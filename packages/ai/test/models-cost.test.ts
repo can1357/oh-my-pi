@@ -196,4 +196,42 @@ describe("calculateCost", () => {
 
 		expect(usage.cost.total).toBeCloseTo(0.01005, 8);
 	});
+
+	it("keeps Daybreak Blue at short-context rates through 272K prompt tokens", () => {
+		const model = getBundledModel("openai", "daybreak-blue-latest");
+		const usage: Usage = {
+			input: 270_000,
+			output: 1_000,
+			cacheRead: 1_000,
+			cacheWrite: 1_000,
+			totalTokens: 273_000,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		};
+
+		calculateCost(model, usage);
+
+		expect(usage.cost.input).toBeCloseTo(1.35, 12);
+		expect(usage.cost.output).toBeCloseTo(0.03, 12);
+		expect(usage.cost.cacheRead).toBeCloseTo(0.0005, 12);
+		expect(usage.cost.cacheWrite).toBeCloseTo(0.00625, 12);
+	});
+
+	it("prices the full Daybreak Blue request at long-context rates above 272K prompt tokens", () => {
+		const model = getBundledModel("openai", "daybreak-blue-latest");
+		const usage: Usage = {
+			input: 270_001,
+			output: 1_000,
+			cacheRead: 1_000,
+			cacheWrite: 1_000,
+			totalTokens: 273_001,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		};
+
+		calculateCost(model, usage);
+
+		expect(usage.cost.input).toBeCloseTo(2.70001, 12);
+		expect(usage.cost.output).toBeCloseTo(0.045, 12);
+		expect(usage.cost.cacheRead).toBeCloseTo(0.001, 12);
+		expect(usage.cost.cacheWrite).toBeCloseTo(0.0125, 12);
+	});
 });

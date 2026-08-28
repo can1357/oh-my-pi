@@ -7,107 +7,19 @@ use std::os::unix::fs::FileTypeExt;
 use std::{
 	ffi::OsString,
 	fs::{File, metadata},
-	io::{self, BufWriter, ErrorKind, Read, Write},
+	io::{self, ErrorKind, Read, Write},
 	path::Path,
 };
 
-use brush_core::{ShellExtensions, builtins::Registration, openfiles::OpenFile};
 use clap::{Arg, ArgAction, ArgMatches, Command};
 use memchr::memchr2;
 use thiserror::Error;
 use uucore::{display::Quotable, fast_inc::fast_inc_one};
 
-use crate::host::{Host, Stdin, Utility, format_usage, matches_parser, util};
+use brush_core::{ShellExtensions, builtins::Registration};
 
-/// Linux splice support.
-#[cfg(any(target_os = "linux", target_os = "android"))]
-mod splice {
-	use std::io::{self, ErrorKind};
-	use std::os::fd::{AsFd, BorrowedFd};
+use crate::host::{Host, Utility, format_usage, matches_parser, util};
 
-	use rustix::io::{read, write};
-	use uucore::pipes::{MAX_ROOTLESS_PIPE_SIZE, pipe, splice, splice_exact};
-
-	use super::{CatError, CatResult, FdReadable, InputHandle};
-
-	const BUF_SIZE: usize = 1024 * 16;
-
-	/// Moves input between real descriptors without copying through userspace.
-	///
-	/// `false` means the input reached EOF; `true` asks the caller to resume with
-	/// buffered copying because splice was unavailable for this descriptor pair.
-	#[inline]
-	pub(super) fn write_fast_using_splice<R: FdReadable>(
-		handle: &InputHandle<R>,
-		write_fd: BorrowedFd<'_>,
-	) -> CatResult<bool> {
-		let Some(read_fd) = handle.reader.try_borrow_as_fd() else {
-			return Ok(true);
-		};
-
-		if splice(&read_fd, &write_fd, MAX_ROOTLESS_PIPE_SIZE).is_ok() {
-			// fcntl improves throughput. It is harmless when stdout is not a pipe.
-			let _ = rustix::pipe::fcntl_setpipe_size(write_fd, MAX_ROOTLESS_PIPE_SIZE);
-			loop {
-				match splice(&read_fd, &write_fd, MAX_ROOTLESS_PIPE_SIZE) {
-					Ok(1..) => {},
-					Ok(0) => return Ok(false),
-					Err(error) if error.kind() == ErrorKind::BrokenPipe => {
-						return Err(CatError::BrokenPipe);
-					},
-					Err(_) => return Ok(true),
-				}
-			}
-		} else if let Ok((pipe_rd, pipe_wr)) = pipe() {
-			// Neither endpoint is a pipe, so broker through an intermediate pipe.
-			loop {
-				match splice(&read_fd, &pipe_wr, MAX_ROOTLESS_PIPE_SIZE) {
-					Ok(0) => return Ok(false),
-					Ok(n) => {
-						if let Err(error) = splice_exact(&pipe_rd, &write_fd, n) {
-							if error.kind() == ErrorKind::BrokenPipe {
-								return Err(CatError::BrokenPipe);
-							}
-							// Preserve bytes already moved into the broker pipe, then
-							// let the caller continue with buffered copying.
-							copy_exact(&pipe_rd, &write_fd, n)?;
-							return Ok(true);
-						}
-					},
-					Err(_) => return Ok(true),
-				}
-			}
-		} else {
-			Ok(true)
-		}
-	}
-
-	/// Moves exactly `num_bytes` bytes between the two descriptors.
-	fn copy_exact(
-		read_fd: &impl AsFd,
-		write_fd: &impl AsFd,
-		num_bytes: usize,
-	) -> io::Result<()> {
-		let mut left = num_bytes;
-		let mut buf = [0; BUF_SIZE];
-		while left > 0 {
-			let n = read(read_fd, &mut buf)?;
-			assert_ne!(n, 0, "unexpected end of pipe");
-			let mut written = 0;
-			while written < n {
-				match write(write_fd, &buf[written..n])? {
-					0 => unreachable!("fd should be writable"),
-					w => written += w,
-				}
-			}
-			left -= n;
-		}
-		Ok(())
-	}
-}
-
-// Allocate 32 digits for the line number. An estimate is that we can print
-// about 1e8 lines/second, so 32 digits lasts for billions of universe lifetimes.
 const LINE_NUMBER_BUF_SIZE: usize = 32;
 
 struct LineNumber {
@@ -117,16 +29,23 @@ struct LineNumber {
 	num_end:     usize,
 }
 
-// Manually incrementing the digits is significantly faster than formatting a
-// `usize` each time. The buffer starts as "     1\t".
+// Logic to store a string for the line number. Manually incrementing the value
+// represented in a buffer like this is significantly faster than storing a
+// `usize` and using the standard Rust formatting macros to format a `usize` to
+// a string each time it's needed.
+// Buffer is initialized to "     1\t" and incremented each time `increment` is
+// called, using uucore's fast_inc function that operates on strings.
 impl LineNumber {
 	fn new() -> Self {
 		let mut buf = [b'0'; LINE_NUMBER_BUF_SIZE];
+
 		let init_str = "     1\t";
 		let print_start = buf.len() - init_str.len();
 		let num_start = buf.len() - 2;
 		let num_end = buf.len() - 1;
+
 		buf[print_start..].copy_from_slice(init_str.as_bytes());
+
 		Self { buf, print_start, num_start, num_end }
 	}
 
@@ -232,25 +151,9 @@ struct OutputState {
 	one_blank_kept: bool,
 }
 
-trait FdReadable: Read {
-	#[cfg(any(target_os = "linux", target_os = "android"))]
-	fn try_borrow_as_fd(&self) -> Option<std::os::fd::BorrowedFd<'_>> {
-		None
-	}
-}
-
-impl FdReadable for File {
-	#[cfg(any(target_os = "linux", target_os = "android"))]
-	fn try_borrow_as_fd(&self) -> Option<std::os::fd::BorrowedFd<'_>> {
-		use std::os::fd::AsFd;
-		Some(self.as_fd())
-	}
-}
-
-impl FdReadable for &mut Stdin {}
 
 /// An input stream and whether it is connected to an interactive terminal.
-struct InputHandle<R: FdReadable> {
+struct InputHandle<R: Read> {
 	reader:         R,
 	is_interactive: bool,
 }
@@ -327,7 +230,8 @@ impl Utility for Cat {
 		};
 		#[allow(clippy::unwrap_used, reason = "clap provides '-' by default")]
 		let files = self.matches.get_many::<OsString>(options::FILE).unwrap();
-		cat_files(files, &options, host)
+		let mut stdout = host.stdout_writer();
+		cat_files(files, &options, host, &mut stdout)
 	}
 }
 
@@ -421,11 +325,11 @@ fn app() -> Command {
 		)
 }
 
-fn cat_handle<R: FdReadable>(
+fn cat_handle<R: Read>(
 	handle: &mut InputHandle<R>,
 	options: &OutputOptions,
 	state: &mut OutputState,
-	stdout: &mut OpenFile,
+	stdout: &mut impl Write,
 ) -> CatResult<()> {
 	if options.can_write_fast() {
 		write_fast(handle, stdout)
@@ -439,13 +343,13 @@ fn cat_path(
 	options: &OutputOptions,
 	state: &mut OutputState,
 	host: &mut Host,
+	stdout: &mut impl Write,
 ) -> CatResult<()> {
 	// Resolve every operand at the boundary, but retain `path` for diagnostics.
 	let resolved = host.resolve(path);
 	match get_input_type(path, &resolved)? {
 		InputType::StdIn => {
-			let (stdin, stdout) = (&mut host.stdin, &mut host.stdout);
-			let mut handle = InputHandle { reader: stdin, is_interactive: false };
+			let mut handle = InputHandle { reader: &mut host.stdin, is_interactive: false };
 			cat_handle(&mut handle, options, state, stdout)
 		},
 		InputType::Directory => Err(CatError::IsDirectory),
@@ -454,12 +358,17 @@ fn cat_path(
 		_ => {
 			let file = File::open(resolved)?;
 			let mut handle = InputHandle { reader: file, is_interactive: false };
-			cat_handle(&mut handle, options, state, &mut host.stdout)
+			cat_handle(&mut handle, options, state, stdout)
 		},
 	}
 }
 
-fn cat_files<'a, I>(files: I, options: &OutputOptions, host: &mut Host) -> i32
+fn cat_files<'a, I>(
+	files: I,
+	options: &OutputOptions,
+	host: &mut Host,
+	stdout: &mut impl Write,
+) -> i32
 where
 	I: IntoIterator<Item = &'a OsString>,
 {
@@ -471,14 +380,15 @@ where
 	};
 
 	for path in files {
-		match cat_path(path, options, &mut state, host) {
+		match cat_path(path, options, &mut state, host, stdout) {
 			Ok(()) => {},
 			Err(CatError::BrokenPipe) => return host.exit_code(),
 			Err(error) => host.error(format!("{}: {error}", path.maybe_quote()), 1),
 		}
 	}
 	if state.skipped_carriage_return {
-		let _ = host.stdout.write_all(b"\r");
+		let _ = stdout.write_all(b"\r");
+		let _ = stdout.flush();
 	}
 	host.exit_code()
 }
@@ -522,23 +432,10 @@ fn get_input_type(path: &OsString, resolved: &Path) -> CatResult<InputType> {
 }
 
 /// Writes a handle to stdout with no output transformation.
-fn write_fast<R: FdReadable>(
+fn write_fast<R: Read>(
 	handle: &mut InputHandle<R>,
-	stdout: &mut OpenFile,
+	stdout: &mut impl Write,
 ) -> CatResult<()> {
-	#[cfg(any(target_os = "linux", target_os = "android"))]
-	{
-		// Splice is safe only when the in-process output stream is backed by a
-		// real descriptor. Never substitute the host process's fd 1.
-		let fall_back = match stdout.try_borrow_as_fd() {
-			Ok(stdout_fd) => splice::write_fast_using_splice(handle, stdout_fd)?,
-			Err(_) => true,
-		};
-		if !fall_back {
-			return Ok(());
-		}
-	}
-
 	let mut buf = [0; 1024 * 64];
 	loop {
 		match handle.reader.read(&mut buf) {
@@ -553,15 +450,13 @@ fn write_fast<R: FdReadable>(
 }
 
 /// Outputs a handle line by line with the requested transformations.
-fn write_lines<R: FdReadable>(
+fn write_lines<R: Read>(
 	handle: &mut InputHandle<R>,
 	options: &OutputOptions,
 	state: &mut OutputState,
-	stdout: &mut OpenFile,
+	stdout: &mut impl Write,
 ) -> CatResult<()> {
 	let mut in_buf = [0; 1024 * 31];
-	// A 32K output buffer greatly improves performance.
-	let mut writer = BufWriter::with_capacity(32 * 1024, stdout);
 
 	loop {
 		let n = match handle.reader.read(&mut in_buf) {
@@ -574,23 +469,23 @@ fn write_lines<R: FdReadable>(
 		let mut pos = 0;
 		while pos < n {
 			if in_buf[pos] == b'\n' {
-				write_new_line(&mut writer, options, state, handle.is_interactive)?;
+				write_new_line(stdout, options, state, handle.is_interactive)?;
 				state.at_line_start = true;
 				pos += 1;
 				continue;
 			}
 			if state.skipped_carriage_return {
-				writer.write_all(b"\r")?;
+				stdout.write_all(b"\r")?;
 				state.skipped_carriage_return = false;
 				state.at_line_start = false;
 			}
 			state.one_blank_kept = false;
 			if state.at_line_start && options.number != NumberingMode::None {
-				state.line_number.write(&mut writer)?;
+				state.line_number.write(stdout)?;
 				state.line_number.increment();
 			}
 
-			let offset = write_end(&mut writer, &in_buf[pos..], options)?;
+			let offset = write_end(stdout, &in_buf[pos..], options)?;
 			if offset + pos == in_buf.len() {
 				state.at_line_start = false;
 				break;
@@ -599,17 +494,13 @@ fn write_lines<R: FdReadable>(
 				state.skipped_carriage_return = true;
 			} else {
 				assert_eq!(in_buf[pos + offset], b'\n');
-				write_end_of_line(
-					&mut writer,
-					options.end_of_line().as_bytes(),
-					handle.is_interactive,
-				)?;
+				write_end_of_line(stdout, options.end_of_line().as_bytes(), handle.is_interactive)?;
 				state.at_line_start = true;
 			}
 			pos += offset + 1;
 		}
 		// Flush before a pipe read can block so available output stays visible.
-		writer.flush()?;
+		stdout.flush()?;
 	}
 	Ok(())
 }

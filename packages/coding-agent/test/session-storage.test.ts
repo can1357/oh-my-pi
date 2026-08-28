@@ -150,6 +150,24 @@ describe("FileSessionStorage writer", () => {
 		await expect(writer.append("two\n")).rejects.toThrow("disk full");
 		await expect(writer.close()).rejects.toThrow("disk full");
 	});
+
+	it("rolls back bytes from a partial append before surfacing the error", () => {
+		const sessionPath = path.join(tempDir, "partial-append.jsonl");
+		fs.writeFileSync(sessionPath, "complete\n");
+		const writer = storage.openWriter(sessionPath);
+		vi.spyOn(fs, "writeSync")
+			.mockImplementationOnce(() => {
+				fs.appendFileSync(sessionPath, "par");
+				return 3;
+			})
+			.mockImplementation(() => {
+				throw Object.assign(new Error("ENOSPC: no space left on device"), { code: "ENOSPC" });
+			});
+		const appendSync = writer.appendSync?.bind(writer);
+		if (!appendSync) throw new Error("File writer must expose appendSync");
+		expect(() => appendSync("partial entry\n")).toThrow("ENOSPC");
+		expect(fs.readFileSync(sessionPath, "utf8")).toBe("complete\n");
+	});
 });
 
 describe("FileSessionStorage.deleteSessionWithArtifacts", () => {

@@ -393,8 +393,7 @@ mod tests {
 
 	#[test]
 	fn resolve_executable_returns_input_unchanged() {
-		// /bin/sh exists and is executable on every supported Unix host.
-		let path = PathBuf::from("/bin/sh");
+		let path = std::env::current_exe().expect("current test executable");
 		let resolved = resolve_executable(path.clone());
 		assert_eq!(resolved.as_deref(), Some(path.as_path()));
 	}

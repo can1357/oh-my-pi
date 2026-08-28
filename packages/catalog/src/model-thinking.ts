@@ -26,11 +26,14 @@ import {
 	isDeepseekModelIdOrName,
 	isDeepseekV4FlashModelId,
 	isGlm52ReasoningEffortModelId,
+	isGlm53ReasoningEffortModelId,
+	isGrokXHighEffortCapable,
 	isKimiK3ModelId,
 	isMimoModelIdOrName,
 	isMinimaxM2FamilyModelId,
 	isMinimaxM3FamilyModelId,
 	isOpenAIGptOssModelId,
+	isQwenModelId,
 	supportsAdaptiveThinkingDisplay,
 } from "./identity/family";
 import type {
@@ -63,12 +66,17 @@ const GEMINI_3_FLASH_EFFORTS: readonly Effort[] = [Effort.Minimal, Effort.Low, E
 const GPT_5_2_PLUS_EFFORTS: readonly Effort[] = [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh];
 const GPT_5_1_CODEX_MINI_EFFORTS: readonly Effort[] = [Effort.Medium, Effort.High];
 const LOW_MEDIUM_HIGH_REASONING_EFFORTS: readonly Effort[] = [Effort.Low, Effort.Medium, Effort.High];
-/** Wire-exact `low`/`high`/`max` scale used by Kimi K3 and DeepSeek V4 Flash (direct API and aggregators). */
+/** Wire-exact `low`/`high`/`max` scale used by Kimi K3 and DeepSeek V4 (Flash and Pro, direct API and aggregators). */
 const LOW_HIGH_MAX_REASONING_EFFORTS: readonly Effort[] = [Effort.Low, Effort.High, Effort.Max];
-/** Wire-exact two-tier scale (`high`/`max`): GLM-5.2 on Z.ai/Umans/Ollama Cloud/Baseten, Sakana Fugu, DeepSeek V4 Pro. */
+/** Wire-exact two-tier scale (`high`/`max`): GLM-5.2 on Z.ai/Umans/Ollama Cloud/Baseten, Sakana Fugu, older DeepSeek reasoners (V3.x/R1). */
 const HIGH_MAX_REASONING_EFFORTS: readonly Effort[] = [Effort.High, Effort.Max];
 /** OpenRouter's DeepSeek route accepts only `high`. */
 const HIGH_ONLY_REASONING_EFFORTS: readonly Effort[] = [Effort.High];
+/**
+ * Qwen 3.8+ open-weight chat template: prompt-steered `reasoning_effort`
+ * kwarg with exactly three wire tiers (template default is `xhigh`).
+ */
+const QWEN38_TEMPLATE_REASONING_EFFORTS: readonly Effort[] = [Effort.Low, Effort.Medium, Effort.XHigh];
 /**
  * Five wire tiers with a `low` floor: GPT-5.6+, Anthropic adaptive models
  * with the real xhigh tier (Opus 4.7+, Sonnet 5+, Fable/Mythos 5), and the
@@ -177,8 +185,13 @@ function fillThinkingWireDefaults<TApi extends Api>(
 		thinking.supportsDisplay === undefined &&
 		(spec.api === "anthropic-messages" || spec.api === "bedrock-converse-stream") &&
 		supportsAdaptiveThinkingDisplay(spec.id);
-	const needsRequiresEffort = thinking.requiresEffort === undefined && impliesMandatoryReasoning(parsed, spec.id);
-	const needsDefaultLevel = thinking.defaultLevel === undefined && isKimiK3ModelId(spec.id);
+	const needsRequiresEffort =
+		thinking.requiresEffort === undefined &&
+		(impliesMandatoryReasoning(parsed, spec.id) ||
+			isQwenTemplateReasoningEffortCompat(compat) ||
+			isOpenCodeGatewayOxAlphaModel(spec));
+	const needsDefaultLevel =
+		thinking.defaultLevel === undefined && (isKimiK3ModelId(spec.id) || isGlm53ReasoningEffortModelId(spec.id));
 	if (!effortsChanged && !shouldReplaceEffortMap && !needsDisplay && !needsRequiresEffort && !needsDefaultLevel) {
 		return thinking;
 	}
@@ -216,7 +229,7 @@ export function deriveThinking<TApi extends Api>(spec: ModelSpec<TApi>, compat: 
 		mode: inferThinkingControlMode(spec, parsed),
 		efforts,
 	};
-	if (isKimiK3ModelId(spec.id)) {
+	if (isKimiK3ModelId(spec.id) || isGlm53ReasoningEffortModelId(spec.id)) {
 		config.defaultLevel = Effort.Max;
 	}
 	const effortMap = inferEffortMap(spec, compat, config.mode, config.efforts);
@@ -229,7 +242,11 @@ export function deriveThinking<TApi extends Api>(spec: ModelSpec<TApi>, compat: 
 	) {
 		config.supportsDisplay = true;
 	}
-	if (impliesMandatoryReasoning(parsed, spec.id)) {
+	if (
+		impliesMandatoryReasoning(parsed, spec.id) ||
+		isQwenTemplateReasoningEffortCompat(compat) ||
+		isOpenCodeGatewayOxAlphaModel(spec)
+	) {
 		config.requiresEffort = true;
 	}
 	return config;
@@ -312,6 +329,21 @@ function getModelDefinedEfforts<TApi extends Api>(
 	spec: ModelSpec<TApi>,
 	compat: CompatOf<TApi>,
 ): readonly Effort[] | undefined {
+	if (
+		isOpenAICompatReasoningApi(spec.api) &&
+		isChatTemplateThinkingFormat(compat) &&
+		spec.thinking?.mode === "effort" &&
+		spec.thinking.efforts.length > 0
+	) {
+		return spec.thinking.efforts;
+	}
+	if (isGlm53ReasoningEffortModelId(spec.id)) {
+		// GLM-5.3+ exposes a uniform wire-exact low/high/max ladder on every
+		// host — unlike GLM-5.2, whose reasoning_effort dialect is
+		// host-specific. Thinking can no longer be disabled (handled by
+		// impliesMandatoryReasoning), and the default effort is `max`.
+		return LOW_HIGH_MAX_REASONING_EFFORTS;
+	}
 	if (isGlm52ReasoningEffortModelId(spec.id)) {
 		// GLM-5.2's reasoning_effort dialect is host-specific (verified against
 		// live endpoints):
@@ -342,6 +374,9 @@ function getModelDefinedEfforts<TApi extends Api>(
 	if (isKimiK3ModelId(spec.id)) {
 		return LOW_HIGH_MAX_REASONING_EFFORTS;
 	}
+	if (isOpenCodeGatewayOxAlphaModel(spec)) {
+		return LOW_HIGH_MAX_REASONING_EFFORTS;
+	}
 	if (isSakanaFuguReasoningModel(spec)) {
 		return HIGH_MAX_REASONING_EFFORTS;
 	}
@@ -366,19 +401,52 @@ function getModelDefinedEfforts<TApi extends Api>(
 	if (spec.provider === "ollama") {
 		return OLLAMA_REASONING_EFFORTS;
 	}
-	if (isOpenAICompatReasoningApi(spec.api) && isDeepseekReasoningModel(spec)) {
-		// DeepSeek V4 Flash accepts the wire-exact low/high/max ladder on every
-		// host — the direct API and aggregators alike (medium/xhigh map to
-		// high). V4 Pro and the older reasoners top out at high/max, and
-		// OpenRouter's non-flash DeepSeek route exposes only high.
+	// Qwen 3.8+ served through a local llama.cpp-style backend: the chat
+	// template's prompt-steered `reasoning_effort` kwarg accepts exactly
+	// low/medium/xhigh (and thinking cannot be turned off — the official 3.8
+	// template raises on `enable_thinking: false`, hence requiresEffort).
+	if (isOpenAICompatReasoningApi(spec.api) && isQwenTemplateReasoningEffortCompat(compat)) {
+		return QWEN38_TEMPLATE_REASONING_EFFORTS;
+	}
+	if (
+		(isOpenAICompatReasoningApi(spec.api) ||
+			spec.api === "openai-responses" ||
+			(spec.api === "ollama-chat" && spec.provider === "ollama-cloud")) &&
+		isDeepseekReasoningModel(spec)
+	) {
+		// The DeepSeek V4 effort ladder is a model property, not a transport one:
+		// `opencode-go/deepseek-v4-flash` is pinned to `openai-responses` (the Go
+		// gateway serves it only at /responses), yet carries the same wire-exact
+		// low/high/max scale — so the Responses transport is admitted here too.
+		// DeepSeek V4 (Flash and Pro) accepts the wire-exact low/high/max ladder
+		// on every first-party/aggregator host — the direct API, aggregators, and
+		// Ollama Cloud alike (medium/xhigh fold into high, max is a real wire
+		// tier). See https://api-docs.deepseek.com/api/create-chat-completion.
+		// OpenRouter's non-Flash V4 route exposes only high, except the dated
+		// `deepseek-v4-pro-0813` SKU: its /models metadata advertises (and the
+		// route accepts) the full low/high/max ladder like every other host.
+		// The older reasoners (V3.x, R1, deepseek-reasoner) top out at high/max.
 		if (isDeepseekV4FlashModelId(spec.id)) {
 			return LOW_HIGH_MAX_REASONING_EFFORTS;
+		}
+		if (bareModelId(spec.id).toLowerCase().includes("deepseek-v4")) {
+			if (!isOpenRouterThinkingFormat(compat)) {
+				return LOW_HIGH_MAX_REASONING_EFFORTS;
+			}
+			return bareModelId(spec.id).toLowerCase() === "deepseek-v4-pro-0813"
+				? LOW_HIGH_MAX_REASONING_EFFORTS
+				: HIGH_ONLY_REASONING_EFFORTS;
 		}
 		return isOpenRouterThinkingFormat(compat) ? HIGH_ONLY_REASONING_EFFORTS : HIGH_MAX_REASONING_EFFORTS;
 	}
 	if (spec.provider === "baseten" && isOpenAIGptOssModelId(spec.id)) {
 		// Baseten's gpt-oss router mirrors its GLM route: high/max only.
 		return HIGH_MAX_REASONING_EFFORTS;
+	}
+	// First-party Grok: `grok-4.6*` and `grok-4.20-multi-agent*` advertise
+	// `xhigh`. Other effort-capable SKUs stay on `minimal/low/medium/high`.
+	if (modelMatchesHost({ provider: spec.provider, baseUrl: spec.baseUrl ?? "" }, "xai")) {
+		return isGrokXHighEffortCapable(spec.id) ? DEFAULT_REASONING_EFFORTS_WITH_XHIGH : DEFAULT_REASONING_EFFORTS;
 	}
 	return isOpenAICompatReasoningApi(spec.api) &&
 		(isMinimaxM2FamilyModelId(spec.id) ||
@@ -453,6 +521,15 @@ function isOpenRouterThinkingFormat(compat: CompatOf<Api>): boolean {
 function isZaiThinkingFormat(compat: CompatOf<Api>): boolean {
 	return compat !== undefined && "thinkingFormat" in compat && compat.thinkingFormat === "zai";
 }
+/** Resolved-compat gate for the Qwen 3.8+ local template `reasoning_effort` dialect. */
+function isQwenTemplateReasoningEffortCompat(compat: CompatOf<Api>): boolean {
+	return (
+		compat !== undefined && "qwenTemplateReasoningEffort" in compat && compat.qwenTemplateReasoningEffort === true
+	);
+}
+function isChatTemplateThinkingFormat(compat: CompatOf<Api>): boolean {
+	return compat !== undefined && "thinkingFormat" in compat && compat.thinkingFormat === "chat-template";
+}
 
 function inferDetectedEffortMap<TApi extends Api>(
 	spec: ModelSpec<TApi>,
@@ -486,6 +563,26 @@ function inferDetectedEffortMap<TApi extends Api>(
 
 function isSakanaFuguReasoningModel<TApi extends Api>(spec: ModelSpec<TApi>): boolean {
 	return spec.provider === "sakana" && /^fugu(?:$|-)/i.test(spec.id);
+}
+
+/**
+ * "Ox Alpha" stealth models on the OpenCode gateways (`opencode-go` /
+ * `opencode-zen`) reason through the wire-exact `low`/`high`/`max` ladder with
+ * mandatory thinking: the gateway rejects `minimal`/`medium`/`xhigh`
+ * (`[1210] ... please use low, high, or max`), the same dialect it already
+ * serves for GLM-5.3 and Kimi K3. The SKU also ships under unrelated aliased
+ * ids (`opencode-zen/x-preview-f-free`), so the stencil display name is
+ * matched as well. Other hosts proxying an `ox-alpha` SKU (Kilo, NanoGPT,
+ * Venice, OpenRouter) expose their own vocabularies and are left untouched.
+ * See issue #9349.
+ */
+function isOpenCodeGatewayOxAlphaModel<TApi extends Api>(spec: ModelSpec<TApi>): boolean {
+	if (spec.provider !== "opencode-go" && spec.provider !== "opencode-zen") return false;
+	if (/(?:^|\/)ox-alpha(?:-|$)/i.test(bareModelId(spec.id))) return true;
+	// Aliased gateway ids surface the same SKU under an unrelated id; the
+	// display name ("Ox Alpha …") is the stable cross-id signal. Anchored on
+	// both sides so "Box Alpha"/"Ox Alphabet" cannot false-positive.
+	return /\box[ _-]?alpha\b/i.test(spec.name ?? "");
 }
 
 function isDeepseekReasoningModel<TApi extends Api>(spec: ModelSpec<TApi>): boolean {
@@ -564,6 +661,9 @@ function impliesMandatoryReasoning(parsed: ParsedModel, modelId: string): boolea
 		if (parsed.kind === "pro" && semverGte(parsed.version, "2.5")) return true;
 	}
 	if (isKimiK3ModelId(modelId)) return true;
+	// GLM-5.3+ no longer supports disabling thinking — thinking.type must
+	// always be "enabled". Floor thinking-off requests to the lowest effort.
+	if (isGlm53ReasoningEffortModelId(modelId)) return true;
 	if (isMinimaxM2FamilyModelId(modelId)) return true;
 	if (OPENAI_O_SERIES_RE.test(bareModelId(modelId))) return true;
 	return findThinkingVariantToken(modelId) !== undefined;
@@ -607,6 +707,13 @@ function inferFallbackEfforts<TApi extends Api>(spec: ModelSpec<TApi>, compat: C
 	}
 	if (isOpenAICompatReasoningApi(spec.api)) {
 		const resolved = compat as ResolvedOpenAICompat;
+		if (
+			resolved.thinkingFormat === "openai" &&
+			modelMatchesHost({ provider: spec.provider, baseUrl: spec.baseUrl ?? "" }, "venice") &&
+			isQwenModelId(spec.id)
+		) {
+			return DEFAULT_REASONING_EFFORTS;
+		}
 		if (resolved.thinkingFormat === "openai" && resolved.supportsReasoningEffort) {
 			return DEFAULT_REASONING_EFFORTS_WITH_XHIGH;
 		}
@@ -669,6 +776,14 @@ function inferThinkingControlMode<TApi extends Api>(
 				if (parsedModel.kind === "opus" && semverGte(parsedModel.version, "4.5")) {
 					return "anthropic-budget-effort";
 				}
+			}
+			// Bedrock serves the GPT-5.x models through OpenAI's own request
+			// schema, which rejects Anthropic's budget block outright:
+			// `unknown_parameter: 'thinking'`. It takes `reasoning.effort`
+			// instead. gpt-oss parses as `unknown` (no `gpt-<digits>`), so it
+			// keeps the budget path it ships with today.
+			if (parsedModel.family === "openai") {
+				return "effort";
 			}
 			return "budget";
 
@@ -763,11 +878,23 @@ export function requireSupportedEffort<TApi extends Api>(model: ApiModel<TApi>, 
 	return effort;
 }
 
-/** Maps a normalized thinking effort to Google's `thinkingLevel` enum values. */
-export function mapEffortToGoogleThinkingLevel(effort: Effort): "MINIMAL" | "LOW" | "MEDIUM" | "HIGH" {
+/** Maps a normalized thinking effort to Google's `thinkingLevel` enum values.
+ * When a collapsed family routes `minimal` onto the same wire id as `low`
+ * (Antigravity Gemini 3.6/3.7 Flash), emit `LOW` — Cloud Code Assist rejects
+ * `MINIMAL` on those `-low` SKUs.
+ */
+export function mapEffortToGoogleThinkingLevel<TApi extends Api>(
+	effort: Effort,
+	model?: ApiModel<TApi>,
+): "MINIMAL" | "LOW" | "MEDIUM" | "HIGH" {
+	if (effort === Effort.Minimal) {
+		const routing = model?.thinking?.effortRouting;
+		if (routing?.[Effort.Minimal] && routing[Effort.Minimal] === routing[Effort.Low]) {
+			return "LOW";
+		}
+		return "MINIMAL";
+	}
 	switch (effort) {
-		case Effort.Minimal:
-			return "MINIMAL";
 		case Effort.Low:
 			return "LOW";
 		case Effort.Medium:
@@ -818,4 +945,26 @@ export function minimumSupportedEffort<TApi extends Api>(model: ApiModel<TApi>):
 		if (efforts.includes(effort)) return effort;
 	}
 	return efforts[0];
+}
+
+/**
+ * Clamp target for effort-less requests on `thinking.requiresEffort` models:
+ * the effort whose wire route equals the model's default wire id
+ * (`requestModelId`), so a collapsed row clamps to the tier it already
+ * advertises as its default rather than the numerically lowest supported tier
+ * (e.g. Cursor Grok 4.5/4.6 default to `medium`, the only tier the Start plan
+ * serves). Falls back to {@link minimumSupportedEffort} when no route matches
+ * the default id — families whose default already is the minimum, or that
+ * expose no routing, are unaffected.
+ */
+export function defaultSupportedEffort<TApi extends Api>(model: ApiModel<TApi>): Effort | undefined {
+	const routing = model.thinking?.effortRouting;
+	const defaultWireId = model.requestModelId;
+	if (routing !== undefined && defaultWireId !== undefined) {
+		const efforts = model.thinking?.efforts;
+		for (const effort of THINKING_EFFORTS) {
+			if (efforts?.includes(effort) && routing[effort] === defaultWireId) return effort;
+		}
+	}
+	return minimumSupportedEffort(model);
 }

@@ -1,12 +1,13 @@
 import { gunzipSync } from "node:zlib";
-import { create, fromBinary, toBinary } from "@bufbuild/protobuf";
 import type { FetchImpl, ModelSpec } from "../types";
 import { discoveryFetch } from "../utils";
 import {
+	type ClientModelConfig,
 	GetCliModelConfigsRequestSchema,
 	GetCliModelConfigsResponseSchema,
-} from "./devin-gen/exa/api_server_pb/api_server_pb";
-import { type ClientModelConfig, MetadataSchema } from "./devin-gen/exa/codeium_common_pb/codeium_common_pb";
+	MetadataSchema,
+} from "./devin-proto";
+import { create, fromBinary, toBinary } from "./protobuf";
 
 const DEVIN_DEFAULT_BASE_URL = "https://server.codeium.com";
 const DEVIN_GET_CLI_MODEL_CONFIGS_PATH = "/exa.api_server_pb.ApiServerService/GetCliModelConfigs";

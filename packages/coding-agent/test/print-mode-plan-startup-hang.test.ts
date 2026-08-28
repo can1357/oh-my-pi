@@ -65,7 +65,6 @@ describe("print mode + plan.defaultOnStartup (#8272)", () => {
 						content: [
 							{ type: "toolCall", name: "write", arguments: { path: "xd://propose", content: "the-plan" } },
 						],
-						delayMs: 5,
 					};
 				}
 				return { content: ["OK"] };

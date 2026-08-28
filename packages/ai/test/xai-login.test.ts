@@ -29,6 +29,52 @@ describe("xAI API login wiring", () => {
 		expect(getEnvApiKey("xai")).toBe("xai-env-key");
 	});
 
+	test("XAI_API_KEY alone does not mark SuperGrok as available", async () => {
+		const originalOauthToken = Bun.env.XAI_OAUTH_TOKEN;
+		Bun.env.XAI_API_KEY = "xai-env-key";
+		delete Bun.env.XAI_OAUTH_TOKEN;
+		const store = new SqliteAuthCredentialStore(new Database(":memory:"));
+		const storage = new AuthStorage(store);
+		await storage.reload();
+		try {
+			expect(storage.hasAuth("xai")).toBe(true);
+			expect(storage.hasAuth("xai-oauth")).toBe(false);
+			expect(storage.hasResolvableAuth("xai")).toBe(true);
+			expect(storage.hasResolvableAuth("xai-oauth")).toBe(true);
+			expect(getEnvApiKey("xai-oauth")).toBe("xai-env-key");
+			expect(storage.getCredentialOrigin("xai")).toEqual({ kind: "env", envVar: "XAI_API_KEY" });
+			expect(storage.getCredentialOrigin("xai-oauth")).toBeUndefined();
+		} finally {
+			if (originalOauthToken === undefined) {
+				delete Bun.env.XAI_OAUTH_TOKEN;
+			} else {
+				Bun.env.XAI_OAUTH_TOKEN = originalOauthToken;
+			}
+			store.close();
+		}
+	});
+
+	test("XAI_OAUTH_TOKEN marks SuperGrok available without a paid API key", async () => {
+		const originalOauthToken = Bun.env.XAI_OAUTH_TOKEN;
+		delete Bun.env.XAI_API_KEY;
+		Bun.env.XAI_OAUTH_TOKEN = "xai-oauth-env";
+		const store = new SqliteAuthCredentialStore(new Database(":memory:"));
+		const storage = new AuthStorage(store);
+		await storage.reload();
+		try {
+			expect(storage.hasAuth("xai")).toBe(false);
+			expect(storage.hasAuth("xai-oauth")).toBe(true);
+			expect(storage.getCredentialOrigin("xai-oauth")).toEqual({ kind: "env" });
+		} finally {
+			if (originalOauthToken === undefined) {
+				delete Bun.env.XAI_OAUTH_TOKEN;
+			} else {
+				Bun.env.XAI_OAUTH_TOKEN = originalOauthToken;
+			}
+			store.close();
+		}
+	});
+
 	test("AuthStorage.login('xai') validates against /models and stores the pasted key", async () => {
 		const fetchCalls: Array<{ url: string; init: RequestInit | undefined }> = [];
 		const fetchMock: FetchImpl = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {

@@ -349,6 +349,39 @@ describe("normalizeSchemaForGoogle", () => {
 		});
 	});
 
+	it("strips the MCP x-mcp-header transport annotation on the Google wire (issue #9016)", () => {
+		// `x-mcp-header` (MCP 2026-07-28) mirrors a param into an `Mcp-Param-*`
+		// HTTP header on the Streamable HTTP transport; it is not a JSON Schema
+		// keyword and Google Cloud Code Assist 400s on the unknown field name.
+		const input = {
+			type: "object",
+			properties: {
+				owner: { type: "string", "x-mcp-header": "owner" },
+				repo: { type: "string", "x-mcp-header": "repo" },
+			},
+			required: ["owner", "repo"],
+		};
+		const stripped = {
+			type: "object",
+			properties: { owner: { type: "string" }, repo: { type: "string" } },
+			required: ["owner", "repo"],
+		};
+
+		expect(normalizeSchemaForGoogle(input)).toEqual({ ...stripped, propertyOrdering: ["owner", "repo"] });
+		expect(normalizeSchemaForCCA(input)).toEqual(stripped);
+
+		// A property literally named `x-mcp-header` is a schema-map entry, not the
+		// annotation, and must survive on every wire.
+		expect(normalizeSchemaForGoogle({ type: "object", properties: { "x-mcp-header": { type: "string" } } })).toEqual({
+			type: "object",
+			properties: { "x-mcp-header": { type: "string" } },
+		});
+
+		// MCP transport/execution reads the annotation from the raw schema, so the
+		// MCP normalizer must leave it intact.
+		expect(normalizeSchemaForMCP(input)).toEqual(input);
+	});
+
 	it("strips draft-2019 conditional keywords the OpenAPI-style wire cannot model", () => {
 		// `dependentSchemas`/`dependencies`/`dependentRequired` have no Google
 		// OpenAPI Schema representation and are not caught by residual checks, so
@@ -605,6 +638,63 @@ describe("sanitizeSchemaForOpenAIResponses", () => {
 		const properties = (sanitized as { properties: Record<string, unknown> }).properties;
 		expect(properties.self).toBe(sanitized as unknown as object);
 		expect((sanitized as { type: unknown }).type).toBe("object");
+	});
+
+	it("preserves exclusive-required anyOf for provider-specific handling", () => {
+		const schema = {
+			type: "object",
+			properties: {
+				project: { type: "string" },
+				paths: { type: "array", items: { type: "string" } },
+				scopes: { type: "array", items: { type: "string" } },
+			},
+			required: ["project"],
+			anyOf: [{ required: ["paths"] }, { required: ["scopes"] }],
+		};
+
+		expect(sanitizeSchemaForOpenAIResponses(schema)).toEqual({
+			type: "object",
+			properties: {
+				project: { type: "string" },
+				paths: { type: "array", items: { type: "string" } },
+				scopes: { type: "array", items: { type: "string" } },
+			},
+			required: ["project"],
+			anyOf: [{ required: ["paths"] }, { required: ["scopes"] }],
+		});
+	});
+
+	it("does not flatten nested exclusive-required anyOf (xAI only rejects the tool root)", () => {
+		const schema = {
+			type: "object",
+			properties: {
+				outputSchema: {
+					type: "object",
+					properties: {
+						paths: { type: "array", items: { type: "string" } },
+						scopes: { type: "array", items: { type: "string" } },
+					},
+					anyOf: [{ required: ["paths"] }, { required: ["scopes"] }],
+				},
+			},
+			required: ["outputSchema"],
+		};
+		const sanitized = sanitizeSchemaForOpenAIResponses(schema);
+		expect(sanitized.anyOf).toBeUndefined();
+		const outputSchema = (sanitized.properties as Record<string, unknown>).outputSchema as Record<string, unknown>;
+		expect(outputSchema.anyOf).toEqual([{ required: ["paths"] }, { required: ["scopes"] }]);
+	});
+
+	it("does not flatten a root union that constrains existing properties", () => {
+		const schema = {
+			type: "object",
+			properties: { kind: { type: "string" } },
+			anyOf: [{ properties: { kind: { const: "a" } } }, { properties: { kind: { const: "b" } } }],
+		};
+		expect(sanitizeSchemaForOpenAIResponses(schema).anyOf).toEqual([
+			{ properties: { kind: { const: "a" } } },
+			{ properties: { kind: { const: "b" } } },
+		]);
 	});
 });
 
@@ -871,6 +961,31 @@ describe("normalizeSchemaForCCA", () => {
 		});
 	});
 
+	it("strips annotation keywords (deprecated, readOnly, writeOnly, $comment) that Cloud Code Assist rejects", () => {
+		// MCP servers (e.g. Stitch's screen tools) annotate parameters with
+		// `deprecated: true`; CCA's protojson has no such Schema field and
+		// rejects the whole request with 400 "Cannot find field".
+		const sanitized = normalizeSchemaForCCA({
+			type: "object",
+			properties: {
+				projectId: { type: "string", deprecated: true, readOnly: true },
+				screenId: { type: "string", writeOnly: true, $comment: "internal id" },
+				name: { type: "string" },
+			},
+			required: ["name"],
+		});
+
+		expect(sanitized).toEqual({
+			type: "object",
+			properties: {
+				projectId: { type: "string" },
+				screenId: { type: "string" },
+				name: { type: "string" },
+			},
+			required: ["name"],
+		});
+	});
+
 	it("lifts stripped validation keywords into description", () => {
 		const normalized = normalizeSchemaForCCA({
 			type: "string",
@@ -1014,7 +1129,6 @@ describe("normalizeSchemaForCCA", () => {
 		};
 		(circular.properties as Record<string, unknown>).self = circular;
 
-		expect(() => normalizeSchemaForCCA(circular)).not.toThrow();
 		expect(normalizeSchemaForCCA(circular)).toEqual({
 			type: "object",
 			properties: {

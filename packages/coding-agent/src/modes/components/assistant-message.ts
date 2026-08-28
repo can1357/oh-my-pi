@@ -19,6 +19,7 @@ import { convertImageToPng } from "../../utils/image-loading";
 import { canonicalizeMessage, formatThinkingForDisplay, hasDisplayableThinking } from "../../utils/thinking-display";
 import { resolveAssistantErrorPresentation } from "../utils/transcript-render-helpers";
 import { type CacheInvalidation, CacheInvalidationMarkerComponent } from "./cache-invalidation-marker";
+import { isRowPrefix, type TranscriptStableRow, trimBlankEdges } from "./transcript-container";
 
 /**
  * Max lines of a turn-ending provider error rendered inline in the transcript.
@@ -28,12 +29,35 @@ import { type CacheInvalidation, CacheInvalidationMarkerComponent } from "./cach
  * the persisted session.
  */
 const MAX_TRANSCRIPT_ERROR_LINES = 8;
-
-/** Opening or closing fence of a code block: ≥3 backticks/tildes plus info string. */
-const CODE_FENCE_LINE = /^ {0,3}(`{3,}|~{3,})(.*)$/;
+const EMPTY_STABLE_RENDER: readonly string[] = [];
 
 type ThinkingContentBlock = Extract<AssistantMessage["content"][number], { type: "thinking" }>;
 type DisplayThinkingContentBlock = ThinkingContentBlock & { rawThinking?: string };
+type StableThinkingPart = { kind: "thinking"; text: string } | { kind: "spacer" };
+
+/**
+ * One published prefix of the leading visible-thinking run. Later snapshots
+ * extend earlier ones part-wise (only the final thinking part may grow), so
+ * rendered stable rows only ever gain a suffix — the append-only transcript
+ * contract that lets them retire into native scrollback mid-stream.
+ */
+interface ThinkingStableSnapshot {
+	readonly key: string;
+	readonly parts: readonly StableThinkingPart[];
+}
+
+function isSnapshotExtension(previous: ThinkingStableSnapshot, current: ThinkingStableSnapshot): boolean {
+	if (previous.parts.length > current.parts.length) return false;
+	for (let index = 0; index < previous.parts.length; index++) {
+		const before = previous.parts[index]!;
+		const after = current.parts[index]!;
+		if (before.kind !== after.kind) return false;
+		if (before.kind === "spacer" || after.kind === "spacer") continue;
+		const isLast = index === previous.parts.length - 1;
+		if (isLast ? !after.text.startsWith(before.text) : after.text !== before.text) return false;
+	}
+	return true;
+}
 
 function resolveThinkingDisplay(block: ThinkingContentBlock, proseOnly: boolean): { text: string; visible: boolean } {
 	const rawThinking = (block as DisplayThinkingContentBlock).rawThinking;
@@ -47,38 +71,6 @@ function resolveThinkingDisplay(block: ThinkingContentBlock, proseOnly: boolean)
 		text: formatted.trim(),
 		visible: hasDisplayableThinking(rawThinking ?? block.thinking, formatted),
 	};
-}
-
-/**
- * Whether `text` contains a ` ```mermaid ` fence (open or closed) outside
- * ordinary code fences. Mermaid defers native-scrollback settling wholesale
- * (see {@link AssistantMessageComponent.getTranscriptBlockSettledRows}): its
- * ASCII rendering resolves asynchronously, so even a completed fence can
- * re-layout rows that already looked settled. Fence-aware so a mermaid
- * example inside a regular code block never triggers the deferral.
- */
-function containsMermaidFence(text: string): boolean {
-	let fence: string | null = null;
-	for (const line of text.split("\n")) {
-		const fenceMatch = CODE_FENCE_LINE.exec(line);
-		if (fence !== null) {
-			// Inside a code block: only a bare matching closing fence ends it.
-			if (
-				fenceMatch &&
-				fenceMatch[2]!.trim() === "" &&
-				fenceMatch[1]![0] === fence[0] &&
-				fenceMatch[1]!.length >= fence.length
-			) {
-				fence = null;
-			}
-			continue;
-		}
-		if (fenceMatch) {
-			if (/^mermaid\b/.test(fenceMatch[2]!.trim())) return true;
-			fence = fenceMatch[1]!;
-		}
-	}
-	return false;
 }
 
 /**
@@ -176,29 +168,26 @@ function lerpHex(from: string, to: string, t: number): string {
 }
 
 /**
- * Component that renders a complete assistant message
+ * Renders an assistant message; streaming content remains mutable until the
+ * provider finalizes it because later deltas can revise earlier Markdown.
+ * The exception is the leading run of visible thinking blocks: raw thinking
+ * only ever appends, so its frozen Markdown prefix publishes as append-only
+ * stable rows ({@link AppendOnlyTranscriptBlock}) and can retire into native
+ * scrollback while the block still streams — a long reasoning trace is no
+ * longer clipped to the mutable viewport.
  */
 export class AssistantMessageComponent extends Container {
+	readonly transcriptBlockMode = "appendOnly" as const;
 	#contentContainer: Container;
 	#markerSlot: Container;
 	#lastMessage?: AssistantMessage;
+	#emergencyText?: Markdown;
 	#toolImagesByCallId = new Map<string, ImageContent[]>();
 	#convertedKittyImages = new Map<string, ImageContent>();
 	#showImages = true;
 	#showToolResultImages = true;
 	#kittyConversionsInFlight = new Set<string>();
 	#transcriptBlockFinalized: boolean;
-	/**
-	 * True while any rendered item carries a ` ```mermaid ` fence. Mermaid's
-	 * ASCII form resolves asynchronously and can re-layout rows that already
-	 * looked settled, so settling defers until the message finalizes. See
-	 * {@link getTranscriptBlockSettledRows}. Recomputed in
-	 * {@link updateContent} ahead of the fast-path return, so it tracks every
-	 * stream tick. Streaming GFM tables need no gate: they live in markdown's
-	 * unfrozen tail while re-aligning and render deterministically once their
-	 * block completes.
-	 */
-	#containsMermaidSource = false;
 	/**
 	 * When true, the turn-ending `Error: …` line for `stopReason === "error"` is
 	 * suppressed because the same error is currently shown in the pinned banner
@@ -235,9 +224,6 @@ export class AssistantMessageComponent extends Container {
 	/** Whether the last updateContent carried an in-flight streaming partial; such
 	 *  renders bypass the markdown module LRU (see Markdown.transientRenderCache). */
 	#lastUpdateTransient = false;
-	/** Width of the most recent render(); the settled-rows walk reads child
-	 *  renders at exactly this width (L1 cache hits). */
-	#lastRenderWidth = 0;
 	// Fast-path state: reuse Markdown children when message shape is stable during streaming.
 	#fastPathKey: string | undefined;
 	#fastPathItems:
@@ -253,6 +239,11 @@ export class AssistantMessageComponent extends Container {
 	 *  Undefined until the first thinking update of this block. */
 	#lastTokenCount: number | undefined;
 	#lastTokenTime = 0;
+	/** Published width-independent thinking prefixes; grows only, never retracts. */
+	#stableSnapshots: ThinkingStableSnapshot[] = [];
+	#transcriptStableRows: TranscriptStableRow[] = [];
+	/** Rendered stable rows memoized by `${count}:${width}`, insertion-evicted. */
+	#stableRenderCache = new Map<string, readonly string[]>();
 	/** Provider-reported tokens in the live thinking block — reasoning tokens when
 	 *  the provider streams them, else total output — shown dimmed beside the
 	 *  speed badge. 0 when no thinking is streaming. */
@@ -279,14 +270,15 @@ export class AssistantMessageComponent extends Container {
 		super();
 		this.#transcriptBlockFinalized = message !== undefined;
 
-		// Slim cache-invalidation divider, populated above the content when this
-		// turn's request lost the prompt cache (see setCacheInvalidation).
-		this.#markerSlot = new Container();
-		this.addChild(this.#markerSlot);
-
-		// Container for text/thinking content
+		// Container for text/thinking content.
 		this.#contentContainer = new Container();
 		this.addChild(this.#contentContainer);
+
+		// Cache-miss usage arrives only at message end. Keep its divider after
+		// streamed content so rows already emitted to native history remain a
+		// prefix of this append-only block.
+		this.#markerSlot = new Container();
+		this.addChild(this.#markerSlot);
 
 		if (message) {
 			this.updateContent(message);
@@ -294,10 +286,9 @@ export class AssistantMessageComponent extends Container {
 	}
 
 	/**
-	 * Show or clear the slim cache-invalidation divider above this turn. Set at
-	 * `message_end` (live) or during rebuild, once the turn's usage is known and
-	 * compared against the previous turn's cache footprint. Bumps the transcript
-	 * block version so the change repaints even after content finalized.
+	 * Show or clear the trailing cache-invalidation divider. Set at `message_end`
+	 * (live) or during rebuild, once the turn's usage is known and compared
+	 * against the previous turn's cache footprint.
 	 */
 	setCacheInvalidation(info: CacheInvalidation | undefined): void {
 		this.#markerSlot.clear();
@@ -318,11 +309,6 @@ export class AssistantMessageComponent extends Container {
 		if (this.#lastMessage) {
 			this.updateContent(this.#lastMessage, { transient: this.#lastUpdateTransient });
 		}
-	}
-
-	override render(width: number): readonly string[] {
-		this.#lastRenderWidth = width;
-		return super.render(width);
 	}
 
 	setHideThinkingBlock(hide: boolean): void {
@@ -456,45 +442,129 @@ export class AssistantMessageComponent extends Container {
 		return this.#transcriptBlockFinalized;
 	}
 
+	override render(width: number): readonly string[] {
+		const rows = super.render(width);
+		this.#publishStableSnapshot(rows, width);
+		return rows;
+	}
+
+	/** Width-independent stable identities for the streamed leading thinking run. */
+	getTranscriptStableRows(): readonly TranscriptStableRow[] {
+		return this.#transcriptStableRows;
+	}
+
+	renderTranscriptStableRows(count: number, width: number): readonly string[] {
+		const index = Math.min(Math.trunc(count), this.#stableSnapshots.length);
+		if (index <= 0) return EMPTY_STABLE_RENDER;
+		const key = `${index}:${width}`;
+		const cached = this.#stableRenderCache.get(key);
+		if (cached) return cached;
+		const rows = this.#renderStableSnapshot(this.#stableSnapshots[index - 1]!, width);
+		this.#stableRenderCache.set(key, rows);
+		// Bounded: the container re-requests only recent counts at live widths.
+		if (this.#stableRenderCache.size > 64) {
+			const oldest = this.#stableRenderCache.keys().next().value;
+			if (oldest !== undefined) this.#stableRenderCache.delete(oldest);
+		}
+		return rows;
+	}
+
 	/**
-	 * Settled leading rows for mid-stream native-scrollback commits (see
-	 * `FinalizableBlock.getTranscriptBlockSettledRows`). Completed content
-	 * blocks render in final form (non-transient) and settle in full; the
-	 * actively streaming markdown contributes its rendered frozen-token
-	 * prefix. The walk stops at the first child that is not declared
-	 * byte-stable (the animated thinking pulse, extension components, images,
-	 * error rows), and a cache-invalidation marker above the content defers
-	 * settling entirely. Mermaid anywhere defers wholesale — its ASCII
-	 * rendering resolves asynchronously and can re-layout settled-looking
-	 * rows. Reads only L1-cached child renders at the width recorded by this
-	 * frame's render().
+	 * Publish the frozen prefix of the leading visible-thinking run as stable
+	 * transcript rows so a long reasoning stream can retire into native
+	 * scrollback mid-turn. Only thinking publishes: streamed text deltas can
+	 * revise earlier Markdown, and published bytes must never change — they may
+	 * already sit in terminal history. Every guard skips publication; nothing
+	 * ever retracts it.
 	 */
-	getTranscriptBlockSettledRows(): number {
-		if (this.#transcriptBlockFinalized || !this.#lastUpdateTransient) return 0;
-		if (this.#containsMermaidSource) return 0;
-		if (this.#markerSlot.children.length > 0) return 0;
+	#publishStableSnapshot(rendered: readonly string[], width: number): void {
+		const snapshot = this.#currentStableSnapshot();
+		if (!snapshot) return;
+		const previous = this.#stableSnapshots.at(-1);
+		if (previous?.key === snapshot.key) return;
+		if (previous && !isSnapshotExtension(previous, snapshot)) return;
+		const currentRows = this.#renderStableSnapshot(snapshot, width);
+		// The container verifies stable rows against the blank-trimmed render.
+		if (!isRowPrefix(currentRows, trimBlankEdges(rendered))) return;
+		const previousRows = previous
+			? this.renderTranscriptStableRows(this.#stableSnapshots.length, width)
+			: EMPTY_STABLE_RENDER;
+		if (!isRowPrefix(previousRows, currentRows)) return;
+		// Each stable row must add at least one physical row at every width.
+		if (currentRows.length === previousRows.length) return;
+		this.#stableSnapshots.push(snapshot);
+		this.#transcriptStableRows.push({ key: snapshot.key });
+		this.#stableRenderCache.set(`${this.#stableSnapshots.length}:${width}`, currentRows);
+	}
+
+	/**
+	 * Width-independent parts eligible for publication right now: the leading
+	 * run of visible thinking blocks, ending inside the streaming block at
+	 * Markdown's frozen boundary. Undefined whenever any prefix byte could
+	 * still change (finalized or non-transient renders, marker rows, extension
+	 * components, hidden thinking, or no frozen prefix yet).
+	 */
+	#currentStableSnapshot(): ThinkingStableSnapshot | undefined {
+		if (this.#transcriptBlockFinalized || !this.#lastUpdateTransient) return undefined;
+		if (this.#markerSlot.children.length > 0) return undefined;
 		const items = this.#fastPathItems;
-		const width = this.#lastRenderWidth;
-		if (!items || items.length === 0 || width <= 0) return 0;
-		const streaming = items[items.length - 1]!.md;
-		// Items are captured in child order: match completed mds positionally.
+		if (!items || items.length === 0) return undefined;
+		const parts: StableThinkingPart[] = [];
 		let itemIndex = 0;
-		let settled = 0;
 		for (const child of this.#contentContainer.children) {
-			if (child === streaming) return settled + streaming.getLastRenderSettledRows();
-			if (itemIndex < items.length - 1 && items[itemIndex]!.md === child) {
+			const item = items[itemIndex];
+			if (item?.md === child) {
+				// Text blocks never publish: their deltas can revise earlier rows.
+				if (item.blockType !== "thinking") break;
+				if (itemIndex === items.length - 1) {
+					// Streaming block: publish Markdown's frozen prefix, and only
+					// once non-blank content exists past it — the thinking fold may
+					// still rewrite the display text's last non-blank line (prose
+					// ellipsis), which must stay out of published bytes.
+					const frozen = item.md.getLastRenderStableText();
+					if (frozen.length > 0 && /\S/.test(item.lastText.slice(frozen.length))) {
+						parts.push({ kind: "thinking", text: frozen });
+					}
+					break;
+				}
+				parts.push({ kind: "thinking", text: item.lastText });
 				itemIndex++;
-				settled += child.render(width).length;
 				continue;
 			}
 			if (child instanceof Spacer) {
-				settled += child.render(width).length;
+				parts.push({ kind: "spacer" });
 				continue;
 			}
-			// Not declared byte-stable: the boundary stops here.
-			return settled;
+			// Unknown child (thinking extension, pulse, image, error row): stop.
+			break;
 		}
-		return settled;
+		while (parts.at(-1)?.kind === "spacer") parts.pop();
+		if (!parts.some(part => part.kind === "thinking")) return undefined;
+		return { key: JSON.stringify(parts), parts };
+	}
+
+	#renderStableSnapshot(snapshot: ThinkingStableSnapshot, width: number): readonly string[] {
+		const rows: string[] = [];
+		for (const part of snapshot.parts) {
+			if (part.kind === "spacer") {
+				rows.push("");
+				continue;
+			}
+			// Constructor args mirror the live thinking Markdown exactly so these
+			// rows are byte-identical to the block render's prefix.
+			const markdown = new Markdown(part.text, 1, 0, getMarkdownTheme(), {
+				color: (text: string) => theme.fg("thinkingText", text),
+				italic: true,
+			});
+			rows.push(...markdown.render(width));
+		}
+		return rows;
+	}
+
+	/** Render completed prose rather than an earlier thinking row under emergency viewport pressure. */
+	renderTranscriptBlockEmergencyRow(width: number): string | undefined {
+		if (!this.#transcriptBlockFinalized) return undefined;
+		return this.#emergencyText?.render(width)[0];
 	}
 
 	getTranscriptBlockVersion(): number {
@@ -831,25 +901,12 @@ export class AssistantMessageComponent extends Container {
 			this.#thinkingRateLive = false;
 		}
 
-		// Mermaid ASCII rendering resolves asynchronously, so a fence anywhere
-		// in the rendered source (text or visible thinking) defers settling; see
-		// getTranscriptBlockSettledRows. Detected from raw source — a Markdown
-		// parser only resolves the fence once it closes, but the stale commits
-		// would happen mid-stream.
-		this.#containsMermaidSource = message.content.some(content => {
-			if (content.type === "text") return containsMermaidFence(content.text);
-			if (content.type === "thinking" && !this.hideThinkingBlock) {
-				const display = resolveThinkingDisplay(content, this.proseOnlyThinking);
-				return display.visible && containsMermaidFence(display.text);
-			}
-			return false;
-		});
-
 		// Fast path: reuse Markdown children when shape is stable during streaming
 		if (this.#tryFastPathUpdate(message, opts)) return;
 
 		// Clear content container
 		this.#contentContainer.clear();
+		this.#emergencyText = undefined;
 		this.#thinkingDots = undefined;
 		this.#hasTruncatableError = false;
 
@@ -879,6 +936,7 @@ export class AssistantMessageComponent extends Container {
 				const mdOptions = this.#textColorTransform ? { color: this.#textColorTransform } : undefined;
 				const md = new Markdown(trimmed, 1, 0, getMarkdownTheme(), mdOptions, 0);
 				this.#contentContainer.addChild(md);
+				this.#emergencyText = md;
 				captureItems?.push({ md, contentIndex: i, blockType: "text", lastText: trimmed });
 				hasRenderedContent = true;
 			} else if (content.type === "thinking" && resolveThinkingDisplay(content, this.proseOnlyThinking).visible) {

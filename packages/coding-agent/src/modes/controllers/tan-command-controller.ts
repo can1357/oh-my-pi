@@ -75,7 +75,7 @@ export class TanCommandController {
 		const parentPromptCacheKey = session.agent.promptCacheKey ?? parentSessionId;
 		const thinkingLevel = session.configuredThinkingLevel();
 		const systemPrompt = [...session.systemPrompt];
-		const toolNames = session.getActiveToolNames();
+		const toolNames = session.getEnabledToolNames();
 		const modelRegistry = session.modelRegistry;
 		const ownerId = session.getAgentId() ?? MAIN_AGENT_ID;
 		const mcpManager = this.ctx.mcpManager;
@@ -111,6 +111,7 @@ export class TanCommandController {
 		let jobId = "";
 		try {
 			const cloneManager = await SessionManager.forkFrom(parentFile, cwd, sessionDir, undefined, {
+				copyArtifacts: false,
 				suppressBreadcrumb: true,
 				sessionFile: cloneFile,
 			});
@@ -151,7 +152,7 @@ export class TanCommandController {
 						clone.sessionManager?.appendSessionInit?.({
 							systemPrompt: clone.systemPrompt ? clone.systemPrompt.join("\n\n") : systemPrompt.join("\n\n"),
 							task: trimmedWork,
-							tools: clone.getActiveToolNames ? clone.getActiveToolNames() : toolNames,
+							tools: clone.getEnabledToolNames(),
 						});
 						const abortClone = () => {
 							void clone?.abort();

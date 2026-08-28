@@ -713,7 +713,9 @@ function getClaudeModelKind(context: CredentialRankingContext | undefined): Clau
  * Claude model-scoped rows are only relevant to the matching model family.
  * Credential-wide exhaustion checks stay on shared umbrella windows unless the
  * request model parses to a concrete Anthropic kind, preventing a Fable cap from
- * suppressing unrelated Opus/Sonnet traffic.
+ * suppressing unrelated Opus/Sonnet traffic. Feeds ranking pressure and the
+ * opt-in reserve-health scope (`scopeLimitsForReserve`); credential-wide hard
+ * blocks use {@link scopeClaudeLimitsForModelHardBlock} instead.
  */
 function scopeClaudeLimitsForModel(report: UsageReport, context: CredentialRankingContext | undefined): UsageLimit[] {
 	const kind = getClaudeModelKind(context);
@@ -742,7 +744,7 @@ function isConfirmedExhaustedTierRow(limit: UsageLimit, nowMs: number): boolean 
  * weekly caps participate only when {@link isConfirmedExhaustedTierRow}
  * confirms them, so a confirmed-dead account is skipped up front and a
  * reactive 429 block extends to the tier reset in markUsageLimitReached,
- * while unconfirmed rows remain ranking pressure only via
+ * while unconfirmed rows remain ranking pressure and opt-in reserve health via
  * scopeClaudeLimitsForModel.
  */
 function scopeClaudeLimitsForModelHardBlock(
@@ -810,6 +812,11 @@ export const claudeRankingStrategy: CredentialRankingStrategy = {
 		return { primary, secondary };
 	},
 	scopeLimits: scopeClaudeLimitsForModelHardBlock,
+	// Reserve health is a non-destructive fallback, not a credential hard
+	// block, so it trusts the mapped tier row before confirmed exhaustion: a
+	// Fable/Mythos weekly cap inside the reserve margin should move the turn to
+	// a healthy candidate rather than serve until 100%.
+	scopeLimitsForReserve: scopeClaudeLimitsForModel,
 	/**
 	 * Fable/Mythos usage-limit errors map to tier-local weekly counters. Scope
 	 * reactive backoff blocks for those tiers, mirroring the per-counter

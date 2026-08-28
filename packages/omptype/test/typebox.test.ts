@@ -46,11 +46,17 @@ describe("TypeBox adapter", () => {
 		expect(valid(Type.String({ format: "email" }), "a@b.co")).toBe(true);
 		expect(valid(Type.String({ format: "email" }), "nope")).toBe(false);
 		expect(Type.String({ format: "url" }).toJsonSchema()).toEqual({ type: "string", format: "uri" });
+		expect(Type.String({ pattern: "^[a-z]+$", format: "email" }).toJsonSchema()).toEqual({
+			type: "string",
+			pattern: "^[a-z]+$",
+			format: "email",
+		});
 
 		const number = Type.Number({ minimum: 1, maximum: 10, multipleOf: 2 });
 		expect(valid(number, 4)).toBe(true);
 		expect(valid(number, 0)).toBe(false);
 		expect(valid(number, 3)).toBe(false);
+		expect(number.toJsonSchema()).toEqual({ type: "number", minimum: 1, maximum: 10, multipleOf: 2 });
 		const exclusive = Type.Number({ exclusiveMinimum: 1, exclusiveMaximum: 3 });
 		expect(valid(exclusive, 2)).toBe(true);
 		expect(valid(exclusive, 1)).toBe(false);

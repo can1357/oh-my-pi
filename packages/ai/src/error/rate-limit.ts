@@ -1,3 +1,5 @@
+import { extractRetryHint } from "@oh-my-pi/pi-utils/fetch-retry";
+
 /**
  * Rate limit reason classification and backoff calculation utilities.
  * Ported from opencode-antigravity-auth plugin for consistency.
@@ -5,6 +7,7 @@
 
 export type RateLimitReason =
 	| "QUOTA_EXHAUSTED"
+	| "INSUFFICIENT_G1_CREDITS_BALANCE"
 	| "RATE_LIMIT_EXCEEDED"
 	| "CONCURRENT_LIMIT"
 	| "MODEL_CAPACITY_EXHAUSTED"
@@ -66,17 +69,100 @@ const CN_TRANSIENT_CAP_PATTERN =
 // isOpaqueStatusBody so CN transients stay in the provider backoff lane instead
 // of rotating through the opaque-429 fallback.
 const CN_THROTTLE_PATTERN = /速率(?:限制|过快)|频率(?:过高|过快)|过于频繁|稍后[重再]试/;
+// DashScope / Bailian (Alibaba Model Studio) reports its per-minute token
+// throttle (429 Throttling.AllocationQuota, type `insufficient_quota`) with
+// OpenAI-compatible billing wording — "You exceeded your current quota,
+// please check your plan and billing details. … (type=insufficient_quota
+// param=insufficient_quota)" — and links the error-code doc's `token-limit`
+// anchor. Per that doc section the error is a transient TPM/TPS cap that
+// clears within the minute window, not an account-local quota exhaustion.
+// The same doc anchor also covers permanent errors such as "Free allocated
+// quota exceeded", so require both the anchor and the exact throttle wording.
+// The identical wording WITHOUT the anchor stays quota-exhausted (OpenAI's
+// real account-quota error uses the same sentence).
+const DASHSCOPE_TOKEN_LIMIT_DOC_PATTERN = /error-code[^()\s]*#token-limit/i;
+const DASHSCOPE_TOKEN_LIMIT_MESSAGE_PATTERN =
+	/\byou exceeded your current quota, please check your plan and billing details\b/i;
+/** True for DashScope/Bailian's documented OpenAI-compatible TPM/TPS throttle. */
+export function isDashScopeTokenLimitText(errorMessage: string): boolean {
+	return (
+		DASHSCOPE_TOKEN_LIMIT_DOC_PATTERN.test(errorMessage) && DASHSCOPE_TOKEN_LIMIT_MESSAGE_PATTERN.test(errorMessage)
+	);
+}
+
+const GOOGLE_RPC_ERROR_INFO_TYPE = "type.googleapis.com/google.rpc.ErrorInfo";
+const LONG_RATE_LIMIT_DELAY_MS = 5 * 60 * 1000;
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+	return typeof value === "object" && value !== null && !Array.isArray(value)
+		? (value as Record<string, unknown>)
+		: undefined;
+}
+
+function parseJsonBody(errorMessage: string): Record<string, unknown> | undefined {
+	const start = errorMessage.indexOf("{");
+	const end = errorMessage.lastIndexOf("}");
+	if (start < 0 || end < start) return undefined;
+	try {
+		const parsed: unknown = JSON.parse(errorMessage.slice(start, end + 1));
+		return asRecord(parsed);
+	} catch {
+		return undefined;
+	}
+}
+
+/**
+ * Classify structured Google RESOURCE_EXHAUSTED bodies before consulting text.
+ * Cloud Code Assist prefixes the JSON with its HTTP error label, so accept an
+ * embedded top-level object as well as a raw JSON body.
+ */
+function parseGoogleRpcRateLimitReason(errorMessage: string): RateLimitReason | undefined {
+	const body = parseJsonBody(errorMessage);
+	const error = asRecord(body?.error);
+	if (typeof error?.status !== "string" || error.status.trim().toUpperCase() !== "RESOURCE_EXHAUSTED") {
+		return undefined;
+	}
+	if (!Array.isArray(error.details)) return undefined;
+
+	for (const value of error.details) {
+		const detail = asRecord(value);
+		if (detail?.["@type"] !== GOOGLE_RPC_ERROR_INFO_TYPE || typeof detail.reason !== "string") continue;
+		const reason = detail.reason.trim().toUpperCase();
+		switch (reason) {
+			case "QUOTA_EXHAUSTED":
+				return "QUOTA_EXHAUSTED";
+			case "INSUFFICIENT_G1_CREDITS_BALANCE":
+				// Keep Google's specific credit-balance reason available to logs
+				// and callers while treating it as credential-rotatable below.
+				return "INSUFFICIENT_G1_CREDITS_BALANCE";
+			case "RATE_LIMIT_EXCEEDED": {
+				const retryDelayMs = extractRetryHint(undefined, errorMessage);
+				return retryDelayMs !== undefined && retryDelayMs >= LONG_RATE_LIMIT_DELAY_MS
+					? "QUOTA_EXHAUSTED"
+					: "RATE_LIMIT_EXCEEDED";
+			}
+		}
+	}
+	return undefined;
+}
+
+function isQuotaExhaustedReason(reason: RateLimitReason): boolean {
+	return reason === "QUOTA_EXHAUSTED" || reason === "INSUFFICIENT_G1_CREDITS_BALANCE";
+}
 
 /**
  * Classify a rate-limit error message into a reason category.
  * Priority order: explicit details in a resource-exhausted error > QUOTA
- * (Antigravity "quota will reset") > CONCURRENT_LIMIT > MODEL_CAPACITY >
- * QUOTA (account) > RATE_LIMIT > QUOTA (generic) > SERVER_ERROR > bare resource-exhausted > UNKNOWN.
+ * (Antigravity "quota will reset") > CN quota > DASHSCOPE_TOKEN_LIMIT (TPM/TPS
+ * throttle) > CONCURRENT_LIMIT > MODEL_CAPACITY > QUOTA (account) > RATE_LIMIT >
+ * QUOTA (generic) > SERVER_ERROR > bare resource-exhausted > UNKNOWN.
  *
  * Bare "resource exhausted" / "resource_exhausted" maps to MODEL_CAPACITY (transient, short wait).
  * Explicit details such as "quota exceeded" retain their normal classification.
  */
 export function parseRateLimitReason(errorMessage: string): RateLimitReason {
+	const structuredReason = parseGoogleRpcRateLimitReason(errorMessage);
+	if (structuredReason !== undefined) return structuredReason;
 	const lowerWithStatus = errorMessage.toLowerCase();
 	const lower = lowerWithStatus.replace(RESOURCE_EXHAUSTED_PATTERN, "");
 	const hasResourceExhaustedStatus = lower !== lowerWithStatus;
@@ -95,6 +181,13 @@ export function parseRateLimitReason(errorMessage: string): RateLimitReason {
 	// account-local cap rotates instead of backing off as a transient.
 	if (CN_QUOTA_EXHAUSTED_PATTERN.test(errorMessage) && !CN_TRANSIENT_CAP_PATTERN.test(errorMessage)) {
 		return "QUOTA_EXHAUSTED";
+	}
+
+	// DashScope/Bailian TPM/TPS throttle: billing-worded like OpenAI's account
+	// quota, but the doc anchor marks it a per-minute token cap that clears on
+	// its own — short backoff on the same credential, never rotation/block.
+	if (isDashScopeTokenLimitText(errorMessage)) {
+		return "RATE_LIMIT_EXCEEDED";
 	}
 
 	if (CONCURRENT_LIMIT_PATTERN.test(errorMessage)) {
@@ -162,6 +255,7 @@ export function parseRateLimitReason(errorMessage: string): RateLimitReason {
  */
 export function calculateRateLimitBackoffMs(reason: RateLimitReason): number {
 	switch (reason) {
+		case "INSUFFICIENT_G1_CREDITS_BALANCE":
 		case "QUOTA_EXHAUSTED":
 			return QUOTA_EXHAUSTED_BACKOFF_MS;
 		case "RATE_LIMIT_EXCEEDED":
@@ -215,6 +309,8 @@ export function isUsageLimitStatus(status: number | undefined): boolean {
  *     credentials.
  */
 export function isUsageLimitOutcome(status: number | undefined, message: string | undefined): boolean {
+	const structuredReason = message ? parseGoogleRpcRateLimitReason(message) : undefined;
+	if (structuredReason !== undefined) return isQuotaExhaustedReason(structuredReason);
 	// Concurrency caps are shed-and-backoff, not credential-rotatable — but only
 	// for quota-worded 429 / other statuses. HTTP 402 is categorically an
 	// account-billing cap, so a 402 whose body happens to mention concurrency is
@@ -235,7 +331,7 @@ export function isUsageLimitOutcome(status: number | undefined, message: string 
 	const reason = parseRateLimitReason(message);
 	// For the categorical 402 billing cap a concurrency-worded body is still an
 	// exhausted cap (rotate); for 429 / other only QUOTA_EXHAUSTED rotates.
-	return reason === "QUOTA_EXHAUSTED" || (isBillingCapStatus && reason === "CONCURRENT_LIMIT");
+	return isQuotaExhaustedReason(reason) || (isBillingCapStatus && reason === "CONCURRENT_LIMIT");
 }
 
 /**
@@ -272,6 +368,9 @@ export function isOpaqueStatusBody(message: string): boolean {
  * {@link isUsageLimitOutcome} uses it for the account-rotation decision.
  */
 export function matchesUsageLimitText(errorMessage: string): boolean {
+	const structuredReason = parseGoogleRpcRateLimitReason(errorMessage);
+	if (structuredReason !== undefined) return isQuotaExhaustedReason(structuredReason);
+	if (isDashScopeTokenLimitText(errorMessage)) return false;
 	return (
 		USAGE_LIMIT_PATTERN.test(errorMessage) ||
 		(CN_QUOTA_EXHAUSTED_PATTERN.test(errorMessage) && !CN_TRANSIENT_CAP_PATTERN.test(errorMessage)) ||

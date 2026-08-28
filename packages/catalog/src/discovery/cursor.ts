@@ -1,12 +1,12 @@
 import * as http2 from "node:http2";
-import { create, fromBinary, toBinary } from "@bufbuild/protobuf";
 import { type } from "@oh-my-pi/omptype";
 import { isKimiK3ModelId } from "../identity";
 import { bareModelId, parseGlmModel, semverGte } from "../identity/classify";
 import { getBundledModels } from "../models";
 import { toModelSpec } from "../provider-models/bundled-references";
 import type { Model, ModelSpec } from "../types";
-import { GetUsableModelsRequestSchema, GetUsableModelsResponseSchema } from "./cursor-gen/agent_pb";
+import { GetUsableModelsRequestSchema, GetUsableModelsResponseSchema } from "./cursor-proto";
+import { create, fromBinary, toBinary } from "./protobuf";
 
 const CURSOR_DEFAULT_BASE_URL = "https://api2.cursor.sh";
 const CURSOR_DEFAULT_CLIENT_VERSION = "cli-2026.02.13-41ac335";
@@ -27,6 +27,15 @@ const CURSOR_1M_NAME_PATTERN = /\b1m\b/i;
 const CURSOR_MAX_MODE_1M_ID_PATTERN = /claude|gemini/;
 /** Kimi's official bare K3 id (`k3`, `kimi/k3`); `k3-256k` is the 256k SKU and stays out. */
 const CURSOR_KIMI_K3_BARE_ID_PATTERN = /(^|\/)k3$/i;
+
+/**
+ * Versioned Cursor Grok ids (`cursor-grok-4.5`, `cursor-grok-4.6-high`) are
+ * reasoning models whose effort is carried in the per-tier sibling id.
+ * `GetUsableModels` ships no `thinkingDetails` and the bundled references read
+ * `reasoning: false`, so classification falls back to the id. The non-reasoning
+ * `grok-code-*` coding models lack the version digit and stay out.
+ */
+const CURSOR_GROK_REASONING_ID_PATTERN = /^cursor-grok-\d/i;
 
 /**
  * Model-id families whose native catalogs (anthropic, openai/openai-codex,
@@ -297,7 +306,11 @@ function normalizeCursorModel(
 
 	const name = pickModelDisplayName(details, id);
 	const reference = references.get(id);
-	const reasoning = isKimiK3ModelId(id) || Boolean(details.thinkingDetails) || reference?.reasoning === true;
+	const reasoning =
+		isKimiK3ModelId(id) ||
+		CURSOR_GROK_REASONING_ID_PATTERN.test(id) ||
+		Boolean(details.thinkingDetails) ||
+		reference?.reasoning === true;
 
 	if (reference) {
 		return {

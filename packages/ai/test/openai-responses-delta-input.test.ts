@@ -52,6 +52,34 @@ describe("buildResponsesDeltaInput streaming-symbol scrub", () => {
 		expect(delta?.[0]).toBe(appended);
 	});
 
+	it("chains a replay-sanitized custom tool call when live history retains its output id", () => {
+		const user: ResponseInputItem = {
+			type: "message",
+			role: "user",
+			content: [{ type: "input_text", text: "edit the file" }],
+		};
+		const previousCustomCall = {
+			type: "custom_tool_call",
+			call_id: "call_eval_1",
+			name: "eval",
+			input: "print('ok')",
+		} as ResponseInputItem;
+		const liveCustomCall = {
+			...previousCustomCall,
+			id: "ctc_eval_1",
+			status: "completed",
+		} as ResponseInputItem;
+		const output = {
+			type: "custom_tool_call_output",
+			call_id: "call_eval_1",
+			output: "ok",
+		} as ResponseInputItem;
+
+		expect(
+			buildResponsesDeltaInput({ input: [user] }, [previousCustomCall], { input: [user, liveCustomCall, output] }),
+		).toEqual([output]);
+	});
+
 	it("still breaks the chain on a real content change, not just symbol noise", () => {
 		const previous = { input: [baselineItems()[0]] };
 		const previousResponseItems = [baselineItems()[1]];
@@ -85,6 +113,68 @@ describe("buildResponsesDeltaInput streaming-symbol scrub", () => {
 		};
 		expect(buildResponsesDeltaInput(previous, [items[1]], current)).toBeNull();
 	});
+
+	it("keeps service_tier chain-breaking unless the caller explicitly excludes it", () => {
+		const items = baselineItems();
+		const appended: ResponseInputItem = {
+			type: "message",
+			role: "user",
+			content: [{ type: "input_text", text: "follow-up" }],
+		};
+		const previous = { input: [items[0]!], service_tier: "default" };
+		const current = { input: [items[0]!, items[1]!, appended], service_tier: "priority" };
+
+		expect(buildResponsesDeltaInput(previous, [items[1]!], current)).toBeNull();
+		expect(buildResponsesDeltaInput(previous, [items[1]!], current, { service_tier: true })).toEqual([appended]);
+	});
+
+	const semanticOptionChanges = [
+		["model", { model: "gpt-before" }, { model: "gpt-after" }],
+		["instructions", { instructions: "before" }, { instructions: "after" }],
+		[
+			"tool schema",
+			{ tools: [{ type: "function", name: "lookup", parameters: { type: "object", properties: {} } }] },
+			{
+				tools: [
+					{
+						type: "function",
+						name: "lookup",
+						parameters: { type: "object", properties: { query: { type: "string" } } },
+					},
+				],
+			},
+		],
+		["reasoning mode", { reasoning: { effort: "low" } }, { reasoning: { effort: "high" } }],
+		["text verbosity", { text: { verbosity: "low" } }, { text: { verbosity: "high" } }],
+		[
+			"response format",
+			{ text: { format: { type: "text" } } },
+			{
+				text: {
+					format: {
+						type: "json_schema",
+						name: "result",
+						schema: { type: "object", properties: { result: { type: "string" } } },
+					},
+				},
+			},
+		],
+	] as const;
+
+	for (const [name, before, after] of semanticOptionChanges) {
+		it(`keeps a ${name} change chain-breaking when service_tier is excluded`, () => {
+			const items = baselineItems();
+			const appended: ResponseInputItem = {
+				type: "message",
+				role: "user",
+				content: [{ type: "input_text", text: "follow-up" }],
+			};
+			const previous = { input: [items[0]!], service_tier: "default", ...before };
+			const current = { input: [items[0]!, items[1]!, appended], service_tier: "priority", ...after };
+
+			expect(buildResponsesDeltaInput(previous, [items[1]!], current, { service_tier: true })).toBeNull();
+		});
+	}
 
 	it("treats assistant message phase as part of chained-prefix equality", () => {
 		const user = baselineItems()[0]!;

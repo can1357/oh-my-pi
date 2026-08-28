@@ -33,37 +33,29 @@ async function expectPromptDateFromStartupTimezone(options: {
 	const scenarioPath = path.join(options.tempDir, "prompt-date-timezone.test.ts");
 	await Bun.write(
 		scenarioPath,
-		`import { expect, it, setSystemTime } from "bun:test";
-import { buildSystemPrompt } from ${JSON.stringify(path.resolve(import.meta.dir, "../src/system-prompt.ts"))};
+		`import { setSystemTime } from "bun:test";
+import { renderDateCwdReminder } from ${JSON.stringify(
+			path.resolve(import.meta.dir, "../src/session/date-cwd-reminder.ts"),
+		)};
+import { formatLocalCalendarDate } from ${JSON.stringify(path.resolve(import.meta.dir, "../src/utils/local-date.ts"))};
 
-it("renders the prompt date in the startup timezone", async () => {
-	setSystemTime(new Date(process.env.OMP_TEST_NOW!));
-	try {
-		const { systemPrompt } = await buildSystemPrompt({
-			cwd: process.cwd(),
-			contextFiles: [],
-			skills: [],
-			rules: [],
-			toolNames: [],
-			workspaceTree: {
-				rootPath: process.cwd(),
-				rendered: "",
-				truncated: false,
-				totalLines: 0,
-				agentsMdFiles: [],
-			},
-			activeRepoContext: null,
-		});
-		const rendered = systemPrompt.join("\\n\\n");
-		expect(rendered).toContain(\`Today: \${process.env.OMP_EXPECTED_DATE}\`);
-		expect(rendered).not.toContain(\`Today: \${process.env.OMP_REJECTED_DATE}\`);
-	} finally {
-		setSystemTime();
+setSystemTime(new Date(process.env.OMP_TEST_NOW!));
+try {
+	// The date/cwd reminder is built per request in the startup local timezone;
+	// the system prompt no longer embeds the date (#7404).
+	const reminder = renderDateCwdReminder(formatLocalCalendarDate(), "/cwd");
+	if (!reminder.includes(\`Today: \${process.env.OMP_EXPECTED_DATE}\`)) {
+		throw new Error(\`Reminder did not contain expected local date:\\n\${reminder}\`);
 	}
-});
+	if (reminder.includes(\`Today: \${process.env.OMP_REJECTED_DATE}\`)) {
+		throw new Error(\`Reminder contained rejected UTC date:\\n\${reminder}\`);
+	}
+} finally {
+	setSystemTime();
+}
 `,
 	);
-	const child = Bun.spawn([process.execPath, "test", scenarioPath], {
+	const child = Bun.spawn([process.execPath, scenarioPath], {
 		cwd: options.tempDir,
 		env: {
 			...process.env,
@@ -81,8 +73,7 @@ it("renders the prompt date in the startup timezone", async () => {
 		new Response(child.stderr).text(),
 		child.exited,
 	]);
-	expect(`${stdout}\n${stderr}`).toContain("1 pass");
-	expect(exitCode).toBe(0);
+	expect(exitCode, `${stdout}\n${stderr}`).toBe(0);
 }
 
 describe("system prompt model identifier", () => {
@@ -113,7 +104,7 @@ describe("system prompt model identifier", () => {
 		expect(systemPrompt.join("\n\n")).toContain("Model: anthropic/claude-opus-4");
 	});
 
-	it("renders the prompt date from the startup local timezone rather than UTC", async () => {
+	it("renders the first-turn reminder date from the startup local timezone rather than UTC", async () => {
 		await expectPromptDateFromStartupTimezone({
 			tempDir,
 			tempHomeDir,

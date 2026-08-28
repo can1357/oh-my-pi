@@ -27,7 +27,7 @@ async function createContextSession(
 		settings.set("advisor.enabled", true);
 		settings.setModelRole("advisor", `${model.provider}/${model.id}`);
 	}
-	const modelRegistry = new ModelRegistry(authStorage);
+	const modelRegistry = new ModelRegistry(authStorage, `${cwd}/models.json`);
 	const sessionManager = SessionManager.inMemory(cwd);
 	const { session } = await createAgentSession({
 		cwd,
@@ -41,6 +41,8 @@ async function createContextSession(
 		slashCommands: [],
 		enableMCP: false,
 		enableLsp: false,
+		toolNames: [],
+		restrictToolNames: true,
 		skipPythonPreflight: true,
 	});
 	return { session, authStorage, sessionManager };

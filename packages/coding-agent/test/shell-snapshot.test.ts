@@ -378,14 +378,15 @@ describe("getOrCreateSnapshot", () => {
 		process.env.TMPDIR = testRoot;
 		try {
 			const fakeShell = path.join(testRoot, "timeout-shell.sh");
-			// Sleep longer than SNAPSHOT_TIMEOUT_MS (2000)
-			await fs.writeFile(fakeShell, `#!/bin/sh\nsleep 3\n`);
+			// A short injected deadline exercises Bun's real process timeout without
+			// making the suite wait out the two-second production startup budget.
+			await fs.writeFile(fakeShell, `#!/bin/sh\nsleep 1\n`);
 			await fs.chmod(fakeShell, 0o755);
 
 			const env = { ...process.env, HOME: testRoot };
 			const snapshotDir = snapshotDirIn(testRoot);
 
-			const snapshotPath = await getOrCreateSnapshot(fakeShell, env);
+			const snapshotPath = await getOrCreateSnapshot(fakeShell, env, 25);
 			expect(snapshotPath).toBeNull();
 
 			if (existsSync(snapshotDir)) {
@@ -397,7 +398,7 @@ describe("getOrCreateSnapshot", () => {
 			else process.env.TMPDIR = originalTmpDir;
 			await fs.rm(testRoot, { recursive: true, force: true });
 		}
-	}, 5000); // increase test timeout to 5s to accommodate the 2s snapshot timeout
+	});
 
 	it("keeps snapshots in a uid-scoped dir so accounts sharing /tmp cannot collide", async () => {
 		// Regression: the dir used to be a single fixed `omp-shell-snapshots` name

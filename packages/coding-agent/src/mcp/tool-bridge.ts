@@ -4,7 +4,7 @@
  * Converts MCP tool definitions to CustomTool format for the agent.
  */
 import type { AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
-import type { TSchema } from "@oh-my-pi/pi-ai";
+import type { ImageContent, TextContent, TSchema } from "@oh-my-pi/pi-ai";
 import { normalizeSchemaForMCP } from "@oh-my-pi/pi-ai/utils/schema";
 import { logger, untilAborted } from "@oh-my-pi/pi-utils";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
@@ -191,30 +191,40 @@ export interface MCPToolDetails {
 	meta?: OutputMeta;
 }
 /**
- * Format MCP content for LLM consumption.
+ * Convert MCP content to agent content while retaining image payloads.
  */
-function formatMCPContent(content: MCPContent[]): string {
-	const parts: string[] = [];
+function formatMCPContent(content: MCPContent[]): Array<TextContent | ImageContent> {
+	const blocks: Array<TextContent | ImageContent> = [];
+	let text = "";
+	const flushText = () => {
+		if (!text) return;
+		blocks.push({ type: "text", text });
+		text = "";
+	};
+	const appendText = (value: string) => {
+		text += text ? `\n\n${value}` : value;
+	};
 
 	for (const item of content) {
 		switch (item.type) {
 			case "text":
-				parts.push(item.text);
+				appendText(item.text);
 				break;
 			case "image":
-				parts.push(`[Image: ${item.mimeType}]`);
+				flushText();
+				blocks.push(item);
 				break;
 			case "resource":
-				if (item.resource.text) {
-					parts.push(`[Resource: ${item.resource.uri}]\n${item.resource.text}`);
-				} else {
-					parts.push(`[Resource: ${item.resource.uri}]`);
-				}
+				appendText(
+					item.resource.text
+						? `[Resource: ${item.resource.uri}]\n${item.resource.text}`
+						: `[Resource: ${item.resource.uri}]`,
+				);
 				break;
 		}
 	}
-
-	return parts.join("\n\n");
+	flushText();
+	return blocks.length > 0 ? blocks : [{ type: "text", text: "" }];
 }
 
 /** Build a CustomToolResult from a callTool response. */
@@ -225,7 +235,7 @@ function buildResult(
 	provider?: string,
 	providerName?: string,
 ): CustomToolResult<MCPToolDetails> {
-	const text = formatMCPContent(result.content);
+	const content = formatMCPContent(result.content);
 	const details: MCPToolDetails = {
 		serverName,
 		mcpToolName,
@@ -235,8 +245,14 @@ function buildResult(
 		provider,
 		providerName,
 	};
-	const contentText = result.isError ? `Error: ${text}` : text;
-	const toolResult: CustomToolResult<MCPToolDetails> = { content: [{ type: "text", text: contentText }], details };
+	if (result.isError) {
+		if (content[0]?.type === "text") {
+			content[0] = { type: "text", text: `Error: ${content[0].text}` };
+		} else {
+			content.unshift({ type: "text", text: "Error:" });
+		}
+	}
+	const toolResult: CustomToolResult<MCPToolDetails> = { content, details };
 	if (result.isError) {
 		toolResult.isError = true;
 	}
@@ -342,6 +358,29 @@ function sanitizeMCPToolNamePart(value: string, fallback: string): string {
 	return sanitized.length > 0 ? sanitized : fallback;
 }
 
+/**
+ * Longest tool name strict validators accept. OpenAI Responses/Completions and
+ * Meta Responses enforce `^[a-zA-Z0-9_-]{1,64}$`; names over 64 chars are
+ * rejected with HTTP 400 `name must be at most 64 characters` (#9130).
+ */
+const MAX_MCP_TOOL_NAME_LENGTH = 64;
+/** Length of the deterministic hash suffix appended when a minted name overflows. */
+const MCP_TOOL_NAME_HASH_LENGTH = 8;
+
+/**
+ * Cap a minted MCP tool name at {@link MAX_MCP_TOOL_NAME_LENGTH}. An overlong
+ * name keeps a readable prefix and gains a deterministic base-36 hash suffix of
+ * the full name, so distinct long names stay unique and the same name is stable
+ * across turns — the model must call the exact registry key, and the hash is
+ * seed-fixed so it never shifts between processes.
+ */
+function capMCPToolNameLength(name: string): string {
+	if (name.length <= MAX_MCP_TOOL_NAME_LENGTH) return name;
+	const hash = Bun.hash(name).toString(36).slice(0, MCP_TOOL_NAME_HASH_LENGTH);
+	const keep = MAX_MCP_TOOL_NAME_LENGTH - hash.length - 1;
+	return `${name.slice(0, keep)}_${hash}`;
+}
+
 export function createMCPToolName(serverName: string, toolName: string): string {
 	const sanitizedServerName = sanitizeMCPToolNamePart(serverName, "server");
 	const sanitizedToolName = sanitizeMCPToolNamePart(toolName, "tool");
@@ -354,7 +393,7 @@ export function createMCPToolName(serverName: string, toolName: string): string 
 		normalizedToolName = sanitizedToolName.slice(prefixWithUnderscore.length);
 	}
 
-	return `mcp__${sanitizedServerName}_${normalizedToolName}`;
+	return capMCPToolNameLength(`mcp__${sanitizedServerName}_${normalizedToolName}`);
 }
 
 export interface MCPToolOriginSource {

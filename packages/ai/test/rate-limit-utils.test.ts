@@ -10,6 +10,30 @@ import {
 	parseRateLimitReason,
 } from "@oh-my-pi/pi-ai/error/rate-limit";
 
+function googleRpc429(reason: string, retryDelay?: string, message = "Resource exhausted"): string {
+	const details: Array<Record<string, string>> = [
+		{
+			"@type": "type.googleapis.com/google.rpc.ErrorInfo",
+			reason,
+			domain: "cloudcode-pa.googleapis.com",
+		},
+	];
+	if (retryDelay) {
+		details.push({
+			"@type": "type.googleapis.com/google.rpc.RetryInfo",
+			retryDelay,
+		});
+	}
+	return `Cloud Code Assist API error (429): ${JSON.stringify({
+		error: {
+			code: 429,
+			message,
+			status: "RESOURCE_EXHAUSTED",
+			details,
+		},
+	})}`;
+}
+
 describe("parseRateLimitReason", () => {
 	it("classifies Google Quota exceeded as QUOTA_EXHAUSTED", () => {
 		expect(
@@ -130,6 +154,38 @@ describe("parseRateLimitReason", () => {
 		expect(parseRateLimitReason("API 使用频率已达上限")).toBe("UNKNOWN");
 	});
 
+	it("keeps DashScope/Bailian TPM throttle in the transient lane", () => {
+		// Bailian reports its per-minute token throttle (429
+		// Throttling.AllocationQuota) with OpenAI-compatible billing wording,
+		// but links the error-code doc's #token-limit anchor, which documents
+		// the error as a transient TPM/TPS cap (clears within the minute
+		// window). Must retry on the same credential with a short backoff —
+		// previously classified QUOTA_EXHAUSTED, blocking the credential for
+		// 30 minutes and stalling the session.
+		const throttle =
+			"429 You exceeded your current quota, please check your plan and billing details. For details, see: https://help.aliyun.com/zh/model-studio/error-code#token-limit\nYou exceeded your current quota, please check your plan and billing details. For details, see: https://help.aliyun.com/zh/model-studio/error-code#token-limit (type=insufficient_quota param=insufficient_quota)";
+		expect(parseRateLimitReason(throttle)).toBe("RATE_LIMIT_EXCEEDED");
+		expect(isUsageLimit(throttle)).toBe(false);
+		expect(isUsageLimit(Object.assign(new Error(throttle), { status: 429 }))).toBe(false);
+		expect(isUsageLimit(new ProviderHttpError(throttle, 429, { code: "insufficient_quota" }))).toBe(false);
+		expect(isUsageLimitOutcome(429, throttle)).toBe(false);
+
+		// The identical wording WITHOUT the doc anchor is OpenAI's real
+		// account-quota error and stays quota-exhausted.
+		const openaiQuota =
+			"429 You exceeded your current quota, please check your plan and billing details. For details, see: https://platform.openai.com/account/usage (type=insufficient_quota)";
+		expect(parseRateLimitReason(openaiQuota)).toBe("QUOTA_EXHAUSTED");
+		expect(isUsageLimitOutcome(429, openaiQuota)).toBe(true);
+
+		// The same DashScope doc anchor also covers permanent free-quota
+		// exhaustion. The anchor alone must not turn that into a retry loop.
+		const freeQuota =
+			"429 Free allocated quota exceeded. For details, see: https://help.aliyun.com/zh/model-studio/error-code#token-limit (type=insufficient_quota)";
+		expect(parseRateLimitReason(freeQuota)).toBe("QUOTA_EXHAUSTED");
+		expect(isUsageLimit(new ProviderHttpError(freeQuota, 429, { code: "insufficient_quota" }))).toBe(true);
+		expect(isUsageLimitOutcome(429, freeQuota)).toBe(true);
+	});
+
 	it("classifies Codex usage limit error as QUOTA_EXHAUSTED", () => {
 		expect(
 			parseRateLimitReason("Codex error event: The usage limit has been reached (code=usage_limit_reached)"),
@@ -169,6 +225,54 @@ describe("parseRateLimitReason", () => {
 				"Cloud Code Assist API error (429): You have exhausted your capacity on this model. Your quota will reset after 3h6m38s.",
 			),
 		).toBe("QUOTA_EXHAUSTED");
+	});
+
+	it("uses structured QUOTA_EXHAUSTED before capacity message heuristics", () => {
+		const body = googleRpc429(
+			"QUOTA_EXHAUSTED",
+			"21600s",
+			"The model has no capacity available; retry another request later.",
+		);
+		expect(parseRateLimitReason(body)).toBe("QUOTA_EXHAUSTED");
+		expect(isUsageLimitOutcome(429, body)).toBe(true);
+	});
+
+	it("keeps structured RATE_LIMIT_EXCEEDED with a 30s delay transient", () => {
+		const body = googleRpc429("RATE_LIMIT_EXCEEDED", "30s", "Too many requests");
+		expect(parseRateLimitReason(body)).toBe("RATE_LIMIT_EXCEEDED");
+		expect(isUsageLimitOutcome(429, body)).toBe(false);
+		expect(isUsageLimit(Object.assign(new Error(body), { status: 429 }))).toBe(false);
+	});
+
+	it("keeps structured RATE_LIMIT_EXCEEDED without a retry delay transient", () => {
+		const body = googleRpc429("RATE_LIMIT_EXCEEDED", undefined, "Too many requests");
+		expect(parseRateLimitReason(body)).toBe("RATE_LIMIT_EXCEEDED");
+		expect(isUsageLimitOutcome(429, body)).toBe(false);
+	});
+
+	it("treats structured RATE_LIMIT_EXCEEDED with a 6h delay as usage exhaustion", () => {
+		const body = googleRpc429("RATE_LIMIT_EXCEEDED", "21600s", "Too many requests");
+		expect(parseRateLimitReason(body)).toBe("QUOTA_EXHAUSTED");
+		expect(isUsageLimitOutcome(429, body)).toBe(true);
+	});
+
+	it("treats the five-minute structured rate-limit threshold as usage exhaustion", () => {
+		const body = googleRpc429("RATE_LIMIT_EXCEEDED", "300s", "Too many requests");
+		expect(parseRateLimitReason(body)).toBe("QUOTA_EXHAUSTED");
+		expect(isUsageLimitOutcome(429, body)).toBe(true);
+	});
+
+	it("preserves structured INSUFFICIENT_G1_CREDITS_BALANCE while rotating credentials", () => {
+		const body = googleRpc429("INSUFFICIENT_G1_CREDITS_BALANCE", undefined, "Credit balance is unavailable");
+		expect(parseRateLimitReason(body)).toBe("INSUFFICIENT_G1_CREDITS_BALANCE");
+		expect(isUsageLimitOutcome(429, body)).toBe(true);
+		expect(isUsageLimit(Object.assign(new Error(body), { status: 429 }))).toBe(true);
+	});
+
+	it("falls back to existing text heuristics for non-JSON 429 bodies", () => {
+		const body = "Cloud Code Assist API error (429): Too many requests";
+		expect(parseRateLimitReason(body)).toBe("RATE_LIMIT_EXCEEDED");
+		expect(isUsageLimitOutcome(429, body)).toBe(false);
 	});
 });
 

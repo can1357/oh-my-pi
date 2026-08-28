@@ -25,7 +25,7 @@ import {
 	sanitizeOpenAIResponsesAssistantHistoryItemsForReplay,
 } from "../utils";
 import { createAbortSourceTracker } from "../utils/abort";
-import { withEmptyCompletionRetry } from "../utils/empty-completion-retry";
+import { withReplaySafeStreamRetry } from "../utils/empty-completion-retry";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import type { RawHttpRequestDump } from "../utils/http-inspector";
 import {
@@ -39,6 +39,7 @@ import { callWithCopilotModelRetry } from "../utils/retry";
 import {
 	adaptSchemaForStrict,
 	findStrictToolSchemaViolation,
+	flattenExclusiveRequiredRootUnion,
 	NO_STRICT,
 	normalizeSchemaForMoonshot,
 	sanitizeSchemaForOpenAIResponses,
@@ -98,6 +99,7 @@ import {
 	resolveOpenAIOutputTokenParam,
 	resolveOpenAIRequestSetup,
 	resolveOpenAIResponsesOutputClamp,
+	shouldDropAutoToolChoiceForReasoning,
 	shouldRetryWithoutStrictTools,
 } from "./openai-shared";
 
@@ -188,7 +190,8 @@ function isOpenAIResponsesReplayUnsafeEvent(event: ResponseStreamEvent): boolean
 function isRetryableOpenAIResponsesStreamFailure(error: unknown): boolean {
 	return (
 		AIError.isTransientStreamParseError(error) ||
-		(error instanceof AIError.ProviderResponseError && error.kind === "incomplete-stream")
+		(error instanceof AIError.ProviderResponseError && error.kind === "incomplete-stream") ||
+		AIError.isProviderRetryableError(error)
 	);
 }
 
@@ -919,13 +922,14 @@ const streamOpenAIResponsesOnce = (
 };
 
 /**
- * Public entry: wrap the single-attempt Responses streamer with bounded
- * empty-completion retries — a `response.completed` carrying no content/usage
- * would otherwise stall the agent loop. Shared with the OpenAI-completions and
- * Anthropic providers via `withEmptyCompletionRetry`.
+ * Public entry: retry benign empty completions before they reach the agent
+ * loop. Transient stream failures are retried inside the attempt so stateful
+ * Responses request metadata remains stable.
  */
 export const streamOpenAIResponses: StreamFunction<"openai-responses"> = (model, context, options) =>
-	withEmptyCompletionRetry(model, context, options, streamOpenAIResponsesOnce);
+	withReplaySafeStreamRetry(model, context, options, streamOpenAIResponsesOnce, {
+		retryEmptyCompletion: true,
+	});
 
 function isOfficialOpenAIResponsesEndpoint(model: Model<"openai-responses">): boolean {
 	if (model.provider !== "openai") return false;
@@ -1275,6 +1279,10 @@ export function buildParams(
 		}
 	}
 
+	if (shouldDropAutoToolChoiceForReasoning(model, model.compat, params.tool_choice, options)) {
+		delete params.tool_choice;
+	}
+
 	const reasoningPolicy = resolveOpenAICompatPolicy(model, {
 		endpoint: "responses",
 		reasoning: options?.reasoning,
@@ -1285,12 +1293,11 @@ export function buildParams(
 		filterReasoningHistory: options?.filterReasoningHistory,
 		omitReasoningEffort: options?.omitReasoningEffort,
 	});
-	const reasoningSummary =
-		model.provider === "xai-oauth"
-			? options?.reasoning === undefined
-				? undefined
-				: null
-			: options?.reasoningSummary;
+	const reasoningSummary = model.compat.supportsReasoningSummary
+		? options?.reasoningSummary
+		: options?.reasoning === undefined
+			? undefined
+			: null;
 	applyResponsesCompatPolicy(params, reasoningPolicy, {
 		reasoningSummary,
 		forceReasoningOff: options?.forceReasoningOff,
@@ -1388,6 +1395,7 @@ export function convertTools(
 		),
 ): OpenAITool[] {
 	const allowFreeform = supportsFreeformApplyPatch(model);
+	const rejectXaiRootObjectUnion = model.provider === "xai" || model.provider === "xai-oauth";
 	const out: OpenAITool[] = [];
 	for (const tool of tools) {
 		if (tool.native?.type === "computer" && model.supportsComputerUse === true) {
@@ -1420,16 +1428,18 @@ export function convertTools(
 		// subschemas ("property schema … must be an object"), so the Moonshot
 		// pass re-coerces them last.
 		const sanitized = sanitizeSchemaForOpenAIResponses(baseParameters);
+		const providerParameters = rejectXaiRootObjectUnion ? flattenExclusiveRequiredRootUnion(sanitized) : sanitized;
 		const responseParameters =
 			model.compat.toolSchemaFlavor === "moonshot-mfjs"
-				? (normalizeSchemaForMoonshot(sanitized) as Record<string, unknown>)
-				: sanitized;
+				? (normalizeSchemaForMoonshot(providerParameters) as Record<string, unknown>)
+				: providerParameters;
 		const { schema: parameters, strict: effectiveStrict } = adaptSchemaForStrict(responseParameters, strict);
 		// Quarantine a tool whose emitted schema carries a provider-rejecting
 		// enum/const-vs-type contradiction: dropping just that tool keeps the rest
 		// of the request valid instead of letting one bad MCP schema 400 the whole
-		// turn (#2652). Other tools and built-ins are unaffected.
-		const violation = findStrictToolSchemaViolation(parameters);
+		// turn (#2652). Other tools and built-ins are unaffected. Leftover
+		// object-root unions are an xAI-only 400; OpenAI/Azure/Codex keep them.
+		const violation = findStrictToolSchemaViolation(parameters, "#", { rejectXaiRootObjectUnion });
 		if (violation) {
 			onQuarantine(tool.name, violation);
 			continue;

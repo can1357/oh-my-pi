@@ -7,6 +7,8 @@ import {
 	astEdit,
 	astMatch,
 	blockRangeAt,
+	countTokens,
+	Encoding,
 	executeShell,
 	FileType,
 	fuzzyFind,
@@ -15,14 +17,18 @@ import {
 	getSupportedLanguages,
 	glob,
 	grep,
+	HighlightStream,
 	highlightCode,
 	htmlToMarkdown,
 	invalidateFsScanCache,
 	listWorkspace,
 	MacOSPowerAssertion,
+	macOSCheckSpelling,
+	macOSSpellCheckerAvailable,
 	matchesKey,
 	PtySession,
 	parseKey,
+	pdfToMarkdown,
 	summarizeCode,
 	supportsLanguage,
 	truncateToWidth,
@@ -31,6 +37,28 @@ import {
 } from "../native/index.js";
 
 const addonUrl = new URL("../native/index.js", import.meta.url).href;
+
+describe("macOS spelling", () => {
+	it("reports platform capability and uses UTF-16 ranges", async () => {
+		const nonsense = "qzxvplmokn";
+		if (process.platform !== "darwin") {
+			expect(macOSSpellCheckerAvailable()).toBeFalse();
+			expect(await macOSCheckSpelling(nonsense)).toEqual([]);
+			return;
+		}
+
+		expect(macOSSpellCheckerAvailable()).toBeTrue();
+		expect(await macOSCheckSpelling(nonsense)).toContainEqual({ start: 0, length: nonsense.length });
+	});
+	it("returns only word spans, never the whole-string orthography result", async () => {
+		if (process.platform !== "darwin") return;
+		// With automatic language identification, checkString: also yields an
+		// orthography result spanning the entire string; leaking it as a typo
+		// range doubled editor text under the undercurl renderer.
+		const text = "hello qzxvplmokn world ";
+		expect(await macOSCheckSpelling(text)).toEqual([{ start: 6, length: 10 }]);
+	});
+});
 
 let testDir: string;
 
@@ -66,6 +94,13 @@ This is a test file.
 	await fs.writeFile(path.join(testDir, "history-search.ts"), "export const historySearch = true;\n");
 }
 
+describe("countTokens", () => {
+	it("counts native UTF-16 content without its N-API terminator and sums arrays", () => {
+		expect(countTokens("hello world", Encoding.O200kBase)).toBe(2);
+		expect(countTokens(["hello world", "hello world"], Encoding.O200kBase)).toBe(4);
+	});
+});
+
 async function cleanupFixtures() {
 	await fs.rm(testDir, { recursive: true, force: true });
 }
@@ -85,6 +120,30 @@ async function createFifo(fifoPath: string) {
 	}
 
 	throw new Error(await new Response(process.stderr).text());
+}
+
+function textPdf(text: string): Uint8Array {
+	const stream = `BT /F1 12 Tf 72 720 Td (${text}) Tj ET`;
+	const objects = [
+		"<< /Type /Catalog /Pages 2 0 R >>",
+		"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+		"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>",
+		`<< /Length ${stream.length} >>\nstream\n${stream}\nendstream`,
+		"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>",
+	];
+	let document = "%PDF-1.4\n";
+	const offsets: number[] = [];
+	for (const [index, object] of objects.entries()) {
+		offsets.push(document.length);
+		document += `${index + 1} 0 obj\n${object}\nendobj\n`;
+	}
+	const xrefOffset = document.length;
+	document += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`;
+	for (const offset of offsets) {
+		document += `${offset.toString().padStart(10, "0")} 00000 n \n`;
+	}
+	document += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xrefOffset}\n%%EOF\n`;
+	return Buffer.from(document);
 }
 
 describe("pi-natives", () => {
@@ -227,6 +286,41 @@ describe("pi-natives", () => {
 			expect(out).toContain("<k>function");
 			expect(out).toContain("<n>1");
 			expect(out).toContain("<c> add");
+		});
+	});
+
+	describe("HighlightStream", () => {
+		const colors = {
+			comment: "<c>",
+			keyword: "<k>",
+			function: "<f>",
+			variable: "<v>",
+			string: "<s>",
+			number: "<n>",
+			type: "<t>",
+			operator: "<o>",
+			punctuation: "<p>",
+		};
+
+		it("chunked pushes are byte-identical to one-shot highlighting across multi-line state", () => {
+			// The streaming Markdown renderer commits chunk-highlighted rows to
+			// native scrollback and later repaints the block via highlightCode;
+			// any divergence shows as a visible seam. The docstring spans the
+			// chunk boundary, so this fails if parser state is not carried.
+			const code = 'def f():\n    """doc\n    string"""\n    return 1\n';
+			const whole = highlightCode(code, "python", colors);
+
+			const stream = new HighlightStream("python", colors);
+			expect(stream.supported).toBe(true);
+			const chunked =
+				stream.push("def f():\n") + stream.push('    """doc\n    string"""\n') + stream.push("    return 1\n");
+			expect(chunked).toBe(whole);
+		});
+
+		it("echoes input unchanged for an unresolved language", () => {
+			const stream = new HighlightStream("no-such-lang", colors);
+			expect(stream.supported).toBe(false);
+			expect(stream.push("plain text\n")).toBe("plain text\n");
 		});
 	});
 
@@ -681,6 +775,67 @@ describe("pi-natives", () => {
 			expect((await run).cancelled).toBeTrue();
 		});
 
+		// Needs this PR's rust; PR CI loads the published natives leaf.
+		it.skipIf(process.env.GITHUB_EVENT_NAME === "pull_request")(
+			"keeps a fast PTY child blocked while onChunk is stalled and still delivers every byte",
+			async () => {
+				if (process.platform === "win32") {
+					return;
+				}
+
+				const blockBytes = 64 * 1024;
+				const blocks = 80;
+				const scriptPath = path.join(testDir, "pty-slow-consumer.ts");
+				await Bun.write(
+					scriptPath,
+					`const block = Buffer.alloc(${blockBytes}, 0x78);\n` +
+						`for (let i = 0; i < ${blocks}; i++) process.stdout.write(block);\n` +
+						`process.stdout.write("END\\n");\n`,
+				);
+
+				const session = new PtySession();
+				let pid = 0;
+				let stalled = false;
+				let aliveDuringStall = false;
+				let output = "";
+				const result = await session.startArgv(
+					{
+						application: process.execPath,
+						args: [scriptPath],
+						cwd: testDir,
+						timeoutMs: 30_000,
+						cols: 400,
+						rows: 24,
+					},
+					(_error, chunk) => {
+						output += chunk;
+						if (stalled || !output.includes("x")) {
+							return;
+						}
+						stalled = true;
+						const until = Date.now() + 400;
+						while (Date.now() < until) {}
+						if (pid > 0) {
+							try {
+								process.kill(pid, 0);
+								aliveDuringStall = true;
+							} catch {}
+						}
+					},
+					(_error, childPid) => {
+						pid = childPid;
+					},
+				);
+
+				expect(result.timedOut).toBe(false);
+				expect(result.cancelled).toBe(false);
+				expect(result.exitCode).toBe(0);
+				expect(aliveDuringStall).toBe(true);
+				expect(output.split("x").length - 1).toBe(blockBytes * blocks);
+				expect(output.includes("END")).toBe(true);
+			},
+		);
+
 		it("should time out detached background workloads without hanging", async () => {
 			if (process.platform === "win32" || !Bun.which("bash")) {
 				return;
@@ -761,6 +916,19 @@ describe("pi-natives", () => {
 
 			await Bun.sleep(600);
 			expect(await Bun.file(markerPath).exists()).toBe(false);
+		});
+	});
+
+	describe("pdfToMarkdown", () => {
+		it("isolates blocking conversion from later JavaScript buffer mutation", async () => {
+			const input = textPdf("Copied PDF bytes");
+			const conversion = pdfToMarkdown(input);
+			input.fill(0);
+
+			const result = await conversion;
+
+			expect(result.pageCount).toBe(1);
+			expect(result.markdown).toContain("Copied PDF bytes");
 		});
 	});
 	describe("htmlToMarkdown", () => {

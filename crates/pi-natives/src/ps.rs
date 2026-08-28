@@ -8,14 +8,14 @@
 use std::time::Duration;
 
 use napi::{
-	Env, Result,
+	Env, JsString, Result,
 	bindgen_prelude::{PromiseRaw, Unknown},
 };
 use napi_derive::napi;
 use pi_shell::process::{self as core_process, ProcessStatus as CoreProcessStatus};
 pub use pi_shell::process::{KILL_SIGNAL, TERM_SIGNAL, TerminationTargets, kill_process_group};
 
-use crate::task;
+use crate::{js::into_string, task};
 
 #[derive(Default)]
 #[napi(object)]
@@ -81,11 +81,11 @@ impl Process {
 
 	/// Open stable process references whose executable path matches exactly.
 	#[napi]
-	pub fn from_path(path: String) -> Vec<Process> {
-		core_process::Process::from_path(path)
+	pub fn from_path(path: JsString) -> Result<Vec<Process>> {
+		Ok(core_process::Process::from_path(into_string(path)?)
 			.into_iter()
 			.map(Self::from_inner)
-			.collect()
+			.collect())
 	}
 
 	/// Operating-system process identifier for this process reference.

@@ -22,16 +22,6 @@ const SHUTDOWN_BUDGET_MS = 2_000;
 
 type RpcMessage = LspJsonRpcRequest | LspJsonRpcResponse | LspJsonRpcNotification;
 
-interface SessionDocumentVersion {
-	clientVersion: number;
-	serverVersion: number;
-}
-
-interface DocumentRecord {
-	serverVersion: number;
-	perSession: Map<Session, SessionDocumentVersion>;
-}
-
 interface ForwardedRequest {
 	session?: Session;
 	originalId?: LspJsonRpcId;
@@ -92,7 +82,7 @@ class ServerInstance {
 	readonly key: string;
 	readonly proc: ptree.ChildProcess<"pipe">;
 	readonly sessions = new Set<Session>();
-	readonly documents = new Map<string, DocumentRecord>();
+	readonly documents = new Set<string>();
 	readonly diagnostics = new Map<string, DiagnosticsParams>();
 	readonly registrations: RegistrationBatch[] = [];
 	readonly progress = new Map<string | number, ProgressParams>();
@@ -188,7 +178,7 @@ function cloneParams<T>(params: T): T {
 export class LspMuxServer {
 	/** Called after the mux has had no connected sessions for its idle grace period. */
 	onIdle?: () => void;
-	readonly #servers = new Map<string, ServerInstance>();
+	readonly #servers = new Set<ServerInstance>();
 	readonly #sessions = new Set<Session>();
 	#netServer?: net.Server;
 	#endpoint?: string;
@@ -204,7 +194,7 @@ export class LspMuxServer {
 
 	/** Keys of currently live shared language-server children. */
 	get serverKeys(): string[] {
-		return [...this.#servers.keys()];
+		return [...this.#servers].map(server => server.key);
 	}
 
 	/** Listen for Content-Length framed mux links at a Unix socket or named pipe. */
@@ -235,7 +225,7 @@ export class LspMuxServer {
 		this.#shuttingDown = true;
 		clearTimeout(this.#idleTimer);
 		for (const session of [...this.#sessions]) session.socket.destroy();
-		await Promise.all([...this.#servers.values()].map(server => this.#stopServer(server)));
+		await Promise.all([...this.#servers].map(server => this.#stopServer(server)));
 		const listener = this.#netServer;
 		this.#netServer = undefined;
 		if (listener) {
@@ -329,8 +319,8 @@ export class LspMuxServer {
 				this.#sendSession(session, rpcError(message.id, -32602, "invalid mux connect params"));
 				return;
 			}
-			const key = muxServerKey(params.command, params.cwd);
-			let server = this.#servers.get(key);
+			const key = muxServerKey(params);
+			let server = [...this.#servers].find(candidate => candidate.key === key && candidate.sessions.size === 0);
 			if (server && server.proc.exitCode !== null) {
 				this.#serverExited(server);
 				server = undefined;
@@ -432,63 +422,26 @@ export class LspMuxServer {
 		const params = parseDocumentParams(message.params);
 		if (!params) return;
 		const uri = params.textDocument.uri;
-		const clientVersion = params.textDocument.version;
 		session.openUris.add(uri);
-		const existing = server.documents.get(uri);
-		if (!existing) {
-			server.documents.set(uri, {
-				serverVersion: clientVersion,
-				perSession: new Map([[session, { clientVersion, serverVersion: clientVersion }]]),
-			});
-			await this.#writeServer(server, message);
-			return;
-		}
-		existing.serverVersion = Math.max(existing.serverVersion + 1, clientVersion);
-		existing.perSession.set(session, { clientVersion, serverVersion: existing.serverVersion });
-		await this.#writeServer(server, {
-			jsonrpc: "2.0",
-			method: "textDocument/didChange",
-			params: {
-				textDocument: { uri, version: existing.serverVersion },
-				contentChanges: [{ text: params.textDocument.text ?? "" }],
-			},
-		});
+		server.documents.add(uri);
+		await this.#writeServer(server, message);
 	}
 
-	async #didChange(session: Session, server: ServerInstance, message: LspJsonRpcNotification): Promise<void> {
-		const params = parseDocumentParams(message.params);
-		if (!params) return;
-		const uri = params.textDocument.uri;
-		const record = server.documents.get(uri);
-		if (!record) {
-			await this.#writeServer(server, message);
-			return;
-		}
-		const clientVersion = params.textDocument.version;
-		record.serverVersion = Math.max(record.serverVersion + 1, clientVersion);
-		record.perSession.set(session, { clientVersion, serverVersion: record.serverVersion });
-		// Map each client's version stream into the one monotonically increasing server stream.
-		await this.#writeServer(server, {
-			...message,
-			params: { ...params, textDocument: { ...params.textDocument, version: record.serverVersion } },
-		});
+	async #didChange(_session: Session, server: ServerInstance, message: LspJsonRpcNotification): Promise<void> {
+		await this.#writeServer(server, message);
 	}
 
 	async #didClose(session: Session, server: ServerInstance, message: LspJsonRpcNotification): Promise<void> {
 		const uri = parseUri(message.params);
 		if (!uri) return;
 		session.openUris.delete(uri);
-		const record = server.documents.get(uri);
-		if (!record) return;
-		record.perSession.delete(session);
-		if (record.perSession.size > 0) return;
 		server.documents.delete(uri);
 		await this.#writeServer(server, message);
 	}
 
 	#spawnServer(key: string, params: MuxConnectParams): ServerInstance {
 		const server = new ServerInstance(key, params);
-		this.#servers.set(key, server);
+		this.#servers.add(server);
 		void this.#readServer(server);
 		server.proc.exited.then(
 			() => this.#serverExited(server),
@@ -537,7 +490,7 @@ export class LspMuxServer {
 			const params = parseDiagnostics(message.params);
 			if (!params) return;
 			server.diagnostics.set(params.uri, cloneParams(params));
-			for (const session of server.sessions) if (session.initialized) this.#sendDiagnostics(session, server, params);
+			for (const session of server.sessions) if (session.initialized) this.#sendDiagnostics(session, params);
 			return;
 		}
 		if (message.method === "$/progress") {
@@ -641,13 +594,12 @@ export class LspMuxServer {
 		void this.#writeServer(session.server, { ...message, id: pending.serverId });
 	}
 
-	#sendDiagnostics(session: Session, server: ServerInstance, params: DiagnosticsParams): void {
-		const rewritten = cloneParams(params);
-		const version = server.documents.get(params.uri)?.perSession.get(session);
-		if (params.version !== undefined && version && params.version === version.serverVersion)
-			rewritten.version = version.clientVersion;
-		else delete rewritten.version;
-		this.#sendSession(session, { jsonrpc: "2.0", method: "textDocument/publishDiagnostics", params: rewritten });
+	#sendDiagnostics(session: Session, params: DiagnosticsParams): void {
+		this.#sendSession(session, {
+			jsonrpc: "2.0",
+			method: "textDocument/publishDiagnostics",
+			params: cloneParams(params),
+		});
 	}
 
 	#replayState(session: Session, server: ServerInstance): void {
@@ -660,7 +612,7 @@ export class LspMuxServer {
 				params: cloneParams(batch),
 			});
 		}
-		for (const params of server.diagnostics.values()) this.#sendDiagnostics(session, server, params);
+		for (const params of server.diagnostics.values()) this.#sendDiagnostics(session, params);
 		for (const params of server.progress.values()) {
 			this.#sendSession(session, { jsonrpc: "2.0", method: "$/progress", params: cloneParams(params) });
 		}
@@ -691,26 +643,23 @@ export class LspMuxServer {
 		this.#sessions.delete(session);
 		const server = session.server;
 		if (server) {
-			server.sessions.delete(session);
+			let cleanup: Promise<void> | undefined;
 			for (const uri of session.openUris) {
-				const record = server.documents.get(uri);
-				if (!record) continue;
-				record.perSession.delete(session);
-				if (record.perSession.size === 0) {
-					server.documents.delete(uri);
-					await this.#writeServer(server, {
-						jsonrpc: "2.0",
-						method: "textDocument/didClose",
-						params: { textDocument: { uri } },
-					});
-				}
+				server.documents.delete(uri);
+				cleanup = this.#writeServer(server, {
+					jsonrpc: "2.0",
+					method: "textDocument/didClose",
+					params: { textDocument: { uri } },
+				});
 			}
+			await cleanup;
 			for (const [muxId, pending] of server.pending) {
 				if (pending.session !== session) continue;
 				pending.drop = true;
 				await this.#writeServer(server, { jsonrpc: "2.0", method: "$/cancelRequest", params: { id: muxId } });
 			}
 			server.initializeWaiters.delete(session);
+			server.sessions.delete(session);
 			if (server.sessions.size === 0 && !server.stopping) {
 				server.lingerTimer = setTimeout(() => {
 					if (server.sessions.size === 0) void this.#stopServer(server);
@@ -722,7 +671,7 @@ export class LspMuxServer {
 
 	#serverExited(server: ServerInstance): void {
 		server.stopping = true;
-		if (this.#servers.get(server.key) === server) this.#servers.delete(server.key);
+		this.#servers.delete(server);
 		if (server.lingerTimer) clearTimeout(server.lingerTimer);
 		server.pending.clear();
 		for (const session of [...server.sessions]) session.socket.destroy();
@@ -738,7 +687,13 @@ export class LspMuxServer {
 		server.pending.set(id, { resolveInternal: resolve });
 		try {
 			await this.#writeServer(server, { jsonrpc: "2.0", id, method: "shutdown", params: null });
-			await Promise.race([promise, Bun.sleep(SHUTDOWN_BUDGET_MS)]);
+			const timeout = Promise.withResolvers<void>();
+			const timer = setTimeout(timeout.resolve, SHUTDOWN_BUDGET_MS);
+			try {
+				await Promise.race([promise, timeout.promise]);
+			} finally {
+				clearTimeout(timer);
+			}
 			await this.#writeServer(server, { jsonrpc: "2.0", method: "exit" });
 		} catch (error) {
 			logger.warn("LSP mux graceful server shutdown failed", { server: server.key, error: String(error) });

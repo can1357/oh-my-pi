@@ -24,9 +24,9 @@ It focuses on current implementation behavior, including fallback paths and cave
 
 `SessionManager` stores file sessions under a canonical-cwd bucket by default:
 
-- `~/.omp/agent/sessions/<scope>-<project-basename>-<sha256(canonical-cwd)>/*.jsonl`
+- `~/.omp/agent/sessions/<encoded-cwd>/*.jsonl`
 
-`scope` is `home`, `tmp`, or `abs`. Legacy relative/absolute bucket names are migrated best-effort. `SessionManager.list(cwd, sessionDir?)` reads only the resolved bucket unless an explicit `sessionDir` is provided.
+`<encoded-cwd>` is the path-encoded canonical cwd (`-<relative>` under home, `-tmp-<relative>` under the temp root, `--<encoded-absolute>--` otherwise; see [session.md](session.md#on-disk-layout)). Buckets from the reverted 17.2.5-17.2.8 hashed scheme are migrated best-effort. `SessionManager.list(cwd, sessionDir?)` reads only the resolved bucket unless an explicit `sessionDir` is provided.
 
 ### Two listing paths with different payloads
 
@@ -170,7 +170,7 @@ Lifecycle/state transition:
 2. disconnect agent listeners, abort active work, run the pre-switch reconciler, and flush pending bash/session writes
 3. snapshot rollback state (manager, queues, messages, model/thinking/tier, tools/prompts, provider-cache identity, and checkpoint/rewind state), then clear message queues
 4. for a different session, drain/detach advisor recorders
-5. `sessionManager.setSessionFile(sessionPath)`: update breadcrumb, load/migrate/blob-resolve/index entries, and adopt an existing recorded cwd
+5. `sessionManager.setSessionFile(sessionPath)`: update breadcrumb, load/migrate/blob-resolve/index entries, and adopt an existing recorded cwd when permitted by cwd policy
 6. sync session id, memory key, inherited provider-cache key, display context, and checkpoint/rewind state
 7. emit `session_switch`, replace messages, reset advisor session state, and sync todos
 8. close provider sessions for a different session, or for a same-session reload whose replay changed
@@ -178,19 +178,19 @@ Lifecycle/state transition:
 10. if the loaded branch ended with an interrupted tool flow, append a synthetic abort message and rebuild display context
 11. restore configured thinking (`auto` survives as auto) and per-family service tiers, falling back to current settings when no corresponding entry exists
 12. reset memory/tool session state as required, reconnect listeners, run mode reconciliation, and refresh the workspace-aware base system prompt
-13. restore advisor cost for a different session, finish the bash transition, notify session-change callbacks, and return `true`
+13. restore advisor cost for a different session, finish the bash transition, notify session-change callbacks, and return `true` on success
+`switchSession()` returns `false` when a before-switch hook cancels or cwd policy rejects the transition. A cross-project switch without a cwd-change callback is rejected rather than silently adopting the target cwd; callback rejection is also cancellation.
 
 Any failure after the snapshot restores the previous manager and runtime state, reconnects/reconciles it, marks the bash transition failed, then rethrows.
 
 ## UI state rebuild after interactive switch
 
-`SelectorController.handleResumeSession` performs UI reset around `switchSession`:
+`SelectorController.handleResumeSession` invokes `switchSession` first. If it returns `false`, the selector stops before applying any new-session UI updates and leaves the existing session/UI unchanged. After a successful switch, it:
 
 - stop loading animation
 - clear status container
 - clear pending-message UI and pending tool map
 - reset streaming component/message references
-- call `session.switchSession(...)`
 - if the resumed session's cwd differs from the previous one, re-point the process and cwd-derived caches at it (`applyCwdChange`)
 - clear chat container and rerender from session context (`renderInitialMessages`)
 - reload todos from new session artifacts
@@ -222,8 +222,7 @@ So visible conversation/todo state is rebuilt from the new session file.
 
 - CLI picker cancel -> returns `null`, caller prints `No session selected`, process exits.
 - Interactive picker cancel -> closes the overlay with no session change.
-- Core hook cancellation (`session_before_switch`) -> `switchSession()` returns `false`.
-- **Current interactive caveat:** `handleResumeSession` does not inspect that boolean and proceeds with its UI refresh/status path. A hook-cancelled interactive switch therefore keeps the old session but can display a misleading resumed status.
+- Core hook or cwd-policy cancellation -> `switchSession()` returns `false`; the interactive selector stops before its UI refresh/status path, preserving the old session and UI. Callback-free cross-project switches are rejected rather than silently adopting the target cwd.
 
 ### Empty list paths
 

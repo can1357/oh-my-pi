@@ -185,10 +185,10 @@ export class AgentTranscriptViewer implements Component {
 		this.#pollTimer.unref?.();
 	}
 
-	/** Advisor transcripts are read-only; everything else may be messaged. */
+	/** Advisor and aborted-agent transcripts are read-only. */
 	get #sendable(): boolean {
 		const ref = this.deps.registry.get(this.deps.agentId);
-		if (!ref || ref.kind === "advisor") return false;
+		if (!ref || ref.kind === "advisor" || ref.status === "aborted") return false;
 		return Boolean(this.deps.remote || this.deps.lifecycle);
 	}
 

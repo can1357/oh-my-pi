@@ -220,7 +220,7 @@ export async function fetchWithRetry(
 			if (signal?.aborted) throw new Error("Request was aborted");
 			const wrapped = wrapNetworkError(error);
 			if (attempt + 1 >= maxAttempts) throw wrapped;
-			await scheduler.wait(resolveDefaultDelay(defaultDelayMs, attempt, maxDelayMs), { signal });
+			await waitForRetry(resolveDefaultDelay(defaultDelayMs, attempt, maxDelayMs), signal);
 			continue;
 		}
 
@@ -234,7 +234,7 @@ export async function fetchWithRetry(
 		if (hint !== undefined && hint > maxDelayMs) return response;
 
 		const delayMs = Math.min(hint ?? resolveDefaultDelay(defaultDelayMs, attempt, maxDelayMs), maxDelayMs);
-		await scheduler.wait(delayMs, { signal });
+		await waitForRetry(delayMs, signal);
 	}
 }
 
@@ -249,6 +249,15 @@ function mergeInit(base: RequestInit, overlay: RequestInit, timeout: number | fa
 		merged.headers = baseHeaders;
 	}
 	return merged;
+}
+
+async function waitForRetry(delayMs: number, signal: AbortSignal | undefined): Promise<void> {
+	try {
+		await scheduler.wait(delayMs, { signal });
+	} catch (error) {
+		if (signal?.aborted) throw new Error("Request was aborted");
+		throw error;
+	}
 }
 
 function wrapNetworkError(error: unknown): Error {

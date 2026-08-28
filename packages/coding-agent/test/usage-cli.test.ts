@@ -21,13 +21,14 @@ function makeLimit(opts: {
 	windowId?: string;
 	tier?: string;
 	accountId?: string;
+	provider?: string;
 	notes?: string[];
 }): UsageReport["limits"][number] {
 	return {
 		id: opts.id,
 		label: opts.id,
 		scope: {
-			provider: "anthropic",
+			provider: opts.provider ?? "anthropic",
 			windowId: opts.windowId,
 			tier: opts.tier,
 			accountId: opts.accountId,
@@ -100,6 +101,81 @@ describe("computeProviderWindowStats", () => {
 		expect(sevenDay.window).toBe("7d");
 		expect(sevenDay.usedAccounts).toBeCloseTo(0.6); // 0.4 (opus binds) + 0.2
 		expect(sevenDay.remainingAccounts).toBeCloseTo(1.4);
+	});
+
+	it("reports Spark-only capacity instead of dropping the meter", () => {
+		const report = makeReport("openai-codex", "spark@example.test", [
+			makeLimit({
+				id: "openai-codex:spark:primary",
+				provider: "openai-codex",
+				tier: "spark",
+				usedFraction: 0.75,
+				durationMs: FIVE_HOURS,
+				windowId: "5h",
+			}),
+			makeLimit({
+				id: "openai-codex:spark:secondary",
+				provider: "openai-codex",
+				tier: "spark",
+				usedFraction: 0.25,
+				durationMs: SEVEN_DAYS,
+				windowId: "7d",
+			}),
+		]);
+		const stats = computeProviderWindowStats([report]);
+		expect(stats.map(stat => [stat.window, stat.meter])).toEqual([
+			["5h", "spark"],
+			["7d", "spark"],
+		]);
+		expect(stats[0]).toMatchObject({ accounts: 1, usedAccounts: 0.75, remainingAccounts: 0.25 });
+	});
+
+	it("keeps mixed Codex meters separate when they share a window duration", () => {
+		const report = makeReport("openai-codex", "mixed@example.test", [
+			makeLimit({
+				id: "openai-codex:primary",
+				provider: "openai-codex",
+				usedFraction: 0.2,
+				durationMs: FIVE_HOURS,
+				windowId: "5h",
+			}),
+			makeLimit({
+				id: "openai-codex:secondary",
+				provider: "openai-codex",
+				usedFraction: 0.4,
+				durationMs: SEVEN_DAYS,
+				windowId: "7d",
+			}),
+			makeLimit({
+				id: "openai-codex:spark:primary",
+				provider: "openai-codex",
+				tier: "spark",
+				usedFraction: 0.8,
+				durationMs: FIVE_HOURS,
+				windowId: "5h",
+			}),
+			makeLimit({
+				id: "openai-codex:spark:secondary",
+				provider: "openai-codex",
+				tier: "spark",
+				usedFraction: 0.1,
+				durationMs: SEVEN_DAYS,
+				windowId: "7d",
+			}),
+		]);
+		const stats = computeProviderWindowStats([report]);
+		expect(stats.map(stat => [stat.window, stat.meter])).toEqual([
+			["5h", "chat"],
+			["5h", "spark"],
+			["7d", "chat"],
+			["7d", "spark"],
+		]);
+		expect(stats.find(stat => stat.window === "5h" && stat.meter === "chat")?.usedAccounts).toBe(0.2);
+		expect(stats.find(stat => stat.window === "5h" && stat.meter === "spark")?.usedAccounts).toBe(0.8);
+
+		const text = stripVTControlCharacters(formatUsageBreakdown([report], [], Date.now()));
+		expect(text).toContain("5h (Chat) → 0.20/1");
+		expect(text).toContain("5h (Spark) → 0.80/1");
 	});
 
 	it("ignores limits without a resolvable fraction", () => {
@@ -422,29 +498,29 @@ describe("formatUsageBreakdown", () => {
 	});
 
 	it("renders provider-level notes once per provider, not duplicated per account or limit", () => {
-		const disclaimer = "OMP-observed spend only; OpenCode usage outside OMP is not included.";
+		const providerNote = "Usage data can be delayed by up to five minutes.";
 		const multiAccount = [
 			makeReport(
-				"opencode-go",
+				"anthropic",
 				"acct-a@example.test",
 				[makeLimit({ id: "5 Hour", usedFraction: 0.3, durationMs: FIVE_HOURS, windowId: "5h" })],
-				[disclaimer],
+				[providerNote],
 			),
 			makeReport(
-				"opencode-go",
+				"anthropic",
 				"acct-b@example.test",
 				[makeLimit({ id: "5 Hour", usedFraction: 0.6, durationMs: FIVE_HOURS, windowId: "5h" })],
-				[disclaimer],
+				[providerNote],
 			),
 		];
 		const text = stripVTControlCharacters(formatUsageBreakdown(multiAccount, [], Date.now()));
-		// The disclaimer appears exactly once, not once per account or limit.
-		const occurrences = text.split(disclaimer).length - 1;
+		// The provider note appears exactly once, not once per account or limit.
+		const occurrences = text.split(providerNote).length - 1;
 		expect(occurrences).toBe(1);
 		// It appears above the per-account rows, not inline with a limit line.
-		const disclaimerIdx = text.indexOf(disclaimer);
+		const noteIdx = text.indexOf(providerNote);
 		const firstLimitIdx = text.indexOf("5 Hour");
-		expect(disclaimerIdx).toBeLessThan(firstLimitIdx);
+		expect(noteIdx).toBeLessThan(firstLimitIdx);
 	});
 
 	it("renders Antigravity weekly windows in the usage breakdown", () => {

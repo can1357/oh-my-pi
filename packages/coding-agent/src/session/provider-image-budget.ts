@@ -45,13 +45,13 @@ function clampContent(
 function clampUserMessage(message: UserMessage, state: { remainingDrops: number }): UserMessage {
 	if (!Array.isArray(message.content) || state.remainingDrops <= 0) return message;
 	const content = clampContent(message.content, state);
-	return content ? { ...message, content } : message;
+	return content ? { ...message, content, providerPayload: undefined } : message;
 }
 
 function clampDeveloperMessage(message: DeveloperMessage, state: { remainingDrops: number }): DeveloperMessage {
 	if (!Array.isArray(message.content) || state.remainingDrops <= 0) return message;
 	const content = clampContent(message.content, state);
-	return content ? { ...message, content } : message;
+	return content ? { ...message, content, providerPayload: undefined } : message;
 }
 
 function clampToolResultMessage(message: ToolResultMessage, state: { remainingDrops: number }): ToolResultMessage {

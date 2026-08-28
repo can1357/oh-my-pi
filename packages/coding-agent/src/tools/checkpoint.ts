@@ -81,13 +81,7 @@ export class CheckpointTool implements AgentTool<typeof checkpointSchema, Checkp
 		}
 		const startedAt = new Date().toISOString();
 		return toolResult<CheckpointToolDetails>({ goal: params.goal, startedAt })
-			.text(
-				[
-					"Checkpoint created.",
-					`Goal: ${params.goal}`,
-					"Run your investigation, then call rewind with a concise report.",
-				].join("\n"),
-			)
+			.text([`Checkpoint: ${params.goal}`, "Finish exploration and formulate findings."].join("\n"))
 			.done();
 	}
 }

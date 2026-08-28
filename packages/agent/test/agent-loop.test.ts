@@ -2216,7 +2216,7 @@ describe("agentLoop with AgentMessage", () => {
 		let steerReady = false;
 		let drained = false;
 		let observedAbort = false;
-		let resolvedByTimeout = false;
+		const toolRelease = Promise.withResolvers<void>();
 
 		const tool: AgentTool<typeof toolSchema, Record<string, never>> = {
 			name: "wait",
@@ -2226,24 +2226,7 @@ describe("agentLoop with AgentMessage", () => {
 			interruptible: params => params.op === "wait",
 			async execute(_toolCallId, _params, signal) {
 				steerReady = true;
-				const { promise, resolve } = Promise.withResolvers<void>();
-				if (signal?.aborted) {
-					resolve();
-				} else {
-					const timer = setTimeout(() => {
-						resolvedByTimeout = true;
-						resolve();
-					}, 300);
-					signal?.addEventListener(
-						"abort",
-						() => {
-							clearTimeout(timer);
-							resolve();
-						},
-						{ once: true },
-					);
-				}
-				await promise;
+				if (!signal?.aborted) await toolRelease.promise;
 				observedAbort = signal?.aborted === true;
 				return { content: [{ type: "text", text: "waited" }], details: {} };
 			},
@@ -2260,7 +2243,11 @@ describe("agentLoop with AgentMessage", () => {
 			model: mock.model,
 			convertToLlm: identityConverter,
 			interruptMode: "immediate",
-			hasSteeringMessages: () => steerReady && !drained,
+			hasSteeringMessages: () => {
+				const queued = steerReady && !drained;
+				if (queued) toolRelease.resolve();
+				return queued;
+			},
 			getSteeringMessages: async () => {
 				if (steerReady && !drained) {
 					drained = true;
@@ -2276,7 +2263,7 @@ describe("agentLoop with AgentMessage", () => {
 		}
 
 		expect(observedAbort).toBe(false);
-		expect(resolvedByTimeout).toBe(true);
+		expect(steerReady).toBe(true);
 		expect(drained).toBe(true);
 		expect(
 			events.some(e => e.type === "message_start" && e.message.role === "user" && e.message.content === "interrupt"),
@@ -3203,7 +3190,12 @@ describe("agentLoop event-driven steering watch", () => {
 				// drain
 			}
 		})();
-		const completed = await Promise.race([drain.then(() => true), Bun.sleep(1000).then(() => false)]);
+		// This is the behavior under test, so retain a deadline; cancel its timer
+		// when teardown succeeds instead of leaving a losing sleep alive.
+		const timeout = Promise.withResolvers<boolean>();
+		const timeoutId = setTimeout(() => timeout.resolve(false), 1000);
+		const completed = await Promise.race([drain.then(() => true), timeout.promise]);
+		clearTimeout(timeoutId);
 		try {
 			expect(completed).toBe(true);
 			expect(executed).toEqual(["only"]);
@@ -4420,6 +4412,48 @@ describe("agentLoopContinue with AgentMessage", () => {
 					event.message.stopReason === "aborted",
 			),
 		).toBe(false);
+	});
+
+	it("runs onTurnEnd for a terminal-yield turn without a spent abort signal", async () => {
+		const toolSchema = type({ value: "string" });
+		const controller = new AbortController();
+		const tool: AgentTool<typeof toolSchema, { value: string }> = {
+			name: "yield",
+			label: "Yield",
+			description: "Yield tool",
+			parameters: toolSchema,
+			async execute(_toolCallId, params) {
+				return { content: [{ type: "text", text: params.value }], details: { value: params.value } };
+			},
+		};
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [tool] };
+		const mock = createMockModel({
+			responses: [
+				{ content: [{ type: "toolCall", id: "yield-1", name: "yield", arguments: { value: "final answer" } }] },
+				{ content: ["must not be reached"] },
+			],
+		});
+		const turnEndCalls: Array<{ willContinue: boolean | undefined; signalAborted: boolean }> = [];
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: identityConverter,
+			afterToolCall: async () => {
+				controller.abort(TERMINAL_TOOL_RESULT_ABORT_REASON);
+			},
+			onTurnEnd: (_messages, signal, ctx) => {
+				turnEndCalls.push({ willContinue: ctx?.willContinue, signalAborted: signal?.aborted === true });
+			},
+		};
+
+		const events: AgentEvent[] = [];
+		const stream = agentLoop([createUserMessage("go")], context, config, controller.signal, mock.stream);
+		for await (const event of stream) events.push(event);
+
+		// The terminal-yield abort must not suppress per-turn bookkeeping: the
+		// hook runs once for the yield turn, marked complete (willContinue:false)
+		// and with no aborted signal so downstream waits behave like a plain turn.
+		expect(mock.calls).toHaveLength(1);
+		expect(turnEndCalls).toEqual([{ willContinue: false, signalAborted: false }]);
 	});
 
 	it("preserves an external abort boundary when a completed tool ignores cancellation", async () => {

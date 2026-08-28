@@ -24,8 +24,7 @@ describe("--service-tier", () => {
 	});
 
 	it("maps none to an explicit OpenAI service-tier omission", async () => {
-		using tempDir = TempDir.createSync("@omp-service-tier-");
-		const authStorage = await AuthStorage.create(path.join(tempDir.path(), "auth.db"));
+		const authStorage = await AuthStorage.create(":memory:");
 		try {
 			const options = await buildSessionOptions(
 				parseArgs(["--service-tier", "none"]),
@@ -42,13 +41,12 @@ describe("--service-tier", () => {
 	});
 
 	it("overrides only the OpenAI family in the live session", async () => {
-		using tempDir = TempDir.createSync("@omp-service-tier-sdk-");
 		const authStorage = await AuthStorage.create(":memory:");
 		const sessionManager = SessionManager.inMemory();
 		try {
 			const { session } = await createAgentSession({
-				cwd: tempDir.path(),
-				agentDir: tempDir.path(),
+				cwd: process.cwd(),
+				agentDir: process.cwd(),
 				modelRegistry: new ModelRegistry(authStorage),
 				settings: Settings.isolated({ "tier.anthropic": "priority" }),
 				sessionManager,

@@ -36,7 +36,7 @@ mod tests {
 
 	#[cfg(unix)]
 	fn matching_process() -> std::process::Child {
-		std::process::Command::new("/bin/sleep")
+		std::process::Command::new("sleep")
 			.arg("30")
 			.spawn()
 			.expect("spawn matching process")

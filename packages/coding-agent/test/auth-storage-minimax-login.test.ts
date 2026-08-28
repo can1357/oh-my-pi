@@ -1,13 +1,8 @@
-import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
-import * as fs from "node:fs";
-import * as os from "node:os";
-import * as path from "node:path";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import type { FetchImpl } from "@oh-my-pi/pi-ai";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
-import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 
 describe("AuthStorage MiniMax login", () => {
-	let tempDir: string;
 	let authStorage: AuthStorage;
 	let currentApiKey = "sk-old";
 
@@ -28,17 +23,11 @@ describe("AuthStorage MiniMax login", () => {
 
 	beforeEach(async () => {
 		currentApiKey = "sk-old";
-		tempDir = path.join(os.tmpdir(), `pi-test-auth-minimax-${Snowflake.next()}`);
-		fs.mkdirSync(tempDir, { recursive: true });
-		authStorage = await AuthStorage.create(path.join(tempDir, "testauth.db"));
+		authStorage = await AuthStorage.create(":memory:");
 	});
 
 	afterEach(() => {
-		vi.restoreAllMocks();
 		authStorage.close();
-		if (tempDir && fs.existsSync(tempDir)) {
-			removeSyncWithRetries(tempDir);
-		}
 	});
 
 	test("relogin with a different API key keeps both stored keys", async () => {

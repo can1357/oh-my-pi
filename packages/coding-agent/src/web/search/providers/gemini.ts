@@ -9,11 +9,8 @@
  * endpoint.
  */
 import { type AuthStorage, type FetchImpl, type OAuthAccess, withOAuthAccess } from "@oh-my-pi/pi-ai";
-import {
-	ANTIGRAVITY_SYSTEM_INSTRUCTION,
-	getAntigravityUserAgent,
-	getGeminiCliHeaders,
-} from "@oh-my-pi/pi-catalog/wire/gemini-headers";
+import { parseCloudflareAiGatewayCredential } from "@oh-my-pi/pi-catalog/wire/cloudflare-ai-gateway";
+import { getAntigravityUserAgent, getGeminiCliHeaders } from "@oh-my-pi/pi-catalog/wire/gemini-headers";
 import { fetchWithRetry, USER_AGENT } from "@oh-my-pi/pi-utils";
 
 import type { SearchCitation, SearchResponse, SearchSource } from "../../../web/search/types";
@@ -441,10 +438,9 @@ async function callGeminiSearch(
 			};
 
 	const normalizedSystemPrompt = systemPrompt?.toWellFormed();
-	const systemInstructionParts: Array<{ text: string }> = [
-		...(auth.isAntigravity ? [{ text: ANTIGRAVITY_SYSTEM_INSTRUCTION }] : []),
-		...(normalizedSystemPrompt ? [{ text: normalizedSystemPrompt }] : []),
-	];
+	const systemInstructionParts: Array<{ text: string }> = normalizedSystemPrompt
+		? [{ text: normalizedSystemPrompt }]
+		: [];
 
 	const requestBody: Record<string, unknown> = {
 		project: auth.projectId,
@@ -661,9 +657,12 @@ export async function searchGemini(params: GeminiSearchParams): Promise<SearchRe
 		);
 	} else {
 		const endpoint = resolveGeminiDeveloperEndpoint();
-		const apiKey = await params.authStorage.getApiKey(endpoint.authProvider, params.sessionId, {
+		const storedApiKey = await params.authStorage.getApiKey(endpoint.authProvider, params.sessionId, {
 			signal: params.signal,
 		});
+		const apiKey = endpoint.isCloudflareGateway
+			? parseCloudflareAiGatewayCredential(storedApiKey ?? "")?.token
+			: storedApiKey;
 		if (!apiKey) {
 			throw new Error(
 				endpoint.isCloudflareGateway

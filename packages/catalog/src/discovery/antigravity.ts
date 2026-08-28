@@ -6,7 +6,7 @@ import {
 	collapseEffortVariants,
 	type VariantCollapseTable,
 } from "../variant-collapse";
-import { getAntigravityUserAgent } from "../wire/gemini-headers";
+import { ensureAntigravityVersion, getAntigravityUserAgent } from "../wire/gemini-headers";
 
 export const ANTIGRAVITY_PRIMARY_ENDPOINT = "https://daily-cloudcode-pa.googleapis.com";
 export const ANTIGRAVITY_SANDBOX_ENDPOINT = "https://daily-cloudcode-pa.sandbox.googleapis.com";
@@ -161,6 +161,10 @@ export interface FetchAntigravityDiscoveryModelsOptions {
 export async function fetchAntigravityDiscoveryModels(
 	options: FetchAntigravityDiscoveryModelsOptions,
 ): Promise<ModelSpec<"google-gemini-cli">[] | null> {
+	if (options.userAgent === undefined) {
+		await ensureAntigravityVersion(options.fetcher ?? fetch, options.signal);
+	}
+
 	const fetcher = discoveryFetch(options.fetcher);
 	const endpoints = options.endpoint
 		? [trimTrailingSlashes(options.endpoint)]

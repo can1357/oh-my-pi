@@ -7,6 +7,7 @@ import {
 } from "@oh-my-pi/pi-ai/providers/anthropic";
 import type { Context, Model, ProviderSessionState, ServiceTier } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { withOfficialAnthropicEndpoint } from "./helpers";
 
 function makeAnthropicModel(id: string): Model<"anthropic-messages"> {
 	return buildModel({
@@ -51,6 +52,8 @@ function capturePayload(model: Model<"anthropic-messages">, opts: CaptureOptions
 	});
 	return promise;
 }
+
+withOfficialAnthropicEndpoint();
 
 describe("Anthropic priority service tier → speed='fast'", () => {
 	it("sets speed='fast' for Claude Opus 4.7 when serviceTier='priority'", async () => {

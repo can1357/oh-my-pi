@@ -2,7 +2,7 @@
 
 Contributor map for Rust workspace members under `crates/`. They are implementation details behind `@oh-my-pi/pi-natives` and its embedded shell; package consumers use JavaScript entrypoints, not these crate APIs.
 
-The root `Cargo.toml` includes `crates/pi-*` and `crates/vendor/*` as workspace members. It also patches crates.io `brush-core` to the vendored copy.
+The root `Cargo.toml` lists every crate under `crates/` explicitly in `workspace.members` — add new crates there. It also patches crates.io `brush-core` to the vendored copy.
 
 ## First-party crates
 

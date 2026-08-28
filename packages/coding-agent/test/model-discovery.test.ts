@@ -8,7 +8,7 @@ import type { OAuthCredentials } from "@oh-my-pi/pi-ai/oauth/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
-import { resolveOllamaModelCacheProviderId } from "@oh-my-pi/pi-catalog/provider-models";
+import { resolveModelCacheProviderId, resolveOllamaModelCacheProviderId } from "@oh-my-pi/pi-catalog/provider-models";
 import type { ModelSpec, OpenAICompat } from "@oh-my-pi/pi-catalog/types";
 import {
 	applyLlamaCppQwenThinking,
@@ -87,7 +87,10 @@ describe("ModelRegistry runtime discovery", () => {
 		return registry.getAll().filter(m => m.provider === provider);
 	}
 
-	function withEnv(name: "OLLAMA_BASE_URL" | "OLLAMA_CONTEXT_LENGTH" | "OLLAMA_HOST", value: string | undefined) {
+	function withEnv(
+		name: "LLAMA_CPP_BASE_URL" | "LM_STUDIO_BASE_URL" | "OLLAMA_BASE_URL" | "OLLAMA_CONTEXT_LENGTH" | "OLLAMA_HOST",
+		value: string | undefined,
+	) {
 		const original = Bun.env[name];
 		if (value === undefined) {
 			delete Bun.env[name];
@@ -174,6 +177,122 @@ describe("ModelRegistry runtime discovery", () => {
 			throw new Error(`Unexpected URL: ${url}`);
 		};
 	}
+
+	type GeminiCliDiscoveryCapture = {
+		loadCodeAssistCalls: number;
+		urls: string[];
+		quotaAuthorization?: string | null;
+		quotaBody?: unknown;
+	};
+
+	function mockGeminiCliStandardDiscovery(capture: GeminiCliDiscoveryCapture): FetchImpl {
+		return async (input, init) => {
+			const url = String(input);
+			capture.urls.push(url);
+			if (url.includes("/manifest/latest-arm64-mac.yml")) {
+				return new Response("", { status: 404 });
+			}
+			if (url.includes(":fetchAvailableModels")) {
+				return new Response("Forbidden", { status: 403 });
+			}
+			if (url.includes(":loadCodeAssist")) {
+				capture.loadCodeAssistCalls++;
+				return new Response("Forbidden", { status: 403 });
+			}
+			if (url.includes(":retrieveUserQuota")) {
+				capture.quotaAuthorization = new Headers(init?.headers).get("authorization");
+				capture.quotaBody = typeof init?.body === "string" ? JSON.parse(init.body) : undefined;
+				return Response.json({ buckets: [{ modelId: "gemini-3.5-flash" }] });
+			}
+			throw new Error(`Unexpected URL: ${url}`);
+		};
+	}
+
+	test("scoped discovery coalesces with an in-flight background refresh", async () => {
+		writeRawModelsJson({
+			gateway: {
+				baseUrl: "http://127.0.0.1:9992",
+				api: "openai-completions",
+				auth: "none",
+				discovery: { type: "openai-models-list" },
+			},
+		});
+		const { promise, resolve } = Promise.withResolvers<Response>();
+		const started = Promise.withResolvers<void>();
+		let modelListCalls = 0;
+		const fetchMock: FetchImpl = async input => {
+			const url = String(input);
+			if (url === "http://127.0.0.1:9992/v1/models") {
+				modelListCalls++;
+				started.resolve();
+				return promise;
+			}
+			return new Response("", { status: 404 });
+		};
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+
+		registry.refreshInBackground();
+		await started.promise;
+		expect(modelListCalls).toBe(1);
+
+		const scopedRefresh = registry.refreshDiscoverableProviders(["gateway"], "online-if-uncached");
+		expect(modelListCalls).toBe(1);
+
+		resolve(Response.json({ data: [{ id: "dynamic-model", context_length: 65_536 }] }));
+		await Promise.all([scopedRefresh, registry.awaitBackgroundRefresh()]);
+
+		expect(modelListCalls).toBe(1);
+		expect(registry.find("gateway", "dynamic-model")).toBeDefined();
+	});
+
+	test("does not coalesce or apply discovery across provider config changes", async () => {
+		writeRawModelsJson({
+			gateway: {
+				baseUrl: "http://127.0.0.1:9992",
+				api: "openai-completions",
+				auth: "none",
+				discovery: { type: "openai-models-list" },
+			},
+		});
+		const oldResponse = Promise.withResolvers<Response>();
+		const oldStarted = Promise.withResolvers<void>();
+		let newModelListCalls = 0;
+		const fetchMock: FetchImpl = async input => {
+			const url = String(input);
+			if (url === "http://127.0.0.1:9992/v1/models") {
+				oldStarted.resolve();
+				return oldResponse.promise;
+			}
+			if (url === "http://127.0.0.1:9991/v1/models") {
+				newModelListCalls++;
+				return Response.json({ data: [{ id: "new-model", context_length: 65_536 }] });
+			}
+			return new Response("", { status: 404 });
+		};
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+
+		registry.refreshInBackground();
+		await oldStarted.promise;
+
+		const previousMtime = fs.statSync(modelsJsonPath).mtimeMs;
+		writeRawModelsJson({
+			gateway: {
+				baseUrl: "http://127.0.0.1:9991",
+				api: "openai-completions",
+				auth: "none",
+				discovery: { type: "openai-models-list" },
+			},
+		});
+		const changedTime = new Date(previousMtime + 1_000);
+		fs.utimesSync(modelsJsonPath, changedTime, changedTime);
+		const refreshed = registry.refresh("online-if-uncached");
+		oldResponse.resolve(Response.json({ data: [{ id: "old-model", context_length: 65_536 }] }));
+		await Promise.all([refreshed, registry.awaitBackgroundRefresh()]);
+
+		expect(newModelListCalls).toBe(1);
+		expect(registry.find("gateway", "new-model")).toBeDefined();
+		expect(registry.find("gateway", "old-model")).toBeUndefined();
+	});
 
 	test("refreshProvider online refreshes expired anthropic OAuth before model discovery", async () => {
 		const { refreshCalls } = await useAuthStorageWithRefreshTracker();
@@ -400,6 +519,47 @@ describe("ModelRegistry runtime discovery", () => {
 		expect(getModelsForProvider(registry, "openai-codex").length).toBeGreaterThan(0);
 	});
 
+	test("Gemini CLI discovery forwards a stored OAuth project id to the quota fallback", async () => {
+		await authStorage.set("google-gemini-cli", {
+			type: "oauth",
+			access: "stored-gemini-token",
+			refresh: "stored-gemini-refresh",
+			expires: Date.now() + 3_600_000,
+			projectId: "stored-gcp-project",
+		});
+		const capture: GeminiCliDiscoveryCapture = { loadCodeAssistCalls: 0, urls: [] };
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, {
+			fetch: mockGeminiCliStandardDiscovery(capture),
+		});
+
+		await registry.refreshProvider("google-gemini-cli", "online");
+
+		expect(capture.loadCodeAssistCalls).toBe(0);
+		expect(capture.urls).toContain("https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota");
+		expect(capture.quotaAuthorization).toBe("Bearer stored-gemini-token");
+		expect(capture.quotaBody).toEqual({ project: "stored-gcp-project" });
+		expect(registry.find("google-gemini-cli", "gemini-3.5-flash")).toBeDefined();
+	});
+
+	test("Gemini CLI discovery accepts project_id in a runtime credential override", async () => {
+		authStorage.setRuntimeApiKey(
+			"google-gemini-cli",
+			JSON.stringify({ token: "runtime-gemini-token", project_id: "runtime-gcp-project" }),
+		);
+		const capture: GeminiCliDiscoveryCapture = { loadCodeAssistCalls: 0, urls: [] };
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, {
+			fetch: mockGeminiCliStandardDiscovery(capture),
+		});
+
+		await registry.refreshProvider("google-gemini-cli", "online");
+
+		expect(capture.loadCodeAssistCalls).toBe(0);
+		expect(capture.urls).toContain("https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota");
+		expect(capture.quotaAuthorization).toBe("Bearer runtime-gemini-token");
+		expect(capture.quotaBody).toEqual({ project: "runtime-gcp-project" });
+		expect(registry.find("google-gemini-cli", "gemini-3.5-flash")).toBeDefined();
+	});
+
 	test("configured discovery suppresses built-in special OAuth discovery", async () => {
 		await authStorage.set("google-gemini-cli", {
 			type: "oauth",
@@ -494,7 +654,6 @@ describe("ModelRegistry runtime discovery", () => {
 
 			const zenmuxModels = getModelsForProvider(registry1, "zenmux");
 			const fable = zenmuxModels.find(m => m.id === "anthropic/claude-fable-5-free");
-			expect(fable).toBeDefined();
 			expect(fable?.api).toBe("anthropic-messages");
 			expect(fable?.baseUrl).toBe("https://zenmux.ai/api/anthropic");
 
@@ -515,7 +674,6 @@ describe("ModelRegistry runtime discovery", () => {
 
 			const offlineZenmuxModels = getModelsForProvider(registry2, "zenmux");
 			const offlineFable = offlineZenmuxModels.find(m => m.id === "anthropic/claude-fable-5-free");
-			expect(offlineFable).toBeDefined();
 			expect(offlineFable?.api).toBe("anthropic-messages");
 			expect(offlineFable?.baseUrl).toBe("https://zenmux.ai/api/anthropic");
 		} finally {
@@ -524,6 +682,33 @@ describe("ModelRegistry runtime discovery", () => {
 			} else {
 				Bun.env.ZENMUX_API_KEY = originalKey;
 			}
+		}
+	});
+
+	test("only marks unconfigured implicit local endpoints as optional", async () => {
+		{
+			using _ollamaBaseUrl = withEnv("OLLAMA_BASE_URL", undefined);
+			using _ollamaHost = withEnv("OLLAMA_HOST", undefined);
+			using _llamaCpp = withEnv("LLAMA_CPP_BASE_URL", undefined);
+			using _lmStudio = withEnv("LM_STUDIO_BASE_URL", undefined);
+			const registry = new ModelRegistry(authStorage, modelsJsonPath);
+			await registry.refresh("offline");
+
+			expect(
+				["ollama", "llama.cpp", "lm-studio"].map(id => registry.getProviderDiscoveryState(id)?.optional),
+			).toEqual([true, true, true]);
+		}
+
+		{
+			using _ollama = withEnv("OLLAMA_BASE_URL", "http://ollama.example:11434");
+			using _llamaCpp = withEnv("LLAMA_CPP_BASE_URL", "http://llama-cpp.example:8080");
+			using _lmStudio = withEnv("LM_STUDIO_BASE_URL", "http://lm-studio.example:1234/v1");
+			const registry = new ModelRegistry(authStorage, modelsJsonPath);
+			await registry.refresh("offline");
+
+			expect(
+				["ollama", "llama.cpp", "lm-studio"].map(id => registry.getProviderDiscoveryState(id)?.optional),
+			).toEqual([false, false, false]);
 		}
 	});
 
@@ -536,6 +721,7 @@ describe("ModelRegistry runtime discovery", () => {
 
 		const model = registry.find("ollama", "phi4-mini");
 		expect(model?.baseUrl).toBe("http://ollama.lan:12345/v1");
+		expect(registry.getProviderDiscoveryState("ollama")?.optional).toBe(false);
 	});
 
 	test("keeps OLLAMA_BASE_URL precedence over OLLAMA_HOST", async () => {
@@ -547,6 +733,7 @@ describe("ModelRegistry runtime discovery", () => {
 
 		const model = registry.find("ollama", "phi4-mini");
 		expect(model?.baseUrl).toBe("http://omp-ollama.example:2222/v1");
+		expect(registry.getProviderDiscoveryState("ollama")?.optional).toBe(false);
 	});
 
 	test("refreshes implicit Ollama discovery when the configured endpoint changes", async () => {
@@ -1039,7 +1226,6 @@ describe("ModelRegistry runtime discovery", () => {
 		expect(llamaModels.some(m => m.id === "llama-3.2:3b")).toBe(true);
 		const apiKey = await registry.getApiKey(llamaModels[0]);
 		expect(apiKey).toBe("test-llama-key");
-		expect(apiKey).not.toBe(kNoAuth);
 	});
 	test("llama.cpp discovery without API key is treated as keyless", async () => {
 		const fetchMock: FetchImpl = async (input, init) => {
@@ -1161,7 +1347,7 @@ describe("ModelRegistry runtime discovery", () => {
 		const plain = registry.find("llama.cpp", "llama-3.1-8b");
 		expect(plain?.reasoning).toBe(false);
 		expect(plain?.api).toBe("openai-responses");
-		expect(plain?.baseUrl).toBe("http://127.0.0.1:8080");
+		expect(plain?.baseUrl).toBe("http://127.0.0.1:8080/v1");
 		expect((plain?.compat as DialectFields | undefined)?.reasoningDisableMode).not.toBe("qwen-template-false");
 	});
 
@@ -2315,7 +2501,6 @@ providers:
 		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
 		await registry.refresh();
 		const model = registry.find("proxy-test", "act_two");
-		expect(model).toBeDefined();
 		expect(model?.name).toBe("Act Two");
 	});
 
@@ -2348,7 +2533,6 @@ providers:
 		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
 		await registry.refresh();
 		const model = registry.find("proxy-test", "gpt-5");
-		expect(model).toBeDefined();
 		expect(model?.name).toBe("GPT-5");
 	});
 
@@ -2368,6 +2552,7 @@ providers:
 					data: [
 						{
 							model_group: "gpt-big",
+							providers: ["openai"],
 							max_input_tokens: 262_144,
 							max_output_tokens: 16_384,
 							supports_vision: true,
@@ -2388,6 +2573,7 @@ providers:
 		expect(model?.maxTokens).toBe(16_384);
 		expect(model?.input).toEqual(["text", "image"]);
 		expect(model?.reasoning).toBe(true);
+		expect(model?.api).toBe("openai-responses");
 	});
 
 	test("litellm discovery enriches configured proxy models with bundled references", async () => {
@@ -2437,7 +2623,7 @@ providers:
 				return new Response("{}", { status: 404 });
 			}
 			if (url === "http://localhost:4000/v1/models") {
-				return Response.json({ data: [{ id: "default-litellm" }] });
+				return Response.json({ data: [{ id: "default-litellm" }, { id: "openai/gpt-5" }] });
 			}
 			throw new Error(`Unexpected URL: ${url}`);
 		};
@@ -2445,6 +2631,7 @@ providers:
 		await registry.refresh();
 
 		expect(registry.find("litellm-test", "default-litellm")?.baseUrl).toBe("http://localhost:4000/v1");
+		expect(registry.find("litellm-test", "openai/gpt-5")?.api).toBe("openai-responses");
 	});
 
 	test("litellm discovery reuses configured bearer on rich and fallback requests", async () => {
@@ -2547,7 +2734,7 @@ providers:
 		expect(registry.find("litellm-test", "deployment-id")).toBeUndefined();
 	});
 
-	test("startup restores a legacy stale-marked Copilot -1m variant via requestModelId", () => {
+	test("startup restores a legacy stale-marked Copilot -1m variant via requestModelId", async () => {
 		// Regression for #6037/#6284: a synthesized Copilot `-1m` long-context
 		// variant keeps the base model's transport headers via `requestModelId`.
 		// The v10 cache omits headers, and legacy rows written by the old id-only
@@ -2567,15 +2754,17 @@ providers:
 		});
 		// Emulate a legacy write: the variant has no same-id static header source,
 		// so it is flagged unrestorable even though its base carries the headers.
-		writeModelCache("github-copilot", Date.now(), [cachedVariant], true, "", cacheDbPath);
+		authStorage.setRuntimeApiKey("github-copilot", "ghp_test_token");
+		const cacheProviderId = resolveModelCacheProviderId("github-copilot", { apiKey: "ghp_test_token" });
+		writeModelCache(cacheProviderId, Date.now(), [cachedVariant], true, "", cacheDbPath);
 		const db = new Database(cacheDbPath);
-		db.run("UPDATE model_cache SET header_restore_version = 0 WHERE provider_id = ?", ["github-copilot"]);
+		db.run("UPDATE model_cache SET header_restore_version = 0 WHERE provider_id = ?", [cacheProviderId]);
 		db.close();
 
 		const registry = new ModelRegistry(authStorage, modelsJsonPath);
+		await registry.hydrateCredentialScopedModelCaches();
 
 		const restored = registry.find("github-copilot", "gpt-5.6-sol-1m");
-		expect(restored).toBeDefined();
 		expect(restored?.headers).toEqual(bundledBase.headers);
 	});
 
@@ -2591,7 +2780,8 @@ providers:
 			requestModelId: "gpt-5.6-sol",
 			headers: { "X-Tenant-Route": "tenant-a" },
 		});
-		writeModelCache("github-copilot", Date.now(), [cachedAlias], true, "", cacheDbPath, [bundledBase]);
+		const cacheProviderId = resolveModelCacheProviderId("github-copilot");
+		writeModelCache(cacheProviderId, Date.now(), [cachedAlias], true, "", cacheDbPath, [bundledBase]);
 
 		const registry = new ModelRegistry(authStorage, modelsJsonPath);
 

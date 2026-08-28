@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { parseArgs } from "../src/cli/args";
+import { parseArgs, validateToolNames } from "../src/cli/args";
 import { OPTIONAL_VALUE_FLAGS, STRING_VALUE_FLAGS } from "../src/cli/flag-tables";
 import { CliUsageError } from "../src/cli/usage-error";
 
@@ -85,19 +85,30 @@ describe("--session-dir", () => {
 	});
 });
 
-describe("--tools legacy aliases", () => {
+describe("--tools validation", () => {
 	it("maps search and find to grep and glob", () => {
 		const result = parseArgs(["--tools", "search,find,grep"]);
 
 		expect(result.tools).toEqual(["grep", "glob"]);
 	});
 
-	it("rejects unknown tool names instead of silently narrowing the toolset", () => {
-		// Removed tools (ssh, job, irc, launch, search_tool_bm25) used to be
-		// dropped with only a log-file warning, so `--tools bash,ssh` ran with
-		// just bash and no visible notice.
-		expect(() => parseArgs(["--tools", "bash,ssh"])).toThrow(CliUsageError);
-		expect(() => parseArgs(["--tools", "bash,ssh"])).toThrow(/Unknown tool in --tools: ssh/);
+	it("defers unknown-name validation until all session tools are discovered", () => {
+		expect(parseArgs(["--tools", "bash,intercom"]).tools).toEqual(["bash", "intercom"]);
+		expect(parseArgs(["--tools", "read,custom_tool"], new Map()).tools).toEqual(["read", "custom_tool"]);
+	});
+});
+
+describe("--tools discovered-registry validation", () => {
+	it("accepts extension and custom tools after they enter the session registry", () => {
+		expect(() =>
+			validateToolNames(["read", "intercom", "custom_tool"], ["read", "intercom", "custom_tool"]),
+		).not.toThrow();
+	});
+
+	it("rejects names absent from the final registry", () => {
+		expect(() => validateToolNames(["read", "missing"], ["read", "intercom", "custom_tool"])).toThrow(
+			/Unknown tool in --tools: missing/,
+		);
 	});
 });
 

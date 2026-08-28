@@ -763,8 +763,8 @@ use std::{
 	collections::HashMap,
 	ffi::OsString,
 	fs::File,
-	io::{BufRead, BufReader, BufWriter, Read, Write},
-	path::PathBuf,
+	io::{BufRead, BufReader, Read, Write},
+	path::{Path, PathBuf},
 	sync::LazyLock,
 };
 #[cfg(any(
@@ -780,7 +780,7 @@ use std::ffi::{CStr, CString};
 
 use clap::{Arg, ArgAction, ArgMatches, Command};
 use jiff::{
-	Timestamp, Zoned,
+	Span, Timestamp, Zoned,
 	fmt::strtime::{self, BrokenDownTime, Config, PosixCustom},
 	tz::{Offset, TimeZone, TimeZoneDatabase},
 };
@@ -807,6 +807,9 @@ const OPT_SET: &str = "set";
 const OPT_REFERENCE: &str = "reference";
 const OPT_UNIVERSAL: &str = "universal";
 const OPT_UNIVERSAL_2: &str = "utc";
+// BSD compatibility options (no GNU equivalents).
+const OPT_BSD_ADJUST: &str = "bsd-adjust";
+const OPT_BSD_PARSE_ONLY: &str = "bsd-parse-only";
 
 /// Settings for this program, parsed from the command line
 struct Settings {
@@ -849,6 +852,8 @@ enum DateSource {
 	FileMtime(PathBuf),
 	Stdin,
 	Human(String),
+	/// BSD `date -j -f FMT VALUE`: VALUE parsed with the strptime format FMT.
+	Strptime { format: String, value: String },
 	Resolution,
 }
 
@@ -1035,6 +1040,247 @@ fn parse_military_timezone_with_offset(s: &str) -> Option<(i32, DayDelta)> {
 
 	Some((hours_from_midnight, day_delta))
 }
+/// Rewrite `-I`/`--iso-8601` so the optional ISO precision only binds when it
+/// is attached (`-Ihours`, `--iso-8601=hours`), matching GNU getopt. Without
+/// this, clap's optional-value handling greedily consumes a following
+/// `+FORMAT` operand (`date -I +%s`).
+///
+/// `argv[0]` is the command name. Scanning stops at `--`, and a token that is
+/// the value of a preceding option is never rewritten.
+fn rewrite_date_argv(argv: Vec<OsString>) -> Vec<OsString> {
+	/// Long options that consume a separate value token.
+	const VALUE_LONGS: &[&str] = &["date", "file", "reference", "set", "rfc-3339"];
+	/// Long flags that take no value (`iso-8601` is handled separately).
+	const FLAG_LONGS: &[&str] =
+		&["debug", "resolution", "rfc-email", "rfc-2822", "rfc-822", "universal", "utc", "uct"];
+	/// Short options that consume a value, attached or separate.
+	const VALUE_SHORTS: &[char] = &['d', 'f', 'r', 's', 'v'];
+
+	let mut out = Vec::with_capacity(argv.len());
+	let mut argv = argv.into_iter();
+	if let Some(name) = argv.next() {
+		out.push(name);
+	}
+	let mut skip_value = false;
+	let mut opts_ended = false;
+	for arg in argv {
+		if skip_value || opts_ended {
+			skip_value = false;
+			out.push(arg);
+			continue;
+		}
+		let Some(token) = arg.to_str() else {
+			out.push(arg);
+			continue;
+		};
+		if token == "--" {
+			opts_ended = true;
+			out.push(arg);
+		} else if let Some(long) = token.strip_prefix("--") {
+			// `infer_long_args` is enabled, so any unambiguous prefix names
+			// the option.
+			let (name, value) = match long.split_once('=') {
+				Some((name, value)) => (name, Some(value)),
+				None => (long, None),
+			};
+			let ambiguous = VALUE_LONGS
+				.iter()
+				.chain(FLAG_LONGS)
+				.any(|other| other.starts_with(name));
+			if !name.is_empty() && "iso-8601".starts_with(name) && !ambiguous {
+				out.push(format!("--iso-8601={}", value.unwrap_or(DATE)).into());
+			} else {
+				if value.is_none()
+					&& VALUE_LONGS.iter().filter(|l| l.starts_with(name)).count() == 1
+					&& !FLAG_LONGS.iter().any(|l| l.starts_with(name))
+					&& !"iso-8601".starts_with(name)
+				{
+					skip_value = true;
+				}
+				out.push(arg);
+			}
+		} else if let Some(cluster) = token.strip_prefix('-').filter(|rest| !rest.is_empty()) {
+			// Walk a short-option cluster (`-uI`, `-ud @0`, `-Ihours`).
+			let mut rewrote = false;
+			for (index, ch) in cluster.char_indices() {
+				if ch == 'I' {
+					let flags = &cluster[..index];
+					let rest = &cluster[index + ch.len_utf8()..];
+					if !flags.is_empty() {
+						out.push(format!("-{flags}").into());
+					}
+					let spec = if rest.is_empty() { DATE } else { rest };
+					out.push(format!("--iso-8601={spec}").into());
+					rewrote = true;
+					break;
+				}
+				if VALUE_SHORTS.contains(&ch) {
+					// The remainder of the token (or the next token when the
+					// remainder is empty) is this option's value.
+					if cluster[index + ch.len_utf8()..].is_empty() {
+						skip_value = true;
+					}
+					break;
+				}
+			}
+			if !rewrote {
+				out.push(arg);
+			}
+		} else {
+			out.push(arg);
+		}
+	}
+	out
+}
+
+/// Unit letter of a BSD `-v` adjustment.
+#[derive(Clone, Copy)]
+enum BsdAdjustUnit {
+	Year,
+	Month,
+	Week,
+	Day,
+	Hour,
+	Minute,
+	Second,
+}
+
+/// One BSD `-v` adjustment: a relative offset (`+1d`, `-2m`) or an absolute
+/// field set (`1d` sets the day of the month).
+#[derive(Clone, Copy)]
+enum BsdAdjustment {
+	Offset(i64, BsdAdjustUnit),
+	Set(i64, BsdAdjustUnit),
+}
+
+/// Parse one BSD `-v` argument of the form `[+|-]VAL[ymwdHMS]`.
+///
+/// BSD is case-sensitive only where it is ambiguous (`m` month vs `M`
+/// minute); the unambiguous letters are accepted in either case. Weekday and
+/// month names (`-vsun`, `-vjan`) are not supported.
+fn parse_bsd_adjustment(spec: &str) -> Option<BsdAdjustment> {
+	let (sign, rest) = match *spec.as_bytes().first()? {
+		b'+' => (Some(1), &spec[1..]),
+		b'-' => (Some(-1), &spec[1..]),
+		_ => (None, spec),
+	};
+	let mut chars = rest.chars();
+	let unit = match chars.next_back()? {
+		'y' | 'Y' => BsdAdjustUnit::Year,
+		'm' => BsdAdjustUnit::Month,
+		'w' | 'W' => BsdAdjustUnit::Week,
+		'd' | 'D' => BsdAdjustUnit::Day,
+		'H' | 'h' => BsdAdjustUnit::Hour,
+		'M' => BsdAdjustUnit::Minute,
+		'S' | 's' => BsdAdjustUnit::Second,
+		_ => return None,
+	};
+	let digits = chars.as_str();
+	if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+		return None;
+	}
+	let value: i64 = digits.parse().ok()?;
+	Some(match sign {
+		Some(sign) => BsdAdjustment::Offset(sign * value, unit),
+		None => BsdAdjustment::Set(value, unit),
+	})
+}
+
+/// Apply BSD `-v` adjustments to `date` in command-line order.
+fn apply_bsd_adjustments(mut date: Zoned, adjustments: &[BsdAdjustment]) -> Result<Zoned, String> {
+	for adjustment in adjustments {
+		date = match *adjustment {
+			BsdAdjustment::Offset(value, unit) => {
+				let span = Span::new();
+				let span = match unit {
+					BsdAdjustUnit::Year => span.try_years(value),
+					BsdAdjustUnit::Month => span.try_months(value),
+					BsdAdjustUnit::Week => span.try_weeks(value),
+					BsdAdjustUnit::Day => span.try_days(value),
+					BsdAdjustUnit::Hour => span.try_hours(value),
+					BsdAdjustUnit::Minute => span.try_minutes(value),
+					BsdAdjustUnit::Second => span.try_seconds(value),
+				}
+				.map_err(|error| format!("invalid adjustment ({error})"))?;
+				date
+					.checked_add(span)
+					.map_err(|error| format!("cannot adjust date ({error})"))?
+			},
+			BsdAdjustment::Set(value, unit) => {
+				let narrow = |unit: char| {
+					i8::try_from(value).map_err(|_| format!("invalid adjustment: '{value}{unit}'"))
+				};
+				let with = date.with();
+				let with = match unit {
+					BsdAdjustUnit::Year => {
+						// BSD windows two-digit years: 69-99 => 19xx, 0-68 => 20xx.
+						let year = match value {
+							0..=68 => value + 2000,
+							69..=99 => value + 1900,
+							_ => value,
+						};
+						let year = i16::try_from(year)
+							.map_err(|_| format!("invalid adjustment: '{value}y'"))?;
+						with.year(year)
+					},
+					BsdAdjustUnit::Month => with.month(narrow('m')?),
+					BsdAdjustUnit::Week => {
+						return Err(format!(
+							"unsupported adjustment: '{value}w' (setting the week is not \
+							 implemented; use an offset like '+{value}w')"
+						));
+					},
+					BsdAdjustUnit::Day => with.day(narrow('d')?),
+					BsdAdjustUnit::Hour => with.hour(narrow('H')?),
+					BsdAdjustUnit::Minute => with.minute(narrow('M')?),
+					BsdAdjustUnit::Second => with.second(narrow('S')?),
+				};
+				with
+					.build()
+					.map_err(|error| format!("cannot adjust date ({error})"))?
+			},
+		};
+	}
+	Ok(date)
+}
+
+/// BSD `date -j -f FMT VALUE`: parse VALUE with the strptime format FMT.
+///
+/// Fields the format does not mention keep the current date/time's values,
+/// matching BSD `date`, which seeds the broken-down time from
+/// `localtime(now)` before calling strptime(3).
+fn parse_bsd_strptime(format: &str, value: &str, now: &Zoned) -> Result<Zoned, String> {
+	let convert_error =
+		|error: jiff::Error| format!("failed conversion of '{value}' using format '{format}' ({error})");
+	let broken = BrokenDownTime::parse(format, value).map_err(convert_error)?;
+	// `%s` (or a complete civil datetime plus an offset) pins an instant.
+	if let Ok(timestamp) = broken.to_timestamp() {
+		return Ok(timestamp.to_zoned(now.time_zone().clone()));
+	}
+	let base = now.datetime();
+	let date = broken
+		.to_date()
+		.or_else(|_| {
+			jiff::civil::Date::new(
+				broken.year().unwrap_or(base.year()),
+				broken.month().unwrap_or(base.month()),
+				broken.day().unwrap_or(base.day()),
+			)
+		})
+		.map_err(convert_error)?;
+	let time = jiff::civil::Time::new(
+		broken.hour().unwrap_or(base.hour()),
+		broken.minute().unwrap_or(base.minute()),
+		broken.second().unwrap_or(base.second()),
+		broken.subsec_nanosecond().unwrap_or(base.subsec_nanosecond()),
+	)
+	.map_err(convert_error)?;
+	date
+		.to_datetime(time)
+		.to_zoned(now.time_zone().clone())
+		.map_err(convert_error)
+}
+
 
 /// Parsed `date` invocation.
 pub(crate) struct Date {
@@ -1063,6 +1309,10 @@ impl From<std::io::Error> for DateError {
 
 impl Utility for Date {
 	const NAME: &'static str = "date";
+
+	fn rewrite_argv(argv: Vec<OsString>) -> Result<Vec<OsString>, String> {
+		Ok(rewrite_date_argv(argv))
+	}
 
 	fn run(self, host: &mut Host) -> i32 {
 		match date_main(host, &self.matches) {
@@ -1152,7 +1402,44 @@ fn locale_default_format(_locale: &str) -> Option<String> {
 
 #[allow(clippy::cognitive_complexity)]
 fn date_main(host: &mut Host, matches: &ArgMatches) -> Result<(), DateError> {
-	let date_source = if let Some(date_os) = matches.get_one::<OsString>(OPT_DATE) {
+	let bsd_parse_only = matches.get_flag(OPT_BSD_PARSE_ONLY);
+	let adjustments: Vec<BsdAdjustment> = matches
+		.get_many::<String>(OPT_BSD_ADJUST)
+		.into_iter()
+		.flatten()
+		.map(|spec| {
+			parse_bsd_adjustment(spec)
+				.ok_or_else(|| DateError::new(1, format!("invalid adjustment: '{spec}'")))
+		})
+		.collect::<Result<_, _>>()?;
+
+	// Positional operands: at most one `+FORMAT`, plus (in the BSD `-j -f`
+	// form) the date value to parse.
+	let mut operands: Vec<&String> = matches
+		.get_many::<String>(OPT_FORMAT)
+		.map(Iterator::collect)
+		.unwrap_or_default();
+
+	// BSD: with `-j`, `-f` is the strptime(3) input format for the date
+	// operand rather than GNU's `--file=DATEFILE`.
+	let strptime_format = if bsd_parse_only {
+		matches.get_one::<String>(OPT_FILE)
+	} else {
+		None
+	};
+	let strptime_value = if strptime_format.is_some() {
+		if operands.first().is_some_and(|operand| !operand.starts_with('+')) {
+			Some(operands.remove(0))
+		} else {
+			return Err(DateError::new(1, "'-j -f FORMAT' requires a date operand to parse"));
+		}
+	} else {
+		None
+	};
+
+	let date_source = if let (Some(format), Some(value)) = (strptime_format, strptime_value) {
+		DateSource::Strptime { format: format.clone(), value: value.clone() }
+	} else if let Some(date_os) = matches.get_one::<OsString>(OPT_DATE) {
 		// Convert OsString to String, handling invalid UTF-8 with GNU-compatible error
 		let date = date_os.to_str().ok_or_else(|| {
 			let bytes = date_os.as_encoded_bytes();
@@ -1165,8 +1452,18 @@ fn date_main(host: &mut Host, matches: &ArgMatches) -> Result<(), DateError> {
 			"-" => DateSource::Stdin,
 			_ => DateSource::File(file.into()),
 		}
-	} else if let Some(file) = matches.get_one::<String>(OPT_REFERENCE) {
-		DateSource::FileMtime(file.into())
+	} else if let Some(reference) = matches.get_one::<String>(OPT_REFERENCE) {
+		// `-r` doubles as GNU `--reference=FILE` and BSD `-r SECONDS`.
+		// Precedence: an existing file always wins (GNU semantics are
+		// primary); a purely numeric operand naming no existing file is
+		// seconds since the epoch (BSD), i.e. GNU `-d @SECONDS`.
+		let digits = reference.strip_prefix('-').unwrap_or(reference);
+		let numeric = !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit());
+		if numeric && !host.resolve(Path::new(reference)).exists() {
+			DateSource::Human(format!("@{reference}"))
+		} else {
+			DateSource::FileMtime(reference.into())
+		}
 	} else if matches.get_flag(OPT_RESOLUTION) {
 		DateSource::Resolution
 	} else {
@@ -1174,18 +1471,15 @@ fn date_main(host: &mut Host, matches: &ArgMatches) -> Result<(), DateError> {
 	};
 
 	// Check for extra operands (multiple positional arguments)
-	if let Some(formats) = matches.get_many::<String>(OPT_FORMAT) {
-		let format_args: Vec<&String> = formats.collect();
-		if format_args.len() > 1 {
-			return Err(DateError::new(1, format!("extra operand '{}'", format_args[1])));
-		}
+	if operands.len() > 1 {
+		return Err(DateError::new(1, format!("extra operand '{}'", operands[1])));
 	}
 
-	let format = if let Some(form) = matches.get_one::<String>(OPT_FORMAT) {
+	let format = if let Some(form) = operands.first() {
 		if !form.starts_with('+') {
 			// if an optional Format String was found but the user has not provided an input
 			// date GNU prints an invalid date Error
-			if !matches!(date_source, DateSource::Human(_)) {
+			if !matches!(date_source, DateSource::Human(_) | DateSource::Strptime { .. }) {
 				return Err(DateError::new(1, format!("invalid date '{form}'")));
 			}
 			// If the user did provide an input date with the --date flag and the Format
@@ -1198,8 +1492,7 @@ fn date_main(host: &mut Host, matches: &ArgMatches) -> Result<(), DateError> {
 				),
 			));
 		}
-		let form = form[1..].to_string();
-		Format::Custom(form)
+		Format::Custom(form[1..].to_string())
 	} else if let Some(fmt) = matches
 		.get_many::<String>(OPT_ISO_8601)
 		.map(|mut iter| iter.next().unwrap_or(&DATE.to_string()).as_str().into())
@@ -1248,6 +1541,7 @@ fn date_main(host: &mut Host, matches: &ArgMatches) -> Result<(), DateError> {
 	let cancel = host.cancel_flag();
 	let mut had_error = false;
 	let mut debug_stderr = host.stderr_clone();
+	let mut stdout = host.stdout_writer();
 	let reader_stderr = host.stderr_clone();
 	let dates: Box<dyn Iterator<Item = _>> = match &settings.date_source {
 		DateSource::Human(input) => {
@@ -1427,6 +1721,11 @@ fn date_main(host: &mut Host, matches: &ArgMatches) -> Result<(), DateError> {
 			let iter = std::iter::once(Ok(date));
 			Box::new(iter)
 		},
+		DateSource::Strptime { format, value } => {
+			let date = parse_bsd_strptime(format, value, &now)
+				.map_err(|message| DateError::new(1, message))?;
+			Box::new(std::iter::once(Ok(date)))
+		},
 		DateSource::Now => {
 			let iter = std::iter::once(Ok(now.clone()));
 			Box::new(iter)
@@ -1434,7 +1733,6 @@ fn date_main(host: &mut Host, matches: &ArgMatches) -> Result<(), DateError> {
 	};
 
 	let format_string = make_format_string(&settings);
-	let mut stdout = BufWriter::new(&mut host.stdout);
 
 	// Format all the dates
 	let config = Config::new().custom(PosixCustom::new()).lenient(true);
@@ -1445,6 +1743,18 @@ fn date_main(host: &mut Host, matches: &ArgMatches) -> Result<(), DateError> {
 		}
 		match date {
 			Ok(date) => {
+				// BSD `-v` adjustments apply to the base date in argv order.
+				let date = if adjustments.is_empty() {
+					date
+				} else {
+					match apply_bsd_adjustments(date, &adjustments) {
+						Ok(date) => date,
+						Err(message) => {
+							let _ = stdout.flush();
+							return Err(DateError::new(1, message));
+						},
+					}
+				};
 				let date = if settings.utc {
 					date.with_time_zone(TimeZone::UTC)
 				} else {
@@ -1509,7 +1819,10 @@ fn uu_app() -> Command {
 				.value_name("DATEFILE")
 				.value_hint(clap::ValueHint::FilePath)
 				.conflicts_with(OPT_DATE)
-				.help("like --date; once for each line of DATEFILE"),
+				.help(
+					"like --date; once for each line of DATEFILE\n(BSD: with -j, the strptime(3) \
+					 input format for the date operand)",
+				),
 		)
 		.arg(
 			Arg::new(OPT_ISO_8601)
@@ -1517,7 +1830,12 @@ fn uu_app() -> Command {
 				.long(OPT_ISO_8601)
 				.value_name("FMT")
 				.value_parser(ShortcutValueParser::new([DATE, HOURS, MINUTES, SECONDS, NS]))
+				// The optional precision binds only when attached (`-Ihours`,
+				// `--iso-8601=hours`): `rewrite_date_argv` normalizes every
+				// spelling to the `=` form, so a following `+FORMAT` operand
+				// is never consumed as the value (GNU getopt behavior).
 				.num_args(0..=1)
+				.require_equals(true)
 				.default_missing_value(OPT_DATE)
 				.help(
 					"output date/time in ISO 8601 format.\nFMT='date' for date only (the \
@@ -1567,8 +1885,12 @@ fn uu_app() -> Command {
 				.long(OPT_REFERENCE)
 				.value_name("FILE")
 				.value_hint(clap::ValueHint::AnyPath)
+				.allow_hyphen_values(true)
 				.conflicts_with_all([OPT_DATE, OPT_FILE, OPT_RESOLUTION])
-				.help("display the last modification time of FILE"),
+				.help(
+					"display the last modification time of FILE\n(BSD: when FILE is numeric and \
+					 no such file exists,\ndisplay the date at that many seconds since the epoch)",
+				),
 		)
 		.arg(
 			Arg::new(OPT_SET)
@@ -1587,6 +1909,26 @@ fn uu_app() -> Command {
 				.overrides_with(OPT_UNIVERSAL)
 				.help("print or set Coordinated Universal Time (UTC)")
 				.action(ArgAction::SetTrue),
+		)
+		.arg(
+			Arg::new(OPT_BSD_PARSE_ONLY)
+				.short('j')
+				.help(
+					"BSD compatibility: do not try to set the system clock;\nwith -f, parse the \
+					 date operand using the strptime(3)\nformat given to -f",
+				)
+				.action(ArgAction::SetTrue),
+		)
+		.arg(
+			Arg::new(OPT_BSD_ADJUST)
+				.short('v')
+				.value_name("[+|-]VAL[ymwdHMS]")
+				.allow_hyphen_values(true)
+				.action(ArgAction::Append)
+				.help(
+					"BSD compatibility: adjust ('+'/'-') or set (no sign) the\ndisplayed date; \
+					 may be given multiple times, applied in order",
+				),
 		)
 		.arg(Arg::new(OPT_FORMAT).num_args(0..))
 }
@@ -1981,6 +2323,194 @@ mod tests {
 		assert_eq!(strip_parenthesized_comments("2026(comment)-01-05"), "2026-01-05");
 		assert_eq!(strip_parenthesized_comments("a(b(c)d)e"), "ae");
 		assert_eq!(strip_parenthesized_comments("a(b)c(d"), "ac");
+	}
+
+	/// Defends: BSD `-r <epoch>` must print that instant, not fail trying to
+	/// open `./<epoch>` as a reference file.
+	#[test]
+	fn bsd_reference_epoch_when_no_such_file() {
+		let (code, capture) =
+			run_util::<Date>(&["-u", "-r", "1700000000", "+%Y-%m-%dT%H:%M:%S"], "", "/");
+
+		assert_eq!(code, 0);
+		assert_eq!(capture.out(), "2023-11-14T22:13:20\n");
+		assert_eq!(capture.err(), "");
+	}
+
+	/// Defends: an existing file always wins over the BSD numeric-epoch
+	/// reading of `-r` (GNU `--reference` semantics are primary).
+	#[test]
+	fn reference_prefers_existing_file_over_epoch() {
+		let dir = std::env::temp_dir().join(format!("pi-date-r-{}", std::process::id()));
+		std::fs::create_dir_all(&dir).unwrap();
+		let file = dir.join("1700000000");
+		std::fs::write(&file, b"x").unwrap();
+
+		let (code, capture) = run_util::<Date>(
+			&["-u", "-r", "1700000000", "+%s"],
+			"",
+			dir.to_str().unwrap(),
+		);
+		let mtime = std::fs::metadata(&file).unwrap().modified().unwrap();
+		let expected = Timestamp::try_from(mtime).unwrap().as_second();
+		std::fs::remove_dir_all(&dir).unwrap();
+
+		assert_eq!(code, 0);
+		assert_eq!(capture.out(), format!("{expected}\n"));
+	}
+
+	/// Defends: BSD `-v` offsets (`+1d`, `-2m`) must parse and apply in argv
+	/// order instead of being rejected as unknown options.
+	#[test]
+	fn bsd_adjustments_apply_in_order() {
+		let (code, capture) = run_util::<Date>(
+			&["-u", "-r", "1700000000", "-v+1d", "-v-2m", "+%F %T"],
+			"",
+			"/",
+		);
+
+		assert_eq!(code, 0);
+		assert_eq!(capture.out(), "2023-09-15 22:13:20\n");
+		assert_eq!(capture.err(), "");
+	}
+
+	/// Defends: the unsigned `-v` form sets a field absolutely (`-v1d` = first
+	/// of the month) rather than offsetting.
+	#[test]
+	fn bsd_adjustment_sets_fields_absolutely() {
+		let (code, capture) = run_util::<Date>(
+			&["-u", "-r", "1700000000", "-v1d", "-v5H", "+%F %T"],
+			"",
+			"/",
+		);
+
+		assert_eq!(code, 0);
+		assert_eq!(capture.out(), "2023-11-01 05:13:20\n");
+		assert_eq!(capture.err(), "");
+	}
+
+	/// Defends: a malformed `-v` argument is a clean diagnostic, not a panic
+	/// or a silently ignored adjustment.
+	#[test]
+	fn bsd_adjustment_rejects_unknown_unit() {
+		let (code, capture) = run_util::<Date>(&["-v+1x", "+%F"], "", "/");
+
+		assert_eq!(code, 1);
+		assert!(capture.err().contains("invalid adjustment"), "stderr: {}", capture.err());
+	}
+
+	/// Defends: with `-j`, `-f` is the BSD strptime input format for the date
+	/// operand, not GNU `--file=DATEFILE`.
+	#[test]
+	fn bsd_j_f_parses_with_strptime_format() {
+		let (code, capture) = run_util::<Date>(
+			&["-u", "-j", "-f", "%Y-%m-%d %H:%M:%S", "2026-01-01 00:00:00", "+%s"],
+			"",
+			"/",
+		);
+
+		assert_eq!(code, 0);
+		assert_eq!(capture.out(), "1767225600\n");
+		assert_eq!(capture.err(), "");
+	}
+
+	/// Defends: fields missing from the `-j -f` format are seeded from "now"
+	/// (BSD strptime semantics), so a date-only format keeps the given date.
+	#[test]
+	fn bsd_j_f_fills_missing_fields_from_now() {
+		let (code, capture) =
+			run_util::<Date>(&["-u", "-j", "-f", "%Y-%m-%d", "2026-01-01", "+%F"], "", "/");
+
+		assert_eq!(code, 0);
+		assert_eq!(capture.out(), "2026-01-01\n");
+		assert_eq!(capture.err(), "");
+	}
+
+	/// Defends: `-j -f` without a date operand is a diagnostic, not a silent
+	/// fallback to GNU `--file` behavior.
+	#[test]
+	fn bsd_j_f_requires_date_operand() {
+		let (code, capture) = run_util::<Date>(&["-j", "-f", "%Y", "+%F"], "", "/");
+
+		assert_eq!(code, 1);
+		assert!(
+			capture.err().contains("requires a date operand"),
+			"stderr: {}",
+			capture.err()
+		);
+	}
+
+	/// Defends: bare `-j` parses as a no-op (never sets the clock) instead of
+	/// being rejected, and `-f` keeps GNU file semantics without `-j`.
+	#[test]
+	fn bsd_j_alone_is_a_no_op() {
+		let (code, capture) = run_util::<Date>(&["-u", "-j", "-r", "0", "+%F"], "", "/");
+
+		assert_eq!(code, 0);
+		assert_eq!(capture.out(), "1970-01-01\n");
+		assert_eq!(capture.err(), "");
+	}
+
+	/// Defends: `date -I +%s` must treat `+%s` as the output format instead of
+	/// greedily consuming it as the ISO precision value.
+	#[test]
+	fn iso_flag_does_not_consume_format_operand() {
+		let (code, capture) = run_util::<Date>(&["-u", "-d", "@0", "-I", "+%s"], "", "/");
+
+		assert_eq!(code, 0);
+		assert_eq!(capture.out(), "0\n");
+		assert_eq!(capture.err(), "");
+	}
+
+	/// Defends: bare `-I` still defaults to date precision after the
+	/// non-greedy rewrite.
+	#[test]
+	fn iso_flag_defaults_to_date_precision() {
+		let (code, capture) = run_util::<Date>(&["-u", "-d", "@0", "-I"], "", "/");
+
+		assert_eq!(code, 0);
+		assert_eq!(capture.out(), "1970-01-01\n");
+		assert_eq!(capture.err(), "");
+	}
+
+	/// Defends: the attached form `-Ihours` keeps binding the precision.
+	#[test]
+	fn iso_flag_accepts_attached_precision() {
+		let (code, capture) = run_util::<Date>(&["-u", "-d", "@0", "-Ihours"], "", "/");
+
+		assert_eq!(code, 0);
+		assert_eq!(capture.out(), "1970-01-01T00+00:00\n");
+		assert_eq!(capture.err(), "");
+	}
+
+	/// Defends: the argv rewrite only touches genuine `-I`/`--iso-8601`
+	/// options — never option values, post-`--` operands, or other flags.
+	#[test]
+	fn rewrites_iso_argv_forms_conservatively() {
+		let argv = |args: &[&str]| -> Vec<OsString> { args.iter().map(OsString::from).collect() };
+
+		assert_eq!(
+			rewrite_date_argv(argv(&["date", "-I", "+%s"])),
+			argv(&["date", "--iso-8601=date", "+%s"])
+		);
+		assert_eq!(rewrite_date_argv(argv(&["date", "-Ihours"])), argv(&["date", "--iso-8601=hours"]));
+		assert_eq!(
+			rewrite_date_argv(argv(&["date", "--iso-8601", "+%s"])),
+			argv(&["date", "--iso-8601=date", "+%s"])
+		);
+		assert_eq!(
+			rewrite_date_argv(argv(&["date", "--iso", "-u"])),
+			argv(&["date", "--iso-8601=date", "-u"])
+		);
+		// `-I` as the value of another option is untouched.
+		assert_eq!(rewrite_date_argv(argv(&["date", "-d", "-I"])), argv(&["date", "-d", "-I"]));
+		// Everything after `--` is an operand.
+		assert_eq!(rewrite_date_argv(argv(&["date", "--", "-I"])), argv(&["date", "--", "-I"]));
+		// Clustered flags before `-I` are preserved.
+		assert_eq!(
+			rewrite_date_argv(argv(&["date", "-uI"])),
+			argv(&["date", "-u", "--iso-8601=date"])
+		);
 	}
 }
 

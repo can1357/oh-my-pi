@@ -1,11 +1,11 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { Text } from "@oh-my-pi/pi-tui";
 import type { ToolDefinition } from "../../extensibility/extensions";
 import type { Theme } from "../../modes/theme/theme";
 import { replaceTabs, truncateToWidth } from "../../tools/render-utils";
-import * as git from "../../utils/git";
 import { computeRunModifiedPaths, getCurrentAutoresearchBranch, parseWorkDirDirtyPaths } from "../git";
 import {
 	ensureNumericMetricMap,
@@ -63,7 +63,7 @@ export function createLogExperimentTool(
 		defaultInactive: true,
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			const storage = await openAutoresearchStorageIfExists(ctx.cwd);
-			const currentBranch = (await git.branch.current(ctx.cwd)) ?? null;
+			const currentBranch = (await vcs.git(ctx.cwd)?.currentBranch()) ?? null;
 			const session = storage?.getActiveSessionForBranch(currentBranch) ?? null;
 			if (!storage || !session) {
 				return {
@@ -313,12 +313,13 @@ async function commitKeptExperiment(
 	primaryMetric: string,
 ): Promise<KeepCommitResult> {
 	if (files.length === 0) return { note: "nothing to commit" };
+	const repository = vcs.requireGit(cwd);
 	try {
-		await git.stage.files(cwd, files);
+		await repository.stageFiles(files);
 	} catch (err) {
 		return { error: `git add failed: ${err instanceof Error ? err.message : String(err)}` };
 	}
-	if (!(await git.diff.has(cwd, { cached: true, files }))) {
+	if (!(await repository.hasDiff({ cached: true, files }))) {
 		return { note: "nothing to commit" };
 	}
 	const payload: { [key: string]: string | number } = {
@@ -330,9 +331,8 @@ async function commitKeptExperiment(
 	}
 	const commitMessage = `${description}\n\nResult: ${JSON.stringify(payload)}`;
 	try {
-		const commitResult = await git.commit(cwd, commitMessage, { files });
-		const summary = `${commitResult.stdout}${commitResult.stderr}`.split("\n").find(line => line.trim().length > 0);
-		return { note: summary?.trim() ?? "committed" };
+		const commitSha = await repository.commitCreate(commitMessage, { files });
+		return { note: `committed ${commitSha.slice(0, 12)}` };
 	} catch (err) {
 		return { error: `git commit failed: ${err instanceof Error ? err.message : String(err)}` };
 	}
@@ -348,8 +348,9 @@ async function revertFailedExperiment(
 		// rewinds prior `keep` commits. Reset to HEAD so any kept improvements
 		// already on the branch survive.
 		try {
-			await git.reset(cwd, { hard: true, target: "HEAD" });
-			await git.clean(cwd);
+			const repository = vcs.requireGit(cwd);
+			await repository.reset("hard", "HEAD");
+			await repository.clean({});
 			return { note: "worktree reset to HEAD" };
 		} catch (err) {
 			return { error: `git reset/clean failed: ${err instanceof Error ? err.message : String(err)}` };
@@ -363,7 +364,7 @@ async function revertFailedExperiment(
 	if (total === 0) return { note: "nothing to revert" };
 	if (tracked.length > 0) {
 		try {
-			await git.restore(cwd, { files: tracked, source: "HEAD", staged: true, worktree: true });
+			await vcs.requireGit(cwd).restore({ files: tracked, source: "HEAD", staged: true, worktree: true });
 		} catch (err) {
 			return { error: `git restore failed: ${err instanceof Error ? err.message : String(err)}` };
 		}
@@ -420,7 +421,7 @@ function mergeMetrics(
 
 async function tryReadHeadSha(cwd: string): Promise<string | null> {
 	try {
-		return (await git.head.sha(cwd)) ?? null;
+		return (await vcs.git(cwd)?.headSha()) ?? null;
 	} catch {
 		return null;
 	}

@@ -91,7 +91,7 @@ function pruneStaleProcessLogs(dir: string): void {
 		`${cutoff.getFullYear()}-${String(cutoff.getMonth() + 1).padStart(2, "0")}-` +
 		String(cutoff.getDate()).padStart(2, "0");
 
-	const staleLogsByProcessDay = new Map<string, Array<{ path: string; mtimeMs: number; rollover: number }>>();
+	const staleLogsByProcessDay = new Map<string, Array<{ path: string; rollover: number }>>();
 	for (const entry of entries) {
 		if (!entry.isFile()) continue;
 		const logMatch = PROCESS_LOG_PATTERN.exec(entry.name);
@@ -120,25 +120,29 @@ function pruneStaleProcessLogs(dir: string): void {
 			continue;
 		}
 
-		try {
-			const key = `${pidText}:${logMatch[1]}`;
-			const staleLogs = staleLogsByProcessDay.get(key) ?? [];
-			staleLogs.push({
-				path: entryPath,
-				mtimeMs: fs.statSync(entryPath).mtimeMs,
-				rollover: Number(logMatch[3] ?? 0),
-			});
-			staleLogsByProcessDay.set(key, staleLogs);
-		} catch {
-			// Another process may have pruned the same stale namespace.
-		}
+		const key = `${pidText}:${logMatch[1]}`;
+		const staleLogs = staleLogsByProcessDay.get(key) ?? [];
+		staleLogs.push({
+			path: entryPath,
+			rollover: Number(logMatch[3] ?? 0),
+		});
+		staleLogsByProcessDay.set(key, staleLogs);
 	}
 
 	for (const staleLogs of staleLogsByProcessDay.values()) {
-		staleLogs.sort(
+		if (staleLogs.length <= RETAINED_STALE_LOGS_PER_PROCESS_DAY) continue;
+		const ranked: Array<{ path: string; mtimeMs: number; rollover: number }> = [];
+		for (const stale of staleLogs) {
+			try {
+				ranked.push({ ...stale, mtimeMs: fs.statSync(stale.path).mtimeMs });
+			} catch {
+				// Another process may have pruned the same stale namespace.
+			}
+		}
+		ranked.sort(
 			(a, b) => b.mtimeMs - a.mtimeMs || b.rollover - a.rollover || (a.path < b.path ? -1 : a.path > b.path ? 1 : 0),
 		);
-		for (const stale of staleLogs.slice(RETAINED_STALE_LOGS_PER_PROCESS_DAY)) {
+		for (const stale of ranked.slice(RETAINED_STALE_LOGS_PER_PROCESS_DAY)) {
 			try {
 				fs.rmSync(stale.path, { force: true });
 			} catch {

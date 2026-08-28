@@ -4,11 +4,11 @@ import * as http2 from "node:http2";
 import type * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
-import { create, toBinary } from "@bufbuild/protobuf";
 // Import from source, not the package specifier: the workspace `node_modules`
 // copy resolves to the primary checkout, not this worktree.
 import { fetchCursorUsableModels } from "../src/discovery/cursor";
-import { GetUsableModelsResponseSchema, ModelDetailsSchema } from "../src/discovery/cursor-gen/agent_pb";
+import { GetUsableModelsResponseSchema, ModelDetailsSchema } from "../src/discovery/cursor-proto";
+import { create, toBinary } from "../src/discovery/protobuf";
 import { resolveProviderModels } from "../src/model-manager";
 import { cursorModelManagerOptions } from "../src/provider-models/special";
 import type { ModelSpec } from "../src/types";
@@ -25,6 +25,10 @@ const FIXTURE_MODEL_IDS = [
 	"kimi-k3-low",
 	"kimi-k3-max",
 	"grok-code-fast-2",
+	// Versioned Cursor Grok siblings: bundled references read reasoning:false,
+	// but the id marks them reasoning.
+	"cursor-grok-4.5-high",
+	"cursor-grok-4.6-xhigh",
 	// Bundled-reference ids: the reference stays authoritative.
 	"claude-4.5-opus-high",
 	"claude-4.6-opus-high",
@@ -90,6 +94,14 @@ describe("cursor discovery input modalities (issue #4726)", () => {
 		expect(byId.get("kimi-k3-high")?.reasoning).toBe(true);
 		expect(byId.get("kimi-k3-low")?.reasoning).toBe(true);
 		expect(byId.get("kimi-k3-max")?.reasoning).toBe(true);
+	});
+
+	it("marks versioned Cursor Grok ids as reasoning despite reasoning:false references (issue #8803)", async () => {
+		const byId = await discover();
+		expect(byId.get("cursor-grok-4.5-high")?.reasoning).toBe(true);
+		expect(byId.get("cursor-grok-4.6-xhigh")?.reasoning).toBe(true);
+		// grok-code-* coding models lack the version digit and stay non-reasoning.
+		expect(byId.get("grok-code-fast-2")?.reasoning).toBe(false);
 	});
 
 	it("keeps bundled references authoritative for input modalities", async () => {

@@ -519,6 +519,11 @@ export function providerImageBudget(provider: string | undefined): number {
 	return (provider !== undefined ? PROVIDER_IMAGE_BUDGETS[provider] : undefined) ?? DEFAULT_PROVIDER_IMAGE_BUDGET;
 }
 
+/** Archive frame cap for `provider`: image budget, never above {@link MAX_FRAMES_DEFAULT}. */
+export function providerFrameBudget(provider: string | undefined): number {
+	return Math.min(providerImageBudget(provider), MAX_FRAMES_DEFAULT);
+}
+
 /** Key under `CompactionEntry.preserveData` holding the frame archive. */
 export const PRESERVE_KEY = "snapcompact";
 
@@ -775,6 +780,132 @@ function truncateForSummary(text: string, maxChars: number, headRatio: number): 
 	return `${text.slice(0, headChars)} […${elided}ch elided…] ${tail}`;
 }
 
+/** One elision marker as emitted by {@link truncateForSummary} (Unicode
+ *  ellipses) or as persisted after `normalize()` (ASCII dots). */
+const ELIDED_MARKER = String.raw`\[(?:…|\.{3})\d+ch elided(?:…|\.{3})\]`;
+
+/** Unquoted RFC 2045 token used as a media-type parameter name or value.
+ *  Quoted-string values (RFC 822) are out of scope. */
+const MEDIA_TYPE_TOKEN = String.raw`[\w!#$%&'*+.^|~-]+`;
+
+/** An inline base64 data URL. The payload may be empty or carry one embedded
+ *  elision marker so fragments left by pre-guard slices — including a cut
+ *  landing exactly on `;base64,` — still match. RFC 2397 allows `*( ";" parameter )`
+ *  between type/subtype and the terminal `;base64`; unquoted tokens are matched,
+ *  quoted-string values are out of scope. `data:` and `base64` match
+ *  case-insensitively (`gi`). Matching starts at `data:`; Markdown wrappers are
+ *  recovered by {@link adjacentMarkdownOpenerStart} after each hit. */
+const DATA_URL_ATOM = new RegExp(
+	String.raw`data:([A-Za-z][\w.+-]*\/[\w.+-]+(?:;${MEDIA_TYPE_TOKEN}=${MEDIA_TYPE_TOKEN})*);base64,` +
+		String.raw`([A-Za-z0-9+/=]*(?:\s*${ELIDED_MARKER}\s*[A-Za-z0-9+/=]*)?)` +
+		String.raw`(\s*\))?`,
+	"gi",
+);
+
+const ELIDED_MARKER_RE = new RegExp(String.raw`\s*${ELIDED_MARKER}\s*`);
+const MARKDOWN_WHITESPACE_CHAR = /\s/;
+
+/** Canonical base64: 4-char groups with valid terminal padding. */
+const CANONICAL_BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{4}|[A-Za-z0-9+/]{3}=|[A-Za-z0-9+/]{2}==)$/;
+
+/** A non-canonical payload at least this long is a damaged fragment of a real
+ *  data URL (e.g. an archive head cut mid-payload by a structure-blind slice),
+ *  not a prose mention like `data:image/png;base64,abc`. */
+const DAMAGED_PAYLOAD_MIN_CHARS = 40;
+
+/** Context for {@link elideDataUrls}. `source` text is intact (never sliced),
+ *  so a short non-canonical payload is a prose mention and stays untouched.
+ *  `archive` text may have been cut by pre-guard structure-blind slices at
+ *  any offset — even 0–39 chars past `;base64,` — so every recognized prefix
+ *  is suspect and is always elided. */
+type DataUrlContext = "source" | "archive";
+
+/** Start of `!?[label](\s*` immediately before `dataIndex`, or `undefined`.
+ *  The opener must lie in `[cursor, dataIndex)`. Nested `[` in the label is
+ *  kept (the old `[^\]\n]*` class allowed it) by taking the earliest `[` after
+ *  a prior `]`, newline, or `cursor`; the scan never walks already-emitted
+ *  text, so repeated `](data:...)` stays linear. */
+function adjacentMarkdownOpenerStart(text: string, dataIndex: number, cursor: number): number | undefined {
+	let i = dataIndex;
+	while (i > cursor && MARKDOWN_WHITESPACE_CHAR.test(text.charAt(i - 1))) i--;
+	// `](` and any following whitespace must sit in [cursor, dataIndex).
+	if (i - 2 < cursor || text.charAt(i - 1) !== "(" || text.charAt(i - 2) !== "]") return undefined;
+	let opener = -1;
+	for (let j = i - 3; j >= cursor; j--) {
+		const c = text.charAt(j);
+		if (c === "]" || c === "\n") break;
+		if (c === "[") opener = j;
+	}
+	if (opener < 0) return undefined;
+	return opener > cursor && text.charAt(opener - 1) === "!" ? opener - 1 : opener;
+}
+
+/** Replace every inline base64 data URL atomically with a deterministic
+ *  placeholder. A character cap that slices inside a base64 payload leaves a
+ *  recognizable image reference that can never decode; OpenAI-dialect
+ *  providers reject such requests as invalid image input, and because the
+ *  corrupted text persists in the archive the session re-fails on every later
+ *  request. The payload is worthless to a model as text, so the whole atom —
+ *  Markdown wrapper included — collapses to its metadata. Payloads already
+ *  carrying an elision marker, and non-canonical fragments left by pre-guard
+ *  slices, are healed the same way.
+ *
+ *  The placeholder's `<mime>` is the media type as written: type/subtype plus
+ *  any unquoted RFC 2397 `;parameter=value` segments, original case preserved.
+ *  Parameters are kept rather than stripped to a bare type/subtype so charset
+ *  (and similar) remain visible after elision and the label stays a pure
+ *  function of the captured text. */
+function elideDataUrls(text: string, context: DataUrlContext = "source"): string {
+	if (!/;base64,/i.test(text)) return text;
+	DATA_URL_ATOM.lastIndex = 0;
+	let match = DATA_URL_ATOM.exec(text);
+	if (match === null) return text;
+	const out: string[] = [];
+	let cursor = 0;
+	while (match !== null) {
+		const urlStart = match.index;
+		const urlEnd = urlStart + match[0].length;
+		const mime = match[1] ?? "";
+		const payload = match[2] ?? "";
+		const closer = match[3];
+		const marker = ELIDED_MARKER_RE.exec(payload);
+		const isAtom =
+			context === "archive" ||
+			marker !== null ||
+			CANONICAL_BASE64.test(payload) ||
+			payload.length >= DAMAGED_PAYLOAD_MIN_CHARS;
+		if (!isAtom) {
+			// Advance through short prose too, so a later wrapper cannot swallow
+			// a data URL already copied out of its Markdown label.
+			out.push(text.slice(cursor, urlEnd));
+			cursor = urlEnd;
+		} else {
+			const b64Chars = marker
+				? payload.length - marker[0].length + Number(/\d+/.exec(marker[0])?.[0] ?? 0)
+				: payload.length;
+			const placeholder = `[data URL omitted: ${mime}, ${b64Chars} base64 chars]`;
+			const foundOpener = adjacentMarkdownOpenerStart(text, urlStart, cursor);
+			const openerStart = foundOpener !== undefined && foundOpener >= cursor ? foundOpener : undefined;
+			const emitStart = openerStart ?? urlStart;
+			out.push(text.slice(cursor, emitStart));
+			// Swallow the Markdown wrapper only when both delimiters matched;
+			// otherwise re-emit whichever half was captured untouched. An opener
+			// that starts before the already-emitted cursor would overlap a prior
+			// replacement, so that URL is treated as bare.
+			if (openerStart !== undefined && closer !== undefined) {
+				out.push(placeholder);
+			} else {
+				const opener = openerStart !== undefined ? text.slice(openerStart, urlStart) : "";
+				out.push(opener, placeholder, closer ?? "");
+			}
+			cursor = urlEnd;
+		}
+		match = DATA_URL_ATOM.exec(text);
+	}
+	out.push(text.slice(cursor));
+	return out.join("");
+}
+
 const DIM_MARKERS = /[\u000e\u000f]/g;
 
 /** Plain-text history kept verbatim at each chronological edge, in HQ-frame-
@@ -836,7 +967,7 @@ export function serializeConversation(messages: Message[], options?: SerializeOp
 	// Wrap a raw tool-result body in an `<out>` block, dimming only the body so
 	// the frame coloring keeps scope markers and calls loud.
 	const renderResultBlock = (rawText: string): string => {
-		const body = truncateForSummary(stripDimMarkers(rawText), toolResultMaxChars, headRatio);
+		const body = truncateForSummary(elideDataUrls(stripDimMarkers(rawText)), toolResultMaxChars, headRatio);
 		return `<out>\n${dimToolResults ? `${DIM_ON}${body}${DIM_OFF}` : body}\n</out>`;
 	};
 
@@ -894,7 +1025,7 @@ export function serializeConversation(messages: Message[], options?: SerializeOp
 							.filter(([key]) => key !== INTENT_FIELD)
 							.map(
 								([key, value]) =>
-									`${key}=${truncateForSummary(JSON.stringify(value) ?? "undefined", toolArgMaxChars, headRatio)}`,
+									`${key}=${truncateForSummary(elideDataUrls(JSON.stringify(value) ?? "undefined"), toolArgMaxChars, headRatio)}`,
 							)
 							.join(", "),
 						toolCallMaxChars,
@@ -1616,7 +1747,7 @@ export function archiveSourceText(archive: Archive): string | undefined {
 		[archive.textHead, archive.textTail]
 			.filter((part): part is string => typeof part === "string" && part.length > 0)
 			.join(NEWLINE_GLYPH);
-	return text.length > 0 ? toPlainText(text) : undefined;
+	return text.length > 0 ? elideDataUrls(toPlainText(text), "archive") : undefined;
 }
 
 /** Build the text used to choose and preflight a font-aware snapcompact shape. */
@@ -1704,7 +1835,7 @@ export function historyBlocks(archive: Archive, options: HistoryBlockOptions = {
 			: hasOmittedImages
 				? `\n${omittedFrameNotice(budgeted.omittedFrames, budgeted.omittedBytes)}\n`
 				: "";
-		blocks.push({ type: "text", text: toPlainText(archive.textHead) + suffix });
+		blocks.push({ type: "text", text: elideDataUrls(toPlainText(archive.textHead), "archive") + suffix });
 	} else if (hasOmittedImages && !hasImages) {
 		blocks.push({ type: "text", text: omittedFrameNotice(budgeted.omittedFrames, budgeted.omittedBytes) });
 	}
@@ -1721,7 +1852,7 @@ export function historyBlocks(archive: Archive, options: HistoryBlockOptions = {
 			: archive.truncatedChars > 0 || hasOmittedImages
 				? "\n-------------- middle history omitted above\n"
 				: "";
-		const tail = prefix + toPlainText(archive.textTail);
+		const tail = prefix + elideDataUrls(toPlainText(archive.textTail), "archive");
 		const lastBlock = blocks[blocks.length - 1];
 		if (lastBlock?.type === "text") {
 			lastBlock.text += tail;
@@ -1917,11 +2048,14 @@ export async function compact<TMessage = Message>(
 			.join(NEWLINE_GLYPH);
 	// Legacy archives may carry `¶think:` sections from before includeThinking
 	// existed; scrub them when this compaction excludes thinking so the
-	// re-rendered archive stops replaying reasoning (issue #6093).
+	// re-rendered archive stops replaying reasoning (issue #6093). They may
+	// also carry data URLs a pre-guard slice cut at any offset; heal those in
+	// archive context before the text is folded into the new source.
+	const previousTextHealed = elideDataUrls(previousTextRaw, "archive");
 	const previousText =
-		options?.includeThinking === false && previousTextRaw.length > 0
-			? stripThinkingSections(previousTextRaw)
-			: previousTextRaw;
+		options?.includeThinking === false && previousTextHealed.length > 0
+			? stripThinkingSections(previousTextHealed)
+			: previousTextHealed;
 	const hasPreviousText = previousText.length > 0;
 	const includedPreviousSummary = !hasPreviousText && !!previousSummary;
 	const shapeProbeText = renderabilityProbeText(serialized, previousPreserveData, previousSummary);
@@ -1949,6 +2083,12 @@ export async function compact<TMessage = Message>(
 	if (hasPreviousText) {
 		archiveText = archiveText.length > 0 ? `${previousText}${NEWLINE_GLYPH}${archiveText}` : previousText;
 	}
+	// Data URLs must never reach planArchive: its edge slices are structure-
+	// blind, and a split payload replays as broken image input on every later
+	// request. previousText is already strictly healed above; this source-mode
+	// pass covers intact URLs in fresh user/assistant text, which the
+	// serializer never truncates.
+	archiveText = elideDataUrls(archiveText);
 
 	const layout = planArchive(archiveText, high, low, maxFrames);
 	truncatedChars += layout.truncatedChars;

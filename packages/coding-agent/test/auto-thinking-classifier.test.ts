@@ -1,5 +1,4 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
-import * as path from "node:path";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import * as ai from "@oh-my-pi/pi-ai";
 import { Effort, type Model } from "@oh-my-pi/pi-ai";
@@ -10,9 +9,7 @@ import {
 	parseDifficultyBucket,
 	parseDifficultyLevel,
 } from "@oh-my-pi/pi-coding-agent/auto-thinking/classifier";
-import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import {
 	AUTO_THINKING,
 	clampAutoThinkingEffort,
@@ -25,40 +22,20 @@ import {
 } from "@oh-my-pi/pi-coding-agent/thinking";
 import type { TinyMemoryLocalModelKey } from "@oh-my-pi/pi-coding-agent/tiny/models";
 import { tinyModelClient } from "@oh-my-pi/pi-coding-agent/tiny/title-client";
-import { TempDir } from "@oh-my-pi/pi-utils";
 
 describe("auto thinking classifier helpers", () => {
 	afterEach(() => {
 		vi.restoreAllMocks();
 	});
 
-	interface LocalClassifierFixture {
-		settings: Settings;
-		registry: ModelRegistry;
-		model: Model;
-		cleanup: () => void;
-	}
-
-	async function createLocalClassifierFixture(
-		autoThinkingModel: TinyMemoryLocalModelKey,
-	): Promise<LocalClassifierFixture> {
-		const tempDir = TempDir.createSync("@pi-auto-thinking-classifier-");
-		const authStorage = await AuthStorage.create(path.join(tempDir.path(), "auth.db"));
+	function createLocalClassifierFixture(autoThinkingModel: TinyMemoryLocalModelKey) {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-6");
-		if (!model) {
-			authStorage.close();
-			tempDir.removeSync();
-			throw new Error("Expected bundled Claude Sonnet 4.6 model");
-		}
+		if (!model) throw new Error("Expected bundled Claude Sonnet 4.6 model");
 
 		return {
 			settings: Settings.isolated({ "providers.autoThinkingModel": autoThinkingModel }),
-			registry: new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml")),
+			registry: null as never,
 			model,
-			cleanup: () => {
-				authStorage.close();
-				tempDir.removeSync();
-			},
 		};
 	}
 
@@ -96,24 +73,16 @@ describe("auto thinking classifier helpers", () => {
 
 	it("expands the local reasoning classifier budget", async () => {
 		let maxTokens: number | undefined;
-		const fixture = await createLocalClassifierFixture("qwen3-1.7b");
+		const fixture = createLocalClassifierFixture("qwen3-1.7b");
 		vi.spyOn(tinyModelClient, "complete").mockImplementation(async (_modelKey, _prompt, options) => {
 			maxTokens = options?.maxTokens;
 			return "moderate";
 		});
 
-		try {
-			const effort = await classifyDifficulty("fix the local classifier token budget", {
-				settings: fixture.settings,
-				registry: fixture.registry,
-				model: fixture.model,
-			});
+		const effort = await classifyDifficulty("fix the local classifier token budget", fixture);
 
-			expect(effort).toBe(Effort.High);
-			expect(maxTokens).toBe(1024);
-		} finally {
-			fixture.cleanup();
-		}
+		expect(effort).toBe(Effort.High);
+		expect(maxTokens).toBe(1024);
 	});
 
 	it("keeps the local classifier capped at xhigh even when opted in to max", async () => {
@@ -122,74 +91,53 @@ describe("auto thinking classifier helpers", () => {
 		// on-device model never selected. `max` is the model's only tier at or
 		// above Low, and the local ceiling hides it, so nothing is eligible —
 		// falling through to `minimal` would breach the Low floor.
-		const fixture = await createLocalClassifierFixture("qwen3-1.7b");
+		const fixture = createLocalClassifierFixture("qwen3-1.7b");
 		const sparse = buildLadderModel("mock-minimal-max", [Effort.Minimal, Effort.Max]);
 		vi.spyOn(tinyModelClient, "complete").mockResolvedValue("hard");
+		const settings = Settings.isolated({
+			"providers.autoThinkingModel": "qwen3-1.7b",
+			"providers.autoThinkingMaxEffort": "max",
+		});
 
-		try {
-			const settings = Settings.isolated({
-				"providers.autoThinkingModel": "qwen3-1.7b",
-				"providers.autoThinkingMaxEffort": "max",
-			});
-
-			expect(
-				await classifyDifficulty("cut over the storage layer", {
-					settings,
-					registry: fixture.registry,
-					model: sparse,
-				}),
-			).toBeUndefined();
-		} finally {
-			fixture.cleanup();
-		}
+		expect(
+			await classifyDifficulty("cut over the storage layer", {
+				settings,
+				registry: fixture.registry,
+				model: sparse,
+			}),
+		).toBeUndefined();
 	});
 
 	it("uses a larger local non-reasoning classifier floor", async () => {
 		let maxTokens: number | undefined;
-		const fixture = await createLocalClassifierFixture("qwen2.5-1.5b");
+		const fixture = createLocalClassifierFixture("qwen2.5-1.5b");
 		vi.spyOn(tinyModelClient, "complete").mockImplementation(async (_modelKey, _prompt, options) => {
 			maxTokens = options?.maxTokens;
 			return "moderate";
 		});
 
-		try {
-			const effort = await classifyDifficulty("rename a local helper", {
-				settings: fixture.settings,
-				registry: fixture.registry,
-				model: fixture.model,
-			});
+		const effort = await classifyDifficulty("rename a local helper", fixture);
 
-			expect(effort).toBe(Effort.High);
-			expect(maxTokens).toBe(16);
-		} finally {
-			fixture.cleanup();
-		}
+		expect(effort).toBe(Effort.High);
+		expect(maxTokens).toBe(16);
 	});
 
 	it("uses shared tiny-message preprocessing before local classification", async () => {
 		let classifierPrompt = "";
-		const fixture = await createLocalClassifierFixture("qwen2.5-1.5b");
+		const fixture = createLocalClassifierFixture("qwen2.5-1.5b");
 		vi.spyOn(tinyModelClient, "complete").mockImplementation(async (_modelKey, promptText) => {
 			classifierPrompt = promptText;
 			return "moderate";
 		});
 
-		try {
-			await classifyDifficulty(
-				"\u001b[31minvestigate failure\u001b[0m 54783db3f0f17c74cae81976f0e825a909deb71e\n```\nnoisy code\n```",
-				{
-					settings: fixture.settings,
-					registry: fixture.registry,
-					model: fixture.model,
-				},
-			);
+		await classifyDifficulty(
+			"\u001b[31minvestigate failure\u001b[0m 54783db3f0f17c74cae81976f0e825a909deb71e\n```\nnoisy code\n```",
+			fixture,
+		);
 
-			expect(classifierPrompt).toContain("investigate failure 54783db");
-			expect(classifierPrompt).not.toContain("54783db3f0f17c74cae81976f0e825a909deb71e");
-			expect(classifierPrompt).not.toContain("noisy code");
-		} finally {
-			fixture.cleanup();
-		}
+		expect(classifierPrompt).toContain("investigate failure 54783db");
+		expect(classifierPrompt).not.toContain("54783db3f0f17c74cae81976f0e825a909deb71e");
+		expect(classifierPrompt).not.toContain("noisy code");
 	});
 
 	it("uses a reasoning-safe online classifier budget when the catalog disables reasoning", async () => {
@@ -228,7 +176,13 @@ describe("auto thinking classifier helpers", () => {
 			| undefined;
 
 		expect(effort).toBe(Effort.High);
-		expect(options).toMatchObject({ disableReasoning: true, maxTokens: 1024 });
+		// The cap must exceed Anthropic's 1024-token minimum thinking budget so an
+		// Anthropic-dialect proxy (LiteLLM/Vertex) that downgrades the disabled
+		// request to the lowest reasoning effort still satisfies
+		// `max_tokens > thinking.budget_tokens` (issue #8610).
+		expect(options?.disableReasoning).toBe(true);
+		expect(options?.maxTokens).toBe(4096);
+		expect(options?.maxTokens).toBeGreaterThan(1024);
 	});
 
 	function createOnlineFixture(targetModel: Model, answer: string, maxEffort: "xhigh" | "max" = "xhigh") {

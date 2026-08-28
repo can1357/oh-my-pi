@@ -1,5 +1,6 @@
 import * as path from "node:path";
 import { createInterface } from "node:readline/promises";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { $env, getProjectDir, isEnoent, prompt } from "@oh-my-pi/pi-utils";
 import { applyChangelogProposals } from "../../commit/changelog";
 import { detectChangelogBoundaries } from "../../commit/changelog/detect";
@@ -10,13 +11,12 @@ import type { CommitCommandArgs, ConventionalAnalysis, NumstatEntry } from "../.
 import { ModelRegistry } from "../../config/model-registry";
 import { Settings } from "../../config/settings";
 import { discoverAuthStorage, discoverContextFiles, loadCliExtensionProviders } from "../../sdk";
-import * as git from "../../utils/git";
 import { abortOnGitFailure, pushOrAbort } from "../execute";
 import { type ExistingChangelogEntries, runCommitAgentSession } from "./agent";
 import { generateFallbackProposal } from "./fallback";
 import { assignLockFilesToPlan } from "./lock-files";
 import splitConfirmPrompt from "./prompts/split-confirm.md" with { type: "text" };
-import type { CommitAgentState, CommitProposal, HunkSelector, SplitCommitPlan } from "./state";
+import type { CommitAgentState, CommitProposal, FileChange, SplitCommitPlan } from "./state";
 import { computeDependencyOrder } from "./topo-sort";
 import { detectTrivialChange } from "./trivial";
 
@@ -28,6 +28,7 @@ interface CommitExecutionContext {
 
 export async function runAgenticCommit(args: CommitCommandArgs): Promise<{ usedFallback: boolean }> {
 	const cwd = getProjectDir();
+	const repo = vcs.requireGit(cwd);
 	const [settings, authStorage] = await Promise.all([Settings.init({ cwd }), discoverAuthStorage()]);
 
 	process.stdout.write("● Resolving model...\n");
@@ -35,11 +36,11 @@ export async function runAgenticCommit(args: CommitCommandArgs): Promise<{ usedF
 	await modelRegistry.refresh();
 	await loadCliExtensionProviders(modelRegistry, settings, cwd);
 	const stagedFilesPromise = (async () => {
-		let stagedFiles = await git.diff.changedFiles(cwd, { cached: true });
+		let stagedFiles = await repo.changedFiles({ cached: true });
 		if (stagedFiles.length === 0) {
 			process.stdout.write("No staged changes detected, staging all changes...\n");
-			await git.stage.files(cwd);
-			stagedFiles = await git.diff.changedFiles(cwd, { cached: true });
+			await repo.stageFiles([]);
+			stagedFiles = await repo.changedFiles({ cached: true });
 		}
 		return stagedFiles;
 	})();
@@ -72,8 +73,12 @@ export async function runAgenticCommit(args: CommitCommandArgs): Promise<{ usedF
 	const [changelogBoundaries, contextFiles, numstat, diff] = await Promise.all([
 		args.noChangelog ? [] : detectChangelogBoundaries(cwd, stagedFiles),
 		discoverContextFiles(cwd),
-		git.diff.numstat(cwd, { cached: true }),
-		git.diff(cwd, { cached: true }),
+		repo
+			.numstat({ cached: true })
+			.then(entries =>
+				entries.map(entry => ({ path: entry.path, additions: entry.added ?? 0, deletions: entry.removed ?? 0 })),
+			),
+		repo.diffText({ cached: true }),
 	]);
 	const changelogTargets = changelogBoundaries.map(boundary => boundary.changelogPath);
 	if (!args.noChangelog) {
@@ -235,6 +240,7 @@ async function completeAgentCommitState(
 }
 
 async function runSingleCommit(proposal: CommitProposal, ctx: CommitExecutionContext): Promise<void> {
+	const repo = vcs.requireGit(ctx.cwd);
 	if (proposal.warnings.length > 0) {
 		process.stdout.write(formatWarnings(proposal.warnings));
 	}
@@ -246,9 +252,9 @@ async function runSingleCommit(proposal: CommitProposal, ctx: CommitExecutionCon
 	}
 	process.stdout.write("● Creating commit...\n");
 	try {
-		await git.commit(ctx.cwd, commitMessage);
+		await repo.commitCreate(commitMessage, {});
 	} catch (error) {
-		if (error instanceof git.GitCommandError) abortOnGitFailure("Commit failed", error);
+		if (vcs.isVcsError(error)) abortOnGitFailure("Commit failed", error);
 		throw error;
 	}
 	process.stdout.write("Commit created.\n");
@@ -259,13 +265,14 @@ async function runSplitCommit(
 	plan: SplitCommitPlan,
 	ctx: CommitExecutionContext & { additionalFiles?: string[] },
 ): Promise<void> {
+	const repo = vcs.requireGit(ctx.cwd);
 	if (plan.warnings.length > 0) {
 		process.stdout.write(formatWarnings(plan.warnings));
 	}
 	if (ctx.additionalFiles && ctx.additionalFiles.length > 0) {
 		appendFilesToLastCommit(plan, ctx.additionalFiles);
 	}
-	const stagedFiles = await git.diff.changedFiles(ctx.cwd, { cached: true });
+	const stagedFiles = await repo.changedFiles({ cached: true });
 	assignLockFilesToPlan(plan, stagedFiles);
 	const plannedFiles = new Set(plan.commits.flatMap(commit => commit.changes.map(change => change.path)));
 	const missingFiles = stagedFiles.filter(file => !plannedFiles.has(file));
@@ -284,9 +291,7 @@ async function runSplitCommit(
 			};
 			const message = formatCommitMessage(analysis, commit.summary);
 			process.stdout.write(`Commit ${index + 1}:\n${message}\n`);
-			const changeSummary = commit.changes
-				.map(change => formatFileChangeSummary(change.path, change.hunks))
-				.join(", ");
+			const changeSummary = commit.changes.map(change => formatFileChangeSummary(change.path, change)).join(", ");
 			process.stdout.write(`Changes: ${changeSummary}\n`);
 		}
 		return;
@@ -303,11 +308,11 @@ async function runSplitCommit(
 	}
 
 	process.stdout.write("● Creating split commits...\n");
-	const stagedDiff = await git.diff(ctx.cwd, { cached: true, binary: true });
-	await git.stage.reset(ctx.cwd);
+	const stagedDiff = await repo.diffText({ cached: true, binary: true });
+	await repo.unstage([]);
 	for (const [position, commitIndex] of order.entries()) {
 		const commit = plan.commits[commitIndex];
-		await git.stage.hunks(ctx.cwd, commit.changes, { rawDiff: stagedDiff, diffCached: true });
+		await repo.stageHunks(commit.changes, stagedDiff);
 		const analysis: ConventionalAnalysis = {
 			type: commit.type,
 			scope: commit.scope,
@@ -316,10 +321,10 @@ async function runSplitCommit(
 		};
 		const message = formatCommitMessage(analysis, commit.summary);
 		try {
-			await git.commit(ctx.cwd, message);
+			await repo.commitCreate(message, {});
 		} catch (error) {
-			if (error instanceof git.GitCommandError) {
-				const stagedNow = await git.diff.changedFiles(ctx.cwd, { cached: true });
+			if (vcs.isVcsError(error)) {
+				const stagedNow = await repo.changedFiles({ cached: true });
 				abortOnGitFailure(
 					`Commit ${position + 1} of ${order.length} failed`,
 					error,
@@ -328,7 +333,7 @@ async function runSplitCommit(
 			}
 			throw error;
 		}
-		await git.stage.reset(ctx.cwd);
+		await repo.unstage([]);
 	}
 	process.stdout.write("Split commits created.\n");
 	if (ctx.push) await pushOrAbort(ctx.cwd);
@@ -340,7 +345,7 @@ function appendFilesToLastCommit(plan: SplitCommitPlan, files: string[]): void {
 	const targetCommit = plan.commits[plan.commits.length - 1];
 	for (const file of files) {
 		if (planned.has(file)) continue;
-		targetCommit.changes.push({ path: file, hunks: { type: "all" } });
+		targetCommit.changes.push({ path: file, kind: "all" });
 		planned.add(file);
 	}
 }
@@ -363,14 +368,14 @@ function formatWarnings(warnings: string[]): string {
 	return `Warnings:\n${warnings.map(warning => `- ${warning}`).join("\n")}\n`;
 }
 
-function formatFileChangeSummary(path: string, hunks: HunkSelector): string {
-	if (hunks.type === "all") {
+function formatFileChangeSummary(path: string, change: FileChange): string {
+	if (change.kind === "all") {
 		return `${path} (all)`;
 	}
-	if (hunks.type === "indices") {
-		return `${path} (hunks ${hunks.indices.join(", ")})`;
+	if (change.kind === "indices") {
+		return `${path} (hunks ${change.indices?.join(", ")})`;
 	}
-	return `${path} (lines ${hunks.start}-${hunks.end})`;
+	return `${path} (lines ${change.start}-${change.end})`;
 }
 
 async function loadExistingChangelogEntries(paths: string[]): Promise<ExistingChangelogEntries[]> {

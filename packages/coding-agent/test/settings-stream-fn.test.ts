@@ -147,6 +147,22 @@ describe("createSettingsAwareStreamFn", () => {
 		expect(calls[0]?.options?.openrouterVariant).toBeUndefined();
 	});
 
+	it("forwards configured cache retention, leaves auto unset, and lets callers override", () => {
+		const auto = captureBase();
+		createSettingsAwareStreamFn(Settings.isolated({}), auto.fn)(stubModel, stubContext, undefined);
+		// auto must stay unset so provider defaults and PI_CACHE_RETENTION apply
+		expect(auto.calls[0]?.options?.cacheRetention).toBeUndefined();
+
+		const long = captureBase();
+		const settings = Settings.isolated({ "providers.cacheRetention": "long" });
+		const wrapped = createSettingsAwareStreamFn(settings, long.fn);
+		wrapped(stubModel, stubContext, undefined);
+		expect(long.calls[0]?.options?.cacheRetention).toBe("long");
+
+		wrapped(stubModel, stubContext, { cacheRetention: "none" });
+		expect(long.calls[1]?.options?.cacheRetention).toBe("none");
+	});
+
 	it("lets caller-supplied options override the session settings", () => {
 		const settings = Settings.isolated({
 			"providers.openrouterVariant": "floor",

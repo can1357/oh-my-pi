@@ -1,6 +1,8 @@
 import { describe, expect, it } from "bun:test";
 import { encodeResponse, encodeStream, parseRequest } from "@oh-my-pi/pi-ai/providers/anthropic-messages-server";
 import type {
+	ToolSearchServerToolUseBlockParam,
+	ToolSearchToolResultBlockParam,
 	WebSearchServerToolUseBlockParam,
 	WebSearchToolResultBlockParam,
 } from "@oh-my-pi/pi-ai/providers/anthropic-wire";
@@ -341,6 +343,47 @@ describe("anthropic-messages parseRequest", () => {
 			{ type: "anthropicServerTool", block: serverToolUse },
 			{ type: "anthropicServerTool", block: searchResult },
 			{ type: "text", text: "forecast ready" },
+		]);
+	});
+
+	it("preserves inbound assistant tool-search call/result blocks verbatim", () => {
+		const serverToolUse: ToolSearchServerToolUseBlockParam = {
+			type: "server_tool_use",
+			id: "srvtoolu_search",
+			name: "tool_search_tool_regex",
+			input: { pattern: "read" },
+		};
+		const searchResult: ToolSearchToolResultBlockParam = {
+			type: "tool_search_tool_result",
+			tool_use_id: "srvtoolu_search",
+			content: {
+				type: "tool_search_tool_search_result",
+				tool_references: [{ type: "tool_reference", tool_name: "_read" }],
+			},
+		};
+		const parsed = parseRequest({
+			model: "claude-opus-4-7",
+			max_tokens: 8,
+			messages: [
+				{ role: "user", content: "read notes" },
+				{
+					role: "assistant",
+					content: [
+						{ type: "thinking", thinking: "find read", signature: "sig-1" },
+						serverToolUse,
+						searchResult,
+						{ type: "text", text: "tool loaded" },
+					],
+				},
+			],
+		});
+		const assistant = parsed.context.messages.find(message => message.role === "assistant");
+
+		expect(assistant?.content).toEqual([
+			{ type: "thinking", thinking: "find read", thinkingSignature: "sig-1" },
+			{ type: "anthropicServerTool", block: serverToolUse },
+			{ type: "anthropicServerTool", block: searchResult },
+			{ type: "text", text: "tool loaded" },
 		]);
 	});
 

@@ -1,20 +1,76 @@
 /**
  * Syntax probe for candidate edit results, via the native tree-sitter parser.
  *
- * Delimiter-balance arithmetic cannot tell a block closer from a `}` inside a
- * regex literal, a string, or Markdown prose. A parser can, so it holds veto
- * power over every repair whose justification is "this line closes a syntactic
- * block": when the edit the author actually wrote still parses, no such repair
- * may rewrite it. The probe never *forces* a repair — an unrecognized language
- * or an already-broken file simply yields no veto, leaving the delimiter
- * heuristics as the only available evidence.
+ * Replacement-boundary repair uses parsing as its semantic filter: exact
+ * outside-row equality may justify dropping a duplicated payload edge, while
+ * retaining a selected source boundary additionally requires source-range
+ * structure, indentation, or a narrow pure-closer shape. An unrecognized
+ * language yields no structural proof, so only evidence-complete textual
+ * normalization remains available.
  */
 
-import { enclosingBlockBoundaries } from "@oh-my-pi/pi-natives";
+import { enclosingBlockBoundaries, type NodeSpan, nodeChainAt } from "@oh-my-pi/pi-natives";
+
+export type { NodeSpan };
 
 /** Parse-result cache keyed by content hash + path; FIFO-bounded. */
 const parseCache = new Map<string, boolean>();
 const PARSE_CACHE_MAX = 256;
+
+const boundaryCache = new Map<string, readonly number[]>();
+
+const chainCache = new Map<string, readonly NodeSpan[]>();
+
+/**
+ * Named-node chain (innermost-first) containing `line`, excluding the file
+ * root: single-line nodes beginning on the line (attributes, decorators)
+ * first, then every enclosing construct. Empty when the language is unknown,
+ * the line is blank, or the source cannot parse — callers treat empty as
+ * "no structural evidence", never as evidence about the line.
+ */
+export function nodeChain(lines: readonly string[], path: string, line: number): readonly NodeSpan[] {
+	const text = lines.join("\n");
+	const key = `${Bun.hash(text).toString(36)}:${text.length}:${path}:${line}`;
+	const cached = chainCache.get(key);
+	if (cached !== undefined) return cached;
+	let chain: readonly NodeSpan[];
+	try {
+		chain = nodeChainAt({ code: text, path, line }) ?? [];
+	} catch {
+		chain = [];
+	}
+	if (chainCache.size >= PARSE_CACHE_MAX) {
+		const oldest = chainCache.keys().next().value;
+		if (oldest !== undefined) chainCache.delete(oldest);
+	}
+	chainCache.set(key, chain);
+	return chain;
+}
+
+/** Syntactic node boundaries outside a visible source range. */
+export function enclosingBoundaries(
+	lines: readonly string[],
+	path: string,
+	startLine: number,
+	endLine: number,
+): readonly number[] {
+	const text = lines.join("\n");
+	const key = `${Bun.hash(text).toString(36)}:${text.length}:${path}:${startLine}:${endLine}`;
+	const cached = boundaryCache.get(key);
+	if (cached !== undefined) return cached;
+	let boundaries: readonly number[];
+	try {
+		boundaries = enclosingBlockBoundaries({ code: text, path, ranges: [{ startLine, endLine }] }) ?? [];
+	} catch {
+		boundaries = [];
+	}
+	if (boundaryCache.size >= PARSE_CACHE_MAX) {
+		const oldest = boundaryCache.keys().next().value;
+		if (oldest !== undefined) boundaryCache.delete(oldest);
+	}
+	boundaryCache.set(key, boundaries);
+	return boundaries;
+}
 
 /**
  * `true` when `text` parses without a syntax error under the language inferred

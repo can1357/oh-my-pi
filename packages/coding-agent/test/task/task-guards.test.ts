@@ -99,6 +99,8 @@ function createFakeSession(config: FakeSessionConfig = {}): FakeSessionHandle {
 		waitForIdle: async () => {
 			await hang;
 		},
+		prepareForHeadlessAdvisorDrain: () => {},
+		waitForAdvisorCatchup: async () => true,
 		sendUserMessage: async (content, options) => {
 			steerCalls.push({ content: String(content), options });
 		},
@@ -109,6 +111,7 @@ function createFakeSession(config: FakeSessionConfig = {}): FakeSessionHandle {
 		},
 		dispose: async () => {},
 		setIrcWakeTurnObserver: () => {},
+		subscribeRunState: () => () => {},
 	};
 	return {
 		session: session as AgentSession,

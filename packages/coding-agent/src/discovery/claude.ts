@@ -18,6 +18,7 @@ import { type SlashCommand, slashCommandCapability } from "../capability/slash-c
 import { type SystemPrompt, systemPromptCapability } from "../capability/system-prompt";
 import { type CustomTool, toolCapability } from "../capability/tool";
 import type { LoadContext, LoadResult } from "../capability/types";
+import { resolveClaudePaths } from "../config/claude-paths";
 import { settings } from "../config/settings";
 import {
 	calculateDepth,
@@ -34,11 +35,10 @@ const DISPLAY_NAME = "Claude Code";
 const PRIORITY = 80;
 const CONFIG_DIR = ".claude";
 
-/**
- * Get user-level .claude path.
- */
+/** Get the active user-level Claude Code directory. */
 function getUserClaude(ctx: LoadContext): string {
-	return path.join(ctx.home, CONFIG_DIR);
+	const { configDir } = resolveClaudePaths(ctx.home);
+	return configDir;
 }
 
 /**
@@ -60,8 +60,7 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 	const items: MCPServer[] = [];
 	const warnings: string[] = [];
 
-	const userBase = getUserClaude(ctx);
-	const userClaudeJson = path.join(ctx.home, ".claude.json");
+	const { configDir: userBase, configFile: userClaudeJson } = resolveClaudePaths(ctx.home);
 	const userMcpJson = path.join(userBase, "mcp.json");
 
 	const projectBase = path.join(ctx.cwd, CONFIG_DIR);
@@ -407,8 +406,9 @@ async function loadTools(ctx: LoadContext): Promise<LoadResult<CustomTool>> {
 	const userToolsDir = path.join(userBase, "tools");
 
 	const userResult = await loadFilesFromDir<CustomTool>(ctx, userToolsDir, PROVIDER_ID, "user", {
+		extensions: ["ts", "js"],
 		transform: (name, _content, path, source) => {
-			const toolName = name.replace(/\.(ts|js|sh|bash|py)$/, "");
+			const toolName = name.replace(/\.(ts|js)$/, "");
 			return {
 				name: toolName,
 				path,
@@ -426,8 +426,9 @@ async function loadTools(ctx: LoadContext): Promise<LoadResult<CustomTool>> {
 	const projectToolsDir = path.join(projectBase, "tools");
 
 	const projectResult = await loadFilesFromDir<CustomTool>(ctx, projectToolsDir, PROVIDER_ID, "project", {
+		extensions: ["ts", "js"],
 		transform: (name, _content, path, source) => {
-			const toolName = name.replace(/\.(ts|js|sh|bash|py)$/, "");
+			const toolName = name.replace(/\.(ts|js)$/, "");
 			return {
 				name: toolName,
 				path,

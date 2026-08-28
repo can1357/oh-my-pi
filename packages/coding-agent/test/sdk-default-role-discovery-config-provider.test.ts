@@ -23,9 +23,10 @@ import type { FetchImpl } from "@oh-my-pi/pi-ai";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
-import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { Snowflake } from "@oh-my-pi/pi-utils";
+import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
 describe("issue #6162 fresh launch default role from models.yml discovery provider", () => {
 	let tempDir: string;
@@ -75,7 +76,7 @@ describe("issue #6162 fresh launch default role from models.yml discovery provid
 			].join("\n"),
 		);
 
-		const authStorage = await AuthStorage.create(path.join(tempDir, "auth.db"));
+		const authStorage = createInMemoryAuthStorage();
 		authStoragesToClose.push(authStorage);
 		// The configured provider's key resolves the role model; a competing
 		// bundled provider key would otherwise win the startup fallback via
@@ -107,6 +108,9 @@ describe("issue #6162 fresh launch default role from models.yml discovery provid
 			enableMCP: false,
 			enableLsp: false,
 			skipPythonPreflight: true,
+			rules: [],
+			preloadedCustomToolPaths: [],
+			toolNames: ["read"],
 		});
 
 		try {

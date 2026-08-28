@@ -8,6 +8,7 @@ export type {
 	RequiredExtensionLoadReceipt,
 } from "./loader";
 export {
+	bindPreparedExtensions,
 	discoverAndLoadExtensions,
 	discoverExtensionPaths,
 	ExtensionRuntimeNotInitializedError,

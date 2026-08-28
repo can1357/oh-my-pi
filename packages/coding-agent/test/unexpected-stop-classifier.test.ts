@@ -139,7 +139,12 @@ describe("classifyUnexpectedStop", () => {
 			| undefined;
 
 		expect(result).toBe(true);
-		expect(options).toMatchObject({ disableReasoning: true, maxTokens: 1024 });
+		// Must exceed Anthropic's 1024-token minimum thinking budget so a LiteLLM/Vertex
+		// Anthropic route (which downgrades the disabled request to the lowest reasoning
+		// effort) still satisfies `max_tokens > thinking.budget_tokens` (issue #8610).
+		expect(options?.disableReasoning).toBe(true);
+		expect(options?.maxTokens).toBe(4096);
+		expect(options?.maxTokens).toBeGreaterThan(1024);
 	});
 });
 

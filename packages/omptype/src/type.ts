@@ -3675,6 +3675,42 @@ export namespace type {
 	export function raw(def: unknown): BaseType {
 		return makeType(parseDef(def), [], {}) as unknown as BaseType;
 	}
+
+	/**
+	 * Return a validation-only schema that emits `json` verbatim — even when
+	 * embedded in an object, array, or union.
+	 *
+	 * A `.toJsonSchema()` method override cannot survive nesting: a parent schema
+	 * emits each child's IR directly and never calls the child's method, so the
+	 * override silently disappears from the wire schema. This stores the override
+	 * on the IR instead.
+	 *
+	 * # Errors
+	 *
+	 * Throws when `schema` has a default or output-changing morph/pipe. A refine
+	 * can preserve validation and the input value, but silently discarding a
+	 * transformed output would violate the returned {@link Type}.
+	 */
+	export function withJsonSchema<t, i = t>(schema: Type<t, i>, json: Record<string, unknown>): Type<t, i> {
+		const internal = schema as unknown as InternalType;
+		if (internal.hasDefault || hasMorph(internal.ir) || internal[kSteps].some(step => step.kind === "pipe")) {
+			throw new OmpTypeError("type.withJsonSchema cannot wrap schemas with defaults or output-changing morphs");
+		}
+		return makeType<t, i>(
+			{
+				k: "refine",
+				base: { k: "unknown" },
+				pred: value => {
+					const result = schema(value);
+					return result instanceof OmpErrors ? result : true;
+				},
+				expected: schema.expression,
+				json: { ...json },
+			},
+			[],
+			{},
+		);
+	}
 }
 
 // Reserved words cannot be declared as namespace bindings, but ArkType exposes

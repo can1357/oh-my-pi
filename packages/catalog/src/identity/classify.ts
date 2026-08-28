@@ -122,16 +122,31 @@ export const parseAnthropicModel = parser((modelId): AnthropicModel | null => {
 	return { family: "anthropic", kind: kind as AnthropicKind, version };
 });
 
+/**
+ * Rolling OpenAI aliases inherit wire capabilities from their current default
+ * snapshots. Keep this map aligned with the model docs when an alias advances.
+ */
+const OPENAI_ALIAS_VERSIONS: Readonly<Record<string, string>> = {
+	"daybreak-blue-latest": "5.6",
+	"gpt-daybreak-blue-latest": "5.6",
+	"daybreak-red-latest": "5.6",
+	"gpt-daybreak-red-latest": "5.6",
+};
+
 export const parseOpenAIModel = parser((modelId): OpenAIModel | null => {
-	const match = /gpt-(\d+(?:\.\d+){0,2})(?:-(codex-spark|codex-mini|codex-max|codex|mini|max|nano))?\b/.exec(modelId);
-	if (!match) {
+	const aliasVersion = OPENAI_ALIAS_VERSIONS[modelId];
+	const match = aliasVersion
+		? null
+		: /gpt-(\d+(?:\.\d+){0,2})(?:-(codex-spark|codex-mini|codex-max|codex|mini|max|nano))?\b/.exec(modelId);
+	const versionInput = aliasVersion ?? match?.[1];
+	if (!versionInput) {
 		return null;
 	}
-	const version = parseSemVer(match[1]);
+	const version = parseSemVer(versionInput);
 	if (!version) {
 		return null;
 	}
-	return { family: "openai", variant: (match[2] as OpenAIVariant | undefined) ?? "base", version };
+	return { family: "openai", variant: (match?.[2] as OpenAIVariant | undefined) ?? "base", version };
 });
 
 /**

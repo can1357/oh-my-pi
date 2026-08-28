@@ -11,10 +11,10 @@ import {
 	isEnoent,
 	logger,
 } from "@oh-my-pi/pi-utils";
-import { withHostGuard } from "../utils";
+import { resolveActiveProjectRegistryPath } from "../../discovery/helpers";
+import { loadExtensions } from "../extensions/loader";
 import { refreshBunGitCache } from "./bun-git-cache";
 import { type GitSource, parseGitUrl } from "./git-url";
-import { installLegacyPiSpecifierShim, loadLegacyPiModule } from "./legacy-pi-compat";
 import { resolvePluginManifestEntries } from "./loader";
 import { getInstalledPluginsRegistryPath, readInstalledPluginsRegistry } from "./marketplace/registry";
 import { parsePluginId } from "./marketplace/types";
@@ -95,14 +95,6 @@ function findGitPackageName(source: GitSource, deps: Record<string, string>): st
 	return undefined;
 }
 
-function hasDefaultExport(value: unknown): value is { default?: unknown } {
-	return typeof value === "object" && value !== null && "default" in value;
-}
-
-function hasExtensionFactoryExport(module: unknown): boolean {
-	return typeof module === "function" || (hasDefaultExport(module) && typeof module.default === "function");
-}
-
 interface PluginPackageSnapshot {
 	readonly actualName: string;
 	readonly packagePath: string;
@@ -112,6 +104,9 @@ interface PluginPackageSnapshot {
 
 interface RuntimePackageJson {
 	name?: unknown;
+	version: string;
+	omp?: PluginManifest;
+	pi?: PluginManifest;
 }
 // =============================================================================
 // Plugin Manager
@@ -129,8 +124,7 @@ export class PluginManager {
 	// Runtime Config Management
 	// ==========================================================================
 
-	async #loadRuntimeConfig(): Promise<PluginRuntimeConfig> {
-		const lockPath = getPluginsLockfile();
+	async #readRuntimeConfigAt(lockPath: string): Promise<PluginRuntimeConfig> {
 		try {
 			return normalizePluginRuntimeConfig(await Bun.file(lockPath).json());
 		} catch (err) {
@@ -138,6 +132,10 @@ export class PluginManager {
 			logger.warn("Failed to load plugin runtime config", { path: lockPath, error: String(err) });
 			return normalizePluginRuntimeConfig({});
 		}
+	}
+
+	async #loadRuntimeConfig(): Promise<PluginRuntimeConfig> {
+		return this.#readRuntimeConfigAt(getPluginsLockfile());
 	}
 
 	async #ensureConfigLoaded(): Promise<PluginRuntimeConfig> {
@@ -231,6 +229,39 @@ export class PluginManager {
 			installedNames.add(name);
 		}
 		return installedNames;
+	}
+	async #resolvePlugin(
+		fallbackName: string,
+		pluginPath: string,
+		config: PluginRuntimeConfig,
+		projectOverrides: ProjectPluginOverrides,
+	): Promise<InstalledPlugin | undefined> {
+		let pluginPkg: RuntimePackageJson;
+		try {
+			pluginPkg = await Bun.file(path.join(pluginPath, "package.json")).json();
+		} catch (err) {
+			if (isEnoent(err)) return undefined;
+			throw err;
+		}
+
+		const name = typeof pluginPkg.name === "string" && pluginPkg.name.length > 0 ? pluginPkg.name : fallbackName;
+		const manifest: PluginManifest = pluginPkg.omp || pluginPkg.pi || { version: pluginPkg.version };
+		manifest.version = pluginPkg.version;
+		const runtimeState = config.plugins[name] || {
+			version: pluginPkg.version,
+			enabledFeatures: null,
+			enabled: true,
+		};
+		const isDisabledInProject = projectOverrides.disabled?.includes(name) ?? false;
+
+		return {
+			name,
+			version: pluginPkg.version,
+			path: pluginPath,
+			manifest,
+			enabledFeatures: projectOverrides.features?.[name] ?? runtimeState.enabledFeatures,
+			enabled: runtimeState.enabled && !isDisabledInProject,
+		};
 	}
 	async #collectMarketplaceRuntimePackageRealpaths(): Promise<Map<string, Set<string>>> {
 		const registry = await readInstalledPluginsRegistry(getInstalledPluginsRegistryPath());
@@ -372,17 +403,9 @@ export class PluginManager {
 		}
 
 		if (loadable.length > 0) {
-			installLegacyPiSpecifierShim();
-			for (const extensionPath of loadable) {
-				try {
-					const module = await withHostGuard(() => loadLegacyPiModule(extensionPath));
-					if (!hasExtensionFactoryExport(module)) {
-						errors.push(`${extensionPath}: extension does not export a valid factory function`);
-					}
-				} catch (err) {
-					const message = err instanceof Error ? err.message : String(err);
-					errors.push(`${extensionPath}: ${message}`);
-				}
+			const result = await loadExtensions(loadable, this.#cwd);
+			for (const failure of result.errors) {
+				errors.push(`${failure.path}: ${failure.error}`);
 			}
 		}
 
@@ -659,6 +682,58 @@ export class PluginManager {
 	}
 
 	/**
+	 * Resolve one installed plugin, including a marketplace runtime package that
+	 * is intentionally omitted from {@link list}.
+	 *
+	 * Resolution order mirrors {@link getEnabledPlugins}: an explicit trusted
+	 * `options.path` (marketplace registry entry) wins; otherwise the active
+	 * enabled project plugin root shadows the user root — so inside a project
+	 * where the same package name exists in both scopes, config reads and writes
+	 * act on the package copy active at runtime.
+	 */
+	async getPlugin(name: string, options: { path?: string } = {}): Promise<InstalledPlugin | undefined> {
+		const [config, projectOverrides] = await Promise.all([this.#ensureConfigLoaded(), this.#loadProjectOverrides()]);
+		if (options.path) {
+			return this.#resolvePlugin(name, options.path, config, projectOverrides);
+		}
+		const projectPlugin = await this.#resolvePluginAtActiveProjectRoot(name, projectOverrides);
+		const deps = await this.#readDeps(getPluginsPackageJson());
+		const userPlugin = this.#collectInstalledNames(deps, config).has(name)
+			? await this.#resolvePlugin(name, path.join(getPluginsNodeModules(), name), config, projectOverrides)
+			: undefined;
+		if (projectPlugin?.enabled || !userPlugin) {
+			return projectPlugin;
+		}
+		return userPlugin;
+	}
+
+	/**
+	 * Resolve a plugin from the active project plugin root
+	 * (`<anchor>/.omp/plugins`). Project npm/link/marketplace installs all record
+	 * their runtime state and `node_modules` symlink there — invisible to the
+	 * user-root lookup — so this reads the project's own `package.json`
+	 * dependencies plus `omp-plugins.lock.json`, and resolves the package from
+	 * the project `node_modules`. Returns undefined when there is no active
+	 * project, when it coincides with the user root, or when the package is not
+	 * installed there.
+	 */
+	async #resolvePluginAtActiveProjectRoot(
+		name: string,
+		projectOverrides: ProjectPluginOverrides,
+	): Promise<InstalledPlugin | undefined> {
+		const registryPath = await resolveActiveProjectRegistryPath(this.#cwd);
+		if (!registryPath) return undefined;
+		const projectRoot = path.dirname(registryPath);
+		if (path.resolve(projectRoot) === path.resolve(getPluginsDir())) return undefined;
+		const [projectDeps, projectConfig] = await Promise.all([
+			this.#readDeps(path.join(projectRoot, "package.json")),
+			this.#readRuntimeConfigAt(path.join(projectRoot, "omp-plugins.lock.json")),
+		]);
+		if (!this.#collectInstalledNames(projectDeps, projectConfig).has(name)) return undefined;
+		return this.#resolvePlugin(name, path.join(projectRoot, "node_modules", name), projectConfig, projectOverrides);
+	}
+
+	/**
 	 * List all installed plugins.
 	 */
 	async list(): Promise<InstalledPlugin[]> {
@@ -681,34 +756,10 @@ export class PluginManager {
 		for (const name of installedNames) {
 			const pluginPath = path.join(getPluginsNodeModules(), name);
 			if (await this.#isMarketplaceRuntimeLink(name, deps, marketplaceRuntimeRealpaths, pluginPath)) continue;
-			const pluginPkgPath = path.join(pluginPath, "package.json");
-			let pluginPkg: { version: string; omp?: PluginManifest; pi?: PluginManifest };
-			try {
-				pluginPkg = await Bun.file(pluginPkgPath).json();
-			} catch (err) {
-				if (isEnoent(err)) continue;
-				throw err;
+			const plugin = await this.#resolvePlugin(name, pluginPath, config, projectOverrides);
+			if (plugin) {
+				plugins.push(plugin);
 			}
-			const manifest: PluginManifest = pluginPkg.omp || pluginPkg.pi || { version: pluginPkg.version };
-			manifest.version = pluginPkg.version;
-
-			const runtimeState = config.plugins[name] || {
-				version: pluginPkg.version,
-				enabledFeatures: null,
-				enabled: true,
-			};
-
-			const isDisabledInProject = projectOverrides.disabled?.includes(name) ?? false;
-			const projectFeatures = projectOverrides.features?.[name];
-
-			plugins.push({
-				name,
-				version: pluginPkg.version,
-				path: pluginPath,
-				manifest,
-				enabledFeatures: projectFeatures ?? runtimeState.enabledFeatures,
-				enabled: runtimeState.enabled && !isDisabledInProject,
-			});
 		}
 
 		return plugins;

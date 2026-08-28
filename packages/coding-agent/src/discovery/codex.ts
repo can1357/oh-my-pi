@@ -23,8 +23,7 @@ import type { Settings } from "../capability/settings";
 import { settingsCapability } from "../capability/settings";
 import type { Skill } from "../capability/skill";
 import { skillCapability } from "../capability/skill";
-import type { SlashCommand } from "../capability/slash-command";
-import { slashCommandCapability } from "../capability/slash-command";
+import { type SlashCommand, slashCommandCapability, slashCommandFrontmatterDisplay } from "../capability/slash-command";
 import type { CustomTool } from "../capability/tool";
 import { toolCapability } from "../capability/tool";
 import type { LoadContext, LoadResult, SourceMeta } from "../capability/types";
@@ -296,6 +295,7 @@ async function loadSlashCommands(ctx: LoadContext): Promise<LoadResult<SlashComm
 				name: String(commandName),
 				path,
 				content: body,
+				...slashCommandFrontmatterDisplay(frontmatter),
 				level,
 				_source: source,
 			};

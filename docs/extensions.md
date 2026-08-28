@@ -115,6 +115,7 @@ Core methods:
 - `on(event, handler)`
 - `registerTool`, `registerCommand`, `registerShortcut`, `registerFlag`
 - `registerMessageRenderer`, `registerAssistantThinkingRenderer`
+- `registerComposerShape`
 - `setLabel`, `getFlag`
 - `sendMessage`, `sendUserMessage`, `appendEntry`, `exec`
 - `getActiveTools`, `getAllTools`, `setActiveTools`
@@ -123,9 +124,52 @@ Core methods:
 - `setModel`, `getThinkingLevel`, `setThinkingLevel`
 - `getServiceTiers`, `setServiceTier`
 - `registerProvider`
+- `registerFileWriteFallback`, `registerFileDeleteFallback`
 - `events` (shared event bus)
 
 `getServiceTiers()` returns a detached snapshot of the session's live per-family tier map. `setServiceTier(family, tier)` changes one family for subsequent requests; pass `undefined` to clear that session override. OpenAI accepts `auto`, `default`, `flex`, `scale`, or `priority`; Anthropic accepts `priority`; Google accepts `flex` or `priority`. Changes made while a response is streaming do not alter that in-flight request.
+
+### Provider registration
+
+`pi.registerProvider(name, config)` can include an optional `usage` field containing a
+`UsageProvider` imported from `@oh-my-pi/pi-ai`. Its `fetchUsage` implementation receives the
+normalized credential and returns a normalized `UsageReport`; the result is then handled
+by the host's AuthStorage cache, history, and usage displays just like built-in provider
+usage.
+
+```ts
+pi.registerProvider("my-provider", {
+  baseUrl: "https://api.example.com/v1",
+  api: "openai-completions",
+  usage: {
+    id: "my-provider",
+    async fetchUsage(params, { fetch }) {
+      const response = await fetch("https://api.example.com/usage", {
+        headers: { Authorization: `Bearer ${params.credential.apiKey}` },
+      });
+      if (!response.ok) return null;
+      const payload = (await response.json()) as { used: number; limit: number };
+      return {
+        provider: "my-provider",
+        fetchedAt: Date.now(),
+        limits: [
+          {
+            id: "requests",
+            label: "Requests",
+            scope: { provider: "my-provider" },
+            amount: { used: payload.used, limit: payload.limit, unit: "requests" },
+          },
+        ],
+      };
+    },
+  },
+});
+```
+
+An extension usage provider overrides a built-in provider with the same name for as
+long as that extension registration is active. `pi.unregisterProvider(name)` (and
+extension source cleanup) removes only that runtime override, restoring the built-in
+or configured usage resolver.
 
 In interactive mode, `input` handlers run before the built-in first-message auto-title check. Extensions that call `await pi.setSessionName(...)` from `input` can set the persisted session name and prevent the default auto-generated title from running for that session.
 
@@ -245,13 +289,13 @@ Cancelable pre-events:
 
 - `input`
 - `before_agent_start`
-- `before_provider_request` (may replace provider request payload)
+- `before_provider_request` (may replace provider request payload — the replacement is applied by every provider that fires the hook, which is all of them except `devin-agent`, which does not fire it)
 - `after_provider_response`
 - `context`
 - `agent_start` / `agent_end` — agent loop lifecycle notification; `agent_end` remains notification-only
 - `session_stop` — main-session stop hook, awaited before settle; may continue with `{ continue: true, additionalContext }` or `{ decision: "block", reason }`; capped at 8 consecutive continuations and never fires for task/subagent sessions
 - `turn_start` / `turn_end`
-- `message_start` / `message_update` / `message_end`
+- `message_start` / `message_update` / `message_end` — lifecycle notifications; `message_end` receives a detached message snapshot, so use `tool_result` or `context` when an extension needs to change provider context
 
 ### Tool lifecycle
 
@@ -370,6 +414,137 @@ pi.registerTool({
 
 `tool_call`/`tool_result` intercept all tools once the registry is wrapped in `sdk.ts`, including built-ins and extension/custom tools. `ToolDefinition` also supports optional `hidden`, `defaultInactive`, `loadMode` (`"discoverable"` by default, or `"essential"`), `deferrable`, `approval` (`"exec"` by default), `strict`, `mcpServerName`, `mcpToolName`, `renderCall`, and `renderResult` fields.
 
+### File write fallback (`registerFileWriteFallback`)
+
+`write`, `edit` and `apply_patch` perform the real byte-write to an ordinary file
+path through one shared primitive
+(`file ? file.write(content) : Bun.write(dst, content)`). When that primitive fails
+with a permission error (`EPERM`/`EACCES`/`EROFS` — every other error, such as
+`EISDIR`, is unaffected), the coding agent consults handlers registered
+via `pi.registerFileWriteFallback` before giving up:
+
+```ts
+import type { FileWriteFallbackHandler } from "@oh-my-pi/pi-coding-agent";
+
+const writeThroughBroker: FileWriteFallbackHandler = async (req, ctx) => {
+  // req: { dst: string; content: string; cause: unknown }
+  const ok = await myPrivilegedWriter.write(req.dst, req.content);
+  return ok;
+};
+
+pi.registerFileWriteFallback(writeThroughBroker);
+```
+
+Handlers run in registration order; the first one to resolve `true` counts as the
+bytes being durably on disk, and the native tool continues exactly as if its own
+write had succeeded — including recording its file snapshot under the real
+destination path, so a later hashline `edit` on that path keeps working. A
+throwing handler is logged and skipped in favor of the next one — per handler, so a
+later handler registered by the same extension still runs; if every handler
+returns `false` (or none are registered), the original error is rethrown
+unchanged. Intended for a host that embeds the agent inside a sandbox denying
+direct filesystem writes but exposing a privileged write channel.
+
+`req.dst` is the **symlink-resolved** destination, not the path the tool was given.
+The kernel follows every component above the last, so `ws/link/file` under a
+`ws/link -> /elsewhere` link lands outside `ws` while still looking in-workspace, and
+a prefix allowlist in your handler would pass on that innocent-looking path. For a
+write the final component is followed too, so it is resolved as well; for a delete it
+is not, because `unlink` removes a link rather than what it points at (so a delete
+`req.dst` may itself name a link). Treat `req.dst` as authoritative and do not
+re-derive the target from anything else. When the real destination cannot be
+established — a dangling final link, or an ancestor this process may not resolve — no
+handler is consulted at all and the original error is rethrown, because there is no
+destination to hand a privileged writer.
+
+Two details matter when the destination is outside what the host allows:
+
+- **A missing parent directory.** `Bun.write` creates missing parents itself, and
+  when that `mkdir` is the operation being denied it reports the subsequent
+  `open()`'s `ENOENT` rather than the denial. The agent redoes the `mkdir`
+  explicitly to recover the real errno, so this still reaches a handler — with
+  `req.cause` set to the `mkdir` denial. In that case `req.dst`'s parent does not
+  exist yet and the handler is responsible for creating it. An `ENOENT` with a
+  genuinely creatable or invalid parent is not diverted. (`apply_patch` creates the
+  parent as a separate step before writing; that `mkdir` tolerates a denial when a
+  fallback is registered, so the write still reaches the handler.)
+- **A hashline `MV`.** `edit`'s move writes its destination directly rather than
+  through the LSP writethrough. It is routed to the same handlers, and the source
+  unlink goes to the delete seam below, so a move out of a directory you cannot
+  write completes too.
+
+This is deliberately not an interception of every write the agent can make. A
+permission error from these surfaces as it does today, with no handler consulted:
+
+- `write` to an archive member (`foo.zip:entry`) or to a SQLite row. Neither is a
+  byte-write to `dst`: an archive rewrite reads the whole archive, replaces one
+  entry, writes a temp file and renames over the original, so what lands is a whole
+  binary container rather than the string the tool was handed; a SQLite write is a
+  row operation inside the database engine with no byte payload at all. Brokering
+  either needs a different request shape than "these bytes belong at this path".
+- The ACP bridge's `writeTextFile`, which hands the write to a remote client.
+- The `lsp` tool's own writes: applying a workspace edit or code action, and the
+  Biome formatter, which writes the buffer and then shells out to `biome format
+  --write` — a subprocess write no in-process seam can reach.
+
+### File delete fallback (`registerFileDeleteFallback`)
+
+Removing a file is a different primitive from writing one, and it has its own seam:
+
+```ts
+pi.registerFileDeleteFallback(async (req, ctx) => {
+  // req: { dst; cause; confirmedFile; sessionId } — no `content`.
+  return await myPrivilegedWriter.unlink(req.dst);
+});
+```
+
+It covers `edit`'s `REM`, the source side of a hashline `MV`, and `apply_patch`'s
+delete op, and follows the same rules as the write seam: same permission codes, first
+`true` wins, a throwing handler is skipped, the original error is rethrown if none
+succeed, and nothing happens at all when no handler is registered. Two differences:
+
+- **`ENOENT` is never diverted.** Nothing is created on the way to an unlink, so a
+  missing file genuinely is missing — `REM` turns it into a not-found error.
+- **A handler must unlink, never remove recursively.** `unlink` on a directory reports
+  `EPERM` on macOS, which is indistinguishable from a sandbox denial by error code
+  alone, so the seam `lstat`s the target and refuses to divert a directory. But when
+  the target's own metadata sits behind the same boundary that denied the unlink —
+  the common sandbox case — that check cannot be resolved, and `req.dst` may then be a
+  directory. `req.confirmedFile` is `true` only when the seam positively established
+  the target is a plain regular file; a symlink reports `false` too, since unlinking a
+  link is fine but resolving it acts on something else entirely. A privileged helper
+  that recursively removes `req.dst`, or realpaths it first, would act far outside
+  what a tool that only ever removes one file asked for.
+
+**Registering for deletes is deliberately separate from registering for writes.** A
+write handler brokers `req.content` to `req.dst`; if a delete request reached it, the
+missing content invites brokering an empty write and *truncating* the file that was
+meant to be removed. A write-only handler therefore never sees a delete.
+
+Two lifecycle constraints, which apply to both seams:
+
+- **Register during extension load** (from the default factory), like other
+  `register*` calls. Handlers are installed when `ExtensionRunner.initialize` runs;
+  an extension that registered nothing by then is skipped entirely, so a first
+  registration made later never takes effect. The `ctx` a handler receives is built
+  per invocation, not captured at install time, so `ctx.cwd` and `ctx.hasUI` describe
+  the session as it is when the mutation is denied — a workspace change (`/move`) is
+  reflected in the next request rather than pinned to load time.
+- **The registries are process-wide.** A process can host several sessions (a subagent
+  gets its own runner), so a handler may be consulted for a denied write or delete
+  from any session in the process — not only the one whose extension registered it.
+  This is deliberate: a subagent spawned with restricted tools loads no extensions of
+  its own, and a host that registers once in its top-level session still expects its
+  subagents' writes brokered. `req.sessionId` names the session that issued the
+  mutation (`undefined` when it did not come from a tool call), and
+  `ctx.sessionManager.getSessionId()` names the handler's own — compare them to make
+  the decision per session. It matters most before prompting: `ctx.ui` belongs to the
+  handler's session, not necessarily to the one being asked about. Handlers are
+  removed on `session_shutdown`.
+
+With nothing registered none of this engages: the primitive runs exactly as it did
+before and performs no extra syscalls.
+
 ## UI integration points
 
 `ctx.ui` implements the `ExtensionUIContext` interface. Support differs by mode.
@@ -443,6 +618,81 @@ pi.on("session_start", async (_event, ctx) => {
 ```
 
 ## Rendering extension points
+
+## Composer shape renderer
+
+`registerComposerShape` adds an extension-owned input-editor layout to **Appearance → Composer Shape**. Register it from the extension factory; the renderer is used by the live editor and its settings preview.
+
+```ts
+import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
+import type { ComposerStyle } from "@oh-my-pi/pi-tui";
+
+const dockStyle: ComposerStyle = {
+  id: "acme-dock",
+  sideBorders: false,
+  verticalChrome: 1,
+  statusAttachment: "none",
+  bottomBar: "full",
+  bottomBarGap: true,
+  defaultPromptGutter: "❯ ",
+
+  defaultPaddingX: () => 0,
+  sideChromeWidth: () => 0,
+  renderTop: ({ box, width, borderColor }) =>
+    borderColor(box.horizontal.repeat(width)),
+  renderRow: ({ gutter, text, pad }) => [gutter + text + pad],
+  renderBottom: () => undefined,
+};
+
+export default function (pi: ExtensionAPI) {
+  pi.registerComposerShape({
+    label: "Acme Dock",
+    description: "Prompt below a single rule",
+    style: dockStyle,
+  });
+}
+```
+
+`ComposerShapeDefinition` contains:
+
+- `label`: required selector label.
+- `description`: optional selector detail.
+- `style`: the complete `ComposerStyle` rendering contract. `style.id` is also the persisted `composer.shape` value.
+
+Use a package-qualified, non-empty, trimmed `style.id`. Built-in ids (`box`, `claude`, `pi`, `borderless`, `rule`, `field`, and `rail`) cannot be replaced. If the extension is unavailable while its id remains configured, the editor falls back to `box`.
+
+### `ComposerStyle` layout metadata
+
+- `sideBorders`: whether content rows own side chrome. This controls cursor reserve, IME layout, and scrollbar behavior; it is not merely descriptive.
+- `verticalChrome`: exact number of fixed top/bottom chrome rows (`0`, `1`, or `2`) used for editor height budgeting.
+- `statusAttachment`: `"top-border"` receives the embedded status gauge, `"top-rule-chip"` receives the right status group for docking on a rule, and `"none"` detaches status from the editor chrome.
+- `bottomBar`: standalone status content below the editor: `"none"`, `"left"`, or `"full"`.
+- `bottomBarGap`: whether a blank row separates the editor from a standalone bottom status bar.
+- `defaultPromptGutter`: prompt text used when the host supplies no override.
+- `defaultPaddingX(themePaddingX)`: horizontal padding selected for this style.
+- `sideChromeWidth(paddingX)`: visible cells consumed on **each** side of a content row, including padding and border/rail glyphs.
+
+`renderTop` and `renderBottom` return one styled terminal row or `undefined`. `renderRow` returns one or more styled rows. Every normal rendered row must occupy exactly `ctx.width` visible cells; ANSI escape sequences have zero width. Preserve the supplied `gutter`, `text`, and `pad` instead of reflowing or truncating them.
+
+### Renderer context
+
+All render methods receive `width`, `paddingX`, the theme's `box` glyphs, and three styling functions:
+
+- `borderColor(text)`: ordinary frame/rule color.
+- `accentColor(text)`: stable accent for shape-defining rails or caps.
+- `surfaceColor(text)`: composer background fill that survives nested SGR resets in decorated input.
+
+`topBorder`, when present, is already-styled status content with its visible `width`. A top renderer owns its placement and must leave the final line at `ctx.width`.
+
+`renderRow` additionally receives:
+
+- `gutter`, `text`, and `pad`: pre-rendered content pieces.
+- `isLastRow`: last visible input row.
+- `cursorOverflow`: cells consumed from the right chrome by an end-of-line cursor.
+- `imeSafeCursorTail`: omit right-side cells after the cursor so terminal-local IME preedit cannot shift the chrome.
+- `scrollbarThumb`: this row intersects the editor scrollbar thumb.
+
+The built-in implementations in `packages/tui/src/components/composer/` are the reference for framed, rule, filled-surface, and IME-safe layouts.
 
 ## Custom message renderer
 

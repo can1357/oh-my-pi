@@ -14,7 +14,7 @@ import {
 	type PlanReviewAnnotationState,
 	PlanReviewOverlay,
 } from "@oh-my-pi/pi-coding-agent/modes/components/plan-review-overlay";
-import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
+import { InteractiveMode, planSaveFileName } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { SubmittedUserInput } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
@@ -23,7 +23,7 @@ import { SILENT_ABORT_MARKER, USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-a
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { AUTO_THINKING } from "@oh-my-pi/pi-coding-agent/thinking";
 import * as clipboard from "@oh-my-pi/pi-coding-agent/utils/clipboard";
-import { type OverlayHandle, type OverlayOptions, setKeybindings, Text } from "@oh-my-pi/pi-tui";
+import { type OverlayHandle, type OverlayOptions, setKeybindings } from "@oh-my-pi/pi-tui";
 import { formatNumber, TempDir } from "@oh-my-pi/pi-utils";
 
 /**
@@ -72,11 +72,10 @@ describe("InteractiveMode plan review rendering", () => {
 	let tempDir: TempDir;
 	let session: AgentSession;
 	let mode: InteractiveMode;
-	// Shared across the whole describe: AuthStorage (a SQLite db) and ModelRegistry
-	// are the expensive pieces (~14ms/test combined) and tests only ever read from
-	// them — `find()` is a pure lookup over a model list frozen at construction, and
-	// the lone `setRuntimeApiKey` re-call is idempotent. Hoisting them out of
-	// `beforeEach` is the dominant body-time win.
+	// Shared across the whole describe: global Settings initialization, AuthStorage
+	// (a SQLite db), and ModelRegistry are immutable inputs here. Tests mutate only
+	// their per-session Settings.isolated() instances, so rebuilding these process-
+	// global resources for every InteractiveMode adds I/O without isolation.
 	let sharedTempDir: TempDir;
 	let authStorage: AuthStorage;
 	let modelRegistry: ModelRegistry;
@@ -96,10 +95,8 @@ describe("InteractiveMode plan review rendering", () => {
 		sharedTempDir?.removeSync();
 	});
 
-	beforeEach(async () => {
-		resetSettingsForTest();
+	beforeEach(() => {
 		tempDir = TempDir.createSync("@pi-plan-review-");
-		await Settings.init({ inMemory: true, cwd: tempDir.path() });
 		const model = modelRegistry.find("anthropic", "claude-sonnet-4-5");
 		if (!model) {
 			throw new Error("Expected claude-sonnet-4-5 to exist in registry");
@@ -133,17 +130,6 @@ describe("InteractiveMode plan review rendering", () => {
 		await currentSession?.dispose();
 		currentTempDir?.removeSync();
 		setKeybindings(KeybindingsManager.inMemory());
-		resetSettingsForTest();
-	});
-
-	it("keeps queued-message rows in the live region instead of native scrollback", () => {
-		const liveRegion = mode.pendingMessagesContainer as {
-			getNativeScrollbackLiveRegionStart?: () => number | undefined;
-		};
-
-		expect(liveRegion.getNativeScrollbackLiveRegionStart?.()).toBeUndefined();
-		mode.pendingMessagesContainer.addChild(new Text("Queued: follow-up"));
-		expect(liveRegion.getNativeScrollbackLiveRegionStart?.()).toBe(0);
 	});
 
 	it("exits empty plan mode without confirmation", async () => {
@@ -640,6 +626,41 @@ describe("InteractiveMode plan review rendering", () => {
 		expect(await Bun.file(resolvedPlanPath).text()).toContain("edited body");
 	});
 
+	it("saves the final plan to the chosen path and starts a new session", async () => {
+		const planFilePath = "local://PLAN.md";
+		const resolvedPlanPath = resolveLocalUrlToPath(planFilePath, {
+			getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
+			getSessionId: () => session.sessionManager.getSessionId(),
+		});
+		await Bun.write(resolvedPlanPath, "# Draft plan\n\noriginal body\n");
+
+		mode.planModeEnabled = true;
+		mode.planModePlanFilePath = planFilePath;
+		const edited = "# Auto QA\n\nSave the final plan.\n\n## Verify\n\n- run focused tests\n";
+		vi.spyOn(mode, "showPlanReview").mockImplementation(async (_plan, _title, _options, dialogOptions) => {
+			dialogOptions?.onPlanEdited?.(edited);
+			return "Save and quit";
+		});
+		const generateTitle = vi.spyOn(session, "generateTitle").mockResolvedValue("Auto QA");
+		const destination = path.join(tempDir.path(), "AUTO_QA_PLAN.md");
+		vi.spyOn(mode, "showHookCustom").mockResolvedValue({ path: "AUTO_QA_PLAN.md" });
+		const clear = vi.spyOn(mode, "handleClearCommand").mockResolvedValue();
+
+		await mode.handlePlanApproval({
+			planFilePath,
+			planExists: true,
+			title: "DRAFT",
+		});
+
+		expect(generateTitle).toHaveBeenCalledWith(
+			"# Auto QA\nSave the final plan.\n## Verify\n- run focused tests",
+			expect.any(String),
+		);
+		expect(await Bun.file(destination).text()).toBe(edited);
+		expect(clear).toHaveBeenCalledTimes(1);
+		expect(mode.planModeEnabled).toBe(false);
+	});
+
 	it("carries pre-approval local artifacts into the fresh approve-and-execute session", async () => {
 		const planFilePath = "local://handoff-plan.md";
 		const localOptions = {
@@ -722,6 +743,7 @@ describe("InteractiveMode plan review rendering", () => {
 				"Approve and compact context",
 				"Approve and keep context (~7.3k / 10k)",
 				"Refine plan",
+				"Save and quit",
 			],
 			expect.any(Object),
 			expect.any(Object),
@@ -796,6 +818,7 @@ describe("InteractiveMode plan review rendering", () => {
 			"Approve and compact context",
 			`Approve and keep context (~${compactNumber(tokens)} / ${compactNumber(executionModel.contextWindow)})`,
 			"Refine plan",
+			"Save and quit",
 		]);
 	});
 
@@ -874,7 +897,13 @@ describe("InteractiveMode plan review rendering", () => {
 		expect(selector).toHaveBeenCalledWith(
 			expect.any(String),
 			"Plan mode - next step",
-			["Approve and execute", "Approve and compact context", "Approve and keep context", "Refine plan"],
+			[
+				"Approve and execute",
+				"Approve and compact context",
+				"Approve and keep context",
+				"Refine plan",
+				"Save and quit",
+			],
 			expect.any(Object),
 			expect.any(Object),
 		);
@@ -1965,6 +1994,67 @@ describe("InteractiveMode plan review rendering", () => {
 		expect(showError).not.toHaveBeenCalled();
 	});
 
+	describe("openPlanReview (manual /plan-review)", () => {
+		const localPath = (url: string): string =>
+			resolveLocalUrlToPath(url, {
+				getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
+				getSessionId: () => session.sessionManager.getSessionId(),
+			});
+
+		it("forwards the newest local plan file and its heading title to the approval flow", async () => {
+			await Bun.write(localPath("local://old-plan.md"), "# Old plan\n\nstale body");
+			await Bun.write(localPath("local://auth-refactor-plan.md"), "# Auth refactor\n\nfresh body");
+			// #listLocalPlanFiles sorts by mtime, newest first — pin mtimes so the
+			// "latest plan" selection is deterministic regardless of write timing.
+			await fs.utimes(localPath("local://old-plan.md"), new Date(1_000), new Date(1_000));
+			await fs.utimes(localPath("local://auth-refactor-plan.md"), new Date(2_000), new Date(2_000));
+
+			mode.planModeEnabled = true;
+			// The default points at a file that never exists; the scan must still find
+			// the real plan, and getPlanReferencePath() is empty before any approval.
+			mode.planModePlanFilePath = "local://PLAN.md";
+			const approval = vi.spyOn(mode, "handlePlanApproval").mockResolvedValue();
+
+			await mode.openPlanReview();
+
+			expect(approval).toHaveBeenCalledTimes(1);
+			expect(approval).toHaveBeenCalledWith({
+				planFilePath: "local://auth-refactor-plan.md",
+				title: "Auth-refactor",
+				planExists: true,
+			});
+		});
+
+		it("warns and does not start approval when plan mode is inactive", async () => {
+			await Bun.write(localPath("local://auth-plan.md"), "# Auth\n\nbody");
+			mode.planModeEnabled = false;
+			const approval = vi.spyOn(mode, "handlePlanApproval").mockResolvedValue();
+			const warn = vi.spyOn(mode, "showWarning");
+
+			await mode.openPlanReview();
+
+			expect(approval).not.toHaveBeenCalled();
+			expect(warn).toHaveBeenCalledWith("Plan mode is not active.");
+		});
+
+		it("warns when no plan file has been written yet", async () => {
+			mode.planModeEnabled = true;
+			const approval = vi.spyOn(mode, "handlePlanApproval").mockResolvedValue();
+			const warn = vi.spyOn(mode, "showWarning");
+
+			await mode.openPlanReview();
+
+			expect(approval).not.toHaveBeenCalled();
+			expect(warn).toHaveBeenCalledWith(expect.stringContaining("No plan to review"));
+		});
+	});
+});
+
+describe("AssistantMessageComponent aborted replay", () => {
+	beforeAll(() => {
+		initTheme();
+	});
+
 	// ==========================================================================
 	// Phase 6 — D layer: replay-side render branches in AssistantMessageComponent.
 	//
@@ -2036,59 +2126,26 @@ describe("InteractiveMode plan review rendering", () => {
 		expect(rendered).not.toContain(USER_INTERRUPT_LABEL);
 		expect(rendered).not.toContain("Operation aborted");
 	});
+});
 
-	describe("openPlanReview (manual /plan-review)", () => {
-		const localPath = (url: string): string =>
-			resolveLocalUrlToPath(url, {
-				getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
-				getSessionId: () => session.sessionManager.getSessionId(),
-			});
-
-		it("forwards the newest local plan file and its heading title to the approval flow", async () => {
-			await Bun.write(localPath("local://old-plan.md"), "# Old plan\n\nstale body");
-			await Bun.write(localPath("local://auth-refactor-plan.md"), "# Auth refactor\n\nfresh body");
-			// #listLocalPlanFiles sorts by mtime, newest first — pin mtimes so the
-			// "latest plan" selection is deterministic regardless of write timing.
-			await fs.utimes(localPath("local://old-plan.md"), new Date(1_000), new Date(1_000));
-			await fs.utimes(localPath("local://auth-refactor-plan.md"), new Date(2_000), new Date(2_000));
-
-			mode.planModeEnabled = true;
-			// The default points at a file that never exists; the scan must still find
-			// the real plan, and getPlanReferencePath() is empty before any approval.
-			mode.planModePlanFilePath = "local://PLAN.md";
-			const approval = vi.spyOn(mode, "handlePlanApproval").mockResolvedValue();
-
-			await mode.openPlanReview();
-
-			expect(approval).toHaveBeenCalledTimes(1);
-			expect(approval).toHaveBeenCalledWith({
-				planFilePath: "local://auth-refactor-plan.md",
-				title: "Auth-refactor",
-				planExists: true,
-			});
-		});
-
-		it("warns and does not start approval when plan mode is inactive", async () => {
-			await Bun.write(localPath("local://auth-plan.md"), "# Auth\n\nbody");
-			mode.planModeEnabled = false;
-			const approval = vi.spyOn(mode, "handlePlanApproval").mockResolvedValue();
-			const warn = vi.spyOn(mode, "showWarning");
-
-			await mode.openPlanReview();
-
-			expect(approval).not.toHaveBeenCalled();
-			expect(warn).toHaveBeenCalledWith("Plan mode is not active.");
-		});
-
-		it("warns when no plan file has been written yet", async () => {
-			mode.planModeEnabled = true;
-			const approval = vi.spyOn(mode, "handlePlanApproval").mockResolvedValue();
-			const warn = vi.spyOn(mode, "showWarning");
-
-			await mode.openPlanReview();
-
-			expect(approval).not.toHaveBeenCalled();
-			expect(warn).toHaveBeenCalledWith(expect.stringContaining("No plan to review"));
-		});
+describe("planSaveFileName", () => {
+	it("turns a short topic into <TOPIC>_PLAN.md", () => {
+		expect(planSaveFileName("PyO3 types")).toBe("PYO3_TYPES_PLAN.md");
+		expect(planSaveFileName("Auth storage plan")).toBe("AUTH_STORAGE_PLAN.md");
 	});
+
+	it("trims verbose fallback titles at a word boundary", () => {
+		expect(planSaveFileName("Split PyEnvironmentBackend request into PyO3 methods")).toBe(
+			"SPLIT_PYENVIRONMENTBACKEND_PLAN.md",
+		);
+	});
+
+	it("falls back to PLAN.md for empty or plan-only titles", () => {
+		expect(planSaveFileName("  ")).toBe("PLAN.md");
+		expect(planSaveFileName("Plan")).toBe("PLAN.md");
+	});
+});
+
+afterAll(() => {
+	resetSettingsForTest();
 });

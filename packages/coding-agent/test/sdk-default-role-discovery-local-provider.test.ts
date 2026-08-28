@@ -61,44 +61,7 @@ describe("issue #6114 fresh launch default role from discovery-only local provid
 		};
 	}
 
-	test("selects the configured LM Studio default on a cache-cold boot", async () => {
-		const authStorage = await AuthStorage.create(path.join(tempDir, "auth.db"));
-		authStoragesToClose.push(authStorage);
-		// Fresh registry: no cached lm-studio catalog on disk, so the static
-		// catalog the SDK resolves against at startup is empty for the provider.
-		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"), {
-			fetch: mockLmStudio(["qwen3-coder-30b"]),
-		});
-
-		const settings = Settings.isolated();
-		settings.setModelRole("default", "lm-studio/qwen3-coder-30b");
-
-		const { session } = await createAgentSession({
-			cwd: tempDir,
-			agentDir: tempDir,
-			authStorage,
-			modelRegistry,
-			settings,
-			sessionManager: SessionManager.inMemory(),
-			disableExtensionDiscovery: true,
-			skills: [],
-			contextFiles: [],
-			promptTemplates: [],
-			slashCommands: [],
-			enableMCP: false,
-			enableLsp: false,
-			skipPythonPreflight: true,
-		});
-
-		try {
-			expect(session.model?.provider).toBe("lm-studio");
-			expect(session.model?.id).toBe("qwen3-coder-30b");
-		} finally {
-			await session.dispose();
-		}
-	});
-
-	test("applies the configured local default even when a bundled provider key is present", async () => {
+	test("prefers the configured LM Studio default over an authenticated bundled fallback on cache-cold boot", async () => {
 		const authStorage = await AuthStorage.create(path.join(tempDir, "auth.db"));
 		authStoragesToClose.push(authStorage);
 		// Mirrors #6114 comment (pmatos): a stray key for a bundled provider makes

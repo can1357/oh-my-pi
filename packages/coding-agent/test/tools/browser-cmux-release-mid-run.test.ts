@@ -290,53 +290,71 @@ describe("browser tab-supervisor — cmux tab close mid-run (#4499)", () => {
 	it("logs a user continuation rejection after its cmux run ends", async () => {
 		spyOn(CmuxSocketClient.prototype, "connect").mockResolvedValue(undefined);
 		spyOn(CmuxSocketClient.prototype, "close").mockImplementation(() => undefined);
-		spyOn(CmuxSocketClient.prototype, "request").mockImplementation(
-			async (method: string): Promise<Record<string, unknown>> => {
-				switch (method) {
-					case "browser.open_split":
-						return { surface_id: "surface-late-rejection", url: "about:blank" };
-					case "browser.url.get":
-						return { url: "about:blank" };
-					case "browser.snapshot":
-						return { page: { html: "" } };
-					case "browser.eval":
-						return { value: "" };
-					default:
-						return {};
-				}
-			},
-		);
-		const warningLogged = Promise.withResolvers<void>();
-		const warn = spyOn(logger, "warn").mockImplementation(message => {
-			if (message === "Unhandled rejection after browser run ended") warningLogged.resolve();
-		});
-		const browser = await acquireBrowser(makeKind("late-rejection"), { cwd: "/tmp" });
-		await acquireTab("late-rejection", browser, {
-			timeoutMs: 5_000,
-			ownerSessionId: "session-late-rejection",
-		});
+		const continuationStarted = Promise.withResolvers<void>();
+		const continuationGate = Promise.withResolvers<void>();
+		const globals = globalThis as typeof globalThis & {
+			__ompLateRejectionStarted?: () => void;
+			__ompLateRejectionGate?: Promise<void>;
+		};
+		globals.__ompLateRejectionStarted = continuationStarted.resolve;
+		globals.__ompLateRejectionGate = continuationGate.promise;
 
-		const result = await runInTab("late-rejection", {
-			code: `
-				const continuationStarted = Promise.withResolvers();
-				void tab.title().then(async () => {
-					continuationStarted.resolve();
-					await Bun.sleep(50);
-					throw new Error("late cmux continuation failed");
-				});
-				await continuationStarted.promise;
-				return "completed";
-			`,
-			timeoutMs: 5_000,
-			session: makeSession("/tmp"),
-		});
-		expect(result.returnValue).toBe("completed");
+		try {
+			spyOn(CmuxSocketClient.prototype, "request").mockImplementation(
+				async (method: string): Promise<Record<string, unknown>> => {
+					switch (method) {
+						case "browser.open_split":
+							return { surface_id: "surface-late-rejection", url: "about:blank" };
+						case "browser.url.get":
+							return { url: "about:blank" };
+						case "browser.snapshot":
+							return { page: { html: "" } };
+						case "browser.eval":
+							return { value: "" };
+						default:
+							return {};
+					}
+				},
+			);
+			const warningLogged = Promise.withResolvers<void>();
+			const warn = spyOn(logger, "warn").mockImplementation(message => {
+				if (message === "Unhandled rejection after browser run ended") warningLogged.resolve();
+			});
+			const browser = await acquireBrowser(makeKind("late-rejection"), { cwd: "/tmp" });
+			await acquireTab("late-rejection", browser, {
+				timeoutMs: 5_000,
+				ownerSessionId: "session-late-rejection",
+			});
 
-		await warningLogged.promise;
-		expect(warn).toHaveBeenCalledWith("Unhandled rejection after browser run ended", {
-			runId: expect.any(String),
-			error: "late cmux continuation failed",
-		});
+			const result = await runInTab("late-rejection", {
+				code: `
+					const guestStarted = Promise.withResolvers();
+					void tab.title().then(async () => {
+						guestStarted.resolve();
+						globalThis.__ompLateRejectionStarted();
+						await globalThis.__ompLateRejectionGate;
+						throw new Error("late cmux continuation failed");
+					});
+					await guestStarted.promise;
+					return "completed";
+				`,
+				timeoutMs: 5_000,
+				session: makeSession("/tmp"),
+			});
+			expect(result.returnValue).toBe("completed");
+			await continuationStarted.promise;
+			continuationGate.resolve();
+
+			await warningLogged.promise;
+			expect(warn).toHaveBeenCalledWith("Unhandled rejection after browser run ended", {
+				runId: expect.any(String),
+				error: "late cmux continuation failed",
+			});
+		} finally {
+			continuationGate.resolve();
+			delete globals.__ompLateRejectionStarted;
+			delete globals.__ompLateRejectionGate;
+		}
 	});
 
 	it("fails a browser error rethrown through a native promise combinator", async () => {
@@ -373,7 +391,7 @@ describe("browser tab-supervisor — cmux tab close mid-run (#4499)", () => {
 				]).catch(reason => {
 					throw reason;
 				});
-				await wait(50);
+				await wait(60_000);
 				return "incorrect success";
 			`,
 			timeoutMs: 5_000,
@@ -386,6 +404,9 @@ describe("browser tab-supervisor — cmux tab close mid-run (#4499)", () => {
 	it("aborts the cmux run facade before draining floated continuations", async () => {
 		spyOn(CmuxSocketClient.prototype, "connect").mockResolvedValue(undefined);
 		spyOn(CmuxSocketClient.prototype, "close").mockImplementation(() => undefined);
+		const delayedTitleStarted = Promise.withResolvers<void>();
+		const delayedTitleGate = Promise.withResolvers<Record<string, unknown>>();
+		let titleRequestCount = 0;
 		const navigatedUrls: string[] = [];
 		spyOn(CmuxSocketClient.prototype, "request").mockImplementation(
 			async (method: string, params: Record<string, unknown>): Promise<Record<string, unknown>> => {
@@ -397,7 +418,10 @@ describe("browser tab-supervisor — cmux tab close mid-run (#4499)", () => {
 					case "browser.snapshot":
 						return { page: { html: "" } };
 					case "browser.eval":
-						await Bun.sleep(0);
+						if (params.script === "document.title" && ++titleRequestCount > 1) {
+							delayedTitleStarted.resolve();
+							return await delayedTitleGate.promise;
+						}
 						return { value: "ready" };
 					case "browser.navigate":
 						navigatedUrls.push(String(params.url));
@@ -422,8 +446,9 @@ describe("browser tab-supervisor — cmux tab close mid-run (#4499)", () => {
 			session: makeSession("/tmp"),
 		});
 		expect(result.returnValue).toBe("completed");
-
-		await Bun.sleep(20);
+		await delayedTitleStarted.promise;
+		delayedTitleGate.resolve({ value: "ready" });
+		for (let i = 0; i < 8; i++) await Promise.resolve();
 		expect(navigatedUrls).toEqual([]);
 	});
 

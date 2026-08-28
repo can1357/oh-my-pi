@@ -98,22 +98,19 @@ function assistant(opts: {
 	};
 }
 
-async function runPythonCompletionInSubprocess(options: {
-	structured: boolean;
-	tempDir: TempDir;
-}): Promise<PythonResult> {
+async function runPythonCompletionsInSubprocess(tempDir: TempDir): Promise<PythonResult> {
 	const repoRoot = path.resolve(import.meta.dir, "../../..");
-	const scriptPath = path.join(options.tempDir.path(), "run-python-completion.ts");
-	const resultPath = path.join(options.tempDir.path(), "python-completion-result.json");
+	const scriptPath = path.join(tempDir.path(), "run-python-completion.ts");
+	const resultPath = path.join(tempDir.path(), "python-completion-result.json");
 	const aiPath = path.resolve(import.meta.dir, "../../../ai/src/index.ts");
 	const executorPath = path.resolve(import.meta.dir, "../../src/eval/py/executor.ts");
 	const settingsPath = path.resolve(import.meta.dir, "../../src/config/settings.ts");
-	const code = options.structured
-		? 'import json\nprint(json.dumps(completion("hi", schema={"type": "object"})))'
-		: 'print(completion("hi", model="smol"))';
-	const responseContent = options.structured
-		? '[{ type: "toolCall", id: "tc-1", name: "respond", arguments: { ok: true } }]'
-		: '[{ type: "text", text: "hello from python" }]';
+	const code = [
+		"import json",
+		'plain = completion("hi", model="smol")',
+		'structured = completion("hi", schema={"type": "object"})',
+		'print(json.dumps({"plain": plain, "structured": structured}))',
+	].join("\n");
 	await Bun.write(
 		scriptPath,
 		`
@@ -146,18 +143,27 @@ const session = {
 	},
 	getActiveModelString: () => "p/smol",
 };
-vi.spyOn(ai, "completeSimple").mockResolvedValue({
-	role: "assistant",
-	api: "openai-responses",
-	provider: "p",
-	model: "smol",
-	stopReason: "stop",
-	content: ${responseContent},
-});
+vi.spyOn(ai, "completeSimple")
+	.mockResolvedValueOnce({
+		role: "assistant",
+		api: "openai-responses",
+		provider: "p",
+		model: "smol",
+		stopReason: "stop",
+		content: [{ type: "text", text: "hello from python" }],
+	})
+	.mockResolvedValueOnce({
+		role: "assistant",
+		api: "openai-responses",
+		provider: "p",
+		model: "smol",
+		stopReason: "stop",
+		content: [{ type: "toolCall", id: "tc-1", name: "respond", arguments: { ok: true } }],
+	});
 const result = await executePython(${JSON.stringify(code)}, {
-	cwd: ${JSON.stringify(options.tempDir.path())},
-	sessionId: ${JSON.stringify(`py-completion:${options.structured ? "struct" : "plain"}`)},
-	sessionFile: ${JSON.stringify(path.join(options.tempDir.path(), "session.jsonl"))},
+	cwd: ${JSON.stringify(tempDir.path())},
+	sessionId: "py-completion",
+	sessionFile: ${JSON.stringify(path.join(tempDir.path(), "session.jsonl"))},
 	toolSession: session,
 	kernelMode: "per-call",
 });
@@ -316,31 +322,41 @@ describe("runEvalCompletion", () => {
 	});
 
 	it("pauses the idle watchdog while a slow completion() request is in flight", async () => {
-		// A oneshot completion emits no status until it returns; delegated model
-		// time must be invisible to the eval timeout budget.
-		vi.spyOn(ai, "completeSimple").mockImplementation(async () => {
-			await Bun.sleep(200);
-			return assistant({ text: "the answer" });
-		});
+		vi.useFakeTimers();
+		try {
+			// A oneshot completion emits no status until it returns; delegated model
+			// time must be invisible to the eval timeout budget.
+			const started = Promise.withResolvers<void>();
+			vi.spyOn(ai, "completeSimple").mockImplementation(async () => {
+				started.resolve();
+				await Bun.sleep(200);
+				return assistant({ text: "the answer" });
+			});
 
-		const ops: string[] = [];
-		using idle = new IdleTimeout(60);
-		const result = await runEvalCompletion(
-			{ prompt: "q", model: "smol" },
-			{
-				session: makeSession(),
-				signal: idle.signal,
-				emitStatus: event => {
-					ops.push(event.op);
-					if (event.op === EVAL_TIMEOUT_PAUSE_OP) idle.pause();
-					if (event.op === EVAL_TIMEOUT_RESUME_OP) idle.resume();
+			const ops: string[] = [];
+			using idle = new IdleTimeout(60);
+			const pendingResult = runEvalCompletion(
+				{ prompt: "q", model: "smol" },
+				{
+					session: makeSession(),
+					signal: idle.signal,
+					emitStatus: event => {
+						ops.push(event.op);
+						if (event.op === EVAL_TIMEOUT_PAUSE_OP) idle.pause();
+						if (event.op === EVAL_TIMEOUT_RESUME_OP) idle.resume();
+					},
 				},
-			},
-		);
+			);
+			await started.promise;
+			vi.advanceTimersByTime(200);
+			const result = await pendingResult;
 
-		expect(result.text).toBe("the answer");
-		expect(ops).toEqual([EVAL_TIMEOUT_PAUSE_OP, EVAL_TIMEOUT_RESUME_OP, "completion"]);
-		expect(idle.signal.aborted).toBe(false);
+			expect(result.text).toBe("the answer");
+			expect(ops).toEqual([EVAL_TIMEOUT_PAUSE_OP, EVAL_TIMEOUT_RESUME_OP, "completion"]);
+			expect(idle.signal.aborted).toBe(false);
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 });
 
@@ -354,57 +370,39 @@ describe("completion() through eval runtimes", () => {
 		await disposeAllKernelSessions();
 	});
 
-	it("exposes completion() in the JavaScript runtime", async () => {
+	it("exposes plain and structured completion() in the JavaScript runtime", async () => {
 		using tempDir = TempDir.createSync("@omp-eval-completion-js-");
 		const sessionFile = path.join(tempDir.path(), "session.jsonl");
 		const sessionId = `js-completion:${crypto.randomUUID()}`;
-		vi.spyOn(ai, "completeSimple").mockResolvedValue(assistant({ text: "hello from smol" }));
-
-		const result = await executeJs('return await completion("hi", { model: "smol" });', {
-			cwd: tempDir.path(),
-			sessionId,
-			session: makeSession(),
-			sessionFile,
-		});
-
-		expect(result.exitCode).toBe(0);
-		expect(result.output.trim()).toBe("hello from smol");
-	});
-
-	it("parses structured completion() output in the JavaScript runtime", async () => {
-		using tempDir = TempDir.createSync("@omp-eval-completion-js-struct-");
-		const sessionFile = path.join(tempDir.path(), "session.jsonl");
-		const sessionId = `js-completion-struct:${crypto.randomUUID()}`;
-		vi.spyOn(ai, "completeSimple").mockResolvedValue(
-			assistant({ toolCall: { name: "respond", arguments: { ok: true, n: 3 } } }),
-		);
+		vi.spyOn(ai, "completeSimple")
+			.mockResolvedValueOnce(assistant({ text: "hello from smol" }))
+			.mockResolvedValueOnce(assistant({ toolCall: { name: "respond", arguments: { ok: true, n: 3 } } }));
 
 		const result = await executeJs(
-			'const r = await completion("hi", { schema: { type: "object" } }); return JSON.stringify(r);',
+			[
+				'const plain = await completion("hi", { model: "smol" });',
+				'const structured = await completion("hi", { schema: { type: "object" } });',
+				"return JSON.stringify({ plain, structured });",
+			].join("\n"),
 			{ cwd: tempDir.path(), sessionId, session: makeSession(), sessionFile },
 		);
 
 		expect(result.exitCode).toBe(0);
-		expect(JSON.parse(result.output.trim())).toEqual({ ok: true, n: 3 });
+		expect(JSON.parse(result.output.trim())).toEqual({
+			plain: "hello from smol",
+			structured: { ok: true, n: 3 },
+		});
 	});
 
-	it("exposes completion() in the Python runtime", async () => {
+	it("exposes plain and structured completion() in the Python runtime", async () => {
 		const tempDir = TempDir.createSync("@omp-eval-completion-py-");
 		try {
-			const result = await runPythonCompletionInSubprocess({ structured: false, tempDir });
+			const result = await runPythonCompletionsInSubprocess(tempDir);
 			expect(result.exitCode).toBe(0);
-			expect(result.output.trim()).toBe("hello from python");
-		} finally {
-			tempDir.removeSync();
-		}
-	});
-
-	it("parses structured completion() output in the Python runtime", async () => {
-		const tempDir = TempDir.createSync("@omp-eval-completion-py-struct-");
-		try {
-			const result = await runPythonCompletionInSubprocess({ structured: true, tempDir });
-			expect(result.exitCode).toBe(0);
-			expect(JSON.parse(result.output.trim())).toEqual({ ok: true });
+			expect(JSON.parse(result.output.trim())).toEqual({
+				plain: "hello from python",
+				structured: { ok: true },
+			});
 		} finally {
 			tempDir.removeSync();
 		}

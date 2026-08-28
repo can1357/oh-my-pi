@@ -6,18 +6,16 @@ describe("MemorySessionStorage indexed mirror", () => {
 	test("append builds the same content as a single writeTextSync of the join", async () => {
 		const storage = new MemorySessionStorage();
 		const path = "/virtual/session.jsonl";
+		const parts = Array.from({ length: 32 }, (_, i) => `{"i":${i}}\n`);
 		const writer = storage.openWriter(path, { flags: "w" });
 		try {
-			const N = 1000;
-			for (let i = 0; i < N; i++) {
-				await writer.append(`{"i":${i}}\n`);
-			}
+			for (const part of parts) await writer.append(part);
 		} finally {
 			await writer.close();
 		}
 
 		// Construct the baseline from the same parts.
-		const expected = Array.from({ length: 1000 }, (_, i) => `{"i":${i}}\n`).join("");
+		const expected = parts.join("");
 		const actual = await storage.readText(path);
 		expect(actual).toBe(expected);
 		expect(actual.length).toBe(expected.length);

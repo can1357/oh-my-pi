@@ -3,10 +3,10 @@
 //! Ported from uutils coreutils 0.8.0.
 
 #[cfg(unix)]
-use std::os::unix::fs::FileTypeExt;
+use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::{
 	ffi::OsString,
-	fs::{OpenOptions, metadata},
+	fs::{Metadata, OpenOptions, metadata},
 	io::ErrorKind,
 };
 
@@ -19,7 +19,7 @@ use uucore::{
 
 use crate::host::{Host, Utility, format_usage, matches_parser, util};
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
 enum TruncateMode {
 	Absolute(u64),
 	Extend(u64),
@@ -49,6 +49,35 @@ impl TruncateMode {
 			Self::RoundDown(size) => fsize.checked_rem(*size).map(|remainder| fsize - remainder),
 			Self::RoundUp(size) => fsize.checked_next_multiple_of(*size),
 		}
+	}
+
+	/// The numeric value carried by this mode.
+	fn value(&self) -> u64 {
+		match self {
+			Self::Absolute(n)
+			| Self::Extend(n)
+			| Self::Reduce(n)
+			| Self::AtMost(n)
+			| Self::AtLeast(n)
+			| Self::RoundDown(n)
+			| Self::RoundUp(n) => *n,
+		}
+	}
+
+	/// Multiply this mode's value by `factor` (for `--io-blocks` scaling).
+	///
+	/// Returns `None` on overflow.
+	fn scale(&self, factor: u64) -> Option<Self> {
+		let value = self.value().checked_mul(factor)?;
+		Some(match self {
+			Self::Absolute(_) => Self::Absolute(value),
+			Self::Extend(_) => Self::Extend(value),
+			Self::Reduce(_) => Self::Reduce(value),
+			Self::AtMost(_) => Self::AtMost(value),
+			Self::AtLeast(_) => Self::AtLeast(value),
+			Self::RoundDown(_) => Self::RoundDown(value),
+			Self::RoundUp(_) => Self::RoundUp(value),
+		})
 	}
 
 	/// Determine whether this mode specifies an absolute size.
@@ -123,10 +152,7 @@ fn app() -> Command {
 			Arg::new(options::IO_BLOCKS)
 				.short('o')
 				.long(options::IO_BLOCKS)
-				.help(
-					"treat SIZE as the number of I/O blocks of the file rather than bytes (NOT \
-					 IMPLEMENTED)",
-				)
+				.help("treat SIZE as the number of I/O blocks of the file rather than bytes")
 				.action(ArgAction::SetTrue),
 		)
 		.arg(
@@ -167,70 +193,103 @@ fn app() -> Command {
 		)
 }
 
-/// Truncate the named file to the specified size.
-///
-/// If `create` is true, the file is created if it does not already exist. If
-/// `size` is larger than the file, it is padded with zeros; if smaller, bytes
-/// beyond `size` are discarded.
-fn do_file_truncate(
-	host: &Host,
-	filename: &OsString,
-	create: bool,
-	size: u64,
-) -> Result<(), String> {
-	let resolved = host.resolve(filename);
-
-	match OpenOptions::new().write(true).create(create).open(&resolved) {
-		Ok(file) => file.set_len(size),
-		Err(error) if error.kind() == ErrorKind::NotFound && !create => Ok(()),
-		Err(error) => Err(error),
+/// The I/O block size of a file, falling back to 512 when the filesystem
+/// reports 0 (mirrors GNU's `ST_BLKSIZE`).
+#[cfg(unix)]
+fn io_blocksize(file_metadata: &Metadata) -> u64 {
+	match file_metadata.blksize() {
+		0 => 512,
+		blksize => blksize,
 	}
-	.map_err(|error| format!("cannot open {} for writing: {error}", filename.quote()))
 }
 
+#[cfg(not(unix))]
+fn io_blocksize(_file_metadata: &Metadata) -> u64 {
+	512
+}
+
+/// Truncate one file according to `mode`.
+///
+/// Unless `no_create` is set, the file is created if it does not already
+/// exist. If the target size is larger than the file, it is padded with
+/// zeros; if smaller, bytes beyond it are discarded. When `io_blocks` is
+/// set, the size is scaled by the file's I/O block size, matching GNU
+/// (which scales by the block size observed after opening the file).
 fn file_truncate(
 	host: &Host,
 	no_create: bool,
+	io_blocks: bool,
 	reference_size: Option<u64>,
 	mode: &TruncateMode,
 	filename: &OsString,
 ) -> Result<(), String> {
 	let resolved = host.resolve(filename);
 
-	// Get the length of the file.
-	let file_size = match metadata(&resolved) {
-		Ok(metadata) => {
-			// A pipe has no length. Do this here to avoid a duplicate `stat()` syscall.
-			#[cfg(unix)]
-			if metadata.file_type().is_fifo() {
-				return Err(format!(
-					"cannot open {} for writing: No such device or address",
-					filename.to_string_lossy().quote()
-				));
-			}
-			metadata.len()
+	// A pipe has no length, and opening it for writing would block waiting
+	// for a reader; refuse it before the open.
+	#[cfg(unix)]
+	if let Ok(pre_metadata) = metadata(&resolved) {
+		if pre_metadata.file_type().is_fifo() {
+			return Err(format!(
+				"cannot open {} for writing: No such device or address",
+				filename.to_string_lossy().quote()
+			));
+		}
+	}
+
+	let create = !no_create;
+	let file = match OpenOptions::new().write(true).create(create).open(&resolved) {
+		Ok(file) => file,
+		Err(error) if error.kind() == ErrorKind::NotFound && !create => return Ok(()),
+		Err(error) => {
+			return Err(format!("cannot open {} for writing: {error}", filename.quote()));
 		},
-		Err(_) => 0,
+	};
+
+	let file_metadata = file
+		.metadata()
+		.map_err(|error| format!("cannot fstat {}: {error}", filename.quote()))?;
+
+	let mode = if io_blocks {
+		let blksize = io_blocksize(&file_metadata);
+		mode.scale(blksize).ok_or_else(|| {
+			format!(
+				"overflow in {} * {blksize} byte blocks for file {}",
+				mode.value(),
+				filename.quote()
+			)
+		})?
+	} else {
+		*mode
 	};
 
 	// The reference size is either the given reference file's size, or the size
 	// of the file to be truncated when no reference was provided.
-	let actual_reference_size = reference_size.unwrap_or(file_size);
+	let actual_reference_size = reference_size.unwrap_or_else(|| file_metadata.len());
 	let Some(truncate_size) = mode.to_size(actual_reference_size) else {
 		return Err("division by zero".to_string());
 	};
 
-	do_file_truncate(host, filename, !no_create, truncate_size)
+	file.set_len(truncate_size).map_err(|error| {
+		format!(
+			"failed to truncate {} at {truncate_size} bytes: {error}",
+			filename.quote()
+		)
+	})
 }
 
 fn truncate(
 	host: &mut Host,
 	no_create: bool,
-	_: bool,
+	io_blocks: bool,
 	reference: Option<String>,
 	size: Option<String>,
 	filenames: &[OsString],
 ) -> Result<(), String> {
+	if io_blocks && size.is_none() {
+		return Err("--io-blocks was specified but --size was not".to_string());
+	}
+
 	let reference_size = match reference {
 		Some(reference_path) => {
 			let reference_metadata = metadata(host.resolve(&reference_path)).map_err(|error| {
@@ -254,13 +313,21 @@ fn truncate(
 		None => TruncateMode::Extend(0),
 	};
 
+	// GNU rejects rounding to a multiple of zero up front, before touching
+	// any file.
+	if matches!(mode, TruncateMode::RoundDown(0) | TruncateMode::RoundUp(0)) {
+		return Err("division by zero".to_string());
+	}
+
 	// If a reference file has been given, the truncate mode cannot be absolute.
 	if reference_size.is_some() && mode.is_absolute() {
 		return Err("you must specify a relative '--size' with '--reference'".to_string());
 	}
 
 	for filename in filenames {
-		if let Err(error) = file_truncate(host, no_create, reference_size, &mode, filename) {
+		if let Err(error) =
+			file_truncate(host, no_create, io_blocks, reference_size, &mode, filename)
+		{
 			host.error(error, 1);
 		}
 	}
@@ -269,8 +336,10 @@ fn truncate(
 }
 
 /// Decide whether a character is one of the size modifiers, like `+` or `<`.
+///
+/// `=` is the BSD spelling of an absolute size.
 fn is_modifier(c: char) -> bool {
-	c == '+' || c == '-' || c == '<' || c == '>' || c == '/' || c == '%'
+	c == '+' || c == '-' || c == '<' || c == '>' || c == '/' || c == '%' || c == '='
 }
 
 /// Parse a size string with an optional modifier symbol as its first character.
@@ -281,7 +350,10 @@ fn parse_mode_and_size(size_string: &str) -> Result<TruncateMode, ParseSizeError
 		if is_modifier(c) {
 			size_string = &size_string[1..];
 		}
-		let allow_list = allow_list_with_all_suffixes("EgGkKmMPQRtTYZ");
+		let mut allow_list = allow_list_with_all_suffixes("EgGkKmMPQRtTYZ");
+		// `b` counts 512-byte blocks (dd-style); accepted here for agent
+		// convenience even though GNU truncate omits it.
+		allow_list.push("b".to_string());
 		let allow_list_ref = allow_list.iter().map(AsRef::as_ref).collect::<Vec<&str>>();
 		Parser::default()
 			.with_allow_list(&allow_list_ref)
@@ -431,8 +503,76 @@ mod tests {
 		assert_eq!(parse_mode_and_size(">10"), Ok(TruncateMode::AtLeast(10)));
 		assert_eq!(parse_mode_and_size("/10"), Ok(TruncateMode::RoundDown(10)));
 		assert_eq!(parse_mode_and_size("%10"), Ok(TruncateMode::RoundUp(10)));
+		assert_eq!(parse_mode_and_size("=10"), Ok(TruncateMode::Absolute(10)));
 		assert_eq!(parse_mode_and_size("1kB"), Ok(TruncateMode::Absolute(1000)));
-		assert!(parse_mode_and_size("1b").is_err());
+		// `b` counts 512-byte blocks; rejecting it broke `truncate -s 2b f`.
+		assert_eq!(parse_mode_and_size("2b"), Ok(TruncateMode::Absolute(1024)));
+	}
+
+	#[test]
+	fn b_suffix_counts_512_byte_blocks() {
+		let (_dir, root) = canonical_tempdir();
+		fs::write(root.join("f"), b"x").unwrap();
+
+		let (code, _, stderr) = run_in(root.clone(), &["-s", "2b", "f"]);
+		assert_eq!((code, stderr.as_str()), (0, ""));
+		assert_eq!(len(&root.join("f")), 1024);
+	}
+
+	#[test]
+	fn bsd_equals_prefix_sets_absolute_size() {
+		let (_dir, root) = canonical_tempdir();
+		fs::write(root.join("f"), b"x").unwrap();
+
+		let (code, _, stderr) = run_in(root.clone(), &["-s", "=100", "f"]);
+		assert_eq!((code, stderr.as_str()), (0, ""));
+		assert_eq!(len(&root.join("f")), 100);
+	}
+
+	/// Regression: `-o` used to be parsed and then silently ignored, truncating
+	/// to the raw byte count (real data loss for `truncate -o -s 1 f`).
+	#[cfg(unix)]
+	#[test]
+	fn io_blocks_scales_size_by_file_blocksize() {
+		use std::os::unix::fs::MetadataExt;
+
+		let (_dir, root) = canonical_tempdir();
+		let path = root.join("f");
+		fs::write(&path, vec![0u8; 4096]).unwrap();
+		let blksize = fs::metadata(&path).unwrap().blksize();
+		assert!(blksize > 1, "test needs a real filesystem block size");
+
+		let (code, _, stderr) = run_in(root.clone(), &["-o", "-s", "1", "f"]);
+		assert_eq!((code, stderr.as_str()), (0, ""));
+		assert_eq!(len(&path), blksize, "-o must scale SIZE by st_blksize, not truncate to 1 byte");
+	}
+
+	#[test]
+	fn io_blocks_without_size_is_rejected() {
+		let (_dir, root) = canonical_tempdir();
+		fs::write(root.join("ref"), b"123").unwrap();
+		fs::write(root.join("f"), b"x").unwrap();
+
+		let (code, _, stderr) = run_in(root.clone(), &["-o", "-r", "ref", "f"]);
+		assert_eq!(code, 1);
+		assert!(stderr.contains("--io-blocks was specified but --size was not"));
+	}
+
+	/// Regression: `%0`/`/0` must fail up front with GNU's error, not create
+	/// or modify any operand.
+	#[test]
+	fn round_to_zero_is_division_by_zero_up_front() {
+		let (_dir, root) = canonical_tempdir();
+
+		for size in ["%0", "/0"] {
+			let (code, _, stderr) = run_in(root.clone(), &["-s", size, "missing"]);
+			assert_eq!(code, 1, "size {size} must fail");
+			assert!(stderr.contains("division by zero"), "size {size}: {stderr}");
+			assert!(
+				!root.join("missing").exists(),
+				"size {size} must not create the operand"
+			);
+		}
 	}
 
 	#[test]

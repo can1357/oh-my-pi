@@ -6,6 +6,7 @@ import {
 	isBunTestRuntime,
 	isCompiledBinary,
 	logger,
+	postmortem,
 	stripWindowsExtendedLengthPathPrefix,
 	workerHostEntry,
 } from "@oh-my-pi/pi-utils";
@@ -108,17 +109,20 @@ export const SMOKE_TEST_TIMEOUT_MS = 30_000;
 /**
  * Resolve the command used to relaunch the agent CLI into worker mode. In a
  * compiled binary the entry point is the binary itself; otherwise re-enter the
- * declared worker-host entry with a cwd-relative script path (Bun's subprocess
- * IPC is more reliable that way under `bun test`), falling back to this
- * package's own `src/cli.ts` when no host entry is declared (bun test, SDK
- * embedding).
+ * declared worker-host entry by absolute path. Workers deliberately spawn
+ * without a pinned cwd there: they share the parent's foreground process
+ * group, and terminal cwd heuristics (kitty's new_tab_with_cwd) read the
+ * newest process in that group, so anchoring them to the install dir leaks
+ * into newly opened terminal tabs. With no declared host entry (bun test, SDK
+ * embedding) fall back to a cwd-relative `src/cli.ts`, which Bun subprocess
+ * IPC handles more reliably under `bun test`.
  */
 export function resolveWorkerSpawnCmd(workerArg: string): WorkerSpawnCommand {
 	const executable = stripWindowsExtendedLengthPathPrefix(process.execPath);
 	if (isCompiledBinary()) return { cmd: [executable, workerArg] };
 	const hostEntry = workerHostEntry();
 	if (hostEntry) {
-		return { cmd: [executable, path.basename(hostEntry), workerArg], cwd: path.dirname(hostEntry) };
+		return { cmd: [executable, hostEntry, workerArg] };
 	}
 	const packageRoot = path.resolve(import.meta.dir, "..", "..");
 	return { cmd: [executable, "src/cli.ts", workerArg], cwd: packageRoot };
@@ -140,6 +144,38 @@ export function workerEnvFromParent(overlay?: Record<string, string>): Record<st
 		for (const key in overlay) merged[key] = overlay[key];
 	}
 	return merged;
+}
+
+/**
+ * `LD_LIBRARY_PATH` overlay that lets a dlopen'd native addon find its C++
+ * runtime. The ONNX addons installed on demand under `~/.omp/agent/cache/**`
+ * are `process.dlopen`'d and need `libstdc++.so.6` / `libgcc_s.so.1`; because
+ * each addon carries its own `DT_RUNPATH`, an RPATH on our executable cannot
+ * satisfy them, so the path has to come from the environment. On distros where
+ * those libraries are outside the loader's default search path (NixOS) the
+ * packaged build exports `OMP_NATIVE_LIBRARY_PATH` (see `nix/package.nix`).
+ * Appended last so an inherited `LD_LIBRARY_PATH` keeps precedence.
+ * Pure for testability; see {@link inferenceWorkerEnv} for the spawn-time glue.
+ */
+export function nativeLibraryPathOverlay(
+	env: Record<string, string | undefined>,
+	platform: NodeJS.Platform,
+): Record<string, string> {
+	if (platform !== "linux") return {};
+	const native = env.OMP_NATIVE_LIBRARY_PATH;
+	if (typeof native !== "string" || native.length === 0) return {};
+	const inherited = env.LD_LIBRARY_PATH;
+	return { LD_LIBRARY_PATH: inherited ? `${inherited}:${native}` : native };
+}
+
+/**
+ * Env for an ONNX inference worker: the parent env plus the native library
+ * path. Only these workers get it — the daemon broker spawns user PTY sessions
+ * and eval kernels through {@link workerEnvFromParent}, and rewriting the
+ * loader search path of arbitrary user commands risks a `GLIBCXX` mismatch.
+ */
+export function inferenceWorkerEnv(overlay?: Record<string, string>): Record<string, string> {
+	return workerEnvFromParent({ ...nativeLibraryPathOverlay($env, process.platform), ...overlay });
 }
 
 /**
@@ -173,6 +209,9 @@ export function createWorkerSubprocess<Outbound>(options: {
 	const stderrDrained = Promise.withResolvers<void>();
 	const stderrCapture = createStderrCapture(options.exitLabel);
 	let stderrDrainStarted = false;
+	// Reassigned once the worker IPC fault handler is registered (after spawn);
+	// invoked from onExit to drop the registration.
+	let unregisterFault: () => void = () => {};
 	const startStderrDrain = (): void => {
 		if (stderrDrainStarted) return;
 		stderrDrainStarted = true;
@@ -192,6 +231,7 @@ export function createWorkerSubprocess<Outbound>(options: {
 			for (const handler of inbound) handler(message as Outbound);
 		},
 		onExit(_proc, exitCode, signalCode) {
+			unregisterFault();
 			startStderrDrain();
 			if (exitCode === 0 && !options.reportCleanExit) return;
 			// Swallow only the expected SIGKILL from `terminate()`; every other
@@ -209,6 +249,26 @@ export function createWorkerSubprocess<Outbound>(options: {
 				for (const handler of errors) handler(err);
 			});
 		},
+	});
+	// Bun raises a malformed advanced-serialization frame as a process-global
+	// uncaughtException with no channel attribution (oven-sh/bun#37287). Register
+	// a fault handler so that failure rejects this worker's in-flight requests and
+	// recycles it — a worker that sent a bad frame but stays alive never fires
+	// onExit, so callers would otherwise await forever. Unregistered in onExit.
+	let faulted = false;
+	unregisterFault = postmortem.registerWorkerIpcFaultHandler(cause => {
+		if (faulted) return;
+		faulted = true;
+		const err = new Error(`${options.exitLabel}: worker sent a malformed IPC frame; recycling worker`, { cause });
+		for (const handler of errors) handler(err);
+		// Recycle the (possibly still-alive) worker; mark the exit intentional so
+		// the SIGKILL's onExit does not surface a duplicate error.
+		intentionalExit.value = true;
+		try {
+			proc.kill("SIGKILL");
+		} catch {
+			// Already gone.
+		}
 	});
 	// Don't keep the parent event loop alive on an idle worker; the dispose
 	// path calls `terminate()` explicitly. Bun's test runner starves IPC for

@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
@@ -23,11 +23,13 @@ describe("AgentSession manual retry", () => {
 	let tempDir: TempDir;
 	let authStorage: AuthStorage;
 	let session: AgentSession | undefined;
+	let modelRegistry: ModelRegistry;
 
-	beforeEach(async () => {
+	beforeAll(async () => {
 		tempDir = TempDir.createSync("@pi-manual-retry-");
 		authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
 		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		modelRegistry = new ModelRegistry(authStorage);
 	});
 
 	afterEach(async () => {
@@ -35,6 +37,9 @@ describe("AgentSession manual retry", () => {
 			await session.dispose();
 			session = undefined;
 		}
+	});
+
+	afterAll(() => {
 		authStorage.close();
 		tempDir.removeSync();
 	});
@@ -65,7 +70,7 @@ describe("AgentSession manual retry", () => {
 			agent,
 			sessionManager: SessionManager.inMemory(),
 			settings: Settings.isolated({ "compaction.enabled": false, "retry.enabled": false }),
-			modelRegistry: new ModelRegistry(authStorage),
+			modelRegistry,
 		});
 		session.subscribe(() => {});
 
@@ -104,7 +109,7 @@ describe("AgentSession manual retry", () => {
 			agent,
 			sessionManager: SessionManager.inMemory(),
 			settings: Settings.isolated({ "compaction.enabled": false }),
-			modelRegistry: new ModelRegistry(authStorage),
+			modelRegistry,
 		});
 		session.subscribe(() => {});
 
@@ -150,7 +155,7 @@ describe("AgentSession manual retry", () => {
 			agent,
 			sessionManager: SessionManager.inMemory(),
 			settings: Settings.isolated({ "compaction.enabled": false, "retry.enabled": false }),
-			modelRegistry: new ModelRegistry(authStorage),
+			modelRegistry,
 		});
 		session.subscribe(() => {});
 
@@ -205,7 +210,7 @@ describe("AgentSession manual retry", () => {
 			agent,
 			sessionManager,
 			settings: Settings.isolated({ "compaction.enabled": false, "retry.enabled": false }),
-			modelRegistry: new ModelRegistry(authStorage),
+			modelRegistry,
 		});
 		session.subscribe(() => {});
 
@@ -247,7 +252,7 @@ describe("AgentSession manual retry", () => {
 			agent: reopenedAgent,
 			sessionManager: reopenedManager,
 			settings: Settings.isolated({ "compaction.enabled": false, "retry.enabled": false }),
-			modelRegistry: new ModelRegistry(authStorage),
+			modelRegistry,
 		});
 		session.subscribe(() => {});
 

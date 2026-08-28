@@ -6,58 +6,50 @@
  * calls resolveModelRoleValue() but only returns .model, dropping the thinking level.
  * #applyPlanModeModel() therefore has no thinking level to apply.
  */
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
-import * as path from "node:path";
+import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { Agent, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { TempDir } from "@oh-my-pi/pi-utils";
 
 describe("plan mode thinking level", () => {
-	let tempDir: TempDir;
 	let session: AgentSession;
 	let modelRegistry: ModelRegistry;
 	let authStorage: AuthStorage;
+	let sessionSettings: Settings;
 
 	beforeAll(async () => {
-		tempDir = TempDir.createSync("@pi-plan-thinking-");
-		authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
+		authStorage = await AuthStorage.create(":memory:");
 		authStorage.setRuntimeApiKey("anthropic", "test-key");
-		modelRegistry = new ModelRegistry(authStorage);
-	});
-
-	afterEach(async () => {
-		if (session) {
-			await session.dispose();
-		}
-	});
-
-	afterAll(() => {
-		authStorage.close();
-		tempDir.removeSync();
-	});
-
-	function createSessionWithRoles(modelRoles: Record<string, string>): AgentSession {
+		modelRegistry = new ModelRegistry(authStorage, undefined, { ignoreLocalModelConfig: true });
+		sessionSettings = Settings.isolated();
 		const sonnet = modelRegistry.find("anthropic", "claude-sonnet-4-5");
 		if (!sonnet) throw new Error("Expected claude-sonnet-4-5 to exist in registry");
-
 		session = new AgentSession({
 			agent: new Agent({
 				initialState: { model: sonnet, systemPrompt: ["Test"], tools: [], messages: [] },
 			}),
 			sessionManager: SessionManager.inMemory(),
-			settings: Settings.isolated({ modelRoles }),
+			settings: sessionSettings,
 			modelRegistry,
 		});
+	});
+
+	afterAll(async () => {
+		await session.dispose();
+		authStorage.close();
+	});
+
+	function configureRoles(modelRoles: Record<string, string>): AgentSession {
+		sessionSettings.override("modelRoles", modelRoles);
 		return session;
 	}
 
 	describe("resolveRoleModelWithThinking", () => {
 		it("returns thinking level when plan role includes a thinking suffix", () => {
-			createSessionWithRoles({ plan: "anthropic/claude-sonnet-4-5:xhigh" });
+			configureRoles({ plan: "anthropic/claude-sonnet-4-5:xhigh" });
 
 			const result = session.resolveRoleModelWithThinking("plan");
 
@@ -69,7 +61,7 @@ describe("plan mode thinking level", () => {
 		});
 
 		it("returns no explicit thinking level when plan role has no thinking suffix", () => {
-			createSessionWithRoles({ plan: "anthropic/claude-sonnet-4-5" });
+			configureRoles({ plan: "anthropic/claude-sonnet-4-5" });
 
 			const result = session.resolveRoleModelWithThinking("plan");
 
@@ -79,7 +71,7 @@ describe("plan mode thinking level", () => {
 		});
 
 		it("returns no model when no plan role is configured", () => {
-			createSessionWithRoles({});
+			configureRoles({});
 
 			const result = session.resolveRoleModelWithThinking("plan");
 
@@ -87,7 +79,7 @@ describe("plan mode thinking level", () => {
 		});
 
 		it("returns thinking level for different levels", () => {
-			createSessionWithRoles({ plan: "anthropic/claude-sonnet-4-5:high" });
+			configureRoles({ plan: "anthropic/claude-sonnet-4-5:high" });
 
 			const result = session.resolveRoleModelWithThinking("plan");
 			expect(result.thinkingLevel).toBe(ThinkingLevel.High);
@@ -95,7 +87,7 @@ describe("plan mode thinking level", () => {
 		});
 
 		it("works with the default role", () => {
-			createSessionWithRoles({ default: "anthropic/claude-sonnet-4-5:medium" });
+			configureRoles({ default: "anthropic/claude-sonnet-4-5:medium" });
 
 			const result = session.resolveRoleModelWithThinking("default");
 			expect(result.model!.id).toBe("claude-sonnet-4-5");
@@ -104,7 +96,7 @@ describe("plan mode thinking level", () => {
 		});
 
 		it("resolveRoleModel still returns just the model (backward compat)", () => {
-			createSessionWithRoles({ plan: "anthropic/claude-sonnet-4-5:xhigh" });
+			configureRoles({ plan: "anthropic/claude-sonnet-4-5:xhigh" });
 
 			const model = session.resolveRoleModel("plan");
 			expect(model).toBeDefined();

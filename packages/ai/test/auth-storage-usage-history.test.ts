@@ -188,15 +188,33 @@ describe("AuthStorage usage history recording", () => {
 	});
 });
 
-describe("OpenCode Go usage from observed request costs", () => {
+describe("OpenCode Go usage via the upstream endpoint", () => {
 	let store: SqliteAuthCredentialStore;
 	let storage: AuthStorage;
+	let fetchCalls: Array<{ url: string; headers: Record<string, string> }>;
 
 	beforeEach(async () => {
+		fetchCalls = [];
 		store = new SqliteAuthCredentialStore(new Database(":memory:"));
 		storage = new AuthStorage(store, {
 			usageProviderResolver: provider =>
 				provider === "opencode-go" ? opencodeGoUsage.opencodeGoUsageProvider : undefined,
+			usageFetch: (async (input: string | URL | Request, init?: RequestInit) => {
+				fetchCalls.push({
+					url: String(input),
+					headers: (init?.headers as Record<string, string>) ?? {},
+				});
+				return new Response(
+					JSON.stringify({
+						usage: {
+							rolling: { status: "ok", percent: 12, resetsAt: "2026-08-12T15:09:04.847Z" },
+							weekly: { status: "ok", percent: 8, resetsAt: "2026-08-17T00:00:00.847Z" },
+							monthly: { status: "rate-limited", percent: 100, resetsAt: "2026-08-19T00:31:53.847Z" },
+						},
+					}),
+					{ status: 200, headers: { "content-type": "application/json" } },
+				);
+			}) as unknown as typeof fetch,
 		});
 		await storage.reload();
 		await storage.set("opencode-go", { type: "api_key", key: "opencode-go-key" });
@@ -208,50 +226,156 @@ describe("OpenCode Go usage from observed request costs", () => {
 		vi.restoreAllMocks();
 	});
 
-	it("returns zero-dollar OpenCode Go limits for a fresh key", async () => {
+	it("fetches percent-based limits for a stored API key and records history rows", async () => {
 		const reports = await storage.fetchUsageReports();
 
+		expect(fetchCalls).toHaveLength(1);
+		expect(fetchCalls[0]?.url).toBe("https://opencode.ai/zen/go/v1/usage");
+		expect(fetchCalls[0]?.headers.authorization).toBe("Bearer opencode-go-key");
+
 		const report = reports?.find(candidate => candidate.provider === "opencode-go");
-		expect(report?.limits.map(limit => [limit.id, limit.amount.used, limit.amount.limit])).toEqual([
-			["rolling-5h", 0, 12],
-			["weekly", 0, 30],
-			["monthly", 0, 60],
+		expect(report?.limits.map(limit => [limit.id, limit.amount.used, limit.status])).toEqual([
+			["rolling-5h", 12, "ok"],
+			["weekly", 8, "ok"],
+			["monthly", 100, "exhausted"],
+		]);
+		expect(report?.limits.map(limit => limit.scope.windowId)).toEqual(["5h", "7d", "monthly"]);
+		expect(report?.limits.find(limit => limit.id === "monthly")?.window?.resetsAt).toBe(
+			Date.parse("2026-08-19T00:31:53.847Z"),
+		);
+
+		// Fresh reports append durable usage-history rows per limit window.
+		const rows = store.listUsageHistory({ provider: "opencode-go" });
+		expect(rows.map(row => [row.limitId, row.usedFraction])).toEqual([
+			["rolling-5h", 0.12],
+			["weekly", 0.08],
+			["monthly", 1],
 		]);
 	});
 
-	it("refreshes cached OpenCode Go limits after recording new observed spend", async () => {
-		const nowMs = Date.parse("2026-06-18T12:00:00Z");
-		setSystemTime(new Date(nowMs));
+	it("resolves reference-stored API keys before the Authorization header", async () => {
+		// Keys stored as references (env var name, "!command") must reach the
+		// endpoint as the resolved secret, not the reference string (#8337 review).
+		const referenceStorage = new AuthStorage(new SqliteAuthCredentialStore(new Database(":memory:")), {
+			usageProviderResolver: provider =>
+				provider === "opencode-go" ? opencodeGoUsage.opencodeGoUsageProvider : undefined,
+			configValueResolver: async config => (config === "ref:opencode" ? "sk-resolved-secret" : config),
+			usageFetch: (async (input: string | URL | Request, init?: RequestInit) => {
+				fetchCalls.push({
+					url: String(input),
+					headers: (init?.headers as Record<string, string>) ?? {},
+				});
+				return new Response(
+					JSON.stringify({
+						usage: {
+							rolling: { status: "ok", percent: 5, resetsAt: "2026-08-12T15:09:04.847Z" },
+							weekly: { status: "ok", percent: 8, resetsAt: "2026-08-17T00:00:00.847Z" },
+							monthly: { status: "ok", percent: 10, resetsAt: "2026-08-19T00:31:53.847Z" },
+						},
+					}),
+					{ status: 200, headers: { "content-type": "application/json" } },
+				);
+			}) as unknown as typeof fetch,
+		});
+		try {
+			await referenceStorage.reload();
+			await referenceStorage.set("opencode-go", { type: "api_key", key: "ref:opencode" });
 
-		const initialReports = await storage.fetchUsageReports();
-		const initial = initialReports?.find(candidate => candidate.provider === "opencode-go");
-		expect(initial?.limits.find(limit => limit.id === "rolling-5h")?.amount.used).toBe(0);
+			const reports = await referenceStorage.fetchUsageReports();
 
-		storage.recordUsageCost("opencode-go", 3, { recordedAt: nowMs });
-
-		const refreshedReports = await storage.fetchUsageReports();
-		const refreshed = refreshedReports?.find(candidate => candidate.provider === "opencode-go");
-		expect(refreshed?.limits.find(limit => limit.id === "rolling-5h")?.amount.used).toBe(3);
+			expect(fetchCalls).toHaveLength(1);
+			expect(fetchCalls[0]?.headers.authorization).toBe("Bearer sk-resolved-secret");
+			expect(reports?.some(candidate => candidate.provider === "opencode-go")).toBe(true);
+		} finally {
+			referenceStorage.close();
+		}
 	});
 
-	it("aggregates one key's observed spend into OpenCode Go cap windows", async () => {
-		const nowMs = Date.parse("2026-06-18T12:00:00Z");
-		setSystemTime(new Date(nowMs));
-		storage.recordUsageCost("opencode-go", 4, { recordedAt: nowMs - HOUR });
-		storage.recordUsageCost("opencode-go", 7, { recordedAt: nowMs - 6 * HOUR });
-		storage.recordUsageCost("opencode-go", 11, { recordedAt: nowMs - 10 * 24 * HOUR });
-		storage.recordUsageCost("opencode-go", 13, { recordedAt: nowMs - 31 * 24 * HOUR });
+	it("drops the last-good report when the key turns definitively unauthorized", async () => {
+		// Transient failures serve the cached report; a 401/403 must not — a
+		// revoked key or lapsed subscription would otherwise keep rendering and
+		// ranking from stale quota until the process restarts.
+		let respondWith: "success" | "unauthorized" = "success";
+		const transitionStorage = new AuthStorage(new SqliteAuthCredentialStore(new Database(":memory:")), {
+			usageProviderResolver: provider =>
+				provider === "opencode-go" ? opencodeGoUsage.opencodeGoUsageProvider : undefined,
+			usageFetch: (async () =>
+				respondWith === "success"
+					? new Response(
+							JSON.stringify({
+								usage: {
+									rolling: { status: "ok", percent: 12, resetsAt: "2026-08-12T15:09:04.847Z" },
+									weekly: { status: "ok", percent: 8, resetsAt: "2026-08-17T00:00:00.847Z" },
+									monthly: { status: "ok", percent: 10, resetsAt: "2026-08-19T00:31:53.847Z" },
+								},
+							}),
+							{ status: 200, headers: { "content-type": "application/json" } },
+						)
+					: new Response(
+							JSON.stringify({ type: "error", error: { type: "AuthError", message: "Unauthorized" } }),
+							{
+								status: 401,
+								headers: { "content-type": "application/json" },
+							},
+						)) as unknown as typeof fetch,
+		});
+		try {
+			await transitionStorage.reload();
+			await transitionStorage.set("opencode-go", { type: "api_key", key: "opencode-go-key" });
 
-		const reports = await storage.fetchUsageReports();
-		const report = reports?.find(candidate => candidate.provider === "opencode-go");
-		if (!report) throw new Error("expected opencode-go usage report");
+			const nowMs = Date.now();
+			setSystemTime(new Date(nowMs));
+			const fresh = await transitionStorage.fetchUsageReports();
+			expect(fresh?.some(candidate => candidate.provider === "opencode-go")).toBe(true);
 
-		const usedByLimit = new Map(report.limits.map(limit => [limit.id, limit.amount.used]));
-		expect(usedByLimit.get("rolling-5h")).toBe(4);
-		expect(usedByLimit.get("weekly")).toBe(11);
-		expect(usedByLimit.get("monthly")).toBe(22);
+			// Past the report TTL the next poll re-hits the endpoint and gets 401.
+			respondWith = "unauthorized";
+			setSystemTime(new Date(nowMs + 10 * 60_000));
+			const afterRevocation = await transitionStorage.fetchUsageReports();
+			expect(afterRevocation?.some(candidate => candidate.provider === "opencode-go")).toBe(false);
+		} finally {
+			transitionStorage.close();
+		}
+	});
 
-		const fiveHour = report.limits.find(limit => limit.id === "rolling-5h");
-		expect(fiveHour?.window?.resetsAt).toBe(nowMs - HOUR + 5 * HOUR);
+	it("retains the last-good report through a partial payload", async () => {
+		// One malformed window fails the whole decode, which must fall back to
+		// the cached complete report instead of replacing it with fewer windows.
+		let respondWith: "success" | "partial" = "success";
+		const partialStorage = new AuthStorage(new SqliteAuthCredentialStore(new Database(":memory:")), {
+			usageProviderResolver: provider =>
+				provider === "opencode-go" ? opencodeGoUsage.opencodeGoUsageProvider : undefined,
+			usageFetch: (async () =>
+				new Response(
+					JSON.stringify({
+						usage: {
+							rolling:
+								respondWith === "success"
+									? { status: "ok", percent: 12, resetsAt: "2026-08-12T15:09:04.847Z" }
+									: { status: "ok", percent: "abc" },
+							weekly: { status: "ok", percent: 8, resetsAt: "2026-08-17T00:00:00.847Z" },
+							monthly: { status: "ok", percent: 10, resetsAt: "2026-08-19T00:31:53.847Z" },
+						},
+					}),
+					{ status: 200, headers: { "content-type": "application/json" } },
+				)) as unknown as typeof fetch,
+		});
+		try {
+			await partialStorage.reload();
+			await partialStorage.set("opencode-go", { type: "api_key", key: "opencode-go-key" });
+
+			const nowMs = Date.now();
+			setSystemTime(new Date(nowMs));
+			const fresh = await partialStorage.fetchUsageReports();
+			expect(fresh?.find(candidate => candidate.provider === "opencode-go")?.limits).toHaveLength(3);
+
+			respondWith = "partial";
+			setSystemTime(new Date(nowMs + 10 * 60_000));
+			const afterPartial = await partialStorage.fetchUsageReports();
+			const retained = afterPartial?.find(candidate => candidate.provider === "opencode-go");
+			expect(retained?.limits.map(limit => limit.id)).toEqual(["rolling-5h", "weekly", "monthly"]);
+		} finally {
+			partialStorage.close();
+		}
 	});
 });

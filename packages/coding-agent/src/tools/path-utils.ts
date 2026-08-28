@@ -3,26 +3,31 @@ import * as os from "node:os";
 import * as path from "node:path";
 import * as url from "node:url";
 import { glob } from "@oh-my-pi/pi-natives";
-import { hasFsCode, isEnoent, isEnotdir, stripWindowsExtendedLengthPathPrefix, untilAborted } from "@oh-my-pi/pi-utils";
+import { hasFsCode, isEnoent, isEnotdir, stripWindowsExtendedLengthPathPrefix } from "@oh-my-pi/pi-utils";
 import type { Skill } from "../extensibility/skills";
 import { InternalUrlRouter, type LocalProtocolOptions } from "../internal-urls";
 import { ToolAbortError, ToolError } from "./tool-errors";
 
 const UNICODE_SPACES = /[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g;
+
+/** POSIX absolute, Windows drive, or UNC (`\\server\share` / `//server/share`). */
+export function isFilesystemSourcePath(value: string): boolean {
+	return path.posix.isAbsolute(value) || path.win32.isAbsolute(value);
+}
 // A single line-range chunk: `N`, `N-M`, `N+K`, or open-ended `N-`. `..` is
 // accepted everywhere `-` is, as a forgiving alias for Rust/Python-style ranges
 // (e.g. `2724..2727` == `2724-2727`, `2724..` == `2724-`); it is normalized to
 // `-` in parseLineRangeChunk. Keep this fragment and LINE_RANGE_CHUNK_RE in sync.
 const RANGE_CHUNK_SRC = String.raw`L?\d+(?:(?:[-+]|\.\.)L?\d+|-|\.\.)?`;
 const RANGE_LIST_SRC = `${RANGE_CHUNK_SRC}(?:,${RANGE_CHUNK_SRC})*`;
-const FILE_LINE_RANGE_RE = new RegExp(`^(?:${RANGE_LIST_SRC}|raw|conflicts)$`, "i");
+const FILE_LINE_RANGE_RE = new RegExp(`^(?:${RANGE_LIST_SRC}|raw|conflicts|img)$`, "i");
 const FILE_LINE_RANGE_ONLY_RE = new RegExp(`^${RANGE_LIST_SRC}$`, "i");
 const FILE_RAW_ONLY_RE = /^raw$/i;
 // Permissive selector chunk for internal URLs — accepts well-formed selectors
 // plus common malformed shapes (e.g. `:-N`) so the read tool peels the entire
 // selector chain off before dispatching to a protocol handler.
 const INTERNAL_URL_SELECTOR_PART_RE = new RegExp(
-	String.raw`^(?:raw|conflicts|${RANGE_LIST_SRC}|-\d+(?:[-+]\d+)?)$`,
+	String.raw`^(?:raw|conflicts|img|${RANGE_LIST_SRC}|-\d+(?:[-+]\d+)?)$`,
 	"i",
 );
 // Schemes whose host grammar is identifier-shaped, so any trailing
@@ -473,6 +478,19 @@ export function isInternalUrlPath(filePath: string): boolean {
 }
 
 /**
+ * Approval tier for a path that will be written through the file/internal-URL
+ * routing layer. Internal resources are read-tier only when their handler is
+ * read-only; writable handlers such as vault:// must retain write approval.
+ */
+export function resolveFileWriteApprovalTier(filePath: string): "read" | "write" {
+	const normalized = normalizeLocalScheme(expandPath(normalizeLocalScheme(filePath)));
+	if (!TOP_LEVEL_INTERNAL_URL_PREFIXES.some(prefix => normalized.startsWith(prefix))) return "write";
+	const scheme = INTERNAL_URL_SCHEME_RE.exec(normalized)?.[1]?.toLowerCase();
+	const handler = scheme ? InternalUrlRouter.instance().getHandler(scheme) : undefined;
+	return handler?.write ? "write" : "read";
+}
+
+/**
  * True when a tool path argument references the `ssh://` scheme anywhere.
  *
  * Substring (not anchored) on purpose: it feeds the read/search/write approval
@@ -615,6 +633,85 @@ function isSymlink(target: string): boolean {
 		return fs.lstatSync(target).isSymbolicLink();
 	} catch {
 		return false;
+	}
+}
+
+/**
+ * Resolve the path a syscall on `filePath` would really act on, or `null` when
+ * that cannot be established.
+ *
+ * A lexical path is not a destination. The kernel follows every component above
+ * the last, so `ws/link/file` under a `ws/link -> /elsewhere` link lands outside
+ * `ws` while still looking relative and `..`-free. Handing such a path to a
+ * privileged helper defeats the defence a helper author reaches for first — a
+ * prefix allowlist passes, because the link sits inside the allowed root while
+ * its target does not. Callers that hand a path to something more privileged
+ * than the syscall that just failed resolve it here first.
+ *
+ * Rejecting symlinked components outright is not an option: `/var` and `/tmp`
+ * are links on macOS, so every path under `os.tmpdir()` traverses one. They are
+ * resolved instead, and only a path whose real destination cannot be established
+ * is refused, because "where would this land" then has no answer to hand over.
+ * {@link confineToWorkspace} refuses an unresolvable link for the same reason.
+ *
+ * @param followFinal `true` for a syscall that follows a link at the final
+ *   component (`open`, so every write), `false` for one that acts on the link
+ *   itself (`unlink`) and therefore needs it left alone.
+ */
+export async function resolveSyscallTarget(filePath: string, followFinal: boolean): Promise<string | null> {
+	const target = path.resolve(filePath);
+	if (followFinal) {
+		const real = await tryRealpathAsync(target);
+		if (real !== null) return real;
+		// `realpath` also fails on a DANGLING link, which a write follows to a place
+		// this cannot name, and on a path whose ancestor may not be searched. Neither
+		// is proof the final component is a plain name, and only proof continues.
+		if (!(await isProvenNotSymlink(target))) return null;
+	}
+	// Walk up to the deepest ancestor that does resolve, then re-apply the
+	// components below it. A resolved ancestor vouches for the ones above it, so
+	// re-applying them lexically matches what the kernel would have done.
+	const tail: string[] = [path.basename(target)];
+	let ancestor = path.dirname(target);
+	for (;;) {
+		const real = await tryRealpathAsync(ancestor);
+		if (real !== null) return path.join(real, ...tail.reverse());
+		// This component is about to be re-applied lexically without a resolved
+		// ancestor vouching for it, which is exactly the escape being closed — so it
+		// has to prove itself. `realpath` fails here for a component that does not
+		// exist yet AND for one inside a directory the caller may not search (the
+		// usual shape when a sandbox hides a denied path), and the second still
+		// permits `lstat`.
+		if (!(await isProvenNotSymlink(ancestor))) return null;
+		const parent = path.dirname(ancestor);
+		// Ran past the filesystem root: `realpath("/")` cannot fail, so only a
+		// filesystem disappearing mid-walk gets here.
+		if (parent === ancestor) return null;
+		tail.push(path.basename(ancestor));
+		ancestor = parent;
+	}
+}
+
+async function tryRealpathAsync(target: string): Promise<string | null> {
+	try {
+		// `fs.promises.realpath` has no `.native` variant under Bun, unlike its sync
+		// counterpart; the JS implementation resolves links identically.
+		return await fs.promises.realpath(target);
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * Whether `target` is known NOT to redirect. A path that does not exist cannot
+ * redirect anything, and nothing below it exists either; any other `lstat`
+ * failure leaves the question unanswered, which is not proof.
+ */
+async function isProvenNotSymlink(target: string): Promise<boolean> {
+	try {
+		return !(await fs.promises.lstat(target)).isSymbolicLink();
+	} catch (error) {
+		return isEnoent(error);
 	}
 }
 
@@ -1247,14 +1344,11 @@ function escapeGlobMetachars(value: string): string {
 	return value.replace(/[*?[{]/g, "[$&]");
 }
 
-/**
- * Find a unique workspace entry whose trailing path matches a missing authored path.
- * Returns `null` for no match, ambiguity, timeout, or scan failure.
- */
-export async function findUniqueWorkspaceSuffix(
+async function findUniqueWorkspaceSuffixWithGlob(
 	rawPath: string,
 	cwd: string,
-	signal?: AbortSignal,
+	signal: AbortSignal | undefined,
+	globImpl: typeof glob,
 ): Promise<{ absolutePath: string; displayPath: string } | null> {
 	const normalized = rawPath.replace(/\\/g, "/").replace(/^\.\//, "").replace(/\/+$/, "");
 	if (!normalized) return null;
@@ -1264,19 +1358,17 @@ export async function findUniqueWorkspaceSuffix(
 
 	let matches: string[];
 	try {
-		const result = await untilAborted(combinedSignal, () =>
-			glob({
-				pattern: `**/${escapeGlobMetachars(normalized)}`,
-				path: cwd,
-				hidden: true,
-			}),
-		);
+		const result = await globImpl({
+			pattern: `**/${escapeGlobMetachars(normalized)}`,
+			path: cwd,
+			hidden: true,
+			signal: combinedSignal,
+			timeoutMs: WORKSPACE_SUFFIX_TIMEOUT_MS,
+		});
+		if (signal?.aborted) throw new ToolAbortError();
 		matches = result.matches.map(match => match.path);
-	} catch (error) {
-		if (error instanceof Error && error.name === "AbortError") {
-			if (!signal?.aborted) return null;
-			throw new ToolAbortError();
-		}
+	} catch {
+		if (signal?.aborted) throw new ToolAbortError();
 		return null;
 	}
 
@@ -1285,6 +1377,28 @@ export async function findUniqueWorkspaceSuffix(
 		absolutePath: path.resolve(cwd, matches[0]),
 		displayPath: matches[0],
 	};
+}
+
+/**
+ * Find a unique workspace entry whose trailing path matches a missing authored path.
+ * Returns `null` for no match, ambiguity, timeout, or scan failure.
+ */
+export async function findUniqueWorkspaceSuffix(
+	rawPath: string,
+	cwd: string,
+	signal?: AbortSignal,
+): Promise<{ absolutePath: string; displayPath: string } | null> {
+	return findUniqueWorkspaceSuffixWithGlob(rawPath, cwd, signal, glob);
+}
+
+/** Exercise the post-native cancellation boundary without a real filesystem walk. */
+export async function findUniqueWorkspaceSuffixWithGlobForTest(
+	rawPath: string,
+	cwd: string,
+	signal: AbortSignal | undefined,
+	globImpl: typeof glob,
+): Promise<{ absolutePath: string; displayPath: string } | null> {
+	return findUniqueWorkspaceSuffixWithGlob(rawPath, cwd, signal, globImpl);
 }
 
 // =============================================================================
@@ -1322,6 +1436,8 @@ export interface ToolScopeOptions {
 	localProtocolOptions?: LocalProtocolOptions;
 	/** Calling session's loaded skills — lets skill:// resolve without process-global state. */
 	skills?: readonly Skill[];
+	/** Calling session's session file — lets history:///agent:// resolve against the caller's root. */
+	sessionFile?: string;
 	/** Materialize readable external URLs to local text files before scope derivation. */
 	resolveExternalUrl?: (rawPath: string) => Promise<ResolvedExternalSearchUrl | undefined>;
 }
@@ -1399,7 +1515,7 @@ export async function resolveToolSearchScope(opts: ToolScopeOptions): Promise<To
 		}
 		if (isSshUrl(rawPath)) {
 			throw new ToolError(
-				`Cannot ${internalUrlAction} a remote ssh:// path (no local file): ${rawPath}. Use \`read ${rawPath}\` to view it, or the \`search\` tool to grep remote files.`,
+				`Cannot ${internalUrlAction} a remote ssh:// path (no local file): ${rawPath}. Use \`read ${rawPath}\` to view it, or use \`grep\` on a specific remote file.`,
 			);
 		}
 		if (hasGlobPathChars(rawPath)) {
@@ -1409,6 +1525,7 @@ export async function resolveToolSearchScope(opts: ToolScopeOptions): Promise<To
 			cwd,
 			settings: opts.settings,
 			signal: opts.signal,
+			sessionFile: opts.sessionFile,
 			localProtocolOptions: opts.localProtocolOptions,
 			skills: opts.skills,
 			// Tool-scope resolution only needs `sourcePath`; skip content

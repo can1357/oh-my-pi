@@ -9,6 +9,7 @@
 
 import {
 	bareModelId,
+	type GlmModel,
 	isAnthropicAdaptiveGenAtLeast,
 	isFableOrMythos,
 	parseAnthropicModel,
@@ -73,6 +74,25 @@ export const isQwenModelId = memo((modelId: string): boolean => {
 	return modelId.toLowerCase().includes("qwen");
 });
 
+/**
+ * Open-weight Qwen 3.8+ releases (`qwen3.8-27b`, `qwen3.8-2.4t-a95b`, GGUF
+ * names like `Qwen3.8-27B-UD-Q6_K_XL`) whose chat template steers thinking
+ * depth through a `reasoning_effort` template kwarg (`low`/`medium`/`xhigh`,
+ * template default `xhigh`; thinking itself cannot be disabled). Compared
+ * component-wise so `qwen3.10` sorts after `qwen3.8`. API-only `-max` SKUs are
+ * excluded — Dashscope drives them through OpenAI-style `reasoning_effort`
+ * with curated compat. The trailing guard rejects parameter-count lookalikes
+ * (`qwen-3.8b`) without breaking `qwen3.8-27b`.
+ */
+export const isQwen38PlusTemplateEffortModelId = memo((modelId: string): boolean => {
+	const match = /qwen[-_ ]?(\d+)\.(\d+)(?![\dbB])/i.exec(modelId);
+	if (!match) return false;
+	const major = Number.parseInt(match[1], 10);
+	const minor = Number.parseInt(match[2], 10);
+	if (major < 3 || (major === 3 && minor < 8)) return false;
+	return !/^-max(?:$|[-.:])/i.test(modelId.slice(match.index + match[0].length));
+});
+
 /** Gemma open-weights family (`gemma-3-27b-it`, `google/gemma-4-E2B-it`, `gemma2-9b`). */
 export const isGemmaModelId = memo((modelId: string): boolean => {
 	return /(^|\/)gemma[-.]?\d/i.test(modelId);
@@ -85,9 +105,11 @@ export const isDeepseekModelIdOrName = memo((value: string): boolean => {
 
 /**
  * DeepSeek V4 Flash SKU in any host/namespace form (`deepseek-v4-flash`, dated
- * `deepseek-v4-flash-0731`, `deepseek-ai/DeepSeek-V4-Flash`). Flash is the only
- * V4 model whose `reasoning_effort` accepts the `low` tier; V4 Pro tops out at
- * `high`/`max`. See https://api-docs.deepseek.com/api/create-chat-completion.
+ * `deepseek-v4-flash-0731`, `deepseek-ai/DeepSeek-V4-Flash`). Both V4 SKUs
+ * (Flash and Pro) accept the `low` reasoning_effort tier; this predicate keeps
+ * Flash distinguishable from Pro where a host quirk splits them (e.g.
+ * OpenRouter exposes `low` on Flash but only `high` on non-Flash V4).
+ * See https://api-docs.deepseek.com/api/create-chat-completion.
  */
 export const isDeepseekV4FlashModelId = memo((modelId: string): boolean => {
 	return bareModelId(modelId).toLowerCase().includes("deepseek-v4-flash");
@@ -98,17 +120,60 @@ export const isMimoModelIdOrName = memo((value: string): boolean => {
 	return value.toLowerCase().includes("mimo");
 });
 
-const GROK_EFFORT_CAPABLE_PREFIXES = ["grok-3-mini", "grok-4.20-multi-agent", "grok-4.3", "grok-4.5"] as const;
+/** StepFun Step 3.7 Flash SKU in any namespace form (`kilo/stepfun/step-3.7-flash:free`). */
+export const isStep37FlashModelId = memo((modelId: string): boolean => {
+	return modelId.toLowerCase().includes("step-3.7-flash");
+});
+
+/** Gemini family ids in any namespace form (`gemini-*`, `google/gemini-*`, `openrouter/google/gemini-…`). */
+export const isGeminiModelId = memo((modelId: string): boolean => {
+	return /(^|\/)gemini[-.]?/i.test(modelId);
+});
+
+/** Grok family ids across namespace and delimiter forms (`grok-*`, `cursor-grok-*`, `xai/grok-*`). */
+export const isGrokModelId = memo((modelId: string): boolean => {
+	return /(?:^|[./_-])grok(?:[-.]|$)/i.test(modelId);
+});
+
+const GROK_EFFORT_CAPABLE_PREFIXES = [
+	"grok-3-mini",
+	"grok-4.20-multi-agent",
+	"grok-4.3",
+	"grok-4.5",
+	"grok-4.6",
+] as const;
 
 /**
  * Grok SKUs that expose the wire `reasoning.effort` dial. Other Grok reasoners
  * (e.g. `grok-build`, `grok-4.20-0309-reasoning`) think natively but reject the
- * param, so callers must omit reasoning effort for them.
+ * param, so callers must omit reasoning effort for them. `grok-4.6` accepts
+ * `low`/`medium`/`high`/`xhigh` and 400s on `max`.
  */
 export const isGrokReasoningEffortCapable = memo((modelId: string): boolean => {
 	const bare = bareModelId(modelId).trim().toLowerCase();
 	if (!bare) return false;
 	return GROK_EFFORT_CAPABLE_PREFIXES.some(prefix => bare.startsWith(prefix));
+});
+
+/**
+ * `grok-4.20-multi-agent*` uses `reasoning.effort` to pick agent count
+ * (`xhigh` is the 16-agent mode). Other first-party Grok effort SKUs stay on
+ * `low|medium|high` unless {@link isGrokXHighEffortCapable} (currently
+ * `grok-4.6*` plus multi-agent).
+ * https://docs.x.ai/developers/model-capabilities/text/reasoning
+ */
+export const isGrokMultiAgentModelId = memo((modelId: string): boolean => {
+	return bareModelId(modelId).trim().toLowerCase().startsWith("grok-4.20-multi-agent");
+});
+
+/**
+ * First-party Grok SKUs whose Responses wire accepts `reasoning.effort: "xhigh"`.
+ * `grok-4.6*` documents xhigh as a reasoning depth; multi-agent uses it as
+ * 16-agent mode. `grok-4.5` / `grok-4.3` / `grok-3-mini` do not.
+ */
+export const isGrokXHighEffortCapable = memo((modelId: string): boolean => {
+	if (isGrokMultiAgentModelId(modelId)) return true;
+	return bareModelId(modelId).trim().toLowerCase().startsWith("grok-4.6");
 });
 
 /**
@@ -143,6 +208,16 @@ export const isMinimaxM3FamilyModelId = memo((modelId: string): boolean => {
  */
 export const isOpenAIGptOssModelId = memo((modelId: string): boolean => {
 	return /(^|\/)gpt-oss[-:]/i.test(modelId);
+});
+
+/**
+ * Meta Muse Spark ids (`muse-spark-1.1`, `muse-spark-1.2`,
+ * `muse-spark-1.2-contributor`, `meta/muse-spark-1.2`). The Responses
+ * `reasoning.effort` wire accepts `none` (thinking-off) plus
+ * `minimal`/`low`/`medium`/`high`/`xhigh`.
+ */
+export const isMuseSparkModelId = memo((modelId: string): boolean => {
+	return /(^|\/)muse-spark(?:[-.]|$)/i.test(modelId);
 });
 
 /** OpenAI model ids (gpt-*, chatgpt-*, o1/o3/o4 SKUs, codex-*, or openai/*). */
@@ -210,18 +285,34 @@ export const isOpenAISamplingRestrictedModelId = memo((modelId: string): boolean
 });
 
 /**
+ * GLM SKU shapes that carry the reasoning ladders. `base`/`air`/`turbo` have
+ * always been reasoning lines; `flash` joins at GLM-5.3-Flash, the first flash
+ * SKU whose thinking is mandatory (pre-5.3 `-flash` SKUs are non-reasoning).
+ * `flashx` and `preview` stay out.
+ */
+function isGlmReasoningVariant(glm: GlmModel): boolean {
+	switch (glm.variant) {
+		case "base":
+		case "air":
+		case "turbo":
+			return true;
+		case "flash":
+			return semverGte(glm.version, "5.3");
+		default:
+			return false;
+	}
+}
+
+/**
  * Reasoning-capable GLM coding SKUs: glm-4.5 and up on the base / `-air` /
- * `-turbo` lines. Excludes the vision (`…v`) shape, the non-reasoning
- * `-flash`/`-flashx`/`-preview` variants, and pre-4.5 ids. Matching the family
- * keeps newly-bumped integers (`glm-5.3`, `glm-6`, …) covered without a per-id
- * allowlist.
+ * `-turbo` lines, plus `-flash` from GLM-5.3-Flash on. Excludes the vision
+ * (`…v`) shape, the non-reasoning `-flashx`/`-preview` variants, and pre-4.5
+ * ids. Matching the family keeps newly-bumped integers (`glm-5.4`, `glm-6`, …)
+ * covered without a per-id allowlist.
  */
 export const isReasoningGlmModelId = memo((modelId: string): boolean => {
 	const glm = parseGlmModel(bareModelId(modelId));
-	if (!glm || glm.vision) {
-		return false;
-	}
-	if (glm.variant !== "base" && glm.variant !== "air" && glm.variant !== "turbo") {
+	if (!glm || glm.vision || !isGlmReasoningVariant(glm)) {
 		return false;
 	}
 	return semverGte(glm.version, "4.5");
@@ -230,18 +321,39 @@ export const isReasoningGlmModelId = memo((modelId: string): boolean => {
 /** GLM-5.2+ coding SKUs accept `reasoning_effort` in addition to binary thinking. */
 export const isGlm52ReasoningEffortModelId = memo((modelId: string): boolean => {
 	const glm = parseGlmModel(bareModelId(modelId));
-	if (!glm || glm.vision) {
-		return false;
-	}
-	if (glm.variant !== "base" && glm.variant !== "air" && glm.variant !== "turbo") {
+	if (!glm || glm.vision || !isGlmReasoningVariant(glm)) {
 		return false;
 	}
 	return semverGte(glm.version, "5.2");
 });
 
-/** GLM vision SKUs — the `v` that attaches to the version (`glm-4v`, `glm-4.5v`). */
+/**
+ * GLM-5.3+ reasoning-effort SKUs. Unlike GLM-5.2 (whose dialect is
+ * host-specific), the base, `-air`, `-turbo`, and `-flash` variants expose a
+ * uniform wire-exact `low`/`high`/`max` ladder on every host, and thinking can
+ * no longer be disabled — `thinking.type` must always be `enabled`. Matching
+ * the family keeps future bumps (`glm-5.4`, `glm-6`, …) covered while excluding
+ * the vision (`…v`) shape and the non-reasoning `-flashx`/`-preview` variants.
+ */
+export const isGlm53ReasoningEffortModelId = memo((modelId: string): boolean => {
+	const glm = parseGlmModel(bareModelId(modelId));
+	if (!glm || glm.vision || !isGlmReasoningVariant(glm)) {
+		return false;
+	}
+	return semverGte(glm.version, "5.3");
+});
+
+/**
+ * GLM SKUs that accept image input: the `v` that attaches to the version
+ * (`glm-4v`, `glm-4.5v`) and the natively multimodal `-flash` line from
+ * GLM-5.3-Flash on, whose id carries no `v` marker.
+ */
 export const isGlmVisionModelId = memo((modelId: string): boolean => {
-	return parseGlmModel(bareModelId(modelId))?.vision === true;
+	const glm = parseGlmModel(bareModelId(modelId));
+	if (!glm) {
+		return false;
+	}
+	return glm.vision || (glm.variant === "flash" && semverGte(glm.version, "5.3"));
 });
 
 /**
@@ -259,12 +371,14 @@ export const modelFamilyToken = memo((modelId: string): string => {
 	const parsed = parseKnownModel(modelId);
 	if (parsed.family !== "unknown") return parsed.family;
 	if (isClaudeModelId(modelId) || isAnthropicNamespacedModelId(modelId)) return "anthropic";
+	if (isGeminiModelId(modelId)) return "gemini";
+	if (isGrokModelId(modelId)) return "grok";
+	if (isDeepseekModelIdOrName(modelId)) return "deepseek";
 	if (isOpenAIModelId(modelId)) return "openai";
 	if (isKimiModelId(modelId)) return "kimi";
 	if (isQwenModelId(modelId)) return "qwen";
 	if (isMinimaxM2FamilyModelId(modelId) || isMinimaxM3FamilyModelId(modelId)) return "minimax";
 	if (isOpenAIGptOssModelId(modelId)) return "gpt-oss";
-	if (isDeepseekModelIdOrName(modelId)) return "deepseek";
 	if (isMimoModelIdOrName(modelId)) return "mimo";
 	if (isGemmaModelId(modelId)) return "gemma";
 	if (parseGlmModel(bareModelId(modelId))) return "glm";
@@ -317,6 +431,22 @@ export const hasOpus47ApiRestrictions = memo((modelId: string): boolean => {
 export const supportsMidConversationSystemMessages = memo((modelId: string): boolean => {
 	const parsed = parseAnthropicModel(bareModelId(modelId));
 	return parsed !== null && isAnthropicAdaptiveGenAtLeast(parsed, "4.8");
+});
+
+/**
+ * Models that reliably follow the hashline line-anchored edit dialect
+ * (`[path#TAG]` headers plus 1-indexed anchors). Kimi, MiMo, DeepSeek V4
+ * Flash, and Step 3.7 Flash miscount anchors or drop the tag header often
+ * enough that hosts fall back to the sloppy edit format for
+ * them.
+ */
+export const supportsHashlineEdits = memo((modelId: string): boolean => {
+	return !(
+		isKimiModelId(modelId) ||
+		isMimoModelIdOrName(modelId) ||
+		isDeepseekV4FlashModelId(modelId) ||
+		isStep37FlashModelId(modelId)
+	);
 });
 
 export const isAnthropicFableOrMythosModel = memo((modelId: string): boolean => {

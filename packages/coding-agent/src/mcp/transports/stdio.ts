@@ -495,7 +495,7 @@ function signalStdioProcess(
 
 /**
  * Terminate an MCP stdio subprocess: SIGTERM (process-group when `detached`
- * on POSIX, direct child otherwise), wait up to `TERM_GRACE_MS` for a
+ * on POSIX, direct child otherwise), wait up to `termGraceMs` for a
  * cooperative exit, then escalate to SIGKILL — waiting up to `KILL_GRACE_MS`
  * more only when the leader itself hadn't already exited. A detached
  * leader's cooperative exit does not prove the whole process group is gone
@@ -508,15 +508,19 @@ function signalStdioProcess(
  * `detached`/`platform` pair: `StdioTransport.connect()` derives `detached`
  * from `resolveStdioSpawnCommand()`, which is tied to the host's real
  * `process.platform`, so a POSIX detached session cannot be reproduced
- * end-to-end through `connect()` on a non-Linux dev/CI host.
+ * end-to-end through `connect()` on a non-Linux dev/CI host. `termGraceMs`
+ * preserves the production grace by default while allowing those real
+ * subprocess tests to cover the same transition without sleeping for a
+ * production-length shutdown window.
  */
 export async function terminateStdioProcess(
 	proc: KillableSubprocess,
 	detached: boolean,
 	platform: NodeJS.Platform = process.platform,
+	termGraceMs = TERM_GRACE_MS,
 ): Promise<void> {
 	signalStdioProcess(proc, detached, "SIGTERM", platform);
-	const exitedOnTerm = await waitForProcessExit(proc.exited, TERM_GRACE_MS);
+	const exitedOnTerm = await waitForProcessExit(proc.exited, termGraceMs);
 	// A non-detached transport has no process group beyond the leader itself:
 	// once it exits, there is nothing left to signal. A detached transport's
 	// leader exiting is NOT proof the group is empty — a grandchild it spawned

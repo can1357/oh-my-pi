@@ -86,6 +86,10 @@ describe("parseAgentFields", () => {
 
 		expect(fields?.tools).toEqual(["read", "grep", "yield"]);
 	});
+	test("keeps an explicitly empty tools list distinct from an absent one", () => {
+		expect(parseAgentFields({ name: "quiet", description: "desc", tools: [] })?.tools).toEqual(["yield"]);
+		expect(parseAgentFields({ name: "quiet", description: "desc" })?.tools).toBeUndefined();
+	});
 
 	test("maps legacy search and find tool names", () => {
 		const fields = parseAgentFields({
@@ -180,5 +184,22 @@ describe("parseAgentFields", () => {
 	test("ignores empty and absent prewalk values", () => {
 		expect(parseAgentFields({ name: "worker", description: "desc", prewalk: "  " })?.prewalk).toBeUndefined();
 		expect(parseAgentFields({ name: "worker", description: "desc" })?.prewalk).toBeUndefined();
+	});
+	test("parses advisor from boolean frontmatter and boolean strings", () => {
+		expect(parseAgentFields({ name: "worker", description: "desc", advisor: true })?.advisor).toBe(true);
+		expect(parseAgentFields({ name: "worker", description: "desc", advisor: false })?.advisor).toBe(false);
+		expect(parseAgentFields({ name: "worker", description: "desc", advisor: "true" })?.advisor).toBe(true);
+		expect(parseAgentFields({ name: "worker", description: "desc", advisor: "false" })?.advisor).toBe(false);
+	});
+
+	test("parses advisor model pattern strings and ignores empty/absent values", () => {
+		expect(parseAgentFields({ name: "worker", description: "desc", advisor: " moonshot/k3 " })?.advisor).toBe(
+			"moonshot/k3",
+		);
+		expect(parseAgentFields({ name: "worker", description: "desc", advisor: "@smol:high" })?.advisor).toBe(
+			"@smol:high",
+		);
+		expect(parseAgentFields({ name: "worker", description: "desc", advisor: "  " })?.advisor).toBeUndefined();
+		expect(parseAgentFields({ name: "worker", description: "desc" })?.advisor).toBeUndefined();
 	});
 });

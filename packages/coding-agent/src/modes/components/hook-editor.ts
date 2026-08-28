@@ -7,7 +7,7 @@
  *   (Ctrl+Q / Ctrl+Enter) submits, bordered popup
  * - Prompt-style (ask): Enter submits, Shift+Enter inserts newline, legacy ask chrome
  */
-import { Container, Editor, type Focusable, matchesKey, Spacer, Text, type TUI } from "@oh-my-pi/pi-tui";
+import { Editor, type Focusable, matchesKey, Spacer, Text, type TUI } from "@oh-my-pi/pi-tui";
 import { getEditorTheme, theme } from "../../modes/theme/theme";
 import {
 	matchesAppExternalEditor,
@@ -15,7 +15,7 @@ import {
 	matchesAppInterrupt,
 } from "../../modes/utils/keybinding-matchers";
 import { getEditorCommand, openInEditor } from "../../utils/external-editor";
-import { DynamicBorder } from "./dynamic-border";
+import { OverlayPanel } from "./overlay-box";
 
 export interface HookEditorOptions {
 	/** When true, use prompt-style keybindings with the legacy ask prompt chrome. */
@@ -30,7 +30,7 @@ export interface HookEditorOptions {
 }
 
 /** Interactive multiline dialog used by hooks and the ask tool's Other response. */
-export class HookEditorComponent extends Container implements Focusable {
+export class HookEditorComponent extends OverlayPanel implements Focusable {
 	#editor: Editor;
 	#onSubmitCallback: (value: string) => void;
 	#onCancelCallback: () => void;
@@ -47,22 +47,22 @@ export class HookEditorComponent extends Container implements Focusable {
 		onCancel: () => void,
 		options?: HookEditorOptions,
 	) {
-		super();
+		// First title line insets into the panel border; remaining lines (e.g. the
+		// bounded ask question under "◆ Other (type your own)") stay as body rows
+		// so they are never truncated into the one-row border.
+		const [titleLine = "", ...detailLines] = title.split("\n");
+		super(titleLine);
 
 		this.#tui = tui;
 		this.#onSubmitCallback = onSubmit;
 		this.#onCancelCallback = onCancel;
 		this.#promptStyle = options?.promptStyle ?? false;
 
-		this.addChild(new DynamicBorder());
 		this.addChild(new Spacer(1));
-
-		// Title. Prompt-style renders the borderless editor's `> ` gutter at
-		// column 0, so pad the title to match; hook-style keeps the 1-col indent
-		// that lines up with its bordered editor body (#5313).
-		const chromePadX = this.#promptStyle ? 0 : 1;
-		this.addChild(new Text(theme.fg("accent", title), chromePadX, 0));
-		this.addChild(new Spacer(1));
+		if (detailLines.length > 0) {
+			for (const line of detailLines) this.addChild(new Text(theme.fg("accent", line), 0, 0));
+			this.addChild(new Spacer(1));
+		}
 
 		// Editor
 		this.#editor = new Editor(getEditorTheme());
@@ -87,10 +87,8 @@ export class HookEditorComponent extends Container implements Focusable {
 		const hint = this.#promptStyle
 			? "enter or ctrl+q submit  esc cancel  ctrl+g external editor"
 			: "ctrl+q/ctrl+enter submit  esc cancel  ctrl+g external editor";
-		this.addChild(new Text(theme.fg("dim", hint), chromePadX, 0));
-
+		this.addChild(new Text(theme.fg("dim", hint), 0, 0));
 		this.addChild(new Spacer(1));
-		this.addChild(new DynamicBorder());
 	}
 
 	/** Keep the nested editor's software/hardware cursor mode aligned with the dialog focus target. */

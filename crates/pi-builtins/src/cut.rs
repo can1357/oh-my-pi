@@ -5,7 +5,7 @@
 use std::{
 	ffi::OsString,
 	fs::File,
-	io::{self, BufRead, BufReader, BufWriter, Read, Write},
+	io::{self, BufRead, BufReader, Read, Write},
 };
 
 use bstr::io::BufReadExt;
@@ -737,7 +737,7 @@ where
 		.collect::<Vec<_>>();
 	let mut stdin_read = false;
 	let mut failed = false;
-	let mut out = BufWriter::new(&mut host.stdout);
+	let mut out = host.stdout_writer();
 
 	for (filename, path) in inputs {
 		let result = if let Some(path) = path {

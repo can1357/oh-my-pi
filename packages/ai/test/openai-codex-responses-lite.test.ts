@@ -683,7 +683,6 @@ describe("openai-codex Responses Lite and client metadata wire format", () => {
 		}).result();
 
 		expect(result.stopReason).toBe("stop");
-		expect(captured).toBeDefined();
 		expect(captured!.headers.get("x-openai-internal-codex-responses-lite")).toBe("true");
 		expect(captured!.headers.get("version")).toBe("0.144.1");
 		const body = captured!.body;

@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+## [17.4.1] - 2026-08-21
+
+### Added
+
+- Restored `providerFrameBudget()` to allow callers to size archives according to the maximum frame budget the provider will send.
+
+### Fixed
+
+- Fixed an issue where character-based truncation could split inline base64 data URLs into corrupted payloads that were rejected by OpenAI-compatible providers. Data URLs are now replaced atomically with placeholders before truncation, and previously affected archives are healed during re-compaction.
+
+## [17.3.8] - 2026-08-19
+
+### Fixed
+
+- Fixed image-based compaction confusing digit `0` with letter `O` and corrupting compacted identifiers (e.g. Slack IDs): the default frame fonts (X.org `8x13`, `6x12`, `5x8`) drew zero as a bare oval indistinguishable from `O`. Zero now carries a disambiguating interior slash (`8x13`) or bar (`6x12`/`5x8`); unscii-8 already shipped a slashed zero ([#8713](https://github.com/can1357/oh-my-pi/issues/8713)).
+
 ## [17.2.15] - 2026-08-12
 
 ### Fixed

@@ -17,7 +17,9 @@ export function detectLineEnding(content: string): LineEnding {
 
 /** Normalize every line ending to LF. */
 export function normalizeToLF(text: string): string {
-	return text.replace(/\r\n?/g, "\n");
+	// Fast path: the regex pass allocates and costs ~2.5ms/MB even when there is
+	// nothing to replace; most real files are already LF-only.
+	return text.indexOf("\r") === -1 ? text : text.replace(/\r\n?/g, "\n");
 }
 
 /** Re-encode LF text with the requested line ending. */

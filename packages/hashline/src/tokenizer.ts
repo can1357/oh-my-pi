@@ -182,6 +182,37 @@ function scanRangeSeparator(line: string, index: number, end: number): number | 
 	return cursor;
 }
 
+/**
+ * Recover a dangling range separator: the run after `N` contains at least one
+ * non-whitespace separator char but no end number (`244.=:`, `5-`, `12.. @reg`).
+ * Models write this intending an open range; it collapses to `N.=N`. Returns
+ * the index past the run only when what follows is `:`, `@`, or end-of-header —
+ * anything else keeps the header on the strict rejection path.
+ */
+function scanDanglingSeparator(line: string, index: number, end: number): number | null {
+	let cursor = index;
+	let sawSeparatorChar = false;
+	while (cursor < end) {
+		const code = line.charCodeAt(cursor);
+		if (code === CHAR_HYPHEN || code === CHAR_DOT || code === CHAR_EQUALS || code === CHAR_ELLIPSIS) {
+			sawSeparatorChar = true;
+			cursor++;
+			continue;
+		}
+		if (isWhitespaceCode(code)) {
+			cursor++;
+			continue;
+		}
+		break;
+	}
+	if (!sawSeparatorChar) return null;
+	if (cursor < end) {
+		const code = line.charCodeAt(cursor);
+		if (code !== CHAR_COLON && code !== CHAR_AT) return null;
+	}
+	return cursor;
+}
+
 function scanHeaderRange(line: string, index = 0, end = trimEndIndex(line), allowSingle = false): RangeScan | null {
 	const numberStart = skipWhitespace(line, index, end);
 	const start = scanLineNumber(line, numberStart, end);
@@ -189,6 +220,14 @@ function scanHeaderRange(line: string, index = 0, end = trimEndIndex(line), allo
 	const afterFirst = scanRangeSeparator(line, start.nextIndex, end);
 	if (afterFirst === null) {
 		if (!allowSingle) return null;
+		const dangling = scanDanglingSeparator(line, start.nextIndex, end);
+		if (dangling !== null) {
+			return {
+				range: { start: { line: start.line }, end: { line: start.line } },
+				nextIndex: dangling,
+				hadSeparator: true,
+			};
+		}
 		return {
 			range: { start: { line: start.line }, end: { line: start.line } },
 			nextIndex: skipWhitespace(line, start.nextIndex, end),

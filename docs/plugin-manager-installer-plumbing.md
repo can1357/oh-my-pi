@@ -109,7 +109,7 @@ Malformed `package.json` JSON is a hard failure at read time; malformed manifest
    - `[a,b]`: validates each feature exists in manifest features map
    - `[]`: empty feature list
    - bare spec: `null` (use defaults policy later in loader)
-7. Validate declared extension entries (`#validateInstalledExtensions`): each manifest `extensions` entry must resolve on disk and import to a factory function. On failure, roll back the install — restore the previous `plugins/package.json`, remove the freshly installed package, and restore any prior version from a backup taken before `bun install` — then abort.
+7. Validate declared extension entries (`#validateInstalledExtensions`): each manifest `extensions` entry must resolve on disk, import to a factory function, and initialize successfully against a throwaway registration surface. On failure, roll back the install — restore the previous `plugins/package.json`, remove the freshly installed package, and restore any prior version from a backup taken before `bun install` — then abort.
 8. Upsert lockfile runtime state: `{ version, enabledFeatures, enabled: true }`.
 
 ### Update semantics
@@ -142,6 +142,8 @@ If uninstall command fails, runtime state is not changed.
    - project `disabled` list masks the plugin as disabled
 
 `omp plugin list` combines this result with `MarketplaceManager.listInstalledPlugins()`.
+
+`PluginManager.getPlugin()` resolves one runtime package directly, including a marketplace symlink intentionally omitted from `list()`. Config commands use this path so marketplace settings remain addressable without duplicating marketplace entries in list and status output.
 
 ## Link flow (`PluginManager.link`)
 

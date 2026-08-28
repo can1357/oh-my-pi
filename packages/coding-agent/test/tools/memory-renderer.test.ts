@@ -7,8 +7,10 @@ import {
 } from "@oh-my-pi/pi-coding-agent/tools/memory-render";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
 
+const themePromise = getThemeByName("dark");
+
 async function theme() {
-	const t = await getThemeByName("dark");
+	const t = await themePromise;
 	expect(t).toBeDefined();
 	return t!;
 }

@@ -47,4 +47,45 @@ describe("MCPManager connection status events", () => {
 			await manager.disconnectAll();
 		}
 	});
+
+	it("includes the originating config path when a discovered server fails to start", async () => {
+		const manager = new MCPManager(workDir);
+		const events: McpConnectionStatusEvent[] = [];
+		const missingCommand = path.join(workDir, "missing-mcp-server");
+		const configPath = path.join(os.homedir(), ".codex", "config.toml");
+
+		try {
+			const result = await manager.connectServers(
+				{
+					broken: {
+						type: "stdio",
+						command: missingCommand,
+					},
+				},
+				{
+					broken: {
+						provider: "codex",
+						providerName: "Codex",
+						path: configPath,
+						level: "user",
+					},
+				},
+				event => events.push(event),
+			);
+
+			const message = result.errors.get("broken") ?? "";
+			expect(message).toMatch(/ENOENT|No such file|not found/i);
+			expect(events).toEqual([
+				{ type: "connecting", serverNames: ["broken"] },
+				{
+					type: "failed",
+					serverName: "broken",
+					error: message,
+					sourcePath: configPath,
+				},
+			]);
+		} finally {
+			await manager.disconnectAll();
+		}
+	});
 });

@@ -47,6 +47,8 @@ function createModelContext(advisorActive: boolean): SegmentContext {
 		contextTokens: 0,
 		contextWindow: 0,
 		autoCompactEnabled: false,
+		compactionSpeculation: "idle",
+		speculationBlinkOn: true,
 		subagentCount: 0,
 		activeMs: 0,
 		activeRepo: null,
@@ -57,10 +59,10 @@ function createModelContext(advisorActive: boolean): SegmentContext {
 }
 
 describe("status line model segment advisor badge", () => {
-	it("appends a success-colored ++ badge when all advisors run", () => {
+	it("appends a success-colored advisor symbol when all advisors run", () => {
 		const rendered = renderSegment("model", createModelContext(true));
 		expect(rendered.content).toContain("Test Model");
-		expect(rendered.content).toContain(theme.fg("success", "++"));
+		expect(rendered.content).toContain(theme.fg("success", ` ${theme.icon.advisor}`));
 	});
 
 	it("colors the badge by the worst roster status", () => {
@@ -72,7 +74,7 @@ describe("status line model segment advisor badge", () => {
 				{ name: "b", status: "quota_exhausted" },
 			],
 		});
-		expect(renderSegment("model", ctx).content).toContain(theme.fg("warning", "++"));
+		expect(renderSegment("model", ctx).content).toContain(theme.fg("warning", ` ${theme.icon.advisor}`));
 		ctx.session.getAdvisorStatusOverview = () => ({
 			configured: true,
 			advisors: [
@@ -80,13 +82,13 @@ describe("status line model segment advisor badge", () => {
 				{ name: "b", status: "quota_exhausted" },
 			],
 		});
-		expect(renderSegment("model", ctx).content).toContain(theme.fg("error", "++"));
+		expect(renderSegment("model", ctx).content).toContain(theme.fg("error", ` ${theme.icon.advisor}`));
 	});
 
 	it("omits the badge when the advisor is inactive", () => {
 		const rendered = renderSegment("model", createModelContext(false));
 		expect(rendered.content).toContain("Test Model");
-		expect(rendered.content).not.toContain("++");
+		expect(rendered.content).not.toContain(theme.icon.advisor);
 	});
 });
 

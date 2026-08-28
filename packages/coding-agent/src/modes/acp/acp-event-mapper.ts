@@ -979,9 +979,12 @@ function extractReadableText(value: unknown): string | undefined {
 		if (text.length > 0) {
 			return normalizeText(text);
 		}
-		if (hasBinaryContentBlock(contentBlocks)) {
-			return undefined;
-		}
+		// A structured result envelope (`{ content: [...] }`) whose blocks carry no
+		// plain text has nothing readable to surface, and its data already rides the
+		// ACP frame as `rawOutput`. Serializing the whole envelope to JSON would just
+		// render a raw blob as the tool row (e.g. hub wait progress, issue #9511), so
+		// stop here instead of falling through to the JSON fallback.
+		return undefined;
 	}
 	if (extractDetailsImages(value)) {
 		return undefined;
@@ -1032,13 +1035,6 @@ function getContentType(value: unknown): string | undefined {
 	}
 	const type = (value as TypedValue).type;
 	return typeof type === "string" ? type : undefined;
-}
-
-function hasBinaryContentBlock(blocks: unknown[]): boolean {
-	return blocks.some(block => {
-		const type = getContentType(block);
-		return type === "image" || type === "audio";
-	});
 }
 
 function extractStringProperty<T extends object>(value: unknown, key: keyof T): string | undefined {
