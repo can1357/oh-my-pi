@@ -1660,6 +1660,13 @@ impl Registry {
 				});
 			}
 
+			if spec.name.contains('@') {
+				return Err(RegistryError::InvalidHostToolSpec {
+					name:    spec.name.clone(),
+					message: sf!("name must not contain '@'"),
+				});
+			}
+
 			if self.protected_core.contains(&spec.name) {
 				return Err(RegistryError::CoreNameClaim {
 					name:       spec.name.clone(),
@@ -3676,6 +3683,37 @@ mod tests {
 		));
 		// Rejection happened before mutating host state.
 		assert!(registry.host_tool_revision("rpc/client").is_none());
+	}
+
+	#[test]
+	fn host_roster_rejects_claimant_qualified_names_atomically() {
+		let mut registry = Registry::new();
+		registry.protect_core_claims(["read"]);
+
+		for name in ["read@omp/core", "custom@publisher/ext"] {
+			let error = registry
+				.replace_host_tools(
+					sf!("rpc/client"),
+					1,
+					vec![HostToolSpec {
+						name:        Str::new_static(name),
+						description: sf!("qualified host tool"),
+						parameters:  serde_json::json!({"type": "object"}),
+					}],
+					Arc::new(HostExecutor),
+				)
+				.expect_err("claimant-qualified host name must be rejected");
+			assert!(matches!(
+				error,
+				RegistryError::InvalidHostToolSpec { name: ref rejected, ref message }
+					if rejected == name && message == "name must not contain '@'"
+			));
+		}
+
+		assert!(
+			registry.host_tool_revision("rpc/client").is_none(),
+			"rejected roster must not mutate host state"
+		);
 	}
 
 	#[test]
