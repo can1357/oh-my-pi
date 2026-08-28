@@ -192,6 +192,16 @@ describe("AgentSession todo reminder self-continuation suppression", () => {
 		expect(continueSpy).not.toHaveBeenCalled();
 	});
 
+	it("does not accept a completion claim followed by a trailing question", async () => {
+		const continueSpy = vi.spyOn(session.agent, "continue").mockResolvedValue();
+
+		emitTextOnlyStop("I've finished everything. Let me know if you'd like anything else?");
+		await session.waitForIdle();
+
+		expect(reminderAttempts).toEqual([1]);
+		expect(continueSpy).toHaveBeenCalledTimes(1);
+	});
+
 	it("still reminds when the assistant answers its own prompt-shaped question", async () => {
 		const continueSpy = vi.spyOn(session.agent, "continue").mockResolvedValue();
 
@@ -227,20 +237,18 @@ describe("AgentSession todo reminder self-continuation suppression", () => {
 		expect(continueSpy).toHaveBeenCalledTimes(1);
 	});
 
-	it("fires exactly one reminder per user pause when the agent only acknowledges", async () => {
-		// Each call to continue() mirrors what the bug-reported model did: emit another
-		// text-only stop ("paused at your instruction"), no tool calls in between.
+	it("keeps a text-only stop non-terminal while actionable todos remain", async () => {
+		let extraStops = 0;
 		vi.spyOn(session.agent, "continue").mockImplementation(async () => {
-			emitTextOnlyStop();
+			extraStops += 1;
+			if (extraStops <= 4) emitTextOnlyStop("Task complete. All 2 items now wired.");
 		});
 
 		emitTextOnlyStop();
 		await session.waitForIdle();
 
-		// With the bug: reminderAttempts === [1, 2, 3] within a single user pause.
-		// With the fix: the second `agent_end` is suppressed because no tool action ran
-		// between the first reminder and the agent's text-only ack.
-		expect(reminderAttempts).toEqual([1]);
+		expect(reminderAttempts.slice(0, 3)).toEqual([1, 2, 3]);
+		expect(extraStops).toBe(5);
 	});
 
 	it("re-escalates after the agent makes tool-level progress between stops", async () => {
@@ -254,14 +262,12 @@ describe("AgentSession todo reminder self-continuation suppression", () => {
 				emitTextOnlyStop();
 				return;
 			}
-			// Subsequent continuations are bare acks — they must not escalate further.
-			emitTextOnlyStop();
+			if (continueCount <= 4) emitTextOnlyStop();
 		});
 
 		emitTextOnlyStop();
 		await session.waitForIdle();
 
-		// 1/3 fires, agent does work, 2/3 fires, agent acks → suppressed, no 3/3.
-		expect(reminderAttempts).toEqual([1, 2]);
+		expect(reminderAttempts.slice(0, 3)).toEqual([1, 2, 3]);
 	});
 });
