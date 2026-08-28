@@ -1058,6 +1058,20 @@ export class RelayBridge {
 					},
 				};
 			}
+			case "Network.emulateNetworkConditions":
+				// Chrome keeps the throttling profile on the shared root until another
+				// emulateNetworkConditions call replaces it. When the replay owner
+				// disappears mid-recovery, reset the root back to neutral conditions so
+				// surviving holders do not inherit an orphaned offline/throttled state.
+				return {
+					method: subscription.method,
+					params: {
+						offline: false,
+						latency: 0,
+						downloadThroughput: -1,
+						uploadThroughput: -1,
+					},
+				};
 			case "Network.setExtraHTTPHeaders":
 				return { method: subscription.method, params: { headers: {} } };
 			case "Network.setBlockedURLs":

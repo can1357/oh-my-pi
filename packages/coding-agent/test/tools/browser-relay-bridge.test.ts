@@ -1409,6 +1409,83 @@ describe("RelayBridge tab grouping", () => {
 		expect(ext2.rpcs("send")).toHaveLength(1);
 	});
 
+	it("clears replayed network throttling when its owner disconnects during recovery", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const owner = new FakeCdpSocket();
+		const ownerConn = bridge.cdpConnected(owner);
+		const ownerSession = await attachPage(bridge, ext, owner, ownerConn, 1);
+		const holder = new FakeCdpSocket();
+		const holderConn = bridge.cdpConnected(holder);
+		const holderSession = await attachPage(bridge, ext, holder, holderConn, 1);
+
+		const throttling = {
+			offline: true,
+			latency: 250,
+			downloadThroughput: 128 * 1024,
+			uploadThroughput: 64 * 1024,
+			connectionType: "cellular3g",
+		};
+
+		bridge.cdpMessage(
+			ownerConn,
+			JSON.stringify({
+				id: ++msgSeq,
+				sessionId: ownerSession,
+				method: "Network.emulateNetworkConditions",
+				params: throttling,
+			}),
+		);
+		await flush();
+		ack(bridge, ext, "send");
+		await flush();
+
+		bridge.extClosed(ext);
+		const ext2 = new FakeExtSocket();
+		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], { recoverableTabIds: [1] });
+		await waitFor(() => ext2.rpcs("attach").length === 1, "recovery attach RPC");
+		ack(bridge, ext2, "attach");
+		await waitFor(() => ext2.rpcs("send").length === 1, "network throttling replay");
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual(["Network.emulateNetworkConditions"]);
+		expect(ext2.rpcs("send")[0]!.params).toEqual(throttling);
+
+		// The throttling owner disappears after the replayed state has been sent
+		// to the fresh root but before replay observes completion. Another holder
+		// keeps the tab attached, so recovery must reset the root back to neutral
+		// network conditions instead of leaving the offline/throttled state orphaned.
+		bridge.cdpClosed(ownerConn);
+		ack(bridge, ext2, "send");
+		await waitFor(() => ext2.rpcs("send").length === 2, "orphaned throttling cleanup");
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual([
+			"Network.emulateNetworkConditions",
+			"Network.emulateNetworkConditions",
+		]);
+		expect(ext2.rpcs("send")[1]!.params).toEqual({
+			offline: false,
+			latency: 0,
+			downloadThroughput: -1,
+			uploadThroughput: -1,
+		});
+		ack(bridge, ext2, "send");
+		await flush();
+
+		const commandId = ++msgSeq;
+		bridge.cdpMessage(
+			holderConn,
+			JSON.stringify({ id: commandId, sessionId: holderSession, method: "Network.getCookies" }),
+		);
+		await flush();
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual([
+			"Network.emulateNetworkConditions",
+			"Network.emulateNetworkConditions",
+			"Network.getCookies",
+		]);
+		ack(bridge, ext2, "send", { cookies: [] });
+		await flush();
+		expect(holder.messages.filter(message => message.id === commandId && "result" in message)).toHaveLength(1);
+	});
+
 	it("does not replay a cleared persistent root setter after recovery", async () => {
 		const bridge = new RelayBridge({});
 		const ext = new FakeExtSocket();
