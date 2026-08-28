@@ -210,7 +210,7 @@ function treePrefix(
 		// rail column — its children's connectors sit directly under that dot.
 		if (!grandparent || grandparent === MAIN_AGENT_ID) break;
 		ancestry.add(parent);
-		segments.push(lastSiblingById.get(parent) ? "    " : "│   ");
+		segments.push(lastSiblingById.get(parent) ? "   " : "│  ");
 		parent = grandparent;
 	}
 	const maxSegments = Math.max(1, Math.floor(Math.max(TREE_SEGMENT_WIDTH, maxWidth - 2) / TREE_SEGMENT_WIDTH));

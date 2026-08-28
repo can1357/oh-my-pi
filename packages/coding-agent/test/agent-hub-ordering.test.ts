@@ -429,6 +429,60 @@ describe("Agent hub row ordering", () => {
 		}
 	});
 
+	it("routes wheel and hover by pane: lists select, detail scrolls, hover highlights", () => {
+		geometry = stubStdoutGeometry(120);
+		geometry.setRows(30);
+		const agents = new AgentRegistry();
+		setSystemTime(1_000);
+		agents.register({ id: "Alpha", displayName: "Alpha", kind: "sub", session: null });
+		setSystemTime(2_000);
+		agents.register({ id: "Beta", displayName: "Beta", kind: "sub", session: null });
+		const irc = new IrcBus(agents);
+		irc.history.recordMessage({ id: "a1", from: "Alpha", to: "Main", body: "alpha says hi", ts: 5_000 });
+		irc.history.recordDelivery("a1", { to: "Main", outcome: "injected" });
+		const hub = makeHub(agents, { irc });
+		try {
+			// Agents: wheel over the left roster pane moves the selection...
+			expect(selectedAgentId(hub)).toBe("Beta");
+			hub.handleInput(wheel("down"));
+			expect(selectedAgentId(hub)).toBe("Alpha");
+			// ...while wheel over the right detail pane scrolls content only.
+			hub.handleInput("\x1b[<65;110;10M");
+			expect(selectedAgentId(hub)).toBe("Alpha");
+			// Hovering a detail line highlights it; re-hovering the same line is
+			// stable; a roster hover replaces it (roster rows hover-highlight too).
+			const baseline = hub.render(120).join("\n");
+			hub.handleInput("\x1b[<35;110;8M");
+			const hovered = hub.render(120).join("\n");
+			expect(hovered).not.toBe(baseline);
+			hub.handleInput("\x1b[<35;110;8M");
+			expect(hub.render(120).join("\n")).toBe(hovered);
+			hub.handleInput("\x1b[<35;10;8M");
+			expect(Bun.stripANSI(hub.render(120).join("\n"))).toBe(Bun.stripANSI(baseline));
+
+			// Messages: wheel over the conversation list changes conversations;
+			// wheel over the thread pane focuses the thread and expands the
+			// selected message with its full raw body and metadata line.
+			hub.handleInput("3");
+			const frame = hub.render(120).map(Bun.stripANSI);
+			const alphaRow = frame.findIndex(line => line.includes("❯ Main ⇄ Alpha"));
+			expect(alphaRow).toBeGreaterThanOrEqual(0);
+			hub.handleInput(`\x1b[<65;10;${alphaRow + 1}M`);
+			const afterListWheel = Bun.stripANSI(hub.render(120).join("\n"));
+			expect(afterListWheel).toContain("Main ⇄ Beta · 0 messages");
+			hub.handleInput(`\x1b[<64;10;${alphaRow + 1}M`);
+			const alphaThread = Bun.stripANSI(hub.render(120).join("\n"));
+			expect(alphaThread).toContain("❯ Main ⇄ Alpha");
+			// List wheel keeps list focus (no expansion yet)...
+			expect(alphaThread).not.toContain("id a1 · injected");
+			// ...while a wheel over the thread pane focuses it and expands.
+			hub.handleInput(`\x1b[<65;110;${alphaRow + 1}M`);
+			expect(Bun.stripANSI(hub.render(120).join("\n"))).toContain("id a1 · injected");
+		} finally {
+			hub.dispose();
+		}
+	});
+
 	it("flags a fallback badge for observer-only rows with no live session", () => {
 		geometry = stubStdoutGeometry(120);
 		const agents = new AgentRegistry();
@@ -966,9 +1020,9 @@ describe("Agent hub row ordering", () => {
 
 		try {
 			hub.handleInput("t");
-			expect(Bun.stripANSI(renderedRosterHeaderLineRaw(hub, "First", 120))).toContain("├── ⟳ First");
-			expect(Bun.stripANSI(renderedRosterHeaderLineRaw(hub, "Grandchild", 120))).toContain("│   └── ⟳ Grandchild");
-			expect(Bun.stripANSI(renderedRosterHeaderLineRaw(hub, "Last", 120))).toContain("└── ⟳ Last");
+			expect(Bun.stripANSI(renderedRosterHeaderLineRaw(hub, "First", 120))).toContain("├─ ⟳ First");
+			expect(Bun.stripANSI(renderedRosterHeaderLineRaw(hub, "Grandchild", 120))).toContain("│  └─ ⟳ Grandchild");
+			expect(Bun.stripANSI(renderedRosterHeaderLineRaw(hub, "Last", 120))).toContain("└─ ⟳ Last");
 		} finally {
 			hub.dispose();
 		}
@@ -1248,7 +1302,7 @@ describe("Agent hub row ordering", () => {
 			expect(visible).toBeDefined();
 			hub.handleInput(leftClick(visible!.index + 1));
 			const selected = Bun.stripANSI(hub.render(120).join("\n"));
-			expect(selected).toContain(`❯ ${visible!.match![1]}`);
+			expect(selected).toContain(`⇄ ${visible!.match![1]}`);
 		} finally {
 			hub.dispose();
 		}
@@ -1341,11 +1395,13 @@ describe("Agent hub row ordering", () => {
 		try {
 			const list = Bun.stripANSI(hub.render(80).join("\n"));
 			expect(list).toContain("Conversations");
-			expect(list).toContain("Needs attention");
+			expect(list).toContain("Main ⇄ Worker");
+			// The list shows participant pairs only — bodies live in the thread pane.
+			expect(list).not.toContain("Needs attention");
 			expect(list).toMatch(/Worker\s+1/);
 			// Periodic/history refresh and list navigation must not clear unread while only the list is visible.
-			hub.handleInput("j");
-			hub.handleInput("k");
+			hub.handleInput("k"); // up to the pinned All-agents row
+			hub.handleInput("j"); // back down to the Worker thread
 			const stillUnread = Bun.stripANSI(hub.render(80).join("\n"));
 			expect(stillUnread).toMatch(/Worker\s+1/);
 			hub.handleInput("\r");

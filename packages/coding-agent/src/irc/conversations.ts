@@ -103,8 +103,11 @@ export function deriveIrcConversations(
 			id === "broadcast:all"
 				? "All agents"
 				: participants.includes(viewerId)
-					? displayName(options.registry, participants.find(participant => participant !== viewerId) ?? viewerId)
-					: participants.map(participant => displayName(options.registry, participant)).join(" ↔ ");
+					? `${displayName(options.registry, viewerId)} ⇄ ${displayName(
+							options.registry,
+							participants.find(participant => participant !== viewerId) ?? viewerId,
+						)}`
+					: participants.map(participant => displayName(options.registry, participant)).join(" ⇄ ");
 		const readAt = options.readAt?.(id) ?? { timestamp: 0, messageId: "" };
 		conversations.push({
 			id,
@@ -122,5 +125,12 @@ export function deriveIrcConversations(
 			}, 0),
 		});
 	}
-	return conversations.sort((a, b) => b.lastMessageAt - a.lastMessageAt || a.id.localeCompare(b.id));
+	// The All-agents broadcast thread stays pinned at the top; everything else
+	// sorts by most recent activity.
+	return conversations.sort((a, b) => {
+		const aAll = a.id === "broadcast:all" ? 1 : 0;
+		const bAll = b.id === "broadcast:all" ? 1 : 0;
+		if (aAll !== bAll) return bAll - aAll;
+		return b.lastMessageAt - a.lastMessageAt || a.id.localeCompare(b.id);
+	});
 }

@@ -133,8 +133,8 @@ describe("IRC history", () => {
 		});
 		expect(conversations.map(conversation => conversation.label)).toEqual([
 			"All agents",
-			"Worker One ↔ Reviewer",
-			"Worker One",
+			"Worker One ⇄ Reviewer",
+			"Main ⇄ Worker One",
 		]);
 		expect(conversations[0]?.messages).toHaveLength(2);
 		expect(conversations[0]?.unread).toBe(1);

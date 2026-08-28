@@ -22,6 +22,7 @@ import {
 	routeSelectListMouse,
 	routeSgrMouseInput,
 	type SelectListMouseTarget,
+	type SgrMouseEvent,
 	type TUI,
 	visibleWidth,
 	wrapTextWithAnsi,
@@ -223,6 +224,8 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 	#conversations: IrcConversation[] = [];
 	#selectedConversationRow = 0;
 	#selectedMessageRow = 0;
+	/** True once the user navigates/clicks conversations; keeps empty pinned thread selected across refreshes. */
+	#conversationSelectionExplicit = false;
 	#messageFocus: "conversations" | "thread" = "conversations";
 	#messageDraft = "";
 	#messageComposing = false;
@@ -258,6 +261,11 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 	/** Fuzzy agent filter (`/`), applied to id and display name. */
 	#agentFilter = "";
 	#agentFilterEditing = false;
+	#hoveredConversationRow: number | null = null;
+	/** Absolute terminal row hovered inside the right detail pane (agents section). */
+	#hoveredDetailLine: number | null = null;
+	#lastConversationWidth = 30;
+	#lastDetailRows: number | undefined;
 	/** Current observer index and summary data, rebuilt on source changes rather than every paint. */
 	#observedById = new Map<string, ObservableSession>();
 	#aggregate: AggregateMetrics = {
@@ -420,16 +428,9 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 	}
 
 	handleInput(keyData: string): void {
-		if (
-			routeSgrMouseInput(keyData, event => {
-				const split = this.#lastSplitRosterWidth;
-				if (split !== undefined && event.wheel === null && event.col > split + 2) return false;
-				return routeSelectListMouse(this, event, event.row);
-			})
-		) {
+		if (routeSgrMouseInput(keyData, event => this.#routeHubMouse(event))) {
 			return;
 		}
-
 		// The hub/observe keys always close the overlay (toggle semantics)
 		for (const key of this.#hubKeys) {
 			if (matchesKey(keyData, key)) {
@@ -697,15 +698,17 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 		for (const ref of this.#registry.listVisibleTo(MAIN_AGENT_ID)) {
 			if (ref.id === MAIN_AGENT_ID || ref.kind === "advisor") continue;
 			const id = `direct:${[MAIN_AGENT_ID, ref.id].sort().join(":")}`;
-			ensure(id, ref.displayName || ref.id, [MAIN_AGENT_ID, ref.id]);
+			ensure(id, `${MAIN_AGENT_ID} ⇄ ${ref.displayName || ref.id}`, [MAIN_AGENT_ID, ref.id]);
 		}
+		// The All-agents thread stays pinned at the top; live threads follow by
+		// recency, and empty compose targets sink below everything with history.
 		this.#conversations.sort((a, b) => {
+			if (a.id === "broadcast:all") return -1;
+			if (b.id === "broadcast:all") return 1;
 			const aLive = a.messages.length > 0 ? 1 : 0;
 			const bLive = b.messages.length > 0 ? 1 : 0;
 			if (aLive !== bLive) return bLive - aLive;
 			if (a.lastMessageAt !== b.lastMessageAt) return b.lastMessageAt - a.lastMessageAt;
-			if (a.id === "broadcast:all") return 1;
-			if (b.id === "broadcast:all") return -1;
 			return a.id.localeCompare(b.id);
 		});
 	}
@@ -727,10 +730,17 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 		});
 		this.#ensureComposableConversations();
 		const kept = selectedId ? this.#conversations.findIndex(conversation => conversation.id === selectedId) : -1;
-		if (kept >= 0) {
+		const withMessages = this.#conversations.findIndex(conversation => conversation.messages.length > 0);
+		const keptConversation = kept >= 0 ? this.#conversations[kept] : undefined;
+		// Keep the user's pick; otherwise a default selection never sticks to an
+		// empty placeholder (e.g. the pinned All-agents thread) once a live thread
+		// exists.
+		const keepKept =
+			kept >= 0 &&
+			(this.#conversationSelectionExplicit || (keptConversation?.messages.length ?? 0) > 0 || withMessages < 0);
+		if (keepKept) {
 			this.#selectedConversationRow = kept;
 		} else {
-			const withMessages = this.#conversations.findIndex(conversation => conversation.messages.length > 0);
 			this.#selectedConversationRow =
 				withMessages >= 0
 					? withMessages
@@ -886,6 +896,7 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 		this.#messagesSplitVisible = split;
 		if (split || this.#messageThreadOpen) this.#markSelectedConversationRead();
 		const conversationWidth = split ? Math.max(24, Math.min(36, Math.floor(width * 0.3))) : Math.max(1, width - 4);
+		this.#lastConversationWidth = conversationWidth;
 		const threadWidth = split ? Math.max(1, width - conversationWidth - 7) : Math.max(1, width - 4);
 		const selected = this.#conversations[this.#selectedConversationRow];
 		const chromeRows = this.#messageComposing || this.#messageNotice ? 1 : 0;
@@ -959,12 +970,12 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 				const conversation = this.#conversations[index]!;
 				const cursor = index === selected ? theme.fg("accent", theme.nav.cursor) : " ";
 				const unread = conversation.unread > 0 ? theme.fg("warning", ` ${conversation.unread}`) : "";
-				const preview = sanitizeDisplayText(conversation.messages.at(-1)?.body ?? "");
+				// Rows show the participant pair ("Main ⇄ all", "Main ⇄ Agent"), not a
+				// message preview — threads read in the right pane.
 				const label = sanitizeDisplayText(conversation.label);
-				const prefix = `${cursor} ${theme.bold(label)}${unread} `;
-				lines.push(
-					`${prefix}${theme.fg("muted", truncateToWidth(preview, Math.max(1, width - visibleWidth(prefix))))}`,
-				);
+				let row = `${cursor} ${theme.bold(label)}${unread}`;
+				if (this.#hoveredConversationRow === index) row = theme.bg("selectedBg", row);
+				lines.push(truncateToWidth(row, width));
 			}
 		}
 		while (lines.length < rows) lines.push("");
@@ -982,12 +993,13 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 			theme.bold(`${sanitizeDisplayText(conversation.label)} · ${conversation.messages.length} messages`),
 		];
 		const budget = Math.max(0, rows - 1);
+		if (conversation.messages.length === 0) {
+			lines.push(theme.fg("muted", "No messages yet — press c to compose"));
+			while (lines.length < rows) lines.push("");
+			return lines.slice(0, rows);
+		}
 		const selected = Math.min(this.#selectedMessageRow, Math.max(0, conversation.messages.length - 1));
-		const start = Math.max(
-			0,
-			Math.min(selected - Math.floor(budget / 2), Math.max(0, conversation.messages.length - budget)),
-		);
-		for (let index = start; index < conversation.messages.length; index++) {
+		const renderRow = (index: number): string[] => {
 			const message = conversation.messages[index]!;
 			const cursor =
 				this.#messageFocus === "thread" && index === selected ? theme.fg("accent", theme.nav.cursor) : " ";
@@ -1001,10 +1013,38 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 						: theme.fg("success", "✓");
 			const error = message.outcome === "failed" && message.error ? ` ${sanitizeDisplayText(message.error)}` : "";
 			const prefix = `${cursor} ${activityClock(message.ts)} ${outcome} ${theme.fg("muted", direction)}${theme.fg("dim", reply)} `;
-			lines.push(
+			const row = [
 				`${prefix}${truncateToWidth(sanitizeLine(message.body + error), Math.max(1, width - visibleWidth(prefix)))}`,
-			);
+			];
+			if (index !== selected || this.#messageFocus !== "thread") return row;
+			// The selected message expands in place: full raw body, wrapped, plus a
+			// dim metadata line — transparency without leaving the thread.
+			const bodyWidth = Math.max(1, width - 6);
+			const body = sanitizeDisplayText(message.body);
+			for (const paragraph of body.split("\n")) {
+				for (const wrapped of wrapTextWithAnsi(paragraph, bodyWidth)) {
+					row.push(`      ${theme.fg("dim", wrapped)}`);
+				}
+			}
+			const meta = `id ${message.id} · ${message.outcome}${reply} · ts ${message.ts}`;
+			row.push(`      ${theme.fg("muted", truncateToWidth(sanitizeLine(meta), bodyWidth))}`);
+			return row;
+		};
+		const heights = conversation.messages.map((_message, index) => renderRow(index).length);
+		// Window by rendered LINES so the expanded message always fits: walk back
+		// from the selection, then fill forward with the remaining budget.
+		let start = selected;
+		let used = heights[selected]!;
+		while (start > 0 && used + heights[start - 1]! <= budget) {
+			start--;
+			used += heights[start]!;
 		}
+		let end = selected;
+		while (end + 1 < conversation.messages.length && used + heights[end + 1]! <= budget) {
+			end++;
+			used += heights[end]!;
+		}
+		for (let index = start; index <= end; index++) lines.push(...renderRow(index));
 		while (lines.length < rows) lines.push("");
 		return lines.slice(0, rows);
 	}
@@ -1033,6 +1073,7 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 		const split = this.#splitRosterWidth(width);
 		this.#lastRenderWasSplit = split !== undefined;
 		this.#lastSplitRosterWidth = split;
+		this.#lastDetailRows = contentRows;
 		const selected = this.#rows[this.#selectedRow];
 		const lines: string[] = [];
 
@@ -1044,7 +1085,11 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 			for (let i = 0; i < contentRows; i++) {
 				const hit = roster.hitRows[i];
 				if (hit !== undefined) this.#hitRows[lines.length] = hit;
-				lines.push(splitRow(roster.lines[i] ?? "", details[i] ?? "", width, split));
+				let detailLine = details[i] ?? "";
+				if (detailLine && this.#hoveredDetailLine === lines.length) {
+					detailLine = theme.bg("selectedBg", detailLine);
+				}
+				lines.push(splitRow(roster.lines[i] ?? "", detailLine, width, split));
 			}
 			lines.push(dividerSplit(width, split));
 			lines.push(row(this.#footer(false, Math.max(1, width - 4)), width));
@@ -1091,12 +1136,12 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 		if (availableWidth < 96) {
 			return theme.fg(
 				"dim",
-				`${filter}1/2/3:view  j/k:select  Enter:open  t:${nextView}  Tab:details  r/x:manage  Esc:close`,
+				`${filter}1/2/3:view  j/k:select  type:search  Enter:open  t:${nextView}  Tab:details  r/x:manage  Esc:close`,
 			);
 		}
 		return theme.fg(
 			"dim",
-			`${filter}1:agents  2:activity  3:messages  j/k/wheel:select  PgUp/PgDn:details  Enter/click:open  t:${nextView}  r:revive  x:kill  Esc:close`,
+			`${filter}1:agents  2:activity  3:messages  j/k/wheel:select  type:search  PgUp/PgDn/wheel:details  Enter/click:open  t:${nextView}  r:revive  x:kill  Esc:close`,
 		);
 	}
 
@@ -1494,8 +1539,80 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 		this.#selectedRow = index;
 	}
 
+	/** Route a mouse event by pane: left lists select, the right detail pane scrolls. */
+	#routeHubMouse(event: SgrMouseEvent): boolean {
+		if (this.#section === "messages") {
+			const leftPane = this.#messagesSplitVisible && event.col <= this.#lastConversationWidth + 2;
+			if (event.wheel !== null) {
+				this.#hoveredConversationRow = null;
+				if (leftPane) {
+					this.#moveConversationSelection(event.wheel);
+				} else {
+					// Wheeling the thread pane is implicit thread focus.
+					this.#messageFocus = "thread";
+					this.#moveThreadSelection(event.wheel);
+				}
+				this.#requestRender();
+				return true;
+			}
+			if (event.motion) {
+				const index = this.#hitRows[event.row];
+				const next = leftPane && index !== undefined ? index : null;
+				if (next !== this.#hoveredConversationRow) {
+					this.#hoveredConversationRow = next;
+					this.#requestRender();
+				}
+				return true;
+			}
+			return false;
+		}
+		const split = this.#lastSplitRosterWidth;
+		if (this.#section === "agents" && split !== undefined && event.col > split + 2) {
+			// Right pane: wheel scrolls the detail text (Recent activity included);
+			// motion highlights the hovered line.
+			if (event.wheel !== null) {
+				this.#scrollDetails(event.wheel);
+				return true;
+			}
+			if (event.motion) {
+				// event.row is the 0-based frame line; detail content occupies
+				// frame lines 1..contentRows (line 0 is the top border).
+				const line = event.row;
+				const next = line >= 1 && line <= (this.#lastDetailRows ?? 0) ? line : null;
+				if (next !== this.#hoveredDetailLine) {
+					this.#hoveredDetailLine = next;
+					this.#requestRender();
+				}
+				return true;
+			}
+			return false;
+		}
+		if (event.motion && this.#hoveredDetailLine !== null) {
+			this.#hoveredDetailLine = null;
+			this.#requestRender();
+		}
+		return routeSelectListMouse(this, event, event.row);
+	}
+
+	#moveConversationSelection(delta: -1 | 1): void {
+		if (this.#conversations.length === 0) return;
+		this.#conversationSelectionExplicit = true;
+		this.#selectedConversationRow = Math.max(
+			0,
+			Math.min(this.#selectedConversationRow + delta, this.#conversations.length - 1),
+		);
+		this.#selectedMessageRow = (this.#conversations[this.#selectedConversationRow]?.messages.length ?? 1) - 1;
+		// Wide split marks on render; narrow list-only must keep unread until thread open.
+	}
+
+	#moveThreadSelection(delta: -1 | 1): void {
+		const messages = this.#conversations[this.#selectedConversationRow]?.messages ?? [];
+		this.#selectedMessageRow = Math.max(0, Math.min(this.#selectedMessageRow + delta, messages.length - 1));
+	}
+
 	handleWheel(delta: -1 | 1): void {
 		this.#hoveredRow = null;
+		this.#hoveredConversationRow = null;
 		if (this.#section === "activity") {
 			if (this.#activityRows.length > 0) {
 				this.#activityFollow = false;
@@ -1505,17 +1622,8 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 				);
 			}
 		} else if (this.#section === "messages") {
-			if (this.#messageFocus === "thread") {
-				const messages = this.#conversations[this.#selectedConversationRow]?.messages ?? [];
-				this.#selectedMessageRow = Math.max(0, Math.min(this.#selectedMessageRow + delta, messages.length - 1));
-			} else if (this.#conversations.length > 0) {
-				this.#selectedConversationRow = Math.max(
-					0,
-					Math.min(this.#selectedConversationRow + delta, this.#conversations.length - 1),
-				);
-				this.#selectedMessageRow = (this.#conversations[this.#selectedConversationRow]?.messages.length ?? 1) - 1;
-				// Wide split marks on render; narrow list-only must keep unread until thread open.
-			}
+			if (this.#messageFocus === "thread") this.#moveThreadSelection(delta);
+			else this.#moveConversationSelection(delta);
 		} else if (this.#rows.length > 0) {
 			this.#selectRow(Math.max(0, Math.min(this.#selectedRow + delta, this.#rows.length - 1)));
 		}
@@ -1527,6 +1635,12 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 	}
 
 	setHoverIndex(index: number | null): void {
+		if (this.#section === "messages") {
+			if (index === this.#hoveredConversationRow) return;
+			this.#hoveredConversationRow = index;
+			this.#requestRender();
+			return;
+		}
 		if (this.#section !== "agents") return;
 		if (index === this.#hoveredRow) return;
 		this.#hoveredRow = index;
@@ -1546,6 +1660,7 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 			return;
 		}
 		if (this.#section === "messages") {
+			this.#conversationSelectionExplicit = true;
 			if (index === this.#selectedConversationRow) {
 				this.#messageFocus = "thread";
 				this.#messageThreadOpen = true;
@@ -1912,6 +2027,16 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 		}
 		if (keyData === "/") {
 			this.#agentFilterEditing = true;
+			this.#requestRender();
+			return;
+		}
+		// Model-menu-style type-to-filter: any printable character starts or extends
+		// the fuzzy query. `t`/`r`/`x` keep their hotkeys while the query is empty
+		// (press `/` to start a query with one); `j`/`k` always navigate.
+		if (keyData.length === 1 && keyData >= " " && keyData !== "\u007f" && !"trxjk".includes(keyData)) {
+			this.#agentFilterEditing = true;
+			this.#agentFilter += keyData;
+			this.#refreshRows();
 			this.#requestRender();
 			return;
 		}
