@@ -850,6 +850,19 @@ export class RelayBridge {
 					sequence: ++this.#subscriptionSeq,
 				});
 				return;
+			case "Emulation.setScriptExecutionDisabled":
+				if (msg.params?.value === false) {
+					this.#forgetTabSubscription(tab, msg.method);
+					return;
+				}
+				if (!ownerIsCurrent) return;
+				this.#rememberSessionSubscription(tab, msg.method, ownerSessionId, {
+					method: msg.method,
+					params: msg.params,
+					ownerSessionId,
+					sequence: ++this.#subscriptionSeq,
+				});
+				return;
 			case "Emulation.clearDeviceMetricsOverride":
 				this.#forgetTabSubscription(tab, "Emulation.setDeviceMetricsOverride");
 				return;
@@ -867,7 +880,7 @@ export class RelayBridge {
 			case "Emulation.setGeolocationOverride":
 			case "Page.setGeolocationOverride":
 			case "Network.emulateNetworkConditions":
-			case "Emulation.setScriptExecutionDisabled":
+			case "Network.setBypassServiceWorker":
 			case "Network.setUserAgentOverride":
 			case "Emulation.setUserAgentOverride":
 				// Persistent root setters survive as long as the shared debugger root.
@@ -1092,6 +1105,8 @@ export class RelayBridge {
 				return { method: subscription.method, params: { urls: [] } };
 			case "Network.setCacheDisabled":
 				return { method: subscription.method, params: { cacheDisabled: false } };
+			case "Network.setBypassServiceWorker":
+				return { method: subscription.method, params: { bypass: false } };
 			case "Page.setBypassCSP":
 			case "Emulation.setTouchEmulationEnabled":
 			case "Page.setTouchEmulationEnabled":
