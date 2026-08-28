@@ -69,6 +69,7 @@ import {
 	getOpenAIResponsesHistoryItems,
 	getOpenAIResponsesHistoryPayload,
 	getOpenAIResponsesReferenceTarget,
+	isOpenAIResponsesAssistantFallbackTargetOwned,
 	isOpenAIResponsesAssistantHistoryTargetOwned,
 	normalizeResponsesToolCallId,
 	normalizeSystemPrompts,
@@ -2383,6 +2384,13 @@ export function buildResponsesInput<TApi extends Api>(options: BuildResponsesInp
 				assistantMsg.providerPayload,
 				referenceTarget,
 			);
+			// A turn that reaches the fallback without a trusted stamp carries its
+			// endpoint identity only in the canonical signatures, which re-encode the
+			// same reasoning item and output-item id the native payload would have.
+			const targetOwnedFallbackRejected = isOpenAIResponsesAssistantFallbackTargetOwned(
+				assistantMsg,
+				referenceTarget,
+			);
 			const nativeReplayEnabled = options.nativeHistory?.replay === true;
 			const historyItems = providerPayload?.items;
 			let suppressHiddenEmptyFallback = false;
@@ -2430,9 +2438,9 @@ export function buildResponsesInput<TApi extends Api>(options: BuildResponsesInp
 				options.model,
 				msgIndex,
 				knownCallIds,
-				suppressHiddenEmptyFallback || targetOwnedHistoryRejected ? false : includeThinkingSignatures,
+				suppressHiddenEmptyFallback || targetOwnedFallbackRejected ? false : includeThinkingSignatures,
 				customCallIds,
-				options.preserveAssistantMessageIds && !targetOwnedHistoryRejected,
+				options.preserveAssistantMessageIds && !targetOwnedFallbackRejected,
 				supportsCustomToolCalls,
 				customToolWireNameMap,
 				computerCallIds,

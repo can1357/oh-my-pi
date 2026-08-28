@@ -1803,7 +1803,7 @@ describe("OpenAI responses history payload", () => {
 		]);
 	});
 
-	it("keeps hashed long legacy signature IDs when the replayed turn carries its reasoning item", async () => {
+	it("drops the reasoning item and hashed legacy id when the turn carries no trusted target stamp", async () => {
 		const legacySignature = `item_${"copilot/legacy+opaque=".repeat(8)}`;
 		const context: Context = {
 			messages: [
@@ -1843,16 +1843,15 @@ describe("OpenAI responses history payload", () => {
 		const payload = (await captureResponsesPayload(model, context)) as { input?: unknown[] };
 		expect(payload.input).toEqual([
 			{ role: "user", content: [{ type: "input_text", text: "first user" }] },
-			{ type: "reasoning", id: "rs_keep", encrypted_content: "enc_keep" },
 			{
 				type: "message",
 				role: "assistant",
 				content: [{ type: "output_text", text: "Signed answer", annotations: [] }],
 				status: "completed",
-				id: `msg_${Bun.hash(legacySignature).toString(36)}`,
 			},
 			{ role: "user", content: [{ type: "input_text", text: "follow-up" }] },
 		]);
+		expect(JSON.stringify(payload.input)).not.toContain(Bun.hash(legacySignature).toString(36));
 	});
 
 	it("strips output-only replay metadata while preserving paired call_id values", async () => {

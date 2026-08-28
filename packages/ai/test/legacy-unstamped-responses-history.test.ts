@@ -150,6 +150,28 @@ describe("legacy unstamped Responses history", () => {
 		expect(JSON.stringify(items)).toContain("portable answer");
 	});
 
+	it("strips endpoint-owned canonical signatures when no provider payload survives", () => {
+		const model = responsesModel("https://responses-proxy.example.invalid/v1");
+		const assistant = legacyAssistant(ENDPOINT_OWNED_ITEMS, {
+			provider: "openai",
+			model: "gpt-5.4",
+			api: "openai-responses",
+		}) as AssistantMessage & { providerPayload?: unknown };
+		assistant.providerPayload = undefined;
+		const items = buildResponsesInput({
+			model,
+			context: contextFor(assistant),
+			strictResponsesPairing: false,
+			supportsImageDetailOriginal: false,
+		});
+
+		expect(items.some(item => item.type === "reasoning")).toBe(false);
+		expect(JSON.stringify(items)).not.toContain("enc_endpoint_a");
+		expect(JSON.stringify(items)).not.toContain("rs_endpoint_a");
+		expect(assistantMessageItem(items)?.id).toBeUndefined();
+		expect(JSON.stringify(items)).toContain("answer");
+	});
+
 	it("drops unstamped endpoint-owned Codex history on the canonical fallback too", () => {
 		const model = createCodexModel("gpt-5.5", { baseUrl: "https://codex-proxy.example.invalid/api/codex" });
 		const assistant = legacyAssistant(ENDPOINT_OWNED_ITEMS, {
