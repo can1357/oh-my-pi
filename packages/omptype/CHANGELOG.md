@@ -8,7 +8,7 @@
 
 ### Fixed
 
-- Fixed `.readonly()` on the `@oh-my-pi/omptype/zod` layer to actually freeze successful parse output (`Object.freeze`, one level deep), matching Zod's runtime contract instead of only changing the inferred type.
+- Fixed `.readonly()` on the `@oh-my-pi/omptype/zod` layer to actually freeze successful parse output (`Object.freeze` of a shallow clone, one level deep), matching Zod's runtime contract instead of only changing the inferred type — without ever freezing the caller's input graph.
 
 ## [17.3.1] - 2026-08-13
 

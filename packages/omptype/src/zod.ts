@@ -319,11 +319,24 @@ function decorate<Out>(schema: Decoratable<Out>, optional = false): ZodLikeSchem
 		 * Matches Zod's runtime contract: `.readonly()` is not merely a type
 		 * cast, it shallow-freezes successful parse output (`Object.freeze`,
 		 * one level deep — a nested object is left mutable, exactly like Zod).
-		 * `Object.freeze` on a non-object `Out` (string/number/etc.) is a safe
-		 * no-op, so this applies uniformly across every schema kind.
+		 *
+		 * Zod freezes its own freshly constructed parse output; omptype's
+		 * parsing shares structure with the input (a parent copy keeps child
+		 * references), so freezing in place would freeze the CALLER's input
+		 * graph — e.g. a persisted session entry schema-validated before blob
+		 * hydration must stay mutable. Shallow-clone first (object spread uses
+		 * define semantics, so an own `__proto__` key survives), then freeze
+		 * the clone; non-objects pass through untouched, where `Object.freeze`
+		 * would have been a no-op anyway.
 		 */
 		readonly(): ZodLikeSchema<Readonly<Out>> {
-			return next(schema.pipe(value => Object.freeze(value) as Out)) as ZodLikeSchema<Readonly<Out>>;
+			return next(
+				schema.pipe(value => {
+					if (typeof value !== "object" || value === null) return value;
+					const clone = Array.isArray(value) ? [...(value as unknown[])] : { ...(value as object) };
+					return Object.freeze(clone) as Out;
+				}),
+			) as ZodLikeSchema<Readonly<Out>>;
 		},
 	}) as unknown as ZodLikeSchema<Out>;
 }

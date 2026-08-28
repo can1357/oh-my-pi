@@ -16,6 +16,7 @@ import {
 	LIVE_RECORD_HEAD_WINDOW_BYTES,
 	LiveToolPresentationRecord,
 } from "@oh-my-pi/pi-coding-agent/presentation/live-record";
+import { persistedToolJournalSchema } from "@oh-my-pi/pi-coding-agent/presentation/schemas/journal";
 import { BlobStore, isBlobRef } from "@oh-my-pi/pi-coding-agent/session/blob-store";
 import type {
 	CompactionEntry,
@@ -313,6 +314,17 @@ describe("tool journal presentation persistence", () => {
 		expect(persistedAttachment.data).not.toContain("[Session persistence truncated large content]");
 
 		const loaded: FileEntry[] = [structuredClone(persisted)];
+		// The loader schema-validates the journal arm BEFORE blob hydration; the
+		// schema's nested `.readonly()` wrappers must freeze only their own
+		// parse output — a freeze leaking onto the loaded entry's attachment
+		// would make the hydration write below throw and the session unloadable.
+		const {
+			id: _id,
+			parentId: _parentId,
+			timestamp: _timestamp,
+			...journalOnly
+		} = loaded[0] as ToolExecutionSettledEntry;
+		expect(persistedToolJournalSchema.safeParse(journalOnly).success).toBe(true);
 		await resolveBlobRefsInEntries(loaded, blobStore);
 		const resolved = (loaded[0] as ToolExecutionSettledEntry).presentation.attachments[0];
 		if (resolved?.kind !== "image") throw new Error("expected a resolved image attachment");

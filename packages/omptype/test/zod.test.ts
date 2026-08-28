@@ -202,6 +202,20 @@ describe("zod-like parsing", () => {
 		expect(Reflect.set(parsedFrozen, "tags", [])).toBe(false);
 		expect(z.array(z.string()).readonly().optional().parse(undefined)).toBeUndefined();
 
+		// `.readonly()` freezes only its own parse output, NEVER the caller's
+		// input graph: a persisted session entry is schema-validated (with
+		// nested `.readonly()` arms) BEFORE blob hydration mutates it in place,
+		// so a freeze leaking onto the input would make the session unloadable.
+		const inputAttachment = { kind: "image", data: "blob:sha256:abc", mimeType: "image/png" };
+		const inputEntry = { attachment: inputAttachment };
+		const nestedReadonly = z.strictObject({
+			attachment: z.strictObject({ kind: z.literal("image"), data: z.string(), mimeType: z.string() }).readonly(),
+		});
+		expect(nestedReadonly.safeParse(inputEntry).success).toBe(true);
+		expect(Object.isFrozen(inputAttachment)).toBe(false);
+		inputAttachment.data = "resolved-bytes"; // the hydration write must still work
+		expect(inputAttachment.data).toBe("resolved-bytes");
+
 		type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue };
 		const jsonValue: z.ZodType<JsonValue> = z.lazy(() =>
 			z.union([z.string(), z.number(), z.boolean(), z.null(), z.array(jsonValue), z.record(z.string(), jsonValue)]),
