@@ -1161,6 +1161,13 @@ export class AskDialogComponent implements Component, Focusable {
 				state.noteRowKey === rowItem.key ? state.note : undefined,
 			);
 			if (input === undefined || this.#closed) return;
+			// An emptied editor clears the note: the submit summary and response
+			// formatting already treat the empty value as absent, so the row
+			// marker must not survive it.
+			if (input.trim() === "") {
+				clearNoteIfRow(state, rowItem.key);
+				return;
+			}
 			state.note = input;
 			state.noteRowKey = rowItem.key;
 		} finally {

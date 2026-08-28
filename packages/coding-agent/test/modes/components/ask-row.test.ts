@@ -10,15 +10,21 @@ import {
 	renderAskRow,
 } from "@oh-my-pi/pi-coding-agent/modes/components/ask-row";
 import { loadThemeSync } from "@oh-my-pi/pi-coding-agent/modes/theme/loader";
-import { getMarkdownTheme, getThemeByName, setThemeInstance, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import {
+	getMarkdownTheme,
+	getThemeByName,
+	setThemeInstance,
+	snapshotThemeState,
+	theme,
+} from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { Theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme-class";
 import { CURSOR_MARKER, visibleWidth } from "@oh-my-pi/pi-tui";
 
 let darkTheme: Theme | undefined;
-// setThemeInstance replaces process-wide theme state and disables
-// auto-detection, so capture the prior instance and restore it after the
-// file; otherwise later test files inherit this file's dark theme.
-let priorTheme: Theme | undefined;
+// setThemeInstance replaces process-wide theme state, disables auto-detection,
+// and stops the theme watcher; only the snapshot seam restores all of it, so
+// later test files do not inherit this file's dark theme or lose their state.
+let restoreTheme: (() => Promise<void>) | undefined;
 
 function strip(line: string): string {
 	return stripVTControlCharacters(line);
@@ -64,7 +70,7 @@ function styledMarker(line: string, glyph: string): string {
 
 describe("askRow", () => {
 	beforeAll(async () => {
-		priorTheme = theme;
+		restoreTheme = snapshotThemeState();
 		darkTheme = await getThemeByName("dark");
 		if (!darkTheme) throw new Error("Failed to load dark theme");
 	});
@@ -74,8 +80,8 @@ describe("askRow", () => {
 		setThemeInstance(darkTheme);
 	});
 
-	afterAll(() => {
-		if (priorTheme) setThemeInstance(priorTheme);
+	afterAll(async () => {
+		await restoreTheme?.();
 	});
 
 	it("prefix is exactly ASK_ROW_PREFIX_COLUMNS wide for focused × multi × jumpDigit", () => {

@@ -3,7 +3,7 @@ import { stripVTControlCharacters } from "node:util";
 import { KeybindingsManager } from "@oh-my-pi/pi-coding-agent/config/keybindings";
 import type { ExtensionAskDialogQuestion } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import { AskDialogComponent } from "@oh-my-pi/pi-coding-agent/modes/components/ask-dialog";
-import { getThemeByName, setThemeInstance, type Theme, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { getThemeByName, setThemeInstance, snapshotThemeState } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { CURSOR_MARKER, setKeybindings } from "@oh-my-pi/pi-tui";
 
 const DOWN = "\x1b[B";
@@ -19,10 +19,10 @@ const LEFT = "\x1b[D";
 const BACKSPACE = "\x7f";
 
 let darkTheme = await getThemeByName("dark");
-// setThemeInstance replaces process-wide theme state and disables
-// auto-detection, so capture the prior instance and restore it after the
-// file; otherwise later test files inherit this file's dark theme.
-let priorTheme: Theme | undefined;
+// setThemeInstance replaces process-wide theme state, disables auto-detection,
+// and stops the theme watcher; only the snapshot seam restores all of it, so
+// later test files do not inherit this file's dark theme or lose their state.
+let restoreTheme: (() => Promise<void>) | undefined;
 
 function render(component: AskDialogComponent): string {
 	return stripVTControlCharacters(component.render(80).join("\n"));
@@ -30,7 +30,7 @@ function render(component: AskDialogComponent): string {
 
 describe("AskDialogComponent", () => {
 	beforeAll(async () => {
-		priorTheme = theme;
+		restoreTheme = snapshotThemeState();
 		darkTheme = await getThemeByName("dark");
 		if (!darkTheme) throw new Error("Failed to load dark theme");
 	});
@@ -47,8 +47,8 @@ describe("AskDialogComponent", () => {
 		vi.restoreAllMocks();
 	});
 
-	afterAll(() => {
-		if (priorTheme) setThemeInstance(priorTheme);
+	afterAll(async () => {
+		await restoreTheme?.();
 	});
 
 	it("single-question, single-select: Enter on option submits immediately", () => {
@@ -636,6 +636,43 @@ describe("AskDialogComponent", () => {
 
 		expect(onSubmit).toHaveBeenCalledTimes(1);
 		expect(onSubmit.mock.calls[0][0].results[0].selectedOptions).toEqual(["Option B"]);
+		expect(onSubmit.mock.calls[0][0].results[0].note).toBeUndefined();
+	});
+
+	it("clears the note and its marker when the reopened editor is submitted empty", async () => {
+		const onPrompt = vi.fn();
+		const onSubmit = vi.fn();
+		const questions: ExtensionAskDialogQuestion[] = [
+			{
+				id: "q1",
+				question: "Choose one?",
+				options: [{ label: "Option A" }, { label: "Option B" }],
+			},
+		];
+
+		const component = new AskDialogComponent(questions, {
+			onSubmit,
+			onCancel: vi.fn(),
+			onPrompt,
+		});
+
+		onPrompt.mockReturnValueOnce(Promise.resolve("Note for A"));
+		component.handleInput("n");
+		await Promise.resolve();
+		await Promise.resolve();
+		expect(render(component)).toContain("✎ note");
+
+		// Reopen the saved note, delete all of its text, and submit the editor:
+		// the marker must not survive, and the submitted answer carries no note.
+		onPrompt.mockReturnValueOnce(Promise.resolve("   "));
+		component.handleInput("n");
+		await Promise.resolve();
+		await Promise.resolve();
+		expect(onPrompt.mock.calls[1][1]).toBe("Note for A");
+		expect(render(component)).not.toContain("✎ note");
+
+		component.handleInput(ENTER);
+		expect(onSubmit).toHaveBeenCalledTimes(1);
 		expect(onSubmit.mock.calls[0][0].results[0].note).toBeUndefined();
 	});
 

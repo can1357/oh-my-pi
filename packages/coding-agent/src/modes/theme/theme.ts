@@ -281,6 +281,29 @@ export function setThemeInstance(themeInstance: Theme): void {
 }
 
 /**
+ * Capture the module's theme state and return a thunk that restores it.
+ * `setThemeInstance` alone cannot undo itself: auto-detection and the
+ * custom-theme watcher are module-private, so a caller that swaps the theme
+ * temporarily (tests, previews) restores the complete state through this seam.
+ */
+export function snapshotThemeState(): () => Promise<void> {
+	const priorTheme = theme;
+	const priorName = currentThemeName;
+	const priorAuto = autoDetectedTheme;
+	const priorWatcher = themeWatcher !== undefined || themeReloadTimer !== undefined;
+	const priorSigwinch = sigwinchHandler !== undefined;
+	return async () => {
+		theme = priorTheme;
+		currentThemeName = priorName;
+		autoDetectedTheme = priorAuto;
+		if (priorWatcher) await startThemeWatcher();
+		else stopThemeWatcher();
+		if (priorSigwinch) startSigwinchListener();
+		notifyThemeChange({ ephemeral: true });
+	};
+}
+
+/**
  * Set the symbol preset override, recreating the theme with the new preset.
  */
 export async function setSymbolPreset(preset: SymbolPreset): Promise<void> {
