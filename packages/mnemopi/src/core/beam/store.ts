@@ -651,7 +651,16 @@ export function invalidate(beam: BeamMemoryState, memoryId: string, replacementI
 		`,
 		[now, replacementId, memoryId, beam.sessionId],
 	);
-	if (working.changes > 0) return true;
+	if (working.changes > 0) {
+		// Recall filters `valid_until`/`superseded_by` in SQL, but the enhanced path consults the
+		// query cache BEFORE it reaches SQL. Without this the row a caller just retired keeps being
+		// served to an identical query for the rest of the cache TTL -- the one thing an explicit
+		// invalidation is supposed to guarantee against. Every other mutator here already does this;
+		// this one was the omission. Gated on an actual row change, like `forgetWorking`, so a
+		// no-op invalidation never discards a valid cache.
+		invalidateCaches(beam);
+		return true;
+	}
 	const episodic = beam.db.run(
 		`
 			UPDATE episodic_memory
@@ -660,7 +669,11 @@ export function invalidate(beam: BeamMemoryState, memoryId: string, replacementI
 		`,
 		[now, replacementId, memoryId, beam.sessionId],
 	);
-	return episodic.changes > 0;
+	if (episodic.changes > 0) {
+		invalidateCaches(beam);
+		return true;
+	}
+	return false;
 }
 
 export function getWorkingStats(
