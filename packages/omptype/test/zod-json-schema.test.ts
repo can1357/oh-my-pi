@@ -11,11 +11,12 @@ import * as z from "../src/zod";
  */
 
 interface ObjectSchema {
-	type?: "object";
+	type?: string;
 	properties?: Record<string, unknown>;
 	required?: string[];
 	additionalProperties?: unknown;
 	anyOf?: unknown[];
+	enum?: unknown[];
 	$ref?: string;
 	$defs?: Record<string, unknown>;
 	const?: unknown;
@@ -127,6 +128,38 @@ describe("zod shim JSON Schema structure", () => {
 		const defaultedJson = asObjectSchema(defaulted.toJsonSchema());
 		expect(propSchema(defaultedJson, "inner")?.properties?.name).toEqual({ type: "string" });
 		expect(propSchema(defaultedJson, "inner")?.default).toEqual({ name: "d" });
+	});
+
+	it("widens objects containing stepped or defaulted properties structurally", () => {
+		// The widened union is disjoint from undefined/null unless the member
+		// itself accepts them, so these shapes must NOT fall back to the
+		// dispatcher: a defaulted enum prop (the shipped api-demo example's
+		// exact shape) erased to `{}` before the gate relaxed.
+		const apiDemo = z
+			.object({
+				message: z.string(),
+				logLevel: z.enum(["error", "warn", "debug"]).default("debug"),
+			})
+			.optional();
+		const apiDemoJson = asObjectSchema(apiDemo.toJsonSchema());
+		const logLevel = propSchema(apiDemoJson, "logLevel");
+		expect(logLevel?.enum).toEqual(["error", "warn", "debug"]);
+		expect(logLevel?.default).toBe("debug");
+		expect(apiDemo.parse(undefined)).toBeUndefined();
+		expect(apiDemo.parse({ message: "m", logLevel: "warn" })).toEqual({ message: "m", logLevel: "warn" });
+
+		const stepped = z.object({ v: z.string().transform(value => value.length) }).nullable();
+		const steppedJson = asObjectSchema(stepped.toJsonSchema());
+		const steppedMember = asObjectSchema((steppedJson.anyOf as ObjectSchema[])[0]);
+		expect(propSchema(steppedMember, "v")?.type).toBe("string");
+		expect(stepped.parse(null)).toBeNull();
+		expect(stepped.parse({ v: "abc" })).toEqual({ v: 3 });
+
+		// A z.lazy property inside the widened object keeps the dispatcher:
+		// the determinism probe cannot see through the deferred alias.
+		const lazyProp = z.object({ t: z.lazy(() => z.string()) }).optional();
+		expect(lazyProp.toJsonSchema()).toEqual({});
+		expect(lazyProp.parse({ t: "x" })).toEqual({ t: "x" });
 	});
 
 	it("keeps plain object nesting fully structural", () => {

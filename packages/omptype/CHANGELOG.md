@@ -4,14 +4,14 @@
 
 ### Fixed
 
-- Fixed the Zod shim (`@oh-my-pi/omptype/zod`) erasing tool parameter schemas to unconstrained `{}`: `.nullable()`, `.optional()`, and `.default()` over `z.object`, `z.discriminatedUnion` over `z.object` variants, and unions of disjoint `z.object` members now emit their real structure instead of a dispatcher placeholder. Parsing is unchanged, but a tool whose parameters previously reached the model unconstrained now has its declared shape enforced by the provider.
+- Fixed the Zod shim (`@oh-my-pi/omptype/zod`) erasing tool parameter schemas to unconstrained `{}`: `.nullable()`, `.optional()`, and `.default()` over `z.object` — including objects containing stepped (`.transform()`, `.refine()`, `.readonly()`) or `.default()`-filled properties — `z.discriminatedUnion` over `z.object` variants, and unions of disjoint `z.object` members now emit their real structure instead of a dispatcher placeholder, and a tool whose parameters previously reached the model unconstrained now has its declared shape enforced by the provider. Parse acceptance and outputs are otherwise unchanged, with one deliberate exception: `.default()` on a shim schema now follows Zod 4's output-default contract (the fallback is returned as-is rather than re-validated through the input schema), which can accept a default standalone that older composed positions (`.describe()`/object embedding) validated — a follow-up will unify the default path end to end.
 
 ### Added
 
 - `z.lazy()` now builds on the IR's cycle-safe alias node, so recursive parameter schemas export as real `$ref`/`$defs` documents instead of erasing to `{}`.
 - `.readonly()` now shallow-freezes parse output like Zod, without freezing the caller's input graph.
 
-Schema erasure remains for shapes omptype's unordered unions cannot represent deterministically. Recursion through **required** array/record edges exports structurally as `$ref`/`$defs`; **optional or nullable recursive edges** (`next: self.optional()`, `z.array(self).optional()`) keep the ordered dispatcher and erase, as does a `z.union` of `z.lazy` members. Disjoint member sets (distinct discriminator literals, `strictObject` members, differing required keys, null/undefined widening) all emit structurally. Follow-ups: extend alias deferral to the union determinism probe with a conservative disjointness rule for deferred members, and derive stable `$defs` names (current keys depend on schema construction order).
+Schema erasure remains for shapes omptype's unordered unions cannot represent deterministically. Recursion through **required** array/record edges exports structurally as `$ref`/`$defs`; **optional or nullable recursive edges** (`next: self.optional()`, `z.array(self).optional()`) keep the ordered dispatcher and erase, as does a `z.union` of `z.lazy` members or an object containing one. Disjoint member sets — distinct discriminator literals, `strictObject` members, null/undefined widening (the constraints must actually prove the members disjoint, e.g. conflicting required literals or strict rejection of the other member's required key) — all emit structurally. Follow-ups: extend alias deferral to the union determinism probe with a conservative disjointness rule for deferred members, and derive stable `$defs` names (current keys depend on schema construction order).
 
 ## [17.3.1] - 2026-08-13
 

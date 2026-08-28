@@ -36,12 +36,14 @@ interface IRAnalysis {
 	descAuto?: boolean;
 }
 
-/** One traversal's answer to both scan questions (see {@link scanIR}). */
+/** One traversal's answer to the scan questions (see {@link scanIR}). */
 interface ScanResult {
 	/** Validating this node can produce an output different from its input. */
 	changesOutput: boolean;
 	/** This node can be emitted without a dispatcher-morph wrapper. */
 	exportable: boolean;
+	/** Any node under this one defers resolution to first parse (`z.lazy`). */
+	hasDeferredAlias: boolean;
 }
 
 /**
@@ -1636,6 +1638,11 @@ export function isStructurallyExportable(ir: IR): boolean {
 	return scanIRCached(ir).exportable;
 }
 
+/**
+ * Cached entry point for {@link scanIR}; the only place that writes the
+ * per-node scan cache, so results computed under a cycle guard are never
+ * memoized.
+ */
 function scanIRCached(ir: IR): ScanResult {
 	const cached = ir[kScanOwner] === ir ? ir[kScan] : undefined;
 	if (cached !== undefined) return cached;
@@ -1645,23 +1652,38 @@ function scanIRCached(ir: IR): ScanResult {
 	return result;
 }
 
+/** True when any node under `ir` is a deferred alias (a `z.lazy` getter). */
+export function hasDeferredAlias(ir: IR): boolean {
+	return scanIRCached(ir).hasDeferredAlias;
+}
+
 /**
- * One traversal answering the two questions the former independent scans
- * (`scanMorph` / `scanExportable`) recomputed with near-identical walks. The
- * asymmetry lives in exactly two places, on adjacent lines in the object and
- * tuple arms: key-stripping (`extras: "delete"`) changes the output value but
- * does NOT disqualify export, because stripping is representable in the
- * emitted schema. A default-filled property does both: it changes the output
- * and counts as non-exportable.
+ * One traversal answering three questions that would otherwise need three
+ * near-identical walks:
  *
+ * - `changesOutput` — can validation produce an output different from its
+ *   input? (morphs, key-stripping objects, default-filled properties.)
+ * - `exportable` — can the node be emitted without a dispatcher-morph
+ *   wrapper, whose emission erases the document to an unconstrained `{}`?
+ * - `hasDeferredAlias` — does any node defer its resolution to first parse
+ *   (a `z.lazy` getter)? Union determinism cannot see through one, so
+ *   consumers must not build native unions containing it.
+ *
+ * The changesOutput/exportable asymmetry lives in exactly two places, on
+ * adjacent lines in the object and tuple arms: key-stripping
+ * (`extras: "delete"`) changes the output value but does NOT disqualify
+ * export, because stripping is representable in the emitted schema. A
+ * default-filled property does both: it changes the output and counts as
+ * non-exportable. Stepped embedded schemas and morphs count as both.
  * Deferred aliases are conservatively `{ changesOutput: true, exportable:
- * false }` — the getter must not run during construction-time scans.
+ * false, hasDeferredAlias: true }` — the getter must not run during
+ * construction-time scans.
  */
 function scanIR(ir: IR, activeAliases?: Set<IR>): ScanResult {
 	const cached = ir[kScanOwner] === ir ? ir[kScan] : undefined;
 	if (cached !== undefined) return cached;
 
-	const result: ScanResult = { changesOutput: false, exportable: true };
+	const result: ScanResult = { changesOutput: false, exportable: true, hasDeferredAlias: false };
 	switch (ir.k) {
 		case "sub":
 		case "morph":
@@ -1671,7 +1693,7 @@ function scanIR(ir: IR, activeAliases?: Set<IR>): ScanResult {
 		case "alias": {
 			// Deferred alias (z.lazy): conservatively a morph without resolving
 			// — the getter must not run during construction-time scans.
-			if (ir.deferred === true) return { changesOutput: true, exportable: false };
+			if (ir.deferred === true) return { changesOutput: true, exportable: false, hasDeferredAlias: true };
 			if (activeAliases?.has(ir)) break;
 			const aliases = activeAliases ?? new Set<IR>();
 			aliases.add(ir);
@@ -1679,6 +1701,7 @@ function scanIR(ir: IR, activeAliases?: Set<IR>): ScanResult {
 			aliases.delete(ir);
 			result.changesOutput = inner.changesOutput;
 			result.exportable = inner.exportable;
+			result.hasDeferredAlias = inner.hasDeferredAlias;
 			break;
 		}
 		case "object": {
@@ -1690,17 +1713,27 @@ function scanIR(ir: IR, activeAliases?: Set<IR>): ScanResult {
 				const inner = scanIR(prop.val, activeAliases);
 				result.changesOutput ||= prop.hasDefault === true || inner.changesOutput;
 				result.exportable &&= prop.hasDefault !== true && inner.exportable;
+				result.hasDeferredAlias ||= inner.hasDeferredAlias;
+				// All three bits are monotone; once pinned, nothing left to learn.
+				if (result.changesOutput && !result.exportable && result.hasDeferredAlias) break;
 			}
-			for (const index of [ir.index, ir.symbolIndex]) {
-				if (index === undefined) continue;
-				const inner = scanIR(index, activeAliases);
+			if (ir.index !== undefined) {
+				const inner = scanIR(ir.index, activeAliases);
 				result.changesOutput ||= inner.changesOutput;
 				result.exportable &&= inner.exportable;
+				result.hasDeferredAlias ||= inner.hasDeferredAlias;
+			}
+			if (ir.symbolIndex !== undefined) {
+				const inner = scanIR(ir.symbolIndex, activeAliases);
+				result.changesOutput ||= inner.changesOutput;
+				result.exportable &&= inner.exportable;
+				result.hasDeferredAlias ||= inner.hasDeferredAlias;
 			}
 			for (const pattern of ir.patternIndexes ?? []) {
 				const inner = scanIR(pattern.val, activeAliases);
 				result.changesOutput ||= inner.changesOutput;
 				result.exportable &&= inner.exportable;
+				result.hasDeferredAlias ||= inner.hasDeferredAlias;
 			}
 			break;
 		}
@@ -1708,6 +1741,7 @@ function scanIR(ir: IR, activeAliases?: Set<IR>): ScanResult {
 			const inner = scanIR(ir.el, activeAliases);
 			result.changesOutput = inner.changesOutput;
 			result.exportable = inner.exportable;
+			result.hasDeferredAlias = inner.hasDeferredAlias;
 			break;
 		}
 		case "union":
@@ -1716,12 +1750,15 @@ function scanIR(ir: IR, activeAliases?: Set<IR>): ScanResult {
 				const inner = scanIR(member, activeAliases);
 				result.changesOutput ||= inner.changesOutput;
 				result.exportable &&= inner.exportable;
+				result.hasDeferredAlias ||= inner.hasDeferredAlias;
+				if (result.changesOutput && !result.exportable && result.hasDeferredAlias) break;
 			}
 			break;
 		case "refine": {
 			const inner = scanIR(ir.base, activeAliases);
 			result.changesOutput = inner.changesOutput;
 			result.exportable = inner.exportable;
+			result.hasDeferredAlias = inner.hasDeferredAlias;
 			break;
 		}
 		case "tuple": {
@@ -1729,16 +1766,19 @@ function scanIR(ir: IR, activeAliases?: Set<IR>): ScanResult {
 				const inner = scanIR(item.val, activeAliases);
 				result.changesOutput ||= item.hasDefault === true || inner.changesOutput;
 				result.exportable &&= item.hasDefault !== true && inner.exportable;
+				result.hasDeferredAlias ||= inner.hasDeferredAlias;
 			}
 			if (ir.variadic !== undefined) {
 				const inner = scanIR(ir.variadic, activeAliases);
 				result.changesOutput ||= inner.changesOutput;
 				result.exportable &&= inner.exportable;
+				result.hasDeferredAlias ||= inner.hasDeferredAlias;
 			}
 			for (const item of ir.postfix) {
 				const inner = scanIR(item, activeAliases);
 				result.changesOutput ||= inner.changesOutput;
 				result.exportable &&= inner.exportable;
+				result.hasDeferredAlias ||= inner.hasDeferredAlias;
 			}
 			break;
 		}

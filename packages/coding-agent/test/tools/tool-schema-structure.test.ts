@@ -60,9 +60,23 @@ const ALLOWED_ERASURES: Array<{ tool: RegExp; pointer: RegExp; reason: string }>
 		// yield's user-requested `outputSchema: true` emits a description-only
 		// data schema that escapes normalizeEmptySchemas; pinned to stay
 		// description-only by the dedicated assertion in the yield test.
-		tool: /^yield:/,
+		tool: /^yield(:|$)/,
 		pointer: /\/data$/,
 		reason: "description-only data schema for outputSchema: true",
+	},
+	{
+		// debug.arguments is a record of arbitrary user-supplied arguments: the
+		// open value schema is the declared contract, not an erasure.
+		tool: /^debug$/,
+		pointer: /\/properties\/arguments\/additionalProperties$/,
+		reason: "intentional open record for arbitrary debug arguments",
+	},
+	{
+		// yield's loose outputSchema fallback types data as an open record —
+		// same user-requested near-miss class as the description-only case.
+		tool: /^yield(:|$)/,
+		pointer: /\/data\/additionalProperties$/,
+		reason: "yield's loose outputSchema fallback data record",
 	},
 ];
 
@@ -71,9 +85,28 @@ const unexpectedErasures = (erasures: Erasure[]): Erasure[] =>
 		erasure => !ALLOWED_ERASURES.some(entry => entry.tool.test(erasure.tool) && entry.pointer.test(erasure.pointer)),
 	);
 
-const SCHEMA_MAP_KEYS = new Set(["properties", "$defs", "definitions"]);
-const SCHEMA_ARRAY_KEYS = new Set(["anyOf", "oneOf", "allOf", "prefixItems"]);
-const SCHEMA_VALUE_KEYS = new Set(["items", "not"]);
+// The complete schema-position inventory, mirroring wire.ts's own traversal
+// sets (STRIP_SCHEMA_VALUE_KEYS / STRIP_SCHEMA_MAP_KEYS) so this walk covers
+// exactly the positions the production wire lowering considers schema-valued.
+const SCHEMA_VALUE_KEYS = new Set([
+	"additionalProperties",
+	"unevaluatedProperties",
+	"unevaluatedItems",
+	"items",
+	"additionalItems",
+	"contains",
+	"propertyNames",
+	"contentSchema",
+	"if",
+	"then",
+	"else",
+	"not",
+	"anyOf",
+	"oneOf",
+	"allOf",
+	"prefixItems",
+]);
+const SCHEMA_MAP_KEYS = new Set(["properties", "patternProperties", "$defs", "definitions", "dependentSchemas"]);
 
 function walkSchema(tool: string, pointer: string, node: unknown, erasures: Erasure[]): void {
 	if (node === true) {
@@ -87,23 +120,25 @@ function walkSchema(tool: string, pointer: string, node: unknown, erasures: Eras
 		return;
 	}
 	for (const [key, value] of Object.entries(obj)) {
-		// `additionalProperties: true` is the legitimate open-record marker,
-		// and `properties: {}` paired with a typed `additionalProperties` is a
-		// real, constrained shape (bash.env, hub.env, debug.arguments,
-		// log_experiment.metrics/asi) — neither is an erasure. Map positions
-		// hold per-key subschemas, so an empty map itself is not an erasure.
-		if (key === "additionalProperties") continue;
 		const childPointer = `${pointer}/${key}`;
-		if (SCHEMA_MAP_KEYS.has(key) && value !== null && typeof value === "object" && !Array.isArray(value)) {
+		// Single-subschema and array-of-subschema keywords are dispatched on
+		// array-ness, exactly like wire.ts's traversal — this includes
+		// object-valued `additionalProperties`, which is a record's VALUE
+		// schema (bash.env, hub.env, debug.arguments, log_experiment.*).
+		if (SCHEMA_VALUE_KEYS.has(key)) {
+			if (Array.isArray(value)) {
+				value.forEach((sub, index) => {
+					walkSchema(tool, `${childPointer}/${index}`, sub, erasures);
+				});
+			} else {
+				walkSchema(tool, childPointer, value, erasures);
+			}
+		} else if (SCHEMA_MAP_KEYS.has(key) && value !== null && typeof value === "object" && !Array.isArray(value)) {
+			// Map positions hold per-key subschemas, so an empty map itself is
+			// not an erasure.
 			for (const [name, sub] of Object.entries(value as Record<string, unknown>)) {
 				walkSchema(tool, `${childPointer}/${name}`, sub, erasures);
 			}
-		} else if (SCHEMA_ARRAY_KEYS.has(key) && Array.isArray(value)) {
-			value.forEach((sub, index) => {
-				walkSchema(tool, `${childPointer}/${index}`, sub, erasures);
-			});
-		} else if (SCHEMA_VALUE_KEYS.has(key)) {
-			walkSchema(tool, childPointer, value, erasures);
 		}
 	}
 }
@@ -198,8 +233,8 @@ describe("setting- and mode-dependent tool variants stay structurally constraine
 			const tool = new EditTool(createSession(), mode);
 			walkSchema(`edit:${mode}`, "", toolWireSchema(tool), erasures);
 		}
-		expect(erasureMessage(erasures)).toBe("");
-		expect(erasures).toEqual([]);
+		expect(erasureMessage(unexpectedErasures(erasures))).toBe("");
+		expect(unexpectedErasures(erasures)).toEqual([]);
 	});
 
 	it("covers the task schema flag combinations", () => {
@@ -215,16 +250,16 @@ describe("setting- and mode-dependent tool variants stay structurally constraine
 			const wire = toolWireSchema(asTool(`task:combo${index}`, "task variant", parameters));
 			walkSchema(`task:combo${index}`, "", wire, erasures);
 		}
-		expect(erasureMessage(erasures)).toBe("");
-		expect(erasures).toEqual([]);
+		expect(erasureMessage(unexpectedErasures(erasures))).toBe("");
+		expect(unexpectedErasures(erasures)).toEqual([]);
 	});
 
 	it("covers the async bash variant", () => {
 		const tool = new BashTool(createSession({ "async.enabled": true }));
 		const erasures: Erasure[] = [];
 		walkSchema("bash:async", "", toolWireSchema(tool), erasures);
-		expect(erasureMessage(erasures)).toBe("");
-		expect(erasures).toEqual([]);
+		expect(erasureMessage(unexpectedErasures(erasures))).toBe("");
+		expect(unexpectedErasures(erasures)).toEqual([]);
 	});
 
 	it("covers every yield outputSchema path and keeps the `true` case description-only", () => {
@@ -246,13 +281,20 @@ describe("setting- and mode-dependent tool variants stay structurally constraine
 			const tool = new YieldTool(createSession({ "~outputSchema": outputSchema }));
 			walkSchema(`yield:${label}`, "", toolWireSchema(tool), erasures);
 		}
-		expect(erasureMessage(erasures)).toBe("");
-		expect(erasures).toEqual([]);
+		expect(erasureMessage(unexpectedErasures(erasures))).toBe("");
+		expect(unexpectedErasures(erasures)).toEqual([]);
 
 		const trueCase = toolWireSchema(new YieldTool(createSession({ "~outputSchema": true })));
 		const data = findDataProperty(trueCase);
-		expect(data).toBeDefined();
-		expect(Object.keys(data as Record<string, unknown>)).toEqual(["description"]);
+		const dataKeys = Object.keys(data as Record<string, unknown>);
+		// The `true` outputSchema case stays non-structural: a description plus
+		// (after normalizeEmptySchemas) an open additionalProperties — never a
+		// schema constraint the provider would enforce or misread.
+		expect(dataKeys.every(key => key === "description" || key === "additionalProperties")).toBe(true);
+		// additionalProperties, when present (the loose-fallback shapes), is the
+		// open-record marker only — never a structural constraint.
+		const additional = (data as Record<string, unknown>).additionalProperties;
+		expect(additional === undefined || additional === true).toBe(true);
 		expect(typeof (data as Record<string, unknown>).description).toBe("string");
 	});
 
@@ -271,8 +313,8 @@ describe("setting- and mode-dependent tool variants stay structurally constraine
 		for (const tool of tools) {
 			walkSchema(tool.name, "", toolWireSchema(tool), erasures);
 		}
-		expect(erasureMessage(erasures)).toBe("");
-		expect(erasures).toEqual([]);
+		expect(erasureMessage(unexpectedErasures(erasures))).toBe("");
+		expect(unexpectedErasures(erasures)).toEqual([]);
 	});
 });
 

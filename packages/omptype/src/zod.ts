@@ -3,6 +3,7 @@ import {
 	type EmbeddableSchema,
 	type Extras,
 	embed,
+	hasDeferredAlias,
 	type IR,
 	IR_BRAND,
 	isStructurallyExportable,
@@ -82,14 +83,14 @@ function schemaFromIR<Out>(ir: IR): Decoratable<Out> {
  */
 function undefinedDispatch<Out>(
 	schema: Decoratable<Out>,
-	fallback: (() => Out) | undefined,
+	fallback: Out | (() => Out) | undefined,
 ): Decoratable<Out | undefined> {
 	return schemaFromIR<Out | undefined>({
 		k: "morph",
 		input: { k: "unknown" },
 		fn: (input, ctx) => {
 			if (input === undefined) {
-				return fallback === undefined ? undefined : fallback();
+				return typeof fallback === "function" ? (fallback as () => Out)() : fallback;
 			}
 			const result = schema(input);
 			if (!(result instanceof type.errors)) return result;
@@ -217,33 +218,46 @@ function decorate<Out>(schema: Decoratable<Out>, optional = false): ZodLikeSchem
 			return next(restrictBase(schema, { ...schema.ir, url: true }));
 		},
 		optional(): ZodLikeSchema<Out | undefined> & OptionalSchemaMarker {
-			// Structurally exportable inner schemas keep a real union so structural
-			// metadata (JSON Schema export, descriptions) survives the widening.
-			// Anything carrying a runtime pipeline takes the dispatch morph below:
-			// `isStructurallyExportable(ir)` rejects in-IR morphs and stepped
-			// embedded schemas, and `hasSteps` covers Type-attached
-			// `.transform()`/`.refine()` steps the IR alone cannot see — rebuilding
-			// from `schema.ir` would silently DROP those steps, not just degrade
-			// the emitted JSON Schema.
-			if (!schema.hasSteps && isStructurallyExportable(schema.ir)) {
-				return decorate(
-					schemaFromIR<Out | undefined>({ k: "union", members: [schema.ir, { k: "undefined" }] }),
-					true,
-				) as ZodLikeSchema<Out | undefined> & OptionalSchemaMarker;
+			// Widening keeps a real union whenever the member carries no deferred
+			// alias, so structural metadata (JSON Schema export, descriptions)
+			// survives even when the member contains stepped (`sub`) or
+			// default-filled properties — the widened union is disjoint from
+			// `undefined` unless the member itself accepts `undefined`, and
+			// omptype's own determinism check arbitrates that at construction
+			// (its indeterminacy error falls back to the dispatcher below).
+			// Deferred aliases are excluded up front: the determinism probe
+			// cannot see through one, and resolving it here would break zod's
+			// defer-to-first-parse contract. `hasSteps` covers Type-attached
+			// `.transform()`/`.refine()` steps the IR alone cannot see —
+			// rebuilding from `schema.ir` would silently DROP those steps, not
+			// just degrade the emitted JSON Schema.
+			if (!schema.hasSteps && !hasDeferredAlias(schema.ir)) {
+				try {
+					return decorate(
+						schemaFromIR<Out | undefined>({ k: "union", members: [schema.ir, { k: "undefined" }] }),
+						true,
+					) as ZodLikeSchema<Out | undefined> & OptionalSchemaMarker;
+				} catch (error) {
+					if (!isIndeterminateUnionError(error)) throw error;
+				}
 			}
 			return decorate(undefinedDispatch<Out>(schema, undefined), true) as ZodLikeSchema<Out | undefined> &
 				OptionalSchemaMarker;
 		},
 		nullable(): ZodLikeSchema<Out | null> {
-			// Structurally exportable inner schemas keep a real union so structural
-			// metadata (JSON Schema export for provider tool definitions) survives
-			// the widening — the dispatcher morph below erases the IR, emitting
-			// `{}` for the member. Same pipeline gate as optional() above.
-			if (!schema.hasSteps && isStructurallyExportable(schema.ir)) {
-				return decorate(
-					schemaFromIR<Out | null>({ k: "union", members: [schema.ir, { k: "lit", v: null }] }),
-					optional,
-				) as ZodLikeSchema<Out | null>;
+			// Same gate as optional() above: widening keeps a real union whenever
+			// the member carries no deferred alias — disjoint from `null` unless
+			// the member itself accepts `null`, which omptype's determinism
+			// check arbitrates at construction.
+			if (!schema.hasSteps && !hasDeferredAlias(schema.ir)) {
+				try {
+					return decorate(
+						schemaFromIR<Out | null>({ k: "union", members: [schema.ir, { k: "lit", v: null }] }),
+						optional,
+					) as ZodLikeSchema<Out | null>;
+				} catch (error) {
+					if (!isIndeterminateUnionError(error)) throw error;
+				}
 			}
 			const inner = schema;
 			const nullable = schemaFromIR<Out | null>({
@@ -262,35 +276,31 @@ function decorate<Out>(schema: Decoratable<Out>, optional = false): ZodLikeSchem
 			value: Exclude<Out, undefined> | (() => Exclude<Out, undefined>),
 		): ZodLikeSchema<Exclude<Out, undefined>> {
 			type DefaultOut = Exclude<Out, undefined>;
-			// Structurally exportable inner schemas keep the original union+pipe
-			// composition so structural metadata survives JSON-Schema export.
-			if (isStructurallyExportable(schema.ir)) {
-				const widened = schema.or(type.raw("undefined")) as Decoratable<Out | undefined>;
-				const pipedPlain = widened.pipe(output => {
-					if (output !== undefined) return output as DefaultOut;
-					return typeof value === "function" ? (value as () => DefaultOut)() : value;
-				}) as unknown as Decoratable<DefaultOut>;
-				const plain = decorate(pipedPlain);
-				Object.defineProperty(plain, "hasDefault", { value: true, enumerable: false });
-				Object.defineProperty(plain, "defaultValue", { value, enumerable: false });
-				return plain;
+			// Same gate as optional()/nullable(): the union+pipe composition
+			// keeps structural metadata alive for members that carry no deferred
+			// alias, with omptype's determinism check arbitrating disjointness
+			// from `undefined` at construction.
+			if (!hasDeferredAlias(schema.ir)) {
+				try {
+					const widened = schema.or(type.raw("undefined")) as Decoratable<Out | undefined>;
+					const pipedPlain = widened.pipe(output => {
+						if (output !== undefined) return output as DefaultOut;
+						return typeof value === "function" ? (value as () => DefaultOut)() : value;
+					}) as unknown as Decoratable<DefaultOut>;
+					const plain = decorate(pipedPlain);
+					Object.defineProperty(plain, "hasDefault", { value: true, enumerable: false });
+					Object.defineProperty(plain, "defaultValue", { value, enumerable: false });
+					return plain;
+				} catch (error) {
+					if (!isIndeterminateUnionError(error)) throw error;
+				}
 			}
-			const fallback = value;
-			const piped = decorate(
-				schemaFromIR<DefaultOut>({
-					k: "morph",
-					input: { k: "unknown" },
-					fn: (input, ctx) => {
-						if (input === undefined) {
-							return typeof fallback === "function" ? (fallback as () => DefaultOut)() : fallback;
-						}
-						const result = schema(input);
-						if (!(result instanceof type.errors)) return result;
-						return ctx.error("the default or a valid value");
-					},
-				}),
-			) as unknown as Decoratable<DefaultOut>;
-			const result = decorate(piped);
+			const result = decorate(
+				undefinedDispatch<DefaultOut>(
+					schema as unknown as Decoratable<DefaultOut>,
+					value,
+				) as unknown as Decoratable<DefaultOut>,
+			);
 			// Stamp the default metadata objectSchema() reads when embedding this
 			// schema as a property: the prop must stay optional with this fallback.
 			Object.defineProperty(result, "hasDefault", { value: true, enumerable: false });
