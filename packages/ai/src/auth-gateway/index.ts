@@ -1,3 +1,4 @@
+export * from "./decision-trace";
 export * from "./http";
 export * from "./route-graph";
 export * from "./server";
