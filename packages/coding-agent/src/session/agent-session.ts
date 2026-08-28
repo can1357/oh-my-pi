@@ -421,11 +421,29 @@ type AgentContinueSkipReason =
 	| "post-restore-unavailable";
 
 type ScheduledAgentContinueOptions = {
+	source: string;
 	delayMs?: number;
 	generation?: number;
 	shouldContinue?: () => boolean;
 	onSkip?: (reason: AgentContinueSkipReason) => void;
 	onError?: (error: unknown) => void;
+};
+
+type ScheduledAgentContinueRequest = {
+	schedulerToken: number;
+	options: ScheduledAgentContinueOptions;
+};
+
+type AgentContinueOutcome =
+	| { status: "completed" }
+	| { status: "skipped"; reason: AgentContinueSkipReason }
+	| { status: "failed"; error: unknown };
+
+type ActiveAgentContinue = {
+	schedulerToken: number;
+	source: string;
+	coalescedSources: Set<string>;
+	promise: Promise<AgentContinueOutcome>;
 };
 
 type SessionTitleSource = "auto" | "user";
@@ -672,6 +690,8 @@ export class AgentSession {
 	#postPromptTasksPromise: Promise<void> | undefined = undefined;
 	#postPromptTasksResolve: (() => void) | undefined = undefined;
 	#postPromptTasksAbortController = new AbortController();
+	#activeAgentContinue: ActiveAgentContinue | undefined;
+	#agentContinueSchedulerToken = 0;
 
 	readonly #streamingEditGuard: StreamingEditGuard;
 	readonly #loopGuards: LoopGuards;
@@ -1897,6 +1917,7 @@ export class AgentSession {
 			status: job.status,
 			label: job.label,
 			startTime: job.startTime,
+			agentId: job.agentId,
 		}));
 		const recent = manager.getRecentJobs(options?.recentLimit ?? 5, ownerFilter).map(job => ({
 			id: job.id,
@@ -1904,6 +1925,7 @@ export class AgentSession {
 			status: job.status,
 			label: job.label,
 			startTime: job.startTime,
+			agentId: job.agentId,
 		}));
 		const delivery = manager.getDeliveryState(ownerFilter);
 		return { running, recent, delivery };
@@ -3374,12 +3396,72 @@ export class AgentSession {
 		this.#trackPostPromptTask(scheduled);
 	}
 
-	#skipAgentContinue(reason: AgentContinueSkipReason, options: ScheduledAgentContinueOptions | undefined): void {
-		logger.debug("agent.continue skipped after scheduling", { reason });
-		options?.onSkip?.(reason);
+	#skipAgentContinue(reason: AgentContinueSkipReason, request: ScheduledAgentContinueRequest): void {
+		logger.debug("agent.continue skipped after scheduling", {
+			reason,
+			source: request.options.source,
+			schedulerToken: request.schedulerToken,
+		});
+		request.options.onSkip?.(reason);
 	}
 
-	#scheduleAgentContinue(options?: ScheduledAgentContinueOptions): void {
+	#handleAgentContinueOutcome(outcome: AgentContinueOutcome, request: ScheduledAgentContinueRequest): void {
+		if (outcome.status === "skipped") {
+			this.#skipAgentContinue(outcome.reason, request);
+		} else if (outcome.status === "failed") {
+			request.options.onError?.(outcome.error);
+		}
+	}
+
+	async #runAgentContinue(
+		signal: AbortSignal,
+		request: ScheduledAgentContinueRequest,
+		coalescedSources: Set<string>,
+	): Promise<AgentContinueOutcome> {
+		try {
+			const reverted = await this.#recovery.maybeRestoreRetryFallbackPrimary();
+			if (signal.aborted || this.#isDisposed) {
+				return { status: "skipped", reason: "post-restore-unavailable" };
+			}
+			// A cooldown-expiry revert can drop the active window below the
+			// accumulated context. The user-prompt path re-checks context after
+			// the revert via runPrePromptCompactionIfNeeded; the auto-continue
+			// path must do the same so agent.continue() never sends a
+			// predictably oversized request to the reverted (smaller) model.
+			if (reverted) {
+				await this.#maintenance.runPrePromptCompactionIfNeeded([]);
+				if (signal.aborted || this.#isDisposed) {
+					return { status: "skipped", reason: "post-restore-unavailable" };
+				}
+			}
+			if (this.settings.get("retry.usageAwareFallback")) {
+				if (!(await this.#runQueuedUsageAwarePreflight(signal))) {
+					return { status: "skipped", reason: "session-unavailable" };
+				}
+			}
+			await this.agent.continue(signal);
+			return { status: "completed" };
+		} catch (error) {
+			logger.warn("agent.continue failed after scheduling", {
+				source: request.options.source,
+				schedulerToken: request.schedulerToken,
+				coalescedSources: [...coalescedSources].filter(source => source !== request.options.source),
+				error: error instanceof Error ? error.message : String(error),
+				stack: error instanceof Error ? error.stack : undefined,
+			});
+			return { status: "failed", error };
+		}
+	}
+
+	#scheduleAgentContinue(options: ScheduledAgentContinueOptions): void {
+		const request: ScheduledAgentContinueRequest = {
+			schedulerToken: ++this.#agentContinueSchedulerToken,
+			options,
+		};
+		logger.debug("agent.continue scheduled", {
+			source: options.source,
+			schedulerToken: request.schedulerToken,
+		});
 		this.#schedulePostPromptTask(
 			async signal => {
 				// Defense in depth: if compaction/handoff slipped onto the post-prompt queue
@@ -3388,54 +3470,55 @@ export class AgentSession {
 				// reset. The first-class fix is in #checkCompaction/the agent_end handler,
 				// but this guard catches anything that bypasses that path.
 				if (signal.aborted || this.#isDisposed || this.isCompacting || this.isGeneratingHandoff) {
-					this.#skipAgentContinue("session-unavailable", options);
+					this.#skipAgentContinue("session-unavailable", request);
 					return;
 				}
-				if (options?.shouldContinue && !options.shouldContinue()) {
-					this.#skipAgentContinue("should-continue-false", options);
+				if (options.shouldContinue && !options.shouldContinue()) {
+					this.#skipAgentContinue("should-continue-false", request);
 					return;
 				}
-				this.#beginInFlight();
-				try {
-					const reverted = await this.#recovery.maybeRestoreRetryFallbackPrimary();
-					if (signal.aborted || this.#isDisposed) {
-						this.#skipAgentContinue("post-restore-unavailable", options);
-						return;
-					}
-					// A cooldown-expiry revert can drop the active window below the
-					// accumulated context. The user-prompt path re-checks context after
-					// the revert via runPrePromptCompactionIfNeeded; the auto-continue
-					// path must do the same so agent.continue() never sends a
-					// predictably oversized request to the reverted (smaller) model.
-					if (reverted) {
-						await this.#maintenance.runPrePromptCompactionIfNeeded([]);
-						if (signal.aborted || this.#isDisposed) {
-							this.#skipAgentContinue("post-restore-unavailable", options);
-							return;
-						}
-					}
-					if (this.settings.get("retry.usageAwareFallback")) {
-						if (!(await this.#runQueuedUsageAwarePreflight(signal))) {
-							this.#skipAgentContinue("session-unavailable", options);
-							return;
-						}
-					}
-					await this.agent.continue(signal);
-				} catch (error) {
-					logger.warn("agent.continue failed after scheduling", {
-						error: error instanceof Error ? error.message : String(error),
-						stack: error instanceof Error ? error.stack : undefined,
+
+				const active = this.#activeAgentContinue;
+				if (active) {
+					active.coalescedSources.add(options.source);
+					logger.debug("agent.continue coalesced after scheduling", {
+						source: options.source,
+						schedulerToken: request.schedulerToken,
+						activeSource: active.source,
+						activeSchedulerToken: active.schedulerToken,
 					});
-					options?.onError?.(error);
+					this.#handleAgentContinueOutcome(await active.promise, request);
+					return;
+				}
+
+				this.#beginInFlight();
+				const coalescedSources = new Set([options.source]);
+				const promise = this.#runAgentContinue(signal, request, coalescedSources);
+				const attempt: ActiveAgentContinue = {
+					schedulerToken: request.schedulerToken,
+					source: options.source,
+					coalescedSources,
+					promise,
+				};
+				this.#activeAgentContinue = attempt;
+				try {
+					this.#handleAgentContinueOutcome(await promise, request);
 				} finally {
+					// Clear the active attempt BEFORE #endInFlight(): the settle drain it
+					// triggers (#drainStrandedQueuedMessages -> queued-message-drain) runs
+					// synchronously and must start a fresh continue for messages queued
+					// after this attempt's final poll, not coalesce onto the finished one.
+					if (this.#activeAgentContinue === attempt) {
+						this.#activeAgentContinue = undefined;
+					}
 					this.#usagePreflightReadyForNextModelCall = false;
 					this.#endInFlight();
 				}
 			},
 			{
-				delayMs: options?.delayMs,
-				generation: options?.generation,
-				onSkip: reason => this.#skipAgentContinue(reason, options),
+				delayMs: options.delayMs,
+				generation: options.generation,
+				onSkip: reason => this.#skipAgentContinue(reason, request),
 			},
 		);
 	}
@@ -3449,6 +3532,7 @@ export class AgentSession {
 		if (options.suppressContinuation) return false;
 		if (this.agent.hasQueuedMessages()) {
 			this.#scheduleAgentContinue({
+				source: "compaction-queued-message",
 				delayMs: 100,
 				generation: options.generation,
 				shouldContinue: () => this.agent.hasQueuedMessages(),
@@ -3492,6 +3576,7 @@ export class AgentSession {
 				if (signal.aborted) return;
 				if (this.agent.hasQueuedMessages()) {
 					this.#scheduleAgentContinue({
+						source: "auto-continue-queued-message",
 						generation,
 						shouldContinue: () => this.agent.hasQueuedMessages(),
 					});
@@ -6387,6 +6472,7 @@ export class AgentSession {
 		}
 		this.#queuedMessageDrainScheduled = true;
 		this.#scheduleAgentContinue({
+			source: "queued-message-drain",
 			shouldContinue: () => {
 				this.#queuedMessageDrainScheduled = false;
 				return (
@@ -7505,7 +7591,10 @@ export class AgentSession {
 			attribution: "agent",
 			timestamp: Date.now(),
 		});
-		this.#scheduleAgentContinue({ generation: this.#promptGeneration });
+		this.#scheduleAgentContinue({
+			source: "checkpoint-rewind-reminder",
+			generation: this.#promptGeneration,
+		});
 		return true;
 	}
 
@@ -7638,6 +7727,7 @@ export class AgentSession {
 		this.agent.appendMessage(reminderMessage);
 		this.sessionManager.appendMessage(reminderMessage);
 		this.#scheduleAgentContinue({
+			source: "plan-mode-reminder",
 			generation: this.#promptGeneration,
 			// If the continuation never runs (new prompt, dispose, compaction,
 			// handoff), the forced choice must not leak onto an unrelated turn.
@@ -9090,7 +9180,7 @@ export class AgentSession {
 	 * guards as every other post-prompt continuation.
 	 */
 	resumeAfterAskReanswer(): void {
-		this.#scheduleAgentContinue();
+		this.#scheduleAgentContinue({ source: "ask-reanswer" });
 	}
 
 	/**

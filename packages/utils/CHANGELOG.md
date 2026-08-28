@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [18.0.9] - 2026-08-28
+
+### Fixed
+
+- Fixed error handling so unrelated aborted requests and closed-connection failures are no longer silently suppressed.
+
 ## [18.0.8] - 2026-08-27
 
 ### Added

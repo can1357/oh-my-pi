@@ -20,6 +20,58 @@ const INDEX_WRITE: gix::index::write::Options = gix::index::write::Options {
 	extensions: gix::index::write::Extensions::None,
 	skip_hash:  false,
 };
+/// Apply a ref update, synthesizing a committer for the reflog entry when no
+/// identity is configured. Reflog lines require a signature, but git never
+/// fails branch/reset/stash ref updates over missing identity — only
+/// `git commit` demands one — so parity requires a fallback here.
+pub(crate) fn update_reference(
+	repo: &gix::Repository,
+	op: &'static str,
+	name: &str,
+	id: gix::hash::ObjectId,
+	expected: gix::refs::transaction::PreviousValue,
+	message: &str,
+	force_create_reflog: bool,
+) -> Result<()> {
+	let name: gix::refs::FullName = name.try_into().map_err(|err| Error::backend(op, err))?;
+	let edit = gix::refs::transaction::RefEdit {
+		change: gix::refs::transaction::Change::Update {
+			log: gix::refs::transaction::LogChange {
+				mode: gix::refs::transaction::RefLog::AndReference,
+				force_create_reflog,
+				message: message.into(),
+			},
+			expected,
+			new: gix::refs::Target::Object(id),
+		},
+		name,
+		deref: false,
+	};
+	let now;
+	let committer = if let Some(signature) = repo
+		.committer()
+		.transpose()
+		.map_err(|err| Error::backend(op, err))?
+	{
+		signature
+	} else {
+		now = format!(
+			"{} +0000",
+			std::time::SystemTime::now()
+				.duration_since(std::time::UNIX_EPOCH)
+				.map_or(0, |elapsed| elapsed.as_secs())
+		);
+		gix::actor::SignatureRef {
+			name:  "oh-my-pi".into(),
+			email: "omp@localhost".into(),
+			time:  &now,
+		}
+	};
+	repo
+		.edit_references_as(Some(edit), Some(committer))
+		.map_err(|err| Error::backend(op, err))?;
+	Ok(())
+}
 
 impl GitRepo {
 	/// Stage worktree files, or every change when `files` is empty.
@@ -219,9 +271,15 @@ impl GitRepo {
 		} else {
 			gix::refs::transaction::PreviousValue::MustNotExist
 		};
-		repo
-			.reference(full, id, constraint, format!("branch: Created from {start}"))
-			.map_err(|err| Error::backend("git branch", err))?;
+		update_reference(
+			&repo,
+			"git branch",
+			&full,
+			id,
+			constraint,
+			&format!("branch: Created from {start}"),
+			false,
+		)?;
 		Ok(())
 	}
 
@@ -435,14 +493,15 @@ impl GitRepo {
 				.map_err(|e| Error::backend("git worktree add", e))?
 				.is_none()
 			{
-				repo
-					.reference(
-						full.as_str(),
-						id,
-						gix::refs::transaction::PreviousValue::MustNotExist,
-						"branch: Created from worktree add",
-					)
-					.map_err(|e| Error::backend("git worktree add", e))?;
+				update_reference(
+					&repo,
+					"git worktree add",
+					full.as_str(),
+					id,
+					gix::refs::transaction::PreviousValue::MustNotExist,
+					"branch: Created from worktree add",
+					false,
+				)?;
 			}
 			format!("ref: {full}")
 		};
@@ -1026,9 +1085,15 @@ fn write_head(path: &Path, symbolic: Option<&str>, id: gix::hash::ObjectId) -> R
 fn update_current_head(repo: &gix::Repository, path: &Path, id: gix::hash::ObjectId) -> Result<()> {
 	let content = fs::read_to_string(path).unwrap_or_default();
 	if let Some(name) = content.trim().strip_prefix("ref: ") {
-		repo
-			.reference(name, id, gix::refs::transaction::PreviousValue::Any, "reset: moving to target")
-			.map_err(|e| Error::backend("git reset", e))?;
+		update_reference(
+			repo,
+			"git reset",
+			name,
+			id,
+			gix::refs::transaction::PreviousValue::Any,
+			"reset: moving to target",
+			false,
+		)?;
 	} else {
 		fs::write(path, format!("{}\n", id.to_hex()))?;
 	}

@@ -153,6 +153,8 @@ export interface InteractiveModeContext {
 	collabGuest?: CollabGuestLink;
 	eventController: EventController;
 	eventBus?: EventBus;
+	/** Root-scoped bus carrying this session tree's `task:subagent:*` frames. */
+	subagentEventBus?: EventBus;
 
 	// State
 	isInitialized: boolean;

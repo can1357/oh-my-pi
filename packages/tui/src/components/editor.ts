@@ -595,6 +595,34 @@ export class Editor implements Component, Focusable {
 		this.#theme = theme;
 		this.borderColor = theme.borderColor;
 	}
+	/** Return bounded editor content, cursor, and transient child state for debug inspection. */
+	debugState(): Record<string, unknown> {
+		const lines = this.#state.lines;
+		let textLength = Math.max(0, lines.length - 1);
+		let textPreview = "";
+		for (let i = 0; i < lines.length; i++) {
+			const line = lines[i] ?? "";
+			textLength += line.length;
+			if (textPreview.length >= 120) continue;
+			if (i > 0) textPreview += "\n";
+			textPreview += line.slice(0, 120 - textPreview.length);
+		}
+		return {
+			textPreview,
+			textLength,
+			previewTruncated: textLength > 120,
+			cursorLine: this.#state.cursorLine,
+			cursorCol: this.#state.cursorCol,
+			lineCount: lines.length,
+			selection: null,
+			placeholderActive: false,
+		};
+	}
+
+	/** Expose the active autocomplete list to the debug tree walker. */
+	get debugChildren(): readonly Component[] {
+		return this.#autocompleteList ? [this.#autocompleteList] : [];
+	}
 
 	setTheme(theme: EditorTheme): void {
 		this.#theme = theme;

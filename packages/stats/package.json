@@ -1,7 +1,7 @@
 {
   "type": "module",
   "name": "@oh-my-pi/omp-stats",
-  "version": "18.0.8",
+  "version": "18.0.9",
   "description": "Local observability dashboard for pi AI usage statistics",
   "homepage": "https://omp.sh",
   "author": "Stencil Labs, Inc.",

@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import { connectToServer } from "@oh-my-pi/pi-coding-agent/mcp/client";
 import { HttpTransport } from "@oh-my-pi/pi-coding-agent/mcp/transports/http";
+import { postmortem } from "@oh-my-pi/pi-utils";
 
 const encoder = new TextEncoder();
 const REQUEST_TIMEOUT_MS = 50;
@@ -234,6 +235,69 @@ describe("MCP Streamable HTTP transport timeouts", () => {
 		await expect(withPendingGuard(transport.request<ToolList>("tools/list"), "request")).resolves.toEqual({
 			tools: [{ name: "fast", inputSchema: { type: "object" } }],
 		});
+	});
+
+	it("close aborts and drains an in-flight SSE POST request", async () => {
+		const requestReceived = Promise.withResolvers<void>();
+		server = Bun.serve({
+			port: 0,
+			fetch() {
+				requestReceived.resolve();
+				return stalledBodyResponse("", {
+					headers: { "Content-Type": "text/event-stream" },
+				});
+			},
+		});
+		if (!server) throw new Error("Test server was not started");
+		const transport = new HttpTransport({
+			type: "http",
+			url: `http://127.0.0.1:${server.port}/mcp`,
+			timeout: GUARD_TIMEOUT_MS,
+		});
+		await transport.connect();
+
+		const request = transport.request("tools/list");
+		await requestReceived.promise;
+		const closing = transport.close();
+
+		const requestError = await withPendingGuard(request, "aborted request").then(
+			() => undefined,
+			error => error,
+		);
+		expect(requestError).toMatchObject({ name: "AbortError" });
+		expect(postmortem.isExpectedCleanupError(requestError)).toBe(true);
+		await withPendingGuard(closing, "transport close");
+	});
+
+	it("keeps an abandoned SSE request rejection observed after caller cancellation", async () => {
+		const requestReceived = Promise.withResolvers<void>();
+		const caller = new AbortController();
+		server = Bun.serve({
+			port: 0,
+			fetch() {
+				requestReceived.resolve();
+				return stalledBodyResponse("", {
+					headers: { "Content-Type": "text/event-stream" },
+				});
+			},
+		});
+		const transport = await connectedTransport();
+		const unhandled: unknown[] = [];
+		const onUnhandled = (reason: unknown) => unhandled.push(reason);
+		process.on("unhandledRejection", onUnhandled);
+		try {
+			void transport.request("tools/list", undefined, { signal: caller.signal });
+			await requestReceived.promise;
+			caller.abort();
+			const nextTurn = Promise.withResolvers<void>();
+			setImmediate(nextTurn.resolve);
+			await nextTurn.promise;
+
+			expect(unhandled).toEqual([]);
+		} finally {
+			process.off("unhandledRejection", onUnhandled);
+			await transport.close();
+		}
 	});
 });
 

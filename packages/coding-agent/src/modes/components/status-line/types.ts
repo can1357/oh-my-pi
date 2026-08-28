@@ -139,6 +139,7 @@ export interface SegmentContext {
 	usage: {
 		tier?: string;
 		fiveHour?: { percent: number; resetMinutes?: number };
+		daily?: { percent: number; resetMinutes?: number };
 		sevenDay?: { percent: number; resetHours?: number };
 		monthly?: { percent: number; resetHours?: number };
 	} | null;

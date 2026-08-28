@@ -319,7 +319,7 @@ describe("selector setting side effects", () => {
 			},
 			statusLine: { invalidate: vi.fn() },
 			updateEditorBorderColor: vi.fn(),
-			keybindings: { getKeys: () => [] },
+			keybindings: { getKeys: () => [], getDisplayString: () => "" },
 			showStatus: vi.fn(),
 			showError: vi.fn(),
 		} as unknown as InteractiveModeContext);
@@ -411,7 +411,7 @@ describe("selector setting side effects", () => {
 			},
 			statusLine: { invalidate: vi.fn() },
 			updateEditorBorderColor: vi.fn(),
-			keybindings: { getKeys: () => [] },
+			keybindings: { getKeys: () => [], getDisplayString: () => "" },
 			showStatus,
 			showError: vi.fn(),
 		} as unknown as InteractiveModeContext);
@@ -495,7 +495,7 @@ describe("selector setting side effects", () => {
 			},
 			statusLine: { invalidate: vi.fn() },
 			updateEditorBorderColor: vi.fn(),
-			keybindings: { getKeys: () => [] },
+			keybindings: { getKeys: () => [], getDisplayString: () => "" },
 			showStatus,
 			showError: vi.fn(),
 		} as unknown as InteractiveModeContext);
@@ -583,7 +583,7 @@ describe("selector setting side effects", () => {
 			},
 			statusLine: { invalidate: vi.fn() },
 			updateEditorBorderColor: vi.fn(),
-			keybindings: { getKeys: () => [] },
+			keybindings: { getKeys: () => [], getDisplayString: () => "" },
 			showStatus,
 			showError: vi.fn(),
 		} as unknown as InteractiveModeContext);
@@ -682,7 +682,7 @@ describe("selector setting side effects", () => {
 			},
 			statusLine: { invalidate: vi.fn() },
 			updateEditorBorderColor: vi.fn(),
-			keybindings: { getKeys: () => [] },
+			keybindings: { getKeys: () => [], getDisplayString: () => "" },
 			showStatus,
 			showError: vi.fn(),
 		} as unknown as InteractiveModeContext);
@@ -784,7 +784,7 @@ describe("selector setting side effects", () => {
 				},
 				statusLine: { invalidate: vi.fn() },
 				updateEditorBorderColor: vi.fn(),
-				keybindings: { getKeys: () => [] },
+				keybindings: { getKeys: () => [], getDisplayString: () => "" },
 				showStatus,
 				showError: vi.fn(),
 			} as unknown as InteractiveModeContext);
@@ -892,7 +892,7 @@ describe("selector setting side effects", () => {
 				},
 				statusLine: { invalidate: vi.fn() },
 				updateEditorBorderColor: vi.fn(),
-				keybindings: { getKeys: () => [] },
+				keybindings: { getKeys: () => [], getDisplayString: () => "" },
 				showStatus,
 				showError: vi.fn(),
 			} as unknown as InteractiveModeContext);
@@ -996,7 +996,7 @@ describe("selector setting side effects", () => {
 			},
 			statusLine: { invalidate: vi.fn() },
 			updateEditorBorderColor: vi.fn(),
-			keybindings: { getKeys: () => [] },
+			keybindings: { getKeys: () => [], getDisplayString: () => "" },
 			showStatus,
 			showError: vi.fn(),
 		} as unknown as InteractiveModeContext);
@@ -1070,7 +1070,7 @@ describe("selector setting side effects", () => {
 			},
 			statusLine: { invalidate: vi.fn() },
 			updateEditorBorderColor: vi.fn(),
-			keybindings: { getKeys: () => [] },
+			keybindings: { getKeys: () => [], getDisplayString: () => "" },
 			showStatus,
 			showError,
 		} as unknown as InteractiveModeContext);
@@ -1164,7 +1164,7 @@ describe("selector setting side effects", () => {
 			},
 			statusLine: { invalidate: vi.fn() },
 			updateEditorBorderColor: vi.fn(),
-			keybindings: { getKeys: () => [] },
+			keybindings: { getKeys: () => [], getDisplayString: () => "" },
 			showModelCycleTrack,
 			showError,
 		} as unknown as InteractiveModeContext);
@@ -1238,7 +1238,7 @@ describe("selector setting side effects", () => {
 			},
 			statusLine: { invalidate: statusInvalidate },
 			updateEditorBorderColor,
-			keybindings: { getKeys: () => [] },
+			keybindings: { getKeys: () => [], getDisplayString: () => "" },
 			showStatus,
 			showError,
 		} as unknown as InteractiveModeContext);
@@ -1323,7 +1323,7 @@ describe("selector setting side effects", () => {
 			},
 			statusLine: { invalidate: vi.fn() },
 			updateEditorBorderColor: vi.fn(),
-			keybindings: { getKeys: () => [] },
+			keybindings: { getKeys: () => [], getDisplayString: () => "" },
 			showStatus: vi.fn(),
 			showError: vi.fn(),
 		} as unknown as InteractiveModeContext);
@@ -1410,7 +1410,7 @@ describe("selector setting side effects", () => {
 			},
 			statusLine: { invalidate: vi.fn() },
 			updateEditorBorderColor: vi.fn(),
-			keybindings: { getKeys: () => [] },
+			keybindings: { getKeys: () => [], getDisplayString: () => "" },
 			showStatus,
 			showError: vi.fn(),
 		} as unknown as InteractiveModeContext);
@@ -1495,7 +1495,7 @@ describe("selector setting side effects", () => {
 			},
 			statusLine: { invalidate: vi.fn() },
 			updateEditorBorderColor: vi.fn(),
-			keybindings: { getKeys: () => [] },
+			keybindings: { getKeys: () => [], getDisplayString: () => "" },
 			showStatus,
 			showError,
 		} as unknown as InteractiveModeContext);
@@ -1598,7 +1598,7 @@ describe("selector setting side effects", () => {
 				},
 				statusLine: { invalidate: statusInvalidate },
 				updateEditorBorderColor,
-				keybindings: { getKeys: () => [] },
+				keybindings: { getKeys: () => [], getDisplayString: () => "" },
 				showStatus,
 				showError,
 			} as unknown as InteractiveModeContext);
@@ -1705,7 +1705,7 @@ describe("selector setting side effects", () => {
 				},
 				statusLine: { invalidate: vi.fn() },
 				updateEditorBorderColor: vi.fn(),
-				keybindings: { getKeys: () => [] },
+				keybindings: { getKeys: () => [], getDisplayString: () => "" },
 				showStatus,
 				showError,
 			} as unknown as InteractiveModeContext);
@@ -1795,7 +1795,7 @@ describe("selector setting side effects", () => {
 			},
 			statusLine: { invalidate: vi.fn() },
 			updateEditorBorderColor: vi.fn(),
-			keybindings: { getKeys: () => [] },
+			keybindings: { getKeys: () => [], getDisplayString: () => "" },
 			showStatus,
 			showError: vi.fn(),
 		} as unknown as InteractiveModeContext);
@@ -1876,7 +1876,7 @@ describe("selector setting side effects", () => {
 			},
 			statusLine: { invalidate: vi.fn() },
 			updateEditorBorderColor: vi.fn(),
-			keybindings: { getKeys: () => [] },
+			keybindings: { getKeys: () => [], getDisplayString: () => "" },
 			showStatus,
 			showError: vi.fn(),
 		} as unknown as InteractiveModeContext);

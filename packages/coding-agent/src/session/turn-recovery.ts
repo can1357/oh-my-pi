@@ -142,7 +142,12 @@ export interface TurnRecoveryHost {
 	promptGeneration(): number;
 	sessionId(): string;
 	emitSessionEvent(event: AgentSessionEvent): Promise<void>;
-	scheduleAgentContinue(options: { delayMs?: number; generation?: number; onError?: (error: unknown) => void }): void;
+	scheduleAgentContinue(options: {
+		source: string;
+		delayMs?: number;
+		generation?: number;
+		onError?: (error: unknown) => void;
+	}): void;
 	waitForSessionMessagePersistence(message: AssistantMessage): Promise<void>;
 	appendSessionMessage(message: AssistantMessage): void;
 	persistedAssistantEntryId(message: AssistantMessage): string | undefined;
@@ -739,7 +744,10 @@ export class TurnRecovery {
 			attribution: "agent",
 			timestamp: Date.now(),
 		});
-		this.#host.scheduleAgentContinue({ generation: this.#host.promptGeneration() });
+		this.#host.scheduleAgentContinue({
+			source: "empty-stop-retry",
+			generation: this.#host.promptGeneration(),
+		});
 		return "continue";
 	}
 
@@ -819,7 +827,10 @@ export class TurnRecovery {
 			attribution: "agent",
 			timestamp: Date.now(),
 		});
-		this.#host.scheduleAgentContinue({ generation: this.#host.promptGeneration() });
+		this.#host.scheduleAgentContinue({
+			source: "unexpected-stop-retry",
+			generation: this.#host.promptGeneration(),
+		});
 		return true;
 	}
 
@@ -2240,6 +2251,7 @@ export class TurnRecovery {
 		// otherwise auto_retry_end never fires, retryPromise stays pending, and
 		// the in-flight prompt() (and the TUI retry indicator) hang forever.
 		this.#host.scheduleAgentContinue({
+			source: "automatic-retry",
 			delayMs: 1,
 			generation,
 			onError: error => void this.#failRetryAfterLocalContinueError(message, error),
@@ -2403,7 +2415,7 @@ export class TurnRecovery {
 		this.#retryAttempt = 0;
 
 		// Re-attempt the turn
-		this.#host.scheduleAgentContinue({ delayMs: 1 });
+		this.#host.scheduleAgentContinue({ source: "manual-retry", delayMs: 1 });
 
 		return true;
 	}

@@ -28,6 +28,7 @@ import type {
 	OAuthProvider,
 	OAuthProviderId,
 } from "./registry/oauth/types";
+import { AUTHENTICATED_SENTINEL } from "./registry/types";
 import { getEnvApiKey, getEnvApiKeyName } from "./stream";
 import type { Provider } from "./types";
 import type {
@@ -1272,6 +1273,7 @@ type UsageRankedCandidate<T extends AuthCredential> = UsageCandidate<T> & {
 	blocked: boolean;
 	blockedUntil?: number;
 	hasPriorityBoost: boolean;
+	usageMeasured: boolean;
 	planPriority: number;
 	secondaryUsed: number;
 	secondaryRequiredDrain: number;
@@ -2168,13 +2170,16 @@ export class AuthStorage {
 			const windows = usage ? strategy.findWindowLimits(usage, args.rankingContext) : undefined;
 			const primary = windows?.primary;
 			const secondary = windows?.secondary;
+			const usageMeasured = primary !== undefined || secondary !== undefined;
+			const primaryUncapped = primary === undefined && secondary !== undefined;
 			ranked.push({
 				selection,
 				usage,
 				usageChecked,
 				blocked,
 				blockedUntil,
-				hasPriorityBoost: strategy.hasPriorityBoost?.(primary) ?? false,
+				usageMeasured,
+				hasPriorityBoost: strategy.hasPriorityBoost?.(primary, primaryUncapped, args.rankingContext) ?? false,
 				planPriority: 0,
 				secondaryUsed: this.#normalizeUsageFraction(secondary),
 				secondaryRequiredDrain: this.#computeWindowRequiredDrain(
@@ -2746,6 +2751,34 @@ export class AuthStorage {
 		if (this.#hasDedicatedEnvAuth(provider)) return true;
 		if (this.#fallbackResolver?.(provider)) return true;
 		return false;
+	}
+
+	/**
+	 * Like {@link hasAuth} but excludes providers whose only credential is the
+	 * self-resolving {@link AUTHENTICATED_SENTINEL} — the marker AWS/Vertex
+	 * transports return when a credential *source* merely exists (a stray
+	 * `~/.aws` profile, an EC2 instance role, Application Default Credentials)
+	 * without a usable key resolved yet. Default-model auto-selection uses this
+	 * so an ambiently-available provider (e.g. `amazon-bedrock` via an unrelated
+	 * AWS profile) does not win the startup default over a provider the user
+	 * actually signed into and then 403 on the first turn. Explicit selection
+	 * and picker visibility still go through {@link hasAuth}. See issue #9967.
+	 */
+	hasConcreteAuth(provider: string): boolean {
+		if (this.#runtimeOverrides.has(provider)) return true;
+		if (this.#configOverrides.has(provider)) return true;
+		if (this.#getCredentialsForProvider(provider).length > 0) return true;
+		if ((provider === "amazon-bedrock" || provider === "bedrock-mantle") && $env.AWS_BEARER_TOKEN_BEDROCK?.trim()) {
+			return true;
+		}
+		if (provider === "xai-oauth") {
+			if ($env.XAI_OAUTH_TOKEN?.trim()) return true;
+		} else {
+			const envApiKey = getEnvApiKey(provider);
+			if (envApiKey !== undefined && envApiKey !== AUTHENTICATED_SENTINEL) return true;
+		}
+		const fallback = this.#fallbackResolver?.(provider);
+		return fallback !== undefined && fallback !== AUTHENTICATED_SENTINEL;
 	}
 
 	/**
@@ -4633,8 +4666,8 @@ export class AuthStorage {
 		// scores are only comparable between measured windows, and the
 		// clockless headroom fallback (0..1) must not let an account whose
 		// usage fetch failed shadow a measured sibling.
-		const leftMeasured = left.usage !== null;
-		const rightMeasured = right.usage !== null;
+		const leftMeasured = left.usageMeasured;
+		const rightMeasured = right.usageMeasured;
 		if (leftMeasured !== rightMeasured) return leftMeasured ? -1 : 1;
 		// Required drain, descending: the account whose remaining quota must
 		// burn fastest to avoid expiring unused at its reset comes first, so
@@ -4769,13 +4802,16 @@ export class AuthStorage {
 			const windows = usage ? strategy.findWindowLimits(usage, args.rankingContext) : undefined;
 			const primary = windows?.primary;
 			const secondary = windows?.secondary;
+			const usageMeasured = primary !== undefined || secondary !== undefined;
+			const primaryUncapped = primary === undefined && secondary !== undefined;
 			ranked.push({
 				selection,
 				usage,
 				usageChecked,
 				blocked,
 				blockedUntil,
-				hasPriorityBoost: strategy.hasPriorityBoost?.(primary) ?? false,
+				usageMeasured,
+				hasPriorityBoost: strategy.hasPriorityBoost?.(primary, primaryUncapped, args.rankingContext) ?? false,
 				planPriority: getOpenAICodexPlanPriority(usage, args.planRequirement),
 				secondaryUsed: this.#normalizeUsageFraction(secondary),
 				secondaryRequiredDrain: this.#computeWindowRequiredDrain(

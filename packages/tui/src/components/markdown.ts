@@ -1773,6 +1773,18 @@ export class Markdown implements Component {
 		this.#defaultTextStyle = defaultTextStyle;
 		this.#codeBlockIndent = Math.max(0, Math.floor(codeBlockIndent));
 	}
+	/** Return bounded source text and layout state for debug inspection. */
+	debugState(): Record<string, unknown> {
+		return {
+			textPreview: this.#text.slice(0, 120),
+			textLength: this.#text.length,
+			previewTruncated: this.#text.length > 120,
+			paddingX: this.#paddingX,
+			paddingY: this.#paddingY,
+			codeBlockIndent: this.#codeBlockIndent,
+			ignoreTight: this.#ignoreTight,
+		};
+	}
 
 	setText(text: string): boolean {
 		// Identical re-emit (throttled tick): fully normalized already.

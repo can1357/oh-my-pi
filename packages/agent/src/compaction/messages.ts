@@ -85,7 +85,16 @@ function getPrunedToolResultContent(message: ToolResultMessage): (TextContent | 
 	}
 	const textBlocks = message.content.filter((content): content is TextContent => content.type === "text");
 	const text = textBlocks.map(block => block.text).join("") || "[Output truncated]";
-	return [{ type: "text", text }];
+	const firstTextIndex = message.content.findIndex(content => content.type === "text");
+	if (firstTextIndex < 0) return [{ type: "text", text }, ...message.content];
+
+	const content: (TextContent | ImageContent)[] = [];
+	for (let index = 0; index < message.content.length; index++) {
+		const block = message.content[index];
+		if (block.type !== "text") content.push(block);
+		else if (index === firstTextIndex) content.push({ type: "text", text });
+	}
+	return content;
 }
 
 export function renderBranchSummaryContext(summary: string): string {
