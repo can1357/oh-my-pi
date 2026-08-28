@@ -1,8 +1,11 @@
 // Contract: ggmlLocalModelInitializer builds a LocalEmbeddingModel from a
-// stubbed node-llama-cpp loader, yields batched vectors, and fails fast when no
-// GGUF model path resolves. The native addon is never pulled — a fake loader is
-// injected via setGgmlModuleLoaderForTests.
-import { describe, expect, test } from "bun:test";
+// stubbed node-llama-cpp loader, yields batched vectors, truncates inputs that
+// exceed the context budget, reloads when the resolved GGUF path changes (and
+// disposes the previous runtime), and fails fast when no GGUF model path
+// resolves. The native addon is never pulled — a fake loader is injected via
+// setGgmlModuleLoaderForTests, and afterEach restores the default loader so a
+// later file never inherits a stale fake.
+import { afterEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -12,6 +15,10 @@ import {
 	resolveGgufModelPath,
 	setGgmlModuleLoaderForTests,
 } from "../src/core/ggml-embedding";
+
+afterEach(() => {
+	resetGgmlForTests();
+});
 
 function fakeLlamaLoader(vector: number[], gpu = "vulkan") {
 	return async () =>
@@ -95,6 +102,92 @@ describe("ggmlLocalModelInitializer", () => {
 			expect(vec).toHaveLength(1);
 		});
 	});
+
+	test("truncates an input that exceeds the token budget before evaluation", async () => {
+		resetGgmlForTests();
+		let seen = "";
+		setGgmlModuleLoaderForTests(
+			(async () => ({
+				getLlama: async () => ({
+					gpu: "vulkan",
+					dispose: async () => {},
+					loadModel: async () => ({
+						embeddingVectorSize: 3,
+						createEmbeddingContext: async () => ({
+							getEmbeddingFor: async (input: string) => {
+								seen = input;
+								return { vector: [1, 2, 3] };
+							},
+							dispose: async () => {},
+						}),
+					}),
+				}),
+			})) as never,
+		);
+		await withFakeGgufPath(async () => {
+			const model = await ggmlLocalModelInitializer({ model: "fast-bge-base-en-v1.5" as never });
+			for await (const _batch of model.embed(["x".repeat(4000)])) {
+				// consume
+			}
+			// The tokenizer-less fake falls back to a character clip so the
+			// context is never asked to evaluate more than its token budget.
+			expect(seen.length).toBeGreaterThan(0);
+			expect(seen.length).toBeLessThanOrEqual(512);
+		});
+	});
+
+	test("reloads for a different GGUF path and disposes the previous runtime", async () => {
+		resetGgmlForTests();
+		let created = 0;
+		let disposedContexts = 0;
+		let disposedLlama = 0;
+		setGgmlModuleLoaderForTests(
+			(async () => ({
+				getLlama: async () => {
+					created += 1;
+					return {
+						gpu: "vulkan",
+						dispose: async () => {
+							disposedLlama += 1;
+						},
+						loadModel: async () => ({
+							embeddingVectorSize: 3,
+							createEmbeddingContext: async () => ({
+								getEmbeddingFor: async () => ({ vector: [created, 0, 0] }),
+								dispose: async () => {
+									disposedContexts += 1;
+								},
+							}),
+						}),
+					};
+				},
+			})) as never,
+		);
+		const setPath = async (value: string, body: () => Promise<void>) => {
+			const before = process.env.MNEMOPI_EMBED_GGUF_PATH;
+			process.env.MNEMOPI_EMBED_GGUF_PATH = value;
+			try {
+				await body();
+			} finally {
+				if (before !== undefined) process.env.MNEMOPI_EMBED_GGUF_PATH = before;
+				else delete process.env.MNEMOPI_EMBED_GGUF_PATH;
+			}
+		};
+		await setPath("/tmp/gguf-a.gguf", async () => {
+			const first = await ggmlLocalModelInitializer({ model: "fast-bge-base-en-v1.5" as never });
+			await first.queryEmbed?.("a");
+		});
+		await setPath("/tmp/gguf-b.gguf", async () => {
+			const second = await ggmlLocalModelInitializer({ model: "fast-bge-base-en-v1.5" as never });
+			const vec = await second.queryEmbed?.("b");
+			// The second load must emit vectors from its OWN context, not the
+			// first path's cached runtime.
+			expect(vec?.[0]).toBeCloseTo(2);
+		});
+		expect(created).toBe(2);
+		expect(disposedContexts).toBe(1);
+		expect(disposedLlama).toBe(1);
+	});
 });
 
 describe("resolveGgufModelPath", () => {
@@ -133,20 +226,29 @@ describe("resolveGgufModelPath", () => {
 		}
 	});
 
-	test("falls back to the sibling mnemopi/models directory", async () => {
+	test("finds the GGUF in the canonical mnemopi/models cache root", async () => {
 		const root = await fs.mkdtemp(path.join(os.tmpdir(), "mnemopi-gguf-root-"));
-		const modelsDir = path.join(root, "..", "models");
+		const modelsDir = path.join(root, "mnemopi", "models");
 		await fs.mkdir(modelsDir, { recursive: true });
 		const modelFile = path.join(modelsDir, "bge-base-en-v1.5-q4_k_m.gguf");
 		await fs.writeFile(modelFile, "x");
 		try {
-			const before = process.env.MNEMOPI_EMBED_GGUF_PATH;
+			const prevDir = process.env.MNEMOPI_EMBED_GGUF_DIR;
+			const prevPath = process.env.MNEMOPI_EMBED_GGUF_PATH;
+			// Point the gguf cache root at the production layout (~/.hermes/mnemopi/models)
+			// so the default root lands in the canonical model directory.
+			process.env.MNEMOPI_EMBED_GGUF_DIR = modelsDir;
 			delete process.env.MNEMOPI_EMBED_GGUF_PATH;
 			try {
-				// candidates are root and root/../models.
-				expect(resolveGgufModelPath("fast-bge-base-en-v1.5", root)).toBe(modelFile);
+				// cacheDir is the fastembed cache root; the canonical model dir wins.
+				expect(
+					resolveGgufModelPath("fast-bge-base-en-v1.5", path.join(root, "cache", "fastembed")),
+				).toBe(modelFile);
 			} finally {
-				if (before !== undefined) process.env.MNEMOPI_EMBED_GGUF_PATH = before;
+				if (prevDir !== undefined) process.env.MNEMOPI_EMBED_GGUF_DIR = prevDir;
+				else delete process.env.MNEMOPI_EMBED_GGUF_DIR;
+				if (prevPath !== undefined) process.env.MNEMOPI_EMBED_GGUF_PATH = prevPath;
+				else delete process.env.MNEMOPI_EMBED_GGUF_PATH;
 			}
 		} finally {
 			await fs.rm(root, { recursive: true, force: true });

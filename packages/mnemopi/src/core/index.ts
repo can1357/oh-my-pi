@@ -9,12 +9,7 @@ export {
 	type StandardEmbeddingModel,
 	setLocalModelInitializer,
 } from "./embeddings";
-export {
-	ggmlLocalModelInitializer,
-	resetGgmlForTests,
-	resolveGgufModelPath,
-	setGgmlModuleLoaderForTests,
-} from "./ggml-embedding";
+export * from "./ggml-embedding";
 export * from "./memory";
 export {
 	addMemory,
