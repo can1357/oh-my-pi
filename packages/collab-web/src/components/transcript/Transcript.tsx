@@ -296,7 +296,7 @@ export function Transcript(props: TranscriptProps): ReactNode {
 	}, [entries]);
 
 	const isCompact = compact === true;
-	const { rootRef, showJump, onScroll, jumpToBottom } = useTranscriptScroll(
+	const { rootRef, contentRef, showJump, onScroll, jumpToBottom } = useTranscriptScroll(
 		!isCompact,
 		entries,
 		stream,
@@ -329,42 +329,44 @@ export function Transcript(props: TranscriptProps): ReactNode {
 			aria-label={isCompact ? undefined : "Transcript"}
 			onScroll={onScroll}
 		>
-			{entries.length === 0 && stream === null && !working && <div className="tr-empty">no activity yet</div>}
-			{entries.map(entry => (
-				<EntryRow key={entry.id} entry={entry} results={results} active={activeTools} host={host} />
-			))}
-			{stream !== null && (
-				<Row kind="assistant" gutter="agent">
-					<AssistantBody
-						message={stream}
-						results={results}
-						active={activeTools}
-						pending={!streamDone}
-						host={host}
-					/>
-				</Row>
-			)}
-			{tailTools.length > 0 && (
-				<Row kind="assistant" gutter={stream === null ? "agent" : ""}>
-					{tailTools.map(tool => (
-						<ToolCard
-							key={tool.toolCallId}
-							toolCallId={tool.toolCallId}
-							name={tool.toolName}
-							intent={tool.intent}
-							args={tool.args}
-							running
-							partialResult={tool.partialResult}
+			<div ref={contentRef} className="tr-content">
+				{entries.length === 0 && stream === null && !working && <div className="tr-empty">no activity yet</div>}
+				{entries.map(entry => (
+					<EntryRow key={entry.id} entry={entry} results={results} active={activeTools} host={host} />
+				))}
+				{stream !== null && (
+					<Row kind="assistant" gutter="agent">
+						<AssistantBody
+							message={stream}
+							results={results}
+							active={activeTools}
+							pending={!streamDone}
 							host={host}
 						/>
-					))}
-				</Row>
-			)}
-			{working && stream === null && activeTools.size === 0 && (
-				<Row kind="assistant" gutter="agent">
-					<div className="tr-shimmer">thinking…</div>
-				</Row>
-			)}
+					</Row>
+				)}
+				{tailTools.length > 0 && (
+					<Row kind="assistant" gutter={stream === null ? "agent" : ""}>
+						{tailTools.map(tool => (
+							<ToolCard
+								key={tool.toolCallId}
+								toolCallId={tool.toolCallId}
+								name={tool.toolName}
+								intent={tool.intent}
+								args={tool.args}
+								running
+								partialResult={tool.partialResult}
+								host={host}
+							/>
+						))}
+					</Row>
+				)}
+				{working && stream === null && activeTools.size === 0 && (
+					<Row kind="assistant" gutter="agent">
+						<div className="tr-shimmer">thinking…</div>
+					</Row>
+				)}
+			</div>
 		</div>
 	);
 

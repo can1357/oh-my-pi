@@ -159,6 +159,7 @@ describe("Transcript jump pill", () => {
 	it("wraps the main scroller and labels it", () => {
 		const html = renderTranscript({ working: false });
 		expect(html).toContain("tr-shell");
+		expect(html).toContain("tr-content");
 		expect(html).toContain('aria-label="Transcript"');
 		expect(html).not.toContain("Scroll to current");
 	});

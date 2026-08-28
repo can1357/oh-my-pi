@@ -47,11 +47,13 @@ export function useTranscriptScroll(
 	working: unknown,
 ): {
 	rootRef: RefObject<HTMLDivElement | null>;
+	contentRef: RefObject<HTMLDivElement | null>;
 	showJump: boolean;
 	onScroll: () => void;
 	jumpToBottom: () => void;
 } {
 	const rootRef = useRef<HTMLDivElement | null>(null);
+	const contentRef = useRef<HTMLDivElement | null>(null);
 	const lockRef = useRef(true);
 	const [showJump, setShowJump] = useState(false);
 
@@ -90,7 +92,12 @@ export function useTranscriptScroll(
 		const el = rootRef.current;
 		if (el === null) return;
 		const ro = new ResizeObserver(onResize);
+		// Scroller box: viewport resizes (mobile keyboard). Content wrapper:
+		// scrollHeight growth without new entries (tool card expansion, image
+		// decode) changes no box the scroller observer would see.
 		ro.observe(el);
+		const content = contentRef.current;
+		if (content !== null) ro.observe(content);
 		return () => {
 			ro.disconnect();
 		};
@@ -103,5 +110,5 @@ export function useTranscriptScroll(
 		el.focus();
 	}, [applyDecision]);
 
-	return { rootRef, showJump, onScroll, jumpToBottom };
+	return { rootRef, contentRef, showJump, onScroll, jumpToBottom };
 }
