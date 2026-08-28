@@ -1157,7 +1157,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 		// relax the restriction for working-tree or non-xd internal URLs.
 		if (
 			this.session.deviceOnlyWrite === true &&
-			!parseXdUrl(path) &&
+			!xdevTarget &&
 			!(this.session.getPlanModeState?.()?.enabled === true && targetsLocalSandbox(this.session, path))
 		) {
 			throw new ToolError(
@@ -1437,17 +1437,22 @@ function writeContentOf(args: unknown): string {
  * The device payload as a (possibly unterminated) JSON string, which is what the mounted renderer's
  * incremental decode consumes.
  *
- * The `__partialJson` fallback is what keeps a typed-args dispatch live while it streams: a `content`
- * string is decoded incrementally by ToolArgsRevealController's string extractor, but `args` is an
- * object, so the parsed view only appears when a throttled full parse lands. Slicing the raw prefix
- * from `"args": {` onward gives the inner renderer the same partial JSON it already handles, so the
- * preview grows at reveal cadence instead of jumping between parse windows. `bash.env` reads its
- * streaming prefix the same way.
+ * Order matters. While a call streams, the reveal controller hands renderers BOTH a parsed `args`
+ * object — refreshed only when a throttled full parse lands — and a `__partialJson` prefix that is
+ * fresh every frame. Serializing the parsed object first would therefore freeze the mounted preview
+ * between parse windows, which is exactly what AGENTS.md means by never pairing provider-parsed
+ * arguments with a raw prefix. The prefix wins whenever it carries an `args` object, and it exists
+ * only while streaming: once the arguments are final the controller finishes the entry and passes
+ * `content.arguments` with no `__partialJson`, so the parsed branch below serves completed calls and
+ * transcript rebuilds. `content` stays first because the controller decodes that string incrementally,
+ * so it is never stale. `bash.env` reads its streaming prefix the same way.
  */
 function writeDeviceContentOf(args: WriteRenderArgs): string | undefined {
 	if (typeof args.content === "string") return args.content;
+	const streaming = partialDeviceArgsOf(args.__partialJson);
+	if (streaming !== undefined) return streaming;
 	if (isRecord(args.args)) return JSON.stringify(args.args);
-	return partialDeviceArgsOf(args.__partialJson);
+	return undefined;
 }
 
 const PARTIAL_ARGS_OPENING = /"args"\s*:\s*\{/u;

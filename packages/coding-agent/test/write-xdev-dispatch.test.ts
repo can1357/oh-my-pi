@@ -138,6 +138,16 @@ describe("read and write route xd:// device URLs", () => {
 		await expect(
 			write.execute("write-xdev-both-payloads", { path: "xd://echo", content: "{}", args: payload }),
 		).rejects.toThrow("either `content` or typed `args`");
+		await expect(write.execute("write-xdev-args-on-file", { path: "notes.md", args: payload })).rejects.toThrow(
+			"valid only for an xd:// device",
+		);
+		// arktype's open record admits an array at the type level; isRecord is the guard that matters.
+		await expect(
+			write.execute("write-xdev-args-array", { path: "xd://echo", args: ["a", "b"] as never }),
+		).rejects.toThrow("must be a JSON object");
+		await expect(write.execute("write-xdev-no-payload", { path: "xd://echo" })).rejects.toThrow(
+			"requires `content`, or typed `args`",
+		);
 	});
 
 	it("records a read tier on the dispatch of a read-only device", async () => {
@@ -200,6 +210,28 @@ describe("read and write route xd:// device URLs", () => {
 		const streamingText = Bun.stripANSI(streaming!.render(120).join("\n"));
 		expect(streamingText).toContain("ecoport/search");
 		expect(streamingText).toContain("Broken");
+
+		// The reveal controller hands renderers a parsed `args` object refreshed only on a throttled
+		// full parse AND a prefix refreshed every frame. The fresher prefix has to win, or the preview
+		// freezes on the last parse — the case the first attempt got backwards.
+		const stalePlusFresh = writeToolRenderer.renderCall(
+			{
+				path: "xd://mcp__ecoport_search",
+				args: { pattern: "Bro" },
+				__partialJson: '{"path":"xd://mcp__ecoport_search","args":{"pattern":"Broken","scope":"game.Sta',
+			},
+			options,
+			uiTheme,
+		);
+		expect(Bun.stripANSI(stalePlusFresh!.render(120).join("\n"))).toContain("Broken");
+
+		// Arguments final: no prefix, so the parsed object is the only source and still renders.
+		const settled = writeToolRenderer.renderCall(
+			{ path: "xd://mcp__ecoport_search", args: { pattern: "Broken" } },
+			options,
+			uiTheme,
+		);
+		expect(Bun.stripANSI(settled!.render(120).join("\n"))).toContain("Broken");
 
 		// No `args` in the prefix yet: still nothing to show, and nothing invented.
 		expect(
