@@ -120,6 +120,24 @@ describe("openai-completions compat — zhipu-coding-plan branch", () => {
 	});
 });
 
+describe("openai-completions compat — Z.AI GLM-5.3-Flash", () => {
+	it("keeps the global Coding Plan endpoint on the existing Z.AI reasoning dialect", () => {
+		const compat = buildOpenAICompat({
+			...zhipuGlm52ByProvider(),
+			id: "glm-5.3-flash",
+			name: "GLM-5.3-Flash",
+			provider: "zai",
+			baseUrl: "https://api.z.ai/api/coding/paas/v4",
+			input: ["text", "image"],
+		});
+
+		expect(compat.thinkingFormat).toBe("zai");
+		expect(compat.supportsReasoningEffort).toBe(true);
+		expect(compat.reasoningContentField).toBe("reasoning_content");
+		expect(compat.streamIdleTimeoutMs).toBe(600_000);
+	});
+});
+
 describe("openai-completions compat — GLM coding-plan stream idle timeout", () => {
 	function glm52(provider: string, baseUrl: string): ModelSpec<"openai-completions"> {
 		return { ...baseModel, id: "glm-5.2", name: "GLM-5.2", provider, baseUrl };
@@ -174,5 +192,33 @@ describe("zhipu-coding-plan model discovery", () => {
 		expect(requestedUrl).toBe("https://open.bigmodel.cn/api/coding/paas/v4/models");
 		expect(models?.[0]?.id).toBe("glm-5.1");
 		expect(models?.[0]?.baseUrl).toBe("https://open.bigmodel.cn/api/coding/paas/v4");
+	});
+});
+
+describe("zhipu-coding-plan GLM-5.3-Flash discovery", () => {
+	it("preserves native image input and Z.AI reasoning compatibility", async () => {
+		const mockFetch: FetchImpl = Object.assign(
+			async (): Promise<Response> => {
+				return new Response(JSON.stringify({ data: [{ id: "glm-5.3-flash", name: "GLM-5.3-Flash" }] }), {
+					headers: { "content-type": "application/json" },
+				});
+			},
+			{ preconnect: fetch.preconnect },
+		);
+
+		const options = zhipuCodingPlanModelManagerOptions({ apiKey: "test-key", fetch: mockFetch });
+		const model = (await options.fetchDynamicModels?.())?.[0];
+
+		expect(model).toMatchObject({
+			id: "glm-5.3-flash",
+			input: ["text", "image"],
+			reasoning: true,
+			compat: {
+				thinkingFormat: "zai",
+				reasoningContentField: "reasoning_content",
+				supportsDeveloperRole: false,
+			},
+		});
+		expect(buildOpenAICompat(model as ModelSpec<"openai-completions">).supportsReasoningEffort).toBe(true);
 	});
 });

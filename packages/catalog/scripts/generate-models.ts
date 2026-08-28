@@ -532,6 +532,46 @@ async function generateModels() {
 		contextWindow: 1_000_000,
 		maxTokens: 131_072,
 	} as ModelSpec<"anthropic-messages">);
+	// Seed GLM-5.3-Flash on Z.AI's OpenAI-compatible Coding Plan endpoint.
+	// It may be absent from `/v1/models`; the durable override preserves native
+	// text-and-image input, and the existing Z.AI policy derives mandatory
+	// max-reasoning request semantics.
+	allModels.push({
+		id: "glm-5.3-flash",
+		name: "GLM-5.3-Flash",
+		api: "openai-completions",
+		provider: "zai",
+		baseUrl: "https://api.z.ai/api/coding/paas/v4",
+		reasoning: true,
+		input: ["text", "image"],
+		cost: { input: 0.075, output: 0.25, cacheRead: 0.015, cacheWrite: 0 },
+		contextWindow: 1_000_000,
+		maxTokens: 131_072,
+		compat: {
+			thinkingFormat: "zai",
+			reasoningContentField: "reasoning_content",
+			supportsDeveloperRole: false,
+		},
+	} as ModelSpec<"openai-completions">);
+	// The China-hosted GLM Coding Plan serves the same model under the established
+	// zhipu-coding-plan provider and uses the same Z.AI compatibility behavior.
+	allModels.push({
+		id: "glm-5.3-flash",
+		name: "GLM-5.3-Flash",
+		api: "openai-completions",
+		provider: "zhipu-coding-plan",
+		baseUrl: "https://open.bigmodel.cn/api/coding/paas/v4",
+		reasoning: true,
+		input: ["text", "image"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 1_000_000,
+		maxTokens: 131_072,
+		compat: {
+			thinkingFormat: "zai",
+			reasoningContentField: "reasoning_content",
+			supportsDeveloperRole: false,
+		},
+	} as ModelSpec<"openai-completions">);
 	// Seed Meta's documented Muse model so first-run selection does not depend on
 	// credentials or live discovery.
 	allModels.push(...META_MUSE_STATIC_MODELS);

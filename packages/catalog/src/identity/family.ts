@@ -9,6 +9,7 @@
 
 import {
 	bareModelId,
+	type GlmModel,
 	isAnthropicAdaptiveGenAtLeast,
 	isFableOrMythos,
 	parseAnthropicModel,
@@ -285,17 +286,23 @@ export const isOpenAISamplingRestrictedModelId = memo((modelId: string): boolean
 
 /**
  * Reasoning-capable GLM coding SKUs: glm-4.5 and up on the base / `-air` /
- * `-turbo` lines. Excludes the vision (`…v`) shape, the non-reasoning
- * `-flash`/`-flashx`/`-preview` variants, and pre-4.5 ids. Matching the family
- * keeps newly-bumped integers (`glm-5.3`, `glm-6`, …) covered without a per-id
- * allowlist.
+ * `-turbo` lines, plus GLM-5.3-Flash and later flash releases. Excludes the
+ * vision (`…v`) shape, `-flashx` / `-preview` variants, and pre-4.5 ids.
+ * Matching the family keeps newly-bumped integers (`glm-5.3`, `glm-6`, …)
+ * covered without a per-id allowlist.
  */
+function isReasoningGlmCodingVariant(glm: GlmModel): boolean {
+	return (
+		glm.variant === "base" ||
+		glm.variant === "air" ||
+		glm.variant === "turbo" ||
+		(glm.variant === "flash" && semverGte(glm.version, "5.3"))
+	);
+}
+
 export const isReasoningGlmModelId = memo((modelId: string): boolean => {
 	const glm = parseGlmModel(bareModelId(modelId));
-	if (!glm || glm.vision) {
-		return false;
-	}
-	if (glm.variant !== "base" && glm.variant !== "air" && glm.variant !== "turbo") {
+	if (!glm || glm.vision || !isReasoningGlmCodingVariant(glm)) {
 		return false;
 	}
 	return semverGte(glm.version, "4.5");
@@ -304,10 +311,7 @@ export const isReasoningGlmModelId = memo((modelId: string): boolean => {
 /** GLM-5.2+ coding SKUs accept `reasoning_effort` in addition to binary thinking. */
 export const isGlm52ReasoningEffortModelId = memo((modelId: string): boolean => {
 	const glm = parseGlmModel(bareModelId(modelId));
-	if (!glm || glm.vision) {
-		return false;
-	}
-	if (glm.variant !== "base" && glm.variant !== "air" && glm.variant !== "turbo") {
+	if (!glm || glm.vision || !isReasoningGlmCodingVariant(glm)) {
 		return false;
 	}
 	return semverGte(glm.version, "5.2");
@@ -319,22 +323,23 @@ export const isGlm52ReasoningEffortModelId = memo((modelId: string): boolean => 
  * ladder on every host, and thinking can no longer be disabled —
  * `thinking.type` must always be `enabled`. Matching the family keeps future
  * bumps (`glm-5.4`, `glm-6`, …) covered while excluding the vision (`…v`)
- * shape and the non-reasoning `-flash`/`-flashx`/`-preview` variants.
+ * shape and the non-reasoning `-flashx` / `-preview` variants.
  */
 export const isGlm53ReasoningEffortModelId = memo((modelId: string): boolean => {
 	const glm = parseGlmModel(bareModelId(modelId));
-	if (!glm || glm.vision) {
-		return false;
-	}
-	if (glm.variant !== "base" && glm.variant !== "air" && glm.variant !== "turbo") {
+	if (!glm || glm.vision || !isReasoningGlmCodingVariant(glm)) {
 		return false;
 	}
 	return semverGte(glm.version, "5.3");
 });
 
-/** GLM vision SKUs — the `v` that attaches to the version (`glm-4v`, `glm-4.5v`). */
+/**
+ * GLM models with native image input: the `v` vision shape (`glm-4v`,
+ * `glm-4.5v`) and the GLM-5.3 Flash line.
+ */
 export const isGlmVisionModelId = memo((modelId: string): boolean => {
-	return parseGlmModel(bareModelId(modelId))?.vision === true;
+	const id = bareModelId(modelId);
+	return id.toLowerCase() === "glm-5.3-flash" || parseGlmModel(id)?.vision === true;
 });
 
 /**

@@ -310,7 +310,7 @@ describe("generated model policies", () => {
 		expect(models[0]?.maxTokens).toBe(131_072);
 	});
 
-	it("pins zai glm-5.3 to 1M context and derives uniform low/high/max thinking with mandatory reasoning", () => {
+	it("pins GLM-5.3 and GLM-5.3-Flash to 1M context and derives mandatory max reasoning", () => {
 		const models = [
 			createSpec({
 				id: "glm-5.3",
@@ -326,11 +326,27 @@ describe("generated model policies", () => {
 				contextWindow: 200_000,
 				maxTokens: 8192,
 			}),
+			createSpec({
+				id: "glm-5.3-flash",
+				api: "openai-completions",
+				provider: "zhipu-coding-plan",
+				input: ["text", "image"],
+				contextWindow: 200_000,
+				maxTokens: 8192,
+			}),
+			createSpec({
+				id: "glm-5.3-flash",
+				api: "openai-completions",
+				provider: "zai",
+				input: ["text", "image"],
+				contextWindow: 200_000,
+				maxTokens: 8192,
+			}),
 		];
 
 		applyGeneratedModelPolicies(models);
 
-		// Context pinning — same 1M tier as glm-5.2 on both GLM coding-plan hosts.
+		// Context pinning — all share the documented 1M GLM Coding Plan tier.
 		for (const model of models) {
 			expect(model.contextWindow).toBe(1_000_000);
 			expect(model.maxTokens).toBe(131_072);
@@ -342,6 +358,10 @@ describe("generated model policies", () => {
 			// Default effort is `max` per the GLM-5.3 API spec.
 			expect(model.thinking?.defaultLevel).toBe(Effort.Max);
 		}
+		expect(models.slice(2).map(model => model.input)).toEqual([
+			["text", "image"],
+			["text", "image"],
+		]);
 	});
 
 	it("pins MiniMax-M3 long-context providers to 1M context", () => {

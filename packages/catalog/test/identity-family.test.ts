@@ -275,7 +275,7 @@ describe("isOpenAIModelId", () => {
 });
 
 describe("isReasoningGlmModelId", () => {
-	test("matches the glm-4.5+ base / air / turbo reasoning lines", () => {
+	test("matches the glm-4.5+ base / air / turbo lines and GLM-5.3-Flash", () => {
 		expect(isReasoningGlmModelId("glm-4.5")).toBe(true);
 		expect(isReasoningGlmModelId("glm-4.5-air")).toBe(true);
 		expect(isReasoningGlmModelId("glm-4.6")).toBe(true);
@@ -284,6 +284,7 @@ describe("isReasoningGlmModelId", () => {
 		expect(isReasoningGlmModelId("glm-5-turbo")).toBe(true);
 		expect(isReasoningGlmModelId("glm-5.1")).toBe(true);
 		expect(isReasoningGlmModelId("glm-5.2")).toBe(true);
+		expect(isReasoningGlmModelId("glm-5.3-flash")).toBe(true);
 		// Family match is future-proof: new integers need no allowlist entry.
 		expect(isReasoningGlmModelId("glm-5.3")).toBe(true);
 		expect(isReasoningGlmModelId("glm-6")).toBe(true);
@@ -291,7 +292,7 @@ describe("isReasoningGlmModelId", () => {
 		expect(isReasoningGlmModelId("z-ai/glm-5-turbo")).toBe(true);
 	});
 
-	test("excludes pre-4.5, vision, flash, and preview SKUs", () => {
+	test("excludes pre-4.5, vision, flashx, and preview SKUs", () => {
 		expect(isReasoningGlmModelId("glm-4")).toBe(false);
 		expect(isReasoningGlmModelId("glm-4.4")).toBe(false);
 		expect(isReasoningGlmModelId("glm-5-preview")).toBe(false);
@@ -308,16 +309,19 @@ describe("isReasoningGlmModelId", () => {
 		expect(isReasoningGlmModelId("zai-org/GLM-4.7")).toBe(true);
 		expect(isReasoningGlmModelId("zai-org/GLM-4.5-Air")).toBe(true);
 		expect(isReasoningGlmModelId("zai-org/GLM-5-Turbo")).toBe(true);
+		expect(isReasoningGlmModelId("zai-org/GLM-5.3-Flash")).toBe(true);
 		// Vision SKUs are still excluded even in uppercase.
 		expect(isReasoningGlmModelId("zai-org/GLM-4.5V")).toBe(false);
 	});
 });
 
+
 describe("isGlmVisionModelId", () => {
-	test("matches the `v` vision shape across versions and variants", () => {
+	test("matches the `v` vision shape and GLM-5.3-Flash", () => {
 		expect(isGlmVisionModelId("glm-4v")).toBe(true);
 		expect(isGlmVisionModelId("glm-4.5v")).toBe(true);
 		expect(isGlmVisionModelId("glm-4v-plus")).toBe(true);
+		expect(isGlmVisionModelId("glm-5.3-flash")).toBe(true);
 	});
 
 	test("excludes non-vision GLM ids (the old `includes('v')` false positives)", () => {
