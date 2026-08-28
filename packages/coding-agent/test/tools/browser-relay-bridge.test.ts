@@ -1126,6 +1126,64 @@ describe("RelayBridge tab grouping", () => {
 		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual(["Fetch.enable", "Fetch.disable", "Network.getCookies"]);
 	});
 
+	it("reapplies the surviving subscription instead of disabling first when a replay owner disconnects", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const originalOwner = new FakeCdpSocket();
+		const originalOwnerConn = bridge.cdpConnected(originalOwner);
+		const originalOwnerSession = await attachPage(bridge, ext, originalOwner, originalOwnerConn, 1);
+		const replayOwner = new FakeCdpSocket();
+		const replayOwnerConn = bridge.cdpConnected(replayOwner);
+		const replayOwnerSession = await attachPage(bridge, ext, replayOwner, replayOwnerConn, 1);
+
+		bridge.cdpMessage(
+			originalOwnerConn,
+			JSON.stringify({
+				id: ++msgSeq,
+				sessionId: originalOwnerSession,
+				method: "Fetch.enable",
+				params: { patterns: [{ urlPattern: "https://original.example/*" }] },
+			}),
+		);
+		await flush();
+		ack(bridge, ext, "send");
+		await flush();
+
+		bridge.cdpMessage(
+			replayOwnerConn,
+			JSON.stringify({
+				id: ++msgSeq,
+				sessionId: replayOwnerSession,
+				method: "Fetch.enable",
+				params: { patterns: [{ urlPattern: "https://replacement.example/*" }] },
+			}),
+		);
+		await flush();
+		ack(bridge, ext, "send");
+		await flush();
+
+		bridge.extClosed(ext);
+		const ext2 = new FakeExtSocket();
+		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], { recoverableTabIds: [1] });
+		await waitFor(() => ext2.rpcs("attach").length === 1, "recovery attach RPC");
+		ack(bridge, ext2, "attach");
+		await waitFor(() => ext2.rpcs("send").length === 1, "surviving fetch replay");
+		expect(ext2.rpcs("send")[0]).toMatchObject({
+			method: "Fetch.enable",
+			params: { patterns: [{ urlPattern: "https://replacement.example/*" }] },
+		});
+
+		bridge.cdpClosed(replayOwnerConn);
+		ack(bridge, ext2, "send");
+		await waitFor(() => ext2.rpcs("send").length === 2, "surviving fetch reapply");
+		expect(ext2.rpcs("send")[1]).toMatchObject({
+			method: "Fetch.enable",
+			params: { patterns: [{ urlPattern: "https://original.example/*" }] },
+		});
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual(["Fetch.enable", "Fetch.enable"]);
+	});
+
 	it("disables a live root subscription when its owner disconnects but another holder keeps the tab attached", async () => {
 		const bridge = new RelayBridge({});
 		const ext = new FakeExtSocket();
@@ -2232,6 +2290,52 @@ describe("RelayBridge tab grouping", () => {
 			method: "Emulation.setEmulatedMedia",
 			params: {
 				media: "screen",
+				features: [{ name: "prefers-color-scheme", value: "dark" }],
+			},
+		});
+	});
+
+	it("preserves emulated media field clears across owner loss before recovery", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const owner = new FakeCdpSocket();
+		const ownerConn = bridge.cdpConnected(owner);
+		const ownerSession = await attachPage(bridge, ext, owner, ownerConn, 1);
+		const clearer = new FakeCdpSocket();
+		const clearerConn = bridge.cdpConnected(clearer);
+		const clearerSession = await attachPage(bridge, ext, clearer, clearerConn, 1);
+
+		const sendRootCommand = async (
+			connId: number,
+			sessionId: string,
+			method: string,
+			params?: Record<string, unknown>,
+		): Promise<void> => {
+			const id = ++msgSeq;
+			bridge.cdpMessage(connId, JSON.stringify({ id, sessionId, method, params }));
+			await flush();
+			ack(bridge, ext, "send");
+			await flush();
+		};
+
+		await sendRootCommand(ownerConn, ownerSession, "Emulation.setEmulatedMedia", {
+			media: "print",
+			features: [{ name: "prefers-color-scheme", value: "dark" }],
+		});
+		await sendRootCommand(clearerConn, clearerSession, "Emulation.setEmulatedMedia", { media: "" });
+		bridge.cdpClosed(clearerConn);
+
+		bridge.extClosed(ext);
+		const ext2 = new FakeExtSocket();
+		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], { recoverableTabIds: [1] });
+		await waitFor(() => ext2.rpcs("attach").length === 1, "recovery reattach RPC");
+		ack(bridge, ext2, "attach");
+
+		await waitFor(() => ext2.rpcs("send").length === 1, "emulated media replay with media clear");
+		expect(ext2.rpcs("send")[0]).toMatchObject({
+			method: "Emulation.setEmulatedMedia",
+			params: {
 				features: [{ name: "prefers-color-scheme", value: "dark" }],
 			},
 		});

@@ -112,6 +112,17 @@ function mergeSubscriptionFieldSequences(
 	return merged;
 }
 
+function subscriptionClearedFields(
+	key: string,
+	params: Record<string, unknown> | undefined,
+): Record<string, number> | undefined {
+	if (key !== "Emulation.setEmulatedMedia" || !params) return undefined;
+	const cleared: Record<string, number> = {};
+	if ("media" in params && params.media === "") cleared.media = 0;
+	if ("features" in params && Array.isArray(params.features) && params.features.length === 0) cleared.features = 0;
+	return Object.keys(cleared).length > 0 ? cleared : undefined;
+}
+
 function subscriptionParamsEqual(
 	left: Record<string, unknown> | undefined,
 	right: Record<string, unknown> | undefined,
@@ -213,6 +224,8 @@ class TabState {
 	restorePending = false;
 	/** Effective root-domain state by subscription key and owning page pseudo-session. */
 	readonly subscriptions = new Map<string, Map<string, SessionRootSubscription>>();
+	/** Tab-wide clear tombstones for partial setters like Emulation.setEmulatedMedia. */
+	readonly subscriptionClears = new Map<string, Record<string, number>>();
 	/** In-flight root-state commands by subscription key. */
 	readonly pendingSubscriptions = new Map<string, Set<Promise<void>>>();
 
@@ -967,7 +980,7 @@ export class RelayBridge {
 			}
 			case "Emulation.setEmulatedMedia":
 			case "Emulation.setLocaleOverride":
-			case "Emulation.setEmulatedVisionDeficiency":
+			case "Emulation.setEmulatedVisionDeficiency": {
 				if (
 					!hasObjectKeys(msg.params) ||
 					(msg.method === "Emulation.setLocaleOverride" && msg.params?.locale === "") ||
@@ -976,14 +989,21 @@ export class RelayBridge {
 					this.#forgetTabSubscription(tab, subscriptionKey(msg.method));
 					return;
 				}
+				const key = subscriptionKey(msg.method);
+				const sequence = ++this.#subscriptionSeq;
+				if (msg.method === "Emulation.setEmulatedMedia") {
+					const clears = subscriptionClearedFields(key, msg.params);
+					if (clears) this.#rememberTabSubscriptionClear(tab, key, clears, sequence);
+				}
 				if (!ownerIsCurrent) return;
-				this.#rememberSessionSubscription(tab, subscriptionKey(msg.method), ownerSessionId, {
+				this.#rememberSessionSubscription(tab, key, ownerSessionId, {
 					method: msg.method,
 					params: msg.params,
 					ownerSessionId,
-					sequence: ++this.#subscriptionSeq,
+					sequence,
 				});
 				return;
+			}
 			case "Emulation.setTimezoneOverride":
 				if (msg.params?.timezoneId === "") {
 					this.#forgetTabSubscription(tab, subscriptionKey(msg.method));
@@ -1130,6 +1150,12 @@ export class RelayBridge {
 		});
 	}
 
+	#rememberTabSubscriptionClear(tab: TabState, key: string, clears: Record<string, number>, sequence: number): void {
+		const merged = { ...(tab.subscriptionClears.get(key) ?? {}) };
+		for (const field of Object.keys(clears)) merged[field] = sequence;
+		tab.subscriptionClears.set(key, merged);
+	}
+
 	#forgetSessionSubscription(tab: TabState, key: string, ownerSessionId: string): void {
 		const owners = tab.subscriptions.get(key);
 		if (!owners) return;
@@ -1139,6 +1165,7 @@ export class RelayBridge {
 
 	#forgetTabSubscription(tab: TabState, key: string): void {
 		tab.subscriptions.delete(key);
+		tab.subscriptionClears.delete(key);
 	}
 
 	#forgetSessionSubscriptions(tabId: number, sessionIds: Iterable<string>): void {
@@ -1236,6 +1263,7 @@ export class RelayBridge {
 
 	#latestSubscriptionForKey(tab: TabState, key: string): SessionRootSubscription | undefined {
 		const owners = tab.subscriptions.get(key);
+		if (!owners && !tab.subscriptionClears.has(key)) return undefined;
 		if (!owners) return undefined;
 		const ordered = [...owners.values()].sort((left, right) => left.sequence - right.sequence);
 		const latest = ordered.at(-1);
@@ -1243,17 +1271,32 @@ export class RelayBridge {
 		if (key !== "Emulation.setEmulatedMedia") return latest;
 		const params: Record<string, unknown> = {};
 		const fieldSequences: Record<string, number> = {};
+		const fieldOwners: Record<string, string> = {};
 		for (const subscription of ordered) {
 			for (const [field, sequence] of Object.entries(subscription.fieldSequences ?? {})) {
 				if (fieldSequences[field] !== undefined && fieldSequences[field]! >= sequence) continue;
 				if (subscription.params && field in subscription.params) {
 					params[field] = subscription.params[field];
 					fieldSequences[field] = sequence;
+					fieldOwners[field] = subscription.ownerSessionId;
 				}
 			}
 		}
+		for (const [field, sequence] of Object.entries(tab.subscriptionClears.get(key) ?? {})) {
+			if (fieldSequences[field] === undefined || fieldSequences[field]! <= sequence) {
+				delete params[field];
+				delete fieldSequences[field];
+				delete fieldOwners[field];
+			}
+		}
+		if (Object.keys(params).length === 0) return undefined;
+		const latestField = Object.entries(fieldSequences)
+			.sort((left, right) => left[1] - right[1])
+			.at(-1);
 		return {
 			...latest,
+			ownerSessionId: latestField ? fieldOwners[latestField[0]] : latest.ownerSessionId,
+			sequence: latestField?.[1] ?? latest.sequence,
 			params: Object.keys(params).length > 0 ? params : undefined,
 			fieldSequences: Object.keys(fieldSequences).length > 0 ? fieldSequences : undefined,
 		};
@@ -1349,14 +1392,19 @@ export class RelayBridge {
 			.sort((a, b) => a[1].sequence - b[1].sequence);
 		for (const [key, subscription] of stale) {
 			replayed.delete(key);
-			const disable = this.#subscriptionDisableCommand(subscription);
-			if (!disable) continue;
+			const current = this.#latestSubscriptionForKey(tab, key);
+			const command = current
+				? subscriptionEquals(current, subscription)
+					? null
+					: { method: current.method, params: current.params }
+				: this.#subscriptionDisableCommand(subscription);
+			if (!command) continue;
 			this.#assertExtensionCurrent(expectedExt);
 			await this.#rpc({
 				op: "send",
 				tabId: tab.tabId,
-				method: disable.method,
-				params: disable.params,
+				method: command.method,
+				params: command.params,
 			});
 			this.#assertExtensionCurrent(expectedExt);
 		}
@@ -1960,14 +2008,19 @@ export class RelayBridge {
 				replayed.set(key, subscription);
 				continue;
 			}
-			const disable = this.#subscriptionDisableCommand(subscription);
-			if (!disable) continue;
+			const current = this.#latestSubscriptionForKey(tab, key);
+			const command = current
+				? subscriptionEquals(current, subscription)
+					? null
+					: { method: current.method, params: current.params }
+				: this.#subscriptionDisableCommand(subscription);
+			if (!command) continue;
 			this.#assertExtensionCurrent(expectedExt);
 			await this.#rpc({
 				op: "send",
 				tabId: tab.tabId,
-				method: disable.method,
-				params: disable.params,
+				method: command.method,
+				params: command.params,
 			});
 			this.#assertExtensionCurrent(expectedExt);
 		}
