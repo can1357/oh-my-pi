@@ -570,6 +570,7 @@ pub struct Agent<C: TurnClient> {
 	unexpected_stop_retries: u8,
 	streaming_edit_guard: Option<Arc<StreamingEditGuard>>,
 	advisor_tool_loop: Option<AdvisorToolLoopGuard>,
+	model_attribution: Option<Arc<dyn Fn(&str) + Send + Sync + 'static>>,
 }
 
 impl<C: TurnClient + Clone> Agent<C> {
@@ -681,6 +682,7 @@ impl<C: TurnClient + Clone> Agent<C> {
 			context_projection_handler: None,
 			unexpected_stop_retries: 0,
 			streaming_edit_guard: None,
+			model_attribution: None,
 			advisor_tool_loop: None,
 		}
 	}
@@ -700,6 +702,11 @@ impl<C: TurnClient + Clone> Agent<C> {
 		self
 			.state
 			.update(|snapshot| snapshot.context_promotion = policy);
+	}
+
+	/// Registers the hook notified whenever the agent rewrites the live model.
+	pub fn set_model_attribution(&mut self, hook: Arc<dyn Fn(&str) + Send + Sync + 'static>) {
+		self.model_attribution = Some(hook);
 	}
 
 	/// Configures synchronous compaction checks at safe tool-loop boundaries.
@@ -1283,6 +1290,9 @@ impl<C: TurnClient + Clone> Agent<C> {
 			snapshot.turn.params.model = target.to_string();
 			snapshot.turn.provider_reset = true;
 		});
+		if let Some(attribution) = self.model_attribution.as_ref() {
+			attribution(&target);
+		}
 		self.clear_provider_context();
 		self.prompt_hash = None;
 		self.prompt_head_events.clear();
@@ -1814,6 +1824,9 @@ impl<C: TurnClient + Clone> Agent<C> {
 			}
 
 			self.events.publish(AgentEvent::Snapshot(snapshot.clone()));
+			if let Some(attribution) = self.model_attribution.as_ref() {
+				attribution(&snapshot.turn.params.model);
+			}
 			self.publish_live_history()?;
 			self.retain_session_memory();
 			let turn_end =
@@ -6223,11 +6236,46 @@ mod tests {
 		snapshot.context_promotion =
 			ContextPromotionPolicy { enabled: true, target: Some(sf!("provider/large")) };
 		let mut agent = Agent::new(client, env, AgentState::new(snapshot), journal, test_caps());
+		let attributed = Arc::new(Mutex::new(Vec::new()));
+		agent.set_model_attribution({
+			let attributed = Arc::clone(&attributed);
+			Arc::new(move |model: &str| attributed.lock().push(model.to_owned()))
+		});
 		assert!(agent.promote_context_if_enabled());
+		assert_eq!(attributed.lock().as_slice(), ["provider/large"]);
 		let promoted = agent.state().snapshot();
 		assert_eq!(promoted.turn.params.model, "provider/large");
 		assert!(promoted.turn.provider_reset);
 		assert!(!agent.promote_context_if_enabled(), "target promotion is one-shot");
+		assert_eq!(attributed.lock().as_slice(), ["provider/large"]);
+		drop(agent);
+		if path.exists() {
+			fs::remove_file(path).expect("remove journal");
+		}
+	}
+
+	#[tokio::test]
+	async fn snapshot_publish_attributes_the_live_model() {
+		let (journal, path) = test_journal("snapshot-attribution");
+		let client = ScriptedClient {
+			scripts: Arc::new(Mutex::new(VecDeque::from([outcome_script(end_outcome("done"))]))),
+			opened:  Arc::new(Mutex::new(Vec::new())),
+		};
+		let (env, _transport) = EnvClient::in_process(1);
+		let mut snapshot = AgentSnapshot::default();
+		snapshot.turn.params.model = "provider/small".to_owned();
+		let mut agent = Agent::new(client, env, AgentState::new(snapshot), journal, test_caps());
+		let attributed = Arc::new(Mutex::new(Vec::new()));
+		agent.set_model_attribution({
+			let attributed = Arc::clone(&attributed);
+			Arc::new(move |model: &str| attributed.lock().push(model.to_owned()))
+		});
+		let summary = agent
+			.submit([message(thread::Role::User, "one turn")], TurnId::new("attr-turn"))
+			.await
+			.expect("turn completes");
+		assert_eq!(summary.committed_turns, 1);
+		assert_eq!(attributed.lock().as_slice(), ["provider/small"]);
 		drop(agent);
 		if path.exists() {
 			fs::remove_file(path).expect("remove journal");

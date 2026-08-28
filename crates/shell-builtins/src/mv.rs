@@ -1243,7 +1243,7 @@ fn rename_dir_fallback(
 
 	#[cfg(all(unix, not(any(target_os = "macos", target_os = "redox"))))]
 	{
-		let _ = copy_xattrs_if_supported(host, from, to);
+		copy_xattrs_if_supported(host, from, to)?;
 	}
 
 	// Remove the source directory after successful copy

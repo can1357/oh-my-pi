@@ -2566,7 +2566,12 @@ where
 									{
 										tracing::warn!(%error, "collaboration stream projection failed");
 									}
-									let live_model = agent_state.snapshot().turn.params.model.clone();
+									let live_model = match event.as_ref() {
+										AgentEvent::Snapshot(_) => {
+											agent_state.snapshot().turn.params.model.clone()
+										},
+										_ => String::new(),
+									};
 									handle_agent_event(
 										&backend_tx,
 										&mut state,

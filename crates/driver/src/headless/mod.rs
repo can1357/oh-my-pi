@@ -792,7 +792,7 @@ impl HeadlessSession {
 			.with_principal(session.id.clone(), session.id.clone())
 			.map_err(HeadlessError::EnvPrincipal)?;
 		let blueprint = chat::session_blueprint(
-			composition_model.as_str(),
+			model.as_str(),
 			catalog,
 			&root,
 			&options.additional_roots,
@@ -977,6 +977,10 @@ impl HeadlessSession {
 		});
 		let mut agent =
 			Agent::new(client, env.clone(), state.clone(), session.journal, chat::CHAT_CAPS_BASE);
+		let attribution = edit_model.clone();
+		agent.set_model_attribution(Arc::new(move |selector: &str| {
+			attribution.set(Str::new(selector));
+		}));
 		let compaction_methods = settings.compaction.method_order();
 		let mid_turn_policy = omp_agent::MidTurnCompactionPolicy {
 			enabled: settings.compaction.enabled && settings.compaction.mid_turn_enabled,
