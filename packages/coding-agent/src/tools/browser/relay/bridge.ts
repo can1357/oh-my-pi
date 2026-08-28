@@ -67,6 +67,32 @@ interface SessionRootSubscription {
 	sequence: number;
 }
 
+function subscriptionKey(method: string): string {
+	switch (method) {
+		case "Emulation.setDeviceMetricsOverride":
+		case "Page.setDeviceMetricsOverride":
+		case "Emulation.clearDeviceMetricsOverride":
+		case "Page.clearDeviceMetricsOverride":
+			return "DeviceMetricsOverride";
+		case "Emulation.setGeolocationOverride":
+		case "Page.setGeolocationOverride":
+		case "Emulation.clearGeolocationOverride":
+		case "Page.clearGeolocationOverride":
+			return "GeolocationOverride";
+		default:
+			return method;
+	}
+}
+
+function mergeSubscriptionParams(
+	key: string,
+	previous: Record<string, unknown> | undefined,
+	next: Record<string, unknown> | undefined,
+): Record<string, unknown> | undefined {
+	if (key !== "Emulation.setEmulatedMedia") return next;
+	return { ...(previous ?? {}), ...(next ?? {}) };
+}
+
 interface TargetInfo {
 	targetId: string;
 	type: "tab" | "page" | "browser";
@@ -826,11 +852,11 @@ export class RelayBridge {
 			case "Emulation.setEmulatedMedia":
 			case "Emulation.setLocaleOverride":
 				if (!hasObjectKeys(msg.params)) {
-					this.#forgetTabSubscription(tab, msg.method);
+					this.#forgetTabSubscription(tab, subscriptionKey(msg.method));
 					return;
 				}
 				if (!ownerIsCurrent) return;
-				this.#rememberSessionSubscription(tab, msg.method, ownerSessionId, {
+				this.#rememberSessionSubscription(tab, subscriptionKey(msg.method), ownerSessionId, {
 					method: msg.method,
 					params: msg.params,
 					ownerSessionId,
@@ -839,11 +865,11 @@ export class RelayBridge {
 				return;
 			case "Emulation.setTimezoneOverride":
 				if (msg.params?.timezoneId === "") {
-					this.#forgetTabSubscription(tab, msg.method);
+					this.#forgetTabSubscription(tab, subscriptionKey(msg.method));
 					return;
 				}
 				if (!ownerIsCurrent) return;
-				this.#rememberSessionSubscription(tab, msg.method, ownerSessionId, {
+				this.#rememberSessionSubscription(tab, subscriptionKey(msg.method), ownerSessionId, {
 					method: msg.method,
 					params: msg.params,
 					ownerSessionId,
@@ -852,11 +878,11 @@ export class RelayBridge {
 				return;
 			case "Emulation.setScriptExecutionDisabled":
 				if (msg.params?.value === false) {
-					this.#forgetTabSubscription(tab, msg.method);
+					this.#forgetTabSubscription(tab, subscriptionKey(msg.method));
 					return;
 				}
 				if (!ownerIsCurrent) return;
-				this.#rememberSessionSubscription(tab, msg.method, ownerSessionId, {
+				this.#rememberSessionSubscription(tab, subscriptionKey(msg.method), ownerSessionId, {
 					method: msg.method,
 					params: msg.params,
 					ownerSessionId,
@@ -864,16 +890,12 @@ export class RelayBridge {
 				});
 				return;
 			case "Emulation.clearDeviceMetricsOverride":
-				this.#forgetTabSubscription(tab, "Emulation.setDeviceMetricsOverride");
-				return;
 			case "Page.clearDeviceMetricsOverride":
-				this.#forgetTabSubscription(tab, "Page.setDeviceMetricsOverride");
+				this.#forgetTabSubscription(tab, subscriptionKey(msg.method));
 				return;
 			case "Emulation.clearGeolocationOverride":
-				this.#forgetTabSubscription(tab, "Emulation.setGeolocationOverride");
-				return;
 			case "Page.clearGeolocationOverride":
-				this.#forgetTabSubscription(tab, "Page.setGeolocationOverride");
+				this.#forgetTabSubscription(tab, subscriptionKey(msg.method));
 				return;
 			case "Emulation.setDeviceMetricsOverride":
 			case "Page.setDeviceMetricsOverride":
@@ -888,7 +910,7 @@ export class RelayBridge {
 				// winning command for each setter so preserved pseudo-sessions keep the
 				// state they previously established.
 				if (!ownerIsCurrent) return;
-				this.#rememberSessionSubscription(tab, msg.method, ownerSessionId, {
+				this.#rememberSessionSubscription(tab, subscriptionKey(msg.method), ownerSessionId, {
 					method: msg.method,
 					params: msg.params,
 					ownerSessionId,
@@ -934,7 +956,11 @@ export class RelayBridge {
 			owners = new Map();
 			tab.subscriptions.set(key, owners);
 		}
-		owners.set(ownerSessionId, subscription);
+		const previous = owners.get(ownerSessionId);
+		owners.set(ownerSessionId, {
+			...subscription,
+			params: mergeSubscriptionParams(key, previous?.params, subscription.params),
+		});
 	}
 
 	#forgetSessionSubscription(tab: TabState, key: string, ownerSessionId: string): void {
