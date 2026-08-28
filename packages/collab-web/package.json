@@ -40,6 +40,7 @@
     "@oh-my-pi/pi-utils": "catalog:",
     "@oh-my-pi/pi-wire": "catalog:",
     "lucide-react": "catalog:",
+    "katex": "catalog:",
     "react": "catalog:",
     "react-dom": "catalog:"
   },

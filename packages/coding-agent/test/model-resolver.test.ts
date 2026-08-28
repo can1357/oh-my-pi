@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { type Api, Effort, type Model } from "@oh-my-pi/pi-ai";
+import { type Api, Effort, type Model, type ModelSpec } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { DEFAULT_MODEL_PER_PROVIDER } from "@oh-my-pi/pi-catalog/provider-models";
@@ -327,7 +327,9 @@ const openaiGpt55Models: Model<Api>[] = [
 	}),
 ];
 
-function createBedrockDefaultModel(): Model<"bedrock-converse-stream"> {
+function createBedrockDefaultModel(
+	overrides?: Partial<ModelSpec<"bedrock-converse-stream">>,
+): Model<"bedrock-converse-stream"> {
 	return buildModel({
 		id: "us.anthropic.claude-opus-4-8",
 		name: "Claude Opus 4.8 (US)",
@@ -339,6 +341,7 @@ function createBedrockDefaultModel(): Model<"bedrock-converse-stream"> {
 		cost: { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 },
 		contextWindow: 1000000,
 		maxTokens: 128000,
+		...overrides,
 	});
 }
 
@@ -1584,6 +1587,36 @@ describe("resolveCliModel", () => {
 		expect(offResult.error).toBeUndefined();
 		expect(offResult.model?.id).toBe(profileArn);
 		expect(offResult.thinkingLevel).toBe("off");
+	});
+
+	test("inherits provider-scoped guardrail, transport, and header overrides onto an ARN model, but not the template's prompt-cache checkpoints", () => {
+		const templateModel = createBedrockDefaultModel({
+			transport: "pi-native",
+			headers: { "X-Custom-Header": "custom-value" },
+			guardrailIdentifier: "arn:aws:bedrock:eu-west-2:123456789012:guardrail/abcd1234",
+			guardrailVersion: "1",
+			guardrailTrace: "enabled",
+		});
+		const profileArn = "arn:aws:bedrock:us-east-2:1234567890:application-inference-profile/company-opus-48";
+
+		const result = resolveCliModel({
+			cliProvider: "amazon-bedrock",
+			cliModel: profileArn,
+			modelRegistry: { getAll: () => [templateModel], getAvailable: () => [templateModel] },
+		});
+
+		expect(result.error).toBeUndefined();
+		expect(result.model?.id).toBe(profileArn);
+		expect(result.model?.transport).toBe("pi-native");
+		expect(result.model?.headers).toEqual({ "X-Custom-Header": "custom-value" });
+		expect(result.model?.guardrailIdentifier).toBe("arn:aws:bedrock:eu-west-2:123456789012:guardrail/abcd1234");
+		expect(result.model?.guardrailVersion).toBe("1");
+		expect(result.model?.guardrailTrace).toBe("enabled");
+
+		// The template's Opus-4.8 id derives explicit prompt-cache checkpoints;
+		// the synthesized ARN model must not borrow that checkpoint policy.
+		expect((templateModel.compat as { promptCacheMode?: string }).promptCacheMode).toBe("explicit");
+		expect((result.model?.compat as { promptCacheMode?: string } | undefined)?.promptCacheMode).toBe("none");
 	});
 
 	test("returns a clear error when there are no models", () => {
