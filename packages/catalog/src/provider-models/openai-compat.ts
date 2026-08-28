@@ -1224,6 +1224,69 @@ export function cerebrasModelManagerOptions(
 }
 
 // ---------------------------------------------------------------------------
+// 3a. Chutes
+// ---------------------------------------------------------------------------
+
+export interface ChutesModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
+function mapChutesModel(
+	entry: OpenAICompatibleModelRecord,
+	defaults: ModelSpec<"openai-completions">,
+): ModelSpec<"openai-completions"> {
+	const price = isRecord(entry.pricing) ? entry.pricing : {};
+	const inputCost = toPositiveNumber(price.prompt, defaults.cost.input);
+	const output = toPositiveNumber(price.completion, defaults.cost.output);
+	const cacheRead = toPositiveNumber(price.input_cache_read, defaults.cost.cacheRead);
+	const contextWindow = toPositiveNumber(entry.context_length, defaults.contextWindow ?? null);
+	const maxTokens = toPositiveNumber(entry.max_output_length, defaults.maxTokens ?? null);
+
+	const supportedFeatures = Array.isArray(entry.supported_features)
+		? entry.supported_features.filter((f): f is string => typeof f === "string")
+		: [];
+	const reasoning = supportedFeatures.includes("reasoning");
+
+	const inputModalities = Array.isArray(entry.input_modalities)
+		? entry.input_modalities.filter((m): m is string => typeof m === "string")
+		: [];
+	const inputCapabilities: ("text" | "image")[] = inputModalities.includes("image") ? ["text", "image"] : ["text"];
+
+	return {
+		...defaults,
+		name: typeof entry.name === "string" && entry.name.length > 0 ? entry.name : defaults.id,
+		reasoning,
+		input: inputCapabilities,
+		cost: { input: inputCost, output, cacheRead, cacheWrite: defaults.cost.cacheWrite },
+		contextWindow,
+		maxTokens,
+	};
+}
+
+export function chutesModelManagerOptions(
+	config?: ChutesModelManagerConfig,
+): ModelManagerOptions<"openai-completions"> {
+	const apiKey = config?.apiKey;
+	const baseUrl = config?.baseUrl ?? "https://llm.chutes.ai/v1";
+	return {
+		providerId: "chutes",
+		...(apiKey && {
+			fetchDynamicModels: () =>
+				fetchOpenAICompatibleModels({
+					api: "openai-completions",
+					provider: "chutes",
+					baseUrl,
+					apiKey,
+					mapModel: (entry, defaults) => mapChutesModel(entry, defaults),
+					fetch: config?.fetch,
+				}),
+		}),
+	};
+}
+
+// ---------------------------------------------------------------------------
 // 4. Hugging Face
 // ---------------------------------------------------------------------------
 

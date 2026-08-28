@@ -313,6 +313,9 @@
 - Fixed account-scoped Codex cyber-policy denials bypassing sibling credential rotation; replay-safe requests now try every configured account before surfacing the error.
 
 ## [17.2.11] - 2026-08-07
+### Added
+
+- Added Chutes provider with API-key authentication and model discovery via `https://llm.chutes.ai/v1/models`.
 
 ### Breaking Changes
 

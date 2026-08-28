@@ -17,6 +17,7 @@ import {
 	basetenModelManagerOptions,
 	bedrockMantleModelManagerOptions,
 	cerebrasModelManagerOptions,
+	chutesModelManagerOptions,
 	cloudflareAiGatewayModelManagerOptions,
 	coreWeaveModelManagerOptions,
 	deepinfraModelManagerOptions,
@@ -137,6 +138,13 @@ export const CATALOG_PROVIDERS = [
 		envVars: ["CEREBRAS_API_KEY"],
 		createModelManagerOptions: (config: ModelManagerConfig) => cerebrasModelManagerOptions(config),
 		catalogDiscovery: { label: "Cerebras" },
+	},
+	{
+		id: "chutes",
+		defaultModel: "deepseek-ai/DeepSeek-V4-Flash-0731-TEE",
+		envVars: ["CHUTES_API_KEY"],
+		createModelManagerOptions: (config: ModelManagerConfig) => chutesModelManagerOptions(config),
+		catalogDiscovery: { label: "Chutes" },
 	},
 	{
 		id: "cloudflare-ai-gateway",
