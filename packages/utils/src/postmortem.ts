@@ -147,6 +147,33 @@ export function isIpcSendEpipe(err: Error): boolean {
 }
 
 /**
+ * Whether an uncaught error is Bun's asynchronous `ERR_SOCKET_CLOSED` thrown
+ * from inside `node:net` internals with no application frames on the stack.
+ *
+ * Bun ≥1.4 can fire the close callback of an already-closed `node:net` socket
+ * on a fresh stack; the throw bypasses every callsite try/catch and surfaces
+ * here as a process-level uncaughtException. Closing an already-closed socket
+ * is inherently a no-op — the socket owner's own `error`/`close` handlers
+ * still drive recovery — so tearing the session down for it is pure loss.
+ * Only frameless internal stacks qualify: an `ERR_SOCKET_CLOSED` raised
+ * through application code keeps the fatal path.
+ */
+export function isInternalSocketClosedError(err: unknown): boolean {
+	if (!(err instanceof Error) || !("code" in err) || err.code !== "ERR_SOCKET_CLOSED") return false;
+	const frames = (err.stack ?? "").split("\n").slice(1);
+	if (frames.length === 0) return false;
+	let hasNetFrame = false;
+	const internal = frames.every(frame => {
+		const trimmed = frame.trim();
+		if (trimmed === "" || trimmed === "at unknown" || trimmed === "at native") return true;
+		if (!/\(node:[^)]*\)$/.test(trimmed) && !/^at node:/.test(trimmed)) return false;
+		hasNetFrame ||= trimmed.includes("node:net:");
+		return true;
+	});
+	return internal && hasNetFrame;
+}
+
+/**
  * Detect Bun's advanced-serialization (structured-clone) IPC decode failure.
  *
  * When a worker subprocess spawned with `serialization: "advanced"` sends a
@@ -236,23 +263,27 @@ const EXPECTED_CLEANUP = Symbol.for("omp.expectedCleanupError");
  * consumer. Returns the same error for inline use at the `abort()` callsite.
  */
 export function markExpectedCleanupError<T extends object>(reason: T): T {
-	(reason as Record<PropertyKey, unknown>)[EXPECTED_CLEANUP] = true;
+	Reflect.set(reason, EXPECTED_CLEANUP, true);
 	return reason;
 }
 
-/**
- * Whether `reason` (or any error in its `cause` chain) was marked via
- * {@link markExpectedCleanupError}. Walks the chain because the unhandled
- * reason is often a wrapper (`AbortError`) with the marked abort reason as
- * its `cause`.
- */
-export function isExpectedCleanupError(reason: unknown): boolean {
+function hasExpectedCleanupMarker(reason: unknown): boolean {
 	let current: unknown = reason;
 	for (let depth = 0; depth < 8 && current !== null && typeof current === "object"; depth++) {
-		if ((current as Record<PropertyKey, unknown>)[EXPECTED_CLEANUP] === true) return true;
-		current = (current as { cause?: unknown }).cause;
+		if (Reflect.get(current, EXPECTED_CLEANUP) === true) return true;
+		current = Reflect.get(current, "cause");
 	}
 	return false;
+}
+
+/**
+ * Whether `reason` (or any object in its bounded `cause` chain) was explicitly
+ * marked via {@link markExpectedCleanupError}. Runtime error names and codes
+ * are intentionally insufficient: unmarked `AbortError` and socket failures
+ * can originate from application code and must remain fatal when unhandled.
+ */
+export function isExpectedCleanupError(reason: unknown): boolean {
+	return hasExpectedCleanupMarker(reason);
 }
 
 /** Interceptors consulted by the global `unhandledRejection` handler before the fatal path. */
@@ -338,9 +369,20 @@ if (isMainThread) {
 			const url = inspector.url();
 			process.stderr.write(`Inspector opened: ${url}\n`);
 		})
-		.on("uncaughtException", async err => {
-			if (isExpectedCleanupError(err)) {
-				logger.warn("Ignoring expected cleanup exception", { err });
+		.on("uncaughtException", async thrown => {
+			// Only explicitly marked exceptions are safe here. Structural
+			// AbortError/socket classification is limited to promise rejections:
+			// a synchronously thrown error may indicate an application bug.
+			if (hasExpectedCleanupMarker(thrown)) {
+				logger.warn("Ignoring expected cleanup exception", { err: thrown });
+				return;
+			}
+			const err = thrown instanceof Error ? thrown : new Error(String(thrown));
+			// Bun can surface a worker IPC send race through uncaughtException
+			// instead of unhandledRejection. Apply the same optional-worker
+			// containment in either global error channel.
+			if (isIpcSendEpipe(err)) {
+				logger.warn("Ignoring EPIPE from worker IPC send; optional subsystem will self-recover", { err });
 				return;
 			}
 			// A malformed advanced-serialization frame from a worker subprocess
@@ -355,6 +397,12 @@ if (isMainThread) {
 			if (isWorkerIpcDeserializeError(err)) {
 				logger.warn("Malformed worker IPC frame; faulting active worker subsystems", { err });
 				faultWorkerIpcChannels(err);
+				return;
+			}
+			if (isInternalSocketClosedError(err)) {
+				logger.warn("Ignoring async ERR_SOCKET_CLOSED from node:net internals; socket owner recovers itself", {
+					err,
+				});
 				return;
 			}
 			await exitAfterFatal("Uncaught Exception", "Uncaught exception", err, Reason.UNCAUGHT_EXCEPTION);

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { type Api, Effort, type Model } from "@oh-my-pi/pi-ai";
+import { type Api, Effort, type Model, type ModelSpec } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { DEFAULT_MODEL_PER_PROVIDER } from "@oh-my-pi/pi-catalog/provider-models";
@@ -327,7 +327,9 @@ const openaiGpt55Models: Model<Api>[] = [
 	}),
 ];
 
-function createBedrockDefaultModel(): Model<"bedrock-converse-stream"> {
+function createBedrockDefaultModel(
+	overrides?: Partial<ModelSpec<"bedrock-converse-stream">>,
+): Model<"bedrock-converse-stream"> {
 	return buildModel({
 		id: "us.anthropic.claude-opus-4-8",
 		name: "Claude Opus 4.8 (US)",
@@ -339,6 +341,7 @@ function createBedrockDefaultModel(): Model<"bedrock-converse-stream"> {
 		cost: { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 },
 		contextWindow: 1000000,
 		maxTokens: 128000,
+		...overrides,
 	});
 }
 
@@ -448,6 +451,46 @@ describe("pickDefaultAvailableModel", () => {
 
 		expect(pickDefaultAvailableModel([paid, oauth])?.provider).toBe("xai-oauth");
 		expect(pickDefaultAvailableModel([paid])?.provider).toBe("xai");
+	});
+
+	test("prefers a concretely-authed provider over a sentinel-only ambient provider (issue #9967)", () => {
+		const bedrockDefault = createBedrockDefaultModel();
+		const anthropicDefault = createOpusModel("anthropic", DEFAULT_MODEL_PER_PROVIDER.anthropic, "Claude Opus");
+		// amazon-bedrock leads in catalog/availability order, exactly as
+		// `getAvailable()` returns it when a stray ~/.aws profile makes Bedrock
+		// ambiently "available" alongside a real Anthropic OAuth login.
+		const models = [bedrockDefault, anthropicDefault];
+
+		// Without the credential hint the ambient provider still wins by order —
+		// this is the reported bug (403 on the first turn).
+		expect(pickDefaultAvailableModel(models)?.provider).toBe("amazon-bedrock");
+
+		// With the hint, the provider the user actually signed into wins.
+		const picked = pickDefaultAvailableModel(models, provider => provider === "anthropic");
+		expect(picked?.provider).toBe("anthropic");
+		expect(picked?.id).toBe(DEFAULT_MODEL_PER_PROVIDER.anthropic);
+	});
+
+	test("keeps a sentinel-only provider when it is the only credentialed option", () => {
+		const bedrockDefault = createBedrockDefaultModel();
+		const picked = pickDefaultAvailableModel([bedrockDefault], () => false);
+		expect(picked?.provider).toBe("amazon-bedrock");
+		expect(picked?.id).toBe(DEFAULT_MODEL_PER_PROVIDER["amazon-bedrock"]);
+	});
+
+	test("checks concrete auth once per provider", () => {
+		const bedrockDefault = createBedrockDefaultModel();
+		const secondBedrockModel = createBedrockDefaultModel({ id: "us.anthropic.claude-sonnet-4-6" });
+		const anthropicDefault = createOpusModel("anthropic", DEFAULT_MODEL_PER_PROVIDER.anthropic, "Claude Opus");
+		const checkedProviders: string[] = [];
+
+		const picked = pickDefaultAvailableModel([bedrockDefault, secondBedrockModel, anthropicDefault], provider => {
+			checkedProviders.push(provider);
+			return provider === "anthropic";
+		});
+
+		expect(picked?.provider).toBe("anthropic");
+		expect(checkedProviders).toEqual(["amazon-bedrock", "anthropic"]);
 	});
 });
 
@@ -1584,6 +1627,36 @@ describe("resolveCliModel", () => {
 		expect(offResult.error).toBeUndefined();
 		expect(offResult.model?.id).toBe(profileArn);
 		expect(offResult.thinkingLevel).toBe("off");
+	});
+
+	test("inherits provider-scoped guardrail, transport, and header overrides onto an ARN model, but not the template's prompt-cache checkpoints", () => {
+		const templateModel = createBedrockDefaultModel({
+			transport: "pi-native",
+			headers: { "X-Custom-Header": "custom-value" },
+			guardrailIdentifier: "arn:aws:bedrock:eu-west-2:123456789012:guardrail/abcd1234",
+			guardrailVersion: "1",
+			guardrailTrace: "enabled",
+		});
+		const profileArn = "arn:aws:bedrock:us-east-2:1234567890:application-inference-profile/company-opus-48";
+
+		const result = resolveCliModel({
+			cliProvider: "amazon-bedrock",
+			cliModel: profileArn,
+			modelRegistry: { getAll: () => [templateModel], getAvailable: () => [templateModel] },
+		});
+
+		expect(result.error).toBeUndefined();
+		expect(result.model?.id).toBe(profileArn);
+		expect(result.model?.transport).toBe("pi-native");
+		expect(result.model?.headers).toEqual({ "X-Custom-Header": "custom-value" });
+		expect(result.model?.guardrailIdentifier).toBe("arn:aws:bedrock:eu-west-2:123456789012:guardrail/abcd1234");
+		expect(result.model?.guardrailVersion).toBe("1");
+		expect(result.model?.guardrailTrace).toBe("enabled");
+
+		// The template's Opus-4.8 id derives explicit prompt-cache checkpoints;
+		// the synthesized ARN model must not borrow that checkpoint policy.
+		expect((templateModel.compat as { promptCacheMode?: string }).promptCacheMode).toBe("explicit");
+		expect((result.model?.compat as { promptCacheMode?: string } | undefined)?.promptCacheMode).toBe("none");
 	});
 
 	test("returns a clear error when there are no models", () => {

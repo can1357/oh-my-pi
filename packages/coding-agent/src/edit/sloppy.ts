@@ -1004,6 +1004,23 @@ function recoverDirectiveRewrite(
 	return operation;
 }
 
+/**
+ * Repair a stray `⟫` typed where the `│` divider belongs: `⟪old⟫new⟫` reads
+ * as `⟪old│new⟫`. Fires only when closes outnumber opens, both sides are
+ * marker-free single-line text (a proper `⟪old│new⟫` followed by a stray
+ * `⟫` never matches), and the repair restores marker balance. A wrong guess
+ * still fails loud downstream: the repaired old side must match the file.
+ */
+function recoverStrayCloseDivider(patternText: string): string | undefined {
+	const opens = (patternText.match(/⟪/gu) || []).length;
+	const closes = (patternText.match(/⟫/gu) || []).length;
+	if (closes <= opens) return undefined;
+	const repaired = patternText.replaceAll(/⟪([^⟪⟫│\n]*)⟫([^⟪⟫│\n]*)⟫/gu, `⟪$1${SELECT_DIVIDER}$2⟫`);
+	if (repaired === patternText) return undefined;
+	const balanced = (repaired.match(/⟪/gu) || []).length === (repaired.match(/⟫/gu) || []).length;
+	return balanced ? repaired : undefined;
+}
+
 function createOperation(
 	sourcePatternText: string,
 	rewriteText: string,
@@ -1012,6 +1029,14 @@ function createOperation(
 	hasExplicitRewrite: boolean,
 ): Operation {
 	let embedded = embedAddLines(sourcePatternText);
+	const strayRepaired = recoverStrayCloseDivider(embedded);
+	if (strayRepaired !== undefined) {
+		const operation = createOperation(strayRepaired, rewriteText, all, operationNumber, hasExplicitRewrite);
+		operation.sourcePatternText = sourcePatternText;
+		const note = `Note: operation ${operationNumber} wrote ${SELECT_CLOSE} where the ${SELECT_DIVIDER} divider belongs; ${SELECT_OPEN}old${SELECT_CLOSE}new${SELECT_CLOSE} was read as ${SELECT_OPEN}old${SELECT_DIVIDER}new${SELECT_CLOSE}.`;
+		operation.recoveryNote = operation.recoveryNote ? `${note}\n${operation.recoveryNote}` : note;
+		return operation;
+	}
 	if (!hasExplicitRewrite && hasBareDesired(embedded)) embedded = embedBareDesired(embedded);
 	if (!hasInlineSelection(embedded) && hasExplicitRewrite) {
 		const directive = recoverDirectiveRewrite(embedded, rewriteText, all, operationNumber);

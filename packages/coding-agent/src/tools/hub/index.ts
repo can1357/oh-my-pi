@@ -132,6 +132,8 @@ interface MessagingDeps {
 	registry: AgentRegistry;
 	senderId: string;
 	settings: ToolSession["settings"];
+	/** Caller session file: direct sends refresh this root's persisted roster before resolving the target. */
+	sessionFileHint?: string | null;
 }
 
 const PROGRESS_INTERVAL_MS = 500;
@@ -255,7 +257,12 @@ export class HubTool implements AgentTool<typeof hubSchema, HubDetails> {
 		const registry = this.session.agentRegistry;
 		const senderId = this.session.getAgentId?.() ?? null;
 		if (!registry || !senderId) return null;
-		return { registry, senderId, settings: this.session.settings };
+		return {
+			registry,
+			senderId,
+			settings: this.session.settings,
+			sessionFileHint: this.session.getSessionFile?.() ?? null,
+		};
 	}
 
 	async execute(
