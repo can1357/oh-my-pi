@@ -51,6 +51,9 @@
 - Auth gateway `PUT /v1/routes/:id` registers or replaces a virtual route.
 - Auth gateway `DELETE /v1/routes/:id` unregisters a virtual route.
 - Auth gateway retries a sibling credential on quota errors before falling over to another model.
+- Auth gateway `GET /v1/executions/:id` returns redacted decision traces for an execution.
+- Auth gateway `GET /v1/health/routes` lists virtual route ids, generations, and targets without credentials.
+- Auth gateway `GET /v1/credentials` lists credential ids without tokens; `POST /v1/credentials/:id/disable` and `POST /v1/credentials/:id/pin` manage stored accounts.
 
 ## [18.0.8] - 2026-08-27
 

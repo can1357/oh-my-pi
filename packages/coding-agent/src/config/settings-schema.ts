@@ -482,6 +482,9 @@ export const SETTINGS_SCHEMA = {
 	// per-machine overrides remain trivial.
 	"auth.broker.url": { type: "string", default: undefined },
 	"auth.broker.token": { type: "string", default: undefined, credential: true },
+	// Auth gateway — optional RouteDefinition file used by `omp auth-gateway serve`
+	// when `--routes` is omitted. Hidden from the UI; populate via config.yml.
+	"auth.gateway.routesFile": { type: "string", default: undefined },
 
 	autoResume: {
 		type: "boolean",

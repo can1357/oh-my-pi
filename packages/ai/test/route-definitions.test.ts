@@ -118,6 +118,129 @@ describe("parseRouteDefinitions", () => {
 			]),
 		).toThrow(/empty/i);
 	});
+
+	it("parses a balance node", () => {
+		const parsed = parseRouteDefinitions([
+			{
+				id: "lb",
+				root: {
+					type: "balance",
+					strategy: "rr",
+					children: [
+						{ type: "target", model: "openai:gpt-4o" },
+						{ type: "target", model: "anthropic:claude-sonnet-4" },
+					],
+				},
+			},
+		]);
+		expect(parsed).toEqual([
+			{
+				id: "lb",
+				root: {
+					type: "balance",
+					strategy: "rr",
+					children: [
+						{ type: "target", model: "openai:gpt-4o" },
+						{ type: "target", model: "anthropic:claude-sonnet-4" },
+					],
+				},
+			},
+		]);
+	});
+
+	it("parses a weighted balance node", () => {
+		const parsed = parseRouteDefinitions([
+			{
+				id: "weighted",
+				root: {
+					type: "balance",
+					strategy: "weighted",
+					children: [{ type: "target", model: "openai:gpt-4o" }],
+				},
+			},
+		]);
+		expect(parsed[0]?.root).toEqual({
+			type: "balance",
+			strategy: "weighted",
+			children: [{ type: "target", model: "openai:gpt-4o" }],
+		});
+	});
+
+	it("parses a conditional node", () => {
+		const parsed = parseRouteDefinitions([
+			{
+				id: "vision",
+				root: {
+					type: "conditional",
+					when: { vision: true },
+					children: [{ type: "target", model: "openai:gpt-4o" }],
+				},
+			},
+		]);
+		expect(parsed).toEqual([
+			{
+				id: "vision",
+				root: {
+					type: "conditional",
+					when: { vision: true },
+					children: [{ type: "target", model: "openai:gpt-4o" }],
+				},
+			},
+		]);
+	});
+
+	it("parses a domain node", () => {
+		const parsed = parseRouteDefinitions([
+			{
+				id: "coding",
+				root: {
+					type: "domain",
+					name: "coding",
+					children: [{ type: "target", model: "openai:gpt-4o" }],
+				},
+			},
+		]);
+		expect(parsed).toEqual([
+			{
+				id: "coding",
+				root: {
+					type: "domain",
+					name: "coding",
+					children: [{ type: "target", model: "openai:gpt-4o" }],
+				},
+			},
+		]);
+	});
+
+	it("parses a route-ref node", () => {
+		const parsed = parseRouteDefinitions([{ id: "alias", root: { type: "route-ref", route: "primary" } }]);
+		expect(parsed).toEqual([{ id: "alias", root: { type: "route-ref", route: "primary" } }]);
+	});
+
+	it("rejects a conditional node missing when (negative)", () => {
+		expect(() =>
+			parseRouteDefinitions([
+				{
+					id: "bad",
+					root: {
+						type: "conditional",
+						children: [{ type: "target", model: "openai:gpt-4o" }],
+					},
+				},
+			]),
+		).toThrow(AIError.ValidationError);
+		expect(() =>
+			parseRouteDefinitions([
+				{
+					id: "bad",
+					root: {
+						type: "conditional",
+						children: [{ type: "target", model: "openai:gpt-4o" }],
+					},
+				},
+			]),
+		).toThrow(/when/i);
+	});
 });
 
 describe("loadRouteDefinitionsFile", () => {

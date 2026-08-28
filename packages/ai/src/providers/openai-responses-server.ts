@@ -609,6 +609,9 @@ export function parseRequest(body: unknown, headers?: Headers): ParsedRequest {
 	}
 	if (data.presence_penalty !== undefined) options.presencePenalty = data.presence_penalty;
 	if (data.frequency_penalty !== undefined) options.frequencyPenalty = data.frequency_penalty;
+	if (data.seed !== undefined) options.seed = data.seed;
+	if (data.logit_bias !== undefined) options.logitBias = data.logit_bias;
+	if (data.response_format !== undefined) options.responseFormat = data.response_format;
 	if (data.parallel_tool_calls !== undefined) options.parallelToolCalls = data.parallel_tool_calls;
 	if (Array.isArray(data.include)) options.include = data.include.filter(isOpenAIResponseInclude);
 	const cacheKey = resolvePromptCacheKey(body, headers);

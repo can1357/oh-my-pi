@@ -10,7 +10,30 @@ export type FallbackNode = {
 	children: readonly RouteNode[];
 };
 
-export type RouteNode = TargetNode | FallbackNode;
+export type BalanceNode = {
+	type: "balance";
+	strategy: "rr" | "weighted";
+	children: readonly RouteNode[];
+};
+
+export type ConditionalNode = {
+	type: "conditional";
+	when: { vision?: boolean };
+	children: readonly RouteNode[];
+};
+
+export type DomainNode = {
+	type: "domain";
+	name: string;
+	children: readonly RouteNode[];
+};
+
+export type RouteRefNode = {
+	type: "route-ref";
+	route: string;
+};
+
+export type RouteNode = TargetNode | FallbackNode | BalanceNode | ConditionalNode | DomainNode | RouteRefNode;
 
 export interface RouteDefinition {
 	id: string;
@@ -53,15 +76,28 @@ export class RouteRegistry {
 
 	/** Register/replace a virtual route. Bumps generation. Rejects cycles and empty fallback children. */
 	register(definition: RouteDefinition): void {
-		const compiled = compileNode(definition.root, new Set());
+		const compiled = compileDefinition(definition, id => this.#routes.get(id)?.root, this.#generation + 1);
 		this.#generation += 1;
-		this.#routes.set(definition.id, {
-			generation: this.#generation,
-			id: definition.id,
-			root: copyNode(definition.root),
-			targets: Object.freeze([...compiled.targets]),
-			fallbacks: freezeFallbacks(compiled.fallbacks),
-		});
+		this.#routes.set(definition.id, compiled);
+	}
+
+	/**
+	 * Atomically replace every virtual route. Compiles all definitions first;
+	 * on any throw, `#routes` and generation stay unchanged. Bumps generation once.
+	 */
+	replaceAll(defs: readonly RouteDefinition[]): void {
+		const nextGeneration = this.#generation + 1;
+		const pending = new Map<string, CompiledRoute>();
+		for (const definition of defs) {
+			const compiled = compileDefinition(
+				definition,
+				id => pending.get(id)?.root ?? this.#routes.get(id)?.root,
+				nextGeneration,
+			);
+			pending.set(definition.id, compiled);
+		}
+		this.#generation = nextGeneration;
+		this.#routes = pending;
 	}
 
 	/** Registered virtual routes in insertion order. Concrete catalog wraps are omitted. */
@@ -97,13 +133,80 @@ export class RouteRegistry {
 	}
 }
 
-function compileNode(node: RouteNode, seenOnPath: ReadonlySet<string>): NodeCompile {
-	if (node.type === "target") {
-		if (seenOnPath.has(node.model)) {
-			throw new AIError.ValidationError(`Route cycle: model "${node.model}" repeats on one path`);
+function compileDefinition(
+	definition: RouteDefinition,
+	lookup: (id: string) => RouteNode | undefined,
+	generation: number,
+): CompiledRoute {
+	const root = resolveRouteRefs(definition.root, lookup);
+	const compiled = compileNode(root, new Set());
+	return {
+		generation,
+		id: definition.id,
+		root: copyNode(root),
+		targets: Object.freeze([...compiled.targets]),
+		fallbacks: freezeFallbacks(compiled.fallbacks),
+	};
+}
+
+function resolveRouteRefs(node: RouteNode, lookup: (id: string) => RouteNode | undefined): RouteNode {
+	switch (node.type) {
+		case "route-ref": {
+			const resolved = lookup(node.route);
+			if (resolved === undefined) {
+				throw new AIError.ValidationError("Unresolved route-ref");
+			}
+			return copyNode(resolved);
 		}
-		return { targets: [node.model], fallbacks: {} };
+		case "target":
+			return { type: "target", model: node.model };
+		case "fallback":
+			return {
+				type: "fallback",
+				on: node.on,
+				children: node.children.map(child => resolveRouteRefs(child, lookup)),
+			};
+		case "balance":
+			return {
+				type: "balance",
+				strategy: node.strategy,
+				children: node.children.map(child => resolveRouteRefs(child, lookup)),
+			};
+		case "conditional":
+			return {
+				type: "conditional",
+				when: { ...node.when },
+				children: node.children.map(child => resolveRouteRefs(child, lookup)),
+			};
+		case "domain":
+			return {
+				type: "domain",
+				name: node.name,
+				children: node.children.map(child => resolveRouteRefs(child, lookup)),
+			};
 	}
+}
+
+function compileNode(node: RouteNode, seenOnPath: ReadonlySet<string>): NodeCompile {
+	switch (node.type) {
+		case "target": {
+			if (seenOnPath.has(node.model)) {
+				throw new AIError.ValidationError(`Route cycle: model "${node.model}" repeats on one path`);
+			}
+			return { targets: [node.model], fallbacks: {} };
+		}
+		case "route-ref":
+			throw new AIError.ValidationError("Unresolved route-ref");
+		case "fallback":
+			return compileFallback(node, seenOnPath);
+		case "balance":
+		case "conditional":
+		case "domain":
+			return compileFlatten(node.children, seenOnPath);
+	}
+}
+
+function compileFallback(node: FallbackNode, seenOnPath: ReadonlySet<string>): NodeCompile {
 	if (node.children.length === 0) {
 		throw new AIError.ValidationError("Fallback node has empty children");
 	}
@@ -132,15 +235,51 @@ function compileNode(node: RouteNode, seenOnPath: ReadonlySet<string>): NodeComp
 	return { targets, fallbacks };
 }
 
-function copyNode(node: RouteNode): RouteNode {
-	if (node.type === "target") {
-		return { type: "target", model: node.model };
+function compileFlatten(children: readonly RouteNode[], seenOnPath: ReadonlySet<string>): NodeCompile {
+	const targets: string[] = [];
+	const fallbacks: Partial<Record<GatewayErrorDisposition, string[]>> = {};
+	const sequential = new Set(seenOnPath);
+	for (const child of children) {
+		const childSeen = new Set(child.type === "target" ? sequential : seenOnPath);
+		const part = compileNode(child, childSeen);
+		targets.push(...part.targets);
+		mergeFallbacks(fallbacks, part.fallbacks);
+		if (child.type === "target") sequential.add(child.model);
 	}
-	return {
-		type: "fallback",
-		on: Object.freeze([...node.on]),
-		children: Object.freeze(node.children.map(copyNode)),
-	};
+	return { targets, fallbacks };
+}
+
+function copyNode(node: RouteNode): RouteNode {
+	switch (node.type) {
+		case "target":
+			return { type: "target", model: node.model };
+		case "fallback":
+			return {
+				type: "fallback",
+				on: Object.freeze([...node.on]),
+				children: Object.freeze(node.children.map(copyNode)),
+			};
+		case "balance":
+			return {
+				type: "balance",
+				strategy: node.strategy,
+				children: Object.freeze(node.children.map(copyNode)),
+			};
+		case "conditional":
+			return {
+				type: "conditional",
+				when: Object.freeze({ ...node.when }),
+				children: Object.freeze(node.children.map(copyNode)),
+			};
+		case "domain":
+			return {
+				type: "domain",
+				name: node.name,
+				children: Object.freeze(node.children.map(copyNode)),
+			};
+		case "route-ref":
+			return { type: "route-ref", route: node.route };
+	}
 }
 
 function mergeFallbacks(

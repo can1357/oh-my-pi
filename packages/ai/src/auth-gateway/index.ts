@@ -7,6 +7,7 @@ export * from "./http";
 export * from "./model-route";
 export * from "./prompt-cache-store";
 export * from "./provider-health";
+export * from "./quota-share";
 export * from "./route-conductor";
 export * from "./route-definitions";
 export * from "./route-graph";

@@ -17,6 +17,11 @@
  *   GET  /v1/routes/:id                    → one registered virtual route
  *   PUT  /v1/routes/:id                    → register or replace a virtual route
  *   DELETE /v1/routes/:id                    → unregister a virtual route
+ *   GET  /v1/executions/:id                → redacted decision traces for one execution
+ *   GET  /v1/health/routes                 → virtual route ids, generations, and targets (no credentials)
+ *   GET  /v1/credentials                   → stored credential ids, providers, and types (no secrets)
+ *   POST /v1/credentials/:id/disable       → disable a stored credential
+ *   POST /v1/credentials/:id/pin           → pin a session to an OAuth credential
  *   POST /v1/chat/completions              → OpenAI chat-completions in/out
  *   POST /v1/messages                      → Anthropic messages in/out
  *   POST /v1/responses                     → OpenAI Responses in/out
@@ -38,7 +43,7 @@ import type { Api, AssistantMessage, AssistantMessageEventStream, Context, Model
 import type { ClientUsageIdentity } from "../usage";
 import { deterministicUuid } from "../utils/deterministic-id";
 import { parseBind } from "../utils/parse-bind";
-import { RouteDecisionTraceLog, redactedDecisionSummary } from "./decision-trace";
+import { type RouteDecisionTrace, RouteDecisionTraceLog, redactedDecisionSummary } from "./decision-trace";
 import {
 	captureRequestHeaders,
 	corsHeaders,
@@ -1597,13 +1602,97 @@ function handleRouteDelete(registry: RouteRegistry, id: string): Response {
 	return new Response(null, { status: 204 });
 }
 
+function handleExecutionTraces(traces: RouteDecisionTraceLog, id: string): Response {
+	const recorded = traces.get(id);
+	if (recorded.length === 0) {
+		return json(404, { error: `Unknown execution: ${id}` });
+	}
+	const data: RouteDecisionTrace[] = [];
+	for (const trace of recorded) {
+		const row: RouteDecisionTrace = {
+			requestId: trace.requestId,
+			routeId: trace.routeId,
+			generation: trace.generation,
+			selectedTarget: trace.selectedTarget,
+			disposition: trace.disposition,
+			recordedAtMs: trace.recordedAtMs,
+		};
+		if (trace.reason !== undefined) row.reason = trace.reason;
+		data.push(row);
+	}
+	return json(200, { object: "list", data });
+}
+
+interface HealthRouteRow {
+	id: string;
+	generation: number;
+	targets: readonly string[];
+}
+
+function handleHealthRoutes(registry: RouteRegistry): Response {
+	const data: HealthRouteRow[] = [];
+	for (const route of registry.list()) {
+		data.push({
+			id: route.id,
+			generation: route.generation,
+			targets: route.targets,
+		});
+	}
+	return json(200, { object: "list", generation: registry.generation, data });
+}
+
+interface CredentialListRow {
+	id: number;
+	provider: string;
+	type: "api_key" | "oauth";
+}
+
+function handleCredentialsList(storage: AuthStorage): Response {
+	const data: CredentialListRow[] = [];
+	for (const entry of storage.exportSnapshot().credentials) {
+		data.push({
+			id: entry.id,
+			provider: entry.provider,
+			type: entry.credential.type,
+		});
+	}
+	return json(200, { object: "list", data });
+}
+
+function handleCredentialDisable(storage: AuthStorage, id: string): Response {
+	if (!storage.disableCredentialById(Number(id), "gateway")) {
+		return json(404, { error: `No credential with id=${id}` });
+	}
+	return json(200, { ok: true });
+}
+
+async function handleCredentialPin(storage: AuthStorage, id: string, req: Request): Promise<Response> {
+	let body: unknown;
+	try {
+		body = await req.json();
+	} catch (error) {
+		return json(400, { error: `Invalid JSON body: ${String(error)}` });
+	}
+	if (!isRecord(body) || typeof body.provider !== "string" || typeof body.sessionId !== "string") {
+		return json(400, { error: "provider and sessionId are required" });
+	}
+	if (body.provider.length === 0 || body.sessionId.length === 0) {
+		return json(400, { error: "provider and sessionId are required" });
+	}
+	if (!storage.pinSessionOAuthAccount(body.provider, body.sessionId, Number(id))) {
+		return json(404, { error: `No credential with id=${id}` });
+	}
+	return json(200, { ok: true });
+}
+
 export function startAuthGateway(opts: AuthGatewayBootOptions): AuthGatewayServerHandle {
 	const registry = opts.routeRegistry ?? new RouteRegistry(opts.resolveModel);
 	for (const def of opts.routes ?? []) registry.register(def);
+	const traces = opts.decisionTraces ?? new RouteDecisionTraceLog();
 	const boot: AuthGatewayBootOptions = {
 		...opts,
 		routeRegistry: registry,
-		decisionTraces: opts.decisionTraces ?? new RouteDecisionTraceLog(),
+		decisionTraces: traces,
 	};
 	const bind = parseBind(boot.bind ?? DEFAULT_AUTH_GATEWAY_BIND);
 	const tokens = new Set<string>(boot.bearerTokens);
@@ -1643,6 +1732,17 @@ export function startAuthGateway(opts: AuthGatewayBootOptions): AuthGatewayServe
 				// credentials, so we need a separate endpoint that captures errors.
 				if (req.method === "GET" && pathname === "/v1/credentials/check") {
 					return withCors(await handleCredentialsCheck(boot.storage, req.signal), req);
+				}
+				if (req.method === "GET" && pathname === "/v1/credentials") {
+					return withCors(handleCredentialsList(boot.storage), req);
+				}
+				const credentialAction = /^\/v1\/credentials\/([^/]+)\/(disable|pin)$/.exec(pathname);
+				if (req.method === "POST" && credentialAction) {
+					const credentialId = credentialAction[1]!;
+					if (credentialAction[2] === "disable") {
+						return withCors(handleCredentialDisable(boot.storage, credentialId), req);
+					}
+					return withCors(await handleCredentialPin(boot.storage, credentialId, req), req);
 				}
 
 				// Provider-format dispatch.
@@ -1686,6 +1786,16 @@ export function startAuthGateway(opts: AuthGatewayBootOptions): AuthGatewayServe
 						return withCors(json(404, { error: `No route: DELETE ${pathname}` }), req);
 					}
 					return withCors(handleRouteDelete(registry, id), req);
+				}
+				if (req.method === "GET" && pathname === "/v1/health/routes") {
+					return withCors(handleHealthRoutes(registry), req);
+				}
+				if (req.method === "GET" && pathname.startsWith("/v1/executions/")) {
+					const id = pathname.slice("/v1/executions/".length);
+					if (id.length === 0) {
+						return withCors(json(404, { error: `No route: GET ${pathname}` }), req);
+					}
+					return withCors(handleExecutionTraces(traces, id), req);
 				}
 
 				// Route-table miss: no format module to defer to, so we emit a

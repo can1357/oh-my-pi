@@ -213,4 +213,169 @@ describe("RouteRegistry", () => {
 		expect(registry.get("missing")).toBeUndefined();
 		expect(registry.resolve("gpt-5")?.id).toBe("gpt-5");
 	});
+
+	it("flattens balance children in visit order for rr and weighted", () => {
+		const registry = new RouteRegistry(() => undefined);
+		registry.register({
+			id: "rr",
+			root: {
+				type: "balance",
+				strategy: "rr",
+				children: [
+					{ type: "target", model: "a" },
+					{ type: "target", model: "b" },
+				],
+			},
+		});
+		registry.register({
+			id: "weighted",
+			root: {
+				type: "balance",
+				strategy: "weighted",
+				children: [
+					{ type: "target", model: "c" },
+					{ type: "target", model: "d" },
+				],
+			},
+		});
+		expect(registry.resolve("rr")?.targets).toEqual(["a", "b"]);
+		expect(registry.resolve("weighted")?.targets).toEqual(["c", "d"]);
+		expect(registry.resolve("rr")?.root).toEqual({
+			type: "balance",
+			strategy: "rr",
+			children: [
+				{ type: "target", model: "a" },
+				{ type: "target", model: "b" },
+			],
+		});
+	});
+
+	it("flattens all conditional children at compile time", () => {
+		const registry = new RouteRegistry(() => undefined);
+		registry.register({
+			id: "vision",
+			root: {
+				type: "conditional",
+				when: { vision: true },
+				children: [
+					{ type: "target", model: "vision-model" },
+					{ type: "target", model: "text-model" },
+				],
+			},
+		});
+		expect(registry.resolve("vision")?.targets).toEqual(["vision-model", "text-model"]);
+	});
+
+	it("treats domain as compile-time grouping", () => {
+		const registry = new RouteRegistry(() => undefined);
+		registry.register({
+			id: "coding",
+			root: {
+				type: "domain",
+				name: "coding",
+				children: [
+					{ type: "target", model: "a" },
+					{ type: "target", model: "b" },
+				],
+			},
+		});
+		expect(registry.resolve("coding")?.targets).toEqual(["a", "b"]);
+		expect(registry.resolve("coding")?.root).toEqual({
+			type: "domain",
+			name: "coding",
+			children: [
+				{ type: "target", model: "a" },
+				{ type: "target", model: "b" },
+			],
+		});
+	});
+
+	it("rejects a cycle through a balance node", () => {
+		const registry = new RouteRegistry(() => undefined);
+		expect(() =>
+			registry.register({
+				id: "cyclic-balance",
+				root: {
+					type: "balance",
+					strategy: "rr",
+					children: [
+						{ type: "target", model: "a" },
+						{ type: "target", model: "a" },
+					],
+				},
+			}),
+		).toThrow(/cycle/i);
+		expect(registry.generation).toBe(1);
+		expect(registry.resolve("cyclic-balance")).toBeUndefined();
+	});
+
+	it("rejects an unknown route-ref (negative)", () => {
+		const registry = new RouteRegistry(() => undefined);
+		expect(() =>
+			registry.register({
+				id: "alias",
+				root: { type: "route-ref", route: "missing" },
+			}),
+		).toThrow(/Unresolved route-ref/);
+		expect(registry.generation).toBe(1);
+		expect(registry.get("alias")).toBeUndefined();
+	});
+
+	it("inlines a route-ref against an already-registered id", () => {
+		const registry = new RouteRegistry(() => undefined);
+		registry.register({ id: "base", root: { type: "target", model: "a" } });
+		registry.register({ id: "alias", root: { type: "route-ref", route: "base" } });
+		const alias = registry.get("alias");
+		expect(alias?.targets).toEqual(["a"]);
+		expect(alias?.root).toEqual({ type: "target", model: "a" });
+	});
+
+	it("replaceAll compiles every definition then swaps once", () => {
+		const registry = new RouteRegistry(() => undefined);
+		registry.replaceAll([
+			{ id: "one", root: { type: "target", model: "a" } },
+			{
+				id: "two",
+				root: {
+					type: "balance",
+					strategy: "weighted",
+					children: [
+						{ type: "target", model: "b" },
+						{ type: "target", model: "c" },
+					],
+				},
+			},
+		]);
+		expect(registry.generation).toBe(2);
+		expect(registry.get("one")?.generation).toBe(2);
+		expect(registry.get("two")?.generation).toBe(2);
+		expect(registry.get("two")?.targets).toEqual(["b", "c"]);
+		expect(registry.list().map(route => route.id)).toEqual(["one", "two"]);
+	});
+
+	it("replaceAll rolls back when a later definition is invalid (negative)", () => {
+		const registry = new RouteRegistry(() => undefined);
+		registry.register({ id: "keep", root: { type: "target", model: "a" } });
+		const generation = registry.generation;
+		expect(() =>
+			registry.replaceAll([
+				{ id: "ok", root: { type: "target", model: "b" } },
+				{
+					id: "bad",
+					root: {
+						type: "fallback",
+						on: ["credential_quota"],
+						children: [
+							{ type: "target", model: "x" },
+							{ type: "target", model: "x" },
+						],
+					},
+				},
+			]),
+		).toThrow(/cycle/i);
+		expect(registry.generation).toBe(generation);
+		expect(registry.get("keep")?.targets).toEqual(["a"]);
+		expect(registry.get("ok")).toBeUndefined();
+		expect(registry.get("bad")).toBeUndefined();
+	});
 });
