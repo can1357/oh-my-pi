@@ -9,8 +9,19 @@
  * in either process.
  */
 
-import { defaultLocalModelInitializer, type StandardEmbeddingModel } from "@oh-my-pi/pi-mnemopi/core";
+import {
+	defaultLocalModelInitializer,
+	embeddingBackend,
+	ggmlLocalModelInitializer,
+	type LocalModelInitializer,
+	type StandardEmbeddingModel,
+} from "@oh-my-pi/pi-mnemopi/core";
 import type { MnemopiEmbedModelId, MnemopiEmbedTransport, MnemopiEmbedWorkerInbound } from "./embed-protocol";
+
+/** Local embedding backend: ONNX fastembed (default) or ggml (llama.cpp GPU). */
+function selectedInitializer(): LocalModelInitializer {
+	return embeddingBackend() === "ggml" ? ggmlLocalModelInitializer : defaultLocalModelInitializer;
+}
 
 interface LoadedModel {
 	model: MnemopiEmbedModelId;
@@ -24,14 +35,14 @@ let loaded: Promise<LoadedModel> | null = null;
 let loadedKey = "";
 
 async function loadModel(model: MnemopiEmbedModelId, cacheDir: string | undefined): Promise<LoadedModel> {
-	// Route through mnemopi's shared initializer so the worker inherits BOTH
-	// cache heals (sidecar re-fetch AND corrupt-model quarantine/retry) —
-	// fastembed/onnxruntime still load only in this child address space, the
-	// initializer calls loadFastembed() itself.
+	// Route through the configured initializer so the worker inherits BOTH
+	// mnemopi's cache heals for fastembed (sidecar re-fetch AND corrupt-model
+	// quarantine/retry) and the ggml (llama.cpp) GPU path when selected. Both
+	// native runtimes stay inside this child address space.
 	// Cast: `model` arrives as a string from the parent (resolved by
 	// mnemopi's `fastembedModelName`); the parent only ever passes pre-vetted
 	// fast-* identifiers.
-	const instance = await defaultLocalModelInitializer({
+	const instance = await selectedInitializer()({
 		model: model as StandardEmbeddingModel,
 		cacheDir,
 		showDownloadProgress: false,
