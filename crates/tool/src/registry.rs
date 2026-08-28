@@ -2254,13 +2254,19 @@ impl Registry {
 				precedence: entry.claims.precedence,
 			});
 		}
-		if self
-			.retired
-			.contains_key(&ToolIdentity { name: name.clone(), rev: rev.clone() })
+		// `projection_tool` decodes a durable call by resolving the identity
+		// through `versions`, then `retired`, then `host_tools.history`. A live
+		// native `(name, rev)` equal to any retained decoder would resolve first
+		// and silently shadow it, mis-decoding a historical transcript call.
+		// Reject a collision against every retained-decoder map, not only the
+		// native ones.
+		let identity = ToolIdentity { name: name.clone(), rev: rev.clone() };
+		if self.retired.contains_key(&identity)
 			|| self
 				.versions
 				.get(&name)
 				.is_some_and(|versions| versions.contains_key(&rev))
+			|| self.host_tools.read().history.contains_key(&identity)
 		{
 			return Err(RegistryError::Duplicate(name, rev));
 		}
@@ -3852,6 +3858,64 @@ mod tests {
 			.projection_tool(&ToolIdentity { name: sf!("guarded"), rev: core_rev })
 			.expect("active core entry is projectable");
 		assert_eq!(active.spec().projection_code, [2; 32]);
+	}
+
+	#[test]
+	fn evicted_host_identity_stays_unique_against_native_registration() {
+		let mut registry = Registry::new();
+		let executor: Arc<dyn HostToolExecutor> = Arc::new(HostExecutor);
+		registry
+			.replace_host_tools(
+				sf!("rpc/client"),
+				1,
+				vec![HostToolSpec {
+					name:        sf!("shadowed"),
+					description: sf!("shadowed host tool"),
+					parameters:  serde_json::json!({"type": "object"}),
+				}],
+				executor,
+			)
+			.expect("host roster installs");
+		let host_identity = ToolIdentity {
+			name: sf!("shadowed"),
+			rev:  Rev { family: sf!("host/rpc/client/1"), n: 1 },
+		};
+
+		// Reserving the name evicts the host tool into `history`, where a
+		// durable call recorded under it must keep decoding.
+		registry.protect_core_claims(["shadowed"]);
+		let retained = registry
+			.projection_tool(&host_identity)
+			.expect("evicted host identity remains projectable");
+		assert_eq!(retained.spec().description, "shadowed host tool");
+
+		// A later native claim must not occupy the retained host identity, or
+		// `projection_tool` would resolve the native decoder for a call the
+		// host implementation recorded.
+		let err = registry
+			.register(
+				LiftTool {
+					spec: ToolSpec {
+						name:            sf!("shadowed"),
+						rev:             host_identity.rev.clone(),
+						description:     sf!("native impostor"),
+						schema:          Bytes::from_static(b"{}"),
+						constraint:      Constraint::None,
+						effects:         Effects::empty(),
+						projection_code: [9; 32],
+					},
+				},
+				Presentation::Slot,
+				Claims { precedence: Precedence::CORE, claimant: sf!("omp/core"), replaces: None },
+			)
+			.expect_err("native registration cannot claim a retained host identity");
+		assert!(
+			matches!(&err, RegistryError::Duplicate(name, rev) if name == "shadowed" && *rev == host_identity.rev)
+		);
+		let still_host = registry
+			.projection_tool(&host_identity)
+			.expect("retained host identity survives the rejected native claim");
+		assert_eq!(still_host.spec().description, "shadowed host tool");
 	}
 
 	#[test]
