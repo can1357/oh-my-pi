@@ -1,5 +1,4 @@
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
-import { settings } from "../config/settings";
 import type { AgentSession } from "../session/agent-session";
 import type { SessionOAuthAccountList } from "../session/agent-session-types";
 import {
@@ -147,6 +146,8 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		subcommands: [
 			{ name: "edit", description: "Open todos in $EDITOR (Markdown round-trip)" },
 			{ name: "copy", description: "Copy todos as Markdown to clipboard" },
+			{ name: "expand", description: "Show every phase and task in the HUD" },
+			{ name: "collapse", description: "Restore the bounded HUD preview" },
 			{ name: "export", description: "Write todos as Markdown to a file (default: TODO.md)", usage: "[<path>]" },
 			{ name: "import", description: "Replace todos from a Markdown file (default: TODO.md)", usage: "[<path>]" },
 			{
@@ -460,15 +461,22 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		},
 	},
 	{
+		name: "git",
+		icon: "branch",
+		description: "Open the git UI (split diff viewer, staging, commit composer)",
+		inlineHint: "[revision]",
+		allowArgs: true,
+		handleTui: (command, runtime) => {
+			runtime.ctx.showGitUi(command.args.trim() || undefined);
+			runtime.ctx.editor.setText("");
+		},
+	},
+	{
 		name: "branch",
 		icon: "branch",
 		description: "Create a new branch from a previous message",
 		handleTui: (_command, runtime) => {
-			if (settings.get("doubleEscapeAction") === "tree") {
-				runtime.ctx.showTreeSelector();
-			} else {
-				runtime.ctx.showUserMessageSelector();
-			}
+			runtime.ctx.showUserMessageSelector();
 			runtime.ctx.editor.setText("");
 		},
 	},

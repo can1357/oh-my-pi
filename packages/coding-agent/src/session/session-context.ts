@@ -7,6 +7,7 @@ import {
 	createCustomMessage,
 	INTERRUPTED_THINKING_MESSAGE_TYPE,
 	isCustomMessageContent,
+	isEmptyErrorTurn,
 	normalizeCustomMessagePayload,
 	PREWALK_PLAN_MESSAGE_TYPE,
 } from "./messages";
@@ -333,7 +334,11 @@ export function buildSessionContext(
 	const appendMessage = (entry: SessionEntry) => {
 		handleEntryResetTracking(entry);
 		if (entry.type === "message") {
-			if (!options?.transcript && entry.message.role === "assistant" && entry.message.retryRecovery) {
+			if (
+				!options?.transcript &&
+				entry.message.role === "assistant" &&
+				(entry.message.retryRecovery || isEmptyErrorTurn(entry.message))
+			) {
 				return;
 			}
 			pushMessage(entry.message);

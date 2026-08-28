@@ -39,6 +39,20 @@ describe("Editor component", () => {
 			editor.handleInput("\x1b[127;5u"); // kitty CSI-u ctrl+backspace
 			expect(editor.getText()).toBe("alfa beta ");
 		});
+
+		it("deletes the next word for Ghostty's physical Option+Forward-Delete wire", () => {
+			setKittyProtocolActive(true);
+			try {
+				const editor = new Editor(defaultEditorTheme);
+				editor.setText("foo bar baz");
+				editor.handleInput("\x01"); // Ctrl+A
+				for (let i = 0; i < 3; i++) editor.handleInput("\x1b[C"); // After "foo"
+				editor.handleInput("\x1b[3;11~"); // Ghostty Option+Forward-Delete
+				expect(editor.getText()).toBe("foo baz");
+			} finally {
+				setKittyProtocolActive(false);
+			}
+		});
 	});
 
 	describe("Submit/newline keybindings", () => {

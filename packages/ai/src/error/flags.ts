@@ -40,6 +40,8 @@ export const Flag = {
 	FastModeUnsupported: 0x2000_0000,
 	/** OAuth refresh failed definitively — the stored grant is dead, re-login required. */
 	OAuthExpiry: 0x4000_0000,
+	/** HTTP 413 byte/media rejection — token compaction cannot shrink bytes or media budgets (#9235). */
+	PayloadRejected: 0x8000_0000,
 } as const;
 
 export type Flag = (typeof Flag)[keyof typeof Flag];
@@ -57,6 +59,7 @@ const KIND_MASK =
 	Flag.AccountPolicy |
 	Flag.ContextOverflow |
 	Flag.AuthFailed |
+	Flag.PayloadRejected |
 	Flag.SilentAbort |
 	Flag.UserInterrupt |
 	Flag.Abort |
@@ -72,7 +75,7 @@ const RETRIABLE_KINDS =
 	Flag.ProviderFinishError |
 	Flag.EmptyResponse;
 
-const OVERFLOW_PATTERNS = [
+const CONTEXT_OVERFLOW_EVIDENCE_PATTERNS = [
 	/prompt is too long/i, // Anthropic
 	/input is too long for requested model/i, // Amazon Bedrock
 	/exceeds the context window/i, // OpenAI (Completions & Responses API)
@@ -80,7 +83,6 @@ const OVERFLOW_PATTERNS = [
 	/maximum prompt length is \d+/i, // xAI (Grok)
 	/reduce the length of the messages/i, // Groq
 	/maximum context length is \d+ tokens/i, // OpenRouter (all backends)
-	/exceeds the limit of \d+/i, // GitHub Copilot
 	/exceeds the available context size/i, // llama.cpp server
 	/requested tokens?.*exceed.*context (window|length|size)/i, // llama.cpp / OpenAI-compatible local servers
 	/context (window|length|size).*(exceeded|overflow|too small)/i, // Generic local server variants
@@ -92,16 +94,63 @@ const OVERFLOW_PATTERNS = [
 	/context[_ ]length[_ ]exceeded/i, // Generic fallback
 	/too many tokens/i, // Generic fallback
 	/token limit exceeded/i, // Generic fallback
-	/request_too_large/i, // Anthropic 413 (request body too large)
-	/request exceeds the maximum size/i, // Anthropic 413 variant
-	/payload too large/i, // Generic HTTP 413 variant
-	/entity too large/i, // Generic HTTP 413 variant
-	/\b413\b.*\b(request|payload|entity)\b.*\btoo large\b/i, // "413 Request Entity Too Large" variants
+	/request_too_large[^\n]*\btokens?\b/i,
+	/\btokens?\b[^\n]*request_too_large/i,
 	/model_context_window_exceeded/i, // z.ai non-standard finish_reason surfaced as error text
 	/prompt filled the context window/i, // Ollama OpenAI-compatible empty length completion
-];
+	/exceeds the limit of \d+ tokens?\b/i,
+	/chat history exceeds the \d+-message limit/i, // Provider message-count cap
+] as const;
+// Numeric limit pattern — also matches media budgets, so must never veto a payload flag (#9235).
+const GENERIC_LIMIT_OVERFLOW_PATTERN = /exceeds the limit of \d+/i;
+const OVERFLOW_PATTERNS = [...CONTEXT_OVERFLOW_EVIDENCE_PATTERNS, GENERIC_LIMIT_OVERFLOW_PATTERN];
+
+/** Token-context evidence only — excludes GENERIC_LIMIT_OVERFLOW_PATTERN which media budgets also match (#9235). */
+function hasTokenContextOverflowEvidence(text: string): boolean {
+	return CONTEXT_OVERFLOW_EVIDENCE_PATTERNS.some(p => p.test(text));
+}
+
+/** Checks every cause-chain link; a wrapper whose nested 413 names the token budget stays overflow-only (#9235). */
+function hasCauseTokenContextOverflowEvidence(error: unknown): boolean {
+	const seen = new Set<object>();
+	let link: unknown = error;
+	while (link !== undefined && link !== null) {
+		if (typeof link !== "object") {
+			if (typeof link === "string" && hasTokenContextOverflowEvidence(link)) return true;
+			break;
+		}
+		if (seen.has(link)) break;
+		seen.add(link);
+		if ("message" in link) {
+			const message: unknown = link.message;
+			if (typeof message === "string" && hasTokenContextOverflowEvidence(message)) return true;
+		}
+		if ("cause" in link) {
+			link = link.cause;
+			continue;
+		}
+		break;
+	}
+	return false;
+}
 
 const OVERFLOW_NO_BODY_PATTERN = /\b4(00|13)\s*(status code)?\s*\(no body\)/i;
+// Bare `413 (no body)` deliberately dual-flagged; maintenance arbitrates against local headroom (#9235).
+const PAYLOAD_REJECTION_PATTERNS = [
+	/\b413\s*(?:status code\s*)?\(no body\)/i,
+	/\b413\b[^.\n]{0,120}\b(?:request|payload|entity|body)\b[^.\n]{0,60}\b(?:exceed|too large|limit)/i,
+	/request_too_large/i,
+	/(?:payload|entity) too large/i,
+	/request exceeds the maximum (?:size|number of bytes)/i,
+] as const;
+
+function matchesPayloadRejectionText(text: string): boolean {
+	if (!PAYLOAD_REJECTION_PATTERNS.some(p => p.test(text))) return false;
+	// Token-context evidence vetoes; only token wording counts — generic numeric limits also match media budgets.
+	if (hasTokenContextOverflowEvidence(text)) return false;
+	return true;
+}
+
 const TIMEOUT_PATTERN = /\b(?:operation\s+)?timed?\s*out\b|\btimeout\b|\bstream stall\b/i;
 const TRANSIENT_ENVELOPE_PATTERN = /anthropic stream envelope error:/i;
 const TRANSIENT_ENVELOPE_BEFORE_START_PATTERN = /before message_start/i;
@@ -118,6 +167,12 @@ const ACCOUNT_POLICY_PATTERN = /\bcyber_policy\b|trusted access for cyber/i;
 const CODEX_CHATGPT_ACCOUNT_MODEL_POLICY_PATTERN =
 	/\bThe ['"]([^'"\r\n]+)['"] model is not supported when using Codex with a ChatGPT account\./i;
 const CODEX_CHATGPT_ACCOUNT_MODEL_MAX_LENGTH = 256;
+const CURSOR_PLAN_POLICY_MARKER_PATTERN = /\bERROR_RATE_LIMITED_CHANGEABLE\b/i;
+const CURSOR_PLAN_POLICY_PATTERN = /\bNamed models unavailable\b|\bModel unavailable on\b|\bFree plans can only use\b/i;
+
+function isCursorPlanPolicyText(text: string): boolean {
+	return CURSOR_PLAN_POLICY_MARKER_PATTERN.test(text) && CURSOR_PLAN_POLICY_PATTERN.test(text);
+}
 
 function normalizeCodexChatGPTAccountPolicyModel(modelId: string | undefined): string | undefined {
 	if (typeof modelId !== "string") return undefined;
@@ -249,6 +304,7 @@ const ERROR_KIND_LABELS: readonly [Flag, string][] = [
 	[Flag.ContentBlocked, "content-blocked"],
 	[Flag.AccountPolicy, "account-policy"],
 	[Flag.ContextOverflow, "context-overflow"],
+	[Flag.PayloadRejected, "payload-rejected"],
 	[Flag.AuthFailed, "auth-failed"],
 	[Flag.SilentAbort, "silent-abort"],
 	[Flag.UserInterrupt, "user-interrupt"],
@@ -275,6 +331,7 @@ export function is(id: number | undefined, flag: Flag): boolean {
 
 export function retriable(id: number | undefined, opts?: { replayUnsafe?: boolean }): boolean {
 	if (is(id, Flag.ContentBlocked)) return false;
+	if (is(id, Flag.PayloadRejected)) return false;
 	if (opts?.replayUnsafe) return false;
 	if (is(id, Flag.MalformedFunctionCall)) return true;
 	return ((id ?? 0) & RETRIABLE_KINDS) !== 0;
@@ -386,6 +443,7 @@ function matchesOverflowText(text: string): boolean {
 function classifyText(
 	errorMessage: string | undefined,
 	errorStatus: number | undefined,
+	priorTokenOverflowEvidence = false,
 	api?: Api,
 	provider?: string,
 	modelId?: string,
@@ -393,13 +451,15 @@ function classifyText(
 	let kinds = 0;
 	if (errorMessage) {
 		if (matchesOverflowText(errorMessage)) kinds |= Flag.ContextOverflow;
+		if (matchesPayloadRejectionText(errorMessage)) kinds |= Flag.PayloadRejected;
 		if (isMalformedFunctionCallText(errorMessage)) kinds |= Flag.MalformedFunctionCall;
 		if (isProviderFinishErrorText(errorMessage)) kinds |= Flag.ProviderFinishError;
 		if (EMPTY_RESPONSE_PATTERN.test(errorMessage)) kinds |= Flag.EmptyResponse | Flag.Transient;
 		if (isContentBlockedText(errorMessage)) kinds |= Flag.ContentBlocked;
 		if (
 			ACCOUNT_POLICY_PATTERN.test(errorMessage) ||
-			isCodexChatGPTAccountPolicyText(errorMessage, provider, modelId)
+			isCodexChatGPTAccountPolicyText(errorMessage, provider, modelId) ||
+			(provider === "cursor" && isCursorPlanPolicyText(errorMessage))
 		) {
 			kinds |= Flag.AccountPolicy | Flag.ContentBlocked;
 		}
@@ -450,6 +510,15 @@ function classifyText(
 		if (matchesStrictToolsRejection(cleanMessage, statusClean)) kinds |= Flag.Grammar;
 		if (matchesFastModeUnsupported(cleanMessage, statusClean)) kinds |= Flag.FastModeUnsupported;
 	}
+	// Status-only 413: infer PayloadRejected unless prior classification carries token-context evidence (#9235).
+	const statusEvidence = errorStatus ?? (errorMessage ? status({ message: errorMessage }) : undefined);
+	if (
+		statusEvidence === 413 &&
+		!priorTokenOverflowEvidence &&
+		!(errorMessage && hasTokenContextOverflowEvidence(errorMessage))
+	) {
+		kinds |= Flag.PayloadRejected;
+	}
 	if (kinds !== 0) return create(kinds);
 	const fallbackStatus = errorStatus ?? (errorMessage ? status({ message: errorMessage }) : undefined);
 	if (fallbackStatus === 401 || fallbackStatus === 403) return create(Flag.AuthFailed);
@@ -459,6 +528,7 @@ function classifyText(
 export function classify(error: unknown, api?: Api): number {
 	let kinds = 0;
 	const seen = new Set<object>();
+	const causeTokenEvidence = hasCauseTokenContextOverflowEvidence(error);
 	let link: unknown = error;
 	while (link !== undefined && link !== null) {
 		if (typeof link === "object") {
@@ -532,7 +602,7 @@ export function classify(error: unknown, api?: Api): number {
 			linkMessage = (link as { message: string }).message;
 		}
 
-		const textId = classifyText(linkMessage, status(link), api);
+		const textId = classifyText(linkMessage, status(link), causeTokenEvidence, api);
 		kinds |= textId & KIND_MASK;
 
 		link = typeof link === "object" && "cause" in link ? (link as { cause: unknown }).cause : undefined;
@@ -584,6 +654,22 @@ export function isCodexChatGPTAccountPolicyError(
 	const deniedIdentity = normalizeCodexChatGPTAccountPolicyModel(deniedModel);
 	const requestedIdentity = normalizeCodexChatGPTAccountPolicyModel(modelId);
 	return provider === "openai-codex" && deniedIdentity !== undefined && deniedIdentity === requestedIdentity;
+}
+
+/** Whether Cursor returned a non-retryable plan entitlement denial for this account. */
+export function isCursorPlanAccountPolicyError(error: unknown, provider: string, depth = 0): boolean {
+	if (provider !== "cursor" || depth > 6) return false;
+	if (typeof error === "string") return isCursorPlanPolicyText(error);
+	if (!error || typeof error !== "object") return false;
+	if (
+		"errorMessage" in error &&
+		typeof error.errorMessage === "string" &&
+		isCursorPlanPolicyText(error.errorMessage)
+	) {
+		return true;
+	}
+	if ("message" in error && typeof error.message === "string" && isCursorPlanPolicyText(error.message)) return true;
+	return "cause" in error && isCursorPlanAccountPolicyError(error.cause, provider, depth + 1);
 }
 
 /**
@@ -648,10 +734,28 @@ export function classifyMessage(message: {
 }): number {
 	const existingId = message.errorId;
 	const currentStatus = message.errorStatus ?? statusFromId(existingId);
+	const existingOverflowOnly =
+		existingId !== undefined && is(existingId, Flag.ContextOverflow) && !is(existingId, Flag.PayloadRejected);
 	const classificationMessage = message.errorClassificationMessage ?? message.errorMessage;
-	const textId = classifyText(classificationMessage, currentStatus, message.api, message.provider, message.model);
+	const textId = classifyText(
+		classificationMessage,
+		currentStatus,
+		existingOverflowOnly,
+		message.api,
+		message.provider,
+		message.model,
+	);
 
 	let kinds = ((existingId ?? 0) | textId) & KIND_MASK;
+	// Two-phase finalization: drop stale status-inferred payload bit when final text proves token overflow (#9235).
+	if (
+		currentStatus === 413 &&
+		classificationMessage &&
+		hasTokenContextOverflowEvidence(classificationMessage) &&
+		!(textId & Flag.PayloadRejected)
+	) {
+		kinds &= ~Flag.PayloadRejected;
+	}
 	if (classificationMessage && LLAMA_CPP_TOOL_CALL_PARSE_PATTERN.test(classificationMessage)) {
 		// Deterministic local-model tool-call JSON parse failure: HTTP 500 is misleading
 		// because the same prompt reproduces the same malformed output, so the agent-level
@@ -669,13 +773,41 @@ export function attach<E extends object>(error: E, id: number): E {
 	return error;
 }
 
+/** Provider-reported usage proves context-window excess — authoritative, compaction-owned (#9235). */
+export function isUsageBackedContextOverflow(message: AssistantMessage, contextWindow?: number): boolean {
+	if (!contextWindow) return false;
+	const inputTokens = message.usage.input + message.usage.cacheRead + message.usage.cacheWrite;
+	return inputTokens > contextWindow;
+}
+
 export function isContextOverflow(message: AssistantMessage, contextWindow?: number): boolean {
 	if (is(message.errorId, Flag.ContextOverflow)) return true;
-	if (contextWindow) {
-		const inputTokens = message.usage.input + message.usage.cacheRead + message.usage.cacheWrite;
-		if (inputTokens > contextWindow) return true;
-	}
+	if (isUsageBackedContextOverflow(message, contextWindow)) return true;
 	return message.stopReason === "error" && !!message.errorMessage && matchesOverflowText(message.errorMessage);
+}
+
+/** HTTP 413 byte/media rejection (#9235); may co-occur with {@link isContextOverflow} for bare `413 (no body)`.
+ *  Callers with local headroom should skip compaction when this returns true. */
+export function isPayloadRejection(message: AssistantMessage): boolean {
+	if (is(message.errorId, Flag.PayloadRejected)) return true;
+	const { errorMessage } = message;
+	if (message.stopReason !== "error" || !errorMessage) return false;
+	return matchesPayloadRejectionText(errorMessage);
+}
+
+/** Dual-flagged 413 (PayloadRejected + ContextOverflow) with no provider-reported token excess (#9235).
+ *  The co-flag means a different provider's larger byte/media budget may accept the request.
+ *  Usage-backed overflows are authoritative window excesses and never ambiguous. */
+export function isTextAmbiguousContextOverflow(
+	errorId: number,
+	message: AssistantMessage | undefined,
+	contextWindow?: number,
+): boolean {
+	const overflowFlagged =
+		is(errorId, Flag.ContextOverflow) || (message !== undefined && isContextOverflow(message, contextWindow));
+	if (!overflowFlagged) return false;
+	if (!is(errorId, Flag.PayloadRejected)) return false;
+	return !(message !== undefined && isUsageBackedContextOverflow(message, contextWindow));
 }
 
 export function stringify(id: number | undefined): string {

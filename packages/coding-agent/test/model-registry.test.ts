@@ -6,6 +6,8 @@ import * as path from "node:path";
 import { Effort, type FetchImpl, type Model, type OpenAICompat, type ThinkingConfig } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
+import { fingerprintStaticModels } from "@oh-my-pi/pi-catalog/model-manager";
+import { getBundledModels } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
@@ -1664,7 +1666,7 @@ describe("ModelRegistry", () => {
 		});
 	});
 	describe("extended context", () => {
-		test("off caps premium long-context models at the standard-pricing threshold", async () => {
+		test("off caps billable premium models without shrinking subscription estimates", async () => {
 			await Settings.init({ inMemory: true, overrides: { extendedContext: false } });
 			const registry = new ModelRegistry(authStorage, modelsJsonPath);
 
@@ -1673,6 +1675,8 @@ describe("ModelRegistry", () => {
 			expect(registry.find("openai-codex", "gpt-5.6-sol")?.contextWindow).toBe(272_000);
 			// Standard-priced 1M models (no long-context tier) keep their window.
 			expect(registry.find("anthropic", "claude-opus-4-8")?.contextWindow).toBe(1_000_000);
+			// SuperGrok carries public xAI tiers for stats estimates, not billing.
+			expect(registry.find("xai-oauth", "grok-4.20-0309-reasoning")?.contextWindow).toBe(2_000_000);
 		});
 
 		test("reapplyModelPolicies re-clamps and restores premium windows on toggle", async () => {
@@ -1848,6 +1852,44 @@ describe("ModelRegistry", () => {
 				expect(model.guardrailTrace).toBeUndefined();
 			}
 		});
+
+		test("guardrail provider config applies to a synthesized inference-profile ARN model", () => {
+			const profileArn = "arn:aws:bedrock:us-east-2:123456789012:application-inference-profile/company-opus-48";
+			const model = guardrailOverride.find("amazon-bedrock", profileArn);
+			expect(model).toBeDefined();
+			expect(model?.id).toBe(profileArn);
+			expect(model?.api).toBe("bedrock-converse-stream");
+			expect(model?.guardrailIdentifier).toBe("arn:aws:bedrock:eu-west-2:123456789012:guardrail/abcd1234");
+			expect(model?.guardrailVersion).toBe("1");
+			expect(model?.guardrailTrace).toBe("enabled");
+		});
+
+		test("guardrail fields are absent on a synthesized ARN model without override", () => {
+			const profileArn = "arn:aws:bedrock:us-east-2:123456789012:application-inference-profile/company-opus-48";
+			const model = sharedBuiltin.find("amazon-bedrock", profileArn);
+			expect(model).toBeDefined();
+			expect(model?.guardrailIdentifier).toBeUndefined();
+			expect(model?.guardrailVersion).toBeUndefined();
+			expect(model?.guardrailTrace).toBeUndefined();
+		});
+
+		test("transport and header overrides apply to a synthesized ARN model", () => {
+			const transportOverride = readonlyRegistry({
+				providers: {
+					"amazon-bedrock": {
+						transport: "pi-native",
+						headers: { "X-Custom-Header": "custom-value" },
+						guardrailIdentifier: "arn:aws:bedrock:eu-west-2:123456789012:guardrail/abcd1234",
+					},
+				},
+			});
+			const profileArn = "arn:aws:bedrock:us-east-2:123456789012:application-inference-profile/company-opus-48";
+			const model = transportOverride.find("amazon-bedrock", profileArn);
+			expect(model).toBeDefined();
+			expect(model?.transport).toBe("pi-native");
+			expect(model?.headers).toEqual({ "X-Custom-Header": "custom-value" });
+			expect(model?.guardrailIdentifier).toBe("arn:aws:bedrock:eu-west-2:123456789012:guardrail/abcd1234");
+		});
 	});
 
 	describe("provider auth: oauth", () => {
@@ -1969,6 +2011,8 @@ describe("ModelRegistry", () => {
 		let vertexNonAuthoritative: ModelRegistry;
 		let vertexStale: ModelRegistry;
 		let litellmStaleNamespaceCache: ModelRegistry;
+		let sharedCatalogCache: ModelRegistry;
+		let staticOnlySharedCatalogCache: ModelRegistry;
 		let litellmCurrentNamespaceCache: ModelRegistry;
 		let openaiModelsListStaleNamespaceCache: ModelRegistry;
 		const vertexProjectModel = () =>
@@ -1985,6 +2029,65 @@ describe("ModelRegistry", () => {
 				maxTokens: 8_888,
 			});
 		beforeAll(() => {
+			sharedCatalogCache = readonlyRegistry(
+				{ providers: {} },
+				{
+					seedCache: dbPath => {
+						const bundledModels = getBundledModels("zai");
+						const bundledModel = bundledModels[0];
+						if (!bundledModel) throw new Error("ZAI bundled catalog is empty");
+						writeModelCache(
+							"zai",
+							Date.now(),
+							[
+								{
+									...bundledModel,
+									name: "Stale cached name",
+									contextWindow: bundledModel.contextWindow === 1 ? 2 : 1,
+									maxTokens: bundledModel.maxTokens === 1 ? 2 : 1,
+								},
+								...bundledModels.slice(1),
+								buildModel({
+									id: "glm-5.3-flash",
+									name: "GLM-5.3-Flash",
+									api: "anthropic-messages",
+									provider: "zai",
+									baseUrl: "https://api.z.ai/api/anthropic",
+									reasoning: true,
+									input: ["text", "image"],
+									cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+									contextWindow: 1_000_000,
+									maxTokens: 131_072,
+								}),
+							],
+							true,
+							"merge-v3:stale-bundle",
+							dbPath,
+						);
+					},
+				},
+			);
+			staticOnlySharedCatalogCache = readonlyRegistry(
+				{ providers: {} },
+				{
+					seedCache: dbPath => {
+						for (const [providerId, dynamicModelsAuthoritative] of [
+							["zai", false],
+							["anthropic", true],
+						] as const) {
+							const bundledModels = getBundledModels(providerId);
+							writeModelCache(
+								providerId,
+								Date.now(),
+								bundledModels,
+								false,
+								fingerprintStaticModels(bundledModels, dynamicModelsAuthoritative),
+								dbPath,
+							);
+						}
+					},
+				},
+			);
 			legacySentinels = readonlyRegistry(
 				{
 					providers: {
@@ -2065,7 +2168,7 @@ describe("ModelRegistry", () => {
 								}),
 							],
 							true,
-							"",
+							fingerprintStaticModels(getBundledModels("ollama-cloud")),
 							dbPath,
 						);
 					},
@@ -2243,11 +2346,12 @@ describe("ModelRegistry", () => {
 					maxTokens: 16_384,
 				});
 			litellmStaleNamespaceCache = readonlyRegistry(litellmProxyConfig(), {
-				// Rows cached before per-model Responses routing must be orphaned
-				// instead of keeping OpenAI-backed groups on Chat Completions.
+				// Rows cached under the retired namespace whose `compatConfig`
+				// retained a colliding bundled model's provider-specific transport
+				// (issue #9938) must be orphaned instead of served.
 				seedCache: dbPath =>
 					writeModelCache(
-						"litellm-proxy:litellm-rich-v2",
+						"litellm-proxy:litellm-rich-v3",
 						Date.now(),
 						[litellmCachedModel("MiniMax-M3 (3x usage)")],
 						true,
@@ -2258,7 +2362,7 @@ describe("ModelRegistry", () => {
 			litellmCurrentNamespaceCache = readonlyRegistry(litellmProxyConfig(), {
 				seedCache: dbPath =>
 					writeModelCache(
-						"litellm-proxy:litellm-rich-v3",
+						"litellm-proxy:litellm-rich-v4",
 						Date.now(),
 						[litellmCachedModel("MiniMax-M3")],
 						true,
@@ -2344,13 +2448,13 @@ describe("ModelRegistry", () => {
 			});
 		});
 
-		test("ignores litellm discovery rows cached under the retired rich-v2 namespace", () => {
-			// Warm rich-v2 rows carry the pre-change provider-wide API and must not load.
+		test("ignores litellm discovery rows cached under the retired rich-v3 namespace", () => {
+			// Warm rich-v3 rows carry the leaked provider-specific compat and must not load.
 			expect(litellmStaleNamespaceCache.find("litellm-proxy", "minimax/minimax-m3")).toBeUndefined();
 			expect(getModelsForProvider(litellmStaleNamespaceCache, "litellm-proxy")).toHaveLength(0);
 		});
 
-		test("loads litellm discovery rows cached under the rich-v3 namespace", () => {
+		test("loads litellm discovery rows cached under the rich-v4 namespace", () => {
 			const model = litellmCurrentNamespaceCache.find("litellm-proxy", "minimax/minimax-m3");
 			expect(model?.name).toBe("MiniMax-M3");
 			expect(model?.provider).toBe("litellm-proxy");
@@ -2413,6 +2517,44 @@ describe("ModelRegistry", () => {
 			const vertexModels = getModelsForProvider(vertexStale, "google-vertex");
 			expect(vertexModels.some(model => model.id === "zai-org/glm-4.7-maas")).toBe(true);
 			expect(vertexModels.some(model => model.id.startsWith("gemini-"))).toBe(true);
+		});
+
+		test("hydrates only shared-catalog additions from cache", () => {
+			const bundledModel = getBundledModels("zai")[0];
+			if (!bundledModel) throw new Error("ZAI bundled catalog is empty");
+			expect(sharedCatalogCache.find("zai", bundledModel.id)).toMatchObject({
+				name: bundledModel.name,
+				contextWindow: bundledModel.contextWindow,
+				maxTokens: bundledModel.maxTokens,
+			});
+			expect(sharedCatalogCache.find("zai", "glm-5.3-flash")).toMatchObject({
+				contextWindow: 1_000_000,
+				maxTokens: 131_072,
+			});
+			expect(sharedCatalogCache.getProviderDiscoveryState("zai")).toMatchObject({
+				provider: "zai",
+				status: "cached",
+				optional: false,
+				stale: false,
+				source: "cache",
+			});
+		});
+
+		test("reports static-only shared-catalog startup caches as bundled", () => {
+			for (const providerId of ["zai", "anthropic"] as const) {
+				const bundledModel = getBundledModels(providerId)[0];
+				if (!bundledModel) throw new Error(`${providerId} bundled catalog is empty`);
+				expect(staticOnlySharedCatalogCache.find(providerId, bundledModel.id)).toBeDefined();
+				const discovery = staticOnlySharedCatalogCache.getProviderDiscoveryState(providerId);
+				expect(discovery).toMatchObject({
+					provider: providerId,
+					status: "unavailable",
+					optional: false,
+					stale: true,
+					source: "bundled",
+				});
+				expect(discovery?.fetchedAt).toBeUndefined();
+			}
 		});
 	});
 

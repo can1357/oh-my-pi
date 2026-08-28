@@ -54,12 +54,16 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 		case "ollama":
 			return resolveOllamaModelCacheProviderId(providerId, options.baseUrl);
 		case "cursor":
-			// v3: max-mode Claude/Gemini rows cached before the 1M context-window
-			// discovery fix carry a stale 200k window and must be refetched.
-			return "cursor:max-mode-v3";
+			// v4: Grok 4.5/4.6 rows cached before the effort-less default-tier fix
+			// carry `requestModelId: *-low`, which the Start plan refuses; refetch
+			// so the collapsed default is re-pointed to `-medium` (issue #9478).
+			return "cursor:default-effort-v4";
 		case "litellm": {
 			const baseUrl = options.baseUrl ?? getDefaultModelDiscoveryBaseUrl(providerId)!;
-			return `litellm:rich-v6:${Bun.hash(baseUrl).toString(36)}`;
+			// rich-v8 invalidates rows whose `compatConfig` retained a colliding
+			// bundled model's provider-specific transport (e.g. Fireworks
+			// `wireModelIdMode`) before that leak was fixed (issue #9938).
+			return `litellm:rich-v8:${Bun.hash(baseUrl).toString(36)}`;
 		}
 		case "opencode-go":
 		case "opencode-zen": {

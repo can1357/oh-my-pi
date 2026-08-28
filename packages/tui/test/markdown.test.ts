@@ -4,7 +4,6 @@ import {
 	autolinkSchemeScanIndex,
 	clearRenderCache,
 	Markdown,
-	mathStartIndex,
 	renderInlineMarkdown,
 	urlTokenPossible,
 } from "@oh-my-pi/pi-tui/components/markdown";
@@ -12,6 +11,7 @@ import { setTerminalTextSizing, TERMINAL } from "@oh-my-pi/pi-tui/terminal-capab
 import { type Component, TUI } from "@oh-my-pi/pi-tui/tui";
 import { visibleWidth } from "@oh-my-pi/pi-tui/utils";
 import { Chalk } from "@oh-my-pi/pi-utils/chalk";
+import { mathStartIndex } from "@oh-my-pi/pi-utils/math-delimiters";
 import { defaultMarkdownTheme } from "./test-themes.js";
 import { VirtualTerminal } from "./virtual-terminal.js";
 
@@ -1893,6 +1893,23 @@ describe("Module-level LRU render cache", () => {
 		const plain = stripVTControlCharacters(markdown.render(80).join("\n"));
 		expect(plain).toContain("plain text line");
 		expect(plain).not.toContain("S<");
+		expect(plain).not.toContain("F<");
+	});
+
+	it("keeps an open fence plain when the highlight stream factory throws", () => {
+		clearRenderCache();
+		const themeWithStream = {
+			...defaultMarkdownTheme,
+			highlightCode: (code: string, _lang?: string): string[] => [`F<${code}>`],
+			createHighlightStream: (_lang?: string) => {
+				throw new TypeError("undefined is not a constructor");
+			},
+		};
+
+		const markdown = new Markdown("```lua\nlocal x = 1\nmore", 0, 0, themeWithStream);
+		markdown.transientRenderCache = true;
+		const plain = stripVTControlCharacters(markdown.render(80).join("\n"));
+		expect(plain).toContain("local x = 1");
 		expect(plain).not.toContain("F<");
 	});
 });

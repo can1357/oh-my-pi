@@ -2,6 +2,67 @@
 
 ## [Unreleased]
 
+## [18.0.8] - 2026-08-27
+
+### Added
+
+- `ProcessTerminal` accepts a `conpty` option to force ConPTY-hosted behavior on or off, keeping terminal tests hermetic on WSL where live env detection would otherwise flip kitty-keyboard flags and write chunking ([#9887](https://github.com/can1357/oh-my-pi/issues/9887)).
+
+### Fixed
+
+- Fixed pending-work animations repeatedly composing expensive frames without applying their full render cost to CPU backpressure.
+- Fixed unfinished live viewport rows entering tmux pane history and duplicating streamed output ([#9780](https://github.com/can1357/oh-my-pi/issues/9780)).
+
+## [18.0.7] - 2026-08-26
+
+### Breaking Changes
+
+- Removed the `inlineMathSpanEnd` and `mathStartIndex` exports; the math delimiter grammar now lives in `@oh-my-pi/pi-utils/math-delimiters`.
+
+### Fixed
+
+- Math spans now end at the first unescaped delimiter, so a TeX row break no longer closes a span early: `\(a \\) b\)` renders as one equation, and an escaped `\$` no longer ends `$$…$$`.
+- Fixed image previews displaying as garbled characters in Paseo terminals.
+- Fixed terminal resizing from duplicating committed history in native scrollback.
+- Fixed autocomplete suggestions for bare-name skills such as `/batch` when no command matches the prefix more strongly.
+
+## [18.0.6] - 2026-08-26
+
+### Added
+
+- Added `Markdown.getLastRenderStableText()` to expose the stable prefix of streamed Markdown text for append-only transcript publication.
+
+## [18.0.5] - 2026-08-25
+
+### Breaking Changes
+
+- Renamed the public `TerminalFrameProvider.resetHistory` method to `beginHistoryReplay`.
+
+### Added
+
+- Loader messages can now be provided as a function, allowing dynamic labels such as live countdowns to update on each spinner tick while preserving the existing behavior for static strings.
+
+### Changed
+
+- Improved history replay and terminal output handling so replayed content is rendered efficiently and complete replay results are written together.
+
+### Fixed
+
+- Fixed graceful shutdown so finalized output is correctly retired before handing control back to the shell.
+- Fixed terminal scrollback corruption during shutdown, tmux pane zoom and resize, and destructive screen resets, preventing duplicated frames, lost history, and stale transcript re-streaming.
+- Fixed streaming Markdown rendering at chunk boundaries to preserve CommonMark emphasis behavior for Unicode text and correctly recognize GFM tables as they are completed.
+
+## [18.0.4] - 2026-08-24
+
+### Changed
+
+- Significantly improved streaming Markdown rendering performance by caching unchanged rows, resuming boundary walks, and inspecting only text deltas for guard scans and OSC 8 normalization.
+
+### Fixed
+
+- Fixed TUI aborting when syntax highlighting fails during Markdown rendering by falling back to unhighlighted text.
+- Fixed Korean IME cursor drift in Orca by properly matching two-cell Hangul Compatibility Jamo rendering.
+
 ## [18.0.3] - 2026-08-23
 
 ### Fixed

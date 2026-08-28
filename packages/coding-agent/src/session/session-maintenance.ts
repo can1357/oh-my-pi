@@ -135,6 +135,26 @@ function compactionDeadEndWarning(remedies: string): string {
 	);
 }
 
+/** Honest-skip notice for a payload-shaped HTTP 413 where compaction was correctly withheld (#9235). */
+function payloadRejectionNotice(storedTokens: number, contextWindow: number): string {
+	const remedies =
+		"Token compaction cannot shrink bytes or image budgets; reduce or remove archived image frames (e.g. switch compaction.methodOrder away from snapcompact) or raise the server/proxy body limit.";
+	if (contextWindow <= 0) {
+		return `The provider rejected the request size or media budget (HTTP 413), and this model has no known context window to compare against — this is NOT a token-context problem. ${remedies}`;
+	}
+	const headroom = Math.max(0, Math.floor(contextWindow - storedTokens));
+	return `The provider rejected the request size or media budget (HTTP 413), but ~${headroom.toLocaleString("en-US")} tokens of headroom remain locally — this is NOT a token-context problem. ${remedies}`;
+}
+
+/** Dead-end notice when provider-reported usage proves context overflow but no recovery exists (#9235). */
+function usageOverflowDeadEndNotice(reportedInputTokens: number, contextWindow: number): string {
+	const windowLabel = contextWindow > 0 ? contextWindow.toLocaleString("en-US") : "unknown";
+	return (
+		`The provider reports ~${reportedInputTokens.toLocaleString("en-US")} input tokens against a ${windowLabel}-token context window — this IS a token-context problem, but automatic compaction is unavailable to shrink it. ` +
+		"Enable a compaction method (compaction.enabled with a configured methodOrder), reduce the conversation's token usage, or switch to a larger-context model."
+	);
+}
+
 /** Creates one provider-scoped compaction lifecycle descriptor. */
 export function createCodexCompactionContext(options: {
 	trigger: CodexCompactionContext["trigger"];
@@ -179,6 +199,10 @@ const PRUNE_IDLE_FLUSH_MS = 90 * 60_000;
  * most-recent kept turn already exceeds the threshold (the snapcompact thrash).
  */
 const COMPACTION_RECOVERY_BAND = 0.8;
+
+/** Payload-shaped 413s share text patterns with overflow; trust the payload classification when local
+ *  occupancy stays under this ceiling (≥10% headroom) and reported usage stays within the window (#9235). */
+const PAYLOAD_REJECTION_OCCUPANCY_CEILING = 0.9;
 
 /** A speculation-produced compaction result, ready to commit at threshold. */
 interface ArmedSpeculation {
@@ -368,6 +392,11 @@ export class SessionMaintenance {
 		const run = this.#speculation;
 		if (!run) return "idle";
 		return run.armed ? "armed" : "running";
+	}
+
+	/** Completion of the current speculative pass, used to resume maintenance skipped during its handoff. */
+	get speculationCompletion(): Promise<void> | undefined {
+		return this.#speculation?.promise;
 	}
 
 	/** Abort and discard any in-flight or armed speculative compaction. */
@@ -1747,13 +1776,33 @@ export class SessionMaintenance {
 		const compactionEntry = getLatestCompactionEntry(this.#host.sessionManager.getBranch());
 		const errorIsFromBeforeCompaction =
 			compactionEntry !== null && assistantMessage.timestamp < new Date(compactionEntry.timestamp).getTime();
-		if (sameModel && !errorIsFromBeforeCompaction && AIError.isContextOverflow(assistantMessage, contextWindow)) {
-			// Clear the failed turn from active context so the retry (or the next
-			// user prompt) does not replay it. The persisted branch entry stays
-			// for now: when no recovery path runs, the user-facing transcript
-			// MUST keep the only assistant message explaining why the turn
-			// stopped. The branch entry is dropped further down, but only on the
-			// paths that actually schedule a retry/compaction.
+		const payloadRejection =
+			sameModel && !errorIsFromBeforeCompaction && AIError.isPayloadRejection(assistantMessage);
+		const ambiguousPayloadRejection =
+			payloadRejection && AIError.is(assistantMessage.errorId, AIError.Flag.ContextOverflow);
+		const storedTokens = payloadRejection && contextWindow > 0 ? this.#estimateStoredContextTokens() : 0;
+		const reportedInputTokens =
+			assistantMessage.usage.input + assistantMessage.usage.cacheRead + assistantMessage.usage.cacheWrite;
+		const trustedPayloadRejection =
+			payloadRejection &&
+			contextWindow > 0 &&
+			reportedInputTokens <= contextWindow &&
+			storedTokens < contextWindow * PAYLOAD_REJECTION_OCCUPANCY_CEILING;
+		if ((payloadRejection && !ambiguousPayloadRejection && contextWindow <= 0) || trustedPayloadRejection) {
+			this.#host.removeAssistantMessageFromActiveContext(assistantMessage);
+			this.#host.emitNotice("warning", payloadRejectionNotice(storedTokens, contextWindow), "compaction");
+			logger.debug("Payload-shaped 413 withheld from token compaction", {
+				provider: assistantMessage.provider,
+				model: assistantMessage.model,
+				message: assistantMessage.errorMessage,
+				storedTokens,
+				contextWindow,
+			});
+			return COMPACTION_CHECK_BLOCK_AUTOMATIC_CONTINUATION;
+		}
+		const overflowEvidence =
+			sameModel && !errorIsFromBeforeCompaction && AIError.isContextOverflow(assistantMessage, contextWindow);
+		if (overflowEvidence || (payloadRejection && !trustedPayloadRejection)) {
 			this.#host.removeAssistantMessageFromActiveContext(assistantMessage);
 
 			// Try context promotion first - switch to a larger model and retry without compacting
@@ -1771,6 +1820,24 @@ export class SessionMaintenance {
 				return await this.#host.runRecoveryCompactionWithRollback("overflow", assistantMessage, allowDefer, {
 					autoContinue,
 				});
+			}
+			if (payloadRejection) {
+				const usageBackedOverflow = AIError.isUsageBackedContextOverflow(assistantMessage, contextWindow);
+				this.#host.emitNotice(
+					"warning",
+					usageBackedOverflow
+						? usageOverflowDeadEndNotice(reportedInputTokens, contextWindow)
+						: payloadRejectionNotice(storedTokens, contextWindow),
+					"compaction",
+				);
+				logger.debug("Payload-shaped 413 has no runnable recovery; blocking automatic continuation", {
+					provider: assistantMessage.provider,
+					model: assistantMessage.model,
+					message: assistantMessage.errorMessage,
+					storedTokens,
+					contextWindow,
+				});
+				return COMPACTION_CHECK_BLOCK_AUTOMATIC_CONTINUATION;
 			}
 			return COMPACTION_CHECK_NONE;
 		}
@@ -2299,6 +2366,11 @@ export class SessionMaintenance {
 	#snapcompactFramePayloadBytes(result: snapcompact.CompactionResult): number {
 		const archive = snapcompact.getPreservedArchive(result.preserveData);
 		return archive ? snapcompact.frameDataBytes(archive.frames) : 0;
+	}
+
+	#deadEndRemedies(defaultRemedies: string, implicatedFrames: number): string {
+		if (implicatedFrames <= 0) return defaultRemedies;
+		return `reduce archived image frames (${implicatedFrames} held) — providers often bill vision media separately from tokens; ${defaultRemedies}`;
 	}
 
 	/**
@@ -3020,8 +3092,14 @@ export class SessionMaintenance {
 				}
 				if (!preparation) {
 					const noProgressDeadEnd = reason !== "idle" && !frameRescueCreatedHeadroom;
+					const implicatedFrames =
+						frameRescueResult && !frameRescueCreatedHeadroom
+							? (snapcompact.getPreservedArchive(frameRescueResult.preserveData)?.frames.length ?? 0)
+							: 0;
 					const deadEndWarning = noProgressDeadEnd
-						? compactionDeadEndWarning("shrink it (e.g. clear large tool output)")
+						? compactionDeadEndWarning(
+								this.#deadEndRemedies("shrink it (e.g. clear large tool output)", implicatedFrames),
+							)
 						: undefined;
 					// A rescue that appended a rebuilt archive without creating
 					// headroom must carry the dead-end badge on the entry the

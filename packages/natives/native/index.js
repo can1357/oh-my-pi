@@ -20,6 +20,7 @@ const nativeBindings = loadNative();
 export const AudioCapture = nativeBindings.AudioCapture;
 export const AudioPlayback = nativeBindings.AudioPlayback;
 export const DesktopSession = adaptDesktopSession(nativeBindings.DesktopSession);
+export const DiffStream = nativeBindings.DiffStream;
 export const FileLock = nativeBindings.FileLock;
 export const HighlightStream = nativeBindings.HighlightStream;
 export const LiveWebRtcPeer = nativeBindings.LiveWebRtcPeer;
@@ -32,7 +33,7 @@ export const TtyWriter = nativeBindings.TtyWriter;
 
 // functions
 export const __ompInstallTokioRuntime = nativeBindings.__ompInstallTokioRuntime;
-export const __piNativesV18_0_3 = nativeBindings.__piNativesV18_0_3;
+export const __piNativesV18_0_8 = nativeBindings.__piNativesV18_0_8;
 export const astEdit = nativeBindings.astEdit;
 export const astGrep = nativeBindings.astGrep;
 export const astMatch = nativeBindings.astMatch;
@@ -79,6 +80,7 @@ export const nodeChainAt = nativeBindings.nodeChainAt;
 export const parseKey = nativeBindings.parseKey;
 export const parseKittySequence = nativeBindings.parseKittySequence;
 export const pdfToMarkdown = nativeBindings.pdfToMarkdown;
+export const rasterizeSvg = nativeBindings.rasterizeSvg;
 export const readImageFromClipboard = nativeBindings.readImageFromClipboard;
 export const renderSnapcompactPng = nativeBindings.renderSnapcompactPng;
 export const search = nativeBindings.search;
@@ -91,6 +93,7 @@ export const supportsLanguage = nativeBindings.supportsLanguage;
 export const truncateToWidth = nativeBindings.truncateToWidth;
 export const vectorIndexTopK = nativeBindings.vectorIndexTopK;
 export const visibleWidth = nativeBindings.visibleWidth;
+export const warmHighlighter = nativeBindings.warmHighlighter;
 export const wrapTextWithAnsi = nativeBindings.wrapTextWithAnsi;
 
 // string/numeric enums (napi-rs string_enum produces TS-only const enum)
@@ -101,6 +104,10 @@ export const AstMatchStrictness = {
 	Relaxed: "relaxed",
 	Signature: "signature",
 	Template: "template",
+};
+export const DiffSide = {
+	Old: "Old",
+	New: "New",
 };
 export const Ellipsis = {
 	Unicode: 0,

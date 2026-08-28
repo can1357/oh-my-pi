@@ -30,10 +30,12 @@ import {
 	isCatalogDescriptor,
 } from "../src/provider-models/descriptor-types";
 import { PROVIDER_DESCRIPTORS } from "../src/provider-models/descriptors";
+import { filterModelsDevCatalogRows } from "../src/provider-models/models-dev-policies";
 import {
 	AIAND_STATIC_MODELS,
 	ALIBABA_TOKEN_PLAN_STATIC_MODELS,
 	ANTHROPIC_CURATED_FALLBACK_MODELS,
+	applyXaiCatalogPricing,
 	BEDROCK_MANTLE_STATIC_MODELS,
 	buildFireworksFastSeed,
 	buildXaiOAuthStaticSeed,
@@ -51,6 +53,7 @@ import {
 	projectOpenAIProReasoningAliases,
 	SAKANA_FUGU_STATIC_MODELS,
 	stripFireworksDeepSeekThinkingToggle,
+	YOLO_AUTO_STATIC_MODELS,
 } from "../src/provider-models/openai-compat";
 import { type OpenAICodexAccount, openaiCodexModelManagerOptions } from "../src/provider-models/special";
 import type { Api, Model, ModelSpec } from "../src/types";
@@ -62,8 +65,6 @@ import {
 	applyGeneratedModelPolicies,
 	applyOllamaCloudOutputCap,
 	CLOUDFLARE_FALLBACK_MODEL,
-	dropBedrockMantleOpenAIModels,
-	dropUnsupportedBedrockGeoIds,
 	hasBillableCost,
 	linkOpenAIPromotionTargets,
 } from "./generated-policies";
@@ -338,50 +339,6 @@ function applyFireworksDeepSeekReasoningShape(models: readonly ModelSpec[]): Mod
 	});
 }
 
-/**
- * Z.AI's `/v1/models` advertises context-tier variants with a `[1m]` suffix
- * (e.g. `glm-5.2[1m]`). That suffix is a Claude Code-side convention — Z.AI's
- * own docs instruct users to append `[1m]` to enable 1M context *inside Claude
- * Code* — but the inference endpoint rejects the bracketed id outright with
- * `[1211][Unknown Model, please check the model code.]`. The base id
- * (`glm-5.2`) already carries the full 1M context window (pinned by
- * {@link applyGeneratedModelPolicy}), so drop the unusable bracketed siblings
- * from the bundled catalog rather than ship a model that 400s on first use.
- */
-function dropUnusableZaiContextTierIds(models: readonly ModelSpec[]): ModelSpec[] {
-	return models.filter(model => !(model.provider === "zai" && model.id.endsWith("[1m]")));
-}
-
-/**
- * Fireworks discovery and prior snapshots can surface internal control-plane
- * resource ids (`accounts/fireworks/{models,routers}/...`) alongside the public
- * request ids (`kimi-k2.7-code`, `deepseek-v4-flash`, ...). The wire ids are an
- * implementation detail the request path reconstructs from the public id, so
- * drop them from the bundle outright.
- */
-function dropFireworksWireIds(models: readonly ModelSpec[]): ModelSpec[] {
-	return models.filter(
-		model =>
-			!(
-				(model.provider === "fireworks" || model.provider === "firepass") &&
-				model.id.startsWith("accounts/fireworks/")
-			),
-	);
-}
-
-/**
- * Xiaomi's `/v1/models` can advertise ASR/TTS ids alongside chat/completions
- * models. Runtime discovery filters them, but previous bundled snapshots can
- * still resurrect those stale ids via the fallback merge. Drop them here so the
- * committed catalog matches the runtime surface.
- */
-function dropXiaomiAudioOnlyIds(models: readonly ModelSpec[]): ModelSpec[] {
-	return models.filter(model => {
-		const isXiaomiProvider = model.provider === "xiaomi" || model.provider.startsWith("xiaomi-token-plan-");
-		return !isXiaomiProvider || (!model.id.includes("-tts") && !model.id.includes("-asr"));
-	});
-}
-
 function normalizeAntigravityEndpoint(models: readonly ModelSpec[]): ModelSpec[] {
 	return models.map(model => {
 		if (model.provider === "google-antigravity" && model.baseUrl) {
@@ -593,6 +550,12 @@ async function generateModels() {
 	if (!authoritativeCatalogProviders.has("aiand")) {
 		allModels.push(...AIAND_STATIC_MODELS);
 	}
+	// Seed Yolo-Auto's documented catalog so the provider is usable when
+	// generation has no YOLO_AUTO_API_KEY. A live `/v1/models` snapshot is
+	// authoritative and replaces the seed.
+	if (!authoritativeCatalogProviders.has("yolo-auto")) {
+		allModels.push(...YOLO_AUTO_STATIC_MODELS);
+	}
 	// Seed the GMI Cloud default model so a fresh install (and a regen without a
 	// `GMI_API_KEY`) still resolves the descriptor's `defaultModel` synchronously
 	// at boot. If live `/v1/models` discovery succeeds, it is authoritative.
@@ -664,6 +627,9 @@ async function generateModels() {
 			if (
 				!fetchedKeys.has(`${model.provider}/${model.id}`) &&
 				!DISCOVERY_ONLY_PROVIDERS.has(model.provider) &&
+				// Yolo-Auto's documented static seed is the complete fallback
+				// catalog; never resurrect retired ids from the previous snapshot.
+				model.provider !== "yolo-auto" &&
 				!RETIRED_PROVIDERS.has(model.provider) &&
 				!authoritativeCatalogProviders.has(model.provider) &&
 				!authoritativeSpecialDiscoveryProviders.has(model.provider) &&
@@ -685,15 +651,12 @@ async function generateModels() {
 	}
 	allModels = applyUmansPricingFallback(allModels, modelsDevModels);
 	allModels = applyPremiumMultiplierOverrides(allModels);
+	allModels = applyXaiCatalogPricing(allModels);
 	allModels = applyCodexPricingFallback(allModels);
 	allModels = applyAntigravityPricingFallback(allModels);
 	allModels = applyKimiMaxTokensCap(allModels);
 	allModels = applyFireworksDeepSeekReasoningShape(allModels);
-	allModels = dropFireworksWireIds(allModels);
-	allModels = dropUnusableZaiContextTierIds(allModels);
-	allModels = dropXiaomiAudioOnlyIds(allModels);
-	allModels = dropUnsupportedBedrockGeoIds(allModels);
-	allModels = dropBedrockMantleOpenAIModels(allModels);
+	allModels = filterModelsDevCatalogRows(allModels);
 	allModels = normalizeAntigravityEndpoint(allModels);
 	// Normalize display names: gateway author prefixes ("OpenAI: …"), alias
 	// markers ("(latest)"), provider attribution ("(Antigravity)"), and

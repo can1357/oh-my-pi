@@ -1,12 +1,19 @@
-import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, spyOn, vi } from "bun:test";
 import { stripVTControlCharacters } from "node:util";
+import { generateRoomKey, importRoomKey } from "@oh-my-pi/pi-coding-agent/collab/crypto";
+import { CollabGuestLink } from "@oh-my-pi/pi-coding-agent/collab/guest";
+import { COLLAB_PROTO, formatCollabLink } from "@oh-my-pi/pi-coding-agent/collab/protocol";
+import { CollabSocket } from "@oh-my-pi/pi-coding-agent/collab/relay-client";
 import {
 	SPINNER_RENDER_INTERVAL_MS,
 	stopSharedSpinnerTicker,
 	ToolExecutionComponent,
 } from "@oh-my-pi/pi-coding-agent/modes/components/tool-execution";
+import { TranscriptContainer } from "@oh-my-pi/pi-coding-agent/modes/components/transcript-container";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import type { TUI } from "@oh-my-pi/pi-tui";
+import { installInMemoryRelay, uninstallInMemoryRelay } from "../../collab/helpers/in-memory-relay";
 
 // Contract under test: live tool previews that render a pending/running status
 // must keep the spinner glyph tied to the shared tool-frame ticker. This covers
@@ -321,6 +328,123 @@ describe("ToolExecutionComponent live preview spinners", () => {
 			expect(folded[0]).toContain("Hub · send → Main");
 		} finally {
 			component.stopAnimation();
+		}
+	});
+
+	// Regression (PR #9377 follow-up, codex review): a live block torn down
+	// through `TranscriptContainer.disposeChildren()` — the real teardown the
+	// collab guest's welcome/resync path (`guest.ts#finalizeSnapshot`) uses to
+	// replace the chat transcript — must unregister from the shared ticker.
+	// Calling `component.dispose()` directly does not exercise that path: the
+	// bug was `chatContainer.clear()` detaching children without disposing
+	// them, so a live block survived the resync with its ticker registration
+	// intact even though its instance was orphaned.
+	it("unregisters a live tool block from the shared ticker via the guest resync teardown", async () => {
+		installInMemoryRelay();
+		const writeSpy = spyOn(Bun, "write").mockResolvedValue(0);
+		try {
+			vi.useFakeTimers();
+
+			const chatContainer = new TranscriptContainer();
+			const liveBlock = new ToolExecutionComponent(
+				"eval",
+				{ language: "py", code: "import time\ntime.sleep(10)" },
+				{},
+				undefined,
+				{ requestRender: vi.fn(), requestComponentRender: vi.fn() } as unknown as TUI,
+				process.cwd(),
+			);
+			chatContainer.addChild(liveBlock);
+			expect(vi.getTimerCount()).toBeGreaterThan(0);
+
+			const ctx = {
+				settings: { get: () => "" },
+				sessionManager: { getSessionFile: () => null, getSessionName: () => "local", getCwd: () => "/local" },
+				session: {
+					messages: [],
+					switchSession: () => Promise.resolve(),
+					newSession: () => Promise.resolve(),
+					agent: {
+						state: { model: undefined },
+						setModel: () => {},
+						setThinkingLevel: () => {},
+						setDisableReasoning: () => {},
+					},
+				},
+				statusContainer: { clear: () => {}, disposeChildren: () => {} },
+				pendingMessagesContainer: { clear: () => {} },
+				compactionQueuedMessages: [],
+				streamingComponent: undefined,
+				streamingMessage: undefined,
+				transcriptMessageComponents: new WeakMap(),
+				pendingTools: new Map(),
+				loadingAnimation: undefined,
+				statusLine: {
+					setCollabStatus: () => {},
+					invalidate: () => {},
+					resetActiveTime: () => {},
+					markActivityStart: () => {},
+					markActivityEnd: () => {},
+				},
+				ui: { requestRender: () => {} },
+				chatContainer,
+				resetObserverRegistry: () => {},
+				renderInitialMessages: () => Promise.resolve(),
+				reloadTodos: () => Promise.resolve(),
+				showStatus: () => {},
+				showError: () => {},
+				updateEditorTopBorder: () => {},
+				updateEditorBorderColor: () => {},
+				syncRunningSubagentBadge: () => {},
+			} as unknown as InteractiveModeContext;
+
+			const roomId = "spinner-resync-room";
+			const roomKey = generateRoomKey();
+			const cryptoKey = await importRoomKey(roomKey);
+			const link = formatCollabLink("ws://localhost:8788", roomId, roomKey);
+			const hostSocket = new CollabSocket({
+				wsUrl: `ws://localhost:8788/r/${roomId}`,
+				role: "host",
+				key: cryptoKey,
+			});
+			const hostOpen = Promise.withResolvers<void>();
+			hostSocket.onOpen = () => hostOpen.resolve();
+			hostSocket.onFrame = frame => {
+				if (frame.t !== "hello") return;
+				hostSocket.send({
+					t: "welcome",
+					proto: COLLAB_PROTO,
+					header: { type: "session", id: "resync-session", timestamp: "2026-06-26T00:00:00Z", cwd: "/tmp" },
+					state: {
+						isStreaming: false,
+						queuedMessageCount: 0,
+						sessionName: "host session",
+						cwd: "/tmp",
+						participants: [{ name: "Host", role: "host" }],
+					},
+					agents: [],
+					entryCount: 0,
+				});
+			};
+			hostSocket.connect();
+			await hostOpen.promise;
+
+			const guest = new CollabGuestLink(ctx);
+			try {
+				// Drives the real welcome handshake into `#finalizeSnapshot`, which
+				// tears down `chatContainer` while `liveBlock` is still registered.
+				await guest.join(link);
+
+				expect(chatContainer.children).not.toContain(liveBlock);
+				expect(vi.getTimerCount()).toBe(0);
+			} finally {
+				hostSocket.close();
+				await guest.leave("test cleanup").catch(() => {});
+			}
+		} finally {
+			writeSpy.mockRestore();
+			uninstallInMemoryRelay();
+			stopSharedSpinnerTicker();
 		}
 	});
 });

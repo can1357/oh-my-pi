@@ -331,10 +331,19 @@ function buildSlashCommandCompletions(
 				let best: (AutocompleteItem & { score: number; usage: number }) | undefined;
 
 				const isSkillCommand = name.startsWith(SKILL_NAMESPACE);
+				// Skills are matched by their bare name as well as the full
+				// `skill:` name so a broken-out or mid-prompt skill ranks at
+				// prefix strength (`/batch` → `skill:batch`) instead of a weak
+				// full-name fuzzy hit.
 				const nameScore =
 					lowerPrefix.length === 0 && isSkillCommand
 						? 950
-						: scoreCommandTextMatch(lowerPrefix, name.toLowerCase());
+						: isSkillCommand
+							? Math.max(
+									scoreCommandTextMatch(lowerPrefix, name.toLowerCase()),
+									scoreCommandTextMatch(lowerPrefix, name.slice(SKILL_NAMESPACE.length).toLowerCase()),
+								)
+							: scoreCommandTextMatch(lowerPrefix, name.toLowerCase());
 				const lowerDesc = staticDesc.toLowerCase();
 				const descScore =
 					lowerDesc && fuzzyMatch(lowerPrefix, lowerDesc) ? fuzzyScore(lowerPrefix, lowerDesc) * 0.5 : 0;
@@ -392,22 +401,55 @@ function hasPromptTextBeforeSlash(
 export const SKILL_NAMESPACE = "skill:";
 
 /**
+ * Match tier used to compare a skill's bare name against non-skill command
+ * names when deciding whether the skill may break out of the collapsed
+ * `skill:` group: exact (1000) > prefix (900) > anything weaker (0). Fuzzy
+ * hits deliberately map to 0 — a fuzzy skill match is never strong enough to
+ * mix skills into the command popup.
+ */
+function skillBreakoutTier(lowerPrefix: string, lowerTarget: string): number {
+	if (lowerPrefix === lowerTarget) return 1000;
+	if (lowerTarget.startsWith(lowerPrefix)) return 900;
+	return 0;
+}
+
+/**
  * Collapse `skill:*` commands into a single `/skill:` namespace row while the
- * typed prefix has not committed to the namespace. Until the prefix starts
- * with `skill:`, individual skills never list — a lone group entry (shown only
- * while the prefix is still a prefix of `skill:`) keeps the `/` popup
- * readable. Accepting the group inserts `/skill:` without a trailing space so
- * the reopened popup expands to the individual skills.
+ * typed prefix has not committed to the namespace. A lone group entry (shown
+ * only while the prefix is still a prefix of `skill:`) keeps the `/` popup
+ * readable. A skill breaks out of the group only when its bare name matches
+ * the prefix at a strictly stronger tier than every non-skill command name
+ * and alias (`/batch` → `skill:batch` while no command prefix-matches
+ * `batch`); a tie keeps the popup command-only, and fuzzy-only skill hits
+ * never surface. Accepting the group inserts `/skill:` without a trailing
+ * space so the reopened popup expands to the individual skills.
  */
 function collapseSkillNamespace(commands: CommandEntry[], lowerPrefix: string): CommandEntry[] {
 	if (lowerPrefix.startsWith(SKILL_NAMESPACE)) return commands;
+	const approachesNamespace = SKILL_NAMESPACE.startsWith(lowerPrefix);
+	let commandTier = 0;
+	if (!approachesNamespace) {
+		for (const cmd of commands) {
+			const name = getCommandName(cmd);
+			if (!name || name.startsWith(SKILL_NAMESPACE)) continue;
+			commandTier = Math.max(commandTier, skillBreakoutTier(lowerPrefix, name.toLowerCase()));
+			for (const alias of getCommandAliases(cmd)) {
+				commandTier = Math.max(commandTier, skillBreakoutTier(lowerPrefix, alias.toLowerCase()));
+			}
+			if (commandTier === 1000) break;
+		}
+	}
 	let skillCount = 0;
 	let skillIcon: string | undefined;
 	const rest = commands.filter(cmd => {
-		if (!getCommandName(cmd)?.startsWith(SKILL_NAMESPACE)) return true;
+		const name = getCommandName(cmd);
+		if (!name?.startsWith(SKILL_NAMESPACE)) return true;
 		skillCount += 1;
 		skillIcon ??= cmd.icon;
-		return false;
+		return (
+			!approachesNamespace &&
+			skillBreakoutTier(lowerPrefix, name.slice(SKILL_NAMESPACE.length).toLowerCase()) > commandTier
+		);
 	});
 	if (skillCount === 0) return commands;
 	if (!SKILL_NAMESPACE.startsWith(lowerPrefix)) return rest;

@@ -85,7 +85,7 @@ function makeGuestContext(counts: number[]): InteractiveModeContext {
 			markActivityEnd: () => {},
 		},
 		ui: { requestRender: () => {} },
-		chatContainer: { clear: () => {} },
+		chatContainer: { clear: () => {}, disposeChildren: () => {} },
 		resetObserverRegistry: () => {},
 		renderInitialMessages: () => {},
 		reloadTodos: () => Promise.resolve(),

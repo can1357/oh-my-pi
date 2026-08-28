@@ -329,6 +329,14 @@ function getModelDefinedEfforts<TApi extends Api>(
 	spec: ModelSpec<TApi>,
 	compat: CompatOf<TApi>,
 ): readonly Effort[] | undefined {
+	if (
+		isOpenAICompatReasoningApi(spec.api) &&
+		isChatTemplateThinkingFormat(compat) &&
+		spec.thinking?.mode === "effort" &&
+		spec.thinking.efforts.length > 0
+	) {
+		return spec.thinking.efforts;
+	}
 	if (isGlm53ReasoningEffortModelId(spec.id)) {
 		// GLM-5.3+ exposes a uniform wire-exact low/high/max ladder on every
 		// host — unlike GLM-5.2, whose reasoning_effort dialect is
@@ -519,6 +527,9 @@ function isQwenTemplateReasoningEffortCompat(compat: CompatOf<Api>): boolean {
 		compat !== undefined && "qwenTemplateReasoningEffort" in compat && compat.qwenTemplateReasoningEffort === true
 	);
 }
+function isChatTemplateThinkingFormat(compat: CompatOf<Api>): boolean {
+	return compat !== undefined && "thinkingFormat" in compat && compat.thinkingFormat === "chat-template";
+}
 
 function inferDetectedEffortMap<TApi extends Api>(
 	spec: ModelSpec<TApi>,
@@ -559,15 +570,19 @@ function isSakanaFuguReasoningModel<TApi extends Api>(spec: ModelSpec<TApi>): bo
  * `opencode-zen`) reason through the wire-exact `low`/`high`/`max` ladder with
  * mandatory thinking: the gateway rejects `minimal`/`medium`/`xhigh`
  * (`[1210] ... please use low, high, or max`), the same dialect it already
- * serves for GLM-5.3 and Kimi K3. Other hosts proxying an `ox-alpha` SKU
- * (Kilo, NanoGPT, Venice, OpenRouter) expose their own vocabularies and are
- * left untouched. See issue #9349.
+ * serves for GLM-5.3 and Kimi K3. The SKU also ships under unrelated aliased
+ * ids (`opencode-zen/x-preview-f-free`), so the stencil display name is
+ * matched as well. Other hosts proxying an `ox-alpha` SKU (Kilo, NanoGPT,
+ * Venice, OpenRouter) expose their own vocabularies and are left untouched.
+ * See issue #9349.
  */
 function isOpenCodeGatewayOxAlphaModel<TApi extends Api>(spec: ModelSpec<TApi>): boolean {
-	return (
-		(spec.provider === "opencode-go" || spec.provider === "opencode-zen") &&
-		/(?:^|\/)ox-alpha(?:-|$)/i.test(bareModelId(spec.id))
-	);
+	if (spec.provider !== "opencode-go" && spec.provider !== "opencode-zen") return false;
+	if (/(?:^|\/)ox-alpha(?:-|$)/i.test(bareModelId(spec.id))) return true;
+	// Aliased gateway ids surface the same SKU under an unrelated id; the
+	// display name ("Ox Alpha …") is the stable cross-id signal. Anchored on
+	// both sides so "Box Alpha"/"Ox Alphabet" cannot false-positive.
+	return /\box[ _-]?alpha\b/i.test(spec.name ?? "");
 }
 
 function isDeepseekReasoningModel<TApi extends Api>(spec: ModelSpec<TApi>): boolean {
@@ -762,6 +777,14 @@ function inferThinkingControlMode<TApi extends Api>(
 					return "anthropic-budget-effort";
 				}
 			}
+			// Bedrock serves the GPT-5.x models through OpenAI's own request
+			// schema, which rejects Anthropic's budget block outright:
+			// `unknown_parameter: 'thinking'`. It takes `reasoning.effort`
+			// instead. gpt-oss parses as `unknown` (no `gpt-<digits>`), so it
+			// keeps the budget path it ships with today.
+			if (parsedModel.family === "openai") {
+				return "effort";
+			}
 			return "budget";
 
 		default:
@@ -922,4 +945,26 @@ export function minimumSupportedEffort<TApi extends Api>(model: ApiModel<TApi>):
 		if (efforts.includes(effort)) return effort;
 	}
 	return efforts[0];
+}
+
+/**
+ * Clamp target for effort-less requests on `thinking.requiresEffort` models:
+ * the effort whose wire route equals the model's default wire id
+ * (`requestModelId`), so a collapsed row clamps to the tier it already
+ * advertises as its default rather than the numerically lowest supported tier
+ * (e.g. Cursor Grok 4.5/4.6 default to `medium`, the only tier the Start plan
+ * serves). Falls back to {@link minimumSupportedEffort} when no route matches
+ * the default id — families whose default already is the minimum, or that
+ * expose no routing, are unaffected.
+ */
+export function defaultSupportedEffort<TApi extends Api>(model: ApiModel<TApi>): Effort | undefined {
+	const routing = model.thinking?.effortRouting;
+	const defaultWireId = model.requestModelId;
+	if (routing !== undefined && defaultWireId !== undefined) {
+		const efforts = model.thinking?.efforts;
+		for (const effort of THINKING_EFFORTS) {
+			if (efforts?.includes(effort) && routing[effort] === defaultWireId) return effort;
+		}
+	}
+	return minimumSupportedEffort(model);
 }

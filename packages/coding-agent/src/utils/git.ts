@@ -50,6 +50,13 @@ export interface StageHunksOptions {
 	readonly rawDiff?: string;
 	readonly signal?: AbortSignal;
 }
+
+/** Options for streaming `git show` bytes without buffering complete output. */
+export interface GitShowStreamOptions {
+	readonly format?: string;
+	readonly maxOutputBytes?: number;
+	readonly signal?: AbortSignal;
+}
 export interface HunkSelectionValidationError {
 	readonly path: string;
 	readonly message: string;
@@ -60,9 +67,13 @@ export interface DiffOptions {
 	readonly base?: string;
 	readonly binary?: boolean;
 	readonly cached?: boolean;
+	/** Unified context lines (`git diff --unified=<n>`). */
+	readonly context?: number;
 	readonly env?: Record<string, string | undefined>;
 	readonly files?: readonly string[];
 	readonly head?: string;
+	/** Per-stream capture ceiling for unusually large but intentional diffs. */
+	readonly maxOutputBytes?: number;
 	readonly nameOnly?: boolean;
 	readonly noIndex?: { left: string; right: string };
 	readonly numstat?: boolean;
@@ -88,10 +99,15 @@ export interface CommitAuthor {
 export interface CommitDetails {
 	readonly author: CommitAuthor;
 	readonly message: string;
+	/** Comma-free parent SHAs; empty for a root commit. */
+	readonly parents: readonly string[];
+	/** Full commit SHA. */
+	readonly sha: string;
 }
 
 export interface CommitOptions {
 	readonly allowEmpty?: boolean;
+	readonly amend?: boolean;
 	readonly author?: CommitAuthor;
 	readonly files?: readonly string[];
 	readonly signal?: AbortSignal;
@@ -583,6 +599,97 @@ async function runText(cwd: string, args: readonly string[], options: CommandOpt
 	return (await runChecked(cwd, args, options)).stdout;
 }
 
+/** Stream stdout chunks while preserving the normal git timeout/error contract. */
+async function* runByteStream(
+	cwd: string,
+	args: readonly string[],
+	options: CommandOptions = {},
+): AsyncGenerator<Uint8Array> {
+	ensureAvailable();
+	const commandArgs = withShortLivedGitConfig(options.readOnly ? withNoOptionalLocks(args) : [...args]);
+	let child: Subprocess;
+	try {
+		child = Bun.spawn(["git", ...commandArgs], {
+			cwd,
+			env: buildGitEnv(options.env),
+			signal: options.signal,
+			stdin: normalizeStdin(options.stdin),
+			stdout: "pipe",
+			stderr: "pipe",
+			windowsHide: true,
+		});
+	} catch (error) {
+		if (!isEnoent(error)) throw error;
+		const stderr = fs.existsSync(cwd) ? "git is not installed." : `working directory does not exist: ${cwd}`;
+		throw new GitCommandError(args, {
+			exitCode: GIT_SPAWN_ENOENT_EXIT_CODE,
+			stdout: "",
+			stderr,
+			truncated: false,
+		});
+	}
+	const stdout = child.stdout;
+	const stderr = child.stderr;
+	if (!(stdout instanceof ReadableStream) || !(stderr instanceof ReadableStream)) {
+		await terminateTimedOutChild(child);
+		throw new Error("Failed to stream git command output.");
+	}
+
+	const maxOutputBytes = resolveOutputLimit(options.maxOutputBytes);
+	const stderrPromise = readCappedText(stderr, maxOutputBytes);
+	const exitPromise = waitForExitWithTimeout(
+		child,
+		formatCommandLabel("git", commandArgs),
+		resolveTimeoutMs(options.timeoutMs),
+	);
+	const reader = stdout.getReader();
+	let bytes = 0;
+	let settled = false;
+	try {
+		while (true) {
+			const { done, value } = await reader.read();
+			if (done) break;
+			bytes += value.length;
+			if (bytes > maxOutputBytes) {
+				await terminateTimedOutChild(child);
+				settled = true;
+				const capturedError = await stderrPromise;
+				throw new GitOutputTruncatedError(args, {
+					exitCode: child.exitCode ?? GIT_COMMAND_TIMEOUT_EXIT_CODE,
+					stdout: "",
+					stderr: capturedError.text,
+					truncated: true,
+				});
+			}
+			yield value;
+		}
+
+		const exit = await exitPromise;
+		settled = true;
+		const capturedError = await stderrPromise;
+		if (exit.timedOut) {
+			throw new GitCommandError(args, {
+				exitCode: GIT_COMMAND_TIMEOUT_EXIT_CODE,
+				stdout: "",
+				stderr: exit.stderr,
+				truncated: false,
+			});
+		}
+		if (exit.exitCode !== 0) {
+			throw new GitCommandError(args, {
+				exitCode: exit.exitCode ?? GIT_COMMAND_TIMEOUT_EXIT_CODE,
+				stdout: "",
+				stderr: capturedError.text,
+				truncated: capturedError.truncated,
+			});
+		}
+	} finally {
+		reader.releaseLock();
+		if (!settled) await terminateTimedOutChild(child);
+		void stderrPromise.catch(() => undefined);
+	}
+}
+
 async function tryText(
 	cwd: string,
 	args: readonly string[],
@@ -659,6 +766,9 @@ function buildDiffArgs(options: DiffOptions): string[] {
 	const args = ["diff"];
 	if (options.binary) args.push("--binary");
 	if (options.cached) args.push("--cached");
+	if (options.context !== undefined && Number.isFinite(options.context) && options.context >= 0) {
+		args.push(`--unified=${Math.trunc(options.context)}`);
+	}
 	if (options.nameOnly) args.push("--name-only");
 	if (options.stat) args.push("--stat");
 	if (options.numstat) args.push("--numstat");
@@ -1286,9 +1396,21 @@ export const diff = Object.assign(
 	async function diff(cwd: string, options: DiffOptions = {}): Promise<string> {
 		const args = buildDiffArgs(options);
 		if (options.allowFailure) {
-			return (await git(cwd, args, { env: options.env, readOnly: true, signal: options.signal })).stdout;
+			return (
+				await git(cwd, args, {
+					env: options.env,
+					maxOutputBytes: options.maxOutputBytes,
+					readOnly: true,
+					signal: options.signal,
+				})
+			).stdout;
 		}
-		const result = await runChecked(cwd, args, { env: options.env, readOnly: true, signal: options.signal });
+		const result = await runChecked(cwd, args, {
+			env: options.env,
+			maxOutputBytes: options.maxOutputBytes,
+			readOnly: true,
+			signal: options.signal,
+		});
 		if (options.requireComplete && result.truncated) {
 			throw new GitOutputTruncatedError(args, result);
 		}
@@ -1442,6 +1564,7 @@ export async function commit(cwd: string, message: string, options: CommitOption
 		if (options.author.date) args.push(`--date=${options.author.date}`);
 	}
 	if (options.allowEmpty) args.push("--allow-empty");
+	if (options.amend) args.push("--amend");
 	if (options.files?.length) args.push("--", ...options.files);
 	return runChecked(cwd, args, { signal: options.signal, stdin: message });
 }
@@ -1732,17 +1855,22 @@ export async function detachGitDir(worktreeRoot: string, sourceCommonDir: string
 
 /** Run `git show` on a revision. */
 export const show = Object.assign(
-	async function show(
-		cwd: string,
-		revision: string,
-		options: { format?: string; signal?: AbortSignal } = {},
-	): Promise<string> {
+	async function show(cwd: string, revision: string, options: GitShowStreamOptions = {}): Promise<string> {
 		return runText(cwd, ["show", `--format=${options.format ?? ""}`, revision], {
+			maxOutputBytes: options.maxOutputBytes,
 			readOnly: true,
 			signal: options.signal,
 		});
 	},
 	{
+		/** Stream raw `git show` stdout chunks without constructing one JS string. */
+		stream(cwd: string, revision: string, options: GitShowStreamOptions = {}): AsyncGenerator<Uint8Array> {
+			return runByteStream(cwd, ["show", `--format=${options.format ?? ""}`, revision], {
+				maxOutputBytes: options.maxOutputBytes,
+				readOnly: true,
+				signal: options.signal,
+			});
+		},
 		/** Get the path prefix of the current directory relative to the repo root. */
 		async prefix(cwd: string, signal?: AbortSignal): Promise<string> {
 			return (await runText(cwd, ["rev-parse", "--show-prefix"], { readOnly: true, signal })).trim();
@@ -1750,16 +1878,36 @@ export const show = Object.assign(
 	},
 );
 
+/** Resolve Git LFS's local object directory without downloading content. */
+export const lfs = {
+	/**
+	 * Return the repository's Git LFS media directory. Uses `git lfs env` when
+	 * available so custom storage is honored, then falls back to `.git/lfs/objects`.
+	 */
+	async mediaDir(cwd: string, signal?: AbortSignal): Promise<string | null> {
+		const environment = await tryText(cwd, ["lfs", "env"], { readOnly: true, signal });
+		const configured = environment
+			?.split("\n")
+			.find(line => line.startsWith("LocalMediaDir="))
+			?.slice("LocalMediaDir=".length)
+			.trim();
+		if (configured) return path.resolve(cwd, configured);
+		const repository = await resolveRepository(cwd);
+		return repository ? path.join(repository.commonDir, "lfs", "objects") : null;
+	},
+};
 /** Read commit message and author metadata for replay/rewrite flows. */
 export async function commitDetails(cwd: string, revision: string, signal?: AbortSignal): Promise<CommitDetails> {
-	const raw = await runText(cwd, ["show", "-s", "--format=%an%x00%ae%x00%aI%x00%B", revision], {
+	const raw = await runText(cwd, ["show", "-s", "--format=%H%x00%P%x00%an%x00%ae%x00%aI%x00%B", revision], {
 		readOnly: true,
 		signal,
 	});
-	const [name = "", email = "", date = "", ...messageParts] = raw.split("\0");
+	const [sha = "", parentsRaw = "", name = "", email = "", date = "", ...messageParts] = raw.split("\0");
 	return {
 		author: { date, email, name },
 		message: messageParts.join("\0").replace(/\n$/, ""),
+		parents: parentsRaw.split(" ").filter(Boolean),
+		sha,
 	};
 }
 

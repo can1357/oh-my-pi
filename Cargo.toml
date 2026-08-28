@@ -16,7 +16,7 @@ members = [
 resolver = "3"
 
 [workspace.package]
-version = "18.0.3"
+version = "18.0.8"
 edition = "2024"
 license = "MIT"
 authors = ["Stencil Labs, Inc."]
@@ -327,6 +327,7 @@ image = { version = "0.25", default-features = false, features = [
    "gif",
    "webp",
 ] }
+resvg = "0.48"
 # Not used directly: activates zune-jpeg's non-default `log` feature so image's
 # JPEG decoder compiles — zune-jpeg 0.5.15's no-log stub macros are not
 # expression-safe and the crate fails to build without it.

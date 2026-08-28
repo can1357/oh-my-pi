@@ -907,6 +907,17 @@ export class ToolExecutionComponent extends Container {
 	}
 
 	/**
+	 * A live block torn down through the generic Container path (transcript
+	 * clear, session switch mid-run) must not leak its shared-ticker
+	 * registration: the dead component would keep the process-wide 80ms
+	 * interval alive and keep being repainted.
+	 */
+	override dispose(): void {
+		this.stopAnimation();
+		super.dispose();
+	}
+
+	/**
 	 * Stop spinner animation and cleanup resources.
 	 */
 	stopAnimation(): void {

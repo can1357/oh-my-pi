@@ -113,6 +113,7 @@ describe("ACP JSON-RPC transport", () => {
 			RequestError.requestCancelled().toErrorResponse(),
 			RequestError.authRequired().toErrorResponse(),
 			RequestError.resourceNotFound("file:///missing").toErrorResponse(),
+			RequestError.sessionBusy("Agent is already processing.", { reason: "session_busy" }).toErrorResponse(),
 		]).toEqual([
 			{ code: -32700, message: "Parse error" },
 			{ code: -32600, message: "Invalid request" },
@@ -122,6 +123,7 @@ describe("ACP JSON-RPC transport", () => {
 			{ code: -32800, message: "Request cancelled" },
 			{ code: -32000, message: "Authentication required" },
 			{ code: -32002, message: "Resource not found: file:///missing", data: { uri: "file:///missing" } },
+			{ code: -32003, message: "Agent is already processing.", data: { reason: "session_busy" } },
 		]);
 	});
 });

@@ -3,6 +3,7 @@ import type { Agent, AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { isRecord, logger, prompt, stringProperty, untilAborted } from "@oh-my-pi/pi-utils";
 import { reset as resetCapabilities } from "../capability";
+import type { EffectiveExtensionRoots } from "../capability/types";
 import type { ModelRegistry } from "../config/model-registry";
 import { formatModelString } from "../config/model-resolver";
 import type { Settings, SkillsSettings } from "../config/settings";
@@ -21,6 +22,7 @@ import { usesCodexTaskPrompt } from "../task/prompt-policy";
 import { isMCPToolName, normalizeToolNames } from "../tools/builtin-names";
 import { computerExposureMode } from "../tools/computer/exposure";
 import { wrapToolWithMetaNotice } from "../tools/output-meta";
+import { isFilesystemSourcePath } from "../tools/path-utils";
 import { supportsExternalThinking } from "../tools/think";
 import { ToolAbortError, ToolError } from "../tools/tool-errors";
 import { isMountableUnderXdev, listXdevTools, type XdevState, xdevDocsFor, xdevEntries } from "../tools/xdev";
@@ -43,6 +45,8 @@ export interface SessionToolsHost {
 	agent: Agent;
 	sessionManager: SessionManager;
 	settings: Settings;
+	/** Session-local extension roots (explicit + mode + configured) for post-startup reloads. */
+	effectiveExtensionRoots(): EffectiveExtensionRoots;
 	modelRegistry: ModelRegistry;
 	extensionRunner(): ExtensionRunner | undefined;
 	clientBridge(): ClientBridge | undefined;
@@ -80,6 +84,9 @@ interface SessionToolsOptions {
 	/** MCP tool names whose current registry entries came from the manager snapshot. */
 	mcpManagerToolNames?: Iterable<string>;
 	ensureWriteRegistered?: () => Promise<boolean>;
+	isDeviceOnlyWrite?: () => boolean;
+	setDeviceOnlyWrite?: (enabled: boolean) => void;
+	setPendingFullWriteDescription?: (enabled: boolean) => void;
 	/** Registers the hidden `goal` tool when goal mode is enabled at runtime. */
 	ensureGoalRegistered?: () => Promise<boolean>;
 	rebuildSystemPrompt?: (
@@ -244,6 +251,14 @@ export class SessionTools {
 	#getMcpServerInstructions: SessionToolsOptions["getMcpServerInstructions"];
 	#setActiveToolNames: SessionToolsOptions["setActiveToolNames"];
 	#ensureWriteRegistered: SessionToolsOptions["ensureWriteRegistered"];
+	#isDeviceOnlyWrite: SessionToolsOptions["isDeviceOnlyWrite"];
+	#setDeviceOnlyWrite: SessionToolsOptions["setDeviceOnlyWrite"];
+	#setPendingFullWriteDescription: SessionToolsOptions["setPendingFullWriteDescription"];
+	/**
+	 * The session originated with an xd:// transport grant. Unlike the live
+	 * device-only flag, this survives temporary full-write upgrades.
+	 */
+	readonly #deviceOnlyWriteTransportAvailable: boolean;
 	#ensureGoalRegistered: SessionToolsOptions["ensureGoalRegistered"];
 	#skills: Skill[];
 	#skillWarnings: SkillWarning[];
@@ -273,6 +288,10 @@ export class SessionTools {
 		}
 		this.#presentationPinnedToolNames = options.presentationPinnedToolNames;
 		this.#ensureWriteRegistered = options.ensureWriteRegistered;
+		this.#isDeviceOnlyWrite = options.isDeviceOnlyWrite;
+		this.#deviceOnlyWriteTransportAvailable = this.#isDeviceOnlyWrite?.() === true;
+		this.#setDeviceOnlyWrite = options.setDeviceOnlyWrite;
+		this.#setPendingFullWriteDescription = options.setPendingFullWriteDescription;
 		this.#ensureGoalRegistered = options.ensureGoalRegistered;
 		this.#rebuildSystemPrompt = options.rebuildSystemPrompt;
 		this.#getMcpServerInstructions = options.getMcpServerInstructions;
@@ -287,6 +306,14 @@ export class SessionTools {
 		this.#skillWarnings = options.skillWarnings ?? [];
 		this.#skillsSettings = options.skillsSettings;
 		this.#skillsReloadable = options.skillsReloadable ?? true;
+		// Seed from the construction slate (top-level tools plus xd:// mounts).
+		// Left empty, getEnabledToolNames() falls back to live agent.state.tools,
+		// so an early reconcile (think/inspect_image/Code Mode after the startup
+		// model resolution) landing while the live set is transiently narrow
+		// commits that narrow set as the sticky slate — the session keeps almost
+		// no tools and the prompt rebuild without `read` empties the skill list.
+		for (const tool of host.agent.state.tools) this.#enabledToolNames.add(tool.name);
+		for (const name of this.#xdev?.mountedNames ?? []) this.#enabledToolNames.add(name);
 		this.#promptModelKey = this.#currentPromptModelKey();
 	}
 
@@ -370,10 +397,12 @@ export class SessionTools {
 	}
 	/** Enabled top-level, `xd://`, and Code Mode bridge tool names. */
 	getEnabledToolNames(): string[] {
-		if (this.#enabledToolNames.size > 0) return [...this.#enabledToolNames];
+		// Union live xd:// mounts so devices mounted out-of-band (plugins writing
+		// to xdev state directly) survive the next apply.
 		const mountedNames = this.#xdev?.mountedNames;
-		if (!mountedNames || mountedNames.size === 0) return this.getActiveToolNames();
-		return [...this.getActiveToolNames(), ...mountedNames];
+		const base = this.#enabledToolNames.size > 0 ? [...this.#enabledToolNames] : this.getActiveToolNames();
+		if (!mountedNames || mountedNames.size === 0) return base;
+		return [...new Set([...base, ...mountedNames])];
 	}
 
 	/** Names currently presented as `xd://` devices. */
@@ -520,7 +549,7 @@ export class SessionTools {
 						? "sdk"
 						: "extension";
 			const sourceInfo: SourceInfo = {
-				path: `<${source}:${name}>`,
+				path: registeredFilesystemSourcePath(this.#host.extensionRunner(), name) ?? `<${source}:${name}>`,
 				source,
 				scope: "temporary",
 				origin: "top-level",
@@ -689,7 +718,11 @@ export class SessionTools {
 
 	/** Reapplies the enabled set after model or Code Mode setting changes. */
 	reconcileCodeMode(): Promise<void> {
-		return this.applyActiveToolsByName(this.getEnabledToolNames());
+		// Sample inside the lock: an unlocked sample can race a queued apply and
+		// re-commit a stale slate.
+		return this.runToolRegistryMutation(async () => {
+			await this.#applyActiveToolsByName(this.getEnabledToolNames());
+		});
 	}
 
 	/** Enabled MCP tools in their current presentation partition. */
@@ -838,11 +871,23 @@ export class SessionTools {
 			evalTransportAvailable: this.#hasCodeModeEvalTransport(),
 		});
 		let builtInWriteAvailable = this.#builtInToolNames.has("write");
-		if (toolNames.includes("write") && !builtInWriteAvailable) {
+		const fullWriteSelected =
+			toolNames.includes("write") &&
+			(this.#presentationPinnedToolNames?.has("write") === true ||
+				this.#runtimeSelectedToolNames?.has("write") === true);
+		if (fullWriteSelected) {
 			const writeRegistration = this.#ensureWriteRegistered?.();
-			builtInWriteAvailable = writeRegistration ? (await untilAborted(signal, writeRegistration)) === true : false;
-			if (builtInWriteAvailable) this.#builtInToolNames.add("write");
+			if (writeRegistration) {
+				builtInWriteAvailable = (await untilAborted(signal, writeRegistration)) === true;
+				if (builtInWriteAvailable) this.#builtInToolNames.add("write");
+			}
 		}
+		const upgradeDeviceOnlyWrite =
+			fullWriteSelected &&
+			builtInWriteAvailable &&
+			this.#isDeviceOnlyWrite?.() === true &&
+			this.#setDeviceOnlyWrite !== undefined &&
+			this.#setPendingFullWriteDescription !== undefined;
 		// Goal mode may have been enabled after session creation, leaving the
 		// registry without `goal`. Register it before resolving the selection so
 		// `#enterGoalMode`'s `[...tools, "goal"]` request is honored instead of
@@ -856,7 +901,9 @@ export class SessionTools {
 			return tool ? [{ name, tool }] : [];
 		});
 		const xdevReadAvailable = this.#builtInToolNames.has("read") && selectedTools.some(({ name }) => name === "read");
-		const xdevWriteAvailable = builtInWriteAvailable && selectedTools.some(({ name }) => name === "write");
+		const xdevWriteAvailable =
+			builtInWriteAvailable &&
+			(selectedTools.some(({ name }) => name === "write") || this.#deviceOnlyWriteTransportAvailable);
 		const isPresentationPinned = (name: string): boolean =>
 			this.#presentationPinnedToolNames?.has(name) === true || this.#runtimeSelectedToolNames?.has(name) === true;
 		const mountCandidates = selectedTools.filter(
@@ -931,6 +978,23 @@ export class SessionTools {
 				directToolNames: codeMode.directToolNames,
 			});
 		}
+		const restrictDeviceOnlyWrite =
+			validToolNames.includes("write") &&
+			!fullWriteSelected &&
+			(this.#presentationPinnedToolNames !== undefined || this.#runtimeSelectedToolNames !== undefined) &&
+			builtInWriteAvailable &&
+			this.#isDeviceOnlyWrite?.() !== true &&
+			this.#setDeviceOnlyWrite !== undefined;
+		const restoreDormantDeviceOnlyWrite =
+			!validToolNames.includes("write") &&
+			this.#deviceOnlyWriteTransportAvailable &&
+			this.#isDeviceOnlyWrite?.() !== true &&
+			this.#setDeviceOnlyWrite !== undefined;
+		const deactivateDeviceOnlyWrite =
+			!validToolNames.includes("write") &&
+			!this.#deviceOnlyWriteTransportAvailable &&
+			this.#isDeviceOnlyWrite?.() === true &&
+			this.#setDeviceOnlyWrite !== undefined;
 		const previousMounted = new Set(this.#xdev?.mountedNames ?? []);
 		const previousActiveToolNames = this.getActiveToolNames();
 		const previousEnabledToolNames = this.#enabledToolNames;
@@ -949,6 +1013,8 @@ export class SessionTools {
 		let rebuiltSignature: string | undefined;
 		let rebuiltXdevCatalogNames: readonly string[] | undefined;
 		try {
+			if (restrictDeviceOnlyWrite) this.#setDeviceOnlyWrite?.(true);
+			if (upgradeDeviceOnlyWrite) this.#setPendingFullWriteDescription?.(true);
 			if (this.#rebuildSystemPrompt) {
 				// The provider receives only `appliedNames`, but prompt capability and
 				// safety gates must see every enabled tool that remains callable via
@@ -976,6 +1042,8 @@ export class SessionTools {
 			}
 			signal?.throwIfAborted();
 		} catch (error) {
+			if (restrictDeviceOnlyWrite) this.#setDeviceOnlyWrite?.(false);
+			if (upgradeDeviceOnlyWrite) this.#setPendingFullWriteDescription?.(false);
 			this.#setMountedNames(previousMounted);
 			this.#toolPredicateNames = previousToolPredicateNames;
 			this.#setActiveToolNames?.(previousToolPredicateNames ?? previousActiveToolNames);
@@ -985,6 +1053,8 @@ export class SessionTools {
 		}
 
 		if (this.#host.isDisposed()) {
+			if (restrictDeviceOnlyWrite) this.#setDeviceOnlyWrite?.(false);
+			if (upgradeDeviceOnlyWrite) this.#setPendingFullWriteDescription?.(false);
 			this.#setMountedNames(previousMounted);
 			this.#toolPredicateNames = previousToolPredicateNames;
 			this.#setActiveToolNames?.(previousToolPredicateNames ?? previousActiveToolNames);
@@ -993,20 +1063,29 @@ export class SessionTools {
 			return;
 		}
 
-		this.#notifyXdevMountDelta(previousMounted);
-		this.#host.agent.setTools(appliedTools);
-		this.#host.setCodeModeNamespacesInfo?.(nextCodeModeNamespacesInfo);
-		this.#codeModeDirectWireSignature = codeMode.active
-			? this.#computeCodeModeDirectWireSignature(appliedNames)
-			: undefined;
-		if (rebuiltSystemPrompt && rebuiltSignature) {
-			if (this.#lastAppliedToolSignature !== undefined) this.#host.clearInheritedProviderPromptCacheKey();
-			this.#baseSystemPrompt = rebuiltSystemPrompt;
-			this.#host.clearMemoryPromotionSnapshot();
-			this.#applyAgentSystemPrompt(this.#baseSystemPrompt);
-			this.#lastAppliedToolSignature = rebuiltSignature;
-			this.#promptModelKey = this.#currentPromptModelKey();
-			this.#basePromptXdevNames = new Set(rebuiltXdevCatalogNames);
+		try {
+			this.#notifyXdevMountDelta(previousMounted);
+			this.#host.agent.setTools(appliedTools);
+			this.#host.setCodeModeNamespacesInfo?.(nextCodeModeNamespacesInfo);
+			this.#codeModeDirectWireSignature = codeMode.active
+				? this.#computeCodeModeDirectWireSignature(appliedNames)
+				: undefined;
+			if (rebuiltSystemPrompt && rebuiltSignature) {
+				if (this.#lastAppliedToolSignature !== undefined) this.#host.clearInheritedProviderPromptCacheKey();
+				this.#baseSystemPrompt = rebuiltSystemPrompt;
+				this.#host.clearMemoryPromotionSnapshot();
+				this.#applyAgentSystemPrompt(this.#baseSystemPrompt);
+				this.#lastAppliedToolSignature = rebuiltSignature;
+				this.#promptModelKey = this.#currentPromptModelKey();
+				this.#basePromptXdevNames = new Set(rebuiltXdevCatalogNames);
+			}
+			if (restoreDormantDeviceOnlyWrite) {
+				this.#setDeviceOnlyWrite?.(true);
+			} else if (upgradeDeviceOnlyWrite || deactivateDeviceOnlyWrite) {
+				this.#setDeviceOnlyWrite?.(false);
+			}
+		} finally {
+			if (upgradeDeviceOnlyWrite) this.#setPendingFullWriteDescription?.(false);
 		}
 	}
 
@@ -1182,6 +1261,7 @@ export class SessionTools {
 				...skillsSettings,
 				cwd: this.#host.sessionManager.getCwd(),
 				disabledExtensions: this.#host.settings.get("disabledExtensions") ?? [],
+				extensionRoots: this.#host.effectiveExtensionRoots(),
 			});
 			this.#skills = discovered.skills;
 			this.#skillWarnings = discovered.warnings;
@@ -1258,12 +1338,16 @@ export class SessionTools {
 		forcePromptRefresh = false,
 		signal?: AbortSignal,
 	): Promise<void> {
+		const retainedMountedDevice = [...mounted].some(name => normalized.includes(name));
+		const retainedDeferrableTool = normalized.some(name => this.#toolRegistry.get(name)?.deferrable === true);
+		const deviceOnlyWriteActive = this.#isDeviceOnlyWrite?.() === true;
 		const transportWriteActive =
-			writeSelected &&
+			normalized.includes("write") &&
 			this.#builtInToolNames.has("write") &&
 			this.#presentationPinnedToolNames?.has("write") !== true &&
 			this.#runtimeSelectedToolNames?.has("write") !== true &&
-			(mounted.size > 0 || this.#host.planModeEnabled());
+			((this.#host.planModeEnabled() && (!writeSelected || deviceOnlyWriteActive)) ||
+				(writeSelected && deviceOnlyWriteActive && (retainedMountedDevice || retainedDeferrableTool)));
 		const previousRuntimeSelectedToolNames = this.#runtimeSelectedToolNames;
 		this.#runtimeSelectedToolNames = new Set(
 			normalized.filter(name => !mounted.has(name) && !(name === "write" && transportWriteActive)),
@@ -1788,4 +1872,11 @@ export class SessionTools {
 			throw error;
 		}
 	}
+}
+
+function registeredFilesystemSourcePath(runner: ExtensionRunner | undefined, name: string): string | undefined {
+	const registered = runner?.getRegisteredTool(name);
+	if (!registered) return undefined;
+	const candidate = registered.definition.sourcePath ?? registered.extensionPath;
+	return candidate && isFilesystemSourcePath(candidate) ? candidate : undefined;
 }

@@ -2,6 +2,51 @@
 
 ## [Unreleased]
 
+## [18.0.8] - 2026-08-27
+
+### Added
+
+- Added the Linux `subreaper` spawn option to retain reparented descendants for process-tree cleanup.
+
+### Fixed
+
+- Keep project-directory state unchanged when changing directories fails.
+- Fixed `ptree` timeout cleanup and output capture so timed commands retain their deadline through descendant-held pipes and untimed commands read output to EOF.
+
+## [18.0.7] - 2026-08-26
+
+### Added
+
+- Added `math-delimiters`, the LaTeX span/block delimiter grammar (`mathStartIndex`, `mathOpenerAt`, `mathSpanAt`, `mathBlockAt`) shared by every Markdown renderer: pandoc's anti-currency rules for `$…$`, own-line display blocks, and delimiters matched by backslash parity, so an escaped `\$x$` stays literal and a TeX row break cannot end a span early.
+- Added `RequestError.sessionBusy(message, data)` to represent ACP session-busy errors (`-32003`) through the shared JSON-RPC transport.
+- Exported `getComposerCacheDir` for resolving the per-project Composer cache directory, including support for `XDG_CACHE_HOME`.
+
+### Fixed
+
+- Fixed OMP sessions unexpectedly exiting during socket cleanup or optional-worker communication on Bun.
+
+## [18.0.6] - 2026-08-26
+
+### Added
+
+- Added conventional commit generation with support for dependency, security, configuration, UX, and infrastructure commit types, plus configurable caching and large-diff analysis behavior.
+
+## [18.0.5] - 2026-08-25
+
+### Added
+
+- Added `stableStringifyJson` for deterministic serialization of nested JSON-shaped data.
+
+### Fixed
+
+- Fixed managed Chrome-for-Testing installation failures when extracting the trusted browser download.
+
+## [18.0.4] - 2026-08-24
+
+### Added
+
+- Exported `getAvatarCacheDir` to resolve the avatar cache directory path.
+
 ## [18.0.1] - 2026-08-23
 
 ### Fixed

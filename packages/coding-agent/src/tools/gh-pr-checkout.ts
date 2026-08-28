@@ -11,10 +11,12 @@ import {
 	buildTextResult,
 	formatAuthor,
 	formatLabels,
+	formatRepoRef,
 	normalizeOptionalString,
 	normalizePrIdentifierList,
 	normalizeText,
 	parsePullRequestUrl,
+	parseRepoRef,
 	pushLine,
 	requireCurrentGitBranch,
 	requireNonEmpty,
@@ -145,9 +147,11 @@ export async function ensurePrRemote(
 	}
 
 	const headRepository = requireNonEmpty(data.headRepository?.nameWithOwner, "head repository");
+	const pullRepo = parsePullRequestUrl(data.url).repo;
+	const pullHost = pullRepo ? parseRepoRef(pullRepo).host : undefined;
 	const repoSummary = await git.github.json<GhRepoViewData>(
 		repoRoot,
-		["repo", "view", headRepository, "--json", GH_REPO_CLONE_FIELDS.join(",")],
+		["repo", "view", formatRepoRef(pullHost, headRepository), "--json", GH_REPO_CLONE_FIELDS.join(",")],
 		signal,
 		{ repoProvided: true },
 	);
@@ -599,7 +603,7 @@ export async function executePrCreate(
 			output
 				.split("\n")
 				.map(line => line.trim())
-				.find(line => line.startsWith("https://github.com/")) ?? output.trim();
+				.find(line => line.startsWith("https://")) ?? output.trim();
 		const parsed = parsePullRequestUrl(url);
 		const resolvedRepo = repo ?? parsed.repo;
 

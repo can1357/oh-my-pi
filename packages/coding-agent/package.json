@@ -1,7 +1,7 @@
 {
   "type": "module",
   "name": "@oh-my-pi/pi-coding-agent",
-  "version": "18.0.3",
+  "version": "18.0.8",
   "description": "Coding agent CLI with read, bash, edit, write tools and session management",
   "homepage": "https://omp.sh",
   "author": "Stencil Labs, Inc.",
@@ -195,17 +195,17 @@
       "types": "./src/commit/changelog/*.ts",
       "import": "./src/commit/changelog/*.ts"
     },
+    "./commit/conventional": {
+      "types": "./src/commit/conventional/index.ts",
+      "import": "./src/commit/conventional/index.ts"
+    },
+    "./commit/conventional/*": {
+      "types": "./src/commit/conventional/*.ts",
+      "import": "./src/commit/conventional/*.ts"
+    },
     "./commit/git/*": {
       "types": "./src/commit/git/*.ts",
       "import": "./src/commit/git/*.ts"
-    },
-    "./commit/map-reduce": {
-      "types": "./src/commit/map-reduce/index.ts",
-      "import": "./src/commit/map-reduce/index.ts"
-    },
-    "./commit/map-reduce/*": {
-      "types": "./src/commit/map-reduce/*.ts",
-      "import": "./src/commit/map-reduce/*.ts"
     },
     "./commit/utils/*": {
       "types": "./src/commit/utils/*.ts",
@@ -346,6 +346,14 @@
     "./eval": {
       "types": "./src/eval/index.ts",
       "import": "./src/eval/index.ts"
+    },
+    "./if-bench": {
+      "types": "./src/if-bench/index.ts",
+      "import": "./src/if-bench/index.ts"
+    },
+    "./if-bench/*": {
+      "types": "./src/if-bench/*.ts",
+      "import": "./src/if-bench/*.ts"
     },
     "./eval/js/*": {
       "types": "./src/eval/js/*.ts",
@@ -492,6 +500,10 @@
       "import": "./src/plan-mode/*.ts"
     },
     "./prompts/*": "./src/prompts/*.md",
+    "./registry/*": {
+      "types": "./src/registry/*.ts",
+      "import": "./src/registry/*.ts"
+    },
     "./secrets": {
       "types": "./src/secrets/index.ts",
       "import": "./src/secrets/index.ts"

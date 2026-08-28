@@ -62,6 +62,43 @@ export declare class DesktopSession {
 }
 
 /**
+ * Incrementally ingests old/new text and computes an exact line diff on a
+ * worker thread once both sides finish.
+ *
+ * Complete lines are observable during ingestion. Only equal leading lines
+ * are declared stable before EOF; future input can change Myers alignment
+ * after the first mismatch.
+ */
+export declare class DiffStream {
+  /** Create an empty two-sided stream. */
+  constructor()
+  /** Append a JavaScript text chunk to one side. */
+  push(side: DiffSide, chunk: string): DiffStreamProgress
+  /** Append a UTF-8 subprocess/file chunk without a JS string conversion. */
+  pushBytes(side: DiffSide, chunk: Uint8Array): DiffStreamProgress
+  /** Mark one side complete; an unfinished final line then becomes visible. */
+  finishSide(side: DiffSide): DiffStreamProgress
+  /** Mark one side too large and complete without further ingestion. */
+  markTooLarge(side: DiffSide): DiffStreamProgress
+  /** Current ingestion state. */
+  progress(): DiffStreamProgress
+  /** Complete display lines from `from`, excluding newline terminators. */
+  lines(side: DiffSide, from: number, limit?: number | undefined | null): Array<string>
+  /** Snapshot all ingested text for one side. */
+  text(side: DiffSide): string
+  /**
+   * Read a filesystem path directly into one side on the native worker pool.
+   *
+   * JavaScript can poll [`DiffStream::progress`] and [`DiffStream::lines`]
+   * while this promise is pending; file bytes never need to cross into JS
+   * and back into the differ.
+   */
+  openFile(side: DiffSide, path: string, maxBytes?: number | undefined | null, signal?: unknown | undefined | null): Promise<DiffStreamProgress>
+  /** Compute exact Myers runs and unified hunks off the JavaScript thread. */
+  finish(context?: number | undefined | null): Promise<DiffStreamResult>
+}
+
+/**
  * Process-owned cross-platform advisory lock.
  *
  * `tryAcquire()` is non-blocking; its returned handle reports whether it won
@@ -339,7 +376,7 @@ export declare function __ompInstallTokioRuntime(): void
  * `packages/natives/native/index.js` (which derives the name from
  * `package.json#version`).
  */
-export declare function __piNativesV18_0_3(): void
+export declare function __piNativesV18_0_8(): void
 
 /**
  * Apply ast-grep rewrite rules to matching files; honors `dryRun` and returns
@@ -853,6 +890,44 @@ export interface DiffRun {
   added: boolean
   /** True when this run exists only in the old text. */
   removed: boolean
+}
+
+/** One side of a streamed line diff. */
+export declare enum DiffSide {
+  /** Original/base text. */
+  Old = 'Old',
+  /** Updated/target text. */
+  New = 'New'
+}
+
+/** Observable ingestion state for [`DiffStream`]. */
+export interface DiffStreamProgress {
+  /** Complete old-side lines available for rendering. */
+  oldLines: number
+  /** Complete new-side lines available for rendering. */
+  newLines: number
+  /** Leading complete lines proven equal on both sides. */
+  stableCommonLines: number
+  /** Whether old-side ingestion has finished. */
+  oldDone: boolean
+  /** Whether new-side ingestion has finished. */
+  newDone: boolean
+  /** Whether either side contains a NUL byte/code unit. */
+  binary: boolean
+  /** Whether either native file exceeded its caller-provided size limit. */
+  tooLarge: boolean
+}
+
+/** Exact line-diff output produced when a [`DiffStream`] finishes. */
+export interface DiffStreamResult {
+  /** Line-token Myers runs used to align the complete files. */
+  runs: Array<DiffRun>
+  /** Unified hunks for the requested context. */
+  hunks: Array<PatchHunk>
+  /** Whether the old text ends in a newline. */
+  oldEndsNewline: boolean
+  /** Whether the new text ends in a newline. */
+  newEndsNewline: boolean
 }
 
 /**
@@ -1830,6 +1905,18 @@ export interface PtyStartOptions {
 }
 
 /**
+ * Rasterize SVG/SVGZ bytes into a bounded PNG without resolving local files.
+ *
+ * Conversion runs on the native blocking pool so parsing and rendering do not
+ * stall the JavaScript event loop.
+ *
+ * # Errors
+ * Returns an error for invalid SVG data, zero/oversized limits, allocation
+ * failure, or PNG encoding failure.
+ */
+export declare function rasterizeSvg(input: Uint8Array, maxWidthPx: number, maxHeightPx: number): Promise<Uint8Array>
+
+/**
  * Read an image from the system clipboard.
  *
  * Returns `Ok(None)` when no image data is available.
@@ -2157,6 +2244,9 @@ export interface VectorTopK {
  * Tabs count as a fixed-width cell.
  */
 export declare function visibleWidth(text: string, tabWidth: number): number
+
+/** Warm syntax grammars and scope matchers on the native worker pool. */
+export declare function warmHighlighter(): Promise<undefined>
 
 /** Profiling results returned to JavaScript. */
 export interface WorkProfile {

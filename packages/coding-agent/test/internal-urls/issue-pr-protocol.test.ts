@@ -303,6 +303,115 @@ describe("pr:// protocol handler", () => {
 			/Invalid issue:\/\/ URL: empty or unsafe path segment/,
 		);
 	});
+
+	it("routes pr://<host>/<owner>/<repo>/<n> at that host", async () => {
+		const spy = vi.spyOn(git.github, "json").mockImplementation(async (_cwd, args) => {
+			if (args.includes("/repos/owner/example/pulls/77/comments")) {
+				return [] as never;
+			}
+			return prPayload(77, "pr body") as never;
+		});
+
+		const router = InternalUrlRouter.instance();
+		const resource = await router.resolve("pr://ghe.example.com/owner/example/77");
+
+		expect(resource.content).toContain("# Pull Request #77: PR #77");
+		// `gh pr view` takes `[HOST/]OWNER/REPO` in --repo…
+		const viewArgs = spy.mock.calls[0]?.[1] as string[];
+		expect(viewArgs[viewArgs.indexOf("--repo") + 1]).toBe("ghe.example.com/owner/example");
+		// …while `gh api` paths cannot carry a host, so it rides as a flag.
+		const apiArgs = spy.mock.calls[1]?.[1] as string[];
+		expect(apiArgs).toContain("/repos/owner/example/pulls/77/comments");
+		expect(apiArgs[apiArgs.indexOf("--hostname") + 1]).toBe("ghe.example.com");
+		expect(resource.notes).toContain("Diff: pr://ghe.example.com/owner/example/77/diff");
+	});
+
+	it("routes a single-label host prefix by shape", async () => {
+		const spy = vi.spyOn(git.github, "json").mockImplementation(async (_cwd, args) => {
+			if (args.includes("/repos/owner/example/pulls/77/comments")) {
+				return [] as never;
+			}
+			return prPayload(77, "pr body") as never;
+		});
+
+		const router = InternalUrlRouter.instance();
+		// `ghe` carries no dot, so the number position is what separates
+		// `<host>/<owner>/<repo>/<n>` from `<owner>/<repo>/<n>/diff`.
+		const resource = await router.resolve("pr://ghe/owner/example/77");
+
+		const viewArgs = spy.mock.calls[0]?.[1] as string[];
+		expect(viewArgs[viewArgs.indexOf("--repo") + 1]).toBe("ghe/owner/example");
+		expect(resource.notes).toContain("Diff: pr://ghe/owner/example/77/diff");
+	});
+
+	it("keeps the bare diff form out of the host-prefix branch", async () => {
+		const spy = vi.spyOn(git.github, "text").mockResolvedValue(makePrDiff([{ name: "a.ts", adds: 1, dels: 0 }]));
+
+		const router = InternalUrlRouter.instance();
+		const resource = await router.resolve("pr://owner/example/77/diff/1");
+
+		// `owner` is not a host here: the diff slice belongs to owner/example#77.
+		const diffArgs = spy.mock.calls[0]?.[1] as string[];
+		expect(diffArgs[diffArgs.indexOf("--repo") + 1]).toBe("owner/example");
+		expect(resource.content).toContain("a.ts");
+	});
+
+	it("shares one cache row with the bare form while still pinning github.com", async () => {
+		const spy = vi.spyOn(git.github, "json").mockImplementation(async (_cwd, args) => {
+			if (args.includes("/repos/owner/example/pulls/79/comments")) {
+				return [] as never;
+			}
+			return prPayload(79, "pr body") as never;
+		});
+
+		const router = InternalUrlRouter.instance();
+		const prefixed = await router.resolve("pr://github.com/owner/example/79");
+		// An explicit host reaches `gh`, which would otherwise resolve a
+		// host-less --repo against GH_HOST.
+		const viewArgs = spy.mock.calls[0]?.[1] as string[];
+		expect(viewArgs[viewArgs.indexOf("--repo") + 1]).toBe("github.com/owner/example");
+
+		const bare = await router.resolve("pr://owner/example/79");
+		// Both spellings key the same row, so the bare form is a cache hit.
+		expect(spy).toHaveBeenCalledTimes(2);
+		expect(prefixed.notes?.[0]).toBe("Fetched live");
+		expect(bare.notes?.[0]).toMatch(/^Cached:/);
+	});
+
+	it("keeps github.com rows separate from the host GH_HOST names", async () => {
+		const spy = vi.spyOn(git.github, "json").mockImplementation(async (_cwd, args) => {
+			if (args.some(arg => arg.endsWith("/comments"))) {
+				return [] as never;
+			}
+			return prPayload(81, "pr body") as never;
+		});
+
+		const saved = process.env.GH_HOST;
+		process.env.GH_HOST = "ghe.example.com";
+		try {
+			const router = InternalUrlRouter.instance();
+			await router.resolve("pr://owner/example/81");
+			// The bare form above belongs to ghe.example.com, so github.com's #81
+			// is a different pull request and must be fetched, not served from it.
+			const explicit = await router.resolve("pr://github.com/owner/example/81");
+			expect(explicit.notes?.[0]).toBe("Fetched live");
+			expect(spy).toHaveBeenCalledTimes(4);
+		} finally {
+			if (saved === undefined) {
+				delete process.env.GH_HOST;
+			} else {
+				process.env.GH_HOST = saved;
+			}
+		}
+	});
+
+	it("rejects a host-prefixed URL that names no repository", async () => {
+		const router = InternalUrlRouter.instance();
+		await expect(InternalUrlRouter.instance().resolve("pr://ghe.example.com/owner")).rejects.toThrow(
+			/Invalid pr:\/\/ URL/,
+		);
+		await expect(router.resolve("issue://ghe.example.com")).rejects.toThrow(/Invalid issue:\/\/ URL/);
+	});
 });
 
 describe("pr://.../diff family", () => {

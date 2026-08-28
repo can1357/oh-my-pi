@@ -382,6 +382,7 @@ export class TurnRecovery {
 		});
 		this.#clearPendingRetryErrors();
 		this.#retryAttempt = 0;
+		this.resolveRetry();
 	}
 
 	/** Closes a failed retry saga when no compaction continuation took ownership. */
@@ -1722,6 +1723,8 @@ export class TurnRecovery {
 		// A thinking loop is a same-model resample signal, not a router fault, so a
 		// base-model swap would abandon the loop-guard redirect (issue #8760).
 		if (AIError.is(id, AIError.Flag.ThinkingLoop)) return false;
+		// Byte/media budget 413s fail identically on the base model — swapping cannot fix them (#9235).
+		if (AIError.isPayloadRejection(message)) return false;
 		return this.#host.modelRegistry.find("fireworks", toFireworksBaseModelId(model.id)) !== undefined;
 	}
 
@@ -1752,7 +1755,12 @@ export class TurnRecovery {
 		if (this.isClassifierRefusal(message)) return false;
 		const id = this.#classifyRetryMessage(message);
 		if (AIError.is(id, AIError.Flag.Abort) || AIError.is(id, AIError.Flag.UserInterrupt)) return false;
-		if (AIError.isContextOverflow(message, model.contextWindow ?? 0)) return false;
+		// Text-ambiguous overflows waive the veto; usage-backed do not — see AIError.isTextAmbiguousContextOverflow (#9235).
+		const contextWindow = model.contextWindow ?? 0;
+		const textAmbiguousOverflow = AIError.isTextAmbiguousContextOverflow(id, message, contextWindow);
+		if (!textAmbiguousOverflow && AIError.isContextOverflow(message, contextWindow)) {
+			return false;
+		}
 		if (this.#hasReplayUnsafeOutput(message)) return false;
 		const currentSelector = formatRetryFallbackSelector(model, this.#host.thinkingLevel());
 		return this.retryFallbackChainKeys(currentSelector).some(

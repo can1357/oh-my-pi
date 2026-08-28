@@ -26,14 +26,18 @@ import {
 	type LoadedImageInput,
 	loadImageAttachmentInput,
 	loadImageInput,
+	loadSvgImageInput,
 	MAX_IMAGE_INPUT_BYTES,
 	webpExclusionForModel,
 } from "../utils/image-loading";
 import type { ToolSession } from "./index";
+import { splitPathAndSelPreferringLiteral } from "./path-utils";
 import { ToolError } from "./tool-errors";
 
 const inspectImageSchema = type({
-	path: type("string").describe("image file path, Image #N label, or attachment://N URI"),
+	path: type("string").describe(
+		"image file path, local .svg/.svgz path with :img, Image #N label, or attachment://N URI",
+	),
 	question: type("string").describe("question about image"),
 	"+": "reject",
 });
@@ -201,6 +205,10 @@ export class InspectImageTool implements AgentTool<typeof inspectImageSchema, In
 		const autoResize = this.session.settings.get("images.autoResize");
 		const excludeWebP = webpExclusionForModel(model);
 		const attachmentReference = parseImageAttachmentReference(params.path);
+		const imageTarget = attachmentReference
+			? undefined
+			: await splitPathAndSelPreferringLiteral(params.path, this.session.cwd);
+		const isSvgImage = imageTarget?.sel?.toLowerCase() === "img";
 		try {
 			if (attachmentReference) {
 				imageInput = await loadAttachmentReferenceInput({
@@ -208,6 +216,14 @@ export class InspectImageTool implements AgentTool<typeof inspectImageSchema, In
 					reference: attachmentReference,
 					attachments: this.session.getImageAttachments?.() ?? [],
 					autoResize,
+					excludeWebP,
+				});
+			} else if (isSvgImage && imageTarget) {
+				imageInput = await loadSvgImageInput({
+					path: imageTarget.path,
+					cwd: this.session.cwd,
+					autoResize,
+					maxBytes: MAX_IMAGE_INPUT_BYTES,
 					excludeWebP,
 				});
 			} else {
@@ -227,7 +243,11 @@ export class InspectImageTool implements AgentTool<typeof inspectImageSchema, In
 		}
 
 		if (!imageInput) {
-			throw new ToolError("inspect_image only supports PNG, JPEG, GIF, and WEBP files detected by file content.");
+			throw new ToolError(
+				isSvgImage
+					? "inspect_image ':img' only supports .svg and .svgz files."
+					: "inspect_image only supports PNG, JPEG, GIF, and WEBP files detected by file content.",
+			);
 		}
 
 		const telemetry = resolveTelemetry(this.session.getTelemetry?.(), this.session.getSessionId?.() ?? undefined);
