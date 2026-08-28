@@ -84,6 +84,8 @@ function subscriptionKey(method: string): string {
 		case "Emulation.clearGeolocationOverride":
 		case "Page.clearGeolocationOverride":
 			return "GeolocationOverride";
+		case "Emulation.clearIdleOverride":
+			return "Emulation.setIdleOverride";
 		default:
 			return method;
 	}
@@ -1027,16 +1029,40 @@ export class RelayBridge {
 			case "Emulation.clearIdleOverride":
 				this.#forgetTabSubscription(tab, subscriptionKey(msg.method));
 				return;
+			case "Network.setBypassServiceWorker":
+				if (msg.params?.bypass === false) {
+					this.#forgetTabSubscription(tab, subscriptionKey(msg.method));
+					return;
+				}
+				if (!ownerIsCurrent) return;
+				this.#rememberSessionSubscription(tab, subscriptionKey(msg.method), ownerSessionId, {
+					method: msg.method,
+					params: msg.params,
+					ownerSessionId,
+					sequence: ++this.#subscriptionSeq,
+				});
+				return;
+			case "Security.setIgnoreCertificateErrors":
+				if (msg.params?.ignore === false) {
+					this.#forgetTabSubscription(tab, subscriptionKey(msg.method));
+					return;
+				}
+				if (!ownerIsCurrent) return;
+				this.#rememberSessionSubscription(tab, subscriptionKey(msg.method), ownerSessionId, {
+					method: msg.method,
+					params: msg.params,
+					ownerSessionId,
+					sequence: ++this.#subscriptionSeq,
+				});
+				return;
 			case "Emulation.setDeviceMetricsOverride":
 			case "Page.setDeviceMetricsOverride":
 			case "Emulation.setGeolocationOverride":
 			case "Page.setGeolocationOverride":
 			case "Emulation.setIdleOverride":
 			case "Network.emulateNetworkConditions":
-			case "Network.setBypassServiceWorker":
 			case "Network.setUserAgentOverride":
 			case "Emulation.setUserAgentOverride":
-			case "Security.setIgnoreCertificateErrors":
 				// Persistent root setters survive as long as the shared debugger root.
 				// When a guard-authorized detach swaps that root, replay the latest
 				// winning command for each setter so preserved pseudo-sessions keep the
