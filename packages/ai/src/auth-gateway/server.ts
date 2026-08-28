@@ -368,19 +368,23 @@ function unknownModelResponse(formatError: FormatErrorFn, modelId: string): Resp
 function conductorExecutionState(
 	compiled: CompiledRoute,
 	attemptedTargets: ReadonlySet<string>,
+	attemptedCredentials: ReadonlySet<number>,
 	retryCount: number,
 	fallbackCount: number,
 	currentTarget: string,
+	siblingsExhausted: boolean,
 	commitState: StreamCommitState,
 ): ExecutionState {
 	return {
 		routeId: compiled.id,
 		generation: compiled.generation,
 		attemptedTargets,
+		attemptedCredentials,
 		retryCount,
 		fallbackCount,
 		committed: commitState !== "probing",
 		currentTarget,
+		siblingsExhausted,
 	};
 }
 
@@ -391,16 +395,6 @@ function dispatchTargetId(
 ): string | undefined {
 	const action = decideAttempt({ route: compiled, state, commitState });
 	return action.type === "dispatch" ? action.targetModelId : undefined;
-}
-
-function fallbackTargetId(
-	compiled: CompiledRoute,
-	state: ExecutionState,
-	classification: GatewayErrorClassification,
-	commitState: StreamCommitState,
-): string | undefined {
-	const action = decideAttempt({ route: compiled, state, classification, commitState });
-	return action.type === "fallback_target" ? action.targetModelId : undefined;
 }
 
 /**
@@ -714,14 +708,25 @@ async function handleFormatEndpoint(
 	const commitGate = new StreamCommitGate();
 	const formatError = route.module.formatError;
 	const attemptedTargets = new Set<string>();
+	const attemptedCredentials = new Set<number>();
 	let retryCount = 0;
 	let fallbackCount = 0;
 	let pendingFallback: string | undefined;
 	let lastClassified: GatewayErrorClassification | undefined;
+	let siblingsExhausted = false;
 	const attemptCap = compiled.targets.length + 1;
 
 	const stateNow = (): ExecutionState =>
-		conductorExecutionState(compiled, attemptedTargets, retryCount, fallbackCount, currentTarget, commitGate.state);
+		conductorExecutionState(
+			compiled,
+			attemptedTargets,
+			attemptedCredentials,
+			retryCount,
+			fallbackCount,
+			currentTarget,
+			siblingsExhausted,
+			commitGate.state,
+		);
 
 	const classifiedError = (classified: GatewayErrorClassification): Response =>
 		formatError(classified.status, classified.type, classified.message);
@@ -729,17 +734,34 @@ async function handleFormatEndpoint(
 	const considerFallback = (classified: GatewayErrorClassification): boolean => {
 		lastClassified = classified;
 		if (commitGate.state === "committed") return false;
-		const next = fallbackTargetId(
-			compiled,
-			conductorExecutionState(compiled, attemptedTargets, retryCount, fallbackCount, currentTarget, "probing"),
-			classified,
-			"probing",
-		);
-		if (next === undefined) return false;
-		pendingFallback = next;
-		fallbackCount += 1;
-		retryCount += 1;
-		return true;
+		const action = decideAttempt({
+			route: compiled,
+			state: conductorExecutionState(
+				compiled,
+				attemptedTargets,
+				attemptedCredentials,
+				retryCount,
+				fallbackCount,
+				currentTarget,
+				siblingsExhausted,
+				"probing",
+			),
+			classification: classified,
+			commitState: "probing",
+		});
+		if (action.type === "sibling_credential") {
+			siblingsExhausted = true;
+			pendingFallback = currentTarget;
+			retryCount += 1;
+			return true;
+		}
+		if (action.type === "fallback_target") {
+			pendingFallback = action.targetModelId;
+			fallbackCount += 1;
+			retryCount += 1;
+			return true;
+		}
+		return false;
 	};
 
 	const bindCurrentTarget = (targetId: string): Response | undefined => {
@@ -804,6 +826,10 @@ async function handleFormatEndpoint(
 				),
 			};
 		}
+		const activeCredentialId = bootOpts.storage
+			.listOAuthAccounts(model.provider, sessionId)
+			.find(account => account.active)?.credentialId;
+		if (activeCredentialId !== undefined) attemptedCredentials.add(activeCredentialId);
 		const dispatched = traces.record({
 			requestId,
 			routeId: compiled.id,
@@ -1085,14 +1111,25 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 	const commitGate = new StreamCommitGate();
 	const formatError = piNative.formatError;
 	const attemptedTargets = new Set<string>();
+	const attemptedCredentials = new Set<number>();
 	let retryCount = 0;
 	let fallbackCount = 0;
 	let pendingFallback: string | undefined;
 	let lastClassified: GatewayErrorClassification | undefined;
+	let siblingsExhausted = false;
 	const attemptCap = compiled.targets.length + 1;
 
 	const stateNow = (): ExecutionState =>
-		conductorExecutionState(compiled, attemptedTargets, retryCount, fallbackCount, currentTarget, commitGate.state);
+		conductorExecutionState(
+			compiled,
+			attemptedTargets,
+			attemptedCredentials,
+			retryCount,
+			fallbackCount,
+			currentTarget,
+			siblingsExhausted,
+			commitGate.state,
+		);
 
 	const classifiedError = (classified: GatewayErrorClassification): Response =>
 		formatError(classified.status, classified.type, classified.message);
@@ -1100,17 +1137,34 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 	const considerFallback = (classified: GatewayErrorClassification): boolean => {
 		lastClassified = classified;
 		if (commitGate.state === "committed") return false;
-		const next = fallbackTargetId(
-			compiled,
-			conductorExecutionState(compiled, attemptedTargets, retryCount, fallbackCount, currentTarget, "probing"),
-			classified,
-			"probing",
-		);
-		if (next === undefined) return false;
-		pendingFallback = next;
-		fallbackCount += 1;
-		retryCount += 1;
-		return true;
+		const action = decideAttempt({
+			route: compiled,
+			state: conductorExecutionState(
+				compiled,
+				attemptedTargets,
+				attemptedCredentials,
+				retryCount,
+				fallbackCount,
+				currentTarget,
+				siblingsExhausted,
+				"probing",
+			),
+			classification: classified,
+			commitState: "probing",
+		});
+		if (action.type === "sibling_credential") {
+			siblingsExhausted = true;
+			pendingFallback = currentTarget;
+			retryCount += 1;
+			return true;
+		}
+		if (action.type === "fallback_target") {
+			pendingFallback = action.targetModelId;
+			fallbackCount += 1;
+			retryCount += 1;
+			return true;
+		}
+		return false;
 	};
 
 	const bindCurrentTarget = (targetId: string): Response | undefined => {
@@ -1175,6 +1229,10 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 				),
 			};
 		}
+		const activeCredentialId = bootOpts.storage
+			.listOAuthAccounts(model.provider, sessionId)
+			.find(account => account.active)?.credentialId;
+		if (activeCredentialId !== undefined) attemptedCredentials.add(activeCredentialId);
 		const dispatched = traces.record({
 			requestId,
 			routeId: compiled.id,

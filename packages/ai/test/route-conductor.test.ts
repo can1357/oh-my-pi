@@ -23,10 +23,12 @@ function state(overrides: Partial<ExecutionState> = {}): ExecutionState {
 		routeId: "virtual/primary",
 		generation: 1,
 		attemptedTargets: new Set(),
+		attemptedCredentials: new Set<number>(),
 		retryCount: 0,
 		fallbackCount: 0,
 		committed: false,
 		currentTarget: "primary",
+		siblingsExhausted: false,
 		...overrides,
 	};
 }
@@ -84,6 +86,70 @@ describe("decideAttempt", () => {
 			commitState: "probing",
 		});
 		expect(action).toEqual({ type: "sibling_credential" });
+	});
+
+	it("returns sibling_credential on credential_quota while siblings remain even when quota fallbacks exist (negative)", () => {
+		const action = decideAttempt({
+			route: route({ fallbacks: { credential_quota: ["claude"] } }),
+			state: state({
+				attemptedTargets: new Set(["primary"]),
+				attemptedCredentials: new Set([0]),
+				siblingsExhausted: false,
+			}),
+			classification: classification("credential_quota"),
+			commitState: "probing",
+		});
+		expect(action).toEqual({ type: "sibling_credential" });
+		expect(action).not.toEqual({ type: "fallback_target", targetModelId: "claude" });
+	});
+
+	it("falls back to the first unused credential_quota target once siblings are exhausted", () => {
+		const action = decideAttempt({
+			route: route({ fallbacks: { credential_quota: ["claude", "gemini"] } }),
+			state: state({
+				attemptedTargets: new Set(["primary"]),
+				siblingsExhausted: true,
+			}),
+			classification: classification("credential_quota"),
+			commitState: "probing",
+		});
+		expect(action).toEqual({ type: "fallback_target", targetModelId: "claude" });
+	});
+
+	it("skips already attempted credential_quota fallbacks once siblings are exhausted", () => {
+		const action = decideAttempt({
+			route: route({ fallbacks: { credential_quota: ["claude", "gemini"] } }),
+			state: state({
+				attemptedTargets: new Set(["primary", "claude"]),
+				siblingsExhausted: true,
+			}),
+			classification: classification("credential_quota"),
+			commitState: "probing",
+		});
+		expect(action).toEqual({ type: "fallback_target", targetModelId: "gemini" });
+	});
+
+	it("returns terminal when credential_quota fallbacks are exhausted after siblings (negative)", () => {
+		const action = decideAttempt({
+			route: route({ fallbacks: { credential_quota: ["claude"] } }),
+			state: state({
+				attemptedTargets: new Set(["primary", "claude"]),
+				siblingsExhausted: true,
+			}),
+			classification: classification("credential_quota"),
+			commitState: "probing",
+		});
+		expect(action).toEqual({ type: "terminal" });
+	});
+
+	it("falls back on credential_transient once siblings are exhausted", () => {
+		const action = decideAttempt({
+			route: route({ fallbacks: { credential_transient: ["backup"] } }),
+			state: state({ siblingsExhausted: true }),
+			classification: classification("credential_transient"),
+			commitState: "probing",
+		});
+		expect(action).toEqual({ type: "fallback_target", targetModelId: "backup" });
 	});
 
 	it("falls back to the first unused fallbacks-map id on provider_unavailable", () => {

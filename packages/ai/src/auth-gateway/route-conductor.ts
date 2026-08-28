@@ -12,10 +12,12 @@ export interface ExecutionState {
 	routeId: string;
 	generation: number;
 	attemptedTargets: ReadonlySet<string>;
+	attemptedCredentials: ReadonlySet<number>;
 	retryCount: number;
 	fallbackCount: number;
 	committed: boolean;
 	currentTarget: string;
+	siblingsExhausted: boolean;
 }
 
 /**
@@ -66,8 +68,13 @@ export function decideAttempt(args: {
 		case "credential_permanent":
 			return { type: "terminal" };
 		case "credential_quota":
-		case "credential_transient":
-			return { type: "sibling_credential" };
+		case "credential_transient": {
+			if (!state.siblingsExhausted) {
+				return { type: "sibling_credential" };
+			}
+			const next = firstUnused(route.fallbacks[disposition], state.attemptedTargets);
+			return next === undefined ? { type: "terminal" } : { type: "fallback_target", targetModelId: next };
+		}
 		case "provider_transient":
 		case "provider_unavailable":
 		case "model_unavailable":
