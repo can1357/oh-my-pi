@@ -25,7 +25,7 @@ import * as h2Pool from "../src/providers/cursor/h2-pool";
 import { buildCursorRunHeaders } from "../src/providers/cursor/headers";
 import * as serverConfig from "../src/providers/cursor/server-config";
 import { fetchCursorBidiAvailability, resetCursorServerConfigCache } from "../src/providers/cursor/server-config";
-import { openCursorTransport } from "../src/providers/cursor/transport";
+import { __setCursorH2FrameQueueBytes, openCursorTransport } from "../src/providers/cursor/transport";
 
 const RUN_PATH = "/agent.v1.AgentService/Run";
 const GET_SERVER_CONFIG_PATH = "/agent.v1.AgentService/GetServerConfig";
@@ -388,6 +388,69 @@ describe("openCursorTransport lifecycle", () => {
 			await closed.promise;
 		}
 	});
+
+	it("fails the eager H2 frame pump on its queued-byte budget while the consumer stalls", async () => {
+		let server: http2.Http2Server | undefined;
+		const sessions = new Set<http2.Http2Session>();
+		server = http2.createServer();
+		server.on("session", session => {
+			sessions.add(session);
+			session.on("close", () => sessions.delete(session));
+		});
+		const filler = Buffer.alloc(200, 0x61);
+		server.on("stream", (stream: http2.ServerHttp2Stream) => {
+			stream.on("data", () => {});
+			stream.on("error", () => {});
+			stream.respond({ ":status": 200, "content-type": "application/connect+proto" });
+			// Six 200-byte frames against a 512-byte budget: the pump must
+			// fail on queued bytes, not retain the whole response. No end
+			// envelope — the budget is what stops the hostile stream.
+			const parts: Buffer[] = [];
+			for (let index = 0; index < 6; index++) {
+				parts.push(frameConnectMessage(filler));
+			}
+			stream.end(Buffer.concat(parts));
+		});
+		const listening = Promise.withResolvers<void>();
+		server.once("error", listening.reject);
+		server.listen(0, "127.0.0.1", listening.resolve);
+		await listening.promise;
+		const address = server.address();
+		if (!address || typeof address === "string") throw new Error("expected live h2 fixture");
+		const h2Url = `http://127.0.0.1:${address.port}`;
+
+		__setCursorH2FrameQueueBytes(512);
+		try {
+			const attempt = await openCursorTransport({
+				baseUrl: h2Url,
+				apiKey: API_KEY,
+				requestPath: RUN_PATH,
+				runHeaders: testRunHeaders(),
+				gzipRequest: false,
+				provider: "cursor",
+			});
+			attempt.write(encodeConnectFrame(Buffer.from("client-request", "utf8"), false));
+			// Do not drain: the reader keeps decoding while frames sit
+			// unconsumed, which is exactly the retention the budget bounds.
+			let error: unknown;
+			try {
+				for await (const frame of attempt.frames()) void frame;
+			} catch (cause) {
+				error = cause;
+			}
+			expect(error).toBeInstanceOf(Error);
+			expect(String(error)).toContain("frame queue exceeded");
+			attempt.close();
+		} finally {
+			__setCursorH2FrameQueueBytes(undefined);
+			for (const session of sessions) session.destroy();
+			const closing = server;
+			server = undefined;
+			const closed = Promise.withResolvers<void>();
+			closing.close(error => (error ? closed.reject(error) : closed.resolve()));
+			await closed.promise;
+		}
+	}, 10_000);
 });
 
 function turnEndedPayload(): Uint8Array {

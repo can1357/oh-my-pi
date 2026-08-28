@@ -214,10 +214,16 @@ describe("ConnectFrameDecoder grammar", () => {
 		expectProtocolError(() => decoder.finish(), "stream ended before end-of-stream frame", "incomplete-stream");
 	});
 
-	test("finish() after end-of-stream is a no-op", () => {
+	test("finish() after end-of-stream leaves the decoder terminal", () => {
 		const decoder = new ConnectFrameDecoder({ acceptCompressed: true });
-		decoder.push(rawFrame(CONNECT_FLAG_END_STREAM, JSON.stringify({ error: null })));
-		expect(() => decoder.finish()).not.toThrow();
+		const frames = decoder.push(rawFrame(CONNECT_FLAG_END_STREAM, JSON.stringify({ error: null })));
+		expect(frames).toEqual([{ kind: "end", error: null }]);
+		expect(decoder.sawEndStream).toBe(true);
+		// The no-op contract, made observable: finish() neither reopens the
+		// stream nor consumes the terminal state, so a trailing byte is
+		// still a protocol error after it ran.
+		decoder.finish();
+		expectProtocolError(() => decoder.push(Buffer.from([0x00])), "bytes after end-of-stream", "envelope");
 	});
 
 	test("fragmented byte-at-a-time delivery yields identical frames to one chunk", () => {
@@ -305,12 +311,5 @@ describe("ConnectFrameDecoder hardening (grill loop batch 1)", () => {
 		expect(decoder.sawEndStream).toBe(true);
 		// Even a single byte pushed after the terminal envelope is a protocol error.
 		expectProtocolError(() => decoder.push(Buffer.from([0x00])), "bytes after end-of-stream", "envelope");
-	});
-
-	test("trailing bytes after end-stream: a clean stream still finishes cleanly", () => {
-		const decoder = new ConnectFrameDecoder({ acceptCompressed: true });
-		decoder.push(rawFrame(CONNECT_FLAG_END_STREAM, JSON.stringify({ error: null })));
-		expect(decoder.sawEndStream).toBe(true);
-		expect(() => decoder.finish()).not.toThrow();
 	});
 });

@@ -32,29 +32,30 @@ import { __resetProxyCache } from "../src/utils/proxy";
 
 const RUN_PATH = "/agent.v1.AgentService/Run";
 
-let server: http2.Http2Server | undefined;
+const servers: http2.Http2Server[] = [];
 const sessions = new Set<http2.Http2Session>();
 let totalSessions = 0;
 let streamCount = 0;
 let serveStream: ((stream: http2.ServerHttp2Stream) => void) | undefined;
 
 async function startServer(): Promise<string> {
-	server = http2.createServer();
-	server.on("session", session => {
+	const srv = http2.createServer();
+	servers.push(srv);
+	srv.on("session", session => {
 		totalSessions++;
 		sessions.add(session);
 		session.on("close", () => sessions.delete(session));
 	});
-	server.on("stream", (stream: http2.ServerHttp2Stream) => {
+	srv.on("stream", (stream: http2.ServerHttp2Stream) => {
 		streamCount++;
 		stream.on("data", () => {});
 		serveStream?.(stream);
 	});
 	const listening = Promise.withResolvers<void>();
-	server.once("error", listening.reject);
-	server.listen(0, "127.0.0.1", listening.resolve);
+	srv.once("error", listening.reject);
+	srv.listen(0, "127.0.0.1", listening.resolve);
 	await listening.promise;
-	const address = server.address();
+	const address = srv.address();
 	if (!address || typeof address === "string") {
 		throw new Error("expected fixture http2 server to bind a tcp port");
 	}
@@ -72,12 +73,15 @@ async function stopServer(): Promise<void> {
 		session.destroy();
 	}
 	sessions.clear();
-	if (!server) return;
-	const closing = server;
-	server = undefined;
-	const closed = Promise.withResolvers<void>();
-	closing.close(error => (error ? closed.reject(error) : closed.resolve()));
-	await closed.promise;
+	const closing = servers.splice(0);
+	await Promise.all(
+		closing.map(
+			srv =>
+				new Promise<void>(resolve => {
+					srv.close(() => resolve());
+				}),
+		),
+	);
 }
 
 function poolOutstanding(): number {
@@ -150,6 +154,25 @@ describe("cursor HTTP/2 session pool", () => {
 		first.lease.release();
 		second.lease.release();
 		expect(poolOutstanding()).toBe(0);
+	});
+
+	it("caps retained sessions and evicts the oldest idle entry beyond the cap", async () => {
+		serveStream = respondOk;
+		// Nine distinct baseUrls, each acquired and released inside the idle
+		// window: age-based eviction alone would retain all nine sessions.
+		const urls: string[] = [];
+		for (let index = 0; index < 9; index++) urls.push(await startServer());
+		for (const url of urls) {
+			const acquired = await acquireCursorH2(runArgs(url));
+			expect(acquired.ok).toBe(true);
+			if (!acquired.ok) return;
+			acquired.lease.release();
+		}
+		const snapshot = __cursorH2PoolSnapshot();
+		expect(snapshot).toHaveLength(8);
+		// The first-established session is the oldest idle entry and is the
+		// one evicted; Map iteration order breaks Date.now() ties the same way.
+		expect(snapshot.map(entry => entry.key)).not.toContain(`${urls[0]}|`);
 	});
 
 	it("refs the idle session for a lease, unrefs at zero, and re-refs on the next acquire", async () => {

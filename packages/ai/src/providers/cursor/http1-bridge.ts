@@ -297,16 +297,35 @@ export function openCursorHttp1Bridge(args: {
 	};
 }
 
+/** Fail the poll queue if decoded payloads outrun the consumer this far.
+ * The poll reader keeps pulling while frames sit unconsumed, so retention
+ * needs a byte budget, not just the response stream's own framing. */
+const POLL_QUEUE_BYTE_LIMIT = 64 * 1024 * 1024;
+
+let __pollQueueByteLimit: number | undefined;
+
+/** Test seam: override (or restore) the poll frame-queue byte budget. */
+export function __setCursorPollQueueByteLimit(bytes: number | undefined): void {
+	__pollQueueByteLimit = bytes;
+}
+
 class FrameQueue implements AsyncIterable<ConnectFrame> {
 	readonly #values: ConnectFrame[] = [];
 	readonly #waiters: Array<() => void> = [];
 	#error: Error | undefined;
 	#done = false;
 	#head = 0;
+	#bytes = 0;
 
 	push(frame: ConnectFrame): void {
 		if (this.#done || this.#error) return;
+		const size = "payload" in frame ? frame.payload.length : 0;
+		if (this.#bytes + size > (__pollQueueByteLimit ?? POLL_QUEUE_BYTE_LIMIT)) {
+			this.fail(new Error(`Cursor HTTP/1 poll frame queue exceeded ${POLL_QUEUE_BYTE_LIMIT} bytes`));
+			return;
+		}
 		this.#values.push(frame);
+		this.#bytes += size;
 		this.#wake();
 	}
 
@@ -353,6 +372,7 @@ class FrameQueue implements AsyncIterable<ConnectFrame> {
 			return undefined;
 		}
 		const value = values[this.#head++];
+		this.#bytes -= "payload" in value ? value.payload.length : 0;
 		if (this.#head === values.length) {
 			values.length = 0;
 			this.#head = 0;

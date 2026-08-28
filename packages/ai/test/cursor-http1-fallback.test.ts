@@ -4,6 +4,7 @@ import { type ConnectFrame, ConnectProtocolError, encodeConnectFrame } from "../
 import { buildCursorRunHeaders } from "../src/providers/cursor/headers";
 import {
 	__setCursorHttp1AppendTimeoutMs,
+	__setCursorPollQueueByteLimit,
 	openCursorHttp1Bridge,
 	pendingCursorHttp1BridgePolls,
 } from "../src/providers/cursor/http1-bridge";
@@ -34,6 +35,7 @@ type PollPlan =
 	| { kind: "data-after-eof" }
 	| { kind: "first-nonzero" }
 	| { kind: "burst" }
+	| { kind: "flood" }
 	| { kind: "malformed-base64" };
 
 let plan: PollPlan = { kind: "success" };
@@ -163,6 +165,20 @@ async function startServer(): Promise<string> {
 				respond();
 				return;
 			}
+			if (plan.kind === "flood") {
+				// Payloads stream in faster than any consumer iterates: the
+				// queue must fail on its byte budget instead of retaining the
+				// whole response. No end envelope — the hostile shape relies
+				// on the budget, not on stream termination, to stop it.
+				const filler = Buffer.alloc(100, 0x61);
+				const parts: Buffer[] = [];
+				for (let i = 0; i < 6; i++) {
+					parts.push(encodeConnectFrame(encodePollResponse(BigInt(i), filler.toString("base64"), false), false));
+				}
+				res.writeHead(200, { "content-type": "application/connect+proto" });
+				res.end(Buffer.concat(parts));
+				return;
+			}
 			if (plan.kind === "eof-without-end") {
 				// The poll eof flag arrives but the Connect end-of-stream envelope
 				// never does — the turn must not settle as a clean end.
@@ -275,6 +291,7 @@ afterEach(async () => {
 	await settleStragglerPollTasks();
 	await stopServer();
 	__setCursorHttp1AppendTimeoutMs(undefined);
+	__setCursorPollQueueByteLimit(undefined);
 	appendStatus = 200;
 });
 
@@ -347,6 +364,29 @@ describe("cursor HTTP/1.1 poll bridge", () => {
 		// A reset would have opened a second poll; the bridge must keep the same attempt.
 		expect(pollHits).toBe(1);
 		bridge.close();
+	});
+
+	it("fails the poll frame queue on its byte budget while the consumer stalls", async () => {
+		plan = { kind: "flood" };
+		__setCursorPollQueueByteLimit(256);
+		const baseUrl = await startServer();
+		const bridge = openCursorHttp1Bridge({
+			baseUrl,
+			requestPath: RUN_PATH,
+			runHeaders: testRunHeaders(),
+			gzipRequest: false,
+		});
+		bridge.write(encodeConnectFrame(Buffer.from("client-request"), false));
+
+		let error: unknown;
+		try {
+			for await (const frame of bridge.frames()) void frame;
+		} catch (cause) {
+			error = cause;
+		}
+		expect(error).toBeInstanceOf(Error);
+		expect(String(error)).toContain("poll frame queue exceeded");
+		await expect(bridge.trailers()).rejects.toBeTruthy();
 	});
 
 	it("rejects a poll EOF that never delivered the Connect end-of-stream envelope", async () => {

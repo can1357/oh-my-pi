@@ -81,6 +81,10 @@ interface PoolEntry {
 const pool = new Map<string, PoolEntry>();
 /** Idle eviction window: a pooled session unused for this long is evicted. */
 const IDLE_EVICT_MS = 60_000;
+/** Hard cap on retained sessions. Age-based eviction alone lets rotating
+ * origins accumulate live unref'd descriptors within the idle window. */
+const MAX_RETAINED_SESSIONS = 8;
+
 /**
  * An in-flight establishment alongside the handle that can terminate it.
  * Successful readiness publishes a live session but owns no request lease.
@@ -173,6 +177,27 @@ function releaseEntryLease(key: string, entry: PoolEntry): void {
 	entry.session.unref();
 	entry.referenced = false;
 	entry.idleSince = Date.now();
+	evictBeyondCap();
+}
+
+/** Evict oldest-idle entries while the pool holds more sessions than
+ * {@link MAX_RETAINED_SESSIONS}. Never touches a leased or draining entry;
+ * if every over-cap entry is leased, the bound re-applies when one releases. */
+function evictBeyondCap(): void {
+	while (pool.size > MAX_RETAINED_SESSIONS) {
+		let victimKey: string | undefined;
+		let victimSince: number | undefined;
+		for (const [key, entry] of pool) {
+			if (entry.outstanding > 0 || entry.draining || entry.idleSince === undefined) continue;
+			if (victimSince === undefined || entry.idleSince < victimSince) {
+				victimSince = entry.idleSince;
+				victimKey = key;
+			}
+		}
+		if (victimKey === undefined) return;
+		const victim = pool.get(victimKey);
+		if (victim) destroyEntry(victimKey, victim);
+	}
 }
 
 /**
@@ -448,6 +473,7 @@ function establishSession(options: CursorH2AcquireOptions, key: string): CursorE
 			// issuance failure must not pin a zero-outstanding idle entry.
 			connect.unref();
 			pool.set(key, { session: connect, outstanding: 0, draining: false, referenced: false, idleSince: Date.now() });
+			evictBeyondCap();
 			handshake.resolve({ kind: "ok", session: connect });
 		};
 		const onGoaway = (): void => {
