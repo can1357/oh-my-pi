@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Bounded each advisor update with the configurable `advisor.maxRequestsPerUpdate` setting, preventing non-repeating tool loops from running indefinitely. Set it to `0` to disable the limit.
+
 ## [18.0.10] - 2026-08-28
 
 ### Added

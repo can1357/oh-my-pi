@@ -919,10 +919,19 @@ export class SessionAdvisors {
 				serviceTierResolver: advisorServiceTierResolver,
 			});
 			advisorAgent.setDisableReasoning(shouldDisableReasoning(advisorThinkingLevel));
+			let advisorRequests = 0;
+			advisorAgent.addBeforeModelCall(() => {
+				advisorRequests++;
+				const maxRequests = this.#host.settings.get("advisor.maxRequestsPerUpdate");
+				if (maxRequests <= 0 || advisorRequests <= maxRequests) return;
+				this.#host.emitNotice(
+					"warning",
+					`Advisor "${advisorName}" reached its request limit (${maxRequests}); this update was stopped. Change advisor.maxRequestsPerUpdate or set it to 0 to disable the limit.`,
+					"advisor",
+				);
+				return { stop: true };
+			});
 			let advisorLoopGuardStopped = false;
-			// The advisor's own loop needs the same repeated-tool-call bound the
-			// primary gets from `LoopGuards`; nothing else stops it reissuing one
-			// failing call until the update is abandoned.
 			const advisorLoopGuard = new AdvisorLoopGuard({
 				settings: this.#host.settings,
 				name: advisorName,
@@ -941,6 +950,7 @@ export class SessionAdvisors {
 			const advisorAgentFacade: AdvisorAgent = {
 				prompt: async input => {
 					let quarantined: string | undefined;
+					advisorRequests = 0;
 					advisorLoopGuard.reset();
 					advisorLoopGuardStopped = false;
 					try {

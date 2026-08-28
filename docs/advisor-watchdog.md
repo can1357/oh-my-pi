@@ -150,6 +150,10 @@ Guard-level suppression is invisible to the model because `AdviseTool` has alrea
 
 The guard's full state — dedupe history and per-update gate — clears on every advisor reset (compaction, session switch, `/new`), so a re-primed reviewer can re-raise issues it already raised against the rewritten transcript.
 
+## Bounded updates with `advisor.maxRequestsPerUpdate`
+
+`advisor.maxRequestsPerUpdate` limits the provider requests made by one advisor update. It defaults to `10` and applies even when tool names or arguments change, so non-repeating loops cannot evade it. Reaching the limit stops that update and emits a warning that identifies the setting; set it to `0` to disable the limit.
+
 ## Bounded catch-up with `advisor.syncBacklog`
 
 `advisor.syncBacklog` is not lockstep turn execution. It is a bounded catch-up delay for the primary agent when the advisor falls behind.
