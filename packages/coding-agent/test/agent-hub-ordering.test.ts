@@ -483,8 +483,7 @@ describe("Agent hub row ordering", () => {
 			expect(Bun.stripANSI(hub.render(120).join("\n"))).toBe(Bun.stripANSI(baseline));
 
 			// Messages: wheel over the conversation list changes conversations;
-			// wheel over the thread pane focuses the thread and expands the
-			// selected message with its full raw body and metadata line.
+			// wheel over the thread pane transfers focus to the selected card.
 			hub.handleInput("3");
 			const frame = hub.render(120).map(Bun.stripANSI);
 			const alphaRow = frame.findIndex(line => line.includes("❯") && line.includes("Main ⇄ Alpha"));
@@ -496,11 +495,10 @@ describe("Agent hub row ordering", () => {
 			hub.handleInput(`\x1b[<64;10;${alphaRow + 1}M`);
 			const alphaThread = Bun.stripANSI(hub.render(120).join("\n"));
 			expect(alphaThread).toContain("Main ⇄ Alpha");
-			// List wheel keeps list focus (no expansion yet)...
-			expect(alphaThread).not.toContain("id a1 · injected");
-			// ...while a wheel over the thread pane focuses it and expands.
+			// Expanded cards are the default even while the conversation pane owns focus.
+			expect(alphaThread).toContain("id a1 · injected");
 			hub.handleInput(`\x1b[<65;110;${alphaRow + 1}M`);
-			expect(Bun.stripANSI(hub.render(120).join("\n"))).toContain("id a1 · injected");
+			expect(Bun.stripANSI(hub.render(120).join("\n"))).toContain("❯ ┌ Alpha → Main");
 		} finally {
 			hub.dispose();
 		}
@@ -1311,6 +1309,15 @@ describe("Agent hub row ordering", () => {
 			expect(wide).toContain("2 delivered");
 			expect(wide).toContain("Found one issue");
 			expect(wide).toContain("↳ m1");
+			expect(wide).toContain("Expanded / Compact");
+			expect(wide).toContain("id m1 · injected");
+			expect(wide).toContain("id m2 · injected");
+			const wideLines = wide.split("\n");
+			const workerConversationRow = wideLines.findIndex(
+				line => line.includes("❯") && line.includes("Main ⇄ Worker"),
+			);
+			expect(workerConversationRow).toBeGreaterThanOrEqual(0);
+			expect(wideLines[workerConversationRow + 1]).toContain("2 messages");
 
 			const narrowList = Bun.stripANSI(hub.render(80).join("\n"));
 			expect(narrowList).toContain("Conversations");
@@ -1322,7 +1329,9 @@ describe("Agent hub row ordering", () => {
 			expect(narrowThread).toContain("id m2 · injected · ↳ m1");
 			hub.handleInput(" ");
 			expect(Bun.stripANSI(hub.render(80).join("\n"))).not.toContain("id m2 · injected");
+			expect(Bun.stripANSI(hub.render(80).join("\n"))).toContain("Space:expanded");
 			hub.handleInput(" ");
+			expect(Bun.stripANSI(hub.render(80).join("\n"))).toContain("Space:compact");
 			const open = vi.spyOn(hub, "openChat");
 			hub.handleInput("o");
 			expect(open).toHaveBeenCalledWith("Worker");
@@ -1386,7 +1395,7 @@ describe("Agent hub row ordering", () => {
 				.map((line, index) => ({ line, index, match: / (Other \d{2}) /u.exec(line) }))
 				.find(entry => entry.match);
 			expect(visible).toBeDefined();
-			hub.handleInput(leftClick(visible!.index + 1));
+			hub.handleInput(leftClick(visible!.index + 2));
 			const selected = Bun.stripANSI(hub.render(120).join("\n"));
 			expect(selected).toContain(`⇄ ${visible!.match![1]}`);
 		} finally {

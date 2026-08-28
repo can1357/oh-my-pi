@@ -89,6 +89,11 @@ export type AgentHubSection = "agents" | "activity" | "messages";
 type ActivityFilter = "all" | "errors" | "responses" | "tools";
 type ActivityScope = "all" | "agent" | "subtree";
 type HubViewMode = "roster" | "tree";
+type MessageViewMode = "expanded" | "compact";
+interface ConversationListRender {
+	lines: string[];
+	hitRows: Array<number | undefined>;
+}
 
 /** Refresh cadence for the relative-time column. */
 const AGE_TICK_MS = 5_000;
@@ -219,7 +224,7 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 	#conversationSelectionExplicit = false;
 	#messageFocus: "conversations" | "thread" = "conversations";
 	#messageDraft = "";
-	#messageExpanded = true;
+	#messageView: MessageViewMode = "expanded";
 	#messageComposing = false;
 	#messageSending = false;
 	#messageThreadOpen = false;
@@ -888,34 +893,32 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 		const split = width >= 90 && !this.#messageThreadOpen;
 		this.#messagesSplitVisible = split;
 		if (split || this.#messageThreadOpen) this.#markSelectedConversationRead();
-		const conversationWidth = split ? Math.max(24, Math.min(36, Math.floor(width * 0.3))) : Math.max(1, width - 4);
+		const conversationWidth = split ? Math.max(30, Math.min(48, Math.floor(width * 0.36))) : Math.max(1, width - 4);
 		this.#lastConversationWidth = conversationWidth;
 		const threadWidth = split ? Math.max(1, width - conversationWidth - 7) : Math.max(1, width - 4);
 		const selected = this.#conversations[this.#selectedConversationRow];
 		const chromeRows = this.#messageComposing || this.#messageNotice ? 1 : 0;
 		const paneRows = Math.max(1, contentRows - body.length - chromeRows);
-		const conversationLines = this.#renderConversationList(conversationWidth, paneRows);
+		const conversationPanel = this.#renderConversationList(conversationWidth, paneRows);
 		const threadLines = this.#renderMessageThread(selected, threadWidth, paneRows);
-		const conversationStart = this.#conversationListStart(paneRows);
 
 		if (split) {
 			for (let index = 0; index < paneRows; index++) {
-				const left = conversationLines[index] ?? "";
+				const left = conversationPanel.lines[index] ?? "";
 				const leftWidth = visibleWidth(left);
 				const right = threadLines[index] ?? "";
 				body.push(`${left}${padding(Math.max(0, conversationWidth - leftWidth))} ${theme.fg("dim", "│")} ${right}`);
-				if (index > 0 && conversationStart + index - 1 < this.#conversations.length) {
-					this.#hitRows[body.length] = conversationStart + index - 1;
-				}
+				const hit = conversationPanel.hitRows[index];
+				if (hit !== undefined) this.#hitRows[body.length] = hit;
 			}
 		} else if (this.#messageThreadOpen && selected) {
 			body.push(...threadLines);
 		} else {
-			body.push(...conversationLines);
-			for (let index = 1; index < conversationLines.length; index++) {
-				if (conversationStart + index - 1 < this.#conversations.length) {
-					this.#hitRows[1 + index] = conversationStart + index - 1;
-				}
+			const panelStart = body.length;
+			body.push(...conversationPanel.lines);
+			for (let index = 0; index < conversationPanel.hitRows.length; index++) {
+				const hit = conversationPanel.hitRows[index];
+				if (hit !== undefined) this.#hitRows[1 + panelStart + index] = hit;
 			}
 		}
 
@@ -936,10 +939,11 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 		}
 		while (body.length < contentRows) body.push("");
 
+		const nextView = this.#messageView === "expanded" ? "compact" : "expanded";
 		const footer =
 			width < 96
-				? "1/2/3:view  j/k:select  Enter:open  c:compose  R:reply  Esc:back"
-				: "1/2/3:view  Tab:pane  j/k/wheel:select  Enter:open  Space:details  o:transcript  c:compose  R:reply  r/x:manage";
+				? `1/2/3:view  j/k:select  Space:${nextView}  Enter:open  c:compose  Esc:back`
+				: `1/2/3:view  Tab:pane  j/k/wheel:select  Space:${nextView}  Enter:open  o:transcript  c:compose  R:reply  r/x:manage`;
 		const lines = [topBorder(width, "Agent Hub")];
 		for (const line of body.slice(0, contentRows)) lines.push(row(line, width));
 		lines.push(divider(width));
@@ -954,6 +958,14 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 		if (rightWidth + 2 >= width) return truncateToWidth(left, width);
 		const compactLeft = truncateToWidth(left, width - rightWidth - 1);
 		return compactLeft + padding(width - visibleWidth(compactLeft) - rightWidth) + right;
+	}
+
+	#messageViewControl(): string {
+		const active = (label: string): string => theme.bg("selectedBg", theme.bold(theme.fg("accent", ` ${label} `)));
+		const inactive = (label: string): string => theme.fg("muted", ` ${label} `);
+		return this.#messageView === "expanded"
+			? `${active("Expanded")}${theme.fg("dim", "/")}${inactive("Compact")}`
+			: `${inactive("Expanded")}${theme.fg("dim", "/")}${active("Compact")}`;
 	}
 
 	#conversationPeerFor(conversation: IrcConversation): string | undefined {
@@ -1031,12 +1043,15 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 	}
 
 	#conversationListStart(rows: number): number {
-		const budget = Math.max(0, rows - 1);
+		const visibleEntries = Math.max(1, Math.floor(Math.max(0, rows - 1) / 2));
 		const selected = Math.min(this.#selectedConversationRow, Math.max(0, this.#conversations.length - 1));
-		return Math.max(0, Math.min(selected - Math.floor(budget / 2), Math.max(0, this.#conversations.length - budget)));
+		return Math.max(
+			0,
+			Math.min(selected - Math.floor(visibleEntries / 2), Math.max(0, this.#conversations.length - visibleEntries)),
+		);
 	}
 
-	#renderConversationList(width: number, rows: number): string[] {
+	#renderConversationList(width: number, rows: number): ConversationListRender {
 		const unreadTotal = this.#conversations.reduce((sum, conversation) => sum + conversation.unread, 0);
 		const header = `  ${theme.bold(
 			this.#messageFocus === "conversations" ? theme.fg("accent", "Conversations") : "Conversations",
@@ -1048,13 +1063,15 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 			.filter(Boolean)
 			.join(theme.fg("dim", theme.sep.dot));
 		const lines = [this.#messageColumns(header, headerMeta, width)];
+		const hitRows: Array<number | undefined> = [undefined];
 		if (this.#conversations.length === 0) {
 			lines.push(theme.fg("muted", "No IRC messages recorded yet"));
+			hitRows.push(undefined);
 		} else {
-			const budget = Math.max(0, rows - 1);
+			const visibleEntries = Math.max(1, Math.floor(Math.max(0, rows - 1) / 2));
 			const selected = Math.min(this.#selectedConversationRow, this.#conversations.length - 1);
 			const start = this.#conversationListStart(rows);
-			for (let index = start; index < Math.min(this.#conversations.length, start + budget); index++) {
+			for (let index = start; index < Math.min(this.#conversations.length, start + visibleEntries); index++) {
 				const conversation = this.#conversations[index]!;
 				const active = index === selected;
 				const cursor =
@@ -1065,24 +1082,48 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 						? theme.bold(theme.fg("accent", label))
 						: theme.bold(label);
 				const left = `${cursor} ${this.#conversationIcon(conversation)} ${styledLabel}`;
-				const meta = [
-					conversation.unread > 0 ? theme.fg("warning", `●${conversation.unread}`) : "",
-					theme.fg("dim", String(conversation.messages.length)),
-					theme.fg("dim", this.#conversationAge(conversation)),
-				]
-					.filter(Boolean)
-					.join(theme.fg("dim", theme.sep.dot));
-				let rendered = this.#messageColumns(left, meta, width);
-				if (this.#hoveredConversationRow === index) {
-					const renderedWidth = visibleWidth(rendered);
-					if (renderedWidth < width) rendered += padding(width - renderedWidth);
-					rendered = theme.bg("selectedBg", rendered);
+				const unread = conversation.unread > 0 ? theme.fg("warning", `●${conversation.unread}`) : "";
+				let failed = 0;
+				let pending = 0;
+				for (const message of conversation.messages) {
+					if (message.outcome === "failed") failed++;
+					else if (message.outcome === "pending") pending++;
 				}
-				lines.push(rendered);
+				const deliveryState =
+					failed > 0
+						? theme.fg("error", `${failed} failed`)
+						: pending > 0
+							? theme.fg("warning", `${pending} pending`)
+							: conversation.messages.length > 0
+								? theme.fg("success", `${conversation.messages.length} delivered`)
+								: theme.fg("muted", "ready");
+				const details = [
+					theme.fg(
+						"dim",
+						`${conversation.messages.length} ${conversation.messages.length === 1 ? "message" : "messages"}`,
+					),
+					theme.fg("dim", this.#conversationAge(conversation)),
+					deliveryState,
+				].join(theme.fg("dim", theme.sep.dot));
+				let titleLine = this.#messageColumns(left, unread, width);
+				let detailLine = truncateToWidth(`    ${details}`, width);
+				if (this.#hoveredConversationRow === index) {
+					const titleWidth = visibleWidth(titleLine);
+					const detailWidth = visibleWidth(detailLine);
+					if (titleWidth < width) titleLine += padding(width - titleWidth);
+					if (detailWidth < width) detailLine += padding(width - detailWidth);
+					titleLine = theme.bg("selectedBg", titleLine);
+					detailLine = theme.bg("selectedBg", detailLine);
+				}
+				lines.push(titleLine, detailLine);
+				hitRows.push(index, index);
 			}
 		}
-		while (lines.length < rows) lines.push("");
-		return lines.slice(0, rows);
+		while (lines.length < rows) {
+			lines.push("");
+			hitRows.push(undefined);
+		}
+		return { lines: lines.slice(0, rows), hitRows: hitRows.slice(0, rows) };
 	}
 
 	#renderMessageThread(conversation: IrcConversation | undefined, width: number, rows: number): string[] {
@@ -1093,7 +1134,6 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 			];
 		}
 		const focused = this.#messageFocus === "thread";
-		const titleCursor = "  ";
 		const title = focused
 			? theme.bold(theme.fg("accent", sanitizeDisplayText(conversation.label)))
 			: theme.bold(sanitizeDisplayText(conversation.label));
@@ -1106,8 +1146,11 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 			.filter(Boolean)
 			.join(theme.fg("dim", theme.sep.dot));
 		const lines = [
-			this.#messageColumns(`${titleCursor}${this.#conversationTypeIcon(conversation)} ${title}`, titleMeta, width),
-			truncateToWidth(`  ${this.#messageThreadFacts(conversation)}`, width),
+			this.#messageColumns(`  ${this.#conversationTypeIcon(conversation)} ${title}`, titleMeta, width),
+			truncateToWidth(
+				`  ${this.#messageViewControl()}${theme.fg("dim", theme.sep.dot)}${this.#messageThreadFacts(conversation)}`,
+				width,
+			),
 		];
 		const budget = Math.max(0, rows - lines.length);
 		if (conversation.messages.length === 0) {
@@ -1127,11 +1170,12 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 			const reply = message.replyTo
 				? `${theme.fg("dim", theme.sep.dot)}${theme.fg("accent", `↳ ${sanitizeDisplayText(message.replyTo)}`)}`
 				: "";
-			const header =
-				`${cursor} ${theme.fg("dim", activityClock(message.ts))} ${this.#messageIdentity(message.from)} ` +
-				`${theme.fg("dim", "→")} ${theme.fg("muted", recipients)}` +
-				`${theme.fg("dim", theme.sep.dot)}${this.#messageOutcome(message.outcome)}${reply}`;
-			if (!active || !this.#messageExpanded) {
+
+			if (this.#messageView === "compact") {
+				const header =
+					`${cursor} ${theme.fg("dim", activityClock(message.ts))} ${this.#messageIdentity(message.from)} ` +
+					`${theme.fg("dim", "→")} ${theme.fg("muted", recipients)}` +
+					`${theme.fg("dim", theme.sep.dot)}${this.#messageOutcome(message.outcome)}${reply}`;
 				const error =
 					message.outcome === "failed" && message.error
 						? `${theme.sep.dot}${sanitizeDisplayText(message.error)}`
@@ -1142,16 +1186,21 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 				return [`${prefix}${truncateToWidth(sanitizeLine(message.body + error), Math.max(1, available))}`];
 			}
 
-			const row = [truncateToWidth(header, width)];
-			const rail = `  ${theme.fg("accent", "│")} `;
+			const connector = (glyph: string): string => (active ? theme.fg("accent", glyph) : theme.fg("muted", glyph));
+			const speaker =
+				`${cursor} ${connector("┌")} ${this.#messageIdentity(message.from)} ` +
+				`${theme.fg("dim", "→")} ${theme.fg("muted", recipients)}`;
+			const delivery = `${this.#messageOutcome(message.outcome)}${reply}${theme.fg("dim", theme.sep.dot)}${theme.fg("dim", activityClock(message.ts))}`;
+			const messageLines = [this.#messageColumns(speaker, delivery, width)];
+			const rail = `  ${connector("│")} `;
 			const bodyWidth = Math.max(1, width - visibleWidth(rail));
 			for (const rawParagraph of message.body.split(/\r?\n/u)) {
 				const wrappedLines = wrapTextWithAnsi(sanitizeDisplayText(rawParagraph), bodyWidth);
-				if (wrappedLines.length === 0) row.push(rail);
-				else for (const wrapped of wrappedLines) row.push(`${rail}${wrapped}`);
+				if (wrappedLines.length === 0) messageLines.push(rail);
+				else for (const wrapped of wrappedLines) messageLines.push(`${rail}${wrapped}`);
 			}
 			if (message.outcome === "failed" && message.error) {
-				row.push(`${rail}${theme.fg("error", sanitizeDisplayText(message.error))}`);
+				messageLines.push(`${rail}${theme.fg("error", sanitizeDisplayText(message.error))}`);
 			}
 			const metadata = [
 				`id ${sanitizeDisplayText(message.id)}`,
@@ -1162,12 +1211,13 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 			]
 				.filter(Boolean)
 				.join(theme.sep.dot);
-			row.push(`    ${theme.fg("muted", truncateToWidth(metadata, Math.max(1, width - 4)))}`);
-			return row;
+			messageLines.push(
+				`  ${connector("└")} ${theme.fg("muted", truncateToWidth(metadata, Math.max(1, width - 4)))}`,
+			);
+			return messageLines;
 		};
 		const heights = conversation.messages.map((_message, index) => renderRow(index).length);
-		// Window by rendered lines so the expanded message, its reply context,
-		// and delivery metadata stay together.
+		// Window by rendered lines so complete message cards stay together.
 		let start = selected;
 		let used = heights[selected]!;
 		while (start > 0 && used + heights[start - 1]! <= budget) {
@@ -1742,14 +1792,12 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 			Math.min(this.#selectedConversationRow + delta, this.#conversations.length - 1),
 		);
 		this.#selectedMessageRow = (this.#conversations[this.#selectedConversationRow]?.messages.length ?? 1) - 1;
-		this.#messageExpanded = true;
 		// Wide split marks on render; narrow list-only must keep unread until thread open.
 	}
 
 	#moveThreadSelection(delta: -1 | 1): void {
 		const messages = this.#conversations[this.#selectedConversationRow]?.messages ?? [];
 		this.#selectedMessageRow = Math.max(0, Math.min(this.#selectedMessageRow + delta, messages.length - 1));
-		this.#messageExpanded = true;
 	}
 
 	handleWheel(delta: -1 | 1): void {
@@ -1803,7 +1851,6 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 		}
 		if (this.#section === "messages") {
 			this.#conversationSelectionExplicit = true;
-			this.#messageExpanded = true;
 			if (index === this.#selectedConversationRow) {
 				this.#messageFocus = "thread";
 				this.#messageThreadOpen = true;
@@ -1832,7 +1879,6 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 		if (section === "messages") {
 			this.#messageFocus = "conversations";
 			this.#messageThreadOpen = false;
-			this.#messageExpanded = true;
 			this.#refreshMessages();
 		}
 		this.#requestRender();
@@ -1880,7 +1926,6 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 			if (this.#conversations.length > 0) {
 				this.#messageFocus = "thread";
 				this.#messageThreadOpen = true;
-				this.#messageExpanded = true;
 				this.#markSelectedConversationRead();
 				this.#requestRender();
 			}
@@ -1891,7 +1936,6 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 			if (this.#messageFocus === "thread") {
 				// Narrow layout only shows the thread when drilled in; wide split is already visible.
 				if (!this.#messagesSplitVisible) this.#messageThreadOpen = true;
-				this.#messageExpanded = true;
 				this.#markSelectedConversationRead();
 			} else {
 				this.#messageThreadOpen = false;
@@ -1907,12 +1951,9 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 			this.#moveMessageSelection(-1);
 			return;
 		}
-		if (keyData === " " && this.#messageFocus === "thread") {
-			const messages = this.#conversations[this.#selectedConversationRow]?.messages ?? [];
-			if (messages.length > 0) {
-				this.#messageExpanded = !this.#messageExpanded;
-				this.#requestRender();
-			}
+		if (keyData === " ") {
+			this.#messageView = this.#messageView === "expanded" ? "compact" : "expanded";
+			this.#requestRender();
 			return;
 		}
 		if (keyData === "o") {
