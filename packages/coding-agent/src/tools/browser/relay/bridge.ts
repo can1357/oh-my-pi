@@ -849,14 +849,15 @@ export class RelayBridge {
 			.then(async () => {
 				await this.#awaitPendingSubscriptions(tab, key);
 				if (!tab.attached || tab.detaching || tab.restoring || this.#sessionHolders(tabId).length === 0) return;
-				if (this.#latestSubscriptionForKey(tab, key)) return;
+				const current = this.#latestSubscriptionForKey(tab, key);
+				const command = current
+					? subscriptionEquals(current, orphaned)
+						? null
+						: { method: current.method, params: current.params }
+					: this.#subscriptionDisableCommand(orphaned);
+				if (!command) return;
 				this.#assertExtensionCurrent(expectedExt);
-				await this.#rpc({
-					op: "send",
-					tabId,
-					method: disable.method,
-					params: disable.params,
-				});
+				await this.#rpc({ op: "send", tabId, method: command.method, params: command.params });
 				this.#assertExtensionCurrent(expectedExt);
 			})
 			.catch(err => {

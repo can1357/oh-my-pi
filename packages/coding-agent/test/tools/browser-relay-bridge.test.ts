@@ -1168,6 +1168,70 @@ describe("RelayBridge tab grouping", () => {
 		expect(holder.messages.filter(message => message.id === commandId && "result" in message)).toHaveLength(1);
 	});
 
+	it("reapplies the latest surviving live root subscription when an orphaned in-flight setter completes", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const survivingOwner = new FakeCdpSocket();
+		const survivingOwnerConn = bridge.cdpConnected(survivingOwner);
+		const survivingOwnerSession = await attachPage(bridge, ext, survivingOwner, survivingOwnerConn, 1);
+		const orphanedOwner = new FakeCdpSocket();
+		const orphanedOwnerConn = bridge.cdpConnected(orphanedOwner);
+		const orphanedOwnerSession = await attachPage(bridge, ext, orphanedOwner, orphanedOwnerConn, 1);
+		const holder = new FakeCdpSocket();
+		const holderConn = bridge.cdpConnected(holder);
+		const holderSession = await attachPage(bridge, ext, holder, holderConn, 1);
+
+		bridge.cdpMessage(
+			survivingOwnerConn,
+			JSON.stringify({
+				id: ++msgSeq,
+				sessionId: survivingOwnerSession,
+				method: "Fetch.enable",
+				params: { patterns: [{ urlPattern: "https://surviving.example/*" }] },
+			}),
+		);
+		await flush();
+		ack(bridge, ext, "send");
+		await flush();
+
+		bridge.cdpMessage(
+			orphanedOwnerConn,
+			JSON.stringify({
+				id: ++msgSeq,
+				sessionId: orphanedOwnerSession,
+				method: "Fetch.enable",
+				params: { patterns: [{ urlPattern: "https://orphaned.example/*" }] },
+			}),
+		);
+		await flush();
+		bridge.cdpClosed(orphanedOwnerConn);
+		ack(bridge, ext, "send");
+		await waitFor(() => ext.rpcs("send").length === 3, "reapply surviving Fetch.enable");
+		expect(ext.rpcs("send").map(rpc => rpc.method)).toEqual(["Fetch.enable", "Fetch.enable", "Fetch.enable"]);
+		expect(ext.rpcs("send")[2]!.params).toEqual({
+			patterns: [{ urlPattern: "https://surviving.example/*" }],
+		});
+		ack(bridge, ext, "send");
+		await flush();
+
+		const commandId = ++msgSeq;
+		bridge.cdpMessage(
+			holderConn,
+			JSON.stringify({ id: commandId, sessionId: holderSession, method: "Network.getCookies" }),
+		);
+		await flush();
+		expect(ext.rpcs("send").map(rpc => rpc.method)).toEqual([
+			"Fetch.enable",
+			"Fetch.enable",
+			"Fetch.enable",
+			"Network.getCookies",
+		]);
+		ack(bridge, ext, "send", { cookies: [] });
+		await flush();
+		expect(holder.messages.filter(message => message.id === commandId && "result" in message)).toHaveLength(1);
+	});
+
 	it("cleans up an earlier replayed subscription when its owner disconnects during a later replay await", async () => {
 		const bridge = new RelayBridge({});
 		const ext = new FakeExtSocket();
