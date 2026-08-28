@@ -53,6 +53,38 @@ describe("decideAttempt", () => {
 		expect(action).toEqual({ type: "dispatch", targetModelId: "backup" });
 	});
 
+	it("dispatches preferred unused target over list order", () => {
+		const action = decideAttempt({
+			route: route({ targets: ["primary", "backup"] }),
+			state: state(),
+			commitState: "probing",
+			preferredTargetId: "backup",
+		});
+		expect(action).toEqual({ type: "dispatch", targetModelId: "backup" });
+	});
+
+	it("uses firstUnused when preferred was already attempted (negative)", () => {
+		const action = decideAttempt({
+			route: route({ targets: ["primary", "backup"] }),
+			state: state({ attemptedTargets: new Set(["backup"]) }),
+			commitState: "probing",
+			preferredTargetId: "backup",
+		});
+		expect(action).toEqual({ type: "dispatch", targetModelId: "primary" });
+		expect(action).not.toEqual({ type: "dispatch", targetModelId: "backup" });
+	});
+
+	it("ignores preferred that is not a route target (negative)", () => {
+		const action = decideAttempt({
+			route: route({ targets: ["primary", "backup"] }),
+			state: state(),
+			commitState: "probing",
+			preferredTargetId: "other",
+		});
+		expect(action).toEqual({ type: "dispatch", targetModelId: "primary" });
+		expect(action).not.toEqual({ type: "dispatch", targetModelId: "other" });
+	});
+
 	it("returns terminal after commit even when fallbacks remain (negative)", () => {
 		const fallbacks = { provider_unavailable: ["backup"] as const };
 		const probingCommitted = decideAttempt({

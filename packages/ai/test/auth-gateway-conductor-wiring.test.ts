@@ -382,4 +382,80 @@ describe("auth-gateway conductor wiring", () => {
 			await fs.rm(dir, { recursive: true, force: true });
 		}
 	});
+
+	it("prefers the remembered prompt-cache model on the next matching request", async () => {
+		registerMockApi();
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-conductor-wire-cache-"));
+		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
+		storage.setRuntimeApiKey("openrouter", "test-key");
+		const primary = createMockModel({
+			provider: "openrouter",
+			id: "primary-id",
+			handler: () => {
+				throw new Error("service unavailable");
+			},
+		});
+		const backup = createMockModel({
+			provider: "openrouter",
+			id: "backup-id",
+			handler: { content: ["ok"] },
+		});
+		const resolveModel = (id: string) => {
+			if (id === "primary-id") return primary.model;
+			if (id === "backup-id") return backup.model;
+			return undefined;
+		};
+		const registry = new RouteRegistry(resolveModel);
+		registry.register({
+			id: "virtual-impl",
+			root: {
+				type: "fallback",
+				on: ["provider_unavailable"],
+				children: [
+					{ type: "target", model: "primary-id" },
+					{ type: "target", model: "backup-id" },
+				],
+			},
+		});
+		const handle = startAuthGateway({
+			bind: "127.0.0.1:0",
+			bearerTokens: ["t"],
+			storage,
+			resolveModel,
+			routeRegistry: registry,
+			version: "test",
+		});
+		const post = async (promptCacheKey: string): Promise<Response> =>
+			fetch(`${handle.url}/v1/chat/completions`, {
+				method: "POST",
+				headers: { "Content-Type": "application/json", Authorization: "Bearer t" },
+				body: JSON.stringify({
+					model: "virtual-impl",
+					messages: [{ role: "user", content: "hi" }],
+					stream: false,
+					prompt_cache_key: promptCacheKey,
+				}),
+			});
+		try {
+			const first = await post("k");
+			expect(first.status).toBe(200);
+			expect(primary.calls.length).toBe(1);
+			expect(backup.calls.length).toBe(1);
+
+			const second = await post("k");
+			expect(second.status).toBe(200);
+			expect(primary.calls.length).toBe(1);
+			expect(backup.calls.length).toBe(2);
+
+			const other = await post("other");
+			expect(other.status).toBe(200);
+			expect(primary.calls.length).toBe(2);
+			expect(primary.calls.length).not.toBe(1);
+			expect(backup.calls.length).toBe(3);
+		} finally {
+			await handle.close();
+			storage.close();
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	});
 });

@@ -61,6 +61,7 @@
 - Auth gateway `POST /v1/realtime` and `POST /v1/audio/speech` return 501 after auth.
 - Auth gateway skips targets whose provider health circuit is open.
 - Auth gateway remembers prompt-cache affinity after a successful non-error stream.
+- Auth gateway prefers the remembered prompt-cache model on the first dispatch of a matching request.
 
 ## [18.0.8] - 2026-08-27
 

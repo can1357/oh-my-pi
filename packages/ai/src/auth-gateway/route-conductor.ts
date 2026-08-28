@@ -46,8 +46,9 @@ export function decideAttempt(args: {
 	state: ExecutionState;
 	classification?: GatewayErrorClassification;
 	commitState: StreamCommitState;
+	preferredTargetId?: string;
 }): ConductorAction {
-	const { state, classification, commitState } = args;
+	const { state, classification, commitState, preferredTargetId } = args;
 	const route = args.route as ConductorRoute;
 
 	if (commitState !== "probing" || state.committed) {
@@ -55,7 +56,12 @@ export function decideAttempt(args: {
 	}
 
 	if (!classification) {
-		const next = firstUnused(route.targets, state.attemptedTargets);
+		const next =
+			preferredTargetId !== undefined &&
+			route.targets.includes(preferredTargetId) &&
+			!state.attemptedTargets.has(preferredTargetId)
+				? preferredTargetId
+				: firstUnused(route.targets, state.attemptedTargets);
 		return next === undefined ? { type: "terminal" } : { type: "dispatch", targetModelId: next };
 	}
 
