@@ -1,4 +1,4 @@
-import type { AgentTool, AgentToolResult } from "@oh-my-pi/pi-agent-core";
+import type { AgentTool, AgentToolContext, AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import type { ToolSession } from "../../tools";
 import { ToolError } from "../../tools/tool-errors";
@@ -128,14 +128,18 @@ export async function callSessionTool(name: string, args: unknown, options: Tool
 	const tool = getTool(options.session, name);
 	const normalizedArgs = normalizeArgs(args);
 	const toolCallId = `js-${name}-${crypto.randomUUID()}`;
+	// The kernel is a programmatic consumer: model-facing inline caps and
+	// artifact spilling would hand the cell a middle-elided string, which
+	// silently corrupts anything it decodes or writes to disk. The flag must
+	// also survive a session that exposes no tool context (SDK embedding,
+	// tests) — tools already read the context defensively, and the caps this
+	// flag suppresses are the only members those tools consult here.
+	const baseContext = options.session.getToolContext?.();
+	const context: AgentToolContext = baseContext
+		? { ...baseContext, programmaticCaller: true }
+		: ({ programmaticCaller: true } as AgentToolContext);
 	try {
-		const result = await tool.execute(
-			toolCallId,
-			normalizedArgs,
-			options.signal,
-			undefined,
-			options.session.getToolContext?.(),
-		);
+		const result = await tool.execute(toolCallId, normalizedArgs, options.signal, undefined, context);
 		const textBlocks = result.content.filter(
 			(content): content is { type: "text"; text: string } =>
 				content.type === "text" && typeof content.text === "string",

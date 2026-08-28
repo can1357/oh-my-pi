@@ -676,6 +676,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 			notices?: readonly string[];
 			terminalId?: string;
 			wallTimeMs?: number;
+			ctx?: AgentToolContext;
 		} = {},
 	): Promise<AgentToolResult<BashToolDetails>> {
 		const exitCode = result.exitCode;
@@ -729,7 +730,10 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 		// that id instead of saving a second (already-truncated) copy, so the
 		// `[raw output: artifact://N]` footer and the truncation notice agree.
 		const inlineCap = {
-			maxBytes: resolveInlineByteCapBudget(this.session.settings),
+			// A programmatic caller (`eval` bridge) hands this text to a kernel, so
+			// the model-facing budget must not elide its middle. `enforceInlineByteCap`
+			// treats a 0 budget as "return unchanged".
+			maxBytes: options.ctx?.programmaticCaller === true ? 0 : resolveInlineByteCapBudget(this.session.settings),
 			saveArtifact: (full: string) => result.artifactId ?? saveBashOriginalArtifact(this.session, full),
 		};
 
@@ -810,6 +814,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 		resolvedEnv?: Record<string, string>;
 		onUpdate?: AgentToolUpdateCallback<BashToolDetails>;
 		forwardUpdates: boolean;
+		ctx?: AgentToolContext;
 	}): ManagedBashJobHandle {
 		const manager = this.session.asyncJobManager;
 		if (!manager) {
@@ -849,6 +854,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 						requestedTimeoutSec: options.requestedTimeoutSec,
 						notices: options.notices ?? [],
 						wallTimeMs,
+						ctx: options.ctx,
 					});
 					const finalText = this.#extractTextResult(finalResult);
 					latestText = finalText;
@@ -1023,6 +1029,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 				resolvedEnv,
 				onUpdate,
 				forwardUpdates: false,
+				ctx,
 			});
 			return this.#buildBackgroundStartResult(job.jobId, "", timeoutSec, {
 				requestedTimeoutSec,
@@ -1061,6 +1068,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 				resolvedEnv,
 				onUpdate,
 				forwardUpdates: !startBackgrounded,
+				ctx,
 			});
 			if (startBackgrounded) {
 				return this.#buildBackgroundStartResult(job.jobId, "", timeoutSec, {
@@ -1359,6 +1367,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 					notices: bridgeNotices,
 					terminalId: handle.terminalId,
 					wallTimeMs: performance.now() - bridgeWallTimeStart,
+					ctx,
 				});
 			} finally {
 				clearTimeout(timeoutTimer);
@@ -1443,6 +1452,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 			requestedTimeoutSec,
 			notices: pendingNotices,
 			wallTimeMs,
+			ctx,
 		});
 	}
 }

@@ -129,7 +129,7 @@ export class ComputerTool implements AgentTool<ComputerSchema, ComputerToolDetai
 		params: ComputerToolInput,
 		signal?: AbortSignal,
 		_onUpdate?: AgentToolUpdateCallback<ComputerToolDetails>,
-		_context?: AgentToolContext,
+		ctx?: AgentToolContext,
 	): Promise<AgentToolResult<ComputerToolDetails>> {
 		throwIfAborted(signal);
 		if (this.#closed) throw new ToolError("Computer session is closed");
@@ -170,6 +170,9 @@ export class ComputerTool implements AgentTool<ComputerSchema, ComputerToolDetai
 		}
 		const textOnly = textBlocks.join("\n");
 		const cappedText = await enforceInlineByteCap(textOnly, {
+			// A programmatic caller (`eval` bridge) decodes this text verbatim;
+			// middle elision there is silent data corruption, not context defense.
+			maxBytes: ctx?.programmaticCaller === true ? 0 : undefined,
 			saveArtifact: full => saveComputerOutputArtifact(this.session, full),
 		});
 		const images = run.displays

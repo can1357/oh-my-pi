@@ -363,13 +363,15 @@ describe("executeJs", () => {
 		expect(result.exitCode).toBe(0);
 		expect(getStatusEvents(result)).toHaveLength(2);
 		expect(getJsonData(result)).toEqual({ wide: "wide", limited: "limited" });
+		// The kernel is a programmatic caller, so the bridge marks the context and
+		// the tool skips its model-facing inline caps.
 		expect(execute).toHaveBeenNthCalledWith(
 			1,
 			expect.stringMatching(/^js-read-/),
 			{ path: "artifact://15:raw:1-1400", [INTENT_FIELD]: "js prelude" },
 			expect.any(AbortSignal),
 			undefined,
-			undefined,
+			{ programmaticCaller: true },
 		);
 		expect(execute).toHaveBeenNthCalledWith(
 			2,
@@ -377,7 +379,7 @@ describe("executeJs", () => {
 			{ path: "artifact://15:raw:1-2", [INTENT_FIELD]: "js prelude" },
 			expect.any(AbortSignal),
 			undefined,
-			undefined,
+			{ programmaticCaller: true },
 		);
 	});
 

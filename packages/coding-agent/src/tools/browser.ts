@@ -226,7 +226,7 @@ export class BrowserTool implements AgentTool<typeof browserSchema, BrowserToolD
 		params: BrowserParams,
 		signal?: AbortSignal,
 		_onUpdate?: AgentToolUpdateCallback<BrowserToolDetails>,
-		_ctx?: AgentToolContext,
+		ctx?: AgentToolContext,
 	): Promise<AgentToolResult<BrowserToolDetails>> {
 		try {
 			throwIfAborted(signal);
@@ -241,7 +241,7 @@ export class BrowserTool implements AgentTool<typeof browserSchema, BrowserToolD
 				case "close":
 					return await this.#close(name, params, details, timeoutMs, signal);
 				case "run":
-					return await this.#run(name, params, details, timeoutMs, signal);
+					return await this.#run(name, params, details, timeoutMs, signal, ctx);
 				default:
 					throw new ToolError(`Unsupported action: ${(params as BrowserParams).action}`);
 			}
@@ -383,6 +383,7 @@ export class BrowserTool implements AgentTool<typeof browserSchema, BrowserToolD
 		details: BrowserToolDetails,
 		timeoutMs: number,
 		signal?: AbortSignal,
+		ctx?: AgentToolContext,
 	): Promise<AgentToolResult<BrowserToolDetails>> {
 		if (!params.code?.trim()) {
 			throw new ToolError("Missing required parameter 'code' for action 'run'.");
@@ -418,6 +419,9 @@ export class BrowserTool implements AgentTool<typeof browserSchema, BrowserToolD
 		// text inline; the full text stays recoverable via the artifact footer
 		// when allocation succeeds.
 		const cappedText = await enforceInlineByteCap(textOnly, {
+			// A programmatic caller (`eval` bridge) decodes this text; elide it and
+			// binary payloads (screenshot base64) silently lose their middle bytes.
+			maxBytes: ctx?.programmaticCaller === true ? 0 : undefined,
 			saveArtifact: full => saveBrowserOutputArtifact(this.session, full),
 		});
 		details.result = cappedText;

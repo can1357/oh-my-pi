@@ -54,7 +54,7 @@ describe("callSessionTool", () => {
 			{ path: "/tmp/demo.txt", [INTENT_FIELD]: "js prelude" },
 			undefined,
 			undefined,
-			undefined,
+			{ programmaticCaller: true },
 		);
 		expect(statuses).toEqual([expect.objectContaining({ op: "read", path: "/tmp/demo.txt", chars: 5 })]);
 	});
@@ -74,7 +74,7 @@ describe("callSessionTool", () => {
 			{ command: "true", [INTENT_FIELD]: "js prelude" },
 			undefined,
 			undefined,
-			context,
+			{ ...context, programmaticCaller: true },
 		);
 	});
 

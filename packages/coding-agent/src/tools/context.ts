@@ -18,6 +18,11 @@ declare module "@oh-my-pi/pi-agent-core" {
 		xdevTierResolved?(tier: "read" | "write" | "exec"): void;
 		/** Set only after an interactive prompt approves provider computer safety checks. */
 		providerSafetyApproved?: boolean;
+		/** Set when a tool runs for a programmatic caller (the `eval` tool bridge)
+		 *  instead of the model: inline output caps exist to protect the model's
+		 *  context window, so a kernel-visible result must stay untruncated — a cell
+		 *  that base64-decodes an elided string silently corrupts binary data. */
+		programmaticCaller?: boolean;
 	}
 }
 
