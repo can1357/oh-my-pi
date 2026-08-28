@@ -348,9 +348,15 @@ export async function createStateSyncRuntime(opts: CreateStateSyncOptions): Prom
 
 		const objectStore = await resolveObjectStore(settings, opts.resolveConfigValue);
 		const sessionsDir = getSessionsDir(agentDir);
+
+		// The cursor store must exist before the domains AND before the body
+		// replicator: the config and sessions domains use it to remember
+		// publications so deletions become tombstones, and the replicator uses it
+		// to remember which local snapshot each uploaded object holds.
+		const syncStore = new StateSyncStore(getStateSyncDbPath(agentDir));
 		const replicator =
 			objectStore && settings.get("objects.sessions") !== false
-				? new SessionReplicator({ store: objectStore, sessionsDir })
+				? new SessionReplicator({ store: objectStore, sessionsDir, sync: syncStore })
 				: undefined;
 
 		attachBlobObjectStore(settings, objectStore);
@@ -358,9 +364,6 @@ export async function createStateSyncRuntime(opts: CreateStateSyncOptions): Prom
 		// this run is fetchable rather than only on the next one.
 		activeReplicator = replicator;
 
-		// The cursor store must exist before the domains: the config domain uses
-		// it to remember publications so deletions become tombstones.
-		const syncStore = new StateSyncStore(getStateSyncDbPath(agentDir));
 		const scanned = await buildDomains(enabled, agentDir, sessionsDir, syncStore);
 		// Body replication rides along with the sessions index scan.
 		const domains = replicator

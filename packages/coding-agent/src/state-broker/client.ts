@@ -159,7 +159,17 @@ export class StateBrokerClient {
 		if (typeof body.more !== "boolean") throw this.#malformed(status, "delta.more not a boolean");
 		if (!Array.isArray(body.entries) || !body.entries.every(isStateEntry))
 			throw this.#malformed(status, "delta.entries malformed");
-		return { domain: expected, seq: body.seq, entries: body.entries as StateEntry[], more: body.more };
+		// `epoch`/`head` are optional: a broker predating them omits them, and the
+		// caller then simply has no rollback signal. Malformed values are dropped
+		// rather than fatal, since they only ever trigger a conservative replay.
+		return {
+			domain: expected,
+			seq: body.seq,
+			entries: body.entries as StateEntry[],
+			more: body.more,
+			epoch: typeof body.epoch === "string" && body.epoch.length > 0 ? body.epoch : undefined,
+			head: isFiniteNumber(body.head) ? body.head : undefined,
+		};
 	}
 
 	#validatePush(raw: unknown, expected: StateDomainId, status: number): StatePushResponse {

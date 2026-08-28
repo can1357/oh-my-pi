@@ -25,8 +25,9 @@ import { logger } from "@oh-my-pi/pi-utils";
 import { sessionDirNameForCwd } from "../session/session-paths";
 import { parseTitleSlotLine } from "../session/session-title-slot";
 import { type ObjectStore, sessionKey } from "./object-store";
+import type { StateSyncStore, UploadedSnapshot } from "./replica";
 import { listSyncedProjects, projectObjectSlug, type ScopedProject } from "./project-scope";
-import { type OwnedSessionFile, scanOwnedSessionFiles } from "./session-files";
+import { type OwnedSessionFile, scanOwnedSessions } from "./session-files";
 
 /** Quiet period before a scheduled upload fires, coalescing a burst of appends. */
 const UPLOAD_DEBOUNCE_MS = 3_000;
@@ -41,14 +42,33 @@ const MAX_CONCURRENT_TRANSFERS = 4;
  */
 const RECONCILE_INTERVAL_MS = 5 * 60_000;
 
+/**
+ * Recorded against an object whose bytes are known NOT to match any local
+ * state, because the body changed while it was being read.
+ *
+ * Negative values can never equal a real `stat`, so this reads as "we have
+ * uploaded something, and it is stale". That is deliberately different from
+ * having NO record, which means "we have never uploaded this" and permits
+ * falling back to comparing the remote timestamp.
+ */
+const STALE_UPLOAD: UploadedSnapshot = { mtime: -1, size: -1 };
+
 export interface SessionReplicatorOptions {
 	store: ObjectStore;
 	sessionsDir: string;
+	/**
+	 * Replica sync store, used to remember exactly which local snapshot each
+	 * uploaded object holds. Optional: without it every upload falls back to
+	 * comparing remote timestamps, which cannot detect a body appended to
+	 * during its own transfer.
+	 */
+	sync?: StateSyncStore;
 }
 
 export class SessionReplicator {
 	readonly #store: ObjectStore;
 	readonly #sessionsDir: string;
+	readonly #sync?: StateSyncStore;
 
 	/**
 	 * Per-path debounce timers, coalescing repeated `scheduleUpload` calls. The
@@ -68,6 +88,7 @@ export class SessionReplicator {
 	constructor(opts: SessionReplicatorOptions) {
 		this.#store = opts.store;
 		this.#sessionsDir = opts.sessionsDir;
+		this.#sync = opts.sync;
 	}
 
 	/** Absolute local path for a wire `rel` (POSIX separators → native). */
@@ -80,7 +101,7 @@ export class SessionReplicator {
 	 * the bare file name from `rel`.
 	 *
 	 * The id must come from the scan that read the body's header `cwd`
-	 * (`scanOwnedSessionFiles`) or from an index row keyed by it. This class
+	 * (`scanOwnedSessions`) or from an index row keyed by it. This class
 	 * used to re-derive the project from the encoded directory name by longest
 	 * prefix, which is unsound: the encoding is not reversible, so a session in
 	 * `~/u/foo/bar` and one at the root of a sibling project `~/u/foo-bar` share
@@ -134,31 +155,34 @@ export class SessionReplicator {
 	}
 
 	/**
-	 * Upload the local body when the remote copy is absent or is not newer than
-	 * this machine's.
+	 * Upload the local body when the archived copy does not already hold exactly
+	 * the bytes now on disk.
 	 *
-	 * Staleness is decided by mtime, NOT byte length. `ensureLocal` REWRITES the
+	 * Staleness is decided by the recorded snapshot of OUR last completed upload
+	 * (`(mtime, size)` of the local file the bytes came from), falling back to
+	 * the remote timestamp when there is no record — a body another machine
+	 * uploaded, or one whose record was lost.
+	 *
+	 * Why not the remote timestamp alone, which is what this used to do: the
+	 * object's `lastModified` is assigned when the `put` COMPLETES, but the
+	 * bytes were read before it started. A session appending in that window
+	 * produces an object missing that record while looking strictly newer than
+	 * the local file, so every later reconcile skipped it and a peer resumed a
+	 * conversation truncated at an arbitrary point, permanently, unless the
+	 * session happened to be appended to again.
+	 *
+	 * Why not compare local and remote SIZE: `ensureLocal` rewrites the
 	 * downloaded header's `cwd` to this machine's checkout path, so identical
-	 * logical content occupies a DIFFERENT number of bytes on machines whose
-	 * project paths differ in length — a shorter local path makes the file
-	 * smaller for the same (or more) turns. A "bigger is newer" size test would
-	 * therefore let a genuinely new turn on a short-path machine satisfy
-	 * `remote.size >= local.size` and silently drop the upload. File mtime is
-	 * invariant to the header rewrite and advances on every append, so it orders
-	 * versions correctly; it is the SAME last-writer-wins clock the sessions
-	 * index domain publishes as `rev` (domains/sessions.ts), keeping the body
-	 * archive and the index in agreement.
-	 *
-	 * FAILURE MODE: mtime is a wall clock, so this inherits LWW's clock-skew
-	 * caveat — a machine whose clock lags the last uploader's could under-upload
-	 * a real edit until its own clock passes the remote's recorded time. That is
-	 * the tradeoff the sessions domain already accepts, and it is strictly safer
-	 * than the size test it replaces, which lost writes with no skew at all.
+	 * logical content occupies a different number of bytes on machines whose
+	 * project paths differ in length. A "bigger is newer" test would let a real
+	 * turn on a short-path machine satisfy `remote.size >= local.size` and drop
+	 * the upload. Sizes are only ever compared against OUR OWN recorded
+	 * snapshot of the same file, where that asymmetry cannot arise.
 	 *
 	 * `mtimeMs` is FRACTIONAL from `fs.stat` while a `rev` is contractually an
-	 * integer, so both sides are floored before comparison — a raw float against
-	 * a floored remote value (100.9 vs 100) would re-upload forever. Only the
-	 * `list()` metadata is read to compare, never the remote body itself.
+	 * integer, so it is floored everywhere — a raw float against a floored
+	 * value (100.9 vs 100) would re-upload forever. Only `list()` metadata is
+	 * read for the fallback comparison, never the remote body itself.
 	 */
 	async uploadIfStale(rel: string, projectId: string): Promise<void> {
 		const scoped = this.#scopeFor(rel, projectId);
@@ -168,30 +192,58 @@ export class SessionReplicator {
 			return;
 		}
 		const abs = this.#localPath(rel);
-		let local: fs.Stats;
-		try {
-			local = await fsp.stat(abs);
-		} catch {
-			// No local body to upload (never created, or already pruned).
-			return;
-		}
-		if (!local.isFile()) return;
+		const before = await this.#statFile(abs);
+		if (!before) return;
 
 		const key = this.#objectKey(scoped.project, scoped.file);
+		const recorded = this.#sync?.uploadedSnapshot(key);
+		if (recorded && recorded.mtime === before.mtime && recorded.size === before.size) return;
+
 		await this.#withSlot(async () => {
 			try {
-				const remote = await this.#store.list(key);
-				const match = remote.find(item => item.key === key);
-				// Skip only when a remote exists AND is at least as new as the local
-				// body. Floor both sides: mtimeMs is fractional and a raw
-				// `100.9 > 100` would re-upload every cycle (see doc).
-				if (match && Math.floor(local.mtimeMs) <= Math.floor(match.mtimeMs)) return;
+				if (!recorded) {
+					// No snapshot of our own: fall back to the remote timestamp so we
+					// do not re-upload a body another machine already archived.
+					const remote = await this.#store.list(key);
+					const match = remote.find(item => item.key === key);
+					if (match && before.mtime <= Math.floor(match.mtimeMs)) return;
+				}
 				const bytes = await fsp.readFile(abs);
+				// Snapshot the file again BEFORE the put: this is what decides whether
+				// the bytes in hand provably correspond to `before`.
+				const afterRead = await this.#statFile(abs);
 				await this.#store.put(key, bytes, "application/x-ndjson");
+
+				if (afterRead && afterRead.mtime === before.mtime && afterRead.size === before.size) {
+					this.#sync?.recordUploaded(key, before);
+					return;
+				}
+				// The body changed while we were reading it, so the object we just
+				// stored is a torn snapshot. Keep it (partial beats absent for a peer
+				// that has nothing) but record the marker rather than a real
+				// snapshot: it can never equal a `stat`, so the next pass re-uploads
+				// AND does not fall back to the remote timestamp, which is exactly
+				// the comparison that cannot see this. Requeue too, so the repair
+				// does not wait for the reconcile interval.
+				this.#sync?.recordUploaded(key, STALE_UPLOAD);
+				logger.debug(`[session-replicator] body changed during upload, requeueing: ${rel}`);
+				this.scheduleUpload(rel, projectId);
 			} catch (err) {
 				logger.warn(`[session-replicator] upload failed for ${rel}: ${String(err)}`);
 			}
 		});
+	}
+
+	/** Floored-mtime stat of a regular file, or undefined when unusable. */
+	async #statFile(abs: string): Promise<UploadedSnapshot | undefined> {
+		try {
+			const stat = await fsp.stat(abs);
+			if (!stat.isFile()) return undefined;
+			return { mtime: Math.floor(stat.mtimeMs), size: stat.size };
+		} catch {
+			// No local body (never created, or already pruned).
+			return undefined;
+		}
 	}
 
 	/**
@@ -306,7 +358,7 @@ export class SessionReplicator {
 
 	async #reconcile(): Promise<void> {
 		// afterRev 0: every owned body, with ownership confirmed by header cwd.
-		const owned = scanOwnedSessionFiles(this.#sessionsDir, { afterRev: 0 });
+		const owned = scanOwnedSessions(this.#sessionsDir, { afterRev: 0 }).files;
 		if (owned.length === 0) return;
 		const byProject = new Map<string, OwnedSessionFile[]>();
 		for (const file of owned) {

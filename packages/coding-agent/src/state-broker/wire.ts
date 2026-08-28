@@ -76,6 +76,24 @@ export interface StateDeltaResponse {
 	entries: StateEntry[];
 	/** True when `limit` truncated the delta — pull again immediately. */
 	more: boolean;
+	/**
+	 * Identity of the broker database, minted on creation.
+	 *
+	 * `seq` is only monotonic within one database file, so a replica's persisted
+	 * cursor is meaningless against a different one. Optional because a broker
+	 * predating this field omits it, in which case rollback cannot be detected
+	 * and behaviour is exactly as before.
+	 */
+	epoch?: string;
+	/**
+	 * The domain's authoritative sequence, independent of this page.
+	 *
+	 * Distinct from `seq`, which echoes the request's cursor when the page is
+	 * empty and therefore cannot reveal that the cursor is impossible. A `head`
+	 * below the replica's cursor means the broker's sequence moved backwards
+	 * (recreated or restored database) and the cursor must be replayed.
+	 */
+	head?: number;
 }
 
 /** `POST /v1/state/:domain` request body. */

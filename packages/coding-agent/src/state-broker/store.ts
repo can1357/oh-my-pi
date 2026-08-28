@@ -49,6 +49,10 @@ CREATE TABLE IF NOT EXISTS state_seq (
 	domain TEXT PRIMARY KEY,
 	seq INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS state_meta (
+	key TEXT PRIMARY KEY,
+	value TEXT NOT NULL
+);
 `;
 
 /** A row as stored on disk: `value` is a JSON string, or SQL `NULL` for a tombstone. */
@@ -77,6 +81,19 @@ export class StateBrokerStore {
 	#upsertSeqStmt: Statement;
 	#deltaStmt: Statement;
 	#countStmt: Statement;
+
+	/**
+	 * Identity of THIS database, minted once on creation.
+	 *
+	 * `seq` is only monotonic within one database file. Recreate `state.db`, or
+	 * restore it from a backup, and the sequence a replica already holds can
+	 * exceed anything the new file will allocate for a long time — during which
+	 * an empty delta echoes the replica's impossible cursor back and it silently
+	 * ignores every entry the rebuilt broker accepts. Publishing an identity
+	 * lets a replica notice it is talking to a different database and replay
+	 * from zero instead of waiting forever.
+	 */
+	readonly epoch: string;
 
 	/**
 	 * Long-poll notifiers keyed by domain. Fed by {@link push} after a commit
@@ -113,6 +130,7 @@ ON CONFLICT(domain) DO UPDATE SET seq = excluded.seq
 			"SELECT key, rev, seq, value FROM state_entries WHERE domain = ? AND seq > ? ORDER BY seq ASC LIMIT ?",
 		);
 		this.#countStmt = this.#db.prepare("SELECT COUNT(*) AS n FROM state_entries WHERE domain = ?");
+		this.epoch = this.#loadOrMintEpoch();
 	}
 
 	/** Open (creating on first use) the broker's shared-state database. */
@@ -154,6 +172,11 @@ ON CONFLICT(domain) DO UPDATE SET seq = excluded.seq
 	 * `limit` (clamped to {@link STATE_PAGE_LIMIT}). `seq` is the last returned
 	 * entry's sequence (or `sinceSeq` when the page is empty); `more` is true
 	 * when the page filled, signalling the caller to pull again immediately.
+	 *
+	 * Also reports `epoch` (this database's identity) and `head` (the domain's
+	 * authoritative sequence) so a replica can detect that its persisted cursor
+	 * belongs to a database that no longer exists, or to a sequence this one has
+	 * not reached.
 	 */
 	delta(domain: StateDomainId, sinceSeq: number, limit: number): StateDeltaResponse {
 		const capped = Math.max(1, Math.min(STATE_PAGE_LIMIT, Math.trunc(limit)));
@@ -164,7 +187,11 @@ ON CONFLICT(domain) DO UPDATE SET seq = excluded.seq
 			value: this.#decodeValue(row.value),
 		}));
 		const seq = rows.length > 0 ? rows[rows.length - 1]!.seq : sinceSeq;
-		return { domain, seq, entries, more: rows.length === capped };
+		// `head` is the domain's authoritative sequence, NOT the echoed cursor.
+		// An empty page otherwise reports the client's own `sinceSeq` straight
+		// back, which tells a replica holding an impossible cursor (rebuilt or
+		// rolled-back broker) nothing is wrong while it ignores every new entry.
+		return { domain, seq, entries, more: rows.length === capped, epoch: this.epoch, head: this.#readSeq(domain) };
 	}
 
 	/** Per-domain current `seq` and stored row count, for the cheap change probe. */
@@ -214,6 +241,21 @@ ON CONFLICT(domain) DO UPDATE SET seq = excluded.seq
 	#readSeq(domain: StateDomainId): number {
 		const row = this.#selectSeqStmt.get(domain) as { seq: number } | null;
 		return row?.seq ?? 0;
+	}
+
+	/**
+	 * This database's identity, created on first open and never changed.
+	 *
+	 * Restoring a backup carries the stored epoch with it, which is correct: the
+	 * file really is the same logical database, just older, and that case is
+	 * caught by the sequence a delta reports rather than by identity.
+	 */
+	#loadOrMintEpoch(): string {
+		const row = this.#db.query("SELECT value FROM state_meta WHERE key = 'epoch'").get() as { value: string } | null;
+		if (row?.value) return row.value;
+		const epoch = crypto.randomUUID();
+		this.#db.run("INSERT OR REPLACE INTO state_meta (key, value) VALUES ('epoch', ?)", [epoch]);
+		return epoch;
 	}
 
 	#notify(domain: StateDomainId): void {

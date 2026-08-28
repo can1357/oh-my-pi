@@ -28,7 +28,7 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { getSessionsDir, logger } from "@oh-my-pi/pi-utils";
+import { getSessionsDir, isEnoent, logger } from "@oh-my-pi/pi-utils";
 import { SESSION_TITLE_SLOT_BYTES } from "../session/session-entries";
 import { sessionDirNameForCwd } from "../session/session-paths";
 import { parseTitleSlotLine } from "../session/session-title-slot";
@@ -47,6 +47,23 @@ export interface OwnedSessionFile {
 	size: number;
 	/** Floored epoch-millis mtime, usable directly as a replication `rev`. */
 	mtimeMs: number;
+}
+
+/**
+ * The result of one scan: the bodies found, plus which projects the scan can
+ * speak for.
+ *
+ * `completeProjects` is what makes absence meaningful. A caller that infers
+ * deletion from "published earlier, not in `files` now" MUST first check that
+ * the project is listed here, because a project is missing from `files` both
+ * when its sessions are genuinely gone AND when it is no longer sync-enabled or
+ * its directories could not be read. Treating those alike published tombstones
+ * that deleted other machines' sessions.
+ */
+export interface OwnedSessionScan {
+	files: OwnedSessionFile[];
+	/** Ids of sync-enabled projects whose bodies were enumerated in full. */
+	completeProjects: ReadonlySet<string>;
 }
 
 /**
@@ -146,15 +163,27 @@ function confirmOwner(abs: string, mtimeMs: number, size: number): { projectId: 
 	return result;
 }
 
-/** Immediate child directory names of the sessions root; `[]` when absent. */
-function readRootDirs(sessionsDir: string): string[] {
+/**
+ * Immediate child directory names of the sessions root, or `null` when the root
+ * could not be read at all.
+ *
+ * The distinction matters: a caller inferring deletions from absence MUST NOT
+ * treat "I could not look" as "nothing is there". Collapsing both to `[]` let a
+ * transient `EACCES`/`EMFILE` on this one `readdir` present as every session
+ * having been deleted.
+ */
+function readRootDirs(sessionsDir: string): string[] | null {
 	try {
 		return fs
 			.readdirSync(sessionsDir, { withFileTypes: true })
 			.filter(e => e.isDirectory())
 			.map(e => e.name);
-	} catch {
-		return [];
+	} catch (err) {
+		// A missing root is authoritative emptiness: no sessions have been
+		// written yet. Anything else means the answer is unknown.
+		if (isEnoent(err)) return [];
+		logger.warn("session scan could not read the sessions root", { sessionsDir, error: String(err) });
+		return null;
 	}
 }
 
@@ -171,16 +200,21 @@ function readRootDirs(sessionsDir: string): string[] {
  * on only one side of the comparison re-emits every session forever, since
  * `100.9 > floor(100.9)`.
  */
-export function scanOwnedSessionFiles(
+export function scanOwnedSessions(
 	sessionsDir: string = getSessionsDir(),
 	opts?: { afterRev?: number },
-): OwnedSessionFile[] {
+): OwnedSessionScan {
 	const afterRev = opts?.afterRev;
 	const out: OwnedSessionFile[] = [];
+	const completeProjects = new Set<string>();
 	const rootDirs = readRootDirs(sessionsDir);
+	if (rootDirs === null) return { files: out, completeProjects };
 	for (const project of listSyncedProjects()) {
 		// sessionDirNameForCwd canonicalizes internally, so localPath is fine.
 		const base = sessionDirNameForCwd(project.localPath);
+		// Only claimed once every directory that could hold this project's bodies
+		// has been enumerated without an unexplained error.
+		let complete = true;
 		for (const dirName of rootDirs) {
 			// Root dir OR a subdirectory session dir (`<base>-<...>`).
 			if (dirName !== base && !dirName.startsWith(`${base}-`)) continue;
@@ -188,8 +222,13 @@ export function scanOwnedSessionFiles(
 			let files: string[];
 			try {
 				files = Array.from(new Bun.Glob("*.jsonl").scanSync(dir));
-			} catch {
-				// This dir vanished between readdir and scan — skip it.
+			} catch (err) {
+				// A vanished dir is a real (empty) answer; anything else means this
+				// project's file set is unknown and absence proves nothing.
+				if (!isEnoent(err)) {
+					complete = false;
+					logger.warn("session scan could not list a session dir", { dir, error: String(err) });
+				}
 				continue;
 			}
 			for (const file of files) {
@@ -197,7 +236,9 @@ export function scanOwnedSessionFiles(
 				let stat: fs.Stats;
 				try {
 					stat = fs.statSync(abs);
-				} catch {
+				} catch (err) {
+					// Raced deletion is exactly what a caller wants to see as absent.
+					if (!isEnoent(err)) complete = false;
 					continue;
 				}
 				if (!stat.isFile()) continue;
@@ -208,8 +249,9 @@ export function scanOwnedSessionFiles(
 				out.push({ projectId: project.id, relCwd: owner.relCwd, file, abs, size: stat.size, mtimeMs });
 			}
 		}
+		if (complete) completeProjects.add(project.id);
 	}
-	return out;
+	return { files: out, completeProjects };
 }
 
 /**

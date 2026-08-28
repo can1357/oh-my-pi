@@ -328,4 +328,64 @@ describe("StateSyncEngine", () => {
 		expect(delta).toEqual([{ key: "queued", rev: 99, value: "late" }]);
 		expect(store.get("history").outboundRev).toBe(99);
 	});
+
+	/**
+	 * A recreated broker database restarts `seq` from zero, so a replica's
+	 * persisted cursor points past everything the new database will allocate for
+	 * a long time. An empty delta echoes that cursor straight back, so without a
+	 * rollback signal the replica silently ignores every entry the rebuilt
+	 * broker accepts, forever, while still pushing its own rows successfully.
+	 */
+	test("recovers when the broker database is recreated beneath a live cursor", async () => {
+		const store = newSyncStore();
+		const first = new FakeDomain("history");
+		first.setLocal({ key: "a", rev: 10, value: "one" });
+		first.setLocal({ key: "b", rev: 20, value: "two" });
+		await engineFor(store, [first]).syncOnce();
+		expect(store.get("history").inboundSeq).toBeGreaterThan(0);
+
+		// Rebuild the broker from scratch: new database, new identity, seq at 0.
+		await handle?.close();
+		brokerStore?.close();
+		await fs.rm(path.join(tempDir, "state.db"), { force: true });
+		brokerStore = StateBrokerStore.open(path.join(tempDir, "state.db"));
+		handle = startAuthBroker({
+			storage: storage!,
+			bind: "127.0.0.1:0",
+			bearerTokens: [TOKEN],
+			disableRefresher: true,
+			routes: [createStateBrokerRoutes(brokerStore)],
+		});
+		client = new StateBrokerClient({ url: handle.url, token: TOKEN, maxRetries: 0 });
+		// A peer's row, at seq 1 of the NEW database: far below the stale cursor.
+		brokerStore.push("history", [{ key: "peer", rev: 30, value: "from elsewhere" }]);
+
+		const second = new FakeDomain("history");
+		await engineFor(store, [second], client).syncOnce();
+
+		expect(second.get("peer")).toEqual({ key: "peer", rev: 30, value: "from elsewhere" });
+	});
+
+	/**
+	 * Same database restored from an older backup: the epoch is unchanged, so
+	 * only the sequence reveals that entries the replica was told about are gone.
+	 */
+	test("recovers when the broker sequence moves backwards within one epoch", async () => {
+		const store = newSyncStore();
+		const domain = new FakeDomain("history");
+		domain.setLocal({ key: "a", rev: 10, value: "one" });
+		await engineFor(store, [domain]).syncOnce();
+
+		// Forge a cursor above the broker's head, exactly as a restored backup
+		// would leave it, and record the epoch so identity alone cannot explain it.
+		const cursor = store.get("history");
+		store.rememberBrokerEpoch(brokerStore!.epoch);
+		store.set("history", { ...cursor, inboundSeq: cursor.inboundSeq + 500 });
+
+		brokerStore!.push("history", [{ key: "peer", rev: 40, value: "restored" }]);
+		const fresh = new FakeDomain("history");
+		await engineFor(store, [fresh]).syncOnce();
+
+		expect(fresh.get("peer")).toEqual({ key: "peer", rev: 40, value: "restored" });
+	});
 });

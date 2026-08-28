@@ -13,7 +13,7 @@
 
 import { logger } from "@oh-my-pi/pi-utils";
 import { mergeRemote, scanChangedSinceForSessionIds } from "../../session/title-index";
-import { scanOwnedSessionFiles } from "../session-files";
+import { scanOwnedSessions } from "../session-files";
 import type { ReplicatedDomain } from "../replica";
 import type { StateEntry } from "../wire";
 
@@ -67,7 +67,7 @@ function syncedSessionIds(sessionsDir: string | undefined): Set<string> {
 	const now = Date.now();
 	if (syncedIdsCache && now - syncedIdsCache.at < SYNCED_IDS_TTL_MS) return syncedIdsCache.ids;
 	const ids = new Set<string>();
-	for (const owned of scanOwnedSessionFiles(sessionsDir)) {
+	for (const owned of scanOwnedSessions(sessionsDir).files) {
 		const id = sessionIdFromFileName(owned.file);
 		if (id) ids.add(id);
 	}

@@ -16,6 +16,9 @@
 - Slash-command autocomplete ranking now includes command usage replicated from other machines.
 - Attachments no longer go missing on other machines when an upload hits a transient error or the process exits mid-upload.
 - Session bodies stranded by a failed upload are now retried by a periodic reconcile, so a peer's index row no longer points at a missing archive object. Bodies that predate switching on object storage get uploaded too.
+- Turning off sync for a project, or a momentary failure to read the sessions directory, no longer deletes that project's sessions from your other machines.
+- A session written to while it was being uploaded is no longer archived truncated, so resuming it on another machine gets the whole conversation.
+- A replica now recovers instead of going permanently deaf when the broker's `state.db` is recreated or restored from an older backup.
 
 ## [18.0.8] - 2026-08-27
 

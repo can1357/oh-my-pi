@@ -7,6 +7,7 @@ import { sessionDirNameForCwd } from "@oh-my-pi/pi-coding-agent/session/session-
 import type { ObjectStore } from "@oh-my-pi/pi-coding-agent/state-broker/object-store";
 import { sessionKey } from "@oh-my-pi/pi-coding-agent/state-broker/object-store";
 import { invalidateProjectScope, projectObjectSlug } from "@oh-my-pi/pi-coding-agent/state-broker/project-scope";
+import { StateSyncStore } from "@oh-my-pi/pi-coding-agent/state-broker/replica";
 import { SessionReplicator } from "@oh-my-pi/pi-coding-agent/state-broker/session-replicator";
 import { __resetDirsFromEnvForTests, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 
@@ -28,6 +29,14 @@ const SAVED_AGENT_DIR = process.env.PI_CODING_AGENT_DIR;
 class FakeObjectStore implements ObjectStore {
 	readonly map = new Map<string, { data: Uint8Array; mtimeMs: number }>();
 	puts = 0;
+	/** Runs at the start of every `put`, to simulate work racing the transfer. */
+	onPut?: (key: string) => void;
+	/**
+	 * Forces the mtime the next `put` stamps. Real object stores stamp the time
+	 * the upload COMPLETED, which a test needs to pin to make "the remote looks
+	 * newer than the local file" deterministic rather than clock-dependent.
+	 */
+	nextPutMtimeMs?: number;
 
 	seed(key: string, data: Uint8Array, mtimeMs: number): void {
 		this.map.set(key, { data: Uint8Array.from(data), mtimeMs });
@@ -35,7 +44,8 @@ class FakeObjectStore implements ObjectStore {
 
 	async put(key: string, data: Uint8Array): Promise<void> {
 		this.puts++;
-		this.map.set(key, { data: Uint8Array.from(data), mtimeMs: Date.now() });
+		this.onPut?.(key);
+		this.map.set(key, { data: Uint8Array.from(data), mtimeMs: this.nextPutMtimeMs ?? Date.now() });
 	}
 	async get(key: string): Promise<Uint8Array | null> {
 		return this.map.get(key)?.data ?? null;
@@ -70,6 +80,7 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
+	for (const store of syncStores.splice(0)) store.close();
 	homedirSpy?.mockRestore();
 	homedirSpy = undefined;
 	fs.rmSync(getProjectsConfigPath(AGENT_DIR), { force: true });
@@ -87,8 +98,12 @@ interface Fixture {
 	foo: string;
 	sessionsDir: string;
 	fake: FakeObjectStore;
+	sync: StateSyncStore;
 	replicator: SessionReplicator;
 }
+
+/** Sync stores opened by `setup`, closed in `afterEach`. */
+const syncStores: StateSyncStore[] = [];
 
 function setup(): Fixture {
 	const home = makeDir("omp-repl-home-");
@@ -101,7 +116,9 @@ function setup(): Fixture {
 	const sessionsDir = path.join(makeDir("omp-repl-root-"), "sessions");
 	fs.mkdirSync(sessionsDir, { recursive: true });
 	const fake = new FakeObjectStore();
-	return { foo, sessionsDir, fake, replicator: new SessionReplicator({ store: fake, sessionsDir }) };
+	const sync = new StateSyncStore(path.join(makeDir("omp-repl-sync-"), "sync.db"));
+	syncStores.push(sync);
+	return { foo, sessionsDir, fake, sync, replicator: new SessionReplicator({ store: fake, sessionsDir, sync }) };
 }
 
 /** Object key `uploadIfStale` addresses `<file>` under `proj:foo` by. */
@@ -362,5 +379,58 @@ describe("SessionReplicator.maybeReconcile", () => {
 		await fx.replicator.drain();
 
 		expect(fx.fake.puts).toBe(0);
+	});
+
+	/**
+	 * A body appended to during its own upload must not stay truncated forever.
+	 *
+	 * The object store stamps the time the `put` COMPLETED, which is later than
+	 * the append that the uploaded bytes missed. Comparing the local mtime with
+	 * that stamp therefore reports "remote is newer" for a remote that is
+	 * provably incomplete, and every later reconcile skipped it, so a peer
+	 * resumed a conversation truncated at an arbitrary point.
+	 */
+	test("a body appended to during its own upload is repaired, not left truncated", async () => {
+		const fx = setup();
+		const file = "dddd4444.jsonl";
+		const header = `${JSON.stringify({ type: "session", version: 1, id: "dddd4444", cwd: fx.foo })}\n`;
+		const { rel, abs } = writeLocalBody(fx, file, header);
+		const key = keyFor(file);
+
+		// The live session appends its final record after `readFile` hit EOF, and
+		// the completed upload is stamped well after that append.
+		fx.fake.onPut = () => fs.appendFileSync(abs, `${JSON.stringify({ type: "message" })}\n`);
+		fx.fake.nextPutMtimeMs = Math.floor(fs.statSync(abs).mtimeMs) + 60_000;
+
+		await fx.replicator.uploadIfStale(rel, "proj:foo");
+		const torn = new TextDecoder().decode((await fx.fake.get(key)) ?? new Uint8Array());
+		expect(torn).toBe(header);
+
+		// Stop racing; a later pass must notice the archive is not the local body.
+		fx.fake.onPut = undefined;
+		fx.fake.nextPutMtimeMs = undefined;
+		await fx.replicator.uploadIfStale(rel, "proj:foo");
+
+		const repaired = new TextDecoder().decode((await fx.fake.get(key)) ?? new Uint8Array());
+		expect(repaired).toBe(fs.readFileSync(abs, "utf8"));
+		expect(repaired).not.toBe(torn);
+		await fx.replicator.drain();
+	});
+
+	/**
+	 * The complement: once an upload provably matches the local file, repeated
+	 * passes must not re-upload it. Without the recorded snapshot this would be
+	 * the fallback timestamp comparison, and the point of the fix is that the
+	 * snapshot replaces it rather than being additive.
+	 */
+	test("a body already archived at its current bytes is not re-uploaded", async () => {
+		const fx = setup();
+		const file = "eeee5555.jsonl";
+		const { rel } = writeLocalBody(fx, file, `${JSON.stringify({ type: "session", version: 1, cwd: fx.foo })}\n`);
+
+		await fx.replicator.uploadIfStale(rel, "proj:foo");
+		expect(fx.fake.puts).toBe(1);
+		await fx.replicator.uploadIfStale(rel, "proj:foo");
+		expect(fx.fake.puts).toBe(1);
 	});
 });

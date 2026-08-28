@@ -52,7 +52,7 @@ Each domain is a thin adapter over an existing local store. It answers exactly t
 | `model-usage`   | Most-recently-used model ordering       | `agent.db` (`AgentStorage`)    | `model_usage.last_used_at` | LWW by `rev` (keep the greater last-used timestamp)              |
 | `command-usage` | Slash-command usage counts/recency      | `agent.db` (`AgentStorage`)    | usage `last_used_at`       | LWW by `rev`                                                     |
 | `config`        | Agent config files (see exclusions)     | files under `~/.omp/agent/`    | file mtime                 | LWW by `rev`; inbound keys re-checked against the replicable set; deleting a file publishes a tombstone |
-| `sessions`      | Session JSONL index rows                | session index (`agent.db`)     | file mtime                 | LWW by `rev`; deleting a session publishes a tombstone; bodies replicate out-of-band via the object store |
+| `sessions`      | Session JSONL index rows                | session index (`agent.db`)     | file mtime                 | LWW by `rev`; deleting a session publishes a tombstone, but only for a project the scan can speak for; bodies replicate out-of-band via the object store |
 
 ### What is intentionally NOT replicated
 
@@ -180,6 +180,8 @@ The state surface is mounted on the auth-broker listener under `/v1/state`. Bear
 
 A delta response carries the broker `seq` after the last returned entry (pass it as the next `since`) and a `more` flag set when `limit` truncated the page — pull again immediately when it is true. `limit` is capped at `STATE_PAGE_LIMIT` (1000) entries per delta or push, and `wait` is clamped to `STATE_MAX_WAIT_MS` (30000 ms) for long-poll, matching the credential snapshot route. `:domain` must be one of `history`, `titles`, `model-usage`, `command-usage`, `config`, or `sessions`.
 
+A delta also reports the broker database's `epoch` and the domain's `head` (its authoritative sequence, as opposed to the echoed cursor). `seq` is only monotonic within one database file, so a replica needs both to tell that its persisted cursor is meaningless: a changed `epoch` means the database was recreated, and a `head` below the replica's cursor means the same database was restored from an older backup. Either way the replica replays that domain's inbound stream from zero, which is safe because every merge is last-writer-wins by `rev`. Without this the broker echoes the impossible cursor back in an empty page and the replica silently ignores every new entry while its own pushes keep succeeding. Both fields are optional, so a broker predating them behaves exactly as before.
+
 ## Bulk content: session bodies and blobs go to S3
 
 Session JSONL bodies and content-addressed blob bytes do **not** travel over the JSON broker. They are large and append-heavy — the wrong shape for a JSON HTTP delta protocol. Instead they replicate to an S3-compatible object store through Bun's builtin `Bun.S3Client` (no extra npm dependency; MinIO, Garage, and R2 work by pointing `objects.s3.endpoint` at them with `pathStyle: true`).
@@ -194,6 +196,8 @@ Key layout under the configured `keyPrefix` (default `omp`):
 The object store is a **replicated archive, not the live write path**. S3 has no append operation, so the local JSONL file stays the authoritative, appendable log that the session runtime writes to; the archive is reconciled in the background. Blobs are content-addressed by `sha256`, so an upload is idempotent and a missing blob is fetched by hash on demand. Body/blob replication is gated by `objects.sessions` and `objects.blobs` respectively and requires `objects.backend: s3`.
 
 Bodies are offered for upload when their index row changes, and separately by a **reconcile pass** every few minutes that compares every owned body against one `list()` per project. The pass is what keeps the archive honest: the index cursor advances as soon as the metadata push succeeds, so a transfer that failed transiently would otherwise never be retried and peers would hold a row pointing at an object that does not exist. It also covers bodies that already existed when object storage was first switched on. A body's owning project always comes from the header-confirmed scan, never from the encoded directory name, which is ambiguous between a subdirectory session and a sibling project's root.
+
+Whether the archived copy is current is decided by the `(mtime, size)` the replica recorded for its own last completed upload, not by the object's timestamp. An object store stamps the time the upload *finished*, which is later than the bytes were read, so a session that appends during its own transfer yields an object missing that record while looking strictly newer than the local file. Comparing against the recorded snapshot instead makes that detectable, and a torn transfer is marked as such so the next pass repairs it rather than falling back to the timestamp. Local and remote *sizes* are never compared with each other, only against the replica's own record: the header rewrite means identical content legitimately differs in length between machines.
 
 ## Setup
 

@@ -602,6 +602,67 @@ describe("sessions domain", () => {
 			store.close();
 		}
 	});
+
+	/**
+	 * Turning sync off for a project must not look like deleting its sessions.
+	 * The scan intentionally stops enumerating a disabled project, so treating
+	 * every published-but-absent key as a deletion published tombstones that
+	 * removed those sessions from every OTHER machine. They could not even be
+	 * restored by re-enabling, since the surviving bodies keep their original
+	 * mtimes and lose LWW against the newer tombstone.
+	 */
+	test("disabling a project does not tombstone its sessions", () => {
+		const { foo, sessionsDir } = setupHome();
+		const store = new StateSyncStore(path.join(makeDir("omp-sess-sync-"), "sync.db"));
+		try {
+			const dir = path.join(sessionsDir, sessionDirNameForCwd(foo));
+			writeSessionBody(dir, "aaaa1111.jsonl", foo, "Kept");
+			const domain = createSessionsDomain(sessionsDir, store);
+			const published = domain.changedSince(0, 100);
+			expect(published).toHaveLength(1);
+
+			// Sync off, body untouched on disk.
+			setProjects([{ id: "proj:foo", path: foo, sync: false }]);
+			invalidateSessionOwnerCache();
+
+			expect(domain.changedSince(published[0].rev, 100)).toEqual([]);
+			// And re-enabling must still see the session as live, not deleted.
+			setProjects([{ id: "proj:foo", path: foo, sync: true }]);
+			invalidateSessionOwnerCache();
+			expect(domain.changedSince(published[0].rev, 100)).toEqual([]);
+			expect(domain.changedSince(0, 100)[0]?.value).not.toBeNull();
+		} finally {
+			store.close();
+		}
+	});
+
+	/**
+	 * Same rule for a scan that could not read the disk. `readdir` failing on
+	 * the sessions root used to be indistinguishable from an empty root, so one
+	 * transient EACCES/EMFILE would tombstone every session this replica had
+	 * ever published.
+	 */
+	test("an unreadable sessions root does not tombstone anything", () => {
+		const { foo, sessionsDir } = setupHome();
+		const store = new StateSyncStore(path.join(makeDir("omp-sess-sync-"), "sync.db"));
+		const readdirSpy = spyOn(fs, "readdirSync");
+		try {
+			const dir = path.join(sessionsDir, sessionDirNameForCwd(foo));
+			writeSessionBody(dir, "bbbb2222.jsonl", foo, "Kept");
+			const domain = createSessionsDomain(sessionsDir, store);
+			const published = domain.changedSince(0, 100);
+			expect(published).toHaveLength(1);
+
+			invalidateSessionOwnerCache();
+			readdirSpy.mockImplementation(() => {
+				throw Object.assign(new Error("EACCES"), { code: "EACCES" });
+			});
+			expect(domain.changedSince(published[0].rev, 100)).toEqual([]);
+		} finally {
+			readdirSpy.mockRestore();
+			store.close();
+		}
+	});
 });
 
 describe("config domain + config-files", () => {

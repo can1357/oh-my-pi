@@ -24,7 +24,7 @@ import {
 	isValidWireRelCwd,
 	isValidWireSessionFile,
 	type OwnedSessionFile,
-	scanOwnedSessionFiles,
+	scanOwnedSessions,
 } from "../session-files";
 import type { StateEntry } from "../wire";
 
@@ -142,7 +142,7 @@ class SessionsDomain implements ReplicatedDomain {
 	 * tombstones for sessions this replica published and no longer has.
 	 *
 	 * Directory enumeration and project-ownership confirmation live in
-	 * {@link scanOwnedSessionFiles}, shared with the `titles` domain so the two
+	 * {@link scanOwnedSessions}, shared with the `titles` domain so the two
 	 * cannot disagree about which sessions belong to a synced project.
 	 *
 	 * Ascending order is mandatory: the engine advances its watermark to the
@@ -156,9 +156,19 @@ class SessionsDomain implements ReplicatedDomain {
 	 * session reappeared as a remote-only stub whose body was still in the
 	 * archive, so selecting it downloaded the session the user had just deleted.
 	 * The published-key ledger is what makes the deletion expressible.
+	 *
+	 * A tombstone is only ever inferred for a project the scan can SPEAK FOR
+	 * (`completeProjects`). Absence is ambiguous otherwise: a project switched to
+	 * `sync: false`, unregistered, or whose directories momentarily failed to
+	 * read also has no files here, and tombstoning those would delete sessions
+	 * that still exist from every other machine. Worse, they could not be
+	 * restored by re-enabling the project, because the surviving bodies carry
+	 * their original mtimes and would lose LWW against the newer tombstone until
+	 * each session was written again.
 	 */
 	changedSince(afterRev: number, limit: number): StateEntry[] {
-		const owned = scanOwnedSessionFiles(this.#sessionsDir, { afterRev: 0 });
+		const scan = scanOwnedSessions(this.#sessionsDir, { afterRev: 0 });
+		const owned = scan.files;
 		const pending: Array<{ key: string; rev: number; file?: OwnedSessionFile }> = [];
 		for (const file of owned) {
 			if (file.mtimeMs > afterRev) {
@@ -173,6 +183,12 @@ class SessionsDomain implements ReplicatedDomain {
 			const now = Date.now();
 			for (const prior of this.#store.published("sessions")) {
 				if (liveKeys.has(prior.key)) continue;
+				// Absence only means deletion for a project this scan enumerated.
+				// A disabled/unregistered project, or one whose directory failed to
+				// read, is silently skipped: its rows stay published untouched and
+				// are neither tombstoned nor forgotten.
+				const decodedPrior = decodeWireKey(prior.key);
+				if (!decodedPrior || !scan.completeProjects.has(decodedPrior.id)) continue;
 				// Absent locally. Latch a tombstone rev on first sight, then keep
 				// re-offering the same rev until the watermark passes it, so a
 				// failed push retries instead of dropping the deletion.

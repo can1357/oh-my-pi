@@ -82,6 +82,20 @@ CREATE TABLE IF NOT EXISTS sync_cursor (
 `;
 
 /**
+ * Small key/value side table for facts about the BROKER, not about a domain.
+ *
+ * Currently the last broker epoch this replica synced against. An inbound
+ * cursor is only meaningful relative to the database that issued it, so the
+ * epoch has to be remembered next to the cursors it qualifies.
+ */
+const META_TABLE_DDL = `
+CREATE TABLE IF NOT EXISTS sync_meta (
+	key TEXT PRIMARY KEY,
+	value TEXT NOT NULL
+);
+`;
+
+/**
  * Keys a domain has already published, so a LOCAL DELETION is detectable.
  *
  * A domain that enumerates live state (files on disk, rows in a table) can only
@@ -112,6 +126,37 @@ export interface PublishedKey {
 }
 
 /**
+ * The exact local snapshot each object-store upload reflects.
+ *
+ * Without this, "is the archived body current?" can only be asked of the
+ * object's own upload timestamp, which is assigned AFTER the bytes were read.
+ * A session that appends between the read and the completed `put` therefore
+ * produces an object that is missing that record yet looks strictly newer than
+ * the local file forever, so every later reconcile skips it and peers resume a
+ * truncated conversation.
+ *
+ * Remembering the `(mtime, size)` the uploaded bytes came from turns the
+ * question into an exact-identity comparison against the local file, which no
+ * remote clock can confuse. It deliberately does NOT compare local and remote
+ * sizes: `ensureLocal` rewrites the header `cwd`, so the same logical content
+ * legitimately occupies different byte counts on machines whose project paths
+ * differ in length.
+ */
+const UPLOADED_TABLE_DDL = `
+CREATE TABLE IF NOT EXISTS uploaded_object (
+	key TEXT PRIMARY KEY,
+	mtime INTEGER NOT NULL,
+	size INTEGER NOT NULL
+);
+`;
+
+/** The local `(mtime, size)` a completed upload was taken from. */
+export interface UploadedSnapshot {
+	mtime: number;
+	size: number;
+}
+
+/**
  * Cursor persistence for the replica, in its own `state-sync.db`.
  *
  * Deliberately a separate file from every domain database: cursors are written
@@ -126,6 +171,11 @@ export class StateSyncStore {
 	#writePublished: Statement;
 	#markDeleted: Statement;
 	#forgetPublished: Statement;
+	#readUploaded: Statement;
+	#writeUploaded: Statement;
+	#readMeta: Statement;
+	#writeMeta: Statement;
+	#resetInbound: Statement;
 
 	constructor(dbPath: string = getStateSyncDbPath()) {
 		fs.mkdirSync(path.dirname(dbPath), { recursive: true });
@@ -138,6 +188,8 @@ PRAGMA journal_mode=WAL;
 PRAGMA synchronous=NORMAL;
 ${CURSOR_TABLE_DDL}
 ${PUBLISHED_TABLE_DDL}
+${UPLOADED_TABLE_DDL}
+${META_TABLE_DDL}
 		`);
 		this.#read = this.#db.prepare("SELECT inbound_seq, outbound_rev FROM sync_cursor WHERE domain = ?");
 		this.#write = this.#db.prepare(`
@@ -153,6 +205,55 @@ ON CONFLICT(domain, key) DO UPDATE SET rev = excluded.rev, deleted = 0
 UPDATE published_key SET rev = ?, deleted = 1 WHERE domain = ? AND key = ?
 		`);
 		this.#forgetPublished = this.#db.prepare("DELETE FROM published_key WHERE domain = ? AND key = ?");
+		this.#readUploaded = this.#db.prepare("SELECT mtime, size FROM uploaded_object WHERE key = ?");
+		this.#writeUploaded = this.#db.prepare(`
+INSERT INTO uploaded_object (key, mtime, size) VALUES (?, ?, ?)
+ON CONFLICT(key) DO UPDATE SET mtime = excluded.mtime, size = excluded.size
+		`);
+		this.#readMeta = this.#db.prepare("SELECT value FROM sync_meta WHERE key = ?");
+		this.#writeMeta = this.#db.prepare(`
+INSERT INTO sync_meta (key, value) VALUES (?, ?)
+ON CONFLICT(key) DO UPDATE SET value = excluded.value
+		`);
+		this.#resetInbound = this.#db.prepare("UPDATE sync_cursor SET inbound_seq = 0");
+	}
+
+	/** Broker epoch this replica's inbound cursors were last valid against. */
+	brokerEpoch(): string | undefined {
+		try {
+			const row = this.#readMeta.get("broker_epoch") as { value: string } | null;
+			return row?.value ?? undefined;
+		} catch (error) {
+			logger.warn("state sync broker epoch read failed", { error: String(error) });
+			return undefined;
+		}
+	}
+
+	/** Record the broker's identity WITHOUT disturbing any cursor. */
+	rememberBrokerEpoch(epoch: string): void {
+		try {
+			this.#writeMeta.run("broker_epoch", epoch);
+		} catch (error) {
+			logger.warn("state sync broker epoch write failed", { epoch, error: String(error) });
+		}
+	}
+
+	/**
+	 * Adopt `epoch` and replay every inbound cursor from zero.
+	 *
+	 * Called when the broker's identity or sequence proves the persisted cursors
+	 * describe a database this one is not. Replaying is safe rather than
+	 * merely tolerable: every domain merges under last-writer-wins by `rev`, so
+	 * re-applying an entry we already hold is a no-op, and `outboundRev` is
+	 * deliberately untouched so local writes are not re-pushed either.
+	 */
+	adoptBrokerEpoch(epoch: string): void {
+		try {
+			this.#resetInbound.run();
+			this.#writeMeta.run("broker_epoch", epoch);
+		} catch (error) {
+			logger.warn("state sync broker epoch adopt failed", { epoch, error: String(error) });
+		}
 	}
 
 	get(domain: StateDomainId): SyncCursor {
@@ -218,6 +319,32 @@ UPDATE published_key SET rev = ?, deleted = 1 WHERE domain = ? AND key = ?
 		}
 	}
 
+	/** The local snapshot our last completed upload of `key` was taken from. */
+	uploadedSnapshot(key: string): UploadedSnapshot | undefined {
+		try {
+			const row = this.#readUploaded.get(key) as { mtime: number; size: number } | null;
+			return row ? { mtime: row.mtime, size: row.size } : undefined;
+		} catch (error) {
+			// Unknown is the safe answer: the caller re-uploads rather than
+			// assuming the archive is current.
+			logger.warn("state sync uploaded read failed", { key, error: String(error) });
+			return undefined;
+		}
+	}
+
+	/**
+	 * Record that `key` now holds exactly the bytes at local `(mtime, size)`.
+	 * Only ever called for a snapshot proven unchanged across the transfer.
+	 */
+	recordUploaded(key: string, snapshot: UploadedSnapshot): void {
+		try {
+			this.#writeUploaded.run(key, snapshot.mtime, snapshot.size);
+		} catch (error) {
+			logger.warn("state sync uploaded write failed", { key, error: String(error) });
+		}
+	}
+
+
 	close(): void {
 		this.#read.finalize();
 		this.#write.finalize();
@@ -225,6 +352,11 @@ UPDATE published_key SET rev = ?, deleted = 1 WHERE domain = ? AND key = ?
 		this.#writePublished.finalize();
 		this.#markDeleted.finalize();
 		this.#forgetPublished.finalize();
+		this.#readUploaded.finalize();
+		this.#writeUploaded.finalize();
+		this.#readMeta.finalize();
+		this.#writeMeta.finalize();
+		this.#resetInbound.finalize();
 		this.#db.close();
 	}
 }

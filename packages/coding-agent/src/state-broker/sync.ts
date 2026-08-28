@@ -13,7 +13,13 @@
 import { logger } from "@oh-my-pi/pi-utils";
 import { HTTP_CLIENT_CLOSED, type StateBrokerClient, StateBrokerError } from "./client";
 import type { ReplicatedDomain, StateSyncStore, SyncCursor } from "./replica";
-import { STATE_MAX_WAIT_MS, STATE_PAGE_LIMIT, type StateDomainId, type StateEntry } from "./wire";
+import {
+	STATE_MAX_WAIT_MS,
+	STATE_PAGE_LIMIT,
+	type StateDeltaResponse,
+	type StateDomainId,
+	type StateEntry,
+} from "./wire";
 
 const DEFAULT_INTERVAL_MS = 30_000;
 
@@ -352,6 +358,7 @@ export class StateSyncEngine {
 	): Promise<boolean> {
 		let pulled = false;
 		let first = true;
+		let recovered = false;
 		for (;;) {
 			if (signal?.aborted) break;
 			const waitMs = longPoll && first ? this.#pullWaitMs : 0;
@@ -361,6 +368,27 @@ export class StateSyncEngine {
 				limit: STATE_PAGE_LIMIT,
 				signal,
 			});
+
+			// Is our cursor even meaningful against the database that answered? A
+			// `seq` is only monotonic within one broker database, so a recreated or
+			// restored `state.db` can leave us holding a cursor it will not reach
+			// for a long time. The delta would then keep echoing that cursor back
+			// in an empty page while we ignored every entry the broker accepted.
+			// Recover at most once per pass, so a broker that reports nonsense
+			// cannot spin us.
+			if (!recovered && this.#rollbackDetected(delta, cursor.inboundSeq)) {
+				recovered = true;
+				const stale = cursor.inboundSeq;
+				if (delta.epoch) this.#store.adoptBrokerEpoch(delta.epoch);
+				cursor.inboundSeq = 0;
+				this.#store.set(domain.id, cursor);
+				logger.warn("state sync broker sequence rolled back; replaying inbound from zero", {
+					domain: domain.id,
+					staleCursor: stale,
+					head: delta.head,
+				});
+				continue;
+			}
 			if (delta.entries.length > 0) {
 				domain.applyRemote(delta.entries);
 				pulled = true;
@@ -377,6 +405,32 @@ export class StateSyncEngine {
 			if (!delta.more) break;
 		}
 		return pulled;
+	}
+
+	/**
+	 * Whether `delta` proves our persisted inbound cursor cannot be honoured.
+	 *
+	 * Two independent signals, because neither covers the other:
+	 *
+	 * - **Identity changed.** The broker database was recreated, so its `seq`
+	 *   restarted from zero. Detected even when the new database has already
+	 *   allocated PAST our cursor, which no sequence comparison can see.
+	 * - **Head went backwards.** Same database, restored from an older backup,
+	 *   so the epoch is unchanged but entries we were told about are gone.
+	 *
+	 * A broker predating these fields sends neither, and this returns false, so
+	 * behaviour against an older broker is exactly what it was before.
+	 */
+	#rollbackDetected(delta: StateDeltaResponse, inboundSeq: number): boolean {
+		if (delta.epoch) {
+			const known = this.#store.brokerEpoch();
+			// First sight is not a rollback: an existing replica upgrading from a
+			// broker that did not report an epoch has perfectly good cursors, so
+			// record the identity WITHOUT resetting them.
+			if (known === undefined) this.#store.rememberBrokerEpoch(delta.epoch);
+			else if (known !== delta.epoch) return true;
+		}
+		return delta.head !== undefined && delta.head < inboundSeq;
 	}
 
 	/**
