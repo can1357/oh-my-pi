@@ -1818,4 +1818,34 @@ describe("selector setting side effects", () => {
 			hub.dispose();
 		}
 	});
+
+	// Both budgets are only read while the prompt is rendered, so a change that
+	// skips the rebuild leaves the provider on the previous catalogue.
+	it("rebuilds skills and the prompt when the skill catalogue budget changes", () => {
+		const refreshSkillState = vi.fn(() => Promise.resolve());
+		const refreshBaseSystemPrompt = vi.fn(() => Promise.resolve());
+		const controller = new SelectorController({
+			refreshSkillState,
+			session: { refreshBaseSystemPrompt },
+		} as unknown as InteractiveModeContext);
+
+		Settings.instance.override("skills.catalogDescriptionBudgetChars", 0);
+		controller.handleSettingChange("skills.catalogDescriptionBudgetChars", 0);
+
+		// refreshSkillState re-reads the skills settings group that /context
+		// accounting keys on, then rebuilds the prompt itself.
+		expect(refreshSkillState).toHaveBeenCalledTimes(1);
+	});
+
+	it("rebuilds the prompt when the agent catalogue budget changes", () => {
+		const refreshBaseSystemPrompt = vi.fn(() => Promise.resolve());
+		const controller = new SelectorController({
+			session: { refreshBaseSystemPrompt },
+		} as unknown as InteractiveModeContext);
+
+		Settings.instance.override("task.agentCatalogDescriptionBudgetChars", 0);
+		controller.handleSettingChange("task.agentCatalogDescriptionBudgetChars", 0);
+
+		expect(refreshBaseSystemPrompt).toHaveBeenCalledTimes(1);
+	});
 });

@@ -4,6 +4,7 @@ import { effectiveReserveTokens, resolveThresholdTokens } from "@oh-my-pi/pi-age
 import type { Tool as AiTool, Model } from "@oh-my-pi/pi-ai";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { formatNumber } from "@oh-my-pi/pi-utils";
+import { applyCatalogDescriptionBudget } from "../../catalog-budget";
 import type { Skill } from "../../extensibility/skills";
 import type { AgentSession } from "../../session/agent-session";
 import { resolveSpeculationMethod } from "../../session/compaction-methods";
@@ -89,6 +90,10 @@ export interface NonMessageTokenSource {
 		};
 	};
 	readonly skills?: readonly Skill[];
+	readonly skillsSettings?: { readonly catalogDescriptionBudgetChars?: number };
+	readonly settings?: {
+		get(key: "task.agentCatalogDescriptionBudgetChars" | "skills.catalogDescriptionBudgetChars"): number;
+	};
 }
 
 const EMPTY_STRING_PARTS: string[] = [];
@@ -96,19 +101,48 @@ const EMPTY_TOOLS: ReadonlyArray<Pick<Tool, "name" | "description" | "parameters
 const EMPTY_SKILLS: readonly Skill[] = [];
 
 /**
+ * Mirrors the `?? -1` default `buildSystemPrompt` applies to the same setting.
+ * Live settings win over the session snapshot: that snapshot freezes at
+ * construction when the skill list is not reloadable, while the prompt is still
+ * rebuilt from the live value, so reading it alone reports a stale budget.
+ */
+function skillsCatalogBudget(session: NonMessageTokenSource): number {
+	return (
+		session.settings?.get("skills.catalogDescriptionBudgetChars") ??
+		session.skillsSettings?.catalogDescriptionBudgetChars ??
+		-1
+	);
+}
+
+/**
+ * `TaskTool.description` is a live getter over this setting, so changing it
+ * rewrites a tool description in place without replacing the tools array. The
+ * memo keys off array identity, so the budget has to join the key or a stale
+ * tool total survives the change.
+ */
+function agentCatalogBudget(session: NonMessageTokenSource): number {
+	return session.settings?.get("task.agentCatalogDescriptionBudgetChars") ?? -1;
+}
+
+/**
  * Skills actually rendered into the system prompt, mirroring the filter in
  * `buildSystemPrompt` (`system-prompt.ts`): the `read` tool must be present so
  * the model can fetch skill content, and skills with frontmatter `hide: true`
- * (or `disable-model-invocation`, normalized onto `hide`) are excluded.
+ * (or `disable-model-invocation`, normalized onto `hide`) are excluded, and
+ * `skills.catalogDescriptionBudgetChars` empties the descriptions past its cap.
  * Accounting must count only these so the Skills category and the System-prompt
  * subtraction stay aligned with the provider-facing prompt.
  */
 function renderedSkills(
 	skills: readonly Skill[],
 	tools: ReadonlyArray<Pick<Tool, "name" | "description" | "parameters">>,
+	budgetChars: number,
 ): readonly Skill[] {
 	if (!tools.some(tool => tool.name === "read")) return EMPTY_SKILLS;
-	return skills.filter(skill => skill.hide !== true);
+	return applyCatalogDescriptionBudget(
+		skills.filter(skill => skill.hide !== true),
+		budgetChars,
+	);
 }
 
 export function estimateSkillsTokens(skills: readonly Skill[], tokenizer: Tokenizer): number {
@@ -173,6 +207,8 @@ interface NonMessageTokenCache {
 	systemPromptRef: readonly string[];
 	toolsRef: ReadonlyArray<Pick<Tool, "name" | "description" | "parameters">>;
 	skillsRef: readonly Skill[];
+	budgetRef: number;
+	agentBudgetRef: number;
 	// The Agent swaps its Tokenizer instance when the model's encoding changes,
 	// so instance identity doubles as the encoding key.
 	tokenizerRef: Tokenizer;
@@ -198,17 +234,30 @@ function nonMessageTokenCacheEntry(session: NonMessageTokenSource, tokenizer: To
 	const systemPromptRef = session.systemPrompt ?? EMPTY_STRING_PARTS;
 	const toolsRef = session.agent?.state?.tools ?? EMPTY_TOOLS;
 	const skillsRef = session.skills ?? EMPTY_SKILLS;
+	const budgetRef = skillsCatalogBudget(session);
+	const agentBudgetRef = agentCatalogBudget(session);
 	let entry = cachedSession[NON_MESSAGE_TOKEN_CACHE];
 	if (
 		entry &&
 		entry.systemPromptRef === systemPromptRef &&
 		entry.toolsRef === toolsRef &&
 		entry.skillsRef === skillsRef &&
+		entry.budgetRef === budgetRef &&
+		entry.agentBudgetRef === agentBudgetRef &&
 		entry.tokenizerRef === tokenizer
 	) {
 		return entry;
 	}
-	entry = { systemPromptRef, toolsRef, skillsRef, tokenizerRef: tokenizer, tokens: undefined, breakdown: undefined };
+	entry = {
+		systemPromptRef,
+		toolsRef,
+		skillsRef,
+		budgetRef,
+		agentBudgetRef,
+		tokenizerRef: tokenizer,
+		tokens: undefined,
+		breakdown: undefined,
+	};
 	cachedSession[NON_MESSAGE_TOKEN_CACHE] = entry;
 	return entry;
 }
@@ -243,7 +292,10 @@ export function computeNonMessageBreakdown(
 	const entry = nonMessageTokenCacheEntry(session, tokenizer);
 	if (entry.breakdown) return entry.breakdown;
 	const tools = session.agent?.state?.tools ?? EMPTY_TOOLS;
-	const skillsTokens = estimateSkillsTokens(renderedSkills(session.skills ?? EMPTY_SKILLS, tools), tokenizer);
+	const skillsTokens = estimateSkillsTokens(
+		renderedSkills(session.skills ?? EMPTY_SKILLS, tools, skillsCatalogBudget(session)),
+		tokenizer,
+	);
 	const toolsTokens = estimateToolSchemaTokens(tools, tokenizer);
 	const systemPromptParts = session.systemPrompt ?? EMPTY_STRING_PARTS;
 	const systemContextTokens = tokenizer.countTokens(Array.from(systemPromptParts.slice(1), part => part ?? ""));

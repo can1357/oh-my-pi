@@ -5108,6 +5108,27 @@ export const SETTINGS_SCHEMA = {
 		default: [] as string[],
 	},
 
+	"task.agentCatalogDescriptionBudgetChars": {
+		type: "number",
+		default: -1,
+		ui: {
+			tab: "tasks",
+			group: "Subagents",
+			label: "Agent Catalogue Description Budget",
+			description:
+				"Character budget for agent descriptions in the task tool prompt. -1 leaves every description intact, 0 renders names only. A positive value is spent in catalogue order, so agents past the cap render as names without descriptions. Every agent stays spawnable either way.",
+			options: [
+				{ value: "-1", label: "Unlimited" },
+				{ value: "0", label: "Names only" },
+				{ value: "500", label: "500 characters" },
+				{ value: "1000", label: "1000 characters" },
+				{ value: "2000", label: "2000 characters" },
+				{ value: "4000", label: "4000 characters" },
+				{ value: "8000", label: "8000 characters" },
+			],
+		},
+	},
+
 	"task.agentModelOverrides": {
 		type: "record",
 		default: DEFAULT_AGENT_MODEL_OVERRIDES,
@@ -5196,6 +5217,27 @@ export const SETTINGS_SCHEMA = {
 	"skills.ignoredSkills": { type: "array", default: [] as string[] },
 
 	"skills.includeSkills": { type: "array", default: [] as string[] },
+
+	"skills.catalogDescriptionBudgetChars": {
+		type: "number",
+		default: -1,
+		ui: {
+			tab: "tasks",
+			group: "Commands & Skills",
+			label: "Skill Catalogue Description Budget",
+			description:
+				"Character budget for skill descriptions in the system prompt. -1 leaves every description intact, 0 renders names only. A positive value is spent in alphabetical order, so skills past the cap render as names without descriptions. Every skill stays readable through skill://<name> either way.",
+			options: [
+				{ value: "-1", label: "Unlimited" },
+				{ value: "0", label: "Names only" },
+				{ value: "500", label: "500 characters" },
+				{ value: "1000", label: "1000 characters" },
+				{ value: "2000", label: "2000 characters" },
+				{ value: "4000", label: "4000 characters" },
+				{ value: "8000", label: "8000 characters" },
+			],
+		},
+	},
 
 	// Commands
 	"commands.enableClaudeUser": {
@@ -6200,6 +6242,7 @@ export interface SkillsSettings {
 	customDirectories?: string[];
 	ignoredSkills?: string[];
 	includeSkills?: string[];
+	catalogDescriptionBudgetChars?: number;
 	disabledExtensions?: string[];
 }
 

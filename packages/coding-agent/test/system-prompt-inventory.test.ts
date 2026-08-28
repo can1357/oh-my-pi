@@ -710,6 +710,95 @@ describe("system prompt tool inventory", () => {
 		expect(withoutScout).not.toContain("read-only scout");
 	});
 
+	const BUDGET_SKILLS = [
+		{ name: "skill-alpha", description: "Alpha workflow details" },
+		{ name: "skill-bravo", description: "Bravo workflow details" },
+		{ name: "skill-charlie", description: "Charlie workflow details" },
+	];
+
+	async function renderSkillCatalog(
+		catalogDescriptionBudgetChars: number,
+		skills: Array<{ name: string; description: string }>,
+		customPrompt?: string,
+	): Promise<string> {
+		const { systemPrompt } = await buildSystemPrompt({
+			cwd: tempDir,
+			contextFiles: [],
+			customPrompt,
+			skills: skills.map(skill => ({
+				...skill,
+				filePath: path.join(tempDir, "SKILL.md"),
+				baseDir: tempDir,
+				source: "test",
+			})),
+			skillsSettings: { catalogDescriptionBudgetChars },
+			rules: [],
+			toolNames: ["read"],
+			tools: TOOLS,
+			workspaceTree: { ...EMPTY_TREE, rootPath: tempDir },
+		});
+		return systemPrompt.join("\n\n");
+	}
+
+	it("renders every skill description when the catalogue budget is unlimited (-1)", async () => {
+		const text = await renderSkillCatalog(-1, BUDGET_SKILLS);
+
+		expect(text).toContain("- skill-alpha: Alpha workflow details");
+		expect(text).toContain("- skill-bravo: Bravo workflow details");
+		expect(text).toContain("- skill-charlie: Charlie workflow details");
+	});
+
+	it("keeps every skill name but drops the colon and description at budget zero", async () => {
+		const text = await renderSkillCatalog(0, BUDGET_SKILLS);
+
+		expect(text).toContain("- skill-alpha\n");
+		expect(text).toContain("- skill-bravo\n");
+		expect(text).toContain("- skill-charlie\n");
+		expect(text).not.toContain("skill-alpha:");
+		expect(text).not.toContain("Alpha workflow details");
+		expect(text).not.toContain("Charlie workflow details");
+	});
+
+	it("retains skill descriptions until the budget overflows, then renders the rest name-only", async () => {
+		const text = await renderSkillCatalog(44, BUDGET_SKILLS);
+
+		expect(text).toContain("- skill-alpha: Alpha workflow details");
+		expect(text).toContain("- skill-bravo: Bravo workflow details");
+		expect(text).toContain("- skill-charlie\n");
+		expect(text).not.toContain("Charlie workflow details");
+	});
+
+	it("preserves the default separator for an originally empty description", async () => {
+		const text = await renderSkillCatalog(-1, [{ name: "skill-empty", description: "" }]);
+
+		expect(text).toContain("- skill-empty:\n");
+	});
+
+	it("budgets descriptions in the custom prompt skill catalogue", async () => {
+		const unlimited = await renderSkillCatalog(-1, BUDGET_SKILLS, "Custom prompt");
+		const compact = await renderSkillCatalog(0, BUDGET_SKILLS, "Custom prompt");
+
+		expect(unlimited).toContain('<skill name="skill-alpha">\nAlpha workflow details\n</skill>');
+		expect(compact).toContain('<skill name="skill-alpha">\n</skill>');
+		expect(compact).not.toContain("Alpha workflow details");
+	});
+
+	it("keeps the exact default scan-descriptions guidance in the custom prompt at budget -1", async () => {
+		const text = await renderSkillCatalog(-1, BUDGET_SKILLS, "Custom prompt");
+
+		expect(text).toContain("Skills are specialized knowledge. Scan descriptions for your task domain.");
+	});
+
+	it("drops the scan-descriptions claim from the custom prompt once descriptions are omitted", async () => {
+		const compact = await renderSkillCatalog(0, BUDGET_SKILLS, "Custom prompt");
+		const partial = await renderSkillCatalog(44, BUDGET_SKILLS, "Custom prompt");
+
+		for (const text of [compact, partial]) {
+			expect(text).not.toContain("Scan descriptions for your task domain.");
+			expect(text).toContain("Skills are specialized knowledge.\nIf a skill applies");
+		}
+	});
+
 	it("does not require browser verification when the browser tool is absent (issue #8139)", async () => {
 		const opts = {
 			cwd: tempDir,
