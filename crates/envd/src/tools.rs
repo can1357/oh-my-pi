@@ -1822,65 +1822,9 @@ pub(crate) fn production_registry<
 	let ask_presenter = PresenterSlot::new(
 		ask_presenter.unwrap_or_else(|| Arc::new(omp_tools::ask::HeadlessPresenter)),
 	);
-	registry.protect_core_claims([
-		"read",
-		"write",
-		"bash",
-		"edit",
-		"glob",
-		"eval",
-		"task",
-		"hub",
-		"browser",
-		"learn",
-		"manage_skill",
-		"computer",
-		"lsp",
-		"debug",
-	]);
-	for name in [
-		"read",
-		"edit",
-		"bash",
-		"grep",
-		"glob",
-		"write",
-		"eval",
-		"todo",
-		"ask",
-		"fetch",
-		"web_search",
-		"think",
-		"goal",
-		"yield",
-		"checkpoint",
-		"rewind",
-		"hub",
-		"browser",
-		"github",
-		"image_gen",
-		"tts",
-		"report_issue",
-		"vibe",
-		"retain",
-		"recall",
-		"reflect",
-		"memory_edit",
-		"learn",
-		"manage_skill",
-		"lsp",
-		"debug",
-		"computer",
-	] {
-		ensure_name_absent(&registry, name)?;
-	}
-	for dynamic in dynamic_tools {
-		dynamic.register(&mut registry)?;
-	}
-	for factory in dynamic_tool_factories {
-		factory.register(&mut registry)?;
-	}
+
 	let search_bridge = Arc::new(SearchBridgeHost::new(search));
+	registry.protect_user_visible_core(["browser"]);
 	if browser_settings.enabled && tool_settings.enabled("browser") {
 		let browser_daemon = BrowserDaemon::start(blobs.clone(), *browser_settings);
 		registry.register(
@@ -1910,8 +1854,10 @@ pub(crate) fn production_registry<
 		Presentation::Device,
 		builtin_device_claims(),
 	)?;
+	registry.unlist_from_roster("report_issue")?;
 	let reflection_bridge = Arc::new(ReflectionBridgeHost::new());
 	let memory_capabilities = memory.capabilities();
+	registry.protect_user_visible_core(["retain"]);
 	if memory_capabilities.writable {
 		registry.register(
 			omp_tools::memory::retain_tool(Arc::clone(memory)),
@@ -1919,6 +1865,7 @@ pub(crate) fn production_registry<
 			builtin_device_claims(),
 		)?;
 	}
+	registry.protect_user_visible_core(["recall", "reflect"]);
 	if memory_capabilities.searchable {
 		registry.register(
 			omp_tools::memory::recall_tool(Arc::clone(memory)),
@@ -1931,6 +1878,7 @@ pub(crate) fn production_registry<
 			builtin_device_claims(),
 		)?;
 	}
+	registry.protect_user_visible_core(["memory_edit"]);
 	if memory_capabilities.editable {
 		registry.register(
 			omp_tools::memory_edit::tool(Arc::clone(memory)),
@@ -1938,6 +1886,7 @@ pub(crate) fn production_registry<
 			builtin_device_claims(),
 		)?;
 	}
+	registry.protect_core_claims(["manage_skill", "learn"]);
 	if autolearn_settings.enabled {
 		if let Some(managed_skills_root) = content.managed_skills_root {
 			let authority = Arc::new(ManagedSkills::new(managed_skills_root, content.authored_skills));
@@ -1946,12 +1895,14 @@ pub(crate) fn production_registry<
 				Presentation::Device,
 				builtin_device_claims(),
 			)?;
+			registry.unlist_from_roster("manage_skill")?;
 			if memory_capabilities.writable {
 				registry.register(
 					omp_tools::learn::tool(Arc::clone(memory), authority),
 					Presentation::Device,
 					builtin_device_claims(),
 				)?;
+				registry.unlist_from_roster("learn")?;
 			}
 		}
 	}
@@ -1961,9 +1912,6 @@ pub(crate) fn production_registry<
 		state_dir,
 		Arc::clone(&github_credentials),
 	);
-	if let Some(upload) = telemetry_upload {
-		upload.start(Arc::clone(telemetry), Arc::clone(&github_credentials));
-	}
 	registry.register(
 		omp_tools::github::tool(github),
 		Presentation::Device,
@@ -2026,18 +1974,20 @@ pub(crate) fn production_registry<
 			hashline_headers:   tool_settings.enabled("edit") && selected_edit.family.as_str() == "hl",
 		},
 	);
+	registry.protect_user_visible_core(["read"]);
 	if tool_settings.enabled("read") {
 		registry.register(read, Presentation::Slot, core_claims())?;
 	}
 	let fetch = omp_tools::fetch::tool(read_sources.clone());
+	registry.protect_user_visible_core(["fetch"]);
 	if tool_settings.enabled("fetch") && tool_settings.fetch_enabled {
 		registry.register(fetch, Presentation::Slot, core_claims())?;
 	}
+	registry.protect_user_visible_core(["web_search"]);
 	if tool_settings.enabled("web_search") {
 		let web_search = omp_tools::web_search::tool(Arc::clone(&search_bridge));
 		registry.register(web_search, Presentation::Slot, core_claims())?;
 	}
-
 	let edit_observer = omp_tools::edit::observer::EditObserver::new(
 		omp_tools::edit::observer::EditBlackboxConfig {
 			path: tool_settings.edit_blackbox_path.as_ref().map(|path| {
@@ -2088,6 +2038,7 @@ pub(crate) fn production_registry<
 		edit_observer,
 		tool_settings.edit_guard_generated,
 	));
+	registry.protect_user_visible_core(["edit"]);
 	if tool_settings.enabled("edit") {
 		let mut edits = [
 			(
@@ -2155,9 +2106,11 @@ pub(crate) fn production_registry<
 		tool_settings.format_policy,
 		tool_settings.edit_guard_generated,
 	);
+	registry.protect_user_visible_core(["write"]);
 	if tool_settings.enabled("write") {
 		registry.register(write, Presentation::Slot, core_claims())?;
 	}
+	registry.protect_user_visible_core(["lsp"]);
 	if tool_settings.enabled("lsp") {
 		let maximum = tool_settings
 			.max_timeout
@@ -2169,6 +2122,7 @@ pub(crate) fn production_registry<
 			core_claims(),
 		)?;
 	}
+	registry.protect_user_visible_core(["debug"]);
 	if tool_settings.enabled("debug") {
 		let maximum = tool_settings
 			.max_timeout
@@ -2187,13 +2141,16 @@ pub(crate) fn production_registry<
 		Arc::clone(&resolvers),
 	);
 	let grep = omp_tools::grep::tool(search.clone(), read_blobs.clone());
+	registry.protect_user_visible_core(["grep"]);
 	if tool_settings.enabled("grep") {
 		registry.register(grep, Presentation::Slot, core_claims())?;
 	}
 	let glob = omp_tools::glob::tool(search, read_blobs);
+	registry.protect_user_visible_core(["glob"]);
 	if tool_settings.enabled("glob") {
 		registry.register(glob, Presentation::Slot, core_claims())?;
 	}
+	registry.protect_user_visible_core(["ast_grep"]);
 	if tool_settings.enabled("ast_grep") {
 		registry.register(
 			omp_tools::ast_grep::tool(workspace.root().to_path_buf()),
@@ -2201,6 +2158,7 @@ pub(crate) fn production_registry<
 			core_claims(),
 		)?;
 	}
+	registry.protect_user_visible_core(["ast_edit"]);
 	if tool_settings.enabled("ast_edit") {
 		registry.register(
 			omp_tools::ast_edit::tool(workspace.root().to_path_buf(), previews.clone()),
@@ -2218,6 +2176,8 @@ pub(crate) fn production_registry<
 		.collect::<Vec<_>>();
 	let eval_host = Arc::new(SessionBridgeHost::new());
 	let mut eval_control = EvalSessionControl::default();
+	registry.protect_user_visible_core(["eval"]);
+	registry.protect_core_claims(["task"]);
 	if tool_settings.enabled("eval") {
 		match preflight_python_eval(
 			Arc::clone(&eval_host),
@@ -2249,9 +2209,11 @@ pub(crate) fn production_registry<
 			},
 		}
 	}
+	registry.protect_user_visible_core(["todo"]);
 	if tool_settings.enabled("todo") {
 		registry.register(omp_tools::todo::tool(), Presentation::Slot, core_claims())?;
 	}
+	registry.protect_user_visible_core(["ask"]);
 	if tool_settings.enabled("ask") {
 		registry.register(
 			omp_tools::ask::tool_with_vocalizer(
@@ -2262,9 +2224,12 @@ pub(crate) fn production_registry<
 			core_claims(),
 		)?;
 	}
+	registry.protect_core_claims(["think"]);
 	if tool_settings.enabled("think") {
 		registry.register(omp_tools::think::tool(), Presentation::Slot, core_claims())?;
+		registry.unlist_from_roster("think")?;
 	}
+	registry.protect_core_claims(["goal"]);
 	if let Some(goal_control) = goal_control {
 		registry.register(
 			omp_tools::goal::tool(GoalControlAdapter(goal_control)),
@@ -2272,6 +2237,7 @@ pub(crate) fn production_registry<
 			core_claims(),
 		)?;
 	}
+	registry.protect_core_claims(["yield"]);
 	if tool_settings.enabled("yield") {
 		// Children finalize through `yield`; the top-level agent never
 		// advertises it, so registration is selection-only (`Hidden`).
@@ -2279,9 +2245,11 @@ pub(crate) fn production_registry<
 	}
 	let checkpoint_control = AgentCheckpointControl::default();
 	let (checkpoint, rewind) = omp_tools::checkpoint::tools(checkpoint_control.clone());
+	registry.protect_user_visible_core(["checkpoint"]);
 	if tool_settings.enabled("checkpoint") {
 		registry.register(checkpoint, Presentation::Slot, core_claims())?;
 	}
+	registry.protect_user_visible_core(["rewind"]);
 	if tool_settings.enabled("rewind") {
 		registry.register(rewind, Presentation::Slot, core_claims())?;
 	}
@@ -2293,6 +2261,15 @@ pub(crate) fn production_registry<
 			Arc::new(device_invoker),
 			previews.clone(),
 		)));
+	}
+
+	registry.protect_user_visible_core(["bash"]);
+	for dynamic in dynamic_tools {
+		dynamic.register(&mut registry)?;
+	}
+	registry.protect_core_claims(["hub"]);
+	for factory in dynamic_tool_factories {
+		factory.register(&mut registry)?;
 	}
 	if tool_settings.enabled("bash") && shell_settings.enabled {
 		let sibling_tools = registry
@@ -2352,6 +2329,7 @@ pub(crate) fn production_registry<
 		);
 		registry.register(shell, Presentation::Slot, core_claims())?;
 	}
+	registry.protect_live_claims();
 	let flattened_slots = if policy == ToolsPolicy::ToolOnly {
 		let mut slots = Vec::new();
 		for registration in workers.registrations() {
@@ -2383,7 +2361,6 @@ pub(crate) fn production_registry<
 		if flattened_slots.is_some() {
 			spec.name = Str::from(spec.name.as_str().replace('/', "_"));
 		}
-		ensure_name_absent(&registry, &spec.name)?;
 		registry.register_worker(
 			spec,
 			if flattened_slots.is_some() {
@@ -2408,6 +2385,12 @@ pub(crate) fn production_registry<
 	eval_host
 		.bind_prelude(prelude, Arc::new(prelude_invoker))
 		.map_err(|error| EnvdError::Eval(Str::from(error.to_string())))?;
+	// Start background delivery only after every fallible assembly step has
+	// succeeded: a failed start must not leave an unowned upload task
+	// retaining the telemetry index and credentials.
+	if let Some(upload) = telemetry_upload {
+		upload.start(Arc::clone(telemetry), Arc::clone(&github_credentials));
+	}
 	Ok((
 		registry,
 		eval_host,
@@ -2558,13 +2541,6 @@ fn preflight_python_eval(
 	python_engine()?;
 	ProcessEvalExec::production(host, interrupt_grace, blobs, configured_interpreter)
 		.map_err(|error| EnvdError::Eval(Str::from(error.to_string())))
-}
-
-fn ensure_name_absent(registry: &Registry, name: &str) -> Result<(), EnvdError> {
-	if registry.live_identity(name).is_some() {
-		return Err(EnvdError::DuplicateToolName(Str::from(name)));
-	}
-	Ok(())
 }
 
 const fn core_claims() -> Claims {
@@ -2885,6 +2861,11 @@ mod tests {
 	use omp_proto::toolhost::v1;
 
 	use super::*;
+	use crate::{
+		eval::BridgeHostError,
+		worker::{HostKey, OwnedToolDecl},
+	};
+
 	fn prelude_param(
 		name: &str,
 		kind: PreludeParamKind,
@@ -2989,5 +2970,215 @@ mod tests {
 				.expect_err("invalid prelude signature was accepted");
 			assert!(error.to_string().contains(expected), "{error}");
 		}
+	}
+
+	/// Counts telemetry uploader starts through the composition bridge.
+	#[derive(Default)]
+	struct RecordingUpload(AtomicU64);
+
+	impl TelemetryUpload for RecordingUpload {
+		fn start(&self, _index: Arc<TelemetryIndex>, _credentials: Arc<GithubCredentialBridge>) {
+			self.0.fetch_add(1, Ordering::SeqCst);
+		}
+	}
+
+	#[derive(Clone, Default)]
+	struct UnusedDeviceInvoker;
+
+	impl omp_tools::device::DeviceInvoker for UnusedDeviceInvoker {
+		async fn invoke(
+			&self,
+			_request: omp_tools::device::DeviceInvokeRequest,
+		) -> omp_tool::ErasedStream<'static> {
+			Box::pin(async_stream::stream! {
+				yield Err(omp_tool::RegistryError::UnknownTool(sf!(
+					"no worker devices in assembly tests"
+				)));
+			})
+		}
+	}
+
+	struct UnusedPreludeInvoker;
+
+	#[async_trait::async_trait]
+	impl PreludeInvoker for UnusedPreludeInvoker {
+		async fn invoke(
+			&self,
+			_name: &str,
+			_rev: &str,
+			_args: serde_json::Value,
+		) -> Result<serde_json::Value, BridgeHostError> {
+			Err(BridgeHostError::message(sf!("no prelude helpers in assembly tests")))
+		}
+	}
+
+	/// Serves exactly the document hello handshake so assembly can bind a
+	/// `DocumentHost` without a live document server; assembly never issues
+	/// document calls, so the transport then just stays open.
+	async fn handshake_document_host(root: &Path) -> DocumentHost {
+		let (client, mut server) = tokio::io::duplex(64 * 1024);
+		let root_uri = format!("file://{}", root.display());
+		tokio::spawn(async move {
+			use omp_docserver::{
+				connection::{PROTOCOL_MAJOR, PROTOCOL_MINOR},
+				wire,
+			};
+			let config = wire::FrameConfig::default();
+			let mut scratch = bytes::BytesMut::new();
+			if wire::read_client_frame(&mut server, config, &mut scratch)
+				.await
+				.is_err()
+			{
+				return;
+			}
+			let hello = omp_proto::document::v1::ServerFrame {
+				request_id: 0,
+				body:       Some(omp_proto::document::v1::server_frame::Body::Hello(
+					omp_proto::document::v1::ServerHello {
+						protocol_major: PROTOCOL_MAJOR,
+						protocol_minor: PROTOCOL_MINOR,
+						workspace_id: bytes::Bytes::from_static(b"assembly-test"),
+						root_uri,
+						server_epoch: bytes::Bytes::from_static(b"epoch"),
+						server_build: "envd-test".to_owned(),
+					},
+				)),
+			};
+			if wire::write_server_frame(&mut server, &hello, config, &mut scratch)
+				.await
+				.is_err()
+			{
+				return;
+			}
+			std::future::pending::<()>().await;
+		});
+		DocumentHost::connect(client)
+			.await
+			.expect("document host handshake")
+	}
+
+	/// Assembles the production registry over throwaway hosts while counting
+	/// telemetry uploader starts.
+	async fn assemble_registry(
+		project: &Path,
+		state: &Path,
+		workers: ExtHostSupervisor,
+		upload: Arc<RecordingUpload>,
+	) -> Result<Arc<Registry>, EnvdError> {
+		let documents = handshake_document_host(project).await;
+		let exec = ExecHost::new();
+		let blobs = BlobHost::open(state.join("blobs")).expect("blob host");
+		let github_cache = Arc::new(
+			GithubCache::open(state.join("github-cache.sqlite3"), time::Duration::from_secs(300))
+				.expect("github cache"),
+		);
+		let mcp = Arc::new(McpService::open(state.join("mcp-cache.sqlite3")).expect("MCP service"));
+		let workspace = WorkspaceHost::open(project).expect("workspace host");
+		let memory = omp_memory::runtime::MemoryRuntime::start(omp_memory::runtime::RuntimeStart {
+			session_id:             sf!("assembly-test"),
+			data_dir:               state.join("memory"),
+			workspace_root:         workspace.root().to_path_buf(),
+			canonical_primary_root: None,
+			backend:                omp_memory::MemoryBackend::Off,
+			mnemopi:                omp_memory::MnemopiSettings::default(),
+		})
+		.expect("memory runtime");
+		let telemetry = Arc::new(
+			TelemetryIndex::open(&state.join("telemetry"), &state.join("telemetry.sqlite3"))
+				.expect("telemetry index"),
+		);
+		let supervisor = Arc::new(workers);
+		let root_uri = sf!("file:///assembly-test");
+		let browser_settings = BrowserSettings { enabled: false, ..BrowserSettings::default() };
+		let autolearn = omp_memory::AutolearnSettings::default();
+		let (
+			registry,
+			_eval_bridge,
+			_reflection_bridge,
+			_eval_control,
+			_checkpoint_control,
+			_previews,
+			_resolvers,
+			_search_bridge,
+			_credentials,
+			_ask_presenter,
+		) = production_registry(
+			&documents,
+			&blobs,
+			&exec,
+			None,
+			state,
+			"assembly-test",
+			Arc::clone(&github_cache),
+			&mcp,
+			&workspace,
+			&memory,
+			&telemetry,
+			&root_uri,
+			supervisor.as_ref(),
+			Duration::new(30, omp_core::DurationUnit::Seconds),
+			&ToolSettings::default(),
+			&browser_settings,
+			&ShellSettings::default(),
+			&AcpSettings::default(),
+			AcpExecSlot::default(),
+			&autolearn,
+			UnusedDeviceInvoker,
+			UnusedPreludeInvoker,
+			ToolsPolicy::Auto,
+			Registry::new(),
+			RegistryBridges { telemetry_upload: Some(upload), ..RegistryBridges::default() },
+		)?;
+		Ok(registry)
+	}
+
+	#[tokio::test]
+	async fn failed_worker_assembly_leaves_the_telemetry_uploader_unstarted() {
+		let project = tempfile::tempdir().expect("project directory");
+		let state = tempfile::tempdir().expect("state directory");
+		// A malformed declaration: assembly must reject it and never reach
+		// the uploader start.
+		let malformed = OwnedToolDecl {
+			owner:       HostKey::new(sf!("workspace"), sf!("trusted"), sf!("fixture")),
+			declaration: ToolDecl { rev: "helper.1".to_owned(), ..ToolDecl::default() },
+		};
+		let upload = Arc::new(RecordingUpload::default());
+		let Err(error) = assemble_registry(
+			project.path(),
+			state.path(),
+			ExtHostSupervisor::inert_with_registrations(Arc::from([malformed])),
+			Arc::clone(&upload),
+		)
+		.await
+		else {
+			panic!("a declaration without a definition must fail assembly");
+		};
+		assert!(error.to_string().contains("no definition"), "unexpected assembly failure: {error}");
+		assert_eq!(
+			upload.0.load(Ordering::SeqCst),
+			0,
+			"failed assembly must not start the telemetry uploader",
+		);
+	}
+
+	#[tokio::test]
+	async fn successful_assembly_starts_the_telemetry_uploader_once() {
+		let project = tempfile::tempdir().expect("project directory");
+		let state = tempfile::tempdir().expect("state directory");
+		let upload = Arc::new(RecordingUpload::default());
+		let registry = assemble_registry(
+			project.path(),
+			state.path(),
+			ExtHostSupervisor::inert_with_registrations(Arc::from([])),
+			Arc::clone(&upload),
+		)
+		.await
+		.expect("empty worker assembly succeeds");
+		assert!(registry.live_identity("bash").is_some(), "core tools registered");
+		assert_eq!(
+			upload.0.load(Ordering::SeqCst),
+			1,
+			"successful assembly starts the uploader exactly once",
+		);
 	}
 }

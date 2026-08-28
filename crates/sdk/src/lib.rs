@@ -60,8 +60,8 @@ pub use session::{
 pub use tools::{
 	AutoLearnCaptureDrainError, AutoLearnCaptureError, AutoLearnCaptureExecutor,
 	AutoLearnCaptureHandle, AutoLearnCaptureRequest, AutoLearnCaptureRunner,
-	AutoLearnCaptureSnapshot, BuiltinToolIdentity, CustomToolDefinitionError, ToolRegistryBuilder,
-	builtin_tool_identities, custom_tool_to_definition,
+	AutoLearnCaptureSnapshot, CustomToolDefinitionError, ToolRegistryBuilder,
+	custom_tool_to_definition,
 };
 pub use url::Url;
 pub use workspace::{FormattedWorkspaceTree, WorkspaceTreeBuilder, WorkspaceTreeError};

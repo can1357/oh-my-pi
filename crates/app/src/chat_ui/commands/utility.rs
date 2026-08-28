@@ -5,7 +5,7 @@ use std::{collections::BTreeSet, fmt::Write as _};
 use futures::StreamExt as _;
 use miette::IntoDiagnostic as _;
 use omp_core::{Str, sf};
-use omp_tool::{CallOutcome, ErasedEv, ErasedOutcome, Registry};
+use omp_tool::{CallOutcome, ErasedEv, ErasedOutcome, Presentation, Registry};
 use omp_tools::computer::{Action, Fault, Params, Payload};
 
 use super::{ChangelogRequest, ComputerRequest, UtilityRequest, VisionRequest, command};
@@ -72,22 +72,36 @@ pub(crate) fn render_changelog(request: ChangelogRequest) -> Str {
 }
 
 pub(crate) fn render_tools(
+	registry: &Registry,
 	live_tools: &[omp_chat_ui::LiveToolView],
 	enabled_tools: &[Str],
 	settings: &omp_envd::tool_settings::ToolSettings,
 	declarations: &[omp_driver::discovery::manifest::DiscoveredCapability],
 ) -> Str {
+	// The roster policy owns user visibility: live claims unlisted via
+	// `unlist_from_roster` must not re-enter the listing as active markers.
 	let mut active = BTreeSet::new();
-	active.extend(enabled_tools.iter().map(Str::as_str));
-	active.extend(live_tools.iter().map(|tool| tool.name.as_str()));
+	active.extend(
+		enabled_tools
+			.iter()
+			.filter(|name| registry.user_visible(name.as_str()))
+			.map(Str::as_str),
+	);
+	active.extend(
+		live_tools
+			.iter()
+			.filter(|tool| registry.user_visible(tool.name.as_str()))
+			.map(|tool| tool.name.as_str()),
+	);
 
 	let mut all = BTreeSet::new();
 	all.extend(
-		omp_tools::builtin_tool_identities()
-			.iter()
-			.filter(|identity| !identity.hidden)
-			.map(|identity| identity.name),
+		registry
+			.roster()
+			.filter(|(_, presentation)| *presentation != Presentation::Hidden)
+			.map(|(name, _)| name.as_str()),
 	);
+	all.extend(registry.disabled_roster().map(Str::as_str));
 	all.extend(active.iter().copied());
 	all.extend(settings.enabled.keys().map(Str::as_str));
 	all.extend(declarations.iter().filter_map(|declaration| {
@@ -255,7 +269,43 @@ fn capability(result: &serde_json::Value, available: &str, permission: &str) -> 
 
 #[cfg(test)]
 mod tests {
+	use bytes::Bytes;
+	use omp_tool::{Claims, Constraint, Effects, Precedence, Rev, ToolSpec};
+
 	use super::*;
+	fn core_claims() -> Claims {
+		Claims { precedence: Precedence::CORE, claimant: sf!("test/core"), replaces: None }
+	}
+
+	fn device_claims() -> Claims {
+		Claims { precedence: Precedence::ENHANCEMENT, claimant: sf!("test/core"), replaces: None }
+	}
+
+	fn stub_spec(name: &str) -> ToolSpec {
+		ToolSpec {
+			name:            Str::new(name),
+			rev:             Rev { family: sf!("test"), n: 1 },
+			description:     sf!("test tool"),
+			schema:          Bytes::from_static(br#"{"type":"object"}"#),
+			constraint:      Constraint::None,
+			effects:         Effects::empty(),
+			projection_code: [0; 32],
+		}
+	}
+
+	fn roster_registry() -> Registry {
+		let mut registry = Registry::new();
+		registry
+			.register_worker(stub_spec("read"), Presentation::Slot, core_claims())
+			.expect("read");
+		registry
+			.register_worker(stub_spec("computer"), Presentation::Device, device_claims())
+			.expect("computer");
+		registry
+			.register_worker(stub_spec("secret"), Presentation::Hidden, core_claims())
+			.expect("secret");
+		registry
+	}
 
 	#[test]
 	fn recent_changelog_is_bounded_to_three_real_releases() {
@@ -286,10 +336,59 @@ mod tests {
 	}
 	#[test]
 	fn tools_distinguish_active_and_disabled_builtins() {
-		let rendered =
-			render_tools(&[], &[sf!("read")], &omp_envd::tool_settings::ToolSettings::default(), &[]);
+		let registry = roster_registry();
+		let rendered = render_tools(
+			&registry,
+			&[],
+			&[sf!("read")],
+			&omp_envd::tool_settings::ToolSettings::default(),
+			&[],
+		);
 		assert!(rendered.lines().any(|line| line == "* read"));
 		assert!(rendered.lines().any(|line| line == "- computer"));
+		assert!(
+			registry
+				.roster()
+				.any(|(name, presentation)| name.as_str() == "secret"
+					&& presentation == Presentation::Hidden)
+		);
+		assert!(
+			!rendered
+				.lines()
+				.any(|line| line == "* secret" || line == "- secret")
+		);
+	}
+
+	#[test]
+	fn tools_do_not_mark_unlisted_live_tools_active() {
+		let mut registry = roster_registry();
+		registry
+			.register_worker(stub_spec("report_issue"), Presentation::Device, device_claims())
+			.expect("report_issue");
+		registry
+			.unlist_from_roster("report_issue")
+			.expect("live claim can be unlisted");
+		let live_tools = [omp_chat_ui::LiveToolView {
+			name:         sf!("report_issue"),
+			label:        None,
+			description:  Some(sf!("report an issue")),
+			input_schema: serde_json::json!({"type": "object"}),
+			source_path:  None,
+			hidden:       false,
+			source:       Str::new_static("builtin"),
+		}];
+		let rendered = render_tools(
+			&registry,
+			&live_tools,
+			&[sf!("read"), sf!("report_issue")],
+			&omp_envd::tool_settings::ToolSettings::default(),
+			&[],
+		);
+		assert!(rendered.lines().any(|line| line == "* read"));
+		assert!(
+			!rendered.lines().any(|line| line.ends_with("report_issue")),
+			"unlisted live tool must not be rendered active: {rendered}"
+		);
 	}
 
 	#[test]

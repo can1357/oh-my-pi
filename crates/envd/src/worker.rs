@@ -25,8 +25,8 @@ use nix::sys::signal;
 #[cfg(unix)]
 use nix::unistd::Pid;
 use omp_core::{
-	CowBytes, Duration as CoreDuration, DurationUnit, InvocationPhase, LifecyclePhase, Principal,
-	RestartReason, Str, sf,
+	CowBytes, Duration as CoreDuration, DurationUnit, FastHashSet, FastState, InvocationPhase,
+	LifecyclePhase, Principal, RestartReason, Str, sf,
 };
 use omp_proto::{
 	env::v1::{ArgText, ArgsCommitted, Interrupt},
@@ -2016,6 +2016,44 @@ impl ExtHostSupervisor {
 		&self.registrations
 	}
 
+	/// Builds an inert supervisor that surfaces fabricated registrations.
+	///
+	/// Production spawn verifies live worker processes; registry-assembly
+	/// tests only need the declaration list that `production_registry`
+	/// consumes, with no routes or actors behind it.
+	#[cfg(test)]
+	pub(crate) fn inert_with_registrations(registrations: Arc<[OwnedToolDecl]>) -> Self {
+		Self {
+			routes: BTreeMap::new(),
+			registrations,
+			next_invocation: AtomicU64::new(1),
+			actors: Vec::new(),
+			data_authority: None,
+			journal_runtime: Arc::new(Mutex::new(JournalRuntimeSlot {
+				binding:   None,
+				was_bound: false,
+			})),
+			availability_pending: Arc::new(Mutex::new(VecDeque::new())),
+			availability_sink: Arc::new(Mutex::new(None)),
+			children_active: AtomicBool::new(false),
+			control_authorities: None,
+			registry_control: None,
+			frozen_registry: Arc::new(Mutex::new(BTreeMap::new())),
+			domain_control: DomainControlSlot::new(),
+			service_router: Arc::new(ServiceRouter {
+				broker: Arc::new(Mutex::new(ServiceBroker::new(1))),
+				routes: Mutex::new(BTreeMap::new()),
+			}),
+			agents_control: Arc::new(AgentsControlSlot {
+				session_generation: 1,
+				next_id:            AtomicU64::new(1),
+				was_bound:          AtomicBool::new(false),
+				binding:            Mutex::new(None),
+			}),
+			control_activations: Vec::new(),
+		}
+	}
+
 	/// Installs sole-owner Agent Journal CONTROL routing.
 	///
 	/// # Errors
@@ -2313,6 +2351,20 @@ pub enum WorkerError {
 	/// The worker used an unexpected protocol sequence.
 	#[error("python tool worker protocol violation: {0}")]
 	Protocol(Str),
+	/// A worker declared tools under the harness-reserved `omp/core` id.
+	#[error("worker extension id 'omp/core' is reserved for harness core tools")]
+	ReservedExtensionId,
+	/// A worker claimed more than one revision of the same tool root.
+	#[error(
+		"worker registered more than one revision of the same tool root: {name} (extension \
+		 {extension_id})"
+	)]
+	DuplicateToolRoot {
+		/// Tool root name claimed at multiple revisions.
+		name:         Str,
+		/// Claiming extension identifier.
+		extension_id: Str,
+	},
 	/// Host and worker schema revisions differed.
 	#[error("python tool worker schema revision {actual} does not match host {expected}")]
 	SchemaRevision {
@@ -6201,7 +6253,8 @@ impl TryFrom<ToolComplete> for WorkerCompletion {
 }
 
 fn validate_registrations(tools: &[ToolDecl]) -> Result<(), WorkerError> {
-	let mut names = HashSet::with_capacity(tools.len());
+	let mut names = FastHashSet::with_capacity_and_hasher(tools.len(), FastState::default());
+	let mut roots = FastHashSet::with_capacity_and_hasher(tools.len(), FastState::default());
 	for tool in tools {
 		let Some(definition) = &tool.definition else {
 			return Err(WorkerError::Protocol(sf!("registered tool has no definition")));
@@ -6210,6 +6263,9 @@ fn validate_registrations(tools: &[ToolDecl]) -> Result<(), WorkerError> {
 			return Err(WorkerError::Protocol(sf!(
 				"registered tool name and revision must be nonempty",
 			)));
+		}
+		if tool.extension_id == "omp/core" {
+			return Err(WorkerError::ReservedExtensionId);
 		}
 		let Some(tool_def::Input::JsonSchema(json_schema)) = definition.input.as_ref() else {
 			return Err(WorkerError::Protocol(sf!(
@@ -6227,6 +6283,12 @@ fn validate_registrations(tools: &[ToolDecl]) -> Result<(), WorkerError> {
 				"worker registered duplicate tool identity: {}@{}",
 				definition.name, tool.rev
 			))));
+		}
+		if !roots.insert((tool.extension_id.as_str(), definition.name.as_str())) {
+			return Err(WorkerError::DuplicateToolRoot {
+				name:         Str::from(definition.name.clone()),
+				extension_id: Str::from(tool.extension_id.clone()),
+			});
 		}
 	}
 	Ok(())
@@ -8148,5 +8210,52 @@ async def worker_prelude_round_trip(patches, *, strategy: str = "sequential"):
 				"strategy": "parallel",
 			})
 		);
+	}
+
+	#[test]
+	fn validate_registrations_rejects_reserved_and_ambiguous_declarations() {
+		let reserved = ToolDecl {
+			extension_id: "omp/core".to_owned(),
+			definition: Some(ToolDef {
+				name:        "reserved".to_owned(),
+				description: "reserved".to_owned(),
+				input:       Some(tool_def::Input::JsonSchema(tool_def::JsonSchema {
+					schema_json: Bytes::from_static(br#"{"type":"object"}"#),
+					strict:      None,
+				})),
+			}),
+			rev: "1".to_owned(),
+			constraint: None,
+			summary: String::new(),
+			docs: String::new(),
+			..ToolDecl::default()
+		};
+		let error = validate_registrations(&[reserved])
+			.expect_err("reserved extension id 'omp/core' is rejected");
+		assert!(matches!(error, WorkerError::ReservedExtensionId));
+
+		let ambiguous_base = ToolDecl {
+			extension_id: "extension/example".to_owned(),
+			definition: Some(ToolDef {
+				name:        "ambiguous".to_owned(),
+				description: "ambiguous".to_owned(),
+				input:       Some(tool_def::Input::JsonSchema(tool_def::JsonSchema {
+					schema_json: Bytes::from_static(br#"{"type":"object"}"#),
+					strict:      None,
+				})),
+			}),
+			constraint: None,
+			summary: String::new(),
+			docs: String::new(),
+			..ToolDecl::default()
+		};
+		let mut first = ambiguous_base.clone();
+		first.rev = "1".to_owned();
+		let mut second = ambiguous_base;
+		second.rev = "2".to_owned();
+		let error = validate_registrations(&[first, second])
+			.expect_err("multiple revisions of the same root from one claimant are rejected");
+		assert!(matches!(error, WorkerError::DuplicateToolRoot { name, extension_id }
+				if name == "ambiguous" && extension_id == "extension/example"));
 	}
 }

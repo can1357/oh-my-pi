@@ -21,16 +21,16 @@ use omp_inference::{Adjustment, ToolGrammarSyntax};
 use omp_proto::policy::v1;
 use omp_tool::{
 	Abort, AbortKind, ArgIssue, ArgIssueKind, ArgPath, ArgSpec, ArgSpecRegistry,
-	ArgSpecRegistryError, ArtifactLifetime, BlobRef, CallOutcome, CallOutcomeDetails,
-	CallOutcomeDetailsError, CallOutcomeSpill, CapsBase, Claims, Coerce, CommitError, Constraint,
-	ConstraintDisposition, DesktopEffects, DocEffects, Effects, ErasedEv, ErasedOutcome, Ev,
-	ExecEffects, ExpectedArtifact, Fallback, GoalToolState, GrammarSyntax, InclusionPolicy,
-	IncomingParams, InferenceEffects, Interrupt, InterruptWaitError, JobKind, JobMetadata, JobOwner,
-	JobRef, JobStatus, LeafOwner, LeafReplacementError, LeafReplacementRegistry, LeafVersion,
-	LiftedCall, LoweringCaps, MemoryToolState, ModelClass, ParamError, Part, PolicyDenied,
-	Precedence, Presentation, ProjectedCall, PromptCaps, PullMode, PulledKind, RecordedCall,
-	RecordedCallOwned, Registry, RegistryError, RegistryLeaf, RepairKind, Rev, Tool, ToolIdentity,
-	ToolSpec, ToolTerminal, Usd, call_outcome_details,
+	ArgSpecRegistryError, ArtifactLifetime, AvailabilityDelta, BlobRef, CallOutcome,
+	CallOutcomeDetails, CallOutcomeDetailsError, CallOutcomeSpill, CapsBase, Claims, Coerce,
+	CommitError, Constraint, ConstraintDisposition, DesktopEffects, DocEffects, Effects, ErasedEv,
+	ErasedOutcome, Ev, ExecEffects, ExpectedArtifact, Fallback, GoalToolState, GrammarSyntax,
+	InclusionPolicy, IncomingParams, InferenceEffects, Interrupt, InterruptWaitError, JobKind,
+	JobMetadata, JobOwner, JobRef, JobStatus, LeafOwner, LeafReplacementError,
+	LeafReplacementRegistry, LeafVersion, LiftedCall, LoweringCaps, MemoryToolState, ModelClass,
+	ParamError, Part, PolicyDenied, Precedence, Presentation, ProjectedCall, PromptCaps, PullMode,
+	PulledKind, RecordedCall, RecordedCallOwned, Registry, RegistryError, RegistryLeaf, RepairKind,
+	Rev, Tool, ToolIdentity, ToolSpec, ToolTerminal, Usd, call_outcome_details,
 	render::{RenderFold, RenderRegistry, RenderRegistryError, ViewState},
 };
 use serde::{Deserialize, Serialize, ser};
@@ -746,6 +746,113 @@ fn core_precedence_band_rejects_devices_and_overrides() {
 }
 
 #[test]
+fn roster_exposes_registered_non_hidden_tools_and_hides_hidden_ones() {
+	let mut registry = Registry::new();
+	for (name, presentation) in [
+		("alpha", Presentation::Slot),
+		("beta", Presentation::Device),
+		("gamma", Presentation::Hidden),
+	] {
+		let claims = if presentation == Presentation::Device {
+			claims("omp/core", Precedence::ENHANCEMENT)
+		} else {
+			claims("omp/core", Precedence::CORE)
+		};
+		registry
+			.register(
+				fake_tool(1, name, Arc::new(AtomicUsize::new(0))).named(name),
+				presentation,
+				claims,
+			)
+			.expect("unique roster fixture");
+	}
+	let visible = registry
+		.roster()
+		.filter(|(_, presentation)| *presentation != Presentation::Hidden)
+		.map(|(name, _)| name.as_str())
+		.collect::<Vec<_>>();
+	assert!(visible.contains(&"alpha"));
+	assert!(visible.contains(&"beta"));
+	assert!(!visible.contains(&"gamma"));
+}
+
+#[test]
+fn unlist_from_roster_omits_user_roster_and_keeps_model_presentation() {
+	let mut registry = Registry::new();
+	for name in ["think", "report_issue", "learn", "manage_skill"] {
+		let presentation = if name == "think" {
+			Presentation::Slot
+		} else {
+			Presentation::Device
+		};
+		let claims = if presentation == Presentation::Device {
+			claims("omp/core", Precedence::ENHANCEMENT)
+		} else {
+			claims("omp/core", Precedence::CORE)
+		};
+		registry
+			.register(
+				fake_tool(1, name, Arc::new(AtomicUsize::new(0))).named(name),
+				presentation,
+				claims,
+			)
+			.expect("internal tool fixture");
+		registry
+			.unlist_from_roster(name)
+			.expect("live claim can be unlisted");
+	}
+	let unknown = registry
+		.unlist_from_roster("missing")
+		.expect_err("unlisting an unregistered name is an error");
+	assert!(matches!(unknown, RegistryError::UnlistUnknown { name } if name == "missing"));
+
+	let visible = registry
+		.roster()
+		.filter(|(_, presentation)| *presentation != Presentation::Hidden)
+		.map(|(name, _)| name.as_str())
+		.collect::<Vec<_>>();
+	for name in ["think", "report_issue", "learn", "manage_skill"] {
+		assert!(!visible.contains(&name), "{name} must be omitted from the user-facing roster");
+		assert!(registry.live_identity(name).is_some(), "{name} stays registered");
+		assert_ne!(
+			registry.presentation(name).expect("live presentation"),
+			Presentation::Hidden,
+			"{name} stays model-visible"
+		);
+	}
+}
+
+#[test]
+fn user_visible_mirrors_roster_and_disabled_roster_membership() {
+	let mut registry = Registry::new();
+	for name in ["read", "secret", "think"] {
+		registry
+			.register(
+				fake_tool(1, name, Arc::new(AtomicUsize::new(0))).named(name),
+				if name == "think" {
+					Presentation::Slot
+				} else if name == "secret" {
+					Presentation::Hidden
+				} else {
+					Presentation::Slot
+				},
+				claims("omp/core", Precedence::CORE),
+			)
+			.expect("roster fixture");
+	}
+	registry
+		.unlist_from_roster("think")
+		.expect("live claim can be unlisted");
+	registry.protect_user_visible_core(["retain"]);
+
+	assert!(registry.user_visible("read"), "roster entry is user-visible");
+	assert!(!registry.user_visible("secret"), "hidden presentation is not user-visible");
+	assert!(!registry.user_visible("think"), "unlisted live claim is not user-visible");
+	assert!(registry.user_visible("retain"), "reserved disabled built-in is user-visible");
+	assert!(!registry.user_visible("missing"), "unknown name is not user-visible");
+}
+
+#[test]
 fn protected_core_claim_rejects_demoting_or_foreign_replacement() {
 	let mut registry = Registry::new();
 	registry.protect_core_claims(["read"]);
@@ -786,6 +893,210 @@ fn protected_core_claim_rejects_demoting_or_foreign_replacement() {
 			.claimant,
 		"omp/core"
 	);
+}
+
+#[test]
+fn protect_live_claims_reserves_slot_and_device_names() {
+	let mut registry = Registry::new();
+	registry
+		.register(
+			fake_tool(1, "slot", Arc::new(AtomicUsize::new(0))).named("read"),
+			Presentation::Slot,
+			claims("omp/core", Precedence::CORE),
+		)
+		.expect("core slot");
+	registry
+		.register(
+			fake_tool(1, "device", Arc::new(AtomicUsize::new(0))).named("browser"),
+			Presentation::Device,
+			claims("omp/core", Precedence::ENHANCEMENT),
+		)
+		.expect("core device");
+	registry.protect_live_claims();
+	for name in ["read", "browser"] {
+		let error = registry
+			.register_worker(
+				worker_spec(name, [7; 32]),
+				Presentation::Device,
+				claims("publisher/extension", Precedence::DEFAULT),
+			)
+			.expect_err("live core names stay reserved");
+		assert!(matches!(
+			error,
+			RegistryError::CoreNameClaim { name: claimed, claimant, .. }
+				if claimed == name && claimant == "publisher/extension"
+		));
+	}
+}
+
+#[test]
+fn protect_core_claims_evicts_preexisting_non_core_claim() {
+	let mut registry = Registry::new();
+	// A non-core claimant occupies the name before protection is applied.
+	registry
+		.register(
+			fake_tool(1, "foreign", Arc::new(AtomicUsize::new(0))).named("hub"),
+			Presentation::Slot,
+			claims("publisher/extension", Precedence::DEFAULT),
+		)
+		.expect("foreign claim succeeds before protection");
+	assert!(registry.live_identity("hub").is_some(), "non-core claimant is live before protection");
+
+	// Protecting the name must evict the preexisting non-core claimant.
+	registry.protect_core_claims(["hub"]);
+	assert!(
+		registry.live_identity("hub").is_none(),
+		"preexisting non-core claim is evicted by protection"
+	);
+
+	// A subsequent non-core registration must be rejected.
+	let error = registry
+		.register_worker(
+			worker_spec("hub", [3; 32]),
+			Presentation::Slot,
+			claims("other/publisher", Precedence::DEFAULT),
+		)
+		.expect_err("protected name rejects non-core claim");
+	assert!(matches!(
+		error,
+		RegistryError::CoreNameClaim { name, claimant, .. }
+			if name == "hub" && claimant == "other/publisher"
+	));
+
+	// The core claimant can still register cleanly after eviction.
+	registry
+		.register(
+			fake_tool(2, "core", Arc::new(AtomicUsize::new(0))).named("hub"),
+			Presentation::Slot,
+			claims("omp/core", Precedence::CORE),
+		)
+		.expect("core claimant registers after eviction");
+	assert!(registry.live_identity("hub").is_some(), "core claimant is live after registration");
+}
+
+#[test]
+fn protect_user_visible_core_evicts_preexisting_non_core_claim() {
+	let mut registry = Registry::new();
+	registry
+		.register(
+			fake_tool(1, "foreign", Arc::new(AtomicUsize::new(0))).named("read"),
+			Presentation::Slot,
+			claims("publisher/extension", Precedence::DEFAULT),
+		)
+		.expect("foreign claim succeeds before protection");
+	assert!(registry.live_identity("read").is_some());
+
+	registry.protect_user_visible_core(["read"]);
+	assert!(
+		registry.live_identity("read").is_none(),
+		"preexisting non-core claim is evicted by user-visible protection"
+	);
+	assert!(
+		registry.disabled_roster().any(|name| name == "read"),
+		"evicted name remains in the disabled roster"
+	);
+
+	let error = registry
+		.register_worker(
+			worker_spec("read", [5; 32]),
+			Presentation::Slot,
+			claims("publisher/extension", Precedence::DEFAULT),
+		)
+		.expect_err("protected name rejects non-core claim");
+	assert!(matches!(
+		error,
+		RegistryError::CoreNameClaim { name, claimant, .. }
+			if name == "read" && claimant == "publisher/extension"
+	));
+}
+
+#[test]
+fn protecting_a_name_clears_stale_unmount_before_core_device_registration() {
+	let mut registry = Registry::new();
+	registry
+		.register(
+			fake_tool(1, "foreign", Arc::new(AtomicUsize::new(0))).named("browser"),
+			Presentation::Device,
+			claims("publisher/extension", Precedence::DEFAULT),
+		)
+		.expect("foreign device");
+	assert_eq!(
+		registry
+			.apply_availability(&[AvailabilityDelta {
+				name:    sf!("browser"),
+				mounted: false,
+				reason:  Some(sf!("worker gone")),
+			}])
+			.len(),
+		1
+	);
+	assert!(registry.devices().next().is_none(), "unmounted foreign device is absent");
+
+	registry.protect_user_visible_core(["browser"]);
+	registry
+		.register(
+			fake_tool(2, "core", Arc::new(AtomicUsize::new(0))).named("browser"),
+			Presentation::Device,
+			claims("omp/core", Precedence::ENHANCEMENT),
+		)
+		.expect("core device");
+	assert!(
+		registry.devices().any(|device| device.name == "browser"),
+		"core device must not inherit the foreign unmount tombstone"
+	);
+}
+
+#[test]
+fn disabled_builtin_name_cannot_be_claimed_by_extension() {
+	let mut registry = Registry::new();
+	registry.protect_core_claims(["shell"]);
+	assert!(registry.live_identity("shell").is_none());
+	let error = registry
+		.register_worker(
+			worker_spec("shell", [9; 32]),
+			Presentation::Slot,
+			claims("publisher/extension", Precedence::DEFAULT),
+		)
+		.expect_err("disabled built-in names stay reserved");
+	assert!(matches!(
+		error,
+		RegistryError::CoreNameClaim { name, claimant, .. }
+			if name == "shell" && claimant == "publisher/extension"
+	));
+}
+
+#[test]
+fn worker_cannot_impersonate_core_claimant_namespace() {
+	let mut registry = Registry::new();
+	let error = registry
+		.register_worker(worker_spec("reserved", [4; 32]), Presentation::Slot, Claims {
+			precedence: Precedence::CORE,
+			claimant:   sf!("omp/core"),
+			replaces:   None,
+		})
+		.expect_err("worker must not use the harness-only 'omp/core' namespace");
+	assert!(matches!(error, RegistryError::ReservedClaimant { name } if name == "reserved"));
+}
+
+#[test]
+fn disabled_roster_lists_user_visible_reserved_names() {
+	let mut registry = Registry::new();
+	registry.protect_user_visible_core(["read", "browser"]);
+	registry.protect_core_claims(["think", "yield"]);
+	let disabled = registry.disabled_roster().collect::<Vec<_>>();
+	assert!(disabled.contains(&&Str::new("read")));
+	assert!(disabled.contains(&&Str::new("browser")));
+	assert!(!disabled.contains(&&Str::new("think")));
+	assert!(!disabled.contains(&&Str::new("yield")));
+
+	registry
+		.register(
+			fake_tool(1, "read", Arc::new(AtomicUsize::new(0))).named("read"),
+			Presentation::Slot,
+			claims("omp/core", Precedence::CORE),
+		)
+		.expect("read live claim removes it from disabled roster");
+	assert!(!registry.disabled_roster().any(|name| name == "read"));
 }
 
 #[test]

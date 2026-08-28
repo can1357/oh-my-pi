@@ -3,7 +3,7 @@
 use std::{
 	collections::{BTreeMap, BTreeSet},
 	future::Future,
-	iter,
+	iter::{self, FusedIterator},
 	mem::size_of,
 	pin::Pin,
 	slice,
@@ -1138,6 +1138,13 @@ pub enum RegistryError {
 		/// Rejected precedence value.
 		precedence: Precedence,
 	},
+	/// A worker or external claimant attempted to use the reserved `omp/core`
+	/// namespace.
+	#[error("tool {name} cannot use reserved 'omp/core' claimant namespace")]
+	ReservedClaimant {
+		/// Rejected tool name.
+		name: Str,
+	},
 	/// Operation requires a native pure or execution surface unavailable for a
 	/// worker declaration.
 	#[error("tool {name}@{rev} is worker-routed and cannot perform registry operation {operation}")]
@@ -1196,6 +1203,12 @@ pub enum RegistryError {
 		rev:     Rev,
 		/// Unsupported constraint feature.
 		feature: &'static str,
+	},
+	/// Roster unlisting named a tool with no live claim.
+	#[error("cannot unlist unknown tool from roster: {name}")]
+	UnlistUnknown {
+		/// Requested tool name.
+		name: Str,
 	},
 }
 
@@ -1589,13 +1602,22 @@ struct RegistryEntry {
 /// revision per stable name.
 #[derive(Default)]
 pub struct Registry {
-	versions:         BTreeMap<Str, BTreeMap<Rev, RegistryEntry>>,
-	live:             BTreeMap<Str, Claim>,
-	protected_core:   BTreeSet<Str>,
-	unmounted:        RwLock<BTreeMap<Str, Option<Str>>>,
-	arg_specs:        ArgSpecRegistry,
-	projection_cache: Arc<ProjectionCache>,
-	host_tools:       RwLock<HostToolState>,
+	versions:              BTreeMap<Str, BTreeMap<Rev, RegistryEntry>>,
+	/// Projection-only history of foreign native entries evicted by core
+	/// protection. Retired tools remain reachable for durable verdict
+	/// projection but are absent from live dispatch, advertisement, and
+	/// reclamation. Active versions win on an exact-identity collision.
+	retired:               BTreeMap<ToolIdentity, Arc<dyn ErasedTool>>,
+	live:                  BTreeMap<Str, Claim>,
+	unlisted:              BTreeSet<Str>,
+	protected_core:        BTreeSet<Str>,
+	/// Core-family names that should still appear in the user-facing roster
+	/// when they are unavailable for runtime or policy reasons.
+	user_visible_reserved: BTreeSet<Str>,
+	unmounted:             RwLock<BTreeMap<Str, Option<Str>>>,
+	arg_specs:             ArgSpecRegistry,
+	projection_cache:      Arc<ProjectionCache>,
+	host_tools:            RwLock<HostToolState>,
 }
 
 impl Registry {
@@ -1629,6 +1651,14 @@ impl Registry {
 				return Err(RegistryError::InvalidHostToolSpec {
 					name:    spec.name.clone(),
 					message: sf!("name must be non-empty and parameters must be a JSON Schema object"),
+				});
+			}
+
+			if self.protected_core.contains(&spec.name) {
+				return Err(RegistryError::CoreNameClaim {
+					name:       spec.name.clone(),
+					claimant:   claimant.clone(),
+					precedence: Precedence::INTEGRATION,
 				});
 			}
 			let owner = if !names.insert(spec.name.clone()) {
@@ -1742,15 +1772,178 @@ impl Registry {
 	///
 	/// Reservations are monotone and may be installed before or after the core
 	/// implementation. Later non-core claims fail instead of shadowing,
-	/// demoting, or blocking the essential slot.
+	/// demoting, or blocking the essential slot.  When protection is applied
+	/// after a non-core claimant has already occupied a name, that preexisting
+	/// claim is evicted so the invariant — a protected core name never carries
+	/// a live non-core claim — holds at the owning seam.
 	pub fn protect_core_claims<I, S>(&mut self, names: I)
 	where
 		I: IntoIterator<Item = S>,
 		S: Into<Str>,
 	{
+		for name in names {
+			let name = name.into();
+			self.evict_foreign_live_claim(&name);
+			self.protected_core.insert(name);
+		}
+	}
+
+	/// Reserves essential built-in names that the user-facing roster should
+	/// still advertise as disabled when the implementation is unavailable.
+	pub fn protect_user_visible_core<I, S>(&mut self, names: I)
+	where
+		I: IntoIterator<Item = S>,
+		S: Into<Str>,
+	{
+		for name in names {
+			let name = name.into();
+			self.evict_foreign_live_claim(&name);
+			self.protected_core.insert(name.clone());
+			self.user_visible_reserved.insert(name);
+		}
+	}
+
+	/// Reserves every currently-live claim name as a protected core claim.
+	pub fn protect_live_claims(&mut self) {
+		self.protected_core.extend(self.live.keys().cloned());
+	}
+
+	/// Retains only core ownership for a newly protected name.
+	fn evict_foreign_live_claim(&mut self, name: &str) {
+		if let Some(claim) = self.live.remove(name) {
+			let foreign_winner = claim.claimant != "omp/core";
+			let mut core_claims = SmallVec::<ShadowClaim, 1>::new();
+			if !foreign_winner {
+				core_claims.push(ShadowClaim {
+					rev:        claim.rev,
+					precedence: claim.precedence,
+					claimant:   claim.claimant,
+					replaces:   claim.replaces,
+				});
+			}
+			core_claims.extend(
+				claim
+					.shadowed
+					.into_iter()
+					.filter(|shadow| shadow.claimant == "omp/core"),
+			);
+			if let Some(winner) = core_claims.first().cloned() {
+				core_claims.remove(0);
+				self.live.insert(Str::new(name), Claim {
+					rev:        winner.rev,
+					precedence: winner.precedence,
+					claimant:   winner.claimant,
+					replaces:   winner.replaces,
+					shadowed:   core_claims,
+				});
+			}
+			if foreign_winner {
+				self.unlisted.remove(name);
+				self.unmounted.write().remove(name);
+			}
+			if let Some(versions) = self.versions.get_mut(name) {
+				let retired_name = Str::new(name);
+				for (rev, entry) in versions.iter() {
+					if entry.claims.claimant != "omp/core" {
+						self.retired.insert(
+							ToolIdentity { name: retired_name.clone(), rev: rev.clone() },
+							Arc::clone(&entry.tool),
+						);
+					}
+				}
+				versions.retain(|_, entry| entry.claims.claimant == "omp/core");
+			}
+			if self.versions.get(name).is_some_and(BTreeMap::is_empty) {
+				self.versions.remove(name);
+			}
+		}
+		self.evict_foreign_host_tool(name);
+	}
+
+	/// Retires one attached host tool after its name becomes core-reserved.
+	fn evict_foreign_host_tool(&self, name: &str) {
+		let mut state = self.host_tools.write();
+		let Some(claimant) = state.live.get(name).cloned() else {
+			return;
+		};
+		let Some(entry) = state
+			.rosters
+			.get_mut(&claimant)
+			.and_then(|roster| roster.entries.remove(name))
+		else {
+			return;
+		};
+		state.live.remove(name);
+		state
+			.history
+			.insert(entry.tool.spec().identity(), entry.tool);
+	}
+
+	/// Omits one live claim from the user-facing roster while leaving its
+	/// model-facing presentation intact.
+	///
+	/// Returns [`RegistryError::UnlistUnknown`] if `name` has no live claim.
+	pub fn unlist_from_roster(&mut self, name: &str) -> Result<(), RegistryError> {
+		if !self.live.contains_key(name) {
+			return Err(RegistryError::UnlistUnknown { name: Str::new(name) });
+		}
+		self.unlisted.insert(Str::new(name));
+		Ok(())
+	}
+
+	/// Iterates the policy-resolved tool roster in stable name order.
+	pub fn roster(
+		&self,
+	) -> impl Iterator<Item = (&Str, Presentation)> + Clone + DoubleEndedIterator + FusedIterator + '_
+	{
+		self.live.iter().filter_map(|(name, claim)| {
+			if self.unlisted.contains(name) {
+				return None;
+			}
+			self
+				.versions
+				.get(name)?
+				.get(&claim.rev)
+				.map(|entry| (name, entry.presentation))
+		})
+	}
+
+	/// Iterates the reserved user-visible built-in names that are not live.
+	pub fn disabled_roster(
+		&self,
+	) -> impl Iterator<Item = &Str> + Clone + DoubleEndedIterator + FusedIterator + '_ {
 		self
-			.protected_core
-			.extend(names.into_iter().map(Into::into));
+			.user_visible_reserved
+			.iter()
+			.filter(|name| !self.live.contains_key(*name))
+	}
+
+	/// Returns whether `name` belongs on the user-facing tools roster.
+	///
+	/// Mirrors [`Self::roster`] after the UI's hidden-entry filter and joins the
+	/// reserved disabled built-ins of [`Self::disabled_roster`]. Live claims
+	/// omitted via [`Self::unlist_from_roster`] remain callable and
+	/// model-visible, but they do not appear in user-facing output.
+	pub fn user_visible(&self, name: &str) -> bool {
+		if self.unlisted.contains(name) {
+			return false;
+		}
+		if let Some(claim) = self.live.get(name) {
+			return self
+				.versions
+				.get(name)
+				.and_then(|versions| versions.get(&claim.rev))
+				.is_some_and(|entry| entry.presentation != Presentation::Hidden);
+		}
+		let host_tools = self.host_tools.read();
+		if let Some(claimant) = host_tools.live.get(name) {
+			return host_tools
+				.rosters
+				.get(claimant)
+				.and_then(|roster| roster.entries.get(name))
+				.is_some_and(|entry| entry.presentation != Presentation::Hidden);
+		}
+		self.user_visible_reserved.contains(name)
 	}
 
 	/// Computes the exact live slot names for one frozen session policy.
@@ -1955,6 +2148,9 @@ impl Registry {
 		worker_name: Str,
 	) -> Result<(), RegistryError> {
 		let name = spec.name.clone();
+		if claims.claimant == "omp/core" {
+			return Err(RegistryError::ReservedClaimant { name });
+		}
 		let rev = spec.rev.clone();
 		let value = serde_json::from_slice(&spec.schema).map_err(|source| {
 			RegistryError::InvalidSchema { name: name.clone(), rev: rev.clone(), source }
@@ -1994,9 +2190,12 @@ impl Registry {
 			});
 		}
 		if self
-			.versions
-			.get(&name)
-			.is_some_and(|versions| versions.contains_key(&rev))
+			.retired
+			.contains_key(&ToolIdentity { name: name.clone(), rev: rev.clone() })
+			|| self
+				.versions
+				.get(&name)
+				.is_some_and(|versions| versions.contains_key(&rev))
 		{
 			return Err(RegistryError::Duplicate(name, rev));
 		}
@@ -2277,6 +2476,11 @@ impl Registry {
 
 	/// Returns the BLAKE3-256 digest of every registered revision and its
 	/// projection implementation.
+	///
+	/// Retired native revisions and evicted host tools remain reachable for
+	/// historical replay, so their identities and decoders belong here too:
+	/// two registries that render the same historical identity with different
+	/// retired implementations must not share one projection identity.
 	pub fn projection_hash(&self) -> Hash32 {
 		let mut hasher = Hash32::hasher();
 		hasher.update(b"omp-tool/projections/v1\0");
@@ -2285,6 +2489,10 @@ impl Registry {
 				hash_identity(&mut hasher, name, rev);
 				hash_field(&mut hasher, &entry.tool.spec().projection_code);
 			}
+		}
+		for (identity, tool) in &self.retired {
+			hash_identity(&mut hasher, &identity.name, &identity.rev);
+			hash_field(&mut hasher, &tool.spec().projection_code);
 		}
 		let host_tools = self.host_tools.read();
 		for (name, claimant) in &host_tools.live {
@@ -2296,6 +2504,10 @@ impl Registry {
 				hash_identity(&mut hasher, name, &entry.tool.spec().rev);
 				hash_field(&mut hasher, &entry.tool.spec().projection_code);
 			}
+		}
+		for (identity, tool) in &host_tools.history {
+			hash_identity(&mut hasher, &identity.name, &identity.rev);
+			hash_field(&mut hasher, &tool.spec().projection_code);
 		}
 		hasher.finalize()
 	}
@@ -2622,6 +2834,10 @@ impl Registry {
 			.and_then(|versions| versions.get(&identity.rev))
 		{
 			return Ok(Arc::clone(&entry.tool));
+		}
+
+		if let Some(tool) = self.retired.get(identity) {
+			return Ok(Arc::clone(tool));
 		}
 		let state = self.host_tools.read();
 		if let Some(tool) = state.history.get(identity) {
@@ -3383,5 +3599,237 @@ mod tests {
 			registry.replace_host_tools(sf!("rpc/client"), 2, Vec::new(), Arc::new(HostExecutor),),
 			Err(RegistryError::StaleHostRoster { .. })
 		));
+	}
+
+	#[test]
+	fn protected_core_name_rejected_from_host_roster() {
+		let mut registry = Registry::new();
+		registry.protect_core_claims(["read"]);
+		let executor: Arc<dyn HostToolExecutor> = Arc::new(HostExecutor);
+		let err = registry
+			.replace_host_tools(
+				sf!("rpc/client"),
+				1,
+				vec![HostToolSpec {
+					name:        sf!("read"),
+					description: sf!("host read"),
+					parameters:  serde_json::json!({"type": "object"}),
+				}],
+				executor,
+			)
+			.unwrap_err();
+		assert!(matches!(
+			err,
+			RegistryError::CoreNameClaim { ref name, ref claimant, .. }
+				if name == "read" && claimant == "rpc/client"
+		));
+		// Rejection happened before mutating host state.
+		assert!(registry.host_tool_revision("rpc/client").is_none());
+	}
+
+	#[test]
+	fn protected_core_name_evicts_live_host_roster() {
+		let mut registry = Registry::new();
+		registry
+			.replace_host_tools(
+				sf!("rpc/client"),
+				1,
+				vec![HostToolSpec {
+					name:        sf!("read"),
+					description: sf!("host read"),
+					parameters:  serde_json::json!({"type": "object"}),
+				}],
+				Arc::new(HostExecutor),
+			)
+			.expect("host read installs before protection");
+		let identity = registry
+			.resolved_identity("read")
+			.expect("host read is live");
+
+		registry.protect_core_claims(["read"]);
+
+		assert!(
+			registry.resolved_identity("read").is_none(),
+			"protected host tool is no longer live"
+		);
+		assert!(registry.host_tool_specs().is_empty(), "protected host tool is no longer advertised");
+		assert_eq!(
+			registry
+				.projection_tool(&identity)
+				.expect("evicted host revision remains projectable")
+				.spec()
+				.name,
+			"read"
+		);
+	}
+
+	#[test]
+	fn foreign_revision_remains_projectable_after_core_protection() {
+		let mut registry = Registry::new();
+		let foreign_rev = Rev { family: sf!("foreign"), n: 1 };
+		let foreign_identity = ToolIdentity { name: sf!("guarded"), rev: foreign_rev.clone() };
+		registry
+			.register(
+				LiftTool {
+					spec: ToolSpec {
+						name:            sf!("guarded"),
+						rev:             foreign_rev.clone(),
+						description:     sf!("foreign"),
+						schema:          Bytes::from_static(b"{}"),
+						constraint:      Constraint::None,
+						effects:         Effects::empty(),
+						projection_code: [1; 32],
+					},
+				},
+				Presentation::Slot,
+				Claims {
+					precedence: Precedence::DEFAULT,
+					claimant:   sf!("test/foreign"),
+					replaces:   None,
+				},
+			)
+			.expect("foreign native tool registers");
+		assert!(registry.live_identity("guarded").is_some());
+
+		// Protecting the name evicts the foreign live claim.
+		registry.protect_core_claims(["guarded"]);
+		assert!(registry.live_identity("guarded").is_none());
+
+		// The retired foreign entry remains reachable at the projection seam.
+		let retired = registry
+			.projection_tool(&foreign_identity)
+			.expect("retired foreign entry remains projectable");
+		assert_eq!(retired.spec().projection_code, [1; 32]);
+		// A later core claim may occupy the name, but not the retired
+		// identity: historical transcript calls keep the original decoder.
+		let err = registry
+			.register(
+				LiftTool {
+					spec: ToolSpec {
+						name:            sf!("guarded"),
+						rev:             foreign_rev.clone(),
+						description:     sf!("core"),
+						schema:          Bytes::from_static(b"{}"),
+						constraint:      Constraint::None,
+						effects:         Effects::empty(),
+						projection_code: [2; 32],
+					},
+				},
+				Presentation::Slot,
+				Claims { precedence: Precedence::CORE, claimant: sf!("omp/core"), replaces: None },
+			)
+			.expect_err("retired identity stays unique");
+		assert!(
+			matches!(&err, RegistryError::Duplicate(name, rev) if name == "guarded" && *rev == foreign_rev)
+		);
+		let still_retired = registry
+			.projection_tool(&foreign_identity)
+			.expect("retired foreign entry remains projectable");
+		assert_eq!(still_retired.spec().projection_code, [1; 32]);
+
+		let core_rev = Rev { family: sf!("core"), n: 1 };
+		registry
+			.register(
+				LiftTool {
+					spec: ToolSpec {
+						name:            sf!("guarded"),
+						rev:             core_rev.clone(),
+						description:     sf!("core"),
+						schema:          Bytes::from_static(b"{}"),
+						constraint:      Constraint::None,
+						effects:         Effects::empty(),
+						projection_code: [2; 32],
+					},
+				},
+				Presentation::Slot,
+				Claims { precedence: Precedence::CORE, claimant: sf!("omp/core"), replaces: None },
+			)
+			.expect("core registration uses a distinct revision");
+		assert!(registry.live_identity("guarded").is_some());
+		let historical = registry
+			.projection_tool(&foreign_identity)
+			.expect("historical identity still projects the retired decoder");
+		assert_eq!(historical.spec().projection_code, [1; 32]);
+		let active = registry
+			.projection_tool(&ToolIdentity { name: sf!("guarded"), rev: core_rev })
+			.expect("active core entry is projectable");
+		assert_eq!(active.spec().projection_code, [2; 32]);
+	}
+
+	#[test]
+	fn projection_hash_covers_retired_projection_implementations() {
+		let evicted = |projection_code: [u8; 32]| {
+			let mut registry = Registry::new();
+			let foreign_rev = Rev { family: sf!("foreign"), n: 1 };
+			registry
+				.register(
+					LiftTool {
+						spec: ToolSpec {
+							name: sf!("guarded"),
+							rev: foreign_rev,
+							description: sf!("foreign"),
+							schema: Bytes::from_static(b"{}"),
+							constraint: Constraint::None,
+							effects: Effects::empty(),
+							projection_code,
+						},
+					},
+					Presentation::Slot,
+					Claims {
+						precedence: Precedence::DEFAULT,
+						claimant:   sf!("test/foreign"),
+						replaces:   None,
+					},
+				)
+				.expect("foreign native tool registers");
+			registry.protect_core_claims(["guarded"]);
+			assert!(
+				registry.live_identity("guarded").is_none(),
+				"protection must evict the foreign claim into retirement",
+			);
+			registry
+		};
+
+		// Identical live versions, different retired projection code.
+		let first = evicted([1; 32]);
+		let second = evicted([2; 32]);
+		assert_ne!(
+			first.projection_hash(),
+			second.projection_hash(),
+			"retired decoders must participate in the projection identity",
+		);
+		assert_eq!(first.projection_hash(), first.projection_hash());
+	}
+
+	#[test]
+	fn projection_hash_covers_evicted_host_tools() {
+		let evicted = |description: &str| {
+			let mut registry = Registry::new();
+			registry
+				.replace_host_tools(
+					sf!("rpc/client"),
+					1,
+					vec![HostToolSpec {
+						name:        sf!("read"),
+						description: Str::new(description),
+						parameters:  serde_json::json!({"type": "object"}),
+					}],
+					Arc::new(HostExecutor),
+				)
+				.expect("host read installs before protection");
+			registry.protect_core_claims(["read"]);
+			assert!(registry.host_tool_specs().is_empty(), "host tool must be evicted");
+			registry
+		};
+
+		// No live entries at all: only the evicted host decoder differs.
+		let first = evicted("first host read");
+		let second = evicted("second host read");
+		assert_ne!(
+			first.projection_hash(),
+			second.projection_hash(),
+			"evicted host decoders must participate in the projection identity",
+		);
+		assert_eq!(evicted("first host read").projection_hash(), first.projection_hash());
 	}
 }

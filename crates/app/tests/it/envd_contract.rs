@@ -781,13 +781,15 @@ fn eval_output(payload: &eval::Payload, channel: OutputChannel) -> Vec<u8> {
 }
 
 #[tokio::test]
-async fn write_name_is_reserved_before_production_registry_assembly() {
+async fn write_duplicate_revision_rejected_during_production_assembly() {
 	let root = tempfile::tempdir().expect("workspace scratch directory");
 	let state = tempfile::tempdir().expect("state scratch directory");
-	let marker = state.path().join("reserved-write-marker");
+	let marker = state.path().join("duplicate-write-marker");
 	let mut registry = Registry::new();
+	let mut colliding = EffectTool::named("write", marker);
+	colliding.spec.rev = Rev { family: Str::new(""), n: 1 };
 	registry
-		.register(EffectTool::named("write", marker), Presentation::Slot, test_claims())
+		.register(colliding, Presentation::Slot, test_claims())
 		.expect("register colliding caller write tool");
 	let result = EnvServer::open_local(
 		root.path(),
@@ -798,9 +800,42 @@ async fn write_name_is_reserved_before_production_registry_assembly() {
 	)
 	.await;
 	let Err(error) = result else {
-		panic!("production registry accepted a caller-owned write tool");
+		panic!("production registry accepted a duplicate-revision write tool");
 	};
-	assert_eq!(error.to_string(), "duplicate production tool name: write");
+	assert!(
+		error
+			.to_string()
+			.contains("tool revision already registered: write@1"),
+		"unexpected error: {error}"
+	);
+}
+
+#[tokio::test]
+async fn write_distinct_revision_does_not_collide_and_core_takes_precedence() {
+	let marker = tempfile::tempdir().expect("marker dir");
+	let mut registry = Registry::new();
+	let mut distinct = EffectTool::named("write", marker.path().join("marker"));
+	distinct.spec.rev = Rev { family: Str::new(""), n: 999 };
+	registry
+		.register(distinct, Presentation::Slot, test_claims())
+		.expect("register distinct-revision write tool");
+	drop(marker);
+	let harness = Harness::start(registry).await;
+	let registry = harness.server.registry();
+	let (_, presentation) = registry
+		.roster()
+		.find(|(name, _)| name.as_str() == "write")
+		.expect("production write tool is registered");
+	assert_eq!(
+		presentation,
+		Presentation::Slot,
+		"production core claim must take precedence over the pre-registered distinct revision"
+	);
+	let (_, revision) = registry
+		.live_identity("write")
+		.expect("production write is live");
+	assert_eq!(revision.family.as_str(), "");
+	assert_eq!(revision.n, 1);
 }
 
 #[tokio::test]
@@ -1168,6 +1203,50 @@ async fn production_registry_advertises_and_dispatches_all_native_adapters() {
 	)
 	.await;
 	assert!(!glob.is_error, "glob adapter returned an error");
+}
+
+#[tokio::test]
+async fn production_registry_roster_exposes_browser_and_lsp() {
+	let harness = Harness::start(Registry::new()).await;
+	let registry = harness.server.registry();
+	let visible = registry
+		.roster()
+		.filter(|(_, presentation)| *presentation != Presentation::Hidden)
+		.map(|(name, _)| name.as_str())
+		.collect::<Vec<_>>();
+	assert!(visible.contains(&"browser"), "browser must be visible in the production roster");
+	assert!(visible.contains(&"lsp"), "lsp must be visible in the production roster");
+}
+
+#[tokio::test]
+async fn production_registry_omits_internal_tools_from_user_roster() {
+	let harness = Harness::start(Registry::new()).await;
+	let registry = harness.server.registry();
+	let visible = registry
+		.roster()
+		.filter(|(_, presentation)| *presentation != Presentation::Hidden)
+		.map(|(name, _)| name.as_str())
+		.collect::<Vec<_>>();
+	for name in ["think", "report_issue", "learn", "manage_skill"] {
+		assert!(!visible.contains(&name), "{name} must be omitted from the /tools roster");
+	}
+	for name in ["think", "report_issue"] {
+		assert!(registry.live_identity(name).is_some(), "{name} stays registered");
+		assert_ne!(
+			registry.presentation(name).expect("live presentation"),
+			Presentation::Hidden,
+			"{name} stays model-visible"
+		);
+	}
+	for name in ["learn", "manage_skill"] {
+		if registry.live_identity(name).is_some() {
+			assert_ne!(
+				registry.presentation(name).expect("live presentation"),
+				Presentation::Hidden,
+				"{name} stays model-visible when registered"
+			);
+		}
+	}
 }
 
 #[tokio::test]
