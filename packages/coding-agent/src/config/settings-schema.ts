@@ -540,6 +540,17 @@ export const SETTINGS_SCHEMA = {
 				"Pair a second model (assigned to the 'advisor' role) that passively reviews each turn and injects notes.",
 		},
 	},
+	"advisor.maxRequestsPerUpdate": {
+		type: "number",
+		default: 10,
+		ui: {
+			tab: "model",
+			group: "Advisor",
+			label: "Advisor Request Limit",
+			description: "Maximum provider requests per advisor update. Set to 0 to disable the limit.",
+			condition: "advisorEnabled",
+		},
+	},
 	"prewalk.enabled": {
 		type: "boolean",
 		default: false,

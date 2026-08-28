@@ -919,10 +919,19 @@ export class SessionAdvisors {
 				serviceTierResolver: advisorServiceTierResolver,
 			});
 			advisorAgent.setDisableReasoning(shouldDisableReasoning(advisorThinkingLevel));
+			let advisorRequests = 0;
+			advisorAgent.addBeforeModelCall(() => {
+				advisorRequests++;
+				const maxRequests = this.#host.settings.get("advisor.maxRequestsPerUpdate");
+				if (maxRequests <= 0 || advisorRequests <= maxRequests) return;
+				this.#host.emitNotice(
+					"warning",
+					`Advisor "${advisorName}" reached its request limit (${maxRequests}); this update was stopped. Change advisor.maxRequestsPerUpdate or set it to 0 to disable the limit.`,
+					"advisor",
+				);
+				return { stop: true };
+			});
 			let advisorLoopGuardStopped = false;
-			// The advisor's own loop needs the same repeated-tool-call bound the
-			// primary gets from `LoopGuards`; nothing else stops it reissuing one
-			// failing call until the update is abandoned.
 			const advisorLoopGuard = new AdvisorLoopGuard({
 				settings: this.#host.settings,
 				name: advisorName,
@@ -971,6 +980,7 @@ export class SessionAdvisors {
 				},
 				abort: reason => advisorAgent.abort(reason),
 				reset: () => {
+					advisorRequests = 0;
 					advisorLoopGuard.reset();
 					advisorLoopGuardStopped = false;
 					advisorAgent.reset();
@@ -1016,6 +1026,7 @@ export class SessionAdvisors {
 				onTurnError: (error, failedMessages, signal) =>
 					this.#recoverAdvisorTurn(advisorRef, error, failedMessages, signal),
 				onTurnSuccess: async () => {
+					advisorRequests = 0;
 					// Commit the delivered batch so retries of a failed turn stay deduped
 					// while this successful turn's context is persisted once (issue #9553).
 					advisorRef.recorder.commitTurn();
@@ -1028,7 +1039,10 @@ export class SessionAdvisors {
 						role: fallback.role,
 					});
 				},
-				onTurnAbandoned: () => advisorRef.recorder.abandonTurn(),
+				onTurnAbandoned: () => {
+					advisorRequests = 0;
+					advisorRef.recorder.abandonTurn();
+				},
 				notifyFailure: error => {
 					this.#advisorStatuses.set(slug, { name: advisorName, status: "error" });
 					const message = error instanceof Error ? error.message : String(error);

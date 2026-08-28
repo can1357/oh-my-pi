@@ -62,13 +62,35 @@ describe("advisor tool-call loop guard", () => {
 	function createAdvisor(
 		guardSettings: Record<string, unknown>,
 		maxRepeatedTurns = 8,
+		failFirstRequest = false,
 	): { advisor: Agent; contexts: Context[] } {
-		const primaryMock = createMockModel({ provider: "anthropic", responses: [{ content: ["primary complete"] }] });
+		const primaryMock = createMockModel({ provider: "anthropic", handler: { content: ["primary complete"] } });
 		const advisorMock = createMockModel({ provider: "anthropic" });
 		const contexts: Context[] = [];
 		let turn = 0;
 		const advisorStreamFn: typeof advisorMock.stream = (_model, context) => {
 			contexts.push(context);
+			const stream = new AssistantMessageEventStream();
+			if (failFirstRequest && turn === 0) {
+				turn++;
+				const message: AssistantMessage = {
+					role: "assistant",
+					content: [],
+					api: advisorMock.api,
+					provider: advisorMock.provider,
+					model: advisorMock.id,
+					usage: zeroUsage,
+					stopReason: "error",
+					errorMessage: "HTTP 503 Service Unavailable",
+					errorStatus: 503,
+					timestamp: Date.now(),
+				};
+				queueMicrotask(() => {
+					stream.push({ type: "start", partial: message });
+					stream.push({ type: "error", reason: "error", error: message });
+				});
+				return stream;
+			}
 			// Deliberately ignore the corrective. The enabled guard must hard-stop
 			// this stream; the finite ceiling keeps the disabled control bounded.
 			const repeating = turn < maxRepeatedTurns;
@@ -94,7 +116,6 @@ describe("advisor tool-call loop guard", () => {
 						stopReason: "stop",
 						timestamp: Date.now(),
 					};
-			const stream = new AssistantMessageEventStream();
 			queueMicrotask(() => {
 				stream.push({ type: "start", partial: message });
 				stream.push({ type: "done", reason: repeating ? "toolUse" : "stop", message });
@@ -141,10 +162,8 @@ describe("advisor tool-call loop guard", () => {
 		await session.prompt("review the current update");
 		expect(await session.waitForAdvisorCatchup(2_000)).toBe(true);
 
-		// First threshold injects one corrective; ignoring it re-arms the
-		// detector, and the second threshold aborts. The agent loop observes the
-		// abort after one already-scheduled request, bounding twenty repeats at 7.
-		expect(contexts).toHaveLength(7);
+		// The request gate observes the guard abort before another provider request starts.
+		expect(contexts).toHaveLength(6);
 		const delivered = JSON.stringify(contexts[3]!.messages);
 		expect(delivered).toContain("You called `read` 3 consecutive times");
 		expect(delivered).toContain("ENOENT: no such file or directory");
@@ -202,15 +221,69 @@ describe("advisor tool-call loop guard", () => {
 		expect(messages[0]?.role).toBe("user");
 	});
 
-	it("leaves the advisor unbounded when the shared loop guard is disabled", async () => {
-		const { advisor, contexts } = createAdvisor({ "model.toolCallLoopGuard.enabled": false });
+	it("stops every advisor update at the configured request limit", async () => {
+		const { advisor, contexts } = createAdvisor(
+			{
+				"advisor.maxRequestsPerUpdate": 3,
+				"model.toolCallLoopGuard.enabled": false,
+			},
+			20,
+		);
+
+		if (!session) throw new Error("Expected live session");
+		const notices: string[] = [];
+		session.subscribe(event => {
+			if (event.type === "notice" && event.level === "warning" && event.source === "advisor") {
+				notices.push(event.message);
+			}
+		});
+		await session.prompt("review the current update");
+		expect(await session.waitForAdvisorCatchup(2_000)).toBe(true);
+
+		expect(contexts).toHaveLength(3);
+		expect(notices).toHaveLength(1);
+		expect(notices[0]).toContain("reached its request limit (3)");
+		expect(notices[0]).toContain("advisor.maxRequestsPerUpdate");
+		await session.prompt("review another update");
+		expect(await session.waitForAdvisorCatchup(2_000)).toBe(true);
+		expect(contexts).toHaveLength(6);
+		expect(notices).toHaveLength(2);
+		expect(advisor.state.error).toBeUndefined();
+	});
+
+	it("preserves the request limit across a recoverable retry", async () => {
+		const { contexts } = createAdvisor(
+			{
+				"advisor.maxRequestsPerUpdate": 3,
+				"model.toolCallLoopGuard.enabled": false,
+			},
+			20,
+			true,
+		);
+
+		if (!session) throw new Error("Expected live session");
+		const capped = Promise.withResolvers<void>();
+		session.subscribe(event => {
+			if (event.type === "notice" && event.source === "advisor" && event.message.includes("request limit")) {
+				capped.resolve();
+			}
+		});
+		await session.prompt("review the current update");
+		await capped.promise;
+		expect(contexts).toHaveLength(3);
+	});
+
+	it("allows an advisor update to opt out of the request limit", async () => {
+		const { advisor, contexts } = createAdvisor({
+			"advisor.maxRequestsPerUpdate": 0,
+			"model.toolCallLoopGuard.enabled": false,
+		});
 
 		await advisor.prompt("review the current update");
 
 		expect(contexts.some(context => JSON.stringify(context.messages).includes("tool_call_loop_detected"))).toBe(
 			false,
 		);
-		// Nine requests: eight repeated tool-call turns plus the final stop.
 		expect(contexts).toHaveLength(9);
 	});
 });
