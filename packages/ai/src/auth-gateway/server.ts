@@ -2,11 +2,11 @@
  * omp auth-gateway HTTP server.
  *
  * Accepts any provider-format request (OpenAI chat-completions, Anthropic
- * messages, OpenAI Responses) and dispatches through pi-ai's `streamSimple()`
- * — which handles credential injection, anthropic-beta headers, codex
- * websocket transport, and all the per-provider intricacies. The gateway is
- * pure protocol translation: foreign wire → omp Context → pi-ai stream() →
- * omp events → foreign wire.
+ * messages, OpenAI Responses, Gemini v1beta) and dispatches through pi-ai's
+ * `streamSimple()` — which handles credential injection, anthropic-beta
+ * headers, codex websocket transport, and all the per-provider intricacies.
+ * The gateway is pure protocol translation: foreign wire → omp Context →
+ * pi-ai stream() → omp events → foreign wire.
  *
  * Endpoints:
  *   GET  /healthz                          → unauth; ok + version
@@ -23,8 +23,14 @@
  *   POST /v1/credentials/:id/disable       → disable a stored credential
  *   POST /v1/credentials/:id/pin           → pin a session to an OAuth credential
  *   POST /v1/chat/completions              → OpenAI chat-completions in/out
+ *   POST /v1/grok/chat/completions         → OpenAI chat-completions (xAI alias)
  *   POST /v1/messages                      → Anthropic messages in/out
+ *   POST /v1/messages/count_tokens         → Anthropic Messages count_tokens
  *   POST /v1/responses                     → OpenAI Responses in/out
+ *   POST /backend-api/codex/responses      → OpenAI Responses (Codex alias)
+ *   POST /backend-api/responses            → OpenAI Responses (Codex alias)
+ *   POST /v1beta/models/generateContent    → Gemini v1beta generateContent
+ *   POST /v1beta/models/streamGenerateContent → Gemini v1beta streamGenerateContent
  */
 
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
@@ -34,7 +40,9 @@ import type { AuthStorage } from "../auth-storage";
 import * as AIError from "../error";
 import { classifyGatewayError, type GatewayErrorClassification } from "../error/gateway";
 import { isUsageLimitOutcome } from "../error/rate-limit";
+import { handleCountTokens } from "../providers/anthropic-count-tokens-server";
 import * as anthropicMessages from "../providers/anthropic-messages-server";
+import * as geminiV1beta from "../providers/gemini-v1beta-server";
 import * as openaiChat from "../providers/openai-chat-server";
 import * as openaiResponses from "../providers/openai-responses-server";
 import * as piNative from "../providers/pi-native-server";
@@ -44,6 +52,7 @@ import type { ClientUsageIdentity } from "../usage";
 import { deterministicUuid } from "../utils/deterministic-id";
 import { parseBind } from "../utils/parse-bind";
 import { type RouteDecisionTrace, RouteDecisionTraceLog, redactedDecisionSummary } from "./decision-trace";
+import { type GatewayHooks, runHook } from "./hooks";
 import {
 	captureRequestHeaders,
 	corsHeaders,
@@ -100,15 +109,22 @@ export interface AuthGatewayBootOptions extends AuthGatewayServerOptions {
 	routes?: readonly RouteDefinition[];
 	/** Bounded redacted decision log. Constructed by {@link startAuthGateway} when omitted. */
 	decisionTraces?: RouteDecisionTraceLog;
+	/** Optional request lifecycle hooks. Missing hooks are a no-op. */
+	hooks?: GatewayHooks;
 }
 
 // `parseBind` lives in ../utils/parse-bind so the gateway and broker can't
 // drift on accepted inputs (e.g. empty hostname, IPv6 brackets).
 
-const FORMAT_ROUTES: Record<string, { module: FormatModule; label: string }> = {
+export const FORMAT_ROUTES: Record<string, { module: FormatModule; label: string }> = {
 	"/v1/chat/completions": { module: openaiChat, label: "openai-chat" },
+	"/v1/grok/chat/completions": { module: openaiChat, label: "openai-chat" },
 	"/v1/messages": { module: anthropicMessages, label: "anthropic-messages" },
 	"/v1/responses": { module: openaiResponses, label: "openai-responses" },
+	"/backend-api/codex/responses": { module: openaiResponses, label: "openai-responses" },
+	"/backend-api/responses": { module: openaiResponses, label: "openai-responses" },
+	"/v1beta/models/generateContent": { module: geminiV1beta, label: "gemini-v1beta" },
+	"/v1beta/models/streamGenerateContent": { module: geminiV1beta, label: "gemini-v1beta" },
 };
 
 // (passthrough fast-path removed — it bypassed pi-ai provider logic, in
@@ -670,6 +686,11 @@ async function handleFormatEndpoint(
 		const message = error instanceof Error ? error.message : String(error);
 		return route.module.formatError(400, "invalid_request_error", message);
 	}
+	await runHook(bootOpts.hooks?.beforeRequest, {
+		requestId,
+		routeId: compiled.id,
+		generation: compiled.generation,
+	});
 	// Merge gateway-captured passthrough headers under the parser's own
 	// captures. Parsers that set `options.headers` themselves win (they may
 	// have stripped or normalized values); the gateway's allow-list fills in
@@ -915,6 +936,12 @@ async function handleFormatEndpoint(
 						return formatError(classified.status, classified.type, errorMessage);
 					}
 					bootOpts.storage.settleQuotaProbeSuccess(requestId);
+					await runHook(bootOpts.hooks?.afterRequest, {
+						requestId,
+						routeId: compiled.id,
+						generation: compiled.generation,
+						ok: true,
+					});
 					return json(
 						200,
 						route.module.encodeResponse(message, parsed.modelId),
@@ -1031,6 +1058,12 @@ async function handleFormatEndpoint(
 			return clientClosedResponse(route);
 		}
 		sseStream = releaseTurnOnStreamEnd(held.stream, bootOpts.storage, requestId, commitGate);
+		await runHook(bootOpts.hooks?.afterRequest, {
+			requestId,
+			routeId: compiled.id,
+			generation: compiled.generation,
+			ok: true,
+		});
 		return new Response(sseStream, {
 			status: 200,
 			headers: {
@@ -1745,6 +1778,9 @@ export function startAuthGateway(opts: AuthGatewayBootOptions): AuthGatewayServe
 					return withCors(await handleCredentialPin(boot.storage, credentialId, req), req);
 				}
 
+				if (req.method === "POST" && pathname === "/v1/messages/count_tokens") {
+					return withCors(await handleCountTokens(req, boot.resolveModel), req);
+				}
 				// Provider-format dispatch.
 				const formatRoute = FORMAT_ROUTES[pathname];
 				if (formatRoute && req.method === "POST") {

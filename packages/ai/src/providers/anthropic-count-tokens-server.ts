@@ -21,7 +21,7 @@ function estimateInputTokens(messages: unknown): number {
 
 export async function handleCountTokens(
 	req: Request,
-	resolveModel: (id: string) => { contextWindow?: number } | undefined,
+	resolveModel: (id: string) => { contextWindow?: number | null } | undefined,
 ): Promise<Response> {
 	let parsed: unknown;
 	try {

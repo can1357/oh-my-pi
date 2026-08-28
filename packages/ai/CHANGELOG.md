@@ -54,6 +54,10 @@
 - Auth gateway `GET /v1/executions/:id` returns redacted decision traces for an execution.
 - Auth gateway `GET /v1/health/routes` lists virtual route ids, generations, and targets without credentials.
 - Auth gateway `GET /v1/credentials` lists credential ids without tokens; `POST /v1/credentials/:id/disable` and `POST /v1/credentials/:id/pin` manage stored accounts.
+- Auth gateway `POST /v1beta/models/generateContent` and `POST /v1beta/models/streamGenerateContent` accept Gemini v1beta generateContent requests.
+- Auth gateway `POST /v1/messages/count_tokens` estimates Anthropic input tokens.
+- Auth gateway `POST /backend-api/codex/responses` and `POST /backend-api/responses` alias Codex clients onto OpenAI Responses.
+- Auth gateway `POST /v1/grok/chat/completions` aliases xAI clients onto OpenAI chat completions.
 
 ## [18.0.8] - 2026-08-27
 
