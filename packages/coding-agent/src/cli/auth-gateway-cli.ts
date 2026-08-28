@@ -30,7 +30,7 @@ import {
 	RemoteAuthCredentialStore,
 	type SnapshotResponse,
 } from "@oh-my-pi/pi-ai/auth-broker";
-import { DEFAULT_AUTH_GATEWAY_BIND, startAuthGateway } from "@oh-my-pi/pi-ai/auth-gateway";
+import { DEFAULT_AUTH_GATEWAY_BIND, loadRouteDefinitionsFile, startAuthGateway } from "@oh-my-pi/pi-ai/auth-gateway";
 import { type GeneratedProvider, getBundledModels } from "@oh-my-pi/pi-catalog/models";
 import { getConfigRootDir, isEnoent, logger, VERSION } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
@@ -51,6 +51,8 @@ export interface AuthGatewayCommandArgs {
 		 * to wire token-paste plumbing into every local client.
 		 */
 		noAuth?: boolean;
+		/** JSON/JSON5 RouteDefinition file for `serve`. */
+		routes?: string;
 		/**
 		 * Strict mode for `check` — additionally exercise every credential
 		 * against its provider's chat-completion endpoint. The usage probe (run
@@ -215,6 +217,7 @@ async function runServe(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
 	await registry.refresh();
 	let modelById = indexModelsByRequestId(registry.getAll(), providersWithCreds);
 
+	const routes = flags.routes ? await loadRouteDefinitionsFile(flags.routes) : undefined;
 	const handle = startAuthGateway({
 		storage,
 		bind,
@@ -222,6 +225,7 @@ async function runServe(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
 		version: VERSION,
 		resolveModel: (id: string) => modelById.get(id),
 		listModels: () => modelById.values(),
+		...(routes !== undefined ? { routes } : {}),
 	});
 	process.stdout.write(`auth-gateway listening on ${handle.url}\n`);
 	if (gatewayToken) {
