@@ -191,7 +191,9 @@ await agent.prompt("What's in this image?", [{ type: "image", data: base64Data, 
 // AgentMessage directly
 await agent.prompt({ role: "user", content: "Hello", timestamp: Date.now() });
 
-// Continue from current context (last message must be user or toolResult)
+// Continue from current context (last message must be user or toolResult).
+// A trailing assistant message with `stopReason: "aborted"` (a user-interrupted
+// partial turn) is replayed as assistant prefill so the model resumes it.
 await agent.continue();
 ```
 

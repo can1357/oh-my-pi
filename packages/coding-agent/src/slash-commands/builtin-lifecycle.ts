@@ -1,13 +1,12 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { CompactionCancelledError } from "@oh-my-pi/pi-agent-core/compaction";
-import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { logger, setProjectDir } from "@oh-my-pi/pi-utils";
 import { applyProviderGlobalsFromSettings } from "../config/provider-globals";
 import { memoryStatsUnavailableMessage, resolveMemoryBackend } from "../memory-backend";
 import type { FreshSessionResult, HandoffResult } from "../session/agent-session";
 import { COMPACT_MODES, parseCompactArgs } from "../session/compact-modes";
-import { USER_INTERRUPT_LABEL } from "../session/messages";
+import { findResumableAbortedAssistant, USER_INTERRUPT_LABEL } from "../session/messages";
 import { resolveResumableSession } from "../session/session-listing";
 import { toggleSessionPin } from "../session/session-pins";
 import { formatShakeSummary, type ShakeMode } from "../session/shake-types";
@@ -440,11 +439,8 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 		icon: "redo",
 		description: "Continue an interrupted response (no message sent)",
 		getTuiAutocompleteDescription: runtime => {
-			const tail = runtime.ctx.session.messages[runtime.ctx.session.messages.length - 1] as
-				| AssistantMessage
-				| undefined;
-			if (tail?.role !== "assistant") return undefined;
-			return tail.stopReason === "aborted" ? "Continue: resumable interrupted turn" : "Continue: nothing to resume";
+			const tail = findResumableAbortedAssistant(runtime.ctx.session.messages);
+			return tail ? "Continue: resumable interrupted turn" : "Continue: nothing to resume";
 		},
 		handle: async (_command, runtime) => {
 			if (runtime.session.isStreaming) {
@@ -462,6 +458,10 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 		},
 		handleTui: async (_command, runtime) => {
 			runtime.ctx.editor.setText("");
+			if (runtime.ctx.session.isStreaming) {
+				runtime.ctx.showStatus("Busy — wait for the current response to finish or abort it first.");
+				return;
+			}
 			if (!runtime.ctx.session.continueInterrupted()) {
 				runtime.ctx.showStatus("Nothing to continue");
 			}

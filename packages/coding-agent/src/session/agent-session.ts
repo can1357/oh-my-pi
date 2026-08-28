@@ -305,6 +305,7 @@ import {
 	demoteInterruptedThinking,
 	didSessionMessagesChange,
 	type FileMentionMessage,
+	findResumableAbortedAssistant,
 	type HookMessage,
 	INTERRUPTED_THINKING_MESSAGE_TYPE,
 	type InterruptedThinkingDetails,
@@ -7813,9 +7814,8 @@ export class AgentSession {
 	 */
 	continueInterrupted(): boolean {
 		if (this.isStreaming || this.isCompacting || this.#recovery.isRetrying) return false;
-		const messages = this.agent.state.messages;
-		const tail = messages[messages.length - 1] as AssistantMessage | undefined;
-		if (tail?.role !== "assistant" || tail.stopReason !== "aborted") return false;
+		const tail = findResumableAbortedAssistant(this.agent.state.messages);
+		if (!tail) return false;
 		this.#scheduleAgentContinue();
 		return true;
 	}
