@@ -44,6 +44,7 @@ import {
 	resolvePeer,
 	withCors,
 } from "./http";
+import { RouteRegistry } from "./route-graph";
 import { commitGateObservesDownstreamSse, observeSseCommit, StreamCommitGate } from "./stream-commit-gate";
 import type {
 	AuthGatewayParsedRequestOptions,
@@ -69,6 +70,8 @@ export interface AuthGatewayBootOptions extends AuthGatewayServerOptions {
 	resolveModel: ModelResolver;
 	/** Optional supplier for `/v1/models` listing. Returns the full model array. */
 	listModels?: () => Iterable<Model<Api>>;
+	/** Wave A compiled-route shim. Constructed by {@link startAuthGateway} when omitted. */
+	routeRegistry?: RouteRegistry;
 }
 
 // `parseBind` lives in ../utils/parse-bind so the gateway and broker can't
@@ -394,7 +397,10 @@ async function handleFormatEndpoint(
 	if (!modelId) {
 		return route.module.formatError(400, "invalid_request_error", "Missing top-level `model` field");
 	}
-
+	const compiled = (bootOpts.routeRegistry ?? new RouteRegistry(bootOpts.resolveModel)).resolve(modelId);
+	if (!compiled) {
+		return route.module.formatError(404, "invalid_request_error", `Unknown model: ${modelId}`);
+	}
 	const model = bootOpts.resolveModel(modelId);
 	if (!model) {
 		return route.module.formatError(404, "invalid_request_error", `Unknown model: ${modelId}`);
@@ -640,6 +646,10 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 		return piNative.formatError(400, "invalid_request_error", message);
 	}
 
+	const compiled = (bootOpts.routeRegistry ?? new RouteRegistry(bootOpts.resolveModel)).resolve(parsed.modelId);
+	if (!compiled) {
+		return piNative.formatError(404, "invalid_request_error", `Unknown model: ${parsed.modelId}`);
+	}
 	const model = bootOpts.resolveModel(parsed.modelId);
 	if (!model) {
 		return piNative.formatError(404, "invalid_request_error", `Unknown model: ${parsed.modelId}`);
@@ -854,9 +864,13 @@ function handleModelsList(opts: AuthGatewayBootOptions): Response {
 }
 
 export function startAuthGateway(opts: AuthGatewayBootOptions): AuthGatewayServerHandle {
-	const bind = parseBind(opts.bind ?? DEFAULT_AUTH_GATEWAY_BIND);
-	const tokens = new Set<string>(opts.bearerTokens);
-	const version = opts.version;
+	const boot: AuthGatewayBootOptions = {
+		...opts,
+		routeRegistry: opts.routeRegistry ?? new RouteRegistry(opts.resolveModel),
+	};
+	const bind = parseBind(boot.bind ?? DEFAULT_AUTH_GATEWAY_BIND);
+	const tokens = new Set<string>(boot.bearerTokens);
+	const version = boot.version;
 
 	const server = Bun.serve({
 		hostname: bind.hostname,
@@ -884,31 +898,31 @@ export function startAuthGateway(opts: AuthGatewayBootOptions): AuthGatewayServe
 				// Same shape as the broker's `/v1/usage`, so widget/llm-git speak to either with the
 				// same client struct.
 				if (req.method === "GET" && pathname === "/v1/usage") {
-					return withCors(await handleUsage(opts.storage, req.signal), req);
+					return withCors(await handleUsage(boot.storage, req.signal), req);
 				}
 
 				// Per-credential auth probe — diagnoses which row in a multi-account
 				// pool is producing 401s. Aggregated `/v1/usage` silently drops failed
 				// credentials, so we need a separate endpoint that captures errors.
 				if (req.method === "GET" && pathname === "/v1/credentials/check") {
-					return withCors(await handleCredentialsCheck(opts.storage, req.signal), req);
+					return withCors(await handleCredentialsCheck(boot.storage, req.signal), req);
 				}
 
 				// Provider-format dispatch.
 				const formatRoute = FORMAT_ROUTES[pathname];
 				if (formatRoute && req.method === "POST") {
-					return withCors(await handleFormatEndpoint(formatRoute, opts, req, peer), req);
+					return withCors(await handleFormatEndpoint(formatRoute, boot, req, peer), req);
 				}
 
 				// Pi-native fast path. Same auth + provider plumbing as the
 				// foreign-wire routes, just without the wire-format translation.
 				if (req.method === "POST" && pathname === "/v1/pi/stream") {
-					return withCors(await handlePiNative(opts, req, peer), req);
+					return withCors(await handlePiNative(boot, req, peer), req);
 				}
 
 				// Model catalog.
 				if (req.method === "GET" && pathname === "/v1/models") {
-					return withCors(handleModelsList(opts), req);
+					return withCors(handleModelsList(boot), req);
 				}
 
 				// Route-table miss: no format module to defer to, so we emit a
