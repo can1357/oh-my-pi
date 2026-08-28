@@ -36,6 +36,7 @@ import {
 import type { KeyId } from "../../config/keybindings";
 import type { Settings } from "../../config/settings";
 import type { MessageRenderer } from "../../extensibility/extensions/types";
+import { backfillIrcHistoryFromTranscript, dedupeBackfillRecords } from "../../irc/backfill";
 import { IrcBus, type IrcHistoryRecord, type IrcReadCursor } from "../../irc/bus";
 import { deriveIrcConversations, type IrcConversation } from "../../irc/conversations";
 import { AgentLifecycleManager } from "../../registry/agent-lifecycle";
@@ -232,6 +233,9 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 	#messageNotice: string | undefined;
 	#remoteHistoryRecords: IrcHistoryRecord[] = [];
 	#remoteMessagesFetchInFlight = false;
+	#backfillRecords: IrcHistoryRecord[] = [];
+	#sessionFile?: string | null;
+	#backfillStarted = false;
 	#remoteMessageReadAt = new Map<string, IrcReadCursor>();
 	#conversationMessageCounts = new Map<string, number>();
 
@@ -302,8 +306,8 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 		this.#registry = deps.registry ?? AgentRegistry.global();
 		this.#observers = deps.observers;
 		this.#settings = deps.settings;
+		this.#sessionFile = deps.sessionFile;
 		this.#irc = deps.irc ?? IrcBus.global();
-		if (!deps.remote) this.#irc.configureHistory(deps.sessionFile);
 		// Lazy: the lifecycle global self-constructs against the global
 		// registry, so only touch it when revive/kill actually needs it.
 		this.#lifecycle = () => deps.lifecycle ?? AgentLifecycleManager.global();
@@ -709,7 +713,10 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 	#refreshMessages(): void {
 		const selectedId = this.#conversations[this.#selectedConversationRow]?.id;
 		if (this.#remote) void this.#refreshRemoteMessages();
-		const records = this.#remote ? this.#remoteHistoryRecords : this.#irc.historyRecords();
+		else void this.#ensureBackfill();
+		const records = this.#remote
+			? this.#remoteHistoryRecords
+			: [...this.#irc.historyRecords(), ...dedupeBackfillRecords(this.#backfillRecords, this.#irc.historyRecords())];
 		this.#conversations = deriveIrcConversations(records, {
 			registry: this.#registry,
 			viewerId: MAIN_AGENT_ID,
@@ -752,6 +759,21 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 		if (this.#remote) this.#remoteMessageReadAt.set(conversation.id, cursor);
 		else this.#irc.history.markRead(conversation.id, cursor);
 		conversation.unread = 0;
+	}
+
+	/**
+	 * One-time lazy scan of the session transcript for legacy hub sends (sessions
+	 * that predate durable IRC journals). Streams the root transcript in the
+	 * background; a cap bounds memory on very chatty sessions.
+	 */
+	async #ensureBackfill(): Promise<void> {
+		if (this.#backfillStarted || this.#remote) return;
+		this.#backfillStarted = true;
+		const records = await backfillIrcHistoryFromTranscript(this.#sessionFile);
+		if (this.#disposed || records.length === 0) return;
+		this.#backfillRecords = records;
+		this.#refreshMessages();
+		this.#requestRender();
 	}
 
 	async #refreshRemoteMessages(): Promise<void> {
