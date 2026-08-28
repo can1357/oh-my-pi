@@ -531,28 +531,41 @@ function coerceToolResult(raw: unknown): { result: AgentToolResult<unknown>; mal
 			text: "Tool returned an invalid result: computer providerMetadata had an unsupported shape.",
 		});
 	}
-	const isError = explicitError || invalidBlocks > 0 || providerMetadataResult.malformed;
+	// The legacy `isError` flag is a *projection* of the typed authority, never a
+	// second opinion. A migrated producer's `outcome` is authoritative and it is under
+	// no obligation to duplicate that verdict into `isError` (see
+	// `AgentToolResult.outcome`: explicit outcome first, then the isError-derived
+	// branches — "nothing else may arbitrate between them"). Deriving the flag from
+	// the raw boolean alone let a failed/interrupted outcome travel as
+	// `isError: false` into the dispatcher's local compatibility flag, and from there
+	// into `afterToolCall`, `tool_execution_end`, and the execute-tool span, while
+	// settlement and the model wire (`wireIsError`) correctly reported the failure.
+	// Projecting it here, at the one boundary every untyped result crosses, is also
+	// what keeps the flag right after replay: history persists `isError` and never
+	// `outcome`.
+	//
+	// Malformed normalization outranks both: the injected explanation blocks *are* the
+	// failure, whatever the producer claimed about its own run.
+	const malformed = invalidBlocks > 0 || providerMetadataResult.malformed;
+	const isError = malformed || (outcome !== undefined ? outcomeFailed(outcome) : explicitError);
 	// Anthropic rejects tool_result blocks with is_error: true and empty content.
 	if (isError && !hasSubstantiveToolResultContent(content)) {
 		content.length = 0;
 		content.push({ type: "text", text: EMPTY_ERROR_TOOL_RESULT_TEXT });
 	}
 	// One invariant enforced at one site instead of five downstream restatements:
-	// `useless` never survives alongside a failure. A
-	// migrated producer's own `outcome` is authoritative for "succeeded"; an
-	// unmigrated producer has none yet (its outcome is derived later, from this
-	// same `isError`), so `!isError` reproduces today's behavior exactly.
-	const succeeded = outcome !== undefined ? outcome.kind === "succeeded" : !isError;
+	// `useless` never survives alongside a failure — and because `isError` is now the
+	// outcome's projection, that holds for a migrated producer's typed failure too.
 	return {
 		result: {
 			content,
 			details,
 			providerMetadata,
 			...(isError ? { isError: true } : {}),
-			...(useless && succeeded ? { useless: true } : {}),
+			...(useless && !isError ? { useless: true } : {}),
 			...(outcome !== undefined ? { outcome } : {}),
 		},
-		malformed: invalidBlocks > 0 || providerMetadataResult.malformed,
+		malformed,
 	};
 }
 

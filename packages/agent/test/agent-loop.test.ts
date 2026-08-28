@@ -3975,6 +3975,120 @@ describe("agentLoop outcome→wire isError bridge", () => {
 	});
 });
 
+describe("agentLoop legacy isError projection", () => {
+	async function runProjectionProbe(toolReturn: unknown): Promise<{
+		hookIsError: boolean | undefined;
+		endIsError: boolean | undefined;
+		wireIsError: boolean | undefined;
+	}> {
+		const toolSchema = type({});
+		const tool: AgentTool<typeof toolSchema> = {
+			name: "probe",
+			label: "Probe",
+			description: "Probe tool",
+			parameters: toolSchema,
+			async execute() {
+				return toolReturn as never;
+			},
+		};
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [tool] };
+		const mock = createMockModel({
+			responses: [
+				{ content: [{ type: "toolCall", id: "tool-1", name: "probe", arguments: {} }] },
+				{ content: ["done"] },
+			],
+		});
+		let hookIsError: boolean | undefined;
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: identityConverter,
+			afterToolCall: async hookContext => {
+				hookIsError = hookContext.isError;
+				return { kind: "unchanged" };
+			},
+		};
+		const events: AgentEvent[] = [];
+		for await (const event of agentLoop([createUserMessage("go")], context, config, undefined, mock.stream)) {
+			events.push(event);
+		}
+		const end = events.find(
+			(e): e is Extract<AgentEvent, { type: "tool_execution_end" }> => e.type === "tool_execution_end",
+		);
+		expect(end).toBeDefined();
+		const wire = events
+			.filter((e): e is Extract<AgentEvent, { type: "message_end" }> => e.type === "message_end")
+			.map(e => e.message)
+			.find((m): m is ToolResultMessage => m.role === "toolResult");
+		expect(wire).toBeDefined();
+		return {
+			hookIsError,
+			endIsError: end?.isError,
+			wireIsError: wire?.isError,
+		};
+	}
+
+	// The legacy boolean is a projection of the typed outcome, not a second
+	// opinion. A migrated producer that returns only its authoritative `outcome`
+	// used to leave every legacy consumer reporting success: `afterToolCall` saw
+	// `isError: false` (so a hook keying off it never fired) and
+	// `tool_execution_end` announced a successful call, while settlement and the
+	// model wire correctly reported the failure.
+	it("projects a failed outcome onto afterToolCall and tool_execution_end", async () => {
+		const observed = await runProjectionProbe({
+			content: [{ type: "text", text: "OUTCOME_PROJECTION_FAILED_FIXTURE_4B19" }],
+			details: {},
+			outcome: mintToolOutcome({
+				kind: "failed",
+				failure: { reason: "tool_reported", message: "OUTCOME_PROJECTION_FAILED_FIXTURE_4B19" },
+			}),
+		});
+		expect(observed.hookIsError).toBe(true);
+		expect(observed.endIsError).toBe(true);
+		expect(observed.wireIsError).toBe(true);
+	});
+
+	// An interruption is a wire failure too (`outcomeFailed`), and it is the one
+	// outcome kind a producer has no legacy bit for at all.
+	it("projects an interrupted outcome onto afterToolCall and tool_execution_end", async () => {
+		const observed = await runProjectionProbe({
+			content: [{ type: "text", text: "OUTCOME_PROJECTION_INTERRUPTED_FIXTURE_7E52" }],
+			details: {},
+			outcome: mintToolOutcome({ kind: "interrupted", reason: "aborted by fixture" }),
+		});
+		expect(observed.hookIsError).toBe(true);
+		expect(observed.endIsError).toBe(true);
+		expect(observed.wireIsError).toBe(true);
+	});
+
+	// Same authority, opposite direction: a stray legacy bit beside a minted
+	// `succeeded` outcome must not make the legacy events disagree with the wire
+	// and the settlement either.
+	it("projects a succeeded outcome over a stray legacy isError bit", async () => {
+		const observed = await runProjectionProbe({
+			content: [{ type: "text", text: "OUTCOME_PROJECTION_SUCCEEDED_FIXTURE_1F80" }],
+			details: {},
+			isError: true,
+			outcome: mintToolOutcome({ kind: "succeeded" }),
+		});
+		expect(observed.hookIsError).toBe(false);
+		expect(observed.endIsError).toBe(false);
+		expect(observed.wireIsError).toBe(false);
+	});
+
+	// An unmigrated producer carries no outcome, so the projection must leave the
+	// legacy path exactly as it was.
+	it("keeps the legacy isError bit authoritative for an unmigrated producer", async () => {
+		const observed = await runProjectionProbe({
+			content: [{ type: "text", text: "OUTCOME_PROJECTION_LEGACY_FIXTURE_63AD" }],
+			details: {},
+			isError: true,
+		});
+		expect(observed.hookIsError).toBe(true);
+		expect(observed.endIsError).toBe(true);
+		expect(observed.wireIsError).toBe(true);
+	});
+});
+
 describe("agentLoopContinue with AgentMessage", () => {
 	it("should throw when context has no messages", () => {
 		const context: AgentContext = {

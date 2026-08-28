@@ -733,7 +733,12 @@ export interface AgentToolResult<T = unknown> {
 	// Details to be displayed in a UI or logged
 	details?: T;
 	// Marks a non-throwing failure (e.g. an aggregator catching per-entry errors).
-	// agent-loop honors this and surfaces it as a tool error on the wire.
+	// agent-loop honors this and surfaces it as a tool error on the wire. A producer
+	// that sets `outcome` need not set this too: `coerceToolResult` projects the
+	// outcome's verdict onto this flag at the boundary, so the legacy consumers that
+	// read it (`afterToolCall`, `tool_execution_end`, the execute-tool span, and
+	// replayed history, which persists this flag and never `outcome`) can never
+	// disagree with the typed authority.
 	isError?: boolean;
 	/** Provider-native metadata that must survive into history replay unchanged. */
 	providerMetadata?: ToolResultProviderMetadata;
