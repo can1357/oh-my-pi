@@ -1738,6 +1738,7 @@ async function streamAssistantResponse(
 				: undefined;
 
 			let providerStreamSettled = false;
+			let speculationSettled = false;
 			const responseIterator = response[Symbol.asyncIterator]();
 			const finishAbortedStream = async (): Promise<AssistantMessage> => {
 				try {
@@ -1747,6 +1748,7 @@ async function streamAssistantResponse(
 					// Provider cancellation failures cannot change the committed aborted message.
 				}
 				await speculationCoordinator?.discardAll("run aborted", "aborted");
+				speculationSettled = true;
 				const aborted = emitAbortedAssistantMessage(
 					partialMessage,
 					addedPartial,
@@ -1853,6 +1855,7 @@ async function streamAssistantResponse(
 								speculationCoordinator.attach(finalMessage);
 							}
 						}
+						speculationSettled = true;
 						if (addedPartial) {
 							context.messages[context.messages.length - 1] = finalMessage;
 						} else {
@@ -1988,59 +1991,68 @@ async function streamAssistantResponse(
 				detachAbortListener?.();
 				if (!providerStreamSettled) {
 					await speculationCoordinator?.discardAll("provider stream failed", "aborted");
+					speculationSettled = true;
 				}
 			}
 
-			let trailing = await response.result();
-			if (harmonyMitigationEnabled) {
-				const detection = detectHarmonyLeakInAssistantMessage(trailing);
-				if (detection) {
-					const recovered = recoverHarmonyToolCall(trailing, detection);
-					const removed = recovered?.removed ?? extractHarmonyRemoved(trailing, detection);
-					if (addedPartial) {
-						emitDiscardedHarmonyPartial(
-							partialMessage,
-							stream,
-							`Discarded after GPT-5 Harmony protocol leakage (${signalListLabel(detection.signals)})`,
-						);
-						context.messages.pop();
-						addedPartial = false;
+			try {
+				let trailing = await response.result();
+				if (harmonyMitigationEnabled) {
+					const detection = detectHarmonyLeakInAssistantMessage(trailing);
+					if (detection) {
+						const recovered = recoverHarmonyToolCall(trailing, detection);
+						const removed = recovered?.removed ?? extractHarmonyRemoved(trailing, detection);
+						if (addedPartial) {
+							emitDiscardedHarmonyPartial(
+								partialMessage,
+								stream,
+								`Discarded after GPT-5 Harmony protocol leakage (${signalListLabel(detection.signals)})`,
+							);
+							context.messages.pop();
+							addedPartial = false;
+						}
+						throw new HarmonyLeakInterruption(detection, removed, recovered);
 					}
-					throw new HarmonyLeakInterruption(detection, removed, recovered);
 				}
-			}
-			if (config.transformAssistantMessage) {
-				await config.transformAssistantMessage(trailing, requestSignal);
-			}
-			trailing = snapshotAssistantMessage(trailing);
-			const preparedDispatch = await prepareToolCallDispatch(trailing, context, config, requestSignal);
-			if (preparedDispatch.size > 0) {
-				preparedDispatchByMessage.set(trailing, preparedDispatch);
-			}
-			if (speculationCoordinator) {
-				if (
-					requestSignal?.aborted ||
-					trailing.stopReason === "error" ||
-					trailing.stopReason === "aborted" ||
-					trailing.stopReason === "length"
-				) {
-					await speculationCoordinator.discardAll(
-						requestSignal?.aborted ? "run aborted" : `final message stop reason: ${trailing.stopReason}`,
-						requestSignal?.aborted ? "aborted" : "discarded",
-					);
-				} else {
-					await speculationCoordinator.reconcileFinalCalls(speculativeFinalCalls(trailing, preparedDispatch));
-					await speculationCoordinator.finalizeAdmissions();
-					speculationCoordinator.attach(trailing);
+				if (config.transformAssistantMessage) {
+					await config.transformAssistantMessage(trailing, requestSignal);
 				}
+				trailing = snapshotAssistantMessage(trailing);
+				const preparedDispatch = await prepareToolCallDispatch(trailing, context, config, requestSignal);
+				if (preparedDispatch.size > 0) {
+					preparedDispatchByMessage.set(trailing, preparedDispatch);
+				}
+				if (speculationCoordinator) {
+					if (
+						requestSignal?.aborted ||
+						trailing.stopReason === "error" ||
+						trailing.stopReason === "aborted" ||
+						trailing.stopReason === "length"
+					) {
+						await speculationCoordinator.discardAll(
+							requestSignal?.aborted ? "run aborted" : `final message stop reason: ${trailing.stopReason}`,
+							requestSignal?.aborted ? "aborted" : "discarded",
+						);
+					} else {
+						await speculationCoordinator.reconcileFinalCalls(speculativeFinalCalls(trailing, preparedDispatch));
+						await speculationCoordinator.finalizeAdmissions();
+						speculationCoordinator.attach(trailing);
+					}
+				}
+				speculationSettled = true;
+				if (addedPartial) {
+					context.messages[context.messages.length - 1] = trailing;
+					stream.push({ type: "message_end", message: snapshotAssistantMessage(trailing) });
+				}
+				await finishChat(trailing);
+				providerStreamSettled = true;
+				return trailing;
+			} catch (error) {
+				if (!speculationSettled) {
+					await speculationCoordinator?.discardAll("provider stream finalization failed", "aborted");
+				}
+				throw error;
 			}
-			if (addedPartial) {
-				context.messages[context.messages.length - 1] = trailing;
-				stream.push({ type: "message_end", message: snapshotAssistantMessage(trailing) });
-			}
-			await finishChat(trailing);
-			providerStreamSettled = true;
-			return trailing;
 		});
 	} catch (err) {
 		failChatSpan(telemetry, chatSpan, {

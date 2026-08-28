@@ -43,6 +43,26 @@ display(verdict);
 		expect(completion?.call.args).toMatchObject({ kind: "concat" });
 	});
 
+	it("rejects numeric addition while retaining proven string concatenation", async () => {
+		const numeric = await projectJavaScriptShadowPlan(`
+const value = 1 + 2;
+await completion(String(value));
+`);
+		expect(numeric.operations).toEqual([]);
+		expect(numeric.barrier?.reason).toBe("unsupported JavaScript declaration value");
+
+		const text = await projectJavaScriptShadowPlan(`
+const path = "src/" + "a.ts";
+await tool.read({ path });
+`);
+		expect(text.barrier).toBeUndefined();
+		expect(text.operations).toHaveLength(1);
+		expect(text.operations[0]?.call.args).toMatchObject({
+			kind: "object",
+			entries: [{ key: "path", value: { kind: "concat" } }],
+		});
+	});
+
 	it("expands deterministic branches and bounded loops with dynamic paths", async () => {
 		const plan = await projectJavaScriptShadowPlan(
 			`

@@ -221,6 +221,12 @@ describe.skipIf(!SHOULD_RUN)("python runner subprocess", () => {
 					},
 				],
 			});
+			const ambiguousAddition = await kernel.shadowPlan("if [] + []:\n    completion('wrong')");
+			expect(ambiguousAddition?.operations).toEqual([]);
+			expect(ambiguousAddition?.barrier?.reason).toBe("unsupported Python condition");
+			const stringAddition = await kernel.shadowPlan("tool.read({'path': 'src/' + 'a.py'})");
+			expect(stringAddition?.barrier).toBeUndefined();
+			expect(stringAddition?.operations).toHaveLength(1);
 			const loop = await kernel.shadowPlan(
 				["for path in ['a', 'b']:", "    await tool.read({'path': path})"].join("\n"),
 			);

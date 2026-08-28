@@ -417,7 +417,15 @@ export class SpeculativeOperationCoordinator {
 
 	attach(message: AssistantMessage): void {
 		if (this.#closed) return;
-		if (this.#candidates.size > 0 || this.#streamSessions.size > 0) coordinatorByMessage.set(message, this);
+		if (this.#streamSessions.size > 0) {
+			coordinatorByMessage.set(message, this);
+			return;
+		}
+		for (const candidate of this.#candidates.values()) {
+			if (candidate.state === "discarded") continue;
+			coordinatorByMessage.set(message, this);
+			return;
+		}
 	}
 
 	static take(message: AssistantMessage): SpeculativeOperationCoordinator | undefined {
@@ -531,6 +539,7 @@ export class SpeculativeOperationCoordinator {
 					.map(value => this.#discardCandidate(value, outcome, `dependency ${candidate.candidateId}: ${reason}`)),
 			);
 		}
+		this.#candidates.delete(candidate.candidateId);
 	}
 
 	async close(reason: string, outcome: "discarded" | "aborted" = "discarded"): Promise<void> {

@@ -5525,6 +5525,36 @@ describe("speculative tool execution", () => {
 
 			expect(discarded.slice(previousDiscardCount)).toEqual(["final outer tool call changed"]);
 		}
+
+		const previousDiscardCount = discarded.length;
+		const failingStream = () => {
+			let index = 0;
+			return {
+				result: async (): Promise<AssistantMessage> => {
+					throw new Error("trailing response failed");
+				},
+				[Symbol.asyncIterator]: () => ({
+					next: async (): Promise<IteratorResult<AssistantMessageEvent>> =>
+						index < events.length ? { done: false, value: events[index++] } : { done: true, value: undefined },
+				}),
+			} as AssistantMessageEventStream;
+		};
+
+		await expect(
+			agentLoop(
+				[createUserMessage("stream")],
+				{ systemPrompt: [""], messages: [], tools: [tool] },
+				{
+					model: createMockModel({ responses: [] }).model,
+					convertToLlm: identityConverter,
+					getToolContext: () => ({}),
+					speculativeToolExecution: { enabled: true },
+				},
+				undefined,
+				failingStream,
+			).result(),
+		).rejects.toThrow("trailing response failed");
+		expect(discarded.slice(previousDiscardCount)).toEqual(["provider stream finalization failed"]);
 	});
 
 	it("invalidates failed descendants without discarding independent siblings", async () => {
@@ -5969,6 +5999,48 @@ describe("speculative tool execution", () => {
 
 		await expect(coordinator.claim(tool, toolCall, { value: "run" })).resolves.toBeUndefined();
 		expect(speculativeExecutions).toBe(1);
+		await coordinator.close("test complete");
+	});
+
+	it("does not attach a coordinator whose final calls were discarded", async () => {
+		const schema = type({ value: "string" });
+		const tool: AgentTool<typeof schema> = {
+			name: "discarded",
+			label: "Discarded",
+			description: "Returns a value",
+			parameters: schema,
+			speculation: {
+				finalized: {
+					assess: () => ({ eligible: true, effect: { kind: "pure" } }),
+					async execute() {
+						return { kind: "result", result: { content: [] }, isError: false };
+					},
+				},
+			},
+			async execute() {
+				return { content: [] };
+			},
+		};
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [tool] };
+		const loopConfig: AgentLoopConfig = {
+			model: createMockModel({ responses: [] }).model,
+			convertToLlm: identityConverter,
+		};
+		const coordinator = new SpeculativeOperationCoordinator({ enabled: true }, { context, loopConfig });
+		const toolCall = {
+			type: "toolCall" as const,
+			id: "discarded-1",
+			name: "discarded",
+			arguments: { value: "run" },
+		};
+		coordinator.admitFinalized(context, toolCall, loopConfig, undefined);
+
+		await coordinator.reconcileFinalCalls(new Map());
+		const message = createAssistantMessage([]);
+		coordinator.attach(message);
+
+		expect(coordinator.size).toBe(0);
+		expect(SpeculativeOperationCoordinator.take(message)).toBeUndefined();
 		await coordinator.close("test complete");
 	});
 

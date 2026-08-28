@@ -140,6 +140,15 @@ function isExpression(node: Node | null | undefined): node is Expression {
 	);
 }
 
+function isDefinitelyString(expression: ShadowExpression): boolean {
+	if (expression.kind === "literal") return typeof expression.value === "string";
+	if (expression.kind === "concat") return true;
+	return (
+		expression.kind === "transform" &&
+		(expression.name === "String" || expression.name === "JSON.stringify" || expression.name === "Array.join")
+	);
+}
+
 type ProjectionState = {
 	readonly snapshot: Readonly<Record<string, unknown>>;
 	readonly environment: Map<string, ShadowExpression>;
@@ -261,7 +270,9 @@ function projectExpression(expression: Expression, state: ProjectionState): Shad
 	) {
 		const left = projectExpression(expression.left, state);
 		const right = projectExpression(expression.right, state);
-		return left && right ? { kind: "concat", items: [left, right] } : undefined;
+		return left && right && (isDefinitelyString(left) || isDefinitelyString(right))
+			? { kind: "concat", items: [left, right] }
+			: undefined;
 	}
 	if (isCallExpression(expression) && expression.arguments.every(argument => isExpression(argument))) {
 		const args = expression.arguments as Expression[];

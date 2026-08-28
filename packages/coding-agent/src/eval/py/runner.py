@@ -311,6 +311,19 @@ def _shadow_dependencies(expression: dict[str, Any], output: set[str] | None = N
     return output
 
 
+def _shadow_expression_is_string(expression: dict[str, Any]) -> bool:
+    kind = expression.get("kind")
+    if kind == "literal":
+        return type(expression.get("value")) is str
+    if kind == "concat":
+        return True
+    return kind == "transform" and expression.get("name") in (
+        "Python.str",
+        "JSON.stringify",
+        "Array.join",
+    )
+
+
 def _shadow_expression(node: ast.AST, environment: dict[str, dict[str, Any]]) -> dict[str, Any] | None:
     if isinstance(node, ast.Constant) and (
         node.value is None or type(node.value) in (bool, int, float, str)
@@ -372,7 +385,10 @@ def _shadow_expression(node: ast.AST, environment: dict[str, dict[str, Any]]) ->
         right = _shadow_expression(node.right, environment)
         return (
             {"kind": "concat", "items": [left, right]}
-            if left is not None and right is not None
+            if left is not None
+            and right is not None
+            and _shadow_expression_is_string(left)
+            and _shadow_expression_is_string(right)
             else None
         )
     if isinstance(node, ast.Call) and not node.keywords:
