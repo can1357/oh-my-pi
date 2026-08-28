@@ -105,6 +105,26 @@ describe("zai usage provider", () => {
 		]);
 	});
 
+	it("keeps distinct Z.AI quota windows without known durations", async () => {
+		const report = await zaiUsageProvider.fetchUsage!(
+			{ provider: "zai", credential: makeCredential(), signal: undefined },
+			makeCtx({
+				success: true,
+				data: {
+					limits: [
+						{ type: "TOKENS_LIMIT", percentage: 30, unit: 7, number: 1 },
+						{ type: "TOKENS_LIMIT", percentage: 40, unit: 8, number: 1 },
+					],
+				},
+			}),
+		);
+
+		expect(report).not.toBeNull();
+		const ranked = zaiRankingStrategy.findWindowLimits(report!);
+		expect(ranked.primary?.id).toBe("zai:tokens:1u7");
+		expect(ranked.secondary?.id).toBe("zai:tokens:1u8");
+	});
+
 	it("supports both api-key and oauth credentials, rejecting oauth rows with no access token", () => {
 		expect(zaiUsageProvider.supports!({ provider: "zai", credential: makeCredential(), signal: undefined })).toBe(
 			true,
@@ -208,12 +228,30 @@ describe("zai usage provider", () => {
 
 		expect(report).not.toBeNull();
 		const limit = report!.limits[0]!;
+		expect(limit.amount.unit).toBe("percent");
 		expect(limit.id).toBe("zai:credits:5h");
 		expect(limit.amount.used).toBeUndefined();
 		expect(limit.amount.usedFraction).toBeCloseTo(0.97, 5);
 		expect(limit.status).toBe("warning");
 	});
 
+	it("keeps credit units when only remaining is available", async () => {
+		const report = await zaiUsageProvider.fetchUsage!(
+			{ provider: "zai", credential: makeCredential(), signal: undefined },
+			makeCtx({
+				success: true,
+				data: {
+					limits: [{ type: "CREDIT_LIMIT", remaining: 1234, unit: 3, number: 5 }],
+				},
+			}),
+		);
+
+		expect(report).not.toBeNull();
+		const limit = report!.limits[0]!;
+		expect(limit.amount.unit).toBe("credits");
+		expect(limit.amount.remaining).toBe(1234);
+		expect(limit.amount.usedFraction).toBeUndefined();
+	});
 	it("keeps one ranked limit per window when tokens and credits meters coexist", async () => {
 		const report = await zaiUsageProvider.fetchUsage!(
 			{ provider: "zai", credential: makeCredential(), signal: undefined },

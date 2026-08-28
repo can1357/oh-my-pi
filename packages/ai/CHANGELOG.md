@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Z.AI quota ranking when usage responses contain multiple meters or omit absolute credit values.
+
 ## [18.0.9] - 2026-08-28
 
 ### Fixed
