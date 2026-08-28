@@ -14,6 +14,7 @@ import { computerExposureMode } from "../tools/computer/exposure";
 import type { InspectImageMode } from "../utils/inspect-image-mode";
 import { commandConsumed, errorMessage, usage } from "./helpers/parse";
 import { handleSecurityCommand } from "./helpers/security";
+import { handleRlmCommand } from "./rlm";
 import type { ParsedSlashCommand, SlashCommandSpec, TuiSlashCommandRuntime } from "./types";
 
 export function refreshStatusLine(ctx: InteractiveModeContext): void {
@@ -612,5 +613,15 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			}
 			return commandConsumed();
 		},
+	},
+	{
+		name: "rlm",
+		icon: "rocket",
+		description:
+			"Run the Recursive Language Model strategy on oversized input (chunk, delegate, aggregate in the eval sandbox)",
+		acpDescription: "Run RLM mode on the given input",
+		inlineHint: "[input-or-query]",
+		allowArgs: true,
+		handle: handleRlmCommand,
 	},
 ];

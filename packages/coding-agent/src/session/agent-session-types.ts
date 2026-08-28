@@ -33,6 +33,7 @@ import type { ExtensionRunner } from "../extensibility/extensions";
 import type { ContextUsage } from "../extensibility/extensions/types";
 import type { Skill, SkillWarning } from "../extensibility/skills";
 import type { FileSlashCommand } from "../extensibility/slash-commands";
+import type { LocalProtocolOptions } from "../internal-urls/local-protocol";
 import type { SecretObfuscator } from "../secrets/obfuscator";
 import type { ConfiguredThinkingLevel } from "../thinking";
 import type { XdevState } from "../tools/xdev";
@@ -244,6 +245,13 @@ export interface AgentSessionConfig {
 	obfuscator?: SecretObfuscator;
 	/** Inherited eval executor session id from a parent agent. */
 	parentEvalSessionId?: string;
+	/**
+	 * Canonical `local://` mapping for this session's eval/tools layer — the
+	 * exact mapping eval sandboxes and the model's tools resolve `local://`
+	 * through (`ToolSession.localProtocolOptions`). Undefined ⇒ the default
+	 * sessionManager-derived mapping applies.
+	 */
+	localProtocolOptions?: LocalProtocolOptions;
 	/** Logical owner for retained eval kernels created by this session. */
 	evalKernelOwnerId?: string;
 	/** Async job manager owned and disposed by this session. */

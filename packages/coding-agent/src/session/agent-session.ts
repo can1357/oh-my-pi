@@ -568,6 +568,8 @@ export class AgentSession {
 	#branchSummaryAbortController: AbortController | undefined = undefined;
 
 	readonly #handoff: SessionHandoff;
+	/** Canonical `local://` mapping for the eval/tools layer; undefined ⇒ default sessionManager-derived mapping. */
+	readonly #configuredLocalProtocolOptions: LocalProtocolOptions | undefined;
 
 	// Retry state
 	readonly #recovery: TurnRecovery;
@@ -1048,6 +1050,7 @@ export class AgentSession {
 		this.agent = config.agent;
 		this.#codeModeState = config.codeModeState ?? {};
 		this.sessionManager = config.sessionManager;
+		this.#configuredLocalProtocolOptions = config.localProtocolOptions;
 		this.settings = config.settings;
 		this.#modelRegistry = config.modelRegistry;
 		this.#extensionRoots =
@@ -5191,6 +5194,15 @@ export class AgentSession {
 	}
 	getEvalSessionId(): string | null {
 		return this.#eval.getSessionId();
+	}
+	/**
+	 * Canonical `local://` mapping for this session's eval/tools layer — the
+	 * exact mapping eval sandboxes and the model's tools resolve `local://`
+	 * through (`ToolSession.localProtocolOptions`). Undefined when no host
+	 * override exists and the default sessionManager-derived mapping applies.
+	 */
+	getLocalProtocolOptions(): LocalProtocolOptions | undefined {
+		return this.#configuredLocalProtocolOptions;
 	}
 	getEvalKernelOwnerId(): string {
 		return this.#eval.getKernelOwnerId();

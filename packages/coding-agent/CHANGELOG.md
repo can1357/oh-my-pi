@@ -31,6 +31,7 @@
 
 ### Added
 
+- Added RLM (Recursive Language Model) mode: a flag-gated `/rlm` slash command (`rlm.enabled`, default off) that processes oversized input by externalizing it into the eval sandbox as a `context` variable, probing it with `metadata`/`search`/`chunk`, and delegating semantic work to the `llm_query`/`llm_query_batched` and `rlm_query`/`rlm_query_batched` eval helpers, aggregating results in code. Recursion is bounded by `task.maxRecursionDepth`.
 - Transcript usage rows now show the total prompt-to-yield time (Δ + clock, including tool calls) after the turn timestamp, opt-in via `display.showTurnTime` (off by default).
 - `omp usage` now shows Z.AI GLM Coding Plan credit quotas (5h + weekly) with the subscribed plan tier.
 - The usage status line now labels untiered quota windows with the report's plan tier, surfacing Z.AI Coding Plan (`pro`) and Codex plan names next to the 5h/7d percentages.

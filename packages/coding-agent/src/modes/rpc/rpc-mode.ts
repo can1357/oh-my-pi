@@ -1026,6 +1026,7 @@ export async function runRpcMode(
 					session,
 					sessionManager: session.sessionManager,
 					settings: session.settings,
+					localProtocolOptions: session?.getLocalProtocolOptions?.(),
 					cwd: session.sessionManager.getCwd(),
 					output: text => output({ type: "command_output", text }),
 					refreshCommands: emitAvailableCommandsUpdate,

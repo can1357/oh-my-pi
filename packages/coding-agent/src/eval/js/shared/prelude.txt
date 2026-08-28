@@ -206,6 +206,277 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 		hard: async () => Boolean((await __budgetSnap()).hard),
 	};
 
+	// llm_query's delegated-prompt shape lives in the static llm_query.md
+	// template (embedded at the top of this source as
+	// __omp_llm_query_template__); this single pass over the placeholders is
+	// the whole interpolation, so a payload that itself contains
+	// {{instructions}}/{{snippet}} is never re-scanned.
+	const __renderLlmmQueryPrompt = (instructions, snippet) =>
+		__omp_llm_query_template__.replace(/\{\{(instructions|snippet)\}\}/g, (match, name) =>
+			name === "instructions" ? instructions : snippet,
+		);
+
+	const llm_query = async (snippet, opts, ...rest) => {
+		const o = optionsArg("llm_query", opts, rest, ["instructions", "model"], "{ instructions, model }");
+		const prompt = o.instructions != null ? __renderLlmmQueryPrompt(o.instructions, snippet) : snippet;
+		return completion(prompt, { model: o.model ?? "default" });
+	};
+
+	const llm_query_batched = async (prompts, opts, ...rest) => {
+		const o = optionsArg("llm_query_batched", opts, rest, ["model"], "{ model }");
+		const model = o.model ?? "default";
+		return parallel(Array.from(prompts ?? []).map(p => async () => llm_query(p, { model })));
+	};
+
+	const rlm_query = async (prompt, opts, ...rest) => {
+		const o = optionsArg("rlm_query", opts, rest, ["agent"], "{ agent }");
+		// Omit the agent field entirely when unset (rather than defaulting to
+		// "task") so agent()'s own bridge resolves the session's spawn-policy
+		// default, matching what a bare agent(prompt) call would pick.
+		return o.agent != null ? agent(prompt, { agent: o.agent }) : agent(prompt);
+	};
+
+	const rlm_query_batched = async (prompts, opts, ...rest) => {
+		const o = optionsArg("rlm_query_batched", opts, rest, ["agent"], "{ agent }");
+		return parallel(
+			Array.from(prompts ?? []).map(p => async () => rlm_query(p, o.agent != null ? { agent: o.agent } : undefined)),
+		);
+	};
+
+	const chunk = (text, opts, ...rest) => {
+		const o = optionsArg("chunk", opts, rest, ["by", "size"], "{ by, size }");
+		const by = o.by ?? "lines";
+		if (by !== "lines" && by !== "tokens") {
+			throw new Error(`chunk() by must be "lines" or "tokens", got ${JSON.stringify(by)}`);
+		}
+		const size = o.size ?? 100;
+		if (!Number.isInteger(size) || size <= 0) throw new Error("chunk() size must be a positive integer");
+		if (by === "tokens") {
+			// Bounded by code-point count (~4 code points/token, matching
+			// metadata()'s approx_tokens heuristic) rather than whitespace-word
+			// splitting: an unbroken multi-MB line (minified JSON/base64/code)
+			// must still be split into windows llm_query() can consume,
+			// regardless of whitespace. Iterates by UTF-16 offset (not by
+			// materializing a full code-point array via Array.from, which
+			// would multiply memory use on huge inputs) and steps two units
+			// at a time on surrogate pairs so a boundary never splits one.
+			const maxChars = size * 4;
+			const str = String(text);
+			const chunks = [];
+			let start = 0;
+			while (start < str.length) {
+				let count = 0;
+				let i = start;
+				while (i < str.length && count < maxChars) {
+					const code = str.codePointAt(i);
+					i += code > 0xffff ? 2 : 1;
+					count++;
+				}
+				chunks.push(str.slice(start, i));
+				start = i;
+			}
+			return chunks;
+		}
+		// Incremental line scan instead of __splitlines(text) + slice/join,
+		// which materializes a full array of every line substring: for a
+		// large line-rich payload that array would coexist with the joined
+		// chunk strings and the original text, tripling memory use and
+		// risking an eval-worker OOM before any chunk is delegated. Only
+		// `size` lines are buffered at a time; the scan mirrors
+		// the old split-based semantics (\r\n|\r|\n boundaries, a trailing
+		// terminator produces no empty last line).
+		const str = String(text);
+		const chunks = [];
+		let buf = [];
+		let last = 0;
+		const lineBreak = /\r\n|\r|\n/g;
+		let m;
+		while ((m = lineBreak.exec(str)) !== null) {
+			buf.push(str.slice(last, m.index));
+			if (buf.length === size) {
+				chunks.push(buf.join("\n"));
+				buf = [];
+			}
+			last = m.index + m[0].length;
+		}
+		if (last < str.length) buf.push(str.slice(last));
+		if (buf.length > 0) chunks.push(buf.join("\n"));
+		return chunks;
+	};
+
+	const search = (text, pattern, opts, ...rest) => {
+		const o = optionsArg("search", opts, rest, ["flags", "limit", "max_line_chars"], "{ flags, limit, max_line_chars }");
+		const limit = o.limit ?? 100;
+		if (!Number.isInteger(limit) || limit <= 0) throw new Error("search() limit must be a positive integer");
+		const maxLineChars = o.max_line_chars ?? 1000;
+		if (!Number.isInteger(maxLineChars) || maxLineChars <= 0) {
+			throw new Error("search() max_line_chars must be a positive integer");
+		}
+		const rx = new RegExp(pattern, typeof o.flags === "string" ? o.flags : "");
+		// Incremental line scan (the same /\r\n|\r|\n/g exec loop chunk()
+		// uses) instead of materializing a full array of every line via
+		// split(): search() only ever emits matching lines, so for a large
+		// line-rich payload the array would double memory use before the
+		// first hit is returned. One line is in flight at a time; numbering,
+		// the \r\n|\r|\n boundary set, and the trailing-whitespace trim are
+		// identical to the split-based behavior. The result list is bounded
+		// too: scanning stops as soon as `limit` matches are retained (a
+		// trailing marker notes the early stop), and each retained match is
+		// itself capped at `max_line_chars` characters. An oversized
+		// matching line is not cut from its start — that can drop the
+		// matched region entirely (e.g. a key near the end of one minified
+		// JSON line), defeating the discovery role — instead a bounded
+		// window around the first match is kept, annotated with the match
+		// offset as `L<n>@<offset>:`, "..." markers on any cut side, and a
+		// "... (line truncated)" suffix for the right cut. A broad or
+		// frequent pattern on a huge payload — including one unbroken
+		// multi-MB line, e.g. minified JSON/base64, whose whole content a
+		// match would otherwise copy — cannot grow the output past the
+		// input and OOM the eval worker.
+		// Window edges are shifted onto code-point boundaries so a cut never
+		// bisects a surrogate pair into a lone half.
+		const str = String(text);
+		const out = [];
+		let lineNo = 0;
+		let last = 0;
+		const lineBreak = /\r\n|\r|\n/g;
+		const matchLine = line => {
+			lineNo++;
+			// Stateful g/y patterns must restart per line or they skip
+			// matches after the first hit.
+			rx.lastIndex = 0;
+			if (!rx.test(line)) return;
+			const content = line.replace(/\s+$/, "");
+			if (content.length <= maxLineChars) {
+				out.push(`L${lineNo}: ${content}`);
+				return;
+			}
+			// Oversized line: keep a bounded window centered on the first
+			// match instead of the line prefix, so the excerpt always
+			// contains the matched region. The `L<n>@<offset>:` annotation
+			// pins the window's character offset in the line; "..." marks a
+			// cut on either side.
+			rx.lastIndex = 0;
+			const m = rx.exec(line);
+			const matchStart = m ? m.index : 0;
+			const k = Math.floor(maxLineChars / 2);
+			let start = matchStart - k;
+			let end = matchStart + (maxLineChars - k);
+			if (start < 0) {
+				start = 0;
+				end = Math.min(line.length, maxLineChars);
+			} else if (end > line.length) {
+				end = line.length;
+				start = Math.max(0, line.length - maxLineChars);
+			}
+			// Never slice through a surrogate pair: a window edge landing
+			// between the two halves would emit a lone half the model reads
+			// as a U+FFFD replacement char, corrupting the excerpt. Back
+			// `start` off a low surrogate (its high half re-enters the
+			// window) and push `end` past a low surrogate whose high half is
+			// inside the window, so both edges sit on code-point boundaries
+			// (the same codePointAt/step-2 discipline chunk(by="tokens")
+			// applies). Lone surrogates in the input itself are left alone —
+			// the cut never creates them.
+			while (
+				start > 0 &&
+				start < line.length &&
+				line.charCodeAt(start) >= 0xdc00 &&
+				line.charCodeAt(start) <= 0xdfff
+			) {
+				start--;
+			}
+			if (
+				end > 0 &&
+				end < line.length &&
+				line.charCodeAt(end) >= 0xdc00 &&
+				line.charCodeAt(end) <= 0xdfff &&
+				line.charCodeAt(end - 1) >= 0xd800 &&
+				line.charCodeAt(end - 1) <= 0xdbff
+			) {
+				end++;
+			}
+			const left = start > 0 ? "..." : "";
+			const right = end < line.length ? "... (line truncated)" : "";
+			out.push(`L${lineNo}@${start}: ${left}${line.slice(start, end).replace(/\s+$/, "")}${right}`);
+		};
+		let m;
+		while ((m = lineBreak.exec(str)) !== null) {
+			matchLine(str.slice(last, m.index));
+			last = m.index + m[0].length;
+			if (out.length === limit && last < str.length) {
+				out.push("... (truncated, more matches may exist)");
+				return out;
+			}
+		}
+		if (last < str.length) matchLine(str.slice(last));
+		return out;
+	};
+	const __countLinesAndWords = text => {
+		// Single-pass scan instead of splitting the whole payload into a
+		// lines array and a words array: for the large whitespace-rich
+		// inputs metadata() is meant to size cheaply before any chunk is
+		// delegated, materializing both would multiply memory use and can
+		// OOM the eval worker during the mandatory probe step.
+		let lines = text.length === 0 ? 0 : 1;
+		let words = 0;
+		let inWord = false;
+		let endsWithTerminator = false;
+		const len = text.length;
+		let i = 0;
+		while (i < len) {
+			const ch = text[i];
+			if (ch === "\r" || ch === "\n") {
+				lines++;
+				i += ch === "\r" && text[i + 1] === "\n" ? 2 : 1;
+				endsWithTerminator = i === len;
+				inWord = false;
+				continue;
+			}
+			if (/\s/.test(ch)) {
+				inWord = false;
+			} else if (!inWord) {
+				words++;
+				inWord = true;
+			}
+			i++;
+		}
+		if (endsWithTerminator) lines--;
+		return { lines, words };
+	};
+
+	const metadata = text => {
+		if (typeof text === "string") {
+			const { lines, words } = __countLinesAndWords(text);
+			return {
+				type: "str",
+				chars: text.length,
+				lines,
+				words,
+				approx_tokens: Math.floor(text.length / 4),
+			};
+		}
+		const items = text ?? [];
+		// Single pass without Array.from: copying the whole list into a fresh
+		// array would double the container memory for huge payloads just to
+		// count items and sum char lengths. Iterables are consumed once;
+		// array-likes fall back to numeric-length indexing with the same
+		// coercion Array.from would apply.
+		let count = 0;
+		let chars = 0;
+		if (typeof items[Symbol.iterator] === "function") {
+			for (const s of items) {
+				chars += String(s).length;
+				count++;
+			}
+		} else {
+			const len = Number(items.length);
+			count = Number.isFinite(len) ? Math.max(0, Math.trunc(len)) : 0;
+			for (let i = 0; i < count; i++) chars += String(items[i]).length;
+		}
+		return { type: "list", items: count, chars, approx_tokens: Math.floor(chars / 4) };
+	};
+
 	const display = value => {
 		globalThis.__omp_display__(value);
 	};
@@ -287,6 +558,13 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 	globalThis.log = log;
 	globalThis.phase = phase;
 	globalThis.budget = budget;
+	globalThis.llm_query = llm_query;
+	globalThis.llm_query_batched = llm_query_batched;
+	globalThis.rlm_query = rlm_query;
+	globalThis.rlm_query_batched = rlm_query_batched;
+	globalThis.chunk = chunk;
+	globalThis.search = search;
+	globalThis.metadata = metadata;
 	globalThis.__pool = __pool;
 	globalThis.read = read;
 	globalThis.write = write;

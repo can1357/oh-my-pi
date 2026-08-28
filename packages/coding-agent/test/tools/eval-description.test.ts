@@ -62,6 +62,15 @@ describe("eval tool description", () => {
 		expect(wildcard).toContain("agent(prompt");
 		expect(denied).not.toContain("agent(prompt");
 	});
+
+	it("hides the RLM helper docs unless rlm.enabled is set", () => {
+		const off = new EvalTool(makeSession({ spawns: "*" })).description;
+		const on = new EvalTool(makeSession({ spawns: "*", backends: { "rlm.enabled": true } })).description;
+		expect(off).not.toContain("llm_query(");
+		expect(off).not.toContain("rlm_query(");
+		expect(on).toContain("llm_query(");
+		expect(on).toContain("rlm_query(");
+	});
 });
 
 describe("eval tool dynamic schema", () => {

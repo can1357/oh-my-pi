@@ -1,4 +1,5 @@
 import type { Settings } from "../config/settings";
+import type { LocalProtocolOptions } from "../internal-urls/local-protocol";
 import type { SlashCommandIconName } from "../modes/theme/symbols";
 import type { InteractiveModeContext, SubmittedUserInput } from "../modes/types";
 import type { AgentSession } from "../session/agent-session";
@@ -62,6 +63,17 @@ export interface SlashCommandRuntime {
 	sessionManager: SessionManager;
 	settings: Settings;
 	cwd: string;
+	/**
+	 * Canonical `local://` mapping for the invoking eval session — the exact
+	 * mapping eval sandboxes and the model's tools resolve `local://`
+	 * reads/writes through (`ToolSession.localProtocolOptions`). Handlers that
+	 * externalize payloads for the eval sandbox MUST write through this
+	 * mapping, not a sessionManager-derived reconstruction: an SDK host that
+	 * supplies custom localProtocolOptions reads from the custom root while
+	 * the session manager's artifacts dir diverges (file-not-found).
+	 * Undefined ⇒ the default sessionManager-derived mapping applies.
+	 */
+	localProtocolOptions?: LocalProtocolOptions;
 	/** Emit text to the operator. TUI maps to `ctx.showStatus`, ACP to `sessionUpdate`. */
 	output: (text: string) => Promise<void> | void;
 	/** Re-advertise the available command list (no-op outside ACP). */

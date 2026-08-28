@@ -125,12 +125,11 @@ if "__omp_prelude_loaded__" not in globals():
             return _read_tool_text(tool_path)
         p = _resolve_omp_path(path)
         data = p.read_text(encoding="utf-8")
-        lines = data.splitlines(keepends=True)
         if offset > 1 or limit is not None:
+            lines = data.splitlines(keepends=True)
             start = max(0, offset - 1)
             end = start + limit if limit else len(lines)
-            lines = lines[start:end]
-            data = "".join(lines)
+            data = "".join(lines[start:end])
         preview = data[:500]
         _emit_status("read", path=str(p), chars=len(data), preview=preview)
         return data
@@ -679,3 +678,201 @@ if "__omp_prelude_loaded__" not in globals():
                 return "<budget unavailable>"
 
     budget = _Budget()
+
+    # llm_query's delegated-prompt shape lives in the static llm_query.md
+    # template (injected at the top of this source as
+    # __omp_llm_query_template__ by eval/py/prelude.ts); this single pass over
+    # the placeholders is the whole interpolation, so a payload that itself
+    # contains {{instructions}}/{{snippet}} is never re-scanned.
+    _LLM_QUERY_TEMPLATE_RE = re.compile(r"\{\{(instructions|snippet)\}\}")
+
+    def llm_query(snippet, instructions=None, *, model="default"):
+        """Sub-LLM completion. `instructions` prefixes `snippet` when given."""
+        if instructions is not None:
+            prompt = _LLM_QUERY_TEMPLATE_RE.sub(
+                lambda m: instructions if m.group(1) == "instructions" else snippet,
+                __omp_llm_query_template__,
+            )
+        else:
+            prompt = snippet
+        return completion(prompt, model=model)
+
+    def llm_query_batched(prompts, *, model="default"):
+        """Parallel sub-LLM completions, preserving input order."""
+        return parallel([lambda p=p: llm_query(p, model=model) for p in prompts])
+
+    def rlm_query(prompt, *, agent=None):
+        """Recursive subagent via agent(); returns its text output. `agent=None` (default) resolves the session's spawn-policy default. `agent` is resolved through globals() so the `agent` parameter does not shadow the module-level agent() helper."""
+        return globals()["agent"](prompt, agent=agent)
+
+    def rlm_query_batched(prompts, *, agent=None):
+        """Parallel recursive subagents, preserving input order."""
+        return parallel([lambda p=p: rlm_query(p, agent=agent) for p in prompts])
+
+    def chunk(text, *, by="lines", size=100):
+        """Split `text` into chunks of `size` lines, or into fixed ~`size`-token windows."""
+        if by not in ("lines", "tokens"):
+            raise ValueError(f"chunk by must be 'lines' or 'tokens', got {by!r}")
+        if not isinstance(size, int) or size <= 0:
+            raise ValueError("chunk size must be a positive integer")
+        if by == "lines":
+            # Scan line offsets incrementally (lazy finditer over the same
+            # line-break separators splitlines() understands) instead of
+            # text.splitlines(), which materializes a full list of every line
+            # substring: for a large line-rich payload that list would coexist
+            # with the joined chunk strings and the original text, tripling
+            # memory use and risking an eval-worker OOM before any chunk is
+            # delegated. Only `size` lines are buffered at a time.
+            if text == "":
+                return []
+            chunks = []
+            buf = []
+            last = 0
+            for m in _line_break_re.finditer(text):
+                buf.append(text[last : m.start()])
+                if len(buf) == size:
+                    chunks.append("\n".join(buf))
+                    buf = []
+                last = m.end()
+            if last < len(text):
+                buf.append(text[last:])
+            if buf:
+                chunks.append("\n".join(buf))
+            return chunks
+        # Bounded by character count (~4 chars/token, matching metadata()'s
+        # approx_tokens heuristic) rather than whitespace-word splitting: an
+        # unbroken multi-MB line (minified JSON/base64/code) must still be
+        # split into windows llm_query() can consume, regardless of whitespace.
+        max_chars = size * 4
+        return [text[i : i + max_chars] for i in range(0, len(text), max_chars)]
+
+    def search(text, pattern, flags=0, *, limit=100, max_line_chars=1000):
+        """Return 'L<lineno>: <line>' for each line matching the regex `pattern`, stopping after `limit` matches (default 100); a trailing '... (truncated, more matches may exist)' entry marks an early stop. Matching lines longer than `max_line_chars` characters (default 1000) are not cut from the line start — that could drop the matched region entirely (e.g. a key near the end of one minified JSON line) — instead a bounded window around the first match is kept, emitted as 'L<lineno>@<offset>: <window>' with '...' markers on cut sides and a '... (line truncated)' suffix for the right cut, so a single oversized line cannot blow up the result. Window edges are shifted onto code-point boundaries so a cut never bisects a surrogate pair into a lone half."""
+        if not isinstance(limit, int) or limit <= 0:
+            raise ValueError("search limit must be a positive integer")
+        if not isinstance(max_line_chars, int) or max_line_chars <= 0:
+            raise ValueError("search max_line_chars must be a positive integer")
+        rx = re.compile(pattern, flags)
+        # Incremental line scan via lazy finditer over _line_break_re (the
+        # same Unicode line-break set splitlines() understands) instead of
+        # text.splitlines(), which materializes a full list of every line
+        # substring: search() only ever emits matching lines, so for a large
+        # line-rich payload the list would double memory use before the first
+        # hit is returned. Only one line is in flight at a time; 1-indexed
+        # numbering and the rstrip() trim are identical to the old behavior.
+        # The result list is bounded too: scanning stops as soon as `limit`
+        # matches are retained (trailing marker appended), and each retained
+        # match is itself capped at `max_line_chars` characters. An oversized
+        # matching line is not cut from its start — that can drop the matched
+        # region entirely (e.g. a key near the end of one minified JSON
+        # line), defeating the discovery role — instead a bounded window
+        # around the first match is kept, annotated with the match offset as
+        # `L<n>@<offset>:`, "..." markers on any cut side, and a '... (line
+        # truncated)' suffix for the right cut. A broad or frequent pattern on
+        # a huge payload — including one unbroken multi-MB line, e.g.
+        # minified JSON/base64, whose whole content a match would otherwise
+        # copy — cannot grow the output past the input and OOM the eval
+        # worker.
+        def _entry(line):
+            if not rx.search(line):
+                return None
+            content = line.rstrip()
+            if len(content) <= max_line_chars:
+                return f"L{line_no}: {content}"
+            # Oversized line: keep a bounded window centered on the first
+            # match instead of the line prefix, so the excerpt always
+            # contains the matched region. The `L<n>@<offset>:` annotation
+            # pins the window's character offset in the line; "..." marks a
+            # cut on either side.
+            first = rx.search(line)
+            match_start = first.start() if first else 0
+            k = max_line_chars // 2
+            start = match_start - k
+            end = match_start + (max_line_chars - k)
+            if start < 0:
+                start = 0
+                end = min(len(line), max_line_chars)
+            elif end > len(line):
+                end = len(line)
+                start = max(0, len(line) - max_line_chars)
+            # Never slice through a surrogate pair: a window edge landing
+            # between the two halves would emit a lone half that a JSON
+            # round-trip turns into a U+FFFD replacement char, corrupting
+            # the excerpt. Back `start` off a low surrogate (its high half
+            # re-enters the window) and push `end` past a low surrogate
+            # whose high half is inside the window, so both edges sit on
+            # code-point boundaries (the same discipline chunk(by="tokens")
+            # applies; Python strings are code-point sequences, so this only
+            # matters when the payload itself carries surrogate code points,
+            # e.g. a JSON-decoded \ud83d\ude00 escape). Lone surrogates in
+            # the input itself are left alone — the cut never creates them.
+            while start > 0 and start < len(line) and 0xDC00 <= ord(line[start]) <= 0xDFFF:
+                start -= 1
+            if (
+                end > 0
+                and end < len(line)
+                and 0xDC00 <= ord(line[end]) <= 0xDFFF
+                and 0xD800 <= ord(line[end - 1]) <= 0xDBFF
+            ):
+                end += 1
+            left = "..." if start > 0 else ""
+            right = "... (line truncated)" if end < len(line) else ""
+            return f"L{line_no}@{start}: {left}{line[start:end].rstrip()}{right}"
+
+        out = []
+        line_no = 0
+        last = 0
+        for m in _line_break_re.finditer(text):
+            line_no += 1
+            line = text[last : m.start()]
+            last = m.end()
+            entry = _entry(line)
+            if entry is not None:
+                out.append(entry)
+                if len(out) == limit and last < len(text):
+                    out.append("... (truncated, more matches may exist)")
+                    return out
+        if last < len(text):
+            line_no += 1
+            entry = _entry(text[last:])
+            if entry is not None:
+                out.append(entry)
+        return out
+
+    _line_break_re = re.compile(r"\r\n|[\n\r\v\f\x1c\x1d\x1e\x85\u2028\u2029]")
+    _word_re = re.compile(r"\S+")
+
+    def _count_lines_and_words(text):
+        # Single-pass scans via re.finditer (lazy, discards each match
+        # immediately) instead of text.splitlines()/text.split(), which
+        # both materialize a full list of substrings for the whole
+        # payload. metadata() sizes input before any chunk is delegated,
+        # so a large document must not multiply memory here.
+        boundaries = 0
+        last_end = 0
+        for m in _line_break_re.finditer(text):
+            boundaries += 1
+            last_end = m.end()
+        lines = 0 if not text else boundaries + 1
+        if boundaries and last_end == len(text):
+            lines -= 1
+        words = sum(1 for _ in _word_re.finditer(text))
+        return lines, words
+
+    def metadata(text):
+        """Shape stats for a str or a list of strings."""
+        if isinstance(text, str):
+            lines, words = _count_lines_and_words(text)
+            return {
+                "type": "str",
+                "chars": len(text),
+                "lines": lines,
+                "words": words,
+                "approx_tokens": len(text) // 4,
+            }
+        return {
+            "type": "list",
+            "items": len(text),
+            "chars": sum(len(s) for s in text),
+            "approx_tokens": sum(len(s) for s in text) // 4,
+        }

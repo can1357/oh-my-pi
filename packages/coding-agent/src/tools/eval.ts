@@ -180,6 +180,8 @@ export interface EvalToolDescriptionOptions {
 	spawns?: boolean | string | null;
 	/** Advertise auto-backgrounding of long-running cells in the tool prompt. */
 	autoBackgroundEnabled?: boolean;
+	/** Advertise the RLM helpers (llm_query/rlm_query/*_batched) in the prompt. Mirrors `rlm.enabled`; default off. */
+	rlm?: boolean;
 }
 
 export function getEvalToolDescription(options: EvalToolDescriptionOptions = {}): string {
@@ -197,6 +199,7 @@ export function getEvalToolDescription(options: EvalToolDescriptionOptions = {})
 		spawns: spawnPolicy.enabled,
 		spawnDefaultAgent: spawnPolicy.defaultAgent,
 		spawnAllowedAgentsText: spawnPolicy.allowedPromptText,
+		rlm: options.rlm ?? false,
 	});
 }
 
@@ -337,6 +340,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 				jl: backends.julia,
 				spawns: sessionSpawns,
 				autoBackgroundEnabled: this.session.settings.get("eval.autoBackground.enabled"),
+				rlm: this.session.settings.get("rlm.enabled"),
 			});
 		}
 		return this.#codeModeDescription(base) ?? base;

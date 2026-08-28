@@ -1,4 +1,7 @@
 import { describe, expect, it } from "bun:test";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import { $which } from "@oh-my-pi/pi-utils";
 import { PYTHON_PRELUDE } from "../../../src/eval/py/prelude";
 
@@ -41,6 +44,34 @@ describe("python prelude", () => {
 		expect(signature).not.toContain("*,");
 		expect(signature).toContain("offset");
 		expect(signature).toContain("limit");
+	});
+
+	it("read() returns the whole file when no offset/limit is given and slices lines otherwise", async () => {
+		// The RLM payload load (`read("{{inputUrl}}")`) passes no offset/limit;
+		// that path must return the file text directly without ever splitting
+		// into lines. Line slicing is only applied when offset/limit are given.
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "prelude-read-"));
+		try {
+			const file = path.join(dir, "sample.txt");
+			fs.writeFileSync(file, "alpha\nbeta\ngamma\ndelta\n", "utf-8");
+			const result = await runPrelude(
+				[
+					"import json",
+					`p = ${JSON.stringify(file)}`,
+					"print(json.dumps(read(p)))",
+					"print(json.dumps(read(p, 2, 2)))",
+					"print(json.dumps(read(p, offset=3)))",
+				].join("\n"),
+				{},
+			);
+			expect(result).toEqual({
+				stdout: '"alpha\\nbeta\\ngamma\\ndelta\\n"\n"beta\\ngamma\\n"\n"gamma\\ndelta\\n"\n',
+				stderr: "",
+				exitCode: 0,
+			});
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
 	});
 
 	it("appends line selectors to delegated URI paths", async () => {

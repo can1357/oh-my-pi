@@ -28,6 +28,22 @@ completion(prompt, model?="default"|"smol"|"slow", system?=None, schema?=None) �
 parallel(thunks) → list     pipeline(items, ...stages) → list
 log(message) → None         phase(title) → None
 budget → {{#if py}}`budget.total` (ceiling or None), `budget.spent()`, `budget.remaining()`{{/if}}{{#if js}}`await budget.total()`, `await budget.spent()`, `await budget.remaining()`{{/if}}{{#if rb}}`budget.total`, `budget.spent`, `budget.remaining`{{/if}}{{#if jl}}`budget.total`, `budget.spent()`, `budget.remaining()`{{/if}}; ceiling `+Nk` advisory, `+Nk!` hard.
+{{#if rlm}}{{#ifAny py js}}llm_query(snippet, instructions?=None, *, model?="default") → str
+    Sub-LLM completion; `instructions` (when given) prefixes `snippet`.{{#if js}} `await`.{{/if}}
+llm_query_batched(prompts, *, model?="default") → list[str]
+    Parallel sub-LLM completions, same order as input.{{#if js}} `await`.{{/if}}
+{{#if spawns}}rlm_query(prompt, *, agent?=None) → str
+    Recursive subagent (via agent()); `agent` omitted resolves the session's default spawn policy. Returns its text.{{#if js}} `await`.{{/if}}
+rlm_query_batched(prompts, *, agent?=None) → list[str]
+    Parallel recursive subagents, same order.{{#if js}} `await`.{{/if}}
+{{/if}}
+chunk(text, *, by?="lines", size?=100) → list[str]
+    Split into `size` chunks by "lines" (join "\n") or bounded ~`size`-token windows (~4 chars/token, character-bounded regardless of whitespace). Empty text → [].
+search(text, pattern, flags?=0, limit?=100, max_line_chars?=1000) → list[str]
+    "L<lineno>: <line>" for each regex-matching line, capped at `limit` matches (default 100; `{ limit }` in JS, `limit=` in Python). Matching lines longer than `max_line_chars` chars (default 1000; `{ max_line_chars }` in JS, `max_line_chars=` in Python) keep a bounded window around the first match — emitted as "L<lineno>@<offset>: <window>" with "..." markers on cut sides and a "... (line truncated)" suffix — so the excerpt always shows the matched region. Appends "... (truncated, more matches may exist)" when the scan stops early. No match → [].
+metadata(text) → dict
+    str → {chars, lines, words, approx_tokens}; list → {items, chars, approx_tokens}.
+{{/ifAny}}{{/if}}
 ```
 </prelude>
 {{#if spawns}}

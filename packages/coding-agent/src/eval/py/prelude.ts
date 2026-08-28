@@ -1,3 +1,18 @@
 import pythonPrelude from "./prelude.py" with { type: "text" };
+import llmQueryTemplate from "../../prompts/llm_query.md" with { type: "text" };
 
-export const PYTHON_PRELUDE = pythonPrelude;
+// The llm_query delegated-prompt shape lives in llm_query.md (never build
+// prompts in code — AGENTS.md), the same template the JS prelude embeds. It is
+// injected into the prelude source exactly once, at build/load time, right
+// after the mandatory `from __future__ import annotations` first statement
+// (mirroring the test harness's own __omp_display injection); the kernel
+// interpolates {{instructions}}/{{snippet}} per call over that string, so there
+// is no host round-trip. The .md's trailing newline (the repo's on-disk
+// convention) is stripped so the rendered prompt stays byte-identical to the
+// previous inline construction: `<instructions>\n\n<snippet>`.
+const LLM_QUERY_TEMPLATE = llmQueryTemplate.replace(/\r?\n$/, "");
+
+export const PYTHON_PRELUDE = pythonPrelude.replace(
+	"from __future__ import annotations",
+	`from __future__ import annotations\n__omp_llm_query_template__ = ${JSON.stringify(LLM_QUERY_TEMPLATE)}`,
+);

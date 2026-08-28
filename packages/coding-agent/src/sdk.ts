@@ -3717,6 +3717,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			providerSessionId: options.providerSessionId,
 			providerPromptCacheKeySource,
 			parentEvalSessionId: options.parentEvalSessionId,
+			localProtocolOptions,
 			advisorTools,
 			// Same per-call `grep` seam the primary bridge gets, built against the
 			// advisor's own tool session so a `pi_grep` frame's context width and

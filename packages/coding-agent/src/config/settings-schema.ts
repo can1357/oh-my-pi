@@ -2989,6 +2989,20 @@ export const SETTINGS_SCHEMA = {
 	},
 	// Config-file-only knob (numbers without `options` are hidden from the UI).
 	"autolearn.minToolCalls": { type: "number", default: 5 },
+	// RLM (Recursive Language Model, experimental): flag-gated `/rlm` mode that
+	// externalizes oversized input into the eval sandbox and drives it in
+	// chunks via llm_query / rlm_query. Default-off → zero footprint.
+	"rlm.enabled": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "context",
+			group: "Experimental",
+			label: "RLM (Recursive Language Model)",
+			description:
+				"Enable the /rlm command: process oversized input in the eval sandbox by chunking and delegating to llm_query / rlm_query, bounded by task.maxRecursionDepth",
+		},
+	},
 
 	// Mnemopi local SQLite memory backend.
 	"mnemopi.dbPath": {
