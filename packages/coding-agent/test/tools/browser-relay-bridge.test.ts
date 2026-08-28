@@ -1585,6 +1585,143 @@ describe("RelayBridge tab grouping", () => {
 		expect(holder.messages.filter(message => message.id === commandId && "result" in message)).toHaveLength(1);
 	});
 
+	it("treats an empty timezone override as a tab-wide clear before recovery", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const owner = new FakeCdpSocket();
+		const ownerConn = bridge.cdpConnected(owner);
+		const ownerSession = await attachPage(bridge, ext, owner, ownerConn, 1);
+		const clearer = new FakeCdpSocket();
+		const clearerConn = bridge.cdpConnected(clearer);
+		const clearerSession = await attachPage(bridge, ext, clearer, clearerConn, 1);
+
+		const sendRootCommand = async (
+			connId: number,
+			sessionId: string,
+			method: string,
+			params?: Record<string, unknown>,
+		): Promise<void> => {
+			const id = ++msgSeq;
+			bridge.cdpMessage(connId, JSON.stringify({ id, sessionId, method, params }));
+			await flush();
+			ack(bridge, ext, "send");
+			await flush();
+		};
+
+		await sendRootCommand(ownerConn, ownerSession, "Emulation.setTimezoneOverride", {
+			timezoneId: "Asia/Shanghai",
+		});
+		await sendRootCommand(clearerConn, clearerSession, "Emulation.setTimezoneOverride", { timezoneId: "" });
+
+		bridge.extClosed(ext);
+		const ext2 = new FakeExtSocket();
+		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], { recoverableTabIds: [1] });
+		await waitFor(() => ext2.rpcs("attach").length === 1, "recovery reattach RPC");
+		ack(bridge, ext2, "attach");
+		await flush();
+
+		expect(ext2.rpcs("send")).toHaveLength(0);
+	});
+
+	it("replays preserved script-execution disables across recovery", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		const pageSession = await attachPage(bridge, ext, cdp, connId, 1);
+
+		const commandId = ++msgSeq;
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({
+				id: commandId,
+				sessionId: pageSession,
+				method: "Emulation.setScriptExecutionDisabled",
+				params: { value: true },
+			}),
+		);
+		await flush();
+		ack(bridge, ext, "send");
+		await flush();
+		expect(cdp.messages.filter(message => message.id === commandId && "result" in message)).toHaveLength(1);
+
+		bridge.extClosed(ext);
+		const ext2 = new FakeExtSocket();
+		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], { recoverableTabIds: [1] });
+		await waitFor(() => ext2.rpcs("attach").length === 1, "recovery reattach RPC");
+		ack(bridge, ext2, "attach");
+
+		await waitFor(() => ext2.rpcs("send").length === 1, "script execution replay");
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual(["Emulation.setScriptExecutionDisabled"]);
+		expect(ext2.rpcs("send")[0]!.params).toEqual({ value: true });
+		ack(bridge, ext2, "send");
+		await flush();
+
+		expect(ext2.rpcs("send")).toHaveLength(1);
+	});
+
+	it("clears replayed script-execution disables when their owner disconnects during recovery", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const owner = new FakeCdpSocket();
+		const ownerConn = bridge.cdpConnected(owner);
+		const ownerSession = await attachPage(bridge, ext, owner, ownerConn, 1);
+		const holder = new FakeCdpSocket();
+		const holderConn = bridge.cdpConnected(holder);
+		const holderSession = await attachPage(bridge, ext, holder, holderConn, 1);
+
+		bridge.cdpMessage(
+			ownerConn,
+			JSON.stringify({
+				id: ++msgSeq,
+				sessionId: ownerSession,
+				method: "Emulation.setScriptExecutionDisabled",
+				params: { value: true },
+			}),
+		);
+		await flush();
+		ack(bridge, ext, "send");
+		await flush();
+
+		bridge.extClosed(ext);
+		const ext2 = new FakeExtSocket();
+		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], { recoverableTabIds: [1] });
+		await waitFor(() => ext2.rpcs("attach").length === 1, "recovery attach RPC");
+		ack(bridge, ext2, "attach");
+		await waitFor(() => ext2.rpcs("send").length === 1, "script execution replay");
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual(["Emulation.setScriptExecutionDisabled"]);
+		expect(ext2.rpcs("send")[0]!.params).toEqual({ value: true });
+
+		bridge.cdpClosed(ownerConn);
+		ack(bridge, ext2, "send");
+		await waitFor(() => ext2.rpcs("send").length === 2, "script execution cleanup");
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual([
+			"Emulation.setScriptExecutionDisabled",
+			"Emulation.setScriptExecutionDisabled",
+		]);
+		expect(ext2.rpcs("send")[1]!.params).toEqual({ value: false });
+		ack(bridge, ext2, "send");
+		await flush();
+
+		const commandId = ++msgSeq;
+		bridge.cdpMessage(
+			holderConn,
+			JSON.stringify({ id: commandId, sessionId: holderSession, method: "Network.getCookies" }),
+		);
+		await flush();
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual([
+			"Emulation.setScriptExecutionDisabled",
+			"Emulation.setScriptExecutionDisabled",
+			"Network.getCookies",
+		]);
+		ack(bridge, ext2, "send", { cookies: [] });
+		await flush();
+		expect(holder.messages.filter(message => message.id === commandId && "result" in message)).toHaveLength(1);
+	});
+
 	it("does not replay a cleared persistent root setter after recovery", async () => {
 		const bridge = new RelayBridge({});
 		const ext = new FakeExtSocket();

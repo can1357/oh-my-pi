@@ -837,6 +837,19 @@ export class RelayBridge {
 					sequence: ++this.#subscriptionSeq,
 				});
 				return;
+			case "Emulation.setTimezoneOverride":
+				if (msg.params?.timezoneId === "") {
+					this.#forgetTabSubscription(tab, msg.method);
+					return;
+				}
+				if (!ownerIsCurrent) return;
+				this.#rememberSessionSubscription(tab, msg.method, ownerSessionId, {
+					method: msg.method,
+					params: msg.params,
+					ownerSessionId,
+					sequence: ++this.#subscriptionSeq,
+				});
+				return;
 			case "Emulation.clearDeviceMetricsOverride":
 				this.#forgetTabSubscription(tab, "Emulation.setDeviceMetricsOverride");
 				return;
@@ -853,8 +866,8 @@ export class RelayBridge {
 			case "Page.setDeviceMetricsOverride":
 			case "Emulation.setGeolocationOverride":
 			case "Page.setGeolocationOverride":
-			case "Emulation.setTimezoneOverride":
 			case "Network.emulateNetworkConditions":
+			case "Emulation.setScriptExecutionDisabled":
 			case "Network.setUserAgentOverride":
 			case "Emulation.setUserAgentOverride":
 				// Persistent root setters survive as long as the shared debugger root.
@@ -1091,6 +1104,8 @@ export class RelayBridge {
 				// disable RPC. When its preserved owner disappears after replay, reset
 				// the shared root back to the browser default timezone.
 				return { method: subscription.method, params: { timezoneId: "" } };
+			case "Emulation.setScriptExecutionDisabled":
+				return { method: subscription.method, params: { value: false } };
 			case "Emulation.setDeviceMetricsOverride":
 				return { method: "Emulation.clearDeviceMetricsOverride" };
 			case "Page.setDeviceMetricsOverride":
