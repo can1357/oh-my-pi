@@ -220,3 +220,46 @@ export function scanOwnedSessionFiles(
 export function invalidateSessionOwnerCache(): void {
 	confirmCache.clear();
 }
+
+/**
+ * Whether a peer-supplied value is usable as a session body's bare filename.
+ *
+ * The `sessions` domain's wire key carries a filename, and the receiver joins
+ * it to a locally derived directory. Nothing about the transport constrains its
+ * shape: an authenticated peer can put `../` segments, an absolute path, or a
+ * NUL in there, and the resulting index row would name a file outside the
+ * sessions dir. Opening such a row materializes a session at that path, so this
+ * is the gate that keeps a compromised peer inside its own lane.
+ *
+ * Accepts exactly what {@link scanOwnedSessionFiles} emits: a single path
+ * segment ending in `.jsonl`. Rejecting `.` and `..` explicitly matters because
+ * both are otherwise separator-free segments.
+ */
+export function isValidWireSessionFile(file: unknown): file is string {
+	if (typeof file !== "string" || file.length === 0 || file.length > 255) return false;
+	if (!file.endsWith(".jsonl") || file === ".jsonl") return false;
+	if (file === "." || file === "..") return false;
+	// Any separator (either platform's), drive prefix, or control character
+	// means this is not a bare filename.
+	if (/[/\\]/.test(file) || /^[A-Za-z]:/.test(file)) return false;
+	if (/[\u0000-\u001f]/.test(file)) return false;
+	return path.basename(file) === file;
+}
+
+/**
+ * Whether a peer-supplied value is usable as a project-relative cwd.
+ *
+ * Joined to this machine's project root to decide which encoded directory a
+ * replicated session belongs in, so a `..` segment would place the row outside
+ * the project. `""` is the project root and always valid.
+ */
+export function isValidWireRelCwd(rel: unknown): rel is string {
+	if (typeof rel !== "string") return false;
+	if (rel === "") return true;
+	if (rel.length > 1024) return false;
+	if (rel.startsWith("/") || /^[A-Za-z]:/.test(rel)) return false;
+	if (rel.includes("\\")) return false;
+	if (/[\u0000-\u001f]/.test(rel)) return false;
+	// POSIX-separated on the wire; every segment must be an ordinary name.
+	return rel.split("/").every(segment => segment !== "" && segment !== "." && segment !== "..");
+}

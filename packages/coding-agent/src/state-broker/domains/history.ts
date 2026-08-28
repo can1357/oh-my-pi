@@ -81,30 +81,55 @@ export function createHistoryDomain(storage: HistoryStorage = HistoryStorage.ope
 				if (project.canonicalPath !== project.localPath) prefixes.push(project.canonicalPath);
 			}
 			const entries: StateEntry[] = [];
-			// Prefix-filtered IN SQL (before the limit) so a page never comes back
-			// empty while eligible rows remain, which would stall the watermark.
-			for (const row of storage.scanChangedSinceForPaths(afterSeconds, limit, prefixes)) {
-				const key = row.prompt;
-				if (key.length > MAX_KEY_LENGTH) {
-					// Truncating would alias two distinct prompts under one key, so skip.
-					logger.debug("history domain skipping oversized prompt key", { length: key.length });
-					continue;
+			// Scan FORWARD until a page yields something sendable.
+			//
+			// The project-prefix and null-cwd predicates run in SQL, before the
+			// LIMIT, but two predicates cannot: an oversized key (see
+			// MAX_KEY_LENGTH) and an unresolvable cwd. Dropping rows after the
+			// limit is what makes an all-dropped page possible, and an empty return
+			// tells the sync engine there is nothing to send — so it leaves the
+			// outbound watermark where it is, and one page's worth of overlong
+			// prompts blocks every newer prompt from ever replicating.
+			//
+			// The length predicate deliberately stays here rather than moving into
+			// SQL: the wire caps `key` at 4096 UTF-16 code units, while SQLite's
+			// `length()` counts code points and `length(CAST(x AS BLOB))` counts
+			// UTF-8 bytes. The former would admit strings the schema rejects; the
+			// latter would silently drop legitimate CJK prompts at a third of the
+			// allowance. So we keep the exact check and make skipping cheap instead.
+			//
+			// Each pass reads `limit` rows and the loop ends as soon as one row
+			// survives, so the ordinary case is a single query. `scanChangedSince…`
+			// compares `created_at > cursor` strictly and returns rows ascending,
+			// so the cursor advances every pass and the walk always terminates.
+			let cursor = afterSeconds;
+			while (entries.length === 0) {
+				const rows = storage.scanChangedSinceForPaths(cursor, limit, prefixes);
+				if (rows.length === 0) break;
+				for (const row of rows) {
+					const key = row.prompt;
+					if (key.length > MAX_KEY_LENGTH) {
+						// Truncating would alias two distinct prompts under one key, so skip.
+						logger.debug("history domain skipping oversized prompt key", { length: key.length });
+						continue;
+					}
+					if (!row.cwd) continue; // the SQL predicate excludes null cwd; defensive.
+					const resolved = resolveProject(row.cwd);
+					if (!resolved) {
+						// A cwd inside a synced prefix should always resolve; if it does
+						// not, drop it rather than leak an absolute local path.
+						logger.debug("history domain skipping unresolved cwd", { key });
+						continue;
+					}
+					const value: HistoryValue = {
+						prompt: row.prompt,
+						createdAt: row.created_at,
+						project: { id: resolved.project.id, rel: resolved.rel },
+						sessionId: row.sessionId,
+					};
+					entries.push({ key, rev: row.created_at * 1000, value });
 				}
-				if (!row.cwd) continue; // the SQL predicate excludes null cwd; defensive.
-				const resolved = resolveProject(row.cwd);
-				if (!resolved) {
-					// A cwd inside a synced prefix should always resolve; if it does
-					// not, drop it rather than leak an absolute local path.
-					logger.debug("history domain skipping unresolved cwd", { key });
-					continue;
-				}
-				const value: HistoryValue = {
-					prompt: row.prompt,
-					createdAt: row.created_at,
-					project: { id: resolved.project.id, rel: resolved.rel },
-					sessionId: row.sessionId,
-				};
-				entries.push({ key, rev: row.created_at * 1000, value });
+				cursor = rows[rows.length - 1].created_at;
 			}
 			return entries;
 		},

@@ -692,10 +692,22 @@ export function mergeRemoteOnlySessions(local: SessionInfo[], sessionsDir: strin
 
 	const localIds = new Set(local.map(session => session.id));
 	const stubs: SessionInfo[] = [];
+	// Resolved once so each row's rebuilt path can be proven to stay inside it.
+	const rootAbs = path.resolve(sessionsDir);
 	for (const entry of index) {
 		// `rel` is this machine's local layout (POSIX-separated), relative to the
 		// sessions dir; rebuild the path the resume path will actually open.
 		const absPath = path.join(sessionsDir, ...entry.rel.split("/"));
+		// The index is written from peer-supplied values, so treat it as untrusted
+		// input even though the domain validates on the way in: this is the last
+		// point before a stub's `path` becomes something the resume path opens,
+		// and an older index file on disk never saw that validation. A `..`
+		// component here would otherwise let a peer name any path on this machine.
+		const resolved = path.resolve(absPath);
+		if (resolved !== rootAbs && !resolved.startsWith(rootAbs + path.sep)) {
+			logger.warn("Ignoring remote session row outside the sessions dir", { rel: entry.rel });
+			continue;
+		}
 		let localFileExists = false;
 		try {
 			localFileExists = fs.existsSync(absPath);

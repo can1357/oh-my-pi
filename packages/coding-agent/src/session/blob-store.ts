@@ -6,6 +6,37 @@ import type { ObjectStore } from "../state-broker/object-store";
 import { blobKey } from "../state-broker/object-store";
 
 const BLOB_PREFIX = "blob:sha256:";
+/** Attempts per background blob upload before giving up and warning. */
+const BLOB_UPLOAD_ATTEMPTS = 3;
+/** First retry delay; doubles per attempt. */
+const BLOB_UPLOAD_RETRY_BASE_MS = 250;
+
+/**
+ * In-flight background blob uploads across every {@link BlobStore}.
+ *
+ * Module-level rather than per-instance because the concern is process-wide:
+ * `BlobStore` is constructed at several independent sites and shutdown has no
+ * handle on those instances, so a per-instance set could not be drained.
+ * Entries remove themselves on settle, so this tracks concurrency rather than
+ * growing with the number of blobs written.
+ */
+const pendingBlobUploads = new Set<Promise<void>>();
+
+/**
+ * Await every in-flight background blob upload.
+ *
+ * Called on graceful shutdown so a process exit does not abandon a blob whose
+ * session body is already replicated, leaving a reference no other machine can
+ * resolve. Uploads settle rather than reject, so this never throws; the caller
+ * bounds it.
+ */
+export async function drainBlobUploads(): Promise<void> {
+	while (pendingBlobUploads.size > 0) {
+		// Re-read the set each pass: a retrying upload can outlive the snapshot,
+		// and settling one does not stop another from still being in flight.
+		await Promise.allSettled([...pendingBlobUploads]);
+	}
+}
 
 /** Canonical blob hash shape: exactly 64 lowercase hex chars (a SHA-256 digest). */
 export const BLOB_HASH_RE = /^[a-f0-9]{64}$/;
@@ -273,25 +304,51 @@ export class BlobStore {
 	}
 
 	/**
-	 * Best-effort background upload of a freshly written blob. Fire-and-forget so
-	 * neither {@link put} nor the synchronous {@link putSync} hot path blocks on the
-	 * network; a `has` guard avoids re-uploading blobs already replicated. Skipped
-	 * entirely when uploads are gated off (sync-disabled project), so the blob
-	 * never leaves this machine while local writes and downloads still work.
+	 * Background upload of a freshly written blob, retried and drainable.
+	 *
+	 * Fire-and-forget so neither {@link put} nor the synchronous {@link putSync}
+	 * hot path blocks on the network, and a `has` guard avoids re-uploading blobs
+	 * already replicated. Skipped entirely when uploads are gated off
+	 * (sync-disabled project), so the blob never leaves this machine while local
+	 * writes and downloads still work.
+	 *
+	 * A single detached attempt was not enough. Blobs are content-addressed, so
+	 * nothing ever revisits one that is already local: a transient failure, or an
+	 * exit while the request was in flight, left the session body replicated with
+	 * a reference no other machine can resolve, permanently. So attempts are
+	 * retried with backoff, and tracked in {@link pendingBlobUploads} so
+	 * {@link drainBlobUploads} can await them on shutdown.
 	 */
 	#scheduleUpload(hash: string, data: Buffer): void {
 		if (!this.#uploadEnabled) return;
 		const store = this.#objectStore;
 		if (!store) return;
 		const key = blobKey(hash);
-		void (async () => {
-			try {
-				if (await store.has(key)) return;
-				await store.put(key, data);
-			} catch (err) {
-				logger.debug(`blob upload failed for ${hash}: ${err}`);
+		const task = (async () => {
+			for (let attempt = 1; attempt <= BLOB_UPLOAD_ATTEMPTS; attempt++) {
+				try {
+					if (await store.has(key)) return;
+					await store.put(key, data);
+					return;
+				} catch (err) {
+					if (attempt === BLOB_UPLOAD_ATTEMPTS) {
+						// Warn, not debug: the blob is now local-only while the session
+						// body referencing it may already be replicated.
+						logger.warn(`blob upload failed for ${hash} after ${attempt} attempts: ${err}`);
+						return;
+					}
+					logger.debug(`blob upload attempt ${attempt} failed for ${hash}: ${err}`);
+					await Bun.sleep(BLOB_UPLOAD_RETRY_BASE_MS * 2 ** (attempt - 1));
+				}
 			}
 		})();
+		pendingBlobUploads.add(task);
+		// Self-removal keeps the set bounded without a sweep; `finally` rather than
+		// `then` so a rejection (which the loop above should make impossible)
+		// cannot leak an entry that a drain would then wait on forever.
+		void task.finally(() => {
+			pendingBlobUploads.delete(task);
+		});
 	}
 
 	/**

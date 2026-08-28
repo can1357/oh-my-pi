@@ -102,7 +102,7 @@ import { resolveResumableSession, type SessionInfo } from "./session/session-lis
 import { SessionManager } from "./session/session-manager";
 import { executeBuiltinSlashCommand } from "./slash-commands/builtin-registry";
 import { shouldShowStartupSplash } from "./startup-splash";
-import { startStateSync } from "./state-broker/registry";
+import { awaitInitialStateSync, startStateSync } from "./state-broker/registry";
 import { discoverTitleSystemPromptFile, resolvePromptInput } from "./system-prompt";
 import { createPersistedSubagentReviverFactory } from "./task/persisted-revive";
 import { createTelemetryExportConfig, initTelemetryExport, isTelemetryExportEnabled } from "./telemetry-export";
@@ -1619,6 +1619,18 @@ export async function runRootCommand(
 			settings: settingsInstance,
 			resolveConfigValue,
 		});
+
+		// Resolving an EXISTING session means reading replicated state, so wait
+		// (bounded) for the first exchange rather than racing it. `startStateSync`
+		// is deliberately fire-and-forget — the initial cycle is what writes the
+		// remote session index, and session resolution is only microseconds away,
+		// so without this a machine that just joined a project resolves `--resume`
+		// against an index that has not arrived and reports no match, or exits with
+		// "no sessions found". A fresh start reads nothing replicated and so is
+		// never gated on the network.
+		if (parsedArgs.resume || parsedArgs.continue || parsedArgs.fork) {
+			await logger.time("awaitInitialStateSync", awaitInitialStateSync);
+		}
 
 		// Resolve native resume/fork flags or import one foreign transcript into a
 		// fresh persisted OMP session before constructing the AgentSession.

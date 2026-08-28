@@ -22,7 +22,7 @@ import {
 	postmortem,
 } from "@oh-my-pi/pi-utils";
 import { AgentStorage } from "../session/agent-storage";
-import { setDefaultBlobObjectStore } from "../session/blob-store";
+import { drainBlobUploads, setDefaultBlobObjectStore } from "../session/blob-store";
 import { StateBrokerClient } from "./client";
 import { createCommandUsageDomain } from "./domains/command-usage";
 import { createConfigDomain } from "./domains/config";
@@ -166,11 +166,23 @@ export class StateSyncRuntime {
 	}
 
 	/**
+	 * Bounded wait for the first push/pull cycle. See
+	 * {@link StateSyncEngine.waitForFirstCycle}.
+	 */
+	async waitForFirstCycle(timeoutMs: number): Promise<void> {
+		await this.#engine.waitForFirstCycle(timeoutMs);
+	}
+
+	/**
 	 * Flush every pending local change to the broker and object store. Called on
 	 * graceful shutdown so the last turn of a conversation is replicated.
+	 *
+	 * Blob uploads are included: they are detached from the session write path,
+	 * so without this an exit mid-upload replicates a session body whose
+	 * attachment reference no other machine can resolve.
 	 */
 	async drain(): Promise<void> {
-		await Promise.allSettled([this.#engine.drain(), this.#replicator?.drain()]);
+		await Promise.allSettled([this.#engine.drain(), this.#replicator?.drain(), drainBlobUploads()]);
 	}
 
 	async stop(): Promise<void> {
@@ -197,6 +209,26 @@ let cancelTeardownHook: (() => void) | undefined;
  * up by the next run's first sync cycle.
  */
 const STATE_SYNC_DRAIN_BUDGET_MS = 2_000;
+
+/**
+ * Budget for the initial exchange that startup may wait on before it resolves a
+ * session. Long enough for a round-trip to a healthy broker, short enough that
+ * an unreachable one costs a noticeable pause rather than a hang.
+ */
+const STATE_SYNC_STARTUP_BUDGET_MS = 3_000;
+
+/**
+ * Wait for replication's first cycle, bounded, so callers about to READ
+ * replicated state do not race the initial exchange.
+ *
+ * No-op when replication is disabled or not started, which is the default. Only
+ * the paths that resolve an existing session need this — a fresh session reads
+ * nothing replicated, so gating every launch on a network round-trip would be
+ * latency for nothing.
+ */
+export async function awaitInitialStateSync(): Promise<void> {
+	await activeRuntime?.waitForFirstCycle(STATE_SYNC_STARTUP_BUDGET_MS);
+}
 
 /** The running replication runtime, if replication is enabled and started. */
 export function activeStateSync(): StateSyncRuntime | undefined {

@@ -146,6 +146,38 @@ describe("history domain", () => {
 		expect(keys).toEqual(["kept"]);
 	});
 
+	/**
+	 * The watermark-stall regression. A page filled entirely with prompts too
+	 * long to be wire keys must not make `changedSince` report "nothing to
+	 * send": the sync engine reads an empty page as end-of-data and leaves the
+	 * outbound watermark where it is, so a newer eligible prompt sitting beyond
+	 * those rows would never replicate.
+	 */
+	test("a page of oversized prompts does not hide a newer eligible prompt", () => {
+		const ws = makeDir("omp-hist-ws-");
+		const foo = path.join(ws, "foo");
+		fs.mkdirSync(foo, { recursive: true });
+		setProjects([{ id: "proj:foo", path: foo, sync: true }]);
+
+		const storage = openStorage();
+		// Three prompts past the 4096-char wire cap, then a normal one that is
+		// NEWER, so any correct scan has to walk past the oversized rows.
+		const oversized = Array.from({ length: 3 }, (_, i) => ({
+			prompt: `${"x".repeat(5000)}-${i}`,
+			createdAt: 1000 + i,
+			cwd: foo,
+		}));
+		storage.mergeRemote([...oversized, { prompt: "reachable", createdAt: 2000, cwd: foo }]);
+
+		// A limit smaller than the oversized run is what turns the old post-filter
+		// into a stall: the first page is entirely dropped.
+		const entries = createHistoryDomain(storage).changedSince(0, 2);
+		expect(entries.map(e => e.key)).toEqual(["reachable"]);
+		// The rev the engine will adopt as its watermark must be the reachable
+		// row's, so the next cycle resumes after it rather than re-reading it.
+		expect(entries[0].rev).toBe(2000 * 1000);
+	});
+
 	test("applyRemote reconstructs the local absolute cwd for a mapped project (millis->seconds)", () => {
 		const ws = makeDir("omp-hist-ws-");
 		const foo = path.join(ws, "foo");
@@ -422,6 +454,57 @@ describe("sessions domain", () => {
 		expect(mapped?.title).toBe("Remote");
 		// Unmapped project fails closed: never recorded.
 		expect(index.some(e => e.projectId === "proj:ghost")).toBe(false);
+	});
+
+	/**
+	 * Trust-boundary regression. The wire key's filename and the value's `relCwd`
+	 * both come from a peer and are both joined into a local path, so a `..`
+	 * segment in either would name a file outside the sessions dir. Selecting
+	 * such a row makes the resume path open (and create) that path.
+	 */
+	test("applyRemote refuses traversal in the wire filename", () => {
+		const { sessionsDir } = setupHome();
+		const domain = createSessionsDomain(sessionsDir);
+		domain.applyRemote([
+			{
+				key: encodeWireKey("proj:foo", "../../../../tmp/evil.jsonl"),
+				rev: 70_000,
+				value: { projectId: "proj:foo", relCwd: "", file: "x.jsonl", size: 1, mtimeMs: 70_000 },
+			},
+			{
+				key: encodeWireKey("proj:foo", "nested/evil.jsonl"),
+				rev: 71_000,
+				value: { projectId: "proj:foo", relCwd: "", file: "x.jsonl", size: 1, mtimeMs: 71_000 },
+			},
+			// A non-.jsonl name would not be opened as a session body either.
+			{
+				key: encodeWireKey("proj:foo", "authorized_keys"),
+				rev: 72_000,
+				value: { projectId: "proj:foo", relCwd: "", file: "x.jsonl", size: 1, mtimeMs: 72_000 },
+			},
+		]);
+
+		const index = readRemoteSessionIndex(sessionsDir);
+		expect(index).toHaveLength(0);
+	});
+
+	test("applyRemote refuses a relCwd that escapes the project", () => {
+		const { sessionsDir } = setupHome();
+		createSessionsDomain(sessionsDir).applyRemote([
+			{
+				key: encodeWireKey("proj:foo", "ffff6666.jsonl"),
+				rev: 80_000,
+				value: {
+					projectId: "proj:foo",
+					relCwd: "../../../../etc",
+					file: "ffff6666.jsonl",
+					size: 1,
+					mtimeMs: 80_000,
+				},
+			},
+		]);
+
+		expect(readRemoteSessionIndex(sessionsDir)).toHaveLength(0);
 	});
 });
 

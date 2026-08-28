@@ -20,7 +20,7 @@ import { sessionDirNameForCwd } from "../../session/session-paths";
 import { parseTitleSlotFromContent } from "../../session/session-title-slot";
 import { decodeWireKey, encodeWireKey, projectById } from "../project-scope";
 import type { ReplicatedDomain } from "../replica";
-import { scanOwnedSessionFiles } from "../session-files";
+import { isValidWireRelCwd, isValidWireSessionFile, scanOwnedSessionFiles } from "../session-files";
 import type { StateEntry } from "../wire";
 
 /** Metadata a remote-only session needs to appear in the resume picker. */
@@ -192,7 +192,18 @@ class SessionsDomain implements ReplicatedDomain {
 			// The wire rel is the bare filename; the local dir is derived from the
 			// project mapping on THIS machine PLUS the session's project-relative
 			// cwd, so a subdirectory session lands in the matching local subdir.
+			//
+			// Checked before BOTH branches so `file` means the same thing in each.
+			// Unlike the config domain's inbound gate, the tombstone path here is
+			// not separately exploitable — its `endsWith("/" + file)` match only
+			// gets harder to satisfy with extra path segments, and the project id
+			// is already confirmed above — but that match is only meaningful while
+			// `file` is guaranteed to be a bare name, which is what this enforces.
 			const file = decoded.rel;
+			if (!isValidWireSessionFile(file)) {
+				logger.warn(`[state:sessions] dropping entry with unsafe file name: ${JSON.stringify(file)}`);
+				continue;
+			}
 
 			if (entry.value === null) {
 				// Tombstone: relCwd is unknown here, so remove any local row for
@@ -213,7 +224,12 @@ class SessionsDomain implements ReplicatedDomain {
 				continue;
 			}
 			// Tolerate a missing `relCwd` from an older peer by treating the
-			// session as project-root ("").
+			// session as project-root (""), but never accept one that would place
+			// the row outside the project.
+			if (value.relCwd !== undefined && !isValidWireRelCwd(value.relCwd)) {
+				logger.warn(`[state:sessions] dropping entry with unsafe relCwd: ${JSON.stringify(value.relCwd)}`);
+				continue;
+			}
 			const relCwd = typeof value.relCwd === "string" ? value.relCwd : "";
 			const localDir = sessionDirNameForCwd(
 				relCwd ? path.join(project.localPath, ...relCwd.split("/")) : project.localPath,

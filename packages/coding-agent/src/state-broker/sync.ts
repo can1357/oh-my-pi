@@ -72,6 +72,13 @@ export class StateSyncEngine {
 	 * rules in {@link #pushDomain} alone.
 	 */
 	readonly #ledgers = new Map<StateDomainId, Map<string, number>>();
+	/**
+	 * Settles after the first {@link syncOnce} returns, so a caller that is about
+	 * to read replicated state can wait for the initial exchange instead of
+	 * racing it. Never rejects: `syncOnce` isolates every domain, so a broker
+	 * that is down simply settles this with nothing merged.
+	 */
+	readonly #firstCycle = Promise.withResolvers<void>();
 
 	constructor(opts: StateSyncEngineOptions) {
 		this.#client = opts.client;
@@ -90,15 +97,48 @@ export class StateSyncEngine {
 		this.#loop = this.#run();
 	}
 
+	/**
+	 * Resolve once the first push/pull cycle has completed, or after `timeoutMs`,
+	 * whichever comes first. Never rejects and never throws on timeout.
+	 *
+	 * Startup needs this because {@link start} is deliberately fire-and-forget:
+	 * the first cycle is what populates the remote session index, and the launch
+	 * path lists and opens sessions within milliseconds of starting sync. Without
+	 * the wait, a machine that just joined a project resolves `--resume` against
+	 * an index that has not arrived yet and reports no match. The bound is what
+	 * keeps an unreachable broker from turning into a hung startup.
+	 */
+	async waitForFirstCycle(timeoutMs: number): Promise<void> {
+		if (timeoutMs <= 0) return;
+		const timer = Promise.withResolvers<void>();
+		const handle = setTimeout(() => timer.resolve(), timeoutMs);
+		// `unref` so a pending bound never by itself keeps the process alive.
+		handle.unref?.();
+		try {
+			await Promise.race([this.#firstCycle.promise, timer.promise]);
+		} finally {
+			clearTimeout(handle);
+		}
+	}
+
 	/** Signal the loop to stop and release its timers. */
 	stop(): void {
 		this.#abort.abort();
 		this.#loop = undefined;
+		// A shutdown before the first cycle finished must not leave a startup
+		// waiter blocked for the rest of its bound.
+		this.#firstCycle.resolve();
 	}
 
 	async #run(): Promise<void> {
 		while (!this.#abort.signal.aborted) {
-			await this.syncOnce(this.#abort.signal);
+			try {
+				await this.syncOnce(this.#abort.signal);
+			} finally {
+				// Release startup even if the cycle threw, so a bug here degrades to
+				// local-only rather than stalling the launch path for the full bound.
+				this.#firstCycle.resolve();
+			}
 			if (this.#abort.signal.aborted) break;
 			// When idle, `syncOnce` already blocked on a long-poll (up to
 			// STATE_MAX_WAIT_MS) so the cycle was cheap; sleep the fixed interval
