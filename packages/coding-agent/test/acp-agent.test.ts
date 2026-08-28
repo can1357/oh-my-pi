@@ -176,6 +176,11 @@ class FakeAgentSession {
 	usageFallbackConfirmer: ((confirmation: UsageFallbackConfirmation) => Promise<boolean>) | undefined;
 	retryResult = false;
 	retryCalls = 0;
+	/** Latest barrier the agent installed — mirrors the real session's plumbing. */
+	presentationSettlementDeliveryBarrier: ((toolCallId: string) => Promise<void>) | undefined;
+	setPresentationSettlementDeliveryBarrier(fn: ((toolCallId: string) => Promise<void>) | undefined): void {
+		this.presentationSettlementDeliveryBarrier = fn;
+	}
 	#listeners = new Set<(event: AgentSessionEvent) => void>();
 	#builtInToolNames = new Set<string>();
 
@@ -5580,6 +5585,102 @@ describe("ACP agent", () => {
 		finishPrompt();
 		harness.abortController.abort();
 		await Bun.sleep(0);
+	});
+
+	it("releases the settlement-delivery barrier before aborting a poisoned session (no teardown deadlock)", async () => {
+		// The real agent loop awaits the configured presentation-settlement
+		// delivery barrier after emitting `settled`. When an UNRELATED outbound
+		// write fails while a presentation tool is still mid-flight, poisoning
+		// removes the prompt subscription (nothing can resolve a settlement
+		// barrier anymore) and then awaits `session.abort()` — which settles
+		// the running tool and, on the real session, blocks the loop on that
+		// barrier. If the barrier is only cleared in #disposeSessionRecord
+		// (which runs AFTER the abort), the whole teardown deadlocks: abort
+		// never returns, disposal never runs, workers and MCP connections leak.
+		// (A failing settled-frame write is NOT this case: its own delivery
+		// promise resolves on write rejection — see the sibling test above.)
+		const failure = new Error("connection closed");
+		const harness = await createHarness({
+			terminalMeta: true,
+			failWrite: notification =>
+				(notification.update as { sessionUpdate?: string }).sessionUpdate === "agent_message_chunk"
+					? failure
+					: undefined,
+		});
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		const finishPrompt = holdPromptStreaming(session);
+		void finishPrompt;
+
+		// The fake session records the barrier the agent installed at session
+		// creation (mirroring the real session's plumbing). Capture it NOW —
+		// exactly like the real agent loop, whose AgentLoopConfig snapshots the
+		// callback when the run starts — and make abort() do what the loop
+		// does: settle the in-flight call and await THAT captured barrier.
+		// Reading the mutable property at abort time instead would miss the
+		// production deadlock: unhooking the barrier cannot reach a callback a
+		// running loop already holds.
+		const capturedBarrier = session.presentationSettlementDeliveryBarrier;
+		expect(capturedBarrier).toBeDefined();
+		let aborts = 0;
+		session.abort = async () => {
+			aborts++;
+			// The loop-side settlement wait, through the pre-poison snapshot:
+			// with no subscription left to resolve a parked waiter, this only
+			// returns if the record was marked released before the abort.
+			await capturedBarrier?.("poison-call");
+			session.isStreaming = false;
+		};
+		const disposed = Promise.withResolvers<void>();
+		const originalDispose = session.dispose.bind(session);
+		session.dispose = async () => {
+			await originalDispose();
+			disposed.resolve();
+		};
+
+		const prompt = harness.agent
+			.prompt({
+				sessionId: created.sessionId,
+				messageId: "00000000-0000-4000-8000-000000000074",
+				prompt: [{ type: "text", text: "run a command" }],
+			} as PromptRequest)
+			.then(
+				() => "resolved",
+				(error: unknown) => error,
+			);
+		await Bun.sleep(0);
+		// The agent installed the real barrier on the session at creation.
+		expect(session.presentationSettlementDeliveryBarrier).toBeDefined();
+
+		const emit = (event: AgentSessionEvent): void => {
+			for (const listener of session.listeners()) listener(event);
+		};
+		emit({
+			type: "tool_presentation",
+			toolCallId: "poison-call",
+			toolName: "bash",
+			event: {
+				type: "started",
+				call: { toolCallId: "poison-call", toolName: "bash", title: "echo hi", kind: "execute" },
+			},
+		} as AgentSessionEvent);
+		await harness.waitForWrite("tool_call:poison-call");
+
+		// An UNRELATED chunk write fails and poisons the queue while the tool
+		// is still running — no settled frame, so no delivery entry exists yet.
+		emit({
+			type: "message_update",
+			message: makeAssistantMessage("chunk"),
+			assistantMessageEvent: { type: "text_delta", delta: "chunk" },
+		} as AgentSessionEvent);
+
+		expect(await prompt).toBe(failure);
+		// Deadlock check: teardown completes only if the barrier was unhooked
+		// (and pending waiters resolved) BEFORE the abort awaited it — a
+		// regression deadlocks right here and fails via the test timeout.
+		await disposed.promise;
+		expect(aborts).toBe(1);
+		expect(session.disposed).toBe(true);
 	});
 
 	it("poisons the queue and rejects the prompt when the frame encoder rejects a reduced frame", async () => {

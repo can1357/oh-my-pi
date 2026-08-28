@@ -1465,7 +1465,12 @@ export class Agent {
 			appendOnlyContext: this.#appendOnlyContext,
 			beforeToolCall: this.beforeToolCall ? (ctx, signal) => this.beforeToolCall?.(ctx, signal) : undefined,
 			afterToolCall: this.afterToolCall ? (ctx, signal) => this.afterToolCall?.(ctx, signal) : undefined,
-			afterPresentationSettlement: this.#afterPresentationSettlement,
+			// A live closure, NEVER the current value: like beforeToolCall/
+			// afterToolCall above, the host may reassign (or UNHOOK) this
+			// mid-run — a poisoned ACP session clears the barrier before
+			// aborting, and a loop that snapshotted the old callback would
+			// await a delivery nothing can ever resolve.
+			afterPresentationSettlement: toolCallId => this.#afterPresentationSettlement?.(toolCallId),
 			transformAssistantMessage: this.transformAssistantMessage
 				? (message, signal) => this.transformAssistantMessage?.(message, signal)
 				: undefined,

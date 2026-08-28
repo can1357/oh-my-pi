@@ -298,6 +298,15 @@ type ManagedSessionRecord = {
 	promptEventHandlers: Set<Promise<void>>;
 	extensionUserMessageTasks: Set<Promise<void>>;
 	presentationSettlementDeliveries: Map<string, PromiseWithResolvers<void>>;
+	/**
+	 * Latched once the record's settlement deliveries were released (poisoned
+	 * teardown or disposal). A running agent loop may still invoke a
+	 * previously captured barrier callback AFTER the map was resolved and
+	 * cleared; once released, {@link AcpAgent.#waitForPresentationSettlementDelivery}
+	 * returns an already-resolved promise instead of parking a new waiter
+	 * nothing can ever resolve.
+	 */
+	settlementDeliveriesReleased: boolean;
 };
 
 type ReplayableMessage = {
@@ -905,6 +914,18 @@ export class AcpAgent implements Agent {
 		// resumable) and release any tool fenced behind an unanswered dialog.
 		record.toolViews.clear();
 		record.outbound.rejectPendingPermissions(error);
+		// The prompt subscription is gone, so nothing can ever deliver a settled
+		// frame or resolve a settlement-delivery barrier again. Unhook the
+		// barrier and release every waiter BEFORE the abort below settles the
+		// running tools: the agent loop awaits this barrier after emitting
+		// `settled`, and #disposeSessionRecord — the only other place that
+		// clears it — runs after the abort completes, so leaving it installed
+		// deadlocks the whole teardown (abort waits on the loop, the loop waits
+		// on a barrier nobody can resolve, disposal never runs).
+		record.session.setPresentationSettlementDeliveryBarrier?.(undefined);
+		record.settlementDeliveriesReleased = true;
+		for (const delivery of record.presentationSettlementDeliveries.values()) delivery.resolve();
+		record.presentationSettlementDeliveries.clear();
 		void this.#tearDownPoisonedSession(record, error);
 	}
 
@@ -1688,6 +1709,7 @@ export class AcpAgent implements Agent {
 			promptEventHandlers: new Set(),
 			extensionUserMessageTasks: new Set(),
 			presentationSettlementDeliveries: new Map(),
+			settlementDeliveriesReleased: false,
 			lifetimeUnsubscribe: undefined,
 		};
 	}
@@ -2421,6 +2443,11 @@ export class AcpAgent implements Agent {
 	}
 
 	#waitForPresentationSettlementDelivery(record: ManagedSessionRecord, toolCallId: string): Promise<void> {
+		// A running agent loop can invoke a barrier callback it captured before
+		// the record's deliveries were released (poisoned teardown/disposal);
+		// parking a new waiter here would deadlock the abort that release
+		// precedes — nothing can resolve it anymore.
+		if (record.settlementDeliveriesReleased) return Promise.resolve();
 		const existing = record.presentationSettlementDeliveries.get(toolCallId);
 		if (existing) return existing.promise;
 		const delivery = Promise.withResolvers<void>();
@@ -3986,6 +4013,7 @@ export class AcpAgent implements Agent {
 	async #disposeSessionRecord(record: ManagedSessionRecord, reason?: postmortem.Reason): Promise<void> {
 		record.lifetimeUnsubscribe?.();
 		record.session.setPresentationSettlementDeliveryBarrier?.(undefined);
+		record.settlementDeliveriesReleased = true;
 		for (const delivery of record.presentationSettlementDeliveries.values()) delivery.resolve();
 		record.presentationSettlementDeliveries.clear();
 		if (record.mcpManager) {
