@@ -9,6 +9,7 @@
 
 ### Fixed
 
+- Grok Bot protobuf decoding rejects nested stream-response fields with incorrect wire types instead of coercing them to empty values.
 - Grok Bot sends discovered `minimal` / `max` effort values on the wire instead of collapsing them to `low` / `xhigh` (aliases only via `thinking.effortMap`).
 - Grok Bot protobuf decoding rejects known InferenceStreamResponse fields with the wrong wire type instead of emitting empty parts.
 - Grok Bot protobuf decoding rejects illegal field number zero instead of treating malformed frames as empty successful messages.

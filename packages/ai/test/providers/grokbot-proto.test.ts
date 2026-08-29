@@ -201,6 +201,13 @@ describe("grokbot proto", () => {
 		);
 	});
 
+	test("rejects nested response fields with incorrect wire types", () => {
+		// textPart (field 1) length-delimited, but inner text field encoded as varint: `0a 02 08 01`
+		expect(() => decodeInferenceStreamResponse(Buffer.from([0x0a, 0x02, 0x08, 0x01]))).toThrow(
+			/textPart\.text must be length-delimited string/i,
+		);
+	});
+
 	test("encodes stopSequences in modelConfig", () => {
 		const encoded = encodeInferenceStreamRequest({
 			messages: [{ role: 1, text: "hi" }],

@@ -386,6 +386,34 @@ function asInt(f) {
 	return 0;
 }
 
+/** Require a present field to be length-delimited string; missing → "". */
+function requireStringField(f, label) {
+	if (!f) return "";
+	if (f.wire !== WIRE_LEN || !f.bytes) {
+		throw new Error(`protobuf ${label} must be length-delimited string`);
+	}
+	return Buffer.from(f.bytes).toString("utf8");
+}
+
+/** Require a present field to be varint bool; missing → false. */
+function requireBoolField(f, label) {
+	if (!f) return false;
+	if (f.wire !== WIRE_VARINT) {
+		throw new Error(`protobuf ${label} must be varint`);
+	}
+	return Boolean(f.value);
+}
+
+/** Require a present field to be varint int; missing → 0. */
+function requireIntField(f, label) {
+	if (!f) return 0;
+	if (f.wire !== WIRE_VARINT) {
+		throw new Error(`protobuf ${label} must be varint`);
+	}
+	const v = f.value;
+	return typeof v === "bigint" ? Number(v) : v;
+}
+
 function asFloat(f) {
 	if (!f?.bytes || f.bytes.length < 4) return 0;
 	return Buffer.from(f.bytes).readFloatLE(0);
@@ -677,68 +705,77 @@ export function encodeInferenceStreamResponse(resp) {
 
 function decodeTextPart(buf) {
 	const fields = decodeFields(buf);
-	return { text: asString(first(fields, 1)), isFinal: asBool(first(fields, 2)) };
+	return {
+		text: requireStringField(first(fields, 1), "textPart.text"),
+		isFinal: requireBoolField(first(fields, 2), "textPart.isFinal"),
+	};
 }
 
 function decodeThinkingPart(buf) {
 	const fields = decodeFields(buf);
-	const out = { text: asString(first(fields, 1)), isFinal: asBool(first(fields, 3)) };
-	if (first(fields, 2)) out.signature = asString(first(fields, 2));
+	const out = {
+		text: requireStringField(first(fields, 1), "thinkingPart.text"),
+		isFinal: requireBoolField(first(fields, 3), "thinkingPart.isFinal"),
+	};
+	if (first(fields, 2)) out.signature = requireStringField(first(fields, 2), "thinkingPart.signature");
 	return out;
 }
 
 function decodeToolCallPart(buf) {
 	const fields = decodeFields(buf);
 	const out = {
-		toolCallId: asString(first(fields, 1)),
-		toolName: asString(first(fields, 2)),
-		args: asString(first(fields, 3)),
-		isComplete: asBool(first(fields, 4)),
+		toolCallId: requireStringField(first(fields, 1), "toolCallPart.toolCallId"),
+		toolName: requireStringField(first(fields, 2), "toolCallPart.toolName"),
+		args: requireStringField(first(fields, 3), "toolCallPart.args"),
+		isComplete: requireBoolField(first(fields, 4), "toolCallPart.isComplete"),
 	};
-	if (first(fields, 5)) out.toolIndex = asInt(first(fields, 5));
+	if (first(fields, 5)) out.toolIndex = requireIntField(first(fields, 5), "toolCallPart.toolIndex");
 	return out;
 }
 
 function decodeUsage(buf) {
 	const fields = decodeFields(buf);
 	return {
-		promptTokens: asInt(first(fields, 1)),
-		completionTokens: asInt(first(fields, 2)),
-		totalTokens: first(fields, 3) ? asInt(first(fields, 3)) : undefined,
+		promptTokens: requireIntField(first(fields, 1), "usage.promptTokens"),
+		completionTokens: requireIntField(first(fields, 2), "usage.completionTokens"),
+		totalTokens: first(fields, 3) ? requireIntField(first(fields, 3), "usage.totalTokens") : undefined,
 	};
 }
 
 function decodeExtendedUsage(buf) {
 	const fields = decodeFields(buf);
 	return {
-		inputTokens: asInt(first(fields, 1)),
-		outputTokens: asInt(first(fields, 2)),
-		cacheReadTokens: asInt(first(fields, 3)),
-		cacheWriteTokens: asInt(first(fields, 4)),
-		maxTokens: asInt(first(fields, 5)),
+		inputTokens: requireIntField(first(fields, 1), "extendedUsage.inputTokens"),
+		outputTokens: requireIntField(first(fields, 2), "extendedUsage.outputTokens"),
+		cacheReadTokens: requireIntField(first(fields, 3), "extendedUsage.cacheReadTokens"),
+		cacheWriteTokens: requireIntField(first(fields, 4), "extendedUsage.cacheWriteTokens"),
+		maxTokens: requireIntField(first(fields, 5), "extendedUsage.maxTokens"),
 	};
 }
 
 function decodeResponseInfo(buf) {
 	const fields = decodeFields(buf);
-	const out = { id: asString(first(fields, 1)), model: asString(first(fields, 2)) };
-	if (first(fields, 5)) out.errorMessage = asString(first(fields, 5));
+	const out = {
+		id: requireStringField(first(fields, 1), "responseInfo.id"),
+		model: requireStringField(first(fields, 2), "responseInfo.model"),
+	};
+	if (first(fields, 5)) out.errorMessage = requireStringField(first(fields, 5), "responseInfo.errorMessage");
 	return out;
 }
 
 function decodeInvocationId(buf) {
 	const fields = decodeFields(buf);
-	return { invocationId: asString(first(fields, 1)) };
+	return { invocationId: requireStringField(first(fields, 1), "invocationId.invocationId") };
 }
 
 function decodeError(buf) {
 	const fields = decodeFields(buf);
 	return {
-		message: asString(first(fields, 1)),
-		code: asString(first(fields, 2)),
-		isInputTokenLimitError: asBool(first(fields, 3)),
-		isOutputTokenLimitError: asBool(first(fields, 4)),
-		errorType: asInt(first(fields, 5)),
+		message: requireStringField(first(fields, 1), "error.message"),
+		code: requireStringField(first(fields, 2), "error.code"),
+		isInputTokenLimitError: requireBoolField(first(fields, 3), "error.isInputTokenLimitError"),
+		isOutputTokenLimitError: requireBoolField(first(fields, 4), "error.isOutputTokenLimitError"),
+		errorType: requireIntField(first(fields, 5), "error.errorType"),
 	};
 }
 
