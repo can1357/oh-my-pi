@@ -451,7 +451,7 @@ export async function scanSkillsFromDir(
 		const remainingEntries = options.recursive ? Math.max(0, limits.maxEntries - visitedEntries) : undefined;
 		let entries: fs.Dirent[] | null;
 		try {
-			entries = await readDirEntriesWithinLimit(current.path, remainingEntries);
+			entries = await readDirEntriesWithinLimit(current.path, remainingEntries, { refresh: true });
 		} catch (error) {
 			if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
 				warnings.push(`Failed to read skills directory: ${current.path} (${String(error)})`);

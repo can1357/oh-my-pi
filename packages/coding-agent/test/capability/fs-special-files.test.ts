@@ -75,6 +75,26 @@ describe("capability/fs cache controls", () => {
 		}
 	});
 
+	it("refreshes and replaces a cached bounded directory listing", async () => {
+		const directory = await fs.promises.mkdtemp(path.join(os.tmpdir(), "omp-fs-refresh-"));
+		try {
+			await Bun.write(path.join(directory, "a"), "");
+			clearCache();
+			expect((await readDirEntriesWithinLimit(directory, 2))?.map(entry => entry.name)).toEqual(["a"]);
+
+			await Bun.write(path.join(directory, "b"), "");
+			expect((await readDirEntriesWithinLimit(directory, 2))?.map(entry => entry.name)).toEqual(["a"]);
+			expect((await readDirEntriesWithinLimit(directory, 2, { refresh: true }))?.map(entry => entry.name)).toEqual([
+				"a",
+				"b",
+			]);
+			expect((await readDirEntriesWithinLimit(directory, 2))?.map(entry => entry.name)).toEqual(["a", "b"]);
+		} finally {
+			clearCache();
+			await fs.promises.rm(directory, { recursive: true, force: true });
+		}
+	});
+
 	it("can bypass a cached miss when an optional file appears", async () => {
 		const directory = await fs.promises.mkdtemp(path.join(os.tmpdir(), "omp-fs-cache-miss-"));
 		const filePath = path.join(directory, "SKILL.md");

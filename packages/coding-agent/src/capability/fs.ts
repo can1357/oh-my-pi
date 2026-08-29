@@ -60,22 +60,36 @@ export async function readDirEntries(dirPath: string): Promise<fs.Dirent[]> {
 	}
 }
 
+export interface ReadDirEntriesWithinLimitOptions {
+	/**
+	 * Ignore and replace any cached listing. A truncated or failed refresh
+	 * removes the stale cache entry instead of preserving outdated results.
+	 * @default false
+	 */
+	refresh?: boolean;
+}
+
 /**
  * Read and sort a directory while bounding the number of entries retained.
  *
- * Returns `null` when the directory contains more than `maxEntries`. Truncated
- * results are never cached because a partial cache entry would violate
- * `readDirEntries()` semantics. Filesystem errors are left to the caller.
+ * Returns `null` when the directory contains more than `maxEntries`; truncated
+ * results are never cached. `refresh` bypasses any cached listing and replaces
+ * it after a complete read. Filesystem errors are left to the caller.
  */
 export async function readDirEntriesWithinLimit(
 	dirPath: string,
 	maxEntries: number | undefined,
+	options: ReadDirEntriesWithinLimitOptions = {},
 ): Promise<fs.Dirent[] | null> {
 	const abs = resolvePath(dirPath);
-	const cached = dirCache.get(abs);
-	if (cached) {
-		if (maxEntries !== undefined && cached.length > maxEntries) return null;
-		return [...cached].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+	if (options.refresh) {
+		dirCache.delete(abs);
+	} else {
+		const cached = dirCache.get(abs);
+		if (cached) {
+			if (maxEntries !== undefined && cached.length > maxEntries) return null;
+			return [...cached].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+		}
 	}
 
 	let entries: fs.Dirent[];
