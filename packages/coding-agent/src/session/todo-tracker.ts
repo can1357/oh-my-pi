@@ -225,7 +225,14 @@ export class TodoTracker {
 			const chain = resolveLeadingCdChain(args.command);
 			if (chain.unresolvable) return { unresolvable: true };
 			if (chain.path !== undefined) {
-				return { cwd: resolveToCwd(chain.path, this.#host.cwd()) };
+				// Relative `cd` targets are relative to the process cwd the bash tool
+				// sets first (structured `cwd`, else session cwd) — e.g.
+				// `{ cwd: "/tmp", command: "cd project && …" }` runs in `/tmp/project`.
+				const processCwd =
+					typeof args.cwd === "string" && args.cwd.trim() !== ""
+						? resolveToCwd(args.cwd.trim(), this.#host.cwd())
+						: this.#host.cwd();
+				return { cwd: resolveToCwd(chain.path, processCwd) };
 			}
 		}
 		if (typeof args.cwd === "string" && args.cwd.trim() !== "") {

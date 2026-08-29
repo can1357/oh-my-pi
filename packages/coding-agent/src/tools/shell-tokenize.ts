@@ -407,6 +407,49 @@ export function hasTopLevelShellBackground(command: string): boolean {
 }
 
 /**
+ * True when the command contains a top-level status-masking operator (`||`,
+ * `;`, or `|`) so a trailing `true` / pipe consumer can report exit 0 even when
+ * the real check failed. `&&` is not masking — failure short-circuits.
+ */
+export function hasTopLevelStatusMaskingOperator(command: string): boolean {
+	let inSingle = false;
+	let inDouble = false;
+	for (let i = 0; i < command.length; i++) {
+		const ch = command[i]!;
+		if (inSingle) {
+			if (ch === "'") inSingle = false;
+			continue;
+		}
+		if (inDouble) {
+			if (ch === "\\" && i + 1 < command.length) {
+				i++;
+				continue;
+			}
+			if (ch === '"') inDouble = false;
+			continue;
+		}
+		if (ch === "'") {
+			inSingle = true;
+			continue;
+		}
+		if (ch === '"') {
+			inDouble = true;
+			continue;
+		}
+		if (ch === "\\" && i + 1 < command.length) {
+			i++;
+			continue;
+		}
+		if (ch === ";") return true;
+		if (ch === "|") {
+			if (command[i + 1] === "|") return true;
+			return true;
+		}
+	}
+	return false;
+}
+
+/**
  * True when the command begins with `cd` but {@link extractLeadingCdTarget}
  * cannot safely resolve the path (redirects, extra args, expansion). The shell
  * still changes directory — callers that need a trusted cwd must treat this as

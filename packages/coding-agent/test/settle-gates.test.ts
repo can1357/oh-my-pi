@@ -115,6 +115,13 @@ describe("isTautologicalParentVerifyCommand", () => {
 		expect(isTautologicalParentVerifyCommand("bun test test/foo.test.ts &")).toBe(true);
 		expect(isTautologicalParentVerifyCommand("bun test && true")).toBe(false);
 	});
+
+	it("rejects status-masking shell chains as non-evidence", () => {
+		expect(isTautologicalParentVerifyCommand("bun test || true")).toBe(true);
+		expect(isTautologicalParentVerifyCommand("bun test; true")).toBe(true);
+		expect(isTautologicalParentVerifyCommand("bun test | cat")).toBe(true);
+		expect(isTautologicalParentVerifyCommand("bun test && bun test")).toBe(false);
+	});
 });
 
 describe("isTrivialParentVerifyEvalCode", () => {

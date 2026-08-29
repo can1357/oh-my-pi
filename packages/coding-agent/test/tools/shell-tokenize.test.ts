@@ -3,6 +3,7 @@ import * as path from "node:path";
 import {
 	extractLeadingCdTarget,
 	hasTopLevelShellBackground,
+	hasTopLevelStatusMaskingOperator,
 	hasUnresolvableLeadingCdPrefix,
 	resolveLeadingCdChain,
 } from "@oh-my-pi/pi-coding-agent/tools/shell-tokenize";
@@ -113,5 +114,15 @@ describe("hasTopLevelShellBackground", () => {
 		expect(hasTopLevelShellBackground("bun test&")).toBe(true);
 		expect(hasTopLevelShellBackground("bun test && true")).toBe(false);
 		expect(hasTopLevelShellBackground('echo "a & b" && bun test')).toBe(false);
+	});
+});
+
+describe("hasTopLevelStatusMaskingOperator", () => {
+	it("detects status-masking operators but not &&", () => {
+		expect(hasTopLevelStatusMaskingOperator("bun test || true")).toBe(true);
+		expect(hasTopLevelStatusMaskingOperator("bun test; true")).toBe(true);
+		expect(hasTopLevelStatusMaskingOperator("bun test | cat")).toBe(true);
+		expect(hasTopLevelStatusMaskingOperator("bun test && true")).toBe(false);
+		expect(hasTopLevelStatusMaskingOperator('echo "a | b" && bun test')).toBe(false);
 	});
 });

@@ -616,6 +616,35 @@ describe("unverified isolated merge latch", () => {
 		expect(latch.latched).toBe(true);
 	});
 
+	it("resolves a relative leading cd against the structured cwd", async () => {
+		const latch = new UnverifiedMergeLatch();
+		latch.mark();
+		const ctx = host(latch, { cwd: "/repo", repoRoot: "/repo" });
+		const tracker = new TodoTracker(ctx.host);
+		tracker.onToolExecutionStart("bash", "call-rel-cwd", {
+			cwd: "/tmp",
+			command: "cd project && bun test",
+		});
+		tracker.onToolResult("bash", false, { cwd: "/tmp" }, "call-rel-cwd");
+		expect(latch.latched).toBe(true);
+	});
+
+	it("does not clear on status-masking shell chains", async () => {
+		const latch = new UnverifiedMergeLatch();
+		latch.mark();
+		const ctx = host(latch);
+		const tracker = new TodoTracker(ctx.host);
+		for (const [id, command] of [
+			["call-or", "bun test || true"],
+			["call-semi", "bun test; true"],
+			["call-pipe", "bun test | cat"],
+		] as const) {
+			tracker.onToolExecutionStart("bash", id, { command });
+			tracker.onToolResult("bash", false, { cwd: "/repo" }, id);
+			expect(latch.latched).toBe(true);
+		}
+	});
+
 	it("does not clear on shell-backgrounded verification", async () => {
 		const latch = new UnverifiedMergeLatch();
 		latch.mark();

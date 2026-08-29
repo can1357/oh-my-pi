@@ -54,7 +54,9 @@
 - Early async terminals are stashed only while a bash/eval tool call still awaits its running-ack re-key; finished job ids are ignored so a hub redelivery cannot poison a later `bg_N` reuse.
 - `lsp` diagnostics waits that time out without a publish or pull report the server as failed (`failedServerCount`) instead of a clean `success: true` with zero errors.
 - Chained relative `cd` targets (`cd /tmp && cd project`) resolve cumulatively for parent-verify cwd snaps.
+- Relative leading `cd` targets resolve against the structured bash `cwd` (then session cwd), matching shell semantics for `{ cwd: "/tmp", command: "cd project && …" }`.
 - Shell-backgrounded verify commands (`bun test & true`) no longer clear the unverified-merge latch.
+- Status-masking verify chains (`bun test || true`, `bun test; true`, `bun test | cat`) no longer clear the unverified-merge latch.
 - Partial cherry-pick success before a later conflict still arms the parent verify latch (`hadAnyChanges`).
 - `/todo edit` and `/todo import` stamp Markdown `[-]`/`[~]` rows as user drops so settle does not treat them as model-abandoned work.
 - Parent `eval` no longer clears the unverified-merge latch on bare success: require an explicit cwd inside the merged tree and reject trivial expressions such as `1+1`.

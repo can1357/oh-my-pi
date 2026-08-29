@@ -1,5 +1,5 @@
 import * as path from "node:path";
-import { extractLeadingCdTarget, hasTopLevelShellBackground } from "../tools/shell-tokenize";
+import { extractLeadingCdTarget, hasTopLevelShellBackground, hasTopLevelStatusMaskingOperator } from "../tools/shell-tokenize";
 
 /** Isolated apply succeeded; parent must re-run acceptance on this tree. */
 export const MERGED_UNVERIFIED_MARKER = "MERGED — child yield is not evidence; re-run acceptance on this tree.";
@@ -81,6 +81,9 @@ export function isTautologicalParentVerifyCommand(command: string): boolean {
 		segments.shift();
 	}
 	if (segments.length === 0) return true;
+	// `bun test || true`, `bun test; true`, and `bun test | cat` report exit 0
+	// even when the check failed — never treat as parent acceptance.
+	if (hasTopLevelStatusMaskingOperator(trimmed)) return true;
 	return segments.every(segment => {
 		const tokens = skipLeadingEnvAssignmentTokens(segment.replace(/^sudo\s+/, "").split(/\s+/));
 		// Bare assignment-only segment (`FOO=1`) is not acceptance evidence.
