@@ -307,6 +307,8 @@ export async function prepareNativeCorePackage(pkgDir: string, write: boolean): 
 		"native/desktop-adapter.d.ts",
 		"native/loader-state.js",
 		"native/loader-state.d.ts",
+		"native/vcs.js",
+		"native/vcs.d.ts",
 		"native/embedded-addon.js",
 		"README.md",
 		...legalFiles,

@@ -2,9 +2,9 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 import { abortOnGitFailure, CommitAbortedError, pushOrAbort } from "../src/commit/execute";
-import * as git from "../src/utils/git";
 
 const tempDirs: string[] = [];
 
@@ -56,21 +56,21 @@ describe("abortOnGitFailure (issue #7834)", () => {
 		await fs.appendFile(path.join(dir, "a.txt"), "two\n");
 		await runGit(dir, ["add", "-A"]);
 
-		// A refused commit yields a GitCommandError from the central git wrapper;
+		// A refused commit yields a VcsError from the native adapter;
 		// this is the input both commit routes hand to abortOnGitFailure.
 		let commitError: unknown;
 		try {
-			await git.commit(dir, "feat: x");
+			await vcs.requireGit(dir).commitCreate("feat: x", {});
 		} catch (error) {
 			commitError = error;
 		}
-		expect(commitError).toBeInstanceOf(git.GitCommandError);
+		expect(vcs.isVcsError(commitError)).toBe(true);
 
 		const stderrSpy = vi.spyOn(process.stderr, "write").mockReturnValue(true);
 		expect(() =>
 			abortOnGitFailure(
 				"Commit 1 of 2 failed",
-				commitError as git.GitCommandError,
+				commitError as vcs.VcsError,
 				"0 of 2 commits created; 1 file(s) remain staged. No changes were lost.",
 			),
 		).toThrow(CommitAbortedError);

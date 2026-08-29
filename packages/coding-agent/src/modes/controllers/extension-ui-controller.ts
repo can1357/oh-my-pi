@@ -24,6 +24,7 @@ import type {
 import { getSessionSlashCommands } from "../../extensibility/extensions/get-commands-handler";
 import { AskDialogComponent, boundPromptTitle } from "../../modes/components/ask-dialog";
 import { installExtensionComposerShape } from "../../modes/components/composer-shape-registry";
+import { EditorTopGap } from "../../modes/components/editor-top-gap";
 import { HookEditorComponent } from "../../modes/components/hook-editor";
 import { HookInputComponent } from "../../modes/components/hook-input";
 import { HookSelectorComponent, type HookSelectorSlider } from "../../modes/components/hook-selector";
@@ -377,7 +378,7 @@ export class ExtensionUiController {
 
 		if (widgets.size === 0) {
 			if (spacerWhenEmpty) {
-				container.addChild(new Spacer(1));
+				container.addChild(new EditorTopGap(() => this.ctx.statusRowOccupied));
 			}
 			return;
 		}

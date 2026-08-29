@@ -344,6 +344,39 @@ describe("generated model policies", () => {
 		}
 	});
 
+	it("pins zai glm-5.3-flash to the 1M tier and restores its native image input", () => {
+		const models = [
+			createSpec({
+				id: "glm-5.3-flash",
+				api: "anthropic-messages",
+				provider: "zai",
+				contextWindow: 200_000,
+				maxTokens: 8192,
+			}),
+			createSpec({
+				id: "glm-5.3-flash",
+				api: "openai-completions",
+				provider: "zhipu-coding-plan",
+				contextWindow: 200_000,
+				maxTokens: 8192,
+			}),
+		];
+
+		applyGeneratedModelPolicies(models);
+
+		for (const model of models) {
+			expect(model.contextWindow).toBe(1_000_000);
+			expect(model.maxTokens).toBe(131_072);
+			// Natively multimodal despite the missing `v` marker; upstream
+			// metadata reports the flash SKU as text-only.
+			expect(model.input).toEqual(["text", "image"]);
+			// Same mandatory low/high/max ladder as the GLM-5.3 base line.
+			expect(model.thinking?.efforts).toEqual([Effort.Low, Effort.High, Effort.Max]);
+			expect(model.thinking?.requiresEffort).toBe(true);
+			expect(model.thinking?.defaultLevel).toBe(Effort.Max);
+		}
+	});
+
 	it("pins MiniMax-M3 long-context providers to 1M context", () => {
 		const models = [
 			createSpec({

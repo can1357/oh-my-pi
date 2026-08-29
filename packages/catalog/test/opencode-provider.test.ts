@@ -2,7 +2,9 @@ import { describe, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
+import { readModelCache, writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { resolveProviderModels } from "@oh-my-pi/pi-catalog/model-manager";
 import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import { getBundledModels } from "@oh-my-pi/pi-catalog/models";
@@ -14,6 +16,7 @@ import {
 	opencodeGoModelManagerOptions,
 	opencodeZenModelManagerOptions,
 } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
+import type { ModelSpec } from "@oh-my-pi/pi-catalog/types";
 import type { FetchImpl } from "@oh-my-pi/pi-utils";
 
 const LIVE_FREE_MODEL_IDS = [
@@ -41,6 +44,12 @@ describe("Shared models.dev catalog fallback", () => {
 			const bundledModel = bundledModels[0];
 			if (!bundledModel) throw new Error("ZAI bundled catalog is empty");
 			const bundledModelId = bundledModel.id;
+			// Must stay un-bundled: the fallback contract below is about models.dev
+			// publishing a model the bundled catalog does not carry yet.
+			const newlyPublishedId = "glm-experimental-probe";
+			if (bundledModels.some(model => model.id === newlyPublishedId)) {
+				throw new Error(`${newlyPublishedId} is bundled; pick a new un-bundled fixture id`);
+			}
 			let fetches = 0;
 			const fallback = modelsDevCatalogFallback("zai");
 			if (!fallback) throw new Error("ZAI did not configure a models.dev fallback");
@@ -51,9 +60,9 @@ describe("Shared models.dev catalog fallback", () => {
 					return {
 						zai: {
 							models: {
-								"glm-5.3-flash": {
-									id: "glm-5.3-flash",
-									name: "GLM-5.3-Flash",
+								[newlyPublishedId]: {
+									id: newlyPublishedId,
+									name: "GLM Experimental Probe",
 									tool_call: true,
 									reasoning: true,
 									limit: { context: 1_000_000, output: 131_072 },
@@ -92,7 +101,7 @@ describe("Shared models.dev catalog fallback", () => {
 				reasoning: bundledModel.reasoning,
 				input: bundledModel.input,
 			});
-			expect(online.models.find(model => model.id === "glm-5.3-flash")).toMatchObject({
+			expect(online.models.find(model => model.id === newlyPublishedId)).toMatchObject({
 				api: "anthropic-messages",
 				baseUrl: "https://api.z.ai/api/anthropic",
 				contextWindow: 1_000_000,
@@ -105,7 +114,7 @@ describe("Shared models.dev catalog fallback", () => {
 			expect(cached.stale).toBe(false);
 			expect(cached.source).toBe("cache");
 			expect(cached.updatedAt).toBe(online.updatedAt);
-			expect(cached.models.some(model => model.id === "glm-5.3-flash")).toBe(true);
+			expect(cached.models.some(model => model.id === newlyPublishedId)).toBe(true);
 
 			const staleFallback = await resolveProviderModels(
 				{
@@ -123,7 +132,7 @@ describe("Shared models.dev catalog fallback", () => {
 			expect(staleFallback.stale).toBe(true);
 			expect(staleFallback.source).toBe("cache");
 			expect(staleFallback.updatedAt).toBe(online.updatedAt);
-			expect(staleFallback.models.some(model => model.id === "glm-5.3-flash")).toBe(true);
+			expect(staleFallback.models.some(model => model.id === newlyPublishedId)).toBe(true);
 			expect(fetches).toBe(1);
 		} finally {
 			await fs.rm(tempDir, { recursive: true, force: true });
@@ -487,6 +496,90 @@ describe("OpenCode provider discovery", () => {
 		}
 		expect(opencodeGoModelManagerOptions().dynamicModelsAuthoritative).toBe(true);
 		expect(opencodeZenModelManagerOptions().dynamicModelsAuthoritative).toBe(true);
+	});
+
+	test("invalidates cached GLM-5.3 Flash effort metadata on upgrade (issue #9960)", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-opencode-glm53-flash-cache-"));
+		const cacheDbPath = path.join(tempDir, "models.db");
+		const discoveredFlash: ModelSpec<"openai-completions"> = {
+			id: "glm-5.3-flash",
+			name: "GLM-5.3-Flash",
+			api: "openai-completions",
+			provider: "opencode-go",
+			baseUrl: "https://opencode.ai/zen/go/v1",
+			reasoning: true,
+			thinking: {
+				mode: "effort",
+				efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.XHigh],
+			},
+			// GLM-5.3 Flash is multimodal; image input coexists with the
+			// reasoning-effort ladder (the `glm.vision` SKU flag matches only the
+			// `…v` shape, never image capability).
+			input: ["text", "image"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 1_000_000,
+			maxTokens: 131_072,
+		};
+
+		try {
+			const options = opencodeGoModelManagerOptions({ apiKey: "go-account-key" });
+			const cacheProviderId = options.cacheProviderId;
+			if (!cacheProviderId) throw new Error("OpenCode Go cache provider id is missing");
+			const priorDropIds = options.dropCachedModelIdsOnStaticMismatch?.filter(id => id !== discoveredFlash.id);
+			await resolveProviderModels(
+				{
+					...options,
+					cacheDbPath,
+					modelsDev: undefined,
+					dropCachedModelIdsOnStaticMismatch: priorDropIds,
+					fetchDynamicModels: async () => [discoveredFlash],
+				},
+				"online",
+			);
+			const priorCache = readModelCache(cacheProviderId, Number.POSITIVE_INFINITY, Date.now, cacheDbPath);
+			if (!priorCache) throw new Error("OpenCode Go cache was not written");
+
+			// Rebuild under the pre-fix identity, then persist it with the prior
+			// migration-policy fingerprint to simulate an upgraded installation.
+			const staleFlash = {
+				...buildModel({ ...discoveredFlash, id: "glm-5.2-flash" }),
+				id: discoveredFlash.id,
+				name: discoveredFlash.name,
+			};
+			writeModelCache(
+				cacheProviderId,
+				priorCache.updatedAt,
+				[staleFlash],
+				true,
+				priorCache.staticFingerprint,
+				cacheDbPath,
+			);
+
+			let fetches = 0;
+			const upgraded = await resolveProviderModels(
+				{
+					...options,
+					cacheDbPath,
+					modelsDev: undefined,
+					fetchDynamicModels: async () => {
+						fetches++;
+						return [discoveredFlash];
+					},
+				},
+				"online-if-uncached",
+			);
+			const flash = upgraded.models.find(model => model.id === discoveredFlash.id);
+			expect(fetches).toBe(1);
+			expect(flash?.input).toEqual(["text", "image"]);
+			expect(flash?.thinking).toEqual({
+				mode: "effort",
+				efforts: [Effort.Low, Effort.High, Effort.Max],
+				defaultLevel: Effort.Max,
+				requiresEffort: true,
+			});
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
 	});
 
 	test("routes opencode-go deepseek-v4-flash to the responses API", () => {

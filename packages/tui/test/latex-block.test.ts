@@ -319,6 +319,14 @@ describe("latexToBlock (2-D layout)", () => {
 		expect(latexToBlock("\\mathbf{\\frac{a}{b}}")).toEqual([" 𝐚 ", "───", " 𝐛 "]);
 	});
 
+	it("styles text-mode fonts across a stacked fraction", () => {
+		const lines = latexToBlock(String.raw`\textbf{\frac{a}{b}}`);
+
+		expect(lines.map(stripVTControlCharacters)).toEqual([" a ", "───", " b "]);
+		expect(lines[0]).toContain("\x1b[1m");
+		expect(lines[2]).toContain("\x1b[1m");
+	});
+
 	it("stacks limit operators inside styling wrappers", () => {
 		Object.assign(TERMINAL, { trueColor: true });
 		const lines = latexToBlock("\\textcolor{red}{\\sum_{i=1}^n}");
