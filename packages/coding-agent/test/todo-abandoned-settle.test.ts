@@ -112,6 +112,23 @@ describe("abandoned todos keep settle incomplete", () => {
 		expect(JSON.stringify(ctx.messages)).not.toContain("Ship feature");
 	});
 
+	it("still reminds after the model rm-abandons every item", async () => {
+		const ctx = host();
+		const tracker = new TodoTracker(ctx.host);
+		tracker.setPhases([
+			{
+				name: "Work",
+				tasks: [
+					{ content: "Ship feature", status: "abandoned" },
+					{ content: "Write tests", status: "abandoned" },
+				],
+			},
+		]);
+
+		expect(await tracker.checkCompletion(textOnlyStop())).toBe(true);
+		expect(ctx.continuations.count).toBe(1);
+	});
+
 	it("does not remind when remaining work is only blocked", async () => {
 		const ctx = host();
 		const tracker = new TodoTracker(ctx.host);

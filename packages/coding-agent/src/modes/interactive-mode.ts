@@ -132,8 +132,10 @@ import { formatMoreItems, replaceTabs, shortenPath, TRUNCATE_LENGTHS, truncateTo
 import { setAutoQaConsentHandler } from "../tools/report-tool-issue";
 import {
 	formatPhaseDisplayName,
+	formatTodoHudRatio,
 	isClosedTodo,
 	nextActionableTask,
+	todoHudCounts,
 	selectCollapsedTodos,
 	setActiveTodoDescriptionsProvider,
 	todoMatchesAnyDescription,
@@ -2599,8 +2601,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		const renderPhase = (phase: TodoPhase, oneBased: number, isActive: boolean): string | string[] => {
 			const label = multiPhase ? formatPhaseDisplayName(phase.name, oneBased) : phase.name;
 			// Completed only: abandoned is a handoff, not HUD progress.
-			const done = phase.tasks.filter(isClosedTodo).length;
-			const progress = ` · ${done}/${phase.tasks.length}`;
+			const progress = ` · ${formatTodoHudRatio(todoHudCounts(phase.tasks))}`;
 			if (!isActive) {
 				const header = theme.fg("muted", label) + theme.fg("dim", progress);
 				return expanded ? [header, ...renderTasks(phase)] : header;
@@ -2677,15 +2678,13 @@ export class InteractiveMode implements InteractiveModeContext {
 		const isMatched = (todo: TodoItem): boolean =>
 			activeDescs.length > 0 && todoMatchesAnyDescription(todo.content, activeDescs);
 
-		const totalTasks = phases.reduce((sum, phase) => sum + phase.tasks.length, 0);
-		const closedTasks = phases.reduce((sum, phase) => sum + phase.tasks.filter(isClosedTodo).length, 0);
-		const droppedTasks = phases.reduce(
-			(sum, phase) => sum + phase.tasks.filter(task => task.status === "abandoned").length,
-			0,
-		);
+		const counts = todoHudCounts(phases.flatMap(phase => phase.tasks));
+		const closedTasks = counts.completed;
+		const droppedTasks = counts.abandoned;
+		const totalTasks = counts.total;
 		const activeTask = nextActionableTask(phases);
 
-		const header = `${theme.bold(theme.fg("accent", "TODO"))} ${theme.fg("dim", `${closedTasks}/${totalTasks}`)}`;
+		const header = `${theme.bold(theme.fg("accent", "TODO"))} ${theme.fg("dim", formatTodoHudRatio(counts))}`;
 		const taskStr = activeTask
 			? this.#formatTodoLine(activeTask, "", isMatched(activeTask))
 			: closedTasks < totalTasks

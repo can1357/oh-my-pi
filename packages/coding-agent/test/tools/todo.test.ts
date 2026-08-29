@@ -7,8 +7,10 @@ import { initTheme, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import {
 	applyOpsToPhases,
+	formatTodoHudRatio,
 	isClosedTodo,
 	isSettledTodo,
+	isTodoPhase,
 	markdownToPhases,
 	nextActionableTask,
 	phasesToMarkdown,
@@ -16,6 +18,7 @@ import {
 	selectCollapsedTodos,
 	TODO_STRIKE_HOLD_FRAMES,
 	TODO_STRIKE_TOTAL_FRAMES,
+	todoHudCounts,
 	type TodoItem,
 	type TodoPhase,
 	TodoTool,
@@ -435,7 +438,7 @@ describe("TodoTool operations", () => {
 		expect(allTasks.map(task => task.status)).toEqual(["completed", "completed", "in_progress"]);
 	});
 
-	it("removes all tasks when rm omits task and phase", async () => {
+	it("abandons all tasks when the model rm omits task and phase", async () => {
 		const tool = new TodoTool(createSession());
 		await tool.execute("call-1", {
 			op: "init",
@@ -443,10 +446,22 @@ describe("TodoTool operations", () => {
 		});
 
 		const result = await tool.execute("call-2", { op: "rm" });
-		expect(result.details?.phases[0]?.tasks).toEqual([]);
+		const tasks = result.details?.phases[0]?.tasks ?? [];
+		expect(tasks.map(task => task.status)).toEqual(["abandoned", "abandoned"]);
+		expect(tasks.every(task => task.droppedBy === undefined)).toBe(true);
 		const summary = result.content.find(part => part.type === "text");
 		if (summary?.type !== "text") throw new Error("Expected text summary");
-		expect(summary.text).toContain("Todo list cleared.");
+		expect(summary.text).toContain("0/2 done, 2 dropped, 0 open");
+		expect(summary.text).not.toContain("Todo list cleared.");
+	});
+
+	it("deletes tasks when user-authored rm runs", () => {
+		const { phases } = applyOpsToPhases(
+			[{ name: "Work", tasks: [{ content: "First", status: "pending" }, { content: "Second", status: "pending" }] }],
+			[{ op: "rm" }],
+			{ userAuthored: true },
+		);
+		expect(phases[0]?.tasks).toEqual([]);
 	});
 
 	it("drops all tasks in a phase", async () => {
@@ -821,6 +836,22 @@ describe("abandoned todos in tool summary and compact HUD contracts", () => {
 		const text = result.content.find(part => part.type === "text")?.text ?? "";
 		expect(text).toContain("0/2 done, 2 dropped, 0 open");
 		expect(text).toContain("Remaining items (0 open + 2 dropped):");
+	});
+
+	it("accepts unknown droppedBy without dropping the persisted task", () => {
+		expect(
+			isTodoPhase({
+				name: "Work",
+				tasks: [{ content: "ship", status: "abandoned", droppedBy: "agent" }],
+			}),
+		).toBe(true);
+	});
+
+	it("formats HUD ratios with a dropped suffix", () => {
+		expect(formatTodoHudRatio(todoHudCounts([{ status: "completed" }, { status: "abandoned" }, { status: "pending" }]))).toBe(
+			"1/3 · 1 dropped",
+		);
+		expect(formatTodoHudRatio(todoHudCounts([{ status: "completed" }, { status: "completed" }]))).toBe("2/2");
 	});
 });
 

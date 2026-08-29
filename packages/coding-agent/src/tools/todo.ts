@@ -51,8 +51,7 @@ export function isTodoPhase(value: unknown): value is TodoPhase {
 				task.status === "in_progress" ||
 				task.status === "completed" ||
 				task.status === "abandoned" ||
-				task.status === "blocked") &&
-			(task.droppedBy === undefined || task.droppedBy === "user"),
+				task.status === "blocked"),
 	);
 }
 
@@ -118,7 +117,7 @@ function findPhaseByName(phases: TodoPhase[], name: string): TodoPhase | undefin
 function cloneTask(task: TodoItem): TodoItem {
 	const cloned: TodoItem = { content: task.content, status: task.status };
 	if (task.blocker !== undefined) cloned.blocker = task.blocker;
-	if (task.droppedBy !== undefined) cloned.droppedBy = task.droppedBy;
+	if (task.droppedBy === "user") cloned.droppedBy = "user";
 	return cloned;
 }
 
@@ -252,6 +251,30 @@ export function isClosedTodo<T extends { status: TodoStatus }>(task: T): boolean
 /** Hidden from the open collapsed viewport: completed or deliberately abandoned. */
 export function isSettledTodo<T extends { status: TodoStatus }>(task: T): boolean {
 	return task.status === "completed" || task.status === "abandoned";
+}
+
+export function todoHudCounts(tasks: ReadonlyArray<{ status: TodoStatus }>): {
+	completed: number;
+	abandoned: number;
+	total: number;
+} {
+	let completed = 0;
+	let abandoned = 0;
+	for (const task of tasks) {
+		if (task.status === "completed") completed++;
+		else if (task.status === "abandoned") abandoned++;
+	}
+	return { completed, abandoned, total: tasks.length };
+}
+
+/** `2/5` or `2/5 · 1 dropped`. */
+export function formatTodoHudRatio(counts: {
+	completed: number;
+	abandoned: number;
+	total: number;
+}): string {
+	const base = `${counts.completed}/${counts.total}`;
+	return counts.abandoned > 0 ? `${base} · ${counts.abandoned} dropped` : base;
 }
 
 /**
@@ -576,7 +599,13 @@ function applyEntry(
 			return phases;
 		}
 		case "rm":
-			return removeTasks(phases, entry, errors);
+			if (options?.userAuthored) return removeTasks(phases, entry, errors);
+			// Model `rm` is a settle cheat: abandon in place like `drop`.
+			for (const task of getTaskTargets(phases, entry, errors)) {
+				task.status = "abandoned";
+				task.droppedBy = undefined;
+			}
+			return phases;
 		case "append":
 			return appendItems(phases, entry, errors);
 		case "view":
@@ -1142,8 +1171,7 @@ function computeTouchedPhases(
  * Dim `completed/total` suffix for a phase header. Abandoned is not done.
  */
 function formatPhaseProgress(phase: TodoPhase, uiTheme: Theme): string {
-	const done = phase.tasks.filter(isClosedTodo).length;
-	return uiTheme.fg("dim", `  ${done}/${phase.tasks.length}`);
+	return uiTheme.fg("dim", `  ${formatTodoHudRatio(todoHudCounts(phase.tasks))}`);
 }
 
 /** One-line summary for a collapsed (untouched) phase: dim header + progress. */

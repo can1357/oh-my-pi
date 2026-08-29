@@ -343,7 +343,7 @@ export class TodoTracker {
 			tasks: phase.tasks.map(task => {
 				const cloned: TodoItem = { content: task.content, status: task.status };
 				if (task.blocker !== undefined) cloned.blocker = task.blocker;
-				if (task.droppedBy !== undefined) cloned.droppedBy = task.droppedBy;
+				if (task.droppedBy === "user") cloned.droppedBy = "user";
 				return cloned;
 			}),
 		}));
