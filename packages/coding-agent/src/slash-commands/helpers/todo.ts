@@ -1,6 +1,7 @@
 import type { TodoPhase } from "../../tools/todo";
 import {
 	applyOpsToPhases,
+	applyUserMarkdownPhases,
 	getLatestTodoPhasesFromEntries,
 	markdownToPhases,
 	phasesToMarkdown,
@@ -149,8 +150,9 @@ async function handleTodoImportCommand(restArgs: string, runtime: SlashCommandRu
 	} catch (err) {
 		return usage(`Failed to read todos: ${errorMessage(err)}`, runtime);
 	}
-	const { phases, errors } = markdownToPhases(content);
+	const { phases: parsed, errors } = markdownToPhases(content);
 	if (errors.length > 0) return usage(`Could not parse ${target}:\n  ${errors.join("\n  ")}`, runtime);
+	const phases = applyUserMarkdownPhases(currentPhases(runtime), parsed);
 	commitTodos(runtime, phases);
 	const taskCount = phases.reduce((sum, phase) => sum + phase.tasks.length, 0);
 	await runtime.output(`Imported ${phases.length} phase(s), ${taskCount} task(s) from ${target}.`);

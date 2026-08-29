@@ -3,6 +3,11 @@ import type { Agent, AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, Model } from "@oh-my-pi/pi-ai";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { TodoTracker, type TodoTrackerHost } from "@oh-my-pi/pi-coding-agent/session/todo-tracker";
+import {
+	applyUserMarkdownPhases,
+	markdownToPhases,
+	phasesToMarkdown,
+} from "@oh-my-pi/pi-coding-agent/tools/todo";
 
 function textOnlyStop(text = "All work is done."): AssistantMessage {
 	return {
@@ -148,6 +153,49 @@ describe("abandoned todos keep settle incomplete", () => {
 		const tracker = new TodoTracker(ctx.host);
 		tracker.setPhases([{ name: "Work", tasks: [{ content: "Ship feature", status: "abandoned" }] }]);
 
+		expect(await tracker.checkCompletion(textOnlyStop())).toBe(false);
+		expect(ctx.continuations.count).toBe(0);
+	});
+
+	it("does not remind after a no-op edit of model-abandoned items", async () => {
+		const prior = [
+			{
+				name: "Work",
+				tasks: [{ content: "Ship feature", status: "abandoned" as const }],
+			},
+		];
+		const md = phasesToMarkdown(prior);
+		const { phases: parsed, errors } = markdownToPhases(md);
+		expect(errors).toEqual([]);
+		const merged = applyUserMarkdownPhases(prior, parsed);
+		expect(merged[0]?.tasks[0]).toEqual({ content: "Ship feature", status: "abandoned" });
+
+		const ctx = host();
+		const tracker = new TodoTracker(ctx.host);
+		tracker.setPhases(merged);
+		expect(await tracker.checkCompletion(textOnlyStop())).toBe(true);
+		expect(ctx.continuations.count).toBe(1);
+	});
+
+	it("does not remind when edit newly abandons a pending item", async () => {
+		const prior = [
+			{
+				name: "Work",
+				tasks: [{ content: "Ship feature", status: "pending" as const }],
+			},
+		];
+		const { phases: parsed, errors } = markdownToPhases("# Work\n- [-] Ship feature\n");
+		expect(errors).toEqual([]);
+		const merged = applyUserMarkdownPhases(prior, parsed);
+		expect(merged[0]?.tasks[0]).toEqual({
+			content: "Ship feature",
+			status: "abandoned",
+			droppedBy: "user",
+		});
+
+		const ctx = host();
+		const tracker = new TodoTracker(ctx.host);
+		tracker.setPhases(merged);
 		expect(await tracker.checkCompletion(textOnlyStop())).toBe(false);
 		expect(ctx.continuations.count).toBe(0);
 	});

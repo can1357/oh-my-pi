@@ -764,18 +764,21 @@ export function markdownToPhases(md: string): { phases: TodoPhase[]; errors: str
 			const blockerMatch = /^(.*?)\s*<!--\s*blocker:\s*(.*?)\s*-->$/.exec(rawContent);
 			if (status === "blocked" && blockerMatch) {
 				currentPhase.tasks.push({ content: blockerMatch[1].trim(), status, blocker: blockerMatch[2].trim() });
-			} else if (status === "abandoned") {
-				// Markdown is a user-authored surface (`/todo edit`, checklist import).
-				// Any `[-]`/`[~]` here is an explicit cancel — stamp droppedBy so settle
-				// does not schedule another continuation for a model drop.
-				const droppedByMatch = /^(.*?)\s*<!--\s*dropped-by:\s*user\s*-->$/.exec(rawContent);
-				currentPhase.tasks.push({
-					content: (droppedByMatch?.[1] ?? rawContent).trim(),
-					status,
-					droppedBy: "user",
-				});
 			} else {
-				currentPhase.tasks.push({ content: rawContent, status });
+				// Recover an already-stamped user drop from the HTML comment emitted by
+				// phasesToMarkdown. Bare `[-]` stays model-shaped here — callers that
+				// commit user markdown (edit/import) must run applyUserMarkdownPhases
+				// against the prior list so no-op edits do not reclassify model drops.
+				const droppedByMatch = /^(.*?)\s*<!--\s*dropped-by:\s*user\s*-->$/.exec(rawContent);
+				if (status === "abandoned" && droppedByMatch) {
+					currentPhase.tasks.push({
+						content: droppedByMatch[1].trim(),
+						status,
+						droppedBy: "user",
+					});
+				} else {
+					currentPhase.tasks.push({ content: rawContent, status });
+				}
 			}
 			continue;
 		}
@@ -785,6 +788,48 @@ export function markdownToPhases(md: string): { phases: TodoPhase[]; errors: str
 
 	normalizeInProgressTask(phases);
 	return { phases, errors };
+}
+
+/**
+ * Merge a user-authored markdown parse against the prior in-memory list.
+ *
+ * `/todo edit` round-trips through phasesToMarkdown → editor → markdownToPhases.
+ * Model drops serialize as bare `[-]` (no HTML comment), so stamping every
+ * abandoned parse result as user-authored would fail open on a no-op save.
+ * Diff against `prior` instead:
+ * - newly abandoned → user cancel
+ * - still abandoned + prior `droppedBy: "user"` → keep (comment may have been stripped)
+ * - still abandoned + prior was model-abandoned → stay model
+ * - empty prior (fresh import) → all `[-]` are user-authored
+ */
+export function applyUserMarkdownPhases(prior: TodoPhase[], parsed: TodoPhase[]): TodoPhase[] {
+	const priorByContent = new Map<string, TodoItem>();
+	for (const phase of prior) {
+		for (const task of phase.tasks) {
+			priorByContent.set(task.content, task);
+		}
+	}
+	const emptyPrior = prior.every(phase => phase.tasks.length === 0);
+
+	return parsed.map(phase => ({
+		name: phase.name,
+		tasks: phase.tasks.map(task => {
+			const next = cloneTask(task);
+			if (next.status !== "abandoned") return next;
+			if (next.droppedBy === "user") return next;
+
+			const prev = priorByContent.get(next.content);
+			if (emptyPrior || !prev || prev.status !== "abandoned") {
+				next.droppedBy = "user";
+				return next;
+			}
+			if (prev.droppedBy === "user") {
+				next.droppedBy = "user";
+				return next;
+			}
+			return next;
+		}),
+	}));
 }
 
 function formatSummary(phases: TodoPhase[], errors: string[], readOnly = false): string {

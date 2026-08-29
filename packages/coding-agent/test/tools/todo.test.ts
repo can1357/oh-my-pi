@@ -7,6 +7,7 @@ import { initTheme, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import {
 	applyOpsToPhases,
+	applyUserMarkdownPhases,
 	formatTodoHudRatio,
 	isCompletedTodo,
 	isSettledTodo,
@@ -336,18 +337,69 @@ describe("TodoTool operations", () => {
 		const userDrop = parsed[0]?.tasks.find(task => task.content === "ship it");
 		const modelDrop = parsed[0]?.tasks.find(task => task.content === "model drop");
 		expect(userDrop).toEqual({ content: "ship it", status: "abandoned", droppedBy: "user" });
-		// Markdown parse is a user surface: bare `[-]` becomes a user drop too.
-		expect(modelDrop).toEqual({ content: "model drop", status: "abandoned", droppedBy: "user" });
+		// Bare model drops stay unstamped at parse time — applyUserMarkdownPhases
+		// decides provenance against the prior list.
+		expect(modelDrop).toEqual({ content: "model drop", status: "abandoned" });
+
+		const merged = applyUserMarkdownPhases(phases, parsed);
+		expect(merged[0]?.tasks.find(task => task.content === "ship it")).toEqual({
+			content: "ship it",
+			status: "abandoned",
+			droppedBy: "user",
+		});
+		expect(merged[0]?.tasks.find(task => task.content === "model drop")).toEqual({
+			content: "model drop",
+			status: "abandoned",
+		});
 	});
 
-	it("treats checklist [-] items from /todo edit as user drops", () => {
-		const md = ["# Work", "- [-] cancelled in the editor", "- [~] also cancelled"].join("\n");
-		const { phases, errors } = markdownToPhases(md);
+	it("stamps newly abandoned checklist items from /todo edit as user drops", () => {
+		const prior: TodoPhase[] = [
+			{
+				name: "Work",
+				tasks: [
+					{ content: "cancelled in the editor", status: "pending" },
+					{ content: "also cancelled", status: "in_progress" },
+					{ content: "model drop", status: "abandoned" },
+				],
+			},
+		];
+		const md = [
+			"# Work",
+			"- [-] cancelled in the editor",
+			"- [~] also cancelled",
+			"- [-] model drop",
+		].join("\n");
+		const { phases: parsed, errors } = markdownToPhases(md);
 		expect(errors).toEqual([]);
-		expect(phases[0]?.tasks).toEqual([
+		const merged = applyUserMarkdownPhases(prior, parsed);
+		expect(merged[0]?.tasks).toEqual([
+			{ content: "cancelled in the editor", status: "abandoned", droppedBy: "user" },
+			{ content: "also cancelled", status: "abandoned", droppedBy: "user" },
+			{ content: "model drop", status: "abandoned" },
+		]);
+	});
+
+	it("stamps all abandoned items on a fresh markdown import with empty prior", () => {
+		const md = ["# Work", "- [-] cancelled in the editor", "- [~] also cancelled"].join("\n");
+		const { phases: parsed, errors } = markdownToPhases(md);
+		expect(errors).toEqual([]);
+		const merged = applyUserMarkdownPhases([], parsed);
+		expect(merged[0]?.tasks).toEqual([
 			{ content: "cancelled in the editor", status: "abandoned", droppedBy: "user" },
 			{ content: "also cancelled", status: "abandoned", droppedBy: "user" },
 		]);
+	});
+
+	it("keeps user droppedBy when the edit HTML comment is stripped", () => {
+		const prior: TodoPhase[] = [
+			{ name: "Work", tasks: [{ content: "ship it", status: "abandoned", droppedBy: "user" }] },
+		];
+		const { phases: parsed, errors } = markdownToPhases("# Work\n- [-] ship it\n");
+		expect(errors).toEqual([]);
+		expect(parsed[0]?.tasks[0]).toEqual({ content: "ship it", status: "abandoned" });
+		const merged = applyUserMarkdownPhases(prior, parsed);
+		expect(merged[0]?.tasks[0]).toEqual({ content: "ship it", status: "abandoned", droppedBy: "user" });
 	});
 
 	it("preserves user droppedBy when a later model broad drop re-targets the task", () => {
@@ -367,6 +419,19 @@ describe("TodoTool operations", () => {
 		expect(newlyDropped).toEqual({ content: "still open", status: "abandoned" });
 	});
 
+	it("stamps droppedBy for slash userAuthored drops but not for model tool drops", () => {
+		const phases: TodoPhase[] = [
+			{ name: "Work", tasks: [{ content: "ship it", status: "pending" }] },
+		];
+		const userDrop = applyOpsToPhases(phases, [{ op: "drop", task: "ship it" }], { userAuthored: true });
+		expect(userDrop.phases[0]?.tasks[0]).toEqual({
+			content: "ship it",
+			status: "abandoned",
+			droppedBy: "user",
+		});
+		const modelDrop = applyOpsToPhases(phases, [{ op: "drop", task: "ship it" }]);
+		expect(modelDrop.phases[0]?.tasks[0]).toEqual({ content: "ship it", status: "abandoned" });
+	});
 	it("parses checklist items with backslash-escaped brackets from /todo edit", () => {
 		// Editors/serializers (e.g. content pasted from a markdown renderer) escape
 		// `[` and `]`; the line still renders as a checkbox, so it must parse rather

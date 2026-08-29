@@ -1,6 +1,7 @@
 import * as fs from "node:fs/promises";
 import {
 	applyOpsToPhases,
+	applyUserMarkdownPhases,
 	getLatestTodoPhasesFromEntries,
 	markdownToPhases,
 	phasesToMarkdown,
@@ -251,11 +252,12 @@ export class TodoCommandController {
 			this.ctx.showError(`Failed to read todos: ${error instanceof Error ? error.message : String(error)}`);
 			return;
 		}
-		const { phases, errors } = markdownToPhases(content);
+		const { phases: parsed, errors } = markdownToPhases(content);
 		if (errors.length > 0) {
 			this.ctx.showError(`Could not parse ${source}:\n  ${errors.join("\n  ")}`);
 			return;
 		}
+		const phases = applyUserMarkdownPhases(this.#currentPhases(), parsed);
 		this.#commit(phases, `/todo import ${source}`);
 		const taskCount = phases.reduce((sum, p) => sum + p.tasks.length, 0);
 		this.ctx.showStatus(`Imported ${phases.length} phase(s), ${taskCount} task(s) from ${source}.`);
@@ -435,9 +437,10 @@ export class TodoCommandController {
 				this.ctx.showError(`Could not parse Markdown:\n  ${errors.join("\n  ")}`);
 				return;
 			}
-			this.#commit(parsed, "/todo edit");
-			const taskCount = parsed.reduce((sum, p) => sum + p.tasks.length, 0);
-			this.ctx.showStatus(`Todos updated from editor: ${parsed.length} phase(s), ${taskCount} task(s).`);
+			const phases = applyUserMarkdownPhases(current, parsed);
+			this.#commit(phases, "/todo edit");
+			const taskCount = phases.reduce((sum, p) => sum + p.tasks.length, 0);
+			this.ctx.showStatus(`Todos updated from editor: ${phases.length} phase(s), ${taskCount} task(s).`);
 		} catch (error) {
 			this.ctx.showWarning(
 				`Failed to open external editor: ${error instanceof Error ? error.message : String(error)}`,

@@ -106,6 +106,40 @@ describe("cursor todo persistence", () => {
 		]);
 	});
 
+	it("preserves user droppedBy and blockers across Cursor todo sync", () => {
+		const h = newHarness([
+			{
+				name: "Work",
+				tasks: [
+					{ content: "cancelled", status: "abandoned", droppedBy: "user" },
+					{ content: "waiting", status: "blocked", blocker: "owner" },
+					{ content: "model drop", status: "abandoned" },
+				],
+			},
+		]);
+		h.handlers.todoSync(
+			{
+				merged: false,
+				todos: [
+					{ content: "cancelled", status: "abandoned" },
+					{ content: "waiting", status: "blocked" },
+					{ content: "model drop", status: "abandoned" },
+				],
+			},
+			"call-1",
+		);
+		expect(h.current()).toEqual([
+			{
+				name: "Work",
+				tasks: [
+					{ content: "cancelled", status: "abandoned", droppedBy: "user" },
+					{ content: "waiting", status: "blocked", blocker: "owner" },
+					{ content: "model drop", status: "abandoned" },
+				],
+			},
+		]);
+	});
+
 	it("replays the newest snapshot after repeated updates", () => {
 		const h = newHarness();
 		h.handlers.todoSync({ merged: false, todos: [{ content: "step one", status: "in_progress" }] }, "call-1");
