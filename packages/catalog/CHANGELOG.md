@@ -10,6 +10,7 @@
 
 ### Fixed
 
+- Grok Bot model-cache identity resolves namespace/client version from env and `secrets/grokbot.env` (same helpers as AvailableModels), not Bun.env alone.
 - Grok Bot max-only AvailableModels rows (`supportsMaxMode` without `supportsNonMaxMode`) keep `sandMaxMode` and use `contextTokenLimitForMaxMode` instead of being forced into non-max.
 - Grok Bot preserves live AvailableModels effort ladders through `buildModel` instead of expanding them to the static catalog scale; reasoning models without an effort parameter no longer invent a thinking control.
 - Grok Bot AvailableModels cache is scoped by renewer, backend, namespace, and client version so credential or `GROKBOT_NAMESPACE` / `GROKBOT_CLIENT_VERSION` switches do not reuse another catalog.

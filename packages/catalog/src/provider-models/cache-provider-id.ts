@@ -1,9 +1,4 @@
-import {
-	GROKBOT_BACKEND,
-	GROKBOT_DEFAULT_NAMESPACE,
-	GROKBOT_STAMPED_CLIENT_VERSION,
-	resolveGrokbotClientVersion,
-} from "../discovery/grokbot-auth";
+import { GROKBOT_BACKEND, resolveGrokbotDiscoveryIdentity } from "../discovery/grokbot-auth";
 import { PERSONAL_GITHUB_COPILOT_BASE_URL } from "../wire/github-copilot";
 
 export interface ModelCacheProviderIdOptions {
@@ -101,15 +96,14 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 		case "grokbot": {
 			// AvailableModels is renewer-scoped and marked authoritative. Discovery
 			// also sends namespace + client-version headers (`grokbotClientHeaders`)
-			// that can select a different rollout/catalog, so include every input
-			// that affects the live list — not just renewer + backend.
+			// from env *or* secrets/grokbot.env, so resolve identity through the
+			// shared helper that mirrors loadGrokbotConfig.
 			const baseUrl = options.baseUrl ?? GROKBOT_BACKEND;
-			const namespace = options.namespace ?? Bun.env.GROKBOT_NAMESPACE ?? GROKBOT_DEFAULT_NAMESPACE;
-			const clientVersion =
-				options.clientVersion ??
-				Bun.env.GROKBOT_CLIENT_VERSION ??
-				resolveGrokbotClientVersion(namespace, GROKBOT_STAMPED_CLIENT_VERSION);
-			const scope = `${options.apiKey ?? ""}\u0000${baseUrl}\u0000${namespace}\u0000${clientVersion}`;
+			const identity = resolveGrokbotDiscoveryIdentity({
+				namespace: options.namespace,
+				clientVersion: options.clientVersion,
+			});
+			const scope = `${options.apiKey ?? ""}\u0000${baseUrl}\u0000${identity.namespace}\u0000${identity.clientVersion}`;
 			return `grokbot:models-v2:${Bun.hash(scope).toString(36)}`;
 		}
 		case "openrouter":

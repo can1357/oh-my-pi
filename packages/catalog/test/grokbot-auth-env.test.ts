@@ -2,7 +2,13 @@ import { afterEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { loadGrokbotSecretFile, loadGrokbotSecretFileSync } from "../src/discovery/grokbot-auth";
+import { getAgentDir, setAgentDir } from "@oh-my-pi/pi-utils";
+import {
+	loadGrokbotSecretFile,
+	loadGrokbotSecretFileSync,
+	resolveGrokbotDiscoveryIdentity,
+} from "../src/discovery/grokbot-auth";
+import { resolveModelCacheProviderId } from "../src/provider-models/cache-provider-id";
 
 describe("grokbot secrets dotenv parsing", () => {
 	const dirs: string[] = [];
@@ -42,5 +48,52 @@ describe("grokbot secrets dotenv parsing", () => {
 		const missing = path.join(dir, "absent.env");
 		expect(await loadGrokbotSecretFile(missing)).toEqual({});
 		expect(loadGrokbotSecretFileSync(missing)).toEqual({});
+	});
+
+	test("discovery identity and cache id honor secrets-file namespace/client version", async () => {
+		const previousAgentDir = getAgentDir();
+		const previousNamespace = process.env.GROKBOT_NAMESPACE;
+		const previousClientVersion = process.env.GROKBOT_CLIENT_VERSION;
+		const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-grokbot-agent-"));
+		dirs.push(agentDir);
+		await fs.mkdir(path.join(agentDir, "secrets"), { recursive: true });
+		await Bun.write(
+			path.join(agentDir, "secrets", "grokbot.env"),
+			["GROKBOT_NAMESPACE=lab", "GROKBOT_CLIENT_VERSION=0.30.0-lab"].join("\n"),
+		);
+
+		try {
+			delete process.env.GROKBOT_NAMESPACE;
+			delete process.env.GROKBOT_CLIENT_VERSION;
+			setAgentDir(agentDir);
+
+			const identity = resolveGrokbotDiscoveryIdentity();
+			expect(identity).toEqual({ namespace: "lab", clientVersion: "0.30.0-lab" });
+
+			const fromSecrets = resolveModelCacheProviderId("grokbot", {
+				apiKey: "renewer",
+				baseUrl: "https://api2.cursor.sh",
+			});
+			const explicit = resolveModelCacheProviderId("grokbot", {
+				apiKey: "renewer",
+				baseUrl: "https://api2.cursor.sh",
+				namespace: "lab",
+				clientVersion: "0.30.0-lab",
+			});
+			const prod = resolveModelCacheProviderId("grokbot", {
+				apiKey: "renewer",
+				baseUrl: "https://api2.cursor.sh",
+				namespace: "prod",
+				clientVersion: "0.30.0",
+			});
+			expect(fromSecrets).toBe(explicit);
+			expect(fromSecrets).not.toBe(prod);
+		} finally {
+			setAgentDir(previousAgentDir);
+			if (previousNamespace === undefined) delete process.env.GROKBOT_NAMESPACE;
+			else process.env.GROKBOT_NAMESPACE = previousNamespace;
+			if (previousClientVersion === undefined) delete process.env.GROKBOT_CLIENT_VERSION;
+			else process.env.GROKBOT_CLIENT_VERSION = previousClientVersion;
+		}
 	});
 });

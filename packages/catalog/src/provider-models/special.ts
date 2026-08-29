@@ -3,6 +3,7 @@ import { type CodexModelDiscoveryResult, fetchCodexModels } from "../discovery/c
 import type { DevinModelDiscoveryOptions } from "../discovery/devin";
 import { buildGitLabDuoWorkflowFallbackModel, fetchGitLabDuoWorkflowModels } from "../discovery/gitlab-duo-workflow";
 import { fetchGrokbotAvailableModels } from "../discovery/grokbot";
+import { resolveGrokbotDiscoveryIdentity } from "../discovery/grokbot-auth";
 import type { ModelManagerOptions } from "../model-manager";
 import type { FetchImpl, ModelSpec } from "../types";
 import { resolveModelCacheProviderId } from "./cache-provider-id";
@@ -223,17 +224,19 @@ export function grokbotModelManagerOptions(
 	config: GrokbotModelManagerConfig = {},
 ): ModelManagerOptions<"grokbot-sand"> {
 	const { apiKey, baseUrl, fetch } = config;
-	// Match AvailableModels header inputs so the authoritative cache cannot be
-	// reused after GROKBOT_NAMESPACE / GROKBOT_CLIENT_VERSION changes.
-	const namespace = config.namespace ?? Bun.env.GROKBOT_NAMESPACE;
-	const clientVersion = config.clientVersion ?? Bun.env.GROKBOT_CLIENT_VERSION;
+	// Match AvailableModels header identity (env + secrets/grokbot.env) so the
+	// authoritative cache cannot be reused after namespace/client-version changes.
+	const identity = resolveGrokbotDiscoveryIdentity({
+		namespace: config.namespace,
+		clientVersion: config.clientVersion,
+	});
 	return {
 		providerId: "grokbot",
 		cacheProviderId: resolveModelCacheProviderId("grokbot", {
 			apiKey,
 			baseUrl,
-			...(namespace ? { namespace } : undefined),
-			...(clientVersion ? { clientVersion } : undefined),
+			namespace: identity.namespace,
+			clientVersion: identity.clientVersion,
 		}),
 		staticModels: buildGrokbotStaticSeed(baseUrl),
 		...(apiKey

@@ -6,7 +6,7 @@
  * surface and adds `/grokbot` status formatting.
  */
 import { GROKBOT_BACKEND, grokbotSecretsPath, loadGrokbotConfig } from "@oh-my-pi/pi-catalog/discovery/grokbot-auth";
-import { shortenPath } from "@oh-my-pi/pi-utils";
+import { DEFAULT_TAB_WIDTH, sanitizeText, shortenPath } from "@oh-my-pi/pi-utils";
 
 export {
 	clearGrokbotTokenCache,
@@ -34,6 +34,31 @@ export {
 /** @deprecated Prefer {@link shortenPath} from `@oh-my-pi/pi-utils`. */
 export { shortenPath as shortenGrokbotDisplayPath } from "@oh-my-pi/pi-utils";
 
+/** Max display cells for `/grokbot` status field values (matches TUI title width). */
+const STATUS_VALUE_MAX_WIDTH = 60;
+
+/** Sanitize a status field: strip controls/ANSI, expand tabs, single-line, width-cap. */
+function formatGrokbotStatusValue(value: string): string {
+	const cleaned = sanitizeText(value)
+		.replaceAll("\t", " ".repeat(DEFAULT_TAB_WIDTH))
+		.replace(/[\r\n]+/g, " ")
+		.trim();
+	if (!cleaned) return "";
+	if (Bun.stringWidth(cleaned) <= STATUS_VALUE_MAX_WIDTH) return cleaned;
+	// Width-aware truncation without depending on pi-tui from the ai package.
+	let width = 0;
+	let end = 0;
+	const ellipsis = "…";
+	const budget = STATUS_VALUE_MAX_WIDTH - Bun.stringWidth(ellipsis);
+	for (const { segment } of new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(cleaned)) {
+		const next = Bun.stringWidth(segment);
+		if (width + next > budget) break;
+		width += next;
+		end += segment.length;
+	}
+	return `${cleaned.slice(0, end)}${ellipsis}`;
+}
+
 /** Human-readable status lines for `/grokbot` (no secret values). */
 export async function formatGrokbotStatus(): Promise<string> {
 	const cfg = await loadGrokbotConfig();
@@ -46,8 +71,8 @@ export async function formatGrokbotStatus(): Promise<string> {
 		"Auth: Grok Bot renewal credential + machine-id checksum (not Cursor OAuth, not XAI_API_KEY)",
 		`Renewer: ${cfg.renewal ? "present" : "missing"}`,
 		`Machine id: ${cfg.machineId ? "present" : "missing"}`,
-		`Namespace: ${cfg.namespace}`,
-		`Client version: ${cfg.clientVersion}`,
+		`Namespace: ${formatGrokbotStatusValue(cfg.namespace)}`,
+		`Client version: ${formatGrokbotStatusValue(cfg.clientVersion)}`,
 		`Secrets file: ${shortenPath(grokbotSecretsPath())}`,
 		"Select models as `grokbot/<id>` (e.g. `grokbot/sand-default`).",
 		"Login: `/login` → Grok Bot — run the shown prompt inside the Grok Bot system (not omp).",

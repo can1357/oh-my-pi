@@ -1,9 +1,11 @@
 import { afterEach, describe, expect, spyOn, test, vi } from "bun:test";
+import * as grokbotCatalogAuth from "@oh-my-pi/pi-catalog/discovery/grokbot-auth";
 import { shortenPath } from "@oh-my-pi/pi-utils";
 import { toInferenceMessages, toSandImageDataUrl } from "../../src/providers/grokbot";
 import * as grokbotAuth from "../../src/providers/grokbot/auth";
 import {
 	createGrokbotChecksum,
+	formatGrokbotStatus,
 	getAccessTokenExpiryMs,
 	resolveGrokbotClientVersion,
 	shortenGrokbotDisplayPath,
@@ -268,6 +270,10 @@ describe("grokbot requested model mapping", () => {
 });
 
 describe("grokbot checksum", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
 	test("is deterministic and matches sand-host JS shift-wrap encoding", () => {
 		const a = createGrokbotChecksum("machine-uuid", 1_700_000_000_000);
 		const b = createGrokbotChecksum("machine-uuid", 1_700_000_000_000);
@@ -283,6 +289,25 @@ describe("grokbot checksum", () => {
 		expect(shortenGrokbotDisplayPath("/Users/demo/.omp/agent/secrets/grokbot.env", "/Users/demo")).toBe(
 			"~/.omp/agent/secrets/grokbot.env",
 		);
+	});
+
+	test("sanitizes namespace and client version in /grokbot status", async () => {
+		spyOn(grokbotCatalogAuth, "loadGrokbotConfig").mockResolvedValue({
+			renewal: "renew-present",
+			machineId: "machine-present",
+			namespace: "lab\t\x1b[31mevil\x1b[0m",
+			clientVersion: `${"x".repeat(80)}\nnext-line`,
+		});
+		spyOn(grokbotCatalogAuth, "grokbotSecretsPath").mockReturnValue("/tmp/agent/secrets/grokbot.env");
+
+		const status = await formatGrokbotStatus();
+		expect(status).toContain("Namespace: lab   evil");
+		expect(status).not.toContain("\x1b");
+		expect(status).not.toContain("\t");
+		const versionLine = status.split("\n").find(line => line.startsWith("Client version:"));
+		expect(versionLine).toBeDefined();
+		expect(versionLine!.includes("next-line")).toBe(false);
+		expect(Bun.stringWidth(versionLine!.slice("Client version: ".length))).toBeLessThanOrEqual(60);
 	});
 });
 

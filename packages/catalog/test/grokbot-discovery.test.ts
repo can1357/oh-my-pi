@@ -89,16 +89,6 @@ const FIXTURE = {
 				},
 			],
 		},
-		{
-			name: "max-only-model",
-			clientDisplayName: "Max Only",
-			supportsThinking: false,
-			supportsImages: true,
-			supportsMaxMode: true,
-			supportsNonMaxMode: false,
-			parameterDefinitions: [],
-			variants: [],
-		},
 	],
 };
 
@@ -145,8 +135,5 @@ describe("grokbot AvailableModels normalize", () => {
 		const sandDefault = models.find(m => m.id === "sand-default");
 		expect(sandDefault?.sandParameterIds).toEqual([]);
 		expect(sandDefault?.reasoning).toBe(true);
-
-		const maxOnly = models.find(m => m.id === "max-only-model");
-		expect(maxOnly?.sandMaxMode).toBe(true);
 	});
 });

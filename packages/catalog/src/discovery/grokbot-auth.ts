@@ -95,6 +95,26 @@ export function loadGrokbotSecretFileSync(filePath = grokbotSecretsPath()): Reco
 	return parseEnvFile(filePath);
 }
 
+/**
+ * Namespace + client-version used for AvailableModels headers and model-cache
+ * scoping. Mirrors {@link loadGrokbotConfig}: env overrides secrets file, then
+ * stamped defaults. Sync so cache ids can be resolved at manager construction.
+ */
+export function resolveGrokbotDiscoveryIdentity(overrides?: { namespace?: string; clientVersion?: string }): {
+	namespace: string;
+	clientVersion: string;
+} {
+	const file = loadGrokbotSecretFileSync();
+	const namespace =
+		overrides?.namespace?.trim() || $env.GROKBOT_NAMESPACE || file.GROKBOT_NAMESPACE || GROKBOT_DEFAULT_NAMESPACE;
+	const explicitVersion =
+		overrides?.clientVersion?.trim() || $env.GROKBOT_CLIENT_VERSION || file.GROKBOT_CLIENT_VERSION || undefined;
+	return {
+		namespace,
+		clientVersion: resolveGrokbotClientVersion(namespace, GROKBOT_STAMPED_CLIENT_VERSION, explicitVersion),
+	};
+}
+
 /** Sync resolver for registry `envKeys` / AuthStorage availability. */
 export function resolveGrokbotEnvApiKey(): string | undefined {
 	const fromEnv = $env.GROKBOT_RENEWAL_CREDENTIAL || $env.SAND_INFERENCE_RENEWAL_CREDENTIAL || undefined;
