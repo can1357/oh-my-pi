@@ -37,9 +37,27 @@ describe("UnverifiedMergeLatch", () => {
 	it("marks and clears", () => {
 		const latch = new UnverifiedMergeLatch();
 		expect(latch.latched).toBe(false);
+		expect(latch.generation).toBe(0);
 		latch.mark();
 		expect(latch.latched).toBe(true);
+		expect(latch.generation).toBe(1);
 		latch.clear();
+		expect(latch.latched).toBe(false);
+		expect(latch.generation).toBe(1);
+	});
+
+	it("clearIfGeneration only clears a matching generation", () => {
+		const latch = new UnverifiedMergeLatch();
+		latch.mark();
+		latch.clearIfGeneration(0);
+		expect(latch.latched).toBe(true);
+		latch.clearIfGeneration(1);
+		expect(latch.latched).toBe(false);
+		latch.mark();
+		expect(latch.generation).toBe(2);
+		latch.clearIfGeneration(1);
+		expect(latch.latched).toBe(true);
+		latch.clearIfGeneration(2);
 		expect(latch.latched).toBe(false);
 	});
 });

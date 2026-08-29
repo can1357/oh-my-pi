@@ -5,11 +5,18 @@ import type { Settings } from "../config/settings";
 import eagerTaskPrompt from "../prompts/system/eager-task.md" with { type: "text" };
 import eagerTodoPrompt from "../prompts/system/eager-todo.md" with { type: "text" };
 import midRunTodoNudgePrompt from "../prompts/system/mid-run-todo-nudge.md" with { type: "text" };
+import todoCompletionReminderPrompt from "../prompts/system/todo-completion-reminder.md" with { type: "text" };
 import { getLatestTodoPhasesFromEntries, isTodoPhase, type TodoItem, type TodoPhase } from "../tools/todo";
 import { buildNamedToolChoice } from "../utils/tool-choice";
 import type { AgentSessionEvent } from "./agent-session-events";
 import type { SessionManager } from "./session-manager";
 import { MERGED_UNVERIFIED_MARKER } from "./settle-gates";
+
+const PARENT_VERIFY_TOOLS: Record<string, true> = {
+	bash: true,
+	eval: true,
+	lsp: true,
+};
 
 const MID_RUN_NUDGE_MUTATION_THRESHOLD = 12;
 const MID_RUN_NUDGE_MAX_PER_CYCLE = 2;
@@ -60,7 +67,8 @@ export interface TodoTrackerHost {
 	planModeEnabled(): boolean;
 	consumeLastServedToolChoiceLabel(): string | undefined;
 	hasUnverifiedMerge?(): boolean;
-	clearUnverifiedMerge?(): void;
+	unverifiedMergeGeneration?(): number;
+	clearUnverifiedMergeIfGeneration?(generationAtStart: number): void;
 }
 
 /** Owns canonical todo state, eager preludes, and completion reminders. */
@@ -71,6 +79,8 @@ export class TodoTracker {
 	#reminderAwaitingProgress = false;
 	#mutationsSinceLastTouch = 0;
 	#midRunNudgeCount = 0;
+	/** Merge generation observed when a parent-verify tool started, keyed by toolCallId. */
+	readonly #verifyStartGeneration = new Map<string, number>();
 
 	constructor(host: TodoTrackerHost) {
 		this.#host = host;
@@ -104,17 +114,50 @@ export class TodoTracker {
 		this.#midRunNudgeCount = 0;
 	}
 
+	/** Snapshots the merge generation when a parent-verify tool begins executing. */
+	onToolExecutionStart(toolName: string, toolCallId: string): void {
+		if (!PARENT_VERIFY_TOOLS[toolName] || !toolCallId) return;
+		this.#verifyStartGeneration.set(toolCallId, this.#host.unverifiedMergeGeneration?.() ?? 0);
+	}
+
 	/** Records a completed tool result before asynchronous event processing begins. */
-	onToolResult(toolName: string, isError: boolean): void {
+	onToolResult(
+		toolName: string,
+		isError: boolean,
+		details?: Record<string, unknown>,
+		toolCallId?: string,
+	): void {
 		if (toolName === "todo") {
 			this.#mutationsSinceLastTouch = 0;
 		} else if (!isError && MUTATING_TOOLS[toolName]) {
 			this.#mutationsSinceLastTouch++;
 		}
-		if (!isError && (toolName === "bash" || toolName === "eval" || toolName === "lsp")) {
-			this.#host.clearUnverifiedMerge?.();
+		if (PARENT_VERIFY_TOOLS[toolName] && this.#isSuccessfulParentVerify(toolName, isError, details)) {
+			// Prefer the generation snapped at tool start. Missing start (tests /
+			// missed event) falls back to the current generation so a post-start
+			// verify still clears, while a start-before-merge snap of 0 never clears.
+			const generationAtStart = toolCallId
+				? (this.#verifyStartGeneration.get(toolCallId) ?? 0)
+				: (this.#host.unverifiedMergeGeneration?.() ?? 0);
+			if (toolCallId) this.#verifyStartGeneration.delete(toolCallId);
+			if (generationAtStart > 0) {
+				this.#host.clearUnverifiedMergeIfGeneration?.(generationAtStart);
+			}
+		} else if (toolCallId) {
+			this.#verifyStartGeneration.delete(toolCallId);
 		}
 		this.#reminderAwaitingProgress = false;
+	}
+
+	#isSuccessfulParentVerify(
+		toolName: string,
+		isError: boolean,
+		details: Record<string, unknown> | undefined,
+	): boolean {
+		if (isError) return false;
+		// LSP reports failure via details.success without setting top-level isError.
+		if (toolName === "lsp") return details?.success === true;
+		return true;
 	}
 
 	/** Detects whether a successful todo result came from an init operation. */
@@ -205,7 +248,11 @@ export class TodoTracker {
 	async checkCompletion(message: AssistantMessage): Promise<boolean> {
 		if (this.#host.consumeLastServedToolChoiceLabel() === "user-force") return false;
 		if (this.#host.planModeEnabled()) return false;
-		if (this.#reminderAwaitingProgress) {
+		// The unverified-merge gate is an acceptance latch, not a todo nudge: it
+		// must fire even when a prior reminder is still awaiting progress, or the
+		// session would settle while the merge remains unverified.
+		const unverifiedMerge = this.#host.hasUnverifiedMerge?.() === true;
+		if (this.#reminderAwaitingProgress && !unverifiedMerge) {
 			logger.debug("Todo completion: prior reminder still awaiting agent action; staying silent", {
 				attempt: this.#reminderCount,
 			});
@@ -216,11 +263,9 @@ export class TodoTracker {
 			logger.debug("Todo completion: max reminders reached", { count: this.#reminderCount });
 			return false;
 		}
-		// The unverified-merge gate is an acceptance latch, not a todo nudge: it
-		// must fire even when todo.reminders/todo.enabled are off, or disabling
+		// Must fire even when todo.reminders/todo.enabled are off, or disabling
 		// reminders would silently disable merge verification. Only the
 		// todo-driven reminder path below consults the todo settings.
-		const unverifiedMerge = this.#host.hasUnverifiedMerge?.() === true;
 		if (
 			!unverifiedMerge &&
 			(!this.#host.settings.get("todo.reminders") || !this.#host.settings.get("todo.enabled"))
@@ -268,16 +313,14 @@ export class TodoTracker {
 		const todoList = incompleteByPhase
 			.map(phase => `- ${phase.name}\n${phase.tasks.map(task => `  - ${task.content}`).join("\n")}`)
 			.join("\n");
-		const unverifiedLine = unverifiedMerge ? `\n${MERGED_UNVERIFIED_MARKER}\n` : "";
-		const reminder =
-			`<system-reminder>\n` +
-			(incomplete.length > 0
-				? `You stopped with ${incomplete.length} incomplete todo item(s):\n${todoList}\n\n`
-				: "You stopped after an isolated merge without parent verification.\n") +
-			unverifiedLine +
-			`Please continue working on these tasks or mark them complete if finished.\n` +
-			`(Reminder ${this.#reminderCount}/${remindersMax})\n` +
-			`</system-reminder>`;
+		const reminder = prompt.render(todoCompletionReminderPrompt, {
+			incompleteCount: incomplete.length,
+			todoList,
+			unverifiedMerge,
+			unverifiedMarker: MERGED_UNVERIFIED_MARKER,
+			attempt: this.#reminderCount,
+			remindersMax,
+		});
 		logger.debug("Todo completion: sending reminder", {
 			incomplete: incomplete.length,
 			attempt: this.#reminderCount,

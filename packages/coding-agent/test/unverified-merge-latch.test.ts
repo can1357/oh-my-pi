@@ -2,7 +2,7 @@ import { describe, expect, it } from "bun:test";
 import type { Agent, AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, Model } from "@oh-my-pi/pi-ai";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { MERGED_UNVERIFIED_MARKER } from "@oh-my-pi/pi-coding-agent/session/settle-gates";
+import { MERGED_UNVERIFIED_MARKER, UnverifiedMergeLatch } from "@oh-my-pi/pi-coding-agent/session/settle-gates";
 import { TodoTracker, type TodoTrackerHost } from "@oh-my-pi/pi-coding-agent/session/todo-tracker";
 
 function textOnlyStop(text = "Task complete."): AssistantMessage {
@@ -25,7 +25,7 @@ function textOnlyStop(text = "Task complete."): AssistantMessage {
 	};
 }
 
-function host(unverified: { value: boolean }): {
+function host(latch: UnverifiedMergeLatch): {
 	host: TodoTrackerHost;
 	messages: unknown[];
 	continuations: { count: number };
@@ -52,18 +52,18 @@ function host(unverified: { value: boolean }): {
 		toolRegistry: () => new Map<string, AgentTool>(),
 		planModeEnabled: () => false,
 		consumeLastServedToolChoiceLabel: () => undefined,
-		hasUnverifiedMerge: () => unverified.value,
-		clearUnverifiedMerge: () => {
-			unverified.value = false;
-		},
+		hasUnverifiedMerge: () => latch.latched,
+		unverifiedMergeGeneration: () => latch.generation,
+		clearUnverifiedMergeIfGeneration: (generationAtStart: number) => latch.clearIfGeneration(generationAtStart),
 	};
 	return { host: built, messages, continuations };
 }
 
 describe("unverified isolated merge latch", () => {
 	it("continues when todos are empty but a merge is unverified", async () => {
-		const unverified = { value: true };
-		const ctx = host(unverified);
+		const latch = new UnverifiedMergeLatch();
+		latch.mark();
+		const ctx = host(latch);
 		const tracker = new TodoTracker(ctx.host);
 		tracker.setPhases([]);
 
@@ -72,31 +72,77 @@ describe("unverified isolated merge latch", () => {
 		expect(JSON.stringify(ctx.messages)).toContain(MERGED_UNVERIFIED_MARKER);
 	});
 
-	it("settles after a successful parent bash result clears the latch", async () => {
-		const unverified = { value: true };
-		const ctx = host(unverified);
+	it("settles after a successful parent bash that started after the latch", async () => {
+		const latch = new UnverifiedMergeLatch();
+		latch.mark();
+		const ctx = host(latch);
 		const tracker = new TodoTracker(ctx.host);
 		tracker.setPhases([]);
-		tracker.onToolResult("bash", false);
+		tracker.onToolExecutionStart("bash", "call-1");
+		tracker.onToolResult("bash", false, undefined, "call-1");
 
-		expect(unverified.value).toBe(false);
+		expect(latch.latched).toBe(false);
 		expect(await tracker.checkCompletion(textOnlyStop())).toBe(false);
 		expect(ctx.continuations.count).toBe(0);
 	});
 
 	it("does not clear the latch on a failed bash result", async () => {
-		const unverified = { value: true };
-		const ctx = host(unverified);
+		const latch = new UnverifiedMergeLatch();
+		latch.mark();
+		const ctx = host(latch);
 		const tracker = new TodoTracker(ctx.host);
-		tracker.onToolResult("bash", true);
-		expect(unverified.value).toBe(true);
+		tracker.onToolExecutionStart("bash", "call-1");
+		tracker.onToolResult("bash", true, undefined, "call-1");
+		expect(latch.latched).toBe(true);
+	});
+
+	it("does not clear when bash started before the merge was marked", async () => {
+		const latch = new UnverifiedMergeLatch();
+		const ctx = host(latch);
+		const tracker = new TodoTracker(ctx.host);
+		tracker.onToolExecutionStart("bash", "call-pre");
+		latch.mark();
+		tracker.onToolResult("bash", false, undefined, "call-pre");
+		expect(latch.latched).toBe(true);
+	});
+
+	it("does not clear the latch on lsp success:false without isError", async () => {
+		const latch = new UnverifiedMergeLatch();
+		latch.mark();
+		const ctx = host(latch);
+		const tracker = new TodoTracker(ctx.host);
+		tracker.onToolExecutionStart("lsp", "call-lsp");
+		tracker.onToolResult("lsp", false, { success: false }, "call-lsp");
+		expect(latch.latched).toBe(true);
+	});
+
+	it("clears the latch on lsp success:true", async () => {
+		const latch = new UnverifiedMergeLatch();
+		latch.mark();
+		const ctx = host(latch);
+		const tracker = new TodoTracker(ctx.host);
+		tracker.onToolExecutionStart("lsp", "call-lsp");
+		tracker.onToolResult("lsp", false, { success: true }, "call-lsp");
+		expect(latch.latched).toBe(false);
+	});
+
+	it("re-arms after an ignored merge reminder instead of settling", async () => {
+		const latch = new UnverifiedMergeLatch();
+		latch.mark();
+		const ctx = host(latch);
+		const tracker = new TodoTracker(ctx.host);
+		tracker.setPhases([]);
+
+		expect(await tracker.checkCompletion(textOnlyStop())).toBe(true);
+		expect(await tracker.checkCompletion(textOnlyStop())).toBe(true);
+		expect(ctx.continuations.count).toBe(2);
+		expect(latch.latched).toBe(true);
 	});
 
 	it("fires the merge gate even when todo reminders are disabled", async () => {
-		// Merge verification is an acceptance latch, not a todo nudge: turning
-		// todo.reminders/todo.enabled off must not strand an unverified merge.
-		const unverified = { value: true };
-		const ctx = host(unverified);
+		const latch = new UnverifiedMergeLatch();
+		latch.mark();
+		const ctx = host(latch);
 		(ctx.host.settings as Settings).set("todo.enabled", false);
 		(ctx.host.settings as Settings).set("todo.reminders", false);
 		const tracker = new TodoTracker(ctx.host);
