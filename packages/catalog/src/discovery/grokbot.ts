@@ -75,6 +75,7 @@ export async function fetchGrokbotAvailableModels(
 				"x-ghost-mode": "true",
 				"content-type": "application/json",
 				accept: "application/json",
+				"connect-protocol-version": "1",
 			}),
 			body: encodeGrokbotAvailableModelsRequest({
 				useModelParameters: true,

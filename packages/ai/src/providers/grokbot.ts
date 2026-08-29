@@ -946,7 +946,18 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 				}
 			}
 
-			const hasToolCall = output.content.some(b => b && b.type === "toolCall");
+			const hasVisibleText = output.content.some(
+				b => b.type === "text" && typeof b.text === "string" && b.text.trim().length > 0,
+			);
+			const hasToolCall = output.content.some(b => b.type === "toolCall");
+			// Trailer-only / thinking-only completions leave the agent with nothing to
+			// retry or show — require visible text or a completed tool call.
+			if (!hasVisibleText && !hasToolCall) {
+				throw new AIError.ProviderResponseError("Grok Bot stream completed with no text or tool call", {
+					provider: model.provider,
+					kind: "empty-body",
+				});
+			}
 			if (output.stopReason !== "length") {
 				output.stopReason = hasToolCall ? "toolUse" : "stop";
 			}

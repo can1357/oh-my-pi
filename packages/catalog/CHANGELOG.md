@@ -10,6 +10,7 @@
 
 ### Fixed
 
+- Grok Bot AvailableModels discovery sends `connect-protocol-version: 1` like other Connect unary clients.
 - Grok Bot AvailableModels requires explicit `supportsImages: true` before advertising image input (omitted proto3 false stays text-only).
 - Grok Bot AvailableModels treats omitted `supportsNonMaxMode` like `false` so max-only rows keep `sandMaxMode`.
 - Grok Bot JWT mint cache is scoped by caller/proxy headers so tenant header changes do not reuse another token.

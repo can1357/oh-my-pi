@@ -977,6 +977,12 @@ describe("grokbot request headers", () => {
 	});
 	const context: Context = { messages: [{ role: "user", content: "hi", timestamp: 1 }] };
 
+	function textThenTrailer(): Uint8Array {
+		const text = frameConnectProto(encodeInferenceStreamResponse({ textPart: { text: "ok", isFinal: true } }));
+		const trailer = frameConnectProto(Buffer.alloc(0), CONNECT_END_STREAM_FLAG);
+		return Buffer.concat([text, trailer]);
+	}
+
 	test("merges model.headers into the inference request", async () => {
 		spyOn(grokbotAuth, "loadGrokbotConfig").mockResolvedValue({
 			renewal: "renew",
@@ -987,10 +993,9 @@ describe("grokbot request headers", () => {
 		spyOn(grokbotAuth, "mintGrokbotAccessToken").mockResolvedValue("fake-jwt");
 
 		let captured: Record<string, string> | undefined;
-		const trailer = frameConnectProto(Buffer.alloc(0), CONNECT_END_STREAM_FLAG);
 		const fetchImpl = (async (_url: string | URL | Request, init?: RequestInit) => {
 			captured = init?.headers as Record<string, string>;
-			return new Response(trailer, {
+			return new Response(textThenTrailer(), {
 				status: 200,
 				headers: { "content-type": "application/connect+proto" },
 			});
@@ -1000,6 +1005,7 @@ describe("grokbot request headers", () => {
 		expect(result.stopReason).toBe("stop");
 		expect(captured?.["x-proxy-api-key"]).toBe("proxy-secret");
 		expect(captured?.authorization).toBe("Bearer fake-jwt");
+		expect(captured?.["connect-protocol-version"]).toBe("1");
 	});
 
 	test("replaces reserved headers case-insensitively so Authorization is not comma-joined", async () => {
@@ -1012,10 +1018,9 @@ describe("grokbot request headers", () => {
 		spyOn(grokbotAuth, "mintGrokbotAccessToken").mockResolvedValue("fake-jwt");
 
 		let captured: Record<string, string> | undefined;
-		const trailer = frameConnectProto(Buffer.alloc(0), CONNECT_END_STREAM_FLAG);
 		const fetchImpl = (async (_url: string | URL | Request, init?: RequestInit) => {
 			captured = init?.headers as Record<string, string>;
-			return new Response(trailer, {
+			return new Response(textThenTrailer(), {
 				status: 200,
 				headers: { "content-type": "application/connect+proto" },
 			});
@@ -1032,6 +1037,37 @@ describe("grokbot request headers", () => {
 		expect(typeKeys).toHaveLength(1);
 		expect(captured?.[authKeys[0]!]).toBe("Bearer fake-jwt");
 		expect(captured?.[typeKeys[0]!]).toBe("application/connect+proto");
+	});
+
+	test("rejects trailer-only and thinking-only completions with no text or tool call", async () => {
+		spyOn(grokbotAuth, "loadGrokbotConfig").mockResolvedValue({
+			renewal: "renew",
+			machineId: "machine",
+			namespace: "prod",
+			clientVersion: "0.30.0",
+		});
+		spyOn(grokbotAuth, "mintGrokbotAccessToken").mockResolvedValue("fake-jwt");
+
+		const emptyTrailer = frameConnectProto(Buffer.alloc(0), CONNECT_END_STREAM_FLAG);
+		const thinkingOnly = Buffer.concat([
+			frameConnectProto(
+				encodeInferenceStreamResponse({
+					thinkingPart: { text: "hmm", signature: "sig", isFinal: true },
+				}),
+			),
+			emptyTrailer,
+		]);
+
+		for (const body of [emptyTrailer, thinkingOnly]) {
+			const fetchImpl = (async () =>
+				new Response(body, {
+					status: 200,
+					headers: { "content-type": "application/connect+proto" },
+				})) as FetchImpl;
+			const result = await streamGrokBot(model, context, { apiKey: "renew", fetch: fetchImpl }).result();
+			expect(result.stopReason).toBe("error");
+			expect(result.errorMessage).toMatch(/no text or tool call/i);
+		}
 	});
 
 	test("treats Connect unauthenticated end-stream as HTTP 401 and clears the token cache", async () => {
@@ -1077,9 +1113,10 @@ describe("grokbot disableReasoning effort floor", () => {
 		spyOn(grokbotAuth, "mintGrokbotAccessToken").mockResolvedValue("fake-jwt");
 
 		let capturedEffort: string | undefined;
+		const text = frameConnectProto(encodeInferenceStreamResponse({ textPart: { text: "ok", isFinal: true } }));
 		const trailer = frameConnectProto(Buffer.alloc(0), CONNECT_END_STREAM_FLAG);
 		const fetchImpl = (async () =>
-			new Response(trailer, {
+			new Response(Buffer.concat([text, trailer]), {
 				status: 200,
 				headers: { "content-type": "application/connect+proto" },
 			})) as FetchImpl;

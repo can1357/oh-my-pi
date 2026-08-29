@@ -310,6 +310,7 @@ describe("grokbot AvailableModels headers", () => {
 		expect(seen.length).toBe(2);
 		expect(seen.every(s => s.headers["x-proxy-api-key"] === "proxy-secret")).toBe(true);
 		expect(seen[1]?.url).toContain("/aiserver.v1.AiService/AvailableModels");
+		expect(seen[1]?.headers["connect-protocol-version"]).toBe("1");
 	});
 
 	test("clears the cached token after AvailableModels returns 401", async () => {
