@@ -137,6 +137,8 @@ export function classifyGatewayError(err: unknown): GatewayErrorClassification {
 function bucketStatus(status: number, message: string): { status: number; type: string; message: string } {
 	if (status === 401 || status === 403) return { status, type: "authentication_error", message };
 	if (status === 429) return { status, type: "rate_limit_error", message };
+	// Request timeout is provider-transient, not a client invalid_request.
+	if (status === 408) return { status, type: "upstream_error", message };
 	if (status >= 400 && status < 500) return { status, type: "invalid_request_error", message };
 	if (status >= 500) return { status, type: "upstream_error", message };
 	return { status: 502, type: "upstream_error", message };
@@ -226,6 +228,10 @@ function classifyOwnerDisposition(
 		if (REVOKED_PATTERN.test(message)) {
 			return { owner: "credential", disposition: "credential_permanent" };
 		}
+	}
+
+	if (status === 408) {
+		return { owner: "provider", disposition: "provider_transient" };
 	}
 
 	if (status === 400 || type === "invalid_request_error") {

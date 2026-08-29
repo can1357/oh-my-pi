@@ -185,6 +185,22 @@ describe("auth-gateway classifyGatewayError", () => {
 		expect(c.disposition).toBe("provider_transient");
 	});
 
+	it("maps HTTP 408 to upstream_error / provider_transient (not request_terminal)", () => {
+		const c = classifyGatewayError(Object.assign(new Error("request timed out"), { status: 408 }));
+		expect(c.status).toBe(408);
+		expect(c.type).toBe("upstream_error");
+		expect(c.owner).toBe("provider");
+		expect(c.disposition).toBe("provider_transient");
+		expect(isRetryableGatewayDisposition(c.disposition)).toBe(true);
+	});
+
+	it("maps embedded HTTP 408 the same as an explicit status property", () => {
+		const c = classifyGatewayError(new Error("HTTP 408: Request Timeout"));
+		expect(c.status).toBe(408);
+		expect(c.type).toBe("upstream_error");
+		expect(c.disposition).toBe("provider_transient");
+	});
+
 	it("falls through inscrutable 502 to provider_unavailable", () => {
 		const c = classifyGatewayError(new Error("something inscrutable happened"));
 		expect(c.status).toBe(502);
