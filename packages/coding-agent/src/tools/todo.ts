@@ -700,6 +700,20 @@ export function resolveTodoMarkdownPath(input: string, cwd: string): string {
 	return resolveToCwd(raw, cwd);
 }
 
+/**
+ * Escape HTML comment delimiters in todo task text so a literal
+ * `<!-- dropped-by: user -->` (or blocker comment) in content cannot be
+ * mistaken for provenance metadata on the next parse.
+ */
+export function escapeTodoMarkdownContent(content: string): string {
+	return content.replaceAll("<!--", "&lt;!--").replaceAll("-->", "--&gt;");
+}
+
+/** Inverse of {@link escapeTodoMarkdownContent} after provenance comments are stripped. */
+export function unescapeTodoMarkdownContent(content: string): string {
+	return content.replaceAll("&lt;!--", "<!--").replaceAll("--&gt;", "-->");
+}
+
 /** Render todo phases as a Markdown checklist suitable for editing/copying. */
 export function phasesToMarkdown(phases: TodoPhase[]): string {
 	if (phases.length === 0) return "# Todos\n";
@@ -709,12 +723,16 @@ export function phasesToMarkdown(phases: TodoPhase[]): string {
 		out.push(`# ${phases[i].name}`);
 		for (const task of phases[i].tasks) {
 			// Provenance notes ride in trailing HTML comments: invisible in rendered
-			// markdown, unambiguous to parse back (task content can't contain the
-			// comment delimiters), so they survive `/todo edit` and export/import.
-			const blockerNote = task.status === "blocked" && task.blocker ? ` <!-- blocker: ${task.blocker} -->` : "";
+			// markdown. Task content escapes `<!--`/`-->` so only metadata we emit
+			// here can match the parse-time sentinel.
+			const visible = escapeTodoMarkdownContent(task.content);
+			const blockerNote =
+				task.status === "blocked" && task.blocker
+					? ` <!-- blocker: ${escapeTodoMarkdownContent(task.blocker)} -->`
+					: "";
 			const droppedByNote =
 				task.status === "abandoned" && task.droppedBy === "user" ? ` <!-- dropped-by: user -->` : "";
-			out.push(`- [${STATUS_TO_MARKER[task.status]}] ${task.content}${blockerNote}${droppedByNote}`);
+			out.push(`- [${STATUS_TO_MARKER[task.status]}] ${visible}${blockerNote}${droppedByNote}`);
 		}
 	}
 	return `${out.join("\n")}\n`;
@@ -768,11 +786,15 @@ export function markdownToPhases(md: string): { phases: TodoPhase[]; errors: str
 				continue;
 			}
 			// Recover blocker / dropped-by provenance from trailing HTML comments
-			// (see phasesToMarkdown), then strip comments from the visible content.
+			// (see phasesToMarkdown), then unescape comment delimiters in content.
 			const rawContent = taskMatch[2].trim();
 			const blockerMatch = /^(.*?)\s*<!--\s*blocker:\s*(.*?)\s*-->$/.exec(rawContent);
 			if (status === "blocked" && blockerMatch) {
-				currentPhase.tasks.push({ content: blockerMatch[1].trim(), status, blocker: blockerMatch[2].trim() });
+				currentPhase.tasks.push({
+					content: unescapeTodoMarkdownContent(blockerMatch[1].trim()),
+					status,
+					blocker: unescapeTodoMarkdownContent(blockerMatch[2].trim()),
+				});
 			} else {
 				// Recover an already-stamped user drop from the HTML comment emitted by
 				// phasesToMarkdown. Bare `[-]` stays model-shaped here — callers that
@@ -781,12 +803,12 @@ export function markdownToPhases(md: string): { phases: TodoPhase[]; errors: str
 				const droppedByMatch = /^(.*?)\s*<!--\s*dropped-by:\s*user\s*-->$/.exec(rawContent);
 				if (status === "abandoned" && droppedByMatch) {
 					currentPhase.tasks.push({
-						content: droppedByMatch[1].trim(),
+						content: unescapeTodoMarkdownContent(droppedByMatch[1].trim()),
 						status,
 						droppedBy: "user",
 					});
 				} else {
-					currentPhase.tasks.push({ content: rawContent, status });
+					currentPhase.tasks.push({ content: unescapeTodoMarkdownContent(rawContent), status });
 				}
 			}
 			continue;
@@ -801,28 +823,56 @@ export function markdownToPhases(md: string): { phases: TodoPhase[]; errors: str
 
 /**
  * Decide whether an abandoned task from a user-authored replace should carry
- * `droppedBy: "user"` given the prior in-memory list.
+ * `droppedBy: "user"` given the matched prior occurrence.
  *
  * - newly abandoned → user cancel
  * - still abandoned + prior `droppedBy: "user"` → keep (comment may have been stripped)
  * - still abandoned + prior was model-abandoned → stay model (no-op edit)
  * - empty prior (fresh import / first RPC set) → all abandoned are user-authored
  */
-function shouldStampAbandonedAsUser(priorByContent: Map<string, TodoItem>, emptyPrior: boolean, task: TodoItem): boolean {
+function shouldStampAbandonedAsUser(prev: TodoItem | undefined, emptyPrior: boolean, task: TodoItem): boolean {
 	if (task.droppedBy === "user") return true;
-	const prev = priorByContent.get(task.content);
 	if (emptyPrior || !prev || prev.status !== "abandoned") return true;
 	return prev.droppedBy === "user";
 }
 
-function priorAbandonedIndex(prior: TodoPhase[]): { byContent: Map<string, TodoItem>; empty: boolean } {
-	const byContent = new Map<string, TodoItem>();
+/**
+ * Prior tasks keyed by phase name, then content, as FIFO occurrence queues.
+ * Duplicate texts with different provenance must not collapse to last-content-wins.
+ */
+function buildPriorOccurrenceLookup(prior: TodoPhase[]): {
+	queues: Map<string, Map<string, TodoItem[]>>;
+	empty: boolean;
+} {
+	const queues = new Map<string, Map<string, TodoItem[]>>();
+	let empty = true;
 	for (const phase of prior) {
+		if (phase.tasks.length > 0) empty = false;
+		let byContent = queues.get(phase.name);
+		if (!byContent) {
+			byContent = new Map();
+			queues.set(phase.name, byContent);
+		}
 		for (const task of phase.tasks) {
-			byContent.set(task.content, task);
+			let list = byContent.get(task.content);
+			if (!list) {
+				list = [];
+				byContent.set(task.content, list);
+			}
+			list.push(task);
 		}
 	}
-	return { byContent, empty: prior.every(phase => phase.tasks.length === 0) };
+	return { queues, empty };
+}
+
+function takePriorOccurrence(
+	queues: Map<string, Map<string, TodoItem[]>>,
+	phaseName: string,
+	content: string,
+): TodoItem | undefined {
+	const list = queues.get(phaseName)?.get(content);
+	if (!list || list.length === 0) return undefined;
+	return list.shift();
 }
 
 /**
@@ -833,16 +883,20 @@ function priorAbandonedIndex(prior: TodoPhase[]): { byContent: Map<string, TodoI
  * abandoned parse result as user-authored would fail open on a no-op save.
  * Pass an empty `prior` for `/todo import` so every `[-]`/`[~]` is a user cancel
  * even when the replaced list already held a model-abandoned item with the same content.
+ *
+ * Matching is by phase name + content occurrence order (not a last-content-wins
+ * map), so duplicate texts with different provenance keep their stamps on a no-op edit.
  */
 export function applyUserMarkdownPhases(prior: TodoPhase[], parsed: TodoPhase[]): TodoPhase[] {
-	const { byContent, empty } = priorAbandonedIndex(prior);
+	const { queues, empty } = buildPriorOccurrenceLookup(prior);
 
 	return parsed.map(phase => ({
 		name: phase.name,
 		tasks: phase.tasks.map(task => {
 			const next = cloneTask(task);
 			if (next.status !== "abandoned") return next;
-			if (shouldStampAbandonedAsUser(byContent, empty, next)) {
+			const prev = takePriorOccurrence(queues, phase.name, next.content);
+			if (shouldStampAbandonedAsUser(prev, empty, next)) {
 				next.droppedBy = "user";
 			}
 			return next;
@@ -856,13 +910,14 @@ export function applyUserMarkdownPhases(prior: TodoPhase[], parsed: TodoPhase[])
  * `notes`, and `details` that Python RPC callers round-trip.
  */
 export function applyRpcTodoProvenance(prior: TodoPhase[], incoming: TodoPhase[]): TodoPhase[] {
-	const { byContent, empty } = priorAbandonedIndex(prior);
+	const { queues, empty } = buildPriorOccurrenceLookup(prior);
 
 	return incoming.map(phase => ({
 		...phase,
 		tasks: phase.tasks.map(task => {
 			if (task.status !== "abandoned") return task;
-			if (!shouldStampAbandonedAsUser(byContent, empty, task)) return task;
+			const prev = takePriorOccurrence(queues, phase.name, task.content);
+			if (!shouldStampAbandonedAsUser(prev, empty, task)) return task;
 			return { ...task, droppedBy: "user" as const };
 		}),
 	}));

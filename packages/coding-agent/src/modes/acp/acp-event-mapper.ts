@@ -282,7 +282,7 @@ export function mapAgentSessionEventToAcpSessionUpdates(
 			const entries = event.todos.map(todo => ({
 				content: todo.content,
 				priority: "medium" as const,
-				status: mapTodoStatus(todo.status),
+				status: mapTodoStatus(todo.status, todo.droppedBy),
 			}));
 			return [toSessionNotification(sessionId, { sessionUpdate: "plan", entries })];
 		}
@@ -407,7 +407,10 @@ const todoStatusMap: Record<TodoStatus, "pending" | "in_progress" | "completed">
 	blocked: "pending",
 };
 
-function mapTodoStatus(status: TodoStatus): "pending" | "in_progress" | "completed" {
+function mapTodoStatus(status: TodoStatus, droppedBy?: "user"): "pending" | "in_progress" | "completed" {
+	// User-authored cancels are settled cancels: plan updates must not resurrect
+	// them as pending. Reminder/model drops stay pending (incomplete).
+	if (status === "abandoned" && droppedBy === "user") return "completed";
 	return todoStatusMap[status];
 }
 
@@ -426,7 +429,7 @@ function mapTodoResultToPlanUpdate(
 		entries: extractTodoEntries(phases).map(todo => ({
 			content: todo.content,
 			priority: "medium" as const,
-			status: mapTodoStatus(todo.status),
+			status: mapTodoStatus(todo.status, todo.droppedBy),
 		})),
 	};
 }
@@ -442,8 +445,10 @@ function extractTodoPhases(result: unknown): unknown {
 	return (details as { phases?: unknown }).phases;
 }
 
-function extractTodoEntries(phases: unknown[]): Array<{ content: string; status: TodoStatus }> {
-	const entries: Array<{ content: string; status: TodoStatus }> = [];
+function extractTodoEntries(
+	phases: unknown[],
+): Array<{ content: string; status: TodoStatus; droppedBy?: "user" }> {
+	const entries: Array<{ content: string; status: TodoStatus; droppedBy?: "user" }> = [];
 	for (const phase of phases) {
 		if (typeof phase !== "object" || phase === null || !("tasks" in phase)) {
 			continue;
@@ -461,7 +466,12 @@ function extractTodoEntries(phases: unknown[]): Array<{ content: string; status:
 				continue;
 			}
 			const status = (task as { status?: TodoStatus }).status;
-			entries.push({ content, status: isTodoStatus(status) ? status : "pending" });
+			const droppedBy = (task as { droppedBy?: unknown }).droppedBy;
+			entries.push({
+				content,
+				status: isTodoStatus(status) ? status : "pending",
+				...(droppedBy === "user" ? { droppedBy: "user" as const } : {}),
+			});
 		}
 	}
 	return entries;

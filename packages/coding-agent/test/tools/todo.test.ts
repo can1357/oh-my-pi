@@ -355,6 +355,69 @@ describe("TodoTool operations", () => {
 		});
 	});
 
+	it("escapes literal provenance comments in task content so they are not parsed as stamps", () => {
+		const phases: TodoPhase[] = [
+			{
+				name: "Work",
+				tasks: [{ content: "note <!-- dropped-by: user --> in body", status: "abandoned" }],
+			},
+		];
+		const md = phasesToMarkdown(phases);
+		expect(md).toContain("&lt;!-- dropped-by: user --&gt;");
+		expect(md).not.toMatch(/\] note <!-- dropped-by: user -->/);
+
+		const { phases: parsed, errors } = markdownToPhases(md);
+		expect(errors).toEqual([]);
+		expect(parsed[0]?.tasks[0]).toEqual({
+			content: "note <!-- dropped-by: user --> in body",
+			status: "abandoned",
+		});
+		const merged = applyUserMarkdownPhases(phases, parsed);
+		expect(merged[0]?.tasks[0]).toEqual({
+			content: "note <!-- dropped-by: user --> in body",
+			status: "abandoned",
+		});
+	});
+
+	it("keeps model drops unstamped on a no-op edit when duplicate content shares a phase", () => {
+		const prior: TodoPhase[] = [
+			{
+				name: "Work",
+				tasks: [
+					{ content: "Ship", status: "abandoned" },
+					{ content: "Ship", status: "pending" },
+				],
+			},
+		];
+		const md = phasesToMarkdown(prior);
+		const { phases: parsed, errors } = markdownToPhases(md);
+		expect(errors).toEqual([]);
+		const merged = applyUserMarkdownPhases(prior, parsed);
+		// Last-content-wins would see the pending row and stamp the model drop as user.
+		expect(merged[0]?.tasks[0]).toEqual({ content: "Ship", status: "abandoned" });
+		expect(merged[0]?.tasks[1]?.status).toBe("in_progress");
+	});
+
+	it("preserves per-occurrence droppedBy when duplicate abandoned texts share a phase", () => {
+		const prior: TodoPhase[] = [
+			{
+				name: "Work",
+				tasks: [
+					{ content: "Ship", status: "abandoned" },
+					{ content: "Ship", status: "abandoned", droppedBy: "user" },
+				],
+			},
+		];
+		const md = phasesToMarkdown(prior);
+		const { phases: parsed, errors } = markdownToPhases(md);
+		expect(errors).toEqual([]);
+		const merged = applyUserMarkdownPhases(prior, parsed);
+		expect(merged[0]?.tasks).toEqual([
+			{ content: "Ship", status: "abandoned" },
+			{ content: "Ship", status: "abandoned", droppedBy: "user" },
+		]);
+	});
+
 	it("stamps newly abandoned checklist items from /todo edit as user drops", () => {
 		const prior: TodoPhase[] = [
 			{
