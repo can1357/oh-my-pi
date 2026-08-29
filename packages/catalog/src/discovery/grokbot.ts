@@ -179,7 +179,7 @@ function toGrokbotModelSpec(row: GrokbotAvailableModel, baseUrl: string): ModelS
 		baseUrl,
 		reasoning,
 		...(thinking ? { thinking } : undefined),
-		input: row.supportsImages === false ? ["text"] : ["text", "image"],
+		input: row.supportsImages === true ? ["text", "image"] : ["text"],
 		cost: COST,
 		contextWindow: resolveGrokbotContextWindow(row, sandMaxMode),
 		maxTokens: DEFAULT_MAX_TOKENS,

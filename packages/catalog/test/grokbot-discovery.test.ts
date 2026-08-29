@@ -107,6 +107,14 @@ const FIXTURE = {
 			],
 		},
 		{
+			name: "text-only-omitted-images",
+			clientDisplayName: "Text Only Omitted Images",
+			supportsThinking: false,
+			// proto3 omits false — supportsImages absent
+			parameterDefinitions: [],
+			variants: [{ parameterValues: [] }],
+		},
+		{
 			name: "effort-with-minimal",
 			clientDisplayName: "Effort With Minimal",
 			supportsThinking: true,
@@ -145,6 +153,9 @@ describe("grokbot AvailableModels normalize", () => {
 		expect(composer?.input).toEqual(["text"]);
 		expect(composer?.sandMaxMode).toBe(false);
 
+		const textOnlyOmitted = models.find(m => m.id === "text-only-omitted-images");
+		expect(textOnlyOmitted?.input).toEqual(["text"]);
+
 		const maxOnly = models.find(m => m.id === "max-only-model");
 		expect(maxOnly?.sandMaxMode).toBe(true);
 		expect(maxOnly?.contextWindow).toBe(1_000_000);
@@ -158,6 +169,7 @@ describe("grokbot AvailableModels normalize", () => {
 		expect([...((grok?.thinking?.efforts as readonly string[] | undefined) ?? [])]).toEqual(["low", "xhigh"]);
 		expect(grok?.contextWindow).toBe(256_000);
 		expect(grok?.sandMaxMode).toBe(false);
+		expect(grok?.input).toEqual(["text", "image"]);
 
 		const sol = models.find(m => m.id === "gpt-5.6-sol");
 		expect(sol?.sandParameterIds).toEqual(["context", "reasoning", "fast"]);

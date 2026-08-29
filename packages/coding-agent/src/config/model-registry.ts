@@ -729,9 +729,10 @@ export class ModelRegistry {
 				if (configuredDiscoveryProviders.has(providerId)) return false;
 				// Credential-scoped providers (grokbot, copilot, …) can warm-start from
 				// cache when a sync-resolvable credential exists so the renewer-scoped
-				// cache id matches what discovery previously wrote.
+				// cache id matches what discovery previously wrote. Include models.yml
+				// `providers.*.apiKey` (already installed into AuthStorage above).
 				if (isCredentialScopedModelCacheProvider(providerId)) {
-					return Boolean(getEnvApiKey(providerId));
+					return Boolean(this.#resolveCredentialScopedStartupApiKey(providerId));
 				}
 				return true;
 			}),
@@ -932,12 +933,23 @@ export class ModelRegistry {
 		);
 	}
 
+	#resolveCredentialScopedStartupApiKey(providerId: string): string | undefined {
+		const fromEnv = getEnvApiKey(providerId);
+		if (fromEnv) return fromEnv;
+		const fromConfig = this.#customProviderApiKeys.get(providerId);
+		if (!fromConfig) return undefined;
+		const resolved = resolveConfigValue(fromConfig);
+		return resolved || undefined;
+	}
+
 	#resolveStartupModelCacheProviderId(providerId: string): string {
 		const baseUrl =
 			this.#runtimeProviderOverrides.get(providerId)?.baseUrl ??
 			this.#providerOverrides.get(providerId)?.baseUrl ??
 			(this.#hasFullSnapshot ? this.getProviderBaseUrl(providerId) : undefined);
-		const apiKey = isCredentialScopedModelCacheProvider(providerId) ? getEnvApiKey(providerId) : undefined;
+		const apiKey = isCredentialScopedModelCacheProvider(providerId)
+			? this.#resolveCredentialScopedStartupApiKey(providerId)
+			: undefined;
 		if (providerId === "grokbot") {
 			const identity = resolveGrokbotDiscoveryIdentity();
 			return resolveModelCacheProviderId(providerId, {
@@ -945,16 +957,15 @@ export class ModelRegistry {
 				apiKey,
 				namespace: identity.namespace,
 				clientVersion: identity.clientVersion,
-				headers: this.#resolveProviderOverrideHeaders("grokbot"),
+				headers: this.getProviderHeaders("grokbot"),
 			});
 		}
 		return resolveModelCacheProviderId(providerId, { baseUrl, apiKey });
 	}
 
 	#resolveProviderOverrideHeaders(providerId: string): Record<string, string> | undefined {
-		const override = this.#runtimeProviderOverrides.get(providerId) ?? this.#providerOverrides.get(providerId);
-		if (!override?.headers) return undefined;
-		return resolveConfigHeaders(override.headers);
+		// Merge models.yml + runtime override headers (same as getProviderHeaders).
+		return this.getProviderHeaders(providerId);
 	}
 
 	#loadCachedStandardProviderModels(providerIds: readonly string[]): {

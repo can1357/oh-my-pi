@@ -8,6 +8,8 @@
 
 ### Fixed
 
+- Grok Bot discovery merges `models.yml` and runtime provider headers (a baseUrl-only runtime override no longer drops configured proxy/tenant headers).
+- Credential-scoped startup model caches (including Grok Bot) warm from `providers.*.apiKey` in `models.yml`, not only from environment credentials.
 - Grok Bot warm-start cache load uses the renewer-scoped cache id (env/secrets credential + identity) so previously discovered models are visible before async refresh.
 - Model lookup keeps a canonical model id resolvable when another catalog row lists that id as an alias (aliases no longer null out exact matches).
 - Login success UI only claims credentials were saved to the agent DB when AuthStorage actually stored an identity (host-secret flows like Grok Bot no longer misreport the backup location).

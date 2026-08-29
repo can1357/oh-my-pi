@@ -10,6 +10,7 @@
 
 ### Fixed
 
+- Grok Bot AvailableModels requires explicit `supportsImages: true` before advertising image input (omitted proto3 false stays text-only).
 - Grok Bot AvailableModels treats omitted `supportsNonMaxMode` like `false` so max-only rows keep `sandMaxMode`.
 - Grok Bot JWT mint cache is scoped by caller/proxy headers so tenant header changes do not reuse another token.
 - Grok Bot AvailableModels discovery and token minting merge configured headers case-insensitively so reserved names are not comma-joined on the wire.
