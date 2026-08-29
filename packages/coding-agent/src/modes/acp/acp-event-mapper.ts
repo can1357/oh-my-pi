@@ -445,9 +445,7 @@ function extractTodoPhases(result: unknown): unknown {
 	return (details as { phases?: unknown }).phases;
 }
 
-function extractTodoEntries(
-	phases: unknown[],
-): Array<{ content: string; status: TodoStatus; droppedBy?: "user" }> {
+function extractTodoEntries(phases: unknown[]): Array<{ content: string; status: TodoStatus; droppedBy?: "user" }> {
 	const entries: Array<{ content: string; status: TodoStatus; droppedBy?: "user" }> = [];
 	for (const phase of phases) {
 		if (typeof phase !== "object" || phase === null || !("tasks" in phase)) {

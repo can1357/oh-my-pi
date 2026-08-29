@@ -3,10 +3,22 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 /**
- * Bun 1.4.0 on this host SIGKILLs every `bun build --compile` binary, including
- * `console.log("hi")`. Compile-backed tests should skip rather than fail.
+ * Opt out of compile-backed tests on hosts that cannot launch `bun build --compile`
+ * binaries. Set this explicitly — do not rely on a silent probe in CI.
  */
-export function compiledBinariesWork(): boolean {
+const EXPLICIT_UNSUPPORTED =
+	process.env.OMP_SKIP_COMPILED_BINARY_TESTS === "1" || process.env.OMP_SKIP_COMPILED_BINARY_TESTS === "true";
+
+function inContinuousIntegration(): boolean {
+	return process.env.CI === "true" || process.env.GITHUB_ACTIONS === "true";
+}
+
+/**
+ * Probe whether a minimal `bun build --compile` binary can launch.
+ * Used only outside CI so a broken local Bun (e.g. SIGKILL on compile) can skip
+ * without failing the whole suite. In CI, compile/launch failure must fail tests.
+ */
+function probeCompiledBinaries(): boolean {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-compile-probe-"));
 	try {
 		const entry = path.join(dir, "hi.ts");
@@ -22,6 +34,19 @@ export function compiledBinariesWork(): boolean {
 	} finally {
 		fs.rmSync(dir, { recursive: true, force: true });
 	}
+}
+
+/**
+ * Whether compile-backed tests should run.
+ *
+ * - Explicit unsupported env (`OMP_SKIP_COMPILED_BINARY_TESTS`) → skip
+ * - CI → always run (a failed compile/launch fails the suite)
+ * - Local → probe, skip only when the host cannot launch compiled binaries
+ */
+export function compiledBinariesWork(): boolean {
+	if (EXPLICIT_UNSUPPORTED) return false;
+	if (inContinuousIntegration()) return true;
+	return probeCompiledBinaries();
 }
 
 export const COMPILED_BINARIES_WORK = compiledBinariesWork();

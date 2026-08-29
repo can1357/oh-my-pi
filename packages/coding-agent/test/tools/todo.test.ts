@@ -527,9 +527,7 @@ describe("TodoTool operations", () => {
 	});
 
 	it("stamps imported [-] as user cancel even over a prior model drop", () => {
-		const prior: TodoPhase[] = [
-			{ name: "Work", tasks: [{ content: "model drop", status: "abandoned" }] },
-		];
+		const prior: TodoPhase[] = [{ name: "Work", tasks: [{ content: "model drop", status: "abandoned" }] }];
 		const { phases: parsed, errors } = markdownToPhases("# Work\n- [-] model drop\n");
 		expect(errors).toEqual([]);
 		// Import uses empty prior so the file's abandoned markers win.
@@ -547,9 +545,7 @@ describe("TodoTool operations", () => {
 	});
 
 	it("stamps RPC abandoned provenance without stripping host wire fields", () => {
-		const prior: TodoPhase[] = [
-			{ name: "Ship", tasks: [{ content: "model drop", status: "abandoned" }] },
-		];
+		const prior: TodoPhase[] = [{ name: "Ship", tasks: [{ content: "model drop", status: "abandoned" }] }];
 		const incoming = [
 			{
 				name: "Ship",

@@ -140,6 +140,37 @@ describe("cursor todo persistence", () => {
 		]);
 	});
 
+	it("merges Cursor provenance by content occurrence, not last-content-wins", () => {
+		const h = newHarness([
+			{
+				name: "Work",
+				tasks: [
+					{ content: "Ship", status: "abandoned", droppedBy: "user" },
+					{ content: "Ship", status: "abandoned" },
+				],
+			},
+		]);
+		h.handlers.todoSync(
+			{
+				merged: false,
+				todos: [
+					{ content: "Ship", status: "abandoned" },
+					{ content: "Ship", status: "abandoned" },
+				],
+			},
+			"call-1",
+		);
+		expect(h.current()).toEqual([
+			{
+				name: "Work",
+				tasks: [
+					{ content: "Ship", status: "abandoned", droppedBy: "user" },
+					{ content: "Ship", status: "abandoned" },
+				],
+			},
+		]);
+	});
+
 	it("replays the newest snapshot after repeated updates", () => {
 		const h = newHarness();
 		h.handlers.todoSync({ merged: false, todos: [{ content: "step one", status: "in_progress" }] }, "call-1");
