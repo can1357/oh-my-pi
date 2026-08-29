@@ -367,6 +367,7 @@ describe("focus-attach mid-turn keeps the prompt→yield delta", () => {
 			ensureLoadingAnimation: vi.fn(),
 			flushPendingModelSwitch: vi.fn(async () => {}),
 			flushPendingCommandOutput: vi.fn(),
+			syncRetryHintRow: vi.fn(),
 			session: viewSession,
 			viewSession,
 			sessionManager: viewSession.sessionManager,

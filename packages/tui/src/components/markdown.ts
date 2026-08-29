@@ -1539,12 +1539,28 @@ function classifyHexColor(hex: string, strict: boolean): boolean {
 	return true;
 }
 
-/** ANSI-painted `glyph` for `#${hex}`, or "" when the color can't be encoded. */
-function colorSwatch(hex: string, glyph: string): string {
-	const ansi = Bun.color(`#${hex}`, TERMINAL.trueColor ? "ansi-16m" : "ansi-256");
-	// Reset only the foreground (\x1b[39m) so an enclosing background/decoration
-	// applied later by the line renderer survives across the swatch.
-	return ansi ? `${ansi}${glyph}\x1b[39m ` : "";
+/** Black-or-white foreground legible on `#${hex}` used as a fill. VS Code's
+ *  rule (Color.isLighter): YIQ brightness (r·299 + g·587 + b·114)/1000 ≥ 128
+ *  → dark text, else light. */
+function swatchContrastFg(hex: string): string {
+	const rgba = Bun.color(`#${hex}`, "{rgba}");
+	if (!rgba) return "";
+	const light = (rgba.r * 299 + rgba.g * 587 + rgba.b * 114) / 1000 >= 128;
+	if (TERMINAL.trueColor) return light ? "\x1b[38;2;0;0;0m" : "\x1b[38;2;255;255;255m";
+	return light ? "\x1b[38;5;16m" : "\x1b[38;5;231m";
+}
+
+/** Chip glyph + `text` (the `#hex` mention) painted onto the color itself:
+ *  a fg-painted chip, then the token with the color as background and a
+ *  YIQ-contrast foreground (VS Code's color-picker rule). Returns "" when the
+ *  color can't be encoded. Foreground closes with \x1b[39m and background with
+ *  a standalone \x1b[49m so line-level backgrounds re-open themselves via
+ *  applyBackgroundToLine / Theme.bgFill. */
+function colorSwatch(hex: string, glyph: string, text: string): string {
+	const fg = Bun.color(`#${hex}`, TERMINAL.trueColor ? "ansi-16m" : "ansi-256");
+	if (!fg) return "";
+	const bg = fg.replace("[38;", "[48;");
+	return `${fg}${glyph}\x1b[39m ${bg}${swatchContrastFg(hex)}${text}\x1b[39m\x1b[49m`;
 }
 
 /**
@@ -1560,10 +1576,10 @@ function renderTextWithSwatches(text: string, applySegment: (t: string) => strin
 		const match = HEX_COLOR_REGEX.exec(text);
 		if (match === null) break;
 		if (!classifyHexColor(match[1], true)) continue;
-		const swatch = colorSwatch(match[1], glyph);
+		const swatch = colorSwatch(match[1], glyph, match[0]);
 		if (!swatch) continue;
 		if (match.index > last) result += applySegment(text.slice(last, match.index));
-		result += swatch + applySegment(match[0]);
+		result += swatch;
 		last = match.index + match[0].length;
 	}
 	if (last === 0) return applySegment(text);
@@ -1575,7 +1591,7 @@ function renderTextWithSwatches(text: string, applySegment: (t: string) => strin
 function codespanSwatch(code: string, glyph: string): string {
 	const match = HEX_COLOR_EXACT_REGEX.exec(code.trim());
 	if (!match || !classifyHexColor(match[1], false)) return "";
-	return colorSwatch(match[1], glyph);
+	return colorSwatch(match[1], glyph, match[0]);
 }
 
 interface RenderSignature {
@@ -1756,6 +1772,18 @@ export class Markdown implements Component {
 		this.#theme = theme;
 		this.#defaultTextStyle = defaultTextStyle;
 		this.#codeBlockIndent = Math.max(0, Math.floor(codeBlockIndent));
+	}
+	/** Return bounded source text and layout state for debug inspection. */
+	debugState(): Record<string, unknown> {
+		return {
+			textPreview: this.#text.slice(0, 120),
+			textLength: this.#text.length,
+			previewTruncated: this.#text.length > 120,
+			paddingX: this.#paddingX,
+			paddingY: this.#paddingY,
+			codeBlockIndent: this.#codeBlockIndent,
+			ignoreTight: this.#ignoreTight,
+		};
 	}
 
 	setText(text: string): boolean {
@@ -3118,7 +3146,8 @@ export class Markdown implements Component {
 
 				case "codespan": {
 					markHtmlItemWhenContent(token.text);
-					result += codespanSwatch(token.text, swatchGlyph) + this.#theme.code(token.text) + stylePrefix;
+					const painted = codespanSwatch(token.text, swatchGlyph);
+					result += (painted || this.#theme.code(token.text)) + stylePrefix;
 					break;
 				}
 

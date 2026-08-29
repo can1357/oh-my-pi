@@ -2823,6 +2823,9 @@ const OPENCODE_GO_API_ID_OVERRIDES: Readonly<Record<string, Api>> = {
 	"qwen3.5-plus": "openai-completions",
 	"qwen3.6-plus": "openai-completions",
 };
+// Runtime-discovered rows cached before model-identity corrections retain
+// stale capability metadata until the authoritative catalog TTL expires.
+const OPENCODE_CACHE_MIGRATION_MODEL_IDS = ["glm-5.3-flash"] as const;
 
 // Billing-variant suffixes the OpenCode gateways append to a base model id
 // without changing its transport (`deepseek-v4-flash-free`,
@@ -2883,12 +2886,10 @@ function openCodeModelManagerOptions(
 		providerId,
 		cacheProviderId: resolveModelCacheProviderId(providerId, { apiKey, baseUrl: discoveryBaseUrl }),
 		dynamicModelsAuthoritative: true,
-		// The per-id API pins are cache identity: without this, rows cached
-		// before a pin was added keep the wrong endpoint until TTL expiry
-		// (#8957 — 17.3.7 caches held muse-spark-1.2[-contributor] on chat
-		// completions after the pin shipped). Sibling-catalog drift is bounded
-		// by the 2h cache TTL instead.
-		dropCachedModelIdsOnStaticMismatch: Object.keys(apiOverrides),
+		// Per-id route pins and capability migrations are cache identity:
+		// without this, rows cached before a correction keep the stale route or
+		// thinking surface until TTL expiry (#8957, #9960).
+		dropCachedModelIdsOnStaticMismatch: [...Object.keys(apiOverrides), ...OPENCODE_CACHE_MIGRATION_MODEL_IDS],
 		modelsDev: {
 			fetch: () => fetchRevalidatedWellKnownModelsWithTimeout(config?.fetch),
 			map: payload => {

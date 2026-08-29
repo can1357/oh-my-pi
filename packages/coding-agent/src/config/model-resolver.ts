@@ -54,18 +54,44 @@ function isKnownProvider(provider: string): provider is KnownProvider {
 /**
  * Pick the first provider-default model in availability order.
  *
+ * When `hasConcreteCredential` is supplied and at least one available model
+ * belongs to a provider with a concrete credential, the candidate pool is
+ * restricted to those providers first. This keeps a provider that is merely
+ * *ambiently* available — an `amazon-bedrock`/`google-vertex` transport that
+ * self-resolves credentials from a stray `~/.aws` profile or Application
+ * Default Credentials — from winning the startup default over the provider the
+ * user actually signed into (issue #9967). A provider that is the *only*
+ * credentialed option is still selected.
+ *
  * If multiple providers expose that same default id, rank only that shared-id
  * group by canonical provider priority so native/OAuth transports beat mirrors
  * without changing unrelated provider fallback precedence.
  */
-export function pickDefaultAvailableModel(availableModels: Model<Api>[]): Model<Api> | undefined {
-	const firstDefault = availableModels.find(
+export function pickDefaultAvailableModel(
+	availableModels: Model<Api>[],
+	hasConcreteCredential?: (provider: string) => boolean,
+): Model<Api> | undefined {
+	const models =
+		hasConcreteCredential === undefined
+			? availableModels
+			: (() => {
+					const concreteAuthByProvider = new Map<string, boolean>();
+					const concrete = availableModels.filter(model => {
+						const cached = concreteAuthByProvider.get(model.provider);
+						if (cached !== undefined) return cached;
+						const hasConcreteAuth = hasConcreteCredential(model.provider);
+						concreteAuthByProvider.set(model.provider, hasConcreteAuth);
+						return hasConcreteAuth;
+					});
+					return concrete.length > 0 ? concrete : availableModels;
+				})();
+	const firstDefault = models.find(
 		model => isKnownProvider(model.provider) && DEFAULT_MODEL_PER_PROVIDER[model.provider] === model.id,
 	);
-	if (!firstDefault) return availableModels[0];
+	if (!firstDefault) return models[0];
 
 	const providerPriority = buildModelProviderPriorityRank();
-	const sharedDefaultMatches = availableModels.filter(
+	const sharedDefaultMatches = models.filter(
 		model =>
 			model.id === firstDefault.id &&
 			isKnownProvider(model.provider) &&
@@ -75,7 +101,7 @@ export function pickDefaultAvailableModel(availableModels: Model<Api>[]): Model<
 		const aRank = providerPriority.get(a.provider.toLowerCase()) ?? Number.POSITIVE_INFINITY;
 		const bRank = providerPriority.get(b.provider.toLowerCase()) ?? Number.POSITIVE_INFINITY;
 		if (aRank !== bRank) return aRank - bRank;
-		return availableModels.indexOf(a) - availableModels.indexOf(b);
+		return models.indexOf(a) - models.indexOf(b);
 	})[0];
 }
 
@@ -472,8 +498,8 @@ export interface ModelMatchPreferences {
 
 export type ModelLookupRegistry = Pick<ModelRegistry, "getAvailable">;
 type CliModelRegistry = Pick<ModelRegistry, "getAll" | "getAvailable">;
-type InitialModelRegistry = Pick<ModelRegistry, "getAvailable" | "find">;
-type RestorableModelRegistry = Pick<ModelRegistry, "getAvailable" | "find" | "getApiKey">;
+type InitialModelRegistry = Pick<ModelRegistry, "getAvailable" | "find" | "hasConcreteAuth">;
+type RestorableModelRegistry = Pick<ModelRegistry, "getAvailable" | "find" | "getApiKey" | "hasConcreteAuth">;
 
 interface ModelPreferenceContext {
 	modelUsageRank: Map<string, number>;
@@ -2074,7 +2100,7 @@ export async function findInitialModel(options: {
 	// 4. Try first available model with valid API key
 	const availableModels = modelRegistry.getAvailable();
 
-	const fallback = pickDefaultAvailableModel(availableModels);
+	const fallback = pickDefaultAvailableModel(availableModels, provider => modelRegistry.hasConcreteAuth(provider));
 	if (fallback) {
 		return { model: fallback, thinkingLevel: undefined, fallbackMessage: undefined };
 	}
@@ -2126,7 +2152,9 @@ export async function restoreModelFromSession(
 	// Try to find any available model
 	const availableModels = modelRegistry.getAvailable();
 
-	const fallbackModel = pickDefaultAvailableModel(availableModels);
+	const fallbackModel = pickDefaultAvailableModel(availableModels, provider =>
+		modelRegistry.hasConcreteAuth(provider),
+	);
 	if (fallbackModel) {
 		if (shouldPrintMessages) {
 			console.log(chalk.dim(`Falling back to: ${fallbackModel.provider}/${fallbackModel.id}`));
