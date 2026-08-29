@@ -1,5 +1,5 @@
 import type { ThinkingLevel } from "@pk-nerdsaver-ai/pi-agent-core";
-import type { Api, Model } from "@pk-nerdsaver-ai/pi-ai";
+import type { Api, Model, ServiceTier } from "@pk-nerdsaver-ai/pi-ai";
 import { Markdown } from "@pk-nerdsaver-ai/pi-tui";
 import { prompt } from "@pk-nerdsaver-ai/pi-utils";
 import { INTENT_FIELD } from "@pk-nerdsaver-ai/pi-wire";
@@ -20,6 +20,9 @@ export interface CommitAgentInput {
 	cwd: string;
 	model: Model<Api>;
 	thinkingLevel?: ThinkingLevel;
+	/** Per-role tier from `modelRoleTiers.smol`; `serviceTierExplicit` makes a `"none"` entry clear the ambient tier. */
+	serviceTier?: ServiceTier;
+	serviceTierExplicit?: boolean;
 	settings: Settings;
 	modelRegistry: ModelRegistry;
 	authStorage: AuthStorage;
@@ -72,8 +75,15 @@ export async function runCommitAgentSession(input: CommitAgentInput): Promise<Co
 		disableExtensionDiscovery: true,
 		skills: [],
 		promptTemplates: [],
-		slashCommands: [],
 	});
+
+	// An explicit modelRoleTiers entry (even "none") overrides the ambient
+	// session tier; an absent entry leaves the ambient tier untouched.
+	if (input.serviceTierExplicit) {
+		session.setServiceTier(input.serviceTier);
+	} else if (input.serviceTier) {
+		session.setServiceTier(input.serviceTier);
+	}
 	let toolCalls = 0;
 	let messageCount = 0;
 	let isThinking = false;

@@ -664,6 +664,14 @@ export class Settings {
 	}
 
 	/**
+	 * Get the `modelRoleTiers` record (role → service-tier setting value).
+	 * Pure accessor — tier resolution happens via {@link resolveRoleServiceTier}.
+	 */
+	getModelRoleTiers(): Record<string, string> {
+		return this.get("modelRoleTiers");
+	}
+
+	/**
 	 * Typed accessor for `task.agentPolicies`. Empty by default — unrestricted
 	 * legacy spawn behavior until an explicit policy is configured.
 	 */

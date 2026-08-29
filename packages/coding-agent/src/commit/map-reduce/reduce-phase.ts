@@ -1,5 +1,5 @@
 import type { ThinkingLevel } from "@pk-nerdsaver-ai/pi-agent-core";
-import type { Api, ApiKey, Model } from "@pk-nerdsaver-ai/pi-ai";
+import type { Api, ApiKey, Model, ServiceTier } from "@pk-nerdsaver-ai/pi-ai";
 import { completeSimple } from "@pk-nerdsaver-ai/pi-ai";
 import { prompt } from "@pk-nerdsaver-ai/pi-utils";
 import reduceSystemPrompt from "../../commit/prompts/reduce-system.md" with { type: "text" };
@@ -14,6 +14,7 @@ export interface ReducePhaseInput {
 	model: Model<Api>;
 	apiKey: ApiKey;
 	thinkingLevel?: ThinkingLevel;
+	serviceTier?: ServiceTier;
 	observations: FileObservation[];
 	stat: string;
 	scopeCandidates: string;
@@ -24,6 +25,7 @@ export async function runReducePhase({
 	model,
 	apiKey,
 	thinkingLevel,
+	serviceTier,
 	observations,
 	stat,
 	scopeCandidates,
@@ -42,7 +44,7 @@ export async function runReducePhase({
 			messages: [{ role: "user", content: userContent, timestamp: Date.now() }],
 			tools: [ReduceTool],
 		},
-		{ apiKey, maxTokens: 2400, reasoning: toReasoningEffort(thinkingLevel) },
+		{ apiKey, maxTokens: 2400, reasoning: toReasoningEffort(thinkingLevel), serviceTier },
 	);
 
 	return parseConventionalAnalysisResponse(response, ReduceTool);

@@ -87,6 +87,7 @@ async function classifyOnline(text: string, deps: ClassifyUnexpectedStopDeps): P
 			maxTokens,
 			disableReasoning: true,
 			metadata,
+			serviceTier: resolved.serviceTier,
 			signal: deps.signal,
 		},
 	);

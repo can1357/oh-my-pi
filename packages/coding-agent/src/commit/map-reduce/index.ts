@@ -1,5 +1,5 @@
 import type { ThinkingLevel } from "@pk-nerdsaver-ai/pi-agent-core";
-import type { Api, ApiKey, Model } from "@pk-nerdsaver-ai/pi-ai";
+import type { Api, ApiKey, Model, ServiceTier } from "@pk-nerdsaver-ai/pi-ai";
 import { $env } from "@pk-nerdsaver-ai/pi-utils";
 import { parseFileDiffs } from "../../commit/git/diff";
 import type { ConventionalAnalysis } from "../../commit/types";
@@ -23,9 +23,11 @@ export interface MapReduceInput {
 	model: Model<Api>;
 	apiKey: ApiKey;
 	thinkingLevel?: ThinkingLevel;
+	serviceTier?: ServiceTier;
 	smolModel: Model<Api>;
 	smolApiKey: ApiKey;
 	smolThinkingLevel?: ThinkingLevel;
+	smolServiceTier?: ServiceTier;
 	diff: string;
 	stat: string;
 	scopeCandidates: string;
@@ -54,6 +56,7 @@ export async function runMapReduceAnalysis(input: MapReduceInput): Promise<Conve
 		model: input.smolModel,
 		apiKey: input.smolApiKey,
 		thinkingLevel: input.smolThinkingLevel,
+		serviceTier: input.smolServiceTier,
 		files: fileDiffs,
 		config: input.settings,
 	});
@@ -61,6 +64,7 @@ export async function runMapReduceAnalysis(input: MapReduceInput): Promise<Conve
 		model: input.model,
 		apiKey: input.apiKey,
 		thinkingLevel: input.thinkingLevel,
+		serviceTier: input.serviceTier,
 		observations,
 		stat: input.stat,
 		scopeCandidates: input.scopeCandidates,

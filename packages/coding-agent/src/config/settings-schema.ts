@@ -493,6 +493,22 @@ export const SETTINGS_SCHEMA = {
 
 	modelRoles: { type: "record", default: EMPTY_STRING_RECORD },
 
+	// Per-role processing-tier overrides: role name (same keys as `modelRoles`)
+	// → Service Tier setting value. Resolved wherever a role's model is picked
+	// (side requests, spawned subagents) so a lane like `smol` can run a
+	// different tier than the main agent's `serviceTier` / `/fast` state.
+	modelRoleTiers: {
+		type: "record",
+		default: EMPTY_STRING_RECORD,
+		ui: {
+			tab: "model",
+			group: "Agent Model Profiles",
+			label: "Role Service Tiers",
+			description:
+				"Per-role processing-tier overrides keyed by role name, e.g. `smol: priority` (OpenRouter `:nitro`) or role `default` → `flex`. An explicit entry wins over inherited tiers; value 'none' omits the tier for that role.",
+		},
+	},
+
 	modelTags: { type: "record", default: EMPTY_MODEL_TAGS_RECORD },
 
 	// Named, swappable bundles of model roles — "optimal model per agent slot"
@@ -5659,6 +5675,7 @@ export interface GroupTypeMap {
 	thinkingBudgets: ThinkingBudgetsSettings;
 	stt: SttSettings;
 	modelRoles: Record<string, string>;
+	modelRoleTiers: Record<string, string>;
 	modelTags: ModelTagsSettings;
 	cycleOrder: string[];
 	shellMinimizer: ShellMinimizerSettings;

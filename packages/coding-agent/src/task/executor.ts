@@ -19,7 +19,7 @@ import {
 	resolveModelOverrideWithAuthFallback,
 } from "../config/model-resolver";
 import type { PromptTemplate } from "../config/prompt-templates";
-import { resolveSubagentServiceTier } from "../config/service-tier";
+import { hasExplicitRoleServiceTier, resolveRoleServiceTier, resolveSubagentServiceTier } from "../config/service-tier";
 import { Settings } from "../config/settings";
 import { SETTINGS_SCHEMA, type SettingPath } from "../config/settings-schema";
 import type { ToolPathWithSource } from "../extensibility/custom-tools";
@@ -2189,14 +2189,23 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 	}
 
 	const settings = options.settings ?? Settings.isolated();
-	// Stamp the subagent's service tier: a concrete `serviceTierSubagent` wins,
-	// `"inherit"` follows the parent's live effective tier (options.parentServiceTier)
-	// or, absent a live session, the parent's configured `serviceTier` setting.
-	const subagentServiceTier = resolveSubagentServiceTier(
-		settings.get("serviceTierSubagent"),
-		settings.get("serviceTier"),
-		options.parentServiceTier,
-	);
+	// Stamp the subagent's service tier. An explicit `modelRoleTiers` entry for
+	// the spawn's difficulty role (smol/task/slow) wins outright — including a
+	// `"none"` entry, which suppresses the tier instead of deferring; otherwise
+	// a concrete `serviceTierSubagent` wins, and `"inherit"` follows the
+	// parent's live effective tier (options.parentServiceTier) or, absent a
+	// live session, the parent's configured `serviceTier` setting.
+	const routingRole = options.modelRouting?.role;
+	const routingRoleTiers = typeof settings.getModelRoleTiers === "function" ? settings.getModelRoleTiers() : undefined;
+	const roleTier = routingRole ? resolveRoleServiceTier(routingRoleTiers, routingRole) : undefined;
+	const roleTierExplicit = routingRole != null && hasExplicitRoleServiceTier(routingRoleTiers, routingRole);
+	const subagentServiceTier = roleTierExplicit
+		? roleTier
+		: resolveSubagentServiceTier(
+				settings.get("serviceTierSubagent"),
+				settings.get("serviceTier"),
+				options.parentServiceTier,
+			);
 	const subagentSettings = createSubagentSettings(settings, {
 		serviceTier: subagentServiceTier,
 		...(agent.readSummarize === false ? { "read.summarize.enabled": false } : undefined),

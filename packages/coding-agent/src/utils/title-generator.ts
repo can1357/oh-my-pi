@@ -3,7 +3,14 @@
  */
 import * as path from "node:path";
 
-import { type Api, type AssistantMessage, completeSimple, type Model, type Tool } from "@pk-nerdsaver-ai/pi-ai";
+import {
+	type Api,
+	type AssistantMessage,
+	completeSimple,
+	type Model,
+	type ServiceTier,
+	type Tool,
+} from "@pk-nerdsaver-ai/pi-ai";
 import { isTerminalHeadless, logger, prompt } from "@pk-nerdsaver-ai/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
 
@@ -68,14 +75,20 @@ function modelSupportsForcedToolChoice(model: Model<Api>): boolean {
 	return true;
 }
 
-function getTitleModel(registry: ModelRegistry, settings: Settings, currentModel?: Model<Api>): Model<Api> | undefined {
+function getTitleModel(
+	registry: ModelRegistry,
+	settings: Settings,
+	currentModel?: Model<Api>,
+): { model: Model<Api>; serviceTier?: ServiceTier } | undefined {
 	const availableModels = registry.getAvailable();
 	if (availableModels.length === 0) return undefined;
 
-	const titleModel = resolveRoleSelection(["tiny", "commit", "smol"], settings, availableModels, registry)?.model;
-	if (titleModel) return titleModel;
+	const titleSelection = resolveRoleSelection(["tiny", "commit", "smol"], settings, availableModels, registry);
+	if (titleSelection?.model) {
+		return { model: titleSelection.model, serviceTier: titleSelection.serviceTier };
+	}
 
-	if (currentModel) return currentModel;
+	if (currentModel) return { model: currentModel };
 
 	return undefined;
 }
@@ -174,7 +187,8 @@ export async function generateTitleOnline(
 	signal?: AbortSignal,
 	customSystemPrompt?: string,
 ): Promise<string | null> {
-	const model = getTitleModel(registry, settings, currentModel);
+	const titleSelection = getTitleModel(registry, settings, currentModel);
+	const model = titleSelection?.model;
 	if (!model) {
 		logger.warn("title-generator: no title model found", { sessionId, reason: "no-title-model" });
 		return null;
@@ -232,6 +246,7 @@ export async function generateTitleOnline(
 				disableReasoning: true,
 				toolChoice: useForcedTool ? { type: "tool", name: SET_TITLE_TOOL_NAME } : undefined,
 				metadata,
+				serviceTier: titleSelection?.serviceTier,
 				signal,
 			},
 		);

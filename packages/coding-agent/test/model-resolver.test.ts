@@ -18,7 +18,12 @@ import {
 	resolveModelOverride,
 	resolveModelRoleValue,
 	resolveModelScope,
+	resolveRoleSelection,
 } from "@pk-nerdsaver-ai/pi-coding-agent/config/model-resolver";
+import {
+	hasExplicitRoleServiceTier,
+	resolveRoleServiceTier,
+} from "@pk-nerdsaver-ai/pi-coding-agent/config/service-tier";
 import { Settings } from "@pk-nerdsaver-ai/pi-coding-agent/config/settings";
 
 // Mock models for testing
@@ -1628,5 +1633,72 @@ describe("effort-tier variant aliases", () => {
 	test("consumed X-thinking twins resolve via the grammar fallback", () => {
 		expect(parseModelPattern("venice/kimi-k2-thinking", variantModels).model?.id).toBe("kimi-k2");
 		expect(parseModelPattern("kimi-k2-thinking", variantModels).model?.id).toBe("kimi-k2");
+	});
+});
+
+describe("resolveRoleSelection service tiers", () => {
+	const makeSettings = (role: string, model: string, tiers: Record<string, string>) => {
+		const settings = Settings.isolated({ modelRoleTiers: tiers });
+		settings.setModelRole(role, model);
+		return settings;
+	};
+
+	test("returns the matched role's configured tier", () => {
+		const settings = makeSettings("smol", "anthropic/claude-sonnet-4-5", { smol: "priority" });
+		const resolved = resolveRoleSelection(["tiny", "smol"], settings, mockModels);
+		expect(resolved?.model.id).toBe("claude-sonnet-4-5");
+		expect(resolved?.serviceTier).toBe("priority");
+	});
+
+	test("tier follows the role that actually matched in a fallback chain", () => {
+		const settings = Settings.isolated({ modelRoleTiers: { tiny: "flex", smol: "priority" } });
+		settings.setModelRole("tiny", "anthropic/claude-sonnet-4-5");
+		settings.setModelRole("smol", "openai/gpt-4o");
+		const resolved = resolveRoleSelection(["tiny", "smol"], settings, mockModels);
+		expect(resolved?.model.id).toBe("claude-sonnet-4-5");
+		expect(resolved?.serviceTier).toBe("flex");
+	});
+
+	test("falls through to the next role when the first has no model", () => {
+		const settings = Settings.isolated({ modelRoleTiers: { tiny: "flex", smol: "priority" } });
+		settings.setModelRole("smol", "openai/gpt-4o");
+		const resolved = resolveRoleSelection(["tiny", "smol"], settings, mockModels);
+		expect(resolved?.model.id).toBe("gpt-4o");
+		expect(resolved?.serviceTier).toBe("priority");
+	});
+
+	test("roles without a tier entry resolve with an undefined tier", () => {
+		const settings = makeSettings("smol", "anthropic/claude-sonnet-4-5", {});
+		const resolved = resolveRoleSelection(["smol"], settings, mockModels);
+		expect(resolved?.model.id).toBe("claude-sonnet-4-5");
+		expect(resolved?.serviceTier).toBeUndefined();
+	});
+
+	test('"none" and unknown tier values omit the tier', () => {
+		const settings = makeSettings("smol", "anthropic/claude-sonnet-4-5", { smol: "none", tiny: "turbo" });
+		const resolved = resolveRoleSelection(["tiny", "smol"], settings, mockModels);
+		expect(resolved?.serviceTier).toBeUndefined();
+		const scoped = makeSettings("smol", "anthropic/claude-sonnet-4-5", { smol: "openai-only" });
+		expect(resolveRoleSelection(["smol"], scoped, mockModels)?.serviceTier).toBe("openai-only");
+	});
+});
+
+describe("resolveRoleServiceTier explicit entries", () => {
+	test('"none" is explicit but carries no tier', () => {
+		expect(hasExplicitRoleServiceTier({ smol: "none" }, "smol")).toBe(true);
+		expect(resolveRoleServiceTier({ smol: "none" }, "smol")).toBeUndefined();
+	});
+
+	test("absent and unrecognized entries are not explicit", () => {
+		expect(hasExplicitRoleServiceTier({}, "smol")).toBe(false);
+		expect(hasExplicitRoleServiceTier(undefined, "smol")).toBe(false);
+		expect(hasExplicitRoleServiceTier({ smol: "turbo" }, "smol")).toBe(false);
+		expect(hasExplicitRoleServiceTier({ smol: "inherit" }, "smol")).toBe(false);
+	});
+
+	test("concrete tiers are explicit", () => {
+		expect(hasExplicitRoleServiceTier({ smol: "priority" }, "smol")).toBe(true);
+		expect(resolveRoleServiceTier({ smol: "priority" }, "smol")).toBe("priority");
+		expect(hasExplicitRoleServiceTier({ smol: "flex" }, "smol")).toBe(true);
 	});
 });

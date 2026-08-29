@@ -65,6 +65,39 @@ export function resolveServiceTierSetting(value: string, inherited: ServiceTier 
 }
 
 /**
+ * Resolve a per-role service tier from the `modelRoleTiers` record
+ * (role name → setting value, e.g. `{ smol: "priority" }`).
+ *
+ * `"none"` and `"inherit"` (and unknown values) yield `undefined` so callers
+ * fall back to their ambient tier chain; a concrete tier value is returned
+ * as-is. Lets a fast lane (e.g. `smol`) ride a different processing tier than
+ * the main agent without touching the global `serviceTier` setting. Use
+ * {@link hasExplicitRoleServiceTier} where an explicit `"none"` must suppress
+ * an ambient fallback rather than defer to it.
+ */
+export function resolveRoleServiceTier(
+	roleTiers: Record<string, string> | undefined,
+	role: string,
+): ServiceTier | undefined {
+	const value = roleTiers?.[role];
+	if (!value || value === "none" || value === "inherit") return undefined;
+	if (!(SERVICE_TIER_SETTING_VALUES as readonly string[]).includes(value)) return undefined;
+	return value as ServiceTier;
+}
+
+/**
+ * Whether `modelRoleTiers` carries an explicit, recognized entry for `role` —
+ * including the `"none"` sentinel. Explicit entries win over ambient fallbacks:
+ * `{ smol: "none" }` really omits the tier for the smol lane instead of letting
+ * `serviceTierSubagent` or the global `serviceTier` apply.
+ */
+export function hasExplicitRoleServiceTier(roleTiers: Record<string, string> | undefined, role: string): boolean {
+	const value = roleTiers?.[role];
+	if (!value) return false;
+	return (SERVICE_TIER_SETTING_VALUES as readonly string[]).includes(value);
+}
+
+/**
  * Resolve the `serviceTier` *setting value* to stamp onto a subagent's settings
  * snapshot.
  *

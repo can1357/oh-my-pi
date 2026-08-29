@@ -1,5 +1,5 @@
 import type { ThinkingLevel } from "@pk-nerdsaver-ai/pi-agent-core";
-import type { Api, ApiKey, AssistantMessage, Message, Model } from "@pk-nerdsaver-ai/pi-ai";
+import type { Api, ApiKey, AssistantMessage, Message, Model, ServiceTier } from "@pk-nerdsaver-ai/pi-ai";
 import { completeSimple } from "@pk-nerdsaver-ai/pi-ai";
 import { prompt } from "@pk-nerdsaver-ai/pi-utils";
 import fileObserverSystemPrompt from "../../commit/prompts/file-observer-system.md" with { type: "text" };
@@ -20,6 +20,7 @@ export interface MapPhaseInput {
 	model: Model<Api>;
 	apiKey: ApiKey;
 	thinkingLevel?: ThinkingLevel;
+	serviceTier?: ServiceTier;
 	files: FileDiff[];
 	config?: {
 		maxFileTokens?: number;
@@ -34,6 +35,7 @@ export async function runMapPhase({
 	model,
 	apiKey,
 	thinkingLevel,
+	serviceTier,
 	files,
 	config,
 }: MapPhaseInput): Promise<FileObservation[]> {
@@ -72,6 +74,7 @@ export async function runMapPhase({
 					apiKey,
 					maxTokens: 400,
 					reasoning: toReasoningEffort(thinkingLevel),
+					serviceTier,
 					signal: AbortSignal.timeout(timeoutMs),
 				}),
 			maxRetries,

@@ -1,6 +1,6 @@
 import * as path from "node:path";
 import type { ThinkingLevel } from "@pk-nerdsaver-ai/pi-agent-core";
-import type { Api, ApiKey, Model } from "@pk-nerdsaver-ai/pi-ai";
+import type { Api, ApiKey, Model, ServiceTier } from "@pk-nerdsaver-ai/pi-ai";
 import { getProjectDir, logger, prompt } from "@pk-nerdsaver-ai/pi-utils";
 import { ModelRegistry } from "../config/model-registry";
 import { Settings } from "../config/settings";
@@ -50,11 +50,13 @@ async function runLegacyCommitCommand(args: CommitCommandArgs): Promise<void> {
 		model: primaryModel,
 		apiKey: primaryApiKey,
 		thinkingLevel: primaryThinkingLevel,
+		serviceTier: primaryServiceTier,
 	} = await resolvePrimaryModel(args.model, settings, modelRegistry);
 	const {
 		model: smolModel,
 		apiKey: smolApiKey,
 		thinkingLevel: smolThinkingLevel,
+		serviceTier: smolServiceTier,
 	} = await resolveSmolModel(settings, modelRegistry, primaryModel, primaryApiKey);
 
 	let stagedFiles = await git.diff.changedFiles(cwd, { cached: true });
@@ -74,6 +76,7 @@ async function runLegacyCommitCommand(args: CommitCommandArgs): Promise<void> {
 			model: primaryModel,
 			apiKey: primaryApiKey,
 			thinkingLevel: primaryThinkingLevel,
+			serviceTier: primaryServiceTier,
 			stagedFiles,
 			dryRun: args.dryRun,
 			maxDiffChars: commitSettings.changelogMaxDiffChars,
@@ -101,9 +104,11 @@ async function runLegacyCommitCommand(args: CommitCommandArgs): Promise<void> {
 		primaryModel,
 		primaryApiKey,
 		primaryThinkingLevel,
+		primaryServiceTier,
 		smolModel,
 		smolApiKey,
 		smolThinkingLevel,
+		smolServiceTier,
 		commitSettings,
 	});
 
@@ -118,6 +123,7 @@ async function runLegacyCommitCommand(args: CommitCommandArgs): Promise<void> {
 		model: primaryModel,
 		apiKey: primaryApiKey,
 		thinkingLevel: primaryThinkingLevel,
+		serviceTier: primaryServiceTier,
 		userContext: args.context,
 	});
 
@@ -147,9 +153,11 @@ async function generateAnalysis(input: {
 	primaryModel: Model<Api>;
 	primaryApiKey: ApiKey;
 	primaryThinkingLevel?: ThinkingLevel;
+	primaryServiceTier?: ServiceTier;
 	smolModel: Model<Api>;
 	smolApiKey: ApiKey;
 	smolThinkingLevel?: ThinkingLevel;
+	smolServiceTier?: ServiceTier;
 	commitSettings: {
 		mapReduceEnabled: boolean;
 		mapReduceMinFiles: number;
@@ -171,9 +179,11 @@ async function generateAnalysis(input: {
 			model: input.primaryModel,
 			apiKey: input.primaryApiKey,
 			thinkingLevel: input.primaryThinkingLevel,
+			serviceTier: input.primaryServiceTier,
 			smolModel: input.smolModel,
 			smolApiKey: input.smolApiKey,
 			smolThinkingLevel: input.smolThinkingLevel,
+			smolServiceTier: input.smolServiceTier,
 			diff: input.diff,
 			stat: input.stat,
 			scopeCandidates: input.scopeCandidates,
@@ -192,6 +202,7 @@ async function generateAnalysis(input: {
 		model: input.primaryModel,
 		apiKey: input.primaryApiKey,
 		thinkingLevel: input.primaryThinkingLevel,
+		serviceTier: input.primaryServiceTier,
 		contextFiles: input.contextFiles,
 		userContext: input.userContext,
 		typesDescription: TYPES_DESCRIPTION(),
@@ -208,6 +219,7 @@ async function generateSummaryWithRetry(input: {
 	model: Model<Api>;
 	apiKey: ApiKey;
 	thinkingLevel?: ThinkingLevel;
+	serviceTier?: ServiceTier;
 	userContext?: string;
 }): Promise<{ summary: string }> {
 	let context = input.userContext;
@@ -216,6 +228,7 @@ async function generateSummaryWithRetry(input: {
 			model: input.model,
 			apiKey: input.apiKey,
 			thinkingLevel: input.thinkingLevel,
+			serviceTier: input.serviceTier,
 			commitType: input.analysis.type,
 			scope: input.analysis.scope,
 			details: input.analysis.details.map(detail => detail.text),

@@ -1,5 +1,5 @@
 import type { ThinkingLevel } from "@pk-nerdsaver-ai/pi-agent-core";
-import type { Api, ApiKey, AssistantMessage, Model } from "@pk-nerdsaver-ai/pi-ai";
+import type { Api, ApiKey, AssistantMessage, Model, ServiceTier } from "@pk-nerdsaver-ai/pi-ai";
 import { completeSimple, validateToolCall } from "@pk-nerdsaver-ai/pi-ai";
 import { prompt } from "@pk-nerdsaver-ai/pi-utils";
 import { type } from "arktype";
@@ -23,6 +23,7 @@ export interface SummaryInput {
 	model: Model<Api>;
 	apiKey: ApiKey;
 	thinkingLevel?: ThinkingLevel;
+	serviceTier?: ServiceTier;
 	commitType: string;
 	scope: string | null;
 	details: string[];
@@ -38,6 +39,7 @@ export async function generateSummary({
 	model,
 	apiKey,
 	thinkingLevel,
+	serviceTier,
 	commitType,
 	scope,
 	details,
@@ -59,7 +61,7 @@ export async function generateSummary({
 			messages: [{ role: "user", content: userPrompt, timestamp: Date.now() }],
 			tools: [SummaryTool],
 		},
-		{ apiKey, maxTokens: 200, reasoning: toReasoningEffort(thinkingLevel) },
+		{ apiKey, maxTokens: 200, reasoning: toReasoningEffort(thinkingLevel), serviceTier },
 	);
 
 	return parseSummaryFromResponse(response, commitType, scope);

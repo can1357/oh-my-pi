@@ -1,5 +1,5 @@
 import type { ThinkingLevel } from "@pk-nerdsaver-ai/pi-agent-core";
-import type { Api, ApiKey, Model } from "@pk-nerdsaver-ai/pi-ai";
+import type { Api, ApiKey, Model, ServiceTier } from "@pk-nerdsaver-ai/pi-ai";
 import type { ApiKeyResolverRegistry } from "../config/api-key-resolver";
 import {
 	getModelMatchPreferences,
@@ -9,6 +9,7 @@ import {
 	resolveRoleSelection,
 } from "../config/model-resolver";
 import { MODEL_ROLE_IDS } from "../config/model-roles";
+import { hasExplicitRoleServiceTier, resolveRoleServiceTier } from "../config/service-tier";
 import type { Settings } from "../config/settings";
 import MODEL_PRIO from "../priority.json" with { type: "json" };
 
@@ -21,6 +22,14 @@ export interface ResolvedCommitModel {
 	 */
 	apiKey: ApiKey;
 	thinkingLevel?: ThinkingLevel;
+	/** Per-role processing tier from `modelRoleTiers` (undefined = omit). */
+	serviceTier?: ServiceTier;
+	/**
+	 * True when `modelRoleTiers` carries an explicit entry for the resolved
+	 * lane (including `"none"`), so consumers with an ambient tier should let
+	 * `serviceTier === undefined` clear it rather than fall back.
+	 */
+	serviceTierExplicit?: boolean;
 }
 
 type CommitModelRegistry = ModelLookupRegistry &
@@ -50,6 +59,7 @@ export async function resolvePrimaryModel(
 		model,
 		apiKey: modelRegistry.resolver(model),
 		thinkingLevel: resolved?.thinkingLevel,
+		serviceTier: resolved && "serviceTier" in resolved ? resolved.serviceTier : undefined,
 	};
 }
 
@@ -60,6 +70,12 @@ export async function resolveSmolModel(
 	fallbackApiKey: ApiKey,
 ): Promise<ResolvedCommitModel> {
 	const available = modelRegistry.getAvailable();
+	// The smol tier applies to the whole smol lane — the role-selection match,
+	// the MODEL_PRIO fallback, and the primary-model fallback — so a configured
+	// `modelRoleTiers.smol` survives regardless of which candidate resolves.
+	const roleTiers = typeof settings.getModelRoleTiers === "function" ? settings.getModelRoleTiers() : undefined;
+	const smolServiceTier = resolveRoleServiceTier(roleTiers, "smol");
+	const smolServiceTierExplicit = hasExplicitRoleServiceTier(roleTiers, "smol");
 	const resolvedSmol = resolveRoleSelection(["smol"], settings, available, modelRegistry);
 	if (resolvedSmol?.model) {
 		const apiKey = await modelRegistry.getApiKey(resolvedSmol.model);
@@ -68,6 +84,8 @@ export async function resolveSmolModel(
 				model: resolvedSmol.model,
 				apiKey: modelRegistry.resolver(resolvedSmol.model),
 				thinkingLevel: resolvedSmol.thinkingLevel,
+				serviceTier: smolServiceTier,
+				serviceTierExplicit: smolServiceTierExplicit,
 			};
 		}
 	}
@@ -81,9 +99,16 @@ export async function resolveSmolModel(
 			return {
 				model: candidate,
 				apiKey: modelRegistry.resolver(candidate),
+				serviceTier: smolServiceTier,
+				serviceTierExplicit: smolServiceTierExplicit,
 			};
 		}
 	}
 
-	return { model: fallbackModel, apiKey: fallbackApiKey };
+	return {
+		model: fallbackModel,
+		apiKey: fallbackApiKey,
+		serviceTier: smolServiceTier,
+		serviceTierExplicit: smolServiceTierExplicit,
+	};
 }

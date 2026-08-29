@@ -46,12 +46,12 @@ export async function runAgenticCommit(args: CommitCommandArgs): Promise<void> {
 	const { model: primaryModel, apiKey: primaryApiKey } = primaryModelResult;
 	process.stdout.write(`  └─ ${primaryModel.name}\n`);
 
-	const { model: agentModel, thinkingLevel: agentThinkingLevel } = await resolveSmolModel(
-		settings,
-		modelRegistry,
-		primaryModel,
-		primaryApiKey,
-	);
+	const {
+		model: agentModel,
+		thinkingLevel: agentThinkingLevel,
+		serviceTier: agentServiceTier,
+		serviceTierExplicit: agentServiceTierExplicit,
+	} = await resolveSmolModel(settings, modelRegistry, primaryModel, primaryApiKey);
 
 	if (stagedFiles.length === 0) {
 		process.stderr.write("No changes to commit.\n");
@@ -129,6 +129,8 @@ export async function runAgenticCommit(args: CommitCommandArgs): Promise<void> {
 			cwd,
 			model: agentModel,
 			thinkingLevel: agentThinkingLevel,
+			serviceTier: agentServiceTier,
+			serviceTierExplicit: agentServiceTierExplicit,
 			settings,
 			modelRegistry,
 			authStorage,

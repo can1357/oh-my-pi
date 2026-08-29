@@ -2217,6 +2217,7 @@ export class AgentSession {
 			telemetry: advisorTelemetry,
 		});
 		advisorAgent.setDisableReasoning(shouldDisableReasoning(advisorThinkingLevel));
+		if (advisorSel.serviceTier) advisorAgent.serviceTier = advisorSel.serviceTier;
 
 		const advisorAgentFacade: AdvisorAgent = {
 			prompt: input => advisorAgent.prompt(input),

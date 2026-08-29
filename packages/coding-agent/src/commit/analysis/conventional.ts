@@ -1,5 +1,5 @@
 import type { ThinkingLevel } from "@pk-nerdsaver-ai/pi-agent-core";
-import type { Api, ApiKey, Model } from "@pk-nerdsaver-ai/pi-ai";
+import type { Api, ApiKey, Model, ServiceTier } from "@pk-nerdsaver-ai/pi-ai";
 import { completeSimple } from "@pk-nerdsaver-ai/pi-ai";
 import { prompt } from "@pk-nerdsaver-ai/pi-utils";
 import analysisSystemPrompt from "../../commit/prompts/analysis-system.md" with { type: "text" };
@@ -16,6 +16,7 @@ export interface ConventionalAnalysisInput {
 	model: Model<Api>;
 	apiKey: ApiKey;
 	thinkingLevel?: ThinkingLevel;
+	serviceTier?: ServiceTier;
 	contextFiles?: Array<{ path: string; content: string }>;
 	userContext?: string;
 	typesDescription?: string;
@@ -32,6 +33,7 @@ export async function generateConventionalAnalysis({
 	model,
 	apiKey,
 	thinkingLevel,
+	serviceTier,
 	contextFiles,
 	userContext,
 	typesDescription,
@@ -57,7 +59,7 @@ export async function generateConventionalAnalysis({
 			messages: [{ role: "user", content: userContent, timestamp: Date.now() }],
 			tools: [ConventionalAnalysisTool],
 		},
-		{ apiKey, maxTokens: 2400, reasoning: toReasoningEffort(thinkingLevel) },
+		{ apiKey, maxTokens: 2400, reasoning: toReasoningEffort(thinkingLevel), serviceTier },
 	);
 
 	return parseConventionalAnalysisResponse(response, ConventionalAnalysisTool);

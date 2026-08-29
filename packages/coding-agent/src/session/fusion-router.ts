@@ -13,7 +13,7 @@
  * - Pool mode (`fusion.modelPool` has 2+ entries): the classifier picks a tier
  *   number from the pool, where tier 1 = most powerful … 5 = least intelligent.
  */
-import { type Api, completeSimple, type Model } from "@pk-nerdsaver-ai/pi-ai";
+import { type Api, completeSimple, type Model, type ServiceTier } from "@pk-nerdsaver-ai/pi-ai";
 import { logger, prompt } from "@pk-nerdsaver-ai/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
 import { resolveRoleSelection } from "../config/model-resolver";
@@ -120,10 +120,14 @@ export function resolveEffectiveFusionRoute(
 	return "cheap";
 }
 
-function getRouteModel(registry: ModelRegistry, settings: Settings): Model<Api> | undefined {
+function getRouteModel(
+	registry: ModelRegistry,
+	settings: Settings,
+): { model: Model<Api>; serviceTier?: ServiceTier } | undefined {
 	const availableModels = registry.getAvailable();
 	if (availableModels.length === 0) return undefined;
-	return resolveRoleSelection(["smol", "title", "commit"], settings, availableModels, registry)?.model;
+	const resolved = resolveRoleSelection(["smol", "title", "commit"], settings, availableModels, registry);
+	return resolved?.model ? { model: resolved.model, serviceTier: resolved.serviceTier } : undefined;
 }
 
 /** Render the pool-mode classifier system prompt. Exported for tests. */
@@ -150,7 +154,8 @@ export async function classifyFusionRoute(
 	const trimmed = summary.trim();
 	if (!trimmed) return null;
 	const poolMode = (pool?.length ?? 0) >= 2;
-	const model = getRouteModel(registry, settings);
+	const routeSelection = getRouteModel(registry, settings);
+	const model = routeSelection?.model;
 	if (!model) {
 		logger.debug("fusion-router: no classifier model available");
 		return null;
@@ -174,6 +179,7 @@ export async function classifyFusionRoute(
 				apiKey: registry.resolver(model, sessionId),
 				maxTokens,
 				disableReasoning: true,
+				serviceTier: routeSelection?.serviceTier,
 			},
 		);
 		if (response.stopReason === "error") {

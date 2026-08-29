@@ -554,6 +554,7 @@ async function resolveMnemopiProviderOptions(
 						apiKey: modelRegistry.resolver(model, sessionId),
 						maxTokens: opts?.maxTokens,
 						temperature: opts?.temperature,
+						serviceTier: resolved.serviceTier,
 					},
 				);
 				return message.content

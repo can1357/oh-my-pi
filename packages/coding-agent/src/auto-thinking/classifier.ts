@@ -98,6 +98,7 @@ async function classifyOnline(input: string, deps: ClassifyDifficultyDeps): Prom
 			maxTokens,
 			disableReasoning: true,
 			metadata,
+			serviceTier: resolved.serviceTier,
 			signal: deps.signal,
 		},
 	);

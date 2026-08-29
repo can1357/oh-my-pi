@@ -1,5 +1,5 @@
 import type { ThinkingLevel } from "@pk-nerdsaver-ai/pi-agent-core";
-import type { Api, ApiKey, AssistantMessage, Model } from "@pk-nerdsaver-ai/pi-ai";
+import type { Api, ApiKey, AssistantMessage, Model, ServiceTier } from "@pk-nerdsaver-ai/pi-ai";
 import { completeSimple, validateToolCall } from "@pk-nerdsaver-ai/pi-ai";
 import { prompt } from "@pk-nerdsaver-ai/pi-utils";
 import { type } from "arktype";
@@ -31,6 +31,7 @@ export interface ChangelogPromptInput {
 	model: Model<Api>;
 	apiKey: ApiKey;
 	thinkingLevel?: ThinkingLevel;
+	serviceTier?: ServiceTier;
 	changelogPath: string;
 	isPackageChangelog: boolean;
 	existingEntries?: string;
@@ -42,6 +43,7 @@ export async function generateChangelogEntries({
 	model,
 	apiKey,
 	thinkingLevel,
+	serviceTier,
 	changelogPath,
 	isPackageChangelog,
 	existingEntries,
@@ -62,7 +64,7 @@ export async function generateChangelogEntries({
 			messages: [{ role: "user", content: userContent, timestamp: Date.now() }],
 			tools: [changelogTool],
 		},
-		{ apiKey, maxTokens: 1200, reasoning: toReasoningEffort(thinkingLevel) },
+		{ apiKey, maxTokens: 1200, reasoning: toReasoningEffort(thinkingLevel), serviceTier },
 	);
 
 	const parsed = parseChangelogResponse(response);

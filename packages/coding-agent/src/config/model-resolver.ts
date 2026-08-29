@@ -16,7 +16,7 @@
  */
 
 import { ThinkingLevel } from "@pk-nerdsaver-ai/pi-agent-core";
-import type { Api, Effort, KnownProvider, Model, ModelSpec } from "@pk-nerdsaver-ai/pi-ai";
+import type { Api, Effort, KnownProvider, Model, ModelSpec, ServiceTier } from "@pk-nerdsaver-ai/pi-ai";
 import { buildModel } from "@pk-nerdsaver-ai/pi-catalog/build";
 import { modelMatchesHost } from "@pk-nerdsaver-ai/pi-catalog/hosts";
 import { buildModelProviderPriorityRank } from "@pk-nerdsaver-ai/pi-catalog/identity";
@@ -32,6 +32,7 @@ import MODEL_PRIO from "../priority.json" with { type: "json" };
 import { parseThinkingLevel, resolveThinkingLevelForModel } from "../thinking";
 import { isAuthenticated, kNoAuth, type ModelRegistry } from "./model-registry";
 import { MODEL_ROLE_IDS, type ModelRole } from "./model-roles";
+import { resolveRoleServiceTier } from "./service-tier";
 import type { Settings } from "./settings";
 
 function isKnownProvider(provider: string): provider is KnownProvider {
@@ -1325,7 +1326,8 @@ export function resolveRoleSelection(
 	settings: Settings,
 	availableModels: Model<Api>[],
 	modelRegistry?: CanonicalModelRegistry,
-): { model: Model<Api>; thinkingLevel?: ThinkingLevel } | undefined {
+): { model: Model<Api>; thinkingLevel?: ThinkingLevel; serviceTier?: ServiceTier } | undefined {
+	const roleTiers = typeof settings.getModelRoleTiers === "function" ? settings.getModelRoleTiers() : undefined;
 	const matchPreferences = getModelMatchPreferences(settings);
 	for (const role of roles) {
 		const resolved = resolveModelRoleValue(settings.getModelRole(role), availableModels, {
@@ -1334,7 +1336,13 @@ export function resolveRoleSelection(
 			modelRegistry,
 		});
 		if (resolved.model) {
-			return { model: resolved.model, thinkingLevel: resolved.thinkingLevel };
+			// The tier follows the role whose pattern actually matched, so a
+			// fallback chain like ["tiny", "smol"] carries the matched role's tier.
+			return {
+				model: resolved.model,
+				thinkingLevel: resolved.thinkingLevel,
+				serviceTier: resolveRoleServiceTier(roleTiers, role),
+			};
 		}
 	}
 	return undefined;
@@ -1352,13 +1360,21 @@ export function resolveAdvisorRoleSelection(
 	settings: Settings,
 	availableModels: Model<Api>[],
 	modelRegistry?: CanonicalModelRegistry,
-): { model: Model<Api>; thinkingLevel?: ThinkingLevel } | undefined {
+): { model: Model<Api>; thinkingLevel?: ThinkingLevel; serviceTier?: ServiceTier } | undefined {
 	const resolved = resolveModelRoleValue(`${PREFIX_MODEL_ROLE}advisor`, availableModels, {
 		settings,
 		matchPreferences: getModelMatchPreferences(settings),
 		modelRegistry,
 	});
-	return resolved.model ? { model: resolved.model, thinkingLevel: resolved.thinkingLevel } : undefined;
+	if (!resolved.model) return undefined;
+	return {
+		model: resolved.model,
+		thinkingLevel: resolved.thinkingLevel,
+		serviceTier:
+			typeof settings.getModelRoleTiers === "function"
+				? resolveRoleServiceTier(settings.getModelRoleTiers(), "advisor")
+				: undefined,
+	};
 }
 
 function resolveExactCanonicalScopePattern(
