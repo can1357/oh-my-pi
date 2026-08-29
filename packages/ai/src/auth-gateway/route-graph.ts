@@ -30,10 +30,12 @@ export class RouteRegistry {
 	resolve(modelId: string): CompiledRoute | undefined {
 		const model = this.#resolveModel(modelId);
 		if (!model) return undefined;
+		// Preserve provider-qualified ids (`openai/gpt-5`) as the compiled target.
+		const target = modelId.includes("/") ? modelId : model.id;
 		return {
 			generation: this.#generation,
 			id: modelId,
-			root: { type: "target", model: model.id },
+			root: { type: "target", model: target },
 		};
 	}
 }
