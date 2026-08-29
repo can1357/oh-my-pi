@@ -113,6 +113,15 @@ check-pkg pkg:
 build:
     cargo build -p omp-app --bin omp --locked
 
+# Build the `omp` CLI/daemon binary for native Termux aarch64.
+[group('build & check')]
+build-android:
+    OMP_PY_TARGET=aarch64-linux-android just setup-python
+    OMP_PY_TARGET=aarch64-linux-android \
+        PYO3_CONFIG_FILE="{{ justfile_directory() }}/vendor/python-android/pyo3-config.txt" \
+        cargo build -p omp-app --bin omp --target aarch64-linux-android \
+            --no-default-features --features android --locked
+
 # Build the `omp` CLI/daemon binary (release profile; macOS needs vendored release Python + Homebrew LLD, see AGENTS.md "Embedded Python").
 [group('build & check')]
 build-release:

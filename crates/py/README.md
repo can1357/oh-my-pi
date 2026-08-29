@@ -1,6 +1,10 @@
 # omp-py
 
-`omp-py` embeds a statically linked, free-threaded CPython 3.14 interpreter in a Rust process. It freezes the Python standard library, repository-provided modules, and pinned pure-Python packages into the binary, while allowing native wheels to be loaded from a configured site-packages directory.
+`omp-py` embeds CPython 3.14 in a Rust process. Desktop builds use a statically
+linked, free-threaded runtime with a frozen standard library. Native Termux
+builds link the installed GIL-enabled CPython dynamically and retain isolated
+module paths while freezing repository-provided modules and pinned pure-Python
+packages.
 
 ## Structure
 
@@ -26,5 +30,12 @@ cargo build
 ```
 
 `PYO3_CONFIG_FILE` must be set before cargo runs (environment or a `.cargo/config.toml` `[env]` entry) — it pins both pyo3 and this crate's build script to the same runtime. In this repository the checkout's `.cargo/config.toml` already points it at `vendor/python/pyo3-config.txt`.
+
+On native Termux/aarch64, install Termux's Python 3.14 and run
+`OMP_PY_TARGET=aarch64-linux-android scripts/fetch-python.sh`. This generates
+`vendor/python-android/pyo3-config.txt` for the system `libpython3.14.so` and
+installs only the pinned pure-Python bundle. `just build-android` performs this
+setup and selects the Android configuration automatically. Android uses the
+`cp314` ABI; it does not claim free-threaded `cp314t` execution.
 
 The deliberate filesystem exception is the authorized site-packages directory, because native extension modules must be loaded from disk. Its default policy processes standard `.pth` metadata (including editable-install paths and executable import lines) and imports `sitecustomize`, while isolated mode continues to exclude ambient global sites and `usercustomize`; embedders can select a narrower `SitePolicy`. Binaries supporting native wheels must export CPython's C API at final link time (for example, with `-Wl,-export_dynamic`); this crate applies the flag to its own binaries, while downstream binaries must apply the equivalent final-link configuration themselves.

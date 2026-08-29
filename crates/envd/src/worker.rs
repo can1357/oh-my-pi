@@ -130,6 +130,10 @@ use crate::{
 pub const WORKER_ARG: &str = "__omp-py-worker";
 
 /// Python ABI revision required by this worker implementation.
+#[cfg(target_os = "android")]
+pub const PYTHON_REV: &str = "3.14";
+/// Python ABI revision required by this worker implementation.
+#[cfg(not(target_os = "android"))]
 pub const PYTHON_REV: &str = "3.14t";
 /// Canonical import name for the opt-in built-in Python evaluation tool.
 pub const PY_EVAL_MODULE: &str = "omp_py_eval";

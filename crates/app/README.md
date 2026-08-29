@@ -49,6 +49,11 @@ Run `just setup-python` once before commands that link embedded Python. Use
 surface with `just run -- <args>`; use `just e2e` or an exact narrower E2E
 recipe from `just --list` for joined behavior.
 
+Native Termux/aarch64 builds use `just build-android`. The recipe prepares an
+Android PyO3 configuration from Termux's CPython 3.14 and builds the terminal
+profile without local ML, native audio, or the GPU GUI. Its binary is
+`target/aarch64-linux-android/debug/omp`.
+
 The default `omp` build keeps optional native engines off the critical path.
 Use `--features local-all` for all local model backends and `--features gui`
 for the native GPU presentation host.

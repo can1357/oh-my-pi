@@ -77,8 +77,10 @@ pub mod standalone_tool_cmd;
 pub mod startup_notice;
 pub mod stats_cmd;
 pub mod theme_watcher;
+#[cfg(feature = "local")]
 pub mod tiny_models_cmd;
 pub mod token_cmd;
+#[cfg(feature = "local")]
 pub mod tool_installer;
 pub mod ttsr_cmd;
 pub mod update_cmd;

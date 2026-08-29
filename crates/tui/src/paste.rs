@@ -692,8 +692,20 @@ pub fn spawn_clipboard_read(scope: ClipboardRead) -> Receiver<Option<Clipboard>>
 ///
 /// Platform CLI bridges run first — they match what the OS itself would
 /// paste (`pbpaste`, PowerShell's `Get-Clipboard -Raw`, `wl-paste`) — with
-/// the native arboard backend as the fallback when no bridge is installed.
+/// the native desktop backend as the fallback when no bridge is installed.
+/// Android uses Termux's `termux-clipboard-get` directly; desktop clipboard
+/// backends are not built for that target.
 pub fn read_clipboard_text() -> Option<String> {
+	read_clipboard_text_platform()
+}
+
+#[cfg(target_os = "android")]
+fn read_clipboard_text_platform() -> Option<String> {
+	capture_text(&["termux-clipboard-get"], CLI_TIMEOUT)
+}
+
+#[cfg(not(target_os = "android"))]
+fn read_clipboard_text_platform() -> Option<String> {
 	if cfg!(target_os = "macos") {
 		return capture_text(&["pbpaste"], CLI_TIMEOUT);
 	}
@@ -722,8 +734,20 @@ pub fn read_clipboard_text() -> Option<String> {
 	None
 }
 
-/// Writes clipboard text, native backend first with CLI bridges as fallback.
+/// Writes clipboard text through a platform bridge or native desktop backend.
+/// Android uses Termux's `termux-clipboard-set`; desktop clipboard backends
+/// are not built for that target.
 pub fn write_clipboard_text(text: &str) -> bool {
+	write_clipboard_text_platform(text)
+}
+
+#[cfg(target_os = "android")]
+fn write_clipboard_text_platform(text: &str) -> bool {
+	run_capture(&["termux-clipboard-set"], Some(text.as_bytes()), CLI_TIMEOUT).is_some()
+}
+
+#[cfg(not(target_os = "android"))]
+fn write_clipboard_text_platform(text: &str) -> bool {
 	let bytes = Some(text.as_bytes());
 	if env::var_os("TERMUX_VERSION").is_some()
 		&& run_capture(&["termux-clipboard-set"], bytes, CLI_TIMEOUT).is_some()
@@ -752,6 +776,12 @@ pub fn write_clipboard_text(text: &str) -> bool {
 	false
 }
 
+#[cfg(target_os = "android")]
+fn read_clipboard_image() -> Option<PastedImage> {
+	None
+}
+
+#[cfg(not(target_os = "android"))]
 fn read_clipboard_image() -> Option<PastedImage> {
 	if env::var_os("TERMUX_VERSION").is_some() {
 		return None;
@@ -788,15 +818,27 @@ fn read_clipboard_image() -> Option<PastedImage> {
 }
 
 /// Reads an image through arboard, re-encoding the RGBA payload as PNG.
+#[cfg(not(target_os = "android"))]
 fn native_read_image() -> Option<PastedImage> {
 	let mut clipboard = arboard::Clipboard::new().ok()?;
 	let image = clipboard.get_image().ok()?;
 	encode_rgba_png(&image)
 }
 
+#[cfg(target_os = "android")]
+fn native_read_image() -> Option<PastedImage> {
+	None
+}
+
 /// Reads clipboard text through arboard.
+#[cfg(not(target_os = "android"))]
 fn native_read_text() -> Option<String> {
 	arboard::Clipboard::new().ok()?.get_text().ok()
+}
+
+#[cfg(target_os = "android")]
+fn native_read_text() -> Option<String> {
+	None
 }
 
 /// Writes text through arboard, keeping the Linux handle alive.
@@ -806,7 +848,7 @@ fn native_read_text() -> Option<String> {
 /// background thread that lives only as long as some `Clipboard` instance
 /// does — a transient handle would empty the selection the moment it drops.
 /// One process-lifetime instance keeps that owner thread serving.
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", not(target_os = "android")))]
 fn native_write_text(text: &str) -> bool {
 	use std::sync::LazyLock;
 
@@ -827,14 +869,20 @@ fn native_write_text(text: &str) -> bool {
 ///
 /// macOS and Windows retain clipboard contents after the writer exits, so
 /// no owner handle needs to outlive the call.
-#[cfg(not(target_os = "linux"))]
+#[cfg(all(not(target_os = "linux"), not(target_os = "android")))]
 fn native_write_text(text: &str) -> bool {
 	arboard::Clipboard::new()
 		.and_then(|mut clipboard| clipboard.set_text(text))
 		.is_ok()
 }
 
+#[cfg(target_os = "android")]
+fn native_write_text(_: &str) -> bool {
+	false
+}
+
 /// Encodes an arboard RGBA payload as a PNG [`PastedImage`].
+#[cfg(not(target_os = "android"))]
 fn encode_rgba_png(image: &arboard::ImageData<'_>) -> Option<PastedImage> {
 	let width = u32::try_from(image.width).ok()?;
 	let height = u32::try_from(image.height).ok()?;
@@ -1326,5 +1374,11 @@ mod tests {
 		);
 		assert_eq!(smart_clipboard(None, || None, || Some(String::new())), None);
 		assert_eq!(smart_clipboard(None, || None, || None), None);
+	}
+	#[cfg(target_os = "android")]
+	#[test]
+	fn image_clipboard_is_unavailable_on_android() {
+		assert_eq!(read_clipboard_image(), None);
+		assert_eq!(native_read_image(), None);
 	}
 }

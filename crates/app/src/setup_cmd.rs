@@ -1,11 +1,16 @@
 //! Standalone onboarding, embedded-Python, and speech-asset setup.
 
-use std::{cell::Cell, fs, io, io::IsTerminal as _, path::Path, str::FromStr as _};
+use std::fs;
+#[cfg(feature = "local")]
+use std::{cell::Cell, io, io::IsTerminal as _, path::Path, str::FromStr as _};
 
 use miette::{IntoDiagnostic as _, miette};
 use omp_catalog::snapshot;
+#[cfg(feature = "local")]
 use omp_chat_ui::ListRow;
+#[cfg(feature = "local")]
 use omp_core::Str;
+#[cfg(feature = "local")]
 use omp_inference::local::{
 	ArtifactStore, LocalCancellation, SystemArtifactFetcher,
 	artifact::ArtifactCacheStatus,
@@ -15,10 +20,10 @@ use serde_json::json;
 
 use crate::{
 	cli::{SetupArgs, SetupCommand},
-	pickers,
-	progress_reporter::ProgressReporter,
 	wizard,
 };
+#[cfg(feature = "local")]
+use crate::{pickers, progress_reporter::ProgressReporter};
 
 /// Executes one standalone setup flow.
 pub async fn run(args: SetupArgs) -> miette::Result<()> {
@@ -33,7 +38,17 @@ pub async fn run(args: SetupArgs) -> miette::Result<()> {
 		},
 		SetupCommand::Python { json } => python(json),
 		SetupCommand::Speech { model, check, json, quiet } => {
-			speech(&data_dir, model, check, json, quiet).await
+			#[cfg(feature = "local")]
+			{
+				speech(&data_dir, model, check, json, quiet).await
+			}
+			#[cfg(not(feature = "local"))]
+			{
+				let _ = (model, check, json, quiet);
+				Err(miette!(
+					"speech setup is unavailable in this build; local speech features are disabled"
+				))
+			}
 		},
 	}
 }
@@ -61,6 +76,7 @@ fn python(json_output: bool) -> miette::Result<()> {
 	Ok(())
 }
 
+#[cfg(feature = "local")]
 async fn speech(
 	data_dir: &Path,
 	mut model: Option<String>,

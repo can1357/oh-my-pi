@@ -662,7 +662,7 @@ pub fn signal_number(value: &str) -> Option<i32> {
 		.or_else(|| value.strip_prefix("sig"))
 		.unwrap_or(value);
 	if let Ok(number) = value.parse::<i32>() {
-		#[cfg(target_os = "linux")]
+		#[cfg(any(target_os = "linux", target_os = "android"))]
 		return (0..=libc::SIGRTMAX()).contains(&number).then_some(number);
 		#[cfg(target_os = "macos")]
 		return (0..=31).contains(&number).then_some(number);

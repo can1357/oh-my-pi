@@ -171,7 +171,12 @@ fn unix_socket_path(digest: &Hash32, kind: &str) -> PathBuf {
 	let short: [u8; 16] = digest.as_bytes()[..16]
 		.try_into()
 		.expect("a SHA-256 digest contains 16 prefix bytes");
-	PathBuf::from("/tmp").join(format!(
+	let directory = if cfg!(target_os = "android") {
+		env::temp_dir()
+	} else {
+		PathBuf::from("/tmp")
+	};
+	directory.join(format!(
 		"omp-{}-{}-{kind}.sock",
 		nix::unistd::geteuid().as_raw(),
 		hex::encode_n(&short)
@@ -197,6 +202,8 @@ fn windows_pipe_path(state_dir: &Path, kind: &str) -> PathBuf {
 
 #[cfg(all(test, unix))]
 mod tests {
+	#[cfg(target_os = "android")]
+	use std::{env, path::Path};
 	use std::{mem, path::PathBuf};
 
 	use super::{document_socket, environment_socket, extension_socket};
@@ -221,10 +228,19 @@ mod tests {
 
 		assert_ne!(env, docs);
 		assert_ne!(env, extension);
+
 		assert_ne!(docs, extension);
 		assert!(env.as_os_str().as_encoded_bytes().len() < capacity);
 		assert!(docs.as_os_str().as_encoded_bytes().len() < capacity);
 		assert!(extension.as_os_str().as_encoded_bytes().len() < capacity);
+	}
+
+	#[cfg(target_os = "android")]
+	#[test]
+	fn socket_paths_use_termux_temporary_directory() {
+		let socket = document_socket(Path::new("/project/state"));
+
+		assert_eq!(socket.parent(), Some(env::temp_dir().as_path()));
 	}
 }
 

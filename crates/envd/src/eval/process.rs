@@ -71,6 +71,9 @@ const MAX_MANAGED_ENV_VALUE_BYTES: usize = 1024 * 1024;
 const MAX_MANAGED_ENV_BYTES: usize = 2 * 1024 * 1024;
 const MANAGED_ENV_KEYS: [&str; 3] =
 	["OMP_ARTIFACTS_DIR", "OMP_EVAL_LOCAL_ROOTS", "OMP_SESSION_FILE"];
+#[cfg(target_os = "android")]
+const EMBEDDED_INTERPRETER: &str = "embedded:cpython-3.14";
+#[cfg(not(target_os = "android"))]
 const EMBEDDED_INTERPRETER: &str = "embedded:cpython-3.14t";
 const EXTERNAL_RUNNER_SOURCE: &str = include_str!("external_runner.py");
 

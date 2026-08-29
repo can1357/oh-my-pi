@@ -530,10 +530,17 @@ mod platform {
 		unsafe { *libc::__error() }
 	}
 
-	#[cfg(any(target_os = "linux", target_os = "android"))]
+	#[cfg(target_os = "linux")]
 	fn errno() -> libc::c_int {
 		// SAFETY: libc supplies a valid thread-local errno pointer.
 		unsafe { *libc::__errno_location() }
+	}
+
+	#[cfg(target_os = "android")]
+	fn errno() -> libc::c_int {
+		io::Error::last_os_error()
+			.raw_os_error()
+			.unwrap_or_default()
 	}
 
 	pub(super) fn deactivate() {

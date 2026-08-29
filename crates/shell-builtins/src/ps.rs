@@ -1261,7 +1261,7 @@ fn format_ps_elapsed(duration: Duration) -> String {
 	}
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 fn ps_total_memory_bytes() -> Option<u64> {
 	let value = fs::read_to_string("/proc/meminfo")
 		.ok()?

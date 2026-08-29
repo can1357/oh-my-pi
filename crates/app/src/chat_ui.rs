@@ -3653,6 +3653,7 @@ where
 			let (host_result, bridge_result) = tokio::join!(host, bridge);
 			(host_result.into_diagnostic(), bridge_result)
 		},
+		#[cfg(feature = "gui")]
 		ChatPresentation::Gui => {
 			#[cfg(not(feature = "gui"))]
 			return Err(miette::miette!(

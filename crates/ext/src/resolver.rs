@@ -16,7 +16,23 @@ use super::{ExtensionCode, ExtensionError};
 use crate::config::FeatureManifest;
 
 /// The `CPython` ABI tags allowed by R3.
+#[cfg(target_os = "android")]
+pub const ACCEPTED_ABIS: [&str; 3] = ["cp314", "abi3", "none"];
+/// The `CPython` ABI tags allowed by R3.
+#[cfg(not(target_os = "android"))]
 pub const ACCEPTED_ABIS: [&str; 3] = ["cp314t", "abi3t", "none"];
+
+/// Exact CPython ABI recorded in extension locks for this target.
+#[cfg(target_os = "android")]
+pub const PYTHON_ABI: &str = "cp314";
+/// Exact CPython ABI recorded in extension locks for this target.
+#[cfg(not(target_os = "android"))]
+pub const PYTHON_ABI: &str = "cp314t";
+
+#[cfg(target_os = "android")]
+const ACCEPTED_ABIS_TEXT: &str = "cp314, abi3, none";
+#[cfg(not(target_os = "android"))]
+const ACCEPTED_ABIS_TEXT: &str = "cp314t, abi3t, none";
 
 /// One enabled extension requirement participating in a host-child unit.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -493,7 +509,7 @@ pub fn validate_abi(tag: &str) -> Result<(), ExtensionError> {
 	} else {
 		Err(ExtensionError::new(
 			ExtensionCode::EAbiRejected,
-			format!("wheel ABI {abi:?}; accepted: cp314t, abi3t, none"),
+			format!("wheel ABI {abi:?}; accepted: {ACCEPTED_ABIS_TEXT}"),
 		))
 	}
 }

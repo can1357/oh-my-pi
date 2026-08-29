@@ -1,6 +1,6 @@
 //! Bounded Content-Length framed Debug Adapter Protocol engine.
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 use std::env;
 use std::{
 	collections::HashMap,
@@ -315,11 +315,11 @@ impl DapProtocol {
 				Self::spawn_tcp(command, args, port_argument, cwd).await
 			},
 			DapTransport::Unix { socket_argument } => {
-				#[cfg(target_os = "linux")]
+				#[cfg(any(target_os = "linux", target_os = "android"))]
 				{
 					Self::spawn_unix(command, args, socket_argument, cwd).await
 				}
-				#[cfg(not(target_os = "linux"))]
+				#[cfg(not(any(target_os = "linux", target_os = "android")))]
 				{
 					Self::spawn_reverse_tcp(command, args, socket_argument, cwd).await
 				}
@@ -365,7 +365,7 @@ impl DapProtocol {
 		}
 	}
 
-	#[cfg(target_os = "linux")]
+	#[cfg(any(target_os = "linux", target_os = "android"))]
 	async fn spawn_unix(
 		command: &str,
 		args: &[Str],
@@ -403,7 +403,7 @@ impl DapProtocol {
 		}
 	}
 
-	#[cfg(not(target_os = "linux"))]
+	#[cfg(not(any(target_os = "linux", target_os = "android")))]
 	async fn spawn_reverse_tcp(
 		command: &str,
 		args: &[Str],

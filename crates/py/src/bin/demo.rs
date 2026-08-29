@@ -29,8 +29,7 @@ fn nth_prime(n: u64) -> PyResult<u64> {
 	Ok(candidate)
 }
 
-/// The `omp` module as seen from Python. `gil_used = false` declares
-/// free-threading support so importing it keeps the GIL disabled.
+/// The `omp` module as seen from Python.
 #[pymodule(gil_used = false)]
 fn omp(m: &Bound<'_, PyModule>) -> PyResult<()> {
 	m.add_function(wrap_pyfunction!(nth_prime, m)?)
@@ -65,15 +64,15 @@ try:
           f"GIL still {'on' if sys._is_gil_enabled() else 'off'}")
 except ModuleNotFoundError:
     print(f"site   : numpy not installed — uv pip install "
-          f"--python \"$(uv python find 3.14t)\" --target {sys.path[0]!r} numpy")
+          f"--python python3.14 --target {sys.path[0]!r} numpy")
 "#
 			),
 			None,
 			None,
 		)?;
 
-		// Concurrent engines: sub-interpreters with isolated state, running
-		// truly in parallel (frozen stdlib exists in every interpreter).
+		// Concurrent engines: sub-interpreters with isolated state (the frozen
+		// desktop stdlib or Termux filesystem stdlib is available in each).
 		py.run(
 			c_str!(
 				r#"

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sysconfig
 from typing import Final
 
 from _omp import Duration
@@ -33,8 +34,10 @@ MAX_PENDING_EFFECTS: Final[int] = 1024
 PING_INTERVAL: Final[Duration] = Duration("15s")
 """Idle interval between host health probes."""
 
-PYTHON_REV: Final[str] = "3.14t"
-"""Python free-threaded ABI revision required by the host."""
+PYTHON_REV: Final[str] = (
+    "3.14t" if sysconfig.get_config_var("Py_GIL_DISABLED") else "3.14"
+)
+"""CPython 3.14 ABI revision required by the host."""
 
 SCHEMA_REV: Final[int] = 7
 """Wire schema revision shared with ``omp_proto::SCHEMA_REV``."""

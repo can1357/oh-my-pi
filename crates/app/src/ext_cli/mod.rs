@@ -25,7 +25,7 @@ use omp_ext::{
 		InstalledExtension, InstalledRecord, LockFile, LockedExtension, LockedPackage, Wheel,
 		index_source,
 	},
-	resolver::{ResolvePlan, ResolveRequirement, SystemUv, minimal_unsat_core},
+	resolver::{PYTHON_ABI, ResolvePlan, ResolveRequirement, SystemUv, minimal_unsat_core},
 	trust::{
 		Grant, GrantsFile, KeysFile, RevocationFreshness, RevocationsFile, grant_covers,
 		verify_artifact_signature,
@@ -1385,7 +1385,9 @@ fn source_requirement(
 }
 
 fn default_resolution_target() -> &'static str {
-	if cfg!(all(target_arch = "aarch64", target_os = "macos")) {
+	if cfg!(all(target_arch = "aarch64", target_os = "android")) {
+		"aarch64-linux-android"
+	} else if cfg!(all(target_arch = "aarch64", target_os = "macos")) {
 		"aarch64-apple-darwin"
 	} else if cfg!(all(target_arch = "x86_64", target_os = "macos")) {
 		"x86_64-apple-darwin"
@@ -2829,7 +2831,7 @@ fn read_lock_or_empty(path: &Path, layer: BackendLayer) -> miette::Result<LockFi
 		generated_at: String::new(),
 		layer,
 		requires_python: Str::new_static("==3.14.*"),
-		abi: Str::new_static("cp314t"),
+		abi: Str::new_static(PYTHON_ABI),
 		targets: Vec::new(),
 		exclude_newer: None,
 		indexes: Vec::new(),

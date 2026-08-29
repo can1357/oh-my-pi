@@ -1889,18 +1889,28 @@ impl Runtime {
 	}
 
 	async fn speech_models(&self) -> miette::Result<Value> {
-		use omp_inference::local::{
-			ArtifactStore, LocalCancellation,
-			speech_catalog::{SpeechArtifactManifests, SpeechCatalog},
-		};
-		let root = self.state.lock().data_dir.join("models");
-		fs::create_dir_all(&root).into_diagnostic()?;
-		let store = ArtifactStore::open(&root).into_diagnostic()?;
-		let manifests = SpeechArtifactManifests::curated().into_diagnostic()?;
-		let snapshot = SpeechCatalog
-			.snapshot(&store, &manifests, &LocalCancellation::new())
-			.into_diagnostic()?;
-		serde_json::to_value(snapshot).into_diagnostic()
+		#[cfg(feature = "local")]
+		{
+			use omp_inference::local::{
+				ArtifactStore, LocalCancellation,
+				speech_catalog::{SpeechArtifactManifests, SpeechCatalog},
+			};
+			let root = self.state.lock().data_dir.join("models");
+			fs::create_dir_all(&root).into_diagnostic()?;
+			let store = ArtifactStore::open(&root).into_diagnostic()?;
+			let manifests = SpeechArtifactManifests::curated().into_diagnostic()?;
+			let snapshot = SpeechCatalog
+				.snapshot(&store, &manifests, &LocalCancellation::new())
+				.into_diagnostic()?;
+			serde_json::to_value(snapshot).into_diagnostic()
+		}
+		#[cfg(not(feature = "local"))]
+		{
+			Err(miette!(
+				"speech model inspection is unavailable in this build; local speech features are \
+				 disabled"
+			))
+		}
 	}
 
 	fn list_extensions(&self) -> miette::Result<Value> {

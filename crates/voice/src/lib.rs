@@ -17,14 +17,14 @@ pub mod attestation;
 pub mod audio;
 pub mod coordinator;
 mod device;
-#[cfg(feature = "realtime-media")]
+#[cfg(all(feature = "realtime-media", not(target_os = "android")))]
 pub mod live;
 /// Fence-aware enhanced-speech rewriting.
 pub mod rewrite;
 /// Streaming Markdown-to-speech segmentation.
 pub mod segmentation;
 /// Realtime SDP and sideband transport.
-#[cfg(feature = "realtime-transport")]
+#[cfg(all(feature = "realtime-transport", not(target_os = "android")))]
 pub mod transport;
 /// Speech-to-text submit-trigger evaluation.
 pub mod triggers;

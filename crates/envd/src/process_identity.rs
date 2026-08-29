@@ -160,7 +160,7 @@ mod platform {
 	}
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 mod platform {
 	use std::{fs, os::unix::fs::MetadataExt as _, time::Duration};
 
@@ -214,6 +214,20 @@ mod platform {
 			&& let Ok(now) = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)
 		{
 			return Some(now.as_secs().saturating_sub(uptime as u64));
+		}
+		#[cfg(target_os = "android")]
+		{
+			// Android's hidepid policy can deny all three procfs sources above.
+			// CLOCK_BOOTTIME remains owner-independent and includes suspend time,
+			// matching `/proc/uptime` for this informational wall-clock field.
+			let mut uptime = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+			// SAFETY: `uptime` is writable and CLOCK_BOOTTIME is a read-only clock.
+			if unsafe { libc::clock_gettime(libc::CLOCK_BOOTTIME, &raw mut uptime) } == 0
+				&& let Ok(uptime_seconds) = u64::try_from(uptime.tv_sec)
+				&& let Ok(now) = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)
+			{
+				return Some(now.as_secs().saturating_sub(uptime_seconds));
+			}
 		}
 		fs::metadata("/proc/1")
 			.ok()
@@ -299,7 +313,7 @@ mod platform {
 	}
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "android", windows)))]
 compile_error!("durable process identity is not implemented for this target");
 
 #[cfg(test)]

@@ -871,6 +871,7 @@ pub enum ChatPresentation {
 	/// Render through the inline terminal host.
 	Terminal,
 	/// Render through the native GPU window host.
+	#[cfg(feature = "gui")]
 	Gui,
 }
 fn shell_argument(value: &str) -> String {

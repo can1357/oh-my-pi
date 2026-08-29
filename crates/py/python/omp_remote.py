@@ -32,8 +32,8 @@ Code shipping, per function (override with ``remote(ship=...)``):
   (omp-py is pinned, so omp-py to omp-py always qualifies) and the function
   must be self-contained: no closures, no references to module globals.
 
-Workers execute calls on real threads; under the free-threaded runtime
-concurrent connections run in parallel.
+Workers execute calls on real threads; concurrency follows the attached
+CPython runtime's threading semantics.
 
 .. warning:: **Security.** Deserializing and executing shipped code IS
    arbitrary code execution — that is the feature. Only ever connect
@@ -532,8 +532,8 @@ def _remove_stale_unix_socket(path):
 
 def serve_forever(address, authkey=None):
     """Accept loop: one daemon thread per connection, each running
-    :func:`serve`. Under free-threaded CPython connections execute in
-    parallel. Never returns."""
+    :func:`serve`. Concurrency follows the attached CPython runtime. Never
+    returns."""
     is_unix = not isinstance(address, tuple)
     _validate_authkey(authkey, required=not is_unix)
     if is_unix:

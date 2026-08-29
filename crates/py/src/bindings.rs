@@ -1,4 +1,4 @@
-//! Native, free-threaded Python value and Environment bindings.
+//! Native `CPython` value and Environment bindings.
 
 use std::{
 	cmp::Ordering,
@@ -4096,7 +4096,7 @@ fn _open_environment_scope(
 	))
 }
 
-/// Frozen cancellation token shared safely by free-threaded Python callers.
+/// Frozen cancellation token shared safely by Python callers.
 #[pyclass(name = "Cancellation", frozen, module = "_omp")]
 #[derive(Debug, Default)]
 struct PyCancellation {
@@ -4127,8 +4127,8 @@ fn _thread_id() -> u64 {
 }
 /// Builtin-only scribe engine shared by every compiled template.
 ///
-/// Registered helpers are the deterministic builtins, so one shared,
-/// immutable registry is safe under free-threaded rendering.
+/// Registered helpers are deterministic builtins, so one shared immutable
+/// registry is safe for concurrent rendering.
 static SCRIBE_ENGINE: LazyLock<ScribeEngine> = LazyLock::new(ScribeEngine::new);
 
 /// Renders a scribe failure once, at the Python boundary, source chain

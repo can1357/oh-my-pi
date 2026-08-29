@@ -131,14 +131,14 @@ omp-docserver = { path = "crates/docserver", version = "0.1.0" }
 omp-desktop = { path = "crates/desktop", version = "0.1.0" }
 omp-driver = { path = "crates/driver", version = "0.1.0", default-features = false }
 omp-env = { path = "crates/env", version = "0.1.0" }
-omp-envd = { path = "crates/envd", version = "0.1.0" }
+omp-envd = { path = "crates/envd", version = "0.1.0", default-features = false }
 omp-ext = { path = "crates/ext", version = "0.1.0" }
 omp-grep = { path = "crates/grep", version = "0.1.0" }
-omp-gui = { path = "crates/gui", version = "0.1.0" }
+omp-gui = { path = "crates/gui", version = "0.1.0", default-features = false }
 omp-hashline = { path = "crates/hashline", version = "0.1.0" }
 omp-http = { path = "crates/http", version = "0.1.0" }
 omp-catalog = { path = "crates/catalog", version = "0.1.0" }
-omp-inference = { path = "crates/inference", version = "0.1.0" }
+omp-inference = { path = "crates/inference", version = "0.1.0", default-features = false }
 omp-serve = { path = "crates/serve", version = "0.1.0" }
 omp-memory = { path = "crates/memory", version = "0.1.0", default-features = false }
 omp-oauth = { path = "crates/oauth", version = "0.1.0" }
@@ -165,7 +165,7 @@ omp-tui = { path = "crates/tui", version = "0.1.0" }
 omp-tui-vocab = { path = "crates/tui-vocab", version = "0.1.0" }
 omp-vcs = { path = "crates/vcs", version = "0.1.0" }
 omp-voice-kokoro = { path = "crates/voice-kokoro", version = "0.1.0" }
-omp-voice = { path = "crates/voice", version = "0.1.0" }
+omp-voice = { path = "crates/voice", version = "0.1.0", default-features = false }
 omp-webview = { path = "crates/webview", version = "0.1.0" }
 omp-walker = { path = "crates/walker", version = "0.1.0" }
 opentelemetry = "0.32.0"

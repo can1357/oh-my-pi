@@ -10,7 +10,7 @@ use omp_core::Str;
 use serde::{Deserialize, Serialize};
 use toml::map;
 
-use super::{ExtensionCode, ExtensionError, Layer, TrustTier};
+use super::{ExtensionCode, ExtensionError, Layer, TrustTier, resolver::PYTHON_ABI};
 
 /// Current `omp.lock` format version.
 pub const LOCK_VERSION: u32 = 2;
@@ -145,10 +145,10 @@ impl LockFile {
 				"lock belongs to a different layer",
 			));
 		}
-		if self.requires_python.as_str() != "==3.14.*" || self.abi.as_str() != "cp314t" {
+		if self.requires_python.as_str() != "==3.14.*" || self.abi.as_str() != PYTHON_ABI {
 			return Err(ExtensionError::new(
 				ExtensionCode::ELockPython,
-				"lock does not target CPython 3.14t",
+				"lock does not target this build's CPython 3.14 ABI",
 			));
 		}
 		if self.index_strategy.as_str() != "first-index" {

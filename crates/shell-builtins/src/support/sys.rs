@@ -70,10 +70,10 @@ pub(crate) mod pipes {
 
 /// Signal-adjacent stdout health probes.
 pub(crate) mod signals {
-	#[cfg(target_os = "linux")]
+	#[cfg(any(target_os = "linux", target_os = "android"))]
 	use std::{io, mem};
 	/// Returns whether stdout is not a FIFO with a broken or hung-up reader.
-	#[cfg(target_os = "linux")]
+	#[cfg(any(target_os = "linux", target_os = "android"))]
 	pub(crate) fn ensure_stdout_not_broken() -> io::Result<bool> {
 		use std::os::fd::AsRawFd;
 		let fd = io::stdout().as_raw_fd();

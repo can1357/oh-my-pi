@@ -89,7 +89,7 @@ async fn uname(argument: &str) -> Option<String> {
 }
 
 async fn cpu_model() -> Option<String> {
-	#[cfg(target_os = "linux")]
+	#[cfg(any(target_os = "linux", target_os = "android"))]
 	{
 		let file = tokio::fs::File::open("/proc/cpuinfo").await.ok()?;
 		let mut bytes = Vec::new();
@@ -164,15 +164,34 @@ async fn run_probe(command: &str, arguments: &[&str], timeout: Duration) -> Opti
 	(!output.is_empty()).then(|| output.to_owned())
 }
 
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(target_os = "linux", target_os = "android", test))]
 fn parse_linux_cpu(cpuinfo: &str) -> Option<String> {
-	cpuinfo.lines().find_map(|line| {
-		let (key, value) = line.split_once(':')?;
-		(key.trim() == "model name")
-			.then(|| value.trim())
-			.filter(|value| !value.is_empty())
-			.map(str::to_owned)
-	})
+	let mut hardware = None;
+	let mut processor = None;
+	for line in cpuinfo.lines() {
+		let Some((key, value)) = line.split_once(':') else {
+			continue;
+		};
+		let value = value.trim();
+		if value.is_empty() {
+			continue;
+		}
+		match key.trim() {
+			"model name" => return Some(value.to_owned()),
+			"Hardware" if cfg!(target_os = "android") => {
+				hardware.get_or_insert(value);
+			},
+			"Processor" if cfg!(target_os = "android") => {
+				processor.get_or_insert(value);
+			},
+			_ => {},
+		};
+	}
+	if cfg!(target_os = "android") {
+		hardware.or(processor).map(str::to_owned)
+	} else {
+		None
+	}
 }
 
 #[cfg(any(windows, test))]
@@ -313,12 +332,17 @@ fn os_type() -> &'static str {
 	"Windows_NT"
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 fn os_type() -> &'static str {
 	"Linux"
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+#[cfg(not(any(
+	target_os = "macos",
+	target_os = "windows",
+	target_os = "linux",
+	target_os = "android"
+)))]
 fn os_type() -> &'static str {
 	env::consts::OS
 }

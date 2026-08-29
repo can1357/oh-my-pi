@@ -8078,13 +8078,25 @@ pub mod processor {
 		}
 	}
 
-	#[cfg(unix)]
+	#[cfg(all(unix, not(target_os = "android")))]
 	fn shell_command(cmd: &str, host: &Host) -> process::Command {
 		let mut c = host.command("/bin/sh");
 		c.arg("-c").arg(cmd);
 		// run relative to the shell's cwd,
 		// not the host process cwd. `output()` already keeps the child's stdio
 		// away from the host's (stdin closed, stdout/stderr captured).
+		c
+	}
+
+	#[cfg(target_os = "android")]
+	fn shell_command(cmd: &str, host: &Host) -> std::process::Command {
+		let mut c = std::process::Command::new("sh");
+		c.arg("-c").arg(cmd);
+		// run relative to the shell's cwd,
+		// not the host process cwd. `output()` already keeps the child's stdio
+		// away from the host's (stdin closed, stdout/stderr captured).
+		c.current_dir(host.cwd());
+		c.env_clear().envs(host.env());
 		c
 	}
 

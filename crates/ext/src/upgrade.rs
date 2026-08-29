@@ -21,6 +21,7 @@ use super::{
 	config::{FeatureManifest, FeatureSelection},
 	index::{IndexArtifact, IndexRelease, SignedIndex},
 	lock::{InstalledRecord, LockFile, atomic_toml},
+	resolver::PYTHON_ABI,
 	trust::{
 		RevocationFreshness, RevocationsFile, verify_artifact_signature, verify_publisher_rotation,
 	},
@@ -934,7 +935,7 @@ mod tests {
 				generated_at: String::new(),
 				layer,
 				requires_python: Str::new_static("==3.14.*"),
-				abi: Str::new_static("cp314t"),
+				abi: Str::new_static(PYTHON_ABI),
 				targets: Vec::new(),
 				exclude_newer: None,
 				indexes: Vec::new(),

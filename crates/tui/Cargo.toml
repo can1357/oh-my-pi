@@ -26,7 +26,6 @@ test = true
 workspace = true
 
 [dependencies]
-arboard = { workspace = true }
 bytes = { workspace = true }
 flume = { workspace = true }
 image = { workspace = true }
@@ -53,6 +52,9 @@ tokio = { workspace = true }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
 xutf = { workspace = true }
+
+[target.'cfg(not(target_os = "android"))'.dependencies]
+arboard = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 nix = { workspace = true }

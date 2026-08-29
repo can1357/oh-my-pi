@@ -2959,13 +2959,23 @@ fn phase_for_state(state: i32) -> ProcessPhase {
 	}
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "android")))]
 fn detached_command(source: &str, sandbox: Option<&ExecSandbox>) -> Command {
 	let args = [OsStr::new("-lc"), OsStr::new(source)];
 	let mut command = sandbox.map_or_else(
 		|| Command::new("/bin/sh"),
 		|sandbox| sandbox.command(OsStr::new("/bin/sh"), &args),
 	);
+	if sandbox.is_none() {
+		command.args(args);
+	}
+	command
+}
+#[cfg(target_os = "android")]
+fn detached_command(source: &str, sandbox: Option<&ExecSandbox>) -> Command {
+	let args = [OsStr::new("-lc"), OsStr::new(source)];
+	let mut command = sandbox
+		.map_or_else(|| Command::new("sh"), |sandbox| sandbox.command(OsStr::new("sh"), &args));
 	if sandbox.is_none() {
 		command.args(args);
 	}

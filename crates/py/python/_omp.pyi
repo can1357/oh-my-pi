@@ -128,7 +128,7 @@ class BlobStat:
 @final
 class Cancellation:
     """
-    Frozen cancellation token shared safely by free-threaded Python callers.
+    Frozen cancellation token shared safely by Python callers.
     """
     def __new__(cls, /) -> Cancellation: ...
     def cancel(self, /) -> None: ...

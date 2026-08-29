@@ -60,6 +60,8 @@ use omp_inference::{
 };
 use tokio::io::{AsyncWriteExt as _, stdout};
 
+#[cfg(feature = "local")]
+use crate::tiny_models_cmd;
 use crate::{
 	acp_mode, auth_broker_cmd, auth_cli, auth_gateway_cmd, bench_cmd, chat_cmd,
 	chat_cmd::{ChatPresentation, ChatStart},
@@ -83,7 +85,7 @@ use crate::{
 	ssh_cmd::SshArgs,
 	startup_notice,
 	startup_notice::Eligibility,
-	stats_cmd, tiny_models_cmd, ttsr_cmd, update_cmd, usage_cmd,
+	stats_cmd, ttsr_cmd, update_cmd, usage_cmd,
 	usage_error::CliUsageError,
 	worktree_cmd,
 };
@@ -3002,6 +3004,10 @@ pub async fn dispatch(cli: OmpCli) -> miette::Result<()> {
 	let command = cli
 		.command
 		.unwrap_or_else(|| Command::Chat(ChatArgs::default_interactive()));
+	#[cfg(not(feature = "gui"))]
+	if gui {
+		return Err(miette!("--gui is unavailable in this build; GUI support is disabled"));
+	}
 	if gui && !matches!(&command, Command::Chat(_)) {
 		return Err(miette!("--gui is only supported by interactive chat"));
 	}
@@ -3021,16 +3027,15 @@ pub async fn dispatch(cli: OmpCli) -> miette::Result<()> {
 			omp_envd::run(args.into_config(), bridges).await
 		},
 		Command::Chat(args) => {
-			run_interactive_chat(
-				args,
-				launch_extensions,
-				if gui {
-					ChatPresentation::Gui
-				} else {
-					ChatPresentation::Terminal
-				},
-			)
-			.await
+			#[cfg(feature = "gui")]
+			let presentation = if gui {
+				ChatPresentation::Gui
+			} else {
+				ChatPresentation::Terminal
+			};
+			#[cfg(not(feature = "gui"))]
+			let presentation = ChatPresentation::Terminal;
+			run_interactive_chat(args, launch_extensions, presentation).await
 		},
 		Command::Print(mut args) => {
 			args.launch.extension_launch = launch_extensions;
@@ -3087,9 +3092,31 @@ pub async fn dispatch(cli: OmpCli) -> miette::Result<()> {
 		Command::Usage(args) => usage_cmd::run(args).await,
 		Command::Bench(args) => bench_cmd::run(args).await,
 		Command::DryBalance(args) => dry_balance_cmd::run(args).await,
-		Command::TinyModels(args) => tiny_models_cmd::run(args).await,
+		Command::TinyModels(args) => {
+			#[cfg(feature = "local")]
+			{
+				tiny_models_cmd::run(args).await
+			}
+			#[cfg(not(feature = "local"))]
+			{
+				let _ = args;
+				Err(miette!(
+					"`tiny-models` is unavailable in this build; local model features are disabled"
+				))
+			}
+		},
 		Command::Setup(args) => setup_cmd::run(args).await,
-		Command::Say(args) => say_cmd::run(args).await,
+		Command::Say(args) => {
+			#[cfg(feature = "local-tts")]
+			{
+				say_cmd::run(args).await
+			}
+			#[cfg(not(feature = "local-tts"))]
+			{
+				let _ = args;
+				Err(miette!("`say` is unavailable in this build; local TTS is disabled"))
+			}
+		},
 		Command::Grep(args) => grep_cmd::run(args),
 		Command::Grievances(args) => grievances_cmd::run(args).await,
 		Command::Ssh(args) => ssh_cmd::run(args).await,

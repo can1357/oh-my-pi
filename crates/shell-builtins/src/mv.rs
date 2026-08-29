@@ -20,7 +20,7 @@ use std::{
 
 use clap::{Arg, ArgAction, ArgMatches, Command, builder::ValueParser, error::ErrorKind};
 use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle, TermLike};
-#[cfg(all(unix, not(any(target_os = "macos", target_os = "redox"))))]
+#[cfg(all(unix, not(any(target_os = "android", target_os = "macos", target_os = "redox"))))]
 use omp_core::FastHashMap;
 use omp_core::{FastHashSet, FastState};
 use omp_shell_engine::{ShellExtensions, builtins::Registration, openfiles::OpenFile};
@@ -36,7 +36,7 @@ use self::hardlink::{
 };
 #[cfg(unix)]
 use crate::support::fsutil::{display_permissions_unix, make_fifo};
-#[cfg(all(unix, not(any(target_os = "macos", target_os = "redox"))))]
+#[cfg(all(unix, not(any(target_os = "android", target_os = "macos", target_os = "redox"))))]
 use crate::support::xattr as fsxattr;
 use crate::{
 	host::{Host, Utility, format_usage, matches_parser, util},
@@ -1166,7 +1166,7 @@ fn rename_symlink_fallback(host: &mut Host, from: &Path, to: &Path) -> io::Resul
 	// must not be resolved; only the from/to operands are filesystem locations.
 	let path_symlink_points_to = fs::read_link(host.resolve(from))?;
 	unix::fs::symlink(path_symlink_points_to, host.resolve(to))?;
-	#[cfg(not(any(target_os = "macos", target_os = "redox")))]
+	#[cfg(not(any(target_os = "android", target_os = "macos", target_os = "redox")))]
 	{
 		let _ = copy_xattrs_if_supported(host, from, to);
 	}
@@ -1231,7 +1231,7 @@ fn rename_dir_fallback(
 		(..) => None,
 	};
 
-	#[cfg(all(unix, not(any(target_os = "macos", target_os = "redox"))))]
+	#[cfg(all(unix, not(any(target_os = "android", target_os = "macos", target_os = "redox"))))]
 	let xattrs =
 		fsxattr::retrieve_xattrs(host.resolve(from)).unwrap_or_else(|_| FastHashMap::default());
 
@@ -1249,7 +1249,7 @@ fn rename_dir_fallback(
 		display_manager,
 	);
 
-	#[cfg(all(unix, not(any(target_os = "macos", target_os = "redox"))))]
+	#[cfg(all(unix, not(any(target_os = "android", target_os = "macos", target_os = "redox"))))]
 	fsxattr::apply_xattrs(host.resolve(to), xattrs)?;
 
 	result?;
@@ -1435,7 +1435,7 @@ fn copy_file_with_hardlinks_helper(
 		// Copy a regular file.
 		fs::copy(host.resolve(from), host.resolve(to))?;
 		// Copy xattrs, ignoring ENOTSUP errors (filesystem doesn't support xattrs)
-		#[cfg(all(unix, not(any(target_os = "macos", target_os = "redox"))))]
+		#[cfg(all(unix, not(any(target_os = "android", target_os = "macos", target_os = "redox"))))]
 		{
 			let _ = copy_xattrs_if_supported(host, from, to);
 		}
@@ -1490,7 +1490,7 @@ fn rename_file_fallback(
 		.map_err(|err| io::Error::new(err.kind(), "Permission denied"))?;
 
 	// Copy xattrs, ignoring ENOTSUP errors (filesystem doesn't support xattrs)
-	#[cfg(all(unix, not(any(target_os = "macos", target_os = "redox"))))]
+	#[cfg(all(unix, not(any(target_os = "android", target_os = "macos", target_os = "redox"))))]
 	{
 		let _ = copy_xattrs_if_supported(host, from, to);
 	}
@@ -1503,7 +1503,7 @@ fn rename_file_fallback(
 /// Copy xattrs from source to destination, ignoring ENOTSUP/EOPNOTSUPP errors.
 /// These errors indicate the filesystem doesn't support extended attributes,
 /// which is acceptable when moving files across filesystems.
-#[cfg(all(unix, not(any(target_os = "macos", target_os = "redox"))))]
+#[cfg(all(unix, not(any(target_os = "android", target_os = "macos", target_os = "redox"))))]
 fn copy_xattrs_if_supported(host: &Host, from: &Path, to: &Path) -> io::Result<()> {
 	match fsxattr::copy_xattrs(host.resolve(from), host.resolve(to)) {
 		Ok(()) => Ok(()),

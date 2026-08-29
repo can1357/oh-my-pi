@@ -22,10 +22,23 @@ path = "src/claude_trace.rs"
 required-features = ["claude-trace"]
 
 [features]
-default = ["local"]
+default = ["desktop"]
+desktop = [
+	"gui",
+	"local-applefm",
+	"local-embedding",
+	"local-text",
+	"local-stt",
+	"local-tts",
+	"native-audio",
+	"realtime-transport",
+]
+android = []
 claude-trace = []
-local = ["omp-driver/local", "omp-inference/local"]
 gui = ["dep:omp-gui"]
+native-audio = ["omp-voice/native-audio"]
+realtime-transport = ["omp-voice/realtime-transport"]
+local = ["omp-driver/local", "omp-inference/local"]
 local-all = [
 	"local-applefm",
 	"local-embedding",

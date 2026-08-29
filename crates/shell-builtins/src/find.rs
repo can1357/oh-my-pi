@@ -89,7 +89,11 @@ pub mod matchers {
 						Self::Writable => Access::WRITE_OK,
 						Self::Executable => Access::EXEC_OK,
 					};
-					accessat(CWD, path, mode, AtFlags::EACCESS).is_ok()
+					#[cfg(target_os = "android")]
+					let flags = AtFlags::empty();
+					#[cfg(not(target_os = "android"))]
+					let flags = AtFlags::EACCESS;
+					accessat(CWD, path, mode, flags).is_ok()
 				}
 				#[cfg(windows)]
 				{
