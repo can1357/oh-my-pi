@@ -97,6 +97,17 @@ describe("StreamCommitGate", () => {
 	});
 });
 
+
+	it("reset returns a terminated gate to probing and clears buffered prelude", () => {
+		const gate = new StreamCommitGate();
+		expect(gate.bufferPrelude(new Uint8Array([1, 2, 3]))).toBe(true);
+		expect(gate.classifyAndObserve("response.failed", 8)).toBe("terminated");
+		gate.reset();
+		expect(gate.state).toBe("probing");
+		expect(gate.preludeByteLength).toBe(0);
+		expect(gate.classifyAndObserve("response.created", 4)).toBe("probing");
+	});
+
 describe("holdSseUntilCommit (prelude replay buffer)", () => {
 	function sse(frames: string[]): ReadableStream<Uint8Array> {
 		const enc = new TextEncoder();

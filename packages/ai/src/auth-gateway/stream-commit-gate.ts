@@ -38,6 +38,14 @@ export class StreamCommitGate {
 		return this.#state;
 	}
 
+	/** Reset to probing for the next fallback attempt (clears prelude). */
+	reset(): void {
+		this.#state = "probing";
+		this.#bytes = 0;
+		this.#prelude = [];
+		this.#preludeBytes = 0;
+	}
+
 	classifyAndObserve(eventType: string, byteLength: number): StreamCommitState {
 		if (this.#state === "terminated") return this.#state;
 
