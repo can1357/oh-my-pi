@@ -808,6 +808,44 @@ describe("anthropic-messages encodeStream", () => {
 		expect(types.indexOf("message_start")).toBeGreaterThanOrEqual(0);
 	});
 
+	it("buffers content until Cursor auto routing resolves after early text", async () => {
+		const initial: AssistantMessage = {
+			role: "assistant",
+			content: [],
+			api: "anthropic-messages",
+			provider: "cursor",
+			model: "gpt-5",
+			usage: emptyUsage(),
+			stopReason: "stop",
+			timestamp: 0,
+		};
+		const earlyText: AssistantMessage = {
+			...initial,
+			content: [{ type: "text", text: "h" }],
+		};
+		const routed: AssistantMessage = {
+			...earlyText,
+			model: "claude-opus-4-7",
+			content: [{ type: "text", text: "hi" }],
+		};
+		// Production can emit text before the conversation checkpoint updates the
+		// routed model on `partial.model`. Content must not force message_start
+		// with the placeholder.
+		const events: AssistantMessageEvent[] = [
+			{ type: "start", partial: initial },
+			{ type: "text_start", contentIndex: 0, partial: earlyText },
+			{ type: "text_delta", contentIndex: 0, delta: "h", partial: earlyText },
+			{ type: "text_delta", contentIndex: 0, delta: "i", partial: routed },
+			{ type: "text_end", contentIndex: 0, content: "hi", partial: routed },
+			{ type: "done", reason: "stop", message: routed },
+		];
+		const sse = await collectSse(encodeStream(makeStream(events), "gpt-5", { cursorAutoMode: true }));
+		const start = sse.find(e => e.event === "message_start");
+		expect((start!.data as { message: { model: string } }).message.model).toBe("claude-opus-4-7");
+		const types = sse.map(e => e.event);
+		expect(types.indexOf("message_start")).toBeLessThan(types.indexOf("content_block_start"));
+	});
+
 	it("defers message_start for the discovered default auto sentinel", async () => {
 		const initial: AssistantMessage = {
 			role: "assistant",

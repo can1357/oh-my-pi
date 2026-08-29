@@ -235,7 +235,7 @@ const CORS_HEADERS: Record<string, string> = {
 	"Access-Control-Allow-Origin": "*",
 	"Access-Control-Allow-Methods": "GET, POST, OPTIONS",
 	"Access-Control-Allow-Headers":
-		"authorization, content-type, anthropic-version, anthropic-beta, openai-organization, openai-project, x-stainless-*, x-api-key",
+		"authorization, content-type, anthropic-version, anthropic-beta, openai-organization, openai-project, x-stainless-*, x-api-key, x-cursor-auto-mode, x-cursor-tool-passthrough, x-cursor-agent-exclude-tools, local-cli-mode, x-dev-experiment-overrides",
 	"Access-Control-Expose-Headers":
 		"x-request-id, request-id, x-litellm-model-id, x-litellm-model-api-base, x-litellm-response-cost, x-litellm-response-duration-ms, openai-processing-ms",
 	"Access-Control-Max-Age": "86400",

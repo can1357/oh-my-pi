@@ -257,6 +257,9 @@
 - Fixed quota reporting and Cookie capture guidance for China (Beijing) Alibaba Token Plan credentials ([#8509](https://github.com/can1357/oh-my-pi/issues/8509)).
 - Cursor `streamSimple` / pi-native capability and session options (`cursorClientSupportsInlineImages`, routed-model / prompt-context RPC flags, `cursorRunId`, `cursorAgentSessionId`) now populate `AgentRunRequest` protobuf fields instead of being dropped before the wire.
 - Unknown Cursor `interaction_query` variants are no longer auto-approved; only the verified unnamed WebFetch field (9) still gets an `approved {}` fallback.
+- Cursor auto-mode Anthropic SSE now buffers content until the routed model is known, so `message_start` is not permanently stamped with `auto`/`default`/the pre-route placeholder.
+- Auth-gateway CORS preflights allow the Cursor control headers (`x-cursor-auto-mode`, `x-cursor-tool-passthrough`, `x-cursor-agent-exclude-tools`, `local-cli-mode`, `x-dev-experiment-overrides`).
+- Cursor `DEBUG_CURSOR` interaction logs go through the central logger instead of `console.error`.
 - Fixed `omp usage invalidate` to discard stale OAuth and API-key usage snapshots, then force a cache-bypassing, per-provider serialized refresh so upgraded subscriptions do not silently retain pre-change quota data.
 
 ## [17.3.3] - 2026-08-14

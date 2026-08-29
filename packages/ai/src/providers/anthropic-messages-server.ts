@@ -6,6 +6,7 @@ import * as AIError from "../error";
 import type {
 	AnthropicServerToolContent,
 	AssistantMessage,
+	AssistantMessageEvent,
 	AssistantMessageEventStream,
 	Message,
 	RedactedThinkingContent,
@@ -644,151 +645,184 @@ export function encodeStream(
 				}
 			}, STREAM_PING_INTERVAL_MS);
 
+			const noteRoutedModel = (model: string | undefined) => {
+				if (!model || model === effectiveModelId) return;
+				effectiveModelId = model;
+				if (options?.cursorAutoMode === true) cursorAutoRoutingResolved = true;
+			};
+
+			const processEvent = (ev: AssistantMessageEvent): "continue" | "return" => {
+				if ("partial" in ev) lastPartial = ev.partial;
+				if ("message" in ev) lastPartial = ev.message;
+				switch (ev.type) {
+					case "start":
+						// Defer while Cursor auto routing is unresolved so clients see
+						// the routed model, not auto/default/the pre-route placeholder.
+						if (deferStartForCursorAuto(ev.partial.model)) break;
+						ensureStart(ev.partial);
+						break;
+					case "text_start": {
+						emitServerToolBlocksBefore(ev.partial, ev.contentIndex);
+						ensureStart(ev.partial);
+						open.set(ev.contentIndex, { index: ev.contentIndex, kind: "text" });
+						controller.enqueue(
+							sseFrame("content_block_start", {
+								type: "content_block_start",
+								index: ev.contentIndex,
+								content_block: { type: "text", text: "" },
+							}),
+						);
+						break;
+					}
+					case "text_delta":
+						controller.enqueue(
+							sseFrame("content_block_delta", {
+								type: "content_block_delta",
+								index: ev.contentIndex,
+								delta: { type: "text_delta", text: ev.delta },
+							}),
+						);
+						break;
+					case "text_end":
+						closeBlock(ev.contentIndex);
+						break;
+					case "thinking_start": {
+						emitServerToolBlocksBefore(ev.partial, ev.contentIndex);
+						ensureStart(ev.partial);
+						open.set(ev.contentIndex, { index: ev.contentIndex, kind: "thinking" });
+						controller.enqueue(
+							sseFrame("content_block_start", {
+								type: "content_block_start",
+								index: ev.contentIndex,
+								content_block: { type: "thinking", thinking: "" },
+							}),
+						);
+						break;
+					}
+					case "thinking_delta":
+						controller.enqueue(
+							sseFrame("content_block_delta", {
+								type: "content_block_delta",
+								index: ev.contentIndex,
+								delta: { type: "thinking_delta", thinking: ev.delta },
+							}),
+						);
+						break;
+					case "thinking_end": {
+						const c = ev.partial.content[ev.contentIndex];
+						if (c?.type === "thinking" && c.thinkingSignature) {
+							controller.enqueue(
+								sseFrame("content_block_delta", {
+									type: "content_block_delta",
+									index: ev.contentIndex,
+									delta: { type: "signature_delta", signature: c.thinkingSignature },
+								}),
+							);
+						}
+						closeBlock(ev.contentIndex);
+						break;
+					}
+					case "toolcall_start": {
+						emitServerToolBlocksBefore(ev.partial, ev.contentIndex);
+						ensureStart(ev.partial);
+						const tc = ev.partial.content[ev.contentIndex] as ToolCall | undefined;
+						open.set(ev.contentIndex, { index: ev.contentIndex, kind: "tool_use" });
+						controller.enqueue(
+							sseFrame("content_block_start", {
+								type: "content_block_start",
+								index: ev.contentIndex,
+								content_block: {
+									type: "tool_use",
+									id: tc?.id ?? "",
+									name: tc?.name ?? "",
+									input: {},
+								},
+							}),
+						);
+						break;
+					}
+					case "toolcall_delta":
+						controller.enqueue(
+							sseFrame("content_block_delta", {
+								type: "content_block_delta",
+								index: ev.contentIndex,
+								delta: { type: "input_json_delta", partial_json: ev.delta },
+							}),
+						);
+						break;
+					case "toolcall_end":
+						closeBlock(ev.contentIndex);
+						break;
+					case "done": {
+						for (const idx of [...open.keys()]) closeBlock(idx);
+						emitServerToolBlocksBefore(ev.message, ev.message.content.length);
+						// Auto-mode may have deferred start with no content events.
+						ensureStart(ev.message);
+						controller.enqueue(
+							sseFrame("message_delta", {
+								type: "message_delta",
+								// TODO: surface matched stop sequence once pi-ai
+								// propagates it on the `done` event.
+								delta: { stop_reason: mapStopReasonOut(ev.reason), stop_sequence: null },
+								usage: encodeUsage(ev.message),
+							}),
+						);
+						controller.enqueue(sseFrame("message_stop", { type: "message_stop" }));
+						controller.close();
+						return "return";
+					}
+					case "error": {
+						const msg = ev.error.errorMessage ?? "stream error";
+						controller.enqueue(sseFrame("error", { type: "error", error: { type: "api_error", message: msg } }));
+						controller.close();
+						return "return";
+					}
+				}
+				return "continue";
+			};
+
 			try {
 				if (cancelled) {
 					controller.close();
 					return;
 				}
+				// Hold content events until Cursor auto routing resolves so
+				// message_start is not permanently stamped with auto/default/the
+				// pre-route placeholder when text arrives before the checkpoint.
+				const pendingWhileRouting: AssistantMessageEvent[] = [];
+				const flushPending = () => {
+					const held = pendingWhileRouting.splice(0);
+					for (const heldEv of held) {
+						if (processEvent(heldEv) === "return") return true;
+					}
+					return false;
+				};
 				for await (const ev of events) {
 					if (cancelled) return;
-					if ("partial" in ev && ev.partial.model && ev.partial.model !== effectiveModelId) {
-						effectiveModelId = ev.partial.model;
-						if (options?.cursorAutoMode === true) cursorAutoRoutingResolved = true;
-						// For Cursor auto mode, message_start may have been deferred until
-						// the routed model is known — emit it now with the real id.
-						ensureStart(ev.partial);
+					if ("partial" in ev) noteRoutedModel(ev.partial.model);
+					if ("message" in ev) noteRoutedModel(ev.message.model);
+
+					// Terminal events must release any held content (force start with the
+					// best-known model) so clients still get a coherent SSE envelope when
+					// routing never arrives.
+					if (ev.type === "done" || ev.type === "error") {
+						if (ev.type === "done") ensureStart(ev.message);
+						if (flushPending()) return;
+						if (processEvent(ev) === "return") return;
+						continue;
 					}
-					switch (ev.type) {
-						case "start":
-							if (ev.partial.model && ev.partial.model !== effectiveModelId) {
-								effectiveModelId = ev.partial.model;
-								if (options?.cursorAutoMode === true) cursorAutoRoutingResolved = true;
-							}
-							// Defer while Cursor auto routing is unresolved so clients see
-							// the routed model, not auto/default/the pre-route placeholder.
-							if (deferStartForCursorAuto(ev.partial.model)) break;
-							ensureStart(ev.partial);
-							break;
-						case "text_start": {
-							emitServerToolBlocksBefore(ev.partial, ev.contentIndex);
-							ensureStart(ev.partial);
-							open.set(ev.contentIndex, { index: ev.contentIndex, kind: "text" });
-							controller.enqueue(
-								sseFrame("content_block_start", {
-									type: "content_block_start",
-									index: ev.contentIndex,
-									content_block: { type: "text", text: "" },
-								}),
-							);
-							break;
-						}
-						case "text_delta":
-							controller.enqueue(
-								sseFrame("content_block_delta", {
-									type: "content_block_delta",
-									index: ev.contentIndex,
-									delta: { type: "text_delta", text: ev.delta },
-								}),
-							);
-							break;
-						case "text_end":
-							closeBlock(ev.contentIndex);
-							break;
-						case "thinking_start": {
-							emitServerToolBlocksBefore(ev.partial, ev.contentIndex);
-							ensureStart(ev.partial);
-							open.set(ev.contentIndex, { index: ev.contentIndex, kind: "thinking" });
-							controller.enqueue(
-								sseFrame("content_block_start", {
-									type: "content_block_start",
-									index: ev.contentIndex,
-									content_block: { type: "thinking", thinking: "" },
-								}),
-							);
-							break;
-						}
-						case "thinking_delta":
-							controller.enqueue(
-								sseFrame("content_block_delta", {
-									type: "content_block_delta",
-									index: ev.contentIndex,
-									delta: { type: "thinking_delta", thinking: ev.delta },
-								}),
-							);
-							break;
-						case "thinking_end": {
-							const c = ev.partial.content[ev.contentIndex];
-							if (c?.type === "thinking" && c.thinkingSignature) {
-								controller.enqueue(
-									sseFrame("content_block_delta", {
-										type: "content_block_delta",
-										index: ev.contentIndex,
-										delta: { type: "signature_delta", signature: c.thinkingSignature },
-									}),
-								);
-							}
-							closeBlock(ev.contentIndex);
-							break;
-						}
-						case "toolcall_start": {
-							emitServerToolBlocksBefore(ev.partial, ev.contentIndex);
-							ensureStart(ev.partial);
-							const tc = ev.partial.content[ev.contentIndex] as ToolCall | undefined;
-							open.set(ev.contentIndex, { index: ev.contentIndex, kind: "tool_use" });
-							controller.enqueue(
-								sseFrame("content_block_start", {
-									type: "content_block_start",
-									index: ev.contentIndex,
-									content_block: {
-										type: "tool_use",
-										id: tc?.id ?? "",
-										name: tc?.name ?? "",
-										input: {},
-									},
-								}),
-							);
-							break;
-						}
-						case "toolcall_delta":
-							controller.enqueue(
-								sseFrame("content_block_delta", {
-									type: "content_block_delta",
-									index: ev.contentIndex,
-									delta: { type: "input_json_delta", partial_json: ev.delta },
-								}),
-							);
-							break;
-						case "toolcall_end":
-							closeBlock(ev.contentIndex);
-							break;
-						case "done": {
-							for (const idx of [...open.keys()]) closeBlock(idx);
-							emitServerToolBlocksBefore(ev.message, ev.message.content.length);
-							// Auto-mode may have deferred start with no content events.
-							ensureStart(ev.message);
-							controller.enqueue(
-								sseFrame("message_delta", {
-									type: "message_delta",
-									// TODO: surface matched stop sequence once pi-ai
-									// propagates it on the `done` event.
-									delta: { stop_reason: mapStopReasonOut(ev.reason), stop_sequence: null },
-									usage: encodeUsage(ev.message),
-								}),
-							);
-							controller.enqueue(sseFrame("message_stop", { type: "message_stop" }));
-							controller.close();
-							return;
-						}
-						case "error": {
-							const msg = ev.error.errorMessage ?? "stream error";
-							controller.enqueue(
-								sseFrame("error", { type: "error", error: { type: "api_error", message: msg } }),
-							);
-							controller.close();
-							return;
-						}
+
+					const deferring = !started && deferStartForCursorAuto(effectiveModelId);
+					if (deferring) {
+						// Skip bare start; buffer everything else until routing lands.
+						if (ev.type !== "start") pendingWhileRouting.push(ev);
+						continue;
 					}
+
+					if (flushPending()) return;
+					if (processEvent(ev) === "return") return;
 				}
+				if (flushPending()) return;
 				// Stream ended without an explicit done: emit a complete envelope
 				// (message_start + message_delta carrying a stop_reason) so strict
 				// clients don't reject the response as a protocol error.
