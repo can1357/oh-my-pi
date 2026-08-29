@@ -938,6 +938,12 @@ export interface MergeBranchResult {
 	conflict?: string;
 	/** Set when cherry-picks landed on HEAD but restoring the stashed working tree failed. */
 	stashConflict?: string;
+	/**
+	 * True when at least one cherry-pick revision landed on HEAD before a later
+	 * conflict aborted the range — parent tree is dirty even though the branch
+	 * is reported in {@link failed}.
+	 */
+	partialCommitsLanded?: boolean;
 }
 
 /**
@@ -969,11 +975,13 @@ export async function mergeTaskBranches(
 
 		try {
 			for (const { branchName, baseSha } of branches) {
+				let revisionsLanded = 0;
 				try {
 					const revisions = baseSha ? await repo.revListRange(baseSha, branchName) : [branchName];
 					for (const revision of revisions) {
 						try {
 							await repo.cherryPick(revision);
+							revisionsLanded++;
 						} catch (error) {
 							if (!vcs.isEmptyCherryPick(error)) throw error;
 							await repo.cherryPickSkip();
@@ -995,6 +1003,7 @@ export async function mergeTaskBranches(
 						merged,
 						failed: [...failed, ...branches.slice(merged.length + failed.length).map(b => b.branchName)],
 						conflict: `${branchName}: ${stderr}`,
+						partialCommitsLanded: revisionsLanded > 0,
 					};
 					break;
 				}

@@ -109,6 +109,12 @@ describe("isTautologicalParentVerifyCommand", () => {
 		expect(isTautologicalParentVerifyCommand("cd packages/foo && bun test")).toBe(false);
 		expect(isTautologicalParentVerifyCommand("cd packages/foo; bun test")).toBe(false);
 	});
+
+	it("rejects shell-backgrounded verification as non-evidence", () => {
+		expect(isTautologicalParentVerifyCommand("bun test & true")).toBe(true);
+		expect(isTautologicalParentVerifyCommand("bun test test/foo.test.ts &")).toBe(true);
+		expect(isTautologicalParentVerifyCommand("bun test && true")).toBe(false);
+	});
 });
 
 describe("isTrivialParentVerifyEvalCode", () => {

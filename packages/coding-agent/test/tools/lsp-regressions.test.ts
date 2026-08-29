@@ -1897,6 +1897,67 @@ describe("lsp regressions", () => {
 		}
 	});
 
+	it("treats diagnostics wait timeout without a publish as a failed server", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-diag-timeout-");
+		try {
+			const targetFile = path.join(tempDir.path(), "target.ts");
+			await Bun.write(targetFile, "export const target = 1;\n");
+			await initTheme();
+
+			const targetUri = fileToUri(targetFile);
+			const server: ServerConfig = { command: "silent-lsp", fileTypes: ["ts"], rootMarkers: [] };
+			const client: LspClient = {
+				name: "silent-lsp",
+				cwd: tempDir.path(),
+				config: server,
+				proc: {
+					stdin: {
+						write() {},
+						flush: async () => {},
+					},
+				} as unknown as LspClient["proc"],
+				requestId: 0,
+				diagnostics: new Map(),
+				diagnosticsVersion: 0,
+				openFiles: new Map([[targetUri, { version: 1, languageId: "typescript" }]]),
+				pendingRequests: new Map(),
+				messageBuffer: new Uint8Array(),
+				isReading: false,
+				status: "ready",
+				lastActivity: Date.now(),
+				writeQueue: Promise.resolve(),
+				activeProgressTokens: new Set(),
+				projectLoaded: Promise.resolve(),
+				resolveProjectLoaded: () => {},
+			};
+
+			vi.spyOn(lspConfig, "loadConfig").mockReturnValue({ servers: {}, idleTimeoutMs: undefined });
+			vi.spyOn(lspConfig, "getServersForFile").mockReturnValue([["silent-lsp", server]]);
+			vi.spyOn(lspClient, "getOrCreateClient").mockResolvedValue(client);
+			vi.spyOn(lspClient, "refreshFile").mockResolvedValue();
+			let now = 1_000_000;
+			vi.spyOn(Date, "now").mockImplementation(() => now);
+			vi.spyOn(Bun, "sleep").mockImplementation(async ms => {
+				now += Math.max(1, Number(ms));
+			});
+
+			const tool = new LspTool(makeLspSession(tempDir.path()));
+			const result = await tool.execute("diag-timeout", {
+				action: "diagnostics",
+				file: targetFile,
+				timeout: 1,
+			});
+
+			expect(result.details?.success).toBe(false);
+			expect(result.details?.diagnosticErrorCount).toBe(0);
+			expect((result.details?.failedServerCount ?? 0) > 0).toBe(true);
+			expect(textResult(result)).not.toBe("OK");
+		} finally {
+			vi.restoreAllMocks();
+			tempDir.removeSync();
+		}
+	});
+
 	it("rejects diagnostics when no language server was attempted for matched files", async () => {
 		const tempDir = TempDir.createSync("@omp-lsp-no-server-attempt-");
 		try {

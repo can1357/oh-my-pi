@@ -398,13 +398,22 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 							: isProjectAwareLspServer(serverConfig)
 								? PROJECT_DIAGNOSTICS_WAIT_TIMEOUT_MS
 								: SINGLE_DIAGNOSTICS_WAIT_TIMEOUT_MS;
-						const diagnostics = await waitForDiagnostics(client, uri, {
+						const waited = await waitForDiagnostics(client, uri, {
 							timeoutMs: Math.min(waitCapMs, timeoutSec * 1000),
 							signal,
 							minVersion,
 							expectedDocumentVersion,
 						});
-						allDiagnostics.push(...diagnostics);
+						if (waited.timedOut) {
+							// No publish/pull before the deadline — not a clean empty set.
+							failedServers.push(serverName);
+							logger.debug("LSP diagnostics wait timed out without a response", {
+								server: serverName,
+								file: relPath,
+							});
+							continue;
+						}
+						allDiagnostics.push(...waited.diagnostics);
 						succeededServers++;
 						totalServerSuccesses++;
 					} catch (err) {

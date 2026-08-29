@@ -1,5 +1,5 @@
 import * as path from "node:path";
-import { extractLeadingCdTarget } from "../tools/shell-tokenize";
+import { extractLeadingCdTarget, hasTopLevelShellBackground } from "../tools/shell-tokenize";
 
 /** Isolated apply succeeded; parent must re-run acceptance on this tree. */
 export const MERGED_UNVERIFIED_MARKER = "MERGED — child yield is not evidence; re-run acceptance on this tree.";
@@ -60,6 +60,9 @@ function isCdOnlyCommandSegment(segment: string): boolean {
 export function isTautologicalParentVerifyCommand(command: string): boolean {
 	let trimmed = command.trim();
 	if (trimmed.length === 0) return true;
+	// Backgrounded work (`bun test & true`) reports sync success before the check
+	// finishes — never treat that as parent acceptance.
+	if (hasTopLevelShellBackground(trimmed)) return true;
 	// Bash normalizes leading `cd <path> &&|; …` into cwd; strip those wrappers so
 	// `cd packages/foo && pwd` classifies as `pwd`, not as a real check.
 	for (;;) {

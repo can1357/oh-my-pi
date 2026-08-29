@@ -36,6 +36,8 @@ const MUTATING_TOOLS: Record<string, true> = {
 	ast_edit: true,
 };
 const MID_RUN_NUDGE_MESSAGE_TYPE = "mid-run-todo-nudge";
+/** Match default async job retention so finished-id poisoning cannot outlive reuse. */
+const FINISHED_VERIFY_JOB_TTL_MS = 5 * 60 * 1000;
 const MARKDOWN_PROMPT_PREFIX_RE = /^(?:>\s*)?(?:(?:[-*+]|\d+[.)])\s+)*/;
 const PROMPT_LABEL_RE = /^(?:q(?:uestion)?|ask)\s*\d*\s*[:.)-]\s*/i;
 const QUESTION_PROMPT_RE =
@@ -113,12 +115,33 @@ export class TodoTracker {
 	/** Merge generation (and bash command) observed when a parent-verify tool started. */
 	readonly #verifyStart = new Map<string, VerifyStartSnap>();
 	/**
+	 * Tool-call ids for bash/eval verify snaps that have not yet received a
+	 * running-ack re-key (or a sync terminal). Early async terminals may only
+	 * be stashed while this set is non-empty — a job-keyed snap waiting for its
+	 * own terminal must not authorize stashing unrelated job ids.
+	 */
+	readonly #awaitingJobRekeys = new Set<string>();
+	/**
+	 * Job ids whose verify terminal was already applied (or deliberately
+	 * skipped). Blocks duplicate hub deliveries from being stashed under a
+	 * reused id while another tool call still awaits re-key. Entries expire
+	 * after {@link FINISHED_VERIFY_JOB_TTL_MS} so post-retention id reuse can
+	 * race early again.
+	 */
+	readonly #finishedVerifyJobIds = new Map<string, number>();
+	/**
 	 * Async job terminals that arrived before the toolResult re-keyed the verify
-	 * snap under the job id (delivery race). Applied immediately on re-key.
+	 * snap under the job id (delivery race). Keyed by the sole tool-call still
+	 * awaiting re-key when possible; otherwise by job id when multiple awaits
+	 * are in flight. Applied on re-key only when the job id matches.
 	 */
 	readonly #earlyAsyncTerminals = new Map<
 		string,
-		{ jobType: string | undefined; status: "running" | "completed" | "failed" | "cancelled" | undefined }
+		{
+			jobId: string;
+			jobType: string | undefined;
+			status: "running" | "completed" | "failed" | "cancelled" | undefined;
+		}
 	>();
 
 	constructor(host: TodoTrackerHost) {
@@ -156,6 +179,8 @@ export class TodoTracker {
 	/** Drop verify-start snapshots owned by the previous logical session. */
 	resetVerifyState(): void {
 		this.#verifyStart.clear();
+		this.#awaitingJobRekeys.clear();
+		this.#finishedVerifyJobIds.clear();
 		this.#earlyAsyncTerminals.clear();
 	}
 
@@ -180,6 +205,10 @@ export class TodoTracker {
 			bashCwdUnresolvable: bashCwd.unresolvable,
 			lspFile,
 		});
+		// Bash/eval may auto-background; track until running-ack re-keys or sync settles.
+		if (toolName === "bash" || toolName === "eval") {
+			this.#awaitingJobRekeys.add(toolCallId);
+		}
 	}
 
 	/**
@@ -257,7 +286,11 @@ export class TodoTracker {
 			// verify still clears, while a start-before-merge snap of 0 never clears.
 			const generationAtStart =
 				start?.generation ?? (toolCallId ? 0 : (this.#host.unverifiedMergeGeneration?.() ?? 0));
-			if (toolCallId) this.#verifyStart.delete(toolCallId);
+			if (toolCallId) {
+				this.#verifyStart.delete(toolCallId);
+				this.#awaitingJobRekeys.delete(toolCallId);
+				this.#earlyAsyncTerminals.delete(toolCallId);
+			}
 			if (generationAtStart > 0) {
 				this.#host.clearUnverifiedMergeIfGeneration?.(generationAtStart);
 			}
@@ -272,6 +305,7 @@ export class TodoTracker {
 			if (asyncState === "running" && jobId) {
 				const snapped = this.#verifyStart.get(toolCallId);
 				this.#verifyStart.delete(toolCallId);
+				this.#awaitingJobRekeys.delete(toolCallId);
 				if (snapped !== undefined) {
 					// Prefer the start snap's cwd (includes leading `cd` resolution).
 					// Running-ack `details.cwd` echoes the structured cwd arg and can
@@ -283,9 +317,13 @@ export class TodoTracker {
 						detailCwd.trim() !== ""
 							? { ...snapped, cwd: path.resolve(detailCwd) }
 							: snapped;
-					const early = this.#earlyAsyncTerminals.get(jobId);
-					this.#earlyAsyncTerminals.delete(jobId);
+					// New incarnation of this job id — allow a fresh early terminal.
+					this.#finishedVerifyJobIds.delete(jobId);
+					const early =
+						this.#takeEarlyAsyncTerminal(toolCallId, jobId) ??
+						this.#takeEarlyAsyncTerminal(jobId, jobId);
 					if (early !== undefined) {
+						this.#markFinishedVerifyJob(jobId);
 						this.#applyAsyncVerifyClear(withCwd, early.jobType, early.status);
 					} else {
 						this.#verifyStart.set(jobId, withCwd);
@@ -293,6 +331,8 @@ export class TodoTracker {
 				}
 			} else {
 				this.#verifyStart.delete(toolCallId);
+				this.#awaitingJobRekeys.delete(toolCallId);
+				this.#earlyAsyncTerminals.delete(toolCallId);
 			}
 		}
 		this.#reminderAwaitingProgress = false;
@@ -310,21 +350,63 @@ export class TodoTracker {
 		const start = this.#verifyStart.get(jobId);
 		if (start === undefined) {
 			// Terminal beat the toolResult re-key — stash until re-key applies it.
-			// Only stash when a tool-call-keyed verify snap is still pending (we are
-			// mid-flight waiting to re-key). After a successful clear the snap is
-			// gone; stashing then would poison a later reused job id (bg_1).
-			if ((jobType === "bash" || jobType === "eval") && this.#hasPendingVerifyToolStart()) {
-				this.#earlyAsyncTerminals.set(jobId, { jobType, status });
+			if (jobType !== "bash" && jobType !== "eval") return;
+			if (this.#awaitingJobRekeys.size === 0) return;
+			if (this.#isFinishedVerifyJob(jobId) && this.#awaitingJobRekeys.size !== 1) {
+				// Multi-await: refuse finished ids so a hub redelivery cannot sit
+				// under `bg_N` for a later reuse. Sole-await uses tool-call
+				// correlation below and checks jobId on re-key instead.
+				return;
+			}
+			if (this.#awaitingJobRekeys.size === 1) {
+				// Unique pending ack — bind to that tool call; re-key checks jobId.
+				const toolCallId = this.#awaitingJobRekeys.values().next().value;
+				if (toolCallId !== undefined && !this.#earlyAsyncTerminals.has(toolCallId)) {
+					this.#earlyAsyncTerminals.set(toolCallId, { jobId, jobType, status });
+				}
+				return;
+			}
+			// Multiple awaits: stash by job id only when not already finished.
+			if (!this.#isFinishedVerifyJob(jobId) && !this.#earlyAsyncTerminals.has(jobId)) {
+				this.#earlyAsyncTerminals.set(jobId, { jobId, jobType, status });
 			}
 			return;
 		}
 		this.#verifyStart.delete(jobId);
+		this.#markFinishedVerifyJob(jobId);
+		this.#earlyAsyncTerminals.delete(jobId);
 		this.#applyAsyncVerifyClear(start, jobType, status);
 	}
 
-	/** True while a verify snap still awaits re-key or async completion. */
-	#hasPendingVerifyToolStart(): boolean {
-		return this.#verifyStart.size > 0;
+	#takeEarlyAsyncTerminal(
+		key: string,
+		expectedJobId: string,
+	):
+		| {
+				jobId: string;
+				jobType: string | undefined;
+				status: "running" | "completed" | "failed" | "cancelled" | undefined;
+		  }
+		| undefined {
+		const early = this.#earlyAsyncTerminals.get(key);
+		if (early === undefined) return undefined;
+		this.#earlyAsyncTerminals.delete(key);
+		if (early.jobId !== expectedJobId) return undefined;
+		return early;
+	}
+
+	#isFinishedVerifyJob(jobId: string): boolean {
+		const at = this.#finishedVerifyJobIds.get(jobId);
+		if (at === undefined) return false;
+		if (Date.now() - at > FINISHED_VERIFY_JOB_TTL_MS) {
+			this.#finishedVerifyJobIds.delete(jobId);
+			return false;
+		}
+		return true;
+	}
+
+	#markFinishedVerifyJob(jobId: string): void {
+		this.#finishedVerifyJobIds.set(jobId, Date.now());
 	}
 
 	#applyAsyncVerifyClear(

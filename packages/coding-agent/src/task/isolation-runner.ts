@@ -375,7 +375,9 @@ export async function mergeIsolatedChanges(opts: IsolationMergeOptions): Promise
 			]);
 			const mergedBranchForNestedPatches = mergeResult.merged.includes(result.branchName);
 			const changesApplied = mergeResult.failed.length === 0;
-			const hadAnyChanges = changesApplied && mergeResult.merged.length > 0;
+			// Partial cherry-picks leave commits on HEAD even when the branch is
+			// listed in `failed` — still arm the parent verify latch.
+			const hadAnyChanges = mergeResult.merged.length > 0 || mergeResult.partialCommitsLanded === true;
 
 			let summary: string;
 			if (changesApplied) {

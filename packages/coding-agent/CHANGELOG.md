@@ -51,6 +51,11 @@
 - Env/`sudo`/whitespace before `cd`, chained `cd … && cd …`, and `~` paths are resolved the same way as the bash tool for parent-verify cwd snaps.
 - Parent `eval` verify uses the session cwd when no explicit cwd is set (where the cell actually runs) and still rejects trivial expressions including `(1+1)` / `void 0`.
 - Duplicate background bash/eval terminals are not stashed after the verify snap clears, so a reused job id cannot clear a later latch from a stale early completion.
+- Early async terminals are stashed only while a bash/eval tool call still awaits its running-ack re-key; finished job ids are ignored so a hub redelivery cannot poison a later `bg_N` reuse.
+- `lsp` diagnostics waits that time out without a publish or pull report the server as failed (`failedServerCount`) instead of a clean `success: true` with zero errors.
+- Chained relative `cd` targets (`cd /tmp && cd project`) resolve cumulatively for parent-verify cwd snaps.
+- Shell-backgrounded verify commands (`bun test & true`) no longer clear the unverified-merge latch.
+- Partial cherry-pick success before a later conflict still arms the parent verify latch (`hadAnyChanges`).
 - `/todo edit` and `/todo import` stamp Markdown `[-]`/`[~]` rows as user drops so settle does not treat them as model-abandoned work.
 - Parent `eval` no longer clears the unverified-merge latch on bare success: require an explicit cwd inside the merged tree and reject trivial expressions such as `1+1`.
 - Leading `cd <path>; …` (semicolon) is recognized for parent-verify cwd resolution, so `cd /tmp; bun test` no longer clears the latch as if it ran in-tree.

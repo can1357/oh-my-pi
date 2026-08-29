@@ -1,5 +1,11 @@
 import { describe, expect, it } from "bun:test";
-import { extractLeadingCdTarget, hasUnresolvableLeadingCdPrefix, resolveLeadingCdChain } from "@oh-my-pi/pi-coding-agent/tools/shell-tokenize";
+import * as path from "node:path";
+import {
+	extractLeadingCdTarget,
+	hasTopLevelShellBackground,
+	hasUnresolvableLeadingCdPrefix,
+	resolveLeadingCdChain,
+} from "@oh-my-pi/pi-coding-agent/tools/shell-tokenize";
 
 describe("extractLeadingCdTarget", () => {
 	it("extracts a bare cd target and returns the remainder", () => {
@@ -84,9 +90,28 @@ describe("resolveLeadingCdChain", () => {
 		expect(resolveLeadingCdChain("  cd /tmp && bun test")).toEqual({ path: "/tmp" });
 	});
 
+	it("resolves relative cd targets against the preceding cwd", () => {
+		expect(resolveLeadingCdChain("cd /tmp && cd project && bun test")).toEqual({
+			path: path.join("/tmp", "project"),
+		});
+		expect(resolveLeadingCdChain("cd packages && cd foo && bun test")).toEqual({
+			path: path.join("packages", "foo"),
+		});
+		expect(resolveLeadingCdChain("cd /tmp && cd /other && bun test")).toEqual({ path: "/other" });
+	});
+
 	it("marks unresolvable when any leading cd cannot be extracted", () => {
 		expect(resolveLeadingCdChain("cd /repo && cd /tmp 2>/dev/null && bun test")).toEqual({
 			unresolvable: true,
 		});
+	});
+});
+
+describe("hasTopLevelShellBackground", () => {
+	it("detects a top-level background operator", () => {
+		expect(hasTopLevelShellBackground("bun test & true")).toBe(true);
+		expect(hasTopLevelShellBackground("bun test&")).toBe(true);
+		expect(hasTopLevelShellBackground("bun test && true")).toBe(false);
+		expect(hasTopLevelShellBackground('echo "a & b" && bun test')).toBe(false);
 	});
 });

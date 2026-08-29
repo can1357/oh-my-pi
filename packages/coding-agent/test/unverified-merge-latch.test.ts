@@ -336,6 +336,31 @@ describe("unverified isolated merge latch", () => {
 		expect(latch.latched).toBe(false);
 	});
 
+	it("does not stash a finished job terminal while another verifier awaits re-key", async () => {
+		const latch = new UnverifiedMergeLatch();
+		latch.mark();
+		const ctx = host(latch);
+		const tracker = new TodoTracker(ctx.host);
+		tracker.onToolExecutionStart("bash", "call-a", { command: "bun test test/a.test.ts" });
+		tracker.onToolResult("bash", false, { async: { state: "running", jobId: "bg_1" }, cwd: "/repo" }, "call-a");
+		tracker.onAsyncJobTerminal("bg_1", "bash", "completed");
+		expect(latch.latched).toBe(false);
+
+		latch.mark();
+		// Second verifier still awaiting running-ack; hub redelivers the finished job.
+		tracker.onToolExecutionStart("bash", "call-b", { command: "bun test test/b.test.ts" });
+		tracker.onAsyncJobTerminal("bg_1", "bash", "completed");
+		tracker.onToolResult("bash", false, { async: { state: "running", jobId: "bg_2" }, cwd: "/repo" }, "call-b");
+		expect(latch.latched).toBe(true);
+
+		// Reused bg_1 for a new job must not consume the stale redelivery.
+		tracker.onToolExecutionStart("bash", "call-c", { command: "bun test test/c.test.ts" });
+		tracker.onToolResult("bash", false, { async: { state: "running", jobId: "bg_1" }, cwd: "/repo" }, "call-c");
+		expect(latch.latched).toBe(true);
+		tracker.onAsyncJobTerminal("bg_1", "bash", "completed");
+		expect(latch.latched).toBe(false);
+	});
+
 	it("does not clear the latch on truncated-glob diagnostics details", async () => {
 		const latch = new UnverifiedMergeLatch();
 		latch.mark();

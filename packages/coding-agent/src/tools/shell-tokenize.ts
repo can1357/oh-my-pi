@@ -11,6 +11,8 @@
  * and arithmetic expansion are out of scope; callers fall through when they
  * cannot find the structure they need.
  */
+import * as path from "node:path";
+
 export function tokenizeShellSegments(command: string): string[][] {
 	const segments: string[][] = [];
 	let current: string[] = [];
@@ -329,8 +331,9 @@ export function stripLeadingEnvAndSudo(command: string): string {
 
 /**
  * Walk a leading `cd … &&|; cd …` chain after env/sudo stripping.
- * Returns the last extractable path, or `{ unresolvable: true }` when any
- * leading `cd` cannot be safely extracted (redirects, expansion, extra args).
+ * Returns the last extractable path (relative targets resolved against the
+ * preceding effective cwd), or `{ unresolvable: true }` when any leading `cd`
+ * cannot be safely extracted (redirects, expansion, extra args).
  */
 export function resolveLeadingCdChain(command: string): { path?: string; unresolvable?: boolean } {
 	let rest = stripLeadingEnvAndSudo(command);
@@ -340,12 +343,67 @@ export function resolveLeadingCdChain(command: string): { path?: string; unresol
 		sawCd = true;
 		const cd = extractLeadingCdTarget(rest);
 		if (!cd) return { unresolvable: true };
-		lastPath = cd.path;
+		lastPath = joinCdChainPath(lastPath, cd.path);
 		rest = cd.rest.trim();
 	}
 	if (sawCd && lastPath === undefined) return { unresolvable: true };
 	if (lastPath !== undefined) return { path: lastPath };
 	return {};
+}
+
+/**
+ * Resolve a subsequent `cd` target against the previous chain cwd.
+ * Absolute/`~` targets replace the chain; relative targets append.
+ */
+export function joinCdChainPath(base: string | undefined, next: string): string {
+	const trimmed = next.trim();
+	if (trimmed.startsWith("~") || path.isAbsolute(trimmed)) return trimmed;
+	if (base === undefined || base.trim() === "") return trimmed;
+	return path.join(base, trimmed);
+}
+
+/**
+ * True when the command contains a top-level shell background operator (`&`
+ * that is not part of `&&`). Sync bash success then races the backgrounded work.
+ */
+export function hasTopLevelShellBackground(command: string): boolean {
+	let inSingle = false;
+	let inDouble = false;
+	for (let i = 0; i < command.length; i++) {
+		const ch = command[i]!;
+		if (inSingle) {
+			if (ch === "'") inSingle = false;
+			continue;
+		}
+		if (inDouble) {
+			if (ch === "\\" && i + 1 < command.length) {
+				i++;
+				continue;
+			}
+			if (ch === '"') inDouble = false;
+			continue;
+		}
+		if (ch === "'") {
+			inSingle = true;
+			continue;
+		}
+		if (ch === '"') {
+			inDouble = true;
+			continue;
+		}
+		if (ch === "\\" && i + 1 < command.length) {
+			i++;
+			continue;
+		}
+		if (ch === "&") {
+			if (command[i + 1] === "&") {
+				i++;
+				continue;
+			}
+			return true;
+		}
+	}
+	return false;
 }
 
 /**
