@@ -10,6 +10,7 @@
 
 ### Fixed
 
+- Grok Bot AvailableModels treats omitted `supportsNonMaxMode` like `false` so max-only rows keep `sandMaxMode`.
 - Grok Bot JWT mint cache is scoped by caller/proxy headers so tenant header changes do not reuse another token.
 - Grok Bot AvailableModels discovery and token minting merge configured headers case-insensitively so reserved names are not comma-joined on the wire.
 - Grok Bot AvailableModels discovery clears the JWT mint cache on HTTP 401 so the next refresh can mint a replacement token.

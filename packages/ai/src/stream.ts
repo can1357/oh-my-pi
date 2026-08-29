@@ -10,6 +10,7 @@ import {
 	defaultSupportedEffort,
 	mapEffortToAnthropicAdaptiveEffort,
 	mapEffortToGoogleThinkingLevel,
+	minimumSupportedEffort,
 	requireSupportedEffort,
 	resolveWireModelId,
 } from "@oh-my-pi/pi-catalog/model-thinking";
@@ -2390,15 +2391,15 @@ function mapOptionsForApi<TApi extends Api>(
 			const grokbotModel = model as Model<"grokbot-sand">;
 			const allowed = grokbotModel.sandParameterIds ?? [];
 			const acceptsEffort = allowed.includes("effort") || allowed.includes("reasoning");
-			const effort =
-				acceptsEffort &&
-				options?.reasoning &&
-				!options.disableReasoning &&
-				!options.forceReasoningOff &&
-				grokbotModel.reasoning &&
-				grokbotModel.thinking
-					? requireSupportedEffort(grokbotModel, options.reasoning)
-					: undefined;
+			let effort: Effort | undefined;
+			if (acceptsEffort && grokbotModel.reasoning && grokbotModel.thinking) {
+				if (options?.disableReasoning || options?.forceReasoningOff) {
+					// Omission would leave the server default (often high); floor instead.
+					effort = minimumSupportedEffort(grokbotModel) ?? defaultSupportedEffort(grokbotModel);
+				} else if (options?.reasoning) {
+					effort = requireSupportedEffort(grokbotModel, options.reasoning);
+				}
+			}
 			return castApi<"grokbot-sand">({
 				...base,
 				conversationId: options?.sessionId,

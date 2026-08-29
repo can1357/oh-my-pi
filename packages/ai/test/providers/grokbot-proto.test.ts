@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, spyOn, test, vi } from "bun:test";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import * as grokbotCatalogAuth from "@oh-my-pi/pi-catalog/discovery/grokbot-auth";
+import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { TRUNCATE_LENGTHS } from "@oh-my-pi/pi-tui";
 import { shortenPath } from "@oh-my-pi/pi-utils";
 import { streamGrokBot, toInferenceMessages, toSandImageDataUrl } from "../../src/providers/grokbot";
@@ -24,6 +25,7 @@ import {
 	frameConnectProto,
 } from "../../src/providers/grokbot/proto";
 import { loginGrokbot } from "../../src/registry/grokbot";
+import { streamSimple } from "../../src/stream";
 import type { Context, FetchImpl, Model } from "../../src/types";
 
 describe("grokbot proto", () => {
@@ -1057,5 +1059,62 @@ describe("grokbot request headers", () => {
 		expect(result.errorStatus).toBe(401);
 		expect(result.errorMessage).toMatch(/unauthenticated|jwt expired/i);
 		expect(clearSpy).toHaveBeenCalled();
+	});
+});
+
+describe("grokbot disableReasoning effort floor", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	test("disableReasoning floors effort to the model's minimum supported tier", async () => {
+		spyOn(grokbotAuth, "loadGrokbotConfig").mockResolvedValue({
+			renewal: "renew",
+			machineId: "machine",
+			namespace: "prod",
+			clientVersion: "0.30.0",
+		});
+		spyOn(grokbotAuth, "mintGrokbotAccessToken").mockResolvedValue("fake-jwt");
+
+		let capturedEffort: string | undefined;
+		const trailer = frameConnectProto(Buffer.alloc(0), CONNECT_END_STREAM_FLAG);
+		const fetchImpl = (async () =>
+			new Response(trailer, {
+				status: 200,
+				headers: { "content-type": "application/connect+proto" },
+			})) as FetchImpl;
+
+		const model: Model<"grokbot-sand"> = buildModel({
+			id: "grok-4.6",
+			name: "Grok 4.6",
+			api: "grokbot-sand",
+			provider: "grokbot",
+			baseUrl: "https://api2.cursor.sh",
+			reasoning: true,
+			thinking: { mode: "effort", efforts: [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh] },
+			sandParameterIds: ["effort", "fast"],
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 100_000,
+			maxTokens: 8_000,
+		});
+
+		await streamSimple(
+			model,
+			{ messages: [{ role: "user", content: "hi", timestamp: 1 }] },
+			{
+				apiKey: "renew",
+				disableReasoning: true,
+				fetch: fetchImpl,
+				onPayload: body => {
+					const params = (body as { requestedModel?: { parameters?: Array<{ id: string; value: string }> } })
+						.requestedModel?.parameters;
+					capturedEffort = params?.find(p => p.id === "effort")?.value;
+					return body;
+				},
+			},
+		).result();
+
+		expect(capturedEffort).toBe("low");
 	});
 });

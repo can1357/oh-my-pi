@@ -148,7 +148,8 @@ function buildSandRouterSpec(id: (typeof GROKBOT_SAND_ROUTER_IDS)[number], baseU
  */
 export function resolveGrokbotSandMaxMode(row: GrokbotAvailableModel): boolean {
 	if (row.supportsMaxMode !== true) return false;
-	if (row.supportsNonMaxMode === false) return true;
+	// Proto3 omits false booleans — missing supportsNonMaxMode means max-only.
+	if (row.supportsNonMaxMode !== true) return true;
 	const hasDefaultMax = (row.variants ?? []).some(v => v.isDefaultMaxConfig === true);
 	const hasDefaultNonMax = (row.variants ?? []).some(v => v.isDefaultNonMaxConfig === true);
 	if (hasDefaultMax && !hasDefaultNonMax) return true;

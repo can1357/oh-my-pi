@@ -65,6 +65,23 @@ const FIXTURE = {
 			],
 		},
 		{
+			name: "max-only-omitted-nonmax",
+			clientDisplayName: "Max Only Omitted NonMax",
+			supportsThinking: true,
+			supportsImages: true,
+			supportsMaxMode: true,
+			// proto3 omits false — supportsNonMaxMode absent
+			contextTokenLimit: 200_000,
+			contextTokenLimitForMaxMode: 900_000,
+			parameterDefinitions: [{ id: "effort" }],
+			variants: [
+				{
+					isDefaultMaxConfig: true,
+					parameterValues: [{ id: "effort", value: "high" }],
+				},
+			],
+		},
+		{
 			name: "hidden-legacy",
 			clientDisplayName: "Hidden",
 			isHidden: true,
@@ -131,6 +148,10 @@ describe("grokbot AvailableModels normalize", () => {
 		const maxOnly = models.find(m => m.id === "max-only-model");
 		expect(maxOnly?.sandMaxMode).toBe(true);
 		expect(maxOnly?.contextWindow).toBe(1_000_000);
+
+		const maxOnlyOmitted = models.find(m => m.id === "max-only-omitted-nonmax");
+		expect(maxOnlyOmitted?.sandMaxMode).toBe(true);
+		expect(maxOnlyOmitted?.contextWindow).toBe(900_000);
 
 		const grok = models.find(m => m.id === "grok-4.6");
 		expect(grok?.sandParameterIds).toEqual(["effort", "fast"]);
