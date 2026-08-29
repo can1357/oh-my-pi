@@ -117,6 +117,129 @@ describe("streaming edit preview coalescing", () => {
 			component.stopAnimation();
 		}
 	});
+	test("whenPreviewSettled waits for a cleanup-window follow-up drain", async () => {
+		const deferreds: Array<PromiseWithResolvers<PerFileDiffPreview[] | null>> = [];
+		const firstStarted = Promise.withResolvers<void>();
+		const secondStarted = Promise.withResolvers<void>();
+		let component: ToolExecutionComponent | undefined;
+		let stopped = false;
+		let settled = false;
+		let previewSettled: Promise<void> | undefined;
+		const spy = spyOn(EDIT_MODE_STRATEGIES.replace, "computeDiffPreview").mockImplementation(() => {
+			const deferred = Promise.withResolvers<PerFileDiffPreview[] | null>();
+			deferreds.push(deferred);
+			if (deferreds.length === 1) firstStarted.resolve();
+			if (deferreds.length === 2) secondStarted.resolve();
+			return deferred.promise;
+		});
+		restore = () => spy.mockRestore();
+
+		const ui = { requestRender() {} } as unknown as TUI;
+		const tool = { mode: "replace" } as unknown as AgentTool;
+		component = new ToolExecutionComponent(
+			"edit",
+			{ path: file, old_string: "const a = 1;", new_string: "a" },
+			{},
+			tool,
+			ui,
+			tmpDir,
+		);
+		try {
+			await firstStarted.promise;
+			previewSettled = component.whenPreviewSettled().then(() => {
+				settled = true;
+			});
+
+			// Register after the component's await reaction. The nested microtask
+			// lands after the drain loop observes clean state but before its
+			// finalizer, which is the replacement-drain window.
+			deferreds[0]!.promise.then(() => {
+				queueMicrotask(() => {
+					if (stopped) return;
+					component?.updateArgs({
+						path: file,
+						old_string: "const a = 1;",
+						new_string: "latest",
+					});
+				});
+			});
+			deferreds[0]!.resolve(null);
+
+			await secondStarted.promise;
+			await Promise.resolve();
+			expect(settled).toBe(false);
+
+			deferreds[1]!.resolve(null);
+			await previewSettled;
+			expect(settled).toBe(true);
+		} finally {
+			stopped = true;
+			for (const deferred of deferreds) deferred.resolve(null);
+			component.stopAnimation();
+			await previewSettled;
+		}
+	});
+	// A microtask-fed stream must still let an independently queued macrotask
+	// run before the preview catches up with every update.
+	test("yields to the event loop while streamed args keep queuing preview work", async () => {
+		const maxUpdates = 128;
+		const maxComputes = maxUpdates + 2;
+		let updates = 0;
+		let computes = 0;
+		let stopped = false;
+		let component: ToolExecutionComponent | undefined;
+		const updatesDone = Promise.withResolvers<void>();
+		const beaconResult = Promise.withResolvers<{ updates: number; computes: number }>();
+		// This is a task boundary, not a duration-based wait; fake timers cannot
+		// prove that the real event loop was allowed to run.
+		const beacon = setImmediate(() => beaconResult.resolve({ updates, computes }));
+		const spy = spyOn(EDIT_MODE_STRATEGIES.replace, "computeDiffPreview").mockImplementation(async () => {
+			computes++;
+			// Bound a failed implementation so this regression never hangs CI.
+			if (computes >= maxComputes) {
+				updatesDone.resolve();
+				beaconResult.resolve({ updates, computes });
+				return null;
+			}
+			if (updates >= maxUpdates) return null;
+			queueMicrotask(() => {
+				if (stopped || updates >= maxUpdates) return;
+				updates++;
+				if (updates === maxUpdates) updatesDone.resolve();
+				component?.updateArgs({
+					path: file,
+					old_string: "const a = 1;",
+					new_string: String(updates),
+				});
+			});
+			return null;
+		});
+		restore = () => spy.mockRestore();
+
+		const ui = { requestRender() {} } as unknown as TUI;
+		const tool = { mode: "replace" } as unknown as AgentTool;
+		component = new ToolExecutionComponent(
+			"edit",
+			{ path: file, old_string: "const a = 1;", new_string: "0" },
+			{},
+			tool,
+			ui,
+			tmpDir,
+		);
+		try {
+			const observed = await beaconResult.promise;
+			expect(observed.updates).toBeLessThan(maxUpdates);
+			expect(observed.computes).toBeLessThan(maxUpdates + 1);
+			await updatesDone.promise;
+			await component.whenPreviewSettled();
+			expect(updates).toBe(maxUpdates);
+		} finally {
+			stopped = true;
+			clearImmediate(beacon);
+			component.stopAnimation();
+			await component.whenPreviewSettled();
+		}
+	});
 	// Transcript rebuild constructs a historical edit call and applies its
 	// persisted result within the same sync replay chunk. The renderer prefers
 	// `details.diff` from that result, so the streaming preview compute must be

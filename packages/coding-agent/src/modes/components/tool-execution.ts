@@ -268,6 +268,8 @@ export interface ToolExecutionHandle extends Component {
 export const SPINNER_RENDER_INTERVAL_MS = 80;
 /** Advance the spinner glyph at its classic ~12.5fps step (mirrors `Loader`). */
 export const SPINNER_GLYPH_ADVANCE_MS = 80;
+/** Keep a burst of streamed edit previews from monopolizing the event loop. */
+const EDIT_PREVIEW_DRAIN_BATCH_SIZE = 8;
 
 /** Phase-locked spinner glyph index shared by every live tool block so parallel
  * spinners advance in lockstep instead of each tracking its own start time. */
@@ -539,7 +541,13 @@ export class ToolExecutionComponent extends Container {
 	 * deterministically instead of racing the spinner's render ticks.
 	 */
 	async whenPreviewSettled(): Promise<void> {
-		await this.#editDiffInFlight;
+		// The cleanup callback can replace the settled promise when an update
+		// lands in the finalization window. Keep following replacements so callers
+		// never observe a preview as settled before the latest drain completes.
+		while (this.#editDiffInFlight) {
+			const inFlight = this.#editDiffInFlight;
+			await inFlight;
+		}
 	}
 
 	/**
@@ -558,6 +566,9 @@ export class ToolExecutionComponent extends Container {
 		if (this.#editDiffInFlight) return;
 		this.#editDiffInFlight = this.#drainPreviewDiff().finally(() => {
 			this.#editDiffInFlight = undefined;
+			// A stream update can land in the microtask between the final
+			// compute and this cleanup. Start another drain instead of losing it.
+			if (this.#editDiffDirty) this.#schedulePreviewDiff();
 		});
 	}
 
@@ -569,9 +580,14 @@ export class ToolExecutionComponent extends Container {
 		// the deferral each one re-ran the full sloppy matcher + whole-file diff
 		// to produce a preview the renderer discards in favor of `details.diff`.
 		await undefined;
+		let computesSinceYield = 0;
 		while (this.#editDiffDirty) {
 			this.#editDiffDirty = false;
 			await this.#computePreviewDiff();
+			if (this.#editDiffDirty && ++computesSinceYield >= EDIT_PREVIEW_DRAIN_BATCH_SIZE) {
+				computesSinceYield = 0;
+				await Bun.sleep(0);
+			}
 		}
 	}
 
