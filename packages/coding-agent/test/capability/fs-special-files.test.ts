@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { clearCache, readFile } from "@oh-my-pi/pi-coding-agent/capability/fs";
+import { clearCache, invalidate, readDirEntriesWithinLimit, readFile } from "@oh-my-pi/pi-coding-agent/capability/fs";
 
 const isWindows = process.platform === "win32";
 
@@ -48,5 +48,65 @@ describe("capability/fs readFile on special files", () => {
 		await fs.promises.symlink(target, link);
 		clearCache();
 		expect(await readFile(link)).toBe("# context");
+	});
+});
+
+describe("capability/fs cache controls", () => {
+	it("shares bounded directory reads with cache invalidation without caching truncation", async () => {
+		const directory = await fs.promises.mkdtemp(path.join(os.tmpdir(), "omp-fs-bounded-"));
+		const firstPath = path.join(directory, "a");
+		const secondPath = path.join(directory, "b");
+		try {
+			await Bun.write(firstPath, "");
+			clearCache();
+			expect((await readDirEntriesWithinLimit(directory, 1))?.map(entry => entry.name)).toEqual(["a"]);
+
+			await Bun.write(secondPath, "");
+			expect((await readDirEntriesWithinLimit(directory, 1))?.map(entry => entry.name)).toEqual(["a"]);
+
+			invalidate(secondPath);
+			expect(await readDirEntriesWithinLimit(directory, 1)).toBeNull();
+
+			await fs.promises.rm(secondPath);
+			expect((await readDirEntriesWithinLimit(directory, 1))?.map(entry => entry.name)).toEqual(["a"]);
+		} finally {
+			clearCache();
+			await fs.promises.rm(directory, { recursive: true, force: true });
+		}
+	});
+
+	it("refreshes and replaces a cached bounded directory listing", async () => {
+		const directory = await fs.promises.mkdtemp(path.join(os.tmpdir(), "omp-fs-refresh-"));
+		try {
+			await Bun.write(path.join(directory, "a"), "");
+			clearCache();
+			expect((await readDirEntriesWithinLimit(directory, 2))?.map(entry => entry.name)).toEqual(["a"]);
+
+			await Bun.write(path.join(directory, "b"), "");
+			expect((await readDirEntriesWithinLimit(directory, 2))?.map(entry => entry.name)).toEqual(["a"]);
+			expect((await readDirEntriesWithinLimit(directory, 2, { refresh: true }))?.map(entry => entry.name)).toEqual([
+				"a",
+				"b",
+			]);
+			expect((await readDirEntriesWithinLimit(directory, 2))?.map(entry => entry.name)).toEqual(["a", "b"]);
+		} finally {
+			clearCache();
+			await fs.promises.rm(directory, { recursive: true, force: true });
+		}
+	});
+
+	it("can bypass a cached miss when an optional file appears", async () => {
+		const directory = await fs.promises.mkdtemp(path.join(os.tmpdir(), "omp-fs-cache-miss-"));
+		const filePath = path.join(directory, "SKILL.md");
+		try {
+			clearCache();
+			expect(await readFile(filePath)).toBeNull();
+			await Bun.write(filePath, "# created");
+			expect(await readFile(filePath)).toBeNull();
+			expect(await readFile(filePath, { cacheMisses: false })).toBe("# created");
+		} finally {
+			clearCache();
+			await fs.promises.rm(directory, { recursive: true, force: true });
+		}
 	});
 });

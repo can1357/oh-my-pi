@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { type Skill as CapabilitySkill, skillCapability } from "@oh-my-pi/pi-coding-agent/capability/skill";
 import { getCapability } from "@oh-my-pi/pi-coding-agent/discovery";
 import { getWslWindowsHomeCandidate, runHostProbe } from "@oh-my-pi/pi-coding-agent/discovery/agents";
+import { type SkillScanLimits, scanSkillsFromDir } from "@oh-my-pi/pi-coding-agent/discovery/helpers";
 import {
 	type LoadSkillsResult,
 	loadSkills,
@@ -162,6 +163,209 @@ describe("skills", () => {
 		});
 	});
 
+	describe("recursive skill scanning", () => {
+		const writeTestSkill = async (skillDir: string, name: string): Promise<void> => {
+			await fs.mkdir(skillDir, { recursive: true });
+			await fs.writeFile(
+				path.join(skillDir, "SKILL.md"),
+				["---", `name: ${name}`, `description: ${name} description`, "---", "", `# ${name}`].join("\n"),
+			);
+		};
+
+		const scanRecursive = (dir: string, limits?: Partial<SkillScanLimits>) =>
+			scanSkillsFromDir(
+				{ cwd: dir, home: dir, repoRoot: null },
+				{ dir, providerId: "test", level: "project", recursive: true, limits },
+			);
+
+		it("continues discovery below a directory that is also a skill", async () => {
+			const root = await fs.mkdtemp(path.join(os.tmpdir(), "pi-skills-parent-child-"));
+			try {
+				await writeTestSkill(path.join(root, "parent"), "parent");
+				await writeTestSkill(path.join(root, "parent", "child"), "child");
+
+				const result = await scanRecursive(root);
+
+				expect(result.items.map(skill => skill.name)).toEqual(["child", "parent"]);
+				expect(result.warnings).toHaveLength(0);
+			} finally {
+				await removeWithRetries(root);
+			}
+		});
+
+		it("discovers a manifest created in an existing directory after an earlier scan", async () => {
+			const root = await fs.mkdtemp(path.join(os.tmpdir(), "pi-skills-created-manifest-"));
+			const skillDir = path.join(root, "created-later");
+			try {
+				await fs.mkdir(skillDir);
+				expect((await scanRecursive(root)).items).toHaveLength(0);
+
+				await writeTestSkill(skillDir, "created-later");
+				const result = await scanRecursive(root);
+
+				expect(result.items.map(skill => skill.name)).toEqual(["created-later"]);
+				expect(result.warnings).toHaveLength(0);
+			} finally {
+				await removeWithRetries(root);
+			}
+		});
+
+		it("discovers a skill directory created after an earlier scan", async () => {
+			const root = await fs.mkdtemp(path.join(os.tmpdir(), "pi-skills-created-directory-"));
+			try {
+				expect((await scanRecursive(root)).items).toHaveLength(0);
+
+				await writeTestSkill(path.join(root, "created-later"), "created-later");
+				const result = await scanRecursive(root);
+
+				expect(result.items.map(skill => skill.name)).toEqual(["created-later"]);
+				expect(result.warnings).toHaveLength(0);
+			} finally {
+				await removeWithRetries(root);
+			}
+		});
+
+		it("loads through depth six and truncates skills at depths seven and eight", async () => {
+			const root = await fs.mkdtemp(path.join(os.tmpdir(), "pi-skills-depth-"));
+			const depthSix = path.join(root, "one", "two", "three", "four", "five", "six");
+			const depthSeven = path.join(depthSix, "seven");
+			const depthEight = path.join(depthSeven, "eight");
+			try {
+				await writeTestSkill(depthSix, "depth-six");
+				await writeTestSkill(depthSeven, "depth-seven");
+				await writeTestSkill(depthEight, "depth-eight");
+
+				const result = await scanRecursive(root);
+
+				expect(result.items.map(skill => skill.name)).toContain("depth-six");
+				expect(result.items.map(skill => skill.name)).not.toContain("depth-seven");
+				expect(result.items.map(skill => skill.name)).not.toContain("depth-eight");
+				expect(result.warnings).toContain(`Skill discovery truncated at ${root}: maximum depth 6 reached`);
+			} finally {
+				await removeWithRetries(root);
+			}
+		});
+
+		it("caps visited directories and reports truncation", async () => {
+			const root = await fs.mkdtemp(path.join(os.tmpdir(), "pi-skills-directories-"));
+			try {
+				await writeTestSkill(path.join(root, "first"), "first");
+				await writeTestSkill(path.join(root, "second"), "second");
+
+				const result = await scanRecursive(root, { maxDirectories: 1 });
+
+				expect(result.items).toHaveLength(0);
+				expect(result.warnings).toContain(
+					`Skill discovery truncated at ${root}: maximum directory count 1 reached`,
+				);
+			} finally {
+				await removeWithRetries(root);
+			}
+		});
+
+		it("uses deterministic directory order before applying the directory cap", async () => {
+			const root = await fs.mkdtemp(path.join(os.tmpdir(), "pi-skills-directory-order-"));
+			try {
+				await writeTestSkill(path.join(root, "z-last"), "z-last");
+				await writeTestSkill(path.join(root, "a-first"), "a-first");
+
+				const result = await scanRecursive(root, { maxDirectories: 2 });
+
+				expect(result.items.map(skill => skill.name)).toEqual(["a-first"]);
+				expect(result.warnings).toContain(
+					`Skill discovery truncated at ${root}: maximum directory count 2 reached`,
+				);
+			} finally {
+				await removeWithRetries(root);
+			}
+		});
+
+		it("loads a skill when its entries exactly fit the entry cap", async () => {
+			const root = await fs.mkdtemp(path.join(os.tmpdir(), "pi-skills-exact-entries-"));
+			try {
+				await writeTestSkill(path.join(root, "only"), "only");
+
+				const result = await scanRecursive(root, { maxEntries: 2 });
+
+				expect(result.items.map(skill => skill.name)).toEqual(["only"]);
+				expect(result.warnings).toHaveLength(0);
+			} finally {
+				await removeWithRetries(root);
+			}
+		});
+
+		it("caps visited entries and reports truncation", async () => {
+			const root = await fs.mkdtemp(path.join(os.tmpdir(), "pi-skills-entries-"));
+			try {
+				await writeTestSkill(path.join(root, "first"), "first");
+				await writeTestSkill(path.join(root, "second"), "second");
+
+				const result = await scanRecursive(root, { maxEntries: 1 });
+
+				expect(result.items).toHaveLength(0);
+				expect(result.warnings).toContain(`Skill discovery truncated at ${root}: maximum entry count 1 reached`);
+			} finally {
+				await removeWithRetries(root);
+			}
+		});
+
+		it("prunes .git and node_modules from recursive discovery", async () => {
+			const root = await fs.mkdtemp(path.join(os.tmpdir(), "pi-skills-pruned-"));
+			try {
+				await writeTestSkill(path.join(root, ".git", "ignored-git"), "ignored-git");
+				await writeTestSkill(path.join(root, "node_modules", "ignored-module"), "ignored-module");
+				await writeTestSkill(path.join(root, "visible"), "visible");
+
+				const result = await scanRecursive(root);
+
+				expect(result.items.map(skill => skill.name)).toEqual(["visible"]);
+				expect(result.warnings).toHaveLength(0);
+			} finally {
+				await removeWithRetries(root);
+			}
+		});
+
+		it.skipIf(process.platform === "win32")(
+			"loads a symlinked skill root without recursively traversing it",
+			async () => {
+				const root = await fs.mkdtemp(path.join(os.tmpdir(), "pi-skills-symlink-root-"));
+				const target = await fs.mkdtemp(path.join(os.tmpdir(), "pi-skills-symlink-target-"));
+				try {
+					await writeTestSkill(target, "linked-root");
+					await writeTestSkill(path.join(target, "nested"), "linked-nested");
+					await fs.symlink(target, path.join(root, "linked"), "dir");
+
+					const result = await scanRecursive(root);
+
+					expect(result.items.map(skill => skill.name)).toEqual(["linked-root"]);
+					expect(result.warnings).toHaveLength(0);
+				} finally {
+					await removeWithRetries(root);
+					await removeWithRetries(target);
+				}
+			},
+		);
+
+		it.skipIf(process.platform === "win32")("applies the depth cap to symlinked skill leaves", async () => {
+			const root = await fs.mkdtemp(path.join(os.tmpdir(), "pi-skills-symlink-depth-root-"));
+			const target = await fs.mkdtemp(path.join(os.tmpdir(), "pi-skills-symlink-depth-target-"));
+			const depthSix = path.join(root, "one", "two", "three", "four", "five", "six");
+			try {
+				await fs.mkdir(depthSix, { recursive: true });
+				await writeTestSkill(target, "linked-depth-seven");
+				await fs.symlink(target, path.join(depthSix, "linked"), "dir");
+
+				const result = await scanRecursive(root);
+
+				expect(result.items.map(skill => skill.name)).not.toContain("linked-depth-seven");
+				expect(result.warnings).toContain(`Skill discovery truncated at ${root}: maximum depth 6 reached`);
+			} finally {
+				await removeWithRetries(root);
+				await removeWithRetries(target);
+			}
+		});
+	});
+
 	describe("loadSkills with options", () => {
 		let customDirectorySkills: LoadSkillsResult;
 
@@ -246,6 +450,100 @@ describe("skills", () => {
 				homedirSpy.mockRestore();
 				await removeWithRetries(tempHome);
 				await removeWithRetries(tempCwd);
+			}
+		});
+
+		it("should recursively load nested user skills from ~/.agents/skills", async () => {
+			const tempHome = await fs.mkdtemp(path.join(os.tmpdir(), "pi-agents-nested-user-home-"));
+			const tempProject = await fs.mkdtemp(path.join(os.tmpdir(), "pi-agents-nested-user-project-"));
+			const parentDir = path.join(tempHome, ".agents", "skills", "home-parent");
+			const childDir = path.join(parentDir, "home-child");
+			await fs.mkdir(childDir, { recursive: true });
+			await fs.writeFile(
+				path.join(parentDir, "SKILL.md"),
+				["---", "name: home-parent", "description: Nested user parent skill", "---", "", "# home-parent"].join(
+					"\n",
+				),
+			);
+			await fs.writeFile(
+				path.join(childDir, "SKILL.md"),
+				["---", "name: home-child", "description: Nested user child skill", "---", "", "# home-child"].join("\n"),
+			);
+			const homedirSpy = spyOn(os, "homedir").mockReturnValue(tempHome);
+			try {
+				const { skills } = await loadSkills({
+					...DISABLE_ALL_BUILTIN_SKILLS,
+					enableAgentsUser: true,
+					cwd: tempProject,
+				});
+				const parent = skills.find(skill => skill.name === "home-parent");
+				const child = skills.find(skill => skill.name === "home-child");
+				expect(parent?.filePath).toBe(path.join(parentDir, "SKILL.md"));
+				expect(parent?.source).toBe("agents:user");
+				expect(child?.filePath).toBe(path.join(childDir, "SKILL.md"));
+				expect(child?.source).toBe("agents:user");
+			} finally {
+				homedirSpy.mockRestore();
+				await removeWithRetries(tempHome);
+				await removeWithRetries(tempProject);
+			}
+		});
+
+		it("should recursively load project skills from .agents/skills", async () => {
+			const tempHome = await fs.mkdtemp(path.join(os.tmpdir(), "pi-agents-nested-home-"));
+			const tempProject = await fs.mkdtemp(path.join(os.tmpdir(), "pi-agents-nested-project-"));
+			const skillDir = path.join(tempProject, ".agents", "skills", "group", "nested-agents-skill");
+			await fs.mkdir(skillDir, { recursive: true });
+			await fs.writeFile(
+				path.join(skillDir, "SKILL.md"),
+				["---", "description: Nested project agents skill", "---", "", "# nested-agents-skill"].join("\n"),
+			);
+
+			try {
+				const capability = getCapability<CapabilitySkill>(skillCapability.id);
+				const agentsProvider = capability?.providers.find(provider => provider.id === "agents");
+				expect(agentsProvider).toBeDefined();
+
+				const result = await agentsProvider!.load({
+					cwd: tempProject,
+					home: tempHome,
+					repoRoot: tempProject,
+				});
+				const skill = result.items.find(item => item.name === "nested-agents-skill");
+				expect(skill?.path).toBe(path.join(skillDir, "SKILL.md"));
+				expect(skill?.level).toBe("project");
+			} finally {
+				await removeWithRetries(tempProject);
+				await removeWithRetries(tempHome);
+			}
+		});
+
+		it("should recursively load project skills from .omp/skills", async () => {
+			const tempHome = await fs.mkdtemp(path.join(os.tmpdir(), "pi-native-nested-home-"));
+			const tempProject = await fs.mkdtemp(path.join(os.tmpdir(), "pi-native-nested-project-"));
+			const skillDir = path.join(tempProject, ".omp", "skills", "group", "nested-native-skill");
+			await fs.mkdir(skillDir, { recursive: true });
+			await fs.writeFile(
+				path.join(skillDir, "SKILL.md"),
+				["---", "description: Nested project OMP skill", "---", "", "# nested-native-skill"].join("\n"),
+			);
+
+			try {
+				const capability = getCapability<CapabilitySkill>(skillCapability.id);
+				const nativeProvider = capability?.providers.find(provider => provider.id === "native");
+				expect(nativeProvider).toBeDefined();
+
+				const result = await nativeProvider!.load({
+					cwd: tempProject,
+					home: tempHome,
+					repoRoot: tempProject,
+				});
+				const skill = result.items.find(item => item.name === "nested-native-skill");
+				expect(skill?.path).toBe(path.join(skillDir, "SKILL.md"));
+				expect(skill?.level).toBe("project");
+			} finally {
+				await removeWithRetries(tempProject);
+				await removeWithRetries(tempHome);
 			}
 		});
 
