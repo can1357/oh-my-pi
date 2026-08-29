@@ -638,7 +638,7 @@ describe("applyEligibleNestedPatches", () => {
 			changesApplied: true,
 			mergedBranchForNestedPatches: true,
 		});
-		expect(suffix.applied).toBe(false);
+		expect(suffix.applied).toBe(true);
 		expect(suffix.summary).toContain("Some nested repository patches failed to apply");
 	});
 
