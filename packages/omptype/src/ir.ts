@@ -40,8 +40,6 @@ interface IRAnalysis {
 interface ScanResult {
 	/** Validating this node can produce an output different from its input. */
 	changesOutput: boolean;
-	/** This node can be emitted without a dispatcher-morph wrapper. */
-	exportable: boolean;
 	/** Any node under this one defers resolution to first parse (`z.lazy`). */
 	hasDeferredAlias: boolean;
 }
@@ -173,16 +171,16 @@ export type IR = IRAnalysis &
 				 * (json-schema.ts), and parse-time error formatting all run after
 				 * the definition is complete. Construction-time paths MUST either
 				 * skip resolution or honour the flag: `scanIR`'s alias arm
-				 * (conservative: changesOutput: true, exportable: false,
+				 * (conservative: changesOutput: true, hasDeferredAlias: true),
 				 * `morphIdentities` (skip deferred aliases; a declared-out morph
 				 * whose projected sides contain one falls back to its function
 				 * identity), `assertDeterminateMorphUnions` (recursive walk
 				 * skips; its disjointness probe leaves deferred alias inputs
 				 * unresolved, so intersect() cannot prove disjointness and the
 				 * union fails closed as indeterminate), and `descriptionOf` in
-				 * type.ts (returns the alias name — it is reachable eagerly via
-				 * appendPipes → metaOf when composing `.pipe()`/`.readonly()`
-				 * after a `z.lazy`).
+				 * type.ts (reports a neutral phrase instead of resolving — it is
+				 * reachable eagerly via appendPipes → metaOf when composing
+				 * `.pipe()`/`.readonly()` after a `z.lazy`).
 				 */
 				deferred?: boolean;
 				desc?: string;
@@ -1633,20 +1631,6 @@ export function hasMorph(ir: IR): boolean {
 }
 
 /**
- * True when `ir` does not require a dispatcher-morph wrapper for JSON Schema
- * emission — the question the zod-shim combinators gate on. Key-stripping
- * objects are exportable (stripping is representable in the emitted schema),
- * whereas {@link hasMorph} must report them because validation changes the
- * output value. Deliberately NOT "the emitted schema is constrained":
- * `z.unknown()` honestly emits `{}` and is exportable. Non-exportable:
- * morphs, stepped embedded schemas (`sub`), default-filled properties, and
- * deferred aliases.
- */
-export function isStructurallyExportable(ir: IR): boolean {
-	return scanIRCached(ir).exportable;
-}
-
-/**
  * Cached entry point for {@link scanIR}; the only place that writes the
  * per-node scan cache, so results computed under a cycle guard are never
  * memoized.
@@ -1666,43 +1650,33 @@ export function hasDeferredAlias(ir: IR): boolean {
 }
 
 /**
- * One traversal answering three questions that would otherwise need three
+ * One traversal answering two questions that would otherwise need two
  * near-identical walks:
  *
  * - `changesOutput` — can validation produce an output different from its
  *   input? (morphs, key-stripping objects, default-filled properties.)
- * - `exportable` — can the node be emitted without a dispatcher-morph
- *   wrapper, whose emission erases the document to an unconstrained `{}`?
  * - `hasDeferredAlias` — does any node defer its resolution to first parse
  *   (a `z.lazy` getter)? Union determinism cannot see through one, so
  *   consumers must not build native unions containing it.
  *
- * The changesOutput/exportable asymmetry lives in exactly two places, on
- * adjacent lines in the object and tuple arms: key-stripping
- * (`extras: "delete"`) changes the output value but does NOT disqualify
- * export, because stripping is representable in the emitted schema. A
- * default-filled property does both: it changes the output and counts as
- * non-exportable. Stepped embedded schemas and morphs count as both.
- * Deferred aliases are conservatively `{ changesOutput: true, exportable:
- * false, hasDeferredAlias: true }` — the getter must not run during
- * construction-time scans.
+ * Deferred aliases are conservatively `{ changesOutput: true,
+ * hasDeferredAlias: true }` — the getter must not run during
+ * construction-time scans, so their content is unknowable here.
  */
 function scanIR(ir: IR, activeAliases?: Set<IR>): ScanResult {
 	const cached = ir[kScanOwner] === ir ? ir[kScan] : undefined;
 	if (cached !== undefined) return cached;
 
-	const result: ScanResult = { changesOutput: false, exportable: true, hasDeferredAlias: false };
+	const result: ScanResult = { changesOutput: false, hasDeferredAlias: false };
 	switch (ir.k) {
 		case "sub":
 			result.changesOutput = true;
-			result.exportable = false;
 			// A deferred alias behind a stepped embed must still be seen: the
 			// widening gates rely on this bit to route around it.
 			result.hasDeferredAlias = scanIR(ir.schema.ir, activeAliases).hasDeferredAlias;
 			break;
 		case "morph":
 			result.changesOutput = true;
-			result.exportable = false;
 			// Same as `sub`: restrictBase wraps stepped schemas in a step-free
 			// morph whose input is the original IR, so a z.lazy can hide here.
 			result.hasDeferredAlias = scanIR(ir.input, activeAliases).hasDeferredAlias;
@@ -1713,49 +1687,43 @@ function scanIR(ir: IR, activeAliases?: Set<IR>): ScanResult {
 		case "alias": {
 			// Deferred alias (z.lazy): conservatively a morph without resolving
 			// — the getter must not run during construction-time scans.
-			if (ir.deferred === true) return { changesOutput: true, exportable: false, hasDeferredAlias: true };
+			if (ir.deferred === true) return { changesOutput: true, hasDeferredAlias: true };
 			if (activeAliases?.has(ir)) break;
 			const aliases = activeAliases ?? new Set<IR>();
 			aliases.add(ir);
 			const inner = scanIR(ir.resolve(), aliases);
 			aliases.delete(ir);
 			result.changesOutput = inner.changesOutput;
-			result.exportable = inner.exportable;
 			result.hasDeferredAlias = inner.hasDeferredAlias;
 			break;
 		}
 		case "object": {
-			// THE asymmetry of the whole scan, on adjacent lines: key-stripping
-			// (`extras: "delete"`) changes the output value but does not
-			// disqualify export; a default-filled property does both.
+			// Key-stripping (`extras: "delete"`) changes the output value, so a
+			// plain `z.object` counts as a morph here even though nothing about
+			// it is opaque.
 			result.changesOutput = ir.extras === "delete";
 			for (const prop of ir.props) {
 				const inner = scanIR(prop.val, activeAliases);
 				result.changesOutput ||= prop.hasDefault === true || inner.changesOutput;
-				result.exportable &&= prop.hasDefault !== true && inner.exportable;
 				result.hasDeferredAlias ||= inner.hasDeferredAlias;
-				// A deferred alias pins all three bits at once (changesOutput:
-				// true, exportable: false), so this is the only early exit
-				// available — lazy-free schemas still need the full walk for
-				// `exportable`.
+				// A deferred alias pins both bits at once (changesOutput: true,
+				// hasDeferredAlias: true), so this is the only early exit
+				// available.
 				if (result.hasDeferredAlias) break;
 			}
 			if (ir.index !== undefined) {
 				const inner = scanIR(ir.index, activeAliases);
 				result.changesOutput ||= inner.changesOutput;
-				result.exportable &&= inner.exportable;
 				result.hasDeferredAlias ||= inner.hasDeferredAlias;
 			}
 			if (ir.symbolIndex !== undefined) {
 				const inner = scanIR(ir.symbolIndex, activeAliases);
 				result.changesOutput ||= inner.changesOutput;
-				result.exportable &&= inner.exportable;
 				result.hasDeferredAlias ||= inner.hasDeferredAlias;
 			}
 			for (const pattern of ir.patternIndexes ?? []) {
 				const inner = scanIR(pattern.val, activeAliases);
 				result.changesOutput ||= inner.changesOutput;
-				result.exportable &&= inner.exportable;
 				result.hasDeferredAlias ||= inner.hasDeferredAlias;
 			}
 			break;
@@ -1763,7 +1731,6 @@ function scanIR(ir: IR, activeAliases?: Set<IR>): ScanResult {
 		case "array": {
 			const inner = scanIR(ir.el, activeAliases);
 			result.changesOutput = inner.changesOutput;
-			result.exportable = inner.exportable;
 			result.hasDeferredAlias = inner.hasDeferredAlias;
 			break;
 		}
@@ -1772,7 +1739,6 @@ function scanIR(ir: IR, activeAliases?: Set<IR>): ScanResult {
 			for (const member of ir.members) {
 				const inner = scanIR(member, activeAliases);
 				result.changesOutput ||= inner.changesOutput;
-				result.exportable &&= inner.exportable;
 				result.hasDeferredAlias ||= inner.hasDeferredAlias;
 				if (result.hasDeferredAlias) break;
 			}
@@ -1780,7 +1746,6 @@ function scanIR(ir: IR, activeAliases?: Set<IR>): ScanResult {
 		case "refine": {
 			const inner = scanIR(ir.base, activeAliases);
 			result.changesOutput = inner.changesOutput;
-			result.exportable = inner.exportable;
 			result.hasDeferredAlias = inner.hasDeferredAlias;
 			break;
 		}
@@ -1788,19 +1753,16 @@ function scanIR(ir: IR, activeAliases?: Set<IR>): ScanResult {
 			for (const item of ir.prefix) {
 				const inner = scanIR(item.val, activeAliases);
 				result.changesOutput ||= item.hasDefault === true || inner.changesOutput;
-				result.exportable &&= item.hasDefault !== true && inner.exportable;
 				result.hasDeferredAlias ||= inner.hasDeferredAlias;
 			}
 			if (ir.variadic !== undefined) {
 				const inner = scanIR(ir.variadic, activeAliases);
 				result.changesOutput ||= inner.changesOutput;
-				result.exportable &&= inner.exportable;
 				result.hasDeferredAlias ||= inner.hasDeferredAlias;
 			}
 			for (const item of ir.postfix) {
 				const inner = scanIR(item, activeAliases);
 				result.changesOutput ||= inner.changesOutput;
-				result.exportable &&= inner.exportable;
 				result.hasDeferredAlias ||= inner.hasDeferredAlias;
 			}
 			break;

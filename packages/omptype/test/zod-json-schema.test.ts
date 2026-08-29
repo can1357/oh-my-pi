@@ -113,7 +113,7 @@ describe("zod shim JSON Schema structure", () => {
 		const nullable = z.object({ inner: z.object({ name: z.string() }).nullable() });
 		const nullableJson = asObjectSchema(nullable.toJsonSchema());
 		const nullableVariants = propSchema(nullableJson, "inner")?.anyOf as ObjectSchema[];
-		expect(nullableVariants[1]).toEqual({ const: null });
+		expect(nullableVariants[1]).toEqual({ type: "null" });
 		expect(nullable.parse({ inner: null })).toEqual({ inner: null });
 		expect(nullable.parse({ inner: { name: "x" } })).toEqual({ inner: { name: "x" } });
 		expect(nullable.safeParse({ inner: 4 }).success).toBe(false);
@@ -177,6 +177,49 @@ describe("zod shim JSON Schema structure", () => {
 		const lazyProp = z.object({ t: z.lazy(() => z.string()) }).optional();
 		expect(lazyProp.toJsonSchema()).toEqual({});
 		expect(lazyProp.parse({ t: "x" })).toEqual({ t: "x" });
+	});
+
+	it("keeps structure AND steps when widening or uniting a stepped member", () => {
+		// Members carrying Type-attached steps (`z.record`'s key check,
+		// `.refine()`, `.regex()`, `.transform()`) are the common plugin
+		// authoring shapes. Widening or uniting them must embed the member —
+		// rebuilding from its base IR drops the steps (a validator that stops
+		// validating), while routing to the dispatcher erases the emitted
+		// document (a parameter the model sees as unconstrained). Both halves
+		// are asserted per shape: emitted structure and the step still firing.
+		const record = z.object({ env: z.record(z.string(), z.string()).optional() });
+		const recordJson = asObjectSchema(record.toJsonSchema());
+		expect(propSchema(recordJson, "env")?.additionalProperties).toEqual({ type: "string" });
+		expect(record.parse({ env: { A: "1" } })).toEqual({ env: { A: "1" } });
+		expect(record.parse({})).toEqual({});
+		expect(record.safeParse({ env: { A: 1 } }).success).toBe(false);
+
+		const refined = z.string().refine(value => value.length > 2, "at least 3 chars");
+		const optionalRefined = z.object({ name: refined.optional() });
+		expect(propSchema(asObjectSchema(optionalRefined.toJsonSchema()), "name")).toEqual({ type: "string" });
+		expect(optionalRefined.parse({})).toEqual({});
+		expect(optionalRefined.parse({ name: "abc" })).toEqual({ name: "abc" });
+		// The step survived the widening: without embedding, `ab` would pass.
+		expect(optionalRefined.safeParse({ name: "ab" }).success).toBe(false);
+
+		const nullableRefined = refined.nullable();
+		expect(asObjectSchema(nullableRefined.toJsonSchema()).anyOf).toEqual([{ type: "string" }, { type: "null" }]);
+		expect(nullableRefined.parse(null)).toBeNull();
+		expect(nullableRefined.safeParse("ab").success).toBe(false);
+
+		const union = z.union([refined, z.number()]);
+		expect(asObjectSchema(union.toJsonSchema()).anyOf).toEqual([{ type: "string" }, { type: "number" }]);
+		expect(union.parse(4)).toBe(4);
+		expect(union.parse("abc")).toBe("abc");
+		expect(union.safeParse("ab").success).toBe(false);
+
+		// Transforming members stay ordered-dispatcher-free too: the union is
+		// disjoint by input domain, so the emitted document keeps both inputs
+		// while the transform still runs.
+		const transformed = z.union([z.string().transform(value => value.length), z.boolean()]);
+		expect(asObjectSchema(transformed.toJsonSchema()).anyOf).toEqual([{ type: "string" }, { type: "boolean" }]);
+		expect(transformed.parse("abcd")).toBe(4);
+		expect(transformed.parse(true)).toBe(true);
 	});
 
 	it("keeps plain object nesting fully structural", () => {

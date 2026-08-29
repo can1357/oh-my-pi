@@ -53,35 +53,12 @@ describe("zod-like parsing", () => {
 		});
 	});
 
-	it("preserves JSON Schema structure for morph-free unions and nullable members", () => {
-		// Provider tool definitions read toolWireSchema's JSON Schema: a
-		// dispatcher-morph wrapper erases the structural IR and the parameter
-		// arrives at the model as an unconstrained `{}`.
-		const unionSchema = z.object({ mode: z.union([z.literal("fast"), z.literal("safe")]) });
-		const unionJson = unionSchema.toJsonSchema() as {
-			properties?: { mode?: Record<string, unknown> };
-		};
-		expect(unionJson.properties?.mode).toBeDefined();
-		expect(Object.keys(unionJson.properties?.mode ?? {}).length).toBeGreaterThan(0);
-		expect(JSON.stringify(unionJson.properties?.mode)).toContain("fast");
-		expect(JSON.stringify(unionJson.properties?.mode)).toContain("safe");
-		// Runtime contract unchanged.
-		expect(unionSchema.parse({ mode: "fast" })).toEqual({ mode: "fast" });
-		expect(unionSchema.safeParse({ mode: "slow" }).success).toBe(false);
-
-		const nullableSchema = z.object({ value: z.string().nullable() });
-		const nullableJson = nullableSchema.toJsonSchema() as {
-			properties?: { value?: Record<string, unknown> };
-		};
-		expect(Object.keys(nullableJson.properties?.value ?? {}).length).toBeGreaterThan(0);
-		expect(JSON.stringify(nullableJson.properties?.value)).toContain("string");
-		expect(nullableSchema.parse({ value: "ok" })).toEqual({ value: "ok" });
-		expect(nullableSchema.parse({ value: null })).toEqual({ value: null });
-		expect(nullableSchema.safeParse({ value: 42 }).success).toBe(false);
-
-		// Members carrying Type-attached steps (transform/refine — invisible to
-		// the member IR) must take the ordered dispatcher path: an IR rebuild
-		// would silently DROP the step, not just degrade the JSON Schema.
+	it("keeps member steps running through union, widening, and discriminated dispatch", () => {
+		// Members carrying Type-attached steps (transform/refine) are invisible
+		// in the member IR, so every combinator must EMBED them rather than
+		// rebuild from `member.ir` — a rebuild silently drops the step and the
+		// schema stops validating. (Emitted-document coverage for the same
+		// shapes lives in zod-json-schema.test.ts.)
 		const morphUnion = z.union([z.string().transform(value => value.length), z.number()]);
 		expect(morphUnion.parse("abc")).toBe(3);
 		expect(morphUnion.parse(7)).toBe(7);
@@ -114,21 +91,14 @@ describe("zod-like parsing", () => {
 				.parse(null),
 		).toBeNull();
 
-		// Discriminated unions with purely structural variants take the same
-		// structural path; a pipeline-carrying variant set keeps the ordered
-		// literal dispatcher (and its transform semantics).
+		// Discriminated dispatch: stripping variants keep their strip semantics
+		// and a stepped variant still transforms.
 		const eventSchema = z.object({
 			evt: z.discriminatedUnion("kind", [
 				z.strictObject({ kind: z.literal("append"), n: z.number() }),
 				z.strictObject({ kind: z.literal("gap"), s: z.string() }),
 			]),
 		});
-		const eventJson = eventSchema.toJsonSchema() as {
-			properties?: { evt?: Record<string, unknown> };
-		};
-		expect(Object.keys(eventJson.properties?.evt ?? {}).length).toBeGreaterThan(0);
-		expect(JSON.stringify(eventJson.properties?.evt)).toContain("append");
-		expect(JSON.stringify(eventJson.properties?.evt)).toContain("gap");
 		expect(eventSchema.parse({ evt: { kind: "append", n: 1 } })).toEqual({ evt: { kind: "append", n: 1 } });
 		expect(eventSchema.safeParse({ evt: { kind: "nope" } }).success).toBe(false);
 		const steppedVariants = z.discriminatedUnion("kind", [

@@ -1,14 +1,5 @@
 import { type OmpErrors, OmpTypeError } from "./errors";
-import {
-	type EmbeddableSchema,
-	type Extras,
-	embed,
-	hasDeferredAlias,
-	type IR,
-	IR_BRAND,
-	isStructurallyExportable,
-	type PropIR,
-} from "./ir";
+import { type EmbeddableSchema, type Extras, embed, hasDeferredAlias, type IR, IR_BRAND, type PropIR } from "./ir";
 import { type NarrowContext, type Type, type } from "./type";
 
 interface OptionalSchemaMarker {
@@ -218,25 +209,26 @@ function decorate<Out>(schema: Decoratable<Out>, optional = false): ZodLikeSchem
 			return next(restrictBase(schema, { ...schema.ir, url: true }));
 		},
 		optional(): ZodLikeSchema<Out | undefined> & OptionalSchemaMarker {
-			// Widening keeps a real union whenever the member carries no deferred
-			// alias, so structural metadata (JSON Schema export, descriptions)
-			// survives even when the member contains stepped (`sub`) or
-			// default-filled properties — the widened union is disjoint from
-			// `undefined` unless the member itself accepts `undefined`, and
-			// omptype's own determinism check arbitrates that at construction
-			// (its indeterminacy error falls back to the dispatcher below).
+			// Widening keeps a real union whenever the member carries no
+			// deferred alias, so structural metadata (JSON Schema export,
+			// descriptions) survives. `or` EMBEDS the member: a member with
+			// Type-attached `.transform()`/`.refine()` steps (`z.record`,
+			// `.regex()`, `.refine()`, …) becomes a `sub` node, so its steps
+			// keep running and its structural base still exports — rebuilding
+			// from `schema.ir` instead would silently DROP those steps.
+			// The widened union is disjoint from `undefined` unless the member
+			// itself accepts `undefined`, and omptype's own determinism check
+			// arbitrates that at construction (its indeterminacy error falls
+			// back to the dispatcher below).
 			// Deferred aliases are excluded up front: the determinism probe
 			// cannot see through one, and resolving it here would break zod's
-			// defer-to-first-parse contract. `hasSteps` covers Type-attached
-			// `.transform()`/`.refine()` steps the IR alone cannot see —
-			// rebuilding from `schema.ir` would silently DROP those steps, not
-			// just degrade the emitted JSON Schema.
-			if (!schema.hasSteps && !hasDeferredAlias(schema.ir)) {
+			// defer-to-first-parse contract.
+			if (!hasDeferredAlias(schema.ir)) {
 				try {
-					return decorate(
-						schemaFromIR<Out | undefined>({ k: "union", members: [schema.ir, { k: "undefined" }] }),
-						true,
-					) as ZodLikeSchema<Out | undefined> & OptionalSchemaMarker;
+					return decorate(schema.or(type.raw("undefined")) as Decoratable<Out | undefined>, true) as ZodLikeSchema<
+						Out | undefined
+					> &
+						OptionalSchemaMarker;
 				} catch (error) {
 					if (!isIndeterminateUnionError(error)) throw error;
 				}
@@ -245,16 +237,13 @@ function decorate<Out>(schema: Decoratable<Out>, optional = false): ZodLikeSchem
 				OptionalSchemaMarker;
 		},
 		nullable(): ZodLikeSchema<Out | null> {
-			// Same gate as optional() above: widening keeps a real union whenever
-			// the member carries no deferred alias — disjoint from `null` unless
-			// the member itself accepts `null`, which omptype's determinism
-			// check arbitrates at construction.
-			if (!schema.hasSteps && !hasDeferredAlias(schema.ir)) {
+			// Same gate as optional() above: the embedded widening union keeps
+			// a stepped member's structure and steps alive, and is disjoint
+			// from `null` unless the member itself accepts `null`, which
+			// omptype's determinism check arbitrates at construction.
+			if (!hasDeferredAlias(schema.ir)) {
 				try {
-					return decorate(
-						schemaFromIR<Out | null>({ k: "union", members: [schema.ir, { k: "lit", v: null }] }),
-						optional,
-					) as ZodLikeSchema<Out | null>;
+					return decorate(schema.or(type.raw("null")) as Decoratable<Out | null>, optional);
 				} catch (error) {
 					if (!isIndeterminateUnionError(error)) throw error;
 				}
@@ -453,27 +442,26 @@ function isIndeterminateUnionError(error: unknown): boolean {
 // keeps zod's ordering and keeps member morphs invisible to the determinism
 // check.
 //
-// The dispatcher is reserved for unions that actually carry a pipeline: a
-// structurally exportable union stays structural, because the morph wrapper
-// erases the IR and `toJsonSchema()` then emits `{}` for the member — a
-// provider-facing tool parameter would appear unconstrained. For pure
-// validators any-match equals first-match, so zod's ordering is not
-// observable there.
+// The dispatcher is the last resort, not the default: it erases the IR, so
+// `toJsonSchema()` emits `{}` and a provider-facing tool parameter appears
+// unconstrained. Whenever omptype accepts the structural union, its output is
+// order-independent — any-match equals first-match — so zod's ordering is not
+// observable and the structural build wins.
 export const union = <
 	const Schemas extends readonly [ZodLikeSchema<unknown>, ZodLikeSchema<unknown>, ...ZodLikeSchema<unknown>[]],
 >(
 	schemas: Schemas,
 ): ZodLikeSchema<UnionOutput<Schemas>> => {
-	const members = schemas.map(schema => schema);
-	const irs = members.map(member => member.ir);
-	// Stricter than the widening gates above: those only exclude deferred
-	// aliases, because widening against `undefined`/`null` is disjoint by
-	// construction. A union of arbitrary members can overlap in ways the
-	// emitted `anyOf` would misrepresent, so members carrying morphs,
-	// stepped embeds, or default-filled properties keep the ordered
-	// dispatcher. `hasSteps` covers Type-attached transform/refine steps
-	// the member IR cannot see.
-	if (members.every(member => !member.hasSteps) && irs.every(ir => isStructurallyExportable(ir))) {
+	// Members are EMBEDDED, not rebuilt from `member.ir`: a member carrying
+	// Type-attached `.transform()`/`.refine()` steps survives as a `sub` node,
+	// so its steps keep running and its structural base still exports. Only a
+	// deferred alias is excluded up front — the determinism probe below cannot
+	// see through one. Everything else attempts the structural build and lets
+	// omptype's determinism check arbitrate: if construction succeeds the
+	// union's output is order-independent, so `anyOf` faithfully describes the
+	// accepted inputs.
+	const irs = schemas.map(schema => embed(schema));
+	if (schemas.every(schema => !hasDeferredAlias(schema.ir))) {
 		try {
 			return decorate(schemaFromIR<UnionOutput<Schemas>>({ k: "union", members: irs }));
 		} catch (error) {
@@ -490,11 +478,11 @@ export const union = <
 			k: "morph",
 			input: { k: "unknown" },
 			fn: (value, ctx) => {
-				for (const member of members) {
+				for (const member of schemas) {
 					const result = member(value);
 					if (!(result instanceof type.errors)) return result;
 				}
-				return ctx.error(`a union of ${members.length} variants`);
+				return ctx.error(`a union of ${schemas.length} variants`);
 			},
 		}),
 	);
@@ -526,14 +514,14 @@ export const discriminatedUnion = <
 	discriminator: Discriminator,
 	schemas: Schemas,
 ): ZodLikeSchema<UnionOutput<Schemas>> => {
-	const variantIrs = schemas.map(schema => schema.ir);
-	// Same pipeline gate as union() above: a structurally exportable variant
-	// set keeps a real structural union so JSON Schema export (provider tool
-	// definitions) survives — distinct discriminator literals make the
-	// variants disjoint, so any-match equals discriminator-dispatch for pure
-	// validators. The literal dispatcher below is reserved for variant sets
-	// carrying morphs or Type-attached steps.
-	if (schemas.every(schema => !schema.hasSteps) && variantIrs.every(ir => isStructurallyExportable(ir))) {
+	const variantIrs = schemas.map(schema => embed(schema));
+	// Same gate as union() above: variants are embedded so stepped variants
+	// keep their steps and their exported structure, only deferred aliases are
+	// excluded up front, and omptype's determinism check arbitrates the rest —
+	// distinct discriminator literals make the variants disjoint, so any-match
+	// equals discriminator-dispatch. The literal dispatcher below is reserved
+	// for variant sets omptype rejects as order-dependent.
+	if (schemas.every(schema => !hasDeferredAlias(schema.ir))) {
 		try {
 			return decorate(schemaFromIR<UnionOutput<Schemas>>({ k: "union", members: variantIrs }));
 		} catch (error) {
