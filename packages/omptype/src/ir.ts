@@ -1686,9 +1686,21 @@ function scanIR(ir: IR, activeAliases?: Set<IR>): ScanResult {
 	const result: ScanResult = { changesOutput: false, exportable: true, hasDeferredAlias: false };
 	switch (ir.k) {
 		case "sub":
+			result.changesOutput = true;
+			result.exportable = false;
+			// A deferred alias behind a stepped embed must still be seen: the
+			// widening gates rely on this bit to route around it.
+			result.hasDeferredAlias = scanIR(ir.schema.ir, activeAliases).hasDeferredAlias;
+			break;
 		case "morph":
 			result.changesOutput = true;
 			result.exportable = false;
+			// Same as `sub`: restrictBase wraps stepped schemas in a step-free
+			// morph whose input is the original IR, so a z.lazy can hide here.
+			result.hasDeferredAlias = scanIR(ir.input, activeAliases).hasDeferredAlias;
+			if (!result.hasDeferredAlias && ir.out !== undefined) {
+				result.hasDeferredAlias = scanIR(ir.out, activeAliases).hasDeferredAlias;
+			}
 			break;
 		case "alias": {
 			// Deferred alias (z.lazy): conservatively a morph without resolving
@@ -1714,8 +1726,11 @@ function scanIR(ir: IR, activeAliases?: Set<IR>): ScanResult {
 				result.changesOutput ||= prop.hasDefault === true || inner.changesOutput;
 				result.exportable &&= prop.hasDefault !== true && inner.exportable;
 				result.hasDeferredAlias ||= inner.hasDeferredAlias;
-				// All three bits are monotone; once pinned, nothing left to learn.
-				if (result.changesOutput && !result.exportable && result.hasDeferredAlias) break;
+				// A deferred alias pins all three bits at once (changesOutput:
+				// true, exportable: false), so this is the only early exit
+				// available — lazy-free schemas still need the full walk for
+				// `exportable`.
+				if (result.hasDeferredAlias) break;
 			}
 			if (ir.index !== undefined) {
 				const inner = scanIR(ir.index, activeAliases);
@@ -1751,7 +1766,7 @@ function scanIR(ir: IR, activeAliases?: Set<IR>): ScanResult {
 				result.changesOutput ||= inner.changesOutput;
 				result.exportable &&= inner.exportable;
 				result.hasDeferredAlias ||= inner.hasDeferredAlias;
-				if (result.changesOutput && !result.exportable && result.hasDeferredAlias) break;
+				if (result.hasDeferredAlias) break;
 			}
 			break;
 		case "refine": {

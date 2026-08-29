@@ -466,8 +466,13 @@ export const union = <
 ): ZodLikeSchema<UnionOutput<Schemas>> => {
 	const members = schemas.map(schema => schema);
 	const irs = members.map(member => member.ir);
-	// Same pipeline gate as optional()/nullable(): `hasSteps` covers
-	// Type-attached transform/refine steps the member IR cannot see.
+	// Stricter than the widening gates above: those only exclude deferred
+	// aliases, because widening against `undefined`/`null` is disjoint by
+	// construction. A union of arbitrary members can overlap in ways the
+	// emitted `anyOf` would misrepresent, so members carrying morphs,
+	// stepped embeds, or default-filled properties keep the ordered
+	// dispatcher. `hasSteps` covers Type-attached transform/refine steps
+	// the member IR cannot see.
 	if (members.every(member => !member.hasSteps) && irs.every(ir => isStructurallyExportable(ir))) {
 		try {
 			return decorate(schemaFromIR<UnionOutput<Schemas>>({ k: "union", members: irs }));

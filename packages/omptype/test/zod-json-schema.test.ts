@@ -130,6 +130,23 @@ describe("zod shim JSON Schema structure", () => {
 		expect(propSchema(defaultedJson, "inner")?.default).toEqual({ name: "d" });
 	});
 
+	it("pins the default-contract boundary across composition positions", () => {
+		// Zod 4 output-default contract, shim side: the fallback is returned
+		// as-is without re-validation through the input schema, so a
+		// default that violates the schema's own constraints is accepted
+		// standalone. Composed positions (`.describe()`'s restrictBase,
+		// object embedding's normalizeDefaults) still route the fallback
+		// through omptype's validating `Type.default()`, so the same schema
+		// fails LOUDLY at construction there. Pinned as an accepted remaining
+		// asymmetry; the follow-up unifies the default path.
+		const standalone = z.number().min(5).default(1);
+		expect(standalone.parse(undefined)).toBe(1);
+		expect(standalone.parse(6)).toBe(6);
+		expect(standalone.safeParse("x").success).toBe(false);
+		expect(() => z.number().min(5).default(1).describe("d")).toThrow(/at least 5/);
+		expect(() => z.object({ n: z.number().min(5).default(1) })).toThrow(/at least 5/);
+	});
+
 	it("widens objects containing stepped or defaulted properties structurally", () => {
 		// The widened union is disjoint from undefined/null unless the member
 		// itself accepts them, so these shapes must NOT fall back to the
