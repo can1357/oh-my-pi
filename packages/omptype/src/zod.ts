@@ -614,7 +614,14 @@ export const lazy = <Out>(getter: () => ZodLikeSchema<Out>): ZodLikeSchema<Out> 
 		name: "lazy",
 		deferred: true,
 		resolve: () => {
-			if (resolved !== undefined) return resolved.ir;
+			// `embed`, not `.ir`: a getter returning a stepped schema
+			// (`z.string().refine(…)`, `.transform()`, `.catch()`,
+			// `.readonly()`) keeps those steps on the schema wrapper, so
+			// resolving to the bare base IR would drop them — the lazy schema
+			// would accept values its own refinement rejects and hand back
+			// untransformed output. A `sub` node keeps the steps and still
+			// exports the structural base.
+			if (resolved !== undefined) return embed(resolved);
 			// Re-entrant resolve while the getter is still building the schema
 			// (recursive definitions — the getter references this very schema):
 			// resolve to the alias itself. Every walker is cycle-safe on alias
@@ -626,7 +633,7 @@ export const lazy = <Out>(getter: () => ZodLikeSchema<Out>): ZodLikeSchema<Out> 
 			} finally {
 				resolving = false;
 			}
-			return resolved.ir;
+			return embed(resolved);
 		},
 	};
 	// The IR's cycle-safe alias node, not a runtime morph closure: the emitter

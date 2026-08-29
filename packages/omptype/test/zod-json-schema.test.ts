@@ -351,6 +351,27 @@ describe("z.lazy deferred alias", () => {
 		expect(calls).toBe(1);
 	});
 
+	it("keeps the resolved schema's steps and still exports its base", () => {
+		// Regression: the alias resolved to `resolved.ir`, the resolved
+		// schema's structural base, so Type-attached steps living on the
+		// wrapper were dropped — the lazy schema accepted values its own
+		// refinement rejects and handed back untransformed output.
+		const refined = z.lazy(() => z.string().refine(value => value.startsWith("x"), "starts with x"));
+		expect(refined.parse("xyz")).toBe("xyz");
+		expect(refined.safeParse("abc").success).toBe(false);
+		expect(resolveRef(asObjectSchema(refined.toJsonSchema()), asObjectSchema(refined.toJsonSchema()).$ref)).toEqual({
+			type: "string",
+		});
+
+		const transformed = z.lazy(() => z.string().transform(value => value.length));
+		expect(transformed.parse("abcd")).toBe(4);
+
+		// Same through a property, where the alias is reached via embed().
+		const holder = z.object({ v: z.lazy(() => z.string().refine(value => value.length > 2, "long enough")) });
+		expect(holder.parse({ v: "abc" })).toEqual({ v: "abc" });
+		expect(holder.safeParse({ v: "ab" }).success).toBe(false);
+	});
+
 	it("gives distinct lazies distinct $defs entries", () => {
 		// Regression: a fixed "$defs" key made one lazy silently win the
 		// collision and the other $ref dangle.
