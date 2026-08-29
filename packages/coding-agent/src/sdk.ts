@@ -3197,7 +3197,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				// unrelated disallow (`disallowedTools: [bash]`) must not strip a
 				// resource-only server's instructions (no owned tool to match) — it
 				// keeps every server's instructions, byte-identical to unrestricted.
-				if (enforceToolAllowlist || disallowedPatterns.some(pattern => pattern.startsWith("mcp__"))) {
+				// Bare `*` is deny-all: it removes every MCP tool, so it targets MCP
+				// access just like `mcp__*` (matching the resource gate).
+				if (
+					enforceToolAllowlist ||
+					disallowedPatterns.some(pattern => pattern.startsWith("mcp__") || pattern === "*")
+				) {
 					scopedInServerNames = new Set();
 					// xd://-mounted MCP tools leave `toolNames` (presentation moves to
 					// `mountedNames`) while staying in the canonical `tools` map, so the

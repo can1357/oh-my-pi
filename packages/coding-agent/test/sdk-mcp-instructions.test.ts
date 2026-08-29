@@ -417,6 +417,46 @@ describe("createAgentSession MCP server instructions (deferred UI)", () => {
 		}
 	}, 20_000);
 
+	it("drops server instructions when disallowedTools is a bare deny-all wildcard", async () => {
+		const { session } = await createAgentSession({
+			cwd: tempDir,
+			agentDir: tempDir,
+			modelRegistry,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({}),
+			model: getBundledModel("openai", "gpt-4o-mini"),
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableLsp: false,
+			skipPythonPreflight: true,
+			enableMCP: true,
+			hasUI: true,
+			disallowedTools: ["*"],
+		});
+		try {
+			const deadline = Date.now() + 12_000;
+			while (session.getToolByName(MCP_TOOL_NAME) === undefined && Date.now() < deadline) {
+				await Bun.sleep(10);
+			}
+			expect(session.getToolByName(MCP_TOOL_NAME)).toBeDefined();
+			expect(session.getActiveToolNames()).not.toContain(MCP_TOOL_NAME);
+
+			// Bare `*` removes every MCP tool, so it targets MCP access just like
+			// `mcp__*` — the server-controlled text must not land in a prompt whose
+			// tool surface cannot act on it (regression: the ownership filter only
+			// matched `mcp__`-prefixed patterns, keeping every server's text).
+			await session.refreshBaseSystemPrompt();
+			const prompt = session.systemPrompt.join("\n");
+			expect(prompt).not.toContain(SERVER_INSTRUCTIONS);
+			expect(prompt).not.toContain("## MCP Server Instructions");
+		} finally {
+			await session.dispose();
+		}
+	}, 20_000);
+
 	it("drops server instructions when an enforced allowlist names none of the server's tools", async () => {
 		const { session } = await createAgentSession({
 			cwd: tempDir,
