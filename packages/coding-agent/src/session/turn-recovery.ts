@@ -2190,11 +2190,22 @@ export class TurnRecovery {
 				!thinkingLoop &&
 				!(retryBudgetExhausted && classifierRefusal)
 			) {
+				// A classifier refusal normally pins the fallback for the rest of the
+				// session: retrying the declining model just trips the same classifier
+				// again. When `retry.classifierRefusalCooldownMs` is positive, treat the
+				// refusal like any other transient failure instead: suppress the
+				// declining selector for that window and leave the fallback unpinned, so
+				// `retry.fallbackRevertPolicy` can restore the primary once the cooldown
+				// ends and a later turn no longer trips the classifier.
+				const classifierRefusalCooldownMs = retrySettings.classifierRefusalCooldownMs;
+				const cooldownClassifierRefusal = classifierRefusal && classifierRefusalCooldownMs > 0;
 				if (!classifierRefusal) {
 					this.noteRetryFallbackCooldown(currentSelector, parsedRetryAfterMs, errorMessage);
+				} else if (cooldownClassifierRefusal) {
+					this.noteRetryFallbackCooldown(currentSelector, classifierRefusalCooldownMs, errorMessage);
 				}
 				switchedModel = await this.#tryRetryModelFallback(currentSelector, message, {
-					pinFallback: classifierRefusal,
+					pinFallback: classifierRefusal && !cooldownClassifierRefusal,
 					preserveFailedTurn,
 				});
 			}
