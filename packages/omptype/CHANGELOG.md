@@ -2,16 +2,17 @@
 
 ## [Unreleased]
 
-### Fixed
-
-- Fixed the Zod shim (`@oh-my-pi/omptype/zod`) erasing tool parameter schemas to unconstrained `{}`: `.nullable()`, `.optional()`, and `.default()` over `z.object` — including objects containing stepped (`.transform()`, `.refine()`, `.readonly()`) or `.default()`-filled properties — `z.discriminatedUnion` over `z.object` variants, and unions of disjoint `z.object` members now emit their real structure instead of a dispatcher placeholder, and a tool whose parameters previously reached the model unconstrained now has its declared shape enforced by the provider. Parse acceptance and outputs are otherwise unchanged, with one deliberate exception: `.default()` on a shim schema now follows Zod 4's output-default contract (the fallback is returned as-is rather than re-validated through the input schema), which can accept a default standalone that older composed positions (`.describe()`/object embedding) validated — a follow-up will unify the default path end to end.
-
 ### Added
 
-- `z.lazy()` now builds on the IR's cycle-safe alias node, so recursive parameter schemas export as real `$ref`/`$defs` documents instead of erasing to `{}`.
-- `.readonly()` now shallow-freezes parse output like Zod, without freezing the caller's input graph.
+- Added `z.lazy()`, `z.discriminatedUnion()`, `z.strictObject()`, `z.looseObject()`, and `.readonly()` to the Zod shim (`@oh-my-pi/omptype/zod`); recursive schemas export as real `$ref`/`$defs` documents and `.readonly()` shallow-freezes parse output like Zod, without freezing the caller's input graph.
 
-Schema erasure remains for shapes omptype's unordered unions cannot represent deterministically. Recursion through **required** array/record edges exports structurally as `$ref`/`$defs`; **optional or nullable recursive edges** (`next: self.optional()`, `z.array(self).optional()`) keep the ordered dispatcher and erase, as does a `z.union` of `z.lazy` members or an object containing one. Disjoint member sets — distinct discriminator literals, `strictObject` members, null/undefined widening (the constraints must actually prove the members disjoint, e.g. conflicting required literals or strict rejection of the other member's required key) — all emit structurally. Follow-ups: extend alias deferral to the union determinism probe with a conservative disjointness rule for deferred members, and derive stable `$defs` names (current keys depend on schema construction order).
+### Fixed
+
+- Fixed `z.union`, `z.discriminatedUnion`, `.optional()`, and `.nullable()` throwing `unordered union with overlapping morph inputs is indeterminate` at construction when a member was a plain (key-stripping) `z.object` overlapping another member or a `.catch()` schema — any plugin, hook, or custom tool declaring that shape failed to load; those combinators now dispatch first-match like Zod. Only that fallback's JSON Schema is unconstrained (`{}`); every member set omptype can combine order-independently still emits its real structure.
+
+### Changed
+
+- `.default()` follows Zod 4's output-default contract: the fallback is returned as-is instead of being re-validated through the input schema, and a mutable default (`.default({})`) no longer has to be spelled as a factory. Composed positions (`.describe()`, object embedding) still validate the fallback at construction.
 
 ## [17.3.1] - 2026-08-13
 
