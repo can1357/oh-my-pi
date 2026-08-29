@@ -468,6 +468,33 @@ describe("auth-gateway openai-chat: encodeStream", () => {
 		expect(text.join("")).toBe("hi");
 	});
 
+	it("streams immediately for literal model id auto without cursorAutoMode", async () => {
+		// OpenRouter (and others) expose a real model named `auto`. Without Cursor
+		// auto intent, encodeStream must not buffer until done.
+		const initial = emptyAssistant();
+		initial.model = "auto";
+		initial.provider = "openrouter";
+		const withText: AssistantMessage = {
+			...initial,
+			content: [{ type: "text", text: "ok" }],
+		};
+		const events: AssistantMessageEvent[] = [
+			{ type: "start", partial: initial },
+			{ type: "text_delta", contentIndex: 0, delta: "ok", partial: withText },
+			{ type: "done", reason: "stop", message: withText },
+		];
+		const stream = encodeStream(makeEventStream(events, withText), "auto");
+		const payloads = (await collectStream(stream)).map(parseSseLine);
+		const chunks = payloads.filter(
+			(p): p is { model: string; choices: Array<{ delta: Record<string, unknown> }> } =>
+				typeof p === "object" && p !== null && "model" in p,
+		);
+		expect(chunks[0]?.choices[0]?.delta).toEqual({ role: "assistant" });
+		expect(chunks[0]?.model).toBe("auto");
+		const text = chunks.map(c => c.choices[0]?.delta.content).filter((v): v is string => typeof v === "string");
+		expect(text.join("")).toBe("ok");
+	});
+
 	it("resolves Cursor auto routing when the selected model id is unchanged", async () => {
 		const initial = emptyAssistant();
 		initial.model = "gpt-5";

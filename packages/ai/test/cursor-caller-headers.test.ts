@@ -226,6 +226,42 @@ describe("Cursor passthrough allowed-tools header", () => {
 		expect(sent["x-cursor-agent-allowed-tools"]).toBe("__none__");
 	});
 
+	it("restricts allowlist to a named forced toolChoice", async () => {
+		const sent = await send(
+			{},
+			{
+				context: { ...context, tools: passthroughTools },
+				options: { cursorToolPassthrough: true, toolChoice: { type: "tool", name: "read" } },
+			},
+		);
+		expect(sent["x-cursor-agent-allowed-tools"]).toBe("read");
+	});
+
+	it("advertises a forced tool name even when it is absent from context.tools", async () => {
+		const sent = await send(
+			{},
+			{
+				context: { ...context, tools: passthroughTools },
+				options: {
+					cursorToolPassthrough: true,
+					toolChoice: { type: "function", name: "report_delivery" },
+				},
+			},
+		);
+		expect(sent["x-cursor-agent-allowed-tools"]).toBe("report_delivery");
+	});
+
+	it("keeps the full declared list when toolChoice is required", async () => {
+		const sent = await send(
+			{},
+			{
+				context: { ...context, tools: passthroughTools },
+				options: { cursorToolPassthrough: true, toolChoice: "required" },
+			},
+		);
+		expect(sent["x-cursor-agent-allowed-tools"]).toBe("bash,read");
+	});
+
 	it("sends __none__ for empty tools under passthrough", async () => {
 		const sent = await send(
 			{},

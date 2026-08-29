@@ -1135,6 +1135,41 @@ describe("openai-responses encodeStream", () => {
 		expect(types.indexOf("response.created")).toBeGreaterThanOrEqual(0);
 	});
 
+	it("streams response.created immediately for literal model id auto without cursorAutoMode", async () => {
+		const stream = new AssistantMessageEventStream();
+		const initial: AssistantMessage = {
+			role: "assistant",
+			api: "openai-responses",
+			provider: "openrouter",
+			model: "auto",
+			content: [],
+			usage: zeroUsage(),
+			stopReason: "stop",
+			timestamp: 1_700_000_000_000,
+		};
+		const withText: AssistantMessage = {
+			...initial,
+			content: [{ type: "text", text: "ok" }],
+		};
+
+		queueMicrotask(() => {
+			stream.push({ type: "start", partial: initial });
+			stream.push({ type: "text_start", contentIndex: 0, partial: withText });
+			stream.push({ type: "text_delta", contentIndex: 0, delta: "ok", partial: withText });
+			stream.push({ type: "text_end", contentIndex: 0, content: "ok", partial: withText });
+			stream.push({ type: "done", reason: "stop", message: withText });
+			stream.end(withText);
+		});
+
+		const frames = parseSse(await collectStream(encodeStream(stream, "auto")));
+		const created = frames.find(f => f.event === "response.created");
+		expect(created).toBeDefined();
+		const response = (created!.data as { response: { model: string } }).response;
+		expect(response.model).toBe("auto");
+		const types = frames.map(f => f.event);
+		expect(types.indexOf("response.created")).toBeLessThan(types.indexOf("response.output_item.added"));
+	});
+
 	it("streams a GA computer_call with provider item id, actions, and safety checks", async () => {
 		const stream = new AssistantMessageEventStream();
 		const actions = [{ type: "scroll" as const, x: 120, y: 240, scroll_x: 0, scroll_y: 650, keys: [] }];

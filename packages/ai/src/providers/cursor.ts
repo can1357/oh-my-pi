@@ -212,6 +212,7 @@ import { AssistantMessageEventStream } from "../utils/event-stream";
 import { connectProxiedSocket, getProxyForUrl } from "../utils/proxy";
 import { createRequestDebugSession, isRequestDebugEnabled, type RequestDebugResponseLog } from "../utils/request-debug";
 import { toolWireSchema } from "../utils/schema/wire";
+import { getNamedToolChoiceName } from "../utils/tool-choice";
 import { formatConnectEndStreamError } from "./connect-error-detail";
 import {
 	buildMcpStateResult,
@@ -797,15 +798,20 @@ function streamCursorWithWireMode(
 			// caller-declared tools (including native names like bash/read/write).
 			// Always send the header: omitting it leaves Cursor's unrestricted native
 			// set enabled (including when tools is empty / text-only passthrough).
-			// toolChoice "none" disables tools even when a catalog is declared.
+			// toolChoice "none" disables tools; a named forced choice advertises that
+			// name alone (even when absent from context.tools — Cursor decides);
+			// "required"/unrestricted keep the full declared list.
 			if (options?.cursorToolPassthrough) {
+				const forcedName = getNamedToolChoiceName(options.toolChoice);
 				const allowedTools =
 					options.toolChoice === "none"
 						? ""
-						: (context.tools ?? [])
-								.map(tool => tool.name)
-								.filter(name => name.length > 0)
-								.join(",");
+						: forcedName
+							? forcedName
+							: (context.tools ?? [])
+									.map(tool => tool.name)
+									.filter(name => name.length > 0)
+									.join(",");
 				requestHeaders["x-cursor-agent-allowed-tools"] = allowedTools || "__none__";
 			}
 			const debugSession = isRequestDebugEnabled()

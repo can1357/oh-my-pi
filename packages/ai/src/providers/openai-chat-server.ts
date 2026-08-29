@@ -541,9 +541,11 @@ export function encodeStream(
 	// lands (or a terminal event forces emit with whatever id we have).
 	let cursorAutoRoutingResolved = false;
 	const deferStartForCursorAuto = (modelId: string | undefined): boolean => {
+		// Only Cursor auto intent buffers. Literal provider ids like OpenRouter's
+		// `auto` must stream immediately when cursorAutoMode is unset/false.
+		if (options?.cursorAutoMode !== true) return false;
 		if (modelId === "auto" || modelId === "default") return true;
-		if (options?.cursorAutoMode === true && !cursorAutoRoutingResolved) return true;
-		return false;
+		return !cursorAutoRoutingResolved;
 	};
 	let cancelled = control?.signal?.aborted === true;
 	const markCancelled = () => {
