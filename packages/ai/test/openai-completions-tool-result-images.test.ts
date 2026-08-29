@@ -35,6 +35,7 @@ const compat: ResolvedOpenAICompat = {
 	thinkingFormat: "openai",
 	reasoningDisableMode: "lowest-effort",
 	omitReasoningEffort: false,
+	trustExplicitThinkingOnly: false,
 	includeEncryptedReasoning: true,
 	filterReasoningHistory: false,
 	reasoningContentField: "reasoning_content",

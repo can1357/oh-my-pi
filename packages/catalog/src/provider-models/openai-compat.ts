@@ -3567,6 +3567,158 @@ export function kiloModelManagerOptions(config?: KiloModelManagerConfig): ModelM
 }
 
 // ---------------------------------------------------------------------------
+// 10.7 MindsHub
+// ---------------------------------------------------------------------------
+
+export interface MindsHubModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
+/**
+ * MindsHub's `GET /v1/models` row shape (see docs.mindshub.ai/inference/models).
+ * `id` is a stable alias (`sonnet`, `kimi`, …), not a raw provider model id;
+ * `label` is the human-readable display name normal OpenAI-compatible
+ * `name` would carry. `reasoning_efforts` is the per-model effort ladder, or
+ * `null` when the model isn't tunable (it may still reason internally).
+ * `embedding` flags rows meant for `/v1/embeddings`, not chat.
+ */
+interface MindsHubModelRecord extends OpenAICompatibleModelRecord {
+	label?: unknown;
+	enabled?: unknown;
+	embedding?: unknown;
+	reasoning_efforts?: unknown;
+	default_reasoning_effort?: unknown;
+	family?: unknown;
+}
+
+/**
+ * MindsHub aliases documented to reason internally on every request even
+ * though the catalog row has no adjustable ladder (`reasoning_efforts:
+ * null`). The wire shape has no separate boolean for this — `docs.mindshub.ai
+ * /models#reasoning-effort` calls out `mindshub_air` and `kimi` by name as
+ * reasoning without a tunable dial — so this allowlist is the only available
+ * signal, keyed on `family` (falling back to `id`, since `family` is only
+ * populated once the model has been classified) to track MindsHub's
+ * authoritative catalog rather than any particular alias spelling.
+ */
+const MINDSHUB_FIXED_REASONING_FAMILIES = new Set(["mindshub_air", "kimi"]);
+
+/**
+ * Whether a MindsHub row reasons at all, independent of whether it advertised
+ * a tunable effort ladder. An advertised ladder always implies reasoning; a
+ * `null` ladder can still mean a fixed/internal reasoner (see
+ * {@link MINDSHUB_FIXED_REASONING_FAMILIES}), so this must not collapse to
+ * `hasLadder` or models like `kimi` would be reported as ordinary chat models
+ * to `model.reasoning`-gated behavior (the model browser, etc).
+ */
+function mindshubReasons(record: MindsHubModelRecord, hasLadder: boolean): boolean {
+	if (hasLadder) return true;
+	const family = typeof record.family === "string" ? record.family : undefined;
+	const id = typeof record.id === "string" ? record.id : undefined;
+	return (
+		(family !== undefined && MINDSHUB_FIXED_REASONING_FAMILIES.has(family)) ||
+		(id !== undefined && MINDSHUB_FIXED_REASONING_FAMILIES.has(id))
+	);
+}
+
+/**
+ * MindsHub advertises a restricted effort ladder per model (e.g. `sonnet`
+ * only exposes `["low", "medium", "high", "max"]`, never `minimal`/`xhigh`).
+ * Build an explicit `ThinkingConfig` from the advertised values instead of
+ * letting the model fall through to identity-based inference — otherwise an
+ * alias id like `sonnet` would get the generic inferred Anthropic ladder
+ * (`minimal` … `xhigh`), which lets the UI offer efforts MindsHub rejects and
+ * hides `max`. Canonical ordering is reapplied regardless of wire order so
+ * the `ThinkingConfig.efforts` "least → most intensive" invariant holds.
+ */
+function mapMindshubThinking(record: MindsHubModelRecord): ThinkingConfig | undefined {
+	const advertised = new Set(
+		Array.isArray(record.reasoning_efforts)
+			? record.reasoning_efforts.filter(
+					(value): value is Effort =>
+						typeof value === "string" && (THINKING_EFFORTS as readonly string[]).includes(value),
+				)
+			: [],
+	);
+	if (advertised.size === 0) {
+		return undefined;
+	}
+	const efforts = THINKING_EFFORTS.filter(effort => advertised.has(effort));
+	const defaultLevel =
+		typeof record.default_reasoning_effort === "string" && advertised.has(record.default_reasoning_effort as Effort)
+			? (record.default_reasoning_effort as Effort)
+			: undefined;
+	return {
+		mode: "effort",
+		efforts,
+		...(defaultLevel && { defaultLevel }),
+	};
+}
+
+export function mindshubModelManagerOptions(
+	config?: MindsHubModelManagerConfig,
+): ModelManagerOptions<"openai-completions"> {
+	const apiKey = config?.apiKey;
+	const baseUrl = config?.baseUrl ?? "https://api.mindshub.ai/v1";
+	return {
+		providerId: "mindshub",
+		fetchDynamicModels: () =>
+			fetchOpenAICompatibleModels<"openai-completions">({
+				api: "openai-completions",
+				provider: "mindshub",
+				baseUrl,
+				apiKey,
+				// The catalog also lists embedding-only rows (e.g. `embed-small`) for
+				// `/v1/embeddings`; they are not chat models and never carry the
+				// `chat.completions` capabilities the coding agent expects. Rows the
+				// org has explicitly disabled (`enabled: false`) are unavailable for
+				// inference even though discovery still lists them, so they're
+				// dropped too — otherwise an unusable alias shows up as selectable
+				// and requests against it fail.
+				filterModel: (entry: OpenAICompatibleModelRecord) => {
+					const record = entry as MindsHubModelRecord;
+					return record.embedding !== true && record.enabled !== false;
+				},
+				mapModel: (entry: OpenAICompatibleModelRecord, defaults: ModelSpec<"openai-completions">) => {
+					const record = entry as MindsHubModelRecord;
+					const thinking = mapMindshubThinking(record);
+					const reasoning = mindshubReasons(record, thinking !== undefined);
+					// `kimi`/`mindshub_air` reason on every request but expose no
+					// tunable dial (`reasoning_efforts: null` —
+					// MINDSHUB_FIXED_REASONING_FAMILIES). Leaving `thinking`
+					// undefined alone is not enough: `resolveModelThinking` treats
+					// an absent `thinking` on a `reasoning: true` model as "infer
+					// one from identity" and would hand the built model the generic
+					// openai-completions minimal..xhigh ladder, letting the picker
+					// offer (and send) effort values these aliases reject.
+					// `trustExplicitThinkingOnly` is the same escape hatch
+					// devin-agent uses for its own no-ladder reasoners — it tells
+					// `resolveModelThinking` to trust the explicit (absent) surface
+					// as-is and skip inference, so `reasoning: true` +
+					// `thinking: undefined` survives through `buildModel` instead of
+					// collapsing into a fabricated ladder. See #9355 review thread.
+					const isFixedReasoner = reasoning && thinking === undefined;
+					return {
+						...defaults,
+						name: toModelName(record.label, defaults.name),
+						reasoning,
+						...(thinking && { thinking }),
+						...(isFixedReasoner && {
+							compat: { ...defaults.compat, trustExplicitThinkingOnly: true },
+						}),
+						// Every catalog model accepts image parts (docs: "Image parts are
+						// accepted on every chat model").
+						input: ["text", "image"],
+					};
+				},
+				fetch: config?.fetch,
+			}),
+	};
+}
+
+// ---------------------------------------------------------------------------
 // Alibaba Coding Plan
 // ---------------------------------------------------------------------------
 

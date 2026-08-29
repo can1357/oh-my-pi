@@ -228,6 +228,18 @@ export interface OpenAICompat {
 	reasoningDisableMode?: OpenAIReasoningDisableMode;
 	/** Whether the provider rejects `reasoning.effort`/`reasoning_effort` even when the model reasons natively. Default: false unless reasoning effort is unsupported. */
 	omitReasoningEffort?: boolean;
+	/**
+	 * Chat-completions analog of {@link DevinCompat.trustExplicitThinkingOnly}:
+	 * trust only explicit `thinking` metadata for this model; never let
+	 * `resolveModelThinking` derive a fabricated effort ladder from identity
+	 * when `thinking` is absent. Set for reasoners whose upstream catalog
+	 * explicitly documents "reasons internally, no tunable dial" (e.g.
+	 * MindsHub's `kimi`/`mindshub_air` aliases) — `reasoning: true` with
+	 * `thinking: undefined` then survives all the way to the built `Model`
+	 * instead of collapsing into the generic OpenAI-compatible ladder.
+	 * Default: false.
+	 */
+	trustExplicitThinkingOnly?: boolean;
 	/** Whether Responses requests should ask for encrypted reasoning replay items. Default: true. */
 	includeEncryptedReasoning?: boolean;
 	/** Whether replayed Responses history should strip native `type: "reasoning"` items before request encoding. Default: false. */

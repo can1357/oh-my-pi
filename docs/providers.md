@@ -118,6 +118,7 @@ Each provider has one or more environment variables that supply a key when no st
 | `huggingface`                    | `HUGGINGFACE_HUB_TOKEN`, then `HF_TOKEN`                                      |
 | `moonshot`                       | `MOONSHOT_API_KEY`, then `KIMI_API_KEY`                                       |
 | `meta`                           | `MODEL_API_KEY`, then `META_API_KEY`                                          |
+| `mindshub`                       | `MINDSHUB_API_KEY`                                                            |
 | `nanogpt`                        | `NANO_GPT_API_KEY`                                                            |
 | `novita`                         | `NOVITA_API_KEY`                                                              |
 | `venice`                         | `VENICE_API_KEY`                                                              |

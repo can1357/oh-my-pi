@@ -41,7 +41,6 @@ import type {
 	CompatOf,
 	Model,
 	ModelSpec,
-	ResolvedDevinCompat,
 	ResolvedOpenAICompat,
 	ResolvedOpenAIResponsesCompat,
 	ThinkingConfig,
@@ -155,10 +154,15 @@ export function resolveModelThinking<TApi extends Api>(
 	if (spec.thinking && Array.isArray(spec.thinking.efforts) && spec.thinking.efforts.length > 0) {
 		return fillThinkingWireDefaults(spec, compat, spec.thinking);
 	}
-	// Cascade selects effort only by routing to a sibling model id, so a Devin
-	// model with no explicit routed thinking has no controllable surface —
-	// never fabricate an effort ladder from identity.
-	if ((compat as ResolvedDevinCompat | undefined)?.trustExplicitThinkingOnly === true) return undefined;
+	// `trustExplicitThinkingOnly` means "no explicit thinking metadata IS the
+	// answer, not an inference prompt": Devin's Cascade selects effort only by
+	// routing to a sibling model id, so a Devin model with no explicit routed
+	// thinking has no controllable surface, and chat-completions reasoners
+	// with a documented fixed/non-adjustable dial (MindsHub's `kimi` /
+	// `mindshub_air`, see openai-compat.ts) set the same flag on their
+	// resolved `OpenAICompat`. Either way: never fabricate an effort ladder
+	// from identity when this is set.
+	if (trustExplicitThinkingOnly(compat)) return undefined;
 	// Empty/malformed explicit metadata is treated as absent — infer instead.
 	return deriveThinking(spec, compat);
 }
@@ -523,6 +527,17 @@ function readCompatEffortMap(compat: CompatOf<Api>): EffortMap | undefined {
 
 function isOpenRouterThinkingFormat(compat: CompatOf<Api>): boolean {
 	return compat !== undefined && "thinkingFormat" in compat && compat.thinkingFormat === "openrouter";
+}
+
+/**
+ * Duck-typed across every resolved compat shape that can carry the flag
+ * (`ResolvedDevinCompat`, `ResolvedOpenAICompat`/`ResolvedOpenRouterCompat` via
+ * `OpenAICompat.trustExplicitThinkingOnly`): true when this model's thinking
+ * surface must come only from explicit `spec.thinking`, never from identity
+ * inference.
+ */
+function trustExplicitThinkingOnly(compat: CompatOf<Api>): boolean {
+	return compat !== undefined && "trustExplicitThinkingOnly" in compat && compat.trustExplicitThinkingOnly === true;
 }
 
 function isZaiThinkingFormat(compat: CompatOf<Api>): boolean {

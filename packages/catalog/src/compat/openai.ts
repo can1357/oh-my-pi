@@ -541,6 +541,10 @@ export function buildOpenAICompat(spec: ModelSpec<"openai-completions">): Resolv
 				? "venice-disable-thinking"
 				: resolveReasoningDisableMode(thinkingFormat),
 		omitReasoningEffort: false,
+		// Provider-specific `mapModel` overrides this via `spec.compat` for
+		// reasoners with a documented fixed/non-adjustable dial (see the field
+		// doc on `OpenAICompat.trustExplicitThinkingOnly`).
+		trustExplicitThinkingOnly: false,
 		includeEncryptedReasoning: true,
 		filterReasoningHistory: isOpenRouter && isAnthropicModel,
 		thinkingKeep: usesMoonshotKimiPreservedThinking ? "all" : undefined,

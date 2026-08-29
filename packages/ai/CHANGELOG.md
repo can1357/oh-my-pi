@@ -141,6 +141,9 @@
 ### Added
 
 - Added Amazon Bedrock Converse guardrail configuration with provider-scoped identifier, version, and trace settings.
+### Added
+
+- Added a native MindsHub provider (API-key login, validated against `GET /v1/models`).
 
 ## [18.0.0] - 2026-08-22
 
