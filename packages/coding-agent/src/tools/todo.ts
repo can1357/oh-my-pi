@@ -117,9 +117,10 @@ function findPhaseByName(phases: TodoPhase[], name: string): TodoPhase | undefin
 }
 
 function cloneTask(task: TodoItem): TodoItem {
-	return task.blocker !== undefined
-		? { content: task.content, status: task.status, blocker: task.blocker }
-		: { content: task.content, status: task.status };
+	const cloned: TodoItem = { content: task.content, status: task.status };
+	if (task.blocker !== undefined) cloned.blocker = task.blocker;
+	if (task.droppedBy === "user") cloned.droppedBy = "user";
+	return cloned;
 }
 
 function clonePhases(phases: TodoPhase[]): TodoPhase[] {
@@ -506,15 +507,18 @@ function applyEntry(
 				for (const candidate of phase.tasks) {
 					if (candidate.status === "in_progress" && candidate !== hit.task) {
 						candidate.status = "pending";
+						delete candidate.droppedBy;
 					}
 				}
 			}
 			hit.task.status = "in_progress";
+			delete hit.task.droppedBy;
 			return phases;
 		}
 		case "done": {
 			for (const task of getTaskTargets(phases, entry, errors)) {
 				task.status = "completed";
+				delete task.droppedBy;
 			}
 			return phases;
 		}
@@ -522,8 +526,9 @@ function applyEntry(
 			for (const task of getTaskTargets(phases, entry, errors)) {
 				task.status = "abandoned";
 				// Slash-command `/todo drop` stamps user provenance so settle treats
-				// the cancel as complete; model `todo` drop ops leave it unset.
+				// the cancel as complete; model `todo` drop ops clear any stale stamp.
 				if (options?.userDrop) task.droppedBy = "user";
+				else delete task.droppedBy;
 			}
 			return phases;
 		}

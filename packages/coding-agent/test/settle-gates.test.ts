@@ -100,6 +100,14 @@ describe("isTautologicalParentVerifyCommand", () => {
 		expect(isTautologicalParentVerifyCommand("FOO=1 && BAR=2")).toBe(true);
 		expect(isTautologicalParentVerifyCommand("CI=1 bun test test/foo.test.ts")).toBe(false);
 	});
+
+	it("strips leading cd wrappers before classifying the remaining command", () => {
+		expect(isTautologicalParentVerifyCommand("cd packages/foo && pwd")).toBe(true);
+		expect(isTautologicalParentVerifyCommand("cd packages/foo && ls")).toBe(true);
+		expect(isTautologicalParentVerifyCommand("cd packages/foo; pwd")).toBe(true);
+		expect(isTautologicalParentVerifyCommand("cd packages/foo && bun test")).toBe(false);
+		expect(isTautologicalParentVerifyCommand("cd packages/foo; bun test")).toBe(false);
+	});
 });
 
 describe("isParentVerifyCwdInMergedTree", () => {

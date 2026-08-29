@@ -1,4 +1,5 @@
 import * as path from "node:path";
+import { extractLeadingCdTarget } from "../tools/shell-tokenize";
 
 /** Isolated apply succeeded; parent must re-run acceptance on this tree. */
 export const MERGED_UNVERIFIED_MARKER = "MERGED — child yield is not evidence; re-run acceptance on this tree.";
@@ -49,14 +50,32 @@ export function skipLeadingEnvAssignmentTokens(tokens: readonly string[]): strin
 	return tokens.slice(index);
 }
 
+/** True when a shell segment is only `cd` (optionally with a path / env prefix). */
+function isCdOnlyCommandSegment(segment: string): boolean {
+	const tokens = skipLeadingEnvAssignmentTokens(segment.replace(/^sudo\s+/, "").split(/\s+/));
+	return (tokens[0] ?? "") === "cd";
+}
+
 /** `ls` / `pwd` / `echo ok` are not parent acceptance of merged work. */
 export function isTautologicalParentVerifyCommand(command: string): boolean {
-	const trimmed = command.trim();
+	let trimmed = command.trim();
+	if (trimmed.length === 0) return true;
+	// Bash normalizes leading `cd <path> && …` into cwd; strip those wrappers so
+	// `cd packages/foo && pwd` classifies as `pwd`, not as a real check.
+	for (;;) {
+		const cd = extractLeadingCdTarget(trimmed);
+		if (!cd) break;
+		trimmed = cd.rest.trim();
+	}
 	if (trimmed.length === 0) return true;
 	const segments = trimmed
 		.split(/(?:&&|\|\||;|\n)+/)
 		.map(segment => segment.trim())
 		.filter(segment => segment.length > 0 && !segment.startsWith("#"));
+	// `extractLeadingCdTarget` only accepts `&&`; also drop leading `cd …;` segments.
+	while (segments.length > 0 && isCdOnlyCommandSegment(segments[0]!)) {
+		segments.shift();
+	}
 	if (segments.length === 0) return true;
 	return segments.every(segment => {
 		const tokens = skipLeadingEnvAssignmentTokens(segment.replace(/^sudo\s+/, "").split(/\s+/));

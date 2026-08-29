@@ -265,7 +265,10 @@ export class TodoTracker {
 		const start = this.#verifyStart.get(jobId);
 		if (start === undefined) {
 			// Terminal beat the toolResult re-key — stash until re-key applies it.
-			this.#earlyAsyncTerminals.set(jobId, { jobType, status });
+			// Only verification jobs (bash/eval) can clear the latch; ignore task/etc.
+			if (jobType === "bash" || jobType === "eval") {
+				this.#earlyAsyncTerminals.set(jobId, { jobType, status });
+			}
 			return;
 		}
 		this.#verifyStart.delete(jobId);

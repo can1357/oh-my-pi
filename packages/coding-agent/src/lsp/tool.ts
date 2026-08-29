@@ -520,15 +520,23 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			const failedServerCount = Math.max(0, totalServerAttempts - totalServerSuccesses);
 			// Every target lacked a configured server — treat as verify failure.
 			const noServersAttempted = noServerTargets === targets.length && totalServerSuccesses === 0;
+			const reportedFailedServers = noServersAttempted
+				? Math.max(failedServerCount, noServerTargets)
+				: failedServerCount;
 			return {
 				content: [{ type: "text", text: results.join("\n") }],
 				details: {
 					action,
 					serverName: Array.from(allServerNames).join(", "),
-					success: !allServersFailed && !noServersAttempted,
+					// Truncated globs only inspected a subset — not full-tree verify.
+					success: !allServersFailed && !noServersAttempted && !truncatedGlobTargets,
 					file,
 					diagnosticErrorCount,
-					failedServerCount: noServersAttempted ? Math.max(failedServerCount, noServerTargets) : failedServerCount,
+					// Keep verify from clearing the latch even if a caller only
+					// inspects failedServerCount (truncated ⇒ incomplete scan).
+					failedServerCount: truncatedGlobTargets
+						? Math.max(reportedFailedServers, 1)
+						: reportedFailedServers,
 				},
 			};
 		}

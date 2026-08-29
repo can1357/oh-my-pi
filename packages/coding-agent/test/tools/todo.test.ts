@@ -90,6 +90,17 @@ describe("applyOpsToPhases userDrop provenance", () => {
 		// Dropping the in-progress task auto-promotes the remaining pending sibling.
 		expect(userDrop.phases[0]?.tasks.find(t => t.content === "Keep shipping")?.status).toBe("in_progress");
 	});
+
+	it("clears stale user droppedBy when a task is restarted then model-dropped", () => {
+		const userDropped: TodoPhase[] = [
+			{ name: "Work", tasks: [{ content: "Retry me", status: "abandoned", droppedBy: "user" }] },
+		];
+		const started = applyOpsToPhases(userDropped, [{ op: "start", task: "Retry me" }]);
+		expect(started.phases[0]?.tasks[0]).toEqual({ content: "Retry me", status: "in_progress" });
+
+		const modelDrop = applyOpsToPhases(started.phases, [{ op: "drop", task: "Retry me" }]);
+		expect(modelDrop.phases[0]?.tasks[0]).toEqual({ content: "Retry me", status: "abandoned" });
+	});
 });
 
 describe("TodoTool auto-start behavior", () => {
