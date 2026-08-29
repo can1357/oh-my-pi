@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import {
 	type BlockState,
+	flushOpenToolCalls,
 	mergeCursorMcpToolCallArgs,
 	processInteractionUpdate,
 	synthesizeCursorExecToolCall,
@@ -75,7 +76,7 @@ function newHarness(): Harness {
 	return { output, stream, captured, state, usageState: { sawTokenDelta: false } };
 }
 
-function startMcpToolCall(h: Harness, name: string, id = "call-1"): void {
+function startMcpToolCall(h: Harness, name: string, id = "call-1", args?: Record<string, Uint8Array>): void {
 	processInteractionUpdate(
 		{
 			message: {
@@ -83,7 +84,7 @@ function startMcpToolCall(h: Harness, name: string, id = "call-1"): void {
 				value: {
 					callId: id,
 					toolCall: {
-						mcpToolCall: { args: { name, toolName: name, toolCallId: id } },
+						mcpToolCall: { args: { name, toolName: name, toolCallId: id, args } },
 					},
 				},
 			},
@@ -233,6 +234,41 @@ describe("processInteractionUpdate content block ordering", () => {
 });
 
 describe("processInteractionUpdate args_text_delta handling", () => {
+	it("preserves announced args when Cursor streams no argument deltas", () => {
+		const h = newHarness();
+		startMcpToolCall(h, "get_weather", "call-weather", {
+			city: new TextEncoder().encode(`"Paris"`),
+		});
+
+		completeMcpToolCall(h, undefined);
+
+		expect(h.output.content[0]).toMatchObject({
+			type: "toolCall",
+			id: "call-weather",
+			name: "get_weather",
+			arguments: { city: "Paris" },
+		});
+		expect(h.captured.map(event => event.type)).toEqual(["toolcall_start", "toolcall_end"]);
+	});
+
+	it("preserves announced args when the stream ends before tool completion", () => {
+		const h = newHarness();
+		startMcpToolCall(h, "get_weather", "call-weather", {
+			city: new TextEncoder().encode(`"Paris"`),
+		});
+
+		flushOpenToolCalls(h.output, h.stream, h.state);
+
+		expect(h.output.content[0]).toMatchObject({
+			type: "toolCall",
+			id: "call-weather",
+			name: "get_weather",
+			arguments: { city: "Paris" },
+		});
+		expect(h.state.currentToolCall).toBeNull();
+		expect(h.captured.map(event => event.type)).toEqual(["toolcall_start", "toolcall_end"]);
+	});
+
 	it("treats cumulative argsTextDelta snapshots as snapshots, not append-only fragments", () => {
 		const h = newHarness();
 		startMcpToolCall(h, "task");

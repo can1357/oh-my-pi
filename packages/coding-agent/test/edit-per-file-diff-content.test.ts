@@ -70,6 +70,8 @@ describe("executePatchSingle — oldText/newText propagation", () => {
 		expect(result.details?.path).toBe(path.join(tempDir, "foo.txt"));
 		expect(result.details?.oldText).toBe("a\n");
 		expect(result.details?.newText).toBe("b\n");
+		const text = result.content.find(entry => entry.type === "text")?.text ?? "";
+		expect(text).toBe("[foo.txt]\n1:b");
 	});
 
 	test("create: oldText is undefined, newText is the created content", async () => {
@@ -161,5 +163,8 @@ describe("executeReplace — oldText/newText propagation", () => {
 		expect(result.details?.path).toBe(path.join(tempDir, "bar.txt"));
 		expect(result.details?.oldText).toBe(originalContent);
 		expect(result.details?.newText).toBe("line one\nline TWO\nline three\n");
+		const text = result.content.find(entry => entry.type === "text")?.text ?? "";
+		expect(text).toContain("[bar.txt]\n1:line one\n2:line TWO\n3:line three");
+		expect(text).not.toMatch(/^\[[^\]\n]+#[0-9A-F]{4}\]/);
 	});
 });

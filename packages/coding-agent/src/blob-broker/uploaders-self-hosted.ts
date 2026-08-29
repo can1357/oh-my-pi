@@ -1,4 +1,5 @@
 import * as path from "node:path";
+import { getSafeProjectCwd } from "@oh-my-pi/pi-utils";
 import { writeRemoteFile } from "../ssh/file-transfer";
 import type { BlobDestinationId } from "./destinations";
 import type { BlobUploader, BlobUploadRequest, RemoteDeleteAction } from "./publication";
@@ -242,7 +243,12 @@ function createFtpUploader(config: DestinationRuntimeConfig): BlobUploader {
 			if (protocol === "ftps" && port !== 990) args.push("--ssl-reqd");
 			args.push(ftpUploadUrl(protocol, host, port, destinationPath));
 			try {
-				const process = Bun.spawn(args, { stdin: request.bytes, stdout: "ignore", stderr: "pipe" });
+				const process = Bun.spawn(args, {
+					stdin: request.bytes,
+					stdout: "ignore",
+					stderr: "pipe",
+					cwd: getSafeProjectCwd(),
+				});
 				const stderr = await new Response(process.stderr as ReadableStream<Uint8Array>).text();
 				const exitCode = await process.exited;
 				if (exitCode !== 0) {

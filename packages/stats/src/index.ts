@@ -39,10 +39,9 @@ export type {
 	ToolUsageStats,
 } from "./types";
 
-/**
- * Format cost in dollars.
- */
-function formatCost(n: number): string {
+/** Format an API-equivalent estimate in dollars, or N/A for unpriced usage. */
+function formatCost(n: number, unpricedRequests = 0): string {
+	if (n === 0 && unpricedRequests > 0) return "N/A";
 	if (n < 0.01) return `$${n.toFixed(4)}`;
 	if (n < 1) return `$${n.toFixed(3)}`;
 	return `$${n.toFixed(2)}`;
@@ -69,7 +68,7 @@ async function printStats(): Promise<void> {
 	console.log(`  Output Tokens: ${formatNumber(overall.totalOutputTokens)}`);
 	console.log(`  Cache Rate: ${formatPercent(overall.cacheRate)}`);
 	console.log(`  Cache Savings: ${formatPercent(overall.cacheSavings)}`);
-	console.log(`  Total Cost: ${formatCost(overall.totalCost)}`);
+	console.log(`  API-equivalent estimate: ${formatCost(overall.totalCost, overall.unpricedRequests)}`);
 	console.log(`  Premium Requests: ${formatNumber(normalizePremiumRequests(overall.totalPremiumRequests ?? 0))}`);
 	console.log(`  Avg Duration: ${overall.avgDuration !== null ? formatDuration(overall.avgDuration) : "-"}`);
 	console.log(`  Avg TTFT: ${overall.avgTtft !== null ? formatDuration(overall.avgTtft) : "-"}`);
@@ -78,18 +77,20 @@ async function printStats(): Promise<void> {
 	}
 
 	if (byModel.length > 0) {
-		console.log("\nBy Model:");
+		console.log("\nBy Model (API-equivalent estimates):");
 		for (const m of byModel.slice(0, 10)) {
 			console.log(
-				`  ${m.model}: ${formatNumber(m.totalRequests)} reqs, ${formatCost(m.totalCost)}, ${formatPercent(m.cacheRate)} cache rate, ${formatPercent(m.cacheSavings)} cache savings`,
+				`  ${m.model}: ${formatNumber(m.totalRequests)} reqs, ${formatCost(m.totalCost, m.unpricedRequests)}, ${formatPercent(m.cacheRate)} cache rate, ${formatPercent(m.cacheSavings)} cache savings`,
 			);
 		}
 	}
 
 	if (byFolder.length > 0) {
-		console.log("\nBy Folder:");
+		console.log("\nBy Folder (API-equivalent estimates):");
 		for (const f of byFolder.slice(0, 10)) {
-			console.log(`  ${f.folder}: ${formatNumber(f.totalRequests)} reqs, ${formatCost(f.totalCost)}`);
+			console.log(
+				`  ${f.folder}: ${formatNumber(f.totalRequests)} reqs, ${formatCost(f.totalCost, f.unpricedRequests)}`,
+			);
 		}
 	}
 

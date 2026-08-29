@@ -54,6 +54,14 @@ const TASK_COMMANDS = {
 			"--status-level=fail",
 			"--final-status-level=fail",
 		],
+		// nextest cannot run doctests (no stable libtest-json interface for
+		// them), so they need their own libtest pass. Today this pass executes
+		// nothing: pi-natives is a `cdylib`, which rustdoc refuses to collect
+		// doctests from, and pi-builtins' 16 examples are `ignore`d vendored
+		// uutils docs. It is kept as a guard so that the first runnable
+		// doctest added to a lib crate actually runs instead of silently
+		// never executing.
+		["cargo", "test", "--doc", "--workspace", ...VENDORED_FORK_EXCLUDES],
 	],
 } as const satisfies Record<string, readonly (readonly string[])[]>;
 

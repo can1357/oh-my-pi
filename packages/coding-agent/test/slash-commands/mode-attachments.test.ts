@@ -43,10 +43,14 @@ function createHarness(
 		vibeModeEnabled: false,
 		goalModeEnabled: false,
 		goalModePaused: false,
+		skillCommands: new Map(),
+		fileSlashCommands: new Set(),
 		session: {
 			isStreaming: false,
 			isCompacting: false,
 			queuedMessageCount: 0,
+			customCommands: [],
+			promptTemplates: [],
 			extensionRunner: {
 				hasHandlers: (event: string) => event === "input",
 				emitInput: vi.fn(async () => inputResult),

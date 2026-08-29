@@ -9,7 +9,9 @@
  */
 
 /** Claude runtime version bundled by the current Cowork desktop release. */
-export const claudeCodeVersion = "2.1.220";
+export const claudeCodeVersion = "2.1.246";
+/** `@anthropic-ai/sdk` version bundled by the current Cowork desktop release. */
+export const claudeCodeSdkVersion = "0.112.1";
 /** User-Agent emitted by Cowork's `claude-desktop` inference entrypoint. */
 export const coworkUserAgent = `claude-cli/${claudeCodeVersion} (external, claude-desktop)`;
 /** Prefix used to isolate custom Anthropic OAuth tools from built-in tools. */

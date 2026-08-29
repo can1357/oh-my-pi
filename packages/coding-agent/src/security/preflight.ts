@@ -1,6 +1,6 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import * as git from "../utils/git";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import type {
 	SecurityAccountRef,
 	SecurityKnowledgeBaseRef,
@@ -48,13 +48,17 @@ export interface SecurityGitAdapter {
 }
 
 export const DEFAULT_SECURITY_GIT_ADAPTER: SecurityGitAdapter = {
-	root: (cwd, signal) => git.repo.root(cwd, signal),
-	headSha: (cwd, signal) => git.head.sha(cwd, signal),
-	resolveRef: (cwd, refName, signal) => git.ref.resolve(cwd, refName, signal),
-	diffTree: (cwd, base, head, signal) => git.diff.tree(cwd, base, head, { signal }),
-	status: (cwd, signal) => git.status(cwd, { porcelainV1: true, untrackedFiles: "all", signal }),
-	files: (cwd, signal) => git.ls.files(cwd, { signal }),
-	untracked: (cwd, signal) => git.ls.untracked(cwd, signal),
+	root: async (cwd, signal) => {
+		signal?.throwIfAborted();
+		return vcs.git(cwd)?.info().repoRoot ?? null;
+	},
+	headSha: async (cwd, signal) => (await vcs.git(cwd)?.headSha(signal)) ?? null,
+	resolveRef: async (cwd, refName, signal) => (await vcs.git(cwd)?.resolveRef(refName, signal)) ?? null,
+	diffTree: (cwd, base, head, signal) => vcs.requireGit(cwd).diffTree(base, head, false, signal),
+	status: (cwd, signal) =>
+		vcs.requireGit(cwd).statusPorcelain({ untracked: "all", pathspecs: undefined, nulTerminated: false }, signal),
+	files: (cwd, signal) => vcs.requireGit(cwd).lsFiles(false, false, signal),
+	untracked: (cwd, signal) => vcs.requireGit(cwd).lsFiles(true, true, signal),
 };
 
 export class StaleSecurityScanPlanError extends Error {

@@ -76,6 +76,11 @@ const USAGE_PREFLIGHT_BLOCKED_PREFIX = "Usage preflight blocked:";
 const STREAM_STALL_ERROR_RE = /stream stall/i;
 const HTTP2_STREAM_RESET_ERROR_RE =
 	/stream closed with error code\s+nghttp2_(?:internal_error|refused_stream)|nghttp2_(?:internal_error|refused_stream)|HTTP2(?:StreamReset|RefusedStream)/i;
+// Gateway closes the SSE stream mid-generation without a terminal chunk
+// (openai-completions "finish_reason", openai/azure responses "terminal
+// response event"). Same transport-failure class as the stall/reset entries:
+// retriable, and eligible for preserved-turn continuation on resolved tool turns.
+const PREMATURE_STREAM_CLOSE_ERROR_RE = /stream closed before a (?:finish_reason|terminal response event)/i;
 const IMMUTABLE_ANTHROPIC_THINKING_ERROR_PATTERN =
 	/messages\.\d+\.content\.\d+.*\b(?:thinking|redacted_thinking)\b.*\blatest assistant message cannot be modified\b/is;
 
@@ -97,6 +102,57 @@ function retryableAssistantTurnEnd(messages: readonly AgentMessage[]): number | 
 	if (message?.role !== "assistant") return undefined;
 	if (message.stopReason !== "error" && message.stopReason !== "aborted") return undefined;
 	return turnEnd;
+}
+/** Whether `messages` ends in a failed/aborted turn whose most recent activity was a tool call. */
+function abortedToolCallTail(messages: readonly AgentMessage[]): boolean {
+	const turnEnd = retryableAssistantTurnEnd(messages);
+	if (turnEnd === undefined) return false;
+	// Synthetic tool results only ever trail a turn that emitted tool calls.
+	if (turnEnd < messages.length) return true;
+	const beforeTurn = messages[turnEnd - 2];
+	return beforeTurn?.role === "toolResult" && beforeTurn.isError === true;
+}
+/**
+ * Index of the first trailing failed tool result to strip for a tool replay,
+ * or undefined when the tail does not qualify.
+ *
+ * Qualifies when the transcript ends in a fully failed/aborted tool batch
+ * whose anchor assistant turn completed with runnable arguments
+ * (`toolUse`/`stop`) — optionally followed by an aborted boundary with no tool
+ * calls of its own (a live Esc; a restored session has already dropped it).
+ * Stripping from the returned index leaves that assistant as the transcript
+ * tail, which `Agent.continue()` resumes by re-executing the calls. A
+ * partially successful batch never qualifies: re-running a completed call
+ * would repeat its side effects. Synthetic placeholder tails never qualify
+ * either — their anchor is the aborted turn itself and its arguments may be
+ * truncated, so those are re-generated via a fresh model call instead.
+ */
+function toolReplayStart(messages: readonly AgentMessage[]): number | undefined {
+	let end = messages.length;
+	const tail = messages[end - 1];
+	if (tail?.role === "assistant") {
+		if (tail.stopReason !== "aborted" && tail.stopReason !== "error") return undefined;
+		if (tail.content.some(block => block.type === "toolCall")) return undefined;
+		end -= 1;
+	}
+	let start = end;
+	while (start > 0 && messages[start - 1].role === "toolResult") start--;
+	if (start === end) return undefined;
+	const anchor = messages[start - 1];
+	if (anchor?.role !== "assistant") return undefined;
+	if (anchor.stopReason !== "toolUse" && anchor.stopReason !== "stop") return undefined;
+	const callIds = new Set<string>();
+	for (const block of anchor.content) {
+		if (block.type === "toolCall") callIds.add(block.id);
+	}
+	if (end - start !== callIds.size) return undefined;
+	for (let i = start; i < end; i++) {
+		const result = messages[i];
+		if (result.role !== "toolResult" || result.isError !== true || !callIds.has(result.toolCallId)) {
+			return undefined;
+		}
+	}
+	return start;
 }
 
 /** Result shape shared with automatic maintenance recovery. */
@@ -137,7 +193,12 @@ export interface TurnRecoveryHost {
 	promptGeneration(): number;
 	sessionId(): string;
 	emitSessionEvent(event: AgentSessionEvent): Promise<void>;
-	scheduleAgentContinue(options: { delayMs?: number; generation?: number; onError?: (error: unknown) => void }): void;
+	scheduleAgentContinue(options: {
+		source: string;
+		delayMs?: number;
+		generation?: number;
+		onError?: (error: unknown) => void;
+	}): void;
 	waitForSessionMessagePersistence(message: AssistantMessage): Promise<void>;
 	appendSessionMessage(message: AssistantMessage): void;
 	persistedAssistantEntryId(message: AssistantMessage): string | undefined;
@@ -377,6 +438,7 @@ export class TurnRecovery {
 		});
 		this.#clearPendingRetryErrors();
 		this.#retryAttempt = 0;
+		this.resolveRetry();
 	}
 
 	/** Closes a failed retry saga when no compaction continuation took ownership. */
@@ -733,7 +795,10 @@ export class TurnRecovery {
 			attribution: "agent",
 			timestamp: Date.now(),
 		});
-		this.#host.scheduleAgentContinue({ generation: this.#host.promptGeneration() });
+		this.#host.scheduleAgentContinue({
+			source: "empty-stop-retry",
+			generation: this.#host.promptGeneration(),
+		});
 		return "continue";
 	}
 
@@ -744,7 +809,8 @@ export class TurnRecovery {
 		});
 	}
 	async #handleUnexpectedAssistantStop(assistantMessage: AssistantMessage): Promise<boolean> {
-		if (!this.#host.settings.get("features.unexpectedStopDetection")) {
+		const mode = this.#host.settings.get("features.unexpectedStopDetection");
+		if (mode === "none") {
 			return false;
 		}
 		if (!isUnexpectedStopCandidate(assistantMessage)) {
@@ -756,37 +822,43 @@ export class TurnRecovery {
 			.filter((content): content is TextContent => content.type === "text")
 			.map(content => content.text)
 			.join("\n");
-		// Thinking-only stops carry their signal in the thinking block (a trapped
-		// response or a truncated fragment); classify on that when there is no text.
-		if (!hasNonWhitespace(text)) {
+		const hasTextContent = hasNonWhitespace(text);
+
+		// A thinking-only terminal turn has no visible assistant message, so both
+		// mechanical and smart modes retry it directly. Tool-call turns never reach
+		// this path: isUnexpectedStopCandidate excludes them, including forced tools.
+		if (!hasTextContent) {
 			text = assistantMessage.content
 				.filter((content): content is ThinkingContent => content.type === "thinking")
 				.map(content => content.thinking)
 				.join("\n");
-		}
-		if (!hasNonWhitespace(text)) {
+			if (!hasNonWhitespace(text)) {
+				this.#unexpectedStopRetryCount = 0;
+				return false;
+			}
+		} else if (mode === "mechanical") {
 			this.#unexpectedStopRetryCount = 0;
 			return false;
-		}
+		} else {
+			const controller = new AbortController();
+			const timeout = setTimeout(() => controller.abort(), UNEXPECTED_STOP_TIMEOUT_MS);
+			let classification: boolean | undefined;
+			try {
+				classification = await classifyUnexpectedStop(text, {
+					settings: this.#host.settings,
+					registry: this.#host.modelRegistry,
+					sessionId: this.#host.sessionId(),
+					metadataResolver: (provider: string) => this.#host.agent.metadataForProvider(provider),
+					signal: controller.signal,
+				});
+			} finally {
+				clearTimeout(timeout);
+			}
 
-		const controller = new AbortController();
-		const timeout = setTimeout(() => controller.abort(), UNEXPECTED_STOP_TIMEOUT_MS);
-		let classification: boolean | undefined;
-		try {
-			classification = await classifyUnexpectedStop(text, {
-				settings: this.#host.settings,
-				registry: this.#host.modelRegistry,
-				sessionId: this.#host.sessionId(),
-				metadataResolver: (provider: string) => this.#host.agent.metadataForProvider(provider),
-				signal: controller.signal,
-			});
-		} finally {
-			clearTimeout(timeout);
-		}
-
-		if (classification !== true) {
-			this.#unexpectedStopRetryCount = 0;
-			return false;
+			if (classification !== true) {
+				this.#unexpectedStopRetryCount = 0;
+				return false;
+			}
 		}
 
 		this.#unexpectedStopRetryCount++;
@@ -806,7 +878,10 @@ export class TurnRecovery {
 			attribution: "agent",
 			timestamp: Date.now(),
 		});
-		this.#host.scheduleAgentContinue({ generation: this.#host.promptGeneration() });
+		this.#host.scheduleAgentContinue({
+			source: "unexpected-stop-retry",
+			generation: this.#host.promptGeneration(),
+		});
 		return true;
 	}
 
@@ -1148,10 +1223,11 @@ export class TurnRecovery {
 	}
 
 	/**
-	 * Classify a reasonless abort, idle stream stall, or HTTP/2 stream reset whose
-	 * emitted tool calls all have results. The failed assistant/tool-result pair
-	 * stays in context so continuation cannot replay completed side effects;
-	 * synthetic results tell the next turn that an unexecuted call must be reissued.
+	 * Classify a reasonless abort, idle stream stall, HTTP/2 stream reset, or
+	 * premature stream close whose emitted tool calls all have results. The failed
+	 * assistant/tool-result pair stays in context so continuation cannot replay
+	 * completed side effects; synthetic results tell the next turn that an
+	 * unexecuted call must be reissued.
 	 */
 	classifyResolvedInterruptedToolTurn(message: AssistantMessage): "reasonless-abort" | "stream-stall" | undefined {
 		const id = this.#classifyRetryMessage(message);
@@ -1173,7 +1249,18 @@ export class TurnRecovery {
 			!this.#host.abortInProgress() &&
 			!this.#host.isDisposed() &&
 			!this.#host.streamingEditAbortTriggered();
-		if (!reasonlessAbort && !streamStall && !transportReset) return undefined;
+		// A premature gateway close (no finish_reason/terminal event) is the same
+		// transport-failure class as the stall/reset cases: mid-generation death.
+		// Preserved-turn continuation lets the retry resume after the partial
+		// output instead of surfacing the error or replaying rendered content.
+		const prematureClose =
+			message.stopReason === "error" &&
+			PREMATURE_STREAM_CLOSE_ERROR_RE.test(errorMessage) &&
+			AIError.retriable(id) &&
+			!this.#host.abortInProgress() &&
+			!this.#host.isDisposed() &&
+			!this.#host.streamingEditAbortTriggered();
+		if (!reasonlessAbort && !streamStall && !transportReset && !prematureClose) return undefined;
 		if (reasonlessAbort && genericAbort) message.errorId = AIError.create(AIError.Flag.Abort);
 
 		// Idle stall and HTTP/2 RST both close the Cursor Connect stream:
@@ -1229,15 +1316,22 @@ export class TurnRecovery {
 	}
 
 	/**
-	 * OpenRouter can repeatedly close Gemini streams at the reasoning-to-payload
-	 * transition. One retry covers a transient edge failure; the normal ten-retry
-	 * budget would otherwise re-run the same expensive reasoning cycle unchanged.
+	 * Known provider routes can repeatedly close after completing an expensive
+	 * reasoning phase. One retry covers a transient edge failure; the normal
+	 * ten-retry budget would otherwise replay the same reasoning cycle unchanged.
 	 */
-	#isOpenRouterThinkingStreamClose(message: AssistantMessage): boolean {
+	#isBoundedThinkingStreamClose(message: AssistantMessage): boolean {
+		if (!message.content.some(block => block.type === "thinking" && block.thinking.trim().length > 0)) {
+			return false;
+		}
+		const errorMessage = message.errorMessage ?? "";
 		return (
-			message.provider === "openrouter" &&
-			/server_error:\s*stream closed with reason:\s*error/i.test(message.errorMessage ?? "") &&
-			message.content.some(block => block.type === "thinking" && block.thinking.trim().length > 0)
+			(message.provider === "openrouter" &&
+				/server_error:\s*stream closed with reason:\s*error/i.test(errorMessage)) ||
+			(message.provider === "github-copilot" &&
+				message.model === "grok-4.6" &&
+				message.api === "openai-responses" &&
+				/OpenAI responses stream closed before a terminal response event was received/i.test(errorMessage))
 		);
 	}
 
@@ -1691,6 +1785,8 @@ export class TurnRecovery {
 		// A thinking loop is a same-model resample signal, not a router fault, so a
 		// base-model swap would abandon the loop-guard redirect (issue #8760).
 		if (AIError.is(id, AIError.Flag.ThinkingLoop)) return false;
+		// Byte/media budget 413s fail identically on the base model — swapping cannot fix them (#9235).
+		if (AIError.isPayloadRejection(message)) return false;
 		return this.#host.modelRegistry.find("fireworks", toFireworksBaseModelId(model.id)) !== undefined;
 	}
 
@@ -1721,7 +1817,12 @@ export class TurnRecovery {
 		if (this.isClassifierRefusal(message)) return false;
 		const id = this.#classifyRetryMessage(message);
 		if (AIError.is(id, AIError.Flag.Abort) || AIError.is(id, AIError.Flag.UserInterrupt)) return false;
-		if (AIError.isContextOverflow(message, model.contextWindow ?? 0)) return false;
+		// Text-ambiguous overflows waive the veto; usage-backed do not — see AIError.isTextAmbiguousContextOverflow (#9235).
+		const contextWindow = model.contextWindow ?? 0;
+		const textAmbiguousOverflow = AIError.isTextAmbiguousContextOverflow(id, message, contextWindow);
+		if (!textAmbiguousOverflow && AIError.isContextOverflow(message, contextWindow)) {
+			return false;
+		}
 		if (this.#hasReplayUnsafeOutput(message)) return false;
 		const currentSelector = formatRetryFallbackSelector(model, this.#host.thinkingLevel());
 		return this.retryFallbackChainKeys(currentSelector).some(
@@ -1909,7 +2010,7 @@ export class TurnRecovery {
 		// (every rotation sets switchedCredential and skips it), so without
 		// this last resort a provider-wide usage cap never fails over to the
 		// configured chain.
-		const maxRetries = this.#isOpenRouterThinkingStreamClose(message)
+		const maxRetries = this.#isBoundedThinkingStreamClose(message)
 			? Math.min(retrySettings.maxRetries, 1)
 			: retrySettings.maxRetries;
 		const retryBudgetExhausted = this.#retryAttempt > maxRetries;
@@ -2201,6 +2302,7 @@ export class TurnRecovery {
 		// otherwise auto_retry_end never fires, retryPromise stays pending, and
 		// the in-flight prompt() (and the TUI retry indicator) hang forever.
 		this.#host.scheduleAgentContinue({
+			source: "automatic-retry",
 			delayMs: 1,
 			generation,
 			onError: error => void this.#failRetryAfterLocalContinueError(message, error),
@@ -2324,6 +2426,25 @@ export class TurnRecovery {
 		this.#host.settings.set("retry.enabled", enabled);
 	}
 	/**
+	 * Whether the transcript tail is a failed/aborted assistant turn whose most
+	 * recent activity was a tool call: synthetic placeholder results trail the
+	 * failed turn (stream died mid-tool-call), or the message right before the
+	 * aborted boundary is an errored/aborted tool result (Esc landed during
+	 * tool execution). Drives the TUI's idle "F5 to Retry" status row;
+	 * {@link retry} is the matching action.
+	 */
+	get hasAbortedToolCallTail(): boolean {
+		const active = this.#host.agent.state.messages;
+		if (abortedToolCallTail(active)) return true;
+		// A trailing assistant message is authoritative for a live session: a
+		// settled successful turn leaves nothing to retry.
+		if (active.at(-1)?.role === "assistant") return false;
+		// A restored session omits the failed turn (and its synthetic results)
+		// from provider context, so — mirroring retry() — the persisted display
+		// transcript decides whether a retryable tool-call tail exists.
+		return abortedToolCallTail(this.#host.sessionManager.buildSessionContext({ transcript: true }).messages);
+	}
+	/**
 	 * Manually retry the last failed assistant turn.
 	 * Removes the error message from active agent state when present and
 	 * re-attempts with a fresh retry budget.
@@ -2341,6 +2462,13 @@ export class TurnRecovery {
 	 * context. In that case, the persisted display transcript remains the source
 	 * of truth for whether the current branch has a retryable failed tail.
 	 *
+	 * When the failure is a fully failed/aborted tool batch with complete
+	 * arguments (see {@link toolReplayStart}), the retry strips the failed
+	 * results (and the aborted boundary) instead of the whole turn, leaving the
+	 * tool-calling assistant as the tail — the continuation then re-executes
+	 * the same tool calls directly rather than paying a model call to re-issue
+	 * them.
+	 *
 	 * @returns true if retry was initiated, false if no failed turn to retry or agent is busy
 	 */
 	async retry(): Promise<boolean> {
@@ -2349,23 +2477,75 @@ export class TurnRecovery {
 		const messages = this.#host.agent.state.messages;
 		const activeTurnEnd = retryableAssistantTurnEnd(messages);
 		if (activeTurnEnd !== undefined) {
-			// Remove the failed/aborted assistant message plus its synthetic tool
-			// results (same as auto-retry does before re-attempting).
-			this.#host.agent.replaceMessages(messages.slice(0, activeTurnEnd - 1));
+			const replayStart = toolReplayStart(messages);
+			if (replayStart !== undefined) {
+				await this.#stripForToolReplay(messages, replayStart);
+			} else {
+				// Remove the failed/aborted assistant message plus its synthetic tool
+				// results (same as auto-retry does before re-attempting).
+				this.#host.agent.replaceMessages(messages.slice(0, activeTurnEnd - 1));
+			}
 		} else {
 			// A restored session already dropped the failed assistant turn (and its
 			// paired synthetic tool results) from provider context, so the persisted
 			// display transcript is the source of truth for a retryable failed tail.
 			const transcriptMessages = this.#host.sessionManager.buildSessionContext({ transcript: true }).messages;
 			if (retryableAssistantTurnEnd(transcriptMessages) === undefined) return false;
+			// The boundary is already gone from active context; when the intact
+			// failed batch is still the tail, replay the tools directly.
+			const replayStart = toolReplayStart(messages);
+			if (replayStart !== undefined) await this.#stripForToolReplay(messages, replayStart);
 		}
 
 		// Reset retry budget for a fresh attempt
 		this.#retryAttempt = 0;
 
 		// Re-attempt the turn
-		this.#host.scheduleAgentContinue({ delayMs: 1 });
+		this.#host.scheduleAgentContinue({ source: "manual-retry", delayMs: 1 });
 
 		return true;
+	}
+	/**
+	 * Strip the failed tool batch (and any aborted boundary) for a tool replay:
+	 * reparent the persisted leaf onto the anchor assistant entry — so the
+	 * dropped results cannot resurface on reload or pair duplicate toolCallIds
+	 * on replay — then cut the active context to the same point.
+	 */
+	async #stripForToolReplay(messages: readonly AgentMessage[], replayStart: number): Promise<void> {
+		const tail = messages[messages.length - 1];
+		if (tail?.role === "assistant") {
+			try {
+				await this.#host.waitForSessionMessagePersistence(tail);
+			} catch (err) {
+				logger.debug("Tool replay: boundary persistence wait failed", {
+					error: err instanceof Error ? err.message : String(err),
+				});
+			}
+		}
+		const anchor = messages[replayStart - 1] as AssistantMessage;
+		const branch = this.#host.sessionManager.getBranch();
+		const persistedEntryId = this.#host.persistedAssistantEntryId(anchor);
+		const anchorEntry =
+			(persistedEntryId === undefined
+				? undefined
+				: branch.find(
+						entry =>
+							entry.id === persistedEntryId && entry.type === "message" && entry.message.role === "assistant",
+					)) ??
+			branch
+				.slice()
+				.reverse()
+				.find(
+					entry =>
+						entry.type === "message" &&
+						entry.message.role === "assistant" &&
+						this.#isSameAssistantMessage(entry.message as AssistantMessage, anchor),
+				);
+		if (anchorEntry) {
+			this.#host.withBashBranchTransition(() => {
+				this.#host.sessionManager.branch(anchorEntry.id);
+			});
+		}
+		this.#host.agent.replaceMessages(messages.slice(0, replayStart));
 	}
 }

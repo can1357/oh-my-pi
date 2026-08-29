@@ -3,8 +3,28 @@ import * as https from "node:https";
 import * as stream from "node:stream";
 import * as tls from "node:tls";
 import * as zlib from "node:zlib";
+import { logger } from "@oh-my-pi/pi-utils";
 import type { FetchImpl } from "../types";
-import { connectProxiedSocket } from "../utils/proxy";
+
+/** `host/path` for logging; query strings can carry keys. */
+function logTarget(input: string | URL | Request): string {
+	try {
+		const url = new URL(input instanceof Request ? input.url : input.toString());
+		return `${url.host}${url.pathname}`;
+	} catch {
+		return "<unparseable>";
+	}
+}
+
+/** Proxy host of a request init, or `"none"` when the request goes out direct. */
+function initProxy(init: RequestInit | undefined): string {
+	if (!init || !("proxy" in init) || typeof init.proxy !== "string") return "none";
+	try {
+		return new URL(init.proxy).host;
+	} catch {
+		return "<unparseable>";
+	}
+}
 
 type CoworkTlsOptions = {
 	ca?: string | string[];
@@ -22,13 +42,10 @@ type CoworkRequestInit = RequestInit & {
 
 type RequestBody = string | Uint8Array;
 
-type AgentLease = {
-	agent: https.Agent;
-	release?: () => void;
-};
-
 const directAgent = new https.Agent({ keepAlive: true });
-const fallbackFetch: FetchImpl = globalThis.fetch;
+
+/** Resolved at call time, so a proxy wrapper installed after this module loads is honored. */
+const fallbackFetch: FetchImpl = (input, init) => globalThis.fetch(input, init as RequestInit);
 
 function isHeaderRecord(headers: RequestInit["headers"]): headers is Record<string, string> {
 	return headers !== undefined && !(headers instanceof Headers) && !Array.isArray(headers);
@@ -76,19 +93,6 @@ function resolveTlsOptions(url: URL, options: CoworkTlsOptions | undefined): tls
 	return resolved;
 }
 
-async function acquireAgent(
-	url: URL,
-	proxy: string | undefined,
-	tlsOptions: tls.ConnectionOptions,
-	signal: AbortSignal | undefined,
-): Promise<AgentLease> {
-	if (!proxy) return { agent: directAgent };
-	const socket = await connectProxiedSocket(proxy, url.origin, { signal, tls: tlsOptions });
-	const agent = new https.Agent({ keepAlive: false });
-	agent.createConnection = () => socket;
-	return { agent, release: () => agent.destroy() };
-}
-
 function responseHeaders(message: IncomingMessage): Headers {
 	const headers = new Headers();
 	for (let index = 0; index < message.rawHeaders.length; index += 2) {
@@ -126,6 +130,9 @@ function createResponse(message: IncomingMessage, method: string): Response {
 	});
 }
 
+/** Response headers worth naming when a provider rejects a request; `cf-ray` names the edge PoP. */
+const DIAGNOSTIC_HEADERS = ["cf-ray", "cf-mitigated", "server", "request-id", "retry-after", "x-should-retry"];
+
 async function sendCoworkRequest(
 	url: URL,
 	init: CoworkRequestInit,
@@ -135,13 +142,11 @@ async function sendCoworkRequest(
 	const method = init.method ?? "GET";
 	const signal = init.signal ?? undefined;
 	const tlsOptions = resolveTlsOptions(url, init.tls);
-	const lease = await acquireAgent(url, init.proxy, tlsOptions, signal);
 	const headers = buildOrderedHeaders(url, sourceHeaders, body);
 	const result = Promise.withResolvers<Response>();
 	let request: ClientRequest | undefined;
 	const release = (): void => {
 		signal?.removeEventListener("abort", abort);
-		lease.release?.();
 	};
 	const abort = (): void => {
 		const reason = signal?.reason;
@@ -160,11 +165,24 @@ async function sendCoworkRequest(
 			path: `${url.pathname}${url.search}`,
 			method,
 			headers,
-			agent: lease.agent,
+			agent: directAgent,
 			...tlsOptions,
 		},
 		message => {
 			message.once("close", release);
+			const status = message.statusCode ?? 0;
+			if (status >= 400) {
+				logger.debug("cowork transport rejected", {
+					url: `${url.host}${url.pathname}`,
+					status,
+					headers: Object.fromEntries(
+						DIAGNOSTIC_HEADERS.filter(name => message.headers[name] !== undefined).map(name => [
+							name,
+							String(message.headers[name]),
+						]),
+					),
+				});
+			}
 			try {
 				result.resolve(createResponse(message, method));
 			} catch (error) {
@@ -182,20 +200,53 @@ async function sendCoworkRequest(
 	return result.promise;
 }
 
-/** Sends Cowork-profiled HTTPS requests with stable header order, HTTP/1.1, and streaming decompression. */
+/**
+ * Sends Cowork-profiled HTTPS requests with stable header order, HTTP/1.1, and streaming decompression.
+ *
+ * Proxied requests deliberately leave this transport. It runs on `node:https`,
+ * and Bun's shim ignores both `agent.createConnection` and
+ * `options.createConnection`: a CONNECT tunnel handed to it is silently
+ * discarded and the request dials the provider directly. That turned every
+ * `PI_PROXY` / `HTTPS_PROXY` setting into a no-op for Anthropic inference —
+ * the proxy looked configured, the traffic left on the default route, and a
+ * region-blocked egress answered `403 Request not allowed`. Bun's own `fetch`
+ * honors `init.proxy`, so a configured proxy wins over the Cowork profile.
+ */
 export const coworkFetch: FetchImpl = async (input, init) => {
-	if (input instanceof Request || init === undefined || !isHeaderRecord(init.headers)) {
+	if (
+		init === undefined ||
+		input instanceof Request ||
+		!isHeaderRecord(init.headers) ||
+		("proxy" in init && Boolean(init.proxy))
+	) {
+		// Reason is logged because the switch changes both the TLS fingerprint and
+		// who applies the proxy.
+		const reason =
+			init === undefined
+				? "no-init"
+				: input instanceof Request
+					? "request-object-input"
+					: !isHeaderRecord(init.headers)
+						? "headers-not-record"
+						: "proxy-configured";
+		logger.debug("cowork transport bypassed", { url: logTarget(input), reason, proxy: initProxy(init) });
 		return fallbackFetch(input, init);
 	}
 	let url: URL;
 	try {
 		url = new URL(input);
 	} catch {
+		logger.debug("cowork transport bypassed", { url: "<unparseable>", reason: "unparseable-url" });
 		return fallbackFetch(input, init);
 	}
-	if (url.protocol !== "https:") return fallbackFetch(input, init);
+	if (url.protocol !== "https:") {
+		logger.debug("cowork transport bypassed", { url: `${url.host}${url.pathname}`, reason: "not-https" });
+		return fallbackFetch(input, init);
+	}
 	const body = resolveBody(init.body);
-	if (init.body != null && body === undefined) return fallbackFetch(input, init);
-	const coworkInit: CoworkRequestInit = init;
-	return sendCoworkRequest(url, coworkInit, init.headers, body);
+	if (init.body != null && body === undefined) {
+		logger.debug("cowork transport bypassed", { url: `${url.host}${url.pathname}`, reason: "unsupported-body" });
+		return fallbackFetch(input, init);
+	}
+	return sendCoworkRequest(url, init, init.headers, body);
 };

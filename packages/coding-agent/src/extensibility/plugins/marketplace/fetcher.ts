@@ -7,11 +7,12 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { isEnoent, logger } from "@oh-my-pi/pi-utils";
-import * as git from "../../../utils/git";
 
-import type { MarketplaceCatalog, MarketplaceSourceType } from "./types";
-import { isValidNameSegment } from "./types";
+import { isValidNameSegment, type MarketplaceCatalog, type MarketplaceSourceType } from "./types";
+
+const GIT_CLONE_TIMEOUT_MS = 30 * 60 * 1000;
 
 // ── Types ─────────────────────────────────────────────────────────────
 
@@ -290,7 +291,7 @@ async function cloneAndReadCatalog(url: string, source: string, cacheDir: string
 	await fs.mkdir(cacheDir, { recursive: true });
 
 	logger.debug(`[marketplace] cloning ${url} → ${tmpDir}`);
-	await git.clone(url, tmpDir);
+	await vcs.clone(url, tmpDir, { timeoutMs: GIT_CLONE_TIMEOUT_MS });
 
 	try {
 		const { displayPath, content } = await readMarketplaceCatalog(tmpDir, { relativeDisplayPaths: true });

@@ -5,7 +5,10 @@
  * and peer-resolution logic.
  */
 import { timingSafeEqual as nodeTimingSafeEqual } from "node:crypto";
+import * as os from "node:os";
+import { getInstallId } from "@oh-my-pi/pi-utils";
 import type { Api, AssistantMessage, Model } from "../types";
+import type { ClientUsageIdentity } from "../usage";
 
 const JSON_HEADERS = {
 	"Content-Type": "application/json",
@@ -136,6 +139,31 @@ export function captureRequestHeaders(headers: Headers): Record<string, string> 
 		}
 	});
 	return out;
+}
+
+/**
+ * Resolve the usage-attribution identity for an inbound gateway request.
+ *
+ * pi-native omp clients send `x-omp-install-id` / `x-omp-hostname` /
+ * `x-omp-app` (see `providers/pi-native-client.ts`); any client may set them.
+ * Requests without an install id fall back to the gateway host's identity
+ * under the `gateway` app label, so unlabeled foreign-SDK traffic (llm-git,
+ * openai/anthropic SDKs) still lands in per-client burn tracking instead of
+ * vanishing. These headers are attribution-only — they are deliberately
+ * absent from {@link captureRequestHeaders}'s allow-list and never reach the
+ * upstream provider.
+ */
+export function resolveClientIdentity(headers: Headers): ClientUsageIdentity {
+	const read = (name: string): string | undefined => {
+		const value = headers.get(name)?.trim();
+		return value ? value : undefined;
+	};
+	const installId = read("x-omp-install-id");
+	const app = read("x-omp-app");
+	if (!installId) {
+		return { installId: getInstallId(), hostname: os.hostname(), app: app ?? "gateway" };
+	}
+	return { installId, hostname: read("x-omp-hostname"), app: app ?? "gateway" };
 }
 
 /**

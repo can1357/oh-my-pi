@@ -75,6 +75,15 @@ describe("Markdown math rendering", () => {
 		expect(line).toBe("it costs $5 and $10 total");
 	});
 
+	it("closes a span at the first unescaped delimiter", () => {
+		// `\\` is a TeX row break, so that `)` is body text, not the closer.
+		const [paren] = renderLines(String.raw`prose \(x \\) y\) end`);
+		expect(paren).toBe("prose x  ) y end");
+		// An escaped dollar cannot end display math either.
+		const [dollar] = renderLines(String.raw`$$a \$$ b$$`);
+		expect(dollar).toBe("a $ b");
+	});
+
 	it("renderInlineMarkdown converts inline math", () => {
 		const out = stripVTControlCharacters(renderInlineMarkdown("energy $E=mc^2$ here", defaultMarkdownTheme));
 		expect(out).toBe("energy E=mc² here");

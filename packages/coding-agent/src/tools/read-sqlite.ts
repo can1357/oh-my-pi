@@ -1,4 +1,4 @@
-import { Database } from "bun:sqlite";
+import type { Database } from "bun:sqlite";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import type { ToolSession } from "../sdk";
 import { DEFAULT_MAX_LINES, truncateHead } from "../session/streaming-output";
@@ -20,6 +20,7 @@ import {
 	isSqliteFile,
 	listTables,
 	MAX_RAW_QUERY_ROWS,
+	openSqliteReadConnection,
 	parseSqlitePathCandidates,
 	parseSqliteSelector,
 	queryRows,
@@ -107,8 +108,7 @@ export async function readSqlite(
 
 	let db: Database | null = null;
 	try {
-		db = new Database(resolvedSqlitePath.absolutePath, { readonly: true, strict: true });
-		db.run("PRAGMA busy_timeout = 3000");
+		db = await openSqliteReadConnection(resolvedSqlitePath.absolutePath);
 		throwIfAborted(signal);
 
 		switch (selector.kind) {

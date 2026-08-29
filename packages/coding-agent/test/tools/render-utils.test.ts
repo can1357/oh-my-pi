@@ -110,6 +110,11 @@ describe("formatScreenshot", () => {
 		expect(shortenPath(String.raw`C:\Users\me\projects\demo`, home)).toBe("~/projects/demo");
 	});
 
+	it("shortens Windows home paths case-insensitively", () => {
+		const home = String.raw`C:\Users\Alice`;
+		expect(shortenPath(String.raw`c:\users\alice\projects\demo`, home)).toBe("~/projects/demo");
+	});
+
 	it("does not shorten paths outside the home boundary", () => {
 		const home = String.raw`C:\Users\me`;
 		const sibling = String.raw`C:\Users\me2\projects\demo`;

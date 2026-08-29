@@ -10,7 +10,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { $ } from "bun";
-import * as git from "./src/utils/git.ts";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
 
 const dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-issue-966-"));
 try {
@@ -20,34 +20,29 @@ try {
 	await fs.writeFile(path.join(dir, "tracked.txt"), "base\\n");
 	await $\`git add tracked.txt\`.cwd(dir).quiet();
 	await $\`git commit -m baseline\`.cwd(dir).quiet();
+	const repo = vcs.requireGit(dir);
 	await fs.writeFile(path.join(dir, "tracked.txt"), "base\\ntracked change\\n");
 	await fs.writeFile(path.join(dir, "new-file.txt"), "sample data\\n");
-	await git.stage.files(dir);
-	const originalStagedDiff = await git.diff(dir, { cached: true });
-	await git.stage.reset(dir);
-	await git.stage.hunks(dir, [{ path: "new-file.txt", hunks: { type: "all" } }], {
-		rawDiff: originalStagedDiff,
-		diffCached: true,
-	});
-	const firstStage = await git.diff.changedFiles(dir, { cached: true });
+	await repo.stageFiles([]);
+	const originalStagedDiff = await repo.diffText({ cached: true });
+	await repo.unstage([]);
+	await repo.stageHunks([{ path: "new-file.txt", kind: "all" }], originalStagedDiff);
+	const firstStage = await repo.changedFiles({ cached: true });
 	if (!Bun.deepEquals(firstStage, ["new-file.txt"])) {
 		throw new Error("unexpected first stage: " + JSON.stringify(firstStage));
 	}
-	await git.commit(dir, "feat: add new file");
-	await git.stage.hunks(dir, [{ path: "tracked.txt", hunks: { type: "all" } }], {
-		rawDiff: originalStagedDiff,
-		diffCached: true,
-	});
-	const secondStage = await git.diff.changedFiles(dir, { cached: true });
+	await repo.commitCreate("feat: add new file", {});
+	await repo.stageHunks([{ path: "tracked.txt", kind: "all" }], originalStagedDiff);
+	const secondStage = await repo.changedFiles({ cached: true });
 	if (!Bun.deepEquals(secondStage, ["tracked.txt"])) {
 		throw new Error("unexpected second stage: " + JSON.stringify(secondStage));
 	}
-	await git.commit(dir, "fix: update tracked file");
+	await repo.commitCreate("fix: update tracked file", {});
 	const log = (await $\`git log --format=%s -2\`.cwd(dir).text()).trim().split("\\n");
 	if (!Bun.deepEquals(log, ["fix: update tracked file", "feat: add new file"])) {
 		throw new Error("unexpected log: " + JSON.stringify(log));
 	}
-	const summary = await git.status.summary(dir);
+	const summary = await repo.statusSummary();
 	if (!Bun.deepEquals(summary, { staged: 0, unstaged: 0, untracked: 0 })) {
 		throw new Error("unexpected status: " + JSON.stringify(summary));
 	}

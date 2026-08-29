@@ -16,7 +16,7 @@ import { afterEach, beforeEach, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { getCapability } from "@oh-my-pi/pi-coding-agent/capability";
+import { getCapability, loadCapability } from "@oh-my-pi/pi-coding-agent/capability";
 import { clearCache } from "@oh-my-pi/pi-coding-agent/capability/fs";
 import { hookCapability } from "@oh-my-pi/pi-coding-agent/capability/hook";
 import { mcpCapability } from "@oh-my-pi/pi-coding-agent/capability/mcp";
@@ -32,6 +32,7 @@ import {
 	clearOmpExtensionCliRoots,
 	injectOmpExtensionCliRoots,
 	listOmpExtensionRoots,
+	setInvocationConfiguredExtensions,
 	withOmpExtensionRootScope,
 } from "@oh-my-pi/pi-coding-agent/discovery/omp-extension-roots";
 import { discoverExtensionPaths } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
@@ -119,17 +120,15 @@ function ctx(): LoadContext {
 	return { cwd: project, home, repoRoot: project };
 }
 
-test("project settings.json#extensions surfaces every sub-directory", async () => {
-	writeFile(path.join(project, ".omp", "settings.json"), JSON.stringify({ extensions: [ext] }));
-
+async function expectExtensionSubDirectoriesLoaded(context: LoadContext): Promise<void> {
 	const [skills, commands, rules, prompts, hooks, tools, mcps] = await Promise.all([
-		loadFromPlugin<{ name: string }>(skillCapability.id, ctx()),
-		loadFromPlugin<{ name: string }>(slashCommandCapability.id, ctx()),
-		loadFromPlugin<{ name: string }>(ruleCapability.id, ctx()),
-		loadFromPlugin<{ name: string }>(promptCapability.id, ctx()),
-		loadFromPlugin<{ name: string; type: "pre" | "post" }>(hookCapability.id, ctx()),
-		loadFromPlugin<{ name: string }>(toolCapability.id, ctx()),
-		loadFromPlugin<{ name: string; command?: string }>(mcpCapability.id, ctx()),
+		loadFromPlugin<{ name: string }>(skillCapability.id, context),
+		loadFromPlugin<{ name: string }>(slashCommandCapability.id, context),
+		loadFromPlugin<{ name: string }>(ruleCapability.id, context),
+		loadFromPlugin<{ name: string }>(promptCapability.id, context),
+		loadFromPlugin<{ name: string; type: "pre" | "post" }>(hookCapability.id, context),
+		loadFromPlugin<{ name: string }>(toolCapability.id, context),
+		loadFromPlugin<{ name: string; command?: string }>(mcpCapability.id, context),
 	]);
 
 	expect(skills.map(s => s.name)).toContain("my-skill");
@@ -140,6 +139,11 @@ test("project settings.json#extensions surfaces every sub-directory", async () =
 	expect(hooks.some(h => h.name === "edit.sh" && h.type === "post")).toBe(true);
 	expect(tools.map(t => t.name)).toEqual(expect.arrayContaining(["wcount", "deep-tool"]));
 	expect(mcps.find(m => m.name === "lsp")?.command).toBe("lsp-server");
+}
+
+test("project settings.json#extensions surfaces every sub-directory", async () => {
+	writeFile(path.join(project, ".omp", "settings.json"), JSON.stringify({ extensions: [ext] }));
+	await expectExtensionSubDirectoriesLoaded(ctx());
 });
 
 test("user settings.json#extensions also feeds sub-discovery", async () => {
@@ -147,6 +151,81 @@ test("user settings.json#extensions also feeds sub-discovery", async () => {
 
 	const skills = await loadFromPlugin<{ name: string }>(skillCapability.id, ctx());
 	expect(skills.map(s => s.name)).toContain("my-skill");
+});
+
+test("project config.yml#extensions surfaces every sub-directory (#9768)", async () => {
+	writeFile(path.join(project, ".omp", "config.yml"), `extensions:\n  - "${ext}"\n`);
+	await expectExtensionSubDirectoriesLoaded(ctx());
+});
+
+test("user config.yaml#extensions feeds sub-discovery", async () => {
+	// User scope also honors the legacy-compatible `config.yaml` filename.
+	writeFile(path.join(home, ".omp", "agent", "config.yaml"), `extensions:\n  - "${ext}"\n`);
+
+	const skills = await loadFromPlugin<{ name: string }>(skillCapability.id, ctx());
+	expect(skills.map(s => s.name)).toContain("my-skill");
+});
+
+test("project config.yml#extensions replaces lower-precedence configured roots", async () => {
+	const userExt = path.join(tempDir, "user-extension");
+	const projectSettingsExt = path.join(tempDir, "project-settings-extension");
+	const projectConfigExt = path.join(tempDir, "project-config-extension");
+	buildExtensionPackage(userExt, "user-skill");
+	buildExtensionPackage(projectSettingsExt, "project-settings-skill");
+	buildExtensionPackage(projectConfigExt, "project-config-skill");
+	writeFile(path.join(home, ".omp", "agent", "config.yml"), `extensions:\n  - "${userExt}"\n`);
+	writeFile(path.join(project, ".omp", "settings.json"), JSON.stringify({ extensions: [projectSettingsExt] }));
+	writeFile(path.join(project, ".omp", "config.yml"), `extensions:\n  - "${projectConfigExt}"\n`);
+
+	const skills = await loadFromPlugin<{ name: string }>(skillCapability.id, ctx());
+	const names = skills.map(skill => skill.name);
+	expect(names).toContain("project-config-skill");
+	expect(names).not.toContain("project-settings-skill");
+	expect(names).not.toContain("user-skill");
+});
+
+test("effective extensions replace persisted roots for overlays and runtime overrides", async () => {
+	const persistedExt = path.join(tempDir, "persisted-extension");
+	const overrideExt = path.join(tempDir, "override-extension");
+	buildExtensionPackage(persistedExt, "persisted-skill");
+	buildExtensionPackage(overrideExt, "override-skill");
+	writeFile(path.join(project, ".omp", "config.yml"), `extensions:\n  - "${persistedExt}"\n`);
+
+	const context: LoadContext = {
+		...ctx(),
+		extensionRoots: { explicit: [], mode: "merge", configured: [overrideExt], configuredLevel: "user" },
+	};
+	const skills = await loadFromPlugin<{ name: string }>(skillCapability.id, context);
+	const names = skills.map(skill => skill.name);
+	expect(names).toContain("override-skill");
+	expect(names).not.toContain("persisted-skill");
+
+	const emptyOverride: LoadContext = {
+		...ctx(),
+		extensionRoots: { explicit: [], mode: "merge", configured: [], configuredLevel: "user" },
+	};
+	const emptySkills = await loadFromPlugin<{ name: string }>(skillCapability.id, emptyOverride);
+	expect(emptySkills.map(skill => skill.name)).not.toContain("persisted-skill");
+});
+
+test("empty project config.yml#extensions suppresses user roots", async () => {
+	const userExt = path.join(tempDir, "user-extension");
+	buildExtensionPackage(userExt, "user-skill");
+	writeFile(path.join(home, ".omp", "agent", "config.yml"), `extensions:\n  - "${userExt}"\n`);
+	writeFile(path.join(project, ".omp", "config.yml"), "extensions: []\n");
+
+	const skills = await loadFromPlugin<{ name: string }>(skillCapability.id, ctx());
+	expect(skills.map(skill => skill.name)).not.toContain("user-skill");
+});
+
+test("user YAML config suppresses its legacy settings.json migration source", async () => {
+	const legacyExt = path.join(tempDir, "legacy-extension");
+	buildExtensionPackage(legacyExt, "legacy-skill");
+	writeFile(path.join(home, ".omp", "agent", "settings.json"), JSON.stringify({ extensions: [legacyExt] }));
+	writeFile(path.join(home, ".omp", "agent", "config.yml"), "theme:\n  dark: default\n");
+
+	const skills = await loadFromPlugin<{ name: string }>(skillCapability.id, ctx());
+	expect(skills.map(skill => skill.name)).not.toContain("legacy-skill");
 });
 
 test("`--extension` CLI injection is wired through the same provider", async () => {
@@ -251,6 +330,149 @@ test("invocation scopes isolate concurrent SDK roots and merge ambient roots onl
 	const mergedRoots = await withOmpExtensionRootScope([ext], "merge", () => listOmpExtensionRoots(ctx()));
 	expect(mergedRoots.map(root => root.path)).toEqual(expect.arrayContaining([ext, projectExt, installed]));
 	expect(mergedRoots.map(root => root.path)).not.toContain(staleCli);
+});
+
+test("concurrent scopes snapshot their own effective extensions (no cross-session leak)", async () => {
+	// Reproduces the P1 concurrency hazard: two SDK sessions with different
+	// effective `extensions` must each discover only their own roots, even when
+	// their capability loads interleave during startup.
+	const firstExt = path.join(tempDir, "first-session-extension");
+	const secondExt = path.join(tempDir, "second-session-extension");
+	buildExtensionPackage(firstExt, "first-session-skill");
+	buildExtensionPackage(secondExt, "second-session-skill");
+
+	const firstEntered = Promise.withResolvers<void>();
+	const secondEntered = Promise.withResolvers<void>();
+	const [firstRoots, secondRoots] = await Promise.all([
+		withOmpExtensionRootScope([], "merge", async () => {
+			setInvocationConfiguredExtensions([firstExt]);
+			firstEntered.resolve();
+			await secondEntered.promise;
+			return listOmpExtensionRoots(ctx());
+		}),
+		withOmpExtensionRootScope([], "merge", async () => {
+			setInvocationConfiguredExtensions([secondExt]);
+			secondEntered.resolve();
+			await firstEntered.promise;
+			return listOmpExtensionRoots(ctx());
+		}),
+	]);
+
+	expect(firstRoots.map(root => root.path)).toEqual([firstExt]);
+	expect(secondRoots.map(root => root.path)).toEqual([secondExt]);
+});
+
+test("explicit-only mode drops the configured lane and installed roots (#9769)", async () => {
+	// A disableExtensionDiscovery / `--no-extensions` session must honor only its
+	// explicit roots on reload — never the ambient `extensions:` (configured
+	// lane) or installed plugins the caller opted out of, even when the struct
+	// still carries a nonempty configured array (round-8 leak).
+	const explicitExt = path.join(tempDir, "explicit-extension");
+	const configuredExt = path.join(tempDir, "configured-extension");
+	const installed = path.join(home, ".omp", "plugins", "node_modules", "installed-extension");
+	buildExtensionPackage(explicitExt, "explicit-skill");
+	buildExtensionPackage(configuredExt, "configured-skill");
+	buildExtensionPackage(installed, "installed-skill");
+	writeFile(
+		path.join(home, ".omp", "plugins", "package.json"),
+		JSON.stringify({ name: "omp-plugins", dependencies: { "installed-extension": "1.0.0" } }),
+	);
+
+	const mergeRoots = await listOmpExtensionRoots({
+		...ctx(),
+		extensionRoots: {
+			explicit: [explicitExt],
+			mode: "merge",
+			configured: [configuredExt],
+			configuredLevel: "project",
+		},
+	});
+	expect(mergeRoots.map(root => path.basename(root.path))).toEqual(
+		expect.arrayContaining(["explicit-extension", "configured-extension", "installed-extension"]),
+	);
+
+	const explicitOnlyRoots = await listOmpExtensionRoots({
+		...ctx(),
+		extensionRoots: {
+			explicit: [explicitExt],
+			mode: "explicit-only",
+			configured: [configuredExt],
+			configuredLevel: "project",
+		},
+	});
+	expect(explicitOnlyRoots.map(root => root.path)).toEqual([explicitExt]);
+});
+
+test("configured lane takes its level from the authority's configuredLevel, not the disk scan (#9769)", async () => {
+	// A project provider Settings can't see on the `.omp` disk scan (e.g.
+	// `.claude/settings.json`) still yields a project-level root because the
+	// session carries the Settings-resolved provenance in the struct.
+	const configuredExt = path.join(tempDir, "provenance-extension");
+	buildExtensionPackage(configuredExt, "provenance-skill");
+	// Nothing on `.omp` disk configures it — the old deepEquals scan would label it `user`.
+
+	const asProject = await listOmpExtensionRoots({
+		...ctx(),
+		extensionRoots: { explicit: [], mode: "merge", configured: [configuredExt], configuredLevel: "project" },
+	});
+	expect(asProject.find(root => root.path === configuredExt)?.level).toBe("project");
+
+	const asUser = await listOmpExtensionRoots({
+		...ctx(),
+		extensionRoots: { explicit: [], mode: "merge", configured: [configuredExt], configuredLevel: "user" },
+	});
+	expect(asUser.find(root => root.path === configuredExt)?.level).toBe("user");
+});
+
+test("scopeless reload with session roots equals the construction-time scoped load (#9769 invariant)", async () => {
+	// The single invariant that retires the per-surface regressions: for any
+	// session, listOmpExtensionRoots outside the construction scope with
+	// session.effectiveExtensionRoots returns byte-identical roots (paths,
+	// levels, order) to the construction-time scoped call — across the whole
+	// 2×2 grid of explicit-only × has-configured.
+	const explicitExt = path.join(tempDir, "invariant-explicit");
+	const configuredExt = path.join(tempDir, "invariant-configured");
+	const installed = path.join(home, ".omp", "plugins", "node_modules", "invariant-installed");
+	buildExtensionPackage(explicitExt, "invariant-explicit-skill");
+	buildExtensionPackage(configuredExt, "invariant-configured-skill");
+	buildExtensionPackage(installed, "invariant-installed-skill");
+	// Persist the configured lane at project scope so its provenance resolves to `project`.
+	writeFile(path.join(project, ".omp", "config.yml"), `extensions:\n  - "${configuredExt}"\n`);
+	writeFile(
+		path.join(home, ".omp", "plugins", "package.json"),
+		JSON.stringify({ name: "omp-plugins", dependencies: { "invariant-installed": "1.0.0" } }),
+	);
+
+	for (const mode of ["merge", "explicit-only"] as const) {
+		for (const configured of [[configuredExt], []]) {
+			for (const configuredLevel of ["user", "project"] as const) {
+				const roots = { explicit: [explicitExt], mode, configured, configuredLevel };
+				const scoped = await withOmpExtensionRootScope(roots.explicit, roots.mode, () => {
+					setInvocationConfiguredExtensions(roots.configured, roots.configuredLevel);
+					return listOmpExtensionRoots(ctx());
+				});
+				const reloaded = await listOmpExtensionRoots({ ...ctx(), extensionRoots: roots });
+				expect(reloaded).toEqual(scoped);
+			}
+		}
+	}
+});
+
+test("loadCapability extensionRoots surfaces override extensions outside any scope (#9769)", async () => {
+	// refreshSkills / slash-command reloads run outside the construction-time
+	// invocation scope. The effective roots must arrive via the explicit option
+	// so overlay/override extensions survive; omitting it falls back to disk.
+	const overrideExt = path.join(tempDir, "runtime-override-extension");
+	buildExtensionPackage(overrideExt, "runtime-override-skill");
+
+	const withOption = await loadCapability<{ name: string }>(skillCapability.id, {
+		cwd: project,
+		extensionRoots: { explicit: [], mode: "merge", configured: [overrideExt], configuredLevel: "user" },
+	});
+	expect(withOption.items.map(skill => skill.name)).toContain("runtime-override-skill");
+
+	const withoutOption = await loadCapability<{ name: string }>(skillCapability.id, { cwd: project });
+	expect(withoutOption.items.map(skill => skill.name)).not.toContain("runtime-override-skill");
 });
 
 test("file-extension entrypoints contribute zero sub-surface (the file has no siblings to scan)", async () => {

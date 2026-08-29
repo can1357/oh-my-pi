@@ -16,8 +16,19 @@ import {
 	estimateToolSchemaTokens,
 	renderContextUsage,
 } from "@oh-my-pi/pi-coding-agent/modes/utils/context-usage";
+import { applyToolProxy } from "../../src/extensibility/tool-proxy";
 
 const tokenizer = new Tokenizer();
+
+/** An arktype-shaped callable schema from an external arktype copy: a plain
+ * function carrying `toJsonSchema`/`assert` that — unlike omptype schemas —
+ * HAS `Function.prototype.bind`. */
+function bindCapableSchema() {
+	return Object.assign((value: unknown) => value, {
+		toJsonSchema: () => ({ type: "object", properties: { a: { type: "string" } } }),
+		assert: (value: unknown) => value,
+	});
+}
 
 describe("estimateToolSchemaTokens", () => {
 	it("counts arktype tool schemas by their wire JSON Schema, not arktype internals", () => {
@@ -34,6 +45,57 @@ describe("estimateToolSchemaTokens", () => {
 			tokenizer,
 		);
 		expect(arktypeEstimate).toBe(wireEstimate);
+	});
+
+	it("counts a proxied bind-capable callable schema by its wire JSON Schema", () => {
+		// Regression (PR #9185): applyToolProxy bound every callable property,
+		// and an external-arktype Type HAS Function.prototype.bind (unlike
+		// omptype), so the bound `parameters` lost its schema surface,
+		// toolWireSchema returned the bare function, and the undefined
+		// JSON.stringify poisoned token accounting — crashing every read-only
+		// subagent at first prompt. The proxied schema must keep counting as
+		// its wire JSON Schema, identical to the pre-converted equivalent.
+		const schema = bindCapableSchema();
+		const unwrapped = { name: "ext", description: "ext tool", parameters: schema };
+		const wrapper: Record<string, unknown> = {};
+		applyToolProxy(unwrapped, wrapper);
+		const proxied = wrapper as { name: string; description: string; parameters: unknown };
+		// The proxied tool must keep counting exactly like the unwrapped tool:
+		// old code fed `undefined` into the tokenizer here and crashed.
+		expect(estimateToolSchemaTokens([proxied as never], tokenizer)).toBe(
+			estimateToolSchemaTokens([unwrapped as never], tokenizer),
+		);
+		expect(estimateToolSchemaTokens([proxied as never], tokenizer)).toBeGreaterThan(0);
+	});
+
+	it("runs the full non-message breakdown on a proxied extension tool", () => {
+		// The crash frame was computeNonMessageBreakdown → estimateToolSchemaTokens
+		// inside pre-prompt compaction; exercise that whole path, memo included.
+		const schema = bindCapableSchema();
+		const wrapper: Record<string, unknown> = {};
+		applyToolProxy({ name: "ext", description: "ext tool", parameters: schema }, wrapper);
+		const session = { systemPrompt: ["base"], agent: { state: { tools: [wrapper] } } };
+		const breakdown = computeNonMessageBreakdown(session as never, tokenizer);
+		expect(breakdown.toolsTokens).toBeGreaterThan(0);
+	});
+
+	it("skips a parameters value that stringifies to undefined, counting exactly name + description", () => {
+		// A plain function is neither an arktype schema nor JSON-serializable:
+		// the independent unserializable-schema fallback must skip it while the
+		// tool's own strings still contribute their exact token share.
+		const estimate = estimateToolSchemaTokens(
+			[{ name: "odd", description: "odd tool", parameters: function bareSchema() {} } as never],
+			tokenizer,
+		);
+		expect(estimate).toBe(estimateToolSchemaTokens([{ name: "odd", description: "odd tool" } as never], tokenizer));
+	});
+
+	it("skips non-string name/description fragments", () => {
+		const estimate = estimateToolSchemaTokens(
+			[{ name: "odd", description: undefined, parameters: { type: "object" } } as never],
+			tokenizer,
+		);
+		expect(estimate).toBeGreaterThan(0);
 	});
 });
 
@@ -175,5 +237,49 @@ describe("computeNonMessageBreakdown skills filtering", () => {
 		const b = computeNonMessageBreakdown(session([], [hidden, visible]), tokenizer);
 		expect(b.skillsTokens).toBe(0);
 		expect(b.systemPromptTokens).toBe(computeNonMessageBreakdown(session([], []), tokenizer).systemPromptTokens);
+	});
+});
+
+/**
+ * Contract: a tool, skill, or system-prompt section with a missing
+ * (`undefined`) description/text must not crash the token estimate. Extensions
+ * can contribute tools whose `description` is absent at runtime (the field is
+ * typed `string` but the extension API does not enforce it); before the guard,
+ * the `undefined` fragment reached the tokenizer and threw, killing every
+ * subagent before its first turn (issue #9331). Each path must instead yield a
+ * finite, non-negative estimate.
+ */
+describe("non-message estimates tolerate a missing description", () => {
+	const readTool = { name: "read", description: "read files", parameters: {} };
+
+	it("estimateToolSchemaTokens does not throw on an undefined tool description", () => {
+		const tokens = estimateToolSchemaTokens(
+			[{ name: "lens_tool", description: undefined, parameters: {} } as never],
+			tokenizer,
+		);
+		expect(Number.isFinite(tokens)).toBe(true);
+		expect(tokens).toBeGreaterThanOrEqual(0);
+	});
+
+	it("computeNonMessageBreakdown does not throw on an undefined skill description", () => {
+		const session = {
+			systemPrompt: ["You are an agent."],
+			agent: { state: { tools: [readTool] } },
+			skills: [{ name: "lens", description: undefined, filePath: "/s/l.md" }],
+		} as never;
+		const b = computeNonMessageBreakdown(session, tokenizer);
+		expect(Number.isFinite(b.skillsTokens)).toBe(true);
+		expect(b.skillsTokens).toBeGreaterThanOrEqual(0);
+	});
+
+	it("computeNonMessageBreakdown does not throw on an undefined system-context section", () => {
+		const session = {
+			systemPrompt: ["primary prompt", undefined, "trailing context"],
+			agent: { state: { tools: [readTool] } },
+			skills: [],
+		} as never;
+		const b = computeNonMessageBreakdown(session, tokenizer);
+		expect(Number.isFinite(b.systemContextTokens)).toBe(true);
+		expect(b.systemContextTokens).toBeGreaterThanOrEqual(0);
 	});
 });

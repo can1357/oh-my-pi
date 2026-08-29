@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { formatEstimatedCost } from "../src/client/data/formatters";
 import { buildAgentTokenShare, buildModelPerformanceLookup } from "../src/client/data/view-models";
 import type { AgentTypeStats, ModelPerformancePoint } from "../src/shared-types";
 
@@ -30,6 +31,14 @@ describe("client view models", () => {
 		expect(series?.data.map(point => point.timestamp)).toEqual([DAY, DAY * 10]);
 		expect(series?.data.map(point => point.requests)).toEqual([1, 2]);
 		expect(series?.data.map(point => point.avgTtftSeconds)).toEqual([0.25, 0.5]);
+	});
+});
+
+describe("API-equivalent cost formatting", () => {
+	it("distinguishes unpriced subscription usage from a zero-dollar estimate", () => {
+		expect(formatEstimatedCost(0, 1)).toBe("N/A");
+		expect(formatEstimatedCost(0, 0)).toBe("$0");
+		expect(formatEstimatedCost(1.5, 1)).toBe("$1.50");
 	});
 });
 

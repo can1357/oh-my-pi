@@ -24,7 +24,7 @@ describe("autocompleteMaxVisible setting", () => {
 	});
 
 	afterEach(async () => {
-		AgentStorage.resetInstance();
+		AgentStorage.close();
 		restoreSettingsTestState(settingsState);
 		settingsState = undefined;
 		if (tempDir) {

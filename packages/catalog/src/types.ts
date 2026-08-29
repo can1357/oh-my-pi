@@ -150,16 +150,25 @@ export interface Usage {
 	};
 }
 
-export type OpenAIReasoningFormat = "openai" | "openrouter" | "zai" | "kimi" | "qwen" | "qwen-chat-template";
+export type OpenAIReasoningFormat =
+	| "openai"
+	| "openrouter"
+	| "zai"
+	| "kimi"
+	| "qwen"
+	| "qwen-chat-template"
+	| "chat-template";
 
 export type OpenAIReasoningDisableMode =
 	| "omit"
 	| "lowest-effort"
 	| "none-effort"
 	| "openrouter-enabled-false"
+	| "venice-disable-thinking"
 	| "zai-thinking-disabled"
 	| "qwen-enable-thinking-false"
-	| "qwen-template-false";
+	| "qwen-template-false"
+	| "chat-template-thinking-false";
 
 export type OpenAIStreamMarkupHealingPattern = "kimi" | "dsml" | "qwen" | "thinking";
 
@@ -846,12 +855,15 @@ export interface TokenCost {
 }
 
 /**
- * Rates applied to the full request when its prompt exceeds `inputThreshold`.
- * Prompt input is the sum of uncached, cached-read, cache-write, and
- * provider-orchestration input tokens.
+ * Rates applied to the full request when its prompt exceeds `inputThreshold`,
+ * or reaches it when `inputThresholdInclusive` is true. Prompt input is the
+ * sum of uncached, cached-read, cache-write, and provider-orchestration input
+ * tokens.
  */
 export interface LongContextTokenCost extends TokenCost {
 	inputThreshold: number;
+	/** Whether the long-context tier starts exactly at `inputThreshold`. */
+	inputThresholdInclusive?: boolean;
 }
 
 /** Base token rates plus an optional long-context tier. */
@@ -880,6 +892,12 @@ export type ModelTokenizer =
 // Model interface for the unified model system
 export interface Model<TApi extends Api = Api> {
 	id: string;
+	/**
+	 * Whether provider-bound private-use glyphs require reversible ASCII tokenization.
+	 * Materialized by `buildModel`; request handlers read this capability instead of
+	 * inferring it from the transport API.
+	 */
+	requiresGlyphTokenization?: boolean;
 	/**
 	 * Model id to send on the wire when it differs from `id`. Used by catalog
 	 * variants that present one upstream model under several local entries —
@@ -999,6 +1017,18 @@ export interface Model<TApi extends Api = Api> {
 	 * `options.isOAuth = true` for the underlying provider call.
 	 */
 	isOAuth?: boolean;
+	/**
+	 * Amazon Bedrock Guardrail id or ARN attached to every Converse request for
+	 * this model. Set from `providers.amazon-bedrock.guardrailIdentifier`; the
+	 * streaming layer forwards it as `options.guardrailIdentifier` so accounts
+	 * that gate `bedrock:InvokeModel*` on the `bedrock:GuardrailIdentifier`
+	 * condition key stop returning an explicit deny.
+	 */
+	guardrailIdentifier?: string;
+	/** Bedrock guardrail version. Defaults to `"DRAFT"` at request time when unset. */
+	guardrailVersion?: string;
+	/** Bedrock guardrail trace verbosity. */
+	guardrailTrace?: "enabled" | "disabled" | "enabled_full";
 }
 
 /**
@@ -1007,7 +1037,7 @@ export interface Model<TApi extends Api = Api> {
  * sparse override shape and nothing is resolved yet.
  */
 export interface ModelSpec<TApi extends Api = Api>
-	extends Omit<Model<TApi>, "compat" | "compatConfig" | "supportsComputerUseConfig"> {
+	extends Omit<Model<TApi>, "compat" | "compatConfig" | "requiresGlyphTokenization" | "supportsComputerUseConfig"> {
 	/** Sparse compatibility overrides; resolved into `Model.compat` by `buildModel`. */
 	compat?: CompatConfigOf<TApi>;
 }

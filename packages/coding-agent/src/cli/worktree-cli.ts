@@ -18,10 +18,10 @@
  */
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { getWorktreesDir, isEnoent } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { hasLiveIsolationOwner, ISOLATION_OWNER_FILE } from "../task/isolation-ownership";
-import * as git from "../utils/git";
 
 type WorktreeKind = "pr-checkout" | "task-isolation" | "empty" | "stray";
 
@@ -108,7 +108,7 @@ export async function clearWorktrees(options: ClearWorktreesOptions): Promise<vo
 				// Live worktree: ask git to remove it cleanly. If git refuses (locked,
 				// dirty, etc.), fall back to fs.rm and rely on `worktree prune` to
 				// clean the bookkeeping on the parent side.
-				const removed = await git.worktree.tryRemove(target.parentRepo, target.path, { force: true });
+				const removed = await vcs.git(target.parentRepo)?.worktreeRemove(target.path, true);
 				if (!removed) {
 					await fs.rm(target.path, { recursive: true, force: true });
 					parentsToPrune.add(target.parentRepo);
@@ -126,7 +126,7 @@ export async function clearWorktrees(options: ClearWorktreesOptions): Promise<vo
 	// Best-effort: drop stale entries from each affected parent's `.git/worktrees/`.
 	for (const parent of parentsToPrune) {
 		try {
-			await git.worktree.prune(parent);
+			await vcs.requireGit(parent).worktreePrune();
 		} catch {
 			/* parent repo may already be gone or pruned — ignore */
 		}

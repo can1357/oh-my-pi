@@ -694,6 +694,12 @@ export class PluginSettingsComponent extends Container {
 		});
 
 		this.addChild(this.#viewComponent);
+
+		// The list mounts after the first frame (npm + marketplace listing is
+		// async and this method runs fire-and-forget), so ask for a repaint —
+		// otherwise the tab stays blank until an unrelated event forces a
+		// render, e.g. reopening /settings (issue #9526).
+		this.callbacks.requestRender?.();
 	}
 
 	#showPluginDetail(plugin: InstalledPlugin): void {

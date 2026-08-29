@@ -650,6 +650,43 @@ describe("ACP event mapper", () => {
 		});
 	});
 
+	it("does not serialize a hub wait progress envelope into content text", () => {
+		const partialResult = {
+			content: [{ type: "text", text: "" }],
+			details: {
+				op: "wait",
+				jobs: [
+					{ id: "bash_1", state: "running" },
+					{ id: "bash_2", state: "running" },
+				],
+			},
+		};
+		const updates = mapAgentSessionEventToAcpSessionUpdates(
+			{
+				type: "tool_execution_update",
+				toolCallId: "tc-hub-wait",
+				toolName: "hub",
+				args: { op: "wait", i: "waiting for jobs" },
+				partialResult,
+			} as AgentSessionEvent,
+			"session-1",
+		);
+
+		expect(updates).toHaveLength(1);
+		expectAcpNotifications(updates);
+		const update = updates[0]!.update as {
+			sessionUpdate: string;
+			content?: unknown;
+			rawOutput?: unknown;
+		};
+		expect(update.sessionUpdate).toBe("tool_call_update");
+		// The job details already ride the frame as structured rawOutput.
+		expect(update.rawOutput).toEqual(partialResult);
+		// An empty-text envelope must not be dumped as a JSON blob display row.
+		expect(update.content).toBeUndefined();
+		expect(JSON.stringify(update.content ?? [])).not.toContain('"op":"wait"');
+	});
+
 	it("keeps terminal content alongside readable text", () => {
 		const updates = mapAgentSessionEventToAcpSessionUpdates(
 			{
@@ -1110,6 +1147,70 @@ describe("ACP event mapper", () => {
 		expect(update.sessionUpdate).toBe("tool_call");
 		expect(update.locations).toEqual([{ path: path.resolve("/repo", "src/file.ts") }]);
 		expect("content" in update).toBe(false);
+	});
+	it("strips read selectors from the ACP location while preserving rawInput", () => {
+		const cases: Array<{ path: string; base: string }> = [
+			{ path: "src/file.ts:1-20", base: "src/file.ts" },
+			{ path: "src/file.ts:raw", base: "src/file.ts" },
+			{ path: "src/file.ts:1-20:raw", base: "src/file.ts" },
+			{ path: "src/file.ts:raw:1-20", base: "src/file.ts" },
+			{ path: "src/file.ts:5-16,960-973", base: "src/file.ts" },
+		];
+		for (const { path: readPath, base } of cases) {
+			const updates = mapAgentSessionEventToAcpSessionUpdates(
+				{
+					type: "tool_execution_start",
+					toolCallId: `toolu_read_sel_${base}`,
+					toolName: "read",
+					args: { path: readPath },
+				} as AgentSessionEvent,
+				"session-1",
+				{ cwd: "/repo" },
+			);
+			expectAcpNotifications(updates);
+			const update = updates[0]!.update as { locations?: { path: string }[]; rawInput?: unknown };
+			expect(update.locations).toEqual([{ path: path.resolve("/repo", base) }]);
+			// The full selector-bearing expression stays in rawInput so the client
+			// can still see exactly what the model asked for.
+			expect(update.rawInput).toEqual({ path: readPath });
+		}
+	});
+	it("keeps a real file literally named like a selector as the read location", () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "acp-read-literal-"));
+		const literalName = "report:1-20";
+		fs.writeFileSync(path.join(dir, literalName), "data\n");
+		try {
+			const updates = mapAgentSessionEventToAcpSessionUpdates(
+				{
+					type: "tool_execution_start",
+					toolCallId: "toolu_read_literal",
+					toolName: "read",
+					args: { path: literalName },
+				} as AgentSessionEvent,
+				"session-1",
+				{ cwd: dir },
+			);
+			expectAcpNotifications(updates);
+			const update = updates[0]!.update as { locations?: { path: string }[] };
+			expect(update.locations).toEqual([{ path: path.join(dir, literalName) }]);
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	});
+	it("does not strip selector-looking suffixes from non-read tool paths", () => {
+		const updates = mapAgentSessionEventToAcpSessionUpdates(
+			{
+				type: "tool_execution_start",
+				toolCallId: "tc-write-colon",
+				toolName: "write",
+				args: { path: "src/report:1-20", content: "x" },
+			} as AgentSessionEvent,
+			"session-1",
+			{ cwd: "/repo" },
+		);
+		expectAcpNotifications(updates);
+		const update = updates[0]!.update as { locations?: { path: string }[] };
+		expect(update.locations).toEqual([{ path: path.resolve("/repo", "src/report:1-20") }]);
 	});
 	it("emits distinct locations for move-style path arguments", () => {
 		const updates = mapAgentSessionEventToAcpSessionUpdates(

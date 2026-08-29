@@ -10,6 +10,10 @@ export class Spacer implements Component {
 	constructor(lines: number = 1) {
 		this.#lines = lines;
 	}
+	/** Return the spacer height for debug inspection. */
+	debugState(): Record<string, unknown> {
+		return { height: this.#lines };
+	}
 
 	setLines(lines: number): void {
 		if (lines === this.#lines) return;

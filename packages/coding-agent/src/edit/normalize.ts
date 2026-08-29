@@ -168,29 +168,32 @@ export function convertLeadingTabsToSpaces(text: string, spacesPerTab: number): 
 // Unicode Normalization
 // ═══════════════════════════════════════════════════════════════════════════
 
-const UNICODE_REPLACEMENTS: [RegExp, string][] = [
-	// Various dash/hyphen code-points → ASCII '-'
-	[/[\u2010-\u2015\u2212]/g, "-"],
-	// Fancy single quotes → '
-	[/[\u2018-\u201B]/g, "'"],
-	// Fancy double quotes → "
-	[/[\u201C-\u201F]/g, '"'],
-	// Non-breaking space and other odd spaces → normal space
-	[/[\u00A0\u2002-\u200A\u202F\u205F\u3000]/g, " "],
-	// Not-equal sign → !=
-	[/\u2260/g, "!="],
-	// Vulgar fraction ½ → 1/2
-	[/\u00BD/g, "1/2"],
-	// Zero-width characters → remove
-	[/[\u200B-\u200D\uFEFF]/g, ""],
-];
+const NON_ASCII_RE = /[^\x00-\x7F]/;
+const UNICODE_REPLACEMENT_RE = /[\u00A0\u00BD\u2002-\u200D\u2010-\u201F\u202F\u205F\u2212\u2260\u3000\uFEFF]/g;
+
+function replaceUnicodeCharacter(character: string): string {
+	const codePoint = character.charCodeAt(0);
+	if ((codePoint >= 0x2010 && codePoint <= 0x2015) || codePoint === 0x2212) return "-";
+	if (codePoint >= 0x2018 && codePoint <= 0x201b) return "'";
+	if (codePoint >= 0x201c && codePoint <= 0x201f) return '"';
+	if (
+		codePoint === 0x00a0 ||
+		(codePoint >= 0x2002 && codePoint <= 0x200a) ||
+		codePoint === 0x202f ||
+		codePoint === 0x205f ||
+		codePoint === 0x3000
+	) {
+		return " ";
+	}
+	if (codePoint === 0x2260) return "!=";
+	if (codePoint === 0x00bd) return "1/2";
+	return "";
+}
 
 export function normalizeUnicode(s: string): string {
-	let result = s.trim();
-	for (const [pattern, replacement] of UNICODE_REPLACEMENTS) {
-		result = result.replace(pattern, replacement);
-	}
-	return result.normalize("NFC");
+	const trimmed = s.trim();
+	if (!NON_ASCII_RE.test(trimmed)) return trimmed;
+	return trimmed.replace(UNICODE_REPLACEMENT_RE, replaceUnicodeCharacter).normalize("NFC");
 }
 
 /**

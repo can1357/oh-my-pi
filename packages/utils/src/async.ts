@@ -59,6 +59,7 @@ export function withTimeout<T>(promise: Promise<T>, ms: number, message: string,
 export class AsyncDrain<T> {
 	#queue?: T[];
 	#promise = Promise.resolve();
+	#flush?: () => void;
 
 	constructor(readonly delayMs: number = 0) {}
 
@@ -66,26 +67,39 @@ export class AsyncDrain<T> {
 	push(value: T, hnd: (values: T[]) => Promise<void> | void): Promise<void> {
 		let queue = this.#queue;
 		if (!queue) {
-			this.#queue = queue = [];
+			const batch: T[] = [];
+			this.#queue = batch;
+			queue = batch;
 			const { promise, resolve, reject } = Promise.withResolvers<void>();
 			const exec = (): void => {
+				if (this.#queue !== batch) return;
+				this.#queue = undefined;
+				this.#flush = undefined;
 				try {
-					if (this.#queue === queue) {
-						this.#queue = undefined;
-					}
-					resolve(hnd(queue!));
+					resolve(hnd(batch));
 				} catch (error) {
 					reject(error);
 				}
 			};
 			if (this.delayMs > 0) {
-				setTimeout(exec, this.delayMs);
+				const timer = setTimeout(exec, this.delayMs);
+				this.#flush = () => {
+					clearTimeout(timer);
+					exec();
+				};
 			} else {
+				this.#flush = exec;
 				queueMicrotask(exec);
 			}
 			this.#promise = promise;
 		}
 		queue.push(value);
+		return this.#promise;
+	}
+
+	/** Runs the pending batch handler immediately and returns its completion promise. */
+	flush(): Promise<void> {
+		this.#flush?.();
 		return this.#promise;
 	}
 }

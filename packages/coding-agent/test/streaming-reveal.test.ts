@@ -422,3 +422,148 @@ describe("BlockUnitCounter.slice", () => {
 		}
 	});
 });
+
+describe("frame-skip coalescing", () => {
+	afterEach(() => {
+		vi.useRealTimers();
+	});
+
+	it("coalesces caught-up target deltas to at most one render per reveal frame", () => {
+		vi.useFakeTimers();
+		const { component, controller } = makeController();
+		const base = "abcdefghij";
+		const tail = "x".repeat(30);
+		const fullText = base + tail;
+
+		controller.begin(component, makeMessage([{ type: "text", text: "" }]));
+		controller.setTarget(makeMessage([{ type: "text", text: base }]));
+		vi.advanceTimersByTime(STREAMING_REVEAL_FRAME_MS * 10);
+		expect(textAt(latestMessage(component), 0)).toBe(base);
+
+		// 30 deltas at 5x the reveal cadence (each 1 unit of growth).
+		const before = component.messages.length;
+		let text = base;
+		for (let i = 0; i < 30; i++) {
+			text += tail[i];
+			controller.setTarget(makeMessage([{ type: "text", text }]));
+			vi.advanceTimersByTime(STREAMING_REVEAL_FRAME_MS / 5);
+		}
+		const burstRenders = component.messages.length - before;
+		expect(burstRenders).toBeLessThanOrEqual(
+			Math.ceil((30 * STREAMING_REVEAL_FRAME_MS) / 5 / STREAMING_REVEAL_FRAME_MS) + 1,
+		);
+		expect(burstRenders).toBeLessThan(30);
+
+		// The final drain renders the full text.
+		vi.advanceTimersByTime(STREAMING_REVEAL_FRAME_MS * 20);
+		expect(textAt(latestMessage(component), 0)).toBe(fullText);
+	});
+
+	it("renders toolCall targets synchronously even when a drain is pending", () => {
+		vi.useFakeTimers();
+		const { component, controller } = makeController();
+
+		controller.begin(component, makeMessage([{ type: "text", text: "" }]));
+		controller.setTarget(makeMessage([{ type: "text", text: "hi" }]));
+		vi.advanceTimersByTime(STREAMING_REVEAL_FRAME_MS);
+		expect(textAt(latestMessage(component), 0)).toBe("hi");
+
+		// Same reveal budget as "hi" -> caught up: drain is deferred to a tick.
+		controller.setTarget(makeMessage([{ type: "text", text: "yo" }]));
+		const pending = component.messages.length;
+		expect(textAt(latestMessage(component), 0)).toBe("hi");
+		controller.setTarget(
+			makeMessage([
+				{ type: "text", text: "yo" },
+				{ type: "toolCall", id: "call-1", name: "read", arguments: { path: "README.md" } },
+			]),
+		);
+		// The toolCall boundary still renders synchronously, before any tick.
+		expect(component.messages.length).toBe(pending + 1);
+		expect(textAt(latestMessage(component), 0)).toBe("yo");
+		expect(latestMessage(component).content.at(-1)?.type).toBe("toolCall");
+		vi.advanceTimersByTime(STREAMING_REVEAL_FRAME_MS * 4);
+		expect(component.messages.length).toBe(pending + 1);
+	});
+
+	it("keeps synchronous per-setTarget renders when smooth streaming is off", () => {
+		vi.useFakeTimers();
+		const { component, controller } = makeController({ smooth: false });
+
+		controller.begin(component, makeMessage([{ type: "text", text: "" }]));
+		controller.setTarget(makeMessage([{ type: "text", text: "one" }]));
+		const before = component.messages.length;
+		controller.setTarget(makeMessage([{ type: "text", text: "one two" }]));
+
+		expect(component.messages.length).toBe(before + 1);
+		expect(textAt(latestMessage(component), 0)).toBe("one two");
+		vi.advanceTimersByTime(STREAMING_REVEAL_FRAME_MS * 5);
+		expect(component.messages.length).toBe(before + 1);
+	});
+	it("cancels a pending drain when smooth streaming is turned off", () => {
+		vi.useFakeTimers();
+		let smooth = true;
+		const component = new RecordingComponent();
+		const controller = new StreamingRevealController({
+			getSmoothStreaming: () => smooth,
+			getHideThinkingBlock: () => false,
+			getProseOnlyThinking: () => true,
+			requestRender: () => {},
+		});
+
+		controller.begin(component, makeMessage([{ type: "text", text: "" }]));
+		controller.setTarget(makeMessage([{ type: "text", text: "hi" }]));
+		vi.advanceTimersByTime(STREAMING_REVEAL_FRAME_MS);
+		controller.setTarget(makeMessage([{ type: "text", text: "yo" }]));
+
+		smooth = false;
+		controller.setTarget(makeMessage([{ type: "text", text: "abcdefghij" }]));
+		expect(textAt(latestMessage(component), 0)).toBe("abcdefghij");
+
+		vi.advanceTimersByTime(STREAMING_REVEAL_FRAME_MS);
+		expect(textAt(latestMessage(component), 0)).toBe("abcdefghij");
+		controller.stop();
+	});
+
+	it("flushes the trailing delta at the next tick and stops the timer", () => {
+		vi.useFakeTimers();
+		const { component, controller } = makeController();
+
+		controller.begin(component, makeMessage([{ type: "text", text: "" }]));
+		controller.setTarget(makeMessage([{ type: "text", text: "hi" }]));
+		vi.advanceTimersByTime(STREAMING_REVEAL_FRAME_MS);
+		expect(textAt(latestMessage(component), 0)).toBe("hi");
+
+		controller.setTarget(makeMessage([{ type: "text", text: "hi!" }]));
+		const before = component.messages.length;
+		vi.advanceTimersByTime(STREAMING_REVEAL_FRAME_MS);
+		expect(component.messages.length).toBe(before + 1);
+		expect(textAt(latestMessage(component), 0)).toBe("hi!");
+
+		const flushed = component.messages.length;
+		vi.advanceTimersByTime(STREAMING_REVEAL_FRAME_MS * 4);
+		expect(component.messages.length).toBe(flushed);
+	});
+
+	it("re-arms the timer for caught-up deltas and renders nothing while idle", () => {
+		vi.useFakeTimers();
+		const { component, controller } = makeController();
+
+		controller.begin(component, makeMessage([{ type: "text", text: "" }]));
+		controller.setTarget(makeMessage([{ type: "text", text: "hi" }]));
+		vi.advanceTimersByTime(STREAMING_REVEAL_FRAME_MS);
+		expect(textAt(latestMessage(component), 0)).toBe("hi");
+
+		// Caught up: "yo" has the same reveal budget, so the render is deferred.
+		controller.setTarget(makeMessage([{ type: "text", text: "yo" }]));
+		const before = component.messages.length;
+		vi.advanceTimersByTime(STREAMING_REVEAL_FRAME_MS);
+		expect(component.messages.length).toBe(before + 1);
+		expect(textAt(latestMessage(component), 0)).toBe("yo");
+
+		// No further deltas: subsequent ticks render nothing.
+		const drained = component.messages.length;
+		vi.advanceTimersByTime(STREAMING_REVEAL_FRAME_MS * 4);
+		expect(component.messages.length).toBe(drained);
+	});
+});

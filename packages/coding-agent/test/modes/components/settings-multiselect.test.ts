@@ -212,3 +212,17 @@ describe("multiselect settings (array-of-enum)", () => {
 		expect(settings.get("providers.webSearchOrder")).toEqual([secondChoice!.value, firstChoice!.value]);
 	});
 });
+
+describe("settings section sidebar", () => {
+	it("does not toggle the selected section's first setting", () => {
+		const comp = createSelector();
+		for (let i = 0; i < 7; i++) comp.handleInput("\x1b[C");
+		expect(settings.get("dev.autoqa")).toBe(true);
+
+		clickOption(comp, "Developer");
+		expect(settings.get("dev.autoqa")).toBe(true);
+
+		clickOption(comp, "Developer");
+		expect(settings.get("dev.autoqa")).toBe(true);
+	});
+});

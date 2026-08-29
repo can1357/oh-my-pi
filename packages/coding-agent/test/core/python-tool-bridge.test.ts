@@ -154,4 +154,53 @@ describe("Python tool bridge HTTP server", () => {
 			unregister();
 		}
 	});
+
+	it("force-stops with an in-flight response without an unhandled socket rejection", async () => {
+		const started = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const tool = {
+			name: "slow",
+			label: "slow",
+			description: "slow",
+			parameters: { type: "object" },
+			async execute(): Promise<AgentToolResult> {
+				started.resolve();
+				await release.promise;
+				return { content: [{ type: "text", text: "done" }] };
+			},
+		} as unknown as AgentTool;
+		const session = makeSession(new Map([["slow", tool]]));
+		const info = await ensurePyToolBridge();
+		const unregister = registerPyToolBridge("shutdown-session", "run-shutdown", { toolSession: session });
+		const unhandled: unknown[] = [];
+		const onUnhandled = (reason: unknown) => unhandled.push(reason);
+		process.on("unhandledRejection", onUnhandled);
+		try {
+			const response = call(info, {
+				session: "shutdown-session",
+				run: "run-shutdown",
+				name: "slow",
+				args: {},
+			}).then(
+				res => res.text(),
+				() => undefined,
+			);
+			await started.promise;
+			const stopping = disposePyToolBridge();
+			await Promise.resolve();
+			release.resolve();
+			await stopping;
+			await response;
+			const nextTurn = Promise.withResolvers<void>();
+			setImmediate(nextTurn.resolve);
+			await nextTurn.promise;
+
+			expect(unhandled).toEqual([]);
+		} finally {
+			release.resolve();
+			unregister();
+			process.off("unhandledRejection", onUnhandled);
+			await disposePyToolBridge();
+		}
+	});
 });

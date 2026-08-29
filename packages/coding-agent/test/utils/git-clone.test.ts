@@ -3,7 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as url from "node:url";
-import * as git from "@oh-my-pi/pi-coding-agent/utils/git";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 // Regression coverage for #1589: `git.clone({ sha })` used to hardcode
@@ -69,19 +69,19 @@ describe("git.clone with options.sha", () => {
 
 	test("checks out a non-tip SHA (regression for #1589)", async () => {
 		const target = path.join(tmpRoot, "clone-non-tip");
-		await git.clone(upstreamUrl, target, { sha: firstSha });
+		await vcs.clone(upstreamUrl, target, { sha: firstSha });
 		expect(gitRun(target, ["rev-parse", "HEAD"])).toBe(firstSha);
 	});
 
 	test("still succeeds when SHA happens to be the tip", async () => {
 		const target = path.join(tmpRoot, "clone-tip");
-		await git.clone(upstreamUrl, target, { sha: tipSha });
+		await vcs.clone(upstreamUrl, target, { sha: tipSha });
 		expect(gitRun(target, ["rev-parse", "HEAD"])).toBe(tipSha);
 	});
 
 	test("cleans up the target directory when SHA does not exist", async () => {
 		const target = path.join(tmpRoot, "clone-missing");
-		await expect(git.clone(upstreamUrl, target, { sha: "0".repeat(40) })).rejects.toThrow(/Failed to checkout SHA/);
+		await expect(vcs.clone(upstreamUrl, target, { sha: "0".repeat(40) })).rejects.toThrow(/failed to checkout SHA/);
 		await expect(fs.stat(target)).rejects.toMatchObject({ code: "ENOENT" });
 	});
 });

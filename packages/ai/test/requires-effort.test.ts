@@ -9,6 +9,11 @@ interface CapturedBody {
 	model?: string;
 	reasoning?: { enabled?: boolean; effort?: string };
 	reasoning_effort?: string;
+	chat_template_kwargs?: {
+		enable_thinking?: boolean;
+		preserve_thinking?: boolean;
+		reasoning_effort?: string;
+	};
 }
 
 const context: Context = {
@@ -30,6 +35,32 @@ function openRouterModel(thinking: ThinkingConfig): Model<"openai-completions"> 
 		cost: { input: 1, output: 2, cacheRead: 0.1, cacheWrite: 0 },
 		contextWindow: 1_048_576,
 		maxTokens: 65_535,
+	} satisfies ModelSpec<"openai-completions">);
+}
+
+function localQwenModel(): Model<"openai-completions"> {
+	return buildModel({
+		id: "qwen3.8-27b",
+		name: "Local Qwen 3.8",
+		api: "openai-completions",
+		provider: "local-qwen",
+		baseUrl: "http://127.0.0.1:18085/v1",
+		reasoning: true,
+		thinking: {
+			mode: "effort",
+			efforts: [Effort.Low, Effort.Medium, Effort.XHigh],
+			requiresEffort: false,
+		},
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 262_144,
+		maxTokens: 32_768,
+		compat: {
+			thinkingFormat: "qwen-chat-template",
+			qwenTemplateReasoningEffort: true,
+			supportsReasoningEffort: true,
+			reasoningContentField: "reasoning_content",
+		},
 	} satisfies ModelSpec<"openai-completions">);
 }
 
@@ -89,6 +120,18 @@ describe("thinking.requiresEffort clamping", () => {
 		expect(off.reasoning).toBeUndefined();
 		const disabled = await captureBody(plain, { disableReasoning: true });
 		expect(disabled.reasoning).toEqual({ enabled: false });
+	});
+
+	it("allows strict off for local Qwen3.8 chat templates", async () => {
+		const model = localQwenModel();
+		expect(model.thinking?.requiresEffort).toBe(false);
+
+		const body = await captureBody(model, { disableReasoning: true });
+		expect(body.reasoning_effort).toBeUndefined();
+		expect(body.chat_template_kwargs).toEqual({
+			preserve_thinking: true,
+			enable_thinking: false,
+		});
 	});
 
 	it("routes flag-free pairs off to the bare SKU and efforts to the thinking SKU", async () => {

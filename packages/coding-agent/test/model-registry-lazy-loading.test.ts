@@ -30,7 +30,7 @@ describe("ModelRegistry lazy bundled composition", () => {
 		await Promise.all(tempDirs.splice(0).map(tempDir => tempDir.remove().catch(() => {})));
 	});
 
-	test("construction with empty auth does not enrich bundled models", async () => {
+	test("construction does not materialize bundled or cached models", async () => {
 		const proc = Bun.spawn([process.execPath, probePath], {
 			cwd: path.join(import.meta.dir, "../../.."),
 			stdout: "pipe",

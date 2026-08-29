@@ -18,7 +18,8 @@ const INVALIDATED_OAUTH_TOKEN_PATTERN = /\binvalidated oauth token\b/i;
 /** Whether an upstream response explicitly says the supplied OAuth bearer was invalidated. */
 export function isInvalidatedOAuthTokenError(error: unknown): boolean {
 	if (typeof error === "object" && error !== null && "errorMessage" in error) {
-		const errorMessage = error.errorMessage;
+		const errorMessage =
+			"errorClassificationMessage" in error ? error.errorClassificationMessage : error.errorMessage;
 		if (typeof errorMessage === "string" && INVALIDATED_OAUTH_TOKEN_PATTERN.test(errorMessage)) return true;
 	}
 	const message = error instanceof Error ? error.message : typeof error === "string" ? error : undefined;

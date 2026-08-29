@@ -17,10 +17,12 @@
 	},
 	"scripts": {
 		"check": "biome check . && bun run check:types",
-		"check:types": "tsgo -p tsconfig.json --noEmit && tsgo -p adapters/edit/tsconfig.json --noEmit && tsgo -p scripts/tsconfig.json --noEmit",
+		"check:types": "tsgo -p tsconfig.json --noEmit && tsgo -p src/tb/tsconfig.json --noEmit && tsgo -p adapters/edit/tsconfig.json --noEmit && tsgo -p scripts/tsconfig.json --noEmit",
 		"lint": "biome lint .",
 		"serve": "bun run src/server.ts",
 		"bench:edit": "bun adapters/edit/cli.ts",
+		"bench:tb": "bun src/tb/cli.ts",
+		"bench:tb-floor": "bun scripts/tb-floor.ts",
 		"dev": "bun --hot src/server.ts",
 		"test": "bun test"
 	},
@@ -32,6 +34,7 @@
 		"@oh-my-pi/pi-coding-agent": "catalog:",
 		"@oh-my-pi/pi-utils": "catalog:",
 		"@oh-my-pi/typescript-edit-benchmark": "workspace:*",
+		"@stencil-hq/vibemon": "^0.3.2",
 		"clsx": "^2.1.1",
 		"d3-scale": "^4.0.2",
 		"d3-shape": "^3.2.0",

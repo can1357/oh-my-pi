@@ -1,4 +1,4 @@
-import * as git from "../utils/git";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import type { ASIData, ASIValue, MetricDirection, NumericMetricMap } from "./types";
 
 export const METRIC_LINE_PREFIX = "METRIC";
@@ -203,7 +203,7 @@ function sanitizeAsiValue(value: unknown): ASIValue | undefined {
 
 export async function tryGitStatus(cwd: string): Promise<string> {
 	try {
-		return await git.status(cwd, { porcelainV1: true, untrackedFiles: "all", z: true });
+		return await vcs.require(cwd).statusPorcelain({ untracked: "all", nulTerminated: true });
 	} catch {
 		return "";
 	}
@@ -211,7 +211,7 @@ export async function tryGitStatus(cwd: string): Promise<string> {
 
 export async function tryGitPrefix(cwd: string): Promise<string> {
 	try {
-		return await git.show.prefix(cwd);
+		return vcs.require(cwd).prefixOf(cwd) ?? "";
 	} catch {
 		return "";
 	}

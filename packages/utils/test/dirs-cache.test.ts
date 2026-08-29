@@ -5,6 +5,7 @@ import * as path from "node:path";
 import {
 	__resetDirsFromEnvForTests,
 	getActiveProfile,
+	getComposerCacheDir,
 	getConfigDirName,
 	getDocumentConversionCacheDir,
 	getMarketplacesRegistryPath,
@@ -59,6 +60,18 @@ describe("document conversion cache directory", () => {
 		expect(getDocumentConversionCacheDir()).toBe(
 			path.join(process.env.XDG_CACHE_HOME, "omp", "cache", "document-conversions"),
 		);
+	});
+
+	it("routes getComposerCacheDir to $XDG_CACHE_HOME/omp/cache/composer", async () => {
+		if (process.platform === "win32") return;
+
+		process.env.XDG_CACHE_HOME = path.join(tempRoot, "cache");
+		await fs.mkdir(path.join(process.env.XDG_CACHE_HOME, "omp"), { recursive: true });
+
+		const defaultAgentDir = path.join(os.homedir(), getConfigDirName(), "agent");
+		setAgentDir(defaultAgentDir);
+
+		expect(getComposerCacheDir()).toBe(path.join(process.env.XDG_CACHE_HOME, "omp", "cache", "composer"));
 	});
 
 	it("stays under a custom PI_CODING_AGENT_DIR", () => {

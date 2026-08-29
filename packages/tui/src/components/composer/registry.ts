@@ -1,3 +1,4 @@
+import { bandComposerStyle } from "./band";
 import { borderlessComposerStyle } from "./borderless";
 import { boxComposerStyle } from "./box";
 import { claudeComposerStyle } from "./claude";
@@ -9,6 +10,7 @@ import type { ComposerStyle, EditorBorderStyle } from "./types";
 
 const BUILTIN_COMPOSER_STYLES: Readonly<Record<string, ComposerStyle>> = {
 	box: boxComposerStyle,
+	band: bandComposerStyle,
 	claude: claudeComposerStyle,
 	pi: piComposerStyle,
 	borderless: borderlessComposerStyle,

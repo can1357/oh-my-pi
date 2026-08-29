@@ -237,7 +237,7 @@ describe("ACP lazy startup", () => {
 		await expect(runAcpStartup(Settings.isolated())).resolves.toEqual({
 			asyncEnabled: true,
 			asyncMaxJobs: 100,
-			bashAutoBackground: false,
+			bashAutoBackground: true,
 			bashAutoBackgroundThresholdMs: 60000,
 		});
 	});
@@ -274,7 +274,7 @@ describe("ACP lazy startup", () => {
 		const rpcOnlyExplicit = {
 			"async.enabled": false,
 			"async.maxJobs": 7,
-			"bash.autoBackground.enabled": true,
+			"bash.autoBackground.enabled": false,
 			"bash.autoBackground.thresholdMs": 5_000,
 		} as const;
 		const allPaths = [

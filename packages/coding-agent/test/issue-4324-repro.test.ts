@@ -14,7 +14,6 @@
  * shows up in `~/.omp/logs/omp.log` without regressing idle-worker shutdown.
  */
 import { describe, expect, it } from "bun:test";
-import * as path from "node:path";
 import { createWorkerSubprocess, type SpawnedSubprocess } from "@oh-my-pi/pi-coding-agent/subprocess/worker-client";
 
 interface FakeWorkerOutbound {
@@ -74,43 +73,6 @@ describe("issue #4324 — worker subprocess stderr survives to the exit error", 
 		// Truncation happened — we did not append the whole 64 KiB.
 		expect(err.message.length).toBeLessThan(20_000);
 	}, 15_000);
-
-	it("does not keep the parent alive while an unref'd worker stays idle", async () => {
-		// Regression guard for PR #4327 review: a pending
-		// `stderr.getReader().read()` keeps Bun's event loop alive even when
-		// the child process itself has been `unref()`'d. This wrapper process
-		// should exit as soon as createWorkerSubprocess returns; the long-lived
-		// worker command below merely proves no stderr drain was started while
-		// the worker is idle.
-		const repoRoot = path.resolve(import.meta.dir, "..");
-		const workerScript =
-			"const p = process.ppid; const lock = new Int32Array(new SharedArrayBuffer(4)); while (process.ppid === p) Atomics.wait(lock, 0, 0, 100);";
-		const wrapperScript = `
-			const { createWorkerSubprocess } = await import("@oh-my-pi/pi-coding-agent/subprocess/worker-client");
-			createWorkerSubprocess({
-				spawnCommand: { cmd: [process.execPath, "-e", ${JSON.stringify(workerScript)}] },
-				env: {},
-				exitLabel: "idle subprocess",
-			});
-		`;
-		const proc = Bun.spawn([process.execPath, "-e", wrapperScript], {
-			cwd: repoRoot,
-			stdout: "pipe",
-			stderr: "pipe",
-			// The wrapper simulates a production parent: the CI harness exports
-			// PI_TEST_RUNTIME=1, which makes isBunTestRuntime() suppress unref in
-			// the worker client and deterministically keeps the wrapper alive.
-			env: { ...process.env, BUN_ENV: "development", NODE_ENV: "development", PI_TEST_RUNTIME: "0" },
-		});
-		const [stdout, stderr, exitCode] = await Promise.all([
-			new Response(proc.stdout).text(),
-			new Response(proc.stderr).text(),
-			proc.exited,
-		]);
-		expect(stdout).toBe("");
-		expect(stderr).toBe("");
-		expect(exitCode).toBe(0);
-	}, 10_000);
 
 	it("does not surface intentional terminate() SIGKILLs as worker errors", async () => {
 		// Regression guard: piping stderr must not change the semantics of an

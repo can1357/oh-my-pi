@@ -228,10 +228,29 @@ stdenv.mkDerivation {
 
   disallowedReferences = [ bun ];
 
+  # patchelf leaves DT_VERDEF pointing at the pre-relocation `.gnu.version_d`
+  # address whenever it grows `.dynamic`: both the `--add-needed libstdc++.so.6`
+  # above and the autoPatchelfHook RPATH pass that follows it do. bun --compile
+  # output defines its own symbol versions (DT_VERDEFNUM), so glibc follows that
+  # stale pointer in `_dl_check_map_versions` and the binary SIGSEGVs in the
+  # loader before `main()` runs (issue #9881). Repoint DT_VERDEF at the current
+  # section address. preInstallCheck runs after every fixupPhase hook, including
+  # the autoPatchelfHook pass that follows postFixup, so it is the last point at
+  # which the field can be corrected; wrapProgram moved the real ELF to
+  # `.omp-wrapped`.
+  preInstallCheck = lib.optionalString stdenv.hostPlatform.isLinux ''
+    bun ${../scripts/fix-dt-verdef.ts} "$out/bin/.omp-wrapped"
+  '';
+
   doInstallCheck = true;
   installCheckPhase = ''
     runHook preInstallCheck
-    HOME="$TMPDIR" "$out/bin/omp" --smoke-test | grep -q "smoke-test: ok"
+    # Capture rather than pipe into grep: piping masks a signal death of omp
+    # under `set -o pipefail` (grep -q's exit status wins), which hid the
+    # loader SIGSEGV in issue #9881. With a variable, errexit surfaces omp's
+    # real exit status and stderr in the build log.
+    smokeOutput="$(HOME="$TMPDIR" "$out/bin/omp" --smoke-test)"
+    grep -q "smoke-test: ok" <<<"$smokeOutput"
     BUN_BE_BUN=1 "$out/bin/omp" -e \
       'if (Bun.version !== "${bun.version}" || typeof Bun.Image !== "function") process.exit(1)'
     ${lib.optionalString stdenv.hostPlatform.isLinux ''

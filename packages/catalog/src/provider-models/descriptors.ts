@@ -19,6 +19,7 @@ import {
 	cerebrasModelManagerOptions,
 	cloudflareAiGatewayModelManagerOptions,
 	coreWeaveModelManagerOptions,
+	deepinfraModelManagerOptions,
 	deepseekModelManagerOptions,
 	firepassModelManagerOptions,
 	fireworksModelManagerOptions,
@@ -56,6 +57,7 @@ import {
 	xaiModelManagerOptions,
 	xaiOAuthModelManagerOptions,
 	xiaomiModelManagerOptions,
+	yoloAutoModelManagerOptions,
 	zenmuxModelManagerOptions,
 	zhipuCodingPlanModelManagerOptions,
 } from "./openai-compat";
@@ -149,6 +151,14 @@ export const CATALOG_PROVIDERS = [
 		envVars: ["CURSOR_ACCESS_TOKEN"],
 		createModelManagerOptions: (config: ModelManagerConfig) => cursorModelManagerOptions(config),
 		catalogDiscovery: { label: "Cursor", envVars: ["CURSOR_API_KEY"], oauthProvider: "cursor" },
+	},
+	{
+		id: "deepinfra",
+		defaultModel: "deepseek-ai/DeepSeek-V4-Flash-0731",
+		envVars: ["DEEPINFRA_API_KEY"],
+		createModelManagerOptions: (config: ModelManagerConfig) => deepinfraModelManagerOptions(config),
+		dynamicModelsAuthoritative: true,
+		catalogDiscovery: { label: "DeepInfra", allowUnauthenticated: true },
 	},
 	{
 		id: "deepseek",
@@ -413,7 +423,7 @@ export const CATALOG_PROVIDERS = [
 	},
 	{
 		id: "synthetic",
-		defaultModel: "hf:zai-org/GLM-5.1",
+		defaultModel: "hf:zai-org/GLM-5.2",
 		envVars: ["SYNTHETIC_API_KEY"],
 		createModelManagerOptions: (config: ModelManagerConfig) => syntheticModelManagerOptions(config),
 		dynamicModelsAuthoritative: true,
@@ -520,6 +530,14 @@ export const CATALOG_PROVIDERS = [
 		envVars: ["XIAOMI_TOKEN_PLAN_SGP_API_KEY"],
 		createModelManagerOptions: (config: ModelManagerConfig) =>
 			xiaomiModelManagerOptions({ ...config, providerId: "xiaomi-token-plan-sgp", tokenPlanRegion: "sgp" }),
+	},
+	{
+		id: "yolo-auto",
+		defaultModel: "deepseek-flash-v4",
+		envVars: ["YOLO_AUTO_API_KEY"],
+		createModelManagerOptions: (config: ModelManagerConfig) => yoloAutoModelManagerOptions(config),
+		dynamicModelsAuthoritative: true,
+		catalogDiscovery: { label: "Yolo-Auto" },
 	},
 	{
 		id: "zai",

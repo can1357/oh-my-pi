@@ -18,6 +18,10 @@ const CODEX_PROVIDER = "openai-codex";
 const DAYBREAK_MODEL = "gpt-daybreak-blue-latest";
 const CODEX_CHATGPT_MODEL_DENIAL =
 	"The 'gpt-daybreak-blue-latest' model is not supported when using Codex with a ChatGPT account. (code=invalid_request_error)";
+const CURSOR_PROVIDER = "cursor";
+const CURSOR_MODEL = "cursor-grok-4.6";
+const CURSOR_PLAN_DENIAL =
+	'Connect error resource_exhausted: Error [details: {"error":"ERROR_RATE_LIMITED_CHANGEABLE","details":{"title":"Named models unavailable","detail":"Free plans can only use Auto."}}]';
 function farExpiry(): number {
 	return Date.now() + 60 * 60_000;
 }
@@ -611,6 +615,71 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 				modelId: "gpt-5.3-codex",
 			}),
 		).toBe("daybreak-denied");
+	});
+
+	test("Cursor plan denial blocks only that model and rotates to a sibling", async () => {
+		if (!store) throw new Error("test setup failed");
+		const cursorStorage = new AuthStorage(store, { usageProviderResolver: () => undefined });
+		vi.spyOn(oauthUtils, "getOAuthApiKey").mockImplementation(async (_provider, credentials) => {
+			const credential = credentials[CURSOR_PROVIDER];
+			if (!credential) return null;
+			return { apiKey: credential.access, newCredentials: credential };
+		});
+		await cursorStorage.set(CURSOR_PROVIDER, [
+			{
+				type: "oauth",
+				access: "cursor-plan-denied",
+				refresh: "ref-A",
+				expires: farExpiry(),
+				accountId: "account-A",
+			},
+			{
+				type: "oauth",
+				access: "cursor-plan-sibling",
+				refresh: "ref-B",
+				expires: farExpiry(),
+				accountId: "account-B",
+			},
+		]);
+
+		const sessionId = "cursor-model-policy";
+		const first = await cursorStorage.getApiKey(CURSOR_PROVIDER, sessionId, { modelId: CURSOR_MODEL });
+		expect(first).toBe("cursor-plan-denied");
+		const usageLimitSpy = vi.spyOn(cursorStorage, "markUsageLimitReached");
+		const rotated = await cursorStorage.rotateSessionCredential(CURSOR_PROVIDER, sessionId, {
+			error: new Error(CURSOR_PLAN_DENIAL),
+			modelId: CURSOR_MODEL,
+			apiKey: first,
+		});
+
+		expect(rotated).toBe(true);
+		expect(usageLimitSpy).not.toHaveBeenCalled();
+		expect(await cursorStorage.getApiKey(CURSOR_PROVIDER, sessionId, { modelId: CURSOR_MODEL })).toBe(
+			"cursor-plan-sibling",
+		);
+
+		const deniedRow = store
+			.listAuthCredentials(CURSOR_PROVIDER)
+			.find(row => row.credential.type === "oauth" && row.credential.access === "cursor-plan-denied");
+		if (!deniedRow) throw new Error("denied credential row missing");
+		const modelBlock = store.getCredentialBlock?.(
+			deniedRow.id,
+			`${CURSOR_PROVIDER}:oauth`,
+			"model-policy:cursor-grok-4.6",
+		);
+		expect(typeof modelBlock).toBe("number");
+		expect(store.getCredentialBlock?.(deniedRow.id, `${CURSOR_PROVIDER}:oauth`, "")).toBeUndefined();
+
+		const otherModelStorage = new AuthStorage(store, { usageProviderResolver: () => undefined });
+		await otherModelStorage.reload();
+		const otherModelSelections = new Set<string>();
+		for (let index = 0; index < 6; index += 1) {
+			const selected = await otherModelStorage.getApiKey(CURSOR_PROVIDER, `cursor-included-model-${index}`, {
+				modelId: "composer-2.5",
+			});
+			if (selected) otherModelSelections.add(selected);
+		}
+		expect(otherModelSelections.has("cursor-plan-denied")).toBe(true);
 	});
 
 	test("rotateSessionCredential treats structured usage codes as quota blocks despite generic messages", async () => {

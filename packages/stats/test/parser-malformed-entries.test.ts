@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { initDb, insertMessageStats, insertToolCalls } from "@oh-my-pi/omp-stats/db";
+import { getRecentRequests, initDb, insertMessageStats, insertToolCalls } from "@oh-my-pi/omp-stats/db";
 import { parseSessionFile } from "@oh-my-pi/omp-stats/parser";
 import { getSessionsDir } from "@oh-my-pi/pi-utils";
 import { installStatsTestIsolation } from "./helpers/temp-agent";
@@ -80,6 +80,50 @@ describe("malformed session entries", () => {
 
 		await initDb();
 		expect(insertMessageStats(result.stats)).toBe(1);
+	});
+
+	// Regression: legacy session files can carry a partially-populated
+	// `usage.cost` (e.g. only `total`). The parser passes such objects through
+	// untouched, and the raw cost used to bind NULL into the cost_* NOT NULL
+	// columns and crash the entire sync with SQLITE_CONSTRAINT_NOTNULL.
+	it("normalises a partial legacy usage.cost instead of failing the NOT NULL insert", async () => {
+		const file = await writeSession([
+			assistantEntry("a1", {
+				content: [],
+				stopReason: "stop",
+				usage: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, totalTokens: 15, cost: { total: 1 } },
+			}),
+		]);
+
+		const result = await parseSessionFile(file);
+		expect(result.stats).toHaveLength(1);
+
+		await initDb();
+		expect(insertMessageStats(result.stats)).toBe(1);
+
+		const request = getRecentRequests(1)[0];
+		expect(request?.usage.cost).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 1 });
+	});
+	it("preserves partial legacy cost components when total is missing", async () => {
+		const file = await writeSession([
+			assistantEntry("a1", {
+				content: [],
+				model: "claude-sonnet-4-6",
+				stopReason: "stop",
+				usage: { input: 10, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 10, cost: { input: 1 } },
+			}),
+		]);
+
+		const result = await parseSessionFile(file);
+		await initDb();
+		expect(insertMessageStats(result.stats)).toBe(1);
+		expect(getRecentRequests(1)[0]?.usage.cost).toEqual({
+			input: 1,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			total: 1,
+		});
 	});
 
 	it("skips assistant entries with no usage or model attribution", async () => {

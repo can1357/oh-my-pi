@@ -716,7 +716,11 @@ export function shortenPath(filePath: unknown, homeDir?: string): string {
 		return "";
 	}
 	const home = homeDir ?? os.homedir();
-	if (home && filePath.startsWith(home)) {
+	const windowsStyle = /^[A-Za-z]:[\\/]/.test(home) || home.startsWith("\\\\");
+	const hasHomePrefix = windowsStyle
+		? filePath.toLowerCase().startsWith(home.toLowerCase())
+		: filePath.startsWith(home);
+	if (home && hasHomePrefix) {
 		const suffix = filePath.slice(home.length);
 		if (suffix === "" || suffix.startsWith(path.posix.sep) || suffix.startsWith(path.win32.sep)) {
 			return `~${suffix.replaceAll(path.win32.sep, path.posix.sep)}`;

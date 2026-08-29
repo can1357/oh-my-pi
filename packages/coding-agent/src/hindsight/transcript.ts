@@ -1,10 +1,13 @@
 /**
  * Pull plain-text user/assistant messages out of a session manager.
  *
- * The Hindsight retain/recall API only takes flat `{role, content}` records,
- * so we drop tool calls, tool results, bash execution wrappers, custom
+ * These `{role, content, timestamp}` records are our internal conversation
+ * shape. The Hindsight retain API ultimately receives a serialized transcript
+ * string, so we drop tool calls, tool results, bash execution wrappers, custom
  * messages, and anything else that isn't a primary conversation turn. Each
- * surviving message's `TextContent` parts are joined with newlines.
+ * surviving message's `TextContent` parts are joined with newlines. The
+ * SessionEntry timestamp is preserved on the internal record as the source
+ * event time.
  */
 
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
@@ -40,7 +43,7 @@ export function extractMessages(sessionManager: ReadonlySessionManagerLike): Hin
 
 		const text = role === "user" ? extractUserText(msg) : extractAssistantText(msg as AssistantMessage);
 		if (!hasSubstantiveContent(text)) continue;
-		messages.push({ role, content: text });
+		messages.push({ role, content: text, timestamp: entry.timestamp });
 	}
 
 	return messages;

@@ -29,6 +29,8 @@ function makeTool(name: string): AgentTool {
 interface HarnessOptions {
 	extraRegistryTools?: readonly AgentTool[];
 	builtInToolNames?: Iterable<string>;
+	/** Registry tools active from the first turn, alongside the built-in `read`. */
+	initialActiveTools?: readonly AgentTool[];
 	rebuildGate?: { fail: boolean; calls?: number };
 	xdev?: XdevState;
 	/** Provider/id of the initial model; defaults to `anthropic/claude-sonnet-4-5`. */
@@ -103,7 +105,7 @@ describe("InteractiveMode plan.defaultOnStartup", () => {
 				initialState: {
 					model: initialModel,
 					systemPrompt: ["Test"],
-					tools: [readTool],
+					tools: [readTool, ...(options.initialActiveTools ?? [])],
 					messages: [],
 					thinkingLevel: Effort.Medium,
 				},
@@ -212,6 +214,7 @@ describe("InteractiveMode plan.defaultOnStartup", () => {
 			{
 				extraRegistryTools: [makeTool("write"), evalTool],
 				builtInToolNames: ["read", "write"],
+				initialActiveTools: [evalTool],
 				initialModel: { provider: "openai-codex", id: "gpt-5.6-sol" },
 			},
 		);
@@ -220,6 +223,9 @@ describe("InteractiveMode plan.defaultOnStartup", () => {
 
 		expect(created.planModeEnabled).toBe(true);
 		expect(session?.getActiveToolNames()).toContain("write");
+		// The eval tool advertises the bridge from this set, so a direct `write`
+		// must never appear as `tool.write()`.
+		expect(session?.getCodeModeDirectToolNames()).toContain("write");
 		expect(session?.getActiveToolNames()).toContain("eval");
 	});
 

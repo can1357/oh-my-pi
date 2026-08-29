@@ -99,14 +99,17 @@ export class SessionStatsTracker {
 			if (message.role === "assistant") {
 				const assistant = message;
 				toolCalls += assistant.content.filter(content => content.type === "toolCall").length;
-				totalInput += assistant.usage.input;
-				totalOutput += assistant.usage.output;
-				totalReasoning += assistant.usage.reasoningTokens ?? 0;
-				totalCacheRead += assistant.usage.cacheRead;
-				totalCacheWrite += assistant.usage.cacheWrite;
-				totalTokens += assistant.usage.totalTokens;
-				totalPremiumRequests += assistant.usage.premiumRequests ?? 0;
-				totalCost += assistant.usage.cost.total;
+				// Persisted and imported transcripts can predate usage metadata despite the current message type.
+				const usage = assistant.usage;
+				if (!usage) continue;
+				totalInput += usage.input;
+				totalOutput += usage.output;
+				totalReasoning += usage.reasoningTokens ?? 0;
+				totalCacheRead += usage.cacheRead;
+				totalCacheWrite += usage.cacheWrite;
+				totalTokens += usage.totalTokens;
+				totalPremiumRequests += usage.premiumRequests ?? 0;
+				totalCost += usage.cost.total;
 			}
 			if (message.role === "toolResult" && message.toolName === "task") {
 				const usage = taskToolUsage(message.details);

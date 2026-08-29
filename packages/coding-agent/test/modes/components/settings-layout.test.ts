@@ -97,6 +97,17 @@ describe("settings layout", () => {
 		}
 	});
 
+	it("shows the unexpected-stop classifier setting only in smart mode", () => {
+		const def = getSettingsForTab("providers").find(item => item.path === "providers.unexpectedStopModel");
+		if (!def?.condition) throw new Error("Unexpected Stop Model should be smart-mode only");
+
+		expect(def.condition()).toBe(false);
+		Settings.instance.set("features.unexpectedStopDetection", "smart");
+		expect(def.condition()).toBe(true);
+		Settings.instance.set("features.unexpectedStopDetection", "none");
+		expect(def.condition()).toBe(false);
+	});
+
 	it("shows provider request limits as a providers services submenu setting", () => {
 		const [def] = getSettingsForTab("providers").filter(item => item.path === "providers.maxInFlightRequests");
 

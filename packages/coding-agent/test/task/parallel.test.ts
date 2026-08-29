@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { mapWithConcurrencyLimitAllSettled } from "@oh-my-pi/pi-coding-agent/task/parallel";
+import { mapWithConcurrencyLimit, mapWithConcurrencyLimitAllSettled } from "@oh-my-pi/pi-coding-agent/task/parallel";
 
 describe("mapWithConcurrencyLimitAllSettled", () => {
 	it("waits for valid siblings after one item rejects and keeps input order", async () => {
@@ -54,5 +54,44 @@ describe("mapWithConcurrencyLimitAllSettled", () => {
 		expect(started).toEqual([0]);
 		expect(settled.aborted).toBe(true);
 		expect(settled.results).toEqual([{ status: "fulfilled", value: 0 }, undefined]);
+	});
+});
+
+describe("mapWithConcurrencyLimit", () => {
+	it("aborts immediately but waits for launched siblings to finish cleanup before rejecting", async () => {
+		const siblingStarted = Promise.withResolvers<void>();
+		const siblingCleaningUp = Promise.withResolvers<void>();
+		const releaseCleanup = Promise.withResolvers<void>();
+		const siblingAborted = Promise.withResolvers<void>();
+
+		const pending = mapWithConcurrencyLimit([0, 1], 2, async (item, _index, signal) => {
+			if (item === 0) {
+				await siblingStarted.promise;
+				throw new Error("first failed");
+			}
+
+			siblingStarted.resolve();
+			signal.addEventListener("abort", () => siblingAborted.resolve(), { once: true });
+			await siblingAborted.promise;
+			siblingCleaningUp.resolve();
+			await releaseCleanup.promise;
+			return item;
+		});
+		let settled = false;
+		void pending.then(
+			() => {
+				settled = true;
+			},
+			() => {
+				settled = true;
+			},
+		);
+
+		await siblingCleaningUp.promise;
+		for (let turn = 0; turn < 5; turn++) await Promise.resolve();
+		expect(settled).toBe(false);
+
+		releaseCleanup.resolve();
+		await expect(pending).rejects.toThrow("first failed");
 	});
 });

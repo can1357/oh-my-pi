@@ -483,6 +483,31 @@ describe("editToolRenderer", () => {
 		expect(rendered).toContain("plain streamed text");
 	});
 
+	it("uses the supplied theme when the injected diff renderer is unavailable", async () => {
+		const activeTheme = await getUiTheme();
+		const uiTheme = await themeModule.getThemeByName("light");
+		if (!uiTheme) throw new Error("Built-in light theme is unavailable");
+		expect(uiTheme.fg("toolDiffAdded", "COLOR")).not.toBe(activeTheme.fg("toolDiffAdded", "COLOR"));
+		const component = editToolRenderer.renderResult(
+			{
+				content: [{ type: "text", text: "Updated demo.ts" }],
+				details: { diff: "-1|const oldValue = 1;\n\n+2|const newValue = 2;", op: "update", path: "demo.ts" },
+			},
+			{ expanded: true, isPartial: false, renderContext: { editMode: "hashline" } },
+			uiTheme,
+			{ file_path: "demo.ts" },
+		);
+
+		const rows = component.render(160);
+		const removedRow = rows.find(row => row.includes("oldValue"));
+		const addedRow = rows.find(row => row.includes("newValue"));
+		const removedColor = uiTheme.fg("toolDiffRemoved", "COLOR").split("COLOR")[0];
+		const addedColor = uiTheme.fg("toolDiffAdded", "COLOR").split("COLOR")[0];
+
+		expect(removedRow).toContain(removedColor);
+		expect(addedRow).toContain(addedColor);
+	});
+
 	it("renders change stats inline on the result header with no separate metadata or stats row", async () => {
 		const uiTheme = await getUiTheme();
 		const diff = [" 115│ ctx", "-116│ old", "+117│ new one", "+118│ new two"].join("\n");
@@ -527,6 +552,28 @@ describe("editToolRenderer", () => {
 		expect(rendered).toContain("+40│line 39");
 		expect(rendered).not.toContain("+41│line 40");
 		expect(rendered).toContain("960 more lines");
+	});
+
+	it("bounds a completed collapsed diff by rendered rows", async () => {
+		const uiTheme = await getUiTheme();
+		const tail = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789".repeat(4);
+		const diff = Array.from({ length: 12 }, (_, index) => {
+			const line = index + 1;
+			return `-${line}|ROW_${line.toString().padStart(2, "0")}=${tail}\n+${line}|ROW_${line.toString().padStart(2, "0")}=changed-${tail}`;
+		}).join("\n");
+		const component = editToolRenderer.renderResult(
+			{
+				content: [{ type: "text", text: "Updated long-lines.txt" }],
+				details: { diff, op: "update" },
+			},
+			{ expanded: false, isPartial: false, renderContext: { renderDiff } },
+			uiTheme,
+			{ file_path: "long-lines.txt" },
+		);
+
+		const lines = component.render(120).map(line => Bun.stripANSI(line));
+		expect(lines).toHaveLength(43);
+		expect(lines.join("\n")).toContain("more lines");
 	});
 
 	it("renders completed edit gutters without inherited frame padding", async () => {
@@ -783,32 +830,5 @@ describe("editToolRenderer diff line wrapping", () => {
 		expect(bodyRows.length).toBeGreaterThanOrEqual(2);
 		expect(bodyRows[0]).toMatch(/^│123\| /);
 		for (const row of bodyRows.slice(1)) expect(row).not.toMatch(/^│\s*\|/);
-	});
-
-	it("keeps the numbered ASCII-pipe gutter for canonical rows through the plain fallback", async () => {
-		// Without renderContext the plain fallback passes canonical rows through
-		// verbatim; a numbered "-42|" row must still take the gutter path and
-		// carry an "   |" continuation gutter, not generic prose wrapping.
-		const uiTheme = await getUiTheme();
-		const component = editToolRenderer.renderResult(
-			{
-				content: [{ type: "text", text: "Updated demo.ts" }],
-				details: {
-					diff: "-42|    the previous synopsis paragraph rambled across quarterly reconciliation notes enumerating every provisional ledger amendment the archival committee had deferred pending review by the regional custodians",
-					op: "update",
-					path: "demo.ts",
-				},
-			},
-			{ expanded: true, isPartial: false },
-			uiTheme,
-			{ file_path: "demo.ts" },
-		);
-
-		const rows = component.render(100).map(row => Bun.stripANSI(row));
-		const bodyRows = rows.slice(1, -1);
-		// Precondition: the row actually wrapped past its first visual line.
-		expect(bodyRows.length).toBeGreaterThanOrEqual(2);
-		expect(bodyRows[0]).toMatch(/^│-42\|/);
-		for (const row of bodyRows.slice(1)) expect(row).toMatch(/^│\s+\|/);
 	});
 });

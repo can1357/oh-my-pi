@@ -68,10 +68,12 @@ export function detectCacheInvalidation(prev: Usage | undefined, current: Usage)
 const CACHE_INVALIDATION_RULE_WIDTH = 10;
 
 /**
- * Slim left-aligned divider rendered above an assistant turn whose request lost
- * the prompt cache. Mirrors the compaction divider's banner styling but spans
- * only a short rule plus label (not the full width) and carries no expandable
- * detail:
+ * Slim left-aligned divider rendered after an assistant turn whose request lost
+ * the prompt cache. It trails streamed content because usage arrives at message
+ * end, after completed rows may already be in native history.
+ *
+ * Mirrors the compaction divider's banner styling but spans only a short rule
+ * plus label (not the full width) and carries no expandable detail:
  *
  *   ────────── ⊘ cache miss · 50.9k tokens
  */

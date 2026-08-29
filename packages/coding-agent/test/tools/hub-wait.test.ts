@@ -134,4 +134,42 @@ describe("hub unified wait", () => {
 		expect(text).toContain("Zombie");
 		expect(text).toContain("no turn in flight");
 	});
+
+	test("bare wait returns a message already queued on the bus", async () => {
+		const registry = AgentRegistry.global();
+		// A recipient whose live hand-off throws is the only way a message
+		// reaches the mailbox: `IrcBus.send` buffers solely from that catch.
+		registry.register({
+			id: SELF_ID,
+			displayName: "main",
+			kind: "main",
+			session: {
+				deliverIrcMessage: () => Promise.reject(new Error("session disposed")),
+			},
+		} as unknown as Parameters<AgentRegistry["register"]>[0]);
+		// Idle peer: nothing is running, so the liveness gate would otherwise
+		// short-circuit the wait before the mailbox is ever consulted.
+		registry.register({ id: "Peer", displayName: "task", kind: "sub", session: null, status: "idle" });
+
+		const firstReceipt = await IrcBus.global().send({ from: "Peer", to: SELF_ID, body: "picked up the lock" });
+		const secondReceipt = await IrcBus.global().send({ from: "Peer", to: SELF_ID, body: "starting the edit" });
+		expect(firstReceipt.outcome).toBe("failed");
+		expect(secondReceipt.outcome).toBe("failed");
+		expect(IrcBus.global().unreadCount(SELF_ID)).toBe(2);
+
+		const manager = new AsyncJobManager({ onJobComplete: () => {} });
+		const result = await new HubTool(makeSession(manager)).execute("call_5", { op: "wait" });
+		const details = result.details as CoordinationDetails;
+
+		expect(details.op).toBe("wait");
+		expect(details.waited?.from).toBe("Peer");
+		expect(details.waited?.body).toBe("picked up the lock");
+		// Consumed exactly one message, not merely peeked or drained the backlog.
+		expect(IrcBus.global().unreadCount(SELF_ID)).toBe(1);
+		expect(
+			IrcBus.global()
+				.inbox(SELF_ID)
+				.map(message => message.body),
+		).toEqual(["starting the edit"]);
+	});
 });

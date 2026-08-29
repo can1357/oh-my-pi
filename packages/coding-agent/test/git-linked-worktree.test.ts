@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import { repo } from "@oh-my-pi/pi-coding-agent/utils/git";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
 
 // Builds the on-disk shape of a linked git worktree without invoking git:
 //   <project>/.git/                      ← shared common dir (basename ".git")
@@ -20,7 +20,7 @@ function linkWorktree(project: string, worktreeRoot: string): void {
 	fs.writeFileSync(path.join(worktreeRoot, ".git"), `gitdir: ${path.relative(worktreeRoot, gitDir)}\n`, "utf8");
 }
 
-describe("git repo.linkedWorktreeSync", () => {
+describe("git linked worktree resolution", () => {
 	let tempRoot: string;
 
 	beforeEach(() => {
@@ -36,7 +36,7 @@ describe("git repo.linkedWorktreeSync", () => {
 		const worktreeRoot = path.join(tempRoot, ".tree", "pi", "xx");
 		linkWorktree(project, worktreeRoot);
 
-		expect(repo.linkedWorktreeSync(worktreeRoot)).toEqual({ root: worktreeRoot, primaryRoot: project });
+		expect(vcs.git(worktreeRoot)?.linkedWorktree()).toEqual({ root: worktreeRoot, primaryRoot: project });
 	});
 
 	it("resolves from a subdirectory of the worktree to the worktree root", () => {
@@ -46,20 +46,20 @@ describe("git repo.linkedWorktreeSync", () => {
 		const sub = path.join(worktreeRoot, "packages", "foo");
 		fs.mkdirSync(sub, { recursive: true });
 
-		expect(repo.linkedWorktreeSync(sub)).toEqual({ root: worktreeRoot, primaryRoot: project });
+		expect(vcs.git(sub)?.linkedWorktree()).toEqual({ root: worktreeRoot, primaryRoot: project });
 	});
 
 	it("returns null for the primary checkout", () => {
 		const project = path.join(tempRoot, "pi");
 		linkWorktree(project, path.join(tempRoot, ".tree", "pi", "xx"));
 
-		expect(repo.linkedWorktreeSync(project)).toBeNull();
+		expect(vcs.git(project)?.linkedWorktree()).toBeNull();
 	});
 
 	it("returns null outside any repository", () => {
 		const bare = path.join(tempRoot, "loose");
 		fs.mkdirSync(bare, { recursive: true });
 
-		expect(repo.linkedWorktreeSync(bare)).toBeNull();
+		expect(vcs.git(bare)?.linkedWorktree() ?? null).toBeNull();
 	});
 });

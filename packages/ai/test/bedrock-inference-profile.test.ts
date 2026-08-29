@@ -142,7 +142,7 @@ function bedrockModel(id: string): Model<"bedrock-converse-stream"> {
 
 async function capturedRequestHost(
 	model: Model<"bedrock-converse-stream">,
-	options: { region?: string; profile?: string } = {},
+	options: { region?: string; profile?: string; guardrailIdentifier?: string } = {},
 ): Promise<string> {
 	const calls: string[] = [];
 	const customFetch: FetchImpl = Object.assign(
@@ -248,6 +248,61 @@ describe("Bedrock cross-region inference-profile geo routing", () => {
 				"bedrock-runtime.eu-west-3.amazonaws.com",
 			);
 		});
+	});
+
+	test("uses the guardrail ARN region when no model or AWS region is configured", async () => {
+		await withEnv(
+			{
+				AWS_REGION: undefined,
+				AWS_DEFAULT_REGION: undefined,
+				AWS_PROFILE: undefined,
+				AWS_SDK_LOAD_CONFIG: undefined,
+			},
+			async () => {
+				expect(
+					await capturedRequestHost(bedrockModel("openai.gpt-oss-20b-1:0"), {
+						guardrailIdentifier: "arn:aws:bedrock:eu-west-1:123456789012:guardrail/abcd1234",
+					}),
+				).toBe("bedrock-runtime.eu-west-1.amazonaws.com");
+			},
+		);
+	});
+
+	test("uses a same-geo guardrail ARN region for a geo profile without AWS region", async () => {
+		await withEnv(
+			{
+				AWS_REGION: undefined,
+				AWS_DEFAULT_REGION: undefined,
+				AWS_PROFILE: undefined,
+				AWS_SDK_LOAD_CONFIG: undefined,
+			},
+			async () => {
+				expect(
+					await capturedRequestHost(bedrockModel("eu.anthropic.claude-opus-4-8"), {
+						guardrailIdentifier: "arn:aws:bedrock:eu-west-2:123456789012:guardrail/abcd1234",
+					}),
+				).toBe("bedrock-runtime.eu-west-2.amazonaws.com");
+			},
+		);
+	});
+
+	test("honors an explicit region over the guardrail ARN region", async () => {
+		await withEnv(
+			{
+				AWS_REGION: undefined,
+				AWS_DEFAULT_REGION: undefined,
+				AWS_PROFILE: undefined,
+				AWS_SDK_LOAD_CONFIG: undefined,
+			},
+			async () => {
+				expect(
+					await capturedRequestHost(bedrockModel("openai.gpt-oss-20b-1:0"), {
+						region: "us-west-2",
+						guardrailIdentifier: "arn:aws:bedrock:eu-west-1:123456789012:guardrail/abcd1234",
+					}),
+				).toBe("bedrock-runtime.us-west-2.amazonaws.com");
+			},
+		);
 	});
 });
 

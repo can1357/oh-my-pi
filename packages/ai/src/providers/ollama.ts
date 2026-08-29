@@ -16,7 +16,7 @@ import type {
 } from "../types";
 import { normalizeSystemPrompts } from "../utils";
 import { clearStreamingPartialJson, kStreamingPartialJson } from "../utils/block-symbols";
-import { withEmptyCompletionRetry } from "../utils/empty-completion-retry";
+import { withReplaySafeStreamRetry } from "../utils/empty-completion-retry";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import type { CapturedHttpErrorResponse, RawHttpRequestDump } from "../utils/http-inspector";
 import {
@@ -785,4 +785,6 @@ const streamOllamaOnce = (
 
 /** Retry EOS-only Ollama completions before the agent loop sees an empty stop. */
 export const streamOllama: StreamFunction<"ollama-chat"> = (model, context, options) =>
-	withEmptyCompletionRetry(model, context, options, streamOllamaOnce);
+	withReplaySafeStreamRetry(model, context, options, streamOllamaOnce, {
+		retryEmptyCompletion: true,
+	});

@@ -7,6 +7,7 @@ from omp_rpc import (
     AutoCompactionEndEvent,
     AutoCompactionStartEvent,
     ExtensionUiRequest,
+    MessageUpdateEvent,
     SessionState,
     TodoReminderEvent,
     assistant_text,
@@ -17,6 +18,38 @@ from omp_rpc import (
 
 
 class ProtocolParsingTests(unittest.TestCase):
+    def test_parse_message_update_preserves_assistant_event_type(self) -> None:
+        assistant = {"role": "assistant"}
+        common = {"contentIndex": 0, "partial": assistant}
+        cases = {
+            "start": {"partial": assistant},
+            "text_start": common,
+            "thinking_start": common,
+            "toolcall_start": common,
+            "text_delta": {**common, "delta": "text"},
+            "thinking_delta": {**common, "delta": "thought"},
+            "toolcall_delta": {**common, "delta": "arguments"},
+            "text_end": {**common, "content": "text"},
+            "thinking_end": {**common, "content": "thought"},
+            "toolcall_end": {**common, "toolCall": {}},
+            "done": {"reason": "stop", "message": assistant},
+            "error": {"reason": "error", "error": assistant},
+        }
+
+        for event_type, event in cases.items():
+            with self.subTest(event_type=event_type):
+                parsed = parse_notification(
+                    {
+                        "type": "message_update",
+                        "message": assistant,
+                        "assistantMessageEvent": {"type": event_type, **event},
+                    }
+                )
+
+                self.assertIsInstance(parsed, MessageUpdateEvent)
+                assert isinstance(parsed, MessageUpdateEvent)
+                self.assertEqual(parsed.assistant_message_event["type"], event_type)
+
     def test_parse_session_state(self) -> None:
         state = parse_session_state(
             {

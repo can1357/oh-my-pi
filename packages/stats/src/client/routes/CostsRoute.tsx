@@ -13,7 +13,7 @@ import {
 	MODEL_COLORS,
 	styleDatasets,
 } from "../components/chart-shared";
-import { formatCost } from "../data/formatters";
+import { formatCost, formatEstimatedCost } from "../data/formatters";
 import { useResource } from "../data/useResource";
 import { buildCostSummary } from "../data/view-models";
 import type { CostTimeSeriesPoint, TimeRange } from "../types";
@@ -54,12 +54,22 @@ function CostOverviewPanel({ costSeries }: { costSeries: CostTimeSeriesPoint[] }
 	const summary = useMemo(() => buildCostSummary(costSeries), [costSeries]);
 
 	const cards = [
-		{ label: "Total Cost", value: formatCost(summary.totalCost) },
-		{ label: "Average / Day", value: formatCost(summary.avgDailyCost) },
+		{
+			label: "API-equivalent estimate",
+			value: formatEstimatedCost(summary.totalCost, summary.unpricedRequests),
+			sub:
+				summary.unpricedRequests > 0
+					? `Excludes ${summary.unpricedRequests.toLocaleString()} unpriced subscription request${summary.unpricedRequests === 1 ? "" : "s"}`
+					: undefined,
+		},
+		{
+			label: "Average estimate / Day",
+			value: formatEstimatedCost(summary.avgDailyCost, summary.unpricedRequests),
+		},
 		{
 			label: "Top Model",
 			value: summary.topModelName || "—",
-			sub: summary.topModelName ? formatCost(summary.topModelCost) : undefined,
+			sub: summary.topModelName ? `API-equivalent estimate: ${formatCost(summary.topModelCost)}` : undefined,
 		},
 	];
 
@@ -71,7 +81,7 @@ function CostOverviewPanel({ costSeries }: { costSeries: CostTimeSeriesPoint[] }
 					<p className="text-2xl font-bold stats-text-primary truncate" title={card.value}>
 						{card.value}
 					</p>
-					{card.sub && <p className="text-xs stats-text-muted mt-1 font-medium">Total spent: {card.sub}</p>}
+					{card.sub && <p className="text-xs stats-text-muted mt-1 font-medium">{card.sub}</p>}
 				</Panel>
 			))}
 		</div>
@@ -118,6 +128,10 @@ function CostTrendPanel({ costSeries }: { costSeries: CostTimeSeriesPoint[] }) {
 	const [byModel, setByModel] = useState(false);
 	const theme = useSystemTheme();
 	const chartTheme = CHART_THEMES[theme];
+	const unpricedRequests = useMemo(
+		() => costSeries.reduce((sum, point) => sum + point.unpricedRequests, 0),
+		[costSeries],
+	);
 
 	const chartData = useMemo(() => {
 		if (byModel) {
@@ -130,7 +144,7 @@ function CostTrendPanel({ costSeries }: { costSeries: CostTimeSeriesPoint[] }) {
 				bucketToValue: bucket => bucket.total,
 			});
 		}
-		return buildAggregateTimeSeries<CostTimeSeriesPoint, { total: number }>(costSeries, "Cost", {
+		return buildAggregateTimeSeries<CostTimeSeriesPoint, { total: number }>(costSeries, "API-equivalent estimate", {
 			initBucket: () => ({ total: 0 }),
 			accumulate: (bucket, point) => {
 				bucket.total += point.cost;
@@ -143,7 +157,7 @@ function CostTrendPanel({ costSeries }: { costSeries: CostTimeSeriesPoint[] }) {
 		return buildSharedPlugins({
 			chartTheme,
 			showLegend: byModel,
-			defaultLabel: "Cost",
+			defaultLabel: "API-equivalent estimate",
 			formatValue: v => `$${v.toFixed(2)}`,
 			footer: items => {
 				if (!byModel || items.length < 2) return undefined;
@@ -214,14 +228,18 @@ function CostTrendPanel({ costSeries }: { costSeries: CostTimeSeriesPoint[] }) {
 
 	return (
 		<Panel
-			title="Daily Cost"
-			subtitle="API spending over time"
+			title="Daily API-equivalent estimate"
+			subtitle={
+				unpricedRequests > 0
+					? `Public API rate-card value over time; excludes ${unpricedRequests.toLocaleString()} unpriced subscription request${unpricedRequests === 1 ? "" : "s"}`
+					: "Public API rate-card value over time"
+			}
 			actions={<SegmentedControl options={toggleOptions} value={byModel} onChange={setByModel} />}
 		>
 			<div className="h-[300px]">
 				{chartData.labels.length === 0 ? (
 					<div className="h-full flex items-center justify-center text-stats-muted text-sm">
-						No cost data available
+						No API-equivalent estimate data available
 					</div>
 				) : byModel && lineData ? (
 					<Line data={lineData} options={lineOptions} />

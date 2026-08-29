@@ -56,7 +56,8 @@ function restoreEnv(snapshot: Record<string, string | undefined>): void {
 	}
 }
 
-function restoreEnvValue(key: string, value: string | undefined): void {
+/** Restores an environment variable without coercing an absent value to `"undefined"`. */
+export function restoreEnvValue(key: string, value: string | undefined): void {
 	if (value === undefined) {
 		delete process.env[key];
 		delete Bun.env[key];

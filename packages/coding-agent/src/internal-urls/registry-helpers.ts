@@ -32,13 +32,22 @@ export function resetRegisteredArtifactDirsForTests(): void {
  * adopted one, so `agent://` must scan both or it 404s a live nested peer.
  * `addDir` dedup collapses the depth-0 case (both formulas agree) back to a
  * single entry.
+ *
+ * When `options.preferredDir` is supplied — the caller root's canonical
+ * artifact directory, derived from the caller's session file — it is inserted
+ * FIRST, ahead of every registry-derived dir. Under A/B same-id conflicts the
+ * caller's own root must win even when the process-global registry's single
+ * `Main` ref belongs to another root (or the caller's session is not
+ * registered at all). Absent a preferred dir, the pre-existing process-global
+ * ordering is preserved unchanged.
  */
-export function artifactsDirsFromRegistry(): string[] {
+export function artifactsDirsFromRegistry(options?: { preferredDir?: string }): string[] {
 	const dirs: string[] = [];
 	const addDir = (dir: string | null | undefined) => {
 		if (!dir) return;
 		if (!dirs.includes(dir)) dirs.push(dir);
 	};
+	if (options?.preferredDir) addDir(options.preferredDir);
 	for (const ref of AgentRegistry.global().list()) {
 		addDir(ref.session?.sessionManager?.getArtifactsDir());
 		if (ref.sessionFile) addDir(ref.sessionFile.slice(0, -6));
@@ -59,9 +68,10 @@ export function artifactsDirsFromRegistry(): string[] {
  * under `<artifactsDir>/<AgentId>/<AgentId>.<ChildId>.jsonl`. Advisor
  * transcripts (`__advisor*.jsonl`) are observability-only and excluded;
  * EPERM-rewrite backups (`.bak`) are skipped. When the same id appears in
- * multiple dirs, the first hit wins (registry dirs are scanned first).
+ * multiple dirs, the first hit wins (registry dirs are scanned first; a
+ * `preferredDir` from the caller root is scanned before them).
  */
-export async function sessionFilesFromDisk(): Promise<Map<string, string>> {
+export async function sessionFilesFromDisk(preferredDir?: string): Promise<Map<string, string>> {
 	const found = new Map<string, string>();
 	const seenDirs = new Set<string>();
 	const scan = async (dir: string, depth: number): Promise<void> => {
@@ -87,7 +97,8 @@ export async function sessionFilesFromDisk(): Promise<Map<string, string>> {
 			if (!found.has(id)) found.set(id, path.join(dir, name));
 		}
 	};
-	for (const dir of artifactsDirsFromRegistry()) await scan(dir, 0);
+	const dirs = preferredDir ? [preferredDir, ...artifactsDirsFromRegistry()] : artifactsDirsFromRegistry();
+	for (const dir of dirs) await scan(dir, 0);
 	return found;
 }
 

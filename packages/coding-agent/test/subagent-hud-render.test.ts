@@ -227,7 +227,7 @@ describe("subagent HUD lines", () => {
 	it("threads the detached flag from lifecycle and progress payloads", () => {
 		const eventBus = new EventBus();
 		const registry = new SessionObserverRegistry();
-		registry.subscribeToEventBus(eventBus);
+		registry.subscribeToEventBus(eventBus, eventBus);
 
 		eventBus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, makeLifecycle("Detached", 0, "background work", true));
 		eventBus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, makeLifecycle("Inline", 1, "sync work"));
@@ -248,10 +248,24 @@ describe("subagent HUD lines", () => {
 		}
 	});
 
+	it("dedupes frames dual-published on the session bus and the shared bus", () => {
+		const eventBus = new EventBus();
+		const registry = new SessionObserverRegistry();
+		registry.subscribeToEventBus(eventBus, eventBus);
+		const kinds: string[] = [];
+		registry.onChange(kind => kinds.push(kind));
+		const payload = makeLifecycle("DualPublished", 0, "dual-published frame");
+		eventBus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, payload);
+		eventBus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, payload);
+		expect(kinds).toEqual(["lifecycle"]);
+		expect(registry.getActiveSubagentCount()).toBe(1);
+		registry.dispose();
+	});
+
 	it("keeps subagent registry order stable while progress arrives out of order", () => {
 		const eventBus = new EventBus();
 		const registry = new SessionObserverRegistry();
-		registry.subscribeToEventBus(eventBus);
+		registry.subscribeToEventBus(eventBus, eventBus);
 		const activeIds = () =>
 			registry
 				.getSessions()

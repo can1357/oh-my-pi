@@ -98,6 +98,7 @@ function makeTurnEndContext(options: { lastAssistantMessage?: AssistantMessage }
 		pendingTools: new Map<string, unknown>(),
 		flushPendingModelSwitch: async () => {},
 		flushPendingCommandOutput: () => {},
+		syncRetryHintRow: () => {},
 		ui: { requestRender: () => {}, requestComponentRender: () => {} },
 		chatContainer: { removeChild: () => {} },
 		statusContainer: { clear: () => {}, disposeChildren: () => {}, addChild: () => {} },

@@ -194,3 +194,43 @@ impl Process {
 		Self { inner }
 	}
 }
+
+/// Replace the current process image via `execvp(3)`.
+///
+/// On success this never returns: the kernel tears down every other thread and
+/// the new program takes over this PID, controlling terminal, and inherited
+/// (non-`CLOEXEC`) file descriptors. Callers must flush logs and restore the
+/// terminal first — no JS or native cleanup runs after a successful call.
+///
+/// # Errors
+/// Returns an error, leaving the process untouched, when `argv` is empty, an
+/// argument contains an interior NUL byte, or the exec itself fails (e.g.
+/// executable not found). Windows has no exec-replace semantics, so this
+/// always errors there; callers fall back to spawn-and-wait.
+#[napi]
+pub fn exec_replace(argv: Vec<String>) -> Result<()> {
+	#[cfg(unix)]
+	{
+		use std::ffi::CString;
+
+		if argv.is_empty() {
+			return Err(napi::Error::from_reason("exec_replace: argv must not be empty"));
+		}
+		let args = argv
+			.into_iter()
+			.map(CString::new)
+			.collect::<std::result::Result<Vec<_>, _>>()
+			.map_err(|err| napi::Error::from_reason(format!("exec_replace: {err}")))?;
+		let mut ptrs: Vec<*const libc::c_char> = args.iter().map(|arg| arg.as_ptr()).collect();
+		ptrs.push(std::ptr::null());
+		// SAFETY: `ptrs` is a NUL-terminated array of pointers into `args`, which
+		// outlives the call; execvp only returns on failure.
+		unsafe { libc::execvp(ptrs[0], ptrs.as_ptr()) };
+		Err(napi::Error::from_reason(format!("execvp failed: {}", std::io::Error::last_os_error())))
+	}
+	#[cfg(not(unix))]
+	{
+		let _ = argv;
+		Err(napi::Error::from_reason("exec_replace is unsupported on this platform"))
+	}
+}

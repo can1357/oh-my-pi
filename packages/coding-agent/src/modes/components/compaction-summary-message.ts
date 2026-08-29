@@ -135,15 +135,19 @@ export class CompactionSummaryMessageComponent implements Component {
 	}
 
 	#detailMarkdown(): string {
-		const tokenStr =
-			this.message.tokensAfter !== undefined
-				? `${this.message.tokensBefore.toLocaleString()} to ${this.message.tokensAfter.toLocaleString()}`
-				: this.message.tokensBefore.toLocaleString();
+		const tokenLine =
+			this.message.tokensBefore > 0
+				? this.message.tokensAfter !== undefined
+					? `Compacted from ${this.message.tokensBefore.toLocaleString()} to ${this.message.tokensAfter.toLocaleString()} tokens`
+					: `Compacted from ${this.message.tokensBefore.toLocaleString()} tokens`
+				: this.message.tokensAfter !== undefined
+					? `Compacted to ${this.message.tokensAfter.toLocaleString()} tokens`
+					: "Compacted context";
 		const frameCount = this.message.images?.length ?? 0;
 		const frameNote =
 			frameCount > 0 ? `\n\n_${frameCount} snapcompact frame${frameCount === 1 ? "" : "s"} attached_` : "";
 		const warningNote = this.message.warning ? `\n\n${theme.icon.warning} **Warning:** ${this.message.warning}` : "";
-		return `**Compacted from ${tokenStr} tokens**${warningNote}\n\n${this.message.summary}${frameNote}`;
+		return `**${tokenLine}**${warningNote}\n\n${this.message.summary}${frameNote}`;
 	}
 }
 

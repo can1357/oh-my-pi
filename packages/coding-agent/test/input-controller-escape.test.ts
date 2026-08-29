@@ -160,6 +160,8 @@ function createContext(): {
 			queuedMessageCount: 0,
 			messages: [],
 			extensionRunner: undefined,
+			customCommands: [],
+			promptTemplates: [],
 			abort,
 			abortBash,
 			abortEval,
@@ -192,6 +194,8 @@ function createContext(): {
 		} as unknown as InteractiveModeContext["keybindings"],
 		compactionQueuedMessages: [],
 		mcpTestEscapeHandlers: new Set(),
+		skillCommands: new Map(),
+		fileSlashCommands: new Set<string>(),
 		isBashMode: false,
 		isPythonMode: false,
 		optimisticUserMessageSignature: undefined,
@@ -443,7 +447,7 @@ describe("InputController escape behavior", () => {
 		expect(spies.abort).not.toHaveBeenCalled();
 	});
 
-	it("keeps every overlapping /mcp test cancellable before aborting the stream", () => {
+	it("keeps every overlapping /mcp test cancellable and consumes ownership on dispatch", () => {
 		const { ctx, editor, spies } = createContext();
 		mutableSessionState(ctx).isStreaming = true;
 		const firstTestEscapeHandler = vi.fn();
@@ -458,13 +462,16 @@ describe("InputController escape behavior", () => {
 		expect(firstTestEscapeHandler).toHaveBeenCalledTimes(1);
 		expect(latestTestEscapeHandler).toHaveBeenCalledTimes(1);
 		expect(spies.abort).not.toHaveBeenCalled();
+		// One press consumes the ownership: the next Esc must reach the stream
+		// abort below instead of being swallowed by stale registrations.
+		expect(ctx.mcpTestEscapeHandlers.size).toBe(0);
 
-		ctx.mcpTestEscapeHandlers.delete(latestTestEscapeHandler);
 		editor.onEscape?.();
 
-		expect(firstTestEscapeHandler).toHaveBeenCalledTimes(2);
+		expect(firstTestEscapeHandler).toHaveBeenCalledTimes(1);
 		expect(latestTestEscapeHandler).toHaveBeenCalledTimes(1);
-		expect(spies.abort).not.toHaveBeenCalled();
+		expect(spies.abort).toHaveBeenCalledTimes(1);
+		expect(spies.abort).toHaveBeenCalledWith({ reason: USER_INTERRUPT_LABEL });
 	});
 
 	it("dismisses an active /btw panel before aborting the main stream", () => {
@@ -673,7 +680,7 @@ describe("InputController escape behavior", () => {
 		expect(ctx.unfocusSession).toHaveBeenCalledTimes(1);
 		expect(ctx.focusParentSession).not.toHaveBeenCalled();
 	});
-	it("opens the tree selector and clears the display on default double-Esc", () => {
+	it("opens the tree selector and forces a viewport repaint on default double-Esc", () => {
 		const { ctx, editor, spies } = createContext();
 		const controller = new InputController(ctx);
 
@@ -683,10 +690,14 @@ describe("InputController escape behavior", () => {
 
 		expect(ctx.showTreeSelector).toHaveBeenCalledTimes(1);
 		expect(ctx.showUserMessageSelector).not.toHaveBeenCalled();
-		expect(spies.resetDisplay).toHaveBeenCalledTimes(1);
+		// Never `resetDisplay()`: that replays the whole transcript and wedges
+		// double-Esc on long sessions (invisible selector behind a multi-second
+		// scrollback replay).
+		expect(spies.requestRender).toHaveBeenCalledWith(true);
+		expect(spies.resetDisplay).not.toHaveBeenCalled();
 	});
 
-	it("opens the message selector and clears the display when double-Esc is configured for branch", () => {
+	it("opens the message selector and forces a viewport repaint when double-Esc is configured for branch", () => {
 		Settings.instance.override("doubleEscapeAction", "branch");
 		const { ctx, editor, spies } = createContext();
 		const controller = new InputController(ctx);
@@ -697,7 +708,8 @@ describe("InputController escape behavior", () => {
 
 		expect(ctx.showUserMessageSelector).toHaveBeenCalledTimes(1);
 		expect(ctx.showTreeSelector).not.toHaveBeenCalled();
-		expect(spies.resetDisplay).toHaveBeenCalledTimes(1);
+		expect(spies.requestRender).toHaveBeenCalledWith(true);
+		expect(spies.resetDisplay).not.toHaveBeenCalled();
 	});
 	it("preserves typed editor text on Esc without opening selectors or aborting", () => {
 		const { ctx, editor, spies } = createContext();

@@ -36,7 +36,7 @@ beforeEach(() => {
 
 afterEach(async () => {
 	vi.restoreAllMocks();
-	AgentStorage.resetInstance();
+	AgentStorage.close();
 	resetSettingsForTest();
 	if (originalAgentDir) {
 		setAgentDir(originalAgentDir);

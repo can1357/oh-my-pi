@@ -2,7 +2,7 @@
 
 This document describes the standard API-error retry path coordinated by `AgentSession` and implemented by `TurnRecovery`.
 
-It explicitly excludes context-overflow recovery via auto-compaction. Overflow is handled by compaction logic and is documented separately in [`compaction.md`](../docs/compaction.md).
+It explicitly excludes context-overflow recovery via auto-compaction. Overflow is handled by compaction logic and is documented separately in [`compaction.md`](./compaction.md).
 
 ## Implementation files
 

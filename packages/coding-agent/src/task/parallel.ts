@@ -16,7 +16,7 @@ export interface ParallelResult<R> {
  * On abort: returns partial results with `aborted: true`. Completed tasks are preserved,
  * in-progress tasks will complete with their abort handling, skipped tasks are `undefined`.
  *
- * On error: fails fast - does not wait for other workers to complete.
+ * On error: cancels siblings immediately, waits for launched work to drain, then rejects with the first error.
  *
  * @param items - Items to process
  * @param concurrency - Maximum concurrent operations
@@ -39,11 +39,8 @@ export async function mapWithConcurrencyLimit<T, R>(
 	const abortController = new AbortController();
 	const workerSignal = signal ? AbortSignal.any([signal, abortController.signal]) : abortController.signal;
 
-	// Promise that rejects on first error - used to fail fast (not for abort)
-	let rejectFirst: (error: unknown) => void;
-	const firstErrorPromise = new Promise<never>((_, reject) => {
-		rejectFirst = reject;
-	});
+	let firstError: unknown;
+	let failed = false;
 
 	const worker = async (): Promise<void> => {
 		while (true) {
@@ -54,13 +51,15 @@ export async function mapWithConcurrencyLimit<T, R>(
 			try {
 				results[index] = await fn(items[index], index, workerSignal);
 			} catch (error) {
-				// On abort, the fn itself handles it and returns a result
-				// Only propagate non-abort errors
+				// The first non-cancellation failure stops new work immediately.
+				// Every worker then returns normally so the pool can be drained
+				// before the original error escapes to its caller.
 				if (!workerSignal.aborted) {
+					failed = true;
+					firstError = error;
 					abortController.abort();
-					rejectFirst(error);
-					throw error;
 				}
+				return;
 			}
 		}
 	};
@@ -70,14 +69,12 @@ export async function mapWithConcurrencyLimit<T, R>(
 		.fill(null)
 		.map(() => worker());
 
-	try {
-		await Promise.race([Promise.all(workers), firstErrorPromise]);
-	} catch (error) {
-		// If aborted, don't rethrow - return partial results
-		if (signal?.aborted) {
-			return { results, aborted: true };
-		}
-		throw error;
+	await Promise.all(workers);
+	if (signal?.aborted) {
+		return { results, aborted: true };
+	}
+	if (failed) {
+		throw firstError;
 	}
 
 	return { results, aborted: signal?.aborted ?? false };

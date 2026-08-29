@@ -103,7 +103,10 @@ export function createProcessTerminalRenderHarness(
 		}),
 	];
 
-	const terminal = new ProcessTerminal();
+	// Force non-ConPTY behavior so kitty-flag and write-chunking assertions are
+	// hermetic: the ambient WSL env (WSL_DISTRO_NAME / WSL_INTEROP) must not
+	// change what the suite observes. See ProcessTerminalOptions.
+	const terminal = new ProcessTerminal({ conpty: false });
 	const tui = new TUI(terminal);
 	const probe = new WidthProbe();
 	tui.addChild(probe);

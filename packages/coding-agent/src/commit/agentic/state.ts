@@ -1,3 +1,4 @@
+import type { VcsHunkSelection } from "@oh-my-pi/pi-natives";
 import type { CommitType, ConventionalAnalysis, ConventionalDetail, NumstatEntry } from "../../commit/types";
 
 export interface GitOverviewSnapshot {
@@ -16,15 +17,7 @@ export interface CommitProposal {
 	warnings: string[];
 }
 
-export type HunkSelector =
-	| { type: "all" }
-	| { type: "indices"; indices: number[] }
-	| { type: "lines"; start: number; end: number };
-
-export interface FileChange {
-	path: string;
-	hunks: HunkSelector;
-}
+export type FileChange = VcsHunkSelection;
 
 export interface SplitCommitGroup {
 	changes: FileChange[];

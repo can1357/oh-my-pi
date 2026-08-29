@@ -107,6 +107,22 @@ export interface WorkerSpawnCommand {
 export const SMOKE_TEST_TIMEOUT_MS = 30_000;
 
 /**
+ * Resolve the command that re-enters this CLI's entrypoint: the compiled
+ * binary itself, or the runtime plus the declared worker-host entry. Used by
+ * the TUI `/restart` relaunch; workers go through {@link resolveWorkerSpawnCmd},
+ * whose no-host fallback deliberately differs (cwd-relative entry pinned to the
+ * package root for `bun test` IPC). Outside a CLI host this falls back to the
+ * absolute path of `src/cli.ts` so the relaunch keeps the caller's cwd.
+ */
+export function resolveCliEntryCmd(): string[] {
+	const executable = stripWindowsExtendedLengthPathPrefix(process.execPath);
+	if (isCompiledBinary()) return [executable];
+	const hostEntry = workerHostEntry();
+	if (hostEntry) return [executable, hostEntry];
+	return [executable, path.resolve(import.meta.dir, "..", "cli.ts")];
+}
+
+/**
  * Resolve the command used to relaunch the agent CLI into worker mode. In a
  * compiled binary the entry point is the binary itself; otherwise re-enter the
  * declared worker-host entry by absolute path. Workers deliberately spawn

@@ -53,15 +53,30 @@ function prepareFake(output: string, options: { exitCode?: number; restartOnce?:
 	return { argsFile, runsFile, signalsFile, restartMarker };
 }
 
-async function waitForRestart(marker: string): Promise<void> {
-	if (fs.existsSync(marker) && fs.readFileSync(marker, "utf8").includes("restarted")) return;
+async function waitForFileContent(filePath: string, matches: (text: string) => boolean): Promise<void> {
+	const matchesCurrentContent = (): boolean => {
+		try {
+			return matches(fs.readFileSync(filePath, "utf8"));
+		} catch {
+			return false;
+		}
+	};
+	if (matchesCurrentContent()) return;
 	const { promise, resolve } = Promise.withResolvers<void>();
-	const watcher = fs.watch(fakeBinDir, () => {
-		if (fs.existsSync(marker) && fs.readFileSync(marker, "utf8").includes("restarted")) resolve();
-	});
-	if (fs.existsSync(marker) && fs.readFileSync(marker, "utf8").includes("restarted")) resolve();
-	await promise;
-	watcher.close();
+	const listener = (): void => {
+		if (matchesCurrentContent()) resolve();
+	};
+	fs.watchFile(filePath, { interval: 25, persistent: false }, listener);
+	listener();
+	try {
+		await promise;
+	} finally {
+		fs.unwatchFile(filePath, listener);
+	}
+}
+
+async function waitForRestart(marker: string): Promise<void> {
+	await waitForFileContent(marker, text => text.includes("restarted"));
 }
 
 function recordedArgs(invocation: FakeInvocation): string[] {
@@ -70,14 +85,7 @@ function recordedArgs(invocation: FakeInvocation): string[] {
 }
 
 async function waitForSignal(invocation: FakeInvocation): Promise<void> {
-	if (fs.existsSync(invocation.signalsFile)) return;
-	const { promise, resolve } = Promise.withResolvers<void>();
-	const watcher = fs.watch(fakeBinDir, (_event, filename) => {
-		if (filename === path.basename(invocation.signalsFile) && fs.existsSync(invocation.signalsFile)) resolve();
-	});
-	if (fs.existsSync(invocation.signalsFile)) resolve();
-	await promise;
-	watcher.close();
+	await waitForFileContent(invocation.signalsFile, text => text.includes("SIGTERM"));
 }
 
 async function stopAndObserve(exposure: ActiveExposure, invocation: FakeInvocation): Promise<void> {

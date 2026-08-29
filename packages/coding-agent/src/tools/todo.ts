@@ -83,7 +83,7 @@ const todoSchema = type({
 	// No `atLeastLength(1)` here: `items` is only meaningful for `init`/`append`,
 	// and both enforce non-empty with op-specific errors. A stray `items: []` on
 	// an op that ignores it (e.g. `view`) must not be a hard schema rejection.
-	"items?": type("string").describe("task content").array().describe("tasks to append"),
+	"items?": type("string").describe("task content").array().describe("tasks for single-phase init or append"),
 	"reason?": type("string").describe("blocker note (block op)"),
 }).describe("apply a single todo operation");
 

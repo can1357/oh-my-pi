@@ -34,8 +34,8 @@ Does not cover extension authoring UX or command UI.
 - Message shapes are defined in `types.ts` (`JsonRpcRequest`, `JsonRpcNotification`, `JsonRpcResponse`, `JsonRpcMessage`).
 - MCP client logic (`client.ts`) decides method order and session handshake:
   1. `initialize` request
-  2. for Streamable HTTP transports, start the optional background SSE listener after the initialize response has established any session id
-  3. `notifications/initialized` notification
+  2. `notifications/initialized` notification, sent before any further session traffic
+  3. for Streamable HTTP transports, start the optional background SSE listener once the initialize response has established any session id
   4. method calls like `tools/list`, `tools/call`
 
 ### Transport layer (`MCPTransport`)
@@ -212,7 +212,7 @@ Two SSE paths exist:
 
 2. **Background SSE listener** (`startSSEListener()`)
    - optional GET listener for server-initiated notifications and server-to-client requests
-   - `connectToServer()` starts it for Streamable HTTP transports after `initialize` and before `notifications/initialized`
+   - `connectToServer()` starts it for Streamable HTTP transports after the `notifications/initialized` notification
    - listener startup waits up to one second, or less for very small request timeouts; `timeout: 0` / `OMP_MCP_TIMEOUT_MS=0` disables that startup deadline
    - if GET returns `405`, another non-OK status, no body, or times out, listener silently disables itself
 
@@ -232,7 +232,7 @@ SSE JSON parsing errors bubble out of `readSseJson` and reject request/listener.
 - The first `endpoint` event is control data, not JSON; its `data` value is resolved against the configured URL and stored as the JSON-RPC POST endpoint.
 - `request()` and `notify()` POST JSON-RPC frames to the discovered endpoint.
 - JSON-RPC responses, notifications, and server-to-client requests are read from `event: message` stream events and correlated by request id.
-- If the stream ends, pending requests fail with `Legacy SSE stream closed`; managed connections may reconnect through `onClose`.
+- If the stream ends, pending requests fail with `Transport closed: legacy SSE stream closed`; managed connections may reconnect through `onClose`.
 
 ## `json-rpc.ts` utility vs transport abstraction
 
@@ -271,7 +271,7 @@ They fail fast and propagate errors.
 - **Stdio stream/process ends**: transport closes; pending requests rejected as `Transport closed`; manager-managed connections trigger reconnect.
 - **HTTP non-2xx**: request/notify throws HTTP error; managed OAuth requests can refresh auth and retry once on 401/403.
 - **Invalid JSON response**: parse exception propagated.
-- **Legacy SSE stream ends**: pending requests fail with `Legacy SSE stream closed`; manager-managed connections trigger reconnect.
+- **Legacy SSE stream ends**: pending requests fail with `Transport closed: legacy SSE stream closed`; manager-managed connections trigger reconnect.
 - **SSE ends without matching id**: request fails with `No response received for request ID ...`.
 - **Timeout**: transport-specific timeout error.
 - **Caller abort**: AbortError/reason propagated from caller signal where the method accepts one.

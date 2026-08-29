@@ -57,6 +57,7 @@ rust_shared_library(
         "//crates/pi-ast",
         "//crates/pi-iso",
         "//crates/pi-shell",
+        "//crates/pi-vcs",
         "//crates/pi-voice",
         "//crates/pi-walker",
     ],

@@ -10,6 +10,7 @@ import {
 	readInterpreterSetting as sharedReadInterpreterSetting,
 	toExecutorBackendResult,
 } from "../backend-helpers";
+import type { BackendProbeOptions } from "../probe";
 import { executeRuby } from "./executor";
 import { checkRubyKernelAvailability } from "./kernel";
 
@@ -28,8 +29,8 @@ export default {
 	label: "Ruby",
 	highlightLang: "ruby",
 
-	async isAvailable(session: ToolSession): Promise<boolean> {
-		const availability = await checkRubyKernelAvailability(session.cwd, readInterpreterSetting(session));
+	async isAvailable(session: ToolSession, opts?: BackendProbeOptions): Promise<boolean> {
+		const availability = await checkRubyKernelAvailability(session.cwd, readInterpreterSetting(session), opts);
 		return availability.ok;
 	},
 

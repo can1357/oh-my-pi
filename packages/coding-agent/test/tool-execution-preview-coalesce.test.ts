@@ -117,4 +117,38 @@ describe("streaming edit preview coalescing", () => {
 			component.stopAnimation();
 		}
 	});
+	// Transcript rebuild constructs a historical edit call and applies its
+	// persisted result within the same sync replay chunk. The renderer prefers
+	// `details.diff` from that result, so the streaming preview compute must be
+	// cancelled before it runs — re-running the edit engine for every historical
+	// edit made session restore take multiple seconds (sloppy matcher dominated
+	// the restore CPU profile).
+	test("a result settled in the same tick as construction cancels the preview compute", async () => {
+		const spy = spyOn(EDIT_MODE_STRATEGIES.replace, "computeDiffPreview");
+		restore = () => spy.mockRestore();
+
+		const ui = { requestRender() {} } as unknown as TUI;
+		const tool = { mode: "replace" } as unknown as AgentTool;
+		const component = new ToolExecutionComponent(
+			"edit",
+			{ path: file, old_string: "const a = 1;", new_string: "const a = 2;" },
+			{},
+			tool,
+			ui,
+			tmpDir,
+		);
+		try {
+			component.updateResult(
+				{
+					content: [{ type: "text", text: "ok" }],
+					details: { diff: "@@ -1 +1 @@\n-const a = 1;\n+const a = 2;", firstChangedLine: 1 },
+				},
+				false,
+			);
+			await component.whenPreviewSettled();
+			expect(spy).not.toHaveBeenCalled();
+		} finally {
+			component.stopAnimation();
+		}
+	});
 });

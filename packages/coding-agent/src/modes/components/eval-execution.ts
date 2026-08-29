@@ -28,6 +28,11 @@ export class EvalExecutionComponent extends Container {
 	#loader: Loader;
 	#truncation?: TruncationMeta;
 	#expanded = false;
+	// Post-finalize mutation counter (FinalizableBlock.getTranscriptBlockVersion):
+	// a completed cell's block still mutates on expansion toggles, and the
+	// transcript's width-epoch resolution and committed-render bypass must
+	// observe that.
+	#blockVersion = 0;
 	#contentContainer: Container;
 
 	#highlightLang(): "python" | "javascript" {
@@ -70,7 +75,12 @@ export class EvalExecutionComponent extends Container {
 		return this.#status !== "running";
 	}
 
+	getTranscriptBlockVersion(): number {
+		return this.#blockVersion;
+	}
+
 	setExpanded(expanded: boolean): void {
+		if (this.#expanded !== expanded) this.#blockVersion++;
 		this.#expanded = expanded;
 		this.#updateDisplay();
 	}

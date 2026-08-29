@@ -2,6 +2,78 @@
 
 ## [Unreleased]
 
+## [18.0.10] - 2026-08-28
+
+### Added
+
+- Added `postmortem.drainStdout` to flush buffered standard output before process exit or exec-replacement.
+- Added an `exitOnly` option to `postmortem.register` for resources that should remain available during keep-alive cleanup and be released only on actual process exit.
+- Added `hexToOklch` and `oklchToHex` color conversion utilities with sRGB gamut mapping that reduces chroma when necessary.
+- Added `checkpointWal` to checkpoint committed SQLite WAL frames without blocking concurrent readers.
+
+### Fixed
+
+- Fixed repeatable `postmortem` cleanup behavior so persistent resources and callbacks registered during cleanup remain active until the eventual process exit.
+- Fixed asynchronous `postmortem` cleanup so callbacks registered during a cleanup pass are awaited before cleanup completes, including during signal-driven exits.
+
+## [18.0.9] - 2026-08-28
+
+### Fixed
+
+- Fixed error handling so unrelated aborted requests and closed-connection failures are no longer silently suppressed.
+
+## [18.0.8] - 2026-08-27
+
+### Added
+
+- Added the Linux `subreaper` spawn option to retain reparented descendants for process-tree cleanup.
+
+### Fixed
+
+- Keep project-directory state unchanged when changing directories fails.
+- Fixed `ptree` timeout cleanup and output capture so timed commands retain their deadline through descendant-held pipes and untimed commands read output to EOF.
+
+## [18.0.7] - 2026-08-26
+
+### Added
+
+- Added `math-delimiters`, the LaTeX span/block delimiter grammar (`mathStartIndex`, `mathOpenerAt`, `mathSpanAt`, `mathBlockAt`) shared by every Markdown renderer: pandoc's anti-currency rules for `$…$`, own-line display blocks, and delimiters matched by backslash parity, so an escaped `\$x$` stays literal and a TeX row break cannot end a span early.
+- Added `RequestError.sessionBusy(message, data)` to represent ACP session-busy errors (`-32003`) through the shared JSON-RPC transport.
+- Exported `getComposerCacheDir` for resolving the per-project Composer cache directory, including support for `XDG_CACHE_HOME`.
+
+### Fixed
+
+- Fixed OMP sessions unexpectedly exiting during socket cleanup or optional-worker communication on Bun.
+
+## [18.0.6] - 2026-08-26
+
+### Added
+
+- Added conventional commit generation with support for dependency, security, configuration, UX, and infrastructure commit types, plus configurable caching and large-diff analysis behavior.
+
+## [18.0.5] - 2026-08-25
+
+### Added
+
+- Added `stableStringifyJson` for deterministic serialization of nested JSON-shaped data.
+
+### Fixed
+
+- Fixed managed Chrome-for-Testing installation failures when extracting the trusted browser download.
+
+## [18.0.4] - 2026-08-24
+
+### Added
+
+- Exported `getAvatarCacheDir` to resolve the avatar cache directory path.
+
+## [18.0.1] - 2026-08-23
+
+### Fixed
+
+- Fixed the Mermaid ASCII renderer throwing on left-to-right diagrams containing a `subgraph`, which made the fenced block fall back to raw source in the terminal. `offsetDrawingForSubgraphs` shifts every drawing coordinate to make room for subgraph borders that extend past the origin, but the canvas had already been sized from the pre-shift grid extents, so edges routed to the outermost column wrote past the allocation and `drawLine` threw on the missing column. The canvas and role canvas now grow by the same shift. ([#9340](https://github.com/can1357/oh-my-pi/issues/9340))
+- Fixed child shell environments inheriting Bun-autoloaded `.env.<mode>.local` values from the launch directory. ([#9290](https://github.com/can1357/oh-my-pi/issues/9290))
+
 ## [17.4.2] - 2026-08-21
 
 ### Fixed

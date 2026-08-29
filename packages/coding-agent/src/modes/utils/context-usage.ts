@@ -116,7 +116,7 @@ export function estimateSkillsTokens(skills: readonly Skill[], tokenizer: Tokeni
 	for (const skill of skills) {
 		// "- name: description\n" wire framing tokenizes ~identically to the
 		// concatenated form, so encode each piece separately and sum.
-		fragments.push(skill.name, skill.description);
+		fragments.push(skill.name, skill.description ?? "");
 	}
 	return tokenizer.countTokens(fragments);
 }
@@ -127,14 +127,20 @@ export function estimateToolSchemaTokens(
 ): number {
 	const fragments: string[] = [];
 	for (const tool of tools) {
-		fragments.push(tool.name, tool.description);
+		// Extension-supplied tools may carry a non-string name/description or a
+		// parameters value whose wire schema stringifies to `undefined` (e.g. a
+		// callable schema that escaped normalization). A non-string fragment is
+		// fatal inside the native tokenizer, so only real strings are counted.
+		if (typeof tool.name === "string") fragments.push(tool.name);
+		if (typeof tool.description === "string") fragments.push(tool.description);
 		try {
 			const wireTool: AiTool = {
 				name: tool.name,
 				description: tool.description,
 				parameters: tool.parameters as AiTool["parameters"],
 			};
-			fragments.push(JSON.stringify(toolWireSchema(wireTool) ?? {}));
+			const wireJson = JSON.stringify(toolWireSchema(wireTool) ?? {});
+			if (typeof wireJson === "string") fragments.push(wireJson);
 		} catch {
 			// Schema may contain functions or cycles; ignore.
 		}
@@ -212,7 +218,9 @@ export function computeNonMessageTokens(session: NonMessageTokenSource, tokenize
 	if (entry.tokens !== undefined) return entry.tokens;
 	const systemPromptParts = session.systemPrompt ?? EMPTY_STRING_PARTS;
 	const tools = session.agent?.state?.tools ?? EMPTY_TOOLS;
-	const tokens = tokenizer.countTokens(systemPromptParts) + estimateToolSchemaTokens(tools, tokenizer);
+	const tokens =
+		tokenizer.countTokens(Array.from(systemPromptParts, part => part ?? "")) +
+		estimateToolSchemaTokens(tools, tokenizer);
 	entry.tokens = tokens;
 	return tokens;
 }
@@ -238,7 +246,7 @@ export function computeNonMessageBreakdown(
 	const skillsTokens = estimateSkillsTokens(renderedSkills(session.skills ?? EMPTY_SKILLS, tools), tokenizer);
 	const toolsTokens = estimateToolSchemaTokens(tools, tokenizer);
 	const systemPromptParts = session.systemPrompt ?? EMPTY_STRING_PARTS;
-	const systemContextTokens = tokenizer.countTokens(systemPromptParts.slice(1));
+	const systemContextTokens = tokenizer.countTokens(Array.from(systemPromptParts.slice(1), part => part ?? ""));
 	const systemPromptTokens = Math.max(0, tokenizer.countTokens(systemPromptParts[0] ?? "") - skillsTokens);
 	const breakdown = { skillsTokens, toolsTokens, systemContextTokens, systemPromptTokens };
 	entry.breakdown = breakdown;

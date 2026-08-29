@@ -190,6 +190,36 @@ describe("PluginSettingsComponent", () => {
 		}
 	});
 
+	it("schedules a render frame once the async plugin list mounts", async () => {
+		const npmListSpy = spyOn(PluginManager.prototype, "list").mockResolvedValue([]);
+		const listInstalledSpy = spyOn(MarketplaceManager.prototype, "listInstalledPlugins").mockResolvedValue([
+			marketplace("late@mkt"),
+		]);
+
+		try {
+			const mounted = Promise.withResolvers<void>();
+			let renders = 0;
+			const component = new PluginSettingsComponent(process.cwd(), {
+				onClose: () => {},
+				onPluginChanged: () => {},
+				requestRender: () => {
+					renders++;
+					mounted.resolve();
+				},
+			});
+
+			// No manual render() poll: the real TUI only repaints when the
+			// component asks for a frame. Without requestRender the list stays
+			// blank until an unrelated event forces a redraw (reopening /settings).
+			await mounted.promise;
+			expect(renders).toBeGreaterThanOrEqual(1);
+			expect(stripVTControlCharacters(component.render(120).join("\n"))).toContain("late@mkt");
+		} finally {
+			npmListSpy.mockRestore();
+			listInstalledSpy.mockRestore();
+		}
+	});
+
 	it("closes on Escape while the plugin list is still loading", async () => {
 		const pending = Promise.withResolvers<InstalledPlugin[]>();
 		const npmListSpy = spyOn(PluginManager.prototype, "list").mockReturnValue(pending.promise);

@@ -407,6 +407,16 @@ export async function runCli(argv: string[]): Promise<void> {
 	// browser workers onto the same-realm inline fallback.
 	if (isProcessEntry) declareWorkerHostEntry();
 
+	// `PI_PROXY` must reach the bare global `fetch` before any provider call:
+	// OAuth refresh/login and usage probes never pass through
+	// `wrapFetchForProxy`, so without this they bypass the proxy and fail
+	// wherever the provider blocks the caller's region. Dynamically imported
+	// like every other dependency in this entry module: a static `pi-ai` import
+	// would load the provider graph before profile bootstrap and on paths
+	// (`--version`, worker selectors) that never touch the network.
+	const { installGlobalProxyFetch } = await import("@oh-my-pi/pi-ai/utils/proxy");
+	installGlobalProxyFetch();
+
 	if (resolvedArgv[0] === "--smoke-test") {
 		await runSmokeTest();
 		return;
@@ -415,19 +425,38 @@ export async function runCli(argv: string[]): Promise<void> {
 		process.stdout.write(formatLicenseOutput());
 		return;
 	}
-	const [{ run }, { commands, resolveCliArgv }] = await Promise.all([
-		import("@oh-my-pi/pi-utils/cli"),
-		import("./cli-commands"),
-	]);
-	// --help and --version are handled by run() directly; --license returned above.
-	// Everything else that isn't a known subcommand routes to "launch".
-	const resolved = resolveCliArgv(resolvedArgv);
-	if ("error" in resolved) {
-		process.stderr.write(`error: ${resolved.error}\n`);
-		process.exitCode = 1;
-		return;
+	let stopStartupComposer: (() => void) | undefined;
+	if (
+		!process.env.PI_TIMING &&
+		process.stdin.isTTY === true &&
+		process.stdout.isTTY === true &&
+		(resolvedArgv.length === 0 || (resolvedArgv.length === 1 && resolvedArgv[0] === "--no-session"))
+	) {
+		// Intentional exception to the static-import convention: this latency boundary
+		// keeps the TUI graph out of worker, subcommand, help, and version launches.
+		// Loading it statically would erase the measured cold-start improvement.
+		const { beginStartupComposer, stopPendingStartupComposer } = await import("./modes/startup-composer");
+		beginStartupComposer({ version: VERSION });
+		stopStartupComposer = stopPendingStartupComposer;
 	}
-	return run({ bin: APP_NAME, version: VERSION, argv: resolved.argv, commands, metadataHelp: showHelp });
+
+	try {
+		const [{ run }, { commands, resolveCliArgv }] = await Promise.all([
+			import("@oh-my-pi/pi-utils/cli"),
+			import("./cli-commands"),
+		]);
+		// --help and --version are handled by run() directly; --license returned above.
+		// Everything else that isn't a known subcommand routes to "launch".
+		const resolved = resolveCliArgv(resolvedArgv);
+		if ("error" in resolved) {
+			process.stderr.write(`error: ${resolved.error}\n`);
+			process.exitCode = 1;
+			return;
+		}
+		await run({ bin: APP_NAME, version: VERSION, argv: resolved.argv, commands, metadataHelp: showHelp });
+	} finally {
+		stopStartupComposer?.();
+	}
 }
 
 // Floating call instead of top-level await: TLA forces `--bytecode` (CJS

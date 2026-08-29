@@ -219,6 +219,20 @@ export function resolveApproval(
 }
 
 /**
+ * Error for a resolved deny. Distinguishes tool-owned policy from user config.
+ */
+export function denyError(resolved: ResolvedApproval, toolName: string): Error {
+	const { source, reason, policyKey } = resolved;
+	if (source === "tool") {
+		return new Error(`Tool "${toolName}" is blocked by tool policy.${reason ? `\nReason: ${reason}` : ""}`);
+	}
+	return new Error(
+		`Tool "${policyKey ?? toolName}" is blocked by user policy.\n` +
+			`To allow: remove "tools.approval.${policyKey ?? toolName}: deny" from config.`,
+	);
+}
+
+/**
  * Check if a tool call requires user approval.
  *
  * @throws Error if policy is 'deny'
@@ -230,16 +244,11 @@ export function requiresApproval(
 	mode: ApprovalMode,
 	userConfig: Record<string, unknown> = {},
 ): { required: boolean; reason?: string } {
-	const { policy, reason, source, policyKey } = resolveApproval(tool, args, mode, userConfig);
+	const resolved = resolveApproval(tool, args, mode, userConfig);
+	const { policy, reason } = resolved;
 
 	if (policy === "deny") {
-		if (source === "tool") {
-			throw new Error(`Tool "${tool.name}" is blocked by tool policy.${reason ? `\nReason: ${reason}` : ""}`);
-		}
-		throw new Error(
-			`Tool "${policyKey ?? tool.name}" is blocked by user policy.\n` +
-				`To allow: remove "tools.approval.${policyKey ?? tool.name}: deny" from config.`,
-		);
+		throw denyError(resolved, tool.name);
 	}
 
 	if (policy === "prompt") return { required: true, reason };

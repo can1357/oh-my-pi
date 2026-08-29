@@ -113,6 +113,21 @@ describe("invalidateGithubCacheForBashCommand", () => {
 		expect(getCached("other/repo", "pr", 123, true)).toBeNull();
 	});
 
+	it("drops the bare row for a mixed-case github.com URL", () => {
+		seedPr(6, "other/repo");
+		invalidateGithubCacheForBashCommand("gh pr close https://GitHub.com/other/repo/pull/6");
+		expect(getCached("other/repo", "pr", 6, true)).toBeNull();
+	});
+
+	it("drops the host-qualified row for an enterprise PR URL", () => {
+		seedPr(5, "ghe.example.com/other/repo");
+		seedPr(5, "other/repo");
+		invalidateGithubCacheForBashCommand("gh pr close https://ghe.example.com/other/repo/pull/5");
+		expect(getCached("ghe.example.com/other/repo", "pr", 5, true)).toBeNull();
+		// Same slug on github.com is a different repository and keeps its row.
+		expect(getCached("other/repo", "pr", 5, true)?.rendered).toBe("pr-other/repo-5");
+	});
+
 	it("drops cache when --repo is supplied separately", () => {
 		seedIssue(9, "third/repo");
 		invalidateGithubCacheForBashCommand("gh issue reopen 9 --repo third/repo");

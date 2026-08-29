@@ -1542,6 +1542,26 @@ describe("CursorExecHandlers native delete gating (issue #5680)", () => {
 		expect(await Bun.file(target).exists()).toBe(false);
 	});
 
+	it("rechecks a live mutation grant after runtime tool activation", async () => {
+		const target = path.join(cwd, "victim.txt");
+		await Bun.write(target, "remove after upgrade");
+		let mutationGranted = false;
+		const handlers = new CursorExecHandlers({
+			cwd,
+			tools: new Map(),
+			allowDirectFileMutation: () => mutationGranted,
+		});
+
+		const denied = await handlers.delete(create(DeleteArgsSchema, { toolCallId: "call-del-denied", path: target }));
+		expect(denied.isError).toBe(true);
+		expect(await Bun.file(target).exists()).toBe(true);
+
+		mutationGranted = true;
+		const allowed = await handlers.delete(create(DeleteArgsSchema, { toolCallId: "call-del-allowed", path: target }));
+		expect(allowed.isError).toBe(false);
+		expect(await Bun.file(target).exists()).toBe(false);
+	});
+
 	it("resolves native deletes through the live cwd resolver", async () => {
 		const movedCwd = path.join(cwd, "moved");
 		await fs.mkdir(movedCwd);

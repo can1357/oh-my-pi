@@ -72,20 +72,7 @@ export async function getAvailableThemesWithPaths(): Promise<ThemeInfo[]> {
 	return result.sort((a, b) => a.name.localeCompare(b.name));
 }
 
-export async function loadThemeJson(name: string): Promise<ThemeJson> {
-	const builtinThemes = getBuiltinThemes();
-	if (name in builtinThemes) {
-		return builtinThemes[name];
-	}
-	const customThemesDir = getCustomThemesDir();
-	const themePath = path.join(customThemesDir, `${name}.json`);
-	let content: string;
-	try {
-		content = await Bun.file(themePath).text();
-	} catch (err) {
-		if (isEnoent(err)) throw new Error(`Theme not found: ${name}`);
-		throw err;
-	}
+function parseThemeJson(name: string, content: string): ThemeJson {
 	let json: unknown;
 	try {
 		json = JSON.parse(content);
@@ -116,6 +103,36 @@ export async function loadThemeJson(name: string): Promise<ThemeJson> {
 		throw new Error(fullErrorMessage);
 	}
 	return parsed;
+}
+
+export async function loadThemeJson(name: string): Promise<ThemeJson> {
+	const builtinThemes = getBuiltinThemes();
+	if (name in builtinThemes) {
+		return builtinThemes[name];
+	}
+	const customThemesDir = getCustomThemesDir();
+	const themePath = path.join(customThemesDir, `${name}.json`);
+	try {
+		return parseThemeJson(name, await Bun.file(themePath).text());
+	} catch (error) {
+		if (isEnoent(error)) throw new Error(`Theme not found: ${name}`);
+		throw error;
+	}
+}
+
+/** Load a theme definition synchronously for the first terminal frame. */
+export function loadThemeJsonSync(name: string): ThemeJson {
+	const builtinThemes = getBuiltinThemes();
+	if (name in builtinThemes) {
+		return builtinThemes[name];
+	}
+	const themePath = path.join(getCustomThemesDir(), `${name}.json`);
+	try {
+		return parseThemeJson(name, fs.readFileSync(themePath, "utf8"));
+	} catch (error) {
+		if (isEnoent(error)) throw new Error(`Theme not found: ${name}`);
+		throw error;
+	}
 }
 
 export interface CreateThemeOptions {
@@ -169,6 +186,10 @@ export async function loadTheme(name: string, options: CreateThemeOptions = {}):
 	return createTheme(themeJson, options);
 }
 
+/** Load and construct a theme synchronously for latency-sensitive first paint. */
+export function loadThemeSync(name: string, options: CreateThemeOptions = {}): Theme {
+	return createTheme(loadThemeJsonSync(name), options);
+}
 export async function getThemeByName(name: string): Promise<Theme | undefined> {
 	try {
 		return await loadTheme(name);

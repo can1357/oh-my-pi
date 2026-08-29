@@ -13,6 +13,7 @@ import type {
 } from "../types";
 import { resolveCacheRetention } from "../utils";
 import { createAbortSourceTracker } from "../utils/abort";
+import { withReplaySafeStreamRetry } from "../utils/empty-completion-retry";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import type { RawHttpRequestDump } from "../utils/http-inspector";
 import {
@@ -76,19 +77,12 @@ type AzureOpenAIResponsesSamplingParams = ResponseCreateParamsStreaming & {
 	repetition_penalty?: number;
 };
 
-/**
- * Generate function for Azure OpenAI Responses API
- */
-export const streamAzureOpenAIResponses: StreamFunction<"azure-openai-responses"> = (
+/** Runs one Azure OpenAI Responses request and decodes its event stream. */
+const streamAzureOpenAIResponsesOnce = (
 	model: Model<"azure-openai-responses">,
 	context: Context,
 	options?: AzureOpenAIResponsesOptions,
 ): AssistantMessageEventStream => {
-	if (options?.promptCache?.mode === "explicit" && resolveCacheRetention(options.cacheRetention) !== "none") {
-		throw new AIError.ConfigurationError(
-			`OpenAI explicit prompt caching is unsupported for ${model.provider}/${model.id}; Azure Responses does not emit explicit cache controls.`,
-		);
-	}
 	const stream = new AssistantMessageEventStream();
 
 	// Start async processing
@@ -263,6 +257,24 @@ export const streamAzureOpenAIResponses: StreamFunction<"azure-openai-responses"
 	})();
 
 	return stream;
+};
+
+/**
+ * Retries transient Azure stream failures only before assistant output commits
+ * the attempt. The unsupported explicit prompt-cache config is rejected
+ * synchronously here — callers of the direct entrypoint get the immediate
+ * `ConfigurationError` rather than a stream whose `.result()` rejects later.
+ */
+export const streamAzureOpenAIResponses: StreamFunction<"azure-openai-responses"> = (model, context, options) => {
+	if (options?.promptCache?.mode === "explicit" && resolveCacheRetention(options.cacheRetention) !== "none") {
+		throw new AIError.ConfigurationError(
+			`OpenAI explicit prompt caching is unsupported for ${model.provider}/${model.id}; Azure Responses does not emit explicit cache controls.`,
+		);
+	}
+	return withReplaySafeStreamRetry(model, context, options, streamAzureOpenAIResponsesOnce, {
+		retryProviderErrors: true,
+		maxProviderErrorRetries: 1,
+	});
 };
 
 function resolveAzureConfig(

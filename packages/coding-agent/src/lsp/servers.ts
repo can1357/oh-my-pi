@@ -255,6 +255,21 @@ export function isMethodNotFoundError(err: unknown): boolean {
 	);
 }
 
+/**
+ * Build the params for the generic `workspace/didChangeConfiguration` reload.
+ *
+ * The handshake in `client.ts` pushes `{ settings: config.settings ?? {} }` right
+ * after `initialized`, so a reload has to echo those same settings back. A bare
+ * `{}` is well-formed LSP, but it means "the configuration is now empty" — the
+ * opposite of a refresh. Servers that key behaviour off their configuration
+ * (formatter options, analysis toggles, per-workspace overrides) silently drop it
+ * and serve the rest of the session on defaults, so `lsp reload` ends up erasing
+ * the configured settings instead of re-applying them (issue #8383).
+ */
+export function reloadConfigurationParams(config: ServerConfig): { settings: Record<string, unknown> } {
+	return { settings: config.settings ?? {} };
+}
+
 export async function reloadServer(client: LspClient, serverName: string, signal?: AbortSignal): Promise<string> {
 	throwIfAborted(signal);
 	// rust-analyzer exposes a real reload request. Only rust-analyzer implements
@@ -278,7 +293,8 @@ export async function reloadServer(client: LspClient, serverName: string, signal
 	// as a request hangs until the tool deadline on servers that route it to
 	// the notification handler and never respond.
 	try {
-		await sendNotification(client, "workspace/didChangeConfiguration", { settings: {} }, signal);
+		const params = reloadConfigurationParams(client.config);
+		await sendNotification(client, "workspace/didChangeConfiguration", params, signal);
 		return `Reloaded ${serverName}`;
 	} catch {
 		throwIfAborted(signal);

@@ -106,6 +106,34 @@ export async function writeAuthBrokerSnapshotCache(opts: WriteAuthBrokerSnapshot
 	} finally {
 		if (removeTemp) await fs.rm(tmpPath, { force: true }).catch(() => {});
 	}
+	await sweepStaleTempFiles(opts.path);
+}
+/** Temp files older than this are debris from a killed process, never a live write. */
+const STALE_TMP_MAX_AGE_MS = 60 * 60_000;
+
+/**
+ * Remove abandoned `<cache>.<pid>.<hex>.tmp` siblings. Writes are fire-and-forget
+ * from snapshot callbacks, so a process exiting between `open` and `rename`
+ * strands its temp file; without this sweep they accumulate unboundedly.
+ */
+async function sweepStaleTempFiles(cachePath: string): Promise<void> {
+	const dir = path.dirname(cachePath);
+	const prefix = `${path.basename(cachePath)}.`;
+	let names: string[];
+	try {
+		names = await fs.readdir(dir);
+	} catch {
+		return;
+	}
+	const cutoff = Date.now() - STALE_TMP_MAX_AGE_MS;
+	for (const name of names) {
+		if (!name.startsWith(prefix) || !name.endsWith(".tmp")) continue;
+		const staleTmp = path.join(dir, name);
+		try {
+			if ((await fs.stat(staleTmp)).mtimeMs > cutoff) continue;
+			await fs.rm(staleTmp, { force: true });
+		} catch {}
+	}
 }
 
 async function encryptCachePayload(snapshot: SnapshotResponse, token: string, url: string): Promise<Uint8Array> {

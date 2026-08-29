@@ -71,7 +71,7 @@
               # Instantiate the pinned upstream binary against this package
               # set so Intel macOS does not re-enter nix-bun's unstable input.
               bun = final.callPackage (nix-bun.outPath + "/package.nix") {
-                sourcesFile = nix-bun.outPath + "/versions/1.3.14.json";
+                sourcesFile = nix-bun.outPath + "/versions/1.4.0.json";
               };
             })
           ];

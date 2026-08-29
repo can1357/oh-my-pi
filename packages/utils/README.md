@@ -17,6 +17,7 @@ Shared utilities for [oh-my-pi](https://github.com/can1357/oh-my-pi) packages. Z
 | `fs-error` | Errno guards (`isEnoent` and friends) |
 | `env` / `worker-host` | Environment plumbing and side-effect-free worker-host entry contract (`workerHostEntry`) |
 | `abortable` / `async` | AbortSignal-aware stream/promise helpers |
+| `math-delimiters` | LaTeX span/block delimiter grammar (offsets only) shared by the TUI and collab-web renderers |
 | `peek-file` | Read the first N bytes of a file with pooled buffers |
 | `frontmatter`, `glob`, `mime`, `temp`, `format`, `color`, `snowflake`, `tab-spacing`, `path-tree`, `sanitize-text` | Smaller single-purpose helpers |
 

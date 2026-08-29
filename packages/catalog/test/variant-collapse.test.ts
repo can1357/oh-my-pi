@@ -10,7 +10,12 @@ import {
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { stripThinkingVariantToken } from "@oh-my-pi/pi-catalog/identity/family";
 import { resolveProviderModels } from "@oh-my-pi/pi-catalog/model-manager";
-import { resolveWireModelId } from "@oh-my-pi/pi-catalog/model-thinking";
+import {
+	defaultSupportedEffort,
+	mapEffortToGoogleThinkingLevel,
+	resolveWireModelId,
+} from "@oh-my-pi/pi-catalog/model-thinking";
+import { getBundledModel, getBundledModels } from "@oh-my-pi/pi-catalog/models";
 import { googleGeminiCliModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/google";
 import type { ModelSpec } from "@oh-my-pi/pi-catalog/types";
 import {
@@ -160,6 +165,76 @@ describe("collapseEffortVariants", () => {
 		expect(resolveWireModelId(model, Effort.Low)).toBe("gemini-3.6-flash-low");
 		expect(resolveWireModelId(model, Effort.Medium)).toBe("gemini-3.6-flash-medium");
 		expect(resolveWireModelId(model, Effort.High)).toBe("gemini-3.6-flash-high");
+	});
+
+	it("folds the gemini-3.7-flash-tiered alias into gemini-3.7-flash so :minimal sends LOW not MINIMAL (#10016)", () => {
+		const out = collapseEffortVariants(
+			[
+				memberSpec("gemini-3.7-flash-high"),
+				memberSpec("gemini-3.7-flash-low"),
+				memberSpec("gemini-3.7-flash-medium"),
+				memberSpec("gemini-3.7-flash-tiered"),
+			],
+			ANTIGRAVITY_VARIANT_COLLAPSE_TABLE,
+		);
+
+		expect(out).toHaveLength(1);
+		const flash = out[0];
+		expect(flash?.id).toBe("gemini-3.7-flash");
+		expect(flash?.thinking?.effortRouting).toEqual({
+			minimal: "gemini-3.7-flash-low",
+			low: "gemini-3.7-flash-low",
+			medium: "gemini-3.7-flash-medium",
+			high: "gemini-3.7-flash-high",
+		});
+
+		// The actual regression: Cloud Code Assist rejects thinkingLevel MINIMAL on
+		// this SKU with HTTP 400, so the collapsed routing must downgrade both :off
+		// (floored to minimal by requiresEffort) and :minimal to LOW on the wire.
+		const model = buildModel(flash as ModelSpec<"google-gemini-cli">);
+		expect(mapEffortToGoogleThinkingLevel(Effort.Minimal, model)).toBe("LOW");
+		expect(mapEffortToGoogleThinkingLevel(Effort.Low, model)).toBe("LOW");
+		expect(resolveWireModelId(model, Effort.Minimal)).toBe("gemini-3.7-flash-low");
+	});
+
+	it("dedupes a stale standalone gemini-3.7-flash-tiered snapshot into the collapsed gemini-3.7-flash (#10016)", () => {
+		// Mirrors the bundled catalog snapshot: the already-collapsed logical id
+		// plus a raw -tiered alias that older snapshots emitted as its own
+		// MINIMAL-sending model. Runtime collapse must fold the alias away.
+		const collapsedFlash = memberSpec("gemini-3.7-flash", {
+			requestModelId: "gemini-3.7-flash-low",
+			thinking: {
+				mode: "google-level",
+				efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High],
+				requiresEffort: true,
+				effortRouting: {
+					minimal: "gemini-3.7-flash-low",
+					low: "gemini-3.7-flash-low",
+					medium: "gemini-3.7-flash-medium",
+					high: "gemini-3.7-flash-high",
+				},
+			},
+		});
+		const staleTiered = memberSpec("gemini-3.7-flash-tiered", {
+			thinking: {
+				mode: "google-level",
+				efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High],
+				requiresEffort: true,
+			},
+		});
+
+		const out = collapseEffortVariants([collapsedFlash, staleTiered], ANTIGRAVITY_VARIANT_COLLAPSE_TABLE);
+		expect(out.map(m => m.id)).toEqual(["gemini-3.7-flash"]);
+		expect(out[0]?.thinking?.effortRouting?.minimal).toBe("gemini-3.7-flash-low");
+	});
+
+	it("bundles only the routed gemini-3.7-flash model after generation (#10016)", () => {
+		const models = getBundledModels("google-antigravity");
+		expect(models.some(model => model.id === "gemini-3.7-flash-tiered")).toBe(false);
+
+		const flash = getBundledModel("google-antigravity", "gemini-3.7-flash");
+		expect(flash?.thinking?.effortRouting?.minimal).toBe("gemini-3.7-flash-low");
+		expect(flash ? mapEffortToGoogleThinkingLevel(Effort.Minimal, flash) : undefined).toBe("LOW");
 	});
 
 	it("drops routes whose target member is absent", () => {
@@ -732,6 +807,69 @@ describe("Cursor Grok tier routing (issue #8803)", () => {
 		// 4.5 has no xhigh sibling: the ceiling stays at high.
 		expect(model("cursor-grok-4.5").thinking?.efforts).toEqual([Effort.Low, Effort.Medium, Effort.High]);
 	});
+
+	it("defaults the collapsed row to -medium and clamps effort-less to -medium (issue #9478)", () => {
+		const collapsed = collapseEffortVariants(
+			RAW_SIBLINGS.map(id => cursorMemberSpec(id)),
+			CURSOR_VARIANT_COLLAPSE_TABLE,
+		);
+		const defaults = [
+			["cursor-grok-4.5", "cursor-grok-4.5-medium"],
+			["cursor-grok-4.5-fast", "cursor-grok-4.5-medium-fast"],
+			["cursor-grok-4.6", "cursor-grok-4.6-medium"],
+			["cursor-grok-4.6-fast", "cursor-grok-4.6-medium-fast"],
+		] as const;
+		for (const [id, requestModelId] of defaults) {
+			const spec = collapsed.find(model => model.id === id);
+			if (!spec) throw new Error(`${id} did not collapse`);
+			// The Start plan refuses the -low floor; the collapsed default and
+			// effort-less clamp target must both be the fixed-settings tier.
+			expect(spec.requestModelId).toBe(requestModelId);
+			const model = buildModel(spec as ModelSpec<"cursor-agent">);
+			expect(defaultSupportedEffort(model)).toBe(Effort.Medium);
+			expect(resolveWireModelId(model, defaultSupportedEffort(model))).toBe(requestModelId);
+		}
+	});
+
+	it("re-points a stale collapsed snapshot pinned to -low back to -medium (issue #9478)", () => {
+		const stale: ModelSpec<"cursor-agent"> = {
+			...cursorMemberSpec("cursor-grok-4.6"),
+			name: "Grok 4.6",
+			reasoning: true,
+			requestModelId: "cursor-grok-4.6-low",
+			thinking: {
+				mode: "effort",
+				efforts: [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh],
+				requiresEffort: true,
+				effortRouting: {
+					[Effort.Low]: "cursor-grok-4.6-low",
+					[Effort.Medium]: "cursor-grok-4.6-medium",
+					[Effort.High]: "cursor-grok-4.6-high",
+					[Effort.XHigh]: "cursor-grok-4.6-xhigh",
+				},
+			},
+		};
+		// Bundled/cache row (no live siblings) — the offline pass-through path.
+		const offline = collapseBuiltModelVariants([buildModel(stale)]);
+		expect(offline.find(m => m.id === "cursor-grok-4.6")?.requestModelId).toBe("cursor-grok-4.6-medium");
+		// Bundled row merged with live siblings — the online discovery path.
+		const online = collapseBuiltModelVariants([
+			buildModel(stale),
+			...RAW_SIBLINGS.filter(id => id.startsWith("cursor-grok-4.6-") && !id.endsWith("-fast")).map(id =>
+				buildModel(cursorMemberSpec(id)),
+			),
+		]);
+		expect(online.find(m => m.id === "cursor-grok-4.6")?.requestModelId).toBe("cursor-grok-4.6-medium");
+
+		// Account-specific discovery can omit the preferred tier. Do not route
+		// effort-less requests to a sibling the account did not advertise.
+		const withoutMedium = collapseBuiltModelVariants([
+			buildModel({ ...stale, requestModelId: "cursor-grok-4.6-medium" }),
+			buildModel(cursorMemberSpec("cursor-grok-4.6-low")),
+			buildModel(cursorMemberSpec("cursor-grok-4.6-high")),
+		]);
+		expect(withoutMedium.find(m => m.id === "cursor-grok-4.6")?.requestModelId).toBe("cursor-grok-4.6-low");
+	});
 });
 
 describe("Cursor GPT-5.6 tier routing (issue #9025)", () => {
@@ -938,6 +1076,7 @@ describe("Cursor generic tier routing (issue #9237)", () => {
 describe("variant aliases", () => {
 	it("resolves members and recycled ids per provider", () => {
 		expect(resolveVariantAlias("google-antigravity", "gemini-3.5-flash-low")).toBe("gemini-3.5-flash");
+		expect(resolveVariantAlias("google-antigravity", "gemini-3.7-flash-tiered")).toBe("gemini-3.7-flash");
 		expect(resolveVariantAlias("google-gemini-cli", "gemini-pro-agent")).toBe("gemini-3.1-pro");
 		expect(resolveVariantAlias("google-antigravity", "gemini-3-flash")).toBe("gemini-3.5-flash");
 		expect(resolveVariantAlias("google-antigravity", "gemini-2.5-flash-thinking")).toBe("gemini-2.5-flash");

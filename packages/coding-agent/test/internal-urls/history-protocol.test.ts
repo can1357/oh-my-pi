@@ -39,11 +39,11 @@ function fakeLiveSession(messages: unknown[]): AgentSession {
 	return { messages } as unknown as AgentSession;
 }
 
-function makeToolSession(cwd: string): ToolSession {
+function makeToolSession(cwd: string, sessionFile: string = path.join(cwd, "session.jsonl")): ToolSession {
 	return {
 		cwd,
 		hasUI: false,
-		getSessionFile: () => path.join(cwd, "session.jsonl"),
+		getSessionFile: () => sessionFile,
 		getSessionSpawns: () => "*",
 		getArtifactsDir: () => path.join(cwd, "artifacts"),
 		allocateOutputArtifact: async toolType => ({
@@ -406,6 +406,63 @@ describe("history:// protocol", () => {
 			registerArtifactsDir(candidate);
 
 			await expect(new HistoryProtocolHandler().complete()).resolves.toEqual([]);
+		});
+	});
+
+	it("read history:// refreshes the caller root before resolving a shared parked id", async () => {
+		await withTempDir(async dir => {
+			const rootA = path.join(dir, "a", "main.jsonl");
+			const rootB = path.join(dir, "b", "main.jsonl");
+			const childA = path.join(dir, "a", "main", "Worker.jsonl");
+			const childB = path.join(dir, "b", "main", "Worker.jsonl");
+			const header = (id: string) =>
+				JSON.stringify({
+					type: "session",
+					version: CURRENT_SESSION_VERSION,
+					id,
+					timestamp: new Date().toISOString(),
+					cwd: "/tmp",
+				});
+			const transcript = (secret: string) =>
+				`${header(`fixture-${secret}`)}\n${JSON.stringify({
+					type: "message",
+					id: `m-${secret}`,
+					parentId: null,
+					timestamp: new Date().toISOString(),
+					message: { role: "user", content: `hello from root ${secret}`, timestamp: 1 },
+				})}\n`;
+			await Bun.write(rootA, `${header("a")}\n`);
+			await Bun.write(rootB, `${header("b")}\n`);
+			await Bun.write(childA, transcript("A"));
+			await Bun.write(childB, transcript("B"));
+			AgentRegistry.global().register({
+				id: "Main",
+				displayName: "main",
+				kind: "main",
+				session: null,
+				sessionFile: rootA,
+				status: "running",
+			});
+			// B's scan ran first: the process-global Worker ref targets B's file.
+			AgentRegistry.global().register({
+				id: "Worker",
+				displayName: "task",
+				kind: "sub",
+				session: null,
+				sessionFile: childB,
+				status: "parked",
+			});
+
+			// The read threads the caller session file into the resolver, which
+			// refreshes the caller root and replaces the stale parked ref.
+			const tool = new ReadTool(makeToolSession(dir, rootA));
+			const result = await tool.execute("history-root-a", { path: "history://Worker" });
+			const output = result.content.find(part => part.type === "text");
+			expect(output?.type).toBe("text");
+			if (output?.type !== "text") throw new Error("Expected text output");
+			expect(output.text).toContain("hello from root A");
+			expect(output.text).not.toContain("hello from root B");
+			expect(AgentRegistry.global().get("Worker")?.sessionFile).toBe(childA);
 		});
 	});
 });

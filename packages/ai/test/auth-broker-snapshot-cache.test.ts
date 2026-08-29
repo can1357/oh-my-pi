@@ -102,6 +102,26 @@ describe("auth-broker snapshot cache", () => {
 		});
 	});
 
+	test("sweeps abandoned temp files without touching a concurrent write", async () => {
+		await withCachePath(async cachePath => {
+			const stale = `${cachePath}.1234.stale.tmp`;
+			const active = `${cachePath}.5678.active.tmp`;
+			await Promise.all([fs.writeFile(stale, "stale"), fs.writeFile(active, "active")]);
+			const old = new Date(Date.now() - 2 * 60 * 60_000);
+			await fs.utimes(stale, old, old);
+
+			await writeAuthBrokerSnapshotCache({
+				path: cachePath,
+				token: TOKEN,
+				url: URL,
+				snapshot: makeSnapshot(Date.now()),
+			});
+
+			expect(await Bun.file(stale).exists()).toBeFalse();
+			expect(await Bun.file(active).exists()).toBeTrue();
+		});
+	});
+
 	test("authenticates the version so a version 2 payload cannot be opened as version 1", async () => {
 		await withCachePath(async cachePath => {
 			const snapshot = makeSnapshot(1_000_000);

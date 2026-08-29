@@ -154,6 +154,20 @@ describe("SQLite tool support", () => {
 		await fs.writeFile(dbPath, fixtureBytes);
 		return dbPath;
 	}
+	async function stampCleanWalDb(name: string): Promise<string> {
+		const dbPath = path.join(tmpDir, name);
+		const db = new Database(`${dbPath}.source`);
+		try {
+			db.run("PRAGMA journal_mode = WAL");
+			db.run("CREATE TABLE entries (id INTEGER PRIMARY KEY, value TEXT NOT NULL)");
+			db.prepare("INSERT INTO entries (value) VALUES (?)").run("persisted");
+			db.run("PRAGMA wal_checkpoint(TRUNCATE)");
+		} finally {
+			db.close();
+		}
+		await fs.copyFile(`${dbPath}.source`, dbPath);
+		return dbPath;
+	}
 
 	beforeAll(async () => {
 		tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "sqlite-tool-test-"));
@@ -220,6 +234,29 @@ describe("SQLite tool support", () => {
 		expect(text).toContain("slugs (2 rows)");
 		expect(text).toContain("notes (3 rows)");
 		expect(text).not.toContain("sqlite_sequence");
+	});
+
+	it("reads a clean WAL database after its writer removes the sidecar files", async () => {
+		const walPath = await stampCleanWalDb("clean-wal.sqlite");
+
+		const result = await readTool.execute("sqlite-clean-wal", { path: walPath });
+
+		expect(getText(result)).toContain("entries (1 rows)");
+	});
+
+	it("keeps the clean-WAL fallback query-only", async () => {
+		const walPath = await stampCleanWalDb("query-only-wal.sqlite");
+
+		await expect(
+			readTool.execute("sqlite-clean-wal-write", {
+				path: `${walPath}?q=INSERT+INTO+entries+(value)+VALUES+('mutated')`,
+			}),
+		).rejects.toThrow();
+		const result = await readTool.execute("sqlite-clean-wal-count", {
+			path: `${walPath}?q=SELECT+COUNT(*)+AS+count+FROM+entries`,
+		});
+
+		expect(getText(result)).toContain("| 1");
 	});
 
 	it("lists tables for a .db database when the magic bytes match SQLite", async () => {

@@ -74,6 +74,7 @@ function createContext(
 		pendingTools: new Map<string, unknown>(),
 		flushPendingModelSwitch: async () => {},
 		flushPendingCommandOutput: () => {},
+		syncRetryHintRow: vi.fn(),
 		ui: { requestRender: vi.fn() },
 		chatContainer: { removeChild: vi.fn() },
 		statusContainer: { clear: vi.fn() },

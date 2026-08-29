@@ -624,12 +624,10 @@ export class MnemopiSessionState {
 	}
 
 	/**
-	 * Drain in-flight fact extraction and run beam consolidation on every owned
-	 * bank, after capturing the current transcript. Mirrors the manual
-	 * `/memory enqueue` slash command, but stops short of closing the DBs so
-	 * callers can keep using the state. {@link dispose} composes this with the
-	 * close step so normal session shutdown promotes working memory to
-	 * episodic/gists/graph automatically (see issue #2320).
+	 * Capture the current transcript, drain in-flight fact extraction, and
+	 * optionally run beam consolidation on every owned bank. The explicit
+	 * `/memory enqueue` path requests full cross-session consolidation; disposal
+	 * composes the lighter retain-and-flush path with closing the DB handles.
 	 *
 	 * Aliased subagent states share `scoped` (and therefore the actual SQLite
 	 * banks) with their parent. `consolidate()` deliberately does NOT
@@ -637,13 +635,13 @@ export class MnemopiSessionState {
 	 * itself, and an explicit `/memory enqueue` invoked from within a subagent
 	 * still needs to flush extractions and sleep the parent's shared banks —
 	 * otherwise enqueue would report success while leaving the subagent's
-	 * retained memories unconsolidated until the parent eventually shuts down
+	 * retained memories unconsolidated until a later full consolidation request
 	 * (PR #2327 review).
 	 *
 	 * @param options.full - When true, run `sleepAllSessions` on every owned bank
 	 *  (the full cross-session consolidation used by `/memory enqueue`). When
-	 *  false (the default), run only `sleep` on the current session for a
-	 *  lighter, bounded shutdown pass.
+	 *  false (the default), run only `sleep` on the current session when bank
+	 *  sleep is enabled.
 	 * @param options.sleep - When false, skips the bank sleep step entirely.
 	 *  Used on the interactive shutdown path so `dispose` does not block on
 	 *  synchronous consolidation of old working rows from previous sessions.
@@ -668,8 +666,8 @@ export class MnemopiSessionState {
 	 * Release the per-session resources. Defaults to running a lighter
 	 * {@link consolidate} pass before closing handles: it retains the current
 	 * transcript and flushes in-flight extractions, but skips the synchronous
-	 * bank sleep so normal session shutdown returns promptly. Full promotion of
-	 * working memory into long-term storage is still performed by the explicit
+	 * bank sleep so normal session shutdown returns promptly. Full age-gated
+	 * promotion of eligible working memory is still requested by the explicit
 	 * `/memory enqueue` and backend enqueue paths. Callers that are about to
 	 * delete the DB files — e.g. `mnemopiBackend.clear` — pass
 	 * `{ consolidate: false }` to skip the retain/flush pass, since spending

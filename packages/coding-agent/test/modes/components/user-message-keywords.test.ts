@@ -5,7 +5,8 @@ import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { CustomEditor } from "@oh-my-pi/pi-coding-agent/modes/components/custom-editor";
 import { UserMessageComponent } from "@oh-my-pi/pi-coding-agent/modes/components/user-message";
-import { chipLabel } from "@oh-my-pi/pi-coding-agent/modes/image-references";
+import { chipLabel } from "@oh-my-pi/pi-coding-agent/modes/composer-attachments";
+import { imageReferenceHyperlink } from "@oh-my-pi/pi-coding-agent/modes/image-references";
 import { getEditorTheme, initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
@@ -99,6 +100,7 @@ describe("UserMessageComponent magic-keyword highlighting", () => {
 
 	it("wraps draft editor image references in file hyperlinks when a blob path is available", () => {
 		const editor = new CustomEditor(getEditorTheme());
+		editor.imageReferenceHyperlink = imageReferenceHyperlink;
 		const imagePath = path.resolve("/tmp/omp-image.png");
 		const imageUri = url.pathToFileURL(path.resolve(imagePath)).href;
 		editor.imageLinks = [imagePath];
@@ -162,6 +164,7 @@ describe("UserMessageComponent magic-keyword highlighting", () => {
 
 	it("hyperlinks the metadata-bearing image marker format", () => {
 		const editor = new CustomEditor(getEditorTheme());
+		editor.imageReferenceHyperlink = imageReferenceHyperlink;
 		const imagePath = path.resolve("/tmp/omp-image.png");
 		const imageUri = url.pathToFileURL(path.resolve(imagePath)).href;
 		editor.imageLinks = [imagePath];

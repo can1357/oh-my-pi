@@ -1,4 +1,5 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
+import { scheduler } from "node:timers/promises";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import * as compactionModule from "@oh-my-pi/pi-agent-core/compaction";
 import { type CompactionPreparation, resolveThresholdTokens, shouldCompact } from "@oh-my-pi/pi-agent-core/compaction";
@@ -934,6 +935,195 @@ describe("AgentSession auto-compaction progress guard", () => {
 				}),
 			}),
 		);
+	});
+
+	it("settles an overlapping successful stop but resumes a thinking-only length stop", async () => {
+		session.settings.set("compaction.methodOrder", ["handoff"]);
+		session.settings.set("compaction.enabled", true);
+		session.settings.set("compaction.asyncEnabled", true);
+		session.settings.set("compaction.thresholdTokens", 150_000);
+		session.settings.set("compaction.keepRecentTokens", 1);
+		session.settings.set("contextPromotion.enabled", false);
+		compactHookEnabled = false;
+		const continueSpy = vi.spyOn(session.agent, "continue").mockResolvedValue();
+		const handoffStarted = Promise.withResolvers<void>();
+		const handoffResult = Promise.withResolvers<string>();
+		vi.spyOn(compactionModule, "generateHandoffFromContext").mockImplementation(async () => {
+			handoffStarted.resolve();
+			return handoffResult.promise;
+		});
+
+		const speculativeTrigger = {
+			role: "assistant" as const,
+			content: [{ type: "text" as const, text: "working" }],
+			api: "anthropic-messages" as const,
+			provider: "anthropic" as const,
+			model: "claude-sonnet-4-5",
+			stopReason: "stop" as const,
+			usage: {
+				input: 143_000,
+				output: 1_000,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 144_000,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: Date.now(),
+		};
+		sessionManager.appendMessage(speculativeTrigger);
+		session.agent.emitExternalEvent({ type: "message_end", message: speculativeTrigger });
+		session.agent.emitExternalEvent({ type: "agent_end", messages: [speculativeTrigger] });
+		await handoffStarted.promise;
+		expect(session.compactionSpeculation).toBe("running");
+
+		await session.waitForIdle();
+		const ordinaryStop = {
+			role: "assistant" as const,
+			content: [{ type: "text" as const, text: "finished" }],
+			api: "anthropic-messages" as const,
+			provider: "anthropic" as const,
+			model: "claude-sonnet-4-5",
+			stopReason: "stop" as const,
+			usage: {
+				input: 143_000,
+				output: 2_000,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 145_000,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: speculativeTrigger.timestamp + 1,
+		};
+		const ordinaryAgentEnd = Promise.withResolvers<void>();
+		session.subscribe(event => {
+			if (event.type === "agent_end") ordinaryAgentEnd.resolve();
+		});
+		sessionManager.appendMessage(ordinaryStop);
+		session.agent.emitExternalEvent({ type: "message_end", message: ordinaryStop });
+		await scheduler.yield();
+		session.agent.emitExternalEvent({ type: "agent_end", messages: [ordinaryStop] });
+		await ordinaryAgentEnd.promise;
+		expect(session.compactionSpeculation).toBe("running");
+
+		const lengthStop = {
+			role: "assistant" as const,
+			content: [{ type: "thinking" as const, thinking: "unfinished reasoning" }],
+			api: "anthropic-messages" as const,
+			provider: "anthropic" as const,
+			model: "claude-sonnet-4-5",
+			stopReason: "length" as const,
+			usage: {
+				input: 150_000,
+				output: 50_000,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 200_000,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: speculativeTrigger.timestamp + 2,
+		};
+		sessionManager.appendMessage(lengthStop);
+		session.agent.emitExternalEvent({ type: "message_end", message: lengthStop });
+		await scheduler.yield();
+		session.agent.emitExternalEvent({ type: "agent_end", messages: [lengthStop] });
+		await scheduler.yield();
+
+		handoffResult.resolve("speculative handoff");
+		await session.waitForIdle();
+
+		expect(continueSpy).toHaveBeenCalledTimes(1);
+		expect(sessionManager.getBranch().at(-1)).toMatchObject({
+			type: "compaction",
+			summary: "speculative handoff",
+		});
+		expect(sessionManager.getBranch()).not.toContainEqual(
+			expect.objectContaining({
+				type: "message",
+				message: expect.objectContaining({
+					role: "assistant",
+					stopReason: "length",
+				}),
+			}),
+		);
+	});
+
+	it("resumes length recovery when overlapping speculation fails before agent_end", async () => {
+		session.settings.set("compaction.methodOrder", ["handoff"]);
+		session.settings.set("compaction.enabled", true);
+		session.settings.set("compaction.asyncEnabled", true);
+		session.settings.set("compaction.thresholdTokens", 150_000);
+		session.settings.set("compaction.keepRecentTokens", 1);
+		session.settings.set("contextPromotion.enabled", false);
+		compactHookEnabled = false;
+		const continueSpy = vi.spyOn(session.agent, "continue").mockResolvedValue();
+		const handoffStarted = Promise.withResolvers<void>();
+		const releaseFailedHandoff = Promise.withResolvers<void>();
+		let handoffCalls = 0;
+		vi.spyOn(compactionModule, "generateHandoffFromContext").mockImplementation(async () => {
+			handoffCalls++;
+			if (handoffCalls === 1) {
+				handoffStarted.resolve();
+				await releaseFailedHandoff.promise;
+				throw new Error("speculative handoff failed");
+			}
+			return "recovery handoff";
+		});
+
+		const speculativeTrigger = {
+			role: "assistant" as const,
+			content: [{ type: "text" as const, text: "working" }],
+			api: "anthropic-messages" as const,
+			provider: "anthropic" as const,
+			model: "claude-sonnet-4-5",
+			stopReason: "stop" as const,
+			usage: {
+				input: 143_000,
+				output: 1_000,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 144_000,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: Date.now(),
+		};
+		sessionManager.appendMessage(speculativeTrigger);
+		session.agent.emitExternalEvent({ type: "message_end", message: speculativeTrigger });
+		session.agent.emitExternalEvent({ type: "agent_end", messages: [speculativeTrigger] });
+		await handoffStarted.promise;
+		expect(session.compactionSpeculation).toBe("running");
+		await session.waitForIdle();
+
+		const lengthStop = {
+			role: "assistant" as const,
+			content: [{ type: "thinking" as const, thinking: "unfinished reasoning" }],
+			api: "anthropic-messages" as const,
+			provider: "anthropic" as const,
+			model: "claude-sonnet-4-5",
+			stopReason: "length" as const,
+			usage: {
+				input: 150_000,
+				output: 50_000,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 200_000,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: speculativeTrigger.timestamp + 1,
+		};
+		sessionManager.appendMessage(lengthStop);
+		session.agent.emitExternalEvent({ type: "message_end", message: lengthStop });
+		await scheduler.yield();
+		releaseFailedHandoff.resolve();
+		await scheduler.yield();
+		expect(session.compactionSpeculation).toBe("idle");
+		session.agent.emitExternalEvent({ type: "agent_end", messages: [lengthStop] });
+		await session.waitForIdle();
+
+		expect(continueSpy).toHaveBeenCalledTimes(1);
+		expect(sessionManager.getBranch().at(-1)).toMatchObject({
+			type: "compaction",
+			summary: "recovery handoff",
+		});
 	});
 
 	it("retries a small-window overflow when the reserve exceeds the model window", async () => {

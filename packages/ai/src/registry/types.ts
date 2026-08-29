@@ -29,6 +29,7 @@ export interface PreparedProviderRequest {
 }
 
 export type ProviderRequestPreparer = (model: Model<Api>, options: StreamOptions) => PreparedProviderRequest;
+export type ProviderModelPreparer = (model: Model<Api>) => Model<Api>;
 export type ProviderSimpleOptionsMapper = (options: SimpleStreamOptions) => Readonly<Record<string, unknown>>;
 
 export interface ProviderModelDiscoveryConfig {
@@ -66,6 +67,8 @@ export interface ProviderDefinition {
 	readonly envKeys?: KeyResolver;
 	/** Provider transport can authenticate without a resolved API-key string. */
 	readonly allowsMissingApiKey?: boolean;
+	/** Provider-owned model normalization that must run before API-specific option mapping. */
+	readonly prepareModel?: ProviderModelPreparer;
 	/** Provider-owned request shaping applied before generic API dispatch. */
 	readonly prepareRequest?: ProviderRequestPreparer;
 	/** Provider-owned projection from the generic simple-stream option bag. */
