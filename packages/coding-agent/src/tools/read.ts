@@ -528,12 +528,20 @@ const IMAGE_ATTACHMENT_URI_REGEX = /^attachment:\/\/[1-9]\d*$/;
 const MAX_IMAGE_SIZE = MAX_IMAGE_INPUT_BYTES;
 
 const readSchema = type({
+	path: type("string").describe("Local path, internal URI (e.g. memory://), or URL. Inline selectors are supported."),
+});
+
+const readSchemaWithSkills = type({
 	path: type("string").describe(
 		"Local path, internal URI (e.g. memory://, skill://), or URL. Inline selectors are supported.",
 	),
 });
 
 const readSchemaWithoutMemory = type({
+	path: type("string").describe("Local path, internal URI, or URL. Inline selectors are supported."),
+});
+
+const readSchemaWithoutMemoryWithSkills = type({
 	path: type("string").describe("Local path, internal URI (e.g. skill://), or URL. Inline selectors are supported."),
 });
 
@@ -628,7 +636,11 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 	readonly loadMode = "essential";
 	description: string;
 	get parameters(): typeof readSchema {
-		return this.session.settings.get("memory.backend") === "off" ? readSchemaWithoutMemory : readSchema;
+		const hasSkills = (this.session.skills?.length ?? 0) > 0;
+		if (this.session.settings.get("memory.backend") === "off") {
+			return hasSkills ? readSchemaWithoutMemoryWithSkills : readSchemaWithoutMemory;
+		}
+		return hasSkills ? readSchemaWithSkills : readSchema;
 	}
 	readonly strict = true;
 

@@ -957,6 +957,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 	// - require the `read` tool so the model can actually fetch skill content;
 	// - drop skills with frontmatter `hide: true` (still loadable via skill:// and /skill:<name>).
 	const hasRead = toolNames.includes("read");
+	const hasSkillUriAccess = hasRead && skills.length > 0;
 	const filteredSkills = hasRead ? skills.filter(skill => skill.hide !== true) : [];
 
 	const effectiveSystemPromptCustomization = dedupePromptSource(systemPromptCustomization, [
@@ -987,6 +988,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		contextFiles,
 		agentsMdSearch: { files: agentsMdFiles },
 		workspaceTree,
+		hasSkillUriAccess,
 		skills: filteredSkills,
 		rules: rules ?? [],
 		alwaysApplyRules: injectedAlwaysApplyRules,

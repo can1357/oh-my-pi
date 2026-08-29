@@ -576,17 +576,73 @@ describe("system prompt tool inventory", () => {
 		expect(inventory).not.toContain("- `read`");
 	});
 
-	it("SDK wrapper preserves an explicit empty tool list", async () => {
+	it("SDK wrapper omits skill guidance with an explicit empty tool list", async () => {
 		const { systemPrompt } = await buildSdkSystemPrompt({
 			cwd: tempDir,
 			contextFiles: [],
-			skills: [],
+			skills: [
+				{
+					name: "sdk-only-skill",
+					description: "Unavailable without a URI resolver",
+					filePath: path.join(tempDir, "SKILL.md"),
+					baseDir: tempDir,
+					source: "test",
+				},
+			],
 			tools: [],
 		});
 		const text = systemPrompt.join("\n\n");
 
 		expect(text).not.toContain("# Inventory");
 		expect(text).not.toContain("- `read`");
+		expect(text).not.toContain("`skill://<name>`");
+	});
+
+	it("omits skill URL guidance when no skills are loaded", async () => {
+		const { systemPrompt } = await buildSystemPrompt({
+			cwd: tempDir,
+			contextFiles: [],
+			skills: [],
+			rules: [],
+			toolNames: ["read"],
+			tools: TOOLS,
+			workspaceTree: { ...EMPTY_TREE, rootPath: tempDir },
+		});
+		const text = systemPrompt.join("\n\n");
+
+		expect(text).toContain("# Internal URLs");
+		expect(text).not.toContain("`skill://<name>`");
+	});
+
+	it("keeps real provider tool definitions free of skill URL guidance", async () => {
+		const session = { ...makeToolSession(Settings.isolated()), skills: [] };
+		const tools = await createTools(session, ["read", "bash"]);
+		const read = tools.find(tool => tool.name === "read")!;
+		const bash = tools.find(tool => tool.name === "bash")!;
+
+		expect(JSON.stringify(read.parameters.toJsonSchema())).not.toContain("skill://");
+		expect(bash.description).not.toContain("skill://");
+	});
+
+	it("advertises loaded skills through real provider tool definitions", async () => {
+		const session = {
+			...makeToolSession(Settings.isolated()),
+			skills: [
+				{
+					name: "provider-skill",
+					description: "Available without a system prompt",
+					filePath: path.join(tempDir, "SKILL.md"),
+					baseDir: tempDir,
+					source: "test",
+				},
+			],
+		};
+		const tools = await createTools(session, ["read", "bash"]);
+		const read = tools.find(tool => tool.name === "read")!;
+		const bash = tools.find(tool => tool.name === "bash")!;
+
+		expect(JSON.stringify(read.parameters.toJsonSchema())).toContain("skill://");
+		expect(bash.description).toContain("`skill://<name>/SKILL.md`");
 	});
 
 	it("keeps visible skills when no tools map is provided", async () => {
@@ -610,7 +666,7 @@ describe("system prompt tool inventory", () => {
 		expect(text).toContain("- prompt-authoring: Prompt authoring workflow");
 	});
 
-	it("omits skills when active tool names exclude read", async () => {
+	it("omits bare skill URL guidance when bash is the only content reader", async () => {
 		const { systemPrompt } = await buildSystemPrompt({
 			cwd: tempDir,
 			contextFiles: [],
@@ -631,9 +687,34 @@ describe("system prompt tool inventory", () => {
 		const text = systemPrompt.join("\n\n");
 
 		expect(text).not.toContain("search-only-skill");
+		expect(text).not.toContain("`skill://<name>`");
 	});
 
-	it("omits hidden skills even when read is active", async () => {
+	it("omits skill URL guidance when glob is the only active resolver", async () => {
+		const { systemPrompt } = await buildSystemPrompt({
+			cwd: tempDir,
+			contextFiles: [],
+			skills: [
+				{
+					name: "glob-only-skill",
+					description: "Cannot be read through glob",
+					filePath: path.join(tempDir, "SKILL.md"),
+					baseDir: tempDir,
+					source: "test",
+				},
+			],
+			rules: [],
+			toolNames: ["glob"],
+			tools: TOOLS,
+			workspaceTree: { ...EMPTY_TREE, rootPath: tempDir },
+		});
+		const text = systemPrompt.join("\n\n");
+
+		expect(text).not.toContain("glob-only-skill");
+		expect(text).not.toContain("`skill://<name>`");
+	});
+
+	it("keeps hidden skills out of the catalog while preserving URL guidance", async () => {
 		const { systemPrompt } = await buildSystemPrompt({
 			cwd: tempDir,
 			contextFiles: [],
@@ -655,6 +736,51 @@ describe("system prompt tool inventory", () => {
 		const text = systemPrompt.join("\n\n");
 
 		expect(text).not.toContain("hidden-workflow");
+		expect(text).toContain("`skill://<name>`");
+	});
+
+	it("preserves hidden skill URL guidance with a custom prompt", async () => {
+		const { systemPrompt } = await buildSystemPrompt({
+			cwd: tempDir,
+			resolvedCustomPrompt: "Custom instructions.",
+			contextFiles: [],
+			skills: [
+				{
+					name: "hidden-workflow",
+					description: "Hidden prompt workflow",
+					filePath: path.join(tempDir, "SKILL.md"),
+					baseDir: tempDir,
+					source: "test",
+					hide: true,
+				},
+			],
+			rules: [],
+			toolNames: ["read"],
+			tools: TOOLS,
+			workspaceTree: { ...EMPTY_TREE, rootPath: tempDir },
+		});
+		const text = systemPrompt.join("\n\n");
+
+		expect(text).toContain("Custom instructions.");
+		expect(text).not.toContain("hidden-workflow");
+		expect(text).toContain("`skill://<name>`");
+	});
+
+	it("omits skill URL guidance from a custom prompt without loaded skills", async () => {
+		const { systemPrompt } = await buildSystemPrompt({
+			cwd: tempDir,
+			resolvedCustomPrompt: "Custom instructions.",
+			contextFiles: [],
+			skills: [],
+			rules: [],
+			toolNames: ["read"],
+			tools: TOOLS,
+			workspaceTree: { ...EMPTY_TREE, rootPath: tempDir },
+		});
+		const text = systemPrompt.join("\n\n");
+
+		expect(text).toContain("Custom instructions.");
+		expect(text).not.toContain("`skill://<name>`");
 	});
 
 	it("tells the agent to read matching skills before work", async () => {
