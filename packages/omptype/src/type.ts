@@ -1418,15 +1418,14 @@ function morphIdentities(ir: IR, identities: unknown[] = [], seen = new Set<IR>(
 			// A declared-out morph whose projected sides contain one falls back
 			// to its function identity — strictly finer than the string form.
 			const out = ir.out;
+			const projectedIn = projectIO(ir.input, "in");
+			const projectedOut = out === undefined ? undefined : projectIO(out, "out");
 			const declared =
 				out !== undefined &&
-				!hasDeferredAlias(projectIO(ir.input, "in")) &&
-				!hasDeferredAlias(projectIO(out, "out"));
-			identities.push(
-				declared
-					? `declared:${expressionOf(projectIO(ir.input, "in"))}=>${expressionOf(projectIO(out, "out"))}`
-					: ir.fn,
-			);
+				projectedOut !== undefined &&
+				!hasDeferredAlias(projectedIn) &&
+				!hasDeferredAlias(projectedOut);
+			identities.push(declared ? `declared:${expressionOf(projectedIn)}=>${expressionOf(projectedOut)}` : ir.fn);
 			morphIdentities(ir.input, identities, seen);
 			if (ir.out !== undefined) morphIdentities(ir.out, identities, seen);
 			break;
