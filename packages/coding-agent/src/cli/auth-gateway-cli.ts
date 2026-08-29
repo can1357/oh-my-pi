@@ -153,14 +153,17 @@ const CATALOG_REFRESH_INTERVAL_MS = 15 * 60 * 1000;
 /**
  * Index resolvable models by the request ids clients may send: the
  * provider-qualified `provider/id` (always) and the bare `id` (first-write-wins
- * fallback for legacy clients). Scoped to providers the gateway holds broker
+ * fallback for legacy clients, except bare `auto` which Cursor claims when
+ * Cursor credentials are held). Scoped to providers the gateway holds broker
  * credentials for, since only those are routable.
  *
  * Cursor's "auto" wire id is a valid per-turn router that `GetUsableModels`
  * never enumerates, so it isn't part of the discovered/bundled catalog. Inject
  * the synthetic {@link CURSOR_AUTO_MODEL} when the gateway holds Cursor
  * credentials so a clean `{"model":"auto"}` request resolves instead of 404ing,
- * and "auto" surfaces in `/v1/models` listings.
+ * and "auto" surfaces in `/v1/models` listings. When OpenRouter is also
+ * credentialed, Cursor still wins the bare `auto` id (use `openrouter/auto` for
+ * OpenRouter's router).
  */
 export function indexModelsByRequestId(
 	models: readonly Model<Api>[],
