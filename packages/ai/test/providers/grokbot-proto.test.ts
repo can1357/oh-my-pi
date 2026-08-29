@@ -535,4 +535,49 @@ describe("grokbot incomplete tool calls", () => {
 			expect.objectContaining({ type: "toolCall", id: "c1", name: "echo", arguments: { a: 1 } }),
 		]);
 	});
+
+	test("rejects isComplete:true tool call with malformed JSON args", async () => {
+		mockAuth();
+		const malformed = frameConnectProto(
+			encodeInferenceStreamResponse({
+				toolCallPart: { toolCallId: "c1", toolName: "echo", args: '{"a":', isComplete: true },
+			}),
+		);
+		const trailer = frameConnectProto(Buffer.alloc(0), CONNECT_END_STREAM_FLAG);
+		const fetchImpl = (async () => connectBody(malformed, trailer)) as FetchImpl;
+
+		const result = await streamGrokBot(model, context, { apiKey: "renew", fetch: fetchImpl }).result();
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toMatch(/malformed JSON arguments/i);
+		expect(result.content.some(b => b.type === "toolCall" && Object.keys(b.arguments).length === 0)).toBe(true);
+	});
+
+	test("correlates tool chunks when later frame supplies only toolIndex", async () => {
+		mockAuth();
+		const start = frameConnectProto(
+			encodeInferenceStreamResponse({
+				toolCallPart: {
+					toolCallId: "c1",
+					toolName: "echo",
+					args: '{"a":',
+					isComplete: false,
+					toolIndex: 0,
+				},
+			}),
+		);
+		const finish = frameConnectProto(
+			encodeInferenceStreamResponse({
+				toolCallPart: { args: '{"a":1}', isComplete: true, toolIndex: 0 },
+			}),
+		);
+		const trailer = frameConnectProto(Buffer.alloc(0), CONNECT_END_STREAM_FLAG);
+		const fetchImpl = (async () => connectBody(start, finish, trailer)) as FetchImpl;
+
+		const result = await streamGrokBot(model, context, { apiKey: "renew", fetch: fetchImpl }).result();
+		expect(result.stopReason).toBe("toolUse");
+		expect(result.errorMessage).toBeUndefined();
+		expect(result.content).toEqual([
+			expect.objectContaining({ type: "toolCall", id: "c1", name: "echo", arguments: { a: 1 } }),
+		]);
+	});
 });

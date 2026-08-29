@@ -617,8 +617,10 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 
 			const finishTool = (state: { ended: boolean; argsText: string; block: ToolCall; index: number }) => {
 				if (state.ended) return;
-				state.ended = true;
+				// Parse before marking ended so malformed JSON does not leave a
+				// "completed" state without a successful toolcall_end.
 				state.block.arguments = parseToolArgs(state.argsText, true);
+				state.ended = true;
 				stream.push({
 					type: "toolcall_end",
 					contentIndex: state.index,
