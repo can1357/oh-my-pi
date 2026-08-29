@@ -4,6 +4,7 @@ import {
 	isolatedApplyShouldLatch,
 	isParentVerifyCwdInMergedTree,
 	isTautologicalParentVerifyCommand,
+	isTrivialParentVerifyEvalCode,
 	MERGED_UNVERIFIED_MARKER,
 	skipLeadingEnvAssignmentTokens,
 	UnverifiedMergeLatch,
@@ -107,6 +108,24 @@ describe("isTautologicalParentVerifyCommand", () => {
 		expect(isTautologicalParentVerifyCommand("cd packages/foo; pwd")).toBe(true);
 		expect(isTautologicalParentVerifyCommand("cd packages/foo && bun test")).toBe(false);
 		expect(isTautologicalParentVerifyCommand("cd packages/foo; bun test")).toBe(false);
+	});
+});
+
+describe("isTrivialParentVerifyEvalCode", () => {
+	it("rejects literal and arithmetic-only cells", () => {
+		expect(isTrivialParentVerifyEvalCode(undefined)).toBe(true);
+		expect(isTrivialParentVerifyEvalCode("")).toBe(true);
+		expect(isTrivialParentVerifyEvalCode("1+1")).toBe(true);
+		expect(isTrivialParentVerifyEvalCode("1 + 1;")).toBe(true);
+		expect(isTrivialParentVerifyEvalCode('"ok"')).toBe(true);
+		expect(isTrivialParentVerifyEvalCode("true")).toBe(true);
+		expect(isTrivialParentVerifyEvalCode("null")).toBe(true);
+	});
+
+	it("accepts cells that exercise project code", () => {
+		expect(isTrivialParentVerifyEvalCode("await read('package.json')")).toBe(false);
+		expect(isTrivialParentVerifyEvalCode("import { add } from './src/math.ts'; add(1, 1)")).toBe(false);
+		expect(isTrivialParentVerifyEvalCode("Bun.spawnSync(['bun', 'test'])")).toBe(false);
 	});
 });
 

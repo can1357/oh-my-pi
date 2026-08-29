@@ -43,6 +43,8 @@
 - Fixed orphaned pages, iframes, and workers accumulating in the shared headless browser after abnormal OMP session termination.
 ### Fixed
 
+- Parent `eval` no longer clears the unverified-merge latch on bare success: require an explicit cwd inside the merged tree and reject trivial expressions such as `1+1`.
+- Leading `cd <path>; …` (semicolon) is recognized for parent-verify cwd resolution, so `cd /tmp; bun test` no longer clears the latch as if it ran in-tree.
 - Isolated task merges now latch parent verification: child yield is not evidence. Each successful isolated apply adds one pending latch; one parent check cannot clear two overlapping merges. A successful parent `bash`/`eval` or clean `lsp` diagnostics result decrements the latch; `ls`/`pwd`/`echo` and error-bearing diagnostics do not. Stopping with an unverified merge continues the session like incomplete todos. Background bash/eval verification clears only when the async job completes successfully (including when hub consumes delivery). Session switches clear the latch and pending verify snapshots so a different cwd/transcript does not inherit them. Nested patch apply failures no longer report `applied: true` unless an earlier nested repo actually changed.
 - Armed the unverified-merge latch before temporary artifact cleanup so a cleanup failure cannot drop the settle gate after an isolated apply.
 - Merge-only todo reminders show an unverified-merge header instead of "0 incomplete todos", and ACP skips empty plan updates for those reminders.

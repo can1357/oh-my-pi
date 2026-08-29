@@ -15,6 +15,7 @@ import type { SessionManager } from "./session-manager";
 import {
 	isParentVerifyCwdInMergedTree,
 	isTautologicalParentVerifyCommand,
+	isTrivialParentVerifyEvalCode,
 	MERGED_UNVERIFIED_MARKER,
 } from "./settle-gates";
 
@@ -59,7 +60,9 @@ interface PromptLine {
 interface VerifyStartSnap {
 	generation: number;
 	command?: string;
-	/** Resolved bash working directory when known at tool start. */
+	/** Eval cell source snapped at tool start (trivial expressions must not clear). */
+	code?: string;
+	/** Resolved bash/eval working directory when known at tool start. */
 	cwd?: string;
 	/**
 	 * LSP diagnostics target snapped at tool start (`*` = workspace-wide).
@@ -155,11 +158,19 @@ export class TodoTracker {
 		if (!PARENT_VERIFY_TOOLS[toolName] || !toolCallId) return;
 		const command =
 			toolName === "bash" && isRecord(args) && typeof args.command === "string" ? args.command : undefined;
-		const cwd = toolName === "bash" ? this.#resolveBashStartCwd(args) : undefined;
+		const code =
+			toolName === "eval" && isRecord(args) && typeof args.code === "string" ? args.code : undefined;
+		const cwd =
+			toolName === "bash"
+				? this.#resolveBashStartCwd(args)
+				: toolName === "eval"
+					? this.#resolveEvalStartCwd(args)
+					: undefined;
 		const lspFile = toolName === "lsp" ? this.#resolveLspDiagnosticsTarget(args) : undefined;
 		this.#verifyStart.set(toolCallId, {
 			generation: this.#host.unverifiedMergeGeneration?.() ?? 0,
 			command,
+			code,
 			cwd,
 			lspFile,
 		});
@@ -167,7 +178,7 @@ export class TodoTracker {
 
 	/**
 	 * Resolve bash cwd the same way the bash tool does: structured `cwd`, else a
-	 * leading `cd <path> && …` target. Absolute/relative paths resolve against the
+	 * leading `cd <path> &&|; …` target. Absolute/relative paths resolve against the
 	 * session tree so out-of-tree verify cannot clear the latch.
 	 */
 	#resolveBashStartCwd(args: unknown): string | undefined {
@@ -181,6 +192,15 @@ export class TodoTracker {
 		}
 		if (hint === undefined) return undefined;
 		return path.resolve(this.#host.cwd(), hint);
+	}
+
+	/** Eval only clears the latch when it declares a cwd inside the merged tree. */
+	#resolveEvalStartCwd(args: unknown): string | undefined {
+		if (!isRecord(args)) return undefined;
+		if (typeof args.cwd === "string" && args.cwd.trim() !== "") {
+			return path.resolve(this.#host.cwd(), args.cwd.trim());
+		}
+		return undefined;
 	}
 
 	/** Resolve LSP diagnostics `file` (`*` stays workspace-wide; else cwd-resolved). */
@@ -202,6 +222,7 @@ export class TodoTracker {
 		const start = toolCallId ? this.#verifyStart.get(toolCallId) : undefined;
 		const detailCwd = typeof details?.cwd === "string" ? details.cwd : undefined;
 		const detailLspFile = this.#resolveLspDiagnosticsTarget(lspDiagnosticsRequestFromDetails(details));
+		const evalCode = toolName === "eval" ? (start?.code ?? evalCodeFromDetails(details)) : undefined;
 		if (
 			PARENT_VERIFY_TOOLS[toolName] &&
 			this.#isSuccessfulParentVerify(
@@ -211,6 +232,7 @@ export class TodoTracker {
 				start?.command,
 				detailCwd ?? start?.cwd,
 				start?.lspFile ?? detailLspFile,
+				evalCode,
 			)
 		) {
 			// Prefer the generation snapped at tool start. Missing start (tests /
@@ -287,6 +309,13 @@ export class TodoTracker {
 		if (jobType === "bash" && !isParentVerifyCwdInMergedTree(start.cwd, this.#host.cwd(), this.#host.repoRoot?.())) {
 			return;
 		}
+		if (jobType === "eval") {
+			if (start.cwd === undefined || start.cwd.trim() === "") return;
+			if (!isParentVerifyCwdInMergedTree(start.cwd, this.#host.cwd(), this.#host.repoRoot?.())) {
+				return;
+			}
+			if (isTrivialParentVerifyEvalCode(start.code)) return;
+		}
 		if ((jobType === "bash" || jobType === "eval") && status === "completed") {
 			this.#host.clearUnverifiedMergeIfGeneration?.(start.generation);
 		}
@@ -299,6 +328,7 @@ export class TodoTracker {
 		command?: string,
 		cwd?: string,
 		lspFile?: string,
+		evalCode?: string,
 	): boolean {
 		if (isError) return false;
 		// Background bash/eval: the initial toolResult is not a completed check.
@@ -309,6 +339,18 @@ export class TodoTracker {
 		}
 		if (toolName === "bash" && !isParentVerifyCwdInMergedTree(cwd, this.#host.cwd(), this.#host.repoRoot?.())) {
 			return false;
+		}
+		// Eval has no structured "test the merged tree" contract — any successful
+		// `1 + 1` would otherwise clear the latch. Require an explicit cwd inside
+		// the merged tree (same spirit as bash) and non-trivial source; bare eval
+		// never verifies.
+		if (toolName === "eval") {
+			if (cwd === undefined || cwd.trim() === "") return false;
+			if (!isParentVerifyCwdInMergedTree(cwd, this.#host.cwd(), this.#host.repoRoot?.())) {
+				return false;
+			}
+			if (isTrivialParentVerifyEvalCode(evalCode)) return false;
+			return true;
 		}
 		if (toolName === "lsp") {
 			const action = typeof details?.action === "string" ? details.action : undefined;
@@ -605,6 +647,18 @@ export class TodoTracker {
 function lspDiagnosticsRequestFromDetails(details: Record<string, unknown> | undefined): unknown {
 	if (typeof details?.file === "string") return { file: details.file };
 	return isRecord(details?.request) ? details.request : undefined;
+}
+
+/** Eval source from tool details when the start-args snap was missed. */
+function evalCodeFromDetails(details: Record<string, unknown> | undefined): string | undefined {
+	if (typeof details?.code === "string") return details.code;
+	const cells = details?.cells;
+	if (!Array.isArray(cells) || cells.length === 0) return undefined;
+	const parts: string[] = [];
+	for (const cell of cells) {
+		if (isRecord(cell) && typeof cell.code === "string") parts.push(cell.code);
+	}
+	return parts.length > 0 ? parts.join("\n") : undefined;
 }
 
 function toolCallOpFromMessage(message: AgentMessage, toolCallId: string): string | undefined {

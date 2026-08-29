@@ -46,8 +46,10 @@ describe("extractLeadingCdTarget", () => {
 		expect(extractLeadingCdTarget("cd `pwd` && ls")).toBeNull();
 	});
 
-	it("requires a top-level && separator", () => {
-		expect(extractLeadingCdTarget("cd /tmp; echo ok")).toBeNull();
+	it("accepts top-level && or ; separators", () => {
+		expect(extractLeadingCdTarget("cd /tmp; echo ok")).toEqual({ path: "/tmp", rest: "echo ok" });
+		expect(extractLeadingCdTarget("cd /tmp;bun test")).toEqual({ path: "/tmp", rest: "bun test" });
+		expect(extractLeadingCdTarget("cd /tmp ; bun test")).toEqual({ path: "/tmp", rest: "bun test" });
 		expect(extractLeadingCdTarget("cd /foo || echo fail")).toBeNull();
 		expect(extractLeadingCdTarget("cd /tmp &echo")).toBeNull();
 	});

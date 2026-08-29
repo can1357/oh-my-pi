@@ -138,6 +138,112 @@ describe("unverified isolated merge latch", () => {
 		expect(latch.latched).toBe(true);
 	});
 
+	it("does not clear when leading cd uses semicolon to escape the merged tree", async () => {
+		const latch = new UnverifiedMergeLatch();
+		latch.mark();
+		const ctx = host(latch, { cwd: "/repo" });
+		const tracker = new TodoTracker(ctx.host);
+		// `cd /tmp; bun test` must resolve cwd to /tmp (not treat missing && as in-tree).
+		tracker.onToolExecutionStart("bash", "call-semi", {
+			command: "cd /tmp; bun test test/foo.test.ts",
+		});
+		tracker.onToolResult("bash", false, undefined, "call-semi");
+		expect(latch.latched).toBe(true);
+
+		tracker.onToolExecutionStart("bash", "call-semi-in", {
+			command: "cd packages/coding-agent; bun test test/foo.test.ts",
+		});
+		tracker.onToolResult("bash", false, undefined, "call-semi-in");
+		expect(latch.latched).toBe(false);
+	});
+
+	it("does not clear the latch on bare or trivial eval success", async () => {
+		const latch = new UnverifiedMergeLatch();
+		latch.mark();
+		const ctx = host(latch, { cwd: "/repo" });
+		const tracker = new TodoTracker(ctx.host);
+
+		// Unrelated arithmetic with no cwd — not parent verification.
+		tracker.onToolExecutionStart("eval", "call-arith", { language: "js", code: "1+1" });
+		tracker.onToolResult("eval", false, { cells: [{ code: "1+1", status: "complete" }] }, "call-arith");
+		expect(latch.latched).toBe(true);
+
+		// Non-trivial code still requires an explicit in-tree cwd.
+		tracker.onToolExecutionStart("eval", "call-nocwd", {
+			language: "js",
+			code: "await read('package.json')",
+		});
+		tracker.onToolResult(
+			"eval",
+			false,
+			{ cells: [{ code: "await read('package.json')", status: "complete" }] },
+			"call-nocwd",
+		);
+		expect(latch.latched).toBe(true);
+
+		// Trivial expression even with in-tree cwd is non-evidence.
+		tracker.onToolExecutionStart("eval", "call-trivial-cwd", {
+			language: "js",
+			code: "1+1",
+			cwd: "/repo",
+		});
+		tracker.onToolResult("eval", false, { cwd: "/repo", code: "1+1" }, "call-trivial-cwd");
+		expect(latch.latched).toBe(true);
+
+		// Outside-tree cwd with project-looking code still must not clear.
+		tracker.onToolExecutionStart("eval", "call-out", {
+			language: "js",
+			code: "await read('package.json')",
+			cwd: "/tmp",
+		});
+		tracker.onToolResult(
+			"eval",
+			false,
+			{ cwd: "/tmp", code: "await read('package.json')" },
+			"call-out",
+		);
+		expect(latch.latched).toBe(true);
+
+		// In-tree cwd + non-trivial code is accepted as parent verify.
+		tracker.onToolExecutionStart("eval", "call-ok", {
+			language: "js",
+			code: "await read('package.json')",
+			cwd: "/repo",
+		});
+		tracker.onToolResult(
+			"eval",
+			false,
+			{ cwd: "/repo", code: "await read('package.json')" },
+			"call-ok",
+		);
+		expect(latch.latched).toBe(false);
+	});
+
+	it("does not clear background eval without in-tree cwd or non-trivial code", async () => {
+		const latch = new UnverifiedMergeLatch();
+		latch.mark();
+		const ctx = host(latch, { cwd: "/repo" });
+		const tracker = new TodoTracker(ctx.host);
+		tracker.onToolExecutionStart("eval", "call-bg", { language: "js", code: "1+1" });
+		tracker.onToolResult("eval", false, { async: { state: "running", jobId: "job-eval" } }, "call-bg");
+		tracker.onAsyncJobTerminal("job-eval", "eval", "completed");
+		expect(latch.latched).toBe(true);
+
+		tracker.onToolExecutionStart("eval", "call-bg-ok", {
+			language: "js",
+			code: "await read('package.json')",
+			cwd: "/repo",
+		});
+		tracker.onToolResult(
+			"eval",
+			false,
+			{ async: { state: "running", jobId: "job-eval-ok" }, cwd: "/repo" },
+			"call-bg-ok",
+		);
+		tracker.onAsyncJobTerminal("job-eval-ok", "eval", "completed");
+		expect(latch.latched).toBe(false);
+	});
+
 	it("does not clear when bash cwd escapes via relative path or leading cd", async () => {
 		const latch = new UnverifiedMergeLatch();
 		latch.mark();
@@ -422,6 +528,43 @@ describe("unverified isolated merge latch", () => {
 		expect(latch.latched).toBe(true);
 		tracker.onToolExecutionStart("bash", "call-test", { command: "bun test test/foo.test.ts" });
 		tracker.onToolResult("bash", false, undefined, "call-test");
+		expect(latch.latched).toBe(false);
+	});
+
+	it("does not clear the latch on bare or trivial eval", async () => {
+		const latch = new UnverifiedMergeLatch();
+		latch.mark();
+		const ctx = host(latch);
+		const tracker = new TodoTracker(ctx.host);
+		tracker.onToolExecutionStart("eval", "call-arith", { code: "1 + 1" });
+		tracker.onToolResult("eval", false, { code: "1 + 1" }, "call-arith");
+		expect(latch.latched).toBe(true);
+		tracker.onToolExecutionStart("eval", "call-no-cwd", { code: "Bun.spawnSync(['bun','test']).exitCode" });
+		tracker.onToolResult("eval", false, { code: "Bun.spawnSync(['bun','test']).exitCode" }, "call-no-cwd");
+		expect(latch.latched).toBe(true);
+		tracker.onToolExecutionStart("eval", "call-ok", {
+			code: "Bun.spawnSync(['bun','test']).exitCode",
+			cwd: "/repo",
+		});
+		tracker.onToolResult(
+			"eval",
+			false,
+			{ code: "Bun.spawnSync(['bun','test']).exitCode", cwd: "/repo" },
+			"call-ok",
+		);
+		expect(latch.latched).toBe(false);
+	});
+
+	it("does not clear the latch when bash cds out of tree with a semicolon", async () => {
+		const latch = new UnverifiedMergeLatch();
+		latch.mark();
+		const ctx = host(latch, { cwd: "/repo", repoRoot: "/repo" });
+		const tracker = new TodoTracker(ctx.host);
+		tracker.onToolExecutionStart("bash", "call-out", { command: "cd /tmp; bun test" });
+		tracker.onToolResult("bash", false, undefined, "call-out");
+		expect(latch.latched).toBe(true);
+		tracker.onToolExecutionStart("bash", "call-in", { command: "cd /repo/packages; bun test" });
+		tracker.onToolResult("bash", false, undefined, "call-in");
 		expect(latch.latched).toBe(false);
 	});
 

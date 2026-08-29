@@ -60,7 +60,7 @@ function isCdOnlyCommandSegment(segment: string): boolean {
 export function isTautologicalParentVerifyCommand(command: string): boolean {
 	let trimmed = command.trim();
 	if (trimmed.length === 0) return true;
-	// Bash normalizes leading `cd <path> && …` into cwd; strip those wrappers so
+	// Bash normalizes leading `cd <path> &&|; …` into cwd; strip those wrappers so
 	// `cd packages/foo && pwd` classifies as `pwd`, not as a real check.
 	for (;;) {
 		const cd = extractLeadingCdTarget(trimmed);
@@ -72,7 +72,8 @@ export function isTautologicalParentVerifyCommand(command: string): boolean {
 		.split(/(?:&&|\|\||;|\n)+/)
 		.map(segment => segment.trim())
 		.filter(segment => segment.length > 0 && !segment.startsWith("#"));
-	// `extractLeadingCdTarget` only accepts `&&`; also drop leading `cd …;` segments.
+	// Drop any remaining leading `cd …` segments (e.g. after `||` / redirects).
+	// Leading `cd … &&|; …` is already stripped via extractLeadingCdTarget above.
 	while (segments.length > 0 && isCdOnlyCommandSegment(segments[0]!)) {
 		segments.shift();
 	}
@@ -85,6 +86,20 @@ export function isTautologicalParentVerifyCommand(command: string): boolean {
 		const base = invoked.split("/").pop() ?? invoked;
 		return TAUTOLOGICAL_BASH_COMMANDS.has(base);
 	});
+}
+
+/**
+ * Literal / arithmetic-only eval cells (`1+1`, `"ok"`, `true`) are not parent
+ * acceptance of merged work. Missing/blank code is also non-evidence.
+ */
+export function isTrivialParentVerifyEvalCode(code: string | undefined): boolean {
+	if (code === undefined) return true;
+	const trimmed = code.trim().replace(/;+\s*$/, "");
+	if (trimmed.length === 0) return true;
+	const literal =
+		"(?:true|false|null|undefined|-?\\d+(?:\\.\\d+)?(?:[eE][+-]?\\d+)?|\"(?:[^\"\\\\]|\\\\.)*\"|'(?:[^'\\\\]|\\\\.)*'|`(?:[^`\\\\]|\\\\.)*`)";
+	const trivialRe = new RegExp(`^${literal}(?:\\s*[+\\-*/%]\\s*${literal})*$`);
+	return trivialRe.test(trimmed);
 }
 
 /**
