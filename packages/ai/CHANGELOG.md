@@ -9,7 +9,7 @@
 
 ### Fixed
 
-- `/grokbot` status sanitizes and width-limits namespace/client-version values before TUI display.
+- `/grokbot` status sanitizes namespace, client version, and secrets path with `replaceTabs`/`truncateToWidth`/`shortenPath` before TUI display.
 - `/login grokbot` host-install prompt names the resolved agent secrets path (`getAgentDir()` / profile / `PI_CODING_AGENT_DIR` / XDG), not a hardcoded `~/.omp/agent` or unsupported `OMP_AGENT_DIR`.
 - Grok Bot Connect streams surface input-token-limit frames as context-overflow errors (for compaction), reject malformed trailers/protobuf frames, and no longer store routed model ids in `upstreamProvider`.
 - Grok Bot checksum encoding no longer wraps 32-bit shifts; JWT mint cache is scoped per renewal/backend/namespace; request `apiKey` wins over ambient secrets; incomplete Connect streams and caller aborts surface correctly.

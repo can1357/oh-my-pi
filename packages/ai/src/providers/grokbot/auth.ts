@@ -6,7 +6,8 @@
  * surface and adds `/grokbot` status formatting.
  */
 import { GROKBOT_BACKEND, grokbotSecretsPath, loadGrokbotConfig } from "@oh-my-pi/pi-catalog/discovery/grokbot-auth";
-import { DEFAULT_TAB_WIDTH, sanitizeText, shortenPath } from "@oh-my-pi/pi-utils";
+import { replaceTabs, truncateToWidth } from "@oh-my-pi/pi-tui";
+import { sanitizeText, shortenPath } from "@oh-my-pi/pi-utils";
 
 export {
 	clearGrokbotTokenCache,
@@ -39,24 +40,12 @@ const STATUS_VALUE_MAX_WIDTH = 60;
 
 /** Sanitize a status field: strip controls/ANSI, expand tabs, single-line, width-cap. */
 function formatGrokbotStatusValue(value: string): string {
-	const cleaned = sanitizeText(value)
-		.replaceAll("\t", " ".repeat(DEFAULT_TAB_WIDTH))
-		.replace(/[\r\n]+/g, " ")
-		.trim();
-	if (!cleaned) return "";
-	if (Bun.stringWidth(cleaned) <= STATUS_VALUE_MAX_WIDTH) return cleaned;
-	// Width-aware truncation without depending on pi-tui from the ai package.
-	let width = 0;
-	let end = 0;
-	const ellipsis = "…";
-	const budget = STATUS_VALUE_MAX_WIDTH - Bun.stringWidth(ellipsis);
-	for (const { segment } of new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(cleaned)) {
-		const next = Bun.stringWidth(segment);
-		if (width + next > budget) break;
-		width += next;
-		end += segment.length;
-	}
-	return `${cleaned.slice(0, end)}${ellipsis}`;
+	const cleaned = replaceTabs(
+		sanitizeText(value)
+			.replace(/[\r\n]+/g, " ")
+			.trim(),
+	);
+	return truncateToWidth(cleaned, STATUS_VALUE_MAX_WIDTH);
 }
 
 /** Human-readable status lines for `/grokbot` (no secret values). */
@@ -73,7 +62,7 @@ export async function formatGrokbotStatus(): Promise<string> {
 		`Machine id: ${cfg.machineId ? "present" : "missing"}`,
 		`Namespace: ${formatGrokbotStatusValue(cfg.namespace)}`,
 		`Client version: ${formatGrokbotStatusValue(cfg.clientVersion)}`,
-		`Secrets file: ${shortenPath(grokbotSecretsPath())}`,
+		`Secrets file: ${formatGrokbotStatusValue(shortenPath(grokbotSecretsPath()))}`,
 		"Select models as `grokbot/<id>` (e.g. `grokbot/sand-default`).",
 		"Login: `/login` → Grok Bot — run the shown prompt inside the Grok Bot system (not omp).",
 	].join("\n");
