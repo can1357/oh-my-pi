@@ -170,11 +170,15 @@ export type IR = IRAnalysis &
 				 *
 				 * Invariant: resolve-on-demand paths MUST NOT consult this flag —
 				 * `walk`/`checks` (interp.ts), `compile` (compile.ts), `emit`
-				 * (json-schema.ts), and error-path resolvers all run after the
-				 * definition is complete. Construction-time scan paths MUST:
-				 * `scanIR`'s alias arm (conservative: changesOutput: true,
-				 * exportable: false), `scanAlias` (true, unresolved),
-				 * `morphIdentities` (skip), `assertDeterminateMorphUnions` (skip).
+				 * (json-schema.ts), and parse-time error formatting all run after
+				 * the definition is complete. Construction-time paths MUST either
+				 * skip resolution or honour the flag: `scanIR`'s alias arm
+				 * (conservative: changesOutput: true, exportable: false,
+				 * hasDeferredAlias: true), `scanAlias` (true, unresolved),
+				 * `morphIdentities` (skip), `assertDeterminateMorphUnions` (skip),
+				 * and `descriptionOf` in type.ts (returns the alias name — it is
+				 * reachable eagerly via appendPipes → metaOf when composing
+				 * `.pipe()`/`.readonly()` after a `z.lazy`).
 				 */
 				deferred?: boolean;
 				desc?: string;

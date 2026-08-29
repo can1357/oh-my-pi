@@ -239,6 +239,58 @@ describe("z.lazy deferred alias", () => {
 		});
 	});
 
+	it("does not resolve a lazy getter wrapped in readonly/describe during composition", () => {
+		// The widening gates exclude deferred aliases — scanIR must not
+		// resolve them: a z.lazy hidden behind restrictBase's step-free
+		// morph (z.lazy(...).readonly().describe(...).optional()) would
+		// otherwise pass the gate and the determinism probe would resolve
+		// the getter at construction.
+		// `getterCalls` asserted zero before any parse is the guard that
+		// does the work: with `node` still unassigned during the chain, a
+		// construction-time resolve would also throw from
+		// objectSchema. (.readonly() resolves descriptions eagerly through
+		// appendPipes → metaOf → descriptionOf, which honours the flag.)
+		type Node = { name: string; next?: Node };
+		let getterCalls = 0;
+		let node: z.ZodType<Node>;
+		node = z
+			.lazy(() => {
+				getterCalls++;
+				return z.object({ name: z.string(), next: node });
+			})
+			.readonly()
+			.describe("d")
+			.optional() as unknown as z.ZodType<Node>;
+		expect(getterCalls).toBe(0);
+		expect(node.parse(undefined)).toBeUndefined();
+		expect(node.parse({ name: "a", next: { name: "b" } })).toEqual({ name: "a", next: { name: "b" } });
+		expect(getterCalls).toBe(1);
+		// The chain's own root — and any embedding of it, since .optional()
+		// routed it to the dispatcher morph — erases (documented boundary).
+		// What MUST stay structural is the readonly/describe chain without
+		// the widening: embed → sub → fallback(emit(inner)) → $ref.
+		type Inner = { name: string; next?: Inner };
+		let innerCalls = 0;
+		let innerNode: z.ZodType<Inner>;
+		innerNode = z
+			.lazy(() => {
+				innerCalls++;
+				return z.object({ name: z.string(), next: innerNode.optional() });
+			})
+			.readonly()
+			.describe("d") as unknown as z.ZodType<Inner>;
+		expect(innerCalls).toBe(0);
+		const holder = z.object({ inner: innerNode });
+		const wrapped = asObjectSchema(holder.toJsonSchema());
+		const innerJson = asObjectSchema(propSchema(wrapped, "inner"));
+		expect(resolveRef(wrapped, innerJson?.$ref)).toBeDefined();
+		expect(innerCalls).toBe(1);
+		expect(holder.parse({ inner: { name: "a", next: { name: "b" } } })).toEqual({
+			inner: { name: "a", next: { name: "b" } },
+		});
+		expect(innerCalls).toBe(1);
+	});
+
 	it("invokes the getter exactly once across parses and exports", () => {
 		// A re-invoking getter would rebuild the IR per parse and silently
 		// kill throughput; memoization is part of the contract.

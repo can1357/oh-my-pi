@@ -431,7 +431,13 @@ function descriptionOf(ir: IR, seen: Set<IR> = new Set()): string {
 	if (ir.desc !== undefined) return ir.desc;
 	if (seen.has(ir)) return ir.k === "alias" ? ir.name : expectedOf(ir);
 	seen.add(ir);
-	if (ir.k === "alias") return descriptionOf(ir.resolve(), seen);
+	if (ir.k === "alias") {
+		// Deferred alias (z.lazy): its getter must not run before first parse —
+		// appendPipes resolves descriptions eagerly at composition time via
+		// metaOf, so resolving here would break recursive `const` definitions.
+		if (ir.deferred === true) return ir.name;
+		return descriptionOf(ir.resolve(), seen);
+	}
 	if (ir.k === "object") {
 		return `{ ${ir.props.map(prop => `${String(prop.key)}${prop.opt ? "?" : ""}: ${descriptionOf(prop.val, seen)}`).join(", ")} }`;
 	}
