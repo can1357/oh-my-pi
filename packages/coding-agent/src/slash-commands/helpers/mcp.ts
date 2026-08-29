@@ -10,6 +10,7 @@ import {
 	updateMCPServer,
 } from "../../mcp/config-writer";
 import { MCPManager } from "../../mcp/manager";
+import { dropManagedMcpOAuthForServer } from "../../mcp/oauth-credentials";
 import { getSmitheryApiKey } from "../../mcp/smithery-auth";
 import { searchSmitheryRegistry } from "../../mcp/smithery-registry";
 import type { MCPServerConfig, MCPServerConnection } from "../../mcp/types";
@@ -459,7 +460,12 @@ async function handleRemoveCommand(rest: string, runtime: SlashCommandRuntime): 
 	if (!parsed.name) return usage("Usage: /mcp remove <name> [--scope project|user]", runtime);
 	try {
 		const filePath = getMCPConfigPath(parsed.scope, runtime.cwd);
+		const existing = await readMCPConfigFile(filePath);
+		const server = existing.mcpServers?.[parsed.name];
 		await removeMCPServer(filePath, parsed.name);
+		if (server) {
+			await dropManagedMcpOAuthForServer(runtime.session.modelRegistry.authStorage, server);
+		}
 		await runtime.output(`Removed server "${parsed.name}" from ${parsed.scope} config.`);
 		return commandConsumed();
 	} catch (err) {

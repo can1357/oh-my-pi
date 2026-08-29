@@ -1,12 +1,13 @@
 import { describe, expect, it } from "bun:test";
 import { stripVTControlCharacters } from "node:util";
-import type { UsageReport } from "@oh-my-pi/pi-ai";
+import type { DisabledCredentialSummary, UsageReport } from "@oh-my-pi/pi-ai";
 import {
 	buildRedactionMap,
 	collectUnreportedAccounts,
 	computeProviderWindowStats,
 	formatUsageBreakdown,
 	formatUsageHistory,
+	selectReportableDisabled,
 	type UsageAccountIdentity,
 } from "@oh-my-pi/pi-coding-agent/cli/usage-cli";
 
@@ -299,6 +300,36 @@ describe("collectUnreportedAccounts", () => {
 	});
 });
 
+describe("selectReportableDisabled", () => {
+	const mcpTombstone: DisabledCredentialSummary = {
+		id: 24,
+		provider: "mcp_oauth:profile:default:https://mcp.higgsfield.ai/mcp",
+		type: "oauth",
+		cause: "oauth refresh failed: invalid_grant",
+	};
+	const anthropicTombstone: DisabledCredentialSummary = {
+		id: 26,
+		provider: "anthropic",
+		type: "oauth",
+		email: "dead@example.test",
+		cause: "oauth refresh failed: Refresh token expired",
+	};
+
+	it("drops credentials whose provider has no usage endpoint", () => {
+		const kept = selectReportableDisabled([mcpTombstone, anthropicTombstone], provider => provider === "anthropic");
+		expect(kept).toEqual([anthropicTombstone]);
+	});
+
+	it("keeps every tombstone when --provider is explicit", () => {
+		const kept = selectReportableDisabled(
+			[mcpTombstone, anthropicTombstone],
+			() => false,
+			"mcp_oauth:profile:default:https://mcp.higgsfield.ai/mcp",
+		);
+		expect(kept).toEqual([mcpTombstone, anthropicTombstone]);
+	});
+});
+
 describe("formatUsageBreakdown", () => {
 	const reports = [
 		makeReport("anthropic", "dummy.primary@example.test", [
@@ -471,6 +502,20 @@ describe("formatUsageBreakdown", () => {
 		const text = stripVTControlCharacters(formatUsageBreakdown([], [], Date.now(), undefined, disabled));
 		expect(text).toContain("Anthropic");
 		expect(text).toContain("✗ last@example.test — disabled: token endpoint said no (re-login to restore)");
+	});
+	it("hides auto-disabled MCP OAuth tombstones — they are not LLM quota", () => {
+		const disabled: DisabledCredentialSummary[] = [
+			{
+				id: 24,
+				provider: "mcp_oauth:profile:default:https://mcp.higgsfield.ai/mcp",
+				type: "oauth",
+				cause: 'oauth refresh failed: MCP OAuth refresh failed: 400 {"error":"invalid_grant"}',
+			},
+		];
+		const text = stripVTControlCharacters(formatUsageBreakdown([], [], Date.now(), undefined, disabled));
+		expect(text).not.toContain("higgsfield");
+		expect(text).not.toContain("mcp_oauth");
+		expect(text).not.toContain("re-login to restore");
 	});
 
 	it("warns about Anthropic's ~30d grant lifetime only inside the final week", () => {

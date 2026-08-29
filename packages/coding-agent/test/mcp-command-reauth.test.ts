@@ -1031,6 +1031,38 @@ describe("/mcp auth commands", () => {
 		expect(userConfig.mcpServers?.discovered).toBeUndefined();
 	});
 
+	test("drops url-keyed OAuth credentials when removing a server", async () => {
+		const authStorage = freshAuthStorage();
+		await authStorage.reload();
+		const projectConfigPath = getMCPConfigPath("project", projectDir);
+		await fs.mkdir(path.dirname(projectConfigPath), { recursive: true });
+		await Bun.write(
+			projectConfigPath,
+			`${JSON.stringify({
+				mcpServers: {
+					hg: { type: "http", url: EXPANDED_SERVER_URL },
+				},
+			})}\n`,
+		);
+		await authStorage.set(oauthFlow.mcpOAuthCredentialId(EXPANDED_SERVER_URL), {
+			type: "oauth",
+			access: "hg-access",
+			refresh: "hg-refresh",
+			expires: Date.now() + 3_600_000,
+		});
+		const { controller, showError } = createController(authStorage, {
+			getConnection: vi.fn(() => undefined),
+			disconnectServer: vi.fn(async () => {}),
+		});
+
+		await controller.handle("/mcp remove hg");
+
+		expect(showError).not.toHaveBeenCalled();
+		expect(authStorage.get(oauthFlow.mcpOAuthCredentialId(EXPANDED_SERVER_URL))).toBeUndefined();
+		const saved = JSON.parse(await Bun.file(projectConfigPath).text()) as TestConfigFile;
+		expect(saved.mcpServers?.hg).toBeUndefined();
+	});
+
 	test("passes env-expanded OAuth client credentials to the reauth flow", async () => {
 		const authStorage = freshAuthStorage();
 		await authStorage.reload();

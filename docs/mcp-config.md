@@ -456,7 +456,7 @@ After editing, use:
 - `/mcp list` to see which config file a server came from
 - `/mcp test <name>` to test a single server
 - `/mcp reconnect <name>` to reconnect one server without rediscovering all configs
-- `/mcp reauth <name>` to replace managed OAuth credentials, or `/mcp unauth <name>` to remove them
+- `/mcp reauth <name>` to replace managed OAuth credentials, `/mcp unauth <name>` to remove them, or `/mcp remove <name>` which also drops the managed OAuth rows so they cannot linger in `omp usage`
 - `/mcp resources`, `/mcp prompts`, and `/mcp notifications` to inspect non-tool MCP capabilities
 
 ## Validation rules OMP enforces

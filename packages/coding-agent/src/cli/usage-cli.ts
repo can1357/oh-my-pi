@@ -578,10 +578,14 @@ function formatReloginDeadline(
  * Tombstones worth a row in `omp usage`: OAuth credentials torn down
  * automatically (refresh failure, upstream invalidation). Rows the user
  * replaced or deleted deliberately are lifecycle noise, not lost capacity.
+ * Managed MCP OAuth (`mcp_oauth:*`) is a connection token, not LLM quota —
+ * a failed refresh after `/mcp remove` or a hand-edit of `mcp.json` must not
+ * render as lost capacity.
  */
 function isActionableDisable(summary: DisabledCredentialSummary, activeAccounts: UsageAccountIdentity[] = []): boolean {
 	if (summary.type !== "oauth") return false;
 	if (/^(replaced by|deleted by user)/i.test(summary.cause)) return false;
+	if (summary.provider.startsWith("mcp_oauth:") || summary.provider.startsWith("mcp_oauth_")) return false;
 
 	// Do not display tombstone if there is an active account for the same provider
 	// matching the same identity (email, accountId, or org).
@@ -922,6 +926,21 @@ export function selectReportableAccounts(
 	return accounts.filter(account => hasUsageProvider(account.provider));
 }
 
+/**
+ * Same cull as {@link selectReportableAccounts} for auto-disabled tombstones.
+ * A refresh-failed MCP OAuth row (or any other credential with no usage
+ * endpoint) is not lost quota; without this, `omp usage` invents a provider
+ * section for it after the live-account filter already dropped the sibling.
+ */
+export function selectReportableDisabled(
+	disabled: DisabledCredentialSummary[],
+	hasUsageProvider: (provider: string) => boolean,
+	explicitProvider?: string,
+): DisabledCredentialSummary[] {
+	if (explicitProvider) return disabled;
+	return disabled.filter(summary => hasUsageProvider(summary.provider));
+}
+
 /** Apply a redaction mask to an optional identity field. */
 function maskIdentity(redaction: Map<string, string>, value: string | undefined): string | undefined {
 	return value === undefined ? undefined : (redaction.get(value) ?? value);
@@ -1124,7 +1143,11 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 		// missing. Best-effort: a broker predating the endpoint yields [].
 		let disabled: DisabledCredentialSummary[] = [];
 		try {
-			disabled = await authStorage.listDisabledCredentials();
+			disabled = selectReportableDisabled(
+				await authStorage.listDisabledCredentials(),
+				provider => authStorage.usageProviderFor(provider) !== undefined,
+				cmd.provider,
+			);
 		} catch {
 			// Usage output must not fail because tombstone listing did.
 		}

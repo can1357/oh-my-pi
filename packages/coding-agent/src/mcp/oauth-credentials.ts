@@ -241,3 +241,25 @@ export async function removeManagedMcpOAuthCredentials(
 	}
 	return removed;
 }
+
+/**
+ * Drop every managed OAuth row this profile holds for `config`: the explicit
+ * `auth.credentialId` (when present) and the url-keyed binding used by
+ * definition-only entries. `/mcp unauth` and `/mcp remove` share this so
+ * deleting a server cannot leave a refresh-failed tombstone in `omp usage`.
+ */
+export async function dropManagedMcpOAuthForServer(
+	authStorage: AuthStorage,
+	config: MCPServerConfig,
+): Promise<boolean> {
+	let removed = false;
+	if (config.auth?.type === "oauth") {
+		removed = (await removeManagedMcpOAuthCredential(authStorage, config.auth.credentialId)) || removed;
+	}
+	if ((config.type === "http" || config.type === "sse") && config.url) {
+		removed =
+			(await removeManagedMcpOAuthCredentials(authStorage, mcpOAuthCredentialIdsForServerUrl(config.url))) ||
+			removed;
+	}
+	return removed;
+}

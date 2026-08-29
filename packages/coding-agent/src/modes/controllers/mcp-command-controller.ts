@@ -27,10 +27,9 @@ import {
 	updateMCPServer,
 } from "../../mcp/config-writer";
 import {
+	dropManagedMcpOAuthForServer,
 	lookupMcpOAuthCredentialForServer,
-	mcpOAuthCredentialIdsForServerUrl,
 	removeManagedMcpOAuthCredential,
-	removeManagedMcpOAuthCredentials,
 } from "../../mcp/oauth-credentials";
 import { MCPOAuthFlow, type MCPStoredOAuthCredential, mcpOAuthCredentialId } from "../../mcp/oauth-flow";
 import {
@@ -1564,7 +1563,8 @@ export class MCPCommandController {
 			const projectPath = getMCPConfigPath("project", cwd);
 			const filePath = scope === "user" ? userPath : projectPath;
 			const config = await readMCPConfigFile(filePath);
-			if (!config.mcpServers?.[name]) {
+			const serverConfig = config.mcpServers?.[name];
+			if (!serverConfig) {
 				this.ctx.showError(`Server "${name}" not found in ${scope} config.`);
 				return;
 			}
@@ -1574,8 +1574,8 @@ export class MCPCommandController {
 				await this.ctx.mcpManager.disconnectServer(name);
 			}
 
-			// Remove from config
 			await removeMCPServer(filePath, name);
+			await dropManagedMcpOAuthForServer(this.ctx.session.modelRegistry.authStorage, serverConfig);
 
 			// Reload MCP manager
 			await this.reloadServers();
@@ -1880,23 +1880,11 @@ export class MCPCommandController {
 
 			const currentAuth = (found.config as MCPServerConfig & { auth?: MCPAuthConfig }).auth;
 			const authStorage = this.ctx.session.modelRegistry.authStorage;
-			if (currentAuth?.type === "oauth") {
-				await removeManagedMcpOAuthCredential(authStorage, currentAuth.credentialId);
-			}
-			// Also drop this profile's url-keyed binding so the server is truly
-			// signed out even when the config carries no auth block. Runtime
-			// discovery expands `${...}` URL values before MCPManager looks up the
-			// deterministic credential row, so unauth must clear that same key.
-			let removedUrlKeyedCredential = false;
-			if ((found.config.type === "http" || found.config.type === "sse") && found.config.url) {
-				removedUrlKeyedCredential = await removeManagedMcpOAuthCredentials(
-					authStorage,
-					mcpOAuthCredentialIdsForServerUrl(found.config.url),
-				);
-			}
+			// Drop explicit + url-keyed bindings (env-expanded URL included).
+			const removedCredential = await dropManagedMcpOAuthForServer(authStorage, found.config);
 
 			if (found.discovered && currentAuth?.type !== "oauth") {
-				if (!removedUrlKeyedCredential) {
+				if (!removedCredential) {
 					this.#showMessage(
 						["", theme.fg("muted", `No stored OAuth auth to remove for "${name}".`), ""].join("\n"),
 					);

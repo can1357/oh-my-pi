@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `omp usage` listing auto-disabled MCP OAuth tombstones after a server was removed from `mcp.json`. `/mcp remove` now drops the managed OAuth rows the way `/mcp unauth` already did.
+
 ## [18.0.10] - 2026-08-28
 
 ### Added
