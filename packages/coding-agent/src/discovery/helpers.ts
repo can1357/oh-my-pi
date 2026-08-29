@@ -353,6 +353,12 @@ export interface ScanSkillsFromDirOptions {
 	level: "user" | "project";
 	requireDescription?: boolean;
 	/**
+	 * When true, descend through ordinary subdirectories and load every `SKILL.md`.
+	 * Directory symlinks remain leaf candidates so recursive discovery cannot loop.
+	 * Default `false` preserves providers whose skill layout is specified as flat.
+	 */
+	recursive?: boolean;
+	/**
 	 * When true, treat a `SKILL.md` sitting directly under `dir` as a single skill in addition to
 	 * scanning `<dir>/<name>/SKILL.md` children. Matches the Claude plugin manifest convention
 	 * that lets a skill path point at a directory containing `SKILL.md` directly (e.g.
@@ -381,15 +387,6 @@ export async function scanSkillsFromDir(
 	const warnings: string[] = [];
 	const { dir, level, providerId, requireDescription = false } = options;
 
-	let entries: fs.Dirent[];
-	try {
-		entries = await fs.promises.readdir(dir, { withFileTypes: true });
-	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-			warnings.push(`Failed to read skills directory: ${dir} (${String(error)})`);
-		}
-		return { items, warnings };
-	}
 	const loadSkill = async (skillPath: string) => {
 		try {
 			const content = await readFile(skillPath);
@@ -418,18 +415,31 @@ export async function scanSkillsFromDir(
 	};
 
 	const work: Promise<void>[] = [];
-	if (options.includeSelf) {
-		const selfSkillPath = path.join(dir, "SKILL.md");
-		if (fs.existsSync(selfSkillPath)) {
-			work.push(loadSkill(selfSkillPath));
+	const directories = [dir];
+	for (let index = 0; index < directories.length; index++) {
+		const currentDir = directories[index];
+		let entries: fs.Dirent[];
+		try {
+			entries = await fs.promises.readdir(currentDir, { withFileTypes: true });
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+				warnings.push(`Failed to read skills directory: ${currentDir} (${String(error)})`);
+			}
+			continue;
 		}
-	}
-	for (const entry of entries) {
-		if (entry.name.startsWith(".")) continue;
-		if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
-		const skillPath = path.join(dir, entry.name, "SKILL.md");
-		if (fs.existsSync(skillPath)) {
-			work.push(loadSkill(skillPath));
+
+		if (currentDir !== dir || options.includeSelf) {
+			work.push(loadSkill(path.join(currentDir, "SKILL.md")));
+		}
+		for (const entry of entries) {
+			if (entry.name.startsWith(".")) continue;
+			if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
+			const childDir = path.join(currentDir, entry.name);
+			if (options.recursive && entry.isDirectory()) {
+				directories.push(childDir);
+			} else {
+				work.push(loadSkill(path.join(childDir, "SKILL.md")));
+			}
 		}
 	}
 	await Promise.all(work);

@@ -24,27 +24,33 @@ The runtime only requires `name` and `path` for validity. In practice, matching 
 
 ### Directory layout
 
-For provider-based discovery (native/Claude/Codex/Agents/plugin providers), skills are discovered as **one level under `skills/`**:
+The OMP-native `native` and `agents` providers discover skills recursively:
+
+- `<ancestor>/.omp/skills/**/SKILL.md`
+- `~/.omp/agent/skills/**/SKILL.md`
+- `<ancestor>/.agent/skills/**/SKILL.md` and `<ancestor>/.agents/skills/**/SKILL.md`
+- `~/.agent/skills/**/SKILL.md` and `~/.agents/skills/**/SKILL.md`
+
+This permits grouping directories such as `<skills-root>/team/internal/<skill>/SKILL.md`.
+Directory symlinks are treated as leaf skill candidates and are not traversed recursively.
+
+Third-party and plugin providers retain their specified one-level layout:
 
 - `<skills-root>/<skill-name>/SKILL.md`
 
-Nested patterns like `<skills-root>/group/<skill>/SKILL.md` are not discovered by provider loaders.
-
-For `skills.customDirectories`, scanning uses the same non-recursive layout (`*/SKILL.md`).
+`skills.customDirectories` also remains non-recursive (`*/SKILL.md`).
 
 ```text
-Provider-discovered layout (non-recursive under skills/):
+OMP-native layout (recursive under skills/):
 
 <root>/skills/
   ├─ postgres/
   │   └─ SKILL.md      ✅ discovered
-  ├─ pdf/
-  │   └─ SKILL.md      ✅ discovered
   └─ team/
       └─ internal/
-          └─ SKILL.md  ❌ not discovered by provider loaders
+          └─ SKILL.md  ✅ discovered by native and agents providers
 
-Custom-directory scanning is also non-recursive, so nested paths are ignored unless you point `customDirectories` at that nested parent.
+The nested skill is not discovered by flat third-party, plugin, or custom-directory scans.
 ```
 
 ### `SKILL.md` frontmatter
@@ -113,7 +119,7 @@ Filter order is:
 3. not ignored
 4. included (if include list present)
 
-The `agents` provider (`.agent[s]/skills`) is the canonical OMP-native location and has its own `enableAgentsUser`/`enableAgentsProject` toggles — disabling Claude/Codex/Pi does **not** turn it off. Providers without a dedicated toggle (`claude-plugins`, `opencode`, `github`, …) are enabled if **any** named third-party source toggle is enabled.
+The `agents` provider (`.agent[s]/skills`) is the canonical OMP-native location, scans recursively, and has its own `enableAgentsUser`/`enableAgentsProject` toggles — disabling Claude/Codex/Pi does **not** turn it off. Providers without a dedicated toggle (`claude-plugins`, `opencode`, `github`, …) are enabled if **any** named third-party source toggle is enabled.
 
 ### Collision and duplicate handling
 

@@ -249,6 +249,64 @@ describe("skills", () => {
 			}
 		});
 
+		it("should recursively load project skills from .agents/skills", async () => {
+			const tempHome = await fs.mkdtemp(path.join(os.tmpdir(), "pi-agents-nested-home-"));
+			const tempProject = await fs.mkdtemp(path.join(os.tmpdir(), "pi-agents-nested-project-"));
+			const skillDir = path.join(tempProject, ".agents", "skills", "group", "nested-agents-skill");
+			await fs.mkdir(skillDir, { recursive: true });
+			await fs.writeFile(
+				path.join(skillDir, "SKILL.md"),
+				["---", "description: Nested project agents skill", "---", "", "# nested-agents-skill"].join("\n"),
+			);
+
+			try {
+				const capability = getCapability<CapabilitySkill>(skillCapability.id);
+				const agentsProvider = capability?.providers.find(provider => provider.id === "agents");
+				expect(agentsProvider).toBeDefined();
+
+				const result = await agentsProvider!.load({
+					cwd: tempProject,
+					home: tempHome,
+					repoRoot: tempProject,
+				});
+				const skill = result.items.find(item => item.name === "nested-agents-skill");
+				expect(skill?.path).toBe(path.join(skillDir, "SKILL.md"));
+				expect(skill?.level).toBe("project");
+			} finally {
+				await removeWithRetries(tempProject);
+				await removeWithRetries(tempHome);
+			}
+		});
+
+		it("should recursively load project skills from .omp/skills", async () => {
+			const tempHome = await fs.mkdtemp(path.join(os.tmpdir(), "pi-native-nested-home-"));
+			const tempProject = await fs.mkdtemp(path.join(os.tmpdir(), "pi-native-nested-project-"));
+			const skillDir = path.join(tempProject, ".omp", "skills", "group", "nested-native-skill");
+			await fs.mkdir(skillDir, { recursive: true });
+			await fs.writeFile(
+				path.join(skillDir, "SKILL.md"),
+				["---", "description: Nested project OMP skill", "---", "", "# nested-native-skill"].join("\n"),
+			);
+
+			try {
+				const capability = getCapability<CapabilitySkill>(skillCapability.id);
+				const nativeProvider = capability?.providers.find(provider => provider.id === "native");
+				expect(nativeProvider).toBeDefined();
+
+				const result = await nativeProvider!.load({
+					cwd: tempProject,
+					home: tempHome,
+					repoRoot: tempProject,
+				});
+				const skill = result.items.find(item => item.name === "nested-native-skill");
+				expect(skill?.path).toBe(path.join(skillDir, "SKILL.md"));
+				expect(skill?.level).toBe("project");
+			} finally {
+				await removeWithRetries(tempProject);
+				await removeWithRetries(tempHome);
+			}
+		});
+
 		it("should load Windows host ~/.agents/skills when running under WSL (#3779)", async () => {
 			const tempHostHome = await fs.mkdtemp(path.join(os.tmpdir(), "pi-agents-wsl-host-"));
 			const tempCwd = await fs.mkdtemp(path.join(os.tmpdir(), "pi-agents-wsl-cwd-"));

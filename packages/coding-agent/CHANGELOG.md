@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Enabled recursive skill discovery under `.omp/skills` and `.agent[s]/skills`, so nested grouping directories load without flattening.
+
 ## [18.0.10] - 2026-08-28
 
 ### Added
