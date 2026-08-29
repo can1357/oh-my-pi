@@ -1556,6 +1556,18 @@ export class SessionTools {
 	}
 
 	/**
+	 * The durable CLI grant restriction (launch `--agent` + explicit
+	 * `--tools`/`--no-tools`): survives persona exit and — unlike the persona
+	 * restriction — must also survive session switches, so the switch's
+	 * baseline recapture can clamp the target transcript's restored tool set
+	 * back to the explicit CLI grant instead of recomputing an unrestricted
+	 * baseline from the registry.
+	 */
+	getResidualCliToolRestriction(): Set<string> | undefined {
+		return this.#residualCliToolRestriction;
+	}
+
+	/**
 	 * Sets or clears the live persona restriction without restoring tools.
 	 * `switchSession` clears it (target transcript re-applies its own), and a
 	 * failed `/agent` switch rollback restores the pre-switch value so the
@@ -2190,8 +2202,10 @@ export class SessionTools {
 		// refresh must not widen the active set past it, so connected manager
 		// tools (and retained extension MCP tools) activate only when the persona
 		// granted them. A launch `--agent` restriction is enforced at creation
-		// time (`restrictToolNames` disables MCP entirely) and never reaches here
-		// (codex #3819553918).
+		// time — `restrictToolNames` disables MCP entirely, and a launch persona
+		// with an explicit CLI tool grant (`--agent ... --tools`) keeps MCP off
+		// for the same reason — so neither ever reaches here (codex
+		// #3819553918).
 		const restriction = this.#personaActiveToolRestriction;
 		const retainedActiveExtensionToolNames = previousActiveMcpToolNames.filter(
 			name =>

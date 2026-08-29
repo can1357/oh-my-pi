@@ -33,6 +33,7 @@ import { VibeSessionRegistry } from "@oh-my-pi/pi-coding-agent/vibe/runtime";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { ModelRegistry } from "../src/config/model-registry";
 import { InteractiveMode } from "../src/modes/interactive-mode";
+import { mainSessionTools } from "../src/task/agent-tools";
 
 function makeTool(name: string): AgentTool {
 	return {
@@ -133,6 +134,17 @@ describe("AgentSession persona state", () => {
 		}
 	});
 
+	it("does not auto-add task for a persona with an explicit empty spawn list", () => {
+		// `spawns: []` is the DISABLED policy (spawnsToString maps it to "",
+		// which resolveSpawnPolicy treats as spawning disabled), so
+		// advertising a `task` tool whose every invocation fails preflight
+		// would be a lie. Omitted or "*" keeps the auto-include; a non-empty
+		// list still adds `task` so the persona can spawn its agents.
+		expect(mainSessionTools(["read"], [])).toEqual(["read"]);
+		expect(mainSessionTools(["read"])).toEqual(["read"]);
+		expect(mainSessionTools(["read"], "*")).toEqual(["read", "task"]);
+		expect(mainSessionTools(["read"], ["scout"])).toEqual(["read", "task"]);
+	});
 	it("round-trips the persona append prompt", () => {
 		expect(session?.getPersonaAppendPrompt()).toBeUndefined();
 		session?.setPersonaAppendPrompt("You are the persona.");

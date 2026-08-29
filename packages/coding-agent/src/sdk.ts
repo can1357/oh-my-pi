@@ -1769,6 +1769,15 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	let hasSession = false;
 	let hasRegistered = false;
 	const restrictToolNames = options.restrictToolNames === true;
+	// A persona session whose tool set came from an EXPLICIT CLI grant
+	// (`--agent ... --tools`/`--no-tools`) must keep that grant authoritative
+	// for the ACTIVE set, even though the persona path leaves
+	// `restrictToolNames` unset so extension/custom tool REGISTRATION and
+	// model resolution still run (a persona can grant an extension tool by
+	// naming it, and extension-provided models must resolve). Without this
+	// flag `alwaysInclude` widens the active set past the grant and MCP
+	// connects tools the CLI never named.
+	const cliGrantRestrictsActive = options.personaCliToolOverride === true;
 	const enableLsp = options.enableLsp ?? !restrictToolNames;
 	// Whether `enableLsp` was EXPLICITLY set at creation (e.g. `--no-lsp`).
 	// A restricted session (`--agent`/`--tools`/`--no-tools`) that did not
@@ -2074,7 +2083,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		await logger.time("createAllTools", createTools, toolSession, options.toolNames);
 
 		// Restricted sessions cannot inherit or discover MCP capabilities.
-		const enableMCP = !restrictToolNames && (options.enableMCP ?? true);
+		const enableMCP = !restrictToolNames && !cliGrantRestrictsActive && (options.enableMCP ?? true);
 		let mcpManager: MCPManager | undefined = enableMCP ? options.mcpManager : undefined;
 		toolSession.mcpManager = mcpManager;
 		toolSession.enableMCP = enableMCP;
@@ -3634,11 +3643,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 
 		// Custom tools and extension-registered tools are always included
 		// unless the effective registry winner is hidden / defaultInactive. Restricted callers own the list.
-		const alwaysInclude: string[] = restrictToolNames
-			? []
-			: [...sdkCustomTools.map(t => t.name), ...registeredTools.map(t => t.definition.name)].filter(
-					name => !defaultInactiveToolNames.has(name),
-				);
+		const alwaysInclude: string[] =
+			restrictToolNames || cliGrantRestrictsActive
+				? []
+				: [...sdkCustomTools.map(t => t.name), ...registeredTools.map(t => t.definition.name)].filter(
+						name => !defaultInactiveToolNames.has(name),
+					);
 		for (const name of alwaysInclude) {
 			if (toolRegistry.has(name) && !initialToolNames.includes(name)) {
 				initialToolNames.push(name);
@@ -4095,11 +4105,6 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			extensionRoots: buildSessionExtensionRoots,
 			disableExtensionDiscovery: options.disableExtensionDiscovery,
 			autoApprove: options.autoApprove,
-			scoutAllowedBySpawnPolicy: isScoutSpawnable(
-				undefined,
-				options.spawns ?? "*",
-				getDiscoveredScoutAgent(sessionManager.getCwd(), buildSessionExtensionRoots()),
-			),
 			evalKernelOwnerId,
 			// Launch `--agent` persona: seed the mutable persona channel (so a
 			// later `/agent` switch replaces the launch persona's prompt) and
@@ -4120,11 +4125,6 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// `restrictToolNames` flag no longer disables extension loading for
 			// personas — codex #3821198710). `explicitlyRequestedToolNames` is
 			// undefined for a persona without `tools:` (no restriction).
-			personaToolRestriction: options.personaName
-				? explicitlyRequestedToolNames
-					? new Set(explicitlyRequestedToolNames)
-					: undefined
-				: undefined,
 			// Residual CLI restriction for when the persona is LEFT: with an
 			// explicit `--tools`/`--no-tools` the baseline IS the CLI list (the
 			// persona frontmatter was NOT applied), so the restored active set is
@@ -4132,13 +4132,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// widen past it either (codex #3845551575). The residual therefore
 			// equals the CLI baseline. A persona-supplied restriction has no CLI
 			// grant behind it and lifts completely (undefined), restoring the
-			// pre-persona refresh behavior (codex #3819553918). Empty baseline
-			// (`--no-tools` with no allowed tools) = nothing can survive —
-			// undefined, since an empty set would filter EVERY late registration.
+			// pre-persona refresh behavior (codex #3819553918). An empty
+			// baseline (`--no-tools` with nothing allowed) stays an EMPTY set:
+			// rejecting every late registration is precisely the grant's
+			// meaning, and `undefined` would let the next MCP/RPC refresh
+			// auto-activate tools the explicit `--no-tools` denied.
 			residualCliToolRestriction:
-				options.personaName && options.personaCliToolOverride && personaBaselineToolNames.length > 0
-					? new Set(personaBaselineToolNames)
-					: undefined,
+				options.personaName && options.personaCliToolOverride ? new Set(personaBaselineToolNames) : undefined,
 			baselineToolNames: options.personaName ? personaBaselineToolNames : undefined,
 			baselineMountedToolNames: options.personaName ? baselineMountedToolNames : undefined,
 			baselineLspEnabled: options.personaName ? baselineLspEnabled : undefined,

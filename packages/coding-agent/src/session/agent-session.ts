@@ -187,6 +187,8 @@ import {
 import type { SecretObfuscator } from "../secrets/obfuscator";
 import { releaseSharpshooterSession } from "../sharpshooter/backend";
 import { flushSharpshooterExtraction } from "../sharpshooter/extract";
+import { getDiscoveredScoutAgent } from "../task/discovery-snapshot";
+import { isScoutSpawnable } from "../task/spawn-policy";
 import {
 	AUTO_THINKING,
 	type ConfiguredThinkingLevel,
@@ -623,7 +625,6 @@ export class AgentSession {
 	// Agent identity (registry id) used for IRC routing and job ownership.
 	#agentId: string | undefined;
 	#agentKind: "main" | "sub" = "main";
-	#scoutAllowedBySpawnPolicy = true;
 	#providerSessionId: string | undefined;
 	#freshProviderSessionId: string | undefined;
 	#inheritedProviderPromptCacheKey: string | undefined;
@@ -1483,7 +1484,6 @@ export class AgentSession {
 		this.#loopGuards = new LoopGuards(streamGuardsHost);
 		this.#agentId = config.agentId;
 		this.#agentKind = config.agentKind ?? "main";
-		this.#scoutAllowedBySpawnPolicy = config.scoutAllowedBySpawnPolicy ?? true;
 		this.#providerSessionId = config.providerSessionId;
 		this.#inheritedProviderPromptCacheKey =
 			config.providerPromptCacheKeySource === "fork" ? this.agent.promptCacheKey : undefined;
@@ -5713,10 +5713,17 @@ export class AgentSession {
 			timestamp: Date.now(),
 		};
 	}
-
 	#isScoutAvailable(): boolean {
-		const disabledAgents = this.settings.get("task.disabledAgents") as string[] | undefined;
-		return this.#scoutAllowedBySpawnPolicy && !disabledAgents?.includes("scout");
+		// Computed from the LIVE spawn policy, not a launch-time snapshot:
+		// persona transitions rewrite the policy through `setSessionSpawns()`
+		// after construction, and a cached verdict would keep advertising (or
+		// suppressing) `scout` based on the launch persona long after the
+		// session's actual policy changed.
+		return isScoutSpawnable(
+			this.settings.get("task.disabledAgents") as string[] | undefined,
+			this.getSessionSpawns(),
+			getDiscoveredScoutAgent(this.sessionManager.getCwd(), this.effectiveExtensionRoots),
+		);
 	}
 
 	async #buildPlanModeMessage(): Promise<CustomMessage | null> {
@@ -8616,8 +8623,17 @@ export class AgentSession {
 				// source persona's restricted active set.
 				if (this.#baselineToolNames !== undefined) {
 					const baseline = this.#tools.computeBaselineToolNames();
-					this.#baselineToolNames = baseline.names;
-					this.#baselineMountedToolNames = baseline.mounted;
+					// An explicit CLI grant (`--agent ... --tools read` /
+					// `--no-tools`) survives the switch: without this clamp the
+					// recapture stores every non-default-inactive registry tool,
+					// and the non-agent reconciler's restoreBaselineTools() would
+					// enable bash/write despite the CLI restriction. The grant
+					// allows at most what it names (empty = nothing).
+					const cliGrant = this.#tools.getResidualCliToolRestriction();
+					this.#baselineToolNames = cliGrant ? baseline.names.filter(name => cliGrant.has(name)) : baseline.names;
+					this.#baselineMountedToolNames = cliGrant
+						? baseline.mounted.filter(name => cliGrant.has(name))
+						: baseline.mounted;
 					// The baseline re-capture belongs to the TARGET transcript: the
 					// previous logical session's read-only persona revoked the Cursor
 					// `editWasGranted` floor, and that revocation must not carry over

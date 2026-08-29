@@ -186,6 +186,66 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		}
 	});
 
+	it("keeps a persona session's explicit CLI tool grant authoritative for the active set", async () => {
+		// `--agent ... --tools read` (personaCliToolOverride): the persona path
+		// leaves `restrictToolNames` unset so extension tools REGISTER (a
+		// persona can grant one by naming it) and extension models resolve,
+		// but the CLI grant must stay authoritative for the ACTIVE set:
+		// `alwaysInclude` widening and MCP activation are suppressed, so a
+		// mutating extension tool cannot ship top-level past the grant
+		// (regression: it was force-activated like an unrestricted session).
+		const tempDir = makeTempDir();
+
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			extensions: [toolActivationExtension],
+			toolNames: ["read"],
+			personaName: "launch-persona",
+			personaCliToolOverride: true,
+		});
+		try {
+			// The extension tool registers (persona path keeps discovery)…
+			expect(session.getToolByName("default_active_tool")).toBeDefined();
+			// …but stays OUT of the active set: the CLI grant named only `read`.
+			expect(session.getActiveToolNames()).toEqual(["read"]);
+			expect(session.systemPrompt.join("\n")).not.toContain("default_active_tool");
+			// The persona baseline equals the CLI grant, and the residual
+			// restriction is the same set — leaving the persona re-enables at
+			// most the CLI list.
+			expect(session.getBaselineToolNames()).toEqual(["read"]);
+			await session.restoreBaselineTools();
+			expect(session.getActiveToolNames()).toEqual(["read"]);
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	it("retains an empty residual restriction after leaving a --no-tools persona", async () => {
+		// `--agent ... --no-tools` grants nothing: the residual CLI restriction
+		// must be an EMPTY set, not `undefined` — undefined would lift the gate
+		// and let the next MCP/RPC/memory refresh auto-activate tools past the
+		// explicit no-tools grant. The empty set rejects every late
+		// registration, which is precisely the grant's meaning.
+		const tempDir = makeTempDir();
+
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			toolNames: [],
+			personaName: "launch-persona",
+			personaCliToolOverride: true,
+		});
+		try {
+			expect(session.getBaselineToolNames()).toEqual([]);
+			// Leaving the persona keeps a defined (empty) restriction.
+			await session.restoreBaselineTools();
+			const restriction = session.getPersonaToolRestriction();
+			expect(restriction).toBeDefined();
+			expect(restriction!.size).toBe(0);
+		} finally {
+			await session.dispose();
+		}
+	});
+
 	it("preserves a deferrable-only write transport across enabled-set reapplication", async () => {
 		const tempDir = makeTempDir();
 		const { session } = await createAgentSession({

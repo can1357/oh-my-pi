@@ -914,7 +914,7 @@ describe("InteractiveMode persona session restore", () => {
 			// baseline of ["read"] used to leak into the target: the reconciler
 			// restored the stale CLI list instead of the target's normal tool
 			// set. The baseline must be re-captured from the registry on a
-			// logical session switch.
+			// logical session switch, clamped to the explicit CLI grant.
 			await fs.writeFile(path.join(agentsDir, "persona-test.md"), agentMd("persona-test", ["tools: [read, write]"]));
 			const sessionFile = path.join(tempHome, "persona.jsonl");
 			await writePersonaSession(sessionFile, projectDir, { name: "persona-test" });
@@ -935,18 +935,18 @@ describe("InteractiveMode persona session restore", () => {
 			expect(session.getBaselineToolNames()).toEqual(["read"]);
 			expect(session.getEnabledToolNames()).toEqual(["read"]);
 
-			// In-process switch to the non-agent target: the baseline must be
-			// re-captured to the target's normal tool set (the full registry,
-			// minus goal and default-inactive tools), NOT the stale CLI list.
+			// In-process switch to the non-agent target: the baseline is
+			// re-captured from the registry for the new transcript, but the
+			// explicit CLI grant bounds the recapture (de-novo review P1) — an
+			// unrestricted re-capture would let the non-agent reconciler's
+			// restoreBaselineTools() enable bash/write past the user's
+			// `--tools read`.
 			await expect(session.switchSession(targetFile)).resolves.toBe(true);
 
 			const baseline = session.getBaselineToolNames();
-			expect(baseline).toBeDefined();
-			expect(baseline).toEqual(expect.arrayContaining(["read", "write", "bash"]));
-			expect(baseline).not.toContain("goal");
-			// The stale launch restriction is gone: the target's active set is
-			// restored to the re-captured normal set.
-			expect(session.getEnabledToolNames()).toEqual(expect.arrayContaining(baseline!));
+			expect(baseline).toEqual(["read"]);
+			// The target's active set stays within the CLI grant.
+			expect(session.getEnabledToolNames()).toEqual(["read"]);
 		},
 		{ timeout: 30_000 },
 	);

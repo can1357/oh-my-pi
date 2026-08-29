@@ -3289,7 +3289,20 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.showWarning("Exit vibe mode first.");
 			return;
 		}
-
+		// Snapshot the persona so a failed plan entry can restore it: the
+		// clear below discards the live persona's tools, prompt, and spawn
+		// policy, and a later failure in plan setup (e.g. a tool-activation
+		// rejection) would otherwise leave the persisted `agent` mode
+		// pointing at state that was already torn down. Snapshot ONLY when a
+		// persona is actually active: `snapshotPersonaSwitch` seeds the
+		// first-write baseline as a side effect, which a never-persona
+		// session must not gain (leaving plan mode would then restore a
+		// stale tool snapshot instead of keeping its live set), and without
+		// an active persona `#clearPersonaOwnedState` no-ops so there is
+		// nothing to roll back anyway.
+		const personaActive =
+			this.session.getPersonaAppendPrompt() !== undefined || this.session.getSessionSpawns() !== null;
+		const personaSnapshot = personaActive ? snapshotPersonaSwitch(this.session) : undefined;
 		await this.#clearPersonaOwnedState();
 
 		this.planModePaused = false;
@@ -3334,6 +3347,14 @@ export class InteractiveMode implements InteractiveModeContext {
 		} catch (error) {
 			this.session.setPlanModeState(previousPlanModeState);
 			this.planModeEnabled = false;
+			// Plan setup failed after the persona was already torn down: the
+			// persisted mode is still `agent`, so restore the persona state the
+			// clear discarded (tools, restriction, spawns, prompt, model) or
+			// the session would resume/rebuild with a live persona marker over
+			// a discarded persona.
+			if (personaSnapshot) {
+				await rollbackPersonaSwitch(this.session, personaSnapshot);
+			}
 			throw error;
 		}
 		this.session.setPlanProposalHandler?.(title => this.session.preparePlanForReview(title));

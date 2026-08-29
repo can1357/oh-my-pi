@@ -1067,6 +1067,50 @@ describe("launch persona first system prompt", () => {
 		expect(session.systemPrompt.join("\n")).not.toContain("one read-only scout while working is allowed");
 	}, 20000);
 
+	it("re-advertises scout after a live persona restriction is lifted", async () => {
+		// Reverse direction of the live-switch regression: the cached
+		// launch-time scout verdict never updated on `setSessionSpawns`, so
+		// leaving a spawn-restricting persona kept the guidance suppressed
+		// after spawning became unrestricted again. Scout availability is now
+		// computed from the LIVE policy, so both transitions must hold.
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected bundled anthropic/claude-sonnet-4-5 to exist");
+
+		const sessionManager = SessionManager.inMemory(projectDir);
+		const result = await createAgentSession({
+			cwd: projectDir,
+			agentDir: tempHome,
+			authStorage,
+			modelRegistry,
+			sessionManager,
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			model,
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+			toolNames: ["read", "write", "task"],
+		});
+		const liveSession = result.session;
+		try {
+			expect(liveSession.systemPrompt.join("\n")).toContain("one read-only scout while working is allowed");
+			liveSession.setSessionSpawns("reviewer");
+			await liveSession.refreshBaseSystemPrompt();
+			expect(liveSession.systemPrompt.join("\n")).not.toContain("one read-only scout while working is allowed");
+			// Leaving the persona restores the unrestricted default: the
+			// guidance must come back (cached-field regression: it did not).
+			liveSession.setSessionSpawns(null);
+			await liveSession.refreshBaseSystemPrompt();
+			expect(liveSession.systemPrompt.join("\n")).toContain("one read-only scout while working is allowed");
+		} finally {
+			await liveSession.dispose();
+		}
+	}, 20000);
+
 	it("does not advertise scout for a launch persona whose spawns restrict it", async () => {
 		// Launch-path contract: `--agent` with `spawns: [reviewer]` seeds the
 		// session spawn policy at creation, so the FIRST system prompt build
