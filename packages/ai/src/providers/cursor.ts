@@ -730,7 +730,9 @@ function streamCursorWithWireMode(
 			const autoModeActive =
 				options?.wireModelId === "default" ||
 				requestedWireModelId === "auto" ||
-				model.id === "auto";
+				requestedWireModelId === "default" ||
+				model.id === "auto" ||
+				model.id === "default";
 
 			const baseUrl = model.baseUrl || CURSOR_API_URL;
 			const requestPath = "/agent.v1.AgentService/Run";
