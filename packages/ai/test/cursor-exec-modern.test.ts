@@ -84,6 +84,7 @@ async function dispatchExec(
 		execHandlers?: CursorExecHandlers;
 		requestContextTools?: McpToolDefinition[];
 		requestContextRules?: CursorRule[];
+		cursorToolPassthrough?: boolean;
 	} = {},
 ): Promise<{ frames: AgentClientMessage[]; output: AssistantMessage; results: ToolResultMessage[] }> {
 	const output = cursorAssistantMessage();
@@ -112,7 +113,9 @@ async function dispatchExec(
 		},
 		{ sawTokenDelta: false },
 		options.requestContextTools ?? [],
-		options.requestContextRules,
+		options.requestContextRules ?? [],
+		undefined,
+		options.cursorToolPassthrough,
 	);
 
 	return { frames: written.map(decodeClientFrame), output, results };
@@ -2062,6 +2065,70 @@ describe("Cursor MCP frame: approval-only probes", () => {
 		const answer = soleResult(frames);
 		if (answer.case !== "mcpResult") throw new Error(`got ${answer.case}`);
 		expect(answer.value.result.case).toBe("success");
+	});
+
+	it("approves declared MCP probes in tool passthrough without a host preflight", async () => {
+		const { frames, output } = await dispatchExec(
+			buildExecMessage({
+				case: "mcpArgs",
+				value: create(McpArgsSchema, {
+					name: "deploy",
+					toolName: "deploy",
+					toolCallId: "c-pass",
+					providerIdentifier: "ops",
+					smartModeApprovalOnly: true,
+				}),
+			}),
+			{
+				cursorToolPassthrough: true,
+				requestContextTools: [mcpTool("deploy", "ops")],
+			},
+		);
+		const answer = soleResult(frames);
+		if (answer.case !== "mcpResult") throw new Error(`got ${answer.case}`);
+		expect(answer.value.result.case).toBe("approved");
+		expect(output.content.filter(block => block.type === "toolCall")).toHaveLength(0);
+	});
+
+	it("rejects undeclared MCP probes in tool passthrough", async () => {
+		const { frames } = await dispatchExec(
+			buildExecMessage({
+				case: "mcpArgs",
+				value: create(McpArgsSchema, {
+					name: "deploy",
+					toolName: "deploy",
+					toolCallId: "c-pass-deny",
+					providerIdentifier: "ops",
+					smartModeApprovalOnly: true,
+				}),
+			}),
+			{ cursorToolPassthrough: true, requestContextTools: [mcpTool("other", "ops")] },
+		);
+		const answer = soleResult(frames);
+		if (answer.case !== "mcpResult") throw new Error(`got ${answer.case}`);
+		expect(answer.value.result.case).toBe("rejected");
+	});
+});
+
+describe("Cursor grep passthrough: empty pattern", () => {
+	it("surfaces empty-pattern grepArgs to the caller instead of local validation", async () => {
+		const { frames, output } = await dispatchExec(
+			buildExecMessage({
+				case: "grepArgs",
+				value: create(GrepArgsSchema, {
+					pattern: "",
+					glob: "**/*.ts",
+					path: ".",
+					toolCallId: "g1",
+				}),
+			}),
+			{ cursorToolPassthrough: true },
+		);
+		const answer = soleResult(frames);
+		if (answer.case !== "grepResult") throw new Error(`got ${answer.case}`);
+		expect(answer.value.result.case).toBe("error");
+		expect(String(answer.value.result.value.error)).toContain("passthrough");
+		expect(output.content.some(block => block.type === "toolCall" && block.name === "grep")).toBe(true);
 	});
 });
 

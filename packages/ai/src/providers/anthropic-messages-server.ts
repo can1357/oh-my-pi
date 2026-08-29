@@ -646,8 +646,10 @@ export function encodeStream(
 			}, STREAM_PING_INTERVAL_MS);
 
 			const noteRoutedModel = (model: string | undefined) => {
-				if (!model || model === effectiveModelId) return;
-				effectiveModelId = model;
+				if (!model) return;
+				if (model !== effectiveModelId) effectiveModelId = model;
+				// Auto-mode may route back to the same concrete id; still mark resolved
+				// so we stop deferring. `auto`/`default` keep deferring via the id check.
 				if (options?.cursorAutoMode === true) cursorAutoRoutingResolved = true;
 			};
 

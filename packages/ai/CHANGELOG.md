@@ -261,6 +261,8 @@
 - Cursor auto-mode OpenAI Chat Completions and Responses SSE similarly defer the initial role / `response.created` envelopes until routing resolves.
 - Cursor auto-mode Responses SSE also buffers early `text`/`thinking`/`toolcall` events until routing lands, so content cannot force `response.created` with the pre-route placeholder.
 - Cursor tool passthrough always sends `x-cursor-agent-allowed-tools` (including `__none__` when the caller declares no tools) so Cursor does not keep its unrestricted native set.
+- Cursor auto-mode Chat Completions rebuilds buffered deltas with the routed model id; same-id auto routing still releases the deferral.
+- Cursor tool passthrough surfaces empty-pattern `grepArgs` and approves declared MCP approval probes so the external caller receives the invocation.
 - Auth-gateway CORS preflights allow the Cursor control headers (`x-cursor-auto-mode`, `x-cursor-tool-passthrough`, `x-cursor-agent-exclude-tools`, `local-cli-mode`, `x-dev-experiment-overrides`).
 - Cursor `DEBUG_CURSOR` interaction logs go through the central logger instead of `console.error`.
 - Cursor tool passthrough synthesizes and defers `fetchArgs`, `listMcpResourcesExecArgs`, and `readMcpResourceExecArgs` the same way as other exec variants.

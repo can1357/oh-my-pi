@@ -1099,7 +1099,7 @@ describe("openai-responses encodeStream", () => {
 			role: "assistant",
 			api: "openai-responses",
 			provider: "cursor",
-			model: "gpt-5",
+			model: "auto",
 			content: [],
 			usage: zeroUsage(),
 			stopReason: "stop",
@@ -1125,7 +1125,7 @@ describe("openai-responses encodeStream", () => {
 			stream.end(routed);
 		});
 
-		const frames = parseSse(await collectStream(encodeStream(stream, "gpt-5", { cursorAutoMode: true })));
+		const frames = parseSse(await collectStream(encodeStream(stream, "auto", { cursorAutoMode: true })));
 		const created = frames.find(f => f.event === "response.created");
 		expect(created).toBeDefined();
 		const response = (created!.data as { response: { model: string } }).response;

@@ -780,7 +780,7 @@ describe("anthropic-messages encodeStream", () => {
 			content: [],
 			api: "anthropic-messages",
 			provider: "cursor",
-			model: "gpt-5",
+			model: "auto",
 			usage: emptyUsage(),
 			stopReason: "stop",
 			timestamp: 0,
@@ -797,7 +797,7 @@ describe("anthropic-messages encodeStream", () => {
 			{ type: "text_end", contentIndex: 0, content: "hi", partial: withText },
 			{ type: "done", reason: "stop", message: withText },
 		];
-		const sse = await collectSse(encodeStream(makeStream(events), "gpt-5", { cursorAutoMode: true }));
+		const sse = await collectSse(encodeStream(makeStream(events), "auto", { cursorAutoMode: true }));
 		const start = sse.find(e => e.event === "message_start");
 		expect(start).toBeDefined();
 		const message = (start!.data as { message: { model: string } }).message;
@@ -814,7 +814,7 @@ describe("anthropic-messages encodeStream", () => {
 			content: [],
 			api: "anthropic-messages",
 			provider: "cursor",
-			model: "gpt-5",
+			model: "auto",
 			usage: emptyUsage(),
 			stopReason: "stop",
 			timestamp: 0,
@@ -839,7 +839,7 @@ describe("anthropic-messages encodeStream", () => {
 			{ type: "text_end", contentIndex: 0, content: "hi", partial: routed },
 			{ type: "done", reason: "stop", message: routed },
 		];
-		const sse = await collectSse(encodeStream(makeStream(events), "gpt-5", { cursorAutoMode: true }));
+		const sse = await collectSse(encodeStream(makeStream(events), "auto", { cursorAutoMode: true }));
 		const start = sse.find(e => e.event === "message_start");
 		expect((start!.data as { message: { model: string } }).message.model).toBe("claude-opus-4-7");
 		const types = sse.map(e => e.event);

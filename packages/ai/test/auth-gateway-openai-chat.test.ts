@@ -437,6 +437,62 @@ describe("auth-gateway openai-chat: encodeStream", () => {
 		expect(payloads[1]).toEqual({ error: { message: "upstream went away", type: "upstream_error" } });
 	});
 
+	it("rebuilds buffered Cursor auto chunks with the routed model", async () => {
+		const initial = emptyAssistant();
+		initial.model = "auto";
+		initial.provider = "cursor";
+		const early: AssistantMessage = {
+			...initial,
+			content: [{ type: "text", text: "h" }],
+		};
+		const routed: AssistantMessage = {
+			...early,
+			model: "claude-opus-4-7",
+			content: [{ type: "text", text: "hi" }],
+		};
+		const events: AssistantMessageEvent[] = [
+			{ type: "start", partial: initial },
+			{ type: "text_delta", contentIndex: 0, delta: "h", partial: early },
+			{ type: "text_delta", contentIndex: 0, delta: "i", partial: routed },
+			{ type: "done", reason: "stop", message: routed },
+		];
+		const stream = encodeStream(makeEventStream(events, routed), "auto", { cursorAutoMode: true });
+		const payloads = (await collectStream(stream)).map(parseSseLine);
+		const chunks = payloads.filter(
+			(p): p is { model: string; choices: Array<{ delta: Record<string, unknown> }> } =>
+				typeof p === "object" && p !== null && "model" in p,
+		);
+		expect(chunks.length).toBeGreaterThan(0);
+		expect(chunks.every(c => c.model === "claude-opus-4-7")).toBe(true);
+		const text = chunks.map(c => c.choices[0]?.delta.content).filter((v): v is string => typeof v === "string");
+		expect(text.join("")).toBe("hi");
+	});
+
+	it("resolves Cursor auto routing when the selected model id is unchanged", async () => {
+		const initial = emptyAssistant();
+		initial.model = "gpt-5";
+		initial.provider = "cursor";
+		const withText: AssistantMessage = {
+			...initial,
+			content: [{ type: "text", text: "ok" }],
+		};
+		const events: AssistantMessageEvent[] = [
+			{ type: "start", partial: initial },
+			{ type: "text_delta", contentIndex: 0, delta: "ok", partial: withText },
+			{ type: "done", reason: "stop", message: withText },
+		];
+		const stream = encodeStream(makeEventStream(events, withText), "gpt-5", { cursorAutoMode: true });
+		const payloads = (await collectStream(stream)).map(parseSseLine);
+		const chunks = payloads.filter(
+			(p): p is { model: string; choices: Array<{ delta: Record<string, unknown> }> } =>
+				typeof p === "object" && p !== null && "model" in p,
+		);
+		expect(chunks[0]?.choices[0]?.delta).toEqual({ role: "assistant" });
+		expect(chunks.every(c => c.model === "gpt-5")).toBe(true);
+		const text = chunks.map(c => c.choices[0]?.delta.content).filter((v): v is string => typeof v === "string");
+		expect(text.join("")).toBe("ok");
+	});
+
 	it("aborts the upstream gateway request when the client cancels the response body", async () => {
 		const aborted: unknown[] = [];
 		async function* neverEndingEvents() {

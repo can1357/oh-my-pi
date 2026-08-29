@@ -588,11 +588,13 @@ export function encodeStream(
 			let hasToolCalls = false;
 			let finishReason: string = "stop";
 			let roleChunkSent = false;
-			const pendingChunks: unknown[] = [];
+			const pendingChunks: Array<() => unknown> = [];
 
 			const noteRoutedModel = (model: string | undefined) => {
-				if (!model || model === effectiveModelId) return;
-				effectiveModelId = model;
+				if (!model) return;
+				if (model !== effectiveModelId) effectiveModelId = model;
+				// Auto-mode may route back to the same concrete id; still mark resolved.
+				// `auto`/`default` keep deferring via deferStartForCursorAuto's id check.
 				if (options?.cursorAutoMode === true) cursorAutoRoutingResolved = true;
 			};
 
@@ -600,16 +602,16 @@ export function encodeStream(
 				if (roleChunkSent) return;
 				roleChunkSent = true;
 				writeSse(controller, baseChunk({ role: "assistant" }, null));
-				for (const chunk of pendingChunks.splice(0)) writeSse(controller, chunk);
+				for (const build of pendingChunks.splice(0)) writeSse(controller, build());
 			};
 
-			const emitChunk = (payload: unknown) => {
+			const emitChunk = (build: () => unknown) => {
 				if (!roleChunkSent && deferStartForCursorAuto(effectiveModelId)) {
-					pendingChunks.push(payload);
+					pendingChunks.push(build);
 					return;
 				}
 				ensureRoleChunk();
-				writeSse(controller, payload);
+				writeSse(controller, build());
 			};
 
 			try {
@@ -630,7 +632,7 @@ export function encodeStream(
 					switch (event.type) {
 						case "text_delta":
 							if (event.delta.length > 0) {
-								emitChunk(baseChunk({ content: event.delta }, null));
+								emitChunk(() => baseChunk({ content: event.delta }, null));
 							}
 							break;
 
@@ -638,7 +640,7 @@ export function encodeStream(
 							// DeepSeek-style / o-series reasoning channel. Clients that don't
 							// understand it ignore the unknown delta key.
 							if (event.delta.length > 0) {
-								emitChunk(baseChunk({ reasoning_content: event.delta }, null));
+								emitChunk(() => baseChunk({ reasoning_content: event.delta }, null));
 							}
 							break;
 
@@ -649,7 +651,7 @@ export function encodeStream(
 							const partial = event.partial.content[event.contentIndex];
 							const call = partial && partial.type === "toolCall" ? partial : undefined;
 							sentToolMeta.set(idx, { id: call?.id ?? "", name: call?.name ?? "", hasArgumentBytes: false });
-							emitChunk(
+							emitChunk(() =>
 								baseChunk(
 									{
 										tool_calls: [
@@ -672,7 +674,9 @@ export function encodeStream(
 							if (idx === undefined) break;
 							const sent = sentToolMeta.get(idx);
 							if (sent && event.delta.length > 0) sent.hasArgumentBytes = true;
-							emitChunk(baseChunk({ tool_calls: [{ index: idx, function: { arguments: event.delta } }] }, null));
+							emitChunk(() =>
+								baseChunk({ tool_calls: [{ index: idx, function: { arguments: event.delta } }] }, null),
+							);
 							break;
 						}
 
@@ -692,7 +696,7 @@ export function encodeStream(
 								? undefined
 								: stringifyArgs(event.toolCall.arguments);
 							if (correctId !== undefined || correctName !== undefined || correctArguments !== undefined) {
-								emitChunk(
+								emitChunk(() =>
 									baseChunk(
 										{
 											tool_calls: [

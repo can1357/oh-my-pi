@@ -1830,7 +1830,9 @@ async function handleExecServerMessage(
 			// regex or switches to `ls`/`read`, instead of the local grep tool
 			// surfacing a bare "Pattern must not be empty" (issue #4574) after the
 			// synthesized block has already been persisted with a placeholder pattern.
-			const emptyPatternError = emptyGrepPatternRejection(args.pattern, args.glob);
+			// Passthrough must still surface the declared call to the external caller
+			// before local-executor validation — they decide how to handle it.
+			const emptyPatternError = cursorToolPassthrough ? null : emptyGrepPatternRejection(args.pattern, args.glob);
 			if (emptyPatternError !== null) {
 				sendExecClientMessage(h2Request, execMsg, "grepResult", buildGrepErrorResult(emptyPatternError));
 				return;
@@ -2058,7 +2060,16 @@ async function handleExecServerMessage(
 			// there is nothing to decide with, so it is refused. Either way no
 			// block is synthesized — nothing ran.
 			if (mcpCall.approvalOnly) {
-				const approved = (await execHandlers?.mcpApprovalPreflight?.(mcpCall)) === true;
+				let approved = (await execHandlers?.mcpApprovalPreflight?.(mcpCall)) === true;
+				// Gateway passthrough has no exec handlers: approve probes for tools the
+				// caller already declared so Cursor proceeds to the real invocation and
+				// the external caller can authorize/execute it.
+				if (!approved && cursorToolPassthrough) {
+					const declaredName = mcpCall.toolName || mcpCall.name;
+					approved = requestContextTools.some(
+						tool => tool.name === declaredName || tool.toolName === declaredName,
+					);
+				}
 				sendExecClientMessage(
 					h2Request,
 					execMsg,
