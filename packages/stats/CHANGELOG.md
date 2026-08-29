@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed session sync reading only the active agent dir: `omp stats` now ingests `<config-root>/agent/sessions` plus every `profiles/<name>/agent/sessions` into the shared app-root `stats.db`, so named-profile traffic no longer vanishes from 24h/7d.
+
+
 ## [18.0.9] - 2026-08-28
 
 ### Fixed

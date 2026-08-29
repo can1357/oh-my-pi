@@ -120,7 +120,8 @@ describe("profile directories", () => {
 	it("moves agent and root data under the named profile root", () => {
 		setProfile("work");
 
-		const root = path.join(os.homedir(), configDir, "profiles", "work");
+		const appRoot = path.join(os.homedir(), configDir);
+		const root = path.join(appRoot, "profiles", "work");
 		const agent = path.join(root, "agent");
 		expect(getActiveProfile()).toBe("work");
 		expect(getConfigRootDir()).toBe(root);
@@ -128,7 +129,7 @@ describe("profile directories", () => {
 		expect(getAgentDir()).toBe(agent);
 		expect(getAgentDbPath()).toBe(path.join(agent, "agent.db"));
 		expect(getSessionsDir()).toBe(path.join(agent, "sessions"));
-		expect(getStatsDbPath()).toBe(path.join(root, "stats.db"));
+		expect(getStatsDbPath()).toBe(path.join(appRoot, "stats.db"));
 	});
 
 	it("treats the default profile as regular mode", () => {

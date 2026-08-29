@@ -6,7 +6,7 @@ import { getOverviewStats } from "@oh-my-pi/omp-stats/aggregator";
 import { getStatsByAgentType, initDb, insertMessageStats } from "@oh-my-pi/omp-stats/db";
 import { classifyAgentType } from "@oh-my-pi/omp-stats/parser";
 import type { AgentType, MessageStats } from "@oh-my-pi/omp-stats/types";
-import { getConfigRootDir, getSessionsDir, getStatsDbPath } from "@oh-my-pi/pi-utils";
+import { getAgentDir, getConfigRootDir, getSessionsDir, getStatsDbPath } from "@oh-my-pi/pi-utils";
 import { installStatsTestIsolation } from "./helpers/temp-agent";
 
 installStatsTestIsolation("@pi-stats-agent-type-");
@@ -60,6 +60,20 @@ describe("classifyAgentType", () => {
 		expect(classifyAgentType(path.join(session, "AuthLoader", "__advisor.security.jsonl"))).toBe("advisor");
 		// `__advisor-2.jsonl` (output-manager bump namespace) is NOT an advisor transcript.
 		expect(classifyAgentType(path.join(session, "__advisor-2.jsonl"))).toBe("subagent");
+	});
+
+	it("classifies profile-dir transcripts relative to that profile's sessions root", () => {
+		const project = path.join(
+			path.dirname(getAgentDir()),
+			"profiles",
+			"grok",
+			"agent",
+			"sessions",
+			"--work--pi",
+		);
+		const session = path.join(project, "1700000000000_abc");
+		expect(classifyAgentType(path.join(project, "1700000000000_abc.jsonl"))).toBe("main");
+		expect(classifyAgentType(path.join(session, "AuthLoader.jsonl"))).toBe("subagent");
 	});
 });
 

@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `listAgentDirs()` to enumerate the default agent directory plus every `profiles/<name>/agent` directory.
+
+### Fixed
+
+- `getStatsDbPath()` stays at the app config root under a named profile so `omp stats` shares one database across `~/.omp/agent` and `~/.omp/profiles/<name>/`.
+
 ## [18.0.11] - 2026-08-29
 
 ### Fixed

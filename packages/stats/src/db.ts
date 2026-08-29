@@ -1,5 +1,6 @@
 import { Database } from "bun:sqlite";
 import * as fs from "node:fs/promises";
+import * as path from "node:path";
 import type { Usage } from "@oh-my-pi/pi-ai";
 import {
 	calculateUncachedInputCost,
@@ -8,7 +9,7 @@ import {
 	getBundledModel,
 } from "@oh-my-pi/pi-catalog/models";
 import type { ModelCost } from "@oh-my-pi/pi-catalog/types";
-import { getConfigRootDir, getStatsDbPath } from "@oh-my-pi/pi-utils";
+import { getStatsDbPath } from "@oh-my-pi/pi-utils";
 import { classifyAgentType } from "./parser";
 import type {
 	AgentType,
@@ -136,7 +137,7 @@ export async function initDb(): Promise<Database> {
 	if (db) return db;
 
 	// Ensure directory exists
-	await fs.mkdir(getConfigRootDir(), { recursive: true });
+	await fs.mkdir(path.dirname(getStatsDbPath()), { recursive: true });
 
 	db = new Database(getStatsDbPath());
 	// Install the busy handler BEFORE any lock-taking statement. See

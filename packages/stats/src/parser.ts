@@ -10,7 +10,7 @@ import {
 	type ToolResultMessage,
 	type Usage,
 } from "@oh-my-pi/pi-ai";
-import { getSessionsDir, isEnoent, readLines } from "@oh-my-pi/pi-utils";
+import { getSessionsDir, isEnoent, listAgentDirs, readLines } from "@oh-my-pi/pi-utils";
 import type {
 	AgentType,
 	MessageStats,
@@ -27,6 +27,14 @@ import { computeUserMessageMetrics } from "./user-metrics";
 /** Basename of an advisor agent's transcript inside a session artifacts dir. */
 const ADVISOR_TRANSCRIPT_BASENAME = "__advisor.jsonl";
 
+/** Sessions root that contains `sessionPath` (`.../agent/sessions`). */
+function sessionsRootFor(sessionPath: string): string {
+	const resolved = path.resolve(sessionPath);
+	const marker = `${path.sep}agent${path.sep}sessions${path.sep}`;
+	const idx = resolved.lastIndexOf(marker);
+	if (idx >= 0) return resolved.slice(0, idx + marker.length - 1);
+	return getSessionsDir();
+}
 /**
  * Classify which agent produced a transcript from its path within the sessions
  * directory. Layout: `<sessionsDir>/<project>/<file>.jsonl` is the `main`
@@ -42,7 +50,7 @@ export function classifyAgentType(sessionPath: string): AgentType {
 	if (base === ADVISOR_TRANSCRIPT_BASENAME || (base.startsWith("__advisor.") && base.endsWith(".jsonl"))) {
 		return "advisor";
 	}
-	const rel = path.relative(getSessionsDir(), sessionPath);
+	const rel = path.relative(sessionsRootFor(sessionPath), sessionPath);
 	// `<project>/<file>.jsonl` -> 2 segments. Deeper nesting is a subagent.
 	return rel.split(path.sep).length <= 2 ? "main" : "subagent";
 }
@@ -53,8 +61,7 @@ export function classifyAgentType(sessionPath: string): AgentType {
  * The folder part uses -- as path separator.
  */
 function extractFolderFromPath(sessionPath: string): string {
-	const sessionsDir = getSessionsDir();
-	const rel = path.relative(sessionsDir, sessionPath);
+	const rel = path.relative(sessionsRootFor(sessionPath), sessionPath);
 	const projectDir = rel.split(path.sep)[0];
 	// Convert --work--pi-- to /work/pi
 	return projectDir.replace(/^--/, "/").replace(/--/g, "/");
@@ -444,13 +451,19 @@ export async function parseSessionFile(sessionPath: string, fromOffset = 0): Pro
  * List all session directories (folders).
  */
 export async function listSessionFolders(): Promise<string[]> {
-	try {
-		const sessionsDir = getSessionsDir();
-		const entries = await fs.readdir(sessionsDir, { withFileTypes: true });
-		return entries.filter(e => e.isDirectory()).map(e => path.join(sessionsDir, e.name));
-	} catch {
-		return [];
+	const folders: string[] = [];
+	for (const agentDir of await listAgentDirs()) {
+		const sessionsDir = getSessionsDir(agentDir);
+		try {
+			const entries = await fs.readdir(sessionsDir, { withFileTypes: true });
+			for (const entry of entries) {
+				if (entry.isDirectory()) folders.push(path.join(sessionsDir, entry.name));
+			}
+		} catch {
+			// Missing or unreadable sessions dir — skip that tree.
+		}
 	}
+	return folders;
 }
 
 /**

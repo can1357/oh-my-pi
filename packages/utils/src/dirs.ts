@@ -795,9 +795,12 @@ export function getNativesDir(): string {
 	return dirs.rootSubdir("natives", "cache");
 }
 
-/** Get the stats database path (~/.omp/stats.db). */
+/** Get the stats database path (~/.omp/stats.db). Shared across named profiles. */
 export function getStatsDbPath(): string {
-	return dirs.rootSubdir("stats.db", "data");
+	if (!activeProfile) return dirs.rootSubdir("stats.db", "data");
+	// Named-profile configRoot is ~/.omp/profiles/<name>. Usage history is
+	// process-wide, so `omp stats` under OMP_PROFILE still opens the app-root DB.
+	return path.join(getBaseConfigRoot(), "stats.db");
 }
 
 /** Get the autoresearch state directory (~/.omp/autoresearch). */
@@ -871,6 +874,44 @@ export function getComposerCacheDir(agentDir?: string): string {
 /** Get the sessions directory (~/.omp/agent/sessions). */
 export function getSessionsDir(agentDir?: string): string {
 	return dirs.agentSubdir(agentDir, "sessions", "data");
+}
+
+/**
+ * Agent dirs whose session logs / minimizer JSONL belong in the shared stats
+ * view: `<config-root>/agent` plus every `profiles/<name>/agent`. A custom
+ * `PI_CODING_AGENT_DIR` whose basename is not `agent` stays a single dir.
+ */
+export async function listAgentDirs(): Promise<string[]> {
+	const agentDir = getAgentDir();
+	if (path.basename(agentDir) !== "agent") return [agentDir];
+
+	const agentParent = path.dirname(agentDir);
+	const configRoot =
+		path.basename(path.dirname(agentParent)) === "profiles"
+			? path.dirname(path.dirname(agentParent))
+			: agentParent;
+
+	const agentDirs = [path.join(configRoot, "agent")];
+	const profilesDir = path.join(configRoot, "profiles");
+	try {
+		const entries = await fs.promises.readdir(profilesDir);
+		for (const entry of entries) {
+			if (!entry.startsWith(".")) agentDirs.push(path.join(profilesDir, entry, "agent"));
+		}
+	} catch (err) {
+		if (!isEnoent(err)) {
+			throw err;
+		}
+	}
+
+	const seen = new Set<string>();
+	const out: string[] = [];
+	for (const dir of agentDirs) {
+		if (seen.has(dir)) continue;
+		seen.add(dir);
+		out.push(dir);
+	}
+	return out;
 }
 
 /** Get the content-addressed blob store directory (~/.omp/agent/blobs). */
