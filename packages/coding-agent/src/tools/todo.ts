@@ -529,6 +529,9 @@ function applyEntry(
 				task.status = "abandoned";
 				if (options?.userAuthored) {
 					task.droppedBy = "user";
+				} else if (task.droppedBy === "user") {
+					// Model broad/phase drops must not erase an earlier user cancel.
+					// Leave droppedBy intact so settle still treats this as user-authored.
 				} else {
 					task.droppedBy = undefined;
 				}

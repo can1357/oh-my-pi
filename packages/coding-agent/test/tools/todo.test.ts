@@ -6,6 +6,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { initTheme, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import {
+	applyOpsToPhases,
 	isClosedTodo,
 	isSettledTodo,
 	markdownToPhases,
@@ -344,6 +345,23 @@ describe("TodoTool operations", () => {
 			{ content: "cancelled in the editor", status: "abandoned", droppedBy: "user" },
 			{ content: "also cancelled", status: "abandoned", droppedBy: "user" },
 		]);
+	});
+
+	it("preserves user droppedBy when a later model broad drop re-targets the task", () => {
+		const phases: TodoPhase[] = [
+			{
+				name: "Work",
+				tasks: [
+					{ content: "keep cancelled", status: "abandoned", droppedBy: "user" },
+					{ content: "still open", status: "pending" },
+				],
+			},
+		];
+		const { phases: next } = applyOpsToPhases(phases, [{ op: "drop", phase: "Work" }]);
+		const kept = next[0]?.tasks.find(task => task.content === "keep cancelled");
+		const newlyDropped = next[0]?.tasks.find(task => task.content === "still open");
+		expect(kept).toEqual({ content: "keep cancelled", status: "abandoned", droppedBy: "user" });
+		expect(newlyDropped).toEqual({ content: "still open", status: "abandoned" });
 	});
 
 	it("parses checklist items with backslash-escaped brackets from /todo edit", () => {
