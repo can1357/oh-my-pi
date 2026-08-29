@@ -5,6 +5,7 @@ import {
 	createGrokbotChecksum,
 	getAccessTokenExpiryMs,
 	resolveGrokbotClientVersion,
+	shortenGrokbotDisplayPath,
 	stampedVersionBaseOf,
 } from "../../src/providers/grokbot/auth";
 import { resolveGrokbotRequestedModel } from "../../src/providers/grokbot/model-request";
@@ -228,12 +229,21 @@ describe("grokbot requested model mapping", () => {
 });
 
 describe("grokbot checksum", () => {
-	test("is deterministic for fixed machine id and time", () => {
+	test("is deterministic and matches sand-host JS shift-wrap encoding", () => {
 		const a = createGrokbotChecksum("machine-uuid", 1_700_000_000_000);
 		const b = createGrokbotChecksum("machine-uuid", 1_700_000_000_000);
 		expect(a).toBe(b);
 		expect(a.endsWith("machine-uuid")).toBe(true);
 		expect(a.length).toBeGreaterThan("machine-uuid".length);
+		// Different floor(now/1e6) buckets must diverge (sand wire).
+		const otherBucket = createGrokbotChecksum("machine-uuid", 1_701_000_000_000);
+		expect(otherBucket).not.toBe(a);
+	});
+
+	test("shortens home-prefixed secrets paths for TUI status", () => {
+		expect(shortenGrokbotDisplayPath("/Users/demo/.omp/agent/secrets/grokbot.env", "/Users/demo")).toBe(
+			"~/.omp/agent/secrets/grokbot.env",
+		);
 	});
 });
 

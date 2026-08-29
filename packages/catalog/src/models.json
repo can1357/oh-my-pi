@@ -315041,7 +315041,7 @@
 			"api": "grokbot-sand",
 			"provider": "grokbot",
 			"baseUrl": "https://api2.cursor.sh",
-			"reasoning": false,
+			"reasoning": true,
 			"input": [
 				"text",
 				"image"

@@ -8,6 +8,7 @@
  * env overrides (`GROKBOT_*` / `SAND_INFERENCE_RENEWAL_CREDENTIAL`).
  */
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import type { FetchImpl } from "@oh-my-pi/pi-catalog/types";
 import { $env, getAgentDir, isEnoent, logger } from "@oh-my-pi/pi-utils";
@@ -36,9 +37,31 @@ export type GrokbotConfig = {
 type CachedToken = {
 	accessToken: string;
 	expiresAtMs: number;
+	renewal: string;
+	backend: string;
 };
 
-let cachedToken: CachedToken = { accessToken: "", expiresAtMs: 0 };
+/** JWT cache keyed by renewal credential + backend URL (prevents cross-tenant bleed). */
+const tokenCache = new Map<string, CachedToken>();
+
+function tokenCacheKey(renewal: string, backend: string): string {
+	return `${backend}\0${renewal}`;
+}
+
+/** Display-only: replace home prefix with `~` (mirrors coding-agent `shortenPath`). */
+export function shortenGrokbotDisplayPath(filePath: string, homeDir = os.homedir()): string {
+	const windowsStyle = /^[A-Za-z]:[\\/]/.test(homeDir) || homeDir.startsWith("\\\\");
+	const hasHomePrefix = windowsStyle
+		? filePath.toLowerCase().startsWith(homeDir.toLowerCase())
+		: filePath.startsWith(homeDir);
+	if (homeDir && hasHomePrefix) {
+		const suffix = filePath.slice(homeDir.length);
+		if (suffix === "" || suffix.startsWith(path.posix.sep) || suffix.startsWith(path.win32.sep)) {
+			return `~${suffix.replaceAll(path.win32.sep, path.posix.sep)}`;
+		}
+	}
+	return filePath;
+}
 
 /** Strip stamp suffix (`0.30.0-pre.16` → `0.30.0`), matching sand-host `stampedVersionBaseOf`. */
 export function stampedVersionBaseOf(stamped: string | undefined | null): string | undefined {
@@ -157,12 +180,19 @@ function enhancedObfuscate(bytes: Uint8Array): Uint8Array {
 	return bytes;
 }
 
-/** Cursor sand checksum: obfuscated floor(now/1e6) bytes + machine id. */
+/**
+ * Cursor sand checksum: obfuscated floor(now/1e6) bytes + machine id.
+ *
+ * Intentionally matches sand-host `createCursorChecksum` JS `>>` semantics:
+ * shift counts are masked to 5 bits (`>> 40` ≡ `>> 8`, `>> 32` ≡ `>> 0`).
+ * Encoding the mathematical big-endian 48-bit value would diverge from the
+ * live sand client wire and fail checksum validation.
+ */
 export function createGrokbotChecksum(machineId: string, nowMs = Date.now()): string {
 	const unixKiloSeconds = Math.floor(nowMs / 1e6);
 	const bytes = Uint8Array.from([
-		(unixKiloSeconds >> 40) & 255,
-		(unixKiloSeconds >> 32) & 255,
+		(unixKiloSeconds >> 8) & 255, // sand: >> 40 wraps to >> 8
+		unixKiloSeconds & 255, // sand: >> 32 wraps to >> 0
 		(unixKiloSeconds >> 24) & 255,
 		(unixKiloSeconds >> 16) & 255,
 		(unixKiloSeconds >> 8) & 255,
@@ -178,11 +208,13 @@ export async function mintGrokbotAccessToken(
 	backend = GROKBOT_BACKEND,
 	signal?: AbortSignal,
 ): Promise<string> {
-	if (cachedToken.accessToken && Date.now() < cachedToken.expiresAtMs - 60_000) {
-		return cachedToken.accessToken;
-	}
 	if (!cfg.renewal) {
 		throw new Error(`Grok Bot renewer missing. Set GROKBOT_RENEWAL_CREDENTIAL or write ${grokbotSecretsPath()}`);
+	}
+	const cacheKey = tokenCacheKey(cfg.renewal, backend);
+	const cached = tokenCache.get(cacheKey);
+	if (cached?.accessToken && Date.now() < cached.expiresAtMs - 60_000) {
+		return cached.accessToken;
 	}
 	const response = await fetchImpl(new URL(GROKBOT_RENEWAL_PATH, backend), {
 		method: "POST",
@@ -202,13 +234,13 @@ export async function mintGrokbotAccessToken(
 		typeof parsed.expiresAtMs === "number" && Number.isFinite(parsed.expiresAtMs)
 			? parsed.expiresAtMs
 			: (getAccessTokenExpiryMs(accessToken) ?? Date.now() + GROKBOT_DEFAULT_TOKEN_TTL_MS);
-	cachedToken = { accessToken, expiresAtMs };
+	tokenCache.set(cacheKey, { accessToken, expiresAtMs, renewal: cfg.renewal, backend });
 	return accessToken;
 }
 
-/** Test-only: clear cached JWT. Also used after HTTP 401 so auth-retry remints. */
+/** Test-only: clear cached JWTs. Also used after HTTP 401 so auth-retry remints. */
 export function clearGrokbotTokenCache(): void {
-	cachedToken = { accessToken: "", expiresAtMs: 0 };
+	tokenCache.clear();
 }
 
 /** Human-readable status lines for `/grokbot` (no secret values). */
@@ -224,7 +256,7 @@ export async function formatGrokbotStatus(): Promise<string> {
 		`Machine id: ${cfg.machineId ? "present" : "missing"}`,
 		`Namespace: ${cfg.namespace}`,
 		`Client version: ${cfg.clientVersion}`,
-		`Secrets file: ${grokbotSecretsPath()}`,
+		`Secrets file: ${shortenGrokbotDisplayPath(grokbotSecretsPath())}`,
 		"Select models as `grokbot/<id>` (e.g. `grokbot/sand-default`).",
 		"Login: `/login` → Grok Bot — run the shown prompt inside the Grok Bot system (not omp).",
 	].join("\n");

@@ -460,7 +460,8 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 			if (!cfg.machineId) {
 				throw new Error("Grok Bot machine id missing (GROKBOT_MACHINE_ID or secrets/grokbot.env)");
 			}
-			const renewal = cfg.renewal || (typeof options?.apiKey === "string" && options.apiKey ? options.apiKey : "");
+			const requestKey = typeof options?.apiKey === "string" ? options.apiKey.trim() : "";
+			const renewal = requestKey || cfg.renewal;
 			if (!renewal) {
 				throw new Error("Grok Bot renewer missing (GROKBOT_RENEWAL_CREDENTIAL or secrets/grokbot.env)");
 			}

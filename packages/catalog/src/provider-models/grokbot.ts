@@ -4,7 +4,8 @@ export const GROKBOT_BACKEND = "https://api2.cursor.sh";
 export const GROKBOT_API = "grokbot-sand" as const;
 export const GROKBOT_DEFAULT_MODEL_ID = "sand-default";
 
-const COST = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } as const;
+const COST = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } as const; // intentional: renewer-billed; omp cost surfaces stay $0
+
 
 type GrokbotModelSeed = {
 	id: string;
@@ -100,7 +101,7 @@ export const GROKBOT_MODEL_SEEDS: readonly GrokbotModelSeed[] = [
 	{ id: "kimi-latest", name: "kimi-latest", reasoning: true },
 	{ id: "kimi", name: "kimi", reasoning: true },
 	{ id: "glm-5.2", name: "GLM 5.2", reasoning: true },
-	{ id: "sand-default", name: "sand-default (routed)", reasoning: false },
+	{ id: "sand-default", name: "sand-default (routed)", reasoning: true },
 	{ id: "sand-cua", name: "sand-cua (routed)", reasoning: false },
 	{ id: "sand-automation", name: "sand-automation (routed)", reasoning: false },
 	{ id: "sand-mock", name: "sand-mock", reasoning: false },
