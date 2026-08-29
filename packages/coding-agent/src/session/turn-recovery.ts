@@ -782,6 +782,8 @@ export class TurnRecovery {
 				(orchestration?.input ?? 0) === 0 &&
 				(orchestration?.output ?? 0) === 0 &&
 				(orchestration?.cacheRead ?? 0) === 0 &&
+				(assistantMessage.usage.premiumRequests ?? 0) === 0 &&
+				(assistantMessage.usage.cost?.total ?? 0) === 0 &&
 				outputTokensExcludingKnownReasoning === 0;
 
 			// Zero-billed empty stops are upstream dispatch failures laundered into a
@@ -2265,6 +2267,15 @@ export class TurnRecovery {
 
 		if (retryBudgetExhausted) {
 			if (!switchedModel && !switchedCredential) {
+				// Fallback-only consults (hardErrorFallback) must not settle the generic
+				// retry budget: the empty-stop cap caller owns the sole terminal
+				// auto_retry_end. Emitting here would duplicate lifecycle events and
+				// leave the synthetic error in JSONL beside the original empty stop.
+				if (options?.hardErrorFallback) {
+					this.#retryAttempt = 0;
+					this.resolveRetry();
+					return false;
+				}
 				const attempt = this.#retryAttempt - 1;
 				message.errorMessage = `Retry budget exhausted after ${attempt} ${attempt === 1 ? "retry" : "retries"}: ${errorMessage}`;
 				await this.persistTerminalEmptyErrorTurn(message);

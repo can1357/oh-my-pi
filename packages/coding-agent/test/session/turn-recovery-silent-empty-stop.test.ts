@@ -267,6 +267,20 @@ describe("TurnRecovery zero-billed empty-stop fallback", () => {
 		expect(msg.stopReason).toBe("stop");
 	});
 
+	it("8b. does NOT promote premium-request or cost.total billed empties", async () => {
+		const { recovery, getModel } = makeRecovery({ fallbackChains });
+		const premium = makeMessage([], model, { usage: usage({ premiumRequests: 1 }) });
+		expect(await settle(recovery, premium)).toEqual(LEGACY_CAP);
+		expect(getModel().id).toBe(model.id);
+
+		const { recovery: recovery2, getModel: getModel2 } = makeRecovery({ fallbackChains });
+		const charged = makeMessage([], model, {
+			usage: usage({ cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0.002 } }),
+		});
+		expect(await settle(recovery2, charged)).toEqual(LEGACY_CAP);
+		expect(getModel2().id).toBe(model.id);
+	});
+
 	it("9. no usable fallback chain settles terminal at the first cap", async () => {
 		const { recovery, events, getModel } = makeRecovery();
 		const msg = zeroBilled();
