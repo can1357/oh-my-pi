@@ -3,15 +3,16 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { getAgentDir, setAgentDir } from "@oh-my-pi/pi-utils";
+import { fetchGrokbotAvailableModels } from "../src/discovery/grokbot";
 import {
 	clearGrokbotTokenCache,
+	GROKBOT_RENEWAL_PATH,
 	joinGrokbotBackendUrl,
 	loadGrokbotSecretFile,
 	loadGrokbotSecretFileSync,
 	mintGrokbotAccessToken,
 	resolveGrokbotDiscoveryIdentity,
 	resolveGrokbotDiscoveryIdentityAsync,
-	GROKBOT_RENEWAL_PATH,
 } from "../src/discovery/grokbot-auth";
 import { resolveModelCacheProviderId } from "../src/provider-models/cache-provider-id";
 import { grokbotModelManagerOptions } from "../src/provider-models/special";
@@ -215,5 +216,44 @@ describe("grokbot backend URL join", () => {
 		// Provider-owned client headers win over caller spoofing.
 		expect(captured?.["x-cursor-client-type"]).toBe("sand");
 		expect(captured?.["x-sand-box-namespace"]).toBe("prod");
+	});
+});
+
+describe("grokbot AvailableModels headers", () => {
+	afterEach(() => {
+		clearGrokbotTokenCache();
+		delete process.env.GROKBOT_MACHINE_ID;
+		delete process.env.GROKBOT_NAMESPACE;
+		delete process.env.GROKBOT_CLIENT_VERSION;
+	});
+
+	test("forwards configured headers on mint and AvailableModels", async () => {
+		process.env.GROKBOT_MACHINE_ID = "machine";
+		process.env.GROKBOT_NAMESPACE = "prod";
+		process.env.GROKBOT_CLIENT_VERSION = "0.30.0";
+		const seen: Array<{ url: string; headers: Record<string, string> }> = [];
+		const fetchImpl: typeof fetch = async (url, init) => {
+			seen.push({ url: String(url), headers: (init?.headers ?? {}) as Record<string, string> });
+			if (String(url).includes("inference-credential")) {
+				return new Response(JSON.stringify({ accessToken: "tok", expiresAtMs: Date.now() + 600_000 }), {
+					status: 200,
+					headers: { "content-type": "application/json" },
+				});
+			}
+			return new Response(JSON.stringify({ models: [] }), {
+				status: 200,
+				headers: { "content-type": "application/json" },
+			});
+		};
+		const models = await fetchGrokbotAvailableModels({
+			apiKey: "renewer",
+			baseUrl: "https://proxy.example/grokbot",
+			fetch: fetchImpl,
+			headers: { "x-proxy-api-key": "proxy-secret" },
+		});
+		expect(models).not.toBeNull();
+		expect(seen.length).toBe(2);
+		expect(seen.every(s => s.headers["x-proxy-api-key"] === "proxy-secret")).toBe(true);
+		expect(seen[1]?.url).toContain("/aiserver.v1.AiService/AvailableModels");
 	});
 });

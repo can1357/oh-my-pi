@@ -218,12 +218,14 @@ export interface GrokbotModelManagerConfig {
 	namespace?: string;
 	/** Override `x-cursor-client-version` for cache scoping (defaults to GROKBOT_CLIENT_VERSION). */
 	clientVersion?: string;
+	/** Caller/model headers forwarded to AvailableModels mint + request. */
+	headers?: Record<string, string>;
 }
 
 export function grokbotModelManagerOptions(
 	config: GrokbotModelManagerConfig = {},
 ): ModelManagerOptions<"grokbot-sand"> {
-	const { apiKey, baseUrl, fetch } = config;
+	const { apiKey, baseUrl, fetch, headers } = config;
 	// Prefer a fully resolved identity from async prep (catalog refresh) so
 	// construction never sync-reads secrets/grokbot.env on the TUI event loop.
 	const ns = config.namespace?.trim();
@@ -247,7 +249,7 @@ export function grokbotModelManagerOptions(
 		...(apiKey
 			? {
 					dynamicModelsAuthoritative: true,
-					fetchDynamicModels: async () => fetchGrokbotAvailableModels({ apiKey, baseUrl, fetch }),
+					fetchDynamicModels: async () => fetchGrokbotAvailableModels({ apiKey, baseUrl, fetch, headers }),
 				}
 			: undefined),
 	};

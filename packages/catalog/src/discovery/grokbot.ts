@@ -31,6 +31,8 @@ export interface GrokbotModelDiscoveryOptions {
 	timeoutMs?: number;
 	signal?: AbortSignal;
 	fetch?: FetchImpl;
+	/** Caller/model headers (e.g. reverse-proxy API key) for mint + AvailableModels. */
+	headers?: Record<string, string>;
 }
 
 /**
@@ -57,10 +59,11 @@ export async function fetchGrokbotAvailableModels(
 			return null;
 		}
 		const fetchImpl = discoveryFetch(options.fetch);
-		const accessToken = await mintGrokbotAccessToken(cfg, fetchImpl, resolvedBaseUrl, signal);
+		const accessToken = await mintGrokbotAccessToken(cfg, fetchImpl, resolvedBaseUrl, signal, options.headers);
 		const response = await fetchImpl(requestUrl, {
 			method: "POST",
 			headers: {
+				...(options.headers ?? {}),
 				...grokbotClientHeaders(cfg),
 				authorization: `Bearer ${accessToken}`,
 				"x-cursor-checksum": createGrokbotChecksum(cfg.machineId),

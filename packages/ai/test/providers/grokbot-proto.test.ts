@@ -584,6 +584,48 @@ describe("grokbot incomplete tool calls", () => {
 			expect.objectContaining({ type: "toolCall", id: "c1", name: "echo", arguments: { a: 1 } }),
 		]);
 	});
+
+	test("wraps grammar custom-tool raw args as { input } with customWireName", async () => {
+		mockAuth();
+		const patch = "*** Begin Patch\n*** Update File: a.ts\n@@\n-old\n+new\n*** End Patch";
+		const complete = frameConnectProto(
+			encodeInferenceStreamResponse({
+				toolCallPart: {
+					toolCallId: "c1",
+					toolName: "apply_patch",
+					args: patch,
+					isComplete: true,
+				},
+			}),
+		);
+		const trailer = frameConnectProto(Buffer.alloc(0), CONNECT_END_STREAM_FLAG);
+		const fetchImpl = (async () => connectBody(complete, trailer)) as FetchImpl;
+		const grammarContext: Context = {
+			messages: [{ role: "user", content: "edit", timestamp: 1 }],
+			tools: [
+				{
+					name: "edit",
+					description: "edit files",
+					parameters: { type: "object" as const },
+					customWireName: "apply_patch",
+					customFormat: { syntax: "lark", definition: "start: ANY" },
+				},
+			],
+		};
+
+		const result = await streamGrokBot(model, grammarContext, { apiKey: "renew", fetch: fetchImpl }).result();
+		expect(result.stopReason).toBe("toolUse");
+		expect(result.errorMessage).toBeUndefined();
+		expect(result.content).toEqual([
+			expect.objectContaining({
+				type: "toolCall",
+				id: "c1",
+				name: "edit",
+				customWireName: "apply_patch",
+				arguments: { input: patch },
+			}),
+		]);
+	});
 });
 
 describe("grokbot request headers", () => {

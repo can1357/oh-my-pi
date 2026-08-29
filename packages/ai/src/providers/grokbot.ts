@@ -164,8 +164,10 @@ function toInferenceTools(tools: Context["tools"]) {
 		if (!tool || typeof tool !== "object") continue;
 		const name = typeof tool.name === "string" ? tool.name : "";
 		if (!name) continue;
+		const wireName =
+			typeof tool.customWireName === "string" && tool.customWireName.trim() ? tool.customWireName.trim() : name;
 		const entry: (typeof out)[number] = {
-			name,
+			name: wireName,
 			description: typeof tool.description === "string" ? tool.description : "",
 			parameters: toolParametersToJson(tool),
 		};
@@ -179,6 +181,46 @@ function toInferenceTools(tools: Context["tools"]) {
 		out.push(entry);
 	}
 	return out;
+}
+
+/** Map wire tool names (incl. customWireName) back to internal tool metadata. */
+function buildGrammarToolIndex(
+	tools: Context["tools"],
+): Map<string, { name: string; customWireName?: string; isGrammar: boolean }> {
+	const index = new Map<string, { name: string; customWireName?: string; isGrammar: boolean }>();
+	if (!Array.isArray(tools)) return index;
+	for (const tool of tools) {
+		if (!tool || typeof tool !== "object") continue;
+		const name = typeof tool.name === "string" ? tool.name : "";
+		if (!name) continue;
+		const customWireName =
+			typeof tool.customWireName === "string" && tool.customWireName.trim() ? tool.customWireName.trim() : undefined;
+		const isGrammar = Boolean(tool.customFormat && typeof tool.customFormat === "object");
+		const meta = { name, customWireName, isGrammar };
+		index.set(name, meta);
+		if (customWireName) index.set(customWireName, meta);
+	}
+	return index;
+}
+
+/**
+ * Parse completed tool args. Grammar/customFormat tools may emit raw patch text
+ * (not JSON); wrap that as `{ input: raw }` like OpenAI freeform custom tools.
+ */
+function parseCompletedToolArgs(raw: unknown, isGrammar: boolean): Record<string, unknown> {
+	if (isGrammar) {
+		const text = raw == null ? "" : typeof raw === "string" ? raw : JSON.stringify(raw);
+		if (text.trim()) {
+			try {
+				const parsed = JSON.parse(text);
+				if (parsed && typeof parsed === "object") return parsed as Record<string, unknown>;
+			} catch {
+				/* intentional raw grammar payload */
+			}
+		}
+		return { input: text };
+	}
+	return parseToolArgs(raw, true);
 }
 
 function toolCallFromPart(part: unknown) {
@@ -499,6 +541,7 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 			);
 			const messages = toInferenceMessages(context);
 			const tools = toInferenceTools(context.tools);
+			const grammarTools = buildGrammarToolIndex(context.tools);
 			const modelConfig = buildModelConfig(model, options);
 			const conversationId = options?.conversationId || options?.sessionId || crypto.randomUUID();
 			const reqModel = resolveGrokbotRequestedModel(model.id, {
@@ -574,7 +617,7 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 			let openIndex = -1;
 			const toolStates = new Map<
 				string,
-				{ key: string; index: number; block: ToolCall; argsText: string; ended: boolean }
+				{ key: string; index: number; block: ToolCall; argsText: string; ended: boolean; isGrammar: boolean }
 			>();
 
 			const closeOpen = () => {
@@ -619,11 +662,17 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 				return openIndex;
 			};
 
-			const finishTool = (state: { ended: boolean; argsText: string; block: ToolCall; index: number }) => {
+			const finishTool = (state: {
+				ended: boolean;
+				argsText: string;
+				block: ToolCall;
+				index: number;
+				isGrammar: boolean;
+			}) => {
 				if (state.ended) return;
 				// Parse before marking ended so malformed JSON does not leave a
 				// "completed" state without a successful toolcall_end.
-				state.block.arguments = parseToolArgs(state.argsText, true);
+				state.block.arguments = parseCompletedToolArgs(state.argsText, state.isGrammar);
 				state.ended = true;
 				stream.push({
 					type: "toolcall_end",
@@ -643,22 +692,29 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 				const idxKey = typeof indexHint === "number" ? `idx:${indexHint}` : undefined;
 				// Correlate chunks by id and/or index — frames may omit one of the two.
 				let state =
-					(id ? toolStates.get(id) : undefined) ??
-					(idxKey ? toolStates.get(idxKey) : undefined) ??
-					undefined;
+					(id ? toolStates.get(id) : undefined) ?? (idxKey ? toolStates.get(idxKey) : undefined) ?? undefined;
 
 				if (!state) {
 					closeOpen();
+					const meta = (name ? grammarTools.get(name) : undefined) ?? undefined;
 					const block: ToolCall = {
 						type: "toolCall",
 						id: id || `call_${output.content.length}`,
-						name: name || "unknown",
+						name: meta?.name || name || "unknown",
 						arguments: {},
+						...(meta?.customWireName ? { customWireName: meta.customWireName } : {}),
 					};
 					const index = output.content.length;
 					output.content.push(block);
 					const key = id || idxKey || `anon:${toolStates.size}`;
-					state = { key, index, block, argsText: "", ended: false };
+					state = {
+						key,
+						index,
+						block,
+						argsText: "",
+						ended: false,
+						isGrammar: Boolean(meta?.isGrammar),
+					};
 					toolStates.set(key, state);
 					if (id) toolStates.set(id, state);
 					if (idxKey) toolStates.set(idxKey, state);
@@ -667,7 +723,10 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 					if (id) toolStates.set(id, state);
 					if (idxKey) toolStates.set(idxKey, state);
 					if (name && (!state.block.name || state.block.name === "unknown")) {
-						state.block.name = name;
+						const meta = grammarTools.get(name);
+						state.block.name = meta?.name || name;
+						if (meta?.customWireName) state.block.customWireName = meta.customWireName;
+						if (meta?.isGrammar) state.isGrammar = true;
 					}
 				}
 				if (id && state.block.id.startsWith("call_")) state.block.id = id;
