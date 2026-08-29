@@ -603,6 +603,31 @@ describe("unverified isolated merge latch", () => {
 		expect(latch.latched).toBe(true);
 	});
 
+	it("does not clear when a relative cd chain lands outside the merged tree", async () => {
+		const latch = new UnverifiedMergeLatch();
+		latch.mark();
+		const ctx = host(latch, { cwd: "/repo", repoRoot: "/repo" });
+		const tracker = new TodoTracker(ctx.host);
+		tracker.onToolExecutionStart("bash", "call-rel", {
+			cwd: "/repo",
+			command: "cd /tmp && cd project && bun test",
+		});
+		tracker.onToolResult("bash", false, { cwd: "/repo" }, "call-rel");
+		expect(latch.latched).toBe(true);
+	});
+
+	it("does not clear on shell-backgrounded verification", async () => {
+		const latch = new UnverifiedMergeLatch();
+		latch.mark();
+		const ctx = host(latch);
+		const tracker = new TodoTracker(ctx.host);
+		tracker.onToolExecutionStart("bash", "call-bg-amp", {
+			command: "bun test test/foo.test.ts & true",
+		});
+		tracker.onToolResult("bash", false, { cwd: "/repo" }, "call-bg-amp");
+		expect(latch.latched).toBe(true);
+	});
+
 	it("does not stash duplicate async terminals after the verify snap cleared", async () => {
 		const latch = new UnverifiedMergeLatch();
 		latch.mark();

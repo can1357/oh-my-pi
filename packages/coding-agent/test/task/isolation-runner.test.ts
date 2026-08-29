@@ -465,6 +465,27 @@ describe("mergeIsolatedChanges", () => {
 		expect(outcome.summary).toContain("nested repository patches captured");
 	});
 
+	it("arms hadAnyChanges when a partial cherry-pick landed before conflict", async () => {
+		vi.spyOn(vcs, "requireGit").mockReturnValue({} as natives.VcsGitRepo);
+		vi.spyOn(worktreeModule, "mergeTaskBranches").mockResolvedValue({
+			merged: [],
+			failed: ["omp/task/Partial"],
+			conflict: "omp/task/Partial: conflict",
+			partialCommitsLanded: true,
+		});
+		vi.spyOn(worktreeModule, "cleanupTaskBranches").mockResolvedValue(undefined);
+
+		const outcome = await mergeIsolatedChanges({
+			repoRoot: "/repo",
+			mergeMode: "branch",
+			result: result({ branchName: "omp/task/Partial", branchBaseSha: "abc" }),
+		});
+
+		expect(outcome.changesApplied).toBe(false);
+		expect(outcome.hadAnyChanges).toBe(true);
+		expect(outcome.summary).toContain("Branch merge failed");
+	});
+
 	it("surfaces branch preparation errors instead of reporting no changes", async () => {
 		vi.spyOn(vcs, "requireGit").mockReturnValue({} as natives.VcsGitRepo);
 		const mergeSpy = vi.spyOn(worktreeModule, "mergeTaskBranches");
