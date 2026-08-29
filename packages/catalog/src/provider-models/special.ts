@@ -205,7 +205,7 @@ export function devinModelManagerOptions(config: DevinModelManagerConfig = {}): 
 const devinDiscovery = once(() => import("../discovery/devin"));
 
 // ---------------------------------------------------------------------------
-// Grok Bot (Cursor sand InferenceService)
+// Grok Bot provider (InferenceService Stream)
 // ---------------------------------------------------------------------------
 
 export interface GrokbotModelManagerConfig {

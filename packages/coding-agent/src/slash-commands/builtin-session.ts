@@ -502,7 +502,7 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	{
 		name: "grokbot",
 		icon: "model",
-		description: "Grok Bot sand status (not Cursor provider, not xAI/Grok CLI)",
+		description: "Grok Bot provider status (not Cursor, not xAI/Grok CLI)",
 		handle: async (_command, runtime) => {
 			await runtime.output(await formatGrokbotStatus());
 		},

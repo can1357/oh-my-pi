@@ -1,6 +1,6 @@
 /**
  * `/login grokbot` — instruct the user to install host secrets from inside the
- * Grok Bot sand VM. Not Cursor OAuth and not xAI / Grok CLI login.
+ * Grok Bot system. Not Cursor OAuth and not xAI / Grok CLI login.
  */
 import * as AIError from "../error";
 import { grokbotSecretsPath, loadGrokbotConfig, resolveGrokbotEnvApiKey } from "../providers/grokbot/auth";
@@ -25,7 +25,7 @@ export async function loginGrokbot(options: OAuthLoginCallbacks): Promise<string
 	}
 
 	options.onProgress?.(
-		"Grok Bot auth is installed from inside the Grok Bot system (sand VM) — not Cursor login, not xAI / Grok CLI.",
+		"Grok Bot auth is installed from inside the Grok Bot system — not Cursor login, not xAI / Grok CLI.",
 	);
 	options.onProgress?.("Copy the prompt below into Grok Bot. Do not run it in omp.");
 
@@ -53,18 +53,18 @@ export async function loginGrokbot(options: OAuthLoginCallbacks): Promise<string
 }
 
 /**
- * Grok Bot — sand InferenceService provider (`grokbot` / `grokbot-sand`).
+ * Grok Bot provider — `grokbot` / `grokbot-sand`.
  *
  * Distinct from:
  * - `cursor` / Cursor CLI (`cursor-agent` AgentService/Run)
  * - `xai` / `xai-oauth` / Grok CLI (xAI API keys or SuperGrok OAuth)
  *
- * Auth is a sand renewal credential (+ machine id checksum), not Cursor OAuth and not xAI.
+ * Auth is a Grok Bot renewal credential (+ machine id checksum), not Cursor OAuth and not xAI.
  * `/login grokbot` shows a prompt to run inside the Grok Bot system to write host secrets.
  */
 export const grokbotProvider = {
 	id: "grokbot",
-	name: "Grok Bot (sand Inference — not Cursor, not xAI)",
+	name: "Grok Bot (not Cursor, not xAI)",
 	envKeys: resolveGrokbotEnvApiKey,
 	login: loginGrokbot,
 } as const satisfies ProviderDefinition;

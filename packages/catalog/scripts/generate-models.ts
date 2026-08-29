@@ -507,7 +507,7 @@ async function generateModels() {
 	// persisted `modelRoles.default = "xai-oauth/<id>"` is honored before the
 	// async refresh fires (interactive boot does not await refresh).
 	allModels.push(...buildXaiOAuthStaticSeed());
-	// Grok Bot is Cursor sand InferenceService — absent from stencil.so / models.dev.
+	// Grok Bot provider — static seeds; absent from stencil.so / models.dev.
 	allModels.push(...buildGrokbotStaticSeed());
 	// Daybreak is separately provisioned and absent from stencil.so. Keep its
 	// documented aliases and current Cyber snapshot in every generated bundle.

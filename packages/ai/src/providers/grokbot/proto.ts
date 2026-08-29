@@ -1,5 +1,5 @@
 /**
- * Typed surface for Cursor sand InferenceService Stream protobuf helpers.
+ * Typed surface for Grok Bot InferenceService Stream protobuf helpers.
  * Codec internals live in `proto-codec.ts` under `@ts-nocheck` (hand-rolled wire).
  */
 import * as codec from "./proto-codec";

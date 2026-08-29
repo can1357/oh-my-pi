@@ -372,7 +372,7 @@ describe("grokbot /login host-install prompt", () => {
 		expect(GROKBOT_HOST_INSTALL_PROMPT).toContain("chmod 600");
 		expect(prompts[0]).toContain("You are in the Linux VM");
 		expect(prompts[0]).toContain("Press Enter after the host secrets file exists");
-		expect(progress.some(line => line.includes("sand VM"))).toBe(true);
+		expect(progress.some(line => line.includes("Grok Bot system"))).toBe(true);
 		expect(progress.some(line => line.includes("not Cursor login"))).toBe(true);
 	});
 

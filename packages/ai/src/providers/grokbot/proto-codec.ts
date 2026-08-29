@@ -1,5 +1,5 @@
 /**
- * Hand-rolled protobuf codec for Cursor sand InferenceService Stream.
+ * Hand-rolled protobuf codec for Grok Bot InferenceService Stream.
  * Request fields sent: 1 messages, 2 tools, 4 model_config, 6 invocation_id,
  * 7 requested_model, 8 conversation_id. Harness fields 3/5/9–16 are never encoded.
  *

@@ -1,8 +1,8 @@
 /**
- * Grok Bot (Cursor sand) credential minting for the `grokbot` provider only.
+ * Grok Bot provider credential minting (`grokbot` / `grokbot-sand`).
  *
  * Auth is NOT Cursor OAuth (`cursor`), NOT xAI API keys (`xai`), and NOT SuperGrok
- * OAuth (`xai-oauth` / Grok CLI). A long-lived sand renewal credential is exchanged
+ * OAuth (`xai-oauth` / Grok CLI). A long-lived renewal credential is exchanged
  * for a short-lived JWT via POST /sand-box/inference-credential. Machine id feeds
  * `x-cursor-checksum`. Secrets live under the agent dir (`secrets/grokbot.env`) or
  * env overrides (`GROKBOT_*` / `SAND_INFERENCE_RENEWAL_CREDENTIAL`).
@@ -181,12 +181,12 @@ function enhancedObfuscate(bytes: Uint8Array): Uint8Array {
 }
 
 /**
- * Cursor sand checksum: obfuscated floor(now/1e6) bytes + machine id.
+ * Grok Bot provider checksum: obfuscated floor(now/1e6) bytes + machine id.
  *
- * Intentionally matches sand-host `createCursorChecksum` JS `>>` semantics:
+ * Intentionally matches the upstream client `createCursorChecksum` JS `>>` semantics:
  * shift counts are masked to 5 bits (`>> 40` ≡ `>> 8`, `>> 32` ≡ `>> 0`).
  * Encoding the mathematical big-endian 48-bit value would diverge from the
- * live sand client wire and fail checksum validation.
+ * live Grok Bot client wire and fail checksum validation.
  */
 export function createGrokbotChecksum(machineId: string, nowMs = Date.now()): string {
 	const unixKiloSeconds = Math.floor(nowMs / 1e6);
@@ -247,11 +247,11 @@ export function clearGrokbotTokenCache(): void {
 export async function formatGrokbotStatus(): Promise<string> {
 	const cfg = await loadGrokbotConfig();
 	return [
-		"Grok Bot (`grokbot` / `grokbot-sand`) — Cursor sand InferenceService/Stream",
+		"Grok Bot provider (`grokbot` / `grokbot-sand`) — InferenceService/Stream",
 		"Not the Cursor provider (`cursor` / AgentService/Run) and not xAI / Grok CLI (`xai`, `xai-oauth`).",
 		`Host: ${GROKBOT_BACKEND}`,
 		"Wire: application/connect+proto (InferenceService/Stream only; no harness / AgentService fields)",
-		"Auth: sand renewal credential + machine-id checksum (not Cursor OAuth, not XAI_API_KEY)",
+		"Auth: Grok Bot renewal credential + machine-id checksum (not Cursor OAuth, not XAI_API_KEY)",
 		`Renewer: ${cfg.renewal ? "present" : "missing"}`,
 		`Machine id: ${cfg.machineId ? "present" : "missing"}`,
 		`Namespace: ${cfg.namespace}`,

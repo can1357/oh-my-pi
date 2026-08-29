@@ -1,4 +1,4 @@
-/** Map omp model ids to Cursor sand InferenceRequestedModel. */
+/** Map omp model ids to Grok Bot InferenceRequestedModel. */
 
 import type { Effort } from "@oh-my-pi/pi-catalog/effort";
 
@@ -32,7 +32,7 @@ const BARE_ALIASES = new Set([
 
 const SAND_DEFAULT_MODEL_ID = "grok-4.5";
 
-/** Map omp Effort / string to Cursor sand effort wire values. */
+/** Map omp Effort / string to Grok Bot effort wire values. */
 export function toSandEffortValue(effort: Effort | string | undefined): string {
 	const raw = typeof effort === "string" ? effort : "high";
 	switch (raw) {

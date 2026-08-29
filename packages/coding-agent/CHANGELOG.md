@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added `/grokbot` to show Grok Bot sand Inference status (credentials/client; no secrets). Distinct from Cursor (`/login cursor`) and xAI / Grok CLI (`xai`, `xai-oauth`). `/login grokbot` surfaces the host-install prompt for the Grok Bot system.
+- Added `/grokbot` to show Grok Bot provider status (credentials/client; no secrets). Distinct from Cursor (`/login cursor`) and xAI / Grok CLI (`xai`, `xai-oauth`). `/login grokbot` surfaces the host-install prompt for the Grok Bot system.
 
 ## [18.0.10] - 2026-08-28
 

@@ -13,7 +13,7 @@ type GrokbotModelSeed = {
 	reasoning: boolean;
 };
 
-/** Sand InferenceService model aliases for `grokbot` (not `cursor`, not `xai` / Grok CLI). */
+/** Grok Bot model aliases for `grokbot` (not `cursor`, not `xai` / Grok CLI). */
 export const GROKBOT_MODEL_SEEDS: readonly GrokbotModelSeed[] = [
 	{ id: "default", name: "Auto", reasoning: false },
 	{ id: "auto", name: "auto", reasoning: false },
