@@ -295,6 +295,7 @@ export function buildOpenAICompat(spec: ModelSpec<"openai-completions">): Resolv
 	const provider = spec.provider;
 	const baseUrl = spec.baseUrl;
 	const hostModel = { provider, baseUrl };
+	const isClinePass = provider === "cline-pass";
 
 	const isCerebras = modelMatchesHost(hostModel, "cerebras");
 	const isZai = modelMatchesHost(hostModel, "zai");
@@ -460,11 +461,14 @@ export function buildOpenAICompat(spec: ModelSpec<"openai-completions">): Resolv
 			? "firepass"
 			: provider === "fireworks"
 				? "fireworks"
-				: isOpenRouter
-					? "openrouter"
-					: "raw";
-	const thinkingFormat: ResolvedOpenAISharedCompat["thinkingFormat"] =
-		(isMoonshotKimi && !isMoonshotKimiK3) || isZai || isZhipu || isXiaomiMimo
+				: isClinePass
+					? "cline-pass"
+					: isOpenRouter
+						? "openrouter"
+						: "raw";
+	const thinkingFormat: ResolvedOpenAISharedCompat["thinkingFormat"] = isClinePass
+		? "openai"
+		: (isMoonshotKimi && !isMoonshotKimiK3) || isZai || isZhipu || isXiaomiMimo
 			? "zai"
 			: isOpenRouter
 				? "openrouter"
@@ -506,15 +510,15 @@ export function buildOpenAICompat(spec: ModelSpec<"openai-completions">): Resolv
 		// Native Kimi K3 always reasons through `reasoning_effort` (never the
 		// K2.x binary `thinking` block that #827's forced-tool-choice conflict is
 		// about), so suppressing its effort would leave K3 in an unsupported mode.
-		disableReasoningOnForcedToolChoice: (isKimiModel && !isMoonshotKimiK3) || isAnthropicModel,
-		disableReasoningOnToolChoice: isDeepseekFamily && Boolean(spec.reasoning) && !isOpenRouter,
-		supportsToolChoice: !isDirectDeepseekReasoning,
-		// DeepSeek reasoning models on OpenCode Zen/Go 400 with
-		// "Thinking mode does not support this tool_choice" when a specific
-		// function is forced while the gateway's default thinking mode is active.
-		// Downgrade only on those gateways: other hosts can turn thinking off via
-		// disableReasoningOnToolChoice and must retain hard tool selection.
-		supportsForcedToolChoice: !requiresEnabledThinking && !(isOpenCodeHost && isDeepseekReasoning),
+		disableReasoningOnForcedToolChoice: !isClinePass && ((isKimiModel && !isMoonshotKimiK3) || isAnthropicModel),
+		disableReasoningOnToolChoice: !isClinePass && isDeepseekFamily && Boolean(spec.reasoning) && !isOpenRouter,
+		supportsToolChoice: isClinePass || !isDirectDeepseekReasoning,
+		// DeepSeek reasoning models on OpenCode Zen/Go and Qwen models on
+		// ClinePass reject a specific function choice while the gateway's
+		// default thinking mode is active. Downgrade only on those gateways:
+		// other hosts can turn thinking off and retain hard tool selection.
+		supportsForcedToolChoice:
+			!requiresEnabledThinking && !(isOpenCodeHost && isDeepseekReasoning) && !(isClinePass && isQwen),
 		supportsNamedToolChoice: STRING_ONLY_NAMED_TOOL_CHOICE_PROVIDERS[provider] !== true,
 		maxTokensField: useMaxTokens ? "max_tokens" : "max_completion_tokens",
 		requiresToolResultName: isMistral,
@@ -531,16 +535,21 @@ export function buildOpenAICompat(spec: ModelSpec<"openai-completions">): Resolv
 		// (issue #2299).
 		thinkingFormat,
 		kimiApiFormat: undefined,
-		reasoningDisableMode: isVenice ? "venice-disable-thinking" : resolveReasoningDisableMode(thinkingFormat),
+		reasoningDisableMode: isClinePass
+			? "cline-enabled-false"
+			: isVenice
+				? "venice-disable-thinking"
+				: resolveReasoningDisableMode(thinkingFormat),
 		omitReasoningEffort: false,
 		includeEncryptedReasoning: true,
 		filterReasoningHistory: isOpenRouter && isAnthropicModel,
 		thinkingKeep: usesMoonshotKimiPreservedThinking ? "all" : undefined,
-		reasoningContentField: "reasoning_content",
-		// Backends that 400 follow-up requests when prior assistant tool-call turns lack `reasoning_content`:
-		//   - Kimi: documented invariant on its native API.
+		reasoningContentField: isClinePass ? "reasoning" : "reasoning_content",
+		// Backends that reject follow-up requests when prior assistant tool-call
+		// turns lack their reasoning replay field:
+		//   - ClinePass names the field `reasoning`; only the family predicates
+		//     below decide whether a Cline-hosted model requires replay.
 		//   - DeepSeek-family reasoning models, including aliased OpenCode Zen models
-		//     like `big-pickle`, validate exact thinking-mode replay.
 		//   - Xiaomi MiMo models require exact `reasoning_content` replay on
 		//     thinking-mode tool-call continuations across standard and Token Plan hosts.
 		//   - Any reasoning-capable model reached through OpenRouter can enforce this
@@ -604,7 +613,10 @@ export function buildOpenAICompat(spec: ModelSpec<"openai-completions">): Resolv
 			provider !== "ollama" &&
 			isQwen38PlusTemplateEffortModelId(spec.id),
 		requiresAssistantContentForToolCalls: isKimiModel || isDirectDeepseekReasoning,
-		cacheControlFormat: isOpenRouter && spec.id.startsWith("anthropic/") ? "anthropic" : undefined,
+		cacheControlFormat:
+			(isClinePass && (isQwen || isAnthropicModel)) || (isOpenRouter && spec.id.startsWith("anthropic/"))
+				? "anthropic"
+				: undefined,
 		supportsPromptCacheBreakpoints,
 		promptCacheBreakpointTtl: supportsPromptCacheBreakpoints ? "30m" : undefined,
 		openRouterRouting: undefined,
@@ -647,13 +659,15 @@ export function buildOpenAICompat(spec: ModelSpec<"openai-completions">): Resolv
 		compat.extraBody = Object.keys(extraBody).length > 0 ? extraBody : undefined;
 	}
 	if (spec.compat?.reasoningDisableMode === undefined) {
-		compat.reasoningDisableMode = requiresEnabledThinking
-			? "omit"
-			: isDirectDeepseekReasoning
-				? "zai-thinking-disabled"
-				: isVenice
-					? "venice-disable-thinking"
-					: resolveReasoningDisableMode(compat.thinkingFormat);
+		compat.reasoningDisableMode = isClinePass
+			? "cline-enabled-false"
+			: requiresEnabledThinking
+				? "omit"
+				: isDirectDeepseekReasoning
+					? "zai-thinking-disabled"
+					: isVenice
+						? "venice-disable-thinking"
+						: resolveReasoningDisableMode(compat.thinkingFormat);
 	}
 	if (spec.compat?.omitReasoningEffort === undefined && !compat.supportsReasoningEffort) {
 		compat.omitReasoningEffort = true;

@@ -42,6 +42,20 @@ describe("parseRateLimitReason", () => {
 		).toBe("QUOTA_EXHAUSTED");
 	});
 
+	// ClinePass subscription windows and free-tier caps are account-local quota
+	// exhaustion (markers from Cline's own error classifier), not rate limiting.
+	it("classifies ClinePass subscription-window limits as QUOTA_EXHAUSTED", () => {
+		expect(parseRateLimitReason("clinepass limit reached for this window. please try again later.")).toBe(
+			"QUOTA_EXHAUSTED",
+		);
+	});
+
+	it("classifies Cline free-tier model caps as QUOTA_EXHAUSTED", () => {
+		expect(
+			parseRateLimitReason("free limit reached on model deepseek/deepseek-v4-flash. try again in 42 minutes"),
+		).toBe("QUOTA_EXHAUSTED");
+	});
+
 	// "Resource has been exhausted (e.g. check quota)" is a quota/daily-limit error — long wait.
 	// Only the literal phrase "resource exhausted" (gRPC status name) is MODEL_CAPACITY.
 	it("classifies 'Resource has been exhausted (e.g. check quota)' as QUOTA_EXHAUSTED", () => {
@@ -416,6 +430,14 @@ describe("isUsageLimitOutcome", () => {
 		for (const message of ["insufficient_quota", "usage_limit_exceeded", "usage_limit_reached"]) {
 			expect(isUsageLimitOutcome(429, message)).toBe(true);
 		}
+	});
+
+	it("rotates on ClinePass limit markers regardless of status", () => {
+		expect(isUsageLimitOutcome(429, "clinepass limit reached for this window. please try again later.")).toBe(true);
+		expect(isUsageLimitOutcome(undefined, "clinepass limit reached for this window. please try again later.")).toBe(
+			true,
+		);
+		expect(isUsageLimitOutcome(undefined, "free limit reached on model x/y. try again in 5 minutes")).toBe(true);
 	});
 
 	it("keeps informative transient 429s in the upstream-backoff lane", () => {

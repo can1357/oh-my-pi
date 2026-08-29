@@ -951,8 +951,9 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 			);
 			const hasToolCall = output.content.some(b => b.type === "toolCall");
 			// Trailer-only / thinking-only completions leave the agent with nothing to
-			// retry or show — require visible text or a completed tool call.
-			if (!hasVisibleText && !hasToolCall) {
+			// retry or show — require visible text or a completed tool call, unless the
+			// caller opted into empty responses (passive/zero-output advisors).
+			if (!hasVisibleText && !hasToolCall && options?.acceptEmptyResponse !== true) {
 				throw new AIError.ProviderResponseError("Grok Bot stream completed with no text or tool call", {
 					provider: model.provider,
 					kind: "empty-body",

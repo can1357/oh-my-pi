@@ -21,6 +21,8 @@ type ChatCompletionsValidation = {
 	model: string;
 	/** Treat an authenticated 401 (`invalid_model`) as a valid key. */
 	tolerateModelDenied?: boolean;
+	maxTokensField?: "max_tokens" | "max_completion_tokens";
+	maxTokens?: number;
 };
 type AnthropicMessagesValidation = {
 	kind: "anthropic-messages";
@@ -98,6 +100,8 @@ export function createApiKeyLogin(config: ApiKeyLoginConfig): (options: OAuthCon
 					apiKey: trimmed,
 					baseUrl: config.validation.baseUrl,
 					model: config.validation.model,
+					maxTokensField: config.validation.maxTokensField,
+					maxTokens: config.validation.maxTokens,
 					signal: options.signal,
 					fetch: options.fetch,
 					tolerateModelDenied: config.validation.tolerateModelDenied,

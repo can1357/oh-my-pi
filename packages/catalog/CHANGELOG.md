@@ -33,6 +33,21 @@
 - Grok Bot AvailableModels cache is scoped by renewer credential + backend so account switches do not reuse another catalog.
 - Grok Bot bundled catalog now includes `xhigh` on parameterized effort ladders (regenerated from seed/policy); AvailableModels discovery uses a static import.
 - Grok Bot `secrets/grokbot.env` loading now uses the shared dotenv parser so quoted values, `export` prefixes, and inline comments authenticate correctly. Async secret loads use `parseEnvFileAsync` so slow agent directories do not block the event loop.
+- Added the native `cline-pass` provider with live roster discovery, generated offline metadata, concise public model IDs, and verified output-token and reasoning-effort request shaping ([#7863](https://github.com/can1357/oh-my-pi/pull/7863) by [@will-bogusz](https://github.com/will-bogusz)).
+- ClinePass roster discovery now also surfaces Cline's free-tier models: the `free` bucket of the recommended-models endpoint is overlaid after the subscription roster (which remains the required, independently validated anchor), free IDs keep their full OpenRouter-style form on the wire via a bucket-derived raw wire tag, and known free models self-enrich from the bundled upstream reference with a `(free)` name marker ([#7863](https://github.com/can1357/oh-my-pi/pull/7863) by [@will-bogusz](https://github.com/will-bogusz)).
+- ClinePass subscription models now surface upstream list prices (resolved from the bundled reference) so cost display reads as API-equivalent spend, matching the Codex/GitHub Copilot policy; only the free tier renders as $0 ([#7863](https://github.com/can1357/oh-my-pi/pull/7863) by [@will-bogusz](https://github.com/will-bogusz)).
+- ClinePass roster metadata now falls through to OpenRouter's public catalog live for ids the bundled reference does not know — the same enrichment source the official Cline client uses — so newly added models get real limits and pricing immediately instead of riding conservative defaults until the next bundle regeneration ([#7863](https://github.com/can1357/oh-my-pi/pull/7863) by [@will-bogusz](https://github.com/will-bogusz)).
+- Refreshed ClinePass to its current sixteen-model roster with exact Cline limits, subscription pricing, modalities, and per-model reasoning controls, including Qwen3.7 Plus token-budget thinking ([#7863](https://github.com/can1357/oh-my-pi/pull/7863) by [@will-bogusz](https://github.com/will-bogusz)).
+- Devin discovery now announces the native `chisel` client and display slots, filters internal configs, reads server pricing/capability/output-limit metadata, exposes the router config as `adaptive`, and collapses server-declared effort families onto each family's native default wire uid ([#8590](https://github.com/can1357/oh-my-pi/pull/8590) by [@will-bogusz](https://github.com/will-bogusz)).
+- Added Devin selector aliases for the native short and dotted model names, plus static SWE-1.6 seeds so the provider default resolves before credential-scoped discovery runs ([#8590](https://github.com/can1357/oh-my-pi/pull/8590) by [@will-bogusz](https://github.com/will-bogusz)).
+- Added optional `description`, `isNew`, `isBeta`, and `isRecommended` model metadata, populated from Devin's `GetCliModelConfigs` so discovered Cascade models keep the server's blurb and badges ([#8590](https://github.com/can1357/oh-my-pi/pull/8590) by [@will-bogusz](https://github.com/will-bogusz)).
+
+### Fixed
+
+- Fixed native Devin families with independent Thinking and 1M Context axes losing wire variants or advertising the wrong context window; each context lane now preserves its complete off/effort routing and server-selected default ([#8590](https://github.com/can1357/oh-my-pi/pull/8590) by [@will-bogusz](https://github.com/will-bogusz)).
+- Stripped the image modality from Devin's `swe-1-6`/`swe-1-6-fast`: their configs advertise `supports_images` but the backend silently drops inline images (verified live against every other Cascade model), so clients now engage their text-only image fallback instead of losing attachments ([#6072](https://github.com/can1357/oh-my-pi/issues/6072)).
+- Devin discovery now logs a warning when the backend returns an empty native catalog, the failure signature of a stale pinned CLI identity ([#8590](https://github.com/can1357/oh-my-pi/pull/8590) by [@will-bogusz](https://github.com/will-bogusz)).
+
 ## [18.0.11] - 2026-08-29
 
 ### Fixed
@@ -41,6 +56,9 @@
 - Fixed Cloudflare AI Gateway catalog refreshes so active Workers AI chat models, including newly released models, are discovered correctly.
 - Fixed Cursor Kimi K3, Grok 4, and Composer 2.5 models being incorrectly treated as text-only when they support image attachments.
 - Fixed OpenRouter routed model variants, including GLM-5.3 and dated DeepSeek V4 Pro, so their reasoning effort options are preserved correctly.
+- Fixed MiniMax-M3 max output regressing to the upstream 512K pricing-tier boundary; all MiniMax providers keep the documented 128K output cap.
+- Fixed GLM-5.3-Flash bundling the 50%-off launch promotion price; the catalog stays on the documented list price.
+- Fixed Synthetic model discovery re-adding image input from the bundled reference when the route advertises text-only modalities.
 
 ## [18.0.9] - 2026-08-28
 

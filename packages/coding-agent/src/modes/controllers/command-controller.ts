@@ -59,6 +59,10 @@ import { copyToClipboard } from "../../utils/clipboard";
 import { openPath } from "../../utils/open";
 import { setSessionTerminalTitle } from "../../utils/title-generator";
 
+function formatCreditValue(value: number): string {
+	return value.toLocaleString(undefined, { maximumFractionDigits: 4 });
+}
+
 function showMarkdownPanel(ctx: InteractiveModeContext, title: string, markdown: string): void {
 	const block = new TranscriptBlock();
 	block.addChild(new DynamicBorder());
@@ -327,6 +331,14 @@ export class CommandController {
 				providerSessionState: this.ctx.session.providerSessionState,
 			});
 			info += renderProviderSection(providerDetails, theme);
+			if (stats.routedModels !== undefined) {
+				const routed = Object.entries(stats.routedModels)
+					.sort(([aId, aCount], [bId, bCount]) => bCount - aCount || aId.localeCompare(bId))
+					.map(
+						([id, count]) => `${replaceTabs(sanitizeText(id))}${count > 1 ? theme.fg("dim", ` ×${count}`) : ""}`,
+					);
+				info += `${theme.fg("dim", "Served:")} ${routed.join(", ")}\n`;
+			}
 		}
 		info += `\n`;
 		info += `${theme.bold("Messages")}\n`;
@@ -355,13 +367,18 @@ export class CommandController {
 		}
 		info += `${theme.fg("dim", "Total:")} ${stats.tokens.total.toLocaleString()}\n`;
 
-		if (stats.cost > 0 || normalizedPremiumRequests > 0) {
+		if (stats.cost > 0 || normalizedPremiumRequests > 0 || stats.credits !== undefined) {
 			info += `\n${theme.bold("Cost")}\n`;
 			if (stats.cost > 0) {
 				info += `${theme.fg("dim", "Total:")} ${stats.cost.toFixed(4)}\n`;
 			}
 			if (normalizedPremiumRequests > 0) {
 				info += `${theme.fg("dim", "Premium Requests:")} ${normalizedPremiumRequests.toLocaleString()}\n`;
+			}
+			if (stats.credits !== undefined) {
+				info += `${theme.fg("dim", "Credits:")} ${formatCreditValue(stats.credits.cost)}\n`;
+				info += `${theme.fg("dim", "Committed Credits:")} ${formatCreditValue(stats.credits.committedCost)}\n`;
+				info += `${theme.fg("dim", "Committed ACU:")} ${formatCreditValue(stats.credits.acuCost)}\n`;
 			}
 		}
 

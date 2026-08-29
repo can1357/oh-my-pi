@@ -711,6 +711,18 @@ function providerErrorCode(error: object): string | undefined {
 	return undefined;
 }
 
+const CLINE_PASS_SURFACE_GATE_PATTERN = /only available via cline product surfaces/i;
+
+/**
+ * Cline's gateway gates some roster entries (certain free-tier models) to its
+ * own product surfaces with a 403. The API key is valid — the restriction is
+ * per-model client policy — so it must neither rotate sibling credentials (they
+ * fail identically) nor surface as an auth failure.
+ */
+export function isClinePassSurfaceGateMessage(errorMessage: string | undefined): boolean {
+	return errorMessage !== undefined && CLINE_PASS_SURFACE_GATE_PATTERN.test(errorMessage);
+}
+
 /**
  * GitHub Copilot 400 `model_not_supported` response for a model advertised by
  * `/models` — transient fleet skew, not a malformed request. Reads the

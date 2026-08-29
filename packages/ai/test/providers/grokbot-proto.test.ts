@@ -1070,6 +1070,30 @@ describe("grokbot request headers", () => {
 		}
 	});
 
+	test("acceptEmptyResponse allows trailer-only completions", async () => {
+		spyOn(grokbotAuth, "loadGrokbotConfig").mockResolvedValue({
+			renewal: "renew",
+			machineId: "machine",
+			namespace: "prod",
+			clientVersion: "0.30.0",
+		});
+		spyOn(grokbotAuth, "mintGrokbotAccessToken").mockResolvedValue("fake-jwt");
+
+		const emptyTrailer = frameConnectProto(Buffer.alloc(0), CONNECT_END_STREAM_FLAG);
+		const fetchImpl = (async () =>
+			new Response(emptyTrailer, {
+				status: 200,
+				headers: { "content-type": "application/connect+proto" },
+			})) as FetchImpl;
+		const result = await streamGrokBot(model, context, {
+			apiKey: "renew",
+			fetch: fetchImpl,
+			acceptEmptyResponse: true,
+		}).result();
+		expect(result.stopReason).toBe("stop");
+		expect(result.errorMessage).toBeUndefined();
+	});
+
 	test("treats Connect unauthenticated end-stream as HTTP 401 and clears the token cache", async () => {
 		spyOn(grokbotAuth, "loadGrokbotConfig").mockResolvedValue({
 			renewal: "renew",
