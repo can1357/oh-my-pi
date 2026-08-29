@@ -540,11 +540,16 @@ export function encodeStream(
 	// id with `x-cursor-auto-mode: true`. Defer the initial role chunk until routing
 	// lands (or a terminal event forces emit with whatever id we have).
 	let cursorAutoRoutingResolved = false;
+	let sawModelObservation = false;
 	const deferStartForCursorAuto = (modelId: string | undefined): boolean => {
-		// Only Cursor auto intent buffers. Literal provider ids like OpenRouter's
-		// `auto` must stream immediately when cursorAutoMode is unset/false.
+		// Cursor's discovered auto wire id is `default` (OpenRouter uses `auto`).
+		// Defer `default` even without the auto-mode header so gateway clients that
+		// select the bundled Cursor default still wait for routing.
+		if (modelId === "default") return true;
+		// Only Cursor auto intent buffers the literal `auto` id — otherwise OpenRouter
+		// (and similar) models named `auto` would non-stream until done.
 		if (options?.cursorAutoMode !== true) return false;
-		if (modelId === "auto" || modelId === "default") return true;
+		if (modelId === "auto") return true;
 		return !cursorAutoRoutingResolved;
 	};
 	let cancelled = control?.signal?.aborted === true;
@@ -595,9 +600,12 @@ export function encodeStream(
 			const noteRoutedModel = (model: string | undefined) => {
 				if (!model) return;
 				if (model !== effectiveModelId) effectiveModelId = model;
-				// Auto-mode may route back to the same concrete id; still mark resolved.
-				// `auto`/`default` keep deferring via deferStartForCursorAuto's id check.
-				if (options?.cursorAutoMode === true) cursorAutoRoutingResolved = true;
+				// Ignore the initial start placeholder; only a later observation
+				// (possibly the same concrete id after routing) releases deferral.
+				if (options?.cursorAutoMode === true && sawModelObservation) {
+					cursorAutoRoutingResolved = true;
+				}
+				sawModelObservation = true;
 			};
 
 			const ensureRoleChunk = () => {
