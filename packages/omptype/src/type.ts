@@ -436,7 +436,9 @@ function descriptionOf(ir: IR, seen: Set<IR> = new Set()): string {
 		// Deferred alias (z.lazy): its getter must not run before first parse —
 		// appendPipes resolves descriptions eagerly at composition time via
 		// metaOf, so resolving here would break recursive `const` definitions.
-		if (ir.deferred === true) return ir.name;
+		// The internal `$defs` name is not a description, so report the only
+		// thing known about the node instead of leaking it into error prose.
+		if (ir.deferred === true) return "a recursive value";
 		return descriptionOf(ir.resolve(), seen);
 	}
 	if (ir.k === "object") {

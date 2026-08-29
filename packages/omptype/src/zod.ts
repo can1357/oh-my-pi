@@ -553,16 +553,19 @@ export const discriminatedUnion = <
 	});
 	return decorate(dispatch as Decoratable<unknown>) as ZodLikeSchema<UnionOutput<Schemas>>;
 };
-let lazyCounter = 0;
 /** Defer schema construction until first parse — required for recursive shapes. */
 export const lazy = <Out>(getter: () => ZodLikeSchema<Out>): ZodLikeSchema<Out> => {
 	let resolved: ZodLikeSchema<Out> | undefined;
 	let resolving = false;
-	// Unique per instance so concurrent lazies land on distinct `$defs` keys.
-	const name = `lazy${++lazyCounter}`;
 	const ir: IR = {
 		k: "alias",
-		name,
+		// Deliberately NOT a globally counted name: `emit` uniquifies colliding
+		// `$defs` keys per document, so distinct lazies still land on distinct
+		// entries while the emitted key (and the schema's `description`) stays
+		// a function of the document alone. A module-level counter would make
+		// tool-definition bytes — and every prompt-cache hit keyed on them —
+		// depend on plugin construction order.
+		name: "lazy",
 		deferred: true,
 		resolve: () => {
 			if (resolved !== undefined) return resolved.ir;
