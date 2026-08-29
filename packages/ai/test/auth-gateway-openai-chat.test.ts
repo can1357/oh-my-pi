@@ -520,6 +520,32 @@ describe("auth-gateway openai-chat: encodeStream", () => {
 		expect(text.join("")).toBe("ok");
 	});
 
+	it("keeps provider-qualified request model ids stable across chat chunks", async () => {
+		// Gateway clients often select `cursor/gpt-5`. Upstream start events report
+		// the bare id `gpt-5` — without Cursor auto intent that must not rewrite the
+		// SSE model field mid-response.
+		const initial = emptyAssistant();
+		initial.model = "gpt-5";
+		initial.provider = "cursor";
+		const withText: AssistantMessage = {
+			...initial,
+			content: [{ type: "text", text: "ok" }],
+		};
+		const events: AssistantMessageEvent[] = [
+			{ type: "start", partial: initial },
+			{ type: "text_delta", contentIndex: 0, delta: "ok", partial: withText },
+			{ type: "done", reason: "stop", message: withText },
+		];
+		const stream = encodeStream(makeEventStream(events, withText), "cursor/gpt-5");
+		const payloads = (await collectStream(stream)).map(parseSseLine);
+		const chunks = payloads.filter(
+			(p): p is { model: string; choices: Array<{ delta: Record<string, unknown> }> } =>
+				typeof p === "object" && p !== null && "model" in p,
+		);
+		expect(chunks.length).toBeGreaterThan(0);
+		expect(chunks.every(c => c.model === "cursor/gpt-5")).toBe(true);
+	});
+
 	it("aborts the upstream gateway request when the client cancels the response body", async () => {
 		const aborted: unknown[] = [];
 		async function* neverEndingEvents() {

@@ -599,7 +599,11 @@ export function encodeStream(
 
 			const noteRoutedModel = (model: string | undefined) => {
 				if (!model) return;
-				if (model !== effectiveModelId) effectiveModelId = model;
+				// Keep provider-qualified request ids (e.g. `cursor/gpt-5`) stable for
+				// non-auto streams. Only Cursor auto routing may rewrite the wire model.
+				const allowRewrite =
+					options?.cursorAutoMode === true || requestedModelId === "default" || requestedModelId === "auto";
+				if (allowRewrite && model !== effectiveModelId) effectiveModelId = model;
 				// Ignore the initial start placeholder; only a later observation
 				// (possibly the same concrete id after routing) releases deferral.
 				if (options?.cursorAutoMode === true && sawModelObservation) {

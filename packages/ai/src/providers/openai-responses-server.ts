@@ -1228,7 +1228,9 @@ export function encodeStream(
 			let envelopesStarted = false;
 			const noteRoutedModel = (model: string | undefined) => {
 				if (!model) return;
-				if (model !== effectiveModelId) effectiveModelId = model;
+				const allowRewrite =
+					options?.cursorAutoMode === true || requestedModelId === "default" || requestedModelId === "auto";
+				if (allowRewrite && model !== effectiveModelId) effectiveModelId = model;
 				// Ignore the initial start placeholder; only a later observation
 				// (possibly the same concrete id after routing) releases deferral.
 				if (options?.cursorAutoMode === true && sawModelObservation) {
