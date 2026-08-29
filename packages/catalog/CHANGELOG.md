@@ -27,6 +27,14 @@
 - Grok Bot AvailableModels cache is scoped by renewer credential + backend so account switches do not reuse another catalog.
 - Grok Bot bundled catalog now includes `xhigh` on parameterized effort ladders (regenerated from seed/policy); AvailableModels discovery uses a static import.
 - Grok Bot `secrets/grokbot.env` loading now uses the shared dotenv parser so quoted values, `export` prefixes, and inline comments authenticate correctly. Async secret loads use `parseEnvFileAsync` so slow agent directories do not block the event loop.
+## [18.0.11] - 2026-08-29
+
+### Fixed
+
+- Fixed Baseten GLM models, including GLM-5.3-Flash, being incorrectly classified as non-reasoning models.
+- Fixed Cloudflare AI Gateway catalog refreshes so active Workers AI chat models, including newly released models, are discovered correctly.
+- Fixed Cursor Kimi K3, Grok 4, and Composer 2.5 models being incorrectly treated as text-only when they support image attachments.
+- Fixed OpenRouter routed model variants, including GLM-5.3 and dated DeepSeek V4 Pro, so their reasoning effort options are preserved correctly.
 
 ## [18.0.9] - 2026-08-28
 

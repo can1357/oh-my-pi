@@ -195,7 +195,12 @@ Reasoning fields are not interchangeable.
 - Uses `reasoning: { effort, summary }`.
 - Can include `reasoning.encrypted_content` for replay.
 - xAI Grok models may require omitting `reasoning.effort`.
-- Some compat paths inject the GPT-5 `# Juice: 0 !important` developer scaffold.
+- When reasoning is forced off for GPT-5.6+ Responses models, a trailing
+  developer item `# Juice: <N> !important` is appended, with `N` mapped from
+  the requested effort (`none`→0, `minimal`→2, `low`→4, `medium`→8, `high`→48,
+  `xhigh`→112, `max`→960; default 8) — see `getJuiceValue` in
+  `packages/ai/src/providers/openai-shared.ts` and the `forceReasoningOff`
+  path in `packages/ai/src/providers/openai-responses.ts`.
 
 ### OpenRouter `reasoning`
 

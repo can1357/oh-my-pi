@@ -302,9 +302,9 @@ export class CommandController {
 				: this.ctx.session.sessionManager.getUsageStatistics().premiumRequests;
 		const normalizedPremiumRequests = Math.round((premiumRequests + Number.EPSILON) * 100) / 100;
 
-		let info = `${theme.bold("Session Info")}\n\n`;
+		let info = "";
 		info += `${theme.fg("dim", "File:")} ${stats.sessionFile ?? "In-memory"}\n`;
-		info += `${theme.fg("dim", "ID:")} ${stats.sessionId}\n\n`;
+		info += `${theme.fg("dim", "ID:")} ${stats.sessionId}\n`;
 		info += `\n${theme.bold("Provider")}\n`;
 		const model = this.ctx.session.model;
 		if (!model) {
@@ -396,7 +396,7 @@ export class CommandController {
 			}
 		}
 
-		this.ctx.presentCommandOutput([new Spacer(1), new Text(info, 1, 0)]);
+		this.ctx.showSessionInfo(info);
 	}
 
 	static readonly #advisorStatusGlyph: Record<string, string> = {

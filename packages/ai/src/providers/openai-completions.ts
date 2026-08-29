@@ -63,6 +63,7 @@ import type {
 	ChatCompletionContentPart,
 	ChatCompletionContentPartImage,
 	ChatCompletionContentPartText,
+	ChatCompletionMessageFunctionToolCall,
 	ChatCompletionMessageParam,
 	ChatCompletionTool,
 	ChatCompletionToolMessageParam,
@@ -131,6 +132,44 @@ type OpenAICompletionsChoiceUsage = ChatCompletionChunk.Choice & {
 type OpenAICompletionsDeltaWithReasoningDetails = ChatCompletionChunk.Choice["delta"] & {
 	reasoning_details?: unknown;
 };
+
+type GeminiThoughtSignatureNamespace = "google" | "vertex";
+
+type GeminiThoughtSignatureExtraContent = Partial<
+	Record<GeminiThoughtSignatureNamespace, { thought_signature: string }>
+>;
+
+type OpenAICompletionsFunctionToolCall = ChatCompletionMessageFunctionToolCall & {
+	extra_content?: GeminiThoughtSignatureExtraContent;
+};
+
+const GEMINI_THOUGHT_SIGNATURE_NAMESPACES: readonly GeminiThoughtSignatureNamespace[] = ["google", "vertex"];
+
+function getGeminiThoughtSignatureExtraContent(value: unknown): GeminiThoughtSignatureExtraContent | undefined {
+	if (typeof value !== "object" || value === null) return undefined;
+	for (const namespace of GEMINI_THOUGHT_SIGNATURE_NAMESPACES) {
+		const providerContent = Reflect.get(value, namespace);
+		if (typeof providerContent !== "object" || providerContent === null) continue;
+		const thoughtSignature = Reflect.get(providerContent, "thought_signature");
+		if (typeof thoughtSignature !== "string" || thoughtSignature.length === 0) continue;
+		return namespace === "google"
+			? { google: { thought_signature: thoughtSignature } }
+			: { vertex: { thought_signature: thoughtSignature } };
+	}
+	return undefined;
+}
+
+function parseGeminiThoughtSignatureExtraContent(
+	thoughtSignature: string | undefined,
+): GeminiThoughtSignatureExtraContent | undefined {
+	if (!thoughtSignature) return undefined;
+	try {
+		const parsed: unknown = JSON.parse(thoughtSignature);
+		return getGeminiThoughtSignatureExtraContent(parsed);
+	} catch {
+		return undefined;
+	}
+}
 
 type OpenAICompletionsAssistantMessageParam = ChatCompletionAssistantMessageParam &
 	Partial<Record<OpenAICompletionsReasoningField, string>> & {
@@ -1257,6 +1296,8 @@ const streamOpenAICompletionsOnce = (
 
 							if (toolCall.id) block.id = toolCall.id;
 							if (incomingName) block.name = incomingName;
+							const extraContent = getGeminiThoughtSignatureExtraContent(Reflect.get(toolCall, "extra_content"));
+							if (extraContent) block.thoughtSignature = JSON.stringify(extraContent);
 							let delta = "";
 							// The OpenAI SDK types `function.arguments` as a JSON string, but MiniMax-compatible
 							// hosts stream a fully-formed object instead. Model both shapes so the branches below
@@ -2235,26 +2276,28 @@ export function convertMessages(
 				assistantMsg.tool_calls = toolCalls.map((tc, toolCallIndex) => {
 					const toolCallId = ensureToolCallId(tc.id, `${i}:${toolCallIndex}:${tc.name}`, msg);
 					rememberToolCallId(tc.id, toolCallId);
-					return {
+					const replayedToolCall: OpenAICompletionsFunctionToolCall = {
 						id: normalizeMistralToolId(toolCallId, compat.requiresMistralToolIds),
-						type: "function" as const,
+						type: "function",
 						function: {
 							name: tc.name,
 							arguments: serializeToolArguments(tc.arguments),
 						},
 					};
+					const extraContent = parseGeminiThoughtSignatureExtraContent(tc.thoughtSignature);
+					if (extraContent) replayedToolCall.extra_content = extraContent;
+					return replayedToolCall;
 				});
-				const reasoningDetails = toolCalls
-					.filter(tc => tc.thoughtSignature)
-					.map(tc => {
-						try {
-							const parsed: unknown = JSON.parse(tc.thoughtSignature!);
-							return parsed;
-						} catch {
-							return null;
-						}
-					})
-					.filter(Boolean);
+				const reasoningDetails = toolCalls.flatMap(tc => {
+					const thoughtSignature = tc.thoughtSignature;
+					if (!thoughtSignature) return [];
+					try {
+						const parsed: unknown = JSON.parse(thoughtSignature);
+						return getGeminiThoughtSignatureExtraContent(parsed) ? [] : [parsed];
+					} catch {
+						return [];
+					}
+				});
 				if (reasoningDetails.length > 0) {
 					assistantMsg.reasoning_details = reasoningDetails;
 				}

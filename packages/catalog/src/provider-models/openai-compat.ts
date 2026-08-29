@@ -12,6 +12,7 @@ import { FIREWORKS_FAST_SUFFIX, toFireworksPublicModelId } from "../fireworks-mo
 import { getBundledModelReferenceIndex } from "../identity/bundled";
 import {
 	anthropicModelSupportsThinking,
+	isGlm52ReasoningEffortModelId,
 	isGlmVisionModelId,
 	isGrokReasoningEffortCapable,
 	isKimiK3ModelId,
@@ -36,6 +37,7 @@ import type {
 } from "../types";
 import { discoveryFetch, isAnthropicOAuthToken, isRecord, toBoolean, toNumber, toPositiveNumber } from "../utils";
 import { ALIBABA_TOKEN_PLAN_BASE_URL, parseAlibabaTokenPlanCredential } from "../wire/alibaba-token-plan";
+import { CLOUDFLARE_AI_GATEWAY_COMPAT_BASE_URL } from "../wire/cloudflare-ai-gateway";
 import { coreWeaveProjectHeaders } from "../wire/coreweave";
 import {
 	COPILOT_API_HEADERS,
@@ -656,6 +658,7 @@ type OpenAICompatibleModelManagerBuilderOptions<TApi extends Api> = {
 	headers?: SimpleProviderDiscoveryHeaders;
 	dynamicModelsAuthoritative?: true;
 	requireApiKey?: true;
+	dropCachedModelIdsOnStaticMismatch?: readonly string[];
 	filterModel?: (
 		entry: OpenAICompatibleModelRecord,
 		model: ModelSpec<TApi>,
@@ -678,6 +681,9 @@ function createOpenAICompatibleModelManagerOptions<TApi extends Api>(
 	return {
 		providerId: options.providerId,
 		...(options.dynamicModelsAuthoritative && { dynamicModelsAuthoritative: true }),
+		...(options.dropCachedModelIdsOnStaticMismatch && {
+			dropCachedModelIdsOnStaticMismatch: options.dropCachedModelIdsOnStaticMismatch,
+		}),
 		...((!options.requireApiKey || apiKey) && {
 			fetchDynamicModels: () =>
 				fetchOpenAICompatibleModels({
@@ -4145,6 +4151,11 @@ export interface BasetenModelManagerConfig {
 	fetch?: FetchImpl;
 }
 
+// A previous version of OMP shipped this model without reasoning levels. We've
+// since fixed that. This const lets us bust the cache so that users on that
+// version of OMP pick up the reasoning levels immediately.
+const BASETEN_CACHE_MIGRATION_MODEL_IDS = ["zai-org/GLM-5.3", "zai-org/GLM-5.3-Flash"] as const;
+
 export function basetenModelManagerOptions(
 	config?: BasetenModelManagerConfig,
 ): ModelManagerOptions<"openai-completions"> {
@@ -4155,6 +4166,7 @@ export function basetenModelManagerOptions(
 		config,
 		dynamicModelsAuthoritative: true,
 		requireApiKey: true,
+		dropCachedModelIdsOnStaticMismatch: BASETEN_CACHE_MIGRATION_MODEL_IDS,
 		mapModel: (entry, defaults, reference) => {
 			const raw = entry as Record<string, unknown> & {
 				supported_features?: unknown;
@@ -4170,10 +4182,9 @@ export function basetenModelManagerOptions(
 			// vocabulary, which OMP must not guess.
 			const isSupportedBasetenReasoningModel =
 				isKimiK3ModelId(defaults.id) ||
+				isGlm52ReasoningEffortModelId(defaults.id) ||
 				defaults.id === "openai/gpt-oss-120b" ||
-				defaults.id === "deepseek-ai/DeepSeek-V4-Pro" ||
-				defaults.id === "zai-org/GLM-5.2" ||
-				defaults.id === "zai-org/GLM-5.2-Fast";
+				defaults.id === "deepseek-ai/DeepSeek-V4-Pro";
 			const reasoning =
 				isSupportedBasetenReasoningModel &&
 				(features.includes("reasoning") || features.includes("reasoning_effort"));
@@ -6757,6 +6768,15 @@ const MODELS_DEV_PROVIDER_DESCRIPTORS_SPECIALIZED: readonly ModelsDevProviderDes
 		"cloudflare-ai-gateway",
 		"cloudflare-ai-gateway",
 		"https://gateway.ai.cloudflare.com/v1/<account>/<gateway>/anthropic",
+	),
+	openAiCompletionsDescriptor(
+		"cloudflare-workers-ai",
+		"cloudflare-ai-gateway",
+		CLOUDFLARE_AI_GATEWAY_COMPAT_BASE_URL,
+		{
+			filterModel: filterActiveToolCallModels,
+			transformModel: model => ({ ...model, id: `workers-ai/${model.id}` }),
+		},
 	),
 	// --- Mistral ---
 	openAiCompletionsDescriptor("mistral", "mistral", "https://api.mistral.ai/v1"),

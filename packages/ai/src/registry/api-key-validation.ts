@@ -1,4 +1,4 @@
-import { ProviderHttpError } from "../error/classes";
+import { OpenAIHttpError, ProviderHttpError } from "../error/classes";
 import type { FetchImpl } from "../types";
 
 type OpenAICompatibleValidationOptions = {
@@ -8,6 +8,7 @@ type OpenAICompatibleValidationOptions = {
 	model: string;
 	signal?: AbortSignal;
 	fetch?: FetchImpl;
+	tolerateModelDenied?: boolean;
 };
 type AnthropicCompatibleValidationOptions = {
 	provider: string;
@@ -27,6 +28,11 @@ type ModelListValidationOptions = {
 	fetch?: FetchImpl;
 };
 
+type ErrorEnvelope = {
+	details: string;
+	code: string | undefined;
+};
+
 const VALIDATION_TIMEOUT_MS = 15_000;
 
 function normalizeAnthropicCompatibleBaseUrl(baseUrl: string): string {
@@ -40,7 +46,7 @@ function resolveValidationHeaders(
 	return typeof headers === "function" ? headers() : headers;
 }
 
-async function createApiKeyValidationError(provider: string, response: Response): Promise<ProviderHttpError> {
+async function readErrorEnvelope(response: Response): Promise<ErrorEnvelope> {
 	let details = "";
 	try {
 		details = (await response.text()).trim();
@@ -48,10 +54,27 @@ async function createApiKeyValidationError(provider: string, response: Response)
 		// Ignore body read errors; the HTTP status still preserves the failure category.
 	}
 
+	let bodyJson: unknown;
+	try {
+		bodyJson = details ? JSON.parse(details) : undefined;
+	} catch {
+		bodyJson = undefined;
+	}
+	const { code } = OpenAIHttpError.parseEnvelope(bodyJson, details);
+	return { details, code };
+}
+
+async function createApiKeyValidationError(
+	provider: string,
+	response: Response,
+	envelope?: ErrorEnvelope,
+): Promise<ProviderHttpError> {
+	const { details, code } = envelope ?? (await readErrorEnvelope(response));
+
 	const message = details
 		? `${provider} API key validation failed (${response.status}): ${details}`
 		: `${provider} API key validation failed (${response.status})`;
-	return new ProviderHttpError(message, response.status, { headers: response.headers });
+	return new ProviderHttpError(message, response.status, { headers: response.headers, code });
 }
 
 /**
@@ -83,7 +106,12 @@ export async function validateOpenAICompatibleApiKey(options: OpenAICompatibleVa
 		return;
 	}
 
-	throw await createApiKeyValidationError(options.provider, response);
+	const envelope = await readErrorEnvelope(response);
+	if (options.tolerateModelDenied && response.status === 401 && envelope.code === "invalid_model") {
+		return;
+	}
+
+	throw await createApiKeyValidationError(options.provider, response, envelope);
 }
 
 /**

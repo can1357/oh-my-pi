@@ -19,8 +19,9 @@ type ChatCompletionsValidation = {
 	provider: string;
 	baseUrl: string;
 	model: string;
+	/** Treat an authenticated 401 (`invalid_model`) as a valid key. */
+	tolerateModelDenied?: boolean;
 };
-
 type AnthropicMessagesValidation = {
 	kind: "anthropic-messages";
 	provider: string;
@@ -99,6 +100,7 @@ export function createApiKeyLogin(config: ApiKeyLoginConfig): (options: OAuthCon
 					model: config.validation.model,
 					signal: options.signal,
 					fetch: options.fetch,
+					tolerateModelDenied: config.validation.tolerateModelDenied,
 				});
 			} else if (config.validation.kind === "anthropic-messages") {
 				await validateAnthropicCompatibleApiKey({

@@ -4,6 +4,7 @@
  * `generate-models.ts` — none of this ships in the runtime bundle.
  */
 import { buildCompat } from "../src/build";
+import { resolveCursorInput } from "../src/discovery/cursor";
 import {
 	type AnthropicModel,
 	bareModelId,
@@ -336,6 +337,9 @@ export function applyOllamaCloudOutputCap(models: ModelSpec<Api>[]): void {
 }
 
 function applyGeneratedModelPolicy(model: ModelSpec<Api>): void {
+	if (model.provider === "cursor") {
+		model.input = resolveCursorInput(model.id, model.input);
+	}
 	if ((model.provider === "xai" || model.provider === "xai-oauth") && model.api === "openai-responses") {
 		const updated = applyXaiResponsesThinkingPolicy(model as ModelSpec<"openai-responses">);
 		model.compat = updated.compat;
