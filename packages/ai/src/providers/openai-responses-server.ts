@@ -936,7 +936,7 @@ function sseEvent(name: string, data: unknown): string {
 export function encodeStream(
 	events: AssistantMessageEventStream,
 	requestedModelId: string,
-	_options?: ParsedRequest["options"],
+	options?: ParsedRequest["options"],
 	control?: AuthGatewayStreamControl,
 ): ReadableStream<Uint8Array> {
 	const encoder = new TextEncoder();
@@ -949,6 +949,15 @@ export function encodeStream(
 	control?.signal?.addEventListener("abort", markCancelled, { once: true });
 	const seq = () => sequenceNumber++;
 	let effectiveModelId = requestedModelId;
+	// Cursor auto may start as catalog `auto`, discovered `default`, or a concrete
+	// id with `x-cursor-auto-mode: true`. Defer response.created / in_progress until
+	// routing lands (or a terminal event forces emit with whatever id we have).
+	let cursorAutoRoutingResolved = false;
+	const deferStartForCursorAuto = (modelId: string | undefined): boolean => {
+		if (modelId === "auto" || modelId === "default") return true;
+		if (options?.cursorAutoMode === true && !cursorAutoRoutingResolved) return true;
+		return false;
+	};
 
 	return new ReadableStream<Uint8Array>({
 		async start(controller) {
@@ -1208,6 +1217,18 @@ export function encodeStream(
 			};
 			let finalMessage: AssistantMessage | undefined;
 			let failureMessage: AssistantMessage | undefined;
+			let envelopesStarted = false;
+			const noteRoutedModel = (model: string | undefined) => {
+				if (!model || model === effectiveModelId) return;
+				effectiveModelId = model;
+				if (options?.cursorAutoMode === true) cursorAutoRoutingResolved = true;
+			};
+			const ensureEnvelopes = () => {
+				if (envelopesStarted) return;
+				envelopesStarted = true;
+				emit("response.created", { response: responseSnapshot("in_progress", []) });
+				emit("response.in_progress", { response: responseSnapshot("in_progress", []) });
+			};
 			try {
 				if (cancelled) {
 					controller.close();
@@ -1215,20 +1236,18 @@ export function encodeStream(
 				}
 				for await (const ev of events) {
 					if (cancelled) return;
-					if ("partial" in ev && ev.partial.model && ev.partial.model !== effectiveModelId) {
-						effectiveModelId = ev.partial.model;
-					}
+					if ("partial" in ev) noteRoutedModel(ev.partial.model);
+					if ("message" in ev) noteRoutedModel(ev.message.model);
 					switch (ev.type) {
 						case "start": {
 							createdAt = Math.floor((ev.partial.timestamp || Date.now()) / 1000);
-							// response.created — initial envelope.
-							emit("response.created", { response: responseSnapshot("in_progress", []) });
-							// response.in_progress — mirrors real OpenAI; some clients gate
-							// on it before reading items.
-							emit("response.in_progress", { response: responseSnapshot("in_progress", []) });
+							// Defer Cursor auto envelopes until the routed model is known.
+							if (deferStartForCursorAuto(ev.partial.model)) break;
+							ensureEnvelopes();
 							break;
 						}
 						case "text_start": {
+							ensureEnvelopes();
 							let cur: OpenMessage;
 							const textBlock = ev.partial.content[ev.contentIndex];
 							const signature =
@@ -1300,6 +1319,7 @@ export function encodeStream(
 							break;
 						}
 						case "thinking_start": {
+							ensureEnvelopes();
 							openReasoning(ev.partial, ev.contentIndex);
 							break;
 						}
@@ -1338,6 +1358,7 @@ export function encodeStream(
 							break;
 						}
 						case "toolcall_start": {
+							ensureEnvelopes();
 							openToolCall(ev.partial, ev.contentIndex);
 							break;
 						}
@@ -1409,10 +1430,12 @@ export function encodeStream(
 							break;
 						}
 						case "done": {
+							ensureEnvelopes();
 							finalMessage = ev.message;
 							break;
 						}
 						case "error": {
+							ensureEnvelopes();
 							failureMessage = ev.error;
 							break;
 						}

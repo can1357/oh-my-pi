@@ -536,6 +536,15 @@ export function encodeStream(
 	const created = Math.floor(Date.now() / 1000);
 	const includeUsage = options?.extra?.includeStreamingUsage === true;
 	let effectiveModelId = requestedModelId;
+	// Cursor auto may start as catalog `auto`, discovered `default`, or a concrete
+	// id with `x-cursor-auto-mode: true`. Defer the initial role chunk until routing
+	// lands (or a terminal event forces emit with whatever id we have).
+	let cursorAutoRoutingResolved = false;
+	const deferStartForCursorAuto = (modelId: string | undefined): boolean => {
+		if (modelId === "auto" || modelId === "default") return true;
+		if (options?.cursorAutoMode === true && !cursorAutoRoutingResolved) return true;
+		return false;
+	};
 	let cancelled = control?.signal?.aborted === true;
 	const markCancelled = () => {
 		cancelled = true;
@@ -578,24 +587,50 @@ export function encodeStream(
 			let nextToolIndex = 0;
 			let hasToolCalls = false;
 			let finishReason: string = "stop";
+			let roleChunkSent = false;
+			const pendingChunks: unknown[] = [];
+
+			const noteRoutedModel = (model: string | undefined) => {
+				if (!model || model === effectiveModelId) return;
+				effectiveModelId = model;
+				if (options?.cursorAutoMode === true) cursorAutoRoutingResolved = true;
+			};
+
+			const ensureRoleChunk = () => {
+				if (roleChunkSent) return;
+				roleChunkSent = true;
+				writeSse(controller, baseChunk({ role: "assistant" }, null));
+				for (const chunk of pendingChunks.splice(0)) writeSse(controller, chunk);
+			};
+
+			const emitChunk = (payload: unknown) => {
+				if (!roleChunkSent && deferStartForCursorAuto(effectiveModelId)) {
+					pendingChunks.push(payload);
+					return;
+				}
+				ensureRoleChunk();
+				writeSse(controller, payload);
+			};
 
 			try {
 				if (cancelled) {
 					controller.close();
 					return;
 				}
-				// Initial role chunk.
-				writeSse(controller, baseChunk({ role: "assistant" }, null));
+				// Non-auto streams keep the historical role-first envelope. Cursor auto
+				// defers until routing resolves so clients do not lock onto a placeholder.
+				if (!deferStartForCursorAuto(effectiveModelId)) {
+					ensureRoleChunk();
+				}
 
 				for await (const event of events) {
 					if (cancelled) return;
-					if ("partial" in event && event.partial.model && event.partial.model !== effectiveModelId) {
-						effectiveModelId = event.partial.model;
-					}
+					if ("partial" in event) noteRoutedModel(event.partial.model);
+					if ("message" in event) noteRoutedModel(event.message.model);
 					switch (event.type) {
 						case "text_delta":
 							if (event.delta.length > 0) {
-								writeSse(controller, baseChunk({ content: event.delta }, null));
+								emitChunk(baseChunk({ content: event.delta }, null));
 							}
 							break;
 
@@ -603,7 +638,7 @@ export function encodeStream(
 							// DeepSeek-style / o-series reasoning channel. Clients that don't
 							// understand it ignore the unknown delta key.
 							if (event.delta.length > 0) {
-								writeSse(controller, baseChunk({ reasoning_content: event.delta }, null));
+								emitChunk(baseChunk({ reasoning_content: event.delta }, null));
 							}
 							break;
 
@@ -614,8 +649,7 @@ export function encodeStream(
 							const partial = event.partial.content[event.contentIndex];
 							const call = partial && partial.type === "toolCall" ? partial : undefined;
 							sentToolMeta.set(idx, { id: call?.id ?? "", name: call?.name ?? "", hasArgumentBytes: false });
-							writeSse(
-								controller,
+							emitChunk(
 								baseChunk(
 									{
 										tool_calls: [
@@ -638,10 +672,7 @@ export function encodeStream(
 							if (idx === undefined) break;
 							const sent = sentToolMeta.get(idx);
 							if (sent && event.delta.length > 0) sent.hasArgumentBytes = true;
-							writeSse(
-								controller,
-								baseChunk({ tool_calls: [{ index: idx, function: { arguments: event.delta } }] }, null),
-							);
+							emitChunk(baseChunk({ tool_calls: [{ index: idx, function: { arguments: event.delta } }] }, null));
 							break;
 						}
 
@@ -661,8 +692,7 @@ export function encodeStream(
 								? undefined
 								: stringifyArgs(event.toolCall.arguments);
 							if (correctId !== undefined || correctName !== undefined || correctArguments !== undefined) {
-								writeSse(
-									controller,
+								emitChunk(
 									baseChunk(
 										{
 											tool_calls: [
@@ -698,6 +728,7 @@ export function encodeStream(
 										: hasToolCalls
 											? "tool_calls"
 											: "stop";
+							ensureRoleChunk();
 							writeSse(controller, baseChunk({}, finishReason));
 							if (includeUsage) writeUsage(controller, event.message);
 							controller.enqueue(encoder.encode("data: [DONE]\n\n"));
@@ -706,6 +737,7 @@ export function encodeStream(
 
 						case "error": {
 							const msg = event.error.errorMessage ?? "stream error";
+							ensureRoleChunk();
 							writeSse(controller, { error: { message: msg, type: "upstream_error" } });
 							controller.close();
 							return;
@@ -720,6 +752,7 @@ export function encodeStream(
 
 				// Stream ended without a terminal `done` (defensive). Close gracefully.
 				if (!cancelled) {
+					ensureRoleChunk();
 					writeSse(controller, baseChunk({}, hasToolCalls ? "tool_calls" : "stop"));
 					controller.enqueue(encoder.encode("data: [DONE]\n\n"));
 					controller.close();

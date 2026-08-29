@@ -72,6 +72,7 @@ import {
 	type ListMcpResourcesExecResult,
 	ListMcpResourcesExecResult_McpResourceSchema,
 	ListMcpResourcesExecResultSchema,
+	ListMcpResourcesRejectedSchema,
 	ListMcpResourcesSuccessSchema,
 	type LsDirectoryTreeNode,
 	type LsDirectoryTreeNode_File,
@@ -102,6 +103,7 @@ import {
 	type ReadMcpResourceExecResult,
 	ReadMcpResourceExecResultSchema,
 	ReadMcpResourceNotFoundSchema,
+	ReadMcpResourceRejectedSchema,
 	ReadMcpResourceSuccessSchema,
 	ReadRejectedSchema,
 	ReadResultSchema,
@@ -1978,6 +1980,35 @@ async function handleExecServerMessage(
 		}
 		case "fetchArgs": {
 			const args = execMsg.message.value;
+			if (cursorToolPassthrough) {
+				// FetchResult has no rejected variant — synthesize + error-defer so the
+				// caller still receives a ToolCall and stopReason becomes toolUse.
+				const toolCallId = crypto.randomUUID();
+				synthesizeCursorExecToolCall(output, stream, state, toolCallId, "web_fetch", { url: args.url });
+				await pairSynthesizedExecResult(
+					state,
+					onToolResult,
+					toolCallId,
+					"web_fetch",
+					"Tool deferred to caller (tool passthrough)",
+					true,
+				);
+				sendExecClientMessage(
+					h2Request,
+					execMsg,
+					"fetchResult",
+					create(FetchResultSchema, {
+						result: {
+							case: "error",
+							value: create(FetchErrorSchema, {
+								url: args.url,
+								error: "Tool deferred to caller (tool passthrough)",
+							}),
+						},
+					}),
+				);
+				return;
+			}
 			const execResult = create(FetchResultSchema, {
 				result: {
 					case: "error",
@@ -2085,6 +2116,34 @@ async function handleExecServerMessage(
 			// handler the honest answer is an explicit empty success. An
 			// unset-oneof result would read as "the call produced nothing".
 			const args = execMsg.message.value;
+			if (cursorToolPassthrough) {
+				const toolCallId = crypto.randomUUID();
+				synthesizeCursorExecToolCall(output, stream, state, toolCallId, "list_mcp_resources", {
+					server: args.server,
+				});
+				await pairSynthesizedExecResult(
+					state,
+					onToolResult,
+					toolCallId,
+					"list_mcp_resources",
+					"Tool deferred to caller (tool passthrough)",
+					true,
+				);
+				sendExecClientMessage(
+					h2Request,
+					execMsg,
+					"listMcpResourcesExecResult",
+					create(ListMcpResourcesExecResultSchema, {
+						result: {
+							case: "rejected",
+							value: create(ListMcpResourcesRejectedSchema, {
+								reason: "Tool deferred to caller (tool passthrough)",
+							}),
+						},
+					}),
+				);
+				return;
+			}
 			let execResult: ListMcpResourcesExecResult;
 			// The model consumes this catalog, so it needs a block and a paired
 			// result or the listing is invisible in the UI and gone from every
@@ -2148,6 +2207,37 @@ async function handleExecServerMessage(
 		}
 		case "readMcpResourceExecArgs": {
 			const args = execMsg.message.value;
+			if (cursorToolPassthrough) {
+				const toolCallId = crypto.randomUUID();
+				synthesizeCursorExecToolCall(output, stream, state, toolCallId, "read_mcp_resource", {
+					server: args.server,
+					uri: args.uri,
+					download_path: args.downloadPath,
+				});
+				await pairSynthesizedExecResult(
+					state,
+					onToolResult,
+					toolCallId,
+					"read_mcp_resource",
+					"Tool deferred to caller (tool passthrough)",
+					true,
+				);
+				sendExecClientMessage(
+					h2Request,
+					execMsg,
+					"readMcpResourceExecResult",
+					create(ReadMcpResourceExecResultSchema, {
+						result: {
+							case: "rejected",
+							value: create(ReadMcpResourceRejectedSchema, {
+								uri: args.uri,
+								reason: "Tool deferred to caller (tool passthrough)",
+							}),
+						},
+					}),
+				);
+				return;
+			}
 			let execResult: ReadMcpResourceExecResult;
 			// The read runs locally, and in download mode it writes a workspace
 			// file — an operation with no transcript block is invisible in the UI
