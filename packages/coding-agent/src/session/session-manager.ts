@@ -15,6 +15,7 @@ import {
 	getSessionsDir,
 	isEnoent,
 	logger,
+	pathIsWithin,
 	stringifyJson,
 	toError,
 } from "@oh-my-pi/pi-utils";
@@ -2967,8 +2968,13 @@ export class SessionManager {
 			// output). Honor the boundary: start fresh rather than falling back to
 			// findMostRecentSession(), which would resurrect the pre-`/new`
 			// transcript. A materialized (or genuinely stale/deleted) crumb reports
-			// exists=false only when fresh, so this never masks a real stale crumb.
-			if (breadcrumb.fresh && !breadcrumb.exists) {
+			// exists=false only when fresh, so this never masks a real stale crumb. An
+			// explicit session directory must also fence recycled terminal breadcrumbs.
+			if (
+				breadcrumb.fresh &&
+				!breadcrumb.exists &&
+				(!sessionDir || pathIsWithin(dir, path.dirname(breadcrumb.sessionFile)))
+			) {
 				const manager = new SessionManager(cwd, dir, true, storage);
 				manager.#resetToNewSession();
 				return manager;
@@ -2979,7 +2985,9 @@ export class SessionManager {
 			breadcrumb.sessionFile = resolveBreadcrumbToInteractiveRoot(breadcrumb.sessionFile);
 			const breadcrumbCwd = path.resolve(breadcrumb.cwd);
 			if (breadcrumbCwd === resolvedCwd) {
-				chosenSession = breadcrumb.sessionFile;
+				if (!sessionDir || pathIsWithin(dir, breadcrumb.sessionFile)) {
+					chosenSession = breadcrumb.sessionFile;
+				}
 			} else {
 				// The terminal's last session started in a different cwd. If that cwd is
 				// gone (worktree move/rename) and this location has no sessions of its
