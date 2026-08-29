@@ -297,6 +297,27 @@ describe("unverified isolated merge latch", () => {
 		expect(latch.latched).toBe(true);
 	});
 
+	it("does not clear from details.file alone when the target is outside the merged tree", async () => {
+		const latch = new UnverifiedMergeLatch();
+		latch.mark();
+		const ctx = host(latch, { cwd: "/repo" });
+		const tracker = new TodoTracker(ctx.host);
+		// No start snap — only details.file (as emitted by the lsp tool).
+		tracker.onToolResult(
+			"lsp",
+			false,
+			{
+				action: "diagnostics",
+				success: true,
+				file: "/tmp/clean.ts",
+				diagnosticErrorCount: 0,
+				failedServerCount: 0,
+			},
+			undefined,
+		);
+		expect(latch.latched).toBe(true);
+	});
+
 	it("clears the latch on workspace-wide lsp diagnostics", async () => {
 		const latch = new UnverifiedMergeLatch();
 		latch.mark();
@@ -445,6 +466,16 @@ describe("unverified isolated merge latch", () => {
 		expect(ctx.continuations.count).toBe(1);
 		expect(JSON.stringify(ctx.messages)).toContain(MERGED_UNVERIFIED_MARKER);
 		expect(latch.latched).toBe(true);
+	});
+
+	it("skips ordinary todo reminders when the assistant ends with a user-facing question", async () => {
+		const latch = new UnverifiedMergeLatch();
+		const ctx = host(latch);
+		const tracker = new TodoTracker(ctx.host);
+		tracker.setPhases([{ name: "Work", tasks: [{ content: "Ship feature", status: "pending" }] }]);
+
+		expect(await tracker.checkCompletion(textOnlyStop("Should I run the tests?"))).toBe(false);
+		expect(ctx.continuations.count).toBe(0);
 	});
 
 	it("session-boundary clear drops the latch and pending verify snapshots", async () => {

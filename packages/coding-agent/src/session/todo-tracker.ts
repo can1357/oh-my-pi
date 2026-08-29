@@ -600,6 +600,7 @@ export class TodoTracker {
 
 /** LSP `request` payload from tool details — used when start-args snap was missed. */
 function lspDiagnosticsRequestFromDetails(details: Record<string, unknown> | undefined): unknown {
+	if (typeof details?.file === "string") return { file: details.file };
 	return isRecord(details?.request) ? details.request : undefined;
 }
 
