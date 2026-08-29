@@ -114,6 +114,11 @@ export class TodoTracker {
 		this.#midRunNudgeCount = 0;
 	}
 
+	/** Drop verify-start snapshots owned by the previous logical session. */
+	resetVerifyState(): void {
+		this.#verifyStart.clear();
+	}
+
 	/** Snapshots the merge generation when a parent-verify tool begins executing. */
 	onToolExecutionStart(toolName: string, toolCallId: string, args?: unknown): void {
 		if (!PARENT_VERIFY_TOOLS[toolName] || !toolCallId) return;

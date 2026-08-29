@@ -5337,6 +5337,7 @@ export class AgentSession {
 		// switch or new session must not inherit an unverified merge from another
 		// cwd/transcript.
 		this.#unverifiedMergeLatch.clear();
+		this.#todo.resetVerifyState();
 	}
 
 	/**

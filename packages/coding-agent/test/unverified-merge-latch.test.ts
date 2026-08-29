@@ -268,4 +268,47 @@ describe("unverified isolated merge latch", () => {
 		expect(ctx.continuations.count).toBe(1);
 		expect(JSON.stringify(ctx.messages)).toContain(MERGED_UNVERIFIED_MARKER);
 	});
+
+	it("session-boundary clear drops the latch and pending verify snapshots", async () => {
+		const latch = new UnverifiedMergeLatch();
+		latch.mark();
+		const ctx = host(latch);
+		const tracker = new TodoTracker(ctx.host);
+		tracker.onToolExecutionStart("bash", "call-1", { command: "bun test test/foo.test.ts" });
+		tracker.onToolResult(
+			"bash",
+			false,
+			{ async: { state: "running", jobId: "bg_1" } },
+			"call-1",
+		);
+		expect(latch.latched).toBe(true);
+
+		// Mirrors AgentSession.#clearSessionScopedToolState on switch/new.
+		latch.clear();
+		tracker.resetVerifyState();
+		expect(latch.latched).toBe(false);
+
+		// Recycled job id from a later session must not clear a fresh latch.
+		latch.mark();
+		tracker.onAsyncJobTerminal("bg_1", "bash", "completed");
+		expect(latch.latched).toBe(true);
+	});
+
+	it("clears the latch when hub observes a consumed successful bash job", async () => {
+		const latch = new UnverifiedMergeLatch();
+		latch.mark();
+		const ctx = host(latch);
+		const tracker = new TodoTracker(ctx.host);
+		tracker.onToolExecutionStart("bash", "call-hub", { command: "bun test test/foo.test.ts" });
+		tracker.onToolResult(
+			"bash",
+			false,
+			{ async: { state: "running", jobId: "bg_hub" } },
+			"call-hub",
+		);
+		expect(latch.latched).toBe(true);
+		// Hub buildJobResult calls observeAsyncJobTerminal after consumeJobResults.
+		tracker.onAsyncJobTerminal("bg_hub", "bash", "completed");
+		expect(latch.latched).toBe(false);
+	});
 });
