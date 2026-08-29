@@ -517,6 +517,12 @@ export class TurnRecovery {
 			allowModelFallback?: boolean;
 			fireworksFastFallback?: boolean;
 			hardErrorFallback?: boolean;
+			/**
+			 * When true with hardErrorFallback, skip nested auto_retry_end /
+			 * synthetic persist so an outer caller (empty-stop cap) owns settlement.
+			 * Ordinary hard-error callers must omit this and settle normally.
+			 */
+			deferTerminalSettlement?: boolean;
 			preserveFailedTurn?: boolean;
 		},
 	): Promise<boolean> {
@@ -815,6 +821,7 @@ export class TurnRecovery {
 				const didRetry = await this.handleRetryableError(synthetic, {
 					allowModelFallback: true,
 					hardErrorFallback: true,
+					deferTerminalSettlement: true,
 				});
 				const modelAfterFallback = this.#host.model();
 				// Effort-only selector changes (provider/model:high → :low) resolve the
@@ -2144,6 +2151,7 @@ export class TurnRecovery {
 			allowModelFallback?: boolean;
 			fireworksFastFallback?: boolean;
 			hardErrorFallback?: boolean;
+			deferTerminalSettlement?: boolean;
 			preserveFailedTurn?: boolean;
 		},
 	): Promise<boolean> {
@@ -2304,11 +2312,10 @@ export class TurnRecovery {
 
 		if (retryBudgetExhausted) {
 			if (!switchedModel && !switchedCredential) {
-				// Fallback-only consults (hardErrorFallback) must not settle the generic
-				// retry budget: the empty-stop cap caller owns the sole terminal
-				// auto_retry_end. Emitting here would duplicate lifecycle events and
-				// leave the synthetic error in JSONL beside the original empty stop.
-				if (options?.hardErrorFallback) {
+				// Empty-stop fallback-only consults defer terminal ownership to the
+				// outer empty-stop cap (sole auto_retry_end). Ordinary hardErrorFallback
+				// callers have no such owner and must settle here.
+				if (options?.deferTerminalSettlement) {
 					this.#retryAttempt = 0;
 					this.resolveRetry();
 					return false;
@@ -2366,10 +2373,10 @@ export class TurnRecovery {
 			!switchedCredential &&
 			(options?.hardErrorFallback || (options?.fireworksFastFallback && !this.isRetryableError(message)))
 		) {
-			// hardErrorFallback: leave terminal ownership to the empty-stop cap caller
-			// (no nested auto_retry_end / synthetic persist). Fireworks Fast still
-			// closes an in-flight saga when attempt > 1.
-			if (!options?.hardErrorFallback && this.#retryAttempt > 1) {
+			// Empty-stop consults defer terminal ownership to the outer cap (no nested
+			// auto_retry_end). Ordinary hardErrorFallback and Fireworks Fast still close
+			// an in-flight saga when attempt > 1.
+			if (!options?.deferTerminalSettlement && this.#retryAttempt > 1) {
 				await this.persistTerminalEmptyErrorTurn(message);
 				await this.#host.emitSessionEvent({
 					type: "auto_retry_end",

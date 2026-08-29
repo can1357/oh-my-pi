@@ -342,4 +342,24 @@ describe("TurnRecovery zero-billed empty-stop fallback", () => {
 		expect(await recovery.handleEmptyAssistantStop(msgB)).toBe("continue");
 		expect(await recovery.handleEmptyAssistantStop(msgB)).toBe("terminal");
 	});
+
+	it("11. ordinary hardErrorFallback settles an in-flight saga when no candidate switches", async () => {
+		const { recovery, events } = makeRecovery();
+		const transient = makeMessage([], model, {
+			stopReason: "error",
+			errorMessage: "503 service unavailable: overloaded_error",
+			errorId: AIError.create(AIError.Flag.Transient),
+		});
+		expect(await recovery.handleRetryableError(transient)).toBe(true);
+		expect(events.some(e => e.type === "auto_retry_start")).toBe(true);
+
+		const hard = makeMessage([], model, {
+			stopReason: "error",
+			errorMessage: "model refused permanently",
+			errorId: AIError.create(),
+		});
+		// Ordinary hard-error path (agent-session) — no empty-stop cap owns settlement.
+		expect(await recovery.handleRetryableError(hard, { hardErrorFallback: true })).toBe(false);
+		expect(events.filter(e => e.type === "auto_retry_end" && e.success === false).length).toBe(1);
+	});
 });
