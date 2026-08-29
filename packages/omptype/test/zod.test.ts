@@ -113,11 +113,11 @@ describe("zod-like parsing", () => {
 		// variant used to build a plain string/number union that answered
 		// safeParse("x") with success — the dispatch contract the call
 		// advertises, silently gone. It must fail at definition instead.
-		expect(() => z.discriminatedUnion("kind", [z.string() as never, z.number() as never])).toThrow(
+		expect(() => z.discriminatedUnion("kind", [z.string(), z.number()])).toThrow(
 			/variant 0 does not declare a "kind" property/,
 		);
 		expect(() =>
-			z.discriminatedUnion("kind", [z.object({ kind: z.literal("a") }), z.object({ other: z.string() }) as never]),
+			z.discriminatedUnion("kind", [z.object({ kind: z.literal("a") }), z.object({ other: z.string() })]),
 		).toThrow(/variant 1 does not declare a "kind" property/);
 
 		// A non-literal discriminator cannot be dispatched on, but zod accepts
@@ -129,6 +129,26 @@ describe("zod-like parsing", () => {
 		expect(enumDiscriminated.parse({ kind: "b", v: "x" })).toEqual({ kind: "b", v: "x" });
 		expect(enumDiscriminated.parse({ kind: "c", n: 1 })).toEqual({ kind: "c", n: 1 });
 		expect(enumDiscriminated.safeParse({ kind: "a", n: 1 }).success).toBe(false);
+
+		// Wrapping the same invalid definition in z.lazy must not launder it:
+		// the variant is accepted unresolved at construction (running the getter
+		// there breaks recursive definitions), then re-checked at first parse,
+		// where it used to quietly match any object without a discriminator.
+		const deferredInvalid = z.discriminatedUnion("kind", [
+			z.lazy(() => z.object({ x: z.string() })),
+			z.object({ kind: z.literal("a"), n: z.number() }),
+		]);
+		expect(() => deferredInvalid.parse({ x: "oops" })).toThrow(/variant 0 does not declare a "kind" property/);
+		// Still throws on later parses rather than latching a one-time pass.
+		expect(() => deferredInvalid.parse({ kind: "a", n: 1 })).toThrow(/variant 0 does not declare a "kind" property/);
+
+		const deferredValid = z.discriminatedUnion("kind", [
+			z.lazy(() => z.object({ kind: z.literal("lazy"), v: z.string() })),
+			z.object({ kind: z.literal("a"), n: z.number() }),
+		]);
+		expect(deferredValid.parse({ kind: "lazy", v: "x" })).toEqual({ kind: "lazy", v: "x" });
+		expect(deferredValid.parse({ kind: "a", n: 1 })).toEqual({ kind: "a", n: 1 });
+		expect(deferredValid.safeParse({ kind: "lazy", v: 1 }).success).toBe(false);
 	});
 
 	it("parses valid values and reports nested safeParse issues", () => {
