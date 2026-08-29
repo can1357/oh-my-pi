@@ -16,6 +16,7 @@ import type { AuthGatewayStreamControl, AuthGatewayParsedRequest as ParsedReques
 import * as AIError from "../error";
 import type {
 	AssistantMessage,
+	AssistantMessageEvent,
 	AssistantMessageEventStream,
 	ComputerAction,
 	ComputerSafetyCheck,
@@ -1234,15 +1235,14 @@ export function encodeStream(
 					controller.close();
 					return;
 				}
-				for await (const ev of events) {
-					if (cancelled) return;
-					if ("partial" in ev) noteRoutedModel(ev.partial.model);
-					if ("message" in ev) noteRoutedModel(ev.message.model);
+				// Hold content events until Cursor auto routing resolves so
+				// response.created is not permanently stamped with the pre-route
+				// placeholder when text/thinking/tools arrive before the checkpoint.
+				const pendingWhileRouting: AssistantMessageEvent[] = [];
+				const processEvent = (ev: AssistantMessageEvent): void => {
 					switch (ev.type) {
 						case "start": {
 							createdAt = Math.floor((ev.partial.timestamp || Date.now()) / 1000);
-							// Defer Cursor auto envelopes until the routed model is known.
-							if (deferStartForCursorAuto(ev.partial.model)) break;
 							ensureEnvelopes();
 							break;
 						}
@@ -1440,6 +1440,39 @@ export function encodeStream(
 							break;
 						}
 					}
+				};
+				const flushPending = (): void => {
+					const held = pendingWhileRouting.splice(0);
+					for (const heldEv of held) processEvent(heldEv);
+				};
+				for await (const ev of events) {
+					if (cancelled) return;
+					if ("partial" in ev) noteRoutedModel(ev.partial.model);
+					if ("message" in ev) noteRoutedModel(ev.message.model);
+
+					// Terminal events must release any held content (force envelopes with the
+					// best-known model) so clients still get a coherent SSE envelope when
+					// routing never arrives.
+					if (ev.type === "done" || ev.type === "error") {
+						ensureEnvelopes();
+						flushPending();
+						processEvent(ev);
+						continue;
+					}
+
+					const deferring = !envelopesStarted && deferStartForCursorAuto(effectiveModelId);
+					if (deferring) {
+						// Capture timestamp from start; buffer everything else until routing lands.
+						if (ev.type === "start") {
+							createdAt = Math.floor((ev.partial.timestamp || Date.now()) / 1000);
+						} else {
+							pendingWhileRouting.push(ev);
+						}
+						continue;
+					}
+
+					flushPending();
+					processEvent(ev);
 				}
 
 				if (failureMessage) {

@@ -309,14 +309,16 @@ describe("Cursor conversation checkpoints", () => {
 			undefined,
 			{ sawTokenDelta: false },
 			[],
+			undefined,
+			undefined,
+			true,
 		);
 
 		expect(output.model).toBe("cursor-grok-4.5-high");
 	});
 
-	it("does not override model when output.model is not the auto sentinel", async () => {
-		// The extraction only fires when output.model is "auto" (auto mode).
-		// For explicit model selections, the checkpoint should not override.
+	it("does not extract routed model when autoModeActive is false", async () => {
+		// Extraction is gated on autoModeActive (request intent), not on output.model.
 		const output = cursorAssistantMessage();
 		output.model = "cursor-claude-sonnet-5";
 
@@ -343,6 +345,9 @@ describe("Cursor conversation checkpoints", () => {
 			undefined,
 			{ sawTokenDelta: false },
 			[],
+			undefined,
+			undefined,
+			false,
 		);
 
 		expect(output.model).toBe("cursor-claude-sonnet-5");

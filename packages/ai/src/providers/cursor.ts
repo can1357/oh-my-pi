@@ -795,13 +795,14 @@ function streamCursorWithWireMode(
 			}
 			// In passthrough mode, restrict the model's tool view to exactly the
 			// caller-declared tools (including native names like bash/read/write).
-			// Filtering those out emptied the allowlist and omitted the header,
-			// leaving Cursor's unrestricted native set enabled.
-			if (options?.cursorToolPassthrough && context.tools && context.tools.length > 0) {
-				const allowedTools = context.tools.map(tool => tool.name).join(",");
-				if (allowedTools) {
-					requestHeaders["x-cursor-agent-allowed-tools"] = allowedTools;
-				}
+			// Always send the header: omitting it leaves Cursor's unrestricted native
+			// set enabled (including when tools is empty / text-only passthrough).
+			if (options?.cursorToolPassthrough) {
+				const allowedTools = (context.tools ?? [])
+					.map(tool => tool.name)
+					.filter(name => name.length > 0)
+					.join(",");
+				requestHeaders["x-cursor-agent-allowed-tools"] = allowedTools || "__none__";
 			}
 			const debugSession = isRequestDebugEnabled()
 				? await createRequestDebugSession({

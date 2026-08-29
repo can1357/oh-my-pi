@@ -1093,6 +1093,48 @@ describe("openai-responses encodeStream", () => {
 		expect(output[2]!.id).not.toBe(output[2]!.call_id);
 	});
 
+	it("buffers content until Cursor auto routing resolves after early text", async () => {
+		const stream = new AssistantMessageEventStream();
+		const initial: AssistantMessage = {
+			role: "assistant",
+			api: "openai-responses",
+			provider: "cursor",
+			model: "gpt-5",
+			content: [],
+			usage: zeroUsage(),
+			stopReason: "stop",
+			timestamp: 1_700_000_000_000,
+		};
+		const earlyText: AssistantMessage = {
+			...initial,
+			content: [{ type: "text", text: "h" }],
+		};
+		const routed: AssistantMessage = {
+			...earlyText,
+			model: "claude-opus-4-7",
+			content: [{ type: "text", text: "hi" }],
+		};
+
+		queueMicrotask(() => {
+			stream.push({ type: "start", partial: initial });
+			stream.push({ type: "text_start", contentIndex: 0, partial: earlyText });
+			stream.push({ type: "text_delta", contentIndex: 0, delta: "h", partial: earlyText });
+			stream.push({ type: "text_delta", contentIndex: 0, delta: "i", partial: routed });
+			stream.push({ type: "text_end", contentIndex: 0, content: "hi", partial: routed });
+			stream.push({ type: "done", reason: "stop", message: routed });
+			stream.end(routed);
+		});
+
+		const frames = parseSse(await collectStream(encodeStream(stream, "gpt-5", { cursorAutoMode: true })));
+		const created = frames.find(f => f.event === "response.created");
+		expect(created).toBeDefined();
+		const response = (created!.data as { response: { model: string } }).response;
+		expect(response.model).toBe("claude-opus-4-7");
+		const types = frames.map(f => f.event);
+		expect(types.indexOf("response.created")).toBeLessThan(types.indexOf("response.output_item.added"));
+		expect(types.indexOf("response.created")).toBeGreaterThanOrEqual(0);
+	});
+
 	it("streams a GA computer_call with provider item id, actions, and safety checks", async () => {
 		const stream = new AssistantMessageEventStream();
 		const actions = [{ type: "scroll" as const, x: 120, y: 240, scroll_x: 0, scroll_y: 650, keys: [] }];

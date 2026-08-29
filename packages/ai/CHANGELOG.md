@@ -259,6 +259,8 @@
 - Unknown Cursor `interaction_query` variants are no longer auto-approved; only the verified unnamed WebFetch field (9) still gets an `approved {}` fallback.
 - Cursor auto-mode Anthropic SSE now buffers content until the routed model is known, so `message_start` is not permanently stamped with `auto`/`default`/the pre-route placeholder.
 - Cursor auto-mode OpenAI Chat Completions and Responses SSE similarly defer the initial role / `response.created` envelopes until routing resolves.
+- Cursor auto-mode Responses SSE also buffers early `text`/`thinking`/`toolcall` events until routing lands, so content cannot force `response.created` with the pre-route placeholder.
+- Cursor tool passthrough always sends `x-cursor-agent-allowed-tools` (including `__none__` when the caller declares no tools) so Cursor does not keep its unrestricted native set.
 - Auth-gateway CORS preflights allow the Cursor control headers (`x-cursor-auto-mode`, `x-cursor-tool-passthrough`, `x-cursor-agent-exclude-tools`, `local-cli-mode`, `x-dev-experiment-overrides`).
 - Cursor `DEBUG_CURSOR` interaction logs go through the central logger instead of `console.error`.
 - Cursor tool passthrough synthesizes and defers `fetchArgs`, `listMcpResourcesExecArgs`, and `readMcpResourceExecArgs` the same way as other exec variants.
