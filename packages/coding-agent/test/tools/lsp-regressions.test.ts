@@ -1897,6 +1897,33 @@ describe("lsp regressions", () => {
 		}
 	});
 
+	it("rejects diagnostics when no language server was attempted for matched files", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-no-server-attempt-");
+		try {
+			const targetFile = path.join(tempDir.path(), "readme.md");
+			await Bun.write(targetFile, "# docs\n");
+			await initTheme();
+
+			vi.spyOn(lspConfig, "loadConfig").mockReturnValue({ servers: {}, idleTimeoutMs: undefined });
+			vi.spyOn(lspConfig, "getServersForFile").mockReturnValue([]);
+
+			const tool = new LspTool(makeLspSession(tempDir.path()));
+			const result = await tool.execute("no-server-attempt", {
+				action: "diagnostics",
+				file: targetFile,
+				timeout: 5,
+			});
+
+			expect(result.details?.success).toBe(false);
+			expect(result.details?.diagnosticErrorCount).toBe(0);
+			expect((result.details?.failedServerCount ?? 0) > 0).toBe(true);
+			expect(textResult(result)).toContain("No language server found");
+		} finally {
+			vi.restoreAllMocks();
+			tempDir.removeSync();
+		}
+	});
+
 	it("reports failure when every workspace-symbol server fails (#8387)", async () => {
 		const tempDir = TempDir.createSync("@omp-lsp-workspace-symbol-all-fail-");
 		try {

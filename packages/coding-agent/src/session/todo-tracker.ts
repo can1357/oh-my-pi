@@ -7,6 +7,7 @@ import eagerTaskPrompt from "../prompts/system/eager-task.md" with { type: "text
 import eagerTodoPrompt from "../prompts/system/eager-todo.md" with { type: "text" };
 import midRunTodoNudgePrompt from "../prompts/system/mid-run-todo-nudge.md" with { type: "text" };
 import todoCompletionReminderPrompt from "../prompts/system/todo-completion-reminder.md" with { type: "text" };
+import { extractLeadingCdTarget } from "../tools/shell-tokenize";
 import { getLatestTodoPhasesFromEntries, isTodoPhase, type TodoItem, type TodoPhase } from "../tools/todo";
 import { buildNamedToolChoice } from "../utils/tool-choice";
 import type { AgentSessionEvent } from "./agent-session-events";
@@ -60,6 +61,11 @@ interface VerifyStartSnap {
 	command?: string;
 	/** Resolved bash working directory when known at tool start. */
 	cwd?: string;
+	/**
+	 * LSP diagnostics target snapped at tool start (`*` = workspace-wide).
+	 * Absolute or cwd-resolved; outside the merged tree must not clear the latch.
+	 */
+	lspFile?: string;
 }
 
 /** Capabilities the todo tracker borrows from its owning session. */
@@ -149,13 +155,41 @@ export class TodoTracker {
 		if (!PARENT_VERIFY_TOOLS[toolName] || !toolCallId) return;
 		const command =
 			toolName === "bash" && isRecord(args) && typeof args.command === "string" ? args.command : undefined;
-		const rawCwd = toolName === "bash" && isRecord(args) && typeof args.cwd === "string" ? args.cwd : undefined;
-		const cwd = rawCwd !== undefined && rawCwd.trim() !== "" ? path.resolve(this.#host.cwd(), rawCwd) : undefined;
+		const cwd = toolName === "bash" ? this.#resolveBashStartCwd(args) : undefined;
+		const lspFile = toolName === "lsp" ? this.#resolveLspDiagnosticsTarget(args) : undefined;
 		this.#verifyStart.set(toolCallId, {
 			generation: this.#host.unverifiedMergeGeneration?.() ?? 0,
 			command,
 			cwd,
+			lspFile,
 		});
+	}
+
+	/**
+	 * Resolve bash cwd the same way the bash tool does: structured `cwd`, else a
+	 * leading `cd <path> && …` target. Absolute/relative paths resolve against the
+	 * session tree so out-of-tree verify cannot clear the latch.
+	 */
+	#resolveBashStartCwd(args: unknown): string | undefined {
+		if (!isRecord(args)) return undefined;
+		let hint: string | undefined;
+		if (typeof args.cwd === "string" && args.cwd.trim() !== "") {
+			hint = args.cwd.trim();
+		} else if (typeof args.command === "string") {
+			const cd = extractLeadingCdTarget(args.command);
+			if (cd) hint = cd.path;
+		}
+		if (hint === undefined) return undefined;
+		return path.resolve(this.#host.cwd(), hint);
+	}
+
+	/** Resolve LSP diagnostics `file` (`*` stays workspace-wide; else cwd-resolved). */
+	#resolveLspDiagnosticsTarget(args: unknown): string | undefined {
+		if (!isRecord(args) || typeof args.file !== "string") return undefined;
+		const file = args.file.trim();
+		if (file === "") return undefined;
+		if (file === "*") return "*";
+		return path.resolve(this.#host.cwd(), file);
 	}
 
 	/** Records a completed tool result before asynchronous event processing begins. */
@@ -167,9 +201,17 @@ export class TodoTracker {
 		}
 		const start = toolCallId ? this.#verifyStart.get(toolCallId) : undefined;
 		const detailCwd = typeof details?.cwd === "string" ? details.cwd : undefined;
+		const detailLspFile = this.#resolveLspDiagnosticsTarget(lspDiagnosticsRequestFromDetails(details));
 		if (
 			PARENT_VERIFY_TOOLS[toolName] &&
-			this.#isSuccessfulParentVerify(toolName, isError, details, start?.command, detailCwd ?? start?.cwd)
+			this.#isSuccessfulParentVerify(
+				toolName,
+				isError,
+				details,
+				start?.command,
+				detailCwd ?? start?.cwd,
+				start?.lspFile ?? detailLspFile,
+			)
 		) {
 			// Prefer the generation snapped at tool start. Missing start (tests /
 			// missed event) falls back to the current generation so a post-start
@@ -253,6 +295,7 @@ export class TodoTracker {
 		details: Record<string, unknown> | undefined,
 		command?: string,
 		cwd?: string,
+		lspFile?: string,
 	): boolean {
 		if (isError) return false;
 		// Background bash/eval: the initial toolResult is not a completed check.
@@ -275,7 +318,15 @@ export class TodoTracker {
 			}
 			// Partial LS failures must not clear the latch even when success:true.
 			const failedServers = typeof details.failedServerCount === "number" ? details.failedServerCount : 0;
-			return failedServers === 0;
+			if (failedServers !== 0) return false;
+			// Same spirit as bash cwd-in-tree: `/tmp/clean.ts` must not clear.
+			// Workspace-wide `*` is in-tree by definition.
+			if (lspFile !== undefined && lspFile !== "*") {
+				if (!isParentVerifyCwdInMergedTree(lspFile, this.#host.cwd(), this.#host.repoRoot?.())) {
+					return false;
+				}
+			}
+			return true;
 		}
 		return true;
 	}
@@ -434,7 +485,9 @@ export class TodoTracker {
 			this.#reminderAwaitingProgress = false;
 			return false;
 		}
-		if (isAwaitingUserAnswer(message)) {
+		// Awaiting-user skips ordinary todo reminders only — an armed merge latch
+		// must still require parent verify (questions must not settle unverified).
+		if (isAwaitingUserAnswer(message) && !unverifiedMerge) {
 			logger.debug("Todo completion: assistant is waiting for user input; skipping reminder", {
 				incomplete: incomplete.length,
 			});
@@ -543,6 +596,11 @@ export class TodoTracker {
 			}),
 		}));
 	}
+}
+
+/** LSP `request` payload from tool details — used when start-args snap was missed. */
+function lspDiagnosticsRequestFromDetails(details: Record<string, unknown> | undefined): unknown {
+	return isRecord(details?.request) ? details.request : undefined;
 }
 
 function toolCallOpFromMessage(message: AgentMessage, toolCallId: string): string | undefined {

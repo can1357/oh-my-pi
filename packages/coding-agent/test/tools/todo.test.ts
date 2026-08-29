@@ -6,6 +6,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { initTheme, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import {
+	applyOpsToPhases,
 	markdownToPhases,
 	nextActionableTask,
 	phasesToMarkdown,
@@ -57,6 +58,37 @@ describe("resolveTodoMarkdownPath", () => {
 		const cwd = path.resolve("tmp", "todo-workspace");
 
 		expect(() => resolveTodoMarkdownPath("artifact://todo", cwd)).toThrow("internal scheme");
+	});
+});
+
+describe("applyOpsToPhases userDrop provenance", () => {
+	it("stamps droppedBy user only when userDrop is set", () => {
+		const current: TodoPhase[] = [
+			{
+				name: "Work",
+				tasks: [
+					{ content: "Keep shipping", status: "pending" },
+					{ content: "Cancel me", status: "in_progress" },
+				],
+			},
+		];
+
+		const modelDrop = applyOpsToPhases(current, [{ op: "drop", task: "Cancel me" }]);
+		expect(modelDrop.errors).toEqual([]);
+		expect(modelDrop.phases[0]?.tasks.find(t => t.content === "Cancel me")).toEqual({
+			content: "Cancel me",
+			status: "abandoned",
+		});
+
+		const userDrop = applyOpsToPhases(current, [{ op: "drop", task: "Cancel me" }], { userDrop: true });
+		expect(userDrop.errors).toEqual([]);
+		expect(userDrop.phases[0]?.tasks.find(t => t.content === "Cancel me")).toEqual({
+			content: "Cancel me",
+			status: "abandoned",
+			droppedBy: "user",
+		});
+		// Dropping the in-progress task auto-promotes the remaining pending sibling.
+		expect(userDrop.phases[0]?.tasks.find(t => t.content === "Keep shipping")?.status).toBe("in_progress");
 	});
 });
 

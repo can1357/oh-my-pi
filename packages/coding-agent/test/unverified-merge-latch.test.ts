@@ -138,6 +138,54 @@ describe("unverified isolated merge latch", () => {
 		expect(latch.latched).toBe(true);
 	});
 
+	it("does not clear when bash cwd escapes via relative path or leading cd", async () => {
+		const latch = new UnverifiedMergeLatch();
+		latch.mark();
+		const ctx = host(latch, { cwd: "/repo" });
+		const tracker = new TodoTracker(ctx.host);
+
+		tracker.onToolExecutionStart("bash", "call-rel", {
+			command: "npm test",
+			cwd: "../other-repo",
+		});
+		tracker.onToolResult("bash", false, undefined, "call-rel");
+		expect(latch.latched).toBe(true);
+
+		tracker.onToolExecutionStart("bash", "call-cd", {
+			command: "cd ../other-repo && npm test",
+		});
+		// No details.cwd — start snap must retain the leading-cd target.
+		tracker.onToolResult("bash", false, undefined, "call-cd");
+		expect(latch.latched).toBe(true);
+
+		tracker.onToolExecutionStart("bash", "call-in", {
+			command: "bun test test/foo.test.ts",
+			cwd: "packages/coding-agent",
+		});
+		tracker.onToolResult("bash", false, { cwd: "/repo/packages/coding-agent" }, "call-in");
+		expect(latch.latched).toBe(false);
+	});
+
+	it("does not clear on lsp diagnostics that report success:false (no server coverage)", async () => {
+		const latch = new UnverifiedMergeLatch();
+		latch.mark();
+		const ctx = host(latch);
+		const tracker = new TodoTracker(ctx.host);
+		tracker.onToolExecutionStart("lsp", "call-none");
+		tracker.onToolResult(
+			"lsp",
+			false,
+			{
+				action: "diagnostics",
+				success: false,
+				diagnosticErrorCount: 0,
+				failedServerCount: 1,
+			},
+			"call-none",
+		);
+		expect(latch.latched).toBe(true);
+	});
+
 	it("does not clear the latch on a background bash still running", async () => {
 		const latch = new UnverifiedMergeLatch();
 		latch.mark();
@@ -218,12 +266,48 @@ describe("unverified isolated merge latch", () => {
 		latch.mark();
 		const ctx = host(latch);
 		const tracker = new TodoTracker(ctx.host);
-		tracker.onToolExecutionStart("lsp", "call-lsp");
+		tracker.onToolExecutionStart("lsp", "call-lsp", { action: "diagnostics", file: "src/foo.ts" });
 		tracker.onToolResult(
 			"lsp",
 			false,
 			{ action: "diagnostics", success: true, diagnosticErrorCount: 0, failedServerCount: 0 },
 			"call-lsp",
+		);
+		expect(latch.latched).toBe(false);
+	});
+
+	it("does not clear the latch on lsp diagnostics outside the merged tree", async () => {
+		const latch = new UnverifiedMergeLatch();
+		latch.mark();
+		const ctx = host(latch, { cwd: "/repo" });
+		const tracker = new TodoTracker(ctx.host);
+		tracker.onToolExecutionStart("lsp", "call-out", { action: "diagnostics", file: "/tmp/clean.ts" });
+		tracker.onToolResult(
+			"lsp",
+			false,
+			{
+				action: "diagnostics",
+				success: true,
+				diagnosticErrorCount: 0,
+				failedServerCount: 0,
+				request: { action: "diagnostics", file: "/tmp/clean.ts" },
+			},
+			"call-out",
+		);
+		expect(latch.latched).toBe(true);
+	});
+
+	it("clears the latch on workspace-wide lsp diagnostics", async () => {
+		const latch = new UnverifiedMergeLatch();
+		latch.mark();
+		const ctx = host(latch);
+		const tracker = new TodoTracker(ctx.host);
+		tracker.onToolExecutionStart("lsp", "call-ws", { action: "diagnostics", file: "*" });
+		tracker.onToolResult(
+			"lsp",
+			false,
+			{ action: "diagnostics", success: true, diagnosticErrorCount: 0, failedServerCount: 0 },
+			"call-ws",
 		);
 		expect(latch.latched).toBe(false);
 	});
@@ -348,6 +432,19 @@ describe("unverified isolated merge latch", () => {
 		expect(await tracker.checkCompletion(textOnlyStop())).toBe(true);
 		expect(ctx.continuations.count).toBe(1);
 		expect(JSON.stringify(ctx.messages)).toContain(MERGED_UNVERIFIED_MARKER);
+	});
+
+	it("keeps the merge gate armed when the assistant ends with a user-facing question", async () => {
+		const latch = new UnverifiedMergeLatch();
+		latch.mark();
+		const ctx = host(latch);
+		const tracker = new TodoTracker(ctx.host);
+		tracker.setPhases([]);
+
+		expect(await tracker.checkCompletion(textOnlyStop("Should I run the tests?"))).toBe(true);
+		expect(ctx.continuations.count).toBe(1);
+		expect(JSON.stringify(ctx.messages)).toContain(MERGED_UNVERIFIED_MARKER);
+		expect(latch.latched).toBe(true);
 	});
 
 	it("session-boundary clear drops the latch and pending verify snapshots", async () => {

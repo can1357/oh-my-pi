@@ -331,11 +331,12 @@ export class TodoCommandController {
 
 	#mutateStatus(rest: string, target: "completed" | "abandoned"): void {
 		const op = target === "completed" ? "done" : "drop";
+		const dropOpts = op === "drop" ? { userDrop: true as const } : undefined;
 		const current = this.#currentPhases();
 		const trimmed = rest.trim();
 		if (!trimmed) {
 			// no-arg: apply to all
-			const { phases, errors } = applyOpsToPhases(current, [{ op }]);
+			const { phases, errors } = applyOpsToPhases(current, [{ op }], dropOpts);
 			if (errors.length > 0) {
 				this.ctx.showError(errors.join("; "));
 				return;
@@ -347,7 +348,7 @@ export class TodoCommandController {
 
 		const taskHit = findTaskFuzzy(current, trimmed);
 		if (taskHit) {
-			const { phases, errors } = applyOpsToPhases(current, [{ op, task: taskHit.task.content }]);
+			const { phases, errors } = applyOpsToPhases(current, [{ op, task: taskHit.task.content }], dropOpts);
 			if (errors.length > 0) {
 				this.ctx.showError(errors.join("; "));
 				return;
@@ -359,7 +360,7 @@ export class TodoCommandController {
 
 		const phaseHit = findPhaseFuzzy(current, trimmed);
 		if (phaseHit) {
-			const { phases, errors } = applyOpsToPhases(current, [{ op, phase: phaseHit.name }]);
+			const { phases, errors } = applyOpsToPhases(current, [{ op, phase: phaseHit.name }], dropOpts);
 			if (errors.length > 0) {
 				this.ctx.showError(errors.join("; "));
 				return;

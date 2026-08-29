@@ -210,7 +210,8 @@ async function handleTodoMutationCommand(
 			await runtime.output("Cleared all todos.");
 			return commandConsumed();
 		}
-		const { phases } = applyOpsToPhases(current, [{ op: verb }]);
+		const dropOpts = verb === "drop" ? { userDrop: true as const } : undefined;
+		const { phases } = applyOpsToPhases(current, [{ op: verb }], dropOpts);
 		commitTodos(runtime, phases);
 		await runtime.output(verb === "done" ? "Marked all tasks completed." : "Marked all tasks abandoned.");
 		return commandConsumed();
@@ -218,7 +219,8 @@ async function handleTodoMutationCommand(
 
 	const taskHit = findTaskFuzzy(current, trimmedArg);
 	if (taskHit) {
-		const { phases } = applyOpsToPhases(current, [{ op: verb, task: taskHit.task.content }]);
+		const dropOpts = verb === "drop" ? { userDrop: true as const } : undefined;
+		const { phases } = applyOpsToPhases(current, [{ op: verb, task: taskHit.task.content }], dropOpts);
 		commitTodos(runtime, phases);
 		const label = verb === "done" ? "Marked completed" : verb === "drop" ? "Marked abandoned" : "Removed";
 		await runtime.output(`${label}: ${taskHit.task.content}`);
@@ -227,7 +229,8 @@ async function handleTodoMutationCommand(
 
 	const phaseHit = findPhaseFuzzy(current, trimmedArg);
 	if (phaseHit) {
-		const { phases } = applyOpsToPhases(current, [{ op: verb, phase: phaseHit.name }]);
+		const dropOpts = verb === "drop" ? { userDrop: true as const } : undefined;
+		const { phases } = applyOpsToPhases(current, [{ op: verb, phase: phaseHit.name }], dropOpts);
 		commitTodos(runtime, phases);
 		const message =
 			verb === "done"

@@ -52,6 +52,10 @@
 - The merge settle gate is skipped when no parent verify tools (`bash`/`eval`/`lsp`) are active.
 - Nested-only branch merges report `hadAnyChanges: false` until nested patches are actually applied.
 - Parent bash verify outside the session/repo tree (e.g. `cwd: /tmp`) no longer clears the unverified-merge latch. Model-abandoned todos stay incomplete for settle (user `droppedBy` cancels), so this gate does not revert the abandoned≠done contract.
+- Clean `lsp` diagnostics on a file outside the session/repo tree (e.g. `/tmp/clean.ts`) no longer clear the unverified-merge latch; workspace-wide `*` and in-tree targets still can.
+- Assistant questions or response cues no longer bypass an armed merge latch — settle still requires successful parent verify.
+- Parent bash verify also rejects relative escapes (`cwd: ../other-repo`) and leading `cd … &&` targets outside the merged tree when result details omit cwd.
+- `/todo drop` (TUI and ACP) stamps `droppedBy: "user"` so settle honors explicit user cancels; model `todo` drop ops remain unstamped.
 
 ## [18.0.10] - 2026-08-28
 

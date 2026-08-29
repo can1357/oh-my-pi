@@ -490,7 +490,12 @@ function removeTasks(phases: TodoPhase[], entry: TodoOpEntryValue, errors: strin
 	return phases;
 }
 
-function applyEntry(phases: TodoPhase[], entry: TodoOpEntryValue, errors: string[]): TodoPhase[] {
+function applyEntry(
+	phases: TodoPhase[],
+	entry: TodoOpEntryValue,
+	errors: string[],
+	options?: { userDrop?: boolean },
+): TodoPhase[] {
 	switch (entry.op) {
 		case "init":
 			return initPhases(entry, errors);
@@ -516,6 +521,9 @@ function applyEntry(phases: TodoPhase[], entry: TodoOpEntryValue, errors: string
 		case "drop": {
 			for (const task of getTaskTargets(phases, entry, errors)) {
 				task.status = "abandoned";
+				// Slash-command `/todo drop` stamps user provenance so settle treats
+				// the cancel as complete; model `todo` drop ops leave it unset.
+				if (options?.userDrop) task.droppedBy = "user";
 			}
 			return phases;
 		}
@@ -613,11 +621,12 @@ function applyParams(phases: TodoPhase[], params: TodoOpEntryValue): { phases: T
 export function applyOpsToPhases(
 	currentPhases: TodoPhase[],
 	ops: TodoOpEntryValue[],
+	options?: { userDrop?: boolean },
 ): { phases: TodoPhase[]; errors: string[] } {
 	const errors: string[] = [];
 	let next = clonePhases(currentPhases);
 	for (const op of ops) {
-		next = applyEntry(next, op, errors);
+		next = applyEntry(next, op, errors, options);
 	}
 	normalizeInProgressTask(next);
 	return { phases: next, errors };
