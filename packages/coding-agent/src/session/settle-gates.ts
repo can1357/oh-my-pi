@@ -20,34 +20,68 @@ export function isolatedApplyShouldLatch(args: {
 	return args.isolated && args.applyChanges && args.hadAnyChanges === true && args.exitCode === 0;
 }
 
+const TAUTOLOGICAL_BASH_COMMANDS = new Set([
+	"pwd",
+	"ls",
+	"echo",
+	"true",
+	"date",
+	"whoami",
+	"hostname",
+	"uname",
+	"id",
+	"printenv",
+	"env",
+	":",
+]);
+
+/** `ls` / `pwd` / `echo ok` are not parent acceptance of merged work. */
+export function isTautologicalParentVerifyCommand(command: string): boolean {
+	const trimmed = command.trim();
+	if (trimmed.length === 0) return true;
+	const segments = trimmed
+		.split(/(?:&&|\|\||;|\n)+/)
+		.map(segment => segment.trim())
+		.filter(segment => segment.length > 0 && !segment.startsWith("#"));
+	if (segments.length === 0) return true;
+	return segments.every(segment => {
+		const tokens = segment.replace(/^sudo\s+/, "").split(/\s+/);
+		const invoked = tokens[0] ?? "";
+		const base = invoked.split("/").pop() ?? invoked;
+		return TAUTOLOGICAL_BASH_COMMANDS.has(base);
+	});
+}
+
 /**
- * A single pending unverified merge — the parent re-runs acceptance once.
+ * Pending unverified isolated merges. Each `mark()` adds one; a matching
+ * parent verify decrements one. One bash cannot clear two overlapping merges.
  *
  * Generation increments on each `mark()` so a verification tool that started
  * before a merge can finish afterward without clearing a latch it never saw.
  */
 export class UnverifiedMergeLatch {
-	#latched = false;
+	#pending = 0;
 	#generation = 0;
 
 	mark(): void {
 		this.#generation++;
-		this.#latched = true;
+		this.#pending++;
 	}
 
 	clear(): void {
-		this.#latched = false;
+		this.#pending = 0;
 	}
 
-	/** Clears only when the latch generation still matches what the verifier saw at start. */
+	/** Decrements one pending merge when the verifier started at the current generation. */
 	clearIfGeneration(generationAtStart: number): void {
-		if (this.#latched && this.#generation === generationAtStart) {
-			this.#latched = false;
+		if (this.#pending === 0) return;
+		if (generationAtStart > 0 && generationAtStart === this.#generation) {
+			this.#pending--;
 		}
 	}
 
 	get latched(): boolean {
-		return this.#latched;
+		return this.#pending > 0;
 	}
 
 	get generation(): number {

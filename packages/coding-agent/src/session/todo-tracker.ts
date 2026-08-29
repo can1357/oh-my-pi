@@ -10,7 +10,7 @@ import { getLatestTodoPhasesFromEntries, isTodoPhase, type TodoItem, type TodoPh
 import { buildNamedToolChoice } from "../utils/tool-choice";
 import type { AgentSessionEvent } from "./agent-session-events";
 import type { SessionManager } from "./session-manager";
-import { MERGED_UNVERIFIED_MARKER } from "./settle-gates";
+import { isTautologicalParentVerifyCommand, MERGED_UNVERIFIED_MARKER } from "./settle-gates";
 
 const PARENT_VERIFY_TOOLS: Record<string, true> = {
 	bash: true,
@@ -79,8 +79,8 @@ export class TodoTracker {
 	#reminderAwaitingProgress = false;
 	#mutationsSinceLastTouch = 0;
 	#midRunNudgeCount = 0;
-	/** Merge generation observed when a parent-verify tool started, keyed by toolCallId. */
-	readonly #verifyStartGeneration = new Map<string, number>();
+	/** Merge generation (and bash command) observed when a parent-verify tool started. */
+	readonly #verifyStart = new Map<string, { generation: number; command?: string }>();
 
 	constructor(host: TodoTrackerHost) {
 		this.#host = host;
@@ -115,9 +115,14 @@ export class TodoTracker {
 	}
 
 	/** Snapshots the merge generation when a parent-verify tool begins executing. */
-	onToolExecutionStart(toolName: string, toolCallId: string): void {
+	onToolExecutionStart(toolName: string, toolCallId: string, args?: unknown): void {
 		if (!PARENT_VERIFY_TOOLS[toolName] || !toolCallId) return;
-		this.#verifyStartGeneration.set(toolCallId, this.#host.unverifiedMergeGeneration?.() ?? 0);
+		const command =
+			toolName === "bash" && isRecord(args) && typeof args.command === "string" ? args.command : undefined;
+		this.#verifyStart.set(toolCallId, {
+			generation: this.#host.unverifiedMergeGeneration?.() ?? 0,
+			command,
+		});
 	}
 
 	/** Records a completed tool result before asynchronous event processing begins. */
@@ -132,14 +137,13 @@ export class TodoTracker {
 		} else if (!isError && MUTATING_TOOLS[toolName]) {
 			this.#mutationsSinceLastTouch++;
 		}
-		if (PARENT_VERIFY_TOOLS[toolName] && this.#isSuccessfulParentVerify(toolName, isError, details)) {
+		const start = toolCallId ? this.#verifyStart.get(toolCallId) : undefined;
+		if (PARENT_VERIFY_TOOLS[toolName] && this.#isSuccessfulParentVerify(toolName, isError, details, start?.command)) {
 			// Prefer the generation snapped at tool start. Missing start (tests /
 			// missed event) falls back to the current generation so a post-start
 			// verify still clears, while a start-before-merge snap of 0 never clears.
-			const generationAtStart = toolCallId
-				? (this.#verifyStartGeneration.get(toolCallId) ?? 0)
-				: (this.#host.unverifiedMergeGeneration?.() ?? 0);
-			if (toolCallId) this.#verifyStartGeneration.delete(toolCallId);
+			const generationAtStart = start?.generation ?? (toolCallId ? 0 : (this.#host.unverifiedMergeGeneration?.() ?? 0));
+			if (toolCallId) this.#verifyStart.delete(toolCallId);
 			if (generationAtStart > 0) {
 				this.#host.clearUnverifiedMergeIfGeneration?.(generationAtStart);
 			}
@@ -152,13 +156,13 @@ export class TodoTracker {
 			const asyncState = asyncMeta ? stringProperty(asyncMeta, "state") : undefined;
 			const jobId = asyncMeta ? stringProperty(asyncMeta, "jobId") : undefined;
 			if (asyncState === "running" && jobId) {
-				const generationAtStart = this.#verifyStartGeneration.get(toolCallId);
-				this.#verifyStartGeneration.delete(toolCallId);
-				if (generationAtStart !== undefined) {
-					this.#verifyStartGeneration.set(jobId, generationAtStart);
+				const snapped = this.#verifyStart.get(toolCallId);
+				this.#verifyStart.delete(toolCallId);
+				if (snapped !== undefined) {
+					this.#verifyStart.set(jobId, snapped);
 				}
 			} else {
-				this.#verifyStartGeneration.delete(toolCallId);
+				this.#verifyStart.delete(toolCallId);
 			}
 		}
 		this.#reminderAwaitingProgress = false;
@@ -173,11 +177,14 @@ export class TodoTracker {
 		jobType: string | undefined,
 		status: "running" | "completed" | "failed" | "cancelled" | undefined,
 	): void {
-		const generationAtStart = this.#verifyStartGeneration.get(jobId);
-		this.#verifyStartGeneration.delete(jobId);
-		if (generationAtStart === undefined || generationAtStart <= 0) return;
+		const start = this.#verifyStart.get(jobId);
+		this.#verifyStart.delete(jobId);
+		if (start === undefined || start.generation <= 0) return;
+		if (jobType === "bash" && start.command !== undefined && isTautologicalParentVerifyCommand(start.command)) {
+			return;
+		}
 		if ((jobType === "bash" || jobType === "eval") && status === "completed") {
-			this.#host.clearUnverifiedMergeIfGeneration?.(generationAtStart);
+			this.#host.clearUnverifiedMergeIfGeneration?.(start.generation);
 		}
 	}
 
@@ -185,13 +192,21 @@ export class TodoTracker {
 		toolName: string,
 		isError: boolean,
 		details: Record<string, unknown> | undefined,
+		command?: string,
 	): boolean {
 		if (isError) return false;
 		// Background bash/eval: the initial toolResult is not a completed check.
 		const asyncState = isRecord(details?.async) ? stringProperty(details.async, "state") : undefined;
 		if (asyncState === "running") return false;
-		// LSP reports failure via details.success without setting top-level isError.
-		if (toolName === "lsp") return details?.success === true;
+		if (toolName === "bash" && command !== undefined && isTautologicalParentVerifyCommand(command)) {
+			return false;
+		}
+		if (toolName === "lsp") {
+			const action = typeof details?.action === "string" ? details.action : undefined;
+			if (action !== "diagnostics") return false;
+			if (details?.success !== true) return false;
+			return details.diagnosticErrorCount === 0;
+		}
 		return true;
 	}
 

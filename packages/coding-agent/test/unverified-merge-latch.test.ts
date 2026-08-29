@@ -153,13 +153,63 @@ describe("unverified isolated merge latch", () => {
 		expect(latch.latched).toBe(true);
 	});
 
-	it("clears the latch on lsp success:true", async () => {
+	it("clears the latch on clean lsp diagnostics", async () => {
 		const latch = new UnverifiedMergeLatch();
 		latch.mark();
 		const ctx = host(latch);
 		const tracker = new TodoTracker(ctx.host);
 		tracker.onToolExecutionStart("lsp", "call-lsp");
-		tracker.onToolResult("lsp", false, { success: true }, "call-lsp");
+		tracker.onToolResult(
+			"lsp",
+			false,
+			{ action: "diagnostics", success: true, diagnosticErrorCount: 0 },
+			"call-lsp",
+		);
+		expect(latch.latched).toBe(false);
+	});
+
+	it("does not clear the latch on lsp hover or error diagnostics", async () => {
+		const latch = new UnverifiedMergeLatch();
+		latch.mark();
+		const ctx = host(latch);
+		const tracker = new TodoTracker(ctx.host);
+		tracker.onToolExecutionStart("lsp", "call-hover");
+		tracker.onToolResult("lsp", false, { action: "hover", success: true }, "call-hover");
+		expect(latch.latched).toBe(true);
+		tracker.onToolExecutionStart("lsp", "call-diag");
+		tracker.onToolResult(
+			"lsp",
+			false,
+			{ action: "diagnostics", success: true, diagnosticErrorCount: 2 },
+			"call-diag",
+		);
+		expect(latch.latched).toBe(true);
+	});
+
+	it("does not clear the latch on tautological bash", async () => {
+		const latch = new UnverifiedMergeLatch();
+		latch.mark();
+		const ctx = host(latch);
+		const tracker = new TodoTracker(ctx.host);
+		tracker.onToolExecutionStart("bash", "call-pwd", { command: "pwd" });
+		tracker.onToolResult("bash", false, undefined, "call-pwd");
+		expect(latch.latched).toBe(true);
+		tracker.onToolExecutionStart("bash", "call-test", { command: "bun test test/foo.test.ts" });
+		tracker.onToolResult("bash", false, undefined, "call-test");
+		expect(latch.latched).toBe(false);
+	});
+
+	it("one parent bash does not clear two overlapping merges", async () => {
+		const latch = new UnverifiedMergeLatch();
+		latch.mark();
+		latch.mark();
+		const ctx = host(latch);
+		const tracker = new TodoTracker(ctx.host);
+		tracker.onToolExecutionStart("bash", "call-1", { command: "bun test test/foo.test.ts" });
+		tracker.onToolResult("bash", false, undefined, "call-1");
+		expect(latch.latched).toBe(true);
+		tracker.onToolExecutionStart("bash", "call-2", { command: "bun test test/foo.test.ts" });
+		tracker.onToolResult("bash", false, undefined, "call-2");
 		expect(latch.latched).toBe(false);
 	});
 

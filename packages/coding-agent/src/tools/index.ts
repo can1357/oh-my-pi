@@ -273,7 +273,7 @@ export interface ToolSession {
 	getMnemopiSessionState?: () => MnemopiSessionState | undefined;
 	/** Agent identity used for IRC routing. Returns the registry id (e.g. "Main", "AuthLoader"). */
 	getAgentId?: () => string | null;
-	/** Parent session: isolated apply succeeded; child yield is not evidence. */
+	/** Parent session: isolated apply succeeded; child yield is not evidence. Required on the live agent session; omitted sessions skip the latch. */
 	noteUnverifiedMerge?: () => void;
 	/**
 	 * Observe a settled async job independently of automatic delivery.

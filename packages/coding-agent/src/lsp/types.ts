@@ -28,6 +28,8 @@ export interface LspToolDetails {
 	action: string;
 	success: boolean;
 	request?: LspParams;
+	/** Error-severity diagnostics counted for `action: "diagnostics"`. */
+	diagnosticErrorCount?: number;
 }
 
 // =============================================================================

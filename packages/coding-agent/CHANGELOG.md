@@ -44,6 +44,8 @@
 ### Fixed
 
 - Isolated task merges now latch parent verification: child yield is not evidence. A successful parent `bash`/`eval`/`lsp` result clears the latch; stopping with an unverified merge continues the session like incomplete todos. Background bash/eval verification now clears only when the async job completes successfully, not on the initial running ack. Session switches clear the latch so a different cwd/transcript does not inherit it. Hub-consumed job snapshots also clear the latch when verification succeeded. Nested patch apply failures no longer report `applied: true` unless an earlier nested repo actually changed.
+- Dropped todos (`todo drop` / `abandoned`) no longer count as done for the stop-time reminder or the todo summary. Settle stays incomplete until those items are completed, blocked, or the user forces stop. User-issued `/todo drop` is stamped as user-authored and does not schedule a continue reminder. Model `todo rm` abandons in place instead of deleting, so it cannot silence the same gate; user `/todo rm` still deletes.
+- Isolated task merges now latch parent verification: child yield is not evidence. Each successful isolated apply adds one pending latch; one parent check cannot clear two overlapping merges. A successful parent `bash`/`eval` or clean `lsp` diagnostics result decrements the latch; `ls`/`pwd`/`echo` and error-bearing diagnostics do not. Stopping with an unverified merge continues the session like incomplete todos. Background bash/eval verification now clears only when the async job completes successfully, not on the initial running ack.
 
 ## [18.0.10] - 2026-08-28
 

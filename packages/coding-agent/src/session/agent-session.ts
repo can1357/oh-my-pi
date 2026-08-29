@@ -350,11 +350,15 @@ import { buildSessionMetadata } from "./session-metadata";
 import { SessionProviderBoundary, type SessionProviderBoundaryHost } from "./session-provider-boundary";
 import { SessionStatsTracker, type SessionStatsTrackerHost } from "./session-stats";
 import { SessionTools, type SessionToolsHost } from "./session-tools";
+import { UnverifiedMergeLatch } from "./settle-gates";
 import type { ShakeMode, ShakeResult } from "./shake-types";
 import { skillPromptTitleInput } from "./skill-title-input";
 import { ToolChoiceQueue } from "./tool-choice-queue";
 import { planTurnPersistence, sameMessageContent, sessionMessagePersistenceKey } from "./turn-persistence";
 import { TurnRecovery, type TurnRecoveryHost } from "./turn-recovery";
+import { LoopGuards, type StreamGuardsHost, StreamingEditGuard } from "./stream-guards";
+import { TodoTracker, type TodoTrackerHost } from "./todo-tracker";
+import { TtsrCoordinator, type TtsrCoordinatorHost } from "./ttsr-coordinator";
 import { YieldQueue } from "./yield-queue";
 
 export * from "./agent-session-events";
@@ -362,11 +366,6 @@ export * from "./agent-session-types";
 export type { AdvisorStats, PerAdvisorStat } from "./session-advisors";
 
 const SESSION_STOP_CONTINUATION_CAP = 8;
-
-import { UnverifiedMergeLatch } from "./settle-gates";
-import { LoopGuards, type StreamGuardsHost, StreamingEditGuard } from "./stream-guards";
-import { TodoTracker, type TodoTrackerHost } from "./todo-tracker";
-import { TtsrCoordinator, type TtsrCoordinatorHost } from "./ttsr-coordinator";
 
 const PLAN_MODE_REMINDER_MAX = 3;
 const POST_PROMPT_DRAIN_TIMEOUT_MS = 5_000;
@@ -2805,7 +2804,7 @@ export class AgentSession {
 
 		if (event.type === "tool_execution_start") {
 			this.#recordToolExecutionStart(event);
-			this.#todo.onToolExecutionStart(event.toolName, event.toolCallId);
+			this.#todo.onToolExecutionStart(event.toolName, event.toolCallId, event.args);
 		}
 
 		if (event.type !== "agent_end") {

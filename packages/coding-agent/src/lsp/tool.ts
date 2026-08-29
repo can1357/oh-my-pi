@@ -167,6 +167,14 @@ function formatRenameStatError(error: unknown): string {
 /**
  * LSP tool for language server protocol operations.
  */
+function countDiagnosticErrors(diagnostics: readonly Diagnostic[]): number {
+	let count = 0;
+	for (const diagnostic of diagnostics) {
+		if (diagnostic.severity === undefined || diagnostic.severity === 1) count++;
+	}
+	return count;
+}
+
 export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Theme> {
 	readonly name = "lsp";
 	readonly approval = (args: unknown): ToolApprovalDecision => {
@@ -310,6 +318,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			const allServerNames = new Set<string>();
 			let totalServerAttempts = 0;
 			let totalServerSuccesses = 0;
+			let diagnosticErrorCount = 0;
 			if (truncatedGlobTargets) {
 				results.push(
 					`${theme.status.warning} Pattern matched more than ${MAX_GLOB_DIAGNOSTIC_TARGETS} files; showing first ${MAX_GLOB_DIAGNOSTIC_TARGETS}. Narrow the glob or use workspace diagnostics.`,
@@ -397,6 +406,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 				}
 
 				sortDiagnostics(uniqueDiagnostics);
+				diagnosticErrorCount += countDiagnosticErrors(uniqueDiagnostics);
 
 				if (!detailed && targets.length === 1) {
 					if (succeededServers === 0) {
@@ -418,7 +428,12 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 								: "OK";
 						return {
 							content: [{ type: "text", text }],
-							details: { action, serverName: Array.from(allServerNames).join(", "), success: true },
+							details: {
+								action,
+								serverName: Array.from(allServerNames).join(", "),
+								success: true,
+								diagnosticErrorCount: 0,
+							},
 						};
 					}
 
@@ -430,7 +445,12 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 					}
 					return {
 						content: [{ type: "text", text: output }],
-						details: { action, serverName: Array.from(allServerNames).join(", "), success: true },
+						details: {
+							action,
+							serverName: Array.from(allServerNames).join(", "),
+							success: true,
+							diagnosticErrorCount: countDiagnosticErrors(uniqueDiagnostics),
+						},
 					};
 				}
 
@@ -461,7 +481,12 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			const allServersFailed = totalServerAttempts > 0 && totalServerSuccesses === 0;
 			return {
 				content: [{ type: "text", text: results.join("\n") }],
-				details: { action, serverName: Array.from(allServerNames).join(", "), success: !allServersFailed },
+				details: {
+					action,
+					serverName: Array.from(allServerNames).join(", "),
+					success: !allServersFailed,
+					diagnosticErrorCount,
+				},
 			};
 		}
 

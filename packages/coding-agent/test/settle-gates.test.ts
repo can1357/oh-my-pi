@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import {
 	annotateUnverifiedMergeSummary,
 	isolatedApplyShouldLatch,
+	isTautologicalParentVerifyCommand,
 	MERGED_UNVERIFIED_MARKER,
 	UnverifiedMergeLatch,
 } from "../src/session/settle-gates";
@@ -59,5 +60,25 @@ describe("UnverifiedMergeLatch", () => {
 		expect(latch.latched).toBe(true);
 		latch.clearIfGeneration(2);
 		expect(latch.latched).toBe(false);
+	});
+
+	it("one matching verify does not clear two overlapping marks", () => {
+		const latch = new UnverifiedMergeLatch();
+		latch.mark();
+		latch.mark();
+		expect(latch.generation).toBe(2);
+		latch.clearIfGeneration(2);
+		expect(latch.latched).toBe(true);
+		latch.clearIfGeneration(2);
+		expect(latch.latched).toBe(false);
+	});
+});
+
+describe("isTautologicalParentVerifyCommand", () => {
+	it("rejects ls/pwd/echo and accepts a real test command", () => {
+		expect(isTautologicalParentVerifyCommand("pwd")).toBe(true);
+		expect(isTautologicalParentVerifyCommand("ls -la")).toBe(true);
+		expect(isTautologicalParentVerifyCommand("echo ok && pwd")).toBe(true);
+		expect(isTautologicalParentVerifyCommand("bun test test/foo.test.ts")).toBe(false);
 	});
 });
