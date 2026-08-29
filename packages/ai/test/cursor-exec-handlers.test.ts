@@ -1614,6 +1614,60 @@ describe("Cursor exec local-work tracking (issue #4593)", () => {
 		expect(mcpBlock?.[kCursorExecResolved]).toBeUndefined();
 	});
 
+	it("synthesizes an MCP ToolCall in passthrough mode without a local mcp handler", async () => {
+		// Auth-gateway passthrough has no execHandlers. mcpArgs can arrive before
+		// toolCallStarted; without a synthesized ToolCall the caller never sees the
+		// custom tool and stopReason never becomes toolUse.
+		const output = cursorAssistantMessage();
+		const stream = new AssistantMessageEventStream();
+		const state = newBlockState();
+		const h2Request = { write: () => true } as unknown as Parameters<typeof handleServerMessage>[5];
+		const serverMsg = create(AgentServerMessageSchema, {
+			message: {
+				case: "execServerMessage",
+				value: create(ExecServerMessageSchema, {
+					id: 1,
+					execId: "exec-mcp-passthrough",
+					message: {
+						case: "mcpArgs",
+						value: create(McpArgsSchema, {
+							name: "mcp__fixture_report",
+							toolName: "mcp__fixture_report",
+							toolCallId: "call-mcp-passthrough",
+							providerIdentifier: "pi-agent",
+						}),
+					},
+				}),
+			},
+		});
+
+		await handleServerMessage(
+			serverMsg,
+			output,
+			stream,
+			state,
+			new Map(),
+			h2Request,
+			undefined,
+			undefined,
+			{ sawTokenDelta: false },
+			[],
+			undefined,
+			true,
+		);
+
+		expect(state.resolvedMcpToolCallIds.has("call-mcp-passthrough")).toBe(true);
+		const mcpBlock = output.content.find(
+			(block): block is ToolCallState => block.type === "toolCall" && block.id === "call-mcp-passthrough",
+		);
+		expect(mcpBlock).toMatchObject({
+			type: "toolCall",
+			id: "call-mcp-passthrough",
+			name: "mcp__fixture_report",
+		});
+		expect(mcpBlock?.[kCursorExecResolved]).toBe(true);
+	});
+
 	it("pairs a result for a synthesized exec block when no handler is installed", async () => {
 		// End-to-end over the real dispatch: synthesis, resolved marking and
 		// pairing must line up. `cursorExecHandlers` is optional (a bare SDK host

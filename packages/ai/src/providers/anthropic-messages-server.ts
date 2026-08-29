@@ -552,7 +552,7 @@ const ZERO_WIRE_USAGE: Record<string, unknown> = {
 export function encodeStream(
 	events: AssistantMessageEventStream,
 	requestedModelId: string,
-	_options?: ParsedRequest["options"],
+	options?: ParsedRequest["options"],
 	control?: AuthGatewayStreamControl,
 ): ReadableStream<Uint8Array> {
 	let pingTimer: NodeJS.Timeout | undefined;
@@ -568,6 +568,15 @@ export function encodeStream(
 		}
 	};
 	let effectiveModelId = requestedModelId;
+	// Cursor auto may start as catalog `auto`, discovered `default`, or a concrete
+	// id with `x-cursor-auto-mode: true`. Defer message_start until routing lands
+	// (or content/done forces emit with whatever id we have).
+	let cursorAutoRoutingResolved = false;
+	const deferStartForCursorAuto = (modelId: string | undefined): boolean => {
+		if (modelId === "auto" || modelId === "default") return true;
+		if (options?.cursorAutoMode === true && !cursorAutoRoutingResolved) return true;
+		return false;
+	};
 	return new ReadableStream<Uint8Array>({
 		async start(controller) {
 			const messageId = newMessageId();
@@ -644,15 +653,20 @@ export function encodeStream(
 					if (cancelled) return;
 					if ("partial" in ev && ev.partial.model && ev.partial.model !== effectiveModelId) {
 						effectiveModelId = ev.partial.model;
+						if (options?.cursorAutoMode === true) cursorAutoRoutingResolved = true;
 						// For Cursor auto mode, message_start may have been deferred until
 						// the routed model is known — emit it now with the real id.
 						ensureStart(ev.partial);
 					}
 					switch (ev.type) {
 						case "start":
-							// Defer message_start while the model is still the auto sentinel
-							// so clients see the routed model, not "auto".
-							if (ev.partial.model === "auto") break;
+							if (ev.partial.model && ev.partial.model !== effectiveModelId) {
+								effectiveModelId = ev.partial.model;
+								if (options?.cursorAutoMode === true) cursorAutoRoutingResolved = true;
+							}
+							// Defer while Cursor auto routing is unresolved so clients see
+							// the routed model, not auto/default/the pre-route placeholder.
+							if (deferStartForCursorAuto(ev.partial.model)) break;
 							ensureStart(ev.partial);
 							break;
 						case "text_start": {
@@ -750,6 +764,8 @@ export function encodeStream(
 						case "done": {
 							for (const idx of [...open.keys()]) closeBlock(idx);
 							emitServerToolBlocksBefore(ev.message, ev.message.content.length);
+							// Auto-mode may have deferred start with no content events.
+							ensureStart(ev.message);
 							controller.enqueue(
 								sseFrame("message_delta", {
 									type: "message_delta",

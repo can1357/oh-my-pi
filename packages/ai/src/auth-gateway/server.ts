@@ -295,9 +295,12 @@ async function refreshGatewayApiKeyAfterAuthError(
 	// token and a sibling credential is used in the meantime. Only fall
 	// through to permanent invalidation when no sibling is available.
 	if (provider === "cursor") {
-		const cooldownMs = $env.CURSOR_GATEWAY_COOLDOWN_MS
-			? Number($env.CURSOR_GATEWAY_COOLDOWN_MS)
-			: CURSOR_GATEWAY_DEFAULT_COOLDOWN_MS;
+		const rawCooldown = $env.CURSOR_GATEWAY_COOLDOWN_MS;
+		const parsedCooldown = rawCooldown !== undefined && rawCooldown !== "" ? Number(rawCooldown) : undefined;
+		const cooldownMs =
+			parsedCooldown !== undefined && Number.isFinite(parsedCooldown) && parsedCooldown >= 0
+				? parsedCooldown
+				: CURSOR_GATEWAY_DEFAULT_COOLDOWN_MS;
 		const { switched, retryAtMs } = await storage.markUsageLimitReached(provider, sessionId, {
 			retryAfterMs: cooldownMs,
 			baseUrl: model.baseUrl,

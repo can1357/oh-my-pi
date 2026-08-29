@@ -773,4 +773,64 @@ describe("anthropic-messages encodeStream", () => {
 		const delta = sse[1]!.data as { delta: { stop_reason: string } };
 		expect(delta.delta.stop_reason).toBe("end_turn");
 	});
+
+	it("defers message_start for Cursor auto until the routed model arrives", async () => {
+		const initial: AssistantMessage = {
+			role: "assistant",
+			content: [],
+			api: "anthropic-messages",
+			provider: "cursor",
+			model: "gpt-5",
+			usage: emptyUsage(),
+			stopReason: "stop",
+			timestamp: 0,
+		};
+		const routed: AssistantMessage = { ...initial, model: "claude-opus-4-7" };
+		const withText: AssistantMessage = {
+			...routed,
+			content: [{ type: "text", text: "hi" }],
+		};
+		const events: AssistantMessageEvent[] = [
+			{ type: "start", partial: initial },
+			{ type: "text_start", contentIndex: 0, partial: withText },
+			{ type: "text_delta", contentIndex: 0, delta: "hi", partial: withText },
+			{ type: "text_end", contentIndex: 0, content: "hi", partial: withText },
+			{ type: "done", reason: "stop", message: withText },
+		];
+		const sse = await collectSse(encodeStream(makeStream(events), "gpt-5", { cursorAutoMode: true }));
+		const start = sse.find(e => e.event === "message_start");
+		expect(start).toBeDefined();
+		const message = (start!.data as { message: { model: string } }).message;
+		expect(message.model).toBe("claude-opus-4-7");
+		const types = sse.map(e => e.event);
+		// Routed model arrives with text_start; message_start must not precede that.
+		expect(types.indexOf("message_start")).toBeLessThan(types.indexOf("content_block_start"));
+		expect(types.indexOf("message_start")).toBeGreaterThanOrEqual(0);
+	});
+
+	it("defers message_start for the discovered default auto sentinel", async () => {
+		const initial: AssistantMessage = {
+			role: "assistant",
+			content: [],
+			api: "anthropic-messages",
+			provider: "cursor",
+			model: "default",
+			usage: emptyUsage(),
+			stopReason: "stop",
+			timestamp: 0,
+		};
+		const routed: AssistantMessage = {
+			...initial,
+			model: "claude-opus-4-7",
+			content: [{ type: "text", text: "ok" }],
+		};
+		const events: AssistantMessageEvent[] = [
+			{ type: "start", partial: initial },
+			{ type: "text_start", contentIndex: 0, partial: routed },
+			{ type: "done", reason: "stop", message: routed },
+		];
+		const sse = await collectSse(encodeStream(makeStream(events), "default"));
+		const start = sse.find(e => e.event === "message_start");
+		expect((start!.data as { message: { model: string } }).message.model).toBe("claude-opus-4-7");
+	});
 });

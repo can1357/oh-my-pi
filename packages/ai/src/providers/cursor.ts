@@ -2044,7 +2044,13 @@ async function handleExecServerMessage(
 				);
 				return;
 			}
-			if (execHandlers?.mcp) {
+			// Synthesize whenever a local MCP handler exists OR passthrough is on.
+			// Passthrough (e.g. auth-gateway) has no execHandlers: mcpArgs can still
+			// arrive before toolCallStarted, and without a ToolCall the caller never
+			// receives the custom tool invocation. Without either path, leave the
+			// streamed announcement unpaired so agent-loop executes it locally.
+			const synthesizeMcp = !!execHandlers?.mcp || !!cursorToolPassthrough;
+			if (synthesizeMcp) {
 				const existingBlock = output.content.find(
 					block => block.type === "toolCall" && block.id === mcpCall.toolCallId,
 				);
@@ -2069,7 +2075,7 @@ async function handleExecServerMessage(
 				toolResult => buildMcpResultFromToolResult(mcpCall, toolResult),
 				_reason => buildMcpToolNotFoundResult(mcpCall),
 				error => buildMcpErrorResult(error),
-				execHandlers?.mcp ? { toolCallId: mcpCall.toolCallId, toolName: mcpCall.toolName } : null,
+				synthesizeMcp ? { toolCallId: mcpCall.toolCallId, toolName: mcpCall.toolName } : null,
 			);
 			sendExecClientMessage(h2Request, execMsg, "mcpResult", execResult);
 			return;
