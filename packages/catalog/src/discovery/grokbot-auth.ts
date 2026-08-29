@@ -191,6 +191,27 @@ export function grokbotClientHeaders(cfg: Pick<GrokbotConfig, "clientVersion" | 
 	};
 }
 
+/**
+ * Case-insensitive header merge: later sources win and keep their casing.
+ * A plain Object.assign would let `authorization` and `Authorization` coexist,
+ * and Bun's Headers constructor then joins both values comma-separated on the wire.
+ */
+export function mergeGrokbotHeaders(...headerSources: (Record<string, string> | undefined)[]): Record<string, string> {
+	const merged: Record<string, string> = {};
+	const keyByLower = new Map<string, string>();
+	for (const headers of headerSources) {
+		if (!headers) continue;
+		for (const [key, value] of Object.entries(headers)) {
+			const lower = key.toLowerCase();
+			const existing = keyByLower.get(lower);
+			if (existing !== undefined && existing !== key) delete merged[existing];
+			keyByLower.set(lower, key);
+			merged[key] = value;
+		}
+	}
+	return merged;
+}
+
 function enhancedObfuscate(bytes: Uint8Array): Uint8Array {
 	let lastByte = 165;
 	for (let i = 0; i < bytes.length; i++) {
@@ -238,11 +259,7 @@ export async function mintGrokbotAccessToken(
 	}
 	const response = await fetchImpl(joinGrokbotBackendUrl(backend, GROKBOT_RENEWAL_PATH), {
 		method: "POST",
-		headers: {
-			...(requestHeaders ?? {}),
-			"content-type": "application/json",
-			...grokbotClientHeaders(cfg),
-		},
+		headers: mergeGrokbotHeaders(requestHeaders, { "content-type": "application/json" }, grokbotClientHeaders(cfg)),
 		body: JSON.stringify({ credential: cfg.renewal }),
 		signal,
 	});

@@ -27,6 +27,7 @@ export {
 	loadGrokbotConfig,
 	loadGrokbotSecretFile,
 	loadGrokbotSecretFileSync,
+	mergeGrokbotHeaders,
 	mintGrokbotAccessToken,
 	resolveGrokbotClientVersion,
 	resolveGrokbotDiscoveryIdentity,

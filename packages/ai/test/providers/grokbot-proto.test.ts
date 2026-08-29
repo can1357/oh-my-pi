@@ -928,4 +928,63 @@ describe("grokbot request headers", () => {
 		expect(captured?.["x-proxy-api-key"]).toBe("proxy-secret");
 		expect(captured?.authorization).toBe("Bearer fake-jwt");
 	});
+
+	test("replaces reserved headers case-insensitively so Authorization is not comma-joined", async () => {
+		spyOn(grokbotAuth, "loadGrokbotConfig").mockResolvedValue({
+			renewal: "renew",
+			machineId: "machine",
+			namespace: "prod",
+			clientVersion: "0.30.0",
+		});
+		spyOn(grokbotAuth, "mintGrokbotAccessToken").mockResolvedValue("fake-jwt");
+
+		let captured: Record<string, string> | undefined;
+		const trailer = frameConnectProto(Buffer.alloc(0), CONNECT_END_STREAM_FLAG);
+		const fetchImpl = (async (_url: string | URL | Request, init?: RequestInit) => {
+			captured = init?.headers as Record<string, string>;
+			return new Response(trailer, {
+				status: 200,
+				headers: { "content-type": "application/connect+proto" },
+			});
+		}) as FetchImpl;
+
+		const casingModel: Model<"grokbot-sand"> = {
+			...model,
+			headers: { Authorization: "proxy", "Content-Type": "application/json" },
+		};
+		await streamGrokBot(casingModel, context, { apiKey: "renew", fetch: fetchImpl }).result();
+		const authKeys = Object.keys(captured ?? {}).filter(k => k.toLowerCase() === "authorization");
+		const typeKeys = Object.keys(captured ?? {}).filter(k => k.toLowerCase() === "content-type");
+		expect(authKeys).toHaveLength(1);
+		expect(typeKeys).toHaveLength(1);
+		expect(captured?.[authKeys[0]!]).toBe("Bearer fake-jwt");
+		expect(captured?.[typeKeys[0]!]).toBe("application/connect+proto");
+	});
+
+	test("treats Connect unauthenticated end-stream as HTTP 401 and clears the token cache", async () => {
+		spyOn(grokbotAuth, "loadGrokbotConfig").mockResolvedValue({
+			renewal: "renew",
+			machineId: "machine",
+			namespace: "prod",
+			clientVersion: "0.30.0",
+		});
+		spyOn(grokbotAuth, "mintGrokbotAccessToken").mockResolvedValue("fake-jwt");
+		const clearSpy = spyOn(grokbotAuth, "clearGrokbotTokenCache").mockImplementation(() => {});
+
+		const trailer = frameConnectProto(
+			Buffer.from(JSON.stringify({ error: { code: "unauthenticated", message: "jwt expired" } })),
+			CONNECT_END_STREAM_FLAG,
+		);
+		const fetchImpl = (async () =>
+			new Response(trailer, {
+				status: 200,
+				headers: { "content-type": "application/connect+proto" },
+			})) as FetchImpl;
+
+		const result = await streamGrokBot(model, context, { apiKey: "renew", fetch: fetchImpl }).result();
+		expect(result.stopReason).toBe("error");
+		expect(result.errorStatus).toBe(401);
+		expect(result.errorMessage).toMatch(/unauthenticated|jwt expired/i);
+		expect(clearSpy).toHaveBeenCalled();
+	});
 });

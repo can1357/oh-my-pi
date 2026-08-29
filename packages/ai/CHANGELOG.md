@@ -9,6 +9,8 @@
 
 ### Fixed
 
+- Grok Bot merges request headers case-insensitively so reserved names like `Authorization` / `Content-Type` are replaced rather than comma-joined.
+- Grok Bot Connect end-stream `unauthenticated` errors clear the JWT cache and surface as HTTP 401 for credential retry.
 - Grok Bot marks every grammar/customFormat tool call (including hashline/sloppy without a renamed wire id) so previews and history replay use raw args.
 - Grok Bot tool-result replay maps grammar tools to their wire name (`customWireName`) so call/result names stay paired.
 - Grok Bot protobuf decoding rejects nested stream-response fields with incorrect wire types instead of coercing them to empty values.

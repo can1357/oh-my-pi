@@ -26,6 +26,7 @@ import {
 	grokbotClientHeaders,
 	joinGrokbotBackendUrl,
 	loadGrokbotConfig,
+	mergeGrokbotHeaders,
 	mintGrokbotAccessToken,
 } from "./grokbot/auth";
 import { resolveGrokbotRequestedModel } from "./grokbot/model-request";
@@ -40,6 +41,7 @@ export {
 	formatGrokbotStatus,
 	GROKBOT_BACKEND,
 	getAccessTokenExpiryMs,
+	mergeGrokbotHeaders,
 	resolveGrokbotClientVersion,
 	stampedVersionBaseOf,
 } from "./grokbot/auth";
@@ -603,10 +605,8 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 
 			// model.headers + options.headers first; provider-owned auth/client
 			// headers win so reverse-proxy keys cannot override sand identity.
-			const headers: Record<string, string> = {
-				...(model.headers ?? {}),
-				...(options?.headers ?? {}),
-				...grokbotClientHeaders(authCfg),
+			// Case-insensitive merge prevents Authorization/authorization duplicates.
+			const headers = mergeGrokbotHeaders(model.headers, options?.headers, grokbotClientHeaders(authCfg), {
 				authorization: `Bearer ${accessToken}`,
 				"x-cursor-checksum": createGrokbotChecksum(authCfg.machineId),
 				"x-ghost-mode": "true",
@@ -614,7 +614,7 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 				"content-type": "application/connect+proto",
 				accept: "application/connect+proto",
 				"connect-protocol-version": "1",
-			};
+			});
 
 			logger.debug("grokbot: stream request", {
 				modelId: reqModel.modelId,
@@ -842,9 +842,16 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 							}
 						}
 						const errObj = parsedEnd.error as Record<string, unknown> | undefined;
+						const code = errObj ? String(errObj.code ?? "").toLowerCase() : "";
 						const message =
 							(errObj && (errObj.message || errObj.code)) || parsedEnd.message || jsonText.slice(0, 200);
 						if (errObj) {
+							// Connect often reports revoked JWTs as end-stream
+							// `unauthenticated` on HTTP 200; treat like HTTP 401.
+							if (code === "unauthenticated") {
+								clearGrokbotTokenCache();
+								throw new Error(`Grok Bot connect error: ${String(message)} (HTTP 401)`);
+							}
 							throw new Error(`Grok Bot connect error: ${String(message)}`);
 						}
 						continue;

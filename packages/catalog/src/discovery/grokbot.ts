@@ -14,6 +14,7 @@ import {
 	createGrokbotChecksum,
 	grokbotClientHeaders,
 	loadGrokbotConfig,
+	mergeGrokbotHeaders,
 	mintGrokbotAccessToken,
 } from "./grokbot-auth";
 import {
@@ -68,15 +69,13 @@ export async function fetchGrokbotAvailableModels(
 		const accessToken = await mintGrokbotAccessToken(cfg, fetchImpl, resolvedBaseUrl, signal, options.headers);
 		const response = await fetchImpl(requestUrl, {
 			method: "POST",
-			headers: {
-				...(options.headers ?? {}),
-				...grokbotClientHeaders(cfg),
+			headers: mergeGrokbotHeaders(options.headers, grokbotClientHeaders(cfg), {
 				authorization: `Bearer ${accessToken}`,
 				"x-cursor-checksum": createGrokbotChecksum(cfg.machineId),
 				"x-ghost-mode": "true",
 				"content-type": "application/json",
 				accept: "application/json",
-			},
+			}),
 			body: encodeGrokbotAvailableModelsRequest({
 				useModelParameters: true,
 				includeLongContextModels: true,

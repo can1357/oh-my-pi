@@ -217,6 +217,28 @@ describe("grokbot backend URL join", () => {
 		expect(captured?.["x-cursor-client-type"]).toBe("sand");
 		expect(captured?.["x-sand-box-namespace"]).toBe("prod");
 	});
+
+	test("mintGrokbotAccessToken replaces Content-Type case-insensitively", async () => {
+		let captured: Record<string, string> | undefined;
+		const fetchImpl: typeof fetch = async (_url, init) => {
+			captured = init?.headers as Record<string, string>;
+			return new Response(JSON.stringify({ accessToken: "tok", expiresAtMs: Date.now() + 600_000 }), {
+				status: 200,
+				headers: { "content-type": "application/json" },
+			});
+		};
+		await mintGrokbotAccessToken(
+			{ renewal: "renewer", machineId: "machine", namespace: "prod", clientVersion: "0.30.0" },
+			fetchImpl,
+			"https://proxy.example/grokbot",
+			undefined,
+			{ "Content-Type": "text/plain", "X-Proxy-Api-Key": "proxy-secret" },
+		);
+		const typeKeys = Object.keys(captured ?? {}).filter(k => k.toLowerCase() === "content-type");
+		expect(typeKeys).toHaveLength(1);
+		expect(captured?.[typeKeys[0]!]).toBe("application/json");
+		expect(captured?.["X-Proxy-Api-Key"] ?? captured?.["x-proxy-api-key"]).toBe("proxy-secret");
+	});
 });
 
 describe("grokbot AvailableModels headers", () => {
