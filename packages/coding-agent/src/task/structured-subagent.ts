@@ -640,10 +640,11 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 					mergedBranchForNestedPatches: outcome.mergedBranchForNestedPatches,
 					commitMessage: makeIsolationCommitMessage(request.session)(),
 				});
-				mergeSummary += nested.summary;
+				const nestedSummary = nested.summary ?? "";
+				mergeSummary += nestedSummary;
 				if (nested.applied) hadAnyChanges = true;
 				requiresRecoveryArtifacts ||=
-					nested.summary.includes("<system-notification>") && (result.nestedPatches?.length ?? 0) > 0;
+					nestedSummary.includes("<system-notification>") && (result.nestedPatches?.length ?? 0) > 0;
 			}
 		} else if (policy.isIsolated && isolationContext && !policy.applyChanges) {
 			if (result.branchName)
