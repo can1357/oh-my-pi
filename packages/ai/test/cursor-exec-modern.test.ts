@@ -16,6 +16,7 @@ import {
 	AgentClientMessageSchema,
 	AgentServerMessageSchema,
 	AgentStoreConflictArgsSchema,
+	BackgroundShellSpawnArgsSchema,
 	CanvasDiagnosticsArgsSchema,
 	ComputerUseArgsSchema,
 	ConnectScmArgsSchema,
@@ -40,6 +41,7 @@ import {
 	ForceBackgroundSubagentStatus,
 	GetDiffRequestSchema,
 	GrepArgsSchema,
+	BackgroundShellSpawnArgsSchema,
 	ListMcpResourcesExecArgsSchema,
 	McpAllowlistPrecheckArgsSchema,
 	McpArgsSchema,
@@ -59,6 +61,7 @@ import {
 	ReadMcpResourceExecArgsSchema,
 	RecordScreenArgsSchema,
 	RequestContextArgsSchema,
+	RoutedModelUpdateSchema,
 	ShellAllowlistPrecheckArgsSchema,
 	ShellArgsSchema,
 	SmartModeClassifierArgsSchema,
@@ -2107,6 +2110,93 @@ describe("Cursor MCP frame: approval-only probes", () => {
 		const answer = soleResult(frames);
 		if (answer.case !== "mcpResult") throw new Error(`got ${answer.case}`);
 		expect(answer.value.result.case).toBe("rejected");
+	});
+});
+
+describe("Cursor InteractionUpdate.routedModel", () => {
+	it("consumes InteractionUpdate.routedModel into output.model", () => {
+		const output = cursorAssistantMessage();
+		output.model = "auto";
+		processInteractionUpdate(
+			{
+				message: {
+					case: "routedModel",
+					value: create(RoutedModelUpdateSchema, {
+						modelId: "cursor-grok-4.5-high",
+						displayName: "Grok 4.5 High",
+					}),
+				},
+			},
+			output,
+			new AssistantMessageEventStream(),
+			newBlockState(),
+			{ sawTokenDelta: false },
+		);
+		expect(output.model).toBe("cursor-grok-4.5-high");
+	});
+
+	it("ignores routedModel updates without a modelId", () => {
+		const output = cursorAssistantMessage();
+		output.model = "auto";
+		processInteractionUpdate(
+			{
+				message: {
+					case: "routedModel",
+					value: create(RoutedModelUpdateSchema, { modelId: "  ", displayName: "x" }),
+				},
+			},
+			output,
+			new AssistantMessageEventStream(),
+			newBlockState(),
+			{ sawTokenDelta: false },
+		);
+		expect(output.model).toBe("auto");
+	});
+});
+
+describe("Cursor backgroundShellSpawnArgs passthrough", () => {
+	it("synthesizes a bash toolCall and rejects the exec for the caller", async () => {
+		const { frames, output } = await dispatchExec(
+			buildExecMessage({
+				case: "backgroundShellSpawnArgs",
+				value: create(BackgroundShellSpawnArgsSchema, {
+					command: "sleep 30",
+					workingDirectory: "/tmp",
+					toolCallId: "bg1",
+				}),
+			}),
+			{ cursorToolPassthrough: true },
+		);
+		const answer = soleResult(frames);
+		if (answer.case !== "backgroundShellSpawnResult") throw new Error(`got ${answer.case}`);
+		expect(answer.value.result.case).toBe("rejected");
+		expect(String(answer.value.result.value.reason)).toContain("passthrough");
+		const calls = output.content.filter(block => block.type === "toolCall");
+		expect(calls).toHaveLength(1);
+		expect(calls[0]).toMatchObject({
+			type: "toolCall",
+			id: "bg1",
+			name: "bash",
+			arguments: { command: "sleep 30", cwd: "/tmp" },
+		});
+	});
+
+	it("keeps the local Not implemented rejection without passthrough", async () => {
+		const { frames, output } = await dispatchExec(
+			buildExecMessage({
+				case: "backgroundShellSpawnArgs",
+				value: create(BackgroundShellSpawnArgsSchema, {
+					command: "sleep 30",
+					workingDirectory: "/tmp",
+					toolCallId: "bg2",
+				}),
+			}),
+		);
+		const answer = soleResult(frames);
+		if (answer.case !== "backgroundShellSpawnResult") throw new Error(`got ${answer.case}`);
+		expect(answer.value.result.case).toBe("rejected");
+		expect(answer.value.result.value.reason).toBe("Not implemented");
+		expect(output.content.filter(block => block.type === "toolCall")).toHaveLength(0);
 	});
 });
 

@@ -2368,6 +2368,7 @@ function mapOptionsForApi<TApi extends Api>(
 				...base,
 				execHandlers,
 				onToolResult,
+				toolChoice: options?.toolChoice,
 				cursorToolPassthrough: options?.cursorToolPassthrough,
 				cursorExcludeTools: options?.cursorExcludeTools,
 				cursorLocalCliMode: options?.cursorLocalCliMode,

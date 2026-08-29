@@ -255,6 +255,9 @@
 
 - Fixed `omp usage invalidate` to discard stale OAuth and API-key usage snapshots, then force a cache-bypassing, per-provider serialized refresh with a broker request budget sized for the full unfiltered account batch, so upgraded subscriptions do not silently retain pre-change quota data.
 - Fixed quota reporting and Cookie capture guidance for China (Beijing) Alibaba Token Plan credentials ([#8509](https://github.com/can1357/oh-my-pi/issues/8509)).
+- Cursor tool passthrough sends `x-cursor-agent-allowed-tools: __none__` when `toolChoice` is `"none"`, even if tools are declared.
+- Cursor consumes `InteractionUpdate.routedModel` into `output.model` when the backend advertises routed-model updates.
+- Cursor tool passthrough synthesizes and defers `backgroundShellSpawnArgs` the same way as other bash exec variants.
 - Cursor `streamSimple` / pi-native capability and session options (`cursorClientSupportsInlineImages`, routed-model / prompt-context RPC flags, `cursorRunId`, `cursorAgentSessionId`) now populate `AgentRunRequest` protobuf fields instead of being dropped before the wire.
 - Unknown Cursor `interaction_query` variants are no longer auto-approved; only the verified unnamed WebFetch field (9) still gets an `approved {}` fallback.
 - Cursor auto-mode Anthropic SSE now buffers content until the routed model is known, so `message_start` is not permanently stamped with `auto`/`default`/the pre-route placeholder.

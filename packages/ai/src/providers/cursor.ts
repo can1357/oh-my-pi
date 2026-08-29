@@ -797,11 +797,15 @@ function streamCursorWithWireMode(
 			// caller-declared tools (including native names like bash/read/write).
 			// Always send the header: omitting it leaves Cursor's unrestricted native
 			// set enabled (including when tools is empty / text-only passthrough).
+			// toolChoice "none" disables tools even when a catalog is declared.
 			if (options?.cursorToolPassthrough) {
-				const allowedTools = (context.tools ?? [])
-					.map(tool => tool.name)
-					.filter(name => name.length > 0)
-					.join(",");
+				const allowedTools =
+					options.toolChoice === "none"
+						? ""
+						: (context.tools ?? [])
+								.map(tool => tool.name)
+								.filter(name => name.length > 0)
+								.join(",");
 				requestHeaders["x-cursor-agent-allowed-tools"] = allowedTools || "__none__";
 			}
 			const debugSession = isRequestDebugEnabled()
@@ -1955,6 +1959,40 @@ async function handleExecServerMessage(
 		}
 		case "backgroundShellSpawnArgs": {
 			const args = execMsg.message.value;
+			if (cursorToolPassthrough) {
+				// Same bash surface as shellArgs / shellStreamArgs — synthesize for the
+				// external caller and reject the exec so Cursor does not wait on us.
+				if (!args.toolCallId) args.toolCallId = crypto.randomUUID();
+				synthesizeCursorExecToolCall(output, stream, state, args.toolCallId, "bash", {
+					command: args.command,
+					cwd: args.workingDirectory || undefined,
+				});
+				await pairSynthesizedExecResult(
+					state,
+					onToolResult,
+					args.toolCallId,
+					"bash",
+					"Tool deferred to caller (tool passthrough)",
+					true,
+				);
+				sendExecClientMessage(
+					h2Request,
+					execMsg,
+					"backgroundShellSpawnResult",
+					create(BackgroundShellSpawnResultSchema, {
+						result: {
+							case: "rejected",
+							value: create(ShellRejectedSchema, {
+								command: args.command,
+								workingDirectory: args.workingDirectory,
+								reason: "Tool deferred to caller (tool passthrough)",
+								isReadonly: false,
+							}),
+						},
+					}),
+				);
+				return;
+			}
 			const execResult = create(BackgroundShellSpawnResultSchema, {
 				result: {
 					case: "rejected",
@@ -4751,6 +4789,15 @@ export function processInteractionUpdate(
 				{ model: output.model, messageTimestamp: output.timestamp },
 			);
 		}
+	} else if (updateCase === "routedModel") {
+		// Consume InteractionUpdate.routedModel when the backend sends it
+		// (capability advertised via cursorClientSupportsRoutedModelUpdate).
+		// Checkpoint JSON extraction remains the fallback for older servers.
+		const routed = update.message.value;
+		const modelId = typeof routed?.modelId === "string" ? routed.modelId.trim() : "";
+		if (modelId) {
+			output.model = modelId;
+		}
 	} else if (updateCase === "tokenDelta") {
 		const tokenDelta = update.message.value;
 		usageState.sawTokenDelta = true;
@@ -4770,9 +4817,9 @@ function handleConversationCheckpointUpdate(
 	// Extract the routed model from the assistant message JSON in pendingToolCalls.
 	// In auto mode, Cursor's backend routes to a specific model per-turn and
 	// surfaces the actual model name via providerOptions.cursor.modelName in the
-	// assistant message JSON. This is the only place the routed model appears —
-	// the RoutedModelUpdate proto field (InteractionUpdate field 24) is never
-	// sent by the real cursor-agent CLI (confirmed via mitmproxy capture).
+	// assistant message JSON. Prefer InteractionUpdate.routedModel when present
+	// (see processInteractionUpdate); this checkpoint path remains the fallback
+	// for servers that only embed the model in pendingToolCalls JSON.
 	// Gate on the request's auto intent, not output.model: when cursorAutoMode
 	// is enabled on a concrete catalog model, output.model stays that id.
 	for (const entry of checkpoint.pendingToolCalls) {
