@@ -267,7 +267,7 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 								...(trailerError.detail ? { detail: trailerError.detail } : {}),
 								rawTrailer: trailerError.raw,
 								requestBytes: reqBytes.byteLength,
-								compressedBytes: gz.byteLength,
+								frameBytes: frame.byteLength,
 								tools: context.tools?.length ?? 0,
 								messages: context.messages.length,
 								hadOutput: firstTokenTime !== undefined,
