@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Exported shared `TRUNCATE_LENGTHS` and `PREVIEW_LIMITS` display budgets for consumers outside coding-agent (e.g. provider status sanitization).
+
 ## [18.0.10] - 2026-08-28
 
 ### Added

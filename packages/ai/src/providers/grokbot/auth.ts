@@ -6,7 +6,7 @@
  * surface and adds `/grokbot` status formatting.
  */
 import { GROKBOT_BACKEND, grokbotSecretsPath, loadGrokbotConfig } from "@oh-my-pi/pi-catalog/discovery/grokbot-auth";
-import { replaceTabs, truncateToWidth } from "@oh-my-pi/pi-tui";
+import { replaceTabs, TRUNCATE_LENGTHS, truncateToWidth } from "@oh-my-pi/pi-tui";
 import { sanitizeText, shortenPath } from "@oh-my-pi/pi-utils";
 
 export {
@@ -36,9 +36,6 @@ export {
 /** @deprecated Prefer {@link shortenPath} from `@oh-my-pi/pi-utils`. */
 export { shortenPath as shortenGrokbotDisplayPath } from "@oh-my-pi/pi-utils";
 
-/** Max display cells for `/grokbot` status field values (matches TUI title width). */
-const STATUS_VALUE_MAX_WIDTH = 60;
-
 /** Sanitize a status field: strip controls/ANSI, expand tabs, single-line, width-cap. */
 function formatGrokbotStatusValue(value: string): string {
 	const cleaned = replaceTabs(
@@ -46,7 +43,7 @@ function formatGrokbotStatusValue(value: string): string {
 			.replace(/[\r\n]+/g, " ")
 			.trim(),
 	);
-	return truncateToWidth(cleaned, STATUS_VALUE_MAX_WIDTH);
+	return truncateToWidth(cleaned, TRUNCATE_LENGTHS.TITLE);
 }
 
 /** Human-readable status lines for `/grokbot` (no secret values). */

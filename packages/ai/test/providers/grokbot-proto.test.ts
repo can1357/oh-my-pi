@@ -1,7 +1,9 @@
 import { afterEach, describe, expect, spyOn, test, vi } from "bun:test";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import * as grokbotCatalogAuth from "@oh-my-pi/pi-catalog/discovery/grokbot-auth";
+import { TRUNCATE_LENGTHS } from "@oh-my-pi/pi-tui";
 import { shortenPath } from "@oh-my-pi/pi-utils";
-import { toInferenceMessages, toSandImageDataUrl } from "../../src/providers/grokbot";
+import { streamGrokBot, toInferenceMessages, toSandImageDataUrl } from "../../src/providers/grokbot";
 import * as grokbotAuth from "../../src/providers/grokbot/auth";
 import {
 	createGrokbotChecksum,
@@ -22,6 +24,7 @@ import {
 	frameConnectProto,
 } from "../../src/providers/grokbot/proto";
 import { loginGrokbot } from "../../src/registry/grokbot";
+import type { Context, FetchImpl, Model } from "../../src/types";
 
 describe("grokbot proto", () => {
 	test("round-trips InferenceStreamRequest without harness fields", () => {
@@ -307,7 +310,9 @@ describe("grokbot checksum", () => {
 		const versionLine = status.split("\n").find(line => line.startsWith("Client version:"));
 		expect(versionLine).toBeDefined();
 		expect(versionLine!.includes("next-line")).toBe(false);
-		expect(Bun.stringWidth(versionLine!.slice("Client version: ".length))).toBeLessThanOrEqual(60);
+		expect(Bun.stringWidth(versionLine!.slice("Client version: ".length))).toBeLessThanOrEqual(
+			TRUNCATE_LENGTHS.TITLE,
+		);
 	});
 });
 
@@ -458,5 +463,76 @@ describe("grokbot /login host-install prompt", () => {
 				onPrompt: async () => "",
 			}),
 		).rejects.toThrow(/secrets missing/i);
+	});
+});
+
+describe("grokbot incomplete tool calls", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	const model: Model<"grokbot-sand"> = buildModel({
+		id: "sand-default",
+		name: "Grok Bot",
+		api: "grokbot-sand",
+		provider: "grokbot",
+		baseUrl: "https://api2.cursor.sh",
+		reasoning: false,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 100_000,
+		maxTokens: 8_000,
+	});
+	const context: Context = { messages: [{ role: "user", content: "call", timestamp: 1 }] };
+
+	function connectBody(...frames: Buffer[]): Response {
+		return new Response(Buffer.concat(frames), {
+			status: 200,
+			headers: { "content-type": "application/connect+proto" },
+		});
+	}
+
+	function mockAuth() {
+		spyOn(grokbotAuth, "loadGrokbotConfig").mockResolvedValue({
+			renewal: "renew",
+			machineId: "machine",
+			namespace: "prod",
+			clientVersion: "0.30.0",
+		});
+		spyOn(grokbotAuth, "mintGrokbotAccessToken").mockResolvedValue("fake-jwt");
+	}
+
+	test("rejects stream that ends with isComplete:false tool call", async () => {
+		mockAuth();
+		const incomplete = frameConnectProto(
+			encodeInferenceStreamResponse({
+				toolCallPart: { toolCallId: "c1", toolName: "echo", args: '{"a":', isComplete: false },
+			}),
+		);
+		const trailer = frameConnectProto(Buffer.alloc(0), CONNECT_END_STREAM_FLAG);
+		const fetchImpl = (async () => connectBody(incomplete, trailer)) as FetchImpl;
+
+		const result = await streamGrokBot(model, context, { apiKey: "renew", fetch: fetchImpl }).result();
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toMatch(/incomplete tool call/i);
+		expect(result.content.some(b => b.type === "toolCall" && Object.keys(b.arguments).length === 0)).toBe(true);
+	});
+
+	test("finalizes complete tool calls as toolUse", async () => {
+		mockAuth();
+		const complete = frameConnectProto(
+			encodeInferenceStreamResponse({
+				toolCallPart: { toolCallId: "c1", toolName: "echo", args: '{"a":1}', isComplete: true },
+			}),
+		);
+		const trailer = frameConnectProto(Buffer.alloc(0), CONNECT_END_STREAM_FLAG);
+		const fetchImpl = (async () => connectBody(complete, trailer)) as FetchImpl;
+
+		const result = await streamGrokBot(model, context, { apiKey: "renew", fetch: fetchImpl }).result();
+		expect(result.stopReason).toBe("toolUse");
+		expect(result.errorMessage).toBeUndefined();
+		expect(result.content).toEqual([
+			expect.objectContaining({ type: "toolCall", id: "c1", name: "echo", arguments: { a: 1 } }),
+		]);
 	});
 });

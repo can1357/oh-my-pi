@@ -9,6 +9,8 @@
 
 ### Fixed
 
+- Grok Bot streams that end with `ToolCallPart.isComplete: false` now fail as incomplete streams instead of parsing partial JSON as `{}` and emitting a successful `toolUse`.
+- `/grokbot` status truncation uses shared `TRUNCATE_LENGTHS.TITLE` from `@oh-my-pi/pi-tui` instead of a provider-local width constant.
 - Grok Bot stream requests keep reverse-proxy path prefixes on the configured backend when joining `InferenceService/Stream`.
 - `/grokbot` status sanitizes namespace, client version, and secrets path with `replaceTabs`/`truncateToWidth`/`shortenPath` before TUI display.
 - `/login grokbot` host-install prompt names the resolved agent secrets path (`getAgentDir()` / profile / `PI_CODING_AGENT_DIR` / XDG), not a hardcoded `~/.omp/agent` or unsupported `OMP_AGENT_DIR`.

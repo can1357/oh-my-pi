@@ -793,7 +793,16 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 			}
 
 			closeOpen();
-			for (const state of toolStates.values()) finishTool(state);
+			// Only finalize tools that received isComplete. Incomplete ToolCallPart
+			// states must not be parsed as {} / emitted as successful toolUse.
+			for (const state of toolStates.values()) {
+				if (!state.ended) {
+					throw new AIError.ProviderResponseError("Grok Bot stream ended with incomplete tool call", {
+						provider: model.provider,
+						kind: "incomplete-stream",
+					});
+				}
+			}
 
 			const hasToolCall = output.content.some(b => b && b.type === "toolCall");
 			if (output.stopReason !== "length") {
