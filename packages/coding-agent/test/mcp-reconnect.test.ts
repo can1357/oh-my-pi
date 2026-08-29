@@ -92,6 +92,15 @@ describe("createMCPToolName", () => {
 		expect(createMCPToolName("puppeteer", "puppeteer_screenshot")).toBe("mcp__puppeteer_screenshot");
 	});
 
+	it("keeps digits, so servers differing only by a digit stay distinct", () => {
+		// The sanitizer used to strip 0-9, minting mcp__context_query_docs for
+		// server "context7" and collapsing "foo1"/"foo2" onto one name, which
+		// then cost one of them a tool via deduplicateMCPToolsByName().
+		expect(createMCPToolName("context7", "query-docs")).toBe("mcp__context7_query_docs");
+		expect(createMCPToolName("s3-storage", "get_object")).toBe("mcp__s3_storage_get_object");
+		expect(createMCPToolName("foo1", "run")).not.toBe(createMCPToolName("foo2", "run"));
+	});
+
 	it("is deterministic and keeps distinct overlong names distinct", () => {
 		const a = createMCPToolName("chrome-devtools-mcp", "chrome_devtools_performance_analyze_insight");
 		const b = createMCPToolName("chrome-devtools-mcp", "chrome_devtools_performance_analyze_insight");
