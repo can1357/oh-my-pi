@@ -495,6 +495,7 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 				fetchImpl,
 				model.baseUrl || GROKBOT_BACKEND,
 				options?.signal,
+				{ ...(model.headers ?? {}), ...(options?.headers ?? {}) },
 			);
 			const messages = toInferenceMessages(context);
 			const tools = toInferenceTools(context.tools);

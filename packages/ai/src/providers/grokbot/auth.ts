@@ -29,6 +29,8 @@ export {
 	loadGrokbotSecretFileSync,
 	mintGrokbotAccessToken,
 	resolveGrokbotClientVersion,
+	resolveGrokbotDiscoveryIdentity,
+	resolveGrokbotDiscoveryIdentityAsync,
 	resolveGrokbotEnvApiKey,
 	stampedVersionBaseOf,
 } from "@oh-my-pi/pi-catalog/discovery/grokbot-auth";

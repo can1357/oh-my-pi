@@ -97,12 +97,18 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 			// AvailableModels is renewer-scoped and marked authoritative. Discovery
 			// also sends namespace + client-version headers (`grokbotClientHeaders`)
 			// from env *or* secrets/grokbot.env, so resolve identity through the
-			// shared helper that mirrors loadGrokbotConfig.
+			// shared helper that mirrors loadGrokbotConfig — unless the caller
+			// already passed a fully resolved identity (no second secrets read).
 			const baseUrl = options.baseUrl ?? GROKBOT_BACKEND;
-			const identity = resolveGrokbotDiscoveryIdentity({
-				namespace: options.namespace,
-				clientVersion: options.clientVersion,
-			});
+			const ns = options.namespace?.trim();
+			const ver = options.clientVersion?.trim();
+			const identity =
+				ns && ver
+					? { namespace: ns, clientVersion: ver }
+					: resolveGrokbotDiscoveryIdentity({
+							namespace: options.namespace,
+							clientVersion: options.clientVersion,
+						});
 			const scope = `${options.apiKey ?? ""}\u0000${baseUrl}\u0000${identity.namespace}\u0000${identity.clientVersion}`;
 			return `grokbot:models-v2:${Bun.hash(scope).toString(36)}`;
 		}

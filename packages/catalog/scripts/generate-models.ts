@@ -18,6 +18,7 @@ import { getProviderDefinition } from "@oh-my-pi/pi-ai/registry";
 import { $env } from "@oh-my-pi/pi-utils";
 import { buildModel } from "../src/build";
 import { ANTIGRAVITY_PRIMARY_ENDPOINT, fetchAntigravityDiscoveryModels } from "../src/discovery/antigravity";
+import { resolveGrokbotDiscoveryIdentityAsync } from "../src/discovery/grokbot-auth";
 import { buildGitLabDuoWorkflowFallbackModel } from "../src/discovery/gitlab-duo-workflow";
 import { createModelManager } from "../src/model-manager";
 import prevModelsJson from "../src/models.json" with { type: "json" };
@@ -137,7 +138,11 @@ async function fetchProviderModelsFromCatalog(
 		const discoveryConfig = { apiKey };
 		const preparedConfig =
 			getProviderDefinition(descriptor.providerId)?.prepareModelDiscovery?.(discoveryConfig) ?? discoveryConfig;
-		const managerOptions = descriptor.createModelManagerOptions(preparedConfig);
+		const managerConfig =
+			descriptor.providerId === "grokbot"
+				? { ...preparedConfig, ...(await resolveGrokbotDiscoveryIdentityAsync()) }
+				: preparedConfig;
+		const managerOptions = descriptor.createModelManagerOptions(managerConfig);
 		const manager = createModelManager(managerOptions);
 		const result = await manager.refresh("online");
 		// `stale: true` means the dynamic fetch failed and the manager fell back

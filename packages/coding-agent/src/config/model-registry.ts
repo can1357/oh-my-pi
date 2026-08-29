@@ -16,6 +16,7 @@ import type {
 } from "@oh-my-pi/pi-ai/types";
 import type { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { resolveGrokbotDiscoveryIdentityAsync } from "@oh-my-pi/pi-catalog/discovery/grokbot-auth";
 import { readModelCache, writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import {
 	createModelManager,
@@ -1802,7 +1803,16 @@ export class ModelRegistry {
 				const preparedConfig =
 					getProviderDefinition(descriptor.providerId)?.prepareModelDiscovery?.(discoveryConfig) ??
 					discoveryConfig;
-				const managerOptions = descriptor.createModelManagerOptions(preparedConfig);
+				// Grok Bot cache scope needs secrets-file identity; load it async
+				// once here so createModelManagerOptions never sync-reads the file.
+				const managerConfig =
+					descriptor.providerId === "grokbot"
+						? {
+								...preparedConfig,
+								...(await resolveGrokbotDiscoveryIdentityAsync()),
+							}
+						: preparedConfig;
+				const managerOptions = descriptor.createModelManagerOptions(managerConfig);
 				const modelsDev = managerOptions.modelsDev
 					? { ...managerOptions.modelsDev, additiveOnly: true }
 					: modelsDevCatalogFallback(descriptor.providerId, this.#fetch);

@@ -224,12 +224,17 @@ export function grokbotModelManagerOptions(
 	config: GrokbotModelManagerConfig = {},
 ): ModelManagerOptions<"grokbot-sand"> {
 	const { apiKey, baseUrl, fetch } = config;
-	// Match AvailableModels header identity (env + secrets/grokbot.env) so the
-	// authoritative cache cannot be reused after namespace/client-version changes.
-	const identity = resolveGrokbotDiscoveryIdentity({
-		namespace: config.namespace,
-		clientVersion: config.clientVersion,
-	});
+	// Prefer a fully resolved identity from async prep (catalog refresh) so
+	// construction never sync-reads secrets/grokbot.env on the TUI event loop.
+	const ns = config.namespace?.trim();
+	const ver = config.clientVersion?.trim();
+	const identity =
+		ns && ver
+			? { namespace: ns, clientVersion: ver }
+			: resolveGrokbotDiscoveryIdentity({
+					namespace: config.namespace,
+					clientVersion: config.clientVersion,
+				});
 	return {
 		providerId: "grokbot",
 		cacheProviderId: resolveModelCacheProviderId("grokbot", {

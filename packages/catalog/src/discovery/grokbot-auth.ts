@@ -109,17 +109,47 @@ export function loadGrokbotSecretFileSync(filePath = grokbotSecretsPath()): Reco
 /**
  * Namespace + client-version used for AvailableModels headers and model-cache
  * scoping. Mirrors {@link loadGrokbotConfig}: env overrides secrets file, then
- * stamped defaults. Sync so cache ids can be resolved at manager construction.
+ * stamped defaults.
+ *
+ * When both overrides are already resolved, skips the secrets file so callers
+ * that loaded identity asynchronously can pass it through without a second
+ * synchronous read (TUI refresh must not block on agent-dir I/O).
  */
 export function resolveGrokbotDiscoveryIdentity(overrides?: { namespace?: string; clientVersion?: string }): {
 	namespace: string;
 	clientVersion: string;
 } {
+	const overrideNs = overrides?.namespace?.trim();
+	const overrideVer = overrides?.clientVersion?.trim();
+	if (overrideNs && overrideVer) {
+		return { namespace: overrideNs, clientVersion: overrideVer };
+	}
 	const file = loadGrokbotSecretFileSync();
-	const namespace =
-		overrides?.namespace?.trim() || $env.GROKBOT_NAMESPACE || file.GROKBOT_NAMESPACE || GROKBOT_DEFAULT_NAMESPACE;
-	const explicitVersion =
-		overrides?.clientVersion?.trim() || $env.GROKBOT_CLIENT_VERSION || file.GROKBOT_CLIENT_VERSION || undefined;
+	const namespace = overrideNs || $env.GROKBOT_NAMESPACE || file.GROKBOT_NAMESPACE || GROKBOT_DEFAULT_NAMESPACE;
+	const explicitVersion = overrideVer || $env.GROKBOT_CLIENT_VERSION || file.GROKBOT_CLIENT_VERSION || undefined;
+	return {
+		namespace,
+		clientVersion: resolveGrokbotClientVersion(namespace, GROKBOT_STAMPED_CLIENT_VERSION, explicitVersion),
+	};
+}
+
+/**
+ * Async counterpart of {@link resolveGrokbotDiscoveryIdentity} for catalog
+ * refresh / discovery prep — reads `secrets/grokbot.env` via
+ * {@link loadGrokbotSecretFile} so the TUI event loop is not blocked.
+ */
+export async function resolveGrokbotDiscoveryIdentityAsync(overrides?: {
+	namespace?: string;
+	clientVersion?: string;
+}): Promise<{ namespace: string; clientVersion: string }> {
+	const overrideNs = overrides?.namespace?.trim();
+	const overrideVer = overrides?.clientVersion?.trim();
+	if (overrideNs && overrideVer) {
+		return { namespace: overrideNs, clientVersion: overrideVer };
+	}
+	const file = await loadGrokbotSecretFile();
+	const namespace = overrideNs || $env.GROKBOT_NAMESPACE || file.GROKBOT_NAMESPACE || GROKBOT_DEFAULT_NAMESPACE;
+	const explicitVersion = overrideVer || $env.GROKBOT_CLIENT_VERSION || file.GROKBOT_CLIENT_VERSION || undefined;
 	return {
 		namespace,
 		clientVersion: resolveGrokbotClientVersion(namespace, GROKBOT_STAMPED_CLIENT_VERSION, explicitVersion),
@@ -195,6 +225,8 @@ export async function mintGrokbotAccessToken(
 	fetchImpl: FetchImpl = fetch,
 	backend = GROKBOT_BACKEND,
 	signal?: AbortSignal,
+	/** Caller/model headers (e.g. reverse-proxy API key); provider-owned headers win. */
+	requestHeaders?: Record<string, string>,
 ): Promise<string> {
 	if (!cfg.renewal) {
 		throw new Error(`Grok Bot renewer missing. Set GROKBOT_RENEWAL_CREDENTIAL or write ${grokbotSecretsPath()}`);
@@ -206,7 +238,11 @@ export async function mintGrokbotAccessToken(
 	}
 	const response = await fetchImpl(joinGrokbotBackendUrl(backend, GROKBOT_RENEWAL_PATH), {
 		method: "POST",
-		headers: { "content-type": "application/json", ...grokbotClientHeaders(cfg) },
+		headers: {
+			...(requestHeaders ?? {}),
+			"content-type": "application/json",
+			...grokbotClientHeaders(cfg),
+		},
 		body: JSON.stringify({ credential: cfg.renewal }),
 		signal,
 	});
