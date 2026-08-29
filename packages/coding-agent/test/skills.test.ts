@@ -390,6 +390,42 @@ describe("skills", () => {
 			}
 		});
 
+		it("should recursively load nested user skills from ~/.agents/skills", async () => {
+			const tempHome = await fs.mkdtemp(path.join(os.tmpdir(), "pi-agents-nested-user-home-"));
+			const tempProject = await fs.mkdtemp(path.join(os.tmpdir(), "pi-agents-nested-user-project-"));
+			const parentDir = path.join(tempHome, ".agents", "skills", "home-parent");
+			const childDir = path.join(parentDir, "home-child");
+			await fs.mkdir(childDir, { recursive: true });
+			await fs.writeFile(
+				path.join(parentDir, "SKILL.md"),
+				["---", "name: home-parent", "description: Nested user parent skill", "---", "", "# home-parent"].join(
+					"\n",
+				),
+			);
+			await fs.writeFile(
+				path.join(childDir, "SKILL.md"),
+				["---", "name: home-child", "description: Nested user child skill", "---", "", "# home-child"].join("\n"),
+			);
+			const homedirSpy = spyOn(os, "homedir").mockReturnValue(tempHome);
+			try {
+				const { skills } = await loadSkills({
+					...DISABLE_ALL_BUILTIN_SKILLS,
+					enableAgentsUser: true,
+					cwd: tempProject,
+				});
+				const parent = skills.find(skill => skill.name === "home-parent");
+				const child = skills.find(skill => skill.name === "home-child");
+				expect(parent?.filePath).toBe(path.join(parentDir, "SKILL.md"));
+				expect(parent?.source).toBe("agents:user");
+				expect(child?.filePath).toBe(path.join(childDir, "SKILL.md"));
+				expect(child?.source).toBe("agents:user");
+			} finally {
+				homedirSpy.mockRestore();
+				await removeWithRetries(tempHome);
+				await removeWithRetries(tempProject);
+			}
+		});
+
 		it("should recursively load project skills from .agents/skills", async () => {
 			const tempHome = await fs.mkdtemp(path.join(os.tmpdir(), "pi-agents-nested-home-"));
 			const tempProject = await fs.mkdtemp(path.join(os.tmpdir(), "pi-agents-nested-project-"));
