@@ -14,6 +14,7 @@ import {
 } from "@oh-my-pi/pi-utils";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import type { EmbeddingModel } from "fastembed";
+import { embeddingBackend, embeddingGgufPath } from "../config";
 import { ensureFastembedModelSidecars } from "./fastembed-model-cache";
 import { loadFastembed } from "./fastembed-runtime";
 import {
@@ -319,6 +320,27 @@ function defaultModel(): string {
  */
 export function currentEmbeddingModel(): string {
 	return defaultModel();
+}
+/**
+ * Backend-qualified identity for the active embedding model. Stamped alongside
+ * each row in `memory_embeddings.model` (see `runEmbedding` in `helpers.ts`) and
+ * compared during reconciliation (see `reconcileEmbeddingModel` in `store.ts`).
+ *
+ * The default fastembed backend keeps the bare model name so legacy rows stay
+ * valid; the ggml backend prefixes the backend and the resolved GGUF artifact so
+ * switching `fastembed <-> ggml` — or pointing at a different GGUF — under the
+ * same model id detects a mismatch and forces a corpus rebuild, instead of
+ * silently scoring query vectors against vectors from a different artifact
+ * (node-llama-cpp embeddings are only comparable within the exact same file).
+ */
+export function currentEmbeddingModelIdentity(): string {
+	const model = currentEmbeddingModel().trim();
+	if (model === "") return "";
+	if (embeddingBackend() === "ggml") {
+		const gguf = embeddingGgufPath().trim();
+		return `ggml:${model}:${gguf || "<default>"}`;
+	}
+	return model;
 }
 
 export function isApiModel(modelName: string): boolean {

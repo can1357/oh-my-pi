@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added a ggml (llama.cpp) local-embedding backend that runs embedding models on the GPU via node-llama-cpp (Vulkan/Metal/CUDA). Select with `MNEMOPI_EMBED_BACKEND=ggml` and point `MNEMOPI_EMBED_GGUF_PATH` at a GGUF embedding model; same model id keeps the existing memory corpus valid.
+
 ## [18.0.9] - 2026-08-28
 
 ### Fixed

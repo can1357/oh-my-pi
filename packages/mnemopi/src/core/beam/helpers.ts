@@ -12,7 +12,7 @@ import {
 	RECALL_SYNONYMS,
 	recallTokens,
 } from "../../util/regex";
-import { currentEmbeddingModel, embed } from "../embeddings";
+import { currentEmbeddingModelIdentity, embed } from "../embeddings";
 import { getMnemopiRuntimeOptions, mnemopiDebugEnabled, withMnemopiRuntimeOptions } from "../runtime-options";
 import { buildExactVectorIndex, searchExactVectorIndex } from "../vector-index";
 import type { BeamMemoryState, JsonValue, Metadata } from "./types";
@@ -787,7 +787,7 @@ async function runEmbedding(beam: BeamMemoryState, items: readonly EmbedItem[]):
 	try {
 		const matrix = await embed(items.map(item => item.content));
 		if (matrix === null) return;
-		const model = currentEmbeddingModel();
+		const model = currentEmbeddingModelIdentity();
 		using insertEmbedding = beam.db.prepare(
 			"INSERT OR REPLACE INTO memory_embeddings(memory_id, embedding_json, model) VALUES (?, ?, ?)",
 		);

@@ -7,13 +7,26 @@
  */
 
 import { Database } from "bun:sqlite";
-import { describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 
 import { initBeam } from "@oh-my-pi/pi-mnemopi/core/beam";
 import { Mnemopi } from "@oh-my-pi/pi-mnemopi/core/memory";
 
 const OLD_MODEL = "BAAI/bge-small-en-v1.5";
 const NEW_MODEL = "intfloat/multilingual-e5-large";
+// The reconcile contract is about MODEL changes, independent of the local
+// embedding backend. Force fastembed so `currentEmbeddingModelIdentity()`
+// equals the bare model name the seed rows are stamped with, regardless of any
+// ambient `MNEMOPI_EMBED_BACKEND` the feature environment sets.
+let prevBackend: string | undefined;
+beforeEach(() => {
+	prevBackend = process.env.MNEMOPI_EMBED_BACKEND;
+	delete process.env.MNEMOPI_EMBED_BACKEND;
+});
+afterEach(() => {
+	if (prevBackend !== undefined) process.env.MNEMOPI_EMBED_BACKEND = prevBackend;
+	else delete process.env.MNEMOPI_EMBED_BACKEND;
+});
 
 // Deterministic fastembed-shaped provider so the background rebuild actually
 // writes rows (and stamps them with the active model) under the test runtime.
