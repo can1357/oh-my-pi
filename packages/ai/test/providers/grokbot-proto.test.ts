@@ -236,7 +236,10 @@ describe("grokbot requested model mapping", () => {
 		});
 		expect(low).toEqual({
 			modelId: "grok-4.6",
-			parameters: [{ id: "effort", value: "low" }],
+			parameters: [
+				{ id: "effort", value: "low" },
+				{ id: "fast", value: "true" },
+			],
 		});
 		const withFast = resolveGrokbotRequestedModel("grok-4.6", {
 			effort: "xhigh",
@@ -247,6 +250,25 @@ describe("grokbot requested model mapping", () => {
 			{ id: "effort", value: "xhigh" },
 			{ id: "fast", value: "false" },
 		]);
+	});
+
+	test("defaults fast to true when the model advertises the parameter", () => {
+		expect(
+			resolveGrokbotRequestedModel("grok-4.6", {
+				sandParameterIds: ["effort", "fast"],
+			}).parameters,
+		).toEqual([{ id: "fast", value: "true" }]);
+		expect(
+			resolveGrokbotRequestedModel("grok-4.6", {
+				fast: false,
+				sandParameterIds: ["effort", "fast"],
+			}).parameters,
+		).toEqual([{ id: "fast", value: "false" }]);
+		expect(
+			resolveGrokbotRequestedModel("grok-4.6", {
+				sandParameterIds: ["effort"],
+			}).parameters,
+		).toBeUndefined();
 	});
 
 	test("preserves discovered minimal and max effort on the wire", () => {
@@ -271,16 +293,24 @@ describe("grokbot requested model mapping", () => {
 		).toEqual([{ id: "effort", value: "low" }]);
 	});
 
-	test("composer only sends fast when allowed and set", () => {
+	test("defaults fast to true when advertised; preserves explicit false", () => {
 		const bare = resolveGrokbotRequestedModel("composer-2.5", {
 			sandParameterIds: ["fast"],
 		});
-		expect(bare).toEqual({ modelId: "composer-2.5" });
+		expect(bare).toEqual({
+			modelId: "composer-2.5",
+			parameters: [{ id: "fast", value: "true" }],
+		});
 		const fast = resolveGrokbotRequestedModel("composer-2.5", {
 			fast: true,
 			sandParameterIds: ["fast"],
 		});
 		expect(fast.parameters).toEqual([{ id: "fast", value: "true" }]);
+		const slow = resolveGrokbotRequestedModel("composer-2.5", {
+			fast: false,
+			sandParameterIds: ["fast"],
+		});
+		expect(slow.parameters).toEqual([{ id: "fast", value: "false" }]);
 	});
 
 	test("gemini flash maps effort only; sol maps reasoning when listed", () => {

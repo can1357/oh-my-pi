@@ -9,6 +9,7 @@
 
 ### Fixed
 
+- Grok Bot sends `fast: true` by default when a model advertises the `fast` parameter (explicit `false` is preserved).
 - Grok Bot keeps JSON-shaped grammar tool output as `{ input: rawText }` instead of JSON-decoding it into structured arguments.
 - Grok Bot merges request headers case-insensitively so reserved names like `Authorization` / `Content-Type` are replaced rather than comma-joined.
 - Grok Bot Connect end-stream `unauthenticated` errors clear the JWT cache and surface as HTTP 401 for credential retry.

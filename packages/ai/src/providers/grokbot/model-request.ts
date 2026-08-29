@@ -18,7 +18,7 @@ export type GrokbotRequestedModelOptions = {
 	 * Identity for omitted keys so discovered `minimal` / `max` stay on the wire.
 	 */
 	effortMap?: Partial<Record<string, string>>;
-	/** sand `fast` parameter; only sent when the model lists `fast` and a value is set. */
+	/** sand `fast` parameter; only sent when the model lists `fast` (defaults to true). */
 	fast?: boolean;
 	/**
 	 * Allowed parameter ids from live `parameterDefinitions` / catalog `sandParameterIds`.
@@ -83,8 +83,11 @@ export function resolveGrokbotRequestedModel(
 				parameters.push({ id: "reasoning", value: effortValue });
 			}
 		}
-		if (allowed.has("fast") && options?.fast !== undefined) {
-			parameters.push({ id: "fast", value: options.fast ? "true" : "false" });
+		if (allowed.has("fast")) {
+			// Documented default is fast:true when the model advertises the param;
+			// explicit false is preserved.
+			const fast = options?.fast !== undefined ? options.fast : true;
+			parameters.push({ id: "fast", value: fast ? "true" : "false" });
 		}
 		// `context` is only sent when explicitly provided later; do not invent tiers.
 	}
