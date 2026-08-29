@@ -255,6 +255,8 @@
 
 - Fixed `omp usage invalidate` to discard stale OAuth and API-key usage snapshots, then force a cache-bypassing, per-provider serialized refresh with a broker request budget sized for the full unfiltered account batch, so upgraded subscriptions do not silently retain pre-change quota data.
 - Fixed quota reporting and Cookie capture guidance for China (Beijing) Alibaba Token Plan credentials ([#8509](https://github.com/can1357/oh-my-pi/issues/8509)).
+- Cursor tool passthrough ends the turn only after a real exec synthesis/deferral — approval-only `mcpArgs` probes no longer set `toolUse` when a prior `toolCallStarted` announcement is already present.
+- Cursor tool passthrough synthesizes `writeShellStdinArgs` and `redactedReadArgs` for the caller, and excludes server-only `connect_scm` from the allowlist / interaction path.
 - Cursor SSE deferral treats the discovered `default` wire id as auto intent; routing resolve ignores the initial start placeholder so concrete+autoMode still buffers until a post-start observation.
 - Auth-gateway SSE only buffers `auto`/`default` model envelopes when Cursor auto mode is set, so literal provider ids like OpenRouter `auto` still stream immediately.
 - Cursor tool passthrough restricts `x-cursor-agent-allowed-tools` to a named forced `toolChoice` (advertising that name alone even when absent from declared tools).

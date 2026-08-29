@@ -272,4 +272,21 @@ describe("Cursor passthrough allowed-tools header", () => {
 		);
 		expect(sent["x-cursor-agent-allowed-tools"]).toBe("__none__");
 	});
+
+	it("excludes server-only connect_scm from the passthrough allowlist", async () => {
+		const sent = await send(
+			{},
+			{
+				context: {
+					...context,
+					tools: [
+						...passthroughTools,
+						{ name: "connect_scm", description: "scm", parameters: { type: "object" as const } },
+					],
+				},
+				options: { cursorToolPassthrough: true },
+			},
+		);
+		expect(sent["x-cursor-agent-allowed-tools"]).toBe("bash,read");
+	});
 });

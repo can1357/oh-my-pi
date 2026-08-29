@@ -41,7 +41,6 @@ import {
 	ForceBackgroundSubagentStatus,
 	GetDiffRequestSchema,
 	GrepArgsSchema,
-	BackgroundShellSpawnArgsSchema,
 	ListMcpResourcesExecArgsSchema,
 	McpAllowlistPrecheckArgsSchema,
 	McpArgsSchema,
@@ -69,6 +68,7 @@ import {
 	SubagentAwaitArgsSchema,
 	ToolCallSchema,
 	WebFetchAllowlistPrecheckArgsSchema,
+	WriteShellStdinArgsSchema,
 } from "@oh-my-pi/pi-catalog/discovery/cursor-proto";
 import { create, fromBinary, toBinary } from "@oh-my-pi/pi-catalog/discovery/protobuf";
 
@@ -2111,6 +2111,57 @@ describe("Cursor MCP frame: approval-only probes", () => {
 		if (answer.case !== "mcpResult") throw new Error(`got ${answer.case}`);
 		expect(answer.value.result.case).toBe("rejected");
 	});
+
+	it("does not end passthrough on an approval probe when a toolCallStarted already exists", async () => {
+		const output = cursorAssistantMessage();
+		output.content.push({
+			type: "toolCall",
+			id: "c-announced",
+			name: "deploy",
+			arguments: {},
+		});
+		const stream = new AssistantMessageEventStream();
+		const state = newBlockState();
+		const written: Buffer[] = [];
+		const h2Request = {
+			write: (chunk: Buffer) => {
+				written.push(chunk);
+				return true;
+			},
+		} as unknown as Parameters<typeof handleServerMessage>[5];
+		await handleServerMessage(
+			create(AgentServerMessageSchema, {
+				message: {
+					case: "execServerMessage",
+					value: buildExecMessage({
+						case: "mcpArgs",
+						value: create(McpArgsSchema, {
+							name: "deploy",
+							toolName: "deploy",
+							toolCallId: "c-announced",
+							providerIdentifier: "ops",
+							smartModeApprovalOnly: true,
+						}),
+					}),
+				},
+			}),
+			output,
+			stream,
+			state,
+			new Map(),
+			h2Request,
+			undefined,
+			undefined,
+			{ sawTokenDelta: false },
+			[mcpTool("deploy", "ops")],
+			undefined,
+			true,
+		);
+		expect(output.stopReason).toBe("stop");
+		const answer = soleResult(written.map(decodeClientFrame));
+		if (answer.case !== "mcpResult") throw new Error(`got ${answer.case}`);
+		expect(answer.value.result.case).toBe("approved");
+	});
 });
 
 describe("Cursor InteractionUpdate.routedModel", () => {
@@ -2197,6 +2248,36 @@ describe("Cursor backgroundShellSpawnArgs passthrough", () => {
 		expect(answer.value.result.case).toBe("rejected");
 		expect(answer.value.result.value.reason).toBe("Not implemented");
 		expect(output.content.filter(block => block.type === "toolCall")).toHaveLength(0);
+	});
+});
+
+describe("Cursor writeShellStdin and redactedRead passthrough", () => {
+	it("surfaces writeShellStdin as a deferred bash toolCall", async () => {
+		const { frames, output } = await dispatchExec(
+			buildExecMessage({
+				case: "writeShellStdinArgs",
+				value: create(WriteShellStdinArgsSchema, { shellId: 1, chars: "y\n" }),
+			}),
+			{ cursorToolPassthrough: true },
+		);
+		expect(output.stopReason).toBe("toolUse");
+		expect(output.content.some(b => b.type === "toolCall" && b.name === "bash")).toBe(true);
+		const answer = soleResult(frames);
+		expect(answer.case).toBe("writeShellStdinResult");
+	});
+
+	it("surfaces redactedRead as a deferred read toolCall", async () => {
+		const { frames, output } = await dispatchExec(
+			buildExecMessage({
+				case: "redactedReadArgs",
+				value: create(ReadArgsSchema, { path: "/repo/.env", toolCallId: "rr-1" }),
+			}),
+			{ cursorToolPassthrough: true },
+		);
+		expect(output.stopReason).toBe("toolUse");
+		expect(output.content.some(b => b.type === "toolCall" && b.name === "read")).toBe(true);
+		const answer = soleResult(frames);
+		expect(answer.case).toBe("redactedReadResult");
 	});
 });
 
