@@ -704,14 +704,17 @@ export function resolveTodoMarkdownPath(input: string, cwd: string): string {
  * Escape HTML comment delimiters in todo task text so a literal
  * `<!-- dropped-by: user -->` (or blocker comment) in content cannot be
  * mistaken for provenance metadata on the next parse.
+ *
+ * Ampersands are escaped first so a pre-existing `&lt;!--` / `--&gt;` in
+ * content round-trips bijectively instead of decoding into real delimiters.
  */
 export function escapeTodoMarkdownContent(content: string): string {
-	return content.replaceAll("<!--", "&lt;!--").replaceAll("-->", "--&gt;");
+	return content.replaceAll("&", "&amp;").replaceAll("<!--", "&lt;!--").replaceAll("-->", "--&gt;");
 }
 
 /** Inverse of {@link escapeTodoMarkdownContent} after provenance comments are stripped. */
 export function unescapeTodoMarkdownContent(content: string): string {
-	return content.replaceAll("&lt;!--", "<!--").replaceAll("--&gt;", "-->");
+	return content.replaceAll("&lt;!--", "<!--").replaceAll("--&gt;", "-->").replaceAll("&amp;", "&");
 }
 
 /** Render todo phases as a Markdown checklist suitable for editing/copying. */
@@ -894,8 +897,10 @@ export function applyUserMarkdownPhases(prior: TodoPhase[], parsed: TodoPhase[])
 		name: phase.name,
 		tasks: phase.tasks.map(task => {
 			const next = cloneTask(task);
-			if (next.status !== "abandoned") return next;
+			// Consume FIFO for every status so a leading non-abandoned duplicate
+			// does not leave a later model-abandoned sibling matched against it.
 			const prev = takePriorOccurrence(queues, phase.name, next.content);
+			if (next.status !== "abandoned") return next;
 			if (shouldStampAbandonedAsUser(prev, empty, next)) {
 				next.droppedBy = "user";
 			}
@@ -915,8 +920,9 @@ export function applyRpcTodoProvenance(prior: TodoPhase[], incoming: TodoPhase[]
 	return incoming.map(phase => ({
 		...phase,
 		tasks: phase.tasks.map(task => {
-			if (task.status !== "abandoned") return task;
+			// Same FIFO consume-all-statuses rule as applyUserMarkdownPhases.
 			const prev = takePriorOccurrence(queues, phase.name, task.content);
+			if (task.status !== "abandoned") return task;
 			if (!shouldStampAbandonedAsUser(prev, empty, task)) return task;
 			return { ...task, droppedBy: "user" as const };
 		}),

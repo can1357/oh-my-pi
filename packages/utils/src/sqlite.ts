@@ -14,8 +14,13 @@ export function isSqliteClosedError(err: unknown): boolean {
 	return err instanceof Error && err.message.includes("Database has closed");
 }
 
-function isSqliteIoError(err: unknown): boolean {
-	return err !== null && typeof err === "object" && "code" in err && typeof err.code === "string" && err.code.startsWith("SQLITE_IOERR");
+/**
+ * Benign I/O failure during shutdown checkpoint: macOS vnode invalidation when
+ * the database path (or its directory) was unlinked underneath an open handle.
+ * Other `SQLITE_IOERR_*` codes (WRITE, FSYNC, …) are real failures and must surface.
+ */
+function isSqliteIoerrVnode(err: unknown): boolean {
+	return err !== null && typeof err === "object" && "code" in err && err.code === "SQLITE_IOERR_VNODE";
 }
 
 /** Checkpoints committed WAL frames without waiting for concurrent readers. */
@@ -25,7 +30,7 @@ export function checkpointWal(db: Database): void {
 	} catch (err) {
 		// Close races: the handle is already gone, or the temp file was unlinked
 		// (SQLITE_IOERR_VNODE) while another test tore down the directory.
-		if (isSqliteClosedError(err) || isSqliteIoError(err)) return;
+		if (isSqliteClosedError(err) || isSqliteIoerrVnode(err)) return;
 		throw err;
 	}
 }

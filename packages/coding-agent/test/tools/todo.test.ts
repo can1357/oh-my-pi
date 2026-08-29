@@ -9,6 +9,7 @@ import {
 	applyOpsToPhases,
 	applyRpcTodoProvenance,
 	applyUserMarkdownPhases,
+	escapeTodoMarkdownContent,
 	formatTodoHudRatio,
 	isCompletedTodo,
 	isHudSettledTodo,
@@ -27,6 +28,7 @@ import {
 	todoHudCounts,
 	todoMatchesAnyDescription,
 	todoToolRenderer,
+	unescapeTodoMarkdownContent,
 } from "@oh-my-pi/pi-coding-agent/tools";
 import type { Component } from "@oh-my-pi/pi-tui";
 
@@ -379,6 +381,27 @@ describe("TodoTool operations", () => {
 		});
 	});
 
+	it("round-trips pre-escaped comment delimiter entities without inventing real delimiters", () => {
+		const samples = [
+			"already &lt;!-- stamped --&gt; text",
+			"bare & and &amp; together",
+			"<!-- real --> plus &lt;!-- fake --&gt;",
+			"--&gt; before &lt;!--",
+		];
+		for (const content of samples) {
+			expect(unescapeTodoMarkdownContent(escapeTodoMarkdownContent(content))).toBe(content);
+		}
+		// Escaped form must not leave raw comment openers that parse as provenance.
+		const md = phasesToMarkdown([
+			{ name: "Work", tasks: [{ content: "already &lt;!-- dropped-by: user --&gt;", status: "pending" }] },
+		]);
+		expect(md).not.toMatch(/\] already <!--/);
+		expect(md).toContain("&amp;lt;!--");
+		const { phases: parsed, errors } = markdownToPhases(md);
+		expect(errors).toEqual([]);
+		expect(parsed[0]?.tasks[0]?.content).toBe("already &lt;!-- dropped-by: user --&gt;");
+	});
+
 	it("keeps model drops unstamped on a no-op edit when duplicate content shares a phase", () => {
 		const prior: TodoPhase[] = [
 			{
@@ -396,6 +419,37 @@ describe("TodoTool operations", () => {
 		// Last-content-wins would see the pending row and stamp the model drop as user.
 		expect(merged[0]?.tasks[0]).toEqual({ content: "Ship", status: "abandoned" });
 		expect(merged[0]?.tasks[1]?.status).toBe("in_progress");
+	});
+
+	it("consumes a leading non-abandoned duplicate before matching a model-abandoned sibling", () => {
+		const prior: TodoPhase[] = [
+			{
+				name: "Work",
+				tasks: [
+					{ content: "Ship", status: "pending" },
+					{ content: "Ship", status: "abandoned" },
+				],
+			},
+		];
+		const md = phasesToMarkdown(prior);
+		const { phases: parsed, errors } = markdownToPhases(md);
+		expect(errors).toEqual([]);
+		const merged = applyUserMarkdownPhases(prior, parsed);
+		// Skipping non-abandoned FIFO consume would match the abandoned row against
+		// the pending prior and incorrectly stamp it as a user drop.
+		expect(merged[0]?.tasks[0]?.status).toBe("in_progress");
+		expect(merged[0]?.tasks[1]).toEqual({ content: "Ship", status: "abandoned" });
+
+		const rpc = applyRpcTodoProvenance(prior, [
+			{
+				name: "Work",
+				tasks: [
+					{ content: "Ship", status: "pending" },
+					{ content: "Ship", status: "abandoned" },
+				],
+			},
+		]);
+		expect(rpc[0]?.tasks[1]).toEqual({ content: "Ship", status: "abandoned" });
 	});
 
 	it("preserves per-occurrence droppedBy when duplicate abandoned texts share a phase", () => {

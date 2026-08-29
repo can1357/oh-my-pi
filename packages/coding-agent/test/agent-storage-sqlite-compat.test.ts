@@ -51,6 +51,10 @@ describe("AgentStorage SQLite compatibility", () => {
 		await AgentStorage.open(dbPath);
 		AgentStorage.close();
 		expect(() => AgentStorage.close()).not.toThrow();
+		// Double-close must leave the process able to reopen and use storage.
+		const storage = await AgentStorage.open(dbPath);
+		storage.recordModelUsage("openai/gpt-5");
+		expect(storage.getModelUsageOrder()).toEqual(["openai/gpt-5"]);
 	});
 
 	it("creates fresh storage without unixepoch defaults", async () => {
