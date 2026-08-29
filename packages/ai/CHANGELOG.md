@@ -9,6 +9,7 @@
 
 ### Fixed
 
+- Grok Bot Connect streams surface input-token-limit frames as context-overflow errors (for compaction), reject malformed trailers/protobuf frames, and no longer store routed model ids in `upstreamProvider`.
 - Grok Bot checksum encoding no longer wraps 32-bit shifts; JWT mint cache is scoped per renewal/backend/namespace; request `apiKey` wins over ambient secrets; incomplete Connect streams and caller aborts surface correctly.
 - Grok Bot provider (`grokbot` / `grokbot-sand`): separate from the Cursor provider (`cursor` / AgentService) and from xAI / Grok CLI (`xai`, `xai-oauth`), including independent usage allowances (using one does not consume Cursor or xAI quota). Speaks `InferenceService/Stream` via renewal-credential minting. Default `sand-default` is sent as a bare sand router slug (no grok rewrite / maxMode / effort stamp). Live picker models come from `AiService/AvailableModels` (sand client); each model only gets its own `parameterDefinitions` on the wire. Stream rejects malformed Connect trailers and protobuf frames instead of treating them as successful completions. `/login grokbot` shows a host-install prompt to run inside the Grok Bot system (writes `secrets/grokbot.env`; does not use Cursor or xAI login). JWT mint cache is keyed by renewer+backend; explicit `apiKey` wins over ambient secrets; catalog cost stays $0 (renewer-billed).
 

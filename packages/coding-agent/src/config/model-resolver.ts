@@ -422,16 +422,23 @@ function getProviderModelIndex(availableModels: readonly Model<Api>[]): Map<stri
 	if (cached) return cached;
 	const index = new Map<string, Model<Api> | null>();
 	const indexKey = (provider: string, id: string) => `${provider.toLowerCase()}\u0000${id.toLowerCase()}`;
+	const canonicalKeys = new Set<string>();
+	// Pass 1: canonical ids win. Duplicate canonical rows become the ambiguous sentinel.
 	for (const m of availableModels) {
 		const key = indexKey(m.provider, m.id);
+		canonicalKeys.add(key);
 		if (index.has(key)) {
-			index.set(key, null); // ambiguous sentinel; do not overwrite back
+			index.set(key, null);
 		} else {
 			index.set(key, m);
 		}
-		// Client-side aliases (Grok Bot AvailableModels idAliases, etc.): resolve to the canonical row.
+	}
+	// Pass 2: client-side aliases (Grok Bot AvailableModels idAliases, etc.).
+	// Never overwrite a canonical id; competing aliases for the same key are ambiguous.
+	for (const m of availableModels) {
 		for (const alias of m.aliases ?? []) {
 			const aliasKey = indexKey(m.provider, alias);
+			if (canonicalKeys.has(aliasKey)) continue;
 			if (index.has(aliasKey)) {
 				if (index.get(aliasKey) !== m) {
 					index.set(aliasKey, null);

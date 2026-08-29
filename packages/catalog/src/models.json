@@ -67499,7 +67499,7 @@
 		},
 		"grok-4.6": {
 			"id": "grok-4.6",
-			"name": "Grok 4.6",
+			"name": "Grok 4.6 (sand)",
 			"api": "grokbot-sand",
 			"provider": "grokbot",
 			"baseUrl": "https://api2.cursor.sh",
@@ -67528,7 +67528,8 @@
 					"minimal",
 					"low",
 					"medium",
-					"high"
+					"high",
+					"xhigh"
 				]
 			},
 			"requiresGlyphTokenization": false,
@@ -67612,7 +67613,8 @@
 					"minimal",
 					"low",
 					"medium",
-					"high"
+					"high",
+					"xhigh"
 				]
 			},
 			"requiresGlyphTokenization": false,

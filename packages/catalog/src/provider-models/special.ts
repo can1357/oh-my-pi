@@ -2,6 +2,7 @@ import { once } from "@oh-my-pi/pi-utils";
 import { type CodexModelDiscoveryResult, fetchCodexModels } from "../discovery/codex";
 import type { DevinModelDiscoveryOptions } from "../discovery/devin";
 import { buildGitLabDuoWorkflowFallbackModel, fetchGitLabDuoWorkflowModels } from "../discovery/gitlab-duo-workflow";
+import { fetchGrokbotAvailableModels } from "../discovery/grokbot";
 import type { ModelManagerOptions } from "../model-manager";
 import type { FetchImpl, ModelSpec } from "../types";
 import { resolveModelCacheProviderId } from "./cache-provider-id";
@@ -224,16 +225,11 @@ export function grokbotModelManagerOptions(
 		...(apiKey ? { dynamicModelsAuthoritative: true } : undefined),
 		...(apiKey
 			? {
-					fetchDynamicModels: async () => {
-						const { fetchGrokbotAvailableModels } = await grokbotDiscovery();
-						return fetchGrokbotAvailableModels({ apiKey, baseUrl, fetch });
-					},
+					fetchDynamicModels: async () => fetchGrokbotAvailableModels({ apiKey, baseUrl, fetch }),
 				}
 			: undefined),
 	};
 }
-
-const grokbotDiscovery = once(() => import("../discovery/grokbot"));
 
 // ---------------------------------------------------------------------------
 // Zai

@@ -36,8 +36,8 @@ import {
 
 export {
 	formatGrokbotStatus,
-	getAccessTokenExpiryMs,
 	GROKBOT_BACKEND,
+	getAccessTokenExpiryMs,
 	resolveGrokbotClientVersion,
 	stampedVersionBaseOf,
 } from "./grokbot/auth";
@@ -104,9 +104,7 @@ function asImagePart(part: unknown): ImageContent | undefined {
 	};
 }
 
-type SandContentPart =
-	| { type: "text"; text: string }
-	| { type: "image"; data: string; mimeType: string };
+type SandContentPart = { type: "text"; text: string } | { type: "image"; data: string; mimeType: string };
 
 function userPartsFromContent(content: unknown): SandContentPart[] {
 	if (typeof content === "string") {
@@ -727,6 +725,12 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 							output.stopReason = "length";
 							continue;
 						}
+						if (e.isInputTokenLimitError || e.is_input_token_limit_error) {
+							throw new AIError.ProviderResponseError(
+								"Grok Bot input token count exceeds the maximum context length",
+								{ provider: model.provider, kind: "output" },
+							);
+						}
 						if (e.message || e.code) throw new Error(String(e.message || e.code));
 					}
 					if (typeof errObj === "string" && errObj) throw new Error(errObj);
@@ -781,7 +785,8 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 							throw new Error(errorMessage);
 						}
 						if (typeof info.id === "string" && info.id) output.responseId = info.id;
-						if (typeof info.model === "string" && info.model) output.upstreamProvider = info.model;
+						// responseInfo.model is a routed model id (e.g. grok-4.5), not a
+						// provider name — leave upstreamProvider unset unless wire exposes one.
 					}
 				}
 			}

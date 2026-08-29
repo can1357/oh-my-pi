@@ -6,6 +6,10 @@
 
 - Added `/grokbot` to show Grok Bot provider status (credentials/client; no secrets). Distinct from Cursor (`/login cursor`) and xAI / Grok CLI (`xai`, `xai-oauth`), with independent usage allowances. `/login grokbot` surfaces the host-install prompt for the Grok Bot system. Model lookup resolves Grok Bot `idAliases` (e.g. `grokbot/composer` → live `composer-2.5`) without separate catalog rows.
 
+### Fixed
+
+- Model lookup keeps a canonical model id resolvable when another catalog row lists that id as an alias (aliases no longer null out exact matches).
+
 ## [18.0.10] - 2026-08-28
 
 ### Added

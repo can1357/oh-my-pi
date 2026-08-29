@@ -10,6 +10,7 @@
 
 ### Fixed
 
+- Grok Bot bundled catalog now includes `xhigh` on parameterized effort ladders (regenerated from seed/policy); AvailableModels discovery uses a static import.
 - Grok Bot `secrets/grokbot.env` loading now uses the shared dotenv parser so quoted values, `export` prefixes, and inline comments authenticate correctly.
 
 ## [18.0.9] - 2026-08-28

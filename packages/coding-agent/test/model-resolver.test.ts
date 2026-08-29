@@ -2342,4 +2342,36 @@ describe("resolveProviderModelReference Model.aliases", () => {
 		expect(resolveProviderModelReference("grokbot", "composer-latest", models)?.id).toBe("composer-2.5");
 		expect(resolveProviderModelReference("grokbot", "composer-2.5", models)?.id).toBe("composer-2.5");
 	});
+
+	test("keeps a canonical id resolvable when another row aliases the same id", () => {
+		const models: Model<"grokbot-sand">[] = [
+			buildModel({
+				id: "default",
+				name: "Auto",
+				api: "grokbot-sand",
+				provider: "grokbot",
+				baseUrl: "https://api2.cursor.sh",
+				reasoning: false,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 200_000,
+				maxTokens: 64_000,
+				aliases: ["auto"],
+			}),
+			buildModel({
+				id: "auto",
+				name: "auto",
+				api: "grokbot-sand",
+				provider: "grokbot",
+				baseUrl: "https://api2.cursor.sh",
+				reasoning: false,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 200_000,
+				maxTokens: 64_000,
+			}),
+		];
+		expect(resolveProviderModelReference("grokbot", "auto", models)?.id).toBe("auto");
+		expect(resolveProviderModelReference("grokbot", "default", models)?.id).toBe("default");
+	});
 });
