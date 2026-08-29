@@ -568,7 +568,17 @@ function applyEntry(
 			return phases;
 		}
 		case "rm":
-			return removeTasks(phases, entry, errors);
+			if (options?.userDrop) return removeTasks(phases, entry, errors);
+			// Model `rm` is a settle cheat: abandon in place like `drop`.
+			// Leave completed/blocked alone, and keep existing abandoned (incl. user
+			// droppedBy) so rm cannot rewrite terminals into unprovenanced drops.
+			for (const task of getTaskTargets(phases, entry, errors)) {
+				if (task.status === "completed" || task.status === "blocked") continue;
+				if (task.status === "abandoned") continue;
+				task.status = "abandoned";
+				delete task.droppedBy;
+			}
+			return phases;
 		case "append":
 			return appendItems(phases, entry, errors);
 		case "view":

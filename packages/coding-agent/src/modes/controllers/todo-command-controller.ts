@@ -384,7 +384,9 @@ export class TodoCommandController {
 		}
 		const taskHit = findTaskFuzzy(current, trimmed);
 		if (taskHit) {
-			const { phases, errors } = applyOpsToPhases(current, [{ op: "rm", task: taskHit.task.content }]);
+			const { phases, errors } = applyOpsToPhases(current, [{ op: "rm", task: taskHit.task.content }], {
+				userDrop: true,
+			});
 			if (errors.length > 0) {
 				this.ctx.showError(errors.join("; "));
 				return;
@@ -395,7 +397,9 @@ export class TodoCommandController {
 		}
 		const phaseHit = findPhaseFuzzy(current, trimmed);
 		if (phaseHit) {
-			const { phases, errors } = applyOpsToPhases(current, [{ op: "rm", phase: phaseHit.name }]);
+			const { phases, errors } = applyOpsToPhases(current, [{ op: "rm", phase: phaseHit.name }], {
+				userDrop: true,
+			});
 			if (errors.length > 0) {
 				this.ctx.showError(errors.join("; "));
 				return;

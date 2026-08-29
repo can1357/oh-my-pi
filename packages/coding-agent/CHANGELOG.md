@@ -43,6 +43,8 @@
 - Fixed orphaned pages, iframes, and workers accumulating in the shared headless browser after abnormal OMP session termination.
 ### Fixed
 
+- Model `todo({ op: "rm" })` abandons open work in place (like drop) so it cannot empty the settle ledger; user `/todo rm` still deletes.
+- RPC `set_todos` stamps abandoned rows as user-authored (`droppedBy: "user"`) so host cancels do not arm model-abandoned reminders.
 - Parent bash verify prefers a leading `cd` over a structured in-tree `cwd`, so `{ cwd: "/repo", command: "cd /tmp && bun test" }` no longer clears the latch.
 - Duplicate background bash/eval terminals are not stashed after the verify snap clears, so a reused job id cannot clear a later latch from a stale early completion.
 - `/todo edit` and `/todo import` stamp Markdown `[-]`/`[~]` rows as user drops so settle does not treat them as model-abandoned work.
