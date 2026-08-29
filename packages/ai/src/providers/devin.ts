@@ -471,12 +471,16 @@ function resolveAttestationF(): string {
  *     version="3000.4.25", os from platform, attestation in field 31 (`f`).
  *     No userJwt, sessionId, requestId, triggerId, or lsTimestamp.
  *   - System prompt: top-level field 2 (`prompt`), not collapsed into user.
- *   - CompletionConfiguration: maxTokens=128000, maxNewlines=400,
+ *   - CompletionConfiguration: maxTokens defaults to model.maxTokens then 128000
+ *     (CLI mitmproxy capture). Callers/`streamSimple` still pass options.maxTokens
+ *     and catalog model.maxTokens first, so those caps win when set.
  *     temperature=1.0, topK=40, topP=0.95 (all overridable via StreamOptions).
  *     No hardcoded stopPatterns (only caller-specified ones are sent),
  *     no firstTemperature, no fimEotProbThreshold.
  *   - No toolChoice, systemPromptCacheOptions, disableParallelToolCalls,
- *     or executionId — none appear in the captured CLI traffic.
+ *     or executionId — none appear in the captured CLI traffic. omp's
+ *     buildNamedToolChoice also does not map `devin-agent`, so omitting
+ *     toolChoice does not regress a named hatch that was never wired here.
  */
 function buildDevinChatRequest(
 	model: Model<"devin-agent">,
