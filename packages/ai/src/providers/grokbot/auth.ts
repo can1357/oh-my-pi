@@ -249,6 +249,7 @@ export async function formatGrokbotStatus(): Promise<string> {
 	return [
 		"Grok Bot provider (`grokbot` / `grokbot-sand`) — InferenceService/Stream",
 		"Not the Cursor provider (`cursor` / AgentService/Run) and not xAI / Grok CLI (`xai`, `xai-oauth`).",
+		"Usage allowances are independent: Grok Bot, Cursor, and xAI / Grok CLI each have their own quota — using one does not consume the others.",
 		`Host: ${GROKBOT_BACKEND}`,
 		"Wire: application/connect+proto (InferenceService/Stream only; no harness / AgentService fields)",
 		"Auth: Grok Bot renewal credential + machine-id checksum (not Cursor OAuth, not XAI_API_KEY)",

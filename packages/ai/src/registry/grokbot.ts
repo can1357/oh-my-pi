@@ -60,6 +60,7 @@ export async function loginGrokbot(options: OAuthLoginCallbacks): Promise<string
  * - `xai` / `xai-oauth` / Grok CLI (xAI API keys or SuperGrok OAuth)
  *
  * Auth is a Grok Bot renewal credential (+ machine id checksum), not Cursor OAuth and not xAI.
+ * Usage allowances are independent of Cursor and of xAI / Grok CLI — each has its own quota.
  * `/login grokbot` shows a prompt to run inside the Grok Bot system to write host secrets.
  */
 export const grokbotProvider = {
