@@ -1,4 +1,5 @@
 import { expect, it } from "bun:test";
+import { COMPILED_BINARIES_WORK } from "../helpers/compiled-binaries";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { TempDir } from "@oh-my-pi/pi-utils";
@@ -109,7 +110,7 @@ it("dispatches the computer worker from a single npm-style host bundle", async (
 	}
 });
 
-it("keeps non-computer selectors isolated in a compiled single-entry worker host", async () => {
+it.skipIf(!COMPILED_BINARIES_WORK)("keeps non-computer selectors isolated in a compiled single-entry worker host", async () => {
 	using tempDir = TempDir.createSync("@omp-compiled-worker-selector-");
 	const packageDir = path.resolve(import.meta.dir, "../..");
 	const outfile = path.join(tempDir.path(), process.platform === "win32" ? "worker-host.exe" : "worker-host");
