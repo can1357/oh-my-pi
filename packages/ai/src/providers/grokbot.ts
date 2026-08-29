@@ -380,14 +380,36 @@ function buildModelConfig(model: Model<"grokbot-sand">, options?: GrokbotOptions
 	return Object.keys(cfgOut).length ? cfgOut : undefined;
 }
 
-function parseToolArgs(raw: unknown): Record<string, unknown> {
+function parseToolArgs(raw: unknown, requireValid = false): Record<string, unknown> {
 	if (raw == null || raw === "") return {};
 	if (typeof raw === "object") return raw as Record<string, unknown>;
-	if (typeof raw !== "string") return {};
+	if (typeof raw !== "string") {
+		if (requireValid) {
+			throw new AIError.ProviderResponseError("Grok Bot completed tool call has non-JSON arguments", {
+				provider: "grokbot",
+				kind: "envelope",
+			});
+		}
+		return {};
+	}
 	try {
 		const parsed = JSON.parse(raw);
-		return parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : {};
-	} catch {
+		if (parsed && typeof parsed === "object") return parsed as Record<string, unknown>;
+		if (requireValid) {
+			throw new AIError.ProviderResponseError("Grok Bot completed tool call arguments must be a JSON object", {
+				provider: "grokbot",
+				kind: "envelope",
+			});
+		}
+		return {};
+	} catch (err) {
+		if (err instanceof AIError.ProviderResponseError) throw err;
+		if (requireValid) {
+			throw new AIError.ProviderResponseError("Grok Bot completed tool call has malformed JSON arguments", {
+				provider: "grokbot",
+				kind: "envelope",
+			});
+		}
 		return {};
 	}
 }
@@ -596,7 +618,7 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 			const finishTool = (state: { ended: boolean; argsText: string; block: ToolCall; index: number }) => {
 				if (state.ended) return;
 				state.ended = true;
-				state.block.arguments = parseToolArgs(state.argsText);
+				state.block.arguments = parseToolArgs(state.argsText, true);
 				stream.push({
 					type: "toolcall_end",
 					contentIndex: state.index,
@@ -612,12 +634,13 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 					part.args == null ? "" : typeof part.args === "string" ? part.args : JSON.stringify(part.args);
 				const isComplete = Boolean(part.isComplete ?? part.is_complete);
 				const indexHint = part.toolIndex ?? part.tool_index;
-				let key = id;
-				if (!key && typeof indexHint === "number") key = `idx:${indexHint}`;
-				if (!key && name) key = `name:${name}:${toolStates.size}`;
-				if (!key) key = `anon:${toolStates.size}`;
+				const idxKey = typeof indexHint === "number" ? `idx:${indexHint}` : undefined;
+				// Correlate chunks by id and/or index — frames may omit one of the two.
+				let state =
+					(id ? toolStates.get(id) : undefined) ??
+					(idxKey ? toolStates.get(idxKey) : undefined) ??
+					undefined;
 
-				let state = toolStates.get(key);
 				if (!state) {
 					closeOpen();
 					const block: ToolCall = {
@@ -628,12 +651,18 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 					};
 					const index = output.content.length;
 					output.content.push(block);
+					const key = id || idxKey || `anon:${toolStates.size}`;
 					state = { key, index, block, argsText: "", ended: false };
 					toolStates.set(key, state);
 					if (id) toolStates.set(id, state);
+					if (idxKey) toolStates.set(idxKey, state);
 					stream.push({ type: "toolcall_start", contentIndex: index, partial: output });
-				} else if (name && !state.block.name) {
-					state.block.name = name;
+				} else {
+					if (id) toolStates.set(id, state);
+					if (idxKey) toolStates.set(idxKey, state);
+					if (name && (!state.block.name || state.block.name === "unknown")) {
+						state.block.name = name;
+					}
 				}
 				if (id && state.block.id.startsWith("call_")) state.block.id = id;
 

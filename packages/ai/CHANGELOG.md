@@ -9,6 +9,7 @@
 
 ### Fixed
 
+- Grok Bot rejects completed tool calls with malformed JSON arguments and correlates tool chunks by id or index.
 - Grok Bot streams that end with `ToolCallPart.isComplete: false` now fail as incomplete streams instead of parsing partial JSON as `{}` and emitting a successful `toolUse`.
 - `/grokbot` status truncation uses shared `TRUNCATE_LENGTHS.TITLE` from `@oh-my-pi/pi-tui` instead of a provider-local width constant.
 - Grok Bot stream requests keep reverse-proxy path prefixes on the configured backend when joining `InferenceService/Stream`.
