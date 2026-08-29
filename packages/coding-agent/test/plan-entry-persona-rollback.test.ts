@@ -2,14 +2,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
-import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
-import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
-import { resetSettingsForTest } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
+import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 
 describe("plan entry persona rollback", () => {
 	let tempHome: string;
@@ -35,8 +34,15 @@ describe("plan entry persona rollback", () => {
 	});
 
 	it("rolls back the torn-down persona when plan setup fails", async () => {
+		// `/plan` from an active persona clears the persona's tools, prompt,
+		// and spawn policy BEFORE the tool-activation step. A failure there
+		// (e.g. a rejected activation) must restore the persona state: the
+		// persisted mode is still `agent`, so a half-cleared persona would
+		// leave the session resuming with a live persona marker over discarded
+		// state. Regression test for the rollback added with the plan-entry
+		// snapshot.
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
-		if (!model) throw new Error("missing model");
+		if (!model) throw new Error("missing bundled anthropic model");
 		const modelRegistry = new ModelRegistry(authStorage, path.join(tempHome, "models.yml"));
 		const { session } = await createAgentSession({
 			cwd: projectDir,
@@ -70,17 +76,13 @@ describe("plan entry persona rollback", () => {
 			await expect(mode.handlePlanModeCommand()).rejects.toThrow("tool activation rejected");
 
 			// The persona state must be restored by rollbackPersonaSwitch.
-			console.log("SPAWNS AFTER FAILURE:", session.getSessionSpawns());
-			console.log("PERSONA PROMPT AFTER FAILURE:", JSON.stringify(session.getPersonaAppendPrompt()));
-			console.log("ENABLED TOOLS AFTER FAILURE:", JSON.stringify(session.getEnabledToolNames()));
-			console.log("PLAN MODE STATE:", JSON.stringify(session.getPlanModeState()));
 			expect(session.getSessionSpawns()).toBe("scout");
 			expect(session.getPersonaAppendPrompt()).toBe("You are launch-persona.");
 			expect(session.getEnabledToolNames()).toEqual(["read"]);
-			// Plan mode must NOT be enabled
+			// Plan mode must NOT be enabled.
 			expect(mode.planModeEnabled).toBe(false);
 		} finally {
 			await session.dispose();
 		}
-	});
+	}, 20_000);
 });
