@@ -3281,6 +3281,107 @@ describe("AgentSession retry fallback", () => {
 		expect(session.model?.id).toBe(primaryModel.id);
 	});
 
+	it("restores the original primary after its cooldown even when a deeper fallback refused", async () => {
+		// primary A rate-limits -> fallback B; then B (not A) declines via the
+		// classifier -> fallback C. B's refusal cooldown must stay associated with
+		// B, not block restoring A once A's own (unrelated) suppression expires.
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5"); // A
+		const firstFallback = getBundledModel("openai", "gpt-4o-mini"); // B
+		const secondFallback = getBundledModel("openai", "gpt-4o"); // C
+		if (!primaryModel || !firstFallback || !secondFallback) {
+			throw new Error("Expected bundled test models to exist");
+		}
+
+		const primaryCooldownMs = 60 * 1000;
+		const refusalCooldownMs = 30 * 60 * 1000;
+		const requestedModels: string[] = [];
+		const mock = createMockModel();
+		let primaryAttempts = 0;
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: {
+				model: primaryModel,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
+			streamFn: (model, context, options) => {
+				requestedModels.push(`${model.provider}/${model.id}`);
+				if (model.provider === primaryModel.provider && model.id === primaryModel.id) {
+					primaryAttempts += 1;
+					// A is rate-limited on first contact, then healthy once its window lapses.
+					if (primaryAttempts === 1) {
+						mock.push({ throw: `rate limit exceeded retry-after-ms=${primaryCooldownMs}` });
+					} else {
+						mock.push({ content: [`primary-recovered:${primaryAttempts}`] });
+					}
+				} else if (model.provider === firstFallback.provider && model.id === firstFallback.id) {
+					// B declines via the content classifier.
+					mock.push({
+						content: [{ type: "thinking", thinking: "Classifier evaluation before refusal." }],
+						stopReason: "error",
+						stopDetails: { type: "refusal", category: "cyber", explanation: "Classifier declined this turn." },
+						errorMessage: "Refusal (cyber): Classifier declined this turn.",
+					});
+				} else if (model.provider === secondFallback.provider && model.id === secondFallback.id) {
+					mock.push({ content: ["second-fallback-ok"] });
+				} else {
+					throw new Error(`Unexpected model requested during deep-refusal test: ${model.provider}/${model.id}`);
+				}
+				return mock.stream(model, context, options);
+			},
+		});
+
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.fallbackChains": {
+				default: [
+					`${firstFallback.provider}/${firstFallback.id}`,
+					`${secondFallback.provider}/${secondFallback.id}`,
+				],
+			},
+			"retry.fallbackRevertPolicy": "cooldown-expiry",
+			"retry.classifierRefusalCooldownMs": refusalCooldownMs,
+		});
+		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
+
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
+		let now = Date.now();
+		vi.spyOn(Date, "now").mockImplementation(() => now);
+
+		await session.prompt("Recover through a deeper fallback refusal");
+		await session.waitForIdle();
+
+		expect(requestedModels).toEqual([
+			`${primaryModel.provider}/${primaryModel.id}`,
+			`${firstFallback.provider}/${firstFallback.id}`,
+			`${secondFallback.provider}/${secondFallback.id}`,
+		]);
+		expect(session.model?.id).toBe(secondFallback.id);
+
+		// A's rate-limit window has expired; B's refusal cooldown has not. The
+		// refusal belonged to B, so it must not keep the session off A: the primary
+		// is restored and, now healthy, serves the turn.
+		now += primaryCooldownMs + 1;
+		await session.prompt("Primary should be restored now");
+		await session.waitForIdle();
+
+		expect(requestedModels).toEqual([
+			`${primaryModel.provider}/${primaryModel.id}`,
+			`${firstFallback.provider}/${firstFallback.id}`,
+			`${secondFallback.provider}/${secondFallback.id}`,
+			`${primaryModel.provider}/${primaryModel.id}`,
+		]);
+		expect(session.model?.provider).toBe(primaryModel.provider);
+		expect(session.model?.id).toBe(primaryModel.id);
+	});
+
 	it("drops classifier refusal messages before later prompts", async () => {
 		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!primaryModel) {

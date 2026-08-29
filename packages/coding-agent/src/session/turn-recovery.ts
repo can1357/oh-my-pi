@@ -2208,11 +2208,20 @@ export class TurnRecovery {
 					pinFallback: classifierRefusal && !cooldownClassifierRefusal,
 					preserveFailedTurn,
 				});
-				if (switchedModel && cooldownClassifierRefusal && this.#activeRetryFallback) {
+				if (
+					switchedModel &&
+					cooldownClassifierRefusal &&
+					this.#activeRetryFallback &&
+					this.#activeRetryFallback.originalSelector === currentSelector
+				) {
 					// Scope the cooldown to THIS session's fallback state rather than the
-					// registry-wide suppression map: a refusal reflects this session's
-					// turn content, so it must not sideline the model for a sibling
-					// session sharing the ModelRegistry or clobber its rate-limit window.
+					// registry-wide suppression map: a refusal reflects this session's turn
+					// content, so it must not sideline the model for a sibling session
+					// sharing the ModelRegistry or clobber its rate-limit window. Only stamp
+					// it when the original primary itself refused: restoration only ever
+					// targets `originalSelector`, so a deeper-chain refusal (primary A -> B,
+					// then B refuses -> C) must not block restoring A once A's own
+					// suppression clears.
 					this.#activeRetryFallback.classifierRefusalCooldownUntilMs = Date.now() + classifierRefusalCooldownMs;
 				}
 			}
