@@ -331,6 +331,9 @@
 - Fixed `lsp diagnostics` incorrectly reporting success for project-aware pull-diagnostic servers when diagnostics time out or fail.
 - Corrected labels under `Settings > Context > Compaction Token Limit`.
 - Fixed orphaned pages, iframes, and workers accumulating in the shared headless browser after abnormal OMP session termination.
+### Fixed
+
+- Fixed MCP tool names dropping digits, which renamed servers such as `context7` and collapsed servers differing only by a digit onto the same tool names ([#10179](https://github.com/can1357/oh-my-pi/pull/10179) by [@bitboxx](https://github.com/bitboxx)).
 
 ## [18.0.10] - 2026-08-28
 

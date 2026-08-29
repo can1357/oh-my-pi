@@ -143,7 +143,7 @@ mcp__<sanitized_server_name>_<sanitized_tool_name>
 Rules:
 
 - lowercases
-- non-`[a-z_]` chars become `_`
+- non-`[a-z0-9_]` chars become `_`
 - repeated underscores collapse
 - redundant `<server>_` prefix in tool name is stripped once
 - names longer than 64 characters keep a readable prefix and append `_` plus the first eight base-36
