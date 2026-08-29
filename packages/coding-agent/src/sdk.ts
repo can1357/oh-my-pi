@@ -3636,6 +3636,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			autoApprove: options.autoApprove,
 			scoutAllowedBySpawnPolicy: isScoutSpawnable(undefined, options.spawns ?? "*"),
 			evalKernelOwnerId,
+			isIsolated: options.isIsolated ?? false,
 			// Defined only for top-level sessions (creation is gated above).
 			// AgentSession uses this to decide whether it may dispose the global
 			// AsyncJobManager on teardown; subagents inherit the parent's and

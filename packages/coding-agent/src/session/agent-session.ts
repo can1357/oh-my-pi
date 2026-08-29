@@ -187,6 +187,7 @@ import {
 import type { SecretObfuscator } from "../secrets/obfuscator";
 import { releaseSharpshooterSession } from "../sharpshooter/backend";
 import { flushSharpshooterExtraction } from "../sharpshooter/extract";
+import { isIsolationAvailable } from "../task/spawn-policy";
 import {
 	AUTO_THINKING,
 	type ConfiguredThinkingLevel,
@@ -623,6 +624,7 @@ export class AgentSession {
 	// Agent identity (registry id) used for IRC routing and job ownership.
 	#agentId: string | undefined;
 	#agentKind: "main" | "sub" = "main";
+	#isIsolated = false;
 	#scoutAllowedBySpawnPolicy = true;
 	#providerSessionId: string | undefined;
 	#freshProviderSessionId: string | undefined;
@@ -1472,6 +1474,7 @@ export class AgentSession {
 		this.#loopGuards = new LoopGuards(streamGuardsHost);
 		this.#agentId = config.agentId;
 		this.#agentKind = config.agentKind ?? "main";
+		this.#isIsolated = config.isIsolated ?? false;
 		this.#scoutAllowedBySpawnPolicy = config.scoutAllowedBySpawnPolicy ?? true;
 		this.#providerSessionId = config.providerSessionId;
 		this.#inheritedProviderPromptCacheKey =
@@ -5679,6 +5682,15 @@ export class AgentSession {
 					content: renderWorkflowNotice({
 						taskBatch: this.settings.get("task.batch"),
 						scoutAvailable: this.#isScoutAvailable(),
+						// Same gate as the eval description: a session that cannot
+						// spawn isolated (plan mode, isolation mode "none", or an
+						// isolated session without allowNested) must not be told
+						// to pass `isolated`/`apply`/`merge` — the preflight
+						// rejects those calls.
+						isolationEnabled: isIsolationAvailable(
+							{ settings: this.settings, isIsolated: this.#isIsolated },
+							this.#planModeState?.enabled === true,
+						),
 					}),
 					display: false,
 					attribution: "user",

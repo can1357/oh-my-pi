@@ -156,6 +156,39 @@ describe("AgentSession magic keyword settings", () => {
 		expect(notice).toContain("Explore inline FIRST");
 	});
 
+	it("omits isolation controls from the workflowz notice when isolation is unavailable", async () => {
+		// Default settings: task.isolation.mode is "none", so the preflight
+		// rejects `isolated`/`apply`/`merge`. The notice must not advertise
+		// controls the spawn preflight refuses (regression: the notice
+		// unconditionally advertised them, steering the model into rejected
+		// calls).
+		const created = await createMagicKeywordSession(modelRegistry);
+		session = created.session;
+		const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined);
+
+		await session.prompt("please workflowz this");
+
+		const promptMessages = promptSpy.mock.calls[0]![0] as unknown as Array<{ content?: string; customType?: string }>;
+		const notice = promptMessages.find(message => message.customType === "workflow-notice")?.content ?? "";
+		expect(notice).not.toContain("isolated=None");
+		expect(notice).not.toContain("apply=None");
+		expect(notice).not.toContain("merge=None");
+	});
+
+	it("advertises isolation controls in the workflowz notice when isolation is available", async () => {
+		const created = await createMagicKeywordSession(modelRegistry);
+		session = created.session;
+		created.settings.set("task.isolation.mode", "auto");
+		const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined);
+
+		await session.prompt("please workflowz this");
+
+		const promptMessages = promptSpy.mock.calls[0]![0] as unknown as Array<{ content?: string; customType?: string }>;
+		const notice = promptMessages.find(message => message.customType === "workflow-notice")?.content ?? "";
+		expect(notice).toContain("isolated=None");
+		expect(notice).toContain("apply=None");
+		expect(notice).toContain("merge=None");
+	});
 	it("skips workflowz notice when the task tool is inactive", async () => {
 		const created = await createMagicKeywordSession(modelRegistry, []);
 		session = created.session;

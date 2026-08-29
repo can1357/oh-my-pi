@@ -26,11 +26,20 @@ export const WORKFLOW_NOTICE: string = renderWorkflowNotice({ taskBatch: true })
 export function renderWorkflowNotice({
 	taskBatch,
 	scoutAvailable,
+	isolationEnabled,
 }: {
 	taskBatch: boolean;
 	scoutAvailable?: boolean;
+	/** Whether `isolated`/`apply`/`merge` controls may be advertised (same gate as the eval description). */
+	isolationEnabled?: boolean;
 }): string {
-	return prompt.render(workflowNoticeTemplate, { taskBatch, scoutAvailable: scoutAvailable ?? true }).trim();
+	return prompt
+		.render(workflowNoticeTemplate, {
+			taskBatch,
+			scoutAvailable: scoutAvailable ?? true,
+			isolationEnabled: isolationEnabled ?? true,
+		})
+		.trim();
 }
 
 /**
