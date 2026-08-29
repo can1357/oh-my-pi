@@ -274,7 +274,7 @@ function toolResultPayload(msg: Record<string, unknown>): unknown {
 	return "";
 }
 
-/** @internal Exported for sand-host parity contract tests. */
+/** @internal Exported for Grok Bot message-conversion contract tests. */
 export function toInferenceMessages(context: Context) {
 	const out: Array<Record<string, unknown>> = [];
 	const system = context.systemPrompt;

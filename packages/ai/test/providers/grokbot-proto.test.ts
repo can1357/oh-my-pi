@@ -345,7 +345,7 @@ describe("grokbot /login host-install prompt", () => {
 		vi.restoreAllMocks();
 	});
 
-	test("surfaces the sand-VM install prompt and verifies host secrets without storing a key", async () => {
+	test("surfaces the Grok Bot system install prompt and verifies host secrets without storing a key", async () => {
 		const prompts: string[] = [];
 		const progress: string[] = [];
 		spyOn(grokbotAuth, "loadGrokbotConfig").mockResolvedValue({
