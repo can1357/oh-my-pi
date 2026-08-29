@@ -301,6 +301,30 @@ describe("ModelRegistry runtime provider registration", () => {
 			model: "model-compact",
 		});
 	});
+	test("combines static fallback models with dynamic provider discovery", async () => {
+		const providerName = "combined-runtime-provider";
+		let dynamicFetches = 0;
+		registry.registerProvider(
+			providerName,
+			{
+				baseUrl: "https://runtime.example.com/v1",
+				apiKey: "RUNTIME_KEY",
+				api: "openai-completions",
+				models: [{ ...baseModel, id: "fallback-model" }],
+				fetchDynamicModels: async () => {
+					dynamicFetches++;
+					return [{ ...baseModel, id: "dynamic-model" }];
+				},
+			},
+			"ext://runtime",
+		);
+
+		await registry.refreshRuntimeProviders("online");
+
+		expect(dynamicFetches).toBe(1);
+		expect(registry.find(providerName, "dynamic-model")).toBeDefined();
+		expect(registry.find(providerName, "fallback-model")).toBeDefined();
+	});
 
 	test("configured discovery suppresses extension fetchDynamicModels for the same provider", async () => {
 		const providerName = "runtime-configured-provider";
@@ -346,6 +370,84 @@ describe("ModelRegistry runtime provider registration", () => {
 
 		expect(runtimeFetchCalls).toBe(0);
 		expect(configuredRegistry.find(providerName, "shared-runtime-model")?.contextWindow).toBe(32_768);
+	});
+
+	test("runtime provider manager supersedes the built-in shared catalog manager", async () => {
+		let catalogFetches = 0;
+		const catalogFetch: FetchImpl = async input => {
+			catalogFetches++;
+			throw new Error(`Unexpected built-in catalog fetch: ${String(input)}`);
+		};
+		const overrideRegistry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: catalogFetch });
+		let runtimeFetches = 0;
+		overrideRegistry.registerProvider(
+			"anthropic",
+			{
+				baseUrl: "https://runtime.example.com/v1",
+				api: "anthropic-messages",
+				fetchDynamicModels: async () => {
+					runtimeFetches++;
+					return [{ ...baseModel, id: "runtime-anthropic-model" }];
+				},
+			},
+			"ext://runtime",
+		);
+
+		await overrideRegistry.refreshProvider("anthropic", "online");
+
+		expect(runtimeFetches).toBe(1);
+		expect(catalogFetches).toBe(0);
+		expect(getProviderModels(overrideRegistry, "anthropic").map(model => model.id)).toEqual([
+			"runtime-anthropic-model",
+		]);
+	});
+
+	test("refreshProvider aborts and retries inherited shared-catalog fetches", async () => {
+		vi.useFakeTimers();
+		// Pin the keyless premise: a host ANTHROPIC_API_KEY (dev machines, agent
+		// harnesses) gives the anthropic manager a fetchDynamicModels hook whose
+		// endpoint fetch starts only after the catalog abort — its deadline timer
+		// arms after the last advanceTimersByTime and the refresh hangs forever.
+		const peekSpy = vi.spyOn(authStorage, "peekApiKey").mockResolvedValue(undefined);
+		let catalogFetches = 0;
+		let abortedFetches = 0;
+		const stalledFetch: FetchImpl = (_input, init) => {
+			catalogFetches++;
+			const { promise, reject } = Promise.withResolvers<Response>();
+			const signal = init?.signal;
+			if (!signal) {
+				reject(new Error("catalog fetch did not receive an abort signal"));
+				return promise;
+			}
+			const rejectAborted = () => {
+				abortedFetches++;
+				reject(signal.reason);
+			};
+			if (signal.aborted) {
+				rejectAborted();
+			} else {
+				signal.addEventListener("abort", rejectAborted, { once: true });
+			}
+			return promise;
+		};
+		const stalledRegistry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: stalledFetch });
+
+		const firstRefresh = stalledRegistry.refreshProvider("anthropic", "online");
+		await drainMicrotasksUntil(() => catalogFetches === 1, "first shared-catalog fetch did not start");
+		vi.advanceTimersByTime(9_999);
+		await Promise.resolve();
+		expect(abortedFetches).toBe(0);
+		vi.advanceTimersByTime(1);
+		await firstRefresh;
+		expect(abortedFetches).toBe(1);
+
+		const secondRefresh = stalledRegistry.refreshProvider("anthropic", "online");
+		await drainMicrotasksUntil(() => catalogFetches === 2, "second shared-catalog fetch did not start");
+		vi.advanceTimersByTime(10_000);
+		await secondRefresh;
+		expect(abortedFetches).toBe(2);
+		expect(catalogFetches).toBe(2);
+		peekSpy.mockRestore();
 	});
 
 	test("refreshRuntimeProviders times out extension fetchDynamicModels that never resolves", async () => {
@@ -416,6 +518,34 @@ describe("ModelRegistry runtime provider registration", () => {
 			// requiresEffort is backfilled from identity.
 			requiresEffort: true,
 		});
+	});
+
+	test("registerProvider preserves a standalone Codex WebSocket opt-out across refresh", async () => {
+		const config: ProviderConfigInput = {
+			baseUrl: "https://chatgpt.com/backend-api/codex",
+			apiKey: "RUNTIME_KEY",
+			api: "openai-codex-responses",
+			models: [{ ...baseModel, id: "gpt-5.6-sol", preferWebsockets: false }],
+		};
+
+		registry.registerProvider("runtime-codex", config, "ext://runtime");
+		expect(registry.find("runtime-codex", "gpt-5.6-sol")?.preferWebsockets).toBe(false);
+
+		await registry.refresh("offline");
+		expect(registry.find("runtime-codex", "gpt-5.6-sol")?.preferWebsockets).toBe(false);
+	});
+
+	test("registerProvider lets an extension disable WebSockets on a bundled Codex model", () => {
+		const config: ProviderConfigInput = {
+			baseUrl: "https://chatgpt.com/backend-api/codex",
+			apiKey: "RUNTIME_KEY",
+			api: "openai-codex-responses",
+			models: [{ ...baseModel, id: "gpt-5.4", preferWebsockets: false }],
+		};
+
+		registry.registerProvider("openai-codex", config, "ext://runtime");
+
+		expect(registry.find("openai-codex", "gpt-5.4")?.preferWebsockets).toBe(false);
 	});
 
 	test("extension-registered models survive refresh('offline') cycle", async () => {

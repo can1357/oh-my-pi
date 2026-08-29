@@ -88,6 +88,7 @@ import {
 } from "./anthropic-wire";
 import {
 	CLAUDE_CODE_MAX_OUTPUT_TOKENS,
+	claudeCodeSdkVersion,
 	claudeCodeSystemInstruction,
 	claudeCodeVersion,
 	claudeToolPrefix,
@@ -154,13 +155,14 @@ function mergeAnthropicBetaHeader(callerHeaders: Record<string, string>, beta: s
 	}
 	return { "anthropic-beta": beta };
 }
-
+const oauthAuthBeta = "oauth-2025-04-20";
 const midConversationSystemBeta = "mid-conversation-system-2026-04-07";
 const contextManagementBeta = "context-management-2025-06-27";
 const structuredOutputsBeta = "structured-outputs-2025-12-15";
 const thinkingTokenCountBeta = "thinking-token-count-2026-05-13";
 const fallbackCreditBeta = "fallback-credit-2026-06-01";
 const coworkUtilityBetaDefaults = [
+	oauthAuthBeta,
 	"interleaved-thinking-2025-05-14",
 	thinkingTokenCountBeta,
 	contextManagementBeta,
@@ -169,6 +171,7 @@ const coworkUtilityBetaDefaults = [
 ] as const;
 const coworkAgentBetaDefaults = [
 	"claude-code-20250219",
+	oauthAuthBeta,
 	"interleaved-thinking-2025-05-14",
 	thinkingTokenCountBeta,
 	contextManagementBeta,
@@ -524,7 +527,7 @@ export const coworkHeaders = {
 	"X-Stainless-Arch": mapStainlessArch(process.arch),
 	"X-Stainless-Lang": "js",
 	"X-Stainless-OS": "Linux",
-	"X-Stainless-Package-Version": "0.94.0",
+	"X-Stainless-Package-Version": claudeCodeSdkVersion,
 	"X-Stainless-Retry-Count": "0",
 	"X-Stainless-Runtime": "node",
 	"X-Stainless-Runtime-Version": "v26.3.0",

@@ -156,7 +156,7 @@ describe("renderHtmlToText: Jina response validation", () => {
 			expect(result.method).toBe("jina");
 			expect(requestHeaders?.get("authorization")).toBe("Bearer stored-jina-key");
 		} finally {
-			AgentStorage.resetInstance();
+			AgentStorage.close();
 			await tempDir.remove().catch(() => {});
 			if (originalApiKey === undefined) delete process.env.JINA_API_KEY;
 			else process.env.JINA_API_KEY = originalApiKey;

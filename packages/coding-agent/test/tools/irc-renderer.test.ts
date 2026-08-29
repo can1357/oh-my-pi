@@ -266,26 +266,58 @@ describe("hubToolRenderer list", () => {
 		expect(row).toContain("auditing the token refresh path");
 	});
 
-	it("uses details.counts when the page is empty but parked peers exist", async () => {
+	it("renders supplied totals on an empty filtered page whenever any roster count is nonzero", async () => {
 		const uiTheme = await theme();
-		const rendered = lines(
-			hubToolRenderer.renderResult(
-				{
-					content: [{ type: "text", text: "" }],
-					details: {
-						op: "list",
-						from: "Main",
-						peers: [],
-						counts: { running: 0, idle: 0, parked: 3, shown: 0, truncated: 0 },
-					} satisfies CoordinationDetails,
-				},
-				{ expanded: false, isPartial: false },
-				uiTheme,
-				{ op: "list" },
-			),
-		);
-		expect(rendered[0]).toContain("3 parked");
-		expect(rendered[0]).not.toContain("no other agents");
+		const cases: Array<{
+			counts: { running: number; idle: number; parked: number; shown: number; truncated: number };
+			contains: string[];
+			absent?: string[];
+		}> = [
+			{
+				counts: { running: 2, idle: 0, parked: 0, shown: 0, truncated: 0 },
+				contains: ["2 running", "0 idle", "0 parked"],
+				absent: ["no other agents"],
+			},
+			{
+				counts: { running: 0, idle: 4, parked: 0, shown: 0, truncated: 0 },
+				contains: ["0 running", "4 idle", "0 parked"],
+				absent: ["no other agents"],
+			},
+			{
+				counts: { running: 0, idle: 0, parked: 3, shown: 0, truncated: 0 },
+				contains: ["0 running", "0 idle", "3 parked"],
+				absent: ["no other agents"],
+			},
+			{
+				counts: { running: 1, idle: 2, parked: 0, shown: 0, truncated: 3 },
+				contains: ["1 running", "2 idle", "0 parked", "3 truncated"],
+				absent: ["no other agents"],
+			},
+			{
+				counts: { running: 0, idle: 0, parked: 0, shown: 0, truncated: 0 },
+				contains: ["no other agents"],
+			},
+		];
+		for (const testCase of cases) {
+			const rendered = lines(
+				hubToolRenderer.renderResult(
+					{
+						content: [{ type: "text", text: "" }],
+						details: {
+							op: "list",
+							from: "Main",
+							peers: [],
+							counts: testCase.counts,
+						} satisfies CoordinationDetails,
+					},
+					{ expanded: false, isPartial: false },
+					uiTheme,
+					{ op: "list" },
+				),
+			);
+			for (const snippet of testCase.contains) expect(rendered[0]).toContain(snippet);
+			for (const snippet of testCase.absent ?? []) expect(rendered[0]).not.toContain(snippet);
+		}
 	});
 });
 

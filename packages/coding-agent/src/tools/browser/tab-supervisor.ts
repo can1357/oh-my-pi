@@ -1,4 +1,12 @@
-import { getPuppeteerDir, logger, postmortem, Snowflake, withTimeout, workerHostEntry } from "@oh-my-pi/pi-utils";
+import {
+	getProjectDir,
+	getPuppeteerDir,
+	logger,
+	postmortem,
+	Snowflake,
+	withTimeout,
+	workerHostEntry,
+} from "@oh-my-pi/pi-utils";
 import type { Page, Target } from "puppeteer-core";
 import { callSessionTool } from "../../eval/js/tool-bridge";
 import { webpExclusionForModel } from "../../utils/image-loading";
@@ -284,7 +292,7 @@ async function acquireTabImpl(
 							timeoutMs: opts.timeoutMs,
 							signal: opts.signal,
 						},
-						{ cwd: process.cwd() },
+						{ cwd: getProjectDir() },
 					);
 				}
 				return { tab: tabs.get(name)!, created: false };

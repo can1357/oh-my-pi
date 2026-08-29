@@ -8,6 +8,7 @@ import {
 	type ImageContent,
 	type Model,
 	type ToolExample,
+	type Usage,
 } from "@oh-my-pi/pi-ai";
 import { prompt } from "@oh-my-pi/pi-utils";
 import { extractTextContent } from "../commit/utils";
@@ -97,6 +98,7 @@ export interface InspectImageToolDetails {
 	model: string;
 	imagePath: string;
 	mimeType: string;
+	usage: Usage;
 }
 
 export class InspectImageTool implements AgentTool<typeof inspectImageSchema, InspectImageToolDetails> {
@@ -177,20 +179,22 @@ export class InspectImageTool implements AgentTool<typeof inspectImageSchema, In
 		let selectedPattern: string | undefined;
 		for (const pattern of ["@vision", "@default", activeModelPattern]) {
 			const resolved = resolvePattern(pattern);
-			if (resolved) {
+			if (resolved?.input.includes("image")) {
 				model = resolved;
 				selectedPattern = pattern;
 				break;
 			}
 		}
-		model ??= availableModels[0];
+		const activeProvider = resolvePattern(activeModelPattern)?.provider;
+		model ??= availableModels.find(
+			candidate => candidate.provider === activeProvider && candidate.input.includes("image"),
+		);
+		model ??= availableModels.find(candidate => candidate.input.includes("image"));
 		if (!model) {
-			throw new ToolError("Unable to resolve a model for inspect_image.");
-		}
-
-		if (!model.input.includes("image")) {
+			const textOnly = resolvePattern("@vision") ?? resolvePattern("@default") ?? resolvePattern(activeModelPattern);
+			if (!textOnly) throw new ToolError("Unable to resolve a model for inspect_image.");
 			throw new ToolError(
-				`Resolved model ${model.provider}/${model.id} does not support image input. Configure a vision-capable model for modelRoles.vision.`,
+				`Resolved model ${textOnly.provider}/${textOnly.id} does not support image input. Configure a vision-capable model for modelRoles.vision.`,
 			);
 		}
 
@@ -328,6 +332,7 @@ export class InspectImageTool implements AgentTool<typeof inspectImageSchema, In
 				model: `${model.provider}/${model.id}`,
 				imagePath: imageInput.resolvedPath,
 				mimeType: imageInput.mimeType,
+				usage: response.usage,
 			},
 		};
 	}

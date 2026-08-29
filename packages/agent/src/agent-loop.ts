@@ -555,12 +555,35 @@ export function agentLoop(
 }
 
 /**
+ * Trailing assistant message whose runnable tool calls have no results yet.
+ *
+ * A harness that strips failed/aborted tool results in order to re-execute
+ * the calls (e.g. `AgentSession.retry`'s tool replay) leaves the transcript
+ * in this shape; {@link agentLoopContinue} resumes it by running those calls
+ * before the next model call. Cursor exec-resolved blocks are excluded — the
+ * provider already executed those server-side. `length`-truncated turns never
+ * qualify: their trailing call arguments may be incomplete.
+ */
+export function unpairedToolCallTail(messages: readonly AgentMessage[]): AssistantMessage | undefined {
+	const tail = messages[messages.length - 1];
+	if (tail?.role !== "assistant") return undefined;
+	// Mirrors the loop's `runnableStop` rule for fresh turns.
+	if (tail.stopReason !== "toolUse" && tail.stopReason !== "stop") return undefined;
+	const hasRunnable = tail.content.some(
+		c => c.type === "toolCall" && (c as CursorExecResolvedCarrier)[kCursorExecResolved] !== true,
+	);
+	return hasRunnable ? tail : undefined;
+}
+
+/**
  * Continue an agent loop from the current context without adding a new message.
  * Used for retries - context already has user message or tool results.
  *
  * **Important:** The last message in context must convert to a `user` or `toolResult` message
- * via `convertToLlm`. If it doesn't, the LLM provider will reject the request.
- * This cannot be validated here since `convertToLlm` is only called once per turn.
+ * via `convertToLlm` — except for an assistant tail with unpaired runnable
+ * tool calls (see {@link unpairedToolCallTail}), which resumes by executing
+ * those calls first. Any other assistant tail is rejected here; other invalid
+ * tails cannot be validated since `convertToLlm` is only called once per turn.
  */
 export function agentLoopContinue(
 	context: AgentContext,
@@ -572,7 +595,7 @@ export function agentLoopContinue(
 		throw new Error("Cannot continue: no messages in context");
 	}
 
-	if (context.messages[context.messages.length - 1].role === "assistant") {
+	if (context.messages[context.messages.length - 1].role === "assistant" && !unpairedToolCallTail(context.messages)) {
 		throw new Error("Cannot continue from message role: assistant");
 	}
 
@@ -1061,6 +1084,43 @@ async function runLoopBody(
 		let softSatisfies: SoftToolRequirement["satisfies"];
 		let directiveResolvedForTurn = false;
 		let turnOpen = false;
+		// A trailing assistant message with unpaired tool calls: the harness
+		// stripped the failed/aborted results so this run re-executes the calls
+		// (AgentSession.retry's tool replay). Run them before the first model
+		// call; the loop then continues normally on the fresh results. Queued
+		// steering stays parked until after the batch — injecting a message
+		// between the tool_use blocks and their results would break the
+		// provider's pairing invariant.
+		const resumeTail = unpairedToolCallTail(currentContext.messages);
+		if (resumeTail) {
+			stream.push({ type: "turn_start" });
+			emitInputMessages(stream, messagesToEmit);
+			messagesToEmit = [];
+			turnOpen = true;
+			const executionResult = await executeToolCalls(
+				currentContext,
+				resumeTail,
+				signal,
+				stream,
+				config,
+				telemetry,
+				invokeAgentSpan,
+			);
+			for (const result of executionResult.toolResults) {
+				currentContext.messages.push(result);
+				newMessages.push(result);
+			}
+			await emitTurnEnd(stream, currentContext, resumeTail, executionResult.toolResults, config, signal, {
+				willContinue: !isDeadlineExceeded(config.deadline),
+			});
+			turnOpen = false;
+			// A tool hook may mark its completed result as terminal (e.g. subagent
+			// yield) — same stop-before-next-model-call rule as the main loop.
+			if (signal?.reason === TERMINAL_TOOL_RESULT_ABORT_REASON) {
+				endAgentStream(stream, newMessages, telemetry, stepCounter.count);
+				return;
+			}
+		}
 
 		// Outer loop: continues when queued follow-up messages arrive after agent would stop
 		while (true) {

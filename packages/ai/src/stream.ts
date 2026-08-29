@@ -939,9 +939,10 @@ function streamDispatch<TApi extends Api>(
 		return streamBedrock(model as Model<"bedrock-converse-stream">, context, requestOptions as BedrockOptions);
 	}
 
-	const prepareRequest = getProviderDefinition(model.provider)?.prepareRequest;
-	const prepared = prepareRequest?.(model as Model<Api>, requestOptions as StreamOptions);
-	const providerModel = prepared?.model ?? (model as Model<Api>);
+	const providerDefinition = getProviderDefinition(model.provider);
+	const requestModel = providerDefinition?.prepareModel?.(model) ?? model;
+	const prepared = providerDefinition?.prepareRequest?.(requestModel, requestOptions as StreamOptions);
+	const providerModel = prepared?.model ?? requestModel;
 	const preparedOptions = prepared?.options ?? (requestOptions as StreamOptions);
 	const apiKey = preparedOptions.apiKey || getEnvApiKey(providerModel.provider);
 	if (!apiKey) {
@@ -1691,8 +1692,9 @@ function streamSimpleRequest<TApi extends Api>(
 			),
 		);
 	}
-	const providerOptions = mapOptionsForApi(model, requestOptions, apiKey);
-	return stream(model, context, providerOptions);
+	const providerModel = getProviderDefinition(model.provider)?.prepareModel?.(model) ?? model;
+	const providerOptions = mapOptionsForApi(providerModel, requestOptions, apiKey);
+	return stream(providerModel, context, providerOptions);
 }
 
 export async function completeSimple<TApi extends Api>(
@@ -2080,8 +2082,8 @@ function mapOptionsForApi<TApi extends Api>(
 				guardrailVersion: model.guardrailVersion ?? options?.guardrailVersion,
 				guardrailTrace: model.guardrailTrace ?? options?.guardrailTrace,
 			};
-			// Adaptive mode sends effort directly, no budget_tokens — skip budget inflation.
-			if (model.thinking?.mode === "anthropic-adaptive") {
+			// Effort modes send effort directly, no budget_tokens — skip budget inflation.
+			if (model.thinking?.mode === "effort" || model.thinking?.mode === "anthropic-adaptive") {
 				return castApi<"bedrock-converse-stream">(bedrockBase);
 			}
 			const budgetInfo = resolveBedrockThinkingBudget(model as Model<"bedrock-converse-stream">, options);
