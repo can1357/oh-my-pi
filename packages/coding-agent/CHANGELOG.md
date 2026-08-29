@@ -43,7 +43,7 @@
 - Fixed orphaned pages, iframes, and workers accumulating in the shared headless browser after abnormal OMP session termination.
 ### Fixed
 
-- Dropped todos (`todo drop` / `abandoned`) no longer count as done for the stop-time reminder or the todo summary. Settle stays incomplete until those items are completed, blocked, or the user forces stop. User-issued `/todo drop` is stamped as user-authored and does not schedule a continue reminder. Newly abandoned checklist items from `/todo edit` or a fresh markdown import are stamped as user drops; a no-op edit of model-abandoned items stays incomplete for settle. Later model broad drops no longer clear an existing user `droppedBy` stamp. Model `todo rm` abandons in place instead of deleting, so it cannot silence the same gate; user `/todo rm` still deletes.
+- Dropped todos (`todo drop` / `abandoned`) no longer count as done for the stop-time reminder or the todo summary. Settle stays incomplete until those items are completed, blocked, or the user forces stop. User-issued `/todo drop` is stamped as user-authored and does not schedule a continue reminder. Newly abandoned checklist items from `/todo edit` or a fresh markdown import are stamped as user drops; a no-op edit of model-abandoned items stays incomplete for settle. Later model broad drops no longer clear an existing user `droppedBy` stamp. Model `todo rm` abandons open tasks in place (not completed/blocked/user-dropped), so it cannot silence the same gate; user `/todo rm` still deletes. User-authored drops also count as settled for HUD auto-clear. RPC `set_todos` merges abandoned provenance against the prior list.
 
 ## [18.0.10] - 2026-08-28
 

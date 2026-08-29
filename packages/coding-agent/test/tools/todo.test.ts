@@ -10,6 +10,7 @@ import {
 	applyUserMarkdownPhases,
 	formatTodoHudRatio,
 	isCompletedTodo,
+	isHudSettledTodo,
 	isSettledTodo,
 	isTodoPhase,
 	markdownToPhases,
@@ -520,6 +521,33 @@ describe("TodoTool operations", () => {
 		expect(summary.text).not.toContain("Todo list cleared.");
 	});
 
+	it("leaves completed, blocked, and user-dropped tasks alone when the model rm runs", () => {
+		const { phases } = applyOpsToPhases(
+			[
+				{
+					name: "Work",
+					tasks: [
+						{ content: "done", status: "completed" },
+						{ content: "waiting", status: "blocked", blocker: "CI" },
+						{ content: "user cancel", status: "abandoned", droppedBy: "user" },
+						{ content: "model drop", status: "abandoned" },
+						{ content: "open", status: "pending" },
+						{ content: "active", status: "in_progress" },
+					],
+				},
+			],
+			[{ op: "rm" }],
+		);
+		expect(phases[0]?.tasks).toEqual([
+			{ content: "done", status: "completed" },
+			{ content: "waiting", status: "blocked", blocker: "CI" },
+			{ content: "user cancel", status: "abandoned", droppedBy: "user" },
+			{ content: "model drop", status: "abandoned" },
+			{ content: "open", status: "abandoned" },
+			{ content: "active", status: "abandoned" },
+		]);
+	});
+
 	it("deletes tasks when user-authored rm runs", () => {
 		const { phases } = applyOpsToPhases(
 			[{ name: "Work", tasks: [{ content: "First", status: "pending" }, { content: "Second", status: "pending" }] }],
@@ -896,11 +924,20 @@ describe("abandoned todos in tool summary and compact HUD contracts", () => {
 		expect(nextActionableTask(phases)).toBeUndefined();
 		expect(phases.flatMap(p => p.tasks).filter(isCompletedTodo)).toHaveLength(0);
 		expect(phases.flatMap(p => p.tasks).filter(isSettledTodo)).toHaveLength(2);
+		expect(phases.flatMap(p => p.tasks).filter(isHudSettledTodo)).toHaveLength(0);
 		const tool = new TodoTool(createSession(phases));
 		const result = await tool.execute("t1", { op: "view" });
 		const text = result.content.find(part => part.type === "text")?.text ?? "";
 		expect(text).toContain("0/2 done, 2 dropped, 0 open");
 		expect(text).toContain("Remaining items (0 open + 2 dropped):");
+	});
+
+	it("treats user-dropped todos as HUD-settled for auto-clear, not progress", () => {
+		expect(isHudSettledTodo({ status: "completed" })).toBe(true);
+		expect(isHudSettledTodo({ status: "abandoned", droppedBy: "user" })).toBe(true);
+		expect(isHudSettledTodo({ status: "abandoned" })).toBe(false);
+		expect(isHudSettledTodo({ status: "blocked" })).toBe(false);
+		expect(isCompletedTodo({ status: "abandoned", droppedBy: "user" })).toBe(false);
 	});
 
 	it("accepts unknown droppedBy without dropping the persisted task", () => {

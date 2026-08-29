@@ -134,6 +134,7 @@ import {
 	formatPhaseDisplayName,
 	formatTodoHudRatio,
 	isCompletedTodo,
+	isHudSettledTodo,
 	nextActionableTask,
 	todoHudCounts,
 	selectCollapsedTodos,
@@ -2451,7 +2452,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		let seenTask = false;
 		for (const phase of phases) {
 			for (const task of phase.tasks) {
-				if (!isCompletedTodo(task)) return false;
+				if (!isHudSettledTodo(task)) return false;
 				seenTask = true;
 			}
 		}

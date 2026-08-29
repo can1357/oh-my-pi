@@ -248,6 +248,11 @@ export function isCompletedTodo<T extends { status: TodoStatus }>(task: T): bool
 	return task.status === "completed";
 }
 
+/** HUD auto-clear settle: completed, or abandoned with an explicit user cancel. */
+export function isHudSettledTodo<T extends { status: TodoStatus; droppedBy?: "user" }>(task: T): boolean {
+	return task.status === "completed" || (task.status === "abandoned" && task.droppedBy === "user");
+}
+
 /** Hidden from the open collapsed viewport: completed or deliberately abandoned. */
 export function isSettledTodo<T extends { status: TodoStatus }>(task: T): boolean {
 	return task.status === "completed" || task.status === "abandoned";
@@ -601,7 +606,11 @@ function applyEntry(
 		case "rm":
 			if (options?.userAuthored) return removeTasks(phases, entry, errors);
 			// Model `rm` is a settle cheat: abandon in place like `drop`.
+			// Leave completed/blocked alone, and keep existing abandoned (incl. user
+			// droppedBy) so rm cannot rewrite terminals into unprovenanced drops.
 			for (const task of getTaskTargets(phases, entry, errors)) {
+				if (task.status === "completed" || task.status === "blocked") continue;
+				if (task.status === "abandoned") continue; // keep droppedBy
 				task.status = "abandoned";
 				task.droppedBy = undefined;
 			}
