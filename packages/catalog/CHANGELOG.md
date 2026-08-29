@@ -8,6 +8,10 @@
 - Grok Bot (`grokbot`) catalog — sand InferenceService model aliases (`sand-default`, `grok-4.5`, …) with image input; distinct from `cursor` and `xai` / Grok CLI catalogs. Catalog cost is intentionally $0 (sand usage meters on the renewer account). Reasoning seeds advertise sand effort including `xhigh`.
 - Grok Bot (`grokbot`) catalog — live models from sand `AiService/AvailableModels` (authoritative when renewer present), plus sand router slugs (`sand-default`, `sand-cua`, `sand-automation`). Aliases stay on the canonical row (`idAliases`); cost is $0 by design (renewer-billed). Distinct from `cursor` and `xai` / Grok CLI catalogs.
 
+### Fixed
+
+- Grok Bot `secrets/grokbot.env` loading now uses the shared dotenv parser so quoted values, `export` prefixes, and inline comments authenticate correctly.
+
 ## [18.0.9] - 2026-08-28
 
 ### Added
