@@ -36,7 +36,8 @@ describe("openai-responses gateway passthrough fields", () => {
 		expect(params.text?.format).toEqual({ type: "json_object" });
 		expect(params.parallel_tool_calls).toBe(false);
 		expect(params.user).toBe("user-1");
-		expect(params.seed).toBe(7);
+		// Responses API has no `seed` field; Chat Completions seed must be omitted.
+		expect("seed" in params).toBe(false);
 		expect("logit_bias" in params).toBe(false);
 	});
 
