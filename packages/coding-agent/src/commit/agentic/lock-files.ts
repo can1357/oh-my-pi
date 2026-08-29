@@ -74,7 +74,7 @@ export function assignLockFilesToPlan(plan: SplitCommitPlan, stagedFiles: readon
 		const dir = parts.slice(0, -1).join("/");
 		const manifests = LOCK_FILE_MANIFESTS[basename] ?? [];
 		const targetIndex = findManifestCommitIndex(plan, dir, manifests);
-		plan.commits[targetIndex].changes.push({ path: lockFile, hunks: { type: "all" } });
+		plan.commits[targetIndex].changes.push({ path: lockFile, kind: "all" });
 		planned.add(lockFile);
 	}
 }

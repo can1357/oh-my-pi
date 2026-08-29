@@ -1672,19 +1672,30 @@ describe("Inline color swatches", () => {
 	const FMT = TERMINAL.trueColor ? "ansi-16m" : "ansi-256";
 	// defaultMarkdownTheme supplies no `colorSwatch` symbol, so the renderer uses its ■ default.
 	const swatchFor = (hex: string, glyph = "■"): string => `${Bun.color(`#${hex}`, FMT)}${glyph}`;
+	// The `#hex` token itself is painted with the color as background and a
+	// YIQ-contrast foreground (VS Code's Color.isLighter rule).
+	const BLACK_FG = TERMINAL.trueColor ? "\x1b[38;2;0;0;0m" : "\x1b[38;5;16m";
+	const WHITE_FG = TERMINAL.trueColor ? "\x1b[38;2;255;255;255m" : "\x1b[38;5;231m";
+	const paintedFor = (hex: string, fg: string, text = `#${hex}`): string =>
+		`${Bun.color(`#${hex}`, FMT)!.replace("[38;", "[48;")}${fg}${text}\x1b[39m\x1b[49m`;
 
 	it("paints a colored swatch before a bare hex color in prose", () => {
 		const out = new Markdown("Accent is #C5FFD6 today.", 0, 0, defaultMarkdownTheme).render(80).join("\n");
 		// Swatch (color SGR + chip glyph + fg reset + space) sits immediately before the code.
 		expect(out.includes(`${swatchFor("C5FFD6")}\x1b[39m `)).toBeTruthy();
-		expect(out.includes("#C5FFD6")).toBeTruthy();
+		// The token itself sits on the color: bg + contrast fg (light fill → black text).
+		expect(out.includes(paintedFor("C5FFD6", BLACK_FG))).toBeTruthy();
+	});
+	it("picks a white foreground on dark fills", () => {
+		const out = new Markdown("Navy is #000080 here.", 0, 0, defaultMarkdownTheme).render(80).join("\n");
+		expect(out.includes(paintedFor("000080", WHITE_FG))).toBeTruthy();
 	});
 
 	it("paints a swatch before a backticked hex color", () => {
 		const out = new Markdown("Use `#C5FFD6` for the bg.", 0, 0, defaultMarkdownTheme).render(80).join("\n");
 		expect(out.includes(swatchFor("C5FFD6"))).toBeTruthy();
-		// The code text survives as inline code (theme styles it yellow).
-		expect(out.includes("#C5FFD6")).toBeTruthy();
+		// The code text is painted onto the color instead of the codespan style.
+		expect(out.includes(paintedFor("C5FFD6", BLACK_FG))).toBeTruthy();
 	});
 
 	it("does not swatch short numeric references that resemble issue numbers", () => {
@@ -1736,8 +1747,10 @@ describe("Inline color swatches", () => {
 			.render(80)
 			.join("\n");
 		expect(out.includes(swatchFor("C5FFD6"))).toBeTruthy();
-		// Gray (\x1b[90m) is re-opened for the code text — the swatch's fg reset must not bleed.
-		expect(out.includes("\x1b[90m#C5FFD6")).toBeTruthy();
+		// The token is painted with its own contrast fg; gray (\x1b[90m) re-opens
+		// for the surrounding prose after the chip's fg/bg resets.
+		expect(out.includes(paintedFor("C5FFD6", BLACK_FG))).toBeTruthy();
+		expect(out.includes("\x1b[90m for accent")).toBeTruthy();
 	});
 });
 

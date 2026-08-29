@@ -1,6 +1,6 @@
+import type { VcsGitRepo } from "@oh-my-pi/pi-natives";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import type { ExtensionAPI } from "../extensibility/extensions";
-import * as git from "../utils/git";
-import * as jj from "../utils/jj";
 import { normalizePathSpec } from "./helpers";
 
 const AUTORESEARCH_BRANCH_PREFIX = "autoresearch/";
@@ -21,7 +21,7 @@ export interface EnsureAutoresearchBranchSuccess {
 export type EnsureAutoresearchBranchResult = EnsureAutoresearchBranchFailure | EnsureAutoresearchBranchSuccess;
 
 export async function getCurrentAutoresearchBranch(_api: ExtensionAPI, workDir: string): Promise<string | null> {
-	const currentBranch = (await git.branch.current(workDir)) ?? "";
+	const currentBranch = (await vcs.git(workDir)?.currentBranch()) ?? "";
 	return currentBranch.startsWith(AUTORESEARCH_BRANCH_PREFIX) ? currentBranch : null;
 }
 
@@ -42,15 +42,15 @@ export async function ensureAutoresearchBranch(
 	// outer Git checkout is rejected at its own root rather than silently
 	// creating `autoresearch/*` branches and commits in the surrounding Git
 	// tree behind jj's back.
-	if (await jj.isPureJjRepo(workDir)) {
+	if (vcs.isPureJj(workDir)) {
 		return {
 			ok: false,
 			error: "Autoresearch needs a Git checkout for branch isolation and baseline commits, but this workspace is pure Jujutsu (`.jj/` without a colocated `.git/`). Run `jj git init --colocate` to add a Git checkout before starting autoresearch.",
 		};
 	}
 
-	const repoRoot = await git.repo.root(workDir);
-	if (!repoRoot) {
+	const repository = vcs.git(workDir);
+	if (!repository) {
 		return {
 			ok: true,
 			branchName: null,
@@ -62,7 +62,7 @@ export async function ensureAutoresearchBranch(
 
 	let dirtyPathsOutput: string;
 	try {
-		dirtyPathsOutput = await git.status(repoRoot, { porcelainV1: true, untrackedFiles: "all", z: true });
+		dirtyPathsOutput = await repository.statusPorcelain({ untracked: "all", nulTerminated: true });
 	} catch (err) {
 		return {
 			ok: false,
@@ -72,7 +72,8 @@ export async function ensureAutoresearchBranch(
 
 	const workDirPrefix = await readGitWorkDirPrefix(api, workDir);
 	const dirtyPaths = collectRelativeDirtyPaths(dirtyPathsOutput, workDirPrefix);
-	const currentBranch = await getCurrentAutoresearchBranch(api, workDir);
+	const branch = (await repository.currentBranch()) ?? "";
+	const currentBranch = branch.startsWith(AUTORESEARCH_BRANCH_PREFIX) ? branch : null;
 	if (currentBranch) {
 		return { ok: true, branchName: currentBranch, created: false };
 	}
@@ -84,9 +85,9 @@ export async function ensureAutoresearchBranch(
 		};
 	}
 
-	const branchName = await allocateBranchName(api, workDir, goal);
+	const branchName = await allocateBranchName(repository, goal);
 	try {
-		await git.branch.checkoutNew(workDir, branchName);
+		await repository.checkoutNewBranch(branchName);
 	} catch (err) {
 		return {
 			ok: false,
@@ -124,7 +125,7 @@ export function relativizeGitPathToWorkDir(repoRelativePath: string, workDirPref
 async function readGitWorkDirPrefix(api: ExtensionAPI, workDir: string): Promise<string> {
 	void api;
 	try {
-		return await git.show.prefix(workDir);
+		return vcs.requireGit(workDir).prefixOf(workDir) ?? "";
 	} catch {
 		return "";
 	}
@@ -182,20 +183,15 @@ export function normalizeStatusPath(rawPath: string): string {
 	return normalizePathSpec(normalized);
 }
 
-async function allocateBranchName(api: ExtensionAPI, workDir: string, goal: string | null): Promise<string> {
+async function allocateBranchName(repository: VcsGitRepo, goal: string | null): Promise<string> {
 	const baseName = `${AUTORESEARCH_BRANCH_PREFIX}${slugifyGoal(goal)}-${currentDateStamp()}`;
 	let candidate = baseName;
 	let suffix = 2;
-	while (await branchExists(api, workDir, candidate)) {
+	while (await repository.refExists(`refs/heads/${candidate}`)) {
 		candidate = `${baseName}-${suffix}`;
 		suffix += 1;
 	}
 	return candidate;
-}
-
-async function branchExists(api: ExtensionAPI, workDir: string, branchName: string): Promise<boolean> {
-	void api;
-	return git.ref.exists(workDir, `refs/heads/${branchName}`);
 }
 
 function slugifyGoal(goal: string | null): string {
