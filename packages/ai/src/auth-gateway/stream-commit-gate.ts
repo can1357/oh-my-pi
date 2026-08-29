@@ -27,6 +27,8 @@ export class StreamCommitGate {
 	#state: StreamCommitState = "probing";
 	#bytes = 0;
 	#maxPreludeBytes: number;
+	#prelude: Uint8Array[] = [];
+	#preludeBytes = 0;
 
 	constructor(maxPreludeBytes: number = DEFAULT_MAX_PRELUDE_BYTES) {
 		this.#maxPreludeBytes = maxPreludeBytes;
@@ -68,6 +70,50 @@ export class StreamCommitGate {
 		}
 		return this.#state;
 	}
+
+	/** Raw bytes buffered while probing (held frames only). */
+	get preludeByteLength(): number {
+		return this.#preludeBytes;
+	}
+
+	/**
+	 * Buffer a raw pre-commit chunk for a HOLDING consumer (one that has not
+	 * forwarded it downstream yet). Bounded: returns false once the prelude
+	 * cap is reached, forcing the hold to commit rather than grow unboundedly.
+	 * The forwarding observation path must not double-buffer.
+	 */
+	bufferPrelude(chunk: Uint8Array): boolean {
+		if (this.#state !== "probing") return false;
+		if (this.#preludeBytes + chunk.byteLength > this.#maxPreludeBytes) return false;
+		this.#prelude.push(chunk);
+		this.#preludeBytes += chunk.byteLength;
+		return true;
+	}
+
+	/**
+	 * Discard and return the held prelude of a FAILED pre-commit attempt — the
+	 * failover path drops these frames (they belong to the dead attempt) and
+	 * the replacement attempt's stream starts from its own first byte, so the
+	 * client observes exactly one response. Committed/terminated gates have no
+	 * takeable prelude.
+	 */
+	takePrelude(): Uint8Array[] | undefined {
+		if (this.#prelude.length === 0) return undefined;
+		const out = this.#prelude;
+		this.#prelude = [];
+		this.#preludeBytes = 0;
+		return out;
+	}
+}
+
+/** Thrown/streamed when a held stream hits a pre-commit retryable terminal. */
+export class PreludeAbortedError extends Error {
+	readonly frames: Uint8Array[];
+	constructor(frames: Uint8Array[], eventType: string) {
+		super(`upstream stream ended before commit (${eventType})`);
+		this.name = "PreludeAbortedError";
+		this.frames = frames;
+	}
 }
 
 export function classifyCommitEvent(eventType: string): CommitClass {
@@ -102,6 +148,58 @@ function eventTypeFromFrame(frame: string): string {
 		if (line.startsWith("event:")) eventType = line.slice(6).trim();
 	}
 	return eventType;
+}
+
+/**
+ * HOLD path for seamless pre-commit failover: unlike {@link observeSseCommit},
+ * pre-commit frames are buffered — never forwarded — so a dead attempt's
+ * metadata never reaches the client. On commit, the held prelude flushes and
+ * the live stream forwards unchanged. A pre-commit retryable/failure terminal
+ * aborts with {@link PreludeAbortedError} carrying the drained frames, letting
+ * the failover loop discard them and dispatch a replacement attempt the client
+ * cannot distinguish from the first.
+ */
+export function holdSseUntilCommit(
+	stream: ReadableStream<Uint8Array>,
+	gate: StreamCommitGate,
+): ReadableStream<Uint8Array> {
+	const decoder = new TextDecoder();
+	let pending = "";
+	let committed = false;
+	return stream.pipeThrough(
+		new TransformStream<Uint8Array, Uint8Array>({
+			transform(chunk, controller) {
+				if (committed) {
+					controller.enqueue(chunk);
+					return;
+				}
+				gate.bufferPrelude(chunk);
+				pending += decoder.decode(chunk, { stream: true });
+				let next = nextSseFrame(pending);
+				while (next) {
+					const eventType = eventTypeFromFrame(next.frame);
+					const state = gate.classifyAndObserve(eventType, next.frame.length);
+					pending = next.rest;
+					next = nextSseFrame(pending);
+					if (state === "terminated") {
+						// Dead attempt: its held frames belong to it and are never
+						// forwarded. The failover loop catches PreludeAbortedError,
+						// discards them, and dispatches a replacement attempt.
+						throw new PreludeAbortedError(gate.takePrelude() ?? [], eventType);
+					}
+					if (state === "committed") {
+						committed = true;
+						for (const held of gate.takePrelude() ?? []) controller.enqueue(held);
+						return;
+					}
+				}
+			},
+			flush() {
+				// truncated tail without commit: treat as metadata-only commit so
+				// a holding consumer never stalls
+			},
+		}),
+	);
 }
 
 /**

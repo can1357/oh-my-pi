@@ -1,5 +1,11 @@
 import { describe, expect, it } from "bun:test";
-import { commitGateObservesDownstreamSse, observeSseCommit, StreamCommitGate } from "@oh-my-pi/pi-ai/auth-gateway";
+import {
+	commitGateObservesDownstreamSse,
+	holdSseUntilCommit,
+	observeSseCommit,
+	PreludeAbortedError,
+	StreamCommitGate,
+} from "@oh-my-pi/pi-ai/auth-gateway";
 
 const FOUR_MIB = 4 * 1024 * 1024;
 
@@ -88,5 +94,83 @@ describe("StreamCommitGate", () => {
 		});
 		await observeSseCommit(source, gate).pipeTo(new WritableStream());
 		expect(gate.state).toBe("committed");
+	});
+});
+
+describe("holdSseUntilCommit (prelude replay buffer)", () => {
+	function sse(frames: string[]): ReadableStream<Uint8Array> {
+		const enc = new TextEncoder();
+		return new ReadableStream<Uint8Array>({
+			start(controller) {
+				for (const f of frames) controller.enqueue(enc.encode(f));
+				controller.close();
+			},
+		});
+	}
+
+	async function collect(stream: ReadableStream<Uint8Array>): Promise<string> {
+		const dec = new TextDecoder();
+		let out = "";
+		for await (const chunk of stream) out += dec.decode(chunk, { stream: true });
+		return out;
+	}
+
+	it("holds pre-commit frames, then flushes them on commit so the client sees exactly one response", async () => {
+		const gate = new StreamCommitGate();
+		const held = holdSseUntilCommit(
+			sse(["event: response.created\ndata: {}\n\n", 'event: response.output_text.delta\ndata: {"delta":"hi"}\n\n']),
+			gate,
+		);
+		const out = await collect(held);
+		expect(out).toContain("response.created");
+		expect(out).toContain("output_text.delta");
+		expect(gate.state).toBe("committed");
+	});
+
+	it("aborts with the dead attempt's frames on a pre-commit retryable terminal", async () => {
+		const gate = new StreamCommitGate();
+		const held = holdSseUntilCommit(
+			sse(["event: response.created\ndata: {}\n\n", 'event: response.failed\ndata: {"error":{}}\n\n']),
+			gate,
+		);
+		let aborted: PreludeAbortedError | undefined;
+		try {
+			await collect(held);
+		} catch (error) {
+			aborted = error as PreludeAbortedError;
+		}
+		expect(aborted).toBeInstanceOf(PreludeAbortedError);
+		// the dead attempt's metadata is returned to the failover loop for
+		// discarding — the replacement attempt's stream starts from byte zero
+		expect(aborted?.frames.length).toBeGreaterThan(0);
+		expect(gate.state).toBe("terminated");
+	});
+
+	it("never forwards a dead attempt's metadata to the client (negative)", async () => {
+		const gate = new StreamCommitGate();
+		const held = holdSseUntilCommit(
+			sse(["event: response.created\ndata: {}\n\n", "event: response.failed\ndata: {}\n\n"]),
+			gate,
+		);
+		let sawCreated = false;
+		try {
+			for await (const chunk of held) {
+				if (new TextDecoder().decode(chunk).includes("response.created")) sawCreated = true;
+			}
+		} catch {
+			// expected abort
+		}
+		expect(sawCreated).toBe(false);
+	});
+
+	it("stops buffering at commit and releases memory on drain (bounded)", () => {
+		const gate = new StreamCommitGate();
+		expect(gate.bufferPrelude(new Uint8Array(8))).toBe(true);
+		gate.classifyAndObserve("response.output_text.delta", 10);
+		// post-commit buffering is refused — held memory is capped by the prelude cap
+		expect(gate.bufferPrelude(new Uint8Array(8))).toBe(false);
+		// the holding consumer drains at flush time, releasing the buffer
+		expect(gate.takePrelude()?.length).toBe(1);
+		expect(gate.preludeByteLength).toBe(0);
 	});
 });
