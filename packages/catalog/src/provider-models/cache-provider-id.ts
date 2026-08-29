@@ -9,6 +9,7 @@ const CREDENTIAL_SCOPED_MODEL_CACHE_PROVIDERS: Readonly<Record<string, true>> = 
 	"opencode-go": true,
 	"opencode-zen": true,
 	"github-copilot": true,
+	grokbot: true,
 };
 
 /** Whether a provider's model-cache namespace requires its resolved credential. */
@@ -86,6 +87,14 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 			const baseUrl = options.baseUrl ?? PERSONAL_GITHUB_COPILOT_BASE_URL;
 			const scope = `${options.apiKey ?? ""}\u0000${baseUrl}`;
 			return `github-copilot:models-v1:${Bun.hash(scope).toString(36)}`;
+		}
+		case "grokbot": {
+			// AvailableModels is renewer-scoped and marked authoritative; key the
+			// cache on renewer + backend so switching GROKBOT_RENEWAL_CREDENTIAL
+			// does not reuse another account's catalog for the TTL window.
+			const baseUrl = options.baseUrl ?? "https://api2.cursor.sh";
+			const scope = `${options.apiKey ?? ""}\u0000${baseUrl}`;
+			return `grokbot:models-v1:${Bun.hash(scope).toString(36)}`;
 		}
 		case "openrouter":
 			return "openrouter:pseudo-api";

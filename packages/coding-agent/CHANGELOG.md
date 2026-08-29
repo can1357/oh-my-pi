@@ -9,6 +9,7 @@
 ### Fixed
 
 - Model lookup keeps a canonical model id resolvable when another catalog row lists that id as an alias (aliases no longer null out exact matches).
+- Login success UI only claims credentials were saved to the agent DB when AuthStorage actually stored an identity (host-secret flows like Grok Bot no longer misreport the backup location).
 
 ## [18.0.10] - 2026-08-28
 

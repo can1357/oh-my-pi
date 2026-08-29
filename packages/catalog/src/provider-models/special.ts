@@ -221,10 +221,11 @@ export function grokbotModelManagerOptions(
 	const { apiKey, baseUrl, fetch } = config;
 	return {
 		providerId: "grokbot",
+		cacheProviderId: resolveModelCacheProviderId("grokbot", { apiKey, baseUrl }),
 		staticModels: buildGrokbotStaticSeed(baseUrl),
-		...(apiKey ? { dynamicModelsAuthoritative: true } : undefined),
 		...(apiKey
 			? {
+					dynamicModelsAuthoritative: true,
 					fetchDynamicModels: async () => fetchGrokbotAvailableModels({ apiKey, baseUrl, fetch }),
 				}
 			: undefined),

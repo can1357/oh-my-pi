@@ -10,6 +10,7 @@
 
 ### Fixed
 
+- Grok Bot AvailableModels cache is scoped by renewer credential + backend so account switches do not reuse another catalog.
 - Grok Bot bundled catalog now includes `xhigh` on parameterized effort ladders (regenerated from seed/policy); AvailableModels discovery uses a static import.
 - Grok Bot `secrets/grokbot.env` loading now uses the shared dotenv parser so quoted values, `export` prefixes, and inline comments authenticate correctly.
 

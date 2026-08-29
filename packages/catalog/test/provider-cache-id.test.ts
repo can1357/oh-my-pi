@@ -15,6 +15,7 @@ test("lightweight cache resolver matches scoped descriptor inputs", () => {
 		{ providerId: "opencode-go", baseUrl: "https://opencode.example/go" },
 		{ providerId: "opencode-zen", baseUrl: "https://opencode.example/zen/v1/" },
 		{ providerId: "vllm", baseUrl: "http://vllm.example:8000/v1" },
+		{ providerId: "grokbot", baseUrl: "https://api2.cursor.sh" },
 	] as const;
 	for (const { providerId, baseUrl } of cases) {
 		const descriptor = PROVIDER_DESCRIPTORS.find(candidate => candidate.providerId === providerId);
@@ -23,6 +24,19 @@ test("lightweight cache resolver matches scoped descriptor inputs", () => {
 		const options = descriptor.createModelManagerOptions(config);
 		expect(resolveModelCacheProviderId(providerId, config)).toBe(options.cacheProviderId ?? providerId);
 	}
+});
+
+test("grokbot cache namespace partitions by renewer credential", () => {
+	const a = resolveModelCacheProviderId("grokbot", {
+		apiKey: "renewer-a",
+		baseUrl: "https://api2.cursor.sh",
+	});
+	const b = resolveModelCacheProviderId("grokbot", {
+		apiKey: "renewer-b",
+		baseUrl: "https://api2.cursor.sh",
+	});
+	expect(a).not.toBe(b);
+	expect(a).toBe(resolveModelCacheProviderId("grokbot", { apiKey: "renewer-a", baseUrl: "https://api2.cursor.sh" }));
 });
 
 test("ollama cache scope preserves reverse-proxy path prefixes", () => {
