@@ -10,6 +10,10 @@
 
 - Added per-subagent MCP and extension tool scoping: an agent definition's `tools:` list is now a hard allowlist for custom, extension, and MCP proxy tools, and a new `disallowedTools:` frontmatter field removes tools by name, `mcp__*` / `mcp__<server>_*` wildcard, or bare `*` deny-all (the `<server>` is the sanitized tool-name prefix — a server named `db2` mints `mcp__db_query`, so the pattern is `mcp__db_*`). Hidden protocol tools (`yield`, `goal`, `think`) can never be disallowed; a scope's reach is uniform — the active tool set, the `xd://` catalog, Cursor bridge execution, MCP resources, and server instructions all follow the same allow/disallow decision. Subagents that do not declare `tools:` are unaffected; top-level sessions are unchanged ([#8599](https://github.com/can1357/oh-my-pi/issues/8599)).
 
+### Fixed
+
+- Fixed a scope denying `todo` from still mutating local todo state: Cursor's server-resolved `update_todos`/`read_todos` frames are now checked against the session's tool scope before mirroring, and advisor explicit-server MCP resource listings no longer bypass the per-server scope gate that filters the primary session's listings.
+
 ## [18.0.10] - 2026-08-28
 
 ### Added
