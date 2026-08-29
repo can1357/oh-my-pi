@@ -230,6 +230,46 @@ describe("unverified isolated merge latch", () => {
 		expect(latch.latched).toBe(false);
 	});
 
+	it("ignores early async terminals from non-verify job types", async () => {
+		const latch = new UnverifiedMergeLatch();
+		latch.mark();
+		const ctx = host(latch);
+		const tracker = new TodoTracker(ctx.host);
+		// A task terminal must not consume the bash verify snap on re-key.
+		tracker.onAsyncJobTerminal("job-shared", "task", "completed");
+		tracker.onToolExecutionStart("bash", "call-bash", { command: "bun test test/foo.test.ts" });
+		tracker.onToolResult(
+			"bash",
+			false,
+			{ async: { state: "running", jobId: "job-shared" }, cwd: "/repo" },
+			"call-bash",
+		);
+		expect(latch.latched).toBe(true);
+		tracker.onAsyncJobTerminal("job-shared", "bash", "completed");
+		expect(latch.latched).toBe(false);
+	});
+
+	it("does not clear the latch on truncated-glob diagnostics details", async () => {
+		const latch = new UnverifiedMergeLatch();
+		latch.mark();
+		const ctx = host(latch);
+		const tracker = new TodoTracker(ctx.host);
+		tracker.onToolExecutionStart("lsp", "call-trunc", { action: "diagnostics", file: "**/*.ts" });
+		tracker.onToolResult(
+			"lsp",
+			false,
+			{
+				action: "diagnostics",
+				success: false,
+				diagnosticErrorCount: 0,
+				failedServerCount: 1,
+				file: "**/*.ts",
+			},
+			"call-trunc",
+		);
+		expect(latch.latched).toBe(true);
+	});
+
 	it("does not clear the latch when a background bash job fails", async () => {
 		const latch = new UnverifiedMergeLatch();
 		latch.mark();

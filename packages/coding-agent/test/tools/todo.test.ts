@@ -101,6 +101,26 @@ describe("applyOpsToPhases userDrop provenance", () => {
 		const modelDrop = applyOpsToPhases(started.phases, [{ op: "drop", task: "Retry me" }]);
 		expect(modelDrop.phases[0]?.tasks[0]).toEqual({ content: "Retry me", status: "abandoned" });
 	});
+
+	it("preserves sibling user droppedBy across clone when starting another task", () => {
+		const current: TodoPhase[] = [
+			{
+				name: "Work",
+				tasks: [
+					{ content: "User cancelled", status: "abandoned", droppedBy: "user" },
+					{ content: "Still open", status: "pending" },
+				],
+			},
+		];
+		const started = applyOpsToPhases(current, [{ op: "start", task: "Still open" }]);
+		expect(started.errors).toEqual([]);
+		expect(started.phases[0]?.tasks.find(t => t.content === "User cancelled")).toEqual({
+			content: "User cancelled",
+			status: "abandoned",
+			droppedBy: "user",
+		});
+		expect(started.phases[0]?.tasks.find(t => t.content === "Still open")?.status).toBe("in_progress");
+	});
 });
 
 describe("TodoTool auto-start behavior", () => {

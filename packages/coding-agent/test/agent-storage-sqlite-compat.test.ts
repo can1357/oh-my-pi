@@ -53,6 +53,24 @@ describe("AgentStorage SQLite compatibility", () => {
 		expect(() => AgentStorage.close()).not.toThrow();
 	});
 
+	it("clears the closing guard when close throws so a retry can re-enter", async () => {
+		tempDir = TempDir.createSync("@omp-agent-storage-close-retry-");
+		const dbPath = path.join(tempDir.path(), "agent.db");
+		const storage = await AgentStorage.open(dbPath);
+		let closeAttempts = 0;
+		const originalClose = storage.authStore.close.bind(storage.authStore);
+		storage.authStore.close = () => {
+			closeAttempts++;
+			if (closeAttempts === 1) throw new Error("simulated close failure");
+			originalClose();
+		};
+		expect(() => AgentStorage.close()).toThrow("simulated close failure");
+		expect(closeAttempts).toBe(1);
+		// Guard must be cleared: a second close re-enters and reaches authStore.close again.
+		expect(() => AgentStorage.close()).not.toThrow();
+		expect(closeAttempts).toBe(2);
+	});
+
 	it("creates fresh storage without unixepoch defaults", async () => {
 		tempDir = TempDir.createSync("@omp-agent-storage-fresh-");
 		const dbPath = path.join(tempDir.path(), "agent.db");

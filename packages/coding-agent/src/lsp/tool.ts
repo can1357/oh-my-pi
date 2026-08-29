@@ -534,9 +534,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 					diagnosticErrorCount,
 					// Keep verify from clearing the latch even if a caller only
 					// inspects failedServerCount (truncated ⇒ incomplete scan).
-					failedServerCount: truncatedGlobTargets
-						? Math.max(reportedFailedServers, 1)
-						: reportedFailedServers,
+					failedServerCount: truncatedGlobTargets ? Math.max(reportedFailedServers, 1) : reportedFailedServers,
 				},
 			};
 		}
