@@ -23,6 +23,7 @@ export {
 	getAccessTokenExpiryMs,
 	grokbotClientHeaders,
 	grokbotSecretsPath,
+	joinGrokbotBackendUrl,
 	loadGrokbotConfig,
 	loadGrokbotSecretFile,
 	loadGrokbotSecretFileSync,

@@ -10,6 +10,8 @@
 
 ### Fixed
 
+- Grok Bot generator preserves seed/AvailableModels effort ladders (no invented router thinking; `grok-4.6` keeps `low`/`medium`/`high`/`xhigh`) and regenerates the bundled catalog to match.
+- Grok Bot renewal and stream URLs keep reverse-proxy path prefixes on the configured backend.
 - Grok Bot model-cache identity resolves namespace/client version from env and `secrets/grokbot.env` (same helpers as AvailableModels), not Bun.env alone.
 - Grok Bot max-only AvailableModels rows (`supportsMaxMode` without `supportsNonMaxMode`) keep `sandMaxMode` and use `contextTokenLimitForMaxMode` instead of being forced into non-max.
 - Grok Bot preserves live AvailableModels effort ladders through `buildModel` instead of expanding them to the static catalog scale; reasoning models without an effort parameter no longer invent a thinking control.

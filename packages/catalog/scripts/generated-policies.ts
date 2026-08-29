@@ -192,6 +192,10 @@ export function rebakeModelThinking(model: ModelSpec<Api>): void {
 		return;
 	}
 	if (model.provider === "openrouter" && model.thinking?.requiresEffort === true) return;
+	// Grok Bot: AvailableModels / static seed own the effort surface. Clearing
+	// thinking and re-deriving would either invent a ladder for reasoning
+	// routers (`sand-default`) or drop seed/live ladders (`grok-4.6` + xhigh).
+	if (model.provider === "grokbot" || model.api === "grokbot-sand") return;
 	const requiresProviderAuthoredEffort =
 		model.provider === "umans" && (model.thinking?.requiresEffort === true || model.id === "umans-kimi-k2.7");
 	const thinking = resolveModelThinking({ ...model, thinking: undefined }, buildCompat(model));

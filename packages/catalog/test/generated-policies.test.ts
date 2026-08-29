@@ -801,3 +801,34 @@ describe("applyAntigravityPricingFallback", () => {
 		expect(result[3]?.cost).toEqual(pricedCost);
 	});
 });
+
+describe("Grok Bot generated thinking policy", () => {
+	it("preserves seed/live ladders and does not invent one for routers", () => {
+		const models = [
+			createSpec({
+				id: "sand-default",
+				api: "grokbot-sand",
+				provider: "grokbot",
+				reasoning: true,
+				thinking: undefined,
+			}),
+			createSpec({
+				id: "grok-4.6",
+				api: "grokbot-sand",
+				provider: "grokbot",
+				thinking: {
+					mode: "effort",
+					efforts: [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh],
+				},
+			}),
+		];
+
+		applyGeneratedModelPolicies(models);
+
+		expect(models[0]?.thinking).toBeUndefined();
+		expect(models[1]?.thinking).toEqual({
+			mode: "effort",
+			efforts: [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh],
+		});
+	});
+});

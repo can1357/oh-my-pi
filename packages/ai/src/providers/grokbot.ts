@@ -23,6 +23,7 @@ import {
 	createGrokbotChecksum,
 	GROKBOT_BACKEND,
 	grokbotClientHeaders,
+	joinGrokbotBackendUrl,
 	loadGrokbotConfig,
 	mintGrokbotAccessToken,
 } from "./grokbot/auth";
@@ -524,7 +525,7 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 			});
 
 			const backend = (model.baseUrl || GROKBOT_BACKEND).replace(/\/+$/, "");
-			const response = await fetchImpl(new URL(STREAM_PATH, backend), {
+			const response = await fetchImpl(joinGrokbotBackendUrl(backend, STREAM_PATH), {
 				method: "POST",
 				headers,
 				body: frameConnectProto(protoBytes),

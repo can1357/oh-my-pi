@@ -9,6 +9,7 @@
 
 ### Fixed
 
+- Grok Bot stream requests keep reverse-proxy path prefixes on the configured backend when joining `InferenceService/Stream`.
 - `/grokbot` status sanitizes namespace, client version, and secrets path with `replaceTabs`/`truncateToWidth`/`shortenPath` before TUI display.
 - `/login grokbot` host-install prompt names the resolved agent secrets path (`getAgentDir()` / profile / `PI_CODING_AGENT_DIR` / XDG), not a hardcoded `~/.omp/agent` or unsupported `OMP_AGENT_DIR`.
 - Grok Bot Connect streams surface input-token-limit frames as context-overflow errors (for compaction), reject malformed trailers/protobuf frames, and no longer store routed model ids in `upstreamProvider`.

@@ -4,9 +4,12 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { getAgentDir, setAgentDir } from "@oh-my-pi/pi-utils";
 import {
+	joinGrokbotBackendUrl,
 	loadGrokbotSecretFile,
 	loadGrokbotSecretFileSync,
+	mintGrokbotAccessToken,
 	resolveGrokbotDiscoveryIdentity,
+	GROKBOT_RENEWAL_PATH,
 } from "../src/discovery/grokbot-auth";
 import { resolveModelCacheProviderId } from "../src/provider-models/cache-provider-id";
 
@@ -95,5 +98,33 @@ describe("grokbot secrets dotenv parsing", () => {
 			if (previousClientVersion === undefined) delete process.env.GROKBOT_CLIENT_VERSION;
 			else process.env.GROKBOT_CLIENT_VERSION = previousClientVersion;
 		}
+	});
+});
+
+describe("grokbot backend URL join", () => {
+	test("preserves reverse-proxy path prefixes for renewal", () => {
+		expect(joinGrokbotBackendUrl("https://proxy.example/grokbot", GROKBOT_RENEWAL_PATH).href).toBe(
+			"https://proxy.example/grokbot/sand-box/inference-credential",
+		);
+		expect(joinGrokbotBackendUrl("https://api2.cursor.sh/", GROKBOT_RENEWAL_PATH).href).toBe(
+			"https://api2.cursor.sh/sand-box/inference-credential",
+		);
+	});
+
+	test("mintGrokbotAccessToken posts to the path-preserving renewal URL", async () => {
+		const seen: string[] = [];
+		const fetchImpl: typeof fetch = async url => {
+			seen.push(String(url));
+			return new Response(JSON.stringify({ accessToken: "tok", expiresAtMs: Date.now() + 600_000 }), {
+				status: 200,
+				headers: { "content-type": "application/json" },
+			});
+		};
+		await mintGrokbotAccessToken(
+			{ renewal: "renewer", machineId: "machine", namespace: "prod", clientVersion: "0.30.0" },
+			fetchImpl,
+			"https://proxy.example/grokbot",
+		);
+		expect(seen).toEqual(["https://proxy.example/grokbot/sand-box/inference-credential"]);
 	});
 });

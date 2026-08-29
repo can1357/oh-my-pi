@@ -12,6 +12,17 @@ import type { FetchImpl } from "../types";
 export const GROKBOT_BACKEND = "https://api2.cursor.sh";
 export const GROKBOT_RENEWAL_PATH = "/sand-box/inference-credential";
 export const GROKBOT_CLIENT_TYPE = "sand";
+
+/**
+ * Join a sand API path onto a configured backend while preserving any reverse-proxy
+ * path prefix (e.g. `https://proxy.example/grokbot`). `new URL("/sand-box/…", base)`
+ * resets the pathname; concatenating onto the trailing-slash-trimmed base keeps it.
+ */
+export function joinGrokbotBackendUrl(baseUrl: string, path: string): URL {
+	const normalized = (baseUrl.trim() || GROKBOT_BACKEND).replace(/\/+$/, "") || GROKBOT_BACKEND;
+	const suffix = path.startsWith("/") ? path : `/${path}`;
+	return new URL(`${normalized}${suffix}`);
+}
 /**
  * Stamped sand client app version (matches current sand-host client stamp).
  * Wire header uses the base (`0.30.0`) for prod, or base+`-dev`/`-lab`.
@@ -193,7 +204,7 @@ export async function mintGrokbotAccessToken(
 	if (cached?.accessToken && Date.now() < cached.expiresAtMs - 60_000) {
 		return cached.accessToken;
 	}
-	const response = await fetchImpl(new URL(GROKBOT_RENEWAL_PATH, backend), {
+	const response = await fetchImpl(joinGrokbotBackendUrl(backend, GROKBOT_RENEWAL_PATH), {
 		method: "POST",
 		headers: { "content-type": "application/json", ...grokbotClientHeaders(cfg) },
 		body: JSON.stringify({ credential: cfg.renewal }),
