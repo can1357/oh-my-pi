@@ -9,6 +9,8 @@
 
 ### Fixed
 
+- Grok Bot protobuf decoding rejects illegal field number zero instead of treating malformed frames as empty successful messages.
+- Grok Bot inference requests include `model.headers` (merged under provider-owned auth/client headers) so reverse-proxy API keys are sent.
 - Grok Bot rejects completed tool calls with malformed JSON arguments and correlates tool chunks by id or index.
 - Grok Bot streams that end with `ToolCallPart.isComplete: false` now fail as incomplete streams instead of parsing partial JSON as `{}` and emitting a successful `toolUse`.
 - `/grokbot` status truncation uses shared `TRUNCATE_LENGTHS.TITLE` from `@oh-my-pi/pi-tui` instead of a provider-local width constant.

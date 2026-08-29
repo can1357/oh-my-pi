@@ -334,6 +334,9 @@ function decodeFields(buf) {
 		const fieldNo = tagNum >>> 3;
 		const wire = tagNum & 7;
 		pos = p1;
+		// Protobuf field numbers are 1..536870911; zero is illegal and would
+		// otherwise decode as a no-op field, turning malformed frames into {}.
+		if (fieldNo === 0) throw new Error("protobuf field number must be non-zero");
 		if (wire === WIRE_VARINT) {
 			const [v, p2] = decodeVarint(bytes, pos);
 			fields.push({ fieldNo, wire, value: v });

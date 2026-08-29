@@ -78,6 +78,9 @@ export async function fetchGrokbotAvailableModels(
 			return null;
 		}
 		const decoded = decodeGrokbotAvailableModelsResponse(await response.json());
+		// Invalid envelopes (missing/non-array `models`) must not become a
+		// cached routers-only catalog — only a real `models: []` is empty-ok.
+		if (decoded === null) return null;
 		return normalizeGrokbotAvailableModels(decoded, resolvedBaseUrl);
 	} catch {
 		return null;

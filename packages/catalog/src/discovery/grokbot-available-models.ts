@@ -60,10 +60,17 @@ export function encodeGrokbotAvailableModelsRequest(
 	return JSON.stringify(request);
 }
 
-export function decodeGrokbotAvailableModelsResponse(raw: unknown): GrokbotAvailableModel[] {
-	if (!raw || typeof raw !== "object") return [];
+/**
+ * Decode an AvailableModels JSON body.
+ *
+ * Returns `null` when the envelope is missing a `models` array (e.g. proxy
+ * `{ "error": ... }` with HTTP 200) so callers do not cache a routers-only
+ * catalog. A genuine empty catalog is `{ "models": [] }` → `[]`.
+ */
+export function decodeGrokbotAvailableModelsResponse(raw: unknown): GrokbotAvailableModel[] | null {
+	if (!raw || typeof raw !== "object") return null;
 	const models = (raw as GrokbotAvailableModelsResponse).models;
-	if (!Array.isArray(models)) return [];
+	if (!Array.isArray(models)) return null;
 	const out: GrokbotAvailableModel[] = [];
 	for (const entry of models) {
 		if (!entry || typeof entry !== "object") continue;

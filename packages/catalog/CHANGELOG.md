@@ -10,6 +10,7 @@
 
 ### Fixed
 
+- Grok Bot AvailableModels discovery returns `null` (no cache write) when HTTP 200 bodies omit a `models` array, instead of caching a routers-only catalog from proxy error envelopes.
 - Grok Bot generator preserves seed/AvailableModels effort ladders (no invented router thinking; `grok-4.6` keeps `low`/`medium`/`high`/`xhigh`) and regenerates the bundled catalog to match.
 - Grok Bot renewal and stream URLs keep reverse-proxy path prefixes on the configured backend.
 - Grok Bot model-cache identity resolves namespace/client version from env and `secrets/grokbot.env` (same helpers as AvailableModels), not Bun.env alone.

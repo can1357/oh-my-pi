@@ -99,7 +99,8 @@ describe("grokbot AvailableModels normalize", () => {
 
 	test("drops isHidden, unions sand routers, keeps aliases and param ids", () => {
 		const rows = decodeGrokbotAvailableModelsResponse(FIXTURE);
-		const models = normalizeGrokbotAvailableModels(rows, "https://api2.cursor.sh");
+		expect(rows).not.toBeNull();
+		const models = normalizeGrokbotAvailableModels(rows!, "https://api2.cursor.sh");
 		const ids = models.map(m => m.id);
 		expect(ids).not.toContain("hidden-legacy");
 		expect(ids).toContain("sand-default");
@@ -135,5 +136,13 @@ describe("grokbot AvailableModels normalize", () => {
 		const sandDefault = models.find(m => m.id === "sand-default");
 		expect(sandDefault?.sandParameterIds).toEqual([]);
 		expect(sandDefault?.reasoning).toBe(true);
+	});
+
+	test("rejects envelopes without a models array; empty models is valid", () => {
+		expect(decodeGrokbotAvailableModelsResponse(null)).toBeNull();
+		expect(decodeGrokbotAvailableModelsResponse({})).toBeNull();
+		expect(decodeGrokbotAvailableModelsResponse({ error: "upstream" })).toBeNull();
+		expect(decodeGrokbotAvailableModelsResponse({ models: "not-an-array" })).toBeNull();
+		expect(decodeGrokbotAvailableModelsResponse({ models: [] })).toEqual([]);
 	});
 });

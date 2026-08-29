@@ -523,8 +523,11 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 			const effort = (reqModel.parameters || []).find(p => p.id === "effort")?.value || "";
 			const fast = (reqModel.parameters || []).find(p => p.id === "fast")?.value || "";
 
+			// model.headers + options.headers first; provider-owned auth/client
+			// headers win so reverse-proxy keys cannot override sand identity.
 			const headers: Record<string, string> = {
-				...options?.headers,
+				...(model.headers ?? {}),
+				...(options?.headers ?? {}),
 				...grokbotClientHeaders(authCfg),
 				authorization: `Bearer ${accessToken}`,
 				"x-cursor-checksum": createGrokbotChecksum(authCfg.machineId),

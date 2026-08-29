@@ -190,6 +190,10 @@ describe("grokbot proto", () => {
 		expect(infoResp.responseInfo.errorMessage).toBe("token limit");
 	});
 
+	test("rejects protobuf frames with field number zero", () => {
+		expect(() => decodeInferenceStreamResponse(Buffer.from([0x00, 0x00]))).toThrow(/field number must be non-zero/i);
+	});
+
 	test("encodes stopSequences in modelConfig", () => {
 		const encoded = encodeInferenceStreamRequest({
 			messages: [{ role: 1, text: "hi" }],
@@ -579,5 +583,51 @@ describe("grokbot incomplete tool calls", () => {
 		expect(result.content).toEqual([
 			expect.objectContaining({ type: "toolCall", id: "c1", name: "echo", arguments: { a: 1 } }),
 		]);
+	});
+});
+
+describe("grokbot request headers", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	const model: Model<"grokbot-sand"> = buildModel({
+		id: "sand-default",
+		name: "Grok Bot",
+		api: "grokbot-sand",
+		provider: "grokbot",
+		baseUrl: "https://api2.cursor.sh",
+		reasoning: false,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 100_000,
+		maxTokens: 8_000,
+		headers: { "x-proxy-api-key": "proxy-secret" },
+	});
+	const context: Context = { messages: [{ role: "user", content: "hi", timestamp: 1 }] };
+
+	test("merges model.headers into the inference request", async () => {
+		spyOn(grokbotAuth, "loadGrokbotConfig").mockResolvedValue({
+			renewal: "renew",
+			machineId: "machine",
+			namespace: "prod",
+			clientVersion: "0.30.0",
+		});
+		spyOn(grokbotAuth, "mintGrokbotAccessToken").mockResolvedValue("fake-jwt");
+
+		let captured: Record<string, string> | undefined;
+		const trailer = frameConnectProto(Buffer.alloc(0), CONNECT_END_STREAM_FLAG);
+		const fetchImpl = (async (_url: string | URL | Request, init?: RequestInit) => {
+			captured = init?.headers as Record<string, string>;
+			return new Response(trailer, {
+				status: 200,
+				headers: { "content-type": "application/connect+proto" },
+			});
+		}) as FetchImpl;
+
+		const result = await streamGrokBot(model, context, { apiKey: "renew", fetch: fetchImpl }).result();
+		expect(result.stopReason).toBe("stop");
+		expect(captured?.["x-proxy-api-key"]).toBe("proxy-secret");
+		expect(captured?.authorization).toBe("Bearer fake-jwt");
 	});
 });
