@@ -7,7 +7,7 @@ import eagerTaskPrompt from "../prompts/system/eager-task.md" with { type: "text
 import eagerTodoPrompt from "../prompts/system/eager-todo.md" with { type: "text" };
 import midRunTodoNudgePrompt from "../prompts/system/mid-run-todo-nudge.md" with { type: "text" };
 import todoCompletionReminderPrompt from "../prompts/system/todo-completion-reminder.md" with { type: "text" };
-import { extractLeadingCdTarget } from "../tools/shell-tokenize";
+import { extractLeadingCdTarget, hasUnresolvableLeadingCdPrefix } from "../tools/shell-tokenize";
 import { getLatestTodoPhasesFromEntries, isTodoPhase, type TodoItem, type TodoPhase } from "../tools/todo";
 import { buildNamedToolChoice } from "../utils/tool-choice";
 import type { AgentSessionEvent } from "./agent-session-events";
@@ -64,6 +64,11 @@ interface VerifyStartSnap {
 	code?: string;
 	/** Resolved bash/eval working directory when known at tool start. */
 	cwd?: string;
+	/**
+	 * Leading `cd` was present but not safely extractable (redirects, expansion).
+	 * The shell still changes directory — never treat session/structured cwd as verify.
+	 */
+	bashCwdUnresolvable?: boolean;
 	/**
 	 * LSP diagnostics target snapped at tool start (`*` = workspace-wide).
 	 * Absolute or cwd-resolved; outside the merged tree must not clear the latch.
@@ -159,18 +164,19 @@ export class TodoTracker {
 		const command =
 			toolName === "bash" && isRecord(args) && typeof args.command === "string" ? args.command : undefined;
 		const code = toolName === "eval" && isRecord(args) && typeof args.code === "string" ? args.code : undefined;
-		const cwd =
+		const bashCwd =
 			toolName === "bash"
 				? this.#resolveBashStartCwd(args)
 				: toolName === "eval"
-					? this.#resolveEvalStartCwd(args)
-					: undefined;
+					? { cwd: this.#resolveEvalStartCwd(args) }
+					: {};
 		const lspFile = toolName === "lsp" ? this.#resolveLspDiagnosticsTarget(args) : undefined;
 		this.#verifyStart.set(toolCallId, {
 			generation: this.#host.unverifiedMergeGeneration?.() ?? 0,
 			command,
 			code,
-			cwd,
+			cwd: bashCwd.cwd,
+			bashCwdUnresolvable: bashCwd.unresolvable,
 			lspFile,
 		});
 	}
@@ -180,19 +186,23 @@ export class TodoTracker {
 	 * leading `cd <path> &&|; …` target. When both are present, the leading `cd`
 	 * wins — `BashTool` leaves that prefix for the shell whenever `cwd` is set,
 	 * so `{ cwd: "/repo", command: "cd /tmp && bun test" }` actually runs in `/tmp`.
+	 * Unextractable leading `cd` (redirects/expansion) marks the snap unresolvable.
 	 */
-	#resolveBashStartCwd(args: unknown): string | undefined {
-		if (!isRecord(args)) return undefined;
-		let hint: string | undefined;
+	#resolveBashStartCwd(args: unknown): { cwd?: string; unresolvable?: boolean } {
+		if (!isRecord(args)) return {};
 		if (typeof args.command === "string") {
 			const cd = extractLeadingCdTarget(args.command);
-			if (cd) hint = cd.path;
+			if (cd) {
+				return { cwd: path.resolve(this.#host.cwd(), cd.path) };
+			}
+			if (hasUnresolvableLeadingCdPrefix(args.command)) {
+				return { unresolvable: true };
+			}
 		}
-		if (hint === undefined && typeof args.cwd === "string" && args.cwd.trim() !== "") {
-			hint = args.cwd.trim();
+		if (typeof args.cwd === "string" && args.cwd.trim() !== "") {
+			return { cwd: path.resolve(this.#host.cwd(), args.cwd.trim()) };
 		}
-		if (hint === undefined) return undefined;
-		return path.resolve(this.#host.cwd(), hint);
+		return {};
 	}
 
 	/** Eval only clears the latch when it declares a cwd inside the merged tree. */
@@ -229,6 +239,7 @@ export class TodoTracker {
 		const verifyCwd = toolName === "bash" ? (start?.cwd ?? detailCwd) : (detailCwd ?? start?.cwd);
 		if (
 			PARENT_VERIFY_TOOLS[toolName] &&
+			!(toolName === "bash" && start?.bashCwdUnresolvable) &&
 			this.#isSuccessfulParentVerify(
 				toolName,
 				isError,
@@ -260,8 +271,14 @@ export class TodoTracker {
 				const snapped = this.#verifyStart.get(toolCallId);
 				this.#verifyStart.delete(toolCallId);
 				if (snapped !== undefined) {
+					// Prefer the start snap's cwd (includes leading `cd` resolution).
+					// Running-ack `details.cwd` echoes the structured cwd arg and can
+					// overwrite an out-of-tree start snap (async `{ cwd: /repo, command: "cd /tmp && …" }`).
 					const withCwd =
-						detailCwd !== undefined && detailCwd.trim() !== ""
+						snapped.cwd === undefined &&
+						!snapped.bashCwdUnresolvable &&
+						detailCwd !== undefined &&
+						detailCwd.trim() !== ""
 							? { ...snapped, cwd: path.resolve(detailCwd) }
 							: snapped;
 					const early = this.#earlyAsyncTerminals.get(jobId);
@@ -314,6 +331,9 @@ export class TodoTracker {
 		status: "running" | "completed" | "failed" | "cancelled" | undefined,
 	): void {
 		if (start.generation <= 0) return;
+		if (jobType === "bash" && start.bashCwdUnresolvable) {
+			return;
+		}
 		if (jobType === "bash" && start.command !== undefined && isTautologicalParentVerifyCommand(start.command)) {
 			return;
 		}

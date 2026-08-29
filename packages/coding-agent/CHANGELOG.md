@@ -46,6 +46,8 @@
 - Model `todo({ op: "rm" })` abandons open work in place (like drop) so it cannot empty the settle ledger; user `/todo rm` still deletes.
 - RPC `set_todos` stamps abandoned rows as user-authored (`droppedBy: "user"`) so host cancels do not arm model-abandoned reminders.
 - Parent bash verify prefers a leading `cd` over a structured in-tree `cwd`, so `{ cwd: "/repo", command: "cd /tmp && bun test" }` no longer clears the latch.
+- Background bash re-key preserves the start-resolved cwd (does not overwrite with the running-ack structured cwd).
+- Leading `cd` prefixes that cannot be safely extracted (redirects, expansion) never clear the latch via session/structured cwd fallback.
 - Duplicate background bash/eval terminals are not stashed after the verify snap clears, so a reused job id cannot clear a later latch from a stale early completion.
 - `/todo edit` and `/todo import` stamp Markdown `[-]`/`[~]` rows as user drops so settle does not treat them as model-abandoned work.
 - Parent `eval` no longer clears the unverified-merge latch on bare success: require an explicit cwd inside the merged tree and reject trivial expressions such as `1+1`.

@@ -534,6 +534,39 @@ describe("unverified isolated merge latch", () => {
 		expect(latch.latched).toBe(true);
 	});
 
+	it("preserves start-resolved cwd across async bash re-key", async () => {
+		const latch = new UnverifiedMergeLatch();
+		latch.mark();
+		const ctx = host(latch, { cwd: "/repo", repoRoot: "/repo" });
+		const tracker = new TodoTracker(ctx.host);
+		tracker.onToolExecutionStart("bash", "call-async", {
+			cwd: "/repo",
+			command: "cd /tmp && bun test",
+		});
+		tracker.onToolResult(
+			"bash",
+			false,
+			{ cwd: "/repo", async: { state: "running", jobId: "bg_out" } },
+			"call-async",
+		);
+		expect(latch.latched).toBe(true);
+		tracker.onAsyncJobTerminal("bg_out", "bash", "completed");
+		expect(latch.latched).toBe(true);
+	});
+
+	it("does not clear when leading cd has redirects that cannot be resolved", async () => {
+		const latch = new UnverifiedMergeLatch();
+		latch.mark();
+		const ctx = host(latch, { cwd: "/repo", repoRoot: "/repo" });
+		const tracker = new TodoTracker(ctx.host);
+		tracker.onToolExecutionStart("bash", "call-redir", {
+			cwd: "/repo",
+			command: "cd /tmp 2>/dev/null && bun test",
+		});
+		tracker.onToolResult("bash", false, { cwd: "/repo" }, "call-redir");
+		expect(latch.latched).toBe(true);
+	});
+
 	it("does not stash duplicate async terminals after the verify snap cleared", async () => {
 		const latch = new UnverifiedMergeLatch();
 		latch.mark();

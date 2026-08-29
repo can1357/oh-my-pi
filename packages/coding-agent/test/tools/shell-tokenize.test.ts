@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { extractLeadingCdTarget } from "@oh-my-pi/pi-coding-agent/tools/shell-tokenize";
+import { extractLeadingCdTarget, hasUnresolvableLeadingCdPrefix } from "@oh-my-pi/pi-coding-agent/tools/shell-tokenize";
 
 describe("extractLeadingCdTarget", () => {
 	it("extracts a bare cd target and returns the remainder", () => {
@@ -58,5 +58,20 @@ describe("extractLeadingCdTarget", () => {
 		expect(extractLeadingCdTarget("cd  && echo")).toBeNull();
 		expect(extractLeadingCdTarget("ls -la")).toBeNull();
 		expect(extractLeadingCdTarget("cdx /tmp && ls")).toBeNull();
+	});
+});
+
+describe("hasUnresolvableLeadingCdPrefix", () => {
+	it("is true when cd is present but extractLeadingCdTarget declines", () => {
+		expect(hasUnresolvableLeadingCdPrefix("cd /tmp 2>/dev/null && bun test")).toBe(true);
+		expect(hasUnresolvableLeadingCdPrefix("cd $HOME && bun test")).toBe(true);
+		expect(hasUnresolvableLeadingCdPrefix("FOO=1 cd /tmp >/dev/null && bun test")).toBe(true);
+	});
+
+	it("is false for clean extractable cd or commands without cd", () => {
+		expect(hasUnresolvableLeadingCdPrefix("cd /tmp && bun test")).toBe(false);
+		expect(hasUnresolvableLeadingCdPrefix("cd /tmp; bun test")).toBe(false);
+		expect(hasUnresolvableLeadingCdPrefix("bun test")).toBe(false);
+		expect(hasUnresolvableLeadingCdPrefix("pwd")).toBe(false);
 	});
 });

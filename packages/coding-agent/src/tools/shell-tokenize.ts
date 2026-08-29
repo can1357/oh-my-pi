@@ -315,3 +315,23 @@ export function extractLeadingCdTarget(command: string): { path: string; rest: s
 	while (command[i] === " " || command[i] === "\t") i++;
 	return { path, rest: command.slice(i) };
 }
+
+/**
+ * True when the command begins with `cd` but {@link extractLeadingCdTarget}
+ * cannot safely resolve the path (redirects, extra args, expansion). The shell
+ * still changes directory — callers that need a trusted cwd must treat this as
+ * unverifiable rather than falling back to the session/structured cwd.
+ */
+export function hasUnresolvableLeadingCdPrefix(command: string): boolean {
+	let rest = command.trim();
+	if (rest.length === 0) return false;
+	// Strip leading `NAME=value` tokens so `FOO=1 cd /tmp 2>/dev/null && …` is caught.
+	while (/^[A-Za-z_][A-Za-z0-9_]*=/.test(rest)) {
+		const space = rest.search(/[ \t]/);
+		if (space < 0) return false;
+		rest = rest.slice(space).trimStart();
+	}
+	rest = rest.replace(/^sudo[ \t]+/, "");
+	if (!/^cd([ \t]|$)/.test(rest)) return false;
+	return extractLeadingCdTarget(rest) === null;
+}
