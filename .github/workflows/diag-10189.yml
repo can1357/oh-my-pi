@@ -1,5 +1,7 @@
 name: diag-10189
 
+# Temporary diagnostic; deletes itself in the final step of its own run.
+
 on:
    push:
       branches: [diag/10189-log]
@@ -71,7 +73,7 @@ jobs:
            run: |
               set -euo pipefail
               out="$GITHUB_WORKSPACE/diag-10189-output.txt"
-              # Keep only lines that matter: failures, errors, and section markers.
+              # Keep only the lines that matter: failures, errors, section markers.
               grep -nE "=====|-----|✗|error|Error|fail|FAIL|expect|at <anonymous>|throw" "$out" \
                  > "$GITHUB_WORKSPACE/diag-10189-summary.txt" || true
               git config user.name "github-actions[bot]"
