@@ -26,17 +26,21 @@ test("lightweight cache resolver matches scoped descriptor inputs", () => {
 	}
 });
 
-test("grokbot cache namespace partitions by renewer credential", () => {
-	const a = resolveModelCacheProviderId("grokbot", {
-		apiKey: "renewer-a",
-		baseUrl: "https://api2.cursor.sh",
-	});
-	const b = resolveModelCacheProviderId("grokbot", {
+test("grokbot cache namespace partitions by renewer credential and client identity", () => {
+	const base = { apiKey: "renewer-a", baseUrl: "https://api2.cursor.sh" } as const;
+	const a = resolveModelCacheProviderId("grokbot", { ...base, namespace: "prod", clientVersion: "0.30.0" });
+	const b = resolveModelCacheProviderId("grokbot", { ...base, namespace: "dev", clientVersion: "0.30.0" });
+	const c = resolveModelCacheProviderId("grokbot", {
 		apiKey: "renewer-b",
 		baseUrl: "https://api2.cursor.sh",
+		namespace: "prod",
+		clientVersion: "0.30.0",
 	});
 	expect(a).not.toBe(b);
-	expect(a).toBe(resolveModelCacheProviderId("grokbot", { apiKey: "renewer-a", baseUrl: "https://api2.cursor.sh" }));
+	expect(a).not.toBe(c);
+	expect(a).toBe(
+		resolveModelCacheProviderId("grokbot", { ...base, namespace: "prod", clientVersion: "0.30.0" }),
+	);
 });
 
 test("grokbot cache namespace partitions by discovery headers", () => {

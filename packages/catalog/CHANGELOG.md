@@ -13,6 +13,9 @@
 - Grok Bot max-only AvailableModels rows (`supportsMaxMode` without `supportsNonMaxMode`) keep `sandMaxMode` and use `contextTokenLimitForMaxMode` instead of being forced into non-max.
 - Grok Bot preserves live AvailableModels effort ladders through `buildModel` instead of expanding them to the static catalog scale; reasoning models without an effort parameter no longer invent a thinking control.
 - Grok Bot AvailableModels cache is scoped by renewer, backend, namespace, and client version so credential or `GROKBOT_NAMESPACE` / `GROKBOT_CLIENT_VERSION` switches do not reuse another catalog.
+- Grok Bot discovery stamps `sandMaxMode` for max-only AvailableModels rows, keeps live effort ladders through `buildModel`, and scopes the model cache by namespace/client version as well as renewer.
+- Grok Bot secrets loading uses async dotenv reads so login/discovery/stream no longer block the event loop on agent-directory I/O.
+- Grok Bot AvailableModels cache is scoped by renewer credential + backend so account switches do not reuse another catalog.
 - Grok Bot bundled catalog now includes `xhigh` on parameterized effort ladders (regenerated from seed/policy); AvailableModels discovery uses a static import.
 - Grok Bot `secrets/grokbot.env` loading now uses the shared dotenv parser so quoted values, `export` prefixes, and inline comments authenticate correctly. Async secret loads use `parseEnvFileAsync` so slow agent directories do not block the event loop.
 
