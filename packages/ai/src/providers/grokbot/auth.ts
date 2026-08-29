@@ -46,9 +46,7 @@ function tokenCacheKey(cfg: Pick<GrokbotConfig, "renewal" | "namespace" | "clien
 }
 
 /** @deprecated Prefer {@link shortenPath} from `@oh-my-pi/pi-utils`. */
-export function shortenGrokbotDisplayPath(filePath: string, homeDir?: string): string {
-	return shortenPath(filePath, homeDir);
-}
+export { shortenPath as shortenGrokbotDisplayPath } from "@oh-my-pi/pi-utils";
 
 /** Strip stamp suffix (`0.30.0-pre.16` → `0.30.0`), matching sand-host `stampedVersionBaseOf`. */
 export function stampedVersionBaseOf(stamped: string | undefined | null): string | undefined {

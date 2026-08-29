@@ -11,7 +11,7 @@ import type { ToolCallContext } from "@oh-my-pi/pi-agent-core";
 import type { Ellipsis } from "@oh-my-pi/pi-natives";
 import type { Component } from "@oh-my-pi/pi-tui";
 import { getKeybindings, replaceTabs, truncateToWidth } from "@oh-my-pi/pi-tui";
-import { pluralize } from "@oh-my-pi/pi-utils";
+import { pluralize, shortenPath } from "@oh-my-pi/pi-utils";
 import { formatKeyHints, type KeyId } from "../config/keybindings";
 import { isSettingsInitialized, settings } from "../config/settings";
 import { getDefault } from "../config/settings-schema";
@@ -711,23 +711,7 @@ export function truncateDiffByHunk(
 // Path Utilities
 // =============================================================================
 
-export function shortenPath(filePath: unknown, homeDir?: string): string {
-	if (typeof filePath !== "string") {
-		return "";
-	}
-	const home = homeDir ?? os.homedir();
-	const windowsStyle = /^[A-Za-z]:[\\/]/.test(home) || home.startsWith("\\\\");
-	const hasHomePrefix = windowsStyle
-		? filePath.toLowerCase().startsWith(home.toLowerCase())
-		: filePath.startsWith(home);
-	if (home && hasHomePrefix) {
-		const suffix = filePath.slice(home.length);
-		if (suffix === "" || suffix.startsWith(path.posix.sep) || suffix.startsWith(path.win32.sep)) {
-			return `~${suffix.replaceAll(path.win32.sep, path.posix.sep)}`;
-		}
-	}
-	return filePath;
-}
+export { shortenPath };
 
 export function formatToolWorkingDirectory(workdir: string | undefined, projectDir: string): string | undefined {
 	if (!workdir) return undefined;

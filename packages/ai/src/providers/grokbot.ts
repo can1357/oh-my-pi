@@ -16,6 +16,7 @@ import type {
 	ToolCall,
 } from "../types";
 import { AssistantMessageEventStream } from "../utils/event-stream";
+import { notifyProviderResponse } from "../utils/provider-response";
 import { toolWireSchema } from "../utils/schema/wire";
 import {
 	clearGrokbotTokenCache,
@@ -528,6 +529,7 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 				body: frameConnectProto(protoBytes),
 				signal: options?.signal,
 			});
+			await notifyProviderResponse(options, response, model, response.headers.get("x-request-id"));
 
 			if (!response.ok || !response.body) {
 				if (response.status === 401) clearGrokbotTokenCache();
@@ -709,6 +711,10 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 					const errObj = firstPresent(parsed, ["error"]);
 					if (errObj && typeof errObj === "object") {
 						const e = errObj as Record<string, unknown>;
+						if (e.isOutputTokenLimitError || e.is_output_token_limit_error) {
+							output.stopReason = "length";
+							continue;
+						}
 						if (e.message || e.code) throw new Error(String(e.message || e.code));
 					}
 					if (typeof errObj === "string" && errObj) throw new Error(errObj);
@@ -772,7 +778,9 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 			for (const state of toolStates.values()) finishTool(state);
 
 			const hasToolCall = output.content.some(b => b && b.type === "toolCall");
-			output.stopReason = hasToolCall ? "toolUse" : "stop";
+			if (output.stopReason !== "length") {
+				output.stopReason = hasToolCall ? "toolUse" : "stop";
+			}
 			output.duration = Math.round(performance.now() - startTime);
 			calculateCost(model, output.usage);
 			logger.debug("grokbot: stream done", {
@@ -785,7 +793,7 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 					totalTokens: output.usage.totalTokens,
 				},
 			});
-			stream.push({ type: "done", reason: output.stopReason, message: output });
+			stream.push({ type: "done", reason: output.stopReason as "stop" | "length" | "toolUse", message: output });
 			stream.end(output);
 		} catch (error) {
 			const result = await AIError.finalize(error, {

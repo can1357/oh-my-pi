@@ -5,3 +5,5 @@ Install omp Grok Bot auth on the user’s host only (Mac via local-exec / regist
 Write `~/.omp/agent/secrets/grokbot.env` on the host (`$OMP_AGENT_DIR/secrets/grokbot.env` if set) with only those two keys. `chmod 600`.
 
 Report host path, key names, mode. If the host is unreachable, stop. Do not fall back to the VM, `/tmp`, or chat.
+
+Press Enter after the host secrets file exists.

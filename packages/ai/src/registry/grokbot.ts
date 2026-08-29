@@ -31,7 +31,7 @@ export async function loginGrokbot(options: OAuthLoginCallbacks): Promise<string
 	options.onProgress?.("Copy the prompt below into Grok Bot. Do not run it in omp.");
 
 	await options.onPrompt({
-		message: `${hostInstallPrompt.trim()}\n\nPress Enter after the host secrets file exists.`,
+		message: hostInstallPrompt.trim(),
 		placeholder: "(Enter when done)",
 		allowEmpty: true,
 	});
