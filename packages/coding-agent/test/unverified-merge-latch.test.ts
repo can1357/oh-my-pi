@@ -521,6 +521,39 @@ describe("unverified isolated merge latch", () => {
 		expect(latch.latched).toBe(false);
 	});
 
+	it("does not clear when structured cwd hides a leading out-of-tree cd", async () => {
+		const latch = new UnverifiedMergeLatch();
+		latch.mark();
+		const ctx = host(latch, { cwd: "/repo", repoRoot: "/repo" });
+		const tracker = new TodoTracker(ctx.host);
+		tracker.onToolExecutionStart("bash", "call-hide", {
+			cwd: "/repo",
+			command: "cd /tmp && bun test",
+		});
+		tracker.onToolResult("bash", false, { cwd: "/repo" }, "call-hide");
+		expect(latch.latched).toBe(true);
+	});
+
+	it("does not stash duplicate async terminals after the verify snap cleared", async () => {
+		const latch = new UnverifiedMergeLatch();
+		latch.mark();
+		const ctx = host(latch);
+		const tracker = new TodoTracker(ctx.host);
+		tracker.onToolExecutionStart("bash", "call-1", { command: "bun test test/foo.test.ts" });
+		tracker.onToolResult("bash", false, { async: { state: "running", jobId: "bg_1" } }, "call-1");
+		tracker.onAsyncJobTerminal("bg_1", "bash", "completed");
+		expect(latch.latched).toBe(false);
+		latch.mark();
+		// Duplicate terminal for the consumed job must not stash for a later reuse.
+		tracker.onAsyncJobTerminal("bg_1", "bash", "completed");
+		expect(latch.latched).toBe(true);
+		// Fresh verifier with reused id still works when a pending snap exists.
+		tracker.onToolExecutionStart("bash", "call-2", { command: "bun test test/bar.test.ts" });
+		tracker.onAsyncJobTerminal("bg_1", "bash", "completed");
+		tracker.onToolResult("bash", false, { async: { state: "running", jobId: "bg_1" } }, "call-2");
+		expect(latch.latched).toBe(false);
+	});
+
 	it("one parent bash does not clear two overlapping merges", async () => {
 		const latch = new UnverifiedMergeLatch();
 		latch.mark();

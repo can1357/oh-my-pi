@@ -739,6 +739,20 @@ export function markdownToPhases(md: string): { phases: TodoPhase[]; errors: str
 	return { phases, errors };
 }
 
+/**
+ * Stamp abandoned checklist rows from user-authored Markdown (`/todo edit` /
+ * `/todo import`) as `droppedBy: "user"`. Without this, `[-]`/`[~]` parses as
+ * model-abandoned work and keeps settle reminders armed.
+ */
+export function stampUserMarkdownAbandoned(phases: TodoPhase[]): TodoPhase[] {
+	return phases.map(phase => ({
+		name: phase.name,
+		tasks: phase.tasks.map(task =>
+			task.status === "abandoned" ? { ...task, droppedBy: "user" as const } : task,
+		),
+	}));
+}
+
 function formatSummary(phases: TodoPhase[], errors: string[], readOnly = false): string {
 	const tasks = phases.flatMap(phase => phase.tasks);
 	if (tasks.length === 0) {

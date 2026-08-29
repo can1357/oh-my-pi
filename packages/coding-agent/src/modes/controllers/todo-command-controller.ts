@@ -5,6 +5,7 @@ import {
 	markdownToPhases,
 	phasesToMarkdown,
 	resolveTodoMarkdownPath,
+	stampUserMarkdownAbandoned,
 	type TodoItem,
 	type TodoPhase,
 	USER_TODO_EDIT_CUSTOM_TYPE,
@@ -256,7 +257,7 @@ export class TodoCommandController {
 			this.ctx.showError(`Could not parse ${source}:\n  ${errors.join("\n  ")}`);
 			return;
 		}
-		this.#commit(phases, `/todo import ${source}`);
+		this.#commit(stampUserMarkdownAbandoned(phases), `/todo import ${source}`);
 		const taskCount = phases.reduce((sum, p) => sum + p.tasks.length, 0);
 		this.ctx.showStatus(`Imported ${phases.length} phase(s), ${taskCount} task(s) from ${source}.`);
 	}
@@ -431,7 +432,7 @@ export class TodoCommandController {
 				this.ctx.showError(`Could not parse Markdown:\n  ${errors.join("\n  ")}`);
 				return;
 			}
-			this.#commit(parsed, "/todo edit");
+			this.#commit(stampUserMarkdownAbandoned(parsed), "/todo edit");
 			const taskCount = parsed.reduce((sum, p) => sum + p.tasks.length, 0);
 			this.ctx.showStatus(`Todos updated from editor: ${parsed.length} phase(s), ${taskCount} task(s).`);
 		} catch (error) {

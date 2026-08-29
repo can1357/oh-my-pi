@@ -5,6 +5,7 @@ import {
 	markdownToPhases,
 	phasesToMarkdown,
 	resolveTodoMarkdownPath,
+	stampUserMarkdownAbandoned,
 	USER_TODO_EDIT_CUSTOM_TYPE,
 } from "../../tools/todo";
 import type { ParsedSlashCommand, SlashCommandResult, SlashCommandRuntime } from "../types";
@@ -151,7 +152,7 @@ async function handleTodoImportCommand(restArgs: string, runtime: SlashCommandRu
 	}
 	const { phases, errors } = markdownToPhases(content);
 	if (errors.length > 0) return usage(`Could not parse ${target}:\n  ${errors.join("\n  ")}`, runtime);
-	commitTodos(runtime, phases);
+	commitTodos(runtime, stampUserMarkdownAbandoned(phases));
 	const taskCount = phases.reduce((sum, phase) => sum + phase.tasks.length, 0);
 	await runtime.output(`Imported ${phases.length} phase(s), ${taskCount} task(s) from ${target}.`);
 	return commandConsumed();

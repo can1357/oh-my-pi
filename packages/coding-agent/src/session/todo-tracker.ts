@@ -177,17 +177,19 @@ export class TodoTracker {
 
 	/**
 	 * Resolve bash cwd the same way the bash tool does: structured `cwd`, else a
-	 * leading `cd <path> &&|; …` target. Absolute/relative paths resolve against the
-	 * session tree so out-of-tree verify cannot clear the latch.
+	 * leading `cd <path> &&|; …` target. When both are present, the leading `cd`
+	 * wins — `BashTool` leaves that prefix for the shell whenever `cwd` is set,
+	 * so `{ cwd: "/repo", command: "cd /tmp && bun test" }` actually runs in `/tmp`.
 	 */
 	#resolveBashStartCwd(args: unknown): string | undefined {
 		if (!isRecord(args)) return undefined;
 		let hint: string | undefined;
-		if (typeof args.cwd === "string" && args.cwd.trim() !== "") {
-			hint = args.cwd.trim();
-		} else if (typeof args.command === "string") {
+		if (typeof args.command === "string") {
 			const cd = extractLeadingCdTarget(args.command);
 			if (cd) hint = cd.path;
+		}
+		if (hint === undefined && typeof args.cwd === "string" && args.cwd.trim() !== "") {
+			hint = args.cwd.trim();
 		}
 		if (hint === undefined) return undefined;
 		return path.resolve(this.#host.cwd(), hint);
@@ -222,6 +224,9 @@ export class TodoTracker {
 		const detailCwd = typeof details?.cwd === "string" ? details.cwd : undefined;
 		const detailLspFile = this.#resolveLspDiagnosticsTarget(lspDiagnosticsRequestFromDetails(details));
 		const evalCode = toolName === "eval" ? (start?.code ?? evalCodeFromDetails(details)) : undefined;
+		// Prefer the start snap for bash cwd: result `details.cwd` echoes the structured
+		// cwd arg and can hide a leading `cd /tmp && …` that actually ran out of tree.
+		const verifyCwd = toolName === "bash" ? (start?.cwd ?? detailCwd) : (detailCwd ?? start?.cwd);
 		if (
 			PARENT_VERIFY_TOOLS[toolName] &&
 			this.#isSuccessfulParentVerify(
@@ -229,7 +234,7 @@ export class TodoTracker {
 				isError,
 				details,
 				start?.command,
-				detailCwd ?? start?.cwd,
+				verifyCwd,
 				start?.lspFile ?? detailLspFile,
 				evalCode,
 			)
@@ -286,14 +291,21 @@ export class TodoTracker {
 		const start = this.#verifyStart.get(jobId);
 		if (start === undefined) {
 			// Terminal beat the toolResult re-key — stash until re-key applies it.
-			// Only verification jobs (bash/eval) can clear the latch; ignore task/etc.
-			if (jobType === "bash" || jobType === "eval") {
+			// Only stash when a tool-call-keyed verify snap is still pending (we are
+			// mid-flight waiting to re-key). After a successful clear the snap is
+			// gone; stashing then would poison a later reused job id (bg_1).
+			if ((jobType === "bash" || jobType === "eval") && this.#hasPendingVerifyToolStart()) {
 				this.#earlyAsyncTerminals.set(jobId, { jobType, status });
 			}
 			return;
 		}
 		this.#verifyStart.delete(jobId);
 		this.#applyAsyncVerifyClear(start, jobType, status);
+	}
+
+	/** True while a verify snap still awaits re-key or async completion. */
+	#hasPendingVerifyToolStart(): boolean {
+		return this.#verifyStart.size > 0;
 	}
 
 	#applyAsyncVerifyClear(
