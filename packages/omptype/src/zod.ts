@@ -630,9 +630,34 @@ export const discriminatedUnion = <
 		deferred: hasDeferredAlias(schema.ir),
 		values: hasDeferredAlias(schema.ir) ? undefined : discriminatorValues(schema.ir, discriminator),
 	}));
-	for (const [index, variant] of variants.entries()) {
-		if (!variant.deferred && variant.values === undefined) throw variantError(index);
-	}
+	/**
+	 * Every discriminator value must be claimed by exactly one variant, as zod
+	 * requires: two variants pinning `kind: "x"` make dispatch ambiguous, and
+	 * the winner would be decided by declaration order alone.
+	 *
+	 * `resolved` says whether deferred getters have run: at construction a
+	 * deferred variant's values are legitimately unknown and it is skipped,
+	 * while afterwards every variant must have produced a value set.
+	 */
+	const claimDiscriminatorValues = (resolved: boolean): void => {
+		const claims = new Map<unknown, number>();
+		for (const [index, variant] of variants.entries()) {
+			if (variant.values === undefined) {
+				if (resolved || !variant.deferred) throw variantError(index);
+				continue;
+			}
+			for (const value of variant.values) {
+				const claimed = claims.get(value);
+				if (claimed !== undefined) {
+					throw new OmpTypeError(
+						`discriminatedUnion variants ${claimed} and ${index} both pin "${discriminator}" to ${JSON.stringify(value) ?? String(value)}`,
+					);
+				}
+				claims.set(value, index);
+			}
+		}
+	};
+	claimDiscriminatorValues(false);
 	const variantIrs = schemas.map(schema => embed(schema));
 	// Same gate as union() above: variants are embedded so stepped variants
 	// keep their steps and their exported structure, only deferred aliases are
@@ -654,14 +679,14 @@ export const discriminatedUnion = <
 	const dispatch = type.unknown.pipe((value, ctx) => {
 		if (!checked) {
 			// First parse: resolution is now legal, so a `z.lazy` variant that
-			// never pins the discriminator surfaces as the same definition error
-			// instead of quietly matching every object. The flag is set only
-			// after every variant passes, so a broken definition keeps throwing.
-			for (const [index, variant] of variants.entries()) {
-				if (!variant.deferred) continue;
-				variant.values = discriminatorValues(variant.schema.ir, discriminator);
-				if (variant.values === undefined) throw variantError(index);
+			// never pins the discriminator — or collides with another variant's
+			// value — surfaces as the same definition error instead of quietly
+			// matching every object. The flag is set only after every variant
+			// passes, so a broken definition keeps throwing.
+			for (const variant of variants) {
+				if (variant.deferred) variant.values = discriminatorValues(variant.schema.ir, discriminator);
 			}
+			claimDiscriminatorValues(true);
 			checked = true;
 		}
 		if (typeof value !== "object" || value === null) {

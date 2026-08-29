@@ -158,6 +158,35 @@ describe("zod-like parsing", () => {
 		expect(deferredValid.safeParse({ kind: "lazy", v: 1 }).success).toBe(false);
 	});
 
+	it("rejects discriminated-union variants claiming the same discriminator value", () => {
+		// Two variants pinning the same value make dispatch ambiguous: the
+		// winner would be decided by declaration order, so the same input could
+		// produce a different output after an innocuous reorder. zod rejects the
+		// definition; so must this.
+		expect(() =>
+			z.discriminatedUnion("kind", [
+				z.object({ kind: z.literal("x"), a: z.string() }),
+				z.object({ kind: z.literal("x"), b: z.number() }),
+			]),
+		).toThrow(/variants 0 and 1 both pin "kind" to "x"/);
+		// Enum members count as claims, so an overlap with a later literal is
+		// caught too — not just literal-vs-literal collisions.
+		expect(() =>
+			z.discriminatedUnion("kind", [
+				z.object({ kind: z.enum(["a", "b"]) }),
+				z.object({ kind: z.literal("b"), n: z.number() }),
+			]),
+		).toThrow(/variants 0 and 1 both pin "kind" to "b"/);
+		// A z.lazy variant is claimed once its getter has run, so wrapping the
+		// collision in z.lazy defers the error to first parse instead of hiding
+		// it.
+		const deferredCollision = z.discriminatedUnion("kind", [
+			z.lazy(() => z.object({ kind: z.literal("x"), a: z.string() })),
+			z.object({ kind: z.literal("x"), b: z.number() }),
+		]);
+		expect(() => deferredCollision.parse({ kind: "x", a: "1" })).toThrow(/variants 0 and 1 both pin "kind" to "x"/);
+	});
+
 	it("rejects arrays wherever an object schema can observe its input", () => {
 		// An array reaching an object schema contradicts the emitted
 		// `{"type":"object"}` and zod's own semantics: the tool would accept a
