@@ -21,6 +21,8 @@
  * `enter` opens the selected file in the diff pane, and `space` stages or
  * unstages the selected row — on a directory, every file underneath it.
  */
+
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import {
 	type Component,
 	matchesKey,
@@ -32,7 +34,7 @@ import {
 } from "@oh-my-pi/pi-tui";
 import { generateGitCommit } from "../../commit/conventional/service";
 import { theme, warmHighlighter } from "../../modes/theme/theme";
-import * as git from "../../utils/git";
+import { aiStage } from "./ai-stage";
 import { AvatarLoader } from "./avatar";
 import { pill, softPill, tintChip } from "./colors";
 import {
@@ -118,6 +120,7 @@ class GitTuiComponent implements Component {
 	#loadAbort: AbortController | null = null;
 	#highlightAbort: AbortController | null = null;
 	#generationAbort: AbortController | null = null;
+	#aiStageAbort: AbortController | null = null;
 	#refreshTimer: NodeJS.Timeout | undefined;
 	#busy = false;
 	#status = "";
@@ -160,6 +163,7 @@ class GitTuiComponent implements Component {
 		this.#loadAbort?.abort();
 		this.#highlightAbort?.abort();
 		this.#generationAbort?.abort();
+		this.#aiStageAbort?.abort();
 		clearInterval(this.#refreshTimer);
 	}
 
@@ -303,6 +307,40 @@ class GitTuiComponent implements Component {
 						theme.fg("success", action.selection ? `Unstaged ${action.selection.label}` : "Unstaged all changes"),
 					);
 					break;
+				case "stage-ai": {
+					const abort = new AbortController();
+					this.#aiStageAbort = abort;
+					this.#setStatus(theme.fg("accent", `Filtering changes: ${action.prompt}`));
+					try {
+						const outcome = await aiStage({
+							cwd: this.#model.cwd,
+							instruction: action.prompt,
+							files: this.#model.unstaged,
+							signal: abort.signal,
+							onProgress: message => {
+								if (!this.#disposed) this.#setStatus(theme.fg("dim", message));
+							},
+						});
+						if (outcome.stagedHunks === 0 && outcome.wholeFiles === 0) {
+							this.#setStatus(theme.fg("warning", `No changes matched "${action.prompt}"`));
+						} else {
+							const parts: string[] = [];
+							if (outcome.stagedHunks > 0) parts.push(`${outcome.stagedHunks} of ${outcome.totalHunks} hunks`);
+							if (outcome.wholeFiles > 0) {
+								parts.push(`${outcome.wholeFiles} whole file${outcome.wholeFiles === 1 ? "" : "s"}`);
+							}
+							this.#setStatus(
+								theme.fg(
+									"success",
+									`Staged ${parts.join(" + ")} (${outcome.matchedFiles}/${outcome.totalFiles} files matched)`,
+								),
+							);
+						}
+					} finally {
+						if (this.#aiStageAbort === abort) this.#aiStageAbort = null;
+					}
+					break;
+				}
 				case "generate": {
 					const abort = new AbortController();
 					this.#generationAbort = abort;
@@ -763,11 +801,12 @@ export interface GitTuiOptions {
  */
 export async function showGitOverlay(ui: TUI, options: GitTuiOptions = {}): Promise<void> {
 	const cwd = options.cwd ?? process.cwd();
-	const root = await git.repo.root(cwd);
+	const repo = vcs.git(cwd);
+	const root = repo?.info().repoRoot ?? null;
 	if (!root) throw new Error(`Not a git repository: ${cwd}`);
 	let pinnedSha: string | undefined;
 	if (options.revision) {
-		pinnedSha = (await git.ref.resolve(root, options.revision)) ?? undefined;
+		pinnedSha = (await repo?.resolveRef(options.revision)) ?? undefined;
 		if (!pinnedSha) throw new Error(`Cannot resolve revision: ${options.revision}`);
 	}
 	const component = new GitTuiComponent(ui, root, pinnedSha);

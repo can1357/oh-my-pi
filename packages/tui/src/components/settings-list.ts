@@ -142,6 +142,25 @@ export class SettingsList implements Component {
 		this.#selectedIndex = this.#firstSelectableIndex();
 		this.#lastNotifiedSelectionId = this.getSelectedItem()?.id;
 	}
+	/** Return item, selection, filter, and submenu state for debug inspection. */
+	debugState(): Record<string, unknown> {
+		const selected = this.getSelectedItem();
+		return {
+			itemCount: this.#items.length,
+			filteredItemCount: this.#filteredItems.length,
+			selectedIndex: this.#filteredItems.length > 0 ? this.#selectedIndex : -1,
+			selectedItemId: selected?.id ?? null,
+			selectedItemLabel: selected?.label ?? null,
+			filterText: this.#filterQuery,
+			sectionFocused: this.#sectionFocus,
+			submenuOpen: this.#submenuComponent !== null,
+		};
+	}
+
+	/** Expose the active submenu to the debug tree walker. */
+	get debugChildren(): readonly Component[] {
+		return this.#submenuComponent ? [this.#submenuComponent] : [];
+	}
 
 	/** The currently selected item, or undefined when empty or on a heading. */
 	getSelectedItem(): SettingItem | undefined {

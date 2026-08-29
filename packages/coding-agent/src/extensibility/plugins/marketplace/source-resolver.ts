@@ -12,11 +12,12 @@
 import * as crypto from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { isEnoent, pathIsWithin } from "@oh-my-pi/pi-utils";
-import * as git from "../../../utils/git";
 
 import type { MarketplaceCatalogMetadata, MarketplacePluginEntry, PluginSource } from "./types";
+
+const GIT_CLONE_TIMEOUT_MS = 30 * 60 * 1000;
 
 export interface ResolveContext {
 	/** Absolute path to the cloned/local marketplace directory. Required for relative sources. */
@@ -87,7 +88,11 @@ async function resolveObjectSource(
 			// { source: "url", url: "https://github.com/owner/repo.git" }
 			// Despite the name, this is typically a git clone URL
 			const targetDir = path.join(context.tmpDir, `plugin-${crypto.randomUUID()}`);
-			await git.clone(source.url, targetDir, { ref: source.ref, sha: source.sha });
+			await vcs.clone(source.url, targetDir, {
+				refName: source.ref,
+				sha: source.sha,
+				timeoutMs: GIT_CLONE_TIMEOUT_MS,
+			});
 			return { dir: targetDir, tempCloneRoot: targetDir };
 		}
 
@@ -95,7 +100,11 @@ async function resolveObjectSource(
 			// { source: "github", repo: "owner/repo" }
 			const url = `https://github.com/${source.repo}.git`;
 			const targetDir = path.join(context.tmpDir, `plugin-${crypto.randomUUID()}`);
-			await git.clone(url, targetDir, { ref: source.ref, sha: source.sha });
+			await vcs.clone(url, targetDir, {
+				refName: source.ref,
+				sha: source.sha,
+				timeoutMs: GIT_CLONE_TIMEOUT_MS,
+			});
 			return { dir: targetDir, tempCloneRoot: targetDir };
 		}
 
@@ -106,7 +115,11 @@ async function resolveObjectSource(
 					? source.url
 					: `https://github.com/${source.url}.git`;
 			const cloneDir = path.join(context.tmpDir, `plugin-repo-${crypto.randomUUID()}`);
-			await git.clone(url, cloneDir, { ref: source.ref, sha: source.sha });
+			await vcs.clone(url, cloneDir, {
+				refName: source.ref,
+				sha: source.sha,
+				timeoutMs: GIT_CLONE_TIMEOUT_MS,
+			});
 
 			const subdirPath = path.resolve(cloneDir, source.path);
 			if (!pathIsWithin(cloneDir, subdirPath)) {

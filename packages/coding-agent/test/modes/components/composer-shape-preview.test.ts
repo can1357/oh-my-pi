@@ -75,6 +75,10 @@ describe("composer shape preview", () => {
 				const content = `CHIP ${previewTitle ?? ""}`;
 				return { content, width: content.length };
 			},
+			getBandTopBorder: (_width: number, previewTitle?: string) => {
+				const content = `BAND ${previewTitle ?? ""}`;
+				return { content, width: content.length };
+			},
 			renderBottomBar: (_width: number, groups: "left" | "full", previewTitle?: string) =>
 				`BOTTOM-${groups.toUpperCase()} ${previewTitle ?? ""}`,
 		};
@@ -83,6 +87,10 @@ describe("composer shape preview", () => {
 		expect(box).toContain("TOPBAR"); // embedded in the top border
 		expect(box).toContain("omp"); // stand-in title forwarded to the status source
 		expect(box).not.toContain("BOTTOM"); // box has no standalone bottom bar
+		const band = renderComposerShapePreview("band", 80, status).join("\n");
+		expect(band).toContain("BAND"); // flush band row above the prompt
+		expect(band).toContain("omp");
+		expect(band).not.toContain("BOTTOM"); // the band replaces the bottom bar
 
 		const claude = renderComposerShapePreview("claude", 80, status).join("\n");
 		expect(claude).toContain("CHIP"); // right group chips onto the top rule

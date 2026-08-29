@@ -382,6 +382,36 @@ export async function splitPathAndSelPreferringLiteral(
 }
 
 /**
+ * Synchronous sibling of {@link probeLiteralPathExists}. Some callers resolve
+ * paths on a synchronous hot path (the ACP event mapper builds tool-call
+ * notifications synchronously), so the async `lstat` probe is unavailable. The
+ * error-code handling matches the async version exactly.
+ */
+export function probeLiteralPathExistsSync(filePath: string, cwd: string): "exists" | "missing" | "unknown" {
+	const resolved = resolveReadPath(filePath, cwd);
+	try {
+		fs.lstatSync(resolved);
+		return "exists";
+	} catch (err) {
+		if (isEnoent(err) || isEnotdir(err) || hasFsCode(err, "ENAMETOOLONG")) return "missing";
+		return "unknown";
+	}
+}
+
+/**
+ * Synchronous sibling of {@link splitPathAndSelPreferringLiteral}. Identical
+ * literal-path precedence — a real file named `report:1-20` keeps its colon —
+ * for callers that cannot await, such as the ACP event mapper's location
+ * builder.
+ */
+export function splitPathAndSelPreferringLiteralSync(rawPath: string, cwd: string): { path: string; sel?: string } {
+	const strict = splitPathAndSel(rawPath);
+	if (strict.sel === undefined) return strict;
+	const probe = probeLiteralPathExistsSync(rawPath, cwd);
+	return probe === "missing" ? strict : { path: rawPath };
+}
+
+/**
  * Variant of {@link splitPathAndSel} for internal URLs (`scheme://...`).
  *
  * The filesystem-path splitter is intentionally conservative: it refuses to
