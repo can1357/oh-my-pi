@@ -36,6 +36,9 @@ Recursive scans stop at depth 6, 2,000 visited directories, or 20,000 visited en
 `.git`, and `node_modules` are pruned. Directory symlinks remain leaf skill candidates and are not traversed
 recursively. Reaching any traversal limit emits a discovery warning instead of silently returning a partial result.
 
+A matched skill directory remains traversable: it may be both an independently invocable skill and a namespace
+for independently invocable child skills.
+
 Third-party and plugin providers retain their specified one-level layout:
 
 - `<skills-root>/<skill-name>/SKILL.md`

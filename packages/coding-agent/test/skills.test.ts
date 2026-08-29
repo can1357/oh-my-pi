@@ -178,18 +178,36 @@ describe("skills", () => {
 				{ dir, providerId: "test", level: "project", recursive: true, limits },
 			);
 
-		it("loads through depth six and warns when deeper directories are truncated", async () => {
+		it("continues discovery below a directory that is also a skill", async () => {
+			const root = await fs.mkdtemp(path.join(os.tmpdir(), "pi-skills-parent-child-"));
+			try {
+				await writeTestSkill(path.join(root, "parent"), "parent");
+				await writeTestSkill(path.join(root, "parent", "child"), "child");
+
+				const result = await scanRecursive(root);
+
+				expect(result.items.map(skill => skill.name)).toEqual(["child", "parent"]);
+				expect(result.warnings).toHaveLength(0);
+			} finally {
+				await removeWithRetries(root);
+			}
+		});
+
+		it("loads through depth six and truncates skills at depths seven and eight", async () => {
 			const root = await fs.mkdtemp(path.join(os.tmpdir(), "pi-skills-depth-"));
 			const depthSix = path.join(root, "one", "two", "three", "four", "five", "six");
 			const depthSeven = path.join(depthSix, "seven");
+			const depthEight = path.join(depthSeven, "eight");
 			try {
 				await writeTestSkill(depthSix, "depth-six");
 				await writeTestSkill(depthSeven, "depth-seven");
+				await writeTestSkill(depthEight, "depth-eight");
 
 				const result = await scanRecursive(root);
 
 				expect(result.items.map(skill => skill.name)).toContain("depth-six");
 				expect(result.items.map(skill => skill.name)).not.toContain("depth-seven");
+				expect(result.items.map(skill => skill.name)).not.toContain("depth-eight");
 				expect(result.warnings).toContain(`Skill discovery truncated at ${root}: maximum depth 6 reached`);
 			} finally {
 				await removeWithRetries(root);
@@ -264,6 +282,25 @@ describe("skills", () => {
 				}
 			},
 		);
+
+		it.skipIf(process.platform === "win32")("applies the depth cap to symlinked skill leaves", async () => {
+			const root = await fs.mkdtemp(path.join(os.tmpdir(), "pi-skills-symlink-depth-root-"));
+			const target = await fs.mkdtemp(path.join(os.tmpdir(), "pi-skills-symlink-depth-target-"));
+			const depthSix = path.join(root, "one", "two", "three", "four", "five", "six");
+			try {
+				await fs.mkdir(depthSix, { recursive: true });
+				await writeTestSkill(target, "linked-depth-seven");
+				await fs.symlink(target, path.join(depthSix, "linked"), "dir");
+
+				const result = await scanRecursive(root);
+
+				expect(result.items.map(skill => skill.name)).not.toContain("linked-depth-seven");
+				expect(result.warnings).toContain(`Skill discovery truncated at ${root}: maximum depth 6 reached`);
+			} finally {
+				await removeWithRetries(root);
+				await removeWithRetries(target);
+			}
+		});
 	});
 
 	describe("loadSkills with options", () => {

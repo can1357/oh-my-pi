@@ -479,11 +479,11 @@ export async function scanSkillsFromDir(
 			}
 			if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
 			const childDir = path.join(current.path, entry.name);
+			if (options.recursive && current.depth >= limits.maxDepth) {
+				truncationReasons.add(`maximum depth ${limits.maxDepth} reached`);
+				continue;
+			}
 			if (options.recursive && entry.isDirectory()) {
-				if (current.depth >= limits.maxDepth) {
-					truncationReasons.add(`maximum depth ${limits.maxDepth} reached`);
-					continue;
-				}
 				directories.push({ path: childDir, depth: current.depth + 1 });
 			} else {
 				work.push(loadSkill(path.join(childDir, "SKILL.md")));
