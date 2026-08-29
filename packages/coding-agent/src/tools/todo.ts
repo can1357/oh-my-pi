@@ -667,12 +667,13 @@ export function phasesToMarkdown(phases: TodoPhase[]): string {
 		if (i > 0) out.push("");
 		out.push(`# ${phases[i].name}`);
 		for (const task of phases[i].tasks) {
-			// A blocked task's reason rides in a trailing HTML comment: invisible in
-			// rendered markdown, unambiguous to parse back (task content can't
-			// contain the comment delimiters), so the note survives `/todo edit` and
-			// export/import round-trips.
+			// Provenance notes ride in trailing HTML comments: invisible in rendered
+			// markdown, unambiguous to parse back (task content can't contain the
+			// comment delimiters), so they survive `/todo edit` and export/import.
 			const blockerNote = task.status === "blocked" && task.blocker ? ` <!-- blocker: ${task.blocker} -->` : "";
-			out.push(`- [${STATUS_TO_MARKER[task.status]}] ${task.content}${blockerNote}`);
+			const droppedByNote =
+				task.status === "abandoned" && task.droppedBy === "user" ? ` <!-- dropped-by: user -->` : "";
+			out.push(`- [${STATUS_TO_MARKER[task.status]}] ${task.content}${blockerNote}${droppedByNote}`);
 		}
 	}
 	return `${out.join("\n")}\n`;
@@ -725,14 +726,23 @@ export function markdownToPhases(md: string): { phases: TodoPhase[]; errors: str
 				errors.push(`Line ${lineNum + 1}: unknown status marker "[${marker}]" (use [ ], [x], [/], [-], [!])`);
 				continue;
 			}
-			// Recover a blocked task's reason from its trailing HTML comment (see
-			// phasesToMarkdown), then strip the comment from the visible content.
+			// Recover blocker / dropped-by provenance from trailing HTML comments
+			// (see phasesToMarkdown), then strip comments from the visible content.
 			const rawContent = taskMatch[2].trim();
 			const blockerMatch = /^(.*?)\s*<!--\s*blocker:\s*(.*?)\s*-->$/.exec(rawContent);
 			if (status === "blocked" && blockerMatch) {
 				currentPhase.tasks.push({ content: blockerMatch[1].trim(), status, blocker: blockerMatch[2].trim() });
 			} else {
-				currentPhase.tasks.push({ content: rawContent, status });
+				const droppedByMatch = /^(.*?)\s*<!--\s*dropped-by:\s*user\s*-->$/.exec(rawContent);
+				if (status === "abandoned" && droppedByMatch) {
+					currentPhase.tasks.push({
+						content: droppedByMatch[1].trim(),
+						status,
+						droppedBy: "user",
+					});
+				} else {
+					currentPhase.tasks.push({ content: rawContent, status });
+				}
 			}
 			continue;
 		}

@@ -313,6 +313,28 @@ describe("TodoTool operations", () => {
 		expect(parsedA?.blocker).toBe("x");
 	});
 
+	it("preserves user droppedBy provenance across the markdown round-trip", () => {
+		const phases: TodoPhase[] = [
+			{
+				name: "Work",
+				tasks: [
+					{ content: "ship it", status: "abandoned", droppedBy: "user" },
+					{ content: "model drop", status: "abandoned" },
+				],
+			},
+		];
+		const md = phasesToMarkdown(phases);
+		expect(md).toContain("<!-- dropped-by: user -->");
+		expect(md).not.toMatch(/model drop.*dropped-by/);
+
+		const { phases: parsed, errors } = markdownToPhases(md);
+		expect(errors).toEqual([]);
+		const userDrop = parsed[0]?.tasks.find(task => task.content === "ship it");
+		const modelDrop = parsed[0]?.tasks.find(task => task.content === "model drop");
+		expect(userDrop).toEqual({ content: "ship it", status: "abandoned", droppedBy: "user" });
+		expect(modelDrop).toEqual({ content: "model drop", status: "abandoned" });
+	});
+
 	it("parses checklist items with backslash-escaped brackets from /todo edit", () => {
 		// Editors/serializers (e.g. content pasted from a markdown renderer) escape
 		// `[` and `]`; the line still renders as a checkbox, so it must parse rather
