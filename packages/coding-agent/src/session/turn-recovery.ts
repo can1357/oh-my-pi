@@ -779,11 +779,14 @@ export class TurnRecovery {
 				assistantMessage.usage.cacheRead === 0 &&
 				assistantMessage.usage.cacheWrite === 0 &&
 				assistantMessage.usage.totalTokens === 0 &&
+				(assistantMessage.usage.contextTokens ?? 0) === 0 &&
 				(orchestration?.input ?? 0) === 0 &&
 				(orchestration?.output ?? 0) === 0 &&
 				(orchestration?.cacheRead ?? 0) === 0 &&
 				(assistantMessage.usage.premiumRequests ?? 0) === 0 &&
 				(assistantMessage.usage.cost?.total ?? 0) === 0 &&
+				(assistantMessage.usage.server?.webSearch ?? 0) === 0 &&
+				(assistantMessage.usage.server?.webFetch ?? 0) === 0 &&
 				outputTokensExcludingKnownReasoning === 0;
 
 			// Zero-billed empty stops are upstream dispatch failures laundered into a
@@ -2329,8 +2332,10 @@ export class TurnRecovery {
 			!switchedCredential &&
 			(options?.hardErrorFallback || (options?.fireworksFastFallback && !this.isRetryableError(message)))
 		) {
-			// Same auto_retry_end backstop as the classifier-refusal branch above.
-			if (this.#retryAttempt > 1) {
+			// hardErrorFallback: leave terminal ownership to the empty-stop cap caller
+			// (no nested auto_retry_end / synthetic persist). Fireworks Fast still
+			// closes an in-flight saga when attempt > 1.
+			if (!options?.hardErrorFallback && this.#retryAttempt > 1) {
 				await this.persistTerminalEmptyErrorTurn(message);
 				await this.#host.emitSessionEvent({
 					type: "auto_retry_end",
