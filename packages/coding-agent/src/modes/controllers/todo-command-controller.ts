@@ -137,13 +137,14 @@ export class TodoCommandController {
 	constructor(private readonly ctx: InteractiveModeContext) {}
 
 	/**
-	 * True latest todo state for the user-facing /todo verbs. Reads from session
-	 * entries or falls back to the active session state.
+	 * True latest todo state for the user-facing /todo verbs. Prefer the live
+	 * session cache so RPC `set_todos` provenance survives a later /todo mutation;
+	 * fall back to branch entries when the cache is empty.
 	 */
 	#currentPhases(): TodoPhase[] {
-		const fromEntries = getLatestTodoPhasesFromEntries(this.ctx.sessionManager.getBranch());
-		if (fromEntries.length > 0) return fromEntries;
-		return this.ctx.session.getTodoPhases();
+		const live = this.ctx.session.getTodoPhases();
+		if (live.length > 0) return live;
+		return getLatestTodoPhasesFromEntries(this.ctx.sessionManager.getBranch());
 	}
 
 	async handleTodoCommand(args: string): Promise<void> {

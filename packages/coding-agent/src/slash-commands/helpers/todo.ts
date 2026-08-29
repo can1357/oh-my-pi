@@ -92,8 +92,11 @@ function findTaskFuzzy(phases: TodoPhase[], query: string): TodoTaskMatch | unde
 }
 
 function currentPhases(runtime: SlashCommandRuntime): TodoPhase[] {
-	const fromEntries = getLatestTodoPhasesFromEntries(runtime.sessionManager.getBranch());
-	return fromEntries.length > 0 ? fromEntries : runtime.session.getTodoPhases();
+	// Prefer the live session cache so RPC `set_todos` provenance is not wiped by
+	// a later /todo mutation that would otherwise rehydrate a stale branch entry.
+	const live = runtime.session.getTodoPhases();
+	if (live.length > 0) return live;
+	return getLatestTodoPhasesFromEntries(runtime.sessionManager.getBranch());
 }
 
 function commitTodos(runtime: SlashCommandRuntime, phases: TodoPhase[]): void {
