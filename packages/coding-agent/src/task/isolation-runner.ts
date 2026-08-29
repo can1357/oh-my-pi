@@ -503,10 +503,12 @@ export async function applyEligibleNestedPatches(
 			applied: true,
 		};
 	} catch {
-		// Nested patch failures are non-fatal to the parent merge.
+		// Nested patch failures are non-fatal to the parent merge, but an earlier
+		// nested repo may already have committed before the throw — treat as
+		// applied so the unverified-merge latch still arms.
 		return {
 			summary: "\n\n<system-notification>Some nested repository patches failed to apply.</system-notification>",
-			applied: false,
+			applied: true,
 		};
 	}
 }
