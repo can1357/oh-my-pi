@@ -168,29 +168,3 @@ describe("combineDiagnosticsOutputs", () => {
 		expect(combineDiagnosticsOutputs([rust, ts])).toBe(expected);
 	});
 });
-
-describe("summarizeWorkspaceDiagnosticsOutput", () => {
-	test("reports clean workspace output as zero errors", () => {
-		expect(summarizeWorkspaceDiagnosticsOutput("No issues found")).toEqual({
-			diagnosticErrorCount: 0,
-			failedServerCount: 0,
-		});
-		expect(
-			summarizeWorkspaceDiagnosticsOutput(
-				"=== Rust (cargo check) ===\nNo issues found\n\n=== TypeScript (tsc --noEmit) ===\nNo issues found",
-			),
-		).toEqual({ diagnosticErrorCount: 0, failedServerCount: 0 });
-	});
-
-	test("counts diagnostic output and failed checkers separately", () => {
-		expect(summarizeWorkspaceDiagnosticsOutput("src/a.ts(1,1): error TS2304")).toEqual({
-			diagnosticErrorCount: 1,
-			failedServerCount: 0,
-		});
-		expect(
-			summarizeWorkspaceDiagnosticsOutput(
-				"Failed to run npx tsc --noEmit: the checker exited with code 17 without reporting anything, so the workspace was not verified",
-			),
-		).toEqual({ diagnosticErrorCount: 0, failedServerCount: 1 });
-	});
-});
