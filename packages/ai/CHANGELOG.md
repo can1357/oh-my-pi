@@ -5,6 +5,11 @@
 ### Added
 
 - Grok Bot provider (`grokbot` / `grokbot-sand`): separate from the Cursor provider (`cursor` / AgentService) and from xAI / Grok CLI (`xai`, `xai-oauth`), including independent usage allowances (using one does not consume Cursor or xAI quota). Speaks `InferenceService/Stream` via renewal-credential minting. Maps thinking effort onto `effort`/`fast`, preserves routed `upstreamProvider`, clears the JWT cache on HTTP 401, and matches Grok Bot client wire (prod client-version base, JWT `exp` mint fallback, `responseInfo.errorMessage`, user/tool-result images, thinking signatures). `/login grokbot` shows a host-install prompt to run inside the Grok Bot system (writes `secrets/grokbot.env`; does not use Cursor or xAI login). JWT mint cache is keyed by renewer+backend; explicit `apiKey` wins over ambient secrets; catalog cost stays $0 (renewer-billed).
+- Grok Bot provider (`grokbot` / `grokbot-sand`): separate from the Cursor provider (`cursor` / AgentService) and from xAI / Grok CLI (`xai`, `xai-oauth`). Speaks Cursor sand `InferenceService/Stream` via renewal-credential minting. Maps thinking effort onto sand `effort`/`fast`, preserves routed `upstreamProvider`, clears the JWT cache on HTTP 401, and matches sand-host wire (prod client-version base, JWT `exp` mint fallback, `responseInfo.errorMessage`, user/tool-result images, thinking signatures). `/login grokbot` shows a host-install prompt to run inside the Grok Bot system (writes `secrets/grokbot.env`; does not use Cursor or xAI login). Token cost metering is intentionally $0 (usage is billed on the renewer account).
+
+### Fixed
+
+- Grok Bot checksum encoding no longer wraps 32-bit shifts; JWT mint cache is scoped per renewal/backend/namespace; request `apiKey` wins over ambient secrets; incomplete Connect streams and caller aborts surface correctly.
 
 ## [18.0.9] - 2026-08-28
 

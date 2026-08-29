@@ -2,6 +2,7 @@
  * `/login grokbot` — instruct the user to install host secrets from inside the
  * Grok Bot system. Not Cursor OAuth and not xAI / Grok CLI login.
  */
+import { shortenPath } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import { grokbotSecretsPath, loadGrokbotConfig, resolveGrokbotEnvApiKey } from "../providers/grokbot/auth";
 import hostInstallPrompt from "../providers/grokbot/host-install-prompt.md" with { type: "text" };
@@ -40,14 +41,15 @@ export async function loginGrokbot(options: OAuthLoginCallbacks): Promise<string
 	}
 
 	const cfg = await loadGrokbotConfig();
+	const secretsDisplay = shortenPath(grokbotSecretsPath());
 	if (!cfg.renewal || !cfg.machineId) {
 		throw new AIError.ConfigurationError(
-			`Grok Bot secrets missing after install. Expected renewer + machine id in ${grokbotSecretsPath()} (or GROKBOT_* / SAND_INFERENCE_RENEWAL_CREDENTIAL env).`,
+			`Grok Bot secrets missing after install. Expected renewer + machine id in ${secretsDisplay} (or GROKBOT_* / SAND_INFERENCE_RENEWAL_CREDENTIAL env).`,
 		);
 	}
 
 	options.onProgress?.(
-		`Host secrets ready at ${grokbotSecretsPath()} (renewer + machine id present; values not shown).`,
+		`Host secrets ready at ${secretsDisplay} (renewer + machine id present; values not shown).`,
 	);
 	return "";
 }

@@ -39,7 +39,7 @@ import type { DevinOptions } from "./devin";
 import type { GoogleOptions } from "./google";
 import type { GoogleGeminiCliOptions } from "./google-gemini-cli";
 import type { GoogleVertexOptions } from "./google-vertex";
-import type { GrokbotOptions } from "./grokbot";
+import { streamGrokBot as streamGrokBotProvider } from "./grokbot";
 import type { OllamaChatOptions } from "./ollama";
 import type { OpenAICodexResponsesOptions } from "./openai-codex-responses";
 import type { OpenAICompletionsOptions } from "./openai-completions";
@@ -135,14 +135,6 @@ interface CursorProviderModule {
 
 interface DevinProviderModule {
 	streamDevin: (model: Model<"devin-agent">, context: Context, options: DevinOptions) => AssistantMessageEventStream;
-}
-
-interface GrokbotProviderModule {
-	streamGrokBot: (
-		model: Model<"grokbot-sand">,
-		context: Context,
-		options: GrokbotOptions,
-	) => AssistantMessageEventStream;
 }
 
 interface BedrockProviderModule {
@@ -469,10 +461,8 @@ function loadDevinProviderModule(): Promise<LazyProviderModule<"devin-agent">> {
 }
 
 function loadGrokbotProviderModule(): Promise<LazyProviderModule<"grokbot-sand">> {
-	// Lazy import matches every other stream provider loader in this file.
-	grokbotProviderModulePromise ||= import("./grokbot").then(module => {
-		const provider = module as GrokbotProviderModule;
-		return { stream: provider.streamGrokBot };
+	grokbotProviderModulePromise ||= Promise.resolve({
+		stream: streamGrokBotProvider,
 	});
 	return grokbotProviderModulePromise;
 }

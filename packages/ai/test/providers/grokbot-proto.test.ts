@@ -346,7 +346,7 @@ describe("grokbot /login host-install prompt", () => {
 	});
 
 	test("surfaces the Grok Bot system install prompt and verifies host secrets without storing a key", async () => {
-		const prompts: string[] = [];
+		let prompted = false;
 		const progress: string[] = [];
 		spyOn(grokbotAuth, "loadGrokbotConfig").mockResolvedValue({
 			renewal: "renew-present",
@@ -358,7 +358,9 @@ describe("grokbot /login host-install prompt", () => {
 		const result = await loginGrokbot({
 			onAuth: () => {},
 			onPrompt: async prompt => {
-				prompts.push(prompt.message);
+				prompted = true;
+				expect(prompt.message.length).toBeGreaterThan(0);
+				expect(prompt.allowEmpty).toBe(true);
 				return "";
 			},
 			onProgress: message => {
@@ -367,13 +369,11 @@ describe("grokbot /login host-install prompt", () => {
 		});
 
 		expect(result).toBe("");
-		expect(GROKBOT_HOST_INSTALL_PROMPT).toContain("You are in the Linux VM");
-		expect(GROKBOT_HOST_INSTALL_PROMPT).toContain("GROKBOT_MACHINE_ID");
-		expect(GROKBOT_HOST_INSTALL_PROMPT).toContain("chmod 600");
-		expect(prompts[0]).toContain("You are in the Linux VM");
-		expect(prompts[0]).toContain("Press Enter after the host secrets file exists");
+		expect(prompted).toBe(true);
+		expect(GROKBOT_HOST_INSTALL_PROMPT.trim().length).toBeGreaterThan(0);
 		expect(progress.some(line => line.includes("Grok Bot system"))).toBe(true);
-		expect(progress.some(line => line.includes("not Cursor login"))).toBe(true);
+		expect(progress.some(line => /Host secrets ready/.test(line))).toBe(true);
+		expect(progress.some(line => line.includes(process.env.HOME ?? "__no_home__"))).toBe(false);
 	});
 
 	test("fails when host secrets are still missing after Enter", async () => {

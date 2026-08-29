@@ -1,6 +1,7 @@
 import type { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import { logger } from "@oh-my-pi/pi-utils";
+import * as AIError from "../error";
 import type {
 	Api,
 	AssistantMessage,
@@ -47,7 +48,7 @@ const MAX_CONNECT_FRAME_PAYLOAD = 16 * 1024 * 1024;
 const DEFAULT_IMAGE_MIME = "image/png";
 
 export interface GrokbotOptions extends StreamOptions {
-	/** Optional sand conversation id; falls back to sessionId then a fresh UUID. */
+	/** Optional sand conversation id; preferred over sessionId, else a fresh UUID. */
 	conversationId?: string;
 	/** Sand effort parameter; when set from mapOptionsForApi, overrides the default `high`. */
 	effort?: Effort | string;
@@ -476,12 +477,12 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 			const messages = toInferenceMessages(context);
 			const tools = toInferenceTools(context.tools);
 			const modelConfig = buildModelConfig(model, options);
-			const conversationId = options?.sessionId || options?.conversationId || crypto.randomUUID();
+			const conversationId = options?.conversationId || options?.sessionId || crypto.randomUUID();
 			const reqModel = resolveGrokbotRequestedModel(model.id, {
 				effort: options?.effort,
 				fast: options?.fast,
 			});
-			const body: Record<string, unknown> = {
+			let body: Record<string, unknown> = {
 				messages,
 				tools,
 				requestedModel: reqModel,
@@ -489,6 +490,10 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 				conversationId,
 			};
 			if (modelConfig) body.modelConfig = modelConfig;
+			const replacementPayload = await options?.onPayload?.(body, model);
+			if (replacementPayload !== undefined) {
+				body = replacementPayload as Record<string, unknown>;
+			}
 			const protoBytes = encodeInferenceStreamRequest(body);
 			const effort = (reqModel.parameters || []).find(p => p.id === "effort")?.value || "";
 			const fast = (reqModel.parameters || []).find(p => p.id === "fast")?.value || "";
@@ -645,10 +650,21 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 			};
 
 			let pending = Buffer.alloc(0);
+			let sawEndStream = false;
 			const reader = (response.body as ReadableStream<Uint8Array>).getReader();
 			while (true) {
 				const { done, value } = await reader.read();
-				if (done) break;
+				if (done) {
+					if (pending.length > 0 || !sawEndStream) {
+						throw new AIError.ProviderResponseError(
+							pending.length > 0
+								? "Grok Bot stream ended with a truncated connect frame"
+								: "Grok Bot stream ended without a connect end-stream trailer",
+							{ provider: model.provider, kind: "incomplete-stream" },
+						);
+					}
+					break;
+				}
 				pending = Buffer.concat([pending, Buffer.from(value)]);
 				const frames: Array<{ flags: number; bytes: Buffer }> = [];
 				let offset = 0;
@@ -666,6 +682,7 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 
 				for (const frame of frames) {
 					if (frame.flags & CONNECT_END_STREAM_FLAG) {
+						sawEndStream = true;
 						const jsonText = Buffer.from(frame.bytes).toString("utf8");
 						let parsedEnd: Record<string, unknown> = {};
 						try {
@@ -771,8 +788,16 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 			stream.push({ type: "done", reason: output.stopReason, message: output });
 			stream.end(output);
 		} catch (error) {
-			output.stopReason = "error";
-			output.errorMessage = error instanceof Error ? error.message : String(error);
+			const result = await AIError.finalize(error, {
+				api: model.api,
+				provider: model.provider,
+				model: model.id,
+				signal: options?.signal,
+			});
+			output.stopReason = result.stopReason;
+			output.errorStatus = result.status;
+			output.errorId = result.id;
+			output.errorMessage = result.message;
 			output.duration = Math.round(performance.now() - startTime);
 			const httpMatch = /HTTP (\d{3})/.exec(output.errorMessage);
 			if (httpMatch && output.errorStatus === undefined) {
@@ -782,8 +807,9 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 			logger.warn("grokbot: stream error", {
 				message: output.errorMessage,
 				errorStatus: output.errorStatus,
+				stopReason: output.stopReason,
 			});
-			stream.push({ type: "error", reason: "error", error: output });
+			stream.push({ type: "error", reason: result.stopReason, error: output });
 			stream.end(output);
 		}
 	})();

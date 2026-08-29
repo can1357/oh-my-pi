@@ -1,11 +1,21 @@
 import type { ModelSpec } from "../types";
+import { Effort } from "../effort";
 
 export const GROKBOT_BACKEND = "https://api2.cursor.sh";
 export const GROKBOT_API = "grokbot-sand" as const;
 export const GROKBOT_DEFAULT_MODEL_ID = "sand-default";
 
-const COST = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } as const; // intentional: renewer-billed; omp cost surfaces stay $0
+/**
+ * Metering is intentionally $0: sand usage is billed on the renewer account,
+ * not as omp-side token pricing. Stats/usage surfaces will show zero cost.
+ */
+const COST = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } as const;
 
+/** Sand InferenceService effort ladder (maps max→xhigh on the wire). */
+const GROKBOT_THINKING = {
+	mode: "effort" as const,
+	efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.XHigh],
+};
 
 type GrokbotModelSeed = {
 	id: string;
@@ -136,6 +146,7 @@ export function buildGrokbotStaticSeed(baseUrl = GROKBOT_BACKEND): ModelSpec<"gr
 		provider: "grokbot",
 		baseUrl,
 		reasoning: seed.reasoning,
+		...(seed.reasoning ? { thinking: { ...GROKBOT_THINKING } } : {}),
 		input: ["text", "image"],
 		cost: COST,
 		contextWindow: 200_000,

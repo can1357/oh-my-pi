@@ -8,10 +8,9 @@
  * env overrides (`GROKBOT_*` / `SAND_INFERENCE_RENEWAL_CREDENTIAL`).
  */
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
 import type { FetchImpl } from "@oh-my-pi/pi-catalog/types";
-import { $env, getAgentDir, isEnoent, logger } from "@oh-my-pi/pi-utils";
+import { $env, getAgentDir, isEnoent, logger, shortenPath } from "@oh-my-pi/pi-utils";
 
 export const GROKBOT_BACKEND = "https://api2.cursor.sh";
 export const GROKBOT_RENEWAL_PATH = "/sand-box/inference-credential";
@@ -37,30 +36,18 @@ export type GrokbotConfig = {
 type CachedToken = {
 	accessToken: string;
 	expiresAtMs: number;
-	renewal: string;
-	backend: string;
 };
 
-/** JWT cache keyed by renewal credential + backend URL (prevents cross-tenant bleed). */
+/** JWT cache keyed by minting configuration so concurrent accounts/backends do not bleed. */
 const tokenCache = new Map<string, CachedToken>();
 
-function tokenCacheKey(renewal: string, backend: string): string {
-	return `${backend}\0${renewal}`;
+function tokenCacheKey(cfg: Pick<GrokbotConfig, "renewal" | "namespace" | "clientVersion">, backend: string): string {
+	return `${cfg.renewal}\0${backend}\0${cfg.namespace}\0${cfg.clientVersion}`;
 }
 
-/** Display-only: replace home prefix with `~` (mirrors coding-agent `shortenPath`). */
-export function shortenGrokbotDisplayPath(filePath: string, homeDir = os.homedir()): string {
-	const windowsStyle = /^[A-Za-z]:[\\/]/.test(homeDir) || homeDir.startsWith("\\\\");
-	const hasHomePrefix = windowsStyle
-		? filePath.toLowerCase().startsWith(homeDir.toLowerCase())
-		: filePath.startsWith(homeDir);
-	if (homeDir && hasHomePrefix) {
-		const suffix = filePath.slice(homeDir.length);
-		if (suffix === "" || suffix.startsWith(path.posix.sep) || suffix.startsWith(path.win32.sep)) {
-			return `~${suffix.replaceAll(path.win32.sep, path.posix.sep)}`;
-		}
-	}
-	return filePath;
+/** @deprecated Prefer {@link shortenPath} from `@oh-my-pi/pi-utils`. */
+export function shortenGrokbotDisplayPath(filePath: string, homeDir?: string): string {
+	return shortenPath(filePath, homeDir);
 }
 
 /** Strip stamp suffix (`0.30.0-pre.16` → `0.30.0`), matching sand-host `stampedVersionBaseOf`. */
@@ -211,7 +198,7 @@ export async function mintGrokbotAccessToken(
 	if (!cfg.renewal) {
 		throw new Error(`Grok Bot renewer missing. Set GROKBOT_RENEWAL_CREDENTIAL or write ${grokbotSecretsPath()}`);
 	}
-	const cacheKey = tokenCacheKey(cfg.renewal, backend);
+	const cacheKey = tokenCacheKey(cfg, backend);
 	const cached = tokenCache.get(cacheKey);
 	if (cached?.accessToken && Date.now() < cached.expiresAtMs - 60_000) {
 		return cached.accessToken;
@@ -234,7 +221,7 @@ export async function mintGrokbotAccessToken(
 		typeof parsed.expiresAtMs === "number" && Number.isFinite(parsed.expiresAtMs)
 			? parsed.expiresAtMs
 			: (getAccessTokenExpiryMs(accessToken) ?? Date.now() + GROKBOT_DEFAULT_TOKEN_TTL_MS);
-	tokenCache.set(cacheKey, { accessToken, expiresAtMs, renewal: cfg.renewal, backend });
+	tokenCache.set(cacheKey, { accessToken, expiresAtMs });
 	return accessToken;
 }
 
@@ -257,7 +244,7 @@ export async function formatGrokbotStatus(): Promise<string> {
 		`Machine id: ${cfg.machineId ? "present" : "missing"}`,
 		`Namespace: ${cfg.namespace}`,
 		`Client version: ${cfg.clientVersion}`,
-		`Secrets file: ${shortenGrokbotDisplayPath(grokbotSecretsPath())}`,
+		`Secrets file: ${shortenPath(grokbotSecretsPath())}`,
 		"Select models as `grokbot/<id>` (e.g. `grokbot/sand-default`).",
 		"Login: `/login` → Grok Bot — run the shown prompt inside the Grok Bot system (not omp).",
 	].join("\n");

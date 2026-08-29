@@ -448,6 +448,12 @@ function getModelDefinedEfforts<TApi extends Api>(
 	if (modelMatchesHost({ provider: spec.provider, baseUrl: spec.baseUrl ?? "" }, "xai")) {
 		return isGrokXHighEffortCapable(spec.id) ? DEFAULT_REASONING_EFFORTS_WITH_XHIGH : DEFAULT_REASONING_EFFORTS;
 	}
+	// Grok Bot sand InferenceService: parameterized models accept sand `effort`
+	// including `xhigh` (max folds to xhigh on the wire). Explicit seed thinking
+	// still wins via resolveModelThinking; this covers sparse reasoning seeds.
+	if (spec.provider === "grokbot" || spec.api === "grokbot-sand") {
+		return DEFAULT_REASONING_EFFORTS_WITH_XHIGH;
+	}
 	return isOpenAICompatReasoningApi(spec.api) &&
 		(isMinimaxM2FamilyModelId(spec.id) ||
 			isOpenAIGptOssModelId(spec.id) ||
