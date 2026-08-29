@@ -57,12 +57,12 @@ describe("TodoCommandController", () => {
 		]);
 		const controller = new TodoCommandController(ctx);
 
-		await controller.handleTodoCommand("append Fresh task");
+		await controller.handleTodoCommand("append Ship");
 
 		const committed = (ctx.session.setTodoPhases as Mock).mock.calls[0]?.[0] as TodoPhase[];
 		expect(committed).toHaveLength(1);
 		expect(committed[0]?.name).toBe("Todos");
-		expect(committed[0]?.tasks.map(task => task.content)).toEqual(["Fresh task"]);
+		expect(committed[0]?.tasks.map(task => task.content)).toEqual(["Ship"]);
 		expect(committed[0]?.tasks.map(task => task.content)).not.toContain("Resurrect me");
 	});
 
