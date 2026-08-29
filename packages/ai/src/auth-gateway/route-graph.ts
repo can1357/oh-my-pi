@@ -69,11 +69,12 @@ export class RouteRegistry {
 		if (virtual) return virtual;
 		const model = this.#resolveModel(modelId);
 		if (!model) return undefined;
+		const id = modelId.includes("/") ? modelId : model.id;
 		return {
 			generation: this.#generation,
-			id: model.id,
-			root: { type: "target", model: model.id },
-			targets: [model.id],
+			id,
+			root: { type: "target", model: id },
+			targets: [id],
 			fallbacks: {},
 		};
 	}
