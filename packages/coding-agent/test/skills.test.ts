@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { type Skill as CapabilitySkill, skillCapability } from "@oh-my-pi/pi-coding-agent/capability/skill";
 import { getCapability } from "@oh-my-pi/pi-coding-agent/discovery";
 import { getWslWindowsHomeCandidate, runHostProbe } from "@oh-my-pi/pi-coding-agent/discovery/agents";
+import { type SkillScanLimits, scanSkillsFromDir } from "@oh-my-pi/pi-coding-agent/discovery/helpers";
 import {
 	type LoadSkillsResult,
 	loadSkills,
@@ -160,6 +161,109 @@ describe("skills", () => {
 
 			expect(skills).toHaveLength(0);
 		});
+	});
+
+	describe("recursive skill scanning", () => {
+		const writeTestSkill = async (skillDir: string, name: string): Promise<void> => {
+			await fs.mkdir(skillDir, { recursive: true });
+			await fs.writeFile(
+				path.join(skillDir, "SKILL.md"),
+				["---", `name: ${name}`, `description: ${name} description`, "---", "", `# ${name}`].join("\n"),
+			);
+		};
+
+		const scanRecursive = (dir: string, limits?: Partial<SkillScanLimits>) =>
+			scanSkillsFromDir(
+				{ cwd: dir, home: dir, repoRoot: null },
+				{ dir, providerId: "test", level: "project", recursive: true, limits },
+			);
+
+		it("loads through depth six and warns when deeper directories are truncated", async () => {
+			const root = await fs.mkdtemp(path.join(os.tmpdir(), "pi-skills-depth-"));
+			const depthSix = path.join(root, "one", "two", "three", "four", "five", "six");
+			const depthSeven = path.join(depthSix, "seven");
+			try {
+				await writeTestSkill(depthSix, "depth-six");
+				await writeTestSkill(depthSeven, "depth-seven");
+
+				const result = await scanRecursive(root);
+
+				expect(result.items.map(skill => skill.name)).toContain("depth-six");
+				expect(result.items.map(skill => skill.name)).not.toContain("depth-seven");
+				expect(result.warnings).toContain(`Skill discovery truncated at ${root}: maximum depth 6 reached`);
+			} finally {
+				await removeWithRetries(root);
+			}
+		});
+
+		it("caps visited directories and reports truncation", async () => {
+			const root = await fs.mkdtemp(path.join(os.tmpdir(), "pi-skills-directories-"));
+			try {
+				await writeTestSkill(path.join(root, "first"), "first");
+				await writeTestSkill(path.join(root, "second"), "second");
+
+				const result = await scanRecursive(root, { maxDirectories: 1 });
+
+				expect(result.items).toHaveLength(0);
+				expect(result.warnings).toContain(
+					`Skill discovery truncated at ${root}: maximum directory count 1 reached`,
+				);
+			} finally {
+				await removeWithRetries(root);
+			}
+		});
+
+		it("caps visited entries and reports truncation", async () => {
+			const root = await fs.mkdtemp(path.join(os.tmpdir(), "pi-skills-entries-"));
+			try {
+				await writeTestSkill(path.join(root, "first"), "first");
+				await writeTestSkill(path.join(root, "second"), "second");
+
+				const result = await scanRecursive(root, { maxEntries: 1 });
+
+				expect(result.items).toHaveLength(0);
+				expect(result.warnings).toContain(`Skill discovery truncated at ${root}: maximum entry count 1 reached`);
+			} finally {
+				await removeWithRetries(root);
+			}
+		});
+
+		it("prunes .git and node_modules from recursive discovery", async () => {
+			const root = await fs.mkdtemp(path.join(os.tmpdir(), "pi-skills-pruned-"));
+			try {
+				await writeTestSkill(path.join(root, ".git", "ignored-git"), "ignored-git");
+				await writeTestSkill(path.join(root, "node_modules", "ignored-module"), "ignored-module");
+				await writeTestSkill(path.join(root, "visible"), "visible");
+
+				const result = await scanRecursive(root);
+
+				expect(result.items.map(skill => skill.name)).toEqual(["visible"]);
+				expect(result.warnings).toHaveLength(0);
+			} finally {
+				await removeWithRetries(root);
+			}
+		});
+
+		it.skipIf(process.platform === "win32")(
+			"loads a symlinked skill root without recursively traversing it",
+			async () => {
+				const root = await fs.mkdtemp(path.join(os.tmpdir(), "pi-skills-symlink-root-"));
+				const target = await fs.mkdtemp(path.join(os.tmpdir(), "pi-skills-symlink-target-"));
+				try {
+					await writeTestSkill(target, "linked-root");
+					await writeTestSkill(path.join(target, "nested"), "linked-nested");
+					await fs.symlink(target, path.join(root, "linked"), "dir");
+
+					const result = await scanRecursive(root);
+
+					expect(result.items.map(skill => skill.name)).toEqual(["linked-root"]);
+					expect(result.warnings).toHaveLength(0);
+				} finally {
+					await removeWithRetries(root);
+					await removeWithRetries(target);
+				}
+			},
+		);
 	});
 
 	describe("loadSkills with options", () => {

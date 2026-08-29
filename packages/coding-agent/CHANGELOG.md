@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Enabled recursive skill discovery under `.omp/skills` and `.agent[s]/skills`, so nested grouping directories load without flattening.
+- Enabled bounded recursive skill discovery under `.omp/skills` and `.agent[s]/skills`, so nested grouping directories load without flattening while symlinks, hidden directories, `.git`, and `node_modules` cannot trigger unbounded traversal.
 
 ## [18.0.10] - 2026-08-28
 

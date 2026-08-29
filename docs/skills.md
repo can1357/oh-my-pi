@@ -32,7 +32,9 @@ The OMP-native `native` and `agents` providers discover skills recursively:
 - `~/.agent/skills/**/SKILL.md` and `~/.agents/skills/**/SKILL.md`
 
 This permits grouping directories such as `<skills-root>/team/internal/<skill>/SKILL.md`.
-Directory symlinks are treated as leaf skill candidates and are not traversed recursively.
+Recursive scans stop at depth 6, 2,000 visited directories, or 20,000 visited entries. Hidden directories,
+`.git`, and `node_modules` are pruned. Directory symlinks remain leaf skill candidates and are not traversed
+recursively. Reaching any traversal limit emits a discovery warning instead of silently returning a partial result.
 
 Third-party and plugin providers retain their specified one-level layout:
 

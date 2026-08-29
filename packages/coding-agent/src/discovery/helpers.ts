@@ -347,6 +347,23 @@ async function globIf(
 	}
 }
 
+export interface SkillScanLimits {
+	maxDepth: number;
+	maxDirectories: number;
+	maxEntries: number;
+}
+
+const DEFAULT_RECURSIVE_SKILL_SCAN_LIMITS = {
+	maxDepth: 6,
+	maxDirectories: 2_000,
+	maxEntries: 20_000,
+} as const satisfies SkillScanLimits;
+
+const PRUNED_RECURSIVE_SKILL_DIRECTORIES: Record<string, true> = {
+	".git": true,
+	node_modules: true,
+};
+
 export interface ScanSkillsFromDirOptions {
 	dir: string;
 	providerId: string;
@@ -358,6 +375,8 @@ export interface ScanSkillsFromDirOptions {
 	 * Default `false` preserves providers whose skill layout is specified as flat.
 	 */
 	recursive?: boolean;
+	/** Traversal limits applied only when `recursive` is true. */
+	limits?: Partial<SkillScanLimits>;
 	/**
 	 * When true, treat a `SKILL.md` sitting directly under `dir` as a single skill in addition to
 	 * scanning `<dir>/<name>/SKILL.md` children. Matches the Claude plugin manifest convention
@@ -415,34 +434,67 @@ export async function scanSkillsFromDir(
 	};
 
 	const work: Promise<void>[] = [];
-	const directories = [dir];
+	const limits = { ...DEFAULT_RECURSIVE_SKILL_SCAN_LIMITS, ...options.limits };
+	const directories: Array<{ path: string; depth: number }> = [{ path: dir, depth: 0 }];
+	const truncationReasons = new Set<string>();
+	let visitedDirectories = 0;
+	let visitedEntries = 0;
+	let entryLimitReached = false;
+
 	for (let index = 0; index < directories.length; index++) {
-		const currentDir = directories[index];
+		if (options.recursive && visitedDirectories >= limits.maxDirectories) {
+			truncationReasons.add(`maximum directory count ${limits.maxDirectories} reached`);
+			break;
+		}
+
+		const current = directories[index];
+		visitedDirectories++;
 		let entries: fs.Dirent[];
 		try {
-			entries = await fs.promises.readdir(currentDir, { withFileTypes: true });
+			entries = await fs.promises.readdir(current.path, { withFileTypes: true });
 		} catch (error) {
 			if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-				warnings.push(`Failed to read skills directory: ${currentDir} (${String(error)})`);
+				warnings.push(`Failed to read skills directory: ${current.path} (${String(error)})`);
 			}
 			continue;
 		}
 
-		if (currentDir !== dir || options.includeSelf) {
-			work.push(loadSkill(path.join(currentDir, "SKILL.md")));
+		if (current.path !== dir || options.includeSelf) {
+			work.push(loadSkill(path.join(current.path, "SKILL.md")));
 		}
 		for (const entry of entries) {
-			if (entry.name.startsWith(".")) continue;
+			if (options.recursive) {
+				if (visitedEntries >= limits.maxEntries) {
+					truncationReasons.add(`maximum entry count ${limits.maxEntries} reached`);
+					entryLimitReached = true;
+					break;
+				}
+				visitedEntries++;
+			}
+			if (
+				entry.name.startsWith(".") ||
+				(options.recursive && PRUNED_RECURSIVE_SKILL_DIRECTORIES[entry.name] === true)
+			) {
+				continue;
+			}
 			if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
-			const childDir = path.join(currentDir, entry.name);
+			const childDir = path.join(current.path, entry.name);
 			if (options.recursive && entry.isDirectory()) {
-				directories.push(childDir);
+				if (current.depth >= limits.maxDepth) {
+					truncationReasons.add(`maximum depth ${limits.maxDepth} reached`);
+					continue;
+				}
+				directories.push({ path: childDir, depth: current.depth + 1 });
 			} else {
 				work.push(loadSkill(path.join(childDir, "SKILL.md")));
 			}
 		}
+		if (entryLimitReached) break;
 	}
 	await Promise.all(work);
+	for (const reason of truncationReasons) {
+		warnings.push(`Skill discovery truncated at ${dir}: ${reason}`);
+	}
 
 	// Deterministic ordering: async file reads complete nondeterministically, so sort after loading.
 	items.sort((a, b) => compareSkillOrder(a.name, a.path, b.name, b.path));
