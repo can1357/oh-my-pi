@@ -1662,6 +1662,8 @@ export class AgentSession {
 				this.#planReferenceSent = false;
 			},
 			syncTodoPhasesFromBranch: () => this.#todo.syncFromBranch(),
+			incompleteTodosCompactionContext: () => this.#todo.buildIncompleteTodosCompactionContext(),
+			appendIncompleteTodosToCompactionSummary: summary => this.#todo.appendIncompleteTodosToSummary(summary),
 			resetAdvisorRuntimes: (reason?: string) => this.#advisors.resetAllRuntimes(reason),
 			rebaseAfterCompaction: () => this.#stats.rebaseAfterCompaction(),
 			recordAnchoredHistoryRewrite: tokensRemoved => this.#stats.recordAnchoredHistoryRewrite(tokensRemoved),

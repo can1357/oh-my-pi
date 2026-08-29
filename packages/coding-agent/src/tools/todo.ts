@@ -9,6 +9,7 @@ import type { RenderResultOptions } from "../extensibility/custom-tools/types";
 import type { Theme } from "../modes/theme/theme";
 import todoDescription from "../prompts/tools/todo.md" with { type: "text" };
 import type { ToolSession } from "../sdk";
+import { parseIncompleteTodosFromSummary } from "../session/incomplete-todos";
 import type { SessionEntry } from "../session/session-entries";
 import { framedBlock, renderStatusLine, renderTreeList } from "../tui";
 import { normalizePathLikeInput, resolveToCwd } from "./path-utils";
@@ -182,6 +183,7 @@ export function nextActionableTask(phases: readonly TodoPhase[]): TodoItem | und
 export const USER_TODO_EDIT_CUSTOM_TYPE = "user_todo_edit";
 
 export function getLatestTodoPhasesFromEntries(entries: SessionEntry[]): TodoPhase[] {
+	let skipCompactionSections = false;
 	for (let i = entries.length - 1; i >= 0; i--) {
 		const entry = entries[i];
 		if (entry.type === "custom" && entry.customType === USER_TODO_EDIT_CUSTOM_TYPE) {
@@ -189,6 +191,16 @@ export function getLatestTodoPhasesFromEntries(entries: SessionEntry[]): TodoPha
 			if (data && Array.isArray(data.phases)) {
 				return clonePhases(data.phases as TodoPhase[]);
 			}
+			continue;
+		}
+		if (entry.type === "compaction") {
+			if (skipCompactionSections) continue;
+			const reconstructed = parseIncompleteTodosFromSummary(entry.summary);
+			if (reconstructed.length > 0) return clonePhases(reconstructed);
+			// Latest compact had no leftover section (stripped or pre-feature).
+			// Keep walking for an older toolResult / user_todo_edit, but ignore
+			// stale leftover sections from earlier compacts.
+			skipCompactionSections = true;
 			continue;
 		}
 		if (entry.type !== "message") continue;

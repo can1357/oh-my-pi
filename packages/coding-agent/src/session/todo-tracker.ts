@@ -5,9 +5,20 @@ import type { Settings } from "../config/settings";
 import eagerTaskPrompt from "../prompts/system/eager-task.md" with { type: "text" };
 import eagerTodoPrompt from "../prompts/system/eager-todo.md" with { type: "text" };
 import midRunTodoNudgePrompt from "../prompts/system/mid-run-todo-nudge.md" with { type: "text" };
+import postCompactionIncompleteTodosPrompt from "../prompts/system/post-compaction-incomplete-todos.md" with {
+	type: "text",
+};
 import { getLatestTodoPhasesFromEntries, isTodoPhase, type TodoItem, type TodoPhase } from "../tools/todo";
 import { buildNamedToolChoice } from "../utils/tool-choice";
 import type { AgentSessionEvent } from "./agent-session-events";
+import {
+	capIncompleteTodoRows,
+	collectIncompleteTodoRows,
+	formatIncompleteTodoSnapshotLines,
+	formatIncompleteTodosSection,
+	groupIncompleteTodoRowsByPhase,
+	upsertIncompleteTodosSection,
+} from "./incomplete-todos";
 import type { SessionManager } from "./session-manager";
 
 const MID_RUN_NUDGE_MUTATION_THRESHOLD = 12;
@@ -185,11 +196,50 @@ export class TodoTracker {
 		};
 	}
 
+	/**
+	 * Structured incomplete-todo lines for the compaction summarizer input
+	 * (`SummaryOptions.extraContext`), so the contract survives the cut.
+	 */
+	buildIncompleteTodosCompactionContext(): string[] {
+		const rows = collectIncompleteTodoRows(this.#phases);
+		if (rows.length === 0) return [];
+		return [
+			"Incomplete todos that MUST survive compaction (pending/in_progress only; a text-only stop is not completion):",
+			...formatIncompleteTodoSnapshotLines(rows),
+		];
+	}
+
+	/**
+	 * Upserts the incomplete todo list into a compaction summary so it remains
+	 * durable text after snapcompact/LLM summarization. A later compact rewrites
+	 * the section from the live list, or strips it when nothing remains.
+	 */
+	appendIncompleteTodosToSummary(summary: string): string {
+		const rows = collectIncompleteTodoRows(this.#phases);
+		return upsertIncompleteTodosSection(summary, formatIncompleteTodosSection(rows));
+	}
+
 	/** Builds reminder-only eager preludes after compaction. */
 	buildPostCompactionEagerNudges(): AgentMessage[] {
 		const nudges: AgentMessage[] = [];
-		const todo = this.createEagerTodoPrelude(undefined);
-		if (todo) nudges.push(todo.message);
+		const rows = collectIncompleteTodoRows(this.#phases);
+		if (rows.length > 0) {
+			const capped = capIncompleteTodoRows(rows);
+			nudges.push({
+				role: "custom",
+				customType: "post-compaction-incomplete-todos",
+				content: prompt.render(postCompactionIncompleteTodosPrompt, {
+					phases: groupIncompleteTodoRowsByPhase(capped.rows),
+					overflow: capped.overflow,
+				}),
+				display: false,
+				attribution: "agent",
+				timestamp: Date.now(),
+			});
+		} else {
+			const todo = this.createEagerTodoPrelude(undefined);
+			if (todo) nudges.push(todo.message);
+		}
 		const task = this.createEagerTaskPrelude(undefined);
 		if (task) nudges.push(task);
 		return nudges;
