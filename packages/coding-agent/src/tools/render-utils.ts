@@ -5,7 +5,6 @@
  * tool renderers to ensure a unified TUI experience.
  */
 
-import * as os from "node:os";
 import * as path from "node:path";
 import type { ToolCallContext } from "@oh-my-pi/pi-agent-core";
 import type { Ellipsis } from "@oh-my-pi/pi-natives";
