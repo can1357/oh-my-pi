@@ -1,8 +1,18 @@
+import {
+	GROKBOT_BACKEND,
+	GROKBOT_DEFAULT_NAMESPACE,
+	GROKBOT_STAMPED_CLIENT_VERSION,
+	resolveGrokbotClientVersion,
+} from "../discovery/grokbot-auth";
 import { PERSONAL_GITHUB_COPILOT_BASE_URL } from "../wire/github-copilot";
 
 export interface ModelCacheProviderIdOptions {
 	apiKey?: string;
 	baseUrl?: string;
+	/** Grok Bot: `x-sand-box-namespace` sent on AvailableModels. */
+	namespace?: string;
+	/** Grok Bot: `x-cursor-client-version` sent on AvailableModels. */
+	clientVersion?: string;
 }
 
 const CREDENTIAL_SCOPED_MODEL_CACHE_PROVIDERS: Readonly<Record<string, true>> = {
@@ -89,12 +99,18 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 			return `github-copilot:models-v1:${Bun.hash(scope).toString(36)}`;
 		}
 		case "grokbot": {
-			// AvailableModels is renewer-scoped and marked authoritative; key the
-			// cache on renewer + backend so switching GROKBOT_RENEWAL_CREDENTIAL
-			// does not reuse another account's catalog for the TTL window.
-			const baseUrl = options.baseUrl ?? "https://api2.cursor.sh";
-			const scope = `${options.apiKey ?? ""}\u0000${baseUrl}`;
-			return `grokbot:models-v1:${Bun.hash(scope).toString(36)}`;
+			// AvailableModels is renewer-scoped and marked authoritative. Discovery
+			// also sends namespace + client-version headers (`grokbotClientHeaders`)
+			// that can select a different rollout/catalog, so include every input
+			// that affects the live list — not just renewer + backend.
+			const baseUrl = options.baseUrl ?? GROKBOT_BACKEND;
+			const namespace = options.namespace ?? Bun.env.GROKBOT_NAMESPACE ?? GROKBOT_DEFAULT_NAMESPACE;
+			const clientVersion =
+				options.clientVersion ??
+				Bun.env.GROKBOT_CLIENT_VERSION ??
+				resolveGrokbotClientVersion(namespace, GROKBOT_STAMPED_CLIENT_VERSION);
+			const scope = `${options.apiKey ?? ""}\u0000${baseUrl}\u0000${namespace}\u0000${clientVersion}`;
+			return `grokbot:models-v2:${Bun.hash(scope).toString(36)}`;
 		}
 		case "openrouter":
 			return "openrouter:pseudo-api";

@@ -39,6 +39,23 @@ test("grokbot cache namespace partitions by renewer credential", () => {
 	expect(a).toBe(resolveModelCacheProviderId("grokbot", { apiKey: "renewer-a", baseUrl: "https://api2.cursor.sh" }));
 });
 
+test("grokbot cache namespace partitions by discovery headers", () => {
+	const base = {
+		apiKey: "renewer-a",
+		baseUrl: "https://api2.cursor.sh",
+	} as const;
+	const prod = resolveModelCacheProviderId("grokbot", { ...base, namespace: "prod", clientVersion: "0.30.0" });
+	const lab = resolveModelCacheProviderId("grokbot", { ...base, namespace: "lab", clientVersion: "0.30.0-lab" });
+	const stamped = resolveModelCacheProviderId("grokbot", {
+		...base,
+		namespace: "prod",
+		clientVersion: "0.31.0-pre.1",
+	});
+	expect(prod).not.toBe(lab);
+	expect(prod).not.toBe(stamped);
+	expect(prod).toBe(resolveModelCacheProviderId("grokbot", { ...base, namespace: "prod", clientVersion: "0.30.0" }));
+});
+
 test("ollama cache scope preserves reverse-proxy path prefixes", () => {
 	const teamA = resolveModelCacheProviderId("ollama", { baseUrl: "https://proxy.example/team-a/v1/" });
 	expect(teamA).toBe(resolveModelCacheProviderId("ollama", { baseUrl: "https://proxy.example/team-a" }));

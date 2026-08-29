@@ -9,17 +9,12 @@ import { Effort } from "../effort";
 import { GROKBOT_API, GROKBOT_BACKEND } from "../provider-models/grokbot";
 import type { FetchImpl, ModelSpec, ThinkingConfig } from "../types";
 import { discoveryFetch } from "../utils";
-import {
-	createGrokbotChecksum,
-	grokbotClientHeaders,
-	loadGrokbotConfig,
-	mintGrokbotAccessToken,
-} from "./grokbot-auth";
+import { createGrokbotChecksum, grokbotClientHeaders, loadGrokbotConfig, mintGrokbotAccessToken } from "./grokbot-auth";
 import {
 	decodeGrokbotAvailableModelsResponse,
 	encodeGrokbotAvailableModelsRequest,
-	type GrokbotAvailableModel,
 	GROKBOT_AVAILABLE_MODELS_PATH,
+	type GrokbotAvailableModel,
 } from "./grokbot-available-models";
 
 const DEFAULT_CONTEXT_WINDOW = 200_000;
@@ -134,12 +129,34 @@ function buildSandRouterSpec(id: (typeof GROKBOT_SAND_ROUTER_IDS)[number], baseU
 	};
 }
 
+/**
+ * Derive whether stream requests must set `requestedModel.maxMode`.
+ * Max-only rows (`supportsMaxMode` without `supportsNonMaxMode`) stay in max mode;
+ * when both are supported, prefer the default-max variant when that is the only default.
+ */
+export function resolveGrokbotSandMaxMode(row: GrokbotAvailableModel): boolean {
+	if (row.supportsMaxMode !== true) return false;
+	if (row.supportsNonMaxMode === false) return true;
+	const hasDefaultMax = (row.variants ?? []).some(v => v.isDefaultMaxConfig === true);
+	const hasDefaultNonMax = (row.variants ?? []).some(v => v.isDefaultNonMaxConfig === true);
+	if (hasDefaultMax && !hasDefaultNonMax) return true;
+	return false;
+}
+
+function resolveGrokbotContextWindow(row: GrokbotAvailableModel, sandMaxMode: boolean): number {
+	if (sandMaxMode) {
+		return positiveOr(row.contextTokenLimitForMaxMode, positiveOr(row.contextTokenLimit, DEFAULT_CONTEXT_WINDOW));
+	}
+	return positiveOr(row.contextTokenLimit, DEFAULT_CONTEXT_WINDOW);
+}
+
 function toGrokbotModelSpec(row: GrokbotAvailableModel, baseUrl: string): ModelSpec<"grokbot-sand"> {
 	const parameterIds = collectParameterIds(row);
 	const efforts = collectEffortValues(row, parameterIds);
 	const reasoning = row.supportsThinking === true || efforts.length > 0;
 	const thinking = efforts.length > 0 ? ({ mode: "effort", efforts } satisfies ThinkingConfig) : undefined;
 	const aliases = uniqueStrings([...(row.idAliases ?? []), ...(row.legacySlugs ?? [])].filter(a => a !== row.name));
+	const sandMaxMode = resolveGrokbotSandMaxMode(row);
 
 	return {
 		id: row.name,
@@ -151,19 +168,17 @@ function toGrokbotModelSpec(row: GrokbotAvailableModel, baseUrl: string): ModelS
 		...(thinking ? { thinking } : undefined),
 		input: row.supportsImages === false ? ["text"] : ["text", "image"],
 		cost: COST,
-		contextWindow: positiveOr(row.contextTokenLimit, DEFAULT_CONTEXT_WINDOW),
+		contextWindow: resolveGrokbotContextWindow(row, sandMaxMode),
 		maxTokens: DEFAULT_MAX_TOKENS,
 		supportsTools: true,
 		...(aliases.length > 0 ? { aliases } : undefined),
 		sandParameterIds: parameterIds,
-		sandMaxMode: false,
+		sandMaxMode,
 	};
 }
 
 function collectParameterIds(row: GrokbotAvailableModel): string[] {
-	const fromDefs = (row.parameterDefinitions ?? [])
-		.map(d => d.id?.trim())
-		.filter((id): id is string => Boolean(id));
+	const fromDefs = (row.parameterDefinitions ?? []).map(d => d.id?.trim()).filter((id): id is string => Boolean(id));
 	if (fromDefs.length > 0) return uniqueStrings(fromDefs);
 	const fromVariants: string[] = [];
 	for (const variant of row.variants ?? []) {

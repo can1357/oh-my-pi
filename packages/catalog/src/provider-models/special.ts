@@ -213,15 +213,28 @@ export interface GrokbotModelManagerConfig {
 	apiKey?: string;
 	baseUrl?: string;
 	fetch?: FetchImpl;
+	/** Override `x-sand-box-namespace` for cache scoping (defaults to GROKBOT_NAMESPACE). */
+	namespace?: string;
+	/** Override `x-cursor-client-version` for cache scoping (defaults to GROKBOT_CLIENT_VERSION). */
+	clientVersion?: string;
 }
 
 export function grokbotModelManagerOptions(
 	config: GrokbotModelManagerConfig = {},
 ): ModelManagerOptions<"grokbot-sand"> {
 	const { apiKey, baseUrl, fetch } = config;
+	// Match AvailableModels header inputs so the authoritative cache cannot be
+	// reused after GROKBOT_NAMESPACE / GROKBOT_CLIENT_VERSION changes.
+	const namespace = config.namespace ?? Bun.env.GROKBOT_NAMESPACE;
+	const clientVersion = config.clientVersion ?? Bun.env.GROKBOT_CLIENT_VERSION;
 	return {
 		providerId: "grokbot",
-		cacheProviderId: resolveModelCacheProviderId("grokbot", { apiKey, baseUrl }),
+		cacheProviderId: resolveModelCacheProviderId("grokbot", {
+			apiKey,
+			baseUrl,
+			...(namespace ? { namespace } : undefined),
+			...(clientVersion ? { clientVersion } : undefined),
+		}),
 		staticModels: buildGrokbotStaticSeed(baseUrl),
 		...(apiKey
 			? {

@@ -1,9 +1,9 @@
 import { describe, expect, test } from "bun:test";
+import { normalizeGrokbotAvailableModels } from "../src/discovery/grokbot";
 import {
 	decodeGrokbotAvailableModelsResponse,
 	encodeGrokbotAvailableModelsRequest,
 } from "../src/discovery/grokbot-available-models";
-import { normalizeGrokbotAvailableModels } from "../src/discovery/grokbot";
 
 const FIXTURE = {
 	models: [
@@ -46,6 +46,23 @@ const FIXTURE = {
 			idAliases: ["composer-latest", "composer", "composer-2-5"],
 			parameterDefinitions: [{ id: "fast" }],
 			variants: [{ parameterValues: [{ id: "fast", value: "false" }] }],
+		},
+		{
+			name: "max-only-model",
+			clientDisplayName: "Max Only",
+			supportsThinking: true,
+			supportsImages: true,
+			supportsMaxMode: true,
+			supportsNonMaxMode: false,
+			contextTokenLimit: 200_000,
+			contextTokenLimitForMaxMode: 1_000_000,
+			parameterDefinitions: [{ id: "effort" }],
+			variants: [
+				{
+					isDefaultMaxConfig: true,
+					parameterValues: [{ id: "effort", value: "high" }],
+				},
+			],
 		},
 		{
 			name: "hidden-legacy",
@@ -97,10 +114,15 @@ describe("grokbot AvailableModels normalize", () => {
 		expect(composer?.input).toEqual(["text"]);
 		expect(composer?.sandMaxMode).toBe(false);
 
+		const maxOnly = models.find(m => m.id === "max-only-model");
+		expect(maxOnly?.sandMaxMode).toBe(true);
+		expect(maxOnly?.contextWindow).toBe(1_000_000);
+
 		const grok = models.find(m => m.id === "grok-4.6");
 		expect(grok?.sandParameterIds).toEqual(["effort", "fast"]);
 		expect([...((grok?.thinking?.efforts as readonly string[] | undefined) ?? [])]).toEqual(["low", "xhigh"]);
 		expect(grok?.contextWindow).toBe(256_000);
+		expect(grok?.sandMaxMode).toBe(false);
 
 		const sol = models.find(m => m.id === "gpt-5.6-sol");
 		expect(sol?.sandParameterIds).toEqual(["context", "reasoning", "fast"]);

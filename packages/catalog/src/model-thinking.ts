@@ -156,6 +156,10 @@ export function resolveModelThinking<TApi extends Api>(
 	// model with no explicit routed thinking has no controllable surface —
 	// never fabricate an effort ladder from identity.
 	if ((compat as ResolvedDevinCompat | undefined)?.trustExplicitThinkingOnly === true) return undefined;
+	// Grok Bot AvailableModels owns the effort surface: reasoning-without-effort
+	// rows (routers, fast-only models) must stay `thinking: undefined`, never a
+	// fabricated catalog ladder.
+	if (spec.provider === "grokbot" || spec.api === "grokbot-sand") return undefined;
 	// Empty/malformed explicit metadata is treated as absent — infer instead.
 	return deriveThinking(spec, compat);
 }
@@ -448,11 +452,14 @@ function getModelDefinedEfforts<TApi extends Api>(
 	if (modelMatchesHost({ provider: spec.provider, baseUrl: spec.baseUrl ?? "" }, "xai")) {
 		return isGrokXHighEffortCapable(spec.id) ? DEFAULT_REASONING_EFFORTS_WITH_XHIGH : DEFAULT_REASONING_EFFORTS;
 	}
-	// Grok Bot sand InferenceService: parameterized models accept sand `effort`
-	// including `xhigh` (max folds to xhigh on the wire). Explicit seed thinking
-	// still wins via resolveModelThinking; this covers sparse reasoning seeds.
+	// Grok Bot sand InferenceService: live AvailableModels / seed thinking owns
+	// the ladder. Preserve an explicit restricted list (e.g. low/xhigh); never
+	// expand it to the static catalog scale during buildModel normalization.
 	if (spec.provider === "grokbot" || spec.api === "grokbot-sand") {
-		return DEFAULT_REASONING_EFFORTS_WITH_XHIGH;
+		if (spec.thinking?.mode === "effort" && spec.thinking.efforts.length > 0) {
+			return spec.thinking.efforts;
+		}
+		return undefined;
 	}
 	return isOpenAICompatReasoningApi(spec.api) &&
 		(isMinimaxM2FamilyModelId(spec.id) ||
