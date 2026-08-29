@@ -18,7 +18,7 @@ import {
 	fieldNumbers,
 	frameConnectProto,
 } from "../../src/providers/grokbot/proto";
-import { GROKBOT_HOST_INSTALL_PROMPT, loginGrokbot } from "../../src/registry/grokbot";
+import { loginGrokbot } from "../../src/registry/grokbot";
 
 describe("grokbot proto", () => {
 	test("round-trips InferenceStreamRequest without harness fields", () => {
@@ -397,8 +397,10 @@ describe("grokbot /login host-install prompt", () => {
 			onAuth: () => {},
 			onPrompt: async prompt => {
 				prompted = true;
-				expect(prompt.message.length).toBeGreaterThan(0);
 				expect(prompt.allowEmpty).toBe(true);
+				expect(prompt.message).toContain("GROKBOT_RENEWAL_CREDENTIAL");
+				expect(prompt.message).toContain("GROKBOT_MACHINE_ID");
+				expect(prompt.message).toContain("secrets/grokbot.env");
 				return "";
 			},
 			onProgress: message => {
@@ -408,7 +410,6 @@ describe("grokbot /login host-install prompt", () => {
 
 		expect(result).toBe("");
 		expect(prompted).toBe(true);
-		expect(GROKBOT_HOST_INSTALL_PROMPT.trim().length).toBeGreaterThan(0);
 		expect(progress.some(line => line.includes("Grok Bot system"))).toBe(true);
 		expect(progress.some(line => /Host secrets ready/.test(line))).toBe(true);
 		expect(progress.some(line => line.includes(process.env.HOME ?? "__no_home__"))).toBe(false);

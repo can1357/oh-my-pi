@@ -688,12 +688,17 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 				for (const frame of frames) {
 					if (frame.flags & CONNECT_END_STREAM_FLAG) {
 						sawEndStream = true;
-						const jsonText = Buffer.from(frame.bytes).toString("utf8");
+						const jsonText = Buffer.from(frame.bytes).toString("utf8").trim();
 						let parsedEnd: Record<string, unknown> = {};
-						try {
-							parsedEnd = jsonText ? (JSON.parse(jsonText) as Record<string, unknown>) : {};
-						} catch {
-							parsedEnd = {};
+						if (jsonText) {
+							try {
+								parsedEnd = JSON.parse(jsonText) as Record<string, unknown>;
+							} catch {
+								throw new AIError.ProviderResponseError(
+									"Grok Bot connect end-stream trailer is not valid JSON",
+									{ provider: model.provider, kind: "envelope" },
+								);
+							}
 						}
 						const errObj = parsedEnd.error as Record<string, unknown> | undefined;
 						const message =
@@ -707,8 +712,12 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 					let parsed: Record<string, unknown>;
 					try {
 						parsed = decodeInferenceStreamResponse(frame.bytes) as Record<string, unknown>;
-					} catch {
-						continue;
+					} catch (err) {
+						if (frame.bytes.length === 0) continue;
+						throw new AIError.ProviderResponseError(
+							`Grok Bot stream frame decode failed: ${err instanceof Error ? err.message : String(err)}`,
+							{ provider: model.provider, kind: "envelope" },
+						);
 					}
 
 					const errObj = firstPresent(parsed, ["error"]);

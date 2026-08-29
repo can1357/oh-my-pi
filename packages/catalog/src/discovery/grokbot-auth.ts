@@ -5,9 +5,8 @@
  * renewal credential is exchanged for a short-lived JWT via POST
  * /sand-box/inference-credential. Machine id feeds `x-cursor-checksum`.
  */
-import * as fs from "node:fs";
 import * as path from "node:path";
-import { $env, getAgentDir, isEnoent, logger } from "@oh-my-pi/pi-utils";
+import { $env, getAgentDir, logger, parseEnvFile } from "@oh-my-pi/pi-utils";
 import type { FetchImpl } from "../types";
 
 export const GROKBOT_BACKEND = "https://api2.cursor.sh";
@@ -88,33 +87,12 @@ export function grokbotSecretsPath(): string {
 	return path.join(getAgentDir(), "secrets", "grokbot.env");
 }
 
-function parseEnvFile(text: string): Record<string, string> {
-	const out: Record<string, string> = {};
-	for (const line of text.split(/\r?\n/)) {
-		const trimmed = line.trim();
-		if (!trimmed || trimmed.startsWith("#") || !trimmed.includes("=")) continue;
-		const eq = trimmed.indexOf("=");
-		out[trimmed.slice(0, eq)] = trimmed.slice(eq + 1);
-	}
-	return out;
-}
-
 export async function loadGrokbotSecretFile(filePath = grokbotSecretsPath()): Promise<Record<string, string>> {
-	try {
-		return parseEnvFile(await Bun.file(filePath).text());
-	} catch (err) {
-		if (isEnoent(err)) return {};
-		throw err;
-	}
+	return parseEnvFile(filePath);
 }
 
 export function loadGrokbotSecretFileSync(filePath = grokbotSecretsPath()): Record<string, string> {
-	try {
-		return parseEnvFile(fs.readFileSync(filePath, "utf8"));
-	} catch (err) {
-		if (isEnoent(err)) return {};
-		throw err;
-	}
+	return parseEnvFile(filePath);
 }
 
 /** Sync resolver for registry `envKeys` / AuthStorage availability. */
