@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Added
+- Added native TypeScript 7 LSP autodetection via `tsc --lsp --stdio`, preferred over `typescript-language-server` when both are available ([#9986](https://github.com/can1357/oh-my-pi/pull/9986) by [@christian-auguste](https://github.com/christian-auguste)).
+
+### Fixed
+- Fixed native TypeScript LSP autodetection skipping pre-7 or unlaunchable `tsc` binaries so the classic server remains available ([#9986](https://github.com/can1357/oh-my-pi/pull/9986) by [@christian-auguste](https://github.com/christian-auguste)).
+
 ## [18.0.11] - 2026-08-29
 
 ### Added
@@ -13,8 +19,6 @@
 - The status line now displays the thinking level as a compact icon alongside the model name by default; set `statusLine.compactThinkingLevel` to `false` to restore the previous display.
 
 ### Fixed
-### Added
-- Added native TypeScript 7 LSP autodetection via `tsc --lsp --stdio`, preferred over `typescript-language-server` when both are available ([#9986](https://github.com/can1357/oh-my-pi/pull/9986) by [@christian-auguste](https://github.com/christian-auguste)).
 
 - Fixed MCP OAuth discovery for shared API gateways and authorization servers with nested paths, including Keycloak realms, so authentication targets the correct resource issuer and supports endpoint and dynamic client-registration discovery.
 - Fixed credential rotation for HTTP 402 payment-required responses so sibling credentials are tried before model fallback without misclassifying informative non-quota errors.
@@ -86,11 +90,7 @@
 - Kept embedded context usage visible in the status line when long session names or paths consume available space.
 - Added a status message when `CTRL-O` toggles tool-output expansion.
 - Fixed `omp usage` to report Codex Chat and Spark capacity meters separately when they share a usage window.
-### Added
-- Added native TypeScript 7 LSP autodetection via `tsc --lsp --stdio`, preferred over `typescript-language-server` when both are available ([#9986](https://github.com/can1357/oh-my-pi/pull/9986) by [@christian-auguste](https://github.com/christian-auguste)).
 
-### Fixed
-- Fixed native TypeScript LSP autodetection skipping pre-7 or unlaunchable `tsc` binaries so the classic server remains available ([#9986](https://github.com/can1357/oh-my-pi/pull/9986) by [@christian-auguste](https://github.com/christian-auguste)).
 
 ## [18.0.8] - 2026-08-27
 
@@ -306,7 +306,6 @@
 - Fixed completed assistant replies disappearing from the live transcript under viewport pressure.
 - Accelerated SHA-2 and SHA-3 checksums on supported ARM64 hardware.
 - Fixed large MCP tool payloads being stored redundantly on disk.
-- Fixed native TypeScript LSP autodetection skipping pre-7 or unlaunchable `tsc` binaries so the classic server remains available ([#9986](https://github.com/can1357/oh-my-pi/pull/9986) by [@christian-auguste](https://github.com/christian-auguste)).
 
 ## [18.0.4] - 2026-08-24
 
