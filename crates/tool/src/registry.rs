@@ -1336,9 +1336,10 @@ struct HostToolRoster {
 
 #[derive(Default)]
 struct HostToolState {
-	rosters: BTreeMap<Str, HostToolRoster>,
-	live:    BTreeMap<Str, Str>,
-	history: BTreeMap<ToolIdentity, Arc<dyn ErasedTool>>,
+	rosters:   BTreeMap<Str, HostToolRoster>,
+	live:      BTreeMap<Str, Str>,
+	protected: BTreeMap<Str, Str>,
+	history:   BTreeMap<ToolIdentity, Arc<dyn ErasedTool>>,
 }
 
 struct Worker {
@@ -1675,17 +1676,14 @@ impl Registry {
 			}
 
 			// A frozen name is protected against every new claim, but the
-			// host that owns it live at freeze time keeps replacing its own
-			// roster at runtime; that continuation is not a takeover.
+			// host that owned it at freeze time keeps replacing its complete
+			// roster at runtime; ownership survives temporary omission.
 			if self.protected_core.contains(&spec.name)
-				&& !state
-					.live
-					.get(&spec.name)
-					.is_some_and(|owner| *owner == claimant)
+				&& state.protected.get(&spec.name) != Some(&claimant)
 			{
 				return Err(RegistryError::CoreNameClaim {
-					name:       spec.name.clone(),
-					claimant:   claimant.clone(),
+					name: spec.name.clone(),
+					claimant,
 					precedence: Precedence::INTEGRATION,
 				});
 			}
@@ -1703,7 +1701,7 @@ impl Registry {
 			if let Some(owner) = owner {
 				return Err(RegistryError::HostToolConflict {
 					name: spec.name.clone(),
-					claimant: claimant.clone(),
+					claimant,
 					owner,
 				});
 			}
@@ -1852,14 +1850,16 @@ impl Registry {
 			.collect::<Vec<_>>();
 		self.protect_core_claims(core_names);
 		self.protected_core.extend(self.live.keys().cloned());
-		let host_names = self
-			.host_tools
-			.read()
+		let mut host_tools = self.host_tools.write();
+		let host_owners = host_tools
 			.live
-			.keys()
-			.cloned()
+			.iter()
+			.map(|(name, claimant)| (name.clone(), claimant.clone()))
 			.collect::<Vec<_>>();
-		self.protected_core.extend(host_names);
+		self
+			.protected_core
+			.extend(host_owners.iter().map(|(name, _)| name.clone()));
+		host_tools.protected.extend(host_owners);
 	}
 
 	/// Retains only core ownership for a newly protected name.
@@ -4158,17 +4158,22 @@ mod tests {
 		registry.protect_live_claims();
 
 		registry
+			.replace_host_tools(sf!("rpc/client"), 2, Vec::new(), Arc::clone(&executor))
+			.expect("the owning claimant may temporarily omit its frozen name");
+		assert!(registry.resolved_identity("alpha").is_none());
+
+		registry
 			.replace_host_tools(
 				sf!("rpc/client"),
-				2,
+				3,
 				vec![HostToolSpec {
 					name:        sf!("alpha"),
-					description: sf!("alpha host tool, second generation"),
+					description: sf!("alpha host tool, third generation"),
 					parameters:  serde_json::json!({"type": "object"}),
 				}],
 				executor,
 			)
-			.expect("the owning claimant keeps replacing its frozen name");
+			.expect("the owning claimant may restore its frozen name");
 		assert!(registry.resolved_identity("alpha").is_some());
 
 		let err = registry
