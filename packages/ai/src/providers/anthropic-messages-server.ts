@@ -644,9 +644,15 @@ export function encodeStream(
 					if (cancelled) return;
 					if ("partial" in ev && ev.partial.model && ev.partial.model !== effectiveModelId) {
 						effectiveModelId = ev.partial.model;
+						// For Cursor auto mode, message_start may have been deferred until
+						// the routed model is known — emit it now with the real id.
+						ensureStart(ev.partial);
 					}
 					switch (ev.type) {
 						case "start":
+							// Defer message_start while the model is still the auto sentinel
+							// so clients see the routed model, not "auto".
+							if (ev.partial.model === "auto") break;
 							ensureStart(ev.partial);
 							break;
 						case "text_start": {
