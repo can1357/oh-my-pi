@@ -108,6 +108,29 @@ describe("zod-like parsing", () => {
 		expect(steppedVariants.parse({ kind: "len", v: "abc" })).toEqual({ kind: "len", v: 3 });
 	});
 
+	it("rejects discriminated-union variants that cannot declare the discriminator", () => {
+		// The public signature accepts any schema, so an accidental non-object
+		// variant used to build a plain string/number union that answered
+		// safeParse("x") with success — the dispatch contract the call
+		// advertises, silently gone. It must fail at definition instead.
+		expect(() => z.discriminatedUnion("kind", [z.string() as never, z.number() as never])).toThrow(
+			/variant 0 does not declare a "kind" property/,
+		);
+		expect(() =>
+			z.discriminatedUnion("kind", [z.object({ kind: z.literal("a") }), z.object({ other: z.string() }) as never]),
+		).toThrow(/variant 1 does not declare a "kind" property/);
+
+		// A non-literal discriminator cannot be dispatched on, but zod accepts
+		// it: the variant stays valid and falls through to the ordered attempt.
+		const enumDiscriminated = z.discriminatedUnion("kind", [
+			z.object({ kind: z.enum(["a", "b"]), v: z.string() }),
+			z.object({ kind: z.literal("c"), n: z.number() }),
+		]);
+		expect(enumDiscriminated.parse({ kind: "b", v: "x" })).toEqual({ kind: "b", v: "x" });
+		expect(enumDiscriminated.parse({ kind: "c", n: 1 })).toEqual({ kind: "c", n: 1 });
+		expect(enumDiscriminated.safeParse({ kind: "a", n: 1 }).success).toBe(false);
+	});
+
 	it("parses valid values and reports nested safeParse issues", () => {
 		const schema = z.object({ profile: z.object({ age: z.number().int().positive() }) });
 		expect(schema.parse({ profile: { age: 42 } })).toEqual({ profile: { age: 42 } });

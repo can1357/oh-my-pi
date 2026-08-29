@@ -502,10 +502,51 @@ function discriminantLiteral(ir: IR, key: string): unknown {
 }
 
 /**
+ * True when `ir` structurally declares `key`, the minimum a discriminated-union
+ * variant must do to be dispatchable at all. Deliberately weaker than "pins a
+ * literal": zod 4 accepts an enum or literal-union discriminator, which cannot
+ * be dispatched on but is a legitimate variant — it falls through to the
+ * ordered attempt. A non-object variant, or an object without the key, is a
+ * definition error instead: nothing about it can honour the dispatch contract.
+ */
+function declaresDiscriminator(ir: IR, key: string, seen?: Set<IR>): boolean {
+	switch (ir.k) {
+		case "object":
+			return ir.props.some(prop => prop.key === key);
+		case "union":
+			return ir.members.every(member => declaresDiscriminator(member, key, seen));
+		case "intersection":
+			return ir.members.some(member => declaresDiscriminator(member, key, seen));
+		case "sub":
+			return declaresDiscriminator(ir.schema.ir, key, seen);
+		case "morph":
+			// restrictBase wraps a stepped schema in a morph over its base IR.
+			return declaresDiscriminator(ir.input, key, seen);
+		case "alias": {
+			// A deferred z.lazy cannot be inspected before first parse; accept it
+			// rather than running the getter (TDZ) or rejecting a valid variant.
+			if (ir.deferred === true) return true;
+			if (seen?.has(ir)) return false;
+			const active = seen ?? new Set<IR>();
+			active.add(ir);
+			return declaresDiscriminator(ir.resolve(), key, active);
+		}
+		default:
+			return false;
+	}
+}
+
+/**
  * Union dispatched on a literal discriminator property. Variants whose IR pins
  * the discriminator to the input's value are tried first; when nothing matches
  * (or no variant declares a usable literal), every variant is attempted in
  * order so failures still report against the full union.
+ *
+ * A variant that cannot declare the discriminator at all is rejected at
+ * construction, matching zod: the public signature accepts any schema, so
+ * `z.discriminatedUnion("kind", [z.string(), z.number()])` would otherwise
+ * build a plain string/number union that accepts `"x"` — silently dropping the
+ * dispatch contract the call advertises.
  */
 export const discriminatedUnion = <
 	const Discriminator extends string,
@@ -514,6 +555,11 @@ export const discriminatedUnion = <
 	discriminator: Discriminator,
 	schemas: Schemas,
 ): ZodLikeSchema<UnionOutput<Schemas>> => {
+	for (const [index, schema] of schemas.entries()) {
+		if (!declaresDiscriminator(schema.ir, discriminator)) {
+			throw new OmpTypeError(`discriminatedUnion variant ${index} does not declare a "${discriminator}" property`);
+		}
+	}
 	const variantIrs = schemas.map(schema => embed(schema));
 	// Same gate as union() above: variants are embedded so stepped variants
 	// keep their steps and their exported structure, only deferred aliases are
