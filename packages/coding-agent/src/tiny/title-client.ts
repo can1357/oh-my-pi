@@ -47,6 +47,17 @@ export interface TinyTitleGenerateOptions {
 	systemPrompt?: string;
 }
 
+const DEFAULT_IDLE_TERMINATE_MS = 5 * 60 * 1000;
+const IDLE_TERMINATE_ENV = "OMP_TINY_MODEL_IDLE_TIMEOUT_MS";
+
+function resolveIdleTerminateMs(overrideMs: number | undefined): number {
+	if (overrideMs !== undefined) return overrideMs;
+	const raw = Bun.env[IDLE_TERMINATE_ENV];
+	if (raw === undefined || raw.trim() === "") return DEFAULT_IDLE_TERMINATE_MS;
+	const parsed = Number(raw);
+	return Number.isFinite(parsed) ? parsed : DEFAULT_IDLE_TERMINATE_MS;
+}
+
 function normalizeTinyTitleGenerateOptions(
 	options: AbortSignal | TinyTitleGenerateOptions | undefined,
 ): TinyTitleGenerateOptions {
@@ -178,11 +189,15 @@ export class TinyTitleClient {
 	#nextRequestId = 0;
 	#refed = false;
 	#spawnWorker: () => RefCountedWorkerHandle<TinyTitleWorkerInbound, TinyTitleWorkerOutbound>;
+	#idleTerminateMs: number;
+	#idleTimer: Timer | null = null;
 
 	constructor(
 		spawnWorker: () => RefCountedWorkerHandle<TinyTitleWorkerInbound, TinyTitleWorkerOutbound> = spawnTinyTitleWorker,
+		options: { idleTimeoutMs?: number } = {},
 	) {
 		this.#spawnWorker = spawnWorker;
+		this.#idleTerminateMs = resolveIdleTerminateMs(options.idleTimeoutMs);
 	}
 
 	onProgress(listener: (event: TinyTitleProgressEvent) => void): () => void {
@@ -209,7 +224,7 @@ export class TinyTitleClient {
 			const abort = (): void => {
 				const pending = this.#pending.get(id);
 				if (pending?.kind !== "generate") return;
-				this.#deletePending(id);
+				this.#deletePending(id, true);
 				pending.resolve(null);
 			};
 			options.signal?.addEventListener("abort", abort, { once: true });
@@ -248,7 +263,7 @@ export class TinyTitleClient {
 			const abort = (): void => {
 				const pending = this.#pending.get(id);
 				if (pending?.kind !== "complete") return;
-				this.#deletePending(id);
+				this.#deletePending(id, true);
 				pending.resolve(null);
 			};
 			options.signal?.addEventListener("abort", abort, { once: true });
@@ -281,7 +296,7 @@ export class TinyTitleClient {
 			const abort = (): void => {
 				const pending = this.#pending.get(id);
 				if (pending?.kind !== "download") return;
-				this.#deletePending(id);
+				this.#deletePending(id, true);
 				pending.resolve(false);
 			};
 			options.signal?.addEventListener("abort", abort, { once: true });
@@ -304,6 +319,7 @@ export class TinyTitleClient {
 	}
 
 	async terminate(): Promise<void> {
+		this.#clearIdleTimer();
 		const worker = this.#worker;
 		this.#worker = null;
 		this.#unsubscribeMessage?.();
@@ -325,6 +341,7 @@ export class TinyTitleClient {
 	}
 
 	#ensureWorker(): RefCountedWorkerHandle<TinyTitleWorkerInbound, TinyTitleWorkerOutbound> {
+		this.#clearIdleTimer();
 		if (this.#worker) return this.#worker;
 		const worker = this.#spawnWorker();
 		this.#worker = worker;
@@ -335,13 +352,21 @@ export class TinyTitleClient {
 
 	/** Register a pending request and keep the worker referenced while work is in flight. */
 	#addPending(id: string, request: PendingRequest): void {
+		this.#clearIdleTimer();
 		this.#pending.set(id, request);
 		this.#syncWorkerRef();
 	}
 
-	/** Drop a pending request and unref the worker once nothing is in flight. */
-	#deletePending(id: string): void {
-		if (this.#pending.delete(id)) this.#syncWorkerRef();
+	/** Drop a request, then either retain the warm worker briefly or kill abandoned native work. */
+	#deletePending(id: string, terminateWorkerIfEmpty = false): void {
+		if (!this.#pending.delete(id)) return;
+		this.#syncWorkerRef();
+		if (this.#pending.size !== 0) return;
+		if (terminateWorkerIfEmpty) {
+			void this.terminate();
+			return;
+		}
+		this.#armIdleTimer();
 	}
 
 	/**
@@ -357,6 +382,23 @@ export class TinyTitleClient {
 		this.#refed = shouldRef;
 		if (shouldRef) worker.ref?.();
 		else worker.unref?.();
+	}
+
+	#clearIdleTimer(): void {
+		if (!this.#idleTimer) return;
+		clearTimeout(this.#idleTimer);
+		this.#idleTimer = null;
+	}
+
+	#armIdleTimer(): void {
+		if (this.#idleTerminateMs <= 0 || !this.#worker || this.#pending.size !== 0) return;
+		this.#clearIdleTimer();
+		this.#idleTimer = setTimeout(() => {
+			this.#idleTimer = null;
+			if (!this.#worker || this.#pending.size !== 0) return;
+			void this.terminate();
+		}, this.#idleTerminateMs);
+		this.#idleTimer.unref?.();
 	}
 
 	#handleMessage(message: TinyTitleWorkerOutbound): void {

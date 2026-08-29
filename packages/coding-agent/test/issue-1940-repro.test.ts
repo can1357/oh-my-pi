@@ -7,6 +7,7 @@ import type {
 
 class FakeTinyWorker {
 	terminated = false;
+	readonly sent: TinyTitleWorkerInbound[] = [];
 	#messageHandlers = new Set<(message: TinyTitleWorkerOutbound) => void>();
 	#onSend: (message: TinyTitleWorkerInbound, worker: FakeTinyWorker) => void;
 
@@ -15,6 +16,7 @@ class FakeTinyWorker {
 	}
 
 	send(message: TinyTitleWorkerInbound): void {
+		this.sent.push(message);
 		this.#onSend(message, this);
 	}
 
@@ -112,6 +114,113 @@ describe("issue #1940 — local model failures release the worker process", () =
 			expect(await first).toBeNull();
 			expect(await second).toBeNull();
 			expect(worker.terminated).toBe(true);
+		} finally {
+			await client.terminate();
+		}
+	});
+});
+
+describe("tiny model worker idle lifecycle", () => {
+	it("terminates the worker after the idle window", async () => {
+		let spawned: FakeTinyWorker | undefined;
+		const client = new TinyTitleClient(
+			() => {
+				spawned = new FakeTinyWorker((message, worker) => {
+					if (message.type === "complete") {
+						queueMicrotask(() => worker.emit({ type: "completion", id: message.id, text: "done" }));
+					}
+				});
+				return spawned;
+			},
+			{ idleTimeoutMs: 20 },
+		);
+
+		try {
+			expect(await client.complete("lfm2-1.2b", "prompt")).toBe("done");
+			await Bun.sleep(50);
+			expect(spawned?.terminated).toBe(true);
+		} finally {
+			await client.terminate();
+		}
+	});
+
+	it("does not terminate while a request is pending", async () => {
+		let spawned: FakeTinyWorker | undefined;
+		const client = new TinyTitleClient(
+			() => {
+				spawned = new FakeTinyWorker((message, worker) => {
+					if (message.type === "complete") {
+						const delayMs = message.prompt === "slow prompt" ? 120 : 0;
+						setTimeout(() => worker.emit({ type: "completion", id: message.id, text: "done" }), delayMs);
+					}
+				});
+				return spawned;
+			},
+			{ idleTimeoutMs: 80 },
+		);
+
+		try {
+			expect(await client.complete("lfm2-1.2b", "warm up")).toBe("done");
+			await Bun.sleep(20);
+			const completion = client.complete("lfm2-1.2b", "slow prompt");
+			await Bun.sleep(80);
+			expect(spawned?.terminated).toBe(false);
+			expect(await completion).toBe("done");
+			await Bun.sleep(100);
+			expect(spawned?.terminated).toBe(true);
+		} finally {
+			await client.terminate();
+		}
+	});
+
+	it("respawns after an idle termination", async () => {
+		const workers: FakeTinyWorker[] = [];
+		const client = new TinyTitleClient(
+			() => {
+				const worker = new FakeTinyWorker((message, activeWorker) => {
+					if (message.type === "complete") {
+						queueMicrotask(() =>
+							activeWorker.emit({ type: "completion", id: message.id, text: `worker-${workers.length}` }),
+						);
+					}
+				});
+				workers.push(worker);
+				return worker;
+			},
+			{ idleTimeoutMs: 20 },
+		);
+
+		try {
+			expect(await client.complete("lfm2-1.2b", "first")).toBe("worker-1");
+			await Bun.sleep(50);
+			expect(workers[0]?.terminated).toBe(true);
+
+			expect(await client.complete("lfm2-1.2b", "second")).toBe("worker-2");
+			expect(workers).toHaveLength(2);
+			expect(workers[1]?.sent.some(message => message.type === "complete")).toBe(true);
+		} finally {
+			await client.terminate();
+		}
+	});
+
+	it("terminates immediately when abort removes the final pending request", async () => {
+		const controller = new AbortController();
+		let spawned: FakeTinyWorker | undefined;
+		const client = new TinyTitleClient(
+			() => {
+				spawned = new FakeTinyWorker(() => {});
+				return spawned;
+			},
+			{ idleTimeoutMs: 60_000 },
+		);
+
+		try {
+			const completion = client.complete("lfm2-1.2b", "cancel me", { signal: controller.signal });
+			await Bun.sleep(0);
+			controller.abort();
+
+			expect(await completion).toBeNull();
+			expect(spawned?.terminated).toBe(true);
 		} finally {
 			await client.terminate();
 		}

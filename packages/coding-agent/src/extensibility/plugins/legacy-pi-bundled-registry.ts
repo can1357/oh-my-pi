@@ -116,6 +116,7 @@ import * as bundledPiAiProvidersTransformMessages from "@pk-nerdsaver-ai/pi-ai/p
 import * as bundledPiAiProvidersVisionGuard from "@pk-nerdsaver-ai/pi-ai/providers/vision-guard";
 import * as bundledPiAiRegistry from "@pk-nerdsaver-ai/pi-ai/registry";
 import * as bundledPiAiRegistryOauth from "@pk-nerdsaver-ai/pi-ai/registry/oauth";
+import * as bundledPiAiUsageAlibabaTokenPlan from "@pk-nerdsaver-ai/pi-ai/usage/alibaba-token-plan";
 import * as bundledPiAiUsageClaude from "@pk-nerdsaver-ai/pi-ai/usage/claude";
 import * as bundledPiAiUsageGemini from "@pk-nerdsaver-ai/pi-ai/usage/gemini";
 import * as bundledPiAiUsageGithubCopilot from "@pk-nerdsaver-ai/pi-ai/usage/github-copilot";
@@ -1310,6 +1311,9 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 		bundledPiAiProvidersOpenaiCodexRequestTransformer as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-ai/providers/openai-codex/response-handler":
 		bundledPiAiProvidersOpenaiCodexResponseHandler as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-ai/usage/alibaba-token-plan": bundledPiAiUsageAlibabaTokenPlan as unknown as Readonly<
+		Record<string, unknown>
+	>,
 	"@pk-nerdsaver-ai/pi-ai/usage/claude": bundledPiAiUsageClaude as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-ai/usage/gemini": bundledPiAiUsageGemini as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-ai/usage/github-copilot": bundledPiAiUsageGithubCopilot as unknown as Readonly<

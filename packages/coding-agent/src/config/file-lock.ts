@@ -6,13 +6,20 @@ export interface FileLockOptions {
 	staleMs?: number;
 	retries?: number;
 	retryDelayMs?: number;
+	staleWhileOwnerAlive?: boolean;
 }
 
 const DEFAULT_OPTIONS: Required<FileLockOptions> = {
 	staleMs: 10_000,
 	retries: 50,
 	retryDelayMs: 100,
+	staleWhileOwnerAlive: true,
 };
+const WINDOWS_REMOVE_RETRIES = 40;
+const WINDOWS_REMOVE_RETRY_DELAY_MS = 50;
+const WINDOWS_RETRYABLE_REMOVE_CODES = new Set(["EBUSY", "EPERM", "ENOTEMPTY"]);
+const WINDOWS_INFO_READ_RETRIES = 40;
+const WINDOWS_INFO_READ_RETRY_DELAY_MS = 5;
 
 interface LockInfo {
 	pid: number;
@@ -20,8 +27,39 @@ interface LockInfo {
 	token: string;
 }
 
+function isLockInfo(value: unknown): value is LockInfo {
+	if (typeof value !== "object" || value === null) return false;
+	const candidate = value as { pid?: unknown; timestamp?: unknown; token?: unknown };
+	return (
+		typeof candidate.pid === "number" &&
+		Number.isSafeInteger(candidate.pid) &&
+		candidate.pid > 0 &&
+		typeof candidate.timestamp === "number" &&
+		Number.isFinite(candidate.timestamp) &&
+		typeof candidate.token === "string" &&
+		candidate.token.length > 0
+	);
+}
+
+interface LockStatSnapshot {
+	dev: number;
+	ino: number;
+	size: number;
+	mtimeMs: number;
+	ctimeMs: number;
+}
+
 function getLockPath(filePath: string): string {
 	return `${filePath}.lock`;
+}
+
+function getBreakerPath(lockPath: string): string {
+	return `${lockPath}.break`;
+}
+
+function getReaperPath(lockPath: string, staleToken: string): string {
+	const safeToken = staleToken.replaceAll(/[^A-Za-z0-9._-]/g, "_").slice(0, 64) || "unknown";
+	return `${lockPath}.reap.${safeToken}`;
 }
 
 async function writeLockInfo(lockPath: string, token: string): Promise<void> {
@@ -30,29 +68,76 @@ async function writeLockInfo(lockPath: string, token: string): Promise<void> {
 }
 
 async function readLockInfo(lockPath: string): Promise<LockInfo | null> {
-	try {
-		const content = await fs.readFile(`${lockPath}/info`, "utf-8");
-		return JSON.parse(content) as LockInfo;
-	} catch {
-		return null;
+	for (let attempt = 0; ; attempt += 1) {
+		try {
+			const content = await fs.readFile(`${lockPath}/info`, "utf-8");
+			const parsed: unknown = JSON.parse(content);
+			return isLockInfo(parsed) ? parsed : null;
+		} catch (error) {
+			if (isEnoent(error) || error instanceof SyntaxError) return null;
+			if (
+				process.platform !== "win32" ||
+				(error as NodeJS.ErrnoException).code !== "EPERM" ||
+				attempt >= WINDOWS_INFO_READ_RETRIES
+			) {
+				throw error;
+			}
+			await Bun.sleep(WINDOWS_INFO_READ_RETRY_DELAY_MS);
+		}
 	}
 }
 
-function isProcessAlive(pid: number): boolean {
+async function readLockStatSnapshot(lockPath: string): Promise<LockStatSnapshot | null> {
 	try {
-		process.kill(pid, 0);
+		const stat = await fs.stat(lockPath);
+		return {
+			dev: stat.dev,
+			ino: stat.ino,
+			size: stat.size,
+			mtimeMs: stat.mtimeMs,
+			ctimeMs: stat.ctimeMs,
+		};
+	} catch (error) {
+		if (isEnoent(error)) return null;
+		throw error;
+	}
+}
+
+function sameLockStat(left: LockStatSnapshot, right: LockStatSnapshot): boolean {
+	return (
+		left.dev === right.dev &&
+		left.ino === right.ino &&
+		left.size === right.size &&
+		left.mtimeMs === right.mtimeMs &&
+		left.ctimeMs === right.ctimeMs
+	);
+}
+
+function lockStatGeneration(snapshot: LockStatSnapshot): string {
+	return `${snapshot.dev}-${snapshot.ino}-${snapshot.size}-${snapshot.mtimeMs}-${snapshot.ctimeMs}`;
+}
+
+type SignalProcess = (pid: number) => void;
+
+function signalProcess(pid: number): void {
+	process.kill(pid, 0);
+}
+
+function isProcessAlive(pid: number, signal: SignalProcess = signalProcess): boolean {
+	try {
+		signal(pid);
 		return true;
-	} catch {
-		return false;
+	} catch (error) {
+		const code = (error as NodeJS.ErrnoException).code;
+		return code !== "ESRCH" && code !== "EINVAL";
 	}
 }
 
-async function isLockStale(lockPath: string, staleMs: number): Promise<boolean> {
+async function isLockStale(lockPath: string, staleMs: number, staleWhileOwnerAlive = true): Promise<boolean> {
 	const info = await readLockInfo(lockPath);
 	if (info) {
 		if (!isProcessAlive(info.pid)) return true;
-		if (Date.now() - info.timestamp > staleMs) return true;
-		return false;
+		return staleWhileOwnerAlive && Date.now() - info.timestamp > staleMs;
 	}
 
 	// No info file. Either the lock holder is between mkdir and writeLockInfo
@@ -68,42 +153,6 @@ async function isLockStale(lockPath: string, staleMs: number): Promise<boolean> 
 	}
 }
 
-async function tryAcquireLock(lockPath: string): Promise<string | null> {
-	try {
-		await fs.mkdir(lockPath);
-		const token = randomUUID();
-		await writeLockInfo(lockPath, token);
-		return token;
-	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code === "EEXIST") {
-			return null;
-		}
-		throw error;
-	}
-}
-
-async function releaseLock(lockPath: string, expectedToken?: string): Promise<void> {
-	try {
-		if (expectedToken !== undefined) {
-			const info = await readLockInfo(lockPath);
-			if (!info || info.token !== expectedToken) {
-				// We are not the owner. The lock either expired and was reaped
-				// or another process has reclaimed it. Do nothing — releasing
-				// here would wipe the rightful owner's lock.
-				logger.debug("file-lock: skipping release for non-owned lock", {
-					lockPath,
-					expectedToken,
-					actualToken: info?.token,
-				});
-				return;
-			}
-		}
-		await fs.rm(lockPath, { recursive: true });
-	} catch {
-		// Ignore errors on release.
-	}
-}
-
 async function lockExists(lockPath: string): Promise<boolean> {
 	try {
 		await fs.stat(lockPath);
@@ -114,21 +163,165 @@ async function lockExists(lockPath: string): Promise<boolean> {
 	}
 }
 
+async function isLockContention(error: unknown, lockPath: string, breakerPath?: string): Promise<boolean> {
+	const code = (error as NodeJS.ErrnoException).code;
+	if (code === "EEXIST") return true;
+	if (process.platform !== "win32" || code !== "EPERM") return false;
+	return (await lockExists(lockPath)) || (breakerPath !== undefined && (await lockExists(breakerPath)));
+}
+
+async function createLockDirectory(lockPath: string, breakerPath?: string): Promise<boolean> {
+	for (let attempt = 0; attempt < 3; attempt += 1) {
+		try {
+			await fs.mkdir(lockPath);
+			return true;
+		} catch (error) {
+			if (await isLockContention(error, lockPath, breakerPath)) return false;
+			if (process.platform !== "win32" || (error as NodeJS.ErrnoException).code !== "EPERM" || attempt === 2) {
+				throw error;
+			}
+			await Bun.sleep(5);
+		}
+	}
+	return false;
+}
+
+async function tryAcquireLock(lockPath: string, breakerPath?: string): Promise<string | null> {
+	if (breakerPath && (await lockExists(breakerPath))) return null;
+	if (!(await createLockDirectory(lockPath, breakerPath))) return null;
+
+	const token = randomUUID();
+	try {
+		await writeLockInfo(lockPath, token);
+		if (breakerPath && (await lockExists(breakerPath))) {
+			await releaseLock(lockPath, token);
+			return null;
+		}
+		return token;
+	} catch (error) {
+		// mkdir succeeded, so this process owns the incomplete directory.
+		await releaseLock(lockPath);
+		throw error;
+	}
+}
+
+async function releaseLock(lockPath: string, expectedToken?: string): Promise<void> {
+	for (let attempt = 0; ; attempt += 1) {
+		try {
+			if (expectedToken !== undefined) {
+				const info = await readLockInfo(lockPath);
+				if (!info || info.token !== expectedToken) {
+					// We are not the owner. The lock either expired and was reaped
+					// or another process has reclaimed it. Do nothing — releasing
+					// here would wipe the rightful owner's lock.
+					logger.debug("file-lock: skipping release for non-owned lock", {
+						lockPath,
+						expectedToken,
+						actualToken: info?.token,
+					});
+					return;
+				}
+			}
+			await fs.rm(lockPath, { force: true, recursive: true });
+			return;
+		} catch (error) {
+			const code = (error as NodeJS.ErrnoException).code;
+			if (
+				process.platform !== "win32" ||
+				!code ||
+				!WINDOWS_RETRYABLE_REMOVE_CODES.has(code) ||
+				attempt >= WINDOWS_REMOVE_RETRIES
+			) {
+				// Release remains best-effort; stale-lock recovery handles leftovers.
+				return;
+			}
+			await Bun.sleep(WINDOWS_REMOVE_RETRY_DELAY_MS);
+		}
+	}
+}
+
+async function reapEmptyBreaker(breakerPath: string, staleMs: number): Promise<boolean> {
+	if (await lockExists(`${breakerPath}/info`)) return false;
+	const staleStat = await readLockStatSnapshot(breakerPath);
+	if (!staleStat || Date.now() - staleStat.mtimeMs <= staleMs) return false;
+
+	const reaperPath = getReaperPath(breakerPath, lockStatGeneration(staleStat));
+	const reaperToken = await tryAcquireLock(reaperPath);
+	if (reaperToken === null) return false;
+	try {
+		if (await lockExists(`${breakerPath}/info`)) return false;
+		const currentStat = await readLockStatSnapshot(breakerPath);
+		if (!currentStat || !sameLockStat(staleStat, currentStat) || Date.now() - currentStat.mtimeMs <= staleMs) {
+			return false;
+		}
+		await releaseLock(breakerPath);
+		return !(await lockExists(breakerPath));
+	} finally {
+		await releaseLock(reaperPath, reaperToken);
+	}
+}
+
+async function acquireBreaker(lockPath: string, staleMs: number): Promise<{ path: string; token: string } | null> {
+	const breakerPath = getBreakerPath(lockPath);
+	for (let attempt = 0; attempt < 2; attempt += 1) {
+		const token = await tryAcquireLock(breakerPath);
+		if (token !== null) return { path: breakerPath, token };
+		const staleInfo = await readLockInfo(breakerPath);
+		if (!staleInfo) {
+			if (!(await reapEmptyBreaker(breakerPath, staleMs))) return null;
+			continue;
+		}
+		if (isProcessAlive(staleInfo.pid)) return null;
+
+		// Fence stale-breaker cleanup by the observed breaker generation. Only
+		// one contender can reap that token, and a crashed reaper blocks that
+		// dead generation rather than deleting a newer breaker's directory.
+		const reaperPath = getReaperPath(breakerPath, staleInfo.token);
+		const reaperToken = await tryAcquireLock(reaperPath);
+		if (reaperToken === null) return null;
+		try {
+			const current = await readLockInfo(breakerPath);
+			if (!current || current.token !== staleInfo.token || isProcessAlive(current.pid)) return null;
+			await releaseLock(breakerPath, current.token);
+		} finally {
+			await releaseLock(reaperPath, reaperToken);
+		}
+	}
+	return null;
+}
+
+async function tryAcquireStaleLock(lockPath: string, options: Required<FileLockOptions>): Promise<string | null> {
+	const breaker = await acquireBreaker(lockPath, options.staleMs);
+	if (!breaker) return null;
+	try {
+		const direct = await tryAcquireLock(lockPath);
+		if (direct !== null) return direct;
+		if (!(await isLockStale(lockPath, options.staleMs, options.staleWhileOwnerAlive))) return null;
+		await releaseLock(lockPath);
+		return await tryAcquireLock(lockPath);
+	} finally {
+		await releaseLock(breaker.path, breaker.token);
+	}
+}
+
 async function acquireLock(filePath: string, options: FileLockOptions = {}): Promise<() => Promise<void>> {
 	const opts = { ...DEFAULT_OPTIONS, ...options };
 	const lockPath = getLockPath(filePath);
+	const breakerPath = getBreakerPath(lockPath);
 
 	for (let attempt = 0; attempt < opts.retries; attempt++) {
-		const token = await tryAcquireLock(lockPath);
+		const token = await tryAcquireLock(lockPath, breakerPath);
 		if (token !== null) {
 			return () => releaseLock(lockPath, token);
 		}
 
-		if ((await lockExists(lockPath)) && (await isLockStale(lockPath, opts.staleMs))) {
-			// Reaping a stale lock — no token because we didn't acquire it. The
-			// rightful owner is presumed dead; rm without ownership check.
-			await releaseLock(lockPath);
-			continue;
+		const staleLock =
+			(await lockExists(lockPath)) && (await isLockStale(lockPath, opts.staleMs, opts.staleWhileOwnerAlive));
+		const staleBreaker =
+			!staleLock && (await lockExists(breakerPath)) && (await isLockStale(breakerPath, opts.staleMs, false));
+		if (staleLock || staleBreaker) {
+			const takeoverToken = await tryAcquireStaleLock(lockPath, opts);
+			if (takeoverToken !== null) return () => releaseLock(lockPath, takeoverToken);
 		}
 
 		await Bun.sleep(opts.retryDelayMs);
@@ -160,5 +353,6 @@ export const __internalsForTesting = {
 	releaseLock,
 	readLockInfo,
 	isLockStale,
+	isProcessAlive,
 	getLockPath,
 };

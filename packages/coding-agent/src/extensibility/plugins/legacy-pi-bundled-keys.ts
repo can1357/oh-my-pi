@@ -92,6 +92,7 @@ export const BUNDLED_PI_REGISTRY_KEYS: ReadonlySet<string> = new Set([
 	"@pk-nerdsaver-ai/pi-ai/providers/vision-guard",
 	"@pk-nerdsaver-ai/pi-ai/providers/openai-codex/request-transformer",
 	"@pk-nerdsaver-ai/pi-ai/providers/openai-codex/response-handler",
+	"@pk-nerdsaver-ai/pi-ai/usage/alibaba-token-plan",
 	"@pk-nerdsaver-ai/pi-ai/usage/claude",
 	"@pk-nerdsaver-ai/pi-ai/usage/gemini",
 	"@pk-nerdsaver-ai/pi-ai/usage/github-copilot",

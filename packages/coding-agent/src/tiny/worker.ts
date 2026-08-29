@@ -17,6 +17,12 @@ import {
 	sendLog,
 	sendProgress,
 } from "../subprocess/worker-runtime";
+import {
+	captureTinyModelTempSnapshot,
+	pruneAbandonedTinyModelTemps,
+	pruneTinyModelAttemptTemps,
+	withTinyModelDownloadLock,
+} from "./cache-guard";
 import { resolveTinyModelDevicePreference, type TinyModelDevice, tinyModelDeviceLoadOrder } from "./device";
 import { resolveTinyModelDtypeOverride, type TinyModelDtype } from "./dtype";
 import {
@@ -177,7 +183,53 @@ async function loadPipeline(
 		getTinyTitleRuntimeDir,
 	);
 	const startedAt = performance.now();
-	const loaded = loadPipelineWithDeviceFallback(transformers, spec, modelKey, transport, requestId).then(
+	const cacheDir = getTinyModelsCacheDir();
+	const loaded = withTinyModelDownloadLock(cacheDir, spec.repo, async () => {
+		const pruned = await pruneAbandonedTinyModelTemps(cacheDir, spec.repo);
+		if (pruned.removedFiles > 0 || pruned.failedFiles > 0) {
+			sendLog(
+				transport,
+				pruned.failedFiles === 0 ? "warn" : "error",
+				"tiny-model: cleaned abandoned partial downloads",
+				{
+					modelKey,
+					repo: spec.repo,
+					removedFiles: pruned.removedFiles,
+					reclaimedBytes: pruned.reclaimedBytes,
+					failedFiles: pruned.failedFiles,
+				},
+			);
+		}
+		const beforeAttempt = await captureTinyModelTempSnapshot(cacheDir, spec.repo);
+		try {
+			return await loadPipelineWithDeviceFallback(transformers, spec, modelKey, transport, requestId);
+		} catch (error) {
+			try {
+				const failedAttempt = await pruneTinyModelAttemptTemps(cacheDir, spec.repo, beforeAttempt);
+				if (failedAttempt.removedFiles > 0 || failedAttempt.failedFiles > 0) {
+					sendLog(
+						transport,
+						failedAttempt.failedFiles === 0 ? "warn" : "error",
+						"tiny-model: cleaned partial downloads from failed load",
+						{
+							modelKey,
+							repo: spec.repo,
+							removedFiles: failedAttempt.removedFiles,
+							reclaimedBytes: failedAttempt.reclaimedBytes,
+							failedFiles: failedAttempt.failedFiles,
+						},
+					);
+				}
+			} catch (cleanupError) {
+				sendLog(transport, "error", "tiny-model: failed to clean partial downloads after load failure", {
+					modelKey,
+					repo: spec.repo,
+					error: errorMessage(cleanupError),
+				});
+			}
+			throw error;
+		}
+	}).then(
 		({ generator, device }) => {
 			sendLog(transport, "debug", "tiny-model: local model loaded", {
 				modelKey,
