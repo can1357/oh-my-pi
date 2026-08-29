@@ -122,6 +122,11 @@ describe("isTautologicalParentVerifyCommand", () => {
 		expect(isTautologicalParentVerifyCommand("bun test | cat")).toBe(true);
 		expect(isTautologicalParentVerifyCommand("bun test && bun test")).toBe(false);
 	});
+
+	it("rejects newline-masked verification as non-evidence", () => {
+		expect(isTautologicalParentVerifyCommand("bun test\ntrue")).toBe(true);
+		expect(isTautologicalParentVerifyCommand("bun test test/foo.test.ts\npwd")).toBe(true);
+	});
 });
 
 describe("isTrivialParentVerifyEvalCode", () => {

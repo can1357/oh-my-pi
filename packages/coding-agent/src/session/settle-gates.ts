@@ -63,6 +63,9 @@ export function isTautologicalParentVerifyCommand(command: string): boolean {
 	// Backgrounded work (`bun test & true`) reports sync success before the check
 	// finishes — never treat that as parent acceptance.
 	if (hasTopLevelShellBackground(trimmed)) return true;
+	// Multiline scripts (`bun test\ntrue`) report the last statement's status, so a
+	// trailing `true`/`pwd` masks a failed check. Reject any newline-separated chain.
+	if (/\r?\n/.test(trimmed)) return true;
 	// Bash normalizes leading `cd <path> &&|; …` into cwd; strip those wrappers so
 	// `cd packages/foo && pwd` classifies as `pwd`, not as a real check.
 	for (;;) {
@@ -72,7 +75,7 @@ export function isTautologicalParentVerifyCommand(command: string): boolean {
 	}
 	if (trimmed.length === 0) return true;
 	const segments = trimmed
-		.split(/(?:&&|\|\||;|\n)+/)
+		.split(/(?:&&|\|\||;)+/)
 		.map(segment => segment.trim())
 		.filter(segment => segment.length > 0 && !segment.startsWith("#"));
 	// Drop any remaining leading `cd …` segments (e.g. after `||` / redirects).
