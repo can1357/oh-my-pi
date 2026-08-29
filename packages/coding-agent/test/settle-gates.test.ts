@@ -7,19 +7,20 @@ import {
 } from "../src/session/settle-gates";
 
 describe("isolatedApplyShouldLatch", () => {
-	it("latches only a successful isolated apply", () => {
-		expect(
-			isolatedApplyShouldLatch({ isolated: true, applyChanges: true, changesApplied: true, exitCode: 0 }),
-		).toBe(true);
-		expect(
-			isolatedApplyShouldLatch({ isolated: true, applyChanges: true, changesApplied: false, exitCode: 0 }),
-		).toBe(false);
-		expect(
-			isolatedApplyShouldLatch({ isolated: false, applyChanges: true, changesApplied: true, exitCode: 0 }),
-		).toBe(false);
-		expect(
-			isolatedApplyShouldLatch({ isolated: true, applyChanges: true, changesApplied: true, exitCode: 1 }),
-		).toBe(false);
+	it("latches only a successful isolated apply that actually merged work", () => {
+		expect(isolatedApplyShouldLatch({ isolated: true, applyChanges: true, hadAnyChanges: true, exitCode: 0 })).toBe(
+			true,
+		);
+		// No-op merge: repo is clean but nothing was applied — no unverified work.
+		expect(isolatedApplyShouldLatch({ isolated: true, applyChanges: true, hadAnyChanges: false, exitCode: 0 })).toBe(
+			false,
+		);
+		expect(isolatedApplyShouldLatch({ isolated: false, applyChanges: true, hadAnyChanges: true, exitCode: 0 })).toBe(
+			false,
+		);
+		expect(isolatedApplyShouldLatch({ isolated: true, applyChanges: true, hadAnyChanges: true, exitCode: 1 })).toBe(
+			false,
+		);
 	});
 });
 
@@ -35,10 +36,10 @@ describe("annotateUnverifiedMergeSummary", () => {
 describe("UnverifiedMergeLatch", () => {
 	it("marks and clears", () => {
 		const latch = new UnverifiedMergeLatch();
-		latch.mark("Leaf");
-		latch.mark("");
-		expect(latch.size).toBe(1);
+		expect(latch.latched).toBe(false);
+		latch.mark();
+		expect(latch.latched).toBe(true);
 		latch.clear();
-		expect(latch.size).toBe(0);
+		expect(latch.latched).toBe(false);
 	});
 });

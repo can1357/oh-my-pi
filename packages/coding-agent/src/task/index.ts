@@ -46,13 +46,13 @@ import "../tools/review";
 import type { AsyncJobManager } from "../async";
 import { hasResolvableTranscript } from "../internal-urls/registry-helpers";
 import { AgentRegistry } from "../registry/agent-registry";
+import { annotateUnverifiedMergeSummary, isolatedApplyShouldLatch } from "../session/settle-gates";
 import { type DiscoveryResult, discoverAgents } from "./discovery";
 import { generateTaskName } from "./name-generator";
 import { AgentOutputManager } from "./output-manager";
 import { mapWithConcurrencyLimitAllSettled, Semaphore } from "./parallel";
 import { renderResult, renderCall as renderTaskCall } from "./render";
 import { repairTaskParams } from "./repair-args";
-import { annotateUnverifiedMergeSummary, isolatedApplyShouldLatch } from "../session/settle-gates";
 import { resolveEffectiveSubagentPolicy, runStructuredSubagent, StructuredSubagentError } from "./structured-subagent";
 
 function renderSubagentUserPrompt(assignment: string): string {
@@ -1463,10 +1463,10 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			const latch = isolatedApplyShouldLatch({
 				isolated: execution.policy.isIsolated,
 				applyChanges: execution.policy.applyChanges,
-				changesApplied: execution.changesApplied,
+				hadAnyChanges: execution.hadAnyChanges,
 				exitCode: execution.result.exitCode,
 			});
-			if (latch) this.session.noteUnverifiedMerge?.(execution.result.id);
+			if (latch) this.session.noteUnverifiedMerge?.();
 			return this.#buildResultPayload(
 				execution.result,
 				execution.policy.discovery.projectAgentsDir,

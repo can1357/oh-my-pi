@@ -91,4 +91,19 @@ describe("unverified isolated merge latch", () => {
 		tracker.onToolResult("bash", true);
 		expect(unverified.value).toBe(true);
 	});
+
+	it("fires the merge gate even when todo reminders are disabled", async () => {
+		// Merge verification is an acceptance latch, not a todo nudge: turning
+		// todo.reminders/todo.enabled off must not strand an unverified merge.
+		const unverified = { value: true };
+		const ctx = host(unverified);
+		(ctx.host.settings as Settings).set("todo.enabled", false);
+		(ctx.host.settings as Settings).set("todo.reminders", false);
+		const tracker = new TodoTracker(ctx.host);
+		tracker.setPhases([]);
+
+		expect(await tracker.checkCompletion(textOnlyStop())).toBe(true);
+		expect(ctx.continuations.count).toBe(1);
+		expect(JSON.stringify(ctx.messages)).toContain(MERGED_UNVERIFIED_MARKER);
+	});
 });

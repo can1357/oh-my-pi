@@ -6,10 +6,10 @@ import eagerTaskPrompt from "../prompts/system/eager-task.md" with { type: "text
 import eagerTodoPrompt from "../prompts/system/eager-todo.md" with { type: "text" };
 import midRunTodoNudgePrompt from "../prompts/system/mid-run-todo-nudge.md" with { type: "text" };
 import { getLatestTodoPhasesFromEntries, isTodoPhase, type TodoItem, type TodoPhase } from "../tools/todo";
-import { MERGED_UNVERIFIED_MARKER } from "./settle-gates";
 import { buildNamedToolChoice } from "../utils/tool-choice";
 import type { AgentSessionEvent } from "./agent-session-events";
 import type { SessionManager } from "./session-manager";
+import { MERGED_UNVERIFIED_MARKER } from "./settle-gates";
 
 const MID_RUN_NUDGE_MUTATION_THRESHOLD = 12;
 const MID_RUN_NUDGE_MAX_PER_CYCLE = 2;
@@ -211,19 +211,26 @@ export class TodoTracker {
 			});
 			return false;
 		}
-		if (!this.#host.settings.get("todo.reminders") || !this.#host.settings.get("todo.enabled")) {
-			this.#reminderCount = 0;
-			this.#reminderAwaitingProgress = false;
-			return false;
-		}
 		const remindersMax = this.#host.settings.get("todo.remindersMax");
 		if (this.#reminderCount >= remindersMax) {
 			logger.debug("Todo completion: max reminders reached", { count: this.#reminderCount });
 			return false;
 		}
+		// The unverified-merge gate is an acceptance latch, not a todo nudge: it
+		// must fire even when todo.reminders/todo.enabled are off, or disabling
+		// reminders would silently disable merge verification. Only the
+		// todo-driven reminder path below consults the todo settings.
+		const unverifiedMerge = this.#host.hasUnverifiedMerge?.() === true;
+		if (
+			!unverifiedMerge &&
+			(!this.#host.settings.get("todo.reminders") || !this.#host.settings.get("todo.enabled"))
+		) {
+			this.#reminderCount = 0;
+			this.#reminderAwaitingProgress = false;
+			return false;
+		}
 		const phases = this.phases;
-		const unverifiedMergeEarly = this.#host.hasUnverifiedMerge?.() === true;
-		if (phases.length === 0 && !unverifiedMergeEarly) {
+		if (phases.length === 0 && !unverifiedMerge) {
 			this.#reminderCount = 0;
 			this.#reminderAwaitingProgress = false;
 			return false;
@@ -240,7 +247,6 @@ export class TodoTracker {
 			}))
 			.filter(phase => phase.tasks.length > 0);
 		const incomplete = incompleteByPhase.flatMap(phase => phase.tasks);
-		const unverifiedMerge = this.#host.hasUnverifiedMerge?.() === true;
 		if (incomplete.length === 0 && !unverifiedMerge) {
 			this.#reminderCount = 0;
 			this.#reminderAwaitingProgress = false;

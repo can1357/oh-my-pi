@@ -141,6 +141,8 @@ export interface StructuredSubagentResult {
 	policy: EffectiveSubagentPolicy;
 	mergeSummary: string;
 	changesApplied: boolean | null;
+	/** True iff the isolated apply actually merged/applied child work into the parent tree. */
+	hadAnyChanges: boolean;
 	artifactsDir: string;
 	temporaryArtifacts: boolean;
 }
@@ -557,6 +559,7 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 	const policy = await resolveEffectiveSubagentPolicy(request);
 	const lease = await leaseArtifacts(request.session, request.invocationKind);
 	let changesApplied: boolean | null = null;
+	let hadAnyChanges = false;
 	let mergeSummary = "";
 	let requiresRecoveryArtifacts = false;
 	let completedSuccessfully = false;
@@ -627,6 +630,7 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 			});
 			mergeSummary = outcome.summary;
 			changesApplied = outcome.changesApplied;
+			hadAnyChanges = outcome.hadAnyChanges;
 			if (outcome.changesApplied !== false) {
 				const nestedPatchSummary = await applyEligibleNestedPatches({
 					result,
@@ -656,6 +660,7 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 			policy,
 			mergeSummary,
 			changesApplied,
+			hadAnyChanges,
 			artifactsDir: lease.artifactsDir,
 			temporaryArtifacts: lease.temporary,
 		};
