@@ -2,10 +2,10 @@ import * as fs from "node:fs/promises";
 import {
 	applyOpsToPhases,
 	applyUserMarkdownPhases,
-	getLatestTodoPhasesFromEntries,
 	markdownToPhases,
 	phasesToMarkdown,
 	resolveTodoMarkdownPath,
+	selectAuthoritativeTodoPhases,
 	type TodoItem,
 	type TodoPhase,
 	USER_TODO_EDIT_CUSTOM_TYPE,
@@ -137,14 +137,11 @@ export class TodoCommandController {
 	constructor(private readonly ctx: InteractiveModeContext) {}
 
 	/**
-	 * True latest todo state for the user-facing /todo verbs. Prefer the live
-	 * session cache so RPC `set_todos` provenance survives a later /todo mutation;
-	 * fall back to branch entries when the cache is empty.
+	 * True latest todo state for the user-facing /todo verbs. Live session cache
+	 * is authoritative, including an explicit empty list after RPC `set_todos([])`.
 	 */
 	#currentPhases(): TodoPhase[] {
-		const live = this.ctx.session.getTodoPhases();
-		if (live.length > 0) return live;
-		return getLatestTodoPhasesFromEntries(this.ctx.sessionManager.getBranch());
+		return selectAuthoritativeTodoPhases(this.ctx.session.getTodoPhases());
 	}
 
 	async handleTodoCommand(args: string): Promise<void> {

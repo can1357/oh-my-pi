@@ -204,6 +204,16 @@ export function getLatestTodoPhasesFromEntries(entries: SessionEntry[]): TodoPha
 	return [];
 }
 
+/**
+ * Authoritative todo list for user `/todo` mutations (slash + TUI).
+ * Always returns the live session cache — including an explicit empty list after
+ * RPC `set_todos([])` — so a host clear is not resurrected from a stale branch
+ * snapshot. {@link AgentSession} initializes the cache from the branch on load.
+ */
+export function selectAuthoritativeTodoPhases(live: TodoPhase[]): TodoPhase[] {
+	return live;
+}
+
 /** Minimum overlap (after normalization) required for a substring match.
  * Picked at six chars to admit single-word identifiers like "review" /
  * "Sonnet" without admitting tiny common substrings like "test" / "fix"

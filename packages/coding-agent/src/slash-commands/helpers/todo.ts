@@ -2,10 +2,10 @@ import type { TodoPhase } from "../../tools/todo";
 import {
 	applyOpsToPhases,
 	applyUserMarkdownPhases,
-	getLatestTodoPhasesFromEntries,
 	markdownToPhases,
 	phasesToMarkdown,
 	resolveTodoMarkdownPath,
+	selectAuthoritativeTodoPhases,
 	USER_TODO_EDIT_CUSTOM_TYPE,
 } from "../../tools/todo";
 import type { ParsedSlashCommand, SlashCommandResult, SlashCommandRuntime } from "../types";
@@ -92,11 +92,8 @@ function findTaskFuzzy(phases: TodoPhase[], query: string): TodoTaskMatch | unde
 }
 
 function currentPhases(runtime: SlashCommandRuntime): TodoPhase[] {
-	// Prefer the live session cache so RPC `set_todos` provenance is not wiped by
-	// a later /todo mutation that would otherwise rehydrate a stale branch entry.
-	const live = runtime.session.getTodoPhases();
-	if (live.length > 0) return live;
-	return getLatestTodoPhasesFromEntries(runtime.sessionManager.getBranch());
+	// Live cache is authoritative, including explicit empty after RPC clear.
+	return selectAuthoritativeTodoPhases(runtime.session.getTodoPhases());
 }
 
 function commitTodos(runtime: SlashCommandRuntime, phases: TodoPhase[]): void {
