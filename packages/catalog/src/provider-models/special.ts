@@ -209,17 +209,31 @@ const devinDiscovery = once(() => import("../discovery/devin"));
 // ---------------------------------------------------------------------------
 
 export interface GrokbotModelManagerConfig {
+	apiKey?: string;
 	baseUrl?: string;
+	fetch?: FetchImpl;
 }
 
 export function grokbotModelManagerOptions(
 	config: GrokbotModelManagerConfig = {},
 ): ModelManagerOptions<"grokbot-sand"> {
+	const { apiKey, baseUrl, fetch } = config;
 	return {
 		providerId: "grokbot",
-		staticModels: buildGrokbotStaticSeed(config.baseUrl),
+		staticModels: buildGrokbotStaticSeed(baseUrl),
+		...(apiKey ? { dynamicModelsAuthoritative: true } : undefined),
+		...(apiKey
+			? {
+					fetchDynamicModels: async () => {
+						const { fetchGrokbotAvailableModels } = await grokbotDiscovery();
+						return fetchGrokbotAvailableModels({ apiKey, baseUrl, fetch });
+					},
+				}
+			: undefined),
 	};
 }
+
+const grokbotDiscovery = once(() => import("../discovery/grokbot"));
 
 // ---------------------------------------------------------------------------
 // Zai

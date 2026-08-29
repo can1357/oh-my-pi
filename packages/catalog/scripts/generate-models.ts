@@ -507,8 +507,12 @@ async function generateModels() {
 	// persisted `modelRoles.default = "xai-oauth/<id>"` is honored before the
 	// async refresh fires (interactive boot does not await refresh).
 	allModels.push(...buildXaiOAuthStaticSeed());
-	// Grok Bot provider — static seeds; absent from stencil.so / models.dev.
-	allModels.push(...buildGrokbotStaticSeed());
+	// Grok Bot — tiny offline seed (sand routers + Auto + grok-4.6). Live
+	// AvailableModels is authoritative when renewer is present; previous-snapshot
+	// grokbot rows are excluded below so retired alias forests do not resurrect.
+	if (!authoritativeCatalogProviders.has("grokbot")) {
+		allModels.push(...buildGrokbotStaticSeed());
+	}
 	// Daybreak is separately provisioned and absent from stencil.so. Keep its
 	// documented aliases and current Cyber snapshot in every generated bundle.
 	allModels.push(...OPENAI_DAYBREAK_CURATED_FALLBACK_MODELS);
@@ -650,9 +654,10 @@ async function generateModels() {
 			if (
 				!fetchedKeys.has(`${model.provider}/${model.id}`) &&
 				!DISCOVERY_ONLY_PROVIDERS.has(model.provider) &&
-				// Yolo-Auto's documented static seed is the complete fallback
-				// catalog; never resurrect retired ids from the previous snapshot.
+				// Yolo-Auto / Grok Bot documented static seeds are the complete
+				// offline fallback; never resurrect retired ids from the previous snapshot.
 				model.provider !== "yolo-auto" &&
+				model.provider !== "grokbot" &&
 				!RETIRED_PROVIDERS.has(model.provider) &&
 				!authoritativeCatalogProviders.has(model.provider) &&
 				!authoritativeSpecialDiscoveryProviders.has(model.provider) &&

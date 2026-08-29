@@ -21,6 +21,7 @@ import {
 	resolveModelOverride,
 	resolveModelRoleValue,
 	resolveModelScope,
+	resolveProviderModelReference,
 } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { DEFAULT_MODEL_ROLE_ALIAS, LEGACY_MODEL_ROLE_ALIAS_PREFIX } from "@oh-my-pi/pi-coding-agent/config/model-roles";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -2316,5 +2317,29 @@ describe("effort-tier variant aliases", () => {
 	test("consumed X-thinking twins resolve via the grammar fallback", () => {
 		expect(parseModelPattern("venice/kimi-k2-thinking", variantModels).model?.id).toBe("kimi-k2");
 		expect(parseModelPattern("kimi-k2-thinking", variantModels).model?.id).toBe("kimi-k2");
+	});
+});
+
+describe("resolveProviderModelReference Model.aliases", () => {
+	test("resolves Grok Bot idAliases to the canonical live row", () => {
+		const models: Model<"grokbot-sand">[] = [
+			buildModel({
+				id: "composer-2.5",
+				name: "Composer 2.5",
+				api: "grokbot-sand",
+				provider: "grokbot",
+				baseUrl: "https://api2.cursor.sh",
+				reasoning: true,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 200_000,
+				maxTokens: 64_000,
+				aliases: ["composer", "composer-latest"],
+				sandParameterIds: ["fast"],
+			}),
+		];
+		expect(resolveProviderModelReference("grokbot", "composer", models)?.id).toBe("composer-2.5");
+		expect(resolveProviderModelReference("grokbot", "composer-latest", models)?.id).toBe("composer-2.5");
+		expect(resolveProviderModelReference("grokbot", "composer-2.5", models)?.id).toBe("composer-2.5");
 	});
 });

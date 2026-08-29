@@ -421,12 +421,24 @@ function getProviderModelIndex(availableModels: readonly Model<Api>[]): Map<stri
 	const cached = tagged[kProviderModelIndex];
 	if (cached) return cached;
 	const index = new Map<string, Model<Api> | null>();
+	const indexKey = (provider: string, id: string) => `${provider.toLowerCase()}\u0000${id.toLowerCase()}`;
 	for (const m of availableModels) {
-		const key = `${m.provider.toLowerCase()}\u0000${m.id.toLowerCase()}`;
+		const key = indexKey(m.provider, m.id);
 		if (index.has(key)) {
 			index.set(key, null); // ambiguous sentinel; do not overwrite back
 		} else {
 			index.set(key, m);
+		}
+		// Client-side aliases (Grok Bot AvailableModels idAliases, etc.): resolve to the canonical row.
+		for (const alias of m.aliases ?? []) {
+			const aliasKey = indexKey(m.provider, alias);
+			if (index.has(aliasKey)) {
+				if (index.get(aliasKey) !== m) {
+					index.set(aliasKey, null);
+				}
+			} else {
+				index.set(aliasKey, m);
+			}
 		}
 	}
 	tagged[kProviderModelIndex] = index;

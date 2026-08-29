@@ -11,12 +11,22 @@ export type GrokbotRequestedModel = {
 };
 
 export type GrokbotRequestedModelOptions = {
-	/** omp effort level; mapped onto sand `parameters[{id:effort}]`. */
+	/** omp effort level; mapped onto sand `effort` or `reasoning` when allowed. */
 	effort?: Effort | string;
-	/** sand `fast` parameter; defaults to true for parameterized models. */
+	/** sand `fast` parameter; only sent when the model lists `fast` and a value is set. */
 	fast?: boolean;
+	/**
+	 * Allowed parameter ids from live `parameterDefinitions` / catalog `sandParameterIds`.
+	 * Empty/undefined ⇒ bare `{ modelId }` (routers and Auto).
+	 */
+	sandParameterIds?: readonly string[];
+	/** When true, set `maxMode` on the wire. Default false. */
+	sandMaxMode?: boolean;
+	/** Canonical wire model id when `modelId` was an alias. */
+	canonicalModelId?: string;
 };
 
+/** Sand router / Auto ids — always bare `{ modelId }`, never rewritten to grok-*. */
 const BARE_ALIASES = new Set([
 	"default",
 	"auto",
@@ -24,18 +34,17 @@ const BARE_ALIASES = new Set([
 	"auto-medium",
 	"auto-high",
 	"auto-smart",
+	"sand-default",
 	"sand-cua",
 	"sand-automation",
 	"sand-mock",
 	"premium",
 ]);
 
-const SAND_DEFAULT_MODEL_ID = "grok-4.5";
-
 /** Map omp Effort / string to Grok Bot effort wire values. */
-export function toSandEffortValue(effort: Effort | string | undefined): string {
-	const raw = typeof effort === "string" ? effort : "high";
-	switch (raw) {
+export function toSandEffortValue(effort: Effort | string | undefined): string | undefined {
+	if (typeof effort !== "string" || !effort) return undefined;
+	switch (effort) {
 		case "minimal":
 		case "low":
 			return "low";
@@ -45,35 +54,50 @@ export function toSandEffortValue(effort: Effort | string | undefined): string {
 		case "max":
 			return "xhigh";
 		case "high":
-		default:
 			return "high";
+		default:
+			return effort;
 	}
-}
-
-function parameterizedModel(modelId: string, options?: GrokbotRequestedModelOptions): GrokbotRequestedModel {
-	const effort = toSandEffortValue(options?.effort);
-	const fast = options?.fast === false ? "false" : "true";
-	return {
-		modelId,
-		maxMode: true,
-		parameters: [
-			{ id: "effort", value: effort },
-			{ id: "fast", value: fast },
-		],
-	};
 }
 
 export function resolveGrokbotRequestedModel(
 	modelId: string,
 	options?: GrokbotRequestedModelOptions,
 ): GrokbotRequestedModel {
-	const raw = typeof modelId === "string" ? modelId : SAND_DEFAULT_MODEL_ID;
+	const raw = typeof modelId === "string" ? modelId : "sand-default";
 	const slug = raw.startsWith("grokbot/") ? raw.slice("grokbot/".length) : raw;
-	if (slug === "sand-default") {
-		return parameterizedModel(SAND_DEFAULT_MODEL_ID, options);
+	const wireId = options?.canonicalModelId?.trim() || slug;
+
+	if (BARE_ALIASES.has(slug) || BARE_ALIASES.has(wireId)) {
+		return { modelId: BARE_ALIASES.has(slug) ? slug : wireId };
 	}
-	if (BARE_ALIASES.has(slug)) return { modelId: slug };
-	return parameterizedModel(slug, options);
+
+	const allowed = new Set(options?.sandParameterIds ?? []);
+	const parameters: GrokbotRequestedParameter[] = [];
+
+	if (allowed.size > 0) {
+		const effortValue = toSandEffortValue(options?.effort);
+		if (effortValue) {
+			if (allowed.has("effort")) {
+				parameters.push({ id: "effort", value: effortValue });
+			} else if (allowed.has("reasoning")) {
+				parameters.push({ id: "reasoning", value: effortValue });
+			}
+		}
+		if (allowed.has("fast") && options?.fast !== undefined) {
+			parameters.push({ id: "fast", value: options.fast ? "true" : "false" });
+		}
+		// `context` is only sent when explicitly provided later; do not invent tiers.
+	}
+
+	const requested: GrokbotRequestedModel = { modelId: wireId };
+	if (options?.sandMaxMode === true) {
+		requested.maxMode = true;
+	}
+	if (parameters.length > 0) {
+		requested.parameters = parameters;
+	}
+	return requested;
 }
 
 export function isGrokbotBareAlias(modelId: string): boolean {

@@ -947,6 +947,18 @@ export interface Model<TApi extends Api = Api> {
 	gitlabDuoWorkflowRootNamespaceId?: string;
 	/** Cursor `max_mode` request flag returned by `GetUsableModels` for premium models that require max mode. */
 	cursorMaxMode?: boolean;
+	/**
+	 * Client-side id aliases from Grok Bot `AvailableModels.idAliases` (and similar).
+	 * Not separate catalog rows — lookup resolves an alias to this canonical model.
+	 */
+	aliases?: readonly string[];
+	/**
+	 * Allowed Grok Bot `requestedModel.parameters` ids from live `parameterDefinitions`
+	 * (e.g. `effort`, `fast`, `reasoning`, `context`). Empty/absent ⇒ bare modelId only.
+	 */
+	sandParameterIds?: readonly string[];
+	/** When true, Grok Bot stream sets `requestedModel.maxMode`. Default false. */
+	sandMaxMode?: boolean;
 	cost: ModelCost;
 	/** Premium Copilot requests charged per user-initiated request (defaults to 1). */
 	premiumMultiplier?: number;

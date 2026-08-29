@@ -241,9 +241,11 @@ export const CATALOG_PROVIDERS = [
 		id: "grokbot",
 		defaultModel: "sand-default",
 		envVars: ["GROKBOT_RENEWAL_CREDENTIAL", "SAND_INFERENCE_RENEWAL_CREDENTIAL"],
+		dynamicModelsAuthoritative: true,
 		createModelManagerOptions: (config: ModelManagerConfig) => grokbotModelManagerOptions(config),
 		catalogDiscovery: {
 			label: "Grok Bot (not Cursor, not xAI)",
+			envVars: ["GROKBOT_RENEWAL_CREDENTIAL", "SAND_INFERENCE_RENEWAL_CREDENTIAL"],
 		},
 	},
 	{

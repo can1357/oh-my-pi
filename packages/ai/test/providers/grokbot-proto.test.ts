@@ -44,7 +44,11 @@ describe("grokbot proto", () => {
 				},
 			],
 			invocationId: "inv-selfcheck",
-			requestedModel: resolveGrokbotRequestedModel("grok-4.5"),
+			requestedModel: resolveGrokbotRequestedModel("grok-4.6", {
+				effort: "high",
+				fast: true,
+				sandParameterIds: ["effort", "fast"],
+			}),
 			conversationId: "conv-selfcheck",
 		};
 		const encoded = encodeInferenceStreamRequest(req);
@@ -57,7 +61,7 @@ describe("grokbot proto", () => {
 				toolContent?: { parts: Array<{ result: string }> };
 			}>;
 			tools: Array<{ name: string; parameters: { type: string; required: string[] } }>;
-			requestedModel: { modelId: string; maxMode: boolean; parameters: Array<{ id: string; value: string }> };
+			requestedModel: { modelId: string; maxMode?: boolean; parameters: Array<{ id: string; value: string }> };
 			invocationId: string;
 			conversationId: string;
 		};
@@ -70,9 +74,10 @@ describe("grokbot proto", () => {
 		expect(decoded.tools[0]!.name).toBe("echo");
 		expect(decoded.tools[0]!.parameters.type).toBe("object");
 		expect(decoded.tools[0]!.parameters.required[0]).toBe("x");
-		expect(decoded.requestedModel.modelId).toBe("grok-4.5");
-		expect(decoded.requestedModel.maxMode).toBe(true);
+		expect(decoded.requestedModel.modelId).toBe("grok-4.6");
+		expect(decoded.requestedModel.maxMode).toBeFalsy();
 		expect(decoded.requestedModel.parameters.find(p => p.id === "effort")?.value).toBe("high");
+		expect(decoded.requestedModel.parameters.find(p => p.id === "fast")?.value).toBe("true");
 		expect(decoded.invocationId).toBe("inv-selfcheck");
 		expect(decoded.conversationId).toBe("conv-selfcheck");
 
@@ -195,32 +200,65 @@ describe("grokbot proto", () => {
 });
 
 describe("grokbot requested model mapping", () => {
-	test("maps sand-default to grok-4.5 with maxMode and effort/fast", () => {
+	test("sand-default stays bare with no maxMode or parameters", () => {
 		const sand = resolveGrokbotRequestedModel("sand-default");
-		expect(sand.modelId).toBe("grok-4.5");
-		expect(sand.maxMode).toBe(true);
-		expect(sand.parameters).toEqual([
-			{ id: "effort", value: "high" },
-			{ id: "fast", value: "true" },
+		expect(sand).toEqual({ modelId: "sand-default" });
+	});
+
+	test("honors effort only when sandParameterIds allow it", () => {
+		const low = resolveGrokbotRequestedModel("grok-4.6", {
+			effort: "low",
+			sandParameterIds: ["effort", "fast"],
+		});
+		expect(low).toEqual({
+			modelId: "grok-4.6",
+			parameters: [{ id: "effort", value: "low" }],
+		});
+		const withFast = resolveGrokbotRequestedModel("grok-4.6", {
+			effort: "xhigh",
+			fast: false,
+			sandParameterIds: ["effort", "fast"],
+		});
+		expect(withFast.parameters).toEqual([
+			{ id: "effort", value: "xhigh" },
+			{ id: "fast", value: "false" },
 		]);
 	});
 
-	test("honors effort override for parameterized models", () => {
-		const low = resolveGrokbotRequestedModel("grok-4.6", { effort: "low" });
-		expect(low.parameters).toEqual([
-			{ id: "effort", value: "low" },
+	test("composer only sends fast when allowed and set", () => {
+		const bare = resolveGrokbotRequestedModel("composer-2.5", {
+			sandParameterIds: ["fast"],
+		});
+		expect(bare).toEqual({ modelId: "composer-2.5" });
+		const fast = resolveGrokbotRequestedModel("composer-2.5", {
+			fast: true,
+			sandParameterIds: ["fast"],
+		});
+		expect(fast.parameters).toEqual([{ id: "fast", value: "true" }]);
+	});
+
+	test("gemini flash maps effort only; sol maps reasoning when listed", () => {
+		const gemini = resolveGrokbotRequestedModel("gemini-3.7-flash", {
+			effort: "high",
+			fast: true,
+			sandParameterIds: ["effort"],
+		});
+		expect(gemini.parameters).toEqual([{ id: "effort", value: "high" }]);
+		const sol = resolveGrokbotRequestedModel("gpt-5.6-sol", {
+			effort: "medium",
+			fast: true,
+			sandParameterIds: ["reasoning", "context", "fast"],
+		});
+		expect(sol.parameters).toEqual([
+			{ id: "reasoning", value: "medium" },
 			{ id: "fast", value: "true" },
-		]);
-		const xhigh = resolveGrokbotRequestedModel("grok-4.6", { effort: "xhigh", fast: false });
-		expect(xhigh.parameters).toEqual([
-			{ id: "effort", value: "xhigh" },
-			{ id: "fast", value: "false" },
 		]);
 	});
 
 	test("bare aliases omit maxMode parameters", () => {
 		const bare = resolveGrokbotRequestedModel("sand-cua");
 		expect(bare).toEqual({ modelId: "sand-cua" });
+		expect(resolveGrokbotRequestedModel("default")).toEqual({ modelId: "default" });
 	});
 
 	test("strips grokbot/ provider prefix", () => {

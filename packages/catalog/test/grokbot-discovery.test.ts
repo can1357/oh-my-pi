@@ -1,0 +1,117 @@
+import { describe, expect, test } from "bun:test";
+import {
+	decodeGrokbotAvailableModelsResponse,
+	encodeGrokbotAvailableModelsRequest,
+} from "../src/discovery/grokbot-available-models";
+import { normalizeGrokbotAvailableModels } from "../src/discovery/grokbot";
+
+const FIXTURE = {
+	models: [
+		{
+			name: "default",
+			clientDisplayName: "Auto",
+			supportsThinking: false,
+			supportsImages: true,
+			idAliases: ["auto"],
+			parameterDefinitions: [],
+			variants: [{ displayName: "Auto", isDefaultNonMaxConfig: true, parameterValues: [] }],
+		},
+		{
+			name: "grok-4.6",
+			clientDisplayName: "Cursor Grok 4.6",
+			supportsThinking: true,
+			supportsImages: true,
+			contextTokenLimit: 256_000,
+			parameterDefinitions: [{ id: "effort" }, { id: "fast" }],
+			variants: [
+				{
+					parameterValues: [
+						{ id: "effort", value: "low" },
+						{ id: "fast", value: "false" },
+					],
+				},
+				{
+					parameterValues: [
+						{ id: "effort", value: "xhigh" },
+						{ id: "fast", value: "true" },
+					],
+				},
+			],
+		},
+		{
+			name: "composer-2.5",
+			clientDisplayName: "Composer 2.5",
+			supportsThinking: true,
+			supportsImages: false,
+			idAliases: ["composer-latest", "composer", "composer-2-5"],
+			parameterDefinitions: [{ id: "fast" }],
+			variants: [{ parameterValues: [{ id: "fast", value: "false" }] }],
+		},
+		{
+			name: "hidden-legacy",
+			clientDisplayName: "Hidden",
+			isHidden: true,
+			supportsThinking: false,
+			parameterDefinitions: [],
+		},
+		{
+			name: "gpt-5.6-sol",
+			clientDisplayName: "GPT-5.6 Sol",
+			supportsThinking: true,
+			supportsImages: true,
+			contextTokenLimit: 272_000,
+			idAliases: ["gpt-latest", "gpt"],
+			parameterDefinitions: [{ id: "context" }, { id: "reasoning" }, { id: "fast" }],
+			variants: [
+				{
+					parameterValues: [
+						{ id: "reasoning", value: "medium" },
+						{ id: "context", value: "272k" },
+						{ id: "fast", value: "false" },
+					],
+				},
+			],
+		},
+	],
+};
+
+describe("grokbot AvailableModels normalize", () => {
+	test("encodes parameterized request body", () => {
+		expect(JSON.parse(encodeGrokbotAvailableModelsRequest())).toEqual({ useModelParameters: true });
+	});
+
+	test("drops isHidden, unions sand routers, keeps aliases and param ids", () => {
+		const rows = decodeGrokbotAvailableModelsResponse(FIXTURE);
+		const models = normalizeGrokbotAvailableModels(rows, "https://api2.cursor.sh");
+		const ids = models.map(m => m.id);
+		expect(ids).not.toContain("hidden-legacy");
+		expect(ids).toContain("sand-default");
+		expect(ids).toContain("sand-cua");
+		expect(ids).toContain("sand-automation");
+		expect(ids).toContain("grok-4.6");
+		expect(ids).toContain("composer-2.5");
+
+		const composer = models.find(m => m.id === "composer-2.5");
+		expect(composer?.aliases).toEqual(["composer-latest", "composer", "composer-2-5"]);
+		expect(composer?.sandParameterIds).toEqual(["fast"]);
+		expect(composer?.input).toEqual(["text"]);
+		expect(composer?.sandMaxMode).toBe(false);
+
+		const grok = models.find(m => m.id === "grok-4.6");
+		expect(grok?.sandParameterIds).toEqual(["effort", "fast"]);
+		expect([...((grok?.thinking?.efforts as readonly string[] | undefined) ?? [])]).toEqual(["low", "xhigh"]);
+		expect(grok?.contextWindow).toBe(256_000);
+
+		const sol = models.find(m => m.id === "gpt-5.6-sol");
+		expect(sol?.sandParameterIds).toEqual(["context", "reasoning", "fast"]);
+		expect(sol?.aliases).toContain("gpt");
+
+		const auto = models.find(m => m.id === "default");
+		expect(auto?.sandParameterIds).toEqual([]);
+		expect(auto?.aliases).toEqual(["auto"]);
+
+		const sandDefault = models.find(m => m.id === "sand-default");
+		expect(sandDefault?.sandParameterIds).toEqual([]);
+		expect(sandDefault?.reasoning).toBe(true);
+	});
+});

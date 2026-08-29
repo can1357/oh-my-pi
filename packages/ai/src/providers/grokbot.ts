@@ -482,6 +482,9 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 			const reqModel = resolveGrokbotRequestedModel(model.id, {
 				effort: options?.effort,
 				fast: options?.fast,
+				sandParameterIds: model.sandParameterIds,
+				sandMaxMode: model.sandMaxMode,
+				canonicalModelId: model.requestModelId,
 			});
 			let body: Record<string, unknown> = {
 				messages,
