@@ -364,6 +364,31 @@ const PRUNED_RECURSIVE_SKILL_DIRECTORIES: Record<string, true> = {
 	node_modules: true,
 };
 
+async function readSortedDirectoryEntriesWithinLimit(
+	directoryPath: string,
+	maxEntries: number | undefined,
+): Promise<fs.Dirent[] | null> {
+	if (maxEntries === undefined) {
+		const entries = await fs.promises.readdir(directoryPath, { withFileTypes: true });
+		entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+		return entries;
+	}
+
+	const entries: fs.Dirent[] = [];
+	const directory = await fs.promises.opendir(directoryPath);
+	for await (const entry of directory) {
+		if (entries.length >= maxEntries) {
+			// A deterministic subset cannot be selected without reading the entire directory.
+			// Reject this directory instead: memory and enumeration stay bounded, and truncation
+			// never exposes a filesystem-order-dependent subset of skills.
+			return null;
+		}
+		entries.push(entry);
+	}
+	entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+	return entries;
+}
+
 export interface ScanSkillsFromDirOptions {
 	dir: string;
 	providerId: string;
@@ -439,7 +464,6 @@ export async function scanSkillsFromDir(
 	const truncationReasons = new Set<string>();
 	let visitedDirectories = 0;
 	let visitedEntries = 0;
-	let entryLimitReached = false;
 
 	for (let index = 0; index < directories.length; index++) {
 		if (options.recursive && visitedDirectories >= limits.maxDirectories) {
@@ -449,28 +473,26 @@ export async function scanSkillsFromDir(
 
 		const current = directories[index];
 		visitedDirectories++;
-		let entries: fs.Dirent[];
+		const remainingEntries = options.recursive ? Math.max(0, limits.maxEntries - visitedEntries) : undefined;
+		let entries: fs.Dirent[] | null;
 		try {
-			entries = await fs.promises.readdir(current.path, { withFileTypes: true });
+			entries = await readSortedDirectoryEntriesWithinLimit(current.path, remainingEntries);
 		} catch (error) {
 			if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
 				warnings.push(`Failed to read skills directory: ${current.path} (${String(error)})`);
 			}
 			continue;
 		}
+		if (entries === null) {
+			truncationReasons.add(`maximum entry count ${limits.maxEntries} reached`);
+			break;
+		}
+		if (options.recursive) visitedEntries += entries.length;
 
 		if (current.path !== dir || options.includeSelf) {
 			work.push(loadSkill(path.join(current.path, "SKILL.md")));
 		}
 		for (const entry of entries) {
-			if (options.recursive) {
-				if (visitedEntries >= limits.maxEntries) {
-					truncationReasons.add(`maximum entry count ${limits.maxEntries} reached`);
-					entryLimitReached = true;
-					break;
-				}
-				visitedEntries++;
-			}
 			if (
 				entry.name.startsWith(".") ||
 				(options.recursive && PRUNED_RECURSIVE_SKILL_DIRECTORIES[entry.name] === true)
@@ -489,7 +511,6 @@ export async function scanSkillsFromDir(
 				work.push(loadSkill(path.join(childDir, "SKILL.md")));
 			}
 		}
-		if (entryLimitReached) break;
 	}
 	await Promise.all(work);
 	for (const reason of truncationReasons) {

@@ -231,6 +231,37 @@ describe("skills", () => {
 			}
 		});
 
+		it("uses deterministic directory order before applying the directory cap", async () => {
+			const root = await fs.mkdtemp(path.join(os.tmpdir(), "pi-skills-directory-order-"));
+			try {
+				await writeTestSkill(path.join(root, "z-last"), "z-last");
+				await writeTestSkill(path.join(root, "a-first"), "a-first");
+
+				const result = await scanRecursive(root, { maxDirectories: 2 });
+
+				expect(result.items.map(skill => skill.name)).toEqual(["a-first"]);
+				expect(result.warnings).toContain(
+					`Skill discovery truncated at ${root}: maximum directory count 2 reached`,
+				);
+			} finally {
+				await removeWithRetries(root);
+			}
+		});
+
+		it("loads a skill when its entries exactly fit the entry cap", async () => {
+			const root = await fs.mkdtemp(path.join(os.tmpdir(), "pi-skills-exact-entries-"));
+			try {
+				await writeTestSkill(path.join(root, "only"), "only");
+
+				const result = await scanRecursive(root, { maxEntries: 2 });
+
+				expect(result.items.map(skill => skill.name)).toEqual(["only"]);
+				expect(result.warnings).toHaveLength(0);
+			} finally {
+				await removeWithRetries(root);
+			}
+		});
+
 		it("caps visited entries and reports truncation", async () => {
 			const root = await fs.mkdtemp(path.join(os.tmpdir(), "pi-skills-entries-"));
 			try {
