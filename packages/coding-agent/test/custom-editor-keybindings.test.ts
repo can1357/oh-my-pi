@@ -1,5 +1,5 @@
 import { beforeAll, describe, expect, it, vi } from "bun:test";
-import { KeybindingsManager } from "@oh-my-pi/pi-coding-agent/config/keybindings";
+import { KEYBINDINGS, KeybindingsManager } from "@oh-my-pi/pi-coding-agent/config/keybindings";
 import { CustomEditor } from "@oh-my-pi/pi-coding-agent/modes/components/custom-editor";
 import { getEditorTheme, initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 
@@ -180,5 +180,12 @@ describe("shipped dequeue defaults", () => {
 		editor.handleInput("\x1b[1;2A");
 
 		expect(onDequeue).toHaveBeenCalledTimes(1);
+	});
+});
+
+describe("shipped persona/thinking default keybinding metadata", () => {
+	it("keeps persona cycleBackward on ctrl+tab and thinking cycle on shift+tab", () => {
+		expect(KEYBINDINGS["app.persona.cycleBackward"].defaultKeys).toBe("ctrl+tab");
+		expect(KEYBINDINGS["app.thinking.cycle"].defaultKeys).toBe("shift+tab");
 	});
 });

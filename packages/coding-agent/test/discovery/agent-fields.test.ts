@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { Effort } from "@oh-my-pi/pi-ai";
-import { parseAgentFields } from "@oh-my-pi/pi-coding-agent/discovery/helpers";
+import { getPrimaryAgents, parseAgentFields } from "@oh-my-pi/pi-coding-agent/discovery/helpers";
+import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import { AUTO_THINKING } from "@oh-my-pi/pi-coding-agent/thinking";
 
 describe("parseAgentFields", () => {
@@ -185,6 +186,19 @@ describe("parseAgentFields", () => {
 			const fields = parseAgentFields({ name: "x", description: "d" });
 			expect(fields?.mode).toBeUndefined();
 		});
+	});
+
+	test("getPrimaryAgents admits only enabled agents with mode exactly primary", () => {
+		const base = { description: "desc", systemPrompt: "", source: "bundled" } as const;
+		const agents = [
+			{ ...base, name: "disabled-primary", mode: "primary" },
+			{ ...base, name: "no-mode" },
+			{ ...base, name: "enabled-primary", mode: "primary" },
+		] as unknown as AgentDefinition[];
+
+		const result = getPrimaryAgents(agents, ["disabled-primary"]);
+
+		expect(result.map(a => a.name)).toEqual(["enabled-primary"]);
 	});
 
 	describe("order field", () => {

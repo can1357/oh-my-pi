@@ -262,6 +262,39 @@ describe("applyAgentPersona — model behavior", () => {
 		expect(session.model?.id).toBe(originalModelId);
 	});
 
+	it("continues past an unresolvable first model candidate to a resolvable second candidate", async () => {
+		await createSession();
+		// First entry never matches any available model; second is a valid bundled
+		// model. The loop must not stop at the first unresolvable candidate.
+		const persona = {
+			...makePersona("beta", "HOW-beta"),
+			model: ["nonexistent-provider/nonexistent-model-xyz", "anthropic/claude-opus-4-5"],
+		};
+
+		const result = await session.applyAgentPersona(persona);
+
+		expect(result).toEqual({});
+		expect(session.model?.id).toBe("claude-opus-4-5");
+	});
+
+	it("continues past a throwing applyRoleModel call to a resolvable second candidate without reporting modelFailed", async () => {
+		await createSession();
+		// Spy on the real instance method so only the first invocation rejects;
+		// the second call falls through to the real implementation (no full mock
+		// of applyAgentPersona/applyRoleModel), proving the loop actually retries
+		// rather than aborting on the first failure.
+		vi.spyOn(session, "applyRoleModel").mockRejectedValueOnce(new Error("forced failure"));
+		const persona = {
+			...makePersona("beta", "HOW-beta"),
+			model: ["anthropic/claude-sonnet-4-5", "anthropic/claude-opus-4-5"],
+		};
+
+		const result = await session.applyAgentPersona(persona);
+
+		expect(result).toEqual({});
+		expect(session.model?.id).toBe("claude-opus-4-5");
+	});
+
 	it("resolves a bare pi/default alias to the session's active model, not the configured default (session-inherit parity with spawned agents)", async () => {
 		// Settings.isolated() with no modelRoles override — configured default is
 		// unset, so pre-fix resolution of "pi/default" via resolveModelRoleValue
