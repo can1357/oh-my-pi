@@ -278,6 +278,39 @@ describe("zod-like parsing", () => {
 		expect(z.strictObject({ n: z.number().default(3) }).parse({})).toEqual({ n: 3 });
 	});
 
+	it("keeps the freeze and replaces the policy when readonly precedes a modifier", () => {
+		// `.readonly()` is a shim wrapper too, so a rebuild after it must put the
+		// freeze back on top of the NEW policy. Carrying it instead re-validated
+		// through the pre-readonly schema: `.readonly().passthrough()` still
+		// rejected extras and `.readonly().partial()` still required the key.
+		const passthrough = z.strictObject({ a: z.string() }).readonly().passthrough();
+		const kept = passthrough.parse({ a: "x", extra: 1 });
+		expect(kept).toEqual({ a: "x", extra: 1 });
+		expect(Object.isFrozen(kept)).toBe(true);
+
+		const partial = z.object({ a: z.string() }).readonly().partial();
+		expect(partial.parse({})).toEqual({});
+		expect(Object.isFrozen(partial.parse({}))).toBe(true);
+		expect(partial.safeParse([]).success).toBe(false);
+
+		// Through a description, and applied twice, the chain still rebuilds.
+		const described = z.strictObject({ a: z.string() }).readonly().describe("d").partial();
+		expect(described.parse({})).toEqual({});
+		expect(Object.isFrozen(described.parse({}))).toBe(true);
+		expect(z.object({ a: z.string() }).readonly().readonly().partial().parse({})).toEqual({});
+
+		// AUTHOR steps keep the opposite contract: a refinement must keep
+		// running against the schema it was written for, so the rebuild
+		// re-validates through it and the now-optional key is still required.
+		expect(
+			z
+				.object({ a: z.string() })
+				.refine(value => "a" in (value as object))
+				.partial()
+				.safeParse({}).success,
+		).toBe(false);
+	});
+
 	it("parses valid values and reports nested safeParse issues", () => {
 		const schema = z.object({ profile: z.object({ age: z.number().int().positive() }) });
 		expect(schema.parse({ profile: { age: 42 } })).toEqual({ profile: { age: 42 } });

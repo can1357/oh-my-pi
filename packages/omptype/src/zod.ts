@@ -92,36 +92,69 @@ function undefinedDispatch<Out>(
 	});
 }
 
+const kRebuild = Symbol("omptype.zod.rebuild");
+
+/**
+ * The shim's own wrappers around a structural schema, kept so a later
+ * structural modifier can rebuild the structure and put them back.
+ *
+ * Author-supplied steps (`.refine()`, `.transform()`) are deliberately NOT
+ * described here: they must keep running against the schema they were written
+ * for, which is what {@link restrictBase}'s re-validating morph path does.
+ */
+interface RebuildInfo<Out> {
+	/** Wrapper-free schema, the one a rebuild starts from. */
+	base: Decoratable<Out>;
+	/** Whether an array guard is part of the chain. */
+	guarded: boolean;
+	/** Re-applies the non-guard wrappers, currently `.readonly()`'s freeze. */
+	rewrap?: (schema: Decoratable<Out>) => Decoratable<Out>;
+}
+
+/** A schema that may carry {@link RebuildInfo}. */
+interface MaybeWrapped<Out> extends Decoratable<Out> {
+	readonly [kRebuild]?: RebuildInfo<Out>;
+}
+
+function rebuildInfoOf<Out>(schema: Decoratable<Out>): RebuildInfo<Out> | undefined {
+	const carrier: MaybeWrapped<Out> = schema;
+	return carrier[kRebuild];
+}
+
+/** Configurable so a schema stamped by `guardArrays` can be re-stamped once its full wrapper chain is known. */
+function stampRebuild<Out>(schema: Decoratable<Out>, info: RebuildInfo<Out>): Decoratable<Out> {
+	Object.defineProperty(schema, kRebuild, { value: info, enumerable: false, configurable: true });
+	return schema;
+}
+
 /**
  * Rebuild `source`'s structure as `ir`, keeping its description, default, and
- * any user steps.
+ * any author steps.
  *
- * The array guard is deliberately unwrapped and re-applied rather than carried:
- * it is the shim's own step, not the author's, and leaving it in place would
- * make the source count as stepped, so the rebuilt schema would validate `ir`
- * and then re-validate through the OLD object policy — `.strict().partial()`
- * would still demand the now-optional keys, and `z.strictObject({})
- * .passthrough()` would still reject extras.
+ * The shim's own wrappers are unwrapped and re-applied rather than carried: they
+ * would make the source count as stepped, so the rebuilt schema would validate
+ * `ir` and then re-validate through the OLD object policy — `.strict()
+ * .partial()` would still demand the now-optional keys, `z.strictObject({})
+ * .passthrough()` would still reject extras, and inserting `.readonly()` before
+ * either would bring that back.
  */
 function restrictBase<Out>(source: Decoratable<Out>, ir: IR): Decoratable<Out> {
-	const unguarded = unguardedObject(source);
-	let next = unguarded.hasSteps
-		? schemaFromIR<Out>({ k: "morph", input: ir, fn: value => unguarded(value) })
+	const info = rebuildInfoOf(source);
+	const base = info?.base ?? source;
+	let structural = base.hasSteps
+		? schemaFromIR<Out>({ k: "morph", input: ir, fn: value => base(value) })
 		: schemaFromIR<Out>(ir);
-	if (unguarded.ir.desc !== undefined) next = next.describe(unguarded.ir.desc);
-	if (unguarded.hasDefault) next = next.default(unguarded.defaultValue as Out | (() => Out));
+	if (base.ir.desc !== undefined) structural = structural.describe(base.ir.desc);
+	if (base.hasDefault) structural = structural.default(base.defaultValue as Out | (() => Out));
 	// Every object target is guarded, stripping included; any other target — a
 	// discriminated union rebuilt by `.describe()` — keeps the guard it arrived
 	// with.
-	const guard = ir.k === "object" || unguarded !== source;
-	return guard ? guardArrays(next) : next;
-}
-
-const kUnguarded = Symbol("omptype.zod.unguardedObject");
-
-/** A schema that may carry the step-free base an array guard was applied to. */
-interface MaybeGuarded<Out> extends Decoratable<Out> {
-	readonly [kUnguarded]?: Decoratable<Out>;
+	const guarded = ir.k === "object" || info?.guarded === true;
+	let next = guarded ? guardArrays(structural) : structural;
+	if (info?.rewrap !== undefined) next = info.rewrap(next);
+	return guarded || info?.rewrap !== undefined
+		? stampRebuild(next, { base: structural, guarded, rewrap: info?.rewrap })
+		: next;
 }
 
 /**
@@ -132,35 +165,59 @@ interface MaybeGuarded<Out> extends Decoratable<Out> {
  * base validates it, so this also catches the shapes an output-side check
  * cannot — a key-stripping object has already turned `[]` into `{}` by the time
  * a narrow runs, and so has a discriminated union whose matching variant strips.
- *
- * The pre-guard schema is kept on the result so {@link restrictBase} can
- * rebuild from it; see there for why carrying the guard instead breaks later
- * structural modifiers.
  */
 function guardArrays<Out>(base: Decoratable<Out>): Decoratable<Out> {
 	const guarded = base.filter(
 		(value, ctx: NarrowContext) => !Array.isArray(value) || ctx.mustBe("an object, not an array"),
 	);
-	Object.defineProperty(guarded, kUnguarded, { value: base, enumerable: false });
-	return guarded;
-}
-
-/** The step-free schema behind an array guard, or `schema` when there is none. */
-function unguardedObject<Out>(schema: Decoratable<Out>): Decoratable<Out> {
-	const carrier: MaybeGuarded<Out> = schema;
-	return carrier[kUnguarded] ?? schema;
+	return stampRebuild(guarded, { base, guarded: true });
 }
 
 /**
- * Keep the unguarded base reachable through a wrapper that adds no policy of
- * its own (`.describe()`), so a later `.partial()`/mode change still rebuilds
- * from the base instead of re-validating through the old object policy.
+ * Keep the rebuild info reachable through a wrapper that adds no policy of its
+ * own (`.describe()`), so a later `.partial()`/mode change still rebuilds from
+ * the base instead of re-validating through the old object policy.
  */
-function carryGuard<Out>(source: Decoratable<Out>, wrapped: Decoratable<Out>): Decoratable<Out> {
-	const carrier: MaybeGuarded<Out> = source;
-	const base = carrier[kUnguarded];
-	if (base !== undefined) Object.defineProperty(wrapped, kUnguarded, { value: base, enumerable: false });
-	return wrapped;
+function carryRebuild<Out>(source: Decoratable<Out>, wrapped: Decoratable<Out>): Decoratable<Out> {
+	const info = rebuildInfoOf(source);
+	return info === undefined ? wrapped : stampRebuild(wrapped, info);
+}
+
+/**
+ * `.readonly()`'s value step: shallow-freeze a CLONE of the parse output.
+ *
+ * Zod freezes its own freshly constructed output; omptype's parsing shares
+ * structure with the input (a parent copy keeps child references), so freezing
+ * in place would freeze the CALLER's input graph — e.g. a persisted session
+ * entry schema-validated before blob hydration must stay mutable.
+ *
+ * The clone copies property DESCRIPTORS onto a fresh object of the same
+ * prototype (a fresh array for arrays). A spread would silently rewrite the
+ * value it is supposed to hand back: non-enumerable own properties would
+ * vanish, accessors would collapse into one-shot values, sparse array holes
+ * would materialize as `undefined`, and custom array properties would be
+ * dropped. Descriptors also keep an own `__proto__` key intact, since
+ * `defineProperty` semantics never invoke the setter.
+ *
+ * Only plain objects and arrays are cloned+frozen. A non-plain object (a
+ * Date/Map/class instance reachable via `z.unknown()`/`z.any()`/a transform) has
+ * no non-destructive shallow clone — its internal slots do not travel with
+ * descriptors — and freezing it in place would mutate the caller's value, so it
+ * passes through untouched: never-freeze-the-input outranks freeze-the-output
+ * for the shim's JSON-oriented use. Primitives and functions pass through for
+ * the same reason. One level deep, exactly like Zod.
+ */
+function freezeParseOutput<Out>(schema: Decoratable<Out>): Decoratable<Out> {
+	return schema.pipe(value => {
+		if (typeof value !== "object" || value === null) return value;
+		const proto = Object.getPrototypeOf(value);
+		if (!Array.isArray(value) && proto !== Object.prototype && proto !== null) return value;
+		const descriptors = Object.getOwnPropertyDescriptors(value);
+		const clone = Array.isArray(value)
+			? Object.defineProperties([] as unknown[], descriptors)
+			: Object.create(proto, descriptors);
+		return Object.freeze(clone) as Out;
+	});
 }
 
 function lengthBound(kind: "min" | "max", schema: Decoratable<unknown>, bound: number): void {
@@ -365,7 +422,7 @@ function decorate<Out>(schema: Decoratable<Out>, optional = false): ZodLikeSchem
 		},
 		describe(description: string): ZodLikeSchema<Out> {
 			const rebuilt = restrictBase(schema, { ...schema.ir, desc: description });
-			return next(carryGuard(rebuilt, rebuilt.describe(description)));
+			return next(carryRebuild(rebuilt, rebuilt.describe(description)));
 		},
 		refine(predicate: (value: Out) => unknown, messageOrOptions?: string | RefineOptions): ZodLikeSchema<Out> {
 			const expectation = refinementMessage(messageOrOptions);
@@ -407,46 +464,24 @@ function decorate<Out>(schema: Decoratable<Out>, optional = false): ZodLikeSchem
 		},
 		/**
 		 * Matches Zod's runtime contract: `.readonly()` is not merely a type
-		 * cast, it shallow-freezes successful parse output (`Object.freeze`,
-		 * one level deep — a nested object is left mutable, exactly like Zod).
-		 *
-		 * Zod freezes its own freshly constructed parse output; omptype's
-		 * parsing shares structure with the input (a parent copy keeps child
-		 * references), so freezing in place would freeze the CALLER's input
-		 * graph — e.g. a persisted session entry schema-validated before blob
-		 * hydration must stay mutable. Shallow-clone first, then freeze the
-		 * clone.
-		 *
-		 * The clone copies property DESCRIPTORS onto a fresh object of the same
-		 * prototype (a fresh array for arrays). A spread would silently rewrite
-		 * the value it is supposed to hand back: non-enumerable own properties
-		 * would vanish, accessors would collapse into one-shot values, sparse
-		 * array holes would materialize as `undefined`, and custom array
-		 * properties would be dropped. Descriptors also keep an own `__proto__`
-		 * key intact, since `defineProperty` semantics never invoke the setter.
-		 *
-		 * Only plain objects and arrays are cloned+frozen. A non-plain object
-		 * (a Date/Map/class instance reachable via `z.unknown()`/`z.any()`/a
-		 * transform) has no non-destructive shallow clone — its internal slots
-		 * do not travel with descriptors — and freezing it in place would
-		 * mutate the caller's value, so it passes through untouched:
-		 * never-freeze-the-input outranks freeze-the-output for the shim's
-		 * JSON-oriented use. Primitives and functions pass through for the same
-		 * reason.
+		 * cast, it shallow-freezes successful parse output — see
+		 * {@link freezeParseOutput} for why that is a descriptor-level clone
+		 * rather than a freeze in place.
 		 */
 		readonly(): ZodLikeSchema<Readonly<Out>> {
-			return next(
-				schema.pipe(value => {
-					if (typeof value !== "object" || value === null) return value;
-					const proto = Object.getPrototypeOf(value);
-					if (!Array.isArray(value) && proto !== Object.prototype && proto !== null) return value;
-					const descriptors = Object.getOwnPropertyDescriptors(value);
-					const clone = Array.isArray(value)
-						? Object.defineProperties([] as unknown[], descriptors)
-						: Object.create(proto, descriptors);
-					return Object.freeze(clone) as Out;
-				}),
-			) as ZodLikeSchema<Readonly<Out>>;
+			// Recorded as a shim wrapper, not just applied: a later structural
+			// modifier (`.partial()`, `.passthrough()`) must rebuild the object
+			// policy and put the freeze back on top, instead of re-validating
+			// through the pre-readonly schema and its old policy.
+			const info = rebuildInfoOf(schema);
+			const rewrap = info?.rewrap;
+			const frozen = freezeParseOutput(schema);
+			stampRebuild(frozen, {
+				base: info?.base ?? schema,
+				guarded: info?.guarded === true,
+				rewrap: rewrap === undefined ? freezeParseOutput : inner => freezeParseOutput(rewrap(inner)),
+			});
+			return next(frozen) as unknown as ZodLikeSchema<Readonly<Out>>;
 		},
 	}) as unknown as ZodLikeSchema<Out>;
 }
