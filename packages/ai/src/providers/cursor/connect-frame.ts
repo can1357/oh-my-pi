@@ -280,6 +280,7 @@ export class ConnectFrameDecoder {
 			if ((flags & CONNECT_FLAG_END_STREAM) !== 0) {
 				this.#sawEndStream = true;
 				endFrame = { kind: "end", error: parseEndStreamFrame(body) };
+				break;
 			} else {
 				frames.push({ kind: "data", payload: body });
 			}

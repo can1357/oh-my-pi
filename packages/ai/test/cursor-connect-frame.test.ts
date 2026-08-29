@@ -313,12 +313,12 @@ describe("ConnectFrameDecoder hardening (grill loop batch 1)", () => {
 		expectProtocolError(() => decoder.finish(), "bytes after end-of-stream", "envelope");
 	});
 
-	test("stray tail after end-stream: data frames ahead of the withheld end frame are still delivered", () => {
+	test("complete frame after end-stream does not discard preceding data", () => {
 		const decoder = new ConnectFrameDecoder({ acceptCompressed: true });
 		const chunk = Buffer.concat([
 			rawFrame(0x00, "streamed tokens"),
 			rawFrame(CONNECT_FLAG_END_STREAM, JSON.stringify({ error: null })),
-			Buffer.from([0x01, 0x02, 0x03]),
+			rawFrame(0x00, "forbidden trailing frame"),
 		]);
 		const frames = decoder.push(chunk);
 		expect(frames).toHaveLength(1);
