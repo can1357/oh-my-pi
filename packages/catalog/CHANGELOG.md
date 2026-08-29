@@ -10,6 +10,7 @@
 
 ### Fixed
 
+- Grok Bot AvailableModels discovery clears the JWT mint cache on HTTP 401 so the next refresh can mint a replacement token.
 - Grok Bot AvailableModels discovery orders effort ladders least→most via shared `THINKING_EFFORTS` (so `minimal` precedes `low` when both are advertised).
 - Grok Bot AvailableModels discovery returns `null` (no cache write) when HTTP 200 bodies omit a `models` array, instead of caching a routers-only catalog from proxy error envelopes.
 - Grok Bot catalog refresh resolves namespace/client-version identity asynchronously once and passes it through cache scoping without synchronous secrets-file rereads.

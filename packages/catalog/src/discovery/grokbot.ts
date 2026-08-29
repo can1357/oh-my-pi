@@ -9,7 +9,13 @@ import { Effort, THINKING_EFFORTS } from "../effort";
 import { GROKBOT_API, GROKBOT_BACKEND } from "../provider-models/grokbot";
 import type { FetchImpl, ModelSpec, ThinkingConfig } from "../types";
 import { discoveryFetch } from "../utils";
-import { createGrokbotChecksum, grokbotClientHeaders, loadGrokbotConfig, mintGrokbotAccessToken } from "./grokbot-auth";
+import {
+	clearGrokbotTokenCache,
+	createGrokbotChecksum,
+	grokbotClientHeaders,
+	loadGrokbotConfig,
+	mintGrokbotAccessToken,
+} from "./grokbot-auth";
 import {
 	decodeGrokbotAvailableModelsResponse,
 	encodeGrokbotAvailableModelsRequest,
@@ -78,6 +84,7 @@ export async function fetchGrokbotAvailableModels(
 			signal,
 		});
 		if (!response.ok) {
+			if (response.status === 401) clearGrokbotTokenCache();
 			return null;
 		}
 		const decoded = decodeGrokbotAvailableModelsResponse(await response.json());

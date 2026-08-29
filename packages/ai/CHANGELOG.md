@@ -9,6 +9,7 @@
 
 ### Fixed
 
+- Grok Bot marks every grammar/customFormat tool call (including hashline/sloppy without a renamed wire id) so previews and history replay use raw args.
 - Grok Bot tool-result replay maps grammar tools to their wire name (`customWireName`) so call/result names stay paired.
 - Grok Bot protobuf decoding rejects nested stream-response fields with incorrect wire types instead of coercing them to empty values.
 - Grok Bot sends discovered `minimal` / `max` effort values on the wire instead of collapsing them to `low` / `xhigh` (aliases only via `thinking.effortMap`).

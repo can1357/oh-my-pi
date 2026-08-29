@@ -528,6 +528,56 @@ describe("grokbot sand-host client parity", () => {
 			},
 		]);
 	});
+
+	test("replays hashline grammar calls as raw even without customWireName", () => {
+		const hashline = "[src/a.ts#abcd]\n1|-old\n1|+new\n";
+		const messages = toInferenceMessages({
+			tools: [
+				{
+					name: "edit",
+					description: "hashline edit",
+					parameters: {},
+					customFormat: { syntax: "lark", definition: "start: ANY" },
+				},
+			],
+			messages: [
+				{
+					role: "assistant",
+					content: [
+						{
+							type: "toolCall",
+							id: "c1",
+							name: "edit",
+							arguments: { input: hashline },
+						},
+					],
+					api: "grokbot-sand",
+					provider: "grokbot",
+					model: "grok-4.5",
+					usage: {
+						input: 0,
+						output: 0,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 0,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+					stopReason: "toolUse",
+					timestamp: 2,
+				},
+			],
+		});
+		const assistant = messages.find(m => m.role === 2) as {
+			toolCalls?: Array<{ toolCallId: string; toolName: string; args?: unknown; rawToolCallArgs?: string }>;
+		};
+		expect(assistant?.toolCalls).toEqual([
+			{
+				toolCallId: "c1",
+				toolName: "edit",
+				rawToolCallArgs: hashline,
+			},
+		]);
+	});
 });
 
 describe("grokbot /login host-install prompt", () => {
@@ -740,6 +790,47 @@ describe("grokbot incomplete tool calls", () => {
 				name: "edit",
 				customWireName: "apply_patch",
 				arguments: { input: patch },
+			}),
+		]);
+	});
+
+	test("marks hashline grammar calls with customWireName equal to the tool name", async () => {
+		mockAuth();
+		const hashline = "[src/a.ts#abcd]\n1|-old\n1|+new\n";
+		const complete = frameConnectProto(
+			encodeInferenceStreamResponse({
+				toolCallPart: {
+					toolCallId: "c1",
+					toolName: "edit",
+					args: hashline,
+					isComplete: true,
+				},
+			}),
+		);
+		const trailer = frameConnectProto(Buffer.alloc(0), CONNECT_END_STREAM_FLAG);
+		const fetchImpl = (async () => connectBody(complete, trailer)) as FetchImpl;
+		const hashlineContext: Context = {
+			messages: [{ role: "user", content: "edit", timestamp: 1 }],
+			tools: [
+				{
+					name: "edit",
+					description: "hashline edit",
+					parameters: { type: "object" as const },
+					customFormat: { syntax: "lark", definition: "start: ANY" },
+				},
+			],
+		};
+
+		const result = await streamGrokBot(model, hashlineContext, { apiKey: "renew", fetch: fetchImpl }).result();
+		expect(result.stopReason).toBe("toolUse");
+		expect(result.errorMessage).toBeUndefined();
+		expect(result.content).toEqual([
+			expect.objectContaining({
+				type: "toolCall",
+				id: "c1",
+				name: "edit",
+				customWireName: "edit",
+				arguments: { input: hashline },
 			}),
 		]);
 	});

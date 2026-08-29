@@ -263,4 +263,43 @@ describe("grokbot AvailableModels headers", () => {
 		expect(seen.every(s => s.headers["x-proxy-api-key"] === "proxy-secret")).toBe(true);
 		expect(seen[1]?.url).toContain("/aiserver.v1.AiService/AvailableModels");
 	});
+
+	test("clears the cached token after AvailableModels returns 401", async () => {
+		process.env.GROKBOT_MACHINE_ID = "machine";
+		process.env.GROKBOT_NAMESPACE = "prod";
+		process.env.GROKBOT_CLIENT_VERSION = "0.30.0";
+		let mintCount = 0;
+		const fetchImpl: typeof fetch = async url => {
+			if (String(url).includes("inference-credential")) {
+				mintCount += 1;
+				return new Response(
+					JSON.stringify({ accessToken: `tok-${mintCount}`, expiresAtMs: Date.now() + 600_000 }),
+					{ status: 200, headers: { "content-type": "application/json" } },
+				);
+			}
+			if (mintCount === 1) {
+				return new Response("Unauthorized", { status: 401 });
+			}
+			return new Response(JSON.stringify({ models: [] }), {
+				status: 200,
+				headers: { "content-type": "application/json" },
+			});
+		};
+		const first = await fetchGrokbotAvailableModels({
+			apiKey: "renewer",
+			baseUrl: "https://proxy.example/grokbot",
+			fetch: fetchImpl,
+		});
+		expect(first).toBeNull();
+		expect(mintCount).toBe(1);
+
+		const second = await fetchGrokbotAvailableModels({
+			apiKey: "renewer",
+			baseUrl: "https://proxy.example/grokbot",
+			fetch: fetchImpl,
+		});
+		expect(second).not.toBeNull();
+		// Without clearing on 401, the second call would reuse tok-1 and never remint.
+		expect(mintCount).toBe(2);
+	});
 });

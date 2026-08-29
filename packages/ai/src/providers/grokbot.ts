@@ -224,7 +224,10 @@ function parseCompletedToolArgs(raw: unknown, isGrammar: boolean): Record<string
 	return parseToolArgs(raw, true);
 }
 
-function toolCallFromPart(part: unknown) {
+function toolCallFromPart(
+	part: unknown,
+	grammarTools?: Map<string, { name: string; customWireName?: string; isGrammar: boolean }>,
+) {
 	if (!part || typeof part !== "object") return undefined;
 	const p = part as Record<string, unknown>;
 	const type = p.type;
@@ -235,14 +238,18 @@ function toolCallFromPart(part: unknown) {
 		typeof p.customWireName === "string" && p.customWireName.trim() ? p.customWireName.trim() : "";
 	if (!id && !name && !customWireName) return undefined;
 	const args = p.arguments ?? p.args ?? {};
-	const wireName = customWireName || name;
+	const meta =
+		(name ? grammarTools?.get(name) : undefined) ?? (customWireName ? grammarTools?.get(customWireName) : undefined);
+	// Grammar/customFormat tools (apply_patch, hashline, sloppy) replay as wire
+	// name + raw input (protobuf field 4), not Struct args. hashline/sloppy omit
+	// customWireName on the tool definition — use context.tools or a stored marker.
+	const isGrammar = Boolean(customWireName) || Boolean(meta?.isGrammar);
+	const wireName = customWireName || meta?.customWireName || name;
 	const tc: { toolCallId: string; toolName: string; args?: Record<string, unknown>; rawToolCallArgs?: string } = {
 		toolCallId: id,
 		toolName: wireName,
 	};
-	// Grammar/custom tools replay as wire name + raw input (protobuf field 4),
-	// not internal name + Struct args.
-	if (customWireName) {
+	if (isGrammar) {
 		if (typeof args === "string") {
 			tc.rawToolCallArgs = args;
 		} else if (args && typeof args === "object") {
@@ -392,7 +399,7 @@ export function toInferenceMessages(context: Context) {
 				if (content) texts.push(content);
 			} else if (Array.isArray(content)) {
 				for (const part of content) {
-					const tc = toolCallFromPart(part);
+					const tc = toolCallFromPart(part, toolWireIndex);
 					if (tc) {
 						toolCalls.push(tc);
 						continue;
@@ -725,12 +732,17 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 				if (!state) {
 					closeOpen();
 					const meta = (name ? grammarTools.get(name) : undefined) ?? undefined;
+					// Mark every grammar/customFormat call (hashline/sloppy have no
+					// customWireName) so live preview + history replay stay on raw args.
+					const grammarWire = meta?.isGrammar
+						? meta.customWireName || meta.name || name || undefined
+						: meta?.customWireName;
 					const block: ToolCall = {
 						type: "toolCall",
 						id: id || `call_${output.content.length}`,
 						name: meta?.name || name || "unknown",
 						arguments: {},
-						...(meta?.customWireName ? { customWireName: meta.customWireName } : {}),
+						...(grammarWire ? { customWireName: grammarWire } : {}),
 					};
 					const index = output.content.length;
 					output.content.push(block);
@@ -753,8 +765,12 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 					if (name && (!state.block.name || state.block.name === "unknown")) {
 						const meta = grammarTools.get(name);
 						state.block.name = meta?.name || name;
-						if (meta?.customWireName) state.block.customWireName = meta.customWireName;
-						if (meta?.isGrammar) state.isGrammar = true;
+						if (meta?.isGrammar) {
+							state.isGrammar = true;
+							state.block.customWireName = meta.customWireName || meta.name || name;
+						} else if (meta?.customWireName) {
+							state.block.customWireName = meta.customWireName;
+						}
 					}
 				}
 				if (id && state.block.id.startsWith("call_")) state.block.id = id;
