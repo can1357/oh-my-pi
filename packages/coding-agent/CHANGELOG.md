@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Promoted tools: the `tools.xdevPromote` setting and per-agent `xdevPromote` frontmatter promote specific built-in/MCP tools out of `xd://` deferred discovery into first-class presentation ([#5648](https://github.com/can1357/oh-my-pi/issues/5648)).
+
 ## [18.0.10] - 2026-08-28
 
 ### Added

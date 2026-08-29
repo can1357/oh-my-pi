@@ -14,6 +14,7 @@ import type { AgentSession, AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/
 import type { CustomMessage } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { createPersistedSubagentReviverFactory } from "@oh-my-pi/pi-coding-agent/task/persisted-revive";
+import { compileXdevPromoteSet, isMountableUnderXdev } from "@oh-my-pi/pi-coding-agent/tools/xdev";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
@@ -69,7 +70,7 @@ async function createPersistedSession(
 	restrictToolNames?: boolean,
 	modelRole?: string,
 	advisor?: string,
-	contract?: { tools?: string[]; readOnly?: boolean },
+	contract?: { tools?: string[]; readOnly?: boolean; xdevPromote?: string[] },
 ): Promise<string> {
 	const manager = SessionManager.create(cwd, path.join(cwd, "sessions"));
 	const sessionFile = manager.getSessionFile();
@@ -80,9 +81,10 @@ async function createPersistedSession(
 		tools: contract?.tools ?? ["read", "yield"],
 		restrictToolNames,
 		modelRole,
-		resolvedModel: modelRole ? "anthropic/claude-sonnet-4-5" : undefined,
 		advisor,
+		resolvedModel: modelRole ? "anthropic/claude-sonnet-4-5" : undefined,
 		readOnly: contract?.readOnly,
+		xdevPromote: contract?.xdevPromote,
 	});
 	manager.appendMessage({
 		role: "assistant",
@@ -430,5 +432,64 @@ describe("persisted subagent revival", () => {
 		expect(await Bun.file(artifactPath).text()).toBe(completedReport);
 		AgentLifecycleManager.resetGlobalForTests();
 		AgentRegistry.resetGlobalForTests();
+	});
+	it("cold revival replays the frozen xdevPromote into the revived subagent settings", async () => {
+		// The persisted `session_init` carries the effective promotion frozen at
+		// spawn (executor writes `subagentSettings.get("tools.xdevPromote")`).
+		// The reviver must replay it through the REAL peekSessionInit ->
+		// createSubagentSettings path, so a parent-inherited promotion survives
+		// a restart instead of silently remounting under xd:// (regression:
+		// replaying raw frontmatter — `undefined` — over root settings would
+		// drop the inherited promotion entirely).
+		const cwd = makeTempDir("@pi-revive-xdev-promote-");
+		const sessionFile = await createPersistedSession(cwd, undefined, undefined, undefined, {
+			xdevPromote: ["lsp"],
+		});
+		let capturedSettings: Settings | undefined;
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+			capturedSettings = options?.settings as Settings;
+			return { session: createRevivedSession([]).session } as CreateAgentSessionResult;
+		});
+
+		const ref = createRef(sessionFile);
+		const reviver = await createFactory(cwd)(ref);
+		if (!reviver) throw new Error("Expected a persisted reviver");
+		await reviver(ref);
+
+		// Root settings carry no promotion; only the replayed frozen value can
+		// keep `lsp` top-level after revival.
+		expect(capturedSettings?.get("tools.xdevPromote")).toEqual(["lsp"]);
+		expect(
+			isMountableUnderXdev(
+				{ name: "lsp", loadMode: "discoverable" },
+				compileXdevPromoteSet(capturedSettings?.get("tools.xdevPromote")),
+			),
+		).toBe(false);
+	});
+
+	it("cold revival from a pre-freeze session file falls back to global inheritance", async () => {
+		// Session files written before the freeze exist and must revive without
+		// an explicit override: the child snapshots root settings, whose default
+		// promotes nothing, so a discoverable tool mounts under xd://.
+		const cwd = makeTempDir("@pi-revive-xdev-prefreeze-");
+		const sessionFile = await createPersistedSession(cwd);
+		let capturedSettings: Settings | undefined;
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+			capturedSettings = options?.settings as Settings;
+			return { session: createRevivedSession([]).session } as CreateAgentSessionResult;
+		});
+
+		const ref = createRef(sessionFile);
+		const reviver = await createFactory(cwd)(ref);
+		if (!reviver) throw new Error("Expected a persisted reviver");
+		await reviver(ref);
+
+		expect(capturedSettings?.get("tools.xdevPromote")).toEqual([]);
+		expect(
+			isMountableUnderXdev(
+				{ name: "lsp", loadMode: "discoverable" },
+				compileXdevPromoteSet(capturedSettings?.get("tools.xdevPromote")),
+			),
+		).toBe(true);
 	});
 });
