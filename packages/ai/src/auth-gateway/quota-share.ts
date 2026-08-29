@@ -9,9 +9,28 @@ export interface QuotaShareInput {
 	weight: number;
 	inFlight: number;
 	saturated: boolean;
+	/**
+	 * Accumulated fair-share debt (Deficit Round Robin). Candidates skipped
+	 * while a peer served accrue debt; serving repays it. All-zero deficits
+	 * reproduce pure P2C behaviour, so the field is optional.
+	 */
+	deficit?: number;
 }
 
-export type QuotaSharePick = { id: string; disposition: "eligible" | "deprioritized" };
+export type QuotaShareDeficitUpdate = { id: string; deficit: number };
+
+export interface QuotaSharePick {
+	id: string;
+	disposition: "eligible" | "deprioritized";
+	/** DRR accounting to persist per candidate until the next pick. */
+	deficitUpdates: ReadonlyArray<QuotaShareDeficitUpdate>;
+}
+
+const DRR_DEFICIT_LIMIT = 1024;
+
+function clampDeficit(value: number): number {
+	return Math.max(-DRR_DEFICIT_LIMIT, Math.min(DRR_DEFICIT_LIMIT, value));
+}
 
 export function pickQuotaShare(inputs: readonly QuotaShareInput[]): QuotaSharePick | undefined {
 	if (inputs.length === 0) {
@@ -26,10 +45,19 @@ export function pickQuotaShare(inputs: readonly QuotaShareInput[]): QuotaSharePi
 	}
 
 	if (unsaturated.length === 0) {
-		return { id: pickMinInFlight(inputs).id, disposition: "deprioritized" };
+		return { id: pickMinInFlight(inputs).id, disposition: "deprioritized", deficitUpdates: [] };
 	}
 
-	return { id: pickTwoChoice(unsaturated).id, disposition: "eligible" };
+	const chosen = pickTwoChoice(unsaturated);
+	// DRR accounting: serving repays the chosen candidate's debt (quantum =
+	// cohort weight sum); every skipped peer accrues its own weight. Equal
+	// health accounts therefore alternate instead of hammering the top-ranked.
+	const quantum = unsaturated.reduce((sum, input) => sum + Math.max(1, input.weight), 0);
+	const deficitUpdates = unsaturated.map(input => ({
+		id: input.id,
+		deficit: clampDeficit((input.deficit ?? 0) + (input.id === chosen.id ? -quantum : Math.max(1, input.weight))),
+	}));
+	return { id: chosen.id, disposition: "eligible", deficitUpdates };
 }
 
 /** Lowest inFlight, then highest weight, then original order. */
@@ -65,7 +93,13 @@ function pickTwoChoice(candidates: readonly QuotaShareInput[]): QuotaShareInput 
 			second = candidate;
 		}
 	}
-	if (second !== undefined && second.weight > lowest.weight) {
+	if (second === undefined) return lowest;
+	// Fair-share tiebreak: between the two finalists, debt repayment outranks
+	// weight — this is what makes equally healthy accounts alternate.
+	if ((second.deficit ?? 0) > (lowest.deficit ?? 0)) {
+		return second;
+	}
+	if (second.weight > lowest.weight) {
 		return second;
 	}
 	return lowest;
