@@ -4124,6 +4124,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// registration cannot widen the active set past it (the creation-time
 			// `restrictToolNames` flag no longer disables extension loading for
 			// personas — codex #3821198710). `explicitlyRequestedToolNames` is
+			personaToolRestriction: options.personaName
+				? explicitlyRequestedToolNames
+					? new Set(explicitlyRequestedToolNames)
+					: undefined
+				: undefined,
 			// undefined for a persona without `tools:` (no restriction).
 			// Residual CLI restriction for when the persona is LEFT: with an
 			// explicit `--tools`/`--no-tools` the baseline IS the CLI list (the
