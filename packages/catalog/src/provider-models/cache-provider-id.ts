@@ -8,6 +8,16 @@ export interface ModelCacheProviderIdOptions {
 	namespace?: string;
 	/** Grok Bot: `x-cursor-client-version` sent on AvailableModels. */
 	clientVersion?: string;
+	/** Grok Bot: configured discovery/proxy headers that select the catalog. */
+	headers?: Record<string, string>;
+}
+
+/** Stable fingerprint of header bag for cache scoping (sorted key=value). */
+export function fingerprintModelCacheHeaders(headers?: Record<string, string>): string {
+	if (!headers) return "";
+	const keys = Object.keys(headers).sort();
+	if (keys.length === 0) return "";
+	return keys.map(key => `${key}=${headers[key] ?? ""}`).join("\u0001");
 }
 
 const CREDENTIAL_SCOPED_MODEL_CACHE_PROVIDERS: Readonly<Record<string, true>> = {
@@ -109,8 +119,9 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 							namespace: options.namespace,
 							clientVersion: options.clientVersion,
 						});
-			const scope = `${options.apiKey ?? ""}\u0000${baseUrl}\u0000${identity.namespace}\u0000${identity.clientVersion}`;
-			return `grokbot:models-v2:${Bun.hash(scope).toString(36)}`;
+			const headerScope = fingerprintModelCacheHeaders(options.headers);
+			const scope = `${options.apiKey ?? ""}\u0000${baseUrl}\u0000${identity.namespace}\u0000${identity.clientVersion}\u0000${headerScope}`;
+			return `grokbot:models-v3:${Bun.hash(scope).toString(36)}`;
 		}
 		case "openrouter":
 			return "openrouter:pseudo-api";

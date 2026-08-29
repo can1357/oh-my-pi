@@ -13,6 +13,8 @@
 - Grok Bot inference requests include `model.headers` (merged under provider-owned auth/client headers) so reverse-proxy API keys are sent.
 - Grok Bot token minting forwards the same caller/model headers so reverse-proxy gateways accept renewal before inference.
 - Grok Bot grammar/customFormat tools (`apply_patch`, hashline, sloppy) accept raw non-JSON args as `{ input }` and preserve `customWireName`.
+- Grok Bot streams update `ToolCall.arguments` (and the streamed partial buffer) on every tool chunk so live previews are not empty until completion.
+- Grok Bot assistant-history replay sends grammar calls as wire name + `rawToolCallArgs` instead of internal name + Struct args.
 - Grok Bot rejects completed tool calls with malformed JSON arguments and correlates tool chunks by id or index.
 - Grok Bot streams that end with `ToolCallPart.isComplete: false` now fail as incomplete streams instead of parsing partial JSON as `{}` and emitting a successful `toolUse`.
 - `/grokbot` status truncation uses shared `TRUNCATE_LENGTHS.TITLE` from `@oh-my-pi/pi-tui` instead of a provider-local width constant.

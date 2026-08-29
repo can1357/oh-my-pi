@@ -411,6 +411,49 @@ describe("grokbot sand-host client parity", () => {
 			},
 		});
 	});
+
+	test("replays grammar tool calls with wire name and rawToolCallArgs", () => {
+		const patch = "*** Begin Patch\n*** Update File: a.ts\n@@\n-old\n+new\n*** End Patch";
+		const messages = toInferenceMessages({
+			messages: [
+				{
+					role: "assistant",
+					content: [
+						{
+							type: "toolCall",
+							id: "c1",
+							name: "edit",
+							customWireName: "apply_patch",
+							arguments: { input: patch },
+						},
+					],
+					api: "grokbot-sand",
+					provider: "grokbot",
+					model: "grok-4.5",
+					usage: {
+						input: 0,
+						output: 0,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 0,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+					stopReason: "toolUse",
+					timestamp: 2,
+				},
+			],
+		});
+		const assistant = messages.find(m => m.role === 2) as {
+			toolCalls?: Array<{ toolCallId: string; toolName: string; args?: unknown; rawToolCallArgs?: string }>;
+		};
+		expect(assistant?.toolCalls).toEqual([
+			{
+				toolCallId: "c1",
+				toolName: "apply_patch",
+				rawToolCallArgs: patch,
+			},
+		]);
+	});
 });
 
 describe("grokbot /login host-install prompt", () => {
@@ -623,6 +666,54 @@ describe("grokbot incomplete tool calls", () => {
 				name: "edit",
 				customWireName: "apply_patch",
 				arguments: { input: patch },
+			}),
+		]);
+	});
+
+	test("updates ToolCall.arguments on incomplete streamed chunks for live previews", async () => {
+		mockAuth();
+		const partial = frameConnectProto(
+			encodeInferenceStreamResponse({
+				toolCallPart: {
+					toolCallId: "c1",
+					toolName: "echo",
+					args: '{"cmd":"ls"}',
+					isComplete: false,
+				},
+			}),
+		);
+		const finish = frameConnectProto(
+			encodeInferenceStreamResponse({
+				toolCallPart: {
+					toolCallId: "c1",
+					toolName: "echo",
+					args: '{"cmd":"ls","n":1}',
+					isComplete: true,
+				},
+			}),
+		);
+		const trailer = frameConnectProto(Buffer.alloc(0), CONNECT_END_STREAM_FLAG);
+		const fetchImpl = (async () => connectBody(partial, finish, trailer)) as FetchImpl;
+
+		const stream = streamGrokBot(model, context, { apiKey: "renew", fetch: fetchImpl });
+		let sawPartialArgs = false;
+		for await (const event of stream) {
+			if (event.type === "toolcall_delta" && event.partial) {
+				const block = event.partial.content.find(b => b.type === "toolCall");
+				if (block && block.type === "toolCall" && block.arguments.cmd === "ls") {
+					sawPartialArgs = true;
+				}
+			}
+		}
+		const result = await stream.result();
+		expect(sawPartialArgs).toBe(true);
+		expect(result.stopReason).toBe("toolUse");
+		expect(result.content).toEqual([
+			expect.objectContaining({
+				type: "toolCall",
+				id: "c1",
+				name: "echo",
+				arguments: { cmd: "ls", n: 1 },
 			}),
 		]);
 	});

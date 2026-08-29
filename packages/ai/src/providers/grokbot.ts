@@ -15,6 +15,7 @@ import type {
 	Tool,
 	ToolCall,
 } from "../types";
+import { clearStreamingPartialJson, setStreamingPartialJson } from "../utils/block-symbols";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import { notifyProviderResponse } from "../utils/provider-response";
 import { toolWireSchema } from "../utils/schema/wire";
@@ -230,12 +231,32 @@ function toolCallFromPart(part: unknown) {
 	if (type !== "toolCall" && type !== "tool-call" && type !== "tool_call") return undefined;
 	const id = String(p.id || p.toolCallId || p.tool_call_id || "");
 	const name = String(p.name || p.toolName || p.tool_name || "");
-	if (!id && !name) return undefined;
+	const customWireName =
+		typeof p.customWireName === "string" && p.customWireName.trim() ? p.customWireName.trim() : "";
+	if (!id && !name && !customWireName) return undefined;
 	const args = p.arguments ?? p.args ?? {};
+	const wireName = customWireName || name;
 	const tc: { toolCallId: string; toolName: string; args?: Record<string, unknown>; rawToolCallArgs?: string } = {
 		toolCallId: id,
-		toolName: name,
+		toolName: wireName,
 	};
+	// Grammar/custom tools replay as wire name + raw input (protobuf field 4),
+	// not internal name + Struct args.
+	if (customWireName) {
+		if (typeof args === "string") {
+			tc.rawToolCallArgs = args;
+		} else if (args && typeof args === "object") {
+			const input = (args as Record<string, unknown>).input;
+			if (typeof input === "string") {
+				tc.rawToolCallArgs = input;
+			} else {
+				tc.args = args as Record<string, unknown>;
+			}
+		} else {
+			tc.rawToolCallArgs = "";
+		}
+		return tc;
+	}
 	if (typeof args === "string") {
 		try {
 			tc.args = JSON.parse(args) as Record<string, unknown>;
@@ -673,6 +694,7 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 				// Parse before marking ended so malformed JSON does not leave a
 				// "completed" state without a successful toolcall_end.
 				state.block.arguments = parseCompletedToolArgs(state.argsText, state.isGrammar);
+				clearStreamingPartialJson(state.block);
 				state.ended = true;
 				stream.push({
 					type: "toolcall_end",
@@ -735,6 +757,10 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 					let delta = argsText;
 					if (argsText.startsWith(state.argsText)) delta = argsText.slice(state.argsText.length);
 					state.argsText = argsText;
+					// Keep ToolCall.arguments + streamed buffer current so live
+					// message_update snapshots show bash/edit previews mid-stream.
+					setStreamingPartialJson(state.block, argsText);
+					state.block.arguments = state.isGrammar ? { input: argsText } : parseToolArgs(argsText, false);
 					if (delta) {
 						stream.push({
 							type: "toolcall_delta",

@@ -904,6 +904,7 @@ export class ModelRegistry {
 				apiKey,
 				namespace: identity.namespace,
 				clientVersion: identity.clientVersion,
+				headers: this.#resolveProviderOverrideHeaders("grokbot"),
 			});
 		}
 		return resolveModelCacheProviderId(providerId, { baseUrl, apiKey });

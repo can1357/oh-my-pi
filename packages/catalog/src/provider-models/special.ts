@@ -244,6 +244,7 @@ export function grokbotModelManagerOptions(
 			baseUrl,
 			namespace: identity.namespace,
 			clientVersion: identity.clientVersion,
+			headers,
 		}),
 		staticModels: buildGrokbotStaticSeed(baseUrl),
 		...(apiKey
