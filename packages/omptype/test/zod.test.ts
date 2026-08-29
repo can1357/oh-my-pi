@@ -187,6 +187,34 @@ describe("zod-like parsing", () => {
 		expect(() => deferredCollision.parse({ kind: "x", a: "1" })).toThrow(/variants 0 and 1 both pin "kind" to "x"/);
 	});
 
+	it("clones readonly output by descriptor instead of spreading it", () => {
+		// `.readonly()` must hand back the value it validated, only frozen. A
+		// spread silently rewrites it: non-enumerable own properties vanish,
+		// accessors collapse into one-shot values, sparse array holes fill with
+		// `undefined`, and custom array properties disappear.
+		const input: Record<string, unknown> = { visible: 1 };
+		Object.defineProperty(input, "token", { value: "secret", enumerable: false, writable: true });
+		Object.defineProperty(input, "computed", { get: () => 42, enumerable: true, configurable: true });
+		const frozen = z.unknown().readonly().parse(input) as Record<string, unknown>;
+		expect(frozen.token).toBe("secret");
+		expect(Object.getOwnPropertyDescriptor(frozen, "token")?.enumerable).toBe(false);
+		expect(Object.getOwnPropertyDescriptor(frozen, "computed")?.get).toBeFunction();
+		expect(frozen.computed).toBe(42);
+		expect(Object.isFrozen(frozen)).toBe(true);
+		// The caller's graph stays mutable — the reason a clone exists at all.
+		expect(Object.isFrozen(input)).toBe(false);
+
+		const sparse: unknown[] = [1];
+		sparse[3] = 4;
+		(sparse as unknown as Record<string, unknown>).custom = "kept";
+		const frozenArray = z.unknown().readonly().parse(sparse) as unknown[];
+		expect(Array.isArray(frozenArray)).toBe(true);
+		expect(1 in frozenArray).toBe(false);
+		expect(frozenArray.length).toBe(4);
+		expect((frozenArray as unknown as Record<string, unknown>).custom).toBe("kept");
+		expect(Object.isFrozen(frozenArray)).toBe(true);
+	});
+
 	it("rejects arrays wherever an object schema can observe its input", () => {
 		// An array reaching an object schema contradicts the emitted
 		// `{"type":"object"}` and zod's own semantics: the tool would accept a

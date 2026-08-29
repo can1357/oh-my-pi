@@ -350,18 +350,25 @@ function decorate<Out>(schema: Decoratable<Out>, optional = false): ZodLikeSchem
 		 * parsing shares structure with the input (a parent copy keeps child
 		 * references), so freezing in place would freeze the CALLER's input
 		 * graph — e.g. a persisted session entry schema-validated before blob
-		 * hydration must stay mutable. Shallow-clone first (object spread uses
-		 * define semantics, so an own `__proto__` key survives), then freeze
-		 * the clone.
+		 * hydration must stay mutable. Shallow-clone first, then freeze the
+		 * clone.
+		 *
+		 * The clone copies property DESCRIPTORS onto a fresh object of the same
+		 * prototype (a fresh array for arrays). A spread would silently rewrite
+		 * the value it is supposed to hand back: non-enumerable own properties
+		 * would vanish, accessors would collapse into one-shot values, sparse
+		 * array holes would materialize as `undefined`, and custom array
+		 * properties would be dropped. Descriptors also keep an own `__proto__`
+		 * key intact, since `defineProperty` semantics never invoke the setter.
 		 *
 		 * Only plain objects and arrays are cloned+frozen. A non-plain object
 		 * (a Date/Map/class instance reachable via `z.unknown()`/`z.any()`/a
-		 * transform) has no non-destructive shallow clone — spreading it would
-		 * produce a prototype-less husk with no internal slots — and freezing
-		 * it in place would mutate the caller's value, so it passes through
-		 * untouched: never-freeze-the-input outranks freeze-the-output for the
-		 * shim's JSON-oriented use. Primitives and functions pass through for
-		 * the same reason.
+		 * transform) has no non-destructive shallow clone — its internal slots
+		 * do not travel with descriptors — and freezing it in place would
+		 * mutate the caller's value, so it passes through untouched:
+		 * never-freeze-the-input outranks freeze-the-output for the shim's
+		 * JSON-oriented use. Primitives and functions pass through for the same
+		 * reason.
 		 */
 		readonly(): ZodLikeSchema<Readonly<Out>> {
 			return next(
@@ -369,7 +376,10 @@ function decorate<Out>(schema: Decoratable<Out>, optional = false): ZodLikeSchem
 					if (typeof value !== "object" || value === null) return value;
 					const proto = Object.getPrototypeOf(value);
 					if (!Array.isArray(value) && proto !== Object.prototype && proto !== null) return value;
-					const clone = Array.isArray(value) ? [...(value as unknown[])] : { ...(value as object) };
+					const descriptors = Object.getOwnPropertyDescriptors(value);
+					const clone = Array.isArray(value)
+						? Object.defineProperties([] as unknown[], descriptors)
+						: Object.create(proto, descriptors);
 					return Object.freeze(clone) as Out;
 				}),
 			) as ZodLikeSchema<Readonly<Out>>;
