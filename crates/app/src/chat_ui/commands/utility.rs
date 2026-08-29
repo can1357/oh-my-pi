@@ -468,9 +468,19 @@ mod tests {
 	}
 
 	#[test]
-	fn tools_do_not_render_hidden_names_from_declarations() {
-		let registry = roster_registry();
-		let declarations = [tools_declaration("secret"), tools_declaration("custom_report")];
+	fn tools_do_not_render_hidden_or_unlisted_names_from_declarations() {
+		let mut registry = roster_registry();
+		registry
+			.register_worker(stub_spec("think"), Presentation::Slot, core_claims())
+			.expect("think");
+		registry
+			.unlist_from_roster("think")
+			.expect("live claim can be unlisted");
+		let declarations = [
+			tools_declaration("secret"),
+			tools_declaration("think"),
+			tools_declaration("custom_report"),
+		];
 		let rendered = render_tools(
 			&registry,
 			&[],
@@ -485,6 +495,10 @@ mod tests {
 		assert!(
 			!rendered.lines().any(|line| line.ends_with("secret")),
 			"declaration sharing a hidden tool's name must stay off the listing: {rendered}"
+		);
+		assert!(
+			!rendered.lines().any(|line| line.ends_with("think")),
+			"declaration sharing an unlisted tool's name must stay off the listing: {rendered}"
 		);
 	}
 
