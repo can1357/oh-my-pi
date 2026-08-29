@@ -13,6 +13,7 @@ import { resolveOutputMaxColumns, resolveOutputSinkHeadBytes } from "../tools/ou
 import { getOrCreateSnapshot } from "../utils/shell-snapshot";
 import { loadDirenvEnv } from "./direnv";
 import { buildNonInteractiveEnv } from "./non-interactive-env";
+import { TerminalQueryResponder } from "./terminal-query-responder";
 
 export interface BashExecutorOptions {
 	cwd?: string;
@@ -385,6 +386,10 @@ async function executeUserShellPty(run: {
 	sink: OutputSink;
 }): Promise<BashResult> {
 	const session = new PtySession();
+	// A headless PTY advertises a real terminal but has nobody to answer the
+	// capability queries probing tools emit, so they block on their reply
+	// timeout (issue #10214). Reply as a terminal would, writing back to stdin.
+	const responder = new TerminalQueryResponder();
 	const result = await session.startArgv(
 		{
 			application: run.shell,
@@ -398,6 +403,14 @@ async function executeUserShellPty(run: {
 		},
 		(err, chunk) => {
 			if (err || !chunk) return;
+			const reply = responder.feed(chunk);
+			if (reply) {
+				try {
+					session.write(reply);
+				} catch {
+					// PTY already closed; nothing to answer.
+				}
+			}
 			run.pty.onChunk(chunk);
 			// CRLF → LF for the capture; the sink strips ANSI itself.
 			run.sink.push(chunk.replace(/\r\n?/gu, "\n"));

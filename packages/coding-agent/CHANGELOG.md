@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `!`/`!!` shell commands stalling ~5s when a program probes the terminal (e.g. `gh` via terminal capability queries); the user-shell PTY now answers cursor-position, device-attribute, and OSC color queries instead of leaving them unanswered ([#10214](https://github.com/can1357/oh-my-pi/issues/10214)).
+
 ## [18.0.11] - 2026-08-29
 
 ### Added
