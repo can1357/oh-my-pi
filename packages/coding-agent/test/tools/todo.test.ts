@@ -729,15 +729,47 @@ describe("todoToolRenderer.renderResult phase collapsing", () => {
 	});
 });
 
-describe("isClosedTodo vs isSettledTodo", () => {
-	it("counts only completed as HUD done; abandoned is settled for collapse", () => {
-		expect(isClosedTodo({ content: "x", status: "completed" })).toBe(true);
-		expect(isClosedTodo({ content: "x", status: "abandoned" })).toBe(false);
-		expect(isClosedTodo({ content: "x", status: "pending" })).toBe(false);
-		expect(isSettledTodo({ content: "x", status: "completed" })).toBe(true);
-		expect(isSettledTodo({ content: "x", status: "abandoned" })).toBe(true);
-		expect(isSettledTodo({ content: "x", status: "pending" })).toBe(false);
-		expect(isSettledTodo({ content: "x", status: "blocked" })).toBe(false);
+describe("abandoned todos in tool summary and compact HUD contracts", () => {
+	it("keeps dropped items in Remaining while Active phase follows actionable work", async () => {
+		const tool = new TodoTool(
+			createSession([
+				{
+					name: "Dropped phase",
+					tasks: [{ content: "old drop", status: "abandoned" }],
+				},
+				{
+					name: "Live phase",
+					tasks: [{ content: "still open", status: "pending" }],
+				},
+			]),
+		);
+		const result = await tool.execute("t1", { op: "view" });
+		const text = result.content.find(part => part.type === "text")?.text ?? "";
+		expect(text).toContain("Remaining items (1 open + 1 dropped):");
+		expect(text).toContain("old drop [abandoned]");
+		expect(text).toContain('Active phase 2/2 "Live phase"');
+		expect(text).not.toContain('Active phase 1/2 "Dropped phase"');
+	});
+
+	it("reports compact progress with dropped-only plans as incomplete, not done", async () => {
+		await initTheme();
+		const phases: TodoPhase[] = [
+			{
+				name: "Only drops",
+				tasks: [
+					{ content: "a", status: "abandoned" },
+					{ content: "b", status: "abandoned" },
+				],
+			},
+		];
+		expect(nextActionableTask(phases)).toBeUndefined();
+		expect(phases.flatMap(p => p.tasks).filter(isClosedTodo)).toHaveLength(0);
+		expect(phases.flatMap(p => p.tasks).filter(isSettledTodo)).toHaveLength(2);
+		const tool = new TodoTool(createSession(phases));
+		const result = await tool.execute("t1", { op: "view" });
+		const text = result.content.find(part => part.type === "text")?.text ?? "";
+		expect(text).toContain("0/2 done, 2 dropped, 0 open");
+		expect(text).toContain("Remaining items (0 open + 2 dropped):");
 	});
 });
 

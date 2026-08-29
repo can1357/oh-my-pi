@@ -402,7 +402,8 @@ const todoStatusMap: Record<TodoStatus, "pending" | "in_progress" | "completed">
 	pending: "pending",
 	in_progress: "in_progress",
 	completed: "completed",
-	abandoned: "completed",
+	// Dropped work is incomplete for settle — ACP must not show it as completed.
+	abandoned: "pending",
 	blocked: "pending",
 };
 

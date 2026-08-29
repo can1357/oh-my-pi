@@ -738,9 +738,7 @@ function formatSummary(phases: TodoPhase[], errors: string[], readOnly = false):
 	const remainingTasks = remainingByPhase.flatMap(phase => phase.tasks.map(task => ({ ...task, phase: phase.name })));
 
 	let currentIdx = phases.findIndex(phase =>
-		phase.tasks.some(
-			task => task.status === "pending" || task.status === "in_progress" || task.status === "abandoned",
-		),
+		phase.tasks.some(task => task.status === "pending" || task.status === "in_progress"),
 	);
 	if (currentIdx === -1) currentIdx = phases.length - 1;
 	const current = phases[currentIdx];

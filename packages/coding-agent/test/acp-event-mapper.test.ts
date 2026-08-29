@@ -1287,4 +1287,20 @@ describe("ACP event mapper", () => {
 		});
 		expectAcpStructureRejects(arkSessionNotification, { ...notification, sessionId: 42 });
 	});
+
+	it("maps abandoned todos in reminders to pending, not completed", () => {
+		const [notification] = mapAgentSessionEventToAcpSessionUpdates(
+			{
+				type: "todo_reminder",
+				todos: [{ content: "dropped work", status: "abandoned" }],
+				attempt: 1,
+				maxAttempts: 3,
+			} as AgentSessionEvent,
+			"session-1",
+		);
+		expect(notification?.update).toMatchObject({
+			sessionUpdate: "plan",
+			entries: [{ content: "dropped work", status: "pending" }],
+		});
+	});
 });

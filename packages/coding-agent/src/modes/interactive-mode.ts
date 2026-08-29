@@ -2679,12 +2679,18 @@ export class InteractiveMode implements InteractiveModeContext {
 
 		const totalTasks = phases.reduce((sum, phase) => sum + phase.tasks.length, 0);
 		const closedTasks = phases.reduce((sum, phase) => sum + phase.tasks.filter(isClosedTodo).length, 0);
+		const droppedTasks = phases.reduce(
+			(sum, phase) => sum + phase.tasks.filter(task => task.status === "abandoned").length,
+			0,
+		);
 		const activeTask = nextActionableTask(phases);
 
 		const header = `${theme.bold(theme.fg("accent", "TODO"))} ${theme.fg("dim", `${closedTasks}/${totalTasks}`)}`;
 		const taskStr = activeTask
 			? this.#formatTodoLine(activeTask, "", isMatched(activeTask))
-			: theme.fg("success", `${theme.checkbox.checked} done`);
+			: closedTasks < totalTasks
+				? theme.fg("warning", droppedTasks > 0 ? `${theme.checkbox.unchecked} dropped` : `${theme.checkbox.unchecked} incomplete`)
+				: theme.fg("success", `${theme.checkbox.checked} done`);
 		const rightLine = `${header} ${theme.fg("dim", "·")} ${taskStr}`;
 
 		const rightPad = " ";
