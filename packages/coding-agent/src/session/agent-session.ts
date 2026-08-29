@@ -5603,12 +5603,15 @@ export class AgentSession {
 		let total = 0;
 		let closed = 0;
 		let open = 0;
+		let dropped = 0;
 		const promptPhases = phases.map(phase => ({
 			name: this.#sanitizeGoalTodoText(phase.name),
 			tasks: phase.tasks.map(task => {
 				total++;
-				if (task.status === "completed" || task.status === "abandoned") {
+				if (task.status === "completed") {
 					closed++;
+				} else if (task.status === "abandoned") {
+					dropped++;
 				} else {
 					open++;
 				}
@@ -5616,9 +5619,12 @@ export class AgentSession {
 			}),
 		}));
 
+		// Matches the `todo` tool summary's Overall line so the every-turn goal
+		// context and the settle-time reminder agree that dropped ≠ done.
 		return prompt.render(goalTodoContextPrompt, {
 			canCallTodoTool,
 			closed: String(closed),
+			dropped: dropped > 0 ? String(dropped) : "",
 			open: String(open),
 			phases: promptPhases,
 			total: String(total),

@@ -751,7 +751,12 @@ function formatSummary(phases: TodoPhase[], errors: string[], readOnly = false):
 	if (remainingTasks.length === 0) {
 		lines.push("Remaining items: none.");
 	} else {
-		lines.push(`Remaining items (${remainingTasks.length}):`);
+		const droppedRemaining = remainingTasks.filter(task => task.status === "abandoned").length;
+		lines.push(
+			droppedRemaining > 0
+				? `Remaining items (${remainingTasks.length - droppedRemaining} open + ${droppedRemaining} dropped):`
+				: `Remaining items (${remainingTasks.length}):`,
+		);
 		for (const task of remainingTasks) {
 			lines.push(`  - ${task.content} [${task.status}] (${task.phase})`);
 		}

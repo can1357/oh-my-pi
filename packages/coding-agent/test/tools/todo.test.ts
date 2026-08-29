@@ -6,12 +6,12 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { initTheme, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import {
+	isClosedTodo,
+	isSettledTodo,
 	markdownToPhases,
 	nextActionableTask,
 	phasesToMarkdown,
 	resolveTodoMarkdownPath,
-	isClosedTodo,
-	isSettledTodo,
 	selectCollapsedTodos,
 	TODO_STRIKE_HOLD_FRAMES,
 	TODO_STRIKE_TOTAL_FRAMES,
