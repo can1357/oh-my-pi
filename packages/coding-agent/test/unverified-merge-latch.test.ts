@@ -311,4 +311,30 @@ describe("unverified isolated merge latch", () => {
 		tracker.onAsyncJobTerminal("bg_hub", "bash", "completed");
 		expect(latch.latched).toBe(false);
 	});
+
+	it("keeps model-abandoned todos incomplete alongside the merge latch", async () => {
+		const latch = new UnverifiedMergeLatch();
+		const ctx = host(latch);
+		const tracker = new TodoTracker(ctx.host);
+		tracker.setPhases([
+			{
+				name: "Work",
+				tasks: [
+					{ content: "Ship feature", status: "abandoned" },
+					{ content: "Cancelled by user", status: "abandoned", droppedBy: "user" },
+				],
+			},
+		]);
+		expect(await tracker.checkCompletion(textOnlyStop())).toBe(true);
+		expect(ctx.continuations.count).toBe(1);
+		expect(JSON.stringify(ctx.messages)).toContain("Ship feature");
+		expect(JSON.stringify(ctx.messages)).toContain("(dropped)");
+		expect(JSON.stringify(ctx.messages)).not.toContain("Cancelled by user");
+		// Clone must preserve user provenance.
+		expect(tracker.phases[0]?.tasks.find(t => t.content === "Cancelled by user")).toEqual({
+			content: "Cancelled by user",
+			status: "abandoned",
+			droppedBy: "user",
+		});
+	});
 });

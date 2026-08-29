@@ -342,8 +342,12 @@ export class TodoTracker {
 				name: phase.name,
 				tasks: phase.tasks
 					.filter(
-						(task): task is TodoItem & { status: "pending" | "in_progress" } =>
-							task.status === "pending" || task.status === "in_progress",
+						(task): task is TodoItem & { status: "pending" | "in_progress" | "abandoned" } =>
+							task.status === "pending" ||
+							task.status === "in_progress" ||
+							// Model-abandoned work is still incomplete; a user `/todo drop`
+							// stamps `droppedBy: "user"` and is an explicit cancel.
+							(task.status === "abandoned" && task.droppedBy !== "user"),
 					)
 					.map(task => ({ content: task.content, status: task.status })),
 			}))
@@ -368,7 +372,10 @@ export class TodoTracker {
 		}
 		this.#reminderCount++;
 		const todoList = incompleteByPhase
-			.map(phase => `- ${phase.name}\n${phase.tasks.map(task => `  - ${task.content}`).join("\n")}`)
+			.map(
+				phase =>
+					`- ${phase.name}\n${phase.tasks.map(task => `  - ${task.content}${task.status === "abandoned" ? " (dropped)" : ""}`).join("\n")}`,
+			)
 			.join("\n");
 		const reminder = prompt.render(todoCompletionReminderPrompt, {
 			incompleteCount: incomplete.length,
@@ -451,11 +458,12 @@ export class TodoTracker {
 	#clonePhases(phases: TodoPhase[]): TodoPhase[] {
 		return phases.map(phase => ({
 			name: phase.name,
-			tasks: phase.tasks.map(task =>
-				task.blocker !== undefined
-					? { content: task.content, status: task.status, blocker: task.blocker }
-					: { content: task.content, status: task.status },
-			),
+			tasks: phase.tasks.map(task => {
+				const cloned: TodoItem = { content: task.content, status: task.status };
+				if (task.blocker !== undefined) cloned.blocker = task.blocker;
+				if (task.droppedBy === "user") cloned.droppedBy = "user";
+				return cloned;
+			}),
 		}));
 	}
 }

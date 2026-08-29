@@ -27,6 +27,13 @@ export interface TodoItem {
 	status: TodoStatus;
 	/** When `status === "blocked"`, an optional note on what the task is waiting for. */
 	blocker?: string;
+	/**
+	 * Set when the user abandoned this task via `/todo drop` (or equivalent).
+	 * Settle treats model-authored `abandoned` as incomplete; a user-authored
+	 * drop is an explicit cancel. Kept here so #10053 provenance survives when
+	 * this branch's settle path runs against the same TodoItem shape.
+	 */
+	droppedBy?: "user";
 }
 
 export interface TodoPhase {
@@ -45,7 +52,8 @@ export function isTodoPhase(value: unknown): value is TodoPhase {
 				task.status === "in_progress" ||
 				task.status === "completed" ||
 				task.status === "abandoned" ||
-				task.status === "blocked"),
+				task.status === "blocked") &&
+			(task.droppedBy === undefined || task.droppedBy === "user"),
 	);
 }
 
