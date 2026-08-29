@@ -9,7 +9,7 @@
 - Fixed runtime installation getting stuck for up to 60 seconds after an installer crash or forced termination, allowing subsequent installation attempts to proceed normally.
 ### Fixed
 
-- `checkpointWal` ignores already-closed databases and benign temp-unlink I/O codes (`SQLITE_IOERR_VNODE` / `DELETE*`), while still propagating real durability failures such as `SQLITE_IOERR_WRITE`.
+- `checkpointWal` ignores already-closed databases and benign temp-unlink I/O codes (`SQLITE_IOERR_VNODE` / `DELETE*`), while still propagating real durability failures such as `SQLITE_IOERR_WRITE` / `ACCESS`.
 
 ## [18.0.10] - 2026-08-28
 

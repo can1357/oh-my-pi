@@ -7,7 +7,8 @@ import eagerTaskPrompt from "../prompts/system/eager-task.md" with { type: "text
 import eagerTodoPrompt from "../prompts/system/eager-todo.md" with { type: "text" };
 import midRunTodoNudgePrompt from "../prompts/system/mid-run-todo-nudge.md" with { type: "text" };
 import todoCompletionReminderPrompt from "../prompts/system/todo-completion-reminder.md" with { type: "text" };
-import { extractLeadingCdTarget, hasUnresolvableLeadingCdPrefix } from "../tools/shell-tokenize";
+import { resolveLeadingCdChain } from "../tools/shell-tokenize";
+import { resolveToCwd } from "../tools/path-utils";
 import { getLatestTodoPhasesFromEntries, isTodoPhase, type TodoItem, type TodoPhase } from "../tools/todo";
 import { buildNamedToolChoice } from "../utils/tool-choice";
 import type { AgentSessionEvent } from "./agent-session-events";
@@ -183,35 +184,36 @@ export class TodoTracker {
 
 	/**
 	 * Resolve bash cwd the same way the bash tool does: structured `cwd`, else a
-	 * leading `cd <path> &&|; …` target. When both are present, the leading `cd`
-	 * wins — `BashTool` leaves that prefix for the shell whenever `cwd` is set,
-	 * so `{ cwd: "/repo", command: "cd /tmp && bun test" }` actually runs in `/tmp`.
-	 * Unextractable leading `cd` (redirects/expansion) marks the snap unresolvable.
+	 * leading `cd <path> &&|; …` chain (last target wins). When both are present,
+	 * the leading `cd` chain wins — `BashTool` leaves that prefix for the shell
+	 * whenever `cwd` is set, so `{ cwd: "/repo", command: "cd /tmp && bun test" }`
+	 * actually runs in `/tmp`. Unextractable leading `cd` (redirects/expansion)
+	 * marks the snap unresolvable. Paths go through {@link resolveToCwd} so `~` expands.
 	 */
 	#resolveBashStartCwd(args: unknown): { cwd?: string; unresolvable?: boolean } {
 		if (!isRecord(args)) return {};
 		if (typeof args.command === "string") {
-			const cd = extractLeadingCdTarget(args.command);
-			if (cd) {
-				return { cwd: path.resolve(this.#host.cwd(), cd.path) };
-			}
-			if (hasUnresolvableLeadingCdPrefix(args.command)) {
-				return { unresolvable: true };
+			const chain = resolveLeadingCdChain(args.command);
+			if (chain.unresolvable) return { unresolvable: true };
+			if (chain.path !== undefined) {
+				return { cwd: resolveToCwd(chain.path, this.#host.cwd()) };
 			}
 		}
 		if (typeof args.cwd === "string" && args.cwd.trim() !== "") {
-			return { cwd: path.resolve(this.#host.cwd(), args.cwd.trim()) };
+			return { cwd: resolveToCwd(args.cwd.trim(), this.#host.cwd()) };
 		}
 		return {};
 	}
 
-	/** Eval only clears the latch when it declares a cwd inside the merged tree. */
-	#resolveEvalStartCwd(args: unknown): string | undefined {
-		if (!isRecord(args)) return undefined;
-		if (typeof args.cwd === "string" && args.cwd.trim() !== "") {
-			return path.resolve(this.#host.cwd(), args.cwd.trim());
+	/**
+	 * Eval runs in the session cwd (no structured cwd on the tool). Use an
+	 * explicit arg when present; otherwise the host cwd where the cell executed.
+	 */
+	#resolveEvalStartCwd(args: unknown): string {
+		if (isRecord(args) && typeof args.cwd === "string" && args.cwd.trim() !== "") {
+			return resolveToCwd(args.cwd.trim(), this.#host.cwd());
 		}
-		return undefined;
+		return this.#host.cwd();
 	}
 
 	/** Resolve LSP diagnostics `file` (`*` stays workspace-wide; else cwd-resolved). */
@@ -220,7 +222,7 @@ export class TodoTracker {
 		const file = args.file.trim();
 		if (file === "") return undefined;
 		if (file === "*") return "*";
-		return path.resolve(this.#host.cwd(), file);
+		return resolveToCwd(file, this.#host.cwd());
 	}
 
 	/** Records a completed tool result before asynchronous event processing begins. */
@@ -371,10 +373,8 @@ export class TodoTracker {
 		if (toolName === "bash" && !isParentVerifyCwdInMergedTree(cwd, this.#host.cwd(), this.#host.repoRoot?.())) {
 			return false;
 		}
-		// Eval has no structured "test the merged tree" contract — any successful
-		// `1 + 1` would otherwise clear the latch. Require an explicit cwd inside
-		// the merged tree (same spirit as bash) and non-trivial source; bare eval
-		// never verifies.
+		// Eval runs in the session cwd. Require non-trivial source so `1+1` cannot
+		// clear the latch; cwd defaults to the host tree where the cell executed.
 		if (toolName === "eval") {
 			if (cwd === undefined || cwd.trim() === "") return false;
 			if (!isParentVerifyCwdInMergedTree(cwd, this.#host.cwd(), this.#host.repoRoot?.())) {

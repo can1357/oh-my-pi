@@ -27,8 +27,7 @@ function isBenignCheckpointIoError(err: unknown): boolean {
 	return (
 		code === "SQLITE_IOERR_VNODE" ||
 		code === "SQLITE_IOERR_DELETE" ||
-		code === "SQLITE_IOERR_DELETE_NOENT" ||
-		code === "SQLITE_IOERR_ACCESS"
+		code === "SQLITE_IOERR_DELETE_NOENT"
 	);
 }
 

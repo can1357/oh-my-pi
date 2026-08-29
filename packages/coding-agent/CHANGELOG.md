@@ -48,6 +48,8 @@
 - Parent bash verify prefers a leading `cd` over a structured in-tree `cwd`, so `{ cwd: "/repo", command: "cd /tmp && bun test" }` no longer clears the latch.
 - Background bash re-key preserves the start-resolved cwd (does not overwrite with the running-ack structured cwd).
 - Leading `cd` prefixes that cannot be safely extracted (redirects, expansion) never clear the latch via session/structured cwd fallback.
+- Env/`sudo`/whitespace before `cd`, chained `cd … && cd …`, and `~` paths are resolved the same way as the bash tool for parent-verify cwd snaps.
+- Parent `eval` verify uses the session cwd when no explicit cwd is set (where the cell actually runs) and still rejects trivial expressions including `(1+1)` / `void 0`.
 - Duplicate background bash/eval terminals are not stashed after the verify snap clears, so a reused job id cannot clear a later latch from a stale early completion.
 - `/todo edit` and `/todo import` stamp Markdown `[-]`/`[~]` rows as user drops so settle does not treat them as model-abandoned work.
 - Parent `eval` no longer clears the unverified-merge latch on bare success: require an explicit cwd inside the merged tree and reject trivial expressions such as `1+1`.

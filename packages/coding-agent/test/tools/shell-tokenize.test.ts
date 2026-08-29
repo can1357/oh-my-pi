@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { extractLeadingCdTarget, hasUnresolvableLeadingCdPrefix } from "@oh-my-pi/pi-coding-agent/tools/shell-tokenize";
+import { extractLeadingCdTarget, hasUnresolvableLeadingCdPrefix, resolveLeadingCdChain } from "@oh-my-pi/pi-coding-agent/tools/shell-tokenize";
 
 describe("extractLeadingCdTarget", () => {
 	it("extracts a bare cd target and returns the remainder", () => {
@@ -71,7 +71,22 @@ describe("hasUnresolvableLeadingCdPrefix", () => {
 	it("is false for clean extractable cd or commands without cd", () => {
 		expect(hasUnresolvableLeadingCdPrefix("cd /tmp && bun test")).toBe(false);
 		expect(hasUnresolvableLeadingCdPrefix("cd /tmp; bun test")).toBe(false);
+		expect(hasUnresolvableLeadingCdPrefix("FOO=1 cd /tmp && bun test")).toBe(false);
 		expect(hasUnresolvableLeadingCdPrefix("bun test")).toBe(false);
 		expect(hasUnresolvableLeadingCdPrefix("pwd")).toBe(false);
+	});
+});
+
+describe("resolveLeadingCdChain", () => {
+	it("strips env/sudo and uses the last cd in a chain", () => {
+		expect(resolveLeadingCdChain("FOO=1 cd /repo && cd /tmp && bun test")).toEqual({ path: "/tmp" });
+		expect(resolveLeadingCdChain("sudo cd /tmp && bun test")).toEqual({ path: "/tmp" });
+		expect(resolveLeadingCdChain("  cd /tmp && bun test")).toEqual({ path: "/tmp" });
+	});
+
+	it("marks unresolvable when any leading cd cannot be extracted", () => {
+		expect(resolveLeadingCdChain("cd /repo && cd /tmp 2>/dev/null && bun test")).toEqual({
+			unresolvable: true,
+		});
 	});
 });

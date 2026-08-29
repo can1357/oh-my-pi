@@ -316,6 +316,38 @@ export function extractLeadingCdTarget(command: string): { path: string; rest: s
 	return { path, rest: command.slice(i) };
 }
 
+/** Strip leading `NAME=value` tokens and a single `sudo` for cwd/`cd` analysis. */
+export function stripLeadingEnvAndSudo(command: string): string {
+	let rest = command.trim();
+	while (/^[A-Za-z_][A-Za-z0-9_]*=/.test(rest)) {
+		const space = rest.search(/[ \t]/);
+		if (space < 0) return rest;
+		rest = rest.slice(space).trimStart();
+	}
+	return rest.replace(/^sudo[ \t]+/, "");
+}
+
+/**
+ * Walk a leading `cd … &&|; cd …` chain after env/sudo stripping.
+ * Returns the last extractable path, or `{ unresolvable: true }` when any
+ * leading `cd` cannot be safely extracted (redirects, expansion, extra args).
+ */
+export function resolveLeadingCdChain(command: string): { path?: string; unresolvable?: boolean } {
+	let rest = stripLeadingEnvAndSudo(command);
+	let lastPath: string | undefined;
+	let sawCd = false;
+	while (/^cd([ \t]|$)/.test(rest)) {
+		sawCd = true;
+		const cd = extractLeadingCdTarget(rest);
+		if (!cd) return { unresolvable: true };
+		lastPath = cd.path;
+		rest = cd.rest.trim();
+	}
+	if (sawCd && lastPath === undefined) return { unresolvable: true };
+	if (lastPath !== undefined) return { path: lastPath };
+	return {};
+}
+
 /**
  * True when the command begins with `cd` but {@link extractLeadingCdTarget}
  * cannot safely resolve the path (redirects, extra args, expansion). The shell
@@ -323,15 +355,5 @@ export function extractLeadingCdTarget(command: string): { path: string; rest: s
  * unverifiable rather than falling back to the session/structured cwd.
  */
 export function hasUnresolvableLeadingCdPrefix(command: string): boolean {
-	let rest = command.trim();
-	if (rest.length === 0) return false;
-	// Strip leading `NAME=value` tokens so `FOO=1 cd /tmp 2>/dev/null && …` is caught.
-	while (/^[A-Za-z_][A-Za-z0-9_]*=/.test(rest)) {
-		const space = rest.search(/[ \t]/);
-		if (space < 0) return false;
-		rest = rest.slice(space).trimStart();
-	}
-	rest = rest.replace(/^sudo[ \t]+/, "");
-	if (!/^cd([ \t]|$)/.test(rest)) return false;
-	return extractLeadingCdTarget(rest) === null;
+	return resolveLeadingCdChain(command).unresolvable === true;
 }

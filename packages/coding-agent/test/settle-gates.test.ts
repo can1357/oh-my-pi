@@ -117,6 +117,8 @@ describe("isTrivialParentVerifyEvalCode", () => {
 		expect(isTrivialParentVerifyEvalCode("")).toBe(true);
 		expect(isTrivialParentVerifyEvalCode("1+1")).toBe(true);
 		expect(isTrivialParentVerifyEvalCode("1 + 1;")).toBe(true);
+		expect(isTrivialParentVerifyEvalCode("(1+1)")).toBe(true);
+		expect(isTrivialParentVerifyEvalCode("void 0")).toBe(true);
 		expect(isTrivialParentVerifyEvalCode('"ok"')).toBe(true);
 		expect(isTrivialParentVerifyEvalCode("true")).toBe(true);
 		expect(isTrivialParentVerifyEvalCode("null")).toBe(true);

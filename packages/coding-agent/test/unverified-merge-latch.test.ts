@@ -168,19 +168,6 @@ describe("unverified isolated merge latch", () => {
 		tracker.onToolResult("eval", false, { cells: [{ code: "1+1", status: "complete" }] }, "call-arith");
 		expect(latch.latched).toBe(true);
 
-		// Non-trivial code still requires an explicit in-tree cwd.
-		tracker.onToolExecutionStart("eval", "call-nocwd", {
-			language: "js",
-			code: "await read('package.json')",
-		});
-		tracker.onToolResult(
-			"eval",
-			false,
-			{ cells: [{ code: "await read('package.json')", status: "complete" }] },
-			"call-nocwd",
-		);
-		expect(latch.latched).toBe(true);
-
 		// Trivial expression even with in-tree cwd is non-evidence.
 		tracker.onToolExecutionStart("eval", "call-trivial-cwd", {
 			language: "js",
@@ -199,13 +186,17 @@ describe("unverified isolated merge latch", () => {
 		tracker.onToolResult("eval", false, { cwd: "/tmp", code: "await read('package.json')" }, "call-out");
 		expect(latch.latched).toBe(true);
 
-		// In-tree cwd + non-trivial code is accepted as parent verify.
-		tracker.onToolExecutionStart("eval", "call-ok", {
+		// Non-trivial code without an explicit cwd runs in the session tree — clears.
+		tracker.onToolExecutionStart("eval", "call-session", {
 			language: "js",
 			code: "await read('package.json')",
-			cwd: "/repo",
 		});
-		tracker.onToolResult("eval", false, { cwd: "/repo", code: "await read('package.json')" }, "call-ok");
+		tracker.onToolResult(
+			"eval",
+			false,
+			{ cells: [{ code: "await read('package.json')", status: "complete" }] },
+			"call-session",
+		);
 		expect(latch.latched).toBe(false);
 	});
 
@@ -564,6 +555,26 @@ describe("unverified isolated merge latch", () => {
 			command: "cd /tmp 2>/dev/null && bun test",
 		});
 		tracker.onToolResult("bash", false, { cwd: "/repo" }, "call-redir");
+		expect(latch.latched).toBe(true);
+	});
+
+	it("does not clear when env-prefixed or chained out-of-tree cd hides structured cwd", async () => {
+		const latch = new UnverifiedMergeLatch();
+		latch.mark();
+		const ctx = host(latch, { cwd: "/repo", repoRoot: "/repo" });
+		const tracker = new TodoTracker(ctx.host);
+		tracker.onToolExecutionStart("bash", "call-env", {
+			cwd: "/repo",
+			command: "FOO=1 cd /tmp && bun test",
+		});
+		tracker.onToolResult("bash", false, { cwd: "/repo" }, "call-env");
+		expect(latch.latched).toBe(true);
+
+		tracker.onToolExecutionStart("bash", "call-chain", {
+			cwd: "/repo",
+			command: "cd /repo && cd /tmp && bun test",
+		});
+		tracker.onToolResult("bash", false, { cwd: "/repo" }, "call-chain");
 		expect(latch.latched).toBe(true);
 	});
 

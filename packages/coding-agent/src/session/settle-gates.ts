@@ -94,7 +94,15 @@ export function isTautologicalParentVerifyCommand(command: string): boolean {
  */
 export function isTrivialParentVerifyEvalCode(code: string | undefined): boolean {
 	if (code === undefined) return true;
-	const trimmed = code.trim().replace(/;+\s*$/, "");
+	let trimmed = code.trim().replace(/;+\s*$/, "");
+	if (trimmed.length === 0) return true;
+	// Strip one layer of block comments / void / outer parens so `void (1+1)` and
+	// `(1+1)` stay non-evidence the same way as bare `1+1`.
+	trimmed = trimmed.replace(/\/\*[\s\S]*?\*\//g, " ").trim();
+	trimmed = trimmed.replace(/^void\s+/, "").trim();
+	if (trimmed.startsWith("(") && trimmed.endsWith(")")) {
+		trimmed = trimmed.slice(1, -1).trim();
+	}
 	if (trimmed.length === 0) return true;
 	const literal =
 		"(?:true|false|null|undefined|-?\\d+(?:\\.\\d+)?(?:[eE][+-]?\\d+)?|\"(?:[^\"\\\\]|\\\\.)*\"|'(?:[^'\\\\]|\\\\.)*'|`(?:[^`\\\\]|\\\\.)*`)";
