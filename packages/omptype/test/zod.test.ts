@@ -108,20 +108,27 @@ describe("zod-like parsing", () => {
 		expect(steppedVariants.parse({ kind: "len", v: "abc" })).toEqual({ kind: "len", v: 3 });
 	});
 
-	it("rejects discriminated-union variants that cannot declare the discriminator", () => {
+	it("rejects discriminated-union variants that cannot be dispatched on", () => {
 		// The public signature accepts any schema, so an accidental non-object
 		// variant used to build a plain string/number union that answered
 		// safeParse("x") with success — the dispatch contract the call
 		// advertises, silently gone. It must fail at definition instead.
-		expect(() => z.discriminatedUnion("kind", [z.string(), z.number()])).toThrow(
-			/variant 0 does not declare a "kind" property/,
-		);
+		const pinFailure = /variant \d+ does not pin "kind" to a literal or enum value/;
+		expect(() => z.discriminatedUnion("kind", [z.string(), z.number()])).toThrow(pinFailure);
 		expect(() =>
 			z.discriminatedUnion("kind", [z.object({ kind: z.literal("a") }), z.object({ other: z.string() })]),
-		).toThrow(/variant 1 does not declare a "kind" property/);
+		).toThrow(pinFailure);
+		// An open discriminator is the subtler shape: the property exists, but
+		// every `kind` string would validate through this variant.
+		expect(() =>
+			z.discriminatedUnion("kind", [
+				z.object({ kind: z.string(), value: z.string() }),
+				z.object({ kind: z.literal("b"), n: z.number() }),
+			]),
+		).toThrow(pinFailure);
 
-		// A non-literal discriminator cannot be dispatched on, but zod accepts
-		// it: the variant stays valid and falls through to the ordered attempt.
+		// An enum or literal-union discriminator pins a finite value set, so it
+		// dispatches like a single literal.
 		const enumDiscriminated = z.discriminatedUnion("kind", [
 			z.object({ kind: z.enum(["a", "b"]), v: z.string() }),
 			z.object({ kind: z.literal("c"), n: z.number() }),
@@ -138,9 +145,9 @@ describe("zod-like parsing", () => {
 			z.lazy(() => z.object({ x: z.string() })),
 			z.object({ kind: z.literal("a"), n: z.number() }),
 		]);
-		expect(() => deferredInvalid.parse({ x: "oops" })).toThrow(/variant 0 does not declare a "kind" property/);
+		expect(() => deferredInvalid.parse({ x: "oops" })).toThrow(pinFailure);
 		// Still throws on later parses rather than latching a one-time pass.
-		expect(() => deferredInvalid.parse({ kind: "a", n: 1 })).toThrow(/variant 0 does not declare a "kind" property/);
+		expect(() => deferredInvalid.parse({ kind: "a", n: 1 })).toThrow(pinFailure);
 
 		const deferredValid = z.discriminatedUnion("kind", [
 			z.lazy(() => z.object({ kind: z.literal("lazy"), v: z.string() })),

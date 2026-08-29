@@ -503,71 +503,113 @@ export const union = <
 		}),
 	);
 };
-const NO_DISCRIMINANT = Symbol("omptype.zod.noDiscriminant");
-
 /**
- * Literal value a discriminated-union variant pins the discriminator to, read
- * straight off its structural IR; {@link NO_DISCRIMINANT} when unknowable.
+ * The values `ir` can take when that set is finite — literals, `null`,
+ * `undefined`, and unions of those (`z.enum`, a literal union). `undefined`
+ * means the set is open, so nothing can be dispatched on it.
  */
-function discriminantLiteral(ir: IR, key: string): unknown {
-	if (ir.k !== "object") return NO_DISCRIMINANT;
-	for (const prop of ir.props) {
-		if (prop.key === key) return prop.val.k === "lit" ? prop.val.v : NO_DISCRIMINANT;
+function finiteValues(ir: IR, seen?: Set<IR>): unknown[] | undefined {
+	switch (ir.k) {
+		case "lit":
+			return [ir.v];
+		case "null":
+			return [null];
+		case "undefined":
+			return [undefined];
+		case "union": {
+			const values: unknown[] = [];
+			for (const member of ir.members) {
+				const inner = finiteValues(member, seen);
+				if (inner === undefined) return undefined;
+				values.push(...inner);
+			}
+			return values.length > 0 ? values : undefined;
+		}
+		case "refine":
+			return finiteValues(ir.base, seen);
+		case "sub":
+			return finiteValues(ir.schema.ir, seen);
+		case "morph":
+			return finiteValues(ir.input, seen);
+		case "alias":
+			return resolveAlias(ir, seen, (resolved, active) => finiteValues(resolved, active));
+		default:
+			return undefined;
 	}
-	return NO_DISCRIMINANT;
 }
 
 /**
- * True when `ir` structurally declares `key`, the minimum a discriminated-union
- * variant must do to be dispatchable at all. Deliberately weaker than "pins a
- * literal": zod 4 accepts an enum or literal-union discriminator, which cannot
- * be dispatched on but is a legitimate variant — it falls through to the
- * ordered attempt. A non-object variant, or an object without the key, is a
- * definition error instead: nothing about it can honour the dispatch contract.
+ * Values a discriminated-union variant pins its discriminator to, or
+ * `undefined` when the variant cannot be dispatched on at all: a non-object, an
+ * object without the key, or a key whose value set is open (`kind: z.string()`,
+ * which zod rejects — accepting it would validate arbitrary discriminators
+ * through whichever variant happens to be tried first).
  *
- * `deferred` chooses what to do with a `z.lazy` alias: `"accept"` at
+ * Never called with an unresolved `z.lazy` inside: the caller skips those at
  * construction, where running the getter would break recursive definitions via
- * TDZ, and `"resolve"` at first parse, the earliest point zod's contract allows
- * the content to be inspected.
+ * TDZ, and re-checks them at first parse when resolution is legal.
  */
-function declaresDiscriminator(ir: IR, key: string, deferred: "accept" | "resolve", seen?: Set<IR>): boolean {
+function discriminatorValues(ir: IR, key: string, seen?: Set<IR>): unknown[] | undefined {
 	switch (ir.k) {
-		case "object":
-			return ir.props.some(prop => prop.key === key);
-		case "union":
-			return ir.members.every(member => declaresDiscriminator(member, key, deferred, seen));
-		case "intersection":
-			return ir.members.some(member => declaresDiscriminator(member, key, deferred, seen));
+		case "object": {
+			const prop = ir.props.find(candidate => candidate.key === key);
+			return prop === undefined ? undefined : finiteValues(prop.val, seen);
+		}
+		case "union": {
+			const values: unknown[] = [];
+			for (const member of ir.members) {
+				const inner = discriminatorValues(member, key, seen);
+				if (inner === undefined) return undefined;
+				values.push(...inner);
+			}
+			return values.length > 0 ? values : undefined;
+		}
+		case "intersection": {
+			for (const member of ir.members) {
+				const inner = discriminatorValues(member, key, seen);
+				if (inner !== undefined) return inner;
+			}
+			return undefined;
+		}
 		case "sub":
-			return declaresDiscriminator(ir.schema.ir, key, deferred, seen);
+			return discriminatorValues(ir.schema.ir, key, seen);
 		case "morph":
 			// restrictBase wraps a stepped schema in a morph over its base IR.
-			return declaresDiscriminator(ir.input, key, deferred, seen);
-		case "alias": {
-			if (ir.deferred === true && deferred === "accept") return true;
-			if (seen?.has(ir)) return false;
-			const active = seen ?? new Set<IR>();
-			active.add(ir);
-			return declaresDiscriminator(ir.resolve(), key, deferred, active);
-		}
+			return discriminatorValues(ir.input, key, seen);
+		case "alias":
+			return resolveAlias(ir, seen, (resolved, active) => discriminatorValues(resolved, key, active));
 		default:
-			return false;
+			return undefined;
 	}
 }
 
+/** Resolve an alias under a cycle guard; a re-entered alias yields nothing. */
+function resolveAlias(
+	ir: Extract<IR, { k: "alias" }>,
+	seen: Set<IR> | undefined,
+	visit: (resolved: IR, seen: Set<IR>) => unknown[] | undefined,
+): unknown[] | undefined {
+	if (seen?.has(ir)) return undefined;
+	const active = seen ?? new Set<IR>();
+	active.add(ir);
+	return visit(ir.resolve(), active);
+}
+
 /**
- * Union dispatched on a literal discriminator property. Variants whose IR pins
- * the discriminator to the input's value are tried first; when nothing matches
- * (or no variant declares a usable literal), every variant is attempted in
- * order so failures still report against the full union.
+ * Union dispatched on the discriminator property. Only the variants pinning the
+ * discriminator to the input's value are attempted; if the input carries no
+ * usable discriminator, every variant is attempted in order so failures still
+ * report against the full union.
  *
- * A variant that cannot declare the discriminator is rejected as a definition
- * error, matching zod: the public signature accepts any schema, so
- * `z.discriminatedUnion("kind", [z.string(), z.number()])` would otherwise
- * build a plain string/number union that accepts `"x"` — silently dropping the
- * dispatch contract the call advertises. Statically inspectable variants throw
- * at construction; a `z.lazy` variant is re-checked once its getter has run,
- * so wrapping the same invalid definition in `z.lazy` cannot bypass the check.
+ * A variant that cannot be dispatched on is rejected as a definition error,
+ * matching zod: the public signature accepts any schema, so
+ * `z.discriminatedUnion("kind", [z.string(), z.number()])` — or a variant
+ * declaring `kind: z.string()` — would otherwise build a plain union that
+ * validates arbitrary values through whichever variant is tried first,
+ * silently dropping the dispatch contract the call advertises. Statically
+ * inspectable variants throw at construction; a `z.lazy` variant is re-checked
+ * once its getter has run, so wrapping the same invalid definition in `z.lazy`
+ * cannot bypass the check.
  */
 export const discriminatedUnion = <
 	const Discriminator extends string,
@@ -577,47 +619,49 @@ export const discriminatedUnion = <
 	schemas: Schemas,
 ): ZodLikeSchema<UnionOutput<Schemas>> => {
 	const variantError = (index: number): OmpTypeError =>
-		new OmpTypeError(`discriminatedUnion variant ${index} does not declare a "${discriminator}" property`);
-	for (const [index, schema] of schemas.entries()) {
-		if (!declaresDiscriminator(schema.ir, discriminator, "accept")) throw variantError(index);
+		new OmpTypeError(
+			`discriminatedUnion variant ${index} does not pin "${discriminator}" to a literal or enum value`,
+		);
+	// A variant carrying a deferred alias is accepted unresolved here and
+	// re-checked at first parse: running the getter now would break recursive
+	// definitions via TDZ.
+	const variants = schemas.map(schema => ({
+		schema: schema as ZodLikeSchema<unknown>,
+		deferred: hasDeferredAlias(schema.ir),
+		values: hasDeferredAlias(schema.ir) ? undefined : discriminatorValues(schema.ir, discriminator),
+	}));
+	for (const [index, variant] of variants.entries()) {
+		if (!variant.deferred && variant.values === undefined) throw variantError(index);
 	}
 	const variantIrs = schemas.map(schema => embed(schema));
 	// Same gate as union() above: variants are embedded so stepped variants
 	// keep their steps and their exported structure, only deferred aliases are
 	// excluded up front, and omptype's determinism check arbitrates the rest —
 	// distinct discriminator literals make the variants disjoint, so any-match
-	// equals discriminator-dispatch. The literal dispatcher below is reserved
-	// for variant sets omptype rejects as order-dependent.
+	// equals discriminator-dispatch. The dispatcher below is reserved for
+	// variant sets omptype rejects as order-dependent.
 	if (schemas.every(schema => !hasDeferredAlias(schema.ir))) {
 		try {
 			return decorate(schemaFromIR<UnionOutput<Schemas>>({ k: "union", members: variantIrs }));
 		} catch (error) {
 			// Same fallback as union(): variants whose discriminators do not
 			// disjointly pin literals (e.g. optional discriminators overlapping
-			// another variant) are order-dependent — keep the literal dispatcher.
+			// another variant) are order-dependent — keep the dispatcher.
 			if (!isIndeterminateUnionError(error)) throw error;
 		}
 	}
-	const variants = schemas.map(schema => ({
-		schema: schema as ZodLikeSchema<unknown>,
-		literal: discriminantLiteral(schema.ir, discriminator),
-		// A deferred variant was accepted unresolved above; its content is only
-		// knowable once the getter has run, which is what `deferred` marks for
-		// the one-time re-check below.
-		deferred: hasDeferredAlias(schema.ir),
-	}));
 	let checked = !variants.some(variant => variant.deferred);
 	const dispatch = type.unknown.pipe((value, ctx) => {
 		if (!checked) {
 			// First parse: resolution is now legal, so a `z.lazy` variant that
-			// never declares the discriminator surfaces as the same definition
-			// error instead of quietly matching every object. Flag set only
+			// never pins the discriminator surfaces as the same definition error
+			// instead of quietly matching every object. The flag is set only
 			// after every variant passes, so a broken definition keeps throwing.
-			variants.forEach((variant, index) => {
-				if (variant.deferred && !declaresDiscriminator(variant.schema.ir, discriminator, "resolve")) {
-					throw variantError(index);
-				}
-			});
+			for (const [index, variant] of variants.entries()) {
+				if (!variant.deferred) continue;
+				variant.values = discriminatorValues(variant.schema.ir, discriminator);
+				if (variant.values === undefined) throw variantError(index);
+			}
 			checked = true;
 		}
 		if (typeof value !== "object" || value === null) {
@@ -625,10 +669,8 @@ export const discriminatedUnion = <
 		}
 		let candidates = variants;
 		const disc = (value as Record<string, unknown>)[discriminator];
-		if (disc !== undefined) {
-			const matched = variants.filter(variant => variant.literal === disc);
-			if (matched.length > 0) candidates = matched;
-		}
+		const matched = variants.filter(variant => variant.values?.includes(disc) === true);
+		if (matched.length > 0) candidates = matched;
 		for (const variant of candidates) {
 			const result = variant.schema(value);
 			if (!(result instanceof type.errors)) return result;
