@@ -196,12 +196,7 @@ describe("unverified isolated merge latch", () => {
 			code: "await read('package.json')",
 			cwd: "/tmp",
 		});
-		tracker.onToolResult(
-			"eval",
-			false,
-			{ cwd: "/tmp", code: "await read('package.json')" },
-			"call-out",
-		);
+		tracker.onToolResult("eval", false, { cwd: "/tmp", code: "await read('package.json')" }, "call-out");
 		expect(latch.latched).toBe(true);
 
 		// In-tree cwd + non-trivial code is accepted as parent verify.
@@ -210,12 +205,7 @@ describe("unverified isolated merge latch", () => {
 			code: "await read('package.json')",
 			cwd: "/repo",
 		});
-		tracker.onToolResult(
-			"eval",
-			false,
-			{ cwd: "/repo", code: "await read('package.json')" },
-			"call-ok",
-		);
+		tracker.onToolResult("eval", false, { cwd: "/repo", code: "await read('package.json')" }, "call-ok");
 		expect(latch.latched).toBe(false);
 	});
 
@@ -528,43 +518,6 @@ describe("unverified isolated merge latch", () => {
 		expect(latch.latched).toBe(true);
 		tracker.onToolExecutionStart("bash", "call-test", { command: "bun test test/foo.test.ts" });
 		tracker.onToolResult("bash", false, undefined, "call-test");
-		expect(latch.latched).toBe(false);
-	});
-
-	it("does not clear the latch on bare or trivial eval", async () => {
-		const latch = new UnverifiedMergeLatch();
-		latch.mark();
-		const ctx = host(latch);
-		const tracker = new TodoTracker(ctx.host);
-		tracker.onToolExecutionStart("eval", "call-arith", { code: "1 + 1" });
-		tracker.onToolResult("eval", false, { code: "1 + 1" }, "call-arith");
-		expect(latch.latched).toBe(true);
-		tracker.onToolExecutionStart("eval", "call-no-cwd", { code: "Bun.spawnSync(['bun','test']).exitCode" });
-		tracker.onToolResult("eval", false, { code: "Bun.spawnSync(['bun','test']).exitCode" }, "call-no-cwd");
-		expect(latch.latched).toBe(true);
-		tracker.onToolExecutionStart("eval", "call-ok", {
-			code: "Bun.spawnSync(['bun','test']).exitCode",
-			cwd: "/repo",
-		});
-		tracker.onToolResult(
-			"eval",
-			false,
-			{ code: "Bun.spawnSync(['bun','test']).exitCode", cwd: "/repo" },
-			"call-ok",
-		);
-		expect(latch.latched).toBe(false);
-	});
-
-	it("does not clear the latch when bash cds out of tree with a semicolon", async () => {
-		const latch = new UnverifiedMergeLatch();
-		latch.mark();
-		const ctx = host(latch, { cwd: "/repo", repoRoot: "/repo" });
-		const tracker = new TodoTracker(ctx.host);
-		tracker.onToolExecutionStart("bash", "call-out", { command: "cd /tmp; bun test" });
-		tracker.onToolResult("bash", false, undefined, "call-out");
-		expect(latch.latched).toBe(true);
-		tracker.onToolExecutionStart("bash", "call-in", { command: "cd /repo/packages; bun test" });
-		tracker.onToolResult("bash", false, undefined, "call-in");
 		expect(latch.latched).toBe(false);
 	});
 

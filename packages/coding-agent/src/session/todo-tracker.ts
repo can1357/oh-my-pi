@@ -158,8 +158,7 @@ export class TodoTracker {
 		if (!PARENT_VERIFY_TOOLS[toolName] || !toolCallId) return;
 		const command =
 			toolName === "bash" && isRecord(args) && typeof args.command === "string" ? args.command : undefined;
-		const code =
-			toolName === "eval" && isRecord(args) && typeof args.code === "string" ? args.code : undefined;
+		const code = toolName === "eval" && isRecord(args) && typeof args.code === "string" ? args.code : undefined;
 		const cwd =
 			toolName === "bash"
 				? this.#resolveBashStartCwd(args)
