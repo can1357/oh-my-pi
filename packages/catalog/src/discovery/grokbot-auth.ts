@@ -6,7 +6,7 @@
  * /sand-box/inference-credential. Machine id feeds `x-cursor-checksum`.
  */
 import * as path from "node:path";
-import { $env, getAgentDir, logger, parseEnvFile } from "@oh-my-pi/pi-utils";
+import { $env, getAgentDir, logger, parseEnvFile, parseEnvFileAsync } from "@oh-my-pi/pi-utils";
 import type { FetchImpl } from "../types";
 
 export const GROKBOT_BACKEND = "https://api2.cursor.sh";
@@ -88,7 +88,7 @@ export function grokbotSecretsPath(): string {
 }
 
 export async function loadGrokbotSecretFile(filePath = grokbotSecretsPath()): Promise<Record<string, string>> {
-	return parseEnvFile(filePath);
+	return parseEnvFileAsync(filePath);
 }
 
 export function loadGrokbotSecretFileSync(filePath = grokbotSecretsPath()): Record<string, string> {

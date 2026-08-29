@@ -8,6 +8,7 @@ import {
 	filterProcessEnv,
 	getDbBusyTimeoutMs,
 	parseEnvFile,
+	parseEnvFileAsync,
 	setInteractiveHost,
 } from "@oh-my-pi/pi-utils/env";
 
@@ -113,6 +114,12 @@ describe("parseEnvFile", () => {
 			QUOTED_HASH: "keep # this",
 			NO_SPACE: "http://host/path#frag",
 		});
+	});
+
+	it("parseEnvFileAsync matches sync parsing and returns {} for missing files", async () => {
+		const filePath = writeTempEnv('QUOTED="token"\nexport EXPORTED=ok\n');
+		await expect(parseEnvFileAsync(filePath)).resolves.toEqual(parseEnvFile(filePath));
+		await expect(parseEnvFileAsync(path.join(os.tmpdir(), `missing-${Date.now()}.env`))).resolves.toEqual({});
 	});
 
 	it("keeps escaped quotes inside quoted values literal, matching Bun", () => {

@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, spyOn, test, vi } from "bun:test";
+import { shortenPath } from "@oh-my-pi/pi-utils";
 import { toInferenceMessages, toSandImageDataUrl } from "../../src/providers/grokbot";
 import * as grokbotAuth from "../../src/providers/grokbot/auth";
 import {
@@ -392,6 +393,7 @@ describe("grokbot /login host-install prompt", () => {
 			namespace: "prod",
 			clientVersion: "0.30.0",
 		});
+		const secretsDisplay = shortenPath(grokbotAuth.grokbotSecretsPath());
 
 		const result = await loginGrokbot({
 			onAuth: () => {},
@@ -400,7 +402,8 @@ describe("grokbot /login host-install prompt", () => {
 				expect(prompt.allowEmpty).toBe(true);
 				expect(prompt.message).toContain("GROKBOT_RENEWAL_CREDENTIAL");
 				expect(prompt.message).toContain("GROKBOT_MACHINE_ID");
-				expect(prompt.message).toContain("secrets/grokbot.env");
+				expect(prompt.message).toContain(secretsDisplay);
+				expect(prompt.message).not.toContain("OMP_AGENT_DIR");
 				return "";
 			},
 			onProgress: message => {
