@@ -126,13 +126,16 @@ describe("ConnectFrameDecoder grammar", () => {
 		expect(frames).toHaveLength(1);
 		expect(frames[0]).toEqual({ kind: "end", error: null });
 		expect(decoder.sawEndStream).toBe(true);
-		// No frame (data or second end) may follow end-of-stream.
-		expectProtocolError(() => decoder.push(rawFrame(0x00, "late")), undefined, "envelope");
-		expectProtocolError(
-			() => decoder.push(rawFrame(CONNECT_FLAG_END_STREAM, JSON.stringify({}))),
-			undefined,
-			"envelope",
-		);
+		// No frame (data or second end) may follow end-of-stream, but the decoder
+		// buffers the trailing bytes and exposes the protocol error via poisonError
+		// instead of throwing from push(), so the pump can emit prefix frames first.
+		expect(decoder.push(rawFrame(0x00, "late"))).toEqual([]);
+		expect(decoder.poisonError).toBeInstanceOf(ConnectProtocolError);
+		expect(decoder.poisonError?.kind).toBe("envelope");
+		expect(decoder.poisonError?.message).toContain("bytes after end-of-stream");
+		const secondEnd = decoder.push(rawFrame(CONNECT_FLAG_END_STREAM, JSON.stringify({})));
+		expect(secondEnd).toEqual([]);
+		expect(decoder.poisonError?.kind).toBe("envelope");
 	});
 
 	test("clean end-of-stream frame yields a null error and marks the stream ended", () => {
@@ -185,20 +188,22 @@ describe("ConnectFrameDecoder grammar", () => {
 		);
 	});
 
-	test("second end-stream frame after end-of-stream is rejected", () => {
+	test("second end-stream frame after end-of-stream is buffered as poison", () => {
 		const decoder = new ConnectFrameDecoder({ acceptCompressed: true });
 		decoder.push(rawFrame(CONNECT_FLAG_END_STREAM, JSON.stringify({ error: null })));
-		expectProtocolError(
-			() => decoder.push(rawFrame(CONNECT_FLAG_END_STREAM, JSON.stringify({ error: null }))),
-			undefined,
-			"envelope",
-		);
+		expect(decoder.push(rawFrame(CONNECT_FLAG_END_STREAM, JSON.stringify({ error: null })))).toEqual([]);
+		expect(decoder.poisonError).toBeInstanceOf(ConnectProtocolError);
+		expect(decoder.poisonError?.kind).toBe("envelope");
+		expect(decoder.poisonError?.message).toContain("bytes after end-of-stream");
 	});
 
-	test("data frame after end-of-stream is rejected", () => {
+	test("data frame after end-of-stream is buffered as poison", () => {
 		const decoder = new ConnectFrameDecoder({ acceptCompressed: true });
 		decoder.push(rawFrame(CONNECT_FLAG_END_STREAM, JSON.stringify({ error: null })));
-		expectProtocolError(() => decoder.push(rawFrame(0x00, "late data")), undefined, "envelope");
+		expect(decoder.push(rawFrame(0x00, "late data"))).toEqual([]);
+		expect(decoder.poisonError).toBeInstanceOf(ConnectProtocolError);
+		expect(decoder.poisonError?.kind).toBe("envelope");
+		expect(decoder.poisonError?.message).toContain("bytes after end-of-stream");
 	});
 
 	test("terminal envelope plus an incomplete trailing envelope in one push withholds the end frame", () => {
@@ -236,9 +241,13 @@ describe("ConnectFrameDecoder grammar", () => {
 		expect(decoder.sawEndStream).toBe(true);
 		// The no-op contract, made observable: finish() neither reopens the
 		// stream nor consumes the terminal state, so a trailing byte is
-		// still a protocol error after it ran.
+		// still a protocol error after it ran. It is surfaced via poisonError,
+		// not by throwing from push(), so prefix frames can still be emitted first.
 		decoder.finish();
-		expectProtocolError(() => decoder.push(Buffer.from([0x00])), "bytes after end-of-stream", "envelope");
+		expect(decoder.push(Buffer.from([0x00]))).toEqual([]);
+		expect(decoder.poisonError).toBeInstanceOf(ConnectProtocolError);
+		expect(decoder.poisonError?.kind).toBe("envelope");
+		expect(decoder.poisonError?.message).toContain("bytes after end-of-stream");
 	});
 
 	test("fragmented byte-at-a-time delivery yields identical frames to one chunk", () => {
@@ -327,11 +336,18 @@ describe("ConnectFrameDecoder hardening (grill loop batch 1)", () => {
 		expectProtocolError(() => decoder.finish(), "bytes after end-of-stream", "envelope");
 	});
 
-	test("trailing bytes after end-stream: a chunk pushed after the terminal frame throws from push()", () => {
+	test("trailing bytes after end-stream: a chunk pushed after the terminal frame exposes poisonError", () => {
 		const decoder = new ConnectFrameDecoder({ acceptCompressed: true });
 		decoder.push(rawFrame(CONNECT_FLAG_END_STREAM, JSON.stringify({ error: null })));
 		expect(decoder.sawEndStream).toBe(true);
-		// Even a single byte pushed after the terminal envelope is a protocol error.
-		expectProtocolError(() => decoder.push(Buffer.from([0x00])), "bytes after end-of-stream", "envelope");
+		// Even a single byte pushed after the terminal envelope is a protocol error,
+		// but push() does not throw: it buffers the tail and exposes the error via
+		// the poison signal so the pump can emit already-decoded prefix frames first.
+		expect(decoder.push(Buffer.from([0x00]))).toEqual([]);
+		expect(decoder.poisonError).toBeInstanceOf(ConnectProtocolError);
+		expect(decoder.poisonError?.kind).toBe("envelope");
+		expect(decoder.poisonError?.message).toContain("bytes after end-of-stream");
+		// finish() still reports the buffered tail as a protocol error.
+		expectProtocolError(() => decoder.finish(), "bytes after end-of-stream", "envelope");
 	});
 });

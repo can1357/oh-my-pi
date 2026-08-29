@@ -146,6 +146,7 @@ export class ConnectFrameDecoder {
 	#start = 0;
 	#end = 0;
 	#sawEndStream = false;
+	#trailingError: ConnectProtocolError | undefined;
 
 	constructor(options: { acceptCompressed: boolean }) {
 		this.#acceptCompressed = options.acceptCompressed;
@@ -153,6 +154,11 @@ export class ConnectFrameDecoder {
 
 	get sawEndStream(): boolean {
 		return this.#sawEndStream;
+	}
+
+	/** The protocol error for bytes buffered after the terminal envelope, if any. */
+	get poisonError(): ConnectProtocolError | undefined {
+		return this.#trailingError;
 	}
 
 	/** Number of unconsumed bytes currently buffered. */
@@ -186,15 +192,19 @@ export class ConnectFrameDecoder {
 
 	/** Appends bytes and returns every frame that completed. Throws `ConnectProtocolError`. */
 	push(chunk: Buffer): ConnectFrame[] {
-		// Once the terminal envelope has been consumed, no further bytes are
-		// valid — a terminal envelope is exactly one header + payload, nothing
-		// more. Reject any non-empty trailing chunk from push() itself.
-		if (this.#sawEndStream && chunk.length > 0) {
-			throw new ConnectProtocolError("Cursor Connect received bytes after end-of-stream envelope", {
-				kind: "envelope",
-			});
-		}
 		if (chunk.length === 0) return [];
+		// Once the terminal envelope has been consumed, no further bytes are
+		// valid. Buffer them and expose the protocol error via `poisonError`
+		// instead of throwing, so the pump can admit already-decoded prefix
+		// frames before observing the failure.
+		if (this.#sawEndStream) {
+			this.#append(chunk);
+			this.#trailingError ??= new ConnectProtocolError(
+				"Cursor Connect received bytes after end-of-stream envelope",
+				{ kind: "envelope" },
+			);
+			return [];
+		}
 		this.#append(chunk);
 
 		const frames: ConnectFrame[] = [];
@@ -218,13 +228,6 @@ export class ConnectFrameDecoder {
 			// Consume the envelope before processing it; a processing throw is a
 			// terminal protocol error that aborts the stream regardless.
 			this.#start = payloadEnd;
-
-			// No frame may follow the end-of-stream envelope.
-			if (this.#sawEndStream) {
-				throw new ConnectProtocolError("Cursor Connect received a frame after end-of-stream", {
-					kind: "envelope",
-				});
-			}
 
 			if ((flags & CONNECT_FLAG_RESERVED_MASK) !== 0) {
 				throw new ConnectProtocolError(`Cursor Connect protocol error: invalid envelope flags ${flags}`, {
@@ -290,7 +293,14 @@ export class ConnectFrameDecoder {
 		// a partial envelope) withhold the end frame and leave the decoder
 		// poisoned, so the next push() or finish() reports the protocol error
 		// while the data frames decoded ahead of it are still delivered.
-		if (endFrame !== undefined && this.#pending === 0) frames.push(endFrame);
+		if (endFrame !== undefined && this.#pending === 0) {
+			frames.push(endFrame);
+		} else if (endFrame !== undefined) {
+			this.#trailingError ??= new ConnectProtocolError(
+				"Cursor Connect received bytes after end-of-stream envelope",
+				{ kind: "envelope" },
+			);
+		}
 		return frames;
 	}
 

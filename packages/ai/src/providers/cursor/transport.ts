@@ -180,7 +180,7 @@ function wrapH2Lease(lease: h2Pool.CursorH2Lease): CursorTransportAttempt {
 		settleTrailers({});
 	}
 
-	const pump = startH2FramePump(request, decoder);
+	const pump = startH2FramePump(request, decoder, failTrailers);
 
 	return {
 		write(frame: Buffer): void {
@@ -233,7 +233,11 @@ function framesRetainedBytes(frames: readonly ConnectFrame[]): number {
 	return bytes;
 }
 
-function startH2FramePump(request: http2.ClientHttp2Stream, decoder: ConnectFrameDecoder): H2FramePump {
+function startH2FramePump(
+	request: http2.ClientHttp2Stream,
+	decoder: ConnectFrameDecoder,
+	onFailure?: (cause: unknown) => void,
+): H2FramePump {
 	const pump: H2FramePump = {
 		pending: [],
 		head: 0,
@@ -257,22 +261,26 @@ function startH2FramePump(request: http2.ClientHttp2Stream, decoder: ConnectFram
 	const fail = (cause: unknown): void => {
 		if (pump.done || pump.failure) return;
 		pump.failure = cause instanceof Error ? cause : new Error(String(cause));
+		onFailure?.(pump.failure);
 		pump.wake();
 	};
 	const onData = (chunk: Buffer | string): void => {
 		if (pump.done || pump.failure) return;
 		try {
 			const frames = decoder.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
-			if (frames.length === 0) return;
-			const incomingBytes = framesRetainedBytes(frames);
-			const queueByteLimit = __frameQueueBytes ?? H2_FRAME_QUEUE_BYTES;
-			if (pump.queuedBytes + incomingBytes > queueByteLimit) {
-				fail(new Error(`Cursor HTTP/2 frame queue exceeded ${queueByteLimit} queued bytes`));
-				return;
+			if (frames.length > 0) {
+				const incomingBytes = framesRetainedBytes(frames);
+				const queueByteLimit = __frameQueueBytes ?? H2_FRAME_QUEUE_BYTES;
+				if (pump.queuedBytes + incomingBytes > queueByteLimit) {
+					fail(new Error(`Cursor HTTP/2 frame queue exceeded ${queueByteLimit} queued bytes`));
+					return;
+				}
+				pump.pending.push(...frames);
+				pump.queuedBytes += incomingBytes;
+				pump.wake();
 			}
-			pump.pending.push(...frames);
-			pump.queuedBytes += incomingBytes;
-			pump.wake();
+			const poison = decoder.poisonError;
+			if (poison) fail(poison);
 		} catch (cause) {
 			fail(cause);
 		}

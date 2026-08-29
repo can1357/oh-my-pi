@@ -786,6 +786,64 @@ describe("openCursorTransport lifecycle", () => {
 			await closed.promise;
 		}
 	}, 10_000);
+
+	it("fails immediately when stray bytes follow the end envelope in a half-open stream, after delivering data frames", async () => {
+		// The server sends the same turnEnded + end + tail shape as above, but
+		// never closes the HTTP/2 stream. The decoder poison must fail the pump
+		// before the client waits for an EOF/caller timeout, while the data
+		// frame decoded ahead of the tail remains observable.
+		let server: http2.Http2Server | undefined;
+		const sessions = new Set<http2.Http2Session>();
+		server = http2.createServer();
+		server.on("session", session => {
+			sessions.add(session);
+			session.on("close", () => sessions.delete(session));
+		});
+		server.on("stream", (stream: http2.ServerHttp2Stream) => {
+			stream.on("data", () => {});
+			stream.respond({ ":status": 200, "content-type": "application/connect+proto" });
+			stream.write(
+				Buffer.concat([frameConnectMessage(turnEndedPayload()), endFrame(), Buffer.from([0x01, 0x02, 0x03])]),
+			);
+		});
+		const listening = Promise.withResolvers<void>();
+		server.once("error", listening.reject);
+		server.listen(0, "127.0.0.1", listening.resolve);
+		await listening.promise;
+		const address = server.address();
+		if (!address || typeof address === "string") throw new Error("expected live h2 fixture");
+
+		try {
+			const attempt = await openCursorTransport({
+				baseUrl: `http://127.0.0.1:${address.port}`,
+				apiKey: API_KEY,
+				requestPath: RUN_PATH,
+				runHeaders: testRunHeaders(),
+				gzipRequest: false,
+				provider: "cursor",
+			});
+			attempt.write(encodeConnectFrame(Buffer.from("client-request"), false));
+			const frames: Array<{ kind: string }> = [];
+			let error: unknown;
+			const started = Date.now();
+			try {
+				for await (const frame of attempt.frames()) frames.push(frame);
+			} catch (cause) {
+				error = cause;
+			}
+			// The half-open poison must surface well inside the caller/heartbeat budget.
+			expect(Date.now() - started).toBeLessThan(2500);
+			expect(frames.filter(frame => frame.kind === "data")).toHaveLength(1);
+			expect(frames.some(frame => frame.kind === "end")).toBe(false);
+			expect(String(error)).toContain("after end-of-stream");
+			attempt.close();
+		} finally {
+			for (const session of sessions) session.destroy();
+			const closed = Promise.withResolvers<void>();
+			server.close(error => (error ? closed.reject(error) : closed.resolve()));
+			await closed.promise;
+		}
+	}, 10_000);
 });
 
 function turnEndedPayload(): Uint8Array {

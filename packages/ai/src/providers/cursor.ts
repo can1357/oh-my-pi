@@ -847,9 +847,12 @@ function streamCursorWithWireMode(
 				debugResponseLogPromise = Promise.resolve(debugSession?.openResponseLog("HTTP/1.1 bridge"));
 			}
 
-			void attempt
-				.trailers()
-				.then(trailers => {
+			// One handled trailers promise: records a nonzero grpc-status or a
+			// rejection into endStreamError without overriding a terminal-frame
+			// error, then settles so the clean-end grace race can observe it.
+			const trailersHandled = Promise.withResolvers<void>();
+			void attempt.trailers().then(
+				trailers => {
 					const status = trailers["grpc-status"];
 					const msg = trailers["grpc-message"];
 					if (status && status !== "0" && !endStreamError) {
@@ -869,23 +872,26 @@ function streamCursorWithWireMode(
 							kind: "envelope",
 						});
 					}
-				})
-				.catch(() => {});
+					trailersHandled.resolve();
+				},
+				cause => {
+					if (!endStreamError) {
+						endStreamError = cause instanceof Error ? cause : new Error(String(cause));
+					}
+					trailersHandled.resolve();
+				},
+			);
 
 			// A clean end envelope settles the frame stream, but trailing HEADERS
 			// stay authoritative: give them a short window to land before the
 			// envelope settles the turn as success. A half-open peer that never
 			// sends trailers (#9852) still settles within the grace budget.
 			const awaitTerminalTrailers = async (): Promise<void> => {
-				const trailersSettled = transport.trailers().then(
-					() => undefined,
-					() => undefined,
-				);
 				const grace = Promise.withResolvers<void>();
 				const graceTimer = setTimeout(grace.resolve, CURSOR_H2_TRAILER_GRACE_MS);
 				graceTimer.unref();
-				void trailersSettled.then(() => clearTimeout(graceTimer));
-				await Promise.race([trailersSettled, grace.promise]);
+				void trailersHandled.promise.then(() => clearTimeout(graceTimer));
+				await Promise.race([trailersHandled.promise, grace.promise]);
 			};
 
 			void (async () => {

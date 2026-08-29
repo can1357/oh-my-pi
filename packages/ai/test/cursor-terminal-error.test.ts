@@ -29,6 +29,7 @@ type Scenario =
 	| { kind: "connect-classification-detail-after-turn" }
 	| { kind: "grpc-trailer-after-turn" }
 	| { kind: "grpc-trailer-after-clean-end" }
+	| { kind: "trailing-bytes-after-clean-end" }
 	| { kind: "end-before-turn" }
 	| { kind: "hang-after-turn" }
 	| { kind: "exec-in-final-chunk"; responseFinished: PromiseWithResolvers<void> }
@@ -203,6 +204,22 @@ async function startServer(): Promise<string> {
 			// cannot win the settle race by accident.
 			stream.write(frameConnectMessage(Buffer.from("{}", "utf8"), CONNECT_END_STREAM_FLAG));
 			setTimeout(() => stream.end(), 25);
+			return;
+		}
+
+		if (scenario.kind === "trailing-bytes-after-clean-end") {
+			// turnEnded and a clean end envelope land first, so the consumer breaks
+			// for the clean-end trailer grace. Then trailing DATA bytes arrive in a
+			// later HTTP/2 DATA frame, poisoning the decoder and failing the pump;
+			// that pump failure must reject the trailers promise and beat the grace
+			// before the turn can settle as done.
+			stream.write(textDeltaFrame("hello"));
+			stream.write(turnEndedFrame());
+			stream.write(frameConnectMessage(Buffer.from("{}", "utf8"), CONNECT_END_STREAM_FLAG));
+			setTimeout(() => {
+				stream.write(Buffer.from([0x00, 0x01, 0x02]));
+				stream.end();
+			}, 25);
 			return;
 		}
 
@@ -468,6 +485,17 @@ describe("Cursor terminal lifecycle after turnEnded", () => {
 		expect(eventTypes).not.toContain("done");
 		expect(result.stopReason).toBe("error");
 		expect(result.errorMessage).toContain("gRPC error 13: post-envelope trailer failure");
+	});
+
+	it("rejects when trailing bytes after a clean end cause the trailers promise to fail during grace", async () => {
+		scenario = { kind: "trailing-bytes-after-clean-end" };
+		const baseUrl = await startServer();
+		const { eventTypes, result } = await collectStream(makeModel(baseUrl));
+		expect(eventTypes[0]).toBe("start");
+		expect(eventTypes.at(-1)).toBe("error");
+		expect(eventTypes).not.toContain("done");
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toMatch(/bytes after end-of-stream|trailing|envelope|protocol/i);
 	});
 
 	it("rejects when the stream ends before turnEnded", async () => {
