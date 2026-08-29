@@ -12,7 +12,7 @@ import {
 	tryParseJson,
 } from "@oh-my-pi/pi-utils";
 import type { ExtensionModule } from "../capability/extension-module";
-import { invalidate as invalidateFsCache, readDirEntries, readFile } from "../capability/fs";
+import { invalidate as invalidateFsCache, readDirEntries, readDirEntriesWithinLimit, readFile } from "../capability/fs";
 import { parseRuleConditionAndScope, type Rule, type RuleFrontmatter } from "../capability/rule";
 import type { Skill, SkillFrontmatter } from "../capability/skill";
 import type { LoadContext, LoadResult, SourceMeta } from "../capability/types";
@@ -364,31 +364,6 @@ const PRUNED_RECURSIVE_SKILL_DIRECTORIES: Record<string, true> = {
 	node_modules: true,
 };
 
-async function readSortedDirectoryEntriesWithinLimit(
-	directoryPath: string,
-	maxEntries: number | undefined,
-): Promise<fs.Dirent[] | null> {
-	if (maxEntries === undefined) {
-		const entries = await fs.promises.readdir(directoryPath, { withFileTypes: true });
-		entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
-		return entries;
-	}
-
-	const entries: fs.Dirent[] = [];
-	const directory = await fs.promises.opendir(directoryPath);
-	for await (const entry of directory) {
-		if (entries.length >= maxEntries) {
-			// A deterministic subset cannot be selected without reading the entire directory.
-			// Reject this directory instead: memory and enumeration stay bounded, and truncation
-			// never exposes a filesystem-order-dependent subset of skills.
-			return null;
-		}
-		entries.push(entry);
-	}
-	entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
-	return entries;
-}
-
 export interface ScanSkillsFromDirOptions {
 	dir: string;
 	providerId: string;
@@ -433,7 +408,7 @@ export async function scanSkillsFromDir(
 
 	const loadSkill = async (skillPath: string) => {
 		try {
-			const content = await readFile(skillPath);
+			const content = await readFile(skillPath, { cacheMisses: false });
 			if (!content) return;
 			const { frontmatter, body } = parseFrontmatter(content, { source: skillPath });
 			if (frontmatter.enabled === false) {
@@ -476,7 +451,7 @@ export async function scanSkillsFromDir(
 		const remainingEntries = options.recursive ? Math.max(0, limits.maxEntries - visitedEntries) : undefined;
 		let entries: fs.Dirent[] | null;
 		try {
-			entries = await readSortedDirectoryEntriesWithinLimit(current.path, remainingEntries);
+			entries = await readDirEntriesWithinLimit(current.path, remainingEntries);
 		} catch (error) {
 			if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
 				warnings.push(`Failed to read skills directory: ${current.path} (${String(error)})`);

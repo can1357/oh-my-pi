@@ -8,10 +8,20 @@ function resolvePath(filePath: string): string {
 	return path.resolve(filePath);
 }
 
-export async function readFile(filePath: string): Promise<string | null> {
+export interface ReadFileOptions {
+	/**
+	 * Cache `null` results. Disable for optional files that may be created between
+	 * discovery passes without an explicit filesystem cache invalidation.
+	 * @default true
+	 */
+	cacheMisses?: boolean;
+}
+
+export async function readFile(filePath: string, options: ReadFileOptions = {}): Promise<string | null> {
 	const abs = resolvePath(filePath);
 	if (contentCache.has(abs)) {
-		return contentCache.get(abs) ?? null;
+		const cached = contentCache.get(abs) ?? null;
+		if (cached !== null || options.cacheMisses !== false) return cached;
 	}
 
 	try {
@@ -22,14 +32,14 @@ export async function readFile(filePath: string): Promise<string | null> {
 		// context files (CLAUDE.md -> AGENTS.md) still resolve.
 		const stats = await fs.promises.stat(abs);
 		if (!stats.isFile()) {
-			contentCache.set(abs, null);
+			if (options.cacheMisses !== false) contentCache.set(abs, null);
 			return null;
 		}
 		const content = await Bun.file(abs).text();
 		contentCache.set(abs, content);
 		return content;
 	} catch {
-		contentCache.set(abs, null);
+		if (options.cacheMisses !== false) contentCache.set(abs, null);
 		return null;
 	}
 }
@@ -48,6 +58,44 @@ export async function readDirEntries(dirPath: string): Promise<fs.Dirent[]> {
 		dirCache.set(abs, []);
 		return [];
 	}
+}
+
+/**
+ * Read and sort a directory while bounding the number of entries retained.
+ *
+ * Returns `null` when the directory contains more than `maxEntries`. Truncated
+ * results are never cached because a partial cache entry would violate
+ * `readDirEntries()` semantics. Filesystem errors are left to the caller.
+ */
+export async function readDirEntriesWithinLimit(
+	dirPath: string,
+	maxEntries: number | undefined,
+): Promise<fs.Dirent[] | null> {
+	const abs = resolvePath(dirPath);
+	const cached = dirCache.get(abs);
+	if (cached) {
+		if (maxEntries !== undefined && cached.length > maxEntries) return null;
+		return [...cached].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+	}
+
+	let entries: fs.Dirent[];
+	if (maxEntries === undefined) {
+		entries = await fs.promises.readdir(abs, { withFileTypes: true });
+	} else {
+		entries = [];
+		const directory = await fs.promises.opendir(abs);
+		for await (const entry of directory) {
+			if (entries.length >= maxEntries) {
+				// A deterministic subset cannot be selected without reading the entire
+				// directory. Reject it instead of exposing filesystem-order-dependent data.
+				return null;
+			}
+			entries.push(entry);
+		}
+	}
+
+	dirCache.set(abs, entries);
+	return [...entries].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
 }
 
 export async function readDir(dirPath: string): Promise<string[]> {

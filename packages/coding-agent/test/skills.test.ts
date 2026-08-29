@@ -193,6 +193,23 @@ describe("skills", () => {
 			}
 		});
 
+		it("discovers a manifest created in an existing directory after an earlier scan", async () => {
+			const root = await fs.mkdtemp(path.join(os.tmpdir(), "pi-skills-created-manifest-"));
+			const skillDir = path.join(root, "created-later");
+			try {
+				await fs.mkdir(skillDir);
+				expect((await scanRecursive(root)).items).toHaveLength(0);
+
+				await writeTestSkill(skillDir, "created-later");
+				const result = await scanRecursive(root);
+
+				expect(result.items.map(skill => skill.name)).toEqual(["created-later"]);
+				expect(result.warnings).toHaveLength(0);
+			} finally {
+				await removeWithRetries(root);
+			}
+		});
+
 		it("loads through depth six and truncates skills at depths seven and eight", async () => {
 			const root = await fs.mkdtemp(path.join(os.tmpdir(), "pi-skills-depth-"));
 			const depthSix = path.join(root, "one", "two", "three", "four", "five", "six");
