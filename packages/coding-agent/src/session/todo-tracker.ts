@@ -227,7 +227,11 @@ export class TodoTracker {
 				tasks: phase.tasks
 					.filter(
 						(task): task is TodoItem & { status: "pending" | "in_progress" | "abandoned" } =>
-							task.status === "pending" || task.status === "in_progress" || task.status === "abandoned",
+							task.status === "pending" ||
+							task.status === "in_progress" ||
+							// Model-abandoned work is still incomplete; a user `/todo drop`
+							// stamps `droppedBy: "user"` and is an explicit cancel.
+							(task.status === "abandoned" && task.droppedBy !== "user"),
 					)
 					.map(task => ({ content: task.content, status: task.status })),
 			}))
@@ -336,11 +340,12 @@ export class TodoTracker {
 	#clonePhases(phases: TodoPhase[]): TodoPhase[] {
 		return phases.map(phase => ({
 			name: phase.name,
-			tasks: phase.tasks.map(task =>
-				task.blocker !== undefined
-					? { content: task.content, status: task.status, blocker: task.blocker }
-					: { content: task.content, status: task.status },
-			),
+			tasks: phase.tasks.map(task => {
+				const cloned: TodoItem = { content: task.content, status: task.status };
+				if (task.blocker !== undefined) cloned.blocker = task.blocker;
+				if (task.droppedBy !== undefined) cloned.droppedBy = task.droppedBy;
+				return cloned;
+			}),
 		}));
 	}
 }

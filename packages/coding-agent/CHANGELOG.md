@@ -41,6 +41,9 @@
 - Fixed `lsp diagnostics` incorrectly reporting success for project-aware pull-diagnostic servers when diagnostics time out or fail.
 - Corrected labels under `Settings > Context > Compaction Token Limit`.
 - Fixed orphaned pages, iframes, and workers accumulating in the shared headless browser after abnormal OMP session termination.
+### Fixed
+
+- Dropped todos (`todo drop` / `abandoned`) no longer count as done for the stop-time reminder or the todo summary. Settle stays incomplete until those items are completed, blocked, or the user forces stop. User-issued `/todo drop` is stamped as user-authored and does not schedule a continue reminder.
 
 ## [18.0.10] - 2026-08-28
 
@@ -66,9 +69,6 @@
 - Fixed a macOS composer display issue where undercurl could remain attached to stale text after rapid typing.
 - Improved `xd://` MCP failure messages with actionable transport stages, failure categories, server and tool context, retryability, trace IDs, and redacted JSON-RPC details.
 - Fixed ACP `read` tool-call locations so clients such as Zed Follow receive the resolved filesystem path rather than the OMP line-range selector.
-### Fixed
-
-- Dropped todos (`todo drop` / `abandoned`) no longer count as done for the stop-time reminder or the todo summary. Settle stays incomplete until those items are completed, blocked, or the user forces stop.
 
 ## [18.0.9] - 2026-08-28
 

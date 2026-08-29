@@ -27,6 +27,12 @@ export interface TodoItem {
 	status: TodoStatus;
 	/** When `status === "blocked"`, an optional note on what the task is waiting for. */
 	blocker?: string;
+	/**
+	 * Set when the user abandoned this task via `/todo drop` (interactive or ACP).
+	 * Settle treats model-authored `abandoned` as incomplete work that should
+	 * continue, but a user-authored drop is an explicit cancel and must not.
+	 */
+	droppedBy?: "user";
 }
 
 export interface TodoPhase {
@@ -45,7 +51,8 @@ export function isTodoPhase(value: unknown): value is TodoPhase {
 				task.status === "in_progress" ||
 				task.status === "completed" ||
 				task.status === "abandoned" ||
-				task.status === "blocked"),
+				task.status === "blocked") &&
+			(task.droppedBy === undefined || task.droppedBy === "user"),
 	);
 }
 
@@ -109,9 +116,10 @@ function findPhaseByName(phases: TodoPhase[], name: string): TodoPhase | undefin
 }
 
 function cloneTask(task: TodoItem): TodoItem {
-	return task.blocker !== undefined
-		? { content: task.content, status: task.status, blocker: task.blocker }
-		: { content: task.content, status: task.status };
+	const cloned: TodoItem = { content: task.content, status: task.status };
+	if (task.blocker !== undefined) cloned.blocker = task.blocker;
+	if (task.droppedBy !== undefined) cloned.droppedBy = task.droppedBy;
+	return cloned;
 }
 
 function clonePhases(phases: TodoPhase[]): TodoPhase[] {
@@ -485,7 +493,12 @@ function removeTasks(phases: TodoPhase[], entry: TodoOpEntryValue, errors: strin
 	return phases;
 }
 
-function applyEntry(phases: TodoPhase[], entry: TodoOpEntryValue, errors: string[]): TodoPhase[] {
+function applyEntry(
+	phases: TodoPhase[],
+	entry: TodoOpEntryValue,
+	errors: string[],
+	options?: { userAuthored?: boolean },
+): TodoPhase[] {
 	switch (entry.op) {
 		case "init":
 			return initPhases(entry, errors);
@@ -496,21 +509,29 @@ function applyEntry(phases: TodoPhase[], entry: TodoOpEntryValue, errors: string
 				for (const candidate of phase.tasks) {
 					if (candidate.status === "in_progress" && candidate !== hit.task) {
 						candidate.status = "pending";
+						candidate.droppedBy = undefined;
 					}
 				}
 			}
 			hit.task.status = "in_progress";
+			hit.task.droppedBy = undefined;
 			return phases;
 		}
 		case "done": {
 			for (const task of getTaskTargets(phases, entry, errors)) {
 				task.status = "completed";
+				task.droppedBy = undefined;
 			}
 			return phases;
 		}
 		case "drop": {
 			for (const task of getTaskTargets(phases, entry, errors)) {
 				task.status = "abandoned";
+				if (options?.userAuthored) {
+					task.droppedBy = "user";
+				} else {
+					task.droppedBy = undefined;
+				}
 			}
 			return phases;
 		}
@@ -533,6 +554,7 @@ function applyEntry(phases: TodoPhase[], entry: TodoOpEntryValue, errors: string
 				if (task.status !== "pending" && task.status !== "in_progress" && task.status !== "blocked") continue;
 				task.status = "blocked";
 				task.blocker = reason;
+				task.droppedBy = undefined;
 			}
 			return phases;
 		}
@@ -545,6 +567,7 @@ function applyEntry(phases: TodoPhase[], entry: TodoOpEntryValue, errors: string
 				if (task.status === "blocked") {
 					task.status = "pending";
 					task.blocker = undefined;
+					task.droppedBy = undefined;
 				}
 			}
 			return phases;
@@ -608,11 +631,12 @@ function applyParams(phases: TodoPhase[], params: TodoOpEntryValue): { phases: T
 export function applyOpsToPhases(
 	currentPhases: TodoPhase[],
 	ops: TodoOpEntryValue[],
+	options?: { userAuthored?: boolean },
 ): { phases: TodoPhase[]; errors: string[] } {
 	const errors: string[] = [];
 	let next = clonePhases(currentPhases);
 	for (const op of ops) {
-		next = applyEntry(next, op, errors);
+		next = applyEntry(next, op, errors, options);
 	}
 	normalizeInProgressTask(next);
 	return { phases: next, errors };

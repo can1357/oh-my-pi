@@ -76,6 +76,42 @@ describe("abandoned todos keep settle incomplete", () => {
 		expect(JSON.stringify(ctx.messages)).toContain("Ship feature");
 	});
 
+	it("does not remind when the user explicitly dropped via /todo drop", async () => {
+		const ctx = host();
+		const tracker = new TodoTracker(ctx.host);
+		tracker.setPhases([
+			{
+				name: "Work",
+				tasks: [
+					{ content: "Ship feature", status: "abandoned", droppedBy: "user" },
+					{ content: "Write tests", status: "abandoned", droppedBy: "user" },
+				],
+			},
+		]);
+
+		expect(await tracker.checkCompletion(textOnlyStop())).toBe(false);
+		expect(ctx.continuations.count).toBe(0);
+	});
+
+	it("still reminds when a model drop remains alongside a user drop", async () => {
+		const ctx = host();
+		const tracker = new TodoTracker(ctx.host);
+		tracker.setPhases([
+			{
+				name: "Work",
+				tasks: [
+					{ content: "Ship feature", status: "abandoned", droppedBy: "user" },
+					{ content: "Write tests", status: "abandoned" },
+				],
+			},
+		]);
+
+		expect(await tracker.checkCompletion(textOnlyStop())).toBe(true);
+		expect(ctx.continuations.count).toBe(1);
+		expect(JSON.stringify(ctx.messages)).toContain("Write tests");
+		expect(JSON.stringify(ctx.messages)).not.toContain("Ship feature");
+	});
+
 	it("does not remind when remaining work is only blocked", async () => {
 		const ctx = host();
 		const tracker = new TodoTracker(ctx.host);
