@@ -5139,7 +5139,8 @@ export const SETTINGS_SCHEMA = {
 			tab: "tools",
 			group: "Todos",
 			label: "Todo Auto-Clear Delay",
-			description: "Delay before completed or abandoned todos are removed from the todo widget",
+			description:
+				"Delay before completed or user-canceled todos are removed from the todo widget (model-dropped items stay until finished or cleared)",
 			options: [
 				{ value: "0", label: "Instant" },
 				{ value: "60", label: "1 minute", description: "Default" },

@@ -2438,7 +2438,9 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	/**
-	 * Whether every todo is closed, so the HUD has nothing left to track.
+	 * Whether every todo is HUD-settled (completed, or abandoned with an explicit
+	 * user cancel), so the auto-clear timer may run. Model-authored abandoned
+	 * items keep the list unsettled — matching `tasks.todoClearDelay`.
 	 *
 	 * The auto-clear only fires on a settled list. Scrubbing closed tasks while
 	 * open work remains is destructive: the walking viewport already hides all but

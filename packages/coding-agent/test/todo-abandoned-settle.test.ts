@@ -153,7 +153,7 @@ describe("abandoned todos keep settle incomplete", () => {
 		expect(ctx.continuations.count).toBe(0);
 	});
 
-	it("does not remind after a no-op edit of model-abandoned items", async () => {
+	it("still reminds after a no-op edit of model-abandoned items", async () => {
 		const prior = [
 			{
 				name: "Work",
