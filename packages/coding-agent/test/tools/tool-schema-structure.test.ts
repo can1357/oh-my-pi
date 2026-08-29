@@ -319,17 +319,19 @@ describe("setting- and mode-dependent tool variants stay structurally constraine
 });
 
 describe("shipped example extension schemas are structurally constrained", () => {
-	// The parameter schemas of examples/extensions/{hello,api-demo,reload-
-	// runtime,with-deps} and examples/custom-tools/hello, re-declared against
-	// the same shim. The example modules themselves are not imported: they
-	// sit outside the package tsconfig and carry pre-existing type errors, so
-	// importing them would force unrelated example fixes into this PR. Each
-	// shape mirrors the cited example source; if the example changes its
-	// parameters, update the entry here — the line refs make drift findable.
+	// The parameter schemas of the shipped examples, re-declared against the
+	// same shim, one row per distinct emitted shape. The example modules
+	// themselves are not imported: they sit outside the package tsconfig and
+	// carry pre-existing type errors, so importing them would force unrelated
+	// example fixes into this PR. Each shape mirrors the cited example source;
+	// if the example changes its parameters, update the entry here — the line
+	// refs make drift findable. examples/extensions/with-deps/index.ts:19 and
+	// examples/custom-tools/hello/index.ts:7 are deliberately absent: both are
+	// the single-described-string shape the hello row already covers.
 	const cases: Array<[string, unknown]> = [
-		// examples/extensions/hello.ts:15-17
+		// examples/extensions/hello.ts:15-17 — single described string prop
 		["extensions/hello.ts:15", zod.object({ name: zod.string().describe("Name to greet") })],
-		// examples/extensions/api-demo.ts:19-22
+		// examples/extensions/api-demo.ts:19-22 — enum with a default payload
 		[
 			"extensions/api-demo.ts:19",
 			zod.object({
@@ -337,15 +339,8 @@ describe("shipped example extension schemas are structurally constrained", () =>
 				logLevel: zod.enum(["error", "warn", "debug"]).default("debug").describe("Log level to use"),
 			}),
 		],
-		// examples/extensions/reload-runtime.ts:29
+		// examples/extensions/reload-runtime.ts:29 — no properties at all
 		["extensions/reload-runtime.ts:29", zod.object({})],
-		// examples/extensions/with-deps/index.ts:19-21
-		[
-			"extensions/with-deps/index.ts:19",
-			zod.object({ duration: zod.string().describe("Duration string like '2 days', '1h', '5m'") }),
-		],
-		// examples/custom-tools/hello/index.ts:7-9
-		["custom-tools/hello/index.ts:7", zod.object({ name: zod.string().describe("Name to greet") })],
 	];
 
 	for (const [label, parameters] of cases) {
