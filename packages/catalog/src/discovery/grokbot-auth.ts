@@ -49,8 +49,22 @@ type CachedToken = {
 /** JWT cache keyed by minting configuration so concurrent accounts/backends do not bleed. */
 const tokenCache = new Map<string, CachedToken>();
 
-function tokenCacheKey(cfg: Pick<GrokbotConfig, "renewal" | "namespace" | "clientVersion">, backend: string): string {
-	return `${cfg.renewal}\0${backend}\0${cfg.namespace}\0${cfg.clientVersion}`;
+/** Stable fingerprint of caller/proxy headers for JWT cache scoping (case-normalized). */
+function fingerprintRequestHeaders(headers?: Record<string, string>): string {
+	if (!headers) return "";
+	const entries = Object.entries(headers)
+		.map(([key, value]) => [key.toLowerCase(), value] as const)
+		.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+	if (entries.length === 0) return "";
+	return entries.map(([key, value]) => `${key}=${value}`).join("\u0001");
+}
+
+function tokenCacheKey(
+	cfg: Pick<GrokbotConfig, "renewal" | "namespace" | "clientVersion">,
+	backend: string,
+	requestHeaders?: Record<string, string>,
+): string {
+	return `${cfg.renewal}\0${backend}\0${cfg.namespace}\0${cfg.clientVersion}\0${fingerprintRequestHeaders(requestHeaders)}`;
 }
 
 /** Strip stamp suffix (`0.30.0-pre.16` → `0.30.0`), matching sand-host `stampedVersionBaseOf`. */
@@ -252,7 +266,7 @@ export async function mintGrokbotAccessToken(
 	if (!cfg.renewal) {
 		throw new Error(`Grok Bot renewer missing. Set GROKBOT_RENEWAL_CREDENTIAL or write ${grokbotSecretsPath()}`);
 	}
-	const cacheKey = tokenCacheKey(cfg, backend);
+	const cacheKey = tokenCacheKey(cfg, backend, requestHeaders);
 	const cached = tokenCache.get(cacheKey);
 	if (cached?.accessToken && Date.now() < cached.expiresAtMs - 60_000) {
 		return cached.accessToken;

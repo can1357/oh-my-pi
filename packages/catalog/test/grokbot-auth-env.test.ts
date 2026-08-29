@@ -239,6 +239,32 @@ describe("grokbot backend URL join", () => {
 		expect(captured?.[typeKeys[0]!]).toBe("application/json");
 		expect(captured?.["X-Proxy-Api-Key"] ?? captured?.["x-proxy-api-key"]).toBe("proxy-secret");
 	});
+
+	test("JWT cache is scoped by caller/proxy headers", async () => {
+		const seen: string[] = [];
+		const fetchImpl: typeof fetch = async (_url, init) => {
+			const headers = init?.headers as Record<string, string>;
+			seen.push(headers?.["x-tenant"] ?? "");
+			return new Response(JSON.stringify({ accessToken: `tok-${seen.length}`, expiresAtMs: Date.now() + 600_000 }), {
+				status: 200,
+				headers: { "content-type": "application/json" },
+			});
+		};
+		const cfg = { renewal: "renewer", machineId: "machine", namespace: "prod", clientVersion: "0.30.0" };
+		const first = await mintGrokbotAccessToken(cfg, fetchImpl, "https://proxy.example/grokbot", undefined, {
+			"x-tenant": "a",
+		});
+		const cached = await mintGrokbotAccessToken(cfg, fetchImpl, "https://proxy.example/grokbot", undefined, {
+			"x-tenant": "a",
+		});
+		const second = await mintGrokbotAccessToken(cfg, fetchImpl, "https://proxy.example/grokbot", undefined, {
+			"x-tenant": "b",
+		});
+		expect(first).toBe("tok-1");
+		expect(cached).toBe("tok-1");
+		expect(second).toBe("tok-2");
+		expect(seen).toEqual(["a", "b"]);
+	});
 });
 
 describe("grokbot AvailableModels headers", () => {
