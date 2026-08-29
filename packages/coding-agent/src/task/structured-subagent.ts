@@ -632,7 +632,7 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 			changesApplied = outcome.changesApplied;
 			hadAnyChanges = outcome.hadAnyChanges;
 			if (outcome.changesApplied !== false) {
-				const nestedPatchSummary = await applyEligibleNestedPatches({
+				const nested = await applyEligibleNestedPatches({
 					result,
 					repoRoot: isolationContext.repoRoot,
 					mergeMode: policy.mergeMode,
@@ -640,9 +640,10 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 					mergedBranchForNestedPatches: outcome.mergedBranchForNestedPatches,
 					commitMessage: makeIsolationCommitMessage(request.session)(),
 				});
-				mergeSummary += nestedPatchSummary;
+				mergeSummary += nested.summary;
+				if (nested.applied) hadAnyChanges = true;
 				requiresRecoveryArtifacts ||=
-					nestedPatchSummary.includes("<system-notification>") && (result.nestedPatches?.length ?? 0) > 0;
+					nested.summary.includes("<system-notification>") && (result.nestedPatches?.length ?? 0) > 0;
 			}
 		} else if (policy.isIsolated && isolationContext && !policy.applyChanges) {
 			if (result.branchName)

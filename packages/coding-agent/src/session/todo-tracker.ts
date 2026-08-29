@@ -155,6 +155,9 @@ export class TodoTracker {
 		details: Record<string, unknown> | undefined,
 	): boolean {
 		if (isError) return false;
+		// Background bash/eval: the initial toolResult is not a completed check.
+		const asyncState = isRecord(details?.async) ? stringProperty(details.async as Record<string, unknown>, "state") : undefined;
+		if (asyncState === "running") return false;
 		// LSP reports failure via details.success without setting top-level isError.
 		if (toolName === "lsp") return details?.success === true;
 		return true;

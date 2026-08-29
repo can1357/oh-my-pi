@@ -599,7 +599,7 @@ describe("applyEligibleNestedPatches", () => {
 			changesApplied: false,
 			mergedBranchForNestedPatches: false,
 		});
-		expect(suffix).toBe("");
+		expect(suffix).toEqual({ summary: "", applied: false });
 		expect(applySpy).not.toHaveBeenCalled();
 	});
 
@@ -612,7 +612,7 @@ describe("applyEligibleNestedPatches", () => {
 			changesApplied: true,
 			mergedBranchForNestedPatches: false,
 		});
-		expect(suffix).toBe("");
+		expect(suffix).toEqual({ summary: "", applied: false });
 		expect(applySpy).not.toHaveBeenCalled();
 	});
 
@@ -625,7 +625,7 @@ describe("applyEligibleNestedPatches", () => {
 			changesApplied: true,
 			mergedBranchForNestedPatches: false,
 		});
-		expect(suffix).toBe("");
+		expect(suffix).toEqual({ summary: "", applied: true });
 		expect(applySpy).toHaveBeenCalledTimes(1);
 	});
 
@@ -638,7 +638,8 @@ describe("applyEligibleNestedPatches", () => {
 			changesApplied: true,
 			mergedBranchForNestedPatches: true,
 		});
-		expect(suffix).toContain("Some nested repository patches failed to apply");
+		expect(suffix.applied).toBe(false);
+		expect(suffix.summary).toContain("Some nested repository patches failed to apply");
 	});
 
 	it("surfaces stash-restore warnings from applyNestedPatches as a system-notification", async () => {
@@ -652,8 +653,9 @@ describe("applyEligibleNestedPatches", () => {
 			changesApplied: true,
 			mergedBranchForNestedPatches: false,
 		});
-		expect(suffix).toContain("could not be auto-restored");
-		expect(suffix).toContain("stash entry preserved");
-		expect(suffix).toContain("<system-notification>");
+		expect(suffix.applied).toBe(true);
+		expect(suffix.summary).toContain("could not be auto-restored");
+		expect(suffix.summary).toContain("stash entry preserved");
+		expect(suffix.summary).toContain("<system-notification>");
 	});
 });

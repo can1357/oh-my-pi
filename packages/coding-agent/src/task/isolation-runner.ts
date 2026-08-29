@@ -480,25 +480,33 @@ export interface NestedPatchApplyOptions {
  * branch-merged) and the non-fatal failure handling so `TaskTool` and the
  * eval `agent()` bridge use one implementation.
  *
- * Returns a system-notification suffix to append to the parent merge summary,
- * or an empty string when nothing was applied or the nested apply succeeded.
+ * `summary` is a system-notification suffix (possibly empty). `applied` is true
+ * when at least one nested patch was written into the parent workspace.
  */
-export async function applyEligibleNestedPatches(opts: NestedPatchApplyOptions): Promise<string> {
+export async function applyEligibleNestedPatches(
+	opts: NestedPatchApplyOptions,
+): Promise<{ summary: string; applied: boolean }> {
 	const { result, repoRoot, mergeMode, changesApplied, mergedBranchForNestedPatches, commitMessage } = opts;
-	if (mergeMode === "patch" && changesApplied === false) return "";
+	if (mergeMode === "patch" && changesApplied === false) return { summary: "", applied: false };
 	const nestedPatches = result.nestedPatches ?? [];
 	const eligible =
 		nestedPatches.length > 0 &&
 		result.exitCode === 0 &&
 		!result.aborted &&
 		(mergeMode !== "branch" || mergedBranchForNestedPatches);
-	if (!eligible) return "";
+	if (!eligible) return { summary: "", applied: false };
 	try {
 		const warnings = await applyNestedPatches(repoRoot, nestedPatches, commitMessage);
-		if (warnings.length === 0) return "";
-		return `\n\n<system-notification>${warnings.join("\n")}</system-notification>`;
+		if (warnings.length === 0) return { summary: "", applied: true };
+		return {
+			summary: `\n\n<system-notification>${warnings.join("\n")}</system-notification>`,
+			applied: true,
+		};
 	} catch {
 		// Nested patch failures are non-fatal to the parent merge.
-		return "\n\n<system-notification>Some nested repository patches failed to apply.</system-notification>";
+		return {
+			summary: "\n\n<system-notification>Some nested repository patches failed to apply.</system-notification>",
+			applied: false,
+		};
 	}
 }

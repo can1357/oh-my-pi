@@ -96,6 +96,16 @@ describe("unverified isolated merge latch", () => {
 		expect(latch.latched).toBe(true);
 	});
 
+	it("does not clear the latch on a background bash still running", async () => {
+		const latch = new UnverifiedMergeLatch();
+		latch.mark();
+		const ctx = host(latch);
+		const tracker = new TodoTracker(ctx.host);
+		tracker.onToolExecutionStart("bash", "call-bg");
+		tracker.onToolResult("bash", false, { async: { state: "running" } }, "call-bg");
+		expect(latch.latched).toBe(true);
+	});
+
 	it("does not clear when bash started before the merge was marked", async () => {
 		const latch = new UnverifiedMergeLatch();
 		const ctx = host(latch);
