@@ -10,12 +10,8 @@ import { preloadPluginRoots } from "@oh-my-pi/pi-coding-agent/discovery/helpers"
 import { LspTool } from "@oh-my-pi/pi-coding-agent/lsp";
 import * as lspClient from "@oh-my-pi/pi-coding-agent/lsp/client";
 import * as lspConfig from "@oh-my-pi/pi-coding-agent/lsp/config";
-<<<<<<< HEAD
-import { getServersForFile, type LspConfig, loadConfig } from "@oh-my-pi/pi-coding-agent/lsp/config";
-import { waitForDiagnostics } from "@oh-my-pi/pi-coding-agent/lsp/diagnostics";
-=======
 import { getServerForFile, getServersForFile, type LspConfig, loadConfig } from "@oh-my-pi/pi-coding-agent/lsp/config";
->>>>>>> 88ddc93035 (feat(lsp): Add native TypeScript 7 server)
+import { waitForDiagnostics } from "@oh-my-pi/pi-coding-agent/lsp/diagnostics";
 import {
 	applyTextEditsToString,
 	applyWorkspaceEdit,
