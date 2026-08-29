@@ -85,9 +85,11 @@ export function decideAttempt(args: {
 		case "provider_unavailable":
 		case "model_unavailable":
 		case "context_overflow": {
-			const next =
-				firstUnused(route.fallbacks[disposition], state.attemptedTargets) ??
-				firstUnused(route.targets, state.attemptedTargets);
+			// Stay inside the disposition's compiled fallback list. Falling through
+			// to firstUnused(route.targets) would bypass the tree (e.g. retry a
+			// small model on context_overflow, or any unused leaf after a
+			// preferred-later failure).
+			const next = firstUnused(route.fallbacks[disposition], state.attemptedTargets);
 			return next === undefined ? { type: "terminal" } : { type: "fallback_target", targetModelId: next };
 		}
 		default: {

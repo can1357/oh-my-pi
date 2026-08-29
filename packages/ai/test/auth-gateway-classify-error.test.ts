@@ -171,6 +171,31 @@ describe("auth-gateway classifyGatewayError", () => {
 		expect(c.disposition).not.toBe("credential_transient");
 	});
 
+	it("maps 403 cyber_policy Trusted Access denials to policy_terminal, not credential_transient", () => {
+		const c = classifyGatewayError(
+			Object.assign(
+				new Error(
+					"Codex error event: This content was flagged for possible cybersecurity risk. Join Trusted Access for Cyber. (code=cyber_policy)",
+				),
+				{ status: 403 },
+			),
+		);
+		expect(c.status).toBe(403);
+		expect(c.owner).toBe("policy");
+		expect(c.disposition).toBe("policy_terminal");
+		expect(isRetryableGatewayDisposition(c.disposition)).toBe(false);
+		expect(c.disposition).not.toBe("credential_transient");
+	});
+
+	it("maps structured cyber_policy code on 403 to policy_terminal even with a bland message", () => {
+		const c = classifyGatewayError(
+			Object.assign(new Error("Forbidden"), { status: 403, code: "cyber_policy" }),
+		);
+		expect(c.owner).toBe("policy");
+		expect(c.disposition).toBe("policy_terminal");
+		expect(c.disposition).not.toBe("credential_transient");
+	});
+
 	it("maps provider-wide 429 to provider_transient rather than credential_quota", () => {
 		const c = classifyGatewayError(Object.assign(new Error("service overloaded"), { status: 429 }));
 		expect(c.status).toBe(429);

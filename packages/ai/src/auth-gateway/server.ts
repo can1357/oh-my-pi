@@ -975,6 +975,9 @@ async function handleFormatEndpoint(
 				owner: "credential",
 				disposition: "credential_transient",
 			};
+			// No key means there is no sibling credential to rotate — skip straight
+			// to disposition-compiled credential_transient fallbacks when present.
+			siblingsExhausted = true;
 			if (considerFallback(classified)) return { type: "retry" };
 			return {
 				type: "respond",
@@ -1484,6 +1487,9 @@ async function handlePiNative(
 				owner: "credential",
 				disposition: "credential_transient",
 			};
+			// No key means there is no sibling credential to rotate — skip straight
+			// to disposition-compiled credential_transient fallbacks when present.
+			siblingsExhausted = true;
 			if (considerFallback(classified)) return { type: "retry" };
 			return {
 				type: "respond",

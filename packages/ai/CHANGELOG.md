@@ -42,6 +42,9 @@
 
 ### Fixed
 
+- Fixed gateway classification treating Codex `cyber_policy` / Trusted Access HTTP 403 denials (including structured `code: "cyber_policy"`) as retryable credential failures; they are now `policy_terminal`.
+- Fixed auth-gateway preferred-later failover so retries stay inside the disposition's compiled fallback list instead of any unused route target (e.g. no small-model retry on `context_overflow`).
+- Fixed auth gateway missing-credential handling to skip a useless same-target sibling retry and fail over immediately via compiled `credential_transient` fallbacks when other targets exist.
 - Fixed OpenAI Responses continuation pairing a caller-supplied `previous_response_id` with an internally computed delta from a different stored response, and restricted stale-baseline recovery to internally owned chain ids so a stale caller id can no longer silently drop prior context.
 - Auth gateway observes Responses SSE through a StreamCommitGate: metadata-only preludes stay failover-eligible, the first output event or 4 MiB cap commits, and post-commit terminals (`response.completed`/`response.failed`/`response.incomplete`/`response.error`) end failover eligibility instead of being misread as output.
 - Auth gateway virtual routes now fail over to a backup model when the primary is unavailable, as long as the response stream has not been committed.

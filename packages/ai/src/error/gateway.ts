@@ -203,6 +203,14 @@ function classifyOwnerDisposition(
 		return { owner: "quota", disposition: "credential_quota" };
 	}
 
+	// Policy denials (Codex cyber_policy / Trusted Access) must win over the
+	// generic 401/403 → credential_transient auth bucket, including structured
+	// `{ code: "cyber_policy" }` with a bland message. Otherwise sibling-retry
+	// treats an account policy block as a rotatable credential failure.
+	if (hasPolicySignal(err, message) && (status === 0 || status < 500)) {
+		return { owner: "policy", disposition: "policy_terminal" };
+	}
+
 	if (status === 401 || status === 403 || type === "authentication_error") {
 		if (REVOKED_PATTERN.test(message)) {
 			return { owner: "credential", disposition: "credential_permanent" };
@@ -214,14 +222,10 @@ function classifyOwnerDisposition(
 		return { owner: "model", disposition: "model_unavailable" };
 	}
 
-	// Policy denials and context overflows are provider decisions delivered on
-	// 4xx statuses; on 5xx they are usually quoted upstream detail, not the
-	// provider's own verdict. Definitive OAuth failures also surface as
-	// 400 `invalid_grant`.
+	// Context overflows and definitive OAuth failures are provider decisions
+	// delivered on 4xx statuses; on 5xx they are usually quoted upstream detail,
+	// not the provider's own verdict.
 	if (status > 0 && status < 500) {
-		if (POLICY_PATTERN.test(message)) {
-			return { owner: "policy", disposition: "policy_terminal" };
-		}
 		if (matchesOverflowText(message)) {
 			return { owner: "request", disposition: "context_overflow" };
 		}
@@ -249,7 +253,7 @@ function classifyOwnerDisposition(
 	if (isUsageLimit(err) || isUsageLimit(message)) {
 		return { owner: "quota", disposition: "credential_quota" };
 	}
-	if (POLICY_PATTERN.test(message)) {
+	if (hasPolicySignal(err, message)) {
 		return { owner: "policy", disposition: "policy_terminal" };
 	}
 	if (matchesOverflowText(message)) {
@@ -265,10 +269,14 @@ function classifyOwnerDisposition(
 	return { owner: "provider", disposition: "provider_unavailable" };
 }
 
-/**
- * Pull a status code from common error-message shapes. Returns undefined when
- * no contextual keyword is present, so we never guess at incidental numbers.
- */
+/** True when message text or a structured `code` property signals account policy. */
+function hasPolicySignal(err: unknown, message: string): boolean {
+	if (POLICY_PATTERN.test(message)) return true;
+	if (typeof err === "object" && err !== null && "code" in err && typeof err.code === "string") {
+		return POLICY_PATTERN.test(err.code);
+	}
+	return false;
+}
 
 /**
  * Pull a status code from common error-message shapes. Returns undefined when
