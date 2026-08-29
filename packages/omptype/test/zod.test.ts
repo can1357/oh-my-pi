@@ -215,24 +215,43 @@ describe("zod-like parsing", () => {
 		expect(Object.isFrozen(frozenArray)).toBe(true);
 	});
 
-	it("rejects arrays wherever an object schema can observe its input", () => {
+	it("rejects arrays reaching any object schema", () => {
 		// An array reaching an object schema contradicts the emitted
 		// `{"type":"object"}` and zod's own semantics: the tool would accept a
-		// shape the model was told was invalid. Non-stripping objects can see
-		// the input, so they reject it.
+		// shape the model was told was invalid. The guard is an input-side
+		// filter, so it also covers the modes an output-side check cannot — a
+		// key-stripping object has already turned `[]` into `{}` by then.
+		expect(z.object({}).safeParse([]).success).toBe(false);
 		expect(z.strictObject({}).safeParse([]).success).toBe(false);
 		expect(z.looseObject({}).safeParse([1, 2]).success).toBe(false);
 		expect(z.object({}).strict().safeParse([]).success).toBe(false);
 		expect(z.object({}).passthrough().safeParse([1]).success).toBe(false);
+		expect(z.object({ a: z.string() }).partial().safeParse([]).success).toBe(false);
+		expect(z.record(z.string(), z.string()).safeParse([]).success).toBe(false);
+		// A discriminated union is object-shaped by definition, and a stripping
+		// variant whose discriminator carries a default would otherwise morph
+		// `[]` into `{ kind: "a" }` — on the structural path and the dispatcher.
+		const defaulted = z.discriminatedUnion("kind", [
+			z.object({ kind: z.literal("a").default("a") }),
+			z.object({ kind: z.literal("b"), n: z.number() }),
+		]);
+		expect(defaulted.safeParse([]).success).toBe(false);
+		expect(defaulted.describe("d").safeParse([]).success).toBe(false);
+		expect(defaulted.parse({})).toEqual({ kind: "a" });
+		const deferredVariant = z.discriminatedUnion("kind", [
+			z.lazy(() => z.object({ kind: z.literal("a").default("a") })),
+			z.object({ kind: z.literal("b"), n: z.number() }),
+		]);
+		expect(deferredVariant.safeParse([]).success).toBe(false);
+		expect(deferredVariant.parse({ kind: "b", n: 2 })).toEqual({ kind: "b", n: 2 });
+		// A plain union may legitimately accept arrays — the guard is scoped to
+		// object-shaped combinators, not to unions in general.
+		expect(z.union([z.array(z.string()), z.object({ a: z.string() })]).parse(["x"])).toEqual(["x"]);
 		// Objects still parse, extras semantics intact.
+		expect(z.object({ a: z.string() }).parse({ a: "x", b: 1 })).toEqual({ a: "x" });
 		expect(z.strictObject({ a: z.string() }).parse({ a: "x" })).toEqual({ a: "x" });
 		expect(z.looseObject({ a: z.string() }).parse({ a: "x", b: 1 })).toEqual({ a: "x", b: 1 });
 		expect(z.strictObject({ a: z.string() }).safeParse({ a: "x", b: 1 }).success).toBe(false);
-		// A KEY-STRIPPING object cannot: stripping runs first, so by the time a
-		// shim-level guard could look, `[]` has already become `{}`. Pinned as
-		// the documented boundary — omptype's object node treats arrays as
-		// objects (so does `type({})`), and tightening that is a core change.
-		expect(z.object({}).parse([])).toEqual({});
 	});
 
 	it("lets later modifiers replace the object policy the array guard sits on", () => {

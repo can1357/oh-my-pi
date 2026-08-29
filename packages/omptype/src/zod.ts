@@ -14,6 +14,8 @@ interface RefineOptions {
 interface Decoratable<out Out> extends EmbeddableSchema {
 	(value: unknown): Out | OmpErrors;
 	narrow(predicate: (value: Out, context: NarrowContext) => unknown): Decoratable<Out>;
+	/** Input-side predicate: runs on the raw value, before the base validates it. */
+	filter(predicate: (value: unknown, context: NarrowContext) => unknown): Decoratable<Out>;
 	pipe<Next>(transform: (value: Out, context: NarrowContext) => Next): Decoratable<Exclude<Next, OmpErrors>>;
 	or(def: unknown): Decoratable<unknown>;
 	describe(description: string): Decoratable<Out>;
@@ -108,7 +110,11 @@ function restrictBase<Out>(source: Decoratable<Out>, ir: IR): Decoratable<Out> {
 		: schemaFromIR<Out>(ir);
 	if (unguarded.ir.desc !== undefined) next = next.describe(unguarded.ir.desc);
 	if (unguarded.hasDefault) next = next.default(unguarded.defaultValue as Out | (() => Out));
-	return ir.k === "object" && ir.extras !== "delete" ? guardArrays(next) : next;
+	// Every object target is guarded, stripping included; any other target — a
+	// discriminated union rebuilt by `.describe()` — keeps the guard it arrived
+	// with.
+	const guard = ir.k === "object" || unguarded !== source;
+	return guard ? guardArrays(next) : next;
 }
 
 const kUnguarded = Symbol("omptype.zod.unguardedObject");
@@ -120,19 +126,19 @@ interface MaybeGuarded<Out> extends Decoratable<Out> {
 
 /**
  * Reject an array reaching an object schema, which zod does and the emitted
- * `{"type":"object"}` already promises. Only usable where the object does NOT
- * strip keys: a narrow step observes the object node's OUTPUT, and a
- * key-stripping object has already turned `[]` into `{}` by then, so the guard
- * would inspect the wrong value. Stripping objects therefore keep omptype's
- * object-node semantics (arrays are objects), which is what `type({})` does
- * too — tightening that belongs in the IR's object arm, not here.
+ * `{"type":"object"}` already promises.
+ *
+ * A `filter` step, not `narrow`: filters run against the RAW INPUT before the
+ * base validates it, so this also catches the shapes an output-side check
+ * cannot — a key-stripping object has already turned `[]` into `{}` by the time
+ * a narrow runs, and so has a discriminated union whose matching variant strips.
  *
  * The pre-guard schema is kept on the result so {@link restrictBase} can
  * rebuild from it; see there for why carrying the guard instead breaks later
  * structural modifiers.
  */
 function guardArrays<Out>(base: Decoratable<Out>): Decoratable<Out> {
-	const guarded = base.narrow(
+	const guarded = base.filter(
 		(value, ctx: NarrowContext) => !Array.isArray(value) || ctx.mustBe("an object, not an array"),
 	);
 	Object.defineProperty(guarded, kUnguarded, { value: base, enumerable: false });
@@ -474,7 +480,7 @@ function objectSchema<const S extends Shape>(shape: S, extras: Extras = "delete"
 		props.push(prop);
 	}
 	const base = schemaFromIR<unknown>({ k: "object", props, extras });
-	return decorateUnknown(extras === "delete" ? base : guardArrays(base)) as unknown as ZodLikeSchema<ObjectOutput<S>>;
+	return decorateUnknown(guardArrays(base)) as unknown as ZodLikeSchema<ObjectOutput<S>>;
 }
 
 export const string = (): ZodLikeSchema<string> => decorate(schemaFromIR(type.string.ir));
@@ -722,7 +728,11 @@ export const discriminatedUnion = <
 	// variant sets omptype rejects as order-dependent.
 	if (schemas.every(schema => !hasDeferredAlias(schema.ir))) {
 		try {
-			return decorate(schemaFromIR<UnionOutput<Schemas>>({ k: "union", members: variantIrs }));
+			// Guarded at the combinator boundary, not per variant: a discriminated
+			// union's input is an object by definition, yet a stripping variant
+			// whose discriminator carries a default (`kind: z.literal("a")
+			// .default("a")`) would otherwise morph `[]` into `{ kind: "a" }`.
+			return decorate(guardArrays(schemaFromIR<UnionOutput<Schemas>>({ k: "union", members: variantIrs })));
 		} catch (error) {
 			// Same fallback as union(): variants whose discriminators do not
 			// disjointly pin literals (e.g. optional discriminators overlapping
@@ -744,7 +754,7 @@ export const discriminatedUnion = <
 			claimDiscriminatorValues(true);
 			checked = true;
 		}
-		if (typeof value !== "object" || value === null) {
+		if (typeof value !== "object" || value === null || Array.isArray(value)) {
 			return ctx.error(`an object with a "${discriminator}" discriminator`);
 		}
 		let candidates = variants;
@@ -827,7 +837,7 @@ export const record = <Key extends string, Value>(
 		index: embed(valueSchema),
 		extras: "keep",
 	});
-	const checked = base.narrow((value, ctx: NarrowContext) => {
+	const checked = guardArrays(base).narrow((value, ctx: NarrowContext) => {
 		for (const key in value) {
 			if (keySchema(key) instanceof type.errors) return ctx.mustBe("a record with valid string keys");
 		}
