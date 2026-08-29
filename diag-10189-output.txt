@@ -1,0 +1,156 @@
+===== FULL BUCKET =====
+$ bun scripts/ci-test-ts.ts coding-agent-native
+Running 73 test command(s), up to 4 in parallel (OMP_TEST_CONCURRENCY=<n>|all to change); 4 cores, --parallel=1 per chunk.
+✓ packages/coding-agent (native/tooling/browser/unit bucket; 729 files; parallel=1 chunk 4/73; 10 files) [4.7s]
+✓ packages/coding-agent (native/tooling/browser/unit bucket; 729 files; parallel=1 chunk 1/73; 10 files) [5.1s]
+✓ packages/coding-agent (native/tooling/browser/unit bucket; 729 files; parallel=1 chunk 6/73; 10 files) [9.5s]
+✓ packages/coding-agent (native/tooling/browser/unit bucket; 729 files; parallel=1 chunk 7/73; 10 files) [895ms]
+✓ packages/coding-agent (native/tooling/browser/unit bucket; 729 files; parallel=1 chunk 8/73; 10 files) [3.6s]
+✓ packages/coding-agent (native/tooling/browser/unit bucket; 729 files; parallel=1 chunk 5/73; 10 files) [16.0s]
+✓ packages/coding-agent (native/tooling/browser/unit bucket; 729 files; parallel=1 chunk 2/73; 10 files) [23.1s]
+✓ packages/coding-agent (native/tooling/browser/unit bucket; 729 files; parallel=1 chunk 10/73; 10 files) [2.6s]
+✓ packages/coding-agent (native/tooling/browser/unit bucket; 729 files; parallel=1 chunk 9/73; 10 files) [4.7s]
+✓ packages/coding-agent (native/tooling/browser/unit bucket; 729 files; parallel=1 chunk 3/73; 10 files) [25.4s]
+✓ packages/coding-agent (native/tooling/browser/unit bucket; 729 files; parallel=1 chunk 11/73; 10 files) [3.5s]
+✓ packages/coding-agent (native/tooling/browser/unit bucket; 729 files; parallel=1 chunk 13/73; 10 files) [3.3s]
+✓ packages/coding-agent (native/tooling/browser/unit bucket; 729 files; parallel=1 chunk 14/73; 10 files) [2.7s]
+✓ packages/coding-agent (native/tooling/browser/unit bucket; 729 files; parallel=1 chunk 16/73; 10 files) [2.5s]
+✓ packages/coding-agent (native/tooling/browser/unit bucket; 729 files; parallel=1 chunk 15/73; 10 files) [4.3s]
+✓ packages/coding-agent (native/tooling/browser/unit bucket; 729 files; parallel=1 chunk 17/73; 10 files) [4.1s]
+✓ packages/coding-agent (native/tooling/browser/unit bucket; 729 files; parallel=1 chunk 12/73; 10 files) [10.0s]
+✓ packages/coding-agent (native/tooling/browser/unit bucket; 729 files; parallel=1 chunk 20/73; 10 files) [4.5s]
+✓ packages/coding-agent (native/tooling/browser/unit bucket; 729 files; parallel=1 chunk 21/73; 10 files) [4.0s]
+✓ packages/coding-agent (native/tooling/browser/unit bucket; 729 files; parallel=1 chunk 19/73; 10 files) [9.2s]
+✓ packages/coding-agent (native/tooling/browser/unit bucket; 729 files; parallel=1 chunk 23/73; 10 files) [5.0s]
+✓ packages/coding-agent (native/tooling/browser/unit bucket; 729 files; parallel=1 chunk 24/73; 10 files) [3.2s]
+✓ packages/coding-agent (native/tooling/browser/unit bucket; 729 files; parallel=1 chunk 25/73; 10 files) [2.0s]
+✓ packages/coding-agent (native/tooling/browser/unit bucket; 729 files; parallel=1 chunk 18/73; 10 files) [18.9s]
+✓ packages/coding-agent (native/tooling/browser/unit bucket; 729 files; parallel=1 chunk 27/73; 10 files) [8.0s]
+✓ packages/coding-agent (native/tooling/browser/unit bucket; 729 files; parallel=1 chunk 28/73; 10 files) [6.4s]
+✓ packages/coding-agent (native/tooling/browser/unit bucket; 729 files; parallel=1 chunk 26/73; 10 files) [12.5s]
+✓ packages/coding-agent (native/tooling/browser/unit bucket; 729 files; parallel=1 chunk 22/73; 10 files) [20.7s]
+✓ packages/coding-agent (native/tooling/browser/unit bucket; 729 files; parallel=1 chunk 29/73; 10 files) [6.1s]
+✓ packages/coding-agent (native/tooling/browser/unit bucket; 729 files; parallel=1 chunk 33/73; 10 files) [3.8s]
+✓ packages/coding-agent (native/tooling/browser/unit bucket; 729 files; parallel=1 chunk 32/73; 10 files) [6.6s]
+✓ packages/coding-agent (native/tooling/browser/unit bucket; 729 files; parallel=1 chunk 30/73; 10 files) [10.2s]
+✓ packages/coding-agent (native/tooling/browser/unit bucket; 729 files; parallel=1 chunk 34/73; 10 files) [3.5s]
+✓ packages/coding-agent (native/tooling/browser/unit bucket; 729 files; parallel=1 chunk 31/73; 10 files) [13.7s]
+✓ packages/coding-agent (native/tooling/browser/unit bucket; 729 files; parallel=1 chunk 37/73; 10 files) [4.5s]
+✓ packages/coding-agent (native/tooling/browser/unit bucket; 729 files; parallel=1 chunk 38/73; 10 files) [3.8s]
+✓ packages/coding-agent (native/tooling/browser/unit bucket; 729 files; parallel=1 chunk 39/73; 10 files) [3.6s]
+✓ packages/coding-agent (native/tooling/browser/unit bucket; 729 files; parallel=1 chunk 40/73; 10 files) [5.8s]
+✓ packages/coding-agent (native/tooling/browser/unit bucket; 729 files; parallel=1 chunk 41/73; 10 files) [10.1s]
+✓ packages/coding-agent (native/tooling/browser/unit bucket; 729 files; parallel=1 chunk 43/73; 10 files) [8.2s]
+✓ packages/coding-agent (native/tooling/browser/unit bucket; 729 files; parallel=1 chunk 42/73; 10 files) [13.0s]
+✓ packages/coding-agent (native/tooling/browser/unit bucket; 729 files; parallel=1 chunk 44/73; 10 files) [2.3s]
+✓ packages/coding-agent (native/tooling/browser/unit bucket; 729 files; parallel=1 chunk 46/73; 10 files) [3.1s]
+✓ packages/coding-agent (native/tooling/browser/unit bucket; 729 files; parallel=1 chunk 47/73; 10 files) [2.0s]
+✗ packages/coding-agent (native/tooling/browser/unit bucket; 729 files; parallel=1 chunk 35/73; 10 files) [39.4s] — test/memory-tools.test.ts > Mnemopi backend lifecycle > bounds synchronous SQLite lock waits on every owned bank during final retention (#7351)
+
+✗ packages/coding-agent (native/tooling/browser/unit bucket; 729 files; parallel=1 chunk 35/73; 10 files) (exit 1)
+$ bun test --only-failures test/mcp/request-id.test.ts test/mcp/smithery-auth.test.ts test/mcp/smithery-registry.test.ts test/mcp/transports/stdio.test.ts test/memories/instructions.test.ts test/memories/isolation.test.ts test/memory-backend-resolve.test.ts test/memory-session-storage.test.ts test/memory-tools.test.ts test/mid-turn-rebuild-pending-tool.test.ts --parallel=1 --timeout=30000
+
+  ✗ test/memory-tools.test.ts > Mnemopi backend lifecycle > bounds synchronous SQLite lock waits on every owned bank during final retention (#7351)
+815 | 			lock.close();
+816 | 		}
+817 | 		const elapsedMs = performance.now() - started;
+818 | 
+819 | 		try {
+820 | 			expect(elapsedMs).toBeLessThan(500);
+                           ^
+error: expect(received).toBeLessThan(expected)
+
+Expected: < 500
+Received: 667.1660210000009
+
+      at <anonymous> (/home/runner/work/oh-my-pi/oh-my-pi/packages/coding-agent/test/memory-tools.test.ts:820:22)
+✓ packages/coding-agent (native/tooling/browser/unit bucket; 729 files; parallel=1 chunk 48/73; 10 files) [6.0s]
+✓ packages/coding-agent (native/tooling/browser/unit bucket; 729 files; parallel=1 chunk 45/73; 10 files) [16.6s]
+✓ packages/coding-agent (native/tooling/browser/unit bucket; 729 files; parallel=1 chunk 50/73; 10 files) [8.6s]
+✓ packages/coding-agent (native/tooling/browser/unit bucket; 729 files; parallel=1 chunk 51/73; 10 files) [8.5s]
+✓ packages/coding-agent (native/tooling/browser/unit bucket; 729 files; parallel=1 chunk 52/73; 10 files) [5.4s]
+✓ packages/coding-agent (native/tooling/browser/unit bucket; 729 files; parallel=1 chunk 49/73; 10 files) [17.0s]
+✓ packages/coding-agent (native/tooling/browser/unit bucket; 729 files; parallel=1 chunk 54/73; 10 files) [3.8s]
+✓ packages/coding-agent (native/tooling/browser/unit bucket; 729 files; parallel=1 chunk 55/73; 10 files) [4.4s]
+✓ packages/coding-agent (native/tooling/browser/unit bucket; 729 files; parallel=1 chunk 57/73; 10 files) [3.7s]
+✓ packages/coding-agent (native/tooling/browser/unit bucket; 729 files; parallel=1 chunk 53/73; 10 files) [11.9s]
+✓ packages/coding-agent (native/tooling/browser/unit bucket; 729 files; parallel=1 chunk 58/73; 10 files) [2.7s]
+✓ packages/coding-agent (native/tooling/browser/unit bucket; 729 files; parallel=1 chunk 59/73; 10 files) [3.7s]
+✓ packages/coding-agent (native/tooling/browser/unit bucket; 729 files; parallel=1 chunk 61/73; 10 files) [2.2s]
+✓ packages/coding-agent (native/tooling/browser/unit bucket; 729 files; parallel=1 chunk 62/73; 10 files) [3.9s]
+✓ packages/coding-agent (native/tooling/browser/unit bucket; 729 files; parallel=1 chunk 60/73; 10 files) [8.5s]
+✓ packages/coding-agent (native/tooling/browser/unit bucket; 729 files; parallel=1 chunk 64/73; 10 files) [1.8s]
+✓ packages/coding-agent (native/tooling/browser/unit bucket; 729 files; parallel=1 chunk 65/73; 10 files) [878ms]
+✓ packages/coding-agent (native/tooling/browser/unit bucket; 729 files; parallel=1 chunk 66/73; 10 files) [937ms]
+✓ packages/coding-agent (native/tooling/browser/unit bucket; 729 files; parallel=1 chunk 63/73; 10 files) [4.9s]
+✓ packages/coding-agent (native/tooling/browser/unit bucket; 729 files; parallel=1 chunk 67/73; 10 files) [3.5s]
+✓ packages/coding-agent (native/tooling/browser/unit bucket; 729 files; parallel=1 chunk 68/73; 10 files) [3.6s]
+✓ packages/coding-agent (native/tooling/browser/unit bucket; 729 files; parallel=1 chunk 70/73; 10 files) [2.3s]
+✓ packages/coding-agent (native/tooling/browser/unit bucket; 729 files; parallel=1 chunk 71/73; 10 files) [5.1s]
+✓ packages/coding-agent (native/tooling/browser/unit bucket; 729 files; parallel=1 chunk 72/73; 10 files) [2.0s]
+✓ packages/coding-agent (native/tooling/browser/unit bucket; 729 files; parallel=1 chunk 56/73; 10 files) [34.8s]
+✓ packages/coding-agent (native/tooling/browser/unit bucket; 729 files; parallel=1 chunk 69/73; 10 files) [12.2s]
+✓ packages/coding-agent (native/tooling/browser/unit bucket; 729 files; parallel=1 chunk 73/73; 9 files) [5.2s]
+✓ packages/coding-agent (native/tooling/browser/unit bucket; 729 files; parallel=1 chunk 36/73; 10 files) [97.0s]
+
+ 72 chunks passed
+ 1 failed
+Ran 73 test command(s) in 162.3s.
+error: script "ci:test:coding-agent:native" exited with code 1
+----- bucket exit=1 -----
+
+===== SUSPECT: new provenance test =====
+bun test v1.4.0 (34cbb9a40)
+
+::group::test/session/session-init-approval-provenance.test.ts:
+(pass) subagent session_init approval provenance > forces yolo mode while preserving the user's tools.approval map [9.87ms]
+(pass) subagent session_init approval provenance > persists approvalMode/approval/hasUI on the session_init entry [3.59ms]
+
+::endgroup::
+
+ 2 pass
+ 0 fail
+ 5 expect() calls
+Ran 2 tests across 1 file. [672.00ms]
+----- provenance exit=0 -----
+
+===== SUSPECT: issue-966 repro x3 =====
+--- run 1 ---
+bun test v1.4.0 (34cbb9a40)
+
+::group::test/issue-966-repro.test.ts:
+(pass) issue #966 split commit restaging > recreates split commits when one commit contains a newly created file [104.18ms]
+
+::endgroup::
+
+ 1 pass
+ 0 fail
+ 1 expect() calls
+Ran 1 test across 1 file. [119.00ms]
+--- exit=0 ---
+--- run 2 ---
+bun test v1.4.0 (34cbb9a40)
+
+::group::test/issue-966-repro.test.ts:
+(pass) issue #966 split commit restaging > recreates split commits when one commit contains a newly created file [130.10ms]
+
+::endgroup::
+
+ 1 pass
+ 0 fail
+ 1 expect() calls
+Ran 1 test across 1 file. [144.00ms]
+--- exit=0 ---
+--- run 3 ---
+bun test v1.4.0 (34cbb9a40)
+
+::group::test/issue-966-repro.test.ts:
+(pass) issue #966 split commit restaging > recreates split commits when one commit contains a newly created file [198.22ms]
+
+::endgroup::
+
+ 1 pass
+ 0 fail
+ 1 expect() calls
+Ran 1 test across 1 file. [208.00ms]
+--- exit=0 ---

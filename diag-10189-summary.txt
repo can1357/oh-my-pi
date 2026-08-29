@@ -1,0 +1,22 @@
+1:===== FULL BUCKET =====
+48:✗ packages/coding-agent (native/tooling/browser/unit bucket; 729 files; parallel=1 chunk 35/73; 10 files) [39.4s] — test/memory-tools.test.ts > Mnemopi backend lifecycle > bounds synchronous SQLite lock waits on every owned bank during final retention (#7351)
+50:✗ packages/coding-agent (native/tooling/browser/unit bucket; 729 files; parallel=1 chunk 35/73; 10 files) (exit 1)
+51:$ bun test --only-failures test/mcp/request-id.test.ts test/mcp/smithery-auth.test.ts test/mcp/smithery-registry.test.ts test/mcp/transports/stdio.test.ts test/memories/instructions.test.ts test/memories/isolation.test.ts test/memory-backend-resolve.test.ts test/memory-session-storage.test.ts test/memory-tools.test.ts test/mid-turn-rebuild-pending-tool.test.ts --parallel=1 --timeout=30000
+53:  ✗ test/memory-tools.test.ts > Mnemopi backend lifecycle > bounds synchronous SQLite lock waits on every owned bank during final retention (#7351)
+59:820 | 			expect(elapsedMs).toBeLessThan(500);
+61:error: expect(received).toBeLessThan(expected)
+66:      at <anonymous> (/home/runner/work/oh-my-pi/oh-my-pi/packages/coding-agent/test/memory-tools.test.ts:820:22)
+97: 1 failed
+99:error: script "ci:test:coding-agent:native" exited with code 1
+100:----- bucket exit=1 -----
+102:===== SUSPECT: new provenance test =====
+112: 0 fail
+113: 5 expect() calls
+115:----- provenance exit=0 -----
+117:===== SUSPECT: issue-966 repro x3 =====
+127: 0 fail
+128: 1 expect() calls
+140: 0 fail
+141: 1 expect() calls
+153: 0 fail
+154: 1 expect() calls
