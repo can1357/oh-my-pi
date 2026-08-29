@@ -132,8 +132,9 @@ export async function fetchCursorUsableModels(
  * module resolution — so discovery owns this tiny pool. It reuses one live
  * session per normalized base URL, shares an in-flight connect, drains on
  * GOAWAY/error, unrefs an idle session so a short-lived catalog consumer is
- * never pinned open, and evicts entries idle beyond a bounded window so
- * rotating origins cannot accumulate open sockets. No proxy tunneling:
+ * never pinned open, and evicts entries idle beyond a bounded window or
+ * beyond a hard cap of eight retained sessions so rotating origins cannot
+ * accumulate open sockets. No proxy tunneling:
  * catalog has no sanctioned lower-level proxy helper and adding one is
  * outside this fix.
  */
@@ -162,6 +163,11 @@ const cursorH2Pool = new Map<string, CursorH2PoolEntry>();
 const cursorH2Draining = new Set<CursorH2PoolEntry>();
 /** Idle eviction window: a pooled session unused for this long is evicted. */
 const CURSOR_H2_IDLE_EVICT_MS = 60_000;
+/**
+ * Hard cap on retained sessions. Age-based eviction alone lets rotating
+ * origins accumulate live unref'd descriptors within the idle window.
+ */
+const CURSOR_H2_MAX_RETAINED_SESSIONS = 8;
 /** Test-only idle-eviction window override; undefined = production window. */
 let cursorH2IdleEvictMsOverride: number | undefined;
 /** Catalog-local cumulative response ceiling for `GetUsableModels`: a fast local gateway streaming a large successful response within the timeout must not exhaust the heap before EOF. */
@@ -238,6 +244,34 @@ function releaseCursorH2Entry(key: string, entry: CursorH2PoolEntry): void {
 	entry.session.unref();
 	entry.referenced = false;
 	entry.idleSince = Date.now();
+	evictCursorH2BeyondCap();
+}
+
+/**
+ * Evict oldest-idle entries while the pool holds more sessions than
+ * {@link CURSOR_H2_MAX_RETAINED_SESSIONS}. Never touches a leased or draining
+ * entry. `protect` exempts a just-published session: it has no lease yet, so
+ * with every older entry leased it would be the only candidate — evicting it
+ * destroys the session the handshake is about to hand out, and reacquisition
+ * reconnects straight into the same eviction until some lease releases. The
+ * bound re-applies on the next release.
+ */
+function evictCursorH2BeyondCap(protect?: string): void {
+	while (cursorH2Pool.size > CURSOR_H2_MAX_RETAINED_SESSIONS) {
+		let victimKey: string | undefined;
+		let victimSince: number | undefined;
+		for (const [key, entry] of cursorH2Pool) {
+			if (key === protect) continue;
+			if (entry.outstanding > 0 || entry.draining || entry.idleSince === undefined) continue;
+			if (victimSince === undefined || entry.idleSince < victimSince) {
+				victimSince = entry.idleSince;
+				victimKey = key;
+			}
+		}
+		if (victimKey === undefined) return;
+		const victim = cursorH2Pool.get(victimKey);
+		if (victim) drainCursorH2Entry(victimKey, victim);
+	}
 }
 
 function issueCursorH2Lease(
@@ -390,6 +424,7 @@ function establishCursorH2Session(key: string, origin: string): CursorH2ConnectH
 			entry.referenced = false;
 			entry.idleSince = Date.now();
 			cursorH2Pool.set(key, entry);
+			evictCursorH2BeyondCap(key);
 			settle(entry);
 		};
 		connected.once("connect", publish);

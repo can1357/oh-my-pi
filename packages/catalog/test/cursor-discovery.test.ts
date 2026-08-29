@@ -610,6 +610,154 @@ describe("fetchCursorUsableModels", () => {
 		expect(sessions).toBe(2);
 	});
 
+	it("caps the pool at eight idle sessions, evicting the oldest origin's session", async () => {
+		const response = create(GetUsableModelsResponseSchema, {
+			models: [create(ModelDetailsSchema, { modelId: "composer-3" })],
+		});
+		const body = toBinary(GetUsableModelsResponseSchema, response);
+
+		// Nine distinct origins: the ninth publish breaches the hard cap and
+		// must evict the oldest idle entry, not the just-published ninth.
+		const urls: string[] = [];
+		const { promise: firstClosed, resolve: firstSessionClosed } = Promise.withResolvers<void>();
+		for (let i = 0; i < 9; i++) {
+			const { promise, resolve, reject } = Promise.withResolvers<string>();
+			const srv = http2.createServer();
+			servers.add(srv);
+			srv.once("error", reject);
+			if (i === 0) {
+				srv.on("session", (session: http2.Http2Session) => {
+					session.once("close", () => firstSessionClosed());
+				});
+			}
+			srv.on("stream", (stream: http2.ServerHttp2Stream) => {
+				stream.respond({ ":status": 200, "content-type": "application/proto" });
+				stream.end(body);
+			});
+			srv.listen(0, "127.0.0.1", () => {
+				resolve(`http://127.0.0.1:${requireTcpAddress(srv.address()).port}`);
+			});
+			urls.push(await promise);
+		}
+
+		for (const url of urls) {
+			const models = await fetchCursorUsableModels({ apiKey: "test-token", baseUrl: url, timeoutMs: 1_000 });
+			expect(models).toEqual([expect.objectContaining({ id: "composer-3" })]);
+		}
+
+		// Eight retained in publish order; the first origin was evicted.
+		const snapshot = __cursorDiscoveryHttp2Snapshot();
+		expect(snapshot.map(entry => entry.key)).toEqual(urls.slice(1).map(url => new URL(url).origin));
+		expect(snapshot.every(entry => entry.outstanding === 0 && !entry.draining && !entry.referenced)).toBe(true);
+		// Eviction destroys the session instead of leaking the open socket:
+		// the server-side close event is the real signal, so await it.
+		await firstClosed;
+	});
+
+	it("protects the just-published ninth session while every older entry is leased", async () => {
+		const response = create(GetUsableModelsResponseSchema, {
+			models: [create(ModelDetailsSchema, { modelId: "composer-3" })],
+		});
+		const body = toBinary(GetUsableModelsResponseSchema, response);
+
+		// Eight origins whose second stream parks, holding one lease per
+		// pooled session while the ninth origin publishes.
+		const held: http2.ServerHttp2Stream[] = [];
+		const { promise: allHeld, resolve: gotAllHeld } = Promise.withResolvers<void>();
+		const urls: string[] = [];
+		for (let i = 0; i < 8; i++) {
+			const { promise, resolve, reject } = Promise.withResolvers<string>();
+			const srv = http2.createServer();
+			servers.add(srv);
+			srv.once("error", reject);
+			let served = false;
+			srv.on("stream", (stream: http2.ServerHttp2Stream) => {
+				if (!served) {
+					served = true;
+					stream.respond({ ":status": 200, "content-type": "application/proto" });
+					stream.end(body);
+					return;
+				}
+				held.push(stream);
+				stream.on("data", () => {});
+				if (held.length === 8) gotAllHeld();
+			});
+			srv.listen(0, "127.0.0.1", () => {
+				resolve(`http://127.0.0.1:${requireTcpAddress(srv.address()).port}`);
+			});
+			urls.push(await promise);
+		}
+
+		for (const url of urls) {
+			const models = await fetchCursorUsableModels({ apiKey: "test-token", baseUrl: url, timeoutMs: 1_000 });
+			expect(models).toEqual([expect.objectContaining({ id: "composer-3" })]);
+		}
+		expect(__cursorDiscoveryHttp2Snapshot()).toHaveLength(8);
+
+		// Lease all eight idle sessions concurrently against the parking
+		// endpoints, then publish a ninth.
+		const leased = urls.map(url =>
+			fetchCursorUsableModels({ apiKey: "test-token", baseUrl: url, timeoutMs: 30_000 }),
+		);
+		await allHeld;
+		// The ninth origin also parks its stream, so its fresh session is
+		// published into a pool already holding eight leased entries.
+		const heldNinth: http2.ServerHttp2Stream[] = [];
+		const { promise: ninthHeld, resolve: gotNinthHeld } = Promise.withResolvers<void>();
+		const { promise: ninthReady, resolve: ninthResolved, reject: ninthRejected } = Promise.withResolvers<string>();
+		const ninthSrv = http2.createServer();
+		servers.add(ninthSrv);
+		const { promise: ninthClosed, resolve: ninthSessionClosed } = Promise.withResolvers<void>();
+		ninthSrv.once("error", ninthRejected);
+		ninthSrv.on("session", (session: http2.Http2Session) => {
+			session.once("close", () => ninthSessionClosed());
+		});
+		ninthSrv.on("stream", (stream: http2.ServerHttp2Stream) => {
+			heldNinth.push(stream);
+			stream.on("data", () => {});
+			gotNinthHeld();
+		});
+		ninthSrv.listen(0, "127.0.0.1", () => {
+			ninthResolved(`http://127.0.0.1:${requireTcpAddress(ninthSrv.address()).port}`);
+		});
+		const ninthUrl = await ninthReady;
+		const ninth = fetchCursorUsableModels({ apiKey: "test-token", baseUrl: ninthUrl, timeoutMs: 30_000 });
+		await ninthHeld;
+
+		// Every older entry is leased and the just-published ninth is
+		// protected at publish, so the bound cannot apply: nine entries
+		// persist and the ninth's handshake handed out its lease.
+		const snapshot = __cursorDiscoveryHttp2Snapshot();
+		expect(snapshot).toHaveLength(9);
+		expect(snapshot.every(entry => entry.outstanding === 1 && !entry.draining)).toBe(true);
+		expect(snapshot.find(entry => entry.key === new URL(ninthUrl).origin)).toEqual(
+			expect.objectContaining({ outstanding: 1, draining: false, referenced: true }),
+		);
+
+		// Releasing the ninth's lease re-applies the bound without
+		// protection: it is the only idle entry, so it is evicted and its
+		// session destroyed.
+		const ninthStream = heldNinth[0];
+		if (!ninthStream) throw new Error("ninth stream never arrived");
+		ninthStream.respond({ ":status": 200, "content-type": "application/proto" });
+		ninthStream.end(body);
+		expect(await ninth).toEqual([expect.objectContaining({ id: "composer-3" })]);
+		const after = __cursorDiscoveryHttp2Snapshot();
+		expect(after).toHaveLength(8);
+		expect(after.some(entry => entry.key === new URL(ninthUrl).origin)).toBe(false);
+		// The eviction's session destruction closes the server-side session;
+		// await that real event rather than guessing a duration.
+		await ninthClosed;
+
+		// The remaining releases find the pool at the cap and shed nothing.
+		for (const stream of held) {
+			stream.respond({ ":status": 200, "content-type": "application/proto" });
+			stream.end(body);
+		}
+		const settled = await Promise.all(leased);
+		expect(settled.every(models => models?.every(model => model.id === "composer-3"))).toBe(true);
+		expect(__cursorDiscoveryHttp2Snapshot()).toHaveLength(8);
+	});
 	it("maps request failures to null", async () => {
 		const { promise, resolve, reject } = Promise.withResolvers<string>();
 		const srv = http2.createServer();
