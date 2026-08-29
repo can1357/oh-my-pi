@@ -332,7 +332,18 @@ describe("TodoTool operations", () => {
 		const userDrop = parsed[0]?.tasks.find(task => task.content === "ship it");
 		const modelDrop = parsed[0]?.tasks.find(task => task.content === "model drop");
 		expect(userDrop).toEqual({ content: "ship it", status: "abandoned", droppedBy: "user" });
-		expect(modelDrop).toEqual({ content: "model drop", status: "abandoned" });
+		// Markdown parse is a user surface: bare `[-]` becomes a user drop too.
+		expect(modelDrop).toEqual({ content: "model drop", status: "abandoned", droppedBy: "user" });
+	});
+
+	it("treats checklist [-] items from /todo edit as user drops", () => {
+		const md = ["# Work", "- [-] cancelled in the editor", "- [~] also cancelled"].join("\n");
+		const { phases, errors } = markdownToPhases(md);
+		expect(errors).toEqual([]);
+		expect(phases[0]?.tasks).toEqual([
+			{ content: "cancelled in the editor", status: "abandoned", droppedBy: "user" },
+			{ content: "also cancelled", status: "abandoned", droppedBy: "user" },
+		]);
 	});
 
 	it("parses checklist items with backslash-escaped brackets from /todo edit", () => {

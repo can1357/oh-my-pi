@@ -732,17 +732,18 @@ export function markdownToPhases(md: string): { phases: TodoPhase[]; errors: str
 			const blockerMatch = /^(.*?)\s*<!--\s*blocker:\s*(.*?)\s*-->$/.exec(rawContent);
 			if (status === "blocked" && blockerMatch) {
 				currentPhase.tasks.push({ content: blockerMatch[1].trim(), status, blocker: blockerMatch[2].trim() });
-			} else {
+			} else if (status === "abandoned") {
+				// Markdown is a user-authored surface (`/todo edit`, checklist import).
+				// Any `[-]`/`[~]` here is an explicit cancel — stamp droppedBy so settle
+				// does not schedule another continuation for a model drop.
 				const droppedByMatch = /^(.*?)\s*<!--\s*dropped-by:\s*user\s*-->$/.exec(rawContent);
-				if (status === "abandoned" && droppedByMatch) {
-					currentPhase.tasks.push({
-						content: droppedByMatch[1].trim(),
-						status,
-						droppedBy: "user",
-					});
-				} else {
-					currentPhase.tasks.push({ content: rawContent, status });
-				}
+				currentPhase.tasks.push({
+					content: (droppedByMatch?.[1] ?? rawContent).trim(),
+					status,
+					droppedBy: "user",
+				});
+			} else {
+				currentPhase.tasks.push({ content: rawContent, status });
 			}
 			continue;
 		}
