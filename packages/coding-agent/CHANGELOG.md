@@ -3,7 +3,7 @@
 ## [Unreleased]
 ### Fixed
 
-- Zero-billed empty stops that exhaust the retry cap now consult `retry.modelFallback` / `retry.fallbackChains` instead of surfacing a retry-cap error. Turns that billed any usage bucket, including provider-side orchestration tokens, still settle terminal ([#9480](https://github.com/can1357/oh-my-pi/issues/9480)).
+- Zero-billed empty stops that exhaust the retry cap now consult `retry.modelFallback` / `retry.fallbackChains` instead of surfacing a retry-cap error. Turns that billed any usage bucket, including provider-side orchestration tokens, still settle terminal ([#9480](https://github.com/can1357/oh-my-pi/issues/9480)). Same-model effort-only chain entries no longer count as a model takeover.
 
 ### Added
 

@@ -811,16 +811,26 @@ export class TurnRecovery {
 					errorId: AIError.create(AIError.Flag.EmptyResponse | AIError.Flag.Transient),
 				};
 				await this.#dropAssistantTurnDurably(assistantMessage);
+				const modelBeforeFallback = this.#host.model();
 				const didRetry = await this.handleRetryableError(synthetic, {
 					allowModelFallback: true,
 					hardErrorFallback: true,
 				});
-				if (didRetry) {
+				const modelAfterFallback = this.#host.model();
+				// Effort-only selector changes (provider/model:high → :low) resolve the
+				// same model and must not count as takeover — otherwise the empty-stop
+				// counter resets and the same dead route gets another full cycle.
+				const modelIdentityChanged =
+					modelBeforeFallback !== undefined &&
+					modelAfterFallback !== undefined &&
+					!modelsAreEqual(modelBeforeFallback, modelAfterFallback);
+				if (didRetry && modelIdentityChanged) {
 					this.#emptyStopRetryCount = 0;
 					return "continue";
 				}
-				// No chain could take over: fall through to the visible terminal settle
-				// rather than granting the same dead pipe another empty-stop cycle.
+				// No distinct model could take over: fall through to the visible
+				// terminal settle rather than granting the same dead pipe another
+				// empty-stop cycle.
 				this.#silentEmptyStopFallbackArmed = false;
 			}
 
@@ -1753,12 +1763,26 @@ export class TurnRecovery {
 		role: string,
 		selector: RetryFallbackSelector,
 		currentSelector: string,
-		options?: { pinFallback?: boolean; apiKey?: string; signal?: AbortSignal },
+		options?: {
+			pinFallback?: boolean;
+			apiKey?: string;
+			signal?: AbortSignal;
+			/** When true, effort-only same-model candidates are rejected as not a takeover. */
+			requireModelIdentityChange?: boolean;
+		},
 	): Promise<boolean> {
 		const resolved = resolveModelOverride([selector.raw], this.#host.modelRegistry, this.#host.settings);
 		const candidate = resolved.model ?? this.#host.modelRegistry.find(selector.provider, selector.id);
 		if (!candidate) {
 			throw new Error(`Retry fallback model not found: ${selector.raw}`);
+		}
+		const previousModel = this.#host.model();
+		if (
+			options?.requireModelIdentityChange &&
+			previousModel !== undefined &&
+			modelsAreEqual(previousModel, candidate)
+		) {
+			return false;
 		}
 		const apiKey =
 			options?.apiKey ??
@@ -1780,7 +1804,6 @@ export class TurnRecovery {
 				? requestedThinkingLevel
 				: clampThinkingLevelToCeiling(candidate, requestedThinkingLevel, this.#host.thinkingLevelCeiling());
 		const candidateSelector = formatModelStringWithRouting(candidate);
-		const previousModel = this.#host.model();
 		// Mark routing BEFORE the swap: `setModelWithProviderSessionReset` moves the
 		// model and fans `model_changed` out to subscribers synchronously, and a
 		// listener reading attribution in that window must already see the incoming
@@ -1831,9 +1854,10 @@ export class TurnRecovery {
 	async #tryRetryModelFallback(
 		currentSelector: string,
 		failedMessage: AssistantMessage,
-		options?: { pinFallback?: boolean; preserveFailedTurn?: boolean },
+		options?: { pinFallback?: boolean; preserveFailedTurn?: boolean; requireModelIdentityChange?: boolean },
 	): Promise<boolean> {
 		const ceiling = this.#host.thinkingLevelCeiling();
+		const currentModel = this.#host.model();
 		const latestAssistant = options?.preserveFailedTurn
 			? failedMessage
 			: this.#host.agent.state.messages.findLast(
@@ -1845,6 +1869,15 @@ export class TurnRecovery {
 				const resolved = resolveModelOverride([selector.raw], this.#host.modelRegistry, this.#host.settings);
 				const candidate = resolved.model ?? this.#host.modelRegistry.find(selector.provider, selector.id);
 				if (!candidate) continue;
+				// Empty-stop / hard-error takeover requires a different provider/model.
+				// Effort-only chain entries (provider/model:high → :low) must not count.
+				if (
+					options?.requireModelIdentityChange &&
+					currentModel !== undefined &&
+					modelsAreEqual(currentModel, candidate)
+				) {
+					continue;
+				}
 				// Anthropic signatures and redacted blocks are model-bound, while the
 				// latest assistant response must remain byte-identical. A same-provider
 				// model switch can satisfy neither constraint, so keep retrying the
@@ -2252,6 +2285,7 @@ export class TurnRecovery {
 				switchedModel = await this.#tryRetryModelFallback(currentSelector, message, {
 					pinFallback: classifierRefusal,
 					preserveFailedTurn,
+					requireModelIdentityChange: options?.hardErrorFallback === true,
 				});
 			}
 			// Auto fallback from a Fireworks Fast variant to its base model. Independent

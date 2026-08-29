@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
@@ -7,6 +8,8 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { TurnRecovery, type TurnRecoveryHost } from "@oh-my-pi/pi-coding-agent/session/turn-recovery";
+import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-coding-agent/thinking";
+import { concreteThinkingLevel } from "@oh-my-pi/pi-coding-agent/thinking";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 /**
@@ -289,6 +292,39 @@ describe("TurnRecovery zero-billed empty-stop fallback", () => {
 		expect(events.some(e => e.type === "retry_fallback_applied")).toBe(false);
 		expect(events.filter(e => e.type === "auto_retry_end" && e.success === false).length).toBe(1);
 		expect(msg.stopReason).toBe("stop");
+	});
+
+	it("9b. same-model effort-only chain does not count as takeover", async () => {
+		const sameModelChain = {
+			[`${model.provider}/${model.id}:high`]: [`${model.provider}/${model.id}:low`],
+			[`${model.provider}/${model.id}`]: [`${model.provider}/${model.id}:low`],
+		};
+		const host = createHost(model, modelRegistry);
+		let currentModel: Model = model;
+		let thinking: ConfiguredThinkingLevel | undefined = ThinkingLevel.High;
+		host.model = () => currentModel;
+		host.thinkingLevel = () => concreteThinkingLevel(thinking);
+		host.configuredThinkingLevel = () => thinking;
+		host.setThinkingLevel = next => {
+			thinking = next;
+		};
+		host.setModelWithProviderSessionReset = async next => {
+			currentModel = next;
+		};
+		host.settings = Settings.isolated({
+			"retry.baseDelayMs": 0,
+			"retry.fallbackChains": sameModelChain,
+		});
+		const events: Array<{ type: string; success?: boolean }> = [];
+		host.emitSessionEvent = async event => {
+			events.push(event as { type: string });
+		};
+		const recovery = new TurnRecovery(host);
+		const msg = zeroBilled();
+		expect(await settle(recovery, msg)).toEqual(LEGACY_CAP);
+		expect(currentModel.id).toBe(model.id);
+		expect(events.some(e => e.type === "retry_fallback_applied")).toBe(false);
+		expect(events.filter(e => e.type === "auto_retry_end" && e.success === false).length).toBe(1);
 	});
 
 	it("10. counter resets after a non-empty turn between empties", async () => {
