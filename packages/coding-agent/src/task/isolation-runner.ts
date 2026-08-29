@@ -496,19 +496,20 @@ export async function applyEligibleNestedPatches(
 		(mergeMode !== "branch" || mergedBranchForNestedPatches);
 	if (!eligible) return { summary: "", applied: false };
 	try {
-		const warnings = await applyNestedPatches(repoRoot, nestedPatches, commitMessage);
-		if (warnings.length === 0) return { summary: "", applied: true };
+		const { warnings, applied } = await applyNestedPatches(repoRoot, nestedPatches, commitMessage);
+		if (warnings.length === 0) return { summary: "", applied };
 		return {
 			summary: `\n\n<system-notification>${warnings.join("\n")}</system-notification>`,
-			applied: true,
+			applied,
 		};
-	} catch {
-		// Nested patch failures are non-fatal to the parent merge, but an earlier
-		// nested repo may already have committed before the throw — treat as
-		// applied so the unverified-merge latch still arms.
+	} catch (err) {
+		// Nested patch failures are non-fatal to the parent merge. Only treat as
+		// applied when an earlier nested repo actually changed before the throw.
+		const applied =
+			typeof err === "object" && err !== null && "nestedPatchesApplied" in err && err.nestedPatchesApplied === true;
 		return {
 			summary: "\n\n<system-notification>Some nested repository patches failed to apply.</system-notification>",
-			applied: true,
+			applied,
 		};
 	}
 }

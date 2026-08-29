@@ -1758,6 +1758,14 @@ export class AgentSession {
 		this.#unverifiedMergeLatch.mark();
 	}
 
+	observeAsyncJobTerminal(
+		jobId: string,
+		jobType: string | undefined,
+		status: "running" | "completed" | "failed" | "cancelled" | undefined,
+	): void {
+		this.#todo.onAsyncJobTerminal(jobId, jobType, status);
+	}
+
 	/** Dequeue the next HARD forced tool choice for the upcoming LLM call, dropping
 	 *  (and rejecting) one whose named tool is no longer active. */
 	#nextHardToolChoice(): ToolChoice | undefined {
@@ -2036,6 +2044,10 @@ export class AgentSession {
 	 */
 	async #deliverAsyncJobResult(manager: AsyncJobManager, jobId: string, text: string, job?: AsyncJob): Promise<void> {
 		if (this.#isDisposed) return;
+		// Observe terminal status before delivery gates: hub `consumeJobResults`
+		// suppresses auto-delivery, but a successful bash/eval verify must still
+		// clear the unverified-merge latch.
+		this.#todo.onAsyncJobTerminal(jobId, job?.type, job?.status);
 		if (manager.isDeliverySuppressed(jobId)) return;
 		// Snapshot the generation before the async format step: a `/new` during it
 		// bumps the epoch, so this delivery belongs to the replaced session and
@@ -2046,10 +2058,6 @@ export class AgentSession {
 		if (this.#isDisposed) return;
 		if (epoch !== this.#asyncDeliveryEpoch) return;
 		if (manager.isDeliverySuppressed(jobId)) return;
-		// Parent-verify tools that auto-backgrounded carried their merge-generation
-		// snapshot under this job id; clear the latch only on successful terminal
-		// completion (the initial `async.state: "running"` toolResult never clears).
-		this.#todo.onAsyncJobTerminal(jobId, job?.type, job?.status);
 		const durationMs = job ? Math.max(0, Date.now() - job.startTime) : undefined;
 		await this.yieldQueue.enqueueWithReceipt<AsyncResultEntry>("async-result", {
 			jobId,
@@ -5326,6 +5334,10 @@ export class AgentSession {
 		this.#toolChoiceQueue.clear();
 		this.#tools.clearAcpPermissionDecisions();
 		this.#tools.resetAnnouncedMounts();
+		// Isolated merges arm this latch against the current workspace/session; a
+		// switch or new session must not inherit an unverified merge from another
+		// cwd/transcript.
+		this.#unverifiedMergeLatch.clear();
 	}
 
 	/**

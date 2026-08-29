@@ -275,6 +275,16 @@ export interface ToolSession {
 	getAgentId?: () => string | null;
 	/** Parent session: isolated apply succeeded; child yield is not evidence. */
 	noteUnverifiedMerge?: () => void;
+	/**
+	 * Observe a settled async job independently of automatic delivery.
+	 * Used when `hub` consumes a completed bash/eval result so the unverified-merge
+	 * latch can clear even though delivery was suppressed.
+	 */
+	observeAsyncJobTerminal?: (
+		jobId: string,
+		jobType: string | undefined,
+		status: "running" | "completed" | "failed" | "cancelled" | undefined,
+	) => void;
 	/** Look up a registered tool by name (used by the eval js backend's tool bridge). */
 	getToolByName?: (name: string) => AgentTool | undefined;
 	/** Look up an enabled tool through the eval bridge's normal permission pipeline. */

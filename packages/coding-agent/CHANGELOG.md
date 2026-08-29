@@ -43,7 +43,7 @@
 - Fixed orphaned pages, iframes, and workers accumulating in the shared headless browser after abnormal OMP session termination.
 ### Fixed
 
-- Isolated task merges now latch parent verification: child yield is not evidence. A successful parent `bash`/`eval`/`lsp` result clears the latch; stopping with an unverified merge continues the session like incomplete todos. Background bash/eval verification now clears only when the async job completes successfully, not on the initial running ack.
+- Isolated task merges now latch parent verification: child yield is not evidence. A successful parent `bash`/`eval`/`lsp` result clears the latch; stopping with an unverified merge continues the session like incomplete todos. Background bash/eval verification now clears only when the async job completes successfully, not on the initial running ack. Session switches clear the latch so a different cwd/transcript does not inherit it. Hub-consumed job snapshots also clear the latch when verification succeeded. Nested patch apply failures no longer report `applied: true` unless an earlier nested repo actually changed.
 
 ## [18.0.10] - 2026-08-28
 

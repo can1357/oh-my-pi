@@ -617,7 +617,9 @@ describe("applyEligibleNestedPatches", () => {
 	});
 
 	it("applies nested patches and returns no warning on success", async () => {
-		const applySpy = vi.spyOn(worktreeModule, "applyNestedPatches").mockResolvedValue([]);
+		const applySpy = vi
+			.spyOn(worktreeModule, "applyNestedPatches")
+			.mockResolvedValue({ warnings: [], applied: true });
 		const suffix = await applyEligibleNestedPatches({
 			result: result({ nestedPatches: [nestedPatch] }),
 			repoRoot: "/repo",
@@ -629,8 +631,23 @@ describe("applyEligibleNestedPatches", () => {
 		expect(applySpy).toHaveBeenCalledTimes(1);
 	});
 
-	it("returns a system-notification suffix on apply failure", async () => {
+	it("returns a system-notification suffix on apply failure without marking applied", async () => {
 		vi.spyOn(worktreeModule, "applyNestedPatches").mockRejectedValue(new Error("boom"));
+		const suffix = await applyEligibleNestedPatches({
+			result: result({ nestedPatches: [nestedPatch] }),
+			repoRoot: "/repo",
+			mergeMode: "branch",
+			changesApplied: true,
+			mergedBranchForNestedPatches: true,
+		});
+		expect(suffix.applied).toBe(false);
+		expect(suffix.summary).toContain("Some nested repository patches failed to apply");
+	});
+
+	it("preserves applied when a later nested patch fails after an earlier success", async () => {
+		vi.spyOn(worktreeModule, "applyNestedPatches").mockRejectedValue(
+			Object.assign(new Error("second repo boom"), { nestedPatchesApplied: true }),
+		);
 		const suffix = await applyEligibleNestedPatches({
 			result: result({ nestedPatches: [nestedPatch] }),
 			repoRoot: "/repo",
@@ -643,9 +660,12 @@ describe("applyEligibleNestedPatches", () => {
 	});
 
 	it("surfaces stash-restore warnings from applyNestedPatches as a system-notification", async () => {
-		vi.spyOn(worktreeModule, "applyNestedPatches").mockResolvedValue([
-			"Pre-existing dirty state in nested repo `nested` could not be auto-restored after the agent commit; stash entry preserved (conflict).",
-		]);
+		vi.spyOn(worktreeModule, "applyNestedPatches").mockResolvedValue({
+			warnings: [
+				"Pre-existing dirty state in nested repo `nested` could not be auto-restored after the agent commit; stash entry preserved (conflict).",
+			],
+			applied: true,
+		});
 		const suffix = await applyEligibleNestedPatches({
 			result: result({ nestedPatches: [nestedPatch] }),
 			repoRoot: "/repo",

@@ -340,7 +340,9 @@ export async function captureDeltaPatch(isolationDir: string, baseline: Worktree
  * see, not a thrown failure.
  *
  * Returns the collected stash-restore warnings (empty when every nested repo
- * was restored cleanly). Throws when the patch apply itself fails.
+ * was restored cleanly) and whether any nested patch modified or committed a
+ * repository. Throws when the patch apply itself fails; the error may carry
+ * `nestedPatchesApplied: true` when an earlier nested repo already succeeded.
  *
  * @param commitMessage Optional async function to generate a commit message from the combined diff.
  *                      If omitted or returns null, falls back to a generic message.
@@ -349,8 +351,9 @@ export async function applyNestedPatches(
 	repoRoot: string,
 	patches: NestedRepoPatch[],
 	commitMessage?: (diff: string) => Promise<string | null>,
-): Promise<string[]> {
+): Promise<{ warnings: string[]; applied: boolean }> {
 	const warnings: string[] = [];
+	let applied = false;
 	// Group patches by target repo to apply all at once and commit
 	const byRepo = new Map<string, NestedRepoPatch[]>();
 	for (const p of patches) {
@@ -378,16 +381,26 @@ export async function applyNestedPatches(
 			? await repository.stashPush(`omp-isolation-${Snowflake.next()}`)
 			: false;
 		try {
-			for (const { patch } of repoPatches) {
-				await repository.applyPatch(patch, {});
-			}
-			if (await repository.isDirty()) {
-				if (touchedFiles.length === 0) {
-					throw new Error(`Nested repo patch for ${relativePath} did not include stageable file paths.`);
+			try {
+				for (const { patch } of repoPatches) {
+					await repository.applyPatch(patch, {});
+					applied = true;
 				}
-				const msg = (await commitMessage?.(combinedDiff)) ?? "changes from isolated task(s)";
-				await repository.stageFiles(touchedFiles);
-				await repository.commitCreate(msg, {});
+				if (await repository.isDirty()) {
+					if (touchedFiles.length === 0) {
+						throw new Error(`Nested repo patch for ${relativePath} did not include stageable file paths.`);
+					}
+					const msg = (await commitMessage?.(combinedDiff)) ?? "changes from isolated task(s)";
+					await repository.stageFiles(touchedFiles);
+					await repository.commitCreate(msg, {});
+				}
+			} catch (err) {
+				if (applied) {
+					throw Object.assign(err instanceof Error ? err : new Error(String(err)), {
+						nestedPatchesApplied: true,
+					});
+				}
+				throw err;
 			}
 		} finally {
 			if (stashed) {
@@ -403,7 +416,7 @@ export async function applyNestedPatches(
 			}
 		}
 	}
-	return warnings;
+	return { warnings, applied };
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
