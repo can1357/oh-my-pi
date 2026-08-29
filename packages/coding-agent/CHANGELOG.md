@@ -9,7 +9,8 @@
 ### Fixed
 
 - Derived the Cursor exec bridge's file-mutation grant from the live active tool set, so a live `/agent` switch to a read-only persona can no longer leave delete/write capabilities enabled.
-- Fixed agent-persona edge cases: mode switches (`/plan`/`/vibe`/`/goal`) now clear persona state, resume with an unresolvable persona model falls back to the transcript's saved model, explicit CLI tool restrictions survive persona exit, and ACP `/agent` switches respect active plan/goal/vibe modes.
+- Enforced an explicit `--tools`/`--no-tools` grant everywhere a persona session's tool set can widen: the initial active set, MCP activation, late refreshes after leaving the persona, and the baseline re-captured on in-process session switches all stay within the CLI grant; a persona with `spawns: []` no longer advertises a `task` tool that always fails preflight; scout availability now follows the live spawn policy instead of the launch snapshot; and a failed `/plan` entry from a persona restores the persona state it cleared.
+
 ## [18.0.10] - 2026-08-28
 
 ### Added
