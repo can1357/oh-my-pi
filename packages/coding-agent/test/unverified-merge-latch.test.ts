@@ -189,4 +189,33 @@ describe("unverified isolated merge latch", () => {
 		expect(ctx.continuations.count).toBe(1);
 		expect(JSON.stringify(ctx.messages)).toContain(MERGED_UNVERIFIED_MARKER);
 	});
+
+	it("keeps the merge gate armed after the todo reminder budget is exhausted", async () => {
+		const latch = new UnverifiedMergeLatch();
+		latch.mark();
+		const ctx = host(latch);
+		(ctx.host.settings as Settings).set("todo.remindersMax", 1);
+		const tracker = new TodoTracker(ctx.host);
+		tracker.setPhases([]);
+
+		expect(await tracker.checkCompletion(textOnlyStop())).toBe(true);
+		expect(ctx.continuations.count).toBe(1);
+		// Budget spent; latch still armed — settle must remain blocked.
+		expect(await tracker.checkCompletion(textOnlyStop())).toBe(true);
+		expect(ctx.continuations.count).toBe(2);
+		expect(latch.latched).toBe(true);
+	});
+
+	it("does not treat a post-task user-force settle as an exemption from the merge latch", async () => {
+		const latch = new UnverifiedMergeLatch();
+		latch.mark();
+		const ctx = host(latch);
+		ctx.host.consumeLastServedToolChoiceLabel = () => "user-force";
+		const tracker = new TodoTracker(ctx.host);
+		tracker.setPhases([]);
+
+		expect(await tracker.checkCompletion(textOnlyStop())).toBe(true);
+		expect(ctx.continuations.count).toBe(1);
+		expect(JSON.stringify(ctx.messages)).toContain(MERGED_UNVERIFIED_MARKER);
+	});
 });

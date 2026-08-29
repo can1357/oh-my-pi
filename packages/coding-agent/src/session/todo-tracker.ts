@@ -281,12 +281,14 @@ export class TodoTracker {
 
 	/** Checks a terminal assistant turn and schedules continuation for incomplete todos. */
 	async checkCompletion(message: AssistantMessage): Promise<boolean> {
-		if (this.#host.consumeLastServedToolChoiceLabel() === "user-force") return false;
-		if (this.#host.planModeEnabled()) return false;
 		// The unverified-merge gate is an acceptance latch, not a todo nudge: it
-		// must fire even when a prior reminder is still awaiting progress, or the
-		// session would settle while the merge remains unverified.
+		// must fire even when a prior reminder is still awaiting progress, the
+		// reminder budget is exhausted, or the terminal turn follows a user-forced
+		// task — otherwise the session would settle while the merge remains unverified.
 		const unverifiedMerge = this.#host.hasUnverifiedMerge?.() === true;
+		// user-force suppresses todo reminders only; an armed merge latch still gates settle.
+		if (this.#host.consumeLastServedToolChoiceLabel() === "user-force" && !unverifiedMerge) return false;
+		if (this.#host.planModeEnabled()) return false;
 		if (this.#reminderAwaitingProgress && !unverifiedMerge) {
 			logger.debug("Todo completion: prior reminder still awaiting agent action; staying silent", {
 				attempt: this.#reminderCount,
@@ -294,7 +296,7 @@ export class TodoTracker {
 			return false;
 		}
 		const remindersMax = this.#host.settings.get("todo.remindersMax");
-		if (this.#reminderCount >= remindersMax) {
+		if (this.#reminderCount >= remindersMax && !unverifiedMerge) {
 			logger.debug("Todo completion: max reminders reached", { count: this.#reminderCount });
 			return false;
 		}
