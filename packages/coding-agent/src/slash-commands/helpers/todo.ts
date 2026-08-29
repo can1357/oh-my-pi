@@ -152,7 +152,9 @@ async function handleTodoImportCommand(restArgs: string, runtime: SlashCommandRu
 	}
 	const { phases: parsed, errors } = markdownToPhases(content);
 	if (errors.length > 0) return usage(`Could not parse ${target}:\n  ${errors.join("\n  ")}`, runtime);
-	const phases = applyUserMarkdownPhases(currentPhases(runtime), parsed);
+	// Import replaces the list from a user-authored file: stamp every abandoned
+	// marker as a user cancel independently of the replaced in-memory list.
+	const phases = applyUserMarkdownPhases([], parsed);
 	commitTodos(runtime, phases);
 	const taskCount = phases.reduce((sum, phase) => sum + phase.tasks.length, 0);
 	await runtime.output(`Imported ${phases.length} phase(s), ${taskCount} task(s) from ${target}.`);

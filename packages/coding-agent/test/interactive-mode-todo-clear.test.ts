@@ -95,10 +95,29 @@ describe("InteractiveMode todo HUD persistence", () => {
 		mode.setTodos(session.getTodoPhases());
 
 		const rendered = renderTodos(mode);
-		// Abandoned is incomplete for settle: the list is not settled, so auto-clear
-		// must not wipe the HUD. Progress counts completed only → 1/2.
+		// Model abandoned is incomplete for settle: the list is not settled, so
+		// auto-clear must not wipe the HUD. Progress counts completed only → 1/2.
 		expect(rendered).toContain("1/2");
 		expect(session.getTodoPhases()).toEqual(phases);
+	});
+
+	it("clears a completed-plus-user-dropped plan once settled for HUD auto-clear", () => {
+		setTodoClearDelay(0);
+		const phases: TodoPhase[] = [
+			{
+				name: "Implementation",
+				tasks: [
+					{ content: "done task", status: "completed" },
+					{ content: "user cancel", status: "abandoned", droppedBy: "user" },
+				],
+			},
+		];
+		session.setTodoPhases(phases);
+
+		mode.setTodos(session.getTodoPhases());
+
+		expect(renderTodos(mode)).not.toContain("done task");
+		expect(renderTodos(mode)).not.toContain("user cancel");
 	});
 
 	/**

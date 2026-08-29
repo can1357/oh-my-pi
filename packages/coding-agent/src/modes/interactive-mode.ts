@@ -136,9 +136,9 @@ import {
 	isCompletedTodo,
 	isHudSettledTodo,
 	nextActionableTask,
-	todoHudCounts,
 	selectCollapsedTodos,
 	setActiveTodoDescriptionsProvider,
+	todoHudCounts,
 	todoMatchesAnyDescription,
 } from "../tools/todo";
 import { vocalizer } from "../tts/vocalizer";
@@ -2689,7 +2689,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		const taskStr = activeTask
 			? this.#formatTodoLine(activeTask, "", isMatched(activeTask))
 			: completedTasks < totalTasks
-				? theme.fg("warning", droppedTasks > 0 ? `${theme.checkbox.unchecked} dropped` : `${theme.checkbox.unchecked} incomplete`)
+				? theme.fg(
+						"warning",
+						droppedTasks > 0 ? `${theme.checkbox.unchecked} dropped` : `${theme.checkbox.unchecked} incomplete`,
+					)
 				: theme.fg("success", `${theme.checkbox.checked} done`);
 		const rightLine = `${header} ${theme.fg("dim", "·")} ${taskStr}`;
 

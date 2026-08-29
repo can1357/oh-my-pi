@@ -358,6 +358,34 @@ class ProtocolParsingTests(unittest.TestCase):
         self.assertEqual(task.status, "blocked")
         self.assertEqual(task.blocker, "waiting on maintainer go-ahead")
 
+    def test_parse_session_state_accepts_dropped_by_todo(self) -> None:
+        state = parse_session_state(
+            {
+                "sessionId": "session-123",
+                "steeringMode": "one-at-a-time",
+                "followUpMode": "one-at-a-time",
+                "interruptMode": "immediate",
+                "todoPhases": [
+                    {
+                        "id": "phase-1",
+                        "name": "Ship",
+                        "tasks": [
+                            {
+                                "id": "task-1",
+                                "content": "Ship it",
+                                "status": "abandoned",
+                                "droppedBy": "user",
+                            }
+                        ],
+                    }
+                ],
+            }
+        )
+
+        task = state.todo_phases[0].tasks[0]
+        self.assertEqual(task.status, "abandoned")
+        self.assertEqual(task.dropped_by, "user")
+
     def test_assistant_text_excludes_thinking_by_default(self) -> None:
         message = {
             "role": "assistant",

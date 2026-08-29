@@ -273,11 +273,7 @@ export function todoHudCounts(tasks: ReadonlyArray<{ status: TodoStatus }>): {
 }
 
 /** `2/5` or `2/5 · 1 dropped`. */
-export function formatTodoHudRatio(counts: {
-	completed: number;
-	abandoned: number;
-	total: number;
-}): string {
+export function formatTodoHudRatio(counts: { completed: number; abandoned: number; total: number }): string {
 	const base = `${counts.completed}/${counts.total}`;
 	return counts.abandoned > 0 ? `${base} · ${counts.abandoned} dropped` : base;
 }
@@ -554,15 +550,15 @@ function applyEntry(
 		}
 		case "drop": {
 			for (const task of getTaskTargets(phases, entry, errors)) {
-				task.status = "abandoned";
-				if (options?.userAuthored) {
-					task.droppedBy = "user";
-				} else if (task.droppedBy === "user") {
-					// Model broad/phase drops must not erase an earlier user cancel.
-					// Leave droppedBy intact so settle still treats this as user-authored.
-				} else {
-					task.droppedBy = undefined;
+				if (!options?.userAuthored) {
+					// Phase-wide/untargeted model drops must not reopen finished or
+					// blocked work — same settle-gate contract as model `rm`. Keep
+					// existing user cancels (incl. droppedBy) untouched.
+					if (task.status === "completed" || task.status === "blocked") continue;
+					if (task.status === "abandoned" && task.droppedBy === "user") continue;
 				}
+				task.status = "abandoned";
+				task.droppedBy = options?.userAuthored ? "user" : undefined;
 			}
 			return phases;
 		}
@@ -800,43 +796,70 @@ export function markdownToPhases(md: string): { phases: TodoPhase[]; errors: str
 }
 
 /**
+ * Decide whether an abandoned task from a user-authored replace should carry
+ * `droppedBy: "user"` given the prior in-memory list.
+ *
+ * - newly abandoned → user cancel
+ * - still abandoned + prior `droppedBy: "user"` → keep (comment may have been stripped)
+ * - still abandoned + prior was model-abandoned → stay model (no-op edit)
+ * - empty prior (fresh import / first RPC set) → all abandoned are user-authored
+ */
+function shouldStampAbandonedAsUser(priorByContent: Map<string, TodoItem>, emptyPrior: boolean, task: TodoItem): boolean {
+	if (task.droppedBy === "user") return true;
+	const prev = priorByContent.get(task.content);
+	if (emptyPrior || !prev || prev.status !== "abandoned") return true;
+	return prev.droppedBy === "user";
+}
+
+function priorAbandonedIndex(prior: TodoPhase[]): { byContent: Map<string, TodoItem>; empty: boolean } {
+	const byContent = new Map<string, TodoItem>();
+	for (const phase of prior) {
+		for (const task of phase.tasks) {
+			byContent.set(task.content, task);
+		}
+	}
+	return { byContent, empty: prior.every(phase => phase.tasks.length === 0) };
+}
+
+/**
  * Merge a user-authored markdown parse against the prior in-memory list.
  *
  * `/todo edit` round-trips through phasesToMarkdown → editor → markdownToPhases.
  * Model drops serialize as bare `[-]` (no HTML comment), so stamping every
  * abandoned parse result as user-authored would fail open on a no-op save.
- * Diff against `prior` instead:
- * - newly abandoned → user cancel
- * - still abandoned + prior `droppedBy: "user"` → keep (comment may have been stripped)
- * - still abandoned + prior was model-abandoned → stay model
- * - empty prior (fresh import) → all `[-]` are user-authored
+ * Pass an empty `prior` for `/todo import` so every `[-]`/`[~]` is a user cancel
+ * even when the replaced list already held a model-abandoned item with the same content.
  */
 export function applyUserMarkdownPhases(prior: TodoPhase[], parsed: TodoPhase[]): TodoPhase[] {
-	const priorByContent = new Map<string, TodoItem>();
-	for (const phase of prior) {
-		for (const task of phase.tasks) {
-			priorByContent.set(task.content, task);
-		}
-	}
-	const emptyPrior = prior.every(phase => phase.tasks.length === 0);
+	const { byContent, empty } = priorAbandonedIndex(prior);
 
 	return parsed.map(phase => ({
 		name: phase.name,
 		tasks: phase.tasks.map(task => {
 			const next = cloneTask(task);
 			if (next.status !== "abandoned") return next;
-			if (next.droppedBy === "user") return next;
-
-			const prev = priorByContent.get(next.content);
-			if (emptyPrior || !prev || prev.status !== "abandoned") {
+			if (shouldStampAbandonedAsUser(byContent, empty, next)) {
 				next.droppedBy = "user";
-				return next;
-			}
-			if (prev.droppedBy === "user") {
-				next.droppedBy = "user";
-				return next;
 			}
 			return next;
+		}),
+	}));
+}
+
+/**
+ * Stamp host-authored abandoned provenance for RPC `set_todos` without
+ * reconstructing phases/tasks — preserves wire fields such as phase/task `id`,
+ * `notes`, and `details` that Python RPC callers round-trip.
+ */
+export function applyRpcTodoProvenance(prior: TodoPhase[], incoming: TodoPhase[]): TodoPhase[] {
+	const { byContent, empty } = priorAbandonedIndex(prior);
+
+	return incoming.map(phase => ({
+		...phase,
+		tasks: phase.tasks.map(task => {
+			if (task.status !== "abandoned") return task;
+			if (!shouldStampAbandonedAsUser(byContent, empty, task)) return task;
+			return { ...task, droppedBy: "user" as const };
 		}),
 	}));
 }

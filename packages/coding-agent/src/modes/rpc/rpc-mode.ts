@@ -31,7 +31,7 @@ import { SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "../../session/m
 import { executeAcpBuiltinSlashCommand } from "../../slash-commands/acp-builtins";
 import { buildAvailableSlashCommands } from "../../slash-commands/available-commands";
 import { defaultLoadModeForToolName } from "../../tools/essential-tools";
-import { applyUserMarkdownPhases } from "../../tools/todo";
+import { applyRpcTodoProvenance } from "../../tools/todo";
 import type { EventBus } from "../../utils/event-bus";
 import { calculateTokensPerSecond } from "../../utils/token-rate";
 import { initializeExtensions } from "../runtime-init";
@@ -1156,7 +1156,7 @@ export async function runRpcMode(
 			}
 
 			case "set_todos": {
-				session.setTodoPhases(applyUserMarkdownPhases(session.getTodoPhases(), command.phases));
+				session.setTodoPhases(applyRpcTodoProvenance(session.getTodoPhases(), command.phases));
 				return success(id, "set_todos", { todoPhases: session.getTodoPhases() });
 			}
 

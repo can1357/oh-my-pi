@@ -3,11 +3,7 @@ import type { Agent, AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, Model } from "@oh-my-pi/pi-ai";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { TodoTracker, type TodoTrackerHost } from "@oh-my-pi/pi-coding-agent/session/todo-tracker";
-import {
-	applyUserMarkdownPhases,
-	markdownToPhases,
-	phasesToMarkdown,
-} from "@oh-my-pi/pi-coding-agent/tools/todo";
+import { applyUserMarkdownPhases, markdownToPhases, phasesToMarkdown } from "@oh-my-pi/pi-coding-agent/tools/todo";
 
 function textOnlyStop(text = "All work is done."): AssistantMessage {
 	return {

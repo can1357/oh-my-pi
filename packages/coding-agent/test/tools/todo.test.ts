@@ -7,6 +7,7 @@ import { initTheme, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import {
 	applyOpsToPhases,
+	applyRpcTodoProvenance,
 	applyUserMarkdownPhases,
 	formatTodoHudRatio,
 	isCompletedTodo,
@@ -20,10 +21,10 @@ import {
 	selectCollapsedTodos,
 	TODO_STRIKE_HOLD_FRAMES,
 	TODO_STRIKE_TOTAL_FRAMES,
-	todoHudCounts,
 	type TodoItem,
 	type TodoPhase,
 	TodoTool,
+	todoHudCounts,
 	todoMatchesAnyDescription,
 	todoToolRenderer,
 } from "@oh-my-pi/pi-coding-agent/tools";
@@ -365,12 +366,7 @@ describe("TodoTool operations", () => {
 				],
 			},
 		];
-		const md = [
-			"# Work",
-			"- [-] cancelled in the editor",
-			"- [~] also cancelled",
-			"- [-] model drop",
-		].join("\n");
+		const md = ["# Work", "- [-] cancelled in the editor", "- [~] also cancelled", "- [-] model drop"].join("\n");
 		const { phases: parsed, errors } = markdownToPhases(md);
 		expect(errors).toEqual([]);
 		const merged = applyUserMarkdownPhases(prior, parsed);
@@ -420,10 +416,82 @@ describe("TodoTool operations", () => {
 		expect(newlyDropped).toEqual({ content: "still open", status: "abandoned" });
 	});
 
-	it("stamps droppedBy for slash userAuthored drops but not for model tool drops", () => {
-		const phases: TodoPhase[] = [
-			{ name: "Work", tasks: [{ content: "ship it", status: "pending" }] },
+	it("leaves completed and blocked tasks alone when the model broad-drops a phase", () => {
+		const { phases } = applyOpsToPhases(
+			[
+				{
+					name: "Work",
+					tasks: [
+						{ content: "done", status: "completed" },
+						{ content: "waiting", status: "blocked", blocker: "owner" },
+						{ content: "open", status: "pending" },
+					],
+				},
+			],
+			[{ op: "drop", phase: "Work" }],
+		);
+		expect(phases[0]?.tasks).toEqual([
+			{ content: "done", status: "completed" },
+			{ content: "waiting", status: "blocked", blocker: "owner" },
+			{ content: "open", status: "abandoned" },
+		]);
+	});
+
+	it("stamps imported [-] as user cancel even over a prior model drop", () => {
+		const prior: TodoPhase[] = [
+			{ name: "Work", tasks: [{ content: "model drop", status: "abandoned" }] },
 		];
+		const { phases: parsed, errors } = markdownToPhases("# Work\n- [-] model drop\n");
+		expect(errors).toEqual([]);
+		// Import uses empty prior so the file's abandoned markers win.
+		const imported = applyUserMarkdownPhases([], parsed);
+		expect(imported[0]?.tasks[0]).toEqual({
+			content: "model drop",
+			status: "abandoned",
+			droppedBy: "user",
+		});
+		// Edit-style merge against the live prior would keep the model stamp.
+		expect(applyUserMarkdownPhases(prior, parsed)[0]?.tasks[0]).toEqual({
+			content: "model drop",
+			status: "abandoned",
+		});
+	});
+
+	it("stamps RPC abandoned provenance without stripping host wire fields", () => {
+		const incoming = [
+			{
+				name: "Ship",
+				id: "phase-1",
+				tasks: [
+					{
+						content: "Ship it",
+						status: "abandoned" as const,
+						id: "task-1",
+						notes: "host note",
+						details: "host details",
+					},
+				],
+			},
+		] as TodoPhase[];
+		const next = applyRpcTodoProvenance([], incoming);
+		expect(next[0]).toMatchObject({
+			name: "Ship",
+			id: "phase-1",
+			tasks: [
+				{
+					content: "Ship it",
+					status: "abandoned",
+					droppedBy: "user",
+					id: "task-1",
+					notes: "host note",
+					details: "host details",
+				},
+			],
+		});
+	});
+
+	it("stamps droppedBy for slash userAuthored drops but not for model tool drops", () => {
+		const phases: TodoPhase[] = [{ name: "Work", tasks: [{ content: "ship it", status: "pending" }] }];
 		const userDrop = applyOpsToPhases(phases, [{ op: "drop", task: "ship it" }], { userAuthored: true });
 		expect(userDrop.phases[0]?.tasks[0]).toEqual({
 			content: "ship it",
@@ -550,7 +618,15 @@ describe("TodoTool operations", () => {
 
 	it("deletes tasks when user-authored rm runs", () => {
 		const { phases } = applyOpsToPhases(
-			[{ name: "Work", tasks: [{ content: "First", status: "pending" }, { content: "Second", status: "pending" }] }],
+			[
+				{
+					name: "Work",
+					tasks: [
+						{ content: "First", status: "pending" },
+						{ content: "Second", status: "pending" },
+					],
+				},
+			],
 			[{ op: "rm" }],
 			{ userAuthored: true },
 		);
@@ -950,9 +1026,9 @@ describe("abandoned todos in tool summary and compact HUD contracts", () => {
 	});
 
 	it("formats HUD ratios with a dropped suffix", () => {
-		expect(formatTodoHudRatio(todoHudCounts([{ status: "completed" }, { status: "abandoned" }, { status: "pending" }]))).toBe(
-			"1/3 · 1 dropped",
-		);
+		expect(
+			formatTodoHudRatio(todoHudCounts([{ status: "completed" }, { status: "abandoned" }, { status: "pending" }])),
+		).toBe("1/3 · 1 dropped");
 		expect(formatTodoHudRatio(todoHudCounts([{ status: "completed" }, { status: "completed" }]))).toBe("2/2");
 	});
 });
