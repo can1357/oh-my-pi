@@ -487,7 +487,7 @@ describe("Anthropic request fingerprint alignment", () => {
 		expect(extractSuffix(billingWithDev)).toBe(extractSuffix(billingUserOnly));
 	});
 
-	it("places the automatic Anthropic cache breakpoint on the last ordered system prompt", async () => {
+	it("stamps cache breakpoints on the first and last system blocks (API-key layout)", async () => {
 		const payload = (await captureAnthropicPayload(
 			ANTHROPIC_MODEL,
 			{
@@ -498,9 +498,76 @@ describe("Anthropic request fingerprint alignment", () => {
 		)) as { system?: Array<{ type: string; text?: string; cache_control?: unknown }> };
 
 		expect(payload.system).toEqual([
-			{ type: "text", text: "stable system" },
+			{ type: "text", text: "stable system", cache_control: { type: "ephemeral" } },
 			{ type: "text", text: "stable durable context", cache_control: { type: "ephemeral" } },
 		]);
+	});
+
+	it("spends spare cache breakpoints on the stable first system block within the 4-breakpoint ceiling", async () => {
+		const assistantReply: AssistantMessage = {
+			role: "assistant",
+			content: [{ type: "text", text: "reply" }],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: ANTHROPIC_MODEL.id,
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "stop",
+			timestamp: Date.now(),
+		};
+		const payload = (await captureAnthropicPayload(
+			ANTHROPIC_MODEL,
+			{
+				systemPrompt: ["stable base", "project footer", "active repo"],
+				messages: [
+					{ role: "user", content: "first turn", timestamp: Date.now() },
+					assistantReply,
+					{ role: "user", content: "second turn", timestamp: Date.now() },
+				],
+			},
+			{ isOAuth: false },
+		)) as {
+			system?: Array<{ type: string; text?: string; cache_control?: { type: string } }>;
+			messages?: Array<{ content: unknown }>;
+		};
+
+		// Stable base block + final system block are stamped; the middle
+		// (churn-prone) block is left unstamped.
+		expect(payload.system?.[0]?.cache_control).toEqual({ type: "ephemeral" });
+		expect(payload.system?.[1]?.cache_control).toBeUndefined();
+		expect(payload.system?.[2]?.cache_control).toEqual({ type: "ephemeral" });
+
+		// Total breakpoints across the request must stay within Anthropic's
+		// ceiling of four: 2 system + the last two messages.
+		const systemBreakpoints = (payload.system ?? []).filter(block => block.cache_control).length;
+		const messageBreakpoints = (payload.messages ?? [])
+			.map(message => JSON.stringify(message))
+			.filter(serialized => serialized.includes('"cache_control"')).length;
+		expect(systemBreakpoints + messageBreakpoints).toBe(4);
+	});
+
+	it("never stamps the billing header in the two-block Claude Code layout", async () => {
+		const payload = (await captureAnthropicPayload(ANTHROPIC_MODEL, {
+			messages: [{ role: "user", content: "hello", timestamp: Date.now() }],
+		})) as {
+			system?: Array<{ type: string; text?: string; cache_control?: { type: string } }>;
+		};
+
+		// No caller system prompt → exactly [billing header, CC instruction].
+		// The layout must still be recognized as Claude Code regardless of block
+		// count, so the billing header is never stamped and the CC instruction
+		// keeps its build-time breakpoint.
+		expect(payload.system?.length).toBe(2);
+		expect(payload.system?.[0]?.text?.startsWith("x-anthropic-billing-header:")).toBe(true);
+		expect(payload.system?.[0]?.cache_control).toBeUndefined();
+		expect(payload.system?.[1]?.text).toContain("Claude agent");
+		expect(payload.system?.[1]?.cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
 	});
 
 	it("uses Bearer auth for non-Anthropic API bases with api-key credentials", () => {

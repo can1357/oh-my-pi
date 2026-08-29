@@ -2625,9 +2625,7 @@ function applyPromptCaching(params: MessageCreateParamsStreaming, cacheControl?:
 	let isCCLayout = false;
 
 	if (params.system && Array.isArray(params.system) && params.system.length > 0) {
-		isCCLayout =
-			params.system.length >= 3 &&
-			(params.system[0] as { text?: string }).text?.startsWith(CLAUDE_BILLING_HEADER_PREFIX) === true;
+		isCCLayout = (params.system[0] as { text?: string }).text?.startsWith(CLAUDE_BILLING_HEADER_PREFIX) === true;
 		if (isCCLayout) {
 			const placed = Math.min(
 				MAX_CACHE_BREAKPOINTS - cacheBreakpointsUsed,
@@ -2636,6 +2634,23 @@ function applyPromptCaching(params: MessageCreateParamsStreaming, cacheControl?:
 			cacheBreakpointsUsed += placed;
 		} else if (applyCacheControlToLastBlock(params.system, cacheControl)) {
 			cacheBreakpointsUsed++;
+			// Spend one spare breakpoint on the FIRST system block (the stable base
+			// prompt). Later blocks (project footer, active-repo context) churn far
+			// more often across prompt rebuilds, model switches, and session
+			// resumes; an early breakpoint keeps the expensive stable prefix
+			// cacheable independently of them. Never touches the CC layout, whose
+			// first block is the billing header.
+			const systemBlocks = params.system as AnthropicSystemBlock[];
+			if (
+				systemBlocks.length >= 2 &&
+				cacheBreakpointsUsed < MAX_CACHE_BREAKPOINTS &&
+				systemBlocks[0].cache_control == null &&
+				// Belt and suspenders: never stamp a Claude-Code billing header.
+				(systemBlocks[0] as { text?: string }).text?.startsWith(CLAUDE_BILLING_HEADER_PREFIX) !== true
+			) {
+				systemBlocks[0] = { ...systemBlocks[0], cache_control: cloneAnthropicCacheControl(cacheControl) };
+				cacheBreakpointsUsed++;
+			}
 		}
 	}
 
