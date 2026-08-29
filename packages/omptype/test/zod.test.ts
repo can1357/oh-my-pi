@@ -235,6 +235,30 @@ describe("zod-like parsing", () => {
 		expect(z.object({}).parse([])).toEqual({});
 	});
 
+	it("lets later modifiers replace the object policy the array guard sits on", () => {
+		// The guard is the shim's own step, so a naive wrapper made every guarded
+		// object look stepped: a rebuild then re-validated through the OLD
+		// policy, and `.strict().partial()` still demanded the now-optional key
+		// while `z.strictObject({}).passthrough()` still rejected extras.
+		expect(z.object({ a: z.string() }).strict().partial().parse({})).toEqual({});
+		expect(z.strictObject({}).passthrough().parse({ extra: 1 })).toEqual({ extra: 1 });
+		expect(z.strictObject({ a: z.string() }).describe("d").partial().parse({})).toEqual({});
+		expect(z.object({ a: z.string() }).strict().strip().parse({ a: "x", b: 1 })).toEqual({ a: "x" });
+		// The replaced policy is really gone, and the surviving one still holds.
+		expect(z.object({ a: z.string() }).strict().partial().safeParse({ b: 1 }).success).toBe(false);
+		expect(z.looseObject({ a: z.string() }).partial().parse({ b: 1 })).toEqual({ b: 1 });
+		// …and the guard survives every chain that stays non-stripping.
+		expect(z.object({ a: z.string() }).strict().partial().safeParse([]).success).toBe(false);
+		expect(z.strictObject({ a: z.string() }).describe("d").safeParse([]).success).toBe(false);
+		expect(z.looseObject({ a: z.string() }).partial().safeParse([]).success).toBe(false);
+		// Descriptions and defaults survive the rebuild the guard forces.
+		expect(z.strictObject({ a: z.string() }).describe("desc").toJsonSchema()).toMatchObject({
+			additionalProperties: false,
+			description: "desc",
+		});
+		expect(z.strictObject({ n: z.number().default(3) }).parse({})).toEqual({ n: 3 });
+	});
+
 	it("parses valid values and reports nested safeParse issues", () => {
 		const schema = z.object({ profile: z.object({ age: z.number().int().positive() }) });
 		expect(schema.parse({ profile: { age: 42 } })).toEqual({ profile: { age: 42 } });

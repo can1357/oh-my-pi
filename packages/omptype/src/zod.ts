@@ -90,13 +90,71 @@ function undefinedDispatch<Out>(
 	});
 }
 
+/**
+ * Rebuild `source`'s structure as `ir`, keeping its description, default, and
+ * any user steps.
+ *
+ * The array guard is deliberately unwrapped and re-applied rather than carried:
+ * it is the shim's own step, not the author's, and leaving it in place would
+ * make the source count as stepped, so the rebuilt schema would validate `ir`
+ * and then re-validate through the OLD object policy — `.strict().partial()`
+ * would still demand the now-optional keys, and `z.strictObject({})
+ * .passthrough()` would still reject extras.
+ */
 function restrictBase<Out>(source: Decoratable<Out>, ir: IR): Decoratable<Out> {
-	let next = source.hasSteps
-		? schemaFromIR<Out>({ k: "morph", input: ir, fn: value => source(value) })
+	const unguarded = unguardedObject(source);
+	let next = unguarded.hasSteps
+		? schemaFromIR<Out>({ k: "morph", input: ir, fn: value => unguarded(value) })
 		: schemaFromIR<Out>(ir);
-	if (source.ir.desc !== undefined) next = next.describe(source.ir.desc);
-	if (source.hasDefault) next = next.default(source.defaultValue as Out | (() => Out));
-	return next;
+	if (unguarded.ir.desc !== undefined) next = next.describe(unguarded.ir.desc);
+	if (unguarded.hasDefault) next = next.default(unguarded.defaultValue as Out | (() => Out));
+	return ir.k === "object" && ir.extras !== "delete" ? guardArrays(next) : next;
+}
+
+const kUnguarded = Symbol("omptype.zod.unguardedObject");
+
+/** A schema that may carry the step-free base an array guard was applied to. */
+interface MaybeGuarded<Out> extends Decoratable<Out> {
+	readonly [kUnguarded]?: Decoratable<Out>;
+}
+
+/**
+ * Reject an array reaching an object schema, which zod does and the emitted
+ * `{"type":"object"}` already promises. Only usable where the object does NOT
+ * strip keys: a narrow step observes the object node's OUTPUT, and a
+ * key-stripping object has already turned `[]` into `{}` by then, so the guard
+ * would inspect the wrong value. Stripping objects therefore keep omptype's
+ * object-node semantics (arrays are objects), which is what `type({})` does
+ * too — tightening that belongs in the IR's object arm, not here.
+ *
+ * The pre-guard schema is kept on the result so {@link restrictBase} can
+ * rebuild from it; see there for why carrying the guard instead breaks later
+ * structural modifiers.
+ */
+function guardArrays<Out>(base: Decoratable<Out>): Decoratable<Out> {
+	const guarded = base.narrow(
+		(value, ctx: NarrowContext) => !Array.isArray(value) || ctx.mustBe("an object, not an array"),
+	);
+	Object.defineProperty(guarded, kUnguarded, { value: base, enumerable: false });
+	return guarded;
+}
+
+/** The step-free schema behind an array guard, or `schema` when there is none. */
+function unguardedObject<Out>(schema: Decoratable<Out>): Decoratable<Out> {
+	const carrier: MaybeGuarded<Out> = schema;
+	return carrier[kUnguarded] ?? schema;
+}
+
+/**
+ * Keep the unguarded base reachable through a wrapper that adds no policy of
+ * its own (`.describe()`), so a later `.partial()`/mode change still rebuilds
+ * from the base instead of re-validating through the old object policy.
+ */
+function carryGuard<Out>(source: Decoratable<Out>, wrapped: Decoratable<Out>): Decoratable<Out> {
+	const carrier: MaybeGuarded<Out> = source;
+	const base = carrier[kUnguarded];
+	if (base !== undefined) Object.defineProperty(wrapped, kUnguarded, { value: base, enumerable: false });
+	return wrapped;
 }
 
 function lengthBound(kind: "min" | "max", schema: Decoratable<unknown>, bound: number): void {
@@ -130,11 +188,10 @@ function decorate<Out>(schema: Decoratable<Out>, optional = false): ZodLikeSchem
 	const next = (inner: Decoratable<Out>, nextOptional = optional): ZodLikeSchema<Out> => decorate(inner, nextOptional);
 	const withObjectExtras = (extras: "keep" | "reject" | "delete"): ZodLikeSchema<Out> => {
 		if (schema.ir.k !== "object") throw new OmpTypeError("object mode requires an object schema");
-		const restricted = restrictBase(schema, { ...schema.ir, extras });
-		// Same reasoning as objectSchema: the guard is only meaningful where the
-		// object does not strip keys, so `.strict()`/`.passthrough()` reject
-		// arrays exactly like `z.strictObject`/`z.looseObject`.
-		return next(extras === "delete" ? restricted : rejectArrays(restricted));
+		// restrictBase re-applies the array guard for the non-stripping modes, so
+		// `.strict()`/`.passthrough()` reject arrays exactly like
+		// `z.strictObject`/`z.looseObject`.
+		return next(restrictBase(schema, { ...schema.ir, extras }));
 	};
 	Object.defineProperty(schema, "isOptional", { value: optional, enumerable: false });
 
@@ -301,7 +358,8 @@ function decorate<Out>(schema: Decoratable<Out>, optional = false): ZodLikeSchem
 			return result;
 		},
 		describe(description: string): ZodLikeSchema<Out> {
-			return next(restrictBase(schema, { ...schema.ir, desc: description }).describe(description));
+			const rebuilt = restrictBase(schema, { ...schema.ir, desc: description });
+			return next(carryGuard(rebuilt, rebuilt.describe(description)));
 		},
 		refine(predicate: (value: Out) => unknown, messageOrOptions?: string | RefineOptions): ZodLikeSchema<Out> {
 			const expectation = refinementMessage(messageOrOptions);
@@ -403,19 +461,6 @@ type ObjectOutput<S extends Shape> = {
 type Simplify<T> = { [K in keyof T]: T[K] };
 type UnionOutput<Schemas extends readonly ZodLikeSchema<unknown>[]> = SchemaOutput<Schemas[number]>;
 
-/**
- * Reject an array reaching an object schema, which zod does and the emitted
- * `{"type":"object"}` already promises. Only usable where the object does NOT
- * strip keys: a narrow step observes the object node's OUTPUT, and a
- * key-stripping object has already turned `[]` into `{}` by then, so the guard
- * would inspect the wrong value. Stripping objects therefore keep omptype's
- * object-node semantics (arrays are objects), which is what `type({})` does
- * too — tightening that belongs in the IR's object arm, not here.
- */
-function rejectArrays<Out>(schema: Decoratable<Out>): Decoratable<Out> {
-	return schema.narrow((value, ctx: NarrowContext) => !Array.isArray(value) || ctx.mustBe("an object, not an array"));
-}
-
 function objectSchema<const S extends Shape>(shape: S, extras: Extras = "delete"): ZodLikeSchema<ObjectOutput<S>> {
 	const props: PropIR[] = [];
 	for (const key in shape) {
@@ -429,7 +474,7 @@ function objectSchema<const S extends Shape>(shape: S, extras: Extras = "delete"
 		props.push(prop);
 	}
 	const base = schemaFromIR<unknown>({ k: "object", props, extras });
-	return decorateUnknown(extras === "delete" ? base : rejectArrays(base)) as unknown as ZodLikeSchema<ObjectOutput<S>>;
+	return decorateUnknown(extras === "delete" ? base : guardArrays(base)) as unknown as ZodLikeSchema<ObjectOutput<S>>;
 }
 
 export const string = (): ZodLikeSchema<string> => decorate(schemaFromIR(type.string.ir));
