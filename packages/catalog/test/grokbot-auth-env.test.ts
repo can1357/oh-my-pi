@@ -220,11 +220,18 @@ describe("grokbot backend URL join", () => {
 });
 
 describe("grokbot AvailableModels headers", () => {
+	const previousMachineId = process.env.GROKBOT_MACHINE_ID;
+	const previousNamespace = process.env.GROKBOT_NAMESPACE;
+	const previousClientVersion = process.env.GROKBOT_CLIENT_VERSION;
+
 	afterEach(() => {
 		clearGrokbotTokenCache();
-		delete process.env.GROKBOT_MACHINE_ID;
-		delete process.env.GROKBOT_NAMESPACE;
-		delete process.env.GROKBOT_CLIENT_VERSION;
+		if (previousMachineId === undefined) delete process.env.GROKBOT_MACHINE_ID;
+		else process.env.GROKBOT_MACHINE_ID = previousMachineId;
+		if (previousNamespace === undefined) delete process.env.GROKBOT_NAMESPACE;
+		else process.env.GROKBOT_NAMESPACE = previousNamespace;
+		if (previousClientVersion === undefined) delete process.env.GROKBOT_CLIENT_VERSION;
+		else process.env.GROKBOT_CLIENT_VERSION = previousClientVersion;
 	});
 
 	test("forwards configured headers on mint and AvailableModels", async () => {

@@ -360,15 +360,20 @@ export function toInferenceMessages(context: Context) {
 		signature?: string;
 	};
 
+	const toolWireIndex = buildGrammarToolIndex(context.tools);
+
 	for (const msg of context.messages ?? []) {
 		if (!msg || typeof msg !== "object") continue;
 		const roleName = msg.role;
 		const record = msg as unknown as Record<string, unknown>;
 
 		if (roleName === "toolResult") {
+			const internalName = String(record.toolName || record.tool_name || "");
+			const meta = internalName ? toolWireIndex.get(internalName) : undefined;
+			const wireName = meta?.customWireName || internalName;
 			const part: Record<string, unknown> = {
 				toolCallId: record.toolCallId || record.tool_call_id || "",
-				toolName: record.toolName || record.tool_name || "",
+				toolName: wireName,
 				result: toolResultPayload(record),
 			};
 			if (record.isError) part.isError = true;

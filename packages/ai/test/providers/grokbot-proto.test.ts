@@ -490,6 +490,44 @@ describe("grokbot sand-host client parity", () => {
 			},
 		]);
 	});
+
+	test("replays grammar tool results with wire name from context.tools", () => {
+		const messages = toInferenceMessages({
+			tools: [
+				{
+					name: "edit",
+					description: "Apply a patch",
+					parameters: {},
+					customWireName: "apply_patch",
+					customFormat: { syntax: "lark", definition: "start: ANY" },
+				},
+			],
+			messages: [
+				{
+					role: "toolResult",
+					toolCallId: "c1",
+					toolName: "edit",
+					content: [{ type: "text", text: "patched" }],
+					isError: false,
+					timestamp: 3,
+				},
+			],
+		});
+		expect(messages).toEqual([
+			{
+				role: 3,
+				toolContent: {
+					parts: [
+						{
+							toolCallId: "c1",
+							toolName: "apply_patch",
+							result: "patched",
+						},
+					],
+				},
+			},
+		]);
+	});
 });
 
 describe("grokbot /login host-install prompt", () => {
