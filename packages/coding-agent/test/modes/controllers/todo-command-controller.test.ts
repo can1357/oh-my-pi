@@ -97,6 +97,27 @@ describe("TodoCommandController", () => {
 		expect(ctx.showError).not.toHaveBeenCalled();
 	});
 
+	it("imports abandoned checklist markers as user cancels over a prior model drop", async () => {
+		tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "pi-tui-todo-import-abandon-"));
+		const target = path.join(tempRoot, "TODO.md");
+		await fs.writeFile(target, "# Work\n- [-] Ship feature\n", "utf8");
+		const prior: TodoPhase[] = [
+			{ name: "Work", tasks: [{ content: "Ship feature", status: "abandoned" }] },
+		];
+		const ctx = createContext(tempRoot, prior);
+		const controller = new TodoCommandController(ctx);
+
+		await controller.handleTodoCommand("import");
+
+		expect(ctx.session.setTodoPhases).toHaveBeenCalledWith([
+			{
+				name: "Work",
+				tasks: [{ content: "Ship feature", status: "abandoned", droppedBy: "user" }],
+			},
+		]);
+		expect(ctx.showError).not.toHaveBeenCalled();
+	});
+
 	it("imports a quoted path with spaces", async () => {
 		tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "pi-tui-todo-import-quoted-"));
 		const target = path.join(tempRoot, "todo file.md");

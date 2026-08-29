@@ -424,6 +424,7 @@ describe("TodoTool operations", () => {
 					tasks: [
 						{ content: "done", status: "completed" },
 						{ content: "waiting", status: "blocked", blocker: "owner" },
+						{ content: "user cancel", status: "abandoned", droppedBy: "user" },
 						{ content: "open", status: "pending" },
 					],
 				},
@@ -433,6 +434,7 @@ describe("TodoTool operations", () => {
 		expect(phases[0]?.tasks).toEqual([
 			{ content: "done", status: "completed" },
 			{ content: "waiting", status: "blocked", blocker: "owner" },
+			{ content: "user cancel", status: "abandoned", droppedBy: "user" },
 			{ content: "open", status: "abandoned" },
 		]);
 	});
@@ -458,36 +460,65 @@ describe("TodoTool operations", () => {
 	});
 
 	it("stamps RPC abandoned provenance without stripping host wire fields", () => {
+		const prior: TodoPhase[] = [
+			{ name: "Ship", tasks: [{ content: "model drop", status: "abandoned" }] },
+		];
 		const incoming = [
 			{
 				name: "Ship",
 				id: "phase-1",
 				tasks: [
 					{
-						content: "Ship it",
+						content: "host cancel",
 						status: "abandoned" as const,
 						id: "task-1",
 						notes: "host note",
 						details: "host details",
 					},
+					{
+						content: "model drop",
+						status: "abandoned" as const,
+						id: "task-2",
+						notes: "still model",
+					},
+					{
+						content: "open work",
+						status: "pending" as const,
+						id: "task-3",
+						details: "keep going",
+					},
 				],
 			},
 		] as TodoPhase[];
-		const next = applyRpcTodoProvenance([], incoming);
-		expect(next[0]).toMatchObject({
-			name: "Ship",
-			id: "phase-1",
-			tasks: [
-				{
-					content: "Ship it",
-					status: "abandoned",
-					droppedBy: "user",
-					id: "task-1",
-					notes: "host note",
-					details: "host details",
-				},
-			],
-		});
+		const next = applyRpcTodoProvenance(prior, incoming);
+		expect(next).toEqual([
+			{
+				name: "Ship",
+				id: "phase-1",
+				tasks: [
+					{
+						content: "host cancel",
+						status: "abandoned",
+						id: "task-1",
+						notes: "host note",
+						details: "host details",
+						droppedBy: "user",
+					},
+					{
+						content: "model drop",
+						status: "abandoned",
+						id: "task-2",
+						notes: "still model",
+					},
+					{
+						content: "open work",
+						status: "pending",
+						id: "task-3",
+						details: "keep going",
+					},
+				],
+			},
+		]);
 	});
 
 	it("stamps droppedBy for slash userAuthored drops but not for model tool drops", () => {
