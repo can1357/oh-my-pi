@@ -95,6 +95,9 @@ function sendUnknownApprovedInteractionResponse(
 	log("interactionResponse", "unknownApproved", { id: queryId, field: fieldNo });
 }
 
+/** Verified unnamed WebFetch permission oneof on current Cursor builds. */
+const UNKNOWN_WEB_FETCH_QUERY_FIELD = 9;
+
 /**
  * Answer a Cursor `interaction_query` so the Run RPC can continue.
  *
@@ -105,16 +108,20 @@ function sendUnknownApprovedInteractionResponse(
  * aborts with "Provider stream stalled while waiting for the next event".
  *
  * Unsupported interactive queries are rejected so the server is not stranded.
- * VM setup is left unanswered rather than reporting a fake success.
+ * Unknown length-delimited variants other than verified WebFetch (field 9)
+ * are left unanswered rather than auto-approved. VM setup is also left
+ * unanswered rather than reporting a fake success.
  */
 export function handleInteractionQuery(query: InteractionQuery, h2Request: http2.ClientHttp2Stream): void {
 	const queryCase = query.query.case;
 	log("interactionQuery", queryCase, query.query.value);
 	if (!queryCase) {
-		const unknown = protoUnknownFields(query).find(field => field.wireType === 2 && field.no >= 2);
-		if (unknown) {
-			log("warn", "unknownInteractionQueryApproved", { id: query.id, field: unknown.no });
-			sendUnknownApprovedInteractionResponse(h2Request, query.id, unknown.no);
+		const unknownWebFetch = protoUnknownFields(query).find(
+			field => field.wireType === 2 && field.no === UNKNOWN_WEB_FETCH_QUERY_FIELD,
+		);
+		if (unknownWebFetch) {
+			log("warn", "unknownInteractionQueryApproved", { id: query.id, field: unknownWebFetch.no });
+			sendUnknownApprovedInteractionResponse(h2Request, query.id, unknownWebFetch.no);
 			return;
 		}
 		log("warn", "unknownInteractionQuery", { id: query.id });

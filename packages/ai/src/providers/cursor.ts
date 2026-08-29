@@ -363,6 +363,22 @@ export interface CursorOptions extends StreamOptions {
 	 * `role: "tool"` messages on the next request.
 	 */
 	cursorToolPassthrough?: boolean;
+	/** Comma-separated tool names to exclude (`x-cursor-agent-exclude-tools`). */
+	cursorExcludeTools?: string;
+	/** Signal local CLI mode (`local-cli-mode: true`). */
+	cursorLocalCliMode?: boolean;
+	/** Statsig experiment overrides (`x-dev-experiment-overrides`). */
+	cursorDevExperimentOverrides?: string;
+	/** Populates `AgentRunRequest.client_supports_inline_images`. */
+	cursorClientSupportsInlineImages?: boolean;
+	/** Populates `AgentRunRequest.client_supports_routed_model_update`. */
+	cursorClientSupportsRoutedModelUpdate?: boolean;
+	/** Populates `AgentRunRequest.client_supports_prompt_context_usage_rpc`. */
+	cursorClientSupportsPromptContextUsageRpc?: boolean;
+	/** Populates `AgentRunRequest.run_id`. */
+	cursorRunId?: string;
+	/** Populates `AgentRunRequest.agent_session_id`. */
+	cursorAgentSessionId?: string;
 }
 
 type CursorWireMode = "normalized" | "discovered";
@@ -763,6 +779,18 @@ function streamCursorWithWireMode(
 				"x-cursor-client-type": "cli",
 				"x-request-id": crypto.randomUUID(),
 			};
+			// Typed Cursor control options (also set as headers by the auth-gateway)
+			// win over any same-name caller header so streamSimple/pi-native paths
+			// that never went through the gateway still populate the wire.
+			if (options?.cursorExcludeTools !== undefined) {
+				requestHeaders["x-cursor-agent-exclude-tools"] = options.cursorExcludeTools;
+			}
+			if (options?.cursorLocalCliMode) {
+				requestHeaders["local-cli-mode"] = "true";
+			}
+			if (options?.cursorDevExperimentOverrides !== undefined) {
+				requestHeaders["x-dev-experiment-overrides"] = options.cursorDevExperimentOverrides;
+			}
 			// In passthrough mode, restrict the model's tool view to exactly the
 			// caller-declared tools (including native names like bash/read/write).
 			// Filtering those out emptied the allowlist and omitted the header,
@@ -5495,6 +5523,11 @@ async function buildGrpcRequestForWireMode(
 		modelDetails,
 		requestedModel,
 		conversationId: state.conversationId,
+		clientSupportsInlineImages: options?.cursorClientSupportsInlineImages === true,
+		clientSupportsRoutedModelUpdate: options?.cursorClientSupportsRoutedModelUpdate === true,
+		clientSupportsPromptContextUsageRpc: options?.cursorClientSupportsPromptContextUsageRpc === true,
+		runId: options?.cursorRunId ?? "",
+		agentSessionId: options?.cursorAgentSessionId ?? "",
 	});
 
 	// Apply customSystemPrompt BEFORE the hook so the onPayload replacement is the
