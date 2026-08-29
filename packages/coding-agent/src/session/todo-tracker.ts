@@ -144,9 +144,41 @@ export class TodoTracker {
 				this.#host.clearUnverifiedMergeIfGeneration?.(generationAtStart);
 			}
 		} else if (toolCallId) {
-			this.#verifyStartGeneration.delete(toolCallId);
+			// Auto-backgrounded bash/eval: the initial toolResult is only a
+			// "running" ack. Terminal completion arrives later via
+			// `#deliverAsyncJobResult` as an async-result follow-up — re-key the
+			// snapshotted generation under the job id so that path can clear.
+			const asyncMeta = isRecord(details?.async) ? details.async : undefined;
+			const asyncState = asyncMeta ? stringProperty(asyncMeta, "state") : undefined;
+			const jobId = asyncMeta ? stringProperty(asyncMeta, "jobId") : undefined;
+			if (asyncState === "running" && jobId) {
+				const generationAtStart = this.#verifyStartGeneration.get(toolCallId);
+				this.#verifyStartGeneration.delete(toolCallId);
+				if (generationAtStart !== undefined) {
+					this.#verifyStartGeneration.set(jobId, generationAtStart);
+				}
+			} else {
+				this.#verifyStartGeneration.delete(toolCallId);
+			}
 		}
 		this.#reminderAwaitingProgress = false;
+	}
+
+	/**
+	 * Clears an unverified-merge latch when a background bash/eval job finishes
+	 * successfully. Called from async-result delivery — not another toolResult.
+	 */
+	onAsyncJobTerminal(
+		jobId: string,
+		jobType: string | undefined,
+		status: "running" | "completed" | "failed" | "cancelled" | undefined,
+	): void {
+		const generationAtStart = this.#verifyStartGeneration.get(jobId);
+		this.#verifyStartGeneration.delete(jobId);
+		if (generationAtStart === undefined || generationAtStart <= 0) return;
+		if ((jobType === "bash" || jobType === "eval") && status === "completed") {
+			this.#host.clearUnverifiedMergeIfGeneration?.(generationAtStart);
+		}
 	}
 
 	#isSuccessfulParentVerify(
@@ -156,7 +188,7 @@ export class TodoTracker {
 	): boolean {
 		if (isError) return false;
 		// Background bash/eval: the initial toolResult is not a completed check.
-		const asyncState = isRecord(details?.async) ? stringProperty(details.async as Record<string, unknown>, "state") : undefined;
+		const asyncState = isRecord(details?.async) ? stringProperty(details.async, "state") : undefined;
 		if (asyncState === "running") return false;
 		// LSP reports failure via details.success without setting top-level isError.
 		if (toolName === "lsp") return details?.success === true;

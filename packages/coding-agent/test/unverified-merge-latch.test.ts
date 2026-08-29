@@ -102,7 +102,34 @@ describe("unverified isolated merge latch", () => {
 		const ctx = host(latch);
 		const tracker = new TodoTracker(ctx.host);
 		tracker.onToolExecutionStart("bash", "call-bg");
-		tracker.onToolResult("bash", false, { async: { state: "running" } }, "call-bg");
+		tracker.onToolResult("bash", false, { async: { state: "running", jobId: "job-bg" } }, "call-bg");
+		expect(latch.latched).toBe(true);
+	});
+
+	it("clears the latch when a background bash job completes via async delivery", async () => {
+		const latch = new UnverifiedMergeLatch();
+		latch.mark();
+		const ctx = host(latch);
+		const tracker = new TodoTracker(ctx.host);
+		tracker.setPhases([]);
+		tracker.onToolExecutionStart("bash", "call-bg");
+		tracker.onToolResult("bash", false, { async: { state: "running", jobId: "job-bg" } }, "call-bg");
+		expect(latch.latched).toBe(true);
+
+		tracker.onAsyncJobTerminal("job-bg", "bash", "completed");
+		expect(latch.latched).toBe(false);
+		expect(await tracker.checkCompletion(textOnlyStop())).toBe(false);
+		expect(ctx.continuations.count).toBe(0);
+	});
+
+	it("does not clear the latch when a background bash job fails", async () => {
+		const latch = new UnverifiedMergeLatch();
+		latch.mark();
+		const ctx = host(latch);
+		const tracker = new TodoTracker(ctx.host);
+		tracker.onToolExecutionStart("bash", "call-bg");
+		tracker.onToolResult("bash", false, { async: { state: "running", jobId: "job-fail" } }, "call-bg");
+		tracker.onAsyncJobTerminal("job-fail", "bash", "failed");
 		expect(latch.latched).toBe(true);
 	});
 

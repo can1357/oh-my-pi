@@ -2046,6 +2046,10 @@ export class AgentSession {
 		if (this.#isDisposed) return;
 		if (epoch !== this.#asyncDeliveryEpoch) return;
 		if (manager.isDeliverySuppressed(jobId)) return;
+		// Parent-verify tools that auto-backgrounded carried their merge-generation
+		// snapshot under this job id; clear the latch only on successful terminal
+		// completion (the initial `async.state: "running"` toolResult never clears).
+		this.#todo.onAsyncJobTerminal(jobId, job?.type, job?.status);
 		const durationMs = job ? Math.max(0, Date.now() - job.startTime) : undefined;
 		await this.yieldQueue.enqueueWithReceipt<AsyncResultEntry>("async-result", {
 			jobId,
