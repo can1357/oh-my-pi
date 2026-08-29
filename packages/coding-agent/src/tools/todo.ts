@@ -552,13 +552,17 @@ function applyEntry(
 			for (const task of getTaskTargets(phases, entry, errors)) {
 				if (!options?.userAuthored) {
 					// Phase-wide/untargeted model drops must not reopen finished or
-					// blocked work — same settle-gate contract as model `rm`. Keep
-					// existing user cancels (incl. droppedBy) untouched.
-					if (task.status === "completed" || task.status === "blocked") continue;
+					// blocked work — same settle-gate contract as model `rm`. A
+					// targeted `drop` (explicit `task`) honors the tool contract and
+					// can abandon blocked/completed work the model no longer tracks.
+					// Keep existing user cancels (incl. droppedBy) untouched.
+					if (!entry.task && (task.status === "completed" || task.status === "blocked")) continue;
 					if (task.status === "abandoned" && task.droppedBy === "user") continue;
 				}
 				task.status = "abandoned";
-				task.droppedBy = options?.userAuthored ? "user" : undefined;
+				delete task.blocker;
+				if (options?.userAuthored) task.droppedBy = "user";
+				else delete task.droppedBy;
 			}
 			return phases;
 		}

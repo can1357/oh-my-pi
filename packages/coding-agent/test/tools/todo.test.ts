@@ -439,6 +439,30 @@ describe("TodoTool operations", () => {
 		]);
 	});
 
+	it("abandons a blocked or completed task when the model targets it with drop", () => {
+		const { phases } = applyOpsToPhases(
+			[
+				{
+					name: "Work",
+					tasks: [
+						{ content: "done", status: "completed" },
+						{ content: "waiting", status: "blocked", blocker: "owner" },
+						{ content: "open", status: "pending" },
+					],
+				},
+			],
+			[
+				{ op: "drop", task: "waiting" },
+				{ op: "drop", task: "done" },
+			],
+		);
+		expect(phases[0]?.tasks).toEqual([
+			{ content: "done", status: "abandoned" },
+			{ content: "waiting", status: "abandoned" },
+			{ content: "open", status: "in_progress" },
+		]);
+	});
+
 	it("stamps imported [-] as user cancel even over a prior model drop", () => {
 		const prior: TodoPhase[] = [
 			{ name: "Work", tasks: [{ content: "model drop", status: "abandoned" }] },
