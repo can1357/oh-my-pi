@@ -428,6 +428,7 @@ FROM model_usage_legacy
 	}
 
 	#close(): void {
+		if (this.#closing) return;
 		this.#closing = true;
 		// Model-performance batches are synchronous once invoked, so this
 		// persists them before finalizing their statements during process exit.

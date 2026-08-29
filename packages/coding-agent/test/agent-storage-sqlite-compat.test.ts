@@ -45,6 +45,14 @@ describe("AgentStorage SQLite compatibility", () => {
 		}
 	});
 
+	it("tolerates concurrent process-wide close without throwing on a closed database", async () => {
+		tempDir = TempDir.createSync("@omp-agent-storage-double-close-");
+		const dbPath = path.join(tempDir.path(), "agent.db");
+		await AgentStorage.open(dbPath);
+		AgentStorage.close();
+		expect(() => AgentStorage.close()).not.toThrow();
+	});
+
 	it("creates fresh storage without unixepoch defaults", async () => {
 		tempDir = TempDir.createSync("@omp-agent-storage-fresh-");
 		const dbPath = path.join(tempDir.path(), "agent.db");
