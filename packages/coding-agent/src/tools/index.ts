@@ -230,6 +230,13 @@ export interface ToolSession {
 	hasEditTool?: boolean;
 	/** Event bus for tool/extension communication */
 	eventBus?: EventBus;
+	/**
+	 * Root-scoped bus for `task:subagent:*` observability frames. The root
+	 * session creates it; every spawned subagent session inherits it, so RPC
+	 * and HUD surfaces see spawns at any depth without crossing into another
+	 * root session's traffic.
+	 */
+	subagentEventBus?: EventBus;
 	/** Output schema for structured completion (subagents). */
 	outputSchema?: unknown;
 	/** Enforcement policy for {@link outputSchema}; defaults to legacy permissive behavior. */

@@ -210,7 +210,7 @@ function staticClientIdFromConfig(config: MCPOAuthConfig): string | undefined {
 	const fromConfig = config.clientId?.trim();
 	if (fromConfig) return fromConfig;
 	try {
-		return new URL(config.authorizationUrl).searchParams.get("client_id") ?? undefined;
+		return new URL(config.authorizationUrl).searchParams.get("client_id")?.trim() || undefined;
 	} catch {
 		return undefined;
 	}
@@ -422,8 +422,12 @@ export class MCPOAuthFlow extends OAuthCallbackFlow {
 			params.set("response_type", "code");
 		}
 		const existingClientId = params.get("client_id")?.trim();
-		if (this.#resolvedClientId && !existingClientId) {
+		if (this.#resolvedClientId) {
 			params.set("client_id", this.#resolvedClientId);
+		} else if (existingClientId) {
+			params.set("client_id", existingClientId);
+		} else {
+			params.delete("client_id");
 		}
 		if (this.config.scopes && !params.get("scope")) {
 			params.set("scope", this.config.scopes);
@@ -641,8 +645,9 @@ export class MCPOAuthFlow extends OAuthCallbackFlow {
 				client_secret?: string;
 			};
 
-			if (data.client_id && data.client_id.trim() !== "") {
-				this.#resolvedClientId = data.client_id;
+			const clientId = data.client_id?.trim();
+			if (clientId) {
+				this.#resolvedClientId = clientId;
 			}
 			if (data.client_secret && data.client_secret.trim() !== "") {
 				this.#registeredClientSecret = data.client_secret;
@@ -816,7 +821,8 @@ export async function refreshMCPOAuthToken(
 		grant_type: "refresh_token",
 		refresh_token: refreshToken,
 	});
-	if (clientId) params.set("client_id", clientId);
+	const normalizedClientId = clientId?.trim();
+	if (normalizedClientId) params.set("client_id", normalizedClientId);
 	// Drop redundant indicators so refresh stays consistent with the initial
 	// grant; see {@link filterResourceIndicator} for context.
 	const resolvedResource = filterResourceIndicator(resolveResourceUri(resource), filterAnchor, {
