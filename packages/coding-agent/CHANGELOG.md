@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Reduced idle CPU usage on WSL when TypeScript custom tools are loaded.
+
 ## [18.0.11] - 2026-08-29
 
 ### Added

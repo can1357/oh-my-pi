@@ -4,6 +4,7 @@
  * Dependencies are injected through CustomToolAPI so tools loaded from user
  * directories do not depend on workspace module resolution.
  */
+import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import * as zod from "@oh-my-pi/omptype/zod";
@@ -49,6 +50,60 @@ function invalidToolError(path: string, index: number, source: ToolLoadError["so
 	};
 }
 
+// Feed Bun pre-transpiled JavaScript so runtime TypeScript tools do not leave
+// compiler-pool threads spinning on WSL after the session becomes idle. The
+// hook is scoped to the tool's directory subtree so sibling/nested `.ts`
+// dependencies transpile through the same path — an entry-only hook would let
+// Bun load those dependencies natively and recreate the compiler pool.
+const tsToolTranspiler = new Bun.Transpiler({ loader: "ts", target: "bun" });
+const tsxToolTranspiler = new Bun.Transpiler({ loader: "tsx", target: "bun" });
+const registeredTypeScriptToolRoots = new Set<string>();
+
+function escapeRegExp(value: string): string {
+	return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/** Bun transpiler for ESM TypeScript paths, or `null` for anything else. */
+function toolTranspilerFor(filePath: string): Bun.Transpiler | null {
+	if (filePath.endsWith(".tsx")) return tsxToolTranspiler;
+	if (filePath.endsWith(".ts") || filePath.endsWith(".mts")) return tsToolTranspiler;
+	// Preserve native CommonJS interop for `.cts`; emitting it as loader `js`
+	// loses `module.exports` instead of exposing the factory as `default`.
+	return null;
+}
+
+function registerTypeScriptToolRoot(root: string): void {
+	if (registeredTypeScriptToolRoots.has(root)) return;
+	registeredTypeScriptToolRoots.add(root);
+	// Match every TypeScript-family module under the tool's directory so the
+	// entry and its relative dependencies share the hook. `node_modules` is
+	// excluded: published deps ship `.js`, and transpiling a dependency's own
+	// `.ts` with our bare transpiler would drop its packaged tsconfig.
+	const filter = new RegExp(`^${escapeRegExp(root + path.sep)}.*\\.(?:ts|tsx|mts)$`);
+	const nodeModulesSegment = `${path.sep}node_modules${path.sep}`;
+	Bun.plugin({
+		name: `omp:custom-tool:${Bun.hash(root).toString(36)}`,
+		setup(build) {
+			build.onLoad({ filter, namespace: "file" }, async args => {
+				const transpiler = toolTranspilerFor(args.path);
+				if (transpiler === null || args.path.includes(nodeModulesSegment)) return undefined;
+				return { contents: transpiler.transformSync(await Bun.file(args.path).text()), loader: "js" };
+			});
+		},
+	});
+}
+
+async function registerTypeScriptToolLoader(resolvedPath: string): Promise<void> {
+	if (toolTranspilerFor(resolvedPath) === null) return;
+	registerTypeScriptToolRoot(path.dirname(resolvedPath));
+	try {
+		const canonicalPath = await fs.realpath(resolvedPath);
+		registerTypeScriptToolRoot(path.dirname(canonicalPath));
+	} catch {
+		// The import below owns the user-facing missing/inaccessible-file error.
+	}
+}
+
 /**
  * Load a single tool module using native Bun import.
  */
@@ -59,6 +114,7 @@ async function loadTool(
 	source?: { provider: string; providerName: string; level: "user" | "project" },
 ): Promise<LoadToolResult> {
 	const resolvedPath = resolvePath(toolPath, cwd);
+	await registerTypeScriptToolLoader(resolvedPath);
 
 	// Skip declarative tool files (.md, .json) - these are metadata only, not executable modules
 	if (resolvedPath.endsWith(".md") || resolvedPath.endsWith(".json")) {

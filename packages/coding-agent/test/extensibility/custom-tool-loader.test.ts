@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -316,5 +316,96 @@ describe("custom tool loader", () => {
 		} finally {
 			process.stdin.removeListener("data", hostListener);
 		}
+	});
+
+	it("loads a TypeScript tool whose entry imports a sibling .ts module", async () => {
+		// The idle-CPU fix (#10212) transpiles runtime TypeScript tools through a
+		// directory-scoped onLoad hook. An entry-only hook left sibling `.ts`
+		// dependencies to Bun's native TypeScript loader; this multi-file layout
+		// exercises the whole tool directory so the dependency is served through
+		// the same hook. Assertion has teeth: the sibling's `TOOL_LABEL` only
+		// reaches `description` if the dependency actually resolved and linked.
+		await writeTool(
+			"reply.ts",
+			['export const TOOL_LABEL = "sibling-linked";', "export type Reply = { ok: true };"].join("\n"),
+		);
+		const entryPath = await writeTool(
+			"typed-tool.ts",
+			[
+				'import { TOOL_LABEL, type Reply } from "./reply.ts";',
+				"export default api => ({",
+				'\tname: "typed_multifile_tool",',
+				"\tdescription: TOOL_LABEL,",
+				"\tparameters: api.arktype({}),",
+				'\tasync execute(): Promise<{ content: Array<{ type: "text"; text: string }>; details: Reply }> {',
+				'\t\treturn { content: [{ type: "text", text: "ok" }], details: { ok: true } };',
+				"\t},",
+				"});",
+			].join("\n"),
+		);
+
+		const result = await loadCustomTools([{ path: entryPath }], requireTempRoot(), []);
+
+		expect(result.errors).toEqual([]);
+		expect(result.tools.map(tool => tool.tool.name)).toEqual(["typed_multifile_tool"]);
+		expect(result.tools[0]?.tool.description).toBe("sibling-linked");
+	});
+
+	it.skipIf(process.platform === "win32")("pretranspiles the canonical source graph of a symlinked tool", async () => {
+		await writeTool(
+			"source/reply.ts",
+			['export const TOOL_LABEL = "symlink-source-linked";', "export type Reply = { ok: true };"].join("\n"),
+		);
+		const targetPath = await writeTool(
+			"source/tool.ts",
+			[
+				'import { TOOL_LABEL, type Reply } from "./reply.ts";',
+				"export default api => ({",
+				'\tname: "symlinked_typescript_tool",',
+				"\tdescription: TOOL_LABEL,",
+				"\tparameters: api.arktype({}),",
+				'\tasync execute(): Promise<{ content: Array<{ type: "text"; text: string }>; details: Reply }> {',
+				'\t\treturn { content: [{ type: "text", text: "ok" }], details: { ok: true } };',
+				"\t},",
+				"});",
+			].join("\n"),
+		);
+		const linkDir = path.join(requireTempRoot(), "links");
+		await fs.mkdir(linkDir);
+		const linkPath = path.join(linkDir, "tool.ts");
+		await fs.symlink(targetPath, linkPath);
+
+		const transformSpy = vi.spyOn(Bun.Transpiler.prototype, "transformSync");
+		try {
+			const result = await loadCustomTools([{ path: linkPath }], requireTempRoot(), []);
+
+			expect(result.errors).toEqual([]);
+			expect(result.tools.map(tool => tool.tool.name)).toEqual(["symlinked_typescript_tool"]);
+			expect(result.tools[0]?.tool.description).toBe("symlink-source-linked");
+			expect(transformSpy).toHaveBeenCalledTimes(2);
+		} finally {
+			transformSpy.mockRestore();
+		}
+	});
+
+	it("preserves CommonJS exports for explicitly configured .cts tools", async () => {
+		const toolPath = await writeTool(
+			"commonjs-tool.cts",
+			[
+				"module.exports = api => ({",
+				'\tname: "commonjs_typescript_tool",',
+				'\tdescription: "Loaded through CommonJS semantics",',
+				"\tparameters: api.arktype({}),",
+				"\tasync execute() {",
+				'\t\treturn { content: [{ type: "text", text: "ok" }] };',
+				"\t},",
+				"});",
+			].join("\n"),
+		);
+
+		const result = await loadCustomTools([{ path: toolPath }], requireTempRoot(), []);
+
+		expect(result.errors).toEqual([]);
+		expect(result.tools.map(tool => tool.tool.name)).toEqual(["commonjs_typescript_tool"]);
 	});
 });
