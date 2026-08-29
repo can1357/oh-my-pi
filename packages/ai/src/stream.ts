@@ -33,6 +33,7 @@ import type { GoogleOptions } from "./providers/google";
 import { getVertexAccessToken } from "./providers/google-auth";
 import type { GoogleGeminiCliOptions } from "./providers/google-gemini-cli";
 import type { GoogleVertexOptions } from "./providers/google-vertex";
+import type { GrokbotOptions } from "./providers/grokbot";
 import { isKimiModel, streamKimi } from "./providers/kimi";
 import type { OllamaChatOptions } from "./providers/ollama";
 import type { OpenAICompletionsOptions } from "./providers/openai-completions";
@@ -54,6 +55,7 @@ import {
 	streamGoogle,
 	streamGoogleGeminiCli,
 	streamGoogleVertex,
+	streamGrokBot,
 	streamOllama,
 	streamOpenAICodexResponses,
 	streamOpenAICompletions,
@@ -1028,6 +1030,9 @@ function streamDispatch<TApi extends Api>(
 
 		case "devin-agent":
 			return streamDevin(providerModel as Model<"devin-agent">, context, providerOptions as DevinOptions);
+
+		case "grokbot-sand":
+			return streamGrokBot(providerModel as Model<"grokbot-sand">, context, providerOptions as GrokbotOptions);
 
 		default:
 			throw new AIError.ConfigurationError(`Unhandled API: ${api}`);
@@ -2379,6 +2384,19 @@ function mapOptionsForApi<TApi extends Api>(
 			return castApi<"devin-agent">({
 				...base,
 				chatModelUid: resolveWireModelId(devinModel, effort),
+			});
+		}
+		case "grokbot-sand": {
+			const grokbotModel = model as Model<"grokbot-sand">;
+			const effort =
+				options?.reasoning && !options.disableReasoning && !options.forceReasoningOff && grokbotModel.reasoning
+					? requireSupportedEffort(grokbotModel, options.reasoning)
+					: undefined;
+			return castApi<"grokbot-sand">({
+				...base,
+				conversationId: options?.sessionId,
+				stopSequences: options?.stopSequences,
+				effort,
 			});
 		}
 		default:

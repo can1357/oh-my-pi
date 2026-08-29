@@ -30,6 +30,7 @@ import {
 	isCatalogDescriptor,
 } from "../src/provider-models/descriptor-types";
 import { PROVIDER_DESCRIPTORS } from "../src/provider-models/descriptors";
+import { buildGrokbotStaticSeed } from "../src/provider-models/grokbot";
 import { filterModelsDevCatalogRows } from "../src/provider-models/models-dev-policies";
 import {
 	AIAND_STATIC_MODELS,
@@ -506,6 +507,8 @@ async function generateModels() {
 	// persisted `modelRoles.default = "xai-oauth/<id>"` is honored before the
 	// async refresh fires (interactive boot does not await refresh).
 	allModels.push(...buildXaiOAuthStaticSeed());
+	// Grok Bot is Cursor sand InferenceService — absent from stencil.so / models.dev.
+	allModels.push(...buildGrokbotStaticSeed());
 	// Daybreak is separately provisioned and absent from stencil.so. Keep its
 	// documented aliases and current Cyber snapshot in every generated bundle.
 	allModels.push(...OPENAI_DAYBREAK_CURATED_FALLBACK_MODELS);

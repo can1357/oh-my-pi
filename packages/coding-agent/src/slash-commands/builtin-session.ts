@@ -1,4 +1,5 @@
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
+import { formatGrokbotStatus } from "@oh-my-pi/pi-ai/providers/grokbot";
 import type { AgentSession } from "../session/agent-session";
 import type { SessionOAuthAccountList } from "../session/agent-session-types";
 import {
@@ -495,6 +496,18 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		description: "Navigate session tree (switch branches)",
 		handleTui: (_command, runtime) => {
 			runtime.ctx.showTreeSelector();
+			runtime.ctx.editor.setText("");
+		},
+	},
+	{
+		name: "grokbot",
+		icon: "model",
+		description: "Grok Bot sand status (not Cursor provider, not xAI/Grok CLI)",
+		handle: async (_command, runtime) => {
+			await runtime.output(await formatGrokbotStatus());
+		},
+		handleTui: async (_command, runtime) => {
+			runtime.ctx.showStatus(await formatGrokbotStatus());
 			runtime.ctx.editor.setText("");
 		},
 	},

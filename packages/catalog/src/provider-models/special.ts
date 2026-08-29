@@ -5,6 +5,7 @@ import { buildGitLabDuoWorkflowFallbackModel, fetchGitLabDuoWorkflowModels } fro
 import type { ModelManagerOptions } from "../model-manager";
 import type { FetchImpl, ModelSpec } from "../types";
 import { resolveModelCacheProviderId } from "./cache-provider-id";
+import { buildGrokbotStaticSeed } from "./grokbot";
 
 // ---------------------------------------------------------------------------
 // OpenAI Codex
@@ -202,6 +203,24 @@ export function devinModelManagerOptions(config: DevinModelManagerConfig = {}): 
 }
 
 const devinDiscovery = once(() => import("../discovery/devin"));
+
+// ---------------------------------------------------------------------------
+// Grok Bot (Cursor sand InferenceService)
+// ---------------------------------------------------------------------------
+
+export interface GrokbotModelManagerConfig {
+	baseUrl?: string;
+}
+
+export function grokbotModelManagerOptions(
+	config: GrokbotModelManagerConfig = {},
+): ModelManagerOptions<"grokbot-sand"> {
+	return {
+		providerId: "grokbot",
+		staticModels: buildGrokbotStaticSeed(config.baseUrl),
+	};
+}
+
 // ---------------------------------------------------------------------------
 // Zai
 // ---------------------------------------------------------------------------

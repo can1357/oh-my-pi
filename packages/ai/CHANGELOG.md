@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Grok Bot provider (`grokbot` / `grokbot-sand`): separate from the Cursor provider (`cursor` / AgentService) and from xAI / Grok CLI (`xai`, `xai-oauth`). Speaks Cursor sand `InferenceService/Stream` via renewal-credential minting. Maps thinking effort onto sand `effort`/`fast`, preserves routed `upstreamProvider`, clears the JWT cache on HTTP 401, and matches sand-host wire (prod client-version base, JWT `exp` mint fallback, `responseInfo.errorMessage`, user/tool-result images, thinking signatures).
+
 ## [18.0.9] - 2026-08-28
 
 ### Fixed

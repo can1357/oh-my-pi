@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Grok Bot (`grokbot`) catalog — sand InferenceService model aliases (`sand-default`, `grok-4.5`, …) with image input; distinct from `cursor` and `xai` / Grok CLI catalogs.
+
 ## [18.0.9] - 2026-08-28
 
 ### Added
