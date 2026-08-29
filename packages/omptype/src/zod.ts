@@ -130,7 +130,11 @@ function decorate<Out>(schema: Decoratable<Out>, optional = false): ZodLikeSchem
 	const next = (inner: Decoratable<Out>, nextOptional = optional): ZodLikeSchema<Out> => decorate(inner, nextOptional);
 	const withObjectExtras = (extras: "keep" | "reject" | "delete"): ZodLikeSchema<Out> => {
 		if (schema.ir.k !== "object") throw new OmpTypeError("object mode requires an object schema");
-		return next(restrictBase(schema, { ...schema.ir, extras }));
+		const restricted = restrictBase(schema, { ...schema.ir, extras });
+		// Same reasoning as objectSchema: the guard is only meaningful where the
+		// object does not strip keys, so `.strict()`/`.passthrough()` reject
+		// arrays exactly like `z.strictObject`/`z.looseObject`.
+		return next(extras === "delete" ? restricted : rejectArrays(restricted));
 	};
 	Object.defineProperty(schema, "isOptional", { value: optional, enumerable: false });
 
@@ -389,6 +393,19 @@ type ObjectOutput<S extends Shape> = {
 type Simplify<T> = { [K in keyof T]: T[K] };
 type UnionOutput<Schemas extends readonly ZodLikeSchema<unknown>[]> = SchemaOutput<Schemas[number]>;
 
+/**
+ * Reject an array reaching an object schema, which zod does and the emitted
+ * `{"type":"object"}` already promises. Only usable where the object does NOT
+ * strip keys: a narrow step observes the object node's OUTPUT, and a
+ * key-stripping object has already turned `[]` into `{}` by then, so the guard
+ * would inspect the wrong value. Stripping objects therefore keep omptype's
+ * object-node semantics (arrays are objects), which is what `type({})` does
+ * too — tightening that belongs in the IR's object arm, not here.
+ */
+function rejectArrays<Out>(schema: Decoratable<Out>): Decoratable<Out> {
+	return schema.narrow((value, ctx: NarrowContext) => !Array.isArray(value) || ctx.mustBe("an object, not an array"));
+}
+
 function objectSchema<const S extends Shape>(shape: S, extras: Extras = "delete"): ZodLikeSchema<ObjectOutput<S>> {
 	const props: PropIR[] = [];
 	for (const key in shape) {
@@ -401,9 +418,8 @@ function objectSchema<const S extends Shape>(shape: S, extras: Extras = "delete"
 		}
 		props.push(prop);
 	}
-	return decorateUnknown(schemaFromIR<unknown>({ k: "object", props, extras })) as unknown as ZodLikeSchema<
-		ObjectOutput<S>
-	>;
+	const base = schemaFromIR<unknown>({ k: "object", props, extras });
+	return decorateUnknown(extras === "delete" ? base : rejectArrays(base)) as unknown as ZodLikeSchema<ObjectOutput<S>>;
 }
 
 export const string = (): ZodLikeSchema<string> => decorate(schemaFromIR(type.string.ir));

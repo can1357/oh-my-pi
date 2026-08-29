@@ -151,6 +151,26 @@ describe("zod-like parsing", () => {
 		expect(deferredValid.safeParse({ kind: "lazy", v: 1 }).success).toBe(false);
 	});
 
+	it("rejects arrays wherever an object schema can observe its input", () => {
+		// An array reaching an object schema contradicts the emitted
+		// `{"type":"object"}` and zod's own semantics: the tool would accept a
+		// shape the model was told was invalid. Non-stripping objects can see
+		// the input, so they reject it.
+		expect(z.strictObject({}).safeParse([]).success).toBe(false);
+		expect(z.looseObject({}).safeParse([1, 2]).success).toBe(false);
+		expect(z.object({}).strict().safeParse([]).success).toBe(false);
+		expect(z.object({}).passthrough().safeParse([1]).success).toBe(false);
+		// Objects still parse, extras semantics intact.
+		expect(z.strictObject({ a: z.string() }).parse({ a: "x" })).toEqual({ a: "x" });
+		expect(z.looseObject({ a: z.string() }).parse({ a: "x", b: 1 })).toEqual({ a: "x", b: 1 });
+		expect(z.strictObject({ a: z.string() }).safeParse({ a: "x", b: 1 }).success).toBe(false);
+		// A KEY-STRIPPING object cannot: stripping runs first, so by the time a
+		// shim-level guard could look, `[]` has already become `{}`. Pinned as
+		// the documented boundary — omptype's object node treats arrays as
+		// objects (so does `type({})`), and tightening that is a core change.
+		expect(z.object({}).parse([])).toEqual({});
+	});
+
 	it("parses valid values and reports nested safeParse issues", () => {
 		const schema = z.object({ profile: z.object({ age: z.number().int().positive() }) });
 		expect(schema.parse({ profile: { age: 42 } })).toEqual({ profile: { age: 42 } });
