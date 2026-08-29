@@ -25,7 +25,7 @@ const WIRE_LEN = 2;
 const WIRE_32 = 5;
 
 function concat(chunks) {
-	return Buffer.concat(chunks.filter(c => c && c.length));
+	return Buffer.concat(chunks.filter(c => c?.length));
 }
 
 function encodeVarint(value) {
@@ -354,7 +354,7 @@ function decodeFields(buf) {
 			fields.push({ fieldNo, wire, bytes: bytes.subarray(pos, pos + 4) });
 			pos += 4;
 		} else {
-			throw new Error("unknown wire type " + wire);
+			throw new Error(`unknown wire type ${wire}`);
 		}
 	}
 	return fields;
@@ -384,12 +384,12 @@ function asInt(f) {
 }
 
 function asFloat(f) {
-	if (!f || !f.bytes || f.bytes.length < 4) return 0;
+	if (!f?.bytes || f.bytes.length < 4) return 0;
 	return Buffer.from(f.bytes).readFloatLE(0);
 }
 
 function asDouble(f) {
-	if (!f || !f.bytes || f.bytes.length < 8) return 0;
+	if (!f?.bytes || f.bytes.length < 8) return 0;
 	return Buffer.from(f.bytes).readDoubleLE(0);
 }
 
@@ -518,7 +518,11 @@ function decodeContentPart(buf) {
 }
 
 function decodeContentParts(buf) {
-	return { parts: all(decodeFields(buf), 1).map(f => decodeContentPart(f.bytes)).filter(Boolean) };
+	return {
+		parts: all(decodeFields(buf), 1)
+			.map(f => decodeContentPart(f.bytes))
+			.filter(Boolean),
+	};
 }
 
 function decodeToolResultPart(buf) {
@@ -529,7 +533,9 @@ function decodeToolResultPart(buf) {
 	};
 	if (first(fields, 3)) out.result = decodeValue(first(fields, 3).bytes);
 	if (asBool(first(fields, 4))) out.isError = true;
-	const experimental = all(fields, 5).map(f => decodeContentPart(f.bytes)).filter(Boolean);
+	const experimental = all(fields, 5)
+		.map(f => decodeContentPart(f.bytes))
+		.filter(Boolean);
 	if (experimental.length) out.experimentalContent = experimental;
 	return out;
 }

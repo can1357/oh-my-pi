@@ -5,17 +5,12 @@
  * so catalog AvailableModels discovery can share them. This module re-exports that
  * surface and adds `/grokbot` status formatting.
  */
-import {
-	GROKBOT_BACKEND,
-	grokbotSecretsPath,
-	loadGrokbotConfig,
-} from "@oh-my-pi/pi-catalog/discovery/grokbot-auth";
+import { GROKBOT_BACKEND, grokbotSecretsPath, loadGrokbotConfig } from "@oh-my-pi/pi-catalog/discovery/grokbot-auth";
 import { shortenPath } from "@oh-my-pi/pi-utils";
 
 export {
 	clearGrokbotTokenCache,
 	createGrokbotChecksum,
-	getAccessTokenExpiryMs,
 	GROKBOT_BACKEND,
 	GROKBOT_CLIENT_TYPE,
 	GROKBOT_DEFAULT_CLIENT_VERSION,
@@ -24,6 +19,7 @@ export {
 	GROKBOT_RENEWAL_PATH,
 	GROKBOT_STAMPED_CLIENT_VERSION,
 	type GrokbotConfig,
+	getAccessTokenExpiryMs,
 	grokbotClientHeaders,
 	grokbotSecretsPath,
 	loadGrokbotConfig,

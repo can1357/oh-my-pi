@@ -403,6 +403,7 @@ describe("grokbot /login host-install prompt", () => {
 				expect(prompt.message).toContain("GROKBOT_RENEWAL_CREDENTIAL");
 				expect(prompt.message).toContain("GROKBOT_MACHINE_ID");
 				expect(prompt.message).toContain(secretsDisplay);
+				expect(prompt.message).toContain("PI_CODING_AGENT_DIR");
 				expect(prompt.message).not.toContain("OMP_AGENT_DIR");
 				return "";
 			},
