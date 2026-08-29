@@ -305,9 +305,13 @@ describe("cursor todo persistence", () => {
 
 		expect(h.current()).toBe(before);
 		expect(h.entries).toEqual([]);
-		expect(h.uiTodos()).toBeNull();
-		expect(result).toMatchObject({ toolCallId: "call-1", isError: false, details: undefined });
 		expect(result.content.find(block => block.type === "text")?.text).toBe("Todo snapshot not mirrored");
+		// The denied scope must still settle the interactive card: resolved todo
+		// blocks never run through the agent loop, so this event is the only
+		// thing clearing the call from `pendingTools`. Without it the card
+		// animates until end-of-turn cleanup.
+		expect(h.events).toHaveLength(1);
+		expect(h.events[0]).toMatchObject({ type: "tool_execution_end", toolCallId: "call-1", isError: false });
 	});
 
 	it("settles a server error as a failure without touching local state", () => {

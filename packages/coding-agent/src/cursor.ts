@@ -972,9 +972,21 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 		// persisted by calls the scope refuses everywhere else. The call still
 		// settles (the interactive card resolves on this result), it just never
 		// mirrors — the same "leave local state untouched" contract as a refused
-		// snapshot.
 		if (this.options.isToolExecutable && !this.options.isToolExecutable("todo")) {
-			return buildTodoSyncResult(toolCallId, undefined, error);
+			// Still settle the interactive card: resolved todo blocks never run
+			// through the agent loop (which emits `tool_execution_end` for
+			// ordinary calls), so this event is the only thing that clears the
+			// call's card from `pendingTools`. Without it a denied scope leaves
+			// the card animating until end-of-turn cleanup.
+			const result = buildTodoSyncResult(toolCallId, undefined, error);
+			this.options.emitEvent?.({
+				type: "tool_execution_end",
+				toolCallId,
+				toolName: "todo",
+				result: { content: result.content, details: result.details },
+				isError: error !== null,
+			});
+			return result;
 		}
 		const setPhases = this.options.setTodoPhases;
 		const existing = this.options.getTodoPhases?.() ?? [];
