@@ -140,6 +140,9 @@ export const FORMAT_ROUTES: Record<string, { module: FormatModule; label: string
 	"/v1beta/models/streamGenerateContent": { module: geminiV1beta, label: "gemini-v1beta" },
 };
 
+/** Gemini puts the model id on the path: `/v1beta/models/{model}:generateContent`. */
+const GEMINI_MODEL_PATH = /^\/v1beta\/models\/([^/]+):(stream)?generateContent$/;
+
 // (passthrough fast-path removed — it bypassed pi-ai provider logic, in
 // particular the Anthropic Claude-Code OAuth system-prompt prefix injection.
 // Every request now takes the translate path so credential-specific request
@@ -684,10 +687,12 @@ function rememberPromptCacheHit(
 	fingerprint: string,
 	model: Model<Api>,
 	sessionId: string,
+	routeTarget?: string,
 ): void {
 	cacheStore.remember(fingerprint, {
 		provider: model.provider,
-		model: model.id,
+		// Prefer the route target id so affinity keys match qualified `provider/id` routes.
+		model: routeTarget ?? model.id,
 		accountId: sessionId,
 	});
 }
@@ -699,6 +704,7 @@ async function handleFormatEndpoint(
 	peer: string,
 	health: ProviderHealthBook,
 	cacheStore: PromptCacheAffinityStore,
+	pathModel?: string,
 ): Promise<Response> {
 	const startedAt = performance.now();
 	const requestId = crypto.randomUUID();
@@ -713,6 +719,11 @@ async function handleFormatEndpoint(
 		return route.module.formatError(400, "invalid_request_error", `Invalid JSON body: ${String(error)}`);
 	}
 	if (controller.signal.aborted) return clientClosedResponse(route);
+
+	// Gemini model-bearing paths carry the model id when the body omits `model`.
+	if (pathModel && isRecord(body) && (typeof body.model !== "string" || body.model.length === 0)) {
+		body = { ...body, model: pathModel };
+	}
 
 	// All three supported wire formats put the model id on a top-level `model`
 	// field. Read it without running the full strict schema so the route can
@@ -957,13 +968,17 @@ async function handleFormatEndpoint(
 				reason: "credential_unavailable",
 			});
 			logger.debug("auth-gateway route decision", redactedDecisionSummary(skipped));
+			const classified: GatewayErrorClassification = {
+				status: 401,
+				type: "authentication_error",
+				message: `No credential available for provider ${model.provider}`,
+				owner: "credential",
+				disposition: "credential_transient",
+			};
+			if (considerFallback(classified)) return { type: "retry" };
 			return {
 				type: "respond",
-				response: formatError(
-					401,
-					"authentication_error",
-					`No credential available for provider ${model.provider}`,
-				),
+				response: formatError(classified.status, classified.type, classified.message),
 			};
 		}
 		const activeCredentialId = bootOpts.storage
@@ -1001,18 +1016,31 @@ async function handleFormatEndpoint(
 		return streamOpts;
 	};
 
+	const attemptHookCtx = () => ({
+		requestId,
+		routeId: compiled.id,
+		target: currentTarget,
+		generation: compiled.generation,
+	});
+
 	if (!parsed.stream) {
 		try {
 			for (let attempt = 0; attempt < attemptCap; attempt++) {
+				if (attempt > 0) commitGate.reset();
 				if (controller.signal.aborted) return clientClosedResponse(route);
 				const picked = pickTarget();
 				if (picked) return picked;
 				const cred = await resolveCredential();
 				if (cred.type === "retry") {
+					await runHook(bootOpts.hooks?.afterAttempt, { ...attemptHookCtx(), ok: false });
 					bootOpts.storage.releaseTurnReservation(requestId);
 					continue;
 				}
-				if (cred.type === "respond") return cred.response;
+				if (cred.type === "respond") {
+					await runHook(bootOpts.hooks?.afterAttempt, { ...attemptHookCtx(), ok: false });
+					return cred.response;
+				}
+				await runHook(bootOpts.hooks?.beforeAttempt, attemptHookCtx());
 				const streamOpts = buildAttemptStreamOpts(cred.apiKey);
 				logger.info("auth-gateway request", {
 					requestId,
@@ -1037,21 +1065,27 @@ async function handleFormatEndpoint(
 							peer,
 						});
 						if (message.stopReason === "aborted") {
+							await runHook(bootOpts.hooks?.afterAttempt, { ...attemptHookCtx(), ok: false });
 							return formatError(499, "request_aborted", errorMessage);
 						}
 						const classified = classifyGatewayError(message.errorClassificationMessage ?? errorMessage);
 						recordProviderHealthFailure(health, model, classified);
 						if (messageHasBillableUsage(message)) {
+							await runHook(bootOpts.hooks?.afterAttempt, { ...attemptHookCtx(), ok: false });
 							return formatError(classified.status, classified.type, errorMessage);
 						}
 						if (considerFallback(classified)) {
+							await runHook(bootOpts.hooks?.afterAttempt, { ...attemptHookCtx(), ok: false });
 							bootOpts.storage.releaseTurnReservation(requestId);
 							continue;
 						}
+						await runHook(bootOpts.hooks?.afterAttempt, { ...attemptHookCtx(), ok: false });
 						return formatError(classified.status, classified.type, errorMessage);
 					}
 					bootOpts.storage.settleQuotaProbeSuccess(requestId);
-					rememberPromptCacheHit(cacheStore, fingerprint, model, sessionId);
+					health.recordSuccess(model.provider, model.id);
+					rememberPromptCacheHit(cacheStore, fingerprint, model, sessionId, currentTarget);
+					await runHook(bootOpts.hooks?.afterAttempt, { ...attemptHookCtx(), ok: true });
 					await runHook(bootOpts.hooks?.afterRequest, {
 						requestId,
 						routeId: compiled.id,
@@ -1072,9 +1106,11 @@ async function handleFormatEndpoint(
 						peer,
 					});
 					if (considerFallback(classified)) {
+						await runHook(bootOpts.hooks?.afterAttempt, { ...attemptHookCtx(), ok: false });
 						bootOpts.storage.releaseTurnReservation(requestId);
 						continue;
 					}
+					await runHook(bootOpts.hooks?.afterAttempt, { ...attemptHookCtx(), ok: false });
 					return classifiedError(classified);
 				}
 			}
@@ -1086,6 +1122,7 @@ async function handleFormatEndpoint(
 	}
 
 	for (let attempt = 0; attempt < attemptCap; attempt++) {
+		if (attempt > 0) commitGate.reset();
 		if (controller.signal.aborted) {
 			bootOpts.storage.releaseTurnReservation(requestId);
 			return clientClosedResponse(route);
@@ -1097,13 +1134,16 @@ async function handleFormatEndpoint(
 		}
 		const cred = await resolveCredential();
 		if (cred.type === "retry") {
+			await runHook(bootOpts.hooks?.afterAttempt, { ...attemptHookCtx(), ok: false });
 			bootOpts.storage.releaseTurnReservation(requestId);
 			continue;
 		}
 		if (cred.type === "respond") {
+			await runHook(bootOpts.hooks?.afterAttempt, { ...attemptHookCtx(), ok: false });
 			bootOpts.storage.releaseTurnReservation(requestId);
 			return cred.response;
 		}
+		await runHook(bootOpts.hooks?.beforeAttempt, attemptHookCtx());
 		const streamOpts = buildAttemptStreamOpts(cred.apiKey);
 		logger.info("auth-gateway request", {
 			requestId,
@@ -1121,9 +1161,11 @@ async function handleFormatEndpoint(
 			const classified = classifyGatewayError(error);
 			logger.warn("auth-gateway streamSimple threw", { format: route.label, error: classified.message, peer });
 			if (considerFallback(classified)) {
+				await runHook(bootOpts.hooks?.afterAttempt, { ...attemptHookCtx(), ok: false });
 				bootOpts.storage.releaseTurnReservation(requestId);
 				continue;
 			}
+			await runHook(bootOpts.hooks?.afterAttempt, { ...attemptHookCtx(), ok: false });
 			bootOpts.storage.releaseTurnReservation(requestId);
 			return classifiedError(classified);
 		}
@@ -1147,11 +1189,13 @@ async function handleFormatEndpoint(
 					held.message.errorMessage ??
 					(held.message.stopReason === "aborted" ? "Request was aborted" : "Upstream request failed");
 				if (held.message.stopReason === "aborted") {
+					await runHook(bootOpts.hooks?.afterAttempt, { ...attemptHookCtx(), ok: false });
 					bootOpts.storage.releaseTurnReservation(requestId);
 					return formatError(499, "request_aborted", errorMessage);
 				}
 				const classified = classifyGatewayError(held.message.errorClassificationMessage ?? errorMessage);
 				recordProviderHealthFailure(health, model, classified);
+				await runHook(bootOpts.hooks?.afterAttempt, { ...attemptHookCtx(), ok: false });
 				bootOpts.storage.releaseTurnReservation(requestId);
 				return formatError(classified.status, classified.type, errorMessage);
 			}
@@ -1164,18 +1208,23 @@ async function handleFormatEndpoint(
 				peer,
 			});
 			if (considerFallback(classified)) {
+				await runHook(bootOpts.hooks?.afterAttempt, { ...attemptHookCtx(), ok: false });
 				bootOpts.storage.releaseTurnReservation(requestId);
 				continue;
 			}
+			await runHook(bootOpts.hooks?.afterAttempt, { ...attemptHookCtx(), ok: false });
 			bootOpts.storage.releaseTurnReservation(requestId);
 			return classifiedError(classified);
 		}
 		if (controller.signal.aborted) {
+			await runHook(bootOpts.hooks?.afterAttempt, { ...attemptHookCtx(), ok: false });
 			bootOpts.storage.releaseTurnReservation(requestId);
 			return clientClosedResponse(route);
 		}
 		sseStream = releaseTurnOnStreamEnd(held.stream, bootOpts.storage, requestId, commitGate);
-		rememberPromptCacheHit(cacheStore, fingerprint, model, sessionId);
+		health.recordSuccess(model.provider, model.id);
+		rememberPromptCacheHit(cacheStore, fingerprint, model, sessionId, currentTarget);
+		await runHook(bootOpts.hooks?.afterAttempt, { ...attemptHookCtx(), ok: true });
 		await runHook(bootOpts.hooks?.afterRequest, {
 			requestId,
 			routeId: compiled.id,
@@ -1428,13 +1477,17 @@ async function handlePiNative(
 				reason: "credential_unavailable",
 			});
 			logger.debug("auth-gateway route decision", redactedDecisionSummary(skipped));
+			const classified: GatewayErrorClassification = {
+				status: 401,
+				type: "authentication_error",
+				message: `No credential available for provider ${model.provider}`,
+				owner: "credential",
+				disposition: "credential_transient",
+			};
+			if (considerFallback(classified)) return { type: "retry" };
 			return {
 				type: "respond",
-				response: formatError(
-					401,
-					"authentication_error",
-					`No credential available for provider ${model.provider}`,
-				),
+				response: formatError(classified.status, classified.type, classified.message),
 			};
 		}
 		const activeCredentialId = bootOpts.storage
@@ -1489,18 +1542,31 @@ async function handlePiNative(
 		return streamOpts;
 	};
 
+	const attemptHookCtx = () => ({
+		requestId,
+		routeId: compiled.id,
+		target: currentTarget,
+		generation: compiled.generation,
+	});
+
 	if (!parsed.stream) {
 		try {
 			for (let attempt = 0; attempt < attemptCap; attempt++) {
+				if (attempt > 0) commitGate.reset();
 				if (controller.signal.aborted) return aborted();
 				const picked = pickTarget();
 				if (picked) return picked;
 				const cred = await resolveCredential();
 				if (cred.type === "retry") {
+					await runHook(bootOpts.hooks?.afterAttempt, { ...attemptHookCtx(), ok: false });
 					bootOpts.storage.releaseTurnReservation(requestId);
 					continue;
 				}
-				if (cred.type === "respond") return cred.response;
+				if (cred.type === "respond") {
+					await runHook(bootOpts.hooks?.afterAttempt, { ...attemptHookCtx(), ok: false });
+					return cred.response;
+				}
+				await runHook(bootOpts.hooks?.beforeAttempt, attemptHookCtx());
 				const streamOpts = buildAttemptStreamOpts(cred.apiKey);
 				logger.info("auth-gateway request", {
 					requestId,
@@ -1525,21 +1591,27 @@ async function handlePiNative(
 							peer,
 						});
 						if (message.stopReason === "aborted") {
+							await runHook(bootOpts.hooks?.afterAttempt, { ...attemptHookCtx(), ok: false });
 							return formatError(499, "request_aborted", errorMessage);
 						}
 						const classified = classifyGatewayError(message.errorClassificationMessage ?? errorMessage);
 						recordProviderHealthFailure(health, model, classified);
 						if (messageHasBillableUsage(message)) {
+							await runHook(bootOpts.hooks?.afterAttempt, { ...attemptHookCtx(), ok: false });
 							return formatError(classified.status, classified.type, errorMessage);
 						}
 						if (considerFallback(classified)) {
+							await runHook(bootOpts.hooks?.afterAttempt, { ...attemptHookCtx(), ok: false });
 							bootOpts.storage.releaseTurnReservation(requestId);
 							continue;
 						}
+						await runHook(bootOpts.hooks?.afterAttempt, { ...attemptHookCtx(), ok: false });
 						return formatError(classified.status, classified.type, errorMessage);
 					}
 					bootOpts.storage.settleQuotaProbeSuccess(requestId);
-					rememberPromptCacheHit(cacheStore, fingerprint, model, sessionId);
+					health.recordSuccess(model.provider, model.id);
+					rememberPromptCacheHit(cacheStore, fingerprint, model, sessionId, currentTarget);
+					await runHook(bootOpts.hooks?.afterAttempt, { ...attemptHookCtx(), ok: true });
 					return json(200, { message }, gatewayResponseHeaders(model, { requestId, message, startedAt }));
 				} catch (error) {
 					if (controller.signal.aborted) return aborted();
@@ -1550,9 +1622,11 @@ async function handlePiNative(
 						peer,
 					});
 					if (considerFallback(classified)) {
+						await runHook(bootOpts.hooks?.afterAttempt, { ...attemptHookCtx(), ok: false });
 						bootOpts.storage.releaseTurnReservation(requestId);
 						continue;
 					}
+					await runHook(bootOpts.hooks?.afterAttempt, { ...attemptHookCtx(), ok: false });
 					return classifiedError(classified);
 				}
 			}
@@ -1564,6 +1638,7 @@ async function handlePiNative(
 	}
 
 	for (let attempt = 0; attempt < attemptCap; attempt++) {
+		if (attempt > 0) commitGate.reset();
 		if (controller.signal.aborted) {
 			bootOpts.storage.releaseTurnReservation(requestId);
 			return aborted();
@@ -1575,13 +1650,16 @@ async function handlePiNative(
 		}
 		const cred = await resolveCredential();
 		if (cred.type === "retry") {
+			await runHook(bootOpts.hooks?.afterAttempt, { ...attemptHookCtx(), ok: false });
 			bootOpts.storage.releaseTurnReservation(requestId);
 			continue;
 		}
 		if (cred.type === "respond") {
+			await runHook(bootOpts.hooks?.afterAttempt, { ...attemptHookCtx(), ok: false });
 			bootOpts.storage.releaseTurnReservation(requestId);
 			return cred.response;
 		}
+		await runHook(bootOpts.hooks?.beforeAttempt, attemptHookCtx());
 		const streamOpts = buildAttemptStreamOpts(cred.apiKey);
 		logger.info("auth-gateway request", {
 			requestId,
@@ -1599,9 +1677,11 @@ async function handlePiNative(
 			const classified = classifyGatewayError(error);
 			logger.warn("auth-gateway streamSimple threw", { format: "pi-native", error: classified.message, peer });
 			if (considerFallback(classified)) {
+				await runHook(bootOpts.hooks?.afterAttempt, { ...attemptHookCtx(), ok: false });
 				bootOpts.storage.releaseTurnReservation(requestId);
 				continue;
 			}
+			await runHook(bootOpts.hooks?.afterAttempt, { ...attemptHookCtx(), ok: false });
 			bootOpts.storage.releaseTurnReservation(requestId);
 			return classifiedError(classified);
 		}
@@ -1622,11 +1702,13 @@ async function handlePiNative(
 					held.message.errorMessage ??
 					(held.message.stopReason === "aborted" ? "Request was aborted" : "Upstream request failed");
 				if (held.message.stopReason === "aborted") {
+					await runHook(bootOpts.hooks?.afterAttempt, { ...attemptHookCtx(), ok: false });
 					bootOpts.storage.releaseTurnReservation(requestId);
 					return formatError(499, "request_aborted", errorMessage);
 				}
 				const classified = classifyGatewayError(held.message.errorClassificationMessage ?? errorMessage);
 				recordProviderHealthFailure(health, model, classified);
+				await runHook(bootOpts.hooks?.afterAttempt, { ...attemptHookCtx(), ok: false });
 				bootOpts.storage.releaseTurnReservation(requestId);
 				return formatError(classified.status, classified.type, errorMessage);
 			}
@@ -1639,18 +1721,23 @@ async function handlePiNative(
 				peer,
 			});
 			if (considerFallback(classified)) {
+				await runHook(bootOpts.hooks?.afterAttempt, { ...attemptHookCtx(), ok: false });
 				bootOpts.storage.releaseTurnReservation(requestId);
 				continue;
 			}
+			await runHook(bootOpts.hooks?.afterAttempt, { ...attemptHookCtx(), ok: false });
 			bootOpts.storage.releaseTurnReservation(requestId);
 			return classifiedError(classified);
 		}
 		if (controller.signal.aborted) {
+			await runHook(bootOpts.hooks?.afterAttempt, { ...attemptHookCtx(), ok: false });
 			bootOpts.storage.releaseTurnReservation(requestId);
 			return aborted();
 		}
 		sseStream = releaseTurnOnStreamEnd(held.stream, bootOpts.storage, requestId, commitGate);
-		rememberPromptCacheHit(cacheStore, fingerprint, model, sessionId);
+		health.recordSuccess(model.provider, model.id);
+		rememberPromptCacheHit(cacheStore, fingerprint, model, sessionId, currentTarget);
+		await runHook(bootOpts.hooks?.afterAttempt, { ...attemptHookCtx(), ok: true });
 		return new Response(sseStream, {
 			status: 200,
 			headers: {
@@ -1964,9 +2051,22 @@ export function startAuthGateway(opts: AuthGatewayBootOptions): AuthGatewayServe
 					return withCors(await handleImageGeneration(req), req);
 				}
 				// Provider-format dispatch.
-				const formatRoute = FORMAT_ROUTES[pathname];
+				let formatRoute = FORMAT_ROUTES[pathname];
+				let pathModel: string | undefined;
+				const geminiPath = GEMINI_MODEL_PATH.exec(pathname);
+				if (!formatRoute && geminiPath) {
+					formatRoute = { module: geminiV1beta, label: "gemini-v1beta" };
+					try {
+						pathModel = decodeURIComponent(geminiPath[1]!);
+					} catch {
+						pathModel = geminiPath[1];
+					}
+				}
 				if (formatRoute && req.method === "POST") {
-					return withCors(await handleFormatEndpoint(formatRoute, boot, req, peer, health, cacheStore), req);
+					return withCors(
+						await handleFormatEndpoint(formatRoute, boot, req, peer, health, cacheStore, pathModel),
+						req,
+					);
 				}
 
 				// Pi-native fast path. Same auth + provider plumbing as the

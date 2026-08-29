@@ -105,6 +105,38 @@ describe("auth-gateway gemini-v1beta: parseRequest", () => {
 		expect(parsed.context.messages[0]).toEqual(expect.objectContaining({ content: "path model" }));
 	});
 
+	it("maps inlineData parts to image content and keeps image-only turns", () => {
+		const parsed = parseRequest({
+			model: "gemini-2.0-flash",
+			contents: [
+				{
+					role: "user",
+					parts: [{ inlineData: { mimeType: "image/png", data: "abc123" } }],
+				},
+				{
+					role: "user",
+					parts: [
+						{ text: "caption" },
+						{ inline_data: { mime_type: "image/jpeg", data: "def456" } },
+					],
+				},
+			],
+		});
+		expect(parsed.context.messages[0]).toEqual({
+			role: "user",
+			content: [{ type: "image", mimeType: "image/png", data: "abc123" }],
+			timestamp: expect.any(Number),
+		});
+		expect(parsed.context.messages[1]).toEqual({
+			role: "user",
+			content: [
+				{ type: "text", text: "caption" },
+				{ type: "image", mimeType: "image/jpeg", data: "def456" },
+			],
+			timestamp: expect.any(Number),
+		});
+	});
+
 	it("joins multiple text parts and maps model role to assistant", () => {
 		const parsed = parseRequest({
 			model: "gemini-2.0-flash",

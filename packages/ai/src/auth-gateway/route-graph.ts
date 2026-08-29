@@ -127,6 +127,8 @@ export class RouteRegistry {
 		if (virtual) return virtual;
 		const model = this.#resolveModel(modelId);
 		if (!model) return undefined;
+		// Preserve provider-qualified ids (`openai/gpt-5`) so affinity / fallback
+		// targets match the caller's route key, not the catalog's bare `model.id`.
 		const id = modelId.includes("/") ? modelId : model.id;
 		return {
 			generation: this.#generation,
