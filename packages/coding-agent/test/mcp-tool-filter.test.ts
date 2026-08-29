@@ -111,6 +111,25 @@ describe("filterMCPTools", () => {
 		]);
 		expect(filterMCPTools({ toolNames: names, enabledTools: ["[^]*"] }).allowed).toEqual(["^search"]);
 	});
+
+	// fnmatch treats a `]` as a literal member when it is the FIRST class body
+	// char — including in negated classes, where the body starts after `[!`.
+	// Regression: the leading-`]`-literal rule was guarded on `cls === ""`,
+	// which the `!` negation prefix had already overwritten, so `[!]]*`
+	// translated to a class that admitted nearly every name a denylist meant
+	// to exclude. Expectations verified pattern-for-pattern against Python
+	// fnmatch.fnmatchcase.
+	it("a leading ] is a literal class member even in negated classes", () => {
+		const names = ["ax", "]ax", "abc", "]abc", "b1"];
+		// `[!]]?` = one char that is not `]`, then any char
+		expect(filterMCPTools({ toolNames: names, enabledTools: ["[!]]?"] }).allowed).toEqual(["ax", "b1"]);
+		// `[!]]*` = first char is not `]`
+		expect(filterMCPTools({ toolNames: names, enabledTools: ["[!]]*"] }).allowed).toEqual(["ax", "abc", "b1"]);
+		// `[]]*` = first char IS `]` (positive class with leading literal member)
+		expect(filterMCPTools({ toolNames: names, enabledTools: ["[]]*"] }).allowed).toEqual(["]ax", "]abc"]);
+		// in a denylist, `[!]]*` must therefore exclude exactly the `]`-prefixed names
+		expect(filterMCPTools({ toolNames: names, disabledTools: ["[!]]*"] }).allowed).toEqual(["]ax", "]abc"]);
+	});
 });
 
 describe("applyMCPToolFilter", () => {

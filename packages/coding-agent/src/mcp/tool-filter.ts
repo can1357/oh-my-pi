@@ -58,6 +58,12 @@ function fnmatchRegex(pattern: string): RegExp {
 			} else if (ch === "[") {
 				const classStart = i;
 				i++;
+				// First class body char index, independent of the accumulated
+				// negation prefix: after `[!` the body starts with `cls === "^"`,
+				// so testing `cls === ""` would skip the leading-`]`-literal rule
+				// for negated classes (`[!]]*` must treat the `]` as a member,
+				// not the class terminator).
+				const bodyStart = i + (pattern[i] === "!" ? 1 : 0);
 				let cls = "";
 				if (pattern[i] === "!") {
 					cls += "^";
@@ -70,7 +76,7 @@ function fnmatchRegex(pattern: string): RegExp {
 					i++;
 				}
 				// a leading ] (first class body char) is a literal member
-				if (cls === "" && pattern[i] === "]") {
+				if (i === bodyStart && pattern[i] === "]") {
 					cls += "\\]";
 					i++;
 				}
