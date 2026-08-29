@@ -287,9 +287,16 @@ function isOpenAiRemoteCompactionApi(api: Api | undefined): boolean {
 
 export function shouldUseOpenAiRemoteCompaction(model: Model): boolean {
 	if (model.remoteCompaction?.enabled === false) return false;
-	if (model.provider === "openai" || model.provider === "openai-codex") return true;
+	const compactionApi = model.remoteCompaction?.api ?? model.api;
+	// ChatGPT's Codex backend exposes V2 compaction on /codex/responses, but
+	// does not expose the OpenAI V1 /responses/compact endpoint. Only use the
+	// V1 path for Codex when an explicit compatible endpoint was configured.
+	if (model.provider === "openai-codex") {
+		return (model.remoteCompaction?.endpoint?.trim().length ?? 0) > 0;
+	}
+	if (model.provider === "openai") return true;
 	if (model.remoteCompaction?.enabled !== true) return false;
-	return isOpenAiRemoteCompactionApi(model.remoteCompaction.api ?? model.api);
+	return isOpenAiRemoteCompactionApi(compactionApi);
 }
 
 function resolveOpenAiCompactEndpoint(model: Model): string {
