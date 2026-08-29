@@ -217,6 +217,29 @@ export function resolveUpdateMethodForTest(
 ): UpdateMethod {
 	return resolveUpdateMethod(ompPath, bunBinDir, options);
 }
+
+const CLI_BINARY_NAMES: ReadonlySet<string> = new Set([APP_NAME, "omp", "ompk"].map(name => name.toLowerCase()));
+
+/**
+ * Return the running executable when it is one of this CLI's compiled binary
+ * names. Source and package-manager launches run through Bun, so their
+ * `process.execPath` is intentionally ignored and falls back to PATH-based
+ * manager detection.
+ */
+function resolveInvokedBinaryPath(
+	executablePath: string,
+	platform: NodeJS.Platform = process.platform,
+): string | undefined {
+	const pathApi = platform === "win32" ? path.win32 : path.posix;
+	const basename = pathApi.basename(executablePath).toLowerCase();
+	const commandName = platform === "win32" && basename.endsWith(".exe") ? basename.slice(0, -4) : basename;
+	return CLI_BINARY_NAMES.has(commandName) ? executablePath : undefined;
+}
+
+export function resolveInvokedBinaryPathForTest(executablePath: string, platform: NodeJS.Platform): string | undefined {
+	return resolveInvokedBinaryPath(executablePath, platform);
+}
+
 async function resolveUpdateTarget(): Promise<UpdateTarget> {
 	const bunBinDir = await getBunGlobalBinDir();
 	const homebrewPrefix = await getHomebrewFormulaPrefix();
@@ -306,11 +329,16 @@ export function buildBinaryDownloadUrl(expectedVersion: string, binaryName: stri
 	return `${DIST_BASE}/bin/v${expectedVersion}/${binaryName}`;
 }
 
-/**
- * Resolve the path that `omp` maps to in the user's PATH.
- */
+/** Resolve the binary this process should update and later verify. */
 function resolveOmpPath(): string | undefined {
-	return $which(APP_NAME) ?? undefined;
+	const invokedBinary = resolveInvokedBinaryPath(process.execPath);
+	if (invokedBinary) return invokedBinary;
+
+	for (const commandName of [APP_NAME, "ompk", "omp"] as const) {
+		const resolved = $which(commandName);
+		if (resolved) return resolved;
+	}
+	return undefined;
 }
 
 /**

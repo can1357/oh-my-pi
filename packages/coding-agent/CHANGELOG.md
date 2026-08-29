@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Updated the compiled binary alias that actually launched `oh-my-pk update`, so `ompk update` and `omp update` no longer leave their invoked command on the old version.
+
 ## [16.4.11] - 2026-08-21
 
 ### Added

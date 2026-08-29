@@ -10,6 +10,7 @@ import {
 	buildMiseForceInstallArgs,
 	buildMiseUpgradeArgs,
 	replaceBinaryForUpdate,
+	resolveInvokedBinaryPathForTest,
 	resolveUpdateMethodForTest,
 	sweepStaleBackups,
 } from "@pk-nerdsaver-ai/pi-coding-agent/cli/update-cli";
@@ -28,6 +29,20 @@ afterEach(async () => {
 });
 
 describe("update-cli install target detection", () => {
+	it("targets the compiled alias that launched the update", () => {
+		expect(resolveInvokedBinaryPathForTest("C:\\Users\\test\\bin\\ompk.exe", "win32")).toBe(
+			"C:\\Users\\test\\bin\\ompk.exe",
+		);
+		expect(resolveInvokedBinaryPathForTest("/Users/test/.local/bin/omp", "darwin")).toBe(
+			"/Users/test/.local/bin/omp",
+		);
+	});
+
+	it("does not mistake the Bun runtime for a compiled CLI binary", () => {
+		expect(resolveInvokedBinaryPathForTest("C:\\Users\\test\\.bun\\bin\\bun.exe", "win32")).toBeUndefined();
+		expect(resolveInvokedBinaryPathForTest("/Users/test/.bun/bin/bun", "linux")).toBeUndefined();
+	});
+
 	it("uses bun update when prioritized omp is inside bun global bin", () => {
 		const method = resolveUpdateMethodForTest("/Users/test/.bun/bin/omp", "/Users/test/.bun/bin");
 
