@@ -8,7 +8,7 @@ import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import {
 	applyOpsToPhases,
 	formatTodoHudRatio,
-	isClosedTodo,
+	isCompletedTodo,
 	isSettledTodo,
 	isTodoPhase,
 	markdownToPhases,
@@ -829,7 +829,7 @@ describe("abandoned todos in tool summary and compact HUD contracts", () => {
 			},
 		];
 		expect(nextActionableTask(phases)).toBeUndefined();
-		expect(phases.flatMap(p => p.tasks).filter(isClosedTodo)).toHaveLength(0);
+		expect(phases.flatMap(p => p.tasks).filter(isCompletedTodo)).toHaveLength(0);
 		expect(phases.flatMap(p => p.tasks).filter(isSettledTodo)).toHaveLength(2);
 		const tool = new TodoTool(createSession(phases));
 		const result = await tool.execute("t1", { op: "view" });

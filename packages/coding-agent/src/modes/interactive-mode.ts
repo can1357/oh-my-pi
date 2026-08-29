@@ -133,7 +133,7 @@ import { setAutoQaConsentHandler } from "../tools/report-tool-issue";
 import {
 	formatPhaseDisplayName,
 	formatTodoHudRatio,
-	isClosedTodo,
+	isCompletedTodo,
 	nextActionableTask,
 	todoHudCounts,
 	selectCollapsedTodos,
@@ -2451,7 +2451,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		let seenTask = false;
 		for (const phase of phases) {
 			for (const task of phase.tasks) {
-				if (!isClosedTodo(task)) return false;
+				if (!isCompletedTodo(task)) return false;
 				seenTask = true;
 			}
 		}
@@ -2650,11 +2650,11 @@ export class InteractiveMode implements InteractiveModeContext {
 		// Clamp so partial progress lights at least one cell; a closed plan fills
 		// the entire path until the configured auto-clear removes the HUD.
 		const totalTasks = phases.reduce((sum, phase) => sum + phase.tasks.length, 0);
-		const closedTasks = phases.reduce((sum, phase) => sum + phase.tasks.filter(isClosedTodo).length, 0);
+		const completedTasks = phases.reduce((sum, phase) => sum + phase.tasks.filter(isCompletedTodo).length, 0);
 		const pathLen = contentLines.length + tailLen;
-		let filled = Math.round((closedTasks / totalTasks) * pathLen);
-		if (closedTasks > 0) filled = Math.max(filled, 1);
-		if (closedTasks < totalTasks) filled = Math.min(filled, pathLen - 1);
+		let filled = Math.round((completedTasks / totalTasks) * pathLen);
+		if (completedTasks > 0) filled = Math.max(filled, 1);
+		if (completedTasks < totalTasks) filled = Math.min(filled, pathLen - 1);
 
 		const lines = ["", theme.bold(theme.fg("accent", "TODO"))];
 		for (let i = 0; i < contentLines.length; i++) {
@@ -2679,7 +2679,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			activeDescs.length > 0 && todoMatchesAnyDescription(todo.content, activeDescs);
 
 		const counts = todoHudCounts(phases.flatMap(phase => phase.tasks));
-		const closedTasks = counts.completed;
+		const completedTasks = counts.completed;
 		const droppedTasks = counts.abandoned;
 		const totalTasks = counts.total;
 		const activeTask = nextActionableTask(phases);
@@ -2687,7 +2687,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		const header = `${theme.bold(theme.fg("accent", "TODO"))} ${theme.fg("dim", formatTodoHudRatio(counts))}`;
 		const taskStr = activeTask
 			? this.#formatTodoLine(activeTask, "", isMatched(activeTask))
-			: closedTasks < totalTasks
+			: completedTasks < totalTasks
 				? theme.fg("warning", droppedTasks > 0 ? `${theme.checkbox.unchecked} dropped` : `${theme.checkbox.unchecked} incomplete`)
 				: theme.fg("success", `${theme.checkbox.checked} done`);
 		const rightLine = `${header} ${theme.fg("dim", "·")} ${taskStr}`;

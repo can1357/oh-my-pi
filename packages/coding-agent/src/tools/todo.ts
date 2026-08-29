@@ -244,7 +244,7 @@ export function todoMatchesAnyDescription(content: string, descriptions: readonl
 }
 
 /** HUD "done": completed only. Abandoned is a handoff, not progress. */
-export function isClosedTodo<T extends { status: TodoStatus }>(task: T): boolean {
+export function isCompletedTodo<T extends { status: TodoStatus }>(task: T): boolean {
 	return task.status === "completed";
 }
 
