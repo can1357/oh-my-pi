@@ -207,20 +207,13 @@ function buildGrammarToolIndex(
 }
 
 /**
- * Parse completed tool args. Grammar/customFormat tools may emit raw patch text
- * (not JSON); wrap that as `{ input: raw }` like OpenAI freeform custom tools.
+ * Parse completed tool args. Grammar/customFormat tools emit raw text (patch,
+ * hashline, or even JSON-shaped grammar output); always wrap as `{ input }` —
+ * never JSON-decode, or agent dispatch / history replay lose the raw field-4 path.
  */
 function parseCompletedToolArgs(raw: unknown, isGrammar: boolean): Record<string, unknown> {
 	if (isGrammar) {
 		const text = raw == null ? "" : typeof raw === "string" ? raw : JSON.stringify(raw);
-		if (text.trim()) {
-			try {
-				const parsed = JSON.parse(text);
-				if (parsed && typeof parsed === "object") return parsed as Record<string, unknown>;
-			} catch {
-				/* intentional raw grammar payload */
-			}
-		}
 		return { input: text };
 	}
 	return parseToolArgs(raw, true);

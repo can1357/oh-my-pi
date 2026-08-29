@@ -794,6 +794,47 @@ describe("grokbot incomplete tool calls", () => {
 		]);
 	});
 
+	test("keeps JSON-shaped grammar output as raw input rather than decoding it", async () => {
+		mockAuth();
+		const jsonDoc = '{"items":[{"id":1}],"ok":true}';
+		const complete = frameConnectProto(
+			encodeInferenceStreamResponse({
+				toolCallPart: {
+					toolCallId: "c1",
+					toolName: "edit",
+					args: jsonDoc,
+					isComplete: true,
+				},
+			}),
+		);
+		const trailer = frameConnectProto(Buffer.alloc(0), CONNECT_END_STREAM_FLAG);
+		const fetchImpl = (async () => connectBody(complete, trailer)) as FetchImpl;
+		const grammarContext: Context = {
+			messages: [{ role: "user", content: "edit", timestamp: 1 }],
+			tools: [
+				{
+					name: "edit",
+					description: "json grammar",
+					parameters: { type: "object" as const },
+					customFormat: { syntax: "lark", definition: "start: object" },
+				},
+			],
+		};
+
+		const result = await streamGrokBot(model, grammarContext, { apiKey: "renew", fetch: fetchImpl }).result();
+		expect(result.stopReason).toBe("toolUse");
+		expect(result.errorMessage).toBeUndefined();
+		expect(result.content).toEqual([
+			expect.objectContaining({
+				type: "toolCall",
+				id: "c1",
+				name: "edit",
+				customWireName: "edit",
+				arguments: { input: jsonDoc },
+			}),
+		]);
+	});
+
 	test("marks hashline grammar calls with customWireName equal to the tool name", async () => {
 		mockAuth();
 		const hashline = "[src/a.ts#abcd]\n1|-old\n1|+new\n";
