@@ -3006,37 +3006,45 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			if (!state) return undefined;
 			return resolveMountedXdevExecutable(state, name);
 		};
-		// Cursor's resource frames ask what THIS client's servers advertise; only
-		// live connections have any. Built once: the advisor bridges answer from
-		// the same connections the primary does.
-		// A resource-only server (advertises resources, no tools) has no registry
-		// entry to gate on. Keep it unless the scope targets THIS server: an
-		// enforced allowlist (the subagent declared no MCP tools) or an `mcp__`
-		// disallow pattern naming it (`mcp__*` or `mcp__<server>_*`) strips it,
-		// while an unrelated `disallowedTools: [bash]` or a pattern for a
-		// different server must not silently remove its resources.
+		// Cursor's resource frames ask what THIS client's servers advertise;
+		// only live connections have any. Built once: the advisor bridges
+		// answer from the same connections the primary does.
+		// A server that owns registry tools is gated purely by tool
+		// executability (at least one owned tool scoped in); the per-server
+		// predicate applies only to resource-only servers (no owned registry
+		// tool at all). One shared decision — `serverResourcesAllowed` below —
+		// covers every resource path: the adapter's three methods and the
+		// handler-side gate (`CursorExecHandlers` reaches the same verdict via
+		// `mcpServerResourcesAllowed`).
+		// A resource-only server (advertises resources, no tools) has no
+		// registry entry to gate on. Keep it unless the scope targets THIS
+		// server: an enforced allowlist (the subagent declared no MCP tools) or
+		// an `mcp__` disallow pattern naming it (`mcp__*` or
+		// `mcp__<server>_*`) strips it, while an unrelated
+		// `disallowedTools: [bash]` or a pattern for a different server must
+		// not silently remove its resources.
 		const resourceOnlyServerAllowed = (serverName: string): boolean =>
 			!enforceToolAllowlist && !mcpDisallowTargetsServer(disallowedPatterns, serverName);
-		// A server that owns registry tools is gated purely by `hasOwnedTool`
-		// (at least one tool scoped in); the per-server predicate applies only
-		// to resource-only servers (no owned registry tool at all).
 		const ownsAnyTool = (serverName: string): boolean =>
 			Array.from(toolRegistry.values()).some(
 				tool => (tool as { mcpServerName?: unknown }).mcpServerName === serverName,
 			);
+		const serverResourcesAllowed = (name: string): boolean =>
+			mcpServerScopedIn(toolRegistry.values(), cursorScopeAllows, name) ||
+			(!ownsAnyTool(name) && resourceOnlyServerAllowed(name));
 		const cursorMcpResources: CursorMcpResourceAdapter | undefined = mcpManager && {
-			serverNames: () =>
-				mcpManager.getConnectedServers().filter(name => {
-					const hasOwnedTool = mcpServerScopedIn(toolRegistry.values(), cursorScopeAllows, name);
-					// Resource-only servers have no owned tool; keep them when
-					// the scope does not target this server.
-					return hasOwnedTool || (!ownsAnyTool(name) && resourceOnlyServerAllowed(name));
-				}),
+			serverNames: () => mcpManager.getConnectedServers().filter(serverResourcesAllowed),
 			getServerResources: async name => {
 				// The manager registers a server's tools before its background
 				// resource load finishes, so a frame arriving in that window
 				// would read an empty cache and report "advertises nothing".
 				await mcpManager.ensureServerResources(name);
+				// The advisor bridge shares this adapter and carries no
+				// handler-level `isToolExecutable` gate, so its explicit-server
+				// listings would otherwise reach this method ungated. The same
+				// scope decision as `serverNames()` above applies: a scoped-out
+				// server advertises nothing here either.
+				if (!serverResourcesAllowed(name)) return undefined;
 				return mcpManager.getServerResources(name);
 			},
 			readServerResource: async (name, uri) => {
@@ -3046,19 +3054,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				// adapter and has no handler-level gate. Resource-only servers
 				// (no owned tool) stay readable when the scope does not target
 				// this server.
-				if (
-					!mcpServerScopedIn(toolRegistry.values(), cursorScopeAllows, name) &&
-					(ownsAnyTool(name) || !resourceOnlyServerAllowed(name))
-				) {
-					return undefined;
-				}
+				if (!serverResourcesAllowed(name)) return undefined;
 				return mcpManager.readServerResource(name, uri);
 			},
 		};
 		const cursorExecHandlers = new CursorExecHandlers({
 			cwd,
 			// The session's cwd moves (`/cd`, resume, branch restore) while this
-			// bridge is built once at startup. Path-confining frames — the native
 			// `delete` and a `download_path` resource read — resolve against
 			// whichever of the two they are given, so without the live resolver the
 			// primary would write into the workspace the session has left while

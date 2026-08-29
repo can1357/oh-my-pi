@@ -19,7 +19,7 @@ import {
 } from "@oh-my-pi/pi-catalog/discovery/cursor-proto";
 import { create, fromBinary } from "@oh-my-pi/pi-catalog/discovery/protobuf";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { CursorExecHandlers } from "@oh-my-pi/pi-coding-agent/cursor";
+import { CursorExecHandlers, mcpServerResourcesAllowed } from "@oh-my-pi/pi-coding-agent/cursor";
 import {
 	bridgeToolMap,
 	createBridgeEditTool,
@@ -1064,6 +1064,47 @@ describe("CursorExecHandlers mounted tool bridge", () => {
 		expect(await handlers.readMcpResource({ server: "docs", uri: "docs://entry" })).toBeNull();
 		expect(await handlers.readMcpResource({ server: "secrets", uri: "secrets://entry" })).toBeNull();
 		expect(await handlers.readMcpResource({ server: "notes", uri: "notes://entry" })).not.toBeNull();
+	});
+
+	it("filters explicit-server resource listings through the shared per-server scope predicate", async () => {
+		// The advisor bridge shares the sdk adapter and carries NO handler-level
+		// `isToolExecutable` gate, so its explicit-`server` listings reach the
+		// adapter's `getServerResources` directly. The adapter must therefore
+		// apply the same shared decision as `serverNames()`/`readServerResource`
+		// (regression: the advisor could enumerate a scoped-out server's
+		// resource names, descriptions, and MIME types by naming it).
+		// `mcpServerResourcesAllowed` is the one predicate every path consults;
+		// this pins its contract so a fork in any path shows up here.
+		const gatedTool = { name: "mcp__docs_list", mcpServerName: "docs" } as unknown as AgentTool;
+		const tools = new Map([["mcp__docs_list", gatedTool]]);
+		const gate = (name: string): boolean => name === "mcp__unrelated";
+		const allowToolless = (serverName: string): boolean => serverName !== "secrets";
+
+		// A server owning a gate-rejected tool is stripped, even when the
+		// per-server predicate would allow it.
+		expect(mcpServerResourcesAllowed(tools.values(), gate, allowToolless, "docs")).toBe(false);
+		// A resource-only server the predicate rejects is stripped.
+		expect(mcpServerResourcesAllowed(tools.values(), gate, allowToolless, "secrets")).toBe(false);
+		// A resource-only server the predicate allows survives.
+		expect(mcpServerResourcesAllowed(tools.values(), gate, allowToolless, "notes")).toBe(true);
+		// No gate configured: unrestricted, everything stays.
+		expect(mcpServerResourcesAllowed(tools.values(), undefined, allowToolless, "docs")).toBe(true);
+		// A server owning a gate-accepted tool survives on executability alone,
+		// even when the per-server predicate would reject it: tool
+		// executability is the stronger grant.
+		const openTool = { name: "mcp__issues_list", mcpServerName: "issues" } as unknown as AgentTool;
+		const toolsWithOpen = new Map<string, AgentTool>([
+			["mcp__docs_list", gatedTool],
+			["mcp__issues_list", openTool],
+		]);
+		expect(
+			mcpServerResourcesAllowed(
+				toolsWithOpen.values(),
+				(name): boolean => name === "mcp__issues_list",
+				() => false,
+				"issues",
+			),
+		).toBe(true);
 	});
 
 	it("waits for a server's catalog instead of reporting it empty", async () => {

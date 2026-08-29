@@ -266,6 +266,33 @@ export function mcpServerScopedIn(
 	);
 }
 
+/**
+ * Whether a server's resources may be surfaced at all under a scope gate:
+ * the single decision shared by every resource-listing/read path (primary
+ * handler, adapter `serverNames`, adapter `getServerResources`/`readServerResource`,
+ * and the advisor bridge that shares the adapter).
+ *
+ * A server that owns registry tools is gated purely by tool executability (at
+ * least one owned tool scoped in); resource-only servers (no owned tool at
+ * all) survive only when the per-server predicate allows them, so an
+ * MCP-targeting scope strips servers its `mcp__` disallow patterns name.
+ */
+export function mcpServerResourcesAllowed(
+	tools: Iterable<AgentTool>,
+	isToolExecutable: ((name: string) => boolean) | undefined,
+	allowToollessServers: ((serverName: string) => boolean) | undefined,
+	serverName: string,
+): boolean {
+	if (!isToolExecutable) return true;
+	// Materialize once: `tools` may be a single-shot iterator (e.g. a Map's
+	// `.values()`), and the ownership pass below would read an exhausted
+	// iterable as "owns no tools", rescuing gated-out servers.
+	const roster = Array.from(tools);
+	if (mcpServerScopedIn(roster, isToolExecutable, serverName)) return true;
+	const ownsAnyTool = roster.some(tool => (tool as { mcpServerName?: unknown }).mcpServerName === serverName);
+	return !ownsAnyTool && allowToollessServers?.(serverName) === true;
+}
+
 /** Shared frame-tool resolution: scope gate first, then overrides, then the canonical map. */
 function resolveFrameTool(options: CursorExecBridgeOptions, toolName: string): AgentTool | undefined {
 	if (options.isToolExecutable && !options.isToolExecutable(toolName)) return undefined;
@@ -488,29 +515,19 @@ function buildTodoSyncResult(
 
 export class CursorExecHandlers implements ICursorExecHandlers {
 	constructor(private options: CursorExecBridgeOptions) {}
-
 	/**
-	 * Whether a server's resources may be listed/read: no scope gate configured
-	 * (unrestricted), or at least one of the server's registered tools is
-	 * executable under it. Resource frames answer by server name and never run
-	 * a registry tool, so the gate must be consulted here — otherwise a scoped
-	 * subagent could still enumerate and read every connected server's
-	 * contents. Ownership is matched via `mcpServerName` (never a lossy
-	 * sanitized name prefix), mirroring the instructions filter.
+	 * Whether a server's resources may be listed/read: the shared
+	 * {@link mcpServerResourcesAllowed} decision, so every resource path
+	 * (this handler, the sdk adapter the advisor bridge shares, and the
+	 * instructions filter's reach) answers with one scope verdict.
 	 */
 	#serverScopedIn(serverName: string): boolean {
-		const gate = this.options.isToolExecutable;
-		if (!gate) return true;
-		const hasOwnedTool = mcpServerScopedIn(this.options.tools.values(), gate, serverName);
-		// A server that owns registry tools is gated purely by `hasOwnedTool`
-		// (at least one tool scoped in). Resource-only servers (no owned tool)
-		// survive only when the per-server predicate allows them; MCP-targeting
-		// scopes strip the servers their `mcp__` disallow patterns name,
-		// matching the adapter's filtering.
-		const ownsAnyTool = Array.from(this.options.tools.values()).some(
-			tool => (tool as { mcpServerName?: unknown }).mcpServerName === serverName,
+		return mcpServerResourcesAllowed(
+			this.options.tools.values(),
+			this.options.isToolExecutable,
+			this.options.allowToollessMcpServers,
+			serverName,
 		);
-		return hasOwnedTool || (!ownsAnyTool && this.options.allowToollessMcpServers?.(serverName) === true);
 	}
 
 	/**
@@ -948,6 +965,17 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 	 * back would let a call that changed nothing overwrite live UI state.
 	 */
 	todoSync(snapshot: CursorTodoSnapshot | null, toolCallId: string, error: string | null = null): ToolResultMessage {
+		// `update_todos` / `read_todos` are resolved server-side and dispatched
+		// straight here, never passing through `resolveFrameTool`'s scope gate.
+		// A scope that denies `todo` must therefore be checked in-band: without
+		// it a scoped session would still see its local todo state mutated and
+		// persisted by calls the scope refuses everywhere else. The call still
+		// settles (the interactive card resolves on this result), it just never
+		// mirrors — the same "leave local state untouched" contract as a refused
+		// snapshot.
+		if (this.options.isToolExecutable && !this.options.isToolExecutable("todo")) {
+			return buildTodoSyncResult(toolCallId, undefined, error);
+		}
 		const setPhases = this.options.setTodoPhases;
 		const existing = this.options.getTodoPhases?.() ?? [];
 
