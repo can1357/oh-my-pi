@@ -307,6 +307,17 @@ describe("auth-gateway openai-chat: encodeResponse", () => {
 		expect(choices[0].finish_reason).toBe("length");
 		expect(choices[0].message.content).toBeNull();
 	});
+
+	it("keeps provider-qualified request model ids unless Cursor auto routing is active", () => {
+		const message: AssistantMessage = {
+			...emptyAssistant(),
+			model: "gpt-5",
+			provider: "cursor",
+		};
+		expect(encodeResponse(message, "cursor/gpt-5").model).toBe("cursor/gpt-5");
+		expect(encodeResponse(message, "cursor/gpt-5", { cursorAutoMode: true }).model).toBe("gpt-5");
+		expect(encodeResponse(message, "auto", { cursorAutoMode: true }).model).toBe("gpt-5");
+	});
 });
 
 describe("auth-gateway openai-chat: encodeStream", () => {
@@ -453,6 +464,8 @@ describe("auth-gateway openai-chat: encodeStream", () => {
 		const events: AssistantMessageEvent[] = [
 			{ type: "start", partial: initial },
 			{ type: "text_delta", contentIndex: 0, delta: "h", partial: early },
+			// Early content must not release deferral — only the explicit routing signal.
+			{ type: "routed_model", model: "claude-opus-4-7", partial: routed },
 			{ type: "text_delta", contentIndex: 0, delta: "i", partial: routed },
 			{ type: "done", reason: "stop", message: routed },
 		];
@@ -466,6 +479,36 @@ describe("auth-gateway openai-chat: encodeStream", () => {
 		expect(chunks.every(c => c.model === "claude-opus-4-7")).toBe(true);
 		const text = chunks.map(c => c.choices[0]?.delta.content).filter((v): v is string => typeof v === "string");
 		expect(text.join("")).toBe("hi");
+	});
+
+	it("does not treat repeated partial.model as Cursor auto routing complete", async () => {
+		const initial = emptyAssistant();
+		initial.model = "gpt-5";
+		initial.provider = "cursor";
+		const early: AssistantMessage = {
+			...initial,
+			content: [{ type: "text", text: "h" }],
+		};
+		const later: AssistantMessage = {
+			...early,
+			model: "claude-opus-4-7",
+			content: [{ type: "text", text: "hi" }],
+		};
+		// Without routed_model, content stays buffered until done even when the
+		// model string on partials changes (second observation is not a signal).
+		const events: AssistantMessageEvent[] = [
+			{ type: "start", partial: initial },
+			{ type: "text_delta", contentIndex: 0, delta: "h", partial: early },
+			{ type: "text_delta", contentIndex: 0, delta: "i", partial: later },
+			{ type: "done", reason: "stop", message: later },
+		];
+		const stream = encodeStream(makeEventStream(events, later), "gpt-5", { cursorAutoMode: true });
+		const payloads = (await collectStream(stream)).map(parseSseLine);
+		const chunks = payloads.filter(
+			(p): p is { model: string; choices: Array<{ delta: Record<string, unknown> }> } =>
+				typeof p === "object" && p !== null && "model" in p,
+		);
+		expect(chunks.every(c => c.model === "claude-opus-4-7")).toBe(true);
 	});
 
 	it("streams immediately for literal model id auto without cursorAutoMode", async () => {
@@ -505,6 +548,7 @@ describe("auth-gateway openai-chat: encodeStream", () => {
 		};
 		const events: AssistantMessageEvent[] = [
 			{ type: "start", partial: initial },
+			{ type: "routed_model", model: "gpt-5", partial: initial },
 			{ type: "text_delta", contentIndex: 0, delta: "ok", partial: withText },
 			{ type: "done", reason: "stop", message: withText },
 		];

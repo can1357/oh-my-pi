@@ -289,4 +289,23 @@ describe("Cursor passthrough allowed-tools header", () => {
 		);
 		expect(sent["x-cursor-agent-allowed-tools"]).toBe("bash,read");
 	});
+
+	it("excludes native todo tools from the passthrough allowlist", async () => {
+		const sent = await send(
+			{},
+			{
+				context: {
+					...context,
+					tools: [
+						...passthroughTools,
+						{ name: "todo", description: "todos", parameters: { type: "object" as const } },
+						{ name: "update_todos", description: "update", parameters: { type: "object" as const } },
+						{ name: "read_todos", description: "read", parameters: { type: "object" as const } },
+					],
+				},
+				options: { cursorToolPassthrough: true },
+			},
+		);
+		expect(sent["x-cursor-agent-allowed-tools"]).toBe("bash,read");
+	});
 });

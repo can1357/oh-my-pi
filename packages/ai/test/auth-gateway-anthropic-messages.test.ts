@@ -792,6 +792,7 @@ describe("anthropic-messages encodeStream", () => {
 		};
 		const events: AssistantMessageEvent[] = [
 			{ type: "start", partial: initial },
+			{ type: "routed_model", model: "claude-opus-4-7", partial: routed },
 			{ type: "text_start", contentIndex: 0, partial: withText },
 			{ type: "text_delta", contentIndex: 0, delta: "hi", partial: withText },
 			{ type: "text_end", contentIndex: 0, content: "hi", partial: withText },
@@ -803,7 +804,7 @@ describe("anthropic-messages encodeStream", () => {
 		const message = (start!.data as { message: { model: string } }).message;
 		expect(message.model).toBe("claude-opus-4-7");
 		const types = sse.map(e => e.event);
-		// Routed model arrives with text_start; message_start must not precede that.
+		// Routed model arrives before content; message_start must not precede that.
 		expect(types.indexOf("message_start")).toBeLessThan(types.indexOf("content_block_start"));
 		expect(types.indexOf("message_start")).toBeGreaterThanOrEqual(0);
 	});
@@ -828,13 +829,13 @@ describe("anthropic-messages encodeStream", () => {
 			model: "claude-opus-4-7",
 			content: [{ type: "text", text: "hi" }],
 		};
-		// Production can emit text before the conversation checkpoint updates the
-		// routed model on `partial.model`. Content must not force message_start
-		// with the placeholder.
+		// Production can emit text before the conversation checkpoint / routedModel
+		// signal. Content must not force message_start with the placeholder.
 		const events: AssistantMessageEvent[] = [
 			{ type: "start", partial: initial },
 			{ type: "text_start", contentIndex: 0, partial: earlyText },
 			{ type: "text_delta", contentIndex: 0, delta: "h", partial: earlyText },
+			{ type: "routed_model", model: "claude-opus-4-7", partial: routed },
 			{ type: "text_delta", contentIndex: 0, delta: "i", partial: routed },
 			{ type: "text_end", contentIndex: 0, content: "hi", partial: routed },
 			{ type: "done", reason: "stop", message: routed },
@@ -864,12 +865,28 @@ describe("anthropic-messages encodeStream", () => {
 		};
 		const events: AssistantMessageEvent[] = [
 			{ type: "start", partial: initial },
+			{ type: "routed_model", model: "claude-opus-4-7", partial: routed },
 			{ type: "text_start", contentIndex: 0, partial: routed },
 			{ type: "done", reason: "stop", message: routed },
 		];
 		const sse = await collectSse(encodeStream(makeStream(events), "default", { cursorAutoMode: true }));
 		const start = sse.find(e => e.event === "message_start");
 		expect((start!.data as { message: { model: string } }).message.model).toBe("claude-opus-4-7");
+	});
+
+	it("keeps provider-qualified request model ids in non-streaming responses", () => {
+		const message: AssistantMessage = {
+			role: "assistant",
+			content: [{ type: "text", text: "ok" }],
+			api: "anthropic-messages",
+			provider: "cursor",
+			model: "claude-opus-4-7",
+			usage: emptyUsage(),
+			stopReason: "stop",
+			timestamp: 0,
+		};
+		expect(encodeResponse(message, "cursor/claude-opus-4-7").model).toBe("cursor/claude-opus-4-7");
+		expect(encodeResponse(message, "auto", { cursorAutoMode: true }).model).toBe("claude-opus-4-7");
 	});
 
 	it("streams message_start immediately for literal model id auto without cursorAutoMode", async () => {

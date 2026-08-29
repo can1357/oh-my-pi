@@ -1329,6 +1329,12 @@ export type AssistantMessageEvent =
 	| { type: "toolcall_start"; contentIndex: number; partial: AssistantMessage }
 	| { type: "toolcall_delta"; contentIndex: number; delta: string; partial: AssistantMessage }
 	| { type: "toolcall_end"; contentIndex: number; toolCall: ToolCall; partial: AssistantMessage }
+	/**
+	 * Explicit Cursor auto-routing checkpoint. Auth-gateway SSE encoders must
+	 * wait for this (not repeated `partial.model` observations) before flushing
+	 * `message_start` / OpenAI envelopes under `x-cursor-auto-mode`.
+	 */
+	| { type: "routed_model"; contentIndex?: undefined; model: string; partial: AssistantMessage }
 	| {
 			type: "done";
 			contentIndex?: undefined;

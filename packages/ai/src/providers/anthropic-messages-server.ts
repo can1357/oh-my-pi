@@ -37,6 +37,7 @@ import { isAnthropicServerToolHistoryBlock } from "./anthropic-wire";
  */
 
 import type { AuthGatewayStreamControl, AuthGatewayParsedRequest as ParsedRequest } from "../auth-gateway/types";
+import { resolveAuthGatewayWireModelId } from "../auth-gateway/types";
 
 export type { ParsedRequest };
 
@@ -496,7 +497,11 @@ function encodeUsage(message: AssistantMessage): Record<string, unknown> {
 	};
 }
 
-export function encodeResponse(message: AssistantMessage, requestedModelId: string): Record<string, unknown> {
+export function encodeResponse(
+	message: AssistantMessage,
+	requestedModelId: string,
+	options?: ParsedRequest["options"],
+): Record<string, unknown> {
 	if (message.stopReason === "error" || message.stopReason === "aborted") {
 		throw new AIError.ProviderResponseError(
 			message.errorMessage ?? `anthropic-messages: upstream ${message.stopReason}`,
@@ -510,7 +515,7 @@ export function encodeResponse(message: AssistantMessage, requestedModelId: stri
 		id: message.responseId ?? newMessageId(),
 		type: "message",
 		role: "assistant",
-		model: message.model || requestedModelId,
+		model: resolveAuthGatewayWireModelId(message, requestedModelId, options),
 		content: encodeContentBlocks(message),
 		stop_reason: mapStopReasonOut(message.stopReason),
 		// TODO: surface the matched stop sequence once pi-ai's
@@ -570,10 +575,9 @@ export function encodeStream(
 	};
 	let effectiveModelId = requestedModelId;
 	// Cursor auto may start as catalog `auto`, discovered `default`, or a concrete
-	// id with `x-cursor-auto-mode: true`. Defer message_start until routing lands
-	// (or content/done forces emit with whatever id we have).
+	// id with `x-cursor-auto-mode: true`. Defer message_start until an explicit
+	// `routed_model` event lands (or content/done forces emit).
 	let cursorAutoRoutingResolved = false;
-	let sawModelObservation = false;
 	const deferStartForCursorAuto = (modelId: string | undefined): boolean => {
 		// Cursor's discovered auto wire id is `default` (OpenRouter uses `auto`).
 		// Defer `default` even without the auto-mode header so gateway clients that
@@ -657,12 +661,11 @@ export function encodeStream(
 				const allowRewrite =
 					options?.cursorAutoMode === true || requestedModelId === "default" || requestedModelId === "auto";
 				if (allowRewrite && model !== effectiveModelId) effectiveModelId = model;
-				// Ignore the initial start placeholder; only a later observation
-				// (possibly the same concrete id after routing) releases deferral.
-				if (options?.cursorAutoMode === true && sawModelObservation) {
-					cursorAutoRoutingResolved = true;
-				}
-				sawModelObservation = true;
+			};
+
+			const markAutoRoutingResolved = (model: string | undefined) => {
+				noteRoutedModel(model);
+				cursorAutoRoutingResolved = true;
 			};
 
 			const processEvent = (ev: AssistantMessageEvent): "continue" | "return" => {
@@ -813,6 +816,13 @@ export function encodeStream(
 				};
 				for await (const ev of events) {
 					if (cancelled) return;
+					if (ev.type === "routed_model") {
+						// Explicit InteractionUpdate.routedModel / checkpoint signal —
+						// never treat repeated partial.model observations as proof.
+						markAutoRoutingResolved(ev.model);
+						if (flushPending()) return;
+						continue;
+					}
 					if ("partial" in ev) noteRoutedModel(ev.partial.model);
 					if ("message" in ev) noteRoutedModel(ev.message.model);
 

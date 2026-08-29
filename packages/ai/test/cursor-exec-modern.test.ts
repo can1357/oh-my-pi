@@ -2168,6 +2168,7 @@ describe("Cursor InteractionUpdate.routedModel", () => {
 	it("consumes InteractionUpdate.routedModel into output.model", () => {
 		const output = cursorAssistantMessage();
 		output.model = "auto";
+		const stream = new AssistantMessageEventStream();
 		processInteractionUpdate(
 			{
 				message: {
@@ -2179,11 +2180,12 @@ describe("Cursor InteractionUpdate.routedModel", () => {
 				},
 			},
 			output,
-			new AssistantMessageEventStream(),
+			stream,
 			newBlockState(),
 			{ sawTokenDelta: false },
 		);
 		expect(output.model).toBe("cursor-grok-4.5-high");
+		expect(stream.queue.some(e => e.type === "routed_model" && e.model === "cursor-grok-4.5-high")).toBe(true);
 	});
 
 	it("ignores routedModel updates without a modelId", () => {
@@ -2220,7 +2222,7 @@ describe("Cursor backgroundShellSpawnArgs passthrough", () => {
 		);
 		const answer = soleResult(frames);
 		if (answer.case !== "backgroundShellSpawnResult") throw new Error(`got ${answer.case}`);
-		expect(answer.value.result.case).toBe("rejected");
+		if (answer.value.result.case !== "rejected") throw new Error(`got ${answer.value.result.case}`);
 		expect(String(answer.value.result.value.reason)).toContain("passthrough");
 		const calls = output.content.filter(block => block.type === "toolCall");
 		expect(calls).toHaveLength(1);
@@ -2245,7 +2247,7 @@ describe("Cursor backgroundShellSpawnArgs passthrough", () => {
 		);
 		const answer = soleResult(frames);
 		if (answer.case !== "backgroundShellSpawnResult") throw new Error(`got ${answer.case}`);
-		expect(answer.value.result.case).toBe("rejected");
+		if (answer.value.result.case !== "rejected") throw new Error(`got ${answer.value.result.case}`);
 		expect(answer.value.result.value.reason).toBe("Not implemented");
 		expect(output.content.filter(block => block.type === "toolCall")).toHaveLength(0);
 	});
@@ -2297,7 +2299,7 @@ describe("Cursor grep passthrough: empty pattern", () => {
 		);
 		const answer = soleResult(frames);
 		if (answer.case !== "grepResult") throw new Error(`got ${answer.case}`);
-		expect(answer.value.result.case).toBe("error");
+		if (answer.value.result.case !== "error") throw new Error(`got ${answer.value.result.case}`);
 		expect(String(answer.value.result.value.error)).toContain("passthrough");
 		expect(output.content.some(block => block.type === "toolCall" && block.name === "grep")).toBe(true);
 	});

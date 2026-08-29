@@ -921,6 +921,22 @@ describe("openai-responses encodeResponse", () => {
 		expect(body.status).toBe("incomplete");
 		expect(body.incomplete_details).toEqual({ reason: "max_output_tokens" });
 	});
+
+	it("keeps provider-qualified request model ids unless Cursor auto routing is active", () => {
+		const message: AssistantMessage = {
+			role: "assistant",
+			api: "openai-responses",
+			provider: "cursor",
+			model: "gpt-5",
+			content: [{ type: "text", text: "ok" }],
+			usage: zeroUsage(),
+			stopReason: "stop",
+			timestamp: 1_700_000_000_000,
+		};
+		expect(encodeResponse(message, "cursor/gpt-5").model).toBe("cursor/gpt-5");
+		expect(encodeResponse(message, "cursor/gpt-5", { cursorAutoMode: true }).model).toBe("gpt-5");
+		expect(encodeResponse(message, "auto", { cursorAutoMode: true }).model).toBe("gpt-5");
+	});
 });
 
 describe("openai-responses encodeStream", () => {
@@ -1119,6 +1135,7 @@ describe("openai-responses encodeStream", () => {
 			stream.push({ type: "start", partial: initial });
 			stream.push({ type: "text_start", contentIndex: 0, partial: earlyText });
 			stream.push({ type: "text_delta", contentIndex: 0, delta: "h", partial: earlyText });
+			stream.push({ type: "routed_model", model: "claude-opus-4-7", partial: routed });
 			stream.push({ type: "text_delta", contentIndex: 0, delta: "i", partial: routed });
 			stream.push({ type: "text_end", contentIndex: 0, content: "hi", partial: routed });
 			stream.push({ type: "done", reason: "stop", message: routed });

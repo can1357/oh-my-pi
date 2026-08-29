@@ -154,9 +154,28 @@ export interface AuthGatewayStreamControl {
 	onCancel?: (reason?: unknown) => void;
 }
 
+/**
+ * Wire `model` for gateway responses. Only Cursor auto routing may rewrite
+ * the echoed id to `message.model`; otherwise retain the client's request id
+ * (including provider-qualified forms like `cursor/gpt-5`).
+ */
+export function resolveAuthGatewayWireModelId(
+	message: AssistantMessage,
+	requestedModelId: string,
+	options?: Pick<AuthGatewayParsedRequestOptions, "cursorAutoMode">,
+): string {
+	const allowRewrite =
+		options?.cursorAutoMode === true || requestedModelId === "default" || requestedModelId === "auto";
+	return allowRewrite && message.model ? message.model : requestedModelId;
+}
+
 export interface AuthGatewayFormatModule {
 	parseRequest(body: unknown, headers?: Headers): AuthGatewayParsedRequest;
-	encodeResponse(message: AssistantMessage, requestedModelId: string): Record<string, unknown>;
+	encodeResponse(
+		message: AssistantMessage,
+		requestedModelId: string,
+		options?: AuthGatewayParsedRequestOptions,
+	): Record<string, unknown>;
 	encodeStream(
 		events: AssistantMessageEventStream,
 		requestedModelId: string,

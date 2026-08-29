@@ -13,6 +13,7 @@ import { type } from "@oh-my-pi/omptype";
 import { logger, structuredCloneJSON } from "@oh-my-pi/pi-utils";
 import { resolvePromptCacheKey } from "../auth-gateway/http";
 import type { AuthGatewayStreamControl, AuthGatewayParsedRequest as ParsedRequest } from "../auth-gateway/types";
+import { resolveAuthGatewayWireModelId } from "../auth-gateway/types";
 import * as AIError from "../error";
 import type {
 	AssistantMessage,
@@ -879,11 +880,15 @@ function buildResponseEnvelope(
 
 // ─── encodeResponse (non-streaming) ─────────────────────────────────────────
 
-export function encodeResponse(message: AssistantMessage, requestedModelId: string): Record<string, unknown> {
+export function encodeResponse(
+	message: AssistantMessage,
+	requestedModelId: string,
+	options?: ParsedRequest["options"],
+): Record<string, unknown> {
 	const items = buildOutputItems(message);
 	return buildResponseEnvelope(
 		message,
-		message.model || requestedModelId,
+		resolveAuthGatewayWireModelId(message, requestedModelId, options),
 		makeRespId(),
 		responseStatusForStopReason(message),
 		items,
@@ -952,9 +957,8 @@ export function encodeStream(
 	let effectiveModelId = requestedModelId;
 	// Cursor auto may start as catalog `auto`, discovered `default`, or a concrete
 	// id with `x-cursor-auto-mode: true`. Defer response.created / in_progress until
-	// routing lands (or a terminal event forces emit with whatever id we have).
+	// an explicit `routed_model` event lands (or a terminal event forces emit).
 	let cursorAutoRoutingResolved = false;
-	let sawModelObservation = false;
 	const deferStartForCursorAuto = (modelId: string | undefined): boolean => {
 		// Cursor's discovered auto wire id is `default` (OpenRouter uses `auto`).
 		// Defer `default` even without the auto-mode header so gateway clients that
@@ -1231,12 +1235,10 @@ export function encodeStream(
 				const allowRewrite =
 					options?.cursorAutoMode === true || requestedModelId === "default" || requestedModelId === "auto";
 				if (allowRewrite && model !== effectiveModelId) effectiveModelId = model;
-				// Ignore the initial start placeholder; only a later observation
-				// (possibly the same concrete id after routing) releases deferral.
-				if (options?.cursorAutoMode === true && sawModelObservation) {
-					cursorAutoRoutingResolved = true;
-				}
-				sawModelObservation = true;
+			};
+			const markAutoRoutingResolved = (model: string | undefined) => {
+				noteRoutedModel(model);
+				cursorAutoRoutingResolved = true;
 			};
 			const ensureEnvelopes = () => {
 				if (envelopesStarted) return;
@@ -1461,6 +1463,13 @@ export function encodeStream(
 				};
 				for await (const ev of events) {
 					if (cancelled) return;
+					if (ev.type === "routed_model") {
+						// Explicit InteractionUpdate.routedModel / checkpoint signal —
+						// never treat repeated partial.model observations as proof.
+						markAutoRoutingResolved(ev.model);
+						flushPending();
+						continue;
+					}
 					if ("partial" in ev) noteRoutedModel(ev.partial.model);
 					if ("message" in ev) noteRoutedModel(ev.message.model);
 

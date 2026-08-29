@@ -173,8 +173,11 @@ export function indexModelsByRequestId(
 		if (!modelById.has(model.id)) modelById.set(model.id, model);
 	}
 	if (providersWithCreds.has("cursor")) {
+		// Cursor's synthetic router must claim bare `auto` even when OpenRouter
+		// (or another provider) already indexed a bundled model with that id —
+		// otherwise `{"model":"auto"}` silently routes away from Cursor.
 		modelById.set("cursor/auto", CURSOR_AUTO_MODEL);
-		if (!modelById.has("auto")) modelById.set("auto", CURSOR_AUTO_MODEL);
+		modelById.set("auto", CURSOR_AUTO_MODEL);
 	}
 	return modelById;
 }

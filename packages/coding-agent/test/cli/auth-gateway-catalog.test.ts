@@ -125,6 +125,19 @@ describe("indexModelsByRequestId (auth-gateway catalog)", () => {
 		expect(bare?.id).toBe("auto");
 	});
 
+	test("Cursor bare auto takes precedence over OpenRouter auto when both have credentials", () => {
+		const registry = new ModelRegistry(stubAuthStorage());
+		const openrouterAuto = registry.getAll().find(m => m.provider === "openrouter" && m.id === "auto");
+		if (!openrouterAuto) throw new Error("expected bundled OpenRouter auto model");
+
+		const index = indexModelsByRequestId(registry.getAll(), new Set(["cursor", "openrouter"]));
+
+		expect(index.get("openrouter/auto")).toBe(openrouterAuto);
+		expect(index.get("cursor/auto")).toBe(CURSOR_AUTO_MODEL);
+		// Documented {"model":"auto"} resolves to Cursor's synthetic router, not OpenRouter.
+		expect(index.get("auto")).toBe(CURSOR_AUTO_MODEL);
+	});
+
 	test("does not synthesize 'auto' when Cursor has no credentials", () => {
 		const registry = new ModelRegistry(stubAuthStorage());
 		const index = indexModelsByRequestId(registry.getAll(), new Set(["anthropic"]));

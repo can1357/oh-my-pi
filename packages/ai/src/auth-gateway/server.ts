@@ -604,7 +604,7 @@ async function handleFormatEndpoint(
 			}
 			return json(
 				200,
-				route.module.encodeResponse(message, parsed.modelId),
+				route.module.encodeResponse(message, parsed.modelId, parsed.options),
 				gatewayResponseHeaders(model, { requestId, message, startedAt }),
 			);
 		} catch (error) {

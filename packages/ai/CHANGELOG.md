@@ -255,10 +255,14 @@
 
 - Fixed `omp usage invalidate` to discard stale OAuth and API-key usage snapshots, then force a cache-bypassing, per-provider serialized refresh with a broker request budget sized for the full unfiltered account batch, so upgraded subscriptions do not silently retain pre-change quota data.
 - Fixed quota reporting and Cookie capture guidance for China (Beijing) Alibaba Token Plan credentials ([#8509](https://github.com/can1357/oh-my-pi/issues/8509)).
+- Auth-gateway Cursor auto SSE waits for an explicit `routed_model` checkpoint (from `InteractionUpdate.routedModel` or conversation checkpoint extraction) before flushing `message_start` / OpenAI envelopes — repeated `partial.model` observations no longer count as routing complete.
+- Auth-gateway non-streaming responses only rewrite the echoed `model` id under Cursor auto routing; otherwise they retain the client's requested id (including provider-qualified forms like `cursor/gpt-5`).
+- Cursor tool passthrough excludes native todo tools (`todo` / `update_todos` / `read_todos`) from the allowlist and interaction path the same way as `connect_scm`.
+
 - Auth-gateway Chat Completions keeps provider-qualified request model ids (e.g. `cursor/gpt-5`) stable across SSE chunks unless Cursor auto routing is active.
 - Cursor tool passthrough ends the turn only after a real exec synthesis/deferral — approval-only `mcpArgs` probes no longer set `toolUse` when a prior `toolCallStarted` announcement is already present.
-- Cursor tool passthrough synthesizes `writeShellStdinArgs` and `redactedReadArgs` for the caller, and excludes server-only `connect_scm` from the allowlist / interaction path.
-- Cursor SSE deferral treats the discovered `default` wire id as auto intent; routing resolve ignores the initial start placeholder so concrete+autoMode still buffers until a post-start observation.
+- Cursor tool passthrough synthesizes `writeShellStdinArgs` and `redactedReadArgs` for the caller, and excludes server-only `connect_scm` / native todo tools from the allowlist / interaction path.
+- Cursor SSE deferral treats the discovered `default` wire id as auto intent; routing resolve requires an explicit `routed_model` signal (not a second `partial.model` observation).
 - Auth-gateway SSE only buffers `auto`/`default` model envelopes when Cursor auto mode is set, so literal provider ids like OpenRouter `auto` still stream immediately.
 - Cursor tool passthrough restricts `x-cursor-agent-allowed-tools` to a named forced `toolChoice` (advertising that name alone even when absent from declared tools).
 - Cursor tool passthrough sends `x-cursor-agent-allowed-tools: __none__` when `toolChoice` is `"none"`, even if tools are declared.
@@ -270,7 +274,7 @@
 - Cursor auto-mode OpenAI Chat Completions and Responses SSE similarly defer the initial role / `response.created` envelopes until routing resolves.
 - Cursor auto-mode Responses SSE also buffers early `text`/`thinking`/`toolcall` events until routing lands, so content cannot force `response.created` with the pre-route placeholder.
 - Cursor tool passthrough always sends `x-cursor-agent-allowed-tools` (including `__none__` when the caller declares no tools) so Cursor does not keep its unrestricted native set.
-- Cursor auto-mode Chat Completions rebuilds buffered deltas with the routed model id; same-id auto routing still releases the deferral.
+- Cursor auto-mode Chat Completions rebuilds buffered deltas with the routed model id; same-id auto routing releases deferral via an explicit `routed_model` signal.
 - Cursor tool passthrough surfaces empty-pattern `grepArgs` and approves declared MCP approval probes so the external caller receives the invocation.
 - Auth-gateway CORS preflights allow the Cursor control headers (`x-cursor-auto-mode`, `x-cursor-tool-passthrough`, `x-cursor-agent-exclude-tools`, `local-cli-mode`, `x-dev-experiment-overrides`).
 - Cursor `DEBUG_CURSOR` interaction logs go through the central logger instead of `console.error`.

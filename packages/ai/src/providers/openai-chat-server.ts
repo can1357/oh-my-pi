@@ -6,6 +6,7 @@ import { resolvePromptCacheKey } from "../auth-gateway/http";
  * `stream(model, context, options)`.
  */
 import type { AuthGatewayStreamControl, AuthGatewayParsedRequest as ParsedRequest } from "../auth-gateway/types";
+import { resolveAuthGatewayWireModelId } from "../auth-gateway/types";
 import * as AIError from "../error";
 import type {
 	AssistantMessage,
@@ -407,7 +408,11 @@ function normalizeToolChoice(value: OpenAIChatToolChoice | undefined): ParsedReq
 // encodeResponse (non-streaming)
 // ---------------------------------------------------------------------------
 
-export function encodeResponse(message: AssistantMessage, requestedModelId: string): Record<string, unknown> {
+export function encodeResponse(
+	message: AssistantMessage,
+	requestedModelId: string,
+	options?: ParsedRequest["options"],
+): Record<string, unknown> {
 	const { text, reasoning, toolCalls } = flattenAssistant(message);
 
 	const responseMessage: Record<string, unknown> = {
@@ -433,7 +438,7 @@ export function encodeResponse(message: AssistantMessage, requestedModelId: stri
 		id: makeId(),
 		object: "chat.completion",
 		created: Math.floor(Date.now() / 1000),
-		model: message.model || requestedModelId,
+		model: resolveAuthGatewayWireModelId(message, requestedModelId, options),
 		// Real OpenAI always emits this key, even when the value is null. Mirror
 		// the contract so probing SDKs do not throw on a missing field.
 		system_fingerprint: null,
@@ -537,10 +542,9 @@ export function encodeStream(
 	const includeUsage = options?.extra?.includeStreamingUsage === true;
 	let effectiveModelId = requestedModelId;
 	// Cursor auto may start as catalog `auto`, discovered `default`, or a concrete
-	// id with `x-cursor-auto-mode: true`. Defer the initial role chunk until routing
-	// lands (or a terminal event forces emit with whatever id we have).
+	// id with `x-cursor-auto-mode: true`. Defer the initial role chunk until an
+	// explicit `routed_model` event lands (or a terminal event forces emit).
 	let cursorAutoRoutingResolved = false;
-	let sawModelObservation = false;
 	const deferStartForCursorAuto = (modelId: string | undefined): boolean => {
 		// Cursor's discovered auto wire id is `default` (OpenRouter uses `auto`).
 		// Defer `default` even without the auto-mode header so gateway clients that
@@ -604,12 +608,11 @@ export function encodeStream(
 				const allowRewrite =
 					options?.cursorAutoMode === true || requestedModelId === "default" || requestedModelId === "auto";
 				if (allowRewrite && model !== effectiveModelId) effectiveModelId = model;
-				// Ignore the initial start placeholder; only a later observation
-				// (possibly the same concrete id after routing) releases deferral.
-				if (options?.cursorAutoMode === true && sawModelObservation) {
-					cursorAutoRoutingResolved = true;
-				}
-				sawModelObservation = true;
+			};
+
+			const markAutoRoutingResolved = (model: string | undefined) => {
+				noteRoutedModel(model);
+				cursorAutoRoutingResolved = true;
 			};
 
 			const ensureRoleChunk = () => {
@@ -641,6 +644,12 @@ export function encodeStream(
 
 				for await (const event of events) {
 					if (cancelled) return;
+					if (event.type === "routed_model") {
+						// Explicit InteractionUpdate.routedModel / checkpoint signal —
+						// never treat repeated partial.model observations as proof.
+						markAutoRoutingResolved(event.model);
+						continue;
+					}
 					if ("partial" in event) noteRoutedModel(event.partial.model);
 					if ("message" in event) noteRoutedModel(event.message.model);
 					switch (event.type) {

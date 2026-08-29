@@ -194,6 +194,7 @@ import type {
 	ThinkingContent,
 	Tool,
 	ToolCall,
+	ToolChoice,
 	ToolResultMessage,
 } from "../types";
 import { normalizeSystemPrompts, normalizeToolCallId } from "../utils";
@@ -304,7 +305,16 @@ const CURSOR_RESERVED_HEADERS = new Set([
  * exec frame). Passthrough must not advertise them — Cursor would finish the
  * work server-side while an OpenAI-shaped client still receives a ToolCall to run.
  */
-const CURSOR_PASSTHROUGH_SERVER_ONLY_TOOLS: ReadonlySet<string> = new Set(["connect_scm"]);
+const CURSOR_PASSTHROUGH_SERVER_ONLY_TOOLS: ReadonlySet<string> = new Set([
+	"connect_scm",
+	// Native todo family — Cursor resolves these server-side with no deferrable
+	// exec frame (same class as connect_scm). Advertising `todo` lets Cursor
+	// mutate todos remotely while the gateway also surfaces a ToolCall for the
+	// OpenAI client to run again.
+	"todo",
+	"update_todos",
+	"read_todos",
+]);
 
 /**
  * Reduce caller-supplied headers to what this HTTP/2 request can legally carry.
@@ -373,6 +383,11 @@ export interface CursorOptions extends StreamOptions {
 	 * `role: "tool"` messages on the next request.
 	 */
 	cursorToolPassthrough?: boolean;
+	/**
+	 * Restricts `x-cursor-agent-allowed-tools` under tool passthrough
+	 * (`"none"` → `__none__`, named force → that name alone).
+	 */
+	toolChoice?: ToolChoice;
 	/** Comma-separated tool names to exclude (`x-cursor-agent-exclude-tools`). */
 	cursorExcludeTools?: string;
 	/** Signal local CLI mode (`local-cli-mode: true`). */
@@ -1307,6 +1322,7 @@ export async function handleServerMessage(
 			usageState,
 			onConversationCheckpoint,
 			autoModeActive,
+			stream,
 		);
 	}
 }
@@ -4674,8 +4690,16 @@ export function processInteractionUpdate(
 			// them, and executing one would emit a spurious toolResult and drive an
 			// extra continuation turn. Local state is mirrored on completion, from
 			// the server's success snapshot only.
+			//
+			// Passthrough: excluded from the allowlist; if Cursor still emits one,
+			// ignore it so we neither re-surface a server-finished call nor end the
+			// turn with a ToolCall the OpenAI client cannot execute.
 			const todoCalls = selectTodoCalls(toolCall);
 			if (todoCalls.update || todoCalls.read) {
+				if (cursorToolPassthrough) {
+					log("passthrough", "ignoredServerOnlyTodo");
+					return;
+				}
 				const callId = update.message.value.callId || crypto.randomUUID();
 				const block: ToolCallState = {
 					type: "toolCall",
@@ -4908,6 +4932,9 @@ export function processInteractionUpdate(
 		const modelId = typeof routed?.modelId === "string" ? routed.modelId.trim() : "";
 		if (modelId) {
 			output.model = modelId;
+			// Explicit signal for auth-gateway SSE: do not treat repeated
+			// `partial.model` observations as proof routing completed.
+			stream.push({ type: "routed_model", model: modelId, partial: output });
 		}
 	} else if (updateCase === "tokenDelta") {
 		const tokenDelta = update.message.value;
@@ -4923,6 +4950,7 @@ function handleConversationCheckpointUpdate(
 	usageState: UsageState,
 	onConversationCheckpoint?: (checkpoint: ConversationStateStructure) => void,
 	autoModeActive?: boolean,
+	stream?: AssistantMessageEventStream,
 ): void {
 	onConversationCheckpoint?.(checkpoint);
 	// Extract the routed model from the assistant message JSON in pendingToolCalls.
@@ -4945,6 +4973,7 @@ function handleConversationCheckpointUpdate(
 				?.modelName;
 			if (modelName) {
 				output.model = modelName;
+				stream?.push({ type: "routed_model", model: modelName, partial: output });
 				break;
 			}
 		} catch {
