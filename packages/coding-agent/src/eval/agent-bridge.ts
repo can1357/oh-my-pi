@@ -12,7 +12,6 @@ import type { AgentProgress, SingleResult } from "../task/types";
 import type { NestedRepoPatch } from "../task/worktree";
 import type { ToolSession } from "../tools";
 import { ToolError } from "../tools/tool-errors";
-import { isolatedApplyShouldLatch } from "../session/settle-gates";
 import { withBridgeTimeoutPause } from "./bridge-timeout";
 import type { JsStatusEvent } from "./js/shared/types";
 // Import review tools for side effects (registers subagent tool handlers).
@@ -165,7 +164,7 @@ export async function runEvalAgent(args: unknown, options: EvalAgentBridgeOption
 				}),
 			{ deferExternalAbort: true },
 		);
-		const { result, policy, mergeSummary, changesApplied, hadAnyChanges, artifactsDir } = execution;
+		const { result, policy, mergeSummary, changesApplied, artifactsDir } = execution;
 		if (result.exitCode !== 0 || result.error || result.aborted) {
 			const failureMessage = buildSubagentFailureMessage(policy.agentName, result)
 				.replace(/<\/?system-notification>/g, "")
@@ -180,16 +179,8 @@ export async function runEvalAgent(args: unknown, options: EvalAgentBridgeOption
 				`agent() isolated apply failed for ${result.id}${summary ? `: ${summary}` : ""}${recoveryHint}`,
 			);
 		}
-		if (
-			isolatedApplyShouldLatch({
-				isolated: policy.isIsolated,
-				applyChanges: policy.applyChanges,
-				hadAnyChanges,
-				exitCode: result.exitCode,
-			})
-		) {
-			options.session.noteUnverifiedMerge?.();
-		}
+		// Latch is armed inside `runStructuredSubagent` before artifact cleanup —
+		// do not mark again here (would double-count overlapping merges).
 
 		const structuredOutput = result.structuredOutput;
 		const structured = structuredOutput?.source !== undefined && structuredOutput.source !== "none";

@@ -284,7 +284,14 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 							text: `Workspace diagnostics (${result.projectType.description}):\n${result.output}`,
 						},
 					],
-					details: { action, success: true, request: params },
+					details: {
+						action,
+						success: result.success,
+						request: params,
+						// Propagate 0 when clean so the unverified-merge latch can clear.
+						diagnosticErrorCount: result.diagnosticErrorCount,
+						failedServerCount: result.failedCheckerCount,
+					},
 				};
 			}
 
@@ -296,7 +303,13 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 							text: "Error: file parameter required. Use `*` for workspace-wide diagnostics or a path/glob for specific files.",
 						},
 					],
-					details: { action, success: false, request: params },
+					details: {
+						action,
+						success: false,
+						request: params,
+						diagnosticErrorCount: 0,
+						failedServerCount: 0,
+					},
 				};
 			}
 
@@ -309,7 +322,14 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			if (targets.length === 0) {
 				return {
 					content: [{ type: "text", text: `No files matched pattern: ${file}` }],
-					details: { action, success: true, request: params },
+					details: {
+						action,
+						// Not a successful verify — do not clear an unverified-merge latch.
+						success: false,
+						request: params,
+						diagnosticErrorCount: 0,
+						failedServerCount: 0,
+					},
 				};
 			}
 
@@ -319,6 +339,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			let totalServerAttempts = 0;
 			let totalServerSuccesses = 0;
 			let diagnosticErrorCount = 0;
+			let noServerTargets = 0;
 			if (truncatedGlobTargets) {
 				results.push(
 					`${theme.status.warning} Pattern matched more than ${MAX_GLOB_DIAGNOSTIC_TARGETS} files; showing first ${MAX_GLOB_DIAGNOSTIC_TARGETS}. Narrow the glob or use workspace diagnostics.`,
@@ -330,6 +351,10 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 				const resolved = resolveToCwd(target, this.session.cwd);
 				const servers = getServersForFile(config, resolved);
 				if (servers.length === 0) {
+					// Count as a failed attempt so an all-"no server" run cannot
+					// report success:true / failedServerCount:0 and clear the latch.
+					noServerTargets++;
+					totalServerAttempts++;
 					results.push(`${theme.status.error} ${target}: No language server found`);
 					continue;
 				}
@@ -417,7 +442,13 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 									text: `${theme.status.error} ${relPath}: all language servers failed (${failedServers.join(", ")})`,
 								},
 							],
-							details: { action, serverName: Array.from(allServerNames).join(", "), success: false },
+							details: {
+								action,
+								serverName: Array.from(allServerNames).join(", "),
+								success: false,
+								diagnosticErrorCount: 0,
+								failedServerCount: Math.max(failedServers.length, 1),
+							},
 						};
 					}
 
@@ -433,6 +464,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 								serverName: Array.from(allServerNames).join(", "),
 								success: true,
 								diagnosticErrorCount: 0,
+								failedServerCount: failedServers.length,
 							},
 						};
 					}
@@ -450,6 +482,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 							serverName: Array.from(allServerNames).join(", "),
 							success: true,
 							diagnosticErrorCount: countDiagnosticErrors(uniqueDiagnostics),
+							failedServerCount: failedServers.length,
 						},
 					};
 				}
@@ -479,13 +512,17 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			}
 
 			const allServersFailed = totalServerAttempts > 0 && totalServerSuccesses === 0;
+			const failedServerCount = Math.max(0, totalServerAttempts - totalServerSuccesses);
+			// Every target lacked a configured server — treat as verify failure.
+			const noServersAttempted = noServerTargets === targets.length && totalServerSuccesses === 0;
 			return {
 				content: [{ type: "text", text: results.join("\n") }],
 				details: {
 					action,
 					serverName: Array.from(allServerNames).join(", "),
-					success: !allServersFailed,
+					success: !allServersFailed && !noServersAttempted,
 					diagnosticErrorCount,
+					failedServerCount: noServersAttempted ? Math.max(failedServerCount, noServerTargets) : failedServerCount,
 				},
 			};
 		}

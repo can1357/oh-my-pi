@@ -1466,7 +1466,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				hadAnyChanges: execution.hadAnyChanges,
 				exitCode: execution.result.exitCode,
 			});
-			if (latch) this.session.noteUnverifiedMerge?.();
+			// Latch is armed inside `runStructuredSubagent` before artifact cleanup.
 			return this.#buildResultPayload(
 				execution.result,
 				execution.policy.discovery.projectAgentsDir,

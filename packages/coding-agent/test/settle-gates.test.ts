@@ -2,8 +2,10 @@ import { describe, expect, it } from "bun:test";
 import {
 	annotateUnverifiedMergeSummary,
 	isolatedApplyShouldLatch,
+	isParentVerifyCwdInMergedTree,
 	isTautologicalParentVerifyCommand,
 	MERGED_UNVERIFIED_MARKER,
+	skipLeadingEnvAssignmentTokens,
 	UnverifiedMergeLatch,
 } from "../src/session/settle-gates";
 
@@ -74,11 +76,39 @@ describe("UnverifiedMergeLatch", () => {
 	});
 });
 
+describe("skipLeadingEnvAssignmentTokens", () => {
+	it("strips leading NAME=value tokens", () => {
+		expect(skipLeadingEnvAssignmentTokens(["CI=1", "pwd"])).toEqual(["pwd"]);
+		expect(skipLeadingEnvAssignmentTokens(["FOO=1", "BAR=2", "true"])).toEqual(["true"]);
+		expect(skipLeadingEnvAssignmentTokens(["FOO=1"])).toEqual([]);
+		expect(skipLeadingEnvAssignmentTokens(["bun", "test"])).toEqual(["bun", "test"]);
+	});
+});
+
 describe("isTautologicalParentVerifyCommand", () => {
 	it("rejects ls/pwd/echo and accepts a real test command", () => {
 		expect(isTautologicalParentVerifyCommand("pwd")).toBe(true);
 		expect(isTautologicalParentVerifyCommand("ls -la")).toBe(true);
 		expect(isTautologicalParentVerifyCommand("echo ok && pwd")).toBe(true);
 		expect(isTautologicalParentVerifyCommand("bun test test/foo.test.ts")).toBe(false);
+	});
+
+	it("treats env-prefixed tautologies and assignment-only segments as non-evidence", () => {
+		expect(isTautologicalParentVerifyCommand("CI=1 pwd")).toBe(true);
+		expect(isTautologicalParentVerifyCommand("FOO=1 BAR=2 true")).toBe(true);
+		expect(isTautologicalParentVerifyCommand("FOO=1")).toBe(true);
+		expect(isTautologicalParentVerifyCommand("FOO=1 && BAR=2")).toBe(true);
+		expect(isTautologicalParentVerifyCommand("CI=1 bun test test/foo.test.ts")).toBe(false);
+	});
+});
+
+describe("isParentVerifyCwdInMergedTree", () => {
+	it("accepts session cwd / repo root and rejects outside trees", () => {
+		expect(isParentVerifyCwdInMergedTree(undefined, "/repo")).toBe(true);
+		expect(isParentVerifyCwdInMergedTree("/repo", "/repo")).toBe(true);
+		expect(isParentVerifyCwdInMergedTree("/repo/packages/a", "/repo")).toBe(true);
+		expect(isParentVerifyCwdInMergedTree("/repo/.git", "/cwd", "/repo")).toBe(true);
+		expect(isParentVerifyCwdInMergedTree("/tmp", "/repo")).toBe(false);
+		expect(isParentVerifyCwdInMergedTree("/repo-other", "/repo")).toBe(false);
 	});
 });

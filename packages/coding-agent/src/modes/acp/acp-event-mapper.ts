@@ -279,6 +279,8 @@ export function mapAgentSessionEventToAcpSessionUpdates(
 			return notifications;
 		}
 		case "todo_reminder": {
+			// Merge-only reminders have an empty todo list; skip the empty plan update.
+			if (event.todos.length === 0) return [];
 			const entries = event.todos.map(todo => ({
 				content: todo.content,
 				priority: "medium" as const,

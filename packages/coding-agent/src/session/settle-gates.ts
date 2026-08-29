@@ -1,3 +1,5 @@
+import * as path from "node:path";
+
 /** Isolated apply succeeded; parent must re-run acceptance on this tree. */
 export const MERGED_UNVERIFIED_MARKER = "MERGED — child yield is not evidence; re-run acceptance on this tree.";
 
@@ -35,6 +37,18 @@ const TAUTOLOGICAL_BASH_COMMANDS = new Set([
 	":",
 ]);
 
+/** Leading `NAME=value` tokens (including empty values) before the invoked command. */
+const ENV_ASSIGNMENT_TOKEN_RE = /^[A-Za-z_][A-Za-z0-9_]*=/;
+
+/** Drop leading env-assignment tokens so `FOO=1 pwd` classifies as `pwd`. */
+export function skipLeadingEnvAssignmentTokens(tokens: readonly string[]): string[] {
+	let index = 0;
+	while (index < tokens.length && ENV_ASSIGNMENT_TOKEN_RE.test(tokens[index] ?? "")) {
+		index++;
+	}
+	return tokens.slice(index);
+}
+
 /** `ls` / `pwd` / `echo ok` are not parent acceptance of merged work. */
 export function isTautologicalParentVerifyCommand(command: string): boolean {
 	const trimmed = command.trim();
@@ -45,11 +59,32 @@ export function isTautologicalParentVerifyCommand(command: string): boolean {
 		.filter(segment => segment.length > 0 && !segment.startsWith("#"));
 	if (segments.length === 0) return true;
 	return segments.every(segment => {
-		const tokens = segment.replace(/^sudo\s+/, "").split(/\s+/);
+		const tokens = skipLeadingEnvAssignmentTokens(segment.replace(/^sudo\s+/, "").split(/\s+/));
+		// Bare assignment-only segment (`FOO=1`) is not acceptance evidence.
+		if (tokens.length === 0) return true;
 		const invoked = tokens[0] ?? "";
 		const base = invoked.split("/").pop() ?? invoked;
 		return TAUTOLOGICAL_BASH_COMMANDS.has(base);
 	});
+}
+
+/**
+ * Parent bash verify must run inside the tree that received the merge
+ * (session cwd, or optionally the repo root). `/tmp` and other outside paths
+ * must not clear the unverified-merge latch.
+ */
+export function isParentVerifyCwdInMergedTree(
+	bashCwd: string | undefined,
+	sessionCwd: string,
+	repoRoot?: string,
+): boolean {
+	if (bashCwd === undefined || bashCwd.trim() === "") return true;
+	const resolvedBash = path.resolve(bashCwd);
+	const roots = [path.resolve(sessionCwd)];
+	if (repoRoot !== undefined && repoRoot.trim() !== "") {
+		roots.push(path.resolve(repoRoot));
+	}
+	return roots.some(root => resolvedBash === root || resolvedBash.startsWith(`${root}${path.sep}`));
 }
 
 /**

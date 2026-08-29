@@ -82,6 +82,7 @@ import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { preferredDialect } from "@oh-my-pi/pi-catalog/identity";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { MacOSPowerAssertion } from "@oh-my-pi/pi-natives";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import {
 	$env,
 	escapeXmlText,
@@ -353,12 +354,12 @@ import { SessionTools, type SessionToolsHost } from "./session-tools";
 import { UnverifiedMergeLatch } from "./settle-gates";
 import type { ShakeMode, ShakeResult } from "./shake-types";
 import { skillPromptTitleInput } from "./skill-title-input";
-import { ToolChoiceQueue } from "./tool-choice-queue";
-import { planTurnPersistence, sameMessageContent, sessionMessagePersistenceKey } from "./turn-persistence";
-import { TurnRecovery, type TurnRecoveryHost } from "./turn-recovery";
 import { LoopGuards, type StreamGuardsHost, StreamingEditGuard } from "./stream-guards";
 import { TodoTracker, type TodoTrackerHost } from "./todo-tracker";
+import { ToolChoiceQueue } from "./tool-choice-queue";
 import { TtsrCoordinator, type TtsrCoordinatorHost } from "./ttsr-coordinator";
+import { planTurnPersistence, sameMessageContent, sessionMessagePersistenceKey } from "./turn-persistence";
+import { TurnRecovery, type TurnRecoveryHost } from "./turn-recovery";
 import { YieldQueue } from "./yield-queue";
 
 export * from "./agent-session-events";
@@ -1132,6 +1133,8 @@ export class AgentSession {
 			settings: this.settings,
 			model: () => this.model,
 			agentKind: () => this.#agentKind,
+			cwd: () => this.sessionManager.getCwd(),
+			repoRoot: () => vcs.git(this.sessionManager.getCwd())?.info().repoRoot,
 			emitSessionEvent: event => this.#emitSessionEvent(event),
 			scheduleAgentContinue: options => this.#scheduleAgentContinue(options),
 			promptGeneration: () => this.#promptGeneration,
@@ -3983,6 +3986,7 @@ export class AgentSession {
 				todos: event.todos,
 				attempt: event.attempt,
 				maxAttempts: event.maxAttempts,
+				...(event.unverifiedMerge ? { unverifiedMerge: true } : {}),
 			});
 		} else if (event.type === "goal_updated") {
 			await this.#extensionRunner.emit({

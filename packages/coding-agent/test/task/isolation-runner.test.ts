@@ -460,7 +460,7 @@ describe("mergeIsolatedChanges", () => {
 
 		expect(mergeSpy).not.toHaveBeenCalled();
 		expect(outcome.changesApplied).toBe(true);
-		expect(outcome.hadAnyChanges).toBe(true);
+		expect(outcome.hadAnyChanges).toBe(false);
 		expect(outcome.mergedBranchForNestedPatches).toBe(true);
 		expect(outcome.summary).toContain("nested repository patches captured");
 	});

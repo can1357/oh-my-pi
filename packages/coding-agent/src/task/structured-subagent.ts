@@ -7,7 +7,7 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import path from "node:path";
-import { $env, prompt, Snowflake } from "@oh-my-pi/pi-utils";
+import { $env, logger, prompt, Snowflake } from "@oh-my-pi/pi-utils";
 import { resolveAgentModelSelection } from "../config/model-resolver";
 import type { LocalProtocolOptions } from "../internal-urls";
 import { registerArtifactsDir } from "../internal-urls/registry-helpers";
@@ -16,6 +16,7 @@ import { loadOverallPlanReference } from "../plan-mode/plan-handoff";
 import planModeSubagentPrompt from "../prompts/system/plan-mode-subagent.md" with { type: "text" };
 import subagentUserPromptTemplate from "../prompts/system/subagent-user-prompt.md" with { type: "text" };
 import { MAIN_AGENT_ID } from "../registry/agent-registry";
+import { isolatedApplyShouldLatch } from "../session/settle-gates";
 import type { TaskEffort } from "../thinking";
 import type { ToolSession } from "../tools";
 import { isIrcEnabled } from "../tools/hub";
@@ -657,6 +658,18 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 		}
 
 		completedSuccessfully = result.exitCode === 0 && !result.error && !result.aborted;
+		// Arm before artifact cleanup so a cleanup failure cannot leave parent
+		// settle without an unverified-merge latch for applied child work.
+		if (
+			isolatedApplyShouldLatch({
+				isolated: policy.isIsolated,
+				applyChanges: policy.applyChanges,
+				hadAnyChanges,
+				exitCode: result.exitCode,
+			})
+		) {
+			request.session.noteUnverifiedMerge?.();
+		}
 		return {
 			result,
 			policy,
@@ -680,8 +693,15 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 		const shouldCleanup = lease.temporary && !shouldRetainArtifacts;
 		if (shouldCleanup) {
 			const cleanupArtifacts = async (): Promise<void> => {
-				await fs.rm(lease.artifactsDir, { recursive: true, force: true });
-				lease.unregister?.();
+				try {
+					await fs.rm(lease.artifactsDir, { recursive: true, force: true });
+					lease.unregister?.();
+				} catch (error) {
+					logger.warn("Failed to clean up temporary subagent artifacts", {
+						artifactsDir: lease.artifactsDir,
+						error: error instanceof Error ? error.message : String(error),
+					});
+				}
 			};
 			if (deferredCleanup) {
 				trackLateCleanup(deferredCleanup.then(cleanupArtifacts), {

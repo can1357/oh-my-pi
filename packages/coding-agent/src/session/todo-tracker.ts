@@ -1,3 +1,4 @@
+import * as path from "node:path";
 import type { Agent, AgentMessage, AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, Message, Model, TextContent, ToolChoice } from "@oh-my-pi/pi-ai";
 import { isRecord, logger, prompt, stringProperty } from "@oh-my-pi/pi-utils";
@@ -10,7 +11,11 @@ import { getLatestTodoPhasesFromEntries, isTodoPhase, type TodoItem, type TodoPh
 import { buildNamedToolChoice } from "../utils/tool-choice";
 import type { AgentSessionEvent } from "./agent-session-events";
 import type { SessionManager } from "./session-manager";
-import { isTautologicalParentVerifyCommand, MERGED_UNVERIFIED_MARKER } from "./settle-gates";
+import {
+	isParentVerifyCwdInMergedTree,
+	isTautologicalParentVerifyCommand,
+	MERGED_UNVERIFIED_MARKER,
+} from "./settle-gates";
 
 const PARENT_VERIFY_TOOLS: Record<string, true> = {
 	bash: true,
@@ -50,6 +55,13 @@ interface PromptLine {
 	hadPromptLabel: boolean;
 }
 
+interface VerifyStartSnap {
+	generation: number;
+	command?: string;
+	/** Resolved bash working directory when known at tool start. */
+	cwd?: string;
+}
+
 /** Capabilities the todo tracker borrows from its owning session. */
 export interface TodoTrackerHost {
 	agent: Agent;
@@ -57,6 +69,10 @@ export interface TodoTrackerHost {
 	settings: Settings;
 	model(): Model | undefined;
 	agentKind(): "main" | "sub";
+	/** Session working directory — parent bash verify must run inside this tree. */
+	cwd(): string;
+	/** Optional git/jj repo root when it differs from {@link cwd}. */
+	repoRoot?(): string | undefined;
 	emitSessionEvent(event: AgentSessionEvent): Promise<void>;
 	scheduleAgentContinue(options: { source: string; generation?: number }): void;
 	promptGeneration(): number;
@@ -80,7 +96,15 @@ export class TodoTracker {
 	#mutationsSinceLastTouch = 0;
 	#midRunNudgeCount = 0;
 	/** Merge generation (and bash command) observed when a parent-verify tool started. */
-	readonly #verifyStart = new Map<string, { generation: number; command?: string }>();
+	readonly #verifyStart = new Map<string, VerifyStartSnap>();
+	/**
+	 * Async job terminals that arrived before the toolResult re-keyed the verify
+	 * snap under the job id (delivery race). Applied immediately on re-key.
+	 */
+	readonly #earlyAsyncTerminals = new Map<
+		string,
+		{ jobType: string | undefined; status: "running" | "completed" | "failed" | "cancelled" | undefined }
+	>();
 
 	constructor(host: TodoTrackerHost) {
 		this.#host = host;
@@ -117,6 +141,7 @@ export class TodoTracker {
 	/** Drop verify-start snapshots owned by the previous logical session. */
 	resetVerifyState(): void {
 		this.#verifyStart.clear();
+		this.#earlyAsyncTerminals.clear();
 	}
 
 	/** Snapshots the merge generation when a parent-verify tool begins executing. */
@@ -124,30 +149,33 @@ export class TodoTracker {
 		if (!PARENT_VERIFY_TOOLS[toolName] || !toolCallId) return;
 		const command =
 			toolName === "bash" && isRecord(args) && typeof args.command === "string" ? args.command : undefined;
+		const rawCwd = toolName === "bash" && isRecord(args) && typeof args.cwd === "string" ? args.cwd : undefined;
+		const cwd = rawCwd !== undefined && rawCwd.trim() !== "" ? path.resolve(this.#host.cwd(), rawCwd) : undefined;
 		this.#verifyStart.set(toolCallId, {
 			generation: this.#host.unverifiedMergeGeneration?.() ?? 0,
 			command,
+			cwd,
 		});
 	}
 
 	/** Records a completed tool result before asynchronous event processing begins. */
-	onToolResult(
-		toolName: string,
-		isError: boolean,
-		details?: Record<string, unknown>,
-		toolCallId?: string,
-	): void {
+	onToolResult(toolName: string, isError: boolean, details?: Record<string, unknown>, toolCallId?: string): void {
 		if (toolName === "todo") {
 			this.#mutationsSinceLastTouch = 0;
 		} else if (!isError && MUTATING_TOOLS[toolName]) {
 			this.#mutationsSinceLastTouch++;
 		}
 		const start = toolCallId ? this.#verifyStart.get(toolCallId) : undefined;
-		if (PARENT_VERIFY_TOOLS[toolName] && this.#isSuccessfulParentVerify(toolName, isError, details, start?.command)) {
+		const detailCwd = typeof details?.cwd === "string" ? details.cwd : undefined;
+		if (
+			PARENT_VERIFY_TOOLS[toolName] &&
+			this.#isSuccessfulParentVerify(toolName, isError, details, start?.command, detailCwd ?? start?.cwd)
+		) {
 			// Prefer the generation snapped at tool start. Missing start (tests /
 			// missed event) falls back to the current generation so a post-start
 			// verify still clears, while a start-before-merge snap of 0 never clears.
-			const generationAtStart = start?.generation ?? (toolCallId ? 0 : (this.#host.unverifiedMergeGeneration?.() ?? 0));
+			const generationAtStart =
+				start?.generation ?? (toolCallId ? 0 : (this.#host.unverifiedMergeGeneration?.() ?? 0));
 			if (toolCallId) this.#verifyStart.delete(toolCallId);
 			if (generationAtStart > 0) {
 				this.#host.clearUnverifiedMergeIfGeneration?.(generationAtStart);
@@ -164,7 +192,17 @@ export class TodoTracker {
 				const snapped = this.#verifyStart.get(toolCallId);
 				this.#verifyStart.delete(toolCallId);
 				if (snapped !== undefined) {
-					this.#verifyStart.set(jobId, snapped);
+					const withCwd =
+						detailCwd !== undefined && detailCwd.trim() !== ""
+							? { ...snapped, cwd: path.resolve(detailCwd) }
+							: snapped;
+					const early = this.#earlyAsyncTerminals.get(jobId);
+					this.#earlyAsyncTerminals.delete(jobId);
+					if (early !== undefined) {
+						this.#applyAsyncVerifyClear(withCwd, early.jobType, early.status);
+					} else {
+						this.#verifyStart.set(jobId, withCwd);
+					}
 				}
 			} else {
 				this.#verifyStart.delete(toolCallId);
@@ -183,9 +221,25 @@ export class TodoTracker {
 		status: "running" | "completed" | "failed" | "cancelled" | undefined,
 	): void {
 		const start = this.#verifyStart.get(jobId);
+		if (start === undefined) {
+			// Terminal beat the toolResult re-key — stash until re-key applies it.
+			this.#earlyAsyncTerminals.set(jobId, { jobType, status });
+			return;
+		}
 		this.#verifyStart.delete(jobId);
-		if (start === undefined || start.generation <= 0) return;
+		this.#applyAsyncVerifyClear(start, jobType, status);
+	}
+
+	#applyAsyncVerifyClear(
+		start: VerifyStartSnap,
+		jobType: string | undefined,
+		status: "running" | "completed" | "failed" | "cancelled" | undefined,
+	): void {
+		if (start.generation <= 0) return;
 		if (jobType === "bash" && start.command !== undefined && isTautologicalParentVerifyCommand(start.command)) {
+			return;
+		}
+		if (jobType === "bash" && !isParentVerifyCwdInMergedTree(start.cwd, this.#host.cwd(), this.#host.repoRoot?.())) {
 			return;
 		}
 		if ((jobType === "bash" || jobType === "eval") && status === "completed") {
@@ -198,6 +252,7 @@ export class TodoTracker {
 		isError: boolean,
 		details: Record<string, unknown> | undefined,
 		command?: string,
+		cwd?: string,
 	): boolean {
 		if (isError) return false;
 		// Background bash/eval: the initial toolResult is not a completed check.
@@ -206,11 +261,21 @@ export class TodoTracker {
 		if (toolName === "bash" && command !== undefined && isTautologicalParentVerifyCommand(command)) {
 			return false;
 		}
+		if (toolName === "bash" && !isParentVerifyCwdInMergedTree(cwd, this.#host.cwd(), this.#host.repoRoot?.())) {
+			return false;
+		}
 		if (toolName === "lsp") {
 			const action = typeof details?.action === "string" ? details.action : undefined;
 			if (action !== "diagnostics") return false;
 			if (details?.success !== true) return false;
-			return details.diagnosticErrorCount === 0;
+			// Require an explicit clean count — missing means the tool did not
+			// report diagnostics (e.g. workspace path before the field existed).
+			if (typeof details.diagnosticErrorCount !== "number" || details.diagnosticErrorCount !== 0) {
+				return false;
+			}
+			// Partial LS failures must not clear the latch even when success:true.
+			const failedServers = typeof details.failedServerCount === "number" ? details.failedServerCount : 0;
+			return failedServers === 0;
 		}
 		return true;
 	}
@@ -305,7 +370,18 @@ export class TodoTracker {
 		// must fire even when a prior reminder is still awaiting progress, the
 		// reminder budget is exhausted, or the terminal turn follows a user-forced
 		// task — otherwise the session would settle while the merge remains unverified.
-		const unverifiedMerge = this.#host.hasUnverifiedMerge?.() === true;
+		// If the parent has no bash/eval/lsp among active tools (SDK restrictToolNames,
+		// disabled builtins), nothing can clear the latch — settle rather than loop.
+		const latched = this.#host.hasUnverifiedMerge?.() === true;
+		const activeTools = this.#host.getActiveToolNames();
+		const canParentVerify =
+			activeTools.includes("bash") || activeTools.includes("eval") || activeTools.includes("lsp");
+		if (latched && !canParentVerify) {
+			logger.warn("Unverified merge latch armed but no parent verify tools are active; settling without gate", {
+				activeToolNames: activeTools,
+			});
+		}
+		const unverifiedMerge = latched && canParentVerify;
 		// user-force suppresses todo reminders only; an armed merge latch still gates settle.
 		if (this.#host.consumeLastServedToolChoiceLabel() === "user-force" && !unverifiedMerge) return false;
 		if (this.#host.planModeEnabled()) return false;
@@ -394,6 +470,7 @@ export class TodoTracker {
 			todos: incomplete,
 			attempt: this.#reminderCount,
 			maxAttempts: remindersMax,
+			unverifiedMerge: unverifiedMerge || undefined,
 		});
 		const reminderMessage: Message = {
 			role: "developer",

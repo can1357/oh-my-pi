@@ -359,7 +359,9 @@ export async function mergeIsolatedChanges(opts: IsolationMergeOptions): Promise
 						? "\n\nNo root changes to apply; nested repository patches captured."
 						: "\n\nNo changes to apply.",
 					changesApplied: true,
-					hadAnyChanges: canApplyNestedOnly,
+					// Nested patches are captured but not applied yet — `hadAnyChanges`
+					// stays false until `applyEligibleNestedPatches` reports `applied`.
+					hadAnyChanges: false,
 					mergedBranchForNestedPatches: canApplyNestedOnly,
 				};
 			}
