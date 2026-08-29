@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed the TUI becoming unresponsive while streamed edit previews arrive in a burst.
+
 ## [18.0.11] - 2026-08-29
 
 ### Added
