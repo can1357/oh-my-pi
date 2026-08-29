@@ -91,6 +91,17 @@ describe("AuthStorage quota probe leases", () => {
 		expect(storage.tryAcquireQuotaProbeLease(idA, "")).toBeTypeOf("string");
 	});
 
+	it("never grants a second live probe lease for the same credential+scope (single-flight)", async () => {
+		if (!storage) throw new Error("setup failed");
+		const { idA } = await seed();
+		await storage.markUsageLimitReached(PROVIDER, undefined, { credentialId: idA });
+		const first = storage.tryAcquireQuotaProbeLease(idA, "");
+		expect(typeof first).toBe("string");
+		expect(storage.tryAcquireQuotaProbeLease(idA, "")).toBeNull();
+		expect(storage.recordQuotaProbeSuccess(idA, "", first)).toBe(true);
+		expect(storage.tryAcquireQuotaProbeLease(idA, "")).toBeTypeOf("string");
+	});
+
 	it("soft-avoids timeout/5xx without throwing as revoked (negative)", async () => {
 		if (!storage) throw new Error("setup failed");
 		const { idA } = await seed();

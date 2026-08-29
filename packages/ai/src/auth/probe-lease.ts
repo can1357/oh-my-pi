@@ -43,10 +43,24 @@ export class QuotaProbeLeaseBook {
 		}
 		const softUntil = this.#softUntil.get(key);
 		if (softUntil !== undefined && softUntil > nowMs) return null;
+		// Single-flight: a live lease must not be overwritten by a concurrent probe.
+		if (this.#leases.has(key)) return null;
 		const generation = this.#generation.get(key) ?? 0;
 		const id = crypto.randomUUID();
 		this.#leases.set(key, { id, generation });
 		return id;
+	}
+
+	/**
+	 * Drop a live lease without clearing cooldown. Used when a probe attempt is
+	 * abandoned (fallback / request end) so a later request can probe again.
+	 */
+	release(credentialId: number, blockScope: string, leaseId: string): boolean {
+		const key = probeKey(credentialId, blockScope);
+		const lease = this.#leases.get(key);
+		if (!lease || lease.id !== leaseId) return false;
+		this.#leases.delete(key);
+		return true;
 	}
 
 	/**
