@@ -267,8 +267,10 @@ describe("z.lazy deferred alias", () => {
 		expect(getterCalls).toBe(1);
 		// The chain's own root — and any embedding of it, since .optional()
 		// routed it to the dispatcher morph — erases (documented boundary).
-		// What MUST stay structural is the readonly/describe chain without
-		// the widening: embed → sub → fallback(emit(inner)) → $ref.
+		// What stays structural is the readonly/describe chain without the
+		// widening: describe routes through restrictBase's step-free morph,
+		// so embed INLINES it (no sub node) and the $ref arrives via emit's
+		// morph arm — fallback(emit(input)) relays the alias's $ref.
 		type Inner = { name: string; next?: Inner };
 		let innerCalls = 0;
 		let innerNode: z.ZodType<Inner>;

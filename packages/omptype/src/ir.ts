@@ -174,11 +174,15 @@ export type IR = IRAnalysis &
 				 * the definition is complete. Construction-time paths MUST either
 				 * skip resolution or honour the flag: `scanIR`'s alias arm
 				 * (conservative: changesOutput: true, exportable: false,
-				 * hasDeferredAlias: true), `scanAlias` (true, unresolved),
-				 * `morphIdentities` (skip), `assertDeterminateMorphUnions` (skip),
-				 * and `descriptionOf` in type.ts (returns the alias name — it is
-				 * reachable eagerly via appendPipes → metaOf when composing
-				 * `.pipe()`/`.readonly()` after a `z.lazy`).
+				 * `morphIdentities` (skip deferred aliases; a declared-out morph
+				 * whose projected sides contain one falls back to its function
+				 * identity), `assertDeterminateMorphUnions` (recursive walk
+				 * skips; its disjointness probe leaves deferred alias inputs
+				 * unresolved, so intersect() cannot prove disjointness and the
+				 * union fails closed as indeterminate), and `descriptionOf` in
+				 * type.ts (returns the alias name — it is reachable eagerly via
+				 * appendPipes → metaOf when composing `.pipe()`/`.readonly()`
+				 * after a `z.lazy`).
 				 */
 				deferred?: boolean;
 				desc?: string;

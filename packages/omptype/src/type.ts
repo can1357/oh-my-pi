@@ -22,6 +22,7 @@ import {
 	type EmbeddableSchema,
 	embed,
 	expectedOf,
+	hasDeferredAlias,
 	hasMorph,
 	type IR,
 	IR_BRAND,
@@ -1412,15 +1413,24 @@ function morphIdentities(ir: IR, identities: unknown[] = [], seen = new Set<IR>(
 	if (seen.has(ir)) return identities;
 	seen.add(ir);
 	switch (ir.k) {
-		case "morph":
+		case "morph": {
+			// Deferred aliases must not resolve here (construction-time scan).
+			// A declared-out morph whose projected sides contain one falls back
+			// to its function identity — strictly finer than the string form.
+			const out = ir.out;
+			const declared =
+				out !== undefined &&
+				!hasDeferredAlias(projectIO(ir.input, "in")) &&
+				!hasDeferredAlias(projectIO(out, "out"));
 			identities.push(
-				ir.out === undefined
-					? ir.fn
-					: `declared:${expressionOf(projectIO(ir.input, "in"))}=>${expressionOf(projectIO(ir.out, "out"))}`,
+				declared
+					? `declared:${expressionOf(projectIO(ir.input, "in"))}=>${expressionOf(projectIO(out, "out"))}`
+					: ir.fn,
 			);
 			morphIdentities(ir.input, identities, seen);
 			if (ir.out !== undefined) morphIdentities(ir.out, identities, seen);
 			break;
+		}
 		case "sub": {
 			const schema = ir.schema as InternalType;
 			for (const step of schema[kSteps]) if (step.kind === "pipe") identities.push(step.fn);
@@ -1476,12 +1486,16 @@ function assertDeterminateMorphUnions(ir: IR, seen = new Set<IR>()): void {
 				) {
 					continue;
 				}
-				// Unwrap one alias level eagerly: the disjointness probe relies on
-				// intersect() throwing, and deferred alias intersections resolve lazily.
+				// Unwrap one alias level eagerly — but never a deferred one: its
+				// getter must not run during construction, and intersect() with the
+				// unresolved alias returns a lazy reference, which the probe reads
+				// as "overlap unproven" → indeterminate → the shim's ordered
+				// dispatcher. The widening gates normally exclude such members;
+				// this guard is the backstop.
 				let leftInput = projectIO(left, "in");
 				let rightInput = projectIO(right, "in");
-				if (leftInput.k === "alias") leftInput = leftInput.resolve();
-				if (rightInput.k === "alias") rightInput = rightInput.resolve();
+				if (leftInput.k === "alias" && leftInput.deferred !== true) leftInput = leftInput.resolve();
+				if (rightInput.k === "alias" && rightInput.deferred !== true) rightInput = rightInput.resolve();
 				if (leftInput.k === "object" && rightInput.k === "object") {
 					const leftKeys = new Set(leftInput.props.map(prop => prop.key));
 					const rightKeys = new Set(rightInput.props.map(prop => prop.key));
