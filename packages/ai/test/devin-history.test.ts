@@ -62,6 +62,9 @@ async function captureRequest(context: Context) {
 		false,
 	);
 	const payload = requestPayload.subarray(5, 5 + length);
+	// CLI wire format is uncompressed Connect frames (flag 0x00). Compressed
+	// frames remain decodable for older captures, but new requests must not gzip.
+	expect(flag & CONNECT_COMPRESSED_FLAG).toBe(0);
 	const decoded = flag & CONNECT_COMPRESSED_FLAG ? gunzipSync(payload) : payload;
 	const request = fromBinary(GetChatMessageRequestSchema, decoded);
 	// Attach headers for tests that assert on the HTTP transport layer.
