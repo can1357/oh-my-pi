@@ -496,6 +496,13 @@ export interface CreateAgentSessionOptions {
 	/** Shared event bus for tool/extension communication. Default: creates new bus. */
 	eventBus?: EventBus;
 
+	/**
+	 * Root-scoped bus carrying `task:subagent:*` observability frames for this
+	 * session and every subagent it spawns. Default: creates a new bus per
+	 * root session; `buildSubagentSessionOptions` inherits the spawner's.
+	 */
+	subagentEventBus?: EventBus;
+
 	/** Skills. Default: discovered from multiple locations */
 	skills?: Skill[];
 	/** Rules. Default: discovered from multiple locations */
@@ -648,6 +655,8 @@ export interface CreateAgentSessionResult {
 	startBackgroundModelDiscovery?: () => Promise<void>;
 	/** Shared event bus for tool/extension communication */
 	eventBus: EventBus;
+	/** Root-scoped bus carrying this session tree's `task:subagent:*` frames. */
+	subagentEventBus?: EventBus;
 }
 
 export type DialectFormat = "auto" | "native" | Dialect;
@@ -1279,6 +1288,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	const cwd = options.cwd ?? getProjectDir();
 	const agentDir = options.agentDir ?? getAgentDir();
 	const eventBus = options.eventBus ?? new EventBus();
+	const subagentEventBus = options.subagentEventBus ?? new EventBus();
 
 	registerSshCleanup();
 	registerEvalCleanup();
@@ -1776,6 +1786,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			refreshSkills: () => session.refreshSkills(),
 			rules: allRules,
 			eventBus,
+			subagentEventBus,
 			outputSchema: options.outputSchema,
 			outputSchemaMode: options.outputSchemaMode,
 			requireYieldTool: options.requireYieldTool,
@@ -2616,7 +2627,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 
 			if (!model) {
 				const fallbackCandidates = await resolveAllowedModels(modelRegistry, settings, modelMatchPreferences);
-				let pick = pickDefaultAvailableModel(fallbackCandidates.filter(hasModelAuth));
+				let pick = pickDefaultAvailableModel(fallbackCandidates.filter(hasModelAuth), provider =>
+					modelRegistry.hasConcreteAuth(provider),
+				);
 
 				// Cold-cache discovery race (issues #6114, #6162): a discovery
 				// provider (models.yml `openai-models-list`, LM Studio/Ollama/
@@ -2644,7 +2657,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 							settings,
 							modelMatchPreferences,
 						);
-						pick = pickDefaultAvailableModel(refreshedCandidates.filter(hasModelAuth));
+						pick = pickDefaultAvailableModel(refreshedCandidates.filter(hasModelAuth), provider =>
+							modelRegistry.hasConcreteAuth(provider),
+						);
 					}
 				}
 
@@ -4191,6 +4206,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			lspServers,
 			startBackgroundModelDiscovery: startRuntimeDiscovery,
 			eventBus,
+			subagentEventBus,
 		};
 	} catch (error) {
 		// Release the subscription if the throw happened after install but before the

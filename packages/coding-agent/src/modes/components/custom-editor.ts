@@ -64,7 +64,7 @@ const DEFAULT_ACTION_KEYS: Record<ConfigurableEditorAction, KeyId[]> = {
 	"app.editor.external": ["ctrl+g"],
 	"app.history.search": ["ctrl+r"],
 	"app.message.dequeue": ["alt+up", "shift+up"],
-	"app.retry": ["alt+r"],
+	"app.retry": ["f5", "alt+r"],
 	"app.clipboard.pasteImage": ["ctrl+v"],
 	"app.clipboard.pasteTextRaw": ["ctrl+shift+v", "alt+shift+v"],
 	"app.clipboard.copyPrompt": ["alt+shift+c"],

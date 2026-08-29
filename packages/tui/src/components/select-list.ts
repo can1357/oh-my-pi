@@ -116,6 +116,19 @@ export class SelectList implements Component, MouseRoutable {
 		this.#maxVisible = Math.max(1, Math.trunc(maxVisible));
 		this.#filteredItems = items;
 	}
+	/** Return item, selection, and filter state for debug inspection. */
+	debugState(): Record<string, unknown> {
+		const selected = this.#filteredItems[this.#selectedIndex];
+		return {
+			itemCount: this.items.length,
+			filteredItemCount: this.#filteredItems.length,
+			selectedIndex: this.#filteredItems.length > 0 ? this.#selectedIndex : -1,
+			selectedItemId: selected?.value ?? null,
+			selectedItemLabel: selected?.label ?? null,
+			filterText: this.#filterQuery,
+			maxVisible: this.#maxVisible,
+		};
+	}
 
 	/** Refit the visible row budget (hosts clamp the list to available height). */
 	setMaxVisible(rows: number): void {
