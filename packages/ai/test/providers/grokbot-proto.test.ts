@@ -1,5 +1,6 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test, vi } from "bun:test";
 import { toInferenceMessages, toSandImageDataUrl } from "../../src/providers/grokbot";
+import * as grokbotAuth from "../../src/providers/grokbot/auth";
 import {
 	createGrokbotChecksum,
 	getAccessTokenExpiryMs,
@@ -16,6 +17,7 @@ import {
 	fieldNumbers,
 	frameConnectProto,
 } from "../../src/providers/grokbot/proto";
+import { GROKBOT_HOST_INSTALL_PROMPT, loginGrokbot } from "../../src/registry/grokbot";
 
 describe("grokbot proto", () => {
 	test("round-trips InferenceStreamRequest without harness fields", () => {
@@ -325,5 +327,58 @@ describe("grokbot sand-host client parity", () => {
 				],
 			},
 		});
+	});
+});
+
+describe("grokbot /login host-install prompt", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	test("surfaces the sand-VM install prompt and verifies host secrets without storing a key", async () => {
+		const prompts: string[] = [];
+		const progress: string[] = [];
+		spyOn(grokbotAuth, "loadGrokbotConfig").mockResolvedValue({
+			renewal: "renew-present",
+			machineId: "machine-present",
+			namespace: "prod",
+			clientVersion: "0.30.0",
+		});
+
+		const result = await loginGrokbot({
+			onAuth: () => {},
+			onPrompt: async prompt => {
+				prompts.push(prompt.message);
+				return "";
+			},
+			onProgress: message => {
+				progress.push(message);
+			},
+		});
+
+		expect(result).toBe("");
+		expect(GROKBOT_HOST_INSTALL_PROMPT).toContain("You are in the Linux VM");
+		expect(GROKBOT_HOST_INSTALL_PROMPT).toContain("GROKBOT_MACHINE_ID");
+		expect(GROKBOT_HOST_INSTALL_PROMPT).toContain("chmod 600");
+		expect(prompts[0]).toContain("You are in the Linux VM");
+		expect(prompts[0]).toContain("Press Enter after the host secrets file exists");
+		expect(progress.some(line => line.includes("sand VM"))).toBe(true);
+		expect(progress.some(line => line.includes("not Cursor login"))).toBe(true);
+	});
+
+	test("fails when host secrets are still missing after Enter", async () => {
+		spyOn(grokbotAuth, "loadGrokbotConfig").mockResolvedValue({
+			renewal: "",
+			machineId: "",
+			namespace: "prod",
+			clientVersion: "0.30.0",
+		});
+
+		await expect(
+			loginGrokbot({
+				onAuth: () => {},
+				onPrompt: async () => "",
+			}),
+		).rejects.toThrow(/secrets missing/i);
 	});
 });

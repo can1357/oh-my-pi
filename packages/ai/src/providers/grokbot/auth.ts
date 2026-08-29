@@ -226,5 +226,6 @@ export async function formatGrokbotStatus(): Promise<string> {
 		`Client version: ${cfg.clientVersion}`,
 		`Secrets file: ${grokbotSecretsPath()}`,
 		"Select models as `grokbot/<id>` (e.g. `grokbot/sand-default`).",
+		"Login: `/login` → Grok Bot — run the shown prompt inside the Grok Bot system (not omp).",
 	].join("\n");
 }
