@@ -10,9 +10,11 @@ import { connectProxiedSocket, getProxyForUrl } from "../../utils/proxy";
  *
  * A session is keyed by `baseUrl|proxyUrl` and reused for as many concurrent
  * streams as arrive. When the peer sends GOAWAY (or the session errors after
- * connect), the entry is marked draining: no new lease is issued from it, the
- * in-flight leases finish, and the session is destroyed once the last lease
- * releases.
+ * connect), the entry is marked draining: no new lease is issued from it and
+ * it leaves the reusable pool immediately. The in-flight leases finish, and
+ * the session is destroyed once the last lease releases; until then the entry
+ * is retained in a tracking set so {@link disposeCursorH2Pool} can still
+ * reach and destroy it even after a replacement session takes the key.
  *
  * Reusable sessions are intentionally unreferenced while idle so the pool does
  * not keep short-lived consumers alive. This module registers no process-level
@@ -62,6 +64,12 @@ interface PoolEntry {
 	outstanding: number;
 	draining: boolean;
 	/**
+	 * True once destruction has been initiated for this entry. Terminal paths
+	 * — final release, eviction, disposal — can interleave on one entry; this
+	 * flag makes the underlying `session.destroy()` run exactly once.
+	 */
+	destroyed: boolean;
+	/**
 	 * Mirrors the live `ref()`/`unref()` state we drive on the session: true
 	 * while at least one lease is outstanding, false once the session goes idle
 	 * or is destroyed. Node/Bun expose `ref`/`unref` but no readable ref-state
@@ -79,6 +87,13 @@ interface PoolEntry {
 
 /** Base-url → live (non-draining) session with its outstanding lease count. */
 const pool = new Map<string, PoolEntry>();
+/**
+ * Draining entries that left the pool by a terminal signal or a replacement
+ * while leases were still outstanding. The pool cannot reach them anymore;
+ * this set keeps them reachable so the final release destroys them, and so
+ * disposal destroys them even if that release never comes.
+ */
+const draining = new Set<PoolEntry>();
 /** Idle eviction window: a pooled session unused for this long is evicted. */
 const IDLE_EVICT_MS = 60_000;
 /** Hard cap on retained sessions. Age-based eviction alone lets rotating
@@ -155,16 +170,27 @@ function isAlpnUnavailable(error: unknown): boolean {
 	return code === "ERR_HTTP2_ERROR" && H2_NOT_SUPPORTED.test(error.message);
 }
 
-function destroyEntry(key: string, entry: PoolEntry): void {
-	if (pool.get(key) === entry) {
-		pool.delete(key);
-	}
+/** Initiates destruction exactly once per entry. Terminal paths can
+ * interleave on one entry — a final release racing disposal, close handlers
+ * arriving after eviction — so the flag, not the caller, guarantees
+ * `session.destroy()` runs once. */
+function destroySessionOnce(entry: PoolEntry): void {
+	if (entry.destroyed) return;
+	entry.destroyed = true;
 	entry.draining = true;
 	try {
 		entry.session.destroy();
 	} catch {
 		/* session already gone */
 	}
+}
+
+function destroyEntry(key: string, entry: PoolEntry): void {
+	if (pool.get(key) === entry) {
+		pool.delete(key);
+	}
+	draining.delete(entry);
+	destroySessionOnce(entry);
 }
 
 function releaseEntryLease(key: string, entry: PoolEntry): void {
@@ -497,33 +523,46 @@ function establishSession(options: CursorH2AcquireOptions, key: string): CursorE
 			// Node/Bun leave a just-connected session referenced, and a first-lease
 			// issuance failure must not pin a zero-outstanding idle entry.
 			connect.unref();
-			pool.set(key, { session: connect, outstanding: 0, draining: false, referenced: false, idleSince: Date.now() });
+			const displaced = pool.get(key);
+			if (displaced && !displaced.destroyed && displaced.outstanding > 0) {
+				// A replacement publish must not orphan a still-leased entry that
+				// is leaving the pool (drained, or destroyed externally before
+				// its close event ran): divert it to the draining set.
+				displaced.draining = true;
+				draining.add(displaced);
+			}
+			pool.set(key, {
+				session: connect,
+				outstanding: 0,
+				draining: false,
+				referenced: false,
+				idleSince: Date.now(),
+				destroyed: false,
+			});
 			evictBeyondCap(key);
 			handshake.resolve({ kind: "ok", session: connect });
 		};
-		const onGoaway = (): void => {
+		// Terminal session signal (GOAWAY, error, close): the entry stops
+		// issuing leases and leaves the reusable pool immediately. Destroy at
+		// zero outstanding; otherwise retain it in the draining set so the
+		// final release destroys it and disposal can still reach it even after
+		// a replacement session takes the key.
+		const drainEntry = (): void => {
 			const entry = pool.get(key);
-			if (entry && entry.session === connect) {
-				entry.draining = true;
-				if (entry.outstanding === 0) destroyEntry(key, entry);
+			if (!entry || entry.session !== connect) return;
+			pool.delete(key);
+			if (entry.outstanding === 0) {
+				destroyEntry(key, entry);
+				return;
 			}
-		};
-		const onClose = (): void => {
-			const existing = pool.get(key);
-			if (existing && existing.session === connect) {
-				existing.draining = true;
-				pool.delete(key);
-			}
+			entry.draining = true;
+			draining.add(entry);
 		};
 		const onError = (error: unknown): void => {
 			if (handshakeDone) {
 				// Post-connect session failure (connection reset, GOAWAY-ish
 				// teardown): stop issuing new leases and let in-flight work drain.
-				const existing = pool.get(key);
-				if (existing && existing.session === connect) {
-					existing.draining = true;
-					if (existing.outstanding === 0) destroyEntry(key, existing);
-				}
+				drainEntry();
 				return;
 			}
 			handshakeDone = true;
@@ -537,8 +576,8 @@ function establishSession(options: CursorH2AcquireOptions, key: string): CursorE
 
 		connect.once("connect", onConnect);
 		connect.on("error", onError);
-		connect.on("goaway", onGoaway);
-		connect.on("close", onClose);
+		connect.on("goaway", drainEntry);
+		connect.on("close", drainEntry);
 
 		// `session.destroy()` during TLS/h2 preface does not always surface
 		// `error`/`connect` on Bun, so a cancelled handshake would hang the
@@ -813,8 +852,9 @@ async function acquireCursorH2AtGeneration(
 }
 
 /**
- * Destroys every pooled session and clears the pool for deterministic teardown.
- * No process-level hooks are installed at import time; callers opt into this.
+ * Destroys every pooled session plus every draining entry still retained for
+ * its outstanding leases, and clears both, for deterministic teardown. No
+ * process-level hooks are installed at import time; callers opt into this.
  */
 export async function disposeCursorH2Pool(): Promise<void> {
 	// Bump the generation BEFORE touching any state: a connect that began under
@@ -824,8 +864,9 @@ export async function disposeCursorH2Pool(): Promise<void> {
 	const inFlight = [...connecting.values()];
 	connecting.clear();
 
-	const entries = [...pool.values()];
+	const entries = [...new Set([...pool.values(), ...draining])];
 	pool.clear();
+	draining.clear();
 
 	// Cancel every in-flight establishment BEFORE awaiting settlement: a peer
 	// that accepts TCP but never completes the h2 handshake leaves the connect
@@ -859,7 +900,7 @@ export async function disposeCursorH2Pool(): Promise<void> {
 			}
 		}),
 		...entries.map(async entry => {
-			entry.draining = true;
+			destroySessionOnce(entry);
 			await closeSession(entry.session);
 		}),
 	]);
@@ -881,6 +922,15 @@ export function __cursorH2PoolSnapshot(): Array<{
 		draining: entry.draining,
 		referenced: entry.referenced,
 	}));
+}
+/**
+ * Test seam: draining entries retained outside the pool while their leases
+ * finish — exactly the entries a terminal signal or a replacement removed
+ * from the pool with outstanding leases, which disposal must still reach.
+ * Exposes no socket or session.
+ */
+export function __cursorH2DrainingSnapshot(): Array<{ outstanding: number; referenced: boolean }> {
+	return [...draining].map(entry => ({ outstanding: entry.outstanding, referenced: entry.referenced }));
 }
 /**
  * Test seam: in-flight establishment introspection — the reserved keys and the

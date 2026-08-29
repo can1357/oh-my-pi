@@ -14,6 +14,7 @@ import { streamCursor } from "../src/providers/cursor";
 import type { CursorH2AcquireOptions, CursorH2Acquisition } from "../src/providers/cursor/h2-pool";
 import {
 	__cursorH2ConnectingSnapshot,
+	__cursorH2DrainingSnapshot,
 	__cursorH2PoolSnapshot,
 	__setCursorH2EstablishBodyGate,
 	__setCursorH2FreshSessionHook,
@@ -273,8 +274,10 @@ describe("cursor HTTP/2 session pool", () => {
 		// The in-flight lease completes even though the session received GOAWAY
 		// mid-stream.
 		await requestEnded.promise;
-		// GOAWAY must mark the pooled entry draining before the release path.
-		await waitFor(() => __cursorH2PoolSnapshot().some(entry => entry.draining));
+		// GOAWAY must drop the entry from the reusable pool and retain it for
+		// disposal while its lease is still outstanding.
+		await waitFor(() => __cursorH2DrainingSnapshot().length === 1);
+		expect(__cursorH2PoolSnapshot()).toHaveLength(0);
 		first.lease.release();
 		expect(poolOutstanding()).toBe(0);
 
@@ -286,6 +289,58 @@ describe("cursor HTTP/2 session pool", () => {
 		await waitFor(() => totalSessions === 2);
 		second.lease.release();
 		expect(poolOutstanding()).toBe(0);
+	});
+
+	it("keeps a GOAWAY-drained leased session reachable to disposal after a replacement takes the key", async () => {
+		const baseUrl = await startServer();
+		let goawaySent = false;
+		serveStream = stream => {
+			respondOk(stream);
+			const session = stream.session;
+			if (!goawaySent && session) {
+				goawaySent = true;
+				session.goaway();
+			}
+		};
+
+		const first = await acquireCursorH2(runArgs(baseUrl));
+		expect(first.ok).toBe(true);
+		if (!first.ok) return;
+		const firstSession = first.lease.request.session;
+		if (!firstSession) throw new Error("expected the leased request to expose its session");
+		// A real transport consumes the response so the client observes GOAWAY
+		// while the lease is still in flight.
+		first.lease.request.on("data", () => {});
+
+		// GOAWAY mid-lease: the entry leaves the reusable pool but stays
+		// tracked and alive until its lease finishes.
+		await waitFor(() => __cursorH2DrainingSnapshot().length === 1);
+		expect(__cursorH2PoolSnapshot()).toHaveLength(0);
+		expect(firstSession.destroyed).toBe(false);
+
+		// The next acquire replaces the drained entry with a fresh session.
+		const second = await acquireCursorH2(runArgs(baseUrl));
+		expect(second.ok).toBe(true);
+		if (!second.ok) return;
+		const secondSession = second.lease.request.session;
+		if (!secondSession) throw new Error("expected the leased request to expose its session");
+		await waitFor(() => totalSessions === 2);
+		// Replacement did not orphan the still-leased drained session: it is
+		// neither destroyed nor dropped from the draining set.
+		expect(firstSession.destroyed).toBe(false);
+		expect(__cursorH2DrainingSnapshot().map(entry => entry.outstanding)).toEqual([1]);
+
+		// Disposal reaches the replaced session even though it is not in the
+		// pool, and the post-disposal releases destroy nothing twice.
+		await disposeCursorH2Pool();
+		expect(firstSession.destroyed).toBe(true);
+		expect(secondSession.destroyed).toBe(true);
+		expect(__cursorH2DrainingSnapshot()).toHaveLength(0);
+		first.lease.release();
+		second.lease.release();
+		expect(__cursorH2DrainingSnapshot()).toHaveLength(0);
+		expect(poolOutstanding()).toBe(0);
+		await waitFor(() => sessions.size === 0);
 	});
 
 	it("destroys a gracefully closed session that still has an active stream and waits for its close", async () => {
