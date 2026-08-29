@@ -94,7 +94,6 @@
 
 ### Added
 
-- Promoted tools: `tools.xdevPromote` setting and per-agent `xdevPromote` frontmatter promote specific built-ins/MCP tools out of `xd://` deferred discovery into first-class presentation ([#5648](https://github.com/can1357/oh-my-pi/issues/5648)).
 - Added side-by-side image and SVG previews to `omp git`, including local Git LFS object resolution and explicit placeholders for unavailable or unsupported binary content.
 - Added the `omp if-bench` command: a zero-tool instruction-following and working-memory benchmark that drives one cached conversation per model, adding one more glyph array action every turn while a `nya{1,N}` directive moves through the prompt, with a live turn-ladder board and a ranked scoreboard
 - Added `q` shortcut to exit the git TUI

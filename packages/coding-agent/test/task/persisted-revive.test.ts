@@ -107,7 +107,7 @@ async function createPersistedSession(
 	return sessionFile;
 }
 
-function createFactory(cwd: string, eventBus?: EventBus) {
+function createFactory(cwd: string, eventBus?: EventBus, rootSettings?: Settings) {
 	const parentSession = {
 		sessionManager: {
 			getCwd: () => cwd,
@@ -121,7 +121,7 @@ function createFactory(cwd: string, eventBus?: EventBus) {
 		session: parentSession,
 		authStorage: {} as never,
 		modelRegistry: { authStorage: {} } as ModelRegistry,
-		settings: Settings.isolated(),
+		settings: rootSettings ?? Settings.isolated(),
 		enableLsp: true,
 		eventBus,
 	});
@@ -469,10 +469,14 @@ describe("persisted subagent revival", () => {
 
 	it("cold revival from a pre-freeze session file falls back to global inheritance", async () => {
 		// Session files written before the freeze exist and must revive without
-		// an explicit override: the child snapshots root settings, whose default
-		// promotes nothing, so a discoverable tool mounts under xd://.
+		// an explicit override. The root here carries a global promotion: the
+		// fallback must snapshot it (grep stays top-level after revival), while
+		// a regressed unconditional replay of the absent init key (undefined
+		// override clearing root settings) yields nothing — the promotion-free
+		// root used previously made both branches indistinguishable.
 		const cwd = makeTempDir("@pi-revive-xdev-prefreeze-");
 		const sessionFile = await createPersistedSession(cwd);
+		const root = Settings.isolated({ "tools.xdevPromote": ["grep"] });
 		let capturedSettings: Settings | undefined;
 		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
 			capturedSettings = options?.settings as Settings;
@@ -480,16 +484,16 @@ describe("persisted subagent revival", () => {
 		});
 
 		const ref = createRef(sessionFile);
-		const reviver = await createFactory(cwd)(ref);
+		const reviver = await createFactory(cwd, undefined, root)(ref);
 		if (!reviver) throw new Error("Expected a persisted reviver");
 		await reviver(ref);
 
-		expect(capturedSettings?.get("tools.xdevPromote")).toEqual([]);
+		expect(capturedSettings?.get("tools.xdevPromote")).toEqual(["grep"]);
 		expect(
 			isMountableUnderXdev(
-				{ name: "lsp", loadMode: "discoverable" },
+				{ name: "grep", loadMode: "discoverable" },
 				compileXdevPromoteSet(capturedSettings?.get("tools.xdevPromote")),
 			),
-		).toBe(true);
+		).toBe(false);
 	});
 });
