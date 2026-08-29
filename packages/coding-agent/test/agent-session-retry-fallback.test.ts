@@ -3249,6 +3249,11 @@ describe("AgentSession retry fallback", () => {
 		expect(session.model?.provider).toBe(fallbackModel.provider);
 		expect(session.model?.id).toBe(fallbackModel.id);
 
+		// The refusal cooldown is session-local: it must not be recorded in the
+		// shared ModelRegistry suppression map, where it could sideline the model
+		// for a sibling session or clobber a real rate-limit window there.
+		expect(modelRegistry.isSelectorSuppressed(`${primaryModel.provider}/${primaryModel.id}`)).toBe(false);
+
 		// While the refusing model is still on cooldown the next turn stays on the
 		// fallback instead of bouncing straight back to the model that declined.
 		now += cooldownMs - 1;

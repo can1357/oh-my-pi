@@ -55,6 +55,15 @@ export interface ActiveRetryFallbackState {
 	 * model, so no observer may report the run as having used it.
 	 */
 	served?: boolean;
+	/**
+	 * Absolute time until which a classifier refusal keeps this session on the
+	 * fallback before a `cooldown-expiry` revert may restore the primary. Held in
+	 * per-session fallback state rather than the shared registry suppression map
+	 * because a refusal reflects this session's turn content: it must not sideline
+	 * the model for a sibling session sharing the ModelRegistry, nor overwrite a
+	 * real rate-limit suppression there.
+	 */
+	classifierRefusalCooldownUntilMs?: number;
 }
 
 /** Model a session's produced work is attributed to. */
