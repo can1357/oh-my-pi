@@ -13,6 +13,11 @@ export type GrokbotRequestedModel = {
 export type GrokbotRequestedModelOptions = {
 	/** omp effort level; mapped onto sand `effort` or `reasoning` when allowed. */
 	effort?: Effort | string;
+	/**
+	 * Optional effort → wire remap from model `thinking.effortMap`.
+	 * Identity for omitted keys so discovered `minimal` / `max` stay on the wire.
+	 */
+	effortMap?: Partial<Record<string, string>>;
 	/** sand `fast` parameter; only sent when the model lists `fast` and a value is set. */
 	fast?: boolean;
 	/**
@@ -41,23 +46,17 @@ const BARE_ALIASES = new Set([
 	"premium",
 ]);
 
-/** Map omp Effort / string to Grok Bot effort wire values. */
-export function toSandEffortValue(effort: Effort | string | undefined): string | undefined {
+/**
+ * Map omp Effort / string to Grok Bot effort wire values.
+ * Preserves the discovered value (`minimal`, `max`, …) unless `effortMap` aliases it.
+ */
+export function toSandEffortValue(
+	effort: Effort | string | undefined,
+	effortMap?: Partial<Record<string, string>>,
+): string | undefined {
 	if (typeof effort !== "string" || !effort) return undefined;
-	switch (effort) {
-		case "minimal":
-		case "low":
-			return "low";
-		case "medium":
-			return "medium";
-		case "xhigh":
-		case "max":
-			return "xhigh";
-		case "high":
-			return "high";
-		default:
-			return effort;
-	}
+	const mapped = effortMap?.[effort];
+	return typeof mapped === "string" && mapped.length > 0 ? mapped : effort;
 }
 
 export function resolveGrokbotRequestedModel(
@@ -76,7 +75,7 @@ export function resolveGrokbotRequestedModel(
 	const parameters: GrokbotRequestedParameter[] = [];
 
 	if (allowed.size > 0) {
-		const effortValue = toSandEffortValue(options?.effort);
+		const effortValue = toSandEffortValue(options?.effort, options?.effortMap);
 		if (effortValue) {
 			if (allowed.has("effort")) {
 				parameters.push({ id: "effort", value: effortValue });

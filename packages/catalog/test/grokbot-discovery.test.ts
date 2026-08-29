@@ -89,6 +89,19 @@ const FIXTURE = {
 				},
 			],
 		},
+		{
+			name: "effort-with-minimal",
+			clientDisplayName: "Effort With Minimal",
+			supportsThinking: true,
+			supportsImages: true,
+			parameterDefinitions: [{ id: "effort" }],
+			variants: [
+				{ parameterValues: [{ id: "effort", value: "xhigh" }] },
+				{ parameterValues: [{ id: "effort", value: "minimal" }] },
+				{ parameterValues: [{ id: "effort", value: "low" }] },
+				{ parameterValues: [{ id: "effort", value: "max" }] },
+			],
+		},
 	],
 };
 
@@ -136,6 +149,14 @@ describe("grokbot AvailableModels normalize", () => {
 		const sandDefault = models.find(m => m.id === "sand-default");
 		expect(sandDefault?.sandParameterIds).toEqual([]);
 		expect(sandDefault?.reasoning).toBe(true);
+
+		const withMinimal = models.find(m => m.id === "effort-with-minimal");
+		expect([...((withMinimal?.thinking?.efforts as readonly string[] | undefined) ?? [])]).toEqual([
+			"minimal",
+			"low",
+			"xhigh",
+			"max",
+		]);
 	});
 
 	test("rejects envelopes without a models array; empty models is valid", () => {

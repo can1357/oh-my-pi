@@ -5,7 +5,7 @@
  * Returns parameterized catalog rows; always unions sand router slugs that are
  * absent from the live list (`sand-default`, `sand-cua`, `sand-automation`).
  */
-import { Effort } from "../effort";
+import { Effort, THINKING_EFFORTS } from "../effort";
 import { GROKBOT_API, GROKBOT_BACKEND } from "../provider-models/grokbot";
 import type { FetchImpl, ModelSpec, ThinkingConfig } from "../types";
 import { discoveryFetch } from "../utils";
@@ -217,7 +217,7 @@ function collectEffortValues(row: GrokbotAvailableModel, parameterIds: readonly 
 	}
 
 	const ordered: Effort[] = [];
-	for (const level of [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh, Effort.Minimal, Effort.Max]) {
+	for (const level of THINKING_EFFORTS) {
 		if (values.has(level)) ordered.push(level);
 	}
 	// Live grok lists low|medium|high|xhigh; if variants were empty but param exists, expose the common ladder.

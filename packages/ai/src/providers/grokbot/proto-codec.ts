@@ -742,22 +742,30 @@ function decodeError(buf) {
 	};
 }
 
+/** Known InferenceStreamResponse oneofs are length-delimited messages. */
+function requireLenBytes(f, label) {
+	if (f.wire !== WIRE_LEN || !f.bytes) {
+		throw new Error(`protobuf field ${f.fieldNo} (${label}) must be length-delimited`);
+	}
+	return f.bytes;
+}
+
 export function decodeInferenceStreamResponse(buf) {
 	const fields = decodeFields(buf);
 	const out = {};
 	for (const f of fields) {
-		if (f.fieldNo === 1) out.textPart = decodeTextPart(f.bytes);
-		else if (f.fieldNo === 2) out.toolCallPart = decodeToolCallPart(f.bytes);
-		else if (f.fieldNo === 3) out.usage = decodeUsage(f.bytes);
-		else if (f.fieldNo === 4) out.responseInfo = decodeResponseInfo(f.bytes);
-		else if (f.fieldNo === 5) out.extendedUsage = decodeExtendedUsage(f.bytes);
+		if (f.fieldNo === 1) out.textPart = decodeTextPart(requireLenBytes(f, "textPart"));
+		else if (f.fieldNo === 2) out.toolCallPart = decodeToolCallPart(requireLenBytes(f, "toolCallPart"));
+		else if (f.fieldNo === 3) out.usage = decodeUsage(requireLenBytes(f, "usage"));
+		else if (f.fieldNo === 4) out.responseInfo = decodeResponseInfo(requireLenBytes(f, "responseInfo"));
+		else if (f.fieldNo === 5) out.extendedUsage = decodeExtendedUsage(requireLenBytes(f, "extendedUsage"));
 		else if (f.fieldNo === 6) {
-			const mf = decodeFields(f.bytes);
+			const mf = decodeFields(requireLenBytes(f, "providerMetadata"));
 			const meta = first(mf, 1);
 			out.providerMetadata = { metadata: meta ? decodeStruct(meta.bytes) : {} };
-		} else if (f.fieldNo === 7) out.invocationId = decodeInvocationId(f.bytes);
-		else if (f.fieldNo === 8) out.error = decodeError(f.bytes);
-		else if (f.fieldNo === 9) out.thinkingPart = decodeThinkingPart(f.bytes);
+		} else if (f.fieldNo === 7) out.invocationId = decodeInvocationId(requireLenBytes(f, "invocationId"));
+		else if (f.fieldNo === 8) out.error = decodeError(requireLenBytes(f, "error"));
+		else if (f.fieldNo === 9) out.thinkingPart = decodeThinkingPart(requireLenBytes(f, "thinkingPart"));
 	}
 	return out;
 }

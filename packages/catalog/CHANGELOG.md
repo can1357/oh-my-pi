@@ -10,6 +10,7 @@
 
 ### Fixed
 
+- Grok Bot AvailableModels discovery orders effort ladders least→most via shared `THINKING_EFFORTS` (so `minimal` precedes `low` when both are advertised).
 - Grok Bot AvailableModels discovery returns `null` (no cache write) when HTTP 200 bodies omit a `models` array, instead of caching a routers-only catalog from proxy error envelopes.
 - Grok Bot catalog refresh resolves namespace/client-version identity asynchronously once and passes it through cache scoping without synchronous secrets-file rereads.
 - Token minting for Grok Bot forwards caller/model proxy headers under provider-owned client headers so reverse-proxy gateways accept `/sand-box/inference-credential`.

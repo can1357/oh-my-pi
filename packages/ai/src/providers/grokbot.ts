@@ -567,6 +567,7 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 			const conversationId = options?.conversationId || options?.sessionId || crypto.randomUUID();
 			const reqModel = resolveGrokbotRequestedModel(model.id, {
 				effort: options?.effort,
+				effortMap: model.thinking?.effortMap,
 				fast: options?.fast,
 				sandParameterIds: model.sandParameterIds,
 				sandMaxMode: model.sandMaxMode,

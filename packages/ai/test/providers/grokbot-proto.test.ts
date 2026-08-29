@@ -194,6 +194,13 @@ describe("grokbot proto", () => {
 		expect(() => decodeInferenceStreamResponse(Buffer.from([0x00, 0x00]))).toThrow(/field number must be non-zero/i);
 	});
 
+	test("rejects known protobuf fields with incorrect wire types", () => {
+		// Field 1 as varint (`08 01`) instead of length-delimited TextPart.
+		expect(() => decodeInferenceStreamResponse(Buffer.from([0x08, 0x01]))).toThrow(
+			/field 1 \(textPart\) must be length-delimited/i,
+		);
+	});
+
 	test("encodes stopSequences in modelConfig", () => {
 		const encoded = encodeInferenceStreamRequest({
 			messages: [{ role: 1, text: "hi" }],
@@ -233,6 +240,28 @@ describe("grokbot requested model mapping", () => {
 			{ id: "effort", value: "xhigh" },
 			{ id: "fast", value: "false" },
 		]);
+	});
+
+	test("preserves discovered minimal and max effort on the wire", () => {
+		expect(
+			resolveGrokbotRequestedModel("grok-4.6", {
+				effort: "minimal",
+				sandParameterIds: ["effort"],
+			}).parameters,
+		).toEqual([{ id: "effort", value: "minimal" }]);
+		expect(
+			resolveGrokbotRequestedModel("grok-4.6", {
+				effort: "max",
+				sandParameterIds: ["effort"],
+			}).parameters,
+		).toEqual([{ id: "effort", value: "max" }]);
+		expect(
+			resolveGrokbotRequestedModel("grok-4.6", {
+				effort: "minimal",
+				effortMap: { minimal: "low" },
+				sandParameterIds: ["effort"],
+			}).parameters,
+		).toEqual([{ id: "effort", value: "low" }]);
 	});
 
 	test("composer only sends fast when allowed and set", () => {

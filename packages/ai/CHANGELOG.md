@@ -9,6 +9,8 @@
 
 ### Fixed
 
+- Grok Bot sends discovered `minimal` / `max` effort values on the wire instead of collapsing them to `low` / `xhigh` (aliases only via `thinking.effortMap`).
+- Grok Bot protobuf decoding rejects known InferenceStreamResponse fields with the wrong wire type instead of emitting empty parts.
 - Grok Bot protobuf decoding rejects illegal field number zero instead of treating malformed frames as empty successful messages.
 - Grok Bot inference requests include `model.headers` (merged under provider-owned auth/client headers) so reverse-proxy API keys are sent.
 - Grok Bot token minting forwards the same caller/model headers so reverse-proxy gateways accept renewal before inference.
