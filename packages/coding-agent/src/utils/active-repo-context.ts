@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import * as fsPromises from "node:fs/promises";
 import * as path from "node:path";
 
-import { type GitRepository, repo } from "./git";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
 
 export interface ActiveRepoContext {
 	cwd: string;
@@ -28,19 +28,12 @@ function buildContext(cwd: string, repoRoot: string): ActiveRepoContext {
 	};
 }
 
-async function resolveRepository(cwd: string): Promise<GitRepository | null> {
+/** Whether `cwd` already sits inside a VCS repository. */
+function insideRepository(cwd: string): boolean {
 	try {
-		return await repo.resolve(cwd);
+		return vcs.repo(cwd) !== null;
 	} catch {
-		return null;
-	}
-}
-
-function resolveRepositorySync(cwd: string): GitRepository | null {
-	try {
-		return repo.resolveSync(cwd);
-	} catch {
-		return null;
+		return false;
 	}
 }
 
@@ -132,12 +125,12 @@ function findSingleDirectChildRepoSync(cwd: string): ActiveRepoContext | null {
 
 export async function resolveActiveRepoContext(cwd: string): Promise<ActiveRepoContext | null> {
 	const resolvedCwd = path.resolve(cwd);
-	if (await resolveRepository(resolvedCwd)) return null;
+	if (insideRepository(resolvedCwd)) return null;
 	return findSingleDirectChildRepo(resolvedCwd);
 }
 
 export function resolveActiveRepoContextSync(cwd: string): ActiveRepoContext | null {
 	const resolvedCwd = path.resolve(cwd);
-	if (resolveRepositorySync(resolvedCwd)) return null;
+	if (insideRepository(resolvedCwd)) return null;
 	return findSingleDirectChildRepoSync(resolvedCwd);
 }

@@ -505,6 +505,17 @@ export class Image implements Component {
 		this.#budget = options.budget;
 		this.#imageId = options.budget ? options.budget.acquireId(options.imageKey) : undefined;
 	}
+	/** Return source metadata without exposing the encoded image buffer. */
+	debugState(): Record<string, unknown> {
+		return {
+			mimeType: this.#mimeType,
+			widthPx: this.#dimensions.widthPx,
+			heightPx: this.#dimensions.heightPx,
+			filename: this.#options.filename ?? null,
+			imageId: this.#imageId ?? null,
+			suppressed: this.#cachedSuppressed,
+		};
+	}
 
 	invalidate(): void {
 		this.#cachedLines = undefined;

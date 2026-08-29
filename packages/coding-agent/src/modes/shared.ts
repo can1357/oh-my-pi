@@ -31,20 +31,4 @@ export function getTabBarTheme(): TabBarTheme {
 	};
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// Working-message hint
-// ═══════════════════════════════════════════════════════════════════════════
-
-/**
- * Suffix appended to the loader's working message to remind users they can
- * abort with Esc. Rendered with the active theme's bracket glyphs so it stays
- * visually consistent with badges and other bracketed UI affordances.
- *
- * The leading space separates the hint from the message body and is consumed
- * by `endsWith`/`slice` matching in the loader renderer.
- */
-export function interruptHint(): string {
-	return ` ${theme.format.bracketLeft}esc${theme.format.bracketRight}`;
-}
-
 export { parseCommandArgs } from "../utils/command-args";

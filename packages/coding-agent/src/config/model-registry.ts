@@ -2210,6 +2210,24 @@ export class ModelRegistry {
 	}
 
 	/**
+	 * Whether `provider` has a *concrete* credential — a stored login, a
+	 * command/config/runtime key, or a keyless local endpoint — as opposed to a
+	 * self-resolving AWS/Vertex sentinel that only signals an ambient credential
+	 * *source* exists. Default-model auto-selection prefers concretely-authed
+	 * providers so an ambiently-available Bedrock/Vertex provider never displaces
+	 * the provider the user actually signed into. See {@link AuthStorage.hasConcreteAuth}
+	 * and issue #9967.
+	 */
+	hasConcreteAuth(provider: string): boolean {
+		const keyConfig = this.#customProviderApiKeys.get(provider);
+		return (
+			isCommandConfigValue(keyConfig) ||
+			this.#keylessProviders.has(provider) ||
+			this.authStorage.hasConcreteAuth(provider)
+		);
+	}
+
+	/**
 	 * Whether the provider's configured API key is resolved from a command.
 	 *
 	 * Callers use this to distinguish the registry's command-first resolver

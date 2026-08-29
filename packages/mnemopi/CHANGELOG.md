@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [18.0.9] - 2026-08-28
+
+### Fixed
+
+- Fixed working-memory search returning too few or no results when the most relevant matches had been superseded, ensuring valid older entries are still returned.
+
 ## [18.0.0] - 2026-08-22
 
 ### Fixed
