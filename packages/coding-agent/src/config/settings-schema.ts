@@ -4721,7 +4721,7 @@ export const SETTINGS_SCHEMA = {
 			group: "Discovery & MCP",
 			label: "xd:// Promoted Tools",
 			description:
-				'Tools to keep top-level instead of mounting under xd:// while xd:// Tools is on (for example "lsp" or "mcp__context_resolve_library_id"). A single name or comma-separated string (for example "lsp, ast_grep") is accepted and split into the tool-name list. MCP names use the sanitized minted form: server and tool parts are lowercased, every run of characters outside [a-z_] (digits included) collapses to a single underscore, and leading/trailing underscores are trimmed (a server named "context7" mints "mcp__context_*" tools). Promotion only changes presentation; tools must still be enabled through their normal settings. No-op when xd:// Tools is off.',
+				'Tools to keep top-level instead of mounting under xd:// while xd:// Tools is on (for example "lsp" or "mcp__context_resolve_library_id"). A single name or comma-separated string (for example "lsp, ast_grep") is accepted and split into the tool-name list. MCP names must be written in the exact minted form mcp__<server>_<tool>: server and tool parts are lowercased, runs of characters outside [a-z_] (digits included) collapse to a single underscore, leading/trailing underscores are trimmed, a tool part redundantly starting with its server name is un-prefixed ("puppeteer/puppeteer_screenshot" mints "mcp__puppeteer_screenshot"), and names over 64 characters are truncated with a deterministic hash suffix. Minted names are listed with their tools under xd:// — copy from there rather than deriving by hand. Promotion only changes presentation; tools must still be enabled through their normal settings. No-op when xd:// Tools is off.',
 		},
 	},
 
