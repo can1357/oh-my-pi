@@ -18,6 +18,12 @@ import {
 import { chromiumAvailable } from "./chromium-probe";
 
 const CHROMIUM_AVAILABLE = await chromiumAvailable();
+// Headful Chromium needs a windowing system on Linux. The chromium probe only
+// proves the binary can exec, so a display-less CI runner passes it and then
+// dies in puppeteer with "Missing X server" — gate visible-window launches on
+// a display too (same check as `hasDisplay()` in src/utils/clipboard.ts).
+const HEADFUL_AVAILABLE =
+	CHROMIUM_AVAILABLE && (process.platform !== "linux" || Boolean(process.env.DISPLAY || process.env.WAYLAND_DISPLAY));
 
 class FakeStartupWorker {
 	#errorHandlers = new Set<(error: Error) => void>();
@@ -217,7 +223,7 @@ describe("browser init deadline carry-over", () => {
 	);
 });
 describe("visible OMP-owned browser tabs", () => {
-	it.skipIf(!CHROMIUM_AVAILABLE)(
+	it.skipIf(!HEADFUL_AVAILABLE)(
 		"creates independent pages without pinning the resizable window viewport",
 		async () => {
 			let browser: BrowserHandle | undefined;
