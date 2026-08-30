@@ -155,6 +155,40 @@ describe("ACP JSON-RPC transport", () => {
 		bytesWriter.releaseLock();
 		reader.releaseLock();
 	});
+
+	it("rejects envelope garbage instead of resolving outstanding requests", async () => {
+		const bytes = new TransformStream<Uint8Array, Uint8Array>();
+		const output = new TransformStream<Uint8Array, Uint8Array>();
+		const stream = ndJsonStream(output.writable, bytes.readable);
+		const connection = new RpcConnection(stream, () => undefined);
+		const bytesWriter = bytes.writable.getWriter();
+		const outputReader = output.readable.getReader();
+		const encoder = new TextEncoder();
+		const readLine = async (source: { read(): Promise<ReadableStreamReadResult<Uint8Array>> }) => {
+			const chunk = await source.read();
+			if (chunk.done) throw new Error("Expected bytes");
+			return new TextDecoder().decode(chunk.value);
+		};
+
+		// `request()` takes id 0; a bare id frame must not pass for its response.
+		const outstanding = connection.request<string>("session/prompt");
+		await bytesWriter.write(encoder.encode('{"jsonrpc":"2.0","id":0}\n'));
+		await readLine(outputReader); // discard the outgoing request frame
+		expect(JSON.parse(await readLine(outputReader))).toEqual({
+			jsonrpc: "2.0",
+			id: 0,
+			error: { code: -32600, message: "Invalid request" },
+		});
+
+		// Under the old shallow predicate this frame settled `outstanding` with a
+		// spurious `undefined` before the correlated response arrived; the final
+		// value assertion fails in that case without any timing.
+
+		await bytesWriter.write(encoder.encode('{"jsonrpc":"2.0","id":0,"result":"ok"}\n'));
+		await expect(outstanding).resolves.toBe("ok");
+		bytesWriter.releaseLock();
+		outputReader.releaseLock();
+	});
 	it("matches the SDK error-code fixtures", () => {
 		expect([
 			RequestError.parseError().toErrorResponse(),

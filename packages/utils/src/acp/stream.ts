@@ -107,13 +107,22 @@ export function ndJsonStream(output: WritableStream<Uint8Array>, input: Readable
 }
 
 function isProtocolMessage(value: unknown): value is AnyMessage {
-	return (
-		typeof value === "object" &&
-		value !== null &&
-		!Array.isArray(value) &&
-		"jsonrpc" in value &&
-		value.jsonrpc === "2.0"
-	);
+	if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+	if (!("jsonrpc" in value) || value.jsonrpc !== "2.0") return false;
+	const message = value as Record<string, unknown>;
+	// A string method means a request or notification; anything else must be a
+	// complete response envelope, so bare id frames can never be mistaken for
+	// responses and resolve outstanding requests with `undefined`.
+	if (typeof message.method === "string") return true;
+	return isResponseEnvelope(message);
+}
+
+function isResponseEnvelope(message: Record<string, unknown>): boolean {
+	const id = message.id;
+	if (typeof id !== "string" && typeof id !== "number" && id !== null) return false;
+	const hasResult = "result" in message;
+	const hasError = message.error !== undefined && message.error !== null && typeof message.error === "object";
+	return hasResult !== hasError;
 }
 
 function requestId(value: unknown): JsonRpcId {
