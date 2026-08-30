@@ -573,7 +573,7 @@ describe("OpenCode provider discovery", () => {
 			expect(flash?.input).toEqual(["text", "image"]);
 			expect(flash?.thinking).toEqual({
 				mode: "effort",
-				efforts: [Effort.Low, Effort.High, Effort.Max],
+				efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.XHigh],
 				defaultLevel: Effort.Max,
 				requiresEffort: true,
 			});

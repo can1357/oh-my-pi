@@ -1,0 +1,78 @@
+// Provider-wire compat for "openai"; regenerated from the frozen census using deployment contract selectors.
+
+provider "openai" {
+	thinking-mode "effort"
+	class "unknown" {
+		revision ">=5.6 <5.7" {
+			reasoning-disable-mode "none-effort"
+			thinking-efforts "low" "medium" "high" "xhigh" "max"
+		}
+		revision ">=5 <6" {
+			apply-patch-tool-type "freeform"
+		}
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "codex-mini-latest" "gpt-realtime-2.1" {
+		thinking-efforts "minimal" "low" "medium" "high" "xhigh"
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "gpt-5.1-codex" "gpt-5.1-codex-max" {
+		thinking-efforts "minimal" "low" "medium" "high"
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "gpt-5.1-codex-mini" {
+		thinking-efforts "medium" "high"
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "gpt-5.6-cyber" {
+		reasoning-disable-mode "none-effort"
+	}
+	// The 5.6 generation reasons through the wire `none` tier when disabled,
+	// and every first-party GPT-5 Responses SKU takes the freeform apply_patch
+	// custom tool.
+	class "openai" {
+		family "gpt" {
+			revision "=5.6" {
+				reasoning-disable-mode "none-effort"
+			}
+		}
+		revision ">=5 <6" {
+			apply-patch-tool-type "freeform"
+		}
+	}
+	// First-party GPT-5.6 whole-request long-context tiers (>272K input).
+	models "daybreak-blue-latest" "gpt-5.6" "gpt-5.6-sol*" {
+		long-context-cost {
+			inputThreshold 272000
+			input 10.0
+			output 45.0
+			cacheRead 1.0
+			cacheWrite 12.5
+		}
+	}
+	models "gpt-5.6-luna*" {
+		long-context-cost {
+			inputThreshold 272000
+			input 0.4
+			output 1.8
+			cacheRead 0.04
+			cacheWrite 0.5
+		}
+	}
+	models "gpt-5.6-terra*" {
+		long-context-cost {
+			inputThreshold 272000
+			input 4.0
+			output 18.0
+			cacheRead 0.4
+			cacheWrite 5.0
+		}
+	}
+	// residue: the bare Daybreak rolling aliases pin the documented 5.6-gen
+	// wire restrictions without carrying the gpt- prefix identity.
+	models "daybreak-blue-latest" "daybreak-red-latest" {
+		prompt-cache-breakpoint-ttl "30m"
+		supports-prompt-cache-breakpoints #true
+		supports-sampling-params #false
+	}
+}

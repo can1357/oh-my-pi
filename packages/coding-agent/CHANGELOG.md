@@ -12,6 +12,13 @@
 ### Changed
 
 - Agent Hub now distinguishes live session lifecycle from task outcomes, retaining completed and failed states after agents become idle or parked and showing retry delays and terminal retry errors in the inspector.
+- Disabled `hashline` edit mode for Kimi, Mimo, DeepSeek Flash, and Stepfun models for stability
+
+### Fixed
+
+- Fixed an issue where custom model overrides were lost during configuration updates
+- Fixed "Please use nerdfont" notification incorrectly persisting after theme configuration
+- Fixed sampling parameter errors for newer Anthropic models (Opus 4.7+, Sonnet 5+)
 
 ## [18.0.11] - 2026-08-29
 

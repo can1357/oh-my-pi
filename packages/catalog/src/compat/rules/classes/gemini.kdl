@@ -1,0 +1,83 @@
+// Model-lineage compat for "gemini"; regenerated from the frozen census using class taxonomy selectors.
+
+class "gemini" {
+	// Gemini ladders follow the model generation on every host: pre-3.0 keeps
+	// the four-tier scale, Gemini 3+ Pro exposes only low/high, and the 3+
+	// Flash/Lite lines keep the four-tier scale.
+	family "pro" {
+		revision "<3" {
+			thinking-efforts "minimal" "low" "medium" "high"
+		}
+		revision ">=3" {
+			thinking-efforts "low" "high"
+		}
+	}
+	family "flash" {
+		revision ">=0" {
+			thinking-efforts "minimal" "low" "medium" "high"
+		}
+	}
+	family "lite" {
+		revision ">=0" {
+			thinking-efforts "minimal" "low" "medium" "high"
+		}
+	}
+	// Direct Gemini 2.5 thinking budgets. Flash and Lite share the lower
+	// documented ceiling; Pro keeps the full 32k high tier.
+	on "google" "google-vertex" "opencode-zen" {
+		family "pro" {
+			revision ">=2.5 <2.6" {
+				thinking-effort-budgets {
+					minimal 128
+					low 2048
+					medium 8192
+					high 32768
+					xhigh 32768
+					max 32768
+				}
+			}
+		}
+		family "flash" {
+			revision ">=2.5 <2.6" {
+				thinking-effort-budgets {
+					minimal 128
+					low 2048
+					medium 8192
+					high 24576
+					xhigh 24576
+					max 24576
+				}
+			}
+		}
+		family "lite" {
+			revision ">=2.5 <2.6" {
+				thinking-effort-budgets {
+					minimal 128
+					low 2048
+					medium 8192
+					high 24576
+					xhigh 24576
+					max 24576
+				}
+			}
+		}
+	}
+
+	// Gemini 3 tool calls require the sentinel signature on unsigned replay.
+	revision ">=3" {
+		requires-skip-thought-signature #true
+	}
+	on "google" "opencode-zen" {
+		revision ">=3" {
+			supports-function-part-id #true
+		}
+	}
+	on "google-antigravity" "google-gemini-cli" {
+		family "flash" {
+			stream-first-event-timeout-ms 60000
+			flash-stream-leak-workaround #true
+		}
+	}
+
+	thinking-loop-guard "gemini"
+}

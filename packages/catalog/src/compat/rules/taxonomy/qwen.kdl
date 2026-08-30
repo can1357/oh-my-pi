@@ -1,0 +1,33 @@
+class "qwen" {
+    bounded "qwen"
+    bounded "deepseek-r1-distill-qwen"
+    glob "*distill-qwen*"
+
+    family "qwq" glob="*qwq*"
+    family "coder" glob="*qwen3-coder*"
+    family "next" glob="*qwen3-next*"
+    family "omni" glob="*qwen3-omni*"
+    family "vl" glob="*qwen3-vl*"
+    family "qwenlong" glob="*qwenlong*"
+
+    revision prefix="qwen"
+
+    override id="kilo-qwq-32b-family" provider="kilo" model="qwq-32b" logical="qwen/qwq-32b" class="qwen" rationale="The reviewed Kilo QwQ deployment belongs to the Qwen family despite its opaque product spelling" provenance="fixtures/llm-oracle/catalog/models.normalized.json"
+    override id="nanogpt-eva-qwen-2-5-family" provider="nanogpt" model="EVA-Qwen2.5-32B-v0.2" logical="EVA-UNIT-01/EVA-Qwen2.5-32B-v0.2" class="qwen" rationale="The reviewed EVA deployment is a Qwen 2.5 derivative despite its opaque product namespace" provenance="fixtures/llm-oracle/catalog/models.normalized.json"
+    override id="nanogpt-eva-qwen-2-5-72b-family" provider="nanogpt" model="EVA-Qwen2.5-72B-v0.2" logical="EVA-UNIT-01/EVA-Qwen2.5-72B-v0.2" class="qwen" rationale="The reviewed EVA 72B deployment is a Qwen 2.5 derivative despite its opaque product namespace" provenance="fixtures/llm-oracle/catalog/models.normalized.json"
+    override id="nanogpt-qwenlong-l1-family" provider="nanogpt" model="QwenLong-L1-32B" logical="Tongyi-Zhiwen/QwenLong-L1-32B" class="qwen" rationale="The reviewed Tongyi Zhiwen QwenLong deployment belongs to the Qwen family" provenance="fixtures/llm-oracle/catalog/models.normalized.json"
+    override id="nanogpt-dolphin-qwen-family" provider="nanogpt" model="dolphin-2.9.2-qwen2-72b" logical="cognitivecomputations/dolphin-2.9.2-qwen2-72b" class="qwen" rationale="The reviewed Dolphin deployment is a Qwen derivative" provenance="fixtures/llm-oracle/catalog/models.normalized.json"
+    override id="nanogpt-cogito-qwen-family" provider="nanogpt" model="cogito-v1-preview-qwen-32B" logical="deepcogito/cogito-v1-preview-qwen-32B" class="qwen" rationale="The reviewed Cogito deployment is a Qwen derivative" provenance="fixtures/llm-oracle/catalog/models.normalized.json"
+    override id="nanogpt-qwq-preview-family" provider="nanogpt" model="qwq-32b-preview" logical="qwen/qwq-32b-preview" class="qwen" rationale="The reviewed QwQ preview belongs to the Qwen family" provenance="fixtures/llm-oracle/catalog/models.normalized.json"
+    override id="nanogpt-grayline-qwen-family" provider="nanogpt" model="GrayLine-Qwen3-8B" logical="soob3123/GrayLine-Qwen3-8B" class="qwen" rationale="The reviewed GrayLine deployment is a Qwen derivative" provenance="fixtures/llm-oracle/catalog/models.normalized.json"
+    override id="novita-r1-qwen-family" provider="novita" model="deepseek-r1-0528-qwen3-8b" logical="deepseek/deepseek-r1-0528-qwen3-8b" class="qwen" rationale="The reviewed distillation lineage follows the Qwen student architecture" provenance="fixtures/llm-oracle/catalog/models.normalized.json"
+    override id="openrouter-qwq-family" provider="openrouter" model="qwq-32b" logical="qwen/qwq-32b" class="qwen" rationale="The reviewed QwQ deployment belongs to the Qwen family" provenance="fixtures/llm-oracle/catalog/models.normalized.json"
+    override id="umans-qwen-3-6-family" provider="umans" model="umans-qwen3.6-35b-a3b" logical="umans-qwen3.6-35b-a3b" class="qwen" rationale="The opaque Umans deployment is backed by the reviewed Qwen 3.6 family" provenance="fixtures/llm-oracle/catalog/models.normalized.json"
+    override id="venice-e2ee-qwen-2-5-family" provider="venice" model="e2ee-qwen-2-5-7b-p" logical="e2ee-qwen-2-5-7b-p" class="qwen" rationale="The opaque Venice E2EE deployment is backed by the reviewed Qwen family" provenance="fixtures/llm-oracle/catalog/models.normalized.json"
+    override id="venice-e2ee-qwen-3-30b-family" provider="venice" model="e2ee-qwen3-30b-a3b-p" logical="e2ee-qwen3-30b-a3b-p" class="qwen" rationale="The opaque Venice E2EE deployment is backed by the reviewed Qwen family" provenance="fixtures/llm-oracle/catalog/models.normalized.json"
+    override id="venice-e2ee-qwen-3-5-family" provider="venice" model="e2ee-qwen3-5-122b-a10b" logical="e2ee-qwen3-5-122b-a10b" class="qwen" rationale="The opaque Venice E2EE deployment is backed by the reviewed Qwen family" provenance="fixtures/llm-oracle/catalog/models.normalized.json"
+    override id="venice-e2ee-qwen-3-6-27b-family" provider="venice" model="e2ee-qwen3-6-27b" logical="e2ee-qwen3-6-27b" class="qwen" rationale="The opaque Venice E2EE deployment is backed by the reviewed Qwen family" provenance="fixtures/llm-oracle/catalog/models.normalized.json"
+    override id="venice-e2ee-qwen-3-6-35b-family" provider="venice" model="e2ee-qwen3-6-35b-a3b" logical="e2ee-qwen3-6-35b-a3b" class="qwen" rationale="The opaque Venice E2EE deployment is backed by the reviewed Qwen family" provenance="fixtures/llm-oracle/catalog/models.normalized.json"
+    override id="venice-e2ee-qwen-3-6-uncensored-family" provider="venice" model="e2ee-qwen3-6-35b-a3b-uncensored-p" logical="e2ee-qwen3-6-35b-a3b-uncensored-p" class="qwen" rationale="The opaque Venice E2EE deployment is backed by the reviewed Qwen family" provenance="fixtures/llm-oracle/catalog/models.normalized.json"
+    override id="venice-e2ee-qwen-vl-family" provider="venice" model="e2ee-qwen3-vl-30b-a3b-p" logical="e2ee-qwen3-vl-30b-a3b-p" class="qwen" rationale="The opaque Venice E2EE deployment is backed by the reviewed Qwen family" provenance="fixtures/llm-oracle/catalog/models.normalized.json"
+}

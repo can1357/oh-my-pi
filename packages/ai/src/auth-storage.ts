@@ -8,6 +8,7 @@
  * - re-exported `SqliteAuthCredentialStore`: concrete SQLite-backed implementation
  */
 import { createHash } from "node:crypto";
+import { planRequirementFor } from "@oh-my-pi/pi-catalog/compat/behavior";
 import { $env, $envExact, extractRetryHint, getAgentDbPath, logger } from "@oh-my-pi/pi-utils";
 import {
 	isSqliteCorruptionError,
@@ -997,7 +998,6 @@ function isAbortSignalOption(
 type OpenAICodexPlanRequirement = "none" | "paid" | "pro";
 type OpenAICodexPlanClass = "free" | "paid" | "pro" | "unknown";
 
-const GPT_56_PAID_CODEX_MODEL_PATTERN = /^gpt-5\.6-(?:sol|luna)(?:-pro)?$/;
 const OPENAI_CODEX_PRO_PLAN_TOKENS: Record<string, true> = {
 	pro: true,
 };
@@ -1028,11 +1028,7 @@ const OPENAI_CODEX_FREE_PLAN_TOKENS: Record<string, true> = {
  */
 function resolveOpenAICodexPlanRequirement(provider: string, modelId: string | undefined): OpenAICodexPlanRequirement {
 	if (provider !== "openai-codex" || typeof modelId !== "string") return "none";
-	const separator = modelId.lastIndexOf("/");
-	const bareModelId = (separator === -1 ? modelId : modelId.slice(separator + 1)).toLowerCase();
-	if (bareModelId.includes("-spark")) return "pro";
-	if (bareModelId === "gpt-5.6" || GPT_56_PAID_CODEX_MODEL_PATTERN.test(bareModelId)) return "paid";
-	return "none";
+	return (planRequirementFor("openai-codex", modelId) as OpenAICodexPlanRequirement | undefined) ?? "none";
 }
 
 const MODEL_ACCOUNT_POLICY_BLOCK_SCOPE_PREFIX = "model-policy:";

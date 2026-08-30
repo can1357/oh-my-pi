@@ -1,4 +1,5 @@
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { apiRouteFor } from "@oh-my-pi/pi-catalog/compat/behavior";
 import {
 	CLOUDFLARE_AI_GATEWAY_ANTHROPIC_BASE_URL,
 	CLOUDFLARE_AI_GATEWAY_BASE_URL,
@@ -54,8 +55,10 @@ export const cloudflareAiGatewayProvider = {
 	name: "Cloudflare AI Gateway",
 	prepareModel: model => {
 		const hasGatewayPlaceholders = model.baseUrl.includes("<account>") || model.baseUrl.includes("<gateway>");
-		if (model.id.startsWith("anthropic/")) {
-			const requestModelId = model.id.slice("anthropic/".length).replaceAll(".", "-");
+		const route = apiRouteFor("cloudflare-ai-gateway", model.id);
+		if (!route) return model;
+		if (route.api === "anthropic-messages") {
+			const requestModelId = (route.requestModelId ?? model.id).replaceAll(".", "-");
 			const baseUrl = hasGatewayPlaceholders ? CLOUDFLARE_AI_GATEWAY_ANTHROPIC_BASE_URL : model.baseUrl;
 			if (
 				model.api === "anthropic-messages" &&
@@ -71,23 +74,18 @@ export const cloudflareAiGatewayProvider = {
 				requestModelId,
 			};
 		}
-		if (model.id.startsWith("openai/")) {
-			const requestModelId = model.id.slice("openai/".length);
-			const baseUrl = hasGatewayPlaceholders ? CLOUDFLARE_AI_GATEWAY_OPENAI_BASE_URL : model.baseUrl;
-			if (model.api === "openai-responses" && model.baseUrl === baseUrl && model.requestModelId === requestModelId) {
-				return model;
-			}
-			return buildModel({
-				...model,
-				api: "openai-responses",
-				baseUrl,
-				compat: model.compatConfig,
-				requestModelId,
-			});
-		}
-		if (model.id.startsWith("workers-ai/")) {
-			const baseUrl = hasGatewayPlaceholders ? CLOUDFLARE_AI_GATEWAY_COMPAT_BASE_URL : model.baseUrl;
-			if (model.api === "openai-completions" && model.baseUrl === baseUrl) {
+		if (route.api === "openai-completions") {
+			const isOpenAIRoute = route.requestModelId !== undefined;
+			const baseUrl = hasGatewayPlaceholders
+				? isOpenAIRoute
+					? CLOUDFLARE_AI_GATEWAY_OPENAI_BASE_URL
+					: CLOUDFLARE_AI_GATEWAY_COMPAT_BASE_URL
+				: model.baseUrl;
+			if (
+				model.api === "openai-completions" &&
+				model.baseUrl === baseUrl &&
+				model.requestModelId === route.requestModelId
+			) {
 				return model;
 			}
 			return buildModel({
@@ -95,6 +93,7 @@ export const cloudflareAiGatewayProvider = {
 				api: "openai-completions",
 				baseUrl,
 				compat: model.compatConfig,
+				...(route.requestModelId !== undefined ? { requestModelId: route.requestModelId } : {}),
 			});
 		}
 		return model;

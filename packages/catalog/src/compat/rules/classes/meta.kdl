@@ -1,0 +1,13 @@
+// Model-lineage compat for "meta"; regenerated from the frozen census using class taxonomy selectors.
+
+class "meta" {
+	models "muse-spark-1.2" "muse-spark-1.2-contributor" {
+		thinking-efforts "minimal" "low" "medium" "high" "xhigh"
+		thinking-mode "effort"
+	}
+	on "kilo" "nvidia" {
+		family "llama" {
+			thinking-efforts "minimal" "low" "medium" "high" "xhigh"
+		}
+	}
+}

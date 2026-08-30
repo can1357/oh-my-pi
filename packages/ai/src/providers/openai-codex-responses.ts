@@ -1330,14 +1330,17 @@ function unrollCodexComputerToolResult(message: ToolResultMessage): ToolResultMe
 }
 
 function getCodexServiceTierCostMultiplier(
-	model: Pick<Model<"openai-codex-responses">, "id">,
+	model: Pick<Model<"openai-codex-responses">, "serviceTierCost">,
 	serviceTier: ServiceTier | "default" | undefined,
 ): number {
+	const resolvedMultiplier =
+		serviceTier === "flex" || serviceTier === "priority" ? model.serviceTierCost?.[serviceTier] : undefined;
+	if (resolvedMultiplier !== undefined) return resolvedMultiplier;
 	switch (serviceTier) {
 		case "flex":
 			return 0.5;
 		case "priority":
-			return model.id === "gpt-5.5" ? 2.5 : 2;
+			return 2;
 		default:
 			return 1;
 	}
@@ -1358,7 +1361,7 @@ function resolveCodexCostServiceTier(res: unknown, req?: unknown): ServiceTier |
 }
 
 function applyCodexServiceTierPricing(
-	model: Pick<Model<"openai-codex-responses">, "id">,
+	model: Pick<Model<"openai-codex-responses">, "serviceTierCost">,
 	usage: AssistantMessage["usage"],
 	resTier: unknown,
 	reqTier: unknown,
