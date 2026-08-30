@@ -4,6 +4,7 @@ import * as http2 from "node:http2";
 import type * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
+import { buildModel } from "../src/build";
 // Import from source, not the package specifier: the workspace `node_modules`
 // copy resolves to the primary checkout, not this worktree.
 import { fetchCursorUsableModels } from "../src/discovery/cursor";
@@ -18,15 +19,23 @@ const FIXTURE_MODEL_IDS = [
 	"claude-opus-4-8-99999999",
 	"gpt-5.5-codex-20991231",
 	"gemini-4-pro-exp",
-	// Reference-less ids from text-only families.
-	"composer-3",
-	// Reference-less K3 effort variants omit Cursor thinkingDetails.
+	// Cursor-only families verified to accept direct image attachments.
 	"kimi-k3-high",
 	"kimi-k3-low",
 	"kimi-k3-max",
+	"cursor-grok-4.5",
+	"cursor-grok-4.5-fast",
+	"cursor-grok-4.6",
+	"cursor-grok-4.6-fast",
+	"composer-2.5",
+	"composer-2.5-fast",
+	// Similar but unverified ids must not inherit image routing.
+	"composer-3",
+	"composer-2.50",
+	"cursor-grok-5",
 	"grok-code-fast-2",
-	// Versioned Cursor Grok siblings: bundled references read reasoning:false,
-	// but the id marks them reasoning.
+	"k3-256k",
+	// Versioned Cursor Grok siblings: the id marks them reasoning.
 	"cursor-grok-4.5-high",
 	"cursor-grok-4.6-xhigh",
 	// Bundled-reference ids: the reference stays authoritative.
@@ -83,10 +92,13 @@ describe("cursor discovery input modalities (issue #4726)", () => {
 		expect(byId.get("gemini-4-pro-exp")?.input).toEqual(["text", "image"]);
 	});
 
-	it("keeps reference-less text-only families text-only", async () => {
+	it("keeps unverified Cursor-only families text-only", async () => {
 		const byId = await discover();
 		expect(byId.get("composer-3")?.input).toEqual(["text"]);
+		expect(byId.get("composer-2.50")?.input).toEqual(["text"]);
+		expect(byId.get("cursor-grok-5")?.input).toEqual(["text"]);
 		expect(byId.get("grok-code-fast-2")?.input).toEqual(["text"]);
+		expect(byId.get("k3-256k")?.input).toEqual(["text"]);
 	});
 
 	it("recognizes reference-less Kimi K3 effort variants as reasoning models", async () => {
@@ -94,6 +106,24 @@ describe("cursor discovery input modalities (issue #4726)", () => {
 		expect(byId.get("kimi-k3-high")?.reasoning).toBe(true);
 		expect(byId.get("kimi-k3-low")?.reasoning).toBe(true);
 		expect(byId.get("kimi-k3-max")?.reasoning).toBe(true);
+	});
+
+	it("routes verified Cursor-only model variants as text+image", async () => {
+		const byId = await discover();
+		const verifiedIds = [
+			"kimi-k3-high",
+			"kimi-k3-low",
+			"kimi-k3-max",
+			"cursor-grok-4.5",
+			"cursor-grok-4.5-fast",
+			"cursor-grok-4.6",
+			"cursor-grok-4.6-fast",
+			"composer-2.5",
+			"composer-2.5-fast",
+		];
+		for (const id of verifiedIds) {
+			expect(byId.get(id)?.input).toEqual(["text", "image"]);
+		}
 	});
 
 	it("marks versioned Cursor Grok ids as reasoning despite reasoning:false references (issue #8803)", async () => {
@@ -104,10 +134,10 @@ describe("cursor discovery input modalities (issue #4726)", () => {
 		expect(byId.get("grok-code-fast-2")?.reasoning).toBe(false);
 	});
 
-	it("keeps bundled references authoritative for input modalities", async () => {
+	it("keeps bundled references authoritative outside verified image families", async () => {
 		const byId = await discover();
-		// Bundled cursor references carry their own input classification; the
-		// id-based inference must not override it in either direction.
+		// The id-based native-family inference must not override bundled
+		// classifications in either direction.
 		expect(byId.get("claude-4.5-opus-high")?.input).toEqual(["text", "image"]);
 		expect(byId.get("claude-4.6-opus-high")?.input).toEqual(["text"]);
 		expect(byId.get("composer-1")?.input).toEqual(["text"]);
@@ -250,7 +280,10 @@ describe("fetchCursorUsableModels", () => {
 
 		const models = await fetchCursorUsableModels({ apiKey: "test-token", baseUrl: nativeBaseUrl, timeoutMs: 1_000 });
 
-		expect(models).toEqual([
+		// The bare-`k3` spellings are rule-owned (`providers/cursor.kdl`
+		// context-window-floor) and reach 1M once the spec is built.
+		const built = models?.map(model => buildModel(model));
+		expect(built).toEqual([
 			expect.objectContaining({ id: "glm-5.10-high", contextWindow: 1_000_000 }),
 			expect.objectContaining({ id: "glm-5.2-max", contextWindow: 1_000_000 }),
 			expect.objectContaining({ id: "glm-6-max", contextWindow: 1_000_000 }),

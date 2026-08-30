@@ -21,6 +21,7 @@ import {
 	resolveModelOverride,
 	resolveModelRoleValue,
 	resolveModelScope,
+	resolveProviderModelReference,
 } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { DEFAULT_MODEL_ROLE_ALIAS, LEGACY_MODEL_ROLE_ALIAS_PREFIX } from "@oh-my-pi/pi-coding-agent/config/model-roles";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -2316,5 +2317,105 @@ describe("effort-tier variant aliases", () => {
 	test("consumed X-thinking twins resolve via the grammar fallback", () => {
 		expect(parseModelPattern("venice/kimi-k2-thinking", variantModels).model?.id).toBe("kimi-k2");
 		expect(parseModelPattern("kimi-k2-thinking", variantModels).model?.id).toBe("kimi-k2");
+	});
+});
+
+describe("Devin selector parity", () => {
+	const devinModel = (id: string, overrides: Partial<Model<"devin-agent">> = {}): Model<Api> =>
+		buildModel({
+			id,
+			name: id,
+			api: "devin-agent",
+			provider: "devin",
+			baseUrl: "https://server.codeium.com",
+			reasoning: true,
+			input: ["text", "image"],
+			supportsTools: true,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 200_000,
+			maxTokens: 64_000,
+			...overrides,
+		});
+
+	const devinModels: Model<Api>[] = [
+		devinModel("claude-opus-5", {
+			requestModelId: "claude-opus-5-low",
+			thinking: {
+				mode: "effort",
+				efforts: [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh, Effort.Max],
+				effortRouting: {
+					[Effort.Low]: "claude-opus-5-low",
+					[Effort.XHigh]: "claude-opus-5-xhigh",
+				},
+				requiresEffort: true,
+			},
+		}),
+		// Fuzzy-match decoy: `opus` must not land here.
+		devinModel("claude-opus-4-6"),
+		devinModel("swe-1-7-lightning", {
+			requestModelId: "swe-1-7-lightning-medium",
+			thinking: {
+				mode: "effort",
+				efforts: [Effort.Medium, Effort.Max],
+				effortRouting: {
+					[Effort.Medium]: "swe-1-7-lightning-medium",
+					[Effort.Max]: "swe-1-7-lightning",
+				},
+				defaultLevel: Effort.Medium,
+				requiresEffort: true,
+			},
+		}),
+		devinModel("gemini-3-7-flash", {
+			requestModelId: "gemini-3-7-flash-medium",
+			thinking: {
+				mode: "effort",
+				efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High],
+				effortRouting: {
+					[Effort.Medium]: "gemini-3-7-flash-medium",
+					[Effort.High]: "gemini-3-7-flash-high",
+				},
+				defaultLevel: Effort.Medium,
+				requiresEffort: true,
+			},
+		}),
+		// A family that only exists in the live catalog: collapsed at discovery
+		// time, so no hand-table alias covers its wire ids.
+		devinModel("claude-mythos-9", {
+			requestModelId: "claude-mythos-9-medium",
+			thinking: {
+				mode: "effort",
+				efforts: [Effort.Medium, Effort.High],
+				effortRouting: {
+					[Effort.Medium]: "claude-mythos-9-medium",
+					[Effort.High]: "claude-mythos-9-high",
+				},
+				requiresEffort: true,
+			},
+		}),
+	];
+
+	test("provider-scoped native aliases beat fuzzy id matches", () => {
+		expect(parseModelPattern("devin/opus", devinModels).model?.id).toBe("claude-opus-5");
+		expect(parseModelPattern("devin/swe", devinModels).model?.id).toBe("swe-1-7-lightning");
+		expect(parseModelPattern("devin/gemini", devinModels).model?.id).toBe("gemini-3-7-flash");
+		const withLevel = parseModelPattern("devin/opus:high", devinModels);
+		expect(withLevel.model?.id).toBe("claude-opus-5");
+		expect(withLevel.thinkingLevel).toBe(Effort.High);
+	});
+
+	test("dotted native spellings resolve to the hyphenated logical id", () => {
+		expect(parseModelPattern("devin/gemini-3.7-flash", devinModels).model?.id).toBe("gemini-3-7-flash");
+		expect(parseModelPattern("devin/swe-1.7-lightning", devinModels).model?.id).toBe("swe-1-7-lightning");
+	});
+
+	test("raw effort-route wire ids resolve to their collapsed model, provider-scoped", () => {
+		expect(resolveProviderModelReference("devin", "claude-mythos-9-high", devinModels)?.id).toBe("claude-mythos-9");
+		expect(resolveProviderModelReference("devin", "gemini-3-7-flash-high", devinModels)?.id).toBe("gemini-3-7-flash");
+		expect(resolveProviderModelReference("openai", "claude-mythos-9-high", devinModels)).toBeUndefined();
+	});
+
+	test("a live raw model still wins over the collapsed carrier routing to it", () => {
+		const withRaw = [...devinModels, devinModel("claude-mythos-9-high")];
+		expect(resolveProviderModelReference("devin", "claude-mythos-9-high", withRaw)?.id).toBe("claude-mythos-9-high");
 	});
 });

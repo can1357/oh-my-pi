@@ -45,7 +45,6 @@
  * three guarded attempts and then fail closed. Disable detection with
  * `PI_NO_THINKING_LOOP_GUARD=1`.
  */
-import { modelFamilyToken } from "@oh-my-pi/pi-catalog/identity";
 import { logger } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import type { Api, AssistantMessage, Model, StreamOptions } from "../types";
@@ -119,14 +118,11 @@ const CONCRETE_ANCHOR =
  */
 export function isLoopGuardedModel(model: Model<Api>, options?: StreamOptions): boolean {
 	if (options?.loopGuard?.enabled === false) return false;
-	switch (modelFamilyToken(model.id)) {
-		case "gemini":
-		case "deepseek":
-		case "grok":
-			return true;
-		default:
-			return false;
+	const compat = model.compat;
+	if (compat !== undefined && "thinkingLoopGuard" in compat) {
+		if (compat.thinkingLoopGuard !== undefined) return true;
 	}
+	return model.identity?.class === "gemini" || model.identity?.class === "deepseek" || model.identity?.class === "xai";
 }
 
 /**

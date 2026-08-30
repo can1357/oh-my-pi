@@ -7,7 +7,7 @@
 - Model-facing prompt: `packages/coding-agent/src/prompts/tools/read.md`
 - Key collaborators:
   - `packages/coding-agent/src/tools/path-utils.ts` — split `path` from trailing selectors; prefer literal filenames; normalize local paths and recover accidental delimited path lists.
-  - `packages/coding-agent/src/utils/zip.ts` — unified ZIP/tar wrapper: detect `archive.ext:inner/path`, index archives, list/read entries.
+  - `packages/utils/src/ar` (`@oh-my-pi/pi-utils/ar`) — unified archive registry: detect `archive.ext:inner/path`, index archives, list/read entries.
   - `packages/coding-agent/src/tools/sqlite-reader.ts` — detect SQLite targets, parse selectors, render tables.
   - `packages/coding-agent/src/tools/fetch.ts` — URL parsing, fetch/render pipeline, URL cache/artifacts.
   - `packages/coding-agent/src/internal-urls/router.ts` — built-in internal-resource registry, including `ssh://` and `xd://`; MCP may advertise additional schemes.
@@ -31,6 +31,7 @@ For normal file-like reads, `splitPathAndSel()` in `packages/coding-agent/src/to
 | Suffix | Meaning |
 | --- | --- |
 | `:raw` | Raw/verbatim mode. Disables structural summaries and line prefixes. |
+| `:img` | Rasterize a local `.svg`/`.svgz` file and return it as an image block for vision input. Only local SVG/SVGZ files are supported. |
 | `:conflicts` | Scan a local file for unresolved Git merge-conflict regions, register them in session conflict history, and render a compact `#N Lx-Ly` index. |
 | `:N` / `:LN` / `:N-` / `:N..` | Start at 1-indexed line `N`, open-ended. |
 | `:A-B` / `:LA-LB` / `:A..B` | Inclusive 1-indexed line range (`..` is a forgiving alias normalized to `-`). |
@@ -129,11 +130,9 @@ Literal filesystem paths take precedence over selector interpretation, so an exi
 
 ### Archives
 
-- Supported archive containers: `.tar`, `.tar.gz`, `.tgz`, `.zip`, plus ZIP-format aliases `.jar`, `.war`, `.ear`, and `.apk`.
+- Supported archive containers (extension table in `packages/utils/src/ar/registry.ts`): tar family `.tar`, `.tar.gz`/`.tgz`, `.tar.bz2`/`.tbz2`/`.tbz`, `.tar.xz`/`.txz`, `.tar.zst`/`.tzst`, `.tar.z`; ZIP family `.zip`, `.jar`, `.war`, `.ear`, `.apk`, `.whl`, `.ipa`, `.xpi`, `.vsix`, `.nupkg`, `.cbz`; standalone `.rar`/`.cbr`, `.7z`, `.iso`, `.cab`, `.cpio`, `.rpm`, `.ar`/`.a`/`.lib`, `.deb`, `.lzh`/`.lha`, `.arj`, `.asar`; single-stream `.gz`, `.bz2`, `.xz`, `.zst`, `.z`, `.lzma`.
 - Syntax: `archive.ext`, `archive.ext:path/inside`, `archive.ext:path/inside:50-60`.
-- `openArchive()` branches by format:
-  - tar/tgz reads the whole archive into memory (capped at `MAX_TAR_ARCHIVE_BYTES = 256 MiB`) and indexes it with `new Bun.Archive(bytes)`
-  - ZIP and ZIP aliases are indexed via ranged central-directory reads; members are inflated on demand with raw DEFLATE (`node:zlib`), and individual extraction is capped at `MAX_ARCHIVE_MEMBER_BYTES = 64 MiB`
+- `openArchive()` dispatches through the `@oh-my-pi/pi-utils/ar` registry (`packages/utils/src/ar/open.ts`); limits live in `packages/utils/src/ar/limits.ts`: in-memory archives cap at 256 MiB, index reads at 64 MiB, and individual member extraction at 64 MiB.
 - Archive paths normalize `/`, drop `.` segments, and reject `..`.
 - Directory reads list immediate children; files show `name` plus ` (size)` when size > 0.
 - Directory listing default limit is `500` entries in `#readArchiveDirectory()`.
@@ -224,6 +223,8 @@ Literal filesystem paths take precedence over selector interpretation, so an exi
   - sets `ignoreResultLimits: true` for `skill://` so the full skill text is paginated only by explicit selectors, not by the normal default line limit
 - `conflict://` is handled separately from the router. `<path>:conflicts` registers blocks; `conflict://<N>` reads one registered marker block, and `/ours`, `/theirs`, `/base`, or `/both` selects a side. `conflict://*` is write-only.
 - `issue://<N>` / `pr://<N>` (and the long form `issue://<owner>/<repo>/<N>` / `pr://<owner>/<repo>/<N>`) route through the same SQLite cache the `github` tool writes to; `?comments=0` selects the no-comments rendering. Bare `issue://` / `pr://` (and repository-qualified variants) browse live lists with `?state=`, `?limit=`, `?author=`, and `?label=`. PR diffs use `pr://<N>/diff`, `/diff/<i>`, and `/diff/all`. Every repository-qualified form also accepts a GitHub Enterprise host prefix (`pr://ghe.example.com/<owner>/<repo>/<N>`), and a host with no dot (`pr://ghe/<owner>/<repo>/<N>`) is recognized in the numbered form. Short forms resolve the host from the session checkout, so an enterprise repo needs no prefix.
+- `memory://` accepts two grammars. `memory://root[/path]` reads file-backed memory artifacts under the project memory root (`memory://root` resolves to the compact startup summary `memory_summary.md`; deeper paths address files such as `MEMORY.md` and `skills/<name>/SKILL.md`, and `memory://root/...` supports glob patterns for `glob`). `memory://<memory-id>` looks up a live Mnemopi memory row by id — working or episodic — and returns the full stored content (not the clipped recall preview) behind a YAML frontmatter header carrying `id`, `bank`, `store`, `memory_type`, `source`, `timestamp`/`created_at`, `importance`, `veracity`, `session_id`, and `metadata`. The id grammar resolves only while a live mnemopi backend session exists (`memory.backend = mnemopi`); with `hindsight` it returns a corrective pointer (hindsight memories are not addressable), and unknown ids error with a pointer to `recall` for the available ids. This is the read counterpart to `memory_edit update`: read the full row before overwriting a truncated preview.
+- `artifact://<id>` resolves a session artifact as plain text. Selector-paginated reads stream from the backing file at any size, but unbounded `:raw` is blocked above `50 KiB` (`MAX_ARTIFACT_RAW_INLINE_BYTES`) with a workflow notice pointing at bounded ranges (`artifact://<id>:1-3000`, `artifact://<id>:raw:1-3000`) and the backing file path. Bare/non-raw reads stream a bounded default page rather than materializing the whole artifact. Protocol-level whole-resource resolution by other consumers is hard-capped at 8 MiB (`MAX_INLINE_ARTIFACT_BYTES` in `packages/coding-agent/src/internal-urls/artifact-protocol.ts`); larger artifacts reject the whole-resource read with the same selector and backing-path hints. Path-only consumers (search/grep, bash URL expansion) skip content materialization and work on artifacts of any size.
 
 ### Web URLs
 - `parseReadUrlTarget()` accepts `http://`, `https://`, or `www.` targets.
@@ -262,7 +263,7 @@ Notes: ...
   - URL mode performs HTTP fetches, binary refetches, and alternate-endpoint probes.
 - Subprocesses / native bindings
   - Uses Bun SQLite for `.db`/`.sqlite*`.
-  - Uses `Bun.Archive` for tar/tgz; ZIP is framed in `packages/coding-agent/src/utils/zip.ts` over the `node:zlib` DEFLATE codec.
+  - Reads archives through the unified `@oh-my-pi/pi-utils/ar` registry; ZIP is framed in `packages/utils/src/ar/zip.ts` over the `node:zlib` DEFLATE codec.
   - URL HTML rendering can delegate into site handlers and HTML-to-text backends from `packages/coding-agent/src/tools/fetch.ts`.
 - Session state
   - Records whole-file snapshots of local text reads into `session.fileSnapshotStore` for later stale-anchor recovery.

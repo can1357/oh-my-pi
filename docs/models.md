@@ -85,6 +85,11 @@ providers:
             controller: mlx
 ```
 
+### Compaction options
+
+- `compactionModel` (per model, including `modelOverrides`) — selector for the model used to summarize/compact context when this model's session is compacted, instead of the model itself.
+- `remoteCompaction` (provider level or per model) — opts eligible models into provider-native compaction. Supported keys: `enabled`, `api`, `endpoint`, `model`, `v2StreamingEnabled`, `v2Endpoint`, `streamingEndpoint`. Provider-level settings are the baseline; per-model keys override them.
+
 ### Allowed provider/model `api` values
 
 - `openai-completions`
@@ -385,6 +390,22 @@ So a model can exist in registry but not be selectable until auth is available.
 `--provider` is legacy; `--model` is preferred. An exact `provider/modelId` is unambiguous; bare ids
 and fuzzy patterns are resolved against the available concrete models.
 
+Resolution precedence for exact selectors:
+
+1. exact `provider/modelId` reference
+2. exact bare id (case-insensitive); when several providers carry the same id, a preference ranking picks the winner (see below)
+3. retired effort-tier variant alias (collapsed catalog entries, e.g. `X`/`X-thinking` twins)
+4. provider-scoped fuzzy match, then substring matching with an alias-vs-dated pick
+
+Glob scope patterns (used by `enabledModels` and CLI `--models`) run separately over concrete models after exact matching.
+
+When a bare id matches models from multiple providers, preference order is:
+
+1. recently used model variants
+2. provider priority (`modelProviderOrder` setting, then built-in catalog provider priority)
+3. recently used providers
+4. registry order
+
 ### Initial model selection priority
 
 `findInitialModel(...)` uses this order:
@@ -437,8 +458,12 @@ String entries apply everywhere. Scoped entries apply when the current working d
 
 ## `/model` and `omp models`
 
-Both surfaces keep provider-prefixed concrete models visible and selectable. Selecting a provider
-row stores its explicit `provider/modelId`.
+Both surfaces keep provider-prefixed concrete models visible and selectable.
+
+- `/model` shows an all-models view plus one view per provider
+- `omp models` (default `ls` action) prints provider-grouped tables of every available model; `omp models find <substring>` filters by provider, id, or name; `omp models refresh` forces an online catalog re-fetch ignoring the model cache TTL; any provider name doubles as an `ls` filter (e.g. `omp models openai-codex`). Flags: `--json`, `-e <path>` (load extension, repeatable), `--no-extensions`, `--config <overlay>` (extra config overlay, repeatable)
+
+Selecting a provider row stores its explicit `provider/modelId`.
 
 ## Context promotion (model-level fallback chains)
 

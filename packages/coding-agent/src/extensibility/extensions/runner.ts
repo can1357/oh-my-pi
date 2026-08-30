@@ -682,6 +682,8 @@ export class ExtensionRunner {
 		this.#abortFn = contextActions.abort;
 		this.#hasPendingMessagesFn = contextActions.hasPendingMessages;
 		this.#shutdownHandler = contextActions.shutdown;
+		this.#getContextUsageFn = contextActions.getContextUsage;
+		this.#compactFn = contextActions.compact;
 		this.#getSystemPromptFn = contextActions.getSystemPrompt;
 
 		// Command context actions (optional, only for interactive mode)
