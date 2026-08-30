@@ -1709,9 +1709,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 
 	const agentRegistry = options.agentRegistry ?? AgentRegistry.global();
 	const resolvedAgentId = options.agentId ?? options.parentTaskPrefix ?? MAIN_AGENT_ID;
-	const resolvedAgentDisplayName =
-		options.agentDisplayName ?? ((options.taskDepth ?? 0) > 0 || options.parentTaskPrefix ? "sub" : "main");
-	const agentKind = (options.taskDepth ?? 0) > 0 || options.parentTaskPrefix ? ("sub" as const) : ("main" as const);
+	// A session with a parent-task prefix is a child even when the caller did not
+	// pass an explicit depth (e.g. /tan clones): report depth 1 rather than the
+	// contradictory kind "sub" + depth 0. Explicit depths win unchanged.
+	const classifiedSub = (options.taskDepth ?? 0) > 0 || options.parentTaskPrefix !== undefined;
+	const resolvedDepth = (options.taskDepth ?? 0) > 0 ? (options.taskDepth as number) : classifiedSub ? 1 : 0;
+	const resolvedAgentDisplayName = options.agentDisplayName ?? (classifiedSub ? "sub" : "main");
+	const agentKind = classifiedSub ? ("sub" as const) : ("main" as const);
 	let registeredAgentRef: AgentRef | undefined;
 	/**
 	 * Forget the agent ref on teardown — unless it is a retained terminal ref.
@@ -2742,7 +2746,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			() => (hasSession ? session.getAsyncJobSnapshot() : null),
 			{
 				kind: agentKind,
-				depth: options.taskDepth ?? 0,
+				depth: resolvedDepth,
 				agentId: resolvedAgentId,
 				displayName: resolvedAgentDisplayName,
 				parentId: options.parentAgentId,
@@ -3726,7 +3730,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			obfuscator,
 			agentId: resolvedAgentId,
 			agentKind,
-			taskDepth: options.taskDepth ?? 0,
+			taskDepth: resolvedDepth,
 			providerSessionId: options.providerSessionId,
 			providerPromptCacheKeySource,
 			parentEvalSessionId: options.parentEvalSessionId,

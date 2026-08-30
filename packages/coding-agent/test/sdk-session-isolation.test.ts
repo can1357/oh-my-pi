@@ -193,6 +193,58 @@ describe("createAgentSession session storage isolation", () => {
 		}
 	});
 
+	it("reports a consistent sub identity for parent-prefixed sessions without an explicit depth", async () => {
+		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `pi-sdk-identity-depth-${Snowflake.next()}-`));
+		tempDirs.push(tempDir);
+		const cwd = path.join(tempDir, "project");
+		fs.mkdirSync(cwd, { recursive: true });
+		const registry = new AgentRegistry();
+		registry.register({
+			id: "Main",
+			displayName: "main",
+			kind: "main",
+			session: null,
+			sessionFile: null,
+			status: "running",
+		});
+
+		// Tan-clone shape: parentTaskPrefix + parentAgentId, no taskDepth.
+		const { session } = await createAgentSession({
+			cwd,
+			agentDir: path.join(tempDir, "agent"),
+			modelRegistry: sharedModelRegistry,
+			settings: Settings.isolated(),
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			toolNames: [],
+			enableMCP: false,
+			enableLsp: false,
+			agentRegistry: registry,
+			agentId: "Tan-depth-test",
+			agentDisplayName: "tan",
+			parentTaskPrefix: "Tan-depth-test",
+			parentAgentId: "Main",
+		});
+
+		try {
+			const runner = session.extensionRunner;
+			if (!runner) throw new Error("Expected extension runner");
+			expect(runner.createContext().agentIdentity).toEqual({
+				kind: "sub",
+				depth: 1,
+				agentId: "Tan-depth-test",
+				displayName: "tan",
+				parentId: "Main",
+				parentChain: [],
+			});
+		} finally {
+			await session.dispose();
+		}
+	});
+
 	it("does not replace a newer registry generation when creation expected the id to be absent", async () => {
 		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `pi-sdk-generation-cas-${Snowflake.next()}-`));
 		tempDirs.push(tempDir);
