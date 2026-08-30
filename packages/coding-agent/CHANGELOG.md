@@ -8,6 +8,7 @@
 
 ### Fixed
 
+- Bare `--model <alias>` selectors resolve through `Model.aliases` the same as `provider/<alias>` (e.g. Grok Bot legacy slugs).
 - Grok Bot discovery merges `models.yml` and runtime provider headers (a baseUrl-only runtime override no longer drops configured proxy/tenant headers).
 - `/grokbot` includes configured AuthStorage renewal credentials (`providers.grokbot.apiKey` / `--api-key`) when reporting Renewer status.
 - Credential-scoped startup model caches prefer `providers.*.apiKey` / runtime `--api-key` over environment credentials (same order as AuthStorage.peekApiKey).
