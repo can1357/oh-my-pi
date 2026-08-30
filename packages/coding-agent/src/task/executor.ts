@@ -7,7 +7,7 @@
 import path from "node:path";
 import type { AgentEvent, AgentIdentity, AgentMessage, AgentTelemetryConfig } from "@oh-my-pi/pi-agent-core";
 import { EventLoopKeepalive, recordHandoff, resolveTelemetry } from "@oh-my-pi/pi-agent-core";
-import type { Api, Model, ServiceTierByFamily, Usage } from "@oh-my-pi/pi-ai";
+import type { Api, Model, ServiceTierByFamily, StopReason, Usage } from "@oh-my-pi/pi-ai";
 import { logger, popLoopPhase, prompt, pushLoopPhase, untilAborted } from "@oh-my-pi/pi-utils";
 import { ASYNC_JOB_MANAGER_SHUTDOWN_REASON, AsyncJobManager } from "../async";
 import type { Rule } from "../capability/rule";
@@ -97,8 +97,12 @@ export type { YieldItem } from "./types";
 const MCP_CALL_TIMEOUT_MS = 60_000;
 const TASK_ABORT_CLEANUP_GRACE_MS = 10_000;
 
-function terminalOutcome(result: { aborted?: boolean; exitCode: number }): AgentTerminalOutcome {
-	return result.aborted ? "aborted" : result.exitCode === 0 ? "completed" : "failed";
+function terminalOutcome(
+	result: { aborted?: boolean; exitCode: number },
+	stopReason?: StopReason,
+): AgentTerminalOutcome {
+	if (result.aborted) return "aborted";
+	return result.exitCode === 0 && stopReason !== "length" ? "completed" : "failed";
 }
 
 async function recordPersistedAgentTaskOutcome(
@@ -2506,7 +2510,7 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 					sessionFile,
 					startTime: turnStartTime,
 				});
-				const outcome = terminalOutcome(result);
+				const outcome = terminalOutcome(result, lastAssistant?.stopReason);
 				if (outcomeGeneration !== undefined && registry.isCurrentTaskOutcome(id, outcomeGeneration)) {
 					recordAgentTaskOutcome(session, outcome);
 					registry.setTaskOutcome(id, outcomeGeneration, outcome);
@@ -2941,6 +2945,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 	let reviveSession: AgentReviver | null = null;
 	let recordedTerminalOutcome: AgentTerminalOutcome | undefined;
 	let recordedTaskOutcomeGeneration: number | undefined;
+	let recordedAssistantStopReason: StopReason | undefined;
 	const installIrcWakeTurnMonitor = (target: AgentSession): void => {
 		attachIrcWakeTurnMonitor(target, {
 			id,
@@ -3578,7 +3583,8 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			const session = monitor.takeActiveSession();
 			if (session) {
 				monitor.captureSalvage(session);
-				recordedTerminalOutcome = terminalOutcome({ aborted, exitCode });
+				recordedAssistantStopReason = session.getLastAssistantMessage()?.stopReason;
+				recordedTerminalOutcome = terminalOutcome({ aborted, exitCode }, recordedAssistantStopReason);
 				recordAgentTaskOutcome(session, recordedTerminalOutcome);
 				recordedTaskOutcomeGeneration = AgentRegistry.global().taskOutcomeGeneration(id);
 				if (options.keepAlive !== false && worktree === undefined) {
@@ -3689,7 +3695,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		sessionFile: subtaskSessionFile,
 		startTime,
 	});
-	const finalOutcome = terminalOutcome(result);
+	const finalOutcome = terminalOutcome(result, recordedAssistantStopReason);
 	const registry = AgentRegistry.global();
 	const finalOutcomeGenerationIsCurrent =
 		recordedTaskOutcomeGeneration !== undefined && registry.isCurrentTaskOutcome(id, recordedTaskOutcomeGeneration);
