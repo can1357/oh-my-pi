@@ -1652,6 +1652,7 @@ describe("Cursor exec local-work tracking (issue #4593)", () => {
 			undefined,
 			{ sawTokenDelta: false },
 			[],
+			[],
 			undefined,
 			true,
 		);
@@ -1732,6 +1733,7 @@ describe("Cursor exec local-work tracking (issue #4593)", () => {
 			undefined,
 			undefined,
 			{ sawTokenDelta: false },
+			[],
 			[],
 			undefined,
 			true,
