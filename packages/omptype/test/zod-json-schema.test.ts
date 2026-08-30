@@ -230,6 +230,23 @@ describe("zod shim JSON Schema structure", () => {
 		expect(nested.parse({ list: [{ name: "x" }] })).toEqual({ list: [{ name: "x" }] });
 	});
 
+	it("emits anyOf for an object-or-array union", () => {
+		// The object's input domain excludes arrays, which makes these two
+		// members provably disjoint — so the union stays structural instead of
+		// falling back to the ordered dispatcher and erasing. Before the domain
+		// was accounted for in the intersection check, "an array carrying the
+		// object's properties" counted as a shared inhabitant and this common
+		// provider-facing shape emitted `{}`.
+		const union = z.union([z.object({ a: z.string() }), z.array(z.string())]);
+		const variants = asObjectSchema(union.toJsonSchema()).anyOf as ObjectSchema[];
+		expect(variants).toHaveLength(2);
+		expect(variants[0]).toMatchObject({ type: "object", properties: { a: { type: "string" } } });
+		expect(variants[1]).toEqual({ type: "array", items: { type: "string" } });
+		expect(union.parse({ a: "x" })).toEqual({ a: "x" });
+		expect(union.parse(["x"])).toEqual(["x"]);
+		expect(union.safeParse(5).success).toBe(false);
+	});
+
 	it("exports required recursive edges and pins optional recursive edges on the dispatcher", () => {
 		// The emission boundary for recursion: REQUIRED array/record edges
 		// export as $ref; OPTIONAL or NULLABLE recursive edges keep the

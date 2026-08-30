@@ -334,6 +334,15 @@ describe("zod-like parsing", () => {
 		expect(plainFirst([])).toEqual([]);
 		expect(plainSecond([])).toEqual([]);
 		expect((z.strictObject({}) as unknown as { equals(def: unknown): boolean }).equals(unrestricted)).toBe(false);
+
+		// Intersecting a plain object with an array is now empty rather than
+		// "an array carrying the object's properties", which is what makes the
+		// object-or-array union provably disjoint. An ArkType object keeps the
+		// inhabited intersection, so the opt-in boundary holds here too.
+		expect(() => intersect(z.object({ a: z.string() }), "string[]")).toThrow(
+			/intersection of a plain object and an array is unsatisfiable/,
+		);
+		expect(intersect(type({ a: "string" }), "string[]")(Object.assign(["x"], { a: "y" }))).toEqual(["x"]);
 	});
 
 	it("carries the object-input domain into definitions that spread a shim schema", () => {

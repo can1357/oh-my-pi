@@ -2169,6 +2169,14 @@ function intersectResolved(a: IR, b: IR): IR {
 		(a.k === "object" && (b.k === "array" || b.k === "tuple")) ||
 		(b.k === "object" && (a.k === "array" || a.k === "tuple"))
 	) {
+		// Without a domain restriction the intersection is inhabited — an array
+		// carrying the object's properties — but a plain-only object excludes
+		// arrays outright, which is what makes `z.union([z.object(…),
+		// z.array(…)])` provably disjoint and keeps its structural `anyOf`
+		// instead of erasing to the ordered dispatcher.
+		if ((a.k === "object" && a.plain === true) || (b.k === "object" && b.plain === true)) {
+			throw new OmpTypeError("intersection of a plain object and an array is unsatisfiable");
+		}
 		return { k: "intersection", members: [a, b] };
 	}
 	const leftDomain = domainOf(a);
