@@ -1,5 +1,4 @@
 import type { Effort } from "@oh-my-pi/pi-catalog/effort";
-import { isKimiModelId } from "@oh-my-pi/pi-catalog/identity";
 import { resolveWireModelId } from "@oh-my-pi/pi-catalog/model-thinking";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import type { ResolvedOpenAICompat } from "@oh-my-pi/pi-catalog/types";
@@ -1553,14 +1552,13 @@ function resolveOpenAICompatForRequest(
 
 function dropOpenRouterKimiForcedToolReasoning(
 	params: OpenAICompletionsParams,
-	model: Model<"openai-completions">,
+	_model: Model<"openai-completions">,
 	policy: OpenAICompatPolicy,
 ): void {
 	if (
 		policy.reasoning.disableReason === "forced-tool-choice" &&
 		policy.reasoning.disableMode === "openrouter-enabled-false" &&
-		policy.compat.isOpenRouterHost &&
-		isKimiModelId(model.id)
+		policy.compat.isOpenRouterHost
 	) {
 		delete params.reasoning;
 	}
@@ -1570,14 +1568,8 @@ function hasActiveNativeKimiK3Reasoning(
 	model: Model<"openai-completions">,
 	options: OpenAICompletionsOptions | undefined,
 ): boolean {
-	if (model.provider !== "kimi-code" || model.id.toLowerCase() !== "k3" || !model.reasoning) return false;
-	if (options?.reasoning === undefined || options.disableReasoning) return false;
-	try {
-		const url = new URL(model.baseUrl);
-		return url.hostname === "api.kimi.com" && (url.pathname === "/coding" || url.pathname.startsWith("/coding/"));
-	} catch {
-		return false;
-	}
+	if (!model.compat.nativeKimiK3Reasoning || !model.reasoning) return false;
+	return options?.reasoning !== undefined && !options.disableReasoning;
 }
 
 function isChatCompletionsPromptCacheableContentBlock(

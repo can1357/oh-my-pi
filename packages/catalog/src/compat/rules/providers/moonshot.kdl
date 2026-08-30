@@ -1,0 +1,31 @@
+// Provider-wire compat for "moonshot"; regenerated from the frozen census using deployment contract selectors.
+
+provider "moonshot" {
+	class "kimi" {
+		thinking-mode "effort"
+	}
+	// Bundled census: the dotted K2.5+ generations and K3 are multimodal;
+	// legacy `kimi-k2-*` previews and the thinking lane stay text-only.
+	class "kimi" {
+		family "k2.5" {
+			input-modalities "text" "image"
+		}
+		family "k2.6" {
+			input-modalities "text" "image"
+		}
+		family "k2.7-code" {
+			input-modalities "text" "image"
+		}
+		family "k3" {
+			input-modalities "text" "image"
+		}
+	}
+	// The /models roster carries no modality metadata for the named vision/vl
+	// SKUs; the bounded id token is the census signal.
+	models token="vision" {
+		input-modalities "text" "image"
+	}
+	models token="vl" {
+		input-modalities "text" "image"
+	}
+}

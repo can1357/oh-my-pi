@@ -1,0 +1,86 @@
+// Provider-wire compat for "opencode-zen"; regenerated from the frozen census using deployment contract selectors.
+
+provider "opencode-zen" {
+	class "anthropic" {
+		revision ">=4 <4.6" {
+			thinking-efforts "minimal" "low" "medium" "high" "xhigh"
+		}
+	}
+	class "deepseek" {
+		thinking-mode "effort"
+	}
+	class "glm" {
+		thinking-mode "effort"
+	}
+	class "kimi" {
+		thinking-mode "effort"
+	}
+	class "mimo" {
+		family "v2" {
+			thinking-mode "effort"
+		}
+	}
+	class "minimax" {
+		family "m3" {
+			thinking-mode "effort"
+		}
+	}
+	class "openai" {
+		revision ">=5 <5.7" {
+			thinking-mode "effort"
+		}
+	}
+	class "unknown" {
+		thinking-mode "effort"
+	}
+	class "xai" {
+		family "grok" {
+			thinking-mode "effort"
+		}
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "*plus" {
+		thinking-efforts "minimal" "low" "medium" "high" "xhigh"
+		thinking-mode "budget"
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "big-pickle" {
+		thinking-efforts "high" "max"
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "glm-4*" "hy*" "ling-3*" "nemotron*" "glm-5" "glm-5.1" "laguna-s-2.1-free" \
+		"longcat-2.0-free" "north-mini-code-free" "ring-2.6-1t-free" {
+		thinking-efforts "minimal" "low" "medium" "high" "xhigh"
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "glm-5.2" {
+		thinking-efforts "minimal" "low" "medium" "high" "max"
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "gpt-5.1-codex" "gpt-5.1-codex-max" {
+		thinking-efforts "minimal" "low" "medium" "high"
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "gpt-5.1-codex-mini" {
+		thinking-efforts "medium" "high"
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "minimax-m2.1" "minimax-m2.5" "minimax-m2.7" {
+		thinking-mode "effort"
+	}
+	// residue: the Ox Alpha stealth SKU also ships under an aliased id; the
+	// wire-exact low/high/max ladder with mandatory thinking (issue #9349).
+	models "ox-alpha*" "x-preview-f-free" {
+		thinking-efforts "low" "high" "max"
+		thinking-requires-effort #true
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "minimax-m2.5-free" {
+		thinking-mode "anthropic-adaptive"
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "qwen3.6-plus-free" {
+		thinking-efforts "minimal" "low" "medium" "high"
+		thinking-mode "effort"
+	}
+}
