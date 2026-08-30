@@ -891,6 +891,47 @@ describe("formatUsageBreakdown", () => {
 		expect(text).toContain("expires in 2d (2026-01-03)");
 		expect(text).toContain("expired (2025-12-30)");
 	});
+	it("does not render reset credit expiries when none are available", () => {
+		const now = Date.parse("2026-01-01T00:00:00.000Z");
+		const reports: UsageReport[] = [
+			{
+				provider: "openai-codex",
+				fetchedAt: now,
+				limits: [],
+				metadata: { email: "none@example.test" },
+				resetCredits: {
+					availableCount: 0,
+					credits: [{ expiresAt: "2026-01-03T00:00:00.000Z", status: "available" }],
+				},
+			},
+		];
+
+		const text = stripVTControlCharacters(formatUsageBreakdown(reports, [], now));
+		expect(text).not.toContain("expires in 2d (2026-01-03)");
+	});
+
+	it("does not render redeemed reset credit expiries", () => {
+		const now = Date.parse("2026-01-01T00:00:00.000Z");
+		const reports: UsageReport[] = [
+			{
+				provider: "openai-codex",
+				fetchedAt: now,
+				limits: [],
+				metadata: { email: "redeemed@example.test" },
+				resetCredits: {
+					availableCount: 1,
+					credits: [
+						{ expiresAt: "2026-01-03T00:00:00.000Z" },
+						{ expiresAt: "2026-01-04T00:00:00.000Z", status: "redeemed" },
+					],
+				},
+			},
+		];
+
+		const text = stripVTControlCharacters(formatUsageBreakdown(reports, [], now));
+		expect(text).toContain("expires in 2d (2026-01-03)");
+		expect(text).not.toContain("expires in 3d (2026-01-04)");
+	});
 
 	it("sanitizes per-limit notes into a single line before joining them", () => {
 		const note = "safe\nFORGED\tcolumn\x1b[2Jcleared";

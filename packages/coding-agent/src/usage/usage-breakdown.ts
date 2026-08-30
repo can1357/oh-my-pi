@@ -304,8 +304,10 @@ function formatAccountHeader(
 }
 
 function formatResetCreditExpiryLines(report: UsageReport, nowMs: number): string[] {
+	if ((report.resetCredits?.availableCount ?? 0) <= 0) return [];
 	const lines: string[] = [];
 	for (const credit of report.resetCredits?.credits ?? []) {
+		if ((credit.status ?? "available") !== "available") continue;
 		if (!credit.expiresAt) continue;
 		const expiresAt = Date.parse(credit.expiresAt);
 		if (Number.isNaN(expiresAt)) continue;
