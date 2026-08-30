@@ -9,10 +9,18 @@
 ### Fixed
 
 - Fixed `z.union`, `z.discriminatedUnion`, `.optional()`, and `.nullable()` throwing `unordered union with overlapping morph inputs is indeterminate` at construction when a member was a plain (key-stripping) `z.object` overlapping another member or a `.catch()` schema — any plugin, hook, or custom tool declaring that shape failed to load; those combinators now dispatch first-match like Zod. Only that fallback's JSON Schema is unconstrained (`{}`); every member set omptype can combine order-independently still emits its real structure.
+- Fixed Zod-shim object schemas accepting input Zod rejects: arrays, `Date`, `Map`, `Set` and promises no longer pass `z.object`, `z.strictObject`, `z.looseObject`, `z.record`, the object mode changes, or a discriminated union, and the restriction survives `.partial()`, `.in`/`.out`, intersections, definition spreads and nesting at any depth. Class instances and plain objects remain object input, as in Zod.
+- Fixed `z.union([z.object(…), z.array(…)])` — and the same union against `Date`/`Map`/`Set`/`Promise` — emitting an unconstrained schema or failing to construct: those members are now provably disjoint, so the union keeps its structural `anyOf`.
+- Fixed `z.discriminatedUnion` silently behaving like an ordinary union: a variant that is not an object, does not declare the discriminator, or leaves its value set open (`kind: z.string()`) is now rejected at definition, as are two variants claiming the same value or both accepting the key missing. Literal unions that normalize to `boolean` still dispatch, and `z.lazy` variants are checked once their getter has run.
+- Fixed `Type.in` dropping input-side `filter` steps, which let it admit values the schema itself rejects.
+- Fixed `z.infer` reporting an optional property as required after `.describe()`, `.readonly()`, `.refine()`, `.transform()`, `.catch()` or `.nullable()`, contradicting the parse that accepts the key's absence.
+- Fixed `z.lazy()` dropping the resolved schema's `.refine()`/`.transform()`/`.catch()` steps, so a recursive schema accepted values its own refinement rejects.
+- Fixed `.readonly()` corrupting its own output: non-enumerable properties, accessors, sparse array holes and custom array properties survive the freeze, and `.readonly()` before `.partial()`/`.passthrough()` now applies the freeze over the new object policy.
 
 ### Changed
 
 - `.default()` follows Zod 4's output-default contract: the fallback is returned as-is instead of being re-validated through the input schema, and a mutable default (`.default({})`) no longer has to be spelled as a factory. Composed positions (`.describe()`, object embedding) still validate the fallback at construction.
+- `z.strictObject`/`z.looseObject` hand back the input object itself when validation succeeds, where Zod always builds a new one; only key-stripping (`z.object`) allocates. Documented rather than changed, because allocating would make overlapping loose-object unions indeterminate and erase their provider-facing schema.
 
 ## [17.3.1] - 2026-08-13
 
