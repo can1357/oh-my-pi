@@ -2412,8 +2412,9 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 	const index = options.index ?? 0;
 	const maxRuntimeMs = options.maxRuntimeMs ?? 0;
 	session.setIrcWakeTurnObserver(records => {
-		recordAgentTaskOutcome(session, null);
-		AgentRegistry.global().clearLastOutcome(id, session);
+		const registry = AgentRegistry.global();
+		const outcomeGeneration = registry.beginTaskOutcome(id, session);
+		if (outcomeGeneration !== undefined) recordAgentTaskOutcome(session, null);
 		const ircTask =
 			records
 				.map(record => {
@@ -2506,8 +2507,10 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 					startTime: turnStartTime,
 				});
 				const outcome = terminalOutcome(result);
-				recordAgentTaskOutcome(session, outcome);
-				AgentRegistry.global().setHistory(id, { lastOutcome: outcome });
+				if (outcomeGeneration !== undefined && registry.isCurrentTaskOutcome(id, outcomeGeneration)) {
+					recordAgentTaskOutcome(session, outcome);
+					registry.setTaskOutcome(id, outcomeGeneration, outcome);
+				}
 			} catch (finalizeError) {
 				logger.warn("IRC subagent turn finalization failed", {
 					id,
@@ -2688,9 +2691,10 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 	const index = options.index ?? 0;
 	const startTime = Date.now();
 	const session = await AgentLifecycleManager.global().ensureLive(id);
-	const ref = AgentRegistry.global().get(id);
-	AgentRegistry.global().clearLastOutcome(id, session);
-	recordAgentTaskOutcome(session, null);
+	const registry = AgentRegistry.global();
+	const ref = registry.get(id);
+	const outcomeGeneration = registry.beginTaskOutcome(id, session);
+	if (outcomeGeneration !== undefined) recordAgentTaskOutcome(session, null);
 	const sessionFile = ref?.sessionFile ?? undefined;
 
 	const monitor = createSubagentRunMonitor({
@@ -2764,8 +2768,10 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 		startTime,
 	});
 	const outcomeResult = terminalOutcome(result);
-	recordAgentTaskOutcome(session, outcomeResult);
-	AgentRegistry.global().setHistory(id, { lastOutcome: outcomeResult });
+	if (outcomeGeneration !== undefined && registry.isCurrentTaskOutcome(id, outcomeGeneration)) {
+		recordAgentTaskOutcome(session, outcomeResult);
+		registry.setTaskOutcome(id, outcomeGeneration, outcomeResult);
+	}
 	return result;
 }
 
@@ -2934,6 +2940,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 	let unsubscribe: (() => void) | null = null;
 	let reviveSession: AgentReviver | null = null;
 	let recordedTerminalOutcome: AgentTerminalOutcome | undefined;
+	let recordedTaskOutcomeGeneration: number | undefined;
 	const installIrcWakeTurnMonitor = (target: AgentSession): void => {
 		attachIrcWakeTurnMonitor(target, {
 			id,
@@ -3573,6 +3580,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				monitor.captureSalvage(session);
 				recordedTerminalOutcome = terminalOutcome({ aborted, exitCode });
 				recordAgentTaskOutcome(session, recordedTerminalOutcome);
+				recordedTaskOutcomeGeneration = AgentRegistry.global().taskOutcomeGeneration(id);
 				if (options.keepAlive !== false && worktree === undefined) {
 					installIrcWakeTurnMonitor(session);
 				}
@@ -3682,17 +3690,23 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		startTime,
 	});
 	const finalOutcome = terminalOutcome(result);
-	if (recordedTerminalOutcome !== undefined && recordedTerminalOutcome !== finalOutcome) {
-		const liveSession = AgentRegistry.global().get(id)?.session;
+	const registry = AgentRegistry.global();
+	const finalOutcomeGenerationIsCurrent =
+		recordedTaskOutcomeGeneration !== undefined &&
+		registry.isCurrentTaskOutcome(id, recordedTaskOutcomeGeneration);
+	const acceptsFollowUpTurns = options.keepAlive !== false && worktree === undefined;
+	const finalOutcomeCanBeRecorded = !acceptsFollowUpTurns || finalOutcomeGenerationIsCurrent;
+	if (recordedTerminalOutcome !== undefined && recordedTerminalOutcome !== finalOutcome && finalOutcomeCanBeRecorded) {
+		const liveSession = registry.get(id)?.session;
 		if (liveSession) {
 			recordAgentTaskOutcome(liveSession, finalOutcome);
 		} else if (subtaskSessionFile) {
 			await recordPersistedAgentTaskOutcome(subtaskSessionFile, cwd, finalOutcome);
 		}
 	}
-	AgentRegistry.global().setHistory(id, {
-		outputPath: result.outputPath,
-		lastOutcome: finalOutcome,
-	});
+	if (recordedTaskOutcomeGeneration !== undefined && finalOutcomeGenerationIsCurrent) {
+		registry.setTaskOutcome(id, recordedTaskOutcomeGeneration, finalOutcome);
+	}
+	registry.setHistory(id, { outputPath: result.outputPath });
 	return result;
 }

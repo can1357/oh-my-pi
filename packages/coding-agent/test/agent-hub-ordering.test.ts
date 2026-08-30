@@ -1150,8 +1150,34 @@ describe("Agent hub row ordering", () => {
 
 		expect(agentDisplayState(ref)).toBe("failed");
 		expect(agentDisplayState({ ...ref, session: { isStreaming: true } as AgentSession })).toBe("running");
+		expect(
+			agentDisplayState(
+				ref,
+				{ id: ref.id, kind: "subagent", label: ref.displayName, status: "failed", lastUpdate: 0, progress: { retryState: {} } } as never,
+			),
+		).toBe("retrying");
 		expect(agents.clearLastOutcome(ref.id, session)).toBe(true);
 		expect(agentDisplayState(ref)).toBe("idle");
+	});
+
+	it("rejects delayed finalization after a newer agent turn starts", () => {
+		const agents = new AgentRegistry();
+		const session = { isStreaming: false } as AgentSession;
+		const ref = agents.register({
+			id: "ConcurrentAgent",
+			displayName: "Concurrent Agent",
+			kind: "sub",
+			session,
+			status: "idle",
+			history: { lastOutcome: "failed" },
+		});
+		const settledGeneration = agents.taskOutcomeGeneration(ref.id)!;
+		const followUpGeneration = agents.beginTaskOutcome(ref.id, session)!;
+
+		expect(agents.setTaskOutcome(ref.id, settledGeneration, "completed")).toBe(false);
+		expect(ref.history?.lastOutcome).toBeUndefined();
+		expect(agents.setTaskOutcome(ref.id, followUpGeneration, "failed")).toBe(true);
+		expect(ref.history?.lastOutcome).toBe("failed");
 	});
 
 	it("invalidates observer outcomes only after a follow-up turn starts", async () => {
@@ -1216,7 +1242,7 @@ describe("Agent hub row ordering", () => {
 		expect(appended.map(entry => entry.data)).toEqual([{ outcome: null }, { outcome: "completed" }]);
 	});
 
-	it("retains the prior outcome when follow-up prompt dispatch is rejected", async () => {
+	it("retains the prior outcome when a follow-up prompt never starts", async () => {
 		const agents = new AgentRegistry();
 		const appended: unknown[] = [];
 		const session = {
@@ -1239,6 +1265,9 @@ describe("Agent hub row ordering", () => {
 				throw new Error("prompt rejected");
 			}),
 		).rejects.toThrow("prompt rejected");
+		expect(agents.get("RejectedAgent")?.history?.lastOutcome).toBe("failed");
+		expect(appended).toEqual([]);
+		expect(await runTrackedAgentTaskTurn(agents, "RejectedAgent", session, async () => true)).toBe(true);
 		expect(agents.get("RejectedAgent")?.history?.lastOutcome).toBe("failed");
 		expect(appended).toEqual([]);
 	});

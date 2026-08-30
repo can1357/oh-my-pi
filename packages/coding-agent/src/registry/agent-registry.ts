@@ -151,6 +151,8 @@ export class AgentRegistry {
 
 	readonly #refs = new Map<string, AgentRef>();
 	readonly #listeners = new Set<RegistryListener>();
+	#nextTaskOutcomeGeneration = 0;
+	readonly #taskOutcomeGenerations = new Map<string, number>();
 
 	#matchesExpected(ref: AgentRef, expected?: AgentRefExpectation): boolean {
 		return expected === undefined || ref === expected || ref.session === expected;
@@ -177,6 +179,7 @@ export class AgentRegistry {
 			history: input.history,
 		};
 		this.#refs.set(ref.id, ref);
+		this.#taskOutcomeGenerations.set(ref.id, ++this.#nextTaskOutcomeGeneration);
 		this.#emit({ type: "registered", ref });
 		return ref;
 	}
@@ -214,6 +217,30 @@ export class AgentRegistry {
 		ref.lastActivity = Date.now();
 		this.#emit({ type: "metadata_changed", ref });
 		return true;
+	}
+
+	/**
+	 * Start one task verdict generation after the owned session confirms a turn.
+	 * A later generation prevents delayed finalization from overwriting that turn.
+	 */
+	beginTaskOutcome(id: string, expected?: AgentRefExpectation): number | undefined {
+		if (!this.clearLastOutcome(id, expected)) return undefined;
+		const generation = ++this.#nextTaskOutcomeGeneration;
+		this.#taskOutcomeGenerations.set(id, generation);
+		return generation;
+	}
+
+	taskOutcomeGeneration(id: string): number | undefined {
+		return this.#refs.has(id) ? this.#taskOutcomeGenerations.get(id) : undefined;
+	}
+
+	isCurrentTaskOutcome(id: string, generation: number): boolean {
+		return this.#refs.has(id) && this.#taskOutcomeGenerations.get(id) === generation;
+	}
+
+	setTaskOutcome(id: string, generation: number, outcome: AgentTerminalOutcome): boolean {
+		if (!this.isCurrentTaskOutcome(id, generation)) return false;
+		return this.setHistory(id, { lastOutcome: outcome });
 	}
 
 	setStatus(id: string, status: AgentStatus, expected?: AgentRefExpectation): boolean {
@@ -289,6 +316,7 @@ export class AgentRegistry {
 		const ref = this.#refs.get(id);
 		if (!ref || !this.#matchesExpected(ref, expected)) return false;
 		this.#refs.delete(id);
+		this.#taskOutcomeGenerations.delete(id);
 		this.#emit({ type: "removed", ref });
 		return true;
 	}
@@ -356,21 +384,25 @@ export async function runTrackedAgentTaskTurn(
 	onState?: (state: AgentTaskOutcomeState) => void,
 ): Promise<boolean> {
 	let started = false;
+	let outcomeGeneration: number | undefined;
 	const finalize = (outcome: AgentTerminalOutcome): void => {
+		if (outcomeGeneration === undefined || !registry.isCurrentTaskOutcome(id, outcomeGeneration)) return;
 		recordAgentTaskOutcome(session, outcome);
-		registry.setHistory(id, { lastOutcome: outcome });
+		registry.setTaskOutcome(id, outcomeGeneration, outcome);
 		onState?.(outcome);
 	};
 	const unsubscribe = session.subscribe(event => {
 		if (event.type !== "agent_start" || started) return;
 		started = true;
+		outcomeGeneration = registry.beginTaskOutcome(id, session);
+		if (outcomeGeneration === undefined) return;
 		recordAgentTaskOutcome(session, null);
-		registry.clearLastOutcome(id, session);
 		onState?.("active");
 	});
 	try {
 		const accepted = await dispatch();
 		if (!accepted) return false;
+		if (!started) return true;
 		const stopReason = session.getLastAssistantMessage()?.stopReason;
 		finalize(stopReason === "aborted" ? "aborted" : stopReason === "error" ? "failed" : "completed");
 		return true;

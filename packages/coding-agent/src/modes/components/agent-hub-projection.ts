@@ -43,11 +43,11 @@ export const AGENT_DISPLAY_STATES = [
  */
 export function agentDisplayState(ref: AgentRef, observed?: ObservableSession): AgentDisplayState {
 	if (ref.status === "aborted") return "aborted";
-	if (ref.session?.isStreaming) return "running";
-	if (ref.status === "running") {
-		return observed?.status === "active" && observed.progress?.retryState ? "retrying" : "running";
+	if (ref.session?.isStreaming || ref.status === "running") {
+		return observed?.progress?.retryState ? "retrying" : "running";
 	}
-	if (observed?.status === "active") return observed.progress?.retryState ? "retrying" : "running";
+	if (observed?.progress?.retryState) return "retrying";
+	if (observed?.status === "active") return "running";
 	if (observed?.status === "completed") return "completed";
 	if (observed?.status === "failed") return "failed";
 	if (observed?.status === "aborted") return "aborted";
