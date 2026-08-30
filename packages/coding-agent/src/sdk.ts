@@ -1564,7 +1564,15 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		});
 	}
 
-	const taskDepth = options.taskDepth ?? 0;
+	// Normalized session depth: a session with any parent linkage
+	// (`parentTaskPrefix`, e.g. /tan clones, or the documented `parentAgentId`)
+	// is a child even without an explicit depth. One value feeds identity,
+	// ToolSession, IRC gating, memory startup, and spawn gates so they can
+	// never disagree. Explicit depths pass through unchanged.
+	const taskDepth =
+		(options.taskDepth ?? 0) > 0 || options.parentTaskPrefix !== undefined || options.parentAgentId !== undefined
+			? Math.max(options.taskDepth ?? 0, 1)
+			: 0;
 
 	// Resolves the session/agent thinking level using the same precedence we
 	// apply at startup: explicit option → persisted session entry → restored
@@ -1709,14 +1717,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 
 	const agentRegistry = options.agentRegistry ?? AgentRegistry.global();
 	const resolvedAgentId = options.agentId ?? options.parentTaskPrefix ?? MAIN_AGENT_ID;
-	// A session with any parent linkage is a child even when the caller did not
-	// pass an explicit depth: `parentTaskPrefix` (e.g. /tan clones) or a
-	// documented parent link (`parentAgentId`, undefined for top-level).
-	// Report depth 1 rather than a contradictory kind "sub" + depth 0;
-	// explicit depths win unchanged.
-	const classifiedSub =
-		(options.taskDepth ?? 0) > 0 || options.parentTaskPrefix !== undefined || options.parentAgentId !== undefined;
-	const resolvedDepth = (options.taskDepth ?? 0) > 0 ? (options.taskDepth as number) : classifiedSub ? 1 : 0;
+	// Classification mirrors the normalized `taskDepth` above: any parent
+	// linkage (`parentTaskPrefix` or documented `parentAgentId`) makes this a
+	// child session.
+	const classifiedSub = taskDepth > 0;
+	const resolvedDepth = taskDepth;
 	const resolvedAgentDisplayName = options.agentDisplayName ?? (classifiedSub ? "sub" : "main");
 	const agentKind = classifiedSub ? ("sub" as const) : ("main" as const);
 	let registeredAgentRef: AgentRef | undefined;
@@ -1796,7 +1801,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			outputSchemaMode: options.outputSchemaMode,
 			requireYieldTool: options.requireYieldTool,
 			prewalkArmed: options.prewalk !== undefined,
-			taskDepth: options.taskDepth ?? 0,
+			taskDepth,
 			getSessionFile: () => sessionManager.getSessionFile() ?? null,
 			sessionManager,
 			getEvalKernelOwnerId: () => evalKernelOwnerId,
@@ -3131,7 +3136,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					settings.get("task.disabledAgents") as string[] | undefined,
 					options.spawns ?? "*",
 				),
-				taskIrcEnabled: !restrictToolNames && isIrcEnabled(settings, options.taskDepth ?? 0),
+				taskIrcEnabled: !restrictToolNames && isIrcEnabled(settings, taskDepth),
 				autoQaEnabled: !restrictToolNames && isAutoQaEnabled(settings),
 				writeTransportOnly:
 					toolSession.deviceOnlyWrite === true && toolSession.pendingFullWriteDescription !== true,
@@ -3686,10 +3691,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			createInspectImageTool: restrictToolNames
 				? undefined
 				: async () => (await BUILTIN_TOOLS.inspect_image(toolSession)) ?? null,
-			createVibeTools:
-				(options.taskDepth ?? 0) === 0 && !options.parentTaskPrefix
-					? () => createVibeTools(toolSession)
-					: undefined,
+			createVibeTools: taskDepth === 0 ? () => createVibeTools(toolSession) : undefined,
 			builtInToolNames: builtInRegistryToolNames,
 			mcpManagerToolNames: initialMcpManagerToolNames,
 			transformContext,

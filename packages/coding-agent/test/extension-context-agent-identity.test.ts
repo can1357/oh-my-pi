@@ -106,21 +106,27 @@ describe("ExtensionContext agentIdentity", () => {
 	it("hands handlers an immutable identity so one extension cannot corrupt it for others", () => {
 		const registry = new AgentRegistry();
 		registry.register({ id: "P1", displayName: "p1", kind: "sub", parentId: MAIN_AGENT_ID, session: null });
+		registry.register({ id: "P2", displayName: "p2", kind: "sub", parentId: "P1", session: null });
 		const runner = makeRunner({
 			kind: "sub",
-			depth: 1,
-			agentId: "C1",
-			displayName: "c1",
-			parentId: "P1",
+			depth: 2,
+			agentId: "C2",
+			displayName: "c2",
+			parentId: "P2",
 			registry,
 		});
 		const identity = runner.createContext().agentIdentity;
+		expect(identity.parentChain).toEqual(["P2", "P1"]);
 
 		expect(Object.isFrozen(identity)).toBe(true);
 		expect(Object.isFrozen(identity.parentChain)).toBe(true);
 		// A mutation attempt must not corrupt the identity other handlers read
 		// (frozen surfaces may not throw in every runtime, but must never change).
-		(identity.parentChain as unknown as string[]).reverse();
-		expect(runner.createContext().agentIdentity.parentChain).toEqual(["P1"]);
+		try {
+			(identity.parentChain as unknown as string[]).reverse();
+		} catch {
+			// Frozen-array mutation may throw depending on runtime — both outcomes fine.
+		}
+		expect(runner.createContext().agentIdentity.parentChain).toEqual(["P2", "P1"]);
 	});
 });
