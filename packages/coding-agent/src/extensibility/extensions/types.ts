@@ -452,6 +452,27 @@ export interface ExtensionModelQuery {
 /** Runtime host mode exposed to Pi-compatible extensions. */
 export type ExtensionMode = "tui" | "rpc" | "json" | "print";
 
+/**
+ * Identity of the agent an extension context serves.
+ */
+export interface AgentIdentity {
+	/** Whether this is the top-level session or a subagent. */
+	kind: "main" | "sub";
+	/** Recursion depth of this agent: `0` = top-level. */
+	depth: number;
+	/** Registry id of this agent; `"Main"` for the default top-level session. */
+	agentId: string;
+	/** Human-readable name of this agent. */
+	displayName: string;
+	/** Registry id of the direct parent agent; undefined for the top-level session. */
+	parentId?: string;
+	/**
+	 * Ancestor registry ids, nearest-first. Excludes `"Main"` and is `[]` for the
+	 * top-level session. Runner-less sessions cannot resolve the chain, so it is
+	 * `[]` there even for subagents.
+	 */
+}
+
 export interface ExtensionContext {
 	/** UI methods for user interaction */
 	ui: ExtensionUIContext;
@@ -477,6 +498,11 @@ export interface ExtensionContext {
 	model: Model | undefined;
 	/** Read-only model query facade: list / current / resolve / family. */
 	models: ExtensionModelQuery;
+	/**
+	 * Identity of the agent this context serves: top-level or subagent,
+	 * depth, registry id, display name, and parent chain. Read lazily.
+	 */
+	agentIdentity: AgentIdentity;
 	/** Whether the agent is idle (not streaming) */
 	isIdle(): boolean;
 	/** Abort the current agent operation */

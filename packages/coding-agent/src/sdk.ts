@@ -2740,6 +2740,14 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			settings,
 			localProtocolOptions,
 			() => (hasSession ? session.getAsyncJobSnapshot() : null),
+			{
+				kind: agentKind,
+				depth: options.taskDepth ?? 0,
+				agentId: resolvedAgentId,
+				displayName: resolvedAgentDisplayName,
+				parentId: options.parentAgentId,
+				registry: agentRegistry,
+			},
 		);
 
 		credentialDisabledTarget = extensionRunner;
@@ -3718,6 +3726,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			obfuscator,
 			agentId: resolvedAgentId,
 			agentKind,
+			taskDepth: options.taskDepth ?? 0,
 			providerSessionId: options.providerSessionId,
 			providerPromptCacheKeySource,
 			parentEvalSessionId: options.parentEvalSessionId,

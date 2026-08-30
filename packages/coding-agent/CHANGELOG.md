@@ -8,6 +8,7 @@
 - Added `CLINE_API_KEY` to the CLI environment help for native ClinePass subscription inference ([#7863](https://github.com/can1357/oh-my-pi/pull/7863) by [@will-bogusz](https://github.com/will-bogusz)).
 - Devin model selectors now accept the native CLI's short aliases (`devin/opus`, `devin/swe`), dotted upstream spellings (`devin/gemini-3.7-flash`), and raw effort-route wire uids for dynamically collapsed families ([#8590](https://github.com/can1357/oh-my-pi/pull/8590) by [@will-bogusz](https://github.com/will-bogusz)).
 - Added provider-supplied model metadata to the `/models` detail line: `new`, `beta`, and `recommended` badges beside the model name, and the upstream description after the context, cost, and perf facts ([#8590](https://github.com/can1357/oh-my-pi/pull/8590) by [@will-bogusz](https://github.com/will-bogusz)).
+- Added `ctx.agentIdentity` to extension contexts, exposing whether a handler runs in the main session or a subagent, its recursion depth, registry id, display name, and parent chain ([#10228](https://github.com/can1357/oh-my-pi/issues/10228)).
 
 ## [18.0.11] - 2026-08-29
 

@@ -214,6 +214,7 @@ Handlers and tool `execute` receive `ctx` with:
 - `shutdown()`
 - `getSystemPrompt()`
 - `memory` (optional structured memory runtime — status/search/save across the configured backend)
+- `agentIdentity` — identity of the agent this handler runs in: `kind` ("main" | "sub"), `depth` (0 = top-level), `agentId` (registry id, "Main" for top-level), `displayName`, optional `parentId`, and `parentChain` (nearest-first ancestor registry ids, excluding "Main"; empty for top-level and for runner-less SDK sessions, which cannot resolve the chain)
 - `setInterval(fn, ms, ...args)` / `setTimeout(fn, ms, ...args)` / `clearTimer(timer)` — managed timers (see below)
 
 ### Background work (`ctx.setInterval` / `ctx.setTimeout`)

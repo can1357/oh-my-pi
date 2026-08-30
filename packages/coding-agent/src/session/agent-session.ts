@@ -143,7 +143,7 @@ import type {
 import { emitSessionShutdownEvent } from "../extensibility/extensions";
 import { ManagedTimers } from "../extensibility/extensions/managed-timers";
 import { createExtensionModelQuery } from "../extensibility/extensions/model-api";
-import type { CompactOptions, ContextUsage } from "../extensibility/extensions/types";
+import type { AgentIdentity, CompactOptions, ContextUsage } from "../extensibility/extensions/types";
 import type { HookCommandContext } from "../extensibility/hooks/types";
 import type { Skill, SkillWarning } from "../extensibility/skills";
 import { expandSlashCommand, type FileSlashCommand } from "../extensibility/slash-commands";
@@ -178,6 +178,7 @@ import planModeToolDecisionReminderPrompt from "../prompts/system/plan-mode-tool
 import rewindReportTemplate from "../prompts/system/rewind-report.md" with { type: "text" };
 import sideChannelNoToolsReminder from "../prompts/system/side-channel-no-tools.md" with { type: "text" };
 import vibeModeActivePrompt from "../prompts/system/vibe-mode-active.md" with { type: "text" };
+import { MAIN_AGENT_ID } from "../registry/agent-registry";
 import {
 	deobfuscateAssistantContent,
 	deobfuscateSessionContext,
@@ -623,6 +624,8 @@ export class AgentSession {
 	// Agent identity (registry id) used for IRC routing and job ownership.
 	#agentId: string | undefined;
 	#agentKind: "main" | "sub" = "main";
+	// Task recursion depth (0 = top-level); mirrors the runner identity input.
+	#taskDepth = 0;
 	#scoutAllowedBySpawnPolicy = true;
 	#providerSessionId: string | undefined;
 	#freshProviderSessionId: string | undefined;
@@ -1473,6 +1476,7 @@ export class AgentSession {
 		this.#loopGuards = new LoopGuards(streamGuardsHost);
 		this.#agentId = config.agentId;
 		this.#agentKind = config.agentKind ?? "main";
+		this.#taskDepth = config.taskDepth ?? 0;
 		this.#scoutAllowedBySpawnPolicy = config.scoutAllowedBySpawnPolicy ?? true;
 		this.#providerSessionId = config.providerSessionId;
 		this.#inheritedProviderPromptCacheKey =
@@ -6231,6 +6235,7 @@ export class AgentSession {
 
 			model: this.model ?? undefined,
 			models: createExtensionModelQuery(this.#modelRegistry, this.settings, () => this.model ?? undefined),
+			agentIdentity: this.#fallbackAgentIdentity(),
 			isIdle: () => !this.isStreaming,
 			abort: () => {
 				void this.abort();
@@ -6290,6 +6295,23 @@ export class AgentSession {
 			logger.warn("Extension timer callback threw", { event, error }),
 		);
 		return this.#fallbackExtensionTimers;
+	}
+
+	/**
+	 * Runner-less command-context identity (SDK embeddings with no extension
+	 * runner). Derived from the session's own registry identity; the parent
+	 * chain is unavailable without a registry handle, so it degrades to empty
+	 * rather than fabricating ancestors.
+	 */
+	#fallbackAgentIdentity(): AgentIdentity {
+		const kind = this.#agentKind;
+		return {
+			kind,
+			depth: this.#taskDepth,
+			agentId: this.#agentId ?? MAIN_AGENT_ID,
+			displayName: kind === "sub" ? "sub" : "main",
+			parentChain: [],
+		};
 	}
 
 	/**
