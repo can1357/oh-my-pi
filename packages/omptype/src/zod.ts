@@ -1,6 +1,15 @@
 import { type OmpErrors, OmpTypeError } from "./errors";
-import { type EmbeddableSchema, type Extras, embed, hasDeferredAlias, type IR, IR_BRAND, type PropIR } from "./ir";
-import { type FilterOptions, type NarrowContext, type Type, type } from "./type";
+import {
+	type EmbeddableSchema,
+	type Extras,
+	embed,
+	hasDeferredAlias,
+	type IR,
+	IR_BRAND,
+	isPlainRecord,
+	type PropIR,
+} from "./ir";
+import { type NarrowContext, type Type, type } from "./type";
 
 interface OptionalSchemaMarker {
 	readonly _optional: true;
@@ -14,8 +23,6 @@ interface RefineOptions {
 interface Decoratable<out Out> extends EmbeddableSchema {
 	(value: unknown): Out | OmpErrors;
 	narrow(predicate: (value: Out, context: NarrowContext) => unknown): Decoratable<Out>;
-	/** Input-side predicate: runs on the raw value, before the base validates it. */
-	filter(predicate: (value: unknown, context: NarrowContext) => unknown, options?: FilterOptions): Decoratable<Out>;
 	pipe<Next>(transform: (value: Out, context: NarrowContext) => Next): Decoratable<Exclude<Next, OmpErrors>>;
 	or(def: unknown): Decoratable<unknown>;
 	describe(description: string): Decoratable<Out>;
@@ -117,10 +124,8 @@ const kRebuild = Symbol("omptype.zod.rebuild");
 interface RebuildInfo<Out> {
 	/** Wrapper-free schema, the one a rebuild starts from. */
 	base: Decoratable<Out>;
-	/** Whether an array guard is part of the chain. */
-	guarded: boolean;
-	/** Re-applies the non-guard wrappers, currently `.readonly()`'s freeze. */
-	rewrap?: (schema: Decoratable<Out>) => Decoratable<Out>;
+	/** Re-applies the wrappers, currently `.readonly()`'s freeze. */
+	rewrap: (schema: Decoratable<Out>) => Decoratable<Out>;
 }
 
 /** A schema that may carry {@link RebuildInfo}. */
@@ -133,7 +138,6 @@ function rebuildInfoOf<Out>(schema: Decoratable<Out>): RebuildInfo<Out> | undefi
 	return carrier[kRebuild];
 }
 
-/** Configurable so a schema stamped by `guardObjectInput` can be re-stamped once its full wrapper chain is known. */
 function stampRebuild<Out>(schema: Decoratable<Out>, info: RebuildInfo<Out>): Decoratable<Out> {
 	Object.defineProperty(schema, kRebuild, { value: info, enumerable: false, configurable: true });
 	return schema;
@@ -158,56 +162,8 @@ function restrictBase<Out>(source: Decoratable<Out>, ir: IR): Decoratable<Out> {
 		: schemaFromIR<Out>(ir);
 	if (base.ir.desc !== undefined) structural = structural.describe(base.ir.desc);
 	if (base.hasDefault) structural = structural.default(base.defaultValue as Out | (() => Out));
-	// Every object target is guarded, stripping included; any other target — a
-	// discriminated union rebuilt by `.describe()` — keeps the guard it arrived
-	// with.
-	const guarded = ir.k === "object" || info?.guarded === true;
-	let next = guarded ? guardObjectInput(structural) : structural;
-	if (info?.rewrap !== undefined) next = info.rewrap(next);
-	return guarded || info?.rewrap !== undefined
-		? stampRebuild(next, { base: structural, guarded, rewrap: info?.rewrap })
-		: next;
-}
-
-/**
- * Kind label for a value zod classifies OUTSIDE its object domain, or
- * `undefined` when the value is acceptable object input.
- *
- * Mirrors zod's own input classification: arrays, `Date`, `Map`, `Set` and
- * thenables are separate parsed types there, so an object schema rejects them.
- * Plain objects and class instances are object input, in zod and here.
- */
-function nonObjectKind(value: object): string | undefined {
-	if (Array.isArray(value)) return "an array";
-	if (value instanceof Date) return "a Date";
-	if (value instanceof Map) return "a Map";
-	if (value instanceof Set) return "a Set";
-	const thenable: { then?: unknown; catch?: unknown } = value;
-	return typeof thenable.then === "function" && typeof thenable.catch === "function" ? "a Promise" : undefined;
-}
-
-/**
- * Hold an object schema to zod's object-input domain, which the emitted
- * `{"type":"object"}` already promises — omptype's object node accepts any
- * non-null object, arrays and built-ins included.
- *
- * A RAW `filter` step: filters run before the base validates, so this also
- * catches what an output-side `narrow` cannot — a key-stripping object has
- * already turned `[]` into `{}` by the time a narrow runs, and so has a
- * discriminated union whose matching variant strips. `raw` skips the input
- * prevalidation walk a filter normally triggers, which would validate every
- * accepted object twice and rewalk descendants once per nesting level.
- */
-function guardObjectInput<Out>(base: Decoratable<Out>): Decoratable<Out> {
-	const guarded = base.filter(
-		(value, ctx: NarrowContext) => {
-			if (typeof value !== "object" || value === null) return true;
-			const kind = nonObjectKind(value);
-			return kind === undefined || ctx.mustBe(`an object, not ${kind}`);
-		},
-		{ raw: true },
-	);
-	return stampRebuild(guarded, { base, guarded: true });
+	if (info === undefined) return structural;
+	return stampRebuild(info.rewrap(structural), { base: structural, rewrap: info.rewrap });
 }
 
 /**
@@ -515,7 +471,6 @@ function decorate<Out>(schema: Decoratable<Out>, optional = false): ZodLikeSchem
 			const frozen = freezeParseOutput(schema);
 			stampRebuild(frozen, {
 				base: info?.base ?? schema,
-				guarded: info?.guarded === true,
 				rewrap: rewrap === undefined ? freezeParseOutput : inner => freezeParseOutput(rewrap(inner)),
 			});
 			return next(frozen) as unknown as ZodLikeSchema<Readonly<Out>>;
@@ -551,8 +506,11 @@ function objectSchema<const S extends Shape>(shape: S, extras: Extras = "delete"
 		}
 		props.push(prop);
 	}
-	const base = schemaFromIR<unknown>({ k: "object", props, extras });
-	return decorateUnknown(guardObjectInput(base)) as unknown as ZodLikeSchema<ObjectOutput<S>>;
+	// `plain` is structural, so it rides through `.strict()`/`.partial()` rebuilds,
+	// `projectIO` (hence `.in`), embedded `sub` nodes and the compiler — none of
+	// which can see a validation step attached to a nested schema.
+	const base = schemaFromIR<unknown>({ k: "object", props, extras, plain: true });
+	return decorateUnknown(base) as unknown as ZodLikeSchema<ObjectOutput<S>>;
 }
 
 export const string = (): ZodLikeSchema<string> => decorate(schemaFromIR(type.string.ir));
@@ -804,7 +762,7 @@ export const discriminatedUnion = <
 			// union's input is an object by definition, yet a stripping variant
 			// whose discriminator carries a default (`kind: z.literal("a")
 			// .default("a")`) would otherwise morph `[]` into `{ kind: "a" }`.
-			return decorate(guardObjectInput(schemaFromIR<UnionOutput<Schemas>>({ k: "union", members: variantIrs })));
+			return decorate(schemaFromIR<UnionOutput<Schemas>>({ k: "union", members: variantIrs }));
 		} catch (error) {
 			// Same fallback as union(): variants whose discriminators do not
 			// disjointly pin literals (e.g. optional discriminators overlapping
@@ -826,7 +784,7 @@ export const discriminatedUnion = <
 			claimDiscriminatorValues(true);
 			checked = true;
 		}
-		if (typeof value !== "object" || value === null || Array.isArray(value)) {
+		if (typeof value !== "object" || value === null || !isPlainRecord(value)) {
 			return ctx.error(`an object with a "${discriminator}" discriminator`);
 		}
 		let candidates = variants;
@@ -908,8 +866,9 @@ export const record = <Key extends string, Value>(
 		props: [],
 		index: embed(valueSchema),
 		extras: "keep",
+		plain: true,
 	});
-	const checked = guardObjectInput(base).narrow((value, ctx: NarrowContext) => {
+	const checked = base.narrow((value, ctx: NarrowContext) => {
 		for (const key in value) {
 			if (keySchema(key) instanceof type.errors) return ctx.mustBe("a record with valid string keys");
 		}

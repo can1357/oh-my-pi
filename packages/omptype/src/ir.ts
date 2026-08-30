@@ -138,6 +138,18 @@ export type IR = IRAnalysis &
 				symbolIndex?: IR;
 				patternIndexes?: { key: IR; val: IR }[];
 				extras: Extras;
+				/**
+				 * Restrict accepted input to plain records: reject arrays and the
+				 * built-ins that carry their own domain (`Date`, `Map`, `Set`,
+				 * thenables). Unset keeps omptype's default, where any non-null
+				 * object is object input.
+				 *
+				 * Structural rather than a validation step on purpose: it rides
+				 * through `projectIO` (so `.in`/`.out` keep it at any depth),
+				 * through embedded `sub` nodes, and through the compiler, none of
+				 * which can see a step attached to a nested schema.
+				 */
+				plain?: boolean;
 				desc?: string;
 		  }
 		| {
@@ -1623,6 +1635,23 @@ function scanSimpleIR(ir: IR): boolean {
 		default:
 			return true;
 	}
+}
+
+/**
+ * True when `value` is acceptable input for an object node marked
+ * {@link IR.plain} — everything except arrays and the built-ins that carry
+ * their own domain. Mirrors zod's input classification, where `Date`, `Map`,
+ * `Set`, arrays and thenables are separate parsed types, so an object schema
+ * rejects them; plain objects and class instances are object input.
+ *
+ * Exported because the interpreter and the compiler both need the identical
+ * predicate — a compiled validator that disagreed with the walker would make
+ * the JIT threshold observable.
+ */
+export function isPlainRecord(value: object): boolean {
+	if (Array.isArray(value) || value instanceof Date || value instanceof Map || value instanceof Set) return false;
+	const thenable: { then?: unknown; catch?: unknown } = value;
+	return typeof thenable.then !== "function" || typeof thenable.catch !== "function";
 }
 
 /** True when validating `ir` can produce an output different from its input. */

@@ -9,7 +9,7 @@
  * - failure returns an `OmpErrors` with a single fast-fail entry
  */
 import { MISSING, OmpErrors } from "./errors";
-import { expectedOf, hasAlias, hasMorph, type IR } from "./ir";
+import { expectedOf, hasAlias, hasMorph, type IR, isPlainRecord } from "./ir";
 
 const own = Object.prototype.hasOwnProperty;
 /** Return an independent runtime value for a prevalidated static default. */
@@ -140,6 +140,7 @@ function checkNode(ir: IR, v: unknown): boolean {
 		}
 		case "object": {
 			if (typeof v !== "object" || v === null) return false;
+			if (ir.plain === true && !isPlainRecord(v)) return false;
 			const rec = v as Record<PropertyKey, unknown>;
 			for (const p of ir.props) {
 				const present = p.key in rec;
@@ -387,6 +388,7 @@ function visitNode(ir: IR, v: unknown, path: PropertyKey[]): unknown {
 		}
 		case "object": {
 			if (typeof v !== "object" || v === null) return fail(path, "an object", v);
+			if (ir.plain === true && !isPlainRecord(v)) return fail(path, "an object", v);
 			const rec = v as Record<PropertyKey, unknown>;
 			const morph = hasMorph(ir);
 			let out: Record<PropertyKey, unknown> | undefined;
