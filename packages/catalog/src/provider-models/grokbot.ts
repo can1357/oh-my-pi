@@ -1,4 +1,3 @@
-import { Effort } from "../effort";
 import type { ModelSpec } from "../types";
 
 export const GROKBOT_BACKEND = "https://api2.cursor.sh";
@@ -22,6 +21,7 @@ type GrokbotModelSeed = {
  * Tiny offline fallback when AvailableModels is unreachable.
  * Live catalog comes from `fetchGrokbotAvailableModels` (authoritative).
  * Do not re-expand into alias forests — aliases resolve client-side from live rows.
+ * Effort ladders are rule-owned (`providers/grokbot.kdl`); seeds stay neutral.
  */
 export const GROKBOT_MODEL_SEEDS: readonly GrokbotModelSeed[] = [
 	{ id: "sand-default", name: "sand-default (routed)", reasoning: true, sandParameterIds: [] },
@@ -47,13 +47,5 @@ export function buildGrokbotStaticSeed(baseUrl = GROKBOT_BACKEND): ModelSpec<"gr
 		supportsTools: true,
 		sandParameterIds: seed.sandParameterIds ?? [],
 		sandMaxMode: false,
-		...(seed.id === "grok-4.6"
-			? {
-					thinking: {
-						mode: "effort" as const,
-						efforts: [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh],
-					},
-				}
-			: undefined),
 	}));
 }

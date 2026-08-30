@@ -10,6 +10,8 @@
 
 ### Fixed
 
+- Grok Bot offline `grok-4.6` effort ladder comes from provider KDL via `buildModel`, not a TypeScript per-id seed branch.
+- Grok Bot AvailableModels does not invent low/medium/high/xhigh when upstream effort values are all unrecognized.
 - Grok Bot AvailableModels aliases include `variants[].legacySlug` so saved legacy selectors still resolve.
 - Grok Bot prefers every environment renewal credential (`GROKBOT_*` / `SAND_INFERENCE_*`) over secrets-file fallbacks when minting.
 - Restored unrelated bundled catalog rows dropped during an earlier Grok Bot `models.json` regen (kept parent catalog; only added Grok Bot).

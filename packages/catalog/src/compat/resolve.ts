@@ -1125,6 +1125,15 @@ function resolveThinkingPolicy<TApi extends Api>(
 	if (compat !== undefined && "trustExplicitThinkingOnly" in compat && compat.trustExplicitThinkingOnly === true) {
 		return undefined;
 	}
+	// Grok Bot: AvailableModels / `providers/grokbot.kdl` own the effort surface.
+	// Never invent a fallback ladder when no thinking-efforts rule matched
+	// (routers, fast-only, or unrecognized upstream-only values).
+	if (
+		(spec.provider === "grokbot" || spec.api === "grokbot-sand") &&
+		(rule.efforts === undefined || rule.efforts.length === 0)
+	) {
+		return undefined;
+	}
 	const config: ThinkingConfig = {
 		mode: rule.mode ?? defaultThinkingMode(spec, facts),
 		efforts: rule.efforts ?? fallbackEfforts(spec, compat),

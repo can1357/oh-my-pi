@@ -42,6 +42,7 @@
 		"providers/google-antigravity.kdl",
 		"providers/google-vertex.kdl",
 		"providers/google.kdl",
+		"providers/grokbot.kdl",
 		"providers/groq.kdl",
 		"providers/huggingface.kdl",
 		"providers/kilo.kdl",
@@ -8169,6 +8170,27 @@
 						"low",
 						"medium",
 						"high"
+					]
+				}
+			},
+			{
+				"source": "providers/grokbot.kdl:8",
+				"providers": [
+					"grokbot"
+				],
+				"models": [
+					{
+						"kind": "glob",
+						"value": "grok-4.6*"
+					}
+				],
+				"thinking": {
+					"mode": "effort",
+					"efforts": [
+						"low",
+						"medium",
+						"high",
+						"xhigh"
 					]
 				}
 			},

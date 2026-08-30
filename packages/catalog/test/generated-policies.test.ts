@@ -8,6 +8,7 @@ import {
 	linkOpenAIPromotionTargets,
 } from "../scripts/generated-policies";
 import { buildModel } from "../src/build";
+import { buildGrokbotStaticSeed } from "../src/provider-models/grokbot";
 
 function createSpec<TApi extends Api>(overrides: {
 	id: string;
@@ -828,5 +829,17 @@ describe("Grok Bot generated thinking policy", () => {
 			mode: "effort",
 			efforts: [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh],
 		});
+	});
+
+	it("derives grok-4.6 seed effort ladder from provider KDL via buildModel", () => {
+		const [seed] = buildGrokbotStaticSeed().filter(m => m.id === "grok-4.6");
+		expect(seed?.thinking).toBeUndefined();
+		const built = buildModel(seed!);
+		expect(built.thinking).toEqual({
+			mode: "effort",
+			efforts: [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh],
+		});
+		const router = buildModel(buildGrokbotStaticSeed().find(m => m.id === "sand-default")!);
+		expect(router.thinking).toBeUndefined();
 	});
 });

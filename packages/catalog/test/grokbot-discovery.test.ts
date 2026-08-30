@@ -197,6 +197,47 @@ describe("grokbot AvailableModels normalize", () => {
 		]);
 	});
 
+	test("does not invent common ladder when upstream values are all unrecognized", () => {
+		const rows = decodeGrokbotAvailableModelsResponse({
+			models: [
+				{
+					name: "adaptive-only",
+					clientDisplayName: "Adaptive Only",
+					supportsThinking: true,
+					supportsImages: true,
+					parameterDefinitions: [
+						{
+							id: "effort",
+							values: [{ value: "adaptive", displayName: "Adaptive" }],
+						},
+					],
+					variants: [{ parameterValues: [{ id: "effort", value: "adaptive" }] }],
+				},
+				{
+					name: "effort-param-no-values",
+					clientDisplayName: "Effort Param No Values",
+					supportsThinking: true,
+					supportsImages: true,
+					parameterDefinitions: [{ id: "effort" }],
+					variants: [{ parameterValues: [] }],
+				},
+			],
+		});
+		expect(rows).not.toBeNull();
+		const models = normalizeGrokbotAvailableModels(rows!, "https://api2.cursor.sh");
+		const adaptive = models.find(m => m.id === "adaptive-only");
+		expect(adaptive?.sandParameterIds).toEqual(["effort"]);
+		expect(adaptive?.thinking).toBeUndefined();
+		const emptyValues = models.find(m => m.id === "effort-param-no-values");
+		expect(emptyValues?.sandParameterIds).toEqual(["effort"]);
+		expect([...((emptyValues?.thinking?.efforts as readonly string[] | undefined) ?? [])]).toEqual([
+			"low",
+			"medium",
+			"high",
+			"xhigh",
+		]);
+	});
+
 	test("rejects envelopes without a models array; empty models is valid", () => {
 		expect(decodeGrokbotAvailableModelsResponse(null)).toBeNull();
 		expect(decodeGrokbotAvailableModelsResponse({})).toBeNull();

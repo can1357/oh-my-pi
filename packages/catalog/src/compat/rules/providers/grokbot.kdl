@@ -1,0 +1,12 @@
+// Provider-wire compat for "grokbot" (sand InferenceService).
+// Offline seed effort ladders are rule-owned here so buildModel derives them
+// from neutral seeds instead of TypeScript per-id branches.
+
+provider "grokbot" {
+	// Static offline seed for grok-4.6 advertises the sand effort dial
+	// (low..xhigh). Live AvailableModels may narrow this via explicit thinking.
+	models "grok-4.6*" {
+		thinking-mode "effort"
+		thinking-efforts "low" "medium" "high" "xhigh"
+	}
+}

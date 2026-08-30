@@ -233,8 +233,14 @@ function collectEffortValues(row: GrokbotAvailableModel, parameterIds: readonly 
 	for (const level of THINKING_EFFORTS) {
 		if (values.has(level)) ordered.push(level);
 	}
-	// Live grok lists low|medium|high|xhigh; if variants were empty but param exists, expose the common ladder.
-	if (ordered.length === 0 && (parameterIds.includes("effort") || parameterIds.includes("reasoning"))) {
+	// Common ladder only when the server advertised the param with no values at
+	// all. Nonempty unrecognized values (e.g. only `adaptive`) must not invent
+	// low/medium/high/xhigh the upstream never offered.
+	if (
+		ordered.length === 0 &&
+		values.size === 0 &&
+		(parameterIds.includes("effort") || parameterIds.includes("reasoning"))
+	) {
 		return [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh];
 	}
 	return ordered;
