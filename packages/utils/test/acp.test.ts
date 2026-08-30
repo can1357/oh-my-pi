@@ -139,6 +139,22 @@ describe("ACP JSON-RPC transport", () => {
 		outputReader.releaseLock();
 		reader.releaseLock();
 	});
+
+	it("does not error the read side when error replies cannot be written", async () => {
+		const bytes = new TransformStream<Uint8Array, Uint8Array>();
+		const output = new TransformStream<Uint8Array, Uint8Array>();
+		const stream = ndJsonStream(output.writable, bytes.readable);
+		const bytesWriter = bytes.writable.getWriter();
+		const reader = stream.readable.getReader();
+		const encoder = new TextEncoder();
+		await output.writable.abort(new Error("EPIPE"));
+
+		await bytesWriter.write(encoder.encode("garbage\n"));
+		await bytesWriter.write(encoder.encode('{"jsonrpc":"2.0","id":9,"method":"ok"}\n'));
+		expect(await reader.read()).toMatchObject({ value: { jsonrpc: "2.0", id: 9, method: "ok" } });
+		bytesWriter.releaseLock();
+		reader.releaseLock();
+	});
 	it("matches the SDK error-code fixtures", () => {
 		expect([
 			RequestError.parseError().toErrorResponse(),

@@ -63,7 +63,10 @@ export function ndJsonStream(output: WritableStream<Uint8Array>, input: Readable
 				try {
 					value = JSON.parse(line);
 				} catch {
-					await writeLine({ jsonrpc: "2.0", id: null, error: { code: -32700, message: "Parse error" } });
+					// Error replies are best-effort: a dead output must not error the read side.
+					await writeLine({ jsonrpc: "2.0", id: null, error: { code: -32700, message: "Parse error" } }).catch(
+						() => {},
+					);
 					return;
 				}
 				if (!isProtocolMessage(value)) {
@@ -71,7 +74,7 @@ export function ndJsonStream(output: WritableStream<Uint8Array>, input: Readable
 						jsonrpc: "2.0",
 						id: requestId(value),
 						error: { code: -32600, message: "Invalid request" },
-					});
+					}).catch(() => {});
 					return;
 				}
 				controller.enqueue(value);
