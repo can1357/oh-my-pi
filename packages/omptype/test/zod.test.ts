@@ -508,6 +508,36 @@ describe("zod-like parsing", () => {
 				.partial()
 				.safeParse({}).success,
 		).toBe(false);
+
+		// An AUTHOR step between `.readonly()` and the modifier makes the rebuild
+		// intersect rather than replace: zod has no such chain at all (`.refine()`
+		// returns ZodEffects, which exposes neither `.passthrough()` nor
+		// `.partial()`), so the conservative answer wins — nothing is dropped,
+		// the result is just stricter. Re-applying the author's predicate to the
+		// REBUILT structure is the alternative, and it would run predicates
+		// against a shape they were not written for, where `value.a.length`
+		// throws from user code instead of failing validation.
+		const stepped = z
+			.strictObject({ a: z.string() })
+			.readonly()
+			.refine(value => (value as { a: string }).a !== "no")
+			.passthrough();
+		// The old strict policy still applies…
+		expect(stepped.safeParse({ a: "x", extra: 1 }).success).toBe(false);
+		// …the author's refinement still fires…
+		expect(stepped.safeParse({ a: "no" }).success).toBe(false);
+		// …and the freeze survives on the accepted value.
+		const steppedOk = stepped.parse({ a: "x" });
+		expect(steppedOk).toEqual({ a: "x" });
+		expect(Object.isFrozen(steppedOk)).toBe(true);
+		expect(
+			z
+				.object({ a: z.string() })
+				.readonly()
+				.transform(value => value)
+				.partial()
+				.safeParse({}).success,
+		).toBe(false);
 	});
 
 	it("parses valid values and reports nested safeParse issues", () => {

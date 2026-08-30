@@ -417,6 +417,15 @@ function decorate<Out>(schema: Decoratable<Out>, optional = false): ZodLikeSchem
 			const rebuilt = restrictBase(schema, { ...schema.ir, desc: description });
 			return next(carryRebuild(rebuilt, rebuilt.describe(description)));
 		},
+		/**
+		 * Author steps end the "replace the object policy" chain: a structural
+		 * modifier applied after one INTERSECTS with the schema the step was
+		 * written against instead of rebuilding from the bare structure, so the
+		 * predicate keeps seeing the shape it was authored for. zod has no such
+		 * chain to match — `.refine()` there returns ZodEffects, which exposes
+		 * neither `.partial()` nor the object modes — so the conservative answer
+		 * is the safe one: the result is stricter, never missing a constraint.
+		 */
 		refine(predicate: (value: Out) => unknown, messageOrOptions?: string | RefineOptions): ZodLikeSchema<Out> {
 			const expectation = refinementMessage(messageOrOptions);
 			return next(schema.narrow((value, ctx) => Boolean(predicate(value)) || ctx.mustBe(expectation)));
