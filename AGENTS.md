@@ -16,6 +16,11 @@
 - Unqualified “update the wiki” requests route to the repository `.wiki/` for project documentation; the two external vaults (`C:\dev\Vaults\Kade` and `C:\dev\Vaults\Design-and-Building`) remain explicit Kade destinations.
 - The `pk-has-adhd` reference is supplemental and does not override repository-local instructions.
 
+## Machine & compute context (pk)
+
+- This machine runs parallel agent sessions (e.g. pr-45 verification) with their own `bun`/`node` processes. Never taskkill `bun.exe`/`node.exe` broadly — kill only processes whose CommandLine matches your own script (filter `Get-CimInstance Win32_Process` on CommandLine).
+- Heavy verification (full test suites, binary builds) may be offloaded to the `msi` peer via `cd C:/dev/Infra/ompk-remote && bun run remote.mjs auto --bg -- bun test <file>`; test-class commands route to msi by policy, light commands stay local. See that script's header for the full surface.
+
 ## Code
 
 - Avoid `any` and `ReturnType<>`; use ES `#private` fields and methods.
