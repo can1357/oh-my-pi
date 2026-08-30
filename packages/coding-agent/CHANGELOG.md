@@ -13,6 +13,7 @@
 ### Changed
 
 - Disabled `hashline` edit mode for Kimi, Mimo, DeepSeek Flash, and Stepfun models for stability
+- Standalone `omp usage`, interactive `/usage`, and ACP `/usage` now share the detailed per-account usage report.
 
 ### Fixed
 

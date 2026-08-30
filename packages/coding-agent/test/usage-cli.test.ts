@@ -29,6 +29,7 @@ function makeLimit(opts: {
 	usedFraction: number;
 	durationMs?: number;
 	windowId?: string;
+	meter?: string;
 	tier?: string;
 	accountId?: string;
 	provider?: string;
@@ -40,6 +41,7 @@ function makeLimit(opts: {
 		scope: {
 			provider: opts.provider ?? "anthropic",
 			windowId: opts.windowId,
+			meter: opts.meter,
 			tier: opts.tier,
 			accountId: opts.accountId,
 		},
@@ -113,20 +115,20 @@ describe("computeProviderWindowStats", () => {
 		expect(sevenDay.remainingAccounts).toBeCloseTo(1.4);
 	});
 
-	it("reports Spark-only capacity instead of dropping the meter", () => {
+	it("reports scoped-meter capacity with opaque limit IDs", () => {
 		const report = makeReport("openai-codex", "spark@example.test", [
 			makeLimit({
-				id: "openai-codex:spark:primary",
+				id: "opaque-primary-limit",
 				provider: "openai-codex",
-				tier: "spark",
+				meter: "spark",
 				usedFraction: 0.75,
 				durationMs: FIVE_HOURS,
 				windowId: "5h",
 			}),
 			makeLimit({
-				id: "openai-codex:spark:secondary",
+				id: "opaque-secondary-limit",
 				provider: "openai-codex",
-				tier: "spark",
+				meter: "spark",
 				usedFraction: 0.25,
 				durationMs: SEVEN_DAYS,
 				windowId: "7d",
@@ -140,34 +142,36 @@ describe("computeProviderWindowStats", () => {
 		expect(stats[0]).toMatchObject({ accounts: 1, usedAccounts: 0.75, remainingAccounts: 0.25 });
 	});
 
-	it("keeps mixed Codex meters separate when they share a window duration", () => {
+	it("keeps scoped meters separate when opaque limit IDs share a window duration", () => {
 		const report = makeReport("openai-codex", "mixed@example.test", [
 			makeLimit({
-				id: "openai-codex:primary",
+				id: "opaque-chat-short",
 				provider: "openai-codex",
+				meter: "chat",
 				usedFraction: 0.2,
 				durationMs: FIVE_HOURS,
 				windowId: "5h",
 			}),
 			makeLimit({
-				id: "openai-codex:secondary",
+				id: "opaque-chat-long",
 				provider: "openai-codex",
+				meter: "chat",
 				usedFraction: 0.4,
 				durationMs: SEVEN_DAYS,
 				windowId: "7d",
 			}),
 			makeLimit({
-				id: "openai-codex:spark:primary",
+				id: "opaque-spark-short",
 				provider: "openai-codex",
-				tier: "spark",
+				meter: "spark",
 				usedFraction: 0.8,
 				durationMs: FIVE_HOURS,
 				windowId: "5h",
 			}),
 			makeLimit({
-				id: "openai-codex:spark:secondary",
+				id: "opaque-spark-long",
 				provider: "openai-codex",
-				tier: "spark",
+				meter: "spark",
 				usedFraction: 0.1,
 				durationMs: SEVEN_DAYS,
 				windowId: "7d",
@@ -358,6 +362,48 @@ describe("runUsageCommand", () => {
 
 		expect(stripVTControlCharacters(output)).toBe(`${EXPECTED_USAGE_BREAKDOWN}\n`);
 	});
+
+	it("redacts identifiers embedded in disabled causes in JSON output", async () => {
+		const email = "account-123@example.test";
+		const accountId = "account-123";
+		const redaction = buildRedactionMap([email, accountId]);
+		const authStorage = new AuthStorage(new SqliteAuthCredentialStore(new Database(":memory:")), {
+			fetchUsageReports: async () => [],
+		});
+		await authStorage.reload();
+		spyOn(authStorage, "getAll").mockReturnValue({} as never);
+		spyOn(authStorage, "revalidateCredentials").mockResolvedValue(undefined);
+		spyOn(authStorage, "listDisabledCredentials").mockResolvedValue([
+			{
+				id: 61,
+				provider: "anthropic",
+				type: "oauth",
+				email,
+				accountId,
+				cause: `oauth refresh failed: ${email} was rejected for ${accountId}`,
+			},
+		]);
+		const discoverSpy = spyOn(sdkModule, "discoverAuthStorage").mockResolvedValue(authStorage);
+		let output = "";
+		const stdoutSpy = spyOn(process.stdout, "write").mockImplementation(chunk => {
+			output += typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk);
+			return true;
+		});
+
+		try {
+			await runUsageCommand({ json: true, redact: true });
+		} finally {
+			stdoutSpy.mockRestore();
+			discoverSpy.mockRestore();
+		}
+
+		const payload = JSON.parse(output) as { disabledCredentials: Array<{ cause: string }> };
+		const cause = payload.disabledCredentials[0]?.cause;
+		expect(cause).not.toContain(email);
+		expect(cause).not.toContain(accountId);
+		expect(cause).toContain(redaction.get(email)!);
+		expect(cause).toContain(redaction.get(accountId)!);
+	});
 });
 describe("formatUsageBreakdown", () => {
 	const reports = [
@@ -501,6 +547,25 @@ describe("formatUsageBreakdown", () => {
 		expect(text).not.toContain("dummy.primary@example.test");
 		expect(text).not.toContain("dummy.secondary@example.test");
 		for (const mask of redaction.values()) expect(text).toContain(mask);
+	});
+
+	it("redacts overlapping identifiers embedded in disabled causes", () => {
+		const email = "account-123@example.test";
+		const accountId = "account-123";
+		const cause = `oauth refresh failed: ${email} was rejected for ${accountId}`;
+		const disabled = [{ id: 60, provider: "anthropic", type: "oauth" as const, email, accountId, cause }];
+		const redaction = new Map([
+			[accountId, "short-mask"],
+			[email, "long-mask"],
+		]);
+
+		const redacted = stripVTControlCharacters(formatUsageBreakdown([], [], Date.now(), redaction, disabled));
+		const plain = stripVTControlCharacters(formatUsageBreakdown([], [], Date.now(), undefined, disabled));
+
+		expect(redacted).not.toContain(email);
+		expect(redacted).not.toContain(accountId);
+		expect(redacted).toContain("long-mask was rejected for short-mask");
+		expect(plain).toContain(`${email} was rejected for ${accountId}`);
 	});
 
 	it("redacts every active session identity component before formatting its label", () => {

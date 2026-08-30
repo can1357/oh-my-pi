@@ -324,6 +324,17 @@ function sanitizeUsageField(value: string): string {
 	return sanitizeText(value.replace(/[\r\n]+/g, " ").replace(/\t/g, "  "));
 }
 
+/** Replace every mapped identity in free-form usage text. */
+export function applyUsageRedaction(value: string, redaction?: ReadonlyMap<string, string>): string {
+	if (!redaction) return value;
+	let masked = value;
+	const entries = [...redaction].sort(([left], [right]) => right.length - left.length);
+	for (const [identity, replacement] of entries) {
+		if (identity) masked = masked.replaceAll(identity, replacement);
+	}
+	return masked;
+}
+
 function formatLimitLine(limit: UsageLimit, labelWidth: number, nowMs: number): string[] {
 	const status = resolveStatus(limit);
 	const title = limitTitle(limit);
@@ -382,20 +393,12 @@ export interface ProviderWindowStat {
 	remainingAccounts: number;
 }
 
-function meterForLimit(report: UsageReport, limit: UsageLimit): string | undefined {
-	if (report.provider !== "openai-codex") return undefined;
-	const tier = limit.scope.tier?.trim().toLowerCase();
-	if (tier) return tier;
-	const slug = limit.id.toLowerCase().split(":")[1];
-	return slug && slug !== "primary" && slug !== "secondary" ? slug : "chat";
-}
-
 /**
  * Aggregate one provider's reports into per-window quota capacity stats.
  *
  * Limits are bucketed by window duration (5h, 7d, ...). Within a bucket each
- * account contributes its single highest used fraction. Codex keeps each meter
- * in its own bucket because chat and Spark can share a window duration.
+ * account contributes its single highest used fraction. Limits with distinct
+ * normalized scope meters remain in separate buckets.
  */
 export function computeProviderWindowStats(reports: UsageReport[]): ProviderWindowStat[] {
 	const buckets = new Map<string, { window: string; durationMs?: number; meter?: string; fractions: number[] }>();
@@ -407,7 +410,7 @@ export function computeProviderWindowStats(reports: UsageReport[]): ProviderWind
 			const durationMs = limit.window?.durationMs;
 			const windowKey =
 				durationMs !== undefined ? `d:${durationMs}` : (limit.scope.windowId ?? limit.window?.label ?? limit.label);
-			const meter = meterForLimit(report, limit);
+			const meter = limit.scope.meter;
 			const key = meter === undefined ? windowKey : `m:${meter}\0${windowKey}`;
 			const previous = accountMax.get(key);
 			if (previous === undefined || fraction > previous) accountMax.set(key, fraction);
@@ -648,7 +651,7 @@ export function formatUsageBreakdown(
 			const label = disabledIdentityLabel(summary, redaction);
 			const ago = summary.disabledAtMs !== undefined ? ` ${formatDuration(nowMs - summary.disabledAtMs)} ago` : "";
 			lines.push(
-				`  ${chalk.red(`✗ ${label} — disabled${ago}: ${sanitizeUsageField(shortDisableCause(summary.cause))}`)} ${chalk.dim("(re-login to restore)")}`,
+				`  ${chalk.red(`✗ ${label} — disabled${ago}: ${sanitizeUsageField(applyUsageRedaction(shortDisableCause(summary.cause), redaction))}`)} ${chalk.dim("(re-login to restore)")}`,
 			);
 		}
 

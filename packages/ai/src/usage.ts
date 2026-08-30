@@ -51,6 +51,7 @@ export interface UsageScope {
 	projectId?: string;
 	orgId?: string;
 	modelId?: string;
+	meter?: string;
 	tier?: string;
 	windowId?: string;
 	shared?: boolean;
@@ -268,6 +269,7 @@ export const usageScopeSchema = type({
 	"projectId?": "string",
 	"orgId?": "string",
 	"modelId?": "string",
+	"meter?": "string",
 	"tier?": "string",
 	"windowId?": "string",
 	"shared?": "boolean",

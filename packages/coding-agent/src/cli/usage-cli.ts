@@ -16,6 +16,7 @@ import { ModelRegistry } from "../config/model-registry";
 import { discoverAuthStorage } from "../sdk";
 import { resolveAuthBrokerConfig } from "../session/auth-broker-config";
 import {
+	applyUsageRedaction,
 	collectStoredAccounts,
 	collectUnreportedAccounts,
 	computeProviderWindowStats,
@@ -543,6 +544,7 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 			if (redaction) {
 				disabledForJson = disabledForJson.map(summary => ({
 					...summary,
+					cause: applyUsageRedaction(summary.cause, redaction),
 					email: maskIdentity(redaction, summary.email),
 					accountId: maskIdentity(redaction, summary.accountId),
 					orgId: maskIdentity(redaction, summary.orgId),
