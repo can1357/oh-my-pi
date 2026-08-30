@@ -3692,8 +3692,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 	const finalOutcome = terminalOutcome(result);
 	const registry = AgentRegistry.global();
 	const finalOutcomeGenerationIsCurrent =
-		recordedTaskOutcomeGeneration !== undefined &&
-		registry.isCurrentTaskOutcome(id, recordedTaskOutcomeGeneration);
+		recordedTaskOutcomeGeneration !== undefined && registry.isCurrentTaskOutcome(id, recordedTaskOutcomeGeneration);
 	const acceptsFollowUpTurns = options.keepAlive !== false && worktree === undefined;
 	const finalOutcomeCanBeRecorded = !acceptsFollowUpTurns || finalOutcomeGenerationIsCurrent;
 	if (recordedTerminalOutcome !== undefined && recordedTerminalOutcome !== finalOutcome && finalOutcomeCanBeRecorded) {

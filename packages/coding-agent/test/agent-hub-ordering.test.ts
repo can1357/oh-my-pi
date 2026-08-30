@@ -1151,10 +1151,14 @@ describe("Agent hub row ordering", () => {
 		expect(agentDisplayState(ref)).toBe("failed");
 		expect(agentDisplayState({ ...ref, session: { isStreaming: true } as AgentSession })).toBe("running");
 		expect(
-			agentDisplayState(
-				ref,
-				{ id: ref.id, kind: "subagent", label: ref.displayName, status: "failed", lastUpdate: 0, progress: { retryState: {} } } as never,
-			),
+			agentDisplayState(ref, {
+				id: ref.id,
+				kind: "subagent",
+				label: ref.displayName,
+				status: "failed",
+				lastUpdate: 0,
+				progress: { retryState: {} },
+			} as never),
 		).toBe("retrying");
 		expect(agents.clearLastOutcome(ref.id, session)).toBe(true);
 		expect(agentDisplayState(ref)).toBe("idle");
