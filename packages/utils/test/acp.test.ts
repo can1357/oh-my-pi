@@ -180,10 +180,20 @@ describe("ACP JSON-RPC transport", () => {
 			error: { code: -32600, message: "Invalid request" },
 		});
 
+		// A present error member with a null value is a member, not an absent one:
+		// under the value-gated predicate this frame passed as a bare result, made
+		// #handle dereference null.code after it deleted the pending entry, closed
+		// the connection, and left the request permanently unsettled.
+		await bytesWriter.write(encoder.encode('{"jsonrpc":"2.0","id":0,"result":"ok","error":null}\n'));
+		expect(JSON.parse(await readLine(outputReader))).toEqual({
+			jsonrpc: "2.0",
+			id: 0,
+			error: { code: -32600, message: "Invalid request" },
+		});
+
 		// Under the old shallow predicate this frame settled `outstanding` with a
 		// spurious `undefined` before the correlated response arrived; the final
 		// value assertion fails in that case without any timing.
-
 		await bytesWriter.write(encoder.encode('{"jsonrpc":"2.0","id":0,"result":"ok"}\n'));
 		await expect(outstanding).resolves.toBe("ok");
 		bytesWriter.releaseLock();
