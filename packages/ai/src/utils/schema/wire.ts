@@ -235,25 +235,41 @@ export function flattenExclusiveRequiredRootUnion(schema: Record<string, unknown
 	return flattened;
 }
 
-/** Keys whose values are a single JSON Schema (not an array or map). */
-const SCHEMA_VALUE_KEYS = [
-	"additionalProperties",
-	"unevaluatedProperties",
-	"unevaluatedItems",
-	"items",
-	"contains",
-	"propertyNames",
-	"if",
-	"then",
-	"else",
-	"not",
-] as const;
+/**
+ * Every position a JSON Schema document can hold another schema in, grouped by
+ * how the value is shaped. One inventory, because each consumer that keeps its
+ * own copy silently stops covering a keyword the others added: the lowering
+ * passes below, the description strip, and the provider-facing structural test
+ * in coding-agent all read these.
+ *
+ * `value` covers single-subschema keywords, including the legacy
+ * `additionalItems` that may survive an incomplete draft upgrade, and the
+ * array-valued combiners — recursion dispatches on array-ness, so tuple forms
+ * like draft-07 `items: []` are handled by the same arm. `map` covers
+ * `{ name: Schema }` keywords, whose names are NOT annotations.
+ */
+export const SCHEMA_POSITIONS = {
+	value: [
+		"additionalProperties",
+		"unevaluatedProperties",
+		"unevaluatedItems",
+		"items",
+		"additionalItems",
+		"contains",
+		"propertyNames",
+		"contentSchema",
+		"if",
+		"then",
+		"else",
+		"not",
+	],
+	map: ["properties", "patternProperties", "$defs", "definitions", "dependentSchemas"],
+	array: ["anyOf", "oneOf", "allOf", "prefixItems"],
+} as const satisfies Record<"value" | "map" | "array", readonly string[]>;
 
-/** Keys whose values are a map of `{ key: Schema }` entries. */
-const SCHEMA_MAP_KEYS = ["properties", "patternProperties", "$defs", "definitions"] as const;
-
-/** Keys whose values are an array of schemas. */
-const SCHEMA_ARRAY_KEYS = ["anyOf", "oneOf", "allOf", "prefixItems"] as const;
+const SCHEMA_VALUE_KEYS = SCHEMA_POSITIONS.value;
+const SCHEMA_MAP_KEYS = SCHEMA_POSITIONS.map;
+const SCHEMA_ARRAY_KEYS = SCHEMA_POSITIONS.array;
 
 function normalizeArkPropertyComments(node: unknown): void {
 	if (Array.isArray(node)) {
@@ -608,33 +624,10 @@ export function toolWireSchema(tool: Tool): Record<string, unknown> {
 	});
 }
 
-/**
- * Schema-valued keywords whose value is a single subschema (or an array of
- * subschemas — the recursion dispatches on array-ness, so tuple forms like
- * draft-07 `items: []` are handled too). Covers the draft 2020-12 surface plus
- * the legacy `additionalItems` that may survive an incomplete upgrade.
- */
-const STRIP_SCHEMA_VALUE_KEYS = [
-	"additionalProperties",
-	"unevaluatedProperties",
-	"unevaluatedItems",
-	"items",
-	"additionalItems",
-	"contains",
-	"propertyNames",
-	"contentSchema",
-	"if",
-	"then",
-	"else",
-	"not",
-	"anyOf",
-	"oneOf",
-	"allOf",
-	"prefixItems",
-] as const;
+/** Single-subschema and array-valued positions, from the one inventory. */
+const STRIP_SCHEMA_VALUE_KEYS = [...SCHEMA_POSITIONS.value, ...SCHEMA_POSITIONS.array] as const;
 
-/** Keywords whose value is a `{ name: Schema }` map — names are NOT annotations. */
-const STRIP_SCHEMA_MAP_KEYS = ["properties", "patternProperties", "$defs", "definitions", "dependentSchemas"] as const;
+const STRIP_SCHEMA_MAP_KEYS = SCHEMA_POSITIONS.map;
 
 /**
  * Recursively strip human-readable `description` annotations from a JSON Schema,

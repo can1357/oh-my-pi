@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import type { Tool } from "@oh-my-pi/pi-ai/types";
-import { isArkSchema, toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
+import { isArkSchema, SCHEMA_POSITIONS, toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createTools, HIDDEN_TOOLS, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { MemoryEditTool } from "@oh-my-pi/pi-coding-agent/tools/memory-edit";
@@ -84,28 +84,11 @@ const unexpectedErasures = (erasures: Erasure[]): Erasure[] =>
 		erasure => !ALLOWED_ERASURES.some(entry => entry.tool.test(erasure.tool) && entry.pointer.test(erasure.pointer)),
 	);
 
-// The complete schema-position inventory, mirroring wire.ts's own traversal
-// sets (STRIP_SCHEMA_VALUE_KEYS / STRIP_SCHEMA_MAP_KEYS) so this walk covers
-// exactly the positions the production wire lowering considers schema-valued.
-const SCHEMA_VALUE_KEYS = new Set([
-	"additionalProperties",
-	"unevaluatedProperties",
-	"unevaluatedItems",
-	"items",
-	"additionalItems",
-	"contains",
-	"propertyNames",
-	"contentSchema",
-	"if",
-	"then",
-	"else",
-	"not",
-	"anyOf",
-	"oneOf",
-	"allOf",
-	"prefixItems",
-]);
-const SCHEMA_MAP_KEYS = new Set(["properties", "patternProperties", "$defs", "definitions", "dependentSchemas"]);
+// Driven by wire.ts's own inventory, not a copy of it: a keyword added to the
+// production lowering has to widen this walk too, or an unconstrained subtree
+// under it would go unreported.
+const SCHEMA_VALUE_KEYS: ReadonlySet<string> = new Set<string>([...SCHEMA_POSITIONS.value, ...SCHEMA_POSITIONS.array]);
+const SCHEMA_MAP_KEYS: ReadonlySet<string> = new Set<string>(SCHEMA_POSITIONS.map);
 
 function walkSchema(tool: string, pointer: string, node: unknown, erasures: Erasure[]): void {
 	if (node === true) {
