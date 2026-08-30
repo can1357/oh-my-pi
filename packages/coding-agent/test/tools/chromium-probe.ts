@@ -1,5 +1,6 @@
 import * as fs from "node:fs/promises";
 import { ensureChromiumExecutable } from "@oh-my-pi/pi-coding-agent/tools/browser/launch";
+import { hasDisplay } from "@oh-my-pi/pi-utils/env";
 
 /**
  * Whether the Chromium puppeteer resolves can actually execute on this host.
@@ -59,6 +60,5 @@ export function chromiumAvailable(): Promise<boolean> {
  * platforms always have a window server.
  */
 export async function headfulAvailable(): Promise<boolean> {
-	if (!(await chromiumAvailable())) return false;
-	return process.platform !== "linux" || Boolean(process.env.DISPLAY || process.env.WAYLAND_DISPLAY);
+	return (await chromiumAvailable()) && hasDisplay();
 }
