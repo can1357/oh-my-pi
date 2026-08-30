@@ -206,8 +206,13 @@ function encodeToolCall(tc) {
 	if (tc.args && typeof tc.args === "object") {
 		chunks.push(encodeMessage(3, encodeStruct(tc.args)));
 	}
-	const raw = tc.rawToolCallArgs || tc.raw_tool_call_args;
-	if (typeof raw === "string" && raw) chunks.push(encodeString(4, raw, { force: true }));
+	const raw = Object.hasOwn(tc, "rawToolCallArgs")
+		? tc.rawToolCallArgs
+		: Object.hasOwn(tc, "raw_tool_call_args")
+			? tc.raw_tool_call_args
+			: undefined;
+	// Preserve empty-string raw grammar args (oneof discriminator); `||` would drop "".
+	if (typeof raw === "string") chunks.push(encodeString(4, raw, { force: true }));
 	return concat(chunks);
 }
 

@@ -175,6 +175,10 @@ describe("grokbot AvailableModels normalize", () => {
 		expect(grok?.contextWindow).toBe(256_000);
 		expect(grok?.sandMaxMode).toBe(false);
 		expect(grok?.input).toEqual(["text", "image"]);
+		// Discovery must not invent a 64K output cap the response never supplied.
+		expect(grok?.maxTokens).toBeNull();
+		expect(composer?.maxTokens).toBeNull();
+		expect(models.find(m => m.id === "sand-default")?.maxTokens).toBeNull();
 
 		const sol = models.find(m => m.id === "gpt-5.6-sol");
 		expect(sol?.sandParameterIds).toEqual(["context", "reasoning", "fast"]);

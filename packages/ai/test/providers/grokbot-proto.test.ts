@@ -563,6 +563,38 @@ describe("grokbot sand-host client parity", () => {
 		]);
 	});
 
+	test("preserves empty-string rawToolCallArgs on the wire", () => {
+		// Empty grammar completions must still set field 4 so the custom/raw
+		// oneof discriminator survives history replay (|| would drop "").
+		const encoded = encodeInferenceStreamRequest({
+			messages: [
+				{
+					role: 2,
+					toolCalls: [
+						{
+							toolCallId: "c-empty",
+							toolName: "apply_patch",
+							rawToolCallArgs: "",
+						},
+					],
+				},
+			],
+			requestedModel: { modelId: "grok-4.5" },
+		});
+		const decoded = decodeInferenceStreamRequest(encoded) as unknown as {
+			messages: Array<{
+				toolCalls?: Array<{ toolCallId: string; toolName: string; rawToolCallArgs?: string; args?: unknown }>;
+			}>;
+		};
+		expect(decoded.messages[0]?.toolCalls).toEqual([
+			{
+				toolCallId: "c-empty",
+				toolName: "apply_patch",
+				rawToolCallArgs: "",
+			},
+		]);
+	});
+
 	test("replays grammar tool results with wire name from context.tools", () => {
 		const messages = toInferenceMessages({
 			tools: [

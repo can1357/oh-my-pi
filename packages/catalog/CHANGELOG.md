@@ -10,6 +10,7 @@
 
 ### Fixed
 
+- Grok Bot AvailableModels leaves output caps unset instead of inventing a 64K `maxTokens` (wire omits `modelConfig.maxTokens` until a reviewed limit exists).
 - Grok Bot generator preserves authored thinking via KDL `preserve-authored-thinking` instead of a TypeScript provider/API branch.
 - Grok Bot offline `grok-4.6` effort ladder comes from provider KDL via `buildModel`, not a TypeScript per-id seed branch.
 - Grok Bot AvailableModels does not invent low/medium/high/xhigh when upstream effort values are all unrecognized.

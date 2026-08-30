@@ -25,7 +25,6 @@ import {
 } from "./grokbot-available-models";
 
 const DEFAULT_CONTEXT_WINDOW = 200_000;
-const DEFAULT_MAX_TOKENS = 64_000;
 const COST = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } as const;
 
 /** Sand router slugs — not in AvailableModels; always unioned into the catalog. */
@@ -135,7 +134,9 @@ function buildSandRouterSpec(id: (typeof GROKBOT_SAND_ROUTER_IDS)[number], baseU
 		input: ["text", "image"],
 		cost: COST,
 		contextWindow: DEFAULT_CONTEXT_WINDOW,
-		maxTokens: DEFAULT_MAX_TOKENS,
+		// AvailableModels does not advertise output caps — leave unset so
+		// buildModelConfig omits modelConfig.maxTokens rather than inventing 64K.
+		maxTokens: null,
 		supportsTools: true,
 		sandParameterIds: [],
 		sandMaxMode: false,
@@ -188,7 +189,9 @@ function toGrokbotModelSpec(row: GrokbotAvailableModel, baseUrl: string): ModelS
 		input: row.supportsImages === true ? ["text", "image"] : ["text"],
 		cost: COST,
 		contextWindow: resolveGrokbotContextWindow(row, sandMaxMode),
-		maxTokens: DEFAULT_MAX_TOKENS,
+		// Do not invent an output cap AvailableModels never supplied; reviewed
+		// offline seed caps stay on static seeds / optional KDL limits-patch.
+		maxTokens: null,
 		supportsTools: true,
 		...(aliases.length > 0 ? { aliases } : undefined),
 		sandParameterIds: parameterIds,
