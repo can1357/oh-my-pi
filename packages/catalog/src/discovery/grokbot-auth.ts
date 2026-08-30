@@ -187,8 +187,8 @@ export async function loadGrokbotConfig(renewalOverride?: string): Promise<Grokb
 		renewal:
 			renewalOverride ||
 			$env.GROKBOT_RENEWAL_CREDENTIAL ||
-			file.GROKBOT_RENEWAL_CREDENTIAL ||
 			$env.SAND_INFERENCE_RENEWAL_CREDENTIAL ||
+			file.GROKBOT_RENEWAL_CREDENTIAL ||
 			file.SAND_INFERENCE_RENEWAL_CREDENTIAL ||
 			"",
 		machineId: $env.GROKBOT_MACHINE_ID || file.GROKBOT_MACHINE_ID || "",

@@ -8,6 +8,7 @@ import {
 	clearGrokbotTokenCache,
 	GROKBOT_RENEWAL_PATH,
 	joinGrokbotBackendUrl,
+	loadGrokbotConfig,
 	loadGrokbotSecretFile,
 	loadGrokbotSecretFileSync,
 	mintGrokbotAccessToken,
@@ -55,6 +56,39 @@ describe("grokbot secrets dotenv parsing", () => {
 		const missing = path.join(dir, "absent.env");
 		expect(await loadGrokbotSecretFile(missing)).toEqual({});
 		expect(loadGrokbotSecretFileSync(missing)).toEqual({});
+	});
+
+	test("SAND_INFERENCE_RENEWAL_CREDENTIAL env beats secrets-file GROKBOT_RENEWAL_CREDENTIAL", async () => {
+		const previousAgentDir = getAgentDir();
+		const previousGrokbot = process.env.GROKBOT_RENEWAL_CREDENTIAL;
+		const previousSand = process.env.SAND_INFERENCE_RENEWAL_CREDENTIAL;
+		const previousMachine = process.env.GROKBOT_MACHINE_ID;
+		const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-grokbot-env-precedence-"));
+		dirs.push(agentDir);
+		await fs.mkdir(path.join(agentDir, "secrets"), { recursive: true });
+		await Bun.write(
+			path.join(agentDir, "secrets", "grokbot.env"),
+			["GROKBOT_RENEWAL_CREDENTIAL=file-renewal", "GROKBOT_MACHINE_ID=file-machine"].join("\n"),
+		);
+
+		try {
+			delete process.env.GROKBOT_RENEWAL_CREDENTIAL;
+			delete process.env.GROKBOT_MACHINE_ID;
+			process.env.SAND_INFERENCE_RENEWAL_CREDENTIAL = "env-sand-renewal";
+			setAgentDir(agentDir);
+
+			const cfg = await loadGrokbotConfig();
+			expect(cfg.renewal).toBe("env-sand-renewal");
+			expect(cfg.machineId).toBe("file-machine");
+		} finally {
+			setAgentDir(previousAgentDir);
+			if (previousGrokbot === undefined) delete process.env.GROKBOT_RENEWAL_CREDENTIAL;
+			else process.env.GROKBOT_RENEWAL_CREDENTIAL = previousGrokbot;
+			if (previousSand === undefined) delete process.env.SAND_INFERENCE_RENEWAL_CREDENTIAL;
+			else process.env.SAND_INFERENCE_RENEWAL_CREDENTIAL = previousSand;
+			if (previousMachine === undefined) delete process.env.GROKBOT_MACHINE_ID;
+			else process.env.GROKBOT_MACHINE_ID = previousMachine;
+		}
 	});
 
 	test("discovery identity and cache id honor secrets-file namespace/client version", async () => {

@@ -9,6 +9,8 @@
 
 ### Fixed
 
+- Grok Bot pairs tool-result wire names with the historical assistant call id when tools/`edit.mode` change after the call.
+- Grok Bot rejects completed tool calls whose arguments are a JSON array instead of an object.
 - Grok Bot honors `acceptEmptyResponse` so passive/zero-output callers can accept trailer-only completions.
 - Grok Bot rejects trailer-only or thinking-only streams with no text or tool call instead of emitting an empty successful stop.
 - Grok Bot floors effort to the model's minimum supported tier when reasoning is disabled, instead of omitting the parameter (server default high).

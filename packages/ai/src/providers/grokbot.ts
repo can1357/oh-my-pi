@@ -363,6 +363,10 @@ export function toInferenceMessages(context: Context) {
 	};
 
 	const toolWireIndex = buildGrammarToolIndex(context.tools);
+	// Prefer the wire name from the preceding assistant call with the same
+	// toolCallId — edit.mode / tool set can change after a grammar call is in
+	// history, so looking up the current context.tools would mismatch names.
+	const wireNameByCallId = new Map<string, string>();
 
 	for (const msg of context.messages ?? []) {
 		if (!msg || typeof msg !== "object") continue;
@@ -370,11 +374,12 @@ export function toInferenceMessages(context: Context) {
 		const record = msg as unknown as Record<string, unknown>;
 
 		if (roleName === "toolResult") {
+			const callId = String(record.toolCallId || record.tool_call_id || "");
 			const internalName = String(record.toolName || record.tool_name || "");
 			const meta = internalName ? toolWireIndex.get(internalName) : undefined;
-			const wireName = meta?.customWireName || internalName;
+			const wireName = (callId ? wireNameByCallId.get(callId) : undefined) || meta?.customWireName || internalName;
 			const part: Record<string, unknown> = {
-				toolCallId: record.toolCallId || record.tool_call_id || "",
+				toolCallId: callId,
 				toolName: wireName,
 				result: toolResultPayload(record),
 			};
@@ -396,6 +401,7 @@ export function toInferenceMessages(context: Context) {
 				for (const part of content) {
 					const tc = toolCallFromPart(part, toolWireIndex);
 					if (tc) {
+						if (tc.toolCallId) wireNameByCallId.set(tc.toolCallId, tc.toolName);
 						toolCalls.push(tc);
 						continue;
 					}
@@ -452,7 +458,19 @@ function buildModelConfig(model: Model<"grokbot-sand">, options?: GrokbotOptions
 
 function parseToolArgs(raw: unknown, requireValid = false): Record<string, unknown> {
 	if (raw == null || raw === "") return {};
-	if (typeof raw === "object") return raw as Record<string, unknown>;
+	if (typeof raw === "object") {
+		// Arrays are typeof "object" but are not valid function-tool argument maps.
+		if (Array.isArray(raw)) {
+			if (requireValid) {
+				throw new AIError.ProviderResponseError("Grok Bot completed tool call arguments must be a JSON object", {
+					provider: "grokbot",
+					kind: "envelope",
+				});
+			}
+			return {};
+		}
+		return raw as Record<string, unknown>;
+	}
 	if (typeof raw !== "string") {
 		if (requireValid) {
 			throw new AIError.ProviderResponseError("Grok Bot completed tool call has non-JSON arguments", {
@@ -464,7 +482,9 @@ function parseToolArgs(raw: unknown, requireValid = false): Record<string, unkno
 	}
 	try {
 		const parsed = JSON.parse(raw);
-		if (parsed && typeof parsed === "object") return parsed as Record<string, unknown>;
+		if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+			return parsed as Record<string, unknown>;
+		}
 		if (requireValid) {
 			throw new AIError.ProviderResponseError("Grok Bot completed tool call arguments must be a JSON object", {
 				provider: "grokbot",

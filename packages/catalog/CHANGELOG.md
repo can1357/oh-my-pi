@@ -10,6 +10,7 @@
 
 ### Fixed
 
+- Grok Bot prefers every environment renewal credential (`GROKBOT_*` / `SAND_INFERENCE_*`) over secrets-file fallbacks when minting.
 - Restored unrelated bundled catalog rows dropped during an earlier Grok Bot `models.json` regen (kept parent catalog; only added Grok Bot).
 - Grok Bot AvailableModels discovery sends `connect-protocol-version: 1` like other Connect unary clients.
 - Grok Bot AvailableModels requires explicit `supportsImages: true` before advertising image input (omitted proto3 false stays text-only).

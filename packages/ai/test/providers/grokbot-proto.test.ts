@@ -561,6 +561,68 @@ describe("grokbot sand-host client parity", () => {
 		]);
 	});
 
+	test("pairs tool results with the historical call wire name when tools change", () => {
+		const patch = "*** Begin Patch\n*** Update File: a.ts\n@@\n-old\n+new\n*** End Patch";
+		const messages = toInferenceMessages({
+			// Current tools use hashline (no customWireName) after edit.mode switched.
+			tools: [
+				{
+					name: "edit",
+					description: "hashline edit",
+					parameters: {},
+					customFormat: { syntax: "lark", definition: "start: ANY" },
+				},
+			],
+			messages: [
+				{
+					role: "assistant",
+					content: [
+						{
+							type: "toolCall",
+							id: "c1",
+							name: "edit",
+							customWireName: "apply_patch",
+							arguments: { input: patch },
+						},
+					],
+					api: "grokbot-sand",
+					provider: "grokbot",
+					model: "grok-4.5",
+					usage: {
+						input: 0,
+						output: 0,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 0,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+					stopReason: "toolUse",
+					timestamp: 2,
+				},
+				{
+					role: "toolResult",
+					toolCallId: "c1",
+					toolName: "edit",
+					content: [{ type: "text", text: "patched" }],
+					isError: false,
+					timestamp: 3,
+				},
+			],
+		});
+		const assistant = messages.find(m => m.role === 2) as {
+			toolCalls?: Array<{ toolCallId: string; toolName: string }>;
+		};
+		const result = messages.find(m => m.role === 3) as {
+			toolContent?: { parts: Array<{ toolCallId: string; toolName: string; result: string }> };
+		};
+		expect(assistant?.toolCalls?.[0]?.toolName).toBe("apply_patch");
+		expect(result?.toolContent?.parts[0]).toEqual({
+			toolCallId: "c1",
+			toolName: "apply_patch",
+			result: "patched",
+		});
+	});
+
 	test("replays hashline grammar calls as raw even without customWireName", () => {
 		const hashline = "[src/a.ts#abcd]\n1|-old\n1|+new\n";
 		const messages = toInferenceMessages({
@@ -753,6 +815,21 @@ describe("grokbot incomplete tool calls", () => {
 		expect(result.stopReason).toBe("error");
 		expect(result.errorMessage).toMatch(/malformed JSON arguments/i);
 		expect(result.content.some(b => b.type === "toolCall" && Object.keys(b.arguments).length === 0)).toBe(true);
+	});
+
+	test("rejects isComplete:true tool call with JSON array args", async () => {
+		mockAuth();
+		const arrayArgs = frameConnectProto(
+			encodeInferenceStreamResponse({
+				toolCallPart: { toolCallId: "c1", toolName: "echo", args: "[1]", isComplete: true },
+			}),
+		);
+		const trailer = frameConnectProto(Buffer.alloc(0), CONNECT_END_STREAM_FLAG);
+		const fetchImpl = (async () => connectBody(arrayArgs, trailer)) as FetchImpl;
+
+		const result = await streamGrokBot(model, context, { apiKey: "renew", fetch: fetchImpl }).result();
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toMatch(/must be a JSON object/i);
 	});
 
 	test("correlates tool chunks when later frame supplies only toolIndex", async () => {
