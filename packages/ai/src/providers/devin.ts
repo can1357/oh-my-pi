@@ -1,5 +1,8 @@
 import { gunzipSync, gzipSync } from "node:zlib";
+
 import {
+	AssignModelRequestSchema,
+	AssignModelResponseSchema,
 	CacheControlType,
 	type ChatMessagePrompt,
 	ChatMessagePromptSchema,
@@ -15,19 +18,24 @@ import {
 	GetChatMessageResponseSchema,
 	GetUserJwtRequestSchema,
 	GetUserJwtResponseSchema,
+	type ImageData,
 	ImageDataSchema,
 	MetadataSchema,
+	type ModelAssignment,
 	PromptCacheOptionsSchema,
 	StopReason,
 } from "@oh-my-pi/pi-catalog/discovery/devin-proto";
 import { create, fromBinary, toBinary } from "@oh-my-pi/pi-catalog/discovery/protobuf";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
+import { DEVIN_DEFAULT_BASE_URL, devinCliMetadata } from "@oh-my-pi/pi-catalog/wire/devin";
+import { decodeDevinUnaryMessage } from "@oh-my-pi/pi-catalog/wire/devin-proto";
 import { logger, parseStreamingJson, parseStreamingJsonThrottled } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import type {
 	Api,
 	AssistantMessage,
 	Context,
+	DeveloperMessage,
 	Message,
 	Model,
 	StreamFunction,
@@ -36,6 +44,7 @@ import type {
 	ThinkingContent,
 	Tool,
 	ToolCall,
+	UserMessage,
 } from "../types";
 import { normalizeSystemPrompts } from "../utils";
 import { isDemotedThinking } from "../utils/block-symbols";
@@ -45,7 +54,7 @@ import { toolWireSchema } from "../utils/schema/wire";
 import { transformMessages } from "./transform-messages";
 
 /** Base host for Codeium/Windsurf's Cascade chat API (Connect protocol over HTTP/1.1). */
-export const DEVIN_API_URL = "https://server.codeium.com";
+export const DEVIN_API_URL = DEVIN_DEFAULT_BASE_URL;
 
 export interface DevinOptions extends StreamOptions {
 	/** Cascade conversation id; reused as `cascade_id` so the server threads turns. */
@@ -57,9 +66,7 @@ export interface DevinOptions extends StreamOptions {
 }
 
 const CHAT_MESSAGE_PATH = "/exa.api_server_pb.ApiServerService/GetChatMessage";
-const DEVIN_IDE_VERSION = "3.2.23";
-const DEVIN_EXTENSION_VERSION = "1.48.2";
-const DEVIN_SESSION_TOKEN_PREFIX = "devin-session-token$";
+const DEVIN_ASSIGN_MODEL_PATH = "/exa.api_server_pb.ApiServerService/AssignModel";
 const DEVIN_AUTH_PATH = "/exa.auth_pb.AuthService/GetUserJwt";
 const DEVIN_DEFAULT_STOP_PATTERNS = ["<|user|>", "<|bot|>", "<|context_request|>", "<|endoftext|>", "<|end_of_turn|>"];
 
@@ -157,10 +164,23 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 		try {
 			const fetchImpl = options?.fetch ?? fetch;
 			const baseUrl = (model.baseUrl || DEVIN_API_URL).replace(/\/+$/, "");
-			const apiKey = normalizeDevinSessionToken(options?.apiKey);
-			const auth = await fetchDevinAuthMetadata(apiKey, baseUrl, fetchImpl, options?.signal);
+			const auth = await fetchDevinAuthMetadata(options?.apiKey, baseUrl, fetchImpl, options?.signal);
 			const chatBaseUrl = auth.baseUrl ?? baseUrl;
-			const request = buildDevinChatRequest(model, context, options, apiKey, auth.userJwt);
+			const turn: DevinTurn = {
+				apiKey: options?.apiKey,
+				userJwt: auth.userJwt,
+				cascadeId: options?.conversationId ?? options?.sessionId ?? crypto.randomUUID(),
+				messages: transformMessages(context.messages, model),
+			};
+			// Router models (`adaptive`) are not valid chat model uids: the server
+			// resolves them through AssignModel and expects the returned uid plus
+			// assignment JWT on the chat request that shares the cascade id.
+			let assignment: ModelAssignment | undefined;
+			if (model.compat.modelRouter) {
+				assignment = await assignDevinModel(model, turn, chatBaseUrl, fetchImpl, options?.signal);
+				output.upstreamModel = assignment.modelUid;
+			}
+			const request = buildDevinChatRequest(model, context, options, turn, assignment);
 			const reqBytes = toBinary(GetChatMessageRequestSchema, request);
 			const gz = gzipSync(reqBytes);
 			logger.debug("devin: sending chat request", {
@@ -304,6 +324,9 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 					const raw = flag & CONNECT_COMPRESSED_FLAG ? gunzipSync(payload) : payload;
 					const msg = fromBinary(GetChatMessageResponseSchema, raw);
 					if (msg.messageId && !output.responseId) output.responseId = msg.messageId;
+					// The router reports the concrete model it landed on; it can differ
+					// from the uid AssignModel handed back (fallbacks, capacity routing).
+					if (msg.actualModelUid) output.upstreamModel = msg.actualModelUid;
 
 					if (msg.deltaThinking) {
 						markFirstToken();
@@ -399,6 +422,13 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 						output.usage.totalTokens =
 							output.usage.input + output.usage.output + output.usage.cacheRead + output.usage.cacheWrite;
 					}
+					if (msg.creditCost || msg.committedCreditCost || msg.committedAcuCost) {
+						output.usage.credits ??= {};
+						const credits = output.usage.credits;
+						if (msg.creditCost) credits.cost = msg.creditCost;
+						if (msg.committedCreditCost) credits.committedCost = msg.committedCreditCost;
+						if (msg.committedAcuCost) credits.acuCost = msg.committedAcuCost;
+					}
 				}
 
 				if (done) break;
@@ -443,27 +473,23 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 	return stream;
 };
 
-function normalizeDevinSessionToken(apiKey: string | undefined): string {
-	if (!apiKey) return "";
-	return apiKey.startsWith(DEVIN_SESSION_TOKEN_PREFIX) ? apiKey : `${DEVIN_SESSION_TOKEN_PREFIX}${apiKey}`;
+/** Per-turn wire state shared by `AssignModel` and `GetChatMessage`. */
+interface DevinTurn {
+	apiKey: string | undefined;
+	userJwt: string;
+	/** Cascade thread id; assignment and chat must agree on it or the JWT is rejected. */
+	cascadeId: string;
+	/** History already run through {@link transformMessages}, shared by both calls. */
+	messages: Message[];
 }
 
 async function fetchDevinAuthMetadata(
-	apiKey: string,
+	apiKey: string | undefined,
 	baseUrl: string,
 	fetchImpl: NonNullable<StreamOptions["fetch"]>,
 	signal: AbortSignal | undefined,
 ): Promise<{ userJwt: string; baseUrl?: string }> {
-	const request = create(GetUserJwtRequestSchema, {
-		metadata: create(MetadataSchema, {
-			apiKey,
-			ideName: "windsurf",
-			ideVersion: DEVIN_IDE_VERSION,
-			extensionName: "windsurf",
-			extensionVersion: DEVIN_EXTENSION_VERSION,
-			locale: "en",
-		}),
-	});
+	const request = create(GetUserJwtRequestSchema, { metadata: create(MetadataSchema, devinCliMetadata(apiKey)) });
 	const response = await fetchImpl(`${baseUrl}${DEVIN_AUTH_PATH}`, {
 		method: "POST",
 		headers: {
@@ -481,8 +507,8 @@ async function fetchDevinAuthMetadata(
 			response.status,
 		);
 	}
-	const decoded = decodeDevinUserJwtResponse(payload);
-	if (!decoded.userJwt) {
+	const decoded = decodeDevinUnaryMessage(GetUserJwtResponseSchema, payload);
+	if (!decoded?.userJwt) {
 		throw new AIError.ProviderResponseError("Devin auth error: GetUserJwt returned an empty user JWT", {
 			provider: "devin",
 			kind: "runtime",
@@ -492,51 +518,98 @@ async function fetchDevinAuthMetadata(
 	return { userJwt: decoded.userJwt, ...(customBaseUrl ? { baseUrl: customBaseUrl.replace(/\/+$/, "") } : undefined) };
 }
 
-function decodeDevinUserJwtResponse(payload: Uint8Array) {
-	try {
-		return fromBinary(GetUserJwtResponseSchema, payload);
-	} catch {
-		return fromBinary(GetUserJwtResponseSchema, gunzipSync(payload));
+/**
+ * Resolve a server-side router (`adaptive`) into the concrete model uid plus the
+ * assignment JWT that authorizes it. The router uid is never a legal
+ * `chatModelUid`, so a failed assignment must fail the turn rather than fall
+ * back to sending the router id to `GetChatMessage`.
+ */
+async function assignDevinModel(
+	model: Model<"devin-agent">,
+	turn: DevinTurn,
+	baseUrl: string,
+	fetchImpl: NonNullable<StreamOptions["fetch"]>,
+	signal: AbortSignal | undefined,
+): Promise<ModelAssignment> {
+	const request = create(AssignModelRequestSchema, {
+		metadata: create(MetadataSchema, devinCliMetadata(turn.apiKey)),
+		modelRouterUid: model.requestModelId ?? model.id,
+		cascadeId: turn.cascadeId,
+		chatMessagePrompt: buildRouterPrompt(turn.messages),
+	});
+	const response = await fetchImpl(`${baseUrl}${DEVIN_ASSIGN_MODEL_PATH}`, {
+		method: "POST",
+		headers: {
+			"content-type": "application/proto",
+			"connect-protocol-version": "1",
+			accept: "*/*",
+		},
+		body: toBinary(AssignModelRequestSchema, request),
+		signal,
+	});
+	const payload = new Uint8Array(await response.arrayBuffer());
+	if (!response.ok) {
+		throw new AIError.DevinApiError(
+			`Devin AssignModel error ${response.status} ${response.statusText}: ${new TextDecoder().decode(payload)}`,
+			response.status,
+		);
 	}
+	const assignment = decodeDevinUnaryMessage(AssignModelResponseSchema, payload)?.assignment;
+	if (!assignment?.assignmentJwt || !assignment.modelUid) {
+		throw new AIError.ProviderResponseError(
+			"Devin AssignModel error: response carried no assignment JWT and model uid",
+			{ provider: model.provider, kind: "runtime" },
+		);
+	}
+	logger.debug("devin: router assigned a model", {
+		router: model.requestModelId ?? model.id,
+		assigned: assignment.modelUid,
+	});
+	return assignment;
+}
+
+/**
+ * The prompt the router scores: the current user/developer turn on its own.
+ * Native leaves `messageId` empty here — the id for the turn is minted by the
+ * chat request that follows.
+ */
+function buildRouterPrompt(messages: Message[]): ChatMessagePrompt | undefined {
+	for (let index = messages.length - 1; index >= 0; index--) {
+		const msg = messages[index];
+		if (msg.role === "user" || msg.role === "developer") return buildUserPrompt(msg, "");
+	}
+	return undefined;
 }
 
 /**
  * Build a {@link GetChatMessageRequest} for one Cascade turn. Auth rides inside
  * `Metadata.apiKey`; the system prompt is the flattened `prompt` string and the
- * conversation history maps to `chatMessagePrompts`.
+ * conversation history maps to `chatMessagePrompts`. `assignment` is present only
+ * for router models and supplies both the resolved uid and its JWT.
  */
 function buildDevinChatRequest(
 	model: Model<"devin-agent">,
 	context: Context,
 	options: DevinOptions | undefined,
-	apiKey: string,
-	userJwt: string,
+	turn: DevinTurn,
+	assignment: ModelAssignment | undefined,
 ) {
-	const cascadeId = options?.conversationId ?? options?.sessionId ?? crypto.randomUUID();
 	const stopPatterns =
 		options?.stopSequences && options.stopSequences.length > 0
 			? [...DEVIN_DEFAULT_STOP_PATTERNS, ...options.stopSequences]
 			: DEVIN_DEFAULT_STOP_PATTERNS;
-	const messages = transformMessages(context.messages, model);
 	return create(GetChatMessageRequestSchema, {
-		metadata: create(MetadataSchema, {
-			apiKey,
-			userJwt,
-			ideName: "windsurf",
-			ideVersion: DEVIN_IDE_VERSION,
-			extensionName: "windsurf",
-			extensionVersion: DEVIN_EXTENSION_VERSION,
-			locale: "en",
-		}),
+		metadata: create(MetadataSchema, devinCliMetadata(turn.apiKey, turn.userJwt)),
 		prompt: normalizeSystemPrompts(context.systemPrompt).join("\n\n"),
-		chatMessagePrompts: buildChatMessagePrompts(messages, cascadeId, model),
-		chatModelUid: options?.chatModelUid ?? model.requestModelId ?? model.id,
+		chatMessagePrompts: buildChatMessagePrompts(turn.messages, turn.cascadeId, model),
+		chatModelUid: assignment?.modelUid ?? options?.chatModelUid ?? model.requestModelId ?? model.id,
+		...(assignment ? { modelAssignmentJwt: assignment.assignmentJwt } : undefined),
 		requestType: ChatMessageRequestType.CASCADE,
 		plannerMode: ConversationalPlannerMode.DEFAULT,
 		toolChoice: create(ChatToolChoiceSchema, { choice: { case: "optionName", value: "auto" } }),
 		systemPromptCacheOptions: create(PromptCacheOptionsSchema, { type: CacheControlType.EPHEMERAL }),
-		disableParallelToolCalls: true,
-		cascadeId,
+		disableParallelToolCalls: !model.compat.supportsParallelToolCalls,
+		cascadeId: turn.cascadeId,
 		executionId: crypto.randomUUID(),
 		configuration: create(CompletionConfigurationSchema, {
 			numCompletions: 1n,
@@ -560,6 +633,24 @@ function buildDevinChatRequest(
 	});
 }
 
+/** Flatten one user/developer turn into a Cascade USER prompt with inline images. */
+function buildUserPrompt(msg: UserMessage | DeveloperMessage, messageId: string): ChatMessagePrompt {
+	let prompt = "";
+	const images: ImageData[] = [];
+	if (typeof msg.content === "string") {
+		prompt = msg.content;
+	} else {
+		for (const part of msg.content) {
+			if (part.type === "text") {
+				prompt += part.text;
+			} else if (part.type === "image") {
+				images.push(create(ImageDataSchema, { base64Data: part.data, mimeType: part.mimeType }));
+			}
+		}
+	}
+	return create(ChatMessagePromptSchema, { messageId, source: ChatMessageSource.USER, prompt, images });
+}
+
 /** Map omp `Message` history onto Cascade `ChatMessagePrompt`s (USER / SYSTEM / TOOL channels). */
 function buildChatMessagePrompts(
 	messages: Message[],
@@ -571,27 +662,7 @@ function buildChatMessagePrompts(
 	// so ids stay stable across content edits / history rebuilds.
 	for (const [index, msg] of messages.entries()) {
 		if (msg.role === "user" || msg.role === "developer") {
-			let promptText = "";
-			const images = [];
-			if (typeof msg.content === "string") {
-				promptText = msg.content;
-			} else {
-				for (const part of msg.content) {
-					if (part.type === "text") {
-						promptText += part.text;
-					} else if (part.type === "image") {
-						images.push(create(ImageDataSchema, { base64Data: part.data, mimeType: part.mimeType }));
-					}
-				}
-			}
-			prompts.push(
-				create(ChatMessagePromptSchema, {
-					messageId: deterministicUuid(`${cascadeId}\0${index}\0${msg.role}`),
-					source: ChatMessageSource.USER,
-					prompt: promptText,
-					images,
-				}),
-			);
+			prompts.push(buildUserPrompt(msg, deterministicUuid(`${cascadeId}\0${index}\0${msg.role}`)));
 		} else if (msg.role === "assistant") {
 			const isNativeDevinMessage =
 				msg.api === model.api && msg.provider === model.provider && msg.model === model.id;

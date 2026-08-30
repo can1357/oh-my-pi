@@ -289,6 +289,14 @@ export class TurnRecovery {
 	#bootstrapCache:
 		| { model: Model; level: ThinkingLevel | undefined; routed: boolean; value: ServingModel }
 		| undefined;
+	/**
+	 * Fallback-chain warnings pushed to `configWarnings` by startup validation,
+	 * tracked so a post-discovery re-check can retract the ones discovery
+	 * resolved (#10048).
+	 */
+	#fallbackChainWarnings = new Set<string>();
+	/** Whether startup validation deferred any warning pending in-flight discovery (#10048). */
+	#pendingDiscoveryDeferredValidation = false;
 
 	constructor(host: TurnRecoveryHost, options: TurnRecoveryOptions = {}) {
 		this.#host = host;
@@ -1158,11 +1166,16 @@ export class TurnRecovery {
 
 		// Credential rotation and classifier fallbacks are safe only before
 		// committed text, images, tool calls, or server tools. Thinking-only
-		// output remains replay-safe. A classifier refusal or malformed-function
-		// response may also be replayed when every emitted tool call is paired
-		// with positive proof that it never executed.
+		// output remains replay-safe. A classifier refusal, malformed-function
+		// response, or retriable transport error (the provider stream died
+		// mid-turn after a complete tool call — e.g. a socket close — and every
+		// emitted call was paired with a synthetic `executed: false` result) may
+		// also be replayed when every emitted tool call is paired with positive
+		// proof that it never executed.
 		const replaySafeUnexecutedTools =
-			(this.isClassifierRefusal(message) || AIError.is(id, AIError.Flag.MalformedFunctionCall)) &&
+			(this.isClassifierRefusal(message) ||
+				AIError.is(id, AIError.Flag.MalformedFunctionCall) ||
+				AIError.retriable(id)) &&
 			this.#unexecutedToolCallsReplaySafe(message);
 		if (this.#hasReplayUnsafeOutput(message) && !replaySafeUnexecutedTools) return false;
 		if (AIError.is(id, AIError.Flag.AccountPolicy) || this.isClassifierRefusal(message)) return true;
@@ -1172,7 +1185,8 @@ export class TurnRecovery {
 	/**
 	 * True when every emitted tool call provably never executed and no other
 	 * replay-unsafe output exists. The caller restricts this exception to
-	 * classifier refusals and malformed-function responses.
+	 * classifier refusals, malformed-function responses, and retriable
+	 * transport errors.
 	 *
 	 * Gemini can report `MALFORMED_FUNCTION_CALL` after streaming an earlier,
 	 * well-formed call. Anthropic classifiers can likewise refuse after a call.
@@ -1354,9 +1368,63 @@ export class TurnRecovery {
 	}
 
 	#validateRetryFallbackChains(): void {
-		validateRetryFallbackChains(this.#host.settings, this.#host.modelRegistry, message =>
-			this.#host.configWarnings.push(message),
+		let deferred = false;
+		validateRetryFallbackChains(
+			this.#host.settings,
+			this.#host.modelRegistry,
+			message => {
+				logger.warn(message);
+				this.#fallbackChainWarnings.add(message);
+				this.#host.configWarnings.push(message);
+			},
+			{
+				isDiscoveryPending: provider => {
+					const pending = this.#host.modelRegistry.isProviderDiscoveryPending(provider);
+					if (pending) deferred = true;
+					return pending;
+				},
+			},
 		);
+		this.#pendingDiscoveryDeferredValidation = deferred;
+	}
+
+	/** Whether startup fallback-chain validation deferred any warning pending in-flight discovery (#10048). */
+	hasPendingDiscoveryDeferredFallbackValidation(): boolean {
+		return this.#pendingDiscoveryDeferredValidation;
+	}
+
+	/**
+	 * Re-run fallback-chain validation once background discovery has settled and
+	 * reconcile `configWarnings`. Startup validation suppresses "unknown model"
+	 * warnings for selectors whose config-declared discovery provider had not yet
+	 * populated the registry (a cold cache after `omp update` bumps the discovery
+	 * namespace, #10048). With discovery done, drop any startup warning discovery
+	 * resolved and surface warnings for selectors that stayed unknown.
+	 *
+	 * @returns true when `configWarnings` changed and the header must rebuild.
+	 */
+	revalidateRetryFallbackChainsAfterDiscovery(): boolean {
+		const definitive = new Set<string>();
+		validateRetryFallbackChains(this.#host.settings, this.#host.modelRegistry, message => definitive.add(message));
+		this.#pendingDiscoveryDeferredValidation = false;
+		let changed = false;
+		for (const message of [...this.#fallbackChainWarnings]) {
+			if (definitive.has(message)) continue;
+			const index = this.#host.configWarnings.indexOf(message);
+			if (index !== -1) {
+				this.#host.configWarnings.splice(index, 1);
+				changed = true;
+			}
+			this.#fallbackChainWarnings.delete(message);
+		}
+		for (const message of definitive) {
+			if (this.#fallbackChainWarnings.has(message)) continue;
+			logger.warn(message);
+			this.#fallbackChainWarnings.add(message);
+			this.#host.configWarnings.push(message);
+			changed = true;
+		}
+		return changed;
 	}
 
 	#getRetryFallbackRevertPolicy(): RetryFallbackRevertPolicy {
@@ -1707,12 +1775,14 @@ export class TurnRecovery {
 	async #tryRetryModelFallback(
 		currentSelector: string,
 		failedMessage: AssistantMessage,
-		options?: { pinFallback?: boolean },
+		options?: { pinFallback?: boolean; preserveFailedTurn?: boolean },
 	): Promise<boolean> {
 		const ceiling = this.#host.thinkingLevelCeiling();
-		const latestAssistant = this.#host.agent.state.messages.findLast(
-			(message): message is AssistantMessage => message.role === "assistant" && message !== failedMessage,
-		);
+		const latestAssistant = options?.preserveFailedTurn
+			? failedMessage
+			: this.#host.agent.state.messages.findLast(
+					(message): message is AssistantMessage => message.role === "assistant" && message !== failedMessage,
+				);
 		for (const role of this.retryFallbackChainKeys(currentSelector)) {
 			for (const selector of this.findRetryFallbackCandidates(role, currentSelector)) {
 				if (this.isRetryFallbackSelectorSuppressed(selector)) continue;
@@ -1741,9 +1811,11 @@ export class TurnRecovery {
 				// clamped UP past the cap by its model floor — skip it entirely.
 				if (ceiling !== undefined && !modelSupportsEffortCeiling(candidate, ceiling)) continue;
 				// Skip a candidate whose window cannot hold the retry context. The
-				// failed assistant is removed before continue(), so exclude it here to
-				// judge the request that will actually be sent (issue #8065).
-				if (!this.#host.contextFitsModel(candidate, failedMessage)) continue;
+				// failed assistant is excluded only when retry removes it; preserved
+				// unexecuted-tool turns remain part of the request (issue #8065).
+				if (!this.#host.contextFitsModel(candidate, options?.preserveFailedTurn ? undefined : failedMessage)) {
+					continue;
+				}
 				const apiKey = await this.#host.modelRegistry.getApiKey(candidate, this.#host.sessionId());
 				if (!apiKey) continue;
 				return this.applyRetryFallbackCandidate(role, selector, currentSelector, options);
@@ -2019,7 +2091,7 @@ export class TurnRecovery {
 		const id = this.#classifyRetryMessage(message);
 		const preserveFailedTurn =
 			options?.preserveFailedTurn === true ||
-			((classifierRefusal || AIError.is(id, AIError.Flag.MalformedFunctionCall)) &&
+			((classifierRefusal || AIError.is(id, AIError.Flag.MalformedFunctionCall) || AIError.retriable(id)) &&
 				this.#unexecutedToolCallsReplaySafe(message));
 		const rateLimitReason = parseRateLimitReason(errorMessage);
 		const staleOpenAIResponsesReplayError = AIError.is(id, AIError.Flag.StaleResponsesItem);
@@ -2123,6 +2195,7 @@ export class TurnRecovery {
 				}
 				switchedModel = await this.#tryRetryModelFallback(currentSelector, message, {
 					pinFallback: classifierRefusal,
+					preserveFailedTurn,
 				});
 			}
 			// Auto fallback from a Fireworks Fast variant to its base model. Independent

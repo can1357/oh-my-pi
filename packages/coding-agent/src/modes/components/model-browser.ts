@@ -16,12 +16,13 @@ import {
 	fuzzyRank,
 	Input,
 	matchesKey,
+	replaceTabs,
 	ScrollView,
 	type SgrMouseEvent,
 	truncateToWidth,
 	visibleWidth,
 } from "@oh-my-pi/pi-tui";
-import { formatNumber } from "@oh-my-pi/pi-utils";
+import { formatNumber, sanitizeText } from "@oh-my-pi/pi-utils";
 import { getModelMatchPreferences, resolveModelRoleValue } from "../../config/model-resolver";
 import { getKnownRoleIds, getRoleInfo, MODEL_ROLE_IDS } from "../../config/model-roles";
 import type { Settings } from "../../config/settings";
@@ -286,6 +287,13 @@ function formatCostPair(model: Model): string {
 		return s.replace(/\.?0+$/, "");
 	};
 	return `$${fmt(cost.input)}/${fmt(cost.output)}`;
+}
+
+/** Provider-supplied blurb, flattened to a single renderable detail-line cell. */
+function formatDescription(description: string): string {
+	return replaceTabs(sanitizeText(description))
+		.replace(/[\r\n]+/g, " ")
+		.trim();
 }
 
 /**
@@ -776,6 +784,11 @@ export class ModelBrowser implements Component {
 		const model = selected.model;
 
 		const facts: string[] = [model.name];
+		// Upstream badges sit next to the name; the provider blurb goes last so
+		// width truncation eats prose before context, cost, or perf facts.
+		if (model.isNew) facts.push("new");
+		if (model.isBeta) facts.push("beta");
+		if (model.isRecommended) facts.push("recommended");
 		if (model.contextWindow) facts.push(`${formatNumber(model.contextWindow).toLowerCase()} ctx`);
 		if (model.maxTokens) facts.push(`${formatNumber(model.maxTokens).toLowerCase()} out`);
 		facts.push(`${formatCostPair(model)} per M`);
@@ -785,6 +798,10 @@ export class ModelBrowser implements Component {
 		if (perf) {
 			facts.push(`~${formatTps(perf.tps)}`);
 			if (perf.ttftMs !== null) facts.push(`${formatTtft(perf.ttftMs)} ttft`);
+		}
+		if (model.description) {
+			const description = formatDescription(model.description);
+			if (description) facts.push(description);
 		}
 		const line1 = truncateToWidth(theme.fg("muted", `  ${facts.join(" · ")}`), width);
 

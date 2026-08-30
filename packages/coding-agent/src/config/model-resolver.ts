@@ -433,6 +433,44 @@ function getProviderModelIndex(availableModels: readonly Model<Api>[]): Map<stri
 	return index;
 }
 
+const kProviderWireRouteIndex = Symbol("model-resolver.wireRouteIndex");
+type ModelsWithWireRouteIndex = readonly Model<Api>[] & {
+	[kProviderWireRouteIndex]?: Map<string, Model<Api> | null>;
+};
+
+/**
+ * Reverse index over collapsed models' `thinking.effortRouting`:
+ * `provider\0wireId` → the logical model that routes to it. Families collapsed
+ * at discovery time (Devin's dynamic catalog) carry no hand-table alias, so
+ * their raw upstream uids would otherwise be unselectable. Ambiguous wire ids
+ * (two logical models routing to one uid) map to the `null` sentinel and
+ * resolve to nothing, exactly like the exact-id index.
+ */
+function getProviderWireRouteIndex(availableModels: readonly Model<Api>[]): Map<string, Model<Api> | null> {
+	const tagged = availableModels as ModelsWithWireRouteIndex;
+	const cached = tagged[kProviderWireRouteIndex];
+	if (cached) return cached;
+	const index = new Map<string, Model<Api> | null>();
+	for (const m of availableModels) {
+		const routing = m.thinking?.effortRouting;
+		if (routing === undefined) continue;
+		const providerKey = m.provider.toLowerCase();
+		for (const effort in routing) {
+			const wireId = routing[effort as keyof typeof routing];
+			if (wireId === undefined) continue;
+			const key = `${providerKey}\u0000${wireId.toLowerCase()}`;
+			const existing = index.get(key);
+			if (existing === undefined) {
+				index.set(key, m);
+			} else if (existing !== null && existing !== m) {
+				index.set(key, null); // ambiguous sentinel; do not overwrite back
+			}
+		}
+	}
+	tagged[kProviderWireRouteIndex] = index;
+	return index;
+}
+
 export function resolveProviderModelReference(
 	provider: string,
 	modelId: string,
@@ -463,6 +501,15 @@ export function resolveProviderModelReference(
 		if (aliased) {
 			return aliased;
 		}
+	}
+
+	// Dynamically collapsed families have no hand-table alias: fall back to the
+	// per-effort wire ids the live model routes to, so a raw upstream uid still
+	// selects its logical model. The exact lookup above keeps a live raw model
+	// winning over the collapsed carrier.
+	const routed = getProviderWireRouteIndex(availableModels).get(`${normalizedProvider}\u0000${normalizedModelId}`);
+	if (routed) {
+		return routed;
 	}
 
 	const bedrockInferenceProfile = resolveBedrockInferenceProfileReference(provider, modelId, availableModels);
