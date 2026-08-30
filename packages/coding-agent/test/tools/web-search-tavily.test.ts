@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import type { AuthStorage } from "@oh-my-pi/pi-ai";
-import { searchTavily } from "@oh-my-pi/pi-coding-agent/web/search/providers/tavily";
+import { searchTavily, TavilyProvider } from "@oh-my-pi/pi-coding-agent/web/search/providers/tavily";
 import type { SearchProviderError } from "@oh-my-pi/pi-coding-agent/web/search/types";
 
 describe("Tavily web search provider", () => {
@@ -38,9 +38,11 @@ describe("Tavily web search provider", () => {
 
 	it("maps Tavily responses into SearchResponse and forwards recency filters", async () => {
 		let requestBody: Record<string, unknown> | null = null;
+		let requestHeaders: Headers | undefined;
 
 		const fetchMock = async (_input: string | URL | Request, init?: RequestInit): Promise<Response> => {
 			requestBody = JSON.parse(String(init?.body ?? "null")) as Record<string, unknown>;
+			requestHeaders = new Headers(init?.headers);
 			return new Response(
 				JSON.stringify({
 					answer: "Synthesized Tavily answer",
@@ -77,6 +79,8 @@ describe("Tavily web search provider", () => {
 			include_raw_content: false,
 		});
 		expect(requestBody).not.toHaveProperty("topic");
+		expect(requestHeaders?.get("Authorization")).toBe("Bearer test-tavily-key");
+		expect(requestHeaders?.has("X-Tavily-Access-Mode")).toBe(false);
 		expect(response).toMatchObject({
 			provider: "tavily",
 			answer: "Synthesized Tavily answer",
@@ -179,10 +183,79 @@ describe("Tavily web search provider", () => {
 		);
 	});
 
-	it("throws a clear error when Tavily credentials are missing", async () => {
+	it("retries with a rotated credential after the seeded key is rejected", async () => {
+		const resolvedKeys = ["initial-tavily-key", "rotated-tavily-key"] as const;
+		let resolutionCount = 0;
+		const authStorage = {
+			resolver(provider: string, options?: { sessionId?: string }) {
+				expect(provider).toBe("tavily");
+				expect(options?.sessionId).toBe("session-tavily-test");
+				return async () => resolvedKeys[resolutionCount++];
+			},
+		} as unknown as AuthStorage;
+		const authorizationHeaders: Array<string | null> = [];
+		const fetchMock = async (_input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+			authorizationHeaders.push(new Headers(init?.headers).get("Authorization"));
+			if (authorizationHeaders.length === 1) {
+				return new Response("credential rejected", { status: 401 });
+			}
+			if (authorizationHeaders.length === 2) {
+				return new Response(JSON.stringify({ request_id: "rotated-tavily-request", results: [] }), {
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				});
+			}
+			throw new Error("unexpected Tavily request");
+		};
+
+		const response = await searchTavily({
+			...makeParams("credential rotation"),
+			authStorage,
+			sessionId: "session-tavily-test",
+			fetch: fetchMock,
+		});
+
+		expect(authorizationHeaders).toEqual(["Bearer initial-tavily-key", "Bearer rotated-tavily-key"]);
+		expect(resolutionCount).toBe(2);
+		expect(response).toMatchObject({
+			requestId: "rotated-tavily-request",
+			authMode: "api_key",
+		});
+	});
+
+	it("uses keyless access only when Tavily is explicitly selected without credentials", async () => {
 		delete process.env.TAVILY_API_KEY;
-		await expect(searchTavily(makeParams("missing creds"))).rejects.toThrow(
-			'Tavily credentials not found. Set TAVILY_API_KEY or configure an API key for provider "tavily".',
-		);
+		const provider = new TavilyProvider();
+		expect(provider.isAvailable(fakeAuthStorage)).toBe(false);
+		expect(provider.isExplicitlyAvailable(fakeAuthStorage)).toBe(true);
+
+		let requestHeaders: Headers | undefined;
+		const fetchMock = async (_input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+			requestHeaders = new Headers(init?.headers);
+			return new Response(
+				JSON.stringify({
+					results: [{ title: "Keyless result", url: "https://example.com/keyless", content: "Free tier" }],
+					request_id: "req-keyless-123",
+				}),
+				{ status: 200, headers: { "Content-Type": "application/json" } },
+			);
+		};
+
+		const response = await searchTavily({
+			...makeParams("keyless search"),
+			explicitProvider: true,
+			fetch: fetchMock,
+		});
+
+		expect(requestHeaders?.has("Authorization")).toBe(false);
+		expect(requestHeaders?.get("X-Client-Name")).toBe("oh-my-pi");
+		expect(requestHeaders?.get("X-Client-Source")).toBe("oh-my-pi-keyless");
+		expect(requestHeaders?.get("X-Tavily-Access-Mode")).toBe("keyless");
+		expect(response).toMatchObject({
+			provider: "tavily",
+			authMode: "keyless",
+			requestId: "req-keyless-123",
+			sources: [{ title: "Keyless result", url: "https://example.com/keyless", snippet: "Free tier" }],
+		});
 	});
 });

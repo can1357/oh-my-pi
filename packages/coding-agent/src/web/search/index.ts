@@ -205,6 +205,7 @@ async function executeSearch(
 			const response = await provider.search({
 				query: params.query,
 				parsedQuery,
+				explicitProvider: candidate.explicit,
 				limit: params.limit,
 				recency: params.recency,
 				systemPrompt: webSearchSystemPrompt,
