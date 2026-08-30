@@ -93,6 +93,7 @@ export class ChatTranscriptBuilder {
 	#pendingUsageTimestamp: number | undefined;
 	#pendingReadUsageCallIds: string[] | undefined;
 	#pendingUsageElapsedMs: number | undefined;
+	#pendingUsageUpstreamProvider: string | undefined;
 	#turnStartedAt: number | undefined;
 	#lastAssistantUsage: Usage | undefined;
 	#waitingPoll: ToolExecutionComponent | null = null;
@@ -157,6 +158,7 @@ export class ChatTranscriptBuilder {
 		this.#pendingUsageTimestamp = undefined;
 		this.#pendingReadUsageCallIds = undefined;
 		this.#pendingUsageElapsedMs = undefined;
+		this.#pendingUsageUpstreamProvider = undefined;
 		this.#turnStartedAt = undefined;
 		this.#lastAssistantUsage = undefined;
 		this.#waitingPoll = null;
@@ -239,6 +241,7 @@ export class ChatTranscriptBuilder {
 				this.#pendingUsageTtft,
 				this.#pendingUsageTimestamp,
 				this.#pendingUsageElapsedMs,
+				this.#pendingUsageUpstreamProvider,
 			) ??
 				false);
 		if (!usageAttached) {
@@ -251,6 +254,7 @@ export class ChatTranscriptBuilder {
 					this.#pendingUsageTtft,
 					this.#pendingUsageTimestamp,
 					this.#pendingUsageElapsedMs,
+					this.#pendingUsageUpstreamProvider,
 				),
 			);
 		}
@@ -260,6 +264,7 @@ export class ChatTranscriptBuilder {
 		this.#pendingUsageTimestamp = undefined;
 		this.#pendingReadUsageCallIds = undefined;
 		this.#pendingUsageElapsedMs = undefined;
+		this.#pendingUsageUpstreamProvider = undefined;
 	}
 
 	#appendChatMessage(message: AgentMessage): void {
@@ -485,6 +490,7 @@ export class ChatTranscriptBuilder {
 		this.#pendingReadUsageCallIds = this.#pendingUsage ? groupedReadUsageCallIds(message) : undefined;
 		this.#pendingUsageElapsedMs =
 			this.#pendingUsage && settings.get("display.showTurnTime") ? this.#turnElapsedMs(message) : undefined;
+		this.#pendingUsageUpstreamProvider = this.#pendingUsage ? message.upstreamProvider : undefined;
 	}
 
 	#appendToolResult(message: Extract<AgentMessage, { role: "toolResult" }>): void {

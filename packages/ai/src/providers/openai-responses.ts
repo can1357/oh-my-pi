@@ -449,6 +449,10 @@ const streamOpenAIResponsesOnce = (
 				openAISessionId: routingSessionId,
 				promptCacheSessionId,
 			});
+			// Opt in to OpenRouter routing metadata: the terminal response event
+			// carries `openrouter_metadata.endpoints[]` with the provider that
+			// actually served the request (no top-level `provider` on responses).
+			if (model.provider === "openrouter") headers["X-OpenRouter-Metadata"] = "enabled";
 			const premiumRequestsTotal = copilotPremiumRequests;
 			const providerSessionState = getOpenAIResponsesProviderSessionState(model, options?.providerSessionState);
 			const strictToolsScope = getOpenAIStrictToolsScope(model, baseUrl);

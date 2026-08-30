@@ -38,6 +38,7 @@ export function formatUsageRow(
 	ttftMs?: number,
 	timestamp?: number,
 	turnElapsedMs?: number,
+	upstreamProvider?: string,
 ): string {
 	const totalInput = usage.input + usage.cacheWrite;
 	const parts: string[] = [];
@@ -68,6 +69,12 @@ export function formatUsageRow(
 		const tokPerSec = (usage.output / durationMs) * 1000;
 		parts.push(`${theme.icon.throughput} ${tokPerSec.toFixed(1)}/s`);
 	}
+	// The aggregator (e.g. OpenRouter) that routed the request — the actual
+	// inference backend that generated this response. Absent for direct
+	// provider connections.
+	if (upstreamProvider) {
+		parts.push(`via ${upstreamProvider}`);
+	}
 	return parts.join("  ");
 }
 
@@ -88,10 +95,11 @@ export function createUsageRowBlock(
 	ttftMs?: number,
 	timestamp?: number,
 	turnElapsedMs?: number,
+	upstreamProvider?: string,
 ): Container {
 	const block = new Container();
 	block.addChild(new Spacer(1));
-	block.addChild(new Text(theme.fg("dim", formatUsageRow(usage, durationMs, ttftMs, timestamp, turnElapsedMs)), 1, 0));
+	block.addChild(new Text(theme.fg("dim", formatUsageRow(usage, durationMs, ttftMs, timestamp, turnElapsedMs, upstreamProvider)), 1, 0));
 	usageRowBlocks.add(block);
 	return block;
 }

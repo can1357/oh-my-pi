@@ -131,6 +131,7 @@ type ReadUsageRow = {
 	ttftMs?: number;
 	timestamp?: number;
 	turnElapsedMs?: number;
+	upstreamProvider?: string;
 };
 
 /** Number of code lines to show in collapsed preview mode */
@@ -487,6 +488,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 		ttftMs?: number,
 		timestamp?: number,
 		turnElapsedMs?: number,
+		upstreamProvider?: string,
 	): boolean {
 		const attachedToolCallIds: string[] = [];
 		let anchorId: string | undefined;
@@ -506,6 +508,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 			ttftMs,
 			timestamp,
 			turnElapsedMs,
+			upstreamProvider,
 		});
 		this.#updateDisplay();
 		return true;
@@ -708,7 +711,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 			lines.push(
 				theme.fg(
 					"dim",
-					`${prefix}${formatUsageRow(usageRow.usage, usageRow.durationMs, usageRow.ttftMs, usageRow.timestamp, usageRow.turnElapsedMs)}`,
+					`${prefix}${formatUsageRow(usageRow.usage, usageRow.durationMs, usageRow.ttftMs, usageRow.timestamp, usageRow.turnElapsedMs, usageRow.upstreamProvider)}`,
 				),
 			);
 		}
@@ -862,6 +865,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 						usageRow.ttftMs,
 						usageRow.timestamp,
 						usageRow.turnElapsedMs,
+						usageRow.upstreamProvider,
 					),
 				),
 				3,
