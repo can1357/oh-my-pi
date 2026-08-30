@@ -310,6 +310,21 @@ describe("zod-like parsing", () => {
 			messages.add(result.success ? "accepted" : result.error.message);
 		}
 		expect([...messages]).toEqual(["must be a plain object (was an array)"]);
+
+		// Union normalization must not prune the WIDER member: the domain bit is
+		// part of what an object accepts, so ignoring it in the subtype check made
+		// the union's accepted input depend on member order, and reported a plain
+		// and an unrestricted object as equal.
+		const unrestricted = type({ "+": "reject" });
+		const plainFirst = (z.strictObject({}) as unknown as { or(def: unknown): (value: unknown) => unknown }).or(
+			unrestricted,
+		);
+		const plainSecond = (unrestricted as unknown as { or(def: unknown): (value: unknown) => unknown }).or(
+			z.strictObject({}),
+		);
+		expect(plainFirst([])).toEqual([]);
+		expect(plainSecond([])).toEqual([]);
+		expect((z.strictObject({}) as unknown as { equals(def: unknown): boolean }).equals(unrestricted)).toBe(false);
 	});
 
 	it("rejects discriminators pinned to values it cannot advertise", () => {

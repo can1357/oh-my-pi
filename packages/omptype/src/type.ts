@@ -2421,6 +2421,11 @@ function isSubtype(source: IR, target: IR, seen = new WeakMap<IR, Set<IR>>()): b
 		return lengthWithin(source, target) && isSubtype(source.el, target.el, seen);
 	}
 	if (source.k === "object" && target.k === "object") {
+		// A plain-only target accepts strictly less than an unrestricted one, so
+		// an unrestricted source cannot be its subtype. Ignoring this let union
+		// normalization prune the wider member and make the union's accepted
+		// input depend on declaration order.
+		if (target.plain === true && source.plain !== true) return false;
 		for (const targetProp of target.props) {
 			const sourceProp = source.props.find(prop => prop.key === targetProp.key);
 			if (sourceProp === undefined) {
