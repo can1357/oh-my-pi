@@ -2182,28 +2182,32 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			}
 			extensionsResult.runtime.pendingProviderRegistrations = [];
 		}
-		// Hydrate cached runtime (extension) provider catalogs before model
-		// resolution. Dynamic-only providers have no synchronous registration side
-		// effect, so a cold --model/provider resume must see the same fresh SQLite
-		// cache that `omp models find` uses before the online refresh continues in
-		// the background.
+		// Runtime extension catalogs intentionally have no disk cache. This offline
+		// pass leaves any current-process models intact; cold resumes await targeted
+		// online discovery below when a saved model needs one.
 		await modelRegistry.refreshRuntimeProviders("offline");
 		// Online runtime discovery must not steal the event loop from the first UI
 		// frame. Explicit deferred model selectors still start it immediately
 		// because they await it below; normal UI startup receives a one-shot
 		// starter in CreateAgentSessionResult and calls it after mode.init paints.
 		let runtimeDiscoveryPromise: Promise<void> | undefined;
-		const startRuntimeDiscovery = (): Promise<void> => {
-			runtimeDiscoveryPromise ??= modelRegistry.refreshRuntimeProviders().catch(error => {
+		let targetedUiRuntimeProviderIds: Set<string> | undefined;
+		const runRuntimeDiscovery = (
+			providerIds?: Iterable<string>,
+			strategy: "online" | "online-if-uncached" = "online-if-uncached",
+			excludedProviderIds?: ReadonlySet<string>,
+		): Promise<void> =>
+			modelRegistry.refreshRuntimeProviders(strategy, providerIds, excludedProviderIds).catch(error => {
 				logger.warn("runtime provider discovery failed", {
 					error: error instanceof Error ? error.message : String(error),
 				});
 			});
+		const startRuntimeDiscovery = (
+			strategy: "online" | "online-if-uncached" = "online-if-uncached",
+		): Promise<void> => {
+			runtimeDiscoveryPromise ??= runRuntimeDiscovery(undefined, strategy, targetedUiRuntimeProviderIds);
 			return runtimeDiscoveryPromise;
 		};
-		if (!options.hasUI || deferredModelPatterns.length > 0) {
-			void startRuntimeDiscovery();
-		}
 
 		// Retry session-model candidates now that extension providers are
 		// registered. The initial restore runs before extensions load, so a role
@@ -2213,6 +2217,32 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// downstream fallback filling `model`). Reclaim it here so resume
 		// honors the last active role in either case.
 		const sessionRetryLimit = restoredSessionModelIndex >= 0 ? restoredSessionModelIndex : sessionModelStrings.length;
+		const sessionCandidateProviders = new Set<string>();
+		const sessionCandidateModelIds = new Map<string, Set<string>>();
+		for (const sessionModelStr of sessionModelStrings.slice(0, sessionRetryLimit)) {
+			const parsedModel = parseModelString(sessionModelStr, {
+				allowMaxSuffix: true,
+				allowAutoAlias: true,
+				isLiteralModelId: (provider, id) => modelRegistry.find(provider, id) !== undefined,
+			});
+			if (!parsedModel) continue;
+			sessionCandidateProviders.add(parsedModel.provider);
+			let ids = sessionCandidateModelIds.get(parsedModel.provider);
+			if (!ids) {
+				ids = new Set();
+				sessionCandidateModelIds.set(parsedModel.provider, ids);
+			}
+			ids.add(parsedModel.id);
+		}
+		if (!options.hasUI || deferredModelPatterns.length > 0) {
+			// Explicit selectors and saved non-UI sessions are user-blocking. They
+			// must discover with refreshed OAuth rather than a fallback-key peek.
+			const strategy =
+				deferredModelPatterns.length > 0 || (!hasExplicitModel && sessionCandidateProviders.size > 0)
+					? "online"
+					: "online-if-uncached";
+			void startRuntimeDiscovery(strategy);
+		}
 		if (!hasExplicitModel && sessionRetryLimit > 0) {
 			const restoreSessionModel = (): boolean => {
 				for (let i = 0; i < sessionRetryLimit; i++) {
@@ -2246,36 +2276,57 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				}
 				return false;
 			};
-			if (!restoreSessionModel()) {
-				// The saved candidates weren't in the static+cached catalog. If any
-				// belongs to a discovery-backed provider that hasn't been fetched
-				// yet (models.yml `discovery:` — openai-models-list/litellm/proxy/…),
-				// trigger a cache-aware, provider-scoped discovery pass and retry
-				// before resume silently downgrades to the default role. The
-				// registry coalesces this with any matching request already running
-				// in the SDK's startup background refresh.
-				const discoverableProviders = new Set(modelRegistry.getDiscoverableProviders());
-				const candidateProviders = new Set<string>();
-				if (discoverableProviders.size > 0) {
-					for (const sessionModelStr of sessionModelStrings.slice(0, sessionRetryLimit)) {
-						const parsedModel = parseModelString(sessionModelStr, {
-							allowMaxSuffix: true,
-							allowAutoAlias: true,
-							isLiteralModelId: (provider, id) => modelRegistry.find(provider, id) !== undefined,
-						});
-						if (parsedModel && discoverableProviders.has(parsedModel.provider)) {
-							candidateProviders.add(parsedModel.provider);
-						}
-					}
+			let restoredSessionModel = restoreSessionModel();
+			if (!restoredSessionModel && runtimeDiscoveryPromise) {
+				await runtimeDiscoveryPromise;
+				restoredSessionModel = restoreSessionModel();
+			}
+			if (!restoredSessionModel && !runtimeDiscoveryPromise) {
+				// Extension runtime catalogs intentionally have no cache. In a UI session,
+				// discover only saved-model providers so unrelated extensions cannot block
+				// the first frame; non-UI startup has already completed an all-provider pass.
+				const targetedRuntimeDiscovery = logger.time(
+					"restoreSessionRuntimeDiscoveryFallback",
+					// A saved model is a user-blocking cold-resume dependency: `online`
+					// deliberately refreshes an expired OAuth credential for its runtime manager.
+					() => runRuntimeDiscovery(sessionCandidateProviders, "online"),
+				);
+				// A UI session has no startup request yet. Exclude each targeted provider
+				// only when it has a usable catalog after this pass; failed providers
+				// remain eligible for post-paint discovery.
+				const targetedUiDiscovery = !runtimeDiscoveryPromise;
+				await targetedRuntimeDiscovery;
+				restoredSessionModel = restoreSessionModel();
+				if (targetedUiDiscovery) {
+					targetedUiRuntimeProviderIds = new Set(
+						[...sessionCandidateModelIds].flatMap(([provider, ids]) =>
+							[...ids].some(id => {
+								const candidate = modelRegistry.find(provider, id);
+								return (
+									candidate &&
+									hasModelAuth(candidate) &&
+									modelRegistry.hasRuntimeDiscoveredModel(provider, candidate.id)
+								);
+							})
+								? [provider]
+								: [],
+						),
+					);
 				}
+			}
+			if (!restoredSessionModel) {
+				// The saved candidates weren't in the static or extension catalog. If any
+				// belongs to a discovery-backed models.yml provider, trigger a cache-aware
+				// provider-scoped pass before silently using the default.
+				const discoverableProviders = new Set(modelRegistry.getDiscoverableProviders());
+				const candidateProviders = new Set(
+					[...sessionCandidateProviders].filter(provider => discoverableProviders.has(provider)),
+				);
 				if (candidateProviders.size > 0) {
-					// This skips the static reload and all-other-runtime restore
-					// performed by `refreshProvider`, so unrelated runtime providers
-					// continue independently.
 					await logger.time("restoreSessionModelDiscoveryFallback", () =>
 						modelRegistry.refreshDiscoverableProviders(candidateProviders, "online-if-uncached"),
 					);
-					restoreSessionModel();
+					restoredSessionModel = restoreSessionModel();
 				}
 			}
 		}
@@ -2283,19 +2334,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// registered. Use the same CLI resolver as the immediate path so bare role
 		// names, exact model names, and provider selectors keep one precedence rule.
 		if (!model && deferredModelPatterns.length > 0) {
-			// Deferred `--model` patterns almost always failed at the immediate
-			// path (main.ts:881) precisely because discovery-backed providers
-			// hadn't populated yet. Await the in-flight runtime discovery
-			// already kicked off above (stash + reuse avoids a second concurrent
-			// `#refreshRuntimeDiscoveries` pass for the same runtime model
-			// managers; it resolves instantly when no runtime managers are
-			// registered). `refreshRuntimeProviders()` only covers runtime model
-			// managers, not config-discovery providers (e.g. user-configured
-			// ollama); fall back to a full cache-aware refresh only when the
-			// runtime pass didn't surface a match AND config-discovery providers
-			// exist to fetch from. By then runtime managers short-circuit on the
-			// fresh cache written by the awaited pass, closing the double-fetch
-			// window.
+			// Deferred patterns often fail immediate resolution because their
+			// discovery-backed provider is not populated yet. First await the
+			// in-flight runtime discovery kicked off above. That pass covers only
+			// runtime managers, not configured discovery providers (for example,
+			// a user-configured ollama endpoint). If it finds no match, refresh only
+			// configured providers; re-running cache-disabled runtime managers could
+			// discard a successful catalog after a transient failure.
 			await logger.time("resolveModelDiscoveryDeferredRetry", startRuntimeDiscovery);
 			const matchPreferences = getModelMatchPreferences(settings);
 			const runtimeResolved = deferredModelPatterns.some(pattern =>
@@ -2317,9 +2362,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					return Boolean(resolved.model);
 				}),
 			);
-			if (!runtimeResolved && modelRegistry.getDiscoverableProviders().length > 0) {
+			const discoverableProviderIds = new Set(modelRegistry.getDiscoverableProviders());
+			if (!runtimeResolved && discoverableProviderIds.size > 0) {
 				await logger.time("resolveModelDiscoveryFallbackNonRuntime", () =>
-					modelRegistry.refresh("online-if-uncached"),
+					modelRegistry.refreshDiscoverableProviders(discoverableProviderIds, "online-if-uncached"),
 				);
 			}
 			const allModels = modelRegistry.getAll();
@@ -2591,8 +2637,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// user's configured default with a bundled provider's default whenever
 			// a stray `OPENAI_API_KEY`/`ANTHROPIC_API_KEY` is in the environment.
 			// (issues #3569, #6162)
-			const tryResolveDefaultRole = async (): Promise<boolean> => {
-				if (hasExplicitModel) return false;
+			const tryResolveDefaultRole = async (): Promise<Model | undefined> => {
+				if (hasExplicitModel) return undefined;
 				// Re-resolve the allowed set: extension factories and discovery
 				// refreshes above may have registered models not visible earlier.
 				const fallbackCandidates = await resolveAllowedModels(modelRegistry, settings, modelMatchPreferences);
@@ -2600,7 +2646,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					settings,
 					matchPreferences: modelMatchPreferences,
 				});
-				if (!reResolvedRoleSpec.model) return false;
+				if (!reResolvedRoleSpec.model) return undefined;
 				defaultRoleSpec = reResolvedRoleSpec;
 				const resolvedDefaultModel = reResolvedRoleSpec.model;
 				model = resolvedDefaultModel;
@@ -2617,10 +2663,24 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						: resolveThinkingLevelForModel(resolvedDefaultModel, effectiveThinkingLevel),
 				);
 				preconnectModelHost(resolvedDefaultModel.baseUrl);
-				return true;
+				return resolvedDefaultModel;
 			};
 
 			await tryResolveDefaultRole();
+
+			// Runtime extension catalogs are memory-only, so a fresh UI session's
+			// configured default can be absent until discovery runs. It is a startup
+			// dependency, unlike unrelated runtime providers which stay post-paint.
+			if (!model && options.hasUI && explicitDefaultProviders?.size) {
+				await logger.time("resolveDefaultRoleRuntimeDiscovery", () =>
+					runRuntimeDiscovery(explicitDefaultProviders, "online-if-uncached"),
+				);
+				const resolvedDefaultModel = await tryResolveDefaultRole();
+				if (resolvedDefaultModel) {
+					targetedUiRuntimeProviderIds ??= new Set();
+					targetedUiRuntimeProviderIds.add(resolvedDefaultModel.provider);
+				}
+			}
 
 			if (!model) {
 				const fallbackCandidates = await resolveAllowedModels(modelRegistry, settings, modelMatchPreferences);

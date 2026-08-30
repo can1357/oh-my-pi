@@ -105,4 +105,79 @@ describe("issue #3569 fresh launch default role from extension provider", () => 
 			await session.dispose();
 		}
 	});
+	test("awaits the default runtime catalog before choosing a fresh UI fallback", async () => {
+		const bundledOpenAiDefault = getBundledModel("openai", "gpt-5.5");
+		if (!bundledOpenAiDefault) {
+			throw new Error("Expected bundled OpenAI GPT-5.5 default");
+		}
+
+		const authStorage = createInMemoryAuthStorage();
+		authStoragesToClose.push(authStorage);
+		authStorage.setRuntimeApiKey("openai", "test-openai-key");
+		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "dynamic-default-models.yml"));
+		const settings = Settings.isolated({ modelRoles: { default: "runtime-provider/runtime-model" } });
+		let defaultFetches = 0;
+		let unrelatedFetches = 0;
+		const dynamicExtension: ExtensionFactory = pi => {
+			pi.registerProvider("runtime-provider", {
+				baseUrl: "https://runtime.example.com/v1",
+				apiKey: "RUNTIME_KEY",
+				api: "openai-completions",
+				fetchDynamicModels: async () => {
+					defaultFetches += 1;
+					return [
+						{
+							id: "runtime-model",
+							name: "Runtime Model",
+							reasoning: false,
+							input: ["text"],
+							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+							contextWindow: 128000,
+							maxTokens: 8192,
+						},
+					];
+				},
+			});
+			pi.registerProvider("unrelated-runtime-provider", {
+				baseUrl: "https://unrelated.example.com/v1",
+				apiKey: "UNRELATED_KEY",
+				api: "openai-completions",
+				fetchDynamicModels: async () => {
+					unrelatedFetches += 1;
+					return [];
+				},
+			});
+		};
+
+		const { session } = await createAgentSession({
+			cwd: tempDir,
+			agentDir: tempDir,
+			authStorage,
+			modelRegistry,
+			settings,
+			sessionManager: SessionManager.inMemory(),
+			disableExtensionDiscovery: true,
+			extensions: [dynamicExtension],
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+			rules: [],
+			preloadedCustomToolPaths: [],
+			toolNames: ["read"],
+			hasUI: true,
+		});
+
+		try {
+			expect(session.model?.provider).toBe("runtime-provider");
+			expect(session.model?.id).toBe("runtime-model");
+			expect(defaultFetches).toBe(1);
+			expect(unrelatedFetches).toBe(0);
+		} finally {
+			await session.dispose();
+		}
+	});
 });

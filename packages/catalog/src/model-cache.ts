@@ -7,11 +7,11 @@ import { renameSync } from "node:fs";
 import { getModelDbPath, isEnoent, isSqliteCorruptionError, logger } from "@oh-my-pi/pi-utils";
 import type { Api, Model, ModelSpec } from "./types";
 
-// Rows persist ModelSpec JSON (sparse `compat`, never the resolved record);
-// the model manager rebuilds via `buildModel` on load. Request headers are
-// intentionally omitted: arbitrary provider-defined header names can carry
-// credentials. v12 invalidates Kimi Code rows carrying the blanket
-// maxTokens: 32000 that predate per-family output caps (k3/k3-256k -> 131072,
+// v14 invalidates rows created by the short-lived credential-scoped cache
+// experiment, so derived credential material is securely deleted rather than
+// reused.
+// v12 invalidates Kimi Code rows carrying the blanket maxTokens: 32000 that
+// predate per-family output caps (k3/k3-256k -> 131072,
 // kimi-for-coding[-highspeed] -> 32768, #6711); v11 invalidates rows that may
 // persist derived computer-use
 // headers and records which model ids lost headers or cannot be rebuilt.
@@ -23,7 +23,7 @@ import type { Api, Model, ModelSpec } from "./types";
 // retired unknown-limit sentinels (222222/8888); v5 invalidated rows predating
 // effort-tier variant collapsing (raw `-low`/`-high`/`-thinking` member ids);
 // v4 dropped the pre-efforts ThinkingConfig shape.
-const CACHE_SCHEMA_VERSION = 12;
+const CACHE_SCHEMA_VERSION = 14;
 const HEADER_RESTORE_VERSION = 1;
 
 interface CacheRow {
@@ -65,6 +65,14 @@ interface CacheEntry<TApi extends Api = Api> {
 let sharedDb: Database | null = null;
 let sharedDbPath: string | null = null;
 
+/** Test-only: release the process-wide cache handle without opening another database. */
+export function __closeSharedModelCacheForTests(): void {
+	if (!sharedDb) return;
+	sharedDb.close();
+	sharedDb = null;
+	sharedDbPath = null;
+}
+
 function openDb(resolvedPath: string): Database {
 	const db = new Database(resolvedPath, { create: true });
 	// Install the busy handler BEFORE any lock-taking statement. See
@@ -88,12 +96,21 @@ function openDb(resolvedPath: string): Database {
 			models TEXT NOT NULL
 		)
 	`);
+	db.run(`
+		CREATE TABLE IF NOT EXISTS model_cache_cleanup (
+			operation TEXT PRIMARY KEY
+		)
+	`);
 	migrateCacheSchema(db);
 	return db;
 }
 
 function getSharedDb(resolvedPath: string): Database {
 	if (sharedDb && sharedDbPath === resolvedPath) {
+		// A concurrently running pre-v14 process can add a credential-scoped v13
+		// row after this handle opened. Re-run the idempotent purge before reuse
+		// so that row is deleted and its WAL pages are checkpointed immediately.
+		migrateCacheSchema(sharedDb);
 		return sharedDb;
 	}
 	if (sharedDb) {
@@ -168,12 +185,69 @@ function withModelCacheDb<T>(dbPath: string | undefined, useDb: (db: Database) =
 	const resolvedPath = dbPath ?? getModelDbPath();
 	const shared = dbPath === undefined;
 	try {
-		return runModelCacheDb(resolvedPath, shared, useDb);
+		return runModelCacheDb(resolvedPath, shared, db => {
+			checkpointPendingCacheWal(db);
+			return useDb(db);
+		});
 	} catch (err) {
 		if (!isSqliteCorruptionError(err)) throw err;
 		healCorruptModelCache(resolvedPath, shared, err);
 		return runModelCacheDb(resolvedPath, shared, useDb);
 	}
+}
+
+function checkpointCacheWal(db: Database): boolean {
+	// secure_delete overwrites freed SQLite cells, but a shared WAL can retain an
+	// older page until checkpointed. Reader contention is reported in the result
+	// row rather than throwing. The migration marker permits a later retry, so do
+	// not wait behind a reader and delay ordinary cache operations.
+	db.run("PRAGMA busy_timeout = 0");
+	try {
+		const result = db.query<{ busy: number }, []>("PRAGMA wal_checkpoint(TRUNCATE)").get();
+		return result?.busy === 0;
+	} finally {
+		db.run("PRAGMA busy_timeout = 3000");
+	}
+}
+
+const WAL_TRUNCATION_MARKER = "truncate-wal";
+
+function markPendingCacheWalCheckpoint(db: Database): void {
+	db.run("INSERT OR IGNORE INTO model_cache_cleanup (operation) VALUES (?)", [WAL_TRUNCATION_MARKER]);
+}
+
+function hasObsoleteCacheRows(db: Database): boolean {
+	return (
+		db
+			.query<{ present: number }, [number]>("SELECT 1 AS present FROM model_cache WHERE version <> ? LIMIT 1")
+			.get(CACHE_SCHEMA_VERSION) !== null
+	);
+}
+
+function checkpointPendingCacheWal(db: Database): void {
+	const marker = db.prepare("SELECT 1 FROM model_cache_cleanup WHERE operation = ? LIMIT 1");
+	try {
+		if (!marker.get(WAL_TRUNCATION_MARKER)) return;
+	} finally {
+		marker.finalize();
+	}
+	if (!checkpointCacheWal(db)) return;
+	const deleteObsolete = db.transaction(() => {
+		db.run("DELETE FROM model_cache WHERE version <> ?", [CACHE_SCHEMA_VERSION]);
+	});
+	deleteObsolete.immediate();
+	// Keep the marker through this checkpoint. A pre-v14 writer can resume as
+	// soon as deleteObsolete releases its lock; clearing the marker before the
+	// checkpoint would let that write become durable without a later cleanup.
+	if (!checkpointCacheWal(db)) return;
+	const clearMarker = db.transaction(() => {
+		if (hasObsoleteCacheRows(db)) return false;
+		db.run("DELETE FROM model_cache_cleanup WHERE operation = ?", [WAL_TRUNCATION_MARKER]);
+		return true;
+	});
+	// Do not checkpoint after clearing the marker: a legacy writer that races
+	// that final transaction must be rediscovered by the next cache operation.
+	clearMarker.immediate();
 }
 
 function migrateCacheSchema(db: Database): void {
@@ -198,12 +272,30 @@ function migrateCacheSchema(db: Database): void {
 	} finally {
 		stmt.finalize();
 	}
-	// Delete rows written under any older schema so they cannot be reused. The
-	// legacy `UPDATE ... WHERE version = 2` migration silently promoted the very
-	// first cache version to whatever the current one is, defeating every
-	// subsequent invalidation (see #4146: pre-V2 Codex rows kept the legacy
-	// compaction path even after CACHE_SCHEMA_VERSION was bumped).
-	db.run("DELETE FROM model_cache WHERE version <> ?", [CACHE_SCHEMA_VERSION]);
+	// Probe without taking SQLite's writer lock. A pre-v14 process can write a
+	// v13 row after the probe, so use data_version to detect that external commit
+	// and recheck under an immediate transaction only when it raced this call.
+	const dataVersionBeforeProbe = db.query<{ data_version: number }, []>("PRAGMA data_version").get()?.data_version;
+	let needsMigration = hasObsoleteCacheRows(db);
+	if (!needsMigration) {
+		const dataVersionAfterProbe = db.query<{ data_version: number }, []>("PRAGMA data_version").get()?.data_version;
+		if (dataVersionBeforeProbe !== dataVersionAfterProbe) {
+			const recheckMigration = db.transaction(() => hasObsoleteCacheRows(db));
+			needsMigration = recheckMigration.immediate();
+		}
+	}
+	if (!needsMigration) {
+		checkpointPendingCacheWal(db);
+		return;
+	}
+	const migrateVersions = db.transaction(() => {
+		db.run("UPDATE model_cache SET version = ? WHERE version = 12", [CACHE_SCHEMA_VERSION]);
+		if (!hasObsoleteCacheRows(db)) return;
+		markPendingCacheWalCheckpoint(db);
+		db.run("DELETE FROM model_cache WHERE version <> ?", [CACHE_SCHEMA_VERSION]);
+	});
+	migrateVersions.immediate();
+	checkpointPendingCacheWal(db);
 }
 
 export function readModelCache<TApi extends Api>(
@@ -239,7 +331,7 @@ export function readModelCache<TApi extends Api>(
 					headerOmittedModelIds,
 					unrestorableHeaderModelIds,
 					legacyHeaderRestoreMarkers: row.header_restore_version < HEADER_RESTORE_VERSION,
-					staticFingerprint: row.static_fingerprint ?? "",
+					staticFingerprint: row.static_fingerprint,
 				};
 			} finally {
 				stmt.finalize();

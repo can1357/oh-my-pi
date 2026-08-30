@@ -1016,6 +1016,49 @@ describe("model cache spec round trip", () => {
 		}
 	});
 
+	it("preserves schema-v12 cache rows across the v14 identity invalidation", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-v12-cache-"));
+		const dbPath = path.join(tempDir, "models.db");
+		const model = buildModel(completionsSpec({ provider: "v12-cache-test" }));
+		try {
+			writeModelCache("v12-cache-test", Date.now(), [model], true, "", dbPath);
+			const db = new Database(dbPath);
+			db.run("UPDATE model_cache SET version = 12 WHERE provider_id = ?", ["v12-cache-test"]);
+			db.close();
+
+			expect(
+				readModelCache("v12-cache-test", Infinity, Date.now, dbPath)?.models.map(candidate => candidate.id),
+			).toEqual([model.id]);
+			const verified = new Database(dbPath, { readonly: true });
+			const row = verified
+				.query<{ version: number }, [string]>("SELECT version FROM model_cache WHERE provider_id = ?")
+				.get("v12-cache-test");
+			verified.close();
+			expect(row?.version).toBe(14);
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
+	});
+	it("invalidates schema-v13 credential-scoped cache rows", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-v13-cache-"));
+		const dbPath = path.join(tempDir, "models.db");
+		const model = buildModel(completionsSpec({ provider: "v13-cache-test" }));
+		try {
+			writeModelCache("v13-cache-test", Date.now(), [model], true, "", dbPath);
+			const db = new Database(dbPath);
+			db.run("UPDATE model_cache SET version = 13 WHERE provider_id = ?", ["v13-cache-test"]);
+			db.close();
+
+			expect(readModelCache("v13-cache-test", Infinity, Date.now, dbPath)).toBeNull();
+			const verified = new Database(dbPath, { readonly: true });
+			const row = verified.query<{ count: number }, []>("SELECT COUNT(*) AS count FROM model_cache").get();
+			verified.close();
+			expect(row?.count).toBe(0);
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
+	});
+
 	it("preserves computer-use provenance across cache restarts and endpoint reroutes", async () => {
 		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-computer-use-cache-"));
 		const dbPath = path.join(tempDir, "models.db");
@@ -1309,6 +1352,55 @@ describe("model cache spec round trip", () => {
 		}
 	});
 
+	it("restores live provider-wide bearer and headers at cache operation time", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-live-headers-"));
+		const dbPath = path.join(tempDir, "models.db");
+		const headers = { Authorization: "Bearer runtime-token", "X-Required-Route": "route-42" };
+		const dynamicModel = completionsSpec({
+			id: "live-header-model",
+			provider: "live-header-cache-test",
+			headers,
+		});
+		let headersAvailable = false;
+		const liveHeaders = new Proxy<Record<string, string>>(
+			{},
+			{
+				get: (_target, key) =>
+					typeof key === "string" && headersAvailable ? headers[key as keyof typeof headers] : undefined,
+				ownKeys: () => (headersAvailable ? Object.keys(headers) : []),
+				getOwnPropertyDescriptor: (_target, key) => {
+					if (typeof key !== "string" || !headersAvailable || !(key in headers)) return undefined;
+					return { configurable: true, enumerable: true, value: headers[key as keyof typeof headers] };
+				},
+			},
+		);
+		const options = {
+			providerId: "live-header-cache-test",
+			staticModels: [],
+			dynamicModelsAuthoritative: true,
+			cacheDbPath: dbPath,
+			restorableHeaderFallback: liveHeaders,
+			fetchDynamicModels: async () => {
+				headersAvailable = true;
+				return [dynamicModel];
+			},
+		};
+		try {
+			const online = await resolveProviderModels(options, "online");
+			expect(online.models[0]?.headers).toEqual(headers);
+
+			headersAvailable = false;
+			const unavailable = await resolveProviderModels(options, "offline");
+			expect(unavailable.models).toEqual([]);
+
+			headersAvailable = true;
+			const restored = await resolveProviderModels(options, "offline");
+			expect(restored.models[0]?.headers).toEqual(headers);
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
+	});
+
 	it("keeps a synthesized request-model variant across an offline restart", async () => {
 		// Regression for #6037/#6284: Copilot `-1m` long-context variants are
 		// synthesized dynamically with transport headers and a `requestModelId`
@@ -1420,6 +1512,41 @@ describe("model cache spec round trip", () => {
 			const restored = offline.models.find(candidate => candidate.id === "sol-1m");
 			expect(restored).toBeDefined();
 			expect(restored?.headers).toEqual(headers);
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
+	});
+	it("does not persist dynamic catalogs when caching is disabled", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-disabled-cache-"));
+		const dbPath = path.join(tempDir, "models.db");
+		const providerId = "disabled-cache-test";
+		const discovered = completionsSpec({ id: "discovered-model", provider: providerId });
+		let fetches = 0;
+		const options = {
+			providerId,
+			staticModels: [],
+			cacheDbPath: dbPath,
+			cacheEnabled: false,
+			dynamicModelsAuthoritative: true,
+			fetchDynamicModels: async () => {
+				fetches++;
+				return [discovered];
+			},
+		};
+		try {
+			const online = await resolveProviderModels<"openai-completions">(options, "online");
+			expect(online.models.map(model => model.id)).toEqual([discovered.id]);
+			expect(fetches).toBe(1);
+			await expect(fs.stat(dbPath)).rejects.toThrow();
+
+			const offline = await resolveProviderModels<"openai-completions">(options, "offline");
+			expect(offline.models).toEqual([]);
+			expect(offline.stale).toBe(true);
+			expect(fetches).toBe(1);
+
+			const refreshed = await resolveProviderModels<"openai-completions">(options, "online-if-uncached");
+			expect(refreshed.models.map(model => model.id)).toEqual([discovered.id]);
+			expect(fetches).toBe(2);
 		} finally {
 			await fs.rm(tempDir, { recursive: true, force: true });
 		}

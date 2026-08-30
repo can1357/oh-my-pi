@@ -44,13 +44,15 @@ export interface ModelManagerOptions<TApi extends Api = Api, TModelsDevPayload =
 	/** Cached model ids whose presence forces refresh when the static or migration-policy fingerprint changes. */
 	dropCachedModelIdsOnStaticMismatch?: readonly string[];
 	/**
-	 * Trusted, provider-wide request headers that can be safely re-derived at
+	 * Trusted provider-wide request headers that can be safely re-derived at
 	 * cache-read time. The cache never persists their values. Models whose live
 	 * headers matched this record at write time can survive offline reads without
 	 * a bundled static source, including configured discovery providers whose
 	 * bearer header comes from the current local config.
 	 */
 	restorableHeaderFallback?: Record<string, string>;
+	/** Whether this manager may persist or restore its catalog. Defaults to true. */
+	cacheEnabled?: boolean;
 	/** Optional dynamic endpoint fetcher. */
 	fetchDynamicModels?: () => Promise<readonly ModelSpec<TApi>[] | null>;
 	/** Optional stencil.so fallback hook. */
@@ -168,8 +170,12 @@ function restoreCachedModelHeaders<TApi extends Api>(
 			// headers matching the provider's trusted constant (e.g. a Copilot
 			// model with no bundled entry). Reattach the constant by value instead
 			// of dropping the model on this offline read.
-			if (!unrestorable && restorableHeaderFallback) {
-				return { ...model, headers: { ...restorableHeaderFallback } };
+			const fallbackHeaders =
+				!unrestorable && restorableHeaderFallback && Object.keys(restorableHeaderFallback).length > 0
+					? restorableHeaderFallback
+					: undefined;
+			if (fallbackHeaders) {
+				return { ...model, headers: { ...fallbackHeaders } };
 			}
 			unresolvedModelIds.add(model.id);
 			return model;
@@ -194,7 +200,6 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 	const now = options.now ?? Date.now;
 	const ttlMs = options.cacheTtlMs ?? DEFAULT_CACHE_TTL_MS;
 	const dbPath = options.cacheDbPath;
-	const restorableHeaderFallback = options.restorableHeaderFallback;
 	const staticModels = options.staticModels
 		? passModelList<TApi>(options.staticModels)
 		: (getBundledModels(options.providerId as GeneratedProvider) as Model<TApi>[]);
@@ -202,24 +207,28 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 		options.modelsDev?.additiveOnly && staticModels.length > 0
 			? new Set(staticModels.map(model => model.id))
 			: undefined;
-	const cache = readModelCache<TApi>(cacheProviderId, ttlMs, now, dbPath);
+	const cacheEnabled = options.cacheEnabled !== false;
+	const cache = cacheEnabled ? readModelCache<TApi>(cacheProviderId, ttlMs, now, dbPath) : null;
+	const dynamicModelsAuthoritative = options.dynamicModelsAuthoritative ?? false;
 	const restoredCache = restoreCachedModelHeaders(
 		cache?.models ?? [],
 		staticModels,
 		cache?.headerOmittedModelIds ?? [],
 		cache?.unrestorableHeaderModelIds ?? [],
 		cache?.legacyHeaderRestoreMarkers ?? false,
-		restorableHeaderFallback,
+		options.restorableHeaderFallback,
 	);
 	const usableCachedModels = restoredCache.models.filter(model => !restoredCache.unresolvedModelIds.has(model.id));
 	const cacheHasUnresolvedHeaders = restoredCache.unresolvedModelIds.size > 0;
-	const dynamicModelsAuthoritative = options.dynamicModelsAuthoritative ?? false;
 	const cacheDropIds = options.dropCachedModelIdsOnStaticMismatch;
-	const staticCatalogFingerprint = fingerprintStaticModels(staticModels, dynamicModelsAuthoritative);
-	// Endpoint-migration policy is cache identity: adding an id must invalidate
-	// matching-static-catalog caches written by the prior resolver.
-	const staticFingerprint =
-		cacheDropIds && cacheDropIds.length > 0
+	const staticCatalogFingerprint = cacheEnabled
+		? fingerprintStaticModels(staticModels, dynamicModelsAuthoritative)
+		: "";
+	// Endpoint-migration policy forms part of the cache key: adding an id must
+	// invalidate matching-static-catalog caches written by the prior resolver.
+	const staticFingerprint = !cacheEnabled
+		? ""
+		: cacheDropIds && cacheDropIds.length > 0
 			? `${staticCatalogFingerprint}:drop:${Bun.hash(cacheDropIds.join("\0")).toString(36)}`
 			: staticCatalogFingerprint;
 	const cacheFingerprintMatches = cache?.staticFingerprint === staticFingerprint && staticFingerprint.length > 0;
@@ -318,7 +327,7 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 	);
 	const resolutionAuthoritative = !hasRemoteFetcher || remoteResolutionComplete || shouldUseFreshCacheAsAuthoritative;
 	const remoteUpdatedAt = anyRemoteFetchSucceeded ? now() : undefined;
-	if (shouldFetchFromNetwork) {
+	if (shouldFetchFromNetwork && cacheEnabled) {
 		if (anyRemoteFetchSucceeded) {
 			writeModelCache(
 				cacheProviderId,
@@ -328,7 +337,7 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 				staticFingerprint,
 				dbPath,
 				staticModels,
-				restorableHeaderFallback,
+				options.restorableHeaderFallback,
 			);
 		} else {
 			// Remote fetch failed — update cache with a non-authoritative snapshot so
@@ -340,7 +349,7 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 				latestCache?.headerOmittedModelIds ?? cache?.headerOmittedModelIds ?? [],
 				latestCache?.unrestorableHeaderModelIds ?? cache?.unrestorableHeaderModelIds ?? [],
 				latestCache?.legacyHeaderRestoreMarkers ?? cache?.legacyHeaderRestoreMarkers ?? false,
-				restorableHeaderFallback,
+				options.restorableHeaderFallback,
 			);
 			const latestUsableCacheModels = latestRestoredCache.models.filter(
 				model => !latestRestoredCache.unresolvedModelIds.has(model.id),
@@ -365,7 +374,7 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 				staticFingerprint,
 				dbPath,
 				staticModels,
-				restorableHeaderFallback,
+				options.restorableHeaderFallback,
 			);
 		}
 	}

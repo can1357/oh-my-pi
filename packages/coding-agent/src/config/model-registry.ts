@@ -174,6 +174,16 @@ interface CustomModelsResult {
  */
 type ModifyModelsHook = (models: Model<Api>[], credentials: OAuthCredentials) => Model<Api>[];
 
+/**
+ * Extension-owned dynamic catalog factory. `online` discovery opts into an
+ * OAuth-refreshing credential resolution; cache-aware/background discovery
+ * deliberately retains the non-refreshing peek path.
+ */
+interface RuntimeModelManager {
+	createOptions(refreshExpiredCredentials: boolean): ModelManagerOptions<Api>;
+	replacementDiscovery?: Promise<void>;
+}
+
 function getDisabledProviderIdsFromSettings(settingsInstance?: Settings): Set<string> {
 	try {
 		return new Set((settingsInstance ?? settings).get("disabledProviders"));
@@ -216,7 +226,13 @@ export class ModelRegistry {
 	#cachedDiscoverableModels: Model<Api>[] = [];
 	#cachedAuthoritativeProviders: Set<string> = new Set();
 	#runtimeDiscoveredModels: Model<Api>[] = [];
+	// Raw extension discovery responses. The composed runtime slice above is
+	// intentionally rebuilt from these after models.yml changes.
+	#runtimeExtensionDiscoveryModels: Model<Api>[] = [];
 	#runtimeAuthoritativeProviders: Set<string> = new Set();
+	// Providers whose current runtime catalog was discovered by an extension
+	// manager, rather than a configured or built-in discovery source.
+	#runtimeExtensionDiscoveredProviders: Set<string> = new Set();
 	#internedStaticModels: Map<string, Model<Api>> = new Map();
 	#providerLookupSnapshots: Map<string, Model<Api>[]> = new Map();
 	#customProviderApiKeys: Map<string, string> = new Map();
@@ -233,6 +249,10 @@ export class ModelRegistry {
 	#configError: ConfigError | undefined = undefined;
 	#modelsConfigFile: ConfigFile<ModelsConfig>;
 	#lastStaticLoadMtime: number | null = null;
+	// Unlike #lastStaticLoadMtime, this is not reset for an extension lifecycle
+	// rebuild, so it detects an actual models.yml revision.
+	#lastModelsConfigMtime: number | null = null;
+	#selectedModelMetadataPatches: Map<string, ModelPatch> = new Map();
 	#registeredProviderSources: Set<string> = new Set();
 	#providerDiscoveryStates: Map<string, ProviderDiscoveryState> = new Map();
 	#cacheDbPath?: string;
@@ -262,8 +282,11 @@ export class ModelRegistry {
 	#runtimeProvidersBySource: Map<string, Set<string>> = new Map();
 	#runtimeProviderSourceByName: Map<string, string> = new Map();
 	// Runtime model managers registered by extensions via fetchDynamicModels.
-	// Keyed by provider name; use the same SQLite cache path as builtins.
-	#runtimeModelManagers: Map<string, { options: ModelManagerOptions<Api>; sourceId: string }> = new Map();
+	// Keyed by provider name; their catalogs remain memory-only.
+	#runtimeModelManagers: Map<string, RuntimeModelManager> = new Map();
+	// Monotonically increasing generation per runtime provider. A later auth
+	// refresh must win over an earlier discovery using the same manager.
+	#runtimeDiscoveryGenerations: Map<string, number> = new Map();
 	#ignoreLocalModelConfig: boolean;
 	#fetch: FetchImpl;
 	#settings: Settings | undefined;
@@ -375,7 +398,20 @@ export class ModelRegistry {
 	async refresh(strategy: ModelRefreshStrategy = "online-if-uncached"): Promise<void> {
 		this.#reloadStaticModels();
 		this.#suppressedSelectors.clear();
-		await this.#refreshRuntimeDiscoveries(strategy);
+		const pendingReplacementProviderIds = new Set(
+			strategy === "offline"
+				? []
+				: [...this.#runtimeModelManagers].flatMap(([providerId, manager]) =>
+						manager.replacementDiscovery ? [providerId] : [],
+					),
+		);
+		const replacementDiscoveries = [...pendingReplacementProviderIds].map(
+			providerId => this.#runtimeModelManagers.get(providerId)?.replacementDiscovery,
+		);
+		await Promise.all([
+			...replacementDiscoveries,
+			this.#refreshRuntimeDiscoveries(strategy, undefined, pendingReplacementProviderIds),
+		]);
 	}
 
 	/**
@@ -409,9 +445,8 @@ export class ModelRegistry {
 	/**
 	 * Rebuild the catalog after a policy-affecting setting change (e.g.
 	 * `extendedContext`). Forces the static reload past the models.yml mtime
-	 * gate, then restores runtime-discovered models from the SQLite cache —
-	 * offline, a settings flip must never hit the network. Concurrent calls
-	 * coalesce onto one rebuild.
+	 * gate, then restores cache-backed catalog sources offline so a settings flip
+	 * never hits the network. Concurrent calls coalesce onto one rebuild.
 	 */
 	reapplyModelPolicies(): Promise<void> {
 		this.#policyReapply ??= this.#runPolicyReapply();
@@ -511,19 +546,9 @@ export class ModelRegistry {
 				this.#suppressedSelectors.delete(selector);
 			}
 		}
+		const replacementDiscovery = this.#runtimeModelManagers.get(providerId)?.replacementDiscovery;
+		if (replacementDiscovery) await replacementDiscovery;
 		await this.#refreshRuntimeDiscoveries(strategy, new Set([providerId]));
-		// #reloadStaticModels above may have rebuilt #models from static sources,
-		// dropping models previously discovered by OTHER runtime providers (their
-		// fetchDynamicModels results live only in #models + the SQLite cache, not
-		// in #loadModels' static inputs). Restore them from cache with the default
-		// online-if-uncached strategy: no network while their cached row is
-		// fresh, so the scoped refresh above stays the only forced fetch.
-		const otherRuntimeProviderIds = new Set(
-			[...this.#runtimeModelManagers.keys()].filter(runtimeId => runtimeId !== providerId),
-		);
-		if (otherRuntimeProviderIds.size > 0) {
-			await this.#refreshRuntimeDiscoveries("online-if-uncached", otherRuntimeProviderIds);
-		}
 	}
 
 	/**
@@ -636,10 +661,14 @@ export class ModelRegistry {
 		}
 		const unprojected = resolveProviderModelReference(current.provider, current.id, this.#unprojectedModels);
 		if (unprojected) {
+			const patchKey = `${current.provider}\u0000${current.id}`;
+			const accumulatedPatch = { ...this.#selectedModelMetadataPatches.get(patchKey), ...patch };
 			const patchedBase = applyModelPatch(unprojected, patch, "merge");
+			this.#selectedModelMetadataPatches.set(patchKey, accumulatedPatch);
 			this.#unprojectedModels = this.#unprojectedModels.map(candidate =>
 				candidate.provider === unprojected.provider && candidate.id === unprojected.id ? patchedBase : candidate,
 			);
+			this.#invalidateProviderModelCache(current.provider);
 			this.#models = this.#applyRuntimeModelModifiers(this.#unprojectedModels);
 			return resolveProviderModelReference(current.provider, current.id, this.#models) ?? patchedBase;
 		}
@@ -655,15 +684,32 @@ export class ModelRegistry {
 	 * (extension providers). Merges the discovered catalog into the existing model
 	 * set without reloading static models, so dynamically-discovered models from
 	 * other providers are preserved. No-op when no runtime providers are registered.
-	 *
-	 * Drives the same SQLite model cache as built-in providers, so the default
-	 * `online-if-uncached` strategy fetches at most once per cache TTL (24 h).
+	 * Runtime extension catalogs are intentionally refreshed online and never
+	 * persisted because their credentials and account scope are not cache-safe.
 	 */
-	async refreshRuntimeProviders(strategy: ModelRefreshStrategy = "online-if-uncached"): Promise<void> {
-		if (this.#runtimeModelManagers.size === 0) {
-			return;
-		}
-		await this.#refreshRuntimeDiscoveries(strategy, new Set(this.#runtimeModelManagers.keys()));
+	async refreshRuntimeProviders(
+		strategy: ModelRefreshStrategy = "online-if-uncached",
+		providerIds?: Iterable<string>,
+		excludedProviderIds?: ReadonlySet<string>,
+	): Promise<void> {
+		const runtimeProviderIds = providerIds
+			? new Set([...providerIds].filter(providerId => this.#runtimeModelManagers.has(providerId)))
+			: new Set([...this.#runtimeModelManagers.keys()].filter(providerId => !excludedProviderIds?.has(providerId)));
+		if (runtimeProviderIds.size === 0) return;
+		const replacementDiscoveries = [...runtimeProviderIds]
+			.map(providerId => this.#runtimeModelManagers.get(providerId)?.replacementDiscovery)
+			.filter((discovery): discovery is Promise<void> => discovery !== undefined);
+		const refreshableRuntimeProviderIds = new Set(
+			[...runtimeProviderIds].filter(
+				providerId => this.#runtimeModelManagers.get(providerId)?.replacementDiscovery === undefined,
+			),
+		);
+		await Promise.all([
+			...replacementDiscoveries,
+			...(refreshableRuntimeProviderIds.size > 0
+				? [this.#refreshRuntimeDiscoveries(strategy, refreshableRuntimeProviderIds)]
+				: []),
+		]);
 	}
 
 	#reloadStaticModels(): void {
@@ -671,6 +717,12 @@ export class ModelRegistry {
 		if (currentMtime !== null && currentMtime === this.#lastStaticLoadMtime) {
 			// Models config unchanged since last load; reloading would be redundant.
 			return;
+		}
+		if (currentMtime !== this.#lastModelsConfigMtime) {
+			// A changed discovery endpoint may reuse a provider/model ID while serving
+			// different limits or modalities. Its learned metadata cannot survive this
+			// configuration reload; it will be re-probed when the model is selected.
+			this.#selectedModelMetadataPatches.clear();
 		}
 		this.#modelsConfigFile.invalidate();
 		this.#customProviderApiKeys.clear();
@@ -689,7 +741,34 @@ export class ModelRegistry {
 		this.#modelOverrides.clear();
 		this.#configError = undefined;
 		this.#providerDiscoveryStates.clear();
+		const activeRuntimeProviderIds = new Set(this.#runtimeModelManagers.keys());
+		const preservedRuntimeProviderIds = new Set(
+			[...this.#runtimeExtensionDiscoveredProviders].filter(provider => activeRuntimeProviderIds.has(provider)),
+		);
+		const preservedRuntimeModels = this.#runtimeExtensionDiscoveryModels.filter(model =>
+			preservedRuntimeProviderIds.has(model.provider),
+		);
 		this.#loadModels();
+		const configuredDiscoveryProviders = new Set(this.#discoverableProviders.map(provider => provider.provider));
+		for (const provider of configuredDiscoveryProviders) {
+			preservedRuntimeProviderIds.delete(provider);
+			if (activeRuntimeProviderIds.has(provider)) {
+				this.#runtimeDiscoveryGenerations.set(provider, (this.#runtimeDiscoveryGenerations.get(provider) ?? 0) + 1);
+			}
+		}
+		const retainedRuntimeModels = preservedRuntimeModels.filter(model =>
+			preservedRuntimeProviderIds.has(model.provider),
+		);
+		this.#runtimeExtensionDiscoveryModels = retainedRuntimeModels;
+		const runtimeProviderFilter = new Set(retainedRuntimeModels.map(model => model.provider));
+		this.#runtimeDiscoveredModels = this.#composeDiscoveredModels(
+			retainedRuntimeModels,
+			this.#composeUnprojectedStaticModels(runtimeProviderFilter),
+		);
+		this.#runtimeAuthoritativeProviders = new Set(
+			[...activeRuntimeProviderIds].filter(provider => !configuredDiscoveryProviders.has(provider)),
+		);
+		this.#runtimeExtensionDiscoveredProviders = preservedRuntimeProviderIds;
 	}
 
 	/**
@@ -723,13 +802,16 @@ export class ModelRegistry {
 		this.#pendingStandardCacheProviders = new Set(
 			STARTUP_MODEL_CACHE_PROVIDER_IDS.filter(
 				providerId =>
-					!configuredDiscoveryProviders.has(providerId) && !isCredentialScopedModelCacheProvider(providerId),
+					!configuredDiscoveryProviders.has(providerId) &&
+					!this.#runtimeModelManagers.has(providerId) &&
+					!isCredentialScopedModelCacheProvider(providerId),
 			),
 		);
 		this.#cachedDiscoverableModels = logger.time("modelRegistry:loadDiscoverableModels", () =>
 			this.#applyHardcodedModelPolicies(this.#loadCachedDiscoverableModels()),
 		);
 		this.#lastStaticLoadMtime = this.#modelsConfigFile.getMtimeMs();
+		this.#lastModelsConfigMtime = this.#lastStaticLoadMtime;
 	}
 
 	#resetStaticComposition(): void {
@@ -740,6 +822,7 @@ export class ModelRegistry {
 		this.#pendingStandardCacheProviders.clear();
 		this.#cachedAuthoritativeProviders.clear();
 		this.#runtimeDiscoveredModels = [];
+		this.#runtimeExtensionDiscoveryModels = [];
 		this.#runtimeAuthoritativeProviders.clear();
 		this.#internedStaticModels.clear();
 		this.#providerLookupSnapshots.clear();
@@ -836,9 +919,11 @@ export class ModelRegistry {
 		resolvedDefaults = this.#mergeResolvedModels(resolvedDefaults, select(this.#runtimeDiscoveredModels));
 		const withConfigModels = this.#mergeCustomModels(resolvedDefaults, select(this.#customModelOverlays));
 		const combined = this.#mergeCustomModels(withConfigModels, select(this.#runtimeModelOverlays));
-		const withModelOverrides = this.#applyModelOverrides(collapseBuiltVariants(combined), this.#modelOverrides);
+		const withMetadata = this.#applySelectedModelMetadataPatches(combined);
+		const withModelOverrides = this.#applyModelOverrides(collapseBuiltVariants(withMetadata), this.#modelOverrides);
 		const withProviderGuardrails = this.#applyProviderGuardrailOverrides(withModelOverrides);
-		return this.#applyLlamaCppModelFixups(this.#applyRuntimeProviderOverrides(withProviderGuardrails));
+		const withRuntimeOverrides = this.#applyRuntimeProviderOverrides(withProviderGuardrails);
+		return this.#applyLlamaCppModelFixups(withRuntimeOverrides);
 	}
 
 	#composeStaticModels(providerFilter?: ReadonlySet<string>): Model<Api>[] {
@@ -878,6 +963,18 @@ export class ModelRegistry {
 				} as ModelSpec<Api>);
 			});
 		});
+	}
+
+	#composeDiscoveredModels(discovered: Model<Api>[], existingModels: Model<Api>[]): Model<Api>[] {
+		return this.#applyHardcodedModelPolicies(
+			discovered.map(model =>
+				mergeDiscoveredModel(
+					model,
+					resolveProviderModelReference(model.provider, model.id, existingModels),
+					this.#providerOverrides.get(model.provider),
+				),
+			),
+		);
 	}
 
 	#mergeResolvedModels(baseModels: Model<Api>[], replacementModels: Model<Api>[]): Model<Api>[] {
@@ -937,6 +1034,10 @@ export class ModelRegistry {
 		const modelsByProvider = new Map<string, Model<Api>[]>();
 		const authoritativeFreshProviders = new Set<string>();
 		for (const providerId of providerIds) {
+			// A runtime extension owns its dynamic transport and credentials. Leave
+			// a colliding legacy raw-ID row on disk for a future built-in restoration,
+			// but never merge it into the extension-owned catalog.
+			if (this.#runtimeModelManagers.has(providerId)) continue;
 			const cacheProviderId = this.#resolveStartupModelCacheProviderId(providerId);
 			const cache = readModelCache<Api>(cacheProviderId, 24 * 60 * 60 * 1000, Date.now, this.#cacheDbPath);
 			const sharedCatalogProvider = MODELS_DEV_CATALOG_PROVIDER_ID_LOOKUP[providerId] === true;
@@ -1056,6 +1157,7 @@ export class ModelRegistry {
 		const providerIds = STARTUP_MODEL_CACHE_PROVIDER_IDS.filter(
 			providerId =>
 				this.#pendingStandardCacheProviders.has(providerId) &&
+				!this.#runtimeModelManagers.has(providerId) &&
 				(providerFilter === undefined || providerFilter.has(providerId)),
 		);
 		if (providerIds.length > 0) {
@@ -1402,7 +1504,21 @@ export class ModelRegistry {
 	async #refreshRuntimeDiscoveries(
 		strategy: ModelRefreshStrategy,
 		providerFilter?: ReadonlySet<string>,
+		excludedRuntimeProviderIds?: ReadonlySet<string>,
 	): Promise<void> {
+		const runtimeDiscoveryGenerations = new Map<string, { manager: RuntimeModelManager; generation: number }>();
+		// Offline runtime managers have no cache and therefore cannot produce a
+		// replacement catalog. Do not let that no-op invalidate an online request
+		// which is still discovering the current extension account.
+		if (strategy !== "offline") {
+			for (const [providerId, manager] of this.#runtimeModelManagers) {
+				if (providerFilter && !providerFilter.has(providerId)) continue;
+				if (excludedRuntimeProviderIds?.has(providerId)) continue;
+				const generation = (this.#runtimeDiscoveryGenerations.get(providerId) ?? 0) + 1;
+				this.#runtimeDiscoveryGenerations.set(providerId, generation);
+				runtimeDiscoveryGenerations.set(providerId, { manager, generation });
+			}
+		}
 		const disabledProviders = getDisabledProviderIdsFromSettings(this.#settings);
 		const selectedDiscoverableProviders = (
 			providerFilter
@@ -1420,41 +1536,66 @@ export class ModelRegistry {
 					);
 		const [configuredDiscoveryResults, builtInDiscovery] = await Promise.all([
 			configuredDiscoveriesPromise,
-			this.#discoverBuiltInProviderModels(strategy, providerFilter),
+			this.#discoverBuiltInProviderModels(strategy, providerFilter, excludedRuntimeProviderIds),
 		]);
 		const currentDiscoverableProviders = new Set(this.#discoverableProviders);
 		const configuredDiscovered = configuredDiscoveryResults
 			.filter(result => currentDiscoverableProviders.has(result.provider))
 			.flatMap(result => result.models);
-		const discovered = [...configuredDiscovered, ...builtInDiscovery.models];
-		if (discovered.length === 0 && builtInDiscovery.authoritativeProviders.size === 0) {
-			return;
-		}
+		const isCurrentRuntimeDiscovery = (providerId: string): boolean => {
+			const snapshot = runtimeDiscoveryGenerations.get(providerId);
+			if (snapshot === undefined) return !this.#runtimeModelManagers.has(providerId);
+			return (
+				this.#runtimeModelManagers.get(providerId) === snapshot.manager &&
+				this.#runtimeDiscoveryGenerations.get(providerId) === snapshot.generation
+			);
+		};
+		const currentBuiltInModels = builtInDiscovery.models.filter(model => isCurrentRuntimeDiscovery(model.provider));
+		const currentBuiltInAuthoritativeProviders = new Set(
+			[...builtInDiscovery.authoritativeProviders].filter(isCurrentRuntimeDiscovery),
+		);
+		const configuredProviderIds = new Set(this.#discoverableProviders.map(provider => provider.provider));
+		const completedExtensionProviders = new Set(
+			[...runtimeDiscoveryGenerations.keys()].filter(
+				provider => !configuredProviderIds.has(provider) && isCurrentRuntimeDiscovery(provider),
+			),
+		);
+		const discovered = [...configuredDiscovered, ...currentBuiltInModels];
 		const touchedProviders = new Set(discovered.map(model => model.provider));
-		for (const provider of builtInDiscovery.authoritativeProviders) touchedProviders.add(provider);
+		for (const provider of currentBuiltInAuthoritativeProviders) touchedProviders.add(provider);
+		for (const provider of completedExtensionProviders) touchedProviders.add(provider);
+		if (touchedProviders.size === 0) return;
 		const existingModels = this.#hasFullSnapshot
 			? this.#unprojectedModels
 			: this.#composeUnprojectedStaticModels(touchedProviders);
-		const discoveredModels = this.#applyHardcodedModelPolicies(
-			discovered.map(model =>
-				mergeDiscoveredModel(
-					model,
-					resolveProviderModelReference(model.provider, model.id, existingModels),
-					this.#providerOverrides.get(model.provider),
-				),
-			),
-		);
+		const discoveredModels = this.#composeDiscoveredModels(discovered, existingModels);
 		const authoritativeProviders = providersWithAuthoritativeProjectCatalog(discoveredModels);
-		for (const provider of builtInDiscovery.authoritativeProviders) {
+		for (const provider of currentBuiltInAuthoritativeProviders) {
 			authoritativeProviders.add(provider);
 		}
+		const failedExtensionProviders = new Set(
+			[...completedExtensionProviders].filter(provider => !authoritativeProviders.has(provider)),
+		);
 
 		this.#runtimeDiscoveredModels = this.#runtimeDiscoveredModels.filter(
 			model => !touchedProviders.has(model.provider),
 		);
 		this.#runtimeDiscoveredModels.push(...discoveredModels);
+		this.#runtimeExtensionDiscoveryModels = this.#runtimeExtensionDiscoveryModels.filter(
+			model => !completedExtensionProviders.has(model.provider),
+		);
+		this.#runtimeExtensionDiscoveryModels.push(
+			...currentBuiltInModels.filter(model => completedExtensionProviders.has(model.provider)),
+		);
 		for (const provider of touchedProviders) {
-			if (authoritativeProviders.has(provider)) {
+			if (completedExtensionProviders.has(provider)) {
+				this.#runtimeExtensionDiscoveredProviders.add(provider);
+			} else {
+				this.#runtimeExtensionDiscoveredProviders.delete(provider);
+			}
+			if (authoritativeProviders.has(provider) || failedExtensionProviders.has(provider)) {
+				// A failed extension refresh still owns this provider ID. Keep bundled
+				// models hidden rather than routing them through extension credentials.
 				this.#runtimeAuthoritativeProviders.add(provider);
 			} else {
 				this.#runtimeAuthoritativeProviders.delete(provider);
@@ -1462,6 +1603,11 @@ export class ModelRegistry {
 			this.#invalidateProviderModelCache(provider);
 		}
 		if (!this.#hasFullSnapshot) return;
+		if (failedExtensionProviders.size > 0) {
+			this.#unprojectedModels = this.#composeUnprojectedStaticModels();
+			this.#models = this.#applyRuntimeModelModifiers(this.#unprojectedModels);
+			return;
+		}
 
 		const baseModels =
 			authoritativeProviders.size > 0
@@ -1470,7 +1616,8 @@ export class ModelRegistry {
 		const resolved = this.#mergeResolvedModels(baseModels, discoveredModels);
 		const withConfigModels = this.#mergeCustomModels(resolved, this.#customModelOverlays);
 		const combined = this.#mergeCustomModels(withConfigModels, this.#runtimeModelOverlays);
-		const withModelOverrides = this.#applyModelOverrides(collapseBuiltVariants(combined), this.#modelOverrides);
+		const withMetadata = this.#applySelectedModelMetadataPatches(combined);
+		const withModelOverrides = this.#applyModelOverrides(collapseBuiltVariants(withMetadata), this.#modelOverrides);
 		const withProviderGuardrails = this.#applyProviderGuardrailOverrides(withModelOverrides);
 		this.#unprojectedModels = this.#applyLlamaCppModelFixups(
 			this.#applyRuntimeProviderOverrides(withProviderGuardrails),
@@ -1656,6 +1803,7 @@ export class ModelRegistry {
 	async #discoverBuiltInProviderModels(
 		strategy: ModelRefreshStrategy,
 		providerFilter?: ReadonlySet<string>,
+		excludedRuntimeProviderIds?: ReadonlySet<string>,
 	): Promise<BuiltInDiscoveryResult> {
 		// Skip providers already handled by configured discovery (e.g. user-configured ollama with discovery.type)
 		const configuredDiscoveryProviders = new Set(this.#discoverableProviders.map(p => p.provider));
@@ -1663,16 +1811,21 @@ export class ModelRegistry {
 			strategy,
 			providerFilter,
 			configuredDiscoveryProviders,
+			excludedRuntimeProviderIds,
 		);
 		if (managerOptions.length === 0) {
 			return { models: [], authoritativeProviders: new Set() };
 		}
 		const discoveries = await Promise.all(
-			managerOptions.map(options => this.#discoverWithModelManager(options, strategy)),
+			managerOptions.map(async options => ({
+				providerId: options.providerId,
+				options,
+				discovery: await this.#discoverWithModelManager(options, strategy),
+			})),
 		);
 		const authoritativeProviders = new Set<string>();
 		const models: Model<Api>[] = [];
-		for (const discovery of discoveries) {
+		for (const { discovery } of discoveries) {
 			models.push(...discovery.models);
 			for (const provider of discovery.authoritativeProviders) {
 				authoritativeProviders.add(provider);
@@ -1744,6 +1897,7 @@ export class ModelRegistry {
 		strategy: ModelRefreshStrategy,
 		providerFilter: ReadonlySet<string> | undefined,
 		configuredDiscoveryProviders: ReadonlySet<string>,
+		excludedRuntimeProviderIds?: ReadonlySet<string>,
 	): Promise<ModelManagerOptions<Api>[]> {
 		const specialProviderDescriptors: Array<{
 			providerId: string;
@@ -1795,6 +1949,7 @@ export class ModelRegistry {
 		const enabledSpecialProviderDescriptors = specialProviderDescriptors.filter(descriptor => {
 			if (disabledProviders.has(descriptor.providerId)) return false;
 			if (configuredDiscoveryProviders.has(descriptor.providerId)) return false;
+			if (this.#runtimeModelManagers.has(descriptor.providerId)) return false;
 			return providerFilter ? providerFilter.has(descriptor.providerId) : true;
 		});
 		const standardProviderKeys = await Promise.all(
@@ -1882,9 +2037,14 @@ export class ModelRegistry {
 		}
 
 		// Append runtime model managers registered by extensions via fetchDynamicModels.
-		for (const { options: managerOpts } of this.#runtimeModelManagers.values()) {
+		// Runtime catalogs are never cache-enabled, so every non-offline strategy
+		// performs a live fetch and must resolve refreshed OAuth credentials.
+		const refreshRuntimeCredentials = strategy !== "offline";
+		for (const manager of this.#runtimeModelManagers.values()) {
+			const managerOpts = manager.createOptions(refreshRuntimeCredentials);
 			if (
 				!configuredDiscoveryProviders.has(managerOpts.providerId) &&
+				!excludedRuntimeProviderIds?.has(managerOpts.providerId) &&
 				(!providerFilter || providerFilter.has(managerOpts.providerId))
 			) {
 				options.push(managerOpts);
@@ -2043,6 +2203,14 @@ export class ModelRegistry {
 		});
 	}
 
+	#applySelectedModelMetadataPatches(models: Model<Api>[]): Model<Api>[] {
+		if (this.#selectedModelMetadataPatches.size === 0) return models;
+		return models.map(model => {
+			const patch = this.#selectedModelMetadataPatches.get(`${model.provider}\u0000${model.id}`);
+			return patch ? applyModelPatch(model, patch, "merge") : model;
+		});
+	}
+
 	#applyRuntimeProviderOverrides(models: Model<Api>[]): Model<Api>[] {
 		if (this.#runtimeProviderOverrides.size === 0) return models;
 		return models.map(model => {
@@ -2168,6 +2336,11 @@ export class ModelRegistry {
 	 */
 	getAll(): Model<Api>[] {
 		return this.#ensureFullSnapshot();
+	}
+
+	/** Whether a runtime extension discovery supplied this exact model. */
+	hasRuntimeDiscoveredModel(provider: string, id: string): boolean {
+		return this.#runtimeExtensionDiscoveryModels.some(model => model.provider === provider && model.id === id);
 	}
 
 	/**
@@ -2436,13 +2609,57 @@ export class ModelRegistry {
 		return this.authStorage.peekApiKey(provider);
 	}
 
+	async #resolveRuntimeDiscoveryApiKey(
+		provider: string,
+		refreshExpiredCredentials: boolean,
+	): Promise<string | undefined> {
+		const peekedKey = await this.#peekApiKeyForProvider(provider);
+		if (!refreshExpiredCredentials || !this.authStorage.hasOAuth(provider)) return peekedKey;
+		try {
+			return await this.getApiKeyForProvider(provider);
+		} catch (error) {
+			logger.debug("OAuth refresh failed during runtime model discovery", {
+				provider,
+				error: error instanceof Error ? error.message : String(error),
+			});
+			return peekedKey;
+		}
+	}
+
 	/**
 	 * Check if a model is using OAuth credentials (subscription).
 	 */
 	isUsingOAuth(model: Model<Api>): boolean {
 		return this.authStorage.hasOAuth(model.provider);
 	}
+	/**
+	 * An extension manager owns this provider for its lifetime. Remove a catalog
+	 * that was already materialized, but retain the pending disk row so a later
+	 * unregister can restore its built-in catalog without rewriting the cache.
+	 */
+	#suppressRuntimeOwnedStandardCache(providerName: string): void {
+		this.#cachedStandardModelsByProvider.delete(providerName);
+		this.#cachedAuthoritativeProviders.delete(providerName);
+		this.#invalidateProviderModelCache(providerName);
+		if (this.#hasFullSnapshot) {
+			this.#unprojectedModels = this.#composeUnprojectedStaticModels();
+			this.#models = this.#applyRuntimeModelModifiers(this.#unprojectedModels);
+		}
+	}
 
+	#clearRuntimeDiscoveredModels(providerName: string): void {
+		this.#runtimeDiscoveredModels = this.#runtimeDiscoveredModels.filter(model => model.provider !== providerName);
+		this.#runtimeExtensionDiscoveryModels = this.#runtimeExtensionDiscoveryModels.filter(
+			model => model.provider !== providerName,
+		);
+		this.#runtimeAuthoritativeProviders.delete(providerName);
+		this.#runtimeExtensionDiscoveredProviders.delete(providerName);
+		this.#invalidateProviderModelCache(providerName);
+		if (this.#hasFullSnapshot) {
+			this.#unprojectedModels = this.#composeUnprojectedStaticModels();
+			this.#models = this.#applyRuntimeModelModifiers(this.#unprojectedModels);
+		}
+	}
 	#clearRuntimeProviderState(providerName: string): void {
 		this.#runtimeProviderApiKeys.delete(providerName);
 		this.#runtimeProviderOverrides.delete(providerName);
@@ -2450,6 +2667,10 @@ export class ModelRegistry {
 		this.#runtimeModelManagers.delete(providerName);
 		this.#runtimeModelModifiers.delete(providerName);
 		this.#lastModelModifierWarnings.delete(providerName);
+		for (const key of this.#selectedModelMetadataPatches.keys()) {
+			if (key.startsWith(`${providerName}\u0000`)) this.#selectedModelMetadataPatches.delete(key);
+		}
+		this.#clearRuntimeDiscoveredModels(providerName);
 		this.authStorage.removeConfigApiKey(providerName);
 		this.authStorage.removeRuntimeUsageProvider(providerName);
 	}
@@ -2574,6 +2795,14 @@ export class ModelRegistry {
 			this.#lastStaticLoadMtime = null;
 			this.#reloadStaticModels();
 		}
+		// A same-source registration replaces every prior runtime registration,
+		// including a dynamic manager omitted by the replacement config. A new
+		// dynamic manager retains its slice until its scheduled replacement fetch
+		// settles; otherwise a re-register briefly exposes bundled collisions.
+		const replacingRuntimeManager = this.#runtimeModelManagers.delete(providerName);
+		if (replacingRuntimeManager && !config.fetchDynamicModels) {
+			this.#clearRuntimeDiscoveredModels(providerName);
+		}
 
 		// Extension usage providers override built-ins/configured resolvers for the
 		// provider lifetime. #clearRuntimeProviderState removes this override when
@@ -2636,28 +2865,21 @@ export class ModelRegistry {
 				if (!config.fetchDynamicModels) return;
 			}
 
-			// Update the unprojected snapshot, then rerun every whole-catalog
-			// projection exactly once. Incremental projection is not safe because one
-			// provider's hook may inspect or suppress another provider's models.
-			const nextModels = this.#unprojectedModels.filter(model => model.provider !== providerName);
-			for (const overlay of newOverlays) {
-				nextModels.push(finalizeCustomModel(overlay, { useDefaults: true }));
+			// Recompose instead of replacing this provider's visible snapshot in
+			// place: it has independently owned dynamic entries that must remain
+			// available until the replacement manager publishes its next catalog.
+			if (this.#hasFullSnapshot) {
+				this.#unprojectedModels = this.#composeUnprojectedStaticModels();
+				this.#models = this.#applyRuntimeModelModifiers(this.#unprojectedModels);
 			}
-			const runtimeTransportOverride = this.#runtimeProviderOverrides.get(providerName);
-			const nextModelsWithTransport = runtimeTransportOverride
-				? nextModels.map(model => {
-						if (model.provider !== providerName) return model;
-						return this.#applyProviderTransportOverrideToModel(model, runtimeTransportOverride);
-					})
-				: nextModels;
-			this.#unprojectedModels = this.#applyProviderGuardrailOverrides(nextModelsWithTransport);
-
-			this.#models = this.#applyRuntimeModelModifiers(this.#unprojectedModels);
 			this.#invalidateProviderModelCache(providerName);
 			if (!config.fetchDynamicModels) return;
 		}
 
 		if (config.fetchDynamicModels) {
+			const hasConfiguredDiscovery = this.#discoverableProviders.some(
+				provider => provider.provider === providerName,
+			);
 			const fetcher = config.fetchDynamicModels;
 			const providerBaseUrl = config.baseUrl ?? "";
 			const providerApi = config.api;
@@ -2665,14 +2887,20 @@ export class ModelRegistry {
 			const providerApiKey = config.apiKey;
 			const providerAuthHeader = config.authHeader;
 			const providerCompat = config.compat;
-			const managerOptions: ModelManagerOptions<Api> = {
+			// Runtime catalogs are credential- and account-specific. Keep their
+			// current-process state only; a raw provider ID can also name a built-in
+			// cache row, so it is unsafe to delete it here. A replacement keeps its
+			// current catalog visible until the replacement manager settles.
+			if (!replacingRuntimeManager && !hasConfiguredDiscovery) this.#clearRuntimeDiscoveredModels(providerName);
+			const createOptions = (refreshExpiredCredentials: boolean): ModelManagerOptions<Api> => ({
 				providerId: providerName as Parameters<typeof createModelManager>[0]["providerId"],
 				staticModels: [],
 				cacheDbPath: this.#cacheDbPath,
 				cacheTtlMs: 24 * 60 * 60 * 1000,
+				cacheEnabled: false,
 				dynamicModelsAuthoritative: true,
 				fetchDynamicModels: async () => {
-					const apiKey = await this.#peekApiKeyForProvider(providerName);
+					const apiKey = await this.#resolveRuntimeDiscoveryApiKey(providerName, refreshExpiredCredentials);
 					const resolvedKey = isAuthenticated(apiKey) ? apiKey : undefined;
 					const modelDefs = await withModelDiscoveryTimeout(RUNTIME_DYNAMIC_MODEL_FETCH_TIMEOUT_MS, () =>
 						fetcher(resolvedKey),
@@ -2695,12 +2923,36 @@ export class ModelRegistry {
 					}
 					return results.map(toModelSpec);
 				},
-			};
-			this.#runtimeModelManagers.set(providerName, { options: managerOptions, sourceId: sourceId ?? "" });
-			// Discovery is driven by refreshRuntimeProviders() after the drain — not
-			// here, so registration has no network side effect and callers can await.
+			});
+			const runtimeManager: RuntimeModelManager = { createOptions };
+			this.#runtimeModelManagers.set(providerName, runtimeManager);
+			if (!hasConfiguredDiscovery) {
+				// A dynamic extension owns its provider ID immediately. Until its first
+				// catalog settles, the safe catalog is authoritative-empty—not bundled
+				// models with the extension's transport and credentials.
+				this.#runtimeAuthoritativeProviders.add(providerName);
+				this.#suppressRuntimeOwnedStandardCache(providerName);
+			}
+			if (replacingRuntimeManager) {
+				const replacementDiscovery = Promise.resolve()
+					.then(() => {
+						if (this.#runtimeModelManagers.get(providerName) !== runtimeManager) return;
+						return this.#refreshRuntimeDiscoveries("online", new Set([providerName]));
+					})
+					.catch(error => {
+						logger.warn("replacement runtime provider discovery failed", {
+							provider: providerName,
+							error: error instanceof Error ? error.message : String(error),
+						});
+					})
+					.finally(() => {
+						if (this.#runtimeModelManagers.get(providerName) === runtimeManager) {
+							runtimeManager.replacementDiscovery = undefined;
+						}
+					});
+				runtimeManager.replacementDiscovery = replacementDiscovery;
+			}
 		}
-
 		if (
 			config.baseUrl ||
 			config.headers ||

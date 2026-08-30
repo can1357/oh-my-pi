@@ -15,6 +15,7 @@
 - Disabled `hashline` edit mode for Kimi, Mimo, DeepSeek Flash, and Stepfun models for stability
 
 ### Fixed
+- Fixed extension-provided dynamic models remaining unavailable from `/switch` after login ([#5780](https://github.com/can1357/oh-my-pi/issues/5780)).
 
 - Fixed an issue where custom model overrides were lost during configuration updates
 - Fixed "Please use nerdfont" notification incorrectly persisting after theme configuration

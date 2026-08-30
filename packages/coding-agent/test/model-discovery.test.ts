@@ -1840,6 +1840,7 @@ providers:
 							maxTokens: 8192,
 						},
 					],
+					fetchDynamicModels: async () => [],
 					oauth: {
 						name: "Projection OAuth",
 						login: async () => ({ access: "a", refresh: "r", expires: Date.now() + 60_000 }),
@@ -1853,6 +1854,7 @@ providers:
 			expect(registry.find("llama.cpp", "cold-preset")?.contextWindow).toBe(16384);
 		} finally {
 			registry.clearSourceRegistrations("ext://metadata-projection");
+			expect(registry.find("llama.cpp", "cold-preset")?.contextWindow).toBe(16384);
 		}
 	});
 
@@ -1968,7 +1970,7 @@ providers:
 		expect(registry.find("llama.cpp", "vision-model")?.input).toEqual(["text", "image"]);
 	});
 
-	test("llama.cpp selected model refresh reads image capability from per-model architecture", async () => {
+	test("llama.cpp selected model refresh preserves metadata patches across probes and recomposition", async () => {
 		writeModelCache(
 			"llama.cpp",
 			Date.now(),
@@ -1990,6 +1992,7 @@ providers:
 			"",
 			cacheDbPath,
 		);
+		let imageCapable = false;
 		const fetchMock: FetchImpl = async input => {
 			const url = String(input);
 			if (url === "http://127.0.0.1:8080/models") {
@@ -1998,10 +2001,14 @@ providers:
 						data: [
 							{
 								id: "router-vision-model",
-								architecture: {
-									input_modalities: ["text", "image"],
-									output_modalities: ["text"],
-								},
+								...(imageCapable
+									? {
+											architecture: {
+												input_modalities: ["text", "image"],
+												output_modalities: ["text"],
+											},
+										}
+									: {}),
 								meta: { n_ctx: 239104 },
 							},
 						],
@@ -2026,10 +2033,16 @@ providers:
 		const stale = registry.find("llama.cpp", "router-vision-model");
 		if (!stale) throw new Error("cached llama.cpp model missing");
 		expect(stale.input).toEqual(["text"]);
-		const refreshed = await registry.refreshSelectedModelMetadata(stale);
+		const contextRefreshed = await registry.refreshSelectedModelMetadata(stale);
+		expect(contextRefreshed.contextWindow).toBe(239104);
+		imageCapable = true;
+		const refreshed = await registry.refreshSelectedModelMetadata(contextRefreshed);
 		expect(refreshed.contextWindow).toBe(239104);
 		expect(refreshed.input).toEqual(["text", "image"]);
-		expect(registry.find("llama.cpp", "router-vision-model")?.input).toEqual(["text", "image"]);
+		await registry.refresh("offline");
+		const recomposed = registry.find("llama.cpp", "router-vision-model");
+		expect(recomposed?.contextWindow).toBe(239104);
+		expect(recomposed?.input).toEqual(["text", "image"]);
 	});
 
 	test("llama.cpp selected model refresh leaves the cached model untouched when /models no longer lists it", async () => {

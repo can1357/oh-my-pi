@@ -13,7 +13,7 @@ import { getModelMatchPreferences, resolveModelScope } from "@oh-my-pi/pi-coding
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { buildSessionOptions as buildCliSessionOptions } from "@oh-my-pi/pi-coding-agent/main";
 import { createAgentSession, type ExtensionFactory } from "@oh-my-pi/pi-coding-agent/sdk";
-import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
@@ -35,8 +35,8 @@ describe("createAgentSession deferred model pattern resolution", () => {
 	beforeEach(() => {
 		tempDir = path.join(os.tmpdir(), `pi-sdk-model-selection-${Snowflake.next()}`);
 		fs.mkdirSync(tempDir, { recursive: true });
+		vi.spyOn(Settings, "init").mockResolvedValue(Settings.isolated());
 	});
-
 	afterEach(() => {
 		vi.restoreAllMocks();
 		for (const authStorage of authStoragesToClose) {
@@ -179,6 +179,79 @@ describe("createAgentSession deferred model pattern resolution", () => {
 			expect(session.model?.provider).toBe("runtime-provider");
 			expect(session.model?.id).toBe("cached-runtime-model");
 			expect(modelFallbackMessage).toBeUndefined();
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	test("refreshes OAuth for an explicit deferred dynamic model selector", async () => {
+		const refreshCalls: string[] = [];
+		const authStorage = await AuthStorage.create(":memory:", {
+			refreshOAuthCredential: async (provider, _credentialId, credential) => {
+				refreshCalls.push(provider);
+				return { ...credential, access: "fresh-explicit-token", expires: Date.now() + 3_600_000 };
+			},
+		});
+		authStoragesToClose.push(authStorage);
+		await authStorage.set("oauth-runtime-provider", {
+			type: "oauth",
+			access: "expired-explicit-token",
+			refresh: "explicit-refresh-token",
+			expires: Date.now() - 60_000,
+		});
+		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
+		const receivedKeys: Array<string | undefined> = [];
+		const extension: ExtensionFactory = pi => {
+			pi.registerProvider("oauth-runtime-provider", {
+				baseUrl: "https://runtime.example.com/v1",
+				api: "openai-completions",
+				fetchDynamicModels: async apiKey => {
+					receivedKeys.push(apiKey);
+					return apiKey === "fresh-explicit-token"
+						? [
+								{
+									id: "explicit-dynamic-model",
+									name: "Explicit Dynamic Model",
+									reasoning: false,
+									input: ["text"],
+									cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+									contextWindow: 128_000,
+									maxTokens: 8192,
+								},
+							]
+						: [];
+				},
+			});
+		};
+
+		const { session, modelFallbackMessage } = await createAgentSession({
+			cwd: tempDir,
+			agentDir: tempDir,
+			authStorage,
+			modelRegistry,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated(),
+			disableExtensionDiscovery: true,
+			extensions: [extension],
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+			rules: [],
+			preloadedCustomToolPaths: [],
+			toolNames: ["read"],
+			modelPattern: "oauth-runtime-provider/explicit-dynamic-model",
+		});
+
+		try {
+			expect(session.model?.provider).toBe("oauth-runtime-provider");
+			expect(session.model?.id).toBe("explicit-dynamic-model");
+			expect(modelFallbackMessage).toBeUndefined();
+			expect(refreshCalls).toEqual(["oauth-runtime-provider"]);
+			expect(receivedKeys).toEqual(["fresh-explicit-token"]);
 		} finally {
 			await session.dispose();
 		}
@@ -1467,6 +1540,220 @@ describe("createAgentSession deferred model pattern resolution", () => {
 			expect(session.thinkingLevel).toBe(Effort.XHigh);
 		} finally {
 			await session.dispose();
+			authStorage.close();
+		}
+	});
+
+	test("does not duplicate completed non-UI discovery for unavailable saved model", async () => {
+		const defaultModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!defaultModel) throw new Error("Expected bundled anthropic default model");
+		const authStorage = createInMemoryAuthStorage();
+		authStorage.setRuntimeApiKey(defaultModel.provider, "test-key");
+		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
+		let fetches = 0;
+		const extension: ExtensionFactory = pi => {
+			pi.registerProvider("runtime-provider", {
+				baseUrl: "https://runtime.example.com/v1",
+				apiKey: "RUNTIME_KEY",
+				api: "openai-completions",
+				fetchDynamicModels: async () => {
+					fetches += 1;
+					return [
+						{
+							id: "renamed-dynamic-model",
+							name: "Renamed Dynamic Model",
+							reasoning: false,
+							input: ["text"],
+							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+							contextWindow: 128_000,
+							maxTokens: 8192,
+						},
+					];
+				},
+			});
+		};
+		const timestamp = "2026-06-01T00:00:00.000Z";
+		const targetSessionFile = path.join(tempDir, "resume-dynamic-startup.jsonl");
+		await Bun.write(
+			targetSessionFile,
+			`${[
+				{ type: "session", version: 3, id: "resume-dynamic-startup", timestamp, cwd: tempDir },
+				{
+					type: "model_change",
+					id: "default",
+					parentId: null,
+					timestamp,
+					model: `${defaultModel.provider}/${defaultModel.id}`,
+					role: "default",
+				},
+				{
+					type: "model_change",
+					id: "smol",
+					parentId: "default",
+					timestamp,
+					model: "runtime-provider/saved-dynamic-model",
+					role: "smol",
+				},
+			]
+				.map(entry => JSON.stringify(entry))
+				.join("\n")}\n`,
+		);
+		const sessionManager = await SessionManager.open(
+			targetSessionFile,
+			path.join(tempDir, "sessions-dynamic-startup"),
+		);
+
+		const { session } = await createAgentSession({
+			cwd: tempDir,
+			agentDir: tempDir,
+			authStorage,
+			modelRegistry,
+			sessionManager,
+			settings: Settings.isolated(),
+			disableExtensionDiscovery: true,
+			extensions: [extension],
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+			rules: [],
+			preloadedCustomToolPaths: [],
+			toolNames: ["read"],
+		});
+
+		try {
+			expect(session.model?.provider).toBe(defaultModel.provider);
+			expect(session.model?.id).toBe(defaultModel.id);
+			expect(fetches).toBe(1);
+		} finally {
+			await session.dispose();
+			authStorage.close();
+		}
+	});
+
+	test("retries failed UI candidates while preserving successful targeted catalogs", async () => {
+		const defaultModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!defaultModel) throw new Error("Expected bundled anthropic default model");
+		const authStorage = createInMemoryAuthStorage();
+		authStorage.setRuntimeApiKey(defaultModel.provider, "test-key");
+		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
+		let targetedFetches = 0;
+		let unrelatedFetches = 0;
+		const extension: ExtensionFactory = pi => {
+			pi.registerProvider("ui-runtime-provider", {
+				baseUrl: "https://runtime.example.com/v1",
+				apiKey: "RUNTIME_KEY",
+				api: "openai-completions",
+				fetchDynamicModels: async () => {
+					targetedFetches += 1;
+					if (targetedFetches === 1) return [];
+					return [
+						{
+							id: "saved-ui-model",
+							name: "Saved UI Model",
+							reasoning: false,
+							input: ["text"],
+							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+							contextWindow: 128_000,
+							maxTokens: 8192,
+						},
+					];
+				},
+			});
+			pi.registerProvider("other-ui-runtime-provider", {
+				baseUrl: "https://runtime.example.com/v1",
+				apiKey: "OTHER_RUNTIME_KEY",
+				api: "openai-completions",
+				fetchDynamicModels: async () => {
+					unrelatedFetches += 1;
+					return [
+						{
+							id: "other-ui-model",
+							name: "Other UI Model",
+							reasoning: false,
+							input: ["text"],
+							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+							contextWindow: 128_000,
+							maxTokens: 8192,
+						},
+						{
+							id: "other-ui-model-thinking",
+							name: "Other UI Model Thinking",
+							reasoning: true,
+							input: ["text"],
+							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+							contextWindow: 128_000,
+							maxTokens: 8192,
+						},
+					];
+				},
+			});
+		};
+		const timestamp = "2026-06-01T00:00:00.000Z";
+		const targetSessionFile = path.join(tempDir, "resume-ui-dynamic.jsonl");
+		await Bun.write(
+			targetSessionFile,
+			`${[
+				{ type: "session", version: 3, id: "resume-ui-dynamic", timestamp, cwd: tempDir },
+				{
+					type: "model_change",
+					id: "default",
+					parentId: null,
+					timestamp,
+					model: "other-ui-runtime-provider/other-ui-model-thinking",
+					role: "default",
+				},
+				{
+					type: "model_change",
+					id: "smol",
+					parentId: "default",
+					timestamp,
+					model: "ui-runtime-provider/saved-ui-model",
+					role: "smol",
+				},
+			]
+				.map(entry => JSON.stringify(entry))
+				.join("\n")}\n`,
+		);
+		const sessionManager = await SessionManager.open(targetSessionFile, path.join(tempDir, "sessions-ui-dynamic"));
+		const result = await createAgentSession({
+			cwd: tempDir,
+			agentDir: tempDir,
+			authStorage,
+			modelRegistry,
+			sessionManager,
+			settings: Settings.isolated(),
+			disableExtensionDiscovery: true,
+			extensions: [extension],
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+			rules: [],
+			preloadedCustomToolPaths: [],
+			toolNames: ["read"],
+			hasUI: true,
+		});
+
+		try {
+			expect(result.session.model?.provider).toBe("other-ui-runtime-provider");
+			expect(result.session.model?.id).toBe("other-ui-model");
+			expect(targetedFetches).toBe(1);
+			expect(unrelatedFetches).toBe(1);
+			await result.startBackgroundModelDiscovery?.();
+			expect(targetedFetches).toBe(2);
+			expect(unrelatedFetches).toBe(1);
+			expect(modelRegistry.find("ui-runtime-provider", "saved-ui-model")).toBeDefined();
+			expect(modelRegistry.find("other-ui-runtime-provider", "other-ui-model")).toBeDefined();
+			expect(modelRegistry.find("other-ui-runtime-provider", "other-ui-model-thinking")?.id).toBe("other-ui-model");
+		} finally {
+			await result.session.dispose();
 			authStorage.close();
 		}
 	});

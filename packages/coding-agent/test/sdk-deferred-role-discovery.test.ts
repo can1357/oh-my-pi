@@ -5,7 +5,7 @@ import * as path from "node:path";
 import type { FetchImpl } from "@oh-my-pi/pi-ai";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
+import { createAgentSession, type ExtensionFactory } from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -86,6 +86,27 @@ describe("createAgentSession deferred role alias on discoverable provider (#8863
 			modelRoles: { smol: "ollama/phi3" },
 			"compaction.enabled": false,
 		});
+		let runtimeFetches = 0;
+		const extension: ExtensionFactory = pi => {
+			pi.registerProvider("unrelated-runtime-provider", {
+				baseUrl: "https://runtime.example.com/v1",
+				api: "openai-completions",
+				fetchDynamicModels: async () => {
+					runtimeFetches += 1;
+					return [
+						{
+							id: "unrelated-runtime-model",
+							name: "Unrelated Runtime Model",
+							reasoning: false,
+							input: ["text"],
+							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+							contextWindow: 128_000,
+							maxTokens: 8_192,
+						},
+					];
+				},
+			});
+		};
 
 		let session: AgentSession | undefined;
 		try {
@@ -98,6 +119,7 @@ describe("createAgentSession deferred role alias on discoverable provider (#8863
 				settings,
 				modelPattern: "@smol",
 				disableExtensionDiscovery: true,
+				extensions: [extension],
 				skills: [],
 				contextFiles: [],
 				promptTemplates: [],
@@ -112,6 +134,7 @@ describe("createAgentSession deferred role alias on discoverable provider (#8863
 
 			expect(result.session.model?.provider).toBe("ollama");
 			expect(result.session.model?.id).toBe("phi3");
+			expect(runtimeFetches).toBe(1);
 		} finally {
 			session?.dispose();
 		}

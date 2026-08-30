@@ -1732,8 +1732,7 @@ export class AuthStorage {
 	 */
 	#getNextRoundRobinIndex(providerKey: string, total: number): number {
 		if (total <= 1) return 0;
-		const current = this.#providerRoundRobinIndex.get(providerKey) ?? -1;
-		const next = (current + 1) % total;
+		const next = ((this.#providerRoundRobinIndex.get(providerKey) ?? -1) + 1) % total;
 		this.#providerRoundRobinIndex.set(providerKey, next);
 		return next;
 	}
