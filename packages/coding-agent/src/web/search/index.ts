@@ -24,6 +24,7 @@ import {
 	formatSearchProviderFailures,
 	getSearchProvider,
 	getSearchProviderLabel,
+	isSearchProviderExcluded,
 	resolveProviderCandidates,
 	type SearchProvider,
 	type SearchProviderCandidate,
@@ -37,6 +38,16 @@ import {
 	type SearchProviderId,
 	type SearchResponse,
 } from "./types";
+
+/**
+ * Credential-free providers that can be queried in parallel via the Public
+ * Web aggregate. When the auto-chain resolves to only these providers the
+ * sequential fallback is replaced by a parallel fan-out so that a bot
+ * challenge or network stall on one engine does not block the others.
+ *
+ * Must stay in sync with `PUBLIC_ENGINE_IDS` in `./providers/public.ts`.
+ */
+const CREDENTIAL_FREE_IDS = new Set<SearchProviderId>(["startpage", "google", "duckduckgo", "ecosia", "mojeek"]);
 
 /** Web search tool parameters schema */
 export const webSearchSchema = type({
@@ -178,6 +189,63 @@ async function executeSearch(
 		}
 	} catch {
 		// Preserve the default for one-shot callers that do not initialize Settings.
+	}
+
+	// When the auto-chain resolves to only credential-free providers, use the
+	// Public Web parallel fan-out instead of trying each one sequentially.
+	// This avoids the worst case where every free provider times out in series
+	// (5 × 60 s = 5 min) when a single parallel pass (5 s soft / 30 s hard)
+	// would return or fail much faster.
+	const resolvedFreeCount = candidates.filter(
+		c => CREDENTIAL_FREE_IDS.has(c.id) && !isSearchProviderExcluded(c.id),
+	).length;
+	const isExplicit = explicitProvider !== undefined && explicitProvider !== "auto";
+	if (!isExplicit && resolvedFreeCount > 0 && resolvedFreeCount === candidates.length) {
+		const { searchPublicWeb } = await import("./providers/public");
+		try {
+			const response = await searchPublicWeb({
+				query: params.query,
+				parsedQuery,
+				limit: params.limit,
+				recency: params.recency,
+				systemPrompt: webSearchSystemPrompt,
+				maxOutputTokens: params.max_tokens,
+				numSearchResults: params.num_search_results,
+				temperature: params.temperature,
+				signal,
+				timeoutMs,
+				authStorage,
+				modelRegistry,
+				sessionId,
+				antigravityEndpointMode,
+				geminiModel,
+			});
+
+			let finalResponse = response;
+			const constraintNotes: string[] = [];
+			if (parsedQuery.hasConstraints && response.sources.length > 0) {
+				const filtered = applyQueryConstraints(response.sources, parsedQuery);
+				if (filtered.sources.length !== response.sources.length) {
+					finalResponse = { ...response, sources: filtered.sources };
+				}
+				for (const label of filtered.dropped) {
+					constraintNotes.push(`no results matched \`${label}\`; the constraint was relaxed`);
+				}
+			}
+
+			if (!hasRenderableSearchContent(finalResponse)) {
+				throw new SearchProviderError("public", "Public Web returned no renderable search content.", 204);
+			}
+
+			return {
+				content: [{ type: "text" as const, text: formatForLLM(finalResponse, constraintNotes) }],
+				details: { response: finalResponse },
+			};
+		} catch (error) {
+			throwIfAborted(signal);
+			// Fall through to the sequential loop so the error message still
+			// names the individual engines that failed.
+		}
 	}
 
 	const failures: Array<{ provider: Pick<SearchProvider, "id" | "label">; error: unknown }> = [];
