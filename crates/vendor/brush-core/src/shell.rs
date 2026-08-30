@@ -223,7 +223,9 @@ impl<SE: extensions::ShellExtensions> Shell<SE> {
 			args: options.shell_args.unwrap_or_default(),
 			version: options.shell_version,
 			product_display_str: options.shell_product_display_str,
-			working_dir: options.working_dir.map_or_else(std::env::current_dir, Ok)?,
+			working_dir: crate::sys::fs::expand_to_long_path(
+				&options.working_dir.map_or_else(std::env::current_dir, Ok)?,
+			),
 			builtins: options.builtins,
 			parser_impl: options.parser,
 			key_bindings: options.key_bindings,

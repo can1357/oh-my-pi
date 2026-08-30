@@ -410,7 +410,7 @@ function findExistingAncestorSync(targetPath: string, rootPath: string): string 
 	while (true) {
 		ensureWithinRoot(current, rootPath);
 		try {
-			return fs.realpathSync(current);
+			return fs.realpathSync.native(current);
 		} catch (error) {
 			if (!isEnoent(error)) throw error;
 			const parent = path.dirname(current);
@@ -434,12 +434,12 @@ export function resolveVaultUrlToPath(input: string | InternalUrl): string {
 		);
 	}
 
-	const resolvedRoot = fs.realpathSync(cachedRoot);
+	const resolvedRoot = fs.realpathSync.native(cachedRoot);
 	const targetPath = parsed.relativePath ? path.resolve(resolvedRoot, parsed.relativePath) : resolvedRoot;
 	ensureWithinRoot(targetPath, resolvedRoot);
 
 	try {
-		const realTarget = fs.realpathSync(targetPath);
+		const realTarget = fs.realpathSync.native(targetPath);
 		ensureWithinRoot(realTarget, resolvedRoot);
 	} catch (error) {
 		if (!isEnoent(error)) throw error;

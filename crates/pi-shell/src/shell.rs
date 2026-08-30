@@ -70,7 +70,23 @@ fn shell_working_dir_matches(shell: &BrushShell, cwd: &str) -> bool {
 		return false;
 	}
 	let current = shell.working_dir();
-	current == requested
+	#[cfg(windows)]
+	{
+		// Compare with the same identity used to store `working_dir`
+		// (short-name-only expansion), not an exact string match: the host
+		// may hand us an 8.3-spelled cwd while the stored dir is long-form
+		// (or vice-versa), and both expand to the same long spelling, so we
+		// avoid a redundant set_working_dir / PWD churn for the same dir.
+		// Unlike `Path::canonicalize`, expand_to_long_path does not resolve
+		// symlinks/junctions, keeping the comparison consistent with what is
+		// actually stored.
+		brush_core::sys::fs::expand_to_long_path(current)
+			== brush_core::sys::fs::expand_to_long_path(requested)
+	}
+	#[cfg(not(windows))]
+	{
+		current == requested
+	}
 }
 
 fn set_shell_working_dir_if_changed(shell: &mut BrushShell, cwd: &str) -> Result<()> {
@@ -1951,6 +1967,105 @@ mod tests {
 	use tokio::process::Command;
 
 	use super::*;
+
+	/// Real 8.3 short spelling of `path` on this host (GetShortPathNameW).
+	/// Equal to the long form only when the volume has no short aliases for
+	/// the components — in which case the identity comparison is vacuous but
+	/// still deterministic.
+	#[cfg(windows)]
+	fn short_name_of(path: &std::path::Path) -> std::path::PathBuf {
+		use std::os::windows::ffi::{OsStrExt, OsStringExt};
+		let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+		let needed = unsafe {
+			windows_sys::Win32::Storage::FileSystem::GetShortPathNameW(
+				wide.as_ptr(),
+				std::ptr::null_mut(),
+				0,
+			)
+		};
+		assert!(needed > 0, "GetShortPathNameW failed for {}", path.display());
+		let mut buf = vec![0u16; needed as usize];
+		let written = unsafe {
+			windows_sys::Win32::Storage::FileSystem::GetShortPathNameW(
+				wide.as_ptr(),
+				buf.as_mut_ptr(),
+				buf.len() as u32,
+			)
+		};
+		assert!(written > 0, "GetShortPathNameW fill failed for {}", path.display());
+		buf.truncate(written as usize);
+		std::path::PathBuf::from(std::ffi::OsString::from_wide(&buf))
+	}
+
+	/// On Windows, the shell's initial working_dir is expanded to the long
+	/// form (ADMINI~1 -> Administrator) via GetLongPathNameW, without
+	/// introducing an `\\?\` extended prefix or resolving symlinks. The input
+	/// is the volume's real 8.3 short spelling of TEMP (computed via
+	/// GetShortPathNameW, the deterministic inverse), so the test actually
+	/// exercises the expansion on hosts where 8.3 aliases exist — not just a
+	/// long-form passthrough. Non-Windows has no short names.
+	#[cfg(windows)]
+	#[tokio::test]
+	async fn working_dir_initializes_to_long_form() {
+		let long = std::env::temp_dir(); // os-level TEMP
+		let short = short_name_of(&long);
+
+		let shell = BrushShell::builder()
+			.do_not_inherit_env(true)
+			.profile(ProfileLoadBehavior::Skip)
+			.rc(RcLoadBehavior::Skip)
+			.working_dir(short.clone())
+			.build()
+			.await
+			.expect("build shell");
+
+		let got = shell.working_dir();
+		// No 8.3 short-name segment (`~` + digits, e.g. ADMINI~1) survives
+		// expansion, and the result is the same physical directory.
+		let short_name_segment = |seg: std::path::Component<'_>| {
+			let s = seg.as_os_str().to_string_lossy();
+			if let Some(tilde) = s.find('~') {
+				let after = &s[tilde + 1..];
+				!after.is_empty() && after.chars().all(|c| c.is_ascii_digit())
+			} else {
+				false
+			}
+		};
+		assert!(
+			!got.components().any(short_name_segment),
+			"working_dir still contains an 8.3 short segment: {} (input was {})",
+			got.display(),
+			short.display()
+		);
+		assert_eq!(got.canonicalize().unwrap(), long.canonicalize().unwrap());
+	}
+
+	/// The stored working_dir is long-form; when the host hands back the
+	/// short spelling of the same directory, identity comparison must accept
+	/// it and skip a redundant `set_working_dir` — a plain string compare
+	/// would see two different paths.
+	#[cfg(windows)]
+	#[tokio::test]
+	async fn short_spelled_cwd_matches_stored_long_form() {
+		let long = std::env::temp_dir();
+		let short = short_name_of(&long);
+
+		let shell = BrushShell::builder()
+			.do_not_inherit_env(true)
+			.profile(ProfileLoadBehavior::Skip)
+			.rc(RcLoadBehavior::Skip)
+			.working_dir(long.clone())
+			.build()
+			.await
+			.expect("build shell");
+
+		assert!(
+			shell_working_dir_matches(&shell, &short.to_string_lossy()),
+			"short spelling {} should match stored long form {}",
+			short.display(),
+			shell.working_dir().display()
+		);
+	}
 
 	#[cfg(unix)]
 	async fn kill_test_context() -> (ShellSessionCore, ExecutionParameters) {
