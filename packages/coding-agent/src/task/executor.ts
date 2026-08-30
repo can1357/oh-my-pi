@@ -810,6 +810,11 @@ function getNumberField(record: Record<string, unknown>, key: string): number | 
 	return typeof value === "number" && Number.isFinite(value) ? value : 0;
 }
 
+function getRestoredAgentCost(id: string): number | undefined {
+	const cost = AgentRegistry.global().get(id)?.history?.metrics?.cost;
+	return typeof cost === "number" && Number.isFinite(cost) && cost > 0 ? cost : undefined;
+}
+
 function firstNumberField(record: Record<string, unknown>, keys: string[]): number | undefined {
 	for (const key of keys) {
 		const value = getNumberField(record, key);
@@ -2401,6 +2406,7 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 				.filter(Boolean)
 				.join("\n\n") || "IRC follow-up";
 		const turnStartTime = Date.now();
+		const restoredCost = getRestoredAgentCost(id);
 		const sessionFile = AgentRegistry.global().get(id)?.sessionFile ?? options.sessionFile ?? undefined;
 		const turnMonitor = createSubagentRunMonitor({
 			index,
@@ -2430,6 +2436,7 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 			status: "started",
 			sessionFile,
 			index,
+			...(restoredCost !== undefined ? { restoredCost } : {}),
 		} as const;
 		emitSubagentFrame(options.eventBus, options.subagentEventBus, TASK_SUBAGENT_LIFECYCLE_CHANNEL, startedPayload);
 
@@ -2661,6 +2668,7 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 	const startTime = Date.now();
 	const session = await AgentLifecycleManager.global().ensureLive(id);
 	const ref = AgentRegistry.global().get(id);
+	const restoredCost = getRestoredAgentCost(id);
 	const sessionFile = ref?.sessionFile ?? undefined;
 
 	const monitor = createSubagentRunMonitor({
@@ -2692,6 +2700,7 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 		status: "started",
 		sessionFile,
 		index,
+		...(restoredCost !== undefined ? { restoredCost } : {}),
 	} as const;
 	emitSubagentFrame(options.eventBus, options.subagentEventBus, TASK_SUBAGENT_LIFECYCLE_CHANNEL, startedPayload);
 
@@ -3353,6 +3362,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				modelRole: modelRole ?? resolveExplicitModelRole(modelOverride ?? agent.model, subagentSettings),
 				resolvedModel: progress.resolvedModel,
 				readOnly: isReadOnlyAgent(agent),
+				detached: options.detached === true,
 				spawns: spawnsEnv,
 				readSummarize: agent.readSummarize,
 				advisor: advisorSelection ? (advisorSelection.model ?? "on") : undefined,

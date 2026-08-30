@@ -848,6 +848,17 @@ export const SETTINGS_SCHEMA = {
 				"Show the thinking level as a single icon on the model name instead of a separate ` · <level>` suffix.",
 		},
 	},
+	"statusLine.showUnreportedSubagentCost": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "appearance",
+			group: "Status Line",
+			label: "Show Unreported Agent Cost",
+			description: "Display child-agent spend omitted from the session cost alongside the session cost",
+		},
+	},
+
 	"tools.artifactSpillThreshold": {
 		type: "number",
 		default: 50,

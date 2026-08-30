@@ -61,6 +61,8 @@ export interface AgentHistorySummary {
 	resolvedModelIsFallback?: boolean;
 	metrics?: AgentMetricsSummary;
 	readOnly?: boolean;
+	/** Whether the historical agent was spawned as a detached background task. */
+	detached?: boolean;
 	/** Durable task output artifact, when the executor wrote one. */
 	outputPath?: string;
 	/** Captured isolated-worktree patch, when patch capture succeeded. */

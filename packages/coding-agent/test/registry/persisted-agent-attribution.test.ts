@@ -3,6 +3,8 @@ import * as path from "node:path";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { registerPersistedSubagents } from "@oh-my-pi/pi-coding-agent/registry/persisted-agents";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { aggregateUnreportedSubagentCost } from "../../src/modes/components/agent-hub-projection";
+import type { SessionEntry } from "../../src/session/session-entries";
 
 const SONNET = { provider: "anthropic", model: "claude-sonnet-5" };
 const SOL = { provider: "openai-codex", model: "gpt-5.6-sol" };
@@ -13,6 +15,7 @@ function assistant(
 	who: { provider: string; model: string },
 	stopReason: string,
 	content: unknown[],
+	cost = 0.5,
 ): string {
 	return JSON.stringify({
 		type: "message",
@@ -25,7 +28,7 @@ function assistant(
 			provider: who.provider,
 			model: who.model,
 			stopReason,
-			usage: { input: 10, output: 20, totalTokens: 30, cost: { total: 0.5 } },
+			usage: { input: 10, output: 20, totalTokens: 30, cost: { total: cost } },
 		},
 	});
 }
@@ -43,7 +46,7 @@ function modelChange(id: string, parentId: string, model: string, role: string, 
 }
 
 /** Head every transcript shares: a session that started on sonnet under the `task` role. */
-function transcriptHead(): string[] {
+function transcriptHead(detached?: boolean): string[] {
 	return [
 		JSON.stringify({ type: "session", id: "s0", parentId: null, timestamp: "2026-08-07T10:34:37.300Z" }),
 		modelChange("m1", "s0", "anthropic/claude-sonnet-5", "task", false),
@@ -54,6 +57,7 @@ function transcriptHead(): string[] {
 			timestamp: "2026-08-07T10:34:38.000Z",
 			agent: "task",
 			task: "build the thing",
+			...(detached === undefined ? {} : { detached }),
 		}),
 	];
 }
@@ -67,12 +71,44 @@ async function historyFor(dir: string, id: string, records: string[]): Promise<A
 	return registry;
 }
 
+/** Writes several worker transcripts under one root and registers their parked refs. */
+async function historiesFor(
+	dir: string,
+	workers: Array<{ id: string; records: string[] }>,
+): Promise<{ registry: AgentRegistry; rootSessionFile: string }> {
+	const rootSessionFile = path.join(dir, "main.jsonl");
+	await Bun.write(rootSessionFile, "");
+	for (const { id, records } of workers) {
+		await Bun.write(path.join(dir, "main", `${id}.jsonl`), `${records.join("\n")}\n`);
+	}
+	const registry = new AgentRegistry();
+	await registerPersistedSubagents(registry, rootSessionFile);
+	return { registry, rootSessionFile };
+}
+
+function rootTaskResult(details: unknown): SessionEntry {
+	return {
+		type: "message",
+		id: "root-task-result",
+		parentId: null,
+		timestamp: "2026-08-07T11:00:00.000Z",
+		message: {
+			role: "toolResult",
+			toolCallId: "task-call",
+			toolName: "task",
+			content: [{ type: "text", text: "done" }],
+			details,
+		},
+	} as unknown as SessionEntry;
+}
+
 describe("persisted agent model attribution", () => {
 	it("reports the model that produced output, not a fallback that never served", async () => {
 		using tempDir = TempDir.createSync("@omp-attribution-incident-");
+		const rootSessionFile = path.join(tempDir.path(), "main.jsonl");
 		// The incident: sonnet does the work, a chain candidate errors instantly.
 		const registry = await historyFor(tempDir.path(), "BuildThing", [
-			...transcriptHead(),
+			...transcriptHead(true),
 			assistant("a1", "si", SONNET, "toolUse", [{ type: "toolCall", id: "t1", name: "read" }]),
 			assistant("e1", "a1", SONNET, "error", []),
 			modelChange("m2", "e1", "openai-codex/gpt-5.6-sol", "fallback", true),
@@ -86,6 +122,44 @@ describe("persisted agent model attribution", () => {
 		expect(history?.modelRole).toBe("task");
 		// Every assistant turn still counts toward the row's telemetry.
 		expect(history?.metrics?.requests).toBe(3);
+		expect(aggregateUnreportedSubagentCost(registry.list(), [], rootSessionFile)).toBe(1.5);
+	});
+
+	it("counts restored detached, blocking, and unknown legacy children unless root results represent them", async () => {
+		using tempDir = TempDir.createSync("@omp-attribution-detached-");
+		const { registry, rootSessionFile } = await historiesFor(tempDir.path(), [
+			{
+				id: "RestoredDetached",
+				records: [
+					...transcriptHead(true),
+					assistant("a1", "si", SONNET, "stop", [{ type: "text", text: "detached work" }], 0.4),
+				],
+			},
+			{
+				id: "StandaloneBlocking",
+				records: [
+					...transcriptHead(false),
+					assistant("a1", "si", SONNET, "stop", [{ type: "text", text: "blocking work" }], 0.2),
+				],
+			},
+			{
+				id: "UnknownLegacy",
+				records: [
+					...transcriptHead(),
+					assistant("a1", "si", SONNET, "stop", [{ type: "text", text: "legacy work" }], 0.1),
+				],
+			},
+		]);
+
+		expect(registry.get("RestoredDetached")?.history?.detached).toBe(true);
+		expect(registry.get("StandaloneBlocking")?.history?.detached).toBe(false);
+		expect(registry.get("UnknownLegacy")?.history?.detached).toBeUndefined();
+		expect(aggregateUnreportedSubagentCost(registry.list(), [], rootSessionFile)).toBeCloseTo(0.7, 8);
+		expect(
+			aggregateUnreportedSubagentCost(registry.list(), [], rootSessionFile, [
+				rootTaskResult({ results: [{ id: "StandaloneBlocking" }] }),
+			]),
+		).toBeCloseTo(0.5, 8);
 	});
 
 	it("treats a stall aborted mid-tool-call as unserved despite its partial content", async () => {

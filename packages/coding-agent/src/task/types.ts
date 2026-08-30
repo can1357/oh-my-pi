@@ -101,6 +101,8 @@ export interface SubagentLifecyclePayload {
 	 * unset — surfaces like the subagent HUD only list detached spawns.
 	 */
 	detached?: boolean;
+	/** Historical spend restored before this follow-up turn; always finite and positive when present. */
+	restoredCost?: number;
 }
 
 /** Display cap for a normalized one-line label (roster line, registry `displayName`, prompt field). */

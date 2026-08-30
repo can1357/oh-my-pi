@@ -2348,6 +2348,7 @@ export class SessionManager {
 		modelRole?: string;
 		resolvedModel?: string;
 		readOnly?: boolean;
+		detached?: boolean;
 		outputSchema?: unknown;
 		outputSchemaMode?: StructuredSubagentSchemaMode;
 		restrictToolNames?: boolean;
@@ -2892,6 +2893,7 @@ export class SessionManager {
 			modelRole?: string;
 			resolvedModel?: string;
 			readOnly?: boolean;
+			detached?: boolean;
 			outputSchema?: unknown;
 			outputSchemaMode?: StructuredSubagentSchemaMode;
 			restrictToolNames?: boolean;
@@ -2909,6 +2911,7 @@ export class SessionManager {
 			modelRole?: string;
 			resolvedModel?: string;
 			readOnly?: boolean;
+			detached?: boolean;
 			outputSchema?: unknown;
 			outputSchemaMode?: StructuredSubagentSchemaMode;
 			restrictToolNames?: boolean;
@@ -2930,6 +2933,7 @@ export class SessionManager {
 					modelRole: entry.modelRole,
 					resolvedModel: entry.resolvedModel,
 					readOnly: entry.readOnly,
+					detached: entry.detached,
 					outputSchema: entry.outputSchema,
 					outputSchemaMode: entry.outputSchemaMode,
 					restrictToolNames: entry.restrictToolNames,

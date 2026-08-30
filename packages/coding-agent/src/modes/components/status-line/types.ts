@@ -40,6 +40,8 @@ export interface StatusLineSettings {
 	/** Replace the model-segment icon with the thinking-level glyph and drop the
 	 *  " · <level>" suffix, so the thinking level reads as a single compact icon. */
 	compactThinkingLevel?: boolean;
+	/** Append child-agent spend omitted from the session cost to the cost segment. */
+	showUnreportedSubagentCost?: boolean;
 	/** How the gap line between the left and right groups reacts to context
 	 *  usage. `embedded` moves configured context segments into the annotated
 	 *  gauge as percentage and window labels. Box composer only. */
@@ -117,6 +119,8 @@ export interface SegmentContext {
 	/** Blink phase for the running-speculation pulse; toggled by the component's timer. */
 	speculationBlinkOn: boolean;
 	subagentCount: number;
+	/** Accumulated child-agent cost omitted from the session cost; zero when hidden or unavailable. */
+	unreportedSubagentCost?: number;
 	/**
 	 * Active processing time accumulated this session, in ms — the union of
 	 * every `agent_start`→`agent_end` window plus the currently-streaming

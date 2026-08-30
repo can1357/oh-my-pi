@@ -11,6 +11,7 @@ beforeAll(async () => {
 interface CostCtxOptions {
 	cost?: number;
 	advisorCost?: number;
+	unreportedSubagentCost?: number;
 	onAdvisorSubscriptionProbe: () => void;
 }
 
@@ -25,6 +26,7 @@ function costCtx(options: CostCtxOptions): SegmentContext {
 			cost: options.cost ?? 0,
 			tokensPerSecond: null,
 		},
+		unreportedSubagentCost: options.unreportedSubagentCost ?? 0,
 		session: {
 			state: { model: undefined },
 			getAdvisorCost: () => options.advisorCost ?? 0,
@@ -61,5 +63,20 @@ describe("cost status-line segment", () => {
 
 		expect(probes).toBe(1);
 		expect(stripVTControlCharacters(rendered.content)).toContain("0.25");
+	});
+
+	it("renders unreported subagent cost as an additional labelled amount", () => {
+		const ctx = costCtx({
+			cost: 0.5,
+			advisorCost: 0.25,
+			unreportedSubagentCost: 0.4,
+			onAdvisorSubscriptionProbe: () => {},
+		});
+
+		const rendered = stripVTControlCharacters(renderSegment("cost", ctx).content);
+
+		expect(rendered).toContain("$0.50 + $0.40 (agents)");
+		expect(rendered).toContain("$0.25");
+		expect(rendered.indexOf("(agents)")).toBeLessThan(rendered.indexOf("$0.25"));
 	});
 });

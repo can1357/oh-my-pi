@@ -333,6 +333,7 @@ async function readPersistedAgentMetadata(sessionFile: string): Promise<Persiste
 						typeof record.modelRole === "string" ? record.modelRole : (history.modelRole ?? inferred.modelRole),
 					resolvedModel: typeof record.resolvedModel === "string" ? record.resolvedModel : history.resolvedModel,
 					readOnly: typeof record.readOnly === "boolean" ? record.readOnly : inferred.readOnly,
+					...(typeof record.detached === "boolean" ? { detached: record.detached } : {}),
 				};
 				return false;
 			},
@@ -466,7 +467,7 @@ function rosterScanError(error: unknown): string {
 	return text.length <= 200 ? text : `${text.slice(0, 197)}...`;
 }
 
-function sessionFileBelongsToRoot(sessionFile: string, rootSessionFile: string): boolean {
+export function sessionFileBelongsToRoot(sessionFile: string, rootSessionFile: string): boolean {
 	const file = path.resolve(sessionFile);
 	const root = path.resolve(rootSessionFile);
 	const artifactRoot = root.slice(0, -".jsonl".length);

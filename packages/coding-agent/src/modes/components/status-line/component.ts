@@ -435,6 +435,7 @@ export class StatusLineComponent implements Component {
 	 * dependency graph; interactive-mode wires it to VibeSessionRegistry.
 	 */
 	#vibeWorkerTokenRate: (() => number | null) | null = null;
+	#unreportedSubagentCost = 0;
 	#collabStatus: CollabStatus | null = null;
 	#focusedAgentId: string | undefined;
 	#activeRepoCache: ActiveRepoCache | undefined;
@@ -505,6 +506,7 @@ export class StatusLineComponent implements Component {
 			transparent: settings.get("statusLine.transparent"),
 			compactThinkingLevel: settings.get("statusLine.compactThinkingLevel"),
 			contextLine: settings.get("statusLine.contextLine"),
+			showUnreportedSubagentCost: settings.get("statusLine.showUnreportedSubagentCost"),
 		};
 	}
 
@@ -583,6 +585,11 @@ export class StatusLineComponent implements Component {
 	setRunningSubagents(agentIds: readonly string[]): void {
 		this.#subagentCount = agentIds.length;
 		this.#runningSubagentIds = new Set(agentIds);
+	}
+
+	/** Set the observer-registry child-agent cost aggregate; non-finite or non-positive values clear it. */
+	setUnreportedSubagentCost(cost: number): void {
+		this.#unreportedSubagentCost = Number.isFinite(cost) && cost > 0 ? cost : 0;
 	}
 
 	/**
@@ -1829,6 +1836,10 @@ export class StatusLineComponent implements Component {
 			compactionSpeculation,
 			speculationBlinkOn: this.#speculationBlinkOn,
 			subagentCount: this.#subagentCount,
+			unreportedSubagentCost:
+				this.#resolveSettings().showUnreportedSubagentCost && !this.#focusedAgentId
+					? this.#unreportedSubagentCost
+					: 0,
 			activeMs: this.getActiveMs(),
 			turnElapsedMs,
 			brandFgAnsi: this.#brandFgAnsi(turnElapsedMs !== null, sessionAccentEnabled),

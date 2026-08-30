@@ -223,6 +223,8 @@ export interface SessionInitEntry extends SessionEntryBase {
 	resolvedModel?: string;
 	/** Whether the agent definition is read-only, allowing an exact zero-LoC attribution. */
 	readOnly?: boolean;
+	/** Whether the agent was spawned as a detached background task. */
+	detached?: boolean;
 	/** Output schema if structured output was requested. */
 	outputSchema?: unknown;
 	/** Enforcement policy recorded with the output schema for faithful revival. */

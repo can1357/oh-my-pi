@@ -657,6 +657,7 @@ statusLine:
   separator: powerline-thin
   transparent: false
   showHookStatus: true
+  showUnreportedSubagentCost: false
 
 terminal:
   showImages: true
@@ -679,6 +680,7 @@ tui:
 | `statusLine.sessionAccent`  | boolean | `true`           | Tint the editor border with the session color.                            |
 | `statusLine.transparent`    | boolean | `false`          | Use the terminal background for the status line.                          |
 | `statusLine.showHookStatus` | boolean | `true`           | Show hook status messages.                                                |
+| `statusLine.showUnreportedSubagentCost` | boolean | `false`          | Show child-agent spend omitted from session cost as an additive `(agents)` amount; it never overlaps session cost. |
 | `terminal.showImages`       | boolean | `true`           | Render images inline (when the terminal supports it).                     |
 | `images.autoResize`         | boolean | `true`           | Resize large images for model compatibility.                              |
 | `images.blockImages`        | boolean | `false`          | Never send images to providers.                                           |

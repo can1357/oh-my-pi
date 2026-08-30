@@ -5,11 +5,11 @@ import { loadTheme } from "../../../../src/modes/theme/loader";
 import { getThemeByName, setThemeInstance } from "../../../../src/modes/theme/theme";
 import type { AgentSession } from "../../../../src/session/agent-session";
 
-// The cost assertions below care about how the two costs are rendered, not about
+// The cost assertions below care about how the cost terms are rendered, not about
 // terminal width. The status line also shows the cwd and git branch, so a long
 // checkout path or branch name eats the budget and pushes the cost segment out
-// at a realistic 120 columns. Render these two cases wide enough that the
-// segment always fits, and let the width-sensitive behavior stay covered by the
+// at a realistic 120 columns. Render these cases wide enough that the segment
+// always fits, and let the width-sensitive behavior stay covered by the
 // truncation tests that target it directly.
 const WIDE_ENOUGH_FOR_COST_SEGMENT = 400;
 
@@ -163,6 +163,42 @@ describe("StatusLineComponent", () => {
 		const stripped = statusLine.getTopBorder(WIDE_ENOUGH_FOR_COST_SEGMENT).content.replace(/\x1b\[[0-9;]*m/g, "");
 		expect(stripped).toContain("S2.67");
 		expect(stripped).not.toContain("(adv)");
+	});
+
+	it("shows unreported subagent cost only when enabled and the main session is focused", () => {
+		const session = makeSessionWithLastMessage(null, false, {
+			cost: 2.67,
+			advisorCost: 0.25,
+		}) as unknown as AgentSession;
+		const statusLine = new StatusLineComponent(session);
+		statusLine.setUnreportedSubagentCost(0.41);
+		statusLine.updateSettings({
+			preset: "custom",
+			leftSegments: ["cost"],
+			rightSegments: [],
+			showUnreportedSubagentCost: false,
+		});
+		const hidden = Bun.stripANSI(statusLine.getTopBorder(WIDE_ENOUGH_FOR_COST_SEGMENT).content);
+		expect(hidden).toContain("$2.67");
+		expect(hidden).toContain("0.25");
+		expect(hidden).not.toContain("(agents)");
+
+		statusLine.updateSettings({
+			preset: "custom",
+			leftSegments: ["cost"],
+			rightSegments: [],
+			showUnreportedSubagentCost: true,
+		});
+		const visible = Bun.stripANSI(statusLine.getTopBorder(WIDE_ENOUGH_FOR_COST_SEGMENT).content);
+		expect(visible).toContain("$2.67 + $0.41 (agents)");
+		expect(visible).toContain("0.25");
+		expect(visible.indexOf("(agents)")).toBeLessThan(visible.indexOf("0.25"));
+
+		statusLine.setSession(session, "FocusedAgent");
+		const focused = Bun.stripANSI(statusLine.getTopBorder(WIDE_ENOUGH_FOR_COST_SEGMENT).content);
+		expect(focused).toContain("$2.67");
+		expect(focused).toContain("0.25");
+		expect(focused).not.toContain("(agents)");
 	});
 
 	it("renders Nerd Font symbols for subscription and advisor costs", async () => {
