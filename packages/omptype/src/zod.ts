@@ -755,7 +755,9 @@ export const discriminatedUnion = <
 	/**
 	 * Every discriminator value must be claimed by exactly one variant, as zod
 	 * requires: two variants pinning `kind: "x"` make dispatch ambiguous, and
-	 * the winner would be decided by declaration order alone.
+	 * the winner would be decided by declaration order alone. A variant naming
+	 * the same value twice — `z.union([z.literal("a"), z.literal("a").refine(…)])`
+	 * — is not ambiguous, since both claims route to the same branch.
 	 *
 	 * `resolved` says whether deferred getters have run: at construction a
 	 * deferred variant's values are legitimately unknown and it is skipped,
@@ -770,7 +772,7 @@ export const discriminatedUnion = <
 			}
 			for (const value of variant.values) {
 				const claimed = claims.get(value);
-				if (claimed !== undefined) {
+				if (claimed !== undefined && claimed !== index) {
 					throw new OmpTypeError(
 						`discriminatedUnion variants ${claimed} and ${index} both pin "${discriminator}" to ${JSON.stringify(value) ?? String(value)}`,
 					);

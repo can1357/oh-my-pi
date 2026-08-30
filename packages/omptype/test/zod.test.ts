@@ -191,6 +191,15 @@ describe("zod-like parsing", () => {
 			z.object({ kind: z.literal("x"), b: z.number() }),
 		]);
 		expect(() => deferredCollision.parse({ kind: "x", a: "1" })).toThrow(/variants 0 and 1 both pin "kind" to "x"/);
+
+		// A variant naming the same value twice is NOT ambiguous — both claims
+		// route to the same branch — so it must load and dispatch normally.
+		const selfRepeat = z.discriminatedUnion("kind", [
+			z.object({ kind: z.union([z.literal("a"), z.literal("a").refine(() => true)]), n: z.number() }),
+			z.object({ kind: z.literal("b"), s: z.string() }),
+		]);
+		expect(selfRepeat.parse({ kind: "a", n: 1 })).toEqual({ kind: "a", n: 1 });
+		expect(selfRepeat.parse({ kind: "b", s: "x" })).toEqual({ kind: "b", s: "x" });
 	});
 
 	it("clones readonly output by descriptor instead of spreading it", () => {
