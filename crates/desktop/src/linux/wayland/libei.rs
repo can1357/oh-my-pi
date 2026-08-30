@@ -54,7 +54,7 @@ struct PortalSession {
 }
 
 pub(crate) struct ActorLibei {
-	context:        Context,
+	context:        ei::Context,
 	pointer:        Option<EiDevice>,
 	keyboard:       Option<EiDevice>,
 	sequence:       u32,

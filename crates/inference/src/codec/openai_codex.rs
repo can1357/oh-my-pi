@@ -197,7 +197,7 @@ pub fn transform_codex_request(
 			arguments: None,
 			input: None,
 			output: None,
-			summary: Vec::new(),
+			summary: None,
 			encrypted_content: None,
 			actions: Vec::new(),
 			pending_safety_checks: Vec::new(),
@@ -995,7 +995,7 @@ impl Codec for OpenAiCodexCodec {
 		let encoded = self
 			.responses
 			.encode_chat(context, chat)
-			.map_err(|_| fail("codex_responses_encoding"))?;
+			.map_err(super::openai_responses::encode_error)?;
 		if !encoded.adjustments.is_empty() {
 			return Err(fail("codex_adjustment_requires_planning"));
 		}

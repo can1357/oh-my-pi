@@ -677,6 +677,7 @@ impl ServerConfig {
 
 	/// Acquires process authority on the opened project directory.
 	pub fn try_lock_authority(&self) -> Result<AuthorityLock> {
+		#[cfg(not(unix))]
 		use cap_std::fs;
 
 		if self
@@ -694,6 +695,22 @@ impl ServerConfig {
 			});
 		}
 		let result = (|| {
+			#[cfg(unix)]
+			let root = {
+				use rustix::fs::{Mode, OFlags};
+
+				let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC;
+				let descriptor =
+					rustix::fs::openat(&self.root, ".", flags, Mode::empty()).map_err(|source| {
+						Error::Io {
+							operation: sf!("reopen Environment authority handle"),
+							path:      self.environment_root.clone(),
+							source:    source.into(),
+						}
+					})?;
+				std::fs::File::from(descriptor)
+			};
+			#[cfg(not(unix))]
 			let root = self
 				.root
 				.try_clone()

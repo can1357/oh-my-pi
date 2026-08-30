@@ -163,6 +163,32 @@ impl Decoder for CompletionOnlyDecoder {
 	}
 }
 
+#[derive(Default)]
+struct TerminalEnvelopeDecoder {
+	complete: bool,
+}
+
+impl Decoder for TerminalEnvelopeDecoder {
+	fn push(&mut self, _frame: Frame, emit: &mut dyn FnMut(RawEvent)) -> Result<(), Error> {
+		emit(RawEvent::Chat(ChatEvent::TextDelta { index: 0, text: sf!("visible") }));
+		emit(RawEvent::Completion(RawCompletion {
+			reason: FinishReason::Stop,
+			blocks: 1,
+			usage:  Usage::default(),
+		}));
+		self.complete = true;
+		Ok(())
+	}
+
+	fn finish(&mut self, _emit: &mut dyn FnMut(RawEvent)) -> Result<(), Error> {
+		Ok(())
+	}
+
+	fn is_complete(&self) -> bool {
+		self.complete
+	}
+}
+
 struct FailDecoder;
 
 impl Decoder for FailDecoder {
@@ -1191,6 +1217,54 @@ async fn websocket_upgrade_sends_initial_frame_before_first_decodable_event() {
 	assert_eq!(captures.len(), 1);
 	assert_eq!(captures[0].frames.len(), 1);
 	assert_eq!(captures[0].frames[0].redaction, Bytes::from_static(b"<redacted>"));
+}
+
+#[tokio::test]
+async fn websocket_terminal_envelope_ends_stream_before_peer_close() {
+	let listener = TcpListener::bind("127.0.0.1:0")
+		.await
+		.expect("bind websocket fixture");
+	let address = listener.local_addr().expect("websocket fixture address");
+	let server = tokio::spawn(async move {
+		let (socket, _) = listener.accept().await.expect("accept websocket fixture");
+		let mut socket = tokio_tungstenite::accept_async(socket)
+			.await
+			.expect("upgrade websocket fixture");
+		let _ = socket
+			.next()
+			.await
+			.expect("initial websocket frame")
+			.expect("valid websocket frame");
+		use futures::SinkExt as _;
+		socket
+			.send(tungstenite::Message::text("terminal"))
+			.await
+			.expect("send terminal frame");
+		let _ = socket.next().await;
+	});
+	let mut service = WebSocketTransport::new();
+	service.ready().await.expect("websocket ready");
+	let mut call = request(
+		BodySource::Bytes(Bytes::from_static(b"request")),
+		TerminalEnvelopeDecoder::default(),
+		Cancellation::default(),
+	);
+	call.encoded.framing = FramingProtocol::WebSocket;
+	call.encoded.uri = sf!("ws://{address}/responses");
+	let response = service.call(call).await.expect("websocket handshake");
+	let mut events = response.events.expect("ordinary event stream");
+	assert!(matches!(events.next().await, Some(Ok(RawEvent::Chat(_)))));
+	assert!(matches!(events.next().await, Some(Ok(RawEvent::Completion(_)))));
+	assert!(
+		time::timeout(time::Duration::from_secs(1), events.next())
+			.await
+			.expect("semantic completion must not wait for peer close")
+			.is_none()
+	);
+	time::timeout(time::Duration::from_secs(1), server)
+		.await
+		.expect("client closes websocket after semantic completion")
+		.expect("websocket fixture");
 }
 
 #[tokio::test]

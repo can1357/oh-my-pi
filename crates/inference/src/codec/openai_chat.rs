@@ -1264,8 +1264,8 @@ fn lower_tools(
 			None
 		};
 		let parameters = match (normalize, flattened) {
-			(true, Some(flattened)) => strict_schema(&flattened)?,
-			(true, None) => strict_schema(parameters.as_value())?,
+			(true, Some(flattened)) => strict_schema(&flattened),
+			(true, None) => strict_schema(parameters.as_value()),
 			(false, Some(flattened)) => flattened,
 			(false, None) => parameters.as_value().clone(),
 		};
@@ -1372,15 +1372,27 @@ fn exclusive_required_branch(branch: &Value) -> bool {
 		.all(|key| matches!(key.as_str(), "required" | "description" | "title"))
 }
 
-fn strict_schema(schema: &Value) -> Result<Value, Error> {
+pub(crate) fn strict_schema(schema: &Value) -> Value {
 	match schema {
 		Value::Object(object) => {
 			let mut output = object.clone();
+			if let Some(constant) = output.remove("const") {
+				if let Some(Value::Array(values)) = output.get_mut("enum") {
+					// `const` and `enum` are conjunctive assertions.  Keep
+					// only the enum member selected by the constant instead
+					// of widening the schema with a new member.
+					values.retain(|value| schema_value_equal(value, &constant));
+				} else {
+					output.insert("enum".into(), Value::Array(vec![constant]));
+				}
+			}
+			output.remove("default");
+			output.remove("format");
 			if let Some(Value::Object(properties)) = object.get("properties") {
 				let mut normalized = serde_json::Map::with_capacity(properties.len());
 				let mut required = Vec::with_capacity(properties.len());
 				for (name, property) in properties {
-					normalized.insert(name.clone(), strict_schema(property)?);
+					normalized.insert(name.clone(), strict_schema(property));
 					required.push(Value::String(name.clone()));
 				}
 				output.insert("properties".into(), Value::Object(normalized));
@@ -1389,21 +1401,160 @@ fn strict_schema(schema: &Value) -> Result<Value, Error> {
 			}
 			for keyword in ["items", "additionalProperties", "not", "if", "then", "else"] {
 				if let Some(value) = object.get(keyword).filter(|value| value.is_object()) {
-					output.insert(keyword.into(), strict_schema(value)?);
+					output.insert(keyword.into(), strict_schema(value));
 				}
 			}
 			for keyword in ["allOf", "anyOf", "oneOf", "prefixItems"] {
 				if let Some(Value::Array(values)) = object.get(keyword) {
-					output.insert(
-						keyword.into(),
-						Value::Array(values.iter().map(strict_schema).collect::<Result<_, _>>()?),
-					);
+					output
+						.insert(keyword.into(), Value::Array(values.iter().map(strict_schema).collect()));
 				}
 			}
-			Ok(Value::Object(output))
+			Value::Object(output)
 		},
-		_ => Ok(schema.clone()),
+		_ => schema.clone(),
 	}
+}
+
+/// JSON Schema compares numeric instances by mathematical value rather than
+/// by their source representation (`1` and `1.0` are equal).
+pub(crate) fn schema_value_equal(left: &Value, right: &Value) -> bool {
+	match (left, right) {
+		(Value::Number(left), Value::Number(right)) => {
+			if left == right {
+				return true;
+			}
+			let left_integer = left
+				.as_i64()
+				.map(i128::from)
+				.or_else(|| left.as_u64().map(i128::from));
+			let right_integer = right
+				.as_i64()
+				.map(i128::from)
+				.or_else(|| right.as_u64().map(i128::from));
+			match (left_integer, right_integer) {
+				(Some(left), Some(right)) => left == right,
+				(Some(integer), None) => right
+					.as_f64()
+					.is_some_and(|float| integer_equals_float(integer, float)),
+				(None, Some(integer)) => left
+					.as_f64()
+					.is_some_and(|float| integer_equals_float(integer, float)),
+				(None, None) => left.as_f64() == right.as_f64(),
+			}
+		},
+		(Value::Array(left), Value::Array(right)) => {
+			left.len() == right.len()
+				&& left
+					.iter()
+					.zip(right)
+					.all(|(left, right)| schema_value_equal(left, right))
+		},
+		(Value::Object(left), Value::Object(right)) => {
+			left.len() == right.len()
+				&& left.iter().all(|(key, left)| {
+					right
+						.get(key)
+						.is_some_and(|right| schema_value_equal(left, right))
+				})
+		},
+		_ => left == right,
+	}
+}
+
+fn integer_equals_float(integer: i128, float: f64) -> bool {
+	const U64_EXCLUSIVE_MAX: f64 = 18_446_744_073_709_551_616.0;
+	if !float.is_finite() || float.fract() != 0.0 {
+		return false;
+	}
+	if integer < 0 {
+		float >= i64::MIN as f64 && float < 0.0 && i128::from(float as i64) == integer
+	} else {
+		float >= 0.0 && float < U64_EXCLUSIVE_MAX && i128::from(float as u64) == integer
+	}
+}
+
+/// Propertyless object schemas are open maps unless they explicitly reject
+/// additional properties. Strict normalization cannot close those maps without
+/// changing which arguments the tool accepts.
+fn propertyless_open_object(object: &serde_json::Map<String, Value>) -> bool {
+	if !declares_object_root(object) {
+		return false;
+	}
+	let propertyless = match object.get("properties") {
+		None => true,
+		Some(Value::Object(properties)) => properties.is_empty(),
+		Some(_) => false,
+	};
+	propertyless && object.get("additionalProperties") != Some(&Value::Bool(false))
+}
+
+/// Reports whether recursive strict normalization can preserve an input
+/// schema's object semantics.
+pub(crate) fn strict_schema_supported(schema: &Value) -> bool {
+	let Value::Object(object) = schema else {
+		return false;
+	};
+	if object
+		.get("additionalProperties")
+		.is_some_and(|additional| additional != &Value::Bool(false))
+	{
+		return false;
+	}
+	if propertyless_open_object(object) {
+		return false;
+	}
+	let representable = object.contains_key("type")
+		|| object.contains_key("$ref")
+		|| object.get("not").is_some_and(Value::is_object)
+		|| ["anyOf", "oneOf", "allOf"]
+			.iter()
+			.any(|key| object.get(*key).is_some_and(Value::is_array));
+	if !representable {
+		return false;
+	}
+	for key in [
+		"properties",
+		"patternProperties",
+		"dependencies",
+		"dependentSchemas",
+		"$defs",
+		"definitions",
+	] {
+		if let Some(Value::Object(entries)) = object.get(key)
+			&& !entries.values().all(strict_schema_supported)
+		{
+			return false;
+		}
+	}
+	for key in ["anyOf", "oneOf", "allOf", "prefixItems"] {
+		if let Some(Value::Array(entries)) = object.get(key)
+			&& !entries.iter().all(strict_schema_supported)
+		{
+			return false;
+		}
+	}
+	for key in [
+		"items",
+		"additionalItems",
+		"contains",
+		"contentSchema",
+		"propertyNames",
+		"if",
+		"then",
+		"else",
+		"not",
+		"unevaluatedItems",
+		"unevaluatedProperties",
+	] {
+		if let Some(child) = object.get(key)
+			&& child.is_object()
+			&& !strict_schema_supported(child)
+		{
+			return false;
+		}
+	}
+	true
 }
 
 fn lower_hosted_tools(
@@ -1501,7 +1652,7 @@ fn lower_output(output: &Setting<StructuredOutput>) -> Result<Option<ResponseFor
 			json_schema: JsonSchemaFormat {
 				name:   name.clone(),
 				schema: if *strict {
-					strict_schema(schema.as_value())?
+					strict_schema(schema.as_value())
 				} else {
 					schema.as_value().clone()
 				},
@@ -2729,6 +2880,46 @@ mod tests {
 		assert_eq!(function.parameters.required, ["q"]);
 		assert!(!function.parameters.additional_properties);
 		assert!(function.parameters.properties.contains_key("q"));
+	}
+
+	#[test]
+	fn strict_schema_intersects_const_with_enum() {
+		let schema = serde_json::json!({
+			"type": "string",
+			"const": "x",
+			"enum": ["x", "y"]
+		});
+		assert_eq!(
+			super::strict_schema(&schema),
+			serde_json::json!({
+				"type": "string",
+				"enum": ["x"]
+			}),
+		);
+	}
+
+	#[test]
+	fn strict_schema_treats_equivalent_numeric_const_and_enum_values_as_equal() {
+		let schema = serde_json::json!({
+			"type": "number",
+			"const": 1,
+			"enum": [1.0, 2]
+		});
+		assert_eq!(
+			super::strict_schema(&schema),
+			serde_json::json!({
+				"type": "number",
+				"enum": [1.0]
+			}),
+		);
+	}
+
+	#[test]
+	fn schema_value_equality_recurses_through_arrays_and_objects() {
+		assert!(super::schema_value_equal(
+			&serde_json::json!({"values": [1, {"nested": 2.0}]}),
+			&serde_json::json!({"values": [1.0, {"nested": 2}]})
+		));
 	}
 
 	#[derive(Deserialize)]

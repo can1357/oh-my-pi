@@ -34,6 +34,7 @@ omp-observability = { workspace = true }
 omp-storage = { workspace = true }
 omp-tool = { workspace = true }
 parking_lot = { workspace = true }
+portable-atomic = { workspace = true }
 schemars = { workspace = true }
 regex = { workspace = true }
 globset = { workspace = true }

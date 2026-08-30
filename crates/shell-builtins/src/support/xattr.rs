@@ -3,7 +3,15 @@
 #[cfg(all(unix, not(any(target_os = "android", target_os = "macos"))))]
 use std::path::Path;
 #[cfg(target_os = "linux")]
-use std::{ffi, io, ptr};
+use std::{ffi, ptr};
+#[cfg(target_os = "linux")]
+use std::{
+	ffi::{OsStr, OsString},
+	io,
+};
+
+#[cfg(target_os = "linux")]
+use omp_core::FastHashMap;
 
 /// Returns whether a path has at least one extended ACL or attribute.
 #[cfg(all(unix, not(any(target_os = "android", target_os = "macos"))))]
@@ -54,8 +62,8 @@ fn path_cstring(path: &Path) -> io::Result<ffi::CString> {
 fn list_xattrs(path: &Path) -> io::Result<Vec<u8>> {
 	let path = path_cstring(path)?;
 	// SAFETY: the C path is valid and a null buffer with length zero performs a
-	// size query.
-	let size = unsafe { libc::listxattr(path.as_ptr(), ptr::null_mut(), 0) };
+	// size query without following a final symlink.
+	let size = unsafe { libc::llistxattr(path.as_ptr(), ptr::null_mut(), 0) };
 	if size < 0 {
 		return Err(io::Error::last_os_error());
 	}
@@ -64,7 +72,7 @@ fn list_xattrs(path: &Path) -> io::Result<Vec<u8>> {
 	}
 	let mut names = vec![0_u8; size as usize];
 	// SAFETY: `names` is writable for its full reported capacity.
-	let read = unsafe { libc::listxattr(path.as_ptr(), names.as_mut_ptr().cast(), names.len()) };
+	let read = unsafe { libc::llistxattr(path.as_ptr(), names.as_mut_ptr().cast(), names.len()) };
 	if read < 0 {
 		return Err(io::Error::last_os_error());
 	}
@@ -77,8 +85,9 @@ fn get_xattr(path: &Path, name: &[u8]) -> io::Result<Vec<u8>> {
 	let path = path_cstring(path)?;
 	let name = ffi::CStr::from_bytes_with_nul(name)
 		.map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid attribute name"))?;
-	// SAFETY: both C strings are valid; a null value pointer performs a size query.
-	let size = unsafe { libc::getxattr(path.as_ptr(), name.as_ptr(), ptr::null_mut(), 0) };
+	// SAFETY: both C strings are valid; a null value pointer performs a size
+	// query without following a final symlink.
+	let size = unsafe { libc::lgetxattr(path.as_ptr(), name.as_ptr(), ptr::null_mut(), 0) };
 	if size < 0 {
 		return Err(io::Error::last_os_error());
 	}
@@ -86,13 +95,77 @@ fn get_xattr(path: &Path, name: &[u8]) -> io::Result<Vec<u8>> {
 	// SAFETY: `value` is writable for the queried size and all pointers remain
 	// live.
 	let read = unsafe {
-		libc::getxattr(path.as_ptr(), name.as_ptr(), value.as_mut_ptr().cast(), value.len())
+		libc::lgetxattr(path.as_ptr(), name.as_ptr(), value.as_mut_ptr().cast(), value.len())
 	};
 	if read < 0 {
 		return Err(io::Error::last_os_error());
 	}
 	value.truncate(read as usize);
 	Ok(value)
+}
+
+/// Reads every extended attribute attached to `path` without following a
+/// final symlink.
+#[cfg(target_os = "linux")]
+pub(crate) fn retrieve_xattrs(
+	path: impl AsRef<Path>,
+) -> io::Result<FastHashMap<OsString, Vec<u8>>> {
+	use std::os::unix::ffi::OsStringExt;
+
+	let path = path.as_ref();
+	let names = list_xattrs(path)?;
+	let mut attrs = FastHashMap::default();
+	for name in names
+		.split(|byte| *byte == 0)
+		.filter(|name| !name.is_empty())
+	{
+		let mut terminated_name = Vec::with_capacity(name.len() + 1);
+		terminated_name.extend_from_slice(name);
+		terminated_name.push(0);
+		attrs.insert(OsString::from_vec(name.to_vec()), get_xattr(path, &terminated_name)?);
+	}
+	Ok(attrs)
+}
+
+/// Applies extended attributes to `path` without following a final symlink.
+#[cfg(target_os = "linux")]
+pub(crate) fn apply_xattrs(
+	path: impl AsRef<Path>,
+	xattrs: FastHashMap<OsString, Vec<u8>>,
+) -> io::Result<()> {
+	let path = path.as_ref();
+	for (name, value) in xattrs {
+		set_xattr(path, &name, &value)?;
+	}
+	Ok(())
+}
+
+/// Copies every extended attribute from `source` to `destination` without
+/// following final symlinks.
+#[cfg(target_os = "linux")]
+pub(crate) fn copy_xattrs(
+	source: impl AsRef<Path>,
+	destination: impl AsRef<Path>,
+) -> io::Result<()> {
+	let xattrs = retrieve_xattrs(source)?;
+	apply_xattrs(destination, xattrs)
+}
+
+#[cfg(target_os = "linux")]
+fn set_xattr(path: &Path, name: &OsStr, value: &[u8]) -> io::Result<()> {
+	use std::os::unix::ffi::OsStrExt;
+
+	let path = path_cstring(path)?;
+	let name = ffi::CString::new(name.as_bytes())
+		.map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "attribute name contains NUL"))?;
+	// SAFETY: both C strings and the value slice remain live for the call.
+	let result = unsafe {
+		libc::lsetxattr(path.as_ptr(), name.as_ptr(), value.as_ptr().cast(), value.len(), 0)
+	};
+	if result < 0 {
+		return Err(io::Error::last_os_error());
+	}
+	Ok(())
 }
 
 #[cfg(target_os = "linux")]
@@ -135,5 +208,69 @@ mod tests {
 			value.extend_from_slice(&u32::MAX.to_le_bytes());
 		}
 		assert_eq!(parse_default_acl_permissions(&value), Some(0o741));
+	}
+
+	#[test]
+	fn copies_extended_attributes() -> io::Result<()> {
+		let directory = tempfile::tempdir()?;
+		let source = directory.path().join("source");
+		let destination = directory.path().join("destination");
+		std::fs::write(&source, b"source")?;
+		std::fs::write(&destination, b"destination")?;
+
+		let name = OsStr::new("user.omp-test");
+		if let Err(error) = set_xattr(&source, name, b"value") {
+			if matches!(error.raw_os_error(), Some(libc::EOPNOTSUPP | libc::EPERM)) {
+				return Ok(());
+			}
+			return Err(error);
+		}
+
+		copy_xattrs(&source, &destination)?;
+		let copied = retrieve_xattrs(&destination)?;
+		assert_eq!(copied.get(name).map(Vec::as_slice), Some(b"value".as_slice()));
+		Ok(())
+	}
+
+	#[test]
+	fn does_not_follow_symlinks_when_copying_extended_attributes() -> io::Result<()> {
+		use std::os::unix::fs::symlink;
+
+		let directory = tempfile::tempdir()?;
+		let source_dir = directory.path().join("source");
+		let destination_dir = directory.path().join("destination");
+		std::fs::create_dir(&source_dir)?;
+		std::fs::create_dir(&destination_dir)?;
+
+		let source_target = source_dir.join("target");
+		let destination_target = destination_dir.join("target");
+		std::fs::write(&source_target, b"source")?;
+		std::fs::write(&destination_target, b"destination")?;
+
+		let name = OsStr::new("user.omp-symlink-test");
+		for (path, value) in
+			[(&source_target, &b"source-value"[..]), (&destination_target, &b"destination-value"[..])]
+		{
+			if let Err(error) = set_xattr(path, name, value) {
+				if matches!(error.raw_os_error(), Some(libc::EOPNOTSUPP | libc::EPERM)) {
+					return Ok(());
+				}
+				return Err(error);
+			}
+		}
+
+		let source_link = source_dir.join("link");
+		let destination_link = destination_dir.join("link");
+		symlink("target", &source_link)?;
+		symlink("target", &destination_link)?;
+
+		copy_xattrs(&source_link, &destination_link)?;
+
+		let destination_attrs = retrieve_xattrs(&destination_target)?;
+		assert_eq!(
+			destination_attrs.get(name).map(Vec::as_slice),
+			Some(b"destination-value".as_slice())
+		);
+		Ok(())
 	}
 }

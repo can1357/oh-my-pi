@@ -286,11 +286,11 @@ impl TableCell {
 	/// that cannot join a single-line flatten (images, containers).
 	fn flatten_run<'a>(child: &'a mut Cached, ctx: &UiContext) -> Option<(&'a Str, Style)> {
 		let style = child.comp().props().style(&ctx.theme);
-		let comp = child.comp_mut();
-		if let Some(pre) = comp.downcast_mut::<Pre>() {
+		let comp = child.comp();
+		if let Some(pre) = comp.downcast_ref::<Pre>() {
 			return Some((pre.content(), style));
 		}
-		if let Some(text) = comp.downcast_mut::<TextLeaf>() {
+		if let Some(text) = comp.downcast_ref::<TextLeaf>() {
 			return Some((text.content(), style));
 		}
 		None

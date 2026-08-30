@@ -20,8 +20,6 @@ use std::{
 
 use clap::{Arg, ArgAction, ArgMatches, Command, builder::ValueParser, error::ErrorKind};
 use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle, TermLike};
-#[cfg(all(unix, not(any(target_os = "macos", target_os = "redox"))))]
-use omp_core::FastHashMap;
 use omp_core::{FastHashSet, FastState};
 use omp_shell_engine::{ShellExtensions, builtins::Registration, openfiles::OpenFile};
 use parking_lot::Mutex;
@@ -36,7 +34,7 @@ use self::hardlink::{
 };
 #[cfg(unix)]
 use crate::support::fsutil::{display_permissions_unix, make_fifo};
-#[cfg(all(unix, not(any(target_os = "macos", target_os = "redox"))))]
+#[cfg(target_os = "linux")]
 use crate::support::xattr as fsxattr;
 use crate::{
 	host::{Host, Utility, format_usage, matches_parser, util},
@@ -1166,9 +1164,9 @@ fn rename_symlink_fallback(host: &mut Host, from: &Path, to: &Path) -> io::Resul
 	// must not be resolved; only the from/to operands are filesystem locations.
 	let path_symlink_points_to = fs::read_link(host.resolve(from))?;
 	unix::fs::symlink(path_symlink_points_to, host.resolve(to))?;
-	#[cfg(not(any(target_os = "macos", target_os = "redox")))]
+	#[cfg(target_os = "linux")]
 	{
-		let _ = copy_xattrs_if_supported(host, from, to);
+		preserve_xattrs(host, from, to)?;
 	}
 	fs::remove_file(host.resolve(from))
 }
@@ -1206,6 +1204,9 @@ fn rename_dir_fallback(
 	#[cfg(unix)] hardlink_tracker: Option<&mut HardlinkTracker>,
 	#[cfg(unix)] hardlink_scanner: Option<&HardlinkGroupScanner>,
 ) -> io::Result<()> {
+	#[cfg(target_os = "linux")]
+	let xattrs = fsxattr::retrieve_xattrs(host.resolve(from))?;
+
 	// We remove the destination directory if it exists to match the
 	// behavior of `fs::rename`. As far as I can tell, `fs_extra`'s
 	// `move_dir` would otherwise behave differently.
@@ -1231,10 +1232,6 @@ fn rename_dir_fallback(
 		(..) => None,
 	};
 
-	#[cfg(all(unix, not(any(target_os = "macos", target_os = "redox"))))]
-	let xattrs =
-		fsxattr::retrieve_xattrs(host.resolve(from)).unwrap_or_else(|_| FastHashMap::default());
-
 	// Use directory copying (with or without hardlink support)
 	let result = copy_dir_contents(
 		host,
@@ -1249,7 +1246,7 @@ fn rename_dir_fallback(
 		display_manager,
 	);
 
-	#[cfg(all(unix, not(any(target_os = "macos", target_os = "redox"))))]
+	#[cfg(target_os = "linux")]
 	fsxattr::apply_xattrs(host.resolve(to), xattrs)?;
 
 	result?;
@@ -1434,10 +1431,10 @@ fn copy_file_with_hardlinks_helper(
 	} else {
 		// Copy a regular file.
 		fs::copy(host.resolve(from), host.resolve(to))?;
-		// Copy xattrs, ignoring ENOTSUP errors (filesystem doesn't support xattrs)
-		#[cfg(all(unix, not(any(target_os = "macos", target_os = "redox"))))]
+		// Copy xattrs before removing the source.
+		#[cfg(target_os = "linux")]
 		{
-			let _ = copy_xattrs_if_supported(host, from, to);
+			preserve_xattrs(host, from, to)?;
 		}
 	}
 
@@ -1489,10 +1486,10 @@ fn rename_file_fallback(
 	fs::copy(host.resolve(from), &to_fs)
 		.map_err(|err| io::Error::new(err.kind(), "Permission denied"))?;
 
-	// Copy xattrs, ignoring ENOTSUP errors (filesystem doesn't support xattrs)
-	#[cfg(all(unix, not(any(target_os = "macos", target_os = "redox"))))]
+	// Copy xattrs before removing the source.
+	#[cfg(target_os = "linux")]
 	{
-		let _ = copy_xattrs_if_supported(host, from, to);
+		preserve_xattrs(host, from, to)?;
 	}
 
 	fs::remove_file(host.resolve(from))
@@ -1500,16 +1497,12 @@ fn rename_file_fallback(
 	Ok(())
 }
 
-/// Copy xattrs from source to destination, ignoring ENOTSUP/EOPNOTSUPP errors.
-/// These errors indicate the filesystem doesn't support extended attributes,
-/// which is acceptable when moving files across filesystems.
-#[cfg(all(unix, not(any(target_os = "macos", target_os = "redox"))))]
-fn copy_xattrs_if_supported(host: &Host, from: &Path, to: &Path) -> io::Result<()> {
-	match fsxattr::copy_xattrs(host.resolve(from), host.resolve(to)) {
-		Ok(()) => Ok(()),
-		Err(e) if e.raw_os_error() == Some(libc::EOPNOTSUPP) => Ok(()),
-		Err(e) => Err(e),
-	}
+/// Copies xattrs from source to destination before the source is removed.
+///
+/// Errors are propagated because dropping metadata during a move is not safe.
+#[cfg(target_os = "linux")]
+fn preserve_xattrs(host: &Host, from: &Path, to: &Path) -> io::Result<()> {
+	fsxattr::copy_xattrs(host.resolve(from), host.resolve(to))
 }
 
 fn is_empty_dir(host: &Host, path: &Path) -> bool {

@@ -1,4 +1,3 @@
-#![feature(integer_atomics)]
 //! Transport-neutral foundations for durable, interruptible OMP agent loops.
 //!
 //! The crate composes immutable configuration snapshots, deterministic system

@@ -179,19 +179,52 @@ mod platform {
 			.parse::<u64>()
 			.map_err(|_| IdentityError::Incomplete { pid })?;
 		let executable = fs::read_link(proc.join("exe")).map_err(|source| map_io(pid, source))?;
-		let boot_seconds = fs::metadata("/proc/1")
-			.map_err(|source| map_io(pid, source))?
-			.ctime()
-			.max(0) as u64;
+		let boot_seconds = boot_seconds().ok_or(IdentityError::Incomplete { pid })?;
 		// SAFETY: `_SC_CLK_TCK` is a read-only process configuration query.
 		let ticks_per_second = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
-		if ticks_per_second <= 0 {
+		let ticks_per_second =
+			u64::try_from(ticks_per_second).map_err(|_| IdentityError::Incomplete { pid })?;
+		if ticks_per_second == 0 {
 			return Err(IdentityError::Incomplete { pid });
 		}
 		let started = SystemTime::UNIX_EPOCH
-			+ Duration::from_secs(boot_seconds)
-			+ Duration::from_secs_f64(start_generation as f64 / ticks_per_second as f64);
+			+ Duration::from_secs(boot_seconds.saturating_add(start_generation / ticks_per_second))
+			+ Duration::from_nanos(
+				start_generation % ticks_per_second * 1_000_000_000 / ticks_per_second,
+			);
 		Ok(ProcessIdentity { pid, started_at_ms: unix_millis(started), start_generation, executable })
+	}
+
+	/// Reads the kernel boot epoch used to turn `/proc/<pid>/stat` jiffies into
+	/// the informational wall-clock start time.
+	///
+	/// `btime` is the procfs-native source. Uptime and `/proc/1` metadata are
+	/// fallbacks for kernels that omit it.
+	fn boot_seconds() -> Option<u64> {
+		if let Ok(stat) = fs::read_to_string("/proc/stat")
+			&& let Some(seconds) = parse_boot_seconds(&stat)
+		{
+			return Some(seconds);
+		}
+		if let Ok(uptime) = fs::read_to_string("/proc/uptime")
+			&& let Some(uptime) = uptime
+				.split_ascii_whitespace()
+				.next()
+				.and_then(|value| value.parse::<f64>().ok())
+			&& let Ok(now) = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)
+		{
+			return Some(now.as_secs().saturating_sub(uptime as u64));
+		}
+		fs::metadata("/proc/1")
+			.ok()
+			.map(|metadata| metadata.ctime().max(0) as u64)
+	}
+
+	fn parse_boot_seconds(stat: &str) -> Option<u64> {
+		stat
+			.lines()
+			.find_map(|line| line.strip_prefix("btime "))
+			.and_then(|value| value.trim().parse().ok())
 	}
 
 	fn map_io(pid: u32, source: io::Error) -> IdentityError {

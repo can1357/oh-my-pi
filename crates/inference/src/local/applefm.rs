@@ -66,7 +66,7 @@ mod abi;
 mod platform;
 #[cfg(not(target_os = "macos"))]
 mod platform {
-	use omp_core::Str;
+	use omp_core::{Str, sf};
 	use tokio_util::sync::CancellationToken;
 
 	use super::{
@@ -688,7 +688,7 @@ impl AppleFmTransport {
 	/// Model availability is intentionally checked per request so discovery can
 	/// report a temporarily blocked system model and later observe it becoming
 	/// available without rebuilding the registry.
-	pub const fn new() -> result::Result<Self, AppleFmAvailabilityEvidence> {
+	pub fn new() -> result::Result<Self, AppleFmAvailabilityEvidence> {
 		#[cfg(target_os = "macos")]
 		{
 			Ok(Self { ready: None })

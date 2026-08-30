@@ -5,7 +5,7 @@ use std::{
 	future,
 	sync::{
 		Arc, OnceLock,
-		atomic::{AtomicBool, AtomicU128, Ordering},
+		atomic::{AtomicBool, Ordering},
 	},
 	time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -29,6 +29,7 @@ use omp_tool::{
 	Abort, ArgIssue, ArgPath, CallOutcome, CallOutcomeDetails, CapsBase, Effects, ExecutionMode,
 	JobRef, Part, PromptCaps, Registry, ToolIdentity, ToolTerminal,
 };
+use portable_atomic::AtomicU128;
 use serde_json::Value;
 use tokio::{sync::Notify, task, time};
 

@@ -7624,6 +7624,7 @@ dependencies = [
  "omp-storage",
  "omp-tool",
  "parking_lot",
+ "portable-atomic",
  "proptest",
  "regex",
  "schemars",

@@ -119,6 +119,7 @@ objc2-app-kit = "0.3"
 notify = { version = "=8.2.0", features = ["macos_kqueue"] }
 num-bigint = "0.4"
 num-traits = "0.2"
+portable-atomic = "1.15"
 omp-agent = { path = "crates/agent", version = "0.1.0" }
 omp-app = { path = "crates/app", version = "0.1.0" }
 omp-chat-ui = { path = "crates/chat-ui", version = "0.1.0" }

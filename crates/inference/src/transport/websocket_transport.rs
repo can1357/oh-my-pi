@@ -455,6 +455,9 @@ async fn execute(
 									break;
 								},
 							}
+							if decoder.is_complete() {
+								break;
+							}
 						},
 						Some(Ok(Message::Binary(payload))) => {
 							if payload.len() as u64 > bounds.frame { break; }
@@ -476,6 +479,9 @@ async fn execute(
 									let _ = event_tx.send_async(Err(error)).await;
 									break;
 								},
+							}
+							if decoder.is_complete() {
+								break;
 							}
 						},
 						Some(Ok(Message::Close(_))) | None => {
