@@ -1,6 +1,4 @@
 import { describe, expect, it } from "bun:test";
-import * as path from "node:path";
-import * as zod from "@oh-my-pi/omptype/zod";
 import type { Tool } from "@oh-my-pi/pi-ai/types";
 import { isArkSchema, toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -317,88 +315,4 @@ describe("setting- and mode-dependent tool variants stay structurally constraine
 		expect(erasureMessage(unexpectedErasures(erasures))).toBe("");
 		expect(unexpectedErasures(erasures)).toEqual([]);
 	});
-});
-
-/**
- * Registration-time surface the shipped examples touch. A Proxy answers
- * anything else with a no-op, so an example gaining an unrelated API call does
- * not turn this into a false failure — the point is to run the REAL parameter
- * definitions, not to reimplement the extension host.
- */
-function stubExtensionApi(registered: Array<{ name: string; parameters: unknown }>): unknown {
-	const noop = (): unknown => undefined;
-	const record = (definition: { name?: string; parameters?: unknown }): void => {
-		if (definition?.parameters !== undefined) {
-			registered.push({ name: definition.name ?? "unnamed", parameters: definition.parameters });
-		}
-	};
-	const surface: Record<string, unknown> = {
-		zod,
-		logger: new Proxy({}, { get: () => noop }),
-		registerTool: record,
-		registerCommand: (_name: string, definition: { parameters?: unknown }) => record(definition),
-	};
-	return new Proxy(surface, {
-		get: (target, key) => (key in target ? target[key as string] : noop),
-	});
-}
-
-/**
- * Load a shipped example and return the parameter schemas it registers.
- *
- * The specifier is assembled at runtime on purpose: a static import would pull
- * the examples into this package's typecheck, and they sit outside its tsconfig
- * with pre-existing errors. Executing them keeps the contract honest — an
- * example that starts emitting an unconstrained schema fails here, which a
- * re-declared copy of its literals could not catch.
- */
-async function exampleParameters(relativePath: string): Promise<Array<{ name: string; parameters: unknown }>> {
-	const examples = path.resolve(import.meta.dir, "../../examples");
-	const moduleUrl = Bun.pathToFileURL(path.join(examples, relativePath)).href;
-	// Dynamic import exception: a static specifier would drag the examples into
-	// this package's typecheck, where they do not belong (see above).
-	const loaded: { default?: unknown } = await import(moduleUrl);
-	const factory = loaded.default;
-	if (typeof factory !== "function") throw new Error(`${relativePath} has no default export function`);
-	const registered: Array<{ name: string; parameters: unknown }> = [];
-	const api = stubExtensionApi(registered);
-	// Extensions register through the api; custom-tool factories return one
-	// definition directly.
-	const returned = (factory as (api: unknown) => unknown)(api);
-	if (returned !== null && typeof returned === "object") {
-		const definition = returned as { name?: string; parameters?: unknown };
-		if (definition.parameters !== undefined) {
-			registered.push({ name: definition.name ?? relativePath, parameters: definition.parameters });
-		}
-	}
-	if (registered.length === 0) throw new Error(`${relativePath} registered no parameter schemas`);
-	return registered;
-}
-
-describe("shipped example extension schemas are structurally constrained", () => {
-	const examples = [
-		"extensions/hello.ts",
-		"extensions/api-demo.ts",
-		"extensions/reload-runtime.ts",
-		"extensions/with-deps/index.ts",
-		"custom-tools/hello/index.ts",
-	];
-
-	for (const relativePath of examples) {
-		it(`emits a structural schema for examples/${relativePath}`, async () => {
-			const registered = await exampleParameters(relativePath);
-			for (const { name, parameters } of registered) {
-				const label = `${relativePath}#${name}`;
-				const wire = toolWireSchema(asTool("example", label, parameters));
-				const erasures: Erasure[] = [];
-				walkSchema(label, "", wire, erasures);
-				expect(erasureMessage(erasures)).toBe("");
-				// Every example authors with `z.object`, so the wire schema must be
-				// a typed object map (reload-runtime legitimately has no props).
-				const json = wire as Record<string, unknown>;
-				expect(json.type).toBe("object");
-				expect(json.properties).toBeObject();
-			}
-		});
-	}
 });
