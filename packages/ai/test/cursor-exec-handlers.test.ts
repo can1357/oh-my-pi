@@ -1668,6 +1668,85 @@ describe("Cursor exec local-work tracking (issue #4593)", () => {
 		expect(mcpBlock?.[kCursorExecResolved]).toBe(true);
 	});
 
+	it("merges mcpArgs into a toolCallStarted announcement that arrived first", async () => {
+		// Cursor often streams toolCallStarted (empty args) before the exec mcpArgs
+		// frame that carries the real parameters. Passthrough must copy those args
+		// onto the existing block rather than only marking it resolved.
+		const output = cursorAssistantMessage();
+		const stream = new AssistantMessageEventStream();
+		const state = newBlockState();
+		processInteractionUpdate(
+			{
+				message: {
+					case: "toolCallStarted",
+					value: {
+						callId: "env-announced",
+						toolCall: {
+							mcpToolCall: {
+								args: {
+									name: "mcp__fixture_report",
+									toolName: "mcp__fixture_report",
+									toolCallId: "call-mcp-announced",
+								},
+							},
+						},
+					},
+				},
+			},
+			output,
+			stream,
+			state,
+			{ sawTokenDelta: false },
+		);
+		const announced = output.content.find(
+			(block): block is ToolCallState => block.type === "toolCall" && block.id === "call-mcp-announced",
+		);
+		expect(announced?.arguments).toEqual({});
+
+		const h2Request = { write: () => true } as unknown as Parameters<typeof handleServerMessage>[5];
+		await handleServerMessage(
+			create(AgentServerMessageSchema, {
+				message: {
+					case: "execServerMessage",
+					value: create(ExecServerMessageSchema, {
+						id: 1,
+						execId: "exec-mcp-announced",
+						message: {
+							case: "mcpArgs",
+							value: create(McpArgsSchema, {
+								name: "mcp__fixture_report",
+								toolName: "mcp__fixture_report",
+								toolCallId: "call-mcp-announced",
+								providerIdentifier: "pi-agent",
+								args: { query: new TextEncoder().encode(JSON.stringify("from-exec")) },
+							}),
+						},
+					}),
+				},
+			}),
+			output,
+			stream,
+			state,
+			new Map(),
+			h2Request,
+			undefined,
+			undefined,
+			{ sawTokenDelta: false },
+			[],
+			undefined,
+			true,
+		);
+
+		expect(output.content.filter(block => block.type === "toolCall")).toHaveLength(1);
+		expect(announced).toMatchObject({
+			type: "toolCall",
+			id: "call-mcp-announced",
+			name: "mcp__fixture_report",
+			arguments: { query: "from-exec" },
+		});
+		expect(announced?.[kCursorExecResolved]).toBe(true);
+	});
+
 	it("pairs a result for a synthesized exec block when no handler is installed", async () => {
 		// End-to-end over the real dispatch: synthesis, resolved marking and
 		// pairing must line up. `cursorExecHandlers` is optional (a bare SDK host

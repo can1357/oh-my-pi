@@ -2213,9 +2213,15 @@ async function handleExecServerMessage(
 			const synthesizeMcp = !!execHandlers?.mcp || !!cursorToolPassthrough;
 			if (synthesizeMcp) {
 				const existingBlock = output.content.find(
-					block => block.type === "toolCall" && block.id === mcpCall.toolCallId,
+					(block): block is ToolCallState => block.type === "toolCall" && block.id === mcpCall.toolCallId,
 				);
 				if (existingBlock) {
+					// toolCallStarted may announce the call before mcpArgs; merge the
+					// authoritative exec args into that block so deferred callers see them.
+					existingBlock.arguments = omitUndefinedArgs(mcpCall.args ?? {});
+					if (mcpCall.toolName || mcpCall.name) {
+						existingBlock.name = mcpCall.toolName || mcpCall.name;
+					}
 					markCursorExecResolved(existingBlock);
 					markDeferredToCaller();
 				} else {
