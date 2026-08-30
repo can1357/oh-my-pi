@@ -30,7 +30,7 @@ import { isGeminiModelId } from "@oh-my-pi/pi-catalog/identity/family";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import { DEVIN_DEFAULT_BASE_URL, devinCliMetadata } from "@oh-my-pi/pi-catalog/wire/devin";
 import { decodeDevinUnaryMessage } from "@oh-my-pi/pi-catalog/wire/devin-proto";
-import { isRecord, logger, parseStreamingJson, parseStreamingJsonThrottled } from "@oh-my-pi/pi-utils";
+import { isRecord, logger, parseStreamingJson, parseStreamingJsonThrottled, sanitizeText } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import type {
 	Api,
@@ -92,7 +92,6 @@ const MAX_CONNECT_FRAME_PAYLOAD = 16 * 1024 * 1024;
 const LARGE_HISTORY_RECOVERY_BYTES = 512 * 1024;
 const MAX_DEVIN_ERROR_DETAIL_CHARS = 4096;
 const HTML_ERROR_BODY_PATTERN = /^\s*(?:<!doctype\s+html\b|<html\b)/i;
-const CONTROL_CHARACTER_PATTERN = /[\u0000-\u0008\u000b\u000c\u000e-\u001f]/;
 
 /** Extract a bounded human error without leaking proxy HTML or binary protobuf. */
 function devinErrorDetail(response: Response, payload: Uint8Array): string | undefined {
@@ -113,11 +112,14 @@ function devinErrorDetail(response: Response, payload: Uint8Array): string | und
 		}
 	} catch {}
 	// Validate after envelope extraction: JSON escapes (`\u001b`, `<html>` inside a
-	// message) materialize bytes the raw-source scan cannot see.
-	if (text.length === 0 || HTML_ERROR_BODY_PATTERN.test(text) || CONTROL_CHARACTER_PATTERN.test(text)) {
+	// message) materialize bytes the raw-source scan cannot see. Whitespace is
+	// collapsed first so benign CRLF does not trip the control detection; after
+	// that, any text `sanitizeText` would alter (C0/C1 controls, DEL, malformed
+	// Unicode) is untrustworthy diagnostics and suppresses to status-only.
+	const normalized = text.replace(/\s+/g, " ").trim();
+	if (normalized.length === 0 || HTML_ERROR_BODY_PATTERN.test(normalized) || sanitizeText(normalized) !== normalized) {
 		return undefined;
 	}
-	const normalized = text.replace(/\s+/g, " ").trim();
 	return normalized.length > MAX_DEVIN_ERROR_DETAIL_CHARS
 		? normalized.slice(0, MAX_DEVIN_ERROR_DETAIL_CHARS)
 		: normalized;

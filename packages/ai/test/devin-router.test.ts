@@ -357,11 +357,15 @@ describe("streamDevin router assignment", () => {
 		expect(result.errorMessage).not.toContain("<html>");
 	});
 
-	it("suppresses control bytes and markup materialized from JSON error envelopes", async () => {
+	it.each([
+		["C0 escape", "\u001b[2J<html>injected</html>"],
+		["C1 CSI", "\u009b2Jinjected"],
+		["DEL", "inject\u007fed"],
+	])("suppresses %s bytes materialized from JSON error envelopes", async (_label, message) => {
 		const auth = fakeDevin({});
 		const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
 			if (String(input).includes("GetChatMessage")) {
-				return new Response(JSON.stringify({ error: { message: "\u001b[2J<html>injected</html>" } }), {
+				return new Response(JSON.stringify({ error: { message } }), {
 					status: 502,
 					statusText: "Bad Gateway",
 					headers: { "content-type": "application/json" },
@@ -376,7 +380,5 @@ describe("streamDevin router assignment", () => {
 		}).result();
 
 		expect(result.errorMessage).toBe("Devin API error 502 Bad Gateway");
-		expect(result.errorMessage).not.toContain("\u001b");
-		expect(result.errorMessage).not.toContain("<html>");
 	});
 });
