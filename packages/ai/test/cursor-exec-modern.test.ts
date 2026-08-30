@@ -16,6 +16,7 @@ import {
 	AgentClientMessageSchema,
 	AgentServerMessageSchema,
 	AgentStoreConflictArgsSchema,
+	BackgroundShellSpawnArgsSchema,
 	CanvasDiagnosticsArgsSchema,
 	ComputerUseArgsSchema,
 	ConnectScmArgsSchema,
@@ -59,6 +60,7 @@ import {
 	ReadMcpResourceExecArgsSchema,
 	RecordScreenArgsSchema,
 	RequestContextArgsSchema,
+	RoutedModelUpdateSchema,
 	ShellAllowlistPrecheckArgsSchema,
 	ShellArgsSchema,
 	SmartModeClassifierArgsSchema,
@@ -66,6 +68,7 @@ import {
 	SubagentAwaitArgsSchema,
 	ToolCallSchema,
 	WebFetchAllowlistPrecheckArgsSchema,
+	WriteShellStdinArgsSchema,
 } from "@oh-my-pi/pi-catalog/discovery/cursor-proto";
 import { create, fromBinary, toBinary } from "@oh-my-pi/pi-catalog/discovery/protobuf";
 
@@ -84,6 +87,7 @@ async function dispatchExec(
 		execHandlers?: CursorExecHandlers;
 		requestContextTools?: McpToolDefinition[];
 		requestContextRules?: CursorRule[];
+		cursorToolPassthrough?: boolean;
 	} = {},
 ): Promise<{ frames: AgentClientMessage[]; output: AssistantMessage; results: ToolResultMessage[] }> {
 	const output = cursorAssistantMessage();
@@ -112,7 +116,9 @@ async function dispatchExec(
 		},
 		{ sawTokenDelta: false },
 		options.requestContextTools ?? [],
-		options.requestContextRules,
+		options.requestContextRules ?? [],
+		undefined,
+		options.cursorToolPassthrough,
 	);
 
 	return { frames: written.map(decodeClientFrame), output, results };
@@ -205,7 +211,7 @@ function soleResult(frames: AgentClientMessage[]) {
 
 describe("Cursor modern exec protocol activation", () => {
 	it("advertises the client build whose schema includes modern exec frames", () => {
-		expect(CURSOR_CLIENT_VERSION).toBe("cli-2026.07.23-e383d2b");
+		expect(CURSOR_CLIENT_VERSION).toBe("cli-2026.08.11-e8db854");
 	});
 });
 
@@ -263,6 +269,94 @@ describe("Cursor conversation checkpoints", () => {
 			output: 0,
 			totalTokens: 0,
 		});
+	});
+
+	it("extracts routed model from assistant message JSON in pendingToolCalls", async () => {
+		// In auto mode, Cursor's backend routes to a specific model and surfaces
+		// the actual model name via providerOptions.cursor.modelName in the
+		// assistant message JSON stored in the checkpoint's pendingToolCalls.
+		// This is the only place the routed model appears — the
+		// RoutedModelUpdate proto field is never sent by the real CLI.
+		// output.model is initialized from the catalog model id, which is
+		// "auto" for CURSOR_AUTO_MODEL — the sentinel the extraction replaces.
+		const output = cursorAssistantMessage();
+		output.model = "auto";
+
+		const assistantJson = JSON.stringify({
+			id: "msg_test",
+			role: "assistant",
+			content: [
+				{
+					type: "reasoning",
+					text: "",
+					signature: "sig",
+					providerOptions: { cursor: { modelName: "cursor-grok-4.5-high" } },
+				},
+				{ type: "text", text: "4" },
+			],
+			providerOptions: { cursor: { modelProviderMessageId: "msg_test" } },
+		});
+
+		await handleServerMessage(
+			create(AgentServerMessageSchema, {
+				message: {
+					case: "conversationCheckpointUpdate",
+					value: create(ConversationStateStructureSchema, {
+						pendingToolCalls: [assistantJson],
+					}),
+				},
+			}),
+			output,
+			new AssistantMessageEventStream(),
+			newBlockState(),
+			new Map(),
+			{ write: () => true } as unknown as Parameters<typeof handleServerMessage>[5],
+			undefined,
+			undefined,
+			{ sawTokenDelta: false },
+			[],
+			undefined,
+			undefined,
+			true,
+		);
+
+		expect(output.model).toBe("cursor-grok-4.5-high");
+	});
+
+	it("does not extract routed model when autoModeActive is false", async () => {
+		// Extraction is gated on autoModeActive (request intent), not on output.model.
+		const output = cursorAssistantMessage();
+		output.model = "cursor-claude-sonnet-5";
+
+		const assistantJson = JSON.stringify({
+			role: "assistant",
+			content: [{ type: "text", text: "hi", providerOptions: { cursor: { modelName: "cursor-grok-4.5-high" } } }],
+		});
+
+		await handleServerMessage(
+			create(AgentServerMessageSchema, {
+				message: {
+					case: "conversationCheckpointUpdate",
+					value: create(ConversationStateStructureSchema, {
+						pendingToolCalls: [assistantJson],
+					}),
+				},
+			}),
+			output,
+			new AssistantMessageEventStream(),
+			newBlockState(),
+			new Map(),
+			{ write: () => true } as unknown as Parameters<typeof handleServerMessage>[5],
+			undefined,
+			undefined,
+			{ sawTokenDelta: false },
+			[],
+			undefined,
+			undefined,
+			false,
+		);
+
+		expect(output.model).toBe("cursor-claude-sonnet-5");
 	});
 });
 
@@ -1974,6 +2068,240 @@ describe("Cursor MCP frame: approval-only probes", () => {
 		const answer = soleResult(frames);
 		if (answer.case !== "mcpResult") throw new Error(`got ${answer.case}`);
 		expect(answer.value.result.case).toBe("success");
+	});
+
+	it("approves declared MCP probes in tool passthrough without a host preflight", async () => {
+		const { frames, output } = await dispatchExec(
+			buildExecMessage({
+				case: "mcpArgs",
+				value: create(McpArgsSchema, {
+					name: "deploy",
+					toolName: "deploy",
+					toolCallId: "c-pass",
+					providerIdentifier: "ops",
+					smartModeApprovalOnly: true,
+				}),
+			}),
+			{
+				cursorToolPassthrough: true,
+				requestContextTools: [mcpTool("deploy", "ops")],
+			},
+		);
+		const answer = soleResult(frames);
+		if (answer.case !== "mcpResult") throw new Error(`got ${answer.case}`);
+		expect(answer.value.result.case).toBe("approved");
+		expect(output.content.filter(block => block.type === "toolCall")).toHaveLength(0);
+	});
+
+	it("rejects undeclared MCP probes in tool passthrough", async () => {
+		const { frames } = await dispatchExec(
+			buildExecMessage({
+				case: "mcpArgs",
+				value: create(McpArgsSchema, {
+					name: "deploy",
+					toolName: "deploy",
+					toolCallId: "c-pass-deny",
+					providerIdentifier: "ops",
+					smartModeApprovalOnly: true,
+				}),
+			}),
+			{ cursorToolPassthrough: true, requestContextTools: [mcpTool("other", "ops")] },
+		);
+		const answer = soleResult(frames);
+		if (answer.case !== "mcpResult") throw new Error(`got ${answer.case}`);
+		expect(answer.value.result.case).toBe("rejected");
+	});
+
+	it("does not end passthrough on an approval probe when a toolCallStarted already exists", async () => {
+		const output = cursorAssistantMessage();
+		output.content.push({
+			type: "toolCall",
+			id: "c-announced",
+			name: "deploy",
+			arguments: {},
+		});
+		const stream = new AssistantMessageEventStream();
+		const state = newBlockState();
+		const written: Buffer[] = [];
+		const h2Request = {
+			write: (chunk: Buffer) => {
+				written.push(chunk);
+				return true;
+			},
+		} as unknown as Parameters<typeof handleServerMessage>[5];
+		await handleServerMessage(
+			create(AgentServerMessageSchema, {
+				message: {
+					case: "execServerMessage",
+					value: buildExecMessage({
+						case: "mcpArgs",
+						value: create(McpArgsSchema, {
+							name: "deploy",
+							toolName: "deploy",
+							toolCallId: "c-announced",
+							providerIdentifier: "ops",
+							smartModeApprovalOnly: true,
+						}),
+					}),
+				},
+			}),
+			output,
+			stream,
+			state,
+			new Map(),
+			h2Request,
+			undefined,
+			undefined,
+			{ sawTokenDelta: false },
+			[mcpTool("deploy", "ops")],
+			undefined,
+			true,
+		);
+		expect(output.stopReason).toBe("stop");
+		const answer = soleResult(written.map(decodeClientFrame));
+		if (answer.case !== "mcpResult") throw new Error(`got ${answer.case}`);
+		expect(answer.value.result.case).toBe("approved");
+	});
+});
+
+describe("Cursor InteractionUpdate.routedModel", () => {
+	it("consumes InteractionUpdate.routedModel into output.model", () => {
+		const output = cursorAssistantMessage();
+		output.model = "auto";
+		const stream = new AssistantMessageEventStream();
+		processInteractionUpdate(
+			{
+				message: {
+					case: "routedModel",
+					value: create(RoutedModelUpdateSchema, {
+						modelId: "cursor-grok-4.5-high",
+						displayName: "Grok 4.5 High",
+					}),
+				},
+			},
+			output,
+			stream,
+			newBlockState(),
+			{ sawTokenDelta: false },
+		);
+		expect(output.model).toBe("cursor-grok-4.5-high");
+		expect(stream.queue.some(e => e.type === "routed_model" && e.model === "cursor-grok-4.5-high")).toBe(true);
+	});
+
+	it("ignores routedModel updates without a modelId", () => {
+		const output = cursorAssistantMessage();
+		output.model = "auto";
+		processInteractionUpdate(
+			{
+				message: {
+					case: "routedModel",
+					value: create(RoutedModelUpdateSchema, { modelId: "  ", displayName: "x" }),
+				},
+			},
+			output,
+			new AssistantMessageEventStream(),
+			newBlockState(),
+			{ sawTokenDelta: false },
+		);
+		expect(output.model).toBe("auto");
+	});
+});
+
+describe("Cursor backgroundShellSpawnArgs passthrough", () => {
+	it("synthesizes a bash toolCall and rejects the exec for the caller", async () => {
+		const { frames, output } = await dispatchExec(
+			buildExecMessage({
+				case: "backgroundShellSpawnArgs",
+				value: create(BackgroundShellSpawnArgsSchema, {
+					command: "sleep 30",
+					workingDirectory: "/tmp",
+					toolCallId: "bg1",
+				}),
+			}),
+			{ cursorToolPassthrough: true },
+		);
+		const answer = soleResult(frames);
+		if (answer.case !== "backgroundShellSpawnResult") throw new Error(`got ${answer.case}`);
+		if (answer.value.result.case !== "rejected") throw new Error(`got ${answer.value.result.case}`);
+		expect(String(answer.value.result.value.reason)).toContain("passthrough");
+		const calls = output.content.filter(block => block.type === "toolCall");
+		expect(calls).toHaveLength(1);
+		expect(calls[0]).toMatchObject({
+			type: "toolCall",
+			id: "bg1",
+			name: "bash",
+			arguments: { command: "sleep 30", cwd: "/tmp" },
+		});
+	});
+
+	it("keeps the local Not implemented rejection without passthrough", async () => {
+		const { frames, output } = await dispatchExec(
+			buildExecMessage({
+				case: "backgroundShellSpawnArgs",
+				value: create(BackgroundShellSpawnArgsSchema, {
+					command: "sleep 30",
+					workingDirectory: "/tmp",
+					toolCallId: "bg2",
+				}),
+			}),
+		);
+		const answer = soleResult(frames);
+		if (answer.case !== "backgroundShellSpawnResult") throw new Error(`got ${answer.case}`);
+		if (answer.value.result.case !== "rejected") throw new Error(`got ${answer.value.result.case}`);
+		expect(answer.value.result.value.reason).toBe("Not implemented");
+		expect(output.content.filter(block => block.type === "toolCall")).toHaveLength(0);
+	});
+});
+
+describe("Cursor writeShellStdin and redactedRead passthrough", () => {
+	it("surfaces writeShellStdin as a deferred bash toolCall", async () => {
+		const { frames, output } = await dispatchExec(
+			buildExecMessage({
+				case: "writeShellStdinArgs",
+				value: create(WriteShellStdinArgsSchema, { shellId: 1, chars: "y\n" }),
+			}),
+			{ cursorToolPassthrough: true },
+		);
+		expect(output.stopReason).toBe("toolUse");
+		expect(output.content.some(b => b.type === "toolCall" && b.name === "bash")).toBe(true);
+		const answer = soleResult(frames);
+		expect(answer.case).toBe("writeShellStdinResult");
+	});
+
+	it("surfaces redactedRead as a deferred read toolCall", async () => {
+		const { frames, output } = await dispatchExec(
+			buildExecMessage({
+				case: "redactedReadArgs",
+				value: create(ReadArgsSchema, { path: "/repo/.env", toolCallId: "rr-1" }),
+			}),
+			{ cursorToolPassthrough: true },
+		);
+		expect(output.stopReason).toBe("toolUse");
+		expect(output.content.some(b => b.type === "toolCall" && b.name === "read")).toBe(true);
+		const answer = soleResult(frames);
+		expect(answer.case).toBe("redactedReadResult");
+	});
+});
+
+describe("Cursor grep passthrough: empty pattern", () => {
+	it("surfaces empty-pattern grepArgs to the caller instead of local validation", async () => {
+		const { frames, output } = await dispatchExec(
+			buildExecMessage({
+				case: "grepArgs",
+				value: create(GrepArgsSchema, {
+					pattern: "",
+					glob: "**/*.ts",
+					path: ".",
+					toolCallId: "g1",
+				}),
+			}),
+			{ cursorToolPassthrough: true },
+		);
+		const answer = soleResult(frames);
+		if (answer.case !== "grepResult") throw new Error(`got ${answer.case}`);
+		if (answer.value.result.case !== "error") throw new Error(`got ${answer.value.result.case}`);
+		expect(String(answer.value.result.value.error)).toContain("passthrough");
+		expect(output.content.some(block => block.type === "toolCall" && block.name === "grep")).toBe(true);
 	});
 });
 

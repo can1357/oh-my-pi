@@ -417,6 +417,8 @@ function snapshotAssistantMessageEvent(
 				toolCall: snapshotAssistantContentBlock(event.toolCall) as AssistantToolCallBlock,
 				partial: partialSnapshot ?? snapshotAssistantMessage(event.partial),
 			};
+		case "routed_model":
+			return { ...event, partial: partialSnapshot ?? snapshotAssistantMessage(event.partial) };
 		case "done":
 			return { ...event, message: snapshotAssistantMessage(event.message) };
 		case "error":

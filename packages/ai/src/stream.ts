@@ -1971,6 +1971,14 @@ function mapOptionsForApi<TApi extends Api>(
 		fallbacks: options?.fallbacks,
 		acceptEmptyResponse: options?.acceptEmptyResponse,
 		anthropicCacheRefreshRequest: options?.anthropicCacheRefreshRequest,
+		cursorExcludeTools: options?.cursorExcludeTools,
+		cursorLocalCliMode: options?.cursorLocalCliMode,
+		cursorDevExperimentOverrides: options?.cursorDevExperimentOverrides,
+		cursorClientSupportsInlineImages: options?.cursorClientSupportsInlineImages,
+		cursorClientSupportsRoutedModelUpdate: options?.cursorClientSupportsRoutedModelUpdate,
+		cursorClientSupportsPromptContextUsageRpc: options?.cursorClientSupportsPromptContextUsageRpc,
+		cursorRunId: options?.cursorRunId,
+		cursorAgentSessionId: options?.cursorAgentSessionId,
 		...simpleProviderOptions,
 	};
 
@@ -2360,7 +2368,19 @@ function mapOptionsForApi<TApi extends Api>(
 				...base,
 				execHandlers,
 				onToolResult,
-				wireModelId: resolveWireModelId(cursorModel, effort),
+				toolChoice: options?.toolChoice,
+				cursorToolPassthrough: options?.cursorToolPassthrough,
+				cursorExcludeTools: options?.cursorExcludeTools,
+				cursorLocalCliMode: options?.cursorLocalCliMode,
+				cursorDevExperimentOverrides: options?.cursorDevExperimentOverrides,
+				cursorClientSupportsInlineImages: options?.cursorClientSupportsInlineImages,
+				cursorClientSupportsRoutedModelUpdate: options?.cursorClientSupportsRoutedModelUpdate,
+				cursorClientSupportsPromptContextUsageRpc: options?.cursorClientSupportsPromptContextUsageRpc,
+				cursorRunId: options?.cursorRunId,
+				cursorAgentSessionId: options?.cursorAgentSessionId,
+				// Auto mode sends the "default" wire id; otherwise the provider
+				// resolves the wire id from the model's own requestModelId.
+				wireModelId: options?.cursorAutoMode ? "default" : undefined,
 			});
 		}
 

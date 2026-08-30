@@ -72,6 +72,7 @@ import {
 	type ListMcpResourcesExecResult,
 	ListMcpResourcesExecResult_McpResourceSchema,
 	ListMcpResourcesExecResultSchema,
+	ListMcpResourcesRejectedSchema,
 	ListMcpResourcesSuccessSchema,
 	type LsDirectoryTreeNode,
 	type LsDirectoryTreeNode_File,
@@ -102,6 +103,7 @@ import {
 	type ReadMcpResourceExecResult,
 	ReadMcpResourceExecResultSchema,
 	ReadMcpResourceNotFoundSchema,
+	ReadMcpResourceRejectedSchema,
 	ReadMcpResourceSuccessSchema,
 	ReadRejectedSchema,
 	ReadResultSchema,
@@ -192,6 +194,7 @@ import type {
 	ThinkingContent,
 	Tool,
 	ToolCall,
+	ToolChoice,
 	ToolResultMessage,
 } from "../types";
 import { normalizeSystemPrompts, normalizeToolCallId } from "../utils";
@@ -210,6 +213,7 @@ import { AssistantMessageEventStream } from "../utils/event-stream";
 import { connectProxiedSocket, getProxyForUrl } from "../utils/proxy";
 import { createRequestDebugSession, isRequestDebugEnabled, type RequestDebugResponseLog } from "../utils/request-debug";
 import { toolWireSchema } from "../utils/schema/wire";
+import { getNamedToolChoiceName } from "../utils/tool-choice";
 import { formatConnectEndStreamError } from "./connect-error-detail";
 import {
 	buildMcpStateResult,
@@ -244,7 +248,17 @@ import {
 import { handleInteractionQuery } from "./cursor/interaction-query";
 
 export const CURSOR_API_URL = "https://api2.cursor.sh";
-export const CURSOR_CLIENT_VERSION = "cli-2026.07.23-e383d2b";
+export const CURSOR_CLIENT_VERSION = "cli-2026.08.11-e8db854";
+
+/**
+ * Resolves the Cursor client version at runtime. An explicit
+ * `CURSOR_CLIENT_VERSION` env var overrides the compile-time default so users
+ * can bump the version when Cursor version-gates old clients without waiting
+ * for a new omp release.
+ */
+function resolveCursorClientVersion(): string {
+	return $env.CURSOR_CLIENT_VERSION || CURSOR_CLIENT_VERSION;
+}
 
 /**
  * HTTP/1 connection-specific headers that HTTP/2 forbids. Node's `http2.request()`
@@ -273,6 +287,7 @@ const CURSOR_RESERVED_HEADERS = new Set([
 	"x-ghost-mode",
 	"x-cursor-client-version",
 	"x-cursor-client-type",
+	"x-cursor-agent-allowed-tools",
 	"x-request-id",
 	// Transport-owned even though this request never sets it: node's http2 client
 	// suppresses the `:authority` it derives from the URL when a plain `host`
@@ -283,6 +298,22 @@ const CURSOR_RESERVED_HEADERS = new Set([
 	// tool responses), so no caller-supplied length can describe it and an HTTP/2
 	// peer resets the stream once the body diverges.
 	"content-length",
+]);
+
+/**
+ * Native tools Cursor resolves entirely on the interaction stream (no deferrable
+ * exec frame). Passthrough must not advertise them — Cursor would finish the
+ * work server-side while an OpenAI-shaped client still receives a ToolCall to run.
+ */
+const CURSOR_PASSTHROUGH_SERVER_ONLY_TOOLS: ReadonlySet<string> = new Set([
+	"connect_scm",
+	// Native todo family — Cursor resolves these server-side with no deferrable
+	// exec frame (same class as connect_scm). Advertising `todo` lets Cursor
+	// mutate todos remotely while the gateway also surfaces a ToolCall for the
+	// OpenAI client to run again.
+	"todo",
+	"update_todos",
+	"read_todos",
 ]);
 
 /**
@@ -344,6 +375,35 @@ export interface CursorOptions extends StreamOptions {
 	onToolResult?: CursorToolResultHandler;
 	/** Wire model id selected after thinking-effort routing (`resolveWireModelId`). */
 	wireModelId?: string;
+	/**
+	 * When true, tool calls from Cursor's backend are surfaced as `ToolCall`
+	 * blocks in the output and the stream ends with `stopReason: "toolUse"`
+	 * after the first tool call batch. No exec handler responses are sent back
+	 * to Cursor; the caller executes tools and replays results as
+	 * `role: "tool"` messages on the next request.
+	 */
+	cursorToolPassthrough?: boolean;
+	/**
+	 * Restricts `x-cursor-agent-allowed-tools` under tool passthrough
+	 * (`"none"` → `__none__`, named force → that name alone).
+	 */
+	toolChoice?: ToolChoice;
+	/** Comma-separated tool names to exclude (`x-cursor-agent-exclude-tools`). */
+	cursorExcludeTools?: string;
+	/** Signal local CLI mode (`local-cli-mode: true`). */
+	cursorLocalCliMode?: boolean;
+	/** Statsig experiment overrides (`x-dev-experiment-overrides`). */
+	cursorDevExperimentOverrides?: string;
+	/** Populates `AgentRunRequest.client_supports_inline_images`. */
+	cursorClientSupportsInlineImages?: boolean;
+	/** Populates `AgentRunRequest.client_supports_routed_model_update`. */
+	cursorClientSupportsRoutedModelUpdate?: boolean;
+	/** Populates `AgentRunRequest.client_supports_prompt_context_usage_rpc`. */
+	cursorClientSupportsPromptContextUsageRpc?: boolean;
+	/** Populates `AgentRunRequest.run_id`. */
+	cursorRunId?: string;
+	/** Populates `AgentRunRequest.agent_session_id`. */
+	cursorAgentSessionId?: string;
 }
 
 type CursorWireMode = "normalized" | "discovered";
@@ -704,6 +764,16 @@ function streamCursorWithWireMode(
 			conversationStateCache.set(conversationId, conversationState);
 			const requestContextTools = buildMcpToolDefinitions(context.tools);
 			const requestContextRules = buildCursorRequestContextRules(context.systemPrompt);
+			// Auto mode may request wire id "default" while output.model stays the
+			// selected catalog id (or "auto"). Track the request intent so routed
+			// model extraction is not gated on output.model === "auto"/"default".
+			const requestedWireModelId = model.requestModelId ?? model.id;
+			const autoModeActive =
+				options?.wireModelId === "default" ||
+				requestedWireModelId === "auto" ||
+				requestedWireModelId === "default" ||
+				model.id === "auto" ||
+				model.id === "default";
 
 			const baseUrl = model.baseUrl || CURSOR_API_URL;
 			const requestPath = "/agent.v1.AgentService/Run";
@@ -721,7 +791,7 @@ function streamCursorWithWireMode(
 			// HTTP/2 allows it only as `trailers`, which is exactly what the fixed
 			// set below re-applies over anything a caller sent.
 			const callerHeaders = sanitizeCursorCallerHeaders(options?.headers);
-			const requestHeaders = {
+			const requestHeaders: Record<string, string> = {
 				...callerHeaders,
 				":method": "POST",
 				":path": requestPath,
@@ -730,10 +800,46 @@ function streamCursorWithWireMode(
 				te: "trailers",
 				authorization: `Bearer ${apiKey}`,
 				"x-ghost-mode": "true",
-				"x-cursor-client-version": CURSOR_CLIENT_VERSION,
+				"x-cursor-client-version": resolveCursorClientVersion(),
 				"x-cursor-client-type": "cli",
 				"x-request-id": crypto.randomUUID(),
 			};
+			// Typed Cursor control options (also set as headers by the auth-gateway)
+			// win over any same-name caller header so streamSimple/pi-native paths
+			// that never went through the gateway still populate the wire.
+			if (options?.cursorExcludeTools !== undefined) {
+				requestHeaders["x-cursor-agent-exclude-tools"] = options.cursorExcludeTools;
+			}
+			if (options?.cursorLocalCliMode) {
+				requestHeaders["local-cli-mode"] = "true";
+			}
+			if (options?.cursorDevExperimentOverrides !== undefined) {
+				requestHeaders["x-dev-experiment-overrides"] = options.cursorDevExperimentOverrides;
+			}
+			// In passthrough mode, restrict the model's tool view to exactly the
+			// caller-declared tools (including native names like bash/read/write).
+			// Always send the header: omitting it leaves Cursor's unrestricted native
+			// set enabled (including when tools is empty / text-only passthrough).
+			// toolChoice "none" disables tools; a named forced choice advertises that
+			// name alone (even when absent from context.tools — Cursor decides);
+			// "required"/unrestricted keep the full declared list.
+			if (options?.cursorToolPassthrough) {
+				const forcedName = getNamedToolChoiceName(options.toolChoice);
+				// Interaction-only tools (e.g. connect_scm) are resolved entirely
+				// server-side with no deferrable exec frame — advertising them lets
+				// Cursor finish the work while an OpenAI client would still try to
+				// re-run the surfaced call. Exclude them from the allowlist.
+				const declared = (context.tools ?? [])
+					.map(tool => tool.name)
+					.filter(name => name.length > 0 && !CURSOR_PASSTHROUGH_SERVER_ONLY_TOOLS.has(name));
+				const allowedTools =
+					options.toolChoice === "none"
+						? ""
+						: forcedName && !CURSOR_PASSTHROUGH_SERVER_ONLY_TOOLS.has(forcedName)
+							? forcedName
+							: declared.join(",");
+				requestHeaders["x-cursor-agent-allowed-tools"] = allowedTools || "__none__";
+			}
 			const debugSession = isRequestDebugEnabled()
 				? await createRequestDebugSession({
 						protocol: "http2",
@@ -868,11 +974,22 @@ function streamCursorWithWireMode(
 							requestContextTools,
 							requestContextRules,
 							onConversationCheckpoint,
+							options?.cursorToolPassthrough,
+							autoModeActive,
 						).catch(error => {
 							log("error", "handleServerMessage", { error: String(error) });
 						});
 						inFlightDispatches.add(dispatch);
-						void dispatch.finally(() => inFlightDispatches.delete(dispatch));
+						void dispatch.finally(() => {
+							inFlightDispatches.delete(dispatch);
+							// Passthrough sets stopReason only after the async exec dispatch
+							// finishes; check here so we don't close the stream before the
+							// ToolCall block exists / stopReason is assigned.
+							if (output.stopReason === "toolUse") {
+								sawTurnEnded = true;
+								h2Request?.close();
+							}
+						});
 
 						// Application completion is not protocol success; wait for a clean HTTP/2 end.
 						if (isTurnEnded) {
@@ -1154,13 +1271,15 @@ export async function handleServerMessage(
 	requestContextTools: McpToolDefinition[],
 	requestContextRules: CursorRule[] = [],
 	onConversationCheckpoint?: (checkpoint: ConversationStateStructure) => void,
+	cursorToolPassthrough?: boolean,
+	autoModeActive?: boolean,
 ): Promise<void> {
 	const msgCase = msg.message.case;
 
 	log("serverMessage", msgCase, msg.message.value);
 
 	if (msgCase === "interactionUpdate") {
-		processInteractionUpdate(msg.message.value, output, stream, state, usageState);
+		processInteractionUpdate(msg.message.value, output, stream, state, usageState, cursorToolPassthrough);
 	} else if (msgCase === "kvServerMessage") {
 		handleKvServerMessage(msg.message.value as KvServerMessage, blobStore, h2Request);
 	} else if (msgCase === "execServerMessage") {
@@ -1168,7 +1287,7 @@ export async function handleServerMessage(
 		// AssistantMessageEvent flows until the handler finishes. Mark the wait
 		// as local work so the lazy stream idle watchdog attributes the silence
 		// to the tool run instead of aborting a healthy stream (issue #4593).
-		await stream.trackLocalWork(
+		const deferredToCaller = await stream.trackLocalWork(
 			handleExecServerMessage(
 				msg.message.value as ExecServerMessage,
 				h2Request,
@@ -1179,8 +1298,15 @@ export async function handleServerMessage(
 				output,
 				stream,
 				state,
+				cursorToolPassthrough,
 			),
 		);
+		// End passthrough only when this exec actually synthesized/deferred a
+		// caller-facing tool — not when an approval-only mcpArgs probe ran while
+		// a prior toolCallStarted announcement already sits in output.content.
+		if (cursorToolPassthrough && deferredToCaller) {
+			output.stopReason = "toolUse";
+		}
 	} else if (msgCase === "interactionQuery") {
 		// Cursor asks the client to approve native web search / Exa fetch / etc.
 		// before it will continue the turn. Dropping the frame leaves the server
@@ -1190,7 +1316,14 @@ export async function handleServerMessage(
 		// permission prompt).
 		handleInteractionQuery(msg.message.value, h2Request);
 	} else if (msgCase === "conversationCheckpointUpdate") {
-		handleConversationCheckpointUpdate(msg.message.value, output, usageState, onConversationCheckpoint);
+		handleConversationCheckpointUpdate(
+			msg.message.value,
+			output,
+			usageState,
+			onConversationCheckpoint,
+			autoModeActive,
+			stream,
+		);
 	}
 }
 
@@ -1334,7 +1467,17 @@ async function handleShellStreamArgs(
 	h2Request: http2.ClientHttp2Stream,
 	execHandlers: CursorExecHandlers | undefined,
 	onToolResult: CursorToolResultHandler | undefined,
+	cursorToolPassthrough?: boolean,
 ): Promise<void> {
+	if (cursorToolPassthrough) {
+		const rejected = buildShellRejectedResult(
+			(args as { command?: string }).command ?? "",
+			args.workingDirectory || process.cwd(),
+			"Tool deferred to caller (tool passthrough)",
+		);
+		sendExecClientMessage(h2Request, execMsg, "shellResult", rejected);
+		return;
+	}
 	const normalizedWorkingDirectory = args.workingDirectory || process.cwd();
 	const normalizedArgs: ShellArgs = { ...args, workingDirectory: normalizedWorkingDirectory };
 	const startTs = performance.now();
@@ -1597,9 +1740,32 @@ async function handleExecServerMessage(
 	output: AssistantMessage,
 	stream: AssistantMessageEventStream,
 	state: BlockState,
-): Promise<void> {
+	cursorToolPassthrough?: boolean,
+): Promise<boolean> {
 	const execCase = execMsg.message.case;
 	log("exec", "dispatch", { execCase, execId: execMsg.execId, hasHandlers: !!execHandlers });
+	/** Set when this frame synthesized a ToolCall for the external passthrough caller. */
+	let deferredToCaller = false;
+	const markDeferredToCaller = (): void => {
+		if (cursorToolPassthrough) deferredToCaller = true;
+	};
+	// In passthrough mode, synthesize the ToolCall (call sites below) then reject
+	// the exec back to Cursor without running local handlers — the caller executes
+	// the surfaced tool and replays the result on the next request.
+	const resolveExec = cursorToolPassthrough
+		? async <TArgs, TResult>(
+				_args: TArgs,
+				_handler: ((args: TArgs) => Promise<CursorExecHandlerResult<TResult>>) | undefined,
+				_onToolResult: CursorToolResultHandler | undefined,
+				_buildFromToolResult: (toolResult: ToolResultMessage) => TResult,
+				buildRejected: (reason: string) => TResult,
+				_buildError: (error: string) => TResult,
+				_pairing: CursorExecPairing | null,
+			): Promise<{ execResult: TResult; toolResult?: ToolResultMessage }> => ({
+				execResult: buildRejected("Tool deferred to caller (tool passthrough)"),
+				toolResult: undefined,
+			})
+		: resolveExecHandler;
 	if (execCase === "requestContextArgs") {
 		const requestContext = create(RequestContextSchema, {
 			rules: requestContextRules,
@@ -1621,7 +1787,7 @@ async function handleExecServerMessage(
 
 		sendExecClientMessage(h2Request, execMsg, "requestContextResult", requestContextResult);
 		log("execClient", "requestContextResult");
-		return;
+		return false;
 	}
 
 	if (!execCase) {
@@ -1633,7 +1799,7 @@ async function handleExecServerMessage(
 		// names a frame it recognises but cannot serve.
 		log("warn", "unknownExecVariant", { id: execMsg.id, execId: execMsg.execId });
 		sendExecClientThrow(h2Request, execMsg, "Unknown exec message variant", "unknown_exec_variant");
-		return;
+		return false;
 	}
 
 	switch (execCase) {
@@ -1659,8 +1825,9 @@ async function handleExecServerMessage(
 				synthesizeCursorExecToolCall(output, stream, state, args.toolCallId, "read", {
 					path: piReadDisplayPath(args.path, args.offset, args.limit),
 				});
+				markDeferredToCaller();
 			}
-			const { execResult } = await resolveExecHandler(
+			const { execResult } = await resolveExec(
 				handlerArgs,
 				execHandlers?.read?.bind(execHandlers),
 				editOwned ? undefined : onToolResult,
@@ -1675,7 +1842,7 @@ async function handleExecServerMessage(
 				editOwned ? null : { toolCallId: args.toolCallId, toolName: "read" },
 			);
 			sendExecClientMessage(h2Request, execMsg, "readResult", execResult);
-			return;
+			return deferredToCaller;
 		}
 		case "lsArgs": {
 			const args = execMsg.message.value;
@@ -1684,7 +1851,8 @@ async function handleExecServerMessage(
 			// `CursorExecHandlers.ls` in `pi-coding-agent/src/cursor.ts`); mirror
 			// that here so the synthesized block matches the toolResult's `toolName`.
 			synthesizeCursorExecToolCall(output, stream, state, args.toolCallId, "read", { path: args.path });
-			const { execResult } = await resolveExecHandler(
+			markDeferredToCaller();
+			const { execResult } = await resolveExec(
 				args,
 				execHandlers?.ls?.bind(execHandlers),
 				onToolResult,
@@ -1694,7 +1862,7 @@ async function handleExecServerMessage(
 				{ toolCallId: args.toolCallId, toolName: "read" },
 			);
 			sendExecClientMessage(h2Request, execMsg, "lsResult", execResult);
-			return;
+			return deferredToCaller;
 		}
 		case "grepArgs": {
 			const args = execMsg.message.value;
@@ -1705,10 +1873,12 @@ async function handleExecServerMessage(
 			// regex or switches to `ls`/`read`, instead of the local grep tool
 			// surfacing a bare "Pattern must not be empty" (issue #4574) after the
 			// synthesized block has already been persisted with a placeholder pattern.
-			const emptyPatternError = emptyGrepPatternRejection(args.pattern, args.glob);
+			// Passthrough must still surface the declared call to the external caller
+			// before local-executor validation — they decide how to handle it.
+			const emptyPatternError = cursorToolPassthrough ? null : emptyGrepPatternRejection(args.pattern, args.glob);
 			if (emptyPatternError !== null) {
 				sendExecClientMessage(h2Request, execMsg, "grepResult", buildGrepErrorResult(emptyPatternError));
-				return;
+				return deferredToCaller;
 			}
 			// Mirror the coding-agent bridge's arg mapping so live UI (from
 			// `tool_execution_start`) and rebuilt transcript (from this block)
@@ -1720,7 +1890,8 @@ async function handleExecServerMessage(
 				case: args.caseInsensitive === true ? false : undefined,
 				skip: piGrepSkip(args.offset),
 			});
-			const { execResult } = await resolveExecHandler(
+			markDeferredToCaller();
+			const { execResult } = await resolveExec(
 				args,
 				execHandlers?.grep?.bind(execHandlers),
 				onToolResult,
@@ -1730,7 +1901,7 @@ async function handleExecServerMessage(
 				{ toolCallId: args.toolCallId, toolName: "grep" },
 			);
 			sendExecClientMessage(h2Request, execMsg, "grepResult", execResult);
-			return;
+			return deferredToCaller;
 		}
 		case "writeArgs": {
 			const args = execMsg.message.value;
@@ -1743,6 +1914,7 @@ async function handleExecServerMessage(
 					path: args.path,
 					content,
 				});
+				markDeferredToCaller();
 			}
 			const write = execHandlers?.write?.bind(execHandlers);
 			const writeHandler = write
@@ -1751,7 +1923,7 @@ async function handleExecServerMessage(
 						return editOwned ? remapExecHandlerToolName(result, "edit") : result;
 					}
 				: undefined;
-			const { execResult } = await resolveExecHandler(
+			const { execResult } = await resolveExec(
 				args,
 				writeHandler,
 				onToolResult,
@@ -1771,13 +1943,14 @@ async function handleExecServerMessage(
 			);
 			if (editOwned) markEditToolCallPaired(state, args.toolCallId);
 			sendExecClientMessage(h2Request, execMsg, "writeResult", execResult);
-			return;
+			return deferredToCaller;
 		}
 		case "deleteArgs": {
 			const args = execMsg.message.value;
 			if (!args.toolCallId) args.toolCallId = crypto.randomUUID();
 			synthesizeCursorExecToolCall(output, stream, state, args.toolCallId, "delete", { path: args.path });
-			const { execResult } = await resolveExecHandler(
+			markDeferredToCaller();
+			const { execResult } = await resolveExec(
 				args,
 				execHandlers?.delete?.bind(execHandlers),
 				onToolResult,
@@ -1787,7 +1960,7 @@ async function handleExecServerMessage(
 				{ toolCallId: args.toolCallId, toolName: "delete" },
 			);
 			sendExecClientMessage(h2Request, execMsg, "deleteResult", execResult);
-			return;
+			return deferredToCaller;
 		}
 		case "shellArgs": {
 			const args = execMsg.message.value;
@@ -1801,7 +1974,8 @@ async function handleExecServerMessage(
 				cwd: args.workingDirectory || undefined,
 				timeout: shellTimeout,
 			});
-			const { execResult } = await resolveExecHandler(
+			markDeferredToCaller();
+			const { execResult } = await resolveExec(
 				args,
 				execHandlers?.shell?.bind(execHandlers),
 				onToolResult,
@@ -1812,7 +1986,7 @@ async function handleExecServerMessage(
 			);
 			const sanitizedExecResult = sanitizeShellExecResult(execResult);
 			sendExecClientMessage(h2Request, execMsg, "shellResult", sanitizedExecResult);
-			return;
+			return deferredToCaller;
 		}
 		case "shellStreamArgs": {
 			const args = execMsg.message.value;
@@ -1823,11 +1997,47 @@ async function handleExecServerMessage(
 				cwd: args.workingDirectory || undefined,
 				timeout: shellStreamTimeout,
 			});
-			await handleShellStreamArgs(args, execMsg, h2Request, execHandlers, onToolResult);
-			return;
+			markDeferredToCaller();
+			await handleShellStreamArgs(args, execMsg, h2Request, execHandlers, onToolResult, cursorToolPassthrough);
+			return deferredToCaller;
 		}
 		case "backgroundShellSpawnArgs": {
 			const args = execMsg.message.value;
+			if (cursorToolPassthrough) {
+				// Same bash surface as shellArgs / shellStreamArgs — synthesize for the
+				// external caller and reject the exec so Cursor does not wait on us.
+				if (!args.toolCallId) args.toolCallId = crypto.randomUUID();
+				synthesizeCursorExecToolCall(output, stream, state, args.toolCallId, "bash", {
+					command: args.command,
+					cwd: args.workingDirectory || undefined,
+				});
+				markDeferredToCaller();
+				await pairSynthesizedExecResult(
+					state,
+					onToolResult,
+					args.toolCallId,
+					"bash",
+					"Tool deferred to caller (tool passthrough)",
+					true,
+				);
+				sendExecClientMessage(
+					h2Request,
+					execMsg,
+					"backgroundShellSpawnResult",
+					create(BackgroundShellSpawnResultSchema, {
+						result: {
+							case: "rejected",
+							value: create(ShellRejectedSchema, {
+								command: args.command,
+								workingDirectory: args.workingDirectory,
+								reason: "Tool deferred to caller (tool passthrough)",
+								isReadonly: false,
+							}),
+						},
+					}),
+				);
+				return deferredToCaller;
+			}
 			const execResult = create(BackgroundShellSpawnResultSchema, {
 				result: {
 					case: "rejected",
@@ -1840,9 +2050,41 @@ async function handleExecServerMessage(
 				},
 			});
 			sendExecClientMessage(h2Request, execMsg, "backgroundShellSpawnResult", execResult);
-			return;
+			return deferredToCaller;
 		}
 		case "writeShellStdinArgs": {
+			const args = execMsg.message.value;
+			if (cursorToolPassthrough) {
+				// No dedicated OpenAI tool for stdin-to-background-shell; surface as
+				// bash with the written chars so the caller still gets toolUse.
+				const toolCallId = crypto.randomUUID();
+				synthesizeCursorExecToolCall(output, stream, state, toolCallId, "bash", {
+					command: `# writeShellStdin shell_id=${args.shellId}\n${args.chars}`,
+				});
+				markDeferredToCaller();
+				await pairSynthesizedExecResult(
+					state,
+					onToolResult,
+					toolCallId,
+					"bash",
+					"Tool deferred to caller (tool passthrough)",
+					true,
+				);
+				sendExecClientMessage(
+					h2Request,
+					execMsg,
+					"writeShellStdinResult",
+					create(WriteShellStdinResultSchema, {
+						result: {
+							case: "error",
+							value: create(WriteShellStdinErrorSchema, {
+								error: "Tool deferred to caller (tool passthrough)",
+							}),
+						},
+					}),
+				);
+				return deferredToCaller;
+			}
 			const execResult = create(WriteShellStdinResultSchema, {
 				result: {
 					case: "error",
@@ -1852,10 +2094,40 @@ async function handleExecServerMessage(
 				},
 			});
 			sendExecClientMessage(h2Request, execMsg, "writeShellStdinResult", execResult);
-			return;
+			return deferredToCaller;
 		}
 		case "fetchArgs": {
 			const args = execMsg.message.value;
+			if (cursorToolPassthrough) {
+				// FetchResult has no rejected variant — synthesize + error-defer so the
+				// caller still receives a ToolCall and stopReason becomes toolUse.
+				const toolCallId = crypto.randomUUID();
+				synthesizeCursorExecToolCall(output, stream, state, toolCallId, "web_fetch", { url: args.url });
+				markDeferredToCaller();
+				await pairSynthesizedExecResult(
+					state,
+					onToolResult,
+					toolCallId,
+					"web_fetch",
+					"Tool deferred to caller (tool passthrough)",
+					true,
+				);
+				sendExecClientMessage(
+					h2Request,
+					execMsg,
+					"fetchResult",
+					create(FetchResultSchema, {
+						result: {
+							case: "error",
+							value: create(FetchErrorSchema, {
+								url: args.url,
+								error: "Tool deferred to caller (tool passthrough)",
+							}),
+						},
+					}),
+				);
+				return deferredToCaller;
+			}
 			const execResult = create(FetchResultSchema, {
 				result: {
 					case: "error",
@@ -1866,7 +2138,7 @@ async function handleExecServerMessage(
 				},
 			});
 			sendExecClientMessage(h2Request, execMsg, "fetchResult", execResult);
-			return;
+			return deferredToCaller;
 		}
 		case "diagnosticsArgs": {
 			const args = execMsg.message.value;
@@ -1877,7 +2149,8 @@ async function handleExecServerMessage(
 				action: "diagnostics",
 				file: args.path,
 			});
-			const { execResult } = await resolveExecHandler(
+			markDeferredToCaller();
+			const { execResult } = await resolveExec(
 				args,
 				execHandlers?.diagnostics?.bind(execHandlers),
 				onToolResult,
@@ -1887,7 +2160,7 @@ async function handleExecServerMessage(
 				{ toolCallId: args.toolCallId, toolName: "lsp" },
 			);
 			sendExecClientMessage(h2Request, execMsg, "diagnosticsResult", execResult);
-			return;
+			return deferredToCaller;
 		}
 		case "mcpArgs": {
 			const args = execMsg.message.value;
@@ -1904,7 +2177,16 @@ async function handleExecServerMessage(
 			// there is nothing to decide with, so it is refused. Either way no
 			// block is synthesized — nothing ran.
 			if (mcpCall.approvalOnly) {
-				const approved = (await execHandlers?.mcpApprovalPreflight?.(mcpCall)) === true;
+				let approved = (await execHandlers?.mcpApprovalPreflight?.(mcpCall)) === true;
+				// Gateway passthrough has no exec handlers: approve probes for tools the
+				// caller already declared so Cursor proceeds to the real invocation and
+				// the external caller can authorize/execute it.
+				if (!approved && cursorToolPassthrough) {
+					const declaredName = mcpCall.toolName || mcpCall.name;
+					approved = requestContextTools.some(
+						tool => tool.name === declaredName || tool.toolName === declaredName,
+					);
+				}
 				sendExecClientMessage(
 					h2Request,
 					execMsg,
@@ -1920,14 +2202,28 @@ async function handleExecServerMessage(
 								},
 					}),
 				);
-				return;
+				// Probe only — do not end passthrough; the real mcpArgs follows.
+				return false;
 			}
-			if (execHandlers?.mcp) {
+			// Synthesize whenever a local MCP handler exists OR passthrough is on.
+			// Passthrough (e.g. auth-gateway) has no execHandlers: mcpArgs can still
+			// arrive before toolCallStarted, and without a ToolCall the caller never
+			// receives the custom tool invocation. Without either path, leave the
+			// streamed announcement unpaired so agent-loop executes it locally.
+			const synthesizeMcp = !!execHandlers?.mcp || !!cursorToolPassthrough;
+			if (synthesizeMcp) {
 				const existingBlock = output.content.find(
-					block => block.type === "toolCall" && block.id === mcpCall.toolCallId,
+					(block): block is ToolCallState => block.type === "toolCall" && block.id === mcpCall.toolCallId,
 				);
 				if (existingBlock) {
+					// toolCallStarted may announce the call before mcpArgs; merge the
+					// authoritative exec args into that block so deferred callers see them.
+					existingBlock.arguments = omitUndefinedArgs(mcpCall.args ?? {});
+					if (mcpCall.toolName || mcpCall.name) {
+						existingBlock.name = mcpCall.toolName || mcpCall.name;
+					}
 					markCursorExecResolved(existingBlock);
+					markDeferredToCaller();
 				} else {
 					synthesizeCursorExecToolCall(
 						output,
@@ -1937,26 +2233,56 @@ async function handleExecServerMessage(
 						mcpCall.toolName || mcpCall.name,
 						mcpCall.args,
 					);
+					markDeferredToCaller();
 					state.resolvedMcpToolCallIds.add(mcpCall.toolCallId);
 				}
 			}
-			const { execResult } = await resolveExecHandler(
+			const { execResult } = await resolveExec(
 				mcpCall,
 				execHandlers?.mcp?.bind(execHandlers),
 				onToolResult,
 				toolResult => buildMcpResultFromToolResult(mcpCall, toolResult),
 				_reason => buildMcpToolNotFoundResult(mcpCall),
 				error => buildMcpErrorResult(error),
-				execHandlers?.mcp ? { toolCallId: mcpCall.toolCallId, toolName: mcpCall.toolName } : null,
+				synthesizeMcp ? { toolCallId: mcpCall.toolCallId, toolName: mcpCall.toolName } : null,
 			);
 			sendExecClientMessage(h2Request, execMsg, "mcpResult", execResult);
-			return;
+			return deferredToCaller;
 		}
 		case "listMcpResourcesExecArgs": {
 			// A host holding live MCP connections answers from them; without a
 			// handler the honest answer is an explicit empty success. An
 			// unset-oneof result would read as "the call produced nothing".
 			const args = execMsg.message.value;
+			if (cursorToolPassthrough) {
+				const toolCallId = crypto.randomUUID();
+				synthesizeCursorExecToolCall(output, stream, state, toolCallId, "list_mcp_resources", {
+					server: args.server,
+				});
+				markDeferredToCaller();
+				await pairSynthesizedExecResult(
+					state,
+					onToolResult,
+					toolCallId,
+					"list_mcp_resources",
+					"Tool deferred to caller (tool passthrough)",
+					true,
+				);
+				sendExecClientMessage(
+					h2Request,
+					execMsg,
+					"listMcpResourcesExecResult",
+					create(ListMcpResourcesExecResultSchema, {
+						result: {
+							case: "rejected",
+							value: create(ListMcpResourcesRejectedSchema, {
+								reason: "Tool deferred to caller (tool passthrough)",
+							}),
+						},
+					}),
+				);
+				return deferredToCaller;
+			}
 			let execResult: ListMcpResourcesExecResult;
 			// The model consumes this catalog, so it needs a block and a paired
 			// result or the listing is invisible in the UI and gone from every
@@ -1967,6 +2293,7 @@ async function handleExecServerMessage(
 				synthesizeCursorExecToolCall(output, stream, state, toolCallId, "list_mcp_resources", {
 					server: args.server,
 				});
+				markDeferredToCaller();
 			}
 			try {
 				const resources = (await execHandlers?.listMcpResources?.({ server: args.server })) ?? [];
@@ -2016,10 +2343,42 @@ async function handleExecServerMessage(
 				);
 			}
 			sendExecClientMessage(h2Request, execMsg, "listMcpResourcesExecResult", execResult);
-			return;
+			return deferredToCaller;
 		}
 		case "readMcpResourceExecArgs": {
 			const args = execMsg.message.value;
+			if (cursorToolPassthrough) {
+				const toolCallId = crypto.randomUUID();
+				synthesizeCursorExecToolCall(output, stream, state, toolCallId, "read_mcp_resource", {
+					server: args.server,
+					uri: args.uri,
+					download_path: args.downloadPath,
+				});
+				markDeferredToCaller();
+				await pairSynthesizedExecResult(
+					state,
+					onToolResult,
+					toolCallId,
+					"read_mcp_resource",
+					"Tool deferred to caller (tool passthrough)",
+					true,
+				);
+				sendExecClientMessage(
+					h2Request,
+					execMsg,
+					"readMcpResourceExecResult",
+					create(ReadMcpResourceExecResultSchema, {
+						result: {
+							case: "rejected",
+							value: create(ReadMcpResourceRejectedSchema, {
+								uri: args.uri,
+								reason: "Tool deferred to caller (tool passthrough)",
+							}),
+						},
+					}),
+				);
+				return deferredToCaller;
+			}
 			let execResult: ReadMcpResourceExecResult;
 			// The read runs locally, and in download mode it writes a workspace
 			// file — an operation with no transcript block is invisible in the UI
@@ -2033,6 +2392,7 @@ async function handleExecServerMessage(
 					uri: args.uri,
 					download_path: args.downloadPath,
 				});
+				markDeferredToCaller();
 			}
 			try {
 				// `null` is the handler's "no such server or uri", which is exactly
@@ -2117,21 +2477,21 @@ async function handleExecServerMessage(
 				);
 			}
 			sendExecClientMessage(h2Request, execMsg, "readMcpResourceExecResult", execResult);
-			return;
+			return deferredToCaller;
 		}
 		case "recordScreenArgs": {
 			const execResult = create(RecordScreenResultSchema, {
 				result: { case: "failure", value: create(RecordScreenFailureSchema, { error: NOT_IMPLEMENTED }) },
 			});
 			sendExecClientMessage(h2Request, execMsg, "recordScreenResult", execResult);
-			return;
+			return deferredToCaller;
 		}
 		case "computerUseArgs": {
 			const execResult = create(ComputerUseResultSchema, {
 				result: { case: "error", value: create(ComputerUseErrorSchema, { error: NOT_IMPLEMENTED }) },
 			});
 			sendExecClientMessage(h2Request, execMsg, "computerUseResult", execResult);
-			return;
+			return deferredToCaller;
 		}
 		case "piReadArgs": {
 			const args = execMsg.message.value;
@@ -2141,7 +2501,8 @@ async function handleExecServerMessage(
 			synthesizeCursorExecToolCall(output, stream, state, toolCallId, "read", {
 				path: piReadDisplayPath(args.path, args.offset, args.limit),
 			});
-			const { execResult } = await resolveExecHandler(
+			markDeferredToCaller();
+			const { execResult } = await resolveExec(
 				{ args, toolCallId },
 				execHandlers?.piRead?.bind(execHandlers),
 				onToolResult,
@@ -2151,7 +2512,7 @@ async function handleExecServerMessage(
 				{ toolCallId, toolName: "read" },
 			);
 			sendExecClientMessage(h2Request, execMsg, "piReadResult", execResult);
-			return;
+			return deferredToCaller;
 		}
 		case "piBashArgs": {
 			const args = execMsg.message.value;
@@ -2160,7 +2521,8 @@ async function handleExecServerMessage(
 				command: args.command,
 				timeout: piTimeout(args.timeout),
 			});
-			const { execResult } = await resolveExecHandler(
+			markDeferredToCaller();
+			const { execResult } = await resolveExec(
 				{ args, toolCallId },
 				execHandlers?.piBash?.bind(execHandlers),
 				onToolResult,
@@ -2170,7 +2532,7 @@ async function handleExecServerMessage(
 				{ toolCallId, toolName: "bash" },
 			);
 			sendExecClientMessage(h2Request, execMsg, "piBashResult", execResult);
-			return;
+			return deferredToCaller;
 		}
 		case "piEditArgs": {
 			const args = execMsg.message.value;
@@ -2184,7 +2546,8 @@ async function handleExecServerMessage(
 				old_string: firstEdit?.oldText ?? "",
 				new_string: firstEdit?.newText ?? "",
 			});
-			const { execResult } = await resolveExecHandler(
+			markDeferredToCaller();
+			const { execResult } = await resolveExec(
 				{ args, toolCallId },
 				execHandlers?.piEdit?.bind(execHandlers),
 				onToolResult,
@@ -2194,7 +2557,7 @@ async function handleExecServerMessage(
 				{ toolCallId, toolName: "edit" },
 			);
 			sendExecClientMessage(h2Request, execMsg, "piEditResult", execResult);
-			return;
+			return deferredToCaller;
 		}
 		case "piWriteArgs": {
 			const args = execMsg.message.value;
@@ -2203,7 +2566,8 @@ async function handleExecServerMessage(
 				path: args.path,
 				content: args.content,
 			});
-			const { execResult } = await resolveExecHandler(
+			markDeferredToCaller();
+			const { execResult } = await resolveExec(
 				{ args, toolCallId },
 				execHandlers?.piWrite?.bind(execHandlers),
 				onToolResult,
@@ -2213,7 +2577,7 @@ async function handleExecServerMessage(
 				{ toolCallId, toolName: "write" },
 			);
 			sendExecClientMessage(h2Request, execMsg, "piWriteResult", execResult);
-			return;
+			return deferredToCaller;
 		}
 		case "piGrepArgs": {
 			const args = execMsg.message.value;
@@ -2230,7 +2594,8 @@ async function handleExecServerMessage(
 				context: args.context,
 				limit: piLimit(args.limit),
 			});
-			const { execResult } = await resolveExecHandler(
+			markDeferredToCaller();
+			const { execResult } = await resolveExec(
 				{ args, toolCallId },
 				execHandlers?.piGrep?.bind(execHandlers),
 				onToolResult,
@@ -2240,7 +2605,7 @@ async function handleExecServerMessage(
 				{ toolCallId, toolName: "grep" },
 			);
 			sendExecClientMessage(h2Request, execMsg, "piGrepResult", execResult);
-			return;
+			return deferredToCaller;
 		}
 		case "piFindArgs": {
 			const args = execMsg.message.value;
@@ -2249,7 +2614,8 @@ async function handleExecServerMessage(
 				path: piJoinPath(args.path, args.pattern),
 				limit: piLimit(args.limit),
 			});
-			const { execResult } = await resolveExecHandler(
+			markDeferredToCaller();
+			const { execResult } = await resolveExec(
 				{ args, toolCallId },
 				execHandlers?.piFind?.bind(execHandlers),
 				onToolResult,
@@ -2259,7 +2625,7 @@ async function handleExecServerMessage(
 				{ toolCallId, toolName: "glob" },
 			);
 			sendExecClientMessage(h2Request, execMsg, "piFindResult", execResult);
-			return;
+			return deferredToCaller;
 		}
 		case "piLsArgs": {
 			const args = execMsg.message.value;
@@ -2268,7 +2634,8 @@ async function handleExecServerMessage(
 			// directories, so the synthesized block must name `read` to match the
 			// bridge's own `toolResult`.
 			synthesizeCursorExecToolCall(output, stream, state, toolCallId, "read", { path: piLsPath(args.path) });
-			const { execResult } = await resolveExecHandler(
+			markDeferredToCaller();
+			const { execResult } = await resolveExec(
 				{ args, toolCallId },
 				execHandlers?.piLs?.bind(execHandlers),
 				onToolResult,
@@ -2278,7 +2645,7 @@ async function handleExecServerMessage(
 				{ toolCallId, toolName: "read" },
 			);
 			sendExecClientMessage(h2Request, execMsg, "piLsResult", execResult);
-			return;
+			return deferredToCaller;
 		}
 		case "miniSweAgentBashArgs": {
 			// Same `ShellArgs`/`ShellResult` pair as `shellArgs`, under its own frame
@@ -2291,7 +2658,8 @@ async function handleExecServerMessage(
 				cwd: args.workingDirectory || undefined,
 				timeout: args.timeout && args.timeout > 0 ? args.timeout : undefined,
 			});
-			const { execResult } = await resolveExecHandler(
+			markDeferredToCaller();
+			const { execResult } = await resolveExec(
 				normalizedArgs,
 				execHandlers?.shell?.bind(execHandlers),
 				onToolResult,
@@ -2301,7 +2669,7 @@ async function handleExecServerMessage(
 				{ toolCallId: args.toolCallId, toolName: "bash" },
 			);
 			sendExecClientMessage(h2Request, execMsg, "miniSweAgentBashResult", sanitizeShellExecResult(execResult));
-			return;
+			return deferredToCaller;
 		}
 		case "redactedReadArgs": {
 			// Same `ReadArgs`/`ReadResult` pair as `readArgs`, but the server expects
@@ -2309,13 +2677,35 @@ async function handleExecServerMessage(
 			// implemented here, and serving a plain read would hand back exactly the
 			// unredacted bytes the frame exists to withhold.
 			const args = execMsg.message.value;
+			if (cursorToolPassthrough) {
+				if (!args.toolCallId) args.toolCallId = crypto.randomUUID();
+				synthesizeCursorExecToolCall(output, stream, state, args.toolCallId, "read", {
+					path: piReadDisplayPath(args.path, args.offset, args.limit),
+				});
+				markDeferredToCaller();
+				await pairSynthesizedExecResult(
+					state,
+					onToolResult,
+					args.toolCallId,
+					"read",
+					"Tool deferred to caller (tool passthrough)",
+					true,
+				);
+				sendExecClientMessage(
+					h2Request,
+					execMsg,
+					"redactedReadResult",
+					buildReadErrorResult(args.path, "Tool deferred to caller (tool passthrough)"),
+				);
+				return deferredToCaller;
+			}
 			sendExecClientMessage(
 				h2Request,
 				execMsg,
 				"redactedReadResult",
 				buildReadErrorResult(args.path, "Secret redaction is not implemented by this client"),
 			);
-			return;
+			return deferredToCaller;
 		}
 		case "mcpStateExecArgs": {
 			const args = execMsg.message.value;
@@ -2325,7 +2715,7 @@ async function handleExecServerMessage(
 				"mcpStateExecResult",
 				buildMcpStateResult(requestContextTools, args.serverIdentifiers),
 			);
-			return;
+			return deferredToCaller;
 		}
 		case "executeHookArgs": {
 			const args = execMsg.message.value;
@@ -2337,10 +2727,10 @@ async function handleExecServerMessage(
 					`Unsupported hook request: ${args.request?.request.case ?? "unset"}`,
 					"unknown_hook_request",
 				);
-				return;
+				return deferredToCaller;
 			}
 			sendExecClientMessage(h2Request, execMsg, "executeHookResult", execResult);
-			return;
+			return deferredToCaller;
 		}
 		case "subagentArgs": {
 			const args = execMsg.message.value;
@@ -2352,7 +2742,7 @@ async function handleExecServerMessage(
 			});
 			log("exec", "subagentRejected", { subagentType: args.subagentType });
 			sendExecClientMessage(h2Request, execMsg, "subagentResult", execResult);
-			return;
+			return deferredToCaller;
 		}
 		case "subagentAwaitArgs": {
 			// No subagent was ever spawned, so every awaited id is genuinely unknown.
@@ -2364,7 +2754,7 @@ async function handleExecServerMessage(
 				},
 			});
 			sendExecClientMessage(h2Request, execMsg, "subagentAwaitResult", execResult);
-			return;
+			return deferredToCaller;
 		}
 		case "forceBackgroundShellArgs": {
 			// Backgrounding targets a running tool call by id. This client runs every
@@ -2373,14 +2763,14 @@ async function handleExecServerMessage(
 				status: ForceBackgroundShellStatus.NOT_FOUND,
 			});
 			sendExecClientMessage(h2Request, execMsg, "forceBackgroundShellResult", execResult);
-			return;
+			return deferredToCaller;
 		}
 		case "forceBackgroundSubagentArgs": {
 			const execResult = create(ForceBackgroundSubagentResultSchema, {
 				status: ForceBackgroundSubagentStatus.NOT_FOUND,
 			});
 			sendExecClientMessage(h2Request, execMsg, "forceBackgroundSubagentResult", execResult);
-			return;
+			return deferredToCaller;
 		}
 		case "smartModeClassifierArgs": {
 			// The classifier decides whether a risky action needs approval. Answering
@@ -2395,7 +2785,7 @@ async function handleExecServerMessage(
 				},
 			});
 			sendExecClientMessage(h2Request, execMsg, "smartModeClassifierResult", execResult);
-			return;
+			return deferredToCaller;
 		}
 		case "canvasDiagnosticsArgs": {
 			const args = execMsg.message.value;
@@ -2409,7 +2799,7 @@ async function handleExecServerMessage(
 				},
 			});
 			sendExecClientMessage(h2Request, execMsg, "canvasDiagnosticsResult", execResult);
-			return;
+			return deferredToCaller;
 		}
 		case "shellAllowlistPrecheckArgs": {
 			// The prechecks ask "is this pre-approved, so may it skip the approval
@@ -2422,7 +2812,7 @@ async function handleExecServerMessage(
 				"shellAllowlistPrecheckResult",
 				create(ShellAllowlistPrecheckResultSchema, { allowlisted: false }),
 			);
-			return;
+			return deferredToCaller;
 		}
 		case "mcpAllowlistPrecheckArgs": {
 			sendExecClientMessage(
@@ -2431,7 +2821,7 @@ async function handleExecServerMessage(
 				"mcpAllowlistPrecheckResult",
 				create(McpAllowlistPrecheckResultSchema, { allowlisted: false }),
 			);
-			return;
+			return deferredToCaller;
 		}
 		case "webFetchAllowlistPrecheckArgs": {
 			sendExecClientMessage(
@@ -2440,7 +2830,7 @@ async function handleExecServerMessage(
 				"webFetchAllowlistPrecheckResult",
 				create(WebFetchAllowlistPrecheckResultSchema, { allowlisted: false }),
 			);
-			return;
+			return deferredToCaller;
 		}
 		case "conversationSearchArgs": {
 			// Cursor conversation history lives server-side; this client keeps no
@@ -2459,12 +2849,13 @@ async function handleExecServerMessage(
 				query: args.query,
 				limit: args.limit,
 			});
+			markDeferredToCaller();
 			await pairSynthesizedExecResult(state, onToolResult, toolCallId, "search_conversations", error);
 			const execResult = create(ConversationSearchResultSchema, {
 				result: { case: "error", value: create(ConversationSearchErrorSchema, { error }) },
 			});
 			sendExecClientMessage(h2Request, execMsg, "conversationSearchResult", execResult);
-			return;
+			return deferredToCaller;
 		}
 		case "agentStoreConflictArgs": {
 			// The agent store is Cursor's own on-disk journal; this client never
@@ -2478,7 +2869,7 @@ async function handleExecServerMessage(
 				},
 			});
 			sendExecClientMessage(h2Request, execMsg, "agentStoreConflictResult", execResult);
-			return;
+			return deferredToCaller;
 		}
 		case "gitDiffRequest": {
 			// `GetDiffResponse` has no error variant: it models five output formats
@@ -2486,7 +2877,7 @@ async function handleExecServerMessage(
 			// therefore a claim that a diff was computed, so a `throw` is the only
 			// truthful reply.
 			sendExecClientThrow(h2Request, execMsg, `Git diff is ${NOT_IMPLEMENTED_SUFFIX}`, "exec_variant_unsupported");
-			return;
+			return deferredToCaller;
 		}
 		default: {
 			// A frame number this build recognises structurally but has no answer
@@ -2501,6 +2892,7 @@ async function handleExecServerMessage(
 			);
 		}
 	}
+	return deferredToCaller;
 }
 
 /**
@@ -4179,6 +4571,7 @@ export function processInteractionUpdate(
 	stream: AssistantMessageEventStream,
 	state: BlockState,
 	usageState: UsageState,
+	cursorToolPassthrough?: boolean,
 ): void {
 	const updateCase = update.message?.case;
 
@@ -4228,6 +4621,14 @@ export function processInteractionUpdate(
 		//
 		// Stamped resolved so `agent-loop.ts` runs no local tool for it: there is
 		// no local `connect_scm`, and the completion pairs the result itself.
+		//
+		// Passthrough: already excluded from the allowlist; if Cursor still emits
+		// one, ignore it so we neither re-surface a server-finished call nor end
+		// the turn with a ToolCall the OpenAI client cannot execute.
+		if (cursorToolPassthrough) {
+			log("passthrough", "ignoredServerOnlyConnectScm");
+			return;
+		}
 		endCurrentTextBlock(output, stream, state);
 		endCurrentThinkingBlock(output, stream, state);
 		const scmCall = selectConnectScmCall(update.message.value.toolCall);
@@ -4295,8 +4696,16 @@ export function processInteractionUpdate(
 			// them, and executing one would emit a spurious toolResult and drive an
 			// extra continuation turn. Local state is mirrored on completion, from
 			// the server's success snapshot only.
+			//
+			// Passthrough: excluded from the allowlist; if Cursor still emits one,
+			// ignore it so we neither re-surface a server-finished call nor end the
+			// turn with a ToolCall the OpenAI client cannot execute.
 			const todoCalls = selectTodoCalls(toolCall);
 			if (todoCalls.update || todoCalls.read) {
+				if (cursorToolPassthrough) {
+					log("passthrough", "ignoredServerOnlyTodo");
+					return;
+				}
 				const callId = update.message.value.callId || crypto.randomUUID();
 				const block: ToolCallState = {
 					type: "toolCall",
@@ -4521,6 +4930,18 @@ export function processInteractionUpdate(
 				{ model: output.model, messageTimestamp: output.timestamp },
 			);
 		}
+	} else if (updateCase === "routedModel") {
+		// Consume InteractionUpdate.routedModel when the backend sends it
+		// (capability advertised via cursorClientSupportsRoutedModelUpdate).
+		// Checkpoint JSON extraction remains the fallback for older servers.
+		const routed = update.message.value;
+		const modelId = typeof routed?.modelId === "string" ? routed.modelId.trim() : "";
+		if (modelId) {
+			output.model = modelId;
+			// Explicit signal for auth-gateway SSE: do not treat repeated
+			// `partial.model` observations as proof routing completed.
+			stream.push({ type: "routed_model", model: modelId, partial: output });
+		}
 	} else if (updateCase === "tokenDelta") {
 		const tokenDelta = update.message.value;
 		usageState.sawTokenDelta = true;
@@ -4534,8 +4955,37 @@ function handleConversationCheckpointUpdate(
 	output: AssistantMessage,
 	usageState: UsageState,
 	onConversationCheckpoint?: (checkpoint: ConversationStateStructure) => void,
+	autoModeActive?: boolean,
+	stream?: AssistantMessageEventStream,
 ): void {
 	onConversationCheckpoint?.(checkpoint);
+	// Extract the routed model from the assistant message JSON in pendingToolCalls.
+	// In auto mode, Cursor's backend routes to a specific model per-turn and
+	// surfaces the actual model name via providerOptions.cursor.modelName in the
+	// assistant message JSON. Prefer InteractionUpdate.routedModel when present
+	// (see processInteractionUpdate); this checkpoint path remains the fallback
+	// for servers that only embed the model in pendingToolCalls JSON.
+	// Gate on the request's auto intent, not output.model: when cursorAutoMode
+	// is enabled on a concrete catalog model, output.model stays that id.
+	for (const entry of checkpoint.pendingToolCalls) {
+		if (!entry || !autoModeActive) continue;
+		try {
+			const parsed = JSON.parse(entry) as {
+				role?: string;
+				content?: Array<{ providerOptions?: { cursor?: { modelName?: string } } }>;
+			};
+			if (parsed.role !== "assistant") continue;
+			const modelName = parsed.content?.find(c => c.providerOptions?.cursor?.modelName)?.providerOptions?.cursor
+				?.modelName;
+			if (modelName) {
+				output.model = modelName;
+				stream?.push({ type: "routed_model", model: modelName, partial: output });
+				break;
+			}
+		} catch {
+			// Not JSON or unexpected shape — skip
+		}
+	}
 	if (usageState.sawTokenDelta) {
 		return;
 	}
@@ -5374,6 +5824,11 @@ async function buildGrpcRequestForWireMode(
 		modelDetails,
 		requestedModel,
 		conversationId: state.conversationId,
+		clientSupportsInlineImages: options?.cursorClientSupportsInlineImages === true,
+		clientSupportsRoutedModelUpdate: options?.cursorClientSupportsRoutedModelUpdate === true,
+		clientSupportsPromptContextUsageRpc: options?.cursorClientSupportsPromptContextUsageRpc === true,
+		runId: options?.cursorRunId ?? "",
+		agentSessionId: options?.cursorAgentSessionId ?? "",
 	});
 
 	// Apply customSystemPrompt BEFORE the hook so the onPayload replacement is the

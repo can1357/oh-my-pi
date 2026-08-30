@@ -1,16 +1,24 @@
 import * as http2 from "node:http2";
 import { type } from "@oh-my-pi/omptype";
+import { $env } from "@oh-my-pi/pi-utils";
 import { isKimiK3ModelId } from "../identity";
 import { bareModelId, parseGlmModel, semverGte } from "../identity/classify";
 import { getBundledModels } from "../models";
 import { toModelSpec } from "../provider-models/bundled-references";
 import type { Model, ModelSpec } from "../types";
-import { GetUsableModelsRequestSchema, GetUsableModelsResponseSchema } from "./cursor-proto";
+import {
+	GetDefaultModelForCliRequestSchema,
+	type GetDefaultModelForCliResponse,
+	GetDefaultModelForCliResponseSchema,
+	GetUsableModelsRequestSchema,
+	GetUsableModelsResponseSchema,
+} from "./cursor-gen/agent_pb";
 import { create, fromBinary, toBinary } from "./protobuf";
 
 const CURSOR_DEFAULT_BASE_URL = "https://api2.cursor.sh";
 const CURSOR_DEFAULT_CLIENT_VERSION = "cli-2026.02.13-41ac335";
 const CURSOR_GET_USABLE_MODELS_PATH = "/agent.v1.AgentService/GetUsableModels";
+const CURSOR_GET_DEFAULT_MODEL_PATH = "/agent.v1.AgentService/GetDefaultModelForCli";
 
 const DEFAULT_CONTEXT_WINDOW = 200_000;
 const DEFAULT_MAX_TOKENS = 64_000;
@@ -81,6 +89,14 @@ const CursorDecodedResponseSchema = type({
 type CursorModelDetailsValue = typeof CursorModelDetailsSchema.infer;
 
 /**
+ * Default model info returned by the `GetDefaultModelForCli` RPC.
+ */
+export interface CursorDefaultModel {
+	modelId: string;
+	displayName?: string;
+}
+
+/**
  * Options for fetching dynamic Cursor models from `GetUsableModels`.
  */
 export interface CursorModelDiscoveryOptions {
@@ -101,6 +117,10 @@ export interface CursorModelDiscoveryOptions {
  *
  * Returns `null` on request/decode failures.
  * Returns `[]` only when the endpoint responds successfully with no usable models.
+ *
+ * The `GetDefaultModelForCli` RPC is queried alongside `GetUsableModels`; when it
+ * reports a default model that isn't already part of the usable list, it is appended
+ * so callers always see the CLI-recommended default.
  */
 export async function fetchCursorUsableModels(
 	options: CursorModelDiscoveryOptions,
@@ -113,7 +133,7 @@ export async function fetchCursorUsableModels(
 		const body = toBinary(GetUsableModelsRequestSchema, requestPayload);
 		const baseUrl = (options.baseUrl ?? CURSOR_DEFAULT_BASE_URL).replace(/\/+$/, "");
 
-		const responseBuffer = await fetchViaHttp2(baseUrl, body, options, timeoutMs);
+		const responseBuffer = await fetchViaHttp2(baseUrl, CURSOR_GET_USABLE_MODELS_PATH, body, options, timeoutMs);
 
 		if (!responseBuffer) {
 			return null;
@@ -125,10 +145,29 @@ export async function fetchCursorUsableModels(
 		}
 
 		const references = createCursorReferenceMap();
-		return normalizeCursorModels(parsedDecoded.models, options.baseUrl, references);
+		const models = normalizeCursorModels(parsedDecoded.models, options.baseUrl, references);
+
+		const defaultModel = await fetchCursorDefaultModelInfo(baseUrl, options, timeoutMs);
+		if (defaultModel) {
+			return mergeDefaultCursorModel(models, defaultModel, options.baseUrl, references);
+		}
+		return models;
 	} catch {
 		return null;
 	}
+}
+
+/**
+ * Fetches the Cursor CLI default model through the `GetDefaultModelForCli` RPC.
+ *
+ * Returns `null` on request/decode failures or when no default model is reported.
+ */
+export async function fetchCursorDefaultModel(
+	options: CursorModelDiscoveryOptions,
+): Promise<CursorDefaultModel | null> {
+	const timeoutMs = options.timeoutMs ?? 5_000;
+	const baseUrl = (options.baseUrl ?? CURSOR_DEFAULT_BASE_URL).replace(/\/+$/, "");
+	return fetchCursorDefaultModelInfo(baseUrl, options, timeoutMs);
 }
 
 function buildRequestHeaders(options: CursorModelDiscoveryOptions): Record<string, string> {
@@ -137,7 +176,7 @@ function buildRequestHeaders(options: CursorModelDiscoveryOptions): Record<strin
 		te: "trailers",
 		authorization: `Bearer ${options.apiKey}`,
 		"x-ghost-mode": "true",
-		"x-cursor-client-version": options.clientVersion ?? CURSOR_DEFAULT_CLIENT_VERSION,
+		"x-cursor-client-version": options.clientVersion ?? $env.CURSOR_CLIENT_VERSION ?? CURSOR_DEFAULT_CLIENT_VERSION,
 		"x-cursor-client-type": "cli",
 	};
 }
@@ -145,6 +184,7 @@ function buildRequestHeaders(options: CursorModelDiscoveryOptions): Record<strin
 /** HTTP/2 transport required by Cursor API (HTTP/1.1 is rejected with 464). */
 async function fetchViaHttp2(
 	baseUrl: string,
+	path: string,
 	body: Uint8Array,
 	options: CursorModelDiscoveryOptions,
 	timeoutMs: number,
@@ -163,7 +203,7 @@ async function fetchViaHttp2(
 
 	const req = client.request({
 		":method": "POST",
-		":path": CURSOR_GET_USABLE_MODELS_PATH,
+		":path": path,
 		...buildRequestHeaders(options),
 	});
 
@@ -242,6 +282,85 @@ function decodeGetUsableModelsResponse(payload: Uint8Array) {
 	} catch {
 		return null;
 	}
+}
+
+function decodeGetDefaultModelForCliResponse(payload: Uint8Array): GetDefaultModelForCliResponse | null {
+	if (payload.length === 0) {
+		return null;
+	}
+
+	const framedBody = decodeConnectUnaryBody(payload);
+	if (framedBody) {
+		try {
+			return fromBinary(GetDefaultModelForCliResponseSchema, framedBody);
+		} catch {
+			return null;
+		}
+	}
+
+	try {
+		return fromBinary(GetDefaultModelForCliResponseSchema, payload);
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * Fetches the CLI default model via `GetDefaultModelForCli`.
+ *
+ * Errors are swallowed (returning `null`) so a failure here never nulls out the
+ * `GetUsableModels` list it is queried alongside.
+ */
+async function fetchCursorDefaultModelInfo(
+	baseUrl: string,
+	options: CursorModelDiscoveryOptions,
+	timeoutMs: number,
+): Promise<CursorDefaultModel | null> {
+	try {
+		const requestPayload = create(GetDefaultModelForCliRequestSchema, {});
+		const body = toBinary(GetDefaultModelForCliRequestSchema, requestPayload);
+
+		const responseBuffer = await fetchViaHttp2(baseUrl, CURSOR_GET_DEFAULT_MODEL_PATH, body, options, timeoutMs);
+		if (!responseBuffer) {
+			return null;
+		}
+
+		const decoded = decodeGetDefaultModelForCliResponse(responseBuffer);
+		if (!decoded?.modelId) {
+			return null;
+		}
+		return { modelId: decoded.modelId, displayName: decoded.displayName };
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * Appends the CLI default model to the usable list when it isn't already present.
+ *
+ * The default model is normalized through the same `normalizeCursorModel` path so
+ * bundled references, context-window, and reasoning inference stay consistent.
+ */
+function mergeDefaultCursorModel(
+	models: ModelSpec<"cursor-agent">[],
+	defaultModel: CursorDefaultModel,
+	baseUrlOverride: string | undefined,
+	references: Map<string, ModelSpec<"cursor-agent">>,
+): ModelSpec<"cursor-agent">[] {
+	const id = defaultModel.modelId.trim();
+	if (!id || models.some(model => model.id === id)) {
+		return models;
+	}
+
+	const normalized = normalizeCursorModel(
+		{ modelId: id, displayName: defaultModel.displayName },
+		baseUrlOverride,
+		references,
+	);
+	if (!normalized) {
+		return models;
+	}
+	return [...models, normalized].sort((a, b) => a.id.localeCompare(b.id));
 }
 
 function decodeConnectUnaryBody(payload: Uint8Array): Uint8Array | null {
