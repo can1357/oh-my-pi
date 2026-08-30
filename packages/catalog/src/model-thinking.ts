@@ -155,6 +155,20 @@ export function resolveModelThinking<TApi extends Api>(
 	if (spec.thinking && Array.isArray(spec.thinking.efforts) && spec.thinking.efforts.length > 0) {
 		return fillThinkingWireDefaults(spec, compat, spec.thinking);
 	}
+	// Friendli Chat Completions accepts `reasoning_effort` per model, not per
+	// host: effort models (discovered `thinking.efforts`, GLM-5.2+ identity)
+	// take it, toggle-only models 400 on it. A Friendli-hosted spec with
+	// neither a declared ladder nor an identity-known one has an unclassified
+	// effort surface — fabricating the default `minimal..high` ladder here
+	// would surface four picker tiers while `supportsReasoningEffort: false`
+	// strips `reasoning_effort` from the wire, so every tier sends a
+	// byte-identical body. Report no controllable surface instead and let the
+	// endpoint's default reasoning depth apply. Explicit/discovered ladders
+	// hit the early return above, and the GLM-5.2 identity fallback inside
+	// `getModelDefinedEfforts` keeps HIGH_MAX flowing for GLM-5.2 specs.
+	if (modelMatchesHost(spec, "friendli") && getModelDefinedEfforts(spec, compat) === undefined) {
+		return undefined;
+	}
 	// Cascade selects effort only by routing to a sibling model id, so a Devin
 	// model with no explicit routed thinking has no controllable surface —
 	// never fabricate an effort ladder from identity.
@@ -348,13 +362,22 @@ function getModelDefinedEfforts<TApi extends Api>(
 		// impliesMandatoryReasoning), and the default effort is `max`.
 		return LOW_HIGH_MAX_REASONING_EFFORTS;
 	}
+	const isFriendliHost = modelMatchesHost(spec, "friendli");
+	// Friendli only detects an explicitly declared effort ladder
+	// (`thinking.efforts`); a custom Friendli-pointed provider serving a
+	// toggle-only model with no declared ladder falls through to the
+	// identity-based detection below.
+	if (isFriendliHost && spec.reasoning && spec.thinking?.efforts?.length) {
+		return spec.thinking.efforts;
+	}
 	if (isGlm52ReasoningEffortModelId(spec.id)) {
 		// GLM-5.2's reasoning_effort dialect is host-specific (verified against
 		// live endpoints):
 		//   - Z.ai/Zhipu ("zai" dialect) expose only high/max ("none" is the
 		//     thinking-off state, not a user tier).
-		//   - Umans, Ollama Cloud, and Baseten serve the same two-tier
-		//     high/max scale on their GLM-5.2 routes.
+		//   - Umans, Ollama Cloud, Baseten, and Friendli serve the same
+		//     two-tier high/max scale on their GLM-5.2 routes (Friendli
+		//     serves the id with uppercase "GLM", matched case-insensitively).
 		//   - OpenRouter rejects `max` — `xhigh` IS its top tier.
 		//   - Other openai-compat hosts (Fireworks, resellers) pass the
 		//     default lower tiers through verbatim and expose the genuine
@@ -367,7 +390,8 @@ function getModelDefinedEfforts<TApi extends Api>(
 			isZaiThinkingFormat(compat) ||
 			isAnthropicMessagesGlm52ReasoningEffortModel(spec) ||
 			isOllamaCloudGlm52ReasoningEffortModel(spec) ||
-			spec.provider === "baseten"
+			spec.provider === "baseten" ||
+			isFriendliHost
 		) {
 			return HIGH_MAX_REASONING_EFFORTS;
 		}

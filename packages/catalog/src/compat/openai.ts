@@ -301,6 +301,21 @@ export function buildOpenAICompat(spec: ModelSpec<"openai-completions">): Resolv
 	const isZai = modelMatchesHost(hostModel, "zai");
 	const isZhipu = modelMatchesHost(hostModel, "zhipu");
 	const supportsZaiReasoningEffort = (isZai || isZhipu) && isGlm52ReasoningEffortModelId(spec.id);
+	const isFriendli = modelMatchesHost(hostModel, "friendli");
+	// Friendli's GLM-5.2 wire dialect only detects an EXPLICITLY declared
+	// effort ladder (`thinking.efforts` or the known GLM-5.2+ id). There is
+	// no toggle-only fallback here: a custom Friendli-pointed provider
+	// serving a toggle-only model with no declared thinking ladder is
+	// deferred to a follow-up. The discovered `thinking.efforts` ladder is
+	// authoritative and wins regardless of model id, so a future
+	// Friendli-served model that declares an effort ladder via discovery is
+	// covered without a code change; `isGlm52ReasoningEffortModelId` is only
+	// the fallback for hardcoded/custom-provider ids without discovery data,
+	// and it intentionally matches `>=5.2` (GLM-5.3+ inherits it too).
+	const friendliHasEffortSurface =
+		isFriendli &&
+		Boolean(spec.reasoning) &&
+		((spec.thinking?.efforts?.length ?? 0) > 0 || isGlm52ReasoningEffortModelId(spec.id));
 	const isKilo = modelMatchesHost(hostModel, "kilo");
 	const isKimiModel = isKimiModelId(spec.id);
 	const isMoonshotNative = modelMatchesHost(hostModel, "moonshotNative");
@@ -474,11 +489,13 @@ export function buildOpenAICompat(spec: ModelSpec<"openai-completions">): Resolv
 				? "openrouter"
 				: isQwen && (isNvidiaNim || provider === "vllm")
 					? "qwen-chat-template"
-					: isQwen && (isFireworks || isVenice)
-						? "openai"
-						: isAlibaba || isQwen
-							? "qwen"
-							: "openai";
+					: friendliHasEffortSurface
+						? "qwen-chat-template"
+						: isQwen && (isFireworks || isVenice)
+							? "openai"
+							: isAlibaba || isQwen
+								? "qwen"
+								: "openai";
 
 	const compat: ResolvedOpenAICompat = {
 		supportsStore: !isNonStandard,
@@ -490,7 +507,11 @@ export function buildOpenAICompat(spec: ModelSpec<"openai-completions">): Resolv
 		// OpenAI's reasoning-API surface.
 		supportsDeveloperRole: isOpenAIHost || isAzureHost,
 		supportsMultipleSystemMessages: supportsMultipleSystemMessagesDefault,
-		supportsReasoningEffort: !isGrok && !isXiaomiMimo && (!(isZai || isZhipu) || supportsZaiReasoningEffort),
+		supportsReasoningEffort:
+			!isGrok &&
+			!isXiaomiMimo &&
+			(!(isZai || isZhipu) || supportsZaiReasoningEffort) &&
+			(!isFriendli || friendliHasEffortSurface),
 		// GitHub Copilot's chat-completions endpoint rejects reasoning params wholesale.
 		supportsReasoningParams: provider !== "github-copilot",
 		// OpenAI proprietary reasoning models (o-series, gpt-5+) reject explicit
@@ -612,6 +633,12 @@ export function buildOpenAICompat(spec: ModelSpec<"openai-completions">): Resolv
 			isLocalOpenAICompatBackend &&
 			provider !== "ollama" &&
 			isQwen38PlusTemplateEffortModelId(spec.id),
+		// Friendli's GLM-5.2 reasoning models are toggled on via
+		// `chat_template_kwargs.enable_thinking` (the `qwen-chat-template`
+		// dialect), but unlike other qwen-chat-template hosts (e.g. NVIDIA
+		// NIM), Friendli's endpoint also accepts top-level `reasoning_effort`
+		// to select between its high/max effort tiers.
+		friendliTemplateReasoningEffort: Boolean(friendliHasEffortSurface),
 		requiresAssistantContentForToolCalls: isKimiModel || isDirectDeepseekReasoning,
 		cacheControlFormat:
 			(isClinePass && (isQwen || isAnthropicModel)) || (isOpenRouter && spec.id.startsWith("anthropic/"))
@@ -796,6 +823,9 @@ export function buildOpenAIResponsesCompat(spec: OpenAIResponsesSpecLike): Resol
 		// the chat-completions wire shape, never on Responses.
 		qwenPreserveThinking: false,
 		qwenTemplateReasoningEffort: false,
+		// Responses-only; Friendli serves its reasoning_effort dialect over
+		// chat-completions only.
+		friendliTemplateReasoningEffort: false,
 		requiresThinkingAsText: false,
 		requiresMistralToolIds: false,
 		requiresToolResultName: false,

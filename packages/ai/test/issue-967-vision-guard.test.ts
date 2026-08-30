@@ -56,6 +56,7 @@ const compat: ResolvedOpenAICompat = {
 	replayReasoningContent: false,
 	qwenPreserveThinking: false,
 	qwenTemplateReasoningEffort: false,
+	friendliTemplateReasoningEffort: false,
 	requiresAssistantContentForToolCalls: false,
 	openRouterRouting: {},
 	vercelGatewayRouting: {},

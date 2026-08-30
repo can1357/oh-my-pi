@@ -53,6 +53,7 @@ export const KNOWN_HOSTS = {
 	baseten: { providers: ["baseten"], urlMarkers: ["baseten.co"] },
 	/** URL-only on purpose: the `fireworks`/`firepass` providers route per-model and not every model is Fireworks-shaped. */
 	fireworks: { urlMarkers: ["fireworks.ai"] },
+	friendli: { providers: ["friendli"], urlMarkers: ["api.friendli.ai"] },
 	groq: { providers: ["groq"], urlMarkers: ["api.groq.com"] },
 	minimax: {
 		providers: ["minimax", "minimax-code", "minimax-code-cn"],

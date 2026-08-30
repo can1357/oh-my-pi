@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+- Friendli GLM reasoning models now select effort tiers correctly instead of collapsing to identical requests.
+- Fixed custom Friendli-hosted reasoning models without a declared effort ladder showing fabricated thinking tiers that all sent identical requests; they now report a single uncontrollable reasoning surface matching the endpoint's default behavior.
+
 ### Added
 
 - Added the native `cline-pass` provider with live roster discovery, generated offline metadata, concise public model IDs, and verified output-token and reasoning-effort request shaping ([#7863](https://github.com/can1357/oh-my-pi/pull/7863) by [@will-bogusz](https://github.com/will-bogusz)).
