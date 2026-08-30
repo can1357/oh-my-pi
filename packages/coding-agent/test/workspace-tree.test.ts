@@ -213,12 +213,12 @@ describe("buildWorkspaceTree", () => {
 		expect(first.rendered).not.toContain("ago");
 	});
 
-	it("keeps relative ages for buildDirectoryTree (tool output, not cached)", async () => {
+	it("keeps relative ages with compact directory metadata spacing", async () => {
 		const cwd = await makeTempDir();
 		await writeFileWithMtime(path.join(cwd, "recent.txt"), "x", Date.now() - 5 * 60_000);
 
 		const tree = await buildDirectoryTree(cwd, { maxDepth: 1 });
 
-		expect(tree.rendered).toContain("ago");
+		expect(tree.rendered).toMatch(/^\.\n  - recent\.txt 1B \d+[smhdw]+ ago$/u);
 	});
 });
