@@ -46,6 +46,17 @@ export interface ZodLikeSchema<out Out> extends Type<Out, unknown> {
 	optional(): ZodLikeSchema<Out | undefined> & OptionalSchemaMarker;
 	nullable(): ZodLikeSchema<Out | null>;
 	default(value: Exclude<Out, undefined> | (() => Exclude<Out, undefined>)): ZodLikeSchema<Exclude<Out, undefined>>;
+	/**
+	 * The `this`-typed overloads keep {@link OptionalSchemaMarker} attached: the
+	 * runtime decorator already carries `isOptional` through both methods, and
+	 * without them `z.infer` reports `z.string().optional().describe("…")` (or
+	 * `.readonly()`) as a REQUIRED property whose value includes `undefined`,
+	 * disagreeing with the parse that accepts the key's absence.
+	 */
+	describe(
+		this: ZodLikeSchema<Out> & OptionalSchemaMarker,
+		description: string,
+	): ZodLikeSchema<Out> & OptionalSchemaMarker;
 	describe(description: string): ZodLikeSchema<Out>;
 	refine(predicate: (value: Out) => unknown, messageOrOptions?: string | RefineOptions): ZodLikeSchema<Out>;
 	transform<Next>(transformer: (value: Out) => Next): ZodLikeSchema<Next>;
@@ -54,6 +65,7 @@ export interface ZodLikeSchema<out Out> extends Type<Out, unknown> {
 	passthrough(): ZodLikeSchema<Out & Record<string, unknown>>;
 	strip(): ZodLikeSchema<Out>;
 	partial(): Out extends object ? ZodLikeSchema<Partial<Out>> : ZodLikeSchema<Out>;
+	readonly(this: ZodLikeSchema<Out> & OptionalSchemaMarker): ZodLikeSchema<Readonly<Out>> & OptionalSchemaMarker;
 	readonly(): ZodLikeSchema<Readonly<Out>>;
 }
 

@@ -22,6 +22,12 @@ const transformed = z.string().transform(value => value.length);
 type _TransformInference = Assert<Eq<z.infer<typeof transformed>, number>>;
 const nullableOptional = z.number().nullable().optional();
 type _NullableOptionalInference = Assert<Eq<z.infer<typeof nullableOptional>, number | null | undefined>>;
+// `.optional()` followed by a metadata/wrapper method must stay optional in the
+// inferred type, matching the parse that accepts the key's absence.
+const optionalThenDescribed = z.object({ note: z.string().optional().describe("d") });
+type _OptionalDescribedInference = Assert<Eq<z.infer<typeof optionalThenDescribed>, { note?: string | undefined }>>;
+const optionalThenReadonly = z.object({ note: z.string().optional().readonly() });
+type _OptionalReadonlyInference = Assert<Eq<z.infer<typeof optionalThenReadonly>, { note?: string | undefined }>>;
 
 describe("zod-like parsing", () => {
 	it("exposes callable omptype schemas with JSON Schema metadata", () => {
