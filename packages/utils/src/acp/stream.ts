@@ -129,7 +129,7 @@ function isResponseEnvelope(message: Record<string, unknown>): boolean {
 	const error = message.error;
 	// A present error member must be shape-valid; result and error members
 	// must be mutually exclusive, so both-present frames never pass.
-	if (error !== undefined) {
+	if (error !== undefined && error !== null) {
 		return (
 			typeof error === "object" &&
 			!Array.isArray(error) &&
