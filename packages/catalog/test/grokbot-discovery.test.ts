@@ -175,10 +175,13 @@ describe("grokbot AvailableModels normalize", () => {
 		expect(grok?.contextWindow).toBe(256_000);
 		expect(grok?.sandMaxMode).toBe(false);
 		expect(grok?.input).toEqual(["text", "image"]);
-		// Discovery must not invent a 64K output cap the response never supplied.
+		// Discovery must not invent output/context caps the response never supplied.
 		expect(grok?.maxTokens).toBeNull();
 		expect(composer?.maxTokens).toBeNull();
+		expect(composer?.contextWindow).toBeNull();
+		expect(textOnlyOmitted?.contextWindow).toBeNull();
 		expect(models.find(m => m.id === "sand-default")?.maxTokens).toBeNull();
+		expect(models.find(m => m.id === "sand-default")?.contextWindow).toBeNull();
 
 		const sol = models.find(m => m.id === "gpt-5.6-sol");
 		expect(sol?.sandParameterIds).toEqual(["context", "reasoning", "fast"]);
@@ -187,6 +190,7 @@ describe("grokbot AvailableModels normalize", () => {
 		const auto = models.find(m => m.id === "default");
 		expect(auto?.sandParameterIds).toEqual([]);
 		expect(auto?.aliases).toEqual(["auto"]);
+		expect(auto?.contextWindow).toBeNull();
 
 		const sandDefault = models.find(m => m.id === "sand-default");
 		expect(sandDefault?.sandParameterIds).toEqual([]);

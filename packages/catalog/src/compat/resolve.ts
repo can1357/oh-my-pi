@@ -1125,13 +1125,9 @@ function resolveThinkingPolicy<TApi extends Api>(
 	if (compat !== undefined && "trustExplicitThinkingOnly" in compat && compat.trustExplicitThinkingOnly === true) {
 		return undefined;
 	}
-	// Grok Bot: AvailableModels / `providers/grokbot.kdl` own the effort surface.
-	// Never invent a fallback ladder when no thinking-efforts rule matched
-	// (routers, fast-only, or unrecognized upstream-only values).
-	if (
-		(spec.provider === "grokbot" || spec.api === "grokbot-sand") &&
-		(rule.efforts === undefined || rule.efforts.length === 0)
-	) {
+	// Catalog fact `preserve-authored-thinking`: do not invent a fallback ladder
+	// when no thinking-efforts rule matched (AvailableModels / seed-owned surface).
+	if (axes.catalog.preserveAuthoredThinking === true && (rule.efforts === undefined || rule.efforts.length === 0)) {
 		return undefined;
 	}
 	const config: ThinkingConfig = {

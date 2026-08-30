@@ -10,8 +10,9 @@
 
 ### Fixed
 
+- Grok Bot thinking fallback suppression uses KDL `preserve-authored-thinking` in `buildModel` (no provider/API TypeScript branch).
+- Grok Bot AvailableModels leaves context windows unset when omitted; reviewed floors come from KDL for known routers/seeds.
 - Grok Bot AvailableModels leaves output caps unset instead of inventing a 64K `maxTokens` (wire omits `modelConfig.maxTokens` until a reviewed limit exists).
-- Grok Bot generator preserves authored thinking via KDL `preserve-authored-thinking` instead of a TypeScript provider/API branch.
 - Grok Bot offline `grok-4.6` effort ladder comes from provider KDL via `buildModel`, not a TypeScript per-id seed branch.
 - Grok Bot AvailableModels does not invent low/medium/high/xhigh when upstream effort values are all unrecognized.
 - Grok Bot AvailableModels aliases include `variants[].legacySlug` so saved legacy selectors still resolve.

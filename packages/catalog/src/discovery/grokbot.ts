@@ -24,7 +24,6 @@ import {
 	type GrokbotAvailableModel,
 } from "./grokbot-available-models";
 
-const DEFAULT_CONTEXT_WINDOW = 200_000;
 const COST = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } as const;
 
 /** Sand router slugs — not in AvailableModels; always unioned into the catalog. */
@@ -133,9 +132,8 @@ function buildSandRouterSpec(id: (typeof GROKBOT_SAND_ROUTER_IDS)[number], baseU
 		reasoning: id === "sand-default",
 		input: ["text", "image"],
 		cost: COST,
-		contextWindow: DEFAULT_CONTEXT_WINDOW,
-		// AvailableModels does not advertise output caps — leave unset so
-		// buildModelConfig omits modelConfig.maxTokens rather than inventing 64K.
+		// Limits come from reviewed KDL floors / offline seeds — do not invent here.
+		contextWindow: null,
 		maxTokens: null,
 		supportsTools: true,
 		sandParameterIds: [],
@@ -158,11 +156,20 @@ export function resolveGrokbotSandMaxMode(row: GrokbotAvailableModel): boolean {
 	return false;
 }
 
-function resolveGrokbotContextWindow(row: GrokbotAvailableModel, sandMaxMode: boolean): number {
+function resolveGrokbotContextWindow(row: GrokbotAvailableModel, sandMaxMode: boolean): number | null {
 	if (sandMaxMode) {
-		return positiveOr(row.contextTokenLimitForMaxMode, positiveOr(row.contextTokenLimit, DEFAULT_CONTEXT_WINDOW));
+		if (typeof row.contextTokenLimitForMaxMode === "number" && row.contextTokenLimitForMaxMode > 0) {
+			return row.contextTokenLimitForMaxMode;
+		}
+		if (typeof row.contextTokenLimit === "number" && row.contextTokenLimit > 0) {
+			return row.contextTokenLimit;
+		}
+		return null;
 	}
-	return positiveOr(row.contextTokenLimit, DEFAULT_CONTEXT_WINDOW);
+	if (typeof row.contextTokenLimit === "number" && row.contextTokenLimit > 0) {
+		return row.contextTokenLimit;
+	}
+	return null;
 }
 
 function toGrokbotModelSpec(row: GrokbotAvailableModel, baseUrl: string): ModelSpec<"grokbot-sand"> {
@@ -247,10 +254,6 @@ function collectEffortValues(row: GrokbotAvailableModel, parameterIds: readonly 
 		return [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh];
 	}
 	return ordered;
-}
-
-function positiveOr(value: number | undefined, fallback: number): number {
-	return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : fallback;
 }
 
 function uniqueStrings(values: readonly string[]): string[] {

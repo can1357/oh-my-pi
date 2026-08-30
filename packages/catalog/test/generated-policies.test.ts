@@ -842,4 +842,33 @@ describe("Grok Bot generated thinking policy", () => {
 		const router = buildModel(buildGrokbotStaticSeed().find(m => m.id === "sand-default")!);
 		expect(router.thinking).toBeUndefined();
 	});
+
+	it("applies reviewed context-window-floor to known routers when discovery left limits unset", () => {
+		const router = buildModel({
+			id: "sand-default",
+			name: "sand-default (routed)",
+			api: "grokbot-sand",
+			provider: "grokbot",
+			baseUrl: "https://api2.cursor.sh",
+			reasoning: true,
+			input: ["text", "image"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: null,
+			maxTokens: null,
+		});
+		expect(router.contextWindow).toBe(200_000);
+		const unknown = buildModel({
+			id: "some-live-model",
+			name: "Some Live Model",
+			api: "grokbot-sand",
+			provider: "grokbot",
+			baseUrl: "https://api2.cursor.sh",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: null,
+			maxTokens: null,
+		});
+		expect(unknown.contextWindow).toBeNull();
+	});
 });

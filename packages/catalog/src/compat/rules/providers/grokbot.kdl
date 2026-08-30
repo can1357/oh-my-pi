@@ -3,12 +3,20 @@
 // from neutral seeds instead of TypeScript per-id branches.
 
 provider "grokbot" {
-	// AvailableModels / seed-owned ladders must survive generate-models rebake.
+	// AvailableModels / seed-owned ladders must survive generate-models rebake,
+	// and buildModel must not invent fallback efforts when no thinking-efforts
+	// rule matched (routers, fast-only, unrecognized upstream-only values).
 	preserve-authored-thinking #true
+	// Synthetic routers + offline seeds: reviewed budgeting floor when live
+	// AvailableModels omits contextTokenLimit (proto3 zero/absent).
+	models "sand-default" "sand-cua" "sand-automation" "default" "auto" {
+		context-window-floor 200000
+	}
 	// Static offline seed for grok-4.6 advertises the sand effort dial
 	// (low..xhigh). Live AvailableModels may narrow this via explicit thinking.
 	models "grok-4.6*" {
 		thinking-mode "effort"
 		thinking-efforts "low" "medium" "high" "xhigh"
+		context-window-floor 200000
 	}
 }

@@ -8174,7 +8174,38 @@
 				}
 			},
 			{
-				"source": "providers/grokbot.kdl:10",
+				"source": "providers/grokbot.kdl:12",
+				"providers": [
+					"grokbot"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "sand-default"
+					},
+					{
+						"kind": "exact",
+						"value": "sand-cua"
+					},
+					{
+						"kind": "exact",
+						"value": "sand-automation"
+					},
+					{
+						"kind": "exact",
+						"value": "default"
+					},
+					{
+						"kind": "exact",
+						"value": "auto"
+					}
+				],
+				"catalog": {
+					"contextWindowFloor": 200000
+				}
+			},
+			{
+				"source": "providers/grokbot.kdl:17",
 				"providers": [
 					"grokbot"
 				],
@@ -8192,6 +8223,9 @@
 						"high",
 						"xhigh"
 					]
+				},
+				"catalog": {
+					"contextWindowFloor": 200000
 				}
 			},
 			{
