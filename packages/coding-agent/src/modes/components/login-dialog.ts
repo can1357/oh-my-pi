@@ -2,6 +2,7 @@ import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import { Container, getKeybindings, Input, Spacer, Text, type TUI, wrapTextWithAnsi } from "@oh-my-pi/pi-tui";
 import { theme } from "../../modes/theme/theme";
 import { urlHyperlinkAlways, WidthAwareText } from "../../tui";
+import { copyToClipboard } from "../../utils/clipboard";
 import { openPath } from "../../utils/open";
 import { OverlayPanel } from "./overlay-box";
 
@@ -100,7 +101,7 @@ export class LoginDialogComponent extends OverlayPanel {
 
 		// Open browser (best-effort)
 		openPath(url);
-
+		void copyToClipboard(url).catch(() => {});
 		this.#tui.requestRender();
 	}
 
