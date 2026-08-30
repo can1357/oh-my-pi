@@ -418,10 +418,10 @@ describe("European gateway provider catalog support", () => {
 			contextWindow: 1_000_000,
 			maxTokens: 128_000,
 			cost: {
-				input: 3,
-				output: 15,
-				cacheRead: 0.3,
-				cacheWrite: 3.75,
+				input: 2,
+				output: 10,
+				cacheRead: 0.2,
+				cacheWrite: 2.5,
 			},
 		});
 	});
