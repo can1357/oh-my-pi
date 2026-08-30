@@ -56,6 +56,8 @@ interface MergedSource {
 	bestRank: number;
 	/** First-seen insertion index; final tiebreak keeps ordering deterministic. */
 	order: number;
+	/** Engines that returned this URL, in observation order. Observability only. */
+	engineSet: Set<string>;
 }
 
 /**
@@ -76,15 +78,15 @@ function dedupKey(rawUrl: string): string {
 }
 
 /** Merge one engine's ranked sources into the accumulator map. */
-function mergeSources(merged: Map<string, MergedSource>, sources: readonly SearchSource[]): void {
+function mergeSources(merged: Map<string, MergedSource>, sources: readonly SearchSource[], engineId: string): void {
 	for (const [rank, source] of sources.entries()) {
 		const key = dedupKey(source.url);
 		const existing = merged.get(key);
 		if (!existing) {
-			merged.set(key, { source: { ...source }, engines: 1, bestRank: rank, order: merged.size });
+			merged.set(key, { source: { ...source }, engines: 1, bestRank: rank, order: merged.size, engineSet: new Set([engineId]) });
 			continue;
 		}
-		existing.engines += 1;
+		existing.engineSet.add(engineId);
 		if (rank < existing.bestRank) {
 			existing.bestRank = rank;
 			existing.source.title = source.title;
@@ -156,8 +158,8 @@ export async function searchPublicWeb(
 	// Merge in engine-priority order (not settlement order) so ranking
 	// tiebreaks stay deterministic.
 	const merged = new Map<string, MergedSource>();
-	for (const response of responses) {
-		if (response) mergeSources(merged, response.sources);
+	for (const [index, response] of responses.entries()) {
+		if (response) mergeSources(merged, response.sources, engineIds[index]);
 	}
 
 	if (merged.size === 0 && failures.length === engineIds.length) {
@@ -171,7 +173,10 @@ export async function searchPublicWeb(
 	const sources = [...merged.values()]
 		.sort((a, b) => b.engines - a.engines || a.bestRank - b.bestRank || a.order - b.order)
 		.slice(0, numResults)
-		.map(entry => entry.source);
+		.map(entry => {
+			entry.source.engineNames = [...entry.engineSet].sort().join("+");
+			return entry.source;
+		});
 
 	return { provider: "public", sources };
 }

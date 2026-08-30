@@ -134,6 +134,8 @@ export interface SearchSource {
 	publishedDate?: string;
 	/** Age in seconds for consistent formatting */
 	ageSeconds?: number;
+	/** Engines that returned this URL (`+`-joined, sorted) — Public Web aggregate only */
+	engineNames?: string;
 	author?: string;
 }
 

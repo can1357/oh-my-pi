@@ -89,9 +89,10 @@ describe("Public Web aggregate provider", () => {
 				title: "Shared (google)",
 				url: "https://www.example.com/shared/",
 				snippet: "a much longer consolidated snippet",
+				engineNames: "duckduckgo+google",
 			},
-			{ title: "Gamma", url: "https://c.example/three", snippet: "gamma snippet" },
-			{ title: "Alpha", url: "https://a.example/one", snippet: "alpha snippet" },
+			{ title: "Gamma", url: "https://c.example/three", snippet: "gamma snippet", engineNames: "google" },
+			{ title: "Alpha", url: "https://a.example/one", snippet: "alpha snippet", engineNames: "duckduckgo" },
 		]);
 	});
 
@@ -104,7 +105,7 @@ describe("Public Web aggregate provider", () => {
 
 		const response = await searchPublicWeb(makeParams("partial failure", fetchMock));
 
-		expect(response.sources).toEqual([{ title: "Alpha", url: "https://a.example/one", snippet: "alpha snippet" }]);
+		expect(response.sources).toEqual([{ title: "Alpha", url: "https://a.example/one", snippet: "alpha snippet", engineNames: "duckduckgo" }]);
 	});
 
 	it("returns at the soft deadline with delivered results and aborts stragglers", async () => {
@@ -128,7 +129,7 @@ describe("Public Web aggregate provider", () => {
 
 		const response = await searchPublicWeb(makeParams("deadline race", fetchMock), { softMs: 50 });
 
-		expect(response.sources).toEqual([{ title: "Alpha", url: "https://a.example/one", snippet: "alpha snippet" }]);
+		expect(response.sources).toEqual([{ title: "Alpha", url: "https://a.example/one", snippet: "alpha snippet", engineNames: "duckduckgo" }]);
 		expect(stragglerAborted).toBe(true);
 	});
 
@@ -145,7 +146,7 @@ describe("Public Web aggregate provider", () => {
 
 		const response = await searchPublicWeb(makeParams("slow first success", fetchMock), { softMs: 10 });
 
-		expect(response.sources).toEqual([{ title: "Alpha", url: "https://a.example/one", snippet: "alpha snippet" }]);
+		expect(response.sources).toEqual([{ title: "Alpha", url: "https://a.example/one", snippet: "alpha snippet", engineNames: "duckduckgo" }]);
 	});
 
 	it("returns whatever it has at the hard deadline even with zero successes", async () => {
