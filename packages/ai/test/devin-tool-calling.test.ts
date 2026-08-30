@@ -44,7 +44,10 @@ async function captureRequest(context: Context, tools?: Context["tools"]) {
 	await streamDevin(devinModel, { ...context, tools }, { apiKey: "token", fetch: fetchImpl }).result();
 	if (!requestPayload) throw new Error("Devin chat request was not captured");
 	const flag = requestPayload[0];
-	const length = new DataView(requestPayload.buffer, requestPayload.byteOffset, requestPayload.byteLength).getUint32(1, false);
+	const length = new DataView(requestPayload.buffer, requestPayload.byteOffset, requestPayload.byteLength).getUint32(
+		1,
+		false,
+	);
 	const payload = requestPayload.subarray(5, 5 + length);
 	const decoded = flag & 0x01 ? gunzipSync(payload) : payload;
 	return fromBinary(GetChatMessageRequestSchema, decoded);
@@ -52,16 +55,13 @@ async function captureRequest(context: Context, tools?: Context["tools"]) {
 
 describe("streamDevin tool calling", () => {
 	it("encodes tool definitions in the request", async () => {
-		const request = await captureRequest(
-			{ messages: [{ role: "user", content: "run ls", timestamp: 0 }] },
-			[
-				{
-					name: "run_command",
-					description: "Run a terminal command",
-					parameters: { type: "object", properties: { command: { type: "string" } }, required: ["command"] },
-				},
-			],
-		);
+		const request = await captureRequest({ messages: [{ role: "user", content: "run ls", timestamp: 0 }] }, [
+			{
+				name: "run_command",
+				description: "Run a terminal command",
+				parameters: { type: "object", properties: { command: { type: "string" } }, required: ["command"] },
+			},
+		]);
 		expect(request.tools.length).toBe(1);
 		expect(request.tools[0].name).toBe("run_command");
 		expect(request.tools[0].description).toBe("Run a terminal command");
@@ -80,7 +80,11 @@ describe("streamDevin tool calling", () => {
 				{
 					name: "edit_file",
 					description: "Create or edit a file",
-					parameters: { type: "object", properties: { path: { type: "string" }, content: { type: "string" } }, required: ["path", "content"] },
+					parameters: {
+						type: "object",
+						properties: { path: { type: "string" }, content: { type: "string" } },
+						required: ["path", "content"],
+					},
 				},
 			],
 		);
@@ -92,23 +96,45 @@ describe("streamDevin tool calling", () => {
 	it("parses tool call deltas from the response stream", async () => {
 		// Simulate a response with a tool call: run_command({"command": "ls"})
 		const chunks = [
-			frameConnectMessage(toBinary(GetChatMessageResponseSchema, create(GetChatMessageResponseSchema, {
-				messageId: "msg-1",
-				deltaToolCalls: [create(ChatToolCallSchema, { id: "call-1", name: "run_command", argumentsJson: "" })],
-			}))),
-			frameConnectMessage(toBinary(GetChatMessageResponseSchema, create(GetChatMessageResponseSchema, {
-				messageId: "msg-1",
-				deltaToolCalls: [create(ChatToolCallSchema, { id: "", name: "", argumentsJson: '{"command": "' })],
-			}))),
-			frameConnectMessage(toBinary(GetChatMessageResponseSchema, create(GetChatMessageResponseSchema, {
-				messageId: "msg-1",
-				deltaToolCalls: [create(ChatToolCallSchema, { id: "", name: "", argumentsJson: "ls" })],
-			}))),
-			frameConnectMessage(toBinary(GetChatMessageResponseSchema, create(GetChatMessageResponseSchema, {
-				messageId: "msg-1",
-				deltaToolCalls: [create(ChatToolCallSchema, { id: "", name: "", argumentsJson: '"}' })],
-				stopReason: StopReason.FUNCTION_CALL,
-			}))),
+			frameConnectMessage(
+				toBinary(
+					GetChatMessageResponseSchema,
+					create(GetChatMessageResponseSchema, {
+						messageId: "msg-1",
+						deltaToolCalls: [
+							create(ChatToolCallSchema, { id: "call-1", name: "run_command", argumentsJson: "" }),
+						],
+					}),
+				),
+			),
+			frameConnectMessage(
+				toBinary(
+					GetChatMessageResponseSchema,
+					create(GetChatMessageResponseSchema, {
+						messageId: "msg-1",
+						deltaToolCalls: [create(ChatToolCallSchema, { id: "", name: "", argumentsJson: '{"command": "' })],
+					}),
+				),
+			),
+			frameConnectMessage(
+				toBinary(
+					GetChatMessageResponseSchema,
+					create(GetChatMessageResponseSchema, {
+						messageId: "msg-1",
+						deltaToolCalls: [create(ChatToolCallSchema, { id: "", name: "", argumentsJson: "ls" })],
+					}),
+				),
+			),
+			frameConnectMessage(
+				toBinary(
+					GetChatMessageResponseSchema,
+					create(GetChatMessageResponseSchema, {
+						messageId: "msg-1",
+						deltaToolCalls: [create(ChatToolCallSchema, { id: "", name: "", argumentsJson: '"}' })],
+						stopReason: StopReason.FUNCTION_CALL,
+					}),
+				),
+			),
 		];
 
 		const fetchImpl = (async (_input: string | URL | Request) => {
@@ -126,14 +152,20 @@ describe("streamDevin tool calling", () => {
 			);
 		}) as typeof fetch;
 
-		const stream = streamDevin(devinModel, {
-			messages: [{ role: "user", content: "run ls", timestamp: 0 }],
-			tools: [{
-				name: "run_command",
-				description: "Run a terminal command",
-				parameters: { type: "object", properties: { command: { type: "string" } }, required: ["command"] },
-			}],
-		}, { apiKey: "token", fetch: fetchImpl });
+		const stream = streamDevin(
+			devinModel,
+			{
+				messages: [{ role: "user", content: "run ls", timestamp: 0 }],
+				tools: [
+					{
+						name: "run_command",
+						description: "Run a terminal command",
+						parameters: { type: "object", properties: { command: { type: "string" } }, required: ["command"] },
+					},
+				],
+			},
+			{ apiKey: "token", fetch: fetchImpl },
+		);
 
 		const result = await stream.result();
 		const toolCall = result.content.find((c): c is ToolCall => c.type === "toolCall");
@@ -147,24 +179,54 @@ describe("streamDevin tool calling", () => {
 		// Simulate two tool calls: run_command({"command": "ls"}) and edit_file({"path": "hello.txt", "content": "Hello World"})
 		const chunks = [
 			// First tool call: run_command
-			frameConnectMessage(toBinary(GetChatMessageResponseSchema, create(GetChatMessageResponseSchema, {
-				messageId: "msg-1",
-				deltaToolCalls: [create(ChatToolCallSchema, { id: "call-1", name: "run_command", argumentsJson: "" })],
-			}))),
-			frameConnectMessage(toBinary(GetChatMessageResponseSchema, create(GetChatMessageResponseSchema, {
-				messageId: "msg-1",
-				deltaToolCalls: [create(ChatToolCallSchema, { id: "", name: "", argumentsJson: '{"command": "ls"}' })],
-			}))),
+			frameConnectMessage(
+				toBinary(
+					GetChatMessageResponseSchema,
+					create(GetChatMessageResponseSchema, {
+						messageId: "msg-1",
+						deltaToolCalls: [
+							create(ChatToolCallSchema, { id: "call-1", name: "run_command", argumentsJson: "" }),
+						],
+					}),
+				),
+			),
+			frameConnectMessage(
+				toBinary(
+					GetChatMessageResponseSchema,
+					create(GetChatMessageResponseSchema, {
+						messageId: "msg-1",
+						deltaToolCalls: [
+							create(ChatToolCallSchema, { id: "", name: "", argumentsJson: '{"command": "ls"}' }),
+						],
+					}),
+				),
+			),
 			// Second tool call: edit_file
-			frameConnectMessage(toBinary(GetChatMessageResponseSchema, create(GetChatMessageResponseSchema, {
-				messageId: "msg-1",
-				deltaToolCalls: [create(ChatToolCallSchema, { id: "call-2", name: "edit_file", argumentsJson: "" })],
-			}))),
-			frameConnectMessage(toBinary(GetChatMessageResponseSchema, create(GetChatMessageResponseSchema, {
-				messageId: "msg-1",
-				deltaToolCalls: [create(ChatToolCallSchema, { id: "", name: "", argumentsJson: '{"path": "hello.txt", "content": "Hello World"}' })],
-				stopReason: StopReason.FUNCTION_CALL,
-			}))),
+			frameConnectMessage(
+				toBinary(
+					GetChatMessageResponseSchema,
+					create(GetChatMessageResponseSchema, {
+						messageId: "msg-1",
+						deltaToolCalls: [create(ChatToolCallSchema, { id: "call-2", name: "edit_file", argumentsJson: "" })],
+					}),
+				),
+			),
+			frameConnectMessage(
+				toBinary(
+					GetChatMessageResponseSchema,
+					create(GetChatMessageResponseSchema, {
+						messageId: "msg-1",
+						deltaToolCalls: [
+							create(ChatToolCallSchema, {
+								id: "",
+								name: "",
+								argumentsJson: '{"path": "hello.txt", "content": "Hello World"}',
+							}),
+						],
+						stopReason: StopReason.FUNCTION_CALL,
+					}),
+				),
+			),
 		];
 
 		const fetchImpl = (async (_input: string | URL | Request) => {
@@ -182,13 +244,29 @@ describe("streamDevin tool calling", () => {
 			);
 		}) as typeof fetch;
 
-		const stream = streamDevin(devinModel, {
-			messages: [{ role: "user", content: "run ls and create hello.txt", timestamp: 0 }],
-			tools: [
-				{ name: "run_command", description: "Run a terminal command", parameters: { type: "object", properties: { command: { type: "string" } }, required: ["command"] } },
-				{ name: "edit_file", description: "Create or edit a file", parameters: { type: "object", properties: { path: { type: "string" }, content: { type: "string" } }, required: ["path", "content"] } },
-			],
-		}, { apiKey: "token", fetch: fetchImpl });
+		const stream = streamDevin(
+			devinModel,
+			{
+				messages: [{ role: "user", content: "run ls and create hello.txt", timestamp: 0 }],
+				tools: [
+					{
+						name: "run_command",
+						description: "Run a terminal command",
+						parameters: { type: "object", properties: { command: { type: "string" } }, required: ["command"] },
+					},
+					{
+						name: "edit_file",
+						description: "Create or edit a file",
+						parameters: {
+							type: "object",
+							properties: { path: { type: "string" }, content: { type: "string" } },
+							required: ["path", "content"],
+						},
+					},
+				],
+			},
+			{ apiKey: "token", fetch: fetchImpl },
+		);
 
 		const result = await stream.result();
 		const toolCalls = result.content.filter((c): c is ToolCall => c.type === "toolCall");
