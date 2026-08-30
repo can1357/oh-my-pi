@@ -426,6 +426,45 @@ describe("createAgentSession deferred model pattern resolution", () => {
 		}
 	});
 
+	test("tries an authenticated expanded role candidate before the parent auth fallback", async () => {
+		const parentModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!parentModel) {
+			throw new Error("Expected bundled anthropic parent model");
+		}
+		const settings = Settings.isolated({ "task.latencyAwareRouting": true });
+		settings.setModelRole("task", "runtime-provider/runtime-model,runtime-provider/runtime-reasoning-model");
+		const options = await buildSessionOptions("@task");
+		options.authStorage.setRuntimeApiKey(parentModel.provider, "parent-key");
+		const getApiKeySpy = vi.spyOn(options.modelRegistry, "getApiKey").mockImplementation(async requested => {
+			if (requested.provider === parentModel.provider) return "parent-key";
+			if (requested.id === "runtime-reasoning-model") return "runtime-key";
+			return undefined;
+		});
+
+		const { session, modelFallbackMessage } = await createAgentSession({
+			...options,
+			settings,
+			modelPatternAuthFallback: `${parentModel.provider}/${parentModel.id}`,
+			modelPatternFallbackRole: "subagent:latency-aware",
+			modelPatternDefaultFallbackChain: [`${parentModel.provider}/${parentModel.id}`],
+		});
+
+		try {
+			expect(session.model?.provider).toBe("runtime-provider");
+			expect(session.model?.id).toBe("runtime-reasoning-model");
+			expect(session.settings.getModelRole("subagent:latency-aware")).toBe(
+				"runtime-provider/runtime-reasoning-model",
+			);
+			expect(session.settings.get("retry.fallbackChains")["subagent:latency-aware"]).toEqual([
+				`${parentModel.provider}/${parentModel.id}`,
+			]);
+			expect(modelFallbackMessage).toBeUndefined();
+		} finally {
+			await session.dispose();
+			getApiKeySpy.mockRestore();
+		}
+	});
+
 	test("resolves deferred role-alias modelPattern after extension providers register", async () => {
 		const settings = Settings.isolated();
 		settings.setModelRole("smol", "runtime-provider/runtime-model");

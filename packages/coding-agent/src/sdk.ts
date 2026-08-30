@@ -11,6 +11,7 @@ import {
 	type ThinkingLevel,
 } from "@oh-my-pi/pi-agent-core";
 import type {
+	Api,
 	Context,
 	CredentialDisabledEvent,
 	Effort,
@@ -2404,6 +2405,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				? availableModels
 				: allModels;
 			let usageFallbackTriggered = false;
+			let authPreflight: Map<Model<Api>, boolean> | undefined;
 			for (let patternIndex = 0; patternIndex < expandedModelPatterns.length; patternIndex += 1) {
 				const { pattern, retryFallback } = expandedModelPatterns[patternIndex];
 				const primary = parseModelPattern(pattern, resolutionModels, matchPreferences);
@@ -2483,8 +2485,40 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				}
 				let authFallbackUsed = false;
 				if (options.modelPatternAuthFallback) {
-					const primaryKey = await modelRegistry.getApiKey(primary.model);
-					if (primaryKey !== kNoAuth && !isAuthenticated(primaryKey)) {
+					authPreflight ??= new Map<Model<Api>, boolean>();
+					let primaryHasAuth = authPreflight.get(primary.model);
+					if (primaryHasAuth === undefined) {
+						const primaryKey = await modelRegistry.getApiKey(primary.model);
+						primaryHasAuth = primaryKey === kNoAuth || isAuthenticated(primaryKey);
+						authPreflight.set(primary.model, primaryHasAuth);
+					}
+					if (!primaryHasAuth) {
+						// Exhaust the expanded role chain before escalating to the
+						// stronger parent model.
+						let hasAuthenticatedRoleCandidate = false;
+						for (
+							let candidateIndex = patternIndex + 1;
+							candidateIndex < expandedModelPatterns.length;
+							candidateIndex += 1
+						) {
+							const candidateEntry = expandedModelPatterns[candidateIndex];
+							const candidate = parseModelPattern(candidateEntry.pattern, resolutionModels, matchPreferences);
+							if (!candidate.model || (candidateEntry.retryFallback && !hasModelAuth(candidate.model))) {
+								continue;
+							}
+							let candidateHasAuth = authPreflight.get(candidate.model);
+							if (candidateHasAuth === undefined) {
+								const candidateKey = await modelRegistry.getApiKey(candidate.model);
+								candidateHasAuth = candidateKey === kNoAuth || isAuthenticated(candidateKey);
+								authPreflight.set(candidate.model, candidateHasAuth);
+							}
+							if (candidateHasAuth) {
+								hasAuthenticatedRoleCandidate = true;
+								break;
+							}
+						}
+						if (hasAuthenticatedRoleCandidate) continue;
+
 						const fallback = parseModelPattern(
 							options.modelPatternAuthFallback,
 							resolutionModels,

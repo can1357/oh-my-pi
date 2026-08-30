@@ -787,6 +787,7 @@ export class ModelHubComponent implements Component {
 				scope === "project"
 					? (this.#settings.getProjectModelRole(scopedRole) ?? this.#settings.getGlobalModelRole(scopedRole))
 					: this.#settings.getGlobalModelRole(scopedRole),
+			get: path => this.#settings.get(path),
 		};
 		return resolveModelRoleValue(roleValue, allModels, { settings: this.#settings, roleLookup });
 	}

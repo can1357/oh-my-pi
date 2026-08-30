@@ -7,6 +7,7 @@ import {
 	expandRoleAlias,
 	extractExplicitThinkingSelector,
 	filterAvailableModelsByEnabledPatterns,
+	type ModelRoleLookup,
 	parseModelPattern,
 	parseModelString,
 	pickDefaultAvailableModel,
@@ -16,6 +17,7 @@ import {
 	resolveAgentPrewalkPattern,
 	resolveAllowedModels,
 	resolveCliModel,
+	resolveConfiguredModelPatterns,
 	resolveExplicitModelRole,
 	resolveModelFromString,
 	resolveModelOverride,
@@ -1097,6 +1099,33 @@ describe("resolveAgentModelPatterns", () => {
 		expect(resolveAgentModelPatterns({ agentModel: "@designer", settings })).toEqual(["local/llama"]);
 	});
 
+	test("latency-aware routing skips default inheritance for smol, slow, and designer roles", () => {
+		const settings = Settings.isolated({
+			"task.latencyAwareRouting": true,
+			modelRoles: { default: "local/llama" },
+		});
+
+		expect(resolveAgentModelPatterns({ agentModel: "@smol", settings })).toContain("cerebras/zai-glm-4.7");
+		expect(resolveAgentModelPatterns({ agentModel: "@smol", settings })).not.toContain("local/llama");
+		expect(resolveAgentModelPatterns({ agentModel: "@slow", settings })).toContain("openai-codex/gpt-5.5");
+		expect(resolveAgentModelPatterns({ agentModel: "@designer", settings })).toContain(
+			"google-gemini-cli/gemini-3.1-pro",
+		);
+	});
+
+	test("carries latency-aware routing through a scoped role lookup", () => {
+		const settings = Settings.isolated({ "task.latencyAwareRouting": true });
+		const roleLookup: ModelRoleLookup = {
+			getModelRole: role => (role === "default" ? "local/llama" : undefined),
+			get: path => settings.get(path),
+		};
+
+		const patterns = resolveConfiguredModelPatterns("@smol", roleLookup);
+
+		expect(patterns).toContain("cerebras/zai-glm-4.7");
+		expect(patterns).not.toContain("local/llama");
+	});
+
 	test("expands cross-role default aliases when inheriting for an unset role", () => {
 		const settings = Settings.isolated({
 			modelRoles: { default: "@slow", slow: "anthropic/claude-sonnet-4-5" },
@@ -1111,6 +1140,7 @@ describe("resolveAgentModelPatterns", () => {
 				default: "anthropic/claude-sonnet-4-5",
 				designer: "openai/gpt-4o",
 			},
+			"task.latencyAwareRouting": true,
 		});
 
 		const result = resolveAgentModelPatterns({
@@ -1962,6 +1992,15 @@ describe("expandRoleAlias", () => {
 		settings.setModelRole("default", "anthropic/claude-sonnet-4-5");
 
 		expect(expandRoleAlias("@vision", settings)).toBe("@vision");
+	});
+
+	test("preserves default inheritance for single-pattern alias expansion", () => {
+		const settings = Settings.isolated({
+			"task.latencyAwareRouting": true,
+			modelRoles: { default: "local/llama" },
+		});
+
+		expect(expandRoleAlias("@smol", settings)).toBe("local/llama");
 	});
 });
 

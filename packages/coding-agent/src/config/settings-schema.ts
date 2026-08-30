@@ -5077,6 +5077,18 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"task.latencyAwareRouting": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tasks",
+			group: "Subagents",
+			label: "Latency-Aware Role Routing",
+			description:
+				"Prefer the first available model from each role's priority chain instead of inheriting the session default for the `smol`, `slow`, and `designer` roles. Useful when the default is a stronger but slower reasoning model and discovery agents should stay latency-optimized.",
+		},
+	},
+
 	"task.softRequestBudgetNotice": {
 		type: "boolean",
 		default: true,

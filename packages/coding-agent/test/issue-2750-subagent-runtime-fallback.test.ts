@@ -189,6 +189,40 @@ describe("subagent runtime model resolution", () => {
 		expect(result.resolvedModelIsFallback).toBeFalsy();
 	});
 
+	it("expands latency-aware role aliases into the child retry fallback chain", async () => {
+		const primary = model("cerebras", "zai-glm-4.7");
+		const fallback = model("cerebras", "zai-glm-4.6");
+		const sessionDefault = model("parent", "strong-model");
+		let childFallbackChains: Record<string, string[]> | undefined;
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+			if (!options) throw new Error("Expected createAgentSession options");
+			childFallbackChains = options.settings?.get("retry.fallbackChains") as Record<string, string[]> | undefined;
+			return { session: createYieldingSession(), extensionsResult: {}, setToolUIContext: () => {} } as never;
+		});
+
+		const agent: AgentDefinition = { name: "smol", description: "test", systemPrompt: "test", source: "bundled" };
+		await runSubprocess({
+			cwd: "/tmp",
+			agent,
+			task: "work",
+			index: 0,
+			id: "latency-aware-role",
+			modelOverride: "@smol",
+			settings: Settings.isolated({
+				"task.latencyAwareRouting": true,
+				modelRoles: { default: "parent/strong-model" },
+			}),
+			modelRegistry: {
+				refresh: async () => {},
+				getAvailable: () => [primary, fallback, sessionDefault],
+				getApiKey: async () => "test-key",
+			} as never,
+			enableLsp: false,
+		});
+
+		expect(childFallbackChains?.["subagent:latency-aware-role"]).toEqual(["cerebras/zai-glm-4.6"]);
+	});
+
 	it("inherits an explicitly configured default fallback chain for a single subagent model", async () => {
 		const primary = model("lm-studio", "local-reviewer");
 		const fallback = model("openai-codex", "gpt-5.6-sol");

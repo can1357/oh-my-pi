@@ -1019,6 +1019,7 @@ const MODEL_ROLE_ALIAS_PREFIXES = [MODEL_ROLE_ALIAS_PREFIX, LEGACY_MODEL_ROLE_AL
 
 export interface ModelRoleLookup {
 	getModelRole(role: ModelRole | string): string | undefined;
+	get?(path: "task.latencyAwareRouting"): boolean;
 }
 
 function isModelRole(role: string): role is ModelRole {
@@ -1087,7 +1088,12 @@ function isSessionInheritedAgentPattern(value: string): boolean {
 	);
 }
 
-function shouldInheritDefaultBeforePriority(role: ModelRole): boolean {
+function shouldInheritDefaultBeforePriority(
+	role: ModelRole,
+	settings: ModelRoleLookup | undefined,
+	applyLatencyAwareRouting: boolean,
+): boolean {
+	if (applyLatencyAwareRouting && settings?.get?.("task.latencyAwareRouting")) return false;
 	return role === "smol" || role === "slow" || role === "designer";
 }
 
@@ -1117,9 +1123,10 @@ function resolveDefaultInheritedPatterns(
 	configuredDefault: string | undefined,
 	roleDefaults: string[],
 	settings: ModelRoleLookup | undefined,
+	applyLatencyAwareRouting: boolean,
 	visited: Set<string>,
 ): string[] {
-	if (!shouldInheritDefaultBeforePriority(role) || !configuredDefault) return [];
+	if (!shouldInheritDefaultBeforePriority(role, settings, applyLatencyAwareRouting) || !configuredDefault) return [];
 
 	const resolved: string[] = [];
 	for (const pattern of normalizeModelPatternList(configuredDefault)) {
@@ -1141,7 +1148,7 @@ function resolveDefaultInheritedPatterns(
 		if (aliasRole && !visited.has(aliasRole)) {
 			// Cross-role alias (e.g. modelRoles.default = "@slow"): resolve the
 			// concrete model patterns instead of another role alias.
-			const recursed = resolveConfiguredRolePattern(pattern, settings, new Set(visited));
+			const recursed = resolveConfiguredRolePattern(pattern, settings, applyLatencyAwareRouting, new Set(visited));
 			if (recursed && recursed.length > 0) {
 				resolved.push(...recursed);
 				continue;
@@ -1155,6 +1162,7 @@ function resolveDefaultInheritedPatterns(
 function resolveConfiguredRolePattern(
 	value: string,
 	settings?: ModelRoleLookup,
+	applyLatencyAwareRouting = true,
 	visited: Set<string> = new Set(),
 ): string[] | undefined {
 	const normalized = value.trim();
@@ -1176,7 +1184,14 @@ function resolveConfiguredRolePattern(
 	const resolved = configured
 		? normalizeModelPatternList(configured)
 		: isModelRole(role)
-			? resolveDefaultInheritedPatterns(role, configuredDefault, roleDefaults, settings, visited)
+			? resolveDefaultInheritedPatterns(
+					role,
+					configuredDefault,
+					roleDefaults,
+					settings,
+					applyLatencyAwareRouting,
+					visited,
+				)
 			: roleDefaults;
 	if (resolved.length === 0) {
 		resolved.push(...roleDefaults);
@@ -1197,7 +1212,7 @@ export function expandRoleAlias(value: string, settings?: ModelRoleLookup): stri
 		return settings?.getModelRole("default") ?? value;
 	}
 
-	const resolved = resolveConfiguredRolePattern(value, settings)?.[0];
+	const resolved = resolveConfiguredRolePattern(value, settings, false)?.[0];
 	return resolved ?? value;
 }
 
