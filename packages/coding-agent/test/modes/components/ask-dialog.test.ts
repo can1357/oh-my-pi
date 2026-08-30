@@ -444,6 +444,39 @@ describe("AskDialogComponent", () => {
 		expect(onSubmit.mock.calls[0][0].results[0].note).toBe("My Custom Note");
 	});
 
+	it("n on Other opens the custom-answer prompt and submits the text as the answer, not a note", async () => {
+		const onPrompt = vi.fn().mockReturnValue(Promise.resolve("free-form reply"));
+		const onSubmit = vi.fn();
+		const questions: ExtensionAskDialogQuestion[] = [
+			{
+				id: "q1",
+				question: "Choose one?",
+				options: [{ label: "Option A" }],
+			},
+		];
+
+		const component = new AskDialogComponent(questions, {
+			onSubmit,
+			onCancel: vi.fn(),
+			onPrompt,
+		});
+
+		// Move to the Other row and press 'n'.
+		component.handleInput(DOWN);
+		component.handleInput("n");
+		await Promise.resolve();
+		await Promise.resolve();
+
+		expect(onPrompt).toHaveBeenCalledTimes(1);
+
+		// Single-select: the custom answer submits the question directly.
+		expect(onSubmit).toHaveBeenCalledTimes(1);
+		const result = onSubmit.mock.calls[0][0].results[0];
+		expect(result.customInput).toBe("free-form reply");
+		expect(result.selectedOptions).toEqual([]);
+		expect(result.note).toBeUndefined();
+	});
+
 	it("note prefill is empty when editing a different row after noting another option", async () => {
 		const onPrompt = vi.fn();
 		const onSubmit = vi.fn();
