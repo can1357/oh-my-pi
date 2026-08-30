@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added DigitalOcean Serverless Inference as an OpenAI-compatible provider with a bundled `glm-5.2` seed.
+- Added DigitalOcean Serverless Inference as an OpenAI-compatible provider with a bundled `glm-5.2` seed ([#10303](https://github.com/can1357/oh-my-pi/pull/10303) by [@khayyamsaleem](https://github.com/khayyamsaleem)).
 - Model identity and compatibility policy now live in a checked-in KDL rule tree (`src/compat/rules/`: taxonomy, class, provider, and runtime files) compiled by `bun run gen:compat` into a committed `rules.json`; the runtime engine (`resolveModelPolicy`/`classifyModel`) resolves every model's wire compat, thinking surface, and catalog metadata from these rules instead of scattered model-name matching in TypeScript.
 - Built models carry a structured `identity` (`class`, `family`, `revision`, effort/thinking-variant facts) baked into `models.json`, and Google APIs (`google-generative-ai`, `google-vertex`, `google-gemini-cli`) gain a resolved compat record instead of `undefined`.
 - Added `model.serviceTierCost` (per-tier price multipliers), a `long-context-cost` multiplier form that tracks live list prices (xAI SuperGrok 200K tier), reviewed catalog corrections (`cost-patch`/`limits-patch`/`input-modalities`), and runtime behavior vocabulary (`api-routes`, `model-limits`, `exclude-models`, `pricing-peer`, `pro-reasoning-alias`) replacing the generator's hand-maintained tables.

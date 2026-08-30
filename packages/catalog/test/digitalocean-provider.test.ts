@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { getBundledModels } from "@oh-my-pi/pi-catalog/models";
 import { CATALOG_PROVIDERS } from "@oh-my-pi/pi-catalog/provider-models/descriptors";
 import {
 	DIGITALOCEAN_STATIC_MODELS,
@@ -7,18 +8,42 @@ import {
 import type { FetchImpl } from "@oh-my-pi/pi-catalog/types";
 
 describe("DigitalOcean Serverless Inference provider", () => {
-	test("static seed covers the descriptor's default model", () => {
-		// Regression for the empty-slice bug: generation has no
-		// DIGITALOCEAN_API_KEY, so a regen without credentials bundles no
-		// digitalocean models, and the declared defaultModel is unresolvable
-		// at boot before async discovery fires.
+	test("fresh bundle resolves the descriptor's default model without discovery", () => {
+		// Regression for the empty-slice bug: a credential-less
+		// `bun run gen:models` regen bundles no digitalocean slice unless the
+		// generator's guard pushes DIGITALOCEAN_STATIC_MODELS, and the declared
+		// defaultModel is then unresolvable at boot before async discovery
+		// fires.
 		const descriptor = CATALOG_PROVIDERS.find(provider => provider.id === "digitalocean");
 		expect(descriptor).toMatchObject({
 			defaultModel: "glm-5.2",
 			envVars: ["DIGITALOCEAN_API_KEY"],
 			dynamicModelsAuthoritative: true,
 		});
-		expect(DIGITALOCEAN_STATIC_MODELS.map(model => model.id)).toContain("glm-5.2");
+		// Exercise the generated bundle: without the guard the provider slice is
+		// absent and the default resolution fails here.
+		const bundled = getBundledModels("digitalocean");
+		expect(bundled.length).toBeGreaterThan(0);
+		expect(bundled.some(model => model.id === descriptor?.defaultModel)).toBe(true);
+		// The seed mirrors DigitalOcean's ten hosted chat models ordered by the
+		// public Artificial Analysis Intelligence Index (passthrough Anthropic /
+		// OpenAI catalog entries excluded).
+		const seedIds = DIGITALOCEAN_STATIC_MODELS.map(model => model.id);
+		for (const expected of [
+			"kimi-k3",
+			"glm-5.3",
+			"qwen3.8-max",
+			"glm-5.3-flash",
+			"deepseek-v4-pro-0813",
+			"glm-5.2",
+			"deepseek-v4-flash-0731",
+			"kimi-k2.6",
+			"deepseek-v4-pro",
+			"mimo-v2.5-pro",
+		]) {
+			expect(seedIds).toContain(expected);
+		}
+		expect(DIGITALOCEAN_STATIC_MODELS).toHaveLength(10);
 	});
 
 	// DigitalOcean's `/v1/models` lists non-chat SKUs (embeddings, rerankers,
@@ -44,6 +69,26 @@ describe("DigitalOcean Serverless Inference provider", () => {
 						created: 0,
 						owned_by: "digitalocean",
 						context_length: 1_000_000,
+						max_output_tokens: 128_000,
+					},
+					// Vendor-prefixed passthrough id — canonical metadata resolves
+					// after prefix stripping, but entry-provided limits still win.
+					{
+						id: "anthropic-claude-opus-4.5",
+						object: "model",
+						created: 0,
+						owned_by: "digitalocean",
+						context_length: 123_456,
+						max_output_tokens: 23_456,
+					},
+					// Vendor-prefixed o-series — canonical metadata resolves
+					// after prefix stripping.
+					{
+						id: "openai-o3",
+						object: "model",
+						created: 0,
+						owned_by: "digitalocean",
+						context_length: 200_000,
 						max_output_tokens: 128_000,
 					},
 					// Non-chat SKUs the provider also lists — all must be filtered.
@@ -81,14 +126,18 @@ describe("DigitalOcean Serverless Inference provider", () => {
 		expect(ids).toContain("glm-5.2");
 		expect(ids).toContain("glm-5.3");
 		expect(ids).toContain("anthropic-claude-5-sonnet");
+		expect(ids).toContain("anthropic-claude-opus-4.5");
+		expect(ids).toContain("openai-o3");
 
 		// Seeded GLM ids carry DigitalOcean's published tariff and limits from
 		// the bundled reference even though the entry rows have no limits.
 		const glm52 = models.find(model => model.id === "glm-5.2");
 		expect(glm52?.reasoning).toBe(true);
 		expect(glm52?.cost).toEqual({ input: 0.7, output: 2.2, cacheRead: 0.105, cacheWrite: 0 });
-		expect(glm52?.contextWindow).toBe(1_000_000);
-		expect(glm52?.maxTokens).toBe(131_072);
+		// Limits come from DigitalOcean's own supported-models table, which lists
+		// GLM-5.2 at 262,144 tokens rather than Z.AI's generic 1M figure.
+		expect(glm52?.contextWindow).toBe(262_144);
+		expect(glm52?.maxTokens).toBe(262_144);
 		expect(glm52?.provider).toBe("digitalocean");
 		expect(glm52?.api).toBe("openai-completions");
 		expect(glm52?.baseUrl).toBe("https://inference.do-ai.run/v1");
@@ -96,13 +145,37 @@ describe("DigitalOcean Serverless Inference provider", () => {
 		const glm53 = models.find(model => model.id === "glm-5.3");
 		expect(glm53?.cost).toEqual({ input: 1.4, output: 4.4, cacheRead: 0.26, cacheWrite: 0 });
 
-		// Unreferenced entries keep the limits the endpoint reported rather than
-		// fabricating params.
+		// Vendor-prefixed family-order rows recover canonical reasoning/vision
+		// metadata via `claude-5-sonnet` → `claude-sonnet-5`…
 		const claude = models.find(model => model.id === "anthropic-claude-5-sonnet");
+		expect(claude?.reasoning).toBe(true);
+		expect(claude?.input).toContain("image");
+		expect(claude?.thinking).toBeDefined();
+		// …while entry-provided limits still beat the canonical consensus and
+		// pricing stays zeroed.
 		expect(claude?.contextWindow).toBe(1_000_000);
 		expect(claude?.maxTokens).toBe(128_000);
-		// ...while pricing stays zeroed instead of borrowing another host's rate.
 		expect(claude?.cost).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+
+		// Vendor-prefixed o-series rows also resolve after prefix stripping.
+		const o3 = models.find(model => model.id === "openai-o3");
+		expect(o3?.reasoning).toBe(true);
+		expect(o3?.thinking).toBeDefined();
+		expect(o3?.contextWindow).toBe(200_000);
+		expect(o3?.maxTokens).toBe(128_000);
+
+		// Vendor-prefixed passthrough rows recover canonical reasoning/vision
+		// metadata after prefix normalization (`anthropic-claude-opus-4.5` →
+		// bundled `claude-opus-4-5`)…
+		const opus = models.find(model => model.id === "anthropic-claude-opus-4.5");
+		expect(opus?.reasoning).toBe(true);
+		expect(opus?.input).toContain("image");
+		expect(opus?.thinking).toBeDefined();
+		// …but DO's own deployment limits still beat the canonical consensus
+		// tables (1M context / 64K output), and pricing stays zeroed.
+		expect(opus?.contextWindow).toBe(123_456);
+		expect(opus?.maxTokens).toBe(23_456);
+		expect(opus?.cost).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
 
 		expect(seen.urls).toContain("https://inference.do-ai.run/v1/models");
 		expect(seen.authorization).toBe("Bearer doo_v1_test");

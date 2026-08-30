@@ -26,7 +26,15 @@ import { resolveModelReference } from "../identity/reference";
 import type { ModelManagerOptions, ModelsDevFallback } from "../model-manager";
 import { type GeneratedProvider, getBundledModels } from "../models";
 import type { Api, FetchImpl, Model, ModelSpec, OpenAICompat, Provider, ThinkingConfig, TokenCost } from "../types";
-import { discoveryFetch, isAnthropicOAuthToken, isRecord, toBoolean, toNumber, toPositiveNumber } from "../utils";
+import {
+	discoveryFetch,
+	isAnthropicOAuthToken,
+	isRecord,
+	toBoolean,
+	toNumber,
+	toPositiveNumber,
+	toPositiveNumberOrNull,
+} from "../utils";
 import { ALIBABA_TOKEN_PLAN_BASE_URL, parseAlibabaTokenPlanCredential } from "../wire/alibaba-token-plan";
 import { CLINEPASS_API_BASE_URL, clinePassClientHeaders } from "../wire/cline-pass";
 import { CLOUDFLARE_AI_GATEWAY_COMPAT_BASE_URL } from "../wire/cloudflare-ai-gateway";
@@ -1134,27 +1142,34 @@ const DIGITALOCEAN_BASE_URL = "https://inference.do-ai.run/v1";
  * provider slice empty and the declared `defaultModel` unresolvable on a
  * fresh install before the async runtime discovery fires. Live `/v1/models`
  * discovery is authoritative for the model ID set, but
- * `mapWithBundledReference` keeps the reference's cost and thinking metadata
- * — so these fields carry DigitalOcean's published per-million-token rates
- * (https://www.digitalocean.com/pricing/artificial-intelligence): GLM-5.2 at
- * $0.70/$2.20 with $0.105 cache reads and the generic-host Think ladder
- * (minimal/low/medium/high/max), GLM-5.3 at $1.40/$4.40 with $0.26 cache reads
- * on the uniform Low/High/Max ladder, defaultLevel=max with mandatory
- * thinking per the identity classifiers.
+ * `mapWithBundledReference` keeps the reference's cost and limits — so these
+ * fields carry DigitalOcean's published per-million-token rates and context
+ * windows. Selection: the ten highest-scoring DigitalOcean-hosted (not the
+ * passthrough Anthropic/OpenAI catalog) chat models on the public Artificial
+ * Analysis Intelligence Index (v4.1.1, snapshot 2026-08-29): Kimi K3 (59.7),
+ * GLM-5.3 (59.5), Qwen3.8-Max (58.1), GLM-5.3-Flash (57.5), DeepSeek V4 Pro
+ * 0813 (53.2), GLM-5.2 (52.6), DeepSeek V4 Flash 0731 (51.8), Kimi K2.6
+ * (45.1), DeepSeek V4 Pro (43.8), MiMo V2.5 Pro (42.9). Limits from
+ * https://docs.digitalocean.com/products/inference/details/models/; pricing
+ * from https://docs.digitalocean.com/products/inference/details/pricing/.
+ * `thinking` is intentionally omitted; the generator's policy pass re-bakes
+ * the ladder from the identity classifiers like every other seeded entry.
  */
 export const DIGITALOCEAN_STATIC_MODELS: readonly ModelSpec<"openai-completions">[] = [
 	{
-		id: "glm-5.2",
-		name: "GLM-5.2",
+		id: "kimi-k3",
+		name: "Kimi K3",
 		api: "openai-completions",
 		provider: "digitalocean",
 		baseUrl: DIGITALOCEAN_BASE_URL,
 		reasoning: true,
-		input: ["text"],
-		cost: { input: 0.7, output: 2.2, cacheRead: 0.105, cacheWrite: 0 },
-		contextWindow: 1_000_000,
+		input: ["text", "image"],
+		cost: { input: 2.85, output: 14.25, cacheRead: 0.285, cacheWrite: 0 },
+		// DO's docs table and wire rows publish no limits for Kimi K3; these
+		// come from the cross-provider consensus on models.dev (Moonshot
+		// first-party included): 1M context, ~128K max output.
+		contextWindow: 1_048_576,
 		maxTokens: 131_072,
-		thinking: { mode: "effort", efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.Max] },
 	},
 	{
 		id: "glm-5.3",
@@ -1165,14 +1180,104 @@ export const DIGITALOCEAN_STATIC_MODELS: readonly ModelSpec<"openai-completions"
 		reasoning: true,
 		input: ["text"],
 		cost: { input: 1.4, output: 4.4, cacheRead: 0.26, cacheWrite: 0 },
+		contextWindow: 1_048_576,
+		maxTokens: 1_048_576,
+	},
+	{
+		id: "qwen3.8-max",
+		name: "Qwen 3.8 Max",
+		api: "openai-completions",
+		provider: "digitalocean",
+		baseUrl: DIGITALOCEAN_BASE_URL,
+		reasoning: true,
+		input: ["text", "image"],
+		cost: { input: 2, output: 6, cacheRead: 0.2, cacheWrite: 0 },
 		contextWindow: 1_000_000,
-		maxTokens: 131_072,
-		thinking: {
-			mode: "effort",
-			efforts: [Effort.Low, Effort.High, Effort.Max],
-			defaultLevel: Effort.Max,
-			requiresEffort: true,
-		},
+		maxTokens: 262_144,
+	},
+	{
+		id: "glm-5.3-flash",
+		name: "GLM-5.3 Flash",
+		api: "openai-completions",
+		provider: "digitalocean",
+		baseUrl: DIGITALOCEAN_BASE_URL,
+		reasoning: true,
+		input: ["text", "image"],
+		cost: { input: 0.15, output: 0.5, cacheRead: 0.03, cacheWrite: 0 },
+		contextWindow: 1_048_576,
+		maxTokens: 1_048_576,
+	},
+	{
+		id: "deepseek-v4-pro-0813",
+		name: "DeepSeek V4 Pro 0813",
+		api: "openai-completions",
+		provider: "digitalocean",
+		baseUrl: DIGITALOCEAN_BASE_URL,
+		reasoning: true,
+		input: ["text"],
+		cost: { input: 1.32, output: 3.96, cacheRead: 0.044, cacheWrite: 0 },
+		contextWindow: 1_048_576,
+		maxTokens: 1_048_576,
+	},
+	{
+		id: "glm-5.2",
+		name: "GLM-5.2",
+		api: "openai-completions",
+		provider: "digitalocean",
+		baseUrl: DIGITALOCEAN_BASE_URL,
+		reasoning: true,
+		input: ["text"],
+		cost: { input: 0.7, output: 2.2, cacheRead: 0.105, cacheWrite: 0 },
+		contextWindow: 262_144,
+		maxTokens: 262_144,
+	},
+	{
+		id: "deepseek-v4-flash-0731",
+		name: "DeepSeek V4 Flash 0731",
+		api: "openai-completions",
+		provider: "digitalocean",
+		baseUrl: DIGITALOCEAN_BASE_URL,
+		reasoning: true,
+		input: ["text"],
+		cost: { input: 0.08, output: 0.252, cacheRead: 0.025, cacheWrite: 0 },
+		contextWindow: 1_048_576,
+		maxTokens: 1_048_576,
+	},
+	{
+		id: "kimi-k2.6",
+		name: "Kimi K2.6",
+		api: "openai-completions",
+		provider: "digitalocean",
+		baseUrl: DIGITALOCEAN_BASE_URL,
+		reasoning: true,
+		input: ["text", "image"],
+		cost: { input: 0.95, output: 4, cacheRead: 0.19, cacheWrite: 0 },
+		contextWindow: 262_144,
+		maxTokens: 262_144,
+	},
+	{
+		id: "deepseek-v4-pro",
+		name: "DeepSeek V4 Pro",
+		api: "openai-completions",
+		provider: "digitalocean",
+		baseUrl: DIGITALOCEAN_BASE_URL,
+		reasoning: true,
+		input: ["text"],
+		cost: { input: 0.87, output: 1.74, cacheRead: 0.174, cacheWrite: 0 },
+		contextWindow: 1_048_576,
+		maxTokens: 384_000,
+	},
+	{
+		id: "mimo-v2.5-pro",
+		name: "MiMo V2.5 Pro",
+		api: "openai-completions",
+		provider: "digitalocean",
+		baseUrl: DIGITALOCEAN_BASE_URL,
+		reasoning: true,
+		input: ["text"],
+		cost: { input: 0.4, output: 1.5, cacheRead: 0.08, cacheWrite: 0 },
+		contextWindow: 262_144,
+		maxTokens: 262_144,
 	},
 ];
 
@@ -1182,23 +1287,39 @@ export interface DigitalOceanModelManagerConfig {
 	fetch?: FetchImpl;
 }
 
+const DIGITALOCEAN_VENDOR_PREFIX = /^(?:anthropic|openai)-(?=(?:claude|gpt|o[1345]))/;
+
+// DO's passthrough ids place the version before the capability segment
+// (`claude-5-sonnet`) while the canonical key reorders them (`claude-sonnet-5`),
+// so reference candidates include the family-order form alongside the raw and
+// prefix-stripped ids (bundle Anthropic ids use dash-separated versions:
+// `claude-opus-4-5`).
+function digitalOceanReferenceCandidates(id: string): string[] {
+	const strippedId = id.replace(DIGITALOCEAN_VENDOR_PREFIX, "");
+	const candidates = [id, strippedId, strippedId.replace(/\./g, "-")];
+	const familyOrder = strippedId.match(/^(claude|gpt)-(\d+(?:\.\d+)?)-(.+)$/i);
+	if (familyOrder) {
+		candidates.push(`${familyOrder[1]}-${familyOrder[3]}-${familyOrder[2]?.replace(/\./g, "-") ?? ""}`);
+	}
+	return candidates;
+}
+
 /**
- * Map a discovered DigitalOcean model to a full spec.
- *
- * DigitalOcean's `/v1/models` returns flat lowercase ids with no per-model
- * type field; `filterModel` drops the non-chat SKUs (embeddings, rerankers,
- * image/video/TTS generators, router ids) via the `exclude-models` rules. Its
- * limit fields are `context_length` and `max_output_tokens` — not the
- * `max_completion_tokens` that `mapWithBundledReference` checks — so the
- * `max_output_tokens` value is normalized onto `max_completion_tokens` before
- * any lookup, and fallback branches hydrate entry-derived limits. When a
- * digitalocean bundled reference exists (the seeded defaults) it supplies the
- * published tariff and full metadata. Other ids are DO-prefixed vendor
- * catalogue entries (`openai-gpt-…`, `anthropic-claude-…`), so intrinsic
- * capabilities are resolved from any bundled upstream entry via the canonical
- * reference index like `mapGmiCloudModel`. Pricing is never borrowed across
- * providers: cost stays zeroed rather than inheriting another provider's
- * rate.
+ * DO's `/v1/models` returns flat lowercase ids with no per-model type field;
+ * `filterModel` drops the non-chat SKUs (embeddings, rerankers, image/video/TTS
+ * generators, router ids) via the `exclude-models` rules. Its limit fields are
+ * `context_length` and `max_output_tokens` — not the `max_completion_tokens`
+ * that `mapWithBundledReference` checks — so the `max_output_tokens` value is
+ * normalized onto `max_completion_tokens` before any lookup, and fallback
+ * branches hydrate entry-derived limits. When a digitalocean bundled reference
+ * exists (the seeded defaults) it supplies the published tariff and full
+ * metadata. Passthrough ids are DO vendor-prefixed (`openai-gpt-…`,
+ * `anthropic-claude-…`), so intrinsic capabilities resolve from any bundled
+ * upstream entry via the canonical reference index after stripping the prefix.
+ * Entry-provided limits take precedence over canonical consensus values: the
+ * upstream tables (1M context) must not weaken DO's deployment limits.
+ * Pricing is never borrowed across providers: cost stays zeroed rather than
+ * inheriting another provider's rate.
  */
 function mapDigitalOceanModel(
 	entry: OpenAICompatibleModelRecord,
@@ -1209,23 +1330,33 @@ function mapDigitalOceanModel(
 	if (reference) {
 		return mapWithBundledReference({ ...entry, max_completion_tokens: entryMaxTokens }, defaults, reference);
 	}
-	const canonical = resolveModelReference(defaults.id, getBundledModelReferenceIndex()) as
-		| ModelSpec<"openai-completions">
-		| undefined;
+	// DO prefixes passthrough ids with the upstream vendor (`openai-gpt-…`,
+	// `anthropic-claude-…`) but the canonical index keys upstream families, so
+	// candidates include the prefix-stripped id, its dash-normalized form
+	// (`claude-opus-4-5`), and its family-order form (`claude-5-sonnet` →
+	// `claude-sonnet-5`).
+	const index = getBundledModelReferenceIndex();
+	let canonical: ModelSpec<"openai-completions"> | undefined;
+	for (const candidate of digitalOceanReferenceCandidates(defaults.id)) {
+		canonical = (resolveModelReference(candidate, index) ?? undefined) as ModelSpec<"openai-completions"> | undefined;
+		if (canonical) break;
+	}
+	const entryContext = toPositiveNumberOrNull(entry.context_length);
+	const entryOutput = toPositiveNumberOrNull(entryMaxTokens);
 	if (!canonical) {
 		return {
 			...defaults,
 			name: toModelName(entry.name, defaults.name),
-			contextWindow: toPositiveNumber(entry.context_length, defaults.contextWindow),
-			maxTokens: toPositiveNumber(entryMaxTokens, defaults.maxTokens),
+			contextWindow: entryContext ?? defaults.contextWindow,
+			maxTokens: entryOutput ?? defaults.maxTokens,
 		};
 	}
-	const contextWindow = canonical.contextWindow ?? toPositiveNumber(entry.context_length, defaults.contextWindow);
-	const maxTokensSource = canonical.maxTokens ?? toPositiveNumber(entryMaxTokens, defaults.maxTokens);
+	// Prefer the positive entry limits over the canonical consensus values,
+	// clamping output to context like the no-reference branch does.
+	const contextWindow = entryContext ?? canonical.contextWindow ?? defaults.contextWindow;
+	const maxTokensSource = entryOutput ?? canonical.maxTokens ?? defaults.maxTokens;
 	const maxTokens =
-		maxTokensSource != null && contextWindow != null
-			? Math.min(maxTokensSource, contextWindow)
-			: maxTokensSource;
+		maxTokensSource != null && contextWindow != null ? Math.min(maxTokensSource, contextWindow) : maxTokensSource;
 	return {
 		...defaults,
 		name: toModelName(entry.name, canonical.name ?? defaults.name),

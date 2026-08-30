@@ -8,14 +8,14 @@
  * for keys that fail to authenticate.
  */
 import { describe, expect, it } from "bun:test";
-
+import type { OAuthLoginCallbacks } from "@oh-my-pi/pi-ai/oauth/types";
 import { loginDigitalOcean } from "@oh-my-pi/pi-ai/registry/digitalocean";
 import type { FetchImpl } from "@oh-my-pi/pi-catalog/types";
 
 const MODELS_HOST = "inference.do-ai.run";
 const MODELS_PATH = "/v1/models";
 
-function makeController(fetchImpl: FetchImpl): Parameters<typeof loginDigitalOcean>[0] {
+function makeController(fetchImpl: FetchImpl): OAuthLoginCallbacks {
 	return {
 		fetch: fetchImpl,
 		onPrompt: async () => "doo_v1_TESTKEY",
@@ -32,10 +32,7 @@ describe("DigitalOcean login", () => {
 			capturedUrl = typeof input === "string" ? input : input.toString();
 			const header = (init?.headers as Record<string, string> | undefined)?.Authorization;
 			capturedAuth = header ?? "";
-			return new Response(
-				JSON.stringify({ object: "list", data: [{ id: "glm-5.2" }] }),
-				{ status: 200 },
-			);
+			return new Response(JSON.stringify({ object: "list", data: [{ id: "glm-5.2" }] }), { status: 200 });
 		};
 
 		const key = await loginDigitalOcean(makeController(fetchImpl));
