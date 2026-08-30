@@ -1,6 +1,6 @@
 import { type OmpErrors, OmpTypeError } from "./errors";
 import { type EmbeddableSchema, type Extras, embed, hasDeferredAlias, type IR, IR_BRAND, type PropIR } from "./ir";
-import { type NarrowContext, type Type, type } from "./type";
+import { type FilterOptions, type NarrowContext, type Type, type } from "./type";
 
 interface OptionalSchemaMarker {
 	readonly _optional: true;
@@ -15,7 +15,7 @@ interface Decoratable<out Out> extends EmbeddableSchema {
 	(value: unknown): Out | OmpErrors;
 	narrow(predicate: (value: Out, context: NarrowContext) => unknown): Decoratable<Out>;
 	/** Input-side predicate: runs on the raw value, before the base validates it. */
-	filter(predicate: (value: unknown, context: NarrowContext) => unknown): Decoratable<Out>;
+	filter(predicate: (value: unknown, context: NarrowContext) => unknown, options?: FilterOptions): Decoratable<Out>;
 	pipe<Next>(transform: (value: Out, context: NarrowContext) => Next): Decoratable<Exclude<Next, OmpErrors>>;
 	or(def: unknown): Decoratable<unknown>;
 	describe(description: string): Decoratable<Out>;
@@ -133,7 +133,7 @@ function rebuildInfoOf<Out>(schema: Decoratable<Out>): RebuildInfo<Out> | undefi
 	return carrier[kRebuild];
 }
 
-/** Configurable so a schema stamped by `guardArrays` can be re-stamped once its full wrapper chain is known. */
+/** Configurable so a schema stamped by `guardObjectInput` can be re-stamped once its full wrapper chain is known. */
 function stampRebuild<Out>(schema: Decoratable<Out>, info: RebuildInfo<Out>): Decoratable<Out> {
 	Object.defineProperty(schema, kRebuild, { value: info, enumerable: false, configurable: true });
 	return schema;
@@ -162,7 +162,7 @@ function restrictBase<Out>(source: Decoratable<Out>, ir: IR): Decoratable<Out> {
 	// discriminated union rebuilt by `.describe()` — keeps the guard it arrived
 	// with.
 	const guarded = ir.k === "object" || info?.guarded === true;
-	let next = guarded ? guardArrays(structural) : structural;
+	let next = guarded ? guardObjectInput(structural) : structural;
 	if (info?.rewrap !== undefined) next = info.rewrap(next);
 	return guarded || info?.rewrap !== undefined
 		? stampRebuild(next, { base: structural, guarded, rewrap: info?.rewrap })
@@ -173,14 +173,17 @@ function restrictBase<Out>(source: Decoratable<Out>, ir: IR): Decoratable<Out> {
  * Reject an array reaching an object schema, which zod does and the emitted
  * `{"type":"object"}` already promises.
  *
- * A `filter` step, not `narrow`: filters run against the RAW INPUT before the
- * base validates it, so this also catches the shapes an output-side check
- * cannot — a key-stripping object has already turned `[]` into `{}` by the time
- * a narrow runs, and so has a discriminated union whose matching variant strips.
+ * A RAW `filter` step: filters run before the base validates, so this also
+ * catches what an output-side `narrow` cannot — a key-stripping object has
+ * already turned `[]` into `{}` by the time a narrow runs, and so has a
+ * discriminated union whose matching variant strips. `raw` skips the input
+ * prevalidation walk a filter normally triggers, which would validate every
+ * accepted object twice and rewalk descendants once per nesting level.
  */
-function guardArrays<Out>(base: Decoratable<Out>): Decoratable<Out> {
+function guardObjectInput<Out>(base: Decoratable<Out>): Decoratable<Out> {
 	const guarded = base.filter(
 		(value, ctx: NarrowContext) => !Array.isArray(value) || ctx.mustBe("an object, not an array"),
+		{ raw: true },
 	);
 	return stampRebuild(guarded, { base, guarded: true });
 }
@@ -527,7 +530,7 @@ function objectSchema<const S extends Shape>(shape: S, extras: Extras = "delete"
 		props.push(prop);
 	}
 	const base = schemaFromIR<unknown>({ k: "object", props, extras });
-	return decorateUnknown(guardArrays(base)) as unknown as ZodLikeSchema<ObjectOutput<S>>;
+	return decorateUnknown(guardObjectInput(base)) as unknown as ZodLikeSchema<ObjectOutput<S>>;
 }
 
 export const string = (): ZodLikeSchema<string> => decorate(schemaFromIR(type.string.ir));
@@ -779,7 +782,7 @@ export const discriminatedUnion = <
 			// union's input is an object by definition, yet a stripping variant
 			// whose discriminator carries a default (`kind: z.literal("a")
 			// .default("a")`) would otherwise morph `[]` into `{ kind: "a" }`.
-			return decorate(guardArrays(schemaFromIR<UnionOutput<Schemas>>({ k: "union", members: variantIrs })));
+			return decorate(guardObjectInput(schemaFromIR<UnionOutput<Schemas>>({ k: "union", members: variantIrs })));
 		} catch (error) {
 			// Same fallback as union(): variants whose discriminators do not
 			// disjointly pin literals (e.g. optional discriminators overlapping
@@ -884,7 +887,7 @@ export const record = <Key extends string, Value>(
 		index: embed(valueSchema),
 		extras: "keep",
 	});
-	const checked = guardArrays(base).narrow((value, ctx: NarrowContext) => {
+	const checked = guardObjectInput(base).narrow((value, ctx: NarrowContext) => {
 		for (const key in value) {
 			if (keySchema(key) instanceof type.errors) return ctx.mustBe("a record with valid string keys");
 		}

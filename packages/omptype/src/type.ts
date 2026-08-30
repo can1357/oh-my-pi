@@ -293,8 +293,11 @@ interface FluentMethods<t, i> {
 	earlierThan(bound: Date | number): FluentType<t, i>;
 	readonly pipe: PipeMethod<t, i>;
 	to<const def>(def: def): FluentType<InferDef<def>, i>;
-	filter<narrowed extends i>(fn: (data: i, ctx: NarrowContext) => data is narrowed): FluentType<t, narrowed>;
-	filter(fn: (data: i, ctx: NarrowContext) => boolean | OmpErrors): FluentType<t, i>;
+	filter<narrowed extends i>(
+		fn: (data: i, ctx: NarrowContext) => data is narrowed,
+		options?: FilterOptions,
+	): FluentType<t, narrowed>;
+	filter(fn: (data: i, ctx: NarrowContext) => boolean | OmpErrors, options?: FilterOptions): FluentType<t, i>;
 	narrow<narrowed extends t>(fn: (data: t, ctx: NarrowContext) => data is narrowed): FluentType<narrowed, i>;
 	narrow(fn: (data: t, ctx: NarrowContext) => boolean | OmpErrors): FluentType<t, i>;
 	brand<const name extends string>(name: name): FluentType<Brand<t, name>, i>;
@@ -405,6 +408,18 @@ export interface FnParser {
 	<const definitions extends readonly FnDefinition[]>(...definitions: definitions): FnFactory<definitions>;
 	raw<const definitions extends readonly FnDefinition[]>(...definitions: definitions): FnFactory<definitions>;
 }
+/** Options accepted by `Type.filter`. */
+export interface FilterOptions {
+	/**
+	 * Inspect the value exactly as handed in, skipping the input prevalidation
+	 * walk a filter normally gets. Use for predicates that only classify the raw
+	 * value (`Array.isArray`, `instanceof Date`): the prevalidation would walk
+	 * the whole input a second time — quadratic across nested schemas — and
+	 * observe getters and proxies twice, which a raw classifier gains nothing
+	 * from.
+	 */
+	raw?: boolean;
+}
 interface Step {
 	kind: "pipe" | "narrow" | "filter";
 	fn: (data: unknown, ctx: NarrowContext) => unknown;
@@ -412,6 +427,8 @@ interface Step {
 	try?: boolean;
 	/** Output IR when the step validates its output; drives public `.out`. */
 	out?: IR;
+	/** Filter step that inspects the raw input; see {@link FilterOptions.raw}. */
+	raw?: boolean;
 }
 /** Runtime constructor-like value used by ArkType-compatible `instanceof Type` checks. */
 export const Type = Object.defineProperty(function Type(): void {}, Symbol.hasInstance, {
@@ -894,8 +911,9 @@ const typeMethods = {
 		return appendPipes(this, [makeType(parseDef(def, this.resolver), [], {})], false, true);
 	},
 
-	filter(this: InternalType, fn: Step["fn"]): InternalType {
-		return makeType(this.ir, [{ kind: "filter", fn }, ...this[kSteps]], metaOf(this));
+	filter(this: InternalType, fn: Step["fn"], options?: FilterOptions): InternalType {
+		const step: Step = options?.raw === true ? { kind: "filter", fn, raw: true } : { kind: "filter", fn };
+		return makeType(this.ir, [step, ...this[kSteps]], metaOf(this));
 	},
 
 	narrow(this: InternalType, fn: Step["fn"]): InternalType {
@@ -1179,7 +1197,11 @@ function makeType(ir: IR, steps: Step[], meta: TypeMeta): unknown {
 	const base: Validator = (data: unknown): unknown => impl(data);
 	const errorConfig = meta.errorConfig ?? ir.cfg;
 
-	const filterInput = steps.some(step => step.kind === "filter") ? projectIO(ir, "in") : undefined;
+	// Raw filters classify the value as handed in, so they do not pay for (or
+	// want) the prevalidation walk; a single non-raw filter still triggers it.
+	const filterInput = steps.some(step => step.kind === "filter" && step.raw !== true)
+		? projectIO(ir, "in")
+		: undefined;
 	const validate: Validator =
 		steps.length === 0
 			? base
