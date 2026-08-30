@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, spyOn } from "bun:test";
 import { Process, ProcessStatus } from "@oh-my-pi/pi-natives";
 import { createLinuxSubreaperScript, exec, NonZeroExitError, spawn, TimeoutError } from "@oh-my-pi/pi-utils/ptree";
 
@@ -56,6 +56,44 @@ describe("ptree timeout", () => {
 			process.off("unhandledRejection", onUnhandled);
 		}
 	});
+
+	it.skipIf(process.platform !== "linux")(
+		"waits for subreaper cleanup when an AbortSignal races the timeout kill",
+		async () => {
+			const controller = new AbortController();
+			using child = spawn([process.execPath, "-e", "Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0)"], {
+				signal: controller.signal,
+				subreaper: true,
+			});
+			const nativeRoot = Process.fromPid(child.pid);
+			expect(nativeRoot).toBeDefined();
+
+			let sweepFinished = false;
+			const root = {
+				children: () => [],
+				killTree: () => {
+					sweepFinished = true;
+					nativeRoot?.killTree(9);
+				},
+				terminate: () => {
+					nativeRoot?.killTree(9);
+					return Promise.resolve(true);
+				},
+			} as unknown as Process;
+			const fromPid = spyOn(Process, "fromPid").mockReturnValue(root);
+
+			try {
+				child.kill(new TimeoutError(1, ""), -1);
+				controller.abort("concurrent abort");
+
+				await expect(child.text()).rejects.toBeInstanceOf(TimeoutError);
+				expect(sweepFinished).toBe(true);
+			} finally {
+				fromPid.mockRestore();
+				nativeRoot?.killTree(9);
+			}
+		},
+	);
 
 	it.skipIf(process.platform !== "linux")("falls back after the first libc soname is unavailable", async () => {
 		const script = createLinuxSubreaperScript(["libc.so.omp-missing", "libc.so.6", "libc.so"]);

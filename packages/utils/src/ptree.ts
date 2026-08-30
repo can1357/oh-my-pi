@@ -191,6 +191,8 @@ export class ChildProcess<In extends InMask = InMask> {
 	#stderrStream?: ReadableStream<Uint8Array>;
 	// Termination in flight after kill(); aborted exits await it before reporting.
 	#terminating?: Promise<boolean | void>;
+	// A hard subreaper sweep must remain authoritative across overlapping kill requests.
+	#hardKillSweep?: Promise<void>;
 	#terminateGroup: boolean;
 	#hardKillTree: boolean;
 	// Windows has no process groups. Retaining the root's native handle pins
@@ -342,13 +344,22 @@ export class ChildProcess<In extends InMask = InMask> {
 			// group leader; wait() still needs to report the later deadline.
 			if (this.proc.exitCode !== null) this.#exitReason = reason;
 		}
+		// An AbortSignal can race a timeout after its hard subreaper sweep has
+		// started. Do not replace that sweep with a normal root termination: the
+		// root must stay alive until adopted descendants have been collected.
+		if (this.#hardKillSweep) return;
 		if (gracefulMs !== undefined && gracefulMs < 0 && this.#hardKillTree && this.proc.exitCode === null) {
 			// Keep the subreaper alive while descendants are killed. A single
 			// killTree() snapshot can miss a worker whose parent exits during the
 			// walk and reparents it to the subreaper after that root was enumerated.
 			const root = Process.fromPid(this.proc.pid);
 			if (root) {
-				this.#terminating = this.#hardKillSubreaperTree(root).catch(e => void e);
+				const sweep = this.#hardKillSubreaperTree(root).catch(e => void e);
+				this.#hardKillSweep = sweep;
+				this.#terminating = sweep;
+				void sweep.finally(() => {
+					if (this.#hardKillSweep === sweep) this.#hardKillSweep = undefined;
+				});
 				return;
 			}
 		}
