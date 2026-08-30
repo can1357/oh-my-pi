@@ -123,6 +123,33 @@ describe("recall FTS path excludes superseded rows from candidate slots", () => 
 	});
 });
 
+describe("recall FTS path excludes EXPIRED rows from candidate slots", () => {
+	test("linear recall returns the live row even when valid_until-retired rows flood the inner pool", async () => {
+		const db = new Database(":memory:");
+		initBeam(db);
+		const beam = makeBeam(db);
+		seedWorking(db, "live0000000000bb", "corridor deployment runbook lives here");
+		// Same flood as the superseded case, but retired the way `memory_edit invalidate` actually
+		// does it: `valid_until` in the past, `superseded_by` left NULL. This drives `recall()`, the
+		// production lexical path; the helpers-level test alone would stay green if `ftsRows` in
+		// recall.ts regressed, because those helpers have no production callers.
+		const past = new Date(Date.now() - 60_000).toISOString();
+		for (let index = 0; index < 55; index++) {
+			const id = `gone${String(index).padStart(12, "0")}`;
+			seedWorking(db, id, "corridor corridor corridor deployment deployment runbook runbook details");
+			db.run("UPDATE working_memory SET valid_until = ? WHERE id = ?", [past, id]);
+		}
+		const supersededCount = (
+			db.prepare("SELECT COUNT(*) AS n FROM working_memory WHERE superseded_by IS NOT NULL").get() as { n: number }
+		).n;
+		expect(supersededCount).toBe(0);
+
+		const results = await recall(beam, "corridor deployment runbook", 1, {});
+		expect(results.map(row => row.id)).toEqual(["live0000000000bb"]);
+		db.close();
+	});
+});
+
 describe("cjk fallback excludes superseded rows", () => {
 	test("k=1 returns the live row when a superseded row matches more query characters", () => {
 		const db = new Database(":memory:");
@@ -167,8 +194,10 @@ describe("FTS visibility predicate stays index-driven", () => {
 		);
 		expect(workingPlan).not.toContain("LIST SUBQUERY");
 		expect(workingPlan).not.toContain("SCAN working_memory");
-		expect(workingPlan).toContain("CORRELATED SCALAR SUBQUERY");
-		expect(workingPlan).toContain("SEARCH w");
+		// SQLite <= 3.51 plans the EXISTS as a correlated scalar subquery;
+		// 3.52+ flattens it into a join step ("SEARCH w EXISTS"). Both are
+		// per-candidate index probes, which is the contract.
+		expect(workingPlan).toMatch(/SEARCH w (EXISTS )?USING INDEX sqlite_autoindex_working_memory_1/);
 
 		const episodicPlan = plan(
 			db,
@@ -179,7 +208,7 @@ describe("FTS visibility predicate stays index-driven", () => {
 		);
 		expect(episodicPlan).not.toContain("LIST SUBQUERY");
 		expect(episodicPlan).not.toContain("SCAN episodic_memory");
-		expect(episodicPlan).toContain("CORRELATED SCALAR SUBQUERY");
+		expect(episodicPlan).toMatch(/SEARCH e (EXISTS )?USING INTEGER PRIMARY KEY/);
 
 		// Control: the rejected IN form really does produce what we are guarding against, so this
 		// test cannot pass vacuously if EXPLAIN output ever changes shape.
@@ -192,6 +221,43 @@ describe("FTS visibility predicate stays index-driven", () => {
 		);
 		expect(rejected).toContain("LIST SUBQUERY");
 		expect(rejected).toContain("SCAN working_memory");
+
+		db.close();
+	});
+});
+
+/**
+ * A memory retired WITHOUT a replacement id keeps `superseded_by` NULL and is expressed only through
+ * `valid_until` — and that is the DEFAULT shape, because the agent-facing `memory_edit invalidate`
+ * passes no replacement. Filtering FTS candidates on `superseded_by` alone therefore missed the
+ * common case entirely: enough retired rows starved recall completely.
+ *
+ * Measured before the fix on a bank with 80 retired better-matching rows and 3 live ones: recall
+ * returned 0 rows. The candidate predicate now mirrors `buildWhere()` exactly.
+ */
+describe("expired rows do not occupy FTS candidate slots", () => {
+	test("live rows still surface behind many valid_until-retired better matches", () => {
+		const db = new Database(":memory:");
+		initBeam(db);
+		const insert = db.prepare(
+			`INSERT INTO working_memory (id, content, source, timestamp, importance, scope, session_id, valid_until)
+			 VALUES (?, ?, 'conversation', datetime('now'), 0.5, 'session', 'bank-a', ?)`,
+		);
+		const past = new Date(Date.now() - 60_000).toISOString();
+		// Retired rows repeat the term so FTS ranks them above the live ones.
+		for (let i = 0; i < 80; i++) insert.run(`dead-${i}`, `zzqq zzqq zzqq zzqq retired ${i}`, past);
+		for (let i = 0; i < 3; i++) insert.run(`live-${i}`, `zzqq live candidate ${i}`, null);
+
+		const hits = ftsSearchWorking(db, "zzqq", 5);
+		expect(hits.length).toBeGreaterThan(0);
+		expect(hits.every(h => h.id.startsWith("live-"))).toBe(true);
+
+		// Control: superseded_by alone cannot express this retirement, so a predicate checking only
+		// that column would return the dead rows and this test would be measuring nothing.
+		const supersededCount = (
+			db.prepare("SELECT COUNT(*) AS n FROM working_memory WHERE superseded_by IS NOT NULL").get() as { n: number }
+		).n;
+		expect(supersededCount).toBe(0);
 
 		db.close();
 	});

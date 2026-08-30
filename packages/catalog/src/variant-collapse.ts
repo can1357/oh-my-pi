@@ -81,8 +81,14 @@ export interface EffortVariantFamily {
 	 * efforts fall back to `requestModelId ?? id`.
 	 */
 	routing: Readonly<Partial<Record<Effort | "off", string>>>;
-	/** Explicit capability surface for the collapsed spec — no inference. */
-	thinking: Readonly<Omit<ThinkingConfig, "effortRouting" | "suppressWhenOff">>;
+	/**
+	 * Explicit capability surface for the collapsed spec — no inference. Omit
+	 * for single-wire-id renames on providers where effort is encoded in the
+	 * upstream id itself (Devin): with one member and no routing there is no
+	 * controllable surface, and the collapsed spec must carry no thinking
+	 * rather than an effort ladder whose every tier resolves to one wire id.
+	 */
+	thinking?: Readonly<Omit<ThinkingConfig, "effortRouting" | "suppressWhenOff">>;
 	/** Thinking-off requests must explicitly suppress thinking on the wire. */
 	suppressWhenOff?: boolean;
 	/**
@@ -98,6 +104,15 @@ export interface EffortVariantFamily {
 
 export interface VariantCollapseTable {
 	families: readonly EffortVariantFamily[];
+	/**
+	 * Provider-scoped selector aliases: short native-CLI names and dotted
+	 * upstream spellings → logical model id. Unlike family members and
+	 * `extraAliases` these are deliberately invisible to the bare-id lookup
+	 * ({@link resolveBareVariantAlias}) and to the reverse index — a generic
+	 * label like `gpt` or `opus` only means something once a provider is
+	 * named, and must never hijack an unqualified selector or re-key config.
+	 */
+	providerAliases?: Readonly<Record<string, string>>;
 }
 
 /** `X` + `X-thinking` hand family: off routes to the bare id, efforts to `-thinking`. */
@@ -184,6 +199,26 @@ function tierFamily(
 			...(routes.off ? undefined : { requiresEffort: true }),
 		},
 		...(defaultMember !== undefined ? { defaultMember } : undefined),
+	};
+}
+
+/** Devin tier family with a server-declared default effort. */
+function devinTierFamily(
+	id: string,
+	name: string,
+	routes: TierRoutes,
+	efforts: readonly Effort[],
+	defaultEffort?: Effort,
+): EffortVariantFamily {
+	const family = tierFamily(id, name, routes, efforts);
+	if (defaultEffort === undefined || family.thinking === undefined) return family;
+	const defaultMember = family.routing[defaultEffort];
+	return {
+		...family,
+		...(defaultMember !== undefined
+			? { members: [defaultMember, ...family.members.filter(member => member !== defaultMember)], defaultMember }
+			: undefined),
+		thinking: { ...family.thinking, defaultLevel: defaultEffort },
 	};
 }
 
@@ -721,7 +756,110 @@ export const DEVIN_VARIANT_COLLAPSE_TABLE: VariantCollapseTable = {
 			},
 			[Effort.High, Effort.XHigh],
 		),
+		// Gemini 3.7 Flash — four wire tiers, native default `-medium`.
+		devinTierFamily(
+			"gemini-3-7-flash",
+			"Gemini 3.7 Flash",
+			{
+				minimal: "gemini-3-7-flash-minimal",
+				low: "gemini-3-7-flash-low",
+				medium: "gemini-3-7-flash-medium",
+				high: "gemini-3-7-flash-high",
+			},
+			[Effort.Minimal, Effort.Low, Effort.Medium, Effort.High],
+			Effort.Medium,
+		),
+		// SWE-1.7 Lightning — like SWE-1.7, the top tier is the bare wire uid.
+		devinTierFamily(
+			"swe-1-7-lightning",
+			"SWE-1.7 Lightning",
+			{
+				medium: "swe-1-7-lightning-medium",
+				max: "swe-1-7-lightning",
+			},
+			[Effort.Medium, Effort.Max],
+			Effort.Medium,
+		),
+		devinTierFamily(
+			"grok-4-6",
+			"Grok 4.6",
+			{
+				low: "grok-4-6-low",
+				medium: "grok-4-6-medium",
+				high: "grok-4-6-high",
+				xhigh: "grok-4-6-xhigh",
+			},
+			DEVIN_FOUR_TIER_EFFORTS,
+			Effort.Medium,
+		),
+		devinTierFamily(
+			"deepseek-v4-flash",
+			"DeepSeek V4 Flash",
+			{
+				low: "deepseek-v4-flash-low",
+				high: "deepseek-v4-flash-high",
+				max: "deepseek-v4-flash-max",
+			},
+			[Effort.Low, Effort.High, Effort.Max],
+			Effort.High,
+		),
+		devinTierFamily(
+			"deepseek-v4-pro",
+			"DeepSeek V4 Pro",
+			{
+				low: "deepseek-v4-pro-low",
+				high: "deepseek-v4-pro-high",
+				max: "deepseek-v4-pro-max",
+			},
+			[Effort.Low, Effort.High, Effort.Max],
+			Effort.High,
+		),
+		devinTierFamily(
+			"nemotron-3-ultra",
+			"Nemotron 3 Ultra",
+			{
+				off: "nemotron-3-ultra-none",
+				medium: "nemotron-3-ultra-medium",
+				high: "nemotron-3-ultra-high",
+			},
+			[Effort.Medium, Effort.High],
+			Effort.High,
+		),
+		// Claude Haiku 4.5 ships under one opaque wire uid with no tier
+		// siblings: a rename-only collapse. Devin encodes effort in the uid, so
+		// a single-member family has no controllable surface — no `thinking`.
+		{
+			id: "claude-haiku-4-5",
+			name: "Claude Haiku 4.5",
+			members: ["MODEL_PRIVATE_11"],
+			routing: {},
+		},
 	],
+	/**
+	 * Devin CLI selector parity. The native picker accepts short family labels
+	 * (`opus`, `swe`) and the dotted upstream spelling of each current family.
+	 * Both are only meaningful under `devin/`, so they stay provider-scoped:
+	 * a bare `gpt` or `claude` must keep resolving by the global rules.
+	 */
+	providerAliases: {
+		claude: "claude-sonnet-5",
+		codex: "gpt-5-3-codex",
+		gemini: "gemini-3-7-flash",
+		gpt: "gpt-5-6-terra",
+		haiku: "claude-haiku-4-5",
+		opus: "claude-opus-5",
+		sonnet: "claude-sonnet-5",
+		swe: "swe-1-7-lightning",
+		"claude-haiku-4.5": "claude-haiku-4-5",
+		"gemini-3.7-flash": "gemini-3-7-flash",
+		"glm-5.2": "glm-5-2",
+		"gpt-5.6-luna": "gpt-5-6-luna",
+		"gpt-5.6-sol": "gpt-5-6-sol",
+		"gpt-5.6-terra": "gpt-5-6-terra",
+		"grok-4.6": "grok-4-6",
+		"swe-1.7": "swe-1-7",
+		"swe-1.7-lightning": "swe-1-7-lightning",
+	},
 };
 
 /** Cursor's Grok tier tokens equal the effort id, so routing is a direct map. */
@@ -1142,9 +1280,10 @@ function refreshCollapsedThinking<TSpec extends VariantSpecLike>(
 	// Scope snapshot self-heal to families carrying a curated per-effort budget
 	// contract (Antigravity gemini-3.x). Their routing targets are all verified
 	// live, so rebuilding routing here is safe; families without `effortBudgets`
-	// (derived `X`/`X-thinking` pairs, claude pairs) keep their presence-filtered
-	// snapshot routing untouched.
-	if (!spec.reasoning || family.thinking.effortBudgets === undefined) return spec;
+	// (derived `X`/`X-thinking` pairs, claude pairs, surface-less renames) keep
+	// their presence-filtered snapshot routing untouched.
+	const familyThinking = family.thinking;
+	if (!spec.reasoning || familyThinking?.effortBudgets === undefined) return spec;
 	const routing: Partial<Record<Effort | "off", string>> = {};
 	let hasRouting = false;
 	for (const effortKey in family.routing) {
@@ -1154,7 +1293,7 @@ function refreshCollapsedThinking<TSpec extends VariantSpecLike>(
 			hasRouting = true;
 		}
 	}
-	const thinking: ThinkingConfig = { ...family.thinking };
+	const thinking: ThinkingConfig = { ...familyThinking };
 	if (hasRouting) thinking.effortRouting = routing;
 	if (family.suppressWhenOff) thinking.suppressWhenOff = true;
 	const offTarget = family.routing.off;
@@ -1281,9 +1420,12 @@ export function collapseEffortVariants<TSpec extends VariantSpecLike>(
 		// A family that routes efforts to a live thinking backing id reasons
 		// even when upstream metadata forgot to mark the members.
 		const reasoning = memberSpecs.some(spec => spec.reasoning) || hasEffortRoute;
-		const thinking: ThinkingConfig = { ...family.thinking };
-		if (hasRouting) thinking.effortRouting = routing;
-		if (family.suppressWhenOff) thinking.suppressWhenOff = true;
+		const familyThinking = family.thinking;
+		const thinking: ThinkingConfig | undefined = familyThinking ? { ...familyThinking } : undefined;
+		if (thinking !== undefined) {
+			if (hasRouting) thinking.effortRouting = routing;
+			if (family.suppressWhenOff) thinking.suppressWhenOff = true;
+		}
 
 		const input: ("text" | "image")[] = [];
 		if (memberSpecs.some(spec => spec.input.includes("text"))) input.push("text");
@@ -1318,7 +1460,10 @@ export function collapseEffortVariants<TSpec extends VariantSpecLike>(
 		} else {
 			collapsed.requestModelId = defaultWireId as string;
 		}
-		if (reasoning) {
+		// A surface-less family (single wire id, uid-encoded effort) keeps
+		// `reasoning` but carries no thinking: every tier would resolve to the
+		// same upstream id, so there is nothing to select.
+		if (reasoning && thinking !== undefined) {
 			collapsed.thinking = thinking;
 		} else {
 			delete collapsed.thinking;
@@ -1469,6 +1614,11 @@ export function collapseBuiltModelVariants<TApi extends Api>(models: readonly Mo
 interface VariantAliasIndex {
 	/** lowercased retired id → replacement model id. */
 	forward: Map<string, string>;
+	/**
+	 * lowercased provider-scoped alias → replacement model id. Kept apart from
+	 * `forward` so bare-id and reverse lookups never see it.
+	 */
+	providerScoped: Map<string, string>;
 	/** replacement model id → retired ids that resolve to it. */
 	reverse: Map<string, string[]>;
 	/** Collapsed logical ids declared by the table or observed at runtime. */
@@ -1487,6 +1637,7 @@ interface TableWithAliasIndex extends VariantCollapseTable {
 function createAliasIndex(): VariantAliasIndex {
 	return {
 		forward: new Map<string, string>(),
+		providerScoped: new Map<string, string>(),
 		reverse: new Map<string, string[]>(),
 		familyIds: new Set<string>(),
 	};
@@ -1549,20 +1700,26 @@ function getAliasIndex(table: VariantCollapseTable): VariantAliasIndex {
 		for (const member of family.members) addVariantAlias(index, member, family.id);
 		for (const alias of family.extraAliases ?? []) addVariantAlias(index, alias, family.id);
 	}
+	for (const alias in table.providerAliases) {
+		const target = table.providerAliases[alias] as string;
+		if (alias !== target) index.providerScoped.set(alias.toLowerCase(), target);
+	}
 	tagged[kAliasIndex] = index;
 	return index;
 }
 
 /**
- * Resolve a retired effort-tier variant id (collapsed member, recycled id) to
- * its replacement model id for `provider` via hand-table or registered live
- * aliases. Returns `undefined` when the id is not a known alias; derived
- * `X-thinking` members also resolve through `stripThinkingVariantToken`.
- * Callers must try an exact model lookup first — a live model always wins over
- * an alias.
+ * Resolve a retired effort-tier variant id, registered live alias, or
+ * provider-scoped native alias to its replacement model id for `provider`.
+ * Returns `undefined` when the id is unknown. Callers must try an exact model
+ * lookup first because a live model always wins over an alias.
  */
 export function resolveVariantAlias(provider: Provider, modelId: string): string | undefined {
-	return resolveRegisteredVariantAlias(provider, modelId.trim().toLowerCase());
+	const normalized = modelId.trim().toLowerCase();
+	const registered = resolveRegisteredVariantAlias(provider, normalized);
+	if (registered !== undefined) return registered;
+	const table = VARIANT_COLLAPSE_TABLES[provider] ?? VARIANT_COLLAPSE_TABLES[provider.toLowerCase()];
+	return table ? getAliasIndex(table).providerScoped.get(normalized) : undefined;
 }
 
 /** Bare-id alias hit: replacement id plus the providers declaring it. */

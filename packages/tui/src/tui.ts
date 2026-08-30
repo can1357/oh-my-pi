@@ -16,6 +16,7 @@ import * as fs from "node:fs";
 import { performance } from "node:perf_hooks";
 import { $flag, getDebugLogPath, logger } from "@oh-my-pi/pi-utils";
 import { DEFAULT_MAX_INLINE_IMAGES, ImageBudget } from "./components/image";
+import { TuiDebugServer } from "./debug-server";
 import { isKeyRelease, matchesKey } from "./keys";
 import { LoopWatchdog } from "./loop-watchdog";
 import { setAltScreenActive, type Terminal } from "./terminal";
@@ -181,6 +182,15 @@ const DEFAULT_RENDER_SCHEDULER: RenderScheduler = {
  * which leading rows survived.
  */
 export interface Component {
+	/** Stable identifier surfaced in the debug tree as kind#id. */
+	debugId?: string;
+	/** Override for the tree node kind (default: constructor.name). */
+	debugKind?: string;
+	/** Widget state for the debug `values`/`tree` ops. JSON-serializable. */
+	debugState?(): Record<string, unknown>;
+	/** Children for the debug tree when not already exposed as a public `children` array. */
+	debugChildren?: readonly Component[];
+
 	/**
 	 * Render the component to an array of physical rows at the given width.
 	 * The result is component-owned and `readonly` to the caller; an unchanged
@@ -699,6 +709,16 @@ export class TUI extends Container {
 	#previousWidth = 0;
 	#previousHeight = 0;
 	#focusedComponent: Component | null = null;
+	#debugServer: TuiDebugServer | undefined;
+	#debugPaint:
+		| {
+				lines: readonly string[];
+				windowTop: number;
+				altScreen: boolean;
+				cursor?: { x: number; y: number; visible?: boolean };
+		  }
+		| undefined;
+	#debugNextWindowTop = 0;
 	#inputListeners = new Set<InputListener>();
 	#startListeners = new Set<StartListener>();
 
@@ -940,6 +960,27 @@ export class TUI extends Container {
 	getFocused(): Component | null {
 		return this.#focusedComponent;
 	}
+	/** Last viewport successfully written by the renderer, for debug inspection. */
+	getDebugPaint():
+		| {
+				lines: readonly string[];
+				windowTop: number;
+				altScreen: boolean;
+				cursor?: { x: number; y: number; visible?: boolean };
+		  }
+		| undefined {
+		return this.#debugPaint;
+	}
+
+	/** Render the current root document at the live terminal width for debug inspection. */
+	getDebugDocument(): readonly string[] {
+		return this.render(Math.max(1, this.terminal.columns));
+	}
+
+	/** Feed debug and test input through the same pipeline as terminal stdin. */
+	injectDebugInput(data: string): void {
+		this.#handleInput(data);
+	}
 
 	/**
 	 * Show an overlay component with configurable positioning and sizing.
@@ -1042,6 +1083,14 @@ export class TUI extends Container {
 
 	start(options?: TUIStartOptions): void {
 		this.#stopped = false;
+		this.#debugPaint = undefined;
+		this.#debugServer?.stop();
+		this.#debugServer = undefined;
+		const debugPath = process.env.OMP_TUI_DEBUG;
+		if (debugPath !== undefined && debugPath.length > 0) {
+			this.#debugServer = new TuiDebugServer(this, debugPath);
+			this.#debugServer.start();
+		}
 		this.#inputDeferred = options?.deferInput === true;
 		this.#watchdog.start();
 		this.#ghosttyInitialImageDelayDone = false;
@@ -1566,6 +1615,8 @@ export class TUI extends Container {
 	}
 
 	stop(): void {
+		this.#debugServer?.stop();
+		this.#debugServer = undefined;
 		this.#resizeSettleTimer?.cancel();
 		this.#resizeSettleTimer = undefined;
 		this.#cancelResizeProbe();
@@ -2210,6 +2261,7 @@ export class TUI extends Container {
 	#renderProviderFrame(width: number, height: number): void {
 		const provider = this.#frameProvider;
 		if (!provider || width <= 0 || height <= 0) return;
+		this.#debugNextWindowTop = 0;
 		this.#imageBudget.beginPass();
 		const plan = provider.renderFrame({ columns: width, rows: height });
 		this.#imageBudget.endPass();
@@ -2462,6 +2514,12 @@ export class TUI extends Container {
 		}
 		buffer += this.#paintEndSequence;
 		this.terminal.write(buffer);
+		this.#debugPaint = {
+			lines: prepared,
+			windowTop: this.#debugNextWindowTop,
+			altScreen: false,
+			...(target === null ? {} : { cursor: { x: target.col, y: target.row, visible: target.visible } }),
+		};
 		if (target) this.#recordHardwareCursorState(target);
 		else this.#recordHardwareCursorHidden();
 		this.#providerWindow = mutablePrepared;
@@ -2570,6 +2628,7 @@ export class TUI extends Container {
 		const composed = this.render(width);
 		this.#imageBudget.endPass();
 		if (this.#maybeDeferGhosttyInitialImagePaint()) return;
+		this.#debugNextWindowTop = Math.max(0, composed.length - height);
 		const viewport = composed.length > height ? composed.slice(composed.length - height) : Array.from(composed);
 		this.#emitPlanFrame(width, height, viewport, undefined, undefined);
 	}
@@ -2915,6 +2974,7 @@ export class TUI extends Container {
 		buffer += this.#paintEndSequence;
 		this.terminal.write(buffer);
 		this.#altPreviousLines = fitted;
+		this.#debugPaint = { lines: fitted, windowTop: 0, altScreen: true };
 		this.#fullRedrawCount += 1;
 	}
 }

@@ -2233,12 +2233,13 @@ checksum = "1d674e81391d1e1ab681a28d99df07927c6d4aa5b027d7da16ba32d1d21ecd99"
 
 [[package]]
 name = "flate2"
-version = "1.1.9"
+version = "1.1.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "843fba2746e448b37e26a819579957415c8cef339bf08564fe8b7ddbd959573c"
+checksum = "6e634e2e0ebac1ee034020da1ca582e17ffe4e0f5e985823721e168928136dcb"
 dependencies = [
  "crc32fast",
- "miniz_oxide",
+ "miniz_oxide 0.9.1",
+ "zlib-rs",
 ]
 
 [[package]]
@@ -3723,9 +3724,9 @@ checksum = "c9356095b4b41197bba32173600e1582792cda618f65d12f68e2e77d273413c5"
 
 [[package]]
 name = "html-to-markdown-rs"
-version = "3.11.4"
+version = "3.11.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6331a4c21bc99309e5863092660c08505c426eb1158e0472013487ecff85412b"
+checksum = "c5fe2583aad3e87439e40d841fed327a60892bb9946da1e3a5788ee7f0f4fe3c"
 dependencies = [
  "ahash",
  "astral-tl",
@@ -4184,9 +4185,9 @@ checksum = "964de6e86d545b246d84badc0fef527924ace5134f30641c203ef52ba83f58d5"
 
 [[package]]
 name = "indexmap"
-version = "2.14.0"
+version = "2.14.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d466e9454f08e4a911e14806c24e16fba1b4c121d1ea474396f396069cf949d9"
+checksum = "07aa2048142242915a31d35844fb311e0e53fcca590c3a0a40dcf1b841fa09eb"
 dependencies = [
  "equivalent",
  "hashbrown 0.17.1",
@@ -4932,6 +4933,16 @@ name = "miniz_oxide"
 version = "0.8.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1fa76a2c86f704bdb222d66965fb3d63269ce38518b83cb0575fca855ebb6316"
+dependencies = [
+ "adler2",
+ "simd-adler32",
+]
+
+[[package]]
+name = "miniz_oxide"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b63fbc4a50860e98e7b2aa7804ded1db5cbc3aff9193adaff57a6931bf7c4b4c"
 dependencies = [
  "adler2",
  "simd-adler32",
@@ -6021,7 +6032,7 @@ dependencies = [
 
 [[package]]
 name = "pi-ast"
-version = "18.0.9"
+version = "18.0.11"
 dependencies = [
  "anyhow",
  "ast-grep-core",
@@ -6091,7 +6102,7 @@ dependencies = [
 
 [[package]]
 name = "pi-builtins"
-version = "18.0.9"
+version = "18.0.11"
 dependencies = [
  "ansi-width",
  "anyhow",
@@ -6178,7 +6189,7 @@ dependencies = [
 
 [[package]]
 name = "pi-iso"
-version = "18.0.9"
+version = "18.0.11"
 dependencies = [
  "async-trait",
  "libc",
@@ -6190,7 +6201,7 @@ dependencies = [
 
 [[package]]
 name = "pi-natives"
-version = "18.0.9"
+version = "18.0.11"
 dependencies = [
  "anyhow",
  "arboard",
@@ -6267,7 +6278,7 @@ dependencies = [
 
 [[package]]
 name = "pi-shell"
-version = "18.0.9"
+version = "18.0.11"
 dependencies = [
  "anyhow",
  "brush-core",
@@ -6295,7 +6306,7 @@ dependencies = [
 
 [[package]]
 name = "pi-vcs"
-version = "18.0.9"
+version = "18.0.11"
 dependencies = [
  "gix",
  "jj-lib",
@@ -6308,7 +6319,7 @@ dependencies = [
 
 [[package]]
 name = "pi-voice"
-version = "18.0.9"
+version = "18.0.11"
 dependencies = [
  "audiopus_sys",
  "bytes",
@@ -6323,7 +6334,7 @@ dependencies = [
 
 [[package]]
 name = "pi-walker"
-version = "18.0.9"
+version = "18.0.11"
 dependencies = [
  "dashmap",
  "globset",
@@ -6427,7 +6438,7 @@ dependencies = [
  "crc32fast",
  "fdeflate",
  "flate2",
- "miniz_oxide",
+ "miniz_oxide 0.8.9",
 ]
 
 [[package]]

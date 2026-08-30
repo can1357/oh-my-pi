@@ -7,7 +7,10 @@ use std::{
 
 use gix::bstr::ByteSlice;
 
-use super::GitRepo;
+use super::{
+	GitRepo,
+	open::{load_index_or_empty, status_with_fresh_index},
+};
 use crate::{
 	error::{Error, Result},
 	types::{
@@ -185,9 +188,7 @@ impl GitRepo {
 				.map(|status| !status.is_empty());
 		}
 		let repo = self.gix()?;
-		let platform = repo
-			.status(gix::progress::Discard)
-			.map_err(|err| Error::backend("git status", err))?
+		let platform = status_with_fresh_index(&repo, "git status")?
 			.untracked_files(gix::status::UntrackedFiles::Collapsed);
 		let iter = platform
 			.into_iter(options.pathspecs.iter().map(|path| path.as_bytes().into()))
@@ -246,10 +247,7 @@ impl GitRepo {
 			UntrackedMode::Normal => gix::status::UntrackedFiles::Collapsed,
 			UntrackedMode::All => gix::status::UntrackedFiles::Files,
 		};
-		let platform = repo
-			.status(gix::progress::Discard)
-			.map_err(|err| Error::backend("git status", err))?
-			.untracked_files(untracked);
+		let platform = status_with_fresh_index(&repo, "git status")?.untracked_files(untracked);
 		let iter = platform
 			.into_iter(options.pathspecs.iter().map(|path| path.as_bytes().into()))
 			.map_err(|err| Error::backend("git status", err))?;
@@ -560,6 +558,37 @@ impl GitRepo {
 		Ok(out)
 	}
 
+	/// Return the best common ancestor of `a` and `b` (`git merge-base a b`),
+	/// or `None` when their histories are unrelated. Used for PR-style diffs,
+	/// which compare the merge base against the head rather than the two tips.
+	pub fn merge_base(&self, a: &str, b: &str) -> Result<Option<String>> {
+		if self.is_reftable() {
+			// `git merge-base` exits 1 for unrelated histories but 128 for fatal
+			// failures (missing ref, corrupt object); only the former is `None`.
+			let args = ["merge-base".to_owned(), a.to_owned(), b.to_owned()];
+			let out = super::cli::run_sync(self.root(), &args)?;
+			return match out.exit_code {
+				0 => Ok(nonempty(out.stdout.trim())),
+				1 => Ok(None),
+				_ => out.into_checked(&args).map(|_| None),
+			};
+		}
+		let repo = self.gix()?;
+		let a_id = repo
+			.rev_parse_single(a)
+			.map_err(|err| Error::backend("git merge-base", err))?
+			.detach();
+		let b_id = repo
+			.rev_parse_single(b)
+			.map_err(|err| Error::backend("git merge-base", err))?
+			.detach();
+		match repo.merge_base(a_id, b_id) {
+			Ok(id) => Ok(Some(id.detach().to_string())),
+			Err(gix::repository::merge_base::Error::NotFound { .. }) => Ok(None),
+			Err(err) => Err(Error::backend("git merge-base", err)),
+		}
+	}
+
 	/// List commits touching `file`, newest first.
 	pub fn rev_list_touching(&self, rev: &str, file: &str, limit: usize) -> Result<Vec<String>> {
 		if self.is_reftable() {
@@ -669,9 +698,7 @@ impl GitRepo {
 		}
 		if !others {
 			let repo = self.gix()?;
-			let index = repo
-				.index_or_empty()
-				.map_err(|err| Error::backend("git ls-files", err))?;
+			let index = load_index_or_empty(&repo, "git ls-files")?;
 			let mut out: Vec<_> = index
 				.entries()
 				.iter()
@@ -683,9 +710,7 @@ impl GitRepo {
 			return Ok(out);
 		}
 		let repo = self.gix()?;
-		let mut platform = repo
-			.status(gix::progress::Discard)
-			.map_err(|e| Error::backend("git ls-files", e))?
+		let mut platform = status_with_fresh_index(&repo, "git ls-files")?
 			.untracked_files(gix::status::UntrackedFiles::Files);
 		if !exclude_standard {
 			platform = platform.dirwalk_options(|opts| {
@@ -1200,6 +1225,32 @@ mod tests {
 		git(dir.path(), &["checkout", "--detach"])?;
 		assert_eq!(repo.head()?, HeadState::Detached { commit: Some(sha) });
 		assert_eq!(repo.current_branch()?, None);
+		Ok(())
+	}
+
+	#[test]
+	fn merge_base_resolves_rejects_and_errors() -> TestResult {
+		let (dir, repo) = repo()?;
+		let root = dir.path();
+		commit(root, "base", "base\n", "base")?;
+		let fork = git(root, &["rev-parse", "HEAD"])?.trim().to_owned();
+
+		git(root, &["checkout", "-b", "feature"])?;
+		commit(root, "feature", "feature\n", "feature")?;
+		git(root, &["checkout", "main"])?;
+		commit(root, "advance", "advance\n", "advance")?;
+
+		// Divergent branches share the fork commit as their merge base.
+		assert_eq!(repo.merge_base("main", "feature")?, Some(fork));
+
+		// Orphan branch has no common ancestor: `None`, not an error.
+		git(root, &["checkout", "--orphan", "orphan"])?;
+		git(root, &["rm", "-rf", "."])?;
+		commit(root, "other", "other\n", "orphan")?;
+		assert_eq!(repo.merge_base("main", "orphan")?, None);
+
+		// A missing ref is a fatal failure, never reported as "no merge base".
+		assert!(repo.merge_base("main", "does-not-exist").is_err());
 		Ok(())
 	}
 

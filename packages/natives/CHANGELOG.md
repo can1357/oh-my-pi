@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+## [18.0.11] - 2026-08-29
+
+### Fixed
+
+- Fixed staging and committing files through a reused Git repository handle, ensuring newly staged changes are correctly included in commits even on filesystems with coarse timestamp resolution.
+
+## [18.0.10] - 2026-08-28
+
+### Added
+
+- Added native process replacement support for the CLI’s `/restart` command.
+- Added `VcsGitRepo.mergeBase(a, b)` to find the best common ancestor of two Git revisions, returning `null` when the histories are unrelated.
+
 ## [18.0.9] - 2026-08-28
 
 ### Breaking Changes

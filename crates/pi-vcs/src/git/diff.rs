@@ -4,7 +4,10 @@ use std::{fmt::Write as _, io::Write as _, path::Path};
 
 use gix::bstr::{BStr, BString, ByteSlice};
 
-use super::GitRepo;
+use super::{
+	GitRepo,
+	open::{load_index_or_empty, status_with_fresh_index},
+};
 use crate::{
 	error::{Error, Result},
 	types::{DiffOptions, NumstatEntry, ShowResult},
@@ -310,9 +313,7 @@ fn index_changes(
 	tree_id: gix::ObjectId,
 	files: &[String],
 ) -> Result<Vec<FileChange>> {
-	let index = repo
-		.index_or_empty()
-		.map_err(|err| Error::backend("git diff --cached", err))?;
+	let index = load_index_or_empty(repo, "git diff --cached")?;
 	let mut pathspec = make_pathspec(repo, files, false)?;
 	let mut out = Vec::new();
 	repo
@@ -432,9 +433,7 @@ fn index_change(repo: &gix::Repository, change: gix::diff::index::Change) -> Res
 
 fn worktree_changes(repo: &gix::Repository, files: &[String]) -> Result<Vec<FileChange>> {
 	let patterns = bstring_patterns(files);
-	let mut iter = repo
-		.status(gix::progress::Discard)
-		.map_err(|err| Error::backend("git diff", err))?
+	let mut iter = status_with_fresh_index(repo, "git diff")?
 		.untracked_files(gix::status::UntrackedFiles::None)
 		.index_worktree_options_mut(|options| options.dirwalk_options = None)
 		.into_index_worktree_iter(patterns)
@@ -603,7 +602,15 @@ fn render_change(
 			Ok(Rendered { text, added: None, removed: None })
 		},
 		gix::diff::blob::platform::prepare_diff::Operation::InternalDiff { algorithm } => {
-			let input = prepared.interned_input();
+			// Tokenize with line terminators kept: git's xdiff treats the
+			// terminator as part of the line, so CRLF content diffs with
+			// literal `\r` bytes and a final line without a newline is a
+			// different line than the same text with one. The convenience
+			// `prepared.interned_input()` strips LF/CRLF and would lose both.
+			let input = gix::diff::blob::InternedInput::new(
+				prepared.old.intern_source(),
+				prepared.new.intern_source(),
+			);
 			let diff = gix::diff::blob::diff_with_slider_heuristics(algorithm, &input);
 			let added = diff.count_additions();
 			let removed = diff.count_removals();
@@ -615,15 +622,7 @@ fn render_change(
 				push_new_path(&mut text, change);
 				text.push('\n');
 				let old_data = prepared.old.data.as_slice().unwrap_or_default();
-				let new_data = prepared.new.data.as_slice().unwrap_or_default();
-				let sink = GitHunks {
-					out: &mut text,
-					old_data,
-					old_lines: line_count(old_data),
-					new_lines: line_count(new_data),
-					old_has_newline: old_data.last() == Some(&b'\n'),
-					new_has_newline: new_data.last() == Some(&b'\n'),
-				};
+				let sink = GitHunks { out: &mut text, old_data };
 				gix::diff::blob::UnifiedDiff::new(
 					&diff,
 					&input,
@@ -705,12 +704,8 @@ fn compute_similarity(
 }
 
 struct GitHunks<'a> {
-	out:             &'a mut String,
-	old_data:        &'a [u8],
-	old_lines:       u32,
-	new_lines:       u32,
-	old_has_newline: bool,
-	new_has_newline: bool,
+	out:      &'a mut String,
+	old_data: &'a [u8],
 }
 
 impl gix::diff::blob::unified_diff::ConsumeHunk for GitHunks<'_> {
@@ -721,7 +716,6 @@ impl gix::diff::blob::unified_diff::ConsumeHunk for GitHunks<'_> {
 		header: gix::diff::blob::unified_diff::HunkHeader,
 		lines: &[(gix::diff::blob::unified_diff::DiffLineKind, &[u8])],
 	) -> std::io::Result<()> {
-		use gix::diff::blob::unified_diff::DiffLineKind;
 		let old_start = zero_start(header.before_hunk_start, header.before_hunk_len);
 		let new_start = zero_start(header.after_hunk_start, header.after_hunk_len);
 		self.out.push_str("@@ -");
@@ -734,34 +728,14 @@ impl gix::diff::blob::unified_diff::ConsumeHunk for GitHunks<'_> {
 			self.out.push_str(&String::from_utf8_lossy(function));
 		}
 		self.out.push('\n');
-		let mut old_pos = old_start.saturating_sub(1);
-		let mut new_pos = new_start.saturating_sub(1);
 		for &(kind, content) in lines {
 			self.out.push(kind.to_prefix());
 			self.out.push_str(&String::from_utf8_lossy(content));
-			self.out.push('\n');
-			match kind {
-				DiffLineKind::Context => {
-					old_pos += 1;
-					new_pos += 1;
-					if (old_pos == self.old_lines && !self.old_has_newline)
-						|| (new_pos == self.new_lines && !self.new_has_newline)
-					{
-						self.out.push_str("\\ No newline at end of file\n");
-					}
-				},
-				DiffLineKind::Remove => {
-					old_pos += 1;
-					if old_pos == self.old_lines && !self.old_has_newline {
-						self.out.push_str("\\ No newline at end of file\n");
-					}
-				},
-				DiffLineKind::Add => {
-					new_pos += 1;
-					if new_pos == self.new_lines && !self.new_has_newline {
-						self.out.push_str("\\ No newline at end of file\n");
-					}
-				},
+			// Tokens carry their terminator; a token without one is the
+			// final line of a file that does not end in a newline.
+			if content.last() != Some(&b'\n') {
+				self.out.push('\n');
+				self.out.push_str("\\ No newline at end of file\n");
 			}
 		}
 		Ok(())
@@ -1174,9 +1148,7 @@ fn make_pathspec<'repo>(
 	if files.is_empty() {
 		return Ok(None);
 	}
-	let index = repo
-		.index_or_empty()
-		.map_err(|err| Error::backend("git diff pathspec", err))?;
+	let index = load_index_or_empty(repo, "git diff pathspec")?;
 	repo
 		.pathspec(
 			false,
@@ -1225,15 +1197,6 @@ fn display_id(id: gix::ObjectId, full: bool) -> String {
 	}
 }
 
-fn line_count(data: &[u8]) -> u32 {
-	if data.is_empty() {
-		0
-	} else {
-		u32::try_from(data.find_iter("\n").count())
-			.unwrap_or(u32::MAX)
-			.saturating_add(u32::from(data.last() != Some(&b'\n')))
-	}
-}
 fn function_context(data: &[u8], hunk_start: u32) -> Option<&[u8]> {
 	let before = usize::try_from(hunk_start.saturating_sub(1)).ok()?;
 	let mut candidate = None;
@@ -1374,6 +1337,60 @@ mod tests {
 				.diff_text(&DiffOptions::default())
 				.expect("intent-to-add diff"),
 			git(dir.path(), &["diff"])
+		);
+	}
+
+	#[test]
+	fn status_reads_observe_same_tick_stage_on_reused_handle() {
+		let dir = fixture();
+		fs::write(dir.path().join("file.txt"), "changed\n").expect("edit tracked");
+		fs::write(dir.path().join("new.txt"), "new\n").expect("write untracked");
+		let repo = GitRepo::discover(dir.path())
+			.expect("discover")
+			.expect("repository");
+
+		// Populate gix's shared index snapshot through status-backed diff before
+		// staging, then force the write back onto the same mtime tick.
+		crate::git::pin_index_mtime(&repo);
+		assert!(
+			!repo
+				.diff_text(&DiffOptions::default())
+				.expect("initial diff")
+				.is_empty()
+		);
+		repo
+			.stage_files(&["file.txt".into(), "new.txt".into()])
+			.expect("stage files");
+		crate::git::pin_index_mtime(&repo);
+
+		assert_eq!(
+			repo
+				.diff_text(&DiffOptions::default())
+				.expect("worktree diff"),
+			git(dir.path(), &["diff"])
+		);
+		assert_eq!(
+			repo
+				.status_porcelain(&crate::types::StatusOptions::default())
+				.expect("status"),
+			git(dir.path(), &["status", "--porcelain"])
+		);
+		assert_eq!(repo.status_summary().expect("summary"), crate::types::StatusSummary {
+			staged:    2,
+			unstaged:  0,
+			untracked: 0,
+		});
+		assert_eq!(repo.ls_files(true, true).expect("untracked files"), Vec::<String>::new());
+
+		repo
+			.commit_create("stage all", &crate::types::CommitOptions::default())
+			.expect("commit staged files");
+		assert!(!repo.is_dirty().expect("clean after commit"));
+		assert_eq!(
+			repo
+				.status_porcelain(&crate::types::StatusOptions::default())
+				.expect("clean status"),
+			""
 		);
 	}
 

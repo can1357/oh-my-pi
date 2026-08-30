@@ -167,7 +167,7 @@ describe("AgentSession python cleanup", () => {
 		}
 		originalNullPrompt = undefined;
 		vi.restoreAllMocks();
-		AgentStorage.resetInstance();
+		AgentStorage.close();
 		await pythonExecutor.disposeAllKernelSessions();
 		await Bun.sleep(0);
 		// Best-effort cleanup: createAgentSession opens AuthStorage/AgentStorage

@@ -169,29 +169,34 @@ describe("git tui sidebar staging", () => {
 			expect(model.unstaged.map(file => file.path).sort()).toEqual(["a/one.txt", "a/two.txt", "b/three.txt"]);
 		});
 	});
-	test("pure additions form their own list; staging their dir skips modified siblings", async () => {
+	test("staging a directory with mixed tracked and untracked files stages both", async () => {
 		await withMixedRepo(async harness => {
 			const { sidebar, model, actions } = harness;
-			// Targets: [Stage All] → dir a/ (changes) → a/tracked.txt → dir a/ (additions) → a/new.txt.
+			// Targets: [Stage All] → dir a/ → a/tracked.txt → a/new.txt.
 			sidebar.handleInput("j");
 			expect(sidebar.selected?.kind).toBe("dir");
 			sidebar.handleInput("j");
 			expect(sidebar.selectedFile?.path).toBe("a/tracked.txt");
 			sidebar.handleInput("j");
-			expect(sidebar.selected?.kind).toBe("dir");
-			sidebar.handleInput("j");
 			expect(sidebar.selectedFile?.path).toBe("a/new.txt");
 
-			// Space on the additions-list a/ dir stages only the new file, not the modified sibling.
+			// Space on the a/ dir stages the modified and the untracked file alike.
+			sidebar.handleInput("k");
 			sidebar.handleInput("k");
 			sidebar.handleInput(" ");
 			expect(actions.at(-1)).toEqual({
 				type: "stage",
-				selection: { files: [expect.objectContaining({ path: "a/new.txt" })], label: "a/" },
+				selection: {
+					files: [
+						expect.objectContaining({ path: "a/tracked.txt" }),
+						expect.objectContaining({ path: "a/new.txt" }),
+					],
+					label: "a/",
+				},
 			});
 			await harness.applyLastAction();
-			expect(model.staged.map(file => file.path)).toEqual(["a/new.txt"]);
-			expect(model.unstaged.map(file => file.path)).toEqual(["a/tracked.txt"]);
+			expect(model.staged.map(file => file.path).sort()).toEqual(["a/new.txt", "a/tracked.txt"]);
+			expect(model.unstaged).toEqual([]);
 		});
 	});
 	test("clicking the section header label folds it instead of staging everything", async () => {

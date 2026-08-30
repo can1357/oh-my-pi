@@ -249,4 +249,108 @@ describe("postmortem expected cleanup errors", () => {
 		expect(result.stdout).toContain("cleanup deadline released");
 		expect(result.stderr).not.toContain("cleanup stayed pending after the deadline");
 	});
+
+	it("re-arms registrations after a manual cleanup keeps the process alive", async () => {
+		const result = await runPostmortemProbe(`
+			import { postmortem } from "${postmortemModuleUrl}";
+
+			const order = [];
+			await postmortem.cleanup();
+			// Registered after a completed manual cleanup: must arm for the next pass,
+			// not run immediately as a one-shot late callback.
+			postmortem.register("late", () => { order.push("cleanup"); });
+			order.push("registered");
+			await postmortem.cleanup();
+			console.log(JSON.stringify(order));
+		`);
+
+		expect(result.exitCode).toBe(0);
+		expect(result.stdout).toContain('["registered","cleanup"]');
+	});
+
+	it("runs a persistent owner again at real exit after a keep-alive cleanup", async () => {
+		const result = await runPostmortemProbe(`
+			import { postmortem } from "${postmortemModuleUrl}";
+
+			const order = [];
+			postmortem.register("persistent", () => { order.push("cleanup"); });
+			await postmortem.cleanup();
+			// The owner remains registered while its subsystem creates resources
+			// again; the real exit must run the same registration a second time.
+			order.push("reused");
+			process.on("exit", () => { console.log(JSON.stringify(order)); });
+			process.exit(0);
+		`);
+
+		expect(result.exitCode).toBe(0);
+		expect(result.stdout).toContain('["cleanup","reused","cleanup"]');
+	});
+
+	it("skips exit-only callbacks on keep-alive cleanup but runs them on the real exit", async () => {
+		const result = await runPostmortemProbe(`
+			import { postmortem } from "${postmortemModuleUrl}";
+
+			const order = [];
+			// Exit-only: a keep-alive cleanup must skip it without latching, so the
+			// registration survives for the eventual real exit.
+			postmortem.register("exit-only", () => { order.push("cleanup"); }, { exitOnly: true });
+			await postmortem.cleanup();
+			order.push("after-keepalive");
+			process.on("exit", () => { console.log(JSON.stringify(order)); });
+			process.exit(0);
+		`);
+
+		expect(result.exitCode).toBe(0);
+		expect(result.stdout).toContain('["after-keepalive","cleanup"]');
+	});
+
+	it("awaits an async callback registered mid-pass before cleanup() settles", async () => {
+		const result = await runPostmortemProbe(`
+			import { postmortem } from "${postmortemModuleUrl}";
+
+			const order = [];
+			postmortem.register("outer", () => {
+				// Registered while the keep-alive pass is running: cleanup() must
+				// join its async completion, not settle after the snapshot alone.
+				postmortem.register("late", async () => {
+					// One full event-loop turn: settles strictly after the snapshot pass.
+					const { promise, resolve } = Promise.withResolvers();
+					setImmediate(resolve);
+					await promise;
+					order.push("late");
+				});
+				order.push("outer");
+			});
+			await postmortem.cleanup();
+			order.push("settled");
+			console.log(JSON.stringify(order));
+		`);
+
+		expect(result.exitCode).toBe(0);
+		expect(result.stdout).toContain('["outer","late","settled"]');
+	});
+
+	it("finishes an async late registration before a SIGTERM exit", async () => {
+		const result = await runPostmortemProbe(`
+			import { postmortem } from "${postmortemModuleUrl}";
+
+			postmortem.register("outer", () => {
+				// Registered during the signal-driven exit pass: the process must not
+				// terminate until this async work completes.
+				postmortem.register("late", async () => {
+					// One full event-loop turn: settles strictly after the snapshot pass.
+					const { promise, resolve } = Promise.withResolvers();
+					setImmediate(resolve);
+					await promise;
+					console.log("late-done");
+				});
+			});
+			process.kill(process.pid, "SIGTERM");
+			// Stay alive until the signal path exits; the harness watchdog bounds a regression.
+			await Promise.withResolvers().promise;
+		`);
+
+		expect(result.exitCode).toBe(143);
+		expect(result.stdout).toContain("late-done");
+	});
 });

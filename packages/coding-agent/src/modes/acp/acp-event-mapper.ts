@@ -8,7 +8,7 @@ import type {
 } from "@oh-my-pi/pi-utils/acp";
 import { parseXdUrl } from "../../internal-urls/xd-protocol";
 import type { AgentSessionEvent } from "../../session/agent-session";
-import { resolveToCwd } from "../../tools/path-utils";
+import { resolveToCwd, splitPathAndSel, splitPathAndSelPreferringLiteralSync } from "../../tools/path-utils";
 import type { TodoStatus } from "../../tools/todo";
 import { canonicalizeMessage } from "../../utils/thinking-display";
 
@@ -244,7 +244,7 @@ export function mapAgentSessionEventToAcpSessionUpdates(
 			if (content.length > 0) {
 				update.content = content;
 			}
-			const locations = extractToolLocations(event.args, options.cwd);
+			const locations = extractToolLocations(event.args, options.cwd, event.toolName);
 			if (locations.length > 0) {
 				update.locations = locations;
 			}
@@ -495,7 +495,7 @@ export function buildToolCallStartUpdate(input: {
 	if (content.length > 0) {
 		update.content = content;
 	}
-	const locations = extractToolLocations(input.args, input.cwd);
+	const locations = extractToolLocations(input.args, input.cwd, input.toolName);
 	if (locations.length > 0) {
 		update.locations = locations;
 	}
@@ -642,7 +642,26 @@ function toAcpLocationPath(value: string, cwd?: string): string {
  */
 const INTERNAL_URL_SUBJECT = /^[a-z][a-z0-9+.-]*:\/\//i;
 
-function extractToolLocations(args: unknown, cwd?: string): ToolCallLocation[] {
+/**
+ * For the `read` tool, peel a trailing read selector (`:1-20`, `:raw`,
+ * `:1-20:raw`, comma-separated ranges) off the filesystem path so the ACP
+ * location names the file actually accessed rather than the selector-bearing
+ * expression — Zed Follow otherwise treats the selector as part of the
+ * filename and opens an empty buffer. Literal POSIX filenames that legitimately
+ * end in selector-shaped text (e.g. `report:1-20`) are preserved via the same
+ * literal-path precedence the read tool uses. Non-read tools and internal URLs
+ * pass through unchanged — colons in write/edit targets are valid filenames.
+ */
+function readLocationBasePath(
+	raw: string | undefined,
+	cwd: string | undefined,
+	toolName: string | undefined,
+): string | undefined {
+	if (raw === undefined || toolName !== "read" || INTERNAL_URL_SUBJECT.test(raw)) return raw;
+	return cwd ? splitPathAndSelPreferringLiteralSync(raw, cwd).path : splitPathAndSel(raw).path;
+}
+
+function extractToolLocations(args: unknown, cwd?: string, toolName?: string): ToolCallLocation[] {
 	const locations: ToolCallLocation[] = [];
 	const seen = new Set<string>();
 	const pushPath = (raw: string | undefined) => {
@@ -653,7 +672,7 @@ function extractToolLocations(args: unknown, cwd?: string): ToolCallLocation[] {
 		locations.push({ path });
 	};
 
-	pushPath(extractStringProperty<PathContainer>(args, "path"));
+	pushPath(readLocationBasePath(extractStringProperty<PathContainer>(args, "path"), cwd, toolName));
 	pushPath(extractStringProperty<OldPathContainer>(args, "oldPath"));
 	pushPath(extractStringProperty<NewPathContainer>(args, "newPath"));
 

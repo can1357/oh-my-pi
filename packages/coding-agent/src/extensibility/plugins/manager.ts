@@ -866,8 +866,7 @@ export class PluginManager {
 
 		// Validate features if setting specific ones
 		if (features && features.length > 0) {
-			const plugins = await this.list();
-			const plugin = plugins.find(p => p.name === name);
+			const plugin = await this.getPlugin(name, { path: path.join(getPluginsNodeModules(), name) });
 			if (plugin?.manifest.features) {
 				for (const feat of features) {
 					if (!(feat in plugin.manifest.features)) {

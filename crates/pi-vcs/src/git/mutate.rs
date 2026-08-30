@@ -10,7 +10,7 @@ use std::{
 
 use gix::bstr::{BString, ByteSlice};
 
-use super::{GitRepo, normalize_path};
+use super::{GitRepo, normalize_path, open::load_index_or_head};
 use crate::{
 	error::{Error, Result},
 	types::{CleanOptions, CommitOptions, DetachGitDirResult, ResetMode, RestoreOptions},
@@ -20,15 +20,64 @@ const INDEX_WRITE: gix::index::write::Options = gix::index::write::Options {
 	extensions: gix::index::write::Extensions::None,
 	skip_hash:  false,
 };
+/// Apply a ref update, synthesizing a committer for the reflog entry when no
+/// identity is configured. Reflog lines require a signature, but git never
+/// fails branch/reset/stash ref updates over missing identity — only
+/// `git commit` demands one — so parity requires a fallback here.
+pub(crate) fn update_reference(
+	repo: &gix::Repository,
+	op: &'static str,
+	name: &str,
+	id: gix::hash::ObjectId,
+	expected: gix::refs::transaction::PreviousValue,
+	message: &str,
+	force_create_reflog: bool,
+) -> Result<()> {
+	let name: gix::refs::FullName = name.try_into().map_err(|err| Error::backend(op, err))?;
+	let edit = gix::refs::transaction::RefEdit {
+		change: gix::refs::transaction::Change::Update {
+			log: gix::refs::transaction::LogChange {
+				mode: gix::refs::transaction::RefLog::AndReference,
+				force_create_reflog,
+				message: message.into(),
+			},
+			expected,
+			new: gix::refs::Target::Object(id),
+		},
+		name,
+		deref: false,
+	};
+	let now;
+	let committer = if let Some(signature) = repo
+		.committer()
+		.transpose()
+		.map_err(|err| Error::backend(op, err))?
+	{
+		signature
+	} else {
+		now = format!(
+			"{} +0000",
+			std::time::SystemTime::now()
+				.duration_since(std::time::UNIX_EPOCH)
+				.map_or(0, |elapsed| elapsed.as_secs())
+		);
+		gix::actor::SignatureRef {
+			name:  "oh-my-pi".into(),
+			email: "omp@localhost".into(),
+			time:  &now,
+		}
+	};
+	repo
+		.edit_references_as(Some(edit), Some(committer))
+		.map_err(|err| Error::backend(op, err))?;
+	Ok(())
+}
 
 impl GitRepo {
 	/// Stage worktree files, or every change when `files` is empty.
 	pub fn stage_files(&self, files: &[String]) -> Result<()> {
 		let repo = self.gix()?;
-		let mut index = repo
-			.index_or_load_from_head_or_empty()
-			.map_err(|err| Error::backend("git add", err))?
-			.into_owned();
+		let mut index = load_index_or_head(&repo, "git add")?;
 		let mut selected = collect_stage_paths(self.root(), files)?;
 		let all = files.is_empty();
 		let requested: BTreeSet<&str> = files.iter().map(String::as_str).collect();
@@ -59,10 +108,7 @@ impl GitRepo {
 		let repo = self.gix()?;
 		let head = head_tree(&repo)?;
 		let head_index = index_for_tree(&repo, head.as_ref())?;
-		let mut current = repo
-			.index_or_load_from_head_or_empty()
-			.map_err(|err| Error::backend("git reset", err))?
-			.into_owned();
+		let mut current = load_index_or_head(&repo, "git reset")?;
 		copy_index_paths(&mut current, &head_index, files);
 		current
 			.write(INDEX_WRITE)
@@ -80,10 +126,7 @@ impl GitRepo {
 			.try_peel_to_id()
 			.map_err(|err| Error::backend("git commit", err))?
 			.map(|id| id.detach());
-		let index = repo
-			.index_or_load_from_head_or_empty()
-			.map_err(|err| Error::backend("git commit", err))?
-			.into_owned();
+		let index = load_index_or_head(&repo, "git commit")?;
 		let tree = if options.files.is_empty() {
 			write_index_tree(&repo, &index)?
 		} else {
@@ -219,9 +262,15 @@ impl GitRepo {
 		} else {
 			gix::refs::transaction::PreviousValue::MustNotExist
 		};
-		repo
-			.reference(full, id, constraint, format!("branch: Created from {start}"))
-			.map_err(|err| Error::backend("git branch", err))?;
+		update_reference(
+			&repo,
+			"git branch",
+			&full,
+			id,
+			constraint,
+			&format!("branch: Created from {start}"),
+			false,
+		)?;
 		Ok(())
 	}
 
@@ -276,10 +325,7 @@ impl GitRepo {
 	pub fn restore(&self, options: &RestoreOptions) -> Result<()> {
 		let repo = self.gix()?;
 		let restore_worktree = options.worktree || !options.staged;
-		let mut index = repo
-			.index_or_load_from_head_or_empty()
-			.map_err(|e| Error::backend("git restore", e))?
-			.into_owned();
+		let mut index = load_index_or_head(&repo, "git restore")?;
 		if options.staged {
 			let source = resolve_tree(&repo, options.source.as_deref().unwrap_or("HEAD"))?;
 			let source_index = index_for_tree(&repo, Some(&source))?;
@@ -315,9 +361,7 @@ impl GitRepo {
 	/// Remove untracked files and directories according to ignore mode.
 	pub fn clean(&self, options: &CleanOptions) -> Result<()> {
 		let repo = self.gix()?;
-		let index = repo
-			.index_or_load_from_head_or_empty()
-			.map_err(|e| Error::backend("git clean", e))?;
+		let index = load_index_or_head(&repo, "git clean")?;
 		let tracked: BTreeSet<String> = index
 			.entries()
 			.iter()
@@ -435,14 +479,15 @@ impl GitRepo {
 				.map_err(|e| Error::backend("git worktree add", e))?
 				.is_none()
 			{
-				repo
-					.reference(
-						full.as_str(),
-						id,
-						gix::refs::transaction::PreviousValue::MustNotExist,
-						"branch: Created from worktree add",
-					)
-					.map_err(|e| Error::backend("git worktree add", e))?;
+				update_reference(
+					&repo,
+					"git worktree add",
+					full.as_str(),
+					id,
+					gix::refs::transaction::PreviousValue::MustNotExist,
+					"branch: Created from worktree add",
+					false,
+				)?;
 			}
 			format!("ref: {full}")
 		};
@@ -912,10 +957,7 @@ fn checkout_tree(
 	let mut target = repo
 		.index_from_tree(&tree)
 		.map_err(|e| Error::backend("git checkout", e))?;
-	let current = repo
-		.index_or_load_from_head_or_empty()
-		.map_err(|e| Error::backend("git checkout", e))?
-		.into_owned();
+	let current = load_index_or_head(repo, "git checkout")?;
 	let conflicts = checkout_conflicts(owner.root(), repo, &current, &target)?;
 	if !overwrite && !conflicts.is_empty() {
 		return Err(Error::Conflict { paths: conflicts });
@@ -1026,9 +1068,15 @@ fn write_head(path: &Path, symbolic: Option<&str>, id: gix::hash::ObjectId) -> R
 fn update_current_head(repo: &gix::Repository, path: &Path, id: gix::hash::ObjectId) -> Result<()> {
 	let content = fs::read_to_string(path).unwrap_or_default();
 	if let Some(name) = content.trim().strip_prefix("ref: ") {
-		repo
-			.reference(name, id, gix::refs::transaction::PreviousValue::Any, "reset: moving to target")
-			.map_err(|e| Error::backend("git reset", e))?;
+		update_reference(
+			repo,
+			"git reset",
+			name,
+			id,
+			gix::refs::transaction::PreviousValue::Any,
+			"reset: moving to target",
+			false,
+		)?;
 	} else {
 		fs::write(path, format!("{}\n", id.to_hex()))?;
 	}
@@ -1213,10 +1261,7 @@ fn branch_is_checked_out(common: &Path, full_ref: &str) -> bool {
 
 fn tracked_worktree_dirty(repo: &GitRepo) -> Result<bool> {
 	let gix = repo.gix()?;
-	let index = gix
-		.index_or_load_from_head_or_empty()
-		.map_err(|e| Error::backend("git worktree remove", e))?
-		.into_owned();
+	let index = load_index_or_head(&gix, "git worktree remove")?;
 	for entry in index.entries() {
 		if worktree_id(
 			&gix,
@@ -1371,6 +1416,31 @@ mod tests {
 		fs::write(path, format!("#!/bin/sh\n{body}\n")).unwrap();
 		let mode = if executable { 0o755 } else { 0o644 };
 		fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
+	}
+
+	#[test]
+	fn stage_commit_survives_unadvanced_index_mtime() {
+		// Regression: a commit right after staging on the same cached handle used
+		// to read a stale in-memory index snapshot when the on-disk index mtime
+		// did not advance past the snapshot's (sub-second writes / coarse mtime
+		// filesystems), failing with "nothing to commit, working tree clean".
+		let (temp, repo) = fixture();
+		// Pin the mtime so the snapshot captured while staging and the index the
+		// write leaves behind collide on the exact same tick.
+		crate::git::pin_index_mtime(&repo);
+
+		fs::write(temp.path().join("a"), "changed\n").unwrap();
+		repo.stage_files(&["a".into()]).unwrap();
+		// Staging bumped the mtime; forcing it back reproduces the same-tick
+		// collision that made gix serve the pre-stage index.
+		crate::git::pin_index_mtime(&repo);
+
+		let sha = repo
+			.commit_create("change", &CommitOptions::default())
+			.unwrap();
+		assert_eq!(git(temp.path(), &["rev-parse", "HEAD"]), sha);
+		// The commit must carry the staged content, not the stale base index.
+		assert_eq!(git(temp.path(), &["show", "HEAD:a"]), "changed");
 	}
 
 	#[cfg(unix)]

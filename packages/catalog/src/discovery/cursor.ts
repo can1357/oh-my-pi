@@ -33,14 +33,20 @@ const CURSOR_KIMI_K3_BARE_ID_PATTERN = /(^|\/)k3$/i;
  * reasoning models whose effort is carried in the per-tier sibling id.
  * `GetUsableModels` ships no `thinkingDetails` and the bundled references read
  * `reasoning: false`, so classification falls back to the id. The non-reasoning
- * `grok-code-*` coding models lack the version digit and stay out.
+ * `grok-code-fast-*` family deliberately stays out.
  */
 const CURSOR_GROK_REASONING_ID_PATTERN = /^cursor-grok-\d/i;
 
 /**
+ * Cursor-only families verified to accept `selectedImages` even though
+ * `GetUsableModels` does not advertise input modalities.
+ */
+const CURSOR_GROK_4_MULTIMODAL_ID_PATTERN = /^cursor-grok-4(?:[.:_-]|$)/i;
+const CURSOR_COMPOSER_25_MULTIMODAL_ID_PATTERN = /^composer-2\.5(?:[.:_-]|$)/i;
+
+/**
  * Model-id families whose native catalogs (anthropic, openai/openai-codex,
- * google) are multimodal. Cursor-only or text-only families (`composer-*`,
- * `grok-code-*`) intentionally stay outside this pattern.
+ * google) are multimodal. Cursor-only verified families are handled separately.
  */
 const CURSOR_MULTIMODAL_ID_PATTERN = /claude|gemini|gpt-|codex/;
 
@@ -319,6 +325,7 @@ function normalizeCursorModel(
 			name,
 			baseUrl: baseUrlOverride ?? reference.baseUrl,
 			reasoning,
+			input: resolveCursorInput(id, reference.input),
 			contextWindow: resolveCursorContextWindow(details, id, reference.contextWindow),
 			cursorMaxMode: details.maxMode,
 		};
@@ -330,7 +337,7 @@ function normalizeCursorModel(
 		provider: "cursor",
 		baseUrl: baseUrlOverride ?? CURSOR_DEFAULT_BASE_URL,
 		reasoning,
-		input: inferInputFromCursorId(id),
+		input: resolveCursorInput(id),
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 		contextWindow: resolveCursorContextWindow(details, id, DEFAULT_CONTEXT_WINDOW),
 		maxTokens: DEFAULT_MAX_TOKENS,
@@ -394,14 +401,22 @@ function pickModelDisplayName(model: CursorModelDetailsValue, fallbackId: string
 }
 
 /**
- * Infers input modalities for Cursor models without a bundled reference.
- *
- * `GetUsableModels` carries no per-model modality metadata, so classification
- * falls back to the model family: families that are multimodal in OMP's own
- * native catalogs accept images, everything else stays text-only. Mirrors
- * `inferInputFromGeminiId` in ./gemini.ts.
+ * Resolves input modalities from a bundled reference when available, except
+ * for Cursor-only families whose image support is known independently. Without
+ * a reference, native multimodal families fall back to id classification.
  */
-function inferInputFromCursorId(id: string): ("text" | "image")[] {
+export function resolveCursorInput(id: string, referenceInput?: ("text" | "image")[]): ("text" | "image")[] {
+	if (
+		isKimiK3ModelId(id) ||
+		CURSOR_KIMI_K3_BARE_ID_PATTERN.test(id) ||
+		CURSOR_GROK_4_MULTIMODAL_ID_PATTERN.test(id) ||
+		CURSOR_COMPOSER_25_MULTIMODAL_ID_PATTERN.test(id)
+	) {
+		return ["text", "image"];
+	}
+	if (referenceInput) {
+		return referenceInput;
+	}
 	if (CURSOR_MULTIMODAL_ID_PATTERN.test(id.toLowerCase())) {
 		return ["text", "image"];
 	}

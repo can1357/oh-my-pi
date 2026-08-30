@@ -88,7 +88,7 @@ describe("config list output", () => {
 
 	afterEach(async () => {
 		vi.restoreAllMocks();
-		AgentStorage.resetInstance();
+		AgentStorage.close();
 		resetSettingsForTest();
 		if (originalAgentDir) setAgentDir(originalAgentDir);
 		else {
