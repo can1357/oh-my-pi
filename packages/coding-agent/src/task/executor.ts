@@ -105,7 +105,7 @@ function terminalOutcome(
 	return result.exitCode === 0 && stopReason !== "length" ? "completed" : "failed";
 }
 
-async function recordPersistedAgentTaskOutcome(
+export async function recordPersistedAgentTaskOutcome(
 	sessionFile: string,
 	initialCwd: string,
 	outcome: AgentTerminalOutcome,

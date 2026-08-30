@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
+import { AGENT_TASK_OUTCOME_ENTRY_TYPE, AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
 import {
@@ -95,6 +95,28 @@ describe("runIsolatedSubprocess", () => {
 			nested: [],
 		};
 		const rootPatch = "diff --git a/task.txt b/task.txt\n--- a/task.txt\n+++ b/task.txt\n@@ -1 +1 @@\n-old\n+new\n";
+		const sessionFile = path.join(artifactsDir, "PreserveBranchFailure.jsonl");
+		await fs.mkdir(artifactsDir, { recursive: true });
+		await Bun.write(
+			sessionFile,
+			`${[
+				JSON.stringify({
+					type: "session",
+					version: 3,
+					id: "isolation-outcome",
+					timestamp: "2026-08-30T10:00:00.000Z",
+					cwd: repoRoot,
+				}),
+				JSON.stringify({
+					type: "custom",
+					id: "completed-outcome",
+					parentId: "isolation-outcome",
+					timestamp: "2026-08-30T10:00:01.000Z",
+					customType: AGENT_TASK_OUTCOME_ENTRY_TYPE,
+					data: { outcome: "completed" },
+				}),
+			].join("\n")}\n`,
+		);
 
 		vi.spyOn(worktreeModule, "ensureIsolation").mockResolvedValue({
 			mergedDir: isolationDir,
@@ -131,6 +153,7 @@ describe("runIsolatedSubprocess", () => {
 		const outcome = await runIsolatedSubprocess({
 			baseOptions: {
 				cwd: repoRoot,
+				sessionFile,
 				agent: {
 					name: "task",
 					description: "Task agent",
@@ -159,6 +182,13 @@ describe("runIsolatedSubprocess", () => {
 		expect(cleanupSpy).toHaveBeenCalledTimes(1);
 		expect(AgentRegistry.global().get("PreserveBranchFailure")?.history?.patchPath).toBe(patchPath);
 		expect(AgentRegistry.global().get("PreserveBranchFailure")?.history?.lastOutcome).toBe("failed");
+		const persistedOutcomes = (await Bun.file(sessionFile).text())
+			.trim()
+			.split("\n")
+			.map(line => JSON.parse(line))
+			.filter(entry => entry.type === "custom" && entry.customType === AGENT_TASK_OUTCOME_ENTRY_TYPE)
+			.map(entry => entry.data?.outcome);
+		expect(persistedOutcomes).toEqual(["completed", "failed"]);
 	});
 
 	it("keeps the task branch when it already carries the agent's commits", async () => {
