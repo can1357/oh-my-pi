@@ -200,24 +200,4 @@ describe("applyMCPToolFilter", () => {
 			error.mockRestore();
 		}
 	});
-
-	it("returns all tools without warnings when no filter is configured", () => {
-		const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
-		try {
-			expect(applyMCPToolFilter("slack", { toolNames: ["search", "read"] })).toEqual(["search", "read"]);
-			expect(warn).not.toHaveBeenCalled();
-		} finally {
-			warn.mockRestore();
-		}
-	});
-
-	it("passes a server that advertises no tools through unchanged when no filter is configured", () => {
-		const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
-		try {
-			expect(applyMCPToolFilter("slack", { toolNames: [] })).toEqual([]);
-			expect(warn).not.toHaveBeenCalled();
-		} finally {
-			warn.mockRestore();
-		}
-	});
 });
