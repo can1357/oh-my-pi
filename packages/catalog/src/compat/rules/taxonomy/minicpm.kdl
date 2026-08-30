@@ -1,0 +1,4 @@
+class "minicpm" {
+	prefix "minicpm-v"
+	prefix "mini-cpm-v"
+}

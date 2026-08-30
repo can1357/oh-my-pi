@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test, vi } from "bun:test";
 import * as os from "node:os";
 import * as path from "node:path";
 import { getEnvApiKey } from "@oh-my-pi/pi-ai/stream";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { createModelManager } from "@oh-my-pi/pi-catalog/model-manager";
 import { getBundledModels } from "@oh-my-pi/pi-catalog/models";
 import { DEFAULT_MODEL_PER_PROVIDER, PROVIDER_DESCRIPTORS } from "@oh-my-pi/pi-catalog/provider-models/descriptors";
@@ -114,9 +115,6 @@ describe("European gateway provider catalog support", () => {
 			expect(descriptor).toBeDefined();
 			expect(descriptor?.defaultModel).toBe(provider.defaultModel);
 			expect(descriptor?.dynamicModelsAuthoritative).toBe(true);
-			if ("allowUnauthenticated" in provider) {
-				expect(descriptor?.allowUnauthenticated).toBe(true);
-			}
 			expect(descriptor?.catalogDiscovery?.envVars).toContain(provider.envVar);
 			expect((DEFAULT_MODEL_PER_PROVIDER as Record<string, string>)[provider.id]).toBe(provider.defaultModel);
 			expect(getEnvApiKey(provider.id)).toBe(`${provider.id}-test-key`);
@@ -177,6 +175,14 @@ describe("European gateway provider catalog support", () => {
 					baseUrl: provider.baseUrl,
 				}),
 			);
+		}
+	});
+
+	test("keeps public catalog discovery separate from authenticated runtime providers", () => {
+		for (const providerId of ["cortecs", "eurouter", "ovhcloud"] as const) {
+			const descriptor = PROVIDER_DESCRIPTORS.find(item => item.providerId === providerId);
+			expect(descriptor?.allowUnauthenticated).toBeUndefined();
+			expect(descriptor?.catalogDiscovery?.allowUnauthenticated).toBe(true);
 		}
 	});
 
@@ -741,7 +747,7 @@ describe("European gateway provider catalog support", () => {
 		});
 	});
 
-	test("marks MiniCPM-V gateway rows as image-capable when discovery metadata is sparse", async () => {
+	test("applies MiniCPM-V image capability through the catalog policy when discovery metadata is sparse", async () => {
 		const fetchMock: FetchImpl = vi.fn(async () => {
 			return new Response(
 				JSON.stringify({
@@ -762,8 +768,9 @@ describe("European gateway provider catalog support", () => {
 		expect(models?.[0]).toMatchObject({
 			id: "minicpm-v-4.5",
 			provider: "cortecs",
-			input: ["text", "image"],
+			input: ["text"],
 		});
+		expect(models?.[0] && buildModel(models[0]).input).toEqual(["text", "image"]);
 	});
 
 	test("honors explicit text-only input metadata for otherwise vision-capable models", async () => {

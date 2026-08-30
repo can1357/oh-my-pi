@@ -168,7 +168,6 @@ export const CATALOG_PROVIDERS = [
 		envVars: ["CORTECS_API_KEY"],
 		createModelManagerOptions: (config: ModelManagerConfig) => cortecsModelManagerOptions(config),
 		dynamicModelsAuthoritative: true,
-		allowUnauthenticated: true,
 		catalogDiscovery: { label: "Cortecs", allowUnauthenticated: true },
 	},
 	{
@@ -215,7 +214,6 @@ export const CATALOG_PROVIDERS = [
 		envVars: ["EUROUTER_API_KEY"],
 		createModelManagerOptions: (config: ModelManagerConfig) => eurouterModelManagerOptions(config),
 		dynamicModelsAuthoritative: true,
-		allowUnauthenticated: true,
 		catalogDiscovery: { label: "EUrouter", allowUnauthenticated: true },
 	},
 	{
@@ -385,7 +383,6 @@ export const CATALOG_PROVIDERS = [
 		envVars: ["OVH_AI_ENDPOINTS_ACCESS_TOKEN"],
 		createModelManagerOptions: (config: ModelManagerConfig) => ovhcloudModelManagerOptions(config),
 		dynamicModelsAuthoritative: true,
-		allowUnauthenticated: true,
 		catalogDiscovery: { label: "OVHcloud AI Endpoints", allowUnauthenticated: true },
 	},
 	{

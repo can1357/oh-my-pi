@@ -815,18 +815,11 @@ function resolveEuropeanGatewayKnownReference(model: ModelSpec<Api>): Model<Api>
 }
 
 function getEuropeanGatewayKnownInput(model: ModelSpec<Api>): ("text" | "image")[] | undefined {
-	if (isEuropeanGatewayKnownVisionModelId(model.id)) {
-		return ["text", "image"];
-	}
 	const reference = resolveEuropeanGatewayKnownReference(model);
 	if (reference?.input.includes("image")) {
 		return ["text", "image"];
 	}
 	return undefined;
-}
-
-function isEuropeanGatewayKnownVisionModelId(modelId: string): boolean {
-	return /(?:^|[/:._-])mini[-_]?cpm[-_]?v(?:$|[/:._-]|\d)/i.test(modelId);
 }
 
 function hasEuropeanGatewayKnownReasoning(model: ModelSpec<Api>): boolean {

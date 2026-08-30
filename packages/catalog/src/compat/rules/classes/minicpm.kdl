@@ -1,0 +1,3 @@
+class "minicpm" {
+	input-modalities "text" "image"
+}
