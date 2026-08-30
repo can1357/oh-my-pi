@@ -81,6 +81,8 @@ export interface SecurityCoordinatorHost {
 	sessionId?: string;
 	agentId?: string;
 	asyncJobManager?: AsyncJobManager;
+	/** Whether the hosting session runs inside an isolation worktree (nested isolation gate). */
+	isIsolated?: boolean;
 }
 
 export interface SecurityPreflightInput {
@@ -265,6 +267,10 @@ async function createDefaultSecuritySession(input: SecurityScanSessionFactoryInp
 		autoApprove: true,
 		skipPythonPreflight: true,
 		agentId: `Security-${input.scanId.slice(-12)}`,
+		// The scan session executes inside the host session's isolation worktree
+		// when the host is isolated, so the nested-isolation gate must keep apply-
+		// ing to it (its `task` spawns would otherwise re-expose `isolated`).
+		isIsolated: input.host.isIsolated === true,
 		agentDisplayName: "security",
 	});
 	return session;

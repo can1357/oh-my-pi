@@ -1747,6 +1747,10 @@ export class AgentSession {
 		return this.#asyncJobManager;
 	}
 
+	get isIsolated(): boolean {
+		return this.#isIsolated;
+	}
+
 	getAgentId(): string | undefined {
 		return this.#agentId;
 	}

@@ -8,6 +8,8 @@ import { createMockModel, type MockResponseSource, registerMockApi } from "@oh-m
 import { $ } from "bun";
 import { ModelRegistry } from "../../src/config/model-registry";
 import { Settings } from "../../src/config/settings";
+import type { createAgentSession } from "../../src/sdk";
+import * as sdkModule from "../../src/sdk";
 import {
 	createNativeSecurityProvenance,
 	DEFAULT_SECURITY_GIT_ADAPTER,
@@ -378,5 +380,51 @@ describe("native security coordinator", () => {
 			error: "Security scan was interrupted by a process restart",
 		});
 		expect((await restarted.listOperations()).map(operation => operation.operationId)).toContain(operationId);
+	});
+
+	test("propagates the host isolation marker into scan session creation", async () => {
+		// A security scan started by a session that itself runs inside an
+		// isolation worktree executes in that same worktree (executionRoot).
+		// The scan session must be created with `isIsolated: true` — its `task`
+		// spawns (security-reviewer) would otherwise re-expose `isolated` and
+		// bypass the task.isolation.allowNested gate.
+		for (const hostIsIsolated of [true, false]) {
+			const mock = createMockModel({ id: "security-mock", provider: "openai-codex" });
+			const coordinator = new SecurityCoordinator(
+				{
+					cwd: repositoryRoot,
+					settings,
+					authStorage,
+					modelRegistry,
+					activeModel: mock.model,
+					sessionId: "parent-session",
+					isIsolated: hostIsIsolated,
+				},
+				{ openStore: storeFactory, gitAdapter },
+			);
+			let sessionOptionsIsIsolated: boolean | undefined;
+			const spy = vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+				sessionOptionsIsIsolated = options?.isIsolated;
+				return {
+					session: {
+						sessionFile: path.join(stateRoot, "fixture-session.jsonl"),
+						waitForIdle: async () => undefined,
+						prompt: async () => true,
+						abort: async () => undefined,
+						dispose: async () => undefined,
+					},
+					extensionsResult: {},
+				} as unknown as Awaited<ReturnType<typeof createAgentSession>>;
+			});
+			try {
+				const plan = await coordinator.preflight({ credentialId, model: mock.model });
+				const started = await coordinator.start({ planId: plan.id });
+				const terminal = await coordinator.wait(started.operationId);
+				expect(terminal.phase).toBe("partial"); // mocked session never publishes
+				expect(sessionOptionsIsIsolated).toBe(hostIsIsolated);
+			} finally {
+				spy.mockRestore();
+			}
+		}
 	});
 });
