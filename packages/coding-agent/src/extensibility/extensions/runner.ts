@@ -1235,33 +1235,41 @@ export class ExtensionRunner {
 	#getAgentIdentity(): AgentIdentity {
 		if (this.#agentIdentityCache) return this.#agentIdentityCache;
 		const input = this.#agentIdentityInput;
+		let identity: AgentIdentity;
 		if (!input) {
-			this.#agentIdentityCache = {
+			identity = {
 				kind: "main",
 				depth: 0,
 				agentId: MAIN_AGENT_ID,
 				displayName: "main",
 				parentChain: [],
 			};
-			return this.#agentIdentityCache;
+		} else {
+			const seen = new Set<string>();
+			const parentChain: string[] = [];
+			let cursor = input.parentId;
+			while (cursor !== undefined && cursor !== MAIN_AGENT_ID && !seen.has(cursor)) {
+				parentChain.push(cursor);
+				seen.add(cursor);
+				cursor = input.registry.get(cursor)?.parentId;
+			}
+			identity = {
+				kind: input.kind,
+				depth: input.depth,
+				agentId: input.agentId,
+				displayName: input.displayName,
+				...(input.parentId !== undefined ? { parentId: input.parentId } : {}),
+				parentChain,
+			};
 		}
-		const seen = new Set<string>();
-		const parentChain: string[] = [];
-		let cursor = input.parentId;
-		while (cursor !== undefined && cursor !== MAIN_AGENT_ID && !seen.has(cursor)) {
-			parentChain.push(cursor);
-			seen.add(cursor);
-			cursor = input.registry.get(cursor)?.parentId;
-		}
-		const identity: AgentIdentity = {
-			kind: input.kind,
-			depth: input.depth,
-			agentId: input.agentId,
-			displayName: input.displayName,
-			...(input.parentId !== undefined ? { parentId: input.parentId } : {}),
-			parentChain,
-		};
-		this.#agentIdentityCache = identity;
+		// Frozen deeply: the memoized object is handed to every handler for the
+		// session, so a mutating extension cannot corrupt the documented identity
+		// (e.g. reversing `parentChain`) for unrelated extensions.
+		const frozen: AgentIdentity = Object.freeze({
+			...identity,
+			parentChain: Object.freeze([...identity.parentChain]),
+		});
+		this.#agentIdentityCache = frozen;
 		return this.#agentIdentityCache;
 	}
 

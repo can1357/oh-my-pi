@@ -6305,13 +6305,16 @@ export class AgentSession {
 	 */
 	#fallbackAgentIdentity(): AgentIdentity {
 		const kind = this.#agentKind;
-		return {
+		// Frozen, matching the runner's memoized identity: command contexts are
+		// shared across handlers, so a mutating extension cannot corrupt them.
+		const identity: AgentIdentity = Object.freeze({
 			kind,
 			depth: this.#taskDepth,
 			agentId: this.#agentId ?? MAIN_AGENT_ID,
 			displayName: kind === "sub" ? "sub" : "main",
-			parentChain: [],
-		};
+			parentChain: Object.freeze([]),
+		});
+		return identity;
 	}
 
 	/**

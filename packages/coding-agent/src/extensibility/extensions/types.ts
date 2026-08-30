@@ -469,9 +469,10 @@ export interface AgentIdentity {
 	/**
 	 * Ancestor registry ids, nearest-first. Excludes `"Main"` and is `[]` for the
 	 * top-level session. Runner-less sessions cannot resolve the chain, so it is
-	 * `[]` there even for subagents.
+	 * `[]` there even for subagents. Immutable: the identity is shared across
+	 * handlers, so extensions must copy rather than mutate it.
 	 */
-	parentChain: string[];
+	parentChain: readonly string[];
 }
 
 export interface ExtensionContext {

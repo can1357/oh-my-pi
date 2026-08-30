@@ -102,4 +102,25 @@ describe("ExtensionContext agentIdentity", () => {
 		expect(Array.isArray(chain)).toBe(true);
 		expect(chain.length).toBeLessThanOrEqual(2);
 	});
+
+	it("hands handlers an immutable identity so one extension cannot corrupt it for others", () => {
+		const registry = new AgentRegistry();
+		registry.register({ id: "P1", displayName: "p1", kind: "sub", parentId: MAIN_AGENT_ID, session: null });
+		const runner = makeRunner({
+			kind: "sub",
+			depth: 1,
+			agentId: "C1",
+			displayName: "c1",
+			parentId: "P1",
+			registry,
+		});
+		const identity = runner.createContext().agentIdentity;
+
+		expect(Object.isFrozen(identity)).toBe(true);
+		expect(Object.isFrozen(identity.parentChain)).toBe(true);
+		// A mutation attempt must not corrupt the identity other handlers read
+		// (frozen surfaces may not throw in every runtime, but must never change).
+		(identity.parentChain as unknown as string[]).reverse();
+		expect(runner.createContext().agentIdentity.parentChain).toEqual(["P1"]);
+	});
 });

@@ -1709,10 +1709,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 
 	const agentRegistry = options.agentRegistry ?? AgentRegistry.global();
 	const resolvedAgentId = options.agentId ?? options.parentTaskPrefix ?? MAIN_AGENT_ID;
-	// A session with a parent-task prefix is a child even when the caller did not
-	// pass an explicit depth (e.g. /tan clones): report depth 1 rather than the
-	// contradictory kind "sub" + depth 0. Explicit depths win unchanged.
-	const classifiedSub = (options.taskDepth ?? 0) > 0 || options.parentTaskPrefix !== undefined;
+	// A session with any parent linkage is a child even when the caller did not
+	// pass an explicit depth: `parentTaskPrefix` (e.g. /tan clones) or a
+	// documented parent link (`parentAgentId`, undefined for top-level).
+	// Report depth 1 rather than a contradictory kind "sub" + depth 0;
+	// explicit depths win unchanged.
+	const classifiedSub =
+		(options.taskDepth ?? 0) > 0 || options.parentTaskPrefix !== undefined || options.parentAgentId !== undefined;
 	const resolvedDepth = (options.taskDepth ?? 0) > 0 ? (options.taskDepth as number) : classifiedSub ? 1 : 0;
 	const resolvedAgentDisplayName = options.agentDisplayName ?? (classifiedSub ? "sub" : "main");
 	const agentKind = classifiedSub ? ("sub" as const) : ("main" as const);
