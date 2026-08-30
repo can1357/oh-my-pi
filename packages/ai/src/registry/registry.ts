@@ -16,6 +16,7 @@ import { cursorProvider } from "./cursor";
 import { deepinfraProvider } from "./deepinfra";
 import { deepseekProvider } from "./deepseek";
 import { devinProvider } from "./devin";
+import { digitalOceanProvider } from "./digitalocean";
 import { exaProvider } from "./exa";
 import { firepassProvider } from "./firepass";
 import { fireworksProvider } from "./fireworks";
@@ -140,6 +141,7 @@ const ALL = [
 	nanogptProvider,
 	waferServerlessProvider,
 	coreWeaveProvider,
+	digitalOceanProvider,
 	vercelAiGatewayProvider,
 	cloudflareAiGatewayProvider,
 	litellmProvider,

@@ -1123,6 +1123,136 @@ export function gmiCloudModelManagerOptions(
 }
 
 // ---------------------------------------------------------------------------
+// 1c. DigitalOcean
+// ---------------------------------------------------------------------------
+
+const DIGITALOCEAN_BASE_URL = "https://inference.do-ai.run/v1";
+
+/**
+ * Bundled seed for DigitalOcean Serverless Inference. Generation has no
+ * `DIGITALOCEAN_API_KEY`, so a regen without credentials would leave the
+ * provider slice empty and the declared `defaultModel` unresolvable on a
+ * fresh install before the async runtime discovery fires. Live `/v1/models`
+ * discovery is authoritative for the model ID set, but
+ * `mapWithBundledReference` keeps the reference's cost and thinking metadata
+ * — so these fields carry DigitalOcean's published per-million-token rates
+ * (https://www.digitalocean.com/pricing/artificial-intelligence): GLM-5.2 at
+ * $0.70/$2.20 with $0.105 cache reads and the generic-host Think ladder
+ * (minimal/low/medium/high/max), GLM-5.3 at $1.40/$4.40 with $0.26 cache reads
+ * on the uniform Low/High/Max ladder, defaultLevel=max with mandatory
+ * thinking per the identity classifiers.
+ */
+export const DIGITALOCEAN_STATIC_MODELS: readonly ModelSpec<"openai-completions">[] = [
+	{
+		id: "glm-5.2",
+		name: "GLM-5.2",
+		api: "openai-completions",
+		provider: "digitalocean",
+		baseUrl: DIGITALOCEAN_BASE_URL,
+		reasoning: true,
+		input: ["text"],
+		cost: { input: 0.7, output: 2.2, cacheRead: 0.105, cacheWrite: 0 },
+		contextWindow: 1_000_000,
+		maxTokens: 131_072,
+		thinking: { mode: "effort", efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.Max] },
+	},
+	{
+		id: "glm-5.3",
+		name: "GLM-5.3",
+		api: "openai-completions",
+		provider: "digitalocean",
+		baseUrl: DIGITALOCEAN_BASE_URL,
+		reasoning: true,
+		input: ["text"],
+		cost: { input: 1.4, output: 4.4, cacheRead: 0.26, cacheWrite: 0 },
+		contextWindow: 1_000_000,
+		maxTokens: 131_072,
+		thinking: {
+			mode: "effort",
+			efforts: [Effort.Low, Effort.High, Effort.Max],
+			defaultLevel: Effort.Max,
+			requiresEffort: true,
+		},
+	},
+];
+
+export interface DigitalOceanModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
+/**
+ * Map a discovered DigitalOcean model to a full spec.
+ *
+ * DigitalOcean's `/v1/models` returns flat lowercase ids with no per-model
+ * type field; `filterModel` drops the non-chat SKUs (embeddings, rerankers,
+ * image/video/TTS generators, router ids) via the `exclude-models` rules. Its
+ * limit fields are `context_length` and `max_output_tokens` — not the
+ * `max_completion_tokens` that `mapWithBundledReference` checks — so the
+ * `max_output_tokens` value is normalized onto `max_completion_tokens` before
+ * any lookup, and fallback branches hydrate entry-derived limits. When a
+ * digitalocean bundled reference exists (the seeded defaults) it supplies the
+ * published tariff and full metadata. Other ids are DO-prefixed vendor
+ * catalogue entries (`openai-gpt-…`, `anthropic-claude-…`), so intrinsic
+ * capabilities are resolved from any bundled upstream entry via the canonical
+ * reference index like `mapGmiCloudModel`. Pricing is never borrowed across
+ * providers: cost stays zeroed rather than inheriting another provider's
+ * rate.
+ */
+function mapDigitalOceanModel(
+	entry: OpenAICompatibleModelRecord,
+	defaults: ModelSpec<"openai-completions">,
+	reference: ModelSpec<"openai-completions"> | undefined,
+): ModelSpec<"openai-completions"> {
+	const entryMaxTokens = entry.max_output_tokens ?? entry.max_completion_tokens;
+	if (reference) {
+		return mapWithBundledReference({ ...entry, max_completion_tokens: entryMaxTokens }, defaults, reference);
+	}
+	const canonical = resolveModelReference(defaults.id, getBundledModelReferenceIndex()) as
+		| ModelSpec<"openai-completions">
+		| undefined;
+	if (!canonical) {
+		return {
+			...defaults,
+			name: toModelName(entry.name, defaults.name),
+			contextWindow: toPositiveNumber(entry.context_length, defaults.contextWindow),
+			maxTokens: toPositiveNumber(entryMaxTokens, defaults.maxTokens),
+		};
+	}
+	const contextWindow = canonical.contextWindow ?? toPositiveNumber(entry.context_length, defaults.contextWindow);
+	const maxTokensSource = canonical.maxTokens ?? toPositiveNumber(entryMaxTokens, defaults.maxTokens);
+	const maxTokens =
+		maxTokensSource != null && contextWindow != null
+			? Math.min(maxTokensSource, contextWindow)
+			: maxTokensSource;
+	return {
+		...defaults,
+		name: toModelName(entry.name, canonical.name ?? defaults.name),
+		reasoning: canonical.reasoning,
+		input: canonical.input,
+		...(canonical.thinking && { thinking: canonical.thinking }),
+		contextWindow,
+		maxTokens,
+	};
+}
+
+export function digitalOceanModelManagerOptions(
+	config?: DigitalOceanModelManagerConfig,
+): ModelManagerOptions<"openai-completions"> {
+	return createOpenAICompatibleModelManagerOptions({
+		api: "openai-completions",
+		providerId: "digitalocean",
+		defaultBaseUrl: DIGITALOCEAN_BASE_URL,
+		config,
+		requireApiKey: true,
+		dynamicModelsAuthoritative: true,
+		mapModel: mapDigitalOceanModel,
+		filterModel: (_entry, model) => !isExcludedModel("digitalocean", model.id),
+	});
+}
+
+// ---------------------------------------------------------------------------
 // 2. Groq
 // ---------------------------------------------------------------------------
 

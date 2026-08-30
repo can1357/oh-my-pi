@@ -13831,6 +13831,27 @@
 				}
 			},
 			{
+				"provider": "digitalocean",
+				"match": {
+					"prefix": [
+						"router:"
+					],
+					"substring": [
+						"embedding",
+						"reranker",
+						"image",
+						"tts",
+						"bge-",
+						"e5-",
+						"gte-",
+						"all-mini",
+						"mpnet",
+						"wan2",
+						"diffusion"
+					]
+				}
+			},
+			{
 				"provider": "alibaba-token-plan",
 				"match": {
 					"prefix": [
