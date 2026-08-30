@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
-import { BlobStore, isBlobRef } from "@oh-my-pi/pi-coding-agent/session/blob-store";
+import { BlobStore, isBlobRef, lazyImageDataSync } from "@oh-my-pi/pi-coding-agent/session/blob-store";
 import type {
 	CompactionEntry,
 	FileEntry,
@@ -214,17 +214,93 @@ describe("snapcompact frame persistence", () => {
 		expect(isBlobRef(persistedArchive.frames[0]!.data)).toBe(true);
 		expect(persistedArchive.frames[0]!.data).not.toContain("[Session persistence truncated large content]");
 
+		// The payload stays a reference after load; `historyBlocks` materializes it
+		// through the resolver. Kept from the eager version of this test so the
+		// round trip still proves a frame reaches the model as usable base64.
 		const loaded: CompactionEntry[] = [structuredClone(persisted)];
 		await resolveBlobRefsInEntries(loaded, blobStore);
 		const loadedArchive = snapcompact.getPreservedArchive(loaded[0]!.preserveData)!;
-		expect(loadedArchive.frames[0]!.data).toBe(frameData);
-
 		const blocks = snapcompact.historyBlocks(loadedArchive, {
 			maxFrameDataBytes: snapcompact.FRAME_DATA_BYTES_BUDGET,
+			resolveFrameData: data => lazyImageDataSync(blobStore, data),
 		});
 		const imageBlocks = blocks.filter((block): block is ImageContent => block.type === "image");
 		expect(imageBlocks).toHaveLength(1);
+		expect(imageBlocks[0]!.data).toBe(frameData);
 		expect(imageBlocks.every(block => isStrictBase64(block.data))).toBe(true);
+
+		// Without a resolver the reference must never leave as image data: a
+		// dropped picture is recoverable, a rejected request is not.
+		const unresolved = snapcompact
+			.historyBlocks(loadedArchive, { maxFrameDataBytes: snapcompact.FRAME_DATA_BYTES_BUDGET })
+			.filter((block): block is ImageContent => block.type === "image");
+		expect(unresolved).toHaveLength(0);
+	});
+
+	it("marks a missing frame blob in place instead of claiming a budget omission", () => {
+		const archive: Archive = {
+			frames: [{ data: "blob:sha256:missing", mimeType: "image/png", cols: 100, rows: 100, chars: 5000 }],
+			totalChars: 5000,
+			truncatedChars: 0,
+			textHead: "head",
+			textTail: "tail",
+		};
+
+		const text = snapcompact
+			.historyBlocks(archive, { resolveFrameData: () => undefined })
+			.filter((block): block is { type: "text"; text: string } => block.type === "text")
+			.map(block => block.text)
+			.join("");
+
+		expect(text).toContain("archived image frame unavailable here");
+		// A missing payload is not a byte-budget omission, so it must not borrow
+		// that notice: the budget notice claims the OLDEST frames were dropped.
+		expect(text).not.toContain("snapcompact image middle omitted");
+		expect(text).not.toBe("headtail");
+	});
+
+	it("keeps a missing-frame gap after the older frame it follows", () => {
+		const available = Buffer.alloc(64, 3).toString("base64");
+		const archive: Archive = {
+			frames: [
+				{ data: available, mimeType: "image/png", cols: 10, rows: 10, chars: 100 },
+				{ data: "blob:sha256:missing", mimeType: "image/png", cols: 10, rows: 10, chars: 100 },
+			],
+			totalChars: 200,
+			truncatedChars: 0,
+		};
+
+		const blocks = snapcompact.historyBlocks(archive, {
+			resolveFrameData: data =>
+				data === available ? { bytes: data.length, read: () => data } : undefined,
+		});
+		const shape = blocks.map(block => (block.type === "image" ? "image" : "text"));
+
+		// Oldest to newest: the surviving picture, then the gap where the newer
+		// one was. A leading notice would date the gap before the image.
+		expect(shape).toEqual(["image", "text"]);
+		expect(blocks[1]).toMatchObject({ type: "text" });
+		expect((blocks[1] as { text: string }).text).toContain("archived image frame unavailable here");
+	});
+
+	it("drops malformed frame blob references before provider input", () => {
+		using tempDir = TempDir.createSync("@snapcompact-malformed-frame-ref-");
+		const blobStore = new BlobStore(tempDir.path());
+		const archive: Archive = {
+			frames: [{ data: "blob:sha256:not-a-hash", mimeType: "image/png", cols: 100, rows: 100, chars: 5000 }],
+			totalChars: 5000,
+			truncatedChars: 0,
+			textHead: "head",
+			textTail: "tail",
+		};
+
+		const blocks = snapcompact.historyBlocks(archive, {
+			resolveFrameData: data => lazyImageDataSync(blobStore, data),
+		});
+		expect(blocks.filter(block => block.type === "image")).toHaveLength(0);
+		expect(blocks.map(block => (block.type === "text" ? block.text : "")).join("")).toContain(
+			"archived image frame unavailable here",
+		);
 	});
 
 	it("recovers frames corrupted by older persistence versions as retained source text", async () => {

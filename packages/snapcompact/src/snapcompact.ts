@@ -1768,10 +1768,21 @@ export function renderabilityProbeText(
 	return serialized;
 }
 
+/** A frame payload that can be priced before it is materialized. */
+export interface LazyFrameData {
+	readonly bytes: number;
+	read(): string;
+}
+
 /** Options for reconstructing a persisted snapcompact archive into prompt blocks. */
 export interface HistoryBlockOptions {
 	/** Hard cap on image base64 bytes attached to one rebuilt provider request. */
 	maxFrameDataBytes?: number;
+	/**
+	 * Price and resolve a frame payload. Called in newest-first budget order.
+	 * Returning `undefined` drops a missing payload.
+	 */
+	resolveFrameData?: (data: string) => LazyFrameData | undefined;
 }
 
 function formatFrameDataBytes(bytes: number): string {
@@ -1780,38 +1791,101 @@ function formatFrameDataBytes(bytes: number): string {
 	return `${bytes} B`;
 }
 
+/**
+ * Prefix of an externalized frame payload (see the session blob store).
+ *
+ * A frame persisted by a recent session holds this reference rather than
+ * base64, so a caller that never supplies `resolveFrameData` would otherwise
+ * hand the reference string to the provider as image data. Dropping the frame
+ * is the safe failure: a missing picture beats a rejected request.
+ */
+const BLOB_REFERENCE_PREFIX = "blob:sha256:";
+
+function isUnresolvedBlobReference(data: string): boolean {
+	return data.startsWith(BLOB_REFERENCE_PREFIX);
+}
+
+/** One reconstructed slot: a usable frame, or a gap where one was unavailable. */
+type FrameSlot = { frame: Frame } | { unavailable: true };
+
+/**
+ * Pick the frames that fit the payload budget, newest first.
+ *
+ * Two causes are kept apart on purpose. A budget omission always takes the
+ * OLDEST frames, so one notice in front of the kept images stays truthful. An
+ * unavailable payload can sit anywhere, so its gap is reported at its own
+ * position instead: merging the two would place a notice before an image that
+ * is actually older than the gap.
+ */
 function imagesWithinBudget(
 	archive: Archive,
-	maxFrameDataBytes: number | undefined,
-): { images: ImageContent[]; omittedFrames: number; omittedBytes: number } {
-	if (maxFrameDataBytes === undefined) {
-		return { images: images(archive), omittedFrames: 0, omittedBytes: 0 };
+	options: HistoryBlockOptions,
+): { slots: FrameSlot[]; omittedFrames: number; omittedBytes: number } {
+	const { maxFrameDataBytes, resolveFrameData } = options;
+	const hasUnresolvedReference = archive.frames.some(frame => isUnresolvedBlobReference(frame.data));
+	if (maxFrameDataBytes === undefined && !resolveFrameData && !hasUnresolvedReference) {
+		return { slots: archive.frames.map(frame => ({ frame })), omittedFrames: 0, omittedBytes: 0 };
 	}
 
 	let usedBytes = 0;
 	let omittedFrames = 0;
 	let omittedBytes = 0;
-	const keptNewestFirst: Frame[] = [];
+	const newestFirst: FrameSlot[] = [];
 	for (let index = archive.frames.length - 1; index >= 0; index--) {
 		const frame = archive.frames[index];
 		if (!frame) continue;
-		const bytes = frame.data.length;
-		if (usedBytes + bytes > maxFrameDataBytes) {
+		const lazy = resolveFrameData?.(frame.data);
+		if (!lazy && (resolveFrameData || isUnresolvedBlobReference(frame.data))) {
+			newestFirst.push({ unavailable: true });
+			continue;
+		}
+		const bytes = lazy ? lazy.bytes : frame.data.length;
+		if (maxFrameDataBytes !== undefined && usedBytes + bytes > maxFrameDataBytes) {
 			omittedFrames++;
 			omittedBytes += bytes;
 			continue;
 		}
 		usedBytes += bytes;
-		keptNewestFirst.push(frame);
+		newestFirst.push({ frame: lazy ? { ...frame, data: lazy.read() } : frame });
 	}
-	keptNewestFirst.reverse();
-	return { images: images({ ...archive, frames: keptNewestFirst }), omittedFrames, omittedBytes };
+	newestFirst.reverse();
+	return { slots: newestFirst, omittedFrames, omittedBytes };
+}
+
+/** Collapse a run of unavailable frames into one in-place gap marker. */
+function unavailableFrameNotice(count: number): string {
+	return `-------------- ${count.toLocaleString()} archived image frame${count === 1 ? "" : "s"} unavailable here --------------`;
+}
+
+/** Blocks for the imaged middle, with gaps kept where their frames were. */
+function frameBlocks(slots: FrameSlot[]): (TextContent | ImageContent)[] {
+	const blocks: (TextContent | ImageContent)[] = [];
+	let pendingGap = 0;
+	const flushGap = (): void => {
+		if (pendingGap === 0) return;
+		blocks.push({ type: "text", text: unavailableFrameNotice(pendingGap) });
+		pendingGap = 0;
+	};
+	for (const slot of slots) {
+		if ("unavailable" in slot) {
+			pendingGap++;
+			continue;
+		}
+		flushGap();
+		blocks.push(...images({ frames: [slot.frame] } as Archive));
+	}
+	flushGap();
+	return blocks;
 }
 
 function omittedFrameNotice(omittedFrames: number, omittedBytes: number): string {
+	const budgetNote =
+		omittedBytes > 0
+			? ` ${formatFrameDataBytes(omittedBytes)} of base64 exceeded the per-request snapcompact payload budget.`
+			: "";
 	return [
 		"-------------- snapcompact image middle omitted",
-		`${omittedFrames.toLocaleString()} archived image frame${omittedFrames === 1 ? "" : "s"} (${formatFrameDataBytes(omittedBytes)} base64) exceeded the per-request snapcompact payload budget. The compacted summary and visible text edges remain available.`,
+		`${omittedFrames.toLocaleString()} archived image frame${omittedFrames === 1 ? "" : "s"} could not be included.${budgetNote} The compacted summary and visible text edges remain available.`,
 		"--------------",
 	].join("\n");
 }
@@ -1831,8 +1905,9 @@ export function images(archive: Archive): ImageContent[] {
  *  instead of persisted on the session entry. */
 export function historyBlocks(archive: Archive, options: HistoryBlockOptions = {}): (TextContent | ImageContent)[] {
 	const blocks: (TextContent | ImageContent)[] = [];
-	const budgeted = imagesWithinBudget(archive, options.maxFrameDataBytes);
-	const hasImages = budgeted.images.length > 0;
+	const budgeted = imagesWithinBudget(archive, options);
+	const middle = frameBlocks(budgeted.slots);
+	const hasImages = middle.some(block => block.type === "image");
 	const hasOmittedImages = budgeted.omittedFrames > 0;
 	if (archive.textHead) {
 		const suffix = hasImages
@@ -1850,7 +1925,7 @@ export function historyBlocks(archive: Archive, options: HistoryBlockOptions = {
 	if (hasImages && hasOmittedImages) {
 		blocks.push({ type: "text", text: omittedFrameNotice(budgeted.omittedFrames, budgeted.omittedBytes) });
 	}
-	blocks.push(...budgeted.images);
+	blocks.push(...middle);
 	if (archive.textTail) {
 		const prefix = hasImages
 			? "-------------- imaged middle above\n"

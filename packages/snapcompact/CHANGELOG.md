@@ -14,6 +14,9 @@
 - Refactored model policy resolution to be driven by the generated compat rules instead of imperative code
 - Migrated model taxonomy, variant collapse tables, and provider-specific overrides to external KDL files
 - Standardized revision handling and model identification across discovery and runtime components
+### Changed
+
+- `historyBlocks()` now resolves persisted frame payloads lazily, keeps the newest frames within a byte budget, and drops unresolved blob references instead of sending them to providers ([#10227](https://github.com/can1357/oh-my-pi/pull/10227) by [@lemonleks](https://github.com/lemonleks)).
 
 ## [17.4.1] - 2026-08-21
 

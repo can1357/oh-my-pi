@@ -13,6 +13,7 @@
 ### Changed
 
 - Disabled `hashline` edit mode for Kimi, Mimo, DeepSeek Flash, and Stepfun models for stability
+- Reduced resume memory use by resolving persisted snapcompact frames only when they are included in the rebuilt context ([#10227](https://github.com/can1357/oh-my-pi/pull/10227) by [@lemonleks](https://github.com/lemonleks)).
 
 ### Fixed
 

@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as path from "node:path";
 import { isEnoent, logger } from "@oh-my-pi/pi-utils";
+import type { LazyFrameData } from "@oh-my-pi/snapcompact";
 
 const BLOB_PREFIX = "blob:sha256:";
 
@@ -166,6 +167,16 @@ export class BlobStore {
 		}
 	}
 
+	/** Stored byte length without reading the blob; null when it is absent. */
+	sizeSync(hash: string): number | null {
+		try {
+			return fs.statSync(path.join(this.dir, hash)).size;
+		} catch (err) {
+			if (isEnoent(err)) return null;
+			throw err;
+		}
+	}
+
 	/** Check if a blob exists. */
 	async has(hash: string): Promise<boolean> {
 		try {
@@ -292,4 +303,20 @@ export function resolveImageDataSync(blobStore: BlobStore, data: string): string
 		return data;
 	}
 	return buffer.toString("base64");
+}
+
+/**
+ * Price a persisted frame payload without reading it, then read it only if the
+ * snapcompact frame budget keeps it. Missing blobs are dropped instead of sent
+ * to a provider as storage references.
+ */
+export function lazyImageDataSync(blobStore: BlobStore, data: string): LazyFrameData | undefined {
+	const hash = parseBlobRef(data);
+	if (!hash) return isBlobRef(data) ? undefined : { bytes: data.length, read: () => data };
+	const size = blobStore.sizeSync(hash);
+	if (size === null) {
+		logger.warn("Blob not found for image reference", { hash });
+		return undefined;
+	}
+	return { bytes: Math.ceil(size / 3) * 4, read: () => resolveImageDataSync(blobStore, data) };
 }

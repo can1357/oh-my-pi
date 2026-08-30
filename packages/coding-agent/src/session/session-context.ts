@@ -27,10 +27,23 @@ function hasLegacySnapcompactFrames(archive: snapcompact.Archive): boolean {
 	return archive.frames.some(frame => frame.font === undefined && frame.variant === undefined);
 }
 
-function hasCrashRiskSnapcompactFramePayload(archive: snapcompact.Archive): boolean {
+function snapcompactFrameDataBytes(
+	archive: snapcompact.Archive,
+	resolveFrameData: BuildSessionContextOptions["resolveFrameData"],
+): number {
+	if (!resolveFrameData) return snapcompact.frameDataBytes(archive.frames);
+	let total = 0;
+	for (const frame of archive.frames) total += resolveFrameData(frame.data)?.bytes ?? frame.data.length;
+	return total;
+}
+
+function hasCrashRiskSnapcompactFramePayload(
+	archive: snapcompact.Archive,
+	resolveFrameData: BuildSessionContextOptions["resolveFrameData"],
+): boolean {
 	return (
 		archive.frames.length >= LEGACY_SNAPCOMPACT_FRAME_COUNT_GUARD ||
-		snapcompact.frameDataBytes(archive.frames) >= snapcompact.FRAME_DATA_BYTES_BUDGET
+		snapcompactFrameDataBytes(archive, resolveFrameData) >= snapcompact.FRAME_DATA_BYTES_BUDGET
 	);
 }
 
@@ -42,10 +55,13 @@ function hasCrashRiskSnapcompactArchiveSize(archive: snapcompact.Archive): boole
 	);
 }
 
-function isCrashRiskLegacySnapcompactArchive(archive: snapcompact.Archive): boolean {
+function isCrashRiskLegacySnapcompactArchive(
+	archive: snapcompact.Archive,
+	resolveFrameData: BuildSessionContextOptions["resolveFrameData"],
+): boolean {
 	return (
 		hasLegacySnapcompactFrames(archive) &&
-		hasCrashRiskSnapcompactFramePayload(archive) &&
+		hasCrashRiskSnapcompactFramePayload(archive, resolveFrameData) &&
 		hasCrashRiskSnapcompactArchiveSize(archive)
 	);
 }
@@ -53,10 +69,16 @@ function isCrashRiskLegacySnapcompactArchive(archive: snapcompact.Archive): bool
 function snapcompactHistoryBlockOptions(
 	archive: snapcompact.Archive,
 	options: BuildSessionContextOptions | undefined,
-): snapcompact.HistoryBlockOptions | undefined {
-	if (options?.transcript) return undefined;
-	if (isCrashRiskLegacySnapcompactArchive(archive)) return { maxFrameDataBytes: 0 };
-	return { maxFrameDataBytes: snapcompact.FRAME_DATA_BYTES_BUDGET };
+): snapcompact.HistoryBlockOptions {
+	const resolveFrameData = options?.resolveFrameData;
+	if (options?.transcript) return resolveFrameData ? { resolveFrameData } : {};
+	if (isCrashRiskLegacySnapcompactArchive(archive, resolveFrameData)) {
+		return { maxFrameDataBytes: 0, ...(resolveFrameData ? { resolveFrameData } : {}) };
+	}
+	return {
+		maxFrameDataBytes: snapcompact.FRAME_DATA_BYTES_BUDGET,
+		...(resolveFrameData ? { resolveFrameData } : {}),
+	};
 }
 
 export interface SessionContext {
@@ -130,6 +152,8 @@ export interface BuildSessionContextOptions {
 	 * hides the call the agent is still waiting on.
 	 */
 	keepDanglingToolCalls?: boolean;
+	/** Price and resolve persisted snapcompact frame payloads on demand. */
+	resolveFrameData?: (data: string) => snapcompact.LazyFrameData | undefined;
 }
 
 /**
