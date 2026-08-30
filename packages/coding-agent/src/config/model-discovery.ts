@@ -11,7 +11,6 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import {
 	getBundledModelReferenceIndex,
 	inheritReferenceThinking,
-	isQwenModelId,
 	resolveModelReference,
 	stripBracketedModelIdAffixes,
 } from "@oh-my-pi/pi-catalog/identity";
@@ -554,8 +553,8 @@ async function discoverLlamaCppServerMetadata(
 
 /**
  * PrismLM Ternary/1-bit Bonsai GGUFs are Qwen3.6-27B derivatives served locally
- * via llama.cpp; their ids do not contain "qwen", so match them explicitly here
- * rather than broadening the global `isQwenModelId` predicate.
+ * via llama.cpp; their ids do not carry classifiable Qwen lineage, so this
+ * reviewed local alias supplements the structured identity.
  */
 function isBonsaiQwenGguf(id: string): boolean {
 	return /(?:ternary-)?bonsai-27b/i.test(id);
@@ -578,7 +577,7 @@ function isBonsaiQwenGguf(id: string): boolean {
  * waiting for re-discovery.
  */
 export function applyLlamaCppQwenThinking(model: Model<Api>): Model<Api> {
-	if (!isQwenModelId(model.id) && !isBonsaiQwenGguf(model.id)) return model;
+	if (model.identity.class !== "qwen" && !isBonsaiQwenGguf(model.id)) return model;
 	return buildModel({
 		...model,
 		api: "openai-completions",

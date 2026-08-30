@@ -34,7 +34,6 @@ import type {
 	WriteResult,
 } from "@oh-my-pi/pi-catalog/discovery/cursor-proto";
 import type { Effort } from "@oh-my-pi/pi-catalog/effort";
-import { isOpenAIModelId } from "@oh-my-pi/pi-catalog/identity/family";
 import type { Api, FetchImpl, KnownApi, Model, Provider, ThinkingBudgets, Usage } from "@oh-my-pi/pi-catalog/types";
 import type { ApiKey } from "./auth-retry";
 import type { BedrockOptions } from "./providers/amazon-bedrock";
@@ -153,7 +152,7 @@ export type ServiceTierFamily = "openai" | "anthropic" | "google";
  */
 export type ServiceTierByFamily = Partial<Record<ServiceTierFamily, ServiceTier>>;
 
-type ServiceTierModel = Pick<Model, "provider" | "api" | "id">;
+type ServiceTierModel = Pick<Model, "provider" | "api" | "identity">;
 
 function isOpenAIServiceTierApi(api: Api | undefined): boolean {
 	return api === "openai-completions" || api === "openai-responses" || api === "openai-codex-responses";
@@ -169,7 +168,7 @@ function isOpenAIServiceTierModel(model: ServiceTierModel): boolean {
 	return (
 		!excludesInferredOpenAIServiceTier(model.provider) &&
 		isOpenAIServiceTierApi(model.api) &&
-		isOpenAIModelId(model.id)
+		model.identity.class === "openai"
 	);
 }
 
@@ -187,10 +186,9 @@ function isOpenAIServiceTierModel(model: ServiceTierModel): boolean {
 export function serviceTierFamily(model: ServiceTierModel): ServiceTierFamily | undefined {
 	const provider = model.provider;
 	if (provider === "openrouter") {
-		const id = model.id.toLowerCase();
-		if (id.startsWith("anthropic/")) return "anthropic";
-		if (id.startsWith("google/")) return "google";
-		if (id.startsWith("openai/")) return "openai";
+		if (model.identity.class === "anthropic") return "anthropic";
+		if (model.identity.class === "gemini") return "google";
+		if (model.identity.class === "openai") return "openai";
 		return undefined;
 	}
 	if (provider === "openai" || provider === "openai-codex") return "openai";
@@ -206,7 +204,7 @@ export function serviceTierFamily(model: ServiceTierModel): ServiceTierFamily | 
  */
 export function resolveModelServiceTier(
 	tiers: ServiceTierByFamily | null | undefined,
-	model: Pick<Model, "provider" | "api" | "id">,
+	model: ServiceTierModel,
 ): ServiceTier | undefined {
 	if (!tiers) return undefined;
 	const family = serviceTierFamily(model);
@@ -253,7 +251,7 @@ export function shouldSendServiceTier(
  */
 export function realizesPriorityServiceTier(
 	serviceTier: ServiceTier | null | undefined,
-	model: Pick<Model, "provider" | "api" | "id">,
+	model: ServiceTierModel,
 ): boolean {
 	if (serviceTier !== "priority") return false;
 	if (model.provider === "anthropic") return true;
@@ -279,7 +277,7 @@ export function realizesPriorityServiceTier(
  */
 export function getPriorityPremiumRequests(
 	serviceTier: ServiceTier | null | undefined,
-	model: Pick<Model, "provider" | "api" | "id">,
+	model: ServiceTierModel,
 ): number {
 	if (!realizesPriorityServiceTier(serviceTier, model)) return 0;
 	const provider = model.provider;

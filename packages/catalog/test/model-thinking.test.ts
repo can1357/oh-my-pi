@@ -120,7 +120,11 @@ describe("model thinking derivation", () => {
 		};
 		expect(mimo.thinking).toEqual(expectedThinking);
 		expect(openRouterMimo.thinking).toEqual(expectedThinking);
-		expect(staleMimo.thinking).toEqual(expectedThinking);
+		expect(staleMimo.thinking).toEqual({
+			mode: "effort",
+			efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.XHigh],
+			effortMap: { minimal: "low", xhigh: "high" },
+		});
 		expect(mimo.compat.reasoningEffortMap).toEqual({ minimal: "low", xhigh: "high" });
 		expect(openRouterMimo.compat.reasoningEffortMap).toEqual({ minimal: "low", xhigh: "high" });
 		expect(staleMimo.compat.reasoningEffortMap).toEqual({ minimal: "low", xhigh: "high" });
@@ -131,7 +135,7 @@ describe("model thinking derivation", () => {
 		expect(nativeXiaomi.thinking?.efforts).toEqual([Effort.Minimal, Effort.Low, Effort.Medium, Effort.High]);
 	});
 
-	it("normalizes stale explicit MiniMax M2 / GPT-OSS effort metadata from caches", () => {
+	it("preserves stale explicit MiniMax M2 / GPT-OSS effort metadata from caches", () => {
 		const staleMinimax = createModel({
 			id: "minimax-m2.7",
 			api: "openai-completions",
@@ -156,12 +160,14 @@ describe("model thinking derivation", () => {
 
 		expect(staleMinimax.thinking).toEqual({
 			mode: "effort",
-			efforts: [Effort.Low, Effort.Medium, Effort.High],
+			efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.XHigh],
+			effortMap: { minimal: "none", xhigh: "max" },
 			requiresEffort: true,
 		});
 		expect(staleGptOss.thinking).toEqual({
 			mode: "effort",
-			efforts: [Effort.Low, Effort.Medium, Effort.High],
+			efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.XHigh],
+			effortMap: { minimal: "none" },
 		});
 	});
 
@@ -193,12 +199,7 @@ describe("model thinking derivation", () => {
 		});
 
 		expect(fireworks.thinking?.effortMap).toEqual({ minimal: "none" });
-		expect(groqQwen.thinking?.effortMap).toEqual({
-			minimal: "default",
-			low: "default",
-			medium: "default",
-			high: "default",
-		});
+		expect(groqQwen.thinking?.effortMap).toBeUndefined();
 		// Explicit compat overrides still win over identity-derived wire values.
 		expect(deepseek.thinking?.effortMap).toEqual({ max: "max-plus" });
 		// OpenRouter-hosted Anthropic adaptive models carry the wire-exact
@@ -227,13 +228,19 @@ describe("model thinking derivation", () => {
 
 		expect(opus48.thinking).toEqual({
 			mode: "anthropic-adaptive",
-			efforts: [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh, Effort.Max],
+			efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.XHigh],
 			supportsDisplay: true,
 		});
-		expect(getSupportedEfforts(opus48)).toEqual([Effort.Low, Effort.Medium, Effort.High, Effort.XHigh, Effort.Max]);
+		expect(getSupportedEfforts(opus48)).toEqual([
+			Effort.Minimal,
+			Effort.Low,
+			Effort.Medium,
+			Effort.High,
+			Effort.XHigh,
+		]);
 		expect(opus46.thinking).toEqual({
 			mode: "anthropic-adaptive",
-			efforts: [Effort.Low, Effort.Medium, Effort.High, Effort.Max],
+			efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.XHigh],
 		});
 	});
 
@@ -364,7 +371,6 @@ describe("model thinking derivation", () => {
 			api: "openrouter",
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
-			thinking: discovered,
 		});
 
 		// The dated SKU keeps its advertised ladder, including through a route suffix;
@@ -378,21 +384,15 @@ describe("model thinking derivation", () => {
 		expect(clampThinkingLevelForModel(bare, Effort.Max)).toBe(Effort.High);
 	});
 
-	it("normalizes OpenCode gateway ox-alpha onto the low/high/max ladder with mandatory thinking (issue #9349)", () => {
+	it("assigns OpenCode gateway ox-alpha the low/high/max ladder with mandatory thinking (issue #9349)", () => {
 		// The OpenCode Go gateway rejects minimal/medium/xhigh for ox-alpha
-		// (`[1210] ... please use low, high, or max`), so the stale
-		// minimal..xhigh surface the catalog shipped made the top tier
-		// unreachable: `max` clamped to `xhigh` and 400'd upstream.
-		const staleThinking = {
-			mode: "effort" as const,
-			efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.XHigh],
-		};
+		// (`[1210] ... please use low, high, or max`), so the catalog
+		// exposes the gateway's wire-exact ladder.
 		const oxAlpha = createModel({
 			id: "ox-alpha-free",
 			api: "openai-completions",
 			provider: "opencode-go",
 			baseUrl: "https://opencode.ai/zen/go/v1",
-			thinking: staleThinking,
 		});
 
 		expect(oxAlpha.thinking).toEqual({
@@ -416,7 +416,6 @@ describe("model thinking derivation", () => {
 			api: "openai-completions",
 			provider: "opencode-zen",
 			baseUrl: "https://opencode.ai/zen/v1",
-			thinking: staleThinking,
 		});
 		expect(zenAlias.thinking).toEqual({
 			mode: "effort",
@@ -427,6 +426,10 @@ describe("model thinking derivation", () => {
 		expect(clampThinkingLevelForModel(zenAlias, Effort.XHigh)).toBe(Effort.High);
 
 		// A zen id with no ox-alpha signal keeps its shipped ladder untouched.
+		const staleThinking = {
+			mode: "effort" as const,
+			efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.XHigh],
+		};
 		const zenOther = createModel({
 			id: "hy3-preview-free",
 			api: "openai-completions",
@@ -735,9 +738,8 @@ describe("model thinking derivation", () => {
 	});
 
 	it("backfills wire facts onto explicit thinking, explicit values winning", () => {
-		// Authored partial ladders on wire-exact models normalize to the
-		// model-defined ladder, and the wire map is re-derived alongside:
-		// stale cached surfaces cannot pin retired wire facts.
+		// Authored partial ladders are authoritative; rules only fill fields
+		// the spec omitted.
 		const filled = createModel({
 			id: "claude-opus-4-8",
 			api: "anthropic-messages",
@@ -746,7 +748,7 @@ describe("model thinking derivation", () => {
 		});
 		expect(filled.thinking).toEqual({
 			mode: "anthropic-adaptive",
-			efforts: [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh, Effort.Max],
+			efforts: [Effort.Low, Effort.High],
 			supportsDisplay: true,
 		});
 
@@ -854,8 +856,7 @@ describe("model thinking derivation", () => {
 		});
 
 		// Stale baked metadata (caches/discovery) — including shifted-era maps —
-		// normalizes to the wire-exact ladder with the map re-derived away, and
-		// namespaced OpenRouter ids parse.
+		// remains authoritative when explicitly authored.
 		const staleOpenRouter = createModel({
 			id: "openai/gpt-5.6-terra",
 			api: "openrouter",
@@ -876,7 +877,14 @@ describe("model thinking derivation", () => {
 
 		expect(staleOpenRouter.thinking).toEqual({
 			mode: "effort",
-			efforts: [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh, Effort.Max],
+			efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.XHigh],
+			effortMap: {
+				minimal: "low",
+				low: "medium",
+				medium: "high",
+				high: "xhigh",
+				xhigh: "max",
+			},
 		});
 	});
 
@@ -946,8 +954,9 @@ describe("model thinking runtime helpers", () => {
 			thinking: { mode: "effort", efforts: [Effort.Medium, Effort.High] },
 		});
 
-		// `-reasoner` ids are thinking-only SKUs — the wire fact is backfilled
-		// onto explicit metadata like effortMap.
+		// Explicit metadata owns the ladder; the `-reasoner` pair token still
+		// backfills the mandatory-thinking floor (variant orphans cannot
+		// disable reasoning).
 		expect(model.thinking).toEqual({ mode: "effort", efforts: [Effort.Medium, Effort.High], requiresEffort: true });
 		expect(clampThinkingLevelForModel(model, Effort.Minimal)).toBe(Effort.Medium);
 		expect(clampThinkingLevelForModel(model, Effort.XHigh)).toBe(Effort.High);
@@ -964,7 +973,7 @@ describe("model thinking runtime helpers", () => {
 		expect(clampThinkingLevelForModel(model, Effort.High)).toBeUndefined();
 	});
 
-	it("does not expose xhigh for binary-thinking openai-compat transports", () => {
+	it("uses the rule-authored GLM budget ladder despite a sparse compat override", () => {
 		const model = createModel({
 			id: "glm-4.7",
 			api: "openai-completions",
@@ -974,12 +983,10 @@ describe("model thinking runtime helpers", () => {
 		});
 
 		expect(model.thinking).toEqual({
-			mode: "effort",
-			efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High],
+			mode: "budget",
+			efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.XHigh],
 		});
-		expect(() => requireSupportedEffort(model, Effort.XHigh)).toThrow(
-			/Supported efforts: minimal, low, medium, high/,
-		);
+		expect(() => requireSupportedEffort(model, Effort.XHigh)).not.toThrow();
 	});
 
 	it("exposes the Z.AI GLM-5.2 high/max wire pair directly", () => {
@@ -1269,7 +1276,7 @@ describe("Qwen 3.8 local template effort ladder", () => {
 		expect(defaultSupportedEffort(floorDefault)).toBe(minimumSupportedEffort(floorDefault));
 	});
 
-	it("normalizes a stale cached generic ladder to the template ladder", () => {
+	it("preserves an authored cached ladder and backfills mandatory thinking", () => {
 		const cached = createModel({
 			id: "qwen3.8-27b",
 			api: "openai-completions",
@@ -1279,7 +1286,7 @@ describe("Qwen 3.8 local template effort ladder", () => {
 		});
 		expect(cached.thinking).toEqual({
 			mode: "effort",
-			efforts: [Effort.Low, Effort.Medium, Effort.XHigh],
+			efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High],
 			requiresEffort: true,
 		});
 	});
@@ -1317,8 +1324,7 @@ describe("Qwen 3.8 local template effort ladder", () => {
 		expect(qwen36.compat.qwenTemplateReasoningEffort).toBe(false);
 		expect(qwen36.thinking?.requiresEffort).toBeUndefined();
 
-		// Local Ollama renders its own (Go) templates and keeps the native
-		// low/medium/high/max effort vocabulary.
+		// Local Ollama renders its own (Go) templates and keeps the generic local fallback ladder.
 		const ollama = createModel({
 			id: "qwen3.8-27b",
 			api: "openai-completions",

@@ -68,6 +68,10 @@ const compat: ResolvedOpenAICompat = {
 	emptyLengthFinishIsContextError: false,
 	usesOpenAIToolCallIdLimit: false,
 	dropThinkingWhenReasoningEffort: false,
+	nativeKimiK3Reasoning: false,
+	zaiReasoningEffortDialect: false,
+	clampOutputToModelMax: false,
+	stripImageInput: false,
 };
 
 function makeModel<TApi extends Api>(api: TApi, provider: Model["provider"]): Model<TApi> {

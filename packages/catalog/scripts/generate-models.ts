@@ -17,12 +17,12 @@ import { getGitLabDuoModels } from "@oh-my-pi/pi-ai/providers/gitlab-duo";
 import { getProviderDefinition } from "@oh-my-pi/pi-ai/registry";
 import { $env } from "@oh-my-pi/pi-utils";
 import { buildModel } from "../src/build";
+import { collapseVariants } from "../src/compat/collapse";
 import { ANTIGRAVITY_PRIMARY_ENDPOINT, fetchAntigravityDiscoveryModels } from "../src/discovery/antigravity";
 import { buildGitLabDuoWorkflowFallbackModel } from "../src/discovery/gitlab-duo-workflow";
 import { resolveGrokbotDiscoveryIdentityAsync } from "../src/discovery/grokbot-auth";
 import { createModelManager } from "../src/model-manager";
 import prevModelsJson from "../src/models.json" with { type: "json" };
-import { resolveOpenAIDaybreakStandardCost } from "../src/openai-pricing";
 import { toModelSpec } from "../src/provider-models/bundled-references";
 import {
 	allowsUnauthenticatedCatalogDiscovery,
@@ -64,7 +64,6 @@ import {
 } from "../src/provider-models/special";
 import type { Api, Model, ModelSpec } from "../src/types";
 import { cleanModelName } from "../src/utils";
-import { collapseEffortVariantsAcrossProviders } from "../src/variant-collapse";
 import {
 	applyAntigravityPricingFallback,
 	applyCanonicalLimitFallback,
@@ -324,7 +323,9 @@ function applyCodexPricingFallback(models: readonly ModelSpec[]): ModelSpec[] {
 			return model;
 		}
 
-		const openAICost = openAIModels.get(model.id) ?? resolveOpenAIDaybreakStandardCost(model.id);
+		// Daybreak standard pricing is rule-owned (`providers/openai-codex.kdl`
+		// cost-patch); only same-id openai mirrors remain generator-applied.
+		const openAICost = openAIModels.get(model.id);
 		if (!openAICost) {
 			return model;
 		}
@@ -746,7 +747,7 @@ async function generateModels() {
 	// Collapse effort-tier variants AFTER the policy re-bake: live-discovery
 	// entries are already collapsed (rebake skips them); this pass folds
 	// previous-snapshot raw members into their logical families.
-	allModels = collapseEffortVariantsAcrossProviders(allModels);
+	allModels = collapseVariants(allModels);
 	// Fill remaining null endpoint limits from each model's canonical-family
 	// reference. Runs last so canonical ids and explicit policy limits are final.
 	applyCanonicalLimitFallback(allModels);

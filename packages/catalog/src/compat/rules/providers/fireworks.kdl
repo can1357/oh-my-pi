@@ -1,0 +1,31 @@
+// Provider-wire compat for "fireworks"; regenerated from the frozen census using deployment contract selectors.
+
+provider "fireworks" {
+	thinking-mode "effort"
+	class "qwen" {
+		thinking-format "openai"
+	}
+	class "unknown" {
+		thinking-efforts "minimal" "low" "medium" "high" "xhigh"
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "deepseek-v4-flash" {
+		requires-reasoning-content-for-all-assistant-turns #true
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "glm-5.1*" "glm-5" {
+		thinking-efforts "minimal" "low" "medium" "high" "xhigh"
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "glm-5.2*" {
+		thinking-efforts "minimal" "low" "medium" "high" "max"
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "qwen3-coder-480b-a35b-instruct" {
+		thinking-format "openai"
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "qwen3.6-plus" {
+		supports-developer-role #false
+	}
+}

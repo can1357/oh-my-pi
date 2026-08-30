@@ -1,7 +1,6 @@
 import { toClinePassWireModelId } from "@oh-my-pi/pi-catalog/cline-pass-model-id";
 import type { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { toFirepassWireModelId, toFireworksWireModelId } from "@oh-my-pi/pi-catalog/fireworks-model-id";
-import { isGlm52ReasoningEffortModelId, isKimiK3ModelId } from "@oh-my-pi/pi-catalog/identity";
 import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import type {
@@ -131,6 +130,7 @@ export const NO_AUTH_SENTINEL = "N/A";
 export interface OpenAIModelIdentity {
 	provider: string;
 	id: string;
+	identity?: Model["identity"];
 	baseUrl?: string;
 }
 
@@ -338,7 +338,7 @@ export function resolveOpenAIRequestSetup(
 export function applyOpenAIServiceTier(
 	params: { service_tier?: ServiceTier | null | undefined },
 	serviceTier: ServiceTier | null | undefined,
-	model: Pick<Model, "provider" | "api" | "id">,
+	model: Pick<Model, "provider" | "api" | "identity">,
 ): void {
 	if (!shouldSendServiceTier(serviceTier, model)) return;
 	params.service_tier = serviceTier;
@@ -350,7 +350,12 @@ export function applyOpenAIServiceTier(
  * half price; Priority is a 2x premium. Codex bills the same tiers with its own
  * table (Priority is 2.5x on gpt-5.5) and applies that separately.
  */
-function getOpenAIResponsesServiceTierCostMultiplier(tier: string | null | undefined): number {
+function getOpenAIResponsesServiceTierCostMultiplier(
+	model: Pick<Model, "serviceTierCost">,
+	tier: string | null | undefined,
+): number {
+	const resolvedMultiplier = tier === "flex" || tier === "priority" ? model.serviceTierCost?.[tier] : undefined;
+	if (resolvedMultiplier !== undefined) return resolvedMultiplier;
 	switch (tier) {
 		case "flex":
 			return 0.5;
@@ -370,7 +375,7 @@ function getOpenAIResponsesServiceTierCostMultiplier(tier: string | null | undef
  * proxy can never skew those costs.
  */
 export function applyOpenAIResponsesServiceTierCost(
-	model: Pick<Model, "provider">,
+	model: Pick<Model, "provider" | "serviceTierCost">,
 	usage: AssistantMessage["usage"],
 	responseServiceTier: unknown,
 	requestServiceTier: ServiceTier | null | undefined,
@@ -380,7 +385,7 @@ export function applyOpenAIResponsesServiceTierCost(
 	// requested priority/flex turn to default under load); only fall back to the
 	// requested tier when the response omits the echo entirely.
 	const served = typeof responseServiceTier === "string" ? responseServiceTier : (requestServiceTier ?? undefined);
-	const multiplier = getOpenAIResponsesServiceTierCostMultiplier(served);
+	const multiplier = getOpenAIResponsesServiceTierCostMultiplier(model, served);
 	if (multiplier === 1) return;
 	usage.cost.input *= multiplier;
 	usage.cost.output *= multiplier;
@@ -541,7 +546,7 @@ export function disableStrictToolsForScope(
 }
 
 export function isOpenRouterAnthropicModel(model: OpenAIModelIdentity): boolean {
-	return model.provider === "openrouter" && model.id.toLowerCase().startsWith("anthropic/");
+	return model.provider === "openrouter" && model.identity?.class === "anthropic";
 }
 
 /**
@@ -1211,8 +1216,8 @@ export function disableChatCompletionsReasoningForDialect(
  * true but are NOT GLM-5.2, so the model-id check is load-bearing — never swap it
  * for `compat.supportsReasoningEffort`.
  */
-function isZaiReasoningEffortDialect(model: Model<"openai-completions">, compat: ResolvedOpenAICompat): boolean {
-	return compat.thinkingFormat === "zai" && isGlm52ReasoningEffortModelId(model.id);
+function isZaiReasoningEffortDialect(_model: Model<"openai-completions">, compat: ResolvedOpenAICompat): boolean {
+	return compat.thinkingFormat === "zai" && compat.zaiReasoningEffortDialect;
 }
 
 /**
@@ -1233,7 +1238,7 @@ export function resolveOpenAICompletionsOutputClamp(
 	if (isZaiReasoningEffortDialect(model, compat)) {
 		return model.maxTokens ?? OPENAI_MAX_OUTPUT_TOKENS;
 	}
-	if (model.provider === "moonshot" && isKimiK3ModelId(model.id)) {
+	if (compat.clampOutputToModelMax) {
 		return model.maxTokens ?? OPENAI_MAX_OUTPUT_TOKENS;
 	}
 	return undefined;
@@ -3560,7 +3565,7 @@ type CommonSamplingOptions = Pick<
 export function applyCommonResponsesSamplingParams<P extends CommonResponsesParams>(
 	params: P,
 	options: CommonSamplingOptions | undefined,
-	model: Pick<Model, "provider" | "api" | "id" | "omitMaxOutputTokens" | "maxTokens"> & {
+	model: Pick<Model, "provider" | "api" | "id" | "omitMaxOutputTokens" | "maxTokens" | "identity"> & {
 		compat: Pick<ResolvedOpenAISharedCompat, "supportsSamplingParams" | "supportsPenaltyAndStopParams">;
 	},
 ): void {
