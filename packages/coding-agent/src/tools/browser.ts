@@ -40,7 +40,13 @@ export {
 export { cmuxSnapshotToObservation, mapWaitUntil, resolveCmuxKind, serializeEval } from "./browser/cmux/rpc";
 export { CmuxSocketClient } from "./browser/cmux/socket-client";
 export { extractReadableFromHtml, type ReadableFormat, type ReadableResult } from "./browser/readable";
-export { DEFAULT_RELAY_URL, type RelayKind, resolveRelayKind } from "./browser/relay/kind";
+export {
+	DEFAULT_RELAY_URL,
+	type FirefoxRelayKind,
+	type RelayBrowser,
+	type RelayKind,
+	resolveRelayKind,
+} from "./browser/relay/kind";
 export type { Observation, ObservationEntry } from "./browser/tab-protocol";
 
 const DEFAULT_TAB_NAME = "main";
@@ -99,10 +105,11 @@ function resolveBrowserKind(params: BrowserParams, session: ToolSession): Browse
 		return { kind: "spawned", path: exe };
 	}
 	const relayUrl = session.settings.get("browser.relayUrl") as string | undefined;
+	const relayBrowser = session.settings.get("browser.relayBrowser") as "chromium" | "firefox" | undefined;
 	// Explicit app.relay wins over every setting; PI_BROWSER_RELAY stays the
 	// final kill switch (a relay that is down would otherwise brick the tool).
 	if (app?.relay) {
-		const relayKind = resolveRelayKind({ settingEnabled: true, url: relayUrl });
+		const relayKind = resolveRelayKind({ settingEnabled: true, browser: relayBrowser, url: relayUrl });
 		if (relayKind) return relayKind;
 	}
 	// Relay before cdpUrl among settings: enabling the opt-out-by-default relay
@@ -112,6 +119,7 @@ function resolveBrowserKind(params: BrowserParams, session: ToolSession): Browse
 	if (app?.relay !== false) {
 		const relayKind = resolveRelayKind({
 			settingEnabled: session.settings.get("browser.relay") as boolean | undefined,
+			browser: relayBrowser,
 			url: relayUrl,
 		});
 		if (relayKind) return relayKind;
@@ -444,9 +452,8 @@ async function saveBrowserOutputArtifact(session: ToolSession, fullText: string)
 }
 
 function describeBrowser(handle: BrowserHandle): string {
-	if (!("browser" in handle)) {
-		return `cmux browser (${handle.kind.surface ?? "split"})`;
-	}
+	if ("client" in handle) return `cmux browser (${handle.kind.surface ?? "split"})`;
+	if ("webSocketUrl" in handle) return `Firefox relay (${handle.webSocketUrl})`;
 	switch (handle.kind.kind) {
 		case "headless":
 			return `headless browser (${handle.kind.headless ? "hidden" : "visible"}${handle.sharedDaemon ? ", shared" : ""})`;
@@ -469,6 +476,8 @@ function describeKind(kind: BrowserKind): string {
 			return `connected:${kind.cdpUrl}`;
 		case "relay":
 			return `relay:${kind.cdpUrl}`;
+		case "firefox-relay":
+			return `firefox-relay:${kind.webSocketUrl}`;
 		case "cmux":
 			return `cmux:${kind.surface ?? "split"}`;
 	}
@@ -480,6 +489,7 @@ function sameBrowserKind(a: BrowserKind, b: BrowserKind): boolean {
 	if (a.kind === "spawned" && b.kind === "spawned") return a.path === b.path;
 	if (a.kind === "connected" && b.kind === "connected") return a.cdpUrl === b.cdpUrl;
 	if (a.kind === "relay" && b.kind === "relay") return a.cdpUrl === b.cdpUrl;
+	if (a.kind === "firefox-relay" && b.kind === "firefox-relay") return a.webSocketUrl === b.webSocketUrl;
 	if (a.kind === "cmux" && b.kind === "cmux") return a.socketPath === b.socketPath;
 	return false;
 }

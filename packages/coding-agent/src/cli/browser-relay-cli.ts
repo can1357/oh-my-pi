@@ -1,7 +1,5 @@
 /**
- * `omp browser-relay` implementation: serve the local CDP relay and install
- * its Chrome extension. Standalone CLI command — console output here is
- * intentional user-facing output.
+ * `omp browser-relay` implementation for the Chromium extension relay.
  */
 import * as path from "node:path";
 import { getBrowserRelayDir } from "@oh-my-pi/pi-utils";
@@ -20,6 +18,7 @@ export type BrowserRelayAction = (typeof BROWSER_RELAY_ACTIONS)[number];
 
 export interface BrowserRelayCommandArgs {
 	action: BrowserRelayAction;
+	browser?: "chromium";
 	port: number;
 	token?: string;
 	/** Install target directory; defaults to ~/.omp/browser-relay/extension. */

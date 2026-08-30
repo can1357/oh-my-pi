@@ -20,7 +20,7 @@ export const benchHelp = {
 } satisfies CommandMetadata;
 
 export const browserRelayHelp = {
-	description: "Run the local CDP relay that lets the browser tool drive your own Chrome tabs",
+	description: "Run or install the local Chromium browser relay",
 } satisfies CommandMetadata;
 
 export const cleanseHelp = {

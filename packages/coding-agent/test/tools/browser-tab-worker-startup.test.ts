@@ -18,6 +18,10 @@ import {
 import { chromiumAvailable } from "./chromium-probe";
 
 const CHROMIUM_AVAILABLE = await chromiumAvailable();
+const HEADFUL_BROWSER_AVAILABLE =
+	CHROMIUM_AVAILABLE &&
+	Bun.env.CI !== "true" &&
+	(process.platform !== "linux" || Boolean(Bun.env.DISPLAY || Bun.env.WAYLAND_DISPLAY));
 
 class FakeStartupWorker {
 	#errorHandlers = new Set<(error: Error) => void>();
@@ -217,7 +221,7 @@ describe("browser init deadline carry-over", () => {
 	);
 });
 describe("visible OMP-owned browser tabs", () => {
-	it.skipIf(!CHROMIUM_AVAILABLE)(
+	it.skipIf(!HEADFUL_BROWSER_AVAILABLE)(
 		"creates independent pages without pinning the resizable window viewport",
 		async () => {
 			let browser: BrowserHandle | undefined;
