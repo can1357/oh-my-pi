@@ -1014,8 +1014,16 @@ const typeMethods = {
 			this.allows = allows;
 			return allows(data);
 		}
-		for (const step of steps) {
-			if (step.kind === "filter" && !step.fn(data, new Ctx(data))) return false;
+		if (steps.some(step => step.kind === "filter")) {
+			// Mirror the callable path, which validates the projected input before
+			// running any filter: a predicate receives a value of its declared
+			// input type, so `v.a.length` cannot throw on malformed data. Without
+			// this, `allows()` invoked the predicate first and a filter carried
+			// into `.in` turned a rejection into an exception.
+			if (walk(projectIO(this.ir, "in"), data) instanceof OmpErrors) return false;
+			for (const step of steps) {
+				if (step.kind === "filter" && !step.fn(data, new Ctx(data))) return false;
+			}
 		}
 		const out = this[kBase](data);
 		if (out instanceof OmpErrors) return false;

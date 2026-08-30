@@ -546,5 +546,17 @@ describe("Type.filter", () => {
 		const narrowed = type({ a: "string" }).narrow(value => value.a !== "no");
 		expect(narrowed({ a: "no" })).toBeInstanceOf(OmpErrors);
 		expect(narrowed.in.allows({ a: "no" })).toBe(true);
+
+		// `allows()` runs filter steps, so it must validate the projected input
+		// first — exactly like the callable path does. Otherwise a predicate that
+		// dereferences its argument throws on malformed data instead of the
+		// schema reporting a rejection, and carrying filters into `.in` turned
+		// that into an exception where the callable returns an error.
+		const dereferencing = type({ a: "string" }).filter(value => value.a.length > 0);
+		expect(dereferencing(null)).toBeInstanceOf(OmpErrors);
+		expect(dereferencing.allows(null)).toBe(false);
+		expect(dereferencing.in.allows(null)).toBe(false);
+		expect(dereferencing.in.allows({ a: "x" })).toBe(true);
+		expect(dereferencing.in.allows({ a: "" })).toBe(false);
 	});
 });
