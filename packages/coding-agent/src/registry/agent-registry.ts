@@ -52,6 +52,8 @@ export interface AgentMetricsSummary {
 	contextWindow?: number;
 }
 
+export type AgentTerminalOutcome = "completed" | "failed" | "aborted";
+
 /** Historical identity and telemetry that remain available after the live session is disposed. */
 export interface AgentHistorySummary {
 	agent?: string;
@@ -59,6 +61,8 @@ export interface AgentHistorySummary {
 	resolvedModel?: string;
 	/** Whether the last resolved model was selected by retry fallback routing. */
 	resolvedModelIsFallback?: boolean;
+	/** Latest task outcome, retained while the reusable session becomes idle or parked. */
+	lastOutcome?: AgentTerminalOutcome;
 	metrics?: AgentMetricsSummary;
 	readOnly?: boolean;
 	/** Durable task output artifact, when the executor wrote one. */
@@ -181,6 +185,17 @@ export class AgentRegistry {
 			Object.entries(history).filter(([, value]) => value !== undefined),
 		) as AgentHistorySummary;
 		ref.history = { ...ref.history, ...definedHistory };
+		this.#emit({ type: "metadata_changed", ref });
+		return true;
+	}
+
+	/** Clear a settled task verdict when the same reusable session starts another turn. */
+	clearLastOutcome(id: string, expected?: AgentRefExpectation): boolean {
+		const ref = this.#refs.get(id);
+		if (!ref || ref.status === "aborted" || !this.#matchesExpected(ref, expected)) return false;
+		if (!ref.history?.lastOutcome) return true;
+		delete ref.history.lastOutcome;
+		ref.lastActivity = Date.now();
 		this.#emit({ type: "metadata_changed", ref });
 		return true;
 	}

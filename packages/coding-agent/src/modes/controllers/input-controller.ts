@@ -21,6 +21,7 @@ import { parseQueueShorthand, splitQueuedMessages } from "../../modes/queue-inpu
 import { buildSkillCommandPrompt, isKnownSkillCommand } from "../../modes/skill-command";
 import type { InteractiveModeContext } from "../../modes/types";
 import manualContinuePrompt from "../../prompts/system/manual-continue.md" with { type: "text" };
+import { AgentRegistry } from "../../registry/agent-registry";
 import { USER_INTERRUPT_LABEL } from "../../session/messages";
 import { executeBuiltinSlashCommand, lookupBuiltinSlashCommand } from "../../slash-commands/builtin-registry";
 import { parseSlashCommand } from "../../slash-commands/helpers/parse";
@@ -1082,6 +1083,8 @@ export class InputController {
 			return; // editor text not cleared: Editor does not auto-clear on submit
 		}
 		this.ctx.editor.clearDraft(text);
+		const focusedAgentId = this.ctx.focusedAgentId;
+		if (focusedAgentId) AgentRegistry.global().clearLastOutcome(focusedAgentId, target);
 		try {
 			// prompt() handles idle (new turn) and streaming (queues per streamingBehavior).
 			await this.ctx.withLocalSubmission(text, () => target.prompt(text, { streamingBehavior, images }), {

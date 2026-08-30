@@ -2661,6 +2661,7 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 	const startTime = Date.now();
 	const session = await AgentLifecycleManager.global().ensureLive(id);
 	const ref = AgentRegistry.global().get(id);
+	AgentRegistry.global().clearLastOutcome(id, session);
 	const sessionFile = ref?.sessionFile ?? undefined;
 
 	const monitor = createSubagentRunMonitor({
@@ -2712,7 +2713,7 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 		monitor.finish();
 	}
 
-	return finalizeRunResult({
+	const result = await finalizeRunResult({
 		monitor,
 		done: { ...outcome, abortReason: outcome.abortReasonText, durationMs: Date.now() - startTime },
 		index,
@@ -2733,6 +2734,10 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 		sessionFile,
 		startTime,
 	});
+	AgentRegistry.global().setHistory(id, {
+		lastOutcome: result.aborted ? "aborted" : result.exitCode === 0 ? "completed" : "failed",
+	});
+	return result;
 }
 
 /**
@@ -3644,6 +3649,9 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		sessionFile: subtaskSessionFile,
 		startTime,
 	});
-	AgentRegistry.global().setHistory(id, { outputPath: result.outputPath });
+	AgentRegistry.global().setHistory(id, {
+		outputPath: result.outputPath,
+		lastOutcome: result.aborted ? "aborted" : result.exitCode === 0 ? "completed" : "failed",
+	});
 	return result;
 }

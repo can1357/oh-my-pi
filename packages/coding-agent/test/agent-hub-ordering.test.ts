@@ -10,6 +10,7 @@ import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import { type AgentHubDeps, AgentHubOverlayComponent } from "@oh-my-pi/pi-coding-agent/modes/components/agent-hub";
+import { agentDisplayState } from "@oh-my-pi/pi-coding-agent/modes/components/agent-hub-projection";
 import { SessionObserverRegistry } from "@oh-my-pi/pi-coding-agent/modes/session-observer-registry";
 import { initTheme, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
@@ -1020,5 +1021,134 @@ describe("Agent hub row ordering", () => {
 		} finally {
 			hub.dispose();
 		}
+	});
+
+	it("keeps task outcomes visible after sessions become idle and explains retry failures", () => {
+		geometry = stubStdoutGeometry(160);
+		geometry.setRows(32);
+		const agents = new AgentRegistry();
+		agents.register({
+			id: "CompletedAgent",
+			displayName: "Completed Agent",
+			kind: "sub",
+			session: null,
+			status: "idle",
+			history: { lastOutcome: "completed" },
+			lastActivity: 1_000,
+		});
+		agents.register({
+			id: "FailedAgent",
+			displayName: "Failed Agent",
+			kind: "sub",
+			session: null,
+			status: "idle",
+			lastActivity: 2_000,
+		});
+		agents.register({
+			id: "RetryAgent",
+			displayName: "Retry Agent",
+			kind: "sub",
+			session: {} as AgentSession,
+			status: "running",
+			lastActivity: 3_000,
+		});
+		const observers = new SessionObserverRegistry();
+		vi.spyOn(observers, "getSessions").mockReturnValue([
+			{
+				id: "RetryAgent",
+				kind: "subagent",
+				label: "Retry Agent",
+				status: "active",
+				lastUpdate: Date.now(),
+				progress: {
+					index: 0,
+					id: "RetryAgent",
+					agent: "worker",
+					agentSource: "bundled",
+					status: "running",
+					task: "Wait for provider capacity",
+					recentTools: [],
+					recentOutput: [],
+					toolCount: 0,
+					requests: 2,
+					tokens: 400,
+					cost: 0,
+					durationMs: 1_500,
+					retryState: {
+						attempt: 2,
+						maxAttempts: 4,
+						delayMs: 5_000,
+						errorMessage: "429 capacity exhausted",
+						startedAtMs: Date.now(),
+					},
+				} as never,
+			},
+			{
+				id: "FailedAgent",
+				kind: "subagent",
+				label: "Failed Agent",
+				status: "failed",
+				lastUpdate: Date.now(),
+				progress: {
+					index: 1,
+					id: "FailedAgent",
+					agent: "worker",
+					agentSource: "bundled",
+					status: "failed",
+					task: "Call the provider",
+					recentTools: [],
+					recentOutput: [],
+					toolCount: 0,
+					requests: 4,
+					tokens: 800,
+					cost: 0,
+					durationMs: 4_000,
+					retryFailure: {
+						attempt: 4,
+						errorMessage: "retry-after exceeded the configured cap",
+					},
+				} as never,
+			},
+		]);
+		const hub = makeHub(agents, { observers });
+
+		try {
+			const retrying = Bun.stripANSI(hub.render(160).join("\n"));
+			expect(retrying).toContain("1 retrying");
+			expect(retrying).toContain("1 failed");
+			expect(retrying).toContain("1 completed");
+			expect(retrying).not.toContain("2 idle");
+			expect(retrying).toContain("Retry");
+			expect(retrying).toContain("Attempt 2/4");
+			expect(retrying).toContain("429 capacity exhausted");
+
+			hub.handleInput("j");
+			const failed = Bun.stripANSI(hub.render(160).join("\n"));
+			expect(selectedAgentId(hub)).toBe("FailedAgent");
+			expect(failed).toContain("failed · idle session");
+			expect(failed).toContain("Failure");
+			expect(failed).toContain("Auto-retry stopped after 4 attempts");
+			expect(failed).toContain("retry-after exceeded the configured cap");
+		} finally {
+			hub.dispose();
+		}
+	});
+
+	it("clears a settled outcome when the reusable session starts another turn", () => {
+		const agents = new AgentRegistry();
+		const session = { isStreaming: false } as AgentSession;
+		const ref = agents.register({
+			id: "FollowUpAgent",
+			displayName: "Follow-up Agent",
+			kind: "sub",
+			session,
+			status: "idle",
+			history: { lastOutcome: "failed" },
+		});
+
+		expect(agentDisplayState(ref)).toBe("failed");
+		expect(agentDisplayState({ ...ref, session: { isStreaming: true } as AgentSession })).toBe("running");
+		expect(agents.clearLastOutcome(ref.id, session)).toBe(true);
+		expect(agentDisplayState(ref)).toBe("idle");
 	});
 });

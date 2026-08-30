@@ -25,7 +25,7 @@ The double-`←` gesture is not a keybinding action. While focused on a subagent
 
 The roster updates from the session's agent registry and progress events. Its responsive rows show:
 
-- status (`running`, `idle`, `parked`, or `aborted`), agent identity, parent, and unread IRC count;
+- display state (`running`, `retrying`, `completed`, `failed`, `idle`, `parked`, or `aborted`), agent identity, parent, and unread IRC count;
 - model role, resolved model, and age since last activity;
 - assigned task or current activity;
 - cost, active time or elapsed span, request count, tool-call count, and tokens.
@@ -34,7 +34,7 @@ The header aggregates status and usage across measured agents. Press `t` to swit
 
 On a wide terminal, the selected agent's inspector appears beside the roster. On a narrow terminal, press `Tab` to replace the roster with it. The inspector adds:
 
-- the current tool and arguments, last intent, and retry state;
+- the current tool and arguments, last intent, retry attempt and delay, and terminal retry-failure reason;
 - context-window use when available;
 - parent and child lineage;
 - output and patch paths, plus isolated-worktree branch metadata when present.
@@ -70,7 +70,7 @@ Contexts without a local focusable session use the Hub's full-screen transcript 
 
 ## Persisted agents and advisors
 
-Opening the Hub for a persisted session scans that session's artifact tree. Historical subagent JSONL files become parked rows; a killed agent's tombstone keeps it aborted. Nested subagents retain their parent/child lineage. Output and patch artifacts are attached to the corresponding inspector row.
+Opening the Hub for a persisted session scans that session's artifact tree. Historical subagent JSONL files become parked rows; a killed agent's tombstone keeps it aborted. When a transcript contains a terminal assistant error or successful `yield` result, the row retains that latest `failed`, `aborted`, or `completed` outcome while the reusable session remains parked. Nested subagents retain their parent/child lineage. Output and patch artifacts are attached to the corresponding inspector row.
 
 Advisor transcript files (`__advisor*.jsonl`) appear as `advisor`-kind rows under their owning session. They are observability records, not peers:
 

@@ -8,7 +8,7 @@ import { parseThinkingLevel } from "../../thinking";
 import { replaceTabs, TRUNCATE_LENGTHS, truncateToWidth } from "../../tools/render-utils";
 import type { ObservableSession } from "../session-observer-registry";
 import { theme } from "../theme/theme";
-import type { AgentMetrics } from "./agent-hub-projection";
+import type { AgentDisplayState, AgentMetrics } from "./agent-hub-projection";
 
 export interface RosterRender {
 	lines: string[];
@@ -40,10 +40,16 @@ export function clampHubLine(line: string, width: number): string {
 }
 
 /** Status glyph, colored per theme status conventions. The title-line counts spell out the words. */
-export function statusGlyph(status: AgentRef["status"]): string {
+export function statusGlyph(status: AgentDisplayState): string {
 	switch (status) {
 		case "running":
 			return theme.fg("accent", theme.status.running);
+		case "retrying":
+			return theme.fg("warning", theme.status.warning);
+		case "completed":
+			return theme.fg("success", theme.status.done);
+		case "failed":
+			return theme.fg("error", theme.status.error);
 		case "idle":
 			return theme.fg("success", theme.status.enabled);
 		case "parked":
@@ -53,16 +59,20 @@ export function statusGlyph(status: AgentRef["status"]): string {
 	}
 }
 
-export function statusText(status: AgentRef["status"], text: string): string {
+export function statusText(status: AgentDisplayState, text: string): string {
 	switch (status) {
 		case "running":
 			return theme.fg("accent", text);
+		case "retrying":
+			return theme.fg("warning", text);
+		case "completed":
 		case "idle":
 			return theme.fg("success", text);
-		case "parked":
-			return theme.fg("muted", text);
+		case "failed":
 		case "aborted":
 			return theme.fg("error", text);
+		case "parked":
+			return theme.fg("muted", text);
 	}
 }
 

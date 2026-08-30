@@ -224,4 +224,30 @@ describe("persisted agent model attribution", () => {
 		expect(history?.resolvedModel).toBe("openai-codex/gpt-5.6-sol@vercel-gw");
 		expect(history?.resolvedModelIsFallback).toBe(true);
 	});
+
+	it("restores the latest durable task outcome from a successful yield result", async () => {
+		using tempDir = TempDir.createSync("@omp-attribution-outcome-");
+		const registry = await historyFor(tempDir.path(), "CompletedWorker", [
+			...transcriptHead(),
+			assistant("a1", "si", SONNET, "toolUse", [
+				{ type: "toolCall", id: "yield-1", name: "yield", arguments: { result: { data: { ok: true } } } },
+			]),
+			JSON.stringify({
+				type: "message",
+				id: "r1",
+				parentId: "a1",
+				timestamp: "2026-08-07T11:00:01.000Z",
+				message: {
+					role: "toolResult",
+					toolCallId: "yield-1",
+					toolName: "yield",
+					content: [{ type: "text", text: "Result submitted." }],
+					details: { status: "success", data: { ok: true } },
+					isError: false,
+				},
+			}),
+		]);
+
+		expect(registry.get("CompletedWorker")?.history?.lastOutcome).toBe("completed");
+	});
 });

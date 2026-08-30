@@ -536,6 +536,7 @@ export class AgentTranscriptViewer implements Component {
 			try {
 				// Revives a parked agent; returns the live session for running/idle.
 				const session = await lifecycle().ensureLive(id);
+				this.deps.registry.clearLastOutcome(id, session);
 				// Steers a mid-turn agent; sends a normal prompt to an idle one.
 				await session.prompt(trimmed, { streamingBehavior: "steer" });
 			} catch (error) {

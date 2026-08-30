@@ -26,13 +26,13 @@ import {
 	visibleWidth,
 	wrapTextWithAnsi,
 } from "@oh-my-pi/pi-tui";
-import { formatAge, formatNumber, getProjectDir, logger } from "@oh-my-pi/pi-utils";
+import { formatAge, formatDuration, formatNumber, getProjectDir, logger } from "@oh-my-pi/pi-utils";
 import type { KeyId } from "../../config/keybindings";
 import type { Settings } from "../../config/settings";
 import type { MessageRenderer } from "../../extensibility/extensions/types";
 import { IrcBus } from "../../irc/bus";
 import { AgentLifecycleManager } from "../../registry/agent-lifecycle";
-import { type AgentRef, AgentRegistry, type AgentStatus, MAIN_AGENT_ID } from "../../registry/agent-registry";
+import { type AgentRef, AgentRegistry, MAIN_AGENT_ID } from "../../registry/agent-registry";
 import { registerPersistedSubagents } from "../../registry/persisted-agents";
 import { USER_INTERRUPT_LABEL } from "../../session/messages";
 import { shortenPath, truncateToWidth } from "../../tools/render-utils";
@@ -41,8 +41,11 @@ import type { ObservableSession, SessionObserverRegistry } from "../session-obse
 import { theme } from "../theme/theme";
 import { matchesSelectDown, matchesSelectUp } from "../utils/keybinding-matchers";
 import {
+	AGENT_DISPLAY_STATES,
+	type AgentDisplayState,
 	type AgentMetrics,
 	type AggregateMetrics,
+	agentDisplayState,
 	aggregateMetrics,
 	progressMetrics,
 	projectAgentTree,
@@ -165,7 +168,15 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 
 	// Table state
 	#rows: AgentRef[] = [];
-	#statusCounts: Record<AgentStatus, number> = { running: 0, idle: 0, parked: 0, aborted: 0 };
+	#statusCounts: Record<AgentDisplayState, number> = {
+		running: 0,
+		retrying: 0,
+		failed: 0,
+		completed: 0,
+		idle: 0,
+		parked: 0,
+		aborted: 0,
+	};
 	#selectedRow = 0;
 	#hoveredRow: number | null = null;
 	/** Per-render screen-line to agent-row map, shared by click and hover routing. */
@@ -183,6 +194,7 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 	#treeLastSiblingById = new Map<string, boolean>();
 	/** Current observer index and summary data, rebuilt on source changes rather than every paint. */
 	#observedById = new Map<string, ObservableSession>();
+	#displayStateById = new Map<string, AgentDisplayState>();
 	#aggregate: AggregateMetrics = {
 		tokens: 0,
 		requests: 0,
@@ -476,8 +488,13 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 			if (children) children.push(ref);
 			else this.#childrenByParent.set(parent, [ref]);
 		}
-		this.#statusCounts = { running: 0, idle: 0, parked: 0, aborted: 0 };
-		for (const ref of rosterRows) this.#statusCounts[ref.status]++;
+		this.#displayStateById.clear();
+		this.#statusCounts = { running: 0, retrying: 0, failed: 0, completed: 0, idle: 0, parked: 0, aborted: 0 };
+		for (const ref of rosterRows) {
+			const displayState = agentDisplayState(ref, this.#observedById.get(ref.id));
+			this.#displayStateById.set(ref.id, displayState);
+			this.#statusCounts[displayState]++;
+		}
 		this.#refreshAggregate();
 	}
 
@@ -735,7 +752,7 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 
 	#statusSummary(): string {
 		const parts: string[] = [];
-		for (const status of ["running", "idle", "parked", "aborted"] as const) {
+		for (const status of AGENT_DISPLAY_STATES) {
 			const count = this.#statusCounts[status];
 			if (count > 0) parts.push(`${statusGlyph(status)} ${statusText(status, `${count} ${status}`)}`);
 		}
@@ -768,6 +785,7 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 		if (!ref) return [theme.fg("dim", "Select an agent to inspect"), ...Array.from({ length: rows - 1 }, () => "")];
 		const observed = this.#observableFor(ref.id);
 		const progress = observed?.progress;
+		const displayState = this.#displayStateById.get(ref.id) ?? agentDisplayState(ref, observed);
 		const metrics = this.#metricsFor(ref, observed);
 		const children = this.#childrenByParent.get(ref.id) ?? [];
 		const lines: string[] = [];
@@ -782,14 +800,18 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 			add(theme.bold(theme.fg("accent", label)));
 		};
 
-		add(`${statusGlyph(ref.status)} ${theme.bold(sanitizeDisplayText(ref.displayName || ref.id))}`);
+		add(`${statusGlyph(displayState)} ${theme.bold(sanitizeDisplayText(ref.displayName || ref.id))}`);
 		if (ref.displayName && ref.displayName !== ref.id) add(theme.fg("dim", sanitizeDisplayText(ref.id)));
+		const activityAge = formatAge(Math.max(1, Math.round((Date.now() - ref.lastActivity) / 1000)));
 		const lifecycleDetails = [
+			displayState !== ref.status ? `${ref.status} session` : undefined,
 			metrics ? formatMetricDuration(metrics) : undefined,
-			`active ${formatAge(Math.max(1, Math.round((Date.now() - ref.lastActivity) / 1000)))}`,
+			displayState === "running" || displayState === "retrying"
+				? `active ${activityAge}`
+				: `updated ${activityAge} ago`,
 		].filter(Boolean);
 		add(
-			`${statusText(ref.status, ref.status)}${theme.fg("dim", `${theme.sep.dot}${lifecycleDetails.join(theme.sep.dot)}`)}`,
+			`${statusText(displayState, displayState)}${theme.fg("dim", `${theme.sep.dot}${lifecycleDetails.join(theme.sep.dot)}`)}`,
 		);
 		const modelDetails: string[] = [];
 		const modelRole = progress?.modelRole ?? ref.history?.modelRole;
@@ -810,9 +832,26 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 		if (current) {
 			section("Current");
 			addWrapped(current);
-			if (progress?.retryState) {
-				add(theme.fg("warning", `retry ${progress.retryState.attempt}/${progress.retryState.maxAttempts}`));
-			}
+		}
+
+		if (progress?.retryState) {
+			section("Retry");
+			add(
+				theme.fg(
+					"warning",
+					`Attempt ${progress.retryState.attempt}/${progress.retryState.maxAttempts}${theme.sep.dot}delay ${formatDuration(progress.retryState.delayMs)}`,
+				),
+			);
+			addWrapped(progress.retryState.errorMessage, 3);
+		} else if (progress?.retryFailure) {
+			section("Failure");
+			add(
+				theme.fg(
+					"error",
+					`Auto-retry stopped after ${progress.retryFailure.attempt} attempt${progress.retryFailure.attempt === 1 ? "" : "s"}`,
+				),
+			);
+			addWrapped(progress.retryFailure.errorMessage, 3);
 		}
 
 		section("Usage", 1);
@@ -874,7 +913,8 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 				: "";
 		const id = sanitizeDisplayText(ref.id);
 		const styledId = selected ? theme.bold(theme.fg("accent", id)) : theme.bold(id);
-		const fields: string[] = [`${cursor} ${statusGlyph(ref.status)} ${branch}${styledId}`];
+		const displayState = this.#displayStateById.get(ref.id) ?? agentDisplayState(ref, observed);
+		const fields: string[] = [`${cursor} ${statusGlyph(displayState)} ${branch}${styledId}`];
 		if (ref.displayName && ref.displayName !== ref.id) {
 			fields.push(theme.fg("dim", sanitizeDisplayText(ref.displayName)));
 		}
