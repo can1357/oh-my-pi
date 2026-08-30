@@ -630,6 +630,7 @@ export class AgentSession {
 	#autolearnCaptureAbortController: AbortController | undefined;
 	#autolearnCaptureTask: Promise<void> | undefined;
 	#isDisposed = false;
+	#fallbackDiscoveryRevalidationAbortController = new AbortController();
 	/** Process-wide by default (double-spend safety across sessions); injectable for tests. */
 	#codexResetCoordinator: CodexAutoRedeemCoordinator;
 	// Extension system
@@ -1724,13 +1725,15 @@ export class AgentSession {
 			});
 		});
 
-		// An advisor enabled in config resolves its role against the model catalog
-		// as it stands at construction. Discovery-backed providers (e.g. GitHub
-		// Copilot) may not be populated yet — background discovery is started
-		// fire-and-forget before the session is built — so a valid configured model
-		// can land as `no_model`. Retry once the initial refresh settles so the
-		// advisor activates without a manual /advisor toggle. See #9010.
+		// Config-declared resolution done against the catalog as it stands at
+		// construction can be premature: background discovery is started
+		// fire-and-forget (before the session in the SDK path, right after it in
+		// the CLI path), so discovery-backed providers (e.g. GitHub Copilot, or a
+		// models.yml LiteLLM provider with a cold cache) may not be populated yet.
+		// Reactivate a `no_model` advisor (#9010) and retract stale
+		// retry.fallbackChains warnings (#10048) once discovery settles.
 		void this.#retryInactiveAdvisorAfterModelDiscovery();
+		void this.#revalidateFallbackChainsAfterModelDiscovery();
 	}
 	/** Model registry for API key resolution and model discovery */
 	get modelRegistry(): ModelRegistry {
@@ -4171,6 +4174,7 @@ export class AgentSession {
 	 */
 	beginDispose(): void {
 		this.#isDisposed = true;
+		this.#fallbackDiscoveryRevalidationAbortController.abort();
 		this.#queuedMessageDrainBlocked = false;
 		this.#usagePreflightReadyForNextModelCall = false;
 		this.#detachUsageBeforeQueueDequeue?.();
@@ -8521,7 +8525,9 @@ export class AgentSession {
 			// it already spent, so a session with history resumes with its total instead
 			// of restarting at zero.
 			if (switchingToDifferentSession) {
-				this.#advisors.restoreCost(await loadAdvisorTranscriptCosts(this.sessionFile));
+				const providersBySlug = new Map<string, Set<string>>();
+				const costs = await loadAdvisorTranscriptCosts(this.sessionFile, { providersBySlug });
+				this.#advisors.restoreCost(costs, providersBySlug);
 			}
 			this.#bash.finishSessionTransition(bashTransition, true);
 			if (previousSessionState.sessionId !== this.sessionManager.getSessionId()) {
@@ -9902,6 +9908,26 @@ export class AgentSession {
 	}
 
 	/**
+	 * Re-run retry.fallbackChains validation once the initial background discovery
+	 * settles. Startup validation suppresses "unknown model" warnings for
+	 * config-declared discovery providers whose cold cache left the registry empty
+	 * (#10048); this retracts the ones discovery resolved and surfaces any that
+	 * stayed unknown. Uses {@link ModelRegistry.awaitInitialBackgroundRefresh}
+	 * because the CLI starts that refresh right after the session is built, so an
+	 * in-flight snapshot taken in the constructor would always miss it.
+	 */
+	async #revalidateFallbackChainsAfterModelDiscovery(): Promise<void> {
+		if (this.#isDisposed || !this.#recovery.hasPendingDiscoveryDeferredFallbackValidation()) return;
+		await this.#modelRegistry.awaitInitialBackgroundRefresh(
+			this.#fallbackDiscoveryRevalidationAbortController.signal,
+		);
+		if (this.#isDisposed) return;
+		if (this.#recovery.revalidateRetryFallbackChainsAfterDiscovery()) {
+			this.#emit({ type: "config_warnings_changed" });
+		}
+	}
+
+	/**
 	 * Toggle the advisor setting and start/stop the runtime accordingly.
 	 *
 	 * @returns true when the advisor is actively running after the call.
@@ -9996,14 +10022,16 @@ export class AgentSession {
 			stale = true;
 		});
 		const snapshot = this.#advisors.beginCostRestoreSnapshot();
+		const providersBySlug = new Map<string, Set<string>>();
 		this.#advisorCostRestore = loadAdvisorTranscriptCosts(this.sessionFile, {
 			beforeSnapshot: snapshot.ready,
 			onSnapshot: snapshot.release,
 			shouldContinue: () => !stale && !this.isDisposed,
+			providersBySlug,
 		})
 			.then(costs => {
 				if (stale || this.isDisposed) return;
-				this.restoreInitialAdvisorCosts(costs, snapshot.costsAtSnapshot);
+				this.restoreInitialAdvisorCosts(costs, snapshot.costsAtSnapshot, providersBySlug);
 				this.#emit({ type: "advisor_cost_changed" });
 			})
 			.catch(err => logger.debug("advisor cost restore failed", { err: String(err) }))
@@ -10027,8 +10055,9 @@ export class AgentSession {
 	restoreInitialAdvisorCosts(
 		costs: ReadonlyMap<string, number>,
 		costsAtSnapshot: ReadonlyMap<string, number> = new Map(),
+		providersBySlug?: ReadonlyMap<string, ReadonlySet<string>>,
 	): void {
-		this.#advisors.restoreInitialCost(costs, costsAtSnapshot);
+		this.#advisors.restoreInitialCost(costs, costsAtSnapshot, providersBySlug);
 	}
 	/** Return whether any active or configured advisor is running on an OAuth/subscription model. */
 	isAdvisorUsingSubscription(): boolean {

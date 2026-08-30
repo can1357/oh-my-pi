@@ -263,4 +263,69 @@ describe("AgentSession session stats", () => {
 			await candidateSession.dispose();
 		}
 	});
+
+	it("aggregates provider credits and concrete routed models", () => {
+		const model = modelRegistry.getAll().find(candidate => candidate.contextWindow && candidate.contextWindow > 0);
+		if (!model) throw new Error("Expected a bundled model");
+
+		const usage = {
+			input: 1,
+			output: 1,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 2,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		};
+		const messages: Message[] = [
+			{
+				role: "assistant",
+				content: [{ type: "text", text: "first" }],
+				api: model.api,
+				provider: model.provider,
+				model: model.id,
+				upstreamModel: "claude-opus-4-6",
+				usage: { ...usage, credits: { cost: 2.5, committedCost: 2, acuCost: 0.25 } },
+				stopReason: "stop",
+				timestamp: 1,
+			},
+			{
+				role: "assistant",
+				content: [{ type: "text", text: "second" }],
+				api: model.api,
+				provider: model.provider,
+				model: model.id,
+				upstreamModel: "claude-opus-4-6",
+				usage: { ...usage, credits: { cost: 1.5, committedCost: 1, acuCost: 0.75 } },
+				stopReason: "stop",
+				timestamp: 2,
+			},
+			{
+				role: "assistant",
+				content: [{ type: "text", text: "third" }],
+				api: model.api,
+				provider: model.provider,
+				model: model.id,
+				upstreamModel: "swe-1-7-medium",
+				usage,
+				stopReason: "stop",
+				timestamp: 3,
+			},
+		];
+		const agent = new Agent({
+			initialState: { model, systemPrompt: ["Test"], tools: [], messages },
+		});
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry,
+		});
+
+		const stats = session.getSessionStats();
+		expect(stats.credits).toEqual({ cost: 4, committedCost: 3, acuCost: 1 });
+		expect(stats.routedModels).toEqual({
+			"claude-opus-4-6": 2,
+			"swe-1-7-medium": 1,
+		});
+	});
 });

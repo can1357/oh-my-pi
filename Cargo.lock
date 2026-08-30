@@ -3724,9 +3724,9 @@ checksum = "c9356095b4b41197bba32173600e1582792cda618f65d12f68e2e77d273413c5"
 
 [[package]]
 name = "html-to-markdown-rs"
-version = "3.11.4"
+version = "3.11.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6331a4c21bc99309e5863092660c08505c426eb1158e0472013487ecff85412b"
+checksum = "c5fe2583aad3e87439e40d841fed327a60892bb9946da1e3a5788ee7f0f4fe3c"
 dependencies = [
  "ahash",
  "astral-tl",
@@ -4185,9 +4185,9 @@ checksum = "964de6e86d545b246d84badc0fef527924ace5134f30641c203ef52ba83f58d5"
 
 [[package]]
 name = "indexmap"
-version = "2.14.0"
+version = "2.14.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d466e9454f08e4a911e14806c24e16fba1b4c121d1ea474396f396069cf949d9"
+checksum = "07aa2048142242915a31d35844fb311e0e53fcca590c3a0a40dcf1b841fa09eb"
 dependencies = [
  "equivalent",
  "hashbrown 0.17.1",
@@ -6032,7 +6032,7 @@ dependencies = [
 
 [[package]]
 name = "pi-ast"
-version = "18.0.10"
+version = "18.0.11"
 dependencies = [
  "anyhow",
  "ast-grep-core",
@@ -6102,7 +6102,7 @@ dependencies = [
 
 [[package]]
 name = "pi-builtins"
-version = "18.0.10"
+version = "18.0.11"
 dependencies = [
  "ansi-width",
  "anyhow",
@@ -6189,7 +6189,7 @@ dependencies = [
 
 [[package]]
 name = "pi-iso"
-version = "18.0.10"
+version = "18.0.11"
 dependencies = [
  "async-trait",
  "libc",
@@ -6201,7 +6201,7 @@ dependencies = [
 
 [[package]]
 name = "pi-natives"
-version = "18.0.10"
+version = "18.0.11"
 dependencies = [
  "anyhow",
  "arboard",
@@ -6278,7 +6278,7 @@ dependencies = [
 
 [[package]]
 name = "pi-shell"
-version = "18.0.10"
+version = "18.0.11"
 dependencies = [
  "anyhow",
  "brush-core",
@@ -6306,7 +6306,7 @@ dependencies = [
 
 [[package]]
 name = "pi-vcs"
-version = "18.0.10"
+version = "18.0.11"
 dependencies = [
  "gix",
  "jj-lib",
@@ -6319,7 +6319,7 @@ dependencies = [
 
 [[package]]
 name = "pi-voice"
-version = "18.0.10"
+version = "18.0.11"
 dependencies = [
  "audiopus_sys",
  "bytes",
@@ -6334,7 +6334,7 @@ dependencies = [
 
 [[package]]
 name = "pi-walker"
-version = "18.0.10"
+version = "18.0.11"
 dependencies = [
  "dashmap",
  "globset",

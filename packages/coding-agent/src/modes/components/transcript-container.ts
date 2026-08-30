@@ -39,6 +39,15 @@ export interface AppendOnlyTranscriptBlock {
 	 * prefix the block's full render at the same width.
 	 */
 	renderTranscriptStableRows(count: number, width: number): readonly string[];
+	/**
+	 * Discard every published stable row so the block re-renders its head from
+	 * scratch. Called only alongside a destructive display reset (e.g. a
+	 * thinking-visibility toggle) that clears the native scrollback those rows
+	 * occupied — the sole context in which the append-only "published bytes never
+	 * change" contract may be retracted. Optional: blocks whose stable-row
+	 * presentation never changes may omit it.
+	 */
+	resetTranscriptStableRows?(): void;
 }
 
 interface FinalizableBlock {
@@ -170,6 +179,32 @@ export class TranscriptContainer extends Container {
 			if (isToolActivityComponent(child)) child.setToolActivityVisible(visible);
 		}
 		this.invalidate();
+	}
+
+	/**
+	 * Forget the append-only emission ledger — emitted counts, published stable
+	 * rows, per-width render cache, and freeze state — for every block, and ask
+	 * each append-only block to drop its own published rows. The next replay then
+	 * re-renders each block from its current {@link Component.render}, applying a
+	 * changed presentation (e.g. a thinking-visibility toggle) to rows that were
+	 * already emitted as stable heads while streaming (#10177).
+	 *
+	 * Callers MUST pair this with a scrollback-clearing {@link resetDisplay}: the
+	 * emitted rows it forgets still sit in native history until that clear
+	 * rewrites them, so unpaired use would duplicate them on the next retirement.
+	 */
+	resetStableEmission(): void {
+		this.#syncEntries();
+		if (this.#offered?.kind === "append") this.#offered = undefined;
+		for (const entry of this.#entries) {
+			entry.emitted = 0;
+			entry.stableRows = EMPTY_STABLE_ROWS;
+			entry.renderedStableByWidth = new Map();
+			entry.stableFrozen = false;
+			if (entry.mode === "appendOnly") {
+				(entry.component as Component & AppendOnlyTranscriptBlock).resetTranscriptStableRows?.();
+			}
+		}
 	}
 
 	/** Whether a transient block may be discarded without leaving tape history. */

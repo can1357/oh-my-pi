@@ -417,6 +417,13 @@ export interface SessionStats {
 	};
 	premiumRequests: number;
 	cost: number;
+	credits?: {
+		cost: number;
+		committedCost: number;
+		acuCost: number;
+	};
+	/** Concrete provider-routed model ids with finalized turn counts. */
+	routedModels?: Record<string, number>;
 	contextUsage?: ContextUsage;
 }
 

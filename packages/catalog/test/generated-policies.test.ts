@@ -377,6 +377,33 @@ describe("generated model policies", () => {
 		}
 	});
 
+	it("bakes verified Cursor image families into the offline catalog", () => {
+		const verifiedIds = [
+			"kimi-k3-high",
+			"kimi-k3-low",
+			"kimi-k3-max",
+			"cursor-grok-4.5",
+			"cursor-grok-4.5-fast",
+			"cursor-grok-4.6",
+			"cursor-grok-4.6-fast",
+			"composer-2.5",
+			"composer-2.5-fast",
+		];
+		const unverifiedIds = ["cursor-grok-5", "composer-2.50", "k3-256k"];
+		const models = [...verifiedIds, ...unverifiedIds].map(id =>
+			createSpec({ id, api: "cursor-agent", provider: "cursor" }),
+		);
+
+		applyGeneratedModelPolicies(models);
+
+		for (const model of models.slice(0, verifiedIds.length)) {
+			expect(model.input).toEqual(["text", "image"]);
+		}
+		for (const model of models.slice(verifiedIds.length)) {
+			expect(model.input).toEqual(["text"]);
+		}
+	});
+
 	it("pins MiniMax-M3 long-context providers to 1M context", () => {
 		const models = [
 			createSpec({
