@@ -881,7 +881,7 @@ function hasOnlyNonTextOutput(entry: OpenAICompatibleModelRecord): boolean {
 }
 
 const EUROPEAN_GATEWAY_REASONING_ID_PATTERN = /(?:^|[\s/:._-])(?:reasoner|reasoning|thinking)(?:$|[\s/:._-])/i;
-const EUROPEAN_GATEWAY_DEEPSEEK_REASONING_ID_PATTERN = /deepseek.*(?:r1|reasoner)/i;
+const EUROPEAN_GATEWAY_GROK_REASONING_REVISIONS = new Set(["3.0.0", "4.3.0", "4.5.0", "4.6.0", "4.20.0"]);
 const EUROPEAN_GATEWAY_TOOL_CAPABILITY_TOKENS = new Set([
 	"function-call",
 	"function-calling",
@@ -915,15 +915,20 @@ function isLikelyEuropeanGatewayChatModel(entry: OpenAICompatibleModelRecord, mo
 
 function hasEuropeanGatewayReasoningIdentity(model: ModelSpec<Api>): boolean {
 	const normalized = `${model.id} ${model.name}`.trim();
-	const bareModelId = model.id.slice(model.id.lastIndexOf("/") + 1).toLowerCase();
 	const identity = classifyModel("", model.id, { lenient: true });
 	return (
 		identity.class === "gpt-oss" ||
 		isGlmReasoningIdentity("", model.id, "4.5") ||
-		/^(?:grok-3-mini|grok-4\.20-multi-agent|grok-4\.[356])/.test(bareModelId) ||
-		EUROPEAN_GATEWAY_DEEPSEEK_REASONING_ID_PATTERN.test(normalized) ||
+		(identity.class === "xai" &&
+			identity.family === "grok" &&
+			EUROPEAN_GATEWAY_GROK_REASONING_REVISIONS.has(identity.revision ?? "")) ||
+		(identity.class === "deepseek" && (identity.family === "r1" || identity.family === "reasoner")) ||
 		EUROPEAN_GATEWAY_REASONING_ID_PATTERN.test(normalized)
 	);
+}
+
+function getEuropeanGatewayReasoningCapability(entry: OpenAICompatibleModelRecord): boolean | undefined {
+	return typeof entry.supports_reasoning === "boolean" ? entry.supports_reasoning : undefined;
 }
 
 function getEuropeanGatewayToolCapability(entry: OpenAICompatibleModelRecord): boolean | undefined {
@@ -959,11 +964,13 @@ function mapEuropeanGatewayModel(
 	const pricing = isRecord(entry.pricing) ? entry.pricing : undefined;
 	const topProvider = isRecord(entry.top_provider) ? entry.top_provider : undefined;
 	const supportsTools = getEuropeanGatewayToolCapability(entry);
+	const supportsReasoning = getEuropeanGatewayReasoningCapability(entry);
 	return {
 		...model,
 		name: toModelName(entry.name, model.name),
 		reasoning:
-			model.reasoning || hasEuropeanGatewayReasoningIdentity(model) || hasEuropeanGatewayKnownReasoning(model),
+			supportsReasoning ??
+			(model.reasoning || hasEuropeanGatewayReasoningIdentity(model) || hasEuropeanGatewayKnownReasoning(model)),
 		input: toGatewayInputCapabilities(entry, model, model.input),
 		cost: {
 			input:

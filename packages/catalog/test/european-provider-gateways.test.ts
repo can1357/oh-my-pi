@@ -370,6 +370,35 @@ describe("European gateway provider catalog support", () => {
 		});
 	});
 
+	test("derives gateway reasoning from taxonomy unless the provider reports an explicit capability", async () => {
+		const fetchMock: FetchImpl = vi.fn(async () => {
+			return new Response(
+				JSON.stringify({
+					data: [
+						{ id: "cursor-grok-4.5-atlas", name: "Cursor Grok 4.5 Atlas" },
+						{ id: "grok-4.20-multi-agent-0309", name: "Grok 4.20 Multi-Agent" },
+						{ id: "grok-4.5", name: "Grok 4.5", supports_reasoning: false },
+						{ id: "gateway-model-2026", name: "Gateway Model 2026", supports_reasoning: true },
+					],
+				}),
+				{ status: 200, headers: { "Content-Type": "application/json" } },
+			);
+		});
+
+		const models = await cortecsModelManagerOptions({ fetch: fetchMock }).fetchDynamicModels?.();
+
+		expect(models).toContainEqual(
+			expect.objectContaining({ id: "cursor-grok-4.5-atlas", provider: "cortecs", reasoning: true }),
+		);
+		expect(models).toContainEqual(
+			expect.objectContaining({ id: "grok-4.20-multi-agent-0309", provider: "cortecs", reasoning: true }),
+		);
+		expect(models).toContainEqual(expect.objectContaining({ id: "grok-4.5", provider: "cortecs", reasoning: false }));
+		expect(models).toContainEqual(
+			expect.objectContaining({ id: "gateway-model-2026", provider: "cortecs", reasoning: true }),
+		);
+	});
+
 	test("preserves known reasoning capability for European gateway refreshes", async () => {
 		const fetchMock: FetchImpl = vi.fn(async () => {
 			return new Response(
