@@ -56,12 +56,12 @@ async function readMessageEntries(file: string): Promise<AdvisorEntry[]> {
 	return entries.filter(entry => entry.type === "message");
 }
 
-function assistantMessage(text: string, inputTokens: number, cost = 0): AgentMessage {
+function assistantMessage(text: string, inputTokens: number, cost = 0, provider = "anthropic"): AgentMessage {
 	const message = {
 		role: "assistant" as const,
 		content: [{ type: "text" as const, text }],
 		api: "anthropic-messages",
-		provider: "anthropic",
+		provider,
 		model: "test-advisor-model",
 		usage: {
 			input: inputTokens,
@@ -296,6 +296,39 @@ describe("AdvisorTranscriptRecorder", () => {
 				"": 0.25,
 				security: 0.75,
 			});
+		});
+	});
+
+	it("captures billing providers per advisor slug for subscription attribution", async () => {
+		await withTempDir(async dir => {
+			const sessionFile = path.join(dir, "sess.jsonl");
+			const recorder = new AdvisorTranscriptRecorder(
+				() => sessionFile,
+				() => dir,
+			);
+			recorder.record(assistantMessage("primary", 1, 0.25));
+			await recorder.close();
+
+			const providersBySlug = new Map<string, Set<string>>();
+			await loadAdvisorTranscriptCosts(sessionFile, { providersBySlug });
+			expect([...(providersBySlug.get("") ?? [])]).toEqual(["anthropic"]);
+		});
+	});
+
+	it("excludes providers that only produced zero-cost turns from subscription attribution", async () => {
+		await withTempDir(async dir => {
+			const sessionFile = path.join(dir, "sess.jsonl");
+			const recorder = new AdvisorTranscriptRecorder(
+				() => sessionFile,
+				() => dir,
+			);
+			recorder.record(assistantMessage("paid", 1, 0.25, "openai"));
+			recorder.record(assistantMessage("failed subscription fallback", 1, 0, "anthropic"));
+			await recorder.close();
+
+			const providersBySlug = new Map<string, Set<string>>();
+			await loadAdvisorTranscriptCosts(sessionFile, { providersBySlug });
+			expect([...(providersBySlug.get("") ?? [])]).toEqual(["openai"]);
 		});
 	});
 

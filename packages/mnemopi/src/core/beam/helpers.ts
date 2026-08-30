@@ -270,8 +270,9 @@ export function cjkLikeSearch(
 	const conditions = cjkChars.map(() => "content LIKE ? ESCAPE '\\'").join(" OR ");
 	try {
 		const rows = db
-			.query(`SELECT ${idColumn}, content FROM ${table} WHERE superseded_by IS NULL AND (${conditions}) LIMIT ?`)
-			.all(...cjkChars.map(ch => `%${ch}%`), k * 5) as Record<string, unknown>[];
+			.query(`SELECT ${idColumn}, content FROM ${table} WHERE superseded_by IS NULL AND (valid_until IS NULL OR valid_until > ?)
+				   AND (${conditions}) LIMIT ?`)
+			.all(new Date().toISOString(), ...cjkChars.map(ch => `%${ch}%`), k * 5) as Record<string, unknown>[];
 		const scored: Array<{ id: string | number; score: number }> = [];
 		for (const row of rows) {
 			const content = String(row.content ?? "");
@@ -298,9 +299,10 @@ export function ftsSearch(db: Database, query: string, k = 20): FtsRankResult[] 
 		const rows = db
 			.query(`SELECT f.rowid, f.rank FROM fts_episodes f
 				 WHERE f.fts_episodes MATCH ?
-				   AND EXISTS (SELECT 1 FROM episodic_memory e WHERE e.rowid = f.rowid AND e.superseded_by IS NULL)
+				   AND EXISTS (SELECT 1 FROM episodic_memory e WHERE e.rowid = f.rowid AND e.superseded_by IS NULL
+			       AND (e.valid_until IS NULL OR e.valid_until > ?))
 				 ORDER BY f.rank, f.rowid LIMIT ?`)
-			.all(ftsQuery, k) as Record<string, unknown>[];
+			.all(ftsQuery, new Date().toISOString(), k) as Record<string, unknown>[];
 		if (rows.length === 0 && hasCjk(query)) return cjkLikeSearch(db, query, k, false) as FtsRankResult[];
 		return rows.map(row => ({ rowid: Number(row.rowid), rank: Number(row.rank) }));
 	} catch {
@@ -315,9 +317,10 @@ export function ftsSearchWorking(db: Database, query: string, k = 20): WorkingFt
 		const rows = db
 			.query(`SELECT f.id, f.rank FROM fts_working f
 				 WHERE f.fts_working MATCH ?
-				   AND EXISTS (SELECT 1 FROM working_memory w WHERE w.id = f.id AND w.superseded_by IS NULL)
+				   AND EXISTS (SELECT 1 FROM working_memory w WHERE w.id = f.id AND w.superseded_by IS NULL
+				       AND (w.valid_until IS NULL OR w.valid_until > ?))
 				 ORDER BY f.rank, f.id LIMIT ?`)
-			.all(ftsQuery, k) as Record<string, unknown>[];
+			.all(ftsQuery, new Date().toISOString(), k) as Record<string, unknown>[];
 		if (rows.length === 0 && hasCjk(query)) return cjkLikeSearch(db, query, k, true) as WorkingFtsRankResult[];
 		return rows.map(row => ({ id: String(row.id), rank: Number(row.rank) }));
 	} catch {
