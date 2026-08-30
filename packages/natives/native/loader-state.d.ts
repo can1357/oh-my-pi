@@ -56,6 +56,15 @@ export interface ResolveLoaderCandidatesInput {
 
 export function resolveLoaderCandidates(input: ResolveLoaderCandidatesInput): string[];
 
+export interface FindScopedLeafPackageDirInput {
+	platformTag: string;
+	packageVersion: string;
+	addonFilenames: string[];
+	corePackageDir: string;
+}
+
+export function findScopedLeafPackageDir(input: FindScopedLeafPackageDirInput): string | null;
+
 export interface InitLoaderContextOverrides {
 	nativeDir?: string;
 	platform?: NodeJS.Platform | string;

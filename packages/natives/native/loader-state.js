@@ -56,18 +56,67 @@ function getNativesDir() {
 	return path.join(os.homedir(), ".omp", "natives");
 }
 
-function resolveLeafPackageDir(platformTag) {
+function resolveLeafPackageDir(platformTag, addonFilenames) {
 	try {
 		const require_ = createRequire(import.meta.url);
 		return path.dirname(require_.resolve(`@oh-my-pi/pi-natives-${platformTag}/package.json`));
 	} catch {
-		return null;
+		// `require.resolve` can't reach bun's global-cache leaves: there the leaf
+		// is a versioned sibling of the core package with no enclosing
+		// `node_modules`, so the node resolution walk misses it. Scan the scope
+		// directory for the sibling that actually holds the addon. See #8901.
+		return findScopedLeafPackageDir({
+			platformTag,
+			packageVersion: packageJson.version,
+			addonFilenames,
+			corePackageDir: path.join(import.meta.dir, ".."),
+		});
 	}
 }
 
 // =========================================================================
 // Pure helpers — re-exported for unit tests in `packages/natives/test/`.
 // =========================================================================
+
+/**
+ * Locate the platform leaf package (`@oh-my-pi/pi-natives-<tag>`) directory that
+ * holds the prebuilt addon by scanning the core package's scope directory for a
+ * matching sibling.
+ *
+ * Fallback for when `require.resolve` can't find the leaf: when the core package
+ * runs from bun's global install cache, the leaf is laid out as a version-pinned
+ * sibling (`<cache>/@oh-my-pi/pi-natives-<tag>@<ver>@@@N/`) with no enclosing
+ * `node_modules`, so node's resolution walk misses it. Out-of-tree consumers —
+ * custom tools importing `@oh-my-pi/pi-tui`, the `omp stats` worker — hit exactly
+ * this. See https://github.com/can1357/oh-my-pi/issues/8901.
+ *
+ * @param {{ platformTag: string; packageVersion: string; addonFilenames: string[]; corePackageDir: string }} input
+ * @returns {string | null} Absolute leaf directory holding an addon, or null when none does.
+ */
+export function findScopedLeafPackageDir({ platformTag, packageVersion, addonFilenames, corePackageDir }) {
+	const scopeDir = path.dirname(corePackageDir);
+	let entries;
+	try {
+		entries = fs.readdirSync(scopeDir);
+	} catch {
+		return null;
+	}
+	const leafBaseName = `pi-natives-${platformTag}`;
+	// Match the plain package dir (`node_modules` install) and bun's
+	// version-pinned cache dirs (`pi-natives-<tag>@<ver>@@@N`), but never a
+	// longer tag (`pi-natives-<tag>-something`).
+	const isLeaf = name => name === leafBaseName || name.startsWith(`${leafBaseName}@`);
+	// Prefer a sibling whose version matches this package so a stale cached
+	// release never shadows the addon built for the running loader.
+	const matches = entries
+		.filter(isLeaf)
+		.sort((a, b) => Number(b.includes(`@${packageVersion}`)) - Number(a.includes(`@${packageVersion}`)));
+	for (const name of matches) {
+		const dir = path.join(scopeDir, name);
+		if (addonFilenames.some(filename => fs.existsSync(path.join(dir, filename)))) return dir;
+	}
+	return null;
+}
 
 /**
  * @param {{
@@ -796,21 +845,20 @@ export function initLoaderContext(overrides = {}) {
 		!isCompiledBinary &&
 		!normalizedNativeDir.includes("\\node_modules\\") &&
 		!normalizedNativeDir.includes("/node_modules/");
+	const selectedVariant = resolveCpuVariant(getVariantOverride());
+	const addonFilenames = getAddonFilenames({ tag: platformTag, arch: process.arch, variant: selectedVariant });
+	const addonLabel = selectedVariant ? `${platformTag} (${selectedVariant})` : platformTag;
 	const leafPackageDir =
 		isCompiledBinary || isWorkspaceLoad
 			? null
 			: overrides.leafPackageDir === undefined
-				? resolveLeafPackageDir(platformTag)
+				? resolveLeafPackageDir(platformTag, addonFilenames)
 				: overrides.leafPackageDir;
 	const stageFromNodeModules = shouldStageNodeModulesAddon({
 		platform,
 		isCompiledBinary,
 		nativeDir: normalizedNativeDir,
 	});
-
-	const selectedVariant = resolveCpuVariant(getVariantOverride());
-	const addonFilenames = getAddonFilenames({ tag: platformTag, arch: process.arch, variant: selectedVariant });
-	const addonLabel = selectedVariant ? `${platformTag} (${selectedVariant})` : platformTag;
 
 	const candidates = resolveLoaderCandidates({
 		addonFilenames,
