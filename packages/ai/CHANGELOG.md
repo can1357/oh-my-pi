@@ -25,6 +25,9 @@
   - Added attestation field 31 (`f`, derived from `getInstallId()`). Updated `CompletionConfiguration` defaults to `maxTokens=128000`, `maxNewlines=400`, `temperature=1.0`, `topK=40`, `topP=0.95` (all still overridable via `StreamOptions`/`model.maxTokens`). Removed hardcoded stop patterns (only caller-specified ones are sent), `firstTemperature`, and `fimEotProbThreshold`.
   - Removed extra request fields absent from CLI traffic: `executionId`, `toolChoice`, `systemPromptCacheOptions`, `disableParallelToolCalls`.
 
+- Devin `GetChatMessage` requests now match the CLI Connect transport: uncompressed frames (flag `0x00`), `authorization: Basic <token>-<token>`, empty `User-Agent`, and `Accept-Encoding: identity`, while keeping the post-#8590 CLI metadata identity, `GetUserJwt`, and `AssignModel` handshake ([#8534](https://github.com/can1357/oh-my-pi/pull/8534)).
+
+
 ## [18.0.11] - 2026-08-29
 
 ### Fixed
@@ -37,7 +40,6 @@
 - Fixed Z.AI browser sign-in to report an occupied callback port before opening the browser.
 
 ## [18.0.9] - 2026-08-28
-
 ### Fixed
 
 - Improved OAuth sign-in flows, including a fallback message when the browser cannot automatically close the OAuth success tab.
