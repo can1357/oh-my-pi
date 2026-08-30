@@ -10,7 +10,7 @@ Four similarly named things behave differently. Keep them straight:
 
 - **Context files** are read as plain Markdown and shown to the agent in generated project instructions (inside `<repo-rules>` with the default prompt template). They are session-opening instructions and background for repository work.
 - **Sticky rules** come from a top-level native `RULES.md`. They are converted into an always-apply rule that is re-attached near the current turn, so they keep their hold even after the visible conversation grows. See "Sticky rules vs normal context" below.
-- **Discovery providers** are the config-source adapters (`native`, `claude`, `codex`, `gemini`, `opencode`, `github`, `agents`, `agents-md`) that know where each tool keeps its files. The same provider that contributes context files may also contribute MCP servers, slash commands, skills, hooks, tools, prompts, and settings.
+- **Discovery providers** are the config-source adapters that know where each tool keeps its files. The full registry is `native`, `omp-plugins`, `claude`, `agent-plugins`, `codex`, `agents`, `claude-plugins`, `gemini`, `opencode`, `cursor`, `windsurf`, `cline`, `github`, `vscode`, `agents-md`, `mcp-json`, `ssh-json`, and `builtin-defaults`. Only some contribute context files (`native`, `claude`, `codex`, `gemini`, `opencode`, `github`, `agents`, `agents-md`); the rest contribute other capabilities such as rules, MCP servers, skills, commands, hooks, tools, or SSH hosts. The same provider that contributes context files may also contribute MCP servers, slash commands, skills, hooks, tools, prompts, and settings.
 - **Model providers** are inference backends such as `anthropic`, `openai`, `google`, `groq`, `ollama`, and `openrouter`. They have nothing to do with context files except that both kinds of id share the one `disabledProviders` list — see "Disabling discovery providers" below and [Providers](./providers.md).
 
 Authoring **skills** and **rule** files (as opposed to the sticky `RULES.md`) is covered in [Skills](./skills.md). Customizing the system prompt with `SYSTEM.md` is covered in [System prompt customization](./system-prompt-customization.md).
@@ -70,19 +70,28 @@ Put broad, durable project background in `AGENTS.md`. Reserve `RULES.md` for sho
 
 Providers marked "(no ancestor walk-up)" only look in the current working directory's config directory. If you need ancestor walk-up behavior, prefer the native `.omp/AGENTS.md` format or a standalone `AGENTS.md` (the `agents-md` provider), or launch `omp` from the directory that holds the config directory.
 
+The discovery registry also holds providers that contribute no context files at all: `cursor` (`.cursor/rules/*.mdc` and legacy `.cursorrules` rules, plus MCP servers and settings), `windsurf` (`.windsurf/rules/*.md`, legacy `.windsurfrules`, and global Windsurf rules, plus MCP servers), `cline` (`.clinerules` rules), `vscode` and `mcp-json` (MCP servers), `claude-plugins` (Claude marketplace plugins: skills, commands, rules, hooks, tools, MCP servers), `omp-plugins` (OMP plugins: skills, commands, rules, prompts, hooks, tools, MCP servers), `agent-plugins` (Agent Plugins standard packages: skills and MCP servers), `ssh-json` (SSH hosts), and `builtin-defaults` (built-in default rules). These become relevant for rules and other capabilities, and for the shared `disabledProviders` switch below.
+
 ## Load order and shadowing
 
-When two providers describe the _same_ scope, the higher-priority provider wins. Provider priorities:
+When two providers describe the _same_ scope, the higher-priority provider wins. Full registry priorities:
 
-| Priority | Provider id       |
-| -------: | ----------------- |
-|      100 | `native`          |
-|       80 | `claude`          |
-|       70 | `agents`, `codex` |
-|       60 | `gemini`          |
-|       55 | `opencode`        |
-|       30 | `github`          |
-|       10 | `agents-md`       |
+| Priority | Provider id                                        |
+| -------: | -------------------------------------------------- |
+|      100 | `native`                                           |
+|       90 | `omp-plugins`                                      |
+|       80 | `claude`                                           |
+|       75 | `agent-plugins`                                    |
+|       70 | `agents`, `claude-plugins`, `codex`                |
+|       60 | `gemini`                                           |
+|       55 | `opencode`                                         |
+|       50 | `cursor`, `windsurf`                               |
+|       40 | `cline`                                            |
+|       30 | `github`                                           |
+|       20 | `vscode`                                           |
+|       10 | `agents-md`                                        |
+|        5 | `mcp-json`, `ssh-json`                             |
+|        1 | `builtin-defaults`                                 |
 
 Discovered files are then deduplicated by scope:
 

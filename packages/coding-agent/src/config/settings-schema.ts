@@ -839,7 +839,7 @@ export const SETTINGS_SCHEMA = {
 	},
 	"statusLine.compactThinkingLevel": {
 		type: "boolean",
-		default: false,
+		default: true,
 		ui: {
 			tab: "appearance",
 			group: "Status Line",
@@ -2561,10 +2561,10 @@ export const SETTINGS_SCHEMA = {
 			description: "Fixed token limit for context maintenance; overrides percentage if set",
 			options: [
 				{ value: "default", label: "Default", description: "Use percentage-based threshold" },
-				{ value: "25000", label: "25K tokens", description: "Quarter of a 200K window" },
-				{ value: "50000", label: "50K tokens", description: "Half of a 200K window" },
-				{ value: "100000", label: "100K tokens", description: "Half of a 200K window" },
-				{ value: "150000", label: "150K tokens", description: "Three-quarters of a 200K window" },
+				{ value: "25000", label: "25K tokens", description: "1/8 of a 200K window" },
+				{ value: "50000", label: "50K tokens", description: "1/4 of a 200K window" },
+				{ value: "100000", label: "100K tokens", description: "1/2 of a 200K window" },
+				{ value: "150000", label: "150K tokens", description: "3/4 of a 200K window" },
 				{ value: "200000", label: "200K tokens", description: "Full standard context window" },
 				{ value: "300000", label: "300K tokens", description: "Large context window" },
 				{ value: "500000", label: "500K tokens", description: "Very large context window" },
