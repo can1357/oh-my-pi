@@ -86,6 +86,9 @@ function subscriptionKey(method: string): string {
 			return "GeolocationOverride";
 		case "Emulation.clearIdleOverride":
 			return "Emulation.setIdleOverride";
+		case "Network.setUserAgentOverride":
+		case "Emulation.setUserAgentOverride":
+			return "UserAgentOverride";
 		default:
 			return method;
 	}

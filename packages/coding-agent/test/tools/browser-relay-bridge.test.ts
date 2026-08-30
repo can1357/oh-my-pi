@@ -1460,24 +1460,73 @@ describe("RelayBridge tab grouping", () => {
 		await waitFor(() => ext2.rpcs("attach").length === 1, "recovery reattach RPC");
 		ack(bridge, ext2, "attach");
 
-		// Recovery replays each UA setter serially, in original order, with the
-		// latest override params — so the fresh Chrome root keeps the stealth
-		// fingerprint instead of reverting after the guard-authorized swap.
+		// Recovery replays only the latest effective UA override once, even if the
+		// browser tool previously issued both alias setters. The fresh Chrome root
+		// should keep the winning stealth fingerprint without replaying a stale
+		// duplicate alias command.
 		await waitFor(() => ext2.rpcs("send").length === 1, "first UA override replayed");
-		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual(["Network.setUserAgentOverride"]);
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual(["Emulation.setUserAgentOverride"]);
 		expect(ext2.rpcs("send")[0]!.params).toEqual(stealthUa);
 		ack(bridge, ext2, "send");
-		await waitFor(() => ext2.rpcs("send").length === 2, "second UA override replayed");
-		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual([
+		await flush();
+		expect(ext2.rpcs("send")).toHaveLength(1);
+	});
+
+	it("preserves the surviving user-agent override across Network/Emulation aliases", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const ownerA = new FakeCdpSocket();
+		const ownerAConn = bridge.cdpConnected(ownerA);
+		const ownerASession = await attachPage(bridge, ext, ownerA, ownerAConn, 1);
+		const ownerB = new FakeCdpSocket();
+		const ownerBConn = bridge.cdpConnected(ownerB);
+		const ownerBSession = await attachPage(bridge, ext, ownerB, ownerBConn, 1);
+		const holder = new FakeCdpSocket();
+		const holderConn = bridge.cdpConnected(holder);
+		const holderSession = await attachPage(bridge, ext, holder, holderConn, 1);
+
+		const sendRootCommand = async (
+			connId: number,
+			sessionId: string,
+			method: string,
+			params?: Record<string, unknown>,
+		): Promise<void> => {
+			const id = ++msgSeq;
+			bridge.cdpMessage(connId, JSON.stringify({ id, sessionId, method, params }));
+			await flush();
+			ack(bridge, ext, "send");
+			await flush();
+		};
+
+		const networkUa = { userAgent: "Mozilla/5.0 network-owner", platform: "Linux" };
+		const emulationUa = { userAgent: "Mozilla/5.0 emulation-owner", platform: "Win32" };
+		await sendRootCommand(ownerAConn, ownerASession, "Network.setUserAgentOverride", networkUa);
+		await sendRootCommand(ownerBConn, ownerBSession, "Emulation.setUserAgentOverride", emulationUa);
+
+		bridge.cdpClosed(ownerBConn);
+		await waitFor(() => ext.rpcs("send").length === 3, "surviving UA replay after latest alias owner closes");
+		expect(ext.rpcs("send").map(rpc => rpc.method)).toEqual([
 			"Network.setUserAgentOverride",
 			"Emulation.setUserAgentOverride",
+			"Network.setUserAgentOverride",
 		]);
-		expect(ext2.rpcs("send")[1]!.params).toEqual(stealthUa);
-		ack(bridge, ext2, "send");
+		expect(ext.rpcs("send")[2]!.params).toEqual(networkUa);
+		ack(bridge, ext, "send");
 		await flush();
-		// Exactly the two UA setters replay — no duplicate from the superseded
-		// stale override, and no disable/enable churn for a stateless setter.
-		expect(ext2.rpcs("send")).toHaveLength(2);
+
+		const commandId = ++msgSeq;
+		bridge.cdpMessage(
+			holderConn,
+			JSON.stringify({ id: commandId, sessionId: holderSession, method: "Network.getCookies" }),
+		);
+		await flush();
+		expect(ext.rpcs("send").map(rpc => rpc.method)).toEqual([
+			"Network.setUserAgentOverride",
+			"Emulation.setUserAgentOverride",
+			"Network.setUserAgentOverride",
+			"Network.getCookies",
+		]);
 	});
 
 	it("replays non-UA persistent root setters for a preserved session across recovery", async () => {
