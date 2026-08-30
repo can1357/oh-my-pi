@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- SDK embedders can wire a restart lifecycle callback (`onRestartRequested`) that exposes an in-session `restart` tool, cooperatively recycling the agent session to pick up host-staged changes a live refresh cannot reach. The tool is offered only when the embedder supplies the callback; a default `omp` CLI session does not present it ([#10289](https://github.com/can1357/oh-my-pi/pull/10289) by [@mattwilkinsonn](https://github.com/mattwilkinsonn)).
+
 ## [18.1.12] - 2026-09-06
 
 - Fixed edit and write results to report the formatted bytes actually committed by LSP writethrough.

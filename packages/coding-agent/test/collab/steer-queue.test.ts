@@ -86,7 +86,7 @@ interface StreamingHostHarness {
 }
 
 /** Context double for a host whose agent is mid-turn (isStreaming === true). */
-function makeStreamingHostContext(): StreamingHostHarness {
+function makeStreamingHostContext(promptResult?: boolean): StreamingHostHarness {
 	const prompts: CapturedPrompt[] = [];
 	const promptWaiters: ((prompt: CapturedPrompt) => void)[] = [];
 	const ctx = {
@@ -115,7 +115,7 @@ function makeStreamingHostContext(): StreamingHostHarness {
 				const captured: CapturedPrompt = { details: message.details, options };
 				prompts.push(captured);
 				for (const waiter of promptWaiters.splice(0)) waiter(captured);
-				return Promise.resolve();
+				return Promise.resolve(promptResult);
 			},
 		},
 		eventBus: undefined,
@@ -206,5 +206,33 @@ describe("collab mid-turn guest prompts", () => {
 			if (frame.t === "state" && frame.state.queuedMessageCount === 1) sawQueuedCount = true;
 		}
 		expect(sawQueuedCount).toBe(true);
+	});
+});
+
+describe("collab dropped guest prompts", () => {
+	it("sends the guest an error when the latch drops the prompt instead of silently losing it", async () => {
+		const relay = startTestRelay();
+		cleanups.push(relay.stop);
+		// A host whose promptCustomMessage reports `false`: the turn never started
+		// (restart latched / disposal / usage-preflight denial), so no turn runs
+		// for the guest prompt. The host must surface that as an error frame.
+		const harness = makeStreamingHostContext(false);
+		const host = new CollabHost(harness.ctx);
+		await host.start(relay.url);
+		cleanups.push(() => host.stop("test done"));
+
+		const guest = await joinAsGuest(host.link, "writer");
+		cleanups.push(() => guest.socket.close());
+		const welcome = await guest.nextFrame();
+		if (welcome.t !== "welcome") throw new Error(`expected welcome, got ${welcome.t}`);
+
+		guest.socket.send({ t: "prompt", text: "steer the host" });
+
+		let sawError = false;
+		for (let i = 0; i < 10 && !sawError; i++) {
+			const frame = await guest.nextFrame();
+			if (frame.t === "error" && /dropped/.test(frame.message)) sawError = true;
+		}
+		expect(sawError).toBe(true);
 	});
 });

@@ -118,7 +118,7 @@ export type RpcSessionChangeResult =
 export type RpcSessionChangeSession = Pick<AgentSession, "newSession" | "switchSession" | "branch">;
 
 export type RpcSkillCommandSession = Pick<AgentSession, "promptCustomMessage" | "skills" | "skillsSettings">;
-export type RpcSkillCommandResult = { agentInvoked: true };
+export type RpcSkillCommandResult = { agentInvoked: boolean };
 
 export interface RpcSkillInvocation {
 	skill: Skill;
@@ -145,6 +145,12 @@ export function resolveRpcSkillInvocation(session: RpcSkillCommandSession, text:
  * compaction checks, provider calls). Resolves once the turn is scheduled.
  * Must not run on the RPC serial queue's response path — register it with
  * watchAndReportLocalOnlyPromptResult and answer the command first.
+ *
+ * Resolves `false` when the turn never started (restart latched, disposal, or a
+ * usage-preflight denial): the custom message was dropped before it reached the
+ * agent, so no `agent_end` follows. Callers must propagate that outcome — an
+ * unconditional `agentInvoked: true` leaves the RPC host waiting on a dead
+ * event.
  */
 export async function runRpcSkillCommand(
 	session: RpcSkillCommandSession,
@@ -172,6 +178,10 @@ export async function runRpcSkillCommand(
  * the skill prompt and running the prompt pipeline (usage preflight,
  * compaction, provider calls) can outlast any client's prompt timeout under
  * provider stress; the plain-prompt path responds first for the same reason.
+ *
+ * Answers `agentInvoked: true` unconditionally because the dispatch outcome is
+ * not known yet; a dropped turn is reported later as a `prompt_result` frame by
+ * the registered watcher, so the host is never left waiting on a dead event.
  */
 export async function dispatchRpcSkillPrompt(input: {
 	id: string | undefined;
@@ -207,8 +217,11 @@ export async function tryRunRpcSkillCommand(
 ): Promise<RpcSkillCommandResult | false> {
 	const invocation = resolveRpcSkillInvocation(session, text);
 	if (!invocation) return false;
-	await runRpcSkillCommand(session, invocation, streamingBehavior);
-	return { agentInvoked: true };
+	// This path awaits the dispatch itself, so the real outcome is in hand: pass
+	// it through instead of asserting `true`. No watcher stands behind this call
+	// to correct a dropped turn later.
+	const agentInvoked = await runRpcSkillCommand(session, invocation, streamingBehavior);
+	return { agentInvoked };
 }
 
 export function reportLocalOnlyPromptResult(input: {

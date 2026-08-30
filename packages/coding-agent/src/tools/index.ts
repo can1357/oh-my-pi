@@ -24,6 +24,7 @@ import type { MnemopiSessionState } from "../mnemopi/state";
 import type { PlanModeState } from "../plan-mode/state";
 import type { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import type { AgentRegistry } from "../registry/agent-registry";
+import type { RequestRestartResult } from "../session/agent-session";
 import type { ArtifactManager } from "../session/artifacts";
 import type { ClientBridge } from "../session/client-bridge";
 import type { CustomMessage } from "../session/messages";
@@ -59,6 +60,7 @@ import { MemoryRetainTool } from "./memory-retain";
 import { wrapToolWithMetaNotice } from "./output-meta";
 import { ReadTool } from "./read";
 import type { PlanProposalHandler } from "./resolve";
+import { RestartTool } from "./restart";
 import { SecurityScanTool } from "./security-scan";
 import { supportsExternalThinking, ThinkTool } from "./think";
 import { type TodoPhase, TodoTool } from "./todo";
@@ -99,6 +101,7 @@ export * from "./memory-retain";
 export * from "./read";
 export * from "./report-tool-issue";
 export * from "./resolve";
+export * from "./restart";
 export * from "./review";
 export * from "./security-scan";
 export * from "./think";
@@ -183,6 +186,12 @@ export interface ToolSession {
 	skills?: readonly Skill[];
 	/** Rediscover live session skills after a tool mutates their backing files. */
 	refreshSkills?: () => Promise<void>;
+	/**
+	 * Cooperatively recycle this session to pick up host-staged changes a live
+	 * refresh cannot reach. Backs the `restart` tool. Absent on sessions with
+	 * no backing `AgentSession` or no bound `onRestartRequested` host callback.
+	 */
+	requestRestart?: () => Promise<RequestRestartResult>;
 	/** Pre-loaded prompt templates */
 	promptTemplates?: PromptTemplate[];
 	/** Pre-loaded rules (forwarded to subagents to skip re-discovery). */
@@ -483,6 +492,10 @@ export const BUILTIN_TOOLS: Record<BuiltinToolName, ToolFactory> = {
 	reflect: MemoryReflectTool.createIf,
 	learn: LearnTool.createIf,
 	manage_skill: ManageSkillTool.createIf,
+	// Conditional (createIf → null when session.requestRestart is unbound):
+	// restart is only offered when a host onRestartRequested callback is wired,
+	// so an unbound session is not shown a tool that always errors.
+	restart: RestartTool.createIf,
 };
 
 export const HIDDEN_TOOLS: Record<HiddenToolName, ToolFactory> = {

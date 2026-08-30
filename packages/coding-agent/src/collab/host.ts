@@ -499,6 +499,16 @@ export class CollabHost {
 				},
 				{ streamingBehavior: "steer", queueChipText: text },
 			)
+			.then(dispatched => {
+				// `false` means the turn never started (restart latched, disposal,
+				// or a usage-preflight denial): the guest prompt was dropped before
+				// reaching the agent, so no turn will run for it. Tell the guest
+				// rather than silently swallowing the input while it waits for a
+				// response that will never come.
+				if (dispatched === false) {
+					this.#socket?.send({ t: "error", message: "prompt dropped: session is busy" }, fromPeer);
+				}
+			})
 			.catch(err => {
 				logger.warn("collab guest prompt failed", { error: String(err) });
 				this.#socket?.send({ t: "error", message: `prompt failed: ${String(err)}` }, fromPeer);

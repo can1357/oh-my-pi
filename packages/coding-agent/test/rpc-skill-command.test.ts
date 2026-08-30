@@ -49,6 +49,42 @@ describe("tryRunRpcSkillCommand", () => {
 		await removeWithRetries(dir);
 	});
 
+	test("reports agentInvoked:false when the latch drops the skill prompt (no dead agent_end)", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), `omp-rpc-skill-${Snowflake.next()}-`));
+		const skillPath = path.join(dir, "SKILL.md");
+		await Bun.write(
+			skillPath,
+			"---\nname: reviewer\ndescription: Review code\n---\n\nReview the supplied code carefully.\n",
+		);
+
+		try {
+			// promptCustomMessage returns false when the turn never started (restart
+			// latched, disposal, usage-preflight denial): no agent_end will follow.
+			const handled = await tryRunRpcSkillCommand(
+				{
+					skillsSettings: { enableSkillCommands: true },
+					skills: [
+						{
+							name: "reviewer",
+							description: "Review code",
+							filePath: skillPath,
+							baseDir: dir,
+							source: "project",
+						},
+					],
+					async promptCustomMessage() {
+						return false;
+					},
+				},
+				"/skill:reviewer focus on risks",
+			);
+
+			expect(handled).toEqual({ agentInvoked: false });
+		} finally {
+			await removeWithRetries(dir);
+		}
+	});
+
 	test("honors the RPC prompt streaming behavior for registered /skill commands", async () => {
 		const dir = await fs.mkdtemp(path.join(os.tmpdir(), `omp-rpc-skill-${Snowflake.next()}-`));
 		const skillPath = path.join(dir, "SKILL.md");

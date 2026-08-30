@@ -654,6 +654,48 @@ export interface CreateAgentSessionOptions {
 	 */
 	onFirstChatDispatch?: () => void;
 
+	/**
+	 * Cooperative restart hook for embedded hosts. When the session (or its
+	 * host) calls {@link AgentSession.requestRestart}, OMP latches out new turns,
+	 * waits for the running turn to settle, flushes the session file to disk,
+	 * disposes the session, then invokes this callback with the data needed to
+	 * re-attach. The session is already disposed when this fires, so the host
+	 * re-opens the manager (`await SessionManager.open(sessionFile)`) and recreates
+	 * the session **through the same configured factory / options it used
+	 * originally**, substituting the reopened manager — re-passing this callback
+	 * and all host options (cwd, agentDir, event bus, injected settings). A bare
+	 * `createAgentSession({ sessionManager })` drops every option, so the recycled
+	 * session would restart once and then never again, and silently lose host
+	 * config. Never create the replacement before this callback (it cannot: the
+	 * old session is gone) — that is the create-before-dispose hazard OMP disposes
+	 * first to avoid.
+	 *
+	 * Reconstruction contract — preserve host config, INVALIDATE the
+	 * restart-sensitive preload. Restart exists to re-read surfaces frozen at
+	 * session start, so the replacement MUST let them be rediscovered instead of
+	 * carrying stale values across the boundary:
+	 * - Do NOT re-pass {@link preloadedExtensions}. Its `Extension` instances
+	 *   close over the disposed session's `ExtensionAPI` (cwd, eventBus, runtime)
+	 *   and are documented unsafe across session boundaries; reusing them routes
+	 *   tools/handlers/commands back through the dead session. Omit them (or
+	 *   forward only {@link preloadedExtensionPaths}) so the new session binds
+	 *   fresh extensions to its own runtime.
+	 * - Do NOT re-pass {@link contextFiles}, {@link skills},
+	 *   {@link promptTemplates}, or {@link slashCommands} with the values captured
+	 *   at first launch. Each bypasses disk discovery when supplied, so re-passing
+	 *   the stale value defeats the reload — restart would silently keep the old
+	 *   `AGENTS.md`, skills, templates, and commands. Omit them so
+	 *   `createAgentSession` re-runs discovery and picks up the on-disk changes
+	 *   restart promises.
+	 * Keep genuine host configuration (model, provider registry, auth, agent id,
+	 * cwd, event bus); invalidate only the discovery-backed preload fields above.
+	 *
+	 * Recycles ONLY this session (same loaded code); picking up a new build is a
+	 * host-process-level operation, never triggered per-agent. Unset =>
+	 * `requestRestart()` refuses (restart unavailable).
+	 */
+	onRestartRequested?: (info: { sessionId: string; sessionFile: string }) => void | Promise<void>;
+
 	/** Whether to auto-approve all tool calls (--auto-approve CLI flag). Default: false */
 	autoApprove?: boolean;
 }
@@ -1814,6 +1856,14 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				return session?.skills ?? skills;
 			},
 			refreshSkills: () => session.refreshSkills(),
+			// Bound only when the host wired onRestartRequested, so the restart tool
+			// can guard on the binding's presence.
+			requestRestart: options.onRestartRequested ? () => session.requestRestart() : undefined,
+			// Bound alongside requestRestart so the restart tool can surface a
+			// pre-dispose refusal/failure to the still-open transcript (the model
+			// must learn the recycle did not happen). No-op before the session
+			// exists; after dispose the tool gates on isDisposed() and never calls it.
+			queueDeferredMessage: message => session?.queueDeferredMessage(message),
 			rules: allRules,
 			activeRules: [...rulebookRules, ...alwaysApplyRules, ...ttsrManager.getRules()],
 			eventBus,
@@ -3789,6 +3839,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			preferWebsockets: preferOpenAICodexWebsockets,
 			convertToLlm: convertToLlmFinal,
 			rebuildSystemPrompt,
+			onRestartRequested: options.onRestartRequested,
 			getXdevToolEntries: () => (toolSession.xdev ? xdevEntries(toolSession.xdev) : []),
 			xdev: toolSession.xdev,
 			presentationPinnedToolNames: explicitlyRequestedToolNameSet,

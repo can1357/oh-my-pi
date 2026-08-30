@@ -60,6 +60,15 @@ export interface AgentSessionDisposeOptions {
 	 * (`/quit`, test teardown, subagent completion).
 	 */
 	reason?: postmortem.Reason;
+	/**
+	 * Skip empty-move-session cleanup during disposal. A restart handoff disposes
+	 * the session but must keep the file it just persisted (`ensureOnDisk()`) so
+	 * `onRestartRequested` can hand it to `SessionManager.open()` for
+	 * reconstruction. Without this an SDK host that MOVED an otherwise empty
+	 * session and then requested a restart would have the captured `sessionFile`
+	 * deleted by `cleanupEmptyMoveSession()`, breaking reattachment.
+	 */
+	preserveSessionFile?: boolean;
 }
 
 /** Listener notified when command metadata changes. */
@@ -248,6 +257,13 @@ export interface AgentSessionConfig {
 		toolNames: string[],
 		tools: Map<string, AgentTool>,
 	) => Promise<{ systemPrompt: string[]; xdevCatalogNames?: readonly string[] }>;
+	/**
+	 * Cooperative restart hook for embedded hosts. Invoked by
+	 * {@link AgentSession.requestRestart} after OMP has quiesced, flushed, and
+	 * disposed this session, with the data the host needs to re-attach the
+	 * recycled session. Wired from `CreateAgentSessionOptions.onRestartRequested`.
+	 */
+	onRestartRequested?: (info: { sessionId: string; sessionFile: string }) => void | Promise<void>;
 	/** Tools mounted under `xd://`, for `/tools` display. */
 	getXdevToolEntries?: () => Array<{ name: string; summary: string }>;
 	/** `xd://` presentation state backed by the canonical tool map. */
