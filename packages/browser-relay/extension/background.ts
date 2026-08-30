@@ -11,6 +11,7 @@
  */
 import { AttachmentGuard } from "../../coding-agent/src/tools/browser/relay/attachment-guard";
 import type { ExtToRelayMessage, RelayToExtMessage, TabSnapshot } from "../../coding-agent/src/tools/browser/relay/protocol";
+import { filterFreshAttachmentState, noteAttachmentStateChange, snapshotAttachmentState } from "./attachment-state";
 import { snapshotAfterPendingOperationsSettle } from "./pending-ops";
 
 const DEFAULT_PORT = 9224;
@@ -71,10 +72,9 @@ function updateRecoverable(update: () => void): Promise<void> {
 	return recoverableUpdates;
 }
 
-function rememberRecoverable(tabIds: number[], isFresh: () => boolean = () => true): Promise<void> {
+function rememberRecoverable(freshTabIds: () => number[]): Promise<void> {
 	return updateRecoverable(() => {
-		if (!isFresh()) return;
-		for (const tabId of tabIds) recoverableTabIds.add(tabId);
+		for (const tabId of freshTabIds()) recoverableTabIds.add(tabId);
 	});
 }
 
@@ -82,23 +82,6 @@ function forgetRecoverable(tabId: number): Promise<void> {
 	return updateRecoverable(() => {
 		recoverableTabIds.delete(tabId);
 	});
-}
-
-function noteAttachmentStateChange(tabId: number): void {
-	attachmentStateEpochs.set(tabId, (attachmentStateEpochs.get(tabId) ?? 0) + 1);
-}
-
-function snapshotAttachmentState(tabIds: number[]): Map<number, number> {
-	const snapshot = new Map<number, number>();
-	for (const tabId of tabIds) snapshot.set(tabId, attachmentStateEpochs.get(tabId) ?? 0);
-	return snapshot;
-}
-
-function attachmentStateMatches(snapshot: Map<number, number>): boolean {
-	for (const [tabId, epoch] of snapshot) {
-		if ((attachmentStateEpochs.get(tabId) ?? 0) !== epoch) return false;
-	}
-	return true;
 }
 
 /**
@@ -140,13 +123,13 @@ const attachmentGuard = new AttachmentGuard<NodeJS.Timeout>({
 async function trackAttachments(
 	tabIds: number[],
 	isFresh: () => boolean = () => true,
-	attachmentState = snapshotAttachmentState(tabIds),
+	attachmentState = snapshotAttachmentState(attachmentStateEpochs, tabIds),
 ): Promise<void> {
 	if (tabIds.length === 0) return;
-	const stillFresh = (): boolean => isFresh() && attachmentStateMatches(attachmentState);
-	await rememberRecoverable(tabIds, stillFresh);
-	if (!stillFresh()) return;
-	for (const tabId of tabIds) attachmentGuard.track(tabId);
+	const freshTabIds = (): number[] =>
+		isFresh() ? filterFreshAttachmentState(attachmentStateEpochs, attachmentState, tabIds) : [];
+	await rememberRecoverable(freshTabIds);
+	for (const tabId of freshTabIds()) attachmentGuard.track(tabId);
 }
 
 interface RelaySettings {
@@ -393,7 +376,7 @@ async function attachTab(tabId: number, socket: WebSocket): Promise<void> {
 
 async function attachTabOperation(tabId: number, socket: WebSocket): Promise<void> {
 	await chrome.debugger.attach({ tabId }, "1.3");
-	noteAttachmentStateChange(tabId);
+	noteAttachmentStateChange(attachmentStateEpochs, tabId);
 	// The relay that requested this attachment disappeared while Chrome was
 	// still resolving attach(). Its pending RPC was rejected by RelayBridge,
 	// so no downstream session can own the resulting debugger attachment.
@@ -581,7 +564,7 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
 
 chrome.debugger.onDetach.addListener((source, reason) => {
 	if (source.tabId === undefined) return;
-	noteAttachmentStateChange(source.tabId);
+	noteAttachmentStateChange(attachmentStateEpochs, source.tabId);
 	// The attachment is gone (user clicked Cancel, tab navigated to a
 	// non-attachable target, or Chrome tore it down); stop tracking it so a
 	// later orphan sweep never tries to detach a tab we no longer own.
