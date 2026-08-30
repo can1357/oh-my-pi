@@ -75,6 +75,17 @@ describe("formatUsageRow upstream provider", () => {
 		expect(row.indexOf("via Z.AI")).toBeGreaterThan(rateIndex);
 	});
 
+	it("strips ANSI escapes, control characters, and caps provider length", () => {
+		const hostile = "[31mEvil\u0007Corp[0m";
+		const row = formatUsageRow(BASE_USAGE, REQUEST_DURATION_MS, undefined, undefined, undefined, hostile);
+		expect(row).toContain("via EvilCorp");
+		expect(row).not.toContain("[");
+		const long = "A".repeat(100);
+		expect(formatUsageRow(BASE_USAGE, REQUEST_DURATION_MS, undefined, undefined, undefined, long)).toContain(
+			`via ${"A".repeat(40)}`,
+		);
+	});
+
 	it("renders the provider even when the rate is suppressed (sub-minimum duration)", () => {
 		const row = formatUsageRow(BASE_USAGE, 50, undefined, undefined, undefined, "Z.AI");
 		expect(row).not.toContain("/s");

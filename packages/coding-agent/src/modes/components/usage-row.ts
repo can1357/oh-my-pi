@@ -69,11 +69,18 @@ export function formatUsageRow(
 		const tokPerSec = (usage.output / durationMs) * 1000;
 		parts.push(`${theme.icon.throughput} ${tokPerSec.toFixed(1)}/s`);
 	}
-	// The aggregator (e.g. OpenRouter) that routed the request — the actual
-	// inference backend that generated this response. Absent for direct
-	// provider connections.
+	// `upstreamProvider` is aggregator-reported text (OpenRouter) rendered
+	// verbatim into the transcript: strip ANSI escapes and control characters
+	// and cap the length so a misbehaving aggregator can't decorate or flood
+	// the usage row. Absent for direct provider connections.
 	if (upstreamProvider) {
-		parts.push(`via ${upstreamProvider}`);
+		const providerLabel = Bun.stripANSI(upstreamProvider)
+			.replace(/[\u0000-\u001f\u007f]/g, "")
+			.trim()
+			.slice(0, 40);
+		if (providerLabel) {
+			parts.push(`via ${providerLabel}`);
+		}
 	}
 	return parts.join("  ");
 }
