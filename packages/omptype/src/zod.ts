@@ -603,7 +603,10 @@ export const union = <
  * dispatched on identity.
  */
 function isDispatchableLiteral(value: unknown): boolean {
-	if (value === null || value === undefined) return true;
+	// `null` has a JSON form; `undefined` does not — a property pinned to it
+	// emits an unconstrained schema inside `required`, which a provider can
+	// neither encode nor select, so the branch is unreachable in practice.
+	if (value === null) return true;
 	switch (typeof value) {
 		case "string":
 		case "boolean":
@@ -616,10 +619,14 @@ function isDispatchableLiteral(value: unknown): boolean {
 }
 
 /**
- * The values `ir` can take when that set is finite AND dispatchable — literals,
- * `null`, `undefined`, and unions of those (`z.enum`, a literal union).
- * `undefined` means the set is open, or pinned to something that cannot be
- * dispatched on, so nothing can be selected by it.
+ * The values `ir` can take when that set is finite and advertisable — literals,
+ * `null`, and unions of those (`z.enum`, a literal union). `undefined`
+ * contributes no value rather than opening the set: a `.default()`-widened
+ * literal is `lit | undefined`, and the default fills the absent case, so the
+ * literal still dispatches. A returned `undefined` means the set is open (or
+ * pinned to something unadvertisable) and nothing can be selected by it; an
+ * empty array means every member was `undefined`, which callers treat the same
+ * way.
  */
 function finiteValues(ir: IR, seen?: Set<IR>): unknown[] | undefined {
 	switch (ir.k) {
@@ -628,7 +635,7 @@ function finiteValues(ir: IR, seen?: Set<IR>): unknown[] | undefined {
 		case "null":
 			return [null];
 		case "undefined":
-			return [undefined];
+			return [];
 		case "union": {
 			const values: unknown[] = [];
 			for (const member of ir.members) {
@@ -636,7 +643,7 @@ function finiteValues(ir: IR, seen?: Set<IR>): unknown[] | undefined {
 				if (inner === undefined) return undefined;
 				values.push(...inner);
 			}
-			return values.length > 0 ? values : undefined;
+			return values;
 		}
 		case "refine":
 			return finiteValues(ir.base, seen);
@@ -666,7 +673,9 @@ function discriminatorValues(ir: IR, key: string, seen?: Set<IR>): unknown[] | u
 	switch (ir.k) {
 		case "object": {
 			const prop = ir.props.find(candidate => candidate.key === key);
-			return prop === undefined ? undefined : finiteValues(prop.val, seen);
+			if (prop === undefined) return undefined;
+			const values = finiteValues(prop.val, seen);
+			return values === undefined || values.length === 0 ? undefined : values;
 		}
 		case "union": {
 			const values: unknown[] = [];

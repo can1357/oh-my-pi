@@ -354,6 +354,27 @@ describe("zod-like parsing", () => {
 			z.object({ kind: z.literal("b") }),
 		]);
 		expect(nullish.parse({ kind: null, a: "x" })).toEqual({ kind: null, a: "x" });
+
+		// `undefined` has no JSON form: a property pinned to it emits an
+		// unconstrained schema inside `required`, which a provider can neither
+		// encode nor select, so the branch is unreachable.
+		expect(() =>
+			z.discriminatedUnion("kind", [
+				z.object({ kind: z.literal(undefined), a: z.string() }),
+				z.object({ kind: z.literal("b") }),
+			]),
+		).toThrow(/does not pin "kind" to a literal or enum value/);
+		expect(() =>
+			z.discriminatedUnion("kind", [z.object({ kind: z.undefined() }), z.object({ kind: z.literal("b") })]),
+		).toThrow(/does not pin "kind" to a literal or enum value/);
+		// A `.default()`-widened literal is `lit | undefined` internally, and the
+		// default fills the absent case, so it must still dispatch on the literal.
+		const defaulted = z.discriminatedUnion("kind", [
+			z.object({ kind: z.literal("a").default("a"), n: z.number() }),
+			z.object({ kind: z.literal("b"), s: z.string() }),
+		]);
+		expect(defaulted.parse({ n: 1 })).toEqual({ kind: "a", n: 1 });
+		expect(defaulted.parse({ kind: "b", s: "x" })).toEqual({ kind: "b", s: "x" });
 	});
 
 	it("lets later modifiers replace the object policy the array guard sits on", () => {
