@@ -69,7 +69,7 @@ async function createPersistedSession(
 	restrictToolNames?: boolean,
 	modelRole?: string,
 	advisor?: string,
-	contract?: { tools?: string[]; readOnly?: boolean },
+	contract?: { tools?: string[]; readOnly?: boolean; isIsolated?: boolean },
 ): Promise<string> {
 	const manager = SessionManager.create(cwd, path.join(cwd, "sessions"));
 	const sessionFile = manager.getSessionFile();
@@ -83,6 +83,7 @@ async function createPersistedSession(
 		resolvedModel: modelRole ? "anthropic/claude-sonnet-4-5" : undefined,
 		advisor,
 		readOnly: contract?.readOnly,
+		isIsolated: contract?.isIsolated,
 	});
 	manager.appendMessage({
 		role: "assistant",
@@ -101,6 +102,7 @@ async function createPersistedSession(
 		stopReason: "stop",
 		timestamp: Date.now(),
 	});
+
 	await manager.close();
 	return sessionFile;
 }
@@ -132,6 +134,27 @@ afterEach(async () => {
 });
 
 describe("persisted subagent revival", () => {
+	it("carries the persisted isolation marker through the cold-revive peek", async () => {
+		// The executor records `isIsolated` in the persisted subagent contract;
+		// dropping it from the peek projection or the reviver would silently
+		// re-expose `isolated` to revived children of isolated parents.
+		for (const isIsolated of [true, false]) {
+			const cwd = makeTempDir(`@pi-isolated-revive-${isIsolated}-`);
+			const sessionFile = await createPersistedSession(cwd, false, undefined, undefined, { isIsolated });
+			let capturedOptions: CreateAgentSessionOptions | undefined;
+			vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+				capturedOptions = options;
+				return { session: createRevivedSession([]).session } as CreateAgentSessionResult;
+			});
+
+			const ref = createRef(sessionFile);
+			const reviver = await createFactory(cwd)(ref);
+			if (!reviver) throw new Error("Expected a persisted reviver");
+			await reviver(ref);
+
+			expect(capturedOptions?.isIsolated).toBe(isIsolated);
+		}
+	});
 	it("initializes the extension runtime on cold revival so tool_call handlers are not fail-closed blocked", async () => {
 		const cwd = makeTempDir("@pi-revive-ext-init-");
 		const sessionFile = await createPersistedSession(cwd);

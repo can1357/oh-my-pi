@@ -10,6 +10,7 @@ import { ModelRegistry } from "../../src/config/model-registry";
 import { Settings } from "../../src/config/settings";
 import type { createAgentSession } from "../../src/sdk";
 import * as sdkModule from "../../src/sdk";
+import * as securityModule from "../../src/security";
 import {
 	createNativeSecurityProvenance,
 	DEFAULT_SECURITY_GIT_ADAPTER,
@@ -19,6 +20,7 @@ import {
 	SecurityStore,
 } from "../../src/security";
 import { SessionManager } from "../../src/session/session-manager";
+import type { ToolSession } from "../../src/tools";
 
 const MOCK_SOURCE_ID = "security-coordinator-test";
 let temporaryRoot = "";
@@ -422,6 +424,41 @@ describe("native security coordinator", () => {
 				const terminal = await coordinator.wait(started.operationId);
 				expect(terminal.phase).toBe("partial"); // mocked session never publishes
 				expect(sessionOptionsIsIsolated).toBe(hostIsIsolated);
+			} finally {
+				spy.mockRestore();
+			}
+		}
+	});
+	test("SecurityScanTool forwards the session isolation marker into the coordinator host", async () => {
+		// The tool-side entry point must populate SecurityCoordinatorHost
+		// with the session's isolation marker; dropping the field would
+		// silently revert scan sessions to non-isolated (the regression this
+		// round fixes). The spy sits at the host factory, past the session's
+		// own ToolSession surface.
+		const { SecurityScanTool } = await import("../../src/tools/security-scan");
+		for (const isIsolated of [true, false]) {
+			const session = {
+				cwd: repositoryRoot,
+				settings,
+				authStorage,
+				modelRegistry,
+				getActiveModel: () => createMockModel({ id: "security-mock", provider: "openai-codex" }).model,
+				getSessionId: () => `fixture-${isIsolated}`,
+				getAgentId: () => "Main",
+				asyncJobManager: undefined,
+				isIsolated,
+			} as unknown as ToolSession;
+			const seen: boolean[] = [];
+			const spy = vi.spyOn(securityModule, "getSecurityCoordinator").mockImplementation(host => {
+				seen.push(host.isIsolated === true);
+				return new SecurityCoordinator(host, { openStore: storeFactory, gitAdapter });
+			});
+			try {
+				const tool = new SecurityScanTool(session);
+				await expect(tool.execute("tool-call", { action: "status", operation_id: "secop_none" })).rejects.toThrow(
+					"Unknown security operation: secop_none",
+				);
+				expect(seen).toEqual([isIsolated]);
 			} finally {
 				spy.mockRestore();
 			}

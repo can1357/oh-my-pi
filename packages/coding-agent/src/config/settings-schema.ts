@@ -4888,7 +4888,7 @@ export const SETTINGS_SCHEMA = {
 			group: "Isolation",
 			label: "Allow Nested Isolation",
 			description:
-				"Permit spawning an isolated subagent from inside an already-isolated subagent. Disabled by default: nested isolated spawns are rejected with a clear error and the `isolated` field is hidden from the task tool schema/prompt inside isolated sessions.",
+				"Permit spawning an isolated subagent from inside an already-isolated subagent. Disabled by default: nested isolated spawns are rejected with a clear error and the `isolated` field is omitted from the task tool prompt and constrained to false in its schema inside isolated sessions.",
 		},
 	},
 

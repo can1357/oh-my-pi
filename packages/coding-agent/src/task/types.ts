@@ -176,6 +176,10 @@ const taskSchemaNoIsolation = type({
 const taskSchemaBatch = type({
 	context: "string",
 	tasks: taskItemSchemaIsolated.array(),
+	// A top-level `isolated` is not part of the batch shape; a flat-form call
+	// with `isolated` must reject (lenient raw-args fallthrough → preflight)
+	// rather than strip and silently run the batch non-isolated.
+	"isolated?": "false",
 	"+": "delete",
 });
 const taskSchemaBatchNoIsolation = type({
@@ -230,6 +234,11 @@ function createTaskSchema(options: {
 			return type.raw({
 				context: "string",
 				tasks: item.array(),
+				// A top-level `isolated` is not part of the batch shape; a flat-form
+				// call with `isolated` must reject (lenient raw-args fallthrough →
+				// preflight) rather than strip and silently run the batch
+				// non-isolated.
+				"isolated?": "false",
 				"+": "delete",
 			});
 		}

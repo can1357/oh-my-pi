@@ -322,7 +322,11 @@ export async function resolveEffectiveSubagentPolicy(
 			`Subagent isolated execution requires task.isolation.mode to be set; current mode is "none".`,
 		);
 	}
-	if (isIsolated && request.session.isIsolated && !request.session.settings.get("task.isolation.allowNested")) {
+	if (
+		isIsolated &&
+		request.session.isIsolated &&
+		request.session.settings.get("task.isolation.allowNested") !== true
+	) {
 		throw new StructuredSubagentError(
 			"preflight",
 			"Subagent isolated execution inside an already-isolated agent requires task.isolation.allowNested to be enabled.",

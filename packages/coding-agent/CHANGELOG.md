@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added `task.isolation.allowNested` to reject nested isolated subagent spawns by default, with an opt-in for large-swarm users; isolated subagents no longer advertise the `isolated` field unless enabled. The isolation marker propagates through non-isolated children of isolated parents and into security scan sessions, and plan mode only rejects affirmative isolation controls (an explicit `isolated: false` no longer fails the call) ([#3760](https://github.com/can1357/oh-my-pi/issues/3760)).
+- Added `task.isolation.allowNested` to reject nested isolated subagent spawns by default, with an opt-in for large-swarm users; isolated subagents no longer advertise the `isolated` field unless enabled. The isolation marker propagates through non-isolated children of isolated parents and into security scan sessions, the nested-isolation preflight and the batch wire schema reject a mis-typed or stray `isolated` instead of silently downgrading the spawn, and plan mode only rejects affirmative isolation controls (an explicit `isolated: false` no longer fails the call) ([#3760](https://github.com/can1357/oh-my-pi/issues/3760)).
 
 - Added provider-reported credits and concrete routed-model counts to `/session` statistics ([#8590](https://github.com/can1357/oh-my-pi/pull/8590) by [@will-bogusz](https://github.com/will-bogusz)).
 - Added `CLINE_API_KEY` to the CLI environment help for native ClinePass subscription inference ([#7863](https://github.com/can1357/oh-my-pi/pull/7863) by [@will-bogusz](https://github.com/will-bogusz)).

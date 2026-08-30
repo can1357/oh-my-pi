@@ -282,4 +282,55 @@ describe("nested isolation gating", () => {
 		const text = result.content.find(part => part.type === "text")?.text ?? "";
 		expect(text).toContain("Top-level `isolated` is not part of the batch shape.");
 	});
+	it("rejects a top-level `isolated` on the batch wrapper even with task.isolation.allowNested", async () => {
+		// The with-isolation batch schema must reject a stray flat-form
+		// top-level `isolated` too: with `"+": "delete"` alone, arktype strips
+		// the key before execute() and the batch spawns quietly non-isolated —
+		// exactly in the allowNested=true configuration where a nested spawn
+		// would actually be honored. Rejection routes the raw args to the
+		// runtime shape error.
+		const session = {
+			...nestedSession(),
+			settings: Settings.isolated({
+				"task.isolation.mode": "auto",
+				"task.batch": true,
+				"task.isolation.allowNested": true,
+			}),
+		} as unknown as ToolSession;
+		mockAgents([taskDefinition]);
+		const tool = await TaskTool.create(session);
+
+		const parsed = tool.parameters({ context: "ctx", tasks: [{ task: "x" }], isolated: true });
+		expect(parsed instanceof type.errors).toBe(true);
+
+		const result = await tool.execute("tool-call", { context: "ctx", tasks: [{ task: "x" }], isolated: true });
+		const text = result.content.find(part => part.type === "text")?.text ?? "";
+		expect(text).toContain("Top-level `isolated` is not part of the batch shape.");
+	});
+
+	it("allows top-level batch items to set isolated while rejecting the flat-form key on allowNested sessions", async () => {
+		// A top-level non-boolean `isolated` (e.g. the string "true") must
+		// reject the with-isolation batch schema (const:false) instead of
+		// being stripped: the lenient raw-args fallthrough then surfaces the
+		// runtime shape error, and the malformed value can never reach
+		// spawnParamsFor's item-override.
+		const session = {
+			...nestedSession(),
+			settings: Settings.isolated({
+				"task.isolation.mode": "auto",
+				"task.batch": true,
+				"task.isolation.allowNested": true,
+			}),
+		} as unknown as ToolSession;
+		mockAgents([taskDefinition]);
+		const tool = await TaskTool.create(session);
+
+		const result = await tool.execute("tool-call", {
+			context: "ctx",
+			tasks: [{ task: "x", isolated: true }],
+			isolated: "true",
+		});
+		const text = result.content.find(part => part.type === "text")?.text ?? "";
+		expect(text).toContain("Top-level `isolated` is not part of the batch shape.");
+	});
 });
