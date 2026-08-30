@@ -480,9 +480,13 @@ export const SETTINGS_SCHEMA = {
 	// Auth broker — credentials proxied through a remote `omp auth-broker serve`
 	// host. Hidden from the UI; populate via env vars or hand-edited config.yml.
 	// Env (`OMP_AUTH_BROKER_URL` / `OMP_AUTH_BROKER_TOKEN`) takes precedence so
-	// per-machine overrides remain trivial.
+	// per-machine overrides remain trivial. `auth.broker.metrics` is the weakest
+	// source for the opt-in `/metrics` endpoint on the serving side, below both
+	// `--enable-metrics` and `OMP_AUTH_BROKER_METRICS`; off means the endpoint is
+	// never registered and no scrape token is minted.
 	"auth.broker.url": { type: "string", default: undefined },
 	"auth.broker.token": { type: "string", default: undefined, credential: true },
+	"auth.broker.metrics": { type: "boolean", default: false },
 
 	autoResume: {
 		type: "boolean",
