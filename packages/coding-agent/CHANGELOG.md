@@ -43,6 +43,7 @@
 - Fixed orphaned pages, iframes, and workers accumulating in the shared headless browser after abnormal OMP session termination.
 ### Fixed
 
+- Compaction’s durable `## Incomplete Todos` section is uncapped and includes model-abandoned items (not user drops), with newline-safe titles, so reconstruction after compact cannot permanently drop overflow or model abandons; summarizer/nudge prompts stay capped. Compaction no longer reloads todos from the branch before writing leftovers, so a live RPC `set_todos` cache stays authoritative.
 - Compaction summaries keep a capped `## Incomplete Todos` section (and summarizer extra-context) so pending/in_progress items survive the cut and can be reconstructed after the latest todo tool result is summarized away (ported from [#8875](https://github.com/can1357/oh-my-pi/pull/8875) / [#8874](https://github.com/can1357/oh-my-pi/issues/8874)).
 
 - `/todo` slash and TUI mutations always use the live session todo cache (including an explicit empty list after RPC `set_todos([])`), so a host clear is not resurrected from a stale branch snapshot.

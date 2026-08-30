@@ -1,14 +1,16 @@
 import type { TodoPhase } from "../tools/todo";
 
-/** Cap leftover-todo dumps so a huge list cannot overflow every compact. */
+/** Cap leftover-todo dumps so a huge list cannot overflow summarizer / nudge prompts. */
 export const INCOMPLETE_TODOS_SNAPSHOT_CAP = 40;
 const INCOMPLETE_TODOS_HEADING = "## Incomplete Todos";
 /** Exact h2, or the same heading with a trailing colon / extra text. */
 const INCOMPLETE_TODOS_HEADING_RE = /^## Incomplete Todos(?:[ \t]*:.*|[ \t]+.+)?[ \t]*$/m;
 
+export type IncompleteTodoStatus = "pending" | "in_progress" | "abandoned";
+
 export interface IncompleteTodoRow {
 	phase: string;
-	status: "pending" | "in_progress";
+	status: IncompleteTodoStatus;
 	title: string;
 }
 
@@ -17,13 +19,50 @@ export interface CappedIncompleteTodos {
 	overflow: number;
 }
 
-/** Flatten pending/in_progress items as phase + status + title rows. */
+function isIncompleteTodoTask(task: TodoPhase["tasks"][number]): boolean {
+	if (task.status === "pending" || task.status === "in_progress") return true;
+	// Model-abandoned rows stay incomplete at settle; user drops are intentional cancels.
+	return task.status === "abandoned" && task.droppedBy !== "user";
+}
+
+/** Escape title so a newline cannot inject fake phase/task markdown structure. */
+export function encodeIncompleteTodoTitle(title: string): string {
+	return title.replace(/\\/g, "\\\\").replace(/\r\n|\r|\n/g, "\\n");
+}
+
+/** Inverse of {@link encodeIncompleteTodoTitle}. */
+export function decodeIncompleteTodoTitle(title: string): string {
+	let out = "";
+	for (let i = 0; i < title.length; i++) {
+		if (title[i] === "\\" && i + 1 < title.length) {
+			const next = title[i + 1];
+			if (next === "n") {
+				out += "\n";
+				i++;
+				continue;
+			}
+			if (next === "\\") {
+				out += "\\";
+				i++;
+				continue;
+			}
+		}
+		out += title[i];
+	}
+	return out;
+}
+
+/** Flatten pending/in_progress/model-abandoned items as phase + status + title rows. */
 export function collectIncompleteTodoRows(phases: readonly TodoPhase[]): IncompleteTodoRow[] {
 	const rows: IncompleteTodoRow[] = [];
 	for (const phase of phases) {
 		for (const task of phase.tasks) {
-			if (task.status !== "pending" && task.status !== "in_progress") continue;
-			rows.push({ phase: phase.name, status: task.status, title: task.content });
+			if (!isIncompleteTodoTask(task)) continue;
+			rows.push({
+				phase: phase.name,
+				status: task.status === "abandoned" ? "abandoned" : task.status,
+				title: task.content,
+			});
 		}
 	}
 	return rows;
@@ -44,19 +83,21 @@ export function formatIncompleteTodoSnapshotLines(
 	cap = INCOMPLETE_TODOS_SNAPSHOT_CAP,
 ): string[] {
 	const capped = capIncompleteTodoRows(rows, cap);
-	const lines = capped.rows.map(row => `[${row.phase}] [${row.status}] ${row.title}`);
+	const lines = capped.rows.map(
+		row => `[${encodeIncompleteTodoTitle(row.phase)}] [${row.status}] ${encodeIncompleteTodoTitle(row.title)}`,
+	);
 	if (capped.overflow > 0) lines.push(`+ ${capped.overflow} more`);
 	return lines;
 }
 
-/** Group capped rows back into phase lists for markdown / prompt rendering. */
+/** Group rows back into phase lists for markdown / prompt rendering. */
 export function groupIncompleteTodoRowsByPhase(rows: readonly IncompleteTodoRow[]): Array<{
 	name: string;
-	tasks: Array<{ content: string; status: "pending" | "in_progress" }>;
+	tasks: Array<{ content: string; status: IncompleteTodoStatus }>;
 }> {
 	const phases: Array<{
 		name: string;
-		tasks: Array<{ content: string; status: "pending" | "in_progress" }>;
+		tasks: Array<{ content: string; status: IncompleteTodoStatus }>;
 	}> = [];
 	for (const row of rows) {
 		const last = phases.at(-1);
@@ -69,23 +110,22 @@ export function groupIncompleteTodoRowsByPhase(rows: readonly IncompleteTodoRow[
 	return phases;
 }
 
-/** Standing summary section, or undefined when nothing remains. */
-export function formatIncompleteTodosSection(
-	rows: readonly IncompleteTodoRow[],
-	cap = INCOMPLETE_TODOS_SNAPSHOT_CAP,
-): string | undefined {
-	const capped = capIncompleteTodoRows(rows, cap);
-	if (capped.rows.length === 0) return undefined;
-	const phases = groupIncompleteTodoRowsByPhase(capped.rows);
+/**
+ * Standing summary section used for durable reconstruction after compaction.
+ * Intentionally uncapped so a large live list is not permanently truncated when
+ * {@link getLatestTodoPhasesFromEntries} rehydrates from this section.
+ */
+export function formatIncompleteTodosSection(rows: readonly IncompleteTodoRow[]): string | undefined {
+	if (rows.length === 0) return undefined;
+	const phases = groupIncompleteTodoRowsByPhase(rows);
 	const lines = [
 		INCOMPLETE_TODOS_HEADING,
-		"These pending/in_progress items remain after compaction; continue them. A text-only stop is not completion.",
+		"These incomplete items remain after compaction; continue them. A text-only stop is not completion.",
 		...phases.flatMap(phase => [
-			`- ${phase.name}`,
-			...phase.tasks.map(task => `  - [${task.status}] ${task.content}`),
+			`- ${encodeIncompleteTodoTitle(phase.name)}`,
+			...phase.tasks.map(task => `  - [${task.status}] ${encodeIncompleteTodoTitle(task.content)}`),
 		]),
 	];
-	if (capped.overflow > 0) lines.push(`- + ${capped.overflow} more`);
 	return lines.join("\n");
 }
 
@@ -127,14 +167,14 @@ function splitIncompleteTodosSection(summary: string): { before: string; body: s
 	};
 }
 
-const INCOMPLETE_TODO_TASK_RE = /^\s+- \[(pending|in_progress)\] (.+)$/;
+const INCOMPLETE_TODO_TASK_RE = /^\s+- \[(pending|in_progress|abandoned)\] (.+)$/;
 const INCOMPLETE_TODO_PHASE_RE = /^- (.+)$/;
 const INCOMPLETE_TODO_OVERFLOW_RE = /^- \+ \d+ more$/;
 
 /**
- * Reconstruct leftover pending/in_progress phases from a compaction summary's
- * standing `## Incomplete Todos` section. Used after the latest todo toolResult
- * has been summarized away.
+ * Reconstruct leftover incomplete phases from a compaction summary's standing
+ * `## Incomplete Todos` section. Used after the latest todo toolResult has been
+ * summarized away.
  */
 export function parseIncompleteTodosFromSummary(summary: string): TodoPhase[] {
 	const split = splitIncompleteTodosSection(summary);
@@ -146,12 +186,15 @@ export function parseIncompleteTodosFromSummary(summary: string): TodoPhase[] {
 		if (task) {
 			const last = phases.at(-1);
 			if (!last) continue;
-			last.tasks.push({ content: task[2], status: task[1] as "pending" | "in_progress" });
+			last.tasks.push({
+				content: decodeIncompleteTodoTitle(task[2]),
+				status: task[1] as IncompleteTodoStatus,
+			});
 			continue;
 		}
 		const phase = INCOMPLETE_TODO_PHASE_RE.exec(line);
 		if (phase && !INCOMPLETE_TODO_OVERFLOW_RE.test(line)) {
-			phases.push({ name: phase[1], tasks: [] });
+			phases.push({ name: decodeIncompleteTodoTitle(phase[1]), tasks: [] });
 		}
 	}
 	return phases.filter(phase => phase.tasks.length > 0);

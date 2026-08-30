@@ -204,7 +204,7 @@ export class TodoTracker {
 		const rows = collectIncompleteTodoRows(this.#phases);
 		if (rows.length === 0) return [];
 		return [
-			"Incomplete todos that MUST survive compaction (pending/in_progress only; a text-only stop is not completion):",
+			"Incomplete todos that MUST survive compaction (pending/in_progress/model-abandoned; a text-only stop is not completion):",
 			...formatIncompleteTodoSnapshotLines(rows),
 		];
 	}

@@ -307,7 +307,7 @@ export interface SessionMaintenanceHost {
 	resetCodexProviderAfterCompaction(compaction: CodexCompactionContext): void;
 	resetPlanReference(): void;
 	syncTodoPhasesFromBranch(): void;
-	/** Live pending/in_progress todo lines for the compaction summarizer input. */
+	/** Live incomplete todo lines for the compaction summarizer input. */
 	incompleteTodosCompactionContext(): string[];
 	/** Keep incomplete todos in the standing compaction summary text. */
 	appendIncompleteTodosToCompactionSummary(summary: string): string;
@@ -1470,9 +1470,9 @@ export class SessionMaintenance {
 		advisorResetReason: string;
 		detachExtensionEmit?: boolean;
 	}): Promise<CompactionEntry | undefined> {
-		// Keep a standing Incomplete Todos section in sync with the live list so
-		// pending/in_progress items survive after the latest todo toolResult is cut.
-		this.#host.syncTodoPhasesFromBranch();
+		// Use the live todo cache (including RPC set_todos) for the standing
+		// Incomplete Todos section — do not reload from the branch first, which
+		// would overwrite an authoritative host clear/update with a stale toolResult.
 		const summary = this.#host.appendIncompleteTodosToCompactionSummary(args.summary);
 		const entryId = this.#host.sessionManager.appendCompaction(
 			summary,
@@ -2296,7 +2296,7 @@ export class SessionMaintenance {
 				preserveData: Record<string, unknown> | undefined;
 		  }
 	> {
-		this.#host.syncTodoPhasesFromBranch();
+		// Live cache is authoritative for leftover rows (RPC set_todos included).
 		this.#injectIncompleteTodoSnapshot(preparation);
 
 		let hookContext: string[] | undefined;
@@ -2846,8 +2846,7 @@ export class SessionMaintenance {
 		const rebuilt = snapcompact.getPreservedArchive(result.preserveData);
 		if (!rebuilt || rebuilt.frames.length >= archive.frames.length) return undefined;
 
-		// Regular compact paths sync before writing leftovers; rescue must too.
-		this.#host.syncTodoPhasesFromBranch();
+		// Regular compact paths use the live todo cache for leftovers; rescue must too.
 		result.summary = this.#host.appendIncompleteTodosToCompactionSummary(result.summary);
 		const rebuiltEntryId = this.#host.sessionManager.appendCompaction(
 			result.summary,

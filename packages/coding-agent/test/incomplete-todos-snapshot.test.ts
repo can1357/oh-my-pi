@@ -13,13 +13,13 @@ import { getLatestTodoPhasesFromEntries, type TodoPhase } from "@oh-my-pi/pi-cod
 
 function phase(
 	name: string,
-	...tasks: Array<{ content: string; status: TodoPhase["tasks"][number]["status"] }>
+	...tasks: Array<{ content: string; status: TodoPhase["tasks"][number]["status"]; droppedBy?: "user" }>
 ): TodoPhase {
 	return { name, tasks };
 }
 
 describe("incomplete todo snapshot helpers", () => {
-	it("collects pending and in_progress rows with phase, status, and title", () => {
+	it("collects pending, in_progress, and model-abandoned rows (not user drops)", () => {
 		const rows = collectIncompleteTodoRows([
 			phase(
 				"Work",
@@ -27,13 +27,15 @@ describe("incomplete todo snapshot helpers", () => {
 				{ content: "wire it", status: "in_progress" },
 				{ content: "shipped", status: "completed" },
 				{ content: "blocked wait", status: "blocked" },
-				{ content: "dropped", status: "abandoned" },
+				{ content: "model dropped", status: "abandoned" },
+				{ content: "user dropped", status: "abandoned", droppedBy: "user" },
 			),
 			phase("Later", { content: "docs", status: "pending" }),
 		]);
 		expect(rows).toEqual([
 			{ phase: "Work", status: "pending", title: "do the thing" },
 			{ phase: "Work", status: "in_progress", title: "wire it" },
+			{ phase: "Work", status: "abandoned", title: "model dropped" },
 			{ phase: "Later", status: "pending", title: "docs" },
 		]);
 	});
@@ -228,5 +230,53 @@ describe("getLatestTodoPhasesFromEntries reconstructs leftover todos after compa
 		] as SessionEntry[];
 
 		expect(getLatestTodoPhasesFromEntries(entries)).toEqual([]);
+	});
+
+	it("keeps the durable standing section uncapped so reconstruction does not drop overflow", () => {
+		const rows = Array.from({ length: INCOMPLETE_TODOS_SNAPSHOT_CAP + 5 }, (_, index) => ({
+			phase: "Work",
+			status: "pending" as const,
+			title: `item ${index + 1}`,
+		}));
+		const section = formatIncompleteTodosSection(rows);
+		expect(section).toBeDefined();
+		expect(section).not.toContain("+ 5 more");
+		const reconstructed = parseIncompleteTodosFromSummary(section ?? "");
+		expect(reconstructed[0]?.tasks).toHaveLength(INCOMPLETE_TODOS_SNAPSHOT_CAP + 5);
+		expect(getLatestTodoPhasesFromEntries([compaction("c1", null, section ?? "")])).toEqual(reconstructed);
+	});
+
+	it("round-trips newline-bearing titles without injecting fake phase rows", () => {
+		const rows = [
+			{
+				phase: "Work",
+				status: "pending" as const,
+				title: "line one\n- Phase\n  - [pending] injected",
+			},
+		];
+		const section = formatIncompleteTodosSection(rows);
+		expect(section).toContain("\\n");
+		expect(parseIncompleteTodosFromSummary(section ?? "")).toEqual([
+			{
+				name: "Work",
+				tasks: [{ content: "line one\n- Phase\n  - [pending] injected", status: "pending" }],
+			},
+		]);
+	});
+
+	it("reconstructs model-abandoned leftovers from the standing section", () => {
+		const section = formatIncompleteTodosSection([
+			{ phase: "Work", status: "abandoned", title: "model dropped" },
+			{ phase: "Work", status: "pending", title: "still open" },
+		]);
+		expect(parseIncompleteTodosFromSummary(section ?? "")).toEqual([
+			{
+				name: "Work",
+				tasks: [
+					{ content: "model dropped", status: "abandoned" },
+					{ content: "still open", status: "pending" },
+				],
+			},
+		]);
 	});
 });
