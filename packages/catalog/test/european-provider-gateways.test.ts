@@ -776,7 +776,7 @@ describe("European gateway provider catalog support", () => {
 		});
 	});
 
-	test("applies MiniCPM-V image capability through the catalog policy when discovery metadata is sparse", async () => {
+	test("derives MiniCPM-V image capability when gateway modality metadata is sparse", async () => {
 		const fetchMock: FetchImpl = vi.fn(async () => {
 			return new Response(
 				JSON.stringify({
@@ -797,7 +797,7 @@ describe("European gateway provider catalog support", () => {
 		expect(models?.[0]).toMatchObject({
 			id: "minicpm-v-4.5",
 			provider: "cortecs",
-			input: ["text"],
+			input: ["text", "image"],
 		});
 		expect(models?.[0] && buildModel(models[0]).input).toEqual(["text", "image"]);
 	});
@@ -823,6 +823,10 @@ describe("European gateway provider catalog support", () => {
 		const models = await cortecsModelManagerOptions({ fetch: fetchMock }).fetchDynamicModels?.();
 
 		expect(models?.map(model => ({ id: model.id, input: model.input }))).toEqual([
+			{ id: "llama-4-maverick", input: ["text"] },
+			{ id: "minicpm-v-4.5", input: ["text"] },
+		]);
+		expect(models?.map(model => ({ id: model.id, input: buildModel(model).input }))).toEqual([
 			{ id: "llama-4-maverick", input: ["text"] },
 			{ id: "minicpm-v-4.5", input: ["text"] },
 		]);
