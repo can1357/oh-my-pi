@@ -403,4 +403,31 @@ describe("z.lazy deferred alias", () => {
 		expect(widened.parse({})).toEqual({});
 		expect(widened.parse({ t: { v: "x" } })).toEqual({ t: { v: "x" } });
 	});
+
+	it("takes optionality from outside the lazy, never from inside it", () => {
+		// A property's `opt` bit is fixed when the parent object is built, and it
+		// drives BOTH the runtime presence check and the emitted `required`.
+		// A deferred getter is unresolvable at that moment, so optionality has to
+		// be spelled outside the lazy. Pinned in both directions so the boundary
+		// is explicit: the supported spelling keeps working, and the unsupported
+		// one fails loudly instead of silently accepting a missing key.
+		const outside = z.object({ x: z.lazy(() => z.string()).optional() });
+		expect(outside.parse({})).toEqual({});
+		expect(outside.parse({ x: "v" })).toEqual({ x: "v" });
+		expect(outside.safeParse({ x: 1 }).success).toBe(false);
+
+		// Optionality declared INSIDE the getter is invisible to the object
+		// builder, so the key stays required.
+		const inside = z.object({ x: z.lazy(() => z.string().optional()) });
+		expect(inside.safeParse({}).success).toBe(false);
+		expect(inside.parse({ x: "v" })).toEqual({ x: "v" });
+
+		// A plainly required lazy property is required, and exports as `$ref`
+		// inside `required` — the shape the common recursive schema relies on.
+		const required = z.object({ x: z.lazy(() => z.string()) });
+		expect(required.safeParse({}).success).toBe(false);
+		const json = asObjectSchema(required.toJsonSchema());
+		expect(json.required).toEqual(["x"]);
+		expect(resolveRef(json, propSchema(json, "x")?.$ref)).toEqual({ type: "string" });
+	});
 });
