@@ -10,6 +10,7 @@
 
 ### Fixed
 
+- Restored unrelated bundled catalog rows dropped during an earlier Grok Bot `models.json` regen (kept parent catalog; only added Grok Bot).
 - Grok Bot AvailableModels discovery sends `connect-protocol-version: 1` like other Connect unary clients.
 - Grok Bot AvailableModels requires explicit `supportsImages: true` before advertising image input (omitted proto3 false stays text-only).
 - Grok Bot AvailableModels treats omitted `supportsNonMaxMode` like `false` so max-only rows keep `sandMaxMode`.
