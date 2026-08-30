@@ -372,6 +372,8 @@ export class AgentRegistry {
 
 export type AgentTaskOutcomeState = "active" | AgentTerminalOutcome;
 
+const trackedTaskTurnStartGates = new WeakMap<AgentSession, Promise<void>>();
+
 /**
  * Track a user-driven turn on a reusable agent session without erasing the
  * previous task verdict until the session confirms that a new turn started.
@@ -383,23 +385,30 @@ export async function runTrackedAgentTaskTurn(
 	dispatch: () => Promise<boolean>,
 	onState?: (state: AgentTaskOutcomeState) => void,
 ): Promise<boolean> {
+	const previousStartGate = trackedTaskTurnStartGates.get(session) ?? Promise.resolve();
+	const startGate = Promise.withResolvers<void>();
+	trackedTaskTurnStartGates.set(session, startGate.promise);
+	await previousStartGate;
+
 	let started = false;
 	let outcomeGeneration: number | undefined;
+	let unsubscribe: (() => void) | undefined;
 	const finalize = (outcome: AgentTerminalOutcome): void => {
 		if (outcomeGeneration === undefined || !registry.isCurrentTaskOutcome(id, outcomeGeneration)) return;
 		recordAgentTaskOutcome(session, outcome);
 		registry.setTaskOutcome(id, outcomeGeneration, outcome);
 		onState?.(outcome);
 	};
-	const unsubscribe = session.subscribe(event => {
-		if (event.type !== "agent_start" || started) return;
-		started = true;
-		outcomeGeneration = registry.beginTaskOutcome(id, session);
-		if (outcomeGeneration === undefined) return;
-		recordAgentTaskOutcome(session, null);
-		onState?.("active");
-	});
 	try {
+		unsubscribe = session.subscribe(event => {
+			if (event.type !== "agent_start" || started) return;
+			started = true;
+			startGate.resolve();
+			outcomeGeneration = registry.beginTaskOutcome(id, session);
+			if (outcomeGeneration === undefined) return;
+			recordAgentTaskOutcome(session, null);
+			onState?.("active");
+		});
 		const accepted = await dispatch();
 		if (!accepted) return false;
 		if (!started) return true;
@@ -413,6 +422,8 @@ export async function runTrackedAgentTaskTurn(
 		}
 		throw error;
 	} finally {
-		unsubscribe();
+		unsubscribe?.();
+		startGate.resolve();
+		if (trackedTaskTurnStartGates.get(session) === startGate.promise) trackedTaskTurnStartGates.delete(session);
 	}
 }

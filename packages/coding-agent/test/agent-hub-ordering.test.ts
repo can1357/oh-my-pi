@@ -1184,6 +1184,75 @@ describe("Agent hub row ordering", () => {
 		expect(ref.history?.lastOutcome).toBe("failed");
 	});
 
+	it("correlates concurrent tracked dispatches with only the turn each starts", async () => {
+		const agents = new AgentRegistry();
+		const listeners = new Set<(event: AgentSessionEvent) => void>();
+		const firstDispatchEntered = Promise.withResolvers<void>();
+		const releaseStart = Promise.withResolvers<void>();
+		const releaseTurn = Promise.withResolvers<void>();
+		let isStreaming = false;
+		const session = {
+			get isStreaming() {
+				return isStreaming;
+			},
+			sessionManager: { appendCustomEntry: () => {} },
+			subscribe: (listener: (event: AgentSessionEvent) => void) => {
+				listeners.add(listener);
+				return () => listeners.delete(listener);
+			},
+			getLastAssistantMessage: () => ({ stopReason: "stop" }),
+		} as unknown as AgentSession;
+		agents.register({
+			id: "ConcurrentAgent",
+			displayName: "Concurrent Agent",
+			kind: "sub",
+			session,
+			status: "idle",
+			history: { lastOutcome: "failed" },
+		});
+
+		const firstStates: string[] = [];
+		const first = runTrackedAgentTaskTurn(
+			agents,
+			"ConcurrentAgent",
+			session,
+			async () => {
+				firstDispatchEntered.resolve();
+				await releaseStart.promise;
+				isStreaming = true;
+				for (const listener of listeners) listener({ type: "agent_start" } as AgentSessionEvent);
+				await releaseTurn.promise;
+				isStreaming = false;
+				return true;
+			},
+			state => firstStates.push(state),
+		);
+		await firstDispatchEntered.promise;
+
+		const secondStates: string[] = [];
+		const second = runTrackedAgentTaskTurn(
+			agents,
+			"ConcurrentAgent",
+			session,
+			async () => {
+				await releaseStart.promise;
+				return true;
+			},
+			state => secondStates.push(state),
+		);
+		const listenersBeforeStart = listeners.size;
+
+		releaseStart.resolve();
+		expect(await second).toBe(true);
+		releaseTurn.resolve();
+		expect(await first).toBe(true);
+
+		expect(listenersBeforeStart).toBe(1);
+		expect(firstStates).toEqual(["active", "completed"]);
+		expect(secondStates).toEqual([]);
+		expect(agents.get("ConcurrentAgent")?.history?.lastOutcome).toBe("completed");
+	});
+
 	it("invalidates observer outcomes only after a follow-up turn starts", async () => {
 		const agents = new AgentRegistry();
 		const observerStates: string[] = [];

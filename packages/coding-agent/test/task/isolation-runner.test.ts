@@ -158,6 +158,7 @@ describe("runIsolatedSubprocess", () => {
 		expect(deleteSpy).toHaveBeenCalledWith("omp/task/PreserveBranchFailure", true);
 		expect(cleanupSpy).toHaveBeenCalledTimes(1);
 		expect(AgentRegistry.global().get("PreserveBranchFailure")?.history?.patchPath).toBe(patchPath);
+		expect(AgentRegistry.global().get("PreserveBranchFailure")?.history?.lastOutcome).toBe("failed");
 	});
 
 	it("keeps the task branch when it already carries the agent's commits", async () => {

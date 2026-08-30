@@ -48,7 +48,7 @@ type IsoBackendKind = natives.IsoBackendKind;
 function rememberAgentArtifacts(result: SingleResult): SingleResult {
 	AgentRegistry.global().setHistory(result.id, {
 		outputPath: result.outputPath,
-		lastOutcome: result.aborted ? "aborted" : result.exitCode === 0 ? "completed" : "failed",
+		lastOutcome: result.aborted ? "aborted" : result.exitCode === 0 && !result.error ? "completed" : "failed",
 		patchPath: result.patchPath,
 		branchName: result.branchName,
 	});
