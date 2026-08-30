@@ -333,10 +333,35 @@ describe("grokbot requested model mapping", () => {
 		]);
 	});
 
-	test("bare aliases omit maxMode parameters", () => {
-		const bare = resolveGrokbotRequestedModel("sand-cua");
-		expect(bare).toEqual({ modelId: "sand-cua" });
+	test("empty sandParameterIds omit parameters even when effort/fast are set", () => {
+		// Catalog fact: routers/Auto advertise no parameter ids ⇒ bare wire.
+		expect(
+			resolveGrokbotRequestedModel("sand-cua", {
+				effort: "high",
+				fast: true,
+				sandParameterIds: [],
+				sandMaxMode: false,
+			}),
+		).toEqual({ modelId: "sand-cua" });
 		expect(resolveGrokbotRequestedModel("default")).toEqual({ modelId: "default" });
+	});
+
+	test("catalog sandParameterIds drive wire params regardless of model id", () => {
+		// A formerly hard-coded bare id must still send params when the catalog
+		// advertises them — routing policy is sandParameterIds, not a name table.
+		expect(
+			resolveGrokbotRequestedModel("sand-default", {
+				effort: "medium",
+				fast: true,
+				sandParameterIds: ["effort", "fast"],
+			}),
+		).toEqual({
+			modelId: "sand-default",
+			parameters: [
+				{ id: "effort", value: "medium" },
+				{ id: "fast", value: "true" },
+			],
+		});
 	});
 
 	test("strips grokbot/ provider prefix", () => {

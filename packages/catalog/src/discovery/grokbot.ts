@@ -169,7 +169,12 @@ function toGrokbotModelSpec(row: GrokbotAvailableModel, baseUrl: string): ModelS
 	const efforts = collectEffortValues(row, parameterIds);
 	const reasoning = row.supportsThinking === true || efforts.length > 0;
 	const thinking = efforts.length > 0 ? ({ mode: "effort", efforts } satisfies ThinkingConfig) : undefined;
-	const aliases = uniqueStrings([...(row.idAliases ?? []), ...(row.legacySlugs ?? [])].filter(a => a !== row.name));
+	const variantLegacySlugs = (row.variants ?? [])
+		.map(v => v.legacySlug?.trim())
+		.filter((slug): slug is string => Boolean(slug));
+	const aliases = uniqueStrings(
+		[...(row.idAliases ?? []), ...(row.legacySlugs ?? []), ...variantLegacySlugs].filter(a => a !== row.name),
+	);
 	const sandMaxMode = resolveGrokbotSandMaxMode(row);
 
 	return {

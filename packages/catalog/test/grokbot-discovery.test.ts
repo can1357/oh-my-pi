@@ -45,7 +45,12 @@ const FIXTURE = {
 			supportsImages: false,
 			idAliases: ["composer-latest", "composer", "composer-2-5"],
 			parameterDefinitions: [{ id: "fast" }],
-			variants: [{ parameterValues: [{ id: "fast", value: "false" }] }],
+			variants: [
+				{
+					parameterValues: [{ id: "fast", value: "false" }],
+					legacySlug: "composer-2",
+				},
+			],
 		},
 		{
 			name: "max-only-model",
@@ -148,7 +153,7 @@ describe("grokbot AvailableModels normalize", () => {
 		expect(ids).toContain("composer-2.5");
 
 		const composer = models.find(m => m.id === "composer-2.5");
-		expect(composer?.aliases).toEqual(["composer-latest", "composer", "composer-2-5"]);
+		expect(composer?.aliases).toEqual(["composer-latest", "composer", "composer-2-5", "composer-2"]);
 		expect(composer?.sandParameterIds).toEqual(["fast"]);
 		expect(composer?.input).toEqual(["text"]);
 		expect(composer?.sandMaxMode).toBe(false);

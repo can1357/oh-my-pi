@@ -22,7 +22,8 @@ export type GrokbotRequestedModelOptions = {
 	fast?: boolean;
 	/**
 	 * Allowed parameter ids from live `parameterDefinitions` / catalog `sandParameterIds`.
-	 * Empty/undefined ⇒ bare `{ modelId }` (routers and Auto).
+	 * Empty/undefined ⇒ bare `{ modelId }` (routers and Auto) — the catalog fact
+	 * that drives bare-wire routing; do not name-match model ids here.
 	 */
 	sandParameterIds?: readonly string[];
 	/** When true, set `maxMode` on the wire. Default false. */
@@ -30,21 +31,6 @@ export type GrokbotRequestedModelOptions = {
 	/** Canonical wire model id when `modelId` was an alias. */
 	canonicalModelId?: string;
 };
-
-/** Sand router / Auto ids — always bare `{ modelId }`, never rewritten to grok-*. */
-const BARE_ALIASES = new Set([
-	"default",
-	"auto",
-	"auto-low",
-	"auto-medium",
-	"auto-high",
-	"auto-smart",
-	"sand-default",
-	"sand-cua",
-	"sand-automation",
-	"sand-mock",
-	"premium",
-]);
 
 /**
  * Map omp Effort / string to Grok Bot effort wire values.
@@ -67,10 +53,8 @@ export function resolveGrokbotRequestedModel(
 	const slug = raw.startsWith("grokbot/") ? raw.slice("grokbot/".length) : raw;
 	const wireId = options?.canonicalModelId?.trim() || slug;
 
-	if (BARE_ALIASES.has(slug) || BARE_ALIASES.has(wireId)) {
-		return { modelId: BARE_ALIASES.has(slug) ? slug : wireId };
-	}
-
+	// Bare-wire routing is a catalog fact: empty/absent `sandParameterIds` means
+	// routers/Auto omit parameters (and `sandMaxMode` alone controls maxMode).
 	const allowed = new Set(options?.sandParameterIds ?? []);
 	const parameters: GrokbotRequestedParameter[] = [];
 
@@ -100,9 +84,4 @@ export function resolveGrokbotRequestedModel(
 		requested.parameters = parameters;
 	}
 	return requested;
-}
-
-export function isGrokbotBareAlias(modelId: string): boolean {
-	const slug = modelId.startsWith("grokbot/") ? modelId.slice("grokbot/".length) : modelId;
-	return BARE_ALIASES.has(slug);
 }

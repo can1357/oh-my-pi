@@ -2612,6 +2612,68 @@ describe("ModelRegistry", () => {
 				else Bun.env.COPILOT_GITHUB_TOKEN = originalCopilotToken;
 			}
 		});
+
+		test("prefers models.yml apiKey over env when scoping startup caches", () => {
+			// Regression: env-first hashing selected a different cache row than
+			// AuthStorage.peekApiKey (config beats env), so live models stayed hidden.
+			const originalCopilotToken = Bun.env.COPILOT_GITHUB_TOKEN;
+			const ymlKey = "yml-copilot-wins-over-env";
+			const envKey = "env-copilot-should-lose";
+			Bun.env.COPILOT_GITHUB_TOKEN = envKey;
+			try {
+				const cachedModel = buildModel({
+					id: "discovered-yml-beats-env",
+					name: "Discovered YML Beats Env",
+					api: "openai-responses",
+					provider: "github-copilot",
+					baseUrl: "https://api.githubcopilot.com",
+					reasoning: false,
+					input: ["text"],
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+					contextWindow: 128_000,
+					maxTokens: 16_384,
+				});
+				writeRawModelsJson({
+					"github-copilot": { apiKey: ymlKey },
+				});
+				writeModelCache(
+					resolveModelCacheProviderId("github-copilot", { apiKey: ymlKey }),
+					Date.now(),
+					[cachedModel],
+					true,
+					"",
+					path.join(tempDir, "models.db"),
+				);
+				// Env-scoped row must not be the one startup reads.
+				writeModelCache(
+					resolveModelCacheProviderId("github-copilot", { apiKey: envKey }),
+					Date.now(),
+					[
+						buildModel({
+							id: "discovered-env-only-wrong-row",
+							name: "Env Only Wrong Row",
+							api: "openai-responses",
+							provider: "github-copilot",
+							baseUrl: "https://api.githubcopilot.com",
+							reasoning: false,
+							input: ["text"],
+							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+							contextWindow: 128_000,
+							maxTokens: 16_384,
+						}),
+					],
+					true,
+					"",
+					path.join(tempDir, "models.db"),
+				);
+				const registry = new ModelRegistry(authStorage, modelsJsonPath);
+				expect(registry.find("github-copilot", "discovered-yml-beats-env")).toBeDefined();
+				expect(registry.find("github-copilot", "discovered-env-only-wrong-row")).toBeUndefined();
+			} finally {
+				if (originalCopilotToken === undefined) delete Bun.env.COPILOT_GITHUB_TOKEN;
+				else Bun.env.COPILOT_GITHUB_TOKEN = originalCopilotToken;
+			}
+		});
 	});
 
 	describe("effort-tier variant collapsing", () => {

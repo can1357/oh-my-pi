@@ -934,12 +934,9 @@ export class ModelRegistry {
 	}
 
 	#resolveCredentialScopedStartupApiKey(providerId: string): string | undefined {
-		const fromEnv = getEnvApiKey(providerId);
-		if (fromEnv) return fromEnv;
-		const fromConfig = this.#customProviderApiKeys.get(providerId);
-		if (!fromConfig) return undefined;
-		const resolved = resolveConfigValue(fromConfig);
-		return resolved || undefined;
+		// Match AuthStorage.peekApiKey: runtime/config overrides beat env so the
+		// startup cache row matches the credential discovery will hash later.
+		return this.authStorage.peekApiKeyOverrides(providerId) ?? getEnvApiKey(providerId);
 	}
 
 	#resolveStartupModelCacheProviderId(providerId: string): string {
