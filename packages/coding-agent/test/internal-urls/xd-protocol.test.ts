@@ -6,9 +6,11 @@ import { XdProtocolHandler, xdevToolUrl } from "@oh-my-pi/pi-coding-agent/intern
 import type { Tool, ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import {
+	dispatchXdevTool,
 	resolveMountedXdevTool,
 	XDEV_DISCOVERY_LIMIT,
 	type XdevState,
+	xdevDocsAll,
 	xdevListing,
 } from "@oh-my-pi/pi-coding-agent/tools/xdev";
 
@@ -135,6 +137,41 @@ describe("xd:// discovery protocol", () => {
 		expect(resolvedName).toBe(name);
 		expect(resource.content).toBe(`docs:${name}`);
 		expect(resolveMountedXdevTool(state, route)).toBe(tool);
+	});
+
+	it("uses a bounded exact alias when a device name contains malformed UTF-16", async () => {
+		const name = `mcp__server_tool_${String.fromCharCode(0xd800)}`;
+		const tool = device(name, "Malformed-name capability");
+		const state = stateFor([tool]);
+		const route = xdevToolUrl(name);
+		const handler = new XdProtocolHandler();
+		const writes: Array<{ tool: string; mode: "help" | "execute" }> = [];
+		const context = {
+			xd: {
+				read: async (reference: string | null) => {
+					const resolved = reference ? resolveMountedXdevTool(state, reference) : undefined;
+					return resolved ? `docs:${resolved.name}` : "missing";
+				},
+				write: async (reference: string | null, content: string) => {
+					if (!reference) throw new Error("expected exact device reference");
+					const dispatched = await dispatchXdevTool(state, reference, content, "alias-call");
+					writes.push({ tool: dispatched.xdev.tool, mode: dispatched.xdev.mode });
+				},
+			},
+		};
+
+		expect(route).toMatch(/^xd:\/\/\?id=[0-9a-f]{64}$/);
+		expect(route).toHaveLength(73);
+		expect(xdevListing(state)).toContain(`${route} — Malformed-name capability`);
+		expect(xdevDocsAll(state, "catalog", [], true)).toContain(route);
+		expect((await handler.resolve(parseInternalUrl(route), context)).content).toBe(`docs:${name}`);
+
+		await handler.write(parseInternalUrl(route), "help", context);
+		await handler.write(parseInternalUrl(route), "{}", context);
+		expect(writes).toEqual([
+			{ tool: name, mode: "help" },
+			{ tool: name, mode: "execute" },
+		]);
 	});
 
 	it("rejects write queries without dispatching and preserves exact write dispatch", async () => {

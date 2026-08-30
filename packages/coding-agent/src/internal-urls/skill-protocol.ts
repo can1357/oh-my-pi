@@ -16,13 +16,14 @@ import { createHash } from "node:crypto";
 import type * as fsTypes from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { isEnoent, sanitizeText, truncate } from "@oh-my-pi/pi-utils";
+import { isEnoent, truncate } from "@oh-my-pi/pi-utils";
 import { resolveContainedPath } from "../discovery/contained-path";
 import { compareSkillOrder } from "../discovery/helpers";
 import { getActiveSkills, type Skill } from "../extensibility/skills";
 import { isMarkdownPath } from "../utils/lang-from-path";
 import { buildDirectoryResource } from "./filesystem-resource";
 import type { InternalResource, InternalUrl, ProtocolHandler, ResolveContext, UrlCompletion } from "./types";
+import { sanitizeDiscoveryLine } from "./xd-protocol";
 
 function getContentType(filePath: string): InternalResource["contentType"] {
 	if (isMarkdownPath(filePath)) return "text/markdown";
@@ -41,13 +42,6 @@ interface SkillCatalogEntry {
 	searchDescription: string;
 }
 
-function sanitizeOneLine(value: string): string {
-	return sanitizeText(value)
-		.replace(/[\p{Cc}\p{Cf}]/gu, " ")
-		.replace(/\s+/gu, " ")
-		.trim();
-}
-
 function skillAliasId(name: string): string {
 	return createHash("sha256").update(Buffer.from(name, "utf16le")).digest("hex");
 }
@@ -64,11 +58,11 @@ function skillUrl(name: string): string {
 }
 
 function buildSkillCatalog(url: InternalUrl, skills: readonly Skill[], rawQuery: string | null): InternalResource {
-	const query = sanitizeOneLine(rawQuery ?? "");
+	const query = sanitizeDiscoveryLine(rawQuery ?? "");
 	const normalizedQuery = query.toLowerCase();
 	const entries: SkillCatalogEntry[] = skills
 		.map(skill => {
-			const description = sanitizeOneLine(skill.description);
+			const description = sanitizeDiscoveryLine(skill.description);
 			return {
 				skill,
 				route: skillUrl(skill.name),
@@ -185,7 +179,7 @@ export class SkillProtocolHandler implements ProtocolHandler {
 
 		if (!skill) {
 			const displayName = skillName
-				? truncate(sanitizeOneLine(skillName), SKILL_QUERY_DISPLAY_LIMIT)
+				? truncate(sanitizeDiscoveryLine(skillName), SKILL_QUERY_DISPLAY_LIMIT)
 				: `alias ${aliasIds[0]}`;
 			throw new Error(`Unknown skill: ${displayName}\nSearch active skills with skill://?q=<term>`);
 		}

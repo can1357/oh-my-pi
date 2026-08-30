@@ -1,7 +1,13 @@
 import { describe, expect, it } from "bun:test";
 import { Tokenizer } from "@oh-my-pi/pi-agent-core";
 import {
+	buildNativeToolSchemaFragments,
+	computeContextBreakdown,
+	computeNonMessageBreakdown,
+} from "@oh-my-pi/pi-coding-agent/modes/utils/context-usage";
+import {
 	buildStaticContextReport,
+	combineStaticContextSources,
 	formatStaticContextReport,
 	reconcileStaticPromptContextSources,
 	type StaticContextSources,
@@ -76,6 +82,54 @@ describe("buildStaticContextReport", () => {
 		});
 		expect(report.components.reduce((sum, component) => sum + component.bytes, 0)).toBe(report.total.bytes);
 		expect(report.components.reduce((sum, component) => sum + component.tokens, 0)).toBe(report.total.tokens);
+	});
+
+	it("matches /context tool accounting to the model-aware static custom-tool projection", () => {
+		const model = { api: "openai-responses", applyPatchToolType: "freeform" } as never;
+		const tools = [
+			{
+				name: "edit",
+				customWireName: "apply_patch",
+				description: "Apply a patch",
+				parameters: {
+					type: "object",
+					properties: { input: { type: "string" } },
+					required: ["input"],
+				},
+				customFormat: { syntax: "lark", definition: 'start: "PATCH" LF\nLF: /\\n/' },
+			},
+		];
+		const session = {
+			model: undefined as unknown,
+			systemPrompt: [],
+			messages: [],
+			agent: { tokenizer, state: { tools } },
+			settings: {
+				get: () => "full",
+				getGroup: () => ({ enabled: false, strategy: "off" }),
+			},
+		};
+		computeNonMessageBreakdown(session as never, tokenizer);
+		session.model = model;
+
+		const modelAwareSchemas = buildNativeToolSchemaFragments(tools as never, model);
+		const staticSources = combineStaticContextSources(
+			{
+				completeSystemPrompt: [],
+				renderedSystemTemplate: [],
+				projectContextBlocks: [],
+				skillCatalog: [],
+			},
+			modelAwareSchemas,
+		);
+		const staticToolTokens = buildStaticContextReport({ sources: staticSources, tokenizer }).components[1].tokens;
+		const contextToolTokens = computeContextBreakdown(session as never).categories.find(
+			category => category.id === "systemTools",
+		)?.tokens;
+
+		expect(modelAwareSchemas).toHaveLength(1);
+		expect(modelAwareSchemas[0]).toContain('"type":"custom"');
+		expect(contextToolTokens).toBe(staticToolTokens);
 	});
 
 	it("assigns provider-boundary byte and token residuals to the rendered template", () => {

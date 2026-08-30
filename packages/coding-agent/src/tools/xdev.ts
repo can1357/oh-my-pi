@@ -33,10 +33,17 @@
 import type { AgentToolContext, AgentToolResult, AgentToolUpdateCallback, ToolLoadMode } from "@oh-my-pi/pi-agent-core";
 import { type Tool as AiTool, jsonSchemaToTypeScript, toolWireSchema, validateToolArguments } from "@oh-my-pi/pi-ai";
 import { type Component, Container, Text } from "@oh-my-pi/pi-tui";
-import { parseStreamingJson, sanitizeText, truncate } from "@oh-my-pi/pi-utils";
+import { parseStreamingJson, truncate } from "@oh-my-pi/pi-utils";
 import type { ContextProfile } from "../config/settings";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
-import { parseXdUrl, XD_URL_PREFIX, xdevToolUrl } from "../internal-urls/xd-protocol";
+import {
+	parseXdUrl,
+	sanitizeDiscoveryLine,
+	XD_URL_PREFIX,
+	xdevAliasId,
+	xdevAliasIdFromReference,
+	xdevToolUrl,
+} from "../internal-urls/xd-protocol";
 import { parseMCPToolName } from "../mcp/tool-bridge";
 import type { Theme } from "../modes/theme/theme";
 import { truncateHeadBytes } from "../session/streaming-output";
@@ -77,10 +84,11 @@ export type XdevDocsMode = "inline" | "builtins" | "catalog";
 
 /**
  * These tools have harness integrations keyed to their native tool name.
- * Mounting them preserves execution but loses todo tracking or interactive
- * question handling, so every profile keeps them native when enabled.
+ * Mounting them preserves execution but loses todo tracking, interactive
+ * question handling, or provider hard tool choices, so every profile keeps
+ * them native when enabled.
  */
-const XDEV_INTEGRATED_TOP_LEVEL: Record<string, true> = { todo: true, ask: true };
+const XDEV_INTEGRATED_TOP_LEVEL: Record<string, true> = { todo: true, ask: true, think: true };
 
 const BALANCED_DIRECT_TOOLS: Record<string, true> = {
 	read: true,
@@ -330,12 +338,21 @@ export const XDEV_DISCOVERY_LIMIT = 50;
 /** Character cap for descriptions returned by xd catalog discovery. */
 export const XDEV_DISCOVERY_DESCRIPTION_LIMIT = 200;
 const XDEV_DISCOVERY_QUERY_DISPLAY_LIMIT = 100;
-const XDEV_DISCOVERY_CONTROL_CHARS = /[\p{Cc}\p{Cf}]/gu;
 
 /** Resolve any enabled tool through the canonical session map. */
 export function resolveXdevTool(state: XdevState, name: string): Tool | undefined {
-	if (!state.mountedNames.has(name) && !state.isActive(name)) return undefined;
-	return state.tools.get(name);
+	if (state.mountedNames.has(name) || state.isActive(name)) return state.tools.get(name);
+	const aliasId = xdevAliasIdFromReference(name);
+	if (!aliasId) return undefined;
+	for (const tool of state.tools.values()) {
+		if (!state.mountedNames.has(tool.name) && !state.isActive(tool.name)) continue;
+		try {
+			encodeURIComponent(tool.name);
+		} catch {
+			if (xdevAliasId(tool.name) === aliasId) return tool;
+		}
+	}
+	return undefined;
 }
 
 /**
@@ -352,8 +369,8 @@ function stripXdevPrefix(name: string): string {
 
 /** Resolve a mounted tool for top-level fallback execution; accepts `xd://<tool>` as the name. */
 export function resolveMountedXdevTool(state: XdevState, name: string): Tool | undefined {
-	const canonical = stripXdevPrefix(name);
-	return state.mountedNames.has(canonical) ? state.tools.get(canonical) : undefined;
+	const tool = resolveXdevTool(state, stripXdevPrefix(name));
+	return tool && state.mountedNames.has(tool.name) ? tool : undefined;
 }
 
 /** Resolve a mounted tool with its execution-only permission decorator. */
@@ -385,11 +402,7 @@ export function xdevEntries(state: XdevState): Array<{ name: string; summary: st
 }
 
 function discoveryCatalogSummary(tool: Tool): string {
-	const sanitized = sanitizeText(toolSummary(tool))
-		.replace(XDEV_DISCOVERY_CONTROL_CHARS, " ")
-		.replace(/\s+/gu, " ")
-		.trim();
-	return truncate(sanitized, XDEV_DISCOVERY_DESCRIPTION_LIMIT);
+	return truncate(sanitizeDiscoveryLine(toolSummary(tool)), XDEV_DISCOVERY_DESCRIPTION_LIMIT);
 }
 
 /** Bounded, deterministic `read xd://` catalog and `read xd://?q=<term>` search. */
@@ -411,10 +424,7 @@ export function xdevListing(state: XdevState, query?: string): string {
 			? [`Mounted tool devices (${shown.length} of ${matches.length})`, `Search with ${XD_URL_PREFIX}?q=<term>.`]
 			: [
 					`Mounted tool devices matching "${truncate(
-						sanitizeText(query ?? "")
-							.replace(XDEV_DISCOVERY_CONTROL_CHARS, " ")
-							.replace(/\s+/gu, " ")
-							.trim(),
+						sanitizeDiscoveryLine(query ?? ""),
 						XDEV_DISCOVERY_QUERY_DISPLAY_LIMIT,
 					)}" (${shown.length} of ${matches.length})`,
 				];
@@ -552,11 +562,15 @@ function renderOverflowCatalog(
 	for (const [serverName, names] of byServer) {
 		// One prefix + a brace list instead of the full mounted name per tool:
 		// with a 21-tool server that is ~420 fewer characters on every request.
+		const routes = names.map(xdevToolUrl);
 		const prefix = commonPrefix(names);
-		const body =
-			names.length > 1 && prefix.length > XD_MCP_PREFIX_MIN
-				? `${XD_URL_PREFIX}${prefix}{${names.map(name => name.slice(prefix.length)).join("|")}}`
-				: names.map(name => `${XD_URL_PREFIX}${name}`).join(", ");
+		const canFactor =
+			names.length > 1 &&
+			prefix.length > XD_MCP_PREFIX_MIN &&
+			routes.every((route, index) => route === `${XD_URL_PREFIX}${names[index]}`);
+		const body = canFactor
+			? `${XD_URL_PREFIX}${prefix}{${names.map(name => name.slice(prefix.length)).join("|")}}`
+			: routes.join(", ");
 		rows.push(`- MCP server \`${serverName}\` (${names.length}): ${body}`);
 	}
 	return rows;
@@ -620,11 +634,12 @@ export async function dispatchXdevTool(
 	let xdev: XdevDispatch = { tool: name, mode: "execute" };
 	try {
 		const canonical = resolveRequiredXdevTool(state, name);
+		xdev = { tool: canonical.name, mode: "execute" };
 
 		if (HELP_CONTENT_RE.test(content)) {
 			return {
 				result: { content: [{ type: "text", text: renderDocs(canonical, "#", undefined, true) }] },
-				xdev: { tool: name, mode: "help" },
+				xdev: { tool: canonical.name, mode: "help" },
 			};
 		}
 

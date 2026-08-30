@@ -12,8 +12,8 @@ describe("context-profile tool presentation", () => {
 		expect(isMountableUnderXdev({ name: "lsp", loadMode: "discoverable" }, "full")).toBe(true);
 	});
 
-	it("keeps editing, search, and interaction-integrated tools native under balanced", () => {
-		for (const name of ["read", "write", "bash", "edit", "grep", "glob", "todo", "ask"]) {
+	it("keeps editing, search, provider thinking, and interaction-integrated tools native under balanced", () => {
+		for (const name of ["read", "write", "bash", "edit", "grep", "glob", "think", "todo", "ask"]) {
 			expect(isMountableUnderXdev({ name, loadMode: "essential" }, "balanced")).toBe(false);
 		}
 		for (const name of ["eval", "task", "web_search", "mcp__server_tool"]) {
@@ -21,8 +21,8 @@ describe("context-profile tool presentation", () => {
 		}
 	});
 
-	it("keeps transport and interaction-integrated tools native under aggressive", () => {
-		for (const name of ["read", "write", "bash", "todo", "ask"]) {
+	it("keeps transport, provider thinking, and interaction-integrated tools native under aggressive", () => {
+		for (const name of ["read", "write", "bash", "think", "todo", "ask"]) {
 			expect(isMountableUnderXdev({ name, loadMode: "essential" }, "aggressive")).toBe(false);
 		}
 		for (const name of ["edit", "grep", "glob", "eval", "task"]) {

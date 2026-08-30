@@ -98,6 +98,7 @@ export function computeCompactionBoundaries(
 
 /** Stable inputs used to cache non-message token estimates. */
 export interface NonMessageTokenSource {
+	readonly model?: Model;
 	readonly systemPrompt?: string[];
 	readonly agent?: {
 		readonly state?: {
@@ -179,8 +180,12 @@ export function buildNativeToolSchemaFragments(tools: ReadonlyArray<ToolSchemaSo
 	return fragments;
 }
 
-export function estimateToolSchemaTokens(tools: ReadonlyArray<ToolSchemaSource>, tokenizer: Tokenizer): number {
-	return tokenizer.countTokens(buildNativeToolSchemaFragments(tools));
+export function estimateToolSchemaTokens(
+	tools: ReadonlyArray<ToolSchemaSource>,
+	tokenizer: Tokenizer,
+	model?: Model,
+): number {
+	return tokenizer.countTokens(buildNativeToolSchemaFragments(tools, model));
 }
 
 /**
@@ -199,15 +204,17 @@ export function estimateToolSchemaTokens(tools: ReadonlyArray<ToolSchemaSource>,
 // once per turn via setSystemPrompt/setTools — but the per-turn compaction and
 // threshold paths call these helpers several times: getContextBreakdown calls
 // both, and #estimateStoredContextTokens adds a third. Memoize on the identity
-// of the three input arrays so the expensive parts (system-prompt tokenization
-// and the per-tool JSON.stringify(toolWireSchema) inside estimateToolSchemaTokens)
-// run at most once per input change rather than per call. The identity keys are
-// the same stable references the StatusLineComponent cache already trusts
-// (setSystemPrompt/setTools replace the array reference rather than mutating it).
+// of the three input arrays, tokenizer, model, and profile so the expensive
+// parts (system-prompt tokenization and the per-tool JSON.stringify(toolWireSchema)
+// inside estimateToolSchemaTokens) run at most once per input change. The array
+// identity keys are the same stable references the StatusLineComponent cache
+// already trusts (setSystemPrompt/setTools replace the reference rather than
+// mutating it).
 interface NonMessageTokenCache {
 	systemPromptRef: readonly string[];
 	toolsRef: ReadonlyArray<ToolSchemaSource>;
 	skillsRef: readonly Skill[];
+	modelRef: Model | undefined;
 	// The Agent swaps its Tokenizer instance when the model's encoding changes,
 	// so instance identity doubles as the encoding key.
 	tokenizerRef: Tokenizer;
@@ -235,6 +242,7 @@ function nonMessageTokenCacheEntry(session: NonMessageTokenSource, tokenizer: To
 	const toolsRef = session.agent?.state?.tools ?? EMPTY_TOOLS;
 	const skillsRef = session.skills ?? EMPTY_SKILLS;
 	const contextProfile = session.settings?.get("contextProfile") ?? "full";
+	const modelRef = session.model;
 	let entry = cachedSession[NON_MESSAGE_TOKEN_CACHE];
 	if (
 		entry &&
@@ -242,6 +250,7 @@ function nonMessageTokenCacheEntry(session: NonMessageTokenSource, tokenizer: To
 		entry.toolsRef === toolsRef &&
 		entry.skillsRef === skillsRef &&
 		entry.tokenizerRef === tokenizer &&
+		entry.modelRef === modelRef &&
 		entry.contextProfile === contextProfile
 	) {
 		return entry;
@@ -251,6 +260,7 @@ function nonMessageTokenCacheEntry(session: NonMessageTokenSource, tokenizer: To
 		toolsRef,
 		skillsRef,
 		tokenizerRef: tokenizer,
+		modelRef,
 		contextProfile,
 		tokens: undefined,
 		breakdown: undefined,
@@ -266,7 +276,7 @@ export function computeNonMessageTokens(session: NonMessageTokenSource, tokenize
 	const tools = session.agent?.state?.tools ?? EMPTY_TOOLS;
 	const tokens =
 		tokenizer.countTokens(Array.from(systemPromptParts, part => part ?? "")) +
-		estimateToolSchemaTokens(tools, tokenizer);
+		estimateToolSchemaTokens(tools, tokenizer, session.model);
 	entry.tokens = tokens;
 	return tokens;
 }
@@ -294,7 +304,7 @@ export function computeNonMessageBreakdown(
 		renderedSkills(session.skills ?? EMPTY_SKILLS, tools, contextProfile),
 		tokenizer,
 	);
-	const toolsTokens = estimateToolSchemaTokens(tools, tokenizer);
+	const toolsTokens = estimateToolSchemaTokens(tools, tokenizer, session.model);
 	const systemPromptParts = session.systemPrompt ?? EMPTY_STRING_PARTS;
 	const systemContextTokens = tokenizer.countTokens(Array.from(systemPromptParts.slice(1), part => part ?? ""));
 	const systemPromptTokens = Math.max(0, tokenizer.countTokens(systemPromptParts[0] ?? "") - skillsTokens);
