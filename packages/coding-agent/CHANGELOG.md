@@ -9,10 +9,12 @@
 - Devin model selectors now accept the native CLI's short aliases (`devin/opus`, `devin/swe`), dotted upstream spellings (`devin/gemini-3.7-flash`), and raw effort-route wire uids for dynamically collapsed families ([#8590](https://github.com/can1357/oh-my-pi/pull/8590) by [@will-bogusz](https://github.com/will-bogusz)).
 - Added provider-supplied model metadata to the `/models` detail line: `new`, `beta`, and `recommended` badges beside the model name, and the upstream description after the context, cost, and perf facts ([#8590](https://github.com/can1357/oh-my-pi/pull/8590) by [@will-bogusz](https://github.com/will-bogusz)).
 - Standalone `CLAUDE.md` files in the project root (and ancestor directories) are now loaded as context, mirroring `AGENTS.md` discovery; config-directory context files still take precedence per scope.
+- Added `contextProfile` with `full`, `balanced`, and `aggressive` static-context policies. Reduced profiles keep enabled skills and tools available through bounded `skill://` and `xd://` discovery.
 
 ### Changed
 
 - Disabled `hashline` edit mode for Kimi, Mimo, DeepSeek Flash, and Stepfun models for stability
+- Reduced mounted MCP route instructions and catalog rows to bounded server-level summaries. Exact tool documentation remains available through `read xd://<tool>`.
 
 ### Fixed
 
@@ -135,13 +137,9 @@
 - Fixed the git TUI sidebar jumping back to the top of the file list after staging or unstaging a file; selection now stays on the nearest remaining row
 - Fixed the `aarch64-linux` `nix build` output segfaulting in the dynamic loader before startup by repointing the stale `DT_VERDEF` that `patchelf` leaves behind when it grows `.dynamic`, and surfaced smoke-test signal deaths in the build log instead of masking them ([#9881](https://github.com/can1357/oh-my-pi/issues/9881)).
 - Added custom RPC launcher builders so embedded clients can transport omp RPC through SSH and remote process managers.
-- Added `tools.xdevForceMount`, a glob list of tool names to mount under `xd://` even when a tool declares itself essential or is pinned top-level, so their schemas stay out of every request and `read xd://<tool>` fetches them on demand. `read` and `write` still cannot be demoted: they carry the `xd://` transport. Off by default; intended for local models where tool schemas can outweigh the rest of the prompt.
-- Added `promptProfile`, selecting which bundled instruction template renders. `compact` drops the examples, the internal-URL catalog, and the long workflow and delegation prose for a short contract, and keeps every generated surface: skills, rules, context files, tool inventory, and the `xd://` protocol. A custom `SYSTEM.md` still replaces the template outright and ignores the profile.
 
 ### Changed
 
-- Reduced the MCP route block in the system prompt to a single naming rule per server when the mounted names are derivable from the server and tool names, instead of one line per mounted tool. Servers with a name the rule cannot derive still list their routes.
-- Shortened the `xd://` device catalog under `tools.xdevDocs: catalog`: MCP tools group by server, and every catalog summary is capped at its first clause. Full docs and schemas remain available through `read xd://<tool>`.
 
 ## [18.0.7] - 2026-08-26
 

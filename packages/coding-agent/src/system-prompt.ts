@@ -20,7 +20,7 @@ import {
 import { contextFileCapability } from "./capability/context-file";
 import { systemPromptCapability } from "./capability/system-prompt";
 import { findConfigFile } from "./config";
-import type { Personality, PromptProfile, SkillsSettings } from "./config/settings";
+import type { ContextProfile, Personality, SkillsSettings } from "./config/settings";
 import { type ContextFile, loadCapability, type SystemPrompt as SystemPromptFile } from "./discovery";
 import { expandAtImports } from "./discovery/at-imports";
 import { loadSkills, type Skill } from "./extensibility/skills";
@@ -28,11 +28,14 @@ import { hasObsidian } from "./internal-urls/vault-protocol";
 import { XD_URL_PREFIX } from "./internal-urls/xd-protocol";
 import activeRepoContextTemplate from "./prompts/system/active-repo-context.md" with { type: "text" };
 import computerSafetyPrompt from "./prompts/system/computer-safety.md" with { type: "text" };
+import contextProfilePresentationTemplate from "./prompts/system/context-profile-presentation.md" with { type: "text" };
+import customSkillCatalogTemplate from "./prompts/system/custom-skill-catalog.md" with { type: "text" };
 import customSystemPromptTemplate from "./prompts/system/custom-system-prompt.md" with { type: "text" };
 import defaultPersonality from "./prompts/system/personalities/default.md" with { type: "text" };
 import friendlyPersonality from "./prompts/system/personalities/friendly.md" with { type: "text" };
 import pragmaticPersonality from "./prompts/system/personalities/pragmatic.md" with { type: "text" };
 import projectPromptTemplate from "./prompts/system/project-prompt.md" with { type: "text" };
+import skillCatalogTemplate from "./prompts/system/skill-catalog.md" with { type: "text" };
 import systemPromptTemplate from "./prompts/system/system-prompt.md" with { type: "text" };
 import systemPromptTemplateCompact from "./prompts/system/system-prompt-compact.md" with { type: "text" };
 import { normalizeConcurrencyLimit } from "./task/parallel";
@@ -664,15 +667,22 @@ export interface BuildSystemPromptOptions {
 	/** Whether active `write` is restricted to xd:// dispatch and the plan artifact sandbox. */
 	writeTransportOnly?: boolean;
 	/**
-	 * Which bundled instruction template to render. "compact" trades the
-	 * examples, the internal-URL catalog, and the long workflow/delegation prose
-	 * for a short contract, keeping every generated surface (skills, rules,
-	 * context files, tool inventory, `xd://` protocol) intact. For local models
-	 * where the prompt competes with the conversation for a small window.
-	 * Ignored when a custom `SYSTEM.md` is active, which replaces the template
-	 * outright. Default: "full".
+	 * Integrated static-context policy. "full" preserves the complete bundled
+	 * prompt, rendered skill inventory, and default tool presentation. The
+	 * smaller profiles use the compact bundled template, omit the eager skill
+	 * listing in favor of bounded `skill://` discovery, and expect non-core
+	 * tools to be mounted under `xd://` by the session presentation layer.
+	 * A custom `SYSTEM.md` still replaces the bundled template, while the
+	 * presentation policy remains active. Default: "full".
 	 */
-	promptProfile?: PromptProfile;
+	contextProfile?: ContextProfile;
+}
+
+export interface StaticPromptContextSources {
+	readonly completeSystemPrompt: readonly string[];
+	readonly renderedSystemTemplate: readonly string[];
+	readonly projectContextBlocks: readonly string[];
+	readonly skillCatalog: readonly string[];
 }
 
 /** Result of building provider-facing system prompt messages. */
@@ -687,12 +697,22 @@ export interface BuildSystemPromptResult {
 	 * a catalog the prompt already carries (issue #7139).
 	 */
 	xdevCatalogNames?: readonly string[];
+	/** Exact static prompt fragments for `/context` budget reporting. */
+	staticContext: StaticPromptContextSources;
 }
 
 /** Build the system prompt with tools, guidelines, and context */
 export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}): Promise<BuildSystemPromptResult> {
 	if ($env.NULL_PROMPT === "true") {
-		return { systemPrompt: [] };
+		return {
+			systemPrompt: [],
+			staticContext: {
+				completeSystemPrompt: [],
+				renderedSystemTemplate: [],
+				projectContextBlocks: [],
+				skillCatalog: [],
+			},
+		};
 	}
 
 	const {
@@ -732,7 +752,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		xdevDocs = "",
 		autoQaEnabled = false,
 		writeTransportOnly = false,
-		promptProfile = "full",
+		contextProfile = "full",
 		activeRepoContext: providedActiveRepoContext,
 	} = options;
 	const inlineToolDescriptors = providedInlineToolDescriptors ?? false;
@@ -934,11 +954,11 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 	// the access path. The Tool Inventory list stays limited to real defs.
 	for (const mounted of xdevTools) {
 		if (toolPromptNames.has(mounted.name)) continue;
-		// The compact profile names the device path outright: a 27B local model
-		// given "MUST use `grep`" for a mounted grep called `grep` by name five
-		// times in one benchmark run. `full` keeps the bare name so its output
-		// stays byte-identical.
-		toolPromptNames.set(mounted.name, promptProfile === "compact" ? `${XD_URL_PREFIX}${mounted.name}` : mounted.name);
+		// Reduced context profiles name the device path outright: a 27B local
+		// model given "MUST use `grep`" for a mounted grep called `grep` by name
+		// repeatedly tried a nonexistent top-level call. `full` keeps the bare
+		// name so its output stays byte-identical.
+		toolPromptNames.set(mounted.name, contextProfile === "full" ? mounted.name : `${XD_URL_PREFIX}${mounted.name}`);
 	}
 	const toolRefs = Object.fromEntries(toolPromptNames.entries());
 	const xdevToolNames = new Set(xdevTools.map(mounted => mounted.name));
@@ -973,9 +993,11 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 
 	// Filter skills for the rendered system prompt:
 	// - require the `read` tool so the model can actually fetch skill content;
-	// - drop skills with frontmatter `hide: true` (still loadable via skill:// and /skill:<name>).
+	// - drop skills with frontmatter `hide: true`;
+	// - reduced profiles use bounded `skill://` discovery instead of eagerly
+	//   paying for every installed skill row on every request.
 	const hasRead = toolNames.includes("read");
-	const filteredSkills = hasRead ? skills.filter(skill => skill.hide !== true) : [];
+	const filteredSkills = contextProfile === "full" && hasRead ? skills.filter(skill => skill.hide !== true) : [];
 
 	const effectiveSystemPromptCustomization = dedupePromptSource(systemPromptCustomization, [
 		resolvedCustomPrompt,
@@ -1033,33 +1055,62 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		autoQaEnabled,
 		writeTransportOnly,
 	};
-	// A custom SYSTEM.md replaces the instruction template outright, so the
-	// profile only chooses between the two bundled ones.
+	// A custom SYSTEM.md replaces the instruction template outright. Context
+	// profiles still govern tool and skill presentation around that template.
 	const baseTemplate = resolvedCustomPrompt
 		? customSystemPromptTemplate
-		: promptProfile === "compact"
-			? systemPromptTemplateCompact
-			: systemPromptTemplate;
+		: contextProfile === "full"
+			? systemPromptTemplate
+			: systemPromptTemplateCompact;
 	const rendered = prompt.render(baseTemplate, data);
+	const renderedSkillCatalog =
+		filteredSkills.length === 0
+			? ""
+			: prompt
+					.render(resolvedCustomPrompt ? customSkillCatalogTemplate : skillCatalogTemplate, {
+						skills: filteredSkills,
+					})
+					.trim();
+	const splitSkillCatalog = renderedSkillCatalog.length > 0 && rendered.includes(renderedSkillCatalog);
 	const systemPrompt = [rendered];
+	const renderedSystemTemplate = [splitSkillCatalog ? rendered.replace(renderedSkillCatalog, "") : rendered];
+	if (resolvedCustomPrompt && contextProfile !== "full") {
+		const presentation = prompt.render(contextProfilePresentationTemplate, data).trim();
+		systemPrompt.push(presentation);
+		renderedSystemTemplate.push(presentation);
+	}
 	if (toolNames.includes("computer")) {
-		systemPrompt.push(computerSafetyPrompt.trim());
+		const safetyPrompt = computerSafetyPrompt.trim();
+		systemPrompt.push(safetyPrompt);
+		renderedSystemTemplate.push(safetyPrompt);
 	}
 	// Custom prompt templates already render context files and append text; the
 	// project footer still carries environment, cwd, workspace, and dir-context.
+	const projectContextBlocks: string[] = [];
 	const projectPrompt = prompt
 		.render(projectPromptTemplate, resolvedCustomPrompt ? { ...data, contextFiles: [], appendPrompt: "" } : data)
 		.trim();
 	if (projectPrompt) {
 		systemPrompt.push(projectPrompt);
+		projectContextBlocks.push(projectPrompt);
 	}
 	if (activeRepoContextPrompt) {
 		systemPrompt.push(activeRepoContextPrompt);
+		projectContextBlocks.push(activeRepoContextPrompt);
 	}
 
-	// The xd:// protocol section (with its device catalog) is only rendered by the
-	// default template; a resolved custom prompt uses a template that omits it.
 	const xdevCatalogNames =
-		!resolvedCustomPrompt && xdevTools.length > 0 ? xdevTools.map(mounted => mounted.name) : undefined;
-	return { systemPrompt, xdevCatalogNames };
+		xdevTools.length > 0 && (!resolvedCustomPrompt || contextProfile !== "full")
+			? xdevTools.map(mounted => mounted.name)
+			: undefined;
+	return {
+		systemPrompt,
+		xdevCatalogNames,
+		staticContext: {
+			completeSystemPrompt: systemPrompt,
+			renderedSystemTemplate,
+			projectContextBlocks,
+			skillCatalog: splitSkillCatalog ? [renderedSkillCatalog] : [],
+		},
+	};
 }

@@ -1,9 +1,8 @@
 /**
- * `promptProfile: "compact"` swaps the bundled instruction template for a short
- * one. It must keep every generated surface — skills, rules, context files,
- * tool inventory, the `xd://` protocol — because those are what makes the
- * prompt dynamic; only the fixed prose gets shorter. A custom `SYSTEM.md`
- * replaces the template outright and therefore ignores the profile.
+ * Reduced context profiles swap the bundled instruction template for a short
+ * one and replace the eager skill inventory with bounded `skill://` discovery.
+ * Full remains the compatibility baseline: making the setting explicit must
+ * produce the exact provider-facing bytes emitted by the default.
  */
 import { describe, expect, it } from "bun:test";
 import { buildSystemPrompt } from "@oh-my-pi/pi-coding-agent/system-prompt";
@@ -13,8 +12,8 @@ const EMPTY_TREE = { rootPath: "", rendered: "", truncated: false, totalLines: 0
 // Lines unique to the default instruction template.
 const FULL_ONLY = ["# Engineering", "# 2. Research Before Editing", "# Exploration", "<completeness>"];
 
-async function render(options: Parameters<typeof buildSystemPrompt>[0] = {}): Promise<string> {
-	const { systemPrompt } = await buildSystemPrompt({
+async function build(options: Parameters<typeof buildSystemPrompt>[0] = {}) {
+	return await buildSystemPrompt({
 		cwd: "/tmp",
 		contextFiles: [],
 		skills: [],
@@ -24,31 +23,42 @@ async function render(options: Parameters<typeof buildSystemPrompt>[0] = {}): Pr
 		workspaceTree: { ...EMPTY_TREE, rootPath: "/tmp" },
 		...options,
 	});
-	return systemPrompt.join("\n\n");
 }
 
-describe("promptProfile", () => {
-	it("defaults to the full template", async () => {
+async function render(options: Parameters<typeof buildSystemPrompt>[0] = {}): Promise<string> {
+	return (await build(options)).systemPrompt.join("\n\n");
+}
+
+describe("contextProfile", () => {
+	it("keeps explicit full byte-identical to the default", async () => {
+		expect(await render({ contextProfile: "full" })).toBe(await render());
+		const custom = { resolvedCustomPrompt: "Custom system prompt." };
+		expect(await render({ ...custom, contextProfile: "full" })).toBe(await render(custom));
+	});
+
+	it("uses the complete template by default", async () => {
 		const rendered = await render();
 		for (const marker of FULL_ONLY) expect(rendered).toContain(marker);
 	});
 
-	it("drops the long prose under the compact profile", async () => {
-		const rendered = await render({ promptProfile: "compact" });
-		for (const marker of FULL_ONLY) expect(rendered).not.toContain(marker);
-		expect(rendered).toContain("§ Critical");
-		expect(rendered).toContain("§ Delivery");
+	it("drops the long prose under reduced profiles", async () => {
+		for (const contextProfile of ["balanced", "aggressive"] as const) {
+			const rendered = await render({ contextProfile });
+			for (const marker of FULL_ONLY) expect(rendered).not.toContain(marker);
+			expect(rendered).toContain("§ Critical");
+			expect(rendered).toContain("§ Delivery");
+		}
 	});
 
 	it("is materially shorter than the full template on the same inputs", async () => {
-		const full = await render({ promptProfile: "full" });
-		const compact = await render({ promptProfile: "compact" });
-		expect(compact.length).toBeLessThan(full.length * 0.75);
+		const full = await render({ contextProfile: "full" });
+		const balanced = await render({ contextProfile: "balanced" });
+		expect(balanced.length).toBeLessThan(full.length * 0.75);
 	});
 
-	it("keeps skills, rules, and the xd:// protocol section", async () => {
+	it("keeps generated rules and xd:// while moving skills to discovery", async () => {
 		const rendered = await render({
-			promptProfile: "compact",
+			contextProfile: "balanced",
 			skills: [
 				{
 					name: "deploy",
@@ -61,15 +71,45 @@ describe("promptProfile", () => {
 			rules: [{ name: "api", description: "API conventions", path: "/tmp/api.md", globs: ["src/api/**"] }],
 			xdevTools: [{ name: "lsp", summary: "Language server" }],
 		} as Parameters<typeof buildSystemPrompt>[0]);
-		expect(rendered).toContain("deploy: How to ship");
+		expect(rendered).not.toContain("deploy: How to ship");
 		expect(rendered).toContain("api");
 		expect(rendered).toContain("xd://");
 	});
 
-	it("ignores the profile when a custom system prompt is active", async () => {
+	it("keeps exact static source ownership for reporting", async () => {
+		const result = await build({
+			contextProfile: "full",
+			skills: [
+				{
+					name: "deploy",
+					description: "How to ship",
+					filePath: "/tmp/deploy/SKILL.md",
+					baseDir: "/tmp",
+					source: "native",
+				},
+			],
+		});
+		const staticContext = result.staticContext;
+
+		expect(staticContext.completeSystemPrompt).toEqual(result.systemPrompt);
+		expect(staticContext.skillCatalog.join("\n\n")).toContain("deploy: How to ship");
+		expect(staticContext.renderedSystemTemplate.join("\n\n")).not.toContain("deploy: How to ship");
+		expect(staticContext.projectContextBlocks.join("\n\n")).toContain("<workstation>");
+	});
+
+	it("keeps presentation policy when a custom system prompt is active", async () => {
 		const marker = "You are a code reviewer and never edit files.";
-		const rendered = await render({ promptProfile: "compact", resolvedCustomPrompt: marker });
+		const result = await build({
+			contextProfile: "balanced",
+			resolvedCustomPrompt: marker,
+			xdevTools: [{ name: "lsp", summary: "Language server" }],
+		});
+		const rendered = result.systemPrompt.join("\n\n");
+
 		expect(rendered).toContain(marker);
+		expect(rendered).toContain("skill://?q=<term>");
+		expect(rendered).toContain("xd://<tool>");
+		expect(result.xdevCatalogNames).toEqual(["lsp"]);
 		for (const full of FULL_ONLY) expect(rendered).not.toContain(full);
 	});
 });

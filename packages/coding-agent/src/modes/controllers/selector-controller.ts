@@ -513,6 +513,11 @@ export class SelectorController {
 					this.ctx.showError(`Failed to apply xd:// prompt docs setting: ${err}`);
 				});
 				break;
+			case "contextProfile":
+				void this.ctx.session.applyContextProfileChange().catch(err => {
+					this.ctx.showError(`Failed to apply context profile: ${err}`);
+				});
+				break;
 			case "memory.backend":
 				void this.ctx.session.applyMemoryBackend().catch(err => {
 					this.ctx.showError(`Failed to apply memory backend: ${err}`);

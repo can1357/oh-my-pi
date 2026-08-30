@@ -51,7 +51,7 @@ The separate project/environment footer remains and carries workstation data, de
 
 The current date and working directory no longer live in the footer: they are emitted as a `<system-reminder>` block on the first user turn of each provider request (`date-cwd-reminder.md`). Keeping per-request bytes out of the system prompt lets open-weight providers (DeepSeek, Qwen, GLM, …) that render tool schemas after the system content keep their prefix cache, and lets a session crossing midnight refresh the date without rebuilding the prompt (#7404).
 
-What disappears is the content unique to the default instruction template: its built-in role/personality text, tool inventory and general tool policy, internal-URL catalog, exploration/delegation/workflow rules, and `xd://` protocol guidance. Generated skills and rules are **not** lost; the custom template renders them explicitly.
+With `contextProfile: full`, what disappears is the content unique to the default instruction template: its built-in role/personality text, tool inventory and general tool policy, internal-URL catalog, exploration/delegation/workflow rules, and `xd://` protocol guidance. Generated skills and rules are **not** lost; the custom template renders them explicitly. Reduced profiles still omit the bundled instruction template, but append the minimal `skill://` and `xd://` discovery instructions required by their presentation policy.
 
 Consequences:
 
@@ -135,27 +135,29 @@ quotes, `<title>...</title>` markers, and terminal punctuation, and treats
 12 words is rejected rather than truncated. Empty, deferred, or rejected output
 leaves the session unnamed, so a later eligible title attempt can name it.
 
-## Compact profile
+## Context profiles
 
-`promptProfile: compact` renders a second bundled instruction template instead of
-the default one. Unlike `SYSTEM.md`, it is maintained in the repository, so a
-session using it keeps receiving prompt improvements rather than freezing a copy.
+`contextProfile` controls the bundled instruction template, the eager skill list,
+the native tool set, and the `xd://` documentation policy as one setting:
 
-It keeps the parts a model cannot infer: the authority and safety contract, the
-specialized-tool mapping, the stop/ask/verify rules, the edit-and-test loop, and
-the `xd://` protocol explanation. It drops the personality block, the examples,
-the internal-URL catalog, and the long workflow and delegation prose. Every
-generated surface is unchanged: skills, rules, context files, tool inventory,
-`xd://` devices, and the project/environment footer all render exactly as they do
-under `full`.
+- `full` preserves the complete prompt and the default tool presentation.
+- `balanced` uses the compact prompt and keeps `read`, `write`, `bash`, `edit`,
+  `grep`, and `glob` native.
+- `aggressive` uses the compact prompt and keeps `read`, `write`, and `bash`
+  native.
+- Both reduced profiles also keep `todo` and `ask` native when enabled because
+  their session and interaction integrations depend on native tool identity.
 
-The profile targets local and small-context models, where the fixed prompt and
-the tool schemas can leave little room for the conversation. Pair it with
-`tools.xdevDocs: catalog` and `tools.xdevForceMount` to move tool schemas out of
-the request as well.
+Both reduced profiles keep every enabled capability. Read `skill://` or
+`skill://?q=<term>` to find skills. Read `xd://` or `xd://?q=<term>` to find
+mounted tools, then read the exact URL for its documentation. Catalog and search
+results have fixed limits, so installed skill and MCP counts do not expand every
+model request.
 
-`SYSTEM.md` and `--system-prompt` take precedence: they replace the instruction
-template outright, so the profile has nothing left to choose.
+`SYSTEM.md` and `--system-prompt` replace the bundled instruction template.
+They do not disable the profile's skill and tool presentation policy; reduced
+profiles append only the minimal `skill://` and `xd://` transport instructions
+needed to reach deferred capabilities.
 
 ## Full provider-facing replacement (SDK only)
 
@@ -168,7 +170,7 @@ The CLI flags and files do **not** set this property: they set `customSystemProm
 | Goal                                                                                   | Use                                                                      |
 | -------------------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
 | Add instructions while keeping the complete default prompt                             | `APPEND_SYSTEM.md` or `--append-system-prompt`                           |
-| Shorten the default instruction template but keep receiving its updates                | `promptProfile: compact`                                                 |
+| Reduce static context while keeping bounded access to enabled skills and tools         | `contextProfile: balanced` or `contextProfile: aggressive`               |
 | Replace the default instruction template but keep generated context, skills, and rules | `SYSTEM.md` or `--system-prompt`                                         |
 | Replace every provider-facing system block                                             | SDK `CreateAgentSessionOptions.systemPrompt`                             |
 | Customize automatic session titles                                                     | `TITLE_SYSTEM.md`                                                        |

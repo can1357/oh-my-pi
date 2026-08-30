@@ -2,8 +2,10 @@ import type { Tokenizer } from "@oh-my-pi/pi-agent-core";
 import type { CompactionSettings } from "@oh-my-pi/pi-agent-core/compaction";
 import { effectiveReserveTokens, resolveThresholdTokens } from "@oh-my-pi/pi-agent-core/compaction";
 import type { Tool as AiTool, Model } from "@oh-my-pi/pi-ai";
+import { compactGrammarDefinition } from "@oh-my-pi/pi-ai/providers/grammar";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { formatNumber } from "@oh-my-pi/pi-utils";
+import type { ContextProfile } from "../../config/settings";
 import type { Skill } from "../../extensibility/skills";
 import type { AgentSession } from "../../session/agent-session";
 import { resolveSpeculationMethod } from "../../session/compaction-methods";
@@ -11,6 +13,20 @@ import { estimateInlineSavings, type SnapcompactSavingsEstimate } from "../../se
 import { resolveSpeculationLeadTokens } from "../../session/speculation-lead";
 import type { Tool } from "../../tools";
 import type { theme as Theme } from "../theme/theme";
+
+type ToolSchemaSource = Pick<Tool, "name" | "description" | "parameters" | "customWireName" | "customFormat">;
+
+const CUSTOM_GRAMMAR_TOOL_APIS: Record<string, true> = {
+	"openai-responses": true,
+	"azure-openai-responses": true,
+	"openai-codex-responses": true,
+};
+
+function emitsCustomGrammarTools(model: Model | undefined): boolean {
+	return (
+		model?.applyPatchToolType === "freeform" && typeof model.api === "string" && model.api in CUSTOM_GRAMMAR_TOOL_APIS
+	);
+}
 
 const GRID_COLS = 20;
 const GRID_ROWS = 10;
@@ -85,29 +101,32 @@ export interface NonMessageTokenSource {
 	readonly systemPrompt?: string[];
 	readonly agent?: {
 		readonly state?: {
-			readonly tools?: ReadonlyArray<Pick<Tool, "name" | "description" | "parameters">>;
+			readonly tools?: ReadonlyArray<ToolSchemaSource>;
 		};
 	};
 	readonly skills?: readonly Skill[];
+	readonly settings?: {
+		get(key: "contextProfile"): ContextProfile;
+	};
 }
 
 const EMPTY_STRING_PARTS: string[] = [];
-const EMPTY_TOOLS: ReadonlyArray<Pick<Tool, "name" | "description" | "parameters">> = [];
+const EMPTY_TOOLS: ReadonlyArray<ToolSchemaSource> = [];
 const EMPTY_SKILLS: readonly Skill[] = [];
 
 /**
- * Skills actually rendered into the system prompt, mirroring the filter in
- * `buildSystemPrompt` (`system-prompt.ts`): the `read` tool must be present so
- * the model can fetch skill content, and skills with frontmatter `hide: true`
- * (or `disable-model-invocation`, normalized onto `hide`) are excluded.
- * Accounting must count only these so the Skills category and the System-prompt
- * subtraction stay aligned with the provider-facing prompt.
+ * Skills actually rendered into the system prompt. Full-profile rendering
+ * mirrors `buildSystemPrompt`: `read` must be present, and skills with
+ * frontmatter `hide: true` (or `disable-model-invocation`, normalized onto
+ * `hide`) are excluded. Reduced profiles render a discovery catalog instead,
+ * so no skill metadata is subtracted into the separate Skills category.
  */
 function renderedSkills(
 	skills: readonly Skill[],
-	tools: ReadonlyArray<Pick<Tool, "name" | "description" | "parameters">>,
+	tools: ReadonlyArray<ToolSchemaSource>,
+	contextProfile: ContextProfile,
 ): readonly Skill[] {
-	if (!tools.some(tool => tool.name === "read")) return EMPTY_SKILLS;
+	if (contextProfile !== "full" || !tools.some(tool => tool.name === "read")) return EMPTY_SKILLS;
 	return skills.filter(skill => skill.hide !== true);
 }
 
@@ -121,12 +140,24 @@ export function estimateSkillsTokens(skills: readonly Skill[], tokenizer: Tokeni
 	return tokenizer.countTokens(fragments);
 }
 
-export function estimateToolSchemaTokens(
-	tools: ReadonlyArray<Pick<Tool, "name" | "description" | "parameters">>,
-	tokenizer: Tokenizer,
-): number {
+export function buildNativeToolSchemaFragments(tools: ReadonlyArray<ToolSchemaSource>, model?: Model): string[] {
 	const fragments: string[] = [];
+	const customGrammarTools = emitsCustomGrammarTools(model);
 	for (const tool of tools) {
+		if (customGrammarTools && tool.customFormat) {
+			const wireJson = JSON.stringify({
+				type: "custom",
+				name: tool.customWireName ?? tool.name,
+				description: typeof tool.description === "string" ? tool.description : "",
+				format: {
+					type: "grammar",
+					syntax: tool.customFormat.syntax,
+					definition: compactGrammarDefinition(tool.customFormat.syntax, tool.customFormat.definition),
+				},
+			});
+			fragments.push(wireJson);
+			continue;
+		}
 		// Extension-supplied tools may carry a non-string name/description or a
 		// parameters value whose wire schema stringifies to `undefined` (e.g. a
 		// callable schema that escaped normalization). A non-string fragment is
@@ -145,7 +176,11 @@ export function estimateToolSchemaTokens(
 			// Schema may contain functions or cycles; ignore.
 		}
 	}
-	return tokenizer.countTokens(fragments);
+	return fragments;
+}
+
+export function estimateToolSchemaTokens(tools: ReadonlyArray<ToolSchemaSource>, tokenizer: Tokenizer): number {
+	return tokenizer.countTokens(buildNativeToolSchemaFragments(tools));
 }
 
 /**
@@ -171,11 +206,12 @@ export function estimateToolSchemaTokens(
 // (setSystemPrompt/setTools replace the array reference rather than mutating it).
 interface NonMessageTokenCache {
 	systemPromptRef: readonly string[];
-	toolsRef: ReadonlyArray<Pick<Tool, "name" | "description" | "parameters">>;
+	toolsRef: ReadonlyArray<ToolSchemaSource>;
 	skillsRef: readonly Skill[];
 	// The Agent swaps its Tokenizer instance when the model's encoding changes,
 	// so instance identity doubles as the encoding key.
 	tokenizerRef: Tokenizer;
+	contextProfile: ContextProfile;
 	tokens: number | undefined;
 	breakdown:
 		| {
@@ -198,17 +234,27 @@ function nonMessageTokenCacheEntry(session: NonMessageTokenSource, tokenizer: To
 	const systemPromptRef = session.systemPrompt ?? EMPTY_STRING_PARTS;
 	const toolsRef = session.agent?.state?.tools ?? EMPTY_TOOLS;
 	const skillsRef = session.skills ?? EMPTY_SKILLS;
+	const contextProfile = session.settings?.get("contextProfile") ?? "full";
 	let entry = cachedSession[NON_MESSAGE_TOKEN_CACHE];
 	if (
 		entry &&
 		entry.systemPromptRef === systemPromptRef &&
 		entry.toolsRef === toolsRef &&
 		entry.skillsRef === skillsRef &&
-		entry.tokenizerRef === tokenizer
+		entry.tokenizerRef === tokenizer &&
+		entry.contextProfile === contextProfile
 	) {
 		return entry;
 	}
-	entry = { systemPromptRef, toolsRef, skillsRef, tokenizerRef: tokenizer, tokens: undefined, breakdown: undefined };
+	entry = {
+		systemPromptRef,
+		toolsRef,
+		skillsRef,
+		tokenizerRef: tokenizer,
+		contextProfile,
+		tokens: undefined,
+		breakdown: undefined,
+	};
 	cachedSession[NON_MESSAGE_TOKEN_CACHE] = entry;
 	return entry;
 }
@@ -243,7 +289,11 @@ export function computeNonMessageBreakdown(
 	const entry = nonMessageTokenCacheEntry(session, tokenizer);
 	if (entry.breakdown) return entry.breakdown;
 	const tools = session.agent?.state?.tools ?? EMPTY_TOOLS;
-	const skillsTokens = estimateSkillsTokens(renderedSkills(session.skills ?? EMPTY_SKILLS, tools), tokenizer);
+	const contextProfile = session.settings?.get("contextProfile") ?? "full";
+	const skillsTokens = estimateSkillsTokens(
+		renderedSkills(session.skills ?? EMPTY_SKILLS, tools, contextProfile),
+		tokenizer,
+	);
 	const toolsTokens = estimateToolSchemaTokens(tools, tokenizer);
 	const systemPromptParts = session.systemPrompt ?? EMPTY_STRING_PARTS;
 	const systemContextTokens = tokenizer.countTokens(Array.from(systemPromptParts.slice(1), part => part ?? ""));

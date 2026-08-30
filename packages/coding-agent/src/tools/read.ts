@@ -2224,12 +2224,12 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			localProtocolOptions: this.session.localProtocolOptions,
 			skills: this.session.skills,
 			xd: {
-				read: async name => {
+				read: async (name, query) => {
 					if (name === REPORT_ISSUE_DEVICE_NAME) return reportIssueDeviceUsage();
 					if (name && isResolutionDeviceName(name)) return resolutionDeviceUsage(name);
 					const xdev = this.session.xdev;
 					if (!xdev) throw new ToolError("xd:// is not mounted in this session.");
-					return name === null ? xdevListing(xdev) : xdevDocs(xdev, name);
+					return name === null ? xdevListing(xdev, query) : xdevDocs(xdev, name);
 				},
 			},
 		});

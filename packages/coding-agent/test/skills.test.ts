@@ -76,16 +76,10 @@ describe("skills", () => {
 			expect(skills.some(skill => skill.name === "Invalid_Name")).toBe(true);
 		});
 
-		it("should load skill when name exceeds 64 characters", async () => {
+		it("should load a skill when its name exceeds 64 characters", async () => {
 			const { skills } = await loadFixtureRoot();
 
-			expect(
-				skills.some(
-					skill =>
-						skill.name ===
-						"this-is-a-very-long-skill-name-that-exceeds-the-sixty-four-character-limit-set-by-the-standard",
-				),
-			).toBe(true);
+			expect(skills.some(skill => skill.name === longSkillName)).toBe(true);
 		});
 
 		it("should skip skill when description is missing", async () => {
@@ -127,9 +121,9 @@ describe("skills", () => {
 					"valid-skill",
 					"different-name",
 					"Invalid_Name",
-					"this-is-a-very-long-skill-name-that-exceeds-the-sixty-four-character-limit-set-by-the-standard",
 					"unknown-field",
 					"bad--name",
+					longSkillName,
 				]),
 			);
 			expect(names).not.toContain("child-skill");

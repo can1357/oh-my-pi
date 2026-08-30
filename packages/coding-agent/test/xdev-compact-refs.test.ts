@@ -9,6 +9,7 @@ import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { type } from "@oh-my-pi/omptype";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { buildSystemPrompt } from "@oh-my-pi/pi-coding-agent/system-prompt";
 import { createTools, type Tool, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
@@ -48,8 +49,8 @@ function session(cwd: string): ToolSession {
 }
 
 describe("mounted-tool references", () => {
-	it("compact profile names the device path for a mounted tool", async () => {
-		const rendered = await render({ promptProfile: "compact" });
+	it("reduced profiles name the device path for a mounted tool", async () => {
+		const rendered = await render({ contextProfile: "balanced" });
 		expect(rendered).toContain("`xd://grep`");
 		expect(rendered).not.toMatch(/→ `grep`/);
 	});
@@ -77,6 +78,19 @@ describe("device docs and catalog", () => {
 		}
 	});
 
+	it("keeps worked examples out of the legacy full-profile prompt docs", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "xdev-compact-refs-"));
+		try {
+			const s = session(tempDir);
+			await createTools(s);
+			const xdev = s.xdev;
+			if (!xdev) throw new Error("expected xdev state");
+			expect(xdevDocsAll(xdev, "builtins")).not.toContain("Example: write(");
+		} finally {
+			await removeWithRetries(tempDir);
+		}
+	});
+
 	it("factors a shared prefix out of an MCP server's catalog row", async () => {
 		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "xdev-compact-refs-"));
 		try {
@@ -92,9 +106,54 @@ describe("device docs and catalog", () => {
 				xdev.tools.set(tool.name, tool);
 				xdev.mountedNames.add(tool.name);
 			}
-			const docs = xdevDocsAll(xdev, "catalog");
+			const docs = xdevDocsAll(xdev, "catalog", [], true);
 			expect(docs).toContain("- MCP server `memory` (3): xd://mcp__memory_{read_note|write_note|search_notes}");
 			expect(docs).not.toContain("xd://mcp__memory_read_note,");
+		} finally {
+			await removeWithRetries(tempDir);
+		}
+	});
+
+	it("bounds the static catalog and points omitted devices to query discovery", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "xdev-compact-refs-"));
+		try {
+			const s = session(tempDir);
+			await createTools(s);
+			const xdev = s.xdev;
+			if (!xdev) throw new Error("expected xdev state");
+			const base = listXdevTools(xdev)[0]!;
+			for (let index = 0; index < 75; index++) {
+				const tool = Object.create(base) as Tool;
+				const name = `zz_probe_${index.toString().padStart(2, "0")}`;
+				Object.defineProperty(tool, "name", { value: name });
+				Object.defineProperty(tool, "summary", { value: `probe ${index}` });
+				xdev.tools.set(name, tool);
+				xdev.mountedNames.add(name);
+			}
+			const docs = xdevDocsAll(xdev, "catalog", [], true);
+			expect(docs).toContain("Static catalog truncated at 50 devices");
+			expect(docs).not.toContain("xd://zz_probe_74");
+		} finally {
+			await removeWithRetries(tempDir);
+		}
+	});
+
+	it("omits a worked call when the tool has no schema-valid authored example", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "xdev-compact-refs-"));
+		try {
+			const s = session(tempDir);
+			await createTools(s);
+			const xdev = s.xdev;
+			if (!xdev) throw new Error("expected xdev state");
+			const base = listXdevTools(xdev)[0]!;
+			const tool = Object.create(base) as Tool;
+			Object.defineProperty(tool, "name", { value: "enum_only" });
+			Object.defineProperty(tool, "parameters", { value: type({ op: "'list'|'status'" }) });
+			Object.defineProperty(tool, "examples", { value: [] });
+			xdev.tools.set(tool.name, tool);
+			xdev.mountedNames.add(tool.name);
+
+			expect(xdevDocs(xdev, tool.name)).not.toContain("Example: write(");
 		} finally {
 			await removeWithRetries(tempDir);
 		}

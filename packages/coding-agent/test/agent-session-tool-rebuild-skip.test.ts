@@ -99,6 +99,9 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 	interface NewSessionOptions {
 		getMcpServerInstructions?: () => Map<string, string> | undefined;
 		xdev?: XdevState;
+		contextProfile?: "full" | "balanced" | "aggressive";
+		enableDynamicXdev?: boolean;
+		toolsXdev?: boolean;
 		lazyWrite?: boolean;
 		deviceOnlyWrite?: boolean;
 		/** Scripted mock model responses; enables driving `session.prompt()`. */
@@ -128,17 +131,20 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 		toolRegistry: Map<string, AgentTool>;
 		isDeviceOnlyWrite: () => boolean;
 		isPendingFullWriteDescription: () => boolean;
+		hasXdevState: () => boolean;
 		isToolActive: (name: string) => boolean;
 	} {
 		const readTool = createBasicTool("read", "Read");
 		const initialMcp = createMcpCustomTool("mcp__nucleus_search", "nucleus", "search", "Search nucleus");
 		const writeTool = createBasicTool("write", "Write");
 		const toolRegistry = options.xdev?.tools ?? new Map<string, AgentTool>();
+		let dynamicXdev = options.xdev;
+		const hasInitialWrite = (options.xdev !== undefined || options.enableDynamicXdev === true) && !options.lazyWrite;
 		let deviceOnlyWrite = options.deviceOnlyWrite === true;
 		let pendingFullWriteDescription = false;
 		toolRegistry.set(readTool.name, readTool);
 		toolRegistry.set(initialMcp.name, initialMcp as unknown as AgentTool);
-		if (options.xdev && !options.lazyWrite) toolRegistry.set(writeTool.name, writeTool);
+		if (hasInitialWrite) toolRegistry.set(writeTool.name, writeTool);
 		const mock = options.responses ? createMockModel({ responses: options.responses }) : undefined;
 		const contexts: Message[][] = [];
 		const systemPrompts: string[][] = [];
@@ -147,10 +153,8 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 			initialState: {
 				model: createModel(),
 				systemPrompt: ["initial"],
-				tools: options.xdev
-					? options.lazyWrite
-						? [readTool, initialMcp as unknown as AgentTool]
-						: [readTool, writeTool, initialMcp as unknown as AgentTool]
+				tools: hasInitialWrite
+					? [readTool, writeTool, initialMcp as unknown as AgentTool]
 					: [readTool, initialMcp as unknown as AgentTool],
 				messages: options.initialMessages ?? [],
 			},
@@ -167,12 +171,16 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 		const session = new AgentSession({
 			agent,
 			sessionManager: SessionManager.inMemory(),
-			settings: Settings.isolated({ "compaction.enabled": false }),
+			settings: Settings.isolated({
+				"compaction.enabled": false,
+				contextProfile: options.contextProfile ?? "full",
+				"tools.xdev": options.toolsXdev ?? true,
+			}),
 			modelRegistry: { getApiKey: async () => "test-key" } as never,
 			toolRegistry,
-			builtInToolNames: options.xdev && !options.lazyWrite ? ["read", "write"] : ["read"],
+			builtInToolNames: hasInitialWrite ? ["read", "write"] : ["read"],
 			ensureWriteRegistered: async () => {
-				if (!options.xdev) return false;
+				if (!options.xdev && !options.enableDynamicXdev) return false;
 				if (!toolRegistry.has("write")) toolRegistry.set("write", writeTool);
 				return true;
 			},
@@ -196,11 +204,27 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 			rebuildSystemPrompt: async (toolNames, _tools) => {
 				const base = await rebuildSystemPrompt(toolNames);
 				if (!options.exposeXdevCatalog) return { systemPrompt: [base] };
-				const catalog = options.xdev ? [...options.xdev.mountedNames] : [];
+				const catalog = dynamicXdev ? [...dynamicXdev.mountedNames] : [];
 				return { systemPrompt: [`${base}\nxd:// catalog: ${catalog.join(",")}`], xdevCatalogNames: catalog };
 			},
 			getMcpServerInstructions: options.getMcpServerInstructions,
-			xdev: options.xdev,
+			xdev: dynamicXdev,
+			ensureXdevState: options.enableDynamicXdev
+				? () => {
+						if (!dynamicXdev) {
+							dynamicXdev = {
+								tools: toolRegistry,
+								mountedNames: new Set(),
+								builtInNames: new Set(["read", "write"]),
+								isActive: name => activeToolNames.has(name),
+							};
+						}
+						return dynamicXdev;
+					}
+				: undefined,
+			clearXdevState: state => {
+				if (dynamicXdev === state) dynamicXdev = undefined;
+			},
 		});
 		sessions.push(session);
 		return {
@@ -210,6 +234,7 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 			toolRegistry,
 			isDeviceOnlyWrite: () => deviceOnlyWrite,
 			isPendingFullWriteDescription: () => pendingFullWriteDescription,
+			hasXdevState: () => dynamicXdev !== undefined,
 			isToolActive: name => activeToolNames.has(name),
 		};
 	}
@@ -390,7 +415,10 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 		const { session } = newSession(
 			async () => {
 				rebuildCount++;
-				const projection = projectMountedMCPXdevGuidance(collectMountedMCPToolRoutes(listXdevTools(xdevState)));
+				const projection = projectMountedMCPXdevGuidance(
+					collectMountedMCPToolRoutes(listXdevTools(xdevState)),
+					true,
+				);
 				// Mirrors everything the real guidance renders: explicit mappings for
 				// routes the naming rule cannot derive, plus the servers the rule
 				// covers and the routes it covers for them.
@@ -400,7 +428,11 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 				renderedPrompts.push(generatedPrompt);
 				return generatedPrompt;
 			},
-			{ xdev: xdevState, getMcpServerInstructions: () => serverInstructions },
+			{
+				xdev: xdevState,
+				getMcpServerInstructions: () => serverInstructions,
+				contextProfile: "balanced",
+			},
 		);
 		const search = createMcpCustomTool("mcp__nucleus_search", "nucleus", "search", "Search nucleus");
 		const fetch = createMcpCustomTool("mcp__nucleus_fetch", "nucleus", "fetch", "Fetch nucleus");
@@ -410,7 +442,7 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 		const searchPrompt = "mounted:|rule:nucleus|routes:mcp__nucleus_search";
 		const searchAndUninstructedPrompt = "mounted:|rule:nucleus,silent|routes:mcp__nucleus_search,mcp__silent_ping";
 		const searchFetchAndUninstructedPrompt =
-			"mounted:|rule:nucleus,silent|routes:mcp__nucleus_fetch,mcp__nucleus_search,mcp__silent_ping";
+			"mounted:|rule:nucleus,silent|routes:mcp__nucleus_search,mcp__nucleus_fetch,mcp__silent_ping";
 
 		await session.refreshMCPTools([search]);
 		expect(rebuildCount).toBe(1);
@@ -434,15 +466,17 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 		expect(rebuildCount).toBe(3);
 		expect(session.systemPrompt).toEqual([searchFetchAndUninstructedPrompt]);
 
-		// Reordering the same routes no longer changes what renders: the rule names
-		// servers, and its route list is sorted. So no rebuild.
+		// Reordering the refresh input reorders the visible insertion-ordered
+		// catalog projection and therefore rebuilds its static guidance.
+		const reorderedSearchFetchPrompt =
+			"mounted:|rule:nucleus,silent|routes:mcp__nucleus_fetch,mcp__nucleus_search,mcp__silent_ping";
 		await session.refreshMCPTools([fetch, equivalentSearch, uninstructed]);
-		expect(rebuildCount).toBe(3);
-		expect(session.systemPrompt).toEqual([searchFetchAndUninstructedPrompt]);
+		expect(rebuildCount).toBe(4);
+		expect(session.systemPrompt).toEqual([reorderedSearchFetchPrompt]);
 
 		const replacementSearch = createMcpCustomTool("mcp__nucleus_search", "nucleus", "search", "Search nucleus");
 		await session.refreshMCPTools([replacementSearch, uninstructed]);
-		expect(rebuildCount).toBe(4);
+		expect(rebuildCount).toBe(5);
 		expect(session.systemPrompt).toEqual([searchAndUninstructedPrompt]);
 		const stableLabel = replacementSearch.label;
 		const reownedAndUninstructedPrompt =
@@ -455,7 +489,7 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 		// `createMCPToolName("archive", "search")` produces, so re-owning the route
 		// drops `archive` out of the rule and lists that one route explicitly.
 		await session.refreshMCPTools([reownedSearch, uninstructed]);
-		expect(rebuildCount).toBe(5);
+		expect(rebuildCount).toBe(6);
 		expect(session.systemPrompt).toEqual([reownedAndUninstructedPrompt]);
 
 		const renamedOriginalSearch = {
@@ -465,7 +499,7 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 		const renamedOriginalAndUninstructedPrompt =
 			'mounted:"lookup"=xd://mcp__nucleus_search|rule:silent|routes:mcp__silent_ping';
 		await session.refreshMCPTools([renamedOriginalSearch, uninstructed]);
-		expect(rebuildCount).toBe(6);
+		expect(rebuildCount).toBe(7);
 		expect(session.systemPrompt).toEqual([renamedOriginalAndUninstructedPrompt]);
 
 		const remountedSearch = {
@@ -476,7 +510,7 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 		// (archive, lookup), so this route rejoins the rule and stops being listed.
 		const remountedAndUninstructedPrompt = "mounted:|rule:archive,silent|routes:mcp__archive_lookup,mcp__silent_ping";
 		await session.refreshMCPTools([remountedSearch, uninstructed]);
-		expect(rebuildCount).toBe(7);
+		expect(rebuildCount).toBe(8);
 		expect(session.systemPrompt).toEqual([remountedAndUninstructedPrompt]);
 
 		const equivalentRemountedSearch = {
@@ -484,24 +518,49 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 			label: stableLabel,
 		};
 		await session.refreshMCPTools([equivalentRemountedSearch, uninstructed]);
-		expect(rebuildCount).toBe(7);
+		expect(rebuildCount).toBe(8);
 		expect(session.systemPrompt).toEqual([remountedAndUninstructedPrompt]);
 
 		// Removing the uninstructed server's rendered route also changes guidance.
 		const remountedPrompt = "mounted:|rule:archive|routes:mcp__archive_lookup";
 		await session.refreshMCPTools([equivalentRemountedSearch]);
-		expect(rebuildCount).toBe(8);
+		expect(rebuildCount).toBe(9);
 		expect(session.systemPrompt).toEqual([remountedPrompt]);
 		expect(renderedPrompts).toEqual([
 			searchPrompt,
 			searchAndUninstructedPrompt,
 			searchFetchAndUninstructedPrompt,
+			reorderedSearchFetchPrompt,
 			searchAndUninstructedPrompt,
 			reownedAndUninstructedPrompt,
 			renamedOriginalAndUninstructedPrompt,
 			remountedAndUninstructedPrompt,
 			remountedPrompt,
 		]);
+	});
+
+	it("allocates xd:// state when switching from full with tools.xdev disabled to a reduced profile", async () => {
+		const { session, hasXdevState } = newSession(async names => `tools:${names.join(",")}`, {
+			enableDynamicXdev: true,
+			toolsXdev: false,
+			contextProfile: "full",
+		});
+		expect(hasXdevState()).toBe(false);
+		expect(session.getMountedXdevToolNames()).toEqual([]);
+		expect(session.getActiveToolNames()).toContain("mcp__nucleus_search");
+
+		session.settings.override("contextProfile", "balanced");
+		expect(session.settings.get("contextProfile")).toBe("balanced");
+		await session.applyContextProfileChange();
+		expect(hasXdevState()).toBe(true);
+		expect(session.getMountedXdevToolNames()).toContain("mcp__nucleus_search");
+		expect(session.getActiveToolNames()).not.toContain("mcp__nucleus_search");
+
+		session.settings.override("contextProfile", "full");
+		await session.applyContextProfileChange();
+		expect(hasXdevState()).toBe(false);
+		expect(session.getMountedXdevToolNames()).toEqual([]);
+		expect(session.getActiveToolNames()).toContain("mcp__nucleus_search");
 	});
 
 	it("skips rebuild when only an omitted mounted MCP mapping changes", async () => {

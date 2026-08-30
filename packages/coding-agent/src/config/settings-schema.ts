@@ -1513,19 +1513,28 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
-	promptProfile: {
+	contextProfile: {
 		type: "enum",
-		values: ["full", "compact"] as const,
+		values: ["full", "balanced", "aggressive"] as const,
 		default: "full",
 		ui: {
 			tab: "model",
 			group: "Prompt",
-			label: "Prompt Profile",
+			label: "Context Profile",
 			description:
-				"Which bundled instruction template to render. Compact drops the examples, the internal-URL catalog, and the long workflow and delegation prose for a short contract, and keeps every generated surface: skills, rules, context files, tool inventory, and the xd:// protocol. For local models where the prompt competes with the conversation for a small context window. A custom SYSTEM.md replaces the template outright and ignores this.",
+				"Choose one integrated static-context budget. Full preserves the complete prompt, skill list, and native tool presentation. Balanced keeps core editing and search tools native while moving the rest behind bounded internal-URL discovery. Aggressive keeps the internal-URL transport and bash native. Interaction-integrated todo and ask remain native in reduced profiles when enabled. A custom SYSTEM.md still replaces the bundled instruction template.",
 			options: [
-				{ value: "full", label: "Full", description: "The default instruction template." },
-				{ value: "compact", label: "Compact", description: "Short contract; same generated surfaces." },
+				{ value: "full", label: "Full", description: "Complete prompt and default tool presentation." },
+				{
+					value: "balanced",
+					label: "Balanced",
+					description: "Compact prompt with core editing and search tools kept native.",
+				},
+				{
+					value: "aggressive",
+					label: "Aggressive",
+					description: "Compact prompt with the internal-URL transport and bash kept native.",
+				},
 			],
 		},
 	},
@@ -4718,18 +4727,6 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
-	"tools.xdevForceMount": {
-		type: "array",
-		default: EMPTY_STRING_ARRAY,
-		ui: {
-			tab: "tools",
-			group: "Discovery & MCP",
-			label: "xd:// Force Mount",
-			description:
-				"Mount tools matching these glob patterns under xd:// even when they declare themselves essential or are pinned top-level, keeping their schemas out of every request. For small-context local models, where tool schemas can outweigh the whole prompt. read and write always stay top-level: they carry the xd:// transport. Forcing grep, todo, ask, or web_search costs the harness integration that pinned them.",
-		},
-	},
-
 	"tools.xdevInlineDevices": {
 		type: "array",
 		default: EMPTY_STRING_ARRAY,
@@ -6139,7 +6136,7 @@ export type TreeFilterMode = SettingValue<"treeFilterMode">;
 
 /** Personality preset - derived from schema */
 export type Personality = SettingValue<"personality">;
-export type PromptProfile = SettingValue<"promptProfile">;
+export type ContextProfile = SettingValue<"contextProfile">;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Typed Group Definitions
