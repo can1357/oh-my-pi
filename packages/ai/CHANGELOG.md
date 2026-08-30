@@ -41,6 +41,7 @@
   - Removed extra request fields absent from CLI traffic: `executionId`, `toolChoice`, `systemPromptCacheOptions`, `disableParallelToolCalls`.
   - Added `authorization: Basic <token>-<token>` HTTP header (matching the CLI's auth pattern), suppressed the default `User-Agent` header, and set `Accept-Encoding: identity` to avoid advertising compression support the CLI doesn't send.
 
+## [18.0.9] - 2026-08-28
 ### Fixed
 
 - Improved OAuth sign-in flows, including a fallback message when the browser cannot automatically close the OAuth success tab.
