@@ -221,19 +221,40 @@ describe("zod-like parsing", () => {
 		expect(Object.isFrozen(frozenArray)).toBe(true);
 	});
 
-	it("rejects arrays reaching any object schema", () => {
-		// An array reaching an object schema contradicts the emitted
-		// `{"type":"object"}` and zod's own semantics: the tool would accept a
-		// shape the model was told was invalid. The guard is an input-side
-		// filter, so it also covers the modes an output-side check cannot — a
-		// key-stripping object has already turned `[]` into `{}` by then.
-		expect(z.object({}).safeParse([]).success).toBe(false);
-		expect(z.strictObject({}).safeParse([]).success).toBe(false);
-		expect(z.looseObject({}).safeParse([1, 2]).success).toBe(false);
+	it("holds object schemas to zod's object-input domain", () => {
+		// Input outside that domain contradicts the emitted `{"type":"object"}`:
+		// the tool would accept a shape the model was told was invalid. The guard
+		// is a raw input-side filter, so it also covers the modes an output-side
+		// check cannot — a key-stripping object has already turned `[]` into `{}`
+		// by then — and zod classifies these built-ins as their own parsed types.
+		for (const outside of [[], new Date(), new Map(), new Set(), Promise.resolve(1)]) {
+			expect(z.object({}).safeParse(outside).success).toBe(false);
+			expect(z.strictObject({}).safeParse(outside).success).toBe(false);
+			expect(z.looseObject({}).safeParse(outside).success).toBe(false);
+			expect(z.record(z.string(), z.string()).safeParse(outside).success).toBe(false);
+		}
+		// A class instance IS object input, in zod and here.
+		class Point {
+			x = "1";
+		}
+		expect(z.object({ x: z.string() }).parse(new Point())).toEqual({ x: "1" });
+		// The guard runs once per parse: a prevalidating filter would walk the
+		// input a second time and read every getter twice, at every depth.
+		let reads = 0;
+		const spy = {
+			l1: {
+				get v() {
+					reads++;
+					return "x";
+				},
+			},
+		};
+		expect(z.object({ l1: z.object({ v: z.string() }) }).parse(spy)).toEqual({ l1: { v: "x" } });
+		expect(reads).toBe(1);
+		// Mode changes keep the guard.
 		expect(z.object({}).strict().safeParse([]).success).toBe(false);
 		expect(z.object({}).passthrough().safeParse([1]).success).toBe(false);
 		expect(z.object({ a: z.string() }).partial().safeParse([]).success).toBe(false);
-		expect(z.record(z.string(), z.string()).safeParse([]).success).toBe(false);
 		// A discriminated union is object-shaped by definition, and a stripping
 		// variant whose discriminator carries a default would otherwise morph
 		// `[]` into `{ kind: "a" }` — on the structural path and the dispatcher.

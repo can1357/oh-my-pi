@@ -170,8 +170,26 @@ function restrictBase<Out>(source: Decoratable<Out>, ir: IR): Decoratable<Out> {
 }
 
 /**
- * Reject an array reaching an object schema, which zod does and the emitted
- * `{"type":"object"}` already promises.
+ * Kind label for a value zod classifies OUTSIDE its object domain, or
+ * `undefined` when the value is acceptable object input.
+ *
+ * Mirrors zod's own input classification: arrays, `Date`, `Map`, `Set` and
+ * thenables are separate parsed types there, so an object schema rejects them.
+ * Plain objects and class instances are object input, in zod and here.
+ */
+function nonObjectKind(value: object): string | undefined {
+	if (Array.isArray(value)) return "an array";
+	if (value instanceof Date) return "a Date";
+	if (value instanceof Map) return "a Map";
+	if (value instanceof Set) return "a Set";
+	const thenable: { then?: unknown; catch?: unknown } = value;
+	return typeof thenable.then === "function" && typeof thenable.catch === "function" ? "a Promise" : undefined;
+}
+
+/**
+ * Hold an object schema to zod's object-input domain, which the emitted
+ * `{"type":"object"}` already promises — omptype's object node accepts any
+ * non-null object, arrays and built-ins included.
  *
  * A RAW `filter` step: filters run before the base validates, so this also
  * catches what an output-side `narrow` cannot — a key-stripping object has
@@ -182,7 +200,11 @@ function restrictBase<Out>(source: Decoratable<Out>, ir: IR): Decoratable<Out> {
  */
 function guardObjectInput<Out>(base: Decoratable<Out>): Decoratable<Out> {
 	const guarded = base.filter(
-		(value, ctx: NarrowContext) => !Array.isArray(value) || ctx.mustBe("an object, not an array"),
+		(value, ctx: NarrowContext) => {
+			if (typeof value !== "object" || value === null) return true;
+			const kind = nonObjectKind(value);
+			return kind === undefined || ctx.mustBe(`an object, not ${kind}`);
+		},
 		{ raw: true },
 	);
 	return stampRebuild(guarded, { base, guarded: true });
