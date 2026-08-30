@@ -471,6 +471,7 @@ export interface AgentIdentity {
 	 * top-level session. Runner-less sessions cannot resolve the chain, so it is
 	 * `[]` there even for subagents.
 	 */
+	parentChain: string[];
 }
 
 export interface ExtensionContext {
