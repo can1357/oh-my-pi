@@ -1515,11 +1515,11 @@ const DEFAULT_COLOR_SWATCH_GLYPH = "■";
 
 // `#` + 3-8 hex digits, not glued to a surrounding word/`#`/`&` (avoids HTML
 // entities like &#9731; and paths like foo#fff), not the start of a canonical
-// UUID, and not trailed by more hex (so over-long runs never produce a
-// misleading swatch). Length/letter rules are enforced in classifyHexColor
-// since the alternation can't express "exactly 3, 6, or 8".
-const HEX_COLOR_REGEX =
-	/(?<![\w#&])#(?![0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12})([0-9a-fA-F]{3,8})(?![0-9a-fA-F])/g;
+// UUID, and not trailed by another word char (over-long runs and word
+// fragments like the "#eac" of "#each" never produce a misleading swatch).
+// Length/letter rules are enforced in classifyHexColor since the alternation
+// can't express "exactly 3, 6, or 8".
+const HEX_COLOR_REGEX = /(?<![\w#&])#(?![0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12})([0-9a-fA-F]{3,8})(?!\w)/g;
 const HEX_COLOR_EXACT_REGEX = /^#([0-9a-fA-F]{3,8})$/;
 
 /**

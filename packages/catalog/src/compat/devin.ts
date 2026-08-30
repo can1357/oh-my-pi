@@ -7,6 +7,10 @@ import type { ModelSpec, ResolvedDevinCompat } from "../types";
  * deriver must never fabricate an effort ladder from identity for these models;
  * only explicit routed metadata counts.
  */
-export function buildDevinCompat(_spec: ModelSpec<"devin-agent">): ResolvedDevinCompat {
-	return { trustExplicitThinkingOnly: true };
+export function buildDevinCompat(spec: ModelSpec<"devin-agent">): ResolvedDevinCompat {
+	return {
+		trustExplicitThinkingOnly: true,
+		modelRouter: spec.compat?.modelRouter ?? false,
+		supportsParallelToolCalls: spec.compat?.supportsParallelToolCalls ?? false,
+	};
 }

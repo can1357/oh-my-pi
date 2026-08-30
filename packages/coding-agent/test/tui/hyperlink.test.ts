@@ -1,10 +1,13 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import * as os from "node:os";
 import * as path from "node:path";
 import * as url from "node:url";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { LocalProtocolHandler } from "@oh-my-pi/pi-coding-agent/internal-urls/local-protocol";
+import { getMarkdownTheme, initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import {
+	applyHyperlinkSetting,
 	fileHyperlink,
 	isHyperlinkEnabled,
 	tryResolveInternalUrlSync,
@@ -20,6 +23,9 @@ const ST = "\x1b\\";
 const BEL = "\x07";
 const LINK_END = `${OSC}8;;${ST}`;
 const ORIGINAL_NO_COLOR = Bun.env.NO_COLOR;
+// Detected OSC 8 capability, captured at import exactly as hyperlink.ts snapshots
+// it — before any test mutates the runtime flag.
+const DETECTED_HYPERLINKS = terminalCaps.TERMINAL.hyperlinks;
 
 /** Extract the hyperlink URI from a wrapped string. Returns undefined if not wrapped. */
 function extractLinkUri(text: string): string | undefined {
@@ -102,17 +108,21 @@ describe("isHyperlinkEnabled", () => {
 		}
 	});
 
-	it("returns TERMINAL.hyperlinks value in auto mode when conditions are met", () => {
+	it("resolves auto against detected capability, immune to runtime flag mutation", () => {
 		setHyperlinkMode("auto");
 		delete Bun.env.NO_COLOR;
 		const origTTY = Object.getOwnPropertyDescriptor(process.stdout, "isTTY");
+		const origHyperlinks = terminalCaps.TERMINAL.hyperlinks;
 		try {
 			Object.defineProperty(process.stdout, "isTTY", { value: true, configurable: true });
-			// TERMINAL.hyperlinks may be true or false depending on the test runner env;
-			// what matters is that isHyperlinkEnabled mirrors it.
-			const expected = terminalCaps.TERMINAL.hyperlinks;
-			expect(isHyperlinkEnabled()).toBe(expected);
+			// auto mirrors the capability detected at import...
+			expect(isHyperlinkEnabled()).toBe(DETECTED_HYPERLINKS);
+			// ...and a prior always/off application that flipped the runtime flag
+			// must not poison it (regression: #10196 review).
+			terminalCaps.setTerminalHyperlinks(!DETECTED_HYPERLINKS);
+			expect(isHyperlinkEnabled()).toBe(DETECTED_HYPERLINKS);
 		} finally {
+			terminalCaps.setTerminalHyperlinks(origHyperlinks);
 			if (origTTY) {
 				Object.defineProperty(process.stdout, "isTTY", origTTY);
 			} else {
@@ -310,5 +320,93 @@ describe("tryResolveInternalUrlSync", () => {
 	it("swallows errors from malformed URLs", () => {
 		// Malformed input should not throw, just return undefined.
 		expect(tryResolveInternalUrlSync("local://%ZZ")).toBeUndefined();
+	});
+});
+
+describe("chat markdown links honor tui.hyperlinks", () => {
+	// The Markdown renderer gates OSC 8 on TERMINAL.hyperlinks. The coding-agent
+	// applies its setting to that shared flag so chat links track path/resource
+	// links (issue #10195).
+	const originalHyperlinks = terminalCaps.TERMINAL.hyperlinks;
+
+	beforeAll(async () => {
+		await initTheme();
+	});
+	afterEach(() => {
+		terminalCaps.TERMINAL.hyperlinks = originalHyperlinks;
+	});
+
+	function renderChatLink(): string {
+		applyHyperlinkSetting();
+		const md = new terminalCaps.Markdown(
+			"See [the docs](https://example.com/path) for details.",
+			0,
+			0,
+			getMarkdownTheme(),
+		);
+		return md.render(80).join("\n");
+	}
+
+	it("applies the configured policy while Settings.init publishes the singleton", async () => {
+		resetSettingsForTest();
+		terminalCaps.setTerminalHyperlinks(false);
+		try {
+			await Settings.init({ inMemory: true, overrides: { "tui.hyperlinks": "always" } });
+			const output = new terminalCaps.Markdown(
+				"See [the docs](https://example.com/path) for details.",
+				0,
+				0,
+				getMarkdownTheme(),
+			)
+				.render(80)
+				.join("\n");
+			expect(terminalCaps.TERMINAL.hyperlinks).toBe(true);
+			expect(extractAnyTerminatorLinkUri(output)).toBe("https://example.com/path");
+		} finally {
+			resetSettingsForTest();
+			await Settings.init({ inMemory: true });
+		}
+	});
+
+	it('wraps the link in OSC 8 under "always" even when the terminal did not advertise support', () => {
+		terminalCaps.TERMINAL.hyperlinks = false;
+		setHyperlinkMode("always");
+		const output = renderChatLink();
+		// The Markdown renderer terminates OSC 8 with BEL, so match either terminator.
+		expect(output.includes(`${OSC}8;`)).toBe(true);
+		expect(extractAnyTerminatorLinkUri(output)).toBe("https://example.com/path");
+	});
+
+	it('suppresses the OSC 8 wrap under "off" even when the terminal advertised support', () => {
+		terminalCaps.TERMINAL.hyperlinks = true;
+		setHyperlinkMode("off");
+		const output = renderChatLink();
+		expect(output).toContain("the docs");
+		expect(output.includes(`${OSC}8;`)).toBe(false);
+	});
+});
+
+describe("applyHyperlinkSetting on project-scoped reload", () => {
+	// A cross-project reload (`/move`, resume, rollback) fires SETTING_HOOKS via
+	// Settings.reloadForCwd → the tui.hyperlinks hook reapplies the policy, so
+	// renderers gating on TERMINAL.hyperlinks never keep the previous project's
+	// value while path links already track the new one (#10196 review).
+	it("reapplies the effective policy so the runtime flag tracks the reloaded setting", async () => {
+		const origHyperlinks = terminalCaps.TERMINAL.hyperlinks;
+		const dirA = path.join(os.tmpdir(), "omp-hyperlink-reload-a");
+		const dirB = path.join(os.tmpdir(), "omp-hyperlink-reload-b");
+		try {
+			terminalCaps.setTerminalHyperlinks(false);
+			settings.override("tui.hyperlinks", "always");
+			await settings.reloadForCwd(dirA);
+			expect(terminalCaps.TERMINAL.hyperlinks).toBe(true);
+
+			settings.override("tui.hyperlinks", "off");
+			await settings.reloadForCwd(dirB);
+			expect(terminalCaps.TERMINAL.hyperlinks).toBe(false);
+		} finally {
+			settings.clearOverride("tui.hyperlinks");
+			terminalCaps.setTerminalHyperlinks(origHyperlinks);
+		}
 	});
 });
