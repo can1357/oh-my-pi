@@ -446,6 +446,7 @@ export interface InteractiveModeContext {
 	showDebugSelector(): Promise<void>;
 	showAgentHub(options?: { requireContent?: boolean; armCloseTap?: boolean }): void;
 	resetObserverRegistry(): void;
+	setObservedAgentTaskOutcome(id: string, state: "active" | "completed" | "failed" | "aborted"): void;
 
 	// Input handling
 	handleCtrlC(): void;

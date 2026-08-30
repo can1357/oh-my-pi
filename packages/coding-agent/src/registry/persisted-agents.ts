@@ -11,6 +11,7 @@ import { loadBundledAgents } from "../task/agents";
 import { isReadOnlyAgent } from "../task/read-only-policy";
 import { persistedVibeChildIds } from "../vibe/lifecycle";
 import {
+	AGENT_TASK_OUTCOME_ENTRY_TYPE,
 	type AgentHistorySummary,
 	type AgentMetricsSummary,
 	type AgentRegistry,
@@ -156,6 +157,7 @@ async function readPersistedAgentHistory(
 	const assistantById = new Map<string, AssistantMetrics>();
 	const modelChangeById = new Map<string, { model: string; role?: string; resolvedModelIsFallback: boolean }>();
 	const outcomeById = new Map<string, AgentTerminalOutcome>();
+	const taskOutcomeById = new Map<string, AgentTerminalOutcome | null>();
 	let leafId: string | undefined;
 	let leafTimestamp: number | undefined;
 	try {
@@ -177,6 +179,13 @@ async function readPersistedAgentHistory(
 						role: typeof record.role === "string" ? record.role : undefined,
 						resolvedModelIsFallback: record.resolvedModelIsFallback === true,
 					});
+					return;
+				}
+				if (record.type === "custom" && record.customType === AGENT_TASK_OUTCOME_ENTRY_TYPE) {
+					const outcome = recordOf(record.data)?.outcome;
+					if (outcome === null || outcome === "completed" || outcome === "failed" || outcome === "aborted") {
+						taskOutcomeById.set(id, outcome);
+					}
 					return;
 				}
 				if (record.type !== "message") return;
@@ -234,10 +243,15 @@ async function readPersistedAgentHistory(
 	let servedModel: string | undefined;
 	let latestModelChange: { model: string; resolvedModelIsFallback: boolean } | undefined;
 	let lastOutcome: AgentTerminalOutcome | undefined;
+	let taskOutcomeResolved = false;
 	const visited = new Set<string>();
 	for (let id = leafId; id && !visited.has(id); id = parents.get(id)) {
 		visited.add(id);
-		lastOutcome ??= outcomeById.get(id);
+		if (!taskOutcomeResolved && taskOutcomeById.has(id)) {
+			taskOutcomeResolved = true;
+			lastOutcome = taskOutcomeById.get(id) ?? undefined;
+		}
+		if (!taskOutcomeResolved) lastOutcome ??= outcomeById.get(id);
 		const modelChange = modelChangeById.get(id);
 		if (modelChange) {
 			latestModelChange ??= modelChange;
@@ -259,7 +273,7 @@ async function readPersistedAgentHistory(
 		}
 		const assistant = assistantById.get(id);
 		if (!assistant) continue;
-		lastOutcome ??= assistant.outcome;
+		if (!taskOutcomeResolved) lastOutcome ??= assistant.outcome;
 		if (servedModel === undefined && assistant.served && assistant.resolvedModel) {
 			servedModel = assistant.resolvedModel;
 		}

@@ -42,7 +42,12 @@ import subagentAsyncPendingTemplate from "../prompts/system/subagent-async-pendi
 import subagentSystemPromptTemplate from "../prompts/system/subagent-system-prompt.md" with { type: "text" };
 import submitReminderTemplate from "../prompts/system/subagent-yield-reminder.md" with { type: "text" };
 import { AgentLifecycleManager, type AgentReviver } from "../registry/agent-lifecycle";
-import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
+import {
+	AgentRegistry,
+	type AgentTerminalOutcome,
+	MAIN_AGENT_ID,
+	recordAgentTaskOutcome,
+} from "../registry/agent-registry";
 import { ensurePersistedRoster, isCurrentSessionRosterRef } from "../registry/persisted-agents";
 import { type CreateAgentSessionOptions, createAgentSession, discoverAuthStorage } from "../sdk";
 import type { AgentSession, AgentSessionEvent, Prewalk } from "../session/agent-session";
@@ -91,6 +96,24 @@ export type { YieldItem } from "./types";
 
 const MCP_CALL_TIMEOUT_MS = 60_000;
 const TASK_ABORT_CLEANUP_GRACE_MS = 10_000;
+
+function terminalOutcome(result: { aborted?: boolean; exitCode: number }): AgentTerminalOutcome {
+	return result.aborted ? "aborted" : result.exitCode === 0 ? "completed" : "failed";
+}
+
+async function recordPersistedAgentTaskOutcome(
+	sessionFile: string,
+	initialCwd: string,
+	outcome: AgentTerminalOutcome,
+): Promise<void> {
+	const sessionManager = await SessionManager.open(sessionFile, undefined, undefined, {
+		initialCwd,
+		suppressBreadcrumb: true,
+	});
+	recordAgentTaskOutcome({ sessionManager }, outcome);
+	await sessionManager.close();
+	sessionManager.releaseRetainedEntries();
+}
 
 /**
  * Soft per-agent request budgets (assistant requests per run). Crossing the
@@ -2389,6 +2412,8 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 	const index = options.index ?? 0;
 	const maxRuntimeMs = options.maxRuntimeMs ?? 0;
 	session.setIrcWakeTurnObserver(records => {
+		recordAgentTaskOutcome(session, null);
+		AgentRegistry.global().clearLastOutcome(id, session);
 		const ircTask =
 			records
 				.map(record => {
@@ -2453,7 +2478,7 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 						: undefined;
 			turnMonitor.finish();
 			try {
-				await finalizeRunResult({
+				const result = await finalizeRunResult({
 					monitor: turnMonitor,
 					done: {
 						exitCode: aborted || error ? 1 : 0,
@@ -2480,6 +2505,9 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 					sessionFile,
 					startTime: turnStartTime,
 				});
+				const outcome = terminalOutcome(result);
+				recordAgentTaskOutcome(session, outcome);
+				AgentRegistry.global().setHistory(id, { lastOutcome: outcome });
 			} catch (finalizeError) {
 				logger.warn("IRC subagent turn finalization failed", {
 					id,
@@ -2662,6 +2690,7 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 	const session = await AgentLifecycleManager.global().ensureLive(id);
 	const ref = AgentRegistry.global().get(id);
 	AgentRegistry.global().clearLastOutcome(id, session);
+	recordAgentTaskOutcome(session, null);
 	const sessionFile = ref?.sessionFile ?? undefined;
 
 	const monitor = createSubagentRunMonitor({
@@ -2734,9 +2763,9 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 		sessionFile,
 		startTime,
 	});
-	AgentRegistry.global().setHistory(id, {
-		lastOutcome: result.aborted ? "aborted" : result.exitCode === 0 ? "completed" : "failed",
-	});
+	const outcomeResult = terminalOutcome(result);
+	recordAgentTaskOutcome(session, outcomeResult);
+	AgentRegistry.global().setHistory(id, { lastOutcome: outcomeResult });
 	return result;
 }
 
@@ -2904,6 +2933,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 	const progress = monitor.progress;
 	let unsubscribe: (() => void) | null = null;
 	let reviveSession: AgentReviver | null = null;
+	let recordedTerminalOutcome: AgentTerminalOutcome | undefined;
 	const installIrcWakeTurnMonitor = (target: AgentSession): void => {
 		attachIrcWakeTurnMonitor(target, {
 			id,
@@ -3541,6 +3571,8 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			const session = monitor.takeActiveSession();
 			if (session) {
 				monitor.captureSalvage(session);
+				recordedTerminalOutcome = terminalOutcome({ aborted, exitCode });
+				recordAgentTaskOutcome(session, recordedTerminalOutcome);
 				if (options.keepAlive !== false && worktree === undefined) {
 					installIrcWakeTurnMonitor(session);
 				}
@@ -3649,9 +3681,18 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		sessionFile: subtaskSessionFile,
 		startTime,
 	});
+	const finalOutcome = terminalOutcome(result);
+	if (recordedTerminalOutcome !== undefined && recordedTerminalOutcome !== finalOutcome) {
+		const liveSession = AgentRegistry.global().get(id)?.session;
+		if (liveSession) {
+			recordAgentTaskOutcome(liveSession, finalOutcome);
+		} else if (subtaskSessionFile) {
+			await recordPersistedAgentTaskOutcome(subtaskSessionFile, cwd, finalOutcome);
+		}
+	}
 	AgentRegistry.global().setHistory(id, {
 		outputPath: result.outputPath,
-		lastOutcome: result.aborted ? "aborted" : result.exitCode === 0 ? "completed" : "failed",
+		lastOutcome: finalOutcome,
 	});
 	return result;
 }

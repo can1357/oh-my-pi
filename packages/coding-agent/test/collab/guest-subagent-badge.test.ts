@@ -42,6 +42,20 @@ function makeAgents(ids: string[]): AgentSnapshot[] {
 	}));
 }
 
+function settledAgent(lastOutcome?: AgentSnapshot["lastOutcome"]): AgentSnapshot {
+	return {
+		id: "settled-agent",
+		displayName: "Settled Agent",
+		kind: "sub",
+		parentId: "Main",
+		status: "idle",
+		lastOutcome,
+		hasSessionFile: true,
+		createdAt: 900,
+		lastActivity: 950,
+	};
+}
+
 function makeGuestContext(counts: number[]): InteractiveModeContext {
 	let statusLineCount = 0;
 	const ctx = {
@@ -123,7 +137,7 @@ describe("collab guest running-subagents badge", () => {
 		const link = formatCollabLink("ws://localhost:8788", roomId, roomKey);
 		const hostSocket = new CollabSocket({ wsUrl: `ws://localhost:8788/r/${roomId}`, role: "host", key: cryptoKey });
 		const hostOpen = Promise.withResolvers<void>();
-		let nextWelcomeAgents = makeAgents(["remote-one"]);
+		let nextWelcomeAgents = [...makeAgents(["remote-one"]), settledAgent("failed")];
 		const sendWelcome = (agents: AgentSnapshot[]) => {
 			hostSocket.send({
 				t: "welcome",
@@ -150,8 +164,9 @@ describe("collab guest running-subagents badge", () => {
 			expect(ctx.collabGuest).toBe(guest);
 			expect(counts).toEqual([0, 1]);
 			expect(ctx.statusLine.subagentCount).toBe(1);
+			expect(getRunningSubagentBadgeRegistry(guest)?.get("settled-agent")?.history?.lastOutcome).toBe("failed");
 
-			nextWelcomeAgents = makeAgents(["remote-one", "remote-two"]);
+			nextWelcomeAgents = [...makeAgents(["remote-one", "remote-two"]), settledAgent()];
 			const secondSnapshot = Promise.withResolvers<void>();
 			const originalSync = ctx.syncRunningSubagentBadge.bind(ctx);
 			ctx.syncRunningSubagentBadge = () => {
@@ -161,6 +176,7 @@ describe("collab guest running-subagents badge", () => {
 			sendWelcome(nextWelcomeAgents);
 			await secondSnapshot.promise;
 			expect(ctx.statusLine.subagentCount).toBe(2);
+			expect(getRunningSubagentBadgeRegistry(guest)?.get("settled-agent")?.history?.lastOutcome).toBeUndefined();
 
 			await guest.leave("test cleanup");
 			expect(ctx.collabGuest).toBeUndefined();

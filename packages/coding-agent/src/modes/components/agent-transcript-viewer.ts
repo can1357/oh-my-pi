@@ -20,7 +20,7 @@ import { formatDuration, formatNumber, logger } from "@oh-my-pi/pi-utils";
 import type { KeyId } from "../../config/keybindings";
 import type { MessageRenderer } from "../../extensibility/extensions/types";
 import type { AgentLifecycleManager } from "../../registry/agent-lifecycle";
-import type { AgentRegistry, AgentStatus } from "../../registry/agent-registry";
+import { type AgentRegistry, type AgentStatus, runTrackedAgentTaskTurn } from "../../registry/agent-registry";
 import type { FileEntry, SessionMessageEntry } from "../../session/session-entries";
 import { parseSessionEntries } from "../../session/session-loader";
 import { replaceTabs, shortenPath, truncateToWidth } from "../../tools/render-utils";
@@ -536,9 +536,17 @@ export class AgentTranscriptViewer implements Component {
 			try {
 				// Revives a parked agent; returns the live session for running/idle.
 				const session = await lifecycle().ensureLive(id);
-				this.deps.registry.clearLastOutcome(id, session);
-				// Steers a mid-turn agent; sends a normal prompt to an idle one.
-				await session.prompt(trimmed, { streamingBehavior: "steer" });
+				if (session.isStreaming) {
+					await session.prompt(trimmed, { streamingBehavior: "steer" });
+				} else {
+					await runTrackedAgentTaskTurn(
+						this.deps.registry,
+						id,
+						session,
+						() => session.prompt(trimmed, { streamingBehavior: "steer" }),
+						state => this.deps.observers?.setTaskOutcomeState(id, state),
+					);
+				}
 			} catch (error) {
 				this.#notice = error instanceof Error ? error.message : String(error);
 			}

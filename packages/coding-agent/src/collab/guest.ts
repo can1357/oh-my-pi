@@ -638,6 +638,11 @@ export class CollabGuestLink {
 				ref.lastActivity = snap.lastActivity;
 				ref.displayName = snap.displayName;
 			}
+			if (snap.lastOutcome) {
+				this.agentRegistry.setHistory(snap.id, { lastOutcome: snap.lastOutcome });
+			} else {
+				this.agentRegistry.clearLastOutcome(snap.id);
+			}
 			this.#agentHasTranscript.set(snap.id, snap.hasSessionFile);
 		}
 	}

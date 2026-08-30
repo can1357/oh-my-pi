@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import * as path from "node:path";
-import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
+import { AGENT_TASK_OUTCOME_ENTRY_TYPE, AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { registerPersistedSubagents } from "@oh-my-pi/pi-coding-agent/registry/persisted-agents";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
@@ -39,6 +39,17 @@ function modelChange(id: string, parentId: string, model: string, role: string, 
 		model,
 		role,
 		resolvedModelIsFallback: isFallback,
+	});
+}
+
+function taskOutcome(id: string, parentId: string, outcome: "completed" | "failed" | "aborted" | null): string {
+	return JSON.stringify({
+		type: "custom",
+		id,
+		parentId,
+		timestamp: "2026-08-07T11:00:02.000Z",
+		customType: AGENT_TASK_OUTCOME_ENTRY_TYPE,
+		data: { outcome },
 	});
 }
 
@@ -249,5 +260,44 @@ describe("persisted agent model attribution", () => {
 		]);
 
 		expect(registry.get("CompletedWorker")?.history?.lastOutcome).toBe("completed");
+	});
+
+	it("prefers the explicit finalized task verdict over a successful yield heuristic", async () => {
+		using tempDir = TempDir.createSync("@omp-attribution-final-outcome-");
+		const registry = await historyFor(tempDir.path(), "FailedWorker", [
+			...transcriptHead(),
+			assistant("a1", "si", SONNET, "toolUse", [
+				{ type: "toolCall", id: "yield-1", name: "yield", arguments: { result: { data: { ok: true } } } },
+			]),
+			JSON.stringify({
+				type: "message",
+				id: "r1",
+				parentId: "a1",
+				timestamp: "2026-08-07T11:00:01.000Z",
+				message: {
+					role: "toolResult",
+					toolCallId: "yield-1",
+					toolName: "yield",
+					content: [{ type: "text", text: "Result submitted." }],
+					details: { status: "success", data: { ok: true } },
+					isError: false,
+				},
+			}),
+			taskOutcome("o1", "r1", "failed"),
+		]);
+
+		expect(registry.get("FailedWorker")?.history?.lastOutcome).toBe("failed");
+	});
+
+	it("restores an in-progress marker without reviving an older task verdict", async () => {
+		using tempDir = TempDir.createSync("@omp-attribution-active-outcome-");
+		const registry = await historyFor(tempDir.path(), "ActiveWorker", [
+			...transcriptHead(),
+			assistant("a1", "si", SONNET, "stop", [{ type: "text", text: "first task done" }]),
+			taskOutcome("o1", "a1", "completed"),
+			taskOutcome("o2", "o1", null),
+		]);
+
+		expect(registry.get("ActiveWorker")?.history?.lastOutcome).toBeUndefined();
 	});
 });

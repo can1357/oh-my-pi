@@ -241,6 +241,8 @@ export interface AgentSnapshot {
 	kind: "main" | "sub";
 	parentId?: string;
 	status: "running" | "idle" | "parked" | "aborted";
+	/** Latest finalized task outcome, independent from the reusable session lifecycle. */
+	lastOutcome?: "completed" | "failed" | "aborted";
 	/** Whether the host has a transcript file for this agent (gates remote transcript fetch). */
 	hasSessionFile: boolean;
 	createdAt: number;

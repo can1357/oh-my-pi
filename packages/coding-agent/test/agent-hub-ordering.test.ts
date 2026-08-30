@@ -13,8 +13,10 @@ import { type AgentHubDeps, AgentHubOverlayComponent } from "@oh-my-pi/pi-coding
 import { agentDisplayState } from "@oh-my-pi/pi-coding-agent/modes/components/agent-hub-projection";
 import { SessionObserverRegistry } from "@oh-my-pi/pi-coding-agent/modes/session-observer-registry";
 import { initTheme, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
-import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
-import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { AgentRegistry, runTrackedAgentTaskTurn } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
+import type { AgentSession, AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { TASK_SUBAGENT_LIFECYCLE_CHANNEL } from "@oh-my-pi/pi-coding-agent/task";
+import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { visibleWidth } from "@oh-my-pi/pi-tui/utils";
 
 interface GeometryStub {
@@ -1150,5 +1152,94 @@ describe("Agent hub row ordering", () => {
 		expect(agentDisplayState({ ...ref, session: { isStreaming: true } as AgentSession })).toBe("running");
 		expect(agents.clearLastOutcome(ref.id, session)).toBe(true);
 		expect(agentDisplayState(ref)).toBe("idle");
+	});
+
+	it("invalidates observer outcomes only after a follow-up turn starts", async () => {
+		const agents = new AgentRegistry();
+		const observerStates: string[] = [];
+		const observers = new SessionObserverRegistry();
+		const eventBus = new EventBus();
+		observers.subscribeToEventBus(eventBus, eventBus);
+		eventBus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
+			id: "FollowUpAgent",
+			index: 0,
+			agent: "task",
+			status: "failed",
+		});
+		await Promise.resolve();
+		const appended: Array<{ customType: string; data: unknown }> = [];
+		let listener: ((event: AgentSessionEvent) => void) | undefined;
+		const session = {
+			isStreaming: false,
+			sessionManager: {
+				appendCustomEntry: (customType: string, data: unknown) => {
+					appended.push({ customType, data });
+				},
+			},
+			subscribe: (next: (event: AgentSessionEvent) => void) => {
+				listener = next;
+				return () => {
+					listener = undefined;
+				};
+			},
+			getLastAssistantMessage: () => ({ stopReason: "stop" }),
+		} as unknown as AgentSession;
+		agents.register({
+			id: "FollowUpAgent",
+			displayName: "Follow-up Agent",
+			kind: "sub",
+			session,
+			status: "idle",
+			history: { lastOutcome: "failed" },
+		});
+
+		await runTrackedAgentTaskTurn(
+			agents,
+			"FollowUpAgent",
+			session,
+			async () => {
+				expect(agents.get("FollowUpAgent")?.history?.lastOutcome).toBe("failed");
+				listener?.({ type: "agent_start" } as AgentSessionEvent);
+				expect(agents.get("FollowUpAgent")?.history?.lastOutcome).toBeUndefined();
+				expect(observers.getSession("FollowUpAgent")?.status).toBe("active");
+				return true;
+			},
+			state => {
+				observerStates.push(state);
+				observers.setTaskOutcomeState("FollowUpAgent", state);
+			},
+		);
+		expect(observers.getSession("FollowUpAgent")?.status).toBe("completed");
+
+		expect(observerStates).toEqual(["active", "completed"]);
+		expect(agents.get("FollowUpAgent")?.history?.lastOutcome).toBe("completed");
+		expect(appended.map(entry => entry.data)).toEqual([{ outcome: null }, { outcome: "completed" }]);
+	});
+
+	it("retains the prior outcome when follow-up prompt dispatch is rejected", async () => {
+		const agents = new AgentRegistry();
+		const appended: unknown[] = [];
+		const session = {
+			isStreaming: false,
+			sessionManager: { appendCustomEntry: (_customType: string, data: unknown) => appended.push(data) },
+			subscribe: () => () => {},
+			getLastAssistantMessage: () => ({ stopReason: "stop" }),
+		} as unknown as AgentSession;
+		agents.register({
+			id: "RejectedAgent",
+			displayName: "Rejected Agent",
+			kind: "sub",
+			session,
+			status: "idle",
+			history: { lastOutcome: "failed" },
+		});
+
+		await expect(
+			runTrackedAgentTaskTurn(agents, "RejectedAgent", session, async () => {
+				throw new Error("prompt rejected");
+			}),
+		).rejects.toThrow("prompt rejected");
+		expect(agents.get("RejectedAgent")?.history?.lastOutcome).toBe("failed");
+		expect(appended).toEqual([]);
 	});
 });

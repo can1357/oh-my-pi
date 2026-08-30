@@ -3,6 +3,7 @@ import { AgentBusyError, type AgentTelemetryConfig, type Tracer } from "@oh-my-p
 import { type AssistantMessage, Effort } from "@oh-my-pi/pi-ai";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ExtensionActions, LoadExtensionsResult } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
+import { AGENT_TASK_OUTCOME_ENTRY_TYPE } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { CreateAgentSessionResult } from "@oh-my-pi/pi-coding-agent/sdk";
 import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession, AgentSessionEvent, PromptOptions } from "@oh-my-pi/pi-coding-agent/session/agent-session";
@@ -623,6 +624,54 @@ describe("runSubprocess yield reminders", () => {
 		expect(result.aborted).toBe(false);
 		expect(result.stderr).toBe(SUBAGENT_WARNING_MISSING_YIELD);
 		expect(result.abortReason).toBeUndefined();
+	});
+
+	it("persists the final failed verdict after strict validation rejects a successful yield", async () => {
+		const outcomes: Array<"completed" | "failed" | "aborted" | null> = [];
+		const session = createMockSession(({ emit, state }) => {
+			const assistant = createAssistantStopMessage("submitted");
+			state.messages.push(assistant);
+			emit({ type: "message_end", message: assistant });
+			emit({
+				type: "tool_execution_end",
+				toolCallId: "tool-invalid-yield",
+				toolName: "yield",
+				result: {
+					content: [{ type: "text", text: "Result submitted." }],
+					details: { status: "success", data: { ok: "wrong" }, schemaOverridden: true },
+				},
+				isError: false,
+			});
+		});
+		session.sessionManager.appendCustomEntry = (customType, data) => {
+			if (
+				customType === AGENT_TASK_OUTCOME_ENTRY_TYPE &&
+				data !== null &&
+				typeof data === "object" &&
+				"outcome" in data
+			) {
+				const outcome = data.outcome;
+				if (outcome === null || outcome === "completed" || outcome === "failed" || outcome === "aborted") {
+					outcomes.push(outcome);
+				}
+			}
+			return "outcome-entry";
+		};
+		mockCreateAgentSession(session);
+
+		const result = await runSubprocess({
+			...baseOptions,
+			id: "subagent-strict-finalization",
+			outputSchema: {
+				type: "object",
+				properties: { ok: { type: "boolean" } },
+				required: ["ok"],
+			},
+			outputSchemaMode: "strict",
+		});
+
+		expect(result.exitCode).toBe(1);
+		expect(outcomes).toEqual(["failed"]);
 	});
 
 	it("surfaces abort reason when yield reports aborted status", async () => {

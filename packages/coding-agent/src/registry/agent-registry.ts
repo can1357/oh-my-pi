@@ -54,6 +54,21 @@ export interface AgentMetricsSummary {
 
 export type AgentTerminalOutcome = "completed" | "failed" | "aborted";
 
+/** Custom session entry whose latest value supersedes heuristic task-outcome reconstruction. */
+export const AGENT_TASK_OUTCOME_ENTRY_TYPE = "agent_task_outcome";
+
+/** Persist or invalidate the latest finalized task outcome on the agent's active transcript branch. */
+export function recordAgentTaskOutcome(
+	session: Pick<AgentSession, "sessionManager">,
+	outcome: AgentTerminalOutcome | null,
+): void {
+	const appendCustomEntry = session.sessionManager.appendCustomEntry;
+	// Lightweight embedders and unit doubles may expose only the session-init
+	// subset of SessionManager. They still receive the in-memory history update.
+	if (typeof appendCustomEntry !== "function") return;
+	appendCustomEntry.call(session.sessionManager, AGENT_TASK_OUTCOME_ENTRY_TYPE, { outcome });
+}
+
 /** Historical identity and telemetry that remain available after the live session is disposed. */
 export interface AgentHistorySummary {
 	agent?: string;
@@ -323,5 +338,48 @@ export class AgentRegistry {
 				// listeners must not break the dispatch loop
 			}
 		}
+	}
+}
+
+export type AgentTaskOutcomeState = "active" | AgentTerminalOutcome;
+
+/**
+ * Track a user-driven turn on a reusable agent session without erasing the
+ * previous task verdict until the session confirms that a new turn started.
+ */
+export async function runTrackedAgentTaskTurn(
+	registry: AgentRegistry,
+	id: string,
+	session: AgentSession,
+	dispatch: () => Promise<boolean>,
+	onState?: (state: AgentTaskOutcomeState) => void,
+): Promise<boolean> {
+	let started = false;
+	const finalize = (outcome: AgentTerminalOutcome): void => {
+		recordAgentTaskOutcome(session, outcome);
+		registry.setHistory(id, { lastOutcome: outcome });
+		onState?.(outcome);
+	};
+	const unsubscribe = session.subscribe(event => {
+		if (event.type !== "agent_start" || started) return;
+		started = true;
+		recordAgentTaskOutcome(session, null);
+		registry.clearLastOutcome(id, session);
+		onState?.("active");
+	});
+	try {
+		const accepted = await dispatch();
+		if (!accepted) return false;
+		const stopReason = session.getLastAssistantMessage()?.stopReason;
+		finalize(stopReason === "aborted" ? "aborted" : stopReason === "error" ? "failed" : "completed");
+		return true;
+	} catch (error) {
+		if (started) {
+			const stopReason = session.getLastAssistantMessage()?.stopReason;
+			finalize(stopReason === "aborted" ? "aborted" : "failed");
+		}
+		throw error;
+	} finally {
+		unsubscribe();
 	}
 }
