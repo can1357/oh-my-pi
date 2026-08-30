@@ -127,14 +127,18 @@ function isResponseEnvelope(message: Record<string, unknown>): boolean {
 	if (typeof id !== "string" && typeof id !== "number" && id !== null) return false;
 	const hasResult = "result" in message;
 	const error = message.error;
-	const hasError =
-		error !== undefined &&
-		error !== null &&
-		typeof error === "object" &&
-		!Array.isArray(error) &&
-		typeof (error as Record<string, unknown>).code === "number" &&
-		typeof (error as Record<string, unknown>).message === "string";
-	return hasResult !== hasError;
+	// A present error member must be shape-valid; result and error members
+	// must be mutually exclusive, so both-present frames never pass.
+	if (error !== undefined) {
+		return (
+			typeof error === "object" &&
+			!Array.isArray(error) &&
+			typeof (error as Record<string, unknown>).code === "number" &&
+			typeof (error as Record<string, unknown>).message === "string" &&
+			!hasResult
+		);
+	}
+	return hasResult;
 }
 
 function requestId(value: unknown): JsonRpcId {
