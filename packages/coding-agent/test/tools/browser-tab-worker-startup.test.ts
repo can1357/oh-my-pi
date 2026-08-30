@@ -1,4 +1,8 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+
+// Browser global read inside page.evaluate callbacks; absent from bun-types.
+declare const devicePixelRatio: number;
+
 import {
 	acquireBrowser,
 	type BrowserHandle,
@@ -6,7 +10,11 @@ import {
 	releaseBrowser,
 } from "@oh-my-pi/pi-coding-agent/tools/browser/registry";
 import type { ReadyInfo, WorkerInbound, WorkerOutbound } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-protocol";
-import { acquireTab, initializeTabWorkerForTest } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
+import {
+	acquireTab,
+	initializeTabWorkerForTest,
+	releaseTab,
+} from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
 import { chromiumAvailable } from "./chromium-probe";
 
 const CHROMIUM_AVAILABLE = await chromiumAvailable();
@@ -206,5 +214,76 @@ describe("browser init deadline carry-over", () => {
 			}
 		},
 		30_000,
+	);
+});
+describe("visible OMP-owned browser tabs", () => {
+	it.skipIf(!CHROMIUM_AVAILABLE)(
+		"creates independent pages without pinning the resizable window viewport",
+		async () => {
+			let browser: BrowserHandle | undefined;
+			const names: string[] = [];
+			try {
+				browser = await acquireBrowser({ kind: "headless", headless: false }, { cwd: process.cwd() });
+				if (!("browser" in browser)) throw new Error("Expected a Puppeteer browser");
+				// Shared broker launches use --no-startup-window. Mirror that empty
+				// target set even though bun tests use the process-local launcher.
+				for (const page of await browser.browser.pages()) await page.close();
+				expect(await browser.browser.pages()).toHaveLength(0);
+
+				const firstName = `visible-owned-a-${process.pid}-${Math.random().toString(36).slice(2)}`;
+				const firstUrl = `data:text/html,<title>${firstName}</title><main>first</main>`;
+				const first = await acquireTab(firstName, browser, { url: firstUrl, timeoutMs: 30_000 });
+				names.push(firstName);
+				const firstPage = (await browser.browser.pages()).find(page => page.url() === firstUrl);
+				if (!firstPage) throw new Error("Expected the first managed page");
+
+				const before = await firstPage.evaluate(() => ({ width: innerWidth, height: innerHeight }));
+				const client = await firstPage.createCDPSession();
+				const { windowId } = await client.send("Browser.getWindowForTarget");
+				await client.send("Browser.setWindowBounds", { windowId, bounds: { width: 1700, height: 1000 } });
+				const after = await firstPage.evaluate(() => ({ width: innerWidth, height: innerHeight }));
+				expect(after.width).toBeGreaterThan(before.width + 100);
+				expect(after.height).toBeGreaterThan(before.height + 100);
+
+				const secondName = `visible-owned-b-${process.pid}-${Math.random().toString(36).slice(2)}`;
+				const secondUrl = `data:text/html,<title>${secondName}</title><main>second</main>`;
+				const second = await acquireTab(secondName, browser, { url: secondUrl, timeoutMs: 30_000 });
+				names.push(secondName);
+				expect(second.tab.targetId).not.toBe(first.tab.targetId);
+				expect(firstPage.url()).toBe(firstUrl);
+			} finally {
+				for (const name of names.reverse()) await releaseTab(name, { kill: true });
+				if (browser && "browser" in browser && browser.browser.connected) {
+					await releaseBrowser(browser, { kill: true });
+				}
+			}
+		},
+		45_000,
+	);
+	it.skipIf(!CHROMIUM_AVAILABLE)(
+		"keeps deterministic viewport emulation for hidden launches",
+		async () => {
+			let browser: BrowserHandle | undefined;
+			const name = `hidden-viewport-${process.pid}-${Math.random().toString(36).slice(2)}`;
+			let opened = false;
+			try {
+				browser = await acquireBrowser({ kind: "headless", headless: true }, { cwd: process.cwd() });
+				if (!("browser" in browser)) throw new Error("Expected a Puppeteer browser");
+				const url = `data:text/html,<title>${name}</title><main>hidden</main>`;
+				await acquireTab(name, browser, { url, timeoutMs: 30_000 });
+				opened = true;
+				const page = (await browser.browser.pages()).find(candidate => candidate.url() === url);
+				if (!page) throw new Error("Expected the managed hidden page");
+				expect(
+					await page.evaluate(() => ({ width: innerWidth, height: innerHeight, dpr: devicePixelRatio })),
+				).toEqual({ width: 1365, height: 768, dpr: 1.25 });
+			} finally {
+				if (opened) await releaseTab(name, { kill: true });
+				else if (browser && "browser" in browser && browser.browser.connected) {
+					await releaseBrowser(browser, { kill: true });
+				}
+			}
+		},
+		45_000,
 	);
 });

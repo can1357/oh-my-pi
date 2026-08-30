@@ -8,6 +8,7 @@ import {
 	STREAM_ENVELOPE_ERROR_PREFIX,
 } from "./classes";
 import {
+	is402BillingCapBody,
 	isAccountScopedCapText,
 	isDashScopeTokenLimitText,
 	isOpaqueStatusBody,
@@ -153,7 +154,7 @@ function matchesPayloadRejectionText(text: string): boolean {
 
 const TIMEOUT_PATTERN = /\b(?:operation\s+)?timed?\s*out\b|\btimeout\b|\bstream stall\b/i;
 const TRANSIENT_ENVELOPE_PATTERN = /anthropic stream envelope error:/i;
-const TRANSIENT_ENVELOPE_BEFORE_START_PATTERN = /before message_start/i;
+const TRANSIENT_ENVELOPE_TRUNCATION_PATTERN = /before message_(?:start|stop)/i;
 export const STREAM_READ_ERROR_PATTERN = /stream[_ -]?read[_ -]?error/i;
 export const TRANSIENT_TRANSPORT_PATTERN =
 	/\b(?:no[_ -]?capacity|(?:high|peak)[ _-]?demand|(?:at|over|insufficient)[ _-]?capacity|capacity[ _-]?(?:exceeded|exhausted)|peak[ _-]?load)\b|overloaded|provider.?returned.?error|rate.?limit|too many requests|\b(?:429|500|502|503|504)\b|service.?unavailable|server.?error|internal.?error|retry your request|network.?error|connection.?error|connection.?refused|unable.?to.?connect\.\s*is the computer able to access the url\?|other side closed|fetch failed|upstream.?connect|upstream.?request.?failed|reset before headers|socket hang up|timed? out|timeout|terminated|retry delay|stream stall|no error details in response|HTTP2(?:StreamReset|RefusedStream|EnhanceYourCalm)|nghttp2_(?:internal_error|refused_stream)|stream closed with error code nghttp2_(?:internal_error|refused_stream)|malformed.?function.?call/i;
@@ -404,7 +405,7 @@ function isTransientErrorText(text: string): boolean {
 	return (
 		isUnexpectedSocketCloseMessage(text) ||
 		isStreamReadErrorText(text) ||
-		(TRANSIENT_ENVELOPE_PATTERN.test(text) && TRANSIENT_ENVELOPE_BEFORE_START_PATTERN.test(text)) ||
+		(TRANSIENT_ENVELOPE_PATTERN.test(text) && TRANSIENT_ENVELOPE_TRUNCATION_PATTERN.test(text)) ||
 		TRANSIENT_TRANSPORT_PATTERN.test(text)
 	);
 }
@@ -471,26 +472,24 @@ function classifyText(
 
 		const isLimitStatus = isUsageLimitStatus(statusClean);
 		const reason = parseRateLimitReason(cleanMessage);
+		const is402BillingCap = statusClean === 402 && is402BillingCapBody(cleanMessage);
 		// Concurrency caps (e.g. Vertex "Online prediction concurrent requests
 		// quota exceeded") are shed-and-backoff, not credential-rotatable —
 		// exclude them even when the quota-worded phrasing matches the generic
 		// usage-limit text matcher, whose `quota.?exceeded` arm would otherwise
 		// set Flag.UsageLimit and burn a healthy sibling credential. HTTP 402 is
-		// excluded from this gate: it is categorically an account-billing cap, so
-		// a 402 whose body merely mentions concurrency still classifies as a
-		// usage limit, mirroring isUsageLimitOutcome.
-		const isBillingCapStatus = statusClean === 402;
-		const concurrencyExcluded = reason === "CONCURRENT_LIMIT" && !isBillingCapStatus;
+		// excluded from this gate: a 402 whose body merely mentions concurrency
+		// still classifies as a usage limit, mirroring isUsageLimitOutcome.
+		const concurrencyExcluded = reason === "CONCURRENT_LIMIT" && statusClean !== 402;
 		if (
 			!concurrencyExcluded &&
-			(matchesUsageLimitText(cleanMessage) ||
+			(is402BillingCap ||
+				matchesUsageLimitText(cleanMessage) ||
 				((statusClean === 403 || statusClean === undefined) && isAccountScopedCapText(cleanMessage)) ||
-				(isLimitStatus &&
-					(isOpaque || reason === "QUOTA_EXHAUSTED" || (isBillingCapStatus && reason === "CONCURRENT_LIMIT"))))
+				(isLimitStatus && (isOpaque || reason === "QUOTA_EXHAUSTED")))
 		) {
 			kinds |= Flag.UsageLimit;
 		}
-
 		if (isTimeoutText(errorMessage)) kinds |= Flag.Transient | Flag.Timeout;
 		else if (isTransientErrorText(errorMessage)) kinds |= Flag.Transient;
 		// A concurrency cap (e.g. Vertex "Online prediction concurrent requests
@@ -518,6 +517,9 @@ function classifyText(
 		!(errorMessage && hasTokenContextOverflowEvidence(errorMessage))
 	) {
 		kinds |= Flag.PayloadRejected;
+	}
+	if (statusEvidence === 402 && (errorMessage === undefined || isOpaqueStatusBody(errorMessage))) {
+		kinds |= Flag.UsageLimit;
 	}
 	if (kinds !== 0) return create(kinds);
 	const fallbackStatus = errorStatus ?? (errorMessage ? status({ message: errorMessage }) : undefined);
@@ -567,7 +569,9 @@ export function classify(error: unknown, api?: Api): number {
 			const { status: codeStatus, code } = link;
 			if (
 				code === "usage_limit_reached" ||
-				(code === "insufficient_quota" && !isDashScopeTokenLimitText(link.message))
+				(code === "insufficient_quota" && !isDashScopeTokenLimitText(link.message)) ||
+				(codeStatus === 402 &&
+					(code === "payment_required" || code === "deactivated_workspace" || is402BillingCapBody(link.message)))
 			) {
 				linkKinds |= Flag.UsageLimit;
 			}
@@ -705,6 +709,18 @@ function providerErrorCode(error: object): string | undefined {
 		node = nested;
 	}
 	return undefined;
+}
+
+const CLINE_PASS_SURFACE_GATE_PATTERN = /only available via cline product surfaces/i;
+
+/**
+ * Cline's gateway gates some roster entries (certain free-tier models) to its
+ * own product surfaces with a 403. The API key is valid — the restriction is
+ * per-model client policy — so it must neither rotate sibling credentials (they
+ * fail identically) nor surface as an auth failure.
+ */
+export function isClinePassSurfaceGateMessage(errorMessage: string | undefined): boolean {
+	return errorMessage !== undefined && CLINE_PASS_SURFACE_GATE_PATTERN.test(errorMessage);
 }
 
 /**
