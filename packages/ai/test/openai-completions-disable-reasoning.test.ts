@@ -206,6 +206,37 @@ describe("OpenAI completions disableReasoning and thinking dialects", () => {
 		const payload = (await promise) as Record<string, unknown>;
 		expect(payload.chat_template_kwargs).toEqual({ enable_thinking: true });
 	});
+
+	it("keeps Qwen chat-template reasoning disabled when extraBody carries a nested override", async () => {
+		const model = buildModel({
+			id: "qwen-ct-extra-body-reasoner",
+			name: "Qwen Chat Template Extra Body Reasoner",
+			api: "openai-completions",
+			provider: "custom",
+			baseUrl: "https://proxy.example.com/v1",
+			reasoning: true,
+			compat: {
+				thinkingFormat: "qwen-chat-template",
+				supportsReasoningParams: true,
+				extraBody: {
+					chat_template_kwargs: {
+						enable_thinking: true,
+						reasoning_effort: "high",
+						custom_template_option: "keep-me",
+					},
+					gateway: "route-a",
+				},
+			},
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 128_000,
+			maxTokens: 16_384,
+		});
+
+		const payload = await captureDisableReasoningPayload(model);
+		expect(payload.chat_template_kwargs).toEqual({ enable_thinking: false, custom_template_option: "keep-me" });
+		expect(payload.gateway).toBe("route-a");
+	});
 	it("does not emit enable_thinking or chat_template_kwargs for the bundled Fireworks Qwen model without reasoning", async () => {
 		// Reproduces the raw 400 from `fireworks/qwen3.7-plus`: before the fix the
 		// `qwen/*` id pattern forced `thinkingFormat: "qwen"`, so an effort-less

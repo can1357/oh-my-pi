@@ -94,6 +94,8 @@
 
 ### Fixed
 
+- Fixed chat-template reasoning dialects that expose only a binary `enable_thinking` toggle showing a fake multi-tier effort ladder in the picker; the ladder now collapses to one selectable tier when no effort field reaches the wire.
+- Fixed effort-routed models on Qwen chat-template backends showing only one selectable thinking tier, which made all other routed upstream models unreachable; effort levels that switch between distinct upstream models now keep their tiers.
 - Fixed `opencode-go/ox-alpha-free` sending `reasoning_effort: "xhigh"` for the top thinking tier, which the OpenCode Go gateway rejects; the model now uses the gateway's wire-exact `low`/`high`/`max` ladder with mandatory thinking so `--thinking max` reaches the real max tier ([#9349](https://github.com/can1357/oh-my-pi/issues/9349)).
 - Fixed Venice-hosted Qwen models (e.g. `venice/qwen3-6-35b-a3b`) failing with `400 Invalid request parameters`. Reasoning levels now use the accepted OpenAI-style `reasoning_effort` field, while Thinking Off sends Venice's explicit `venice_parameters.disable_thinking` flag ([#9345](https://github.com/can1357/oh-my-pi/issues/9345)).
 - Fixed gateway-first OpenCode Zen and Go models missing context, output, image, and reasoning metadata by enriching live discovery from the current stencil catalog ([#9272](https://github.com/can1357/oh-my-pi/issues/9272)).

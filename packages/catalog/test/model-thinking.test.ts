@@ -1329,3 +1329,142 @@ describe("Qwen 3.8 local template effort ladder", () => {
 		expect(ollama.thinking?.efforts).toEqual([Effort.Low, Effort.Medium, Effort.High, Effort.Max]);
 	});
 });
+
+describe("qwen-chat-template binary thinking toggle collapse", () => {
+	it("collapses a bundled multi-tier ladder to one tier when the wire exposes only the enable_thinking toggle", () => {
+		// omitReasoningEffort suppresses the top-level field and
+		// qwenTemplateReasoningEffort is not set, so neither the top-level
+		// nor the chat_template_kwargs effort surface reaches the wire —
+		// every tier would otherwise produce an identical request body.
+		const model = createModel({
+			id: "qwen3.8-30b",
+			api: "openai-completions",
+			provider: "custom",
+			baseUrl: "https://strict-gateway.example.com/v1",
+			compat: {
+				thinkingFormat: "qwen-chat-template",
+				omitReasoningEffort: true,
+				qwenTemplateReasoningEffort: false,
+			},
+			thinking: {
+				mode: "effort",
+				efforts: [Effort.Low, Effort.Medium, Effort.High],
+				defaultLevel: Effort.Medium,
+			},
+		});
+
+		expect(model.thinking?.efforts).toEqual([Effort.Medium]);
+		expect(model.thinking?.effortMap).toBeUndefined();
+	});
+
+	it("keeps the full ladder only when chat_template_kwargs.reasoning_effort actually reaches the wire", () => {
+		// qwenTemplateReasoningEffort: true means the ladder still reaches
+		// the wire via chat_template_kwargs.reasoning_effort — must not collapse.
+		// (The wire-exact low/medium/xhigh tiers for this dialect are enforced
+		// independently of the collapse logic under test here.)
+		const templateEffort = createModel({
+			id: "qwen3.8-30b",
+			api: "openai-completions",
+			provider: "custom",
+			baseUrl: "http://localhost:8080/v1",
+			compat: {
+				thinkingFormat: "qwen-chat-template",
+				omitReasoningEffort: true,
+				qwenTemplateReasoningEffort: true,
+			},
+			thinking: {
+				mode: "effort",
+				efforts: [Effort.Low, Effort.Medium, Effort.High],
+			},
+		});
+		expect(templateEffort.thinking?.efforts).toEqual([Effort.Low, Effort.Medium, Effort.XHigh]);
+	});
+
+	it("collapses even when omitReasoningEffort: false, because the qwen-template-false encoder never reads that flag", () => {
+		// `omitReasoningEffort` only gates the `default` switch branch in
+		// `applyChatCompletionsCompatPolicy`; the `qwen-template-false` branch
+		// (which every qwen-chat-template model's `reasoningDisableMode`
+		// resolves to) always writes `chat_template_kwargs.enable_thinking`
+		// and only adds an effort kwarg when `qwenTemplateReasoningEffort` is
+		// true. A real NVIDIA NIM-hosted Qwen model reports
+		// `supportsReasoningEffort: true` (so `omitReasoningEffort` defaults
+		// to `false`) yet has no local `qwenTemplateReasoningEffort` escape
+		// hatch — every requested tier previously produced an identical
+		// request body despite the ladder claiming three selectable tiers.
+		const topLevelEffort = createModel({
+			id: "qwen3.8-30b",
+			api: "openai-completions",
+			provider: "custom",
+			baseUrl: "https://gateway.example.com/v1",
+			compat: {
+				thinkingFormat: "qwen-chat-template",
+				omitReasoningEffort: false,
+			},
+			thinking: {
+				mode: "effort",
+				efforts: [Effort.Low, Effort.Medium, Effort.High],
+				defaultLevel: Effort.Medium,
+			},
+		});
+		expect(topLevelEffort.thinking?.efforts).toEqual([Effort.Medium]);
+		expect(topLevelEffort.thinking?.effortMap).toBeUndefined();
+	});
+
+	it("keeps effort-routed tiers that resolve to distinct upstream wire ids", () => {
+		// effortRouting maps each tier to a wire model that the request
+		// serializes (resolveWireModelId), so tiers routing to distinct
+		// upstream ids are wire-distinct and must keep their ladder —
+		// collapsing would strand every routed upstream except the kept
+		// tier behind a picker that can no longer select them.
+		const routed = createModel({
+			id: "qwen3.8-30b",
+			api: "openai-completions",
+			provider: "custom",
+			baseUrl: "https://gateway.example.com/v1",
+			compat: {
+				thinkingFormat: "qwen-chat-template",
+				omitReasoningEffort: true,
+			},
+			thinking: {
+				mode: "effort",
+				efforts: [Effort.Low, Effort.Medium, Effort.High],
+				effortRouting: {
+					[Effort.Low]: "qwen3.8-30b-low",
+					[Effort.Medium]: "qwen3.8-30b-medium",
+					[Effort.High]: "qwen3.8-30b-high",
+				},
+			},
+		});
+		expect(routed.thinking?.efforts).toEqual([Effort.Low, Effort.Medium, Effort.High]);
+		expect(routed.thinking?.effortRouting).not.toBeUndefined();
+	});
+
+	it("still collapses routed ladders whose tiers all send the same wire id", () => {
+		// The variant-collapse X/X-thinking pair shape: every tier routes
+		// to the same upstream id, so tiers stay body-identical and the
+		// fake-ladder collapse must still apply.
+		const uniformlyRouted = createModel({
+			id: "qwen3.8-30b",
+			api: "openai-completions",
+			provider: "custom",
+			baseUrl: "https://gateway.example.com/v1",
+			compat: {
+				thinkingFormat: "qwen-chat-template",
+				omitReasoningEffort: true,
+			},
+			thinking: {
+				mode: "effort",
+				efforts: [Effort.Low, Effort.Medium, Effort.High],
+				defaultLevel: Effort.Medium,
+				effortRouting: {
+					off: "qwen3.8-30b",
+					[Effort.Low]: "qwen3.8-30b-thinking",
+					[Effort.Medium]: "qwen3.8-30b-thinking",
+					[Effort.High]: "qwen3.8-30b-thinking",
+				},
+			},
+		});
+		expect(uniformlyRouted.thinking?.efforts).toEqual([Effort.Medium]);
+		expect(uniformlyRouted.thinking?.effortMap).toBeUndefined();
+	});
+});

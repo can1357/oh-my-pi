@@ -720,6 +720,73 @@ export interface OpenAIExtraBodyOptions {
 	 * `reasoning_effort`; drop `thinking` when the effort field carries the level.
 	 */
 	dropThinkingWhenReasoningEffort?: boolean;
+	/**
+	 * When true, strip every reasoning-control key from `extraBody` before
+	 * merging instead of skipping the merge entirely. `extraBody` is an
+	 * arbitrary record that commonly carries gateway-routing hints and
+	 * controller fields with no relation to reasoning; dropping the whole
+	 * blob on a reasoning-disable would also drop those unrelated fields
+	 * and could misroute the request. Only the known reasoning-control keys
+	 * (`REASONING_ONLY_EXTRA_BODY_KEYS`) are removed — including top-level
+	 * dialect toggles (`enable_thinking`, `reasoning_effort`, `reasoning`)
+	 * that could otherwise re-enable reasoning after the encoder already
+	 * wrote its disabled shape; the rest flows through unchanged.
+	 */
+	reasoningDisabled?: boolean;
+}
+
+/**
+ * Reasoning-control `extraBody` keys that must not survive a reasoning
+ * disable. Covers the no-op reasoning-only fields plus every top-level
+ * dialect toggle `encodeChatCompletionsDisabledReasoning` can write
+ * (`enable_thinking`, `reasoning_effort`, `reasoning`) so a caller-supplied
+ * `extraBody` cannot re-enable reasoning via `Object.assign` after the
+ * encoder already wrote the disabled shape. Stripped from the blob before
+ * merging when `reasoningDisabled` is set; every other key (gateway
+ * routing, controller fields, …) survives. A `Set` with `.has()` avoids the
+ * prototype-lookup hazard of a plain object index (`constructor`,
+ * `toString`, … would otherwise read as inherited truthy members).
+ */
+const REASONING_ONLY_EXTRA_BODY_KEYS = new Set([
+	"thinking",
+	"parse_reasoning",
+	"include_reasoning",
+	"enable_thinking",
+	"reasoning_effort",
+	"reasoning",
+]);
+
+/**
+ * `chat_template_kwargs` can carry the same Qwen reasoning controls as the
+ * top-level request body. When the encoder has disabled reasoning, remove the
+ * nested controls before merging provider config and retain the encoder's
+ * already-written kwargs over any duplicate config values.
+ */
+const REASONING_ONLY_CHAT_TEMPLATE_KWARG_KEYS = new Set(["enable_thinking", "reasoning_effort"]);
+
+function splitReasoningDisabledExtraBody(extraBody: Record<string, unknown>): {
+	values: Record<string, unknown>;
+	chatTemplateKwargs?: Record<string, unknown>;
+} {
+	const values: Record<string, unknown> = {};
+	let chatTemplateKwargs: Record<string, unknown> | undefined;
+	for (const [key, value] of Object.entries(extraBody)) {
+		if (REASONING_ONLY_EXTRA_BODY_KEYS.has(key)) continue;
+		if (key === "chat_template_kwargs") {
+			// Only sanitize object-shaped kwargs; a non-record value (null,
+			// array, primitive) would otherwise land in `values` and clobber
+			// the encoder's disabled `chat_template_kwargs` via `Object.assign`.
+			// Drop it so the encoder shape survives.
+			if (isRecord(value)) {
+				chatTemplateKwargs = Object.fromEntries(
+					Object.entries(value).filter(([kwarg]) => !REASONING_ONLY_CHAT_TEMPLATE_KWARG_KEYS.has(kwarg)),
+				);
+			}
+			continue;
+		}
+		values[key] = value;
+	}
+	return { values, chatTemplateKwargs };
 }
 
 /**
@@ -728,6 +795,9 @@ export interface OpenAIExtraBodyOptions {
  * an explicit per-turn Thinking Off selection cannot be re-enabled by config.
  * When `dropThinkingWhenReasoningEffort` is set and `reasoning_effort` is
  * present, delete the conflicting `thinking` toggle (Fireworks rejects both).
+ * When `reasoningDisabled` is set, strip only the reasoning-control keys
+ * from the blob before merging so unrelated provider-required configuration
+ * (gateway routing, controller fields, …) still reaches the request.
  */
 export function applyOpenAIExtraBody<P extends object>(
 	params: P & { venice_parameters?: Record<string, unknown> },
@@ -736,9 +806,19 @@ export function applyOpenAIExtraBody<P extends object>(
 ): void {
 	if (!extraBody) return;
 	const encodedVeniceParameters = params.venice_parameters;
-	Object.assign(params, extraBody);
+	const { values: mergedExtraBody, chatTemplateKwargs } = options?.reasoningDisabled
+		? splitReasoningDisabledExtraBody(extraBody)
+		: { values: extraBody };
+	Object.assign(params, mergedExtraBody);
+	if (chatTemplateKwargs !== undefined) {
+		const shaped = params as P & { chat_template_kwargs?: Record<string, unknown> };
+		shaped.chat_template_kwargs = {
+			...chatTemplateKwargs,
+			...shaped.chat_template_kwargs,
+		};
+	}
 	if (encodedVeniceParameters?.disable_thinking === true) {
-		const configuredVeniceParameters = extraBody.venice_parameters;
+		const configuredVeniceParameters = mergedExtraBody.venice_parameters;
 		params.venice_parameters = {
 			...(isRecord(configuredVeniceParameters) ? configuredVeniceParameters : {}),
 			...encodedVeniceParameters,

@@ -123,6 +123,7 @@
 
 ### Fixed
 
+- Fixed `applyOpenAIExtraBody` re-enabling reasoning on a disabled turn when a model's `extraBody` carries conflicting top-level or `chat_template_kwargs` dialect controls; those controls are now stripped while unrelated configuration is preserved, and a `constructor`/`toString`-named `extraBody` key no longer reads as an inherited truthy match.
 - Captured bounded Devin Connect trailer details and request-shape evidence for diagnosing intermittent `invalid_argument` stream rejections ([#4218](https://github.com/can1357/oh-my-pi/issues/4218)).
 - Fixed abandoned `auth-broker-snapshot.enc.*.tmp` files accumulating in the cache directory when a process exited mid-write; stale temp files are now swept on each cache write.
 - Fixed Cursor GPT effort models failing with `not_found` on accounts that require the discovered effort-specific model id ([#9287](https://github.com/can1357/oh-my-pi/issues/9287)).
