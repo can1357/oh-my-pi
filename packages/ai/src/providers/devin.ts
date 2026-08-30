@@ -1,4 +1,4 @@
-import { gunzipSync, gzipSync } from "node:zlib";
+import { gunzipSync } from "node:zlib";
 
 import {
 	AssignModelRequestSchema,
@@ -27,7 +27,11 @@ import {
 } from "@oh-my-pi/pi-catalog/discovery/devin-proto";
 import { create, fromBinary, toBinary } from "@oh-my-pi/pi-catalog/discovery/protobuf";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
-import { DEVIN_DEFAULT_BASE_URL, devinCliMetadata } from "@oh-my-pi/pi-catalog/wire/devin";
+import {
+	DEVIN_DEFAULT_BASE_URL,
+	devinCliMetadata,
+	normalizeDevinSessionToken,
+} from "@oh-my-pi/pi-catalog/wire/devin";
 import { decodeDevinUnaryMessage } from "@oh-my-pi/pi-catalog/wire/devin-proto";
 import { logger, parseStreamingJson, parseStreamingJsonThrottled } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
@@ -182,27 +186,31 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 			}
 			const request = buildDevinChatRequest(model, context, options, turn, assignment);
 			const reqBytes = toBinary(GetChatMessageRequestSchema, request);
-			const gz = gzipSync(reqBytes);
 			logger.debug("devin: sending chat request", {
 				model: model.id,
 				tools: context.tools?.length ?? 0,
 				requestBytes: reqBytes.byteLength,
-				compressedBytes: gz.byteLength,
 			});
-			const frame = Buffer.alloc(5 + gz.length);
-			frame[0] = CONNECT_COMPRESSED_FLAG;
-			frame.writeUInt32BE(gz.length, 1);
-			frame.set(gz, 5);
+			// CLI wire format uses uncompressed Connect frames (flag 0x00), not gzip.
+			const frame = Buffer.alloc(5 + reqBytes.length);
+			frame[0] = 0x00;
+			frame.writeUInt32BE(reqBytes.length, 1);
+			frame.set(reqBytes, 5);
 
+			const sessionToken = normalizeDevinSessionToken(options?.apiKey);
 			const response = await fetchImpl(chatBaseUrl + CHAT_MESSAGE_PATH, {
 				method: "POST",
 				headers: {
 					"content-type": "application/connect+proto",
 					"connect-protocol-version": "1",
-					"connect-content-encoding": "gzip",
+					// Devin CLI sends Basic with the session token repeated (token-token,
+					// not base64). Metadata.apiKey alone is accepted, but the header
+					// matches the real client.
+					authorization: `Basic ${sessionToken}-${sessionToken}`,
+					// Suppress Bun's default User-Agent to avoid leaking runtime identity.
+					"user-agent": "",
+					// Avoid advertising compression the CLI does not send.
 					"accept-encoding": "identity",
-					"user-agent": "connect-go/1.18.1 (go1.26.3)",
-					"connect-accept-encoding": "gzip",
 					...(options?.headers ?? {}),
 				},
 				body: frame,
@@ -312,7 +320,7 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 										model: model.id,
 										historyBytes,
 										requestBytes: reqBytes.byteLength,
-										compressedBytes: gz.byteLength,
+										frameBytes: frame.byteLength,
 									});
 								}
 							}
