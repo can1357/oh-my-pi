@@ -269,6 +269,7 @@ export class MCPManager {
 	}
 
 	#emitConnectionStatus(event: McpConnectionStatusEvent): void {
+		this.#sessionOnStatus?.(event);
 		for (const listener of this.#connectionStatusListeners) {
 			try {
 				listener(event);
@@ -277,6 +278,17 @@ export class MCPManager {
 			}
 		}
 	}
+
+	/**
+	 * Session status bridge installed once and reused for the manager's whole
+	 * lifetime. `discoverAndConnect`/`connectServers` set the same callback
+	 * they were called with, so post-startup events — reconnects
+	 * (`#doReconnect`), `tools/list_changed` refreshes
+	 * (`refreshServerTools`) — reach the interactive status bus exactly like
+	 * startup events, instead of only reaching direct
+	 * {@link addConnectionStatusListener} subscribers.
+	 */
+	#sessionOnStatus?: (event: McpConnectionStatusEvent) => void;
 
 	/**
 	 * Register a listener for MCP catalog refreshes (`resources` / `prompts`).
@@ -473,7 +485,6 @@ export class MCPManager {
 			});
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
-			options?.onStatus?.({ type: "failed", serverName: ".mcp.json", error: message });
 			this.#emitConnectionStatus({ type: "failed", serverName: ".mcp.json", error: message });
 			throw error;
 		}
@@ -497,8 +508,14 @@ export class MCPManager {
 		sources: Record<string, SourceMeta>,
 		onStatus?: (event: McpConnectionStatusEvent) => void,
 	): Promise<MCPLoadResult> {
+		// Keep the caller's callback for the manager's lifetime: post-startup
+		// events (reconnects, tools/list_changed refreshes) flow through
+		// #emitConnectionStatus, so they reach the caller's `onStatus` bridge
+		// (e.g. the sdk → eventBus → interactive-status route) exactly like
+		// startup events, not just direct addConnectionStatusListener
+		// subscribers.
+		if (onStatus) this.#sessionOnStatus = onStatus;
 		const notify = (event: McpConnectionStatusEvent) => {
-			onStatus?.(event);
 			this.#emitConnectionStatus(event);
 		};
 		type ConnectionTask = {

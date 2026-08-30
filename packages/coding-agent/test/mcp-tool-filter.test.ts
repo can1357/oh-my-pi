@@ -130,6 +130,28 @@ describe("filterMCPTools", () => {
 		// in a denylist, `[!]]*` must therefore exclude exactly the `]`-prefixed names
 		expect(filterMCPTools({ toolNames: names, disabledTools: ["[!]]*"] }).allowed).toEqual(["]ax", "]abc"]);
 	});
+
+	// fnmatch treats a descending range (`z-a`) as an EMPTY class: a positive
+	// empty class matches nothing, a negated empty class matches everything.
+	// Regression: interpolating `z-a` verbatim into the regex threw
+	// "range out of order", so `matches()` reported false for every name —
+	// an allowlist entry silently disabled the server and a denylist entry
+	// excluded nothing. Expectations verified against Python
+	// fnmatch.fnmatchcase.
+	it("a descending range is an empty class (positive matches nothing, negated matches everything)", () => {
+		const names = ["ax", "zx", "beta"];
+		expect(filterMCPTools({ toolNames: names, enabledTools: ["[z-a]*"] }).allowed).toEqual([]);
+		expect(filterMCPTools({ toolNames: names, enabledTools: ["[!z-a]*"] }).allowed).toEqual(names);
+		expect(filterMCPTools({ toolNames: names, disabledTools: ["[!z-a]*"] }).allowed).toEqual([]);
+		expect(filterMCPTools({ toolNames: names, disabledTools: ["[z-a]*"] }).allowed).toEqual(names);
+		// ascending ranges and fnmatch hyphen-literal rules are unaffected
+		expect(filterMCPTools({ toolNames: names, enabledTools: ["[a-z]*"] }).allowed).toEqual(names);
+		expect(filterMCPTools({ toolNames: ["ax", "1x", "beta"], enabledTools: ["[!a-z]*"] }).allowed).toEqual(["1x"]);
+		expect(filterMCPTools({ toolNames: ["a-", "ax"], enabledTools: ["[a-]*"] }).allowed).toEqual(["a-", "ax"]);
+		expect(filterMCPTools({ toolNames: ["-x", "ax"], enabledTools: ["[-a]*"] }).allowed).toEqual(["-x", "ax"]);
+		// a literal-dash member mixed with an ascending range still matches
+		expect(filterMCPTools({ toolNames: ["z-a", "ax"], enabledTools: ["[a-z0-9-]*"] }).allowed).toEqual(["z-a", "ax"]);
+	});
 });
 
 describe("applyMCPToolFilter", () => {

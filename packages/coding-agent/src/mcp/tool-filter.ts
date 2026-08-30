@@ -84,10 +84,35 @@ function fnmatchRegex(pattern: string): RegExp {
 					cls += pattern[i] === "\\" ? "\\\\" : pattern[i];
 					i++;
 				}
+				// fnmatch treats a descending range (`z-a`) as an empty class: a
+				// positive empty class matches nothing, a negated empty class
+				// matches everything. Interpolating `z-a` verbatim throws
+				// "range out of order", so every match fell through the
+				// caller's catch as false — an allowlist entry silently
+				// disabled the server and a denylist entry excluded nothing.
+				// Rewriting the class keeps matching consistent and non-throwing.
+				const negated = cls.startsWith("^");
+				const body = negated ? cls.slice(1) : cls; // strip the `^` negation prefix
+				let descending = false;
+				for (let j = 1; j < body.length - 1; j++) {
+					// a range dash is an unescaped `-` with a member on both sides;
+					// first/last-position or doubled hyphens are literal members
+					if (body[j] !== "-") continue;
+					const lo = body[j - 1];
+					const hi = body[j + 1];
+					if (lo === "-" || hi === "-") continue; // `--` or `a--`: literal dash members
+					// descending when the lo bound sorts after the hi bound
+					if (lo.charCodeAt(0) > hi.charCodeAt(0)) descending = true;
+					break;
+				}
 				if (i >= end) {
 					// unterminated — treat the literal `[` (and body) as escaped text
 					out += escapeOutsideClass(pattern.slice(classStart, end));
 					i = end;
+				} else if (descending) {
+					// positive empty class matches nothing; negated matches everything
+					out += negated ? ".*" : "(?!x)x";
+					i++; // consume ]
 				} else {
 					out += `[${cls}]`;
 					i++; // consume ]

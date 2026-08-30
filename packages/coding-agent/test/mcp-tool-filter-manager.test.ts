@@ -6,7 +6,7 @@ import { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
 import type { McpConnectionStatusEvent } from "@oh-my-pi/pi-coding-agent/mcp/startup-events";
 import type { MCPStdioServerConfig } from "@oh-my-pi/pi-coding-agent/mcp/types";
 import { manyToolName } from "./fixtures/many-tools-mcp";
-import { FIRST_TOOL } from "./fixtures/tool-list-change-mcp";
+import { FIRST_TOOL, SECOND_TOOL } from "./fixtures/tool-list-change-mcp";
 
 const FIXTURE_PATH = path.join(import.meta.dir, "fixtures", "many-tools-mcp.ts");
 const CHANGE_FIXTURE_PATH = path.join(import.meta.dir, "fixtures", "tool-list-change-mcp.ts");
@@ -123,8 +123,8 @@ describe("per-server MCP tool filtering", () => {
 			args: [CHANGE_FIXTURE_PATH],
 			enabledTools: [FIRST_TOOL],
 		};
-		// The refresh path emits through the connection-status listeners, not
-		// the connectServers onStatus callback.
+		// The refresh path emits through #emitConnectionStatus, which reaches
+		// both the connection-status listeners and the caller's onStatus bridge.
 		const statusEvents: McpConnectionStatusEvent[] = [];
 		const unsubscribe = manager.addConnectionStatusListener(event => statusEvents.push(event));
 		try {
@@ -141,6 +141,45 @@ describe("per-server MCP tool filtering", () => {
 		} finally {
 			unsubscribe();
 		}
+	});
+
+	// Interactive status UI receives events only through the callback passed
+	// to connectServers (sdk → eventBus → interactive-status). A server that
+	// starts filter-empty (failed) and later recovers via a `tools/list`
+	// refresh must emit `connected` to that SAME callback, or the UI keeps
+	// the server in its failed list forever. Regression: the refresh path
+	// emitted only to direct addConnectionStatusListener subscribers, so the
+	// startup callback never learned about the recovery.
+	it("routes a refresh recovery (failed → connected) into the caller's onStatus bridge", async () => {
+		const events: McpConnectionStatusEvent[] = [];
+		// The change fixture serves [alpha, beta] on the first tools/list and
+		// only [beta] afterwards. enabledTools ["alpha"] connects fine, then
+		// the fixture's shrink makes the refresh's filtered set empty → the
+		// refresh surface emits `failed`.
+		const changeConfig: MCPStdioServerConfig = {
+			type: "stdio",
+			command: BUN_EXEC,
+			args: [CHANGE_FIXTURE_PATH],
+			enabledTools: [FIRST_TOOL],
+		};
+		await manager.connectServers({ change: changeConfig }, {}, event => events.push(event));
+		await waitForRegistered(manager, [FIRST_TOOL]);
+		// The shrink refresh: filtered set [beta] ∩ allow {"alpha"} = ∅ → failed
+		// must reach the caller's callback (pre-fix: listener-only).
+		await manager.refreshServerTools("change");
+		await waitForRegistered(manager, []);
+		expect(events.some(e => e.type === "failed" && e.serverName === "change")).toBe(true);
+
+		// Recovery on the same channel: swap the stored config to re-allow beta
+		// (disconnect first — connectServers is incremental and keeps the live
+		// connection when the server name is already connected), then let the
+		// refresh register tools again → `connected` must reach the same
+		// original callback.
+		await manager.disconnectServer("change");
+		await manager.connectServers({ change: { ...changeConfig, enabledTools: [SECOND_TOOL] } }, {});
+		await manager.refreshServerTools("change");
+		await waitForRegistered(manager, [SECOND_TOOL]);
+		expect(events.some(e => e.type === "connected" && e.serverName === "change")).toBe(true);
 	});
 
 	it("reports a server whose filter excludes every tool without failing the batch", async () => {
