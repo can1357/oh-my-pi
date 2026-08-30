@@ -1,8 +1,18 @@
 import { beforeAll, describe, expect, it, vi } from "bun:test";
+import { stripVTControlCharacters } from "node:util";
 import type { UsageReport } from "@oh-my-pi/pi-ai";
 import { CommandController } from "@oh-my-pi/pi-coding-agent/modes/controllers/command-controller";
 import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
+import {
+	EXPECTED_USAGE_BREAKDOWN,
+	USAGE_FIXTURE_ACCOUNTS,
+	USAGE_FIXTURE_CONTEXT_LINES,
+	USAGE_FIXTURE_DISABLED,
+	USAGE_FIXTURE_MODEL_SELECTORS,
+	USAGE_FIXTURE_NOW,
+	USAGE_FIXTURE_REPORTS,
+} from "../../helpers/usage-breakdown-fixture";
 
 interface RenderableBlock {
 	render(width: number): string[];
@@ -21,7 +31,17 @@ function renderPresentedBlocks(value: unknown): string {
 }
 
 function createUsageSessionDouble() {
-	return { getUsageReportingModelSelectors: () => [] };
+	return {
+		modelRegistry: {
+			authStorage: {
+				getAll: () => ({}),
+				usageProviderFor: () => undefined,
+				listDisabledCredentials: async () => [],
+				getOAuthAccountIdentity: () => undefined,
+			},
+		},
+		getUsageReportingModelSelectors: () => [],
+	};
 }
 
 describe("CommandController /usage", () => {
@@ -66,7 +86,7 @@ describe("CommandController /usage", () => {
 		const firstCall = present.mock.calls[0];
 		expect(firstCall).toBeDefined();
 		const output = renderPresentedBlocks(firstCall?.[0]);
-		expect(output).toContain("25% free");
+		expect(output).toContain("75.0% used");
 		expect(output).toContain("█");
 		expect(output).not.toContain("··········");
 	});
@@ -116,7 +136,7 @@ describe("CommandController /usage", () => {
 		const output = renderPresentedBlocks(firstCall?.[0]);
 		expect(output).toContain("Cursor");
 		expect(output).toContain("gpt-4 requests");
-		expect(output).toContain("70% free");
+		expect(output).toContain("150 / 500 requests");
 		expect(output).toContain("resets in 1d");
 	});
 
@@ -148,16 +168,116 @@ describe("CommandController /usage", () => {
 			},
 		];
 
-		await controller.handleUsageCommand(reports);
+		const nowSpy = vi.spyOn(Date, "now").mockReturnValue(now);
+		try {
+			await controller.handleUsageCommand(reports);
+		} finally {
+			nowSpy.mockRestore();
+		}
 
 		expect(present).toHaveBeenCalledTimes(1);
 		const firstCall = present.mock.calls[0];
 		expect(firstCall).toBeDefined();
 		const output = renderPresentedBlocks(firstCall?.[0]);
-		expect(output).toContain("Saved rate-limit resets");
-		expect(output).toContain("user@example.com: 2 saved resets");
-		expect(output).toContain(`expires in`);
-		expect(output).toContain(`(${futureIso.slice(0, 10)})`);
+		expect(output).toContain("user@example.com · ✦ 2 saved resets");
+		expect(output).toContain(`expires in 2d (${futureIso.slice(0, 10)})`);
 		expect(output).toContain(`expired (${expiredIso.slice(0, 10)})`);
+	});
+
+	it("renders the pinned detailed body plus only the approved session context", async () => {
+		const present = vi.fn();
+		const authStorage = {
+			getAll: () => ({
+				anthropic: USAGE_FIXTURE_ACCOUNTS.map(account => ({ type: account.type, email: account.email })),
+			}),
+			usageProviderFor: () => ({}),
+			listDisabledCredentials: async () => USAGE_FIXTURE_DISABLED,
+			getOAuthAccountIdentity: () => ({ email: "active@example.test" }),
+		};
+		const ctx = {
+			session: {
+				model: { provider: "anthropic" },
+				sessionId: "session-id",
+				modelRegistry: { authStorage },
+				getUsageReportingModelSelectors: () => USAGE_FIXTURE_MODEL_SELECTORS,
+			},
+			ui: { terminal: { columns: 120 } },
+			present,
+			presentCommandOutput: present,
+			showWarning: vi.fn(),
+			showError: vi.fn(),
+		} as unknown as InteractiveModeContext;
+		const nowSpy = vi.spyOn(Date, "now").mockReturnValue(USAGE_FIXTURE_NOW);
+		try {
+			await new CommandController(ctx).handleUsageCommand(USAGE_FIXTURE_REPORTS);
+		} finally {
+			nowSpy.mockRestore();
+		}
+
+		const rendered = stripVTControlCharacters(renderPresentedBlocks(present.mock.calls[0]?.[0]))
+			.split("\n")
+			.map(line => line.slice(1).trimEnd())
+			.join("\n")
+			.trim();
+		const renderedLines = rendered.split("\n");
+		const contextLines: string[] = [...USAGE_FIXTURE_CONTEXT_LINES];
+		expect(renderedLines.filter(line => contextLines.includes(line))).toEqual(contextLines);
+		expect(renderedLines.filter(line => !contextLines.includes(line)).join("\n")).toBe(EXPECTED_USAGE_BREAKDOWN);
+	});
+
+	it("renders stored credentials when the provider returns no reports", async () => {
+		const present = vi.fn();
+		const showWarning = vi.fn();
+		const authStorage = {
+			getAll: () => ({ anthropic: { type: "oauth", email: "stored@example.test" } }),
+			usageProviderFor: () => ({}),
+			listDisabledCredentials: async () => [],
+			getOAuthAccountIdentity: () => undefined,
+		};
+		const ctx = {
+			session: {
+				model: undefined,
+				sessionId: "session-id",
+				modelRegistry: { authStorage },
+				getUsageReportingModelSelectors: () => [],
+			},
+			ui: { terminal: { columns: 120 } },
+			presentCommandOutput: present,
+			showWarning,
+			showError: vi.fn(),
+		} as unknown as InteractiveModeContext;
+
+		await new CommandController(ctx).handleUsageCommand([]);
+
+		expect(showWarning).not.toHaveBeenCalled();
+		expect(renderPresentedBlocks(present.mock.calls[0]?.[0])).toContain("stored@example.test — no usage data");
+	});
+
+	it("renders actionable disabled credentials when the provider returns no reports", async () => {
+		const present = vi.fn();
+		const showWarning = vi.fn();
+		const authStorage = {
+			getAll: () => ({}),
+			usageProviderFor: () => ({}),
+			listDisabledCredentials: async () => USAGE_FIXTURE_DISABLED,
+			getOAuthAccountIdentity: () => undefined,
+		};
+		const ctx = {
+			session: {
+				model: undefined,
+				sessionId: "session-id",
+				modelRegistry: { authStorage },
+				getUsageReportingModelSelectors: () => [],
+			},
+			ui: { terminal: { columns: 120 } },
+			presentCommandOutput: present,
+			showWarning,
+			showError: vi.fn(),
+		} as unknown as InteractiveModeContext;
+
+		await new CommandController(ctx).handleUsageCommand([]);
+
+		expect(showWarning).not.toHaveBeenCalled();
+		expect(renderPresentedBlocks(present.mock.calls[0]?.[0])).toContain("disabled@example.test — disabled");
 	});
 });

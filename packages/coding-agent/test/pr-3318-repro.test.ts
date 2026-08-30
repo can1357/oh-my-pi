@@ -20,13 +20,21 @@ describe("PR 3318 repro", () => {
 		const text = await buildUsageReportText({
 			session: {
 				model: undefined,
+				modelRegistry: {
+					authStorage: {
+						getAll: () => ({}),
+						usageProviderFor: () => undefined,
+						listDisabledCredentials: async () => [],
+						getOAuthAccountIdentity: () => undefined,
+					},
+				},
 				fetchUsageReports: async () => [report],
 				getUsageReportingModelSelectors: () => ["test-provider/coding-plan-model"],
 			},
 		} as never);
 
-		expect(text).toContain("scoped-account: 1.00 requests used");
-		expect(text).not.toContain("account 1: 1.00 requests used");
+		expect(text).toContain("scoped-account");
+		expect(text).not.toContain("account 1");
 		expect(text).toContain("Models with usage data");
 		expect(text).toContain("test-provider/coding-plan-model");
 	});

@@ -14,6 +14,15 @@ import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-sessi
 import type { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { executeAcpBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/acp-builtins";
 import { getProjectDir, removeWithRetries, setProjectDir } from "@oh-my-pi/pi-utils";
+import {
+	EXPECTED_USAGE_BREAKDOWN,
+	USAGE_FIXTURE_ACCOUNTS,
+	USAGE_FIXTURE_CONTEXT_LINES,
+	USAGE_FIXTURE_DISABLED,
+	USAGE_FIXTURE_MODEL_SELECTORS,
+	USAGE_FIXTURE_NOW,
+	USAGE_FIXTURE_REPORTS,
+} from "./helpers/usage-breakdown-fixture";
 
 interface FakeAcpBuiltinSession {
 	fastMode: boolean;
@@ -37,6 +46,8 @@ interface FakeAcpBuiltinSession {
 	messages: unknown[];
 	settings: Settings;
 	model: { provider: string; id: string } | undefined;
+	modelRegistry: unknown;
+	getUsageReportingModelSelectors?: (reports: readonly UsageReport[]) => string[];
 	newSession(opts?: { drop?: boolean; parentSession?: string }): Promise<boolean>;
 	switchSession(sessionPath: string): Promise<boolean>;
 	moveSession(newCwd: string, targetSessionDir?: string): Promise<void>;
@@ -165,6 +176,14 @@ function createRuntime() {
 		getLastAssistantText: () => undefined,
 		messages: [],
 		model: undefined,
+		modelRegistry: {
+			authStorage: {
+				getAll: () => ({}),
+				usageProviderFor: () => undefined,
+				listDisabledCredentials: async () => [],
+				getOAuthAccountIdentity: () => undefined,
+			},
+		},
 		settings,
 		getToolByName: (_name: string) => undefined,
 		async compact(_args?: string) {},
@@ -319,10 +338,104 @@ describe("ACP builtin slash commands", () => {
 		expect(result).toEqual({ consumed: true });
 		expect(output[0]).toContain("Openai Codex");
 		expect(output[0]).toContain("5 hours (prolite)");
-		expect(output[0]).toContain("user@example.com: 0.24 unknown used (76.0% left)");
+		expect(output[0]).toContain("user@example.com");
+		expect(output[0]).toContain("24.0% used");
 		expect(output[0]).toContain("resets in");
 	});
+	it("keeps provider backticks and forged text inside the ACP usage fence", async () => {
+		const { output, runtime } = createRuntime();
+		runtime.session.fetchUsageReports = async () => [
+			{
+				provider: "anthropic",
+				fetchedAt: Date.now(),
+				limits: [],
+				metadata: { email: "victim@example.test\n```\nFORGED OUTSIDE" },
+				notes: ["```"],
+			},
+		];
 
+		const result = await executeAcpBuiltinSlashCommand("/usage", runtime);
+
+		expect(result).toEqual({ consumed: true });
+		const lines = output[0]!.split("\n");
+		expect(lines[0]).toBe("````");
+		expect(lines.at(-1)).toBe("````");
+		expect(lines.filter(line => line === "````")).toHaveLength(2);
+		expect(lines.slice(1, -1).join("\n")).toContain("FORGED OUTSIDE");
+	});
+	it("wraps the pinned detailed body plus only the approved session context", async () => {
+		const nowSpy = spyOn(Date, "now").mockReturnValue(USAGE_FIXTURE_NOW);
+		try {
+			const { output, runtime } = createRuntime();
+			runtime.session.fetchUsageReports = async () => USAGE_FIXTURE_REPORTS;
+			Object.assign(runtime.session, {
+				model: { provider: "anthropic", id: "claude-sonnet-4-6" },
+				modelRegistry: {
+					authStorage: {
+						getAll: () => ({
+							anthropic: USAGE_FIXTURE_ACCOUNTS.map(account => ({ type: account.type, email: account.email })),
+						}),
+						usageProviderFor: () => ({}),
+						listDisabledCredentials: async () => USAGE_FIXTURE_DISABLED,
+						getOAuthAccountIdentity: () => ({ email: "active@example.test" }),
+					},
+				},
+				getUsageReportingModelSelectors: () => USAGE_FIXTURE_MODEL_SELECTORS,
+			});
+
+			const result = await executeAcpBuiltinSlashCommand("/usage", runtime);
+
+			expect(result).toEqual({ consumed: true });
+			expect(output[0]).toStartWith("\x60\x60\x60\n");
+			expect(output[0]).toEndWith("\n\x60\x60\x60");
+			const bodyLines = output[0]!.slice(4, -4).split("\n");
+			const contextLines: string[] = [...USAGE_FIXTURE_CONTEXT_LINES];
+			expect(bodyLines.filter(line => contextLines.includes(line))).toEqual(contextLines);
+			expect(bodyLines.filter(line => !contextLines.includes(line)).join("\n")).toBe(EXPECTED_USAGE_BREAKDOWN);
+		} finally {
+			nowSpy.mockRestore();
+		}
+	});
+
+	it("renders stored credentials when fetched reports are empty", async () => {
+		const { output, runtime } = createRuntime();
+		runtime.session.fetchUsageReports = async () => [];
+		Object.assign(runtime.session, {
+			modelRegistry: {
+				authStorage: {
+					getAll: () => ({ anthropic: { type: "oauth", email: "stored@example.test" } }),
+					usageProviderFor: () => ({}),
+					listDisabledCredentials: async () => [],
+					getOAuthAccountIdentity: () => undefined,
+				},
+			},
+		});
+
+		await executeAcpBuiltinSlashCommand("/usage", runtime);
+
+		expect(output[0]).toStartWith("\x60\x60\x60\n");
+		expect(output[0]).toContain("stored@example.test — no usage data");
+	});
+
+	it("renders actionable disabled credentials when fetched reports are empty", async () => {
+		const { output, runtime } = createRuntime();
+		runtime.session.fetchUsageReports = async () => [];
+		Object.assign(runtime.session, {
+			modelRegistry: {
+				authStorage: {
+					getAll: () => ({}),
+					usageProviderFor: () => ({}),
+					listDisabledCredentials: async () => USAGE_FIXTURE_DISABLED,
+					getOAuthAccountIdentity: () => undefined,
+				},
+			},
+		});
+
+		await executeAcpBuiltinSlashCommand("/usage", runtime);
+
+		expect(output[0]).toStartWith("\x60\x60\x60\n");
+		expect(output[0]).toContain("disabled@example.test — disabled");
+	});
 	it("suppresses redundant usage window suffixes while retaining legitimate ones", async () => {
 		const { output, runtime } = createRuntime();
 		runtime.session.fetchUsageReports = async () => [
@@ -353,8 +466,8 @@ describe("ACP builtin slash commands", () => {
 		expect(result).toEqual({ consumed: true });
 		expect(output[0]).toContain("Claude Extra Usage");
 		expect(output[0]).not.toContain("Claude Extra Usage — extra");
-		expect(output[0]).toContain("123.45 usd used");
-		expect(output[0]).toContain("Daily quota — 24 hours");
+		expect(output[0]).toContain("$123.45 used");
+		expect(output[0]).toContain("Daily quota (24 hours)");
 	});
 	it("/usage show renders the same report as plain /usage", async () => {
 		const now = 1_700_000_000_000;
@@ -545,7 +658,33 @@ describe("ACP builtin slash commands", () => {
 		expect(titleNotified).toBe(1);
 		expect(configNotified).toBe(1);
 	});
+	it("falls back to local token statistics when no detailed usage is renderable", async () => {
+		const { output, runtime } = createRuntime();
+		runtime.session.fetchUsageReports = async () => [];
+		Object.assign(runtime.session, {
+			sessionManager: {
+				getUsageStatistics: () => ({
+					input: 11,
+					output: 7,
+					cacheRead: 3,
+					cacheWrite: 2,
+					totalTokens: 23,
+					orchestrationInput: 0,
+					orchestrationOutput: 0,
+					orchestrationCacheRead: 0,
+					premiumRequests: 1,
+					cost: 0.125,
+				}),
+			},
+		});
 
+		const result = await executeAcpBuiltinSlashCommand("/usage", runtime);
+
+		expect(result).toEqual({ consumed: true });
+		expect(output).toEqual([
+			"Usage\nInput tokens: 11\nOutput tokens: 7\nCache read tokens: 3\nCache write tokens: 2\nTotal tokens: 23\nPremium requests: 1\nCost: $0.125000",
+		]);
+	});
 	it("model: does not emit config change when id is unknown", async () => {
 		const { runtime } = createRuntime();
 		let configNotified = 0;

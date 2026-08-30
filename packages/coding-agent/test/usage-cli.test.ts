@@ -1,14 +1,24 @@
-import { describe, expect, it } from "bun:test";
+import { Database } from "bun:sqlite";
+import { describe, expect, it, spyOn } from "bun:test";
 import { stripVTControlCharacters } from "node:util";
-import type { UsageReport } from "@oh-my-pi/pi-ai";
+import { AuthStorage, SqliteAuthCredentialStore, type UsageReport } from "@oh-my-pi/pi-ai";
+import { buildRedactionMap, formatUsageHistory, runUsageCommand } from "@oh-my-pi/pi-coding-agent/cli/usage-cli";
+import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
 import {
-	buildRedactionMap,
 	collectUnreportedAccounts,
 	computeProviderWindowStats,
 	formatUsageBreakdown,
-	formatUsageHistory,
+	hasRenderableUsageBreakdown,
+	isActionableDisabledCredential,
 	type UsageAccountIdentity,
-} from "@oh-my-pi/pi-coding-agent/cli/usage-cli";
+} from "@oh-my-pi/pi-coding-agent/usage/usage-breakdown";
+import {
+	EXPECTED_USAGE_BREAKDOWN,
+	USAGE_FIXTURE_ACCOUNTS,
+	USAGE_FIXTURE_DISABLED,
+	USAGE_FIXTURE_NOW,
+	USAGE_FIXTURE_REPORTS,
+} from "./helpers/usage-breakdown-fixture";
 
 const HOUR = 3_600_000;
 const FIVE_HOURS = 5 * HOUR;
@@ -267,7 +277,24 @@ describe("collectUnreportedAccounts", () => {
 		// stays covered by any same-org report.
 		expect(collectUnreportedAccounts([aliceReport], [alice, bob, orgOnly])).toEqual([bob]);
 	});
+	it("uses limit-scope organizations for same-email account attribution", () => {
+		const email = "shared@example.test";
+		const orgA: UsageAccountIdentity = { provider: "anthropic", type: "oauth", email, orgId: "org-a" };
+		const orgB: UsageAccountIdentity = { provider: "anthropic", type: "oauth", email, orgId: "org-b" };
+		const orgless: UsageAccountIdentity = { provider: "anthropic", type: "oauth", email };
+		const report = makeReport("anthropic", email, [
+			{
+				id: "org-a-limit",
+				label: "Org A quota",
+				scope: { provider: "anthropic", orgId: "org-a" },
+				amount: { unit: "percent", usedFraction: 0.25 },
+			},
+		]);
 
+		expect(collectUnreportedAccounts([report], [orgA, orgB, orgless])).toEqual([orgB, orgless]);
+		const rendered = stripVTControlCharacters(formatUsageBreakdown([report], [], Date.now()));
+		expect(rendered).toContain(`${email} · org-a`);
+	});
 	it("keeps an org-less account covered by its own org-less report when org-scoped siblings exist", () => {
 		// Live incident shape: legacy org-less rows (pre-org-capture logins)
 		// beside fresh org-scoped logins. Every account fetched successfully —
@@ -298,7 +325,40 @@ describe("collectUnreportedAccounts", () => {
 		expect(collectUnreportedAccounts([freshReport], [legacy, fresh])).toEqual([legacy]);
 	});
 });
+describe("runUsageCommand", () => {
+	it("renders the pinned detailed breakdown through the standalone command entry path", async () => {
+		const authStorage = new AuthStorage(new SqliteAuthCredentialStore(new Database(":memory:")), {
+			fetchUsageReports: async () => USAGE_FIXTURE_REPORTS,
+		});
+		await authStorage.reload();
+		spyOn(authStorage, "getAll").mockReturnValue({
+			anthropic: USAGE_FIXTURE_ACCOUNTS.map(account => ({
+				type: account.type,
+				email: account.email,
+			})),
+		} as never);
+		spyOn(authStorage, "usageProviderFor").mockReturnValue({} as never);
+		spyOn(authStorage, "revalidateCredentials").mockResolvedValue(undefined);
+		spyOn(authStorage, "listDisabledCredentials").mockResolvedValue(USAGE_FIXTURE_DISABLED);
+		const discoverSpy = spyOn(sdkModule, "discoverAuthStorage").mockResolvedValue(authStorage);
+		const nowSpy = spyOn(Date, "now").mockReturnValue(USAGE_FIXTURE_NOW);
+		let output = "";
+		const stdoutSpy = spyOn(process.stdout, "write").mockImplementation(chunk => {
+			output += typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk);
+			return true;
+		});
 
+		try {
+			await runUsageCommand({});
+		} finally {
+			stdoutSpy.mockRestore();
+			nowSpy.mockRestore();
+			discoverSpy.mockRestore();
+		}
+
+		expect(stripVTControlCharacters(output)).toBe(`${EXPECTED_USAGE_BREAKDOWN}\n`);
+	});
+});
 describe("formatUsageBreakdown", () => {
 	const reports = [
 		makeReport("anthropic", "dummy.primary@example.test", [
@@ -314,6 +374,21 @@ describe("formatUsageBreakdown", () => {
 		{ provider: "cerebras", type: "api_key" },
 	];
 
+	it("matches the pinned detailed multi-account breakdown", () => {
+		const standalone = stripVTControlCharacters(
+			formatUsageBreakdown(
+				USAGE_FIXTURE_REPORTS,
+				USAGE_FIXTURE_ACCOUNTS,
+				USAGE_FIXTURE_NOW,
+				undefined,
+				USAGE_FIXTURE_DISABLED,
+			),
+		);
+
+		expect(standalone).toBe(EXPECTED_USAGE_BREAKDOWN);
+		expect(standalone).not.toContain("in use by this session");
+		expect(standalone).not.toContain("Models with usage data");
+	});
 	it("renders used-only USD spend without fabricating quota data", () => {
 		const spendReport = makeReport("anthropic", "spend@example.test", [
 			{
@@ -338,6 +413,38 @@ describe("formatUsageBreakdown", () => {
 		expect(text).toContain("Cerebras");
 		expect(text).toContain("API key — no usage data");
 		expect(text).toContain("capacity: 5h → 1.34/2 accounts used (0.66× quota left)");
+	});
+	it("falls back to limit-scope organizations for same-email account headers", () => {
+		const email = "shared@example.test";
+		const reports = [
+			{
+				...makeReport("anthropic", email, [
+					{
+						id: "org-a-quota",
+						label: "Org A quota",
+						scope: { provider: "anthropic", orgId: "org-a" },
+						amount: { unit: "percent" as const, usedFraction: 0.25 },
+					},
+				]),
+				metadata: { email, orgId: "" },
+			},
+			{
+				...makeReport("anthropic", email, [
+					{
+						id: "org-b-quota",
+						label: "Org B quota",
+						scope: { provider: "anthropic", orgId: "org-b" },
+						amount: { unit: "percent" as const, usedFraction: 0.5 },
+					},
+				]),
+				metadata: { email, orgId: 42 },
+			},
+		];
+
+		const text = stripVTControlCharacters(formatUsageBreakdown(reports, [], Date.now()));
+
+		expect(text).toContain(email + " · org-a");
+		expect(text).toContain(email + " · org-b");
 	});
 
 	it("keeps near-exhausted capacity fractional instead of rounding it to an exact need", () => {
@@ -396,6 +503,22 @@ describe("formatUsageBreakdown", () => {
 		for (const mask of redaction.values()) expect(text).toContain(mask);
 	});
 
+	it("redacts every active session identity component before formatting its label", () => {
+		const email = "active@example.test";
+		const orgName = "Secret Organization";
+		const redaction = buildRedactionMap([email, orgName]);
+		const text = stripVTControlCharacters(
+			formatUsageBreakdown(reports, accounts, Date.now(), redaction, [], {
+				resolveActiveAccount: provider => (provider === "anthropic" ? { email, orgName } : undefined),
+			}),
+		);
+		const marker = text.split("\n").find(line => line.includes("in use by this session"));
+		expect(text).not.toContain(email);
+		expect(text).not.toContain(orgName);
+		expect(marker).toContain(redaction.get(email));
+		expect(marker).toContain(redaction.get(orgName));
+	});
+
 	it("renders auto-disabled tombstones with the upstream error_description and hides lifecycle noise", () => {
 		const now = Date.now();
 		const disabled = [
@@ -428,6 +551,136 @@ describe("formatUsageBreakdown", () => {
 		expect(text).not.toContain("rotated@example.test");
 		expect(text).not.toContain("Fireworks");
 	});
+
+	it("exports the actionable-disabled predicate used by CLI JSON filtering", () => {
+		expect(
+			isActionableDisabledCredential({
+				id: 28,
+				provider: "anthropic",
+				type: "oauth",
+				cause: "oauth refresh failed: token expired",
+				disabledAtMs: 0,
+			}),
+		).toBe(true);
+		expect(
+			isActionableDisabledCredential({
+				id: 29,
+				provider: "anthropic",
+				type: "oauth",
+				cause: "deleted by user",
+				disabledAtMs: 0,
+			}),
+		).toBe(false);
+	});
+	it("treats an actionable tombstone as a renderable usage breakdown", () => {
+		expect(
+			hasRenderableUsageBreakdown(
+				[],
+				[],
+				[
+					{
+						id: 30,
+						provider: "anthropic",
+						type: "oauth",
+						email: "disabled@example.test",
+						cause: "oauth refresh failed: token expired",
+					},
+				],
+			),
+		).toBe(true);
+	});
+
+	it("does not treat lifecycle-noise tombstones as a renderable usage breakdown", () => {
+		expect(
+			hasRenderableUsageBreakdown(
+				[],
+				[],
+				[
+					{
+						id: 31,
+						provider: "anthropic",
+						type: "oauth",
+						email: "replaced@example.test",
+						cause: "replaced by newer credential",
+					},
+				],
+			),
+		).toBe(false);
+	});
+
+	it("keeps a same-email tombstone actionable when it belongs to a different organization", () => {
+		const activeAccounts: UsageAccountIdentity[] = [
+			{
+				provider: "anthropic",
+				type: "oauth",
+				email: "member@example.test",
+				orgId: "active-org",
+			},
+		];
+
+		expect(
+			isActionableDisabledCredential(
+				{
+					id: 32,
+					provider: "anthropic",
+					type: "oauth",
+					email: "member@example.test",
+					orgId: "disabled-org",
+					cause: "oauth refresh failed: token expired",
+				},
+				activeAccounts,
+			),
+		).toBe(true);
+	});
+
+	it("suppresses a same-email tombstone when it belongs to the same organization", () => {
+		const activeAccounts: UsageAccountIdentity[] = [
+			{
+				provider: "anthropic",
+				type: "oauth",
+				email: "member@example.test",
+				orgId: "shared-org",
+			},
+		];
+
+		expect(
+			isActionableDisabledCredential(
+				{
+					id: 33,
+					provider: "anthropic",
+					type: "oauth",
+					email: "member@example.test",
+					orgId: "shared-org",
+					cause: "oauth refresh failed: token expired",
+				},
+				activeAccounts,
+			),
+		).toBe(false);
+	});
+
+	it("suppresses an org-only active identity's tombstone in the same organization", () => {
+		const activeAccounts: UsageAccountIdentity[] = [
+			{
+				provider: "anthropic",
+				type: "oauth",
+				orgId: "shared-org",
+			},
+		];
+
+		expect(
+			isActionableDisabledCredential(
+				{
+					id: 34,
+					provider: "anthropic",
+					type: "oauth",
+					orgId: "shared-org",
+					cause: "oauth refresh failed: token expired",
+				},
+				activeAccounts,
+			),
+		).toBe(false);
+	});
+
 	it("suppresses auto-disabled tombstones when an active account exists with the same identity", () => {
 		const now = Date.now();
 		const activeAccounts: UsageAccountIdentity[] = [
@@ -456,6 +709,31 @@ describe("formatUsageBreakdown", () => {
 		const text = stripVTControlCharacters(formatUsageBreakdown([], activeAccounts, now, undefined, disabled));
 		expect(text).not.toContain("active@example.test — disabled");
 		expect(text).toContain("✗ truly-dead@example.test — disabled");
+	});
+
+	it("keeps a disabled sibling visible when the active account only shares its organization", () => {
+		const activeAccounts: UsageAccountIdentity[] = [
+			{
+				provider: "anthropic",
+				type: "oauth",
+				email: "bob@example.test",
+				orgId: "shared-org",
+			},
+		];
+		const disabled = [
+			{
+				id: 32,
+				provider: "anthropic",
+				type: "oauth" as const,
+				email: "alice@example.test",
+				orgId: "shared-org",
+				cause: "oauth refresh failed: Refresh token expired",
+			},
+		];
+
+		const text = stripVTControlCharacters(formatUsageBreakdown([], activeAccounts, Date.now(), undefined, disabled));
+
+		expect(text).toContain("✗ alice@example.test · shared-org — disabled");
 	});
 
 	it("renders a tombstone-only provider section even when no active credential remains", () => {
@@ -593,39 +871,141 @@ describe("formatUsageBreakdown", () => {
 		expect(text).toContain("30.0% used");
 		expect(text).toContain("resets in 31d");
 	});
-	it("renders saved reset expiry state for future and expired credits", () => {
+	it("renders every saved reset expiry when one account mixes future and expired credits", () => {
 		const now = Date.parse("2026-01-01T00:00:00.000Z");
 		const reports: UsageReport[] = [
 			{
 				provider: "openai-codex",
 				fetchedAt: now,
 				limits: [],
-				metadata: { email: "future@example.test" },
+				metadata: { email: "mixed@example.test" },
 				resetCredits: {
-					availableCount: 1,
-					credits: [{ expiresAt: "2026-01-03T00:00:00.000Z" }],
-				},
-			},
-			{
-				provider: "openai-codex",
-				fetchedAt: now,
-				limits: [],
-				metadata: { email: "expired@example.test" },
-				resetCredits: {
-					availableCount: 1,
-					credits: [{ expiresAt: "2025-12-30T00:00:00.000Z" }],
+					availableCount: 2,
+					credits: [{ expiresAt: "2026-01-03T00:00:00.000Z" }, { expiresAt: "2025-12-30T00:00:00.000Z" }],
 				},
 			},
 		];
 
 		const text = stripVTControlCharacters(formatUsageBreakdown(reports, [], now));
-		expect(text).toContain("future@example.test");
-		expect(text).toContain("soonest expires in 2d (2026-01-03)");
-		expect(text).toContain("expired@example.test");
+		expect(text).toContain("mixed@example.test · ✦ 2 saved resets");
+		expect(text).toContain("expires in 2d (2026-01-03)");
 		expect(text).toContain("expired (2025-12-30)");
 	});
 
-	it("deduplicates identical per-limit notes across accounts sharing a window", () => {
+	it("sanitizes per-limit notes into a single line before joining them", () => {
+		const note = "safe\nFORGED\tcolumn\x1b[2Jcleared";
+		const reports = [
+			makeReport("github-copilot", "acct@example.test", [
+				makeLimit({ id: "Copilot", usedFraction: 0.8, windowId: "monthly", notes: [note] }),
+			]),
+		];
+		const raw = formatUsageBreakdown(reports, [], Date.now());
+		const text = stripVTControlCharacters(raw);
+		const noteLines = text.split("\n").filter(line => line.includes("safe") || line.includes("FORGED"));
+		expect(raw).not.toContain("\x1b[2J");
+		expect(noteLines).toHaveLength(1);
+		expect(noteLines[0]?.trim()).toBe("safe FORGED  columncleared");
+	});
+	it("sanitizes every provider-controlled display field without sanitizing renderer ANSI", () => {
+		const now = Date.now();
+		const tainted = (field: string) => `safe-${field}\r\nFORGED_${field}\tvalue\x1b[2Jcleared`;
+		const report: UsageReport = {
+			provider: tainted("provider"),
+			fetchedAt: now,
+			metadata: {
+				email: tainted("account"),
+				orgName: tainted("organization"),
+				planType: tainted("plan"),
+			},
+			notes: [tainted("provider_note")],
+			limits: [
+				{
+					id: "tainted-limit",
+					label: tainted("limit"),
+					scope: {
+						provider: tainted("provider"),
+						tier: tainted("tier"),
+						windowId: tainted("scope_window"),
+					},
+					window: {
+						id: "tainted-window",
+						label: tainted("window"),
+						resetsAt: now + HOUR,
+						resetLabel: tainted("reset"),
+					},
+					amount: { unit: "percent", usedFraction: 0.5 },
+					notes: [tainted("limit_note")],
+				},
+			],
+		};
+		const codexReport = makeReport("openai-codex", "codex@example.test", [
+			makeLimit({
+				id: "openai-codex:tainted:primary",
+				provider: "openai-codex",
+				tier: tainted("meter"),
+				windowId: tainted("capacity_window"),
+				usedFraction: 0.5,
+			}),
+		]);
+		const accounts: UsageAccountIdentity[] = [
+			{
+				provider: "stored-provider",
+				type: "oauth",
+				email: tainted("stored_account"),
+				orgName: tainted("stored_org"),
+			},
+		];
+		const disabled = [
+			{
+				id: 99,
+				provider: "disabled-provider",
+				type: "oauth" as const,
+				email: tainted("disabled_account"),
+				orgName: tainted("disabled_org"),
+				cause: "safe-disabled_cause\tFORGED_disabled_cause\x1b[2Jcleared",
+			},
+		];
+
+		const raw = formatUsageBreakdown([report, codexReport], accounts, now, undefined, disabled, {
+			resolveActiveAccount: provider =>
+				provider === "openai-codex"
+					? { email: tainted("active_account"), orgName: tainted("active_org") }
+					: undefined,
+			usageModelSelectors: [`openai-codex/${tainted("selector")}`],
+		});
+		const text = stripVTControlCharacters(raw);
+		const fields = [
+			"provider",
+			"account",
+			"organization",
+			"plan",
+			"provider_note",
+			"limit",
+			"tier",
+			"window",
+			"reset",
+			"limit_note",
+			"meter",
+			"capacity_window",
+			"stored_account",
+			"stored_org",
+			"disabled_account",
+			"disabled_org",
+			"disabled_cause",
+			"active_account",
+			"active_org",
+			"selector",
+		];
+
+		expect(raw).not.toContain("\x1b[2J");
+		for (const field of fields) {
+			const marker = `FORGED_${field}`;
+			const markerLines = text.split("\n").filter(line => line.includes(marker));
+			expect(markerLines.length).toBeGreaterThan(0);
+			expect(markerLines.every(line => !line.trimStart().startsWith(marker))).toBe(true);
+		}
+	});
+	it("renders identical per-limit notes for every account sharing a window", () => {
 		const note = "Overage requests: 5";
 		const reports = [
 			makeReport("github-copilot", "acct-a@example.test", [
@@ -636,10 +1016,6 @@ describe("formatUsageBreakdown", () => {
 			]),
 		];
 		const text = stripVTControlCharacters(formatUsageBreakdown(reports, [], Date.now()));
-		// CLI renders per-limit, so each account shows its own note — that's
-		// correct for the CLI path (one limit at a time). The dedup contract
-		// lives in the TUI aggregate path (command-controller), tested separately.
-		// Here we assert the CLI doesn't add spurious duplicates beyond one-per-limit.
 		const occurrences = text.split(note).length - 1;
 		expect(occurrences).toBe(2);
 	});
