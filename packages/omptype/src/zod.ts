@@ -604,6 +604,15 @@ export const union = <
 	);
 };
 /**
+ * A discriminator claim for "this variant accepts the property missing" — an
+ * optional or defaulted discriminator, or one whose value set includes
+ * `undefined`. Claimed but never dispatched on: it cannot be advertised (JSON
+ * omits `undefined` properties), yet two variants accepting the absent case pick
+ * a branch by declaration order, which is the ambiguity zod rejects.
+ */
+const ABSENT = Symbol("omptype.zod.absentDiscriminator");
+
+/**
  * A literal the shim can both dispatch on and advertise. omptype compares
  * object literals by REFERENCE ("must be reference equal to …"), so emitting
  * `const: {…}` would promise the model a structural match the runtime refuses,
@@ -649,7 +658,7 @@ function finiteValues(ir: IR, seen?: Set<IR>): unknown[] | undefined {
 			// so it dispatches like the literal union it was written as.
 			return [true, false];
 		case "undefined":
-			return [];
+			return [ABSENT];
 		case "union": {
 			const values: unknown[] = [];
 			for (const member of ir.members) {
@@ -689,7 +698,15 @@ function discriminatorValues(ir: IR, key: string, seen?: Set<IR>): unknown[] | u
 			const prop = ir.props.find(candidate => candidate.key === key);
 			if (prop === undefined) return undefined;
 			const values = finiteValues(prop.val, seen);
-			return values === undefined || values.length === 0 ? undefined : values;
+			if (values === undefined) return undefined;
+			// An optional or defaulted discriminator also accepts the property
+			// missing, and that case needs a claim of its own or two such
+			// variants would silently resolve by declaration order.
+			const absent = prop.opt === true || prop.hasDefault === true;
+			const claims = absent && !values.includes(ABSENT) ? [...values, ABSENT] : values;
+			// A variant pinned ONLY to the absent case cannot be dispatched on at
+			// all: nothing about it is advertisable.
+			return claims.some(value => value !== ABSENT) ? claims : undefined;
 		}
 		case "union": {
 			const values: unknown[] = [];
@@ -788,7 +805,9 @@ export const discriminatedUnion = <
 				const claimed = claims.get(value);
 				if (claimed !== undefined && claimed !== index) {
 					throw new OmpTypeError(
-						`discriminatedUnion variants ${claimed} and ${index} both pin "${discriminator}" to ${JSON.stringify(value) ?? String(value)}`,
+						value === ABSENT
+							? `discriminatedUnion variants ${claimed} and ${index} both accept a missing "${discriminator}"`
+							: `discriminatedUnion variants ${claimed} and ${index} both pin "${discriminator}" to ${JSON.stringify(value) ?? String(value)}`,
 					);
 				}
 				claims.set(value, index);

@@ -200,6 +200,39 @@ describe("zod-like parsing", () => {
 		]);
 		expect(selfRepeat.parse({ kind: "a", n: 1 })).toEqual({ kind: "a", n: 1 });
 		expect(selfRepeat.parse({ kind: "b", s: "x" })).toEqual({ kind: "b", s: "x" });
+
+		// An optional or defaulted discriminator also accepts the property
+		// MISSING, and two variants doing that resolve `{}` by declaration order:
+		// the defaulted pair below fills `kind: "a"` or `kind: "b"` purely
+		// depending on which was written first. That case needs its own claim.
+		expect(() =>
+			z.discriminatedUnion("kind", [
+				z.object({ kind: z.literal("a").optional() }),
+				z.object({ kind: z.literal("b").optional() }),
+			]),
+		).toThrow(/variants 0 and 1 both accept a missing "kind"/);
+		expect(() =>
+			z.discriminatedUnion("kind", [
+				z.object({ kind: z.literal("a").default("a") }),
+				z.object({ kind: z.literal("b").default("b") }),
+			]),
+		).toThrow(/variants 0 and 1 both accept a missing "kind"/);
+
+		// One variant may own the absent case: the claim is unique, so the
+		// definition loads and the missing key routes to it.
+		const oneOptional = z.discriminatedUnion("kind", [
+			z.object({ kind: z.literal("a").optional(), n: z.number() }),
+			z.object({ kind: z.literal("b"), s: z.string() }),
+		]);
+		expect(oneOptional.parse({ n: 2 })).toEqual({ n: 2 });
+		expect(oneOptional.parse({ kind: "a", n: 3 })).toEqual({ kind: "a", n: 3 });
+		expect(oneOptional.parse({ kind: "b", s: "x" })).toEqual({ kind: "b", s: "x" });
+		const oneDefaulted = z.discriminatedUnion("kind", [
+			z.object({ kind: z.literal("a").default("a"), n: z.number() }),
+			z.object({ kind: z.literal("b"), s: z.string() }),
+		]);
+		expect(oneDefaulted.parse({ n: 1 })).toEqual({ kind: "a", n: 1 });
+		expect(oneDefaulted.parse({ kind: "b", s: "x" })).toEqual({ kind: "b", s: "x" });
 	});
 
 	it("clones readonly output by descriptor instead of spreading it", () => {
