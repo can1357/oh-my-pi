@@ -1,4 +1,4 @@
-import { isUsageLimit, matchesOverflowText } from "./flags";
+import { Flag, is, isUsageLimit, matchesOverflowText } from "./flags";
 
 /** Who owns a classified gateway failure. */
 export type GatewayErrorOwner =
@@ -179,6 +179,25 @@ function classifyOwnerDisposition(
 		GATEWAY_INVARIANT_PATTERN.test(errName)
 	) {
 		return { owner: "gateway", disposition: "gateway_terminal" };
+	}
+
+	// Structural content/policy flags are terminal even when the HTTP mapping
+	// is a synthetic 502 (message lacked POLICY_PATTERN). Retrying against a
+	// sibling provider would replay a safety rejection.
+	let errorId: number | undefined;
+	if (typeof err === "object" && err !== null && "errorId" in err && typeof err.errorId === "number") {
+		errorId = err.errorId;
+	}
+	let kind: string | undefined;
+	if (typeof err === "object" && err !== null && "kind" in err && typeof err.kind === "string") {
+		kind = err.kind;
+	}
+	if (
+		is(errorId, Flag.ContentBlocked) ||
+		is(errorId, Flag.AccountPolicy) ||
+		kind === "content-blocked"
+	) {
+		return { owner: "policy", disposition: "policy_terminal" };
 	}
 
 	// Authoritative HTTP buckets first: message heuristics never rebrand a
