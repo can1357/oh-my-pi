@@ -887,9 +887,22 @@ export const array = <Element>(element: ZodLikeSchema<Element>): ZodLikeSchema<E
 	decorate(schemaFromIR({ k: "array", el: embed(element) }));
 export const object = <const S extends Shape>(shape: S): ZodLikeSchema<Simplify<ObjectOutput<S>>> =>
 	objectSchema(shape);
-/** Object that rejects undeclared keys (zod `z.strictObject`). */
+/**
+ * Object that rejects undeclared keys (zod `z.strictObject`).
+ *
+ * Unlike `z.object`, whose key stripping allocates, this hands back the input
+ * object itself when validation succeeds — omptype only builds a new value when
+ * validating changes it. Mutating the parse result therefore mutates the input,
+ * which zod does not do. Left as-is deliberately: allocating would require the
+ * object node to report itself as output-changing, which makes overlapping
+ * loose-object unions indeterminate and erases their provider-facing schema.
+ */
 export const strictObject = <const S extends Shape>(shape: S): ZodLikeSchema<Simplify<ObjectOutput<S>>> =>
 	objectSchema(shape, "reject");
+/**
+ * Object that keeps undeclared keys (zod `z.looseObject`). Hands back the input
+ * object itself, prototype included — see {@link strictObject} for why.
+ */
 export const looseObject = <const S extends Shape>(
 	shape: S,
 ): ZodLikeSchema<Simplify<ObjectOutput<S>> & Record<string, unknown>> =>

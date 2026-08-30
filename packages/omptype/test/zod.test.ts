@@ -230,6 +230,26 @@ describe("zod-like parsing", () => {
 		expect(Object.isFrozen(frozenArray)).toBe(true);
 	});
 
+	it("pins which object modes hand back a fresh parse output", () => {
+		// zod always builds a new object; omptype returns the input when nothing
+		// about validation changes the value, so only key-stripping allocates.
+		// Pinned as a known divergence rather than fixed: making the
+		// non-stripping modes allocate requires the object node to report itself
+		// as output-changing, which makes OVERLAPPING loose-object unions
+		// indeterminate — `z.union([z.looseObject({ a }), z.looseObject({ b })])`
+		// would fall to the ordered dispatcher and emit `{}` for the model
+		// instead of today's `anyOf`. Provider-facing erasure is a worse trade
+		// than an aliased parse result.
+		const input = { a: "x" };
+		expect(z.object({ a: z.string() }).parse(input)).not.toBe(input);
+		expect(z.strictObject({ a: z.string() }).parse(input)).toBe(input);
+		expect(z.looseObject({ a: z.string() }).parse(input)).toBe(input);
+		// The union that would pay for it, kept structural.
+		const looseUnion = z.union([z.looseObject({ a: z.string() }), z.looseObject({ b: z.number() })]);
+		const emitted: { anyOf?: unknown } = looseUnion.toJsonSchema();
+		expect(emitted.anyOf).toBeArrayOfSize(2);
+	});
+
 	it("holds object schemas to zod's object-input domain", () => {
 		// Input outside that domain contradicts the emitted `{"type":"object"}`:
 		// the tool would accept a shape the model was told was invalid. The guard
