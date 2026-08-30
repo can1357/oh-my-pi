@@ -32,7 +32,7 @@ export interface LastCommand {
  * `children` to drill into.
  */
 export interface CopyTarget {
-	/** Stable id (e.g. "msg:1", "msg:1:code:0", "msg:1:quote:0", "msg:1:all", "cmd:1"). */
+	/** Stable id (e.g. "msg:1", "msg:1:code:0", "msg:1:quote:0", "msg:1:all", "you:1", "cmd:1"). */
 	id: string;
 	label: string;
 	/** Dim annotation: line/block counts, language, or tool name. */
@@ -55,8 +55,25 @@ export interface CopySource {
 	getLastVisibleHandoffText(): string | undefined;
 }
 
-/** Cap on how many recent assistant messages the picker lists. */
+/** Cap on how many recent messages of each kind (assistant, user) the picker lists. */
 const MAX_MESSAGES = 50;
+
+/** Whose turn produced a message target; also selects the target id namespace. */
+type MessageKind = "assistant" | "user";
+
+/**
+ * Openers of the synthetic "user" turns the runtime injects (environment
+ * context, skills, token budget, model switch). Nobody typed these, so `/copy`
+ * hides them. Mirrors the contextual filter the compaction retention pass uses.
+ */
+const CONTEXTUAL_USER_PREFIXES = [
+	"<environment_context>",
+	"<user_instructions>",
+	"<additional_context>",
+	"<skills",
+	"<token_budget>",
+	"<model_switch>",
+];
 
 const OPEN_FENCE_RE = /^```([^\n]*)$/;
 const CLOSE_FENCE_RE = /^```/;
@@ -200,6 +217,28 @@ function assistantText(msg: AgentMessage): string | undefined {
 	return text.trim() || undefined;
 }
 
+/**
+ * Text a human actually typed in a user turn, or undefined when the message is
+ * empty or is one of the contextual blocks the runtime injects as a "user"
+ * turn. User content is a bare string on some transports and text/image blocks
+ * on others, so both shapes are handled.
+ */
+function userText(msg: AgentMessage): string | undefined {
+	if (msg.role !== "user") return undefined;
+	let text = "";
+	if (typeof msg.content === "string") {
+		text = msg.content;
+	} else {
+		for (const content of msg.content) {
+			if (content.type === "text") text += content.text;
+		}
+	}
+	const trimmed = text.trim();
+	if (!trimmed) return undefined;
+	const probe = trimmed.toLowerCase();
+	return CONTEXTUAL_USER_PREFIXES.some(prefix => probe.startsWith(prefix)) ? undefined : trimmed;
+}
+
 function pluralLines(text: string): string {
 	const count = text.length === 0 ? 0 : text.split("\n").length;
 	return `${count} line${count === 1 ? "" : "s"}`;
@@ -227,17 +266,27 @@ function blockSummaryHint(text: string, codeCount: number, quoteCount: number): 
 	return parts.join(" · ");
 }
 
-/** Build the target node for one assistant message: a leaf when it has no
+/** Status line shown after copying a whole message, by whose turn it was. */
+function messageCopyLabel(kind: MessageKind, rank: number): string {
+	const subject = `${kind === "user" ? "your " : ""}${rank === 1 ? "last message" : "message"}`;
+	return `Copied ${subject} to clipboard`;
+}
+
+/** Build the target node for one message: a leaf when it has no
  * drillable blocks, otherwise a group exposing the full message plus each
- * fenced code block and `>`-quoted block (de-prefixed) as a child target. */
-function messageTarget(text: string, rank: number): CopyTarget {
-	const id = `msg:${rank}`;
+ * fenced code block and `>`-quoted block (de-prefixed) as a child target.
+ * `kind` picks the id namespace so assistant and user entries never collide. */
+function messageTarget(text: string, rank: number, kind: MessageKind = "assistant"): CopyTarget {
+	const id = kind === "user" ? `you:${rank}` : `msg:${rank}`;
 	const label = firstLine(text);
 	const blocks = extractBlocks(text);
-	const messageCopy = rank === 1 ? "Copied last message to clipboard" : "Copied message to clipboard";
+	const messageCopy = messageCopyLabel(kind, rank);
+	// User entries are tagged in the hint so the two streams stay tellable apart.
+	const hintPrefix = kind === "user" ? "you · " : "";
 
 	if (blocks.length === 0) {
-		return { id, label, hint: pluralLines(text), preview: text, content: text, copyMessage: messageCopy };
+		const hint = `${hintPrefix}${pluralLines(text)}`;
+		return { id, label, hint, preview: text, content: text, copyMessage: messageCopy };
 	}
 
 	// The message node itself copies the full message; each block is a child
@@ -295,7 +344,7 @@ function messageTarget(text: string, rank: number): CopyTarget {
 		});
 	}
 
-	const hint = blockSummaryHint(text, codeBlocks.length, quoteBlocks.length);
+	const hint = `${hintPrefix}${blockSummaryHint(text, codeBlocks.length, quoteBlocks.length)}`;
 	return { id, label, hint, preview: text, content: text, copyMessage: messageCopy, children };
 }
 
@@ -317,15 +366,16 @@ function commandTarget(command: LastCommand, rank: number): CopyTarget {
 }
 
 /**
- * Assemble the unified `/copy` target tree: recent assistant messages
- * (most recent first, each drillable into its code blocks), runnable command
- * targets interleaved after the assistant message that issued them, and a
- * fresh-handoff fallback when no assistant message exists yet.
+ * Assemble the unified `/copy` target tree: recent assistant and user messages
+ * (most recent first, each drillable into its code and quote blocks), runnable
+ * command targets interleaved after the assistant message that issued them, and
+ * a fresh-handoff fallback when no assistant message exists yet.
  */
 export function buildCopyTargets(source: CopySource): CopyTarget[] {
 	const targets: CopyTarget[] = [];
 	const pendingCommands: LastCommand[] = [];
 	let messageRank = 0;
+	let userRank = 0;
 	let commandRank = 0;
 
 	const appendCommands = (commands: readonly LastCommand[]) => {
@@ -337,6 +387,18 @@ export function buildCopyTargets(source: CopySource): CopyTarget[] {
 
 	for (let i = source.messages.length - 1; i >= 0 && messageRank < MAX_MESSAGES; i--) {
 		const msg = source.messages[i];
+
+		if (msg.role === "user") {
+			// Your own turns are copy targets too: before #7976 the prompt you
+			// typed was structurally unreachable from the picker.
+			if (userRank >= MAX_MESSAGES) continue;
+			const typed = userText(msg);
+			if (!typed) continue;
+			userRank += 1;
+			targets.push(messageTarget(typed, userRank, "user"));
+			continue;
+		}
+
 		if (msg.role !== "assistant") continue;
 
 		const toolCalls = msg.content.filter((c): c is ToolCall => c.type === "toolCall");

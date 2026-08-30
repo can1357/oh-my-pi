@@ -25,6 +25,10 @@ function assistantText(text: string): AgentMessage {
 	return { role: "assistant", content: [{ type: "text", text }] } as unknown as AgentMessage;
 }
 
+function userMessage(text: string): AgentMessage {
+	return { role: "user", content: [{ type: "text", text }] } as unknown as AgentMessage;
+}
+
 function assistantCalls(toolCalls: Array<{ name: string; arguments: Record<string, unknown> }>): AgentMessage {
 	return {
 		role: "assistant",
@@ -166,7 +170,7 @@ describe("buildCopyTargets", () => {
 		expect(msg?.children?.find(c => c.id === "msg:1:all-quotes")?.content).toBe("q one\n\nq two");
 	});
 
-	it("skips tool-only assistant turns and non-assistant messages", () => {
+	it("skips tool-only assistant turns and keeps user turns in their own namespace", () => {
 		const messages = [
 			{ role: "user", content: [{ type: "text", text: "hi" }] },
 			assistantCalls([{ name: "read", arguments: { path: "x" } }]),
@@ -174,6 +178,59 @@ describe("buildCopyTargets", () => {
 		] as unknown as AgentMessage[];
 		const targets = buildCopyTargets(source({ messages }));
 		expect(targets.filter(t => t.id.startsWith("msg:")).map(t => t.label)).toEqual(["real answer"]);
+		expect(targets.filter(t => t.id.startsWith("you:")).map(t => t.label)).toEqual(["hi"]);
+	});
+
+	it("lists the prompts you typed so the original request stays copyable (#7976)", () => {
+		const targets = buildCopyTargets(
+			source({
+				messages: [
+					userMessage("first prompt I wrote"),
+					assistantText("an answer"),
+					userMessage("follow-up prompt"),
+				] as unknown as AgentMessage[],
+			}),
+		);
+
+		// Every user turn is reachable, newest first — including the very first
+		// prompt, which the picker could never surface before.
+		expect(targets.filter(t => t.id.startsWith("you:")).map(t => t.id)).toEqual(["you:1", "you:2"]);
+		expect(byId(targets, "you:1")?.content).toBe("follow-up prompt");
+		expect(byId(targets, "you:2")?.content).toBe("first prompt I wrote");
+		expect(byId(targets, "you:1")?.hint).toBe("you · 1 line");
+		expect(byId(targets, "you:1")?.copyMessage).toBe("Copied your last message to clipboard");
+		expect(byId(targets, "you:2")?.copyMessage).toBe("Copied your message to clipboard");
+
+		// Assistant ranking and copy messages are untouched by the new entries.
+		expect(byId(targets, "msg:1")?.content).toBe("an answer");
+		expect(byId(targets, "msg:1")?.copyMessage).toBe("Copied last message to clipboard");
+	});
+
+	it("drills a user message into its blocks without colliding with assistant ids", () => {
+		const text = "run this\n```sh\nbun test\n```";
+		const targets = buildCopyTargets(source({ messages: [userMessage(text)] as unknown as AgentMessage[] }));
+		const mine = byId(targets, "you:1");
+		expect(mine?.content).toBe(text);
+		expect(mine?.hint).toBe("you · 4 lines · 1 code");
+		expect(mine?.children?.map(c => c.id)).toEqual(["you:1:code:0"]);
+		expect(mine?.children?.[0]?.content).toBe("bun test");
+		expect(byId(targets, "msg:1")).toBeUndefined();
+	});
+
+	it("hides the contextual user turns the runtime injects", () => {
+		const messages = [
+			userMessage("<environment_context>\ncwd: /repo"),
+			userMessage("<skills>\nfoo"),
+			{ role: "user", content: [{ type: "text", text: "   " }] },
+			userMessage("what I actually asked"),
+		] as unknown as AgentMessage[];
+		const targets = buildCopyTargets(source({ messages }));
+		expect(targets.filter(t => t.id.startsWith("you:")).map(t => t.content)).toEqual(["what I actually asked"]);
+	});
+
+	it("reads user turns whose content is a bare string", () => {
+		const messages = [{ role: "user", content: "plain string prompt" }] as unknown as AgentMessage[];
+		expect(byId(buildCopyTargets(source({ messages })), "you:1")?.content).toBe("plain string prompt");
 	});
 
 	it("falls back to handoff context only when there are no assistant messages", () => {
