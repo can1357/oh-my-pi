@@ -24,6 +24,7 @@ import type { InteractiveModeContext } from "../modes/types";
 import { AgentRegistry } from "../registry/agent-registry";
 import type { AgentSessionEvent } from "../session/agent-session";
 import type { SessionEntry } from "../session/session-entries";
+import { type SubagentLifecyclePayload, TASK_SUBAGENT_LIFECYCLE_CHANNEL } from "../task/types";
 import { shouldDisableReasoning, toReasoningEffort } from "../thinking";
 import { emitSubagentFrame } from "../utils/event-bus";
 import { setSessionTerminalTitle } from "../utils/title-generator";
@@ -193,6 +194,8 @@ export class CollabGuestLink {
 	readonly agentRegistry = new AgentRegistry();
 	/** Per-agent `hasSessionFile` from the last snapshot; gates remote transcript fetches. */
 	#agentHasTranscript = new Map<string, boolean>();
+	/** Last lifecycle state mirrored per agent; dedupes snapshot reconciliation. */
+	#agentOutcomeStates = new Map<string, "active" | "completed" | "failed" | "aborted">();
 	#pendingTranscripts = new Map<number, (r: AgentHubRemoteTranscript | null) => void>();
 	/** Host `ui-request`s presented (or queued) locally, keyed by reqId; aborting dismisses. */
 	#pendingUiRequests = new Map<number, AbortController>();
@@ -534,6 +537,10 @@ export class CollabGuestLink {
 				// Mirrored host EventBus traffic (task subagent lifecycle/progress)
 				// feeding the observer HUD and Agent Hub progress columns. The
 				// observer registry listens on the shared observability bus.
+				if (frame.channel === TASK_SUBAGENT_LIFECYCLE_CHANNEL) {
+					const lifecycle = frame.data as SubagentLifecyclePayload;
+					this.#agentOutcomeStates.set(lifecycle.id, lifecycle.status === "started" ? "active" : lifecycle.status);
+				}
 				emitSubagentFrame(this.#ctx.eventBus, this.#ctx.subagentEventBus, frame.channel, frame.data);
 				break;
 			case "agents":
@@ -615,6 +622,7 @@ export class CollabGuestLink {
 			if (!seen.has(ref.id)) {
 				this.agentRegistry.unregister(ref.id);
 				this.#agentHasTranscript.delete(ref.id);
+				this.#agentOutcomeStates.delete(ref.id);
 			}
 		}
 		for (const snap of agents) {
@@ -643,6 +651,11 @@ export class CollabGuestLink {
 			} else {
 				this.agentRegistry.clearLastOutcome(snap.id);
 			}
+			const outcomeState = snap.status === "running" ? "active" : snap.lastOutcome;
+			if (outcomeState && this.#agentOutcomeStates.get(snap.id) !== outcomeState) {
+				this.#agentOutcomeStates.set(snap.id, outcomeState);
+				this.#ctx.setObservedAgentTaskOutcome(snap.id, outcomeState);
+			}
 			this.#agentHasTranscript.set(snap.id, snap.hasSessionFile);
 		}
 	}
@@ -652,6 +665,7 @@ export class CollabGuestLink {
 			this.agentRegistry.unregister(ref.id);
 		}
 		this.#agentHasTranscript.clear();
+		this.#agentOutcomeStates.clear();
 	}
 
 	/** Resolve every in-flight transcript request with null (resolvers clear their own timers). */

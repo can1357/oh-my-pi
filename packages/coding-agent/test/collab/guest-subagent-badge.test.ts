@@ -55,8 +55,12 @@ function settledAgent(lastOutcome?: AgentSnapshot["lastOutcome"]): AgentSnapshot
 		lastActivity: 950,
 	};
 }
+type ObservedOutcome = {
+	id: string;
+	state: "active" | "completed" | "failed" | "aborted";
+};
 
-function makeGuestContext(counts: number[]): InteractiveModeContext {
+function makeGuestContext(counts: number[], observedOutcomes: ObservedOutcome[]): InteractiveModeContext {
 	let statusLineCount = 0;
 	const ctx = {
 		collabGuest: undefined as CollabGuestLink | undefined,
@@ -108,6 +112,9 @@ function makeGuestContext(counts: number[]): InteractiveModeContext {
 		updateEditorTopBorder: () => {},
 		updateEditorBorderColor: () => {},
 		eventController: { handleEvent: () => Promise.resolve() },
+		setObservedAgentTaskOutcome: (id: string, state: ObservedOutcome["state"]) => {
+			observedOutcomes.push({ id, state });
+		},
 		syncRunningSubagentBadge: () => {
 			const registry = getRunningSubagentBadgeRegistry(ctx.collabGuest);
 			const agentIds = getRunningSubagentBadgeAgentIds(registry);
@@ -156,7 +163,8 @@ describe("collab guest running-subagents badge", () => {
 		await hostOpen.promise;
 
 		const counts: number[] = [];
-		const ctx = makeGuestContext(counts);
+		const observedOutcomes: ObservedOutcome[] = [];
+		const ctx = makeGuestContext(counts, observedOutcomes);
 		const guest = new CollabGuestLink(ctx);
 
 		try {
@@ -165,18 +173,31 @@ describe("collab guest running-subagents badge", () => {
 			expect(counts).toEqual([0, 1]);
 			expect(ctx.statusLine.subagentCount).toBe(1);
 			expect(getRunningSubagentBadgeRegistry(guest)?.get("settled-agent")?.history?.lastOutcome).toBe("failed");
+			expect(observedOutcomes).toContainEqual({ id: "settled-agent", state: "failed" });
 
-			nextWelcomeAgents = [...makeAgents(["remote-one", "remote-two"]), settledAgent()];
-			const secondSnapshot = Promise.withResolvers<void>();
+			nextWelcomeAgents = [...makeAgents(["remote-one", "remote-two"]), { ...settledAgent(), status: "running" }];
+			const activeSnapshot = Promise.withResolvers<void>();
 			const originalSync = ctx.syncRunningSubagentBadge.bind(ctx);
 			ctx.syncRunningSubagentBadge = () => {
 				originalSync();
-				if (ctx.statusLine.subagentCount === 2) secondSnapshot.resolve();
+				if (ctx.statusLine.subagentCount === 3) activeSnapshot.resolve();
 			};
 			sendWelcome(nextWelcomeAgents);
-			await secondSnapshot.promise;
-			expect(ctx.statusLine.subagentCount).toBe(2);
+			await activeSnapshot.promise;
 			expect(getRunningSubagentBadgeRegistry(guest)?.get("settled-agent")?.history?.lastOutcome).toBeUndefined();
+			expect(observedOutcomes.at(-1)).toEqual({ id: "settled-agent", state: "active" });
+
+			nextWelcomeAgents = [...makeAgents(["remote-one", "remote-two"]), settledAgent("completed")];
+			const completedSnapshot = Promise.withResolvers<void>();
+			ctx.syncRunningSubagentBadge = () => {
+				originalSync();
+				if (ctx.statusLine.subagentCount === 2) completedSnapshot.resolve();
+			};
+			sendWelcome(nextWelcomeAgents);
+			await completedSnapshot.promise;
+			expect(ctx.statusLine.subagentCount).toBe(2);
+			expect(getRunningSubagentBadgeRegistry(guest)?.get("settled-agent")?.history?.lastOutcome).toBe("completed");
+			expect(observedOutcomes.at(-1)).toEqual({ id: "settled-agent", state: "completed" });
 
 			await guest.leave("test cleanup");
 			expect(ctx.collabGuest).toBeUndefined();
