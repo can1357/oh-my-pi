@@ -59,6 +59,10 @@ export type RGB = readonly [number, number, number];
 
 export interface SegmentContext {
 	session: AgentSession;
+	/** Deterministic wall clock for previews/tests; production omits it. */
+	now?: Date;
+	/** Deterministic host label for previews/tests; production omits it. */
+	hostname?: string;
 	/** Focused subagent id while the view is proxied at its session, undefined otherwise. */
 	focusedAgentId?: string | undefined;
 	/** Effective `statusLine.sessionAccent`; `false` disables hash-derived accent colors, while `true` or omission enables them. */

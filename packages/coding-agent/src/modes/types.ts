@@ -271,6 +271,8 @@ export interface InteractiveModeContext {
 	 * native scrollback.
 	 */
 	presentCommandOutput(content: Component | readonly Component[]): void;
+	/** Show session information in a focused transient overlay. */
+	showSessionInfo(info: string): void;
 	/** Mount command output deferred by {@link presentCommandOutput}. */
 	flushPendingCommandOutput(): void;
 	/**
