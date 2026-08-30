@@ -62,11 +62,18 @@ export function isReadOnlyAgent(
 	// tool, so classifying on the unexpanded alias would misreport the agent
 	// as writable. Without backend info, assume eval is available (fail-safe
 	// toward writable, matching the runtime default allowance).
-	const declared = expandExecToolAlias(
+	// Mirror the executor spawn path's auto-adds BEFORE classification, so the
+	// grant the runtime actually creates is the set being classified:
+	// - `spawns:` auto-adds `task` (delegation to a writable child breaks the
+	//   read-only contract even when the agent's own allowlist is read-only);
+	// - non-restricted spawn paths auto-add `hub` (`exec`-tier approval), so an
+	//   effective set that is otherwise read-only still cannot be flagged
+	//   read-only unless `READ_ONLY_TOOL_NAMES` already covers it.
+	const effective = expandExecToolAlias(
 		agent.tools,
 		patterns,
 		evalBackends ?? { python: true, js: true, ruby: false, julia: false },
-	);
-	const effective = declared.filter(tool => !isToolDisallowed(tool, patterns));
-	return effective.every(tool => READ_ONLY_TOOL_NAMES.has(tool));
+	).filter(tool => !isToolDisallowed(tool, patterns));
+	const withAutoAdds = agent.spawns !== undefined && !effective.includes("task") ? [...effective, "task"] : effective;
+	return withAutoAdds.every(tool => READ_ONLY_TOOL_NAMES.has(tool));
 }

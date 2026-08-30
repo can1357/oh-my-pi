@@ -78,6 +78,24 @@ describe("task agent capability descriptions", () => {
 			),
 		).toBe(true);
 	});
+	it("mirrors the executor auto-adds before classifying", () => {
+		// The spawn path auto-adds `task` when `spawns:` is defined, so an agent
+		// with an empty allowlist + `spawns: "*"` can delegate to a writable
+		// child — advertising it as READ-ONLY would direct investigation flows
+		// at an agent that can mutate indirectly.
+		const base: AgentDefinition = {
+			name: "x",
+			description: "x",
+			systemPrompt: "x",
+			source: "bundled",
+		};
+		expect(isReadOnlyAgent({ ...base, tools: [], spawns: "*" })).toBe(false);
+		expect(isReadOnlyAgent({ ...base, tools: ["read"], spawns: "*" })).toBe(false);
+		// Without `spawns:`, delegation is impossible and the read-only
+		// classification holds (the auto-added task row never applies).
+		expect(isReadOnlyAgent({ ...base, tools: [] })).toBe(true);
+		expect(isReadOnlyAgent({ ...base, tools: ["read"] })).toBe(true);
+	});
 	it("classifies an empty effective allowlist as read-only", () => {
 		// An explicit `tools: []` is a hard allowlist (discovery preserves it):
 		// the child can call no tool at all, so it must not be advertised as
