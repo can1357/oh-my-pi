@@ -1,4 +1,7 @@
 import { describe, expect, it, spyOn } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
 import { Process, ProcessStatus } from "@oh-my-pi/pi-natives";
 import { createLinuxSubreaperScript, exec, NonZeroExitError, spawn, TimeoutError } from "@oh-my-pi/pi-utils/ptree";
 
@@ -58,39 +61,92 @@ describe("ptree timeout", () => {
 	});
 
 	it.skipIf(process.platform !== "linux")(
-		"waits for subreaper cleanup when an AbortSignal races the timeout kill",
+		"kills descendants adopted while an AbortSignal races the timeout sweep",
 		async () => {
+			const testRoot = await fs.mkdtemp(path.join(os.tmpdir(), "pi-utils-subreaper-race-"));
+			const pidFile = path.join(testRoot, "worker.pid");
+			const launcher = path.join(testRoot, "launcher.sh");
+			await Bun.write(
+				launcher,
+				`#!/bin/sh
+setsid sleep 30 </dev/null >/dev/null 2>&1 &
+printf '%s\n' "$!" > ${JSON.stringify(pidFile)}
+sleep 30
+`,
+			);
+			await fs.chmod(launcher, 0o755);
+
 			const controller = new AbortController();
-			using child = spawn([process.execPath, "-e", "Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0)"], {
+			using child = spawn([launcher], {
 				signal: controller.signal,
 				subreaper: true,
 			});
-			const nativeRoot = Process.fromPid(child.pid);
-			expect(nativeRoot).toBeDefined();
-
-			let sweepFinished = false;
-			const root = {
-				children: () => [],
-				killTree: () => {
-					sweepFinished = true;
-					nativeRoot?.killTree(9);
-				},
-				terminate: () => {
-					nativeRoot?.killTree(9);
-					return Promise.resolve(true);
-				},
-			} as unknown as Process;
-			const fromPid = spyOn(Process, "fromPid").mockReturnValue(root);
+			const cleanupProcesses: Process[] = [];
 
 			try {
-				child.kill(new TimeoutError(1, ""), -1);
-				controller.abort("concurrent abort");
+				const pidFileHandle = Bun.file(pidFile);
+				const setupDeadline = Date.now() + 2_000;
+				while (!(await pidFileHandle.exists()) && Date.now() < setupDeadline) await Bun.sleep(10);
+				expect(await pidFileHandle.exists(), "the launcher must create its worker").toBe(true);
 
-				await expect(child.text()).rejects.toBeInstanceOf(TimeoutError);
-				expect(sweepFinished).toBe(true);
+				const workerPid = Number.parseInt((await pidFileHandle.text()).trim(), 10);
+				const subreaper = Process.fromPid(child.pid);
+				const command = subreaper?.children()[0];
+				const worker = Process.fromPid(workerPid);
+				if (!subreaper || !command || !worker) throw new Error("failed to capture the subreaper process tree");
+				cleanupProcesses.push(worker, command, subreaper);
+				expect(worker.ppid, "the worker must initially belong to the supervised command").toBe(command.pid);
+
+				const killOnly = (pid: number): number => {
+					try {
+						process.kill(pid, "SIGKILL");
+						return 1;
+					} catch {
+						return 0;
+					}
+				};
+				const commandSnapshot = {
+					killTree: () => killOnly(command.pid),
+				} as unknown as Process;
+				const pendingAdoption = {
+					killTree: () => 0,
+				} as unknown as Process;
+				let snapshots = 0;
+				let observedAdoption = false;
+				const controlledSubreaper = {
+					children: (): Process[] => {
+						snapshots++;
+						if (snapshots === 1) return [commandSnapshot];
+						if (subreaper.status() !== ProcessStatus.Running || worker.status() !== ProcessStatus.Running)
+							return [];
+						if (worker.ppid !== subreaper.pid) return [pendingAdoption];
+						observedAdoption = true;
+						return [worker];
+					},
+					killTree: () => killOnly(subreaper.pid),
+					terminate: () => Promise.resolve(killOnly(subreaper.pid) > 0),
+				} as unknown as Process;
+				const nativeFromPid = Process.fromPid.bind(Process);
+				const fromPid = spyOn(Process, "fromPid").mockImplementation(pid =>
+					pid === child.pid ? controlledSubreaper : nativeFromPid(pid),
+				);
+
+				try {
+					child.kill(new TimeoutError(1, ""), -1);
+					controller.abort("concurrent abort");
+
+					const result = await child.wait({ allowAbort: true });
+					expect(result.exitError).toBeInstanceOf(TimeoutError);
+					expect(observedAdoption, "the worker must reparent to the live subreaper during cleanup").toBe(true);
+					expect(worker.status(), `adopted descendant ${worker.pid} survived cleanup`).not.toBe(
+						ProcessStatus.Running,
+					);
+				} finally {
+					fromPid.mockRestore();
+				}
 			} finally {
-				fromPid.mockRestore();
-				nativeRoot?.killTree(9);
+				for (const processHandle of cleanupProcesses) processHandle.killTree(9);
+				await fs.rm(testRoot, { recursive: true, force: true });
 			}
 		},
 	);
