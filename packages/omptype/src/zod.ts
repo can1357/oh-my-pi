@@ -51,22 +51,40 @@ export interface ZodLikeSchema<out Out> extends Type<Out, unknown> {
 	regex(expression: RegExp, message?: string): ZodLikeSchema<Out>;
 	url(): ZodLikeSchema<Out>;
 	optional(): ZodLikeSchema<Out | undefined> & OptionalSchemaMarker;
+	nullable(this: ZodLikeSchema<Out> & OptionalSchemaMarker): ZodLikeSchema<Out | null> & OptionalSchemaMarker;
 	nullable(): ZodLikeSchema<Out | null>;
 	default(value: Exclude<Out, undefined> | (() => Exclude<Out, undefined>)): ZodLikeSchema<Exclude<Out, undefined>>;
 	/**
-	 * The `this`-typed overloads keep {@link OptionalSchemaMarker} attached: the
-	 * runtime decorator already carries `isOptional` through both methods, and
-	 * without them `z.infer` reports `z.string().optional().describe("…")` (or
-	 * `.readonly()`) as a REQUIRED property whose value includes `undefined`,
-	 * disagreeing with the parse that accepts the key's absence.
+	 * The `this`-typed overloads keep {@link OptionalSchemaMarker} attached
+	 * wherever the runtime decorator carries `isOptional` through — every
+	 * wrapper that returns the same schema in a new coat. Without them `z.infer`
+	 * reports `z.string().optional().refine(…)` (or `.describe()`,
+	 * `.readonly()`, `.transform()`, `.catch()`, `.nullable()`) as a REQUIRED
+	 * property whose value includes `undefined`, disagreeing with the parse that
+	 * accepts the key's absence. Keyed off the receiver rather than
+	 * `undefined extends Out`, which would also mark a genuine `z.undefined()`
+	 * property optional.
 	 */
 	describe(
 		this: ZodLikeSchema<Out> & OptionalSchemaMarker,
 		description: string,
 	): ZodLikeSchema<Out> & OptionalSchemaMarker;
 	describe(description: string): ZodLikeSchema<Out>;
+	refine(
+		this: ZodLikeSchema<Out> & OptionalSchemaMarker,
+		predicate: (value: Out) => unknown,
+		messageOrOptions?: string | RefineOptions,
+	): ZodLikeSchema<Out> & OptionalSchemaMarker;
 	refine(predicate: (value: Out) => unknown, messageOrOptions?: string | RefineOptions): ZodLikeSchema<Out>;
+	transform<Next>(
+		this: ZodLikeSchema<Out> & OptionalSchemaMarker,
+		transformer: (value: Out) => Next,
+	): ZodLikeSchema<Next> & OptionalSchemaMarker;
 	transform<Next>(transformer: (value: Out) => Next): ZodLikeSchema<Next>;
+	catch(
+		this: ZodLikeSchema<Out> & OptionalSchemaMarker,
+		fallback: Out | (() => Out),
+	): ZodLikeSchema<Out> & OptionalSchemaMarker;
 	catch(fallback: Out | (() => Out)): ZodLikeSchema<Out>;
 	strict(): ZodLikeSchema<Out>;
 	passthrough(): ZodLikeSchema<Out & Record<string, unknown>>;

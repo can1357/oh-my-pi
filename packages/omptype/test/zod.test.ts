@@ -22,12 +22,33 @@ const transformed = z.string().transform(value => value.length);
 type _TransformInference = Assert<Eq<z.infer<typeof transformed>, number>>;
 const nullableOptional = z.number().nullable().optional();
 type _NullableOptionalInference = Assert<Eq<z.infer<typeof nullableOptional>, number | null | undefined>>;
-// `.optional()` followed by a metadata/wrapper method must stay optional in the
-// inferred type, matching the parse that accepts the key's absence.
+// `.optional()` followed by any wrapper that keeps runtime optionality must stay
+// optional in the inferred type, matching the parse that accepts the key's
+// absence. One row per wrapper: each carries the marker independently.
 const optionalThenDescribed = z.object({ note: z.string().optional().describe("d") });
 type _OptionalDescribedInference = Assert<Eq<z.infer<typeof optionalThenDescribed>, { note?: string | undefined }>>;
 const optionalThenReadonly = z.object({ note: z.string().optional().readonly() });
 type _OptionalReadonlyInference = Assert<Eq<z.infer<typeof optionalThenReadonly>, { note?: string | undefined }>>;
+const optionalThenRefined = z.object({
+	note: z
+		.string()
+		.optional()
+		.refine(() => true),
+});
+type _OptionalRefinedInference = Assert<Eq<z.infer<typeof optionalThenRefined>, { note?: string | undefined }>>;
+const optionalThenTransformed = z.object({
+	note: z
+		.string()
+		.optional()
+		.transform(value => value === undefined),
+});
+type _OptionalTransformedInference = Assert<Eq<z.infer<typeof optionalThenTransformed>, { note?: boolean }>>;
+const optionalThenCaught = z.object({ note: z.string().optional().catch(undefined) });
+type _OptionalCaughtInference = Assert<Eq<z.infer<typeof optionalThenCaught>, { note?: string | undefined }>>;
+const optionalThenNullable = z.object({ note: z.string().optional().nullable() });
+type _OptionalNullableInference = Assert<
+	Eq<z.infer<typeof optionalThenNullable>, { note?: string | null | undefined }>
+>;
 
 describe("zod-like parsing", () => {
 	it("exposes callable omptype schemas with JSON Schema metadata", () => {
