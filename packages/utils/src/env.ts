@@ -318,19 +318,6 @@ export function $envpos(name: string, defaultValue: number): number {
 	return parsed;
 }
 
-/**
- * True when a GUI can be reached: a window server always exists off Linux,
- * while X11/Wayland must be advertised through the environment there.
- *
- * Shared because clipboard tooling and headful-browser launches gate on the
- * same fact — two copies would let platform hardening drift apart, and the
- * failure mode is a hang or an opaque "Missing X server" rather than a clear
- * skip.
- */
-export function hasDisplay(): boolean {
-	return process.platform !== "linux" || Boolean(process.env.DISPLAY || process.env.WAYLAND_DISPLAY);
-}
-
 const BUN_TEST_ENTRY_PATTERN = /[._](?:test|spec)\.[cm]?[jt]sx?$/;
 
 /** True when the process is an explicitly marked test child or Bun is running a test entrypoint. */
