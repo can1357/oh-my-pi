@@ -8,6 +8,7 @@ import {
 	type UsageReport,
 	type UsageUnit,
 } from "@oh-my-pi/pi-ai";
+import { replaceTabs } from "@oh-my-pi/pi-tui";
 import { formatDuration, formatNumber, sanitizeText } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { formatActiveAccountLabel } from "../slash-commands/helpers/active-oauth-account";
@@ -321,7 +322,7 @@ function formatResetCreditExpiryLines(report: UsageReport, nowMs: number): strin
 }
 
 function sanitizeUsageField(value: string): string {
-	return sanitizeText(value.replace(/[\r\n]+/g, " ").replace(/\t/g, "  "));
+	return sanitizeText(replaceTabs(value.replace(/[\r\n]+/g, " ")));
 }
 
 /** Replace every mapped identity in free-form usage text. */

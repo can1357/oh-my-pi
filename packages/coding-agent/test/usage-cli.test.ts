@@ -1010,7 +1010,7 @@ describe("formatUsageBreakdown", () => {
 		const noteLines = text.split("\n").filter(line => line.includes("safe") || line.includes("FORGED"));
 		expect(raw).not.toContain("\x1b[2J");
 		expect(noteLines).toHaveLength(1);
-		expect(noteLines[0]?.trim()).toBe("safe FORGED  columncleared");
+		expect(noteLines[0]?.trim()).toBe("safe FORGED   columncleared");
 	});
 	it("sanitizes every provider-controlled display field without sanitizing renderer ANSI", () => {
 		const now = Date.now();
