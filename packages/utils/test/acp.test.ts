@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import type { ReadableStreamReadResult } from "node:stream/web";
 import {
 	type Agent,
 	AgentSideConnection,
@@ -101,6 +102,41 @@ describe("ACP JSON-RPC transport", () => {
 		expect(await reader.read()).toMatchObject({ value: { method: "a", params: {} } });
 		expect(await reader.read()).toMatchObject({ value: { method: "b" } });
 		writer.releaseLock();
+		reader.releaseLock();
+	});
+
+	it("keeps consuming after unparseable lines and rejects them per JSON-RPC", async () => {
+		const bytes = new TransformStream<Uint8Array, Uint8Array>();
+		const output = new TransformStream<Uint8Array, Uint8Array>();
+		const stream = ndJsonStream(output.writable, bytes.readable);
+		const bytesWriter = bytes.writable.getWriter();
+		const outputReader = output.readable.getReader();
+		const reader = stream.readable.getReader();
+		const encoder = new TextEncoder();
+		const readLine = async (source: { read(): Promise<ReadableStreamReadResult<Uint8Array>> }) => {
+			const chunk = await source.read();
+			if (chunk.done) throw new Error("Expected bytes");
+			return new TextDecoder().decode(chunk.value);
+		};
+
+		await bytesWriter.write(encoder.encode("not json\n"));
+		expect(JSON.parse(await readLine(outputReader))).toEqual({
+			jsonrpc: "2.0",
+			id: null,
+			error: { code: -32700, message: "Parse error" },
+		});
+
+		await bytesWriter.write(encoder.encode('{"id":7,"method":"m"}\n'));
+		expect(JSON.parse(await readLine(outputReader))).toEqual({
+			jsonrpc: "2.0",
+			id: 7,
+			error: { code: -32600, message: "Invalid request" },
+		});
+
+		await bytesWriter.write(encoder.encode('{"jsonrpc":"2.0","id":9,"method":"ok"}\n'));
+		expect(await reader.read()).toMatchObject({ value: { jsonrpc: "2.0", id: 9, method: "ok" } });
+		bytesWriter.releaseLock();
+		outputReader.releaseLock();
 		reader.releaseLock();
 	});
 	it("matches the SDK error-code fixtures", () => {

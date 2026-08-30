@@ -18,6 +18,9 @@
 - Fixed an issue where custom model overrides were lost during configuration updates
 - Fixed "Please use nerdfont" notification incorrectly persisting after theme configuration
 - Fixed sampling parameter errors for newer Anthropic models (Opus 4.7+, Sonnet 5+)
+### Fixed
+
+- ACP initialize no longer advertises the v2-draft `fork` capability as a direct v1 `sessionCapabilities` key; it lives in the reserved `_meta` extension bag so strict clients cannot reject the session negotiation.
 
 ## [18.0.11] - 2026-08-29
 

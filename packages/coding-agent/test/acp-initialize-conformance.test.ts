@@ -250,11 +250,15 @@ describe("ACP initialize conformance", () => {
 				promptCapabilities: expect.objectContaining({ embeddedContext: true, image: true }),
 				sessionCapabilities: expect.objectContaining({
 					list: expect.any(Object),
-					fork: expect.any(Object),
 					resume: expect.any(Object),
 					close: expect.any(Object),
 				}),
 			}),
 		);
+		const capabilities = response.agentCapabilities! as {
+			sessionCapabilities: Record<string, unknown>;
+		};
+		expect(capabilities.sessionCapabilities).not.toHaveProperty("fork");
+		expect(capabilities.sessionCapabilities._meta).toEqual({ fork: {} });
 	});
 });
