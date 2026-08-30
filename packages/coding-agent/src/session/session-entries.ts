@@ -1,6 +1,6 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent, MessageAttribution, ServiceTierByFamily, TextContent } from "@oh-my-pi/pi-ai";
-import type { StructuredSubagentSchemaMode } from "../task/types";
+import type { AgentDefinitionIdentity, AgentSource, StructuredSubagentSchemaMode } from "../task/types";
 import type { CompactionMethod } from "./compaction-methods";
 
 export const CURRENT_SESSION_VERSION = 3;
@@ -217,6 +217,10 @@ export interface SessionInitEntry extends SessionEntryBase {
 	tools: string[];
 	/** Agent definition name (for example `scout` or `reviewer`). */
 	agent?: string;
+	/** Legacy precedence source of the selected agent definition. */
+	agentSource?: AgentSource;
+	/** Exact host-owned identity of the selected definition, when available. */
+	agentIdentity?: AgentDefinitionIdentity;
 	/** Semantic model role declared by the agent, retained even after concrete model resolution. */
 	modelRole?: string;
 	/** Initially resolved provider/model selector for historical display. */

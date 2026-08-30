@@ -184,13 +184,15 @@ export function createPersistedSubagentReviverFactory(
 			// The internal run-state signal precedes deferrable public `agent_end`,
 			// keeping idle-TTL ownership synchronized even while prompts unwind.
 			registry.syncSessionStatus(ref.id, session);
-			// Persisted files predate an agent-source field, so cold-revived frames
-			// report the runtime-neutral `user` source; name comes from the ref.
+			// Live lifecycle frames report the selected definition name. New persisted
+			// sessions retain that name; older files predate it and must continue to
+			// report the registry display name (and runtime-neutral source) on revival.
 			const wakeAgent: AgentDefinition = {
-				name: ref.displayName,
+				name: init.agent ?? ref.displayName,
 				description: "",
 				systemPrompt: init.systemPrompt,
-				source: "user",
+				source: init.agentSource ?? "user",
+				...(init.agentIdentity ? { identity: init.agentIdentity } : {}),
 			};
 			attachIrcWakeTurnMonitor(session, {
 				id: ref.id,

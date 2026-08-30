@@ -53,6 +53,7 @@ export * from "./session/session-manager";
 export * from "./session/session-migrations";
 export * from "./session/session-storage";
 export * from "./session/sql-session-storage";
+export { resolveAgentDefinitionIdentities, resolveAgentDefinitionIdentity } from "./task/discovery";
 export * from "./task/executor";
 export type * from "./task/types";
 // Tools (detail types and utilities)

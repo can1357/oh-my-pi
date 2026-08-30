@@ -28,6 +28,8 @@ import { execCommand } from "../../exec/exec";
 // Runtime self-reference: dereference this namespace only inside loader functions to keep the index.ts cycle safe.
 import * as PiCodingAgent from "../../index";
 import type { CustomMessagePayload } from "../../session/messages";
+import { createAgentDefinitionOriginIdentity } from "../../task/agent-definition-identity";
+import type { AgentDefinitionOriginIdentity } from "../../task/types";
 import type { FileDeleteFallbackHandler, FileWriteFallbackHandler } from "../../tools/file-write-fallback";
 import { EventBus } from "../../utils/event-bus";
 import * as TypeBox from "../legacy-typebox";
@@ -162,6 +164,7 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 		config: ProviderConfig;
 		sourceId: string;
 	}> = [];
+	readonly extensionOrigin: AgentDefinitionOriginIdentity | undefined;
 
 	constructor(
 		public readonly pi: typeof PiCodingAgent,
@@ -169,7 +172,9 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 		private readonly runtime: IExtensionRuntime,
 		private readonly cwd: string,
 		public readonly events: EventBus,
-	) {}
+	) {
+		this.extensionOrigin = extension.origin;
+	}
 
 	on<F extends HandlerFn>(event: string, handler: F): void {
 		const list = this.extension.handlers.get(event) ?? [];
@@ -337,10 +342,15 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 /**
  * Create an Extension object with empty collections.
  */
-function createExtension(extensionPath: string, resolvedPath: string): Extension {
+function createExtension(
+	extensionPath: string,
+	resolvedPath: string,
+	origin?: AgentDefinitionOriginIdentity,
+): Extension {
 	return {
 		path: extensionPath,
 		resolvedPath,
+		...(origin ? { origin } : {}),
 		handlers: new Map(),
 		tools: new Map(),
 		toolRegistrationListeners: new Set(),
@@ -382,7 +392,10 @@ async function runExtensionFactory(
 async function importExtensionModule(extensionPath: string, cwd: string): Promise<PreparedExtension> {
 	const resolvedPath = resolvePath(extensionPath, cwd);
 	try {
-		const module = (await withHostGuard(() => loadLegacyPiModule(resolvedPath))) as LoadedExtensionModule;
+		const [module, origin] = await Promise.all([
+			withHostGuard(() => loadLegacyPiModule(resolvedPath)) as Promise<LoadedExtensionModule>,
+			resolveExtensionPackageOriginIdentity(resolvedPath),
+		]);
 		const factory = getExtensionFactory(module);
 
 		if (typeof factory !== "function") {
@@ -391,13 +404,20 @@ async function importExtensionModule(extensionPath: string, cwd: string): Promis
 				factory: null,
 				resolvedPath,
 				error: `Extension does not export a valid factory function: ${extensionPath}`,
+				origin: origin ?? null,
 			};
 		}
 
-		return { path: extensionPath, factory, resolvedPath, error: null };
+		return { path: extensionPath, factory, resolvedPath, error: null, origin: origin ?? null };
 	} catch (err) {
 		const message = err instanceof Error ? err.message : String(err);
-		return { path: extensionPath, factory: null, resolvedPath, error: `Failed to load extension: ${message}` };
+		return {
+			path: extensionPath,
+			factory: null,
+			resolvedPath,
+			error: `Failed to load extension: ${message}`,
+			origin: null,
+		};
 	}
 }
 
@@ -413,7 +433,10 @@ async function bindExtension(
 		return { extension: null, error: imported.error };
 	}
 	try {
-		const extension = createExtension(extensionPath, imported.resolvedPath);
+		const origin = Object.hasOwn(imported, "origin")
+			? (imported.origin ?? undefined)
+			: await resolveExtensionPackageOriginIdentity(imported.resolvedPath);
+		const extension = createExtension(extensionPath, imported.resolvedPath, origin);
 		const api = new ConcreteExtensionAPI(PiCodingAgent, extension, runtime, cwd, eventBus);
 		await withHostGuard(() => runExtensionFactory(factory, api, runtime));
 
@@ -559,6 +582,40 @@ async function resolveExtensionEntries(dir: string): Promise<string[] | null> {
 	}
 
 	return null;
+}
+
+async function canonicalExtensionPath(candidate: string): Promise<string> {
+	try {
+		return await fs.realpath(candidate);
+	} catch (error) {
+		if (isEnoent(error)) return path.resolve(candidate);
+		throw error;
+	}
+}
+
+/**
+ * Resolve the manifest package that authoritatively declared one loaded entry.
+ * Direct loose files and inline factories intentionally receive no package identity.
+ */
+async function resolveExtensionPackageOriginIdentity(
+	extensionEntryPath: string,
+): Promise<AgentDefinitionOriginIdentity | undefined> {
+	const canonicalEntry = await canonicalExtensionPath(extensionEntryPath);
+	let directory = path.dirname(path.resolve(extensionEntryPath));
+	while (true) {
+		const manifest = await readExtensionManifest(path.join(directory, "package.json"));
+		if (manifest?.extensions?.length) {
+			for (const entry of manifest.extensions) {
+				const candidate = await canonicalExtensionPath(path.resolve(directory, entry));
+				if (candidate === canonicalEntry) {
+					return createAgentDefinitionOriginIdentity("extension", directory);
+				}
+			}
+		}
+		const parent = path.dirname(directory);
+		if (parent === directory) return undefined;
+		directory = parent;
+	}
 }
 
 /**

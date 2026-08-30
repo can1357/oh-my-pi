@@ -18,7 +18,7 @@ import {
 	stringifyJson,
 	toError,
 } from "@oh-my-pi/pi-utils";
-import type { StructuredSubagentSchemaMode } from "../task/types";
+import type { AgentDefinitionIdentity, AgentSource, StructuredSubagentSchemaMode } from "../task/types";
 import { ArtifactManager } from "./artifacts";
 import { type BlobPutOptions, type BlobPutResult, BlobStore } from "./blob-store";
 import type { CompactionMethod } from "./compaction-methods";
@@ -2345,6 +2345,8 @@ export class SessionManager {
 		task: string;
 		tools: string[];
 		agent?: string;
+		agentSource?: AgentSource;
+		agentIdentity?: AgentDefinitionIdentity;
 		modelRole?: string;
 		resolvedModel?: string;
 		readOnly?: boolean;
@@ -2889,6 +2891,8 @@ export class SessionManager {
 			task: string;
 			tools: string[];
 			agent?: string;
+			agentSource?: AgentSource;
+			agentIdentity?: AgentDefinitionIdentity;
 			modelRole?: string;
 			resolvedModel?: string;
 			readOnly?: boolean;
@@ -2906,6 +2910,8 @@ export class SessionManager {
 			task: string;
 			tools: string[];
 			agent?: string;
+			agentSource?: AgentSource;
+			agentIdentity?: AgentDefinitionIdentity;
 			modelRole?: string;
 			resolvedModel?: string;
 			readOnly?: boolean;
@@ -2927,6 +2933,8 @@ export class SessionManager {
 					task: entry.task,
 					tools: entry.tools,
 					agent: entry.agent,
+					agentSource: entry.agentSource,
+					agentIdentity: entry.agentIdentity,
 					modelRole: entry.modelRole,
 					resolvedModel: entry.resolvedModel,
 					readOnly: entry.readOnly,
