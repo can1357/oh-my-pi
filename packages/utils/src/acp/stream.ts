@@ -113,7 +113,12 @@ function isProtocolMessage(value: unknown): value is AnyMessage {
 	// A string method means a request or notification; anything else must be a
 	// complete response envelope, so bare id frames can never be mistaken for
 	// responses and resolve outstanding requests with `undefined`.
-	if (typeof message.method === "string") return true;
+	// Keep only valid request ids; shape-invalid ids fall through to the
+	// -32600 path instead of echoing unusable ids back to clients.
+	if (typeof message.method === "string") {
+		const id = message.id;
+		return id === undefined || typeof id === "string" || typeof id === "number" || id === null;
+	}
 	return isResponseEnvelope(message);
 }
 
@@ -121,7 +126,14 @@ function isResponseEnvelope(message: Record<string, unknown>): boolean {
 	const id = message.id;
 	if (typeof id !== "string" && typeof id !== "number" && id !== null) return false;
 	const hasResult = "result" in message;
-	const hasError = message.error !== undefined && message.error !== null && typeof message.error === "object";
+	const error = message.error;
+	const hasError =
+		error !== undefined &&
+		error !== null &&
+		typeof error === "object" &&
+		!Array.isArray(error) &&
+		typeof (error as Record<string, unknown>).code === "number" &&
+		typeof (error as Record<string, unknown>).message === "string";
 	return hasResult !== hasError;
 }
 
