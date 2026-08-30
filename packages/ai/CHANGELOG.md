@@ -255,6 +255,7 @@
 
 - Fixed `omp usage invalidate` to discard stale OAuth and API-key usage snapshots, then force a cache-bypassing, per-provider serialized refresh with a broker request budget sized for the full unfiltered account batch, so upgraded subscriptions do not silently retain pre-change quota data.
 - Fixed quota reporting and Cookie capture guidance for China (Beijing) Alibaba Token Plan credentials ([#8509](https://github.com/can1357/oh-my-pi/issues/8509)).
+- Cursor tool passthrough merges authoritative `mcpArgs` into a prior `toolCallStarted` announcement instead of only marking the empty block resolved.
 - Auth-gateway Cursor auto SSE waits for an explicit `routed_model` checkpoint (from `InteractionUpdate.routedModel` or conversation checkpoint extraction) before flushing `message_start` / OpenAI envelopes — repeated `partial.model` observations no longer count as routing complete.
 - Auth-gateway non-streaming responses only rewrite the echoed `model` id under Cursor auto routing; otherwise they retain the client's requested id (including provider-qualified forms like `cursor/gpt-5`).
 - Cursor tool passthrough excludes native todo tools (`todo` / `update_todos` / `read_todos`) from the allowlist and interaction path the same way as `connect_scm`.
