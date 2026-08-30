@@ -236,6 +236,17 @@ describe("persisted agent model attribution", () => {
 		expect(history?.resolvedModelIsFallback).toBe(true);
 	});
 
+	it("ignores an older provider error after a successful terminal turn", async () => {
+		using tempDir = TempDir.createSync("@omp-attribution-recovered-");
+		const registry = await historyFor(tempDir.path(), "RecoveredLegacy", [
+			...transcriptHead(),
+			assistant("e1", "si", SONNET, "error", []),
+			assistant("a1", "e1", SONNET, "stop", [{ type: "text", text: "recovered successfully" }]),
+		]);
+
+		expect(registry.get("RecoveredLegacy")?.history?.lastOutcome).toBeUndefined();
+	});
+
 	it("restores the latest durable task outcome from a successful yield result", async () => {
 		using tempDir = TempDir.createSync("@omp-attribution-outcome-");
 		const registry = await historyFor(tempDir.path(), "CompletedWorker", [

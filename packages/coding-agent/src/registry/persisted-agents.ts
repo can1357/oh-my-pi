@@ -111,6 +111,8 @@ interface AssistantMetrics {
 	 * same verdict the session reached while running it.
 	 */
 	served: boolean;
+	/** True when this assistant turn successfully ended its request. */
+	terminalSuccess: boolean;
 }
 
 function assistantMetrics(message: Record<string, unknown>): AssistantMetrics {
@@ -120,6 +122,10 @@ function assistantMetrics(message: Record<string, unknown>): AssistantMetrics {
 	const provider = typeof message.provider === "string" ? message.provider : undefined;
 	const model = typeof message.model === "string" ? message.model : undefined;
 	const outcome = message.stopReason === "error" ? "failed" : message.stopReason === "aborted" ? "aborted" : undefined;
+	const served = assistantTurnProducedOutput({
+		stopReason: message.stopReason,
+		content,
+	} as Pick<AssistantMessage, "stopReason" | "content">);
 	return {
 		tokens: usageTokens(usage),
 		tools: content.filter(part => recordOf(part)?.type === "toolCall").length,
@@ -127,10 +133,8 @@ function assistantMetrics(message: Record<string, unknown>): AssistantMetrics {
 		contextTokens: finiteNumber(usage.totalTokens) || undefined,
 		resolvedModel: provider && model ? `${provider}/${model}` : undefined,
 		outcome,
-		served: assistantTurnProducedOutput({
-			stopReason: message.stopReason,
-			content,
-		} as Pick<AssistantMessage, "stopReason" | "content">),
+		served,
+		terminalSuccess: message.stopReason === "stop" && served,
 	};
 }
 
@@ -244,6 +248,7 @@ async function readPersistedAgentHistory(
 	let latestModelChange: { model: string; resolvedModelIsFallback: boolean } | undefined;
 	let lastOutcome: AgentTerminalOutcome | undefined;
 	let taskOutcomeResolved = false;
+	let legacyOutcomeResolved = false;
 	const visited = new Set<string>();
 	for (let id = leafId; id && !visited.has(id); id = parents.get(id)) {
 		visited.add(id);
@@ -251,7 +256,10 @@ async function readPersistedAgentHistory(
 			taskOutcomeResolved = true;
 			lastOutcome = taskOutcomeById.get(id) ?? undefined;
 		}
-		if (!taskOutcomeResolved) lastOutcome ??= outcomeById.get(id);
+		if (!taskOutcomeResolved && !legacyOutcomeResolved && outcomeById.has(id)) {
+			legacyOutcomeResolved = true;
+			lastOutcome = outcomeById.get(id);
+		}
 		const modelChange = modelChangeById.get(id);
 		if (modelChange) {
 			latestModelChange ??= modelChange;
@@ -273,7 +281,16 @@ async function readPersistedAgentHistory(
 		}
 		const assistant = assistantById.get(id);
 		if (!assistant) continue;
-		if (!taskOutcomeResolved) lastOutcome ??= assistant.outcome;
+		if (!taskOutcomeResolved && !legacyOutcomeResolved) {
+			if (assistant.outcome) {
+				legacyOutcomeResolved = true;
+				lastOutcome = assistant.outcome;
+			} else if (assistant.terminalSuccess) {
+				// Legacy/advisor transcripts have no explicit task marker. A newer
+				// successful terminal turn supersedes any older provider error.
+				legacyOutcomeResolved = true;
+			}
+		}
 		if (servedModel === undefined && assistant.served && assistant.resolvedModel) {
 			servedModel = assistant.resolvedModel;
 		}
