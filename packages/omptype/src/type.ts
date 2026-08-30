@@ -1899,6 +1899,9 @@ function mergeObjects(left: ObjectIR, right: ObjectIR): ObjectIR {
 				? undefined
 				: [...(left.patternIndexes ?? []), ...(right.patternIndexes ?? [])],
 		extras: right.extras === "keep" ? left.extras : right.extras,
+		// Spreading one object into another keeps the narrower input domain, for
+		// the same reason `intersect` does.
+		plain: left.plain === true || right.plain === true ? true : undefined,
 	};
 }
 
@@ -2110,7 +2113,11 @@ function intersectResolved(a: IR, b: IR): IR {
 					? "delete"
 					: "keep";
 		const index = a.index && b.index ? intersect(a.index, b.index) : (a.index ?? b.index);
-		return { k: "object", props, index, extras };
+		// An intersection accepts only what BOTH sides accept, so the narrower
+		// input domain wins: dropping `plain` here let `.and()` widen a schema
+		// back to accepting arrays and built-ins.
+		const plain = a.plain === true || b.plain === true ? true : undefined;
+		return { k: "object", props, index, extras, plain };
 	}
 	if (a.k === "string" && b.k === "string") {
 		const min = maxOf(a.min, b.min);

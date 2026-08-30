@@ -387,8 +387,12 @@ function visitNode(ir: IR, v: unknown, path: PropertyKey[]): unknown {
 			return errors ?? output;
 		}
 		case "object": {
-			if (typeof v !== "object" || v === null) return fail(path, "an object", v);
-			if (ir.plain === true && !isPlainRecord(v)) return fail(path, "an object", v);
+			// "a plain object" rather than "an object" so the message is not
+			// self-contradictory: the domain formatter calls an array "an object",
+			// since an array IS the object domain for omptype's own schemas.
+			const expected = ir.plain === true ? "a plain object" : "an object";
+			if (typeof v !== "object" || v === null) return fail(path, expected, v);
+			if (ir.plain === true && !isPlainRecord(v)) return fail(path, expected, v);
 			const rec = v as Record<PropertyKey, unknown>;
 			const morph = hasMorph(ir);
 			let out: Record<PropertyKey, unknown> | undefined;

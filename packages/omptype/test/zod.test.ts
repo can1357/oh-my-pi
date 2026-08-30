@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { OmpTypeError } from "../src/errors";
+import { OmpErrors, OmpTypeError } from "../src/errors";
 import { Type, type } from "../src/type";
 import * as zod from "../src/zod";
 import { z } from "../src/zod";
@@ -279,6 +279,37 @@ describe("zod-like parsing", () => {
 		expect(z.strictObject({ a: z.string() }).parse({ a: "x" })).toEqual({ a: "x" });
 		expect(z.looseObject({ a: z.string() }).parse({ a: "x", b: 1 })).toEqual({ a: "x", b: 1 });
 		expect(z.strictObject({ a: z.string() }).safeParse({ a: "x", b: 1 }).success).toBe(false);
+	});
+
+	it("keeps the object-input domain through intersections and compiled parses", () => {
+		// The IR merge behind `.and()` builds a NEW object node, so the domain has
+		// to be carried over: an intersection accepts only what both sides accept,
+		// and dropping the flag silently widened the result back to arrays and
+		// built-ins. Reached through the omptype surface, since the shim's own
+		// type does not expose `.and()`.
+		const intersect = (schema: unknown, other: unknown): ((value: unknown) => unknown) =>
+			(schema as { and(def: unknown): (value: unknown) => unknown }).and(other);
+
+		const intersected = intersect(z.strictObject({}), type({}));
+		expect(intersected([])).toBeInstanceOf(OmpErrors);
+		expect(intersected(new Date())).toBeInstanceOf(OmpErrors);
+		expect(intersected({})).toEqual({});
+
+		const withProps = intersect(z.object({ x: z.string() }), type({}));
+		const arrayWithProp: unknown[] = [];
+		Object.assign(arrayWithProp, { x: "v" });
+		expect(withProps(arrayWithProp)).toBeInstanceOf(OmpErrors);
+		expect(withProps({ x: "v" })).toEqual({ x: "v" });
+
+		// The compiled validator must agree with the walked one, or the JIT
+		// threshold would be observable: same rejection, same message, always.
+		const schema = z.object({ a: z.string() });
+		const messages = new Set<string>();
+		for (let index = 0; index < 12; index++) {
+			const result = schema.safeParse([]);
+			messages.add(result.success ? "accepted" : result.error.message);
+		}
+		expect([...messages]).toEqual(["must be a plain object (was an array)"]);
 	});
 
 	it("lets later modifiers replace the object policy the array guard sits on", () => {

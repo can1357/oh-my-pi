@@ -415,7 +415,7 @@ class Builder {
 				this.push(
 					`if(typeof ${v}!=="object"||${v}===null${notRecord}){${this.appendError(
 						errors,
-						this.error(segs, "an object", failureData),
+						this.error(segs, node.plain === true ? "a plain object" : "an object", failureData),
 					)}}else{`,
 				);
 				for (const prop of node.props) {
@@ -849,7 +849,7 @@ class Builder {
 				this.push(
 					`if(typeof ${v}!=="object"||${v}===null${nonRecord}){${this.appendError(
 						errors,
-						this.error(segs, "an object", failureData),
+						this.error(segs, node.plain === true ? "a plain object" : "an object", failureData),
 					)}break ${brk};}`,
 				);
 				const object = this.next("o");
