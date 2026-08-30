@@ -22,6 +22,13 @@ export enum ConversationSearchSource {
 	CLOUD_CACHE = 2,
 }
 
+/** Cursor agent enum CursorRuleSource. */
+export enum CursorRuleSource {
+	UNSPECIFIED = 0,
+	TEAM = 1,
+	USER = 2,
+}
+
 /** Cursor agent enum DiagnosticSeverity. */
 export enum DiagnosticSeverity {
 	UNSPECIFIED = 0,
@@ -29,13 +36,6 @@ export enum DiagnosticSeverity {
 	WARNING = 2,
 	INFORMATION = 3,
 	HINT = 4,
-}
-
-/** Cursor agent enum CursorRuleSource. */
-export enum CursorRuleSource {
-	UNSPECIFIED = 0,
-	TEAM = 1,
-	USER = 2,
 }
 
 /** Cursor agent enum ForceBackgroundShellStatus. */

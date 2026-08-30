@@ -1,6 +1,5 @@
 import { scheduler } from "node:timers/promises";
 import { hostMatchesUrl } from "@oh-my-pi/pi-catalog/hosts";
-import { bareModelId, parseOpenAIModel, semverGte } from "@oh-my-pi/pi-catalog/identity";
 import { $flag, logger, structuredCloneJSON } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import { getEnvApiKey } from "../stream";
@@ -941,17 +940,6 @@ function isOfficialOpenAIResponsesEndpoint(model: Model<"openai-responses">): bo
 	}
 }
 
-/**
- * GPT-5.6+ family check for Responses routes. The model id classifies the
- * reasoning family regardless of the provider/host serving it — a cliproxy or
- * other OpenAI-compatible gateway carrying `gpt-5.6-sol` gets the same
- * scaffolding as the official endpoint.
- */
-function isGpt56PlusResponsesModel(model: Model<"openai-responses">): boolean {
-	const parsed = parseOpenAIModel(bareModelId(model.requestModelId ?? model.id));
-	return parsed !== null && semverGte(parsed.version, "5.6");
-}
-
 function isResponsesPromptCacheableContentBlock(block: unknown): block is ResponseInputContent {
 	if (typeof block !== "object" || block === null || !("type" in block)) return false;
 	return block.type === "input_text" || block.type === "input_image" || block.type === "input_file";
@@ -1324,7 +1312,7 @@ export function buildParams(
 	applyOpenAIResponsesPromptCachePolicy(params, model, options, statefulCacheBaseline);
 
 	let trailingScaffoldingItems = 0;
-	if (options?.forceReasoningOff && isGpt56PlusResponsesModel(model)) {
+	if (options?.forceReasoningOff && model.compat.requiresReasoningOffJuiceInstruction) {
 		const effort = options.reasoning ?? "medium";
 		const juice = getJuiceValue(effort);
 		messages.push({

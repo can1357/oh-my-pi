@@ -1,0 +1,9 @@
+// Provider-wire compat for "firepass"; regenerated from the frozen census using deployment contract selectors.
+
+provider "firepass" {
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "kimi-k2.6-turbo" {
+		thinking-efforts "low" "medium" "high" "xhigh" "max"
+		thinking-mode "effort"
+	}
+}

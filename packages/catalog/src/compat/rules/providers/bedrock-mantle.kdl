@@ -1,0 +1,15 @@
+// Provider-wire compat for "bedrock-mantle"; regenerated from the frozen census using deployment contract selectors.
+
+provider "bedrock-mantle" {
+	class "unknown" {
+		thinking-mode "effort"
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "openai.gpt-5.4" "openai.gpt-5.5" {
+		thinking-efforts "low" "medium" "high" "xhigh"
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "openai.gpt-5.6*" {
+		thinking-efforts "low" "medium" "high" "xhigh" "max"
+	}
+}

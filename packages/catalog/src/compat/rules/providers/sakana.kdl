@@ -1,0 +1,10 @@
+// Provider-wire compat for "sakana"; regenerated from the frozen census using deployment contract selectors.
+
+provider "sakana" {
+	include-encrypted-reasoning #false
+	stream-idle-timeout-ms 0
+	class "unknown" {
+		thinking-efforts "high" "max"
+		thinking-mode "effort"
+	}
+}

@@ -14,7 +14,16 @@ import { Settings } from "../config/settings";
 import { ToolExecutionComponent } from "../modes/components/tool-execution";
 import { initTheme, theme } from "../modes/theme/theme";
 import { toolRenderers } from "../tools/renderers";
-import { type GalleryFixture, type GalleryResult, galleryFixtures } from "./gallery-fixtures";
+import {
+	type GalleryFixture,
+	type GalleryPreviewEntry,
+	type GalleryResult,
+	galleryFixtures,
+	getComposerGalleryEntries,
+	getComposerGalleryInventory,
+	getSegmentGalleryEntries,
+	getSegmentGalleryInventory,
+} from "./gallery-fixtures";
 import { captureGalleryScreenshots } from "./gallery-screenshot";
 
 /** Lifecycle states the gallery renders, in display order. */
@@ -43,6 +52,29 @@ const GALLERY_STATE_ALIASES: Record<string, GalleryState> = {
 /** Accepted `--state` tokens, including legacy lifecycle names and displayed labels. */
 export const GALLERY_STATE_TOKENS = Object.keys(GALLERY_STATE_ALIASES);
 
+/** Gallery surfaces in stable product order. */
+export const GALLERY_SURFACES = ["tool", "composer", "segment"] as const;
+export type GallerySurface = (typeof GALLERY_SURFACES)[number];
+export const GALLERY_SURFACE_TOKENS = [...GALLERY_SURFACES, "all"] as const;
+
+/** Expand user-provided surface tokens while preserving product order. */
+export function parseGallerySurfaces(surfaces: readonly string[] | undefined): GallerySurface[] | undefined {
+	if (!surfaces || surfaces.length === 0) return undefined;
+	const requested = new Set<GallerySurface>();
+	for (const raw of surfaces) {
+		const token = raw.trim().toLowerCase();
+		if (token === "all") {
+			for (const surface of GALLERY_SURFACES) requested.add(surface);
+			continue;
+		}
+		if (!GALLERY_SURFACES.includes(token as GallerySurface)) {
+			throw new Error(`Invalid --surface '${raw}'. Valid values: ${GALLERY_SURFACE_TOKENS.join(", ")}`);
+		}
+		requested.add(token as GallerySurface);
+	}
+	return GALLERY_SURFACES.filter(surface => requested.has(surface));
+}
+
 /** Normalize user-provided `--state` tokens to the internal gallery lifecycle states. */
 export function parseGalleryStates(states: readonly string[] | undefined): GalleryState[] | undefined {
 	if (!states || states.length === 0) return undefined;
@@ -60,8 +92,14 @@ export function parseGalleryStates(states: readonly string[] | undefined): Galle
 export interface GalleryCommandArgs {
 	/** Render width in columns (defaults to terminal width, clamped). */
 	width?: number;
+	/** Restrict rendering to selected surface types (defaults to all). */
+	surfaces?: GallerySurface[];
 	/** Restrict to a single tool name. */
 	tool?: string;
+	/** Restrict to a single composer shape. */
+	composer?: string;
+	/** Restrict to a single status-line segment. */
+	segment?: string;
 	/** Restrict to specific lifecycle states. */
 	states?: GalleryState[];
 	/** Render the expanded variant of each renderer. */
@@ -220,6 +258,64 @@ async function renderGallerySections(
 	return sections;
 }
 
+function resolveSurfaces(args: GalleryCommandArgs): GallerySurface[] {
+	const selected = new Set<GallerySurface>(args.surfaces ?? []);
+	if (!args.surfaces || args.surfaces.length === 0) {
+		if (!args.tool && !args.composer && !args.segment) return [...GALLERY_SURFACES];
+	}
+	if (args.tool) selected.add("tool");
+	if (args.composer) selected.add("composer");
+	if (args.segment) selected.add("segment");
+	return GALLERY_SURFACES.filter(surface => selected.has(surface));
+}
+
+async function renderPreviewSections(
+	entries: readonly GalleryPreviewEntry[],
+	width: number,
+	expanded: boolean,
+): Promise<GallerySection[]> {
+	const sections: GallerySection[] = [];
+	for (const entry of entries) {
+		const lines = ["", sectionRule(entry.heading, width)];
+		for (const variant of entry.variants) {
+			lines.push("", theme.fg("dim", `  · ${variant.label}`));
+			try {
+				for (const line of await variant.render(width, expanded)) lines.push(line);
+			} catch (err) {
+				lines.push(theme.fg("error", `  render failed: ${String(err)}`));
+			}
+		}
+		sections.push({ heading: entry.heading, lines });
+	}
+	return sections;
+}
+
+/** Build requested sections in the fixed tool → composer → segment order. */
+export async function renderGallerySurfaceSections(
+	args: GalleryCommandArgs,
+	width = resolveWidth(args.width),
+): Promise<GallerySection[]> {
+	const expanded = args.expanded ?? false;
+	const states = args.states && args.states.length > 0 ? args.states : [...GALLERY_STATES];
+	const surfaces = resolveSurfaces(args);
+	const sections: GallerySection[] = [];
+
+	if (surfaces.includes("tool")) {
+		const allNames = Array.from(new Set([...Object.keys(toolRenderers), ...Object.keys(galleryFixtures)])).sort();
+		const names = args.tool ? allNames.filter(name => name === args.tool) : allNames;
+		sections.push(...(await renderGallerySections(names, states, width, expanded)));
+	}
+	if (surfaces.includes("composer")) {
+		const entries = getComposerGalleryEntries().filter(entry => !args.composer || entry.id === args.composer);
+		sections.push(...(await renderPreviewSections(entries, width, expanded)));
+	}
+	if (surfaces.includes("segment")) {
+		const entries = getSegmentGalleryEntries().filter(entry => !args.segment || entry.id === args.segment);
+		sections.push(...(await renderPreviewSections(entries, width, expanded)));
+	}
+	return sections;
+}
+
 /**
  * Render the gallery. Iterates the renderer registry (or a single tool),
  * printing each requested lifecycle state under a labeled section — or, with
@@ -240,20 +336,28 @@ export async function runGalleryCommand(args: GalleryCommandArgs): Promise<void>
 	);
 
 	const width = resolveWidth(args.width);
-	const expanded = args.expanded ?? false;
-	const states = args.states && args.states.length > 0 ? args.states : [...GALLERY_STATES];
-
-	// Renderer-registry tools plus fixture-only tools (no dedicated renderer,
-	// e.g. `report_tool_issue` / custom extension tools) so the gallery covers
-	// the generic fallback + custom-tool branches too.
-	const allNames = Array.from(new Set([...Object.keys(toolRenderers), ...Object.keys(galleryFixtures)])).sort();
-	const names = args.tool ? allNames.filter(name => name === args.tool) : allNames;
-	if (args.tool && names.length === 0) {
-		process.stdout.write(`Unknown tool '${args.tool}'. Known tools: ${allNames.join(", ")}\n`);
+	const surfaces = resolveSurfaces(args);
+	if (surfaces.includes("tool") && args.tool) {
+		const knownTools = Array.from(new Set([...Object.keys(toolRenderers), ...Object.keys(galleryFixtures)])).sort();
+		if (!knownTools.includes(args.tool)) {
+			process.stdout.write(`Unknown tool '${args.tool}'. Known tools: ${knownTools.join(", ")}\n`);
+			return;
+		}
+	}
+	if (surfaces.includes("composer") && args.composer && !getComposerGalleryInventory().includes(args.composer)) {
+		process.stdout.write(
+			`Unknown composer '${args.composer}'. Known composers: ${getComposerGalleryInventory().join(", ")}\n`,
+		);
+		return;
+	}
+	if (surfaces.includes("segment") && args.segment && !getSegmentGalleryInventory().some(id => id === args.segment)) {
+		process.stdout.write(
+			`Unknown segment '${args.segment}'. Known segments: ${getSegmentGalleryInventory().join(", ")}\n`,
+		);
 		return;
 	}
 
-	const sections = await renderGallerySections(names, states, width, expanded);
+	const sections = await renderGallerySurfaceSections(args, width);
 
 	if (args.screenshot) {
 		const paths = await captureGalleryScreenshots(sections, {
