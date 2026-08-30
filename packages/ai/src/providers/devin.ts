@@ -102,23 +102,21 @@ function devinErrorDetail(response: Response, payload: Uint8Array): string | und
 	} catch {
 		return undefined;
 	}
-	if (
-		text.length === 0 ||
-		response.headers.get("content-type")?.toLowerCase().includes("text/html") ||
-		HTML_ERROR_BODY_PATTERN.test(text) ||
-		CONTROL_CHARACTER_PATTERN.test(text)
-	) {
-		return undefined;
-	}
+	if (response.headers.get("content-type")?.toLowerCase().includes("text/html")) return undefined;
 	try {
 		const decoded: unknown = JSON.parse(text);
 		if (isRecord(decoded)) {
 			const error = decoded.error;
-			if (isRecord(error) && typeof error.message === "string") text = error.message;
-			else if (typeof error === "string") text = error;
-			else if (typeof decoded.message === "string") text = decoded.message;
+			if (isRecord(error) && typeof error.message === "string") text = error.message.trim();
+			else if (typeof error === "string") text = error.trim();
+			else if (typeof decoded.message === "string") text = decoded.message.trim();
 		}
 	} catch {}
+	// Validate after envelope extraction: JSON escapes (`\u001b`, `<html>` inside a
+	// message) materialize bytes the raw-source scan cannot see.
+	if (text.length === 0 || HTML_ERROR_BODY_PATTERN.test(text) || CONTROL_CHARACTER_PATTERN.test(text)) {
+		return undefined;
+	}
 	const normalized = text.replace(/\s+/g, " ").trim();
 	return normalized.length > MAX_DEVIN_ERROR_DETAIL_CHARS
 		? normalized.slice(0, MAX_DEVIN_ERROR_DETAIL_CHARS)
