@@ -526,3 +526,48 @@ describe("type.withJsonSchema", () => {
 		).toThrow("cannot wrap schemas with defaults or output-changing morphs");
 	});
 });
+
+describe("Type.filter", () => {
+	it("keeps input predicates in the .in projection and skips prevalidation when raw", () => {
+		// `.in` is what callers validate a schema's accepted INPUT with, so an
+		// input-side predicate has to survive the projection: dropping it let
+		// `.in` admit values the schema itself rejects. Output-side steps
+		// (`narrow`) are correctly absent there.
+		const noArrays = type({ a: "string" }).filter(
+			(value, ctx) => !Array.isArray(value) || ctx.mustBe("an object, not an array"),
+			{ raw: true },
+		);
+		const withArray: unknown[] = [];
+		Object.assign(withArray, { a: "x" });
+		expect(noArrays(withArray)).toBeInstanceOf(OmpErrors);
+		expect(noArrays.in.allows(withArray)).toBe(false);
+		expect(noArrays({ a: "x" })).toEqual({ a: "x" });
+		expect(noArrays.in.allows({ a: "x" })).toBe(true);
+
+		const narrowed = type({ a: "string" }).narrow(value => (value as { a: string }).a !== "no");
+		expect(narrowed({ a: "no" })).toBeInstanceOf(OmpErrors);
+		expect(narrowed.in.allows({ a: "no" })).toBe(true);
+
+		// A raw filter sees the value as handed in and costs no extra walk, so a
+		// getter is read once; a plain filter prevalidates and reads it twice.
+		let rawReads = 0;
+		const rawSpy = {
+			get a() {
+				rawReads++;
+				return "x";
+			},
+		};
+		noArrays(rawSpy);
+		expect(rawReads).toBe(1);
+
+		let prevalidatedReads = 0;
+		const prevalidatedSpy = {
+			get a() {
+				prevalidatedReads++;
+				return "x";
+			},
+		};
+		type({ a: "string" }).filter(() => true)(prevalidatedSpy);
+		expect(prevalidatedReads).toBe(2);
+	});
+});

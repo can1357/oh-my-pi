@@ -1115,7 +1115,11 @@ Object.defineProperty(typeMethods, "~standard", {
 
 Object.defineProperty(typeMethods, "in", {
 	get(this: InternalType): InternalType {
-		return makeType(projectIO(this.ir, "in"), [], {});
+		// Filter steps ARE the input side: dropping them would let `.in` admit
+		// values the schema itself rejects. `narrow`/`pipe` steps run on the
+		// output and are correctly absent here.
+		const filters = this[kSteps].filter(step => step.kind === "filter");
+		return makeType(projectIO(this.ir, "in"), filters, {});
 	},
 });
 
