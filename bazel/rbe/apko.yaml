@@ -1,0 +1,47 @@
+contents:
+  repositories:
+    - https://packages.wolfi.dev/os
+    - https://packages.cgr.dev/extras
+  keyring:
+    - https://packages.wolfi.dev/os/wolfi-signing.rsa.pub
+    - https://packages.cgr.dev/extras/chainguard-extras.rsa.pub
+  packages:
+    - ca-certificates
+    - git
+    # busybox supplies /bin/sh. rules_rust's bootstrap_process_wrapper.sh (and
+    # every genrule/build-script shell action) is `#!/bin/sh`, so without it
+    # every remote action dies with a bare "No such file or directory" naming
+    # the *script*, not the missing interpreter.
+    - busybox
+    - bash
+    # Build scripts shell out to the usual POSIX utilities; busybox applets are
+    # too thin for several of them (notably GNU-flavoured install/readlink).
+    - coreutils
+    # cmake's default generator on linux is "Unix Makefiles", so the cmake crate
+    # (audiopus_sys' bundled opus) needs make as well as cmake itself.
+    - cmake
+    - make
+    # opus is a static lib: cmake archives it with the `ar` it finds on PATH,
+    # exactly as it does on dev hosts and GH runners. Without binutils cmake
+    # configures fine and only fails at archive time, reporting the unhelpful
+    # "Error running link command: no such file or directory".
+    - binutils
+    # The x86_64-pc-windows-msvc cross build pins CMAKE_GENERATOR=Ninja (a VS
+    # generator cannot exist off-Windows) - see the audiopus_sys annotation in
+    # MODULE.bazel, which requires ninja on PATH.
+    - ninja
+    # The prebuilt LLVM tools behind //bazel/toolchains/msvc (lld-link, clang-cl,
+    # llvm-rc/mt/lib) are dynamically linked: `readelf -d` lists libxml2.so.2 and
+    # libz.so.1 (zlib arrives via ca-certificates' closure). Missing libxml2 only
+    # surfaces as an exit-127 link failure inside cmake's try_compile.
+    #
+    # Requested by soname, not by name: wolfi's `libxml2` now tracks 2.15.x,
+    # which bumped the soname and ships no libxml2.so.2 at all, so plain
+    # `libxml2` installs a package that does not satisfy these binaries.
+    - so:libxml2.so.2
+
+cmd: /bin/bash -l
+
+archs:
+  - arm64
+  - amd64

@@ -18,10 +18,14 @@ Cargo.toml/Cargo.lock and the module annotations; no separate repin step is requ
 
 module(name = "oh-my-pi")
 
-bazel_dep(name = "bazel_skylib", version = "1.8.2")
+bazel_dep(name = "bazel_skylib", version = "1.9.0")
 bazel_dep(name = "platforms", version = "1.1.0")
 bazel_dep(name = "rules_rust", version = "0.71.3")
 bazel_dep(name = "hermetic_cc_toolchain", version = "4.2.0")
+bazel_dep(name = "toolchains_buildbuddy", version = "0.0.4")
+bazel_dep(name = "rules_apko", version = "1.5.52")
+bazel_dep(name = "rules_oci", version = "2.3.0")
+bazel_dep(name = "container_structure_test", version = "1.22.1")
 
 # zig 0.14's cache corrupts under concurrent `zig cc` (ziglang/zig#18763);
 # the patch gives compile-only steps private throwaway caches while links
@@ -267,3 +271,36 @@ crate.annotation(
     },
 )
 # --- end msvc cross toolchain ---------------------------------------------------
+
+# --- buildbuddy integration -----------------------------------------------------
+
+buildbuddy = use_extension(
+    "@toolchains_buildbuddy//:extensions.bzl",
+    "buildbuddy",
+    dev_dependency = True,
+)
+
+# NOTE: @toolchains_buildbuddy//toolchains/cc:ubuntu_gcc_x86_64 is deliberately
+# NOT registered. It is the executor image's stock gcc, which would target the
+# image's glibc rather than the shipped 2.17 portability floor; RBE keeps using
+# the same hermetic zig cc toolchains as local/CI builds, so remote and local
+# outputs stay bit-comparable. (It never resolves anyway - it requires the
+# @bazel_tools//tools/cpp:gcc compiler constraint, which //bazel/platforms:rbe_*
+# does not declare - but registering it invites silent drift if that changes.)
+
+# --- end buildbuddy integration -------------------------------------------------
+
+# --- apk/wolfi integration ------------------------------------------------------
+
+apk = use_extension(
+    "@rules_apko//apko:extensions.bzl",
+    "apko",
+    dev_dependency = True,
+)
+apk.translate_lock(
+    name = "bazel_rbe_base",
+    lock = "//bazel/rbe:apko.lock.json",
+)
+use_repo(apk, "bazel_rbe_base")
+
+# --- end apk/wolfi integration --------------------------------------------------

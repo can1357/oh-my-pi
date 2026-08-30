@@ -1,0 +1,35 @@
+load("@rules_apko//apko:defs.bzl", "apko_image")
+load("@rules_oci//oci:defs.bzl", "oci_push", "oci_image_index")
+
+exports_files([
+    "apko.yaml",
+])
+
+# Multi-arch hermetic build image, for use with Bazel RBE.
+apko_image(
+    name = "image_x64",
+    architecture = "amd64",
+    config = "apko.yaml",
+    contents = "@bazel_rbe_base//:contents",
+    tag = "omp-bazel-rbe-base:latest",
+)
+
+apko_image(
+    name = "image_arm64",
+    architecture = "arm64",
+    config = "apko.yaml",
+    contents = "@bazel_rbe_base//:contents",
+    tag = "omp-bazel-rbe-base:latest",
+)
+
+oci_image_index(
+    name = "image_multiarch",
+    images = [":image_x64", ":image_arm64"],
+)
+
+oci_push(
+    name = "image.push",
+    image = ":image_multiarch",
+    remote_tags = ["latest"],
+    repository = "us-docker.pkg.dev/oh-my-pi-dev/omp-rbe/omp-bazel-rbe-base",
+)

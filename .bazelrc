@@ -89,6 +89,11 @@ build:cache-ro --remote_retries=2
 build:cache-rw --remote_timeout=60s
 build:cache-ro --remote_timeout=60s
 
+# --- BuildBuddy support ------------------------------------------------------
+# Adds the configuration `buildbuddy` which reports build events via Bazel's
+# event protocol. Usage: `bazel [build|test] --config=buildbuddy ...`.
+import %workspace%/bazel/buildbuddy.bazelrc
+
 # --- Local development ---------------------------------------------------------
 # Optional user overrides (remote cache endpoint, disk cache, etc.).
 try-import %workspace%/.bazelrc.user

@@ -59,3 +59,51 @@ platform(
         "//bazel/variants:baseline",
     ],
 )
+
+## RBE platforms.
+
+# Execution platforms for BuildBuddy remote execution (--config=buildbuddy-rbe).
+# These describe the *executor*, not a shipped addon target: the container only
+# has to host the toolchains' own binaries plus what cargo build scripts shell
+# out to (sh, coreutils, cmake+make for audiopus_sys' bundled opus). The cc
+# toolchain itself stays hermetic zig cc, so remote and local builds hold the
+# same glibc 2.17 floor.
+#
+# Rebuild + repin after any bazel/rbe/apko.yaml change:
+#   bazelisk run //bazel/rbe:image.push --remote_executor=
+# and copy the pushed digest here.
+RBE_CONTAINER_BASE = "us-docker.pkg.dev/oh-my-pi-dev/omp-rbe/omp-bazel-rbe-base@sha256:f598e164d804d936516160adf4b08667c3d053b7fb25dc36828183c24439a2b9"
+
+# Inheriting the zig libc_aware platform is load-bearing, not cosmetic. The RBE
+# platform is also the host/exec platform, so it is the target platform of every
+# exec-config action (rules_rust's process_wrapper, build scripts, protoc...).
+# On a bare linux/x86_64 platform those fall through to the autodetected
+# @local_config_cc, which hardcodes the *developer's* /usr/bin/gcc — a path that
+# does not exist inside the executor image, so every exec-config link dies with
+# "linker `/usr/bin/gcc` not found". The libc:gnu.2.17 constraint pulls in the
+# hermetic zig cc toolchain instead, which ships itself to the executor.
+platform(
+    name = "rbe_linux_x64",
+    exec_properties = {
+        "test.recycle-runner": "true",
+        "Arch": "amd64",
+        "OSFamily": "Linux",
+        "container-image": "docker://%s" % RBE_CONTAINER_BASE,
+    },
+    parents = ["@zig_sdk//libc_aware/platform:linux_amd64_gnu.2.17"],
+)
+
+# Defined but deliberately NOT in --extra_execution_platforms: BuildBuddy runs
+# an x86_64 pool, and every arm64 addon is cross-compiled from it by zig cc.
+# Registering it would let Bazel schedule actions onto a pool that isn't there.
+platform(
+    name = "rbe_linux_arm64",
+    exec_properties = {
+        "test.workload-isolation-type": "firecracker",
+        "test.recycle-runner": "true",
+        "Arch": "aarch64",
+        "OSFamily": "Linux",
+        "container-image": "docker://%s" % RBE_CONTAINER_BASE,
+    },
+    parents = ["@zig_sdk//libc_aware/platform:linux_arm64_gnu.2.17"],
+)

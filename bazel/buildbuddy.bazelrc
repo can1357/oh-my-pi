@@ -1,0 +1,48 @@
+# Build Event Service endpoint/results URL prefix.
+build:buildbuddy --bes_results_url=https://oh-my-pi.buildbuddy.io/invocation/
+build:buildbuddy --bes_backend=grpcs://oh-my-pi.buildbuddy.io
+build:buildbuddy --noslim_profile
+build:buildbuddy --experimental_profile_include_target_label
+build:buildbuddy --experimental_profile_include_primary_output
+build:buildbuddy --experimental_remote_downloader=grpcs://oh-my-pi.buildbuddy.io
+
+# toplevel, NOT minimal: the //:natives-* addons ARE the deliverable, and under
+# --remote_download_minimal bazel-bin/natives-*/pi_natives.*.node is left as a
+# dangling symlink into a never-fetched output path, which the packaging step
+# then silently picks up as missing.
+build:buildbuddy --remote_download_toplevel
+
+# Remote cache.
+common:buildbuddy --remote_cache=grpcs://oh-my-pi.buildbuddy.io
+common:buildbuddy --remote_cache_compression
+common:buildbuddy --remote_timeout=10m
+
+# Remote execution.
+#
+# --host_platform and --extra_execution_platforms are BOTH last-wins (Bazel
+# explicitly documents extra_execution_platforms as "can only be set once;
+# later instances override earlier flag settings"). Repeating them per arch
+# leaves exactly one execution platform, so they must be a single line each,
+# comma-separated.
+#
+# Only an x86_64 executor pool is declared: every shipped addon triple is
+# cross-compiled from x64 by the zig cc toolchains (//bazel/platforms parents
+# @zig_sdk//libc_aware/platform:*), so an aarch64 exec platform would only
+# invite Bazel to schedule actions onto a pool BuildBuddy doesn't run.
+#
+# The target platform is deliberately NOT forced here: the //:natives-* targets
+# transition to //bazel/platforms:<addon>, whose zig libc constraint is what
+# pins the glibc 2.17 floor. Pointing --platforms at a bare linux/x86_64
+# platform drops that constraint and knocks the libc_aware toolchains out of
+# resolution.
+common:buildbuddy-rbe --remote_executor=grpcs://oh-my-pi.buildbuddy.io
+common:buildbuddy-rbe --host_platform=//bazel/platforms:rbe_linux_x64
+common:buildbuddy-rbe --extra_execution_platforms=//bazel/platforms:rbe_linux_x64
+
+# RBE, build-level settings.
+build:buildbuddy-rbe --define=EXECUTOR=remote
+build:buildbuddy-rbe --jobs=25
+build:buildbuddy-rbe --incompatible_strict_action_env=true
+
+# RBE implies base config.
+build:buildbuddy-rbe --config=buildbuddy
