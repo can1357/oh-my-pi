@@ -241,4 +241,59 @@ describe("streamDevin router assignment", () => {
 		}).result();
 		expect(on.recorded.chat?.disableParallelToolCalls).toBe(false);
 	});
+
+	it("normalizes tool schemas for Gemini-backed Devin models", async () => {
+		const { fetch: fetchImpl, recorded } = fakeDevin({});
+		const geminiContext: Context = {
+			...context,
+			tools: [
+				{
+					name: "grep",
+					description: "Search files",
+					parameters: {
+						type: "object",
+						properties: { skip: { type: ["number", "null"] } },
+						required: [],
+						additionalProperties: false,
+					},
+				},
+			],
+		};
+
+		const result = await streamDevin(devinModel({}, "gemini-3-7-flash-medium"), geminiContext, {
+			apiKey: "token",
+			fetch: fetchImpl,
+		}).result();
+
+		const schema = JSON.parse(recorded.chat?.tools[0]?.jsonSchemaString ?? "{}") as {
+			properties?: { skip?: { type?: unknown; nullable?: unknown } };
+		};
+		expect(schema.properties?.skip).toEqual({ type: "number", nullable: true });
+		expect(result.stopReason).toBe("stop");
+	});
+
+	it("hides proxy HTML in Devin HTTP errors while preserving the status", async () => {
+		const auth = fakeDevin({});
+		const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
+			if (String(input).includes("GetChatMessage")) {
+				return new Response(
+					"<html><head><title>504 Gateway Time-out</title></head><body><h1>504 Gateway Time-out</h1></body></html>",
+					{
+						status: 504,
+						statusText: "Gateway Time-out",
+						headers: { "content-type": "text/html", "retry-after": "1" },
+					},
+				);
+			}
+			return auth.fetch(input, init);
+		}) as typeof fetch;
+
+		const result = await streamDevin(devinModel({}, "gemini-3-7-flash-medium"), context, {
+			apiKey: "token",
+			fetch: fetchImpl,
+		}).result();
+
+		expect(result.errorMessage).toBe("Devin API error 504 Gateway Time-out retry-after-ms=1000");
+		expect(result.errorMessage).not.toContain("<html>");
+	});
 });
