@@ -19,6 +19,19 @@
 - Devin auth, model assignment, and chat requests now send the native Devin CLI identity (`ideName: devin-cli`, `ideType: chisel`, `extensionName: chisel`, mapped `os`) instead of the Windsurf IDE identity; `ideType: chisel` is what the backend requires for router assignment ([#8590](https://github.com/can1357/oh-my-pi/pull/8590) by [@will-bogusz](https://github.com/will-bogusz)).
 - Devin parallel tool calls follow `compat.supportsParallelToolCalls` instead of being disabled unconditionally, so natively discovered configs that support parallelism can use it ([#8590](https://github.com/can1357/oh-my-pi/pull/8590) by [@will-bogusz](https://github.com/will-bogusz)).
 
+### Fixed
+
+- Gateway error classifications now carry a failure owner and retry/failover disposition (`credential_permanent`, `provider_transient`, `policy_terminal`, …); provider status codes stay authoritative over message wording, and context-overflow detection reuses the central classifier.
+- Gateway requests now forward `previous_response_id`, `parallel_tool_calls`, `logit_bias`, `user`, and `response_format` to providers instead of dropping them; Responses requests map `response_format` JSON-schema to the flat `text.format` shape and never send Chat-Completions-only `seed`.
+- Fixed OpenAI Responses continuation pairing a caller-supplied `previous_response_id` with an internally computed delta from a different stored response, and restricted stale-baseline recovery to internally owned chain ids so a stale caller id can no longer silently drop prior context.
+- Auth gateway observes Responses SSE through a StreamCommitGate: metadata-only preludes stay failover-eligible, the first output event or 4 MiB cap commits, and post-commit terminals (`response.completed`/`response.failed`/`response.incomplete`/`response.error`) end failover eligibility instead of being misread as output.
+- Auth gateway virtual routes now fail over to a backup model when the primary is unavailable, as long as the response stream has not been committed.
+- Auth gateway can load virtual routes from a JSON/JSON5 file.
+- Auth gateway `GET /v1/routes` lists registered virtual routes.
+- Auth gateway `GET /v1/routes/:id` returns a registered virtual route.
+- Auth gateway `PUT /v1/routes/:id` registers or replaces a virtual route.
+- Auth gateway `DELETE /v1/routes/:id` unregisters a virtual route.
+
 ## [18.0.11] - 2026-08-29
 
 ### Fixed
@@ -37,19 +50,6 @@
 - Improved OAuth sign-in flows, including a fallback message when the browser cannot automatically close the OAuth success tab.
 - Fixed Cloudflare AI Gateway onboarding and routing so gateway account and endpoint configuration is preserved correctly while gateway credentials are not sent as upstream OpenAI authorization headers.
 - Fixed Codex OAuth quota handling so chat and Spark usage remain independent, legacy shared quota limits continue to work, and incomplete usage reports are not incorrectly treated as unlimited.
-- Gateway error classifications now carry a failure owner and retry/failover disposition (`credential_permanent`, `provider_transient`, `policy_terminal`, …); provider status codes stay authoritative over message wording, and context-overflow detection reuses the central classifier.
-- Gateway requests now forward `previous_response_id`, `parallel_tool_calls`, `logit_bias`, `user`, and `response_format` to providers instead of dropping them; Responses requests map `response_format` JSON-schema to the flat `text.format` shape and never send Chat-Completions-only `seed`.
-
-### Fixed
-
-- Fixed OpenAI Responses continuation pairing a caller-supplied `previous_response_id` with an internally computed delta from a different stored response, and restricted stale-baseline recovery to internally owned chain ids so a stale caller id can no longer silently drop prior context.
-- Auth gateway observes Responses SSE through a StreamCommitGate: metadata-only preludes stay failover-eligible, the first output event or 4 MiB cap commits, and post-commit terminals (`response.completed`/`response.failed`/`response.incomplete`/`response.error`) end failover eligibility instead of being misread as output.
-- Auth gateway virtual routes now fail over to a backup model when the primary is unavailable, as long as the response stream has not been committed.
-- Auth gateway can load virtual routes from a JSON/JSON5 file.
-- Auth gateway `GET /v1/routes` lists registered virtual routes.
-- Auth gateway `GET /v1/routes/:id` returns a registered virtual route.
-- Auth gateway `PUT /v1/routes/:id` registers or replaces a virtual route.
-- Auth gateway `DELETE /v1/routes/:id` unregisters a virtual route.
 
 ## [18.0.8] - 2026-08-27
 
@@ -2062,4 +2062,3 @@
 
 - Removed the dead `iterateUntilAbort` helper (superseded by `iterateWithIdleTimeout`); it leaked the upstream iterator when the consumer abandoned mid-yield and had no production call sites.
 
-Older entries are archived in [packages/ai/CHANGELOG.md@c821261d1018](https://github.com/can1357/oh-my-pi/blob/c821261d10180d60bd96c1b7334227691c9e14f6/packages/ai/CHANGELOG.md).
