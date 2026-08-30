@@ -3,8 +3,8 @@ import { gunzipSync } from "node:zlib";
 import { streamDevin } from "@oh-my-pi/pi-ai/providers/devin";
 import type { AssistantMessage, Context, Model } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
-import { GetChatMessageRequestSchema } from "@oh-my-pi/pi-catalog/discovery/devin-proto";
-import { fromBinary } from "@oh-my-pi/pi-catalog/discovery/protobuf";
+import { GetChatMessageRequestSchema, GetUserJwtResponseSchema } from "@oh-my-pi/pi-catalog/discovery/devin-proto";
+import { create, fromBinary, toBinary } from "@oh-my-pi/pi-catalog/discovery/protobuf";
 
 /** Connect streaming flag bit 0x01 = gzip-compressed payload. */
 const CONNECT_COMPRESSED_FLAG = 0x01;
@@ -48,9 +48,15 @@ function assistant(overrides: Partial<AssistantMessage>): AssistantMessage {
 async function captureRequest(context: Context) {
 	let requestPayload: Uint8Array | undefined;
 	let requestHeaders: Headers | undefined;
-	const fetchImpl = (async (_input: string | URL | Request, init?: RequestInit) => {
-		requestPayload = new Uint8Array(init?.body as ArrayBuffer);
-		requestHeaders = new Headers(init?.headers);
+	const authPayload = toBinary(GetUserJwtResponseSchema, create(GetUserJwtResponseSchema, { userJwt: "jwt" }));
+	const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
+		const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+		if (url.includes("GetUserJwt")) return new Response(authPayload);
+		// Capture only the GetChatMessage Connect frame (AssignModel may precede it).
+		if (url.includes("GetChatMessage")) {
+			requestPayload = new Uint8Array(init?.body as ArrayBuffer);
+			requestHeaders = new Headers(init?.headers);
+		}
 		return new Response(new Uint8Array());
 	}) as typeof fetch;
 

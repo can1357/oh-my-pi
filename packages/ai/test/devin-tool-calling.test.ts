@@ -7,6 +7,7 @@ import {
 	ChatToolCallSchema,
 	GetChatMessageRequestSchema,
 	GetChatMessageResponseSchema,
+	GetUserJwtResponseSchema,
 	StopReason,
 } from "@oh-my-pi/pi-catalog/discovery/devin-proto";
 import { create, fromBinary, toBinary } from "@oh-my-pi/pi-catalog/discovery/protobuf";
@@ -36,8 +37,13 @@ const devinModel: Model<"devin-agent"> = buildModel({
 /** Capture the protobuf request from a streamDevin call. */
 async function captureRequest(context: Context, tools?: Context["tools"]) {
 	let requestPayload: Uint8Array | undefined;
-	const fetchImpl = (async (_input: string | URL | Request, init?: RequestInit) => {
-		requestPayload = new Uint8Array(init?.body as ArrayBuffer);
+	const authPayload = toBinary(GetUserJwtResponseSchema, create(GetUserJwtResponseSchema, { userJwt: "jwt" }));
+	const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
+		const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+		if (url.includes("GetUserJwt")) return new Response(authPayload);
+		if (url.includes("GetChatMessage")) {
+			requestPayload = new Uint8Array(init?.body as ArrayBuffer);
+		}
 		return new Response(new Uint8Array());
 	}) as typeof fetch;
 
@@ -111,7 +117,10 @@ describe("streamDevin tool calling", () => {
 			}))),
 		];
 
-		const fetchImpl = (async (_input: string | URL | Request) => {
+		const authPayload = toBinary(GetUserJwtResponseSchema, create(GetUserJwtResponseSchema, { userJwt: "jwt" }));
+		const fetchImpl = (async (input: string | URL | Request) => {
+			const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+			if (url.includes("GetUserJwt")) return new Response(authPayload);
 			let index = 0;
 			return new Response(
 				new ReadableStream<Uint8Array>({
@@ -167,7 +176,10 @@ describe("streamDevin tool calling", () => {
 			}))),
 		];
 
-		const fetchImpl = (async (_input: string | URL | Request) => {
+		const authPayload = toBinary(GetUserJwtResponseSchema, create(GetUserJwtResponseSchema, { userJwt: "jwt" }));
+		const fetchImpl = (async (input: string | URL | Request) => {
+			const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+			if (url.includes("GetUserJwt")) return new Response(authPayload);
 			let index = 0;
 			return new Response(
 				new ReadableStream<Uint8Array>({
