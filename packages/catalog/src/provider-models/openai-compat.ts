@@ -22,19 +22,6 @@ import {
 import { Effort, THINKING_EFFORTS } from "../effort";
 import { FIREWORKS_FAST_SUFFIX, toFireworksPublicModelId } from "../fireworks-model-id";
 import { getBundledModelReferenceIndex } from "../identity/bundled";
-import { parseAnthropicModel } from "../identity/classify";
-import {
-	anthropicModelSupportsThinking,
-	isGlm52ReasoningEffortModelId,
-	isGlmVisionModelId,
-	isGrokReasoningEffortCapable,
-	isKimiK3ModelId,
-	isKimiModelId,
-	isMuseSparkModelId,
-	isOpenAIGptOssModelId,
-	isQwen38PlusTemplateEffortModelId,
-	isReasoningGlmModelId,
-} from "../identity/family";
 import { resolveModelReference } from "../identity/reference";
 import type { ModelManagerOptions, ModelsDevFallback } from "../model-manager";
 import { type GeneratedProvider, getBundledModels } from "../models";
@@ -801,18 +788,22 @@ function toAnthropicCanonicalReferenceId(modelId: string): string | undefined {
 		/\bclaude-(opus|sonnet|fable|mythos)(\d{1,2})(?=$|[.-])/gi,
 		"claude-$1-$2",
 	);
-	const parsed = parseAnthropicModel(normalizedModelId);
-	if (!parsed) {
+	const identity = classifyModel("", normalizedModelId, { lenient: true });
+	if (identity.class !== "anthropic" || !identity.family || !identity.revision) {
 		return undefined;
 	}
-	const versionParts = [parsed.version.major];
-	if (parsed.version.minor !== 0 || parsed.version.patch !== 0) {
-		versionParts.push(parsed.version.minor);
+	const [major, minor = "0", patch = "0"] = identity.revision.split(".");
+	if (!major) {
+		return undefined;
 	}
-	if (parsed.version.patch !== 0) {
-		versionParts.push(parsed.version.patch);
+	const versionParts = [major];
+	if (minor !== "0" || patch !== "0") {
+		versionParts.push(minor);
 	}
-	return `claude-${parsed.kind}-${versionParts.join("-")}`;
+	if (patch !== "0") {
+		versionParts.push(patch);
+	}
+	return `claude-${identity.family}-${versionParts.join("-")}`;
 }
 
 function resolveEuropeanGatewayKnownReference(model: ModelSpec<Api>): Model<Api> | undefined {
@@ -931,10 +922,12 @@ function isLikelyEuropeanGatewayChatModel(entry: OpenAICompatibleModelRecord, mo
 
 function hasEuropeanGatewayReasoningIdentity(model: ModelSpec<Api>): boolean {
 	const normalized = `${model.id} ${model.name}`.trim();
+	const bareModelId = model.id.slice(model.id.lastIndexOf("/") + 1).toLowerCase();
+	const identity = classifyModel("", model.id, { lenient: true });
 	return (
-		isOpenAIGptOssModelId(model.id) ||
-		isReasoningGlmModelId(model.id) ||
-		isGrokReasoningEffortCapable(model.id) ||
+		identity.class === "gpt-oss" ||
+		isGlmReasoningIdentity("", model.id, "4.5") ||
+		/^(?:grok-3-mini|grok-4\.20-multi-agent|grok-4\.[356])/.test(bareModelId) ||
 		EUROPEAN_GATEWAY_DEEPSEEK_REASONING_ID_PATTERN.test(normalized) ||
 		EUROPEAN_GATEWAY_REASONING_ID_PATTERN.test(normalized)
 	);
