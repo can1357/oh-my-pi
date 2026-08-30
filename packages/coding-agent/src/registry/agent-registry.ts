@@ -62,11 +62,12 @@ export function recordAgentTaskOutcome(
 	session: Pick<AgentSession, "sessionManager">,
 	outcome: AgentTerminalOutcome | null,
 ): void {
-	const appendCustomEntry = session.sessionManager.appendCustomEntry;
-	// Lightweight embedders and unit doubles may expose only the session-init
-	// subset of SessionManager. They still receive the in-memory history update.
+	const sessionManager = session.sessionManager;
+	const appendCustomEntry = sessionManager?.appendCustomEntry;
+	// Lightweight embedders and unit doubles may omit SessionManager or expose
+	// only its session-init subset. They still receive the in-memory update.
 	if (typeof appendCustomEntry !== "function") return;
-	appendCustomEntry.call(session.sessionManager, AGENT_TASK_OUTCOME_ENTRY_TYPE, { outcome });
+	appendCustomEntry.call(sessionManager, AGENT_TASK_OUTCOME_ENTRY_TYPE, { outcome });
 }
 
 /** Historical identity and telemetry that remain available after the live session is disposed. */
