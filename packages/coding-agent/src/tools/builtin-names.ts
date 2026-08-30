@@ -64,7 +64,32 @@ export function normalizeToolNames(names: Iterable<string>): string[] {
 		seen.add(normalized);
 		out.push(normalized);
 	}
+
 	return out;
+}
+
+/**
+ * Expand the `exec` tool alias into its concrete backends: `eval` (kept only
+ * when at least one eval backend is allowed per `backends`) and `bash`. A deny
+ * on the alias itself blocks the whole expansion; a deny on a child is applied
+ * by the caller's later disallow filter (or by {@link isToolDisallowed} here
+ * under an explicit `patterns`). Shared by the executor spawn path and
+ * read-only classification so both see the same effective set.
+ */
+export function expandExecToolAlias(
+	names: readonly string[],
+	patterns: readonly string[],
+	backends: { python: boolean; js: boolean; ruby: boolean; julia: boolean },
+): string[] {
+	if (!names.includes("exec")) return [...names];
+	const withoutAlias = names.filter(name => name !== "exec");
+	// `exec` is an alias for eval+bash: a deny on the alias blocks the whole
+	// expansion; an explicit deny on either child still wins downstream.
+	if (isToolDisallowed("exec", patterns)) return withoutAlias;
+	const expanded = [...withoutAlias];
+	if (backends.python || backends.js || backends.ruby || backends.julia) expanded.push("eval");
+	expanded.push("bash");
+	return Array.from(new Set(expanded)).filter(name => !isToolDisallowed(name, patterns));
 }
 
 /** MCP tool names carry the `mcp__<server>_<tool>` prefix minted by `createMCPToolName`. */

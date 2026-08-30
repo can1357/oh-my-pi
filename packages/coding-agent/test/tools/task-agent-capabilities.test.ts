@@ -46,6 +46,38 @@ describe("task agent capability descriptions", () => {
 		// the protocol-only child can mutate nothing, so it classifies read-only.
 		expect(isReadOnlyAgent({ ...base, disallowedTools: ["*"] })).toBe(true);
 	});
+	it("expands the exec alias before classifying", () => {
+		// `tools: [exec]` + both backends denied leaves the child with no
+		// execution tool: classifying on the unexpanded alias would advertise
+		// the agent as writable while the runtime spawn strips eval and bash.
+		const base: AgentDefinition = {
+			name: "x",
+			description: "x",
+			systemPrompt: "x",
+			source: "bundled",
+		};
+		const execOnly: AgentDefinition = { ...base, tools: ["exec"] };
+		// With backends available (runtime default), exec expands to eval+bash:
+		// mutating, not read-only.
+		expect(isReadOnlyAgent(execOnly)).toBe(false);
+		expect(isReadOnlyAgent(execOnly, { python: true, js: true, ruby: false, julia: false })).toBe(false);
+		// Both concrete backends denied: no execution or mutation tool survives.
+		expect(
+			isReadOnlyAgent(
+				{ ...execOnly, disallowedTools: ["eval", "bash"] },
+				{ python: true, js: true, ruby: false, julia: false },
+			),
+		).toBe(true);
+		// A deny on the alias itself blocks the whole expansion.
+		expect(isReadOnlyAgent({ ...execOnly, disallowedTools: ["exec"] })).toBe(true);
+		// Read-only companion tools keep the classification true.
+		expect(
+			isReadOnlyAgent(
+				{ ...base, tools: ["read", "exec"], disallowedTools: ["eval", "bash"] },
+				{ python: true, js: true, ruby: false, julia: false },
+			),
+		).toBe(true);
+	});
 	it("classifies an empty effective allowlist as read-only", () => {
 		// An explicit `tools: []` is a hard allowlist (discovery preserves it):
 		// the child can call no tool at all, so it must not be advertised as

@@ -328,6 +328,16 @@ export class SessionTools {
 		for (const tool of host.agent.state.tools) this.#enabledToolNames.add(tool.name);
 		for (const name of this.#xdev?.mountedNames ?? []) this.#enabledToolNames.add(name);
 		this.#promptModelKey = this.#currentPromptModelKey();
+		// A scoped session (disallowed patterns or enforced allowlist) can cache a
+		// stale `read` description at construction: ReadTool resolves availability
+		// from the tool-session predicate, which still reflects createTools'
+		// pre-scope factory set. Run one reconcile so the advertised state derives
+		// from the post-scope active set; unscoped sessions skip the scan.
+		if (this.#enforceToolAllowlist || this.#disallowedToolPatterns.length > 0) {
+			void this.reconcileInspectImageTool().catch(error => {
+				logger.warn("Scoped inspect_image reconcile at construction failed", { error: String(error) });
+			});
+		}
 	}
 
 	/** Mutable registry shared with controller hosts that inspect available tools. */
@@ -1558,8 +1568,14 @@ export class SessionTools {
 			};
 			const active = this.getEnabledToolNames();
 			const isActive = active.includes("inspect_image");
+			// A scoped subagent can silently drop `inspect_image` from the applied
+			// set (`#scopeActiveToolSelection`), so advertise what WILL be active:
+			// derive from the post-scope selection, otherwise the `read`
+			// description would advertise a tool the active set lacks.
+			const advertised = (names: string[]): boolean =>
+				this.#scopeActiveToolSelection(names).includes("inspect_image");
 			if (expected === isActive) {
-				syncReadDescription(isActive);
+				syncReadDescription(advertised(active));
 				return true;
 			}
 			if (!expected) {
@@ -1580,8 +1596,9 @@ export class SessionTools {
 				this.#toolRegistry.set(wrapped.name, wrapped);
 				this.#builtInToolNames.add(wrapped.name);
 			}
-			syncReadDescription(true);
-			await this.#applyActiveToolsByName([...active, "inspect_image"]);
+			const applied = [...active, "inspect_image"];
+			syncReadDescription(advertised(applied));
+			await this.#applyActiveToolsByName(applied);
 			return true;
 		});
 	}

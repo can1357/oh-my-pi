@@ -54,7 +54,7 @@ import { SessionManager } from "../session/session-manager";
 import { truncateTail } from "../session/streaming-output";
 import { type ConfiguredThinkingLevel, prewalkWouldBeNoop, resolveTaskEffortLevel, type TaskEffort } from "../thinking";
 import type { ContextFileEntry, ToolSession } from "../tools";
-import { isToolDisallowed } from "../tools/builtin-names";
+import { expandExecToolAlias } from "../tools/builtin-names";
 import { resolveEvalBackends } from "../tools/eval-backends";
 import { isIrcEnabled } from "../tools/hub";
 import { LIST_STATUS_ORDER } from "../tools/hub/messaging";
@@ -2859,16 +2859,9 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 	if (toolNames && !options.restrictToolNames && !toolNames.includes("hub")) {
 		toolNames = [...toolNames, "hub"];
 	}
-	if (toolNames?.includes("exec")) {
-		const backends = resolveEvalBackends({ settings } as ToolSession);
-		const expanded = toolNames.filter(name => name !== "exec");
-		// `exec` is an alias for eval+bash: a deny on the alias blocks the whole
-		// expansion; an explicit deny on either child still wins downstream.
-		if (!isToolDisallowed("exec", agent.disallowedTools ?? [])) {
-			if (backends.python || backends.js || backends.ruby || backends.julia) expanded.push("eval");
-			expanded.push("bash");
-		}
-		toolNames = Array.from(new Set(expanded)).filter(name => !isToolDisallowed(name, agent.disallowedTools ?? []));
+	const evalBackends = resolveEvalBackends({ settings } as ToolSession);
+	if (toolNames) {
+		toolNames = expandExecToolAlias(toolNames, agent.disallowedTools ?? [], evalBackends);
 	}
 
 	const modelPatterns = normalizeModelPatterns(modelOverride ?? agent.model);
@@ -3364,10 +3357,9 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				agent: agent.name,
 				modelRole: modelRole ?? resolveExplicitModelRole(modelOverride ?? agent.model, subagentSettings),
 				resolvedModel: progress.resolvedModel,
-				readOnly: isReadOnlyAgent(agent),
 				spawns: spawnsEnv,
 				readSummarize: agent.readSummarize,
-				advisor: advisorSelection ? (advisorSelection.model ?? "on") : undefined,
+				readOnly: isReadOnlyAgent(agent, evalBackends),
 				outputSchema,
 				outputSchemaMode: options.outputSchemaMode,
 				restrictToolNames: restrictToolNames || undefined,

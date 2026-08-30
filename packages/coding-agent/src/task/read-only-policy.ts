@@ -1,4 +1,4 @@
-import { isToolDisallowed } from "../tools/builtin-names";
+import { expandExecToolAlias, isToolDisallowed } from "../tools/builtin-names";
 import type { AgentDefinition } from "./types";
 
 // Built-in tools whose approval tier is "read" (see tool classes' `approval`).
@@ -23,7 +23,15 @@ export const READ_ONLY_TOOL_NAMES: ReadonlySet<string> = new Set([
 	"rewind",
 ]);
 
-export function isReadOnlyAgent(agent: AgentDefinition): boolean {
+export function isReadOnlyAgent(
+	agent: AgentDefinition,
+	evalBackends?: {
+		python: boolean;
+		js: boolean;
+		ruby: boolean;
+		julia: boolean;
+	},
+): boolean {
 	// Classify from the EFFECTIVE tool set: `disallowedTools:` can remove a
 	// mutating tool (e.g. `tools: [read, write]` + `disallowedTools: [write]`),
 	// leaving a read-only scope that the declared list alone would mark
@@ -49,6 +57,16 @@ export function isReadOnlyAgent(agent: AgentDefinition): boolean {
 	// protocol-only scope: the child can call no tool at all, so it cannot
 	// mutate anything and classifies read-only. A non-empty effective set is
 	// read-only iff every surviving tool is read-only.
-	const effective = agent.tools.filter(tool => !isToolDisallowed(tool, patterns));
+	// `exec` is expanded to its concrete backends BEFORE classification:
+	// `tools: [exec]` + `disallowedTools: [eval, bash]` leaves no execution
+	// tool, so classifying on the unexpanded alias would misreport the agent
+	// as writable. Without backend info, assume eval is available (fail-safe
+	// toward writable, matching the runtime default allowance).
+	const declared = expandExecToolAlias(
+		agent.tools,
+		patterns,
+		evalBackends ?? { python: true, js: true, ruby: false, julia: false },
+	);
+	const effective = declared.filter(tool => !isToolDisallowed(tool, patterns));
 	return effective.every(tool => READ_ONLY_TOOL_NAMES.has(tool));
 }

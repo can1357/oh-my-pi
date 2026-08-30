@@ -26,6 +26,7 @@ import taskAsyncContractTemplate from "../prompts/tools/task-async-contract.md" 
 import taskSummaryTemplate from "../prompts/tools/task-summary.md" with { type: "text" };
 import { TASK_EFFORTS, type TaskEffort } from "../thinking";
 import { truncateForPrompt } from "../tools/approval";
+import { type EvalBackendsAllowance, resolveEvalBackends } from "../tools/eval-backends";
 import { isIrcEnabled } from "../tools/hub";
 import { formatBytes, formatDuration } from "../tools/render-utils";
 import { isReadOnlyAgent } from "./read-only-policy";
@@ -143,6 +144,7 @@ interface TaskDescriptionOptions {
 	asyncEnabled: boolean;
 	ircEnabled: boolean;
 	parentSpawns: string;
+	evalBackends: EvalBackendsAllowance;
 }
 
 /** Render the tool description from a cached agent list and current settings. */
@@ -162,7 +164,7 @@ function renderDescription(options: TaskDescriptionOptions): string {
 	const renderedAgents = filteredAgents.map(agent => ({
 		name: agent.name,
 		description: agent.description,
-		readOnly: isReadOnlyAgent(agent),
+		readOnly: isReadOnlyAgent(agent, options.evalBackends),
 		blocking: agent.blocking === true,
 	}));
 	const scoutAvailable = isScoutSpawnable(options.disabledAgents, options.parentSpawns);
@@ -619,6 +621,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			asyncEnabled: this.session.settings.get("async.enabled"),
 			ircEnabled: isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0),
 			parentSpawns: this.session.getSessionSpawns() ?? "*",
+			evalBackends: resolveEvalBackends(this.session),
 		});
 	}
 	private constructor(

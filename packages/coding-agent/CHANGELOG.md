@@ -12,7 +12,8 @@
 
 ### Fixed
 
-- Fixed a scope denying `todo` from still mutating local todo state: Cursor's server-resolved `update_todos`/`read_todos` frames are now checked against the session's tool scope before mirroring, and advisor explicit-server MCP resource listings no longer bypass the per-server scope gate that filters the primary session's listings.
+- Fixed read-only classification ignoring the `exec` alias expansion: an agent declaring `tools: [exec]` with both concrete backends disallowed is now classified read-only (matching what the runtime actually spawns). Scoped sessions no longer advertise `inspect_image` in the `read` tool description when the scope removes it, and any description flip now also holds on the enable path.
+
 ### Added
 
 - Added provider-reported credits and concrete routed-model counts to `/session` statistics ([#8590](https://github.com/can1357/oh-my-pi/pull/8590) by [@will-bogusz](https://github.com/will-bogusz)).
