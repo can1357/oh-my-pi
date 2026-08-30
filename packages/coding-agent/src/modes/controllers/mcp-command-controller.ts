@@ -6,7 +6,6 @@
 import * as path from "node:path";
 import { type Component, replaceTabs, Spacer, Text } from "@oh-my-pi/pi-tui";
 import { getMCPConfigPath, getProjectDir } from "@oh-my-pi/pi-utils";
-import { clearCache as clearFsCache } from "../../capability/fs";
 import type { SourceMeta } from "../../capability/types";
 import { expandEnvVarsDeep } from "../../discovery/helpers";
 import {
@@ -33,6 +32,7 @@ import {
 	removeManagedMcpOAuthCredentials,
 } from "../../mcp/oauth-credentials";
 import { MCPOAuthFlow, type MCPStoredOAuthCredential, mcpOAuthCredentialId } from "../../mcp/oauth-flow";
+import { reloadMcpServers } from "../../mcp/reload";
 import {
 	clearSmitheryApiKey,
 	createSmitheryCliAuthSession,
@@ -2203,24 +2203,14 @@ export class MCPCommandController {
 			return;
 		}
 
-		// Disconnect all existing servers
-		await this.ctx.mcpManager.disconnectAll();
-		// Prompt enrichment is asynchronous. Clear commands before rediscovery so
-		// removed/disabled servers cannot leave stale `/server:prompt` entries;
-		// newly loaded prompts repopulate them through the manager callback.
-		this.ctx.session.setMCPPromptCommands([]);
-		// External edits to mcp.json (not via writeMCPConfigFile) otherwise
-		// keep stale env/command after reload.
-		clearFsCache();
-
-		// Rediscover and connect, mirroring startup's discovery filters.
-		const result = await this.ctx.mcpManager.discoverAndConnect({
-			enableProjectConfig: this.ctx.settings.get("mcp.enableProjectConfig") ?? true,
-			filterExa: true,
-			filterBrowser: this.ctx.session.getEvalPreludes().some(definition => definition.name === "browser"),
+		const result = await reloadMcpServers({
+			manager: this.ctx.mcpManager,
+			setMCPPromptCommands: commands => this.ctx.session.setMCPPromptCommands(commands),
+			refreshMCPTools: tools => this.ctx.session.refreshMCPTools(tools),
 			extensionRoots: this.ctx.session.effectiveExtensionRoots,
+			enableProjectConfig: this.ctx.settings.get("mcp.enableProjectConfig") ?? true,
+			filterBrowser: this.ctx.session.getEvalPreludes().some(definition => definition.name === "browser"),
 		});
-		await this.ctx.session.refreshMCPTools(this.ctx.mcpManager.getTools());
 
 		this.#showMCPConnectionErrors(result.errors);
 	}

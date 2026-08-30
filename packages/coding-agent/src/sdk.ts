@@ -88,6 +88,8 @@ import { createImageUrlServiceFromSettings } from "./blob-broker/service";
 import { wrapStreamFnWithBlobUrlFallback } from "./blob-broker/stream-fallback";
 import { initializeWithSettings } from "./discovery";
 import { setInvocationConfiguredExtensions, withOmpExtensionRootScope } from "./discovery/omp-extension-roots";
+import { applyMCPEnvironment } from "./mcp/reload";
+import { TtsrManager } from "./export/ttsr";
 import { disposeVmContextsByOwner } from "./eval/js/context-manager";
 import { getEnabledEvalPreludes, type EvalPreludeDefinition } from "./eval/preludes";
 import { disposeAllKernelSessions, disposeKernelSessionsByOwner } from "./eval/py/executor";
@@ -364,12 +366,6 @@ function collectPendingMCPToolNames(explicitToolNames: readonly string[] | undef
 function logMCPLoadErrors(errors: MCPLoadResult["errors"]): void {
 	for (const [serverName, error] of errors) {
 		logger.error("MCP tool load failed", { path: `mcp:${serverName}`, error });
-	}
-}
-
-function applyMCPEnvironment(result: { exaApiKeys: string[] }): void {
-	if (result.exaApiKeys.length > 0 && !$env.EXA_API_KEY) {
-		Bun.env.EXA_API_KEY = result.exaApiKeys[0];
 	}
 }
 
@@ -1660,27 +1656,36 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	const resolvedAgentName = (options.agentName ?? agentKind).trim().toLowerCase();
 
 	// Discover rules and bucket them in one pass to avoid repeated scans over large rule sets.
-	const { ttsrManager, rulebookRules, alwaysApplyRules, allRules } = await logger.time(
-		"discoverTtsrRules",
-		async () => {
-			const { TtsrManager } = await import("./export/ttsr");
-			const ttsrSettings = settings.getGroup("ttsr");
-			const ttsrManager = new TtsrManager(ttsrSettings);
-			const rulesResult =
-				options.rules !== undefined
-					? { items: options.rules, warnings: undefined }
-					: await loadCapability<Rule>(ruleCapability.id, { cwd });
-			const { rulebookRules, alwaysApplyRules } = bucketRules(rulesResult.items, ttsrManager, {
-				builtinRules: ttsrSettings.builtinRules,
-				disabledRules: ttsrSettings.disabledRules,
-				agentName: resolvedAgentName,
-			});
-			if (existingSession.injectedTtsrRules.length > 0) {
-				ttsrManager.restoreInjected(existingSession.injectedTtsrRules);
-			}
-			return { ttsrManager, rulebookRules, alwaysApplyRules, allRules: rulesResult.items };
-		},
-	);
+	// `rulebookRules`/`alwaysApplyRules` are reassignable so an in-session
+	// `refresh` can swap the roster the `rebuildSystemPrompt` closure renders
+	// from (wired via `applyReloadedRoster` below). Without that, a rules refresh
+	// would rebuild the prompt from this stale launch-time snapshot.
+	let rulebookRules: Rule[];
+	let alwaysApplyRules: Rule[];
+	const {
+		ttsrManager,
+		allRules,
+		rulebookRules: initialRulebookRules,
+		alwaysApplyRules: initialAlwaysApplyRules,
+	} = await logger.time("discoverTtsrRules", async () => {
+		const ttsrSettings = settings.getGroup("ttsr");
+		const ttsrManager = new TtsrManager(ttsrSettings);
+		const rulesResult =
+			options.rules !== undefined
+				? { items: options.rules, warnings: undefined }
+				: await loadCapability<Rule>(ruleCapability.id, { cwd });
+		const { rulebookRules, alwaysApplyRules } = bucketRules(rulesResult.items, ttsrManager, {
+			builtinRules: ttsrSettings.builtinRules,
+			disabledRules: ttsrSettings.disabledRules,
+			agentName: resolvedAgentName,
+		});
+		if (existingSession.injectedTtsrRules.length > 0) {
+			ttsrManager.restoreInjected(existingSession.injectedTtsrRules);
+		}
+		return { ttsrManager, rulebookRules, alwaysApplyRules, allRules: rulesResult.items };
+	});
+	rulebookRules = initialRulebookRules;
+	alwaysApplyRules = initialAlwaysApplyRules;
 
 	// Resolve contextFiles up-front (it's needed before tool creation). The
 	// workspace tree scan is slow on large repos and we MUST NOT block startup on
@@ -1814,6 +1819,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				return session?.skills ?? skills;
 			},
 			refreshSkills: () => session.refreshSkills(),
+			refresh: scope => session.refresh(scope),
 			rules: allRules,
 			activeRules: [...rulebookRules, ...alwaysApplyRules, ...ttsrManager.getRules()],
 			eventBus,
@@ -3624,9 +3630,20 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 
 		cursorEventEmitter = event => agent.emitExternalEvent(event);
 
+		// An EXPLICIT startup model (`options.model` / `options.modelPattern`, incl.
+		// CLI `--model`) is a user pin, exactly like an in-session `/model` pick, and
+		// must be recorded with role `default` on BOTH startup paths. On a resumed
+		// branch whose latest non-ephemeral `model_change` is role-less,
+		// `AgentSession.#hasSessionModelOverride()` would otherwise classify the
+		// explicitly requested model as settings-tracking, and the next
+		// `refresh('settings')` would replace it with the configured default.
+		const explicitStartupModel = hasExplicitModel ? model : undefined;
 		// Restore messages if session has existing data
 		if (hasExistingSession) {
 			agent.replaceMessages(existingSession.messages);
+			if (explicitStartupModel) {
+				sessionManager.appendModelChange(`${explicitStartupModel.provider}/${explicitStartupModel.id}`, "default");
+			}
 			if (options.openAIServiceTier !== undefined) {
 				sessionManager.appendServiceTierChange(
 					Object.keys(initialServiceTierByFamily).length > 0 ? initialServiceTierByFamily : null,
@@ -3635,12 +3652,26 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		} else {
 			// Save initial model, thinking level, and service tier for new sessions so they can be restored on resume.
 			if (model) {
-				sessionManager.appendModelChange(`${model.provider}/${model.id}`);
+				// A settings-derived startup stays role-less (still tracks the
+				// configured default and remains swappable).
+				sessionManager.appendModelChange(
+					`${model.provider}/${model.id}`,
+					explicitStartupModel ? "default" : undefined,
+				);
 			}
 			if (!autoThinking) {
 				// Do not write the `auto` selector before the first turn resolves; auto
 				// classification persists its concrete effort once a real user turn runs.
-				sessionManager.appendThinkingLevelChange(effectiveThinkingLevel);
+				//
+				// Mark a SETTINGS-DERIVED level as settings-tracking so a later
+				// `refresh('settings')` may re-derive it, while an explicitly requested
+				// one (`options.thinkingLevel`, incl. CLI `--thinking`, or an explicit
+				// model selector's `:level` suffix) reads as a session pin the reload
+				// must not clobber — mirroring the model classification above.
+				const explicitStartupThinking = options.thinkingLevel !== undefined || hasExplicitModel;
+				sessionManager.appendThinkingLevelChange(effectiveThinkingLevel, undefined, {
+					settingsTracking: !explicitStartupThinking,
+				});
 			}
 			if (options.openAIServiceTier !== undefined || Object.keys(initialServiceTierByFamily).length > 0) {
 				sessionManager.appendServiceTierChange(
@@ -3754,6 +3785,25 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			skillWarnings,
 			skillsReloadable: options.skills === undefined,
 			skillsSettings: settings.getGroup("skills"),
+			// Only the caller-supplied rule policy (SDK `rules` / `--no-rules`), not
+			// the disk-discovered set: present, an in-session refresh re-buckets it
+			// instead of re-scanning disk, so it cannot re-enable ambient rules the
+			// session excluded. `undefined` keeps the roster-editing disk re-scan.
+			rules: options.rules,
+			// The session's initial discovered roster (rulebook + always-apply), so
+			// a settings-only `refresh` re-buckets the COMPLETE set against the
+			// reloaded TTSR gating and drops only newly-gated rules — instead of
+			// re-bucketing from TTSR entries alone (empty non-TTSR set) and wiping
+			// every non-TTSR rule from the published active rules and next prompt.
+			initialRosterRules: [...rulebookRules, ...alwaysApplyRules],
+			// The complete UNGATED discovery output. A settings-only `refresh`
+			// re-buckets THIS set, so toggling `ttsr.disabledRules`/`builtinRules`
+			// applies in both directions: re-bucketing only the gated roster above
+			// could never restore a rule whose disable entry the user reverted.
+			initialSourceRules: allRules,
+			// The same name init bucketed with, so a refresh re-buckets under this
+			// session's agent scope rather than admitting every agent-scoped rule.
+			agentRuleName: resolvedAgentName,
 			modelRegistry,
 			rebindModelAfterDiscovery: options.model === undefined || options.rebindModelAfterDiscovery === true,
 			toolRegistry,
@@ -3789,6 +3839,36 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			preferWebsockets: preferOpenAICodexWebsockets,
 			convertToLlm: convertToLlmFinal,
 			rebuildSystemPrompt,
+			// An in-session `refresh` re-scans the roster and threads the fresh
+			// buckets back here. Reassigning the closure locals `rebuildSystemPrompt`
+			// reads is what makes a rules refresh reach the model prompt — without
+			// it, `refreshBaseSystemPrompt()` would rebuild from the stale
+			// launch-time snapshot. Skills bind a per-session snapshot updated
+			// separately (`applyReloadedSkills`); the prompt reads `session.skills`.
+			applyReloadedRoster: roster => {
+				rulebookRules = roster.rulebookRules;
+				alwaysApplyRules = roster.alwaysApplyRules;
+				// Re-publish the session's OWN rule snapshot too. `rule://`
+				// resolution prefers `context.rules` (this array) over the process
+				// global, so leaving it at the launch-time value serves stale rule
+				// content — and hides a newly added rule — from every tool that
+				// threads `session.activeRules`.
+				toolSession.activeRules = [...roster.rulebookRules, ...roster.alwaysApplyRules, ...ttsrManager.getRules()];
+				// And the SPAWN-facing field, which is a different set: children
+				// receive `rules: session.rules` as `options.rules`, and a defined
+				// `options.rules` is the child's authoritative rule policy (it skips
+				// the disk scan and buckets exactly this list). Left at the
+				// launch-time `allRules`, a rule added or edited before the spawn was
+				// silently absent from the new child's prompt and `rule://` snapshot.
+				//
+				// The UNGATED source roster is the right value: the gated buckets
+				// above are THIS session's applicable set, so forwarding them would
+				// bake this session's `ttsr.disabledRules`/`agents` scoping into the
+				// child as an unrecoverable policy — the child could never restore a
+				// rule whose disable entry the user later reverted, and a rule scoped
+				// to the child's own agent would be missing outright.
+				toolSession.rules = [...roster.sourceRules];
+			},
 			getXdevToolEntries: () => (toolSession.xdev ? xdevEntries(toolSession.xdev) : []),
 			xdev: toolSession.xdev,
 			presentationPinnedToolNames: explicitlyRequestedToolNameSet,
@@ -3817,10 +3897,18 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					}
 				: undefined,
 			disconnectOwnedMcpManager: ownedMcpManager ? () => ownedMcpManager.disconnectAll() : undefined,
+			// The manager THIS session was built with (owned or the parent's), so an
+			// in-session refresh reconnects it rather than the process-global
+			// `MCPManager.instance()` — which, with multiple top-level sessions, may
+			// be a different session's manager.
+			mcpManager,
 			ttsrManager,
 			obfuscator,
 			agentId: resolvedAgentId,
 			agentKind,
+			// Retain the registry this session was created against so refresh's skill
+			// fan-out targets THIS tree's descendants, not a foreign global tree.
+			agentRegistry,
 			providerSessionId: options.providerSessionId,
 			providerPromptCacheKeySource,
 			parentEvalSessionId: options.parentEvalSessionId,

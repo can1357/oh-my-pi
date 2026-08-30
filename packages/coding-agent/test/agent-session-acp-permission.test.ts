@@ -902,6 +902,51 @@ it("read tool: requestPermission is never called for non-gated tools", async () 
 	expect(readTool.executeCalls).toBe(1);
 });
 
+// refresh("mcp"/"all") reconnects MCP — spawning project `.mcp.json` stdio
+// subprocesses (arbitrary exec) — so an ACP client must gate it like bash/edit
+// rather than let a model self-invoke it. It is in PERMISSION_REQUIRED_TOOLS.
+// Pre-fix: refresh was absent from the set, so it ran ungated.
+it("refresh tool requests ACP permission before executing", async () => {
+	const refreshTool = makeFakeTool("refresh");
+	const bridge = makeBridge({ outcome: "selected", optionId: "allow_once", kind: "allow_once" });
+	const permissionSpy = spyOn(bridge, "requestPermission");
+	session = await createSession([refreshTool], bridge);
+
+	await session.setActiveToolsByName(["refresh"]);
+	const wrappedRefresh = session.agent.state.tools.find(t => t.name === "refresh");
+	expect(wrappedRefresh).toBeDefined();
+
+	await wrappedRefresh!.execute("call-refresh", {}, undefined, undefined as never, undefined as never);
+
+	expect(permissionSpy).toHaveBeenCalledTimes(1);
+	expect(refreshTool.executeCalls).toBe(1);
+});
+
+// Per-scope cacheKey guard: an "always allow" on a benign refresh scope must NOT
+// silently pre-approve refresh("mcp"), which reconnects MCP and spawns .mcp.json
+// stdio subprocesses (arbitrary exec). Each scope carries its own persisted
+// decision, so a second call under a different scope re-prompts.
+// Pre-fix (single cacheKey "refresh"): the mcp call short-circuits on the cached
+// skills decision and the bridge is consulted only once.
+it("refresh: allow_always on a benign scope does not pre-approve refresh('mcp')", async () => {
+	const refreshTool = makeFakeTool("refresh");
+	const bridge = makeBridge({ outcome: "selected", optionId: "allow_always", kind: "allow_always" });
+	const permissionSpy = spyOn(bridge, "requestPermission");
+	session = await createSession([refreshTool], bridge);
+
+	await session.setActiveToolsByName(["refresh"]);
+	const wrappedRefresh = session.agent.state.tools.find(t => t.name === "refresh");
+	expect(wrappedRefresh).toBeDefined();
+
+	// Benign scope: user picks "always allow".
+	await wrappedRefresh!.execute("call-skills", { scope: "skills" }, undefined, undefined as never, undefined as never);
+	// Exec-bearing scope: must prompt again — different cacheKey, no pre-approval.
+	await wrappedRefresh!.execute("call-mcp", { scope: "mcp" }, undefined, undefined as never, undefined as never);
+
+	expect(permissionSpy).toHaveBeenCalledTimes(2);
+	expect(refreshTool.executeCalls).toBe(2);
+});
+
 it("setActiveToolsByName normalizes legacy tool names", async () => {
 	const grepTool = makeFakeTool("grep");
 	const globTool = makeFakeTool("glob");

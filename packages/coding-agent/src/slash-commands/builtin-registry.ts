@@ -13,6 +13,7 @@ import { BUILTIN_CONTROL_SLASH_COMMANDS } from "./builtin-control";
 import { BUILTIN_LIFECYCLE_SLASH_COMMANDS } from "./builtin-lifecycle";
 import { BUILTIN_MARKETPLACE_SLASH_COMMANDS, reloadTuiPluginState } from "./builtin-marketplace";
 import { BUILTIN_MODE_SLASH_COMMANDS } from "./builtin-modes";
+import { BUILTIN_REFRESH_SLASH_COMMANDS } from "./builtin-refresh";
 import { BUILTIN_SESSION_SLASH_COMMANDS } from "./builtin-session";
 import { parseSlashCommand } from "./helpers/parse";
 import type {
@@ -42,6 +43,7 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 	...BUILTIN_LIFECYCLE_SLASH_COMMANDS,
 	...BUILTIN_MARKETPLACE_SLASH_COMMANDS,
 	...BUILTIN_CONTROL_SLASH_COMMANDS,
+	...BUILTIN_REFRESH_SLASH_COMMANDS,
 ];
 
 const BUILTIN_SLASH_COMMAND_LOOKUP = new Map<string, SlashCommandSpec>();

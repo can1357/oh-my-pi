@@ -21,6 +21,7 @@ import type {
 import type { postmortem } from "@oh-my-pi/pi-utils";
 import type { AdvisorConfig } from "../advisor";
 import type { AsyncJob, AsyncJobDeliveryState, AsyncJobManager } from "../async";
+import type { Rule } from "../capability/rule";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import type { ModelRegistry } from "../config/model-registry";
 import type { PromptTemplate } from "../config/prompt-templates";
@@ -33,8 +34,11 @@ import type { LoadedCustomCommand } from "../extensibility/custom-commands";
 import type { CustomTool } from "../extensibility/custom-tools/types";
 import type { ExtensionRunner, PreparedExtension } from "../extensibility/extensions";
 import type { ContextUsage } from "../extensibility/extensions/types";
+import type { RefreshScope } from "../extensibility/reload";
 import type { Skill, SkillWarning } from "../extensibility/skills";
 import type { FileSlashCommand } from "../extensibility/slash-commands";
+import type { MCPManager } from "../mcp/manager";
+import type { AgentRegistry } from "../registry/agent-registry";
 import type { SecretObfuscator } from "../secrets/obfuscator";
 import type { ConfiguredThinkingLevel } from "../thinking";
 import type { XdevState } from "../tools/xdev";
@@ -184,6 +188,39 @@ export interface AgentSessionConfig {
 	skillWarnings?: SkillWarning[];
 	/** Whether runtime reloads may rediscover disk-backed skills. */
 	skillsReloadable?: boolean;
+	/**
+	 * Caller-supplied rule policy (SDK `rules` array; `--no-rules` passes `[]`).
+	 * Present, an in-session `refresh` re-buckets these rules rather than
+	 * re-scanning disk, so it cannot re-enable ambient rules the session
+	 * excluded. Absent (`undefined`), a refresh re-discovers rules from disk.
+	 */
+	rules?: readonly Rule[];
+	/**
+	 * The session's initial discovered rule roster (rulebook + always-apply
+	 * buckets) snapshot at construction. A settings-only `refresh` re-buckets
+	 * this COMPLETE set against the reloaded TTSR gating, so it can only DROP a
+	 * newly-gated rule — never wipe the non-TTSR rules a roster refresh has not
+	 * yet re-populated. Absent (`undefined`), the roster snapshot starts empty
+	 * and a settings-only refresh cannot re-bucket the non-TTSR rules.
+	 */
+	initialRosterRules?: readonly Rule[];
+	/**
+	 * The session's COMPLETE, UNGATED discovered rule set (`sdk.ts` `allRules`) —
+	 * every rule the discovery produced, before `ttsr.disabledRules`/`builtinRules`
+	 * dropped any. A settings-only `refresh` re-buckets THIS set, so flipping a
+	 * gating lever applies in both directions: re-bucketing only the surviving
+	 * gated roster could never restore a rule whose `disabledRules` entry was
+	 * reverted. Absent (`undefined`), the gated roster is reused and a settings
+	 * refresh stays drop-only.
+	 */
+	initialSourceRules?: readonly Rule[];
+	/**
+	 * The session's resolved agent name for rule `agents` scoping (`sdk.ts`
+	 * `resolvedAgentName`: explicit `agentName`, else `main`/`sub`). An
+	 * in-session `refresh` re-buckets against THIS name, matching init; absent,
+	 * `bucketRules` disables scoping and admits every agent-scoped rule.
+	 */
+	agentRuleName?: string;
 	/** Custom TypeScript slash commands. */
 	customCommands?: LoadedCustomCommand[];
 	skillsSettings?: SkillsSettings;
@@ -248,6 +285,33 @@ export interface AgentSessionConfig {
 		toolNames: string[],
 		tools: Map<string, AgentTool>,
 	) => Promise<{ systemPrompt: string[]; xdevCatalogNames?: readonly string[] }>;
+	/**
+	 * Thread a freshly reloaded skills/rules roster into the closure state that
+	 * {@link rebuildSystemPrompt} reads, so an in-session `refresh` re-renders the
+	 * advertised roster instead of the stale launch-time snapshot. The advertisement
+	 * renders from SDK-closure locals, not the process globals, so a global swap
+	 * alone does not reach it. No-op when the SDK did not wire it (subagents/tests).
+	 */
+	applyReloadedRoster?: (roster: {
+		skills: readonly Skill[];
+		rulebookRules: Rule[];
+		alwaysApplyRules: Rule[];
+		/**
+		 * The refreshed UNGATED discovery output ({@link initialSourceRules}'s
+		 * successor), for the spawn-facing rule policy children inherit. Gated
+		 * buckets are this session's own applicable set; forwarding them to a child
+		 * as its authoritative `rules` would make this session's TTSR gating
+		 * irreversible there.
+		 */
+		sourceRules: readonly Rule[];
+	}) => void;
+	/**
+	 * Pre-refresh hook for embedded hosts. Awaited as the first statement inside
+	 * {@link AgentSession.refresh}'s critical section, before any config surface
+	 * is re-read, so the host can stage fresh skills/rules/settings/MCP to disk.
+	 * Wired from `CreateAgentSessionOptions.onBeforeRefresh`.
+	 */
+	onBeforeRefresh?: (scope: RefreshScope) => void | Promise<void>;
 	/** Tools mounted under `xd://`, for `/tools` display. */
 	getXdevToolEntries?: () => Array<{ name: string; summary: string }>;
 	/** `xd://` presentation state backed by the canonical tool map. */
@@ -272,6 +336,14 @@ export interface AgentSessionConfig {
 	agentId?: string;
 	/** Whether this is a top-level or subagent session. */
 	agentKind?: "main" | "sub";
+	/**
+	 * Registry this session is created against (SDK
+	 * `CreateAgentSessionOptions.agentRegistry`, else the global). Skill fan-out
+	 * on refresh iterates THIS registry, restricted to this session's own
+	 * descendants — so a session on a caller-supplied registry never overwrites
+	 * an unrelated global-tree session's snapshot. Default: `AgentRegistry.global()`.
+	 */
+	agentRegistry?: AgentRegistry;
 	/** Provider-facing session ID override. */
 	providerSessionId?: string;
 	/** Whether the provider prompt-cache key was explicit or fork-inherited. */
@@ -321,6 +393,13 @@ export interface AgentSessionConfig {
 	pruneToolDescriptions?: boolean;
 	/** Disconnect the MCP manager owned by this session during disposal. */
 	disconnectOwnedMcpManager?: () => Promise<void>;
+	/**
+	 * The MCP manager this session was constructed with (owned or an inherited
+	 * parent's). An in-session `refresh` reconnects THIS instance rather than the
+	 * process-global `MCPManager.instance()`, which — with multiple top-level
+	 * SDK/ACP sessions — may point at a different session's manager.
+	 */
+	mcpManager?: MCPManager;
 	/** System prompt used by automatic session-title generation. */
 	titleSystemPrompt?: string;
 }

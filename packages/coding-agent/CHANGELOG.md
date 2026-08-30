@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed the in-session `refresh` so an MCP refresh keeps extension-declared servers, a rules refresh (including an edited rule body) reaches the model prompt, and a settings-changing refresh applies the new skills config ([#10288](https://github.com/can1357/oh-my-pi/pull/10288) by [@mattwilkinsonn](https://github.com/mattwilkinsonn)).
+
 ## [18.1.12] - 2026-09-06
 
 - Fixed edit and write results to report the formatted bytes actually committed by LSP writethrough.
