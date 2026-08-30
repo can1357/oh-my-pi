@@ -11,6 +11,7 @@ import { LspTool } from "@oh-my-pi/pi-coding-agent/lsp";
 import * as lspClient from "@oh-my-pi/pi-coding-agent/lsp/client";
 import * as lspConfig from "@oh-my-pi/pi-coding-agent/lsp/config";
 import { getServersForFile, type LspConfig, loadConfig } from "@oh-my-pi/pi-coding-agent/lsp/config";
+import { waitForDiagnostics } from "@oh-my-pi/pi-coding-agent/lsp/diagnostics";
 import {
 	applyTextEditsToString,
 	applyWorkspaceEdit,
@@ -1653,6 +1654,109 @@ describe("lsp regressions", () => {
 				});
 				expect(fakeServer.received.map(message => message.method)).toContain("textDocument/diagnostic");
 				expect(textResult(result)).toContain("Type 'number' is not assignable to type 'string'.");
+			} finally {
+				await lspClient.shutdownAll();
+				tempDir.removeSync();
+			}
+		}, 15_000);
+	}
+
+	for (const scenario of [
+		{
+			name: "rejects a failed document pull when no publish follows (#10035)",
+			publish: false,
+			settleMs: 0,
+			acceptsPublish: false,
+		},
+		{
+			name: "accepts fresh published diagnostics after a document pull failure (#10035)",
+			publish: true,
+			settleMs: 0,
+			acceptsPublish: true,
+		},
+		{
+			name: "rejects an unversioned publish that has not settled after a pull failure (#10035)",
+			publish: true,
+			settleMs: 10_000,
+			acceptsPublish: false,
+		},
+	]) {
+		it(scenario.name, async () => {
+			const tempDir = TempDir.createSync("@omp-lsp-failed-pull-");
+			try {
+				const targetFile = path.join(tempDir.path(), "Program.cs");
+				await Bun.write(targetFile, "private readonly object _gate = new();\n");
+				const uri = fileToUri(targetFile);
+				const publishedDiagnostic: Diagnostic = {
+					message: "Use System.Threading.Lock",
+					severity: 3,
+					code: "IDE0330",
+					source: "roslyn",
+					range: {
+						start: { line: 0, character: 25 },
+						end: { line: 0, character: 38 },
+					},
+				};
+
+				const fakeServer = installFakeLsp((message, server) => {
+					if (message.method === "initialize") {
+						server.send({ jsonrpc: "2.0", id: message.id, result: { capabilities: {} } });
+					} else if (message.method === "initialized") {
+						server.send({
+							jsonrpc: "2.0",
+							id: "register-diagnostics",
+							method: "client/registerCapability",
+							params: {
+								registrations: [
+									{
+										id: "pull-diagnostics",
+										method: "textDocument/diagnostic",
+										registerOptions: { identifier: "DocumentCompilerSemantic" },
+									},
+								],
+							},
+						});
+					} else if (message.method === "textDocument/diagnostic") {
+						server.send({
+							jsonrpc: "2.0",
+							id: message.id,
+							error: { code: -32800, message: "request failed" },
+						});
+						if (scenario.publish) {
+							setImmediate(() => {
+								server.send({
+									jsonrpc: "2.0",
+									method: "textDocument/publishDiagnostics",
+									params: { uri, diagnostics: [publishedDiagnostic] },
+								});
+							});
+						}
+					} else if (message.method === "shutdown") {
+						server.send({ jsonrpc: "2.0", id: message.id, result: null });
+					} else if (message.method === "exit") {
+						server.exit(0);
+					}
+				});
+				const serverConfig: ServerConfig = {
+					command: "Microsoft.CodeAnalysis.LanguageServer",
+					fileTypes: ["cs"],
+					rootMarkers: [],
+				};
+				const client = await lspClient.getOrCreateClient(serverConfig, tempDir.path());
+				const diagnostics = waitForDiagnostics(client, uri, {
+					timeoutMs: scenario.acceptsPublish ? 1_000 : 50,
+					settleMs: scenario.settleMs,
+				});
+
+				if (scenario.acceptsPublish) {
+					expect(await diagnostics).toEqual([publishedDiagnostic]);
+				} else {
+					await expect(diagnostics).rejects.toThrow("request failed");
+				}
+				if (scenario.publish) {
+					expect(client.diagnostics.get(uri)?.diagnostics).toEqual([publishedDiagnostic]);
+				}
+				expect(fakeServer.received.map(m => m.method)).toContain("textDocument/diagnostic");
 			} finally {
 				await lspClient.shutdownAll();
 				tempDir.removeSync();

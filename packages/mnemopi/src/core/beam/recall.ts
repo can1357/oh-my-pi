@@ -556,18 +556,20 @@ function ftsRows(
 				// 0.042ms. EXISTS probes the primary key only for rows MATCH actually produced.
 				`SELECT f.id, f.rank FROM fts_working f
 				 WHERE f.fts_working MATCH ?
-				   AND EXISTS (SELECT 1 FROM working_memory w WHERE w.id = f.id AND w.superseded_by IS NULL)
+				   AND EXISTS (SELECT 1 FROM working_memory w WHERE w.id = f.id AND w.superseded_by IS NULL
+				       AND (w.valid_until IS NULL OR w.valid_until > ?))
 				 ORDER BY f.rank, f.id LIMIT ?`,
-				[ftsQuery(query, useSynonyms), limit],
+				[ftsQuery(query, useSynonyms), nowIso(), limit],
 			);
 		}
 		return queryAll(
 			beam,
 			`SELECT f.rowid, f.rank FROM fts_episodes f
 			 WHERE f.fts_episodes MATCH ?
-			   AND EXISTS (SELECT 1 FROM episodic_memory e WHERE e.rowid = f.rowid AND e.superseded_by IS NULL)
+			   AND EXISTS (SELECT 1 FROM episodic_memory e WHERE e.rowid = f.rowid AND e.superseded_by IS NULL
+			       AND (e.valid_until IS NULL OR e.valid_until > ?))
 			 ORDER BY f.rank, f.rowid LIMIT ?`,
-			[ftsQuery(query, useSynonyms), limit],
+			[ftsQuery(query, useSynonyms), nowIso(), limit],
 		);
 	} catch {
 		return [];

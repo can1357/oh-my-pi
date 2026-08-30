@@ -133,7 +133,7 @@ const piSegment: StatusLineSegment = {
 		// whole-unit turn timer (port of rust omp's status-band active brand).
 		const content =
 			ctx.turnElapsedMs != null
-				? `${brandSpinnerFrame()} ${brandTimer(ctx.turnElapsedMs)} `
+				? `${brandSpinnerFrame(ctx.now?.getTime())} ${brandTimer(ctx.turnElapsedMs)} `
 				: theme.icon.omp
 					? `${theme.icon.omp} `
 					: "";
@@ -141,9 +141,9 @@ const piSegment: StatusLineSegment = {
 	},
 };
 /** Current braille-spinner glyph on the shared clock, at the Loader's 80ms cadence. */
-function brandSpinnerFrame(): string {
+function brandSpinnerFrame(nowMs = Date.now()): string {
 	const frames = theme.getSpinnerFrames("activity");
-	return frames[Math.floor(Date.now() / SPINNER_ADVANCE_MS) % frames.length] ?? "";
+	return frames[Math.floor(nowMs / SPINNER_ADVANCE_MS) % frames.length] ?? "";
 }
 
 /** Turn timer in omp's brand format: whole seconds → minutes → hours (capped at 99h). */
@@ -277,11 +277,14 @@ function renderGoalMode(ctx: SegmentContext, mode: { enabled: boolean; paused: b
 	};
 }
 
-function formatLoopLimit(limit: NonNullable<SegmentContext["loopMode"]>["limit"]): string | undefined {
+function formatLoopLimit(
+	limit: NonNullable<SegmentContext["loopMode"]>["limit"],
+	nowMs = Date.now(),
+): string | undefined {
 	if (!limit) return undefined;
 	if (limit.kind === "iterations") return `${limit.remaining}/${limit.initial}`;
 
-	const totalSeconds = Math.max(0, Math.ceil((limit.deadlineMs - Date.now()) / 1_000));
+	const totalSeconds = Math.max(0, Math.ceil((limit.deadlineMs - nowMs) / 1_000));
 	const hours = Math.floor(totalSeconds / 3_600);
 	const minutes = Math.floor((totalSeconds % 3_600) / 60);
 	const seconds = totalSeconds % 60;
@@ -327,7 +330,7 @@ const modeSegment: StatusLineSegment = {
 			const icon = loop.state === "paused" ? theme.icon.pause || theme.icon.loop : theme.icon.loop;
 			const color: ThemeColor = loop.state === "paused" ? "warning" : "customMessageLabel";
 			const parts = [withIcon(icon, `Loop ${loop.state}`)];
-			const limit = formatLoopLimit(loop.limit);
+			const limit = formatLoopLimit(loop.limit, ctx.now?.getTime());
 			if (limit) parts.push(limit);
 			return { content: theme.fg(color, parts.join(" ")), visible: true };
 		}
@@ -504,7 +507,6 @@ const costSegment: StatusLineSegment = {
 		const normalizedPremiumRequests = normalizePremiumRequests(premiumRequests);
 		const state = ctx.session.state;
 		const usingSubscription = state.model ? (ctx.session.modelRegistry?.isUsingOAuth(state.model) ?? false) : false;
-		const advisorUsingSubscription = ctx.session.isAdvisorUsingSubscription?.() ?? false;
 
 		if (!cost && !advisorCost && !usingSubscription && !normalizedPremiumRequests) {
 			return { content: "", visible: false };
@@ -521,6 +523,11 @@ const costSegment: StatusLineSegment = {
 		if (normalizedPremiumRequests) billingParts.push(`★ ${formatNumber(normalizedPremiumRequests)}`);
 		if (advisorCost) {
 			const prefix = billingParts.length ? "+ " : "";
+			// Resolve the advisor subscription flag lazily: with no active advisor
+			// it walks the whole model catalog (getAvailable → hasAuth per provider
+			// → credential-file reads), and the status line re-renders at the
+			// working-spinner cadence, so an eager per-frame probe pinned CPU (#10129).
+			const advisorUsingSubscription = ctx.session.isAdvisorUsingSubscription?.() ?? false;
 			billingParts.push(`${prefix}${formatAdvisorSpend(advisorCost, advisorUsingSubscription, theme)}`);
 		}
 		if (billingParts.length === 0) return { content: "", visible: false };
@@ -591,7 +598,7 @@ const timeSegment: StatusLineSegment = {
 	id: "time",
 	render(ctx) {
 		const opts = ctx.options.time ?? {};
-		const now = new Date();
+		const now = ctx.now ?? new Date();
 
 		let hours = now.getHours();
 		let suffix = "";
@@ -625,7 +632,7 @@ const sessionSegment: StatusLineSegment = {
 const hostnameSegment: StatusLineSegment = {
 	id: "hostname",
 	render(ctx) {
-		const name = os.hostname().split(".")[0];
+		const name = ctx.hostname ?? os.hostname().split(".")[0];
 		const content = withIcon(theme.icon.host, name);
 		const ansi = sessionAccentAnsi(ctx);
 		return { content: ansi ? `${ansi}${content}\x1b[39m` : content, visible: true };

@@ -955,6 +955,8 @@ export interface AssistantMessage {
 	 * providers that expose no such field.
 	 */
 	upstreamProvider?: string;
+	/** Provider-reported concrete model when a router selected one for this turn. */
+	upstreamModel?: string;
 	usage: Usage;
 	stopReason: StopReason;
 	stopDetails?: StopDetails | null;
