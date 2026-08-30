@@ -620,8 +620,12 @@ export class CollabHost {
 					.then(session =>
 						session.isStreaming
 							? session.prompt(trimmed, { streamingBehavior: "steer" })
-							: runTrackedAgentTaskTurn(AgentRegistry.global(), agentId, session, () =>
-									session.prompt(trimmed, { streamingBehavior: "steer" }),
+							: runTrackedAgentTaskTurn(
+									AgentRegistry.global(),
+									agentId,
+									session,
+									() => session.prompt(trimmed, { streamingBehavior: "steer" }),
+									state => this.#ctx.setObservedAgentTaskOutcome(agentId, state),
 								),
 					)
 					.catch(fail);

@@ -24,12 +24,19 @@ import { installInMemoryRelay, uninstallInMemoryRelay } from "./helpers/in-memor
 // sealing, enveloping, the hello→welcome handshake, and read-only enforcement
 // are all exercised.
 
+type ObservedOutcome = {
+	id: string;
+	state: "active" | "completed" | "failed" | "aborted";
+};
+
 interface HostHarness {
 	ctx: InteractiveModeContext;
 	prompts: { from?: string }[];
 	aborts: { count: number };
+	observedOutcomes: ObservedOutcome[];
 	/** Resolves on the next promptCustomMessage call — no polling. */
 	nextPrompt(): Promise<{ from?: string }>;
+	nextObservedOutcome(): Promise<ObservedOutcome>;
 }
 
 /** Minimal InteractiveModeContext double: only the members CollabHost touches. */
@@ -37,6 +44,8 @@ function makeHostContext(): HostHarness {
 	const prompts: { from?: string }[] = [];
 	const aborts = { count: 0 };
 	const promptWaiters: ((details: { from?: string }) => void)[] = [];
+	const observedOutcomes: ObservedOutcome[] = [];
+	const observedOutcomeWaiters: ((outcome: ObservedOutcome) => void)[] = [];
 	const ctx = {
 		settings: { get: () => "" },
 		sessionManager: {
@@ -67,6 +76,11 @@ function makeHostContext(): HostHarness {
 				return Promise.resolve();
 			},
 		},
+		setObservedAgentTaskOutcome: (id: string, state: ObservedOutcome["state"]) => {
+			const outcome = { id, state };
+			observedOutcomes.push(outcome);
+			observedOutcomeWaiters.shift()?.(outcome);
+		},
 		eventBus: undefined,
 		statusLine: {
 			setCollabStatus: () => {},
@@ -82,7 +96,12 @@ function makeHostContext(): HostHarness {
 		promptWaiters.push(resolve);
 		return promise;
 	};
-	return { ctx, prompts, aborts, nextPrompt };
+	const nextObservedOutcome = (): Promise<ObservedOutcome> => {
+		const { promise, resolve } = Promise.withResolvers<ObservedOutcome>();
+		observedOutcomeWaiters.push(resolve);
+		return promise;
+	};
+	return { ctx, prompts, aborts, observedOutcomes, nextPrompt, nextObservedOutcome };
 }
 
 interface TestGuest {
@@ -159,6 +178,7 @@ afterEach(() => {
 	for (const cleanup of guestCleanups.splice(0).reverse()) cleanup();
 	harness.prompts.length = 0;
 	harness.aborts.count = 0;
+	harness.observedOutcomes.length = 0;
 });
 
 afterAll(async () => {
@@ -211,6 +231,49 @@ describe("collab read-only links", () => {
 		expect(await prompted).toEqual({ from: "writer" });
 		expect(prompts).toHaveLength(1);
 		expect(host.participants.find(p => p.name === "writer")?.readOnly).toBeUndefined();
+	});
+
+	it("synchronizes observer outcomes for collaboration-driven follow-ups", async () => {
+		const guest = await joinAsGuest(host.link, "writer-chat");
+		guestCleanups.push(() => guest.socket.close());
+		const welcome = await guest.nextFrame();
+		if (welcome.t !== "welcome") throw new Error(`expected welcome, got ${welcome.t}`);
+
+		const id = "Remote-Chatted-Sub";
+		const registry = AgentRegistry.global();
+		let listener: ((event: { type: "agent_start" }) => void) | undefined;
+		const session = {
+			isStreaming: false,
+			subscribe: (next: (event: { type: "agent_start" }) => void) => {
+				listener = next;
+				return () => {
+					listener = undefined;
+				};
+			},
+			prompt: async () => {
+				listener?.({ type: "agent_start" });
+				return true;
+			},
+			getLastAssistantMessage: () => ({ stopReason: "stop" }),
+		} as unknown as AgentSession;
+		const ref = registry.register({
+			id,
+			displayName: "remote chat",
+			kind: "sub",
+			session,
+			status: "idle",
+			history: { lastOutcome: "failed" },
+		});
+		const active = harness.nextObservedOutcome();
+		const completed = harness.nextObservedOutcome();
+		try {
+			guest.socket.send({ t: "agent-cmd", cmd: "chat", agentId: id, text: "try again" });
+			expect(await active).toEqual({ id, state: "active" });
+			expect(await completed).toEqual({ id, state: "completed" });
+			expect(ref.history?.lastOutcome).toBe("completed");
+		} finally {
+			registry.unregister(id, ref);
+		}
 	});
 
 	it("keeps a remotely killed subagent tombstoned", async () => {
