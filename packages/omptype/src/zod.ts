@@ -595,14 +595,36 @@ export const union = <
 	);
 };
 /**
- * The values `ir` can take when that set is finite — literals, `null`,
- * `undefined`, and unions of those (`z.enum`, a literal union). `undefined`
- * means the set is open, so nothing can be dispatched on it.
+ * A literal the shim can both dispatch on and advertise. omptype compares
+ * object literals by REFERENCE ("must be reference equal to …"), so emitting
+ * `const: {…}` would promise the model a structural match the runtime refuses,
+ * and bigint, symbol and non-finite numbers have no JSON form at all. Anything
+ * outside this set makes the variant undispatchable rather than silently
+ * dispatched on identity.
+ */
+function isDispatchableLiteral(value: unknown): boolean {
+	if (value === null || value === undefined) return true;
+	switch (typeof value) {
+		case "string":
+		case "boolean":
+			return true;
+		case "number":
+			return Number.isFinite(value);
+		default:
+			return false;
+	}
+}
+
+/**
+ * The values `ir` can take when that set is finite AND dispatchable — literals,
+ * `null`, `undefined`, and unions of those (`z.enum`, a literal union).
+ * `undefined` means the set is open, or pinned to something that cannot be
+ * dispatched on, so nothing can be selected by it.
  */
 function finiteValues(ir: IR, seen?: Set<IR>): unknown[] | undefined {
 	switch (ir.k) {
 		case "lit":
-			return [ir.v];
+			return isDispatchableLiteral(ir.v) ? [ir.v] : undefined;
 		case "null":
 			return [null];
 		case "undefined":

@@ -312,6 +312,35 @@ describe("zod-like parsing", () => {
 		expect([...messages]).toEqual(["must be a plain object (was an array)"]);
 	});
 
+	it("rejects discriminators pinned to values it cannot advertise", () => {
+		// omptype compares object literals by reference, so emitting
+		// `const: {"a":1}` would promise the model a structural match the runtime
+		// refuses — the provider-valid `{ kind: { a: 1 } }` only parsed when it
+		// carried the original reference. bigint has no JSON form at all.
+		const objectLiteral = { a: 1 };
+		expect(() =>
+			z.discriminatedUnion("kind", [
+				z.object({ kind: z.literal(objectLiteral), n: z.number() }),
+				z.object({ kind: z.literal("b") }),
+			]),
+		).toThrow(/does not pin "kind" to a literal or enum value/);
+		expect(() =>
+			z.discriminatedUnion("kind", [z.object({ kind: z.literal(1n) }), z.object({ kind: z.literal("b") })]),
+		).toThrow(/does not pin "kind" to a literal or enum value/);
+
+		// Every literal kind that survives a JSON Schema `const` still dispatches.
+		const numeric = z.discriminatedUnion("kind", [
+			z.object({ kind: z.literal(1), a: z.string() }),
+			z.object({ kind: z.literal(2), b: z.number() }),
+		]);
+		expect(numeric.parse({ kind: 2, b: 3 })).toEqual({ kind: 2, b: 3 });
+		const nullish = z.discriminatedUnion("kind", [
+			z.object({ kind: z.null(), a: z.string() }),
+			z.object({ kind: z.literal("b") }),
+		]);
+		expect(nullish.parse({ kind: null, a: "x" })).toEqual({ kind: null, a: "x" });
+	});
+
 	it("lets later modifiers replace the object policy the array guard sits on", () => {
 		// The guard is the shim's own step, so a naive wrapper made every guarded
 		// object look stepped: a rebuild then re-validated through the OLD
