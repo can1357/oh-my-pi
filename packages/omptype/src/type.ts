@@ -2034,6 +2034,23 @@ function intersect(a: IR, b: IR): IR {
 	return intersectResolved(a, b);
 }
 
+/**
+ * Whether a plain-only object node can accept an instance of `ctor`.
+ *
+ * The built-ins listed here are exactly the ones `isPlainRecord` refuses, so an
+ * intersection with them is empty and a union containing both branches is
+ * provably disjoint. An ordinary class instance IS plain-record input and stays
+ * satisfiable. A custom thenable is not detectable from a constructor, so it
+ * stays satisfiable too — conservative in the safe direction, since the union
+ * then keeps the ordered dispatcher instead of being proven disjoint.
+ */
+function plainAcceptsInstance(ctor: Constructor): boolean {
+	for (const excluded of [Array, Date, Map, Set, Promise]) {
+		if (ctor === excluded || ctor.prototype instanceof excluded) return false;
+	}
+	return true;
+}
+
 function intersectResolved(a: IR, b: IR): IR {
 	if (a.k === "never" || b.k === "never") throw new OmpTypeError("intersection with never is unsatisfiable");
 	if (a.k === "unknown") return b;
@@ -2178,6 +2195,13 @@ function intersectResolved(a: IR, b: IR): IR {
 			throw new OmpTypeError("intersection of a plain object and an array is unsatisfiable");
 		}
 		return { k: "intersection", members: [a, b] };
+	}
+	if (
+		(a.k === "object" && a.plain === true && b.k === "instance" && !plainAcceptsInstance(b.ctor)) ||
+		(b.k === "object" && b.plain === true && a.k === "instance" && !plainAcceptsInstance(a.ctor))
+	) {
+		const excluded = a.k === "instance" ? a : (b as Extract<IR, { k: "instance" }>);
+		throw new OmpTypeError(`intersection of a plain object and ${excluded.expected} is unsatisfiable`);
 	}
 	const leftDomain = domainOf(a);
 	const rightDomain = domainOf(b);

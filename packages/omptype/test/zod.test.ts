@@ -396,6 +396,34 @@ describe("zod-like parsing", () => {
 			/intersection of a plain object and an array is unsatisfiable/,
 		);
 		expect(intersect(type({ a: "string" }), "string[]")(Object.assign(["x"], { a: "y" }))).toEqual(["x"]);
+
+		// The domain excludes more than arrays, so the same disjointness applies
+		// to the built-ins it refuses — otherwise a mixed omptype/shim union
+		// cannot even be constructed.
+		for (const excluded of [Date, Map, Set, Promise]) {
+			const mixed = (z.object({ a: z.string() }) as unknown as { or(def: unknown): (value: unknown) => unknown }).or(
+				type.instanceOf(excluded),
+			);
+			expect(mixed({ a: "x" })).toEqual({ a: "x" });
+		}
+		const withDate = (z.object({ a: z.string() }) as unknown as { or(def: unknown): (value: unknown) => unknown }).or(
+			type.instanceOf(Date),
+		);
+		const instant = new Date();
+		expect(withDate(instant)).toBe(instant);
+		expect(withDate(5)).toBeInstanceOf(OmpErrors);
+		// An ordinary class instance IS plain-record input, so that union really
+		// is order-dependent and must stay on the dispatcher — the guard only
+		// covers domains the shim refuses.
+		expect(() =>
+			(z.object({ a: z.string() }) as unknown as { or(def: unknown): unknown }).or(
+				type.instanceOf(
+					class Point {
+						a = "x";
+					},
+				),
+			),
+		).toThrow(/unordered union with overlapping morph inputs is indeterminate/);
 	});
 
 	it("carries the object-input domain into definitions that spread a shim schema", () => {
