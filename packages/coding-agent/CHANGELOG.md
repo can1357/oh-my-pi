@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Pressing `n` on the ask dialog's "Other" row now opens the custom-answer prompt, so the typed text is the answer itself
+
 ### Fixed
 
 - The startup update notice counts every change in a release: bullets written above a `###` heading now count under `Other`, and `+`/`*` markers and lightly indented bullets count like `-`.
