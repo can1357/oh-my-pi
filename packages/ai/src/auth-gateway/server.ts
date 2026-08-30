@@ -617,7 +617,8 @@ function mirrorRequestAbort(req: Request): AbortController {
 
 // (handlePassthrough removed — see note above.)
 
-function releaseTurnOnStreamEnd(
+/** Wrap an SSE body so turn reservations (and settled probes) release on close, cancel, or read failure. */
+export function releaseTurnOnStreamEnd(
 	stream: ReadableStream<Uint8Array>,
 	storage: AuthStorage,
 	requestId: string,
@@ -635,13 +636,18 @@ function releaseTurnOnStreamEnd(
 	};
 	return new ReadableStream({
 		async pull(controller) {
-			const { done, value } = await reader.read();
-			if (done) {
+			try {
+				const { done, value } = await reader.read();
+				if (done) {
+					release();
+					controller.close();
+					return;
+				}
+				controller.enqueue(value);
+			} catch (error) {
 				release();
-				controller.close();
-				return;
+				controller.error(error);
 			}
-			controller.enqueue(value);
 		},
 		cancel(reason) {
 			release();
@@ -679,6 +685,8 @@ function recordProviderHealthFailure(
 ): void {
 	if (classified.owner === "provider") {
 		health.recordFailure(model.provider, model.id, "provider");
+	} else if (classified.owner === "model") {
+		health.recordFailure(model.provider, model.id, "model");
 	}
 }
 
@@ -820,7 +828,8 @@ async function handleFormatEndpoint(
 	let pendingFallback: string | undefined;
 	let lastClassified: GatewayErrorClassification | undefined;
 	let siblingsExhausted = false;
-	const attemptCap = compiled.targets.length + 1;
+	// One dispatch + one sibling-credential retry per target, plus a spare iteration.
+	const attemptCap = compiled.targets.length * 2 + 1;
 
 	const stateNow = (): ExecutionState =>
 		conductorExecutionState(
@@ -863,6 +872,8 @@ async function handleFormatEndpoint(
 			return true;
 		}
 		if (action.type === "fallback_target") {
+			// New target gets a fresh sibling-credential budget.
+			siblingsExhausted = false;
 			pendingFallback = action.targetModelId;
 			fallbackCount += 1;
 			retryCount += 1;
@@ -933,6 +944,7 @@ async function handleFormatEndpoint(
 						commitState: "probing",
 					});
 					if (action.type === "fallback_target") {
+						siblingsExhausted = false;
 						pendingFallback = action.targetModelId;
 					}
 				}
@@ -1072,8 +1084,8 @@ async function handleFormatEndpoint(
 							return formatError(499, "request_aborted", errorMessage);
 						}
 						const classified = classifyGatewayError(message.errorClassificationMessage ?? errorMessage);
-						recordProviderHealthFailure(health, model, classified);
 						if (messageHasBillableUsage(message)) {
+							recordProviderHealthFailure(health, model, classified);
 							await runHook(bootOpts.hooks?.afterAttempt, { ...attemptHookCtx(), ok: false });
 							return formatError(classified.status, classified.type, errorMessage);
 						}
@@ -1332,7 +1344,8 @@ async function handlePiNative(
 	let pendingFallback: string | undefined;
 	let lastClassified: GatewayErrorClassification | undefined;
 	let siblingsExhausted = false;
-	const attemptCap = compiled.targets.length + 1;
+	// One dispatch + one sibling-credential retry per target, plus a spare iteration.
+	const attemptCap = compiled.targets.length * 2 + 1;
 
 	const stateNow = (): ExecutionState =>
 		conductorExecutionState(
@@ -1375,6 +1388,8 @@ async function handlePiNative(
 			return true;
 		}
 		if (action.type === "fallback_target") {
+			// New target gets a fresh sibling-credential budget.
+			siblingsExhausted = false;
 			pendingFallback = action.targetModelId;
 			fallbackCount += 1;
 			retryCount += 1;
@@ -1445,6 +1460,7 @@ async function handlePiNative(
 						commitState: "probing",
 					});
 					if (action.type === "fallback_target") {
+						siblingsExhausted = false;
 						pendingFallback = action.targetModelId;
 					}
 				}
@@ -1601,8 +1617,8 @@ async function handlePiNative(
 							return formatError(499, "request_aborted", errorMessage);
 						}
 						const classified = classifyGatewayError(message.errorClassificationMessage ?? errorMessage);
-						recordProviderHealthFailure(health, model, classified);
 						if (messageHasBillableUsage(message)) {
+							recordProviderHealthFailure(health, model, classified);
 							await runHook(bootOpts.hooks?.afterAttempt, { ...attemptHookCtx(), ok: false });
 							return formatError(classified.status, classified.type, errorMessage);
 						}

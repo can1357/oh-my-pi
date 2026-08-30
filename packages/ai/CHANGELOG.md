@@ -42,6 +42,10 @@
 
 ### Fixed
 
+- Fixed `mapOptionsForApi` dropping OpenAI Responses/Completions continuation fields (`previousResponseId`, `parallelToolCalls`, `seed`, `logitBias`, `user`, `responseFormat`) so gateway-parsed options reach provider `buildParams()`.
+- Fixed auth-gateway target health ignoring `owner: "model"` failures and double-counting non-streaming provider failures before fallback, so circuits open at the intended three-failure threshold.
+- Fixed auth-gateway `siblingsExhausted` sticking across `fallback_target` moves (and raised the attempt cap) so each fallback target gets its own sibling-credential retry.
+- Fixed committed SSE streams leaking turn reservations when `reader.read()` rejects.
 - Fixed gateway classification treating Codex `cyber_policy` / Trusted Access HTTP 403 denials (including structured `code: "cyber_policy"`) as retryable credential failures; they are now `policy_terminal`.
 - Fixed auth-gateway preferred-later failover so retries stay inside the disposition's compiled fallback list instead of any unused route target (e.g. no small-model retry on `context_overflow`).
 - Fixed auth gateway missing-credential handling to skip a useless same-target sibling retry and fail over immediately via compiled `credential_transient` fallbacks when other targets exist.
