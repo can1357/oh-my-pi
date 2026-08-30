@@ -57,11 +57,13 @@ import type { EditToolDetails } from "../../edit";
 import type { PythonResult } from "../../eval/py/executor";
 import type { BashResult } from "../../exec/bash-executor";
 import type { ExecOptions, ExecResult } from "../../exec/exec";
+import type { GoalModeState } from "../../goals/state";
 import type * as PiCodingAgent from "../../index";
 import type { LocalProtocolOptions } from "../../internal-urls/local-protocol";
 import type { MemoryRuntimeContext } from "../../memory-backend";
 import type { CustomEditor } from "../../modes/components/custom-editor";
 import type { Theme } from "../../modes/theme/theme";
+import type { PlanModeState } from "../../plan-mode/state";
 import type { AsyncJobSnapshot } from "../../session/agent-session";
 import type { CompactMode } from "../../session/compact-modes";
 import type { CustomMessage, CustomMessagePayload } from "../../session/messages";
@@ -461,6 +463,10 @@ export interface ExtensionContext {
 	getContextUsage(): ContextUsage | undefined;
 	/** Get a read-only snapshot of async jobs owned by this session. */
 	getAsyncJobSnapshot(): AsyncJobSnapshot | null;
+	/** Get this session's plan mode state (if active). Live per call; the object is a snapshot. */
+	getPlanModeState(): PlanModeState | undefined;
+	/** Get this session's goal mode state (if active or exiting). Live per call; the object is a snapshot. */
+	getGoalModeState(): GoalModeState | undefined;
 	/** Compact the session context (interactive mode shows UI). */
 	compact(instructionsOrOptions?: string | CompactOptions): Promise<void>;
 	/** Whether UI is available (false in print/RPC mode) */
