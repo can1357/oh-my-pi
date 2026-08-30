@@ -151,6 +151,15 @@ test.skipIf(process.platform !== "linux")(
 
 			const pid = Number.parseInt((await Bun.file(pidFile).text()).trim(), 10);
 			escaped = Process.fromPid(pid);
+			// Real subprocess timing: fake timers cannot advance the kill sweep,
+			// and the session-escape sweep can complete a beat after the resolver
+			// returns under CI load — poll with the same margin the marker-based
+			// siblings use instead of sampling once. A real leak still fails: the
+			// worker sleeps far past the window.
+			const deadline = Date.now() + 2000;
+			while (Date.now() < deadline && escaped?.status() === ProcessStatus.Running) {
+				await Bun.sleep(50);
+			}
 			expect(escaped?.status(), `session-escaping descendant ${pid} survived the timeout`).not.toBe(
 				ProcessStatus.Running,
 			);
