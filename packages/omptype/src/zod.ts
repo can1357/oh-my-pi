@@ -634,6 +634,11 @@ function finiteValues(ir: IR, seen?: Set<IR>): unknown[] | undefined {
 			return isDispatchableLiteral(ir.v) ? [ir.v] : undefined;
 		case "null":
 			return [null];
+		case "boolean":
+			// `z.union([z.literal(true), z.literal(false)])` normalizes to the
+			// boolean node, and the domain is a finite, JSON-representable pair —
+			// so it dispatches like the literal union it was written as.
+			return [true, false];
 		case "undefined":
 			return [];
 		case "union": {

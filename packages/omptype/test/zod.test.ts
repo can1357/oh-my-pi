@@ -390,6 +390,21 @@ describe("zod-like parsing", () => {
 			z.object({ kind: z.literal(2), b: z.number() }),
 		]);
 		expect(numeric.parse({ kind: 2, b: 3 })).toEqual({ kind: 2, b: 3 });
+		// `z.union([z.literal(true), z.literal(false)])` normalizes to the boolean
+		// node, so the finite pair has to be recognized there too — otherwise a
+		// discriminator written as a literal union fails to load.
+		const booleanUnion = z.discriminatedUnion("kind", [
+			z.object({ kind: z.union([z.literal(true), z.literal(false)]), a: z.string() }),
+			z.object({ kind: z.literal("b"), b: z.number() }),
+		]);
+		expect(booleanUnion.parse({ kind: true, a: "x" })).toEqual({ kind: true, a: "x" });
+		expect(booleanUnion.parse({ kind: false, a: "y" })).toEqual({ kind: false, a: "y" });
+		expect(booleanUnion.parse({ kind: "b", b: 1 })).toEqual({ kind: "b", b: 1 });
+		// …and both of its values are claimed, so a literal overlapping either
+		// side is still an ambiguous definition.
+		expect(() =>
+			z.discriminatedUnion("kind", [z.object({ kind: z.boolean() }), z.object({ kind: z.literal(true) })]),
+		).toThrow(/variants 0 and 1 both pin "kind" to true/);
 		const nullish = z.discriminatedUnion("kind", [
 			z.object({ kind: z.null(), a: z.string() }),
 			z.object({ kind: z.literal("b") }),
