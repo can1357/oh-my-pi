@@ -84,37 +84,52 @@ function fnmatchRegex(pattern: string): RegExp {
 					cls += pattern[i] === "\\" ? "\\\\" : pattern[i];
 					i++;
 				}
-				// fnmatch treats a descending range (`z-a`) as an empty class: a
-				// positive empty class matches nothing, a negated empty class
-				// matches everything. Interpolating `z-a` verbatim throws
-				// "range out of order", so every match fell through the
-				// caller's catch as false — an allowlist entry silently
-				// disabled the server and a denylist entry excluded nothing.
-				// Rewriting the class keeps matching consistent and non-throwing.
+				// fnmatch DISCARDS a descending range (`z-a`) from a class — it
+				// contributes nothing; every other member (literals, ascending
+				// ranges) is kept. `[az-a]` keeps just the two `a` literals;
+				// `[a-z9-0]` keeps `a-z`. Interpolating the descending range
+				// verbatim made RegExp construction throw "range out of order",
+				// so `matches()` returned false for every name: an allowlist
+				// entry silently disabled the server and a denylist entry
+				// excluded nothing.
 				const negated = cls.startsWith("^");
 				const body = negated ? cls.slice(1) : cls; // strip the `^` negation prefix
-				let descending = false;
-				for (let j = 1; j < body.length - 1; j++) {
-					// a range dash is an unescaped `-` with a member on both sides;
-					// first/last-position or doubled hyphens are literal members
-					if (body[j] !== "-") continue;
-					const lo = body[j - 1];
-					const hi = body[j + 1];
-					if (lo === "-" || hi === "-") continue; // `--` or `a--`: literal dash members
-					// descending when the lo bound sorts after the hi bound
-					if (lo.charCodeAt(0) > hi.charCodeAt(0)) descending = true;
-					break;
+				let members = "";
+				for (let j = 0; j < body.length; j++) {
+					if (body[j] === "\\") {
+						// keep escaped members verbatim (backslash escapes the next char)
+						members += body.slice(j, Math.min(j + 2, body.length));
+						j++;
+						continue;
+					}
+					// a range dash needs a member on each side; first/last-position
+					// or doubled hyphens are literal members
+					if (body[j + 1] !== "-" || body[j + 2] === undefined) {
+						members += body[j];
+						continue;
+					}
+					const lo = body[j];
+					const hi = body[j + 2];
+					j += 2; // consume `x-y`
+					// a descending range is dropped (fnmatch: empty range = no member);
+					// ascending and self ranges (`a-a`) are kept
+					if (lo.charCodeAt(0) > hi.charCodeAt(0)) continue;
+					members += `${lo}-${hi}`;
 				}
 				if (i >= end) {
 					// unterminated — treat the literal `[` (and body) as escaped text
 					out += escapeOutsideClass(pattern.slice(classStart, end));
 					i = end;
-				} else if (descending) {
-					// positive empty class matches nothing; negated matches everything
-					out += negated ? ".*" : "(?!x)x";
+				} else if (negated) {
+					// `[^]` (negation of everything) admits every leading char
+					out += members ? `[^${members}]` : ".*";
+					i++; // consume ]
+				} else if (!members) {
+					// empty positive class matches nothing
+					out += "(?!x)x";
 					i++; // consume ]
 				} else {
-					out += `[${cls}]`;
+					out += `[${members}]`;
 					i++; // consume ]
 				}
 			} else if (ch === "{") {

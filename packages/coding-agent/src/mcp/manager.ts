@@ -760,17 +760,27 @@ export class MCPManager {
 					if (cached) {
 						const source = this.#sources.get(name);
 						const reconnect = () => this.reconnectServer(name);
-						this.#replaceServerTools(
+						const deferred = DeferredMCPTool.fromTools(
 							name,
-							DeferredMCPTool.fromTools(
-								name,
-								task.config,
-								cached,
-								() => this.waitForConnection(name),
-								source,
-								reconnect,
-							),
+							task.config,
+							cached,
+							() => this.waitForConnection(name),
+							source,
+							reconnect,
 						);
+						this.#replaceServerTools(name, deferred);
+						// A cached tool list entirely excluded by the filter means
+						// the server contributes nothing even before the real
+						// connection lands — surface it like the fulfilled path
+						// instead of reporting a silently-empty "connecting" server
+						// indefinitely.
+						if (deferred.length === 0) {
+							const filterMsg = mcpFilterEmptyMessage(name, task.config, cached.length);
+							if (filterMsg) {
+								errors.set(name, filterMsg);
+								notify(createMcpStartupFailure(name, filterMsg, source));
+							}
+						}
 					}
 				}
 			}

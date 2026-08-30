@@ -131,8 +131,9 @@ describe("filterMCPTools", () => {
 		expect(filterMCPTools({ toolNames: names, disabledTools: ["[!]]*"] }).allowed).toEqual(["]ax", "]abc"]);
 	});
 
-	// fnmatch treats a descending range (`z-a`) as an EMPTY class: a positive
-	// empty class matches nothing, a negated empty class matches everything.
+	// fnmatch DISCARDS a descending range (`z-a`) from a class — it contributes
+	// nothing; all other members (literals, ascending ranges) are kept, and a
+	// negated class whose members are all dropped matches everything.
 	// Regression: interpolating `z-a` verbatim into the regex threw
 	// "range out of order", so `matches()` reported false for every name —
 	// an allowlist entry silently disabled the server and a denylist entry
@@ -151,6 +152,24 @@ describe("filterMCPTools", () => {
 		expect(filterMCPTools({ toolNames: ["-x", "ax"], enabledTools: ["[-a]*"] }).allowed).toEqual(["-x", "ax"]);
 		// a literal-dash member mixed with an ascending range still matches
 		expect(filterMCPTools({ toolNames: ["z-a", "ax"], enabledTools: ["[a-z0-9-]*"] }).allowed).toEqual(["z-a", "ax"]);
+	});
+
+	// fnmatch drops only the invalid range from a MIXED class; valid members
+	// keep matching. `[az-a]` keeps the two `a` literals, `[a-z9-0]` keeps
+	// `a-z`; a negated mixed class `[!az-a]` excludes exactly the kept members.
+	it("a mixed class drops only the descending range and keeps valid members", () => {
+		expect(filterMCPTools({ toolNames: ["apple", "zebra", "beta"], enabledTools: ["[az-a]*"] }).allowed).toEqual([
+			"apple",
+		]);
+		expect(
+			filterMCPTools({ toolNames: ["apple", "zebra", "123", "beta"], enabledTools: ["[a-z9-0]*"] }).allowed,
+		).toEqual(["apple", "zebra", "beta"]);
+		expect(filterMCPTools({ toolNames: ["apple", "zebra", "123"], enabledTools: ["[!az-a]*"] }).allowed).toEqual([
+			"zebra",
+			"123",
+		]);
+		// self-ranges (`a-a`) are valid single-member ranges, not dropped
+		expect(filterMCPTools({ toolNames: ["ax", "bx"], enabledTools: ["[a-a]*"] }).allowed).toEqual(["ax"]);
 	});
 });
 
