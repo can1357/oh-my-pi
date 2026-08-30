@@ -1935,6 +1935,8 @@ export class TurnRecovery {
 		if (!this.#activeRetryFallback) return false;
 		if (this.#activeRetryFallback.pinned) return false;
 		if (this.#getRetryFallbackRevertPolicy() !== "cooldown-expiry") return false;
+		const refusalCooldownUntilMs = this.#activeRetryFallback.classifierRefusalCooldownUntilMs;
+		if (refusalCooldownUntilMs !== undefined && Date.now() < refusalCooldownUntilMs) return false;
 
 		const {
 			originalSelector: originalSelectorRaw,
@@ -2190,13 +2192,38 @@ export class TurnRecovery {
 				!thinkingLoop &&
 				!(retryBudgetExhausted && classifierRefusal)
 			) {
+				// A classifier refusal normally pins the fallback for the rest of the
+				// session: retrying the declining model just trips the same classifier
+				// again. When `retry.classifierRefusalCooldownMs` is positive, treat the
+				// refusal like any other transient failure instead: leave the fallback
+				// unpinned and record a session-local cooldown, so
+				// `retry.fallbackRevertPolicy` can restore the primary once the cooldown
+				// ends and a later turn no longer trips the classifier.
+				const classifierRefusalCooldownMs = retrySettings.classifierRefusalCooldownMs;
+				const cooldownClassifierRefusal = classifierRefusal && classifierRefusalCooldownMs > 0;
 				if (!classifierRefusal) {
 					this.noteRetryFallbackCooldown(currentSelector, parsedRetryAfterMs, errorMessage);
 				}
 				switchedModel = await this.#tryRetryModelFallback(currentSelector, message, {
-					pinFallback: classifierRefusal,
+					pinFallback: classifierRefusal && !cooldownClassifierRefusal,
 					preserveFailedTurn,
 				});
+				if (
+					switchedModel &&
+					cooldownClassifierRefusal &&
+					this.#activeRetryFallback &&
+					this.#activeRetryFallback.originalSelector === currentSelector
+				) {
+					// Scope the cooldown to THIS session's fallback state rather than the
+					// registry-wide suppression map: a refusal reflects this session's turn
+					// content, so it must not sideline the model for a sibling session
+					// sharing the ModelRegistry or clobber its rate-limit window. Only stamp
+					// it when the original primary itself refused: restoration only ever
+					// targets `originalSelector`, so a deeper-chain refusal (primary A -> B,
+					// then B refuses -> C) must not block restoring A once A's own
+					// suppression clears.
+					this.#activeRetryFallback.classifierRefusalCooldownUntilMs = Date.now() + classifierRefusalCooldownMs;
+				}
 			}
 			// Auto fallback from a Fireworks Fast variant to its base model. Independent
 			// of the role-fallback setting: it's intrinsic to the Fast contract (speed

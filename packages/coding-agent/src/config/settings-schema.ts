@@ -1909,6 +1909,17 @@ export const SETTINGS_SCHEMA = {
 			],
 		},
 	},
+	"retry.classifierRefusalCooldownMs": {
+		type: "number",
+		default: 0,
+		ui: {
+			tab: "model",
+			group: "Retry & Fallback",
+			label: "Classifier Refusal Cooldown",
+			description:
+				"How long, in ms, to keep a session on its fallback after the primary model declines a turn via its content classifier. 0 (default) pins the fallback for the rest of the session, since retrying the declining model immediately just trips the same classifier again. A positive value instead treats the refusal as transient: the fallback is left unpinned and Fallback Revert Policy restores the primary once the cooldown ends and a later turn no longer trips the classifier. The window is tracked per session, so a refusal never sidelines the model for other sessions.",
+		},
+	},
 
 	"providers.anthropic.serverSideFallback": {
 		type: "boolean",
@@ -6157,6 +6168,7 @@ export interface RetrySettings {
 	usageAwareFallback: boolean;
 	usageReservePct: number;
 	usageReservePolicy: "confirm" | "auto" | "fail-closed";
+	classifierRefusalCooldownMs: number;
 }
 
 export interface MemoriesSettings {

@@ -8,6 +8,7 @@
 - Added `CLINE_API_KEY` to the CLI environment help for native ClinePass subscription inference ([#7863](https://github.com/can1357/oh-my-pi/pull/7863) by [@will-bogusz](https://github.com/will-bogusz)).
 - Devin model selectors now accept the native CLI's short aliases (`devin/opus`, `devin/swe`), dotted upstream spellings (`devin/gemini-3.7-flash`), and raw effort-route wire uids for dynamically collapsed families ([#8590](https://github.com/can1357/oh-my-pi/pull/8590) by [@will-bogusz](https://github.com/will-bogusz)).
 - Added provider-supplied model metadata to the `/models` detail line: `new`, `beta`, and `recommended` badges beside the model name, and the upstream description after the context, cost, and perf facts ([#8590](https://github.com/can1357/oh-my-pi/pull/8590) by [@will-bogusz](https://github.com/will-bogusz)).
+- Added `retry.classifierRefusalCooldownMs` to time-box classifier-refusal model fallbacks: a positive value lets `retry.fallbackRevertPolicy` restore the primary model after the cooldown instead of pinning the fallback for the rest of the session (default `0` preserves the pin behavior). The cooldown is tracked per session so it never sidelines a model for a sibling session sharing the model registry. ([#10206](https://github.com/can1357/oh-my-pi/issues/10206))
 
 ## [18.0.11] - 2026-08-29
 
