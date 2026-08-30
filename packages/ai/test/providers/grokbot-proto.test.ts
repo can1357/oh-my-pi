@@ -411,6 +411,21 @@ describe("grokbot checksum", () => {
 			TRUNCATE_LENGTHS.TITLE,
 		);
 	});
+
+	test("reports renewer present when AuthStorage / models.yml credential is passed", async () => {
+		spyOn(grokbotCatalogAuth, "loadGrokbotConfig").mockImplementation(async (renewalOverride?: string) => ({
+			renewal: renewalOverride || "",
+			machineId: "machine-present",
+			namespace: "prod",
+			clientVersion: "0.30.0",
+		}));
+		spyOn(grokbotCatalogAuth, "grokbotSecretsPath").mockReturnValue("/tmp/agent/secrets/grokbot.env");
+
+		const without = await formatGrokbotStatus();
+		expect(without).toContain("Renewer: missing");
+		const withConfigured = await formatGrokbotStatus({ renewalCredential: "yml-or-runtime-renewal" });
+		expect(withConfigured).toContain("Renewer: present");
+	});
 });
 
 describe("grokbot sand-host client parity", () => {

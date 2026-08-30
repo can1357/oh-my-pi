@@ -49,9 +49,19 @@ function formatGrokbotStatusValue(value: string): string {
 	return truncateToWidth(cleaned, TRUNCATE_LENGTHS.TITLE);
 }
 
+export type FormatGrokbotStatusOptions = {
+	/**
+	 * Effective renewal credential from AuthStorage / `providers.grokbot.apiKey`
+	 * / runtime `--api-key`. When present, status reports Renewer as present
+	 * even if env/secrets file are empty.
+	 */
+	renewalCredential?: string;
+};
+
 /** Human-readable status lines for `/grokbot` (no secret values). */
-export async function formatGrokbotStatus(): Promise<string> {
-	const cfg = await loadGrokbotConfig();
+export async function formatGrokbotStatus(options?: FormatGrokbotStatusOptions): Promise<string> {
+	const configured = typeof options?.renewalCredential === "string" ? options.renewalCredential.trim() : "";
+	const cfg = await loadGrokbotConfig(configured || undefined);
 	return [
 		"Grok Bot provider (`grokbot` / `grokbot-sand`) — InferenceService/Stream",
 		"Not the Cursor provider (`cursor` / AgentService/Run) and not xAI / Grok CLI (`xai`, `xai-oauth`).",

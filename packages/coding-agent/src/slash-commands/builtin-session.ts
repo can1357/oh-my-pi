@@ -504,10 +504,12 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		icon: "model",
 		description: "Grok Bot provider status (not Cursor, not xAI/Grok CLI)",
 		handle: async (_command, runtime) => {
-			await runtime.output(await formatGrokbotStatus());
+			const renewalCredential = await runtime.session.modelRegistry.authStorage.peekApiKey("grokbot");
+			await runtime.output(await formatGrokbotStatus({ renewalCredential }));
 		},
 		handleTui: async (_command, runtime) => {
-			runtime.ctx.showStatus(await formatGrokbotStatus());
+			const renewalCredential = await runtime.session.modelRegistry.authStorage.peekApiKey("grokbot");
+			runtime.ctx.showStatus(await formatGrokbotStatus({ renewalCredential }));
 			runtime.ctx.editor.setText("");
 		},
 	},

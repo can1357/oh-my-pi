@@ -8174,7 +8174,7 @@
 				}
 			},
 			{
-				"source": "providers/grokbot.kdl:8",
+				"source": "providers/grokbot.kdl:10",
 				"providers": [
 					"grokbot"
 				],
@@ -8192,6 +8192,15 @@
 						"high",
 						"xhigh"
 					]
+				}
+			},
+			{
+				"source": "providers/grokbot.kdl:5",
+				"providers": [
+					"grokbot"
+				],
+				"catalog": {
+					"preserveAuthoredThinking": true
 				}
 			},
 			{

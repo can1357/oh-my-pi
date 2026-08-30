@@ -10,6 +10,7 @@
 ### Fixed
 
 - Grok Bot bare-wire routing follows catalog `sandParameterIds` / `sandMaxMode` instead of a hard-coded model-id set.
+- `/grokbot` reports Renewer present when the credential comes from `providers.grokbot.apiKey` or a runtime API-key override.
 - Grok Bot pairs tool-result wire names with the historical assistant call id when tools/`edit.mode` change after the call.
 - Grok Bot rejects completed tool calls whose arguments are a JSON array instead of an object.
 - Grok Bot honors `acceptEmptyResponse` so passive/zero-output callers can accept trailer-only completions.

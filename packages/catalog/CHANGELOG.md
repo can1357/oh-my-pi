@@ -10,6 +10,7 @@
 
 ### Fixed
 
+- Grok Bot generator preserves authored thinking via KDL `preserve-authored-thinking` instead of a TypeScript provider/API branch.
 - Grok Bot offline `grok-4.6` effort ladder comes from provider KDL via `buildModel`, not a TypeScript per-id seed branch.
 - Grok Bot AvailableModels does not invent low/medium/high/xhigh when upstream effort values are all unrecognized.
 - Grok Bot AvailableModels aliases include `variants[].legacySlug` so saved legacy selectors still resolve.

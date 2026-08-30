@@ -9,6 +9,7 @@
 ### Fixed
 
 - Grok Bot discovery merges `models.yml` and runtime provider headers (a baseUrl-only runtime override no longer drops configured proxy/tenant headers).
+- `/grokbot` includes configured AuthStorage renewal credentials (`providers.grokbot.apiKey` / `--api-key`) when reporting Renewer status.
 - Credential-scoped startup model caches prefer `providers.*.apiKey` / runtime `--api-key` over environment credentials (same order as AuthStorage.peekApiKey).
 - Credential-scoped startup model caches (including Grok Bot) warm from `providers.*.apiKey` in `models.yml`, not only from environment credentials.
 - Grok Bot warm-start cache load uses the renewer-scoped cache id (env/secrets credential + identity) so previously discovered models are visible before async refresh.

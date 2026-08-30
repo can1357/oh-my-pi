@@ -3,6 +3,8 @@
 // from neutral seeds instead of TypeScript per-id branches.
 
 provider "grokbot" {
+	// AvailableModels / seed-owned ladders must survive generate-models rebake.
+	preserve-authored-thinking #true
 	// Static offline seed for grok-4.6 advertises the sand effort dial
 	// (low..xhigh). Live AvailableModels may narrow this via explicit thinking.
 	models "grok-4.6*" {

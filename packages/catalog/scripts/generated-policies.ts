@@ -119,10 +119,9 @@ export function rebakeModelThinking(model: ModelSpec<Api>): void {
 	}
 	if (model.provider === "cline-pass" && model.thinking) return;
 	if (model.provider === "openrouter" && model.thinking?.requiresEffort === true) return;
-	// Grok Bot: AvailableModels / provider KDL own the effort surface. Clearing
-	// thinking and re-deriving would either invent a ladder for reasoning
-	// routers (`sand-default`) or drop live ladders (`grok-4.6` + xhigh).
-	if (model.provider === "grokbot" || model.api === "grokbot-sand") return;
+	// Resolved KDL catalog fact (`preserve-authored-thinking`): skip rebake so
+	// AvailableModels / seed-owned ladders are not cleared or re-invented.
+	if (resolveModelPolicy(model).catalog.preserveAuthoredThinking === true) return;
 	const requiresProviderAuthoredEffort =
 		model.provider === "umans" && (model.thinking?.requiresEffort === true || model.id === "umans-kimi-k2.7");
 	const thinking = resolveModelPolicy({ ...model, thinking: undefined }).thinking;
