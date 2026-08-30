@@ -318,6 +318,8 @@ describe.skipIf(!hasPtyHarness)("interactive startup changelog PTY smoke", () =>
 						stderr: "pipe",
 						env: {
 							...process.env,
+							// The nested CLI must exercise production terminal behavior.
+							PI_TEST_RUNTIME: "0",
 							HOME: root,
 							XDG_CONFIG_HOME: path.join(root, "xdg-config"),
 							XDG_STATE_HOME: path.join(root, "xdg-state"),

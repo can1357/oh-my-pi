@@ -55,7 +55,7 @@ Supported frontmatter fields on the skill type:
 - `description?: string`
 - `globs?: string[]`
 - `alwaysApply?: boolean`
-- `hide?: boolean`
+- `hide?: boolean` (author-controlled model visibility; `true` keeps the skill loaded but omits it from the model prompt)
 - `disableModelInvocation?: boolean` (Agent Skills equivalent of `hide`; normalized from kebab-case `disable-model-invocation`)
 - additional keys are preserved as unknown metadata
 
@@ -105,6 +105,7 @@ Dedup key is skill name. First item with a given name wins.
 - `disabledExtensions` entries with `skill:<name>`
 - `ignoredSkills` (exclude; glob patterns)
 - `includeSkills` (include allowlist; glob patterns; empty means include all)
+- `skills.optInSkills` (name-glob list; matched skills remain loaded but are hidden from the model prompt)
 
 Filter order is:
 
@@ -112,6 +113,8 @@ Filter order is:
 2. source enabled
 3. not ignored
 4. included (if include list present)
+
+`skills.optInSkills` is not a removal filter. After provider, custom-directory, and managed-skill discovery and name deduplication are complete, its Bun-style glob patterns are matched against each final resolved skill name. Matches are marked hidden from the model prompt but remain loaded and accessible through `skill://<name>` and `/skill:<name>`.
 
 The `agents` provider (`.agent[s]/skills`) is the canonical OMP-native location and has its own `enableAgentsUser`/`enableAgentsProject` toggles — disabling Claude/Codex/Pi does **not** turn it off. Providers without a dedicated toggle (`claude-plugins`, `opencode`, `github`, …) are enabled if **any** named third-party source toggle is enabled.
 
