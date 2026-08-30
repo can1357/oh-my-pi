@@ -8,7 +8,7 @@ import { createMockModel, type MockResponseSource, registerMockApi } from "@oh-m
 import { $ } from "bun";
 import { ModelRegistry } from "../../src/config/model-registry";
 import { Settings } from "../../src/config/settings";
-import type { createAgentSession } from "../../src/sdk";
+import type { CreateAgentSessionResult } from "../../src/sdk";
 import * as sdkModule from "../../src/sdk";
 import * as securityModule from "../../src/security";
 import {
@@ -21,6 +21,7 @@ import {
 } from "../../src/security";
 import { SessionManager } from "../../src/session/session-manager";
 import type { ToolSession } from "../../src/tools";
+import { SecurityScanTool } from "../../src/tools/security-scan";
 
 const MOCK_SOURCE_ID = "security-coordinator-test";
 let temporaryRoot = "";
@@ -416,7 +417,7 @@ describe("native security coordinator", () => {
 						dispose: async () => undefined,
 					},
 					extensionsResult: {},
-				} as unknown as Awaited<ReturnType<typeof createAgentSession>>;
+				} as unknown as CreateAgentSessionResult;
 			});
 			try {
 				const plan = await coordinator.preflight({ credentialId, model: mock.model });
@@ -435,7 +436,6 @@ describe("native security coordinator", () => {
 		// silently revert scan sessions to non-isolated (the regression this
 		// round fixes). The spy sits at the host factory, past the session's
 		// own ToolSession surface.
-		const { SecurityScanTool } = await import("../../src/tools/security-scan");
 		for (const isIsolated of [true, false]) {
 			const session = {
 				cwd: repositoryRoot,
