@@ -141,6 +141,15 @@ export interface Usage {
 		webSearch?: number;
 		webFetch?: number;
 	};
+	/** Provider-reported credit meter values for credit-based billing APIs. */
+	credits?: {
+		/** Uncommitted per-response credit cost, when reported. */
+		cost?: number;
+		/** Final committed credit cost, when reported. */
+		committedCost?: number;
+		/** Final committed ACU cost, when reported. */
+		acuCost?: number;
+	};
 	cost: {
 		input: number;
 		output: number;
@@ -164,6 +173,7 @@ export type OpenAIReasoningDisableMode =
 	| "lowest-effort"
 	| "none-effort"
 	| "openrouter-enabled-false"
+	| "cline-enabled-false"
 	| "venice-disable-thinking"
 	| "zai-thinking-disabled"
 	| "qwen-enable-thinking-false"
@@ -315,6 +325,14 @@ export interface OpenAICompat {
 	openRouterRouting?: OpenRouterRouting;
 	/** Vercel AI Gateway routing preferences. Only used when baseUrl points to Vercel AI Gateway. */
 	vercelGatewayRouting?: VercelGatewayRouting;
+	/**
+	 * Provider-specific wire model-id transform applied to the base id, overriding
+	 * the provider-detected default. Discovery layers set this per model when the
+	 * upstream roster declares the id's namespace (e.g. ClinePass free-tier models
+	 * arrive pre-namespaced and use `"raw"`), so wire form follows data rather
+	 * than id shape.
+	 */
+	wireModelIdMode?: "raw" | "cline-pass" | "firepass" | "fireworks" | "openrouter";
 	/** Extra fields to include in request body (e.g. gateway routing hints for OpenClaw-style proxies). */
 	extraBody?: Record<string, unknown>;
 	/** Request-session header that should mirror the normalized prompt-cache key. Default: unset. */
@@ -651,7 +669,7 @@ export interface ResolvedOpenAISharedCompat {
 	alwaysSendMaxTokens: boolean;
 	openRouterRouting?: OpenAICompat["openRouterRouting"];
 	/** Provider-specific wire model-id transform applied to the base id. */
-	wireModelIdMode: "raw" | "firepass" | "fireworks" | "openrouter";
+	wireModelIdMode: "raw" | "cline-pass" | "firepass" | "fireworks" | "openrouter";
 	/** See {@link OpenAICompat.toolSchemaFlavor}. Read by both wire paths when converting tools. */
 	toolSchemaFlavor?: OpenAICompat["toolSchemaFlavor"];
 }
@@ -792,6 +810,13 @@ export interface DevinCompat {
 	 * effort) instead of a fabricated minimal/low/medium/high ladder.
 	 */
 	trustExplicitThinkingOnly?: boolean;
+	/**
+	 * Server-side router model. Providers must resolve the router through
+	 * `AssignModel` and send the returned assignment JWT with the chat request.
+	 */
+	modelRouter?: boolean;
+	/** Whether the upstream model supports native parallel tool calls. */
+	supportsParallelToolCalls?: boolean;
 }
 
 /** Fully-resolved devin-agent compat view. */
@@ -993,6 +1018,17 @@ export interface Model<TApi extends Api = Api> {
 	remoteCompaction?: RemoteCompactionConfig<TApi>;
 	/** Provider-assigned priority value (lower = higher priority). */
 	priority?: number;
+	/**
+	 * Provider-supplied one-line blurb for this model. Set only when an upstream
+	 * ships one (Devin's `GetCliModelConfigs`); never synthesized locally.
+	 */
+	description?: string;
+	/** Upstream marks this model as newly released. */
+	isNew?: boolean;
+	/** Upstream marks this model as beta / preview quality. */
+	isBeta?: boolean;
+	/** Upstream marks this model as one of its recommended picks. */
+	isRecommended?: boolean;
 	/** Canonical thinking capability metadata for this model. */
 	thinking?: ThinkingConfig;
 	/**

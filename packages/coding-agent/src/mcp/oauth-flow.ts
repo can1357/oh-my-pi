@@ -11,6 +11,7 @@ import type { OAuthController, OAuthCredentials } from "@oh-my-pi/pi-ai/oauth/ty
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
 import { getActiveProfile } from "@oh-my-pi/pi-utils/dirs";
 import type { OAuthCredential } from "../session/auth-storage";
+import { buildWellKnownUrls } from "./oauth-discovery";
 
 /** Credential-id prefix for OMP-managed MCP OAuth credentials keyed by profile and server URL. */
 const MCP_OAUTH_URL_CREDENTIAL_PREFIX = "mcp_oauth:";
@@ -210,7 +211,7 @@ function staticClientIdFromConfig(config: MCPOAuthConfig): string | undefined {
 	const fromConfig = config.clientId?.trim();
 	if (fromConfig) return fromConfig;
 	try {
-		return new URL(config.authorizationUrl).searchParams.get("client_id") ?? undefined;
+		return new URL(config.authorizationUrl).searchParams.get("client_id")?.trim() || undefined;
 	} catch {
 		return undefined;
 	}
@@ -298,6 +299,8 @@ export interface MCPOAuthConfig {
 	authorizationUrl: string;
 	/** Token endpoint URL */
 	tokenUrl: string;
+	/** Authorization-server issuer URL used for metadata discovery. */
+	issuerUrl?: string;
 	/** Dynamic client registration endpoint advertised by the authorization server. */
 	registrationUrl?: string;
 	/** Client ID (optional when already embedded in authorization URL) */
@@ -422,8 +425,12 @@ export class MCPOAuthFlow extends OAuthCallbackFlow {
 			params.set("response_type", "code");
 		}
 		const existingClientId = params.get("client_id")?.trim();
-		if (this.#resolvedClientId && !existingClientId) {
+		if (this.#resolvedClientId) {
 			params.set("client_id", this.#resolvedClientId);
+		} else if (existingClientId) {
+			params.set("client_id", existingClientId);
+		} else {
+			params.delete("client_id");
 		}
 		if (this.config.scopes && !params.get("scope")) {
 			params.set("scope", this.config.scopes);
@@ -641,8 +648,9 @@ export class MCPOAuthFlow extends OAuthCallbackFlow {
 				client_secret?: string;
 			};
 
-			if (data.client_id && data.client_id.trim() !== "") {
-				this.#resolvedClientId = data.client_id;
+			const clientId = data.client_id?.trim();
+			if (clientId) {
+				this.#resolvedClientId = clientId;
 			}
 			if (data.client_secret && data.client_secret.trim() !== "") {
 				this.#registeredClientSecret = data.client_secret;
@@ -659,35 +667,16 @@ export class MCPOAuthFlow extends OAuthCallbackFlow {
 	}
 
 	async #resolveRegistrationEndpoint(): Promise<string | null> {
-		const authorizationUrl = new URL(this.config.authorizationUrl);
-
-		// origin-root well-known; most servers serve metadata here.
-		const rootUrl = new URL("/.well-known/oauth-authorization-server", authorizationUrl.origin).toString();
-		const endpoint = await this.#tryWellKnownForRegistration(rootUrl);
-		if (endpoint) return endpoint;
-
-		// path-prefixed well-known for gateways (e.g. https://gateway.example.com/my-service/).
-		const normalizedPath = authorizationUrl.pathname.replace(/\/$/, "");
-		const lastSlash = normalizedPath.lastIndexOf("/");
-		// Bare-origin authorization URL — nothing further to try.
-		if (lastSlash < 0) return null;
-
-		// Single-segment paths are the gateway prefix itself; multi-segment paths
-		// drop the trailing segment (typically a service endpoint).
-		const prefixPath = lastSlash === 0 ? normalizedPath : normalizedPath.slice(0, lastSlash);
-		const prefixedUrl = new URL(
-			".well-known/oauth-authorization-server",
-			`${authorizationUrl.origin}${prefixPath}/`,
-		).toString();
-		const prefixedEndpoint = await this.#tryWellKnownForRegistration(prefixedUrl);
-		if (prefixedEndpoint) return prefixedEndpoint;
-
-		// RFC 8414 §3.1 path-ful issuer form: /.well-known/oauth-authorization-server/<path>.
-		const pathfulUrl = new URL(
-			`/.well-known/oauth-authorization-server${normalizedPath}`,
-			authorizationUrl.origin,
-		).toString();
-		return await this.#tryWellKnownForRegistration(pathfulUrl);
+		const candidates = buildWellKnownUrls(
+			"/.well-known/oauth-authorization-server",
+			this.config.issuerUrl ?? this.config.authorizationUrl,
+			this.config.issuerUrl !== undefined,
+		);
+		for (const url of candidates) {
+			const endpoint = await this.#tryWellKnownForRegistration(url.toString());
+			if (endpoint) return endpoint;
+		}
+		return null;
 	}
 
 	async #tryWellKnownForRegistration(wellKnownUrl: string): Promise<string | null> {
@@ -816,7 +805,8 @@ export async function refreshMCPOAuthToken(
 		grant_type: "refresh_token",
 		refresh_token: refreshToken,
 	});
-	if (clientId) params.set("client_id", clientId);
+	const normalizedClientId = clientId?.trim();
+	if (normalizedClientId) params.set("client_id", normalizedClientId);
 	// Drop redundant indicators so refresh stays consistent with the initial
 	// grant; see {@link filterResourceIndicator} for context.
 	const resolvedResource = filterResourceIndicator(resolveResourceUri(resource), filterAnchor, {

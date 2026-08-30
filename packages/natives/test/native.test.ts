@@ -99,6 +99,14 @@ describe("countTokens", () => {
 		expect(countTokens("hello world", Encoding.O200kBase)).toBe(2);
 		expect(countTokens(["hello world", "hello world"], Encoding.O200kBase)).toBe(4);
 	});
+
+	it("round-trips every Encoding through the local addon", () => {
+		for (const encoding of Object.values(Encoding)) {
+			const n = countTokens("hello", encoding);
+			expect(typeof n).toBe("number");
+			expect(n).toBeGreaterThan(0);
+		}
+	});
 });
 
 async function cleanupFixtures() {

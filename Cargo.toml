@@ -9,6 +9,7 @@ members = [
    "crates/pi-iso",
    "crates/pi-natives",
    "crates/pi-shell",
+   "crates/pi-vcs",
    "crates/pi-voice",
    "crates/pi-walker",
    "crates/vendor/brush-core",
@@ -16,7 +17,7 @@ members = [
 resolver = "3"
 
 [workspace.package]
-version = "18.0.8"
+version = "18.0.11"
 edition = "2024"
 license = "MIT"
 authors = ["Stencil Labs, Inc."]
@@ -184,6 +185,10 @@ verbose_bit_mask = "allow"   # Explicit bit patterns can be clearer than hex
 # ──────────────────────────────────────────────────────────────────────────────
 default_trait_access = "allow"        # Default::default() sometimes clearer
 significant_drop_tightening = "allow" # We pay attention to this already
+# ──────────────────────────────────────────────────────────────────────────────
+# Tests & Assertions
+# ──────────────────────────────────────────────────────────────────────────────
+assert_is_empty = "allow" # `is_empty()` states intent without brittle type annotations
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Documentation
@@ -207,6 +212,7 @@ pi-iso = { path = "crates/pi-iso" }
 pi-shell = { path = "crates/pi-shell" }
 pi-voice = { path = "crates/pi-voice" }
 pi-walker = { path = "crates/pi-walker" }
+pi-vcs = { path = "crates/pi-vcs" }
 brush-core = { path = "crates/vendor/brush-core" }
 pi-builtins = { path = "crates/pi-builtins" }
 
@@ -234,6 +240,7 @@ toml = "1.1"
 # Error Handling
 # ──────────────────────────────────────────────────────────────────────────────
 anyhow = "1.0"
+thiserror = "2"
 bytes = "1"
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -358,6 +365,29 @@ tiktoken-rs = "0.11"
 # Shell Parsing
 # ──────────────────────────────────────────────────────────────────────────────
 brush-parser = "0.3"
+# ──────────────────────────────────────────────────────────────────────────────
+# Version Control (in-process git + jujutsu)
+# ──────────────────────────────────────────────────────────────────────────────
+# gix is pinned to the minor jj-lib depends on so both VCS backends share one
+# gitoxide stack in the binary. No transport/credential features: network ops
+# (clone/fetch/push) deliberately shell out to the git CLI for auth parity.
+gix = { version = "0.85", default-features = false, features = [
+   "attributes",
+   "blob-diff",
+   "dirwalk",
+   "excludes",
+   "index",
+   "max-performance-safe",
+   "merge",
+   "revision",
+   "sha1",
+   "sha256",
+   "status",
+   "tree-editor",
+   "worktree-mutation",
+   "zlib-rs",
+] }
+jj-lib = { version = "0.44", default-features = false, features = ["git"] }
 
 # ──────────────────────────────────────────────────────────────────────────────
 # AST & Tree-Sitter

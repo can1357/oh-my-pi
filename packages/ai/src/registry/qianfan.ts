@@ -17,6 +17,7 @@ export const loginQianfan = createApiKeyLogin({
 		provider: "qianfan",
 		baseUrl: API_BASE_URL,
 		model: VALIDATION_MODEL,
+		tolerateModelDenied: true,
 	},
 });
 

@@ -4,6 +4,7 @@
  * `generate-models.ts` — none of this ships in the runtime bundle.
  */
 import { buildCompat } from "../src/build";
+import { resolveCursorInput } from "../src/discovery/cursor";
 import {
 	type AnthropicModel,
 	bareModelId,
@@ -191,6 +192,7 @@ export function rebakeModelThinking(model: ModelSpec<Api>): void {
 	) {
 		return;
 	}
+	if (model.provider === "cline-pass" && model.thinking) return;
 	if (model.provider === "openrouter" && model.thinking?.requiresEffort === true) return;
 	const requiresProviderAuthoredEffort =
 		model.provider === "umans" && (model.thinking?.requiresEffort === true || model.id === "umans-kimi-k2.7");
@@ -332,6 +334,9 @@ export function applyOllamaCloudOutputCap(models: ModelSpec<Api>[]): void {
 }
 
 function applyGeneratedModelPolicy(model: ModelSpec<Api>): void {
+	if (model.provider === "cursor") {
+		model.input = resolveCursorInput(model.id, model.input);
+	}
 	if ((model.provider === "xai" || model.provider === "xai-oauth") && model.api === "openai-responses") {
 		const updated = applyXaiResponsesThinkingPolicy(model as ModelSpec<"openai-responses">);
 		model.compat = updated.compat;
@@ -352,19 +357,33 @@ function applyGeneratedModelPolicy(model: ModelSpec<Api>): void {
 
 	// GLM Coding Plan: the selectable 1M-context served ids; pin them so
 	// endpoint discovery or older bundled fallbacks cannot regress to 200k.
-	// GLM-5.3 succeeds GLM-5.2 with the same 1M context window.
+	// GLM-5.3 succeeds GLM-5.2 with the same 1M context window, and
+	// GLM-5.3-Flash shares the tier while adding native image input that
+	// upstream metadata still reports as text-only.
 	if (
 		(model.provider === "zai" || model.provider === "zhipu-coding-plan") &&
-		(model.id === "glm-5.2" || model.id === "glm-5.3")
+		(model.id === "glm-5.2" || model.id === "glm-5.3" || model.id === "glm-5.3-flash")
 	) {
 		model.contextWindow = 1_000_000;
 		model.maxTokens = 131_072;
+		if (model.id === "glm-5.3-flash") {
+			model.input = ["text", "image"];
+			// Stencil.so now lists glm-5.3-flash at the 50%-off launch promotion
+			// (expires 2026-09-09) and its row wins dedup over the generator seed.
+			// Keep the permanent catalog on the documented list price from
+			// https://docs.z.ai/guides/overview/pricing; coding-plan providers
+			// stay on their subscription (zero-cost) rows.
+			if (model.provider === "zai") {
+				model.cost = { input: 0.15, output: 0.5, cacheRead: 0.03, cacheWrite: 0 };
+			}
+		}
 	}
 	// MiniMax-M3: 512K is the standard pricing tier boundary, not the
 	// model ceiling. Pin every long-context provider that serves the model
 	// (anthropic-messages `minimax`/`minimax-cn` and the openai-completions
 	// MiniMax Coding/Token Plan endpoints `minimax-code`/`minimax-code-cn`)
-	// to the documented 1M tier.
+	// to the documented 1M tier. Upstream also leaks the same 512K boundary
+	// into `max_output_tokens`; the documented output cap is 128K.
 	if (
 		model.id === "MiniMax-M3" &&
 		(model.provider === "minimax" ||
@@ -373,6 +392,7 @@ function applyGeneratedModelPolicy(model: ModelSpec<Api>): void {
 			model.provider === "minimax-code-cn")
 	) {
 		model.contextWindow = 1_000_000;
+		model.maxTokens = 128_000;
 	}
 
 	if (

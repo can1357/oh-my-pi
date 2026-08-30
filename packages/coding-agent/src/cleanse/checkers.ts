@@ -1,7 +1,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { $which, isRecord, ptree, sanitizeText } from "@oh-my-pi/pi-utils";
-import * as git from "../utils/git";
 import { CLEANSE_PARSER_KINDS, type CleanseParserKind, parseCleanseDiagnostics } from "./parsers";
 import type { CleanseCheckResult, CleanseDiagnostic, CleanseDiagnosticReport, SkippedCleanseCheck } from "./types";
 
@@ -276,7 +276,11 @@ function normalizeCustomRoot(projectCwd: string, cwd: string | undefined): strin
 
 async function listProjectFiles(cwd: string): Promise<string[]> {
 	try {
-		const [tracked, untracked] = await Promise.all([git.ls.files(cwd), git.ls.untracked(cwd)]);
+		const repository = vcs.require(cwd);
+		const [tracked, untracked] = await Promise.all([
+			repository.lsFiles(false, false),
+			repository.lsFiles(true, true),
+		]);
 		return normalizeFiles([...tracked, ...untracked]);
 	} catch {
 		const files: string[] = [];

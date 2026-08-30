@@ -12,6 +12,7 @@ import {
 	type ComposerChromeContext,
 	type EditorTopBorder,
 	getComposerStyle,
+	isFilledComposerStyle,
 	padding,
 	truncateToWidth,
 	visibleWidth,
@@ -27,6 +28,8 @@ import { theme } from "../theme/theme";
 export interface ComposerPreviewStatusSource {
 	/** Powerline bar with the context gauge (box top border content). */
 	getTopBorder(width: number, previewTitle?: string): { content: string; width: number };
+	/** Flush soft-capped powerline band (band composer top row). */
+	getBandTopBorder(width: number, previewTitle?: string): { content: string; width: number };
 	/** Plain right-group chip (claude top rule content). */
 	getStandaloneTopBorder(width: number, previewTitle?: string): { content: string; width: number };
 	/** Plain standalone bottom bar carrying the given segment groups. */
@@ -55,6 +58,8 @@ export function renderComposerShapePreview(
 	if (status) {
 		if (style.statusAttachment === "top-border") {
 			topBorder = status.getTopBorder(Math.max(1, previewWidth - chromeWidth * 2), PREVIEW_TITLE);
+		} else if (style.statusAttachment === "top-band") {
+			topBorder = status.getBandTopBorder(previewWidth, PREVIEW_TITLE);
 		} else if (style.statusAttachment === "top-rule-chip") {
 			topBorder = status.getStandaloneTopBorder(previewWidth, PREVIEW_TITLE);
 		}
@@ -65,7 +70,8 @@ export function renderComposerShapePreview(
 		paddingX,
 		borderColor: (str: string) => theme.fg("borderAccent", str),
 		accentColor: (str: string) => theme.fg("accent", str),
-		surfaceColor: (str: string) => theme.bgFill("userMessageBg", str),
+		surfaceColor: (str: string) =>
+			theme.bgFill("userMessageBg", theme.fgOnBg("userMessageText", "userMessageBg", str)),
 		box: theme.boxRound,
 		topBorder,
 	};
@@ -73,7 +79,11 @@ export function renderComposerShapePreview(
 	const gutter = style.defaultPromptGutter ?? "";
 	const contentWidth = Math.max(1, previewWidth - chromeWidth * 2 - visibleWidth(gutter));
 	const promptText = truncateToWidth("Ask anything, edit files, run tools", Math.max(1, contentWidth - 1));
-	const text = `${theme.fg("text", promptText)}${theme.inverse(" ")}`;
+	// Mirror the live editor: filled shapes let `surfaceColor` paint their own
+	// foreground, while transparent shapes resolve `text` to a contrast-safe
+	// color so an empty token never falls back to the terminal default.
+	const promptRow = `${promptText}${theme.inverse(" ")}`;
+	const text = isFilledComposerStyle(style) ? promptRow : theme.fgResolved("text", promptRow);
 	const pad = padding(Math.max(0, contentWidth - visibleWidth(promptText) - 1));
 	const styledGutter = gutter ? theme.fg("accent", gutter) : "";
 
@@ -109,7 +119,7 @@ export class ComposerShapePreview implements Component {
 	#shape: ComposerShape;
 	#options: ComposerShapePreviewOptions;
 
-	constructor(initialValue: ComposerShape = "box", options: ComposerShapePreviewOptions = {}) {
+	constructor(initialValue: ComposerShape = "band", options: ComposerShapePreviewOptions = {}) {
 		this.#shape = initialValue;
 		this.#options = options;
 	}

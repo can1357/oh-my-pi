@@ -117,6 +117,24 @@ describe("zai oauth flow", () => {
 		expect(authUrl.searchParams.get("code_challenge_method")).toBeNull();
 	});
 
+	it("rejects an occupied fixed callback port before opening the browser", async () => {
+		const serveSpy = vi.spyOn(Bun, "serve").mockImplementation(() => {
+			throw Object.assign(new Error("EADDRINUSE"), { code: "EADDRINUSE" });
+		});
+		const onAuth = vi.fn();
+		const flow = new ZaiOAuthFlow({ onAuth });
+
+		const error = await flow.login().catch((caught: unknown) => caught);
+
+		expect(error).toBeInstanceOf(AIError.ConfigurationError);
+		if (!(error instanceof AIError.ConfigurationError)) throw error;
+		expect(error.message).toContain(
+			"OAuth callback port 54548 is in use. The OAuth provider validates redirect URIs",
+		);
+		expect(onAuth).not.toHaveBeenCalled();
+		expect(serveSpy.mock.calls.every(([options]) => options.port === 54548)).toBe(true);
+	});
+
 	it("exchanges the code, does business-login, then mints an id.secret key (create path)", async () => {
 		const { fetchMock, requests } = makeBizFetch();
 		const flow = new ZaiOAuthFlow({ fetch: fetchMock as unknown as typeof fetch });

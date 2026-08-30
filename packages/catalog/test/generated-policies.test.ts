@@ -344,6 +344,66 @@ describe("generated model policies", () => {
 		}
 	});
 
+	it("pins zai glm-5.3-flash to the 1M tier and restores its native image input", () => {
+		const models = [
+			createSpec({
+				id: "glm-5.3-flash",
+				api: "anthropic-messages",
+				provider: "zai",
+				contextWindow: 200_000,
+				maxTokens: 8192,
+			}),
+			createSpec({
+				id: "glm-5.3-flash",
+				api: "openai-completions",
+				provider: "zhipu-coding-plan",
+				contextWindow: 200_000,
+				maxTokens: 8192,
+			}),
+		];
+
+		applyGeneratedModelPolicies(models);
+
+		for (const model of models) {
+			expect(model.contextWindow).toBe(1_000_000);
+			expect(model.maxTokens).toBe(131_072);
+			// Natively multimodal despite the missing `v` marker; upstream
+			// metadata reports the flash SKU as text-only.
+			expect(model.input).toEqual(["text", "image"]);
+			// Same mandatory low/high/max ladder as the GLM-5.3 base line.
+			expect(model.thinking?.efforts).toEqual([Effort.Low, Effort.High, Effort.Max]);
+			expect(model.thinking?.requiresEffort).toBe(true);
+			expect(model.thinking?.defaultLevel).toBe(Effort.Max);
+		}
+	});
+
+	it("bakes verified Cursor image families into the offline catalog", () => {
+		const verifiedIds = [
+			"kimi-k3-high",
+			"kimi-k3-low",
+			"kimi-k3-max",
+			"cursor-grok-4.5",
+			"cursor-grok-4.5-fast",
+			"cursor-grok-4.6",
+			"cursor-grok-4.6-fast",
+			"composer-2.5",
+			"composer-2.5-fast",
+		];
+		const unverifiedIds = ["cursor-grok-5", "composer-2.50", "k3-256k"];
+		const models = [...verifiedIds, ...unverifiedIds].map(id =>
+			createSpec({ id, api: "cursor-agent", provider: "cursor" }),
+		);
+
+		applyGeneratedModelPolicies(models);
+
+		for (const model of models.slice(0, verifiedIds.length)) {
+			expect(model.input).toEqual(["text", "image"]);
+		}
+		for (const model of models.slice(verifiedIds.length)) {
+			expect(model.input).toEqual(["text"]);
+		}
+	});
+
 	it("pins MiniMax-M3 long-context providers to 1M context", () => {
 		const models = [
 			createSpec({

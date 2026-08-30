@@ -148,6 +148,9 @@ export function resolveModelThinking<TApi extends Api>(
 	compat: CompatOf<TApi>,
 ): ThinkingConfig | undefined {
 	if (!spec.reasoning) return undefined;
+	if (spec.provider === "cline-pass" && (compat as ResolvedOpenAICompat).supportsReasoningEffort === false) {
+		return undefined;
+	}
 	if (omitsWireReasoningEffort(spec.api, compat)) return undefined;
 	if (spec.thinking && Array.isArray(spec.thinking.efforts) && spec.thinking.efforts.length > 0) {
 		return fillThinkingWireDefaults(spec, compat, spec.thinking);
@@ -174,7 +177,8 @@ function fillThinkingWireDefaults<TApi extends Api>(
 	thinking: ThinkingConfig,
 ): ThinkingConfig {
 	const parsed = parseKnownModel(spec.id);
-	const normalizedEfforts = getModelDefinedEfforts(spec, compat) ?? thinking.efforts;
+	const normalizedEfforts =
+		spec.provider === "cline-pass" ? thinking.efforts : (getModelDefinedEfforts(spec, compat) ?? thinking.efforts);
 	const effortsChanged = !sameEffortList(normalizedEfforts, thinking.efforts);
 	const effortMap =
 		thinking.effortMap === undefined || effortsChanged
@@ -429,11 +433,14 @@ function getModelDefinedEfforts<TApi extends Api>(
 		if (isDeepseekV4FlashModelId(spec.id)) {
 			return LOW_HIGH_MAX_REASONING_EFFORTS;
 		}
-		if (bareModelId(spec.id).toLowerCase().includes("deepseek-v4")) {
+		const bareId = bareModelId(spec.id).toLowerCase();
+		if (bareId.includes("deepseek-v4")) {
 			if (!isOpenRouterThinkingFormat(compat)) {
 				return LOW_HIGH_MAX_REASONING_EFFORTS;
 			}
-			return bareModelId(spec.id).toLowerCase() === "deepseek-v4-pro-0813"
+			// Route suffixes are OpenRouter-specific and not part of the model identity.
+			const openRouterBaseId = bareId.replace(/:[^:]+$/, "");
+			return openRouterBaseId === "deepseek-v4-pro-0813"
 				? LOW_HIGH_MAX_REASONING_EFFORTS
 				: HIGH_ONLY_REASONING_EFFORTS;
 		}

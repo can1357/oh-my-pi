@@ -676,6 +676,18 @@ export function setTerminalTextSizing(enabled: boolean): void {
 	TERMINAL.textSizing = enabled;
 }
 
+/**
+ * Override OSC 8 hyperlink capability at runtime. The coding-agent calls this
+ * from the `tui.hyperlinks` setting so its resolved policy (`off`/`auto`/`always`)
+ * drives every renderer that gates on {@link TERMINAL}`.hyperlinks` — notably the
+ * Markdown component's `[text](url)`/bare-URL links — consistently with the
+ * path/resource links that already consult the setting directly. Tests flip it
+ * to exercise the OSC 8 and plain-text paths deterministically.
+ */
+export function setTerminalHyperlinks(enabled: boolean): void {
+	TERMINAL.hyperlinks = enabled;
+}
+
 export function getTerminalInfo(
 	terminalId: TerminalId,
 	platform: NodeJS.Platform = process.platform,
