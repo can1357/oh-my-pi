@@ -59,6 +59,10 @@ export type RGB = readonly [number, number, number];
 
 export interface SegmentContext {
 	session: AgentSession;
+	/** Deterministic wall clock for previews/tests; production omits it. */
+	now?: Date;
+	/** Deterministic host label for previews/tests; production omits it. */
+	hostname?: string;
 	/** Focused subagent id while the view is proxied at its session, undefined otherwise. */
 	focusedAgentId?: string | undefined;
 	/** Effective `statusLine.sessionAccent`; `false` disables hash-derived accent colors, while `true` or omission enables them. */
@@ -121,6 +125,19 @@ export interface SegmentContext {
 	 * `Date.now() - sessionStart`.
 	 */
 	activeMs: number;
+	/**
+	 * Elapsed ms of the currently-running turn (the open `agent_start` window),
+	 * or null when the agent is idle. Drives the `pi` segment's working
+	 * spinner + turn timer.
+	 */
+	turnElapsedMs: number | null;
+	/**
+	 * Sampled foreground ANSI for the `pi` brand segment — tweened between dim
+	 * gray (idle) and the accent (working) across turn edges (rust omp's
+	 * status-band brand fade). Absent in direct-segment fixtures and previews,
+	 * which fall back to the static dim color.
+	 */
+	brandFgAnsi?: string;
 	git: {
 		branch: string | null;
 		status: { staged: number; unstaged: number; untracked: number } | null;
@@ -136,6 +153,7 @@ export interface SegmentContext {
 	usage: {
 		tier?: string;
 		fiveHour?: { percent: number; resetMinutes?: number };
+		daily?: { percent: number; resetMinutes?: number };
 		sevenDay?: { percent: number; resetHours?: number };
 		monthly?: { percent: number; resetHours?: number };
 	} | null;

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { type Api, Effort, type Model } from "@oh-my-pi/pi-ai";
+import { type Api, Effort, type Model, type ModelSpec } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { DEFAULT_MODEL_PER_PROVIDER } from "@oh-my-pi/pi-catalog/provider-models";
@@ -21,6 +21,7 @@ import {
 	resolveModelOverride,
 	resolveModelRoleValue,
 	resolveModelScope,
+	resolveProviderModelReference,
 } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { DEFAULT_MODEL_ROLE_ALIAS, LEGACY_MODEL_ROLE_ALIAS_PREFIX } from "@oh-my-pi/pi-coding-agent/config/model-roles";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -327,7 +328,9 @@ const openaiGpt55Models: Model<Api>[] = [
 	}),
 ];
 
-function createBedrockDefaultModel(): Model<"bedrock-converse-stream"> {
+function createBedrockDefaultModel(
+	overrides?: Partial<ModelSpec<"bedrock-converse-stream">>,
+): Model<"bedrock-converse-stream"> {
 	return buildModel({
 		id: "us.anthropic.claude-opus-4-8",
 		name: "Claude Opus 4.8 (US)",
@@ -339,6 +342,7 @@ function createBedrockDefaultModel(): Model<"bedrock-converse-stream"> {
 		cost: { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 },
 		contextWindow: 1000000,
 		maxTokens: 128000,
+		...overrides,
 	});
 }
 
@@ -448,6 +452,46 @@ describe("pickDefaultAvailableModel", () => {
 
 		expect(pickDefaultAvailableModel([paid, oauth])?.provider).toBe("xai-oauth");
 		expect(pickDefaultAvailableModel([paid])?.provider).toBe("xai");
+	});
+
+	test("prefers a concretely-authed provider over a sentinel-only ambient provider (issue #9967)", () => {
+		const bedrockDefault = createBedrockDefaultModel();
+		const anthropicDefault = createOpusModel("anthropic", DEFAULT_MODEL_PER_PROVIDER.anthropic, "Claude Opus");
+		// amazon-bedrock leads in catalog/availability order, exactly as
+		// `getAvailable()` returns it when a stray ~/.aws profile makes Bedrock
+		// ambiently "available" alongside a real Anthropic OAuth login.
+		const models = [bedrockDefault, anthropicDefault];
+
+		// Without the credential hint the ambient provider still wins by order —
+		// this is the reported bug (403 on the first turn).
+		expect(pickDefaultAvailableModel(models)?.provider).toBe("amazon-bedrock");
+
+		// With the hint, the provider the user actually signed into wins.
+		const picked = pickDefaultAvailableModel(models, provider => provider === "anthropic");
+		expect(picked?.provider).toBe("anthropic");
+		expect(picked?.id).toBe(DEFAULT_MODEL_PER_PROVIDER.anthropic);
+	});
+
+	test("keeps a sentinel-only provider when it is the only credentialed option", () => {
+		const bedrockDefault = createBedrockDefaultModel();
+		const picked = pickDefaultAvailableModel([bedrockDefault], () => false);
+		expect(picked?.provider).toBe("amazon-bedrock");
+		expect(picked?.id).toBe(DEFAULT_MODEL_PER_PROVIDER["amazon-bedrock"]);
+	});
+
+	test("checks concrete auth once per provider", () => {
+		const bedrockDefault = createBedrockDefaultModel();
+		const secondBedrockModel = createBedrockDefaultModel({ id: "us.anthropic.claude-sonnet-4-6" });
+		const anthropicDefault = createOpusModel("anthropic", DEFAULT_MODEL_PER_PROVIDER.anthropic, "Claude Opus");
+		const checkedProviders: string[] = [];
+
+		const picked = pickDefaultAvailableModel([bedrockDefault, secondBedrockModel, anthropicDefault], provider => {
+			checkedProviders.push(provider);
+			return provider === "anthropic";
+		});
+
+		expect(picked?.provider).toBe("anthropic");
+		expect(checkedProviders).toEqual(["amazon-bedrock", "anthropic"]);
 	});
 });
 
@@ -1586,6 +1630,36 @@ describe("resolveCliModel", () => {
 		expect(offResult.thinkingLevel).toBe("off");
 	});
 
+	test("inherits provider-scoped guardrail, transport, and header overrides onto an ARN model, but not the template's prompt-cache checkpoints", () => {
+		const templateModel = createBedrockDefaultModel({
+			transport: "pi-native",
+			headers: { "X-Custom-Header": "custom-value" },
+			guardrailIdentifier: "arn:aws:bedrock:eu-west-2:123456789012:guardrail/abcd1234",
+			guardrailVersion: "1",
+			guardrailTrace: "enabled",
+		});
+		const profileArn = "arn:aws:bedrock:us-east-2:1234567890:application-inference-profile/company-opus-48";
+
+		const result = resolveCliModel({
+			cliProvider: "amazon-bedrock",
+			cliModel: profileArn,
+			modelRegistry: { getAll: () => [templateModel], getAvailable: () => [templateModel] },
+		});
+
+		expect(result.error).toBeUndefined();
+		expect(result.model?.id).toBe(profileArn);
+		expect(result.model?.transport).toBe("pi-native");
+		expect(result.model?.headers).toEqual({ "X-Custom-Header": "custom-value" });
+		expect(result.model?.guardrailIdentifier).toBe("arn:aws:bedrock:eu-west-2:123456789012:guardrail/abcd1234");
+		expect(result.model?.guardrailVersion).toBe("1");
+		expect(result.model?.guardrailTrace).toBe("enabled");
+
+		// The template's Opus-4.8 id derives explicit prompt-cache checkpoints;
+		// the synthesized ARN model must not borrow that checkpoint policy.
+		expect((templateModel.compat as { promptCacheMode?: string }).promptCacheMode).toBe("explicit");
+		expect((result.model?.compat as { promptCacheMode?: string } | undefined)?.promptCacheMode).toBe("none");
+	});
+
 	test("returns a clear error when there are no models", () => {
 		const registry = { getAll: () => [], getAvailable: () => [] } as unknown as Parameters<
 			typeof resolveCliModel
@@ -2243,5 +2317,105 @@ describe("effort-tier variant aliases", () => {
 	test("consumed X-thinking twins resolve via the grammar fallback", () => {
 		expect(parseModelPattern("venice/kimi-k2-thinking", variantModels).model?.id).toBe("kimi-k2");
 		expect(parseModelPattern("kimi-k2-thinking", variantModels).model?.id).toBe("kimi-k2");
+	});
+});
+
+describe("Devin selector parity", () => {
+	const devinModel = (id: string, overrides: Partial<Model<"devin-agent">> = {}): Model<Api> =>
+		buildModel({
+			id,
+			name: id,
+			api: "devin-agent",
+			provider: "devin",
+			baseUrl: "https://server.codeium.com",
+			reasoning: true,
+			input: ["text", "image"],
+			supportsTools: true,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 200_000,
+			maxTokens: 64_000,
+			...overrides,
+		});
+
+	const devinModels: Model<Api>[] = [
+		devinModel("claude-opus-5", {
+			requestModelId: "claude-opus-5-low",
+			thinking: {
+				mode: "effort",
+				efforts: [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh, Effort.Max],
+				effortRouting: {
+					[Effort.Low]: "claude-opus-5-low",
+					[Effort.XHigh]: "claude-opus-5-xhigh",
+				},
+				requiresEffort: true,
+			},
+		}),
+		// Fuzzy-match decoy: `opus` must not land here.
+		devinModel("claude-opus-4-6"),
+		devinModel("swe-1-7-lightning", {
+			requestModelId: "swe-1-7-lightning-medium",
+			thinking: {
+				mode: "effort",
+				efforts: [Effort.Medium, Effort.Max],
+				effortRouting: {
+					[Effort.Medium]: "swe-1-7-lightning-medium",
+					[Effort.Max]: "swe-1-7-lightning",
+				},
+				defaultLevel: Effort.Medium,
+				requiresEffort: true,
+			},
+		}),
+		devinModel("gemini-3-7-flash", {
+			requestModelId: "gemini-3-7-flash-medium",
+			thinking: {
+				mode: "effort",
+				efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High],
+				effortRouting: {
+					[Effort.Medium]: "gemini-3-7-flash-medium",
+					[Effort.High]: "gemini-3-7-flash-high",
+				},
+				defaultLevel: Effort.Medium,
+				requiresEffort: true,
+			},
+		}),
+		// A family that only exists in the live catalog: collapsed at discovery
+		// time, so no hand-table alias covers its wire ids.
+		devinModel("claude-mythos-9", {
+			requestModelId: "claude-mythos-9-medium",
+			thinking: {
+				mode: "effort",
+				efforts: [Effort.Medium, Effort.High],
+				effortRouting: {
+					[Effort.Medium]: "claude-mythos-9-medium",
+					[Effort.High]: "claude-mythos-9-high",
+				},
+				requiresEffort: true,
+			},
+		}),
+	];
+
+	test("provider-scoped native aliases beat fuzzy id matches", () => {
+		expect(parseModelPattern("devin/opus", devinModels).model?.id).toBe("claude-opus-5");
+		expect(parseModelPattern("devin/swe", devinModels).model?.id).toBe("swe-1-7-lightning");
+		expect(parseModelPattern("devin/gemini", devinModels).model?.id).toBe("gemini-3-7-flash");
+		const withLevel = parseModelPattern("devin/opus:high", devinModels);
+		expect(withLevel.model?.id).toBe("claude-opus-5");
+		expect(withLevel.thinkingLevel).toBe(Effort.High);
+	});
+
+	test("dotted native spellings resolve to the hyphenated logical id", () => {
+		expect(parseModelPattern("devin/gemini-3.7-flash", devinModels).model?.id).toBe("gemini-3-7-flash");
+		expect(parseModelPattern("devin/swe-1.7-lightning", devinModels).model?.id).toBe("swe-1-7-lightning");
+	});
+
+	test("raw effort-route wire ids resolve to their collapsed model, provider-scoped", () => {
+		expect(resolveProviderModelReference("devin", "claude-mythos-9-high", devinModels)?.id).toBe("claude-mythos-9");
+		expect(resolveProviderModelReference("devin", "gemini-3-7-flash-high", devinModels)?.id).toBe("gemini-3-7-flash");
+		expect(resolveProviderModelReference("openai", "claude-mythos-9-high", devinModels)).toBeUndefined();
+	});
+
+	test("a live raw model still wins over the collapsed carrier routing to it", () => {
+		const withRaw = [...devinModels, devinModel("claude-mythos-9-high")];
+		expect(resolveProviderModelReference("devin", "claude-mythos-9-high", withRaw)?.id).toBe("claude-mythos-9-high");
 	});
 });

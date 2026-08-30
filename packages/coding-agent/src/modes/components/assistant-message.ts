@@ -453,6 +453,19 @@ export class AssistantMessageComponent extends Container {
 		return this.#transcriptStableRows;
 	}
 
+	/**
+	 * Drop every published thinking stable row. Called by the transcript
+	 * container during a visibility-driven destructive replay so the head no
+	 * longer re-emits reasoning captured while thinking was visible. Safe only
+	 * because the paired display reset clears the scrollback those rows occupied
+	 * — see {@link AppendOnlyTranscriptBlock.resetTranscriptStableRows}.
+	 */
+	resetTranscriptStableRows(): void {
+		this.#stableSnapshots = [];
+		this.#transcriptStableRows = [];
+		this.#stableRenderCache.clear();
+	}
+
 	renderTranscriptStableRows(count: number, width: number): readonly string[] {
 		const index = Math.min(Math.trunc(count), this.#stableSnapshots.length);
 		if (index <= 0) return EMPTY_STABLE_RENDER;

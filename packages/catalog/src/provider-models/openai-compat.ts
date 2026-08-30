@@ -1,5 +1,6 @@
 import { USER_AGENT } from "@oh-my-pi/pi-utils";
 import * as logger from "@oh-my-pi/pi-utils/logger";
+import { toClinePassPublicModelId } from "../cline-pass-model-id";
 import { xaiResponsesReasoningEffortMap } from "../compat/openai";
 import {
 	DEFAULT_OPENAI_COMPATIBLE_DISCOVERY_TIMEOUT_MS,
@@ -12,6 +13,7 @@ import { FIREWORKS_FAST_SUFFIX, toFireworksPublicModelId } from "../fireworks-mo
 import { getBundledModelReferenceIndex } from "../identity/bundled";
 import {
 	anthropicModelSupportsThinking,
+	isGlm52ReasoningEffortModelId,
 	isGlmVisionModelId,
 	isGrokReasoningEffortCapable,
 	isKimiK3ModelId,
@@ -21,7 +23,7 @@ import {
 	isReasoningGlmModelId,
 } from "../identity/family";
 import { resolveModelReference } from "../identity/reference";
-import type { ModelManagerOptions } from "../model-manager";
+import type { ModelManagerOptions, ModelsDevFallback } from "../model-manager";
 import { type GeneratedProvider, getBundledModels } from "../models";
 import { OPENAI_GPT_56_CYBER_STANDARD_COST, OPENAI_GPT_56_SOL_STANDARD_COST } from "../openai-pricing";
 import type {
@@ -36,6 +38,8 @@ import type {
 } from "../types";
 import { discoveryFetch, isAnthropicOAuthToken, isRecord, toBoolean, toNumber, toPositiveNumber } from "../utils";
 import { ALIBABA_TOKEN_PLAN_BASE_URL, parseAlibabaTokenPlanCredential } from "../wire/alibaba-token-plan";
+import { CLINEPASS_API_BASE_URL, clinePassClientHeaders } from "../wire/cline-pass";
+import { CLOUDFLARE_AI_GATEWAY_COMPAT_BASE_URL } from "../wire/cloudflare-ai-gateway";
 import { coreWeaveProjectHeaders } from "../wire/coreweave";
 import {
 	COPILOT_API_HEADERS,
@@ -46,7 +50,9 @@ import {
 } from "../wire/github-copilot";
 import { createBundledReferenceMap, createReferenceResolver, toModelSpec } from "./bundled-references";
 import { getDefaultModelDiscoveryBaseUrl, resolveModelCacheProviderId } from "./cache-provider-id";
+import { getClinePassModelMetadata } from "./cline-pass";
 import type { ModelManagerConfig } from "./descriptor-types";
+import { filterModelsDevCatalogRows } from "./models-dev-policies";
 
 const MODELS_DEV_URL = "https://catalog.stencil.so/models.json.zstd";
 
@@ -80,6 +86,7 @@ export interface ModelsDevModel {
 	name?: string;
 	tool_call?: boolean;
 	reasoning?: boolean;
+	reasoning_options?: Array<{ type?: string; values?: string[]; min?: number; max?: number }>;
 	limit?: {
 		context?: number;
 		output?: number;
@@ -114,17 +121,40 @@ function toInputCapabilities(value: unknown): ("text" | "image")[] {
 }
 
 /**
- * Process-wide catalog session: the first call downloads the payload (the one
- * request the server logs); later calls revalidate with `If-None-Match` and
- * reuse the decoded payload on `304`. Failure after a successful load falls
- * back to the session copy.
+ * Catalog sessions are scoped to the fetch implementation that owns their
+ * network and authentication context. Callers sharing one fetch reuse the same
+ * conditional request state; isolated registries cannot observe each other's
+ * payloads, ETags, or in-flight requests.
  */
-const catalogSession: {
+interface CatalogSession {
 	inflight: Promise<unknown> | null;
 	payload: unknown;
 	etag: string | null;
 	hasPayload: boolean;
-} = { inflight: null, payload: undefined, etag: null, hasPayload: false };
+}
+
+const defaultCatalogSession: CatalogSession = { inflight: null, payload: undefined, etag: null, hasPayload: false };
+const catalogSessionsByFetch = new WeakMap<FetchImpl, CatalogSession>();
+
+function getCatalogSession(fetchImpl: FetchImpl | undefined): CatalogSession {
+	if (!fetchImpl) return defaultCatalogSession;
+	const existing = catalogSessionsByFetch.get(fetchImpl);
+	if (existing) return existing;
+	const created: CatalogSession = { inflight: null, payload: undefined, etag: null, hasPayload: false };
+	catalogSessionsByFetch.set(fetchImpl, created);
+	return created;
+}
+
+function waitForCatalogRequest<T>(request: Promise<T>, signal?: AbortSignal): Promise<T> {
+	if (!signal) return request;
+	if (signal.aborted) return Promise.reject(signal.reason);
+	const aborted = Promise.withResolvers<never>();
+	const rejectAborted = () => aborted.reject(signal.reason);
+	signal.addEventListener("abort", rejectAborted, { once: true });
+	return Promise.race([request, aborted.promise]).finally(() => {
+		signal.removeEventListener("abort", rejectAborted);
+	});
+}
 
 const CATALOG_USER_AGENT = USER_AGENT;
 
@@ -134,52 +164,66 @@ const CATALOG_USER_AGENT = USER_AGENT;
  * The frame magic is sniffed rather than trusting content-type so plain-JSON
  * responses (test stubs, fallback mirrors) parse identically.
  *
- * Fetched fully once per process: concurrent callers share the in-flight
- * request, repeat callers send a conditional GET that the server answers
- * (and deliberately does not log) with `304`.
+ * Fetched fully once per fetch context: concurrent callers sharing a fetch
+ * implementation reuse one transport request, while repeat callers send a
+ * conditional GET that the server answers with `304`. Each subscriber may stop
+ * waiting independently; the shared transport retains its own hard deadline.
+ * Transient failures reuse the last in-memory payload for callers that only
+ * need best-effort metadata.
  */
 export function fetchWellKnownModels(fetchImpl?: FetchImpl, signal?: AbortSignal): Promise<unknown> {
-	if (!catalogSession.inflight) {
-		catalogSession.inflight = fetchCatalogPayload(fetchImpl ?? discoveryFetch(), signal).finally(() => {
-			catalogSession.inflight = null;
-		});
-	}
-	return catalogSession.inflight;
+	const session = getCatalogSession(fetchImpl);
+	return fetchRevalidatedWellKnownModels(fetchImpl, signal).catch(error => {
+		if (session.hasPayload) return session.payload;
+		throw error;
+	});
 }
 
-async function fetchCatalogPayload(fetchImpl: FetchImpl, signal?: AbortSignal): Promise<unknown> {
+function fetchRevalidatedWellKnownModels(fetchImpl?: FetchImpl, signal?: AbortSignal): Promise<unknown> {
+	const session = getCatalogSession(fetchImpl);
+	if (!session.inflight) {
+		session.inflight = withCatalogDiscoveryTimeout(DEFAULT_OPENAI_COMPATIBLE_DISCOVERY_TIMEOUT_MS, transportSignal =>
+			fetchCatalogPayload(fetchImpl ?? discoveryFetch(), session, transportSignal),
+		).finally(() => {
+			session.inflight = null;
+		});
+	}
+	return waitForCatalogRequest(session.inflight, signal);
+}
+
+function fetchRevalidatedWellKnownModelsWithTimeout(
+	fetchImpl?: FetchImpl,
+	timeoutMs = DEFAULT_OPENAI_COMPATIBLE_DISCOVERY_TIMEOUT_MS,
+): Promise<unknown> {
+	return withCatalogDiscoveryTimeout(timeoutMs, signal => fetchRevalidatedWellKnownModels(fetchImpl, signal));
+}
+
+async function fetchCatalogPayload(
+	fetchImpl: FetchImpl,
+	session: CatalogSession,
+	signal?: AbortSignal,
+): Promise<unknown> {
 	const headers: Record<string, string> = {
 		Accept: "application/zstd, application/json",
 		"User-Agent": CATALOG_USER_AGENT,
 	};
-	if (catalogSession.hasPayload && catalogSession.etag) {
-		headers["If-None-Match"] = catalogSession.etag;
+	if (session.hasPayload && session.etag) {
+		headers["If-None-Match"] = session.etag;
 	}
-	let response: Response;
-	try {
-		response = await fetchImpl(MODELS_DEV_URL, { method: "GET", headers, signal });
-	} catch (error) {
-		if (catalogSession.hasPayload) {
-			return catalogSession.payload;
-		}
-		throw error;
-	}
-	if (response.status === 304 && catalogSession.hasPayload) {
-		return catalogSession.payload;
+	const response = await fetchImpl(MODELS_DEV_URL, { method: "GET", headers, signal });
+	if (response.status === 304 && session.hasPayload) {
+		return session.payload;
 	}
 	if (!response.ok) {
-		if (catalogSession.hasPayload) {
-			return catalogSession.payload;
-		}
 		throw new Error(`models catalog fetch failed: ${response.status}`);
 	}
 	const bytes = new Uint8Array(await response.arrayBuffer());
 	const isZstd = bytes.length >= 4 && new DataView(bytes.buffer, bytes.byteOffset).getUint32(0, true) === ZSTD_MAGIC;
 	const text = new TextDecoder().decode(isZstd ? await Bun.zstdDecompress(bytes) : bytes);
 	const payload: unknown = JSON.parse(text);
-	catalogSession.payload = payload;
-	catalogSession.etag = response.headers.get("etag");
-	catalogSession.hasPayload = true;
+	session.payload = payload;
+	session.etag = response.headers.get("etag");
+	session.hasPayload = true;
 	return payload;
 }
 
@@ -618,6 +662,7 @@ type OpenAICompatibleModelManagerBuilderOptions<TApi extends Api> = {
 	headers?: SimpleProviderDiscoveryHeaders;
 	dynamicModelsAuthoritative?: true;
 	requireApiKey?: true;
+	dropCachedModelIdsOnStaticMismatch?: readonly string[];
 	filterModel?: (
 		entry: OpenAICompatibleModelRecord,
 		model: ModelSpec<TApi>,
@@ -640,6 +685,9 @@ function createOpenAICompatibleModelManagerOptions<TApi extends Api>(
 	return {
 		providerId: options.providerId,
 		...(options.dynamicModelsAuthoritative && { dynamicModelsAuthoritative: true }),
+		...(options.dropCachedModelIdsOnStaticMismatch && {
+			dropCachedModelIdsOnStaticMismatch: options.dropCachedModelIdsOnStaticMismatch,
+		}),
 		...((!options.requireApiKey || apiKey) && {
 			fetchDynamicModels: () =>
 				fetchOpenAICompatibleModels({
@@ -2538,6 +2586,304 @@ export function firepassModelManagerOptions(
 	};
 }
 
+const CLINEPASS_MODELS_URL = `${CLINEPASS_API_BASE_URL}/ai/cline/recommended-models`;
+const CLINEPASS_FALLBACK_CONTEXT_WINDOW = 128_000;
+const CLINEPASS_FALLBACK_MAX_TOKENS = 8_192;
+
+function buildClinePassFallbackModel(id: string): ModelSpec<"openai-completions"> {
+	return {
+		id,
+		name: id,
+		api: "openai-completions",
+		provider: "cline-pass",
+		baseUrl: CLINEPASS_API_BASE_URL,
+		reasoning: true,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: CLINEPASS_FALLBACK_CONTEXT_WINDOW,
+		maxTokens: CLINEPASS_FALLBACK_MAX_TOKENS,
+		compat: { supportsReasoningEffort: false },
+	};
+}
+
+/**
+ * Live reference catalog mirroring Cline's own client enrichment: the official
+ * CLI fills roster metadata from OpenRouter's public `/models` catalog (their
+ * gateway routes through it), keyed by full id and by slug. Consulted only for
+ * ids the bundled reference has no real upstream entry for: the bundle stays
+ * authoritative for known ids, and unknown ids ride fresh live data instead of
+ * the conservative constants until the next regen.
+ */
+interface ClinePassLiveCatalogEntry {
+	name?: string;
+	contextWindow?: number;
+	maxTokens?: number;
+	cost?: ModelSpec<"openai-completions">["cost"];
+	reasoning?: boolean;
+	input?: ("text" | "image")[];
+}
+
+interface ClinePassLiveCatalog {
+	byId: ReadonlyMap<string, ClinePassLiveCatalogEntry>;
+	bySlug: ReadonlyMap<string, ClinePassLiveCatalogEntry>;
+}
+
+const CLINE_PASS_LIVE_CATALOG_URL = "https://openrouter.ai/api/v1/models";
+
+/** Enrichment tier, never authoritative: any failure degrades to the bundled path. */
+async function fetchClinePassLiveCatalog(fetchImpl: FetchImpl): Promise<ClinePassLiveCatalog | undefined> {
+	try {
+		const response = await withCatalogDiscoveryTimeout(5_000, signal =>
+			fetchImpl(CLINE_PASS_LIVE_CATALOG_URL, { signal }),
+		);
+		if (!response.ok) return undefined;
+		const payload: unknown = await response.json();
+		if (!isRecord(payload) || !Array.isArray(payload.data)) return undefined;
+		const byId = new Map<string, ClinePassLiveCatalogEntry>();
+		const bySlug = new Map<string, ClinePassLiveCatalogEntry>();
+		for (const raw of payload.data) {
+			if (!isRecord(raw) || typeof raw.id !== "string" || !raw.id) continue;
+			const pricing = isRecord(raw.pricing) ? raw.pricing : undefined;
+			const topProvider = isRecord(raw.top_provider) ? raw.top_provider : undefined;
+			const params = Array.isArray(raw.supported_parameters) ? raw.supported_parameters : undefined;
+			const modality = String(isRecord(raw.architecture) ? (raw.architecture.modality ?? "") : "");
+			const contextWindow = toPositiveNumber(raw.context_length, 0);
+			const maxTokens = toPositiveNumber(topProvider?.max_completion_tokens, 0);
+			const entry: ClinePassLiveCatalogEntry = {
+				...(typeof raw.name === "string" && raw.name ? { name: raw.name.replace(/^[^:]+:\s*/, "") } : {}),
+				...(contextWindow > 0 ? { contextWindow } : {}),
+				...(maxTokens > 0 ? { maxTokens } : {}),
+				...(pricing
+					? {
+							cost: {
+								input: parseFloat(String(pricing.prompt ?? "0")) * 1_000_000,
+								output: parseFloat(String(pricing.completion ?? "0")) * 1_000_000,
+								cacheRead: parseFloat(String(pricing.input_cache_read ?? "0")) * 1_000_000,
+								cacheWrite: parseFloat(String(pricing.input_cache_write ?? "0")) * 1_000_000,
+							},
+						}
+					: {}),
+				...(params ? { reasoning: params.includes("reasoning") } : {}),
+				...(modality
+					? { input: modality.includes("image") ? (["text", "image"] as const) : (["text"] as const) }
+					: {}),
+			};
+			byId.set(raw.id, entry);
+			// Cline's `buildModelsNameMap` algorithm: roster ids are lab-less slugs
+			// ("glm-5.2"), so the catalog is also keyed by its last id segment.
+			const slug = raw.id.split("/").at(-1);
+			if (slug) bySlug.set(slug, entry);
+		}
+		return byId.size > 0 ? { byId, bySlug } : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+/** Zero legs mean "unpriced upstream", not "free" — pass models bill quota regardless. */
+function hasClinePassBillableCost(cost: ModelSpec<"openai-completions">["cost"] | undefined): boolean {
+	return cost !== undefined && (cost.input > 0 || cost.output > 0);
+}
+
+function buildCuratedClinePassModel(
+	id: string,
+	tier: "subscription" | "free",
+): ModelSpec<"openai-completions"> | undefined {
+	const metadata = getClinePassModelMetadata(id);
+	if (!metadata || metadata.tier !== tier) return undefined;
+	return {
+		...buildClinePassFallbackModel(id),
+		name: metadata.name,
+		contextWindow: metadata.contextWindow,
+		maxTokens: metadata.maxTokens,
+		input: metadata.input,
+		cost: metadata.cost,
+		reasoning: metadata.reasoning,
+		thinking: metadata.thinking,
+		compat: {
+			...(metadata.thinking === undefined ? { supportsReasoningEffort: false } : {}),
+			...(tier === "free" ? { wireModelIdMode: "raw" as const } : {}),
+		},
+	};
+}
+
+/**
+ * Subscription models bill against plan quota, not per token — but the catalog still
+ * carries the upstream list price so cost display reads as API-equivalent spend. Same
+ * policy as the codex/antigravity generator fixups and the zai PAYG descriptor swap
+ * (issue #5598: an all-$0 roster surfaces every model as "free" in the picker, which
+ * was treated as a bug there). The price comes from the bundled upstream reference,
+ * so it works offline and survives roster refreshes (`preferDiscoveryCost` never lets
+ * a zero overwrite it). Ids with no upstream reference keep the honest zero until
+ * models.dev prices them.
+ */
+function buildClinePassSubscriptionModel(
+	id: string,
+	references: ReadonlyMap<string, ModelSpec<"openai-completions">>,
+	liveCatalog?: ClinePassLiveCatalog,
+): ModelSpec<"openai-completions"> {
+	const curated = buildCuratedClinePassModel(id, "subscription");
+	if (curated) return curated;
+	const base = references.get(id) ?? buildClinePassFallbackModel(id);
+	const reference = resolveModelReference(id, getBundledModelReferenceIndex());
+	// A reference pointing back at the ClinePass bundle means the last regen
+	// knew nothing about the id and encoded fallback constants — treat as none.
+	const upstream = reference && reference.provider !== "cline-pass" ? reference : undefined;
+	// Same degeneracy on the bundle side: a bundled entry whose limits are the
+	// fallback pair was written by a regen that had no upstream data for the id.
+	const baseLimitsAreFallback =
+		base.contextWindow === CLINEPASS_FALLBACK_CONTEXT_WINDOW && base.maxTokens === CLINEPASS_FALLBACK_MAX_TOKENS;
+	if (upstream) {
+		// Known to the bundle with real limits: overlay the list price only.
+		// Otherwise full enrichment, like the free-tier path.
+		return references.has(id) && !baseLimitsAreFallback
+			? { ...base, cost: upstream.cost }
+			: {
+					...base,
+					name: references.has(id) ? base.name : upstream.name,
+					reasoning: upstream.reasoning,
+					input: upstream.input,
+					cost: upstream.cost,
+					contextWindow: upstream.contextWindow,
+					maxTokens: upstream.maxTokens,
+					...(upstream.reasoning ? {} : { thinking: undefined }),
+				};
+	}
+	const live = liveCatalog?.bySlug.get(id);
+	if (!live) return base;
+	return {
+		...base,
+		...(live.name ? { name: live.name } : {}),
+		...(live.contextWindow ? { contextWindow: live.contextWindow } : {}),
+		...(live.maxTokens ? { maxTokens: live.maxTokens } : {}),
+		...(hasClinePassBillableCost(live.cost) ? { cost: live.cost } : {}),
+		...(live.reasoning !== undefined ? { reasoning: live.reasoning } : {}),
+		...(live.input ? { input: live.input } : {}),
+		...(live.reasoning === false ? { thinking: undefined } : {}),
+	};
+}
+
+/**
+ * Free-tier entries arrive as full OpenRouter-style ids (`deepseek/deepseek-v4-flash`,
+ * `poolside/laguna-s-2.1:free`) and ride usage billing at $0 outside the subscription
+ * quota — their cost is genuinely zero, unlike the subscription roster's list-price
+ * display. Limits and modalities resolve through the bundled upstream reference (its
+ * candidate expansion treats provider prefixes and trailing `:free`-style markers as
+ * identity-preserving), so known models self-enrich offline. Compat and thinking are
+ * deliberately NOT inherited: those describe the reference's native host, while the
+ * Cline gateway dialect is resolved per provider/family. The raw wire tag is
+ * bucket-derived — the gateway already namespaces these ids, so the cline-pass prefix
+ * transform must never apply to them.
+ */
+function buildClinePassFreeModel(id: string, liveCatalog?: ClinePassLiveCatalog): ModelSpec<"openai-completions"> {
+	const curated = buildCuratedClinePassModel(id, "free");
+	if (curated) return curated;
+	const reference = resolveModelReference(id, getBundledModelReferenceIndex());
+	const upstream = reference && reference.provider !== "cline-pass" ? reference : undefined;
+	// Free ids are OpenRouter-native, so the live catalog matches by full id
+	// before falling back to the slug — the official client's own lookup order.
+	const live = liveCatalog?.byId.get(id) ?? liveCatalog?.bySlug.get(id.split("/").at(-1) ?? id);
+	// References can carry their own free markers (e.g. OpenRouter-style
+	// "Laguna S 2.1 (free)"); strip before applying our single tier suffix.
+	const baseName = (upstream?.name ?? live?.name ?? id.split("/").at(-1) ?? id)
+		.replace(/\s*\(free\)\s*$/i, "")
+		.replace(/:free$/i, "")
+		.trim();
+	const fallback = buildClinePassFallbackModel(id);
+	const reasoning = upstream?.reasoning ?? live?.reasoning ?? fallback.reasoning;
+	return {
+		...fallback,
+		name: `${baseName || id} (free)`,
+		reasoning,
+		input: upstream?.input ?? live?.input ?? fallback.input,
+		contextWindow: upstream?.contextWindow ?? live?.contextWindow ?? fallback.contextWindow,
+		maxTokens: upstream?.maxTokens ?? live?.maxTokens ?? fallback.maxTokens,
+		// A non-reasoning reference must not carry the Cline effort ladder.
+		...(reasoning ? {} : { thinking: undefined }),
+		compat: { supportsReasoningEffort: false, wireModelIdMode: "raw" },
+	};
+}
+
+async function fetchClinePassModels(
+	fetchImpl: FetchImpl,
+	references: ReadonlyMap<string, ModelSpec<"openai-completions">>,
+): Promise<ModelSpec<"openai-completions">[]> {
+	// The roster is authoritative for ids; the live reference catalog is a pure
+	// enrichment tier fetched alongside and tolerated away (offline → bundle).
+	const [response, liveCatalog] = await Promise.all([
+		withCatalogDiscoveryTimeout(5_000, signal =>
+			fetchImpl(CLINEPASS_MODELS_URL, { signal, headers: clinePassClientHeaders() }),
+		),
+		fetchClinePassLiveCatalog(fetchImpl),
+	]);
+	if (!response.ok) {
+		throw new Error(`Failed to fetch ClinePass models: HTTP ${response.status}`);
+	}
+	const payload: unknown = await response.json();
+	if (!isRecord(payload) || !Array.isArray(payload.clinePass)) {
+		throw new Error("ClinePass model catalog response is missing clinePass");
+	}
+
+	const models = new Map<string, ModelSpec<"openai-completions">>();
+	for (const entry of payload.clinePass) {
+		if (!isRecord(entry) || typeof entry.id !== "string") {
+			continue;
+		}
+		const wireId = entry.id.trim();
+		if (!wireId.startsWith("cline-pass/")) {
+			continue;
+		}
+		const id = toClinePassPublicModelId(wireId).trim();
+		if (!id) {
+			continue;
+		}
+		models.set(id, buildClinePassSubscriptionModel(id, references, liveCatalog));
+	}
+	if (models.size === 0) {
+		throw new Error("ClinePass model catalog contains no valid model IDs");
+	}
+
+	// Free tier rides the same key and gateway at $0 outside the subscription
+	// quota. Optional overlay: entries validate individually, a cline-pass/-shaped
+	// entry belongs to the pass bucket, pass ids win any collision, and pass-first
+	// insertion order keeps the registry's first-available fallback on a
+	// subscription model.
+	const freeEntries = Array.isArray(payload.free) ? payload.free : [];
+	for (const entry of freeEntries) {
+		if (!isRecord(entry) || typeof entry.id !== "string") {
+			continue;
+		}
+		const id = entry.id.trim();
+		if (!id || id.startsWith("cline-pass/") || models.has(id)) {
+			continue;
+		}
+		models.set(id, buildClinePassFreeModel(id, liveCatalog));
+	}
+	return [...models.values()];
+}
+
+/**
+ * Cline's OpenAI-compatible `/models` route is absent, but its public
+ * recommended-models endpoint is the authoritative ClinePass roster: the
+ * `clinePass` bucket lists subscription models and the optional `free` bucket
+ * adds $0 usage-billing models selectable with the same key. Metadata resolves
+ * in three tiers: the current Cline-published metadata snapshot first, bundled
+ * upstream references and OpenRouter enrichment for future ids second, then
+ * conservative constants. Newly added ids remain usable before the next regen;
+ * known ids retain exact Cline limits, plan pricing, and reasoning controls.
+ */
+export function clinePassModelManagerOptions(config?: ModelManagerConfig): ModelManagerOptions<"openai-completions"> {
+	const references = new Map(
+		(getBundledModels("cline-pass") as Model<"openai-completions">[]).map(model => [model.id, toModelSpec(model)]),
+	);
+	const fetchImpl = discoveryFetch(config?.fetch);
+	return {
+		providerId: "cline-pass",
+		dynamicModelsAuthoritative: true,
+		fetchDynamicModels: () => fetchClinePassModels(fetchImpl, references),
+	};
+}
+
 // ---------------------------------------------------------------------------
 // 7.7 Wafer Serverless
 // ---------------------------------------------------------------------------
@@ -2785,6 +3131,9 @@ const OPENCODE_GO_API_ID_OVERRIDES: Readonly<Record<string, Api>> = {
 	"qwen3.5-plus": "openai-completions",
 	"qwen3.6-plus": "openai-completions",
 };
+// Runtime-discovered rows cached before model-identity corrections retain
+// stale capability metadata until the authoritative catalog TTL expires.
+const OPENCODE_CACHE_MIGRATION_MODEL_IDS = ["glm-5.3-flash"] as const;
 
 // Billing-variant suffixes the OpenCode gateways append to a base model id
 // without changing its transport (`deepseek-v4-flash-free`,
@@ -2845,14 +3194,12 @@ function openCodeModelManagerOptions(
 		providerId,
 		cacheProviderId: resolveModelCacheProviderId(providerId, { apiKey, baseUrl: discoveryBaseUrl }),
 		dynamicModelsAuthoritative: true,
-		// The per-id API pins are cache identity: without this, rows cached
-		// before a pin was added keep the wrong endpoint until TTL expiry
-		// (#8957 — 17.3.7 caches held muse-spark-1.2[-contributor] on chat
-		// completions after the pin shipped). Sibling-catalog drift is bounded
-		// by the 2h cache TTL instead.
-		dropCachedModelIdsOnStaticMismatch: Object.keys(apiOverrides),
+		// Per-id route pins and capability migrations are cache identity:
+		// without this, rows cached before a correction keep the stale route or
+		// thinking surface until TTL expiry (#8957, #9960).
+		dropCachedModelIdsOnStaticMismatch: [...Object.keys(apiOverrides), ...OPENCODE_CACHE_MIGRATION_MODEL_IDS],
 		modelsDev: {
-			fetch: () => fetchWellKnownModels(config?.fetch),
+			fetch: () => fetchRevalidatedWellKnownModelsWithTimeout(config?.fetch),
 			map: payload => {
 				if (!isRecord(payload)) return [];
 				return mapModelsDevToModels(payload, OPENCODE_MODELS_DEV_DESCRIPTORS)
@@ -4034,10 +4381,19 @@ export function syntheticModelManagerOptions(
 							name: toModelName(entry.name, reference?.name ?? defaults.name),
 							reasoning,
 							...(thinking ? { thinking } : {}),
+							// Advertised `input_modalities` are authoritative, mirroring the
+							// effort vocabulary above: a wire that names its modalities (even
+							// text-only) must not regrow `image` from the bundled reference.
+							// Only when the wire omits them do `supports_vision` and the
+							// reference get a vote.
 							input:
-								modalities.includes("image") || entry.supports_vision === true || referenceSupportsImage
-									? ["text", "image"]
-									: ["text"],
+								modalities.length > 0
+									? modalities.includes("image")
+										? ["text", "image"]
+										: ["text"]
+									: entry.supports_vision === true || referenceSupportsImage
+										? ["text", "image"]
+										: ["text"],
 							// A present `supported_features` list (even empty) is the route's
 							// whole advertised surface: no `tools` entry means no tool
 							// support. The reference still wins when it already vouched for
@@ -4106,6 +4462,11 @@ export interface BasetenModelManagerConfig {
 	fetch?: FetchImpl;
 }
 
+// A previous version of OMP shipped this model without reasoning levels. We've
+// since fixed that. This const lets us bust the cache so that users on that
+// version of OMP pick up the reasoning levels immediately.
+const BASETEN_CACHE_MIGRATION_MODEL_IDS = ["zai-org/GLM-5.3", "zai-org/GLM-5.3-Flash"] as const;
+
 export function basetenModelManagerOptions(
 	config?: BasetenModelManagerConfig,
 ): ModelManagerOptions<"openai-completions"> {
@@ -4116,6 +4477,7 @@ export function basetenModelManagerOptions(
 		config,
 		dynamicModelsAuthoritative: true,
 		requireApiKey: true,
+		dropCachedModelIdsOnStaticMismatch: BASETEN_CACHE_MIGRATION_MODEL_IDS,
 		mapModel: (entry, defaults, reference) => {
 			const raw = entry as Record<string, unknown> & {
 				supported_features?: unknown;
@@ -4131,10 +4493,9 @@ export function basetenModelManagerOptions(
 			// vocabulary, which OMP must not guess.
 			const isSupportedBasetenReasoningModel =
 				isKimiK3ModelId(defaults.id) ||
+				isGlm52ReasoningEffortModelId(defaults.id) ||
 				defaults.id === "openai/gpt-oss-120b" ||
-				defaults.id === "deepseek-ai/DeepSeek-V4-Pro" ||
-				defaults.id === "zai-org/GLM-5.2" ||
-				defaults.id === "zai-org/GLM-5.2-Fast";
+				defaults.id === "deepseek-ai/DeepSeek-V4-Pro";
 			const reasoning =
 				isSupportedBasetenReasoningModel &&
 				(features.includes("reasoning") || features.includes("reasoning_effort"));
@@ -5359,12 +5720,29 @@ function mapLiteLLMRichEntry<TApi extends Api>(
 							["tools", "tool_choice", "functions", "function_call"].includes(param),
 						)
 					: reference?.supportsTools;
+	// Enrich from the bundled reference with provider-INDEPENDENT reasoning
+	// hints only. The reference is resolved against the global bundled catalog,
+	// so a custom endpoint exposing an alias that collides with a bundled model
+	// (a LiteLLM proxy serving `kimi-k3`, which matches Fireworks' bundled
+	// `kimi-k3`) must not inherit that provider's transport compat. Spreading
+	// the resolved `reference.compat` wholesale leaked `wireModelIdMode`,
+	// `toolSchemaFlavor`, `thinkingFormat`, etc. across the provider boundary —
+	// rewriting the wire id to `accounts/fireworks/models/kimi-k3` for a
+	// non-Fireworks endpoint (issue #9938). `buildModel` re-derives every
+	// transport field from the discovered provider and model id, so only the
+	// effort vocabulary flows through here. Mirrors `discoverOpenAIModelsList`.
+	const referenceCompat = reference?.compat as OpenAICompat | undefined;
 	const compat: OpenAICompat = {
-		...(reference?.compat ?? {}),
 		supportsStore: false,
 		supportsDeveloperRole: false,
 		...(supportedOpenAIParams !== undefined
 			? { supportsReasoningEffort: supportedOpenAIParams.includes("reasoning_effort") }
+			: referenceCompat?.supportsReasoningEffort !== undefined
+				? { supportsReasoningEffort: referenceCompat.supportsReasoningEffort }
+				: {}),
+		...(referenceCompat?.reasoningEffortMap ? { reasoningEffortMap: referenceCompat.reasoningEffortMap } : {}),
+		...(referenceCompat?.omitReasoningEffort !== undefined
+			? { omitReasoningEffort: referenceCompat.omitReasoningEffort }
 			: {}),
 	};
 	return {
@@ -5590,12 +5968,14 @@ export function litellmModelManagerOptions(config?: LiteLLMModelManagerConfig): 
 	const baseUrl = config?.baseUrl ?? getDefaultModelDiscoveryBaseUrl("litellm")!;
 	return {
 		providerId: "litellm",
-		// rich-v7 invalidates rows cached before discovery continued past endpoints
-		// that omitted cache pricing. Earlier versions added bundled reference fallback,
-		// moved OpenAI models to Responses, continued past incomplete vision and API
-		// metadata, stripped reseller usage suffixes, filtered placeholder rows, and
-		// mapped rich pricing. Bump the version whenever these mappers change, or warm
-		// authoritative caches keep serving pre-change rows for the full TTL.
+		// rich-v8 invalidates rows whose `compatConfig` retained a colliding
+		// bundled model's provider-specific transport (e.g. Fireworks
+		// `wireModelIdMode`) before that leak was fixed. Earlier versions added
+		// bundled reference fallback, moved OpenAI models to Responses, continued
+		// past incomplete vision/API metadata and endpoints omitting cache
+		// pricing, stripped reseller usage suffixes, filtered placeholder rows,
+		// and mapped rich pricing. Bump the version whenever these mappers change,
+		// or warm authoritative caches keep serving pre-change rows for the full TTL.
 		cacheProviderId: resolveModelCacheProviderId("litellm", { baseUrl }),
 		// litellm is a local-only proxy and is never bundled in models.json (that
 		// would leak the machine's localhost catalog). Prefer the proxy's richer
@@ -6118,7 +6498,7 @@ export function anthropicModelManagerOptions(
 	return {
 		providerId: "anthropic",
 		modelsDev: {
-			fetch: () => fetchWellKnownModels(config?.fetch),
+			fetch: () => fetchRevalidatedWellKnownModelsWithTimeout(config?.fetch),
 			map: payload => mapAnthropicModelsDev(payload, baseUrl),
 		},
 		...(apiKey && {
@@ -6498,6 +6878,40 @@ const MODELS_DEV_PROVIDER_DESCRIPTORS_BEDROCK: readonly ModelsDevProviderDescrip
 	},
 ];
 
+const CLINEPASS_REASONING_BUDGET_RATIOS: Readonly<Record<Effort, number>> = {
+	[Effort.Minimal]: 0.1,
+	[Effort.Low]: 0.2,
+	[Effort.Medium]: 0.5,
+	[Effort.High]: 0.8,
+	[Effort.XHigh]: 0.95,
+	[Effort.Max]: 1,
+};
+
+function buildClinePassThinking(raw: ModelsDevModel, model: ModelSpec<Api>): ThinkingConfig | undefined {
+	const effortValues = raw.reasoning_options?.find(option => option.type === "effort")?.values;
+	if (effortValues) {
+		const efforts = THINKING_EFFORTS.filter(effort => effortValues.includes(effort));
+		return efforts.length > 0 ? { mode: "effort", efforts } : undefined;
+	}
+
+	const budget = raw.reasoning_options?.find(option => option.type === "budget_tokens");
+	if (!budget) return undefined;
+	const modelMaxTokens = model.maxTokens ?? CLINEPASS_FALLBACK_MAX_TOKENS;
+	const maximum = toPositiveNumber(budget.max, modelMaxTokens) ?? modelMaxTokens;
+	const minimum = toPositiveNumber(budget.min, 1) ?? 1;
+	const scale = Math.min(modelMaxTokens, maximum);
+	return {
+		mode: "budget",
+		efforts: THINKING_EFFORTS,
+		effortBudgets: Object.fromEntries(
+			THINKING_EFFORTS.map(effort => [
+				effort,
+				Math.min(Math.max(Math.floor(scale * CLINEPASS_REASONING_BUDGET_RATIOS[effort]), minimum), maximum),
+			]),
+		),
+	};
+}
+
 const MODELS_DEV_PROVIDER_DESCRIPTORS_CORE: readonly ModelsDevProviderDescriptor[] = [
 	// --- Anthropic ---
 	anthropicMessagesDescriptor("anthropic", "anthropic", "https://api.anthropic.com", {
@@ -6526,6 +6940,35 @@ const MODELS_DEV_PROVIDER_DESCRIPTORS_CORE: readonly ModelsDevProviderDescriptor
 	openAiCompletionsDescriptor("groq", "groq", "https://api.groq.com/openai/v1"),
 	// --- Cerebras ---
 	openAiCompletionsDescriptor("cerebras", "cerebras", "https://api.cerebras.ai/v1"),
+	// --- ClinePass ---
+	// The live roster owns membership; this snapshot pins Cline's exact limits,
+	// pricing, modalities, and per-model reasoning controls for known ids.
+	openAiCompletionsDescriptor("cline-pass", "cline-pass", "https://api.cline.bot/api/v1", {
+		transformModel: (model, modelId, raw) => {
+			const id = toClinePassPublicModelId(modelId);
+			const metadata = getClinePassModelMetadata(id);
+			if (metadata) {
+				return {
+					...model,
+					id,
+					name: metadata.name,
+					contextWindow: metadata.contextWindow,
+					maxTokens: metadata.maxTokens,
+					input: metadata.input,
+					cost: metadata.cost,
+					reasoning: metadata.reasoning,
+					thinking: metadata.thinking,
+					compat:
+						metadata.thinking === undefined ? { ...model.compat, supportsReasoningEffort: false } : model.compat,
+				};
+			}
+			return {
+				...model,
+				id,
+				thinking: model.reasoning ? buildClinePassThinking(raw, model) : undefined,
+			};
+		},
+	}),
 	// --- Together ---
 	openAiCompletionsDescriptor("togetherai", "together", "https://api.together.xyz/v1"),
 	// --- CoreWeave Serverless Inference ---
@@ -6700,6 +7143,15 @@ const MODELS_DEV_PROVIDER_DESCRIPTORS_SPECIALIZED: readonly ModelsDevProviderDes
 		"cloudflare-ai-gateway",
 		"https://gateway.ai.cloudflare.com/v1/<account>/<gateway>/anthropic",
 	),
+	openAiCompletionsDescriptor(
+		"cloudflare-workers-ai",
+		"cloudflare-ai-gateway",
+		CLOUDFLARE_AI_GATEWAY_COMPAT_BASE_URL,
+		{
+			filterModel: filterActiveToolCallModels,
+			transformModel: model => ({ ...model, id: `workers-ai/${model.id}` }),
+		},
+	),
 	// --- Mistral ---
 	openAiCompletionsDescriptor("mistral", "mistral", "https://api.mistral.ai/v1"),
 	// --- OpenCode Zen / Go ---
@@ -6790,3 +7242,42 @@ export const MODELS_DEV_PROVIDER_DESCRIPTORS: readonly ModelsDevProviderDescript
 	...MODELS_DEV_PROVIDER_DESCRIPTORS_CODING_PLANS,
 	...MODELS_DEV_PROVIDER_DESCRIPTORS_SPECIALIZED,
 ];
+
+const MODELS_DEV_DESCRIPTORS_BY_PROVIDER: Record<string, ModelsDevProviderDescriptor[]> = Object.create(null);
+for (const descriptor of MODELS_DEV_PROVIDER_DESCRIPTORS) {
+	const providerDescriptors = MODELS_DEV_DESCRIPTORS_BY_PROVIDER[descriptor.providerId];
+	if (providerDescriptors) {
+		providerDescriptors.push(descriptor);
+	} else {
+		MODELS_DEV_DESCRIPTORS_BY_PROVIDER[descriptor.providerId] = [descriptor];
+	}
+}
+
+/** Providers whose bundled catalog can receive additive models.dev updates at runtime. */
+export const MODELS_DEV_CATALOG_PROVIDER_IDS: readonly string[] = Object.freeze(
+	Object.keys(MODELS_DEV_DESCRIPTORS_BY_PROVIDER),
+);
+
+/**
+ * Build the shared models.dev fallback for one known provider.
+ *
+ * Provider managers sharing one fetch implementation reuse its conditional
+ * catalog session. Each mapped provider slice is persisted independently so
+ * startup can restore it without parsing the full catalog.
+ *
+ * `timeoutMs` bounds the catalog request. It is configurable for callers with a
+ * stricter startup budget and for deterministic timeout tests.
+ */
+export function modelsDevCatalogFallback(
+	providerId: string,
+	fetchImpl?: FetchImpl,
+	timeoutMs = DEFAULT_OPENAI_COMPATIBLE_DISCOVERY_TIMEOUT_MS,
+): ModelsDevFallback<Api> | undefined {
+	const descriptors = MODELS_DEV_DESCRIPTORS_BY_PROVIDER[providerId];
+	if (!descriptors) return undefined;
+	return {
+		additiveOnly: true,
+		fetch: () => fetchRevalidatedWellKnownModelsWithTimeout(fetchImpl, timeoutMs),
+		map: payload => (isRecord(payload) ? filterModelsDevCatalogRows(mapModelsDevToModels(payload, descriptors)) : []),
+	};
+}

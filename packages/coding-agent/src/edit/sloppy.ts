@@ -197,6 +197,7 @@ export const SLOPPY_MARKERS = {
 	gap: "…",
 	selectDivider: "│",
 	add: "＋",
+	remove: "－",
 } as const;
 
 const OPENER = SLOPPY_MARKERS.open;
@@ -206,6 +207,7 @@ const SELECT_CLOSE = SLOPPY_MARKERS.selectClose;
 const SELECT_DIVIDER = SLOPPY_MARKERS.selectDivider;
 const GAP = SLOPPY_MARKERS.gap;
 const ADD_LINE = SLOPPY_MARKERS.add;
+const REMOVE_LINE = SLOPPY_MARKERS.remove;
 /** Operation opener: non-directional, doubles as the file header. */
 const SECTION_OPENER = "§";
 
@@ -416,15 +418,21 @@ function normalizeBlock(lines: string[], rewrite: boolean): string {
 		// Models sometimes annotate the rewrite with a bare `//` header line;
 		// written verbatim it corrupts the file. Worded comments stay.
 		if (cleaned[0]?.trim() === "//") cleaned.shift();
-		// A `＋` add marker is MATCH vocabulary; in REWRITE the line is already
-		// stated final text, so the marker is diff-habit noise — written verbatim
-		// it corrupts the file.
-		for (let index = 0; index < cleaned.length; index++) {
-			const line = cleaned[index];
-			const indent = line.match(/^[ \t]*/u)?.[0] ?? "";
-			if (line.startsWith(ADD_LINE, indent.length)) {
-				cleaned[index] = indent + line.slice(indent.length + ADD_LINE.length);
+		// `＋`/`－` markers are MATCH vocabulary; in REWRITE the text is already
+		// stated final, so the markers are diff-habit noise — written verbatim
+		// they corrupt the file. A `－` line paired with a `＋` line states old
+		// text that must not appear in the final text: drop it.
+		if (
+			cleaned.some(line => markerLineContent(line, REMOVE_LINE) !== undefined) &&
+			cleaned.some(line => markerLineContent(line, ADD_LINE) !== undefined)
+		) {
+			for (let index = cleaned.length - 1; index >= 0; index--) {
+				if (markerLineContent(cleaned[index], REMOVE_LINE) !== undefined) cleaned.splice(index, 1);
 			}
+		}
+		for (let index = 0; index < cleaned.length; index++) {
+			const stripped = markerLineContent(cleaned[index], ADD_LINE);
+			if (stripped !== undefined) cleaned[index] = stripped;
 		}
 		const hasOld = cleaned.some(line => /^-(?!---)/u.test(line));
 		const hasNew = cleaned.some(line => /^\+(?!\+\+)/u.test(line));
@@ -794,7 +802,6 @@ function embedBareDesired(patternText: string): string {
 	return patternText.replaceAll(/⟪([^⟪⟫│\n…]+)⟫/gu, `⟪…│$1⟫`);
 }
 
-/** True when any line is a `＋`-prefixed add line (optionally indented). */
 /**
  * A legacy bare selection whose one-line REWRITE restates the whole
  * selection-bearing line (echoing the text before the selection) means "this
@@ -826,12 +833,20 @@ function expandEchoedLineSelection(patternText: string, rewriteText: string): st
 	return lines.join("\n");
 }
 
-function hasAddLines(patternText: string): boolean {
-	if (!patternText.includes(ADD_LINE)) return false;
-	return patternText.split("\n").some(line => {
-		const indent = line.match(/^[ \t]*/u)?.[0] ?? "";
-		return line.startsWith(ADD_LINE, indent.length);
-	});
+/** The line's content with `marker` stripped (indent kept), or undefined when not marker-prefixed. */
+function markerLineContent(line: string, marker: string): string | undefined {
+	const indent = line.match(/^[ \t]*/u)?.[0] ?? "";
+	return line.startsWith(marker, indent.length) ? indent + line.slice(indent.length + marker.length) : undefined;
+}
+
+/** True when any line is a `＋` add line or `－` remove line (optionally indented). */
+function hasMarkerLines(patternText: string): boolean {
+	if (!patternText.includes(ADD_LINE) && !patternText.includes(REMOVE_LINE)) return false;
+	return patternText
+		.split("\n")
+		.some(
+			line => markerLineContent(line, ADD_LINE) !== undefined || markerLineContent(line, REMOVE_LINE) !== undefined,
+		);
 }
 
 /**
@@ -861,11 +876,6 @@ function isNearVariant(anchor: string, added: string): boolean {
 	return (2 * shared) / (leftTotal + rightTotal) >= 0.8;
 }
 
-/**
- * Embed `＋`-prefixed add lines as whole-line insert selections. `＋final text`
- * on its own line inserts that line at its position; a run of consecutive add
- * lines becomes one multi-line insert so the lines land in authored order.
- */
 const LITERAL_OPEN = "\u0000V8LITOPEN\u0000";
 const LITERAL_CLOSE = "\u0000V8LITCLOSE\u0000";
 const LITERAL_DIVIDER = "\u0000V8LITDIV\u0000";
@@ -911,18 +921,36 @@ function wrapTrailingAnchor(out: string[], added: string[]): boolean {
 	return true;
 }
 
-function embedAddLines(patternText: string): string {
-	if (!hasAddLines(patternText)) return patternText;
+/**
+ * Embed `＋`/`－` marker lines as inline selections. `＋final text` on its own
+ * line inserts that line at its position; a run of consecutive add lines
+ * becomes one multi-line insert so the lines land in authored order. A `－`
+ * run is the diff -/+ habit in the taught alphabet: it deletes those lines
+ * verbatim, and a `＋` run directly below replaces them instead.
+ */
+function embedMarkerLines(patternText: string): string {
+	if (!hasMarkerLines(patternText)) return patternText;
 	const lines = patternText.split("\n");
 	const out: string[] = [];
 	for (let index = 0; index < lines.length; index++) {
+		const removed: string[] = [];
+		while (index < lines.length) {
+			const line = markerLineContent(lines[index], REMOVE_LINE);
+			if (line === undefined) break;
+			removed.push(line);
+			index++;
+		}
 		const added: string[] = [];
 		while (index < lines.length) {
-			const line = lines[index];
-			const indent = line.match(/^[ \t]*/u)?.[0] ?? "";
-			if (!line.startsWith(ADD_LINE, indent.length)) break;
-			added.push(encodeLiteralMarkers(indent + line.slice(indent.length + ADD_LINE.length)));
+			const line = markerLineContent(lines[index], ADD_LINE);
+			if (line === undefined) break;
+			added.push(encodeLiteralMarkers(line));
 			index++;
+		}
+		if (removed.length > 0) {
+			out.push(`${SELECT_OPEN}${removed.join("\n")}${SELECT_DIVIDER}${added.join("\n")}${SELECT_CLOSE}`);
+			index--;
+			continue;
 		}
 		if (added.length === 0) {
 			out.push(lines[index]);
@@ -1004,6 +1032,23 @@ function recoverDirectiveRewrite(
 	return operation;
 }
 
+/**
+ * Repair a stray `⟫` typed where the `│` divider belongs: `⟪old⟫new⟫` reads
+ * as `⟪old│new⟫`. Fires only when closes outnumber opens, both sides are
+ * marker-free single-line text (a proper `⟪old│new⟫` followed by a stray
+ * `⟫` never matches), and the repair restores marker balance. A wrong guess
+ * still fails loud downstream: the repaired old side must match the file.
+ */
+function recoverStrayCloseDivider(patternText: string): string | undefined {
+	const opens = (patternText.match(/⟪/gu) || []).length;
+	const closes = (patternText.match(/⟫/gu) || []).length;
+	if (closes <= opens) return undefined;
+	const repaired = patternText.replaceAll(/⟪([^⟪⟫│\n]*)⟫([^⟪⟫│\n]*)⟫/gu, `⟪$1${SELECT_DIVIDER}$2⟫`);
+	if (repaired === patternText) return undefined;
+	const balanced = (repaired.match(/⟪/gu) || []).length === (repaired.match(/⟫/gu) || []).length;
+	return balanced ? repaired : undefined;
+}
+
 function createOperation(
 	sourcePatternText: string,
 	rewriteText: string,
@@ -1011,7 +1056,15 @@ function createOperation(
 	operationNumber: number,
 	hasExplicitRewrite: boolean,
 ): Operation {
-	let embedded = embedAddLines(sourcePatternText);
+	let embedded = embedMarkerLines(sourcePatternText);
+	const strayRepaired = recoverStrayCloseDivider(embedded);
+	if (strayRepaired !== undefined) {
+		const operation = createOperation(strayRepaired, rewriteText, all, operationNumber, hasExplicitRewrite);
+		operation.sourcePatternText = sourcePatternText;
+		const note = `Note: operation ${operationNumber} wrote ${SELECT_CLOSE} where the ${SELECT_DIVIDER} divider belongs; ${SELECT_OPEN}old${SELECT_CLOSE}new${SELECT_CLOSE} was read as ${SELECT_OPEN}old${SELECT_DIVIDER}new${SELECT_CLOSE}.`;
+		operation.recoveryNote = operation.recoveryNote ? `${note}\n${operation.recoveryNote}` : note;
+		return operation;
+	}
 	if (!hasExplicitRewrite && hasBareDesired(embedded)) embedded = embedBareDesired(embedded);
 	if (!hasInlineSelection(embedded) && hasExplicitRewrite) {
 		const directive = recoverDirectiveRewrite(embedded, rewriteText, all, operationNumber);
@@ -1090,7 +1143,7 @@ function parseOperations(input: string, content: string): Operation[] {
 		(lines.some(line => line.trim() === REWRITE_HEADER) ||
 			payload.includes(SELECT_OPEN) ||
 			payload.includes(SELECT_CLOSE) ||
-			hasAddLines(payload))
+			hasMarkerLines(payload))
 	) {
 		lines.unshift(OPENER);
 	}
@@ -1131,7 +1184,7 @@ function parseOperations(input: string, content: string): Operation[] {
 		const sourcePatternText = normalizeBlock(patternLines, false);
 		if (
 			hasInlineSelection(sourcePatternText) ||
-			hasAddLines(sourcePatternText) ||
+			hasMarkerLines(sourcePatternText) ||
 			hasBareDesired(sourcePatternText)
 		) {
 			operations.push(createOperation(sourcePatternText, "", allMatches, operations.length + 1, false));
@@ -2361,9 +2414,9 @@ function locate(
 	if (raw.overflow) {
 		throw new Error(`Operation ${operationNumber} pattern is too broad; add another distinctive ${GAP} fragment.`);
 	}
-	if (raw.candidates.length === 0 && hasAddLines(operation.sourcePatternText)) {
+	if (raw.candidates.length === 0 && hasMarkerLines(operation.sourcePatternText)) {
 		throw new Error(
-			`Operation ${operationNumber} adds whole lines but MATCH did not match byte-for-byte. Re-read the region and copy its exact indentation.`,
+			`Operation ${operationNumber} adds or removes whole lines but MATCH did not match byte-for-byte. Re-read the region and copy its exact indentation.`,
 		);
 	}
 	if (raw.candidates.length === 0 && pattern.literalFallback) {
@@ -3194,7 +3247,8 @@ function trailingSelectionCandidate(patternText: string): string | undefined {
  * drop. Returns candidates with and without the diff context-space stripped.
  */
 function isDiffShaped(patternText: string): boolean {
-	if (patternText.includes(SELECT_OPEN) || patternText.includes(ADD_LINE)) return false;
+	if (patternText.includes(SELECT_OPEN) || patternText.includes(ADD_LINE) || patternText.includes(REMOVE_LINE))
+		return false;
 	const lines = patternText.split("\n");
 	if (!lines.some(line => /^-(?!--)/u.test(line))) return false;
 	return (

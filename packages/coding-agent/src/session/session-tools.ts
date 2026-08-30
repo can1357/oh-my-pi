@@ -306,6 +306,14 @@ export class SessionTools {
 		this.#skillWarnings = options.skillWarnings ?? [];
 		this.#skillsSettings = options.skillsSettings;
 		this.#skillsReloadable = options.skillsReloadable ?? true;
+		// Seed from the construction slate (top-level tools plus xd:// mounts).
+		// Left empty, getEnabledToolNames() falls back to live agent.state.tools,
+		// so an early reconcile (think/inspect_image/Code Mode after the startup
+		// model resolution) landing while the live set is transiently narrow
+		// commits that narrow set as the sticky slate — the session keeps almost
+		// no tools and the prompt rebuild without `read` empties the skill list.
+		for (const tool of host.agent.state.tools) this.#enabledToolNames.add(tool.name);
+		for (const name of this.#xdev?.mountedNames ?? []) this.#enabledToolNames.add(name);
 		this.#promptModelKey = this.#currentPromptModelKey();
 	}
 
@@ -389,10 +397,12 @@ export class SessionTools {
 	}
 	/** Enabled top-level, `xd://`, and Code Mode bridge tool names. */
 	getEnabledToolNames(): string[] {
-		if (this.#enabledToolNames.size > 0) return [...this.#enabledToolNames];
+		// Union live xd:// mounts so devices mounted out-of-band (plugins writing
+		// to xdev state directly) survive the next apply.
 		const mountedNames = this.#xdev?.mountedNames;
-		if (!mountedNames || mountedNames.size === 0) return this.getActiveToolNames();
-		return [...this.getActiveToolNames(), ...mountedNames];
+		const base = this.#enabledToolNames.size > 0 ? [...this.#enabledToolNames] : this.getActiveToolNames();
+		if (!mountedNames || mountedNames.size === 0) return base;
+		return [...new Set([...base, ...mountedNames])];
 	}
 
 	/** Names currently presented as `xd://` devices. */
@@ -708,7 +718,11 @@ export class SessionTools {
 
 	/** Reapplies the enabled set after model or Code Mode setting changes. */
 	reconcileCodeMode(): Promise<void> {
-		return this.applyActiveToolsByName(this.getEnabledToolNames());
+		// Sample inside the lock: an unlocked sample can race a queued apply and
+		// re-commit a stale slate.
+		return this.runToolRegistryMutation(async () => {
+			await this.#applyActiveToolsByName(this.getEnabledToolNames());
+		});
 	}
 
 	/** Enabled MCP tools in their current presentation partition. */

@@ -1,8 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import {
+	bareModelId,
 	hasOpus47ApiRestrictions,
 	isClaudeModelId,
 	isGeminiModelId,
+	isGlm52ReasoningEffortModelId,
+	isGlm53ReasoningEffortModelId,
 	isGlmVisionModelId,
 	isGrokModelId,
 	isGrokMultiAgentModelId,
@@ -287,15 +290,19 @@ describe("isReasoningGlmModelId", () => {
 		// Family match is future-proof: new integers need no allowlist entry.
 		expect(isReasoningGlmModelId("glm-5.3")).toBe(true);
 		expect(isReasoningGlmModelId("glm-6")).toBe(true);
+		// GLM-5.3-Flash is the first `-flash` SKU with mandatory thinking.
+		expect(isReasoningGlmModelId("glm-5.3-flash")).toBe(true);
 		// Namespaced ids are stripped before classification.
 		expect(isReasoningGlmModelId("z-ai/glm-5-turbo")).toBe(true);
 	});
 
-	test("excludes pre-4.5, vision, flash, and preview SKUs", () => {
+	test("excludes pre-4.5, vision, pre-5.3 flash, flashx, and preview SKUs", () => {
 		expect(isReasoningGlmModelId("glm-4")).toBe(false);
 		expect(isReasoningGlmModelId("glm-4.4")).toBe(false);
 		expect(isReasoningGlmModelId("glm-5-preview")).toBe(false);
 		expect(isReasoningGlmModelId("glm-4.5-flash")).toBe(false);
+		expect(isReasoningGlmModelId("glm-4.7-flash")).toBe(false);
+		expect(isReasoningGlmModelId("glm-5.2-flash")).toBe(false);
 		expect(isReasoningGlmModelId("glm-4.7-flashx")).toBe(false);
 		expect(isReasoningGlmModelId("glm-4.5v")).toBe(false);
 		expect(isReasoningGlmModelId("qwen3.5")).toBe(false);
@@ -313,11 +320,59 @@ describe("isReasoningGlmModelId", () => {
 	});
 });
 
+describe("isGlm52ReasoningEffortModelId", () => {
+	test("matches GLM-5.2+ reasoning SKUs including the 5.3 flash line", () => {
+		expect(isGlm52ReasoningEffortModelId("glm-5.2")).toBe(true);
+		expect(isGlm52ReasoningEffortModelId("zai-org/GLM-5.2-Fast")).toBe(true);
+		// The 5.3 flash SKU accepts reasoning_effort like the rest of 5.3+.
+		expect(isGlm52ReasoningEffortModelId("glm-5.3-flash")).toBe(true);
+		expect(isGlm52ReasoningEffortModelId("zai-org/GLM-5.3-Flash")).toBe(true);
+	});
+
+	test("excludes pre-5.2 SKUs, pre-5.3 flash, and non-reasoning variants", () => {
+		expect(isGlm52ReasoningEffortModelId("glm-5.1")).toBe(false);
+		expect(isGlm52ReasoningEffortModelId("glm-5.2-flash")).toBe(false);
+		expect(isGlm52ReasoningEffortModelId("glm-4.7-flashx")).toBe(false);
+		expect(isGlm52ReasoningEffortModelId("glm-5-preview")).toBe(false);
+		expect(isGlm52ReasoningEffortModelId("glm-4.5v")).toBe(false);
+	});
+});
+
+describe("isGlm53ReasoningEffortModelId", () => {
+	test("matches GLM-5.3+ SKUs across variants, including Flash", () => {
+		expect(isGlm53ReasoningEffortModelId("glm-5.3")).toBe(true);
+		expect(isGlm53ReasoningEffortModelId("glm-5.3-air")).toBe(true);
+		expect(isGlm53ReasoningEffortModelId("glm-5.3-turbo")).toBe(true);
+		expect(isGlm53ReasoningEffortModelId("glm-5.3-flash")).toBe(true);
+		expect(isGlm53ReasoningEffortModelId("zai-org/GLM-5.3-Flash")).toBe(true);
+		// Future bumps inherit the ladder without a new entry.
+		expect(isGlm53ReasoningEffortModelId("glm-6")).toBe(true);
+	});
+
+	test("excludes pre-5.3 SKUs and non-reasoning variants", () => {
+		expect(isGlm53ReasoningEffortModelId("glm-5.2")).toBe(false);
+		expect(isGlm53ReasoningEffortModelId("glm-5.2-flash")).toBe(false);
+		expect(isGlm53ReasoningEffortModelId("glm-5.3-flashx")).toBe(false);
+		expect(isGlm53ReasoningEffortModelId("glm-5.3-preview")).toBe(false);
+		expect(isGlm53ReasoningEffortModelId("glm-5.3v")).toBe(false);
+	});
+});
 describe("isGlmVisionModelId", () => {
 	test("matches the `v` vision shape across versions and variants", () => {
 		expect(isGlmVisionModelId("glm-4v")).toBe(true);
 		expect(isGlmVisionModelId("glm-4.5v")).toBe(true);
 		expect(isGlmVisionModelId("glm-4v-plus")).toBe(true);
+	});
+
+	test("matches the natively multimodal flash line from GLM-5.3-Flash on", () => {
+		// GLM-5.3-Flash accepts image blocks without carrying a `v` marker.
+		expect(isGlmVisionModelId("glm-5.3-flash")).toBe(true);
+		expect(isGlmVisionModelId("zai-org/GLM-5.3-Flash")).toBe(true);
+		// Earlier flash SKUs stay text-only.
+		expect(isGlmVisionModelId("glm-4.5-flash")).toBe(false);
+		expect(isGlmVisionModelId("glm-4.7-flash")).toBe(false);
+		// The text-only base line is unaffected.
+		expect(isGlmVisionModelId("glm-5.3")).toBe(false);
 	});
 
 	test("excludes non-vision GLM ids (the old `includes('v')` false positives)", () => {
@@ -437,5 +492,19 @@ describe("isGrokXHighEffortCapable", () => {
 		expect(isGrokXHighEffortCapable("grok-3-mini")).toBe(false);
 		expect(isGrokXHighEffortCapable("grok-build")).toBe(false);
 		expect(isGrokXHighEffortCapable("")).toBe(false);
+	});
+});
+
+describe("bareModelId", () => {
+	test("strips only the provider namespace and preserves colon-delimited identity", () => {
+		expect(bareModelId("ollama-cloud/gemma3:12b")).toBe("gemma3:12b");
+		expect(bareModelId("synthetic/syn:large:text")).toBe("syn:large:text");
+		expect(bareModelId("custom:happyhorse-1.0")).toBe("custom:happyhorse-1.0");
+	});
+
+	test("keeps ids without a colon suffix untouched", () => {
+		expect(bareModelId("anthropic/claude-opus-5")).toBe("claude-opus-5");
+		expect(bareModelId("gpt-5.6-luna")).toBe("gpt-5.6-luna");
+		expect(bareModelId("")).toBe("");
 	});
 });

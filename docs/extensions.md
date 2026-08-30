@@ -171,6 +171,8 @@ long as that extension registration is active. `pi.unregisterProvider(name)` (an
 extension source cleanup) removes only that runtime override, restoring the built-in
 or configured usage resolver.
 
+Extension-registered providers (`registerProvider`) can supply `fetchDynamicModels` for runtime model discovery; these fetches are hard-bounded to a 15-second timeout (`RUNTIME_DYNAMIC_MODEL_FETCH_TIMEOUT_MS` in `model-provider-discovery.ts`) so a hung endpoint cannot stall discovery.
+
 In interactive mode, `input` handlers run before the built-in first-message auto-title check. Extensions that call `await pi.setSessionName(...)` from `input` can set the persisted session name and prevent the default auto-generated title from running for that session.
 
 Also exposed:
@@ -191,6 +193,8 @@ Also exposed:
 - `triggerTurn: true` — starts a turn when idle (also honored with `deliverAs: "nextTurn"`: idle prompts immediately; while streaming the queued message schedules an internal continuation)
 
 `pi.sendUserMessage(content, { deliverAs })` always goes through prompt flow. Omit `deliverAs` to start a normal prompt when idle; while streaming, omitted `deliverAs` queues the message as a steer. Set `deliverAs: "followUp"` to wait until the current run finishes.
+
+Payloads passed to `pi.sendMessage` are normalized before delivery (`normalizeCustomMessagePayload` in `session/messages.ts`): non-object payloads are coerced to string content under the default custom type, missing `customType`/`attribution` fields are defaulted, and invalid content collapses to an empty string — malformed payloads no longer persist entries that crash later session resumes.
 
 ## 2) Handler context (`ExtensionContext`)
 
@@ -293,7 +297,7 @@ Cancelable pre-events:
 - `after_provider_response`
 - `context`
 - `agent_start` / `agent_end` — agent loop lifecycle notification; `agent_end` remains notification-only
-- `session_stop` — main-session stop hook, awaited before settle; may continue with `{ continue: true, additionalContext }` or `{ decision: "block", reason }`; capped at 8 consecutive continuations and never fires for task/subagent sessions
+- `session_stop` — main-session stop hook, awaited before settle; may continue with `{ continue: true, additionalContext }` or `{ decision: "block", reason }`; capped at 8 consecutive continuations, never fires for task/subagent sessions, and defers until agent-owned background jobs are fully idle (`#hasPendingAsyncWake` in `session/agent-session.ts`)
 - `turn_start` / `turn_end`
 - `message_start` / `message_update` / `message_end` — lifecycle notifications; `message_end` receives a detached message snapshot, so use `tool_result` or `context` when an extension needs to change provider context
 
@@ -566,7 +570,7 @@ Current no-op methods in this controller:
 - `setFooter`
 - `setHeader`
 
-`setEditorComponent` is wired to the live editor (`ctx.setEditorComponent(factory)`). `setWidget` renders real widget components above or below the editor via `setHookWidget(...)` (`placement: "aboveEditor" | "belowEditor"`; string-array content capped at 10 lines).
+`setEditorComponent` is wired to the live editor (`ctx.setEditorComponent(factory)`). `setWidget` renders real widget components above or below the editor via `setHookWidget(...)` (`placement: "aboveEditor" | "belowEditor"`; string-array content capped at 10 lines). `setEditorText` and `pasteToEditor` schedule a repaint after mutating the editor, so prompt changes don't leave stale content on screen.
 
 ### RPC mode (`rpc-mode.ts`)
 

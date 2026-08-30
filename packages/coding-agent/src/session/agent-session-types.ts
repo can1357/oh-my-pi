@@ -63,7 +63,7 @@ export interface AgentSessionDisposeOptions {
 /** Listener notified when command metadata changes. */
 export type CommandMetadataChangedListener = () => void | Promise<void>;
 /** Public summary of an asynchronous job. */
-export type AsyncJobSnapshotItem = Pick<AsyncJob, "id" | "type" | "status" | "label" | "startTime">;
+export type AsyncJobSnapshotItem = Pick<AsyncJob, "id" | "type" | "status" | "label" | "startTime" | "agentId">;
 
 /** Snapshot of running, recent, and pending-delivery asynchronous jobs. */
 export interface AsyncJobSnapshot {
@@ -417,6 +417,13 @@ export interface SessionStats {
 	};
 	premiumRequests: number;
 	cost: number;
+	credits?: {
+		cost: number;
+		committedCost: number;
+		acuCost: number;
+	};
+	/** Concrete provider-routed model ids with finalized turn counts. */
+	routedModels?: Record<string, number>;
 	contextUsage?: ContextUsage;
 }
 
