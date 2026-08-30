@@ -120,9 +120,15 @@ function devinErrorDetail(response: Response, payload: Uint8Array): string | und
 	if (normalized.length === 0 || HTML_ERROR_BODY_PATTERN.test(normalized) || sanitizeText(normalized) !== normalized) {
 		return undefined;
 	}
-	return normalized.length > MAX_DEVIN_ERROR_DETAIL_CHARS
-		? normalized.slice(0, MAX_DEVIN_ERROR_DETAIL_CHARS)
-		: normalized;
+	if (normalized.length <= MAX_DEVIN_ERROR_DETAIL_CHARS) return normalized;
+	// Truncate on a code-point boundary: slicing through a surrogate pair would
+	// re-introduce the malformed text the sanitizeText gate just ruled out.
+	const boundaryUnit = normalized.charCodeAt(MAX_DEVIN_ERROR_DETAIL_CHARS - 1);
+	const cut =
+		boundaryUnit >= 0xd800 && boundaryUnit <= 0xdbff
+			? MAX_DEVIN_ERROR_DETAIL_CHARS - 1
+			: MAX_DEVIN_ERROR_DETAIL_CHARS;
+	return normalized.slice(0, cut);
 }
 
 function createDevinHttpError(operation: string, response: Response, payload: Uint8Array): AIError.DevinApiError {

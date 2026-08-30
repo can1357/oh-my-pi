@@ -381,4 +381,30 @@ describe("streamDevin router assignment", () => {
 
 		expect(result.errorMessage).toBe("Devin API error 502 Bad Gateway");
 	});
+
+	it("truncates oversized error details on a code-point boundary", async () => {
+		const auth = fakeDevin({});
+		// 4095 units of padding put the astral pair astride the 4096 cutoff.
+		const message = `${"x".repeat(4095)}\u{1f600}tail`;
+		const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
+			if (String(input).includes("GetChatMessage")) {
+				return new Response(JSON.stringify({ error: { message } }), {
+					status: 502,
+					statusText: "Bad Gateway",
+					headers: { "content-type": "application/json" },
+				});
+			}
+			return auth.fetch(input, init);
+		}) as typeof fetch;
+
+		const result = await streamDevin(devinModel({}, "gemini-3-7-flash-medium"), context, {
+			apiKey: "token",
+			fetch: fetchImpl,
+		}).result();
+
+		expect(result.errorMessage).toBeDefined();
+		expect(result.errorMessage?.isWellFormed()).toBe(true);
+		expect(result.errorMessage?.endsWith("x")).toBe(true);
+		expect(result.errorMessage).not.toContain("\ufffd");
+	});
 });
