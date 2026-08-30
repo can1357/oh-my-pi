@@ -524,6 +524,38 @@ export function providerImageBudget(provider: string | undefined): number {
 	return (provider !== undefined ? PROVIDER_IMAGE_BUDGETS[provider] : undefined) ?? DEFAULT_PROVIDER_IMAGE_BUDGET;
 }
 
+/**
+ * Per-request image-BYTE budgets (base64 wire bytes) by provider id. Cap the
+ * combined base64 payload of every image in a request, independent of count.
+ * A snapcompact archive accretes many small frames that each sit well under the
+ * per-image dimension/size limit and under {@link PROVIDER_IMAGE_BUDGETS}, yet
+ * their summed bytes can still exceed the provider's request-size limit (a long
+ * session reached 79 frames / ~14 MB base64 on `messages[0]` and every request
+ * 413'd). Values are conservative caps that leave headroom for the rest of the
+ * context and a freshly added image; oldest frames are dropped first to fit.
+ */
+export const PROVIDER_IMAGE_BYTE_BUDGETS: Record<string, number> = {
+	anthropic: 6_000_000,
+	"amazon-bedrock": 6_000_000,
+	openai: 16_000_000,
+	"openai-codex": 16_000_000,
+	google: 16_000_000,
+	"google-vertex": 16_000_000,
+	"google-gemini-cli": 16_000_000,
+	openrouter: 6_000_000,
+	umans: 6_000_000,
+};
+
+/** Safe byte floor for unknown providers, mirroring the strict image-count floor. */
+export const DEFAULT_PROVIDER_IMAGE_BYTE_BUDGET = 4_000_000;
+
+/** Per-request image-byte budget for `provider`; unknown providers get the floor. */
+export function providerImageByteBudget(provider: string | undefined): number {
+	return (
+		(provider !== undefined ? PROVIDER_IMAGE_BYTE_BUDGETS[provider] : undefined) ?? DEFAULT_PROVIDER_IMAGE_BYTE_BUDGET
+	);
+}
+
 /** Archive frame cap for `provider`: image budget, never above {@link MAX_FRAMES_DEFAULT}. */
 export function providerFrameBudget(provider: string | undefined): number {
 	return Math.min(providerImageBudget(provider), MAX_FRAMES_DEFAULT);
