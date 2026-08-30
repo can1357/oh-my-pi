@@ -223,6 +223,23 @@ function parseAndSetValue(path: SettingPath, rawValue: string): void {
 			if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
 				throw new Error(`Invalid record JSON: ${rawValue}`);
 			}
+			if (path === "modelRoles") {
+				// `config set modelRoles` is a patch operation, not a destructive
+				// replacement. Validate the entire patch before mutating so one bad
+				// entry cannot partially update the table, then use the per-role
+				// setter so Settings' save-time merge preserves every unrelated role.
+				const normalizedEntries: Array<[string, string]> = [];
+				for (const [role, value] of Object.entries(parsed)) {
+					if (typeof value !== "string" || value.trim().length === 0) {
+						throw new Error(`Invalid model role value for ${role}: expected non-empty string`);
+					}
+					normalizedEntries.push([role, value.trim()]);
+				}
+				for (const [role, value] of normalizedEntries) {
+					settings.setModelRole(role, value);
+				}
+				return;
+			}
 			if (path === "providers.maxInFlightRequests") {
 				parsed = validateProviderMaxInFlightRequests(parsed);
 			}
