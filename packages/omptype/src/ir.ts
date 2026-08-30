@@ -736,6 +736,9 @@ function mergeObjectIR(left: IR, right: IR): IR {
 				? undefined
 				: [...(left.patternIndexes ?? []), ...(right.patternIndexes ?? [])],
 		extras: right.extras === "keep" ? left.extras : right.extras,
+		// Merging keeps the narrower input domain, like `intersect` and
+		// `mergeObjects` in type.ts: a merge accepts only what both sides do.
+		plain: left.plain === true || right.plain === true ? true : undefined,
 	};
 }
 
@@ -1336,6 +1339,7 @@ function addObjectProp(props: PropIR[], spreadKeys: Set<PropertyKey> | undefined
 function parseObjectDefinition(def: Record<PropertyKey, unknown>, resolve?: AliasResolver): IR {
 	const props: PropIR[] = [];
 	let spreadKeys: Set<PropertyKey> | undefined;
+	let plain: true | undefined;
 	let normalizedKey: PropertyKey | undefined;
 	let normalizedKeys: PropertyKey[] | undefined;
 	let indexes:
@@ -1380,6 +1384,10 @@ function parseObjectDefinition(def: Record<PropertyKey, unknown>, resolve?: Alia
 				if (spread.patternIndexes !== undefined) objectIndexes.patterns.push(...spread.patternIndexes);
 			}
 			if (spread.extras !== "keep") extras = spread.extras;
+			// The spread contributes its input domain along with its props and
+			// extras policy: spreading a plain-only object cannot widen back to
+			// arrays and built-ins.
+			if (spread.plain === true) plain = true;
 			continue;
 		}
 		if (typeof originalKey === "string" && originalKey.startsWith("[") && originalKey.endsWith("]")) {
@@ -1531,6 +1539,7 @@ function parseObjectDefinition(def: Record<PropertyKey, unknown>, resolve?: Alia
 		symbolIndex: indexes?.symbol,
 		patternIndexes: indexes === undefined || indexes.patterns.length === 0 ? undefined : indexes.patterns,
 		extras,
+		plain,
 	};
 	object[kSimple] = simple;
 	object[kSimpleOwner] = object;

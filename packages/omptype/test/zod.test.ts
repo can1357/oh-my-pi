@@ -327,6 +327,29 @@ describe("zod-like parsing", () => {
 		expect((z.strictObject({}) as unknown as { equals(def: unknown): boolean }).equals(unrestricted)).toBe(false);
 	});
 
+	it("carries the object-input domain into definitions that spread a shim schema", () => {
+		// `type({ "...": schema })` copies the spread's props, indexes and extras
+		// policy into a fresh node, so the domain has to travel with them: a
+		// definition spreading a plain-only object cannot widen back to arrays.
+		const spreadOf = (schema: unknown): ((value: unknown) => unknown) =>
+			type({ "...": schema as never }) as unknown as (value: unknown) => unknown;
+
+		const spread = spreadOf(z.strictObject({}));
+		expect(spread([])).toBeInstanceOf(OmpErrors);
+		expect(spread(new Date())).toBeInstanceOf(OmpErrors);
+		expect(spread({})).toEqual({});
+
+		const withRequired = spreadOf(z.object({ x: z.string() }));
+		expect(withRequired(Object.assign([], { x: "v" }))).toBeInstanceOf(OmpErrors);
+		expect(withRequired({ x: "v" })).toEqual({ x: "v" });
+
+		// An ArkType definition that spreads nothing keeps omptype's own object
+		// semantics, where an array IS object input — the domain is opt-in, and
+		// this is the assertion that keeps it that way.
+		const arkObject = type({ x: "string" }) as unknown as (value: unknown) => unknown;
+		expect(arkObject(Object.assign([], { x: "v" }))).toEqual([]);
+	});
+
 	it("rejects discriminators pinned to values it cannot advertise", () => {
 		// omptype compares object literals by reference, so emitting
 		// `const: {"a":1}` would promise the model a structural match the runtime
