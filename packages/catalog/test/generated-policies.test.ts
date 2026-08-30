@@ -831,16 +831,36 @@ describe("Grok Bot generated thinking policy", () => {
 		});
 	});
 
-	it("derives grok-4.6 seed effort ladder from provider KDL via buildModel", () => {
+	it("derives grok-4.6 seed effort ladder and sand params from provider KDL via buildModel", () => {
 		const [seed] = buildGrokbotStaticSeed().filter(m => m.id === "grok-4.6");
 		expect(seed?.thinking).toBeUndefined();
+		expect(seed?.sandParameterIds).toBeUndefined();
 		const built = buildModel(seed!);
 		expect(built.thinking).toEqual({
 			mode: "effort",
 			efforts: [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh],
 		});
+		expect(built.sandParameterIds).toEqual(["effort", "fast"]);
 		const router = buildModel(buildGrokbotStaticSeed().find(m => m.id === "sand-default")!);
 		expect(router.thinking).toBeUndefined();
+		expect(router.sandParameterIds).toBeUndefined();
+	});
+
+	it("does not overwrite live AvailableModels sandParameterIds with KDL", () => {
+		const live = buildModel({
+			id: "grok-4.6",
+			name: "Grok 4.6",
+			api: "grokbot-sand",
+			provider: "grokbot",
+			baseUrl: "https://api2.cursor.sh",
+			reasoning: true,
+			input: ["text", "image"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 200_000,
+			maxTokens: null,
+			sandParameterIds: ["effort"],
+		});
+		expect(live.sandParameterIds).toEqual(["effort"]);
 	});
 
 	it("applies reviewed context-window-floor to known routers when discovery left limits unset", () => {

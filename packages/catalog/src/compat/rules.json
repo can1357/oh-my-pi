@@ -8225,7 +8225,11 @@
 					]
 				},
 				"catalog": {
-					"contextWindowFloor": 200000
+					"contextWindowFloor": 200000,
+					"sandParameterIds": [
+						"effort",
+						"fast"
+					]
 				}
 			},
 			{

@@ -250,6 +250,12 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	 */
 	"preserve-authored-thinking": { key: "preserveAuthoredThinking", set: "catalog", shape: "scalar" },
 	priority: { key: "priority", set: "catalog", shape: "scalar" },
+	/**
+	 * Offline Sand wire-parameter allowlist (e.g. `effort`/`fast`). Applied only
+	 * when the model has not already declared `sandParameterIds` (live discovery
+	 * wins). Empty lists are unsupported — omit the property for bare routing.
+	 */
+	"sand-parameter-ids": { key: "sandParameterIds", set: "catalog", shape: "array" },
 	"service-tier-cost": { key: "serviceTierCost", set: "catalog", shape: "object" },
 };
 

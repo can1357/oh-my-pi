@@ -14,22 +14,26 @@ type GrokbotModelSeed = {
 	id: string;
 	name: string;
 	reasoning: boolean;
-	sandParameterIds?: readonly string[];
 };
 
 /**
  * Tiny offline fallback when AvailableModels is unreachable.
  * Live catalog comes from `fetchGrokbotAvailableModels` (authoritative).
  * Do not re-expand into alias forests — aliases resolve client-side from live rows.
- * Effort ladders are rule-owned (`providers/grokbot.kdl`); seeds stay neutral.
+ *
+ * Deployment routing facts (`sandParameterIds`, effort ladders, context floors)
+ * live in `providers/grokbot.kdl` and are applied via `buildModel` /
+ * `applyCatalogAssignments`. Seeds stay identity-neutral — omit
+ * `sandParameterIds` here (empty KDL arrays are unsupported; bare routing is
+ * the unset default consumed as `[]` on the wire).
  */
 export const GROKBOT_MODEL_SEEDS: readonly GrokbotModelSeed[] = [
-	{ id: "sand-default", name: "sand-default (routed)", reasoning: true, sandParameterIds: [] },
-	{ id: "sand-cua", name: "sand-cua (routed)", reasoning: false, sandParameterIds: [] },
-	{ id: "sand-automation", name: "sand-automation (routed)", reasoning: false, sandParameterIds: [] },
-	{ id: "default", name: "Auto", reasoning: false, sandParameterIds: [] },
-	{ id: "auto", name: "auto", reasoning: false, sandParameterIds: [] },
-	{ id: "grok-4.6", name: "Grok 4.6 (sand)", reasoning: true, sandParameterIds: ["effort", "fast"] },
+	{ id: "sand-default", name: "sand-default (routed)", reasoning: true },
+	{ id: "sand-cua", name: "sand-cua (routed)", reasoning: false },
+	{ id: "sand-automation", name: "sand-automation (routed)", reasoning: false },
+	{ id: "default", name: "Auto", reasoning: false },
+	{ id: "auto", name: "auto", reasoning: false },
+	{ id: "grok-4.6", name: "Grok 4.6 (sand)", reasoning: true },
 ];
 
 export function buildGrokbotStaticSeed(baseUrl = GROKBOT_BACKEND): ModelSpec<"grokbot-sand">[] {
@@ -45,7 +49,6 @@ export function buildGrokbotStaticSeed(baseUrl = GROKBOT_BACKEND): ModelSpec<"gr
 		contextWindow: 200_000,
 		maxTokens: 64_000,
 		supportsTools: true,
-		sandParameterIds: seed.sandParameterIds ?? [],
 		sandMaxMode: false,
 	}));
 }

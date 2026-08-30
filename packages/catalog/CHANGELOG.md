@@ -10,6 +10,7 @@
 
 ### Fixed
 
+- Grok Bot offline `sandParameterIds` for `grok-4.6` come from provider KDL (`sand-parameter-ids`) via `buildModel`, not TypeScript seed tables.
 - Grok Bot thinking fallback suppression uses KDL `preserve-authored-thinking` in `buildModel` (no provider/API TypeScript branch).
 - Grok Bot AvailableModels leaves context windows unset when omitted; reviewed floors come from KDL for known routers/seeds.
 - Grok Bot AvailableModels leaves output caps unset instead of inventing a 64K `maxTokens` (wire omits `modelConfig.maxTokens` until a reviewed limit exists).
