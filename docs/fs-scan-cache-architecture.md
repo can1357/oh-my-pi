@@ -33,6 +33,8 @@ High-level `WalkRequest` filters, ranking, result limits, empty-recheck policy, 
 
 Collected entries contain normalized forward-slash relative paths and file types. `WalkDetail::Full` additionally requests mtime and regular-file size. Cancellation is delivered through the caller-supplied heartbeat.
 
+Cached scans of the same key are single-flight: the first caller (the leader) performs the walk outside all locks while later callers either serve the existing snapshot — even an expired one — or block on the leader when no snapshot exists yet. Blocked followers poll their own heartbeat, so their own cancellation or timeout ends their wait with their own `Interrupted` error rather than waiting out the leader's walk. A leader that fails on its own heartbeat does not propagate that error to followers; followers rerun the walk themselves, each bounded by its own heartbeat.
+
 Traversal-adjacent parallel work uses a shared Rayon pool:
 
 - `PI_WALK_WORKERS` defaults to `4`
@@ -52,7 +54,7 @@ With caching enabled:
 
 - TTL `0` bypasses cache and returns a fresh scan with `cache_age_ms = 0`.
 - A hit younger than TTL clones the stored entries and reports its age.
-- An expired entry is removed and replaced by a fresh scan.
+- An expired entry stays in place and is served stale-while-revalidate: the caller that triggers refresh walks fresh, while other concurrent callers keep receiving the expired snapshot until a successful scan replaces it. A failed revalidation likewise leaves the stale snapshot cached for later callers.
 - After insertion, entries above the configured maximum are evicted oldest-first by creation time.
 
 With caching disabled, collection scans fresh and neither reads nor populates the shared cache. It does not evict an existing cached entry for the same key.

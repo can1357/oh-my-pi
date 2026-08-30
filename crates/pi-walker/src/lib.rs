@@ -2156,7 +2156,7 @@ const fn walk_decision_to_control(decision: WalkDecision) -> WalkControl {
 }
 
 /// Error returned by native traversal.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum WalkError<E> {
 	/// A caller-supplied heartbeat or visitor returned an error.
 	Interrupted(E),
