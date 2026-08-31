@@ -191,16 +191,15 @@ export interface CompactionSettings {
 export const DEFAULT_RESERVE_TOKENS = 16384;
 
 /**
- * Hard ceiling on a generated compaction summary.
+ * Hard ceiling on a generated continuity capsule.
  *
- * The summary budget is `floor(0.8 * reserveTokens)`, and the effective reserve is
- * at least 15% of the declared context window, so a 1M-token window authorizes a
- * ~120k-token summary. At that size the model copies rather than compresses, and
- * output is the slowest and most expensive token class. Capping absolutely keeps
- * the compression ratio improving with window size instead of degrading. The value
- * mirrors {@link DEFAULT_RESERVE_TOKENS} so this adds no new tuning constant.
+ * Large model windows can otherwise authorize summaries that copy implementation
+ * chronology instead of preserving the small set of facts needed to resume. Two
+ * thousand tokens leave ample room for the selective 500-word capsule contract
+ * while programmatically bounding noncompliant output.
  */
-export const MAX_SUMMARY_TOKENS = DEFAULT_RESERVE_TOKENS;
+export const MAX_SUMMARY_TOKENS = 2048;
+const MAX_TURN_PREFIX_SUMMARY_TOKENS = 1024;
 
 // reserveTokens is deliberately absent: an unset reserve is what marks it as
 // defaulted, which resolveBudgetReserveTokens needs to distinguish "user never
@@ -782,17 +781,15 @@ function minSummaryInputTokens(model: Model): number {
 }
 
 /**
- * Usable conversation input for ONE summarization call: the summarizer's window
- * minus the summary it must emit, the previous summary it carries forward, and
- * prompt scaffolding. Providers tokenize differently from the local cl100k
- * estimate, so the window is discounted before the fixed reserves come off.
+ * Usable conversation input for ONE summarization call: the discounted model
+ * window minus the historical fixed reserves for summary carry-forward, output,
+ * and prompt scaffolding. The concise output cap must not silently widen input
+ * windows: provider tokenizers still disagree with the local cl100k estimate,
+ * and being wrong here is a hard 400 on the call rescuing an oversized session.
  */
-function summaryInputBudgetTokens(model: Model, maxTokens: number): number {
+function summaryInputBudgetTokens(model: Model): number {
 	const window = model.contextWindow && model.contextWindow > 0 ? model.contextWindow : DEFAULT_SUMMARY_INPUT_WINDOW;
-	// 0.8, not "window minus reserves": provider tokenizers disagree with the
-	// local cl100k estimate by a few percent, and being wrong here is a hard
-	// 400 on the one call that is supposed to rescue an oversized session.
-	return Math.max(minSummaryInputTokens(model), Math.floor(window * 0.8) - maxTokens - MAX_SUMMARY_TOKENS);
+	return Math.max(minSummaryInputTokens(model), Math.floor(window * 0.8) - DEFAULT_RESERVE_TOKENS * 2);
 }
 
 /**
@@ -862,7 +859,7 @@ export async function generateSummary(
 	const dialect = preferredDialect(model.id);
 	const tokenizer = new Tokenizer(model);
 	const wholeConversation = serializeConversationForSummary(llmMessages, dialect);
-	const budgetTokens = summaryInputBudgetTokens(model, maxTokens);
+	const budgetTokens = summaryInputBudgetTokens(model);
 	// A span that outgrew the summarizer's window is summarized as a fold: each
 	// window updates the summary carried out of the previous one, which is the
 	// same contract the update prompt already implements for iterative
@@ -1813,7 +1810,7 @@ async function generateTurnPrefixSummary(
 	signal?: AbortSignal,
 	options?: SummaryOptions,
 ): Promise<string> {
-	const maxTokens = Math.min(Math.floor(0.5 * reserveTokens), MAX_SUMMARY_TOKENS); // Smaller budget for turn prefix
+	const maxTokens = Math.min(Math.floor(0.5 * reserveTokens), MAX_TURN_PREFIX_SUMMARY_TOKENS);
 
 	const llmMessages = (options?.convertToLlm ?? defaultConvertToLlm)(messages);
 	const conversationText = serializeConversationForSummary(llmMessages, preferredDialect(model.id));
