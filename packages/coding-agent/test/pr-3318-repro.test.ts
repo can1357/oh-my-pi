@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import type { UsageReport } from "@oh-my-pi/pi-ai";
 import { buildUsageReportText } from "@oh-my-pi/pi-coding-agent/slash-commands/helpers/usage-report";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 
 describe("PR 3318 repro", () => {
 	it("falls back to scoped account when metadata identities are empty strings", async () => {
@@ -18,6 +19,7 @@ describe("PR 3318 repro", () => {
 			metadata: { email: "", accountId: "", projectId: "" },
 		};
 		const text = await buildUsageReportText({
+			settings: Settings.isolated(),
 			session: {
 				model: undefined,
 				fetchUsageReports: async () => [report],
@@ -46,6 +48,7 @@ describe("PR 3318 repro", () => {
 			resetCredits: { availableCount: 1 },
 		};
 		const text = await buildUsageReportText({
+			settings: Settings.isolated(),
 			session: { model: undefined, fetchUsageReports: async () => [report] },
 		} as never);
 		expect(text).toContain("user@example.test · plan: prolite forged: 1 saved rate-limit reset");
