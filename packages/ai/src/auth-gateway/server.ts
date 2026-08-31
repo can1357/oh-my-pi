@@ -1009,6 +1009,25 @@ async function handleFormatEndpoint(
 				reason: "credential_unavailable",
 			});
 			logger.debug("auth-gateway route decision", redactedDecisionSummary(skipped));
+			const unavailable: GatewayErrorClassification = {
+				status: 401,
+				type: "authentication_error",
+				message: `No credential available for provider ${model.provider}`,
+				owner: "credential",
+				disposition: "provider_unavailable",
+			};
+			if (considerFallback(unavailable)) return { type: "retry" };
+			// Balance / multi-target routes may have unused siblings without fallback edges.
+			const next = decideAttempt({
+				route: compiled,
+				state: stateNow(),
+				commitState: commitGate.state,
+			});
+			if (next.type === "dispatch") {
+				pendingFallback = next.targetModelId;
+				retryCount += 1;
+				return { type: "retry" };
+			}
 			return {
 				type: "respond",
 				response: formatError(
@@ -1056,6 +1075,7 @@ async function handleFormatEndpoint(
 	if (!parsed.stream) {
 		try {
 			for (let attempt = 0; attempt < attemptCap; attempt++) {
+				if (attempt > 0) commitGate.reset();
 				if (controller.signal.aborted) return clientClosedResponse(route);
 				const picked = pickTarget();
 				if (picked) return picked;
@@ -1139,6 +1159,7 @@ async function handleFormatEndpoint(
 	}
 
 	for (let attempt = 0; attempt < attemptCap; attempt++) {
+		if (attempt > 0) commitGate.reset();
 		if (controller.signal.aborted) {
 			bootOpts.storage.releaseTurnReservation(requestId);
 			return clientClosedResponse(route);
@@ -1495,6 +1516,24 @@ async function handlePiNative(
 				reason: "credential_unavailable",
 			});
 			logger.debug("auth-gateway route decision", redactedDecisionSummary(skipped));
+			const unavailable: GatewayErrorClassification = {
+				status: 401,
+				type: "authentication_error",
+				message: `No credential available for provider ${model.provider}`,
+				owner: "credential",
+				disposition: "provider_unavailable",
+			};
+			if (considerFallback(unavailable)) return { type: "retry" };
+			const next = decideAttempt({
+				route: compiled,
+				state: stateNow(),
+				commitState: commitGate.state,
+			});
+			if (next.type === "dispatch") {
+				pendingFallback = next.targetModelId;
+				retryCount += 1;
+				return { type: "retry" };
+			}
 			return {
 				type: "respond",
 				response: formatError(
@@ -1559,6 +1598,7 @@ async function handlePiNative(
 	if (!parsed.stream) {
 		try {
 			for (let attempt = 0; attempt < attemptCap; attempt++) {
+				if (attempt > 0) commitGate.reset();
 				if (controller.signal.aborted) return aborted();
 				const picked = pickTarget();
 				if (picked) return picked;
@@ -1632,6 +1672,7 @@ async function handlePiNative(
 	}
 
 	for (let attempt = 0; attempt < attemptCap; attempt++) {
+		if (attempt > 0) commitGate.reset();
 		if (controller.signal.aborted) {
 			bootOpts.storage.releaseTurnReservation(requestId);
 			return aborted();
@@ -2032,7 +2073,10 @@ export function startAuthGateway(opts: AuthGatewayBootOptions): AuthGatewayServe
 				}
 
 				if (req.method === "POST" && pathname === "/v1/messages/count_tokens") {
-					return withCors(await handleCountTokens(req, boot.resolveModel), req);
+					return withCors(
+						await handleCountTokens(req, id => registry.resolve(id) ?? boot.resolveModel(id)),
+						req,
+					);
 				}
 				if (req.method === "POST" && (pathname === "/v1/realtime" || pathname === "/v1/audio/speech")) {
 					return withCors(json(501, { error: "not available on this gateway" }), req);

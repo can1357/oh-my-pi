@@ -4,6 +4,11 @@
 
 ### Fixed
 
+- Block private discovery hosts across RFC1918, CGNAT, link-local, and IPv6 ULA ranges when `allowPrivate` is unset.
+- Reset StreamCommitGate before each pre-commit retry so terminated gates do not hold fallback SSE.
+- Continue routing to backup targets when a virtual-route primary has no credential.
+- Resolve `/v1/messages/count_tokens` models through the route registry so virtual route ids work.
+
 - Remember prompt-cache affinity under the derived session fingerprint when clients omit an explicit cache key.
 - Settle quota probes only after a successful stream result, not on post-commit failure or client cancel.
 - Preserve the SSE chunk that crosses the StreamCommitGate prelude byte cap instead of dropping it on commit.
