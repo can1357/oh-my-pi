@@ -1113,6 +1113,7 @@ export interface Model<TApi extends Api = Api> {
 	 */
 	catalogFallback?: {
 		liveCostFields?: readonly (keyof TokenCost)[];
+		liveLimitFields?: readonly ("contextWindow" | "maxTokens")[];
 		liveInputModalities?: boolean;
 		liveReasoning?: boolean;
 	};

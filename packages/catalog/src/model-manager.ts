@@ -601,8 +601,18 @@ function mergeDynamicModel<TApi extends Api>(existingModel: Model<TApi>, dynamic
 			),
 			...(longContextCost ? { longContext: longContextCost } : {}),
 		},
-		contextWindow: preferDiscoveryLimit(dynamicModel.contextWindow, existingModel.contextWindow),
-		maxTokens: preferDiscoveryLimit(dynamicModel.maxTokens, existingModel.maxTokens),
+		contextWindow: preferDiscoveryLimit(
+			dynamicModel.contextWindow,
+			existingModel.contextWindow,
+			dynamicModel.catalogFallback,
+			"contextWindow",
+		),
+		maxTokens: preferDiscoveryLimit(
+			dynamicModel.maxTokens,
+			existingModel.maxTokens,
+			dynamicModel.catalogFallback,
+			"maxTokens",
+		),
 		headers: dynamicModel.headers ? { ...existingModel.headers, ...dynamicModel.headers } : existingModel.headers,
 		compat: dynamicModel.compatConfig ?? existingModel.compatConfig,
 		contextPromotionTarget: dynamicModel.contextPromotionTarget ?? existingModel.contextPromotionTarget,
@@ -635,11 +645,29 @@ function preferDiscoveryName(discoveryName: string, fallbackName: string, modelI
 	return normalizedDiscoveryName;
 }
 
-function preferDiscoveryLimit(discoveryLimit: number, fallbackLimit: number): number;
-function preferDiscoveryLimit(discoveryLimit: number | null, fallbackLimit: number | null): number | null;
-function preferDiscoveryLimit(discoveryLimit: number | null, fallbackLimit: number | null): number | null {
+function preferDiscoveryLimit(
+	discoveryLimit: number,
+	fallbackLimit: number,
+	catalogFallback: Model<Api>["catalogFallback"],
+	field: "contextWindow" | "maxTokens",
+): number;
+function preferDiscoveryLimit(
+	discoveryLimit: number | null,
+	fallbackLimit: number | null,
+	catalogFallback: Model<Api>["catalogFallback"],
+	field: "contextWindow" | "maxTokens",
+): number | null;
+function preferDiscoveryLimit(
+	discoveryLimit: number | null,
+	fallbackLimit: number | null,
+	catalogFallback: Model<Api>["catalogFallback"],
+	field: "contextWindow" | "maxTokens",
+): number | null {
 	if (discoveryLimit === null || !Number.isFinite(discoveryLimit) || discoveryLimit <= 0) {
 		return fallbackLimit;
+	}
+	if (catalogFallback?.liveLimitFields?.includes(field) === true) {
+		return discoveryLimit;
 	}
 	if (discoveryLimit === 4096 && fallbackLimit !== null && fallbackLimit > discoveryLimit) {
 		return fallbackLimit;

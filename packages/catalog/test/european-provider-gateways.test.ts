@@ -662,6 +662,8 @@ describe("European gateway provider catalog support", () => {
 								name: "Kimi K2.7 Code 1100B",
 								pricing: { prompt: "0", completion: "0" },
 								supports_reasoning: false,
+								context_length: 32_768,
+								max_completion_tokens: 4_096,
 							},
 						],
 					}),
@@ -689,6 +691,8 @@ describe("European gateway provider catalog support", () => {
 		expect(aki.models[0]).toMatchObject({
 			cost: { input: 0, output: 0 },
 			reasoning: false,
+			contextWindow: 32_768,
+			maxTokens: 4_096,
 		});
 		expect(aki.models[0]?.thinking).toBeUndefined();
 		expect(eurouter.models[0]).toMatchObject({ input: ["text"] });

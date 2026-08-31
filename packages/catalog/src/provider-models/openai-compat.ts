@@ -957,15 +957,29 @@ function mapEuropeanGatewayModel(
 	const outputCost = toGatewayCostPerMillion(pricing?.completion ?? pricing?.output_token);
 	const cacheReadCost = toGatewayCostPerMillion(pricing?.input_cache_read ?? pricing?.cache_read_cost);
 	const cacheWriteCost = toGatewayCostPerMillion(pricing?.input_cache_write ?? pricing?.cache_write_cost);
+	const liveContextWindow = toPositiveNumber(
+		entry.context_length,
+		toPositiveNumber(entry.context_size, toPositiveNumber(topProvider?.context_length, null)),
+	);
+	const liveMaxTokens = toPositiveNumber(
+		entry.max_completion_tokens,
+		toPositiveNumber(topProvider?.max_completion_tokens, null),
+	);
+	const contextWindow = liveContextWindow ?? model.contextWindow ?? knownReference?.contextWindow ?? null;
+	const maxTokens = liveMaxTokens ?? model.maxTokens ?? knownReference?.maxTokens ?? null;
 	const liveCostFields: (keyof TokenCost)[] = [];
 	if (inputCost !== undefined) liveCostFields.push("input");
 	if (outputCost !== undefined) liveCostFields.push("output");
 	if (cacheReadCost !== undefined) liveCostFields.push("cacheRead");
 	if (cacheWriteCost !== undefined) liveCostFields.push("cacheWrite");
+	const liveLimitFields: ("contextWindow" | "maxTokens")[] = [];
+	if (liveContextWindow !== null) liveLimitFields.push("contextWindow");
+	if (liveMaxTokens !== null) liveLimitFields.push("maxTokens");
 	const catalogFallback =
-		liveCostFields.length > 0 || liveInputModalities || liveReasoning
+		liveCostFields.length > 0 || liveLimitFields.length > 0 || liveInputModalities || liveReasoning
 			? {
 					...(liveCostFields.length > 0 && { liveCostFields }),
+					...(liveLimitFields.length > 0 && { liveLimitFields }),
 					...(liveInputModalities && { liveInputModalities: true }),
 					...(liveReasoning && { liveReasoning: true }),
 				}
@@ -986,17 +1000,8 @@ function mapEuropeanGatewayModel(
 				cacheWriteCost ?? reference?.cost.cacheWrite ?? knownReference?.cost.cacheWrite ?? model.cost.cacheWrite,
 		},
 		...(catalogFallback && { catalogFallback }),
-		contextWindow: toPositiveNumber(
-			entry.context_length,
-			toPositiveNumber(
-				entry.context_size,
-				toPositiveNumber(topProvider?.context_length, model.contextWindow ?? knownReference?.contextWindow ?? null),
-			),
-		),
-		maxTokens: toPositiveNumber(
-			entry.max_completion_tokens,
-			toPositiveNumber(topProvider?.max_completion_tokens, model.maxTokens ?? knownReference?.maxTokens ?? null),
-		),
+		contextWindow,
+		maxTokens,
 		...(supportsTools !== undefined ? { supportsTools } : {}),
 	};
 	applyCatalogCorrections(mapped, resolveModelPolicy(mapped).catalog);
