@@ -47,6 +47,11 @@ import {
 	formatActiveRepoWatchdogPrompt,
 	formatAdvisorContextPrompt,
 } from "./advisor";
+import {
+	type AssignmentCapabilityLaunchOptions,
+	AssignmentCapabilityRuntime,
+	AssignmentCompleteTool,
+} from "./assignment-capability";
 import { AsyncJobManager } from "./async";
 import { AutoLearnController, buildAutoLearnInstructions } from "./autolearn/controller";
 import { createAutoresearchExtension } from "./autoresearch";
@@ -433,6 +438,12 @@ export interface CreateAgentSessionOptions {
 	providerPromptCacheKeySource?: "explicit" | "fork";
 	/** Absolute wall-clock deadline in Unix epoch milliseconds. */
 	deadline?: number;
+	/**
+	 * Immutable JIP-0065 launch eligibility. The holder secret and live notices
+	 * are acquired from Herdr and remain in process memory; this option contains
+	 * only caller-owned transport addressing.
+	 */
+	assignmentCapability?: Readonly<AssignmentCapabilityLaunchOptions>;
 
 	/** Custom tools to register (in addition to built-in tools). Accepts both CustomTool and ToolDefinition. */
 	customTools?: (CustomTool | ToolDefinition)[];
@@ -675,6 +686,7 @@ export function resolveDialect(
 
 // Re-exports
 
+export type { AssignmentCapabilityLaunchOptions } from "./assignment-capability";
 export type { PromptTemplate } from "./config/prompt-templates";
 export { Settings, type SkillsSettings } from "./config/settings";
 export type { CustomCommand, CustomCommandFactory } from "./extensibility/custom-commands/types";
@@ -2730,6 +2742,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// (The builtin autoresearch extension is unconditionally loaded above, so this scenario
 		// is unreachable; unconditional runner construction keeps that invariant explicit and
 		// prevents future optional extensions from silently re-opening the hole.)
+		const assignmentCapabilityRuntime = options.assignmentCapability
+			? await AssignmentCapabilityRuntime.create(options.assignmentCapability)
+			: undefined;
 		const extensionRunner: ExtensionRunner = new ExtensionRunner(
 			extensionsResult.extensions,
 			extensionsResult.runtime,
@@ -2740,6 +2755,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			settings,
 			localProtocolOptions,
 			() => (hasSession ? session.getAsyncJobSnapshot() : null),
+			assignmentCapabilityRuntime,
 		);
 
 		credentialDisabledTarget = extensionRunner;
@@ -2830,6 +2846,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			toolRegistry.set(tool.name, tool);
 			builtInRegistryToolNames.delete(tool.name);
 		}
+		if (assignmentCapabilityRuntime) {
+			const assignmentCompleteTool = wrapToolWithMetaNotice(new AssignmentCompleteTool());
+			toolRegistry.set(assignmentCompleteTool.name, assignmentCompleteTool);
+			builtInRegistryToolNames.add(assignmentCompleteTool.name);
+			nativeToolsByName.set(assignmentCompleteTool.name, assignmentCompleteTool);
+		}
 		// Expose the native built-ins to same-tool `ctx.invokeTool` on re-registered tools. Set after
 		// the override loop so the map holds the natives, not the extension replacements. The context
 		// factory is the loop's own tool context, so a delegated native call sees ordinary session state.
@@ -2850,7 +2872,14 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// call site, regardless of whether any user extensions are loaded. See the runner-construction
 		// comment above for the safety invariant this enforces.
 		for (const tool of toolRegistry.values()) {
-			toolRegistry.set(tool.name, new ExtensionToolWrapper(tool, extensionRunner));
+			toolRegistry.set(
+				tool.name,
+				new ExtensionToolWrapper(
+					tool,
+					extensionRunner,
+					builtInRegistryToolNames.has(tool.name) ? "core" : "external",
+				),
+			);
 		}
 		// Hashline `edit` stays in the registry so Cursor can call it as MCP.
 		// Native StrReplace arrives as `editToolCall` and materializes through
@@ -2886,7 +2915,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				const writeTool = await logger.time("createTools:write:session", BUILTIN_TOOLS.write, toolSession);
 				if (!writeTool || toolRegistry.has("write")) return builtInRegistryToolNames.has("write");
 				const nativeWrite = wrapToolWithMetaNotice(writeTool);
-				toolRegistry.set(writeTool.name, new ExtensionToolWrapper(nativeWrite, extensionRunner) as Tool);
+				toolRegistry.set(writeTool.name, new ExtensionToolWrapper(nativeWrite, extensionRunner, "core") as Tool);
 				builtInRegistryToolNames.add(writeTool.name);
 				nativeToolsByName.set(writeTool.name, nativeWrite);
 				return true;
@@ -2911,7 +2940,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				const goalTool = await logger.time("createTools:goal:session", HIDDEN_TOOLS.goal, toolSession);
 				if (!goalTool || toolRegistry.has("goal")) return toolRegistry.has("goal");
 				const nativeGoal = wrapToolWithMetaNotice(goalTool);
-				toolRegistry.set(goalTool.name, new ExtensionToolWrapper(nativeGoal, extensionRunner) as Tool);
+				toolRegistry.set(goalTool.name, new ExtensionToolWrapper(nativeGoal, extensionRunner, "core") as Tool);
 				builtInRegistryToolNames.add(goalTool.name);
 				nativeToolsByName.set(goalTool.name, nativeGoal);
 				return true;
@@ -2974,6 +3003,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			getEditReplaceTool: getCursorBridgeEditTool,
 			getToolContext: () => toolContextStore.getContext(),
 			mcpResources: cursorMcpResources,
+			assignmentCapabilityRuntime: assignmentCapabilityRuntime !== undefined,
 			emitEvent: event => cursorEventEmitter?.(event),
 			getTodoPhases: () => session.getTodoPhases(),
 			setTodoPhases: phases => session.setTodoPhases(phases),
@@ -3597,7 +3627,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// first, matching the registry's wrap order.
 		const advisorTools: Tool[] = built
 			.filter((tool): tool is Tool => tool != null)
-			.map(tool => new ExtensionToolWrapper(wrapToolWithMetaNotice(tool), extensionRunner) as Tool);
+			.map(tool => new ExtensionToolWrapper(wrapToolWithMetaNotice(tool), extensionRunner, "core-readonly") as Tool);
 
 		const advisorWatchdogPrompts = [...watchdogFiles];
 		if (initialActiveRepoContext) {
@@ -3722,13 +3752,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			providerPromptCacheKeySource,
 			parentEvalSessionId: options.parentEvalSessionId,
 			advisorTools,
-			// Same per-call `grep` seam the primary bridge gets, built against the
+			advisorCreateGrepTool: createBridgeGrepFactory(advisorToolSession, extensionRunner, "core-readonly"),
 			// advisor's own tool session so a `pi_grep` frame's context width and
 			// match cap are honored there too.
-			advisorCreateGrepTool: createBridgeGrepFactory(advisorToolSession, extensionRunner),
-			// Same `replace`-mode requirement as the primary bridge; the advisor
-			// path gates it on the advisor's own `edit` grant.
-			advisorCreateEditTool: () => createBridgeEditTool(advisorToolSession, extensionRunner),
+			advisorCreateEditTool: () => createBridgeEditTool(advisorToolSession, extensionRunner, "core-readonly"),
 			// The advisor's bridge tools are wrapped for approval, but the wrapper
 			// reads the mode and per-tool policies only from the execute-time
 			// context — the primary bridge passes the same store.

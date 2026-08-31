@@ -10,6 +10,7 @@ import type {
 } from "@oh-my-pi/pi-agent-core";
 import type { ComputerSafetyCheck, ImageContent, Static, TextContent, TSchema } from "@oh-my-pi/pi-ai";
 import { sanitizeText, untilAborted } from "@oh-my-pi/pi-utils";
+import { type AssignmentToolTrust, classifyAssignmentTool } from "../../assignment-capability";
 import type { Settings } from "../../config/settings";
 import type { Theme } from "../../modes/theme/theme";
 import {
@@ -161,6 +162,7 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 	constructor(
 		private tool: AgentTool<TParameters, TDetails>,
 		private runner: ExtensionRunner,
+		private readonly assignmentTrust: AssignmentToolTrust = "external",
 	) {
 		applyToolProxy(tool, this);
 	}
@@ -345,26 +347,63 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 			}
 		}
 
-		// Execute the actual tool
+		// 3. Assignment capability gate. Sessions whose immutable launch record
+		// declares the gateway get one universal in-process gate. Ordinary OMP
+		// Sessions have no Assignment runtime and retain their existing tools.
+		// Approval establishes user intent only; it never supplies Assignment
+		// execution authority. Classification is after extension revision and
+		// final approval resolution, against the exact args that would execute.
+		const assignmentRuntime = this.runner.getAssignmentCapability();
+		const classification = assignmentRuntime
+			? classifyAssignmentTool(this.tool.name, this.assignmentTrust, resolved.tier, effectiveParams)
+			: undefined;
+		if (classification?.kind === "denied") {
+			throw new Error(`Assignment capability denied: tool "${this.tool.name}" is not authorized by v1`);
+		}
+
 		let result: AgentToolResult<TDetails, TParameters>;
 		let executionError: Error | undefined;
-
-		try {
-			// A denied file write or delete inside this tool can be brokered to an
-			// extension handler, and that registry is PROCESS-WIDE — so the session is
-			// named here, the one place where every tool's execution and the runner
-			// that owns the handlers are both in scope (`sdk.ts` wraps the whole tool
-			// registry with this class whenever a runner exists). Inert with no
-			// fallback registered: no scope is entered.
-			result = await withFileMutationSession(this.runner.sessionId, () =>
-				this.tool.execute(toolCallId, effectiveParams, signal, onUpdate, context),
-			);
-		} catch (err) {
-			executionError = err instanceof Error ? err : new Error(String(err));
-			result = {
-				content: [{ type: "text", text: executionError.message }],
-				details: undefined as TDetails,
-			};
+		if (classification?.kind === "mutation") {
+			const runtime = assignmentRuntime;
+			if (!runtime) throw new Error("Assignment capability runtime is unavailable");
+			const effectiveArgsDigest = await runtime.digest(effectiveParams);
+			const execution = await runtime.execute({
+				toolCall: toolCallId,
+				tool: classification.family,
+				tier: "write",
+				effectiveArgs: effectiveParams,
+				effectiveArgsDigest,
+			});
+			// The discussion Session is requester-only: the local mutating tool is
+			// deliberately not called. Go returns one already-sanitized tool result
+			// after the hidden worker attempt is terminal.
+			result = execution.toolResult as AgentToolResult<TDetails, TParameters>;
+		} else if (classification?.kind === "completion") {
+			const runtime = assignmentRuntime;
+			if (!runtime) throw new Error("Assignment capability runtime is unavailable");
+			const completion = await runtime.complete(toolCallId);
+			// Completion is an explicit authenticated Go lifecycle transition. The
+			// local placeholder tool never executes and final output/idle/close do
+			// not imply completion.
+			result = completion.toolResult as AgentToolResult<TDetails, TParameters>;
+		} else {
+			try {
+				// A denied file write or delete inside this tool can be brokered to an
+				// extension handler, and that registry is PROCESS-WIDE — so the session is
+				// named here, the one place where every tool's execution and the runner
+				// that owns the handlers are both in scope (`sdk.ts` wraps the whole tool
+				// registry with this class whenever a runner exists). Inert with no
+				// fallback registered: no scope is entered.
+				result = await withFileMutationSession(this.runner.sessionId, () =>
+					this.tool.execute(toolCallId, effectiveParams, signal, onUpdate, context),
+				);
+			} catch (err) {
+				executionError = err instanceof Error ? err : new Error(String(err));
+				result = {
+					content: [{ type: "text", text: executionError.message }],
+					details: undefined as TDetails,
+				};
+			}
 		}
 
 		// Emit tool_result event - extensions can modify the result and error status

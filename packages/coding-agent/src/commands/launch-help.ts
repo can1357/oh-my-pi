@@ -14,6 +14,14 @@ export const launchHelp = {
 		}),
 	},
 	flags: {
+		"assignment-capability-schema": Flags.string({
+			description: "Internal Assignment capability schema",
+			hidden: true,
+		}),
+		"assignment-herdr-socket": Flags.string({ description: "Internal Herdr capability socket", hidden: true }),
+		"assignment-herdr-pane": Flags.string({ description: "Internal Herdr pane binding", hidden: true }),
+		"assignment-session": Flags.string({ description: "Internal OMP Session binding", hidden: true }),
+		"assignment-juiz-gateway-argv": Flags.string({ description: "Internal Juiz gateway argv", hidden: true }),
 		model: Flags.string({
 			description: 'Model to use (fuzzy match: "opus", "gpt-5.2", or "openai/gpt-5.2")',
 		}),

@@ -59,6 +59,7 @@ function passthroughRunner(seen: string[] = []): ExtensionRunner {
 	return {
 		hasHandlers: () => true,
 		consumeToolCallEmitted: () => false,
+		getAssignmentCapability: () => undefined,
 		emitToolCall: async (event: { toolName: string }) => {
 			seen.push(event.toolName);
 			return undefined;
@@ -1322,6 +1323,17 @@ describe("CursorExecHandlers mounted tool bridge", () => {
 				denied.readMcpResource({ server: "files", uri: "files://x", downloadPath: "out.txt" }),
 			).rejects.toThrow(/blocked by user policy/);
 
+			const capabilityBound = new CursorExecHandlers({
+				cwd: workspace,
+				tools: new Map(),
+				allowDirectFileMutation: true,
+				assignmentCapabilityRuntime: true,
+				mcpResources,
+			});
+			await expect(
+				capabilityBound.readMcpResource({ server: "files", uri: "files://x", downloadPath: "out.txt" }),
+			).rejects.toThrow(/Assignment capability denied/);
+
 			expect(reads).toBe(0);
 			expect(await Bun.file(path.join(workspace, "out.txt")).exists()).toBe(false);
 
@@ -1540,6 +1552,25 @@ describe("CursorExecHandlers native delete gating (issue #5680)", () => {
 
 		expect(result.isError).toBe(false);
 		expect(await Bun.file(target).exists()).toBe(false);
+	});
+
+	it("denies native delete only in an Assignment capability Session", async () => {
+		const target = path.join(cwd, "victim.txt");
+		await Bun.write(target, "preserve under broker");
+		const handlers = new CursorExecHandlers({
+			cwd,
+			tools: new Map(),
+			allowDirectFileMutation: true,
+			assignmentCapabilityRuntime: true,
+		});
+
+		const result = await handlers.delete(create(DeleteArgsSchema, { toolCallId: "call-del", path: target }));
+
+		expect(result.isError).toBe(true);
+		expect(result.content).toEqual([
+			{ type: "text", text: "Assignment capability denied: direct delete is not authorized by v1" },
+		]);
+		expect(await Bun.file(target).exists()).toBe(true);
 	});
 
 	it("rechecks a live mutation grant after runtime tool activation", async () => {

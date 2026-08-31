@@ -97,6 +97,8 @@ interface CursorExecBridgeOptions {
 	 * policy is resolved separately, per call.
 	 */
 	allowDirectFileMutation?: boolean | (() => boolean);
+	/** True only for an immutable JIP-0065 discussion Session. */
+	assignmentCapabilityRuntime?: boolean;
 	/**
 	 * Mirror Cursor's server-owned todo list into local session state. Cursor
 	 * resolves `update_todos` / `read_todos` remotely, so without this bridge
@@ -336,6 +338,16 @@ async function executeDelete(options: CursorExecBridgeOptions, pathArg: string, 
 	const refusal = refuseByWritePolicy(options, toolName, pathArg);
 	if (refusal) {
 		return createToolResultMessage(toolCallId, toolName, buildToolErrorResult(refusal), true);
+	}
+	if (options.assignmentCapabilityRuntime) {
+		// JIP-0065 supports only the four core mutation families through a hidden
+		// worker. Cursor's direct delete frame has no such worker contract.
+		return createToolResultMessage(
+			toolCallId,
+			toolName,
+			buildToolErrorResult("Assignment capability denied: direct delete is not authorized by v1"),
+			true,
+		);
 	}
 
 	options.emitEvent?.({ type: "tool_execution_start", toolCallId, toolName, args: { path: pathArg } });
@@ -794,6 +806,9 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 			}
 			const refusal = refuseByWritePolicy(this.options, "write", downloadPath);
 			if (refusal) throw new Error(refusal);
+			if (this.options.assignmentCapabilityRuntime) {
+				throw new Error("Assignment capability denied: MCP resource download is not authorized by v1");
+			}
 		}
 		const mcp = this.options.mcpResources;
 		if (!mcp) return null;

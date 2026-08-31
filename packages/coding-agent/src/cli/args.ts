@@ -61,6 +61,11 @@ export interface Args {
 	providerSessionId?: string;
 	providerPromptCacheKey?: string;
 	fork?: string;
+	assignmentCapabilitySchema?: string;
+	assignmentHerdrSocket?: string;
+	assignmentHerdrPane?: string;
+	assignmentSession?: string;
+	assignmentJuizGatewayArgv?: string;
 	/** Collab link to join at startup (set by the `join` subcommand; no CLI flag). */
 	join?: string;
 	models?: string[];

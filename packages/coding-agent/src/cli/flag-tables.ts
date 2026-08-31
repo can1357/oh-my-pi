@@ -128,6 +128,21 @@ export const STRING_SETTERS: Record<string, StringSetter> = {
 	"--fork": (result, value) => {
 		result.fork = value;
 	},
+	"--assignment-capability-schema": (result, value) => {
+		result.assignmentCapabilitySchema = value;
+	},
+	"--assignment-herdr-socket": (result, value) => {
+		result.assignmentHerdrSocket = value;
+	},
+	"--assignment-herdr-pane": (result, value) => {
+		result.assignmentHerdrPane = value;
+	},
+	"--assignment-session": (result, value) => {
+		result.assignmentSession = value;
+	},
+	"--assignment-juiz-gateway-argv": (result, value) => {
+		result.assignmentJuizGatewayArgv = value;
+	},
 	"--provider": (result, value) => {
 		result.provider = value;
 	},

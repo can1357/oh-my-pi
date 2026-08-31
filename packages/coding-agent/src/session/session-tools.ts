@@ -559,9 +559,11 @@ export class SessionTools {
 	}
 
 	#wrapRuntimeTool(tool: AgentTool): AgentTool {
-		const wrapped = wrapToolWithMetaNotice(tool);
 		const extensionRunner = this.#host.extensionRunner();
-		return extensionRunner ? new ExtensionToolWrapper(wrapped, extensionRunner) : wrapped;
+		if (!extensionRunner) {
+			throw new Error(`Cannot register runtime tool "${tool.name}" without the universal capability gate`);
+		}
+		return new ExtensionToolWrapper(wrapToolWithMetaNotice(tool), extensionRunner);
 	}
 
 	/** Installs and activates the ephemeral vibe tool set. */
@@ -1777,7 +1779,7 @@ export class SessionTools {
 		const extensionRunner = this.#host.extensionRunner();
 		const managerTools = deduplicateMCPToolsByName(mcpTools).map(customTool => {
 			const wrapped = wrapToolWithMetaNotice(CustomToolAdapter.wrap(customTool, getCustomToolContext) as AgentTool);
-			return (extensionRunner ? new ExtensionToolWrapper(wrapped, extensionRunner) : wrapped) as AgentTool;
+			return extensionRunner ? (new ExtensionToolWrapper(wrapped, extensionRunner) as AgentTool) : wrapped;
 		});
 		const managerToolSet = new Set(managerTools);
 		const reconciledTools = deduplicateMCPToolsByName([...this.#extensionMcpTools.values(), ...managerTools]);
@@ -1847,9 +1849,9 @@ export class SessionTools {
 		const extensionRunner = this.#host.extensionRunner();
 		for (const tool of rpcTools) {
 			const metaWrapped = wrapToolWithMetaNotice(tool);
-			const finalTool = (
-				extensionRunner ? new ExtensionToolWrapper(metaWrapped, extensionRunner) : metaWrapped
-			) as AgentTool;
+			const finalTool = extensionRunner
+				? (new ExtensionToolWrapper(metaWrapped, extensionRunner) as AgentTool)
+				: metaWrapped;
 			this.#toolRegistry.set(finalTool.name, finalTool);
 			this.#rpcHostToolNames.add(finalTool.name);
 		}

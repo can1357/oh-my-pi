@@ -12,6 +12,7 @@ import type {
 import type { CredentialDisabledEvent, ImageContent, Model, ProviderResponseMetadata } from "@oh-my-pi/pi-ai";
 import type { KeyId } from "@oh-my-pi/pi-tui";
 import { logger } from "@oh-my-pi/pi-utils";
+import type { AssignmentCapabilityRuntime } from "../../assignment-capability";
 import type { ModelRegistry } from "../../config/model-registry";
 import type { Settings } from "../../config/settings";
 import type { LocalProtocolOptions } from "../../internal-urls/local-protocol";
@@ -395,6 +396,7 @@ export async function emitSessionShutdownEvent(extensionRunner: ExtensionRunner 
 	} finally {
 		extensionRunner.disposeFileFallbacks();
 		extensionRunner.clearManagedTimers();
+		extensionRunner.closeAssignmentCapability();
 	}
 }
 
@@ -607,10 +609,20 @@ export class ExtensionRunner {
 		private readonly settings?: Settings,
 		private readonly localProtocolOptions?: LocalProtocolOptions,
 		getAsyncJobSnapshot?: () => AsyncJobSnapshot | null,
+		private readonly assignmentCapability?: AssignmentCapabilityRuntime,
 	) {
 		this.#uiContext = noOpUIContext;
 		this.#getMemoryFn = getMemory;
 		this.#getAsyncJobSnapshotFn = getAsyncJobSnapshot ?? (() => null);
+	}
+
+	/** Session-owned immutable Assignment capability runtime, if launch opted in. */
+	getAssignmentCapability(): AssignmentCapabilityRuntime | undefined {
+		return this.assignmentCapability;
+	}
+
+	closeAssignmentCapability(): void {
+		this.assignmentCapability?.close();
 	}
 
 	/**

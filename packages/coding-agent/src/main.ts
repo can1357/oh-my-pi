@@ -23,6 +23,7 @@ import {
 	VERSION,
 } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
+import { ASSIGNMENT_CAPABILITY_SCHEMA } from "./assignment-capability";
 import { reset as resetCapabilities } from "./capability";
 import { type Args, reportUnrecognizedFlags, validateToolNames } from "./cli/args";
 import { applyExtensionFlags, type ExtensionFlagSink } from "./cli/extension-flags";
@@ -1069,6 +1070,41 @@ export function applyResolvedSystemPromptInputs(
 	}
 }
 
+function assignmentCapabilityFromArgs(parsed: Args): CreateAgentSessionOptions["assignmentCapability"] {
+	const values = [
+		parsed.assignmentCapabilitySchema,
+		parsed.assignmentHerdrSocket,
+		parsed.assignmentHerdrPane,
+		parsed.assignmentSession,
+		parsed.assignmentJuizGatewayArgv,
+	];
+	const supplied = values.filter(value => value !== undefined).length;
+	if (supplied === 0) return undefined;
+	if (supplied !== values.length || parsed.assignmentCapabilitySchema !== ASSIGNMENT_CAPABILITY_SCHEMA) {
+		throw new Error("Assignment capability launch requires the exact v1 schema and every hidden transport option");
+	}
+	let gatewayArgv: unknown;
+	try {
+		gatewayArgv = JSON.parse(Buffer.from(parsed.assignmentJuizGatewayArgv!, "base64url").toString("utf8"));
+	} catch {
+		throw new Error("Assignment capability gateway argv is invalid");
+	}
+	if (
+		!Array.isArray(gatewayArgv) ||
+		gatewayArgv.length === 0 ||
+		!gatewayArgv.every(value => typeof value === "string" && value.length > 0)
+	) {
+		throw new Error("Assignment capability gateway argv is invalid");
+	}
+	return Object.freeze({
+		schema: ASSIGNMENT_CAPABILITY_SCHEMA,
+		herdrSocketPath: parsed.assignmentHerdrSocket!,
+		pane: parsed.assignmentHerdrPane!,
+		session: parsed.assignmentSession!,
+		juizGatewayArgv: Object.freeze(gatewayArgv) as readonly [string, ...string[]],
+	});
+}
+
 /** Builds startup session options from parsed CLI flags, scoped models, and resolved session lineage. */
 export async function buildSessionOptions(
 	parsed: Args,
@@ -1081,6 +1117,7 @@ export async function buildSessionOptions(
 		cwd: parsed.cwd ?? getProjectDir(),
 		autoApprove: parsed.autoApprove ?? false,
 	};
+	options.assignmentCapability = assignmentCapabilityFromArgs(parsed);
 	const restoringSession = Boolean(parsed.continue || parsed.resume || isForeignSessionImport(parsed));
 	if (parsed.serviceTier !== undefined) {
 		options.openAIServiceTier = serviceTierSettingToTier(parsed.serviceTier) ?? null;

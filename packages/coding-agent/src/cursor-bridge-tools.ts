@@ -9,6 +9,7 @@
  */
 
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
+import type { AssignmentToolTrust } from "./assignment-capability";
 import { EditTool } from "./edit";
 import type { ExtensionRunner } from "./extensibility/extensions";
 import { ExtensionToolWrapper } from "./extensibility/extensions";
@@ -29,10 +30,11 @@ import { GrepTool } from "./tools";
 export function createBridgeGrepFactory(
 	session: ToolSession,
 	extensionRunner: ExtensionRunner,
+	assignmentTrust: AssignmentToolTrust = "core",
 ): (options: GrepToolOptions) => AgentTool {
 	return options => {
 		const grepTool: Tool = new GrepTool(session, options);
-		return new ExtensionToolWrapper(grepTool, extensionRunner);
+		return new ExtensionToolWrapper(grepTool, extensionRunner, assignmentTrust);
 	};
 }
 
@@ -49,9 +51,13 @@ export function createBridgeGrepFactory(
  * tool is constructed rather than looked up, so building one unconditionally
  * hands a restricted agent a mutating tool it was denied (issue #5680).
  */
-export function createBridgeEditTool(session: ToolSession, extensionRunner: ExtensionRunner): AgentTool {
+export function createBridgeEditTool(
+	session: ToolSession,
+	extensionRunner: ExtensionRunner,
+	assignmentTrust: AssignmentToolTrust = "core",
+): AgentTool {
 	const editTool: Tool = new EditTool(session, "replace");
-	return new ExtensionToolWrapper(editTool, extensionRunner);
+	return new ExtensionToolWrapper(editTool, extensionRunner, assignmentTrust);
 }
 
 /**
