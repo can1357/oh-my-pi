@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- The ACP stdio transport keeps running when a malformed frame arrives; bad lines now get a JSON-RPC error reply instead of dropping the whole connection.
+
 ## [18.0.11] - 2026-08-29
 
 ### Fixed

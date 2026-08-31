@@ -667,9 +667,9 @@ export class AcpAgent implements Agent {
 				},
 				sessionCapabilities: {
 					list: {},
-					fork: {},
 					resume: {},
 					close: {},
+					_meta: { fork: {} },
 				},
 			},
 		};

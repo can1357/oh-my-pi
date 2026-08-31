@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import type { ReadableStreamReadResult } from "node:stream/web";
 import {
 	type Agent,
 	AgentSideConnection,
@@ -102,6 +103,101 @@ describe("ACP JSON-RPC transport", () => {
 		expect(await reader.read()).toMatchObject({ value: { method: "b" } });
 		writer.releaseLock();
 		reader.releaseLock();
+	});
+
+	it("keeps consuming after unparseable lines and rejects them per JSON-RPC", async () => {
+		const bytes = new TransformStream<Uint8Array, Uint8Array>();
+		const output = new TransformStream<Uint8Array, Uint8Array>();
+		const stream = ndJsonStream(output.writable, bytes.readable);
+		const bytesWriter = bytes.writable.getWriter();
+		const outputReader = output.readable.getReader();
+		const reader = stream.readable.getReader();
+		const encoder = new TextEncoder();
+		const readLine = async (source: { read(): Promise<ReadableStreamReadResult<Uint8Array>> }) => {
+			const chunk = await source.read();
+			if (chunk.done) throw new Error("Expected bytes");
+			return new TextDecoder().decode(chunk.value);
+		};
+
+		await bytesWriter.write(encoder.encode("not json\n"));
+		expect(JSON.parse(await readLine(outputReader))).toEqual({
+			jsonrpc: "2.0",
+			id: null,
+			error: { code: -32700, message: "Parse error" },
+		});
+
+		await bytesWriter.write(encoder.encode('{"id":7,"method":"m"}\n'));
+		expect(JSON.parse(await readLine(outputReader))).toEqual({
+			jsonrpc: "2.0",
+			id: 7,
+			error: { code: -32600, message: "Invalid request" },
+		});
+
+		await bytesWriter.write(encoder.encode('{"jsonrpc":"2.0","id":9,"method":"ok"}\n'));
+		expect(await reader.read()).toMatchObject({ value: { jsonrpc: "2.0", id: 9, method: "ok" } });
+		bytesWriter.releaseLock();
+		outputReader.releaseLock();
+		reader.releaseLock();
+	});
+
+	it("does not error the read side when error replies cannot be written", async () => {
+		const bytes = new TransformStream<Uint8Array, Uint8Array>();
+		const output = new TransformStream<Uint8Array, Uint8Array>();
+		const stream = ndJsonStream(output.writable, bytes.readable);
+		const bytesWriter = bytes.writable.getWriter();
+		const reader = stream.readable.getReader();
+		const encoder = new TextEncoder();
+		await output.writable.abort(new Error("EPIPE"));
+
+		await bytesWriter.write(encoder.encode("garbage\n"));
+		await bytesWriter.write(encoder.encode('{"jsonrpc":"2.0","id":9,"method":"ok"}\n'));
+		expect(await reader.read()).toMatchObject({ value: { jsonrpc: "2.0", id: 9, method: "ok" } });
+		bytesWriter.releaseLock();
+		reader.releaseLock();
+	});
+
+	it("rejects envelope garbage instead of resolving outstanding requests", async () => {
+		const bytes = new TransformStream<Uint8Array, Uint8Array>();
+		const output = new TransformStream<Uint8Array, Uint8Array>();
+		const stream = ndJsonStream(output.writable, bytes.readable);
+		const connection = new RpcConnection(stream, () => undefined);
+		const bytesWriter = bytes.writable.getWriter();
+		const outputReader = output.readable.getReader();
+		const encoder = new TextEncoder();
+		const readLine = async (source: { read(): Promise<ReadableStreamReadResult<Uint8Array>> }) => {
+			const chunk = await source.read();
+			if (chunk.done) throw new Error("Expected bytes");
+			return new TextDecoder().decode(chunk.value);
+		};
+
+		// `request()` takes id 0; a bare id frame must not pass for its response.
+		const outstanding = connection.request<string>("session/prompt");
+		await bytesWriter.write(encoder.encode('{"jsonrpc":"2.0","id":0}\n'));
+		await readLine(outputReader); // discard the outgoing request frame
+		expect(JSON.parse(await readLine(outputReader))).toEqual({
+			jsonrpc: "2.0",
+			id: 0,
+			error: { code: -32600, message: "Invalid request" },
+		});
+
+		// A present error member with a null value is a member, not an absent one:
+		// under the value-gated predicate this frame passed as a bare result, made
+		// #handle dereference null.code after it deleted the pending entry, closed
+		// the connection, and left the request permanently unsettled.
+		await bytesWriter.write(encoder.encode('{"jsonrpc":"2.0","id":0,"result":"ok","error":null}\n'));
+		expect(JSON.parse(await readLine(outputReader))).toEqual({
+			jsonrpc: "2.0",
+			id: 0,
+			error: { code: -32600, message: "Invalid request" },
+		});
+
+		// Under the old shallow predicate this frame settled `outstanding` with a
+		// spurious `undefined` before the correlated response arrived; the final
+		// value assertion fails in that case without any timing.
+		await bytesWriter.write(encoder.encode('{"jsonrpc":"2.0","id":0,"result":"ok"}\n'));
+		await expect(outstanding).resolves.toBe("ok");
+		bytesWriter.releaseLock();
+		outputReader.releaseLock();
 	});
 	it("matches the SDK error-code fixtures", () => {
 		expect([
