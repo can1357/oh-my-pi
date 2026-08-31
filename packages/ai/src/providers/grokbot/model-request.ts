@@ -18,8 +18,23 @@ export type GrokbotRequestedModelOptions = {
 	 * Identity for omitted keys so discovered `minimal` / `max` stay on the wire.
 	 */
 	effortMap?: Partial<Record<string, string>>;
-	/** sand `fast` parameter; only sent when the model lists `fast` (defaults to true). */
+	/**
+	 * sand `fast` parameter; only sent when the model lists `fast`.
+	 * Default: `false` when `thinking` is also advertised (Cursor Anthropic defaults),
+	 * otherwise `true` (Cursor composer / Grok defaults).
+	 * Note: Grok models reject `fast=false` with tools (sand HTTP 422); keep the default.
+	 */
 	fast?: boolean;
+	/**
+	 * sand `thinking` boolean; only sent when the model lists `thinking`.
+	 * Default: `true` when an effort/reasoning value is being sent, else `false`.
+	 */
+	thinking?: boolean;
+	/**
+	 * sand `context` tier (e.g. `300k` / `1m`); only sent when the model lists `context`.
+	 * Default: `1m` when `sandMaxMode`, otherwise `300k` (Cursor AvailableModels defaults).
+	 */
+	context?: string;
 	/**
 	 * Allowed parameter ids from live `parameterDefinitions` / catalog `sandParameterIds`.
 	 * Empty/undefined ⇒ bare `{ modelId }` (routers and Auto) — the catalog fact
@@ -60,6 +75,23 @@ export function resolveGrokbotRequestedModel(
 
 	if (allowed.size > 0) {
 		const effortValue = toSandEffortValue(options?.effort, options?.effortMap);
+		// Cursor AvailableModels variants always send the full advertised set
+		// (thinking/context/effort/fast). Partial sets work for some vendors but
+		// Anthropic variants are defined as complete combinations.
+		if (allowed.has("thinking")) {
+			const thinking =
+				options?.thinking !== undefined ? options.thinking : Boolean(effortValue);
+			parameters.push({ id: "thinking", value: thinking ? "true" : "false" });
+		}
+		if (allowed.has("context")) {
+			const context =
+				typeof options?.context === "string" && options.context.trim()
+					? options.context.trim()
+					: options?.sandMaxMode === true
+						? "1m"
+						: "300k";
+			parameters.push({ id: "context", value: context });
+		}
 		if (effortValue) {
 			if (allowed.has("effort")) {
 				parameters.push({ id: "effort", value: effortValue });
@@ -68,12 +100,10 @@ export function resolveGrokbotRequestedModel(
 			}
 		}
 		if (allowed.has("fast")) {
-			// Documented default is fast:true when the model advertises the param;
-			// explicit false is preserved.
-			const fast = options?.fast !== undefined ? options.fast : true;
+			const defaultFast = !allowed.has("thinking");
+			const fast = options?.fast !== undefined ? options.fast : defaultFast;
 			parameters.push({ id: "fast", value: fast ? "true" : "false" });
 		}
-		// `context` is only sent when explicitly provided later; do not invent tiers.
 	}
 
 	const requested: GrokbotRequestedModel = { modelId: wireId };

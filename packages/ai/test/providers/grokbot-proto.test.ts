@@ -4,7 +4,7 @@ import * as grokbotCatalogAuth from "@oh-my-pi/pi-catalog/discovery/grokbot-auth
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { TRUNCATE_LENGTHS } from "@oh-my-pi/pi-tui";
 import { shortenPath } from "@oh-my-pi/pi-utils";
-import { streamGrokBot, toInferenceMessages, toSandImageDataUrl } from "../../src/providers/grokbot";
+import { formatGrokbotConnectTrailerError, streamGrokBot, toInferenceMessages, toSandImageDataUrl } from "../../src/providers/grokbot";
 import * as grokbotAuth from "../../src/providers/grokbot/auth";
 import {
 	createGrokbotChecksum,
@@ -315,7 +315,7 @@ describe("grokbot requested model mapping", () => {
 		expect(slow.parameters).toEqual([{ id: "fast", value: "false" }]);
 	});
 
-	test("gemini flash maps effort only; sol maps reasoning when listed", () => {
+	test("gemini flash maps effort only; sol maps reasoning+context when listed", () => {
 		const gemini = resolveGrokbotRequestedModel("gemini-3.7-flash", {
 			effort: "high",
 			fast: true,
@@ -328,6 +328,7 @@ describe("grokbot requested model mapping", () => {
 			sandParameterIds: ["reasoning", "context", "fast"],
 		});
 		expect(sol.parameters).toEqual([
+			{ id: "context", value: "300k" },
 			{ id: "reasoning", value: "medium" },
 			{ id: "fast", value: "true" },
 		]);
@@ -366,6 +367,96 @@ describe("grokbot requested model mapping", () => {
 
 	test("strips grokbot/ provider prefix", () => {
 		expect(resolveGrokbotRequestedModel("grokbot/grok-4.6").modelId).toBe("grok-4.6");
+	});
+
+	test("emits full Anthropic sand parameter set matching AvailableModels variants", () => {
+		expect(
+			resolveGrokbotRequestedModel("claude-opus-5", {
+				effort: "max",
+				sandParameterIds: ["thinking", "context", "effort", "fast"],
+			}),
+		).toEqual({
+			modelId: "claude-opus-5",
+			parameters: [
+				{ id: "thinking", value: "true" },
+				{ id: "context", value: "300k" },
+				{ id: "effort", value: "max" },
+				{ id: "fast", value: "false" },
+			],
+		});
+		expect(
+			resolveGrokbotRequestedModel("claude-opus-5", {
+				effort: "high",
+				fast: true,
+				sandMaxMode: true,
+				sandParameterIds: ["thinking", "context", "effort", "fast"],
+			}).parameters,
+		).toEqual([
+			{ id: "thinking", value: "true" },
+			{ id: "context", value: "1m" },
+			{ id: "effort", value: "high" },
+			{ id: "fast", value: "true" },
+		]);
+		expect(
+			resolveGrokbotRequestedModel("claude-opus-5", {
+				thinking: false,
+				effort: "low",
+				sandParameterIds: ["thinking", "context", "effort", "fast"],
+			}).parameters,
+		).toEqual([
+			{ id: "thinking", value: "false" },
+			{ id: "context", value: "300k" },
+			{ id: "effort", value: "low" },
+			{ id: "fast", value: "false" },
+		]);
+	});
+});
+
+describe("formatGrokbotConnectTrailerError", () => {
+	test("surfaces Anthropic providerStatusCode when connect message is opaque", () => {
+		expect(
+			formatGrokbotConnectTrailerError({
+				error: {
+					code: "resource_exhausted",
+					message: "Error",
+					details: [
+						{
+							type: "aiserver.v1.ErrorDetails",
+							debug: {
+								error: "ERROR_PROVIDER_ERROR",
+								details: {
+									title: "Provider Error",
+									detail:
+										"We're having trouble connecting to the model provider. This might be temporary - please try again in a moment.",
+									additionalInfo: { providerStatusCode: "400" },
+								},
+							},
+						},
+					],
+				},
+			}),
+		).toBe(
+			"Grok Bot connect error: ERROR_PROVIDER_ERROR: Provider Error: HTTP 400: We're having trouble connecting to the model provider. This might be temporary - please try again in a moment.",
+		);
+	});
+
+	test("keeps a specific connect message and appends debug detail", () => {
+		expect(
+			formatGrokbotConnectTrailerError({
+				error: {
+					code: "aborted",
+					message: "deadline exceeded",
+					details: [
+						{
+							debug: {
+								error: "ERROR_TIMEOUT",
+								details: { title: "Timeout", detail: "upstream stalled" },
+							},
+						},
+					],
+				},
+			}),
+		).toBe("Grok Bot connect error: deadline exceeded (ERROR_TIMEOUT: Timeout: upstream stalled)");
 	});
 });
 

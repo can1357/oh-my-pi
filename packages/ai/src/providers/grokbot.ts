@@ -57,8 +57,15 @@ export interface GrokbotOptions extends StreamOptions {
 	conversationId?: string;
 	/** Sand effort parameter; when set from mapOptionsForApi, overrides the default `high`. */
 	effort?: Effort | string;
-	/** Sand `fast` parameter; defaults to true for parameterized models. */
+	/**
+	 * Sand `fast` parameter. When omitted, `resolveGrokbotRequestedModel` picks
+	 * a catalog-aware default (`false` if `thinking` is advertised, else `true`).
+	 */
 	fast?: boolean;
+	/** Sand `thinking` boolean; when omitted, defaults to true iff effort is sent. */
+	thinking?: boolean;
+	/** Sand `context` tier (`300k` / `1m`); when omitted, follows sandMaxMode. */
+	context?: string;
 }
 
 const ROLE = {
@@ -541,6 +548,62 @@ function firstPresent(obj: Record<string, unknown> | undefined, keys: string[]):
 	return undefined;
 }
 
+/**
+ * Connect end-stream errors often use opaque `message` values (`Error`,
+ * `internal error`) while the actionable Anthropic/OpenAI status lives under
+ * `details[].debug` (`ERROR_PROVIDER_ERROR`, `providerStatusCode`, detail).
+ */
+export function formatGrokbotConnectTrailerError(parsedEnd: Record<string, unknown>): string {
+	const errObj = parsedEnd.error as Record<string, unknown> | undefined;
+	const bare =
+		(errObj && (errObj.message || errObj.code)) || parsedEnd.message || JSON.stringify(parsedEnd).slice(0, 200);
+	const bareText = String(bare || "unknown error");
+
+	const details = errObj?.details;
+	if (!Array.isArray(details) || details.length === 0) {
+		return `Grok Bot connect error: ${bareText}`;
+	}
+
+	const parts: string[] = [];
+	for (const entry of details) {
+		if (!entry || typeof entry !== "object") continue;
+		const row = entry as Record<string, unknown>;
+		const debug = (row.debug && typeof row.debug === "object" ? row.debug : undefined) as
+			| Record<string, unknown>
+			| undefined;
+		if (!debug) continue;
+		const providerError = typeof debug.error === "string" ? debug.error : "";
+		const nested =
+			debug.details && typeof debug.details === "object"
+				? (debug.details as Record<string, unknown>)
+				: undefined;
+		const title = nested && typeof nested.title === "string" ? nested.title : "";
+		const detail = nested && typeof nested.detail === "string" ? nested.detail : "";
+		const info =
+			nested?.additionalInfo && typeof nested.additionalInfo === "object"
+				? (nested.additionalInfo as Record<string, unknown>)
+				: undefined;
+		const status =
+			info && (typeof info.providerStatusCode === "string" || typeof info.providerStatusCode === "number")
+				? String(info.providerStatusCode)
+				: "";
+		const chunk = [providerError, title, status ? `HTTP ${status}` : "", detail]
+			.filter(s => s.length > 0)
+			.join(": ");
+		if (chunk) parts.push(chunk);
+	}
+
+	if (parts.length === 0) {
+		return `Grok Bot connect error: ${bareText}`;
+	}
+	// Prefer structured detail when the bare connect message is opaque.
+	const opaque = /^(error|internal error)$/i.test(bareText.trim());
+	if (opaque) {
+		return `Grok Bot connect error: ${parts.join("; ")}`;
+	}
+	return `Grok Bot connect error: ${bareText} (${parts.join("; ")})`;
+}
+
 export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 	model: Model<"grokbot-sand">,
 	context: Context,
@@ -596,6 +659,8 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 				effort: options?.effort,
 				effortMap: model.thinking?.effortMap,
 				fast: options?.fast,
+				thinking: options?.thinking,
+				context: options?.context,
 				sandParameterIds: model.sandParameterIds,
 				sandMaxMode: model.sandMaxMode,
 				canonicalModelId: model.requestModelId,
@@ -856,16 +921,14 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 						}
 						const errObj = parsedEnd.error as Record<string, unknown> | undefined;
 						const code = errObj ? String(errObj.code ?? "").toLowerCase() : "";
-						const message =
-							(errObj && (errObj.message || errObj.code)) || parsedEnd.message || jsonText.slice(0, 200);
 						if (errObj) {
 							// Connect often reports revoked JWTs as end-stream
 							// `unauthenticated` on HTTP 200; treat like HTTP 401.
 							if (code === "unauthenticated") {
 								clearGrokbotTokenCache();
-								throw new Error(`Grok Bot connect error: ${String(message)} (HTTP 401)`);
+								throw new Error(`${formatGrokbotConnectTrailerError(parsedEnd)} (HTTP 401)`);
 							}
-							throw new Error(`Grok Bot connect error: ${String(message)}`);
+							throw new Error(formatGrokbotConnectTrailerError(parsedEnd));
 						}
 						continue;
 					}

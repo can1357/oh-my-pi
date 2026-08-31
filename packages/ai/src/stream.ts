@@ -2391,9 +2391,10 @@ function mapOptionsForApi<TApi extends Api>(
 			const grokbotModel = model as Model<"grokbot-sand">;
 			const allowed = grokbotModel.sandParameterIds ?? [];
 			const acceptsEffort = allowed.includes("effort") || allowed.includes("reasoning");
+			const disableThinking = Boolean(options?.disableReasoning || options?.forceReasoningOff);
 			let effort: Effort | undefined;
 			if (acceptsEffort && grokbotModel.reasoning && grokbotModel.thinking) {
-				if (options?.disableReasoning || options?.forceReasoningOff) {
+				if (disableThinking) {
 					// Omission would leave the server default (often high); floor instead.
 					effort = minimumSupportedEffort(grokbotModel) ?? defaultSupportedEffort(grokbotModel);
 				} else if (options?.reasoning) {
@@ -2405,6 +2406,7 @@ function mapOptionsForApi<TApi extends Api>(
 				conversationId: options?.sessionId,
 				stopSequences: options?.stopSequences,
 				effort,
+				...(allowed.includes("thinking") ? { thinking: !disableThinking && Boolean(effort) } : {}),
 			});
 		}
 		default:
