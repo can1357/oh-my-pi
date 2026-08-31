@@ -422,8 +422,11 @@ function releaseTurnOnStreamEnd(
 			}
 		},
 		async cancel(reason) {
+			// Cancel upstream first so the encoder's onCancel can settle events.result()
+			// before we await settlement — otherwise release holds the turn reservation
+			// while the model finishes after the client already disconnected.
+			await reader.cancel(reason).catch(() => {});
 			await release(false);
-			return reader.cancel(reason);
 		},
 	});
 }
