@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Prompt-cache affinity stores the route target id; default-route tests register/dispatch instead of static-echo.
 - Quota probe leases are not acquired without a `requestId` that can settle or release them.
 - Fixed Gemini responses dropping `toolCall` blocks (now encoded as `functionCall` parts).
 - Fixed OAuth quota probing acquiring an immortal lease when `getApiKey` is called without `requestId`.
