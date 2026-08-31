@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Preserve the SSE chunk that crosses the StreamCommitGate prelude byte cap instead of dropping it on commit.
 - Renew turn reservations while SSE chunks arrive so long streams outlive the idle TTL, and skip cooldown-blocked API keys when healthy rows are already reserved.
 
 - Reserve stored API-key rows before returning them, and flush metadata-only held SSE preludes at EOF.
