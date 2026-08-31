@@ -9,6 +9,7 @@ import {
 	linkOpenAIPromotionTargets,
 } from "../scripts/generated-policies";
 import { buildModel } from "../src/build";
+import { resolveModelPolicy } from "../src/compat/resolve";
 import { buildGrokbotStaticSeed } from "../src/provider-models/grokbot";
 
 function createSpec<TApi extends Api>(overrides: {
@@ -890,6 +891,11 @@ describe("Grok Bot generated thinking policy", () => {
 		const built = buildModel(models.find(m => m.id === "sand-default")!);
 		expect(built.maxTokens).toBeNull();
 		expect(built.contextWindow).toBe(200_000);
+	});
+
+	it("marks grokbot credential-scoped catalog via provider KDL", () => {
+		const [seed] = buildGrokbotStaticSeed();
+		expect(resolveModelPolicy(seed).catalog.credentialScopedCatalog).toBe(true);
 	});
 
 	it("applies reviewed context-window-floor to known routers when discovery left limits unset", () => {

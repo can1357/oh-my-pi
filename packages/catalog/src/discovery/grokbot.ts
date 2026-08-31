@@ -130,7 +130,7 @@ function buildSandRouterSpec(id: (typeof GROKBOT_SAND_ROUTER_IDS)[number], baseU
 		provider: "grokbot",
 		baseUrl,
 		reasoning: id === "sand-default",
-		input: ["text", "image"],
+		input: ["text"],
 		cost: COST,
 		// Limits come from reviewed KDL floors / offline seeds — do not invent here.
 		contextWindow: null,

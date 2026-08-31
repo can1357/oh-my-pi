@@ -249,6 +249,11 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	 * ladders). Consumed by `rebakeModelThinking`.
 	 */
 	"preserve-authored-thinking": { key: "preserveAuthoredThinking", set: "catalog", shape: "scalar" },
+	/**
+	 * Credential-scoped catalogs (live discovery authoritative): generation must
+	 * not enrich limits from canonical-family or stencil.so same-id references.
+	 */
+	"credential-scoped-catalog": { key: "credentialScopedCatalog", set: "catalog", shape: "scalar" },
 	priority: { key: "priority", set: "catalog", shape: "scalar" },
 	/**
 	 * Offline Sand wire-parameter allowlist (e.g. `effort`/`fast`). Applied only

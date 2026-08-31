@@ -18,6 +18,7 @@ import { getProviderDefinition } from "@oh-my-pi/pi-ai/registry";
 import { $env } from "@oh-my-pi/pi-utils";
 import { buildModel } from "../src/build";
 import { collapseVariants } from "../src/compat/collapse";
+import { resolveModelPolicy } from "../src/compat/resolve";
 import { ANTIGRAVITY_PRIMARY_ENDPOINT, fetchAntigravityDiscoveryModels } from "../src/discovery/antigravity";
 import { buildGitLabDuoWorkflowFallbackModel } from "../src/discovery/gitlab-duo-workflow";
 import { resolveGrokbotDiscoveryIdentityAsync } from "../src/discovery/grokbot-auth";
@@ -234,7 +235,7 @@ function applyGlobalModelsDevFallback(
 			providerScopedKeys.has(`${model.provider}/${model.id}`) ||
 			model.provider === "devin" ||
 			model.provider === "baseten" ||
-			model.provider === "grokbot"
+			resolveModelPolicy(model).catalog.credentialScopedCatalog === true
 		) {
 			return model;
 		}

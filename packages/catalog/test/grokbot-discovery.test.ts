@@ -195,6 +195,8 @@ describe("grokbot AvailableModels normalize", () => {
 		const sandDefault = models.find(m => m.id === "sand-default");
 		expect(sandDefault?.sandParameterIds).toEqual([]);
 		expect(sandDefault?.reasoning).toBe(true);
+		expect(sandDefault?.input).toEqual(["text"]);
+		expect(models.find(m => m.id === "sand-cua")?.input).toEqual(["text"]);
 
 		const withMinimal = models.find(m => m.id === "effort-with-minimal");
 		expect([...((withMinimal?.thinking?.efforts as readonly string[] | undefined) ?? [])]).toEqual([

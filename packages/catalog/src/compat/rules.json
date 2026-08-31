@@ -8174,7 +8174,7 @@
 				}
 			},
 			{
-				"source": "providers/grokbot.kdl:12",
+				"source": "providers/grokbot.kdl:15",
 				"providers": [
 					"grokbot"
 				],
@@ -8205,7 +8205,7 @@
 				}
 			},
 			{
-				"source": "providers/grokbot.kdl:17",
+				"source": "providers/grokbot.kdl:20",
 				"providers": [
 					"grokbot"
 				],
@@ -8238,7 +8238,8 @@
 					"grokbot"
 				],
 				"catalog": {
-					"preserveAuthoredThinking": true
+					"preserveAuthoredThinking": true,
+					"credentialScopedCatalog": true
 				}
 			},
 			{

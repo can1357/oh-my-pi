@@ -7,6 +7,9 @@ provider "grokbot" {
 	// and buildModel must not invent fallback efforts when no thinking-efforts
 	// rule matched (routers, fast-only, unrecognized upstream-only values).
 	preserve-authored-thinking #true
+	// Live discovery owns limits/modality; gen:models must not backfill from
+	// canonical-family or stencil.so same-id references.
+	credential-scoped-catalog #true
 	// Synthetic routers + offline seeds: reviewed budgeting floor when live
 	// AvailableModels omits contextTokenLimit (proto3 zero/absent).
 	models "sand-default" "sand-cua" "sand-automation" "default" "auto" {
