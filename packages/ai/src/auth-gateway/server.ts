@@ -386,12 +386,14 @@ function releaseTurnOnStreamEnd(
 	const release = (settleProbe: boolean): void => {
 		if (released) return;
 		released = true;
-		// Settle only on successful completion evidence: committed/terminated gates,
-		// or foreign-format paths with no gate. A probing gate after an encoded error
-		// prelude must not clear cooldown. Always release the turn reservation.
+		// Settle only on successful completion evidence: committed streams, successful
+		// terminals (empty completed responses), or foreign-format paths with no gate.
+		// A terminated `response.failed` must not clear cooldown.
 		if (
 			settleProbe &&
-			(commitGate === undefined || commitGate.state === "committed" || commitGate.state === "terminated")
+			(commitGate === undefined ||
+				commitGate.state === "committed" ||
+				(commitGate.state === "terminated" && commitGate.sawSuccessfulTerminal))
 		) {
 			storage.settleQuotaProbeSuccess(requestId);
 		}

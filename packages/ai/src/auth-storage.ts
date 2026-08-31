@@ -5745,6 +5745,22 @@ export class AuthStorage {
 			// usage/refresh awaits below can shift positional indices, so every later
 			// refresh / persist / CAS-disable addresses the row by this stable id.
 			const credentialId = this.#getStoredCredentials(provider)[selection.index]?.id;
+			// prepare/broker refresh may bump incarnation and purge the prior reservation;
+			// reacquire against the post-prepare incarnation before vending the bearer.
+			if (options?.requestId && credentialId !== undefined) {
+				const held = this.#activeTurnReservation(credentialId, this.getCredentialIncarnation(credentialId));
+				if (!held || held.requestId !== options.requestId) {
+					const acquired = this.tryAcquireTurnReservation({
+						credentialId,
+						incarnation: this.getCredentialIncarnation(credentialId),
+						requestId: options.requestId,
+					});
+					if (!acquired.ok) {
+						this.clearQuotaProbe(options.requestId);
+						return undefined;
+					}
+				}
+			}
 
 			const planRequirement =
 				providedPlanRequirement ?? resolveOpenAICodexPlanRequirement(provider, options?.modelId);
