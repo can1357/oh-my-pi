@@ -190,6 +190,12 @@ function classifyOwnerDisposition(
 	if (typeof err === "object" && err !== null && "kind" in err && typeof err.kind === "string") {
 		kind = err.kind;
 	}
+	if (is(errorId, Flag.Abort)) {
+		return { owner: "cancelled", disposition: "cancelled" };
+	}
+	if (is(errorId, Flag.ContextOverflow)) {
+		return { owner: "request", disposition: "context_overflow" };
+	}
 	if (
 		is(errorId, Flag.ContentBlocked) ||
 		is(errorId, Flag.AccountPolicy) ||
@@ -218,6 +224,7 @@ function classifyOwnerDisposition(
 			PROVIDER_WIDE_PATTERN.test(message) ||
 			reason === "RATE_LIMIT_EXCEEDED" ||
 			reason === "MODEL_CAPACITY_EXHAUSTED" ||
+			reason === "CONCURRENT_LIMIT" ||
 			reason === "SERVER_ERROR"
 		) {
 			return { owner: "provider", disposition: "provider_transient" };
