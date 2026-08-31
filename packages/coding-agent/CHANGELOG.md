@@ -17,6 +17,7 @@
 
 ### Fixed
 
+- Fixed recent-commit lookups using excessive memory in repositories with large histories, which could cause slowdowns or out-of-memory crashes.
 - Fixed an issue where custom model overrides were lost during configuration updates
 - Fixed "Please use nerdfont" notification incorrectly persisting after theme configuration
 - Fixed sampling parameter errors for newer Anthropic models (Opus 4.7+, Sonnet 5+)

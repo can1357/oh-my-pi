@@ -489,7 +489,7 @@ impl GitRepo {
 		}
 		let repo = self.gix()?;
 		let mut out = Vec::new();
-		for id in self.walk_commit_ids("HEAD")?.into_iter().take(count) {
+		for id in self.walk_commit_ids("HEAD", Some(count))? {
 			let commit = repo
 				.find_commit(id)
 				.map_err(|err| Error::backend("git log", err))?;
@@ -510,7 +510,7 @@ impl GitRepo {
 		}
 		let mut out = Vec::new();
 		let repo = self.gix()?;
-		for id in self.walk_commit_ids("HEAD")?.into_iter().take(count) {
+		for id in self.walk_commit_ids("HEAD", Some(count))? {
 			let commit = repo
 				.find_commit(id)
 				.map_err(|err| Error::backend("git log", err))?;
@@ -602,7 +602,7 @@ impl GitRepo {
 		}
 		let mut out = Vec::new();
 		let repo = self.gix()?;
-		for id in self.walk_commit_ids(rev)? {
+		for id in self.walk_commit_ids(rev, None)? {
 			let commit = repo
 				.find_commit(id)
 				.map_err(|err| Error::backend("git rev-list", err))?;
@@ -902,13 +902,13 @@ impl GitRepo {
 		Ok(None)
 	}
 
-	fn walk_commit_ids(&self, rev: &str) -> Result<Vec<gix::ObjectId>> {
+	fn walk_commit_ids(&self, rev: &str, limit: Option<usize>) -> Result<Vec<gix::ObjectId>> {
 		let repo = self.gix()?;
 		let id = repo
 			.rev_parse_single(rev)
 			.map_err(|err| Error::backend("git rev-list", err))?
 			.detach();
-		repo
+		let walk = repo
 			.rev_walk([id])
 			.sorting(gix::revision::walk::Sorting::ByCommitTime(
 				gix::traverse::commit::simple::CommitTimeOrder::NewestFirst,
@@ -919,8 +919,11 @@ impl GitRepo {
 				item
 					.map(|info| info.id)
 					.map_err(|err| Error::backend("git rev-list", err))
-			})
-			.collect()
+			});
+		match limit {
+			Some(limit) => walk.take(limit).collect(),
+			None => walk.collect(),
+		}
 	}
 }
 
