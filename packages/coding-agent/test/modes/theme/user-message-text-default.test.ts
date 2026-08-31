@@ -41,10 +41,19 @@ describe("userMessageText derived default", () => {
 
 	it("feeds the derived accent into HTML export colors", async () => {
 		const dark = await getResolvedThemeColors("dark");
-		const porcelain = await getResolvedThemeColors("porcelain");
 
 		expect(dark.userMessageText).toBe("#febc38");
-		// Unchanged theme keeps the export text fallback.
-		expect(porcelain.userMessageText).toBe(porcelain.text);
+	});
+
+	it("guards the export derivation against the exported surface, not the bubble", async () => {
+		// dark-slate: accent 3.10:1 on userMessageBg but ~2.9:1 on the exported
+		// 6%-accent-over-bodyBg surface, so the export keeps the readable fallback
+		// while the TUI still derives. porcelain inverts: its accent equals the
+		// bubble (TUI keeps the fallback) but clears 3:1 on the light export page.
+		const darkSlate = await getResolvedThemeColors("dark-slate");
+		const porcelain = await getResolvedThemeColors("porcelain");
+
+		expect(darkSlate.userMessageText).toBe(darkSlate.text);
+		expect(porcelain.userMessageText).toBe(porcelain.accent);
 	});
 });

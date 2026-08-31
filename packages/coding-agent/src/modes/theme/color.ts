@@ -80,15 +80,17 @@ const USER_MESSAGE_ACCENT_CONTRAST_MIN = 3;
  * default — indistinguishable from assistant output (#1633). Inherit the theme
  * accent when it stays readable on the bubble background; otherwise return the
  * token unchanged so `Theme.getFgOnBgAnsi` keeps its near-black/near-white
- * fallback. Explicit theme values always win.
+ * fallback. Explicit non-empty theme values always win; `""` derives.
  */
-export function deriveUserMessageTextDefault(resolved: Record<string, string | number>): string | number {
+export function deriveUserMessageTextDefault(
+	resolved: Record<string, string | number>,
+	surface?: string,
+): string | number {
 	const current = resolved.userMessageText;
 	if (current !== undefined && current !== "") return current;
 	const accent = resolved.accent;
 	if (accent === undefined || accent === "") return current ?? "";
-	const background = resolved.userMessageBg;
-	if (background === undefined || background === "") return current ?? "";
+	const background = surface ?? resolved.userMessageBg;
 	const accentLuminance = relativeLuminance(accent);
 	const backgroundLuminance = relativeLuminance(background);
 	if (accentLuminance === undefined || backgroundLuminance === undefined) return current ?? "";
