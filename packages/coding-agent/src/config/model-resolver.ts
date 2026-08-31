@@ -18,13 +18,13 @@
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Api, Effort, KnownProvider, Model, ModelSpec } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { resolveBareVariantSelector, resolveVariantSelector } from "@oh-my-pi/pi-catalog/compat/collapse";
+import { collapseVariantId, stripThinkingVariantSuffix } from "@oh-my-pi/pi-catalog/compat/taxonomy";
 import { modelMatchesHost } from "@oh-my-pi/pi-catalog/hosts";
 import { buildModelProviderPriorityRank } from "@oh-my-pi/pi-catalog/identity";
-import { stripThinkingVariantToken } from "@oh-my-pi/pi-catalog/identity/family";
 import { clampThinkingLevelForModel } from "@oh-my-pi/pi-catalog/model-thinking";
 import { type GeneratedProvider, getBundledModels, modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { DEFAULT_MODEL_PER_PROVIDER } from "@oh-my-pi/pi-catalog/provider-models";
-import { resolveBareVariantAlias, resolveVariantAlias } from "@oh-my-pi/pi-catalog/variant-collapse";
 import { fuzzyMatch } from "@oh-my-pi/pi-tui";
 import { logger } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
@@ -494,8 +494,10 @@ export function resolveProviderModelReference(
 	// Retired effort-tier variant ids resolve to their collapsed logical
 	// model: hand-table aliases first, then the `X-thinking` → `X` grammar
 	// for auto-derived pairs. Exact lookup above always wins while raw is live.
+	const collapsedVariant = collapseVariantId(normalizedProvider, normalizedModelId);
 	const variantAliasId =
-		resolveVariantAlias(normalizedProvider, normalizedModelId) ?? stripThinkingVariantToken(normalizedModelId);
+		resolveVariantSelector(normalizedProvider, normalizedModelId) ??
+		(collapsedVariant.thinkingVariant ? collapsedVariant.logicalId : undefined);
 	if (variantAliasId) {
 		const aliased = index.get(`${normalizedProvider}\u0000${variantAliasId.toLowerCase()}`);
 		if (aliased) {
@@ -779,8 +781,8 @@ function matchModel(
 	// their collapsed logical model; models from the providers whose table
 	// declared the alias win ties. Auto-derived `X-thinking` pairs resolve
 	// through the grammar fallback.
-	const bareAlias = resolveBareVariantAlias(modelPattern);
-	const bareAliasTargetId = bareAlias?.id ?? stripThinkingVariantToken(modelPattern);
+	const bareAlias = resolveBareVariantSelector(modelPattern);
+	const bareAliasTargetId = bareAlias?.id ?? stripThinkingVariantSuffix(modelPattern);
 	if (bareAliasTargetId) {
 		const lowerAliasTarget = bareAliasTargetId.toLowerCase();
 		const aliasMatches = availableModels.filter(m => m.id.toLowerCase() === lowerAliasTarget);

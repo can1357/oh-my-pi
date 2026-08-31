@@ -1,0 +1,33 @@
+// Provider-wire compat for "alibaba-token-plan"; regenerated from the frozen census using deployment contract selectors.
+
+provider "alibaba-token-plan" {
+	thinking-mode "effort"
+	class "qwen" {
+		revision ">=3.6 <3.8" {
+			thinking-efforts "minimal" "low" "medium" "high"
+		}
+		revision ">=3.8 <3.9" {
+			supports-reasoning-effort #true
+		}
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "deepseek-v4-pro" {
+		thinking-format "qwen"
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "qwen3.8-max" {
+		thinking-default-level "xhigh"
+		thinking-efforts "low" "medium" "xhigh"
+		when-thinking {
+			extraBody {
+				enable_thinking #true
+			}
+			thinkingFormat "openai"
+		}
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "qwen3.8-max-preview" {
+		thinking-efforts "low" "high" "xhigh"
+		thinking-requires-effort #true
+	}
+}

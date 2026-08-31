@@ -2,7 +2,6 @@ import type { Agent, AgentEvent, AgentMessage, AgentTurnEndContext } from "@oh-m
 import type { AssistantMessage, AssistantMessageEvent, Model, ToolCall } from "@oh-my-pi/pi-ai";
 import { GeminiHeaderRunDetector } from "@oh-my-pi/pi-ai/utils/thinking-loop";
 import { type RepeatedToolCallDetection, ToolCallLoopGuard } from "@oh-my-pi/pi-ai/utils/tool-call-loop-guard";
-import { modelFamilyToken } from "@oh-my-pi/pi-catalog/identity";
 import { logger, prompt } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../config/settings";
 import { normalizeDiff, normalizeToLF, ParseError, previewPatch, stripBom } from "../edit";
@@ -436,7 +435,7 @@ export class LoopGuards {
 			this.#host.settings.get("model.loopGuard.enabled") === true &&
 			this.#host.settings.get("model.loopGuard.toolCallReminder") === true &&
 			model !== undefined &&
-			modelFamilyToken(model.id) === "gemini"
+			model.identity.class === "gemini"
 		);
 	}
 

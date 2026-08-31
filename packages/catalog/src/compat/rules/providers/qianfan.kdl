@@ -1,0 +1,8 @@
+// Provider-wire compat for "qianfan"; regenerated from the frozen census using deployment contract selectors.
+
+provider "qianfan" {
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "deepseek-v3.2" {
+		thinking-mode "effort"
+	}
+}
