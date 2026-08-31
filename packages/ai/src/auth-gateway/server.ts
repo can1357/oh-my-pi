@@ -574,15 +574,30 @@ async function handleFormatEndpoint(
 	const classifiedError = (classified: GatewayErrorClassification): Response =>
 		formatError(classified.status, classified.type, classified.message);
 
+	let siblingsExhausted = false;
 	const considerFallback = (classified: GatewayErrorClassification): boolean => {
 		lastClassified = classified;
 		if (commitGate.state !== "probing") return false;
-		const next = fallbackTargetId(compiled, stateNow(), classified, commitGate.state);
-		if (next === undefined) return false;
-		pendingFallback = next;
-		fallbackCount += 1;
-		retryCount += 1;
-		return true;
+		const action = decideAttempt({
+			route: compiled,
+			state: { ...stateNow(), siblingsExhausted },
+			classification: classified,
+			commitState: commitGate.state,
+		});
+		if (action.type === "sibling_credential") {
+			siblingsExhausted = true;
+			pendingFallback = currentTarget;
+			retryCount += 1;
+			return true;
+		}
+		if (action.type === "fallback_target") {
+			siblingsExhausted = false;
+			pendingFallback = action.targetModelId;
+			fallbackCount += 1;
+			retryCount += 1;
+			return true;
+		}
+		return false;
 	};
 
 	const bindCurrentTarget = (targetId: string): Response | undefined => {
@@ -911,15 +926,30 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 	const classifiedError = (classified: GatewayErrorClassification): Response =>
 		formatError(classified.status, classified.type, classified.message);
 
+	let siblingsExhausted = false;
 	const considerFallback = (classified: GatewayErrorClassification): boolean => {
 		lastClassified = classified;
 		if (commitGate.state !== "probing") return false;
-		const next = fallbackTargetId(compiled, stateNow(), classified, commitGate.state);
-		if (next === undefined) return false;
-		pendingFallback = next;
-		fallbackCount += 1;
-		retryCount += 1;
-		return true;
+		const action = decideAttempt({
+			route: compiled,
+			state: { ...stateNow(), siblingsExhausted },
+			classification: classified,
+			commitState: commitGate.state,
+		});
+		if (action.type === "sibling_credential") {
+			siblingsExhausted = true;
+			pendingFallback = currentTarget;
+			retryCount += 1;
+			return true;
+		}
+		if (action.type === "fallback_target") {
+			siblingsExhausted = false;
+			pendingFallback = action.targetModelId;
+			fallbackCount += 1;
+			retryCount += 1;
+			return true;
+		}
+		return false;
 	};
 
 	const bindCurrentTarget = (targetId: string): Response | undefined => {

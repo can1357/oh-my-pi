@@ -5694,18 +5694,19 @@ export class AuthStorage {
 					!this.#isCredentialBlocked(provider, providerKey, index, blockScopes ?? blockScope),
 			);
 			if (hasUsableSibling) return undefined;
+			// Probe leases are only settleable via requestId → #inflightProbes.
+			// Callers that omit requestId must not acquire an untrackable lease.
+			if (!options?.requestId) return undefined;
 			const held = this.#activeTurnReservation(blockedId, this.getCredentialIncarnation(blockedId));
-			if (held && held.requestId !== options?.requestId) return undefined;
+			if (held && held.requestId !== options.requestId) return undefined;
 			const probeScope = blockScope ?? "";
 			const lease = this.tryAcquireQuotaProbeLease(blockedId, probeScope);
 			if (!lease) return undefined;
-			if (options?.requestId) {
-				this.#inflightProbes.set(options.requestId, {
-					credentialId: blockedId,
-					blockScope: probeScope,
-					leaseId: lease,
-				});
-			}
+			this.#inflightProbes.set(options.requestId, {
+				credentialId: blockedId,
+				blockScope: probeScope,
+				leaseId: lease,
+			});
 		}
 		if (options?.requestId) {
 			const reserveId = this.#getStoredCredentials(provider)[selection.index]?.id;

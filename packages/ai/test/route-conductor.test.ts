@@ -86,6 +86,16 @@ describe("decideAttempt", () => {
 		expect(action).toEqual({ type: "sibling_credential" });
 	});
 
+	it("honors credential_quota compiled fallbacks after siblings are exhausted", () => {
+		const action = decideAttempt({
+			route: route({ fallbacks: { credential_quota: ["backup"] } }),
+			state: state({ attemptedTargets: new Set(["primary"]), siblingsExhausted: true }),
+			classification: classification("credential_quota"),
+			commitState: "probing",
+		});
+		expect(action).toEqual({ type: "fallback_target", targetModelId: "backup" });
+	});
+
 	it("falls back to the first unused fallbacks-map id on provider_unavailable", () => {
 		const action = decideAttempt({
 			route: route({ fallbacks: { provider_unavailable: ["backup", "tertiary"] } }),
