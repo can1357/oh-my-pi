@@ -40,6 +40,7 @@ export type McpCatalogChangeEvent = { serverName: string; kind: "resources" | "p
 import type { MCPToolDetails } from "./tool-bridge";
 import { DeferredMCPTool, MCPTool } from "./tool-bridge";
 import type { MCPToolCache } from "./tool-cache";
+import { mcpFilterEmptyMessage } from "./tool-filter";
 import { setGeneratedHeader } from "./transports/header-policy";
 import type {
 	MCPAuthChallenge,
@@ -647,6 +648,18 @@ export class MCPManager {
 					void this.#onToolsChanged?.(this.#tools);
 					void this.toolCache?.set(name, config, serverTools);
 
+					if (customTools.length === 0 && serverTools.length > 0 && !reportedErrors.has(name)) {
+						// Filter excluded everything: record the failure for callers
+						// that only read `result.errors`, emit the per-server failure
+						// event, and mark the server as failed — never "connected".
+						const message = mcpFilterEmptyMessage(serverTools.length);
+						errors.set(name, message);
+						reportedErrors.add(name);
+						notify(createMcpStartupFailure(name, message, sources[name]));
+						await this.#loadServerResourcesAndPrompts(name, connection);
+						return;
+					}
+
 					notify({ type: "connected", serverName: name });
 					await this.#loadServerResourcesAndPrompts(name, connection);
 				})
@@ -698,13 +711,24 @@ export class MCPManager {
 
 			for (const task of connectionTasks) {
 				const { name } = task;
-				if (task.tracked.status === "fulfilled") {
+				if (task.tracked.status === "fulfilled" && !reportedErrors.has(name)) {
 					const value = task.tracked.value;
 					if (!value) continue;
 					const { connection, serverTools } = value;
-					connectedServers.add(name);
 					const reconnect = () => this.reconnectServer(name);
-					this.#replaceServerTools(name, MCPTool.fromTools(connection, serverTools, reconnect));
+					const customTools = MCPTool.fromTools(connection, serverTools, reconnect);
+					// Mirror the background-continuation diagnostic: a filter that
+					// excluded everything is a failure, not a silent empty server.
+					if (customTools.length === 0 && serverTools.length > 0) {
+						const message = mcpFilterEmptyMessage(serverTools.length);
+						errors.set(name, message);
+						reportedErrors.add(name);
+						this.#replaceServerTools(name, []);
+						notify(createMcpStartupFailure(name, message, sources[name]));
+						continue;
+					}
+					connectedServers.add(name);
+					this.#replaceServerTools(name, customTools);
 				} else if (task.tracked.status === "rejected") {
 					const message =
 						task.tracked.reason instanceof Error ? task.tracked.reason.message : String(task.tracked.reason);
@@ -715,10 +739,23 @@ export class MCPManager {
 					if (cached) {
 						const source = this.#sources.get(name);
 						const reconnect = () => this.reconnectServer(name);
-						this.#replaceServerTools(
+						const deferredTools = DeferredMCPTool.fromTools(
 							name,
-							DeferredMCPTool.fromTools(name, cached, () => this.waitForConnection(name), source, reconnect),
+							cached,
+							() => this.waitForConnection(name),
+							source,
+							reconnect,
+							task.config,
 						);
+						this.#replaceServerTools(name, deferredTools);
+						if (deferredTools.length === 0) {
+							// The cached list is known — surface a filter-empty failure now
+							// instead of reporting the server as silently connecting.
+							const message = mcpFilterEmptyMessage(cached.length);
+							errors.set(name, message);
+							reportedErrors.add(name);
+							notify(createMcpStartupFailure(name, message, source));
+						}
 					}
 				}
 			}
@@ -1285,8 +1322,19 @@ export class MCPManager {
 		const customTools = MCPTool.fromTools(connection, serverTools, reconnect);
 		void this.toolCache?.set(name, connection.config, serverTools);
 
-		// Replace tools from this server
+		// Replace tools from this server. A previously filter-empty server that
+		// now advertises matching tools recovers here: `#replaceServerTools`
+		// clears the stale excluded tools, and the `connected` event below lets
+		// the interactive status handler clear its failed entry.
 		this.#replaceServerTools(name, customTools);
+		const wasFilterEmpty = customTools.length === 0 && serverTools.length > 0;
+		if (wasFilterEmpty) {
+			const message = mcpFilterEmptyMessage(serverTools.length);
+			logger.error(`MCP server "${name}": ${message}`, { path: `mcp:${name}` });
+			this.#emitConnectionStatus({ type: "failed", serverName: name, error: message });
+		} else {
+			this.#emitConnectionStatus({ type: "connected", serverName: name });
+		}
 		await this.#onToolsChanged?.(this.#tools);
 	}
 

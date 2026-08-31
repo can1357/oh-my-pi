@@ -23,9 +23,11 @@ import { ToolAbortError, throwIfAborted } from "../tools/tool-errors";
 import { callTool } from "./client";
 import { formatMCPToolFailure, MCPTransportError } from "./errors";
 import { renderMCPCall, renderMCPResult } from "./render";
+import { applyMCPToolFilter } from "./tool-filter";
 import type {
 	MCPAuthChallenge,
 	MCPContent,
+	MCPServerConfig,
 	MCPServerConnection,
 	MCPToolCallParams,
 	MCPToolCallResult,
@@ -509,9 +511,15 @@ export class MCPTool implements CustomTool<TSchema, MCPToolDetails> {
 	 */
 	readonly strict = false as const;
 
-	/** Create MCPTool instances for all tools from an MCP server connection */
+	/** Create MCPTool instances for all tools from an MCP server connection.
+	 *  Applies the server's configured `enabledTools`/`disabledTools` filter to
+	 *  the raw advertised tool names. */
 	static fromTools(connection: MCPServerConnection, tools: MCPToolDefinition[], reconnect?: MCPReconnect): MCPTool[] {
-		return tools.map(tool => new MCPTool(connection, tool, reconnect));
+		return applyMCPToolFilter(connection.name, {
+			toolNames: tools.map(t => t.name),
+			enabledTools: connection.config.enabledTools,
+			disabledTools: connection.config.disabledTools,
+		}).map(toolName => new MCPTool(connection, tools.find(t => t.name === toolName)!, reconnect));
 	}
 
 	constructor(
@@ -619,15 +627,25 @@ export class DeferredMCPTool implements CustomTool<TSchema, MCPToolDetails> {
 	readonly #fallbackProvider: string | undefined;
 	readonly #fallbackProviderName: string | undefined;
 
-	/** Create DeferredMCPTool instances for all tools from an MCP server */
+	/** Create DeferredMCPTool instances for all tools from an MCP server.
+	 *  Applies the server's configured `enabledTools`/`disabledTools` filter to
+	 *  the raw advertised tool names. */
 	static fromTools(
 		serverName: string,
 		tools: MCPToolDefinition[],
 		getConnection: () => Promise<MCPServerConnection>,
 		source?: SourceMeta,
 		reconnect?: MCPReconnect,
+		config?: MCPServerConfig,
 	): DeferredMCPTool[] {
-		return tools.map(tool => new DeferredMCPTool(serverName, tool, getConnection, source, reconnect));
+		return applyMCPToolFilter(serverName, {
+			toolNames: tools.map(t => t.name),
+			enabledTools: config?.enabledTools,
+			disabledTools: config?.disabledTools,
+		}).map(
+			toolName =>
+				new DeferredMCPTool(serverName, tools.find(t => t.name === toolName)!, getConnection, source, reconnect),
+		);
 	}
 
 	constructor(

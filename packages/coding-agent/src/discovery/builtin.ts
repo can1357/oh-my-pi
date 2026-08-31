@@ -31,6 +31,7 @@ import {
 	expandEnvVarsDeep,
 	getExtensionNameFromPath,
 	loadFilesFromDir,
+	parseMCPToolFilterEntries,
 	parseRequestIdFormat,
 	SOURCE_PATHS,
 	scanSkillsFromDir,
@@ -162,12 +163,16 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 					`MCP server "${serverName}": invalid requestIdFormat ${JSON.stringify(serverConfig.requestIdFormat)}, ignoring`,
 				);
 			}
-
+			// Strict array-of-nonempty-strings; comma globs like "{a,b}_*" survive intact
+			const enabledTools = parseMCPToolFilterEntries(serverConfig.enabledTools);
+			const disabledTools = parseMCPToolFilterEntries(serverConfig.disabledTools);
 			result.push({
 				name: serverName,
 				enabled,
 				timeout,
 				requestIdFormat,
+				enabledTools,
+				disabledTools,
 				command: serverConfig.command as string | undefined,
 				args: serverConfig.args as string[] | undefined,
 				env: serverConfig.env as Record<string, string> | undefined,

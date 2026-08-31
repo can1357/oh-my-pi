@@ -1,0 +1,140 @@
+/**
+ * Per-server MCP tool filtering (`enabledTools` / `disabledTools`).
+ *
+ * Tool names are matched against the raw names the server advertises via
+ * `tools/list` (not the `mcp__server_`-prefixed session names). Entries may be
+ * literal tool names or glob patterns (`"search"`, `"channel_*"`), matched by
+ * [`picomatch`](https://github.com/micromatch/picomatch).
+ *
+ * Semantics, mirroring the server-level `enabledServers` / `disabledServers`
+ * pair: an allowlist registers only matching tools, a denylist registers
+ * everything except matching tools, and when both are set the denylist wins
+ * (deny subtracts from allow).
+ */
+
+import { logger } from "@oh-my-pi/pi-utils";
+import picomatch from "picomatch";
+
+/** A tool filter rule set for one server, with the raw advertised tool names. */
+export interface MCPToolFilterInput {
+	/** Raw tool names advertised by the server (from `tools/list`). */
+	toolNames: string[];
+	/** `enabledTools` from the server config, if any. */
+	enabledTools?: readonly string[];
+	/** `disabledTools` from the server config, if any. */
+	disabledTools?: readonly string[];
+}
+
+/** Result of applying a tool filter. */
+export interface MCPToolFilterResult {
+	/** The subset of `toolNames` that passed the filter, in original order. */
+	allowed: string[];
+	/** Config entries that matched no advertised tool name, in config order. */
+	unmatched: string[];
+	/** True when a configured filter excluded every advertised tool; the healthy
+	 * connection's stale tools must be cleared, not kept for transport-failure recovery. */
+	filterEmpty: boolean;
+}
+
+const MATCH_OPTIONS = { dot: true } as const;
+
+/**
+ * Check `name` against one filter entry. Returns false when the entry is a
+ * malformed pattern (picomatch returns a never-matching regex for syntactically
+ * broken classes/ranges rather than throwing, so a typo degrades to "entry
+ * matches nothing" — surfaced as `unmatched` — instead of disabling the server).
+ */
+function matches(name: string, pattern: string): boolean {
+	if (pattern === name) return true;
+	if (!/[*?[\]{}]/.test(pattern)) return false;
+	return picomatch.isMatch(name, pattern, MATCH_OPTIONS);
+}
+
+/**
+ * Apply a per-server tool filter.
+ *
+ * Literal entries match exactly; entries containing glob metacharacters
+ * (`*`, `?`, `[...]`, `{...}`) are matched with picomatch semantics (dotfiles
+ * enabled, since MCP tool names are opaque strings, not paths). Denylist
+ * entries subtract from the allowlist when both are set.
+ */
+export function filterMCPTools(input: MCPToolFilterInput): MCPToolFilterResult {
+	const { toolNames, enabledTools, disabledTools } = input;
+	const filterConfigured = Boolean(enabledTools?.length || disabledTools?.length);
+	if (!filterConfigured) {
+		return { allowed: [...toolNames], unmatched: [], filterEmpty: false };
+	}
+
+	let allowed: string[];
+	let unmatched: string[];
+
+	if (enabledTools?.length) {
+		allowed = toolNames.filter(name => enabledTools.some(pattern => matches(name, pattern)));
+		unmatched = enabledTools.filter(pattern => !toolNames.some(name => matches(name, pattern)));
+	} else {
+		allowed = [...toolNames];
+		unmatched = [];
+	}
+
+	if (disabledTools?.length) {
+		allowed = allowed.filter(name => !disabledTools.some(pattern => matches(name, pattern)));
+		unmatched = [...unmatched, ...disabledTools.filter(pattern => !toolNames.some(name => matches(name, pattern)))];
+	}
+
+	return { allowed, unmatched, filterEmpty: allowed.length === 0 && toolNames.length > 0 };
+}
+
+/**
+ * Message describing a filter that excludes every advertised tool, shared by
+ * the manager's startup failure and refresh diagnostics paths.
+ */
+export function mcpFilterEmptyMessage(toolCount: number): string {
+	return `tool filter excludes all ${toolCount} advertised tools; the server would contribute nothing to the session. Remove the filter or widen it.`;
+}
+
+/**
+ * Apply a per-server tool filter and surface diagnostics.
+ *
+ * Unknown entries (patterns matching no advertised tool) are warned about —
+ * a typo is a config bug, but a server renaming tools upstream must degrade
+ * to "filter ignored" rather than disabling an otherwise usable server.
+ *
+ * Never throws: an all-excluding filter logs once and returns `[]`, so callers
+ * clear stale tools instead of treating a healthy connection as a failure.
+ */
+export function applyMCPToolFilter(serverName: string, input: MCPToolFilterInput): string[] {
+	const { allowed, unmatched, filterEmpty } = filterMCPTools(input);
+
+	if (unmatched.length > 0) {
+		logger.warn(`MCP server "${serverName}": tool filter entries matched no advertised tool; ignoring them`, {
+			path: `mcp:${serverName}`,
+			unmatched,
+			advertised: input.toolNames,
+		});
+	}
+
+	if (filterEmpty) {
+		logger.error(
+			`MCP server "${serverName}": tool filter (enabledTools=${JSON.stringify(input.enabledTools)}, disabledTools=${JSON.stringify(input.disabledTools)}) excludes all ${input.toolNames.length} advertised tools; the server would contribute nothing to the session. Remove the filter or widen it.`,
+			{ path: `mcp:${serverName}` },
+		);
+		return [];
+	}
+
+	return allowed;
+}
+
+/**
+ * Normalized comparison key for the filter of a server: unique members, sorted.
+ * Two alias configs with the same members in any order/duplicates have
+ * identical filtering behavior and must dedup to a single connection.
+ */
+export function mcpToolFilterKey(
+	enabledTools: readonly string[] | undefined,
+	disabledTools: readonly string[] | undefined,
+): string {
+	return JSON.stringify([
+		enabledTools?.length ? [...new Set(enabledTools)].sort() : null,
+		disabledTools?.length ? [...new Set(disabledTools)].sort() : null,
+	]);
+}

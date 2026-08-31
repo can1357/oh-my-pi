@@ -153,6 +153,19 @@ export function parseRequestIdFormat(value: unknown): MCPRequestIdFormat | undef
 }
 
 /**
+ * Parse an MCP `enabledTools` / `disabledTools` value: a strict array of
+ * non-empty strings. Strings are rejected (not CSV-split) so glob entries
+ * with commas like `"{create,delete}_*"` survive intact. Unrecognized values
+ * are dropped so a typo degrades to an empty filter rather than reaching a
+ * transport.
+ */
+export function parseMCPToolFilterEntries(value: unknown): string[] | undefined {
+	if (!Array.isArray(value)) return undefined;
+	const filtered = value.filter((item): item is string => typeof item === "string" && item.length > 0);
+	return filtered.length > 0 ? filtered : undefined;
+}
+
+/**
  * Parse a comma-separated string into an array of trimmed, non-empty strings.
  */
 export function parseCSV(value: string): string[] {
