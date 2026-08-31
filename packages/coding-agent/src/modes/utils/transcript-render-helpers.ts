@@ -216,7 +216,6 @@ export function buildLaunchCompletionBlock(message: CustomOrHookMessage): ToolAc
 			daemon.exitedAt !== undefined && daemon.startedAt !== undefined
 				? formatDuration(daemon.exitedAt - daemon.startedAt)
 				: undefined;
-		const name = truncateToWidth(sanitizeAsyncProgressDisplayText(sanitizeText(daemon.name)), TRUNCATE_LENGTHS.TITLE);
 		const line = [
 			failed
 				? theme.fg("error", `${theme.status.error} Supervised process failed`)
