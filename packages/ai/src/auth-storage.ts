@@ -4740,6 +4740,31 @@ export class AuthStorage {
 		return this.#probeLeases.tryAcquire(credentialId, blockScope);
 	}
 
+	/**
+	 * Acquire a probe lease for `requestId`, or reuse the request-owned lease when
+	 * auth retry re-enters while the same request still holds it (tryAcquire would
+	 * otherwise return null and clearQuotaProbe would be unreachable).
+	 */
+	#acquireOrReuseQuotaProbeLease(requestId: string, credentialId: number, probeScope: string): boolean {
+		const existing = this.#inflightProbes.get(requestId);
+		if (
+			existing &&
+			existing.credentialId === credentialId &&
+			existing.blockScope === probeScope
+		) {
+			return true;
+		}
+		const lease = this.tryAcquireQuotaProbeLease(credentialId, probeScope);
+		if (!lease) return false;
+		this.clearQuotaProbe(requestId);
+		this.#inflightProbes.set(requestId, {
+			credentialId,
+			blockScope: probeScope,
+			leaseId: lease,
+		});
+		return true;
+	}
+
 	recordQuotaProbeSuccess(credentialId: number, blockScope: string, leaseId: string | null): boolean {
 		if (!this.#probeLeases.recordSuccess(credentialId, blockScope, leaseId)) return false;
 		for (const [provider, entries] of this.#data) {
@@ -5612,27 +5637,16 @@ export class AuthStorage {
 						this.#probeLeases.noteRetryAfterBlock(blockedId, probeScope, blockedUntil);
 					}
 				}
-				const lease = this.tryAcquireQuotaProbeLease(blockedId, probeScope);
-				if (!lease) return undefined;
-				// Replace any prior inflight probe for this request without treating it as success.
-				this.clearQuotaProbe(options.requestId);
-				this.#inflightProbes.set(options.requestId, {
-					credentialId: blockedId,
-					blockScope: probeScope,
-					leaseId: lease,
-				});
+				if (!this.#acquireOrReuseQuotaProbeLease(options.requestId, blockedId, probeScope)) {
+					return undefined;
+				}
 			} else {
 				// allowBlocked path: every blocked credential still needs the single-flight
 				// probe lease (Retry-After and ordinary hard cooldowns alike).
 				if (!options?.requestId) return undefined;
-				const lease = this.tryAcquireQuotaProbeLease(blockedId, probeScope);
-				if (!lease) return undefined;
-				this.clearQuotaProbe(options.requestId);
-				this.#inflightProbes.set(options.requestId, {
-					credentialId: blockedId,
-					blockScope: probeScope,
-					leaseId: lease,
-				});
+				if (!this.#acquireOrReuseQuotaProbeLease(options.requestId, blockedId, probeScope)) {
+					return undefined;
+				}
 			}
 		}
 

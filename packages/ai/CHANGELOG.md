@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Settle probes from canonical stream results, reuse request-owned probe leases on auth retry, and observe post-commit SSE terminals.
 - Require probe leases on allow-blocked paths, forward successful terminal-only SSE preludes, return 429 while credentials cool down, and carry Retry-After provenance on durable blocks when the store round-trips it.
 - Fixed quota probes honoring global Retry-After when selection uses a chat/spark scope, and workspace deactivation attributing rotated bearers via fingerprint history.
 - Fixed quota-probe leases releasing on abort/5xx/fallback via `clearQuotaProbe`, and settling only on successful stream completion.

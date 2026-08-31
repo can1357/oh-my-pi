@@ -185,6 +185,15 @@ export function holdSseUntilCommit(
 		new TransformStream<Uint8Array, Uint8Array>({
 			transform(chunk, controller) {
 				if (committed) {
+					// Keep observing terminals after commit so committed→terminated
+					// transitions still happen; forward bytes unchanged.
+					pending += decoder.decode(chunk, { stream: true });
+					let next = nextSseFrame(pending);
+					while (next) {
+						gate.classifyAndObserve(eventTypeFromFrame(next.frame), next.frame.length);
+						pending = next.rest;
+						next = nextSseFrame(pending);
+					}
 					controller.enqueue(chunk);
 					return;
 				}

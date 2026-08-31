@@ -122,4 +122,19 @@ describe("AuthStorage quota probe leases", () => {
 		expect(storage.settleQuotaProbeSuccess("never-acquired")).toBe(false);
 		expect(storage.recordQuotaProbeSuccess(idA, "", lease)).toBe(true);
 	});
+
+	it("reuses the request-owned probe lease on auth retry", async () => {
+		if (!storage) throw new Error("setup failed");
+		await storage.set(PROVIDER, [oauth("solo")]);
+		const id = storage.listStoredCredentials(PROVIDER)[0]?.id;
+		if (id === undefined) throw new Error("missing credential");
+		await storage.markUsageLimitReached(PROVIDER, undefined, { credentialId: id });
+		const first = await storage.getApiKey(PROVIDER, "solo-session", { requestId: "probe-retry" });
+		expect(first).toBe("access-solo");
+		// Same request still holds the single-flight lease — a bare acquire must fail,
+		// but re-entering getApiKey with the same requestId must reuse it.
+		expect(storage.tryAcquireQuotaProbeLease(id, "")).toBeNull();
+		const second = await storage.getApiKey(PROVIDER, "solo-session", { requestId: "probe-retry" });
+		expect(second).toBe("access-solo");
+	});
 });
