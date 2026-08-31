@@ -2416,6 +2416,27 @@ export class AuthStorage {
 		return undefined;
 	}
 
+	/** Resolve a reserved API-key selection; release the turn hold if the helper yields no secret. */
+	async #resolveReservedApiKey(
+		provider: string,
+		sessionId: string | undefined,
+		selection: ApiKeySelection,
+		requestId: string | undefined,
+	): Promise<string | undefined> {
+		try {
+			const resolved = await this.#configValueResolver(selection.credential.key);
+			if (resolved === undefined || resolved === "") {
+				if (requestId) this.releaseTurnReservation(requestId);
+				return undefined;
+			}
+			this.#recordSessionCredential(provider, sessionId, "api_key", selection.index);
+			return resolved;
+		} catch (error) {
+			if (requestId) this.releaseTurnReservation(requestId);
+			throw error;
+		}
+	}
+
 	/** Acquire an exclusive turn reservation for a stored API-key row when requestId is set. */
 	#tryReserveApiKeySelection(
 		provider: string,
@@ -6056,8 +6077,13 @@ export class AuthStorage {
 			credential => credential.source === "login",
 		);
 		if (loginApiKeySelection) {
-			this.#recordSessionCredential(provider, sessionId, "api_key", loginApiKeySelection.index);
-			return this.#configValueResolver(loginApiKeySelection.credential.key);
+			const resolved = await this.#resolveReservedApiKey(
+				provider,
+				sessionId,
+				loginApiKeySelection,
+				options?.requestId,
+			);
+			if (resolved !== undefined) return resolved;
 		}
 
 		// Past OAuth: the session sticky (if any) is stale — the request authenticates via
@@ -6074,8 +6100,13 @@ export class AuthStorage {
 			credential => credential.source !== "login",
 		);
 		if (apiKeySelection) {
-			this.#recordSessionCredential(provider, sessionId, "api_key", apiKeySelection.index);
-			return this.#configValueResolver(apiKeySelection.credential.key);
+			const resolved = await this.#resolveReservedApiKey(
+				provider,
+				sessionId,
+				apiKeySelection,
+				options?.requestId,
+			);
+			if (resolved !== undefined) return resolved;
 		}
 
 		// Fall back to custom resolver (e.g., models.json custom providers)

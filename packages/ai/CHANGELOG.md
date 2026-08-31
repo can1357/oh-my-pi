@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Settle quota probes only after canonical success evidence, and release API-key turn reservations when credential helpers fail.
 - Reserve stored API-key selections for turn exclusivity, run no-status message heuristics before default provider failure, and assert virtual-route dispatch behavior.
 - Fixed virtual route dispatch resolving `compiled.targets[0]`, and reacquiring turn reservations after broker prepare/incarnation bump.
 

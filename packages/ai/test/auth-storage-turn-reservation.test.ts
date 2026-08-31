@@ -148,4 +148,37 @@ describe("AuthStorage in-flight turn reservations", () => {
 		const key = await storage.getApiKey(PROVIDER, "holder-session", { requestId: "holder" });
 		expect(key).toBe("access-a");
 	});
+
+	it("reserves stored api_key rows before returning them", async () => {
+		if (!storage) throw new Error("setup failed");
+		const apiProvider = `${PROVIDER}-api-keys`;
+		await storage.set(apiProvider, [
+			{ type: "api_key", key: "key-a", source: "login" },
+			{ type: "api_key", key: "key-b", source: "login" },
+		]);
+		const first = await storage.getApiKey(apiProvider, "s-a", { requestId: "api-req-a" });
+		const second = await storage.getApiKey(apiProvider, "s-b", { requestId: "api-req-b" });
+		expect(first).toBeDefined();
+		expect(second).toBeDefined();
+		expect(first).not.toBe(second);
+	});
+
+	it("releases api_key reservation when configValueResolver fails", async () => {
+		if (!store) throw new Error("setup failed");
+		const apiProvider = `${PROVIDER}-api-key-fail`;
+		const failing = new AuthStorage(store, {
+			configValueResolver: async () => undefined,
+		});
+		await failing.set(apiProvider, [{ type: "api_key", key: "!command:missing", source: "login" }]);
+		const id = failing.listStoredCredentials(apiProvider)[0]?.id;
+		if (id === undefined) throw new Error("missing credential");
+		const missing = await failing.getApiKey(apiProvider, "s-fail", { requestId: "fail-req" });
+		expect(missing).toBeUndefined();
+		const reacquire = failing.tryAcquireTurnReservation({
+			credentialId: id,
+			incarnation: failing.getCredentialIncarnation(id),
+			requestId: "after-fail",
+		});
+		expect(reacquire.ok).toBe(true);
+	});
 });

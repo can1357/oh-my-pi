@@ -379,19 +379,23 @@ function releaseTurnOnStreamEnd(
 	storage: AuthStorage,
 	requestId: string,
 	commitGate?: StreamCommitGate,
+	settled?: Promise<unknown>,
 ): ReadableStream<Uint8Array> {
 	const reader = stream.getReader();
 	let released = false;
-	const release = (settleProbe: boolean): void => {
+	const release = async (settleProbe: boolean): Promise<void> => {
 		if (released) return;
 		released = true;
-		// Settle only on successful completion evidence. Failed terminals must not
-		// clear cooldown; callers must attach a gate (including pi-native).
+		// Wait for the canonical assistant result so probing/committed gates reflect
+		// error/abort outcomes before EOF can settle a quota probe.
+		if (settled) await settled.catch(() => {});
+		// Settle only on positive completion evidence (committed output or a
+		// successful terminal). Never settle a still-probing gate after pre-SSE
+		// failure — format encoders turn errors into frames + normal close.
 		if (
 			settleProbe &&
 			commitGate !== undefined &&
 			(commitGate.state === "committed" ||
-				commitGate.state === "probing" ||
 				(commitGate.state === "terminated" && commitGate.sawSuccessfulTerminal))
 		) {
 			storage.settleQuotaProbeSuccess(requestId);
@@ -403,19 +407,21 @@ function releaseTurnOnStreamEnd(
 			try {
 				const { done, value } = await reader.read();
 				if (done) {
-					release(true);
+					await release(true);
 					controller.close();
 					return;
 				}
 				controller.enqueue(value);
 			} catch (error) {
-				release(false);
+				await release(false);
 				controller.error(error);
 			}
 		},
-		cancel(reason) {
-			release(false);
-			return reader.cancel(reason);
+		async cancel(reason) {
+			// Cancel upstream first so the encoder's onCancel can settle events.result()
+			// before we await settlement.
+			await reader.cancel(reason).catch(() => {});
+			await release(false);
 		},
 	});
 }
@@ -669,10 +675,22 @@ async function handleFormatEndpoint(
 		bootOpts.storage.releaseTurnReservation(requestId);
 		return clientClosedResponse(route);
 	}
-	void events
-		.result()
-		.then(message => recordGatewayUsage(bootOpts.storage, model, client, message))
-		.catch(() => {});
+	const settled = events.result();
+	void settled.then(message => recordGatewayUsage(bootOpts.storage, model, client, message)).catch(() => {});
+	// Non-Responses formats may never feed onSseEvent; mirror pi-native and mark the
+	// commit gate from the canonical assistant result before EOF can settle a probe.
+	void settled
+		.then(message => {
+			if (message.stopReason === "error" || message.stopReason === "aborted") {
+				commitGate.classifyAndObserve("response.failed", 1);
+			} else {
+				commitGate.classifyAndObserve("response.output_text.delta", 1);
+				commitGate.classifyAndObserve("response.completed", 1);
+			}
+		})
+		.catch(() => {
+			commitGate.classifyAndObserve("response.failed", 1);
+		});
 
 	let sseStream = route.module.encodeStream(events, parsed.modelId, parsed.options, {
 		signal: controller.signal,
@@ -685,7 +703,7 @@ async function handleFormatEndpoint(
 	if (route.label === "openai-responses") {
 		sseStream = observeSseCommit(sseStream, commitGate);
 	}
-	sseStream = releaseTurnOnStreamEnd(sseStream, bootOpts.storage, requestId, commitGate);
+	sseStream = releaseTurnOnStreamEnd(sseStream, bootOpts.storage, requestId, commitGate, settled);
 	return new Response(sseStream, {
 		status: 200,
 		headers: {
@@ -898,10 +916,8 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 		bootOpts.storage.releaseTurnReservation(requestId);
 		return aborted();
 	}
-	void events
-		.result()
-		.then(message => recordGatewayUsage(bootOpts.storage, model, client, message))
-		.catch(() => {});
+	const settled = events.result();
+	void settled.then(message => recordGatewayUsage(bootOpts.storage, model, client, message)).catch(() => {});
 
 	let sseStream = piNative.encodeStream(events, parsed.modelId, parsed.options, {
 		signal: controller.signal,
@@ -912,8 +928,7 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 		},
 	});
 	const piCommitGate = new StreamCommitGate();
-	void events
-		.result()
+	void settled
 		.then(message => {
 			if (message.stopReason === "error" || message.stopReason === "aborted") {
 				piCommitGate.classifyAndObserve("response.failed", 1);
@@ -925,7 +940,7 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 		.catch(() => {
 			piCommitGate.classifyAndObserve("response.failed", 1);
 		});
-	sseStream = releaseTurnOnStreamEnd(sseStream, bootOpts.storage, requestId, piCommitGate);
+	sseStream = releaseTurnOnStreamEnd(sseStream, bootOpts.storage, requestId, piCommitGate, settled);
 	return new Response(sseStream, {
 		status: 200,
 		headers: {
