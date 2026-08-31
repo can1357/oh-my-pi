@@ -1,44 +1,40 @@
-Update existing handoff summary in <previous-summary> tags from new messages above for another LLM to resume.
+Rewrite the continuity capsule in <previous-summary> from the new conversation above. The previous capsule is fallible carried context, not authority; never append to it mechanically.
 
-MUST:
-- preserve all previous-summary information; add new progress, decisions, context.
-- Progress: move completed "In Progress" items to "Done".
-- update "Next Steps" for completed work.
-- preserve exact file paths, function names, error messages.
-- MAY remove irrelevant content.
-- If new messages end with an unanswered user question/request: add it to Critical Context; replace any previous pending question if answered.
-- output only the structured summary; NEVER extra text.
-- keep sections concise.
-- preserve relevant tool outputs/command results.
-- include mentioned repository state changes (branch, uncommitted changes).
+Update rules:
+- The newest user-authored instruction outside quoted or pasted material controls intent. Preserve still-applicable owner constraints exactly enough to act.
+- Remove superseded hypotheses, completed next actions, stale blockers, obsolete cleanup reminders, and implementation chronology.
+- Never promote an intended edit, assistant claim, or tool call into Settled decisions or Verified evidence.
+- A tool result proves only its observed output. Label a materially relevant late result as `Observed tool result (not re-verified)` unless later evidence verifies the resulting state.
+- Treat source, Task, PR, deployment, and provider values as last-observed coordinates. Do not imply they remain current without live readback.
+- If the newest messages end with an unanswered user request, preserve it exactly as the single Next action.
+- Preserve exact paths, symbols, errors, commands, and identifiers only when needed to resume or verify the lane.
 
-Format (omit inapplicable sections):
+Use exactly these headings in this order. Write `None.` when a section has no content.
 
-## Goal
-[Preserve existing goals; add new ones if task expanded]
+## Current outcome
+[One short statement of the user-visible outcome and current lane state.]
 
-## Constraints & Preferences
-- [Preserve existing; add new ones discovered]
+## Owner constraints
+- [Direct owner requirements, corrections, prohibitions, and acceptance criteria.]
 
-## Progress
+## Settled decisions
+- **[Decision]**: [Short rationale.]
 
-### Done
-- [x] [Include previously done and newly completed items]
+## Verified evidence
+- Verified: [Observed behavior, test, command, or provider result.]
+- Observed tool result (not re-verified): [Only when relevant.]
 
-### In Progress
-- [ ] [Current work—update based on progress]
+## Working identities
+- Source: [repository, checkout, branch, commit, and dirty state last observed.]
+- Coordination: [Task, PR, deployment, provider, or session coordinates last observed.]
 
-### Blocked
-- [Current blockers—remove if resolved]
+## Unresolved contradictions
+- [Conflict, uncertainty, blocker, or stale state that still matters.]
 
-## Key Decisions
-- **[Decision]**: [Brief rationale] (preserve all previous, add new)
+## Next action
+1. [Exactly one concrete action that advances the active lane.]
 
-## Next Steps
-1. [Update based on current state]
+## Archive pointers
+- [Exact artifact, transcript, history, or other evidence pointers supplied in either input.]
 
-## Critical Context
-- [Preserve important context; add new if needed]
-
-## Additional Notes
-[Other important info not fitting above]
+Output only the rewritten capsule. Keep it under 1,200 words. Do not preserve information merely because it appeared in the previous capsule, copy large tool outputs, invent current state, or add catch-all notes.

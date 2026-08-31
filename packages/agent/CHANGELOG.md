@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Compaction summaries now use a concise, deterministic continuity capsule with explicit owner, evidence, identity, contradiction, next-action, and archive provenance, capped at 4,096 output tokens.
+
 ## [18.0.11] - 2026-08-29
 
 ### Fixed

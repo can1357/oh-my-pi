@@ -47,12 +47,55 @@ afterEach(() => {
 	vi.restoreAllMocks();
 });
 
+function promptTextOf(call: unknown[]): string {
+	const context = call[1] as { messages: { content: { type: string; text: string }[] }[] };
+	return context.messages[0]?.content[0]?.text ?? "";
+}
+
 describe("compaction summary output budget", () => {
 	test("caps the summary budget for large reserves", async () => {
 		const spy = vi.spyOn(ai, "completeSimple").mockResolvedValue(createAssistantMessage("summary"));
 		// A 1M-token window yields a 150k reserve, which used to authorize a ~120k-token summary.
 		await generateSummary(messages, getModel(), 150_000, "test-key");
 		expect(spy.mock.calls[0]?.[2]?.maxTokens).toBe(MAX_SUMMARY_TOKENS);
+	});
+
+	test("requests a deterministic continuity capsule with explicit provenance", async () => {
+		const spy = vi.spyOn(ai, "completeSimple").mockResolvedValue(createAssistantMessage("capsule"));
+		await generateSummary(messages, getModel(), 150_000, "test-key");
+
+		const request = promptTextOf(spy.mock.calls[0] ?? []);
+		const headings = [
+			"## Current outcome",
+			"## Owner constraints",
+			"## Settled decisions",
+			"## Verified evidence",
+			"## Working identities",
+			"## Unresolved contradictions",
+			"## Next action",
+			"## Archive pointers",
+		];
+		let previousIndex = -1;
+		for (const heading of headings) {
+			const headingIndex = request.indexOf(heading);
+			expect(headingIndex).toBeGreaterThan(previousIndex);
+			previousIndex = headingIndex;
+		}
+		expect(request).toContain("Observed tool result (not re-verified)");
+		expect(request).toContain("Quoted or pasted material inside a user turn keeps its original provenance");
+		expect(request).toContain("A tool call proves only that an action was attempted");
+		expect(request).toContain("last-observed coordinates");
+		expect(request).toContain("Exactly one concrete action");
+	});
+
+	test("rewrites carried summaries instead of preserving stale state", async () => {
+		const spy = vi.spyOn(ai, "completeSimple").mockResolvedValue(createAssistantMessage("capsule"));
+		await generateSummary(messages, getModel(), 150_000, "test-key", undefined, undefined, "old capsule");
+
+		const request = promptTextOf(spy.mock.calls[0] ?? []);
+		expect(request).toContain("never append to it mechanically");
+		expect(request).toContain("Remove superseded hypotheses, completed next actions, stale blockers");
+		expect(request).toContain("<previous-summary>\nold capsule\n</previous-summary>");
 	});
 
 	test("forwards the cap to remote compaction", async () => {
@@ -66,6 +109,7 @@ describe("compaction summary output budget", () => {
 		});
 
 		expect(requestBody?.maxTokens).toBe(MAX_SUMMARY_TOKENS);
+		expect(String(requestBody?.prompt)).toContain("## Archive pointers");
 	});
 
 	test("caps both summaries when compaction splits a turn", async () => {
@@ -89,11 +133,20 @@ describe("compaction summary output budget", () => {
 
 		const budgets = spy.mock.calls.map(call => call[2]?.maxTokens).sort((a, b) => (a ?? 0) - (b ?? 0));
 		expect(budgets).toEqual([512, MAX_SUMMARY_TOKENS, MAX_SUMMARY_TOKENS]);
+		const requests = spy.mock.calls.map(call => promptTextOf(call));
+		expect(
+			requests.some(
+				request =>
+					request.includes("## Owner request") &&
+					request.includes("## Verified prefix evidence") &&
+					request.includes("## Unverified prefix state"),
+			),
+		).toBeTrue();
 	});
 
-	test("leaves a reserve smaller than the cap proportional", async () => {
+	test("caps default-sized reserves at the continuity capsule ceiling", async () => {
 		const spy = vi.spyOn(ai, "completeSimple").mockResolvedValue(createAssistantMessage("summary"));
 		await generateSummary(messages, getModel(), 10_000, "test-key");
-		expect(spy.mock.calls[0]?.[2]?.maxTokens).toBe(8_000);
+		expect(spy.mock.calls[0]?.[2]?.maxTokens).toBe(MAX_SUMMARY_TOKENS);
 	});
 });
