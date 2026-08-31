@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added the RPC `steer_subagent` command, delivering a steering DM to a live in-process subagent over the hub/IRC bus (isolated worktree runs are rejected with error code `unsupported_isolated`).
 - Added a structured `advisor_note` session event mirroring every routed advisor delivery (preserved card or steered message), so headless RPC/ACP hosts can surface advisories without parsing transcript text.
 - RPC `get_messages_page` now pages a frozen snapshot while a turn streams (compaction still refuses with `session_busy`); cursors stay bound to the frozen length and stale cursors across epochs/session switches still fail.
 - Added the RPC `generate_title` command wrapping the session title generator, plus opt-in auto-titling on `prompt` via `PI_RPC_TITLES=1`.

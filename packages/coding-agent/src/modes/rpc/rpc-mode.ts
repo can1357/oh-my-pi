@@ -28,7 +28,9 @@ import {
 import type { ToolApprovalRequestedEvent, ToolApprovalResolvedEvent } from "../../extensibility/extensions/types";
 import { buildSkillPromptMessage, parseSkillInvocation } from "../../extensibility/skills";
 import { loadSlashCommands } from "../../extensibility/slash-commands";
+import { IrcBus, type IrcDeliveryReceipt } from "../../irc/bus";
 import { type Theme, theme } from "../../modes/theme/theme";
+import { MAIN_AGENT_ID } from "../../registry/agent-registry";
 import type { AgentSession } from "../../session/agent-session";
 import { SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "../../session/messages";
 import { executeAcpBuiltinSlashCommand } from "../../slash-commands/acp-builtins";
@@ -483,6 +485,59 @@ export class RpcShutdownCoordinator {
 }
 
 export type RpcSubagentResetRegistry = Pick<RpcSubagentRegistry, "clear">;
+
+type RpcSteerSubagentErrorCode = "unsupported_isolated";
+export type RpcSteerSubagentResult =
+	| { kind: "delivered"; to: string; outcome: IrcDeliveryReceipt["outcome"] }
+	| { kind: "error"; message: string; code?: RpcSteerSubagentErrorCode };
+
+/**
+ * Steer an in-process subagent over the hub/IRC bus (RPC `steer_subagent`).
+ *
+ * The `subagentId` is resolved through the RPC subagent registry, whose
+ * snapshot ids ARE the hub/IRC recipient ids: the task executor emits
+ * lifecycle frames with the same agent id it registers in the global
+ * `AgentRegistry` (see sdk.ts `createAgentSession`), so a "running"
+ * resolution addresses the live subagent directly.
+ *
+ * Delivery reuses the exact primitive the `hub` send tool executes
+ * (`IrcBus.global().send`, see tools/hub/messaging.ts `executeSend`): idle
+ * peers are woken, parked ones revived through the lifecycle manager, and
+ * busy ones receive the message as a non-interrupting aside at their next
+ * step boundary. The sender is attributed to the session owner so the
+ * subagent sees a normal steering DM rather than an anonymous peer.
+ *
+ * Only in-process subagents are steerable this pass: isolated worktree runs
+ * are rejected with error code `unsupported_isolated`.
+ */
+export async function handleRpcSteerSubagent(
+	subagentRegistry: RpcSubagentRegistry,
+	subagentId: string,
+	message: string,
+): Promise<RpcSteerSubagentResult> {
+	const resolution = subagentRegistry.resolveForSteer(subagentId);
+	switch (resolution.kind) {
+		case "unknown":
+			return { kind: "error", message: `Unknown subagent: ${subagentId}` };
+		case "not-running":
+			return { kind: "error", message: `Subagent not running: ${subagentId}` };
+		case "running":
+			if (resolution.snapshot.isolated === true) {
+				return {
+					kind: "error",
+					message: `Subagent ${subagentId} runs in an isolation worktree and cannot be steered over the hub yet.`,
+					code: "unsupported_isolated",
+				};
+			}
+			break;
+	}
+
+	const receipt = await IrcBus.global().send({ from: MAIN_AGENT_ID, to: subagentId, body: message });
+	if (receipt.outcome === "failed") {
+		return { kind: "error", message: `Delivery failed: ${receipt.error ?? "unknown error"}` };
+	}
+	return { kind: "delivered", to: receipt.to, outcome: receipt.outcome };
+}
 
 export type RpcGenerateTitleSession = Pick<AgentSession, "messages" | "generateTitle">;
 
@@ -1391,6 +1446,21 @@ export async function runRpcMode(
 				} catch (err) {
 					return error(id, "get_subagent_messages", err instanceof Error ? err.message : String(err));
 				}
+			}
+
+			case "steer_subagent": {
+				if (!subagentRegistry) {
+					return error(id, "steer_subagent", "Subagent event bus is unavailable");
+				}
+				const message = command.message.trim();
+				if (!message) {
+					return error(id, "steer_subagent", "`message` is required for steer_subagent.");
+				}
+				const result = await handleRpcSteerSubagent(subagentRegistry, command.subagentId, message);
+				if (result.kind === "error") {
+					return error(id, "steer_subagent", result.message, result.code);
+				}
+				return success(id, "steer_subagent", { to: result.to, outcome: result.outcome });
 			}
 
 			// =================================================================

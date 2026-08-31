@@ -133,6 +133,7 @@ Important edge behavior from runtime:
 - `{ id?, type: "set_subagent_subscription", level: "off" | "progress" | "events" }`
 - `{ id?, type: "get_subagents" }`
 - `{ id?, type: "get_subagent_messages", subagentId?: string, sessionFile?: string, fromByte?: number }`
+- `{ id?, type: "steer_subagent", subagentId: string, message: string }`
 
 ### Approval rules
 
@@ -638,6 +639,37 @@ Subagent forwarding defaults to `"off"`. `set_subagent_subscription` selects:
 `fromByte`, `nextByte`, `reset`, raw transcript `entries`, and converted
 `messages`. If `fromByte` exceeds the current file size, reading restarts at
 byte zero and reports `reset: true`.
+
+### Steering subagents
+
+`steer_subagent` delivers a direct-message to a live **in-process** subagent
+over the same hub/IRC path the `hub` send tool uses (`IrcBus.global().send`):
+idle subagents are woken with a real turn, busy ones receive the message as a
+non-interrupting aside at their next step boundary, and parked ones are
+revived through the lifecycle manager. The sender is attributed to the session
+owner (`Main`), so the subagent sees a normal steering DM.
+
+```json
+{ "id": "req_1", "type": "steer_subagent", "subagentId": "OmpWorker", "message": "Drop the glob, keep the direct path." }
+```
+
+Failure responses include a machine-readable `code` when the cause is
+actionable:
+
+- unknown `subagentId` → `error: "Unknown subagent: <id>"` (no code)
+- subagent completed/released → `error: "Subagent not running: <id>"` (no code)
+- subagent runs in an isolation worktree (not steerable this pass) →
+  `error` with `code: "unsupported_isolated"`
+
+Success responses carry delivery metadata:
+
+```json
+{ "id": "req_1", "type": "response", "command": "steer_subagent", "success": true, "data": { "to": "OmpWorker", "outcome": "injected" } }
+```
+
+`outcome` is the hub delivery receipt: `"injected"` (aside into a busy agent or
+consumed waiter), `"woken"` (idle agent woke for a real turn), or `"revived"`
+(parked agent restored before delivery).
 
 ## Prompt/Queue Concurrency and Ordering
 

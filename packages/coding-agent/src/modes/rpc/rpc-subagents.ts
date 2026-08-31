@@ -26,6 +26,17 @@ export interface RpcSubagentTranscriptSelector {
 	fromByte?: number;
 }
 
+/**
+ * Result of {@link RpcSubagentRegistry.resolveForSteer}. `"running"` means a
+ * live in-process subagent whose id maps 1:1 to a hub/IRC recipient;
+ * `"not-running"` means a completed/released subagent whose snapshot was
+ * pruned; `"unknown"` means the id was never seen.
+ */
+export type RpcSubagentSteerResolution =
+	| { kind: "running"; snapshot: RpcSubagentSnapshot }
+	| { kind: "not-running" }
+	| { kind: "unknown" };
+
 type RpcSubagentOutput = (frame: RpcSubagentFrame) => void;
 
 const MAX_RETAINED_TRANSCRIPT_REFERENCES = 256;
@@ -158,6 +169,34 @@ export class RpcSubagentRegistry {
 		return [...this.#subagents.values()].sort((a, b) => a.index - b.index || a.id.localeCompare(b.id));
 	}
 
+	/**
+	 * Resolve a subagent id for steering (RPC `steer_subagent`).
+	 *
+	 * The snapshot `id` is the same agent id the task executor registers in the
+	 * process-global {@link AgentRegistry}: the executor emits lifecycle frames
+	 * with the identical `id` it passes to `createAgentSession` (whose
+	 * registration key becomes the `AgentRegistry` ref key, see sdk.ts), so a
+	 * "running" resolution can be handed straight to the hub/IRC bus as the
+	 * recipient id. Terminal ids are never pruned from `#staleSubagentIds` /
+	 * `#transcriptSessionFilesBySubagentId` until `clear()`, so a released or
+	 * completed subagent stays distinguishable from a genuinely unknown id.
+	 */
+	resolveForSteer(subagentId: string): RpcSubagentSteerResolution {
+		const snapshot = this.#subagents.get(subagentId);
+		if (snapshot) {
+			if (snapshot.status === "running" || snapshot.status === "pending") {
+				return { kind: "running", snapshot };
+			}
+			// Progress can briefly report a terminal status before the terminal
+			// lifecycle frame prunes the snapshot; treat that as not running.
+			return { kind: "not-running" };
+		}
+		if (this.#staleSubagentIds.has(subagentId) || this.#transcriptSessionFilesBySubagentId.has(subagentId)) {
+			return { kind: "not-running" };
+		}
+		return { kind: "unknown" };
+	}
+
 	#rememberTranscriptSession(subagentId: string, sessionFile: string | undefined): void {
 		if (!sessionFile) return;
 		this.#transcriptSessionFilesBySubagentId.delete(subagentId);
@@ -200,6 +239,7 @@ export class RpcSubagentRegistry {
 			parentToolCallId: payload.parentToolCallId ?? existing?.parentToolCallId,
 			lastUpdate: Date.now(),
 			progress: existing?.progress,
+			isolated: payload.isolated ?? existing?.isolated,
 		};
 		this.#rememberTranscriptSession(payload.id, sessionFile);
 		if (isTerminalLifecycleStatus(payload.status)) {
@@ -233,6 +273,9 @@ export class RpcSubagentRegistry {
 			lastUpdate: Date.now(),
 			parentToolCallId: payload.parentToolCallId ?? existing?.parentToolCallId,
 			progress,
+			// Progress payloads do not carry the isolation marker; only lifecycle
+			// start does (set by the executor for worktree-confined runs).
+			isolated: existing?.isolated,
 		});
 		if (this.#subscriptionLevel !== "off") {
 			this.#output({ type: "subagent_progress", payload });

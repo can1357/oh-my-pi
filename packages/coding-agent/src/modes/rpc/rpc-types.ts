@@ -9,6 +9,7 @@ import type { CompactionResult } from "@oh-my-pi/pi-agent-core/compaction";
 import type { Effort, ImageContent, Model, ToolExample } from "@oh-my-pi/pi-ai";
 import type { BashResult } from "../../exec/bash-executor";
 import type { ContextUsage } from "../../extensibility/extensions/types";
+import type { IrcDeliveryReceipt } from "../../irc/bus";
 import type { AgentSessionEvent, SessionStats } from "../../session/agent-session";
 import type { FileEntry } from "../../session/session-entries";
 import type { AvailableSlashCommandSource } from "../../slash-commands/available-commands";
@@ -54,6 +55,7 @@ export type RpcCommand =
 	| { id?: string; type: "add_approval_rule"; rule: ApprovalRule }
 	| { id?: string; type: "list_approval_rules" }
 	| { id?: string; type: "remove_approval_rule"; index: number }
+	| { id?: string; type: "steer_subagent"; subagentId: string; message: string }
 
 	// Model
 	| { id?: string; type: "set_model"; provider: string; modelId: string }
@@ -185,6 +187,12 @@ export interface RpcSubagentSnapshot {
 	lastUpdate: number;
 	progress?: AgentProgress;
 	parentToolCallId?: string;
+	/**
+	 * True when the subagent runs inside an isolation worktree
+	 * (task.isolation.*). Such runs cannot be steered over the hub/IRC bus;
+	 * steering them fails with error code `unsupported_isolated`.
+	 */
+	isolated?: boolean;
 }
 
 export interface RpcSubagentMessagesResult {
@@ -281,6 +289,13 @@ export type RpcResponse =
 			command: "remove_approval_rule";
 			success: true;
 			data: { rules: ApprovalRule[] };
+	  }
+	| {
+			id?: string;
+			type: "response";
+			command: "steer_subagent";
+			success: true;
+			data: { to: string; outcome: IrcDeliveryReceipt["outcome"] };
 	  }
 
 	// Model
