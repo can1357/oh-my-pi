@@ -586,16 +586,16 @@ async function handleFormatEndpoint(
 			commitState: commitGate.state,
 		});
 		if (action.type === "sibling_credential") {
-			bootOpts.storage.clearQuotaProbe(requestId);
+			bootOpts.storage.releaseTurnReservation(requestId);
 			siblingsExhausted = true;
 			pendingFallback = currentTarget;
 			retryCount += 1;
 			return true;
 		}
 		if (action.type === "fallback_target") {
-			// Drop the failed attempt's probe so settle on the backup cannot clear
-			// the primary credential's cooldown, and so a new probe can be acquired.
-			bootOpts.storage.clearQuotaProbe(requestId);
+			// Drop the failed attempt's reservation+probe so the primary credential is
+			// free for peers and settle on the backup cannot clear its cooldown.
+			bootOpts.storage.releaseTurnReservation(requestId);
 			siblingsExhausted = false;
 			pendingFallback = action.targetModelId;
 			fallbackCount += 1;
@@ -943,16 +943,16 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 			commitState: commitGate.state,
 		});
 		if (action.type === "sibling_credential") {
-			bootOpts.storage.clearQuotaProbe(requestId);
+			bootOpts.storage.releaseTurnReservation(requestId);
 			siblingsExhausted = true;
 			pendingFallback = currentTarget;
 			retryCount += 1;
 			return true;
 		}
 		if (action.type === "fallback_target") {
-			// Drop the failed attempt's probe so settle on the backup cannot clear
-			// the primary credential's cooldown, and so a new probe can be acquired.
-			bootOpts.storage.clearQuotaProbe(requestId);
+			// Drop the failed attempt's reservation+probe so the primary credential is
+			// free for peers and settle on the backup cannot clear its cooldown.
+			bootOpts.storage.releaseTurnReservation(requestId);
 			siblingsExhausted = false;
 			pendingFallback = action.targetModelId;
 			fallbackCount += 1;

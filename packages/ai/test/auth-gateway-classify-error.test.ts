@@ -251,3 +251,12 @@ describe("classifyGatewayError review follow-ups", () => {
 		expect(c.disposition).not.toBe("provider_unavailable");
 	});
 });
+
+describe("classifyGatewayError model availability", () => {
+	it("maps OpenAI-style model-does-not-exist 404 to model_unavailable", () => {
+		const classified = classifyGatewayError(
+			Object.assign(new Error("The model `gpt-nope` does not exist or you do not have access to it"), { status: 404 }),
+		);
+		expect(classified.disposition).toBe("model_unavailable");
+	});
+});

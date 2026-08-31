@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Fixed Retry-After provenance hydration from persisted blocks, releasing turn reservations on fallback, and OpenAI model-does-not-exist 404 classification.
 - Fixed clearing quota probes before fallback/sibling retries, per-target sibling-credential attempt budget, and stream-commit contract coverage for pre-commit failures.
 
 ### Added

@@ -2015,6 +2015,9 @@ export class AuthStorage {
 			(blockedUntil === undefined || persistedGlobalBlockedUntil > blockedUntil)
 		) {
 			blockedUntil = persistedGlobalBlockedUntil;
+			// Restarts lose in-memory Retry-After provenance; treat still-active persisted
+			// blocks as Retry-After-sourced so allowBlocked cannot bypass probe leases.
+			this.#probeLeases.noteRetryAfterBlock(credentialId, "", persistedGlobalBlockedUntil);
 		}
 		for (const blockScope of scopes) {
 			const persistedScopedBlockedUntil = this.#readPersistedCredentialBlock(credentialId, providerKey, blockScope);
@@ -2023,6 +2026,7 @@ export class AuthStorage {
 				(blockedUntil === undefined || persistedScopedBlockedUntil > blockedUntil)
 			) {
 				blockedUntil = persistedScopedBlockedUntil;
+				this.#probeLeases.noteRetryAfterBlock(credentialId, blockScope, persistedScopedBlockedUntil);
 			}
 		}
 		const incarnation = this.#credentialIncarnation.get(credentialId) ?? 1;
