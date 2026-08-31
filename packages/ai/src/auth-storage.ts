@@ -5670,36 +5670,44 @@ export class AuthStorage {
 			blockScopes,
 			allowFallback = true,
 		} = usageOptions;
-		if (
-			!allowBlocked &&
-			this.#isCredentialBlocked(
-				provider,
-				providerKey,
-				selection.index,
-				blockScopes ?? blockScope,
-				options?.requestId,
-			)
-		) {
+		const blockedNow = this.#isCredentialBlocked(
+			provider,
+			providerKey,
+			selection.index,
+			blockScopes ?? blockScope,
+			options?.requestId,
+		);
+		if (blockedNow) {
 			const entries = this.#getStoredCredentials(provider);
 			const blockedId = entries[selection.index]?.id;
 			if (blockedId === undefined) return undefined;
-			// A live block must never hijack rotation: while any same-type sibling
-			// is still usable, fall through so the caller rotates to it. Probing a
-			// cooled-down credential is a last resort for requests that have no
-			// unblocked sibling at all (one lease per cooldown generation).
-			const hasUsableSibling = entries.some(
-				(entry, index) =>
-					index !== selection.index &&
-					entry.credential.type === selection.credential.type &&
-					!this.#isCredentialBlocked(provider, providerKey, index, blockScopes ?? blockScope),
-			);
-			if (hasUsableSibling) return undefined;
-			const held = this.#activeTurnReservation(blockedId, this.getCredentialIncarnation(blockedId));
-			if (held && held.requestId !== options?.requestId) return undefined;
 			const probeScope = blockScope ?? "";
-			const lease = this.tryAcquireQuotaProbeLease(blockedId, probeScope);
-			if (!lease) return undefined;
-			if (options?.requestId) {
+			if (!allowBlocked) {
+				// A live block must never hijack rotation: while any same-type sibling
+				// is still usable, fall through so the caller rotates to it. Probing a
+				// cooled-down credential is a last resort for requests that have no
+				// unblocked sibling at all (one lease per cooldown generation).
+				const hasUsableSibling = entries.some(
+					(entry, index) =>
+						index !== selection.index &&
+						entry.credential.type === selection.credential.type &&
+						!this.#isCredentialBlocked(provider, providerKey, index, blockScopes ?? blockScope),
+				);
+				if (hasUsableSibling) return undefined;
+				if (!options?.requestId) return undefined;
+				const held = this.#activeTurnReservation(blockedId, this.getCredentialIncarnation(blockedId));
+				if (held && held.requestId !== options.requestId) return undefined;
+				const lease = this.tryAcquireQuotaProbeLease(blockedId, probeScope);
+				if (!lease) return undefined;
+				this.#inflightProbes.set(options.requestId, {
+					credentialId: blockedId,
+					blockScope: probeScope,
+					leaseId: lease,
+				});
+			} else if (this.#probeLeases.isRetryAfterSourced(blockedId, probeScope)) {
+				if (!options?.requestId) return undefined;
+				const lease = this.tryAcquireQuotaProbeLease(blockedId, probeScope);
+				if (!lease) return undefined;
 				this.#inflightProbes.set(options.requestId, {
 					credentialId: blockedId,
 					blockScope: probeScope,
