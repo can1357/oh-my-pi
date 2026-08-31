@@ -740,7 +740,8 @@ async function handleFormatEndpoint(
 	let pendingFallback: string | undefined;
 	let lastClassified: GatewayErrorClassification | undefined;
 	let siblingsExhausted = false;
-	const attemptCap = compiled.targets.length + 1;
+	// One dispatch + one sibling-credential retry per target, plus a spare iteration.
+	const attemptCap = compiled.targets.length * 2 + 1;
 
 	const stateNow = (): ExecutionState =>
 		conductorExecutionState(
@@ -782,6 +783,8 @@ async function handleFormatEndpoint(
 			return true;
 		}
 		if (action.type === "fallback_target") {
+			// New target gets a fresh sibling-credential budget.
+			siblingsExhausted = false;
 			pendingFallback = action.targetModelId;
 			fallbackCount += 1;
 			retryCount += 1;
@@ -1155,7 +1158,8 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 	let pendingFallback: string | undefined;
 	let lastClassified: GatewayErrorClassification | undefined;
 	let siblingsExhausted = false;
-	const attemptCap = compiled.targets.length + 1;
+	// One dispatch + one sibling-credential retry per target, plus a spare iteration.
+	const attemptCap = compiled.targets.length * 2 + 1;
 
 	const stateNow = (): ExecutionState =>
 		conductorExecutionState(
@@ -1197,6 +1201,8 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 			return true;
 		}
 		if (action.type === "fallback_target") {
+			// New target gets a fresh sibling-credential budget.
+			siblingsExhausted = false;
 			pendingFallback = action.targetModelId;
 			fallbackCount += 1;
 			retryCount += 1;

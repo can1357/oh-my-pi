@@ -23,6 +23,8 @@ import type {
 	ServiceTier,
 	StopReason,
 	TextContent,
+	Tool,
+	TSchema,
 } from "../types";
 
 export type { ParsedRequest };
@@ -211,6 +213,42 @@ function applyOpenAiSampling(options: ParsedRequest["options"], body: Record<str
 	if (stopSequences && options.stopSequences === undefined) options.stopSequences = stopSequences;
 }
 
+
+function walkGeminiTools(tools: unknown): Tool[] | undefined {
+	if (!Array.isArray(tools)) return undefined;
+	const out: Tool[] = [];
+	for (const tool of tools) {
+		if (!isRecord(tool)) continue;
+		const decls = tool.functionDeclarations ?? tool.function_declarations;
+		if (!Array.isArray(decls)) continue;
+		for (const decl of decls) {
+			if (!isRecord(decl) || typeof decl.name !== "string" || decl.name.length === 0) continue;
+			out.push({
+				name: decl.name,
+				description: typeof decl.description === "string" ? decl.description : "",
+				parameters: (isRecord(decl.parameters) ? decl.parameters : {}) as TSchema,
+			});
+		}
+	}
+	return out.length > 0 ? out : undefined;
+}
+
+function mapGeminiToolChoice(toolConfig: unknown): ParsedRequest["options"]["toolChoice"] {
+	if (!isRecord(toolConfig)) return undefined;
+	const fcc = toolConfig.functionCallingConfig ?? toolConfig.function_calling_config;
+	if (!isRecord(fcc)) return undefined;
+	const allowed = fcc.allowedFunctionNames ?? fcc.allowed_function_names;
+	if (Array.isArray(allowed)) {
+		const names = allowed.filter((name): name is string => typeof name === "string" && name.length > 0);
+		if (names.length === 1) return { name: names[0]! };
+	}
+	const mode = typeof fcc.mode === "string" ? fcc.mode.toUpperCase() : "";
+	if (mode === "NONE") return "none";
+	if (mode === "ANY") return "required";
+	if (mode === "AUTO") return "auto";
+	return undefined;
+}
+
 // ---------------------------------------------------------------------------
 // parseRequest
 // ---------------------------------------------------------------------------
@@ -250,9 +288,14 @@ export function parseRequest(body: unknown, _headers?: Headers): ParsedRequest {
 	if (isRecord(generationConfig)) applyGenerationConfig(options, generationConfig);
 	applyOpenAiSampling(options, body);
 
+	const tools = walkGeminiTools(body.tools);
+	const toolChoice = mapGeminiToolChoice(body.toolConfig ?? body.tool_config);
+	if (toolChoice !== undefined) options.toolChoice = toolChoice;
+
 	const context: Context = {
 		messages,
 		...(systemParts.length > 0 ? { systemPrompt: systemParts } : {}),
+		...(tools ? { tools } : {}),
 	};
 
 	return {

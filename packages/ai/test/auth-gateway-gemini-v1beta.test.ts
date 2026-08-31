@@ -170,3 +170,14 @@ describe("auth-gateway gemini-v1beta: formatError", () => {
 		});
 	});
 });
+
+it("parses functionDeclarations and toolConfig into context tools", () => {
+	const parsed = parseRequest({
+		model: "gemini-2.5-flash",
+		contents: [{ role: "user", parts: [{ text: "hi" }] }],
+		tools: [{ functionDeclarations: [{ name: "lookup", description: "d", parameters: { type: "object" } }] }],
+		toolConfig: { functionCallingConfig: { mode: "ANY" } },
+	});
+	expect(parsed.context.tools?.map(tool => tool.name)).toEqual(["lookup"]);
+	expect(parsed.options.toolChoice).toBe("required");
+});

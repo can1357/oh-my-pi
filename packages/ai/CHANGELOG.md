@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Gemini v1beta requests dropping `tools[].functionDeclarations` / `toolConfig` before dispatch.
+- Fixed auth-gateway sibling-credential budget sticking across fallback targets (and raised the attempt cap).
+- Fixed multi-row stored API-key selection consulting turn reservations without acquiring one for the chosen key.
+
 ### Added
 
 - Added API-key authentication for ClinePass through the official `CLINE_API_KEY` variable, including account-route validation and rolling quota-window reporting in `omp usage` ([#7863](https://github.com/can1357/oh-my-pi/pull/7863) by [@will-bogusz](https://github.com/will-bogusz)).
