@@ -2121,6 +2121,10 @@ function mapOptionsForApi<TApi extends Api>(
 					textVerbosity: options?.textVerbosity,
 					promptCache: options?.promptCache,
 					statefulResponses: options?.statefulResponses,
+					seed: options?.seed,
+					logitBias: options?.logitBias,
+					user: options?.user,
+					responseFormat: options?.responseFormat,
 				});
 			}
 			return castApi<"openai-completions">({
@@ -2132,6 +2136,10 @@ function mapOptionsForApi<TApi extends Api>(
 				openrouterVariant: options?.openrouterVariant,
 				maxTokensExplicit: rawOptions?.maxTokens !== undefined,
 				promptCache: options?.promptCache,
+				seed: options?.seed,
+				logitBias: options?.logitBias,
+				user: options?.user,
+				responseFormat: options?.responseFormat,
 			});
 		}
 
@@ -2145,6 +2153,10 @@ function mapOptionsForApi<TApi extends Api>(
 				openrouterVariant: options?.openrouterVariant,
 				maxTokensExplicit: rawOptions?.maxTokens !== undefined,
 				promptCache: options?.promptCache,
+				seed: options?.seed,
+				logitBias: options?.logitBias,
+				user: options?.user,
+				responseFormat: options?.responseFormat,
 			});
 
 		case "openai-responses":

@@ -4,6 +4,8 @@
 
 ### Fixed
 
+- Delay pi-native stream commit until text/thinking/tool deltas; keep Responses structural item/part events pre-commit.
+- Forward `previous_response_id` onto Azure Responses wire params and Chat Completions seed/logit_bias/user/response_format through the API mapper.
 - Treat Anthropic message_start as stream metadata; restore Cloudflare and MCP OAuth notes to their released sections.
 
 - Authoritative HTTP status beats free-text aborted wording; Responses file_id refs are rejected on incompatible targets.

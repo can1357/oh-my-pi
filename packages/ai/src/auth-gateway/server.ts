@@ -1406,7 +1406,8 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 				}
 			},
 		});
-		const held = await holdSseUntilCommit(sseStream, commitGate, settled, true);
+		sseStream = observeSseCommit(sseStream, commitGate);
+		const held = await holdSseUntilCommit(sseStream, commitGate, settled, false);
 		if (held.type === "failed") {
 			if (held.message && messageHasBillableUsage(held.message)) {
 				const errorMessage =

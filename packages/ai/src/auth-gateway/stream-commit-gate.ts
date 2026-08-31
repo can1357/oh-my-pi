@@ -5,18 +5,25 @@ export type StreamCommitState = "probing" | "committed" | "terminated";
 
 const DEFAULT_MAX_PRELUDE_BYTES = 4 * 1024 * 1024;
 
-/** Downstream SSE observer is used for Responses; upstream onSseEvent must not also feed the gate. */
+/** Downstream SSE observer is used for Responses and pi-native; upstream onSseEvent must not also feed the gate. */
 export function commitGateObservesDownstreamSse(formatLabel: string): boolean {
-	return formatLabel === "openai-responses";
+	return formatLabel === "openai-responses" || formatLabel === "pi-native";
 }
 
 const METADATA_EVENTS: Record<string, true> = {
 	"response.created": true,
 	"response.in_progress": true,
 	"response.queued": true,
+	"response.output_item.added": true,
+	"response.content_part.added": true,
 	message_start: true,
 	heartbeat: true,
 	ping: true,
+	// Pi-native encoder emits a synthetic `start` before any assistant content.
+	start: true,
+	text_start: true,
+	thinking_start: true,
+	toolcall_start: true,
 };
 
 /**
@@ -128,10 +135,10 @@ export class PreludeAbortedError extends Error {
 export function classifyCommitEvent(eventType: string): CommitClass {
 	if (!eventType) return "output";
 	if (METADATA_EVENTS[eventType]) return "metadata";
-	if (eventType === "response.completed") return "terminal-success";
+	if (eventType === "response.completed" || eventType === "done") return "terminal-success";
 	if (eventType === "response.failed") return "terminal-retryable";
 	if (eventType === "response.incomplete") return "terminal-success";
-	if (eventType === "response.error") return "terminal-failure";
+	if (eventType === "response.error" || eventType === "error") return "terminal-failure";
 	return "output";
 }
 
@@ -153,10 +160,22 @@ function nextSseFrame(pending: string): { frame: string; rest: string } | undefi
 
 function eventTypeFromFrame(frame: string): string {
 	let eventType = "";
+	let data = "";
 	for (const line of frame.split(/\r?\n/)) {
 		if (line.startsWith("event:")) eventType = line.slice(6).trim();
+		else if (line.startsWith("data:")) data = line.slice(5).trim();
 	}
-	return eventType;
+	if (eventType) return eventType;
+	// Pi-native frames are data-only JSON with a canonical `type` field.
+	if (data && data !== "[DONE]") {
+		try {
+			const parsed = JSON.parse(data) as { type?: unknown };
+			if (typeof parsed.type === "string") return parsed.type;
+		} catch {
+			/* ignore non-JSON data frames */
+		}
+	}
+	return "";
 }
 
 /**

@@ -24,6 +24,27 @@ describe("StreamCommitGate", () => {
 		expect(gate.classifyAndObserve("heartbeat", 4)).toBe("probing");
 	});
 
+	it("keeps structural Responses item/part events pre-commit", () => {
+		const gate = new StreamCommitGate();
+		expect(gate.classifyAndObserve("response.output_item.added", 40)).toBe("probing");
+		expect(gate.classifyAndObserve("response.content_part.added", 40)).toBe("probing");
+		expect(gate.classifyAndObserve("response.output_text.delta", 12)).toBe("committed");
+	});
+
+	it("keeps pi-native start pre-commit and commits on text delta", () => {
+		const gate = new StreamCommitGate();
+		expect(gate.classifyAndObserve("start", 20)).toBe("probing");
+		expect(gate.classifyAndObserve("text_start", 20)).toBe("probing");
+		expect(gate.classifyAndObserve("text_delta", 12)).toBe("committed");
+	});
+
+	it("uses downstream SSE for openai-responses and pi-native (negative: chat is upstream-fed)", () => {
+		expect(commitGateObservesDownstreamSse("openai-responses")).toBe(true);
+		expect(commitGateObservesDownstreamSse("pi-native")).toBe(true);
+		expect(commitGateObservesDownstreamSse("openai-chat")).toBe(false);
+		expect(commitGateObservesDownstreamSse("anthropic-messages")).toBe(false);
+	});
+
 	it("commits when prelude reaches 4 MiB even on metadata", () => {
 		const gate = new StreamCommitGate();
 		expect(gate.classifyAndObserve("response.created", FOUR_MIB)).toBe("committed");
@@ -55,12 +76,6 @@ describe("StreamCommitGate", () => {
 		expect(gate.classifyAndObserve("response.created", 20)).toBe("probing");
 		expect(gate.classifyAndObserve("response.failed", 20)).toBe("terminated");
 		expect(gate.state).not.toBe("committed");
-	});
-
-	it("uses downstream SSE only for openai-responses (negative: chat is upstream-fed)", () => {
-		expect(commitGateObservesDownstreamSse("openai-responses")).toBe(true);
-		expect(commitGateObservesDownstreamSse("openai-chat")).toBe(false);
-		expect(commitGateObservesDownstreamSse("anthropic-messages")).toBe(false);
 	});
 
 	it("observeSseCommit counts frame.length not chunk.byteLength (negative heartbeat steal)", async () => {

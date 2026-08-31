@@ -95,4 +95,88 @@ describe("mapOptionsForApi Responses field forwarding", () => {
 		expect(captured).toBeDefined();
 		expect(captured?.previous_response_id).toBeUndefined();
 	});
+
+	it("forwards Chat Completions seed, logitBias, user, and responseFormat onto the wire", async () => {
+		let captured: Record<string, unknown> | undefined;
+		const fetchImpl: FetchImpl = async (_input, init) => {
+			captured = typeof init?.body === "string" ? (JSON.parse(init.body) as Record<string, unknown>) : undefined;
+			return new Response(
+				new ReadableStream({
+					start(controller) {
+						controller.close();
+					},
+				}),
+				{ status: 200, headers: { "content-type": "text/event-stream" } },
+			);
+		};
+		const model = buildModel({
+			api: "openai-completions",
+			name: "gpt-test",
+			id: "gpt-test",
+			provider: "openai",
+			baseUrl: "https://api.openai.com/v1",
+			reasoning: false,
+			contextWindow: 128000,
+			maxTokens: 8192,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		});
+		const context: Context = { messages: [{ role: "user", content: "hi", timestamp: 1 }] };
+		const events = streamSimple(model, context, {
+			apiKey: "test-key",
+			fetch: fetchImpl,
+			seed: 7,
+			logitBias: { "42": -1 },
+			user: "user-1",
+			responseFormat: { type: "json_object" },
+		});
+		for await (const _ of events) {
+			/* drain */
+		}
+		expect(captured).toBeDefined();
+		expect(captured?.seed).toBe(7);
+		expect(captured?.logit_bias).toEqual({ "42": -1 });
+		expect(captured?.user).toBe("user-1");
+		expect(captured?.response_format).toEqual({ type: "json_object" });
+	});
+
+	it("forwards previous_response_id onto the Azure Responses wire", async () => {
+		let captured: Record<string, unknown> | undefined;
+		const fetchImpl: FetchImpl = async (_input, init) => {
+			captured = typeof init?.body === "string" ? (JSON.parse(init.body) as Record<string, unknown>) : undefined;
+			return new Response(
+				new ReadableStream({
+					start(controller) {
+						controller.close();
+					},
+				}),
+				{ status: 200, headers: { "content-type": "text/event-stream" } },
+			);
+		};
+		const model = buildModel({
+			api: "azure-openai-responses",
+			name: "gpt-test",
+			id: "gpt-test",
+			provider: "azure-openai-responses",
+			baseUrl: "https://example.openai.azure.com",
+			reasoning: false,
+			contextWindow: 128000,
+			maxTokens: 8192,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		});
+		const context: Context = { messages: [{ role: "user", content: "hi", timestamp: 1 }] };
+		const events = streamSimple(model, context, {
+			apiKey: "test-key",
+			fetch: fetchImpl,
+			previousResponseId: "resp_azure_123",
+			azureDeploymentName: "gpt-test",
+			azureApiVersion: "2024-12-01-preview",
+		} as never);
+		for await (const _ of events) {
+			/* drain */
+		}
+		expect(captured).toBeDefined();
+		expect(captured?.previous_response_id).toBe("resp_azure_123");
+	});
 });
