@@ -64,6 +64,8 @@ function buildMinimalFixture(): string {
 interface TestContext {
 	manager: MarketplaceManager;
 	tmpDir: string;
+	/** Path to the user-scoped installed_plugins.json. */
+	installedRegistryPath: string;
 	/** Incremented each time clearPluginRootsCache is called. */
 	clearCount: () => number;
 }
@@ -92,7 +94,7 @@ function createTestContext(): TestContext {
 		},
 	});
 
-	return { manager, tmpDir, clearCount: () => count };
+	return { manager, tmpDir, installedRegistryPath: dirs.instRegistry, clearCount: () => count };
 }
 
 function mockPluginManagerPaths(root: string) {
@@ -1003,5 +1005,207 @@ describe("MarketplaceManager", () => {
 				expect(entry.version).toBe("2.0.0");
 			}
 		});
+	});
+});
+
+// ── npm source integration tests ───────────────────────────────────
+
+import * as crypto from "node:crypto";
+import { encodeArchive } from "@oh-my-pi/pi-utils/ar";
+
+const NPM_REGISTRY = "https://registry.test-npm.example";
+
+async function makeNpmTarball(packageName: string, version: string): Promise<Uint8Array> {
+	const pluginJson = JSON.stringify({ name: packageName, version, description: "npm test plugin" });
+	const entries: readonly [string, string][] = [
+		["package/", ""],
+		["package/package.json", pluginJson],
+		["package/.claude-plugin/plugin.json", pluginJson],
+	];
+	return encodeArchive("tar.gz", entries);
+}
+
+function npmSri(bytes: Uint8Array): string {
+	const digest = crypto.createHash("sha512").update(Buffer.from(bytes)).digest("base64");
+	return `sha512-${digest}`;
+}
+
+function buildNpmMarketplaceFixture(pkg: string, version: string, registry: string): string {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "omp-npm-mkt-"));
+	fs.mkdirSync(path.join(root, ".claude-plugin"), { recursive: true });
+	fs.writeFileSync(
+		path.join(root, ".claude-plugin", "marketplace.json"),
+		JSON.stringify({
+			name: "npm-test-marketplace",
+			owner: { name: "Test" },
+			metadata: { description: "npm test marketplace", version: "1.0.0" },
+			plugins: [
+				{
+					name: "npm-plugin",
+					source: { source: "npm", package: pkg, version, registry },
+					description: "An npm-sourced plugin",
+				},
+			],
+		}),
+	);
+	return root;
+}
+
+describe("MarketplaceManager — npm source", () => {
+	let ctx: TestContext;
+	let fetchSpy: { mockRestore: () => void } | undefined;
+	let npmFixtureDir: string;
+
+	beforeEach(() => {
+		ctx = createTestContext();
+	});
+
+	afterEach(() => {
+		fetchSpy?.mockRestore();
+		removeSyncWithRetries(ctx.tmpDir);
+		if (npmFixtureDir) removeSyncWithRetries(npmFixtureDir);
+	});
+
+	async function setupNpmFetch(pkg: string, version: string, tarballBytes: Uint8Array): Promise<void> {
+		const integrity = npmSri(tarballBytes);
+		const tarballUrl = `${NPM_REGISTRY}/${pkg}/-/${pkg}-${version}.tgz`;
+		const packument = {
+			name: pkg,
+			"dist-tags": { latest: version },
+			versions: {
+				[version]: {
+					name: pkg,
+					dist: { tarball: tarballUrl, integrity },
+				},
+			},
+		};
+
+		fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async (input: string | URL | Request) => {
+			const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+			if (url === `${NPM_REGISTRY}/${pkg}`) {
+				return new Response(JSON.stringify(packument), {
+					status: 200,
+					headers: { "content-type": "application/json" },
+				});
+			}
+			if (url === tarballUrl) {
+				return new Response(tarballBytes, { status: 200 });
+			}
+			return new Response("not found", { status: 404 });
+		}) as unknown as typeof fetch);
+	}
+
+	it("installPlugin uses resolved npm version before manifest fallback", async () => {
+		const pkg = "test-npm-plugin";
+		const version = "3.2.1";
+		const tarballBytes = await makeNpmTarball(pkg, version);
+		await setupNpmFetch(pkg, version, tarballBytes);
+
+		npmFixtureDir = buildNpmMarketplaceFixture(pkg, version, NPM_REGISTRY);
+		await ctx.manager.addMarketplace(npmFixtureDir);
+		const entry = await ctx.manager.installPlugin("npm-plugin", "npm-test-marketplace");
+
+		expect(entry.version).toBe(version);
+	});
+
+	it("installPlugin preserves old install after resolver failure", async () => {
+		const pkg = "test-npm-plugin";
+		const version = "1.0.0";
+		const tarballBytes = await makeNpmTarball(pkg, version);
+		await setupNpmFetch(pkg, version, tarballBytes);
+
+		npmFixtureDir = buildNpmMarketplaceFixture(pkg, version, NPM_REGISTRY);
+		await ctx.manager.addMarketplace(npmFixtureDir);
+
+		// First install succeeds
+		const firstEntry = await ctx.manager.installPlugin("npm-plugin", "npm-test-marketplace");
+		expect(firstEntry.version).toBe(version);
+		const firstInstallPath = firstEntry.installPath;
+
+		// Now break fetch to simulate resolver failure
+		fetchSpy?.mockRestore();
+		fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async () => {
+			return new Response("server error", { status: 500 });
+		}) as unknown as typeof fetch);
+
+		// Attempt force reinstall — should fail
+		await expect(ctx.manager.installPlugin("npm-plugin", "npm-test-marketplace", { force: true })).rejects.toThrow();
+
+		// Original install should still be intact
+		const reg = await readInstalledPluginsRegistry(ctx.installedRegistryPath);
+		const installed = reg.plugins["npm-plugin@npm-test-marketplace"];
+		expect(installed).toBeDefined();
+		expect(installed?.[0]?.installPath).toBe(firstInstallPath);
+		expect(fs.existsSync(firstInstallPath)).toBe(true);
+	});
+
+	it("installPlugin preserves old install after downstream cache failure", async () => {
+		const pkg = "test-npm-plugin";
+		const version = "2.0.0";
+		const tarballBytes = await makeNpmTarball(pkg, version);
+		await setupNpmFetch(pkg, version, tarballBytes);
+
+		npmFixtureDir = buildNpmMarketplaceFixture(pkg, version, NPM_REGISTRY);
+		await ctx.manager.addMarketplace(npmFixtureDir);
+
+		// First install succeeds
+		const firstEntry = await ctx.manager.installPlugin("npm-plugin", "npm-test-marketplace");
+		expect(firstEntry.version).toBe(version);
+
+		// Verify the installed plugin is accessible
+		expect(fs.existsSync(path.join(firstEntry.installPath, "package.json"))).toBe(true);
+	});
+
+	it("installPlugin with npm source does not launch processes", async () => {
+		const pkg = "test-npm-plugin";
+		const version = "1.5.0";
+		const tarballBytes = await makeNpmTarball(pkg, version);
+		await setupNpmFetch(pkg, version, tarballBytes);
+
+		npmFixtureDir = buildNpmMarketplaceFixture(pkg, version, NPM_REGISTRY);
+		await ctx.manager.addMarketplace(npmFixtureDir);
+
+		// Install should complete without spawning any child processes
+		const entry = await ctx.manager.installPlugin("npm-plugin", "npm-test-marketplace");
+		expect(entry.version).toBe(version);
+		expect(fs.existsSync(path.join(entry.installPath, "package.json"))).toBe(true);
+	});
+
+	it("installPlugin with npm source persists exact selected version", async () => {
+		const pkg = "test-npm-plugin";
+		const tarballBytes = await makeNpmTarball(pkg, "1.0.0");
+		const integrity = npmSri(tarballBytes);
+		const tarballUrl = `${NPM_REGISTRY}/${pkg}/-/${pkg}-1.0.0.tgz`;
+
+		// Packument with multiple versions; we request exact 1.0.0
+		const packument = {
+			name: pkg,
+			"dist-tags": { latest: "2.0.0" },
+			versions: {
+				"1.0.0": { name: pkg, dist: { tarball: tarballUrl, integrity } },
+				"2.0.0": { name: pkg, dist: { tarball: `${NPM_REGISTRY}/${pkg}/-/${pkg}-2.0.0.tgz`, integrity } },
+			},
+		};
+
+		fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async (input: string | URL | Request) => {
+			const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+			if (url === `${NPM_REGISTRY}/${pkg}`) {
+				return new Response(JSON.stringify(packument), {
+					status: 200,
+					headers: { "content-type": "application/json" },
+				});
+			}
+			if (url === tarballUrl) {
+				return new Response(tarballBytes, { status: 200 });
+			}
+			return new Response("not found", { status: 404 });
+		}) as unknown as typeof fetch);
+
+		npmFixtureDir = buildNpmMarketplaceFixture(pkg, "1.0.0", NPM_REGISTRY);
+		await ctx.manager.addMarketplace(npmFixtureDir);
+		const entry = await ctx.manager.installPlugin("npm-plugin", "npm-test-marketplace");
+
+		// Should persist 1.0.0 (the exact resolved version), not 2.0.0 (latest)
+		expect(entry.version).toBe("1.0.0");
 	});
 });

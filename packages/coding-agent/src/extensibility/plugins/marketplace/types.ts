@@ -190,3 +190,20 @@ export interface InstalledPluginSummary {
 	/** Set when a user-scoped plugin is overridden by a project-scoped install. */
 	shadowedBy?: "project";
 }
+
+// ── Runtime package-name validator (shared) ─────────────────────────
+
+/**
+ * npm package-name invariant: scoped or unscoped, lowercase, max 214 bytes.
+ * Used by both the runtime package path and the npm source resolver.
+ */
+export const RUNTIME_PACKAGE_NAME_RE = /^(?:@[a-z0-9][a-z0-9._~-]*\/)?[a-z0-9][a-z0-9._~-]*$/;
+export const MAX_RUNTIME_PACKAGE_NAME_LENGTH = 214;
+
+/** Validate and return a runtime package name, or throw with a clear error. */
+export function assertRuntimePackageName(name: string): string {
+	if (name.length > MAX_RUNTIME_PACKAGE_NAME_LENGTH || !RUNTIME_PACKAGE_NAME_RE.test(name)) {
+		throw new Error(`Invalid marketplace plugin package name: ${JSON.stringify(name)}`);
+	}
+	return name;
+}

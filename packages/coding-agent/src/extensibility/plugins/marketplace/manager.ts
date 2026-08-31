@@ -39,17 +39,7 @@ import type {
 	MarketplacePluginEntry,
 	MarketplaceRegistryEntry,
 } from "./types";
-import { buildPluginId, parsePluginId } from "./types";
-
-const RUNTIME_PACKAGE_NAME_RE = /^(?:@[a-z0-9][a-z0-9._~-]*\/)?[a-z0-9][a-z0-9._~-]*$/;
-const MAX_RUNTIME_PACKAGE_NAME_LENGTH = 214;
-
-function assertRuntimePackageName(name: string): string {
-	if (name.length > MAX_RUNTIME_PACKAGE_NAME_LENGTH || !RUNTIME_PACKAGE_NAME_RE.test(name)) {
-		throw new Error(`Invalid marketplace plugin package name: ${JSON.stringify(name)}`);
-	}
-	return name;
-}
+import { assertRuntimePackageName, buildPluginId, parsePluginId } from "./types";
 
 // ── Options ──────────────────────────────────────────────────────────────────
 
@@ -292,17 +282,21 @@ export class MarketplaceManager {
 			);
 		}
 
-		const { dir: sourcePath, tempCloneRoot } = await resolvePluginSource(pluginEntry, {
+		const {
+			dir: sourcePath,
+			tempCloneRoot,
+			resolvedVersion,
+		} = await resolvePluginSource(pluginEntry, {
 			marketplaceClonePath,
 			catalogMetadata: catalog.metadata,
 			tmpDir: os.tmpdir(),
 		});
 
-		// 5. Determine version: catalog entry > plugin manifest > git SHA > fallback
+		// 5. Determine version: npm resolved version > catalog entry > plugin manifest > git SHA > fallback
 		let version!: string;
 		let cachePath!: string;
 		try {
-			version = await this.#resolvePluginVersion(pluginEntry, sourcePath);
+			version = resolvedVersion ?? (await this.#resolvePluginVersion(pluginEntry, sourcePath));
 			cachePath = await cachePlugin(sourcePath, this.#opts.pluginsCacheDir, marketplace, name, version);
 			await this.#writeEmbeddedLspConfig(pluginEntry, cachePath);
 			await this.#writeEmbeddedDapConfig(pluginEntry, cachePath);
