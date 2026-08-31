@@ -504,6 +504,10 @@ const streamOpenAIResponsesOnce = (
 				// Platform `previous_response_id` chaining only resolves stored responses.
 				params.store = true;
 			}
+			if (options?.previousResponseId) {
+				// Explicit client continuation chains also require stored responses.
+				params.store = true;
+			}
 			applyReasoningEffortFallbackForRequest(params);
 			// A caller-supplied `previous_response_id` names the client's own stored
 			// response; internal chain deltas are computed against a DIFFERENT
@@ -1250,7 +1254,7 @@ export function buildParams(
 	if (responseFormat !== undefined && typeof responseFormat === "object" && responseFormat !== null) {
 		const format = responseFormat as {
 			type?: string;
-			json_schema?: { name?: string; schema?: unknown; strict?: boolean };
+			json_schema?: { name?: string; description?: string; schema?: unknown; strict?: boolean };
 		};
 		if (
 			format.type === "json_schema" &&
@@ -1265,6 +1269,9 @@ export function buildParams(
 					type: "json_schema",
 					name: format.json_schema.name ?? "response",
 					schema: format.json_schema.schema,
+					...(format.json_schema.description !== undefined
+						? { description: format.json_schema.description }
+						: {}),
 					...(format.json_schema.strict !== undefined ? { strict: format.json_schema.strict } : {}),
 				} as never,
 			};

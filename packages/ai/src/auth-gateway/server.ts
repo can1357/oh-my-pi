@@ -378,14 +378,17 @@ function releaseTurnOnStreamEnd(
 	stream: ReadableStream<Uint8Array>,
 	storage: AuthStorage,
 	requestId: string,
-	commitGate?: StreamCommitGate,
+	_commitGate?: StreamCommitGate,
 ): ReadableStream<Uint8Array> {
 	const reader = stream.getReader();
 	let released = false;
-	const release = (): void => {
+	const release = (settleProbe: boolean): void => {
 		if (released) return;
 		released = true;
-		if (commitGate && (commitGate.state === "committed" || commitGate.state === "terminated")) {
+		// Foreign-format / non-SSE transports may never invoke onSseEvent, so the
+		// commit gate can remain `probing` after a successful stream. Settle on
+		// normal completion; abandon (cancel) must not clear cooldown.
+		if (settleProbe) {
 			storage.settleQuotaProbeSuccess(requestId);
 		}
 		storage.releaseTurnReservation(requestId);
@@ -394,14 +397,14 @@ function releaseTurnOnStreamEnd(
 		async pull(controller) {
 			const { done, value } = await reader.read();
 			if (done) {
-				release();
+				release(true);
 				controller.close();
 				return;
 			}
 			controller.enqueue(value);
 		},
 		cancel(reason) {
-			release();
+			release(false);
 			return reader.cancel(reason);
 		},
 	});
