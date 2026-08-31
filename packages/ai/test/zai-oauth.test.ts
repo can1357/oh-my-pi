@@ -8,7 +8,7 @@ const TOKEN_URL = "https://zcode.z.ai/api/v1/oauth/token";
 const BUSINESS_LOGIN_URL = "https://api.z.ai/api/auth/z/login";
 const BIZ_BASE = "https://api.z.ai";
 const KEYS_URL = `${BIZ_BASE}/api/biz/v1/organization/org-1/projects/proj-1/api_keys`;
-const REDIRECT_URI = "http://localhost:54548/callback";
+const REDIRECT_URI = "http://127.0.0.1:9999/callback";
 
 interface RecordedRequest {
 	url: string;
@@ -117,6 +117,33 @@ describe("zai oauth flow", () => {
 		expect(authUrl.searchParams.get("code_challenge_method")).toBeNull();
 	});
 
+	it("advertises the ZCode-registered CLI redirect, never a random port (#10245)", async () => {
+		const serveSpy = vi
+			.spyOn(Bun, "serve")
+			.mockReturnValue({ port: 9999, stop: () => {} } as unknown as Bun.Server<unknown>);
+		const controller = new AbortController();
+		const captured: { redirect: string | null } = { redirect: null };
+		const flow = new ZaiOAuthFlow({
+			signal: controller.signal,
+			onAuth: ({ url }) => {
+				captured.redirect = new URL(url).searchParams.get("redirect_uri");
+				// Stop before waiting on a callback that never arrives in the test.
+				controller.abort();
+			},
+		});
+
+		const error = await flow.login().catch((caught: unknown) => caught);
+
+		// Z.AI's allowlist only registers this exact CLI redirect for the reused
+		// ZCode client id; anything else is rejected before the login page.
+		expect(captured.redirect).toBe(REDIRECT_URI);
+		expect(error).toBeInstanceOf(AIError.LoginCancelledError);
+		// Bound the IPv4 loopback on the exact registered port — no fallback.
+		expect(serveSpy.mock.calls.every(([options]) => options.hostname === "127.0.0.1" && options.port === 9999)).toBe(
+			true,
+		);
+	});
+
 	it("rejects an occupied fixed callback port before opening the browser", async () => {
 		const serveSpy = vi.spyOn(Bun, "serve").mockImplementation(() => {
 			throw Object.assign(new Error("EADDRINUSE"), { code: "EADDRINUSE" });
@@ -129,10 +156,10 @@ describe("zai oauth flow", () => {
 		expect(error).toBeInstanceOf(AIError.ConfigurationError);
 		if (!(error instanceof AIError.ConfigurationError)) throw error;
 		expect(error.message).toContain(
-			"OAuth callback port 54548 is in use. The OAuth provider validates redirect URIs",
+			"OAuth callback port 9999 is in use, but oauth.redirectUri (http://127.0.0.1:9999/callback) requires this exact port",
 		);
 		expect(onAuth).not.toHaveBeenCalled();
-		expect(serveSpy.mock.calls.every(([options]) => options.port === 54548)).toBe(true);
+		expect(serveSpy.mock.calls.every(([options]) => options.port === 9999)).toBe(true);
 	});
 
 	it("exchanges the code, does business-login, then mints an id.secret key (create path)", async () => {
