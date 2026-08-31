@@ -322,6 +322,21 @@ describe("European gateway provider catalog support", () => {
 		}
 	});
 
+	test("materializes EURouter's bundled context fallback for fresh installs", () => {
+		const model = getBundledModels("eurouter").find(candidate => candidate.id === "mistral-large-3");
+
+		expect(model?.contextWindow).toBe(262_144);
+	});
+
+	test("rejects malformed provider rebake invocations", async () => {
+		const child = Bun.spawn(
+			[process.execPath, path.join(import.meta.dir, "../scripts/generate-models.ts"), "--rebake-provider"],
+			{ stdout: "ignore", stderr: "ignore" },
+		);
+
+		expect(await child.exited).not.toBe(0);
+	});
+
 	test("filters non-chat model ids from European gateway discovery", async () => {
 		const fetchMock: FetchImpl = vi.fn(async () => {
 			return new Response(

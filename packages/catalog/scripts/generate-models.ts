@@ -98,6 +98,8 @@ const DISCOVERY_ONLY_PROVIDERS = new Set(["ollama", "vllm", "lm-studio", "litell
  * fallback-only policy below).
  */
 const CREDENTIAL_SCOPED_PROVIDERS = new Set(["devin"]);
+type GeneratedModels = Record<string, Record<string, ModelSpec<Api>>>;
+const previousModels = prevModelsJson as unknown as GeneratedModels;
 
 /**
  * Restores unfetched rows from a previous generated catalog while pruning
@@ -673,7 +675,7 @@ async function generateModels() {
 	// catalog regeneration lacks live credentials or provider discovery is down.
 	// If a gateway returned an authoritative catalog, keep that live list exact
 	// and do not reintroduce seed IDs the endpoint omitted.
-	allModels.push(...getEuropeanGatewayStaticFallbackModels(authoritativeCatalogProviders));
+	allModels.unshift(...getEuropeanGatewayStaticFallbackModels(authoritativeCatalogProviders));
 	// Seed Fireworks "Fast" serving-path variants (`<id>-fast`). Fast routers are
 	// not enumerated by the serverless control-plane list, so discovery never
 	// surfaces them; the seed projects each base entry into a fast variant.
@@ -841,6 +843,69 @@ function canonicalizeModelCompat(model: ModelSpec<Api>): void {
 	}
 }
 
+function parseRebakeProviderArg(args: readonly string[]): string | undefined {
+	if (args.length === 0) return undefined;
+	if (args.length !== 2 || args[0] !== "--rebake-provider" || args[1].length === 0) {
+		throw new Error("Usage: generate-models.ts --rebake-provider <provider-id>");
+	}
+	return args[1];
+}
+
+function rebakeBundledModel(model: ModelSpec<Api>): ModelSpec<Api> {
+	const rebaked = buildModel(toModelSpec(model as unknown as Model<Api>));
+	const {
+		identity: _identity,
+		requiresGlyphTokenization: _requiresGlyphTokenization,
+		tokenizer: _tokenizer,
+		thinking: _thinking,
+		supportsComputerUse: _supportsComputerUse,
+		supportsComputerUseConfig: _supportsComputerUseConfig,
+		compatConfig: _compatConfig,
+		...policyRebaked
+	} = rebaked;
+	return {
+		...policyRebaked,
+		...(Object.hasOwn(model, "identity") && { identity: rebaked.identity }),
+		...(Object.hasOwn(model, "requiresGlyphTokenization") && {
+			requiresGlyphTokenization: rebaked.requiresGlyphTokenization,
+		}),
+		...(Object.hasOwn(model, "tokenizer") && { tokenizer: rebaked.tokenizer }),
+		...(Object.hasOwn(model, "thinking") && { thinking: rebaked.thinking }),
+		...(Object.hasOwn(model, "supportsComputerUse") && { supportsComputerUse: rebaked.supportsComputerUse }),
+		...(Object.hasOwn(model, "supportsComputerUseConfig") && {
+			supportsComputerUseConfig: rebaked.supportsComputerUseConfig,
+		}),
+		...(Object.hasOwn(model, "compatConfig") && { compatConfig: rebaked.compatConfig }),
+	} as ModelSpec<Api>;
+}
+
+async function rebakeProviderModels(providerId: string): Promise<void> {
+	const providerModels = previousModels[providerId];
+	if (providerModels === undefined) {
+		throw new Error(`Unknown bundled provider: ${providerId}`);
+	}
+	const rebakedProviderModels = Object.fromEntries(
+		Object.entries(providerModels).map(([id, model]) => [id, rebakeBundledModel(model)]),
+	);
+	await Bun.write(
+		path.join(packageRoot, "src/models.json"),
+		`${JSON.stringify({ ...previousModels, [providerId]: rebakedProviderModels }, null, "\t")}\n`,
+	);
+	console.log(`Rebaked ${providerId} models in src/models.json`);
+}
+
+async function main(): Promise<void> {
+	const providerId = parseRebakeProviderArg(Bun.argv.slice(2));
+	if (providerId !== undefined) {
+		await rebakeProviderModels(providerId);
+		return;
+	}
+	await generateModels();
+}
+
 if (import.meta.main) {
-	generateModels().catch(console.error);
+	main().catch(error => {
+		console.error(error);
+		process.exitCode = 1;
+	});
 }

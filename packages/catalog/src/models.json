@@ -69704,7 +69704,7 @@
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
-			"contextWindow": null,
+			"contextWindow": 262144,
 			"maxTokens": null,
 			"compat": {
 				"supportsStore": true,
