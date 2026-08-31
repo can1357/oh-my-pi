@@ -133,6 +133,15 @@ async function stopAndObserve(exposure: ActiveExposure, invocation: FakeInvocati
 	expect(fs.readFileSync(invocation.signalsFile, "utf8")).toContain("SIGTERM");
 }
 
+function currentProcessTunnelLogs(): string[] {
+	const prefix = "omp-blob-tunnel-";
+	const suffix = `-${process.pid}.log`;
+	return fs
+		.readdirSync(os.tmpdir())
+		.filter(name => name.startsWith(prefix) && name.endsWith(suffix))
+		.map(name => path.join(os.tmpdir(), name));
+}
+
 beforeAll(() => {
 	fakeBinDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-blob-tunnels-"));
 
@@ -211,6 +220,19 @@ describe("startExposure tunnel adapters", () => {
 			"json",
 		]);
 		await stopAndObserve(active, invocation);
+	});
+
+	it("removes its file-backed tunnel log after stop completes", async () => {
+		const existingLogs = new Set(currentProcessTunnelLogs());
+		const invocation = prepareFake('{"type":"registered","domain":"cleanup-owl.lhr.life"}');
+		const active = await startExposure(exposure("localhost-run"), PORT);
+		activeExposures.push(active);
+		const createdLogs = currentProcessTunnelLogs().filter(logPath => !existingLogs.has(logPath));
+		expect(createdLogs).toHaveLength(1);
+		expect(fs.readFileSync(createdLogs[0], "utf8")).toContain("cleanup-owl.lhr.life");
+
+		await stopAndObserve(active, invocation);
+		expect(createdLogs.filter(logPath => fs.existsSync(logPath))).toEqual([]);
 	});
 
 	it("never reconnects a free Pinggy tunnel behind a different published hostname", async () => {
