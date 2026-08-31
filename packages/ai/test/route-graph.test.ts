@@ -44,6 +44,26 @@ describe("RouteRegistry", () => {
 		expect(registry.generation).toBe(1);
 	});
 
+	it("compiles suffix edges from each fallback sibling", () => {
+		const registry = new RouteRegistry(() => undefined);
+		registry.register({
+			id: "abc",
+			root: {
+				type: "fallback",
+				on: ["provider_unavailable"],
+				children: [
+					{ type: "target", model: "A" },
+					{ type: "target", model: "B" },
+					{ type: "target", model: "C" },
+				],
+			},
+		});
+		const route = registry.resolve("abc");
+		expect(route?.fallbackByTarget?.A?.provider_unavailable).toEqual(["B", "C"]);
+		expect(route?.fallbackByTarget?.B?.provider_unavailable).toEqual(["C"]);
+		expect(route?.fallbackByTarget?.C?.provider_unavailable).toBeUndefined();
+	});
+
 	it("register compiles a quota fallback list", () => {
 		const registry = new RouteRegistry(id => (id === "gpt-5" || id === "gpt-4o" ? fakeModel(id) : undefined));
 		registry.register({

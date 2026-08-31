@@ -106,38 +106,45 @@ function compileNode(node: RouteNode, seenOnPath: ReadonlySet<string>): NodeComp
 
 	const targets: string[] = [];
 	const fallbacksByFrom: Partial<Record<GatewayErrorDisposition, Partial<Record<string, string[]>>>> = {};
-	const afterPrimary: string[] = [];
-	const primaryTargets: string[] = [];
 	const sequential = new Set(seenOnPath);
-	let primary = true;
+	const childParts: Array<{ entryTargets: string[]; after: string[] }> = [];
+	const entryTargetsPerChild: string[][] = [];
 	for (const child of node.children) {
 		// Independent ancestor copy per sibling. Fallback subtrees must not
 		// inherit sequential sibling targets — those are other leaves.
 		const childSeen = new Set(child.type === "target" ? sequential : seenOnPath);
 		const part = compileNode(child, childSeen);
 		targets.push(...part.targets);
-		if (primary) {
-			primaryTargets.push(...part.targets);
-		} else if (child.type === "fallback") {
-			const nestedPrimary = part.targets[0];
-			if (nestedPrimary !== undefined) afterPrimary.push(nestedPrimary);
-		} else {
-			afterPrimary.push(...part.targets);
-		}
+		const entry =
+			child.type === "fallback"
+				? part.targets[0] !== undefined
+					? [part.targets[0]]
+					: []
+				: [...part.targets];
+		entryTargetsPerChild.push(entry);
 		mergeFallbacksByFrom(fallbacksByFrom, part.fallbacksByFrom);
 		if (child.type === "target") sequential.add(child.model);
-		primary = false;
+	}
+	// From each sibling entry, edges go to the remaining suffix of entry targets.
+	for (let i = 0; i < entryTargetsPerChild.length; i += 1) {
+		const suffix: string[] = [];
+		for (let j = i + 1; j < entryTargetsPerChild.length; j += 1) {
+			suffix.push(...entryTargetsPerChild[j]!);
+		}
+		childParts.push({ entryTargets: entryTargetsPerChild[i]!, after: suffix });
 	}
 	for (const disposition of node.on) {
-		if (afterPrimary.length === 0) continue;
 		let byFrom = fallbacksByFrom[disposition];
 		if (!byFrom) {
 			byFrom = {};
 			fallbacksByFrom[disposition] = byFrom;
 		}
-		for (const from of primaryTargets) {
-			const existing = byFrom[from];
-			byFrom[from] = existing ? [...existing, ...afterPrimary] : [...afterPrimary];
+		for (const part of childParts) {
+			if (part.after.length === 0) continue;
+			for (const from of part.entryTargets) {
+				const existing = byFrom[from];
+				byFrom[from] = existing ? [...existing, ...part.after] : [...part.after];
+			}
 		}
 	}
 	return { targets, fallbacksByFrom };
