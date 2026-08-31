@@ -4842,6 +4842,16 @@ export class AuthStorage {
 		this.clearQuotaProbe(requestId);
 	}
 
+	/** Extend every live reservation held by `requestId` so long streams outlive the idle TTL. */
+	renewTurnReservation(requestId: string, ttlMs: number = DEFAULT_TURN_RESERVATION_TTL_MS): void {
+		const expiresAtMs = Date.now() + ttlMs;
+		for (const [key, held] of this.#turnReservations) {
+			if (held.requestId === requestId) {
+				this.#turnReservations.set(key, { ...held, expiresAtMs });
+			}
+		}
+	}
+
 	/**
 	 * Drop an inflight quota probe for `requestId` without clearing cooldown.
 	 * Call when the attempt is abandoned (fallback / turn release) so a later

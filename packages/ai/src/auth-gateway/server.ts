@@ -613,6 +613,7 @@ export function releaseTurnOnStreamEnd(
 					controller.close();
 					return;
 				}
+				storage.renewTurnReservation(requestId);
 				controller.enqueue(value);
 			} catch (error) {
 				release();
@@ -732,10 +733,6 @@ async function handleFormatEndpoint(
 			"OpenAI image file IDs in tool outputs require a Responses-compatible upstream model",
 		);
 	};
-	{
-		const incompat = openaiImageFileCompatError(model);
-		if (incompat) return incompat;
-	}
 
 	// Sticky credential id: honour the client's `prompt_cache_key` when
 	// supplied (so external session ids align), otherwise derive from
@@ -934,6 +931,25 @@ async function handleFormatEndpoint(
 				reason: "credential_unavailable",
 			});
 			logger.debug("auth-gateway route decision", redactedDecisionSummary(skipped));
+			const unavailable: GatewayErrorClassification = {
+				status: 401,
+				type: "authentication_error",
+				message: `No credential available for provider ${model.provider}`,
+				owner: "credential",
+				disposition: "provider_unavailable",
+			};
+			if (considerFallback(unavailable)) return { type: "retry" };
+			// Balance / multi-target routes may have unused siblings without fallback edges.
+			const next = decideAttempt({
+				route: compiled,
+				state: stateNow(),
+				commitState: commitGate.state,
+			});
+			if (next.type === "dispatch") {
+				pendingFallback = next.targetModelId;
+				retryCount += 1;
+				return { type: "retry" };
+			}
 			return {
 				type: "respond",
 				response: formatError(
@@ -1424,6 +1440,24 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 				reason: "credential_unavailable",
 			});
 			logger.debug("auth-gateway route decision", redactedDecisionSummary(skipped));
+			const unavailable: GatewayErrorClassification = {
+				status: 401,
+				type: "authentication_error",
+				message: `No credential available for provider ${model.provider}`,
+				owner: "credential",
+				disposition: "provider_unavailable",
+			};
+			if (considerFallback(unavailable)) return { type: "retry" };
+			const next = decideAttempt({
+				route: compiled,
+				state: stateNow(),
+				commitState: commitGate.state,
+			});
+			if (next.type === "dispatch") {
+				pendingFallback = next.targetModelId;
+				retryCount += 1;
+				return { type: "retry" };
+			}
 			return {
 				type: "respond",
 				response: formatError(

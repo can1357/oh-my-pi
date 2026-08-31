@@ -5,6 +5,7 @@
 ### Fixed
 
 - Honour balance rr/weighted strategies on first dispatch, and resolve replaceAll route-refs against the complete incoming definition set.
+- Renew in-flight turn reservations for the lifetime of the SSE stream, defer OpenAI file_id compat until a catalog target binds, and route temporary credential unavailability through the conductor before 401.
 - Reject shared 100.64/10 discovery hosts, gate previous_response_id fallbacks by Responses-compatible APIs, and detect OpenAI file refs in user/assistant messages.
 - Reject RFC1918 172.16/12 discovery hosts, preserve stateful ownership when the primary is missing, recheck OpenAI file_id compat per target, require requestId for probe leases, and reset sibling exhaustion per fallback target.
 - Reject private IPv6 discovery hosts, keep incompatible previous_response_id fallbacks disposition-scoped, and flush metadata-only SSE preludes at EOF.
