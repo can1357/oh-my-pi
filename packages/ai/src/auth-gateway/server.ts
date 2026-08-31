@@ -56,7 +56,7 @@ import {
 } from "./http";
 import { decideAttempt, type ExecutionState } from "./route-conductor";
 import { parseRouteDefinition } from "./route-definitions";
-import { type CompiledRoute, type RouteDefinition, RouteRegistry } from "./route-graph";
+import { type CompiledRoute, type RouteDefinition, RouteRegistry, pickInitialRouteTarget } from "./route-graph";
 import {
 	commitGateObservesDownstreamSse,
 	observeSseCommit,
@@ -366,6 +366,12 @@ type FormatErrorFn = (status: number, type: string, message: string) => Response
 
 type AttemptPrep = { type: "key"; apiKey: string } | { type: "retry" } | { type: "respond"; response: Response };
 
+function hashString(value: string): number {
+	let h = 0;
+	for (let i = 0; i < value.length; i++) h = (h * 31 + value.charCodeAt(i)) | 0;
+	return h;
+}
+
 function unknownModelResponse(formatError: FormatErrorFn, modelId: string): Response {
 	return formatError(404, "invalid_request_error", `Unknown model: ${modelId}`);
 }
@@ -654,7 +660,7 @@ async function handleFormatEndpoint(
 	if (!compiled) {
 		return unknownModelResponse(route.module.formatError, modelId);
 	}
-	const firstTarget = compiled.targets[0];
+	const firstTarget = pickInitialRouteTarget(compiled, hashString(requestId));
 	if (firstTarget === undefined) {
 		return unknownModelResponse(route.module.formatError, modelId);
 	}
@@ -1207,7 +1213,7 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 	if (!compiled) {
 		return unknownModelResponse(piNative.formatError, parsed.modelId);
 	}
-	const firstTarget = compiled.targets[0];
+	const firstTarget = pickInitialRouteTarget(compiled, hashString(requestId));
 	if (firstTarget === undefined) {
 		return unknownModelResponse(piNative.formatError, parsed.modelId);
 	}

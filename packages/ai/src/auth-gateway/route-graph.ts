@@ -2,7 +2,7 @@ import * as AIError from "../error";
 import type { GatewayErrorDisposition } from "../error/gateway";
 import type { Api, Model } from "../types";
 
-export type TargetNode = { type: "target"; model: string };
+export type TargetNode = { type: "target"; model: string; weight?: number };
 
 export type FallbackNode = {
 	type: "fallback";
@@ -95,16 +95,20 @@ export class RouteRegistry {
 	/**
 	 * Atomically replace every virtual route. Compiles all definitions first;
 	 * on any throw, `#routes` and generation stay unchanged. Bumps generation once.
+	 *
+	 * Route-ref lookup uses the complete incoming definition set (not partial
+	 * compile order or the previous generation), so `[alias → base, base → A]`
+	 * is order-independent within the batch.
 	 */
 	replaceAll(defs: readonly RouteDefinition[]): void {
 		const nextGeneration = this.#generation + 1;
+		const incomingRoots = new Map<string, RouteNode>();
+		for (const definition of defs) {
+			incomingRoots.set(definition.id, definition.root);
+		}
 		const pending = new Map<string, CompiledRoute>();
 		for (const definition of defs) {
-			const compiled = compileDefinition(
-				definition,
-				id => pending.get(id)?.root ?? this.#routes.get(id)?.root,
-				nextGeneration,
-			);
+			const compiled = compileDefinition(definition, id => incomingRoots.get(id), nextGeneration);
 			pending.set(definition.id, compiled);
 		}
 		this.#generation = nextGeneration;
@@ -162,40 +166,51 @@ function compileDefinition(
 	};
 }
 
-function resolveRouteRefs(node: RouteNode, lookup: (id: string) => RouteNode | undefined): RouteNode {
+function resolveRouteRefs(
+	node: RouteNode,
+	lookup: (id: string) => RouteNode | undefined,
+	seenRefs: ReadonlySet<string> = new Set(),
+): RouteNode {
 	switch (node.type) {
 		case "route-ref": {
+			if (seenRefs.has(node.route)) {
+				throw new AIError.ValidationError(`Route cycle: route-ref "${node.route}" repeats`);
+			}
 			const resolved = lookup(node.route);
 			if (resolved === undefined) {
 				throw new AIError.ValidationError("Unresolved route-ref");
 			}
-			return copyNode(resolved);
+			const nextSeen = new Set(seenRefs);
+			nextSeen.add(node.route);
+			return resolveRouteRefs(resolved, lookup, nextSeen);
 		}
 		case "target":
-			return { type: "target", model: node.model };
+			return node.weight === undefined
+				? { type: "target", model: node.model }
+				: { type: "target", model: node.model, weight: node.weight };
 		case "fallback":
 			return {
 				type: "fallback",
 				on: node.on,
-				children: node.children.map(child => resolveRouteRefs(child, lookup)),
+				children: node.children.map(child => resolveRouteRefs(child, lookup, seenRefs)),
 			};
 		case "balance":
 			return {
 				type: "balance",
 				strategy: node.strategy,
-				children: node.children.map(child => resolveRouteRefs(child, lookup)),
+				children: node.children.map(child => resolveRouteRefs(child, lookup, seenRefs)),
 			};
 		case "conditional":
 			return {
 				type: "conditional",
 				when: { ...node.when },
-				children: node.children.map(child => resolveRouteRefs(child, lookup)),
+				children: node.children.map(child => resolveRouteRefs(child, lookup, seenRefs)),
 			};
 		case "domain":
 			return {
 				type: "domain",
 				name: node.name,
-				children: node.children.map(child => resolveRouteRefs(child, lookup)),
+				children: node.children.map(child => resolveRouteRefs(child, lookup, seenRefs)),
 			};
 	}
 }
@@ -306,7 +321,9 @@ function compileFlatten(children: readonly RouteNode[], seenOnPath: ReadonlySet<
 function copyNode(node: RouteNode): RouteNode {
 	switch (node.type) {
 		case "target":
-			return { type: "target", model: node.model };
+			return node.weight === undefined
+				? { type: "target", model: node.model }
+				: { type: "target", model: node.model, weight: node.weight };
 		case "fallback":
 			return {
 				type: "fallback",
@@ -334,6 +351,32 @@ function copyNode(node: RouteNode): RouteNode {
 		case "route-ref":
 			return { type: "route-ref", route: node.route };
 	}
+}
+
+/**
+ * Choose the first dispatch target, honouring a root balance strategy when present.
+ * `salt` rotates `rr` across concurrent requests; `weighted` prefers the highest
+ * child weight (default 1). Conditional `when` / domain grouping remain on `root`
+ * for runtime policy; targets stay the DFS union for failover listing.
+ */
+export function pickInitialRouteTarget(compiled: CompiledRoute, salt = 0): string | undefined {
+	if (compiled.targets.length === 0) return undefined;
+	if (compiled.root.type !== "balance") return compiled.targets[0];
+	if (compiled.root.strategy === "weighted") {
+		let best: string | undefined;
+		let bestWeight = Number.NEGATIVE_INFINITY;
+		for (const child of compiled.root.children) {
+			if (child.type !== "target") continue;
+			const weight = child.weight ?? 1;
+			if (weight > bestWeight) {
+				bestWeight = weight;
+				best = child.model;
+			}
+		}
+		return best ?? compiled.targets[0];
+	}
+	const idx = Math.abs(salt) % compiled.targets.length;
+	return compiled.targets[idx];
 }
 
 function mergeFallbacksByFrom(

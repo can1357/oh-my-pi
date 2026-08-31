@@ -33,7 +33,9 @@ function parseNode(input: unknown): RouteNode {
 		if (typeof input.model !== "string" || input.model.length === 0) {
 			throw new AIError.ValidationError("Target node missing model");
 		}
-		return { type: "target", model: input.model };
+		const target: { type: "target"; model: string; weight?: number } = { type: "target", model: input.model };
+		if (typeof input.weight === "number" && Number.isFinite(input.weight)) target.weight = input.weight;
+		return target;
 	}
 	if (type === "fallback") {
 		if (!Array.isArray(input.on)) {

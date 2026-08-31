@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { RouteRegistry } from "@oh-my-pi/pi-ai/auth-gateway";
+import { pickInitialRouteTarget, RouteRegistry } from "@oh-my-pi/pi-ai/auth-gateway";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 
 function fakeModel(id: string) {
@@ -439,5 +439,50 @@ describe("RouteRegistry", () => {
 		expect(registry.get("keep")?.targets).toEqual(["a"]);
 		expect(registry.get("ok")).toBeUndefined();
 		expect(registry.get("bad")).toBeUndefined();
+	});
+
+	it("replaceAll resolves alias-before-base against the complete incoming set", () => {
+		const registry = new RouteRegistry(() => undefined);
+		registry.register({ id: "base", root: { type: "target", model: "stale" } });
+		registry.replaceAll([
+			{ id: "alias", root: { type: "route-ref", route: "base" } },
+			{ id: "base", root: { type: "target", model: "fresh" } },
+		]);
+		expect(registry.get("alias")?.targets).toEqual(["fresh"]);
+		expect(registry.get("alias")?.root).toEqual({ type: "target", model: "fresh" });
+		expect(registry.get("base")?.targets).toEqual(["fresh"]);
+	});
+
+	it("pickInitialRouteTarget rotates rr and prefers weighted children", () => {
+		const registry = new RouteRegistry(() => undefined);
+		registry.register({
+			id: "rr",
+			root: {
+				type: "balance",
+				strategy: "rr",
+				children: [
+					{ type: "target", model: "a" },
+					{ type: "target", model: "b" },
+				],
+			},
+		});
+		registry.register({
+			id: "weighted",
+			root: {
+				type: "balance",
+				strategy: "weighted",
+				children: [
+					{ type: "target", model: "low", weight: 1 },
+					{ type: "target", model: "high", weight: 5 },
+				],
+			},
+		});
+		const rr = registry.resolve("rr");
+		const weighted = registry.resolve("weighted");
+		expect(rr).toBeDefined();
+		expect(weighted).toBeDefined();
+		expect(pickInitialRouteTarget(rr!, 0)).toBe("a");
+		expect(pickInitialRouteTarget(rr!, 1)).toBe("b");
+		expect(pickInitialRouteTarget(weighted!)).toBe("high");
 	});
 });

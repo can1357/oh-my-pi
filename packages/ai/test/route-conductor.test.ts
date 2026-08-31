@@ -181,4 +181,56 @@ describe("decideAttempt", () => {
 		});
 		expect(action).toEqual({ type: "terminal" });
 	});
+
+	it("rotates balance rr targets across fresh executions", () => {
+		const balanceRoute = {
+			generation: 1,
+			id: "balance-rr",
+			root: {
+				type: "balance" as const,
+				strategy: "rr" as const,
+				children: [
+					{ type: "target" as const, model: "a" },
+					{ type: "target" as const, model: "b" },
+				],
+			},
+			targets: ["a", "b"],
+			fallbacks: {},
+		} as CompiledRoute;
+		const first = decideAttempt({
+			route: balanceRoute,
+			state: state({ routeId: "balance-rr", currentTarget: "a", attemptedTargets: new Set() }),
+			commitState: "probing",
+		});
+		const second = decideAttempt({
+			route: balanceRoute,
+			state: state({ routeId: "balance-rr", currentTarget: "a", attemptedTargets: new Set() }),
+			commitState: "probing",
+		});
+		expect(first).toEqual({ type: "dispatch", targetModelId: "a" });
+		expect(second).toEqual({ type: "dispatch", targetModelId: "b" });
+	});
+
+	it("prefers the highest-weight balance child on fresh dispatch", () => {
+		const balanceRoute = {
+			generation: 1,
+			id: "balance-weighted",
+			root: {
+				type: "balance" as const,
+				strategy: "weighted" as const,
+				children: [
+					{ type: "target" as const, model: "low", weight: 1 },
+					{ type: "target" as const, model: "high", weight: 9 },
+				],
+			},
+			targets: ["low", "high"],
+			fallbacks: {},
+		} as CompiledRoute;
+		const action = decideAttempt({
+			route: balanceRoute,
+			state: state({ routeId: "balance-weighted", currentTarget: "low", attemptedTargets: new Set() }),
+			commitState: "probing",
+		});
+		expect(action).toEqual({ type: "dispatch", targetModelId: "high" });
+	});
 });

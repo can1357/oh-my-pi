@@ -32,6 +32,33 @@ type ConductorRoute = CompiledRoute & {
 	>;
 };
 
+const balanceRrCursor = new Map<string, number>();
+
+function pickBalanceTarget(route: ConductorRoute, attempted: ReadonlySet<string>): string | undefined {
+	if (route.root.type !== "balance") return undefined;
+	const unused = route.targets.filter(id => !attempted.has(id));
+	if (unused.length === 0) return undefined;
+	if (route.root.strategy === "weighted") {
+		let best: string | undefined;
+		let bestWeight = Number.NEGATIVE_INFINITY;
+		for (const child of route.root.children) {
+			if (child.type !== "target") continue;
+			if (attempted.has(child.model)) continue;
+			const weight = child.weight ?? 1;
+			if (weight > bestWeight) {
+				bestWeight = weight;
+				best = child.model;
+			}
+		}
+		return best ?? unused[0];
+	}
+	const key = `${route.id}:${route.generation}`;
+	const cursor = balanceRrCursor.get(key) ?? 0;
+	const pick = unused[cursor % unused.length]!;
+	balanceRrCursor.set(key, cursor + 1);
+	return pick;
+}
+
 function firstUnused(ids: readonly string[] | undefined, attempted: ReadonlySet<string>): string | undefined {
 	if (!ids) return undefined;
 	for (const id of ids) {
@@ -70,7 +97,8 @@ export function decideAttempt(args: {
 	}
 
 	if (!classification) {
-		const next = firstUnused(route.targets, state.attemptedTargets);
+		const next =
+			pickBalanceTarget(route, state.attemptedTargets) ?? firstUnused(route.targets, state.attemptedTargets);
 		return next === undefined ? { type: "terminal" } : { type: "dispatch", targetModelId: next };
 	}
 
