@@ -23,6 +23,7 @@ import {
 import {
 	nextOrphanSweepDeadline,
 	orphanSweepAlarmDelayMinutes,
+	orphanSweepSeesRelayDisconnected,
 	shouldRunOrphanSweep,
 } from "./orphan-sweep";
 import { snapshotAfterPendingOperationsSettle } from "./pending-ops";
@@ -124,9 +125,14 @@ async function setOrphanSweepDeadline(
 }
 
 async function maybeScheduleOrphanSweep(
-	disconnected = !ws || ws.readyState === WebSocket.CLOSED,
+	forceDisconnected = false,
 ): Promise<void> {
 	await recoverableUpdates;
+	const disconnected = orphanSweepSeesRelayDisconnected({
+		socketReadyState: ws?.readyState,
+		openReadyState: WebSocket.OPEN,
+		forceDisconnected,
+	});
 	const nextDeadlineMs = nextOrphanSweepDeadline({
 		nowMs: Date.now(),
 		graceMs: ORPHAN_GRACE_MS,
@@ -143,7 +149,10 @@ async function maybeRunOrphanSweep(): Promise<void> {
 		!shouldRunOrphanSweep({
 			nowMs: Date.now(),
 			deadlineMs: orphanSweepDeadlineMs,
-			disconnected: !ws || ws.readyState === WebSocket.CLOSED,
+			disconnected: orphanSweepSeesRelayDisconnected({
+				socketReadyState: ws?.readyState,
+				openReadyState: WebSocket.OPEN,
+			}),
 			hasTrackedAttachments: attachmentGuard.attachedTabIds().length > 0,
 		})
 	) {
@@ -645,15 +654,15 @@ async function reconcileOrphans(): Promise<void> {
 		}
 	}
 	await trackAttachments(attachedTabIds);
-	// A live/pending socket owns reconciliation via hello; only arm a
-	// standalone sweep when nothing is connecting to reclaim these tabs.
+	// Only an open socket owns reconciliation via hello. A merely CONNECTING
+	// socket may still stall/fail before any hello or in-memory timer exists, so
+	// the persisted deadline must stay armed until the connection is proven live.
 	if (
 		attachedTabIds.length > 0 &&
-		!(
-			ws &&
-			(ws.readyState === WebSocket.OPEN ||
-				ws.readyState === WebSocket.CONNECTING)
-		)
+		orphanSweepSeesRelayDisconnected({
+			socketReadyState: ws?.readyState,
+			openReadyState: WebSocket.OPEN,
+		})
 	) {
 		attachmentGuard.onDisconnected();
 		await maybeRunOrphanSweep();

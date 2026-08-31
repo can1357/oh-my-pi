@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import {
 	nextOrphanSweepDeadline,
 	orphanSweepAlarmDelayMinutes,
+	orphanSweepSeesRelayDisconnected,
 	shouldRunOrphanSweep,
 } from "../../../browser-relay/extension/orphan-sweep";
 
@@ -73,5 +74,36 @@ describe("browser relay orphan sweep scheduling", () => {
 	it("keeps the follow-up alarm delay positive even when the deadline is already due", () => {
 		expect(orphanSweepAlarmDelayMinutes(31_000, 1_000)).toBeCloseTo(0.5, 5);
 		expect(orphanSweepAlarmDelayMinutes(31_000, 31_500)).toBe(0.01);
+	});
+
+	it("treats only an OPEN socket as owning orphan reconciliation", () => {
+		expect(
+			orphanSweepSeesRelayDisconnected({
+				socketReadyState: null,
+				openReadyState: 1,
+			}),
+		).toBe(true);
+		expect(
+			orphanSweepSeesRelayDisconnected({
+				socketReadyState: 0,
+				openReadyState: 1,
+			}),
+		).toBe(true);
+		expect(
+			orphanSweepSeesRelayDisconnected({
+				socketReadyState: 1,
+				openReadyState: 1,
+			}),
+		).toBe(false);
+	});
+
+	it("lets onSuspend force a disconnected deadline even before onclose updates the socket", () => {
+		expect(
+			orphanSweepSeesRelayDisconnected({
+				socketReadyState: 1,
+				openReadyState: 1,
+				forceDisconnected: true,
+			}),
+		).toBe(true);
 	});
 });

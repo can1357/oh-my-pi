@@ -6,6 +6,21 @@ export interface OrphanSweepState {
 	existingDeadlineMs: number | null;
 }
 
+export interface OrphanSweepConnectionState {
+	socketReadyState: number | null | undefined;
+	openReadyState: number;
+	forceDisconnected?: boolean;
+}
+
+export function orphanSweepSeesRelayDisconnected(
+	state: OrphanSweepConnectionState,
+): boolean {
+	return (
+		state.forceDisconnected === true ||
+		state.socketReadyState !== state.openReadyState
+	);
+}
+
 /**
  * Preserve the first orphan-sweep deadline while the relay stays disconnected.
  *

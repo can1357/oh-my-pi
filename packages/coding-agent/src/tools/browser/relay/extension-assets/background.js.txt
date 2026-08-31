@@ -69,6 +69,9 @@ function filterFreshAttachmentState(epochs, snapshot, tabIds) {
 }
 
 // extension/orphan-sweep.ts
+function orphanSweepSeesRelayDisconnected(state) {
+  return state.forceDisconnected === true || state.socketReadyState !== state.openReadyState;
+}
 function nextOrphanSweepDeadline(state) {
   if (!state.disconnected || !state.hasTrackedAttachments)
     return null;
@@ -170,8 +173,13 @@ async function setOrphanSweepDeadline(deadlineMs) {
   }
   await chrome.storage.session.set({ [ORPHAN_SWEEP_DEADLINE_KEY]: deadlineMs }).catch(() => {});
 }
-async function maybeScheduleOrphanSweep(disconnected = !ws || ws.readyState === WebSocket.CLOSED) {
+async function maybeScheduleOrphanSweep(forceDisconnected = false) {
   await recoverableUpdates;
+  const disconnected = orphanSweepSeesRelayDisconnected({
+    socketReadyState: ws?.readyState,
+    openReadyState: WebSocket.OPEN,
+    forceDisconnected
+  });
   const nextDeadlineMs = nextOrphanSweepDeadline({
     nowMs: Date.now(),
     graceMs: ORPHAN_GRACE_MS,
@@ -186,7 +194,10 @@ async function maybeRunOrphanSweep() {
   if (!shouldRunOrphanSweep({
     nowMs: Date.now(),
     deadlineMs: orphanSweepDeadlineMs,
-    disconnected: !ws || ws.readyState === WebSocket.CLOSED,
+    disconnected: orphanSweepSeesRelayDisconnected({
+      socketReadyState: ws?.readyState,
+      openReadyState: WebSocket.OPEN
+    }),
     hasTrackedAttachments: attachmentGuard.attachedTabIds().length > 0
   })) {
     await maybeScheduleOrphanSweep();
@@ -221,7 +232,10 @@ async function trackAttachments(tabIds, isFresh = () => true, attachmentState = 
     attachmentGuard.track(tabId);
 }
 async function loadSettings() {
-  const stored = await chrome.storage.local.get({ port: DEFAULT_PORT, token: "" });
+  const stored = await chrome.storage.local.get({
+    port: DEFAULT_PORT,
+    token: ""
+  });
   const port = Number(stored.port);
   return {
     port: Number.isInteger(port) && port > 0 && port <= 65535 ? port : DEFAULT_PORT,
@@ -306,7 +320,9 @@ function post(msg) {
 async function setBadge(connected) {
   try {
     await chrome.action.setBadgeText({ text: connected ? "on" : "off" });
-    await chrome.action.setBadgeBackgroundColor({ color: connected ? "#1a7f37" : "#8b8b8b" });
+    await chrome.action.setBadgeBackgroundColor({
+      color: connected ? "#1a7f37" : "#8b8b8b"
+    });
   } catch {}
 }
 var helloRefresh = null;
@@ -464,7 +480,12 @@ function handleRelayMessage(socket, raw) {
     return;
   runRpc(msg, socket).then((result) => {
     if (ws === socket && socket.readyState === WebSocket.OPEN) {
-      socket.send(JSON.stringify({ t: "rpcResult", id: msg.id, ok: true, result }));
+      socket.send(JSON.stringify({
+        t: "rpcResult",
+        id: msg.id,
+        ok: true,
+        result
+      }));
     }
   }).catch((err) => {
     if (ws === socket && socket.readyState === WebSocket.OPEN) {
@@ -491,7 +512,10 @@ async function reconcileOrphans() {
     }
   }
   await trackAttachments(attachedTabIds);
-  if (attachedTabIds.length > 0 && !(ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING))) {
+  if (attachedTabIds.length > 0 && orphanSweepSeesRelayDisconnected({
+    socketReadyState: ws?.readyState,
+    openReadyState: WebSocket.OPEN
+  })) {
     attachmentGuard.onDisconnected();
     await maybeRunOrphanSweep();
     return;
@@ -539,7 +563,13 @@ async function connect() {
 chrome.debugger.onEvent.addListener((source, method, params) => {
   if (source.tabId === undefined)
     return;
-  post({ t: "cdpEvent", tabId: source.tabId, sessionId: source.sessionId, method, params });
+  post({
+    t: "cdpEvent",
+    tabId: source.tabId,
+    sessionId: source.sessionId,
+    method,
+    params
+  });
 });
 chrome.debugger.onDetach.addListener((source, reason) => {
   if (source.tabId === undefined)
