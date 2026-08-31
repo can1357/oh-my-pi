@@ -1055,7 +1055,12 @@ async function handleFormatEndpoint(
 					await runHook(bootOpts.hooks?.afterAttempt, { ...attemptHookCtx(), ok: false });
 					return cred.response;
 				}
-				await runHook(bootOpts.hooks?.beforeAttempt, attemptHookCtx());
+				try {
+					await runHook(bootOpts.hooks?.beforeAttempt, attemptHookCtx());
+				} catch (error) {
+					bootOpts.storage.releaseTurnReservation(requestId);
+					throw error;
+				}
 				const streamOpts = buildAttemptStreamOpts(cred.apiKey);
 				logger.info("auth-gateway request", {
 					requestId,
@@ -1158,7 +1163,12 @@ async function handleFormatEndpoint(
 			bootOpts.storage.releaseTurnReservation(requestId);
 			return cred.response;
 		}
-		await runHook(bootOpts.hooks?.beforeAttempt, attemptHookCtx());
+		try {
+			await runHook(bootOpts.hooks?.beforeAttempt, attemptHookCtx());
+		} catch (error) {
+			bootOpts.storage.releaseTurnReservation(requestId);
+			throw error;
+		}
 		const streamOpts = buildAttemptStreamOpts(cred.apiKey);
 		logger.info("auth-gateway request", {
 			requestId,
@@ -1588,7 +1598,12 @@ async function handlePiNative(
 					await runHook(bootOpts.hooks?.afterAttempt, { ...attemptHookCtx(), ok: false });
 					return cred.response;
 				}
-				await runHook(bootOpts.hooks?.beforeAttempt, attemptHookCtx());
+				try {
+					await runHook(bootOpts.hooks?.beforeAttempt, attemptHookCtx());
+				} catch (error) {
+					bootOpts.storage.releaseTurnReservation(requestId);
+					throw error;
+				}
 				const streamOpts = buildAttemptStreamOpts(cred.apiKey);
 				logger.info("auth-gateway request", {
 					requestId,
@@ -1681,7 +1696,12 @@ async function handlePiNative(
 			bootOpts.storage.releaseTurnReservation(requestId);
 			return cred.response;
 		}
-		await runHook(bootOpts.hooks?.beforeAttempt, attemptHookCtx());
+		try {
+			await runHook(bootOpts.hooks?.beforeAttempt, attemptHookCtx());
+		} catch (error) {
+			bootOpts.storage.releaseTurnReservation(requestId);
+			throw error;
+		}
 		const streamOpts = buildAttemptStreamOpts(cred.apiKey);
 		logger.info("auth-gateway request", {
 			requestId,

@@ -307,9 +307,11 @@ export function parseRequest(body: unknown, _headers?: Headers): ParsedRequest {
 	if (isRecord(generationConfig)) applyGenerationConfig(options, generationConfig);
 	applyOpenAiSampling(options, body);
 
+	const tools = buildToolsFromGeminiBody(body.tools);
 	const context: Context = {
 		messages,
 		...(systemParts.length > 0 ? { systemPrompt: systemParts } : {}),
+		...(tools ? { tools } : {}),
 	};
 
 	return {
@@ -318,6 +320,30 @@ export function parseRequest(body: unknown, _headers?: Headers): ParsedRequest {
 		stream: typeof body.stream === "boolean" ? body.stream : true,
 		options,
 	};
+}
+
+/** Translate Gemini `tools[].functionDeclarations` into canonical `Context.tools`. */
+function buildToolsFromGeminiBody(tools: unknown): Context["tools"] | undefined {
+	if (!Array.isArray(tools) || tools.length === 0) return undefined;
+	const out: NonNullable<Context["tools"]> = [];
+	for (const entry of tools) {
+		if (!isRecord(entry)) continue;
+		const decls = entry.functionDeclarations ?? entry.function_declarations;
+		if (!Array.isArray(decls)) continue;
+		for (const decl of decls) {
+			if (!isRecord(decl) || typeof decl.name !== "string" || decl.name.length === 0) continue;
+			const parameters = (decl.parametersJsonSchema ??
+				decl.parameters_json_schema ??
+				decl.parameters ??
+				{}) as NonNullable<Context["tools"]>[number]["parameters"];
+			out.push({
+				name: decl.name,
+				description: typeof decl.description === "string" ? decl.description : "",
+				parameters,
+			});
+		}
+	}
+	return out.length > 0 ? out : undefined;
 }
 
 // ---------------------------------------------------------------------------
