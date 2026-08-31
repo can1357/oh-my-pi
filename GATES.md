@@ -52,8 +52,18 @@ OUT OF SCOPE (oh-my-pi grokbot provider): **grokbot-BYOK Anthropic Messages shim
 
 ## Honest ceiling (grokbot renewal only)
 
+**Selecting Opus with tools does not run Opus.** Default `auto` rewrites the *entire* tools turn to `sand-automation`; sand then routes to grok (not Claude). Sol+tools stays on Sol.
+
+| Selection | Tools? | Wire model | Who runs (mitm 2026-08-31) |
+|-----------|--------|------------|----------------------------|
+| `gpt-5.6-sol*` | yes | `gpt-5.6-sol` | **Sol** (13/13) |
+| `claude-opus-*` / `claude-*` | no | Claude id | May be Opus |
+| `claude-opus-*` / `claude-*` | yes (`auto`) | **`sand-automation`** | **cursor-grok-4.5/4.6 only** (40/40 Opus ids; never Opus) |
+| `cursor/claude-opus-5:max` | yes | AgentService | Real Opus (separate auth) |
+
 | Goal | Status |
 |------|--------|
-| `grokbot/claude-opus-5*` + omp tools (bash/read/…) | **Yes** via automation wire (`auto` default) |
-| Verified Opus backend on sand | **Not guaranteed** — log `routedResponseModel` |
+| `grokbot/claude-opus-5*` + omp tools (bash/read/…) | **Yes** via automation wire (`auto` default) — tools work |
+| Verified Opus backend on sand with tools | **No** — mitm: all 40 Opus catalog ids → `sand-automation` → `cursor-grok-4.5/4.6-*` |
+| `grokbot/gpt-5.6-sol*` + tools | **Yes** — stays on Sol (13/13) |
 | Same as `cursor/claude-opus-5:max` AgentService | **No** — different RPC + auth |
