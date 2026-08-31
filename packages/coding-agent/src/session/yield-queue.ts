@@ -179,13 +179,17 @@ export class YieldQueue {
 		return thunks;
 	}
 
-	/** Build and remove all queued entries for one kind without injecting them. */
-	drainKind(kind: string): AgentMessage | null {
+	/** Build and remove matching queued entries for one kind without injecting them. */
+	drainKind(kind: string, include: (entry: unknown) => boolean = () => true): AgentMessage | null {
 		const dispatcher = this.#dispatchers.get(kind);
 		if (!dispatcher) return null;
 		const entries = this.#drain(kind);
 		if (entries.length === 0) return null;
-		const built = this.#build(kind, dispatcher, entries);
+		const included: StoredEntry[] = [];
+		const retained: StoredEntry[] = [];
+		for (const entry of entries) (include(entry.value) ? included : retained).push(entry);
+		if (retained.length > 0) this.#entries.set(kind, retained);
+		const built = this.#build(kind, dispatcher, included);
 		if (!built) return null;
 		this.#resolveEntries(built.entries);
 		return built.message;

@@ -587,7 +587,7 @@ describe("AgentSession advisor auto-resume suppression", () => {
 		const { session, sessionManager, mock, streamStarted } = await createParkedSession();
 		const persisted = capturePersistedAdvice(sessionManager);
 		session.settings.set("advisor.interruptMode", "wait");
-		session.yieldQueue.register<{ note: string; severity: "blocker" }>("advisor", {
+		session.yieldQueue.register<{ note: string; severity: "blocker"; deferredInterrupt: true }>("advisor", {
 			build: entries =>
 				({
 					role: "custom",
@@ -603,6 +603,7 @@ describe("AgentSession advisor auto-resume suppression", () => {
 		session.yieldQueue.enqueue("advisor", {
 			note: "deferred mid-tool",
 			severity: "blocker",
+			deferredInterrupt: true,
 		});
 
 		await session.abort({ reason: USER_INTERRUPT_LABEL });

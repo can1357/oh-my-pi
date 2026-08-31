@@ -605,9 +605,12 @@ export class SessionAdvisors {
 		await Promise.allSettled(this.#pendingAdvisorCardEvents);
 	}
 
-	/** Remove deferred advice from the aside queue for explicit preservation. */
+	/** Remove wait-deferred interrupting advice for explicit preservation. */
 	drainDeferredAdvice(): CustomMessage[] {
-		const message = this.#host.yieldQueue.drainKind("advisor");
+		const message = this.#host.yieldQueue.drainKind(
+			"advisor",
+			entry => (entry as AdvisorNote).deferredInterrupt === true,
+		);
 		return message && isAdvisorCard(message) ? [message] : [];
 	}
 
@@ -1229,6 +1232,10 @@ export class SessionAdvisors {
 		const source = advisor.slug ? advisor.name : undefined;
 		const interrupting = isInterruptingSeverity(severity);
 		const planModeEnabled = this.#host.planModeState()?.enabled === true;
+		const deferInterruptingAdvice = shouldDeferAdvisorInterrupt(
+			this.#host.settings.get("advisor.interruptMode"),
+			planModeEnabled,
+		);
 		const channel = resolveAdvisorDeliveryChannel({
 			severity,
 			autoResumeSuppressed: this.#advisorAutoResumeSuppressed,
@@ -1240,13 +1247,15 @@ export class SessionAdvisors {
 			aborting: this.#host.abortInProgress(),
 			terminalAnswerNoQueuedWork: this.#hasTerminalTextAnswerWithoutQueuedWork(),
 			interruptImmuneTurnActive: interrupting && this.#isAdvisorInterruptImmuneTurnActive(),
-			deferInterruptingAdvice: shouldDeferAdvisorInterrupt(
-				this.#host.settings.get("advisor.interruptMode"),
-				planModeEnabled,
-			),
+			deferInterruptingAdvice,
 		});
 		if (channel === "aside") {
-			this.#host.yieldQueue.enqueue("advisor", { note, severity, advisor: source });
+			this.#host.yieldQueue.enqueue("advisor", {
+				note,
+				severity,
+				advisor: source,
+				...(deferInterruptingAdvice && interrupting ? { deferredInterrupt: true } : {}),
+			});
 			return;
 		}
 		const notes: AdvisorNote[] = [{ note, severity, advisor: source }];
@@ -1768,6 +1777,7 @@ export class SessionAdvisors {
 	prepareForTerminalYieldAdvisorDrain(): void {
 		this.#preserveAdvisorAdvice = true;
 		this.#preserveTerminalYieldAdvice = true;
+		for (const card of this.drainDeferredAdvice()) this.#host.preserveAdvisorCard(card);
 	}
 
 	/** Restore normal advisor routing when a kept-alive subagent starts new work. */

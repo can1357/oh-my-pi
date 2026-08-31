@@ -122,6 +122,22 @@ describe("YieldQueue", () => {
 		expect(message && messageText(message)).toBe("concern");
 		expect(harness.queue.has("advisor")).toBe(false);
 	});
+
+	test("drainKind retains entries rejected by its filter", () => {
+		const harness = createHarness(true);
+		harness.queue.register<Entry>("advisor", {
+			build: entries => userMessage(entries.map(entry => entry.id).join(",")),
+			skipIdleFlush: true,
+		});
+		harness.queue.enqueue("advisor", { id: "nit" });
+		harness.queue.enqueue("advisor", { id: "deferred" });
+
+		const message = harness.queue.drainKind("advisor", entry => (entry as Entry).id === "deferred");
+
+		expect(message && messageText(message)).toBe("deferred");
+		expect(harness.queue.has("advisor")).toBe(true);
+		expect(messageText(harness.queue.drainKind("advisor")!)).toBe("nit");
+	});
 	test("enqueue while idle schedules one debounced idle flush", async () => {
 		const harness = createHarness(false);
 		harness.queue.register<Entry>("items", {

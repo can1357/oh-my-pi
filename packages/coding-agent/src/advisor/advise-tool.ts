@@ -35,6 +35,8 @@ export interface AdvisorNote {
 	severity?: AdvisorSeverity;
 	/** Which configured advisor produced this note (omitted for the default advisor). */
 	advisor?: string;
+	/** True only when wait mode deferred an otherwise interrupting note. */
+	deferredInterrupt?: boolean;
 }
 
 /** Details payload on the batched `advisor` custom message rendered in the transcript. */
