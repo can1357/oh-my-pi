@@ -459,12 +459,6 @@ export class ExtensionRunner {
 	#waitForIdleFn: () => Promise<void> = async () => {};
 	#abortFn: () => void = () => {};
 	#agentIdentityInput?: ExtensionRunnerIdentityInput;
-	/**
-	 * Memoized identity: the parent chain is structural for a live agent —
-	 * registry parent links don't mutate mid-session — so it is computed once
-	 * on first `ctx.agentIdentity` access.
-	 */
-	#agentIdentityCache: AgentIdentity | undefined;
 	#hasPendingMessagesFn: () => boolean = () => false;
 	#getContextUsageFn: () => ContextUsage | undefined = () => undefined;
 	#compactFn: (instructionsOrOptions?: string | CompactOptions) => Promise<void> = async () => {};
@@ -1226,19 +1220,25 @@ export class ExtensionRunner {
 	}
 
 	/**
-	 * Identity exposed at `ctx.agentIdentity`. Computed once and memoized: the
-	 * parent chain is structural for a live agent (registry parent links don't
-	 * mutate mid-session). When the runner was constructed without an identity
-	 * input (tests, legacy hosts, provider-only registration), falls back to a
-	 * top-level identity. The chain walk is cycle-guarded and excludes `"Main"`.
-	 *
-	 * Purely observational: this resolves registry links that predate this
-	 * feature; it does not create, re-key, or validate them (registry
-	 * registration ownership remains the caller's pre-existing contract).
+	 * Identity snapshot (with the parent chain) taken on first
+	 * `ctx.agentIdentity` read. `AgentRegistry` refs are mutable mid-session
+	 * (SDK callers may unregister/re-register), so the chain must not be
+	 * re-resolved from the registry on every access; freezing at first read
+	 * yields one stable, frozen identity object per session. Observational
+	 * only: this resolves registry links that predate this feature; it does
+	 * not create, re-key, or validate them (registry registration ownership
+	 * remains the caller's pre-existing contract).
 	 */
+	#identitySnapshot: AgentIdentity | undefined;
+
 	#getAgentIdentity(): AgentIdentity {
-		if (this.#agentIdentityCache) return this.#agentIdentityCache;
-		const input = this.#agentIdentityInput;
+		if (!this.#identitySnapshot) {
+			this.#identitySnapshot = this.#buildAgentIdentity(this.#agentIdentityInput);
+		}
+		return this.#identitySnapshot;
+	}
+
+	#buildAgentIdentity(input?: ExtensionRunnerIdentityInput): AgentIdentity {
 		let identity: AgentIdentity;
 		if (!input) {
 			identity = {
@@ -1272,12 +1272,10 @@ export class ExtensionRunner {
 		// Frozen deeply: the memoized object is handed to every handler for the
 		// session, so a mutating extension cannot corrupt the documented identity
 		// (e.g. reversing `parentChain`) for unrelated extensions.
-		const frozen: AgentIdentity = Object.freeze({
+		return Object.freeze({
 			...identity,
 			parentChain: Object.freeze([...identity.parentChain]),
 		});
-		this.#agentIdentityCache = frozen;
-		return this.#agentIdentityCache;
 	}
 
 	/**

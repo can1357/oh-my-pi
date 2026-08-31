@@ -78,6 +78,36 @@ describe("ExtensionContext agentIdentity", () => {
 		});
 	});
 
+	it("snapshots the chain at first access so registry unregistration or replacement never rewrites it", () => {
+		const registry = new AgentRegistry();
+		registry.register({ id: "P1", displayName: "planner", kind: "sub", parentId: "GP", session: null });
+		registry.register({ id: "GP", displayName: "grandparent", kind: "sub", parentId: MAIN_AGENT_ID, session: null });
+		registry.register({ id: "C1", displayName: "worker", kind: "sub", parentId: "P1", session: null });
+		const runner = makeRunner({
+			kind: "sub",
+			depth: 2,
+			agentId: "C1",
+			displayName: "worker",
+			parentId: "P1",
+			registry,
+		});
+
+		const before = runner.createContext().agentIdentity;
+		expect(before.parentChain).toEqual(["P1", "GP"]);
+
+		// Unregistering an ancestor truncates nothing in the already-snapshotted
+		// chain; re-registering the same id with different ancestry splices in
+		// nothing either. One stable identity per session regardless of when
+		// handlers first read `ctx.agentIdentity`.
+		registry.unregister("GP");
+		registry.unregister("P1");
+		registry.register({ id: "P1", displayName: "imposter", kind: "sub", parentId: "EVIL", session: null });
+		registry.register({ id: "EVIL", displayName: "evil", kind: "sub", parentId: "P1", session: null });
+
+		expect(before.parentChain).toEqual(["P1", "GP"]);
+		expect(runner.createContext().agentIdentity).toBe(before);
+	});
+
 	it("resolves the ancestor chain nearest-first through registry parent links, excluding Main", () => {
 		const registry = new AgentRegistry();
 		registry.register({ id: "P1", displayName: "planner", kind: "sub", parentId: MAIN_AGENT_ID, session: null });
