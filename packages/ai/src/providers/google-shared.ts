@@ -815,6 +815,9 @@ export function buildGoogleGenerateContentParams<T extends "google-generative-ai
 	if (options.minP !== undefined) generationConfig.minP = options.minP;
 	if (options.presencePenalty !== undefined) generationConfig.presencePenalty = options.presencePenalty;
 	if (options.repetitionPenalty !== undefined) generationConfig.repetitionPenalty = options.repetitionPenalty;
+	if (options.responseMimeType !== undefined) generationConfig.responseMimeType = options.responseMimeType;
+	if (options.responseSchema !== undefined) generationConfig.responseSchema = options.responseSchema;
+	if (options.responseJsonSchema !== undefined) generationConfig.responseJsonSchema = options.responseJsonSchema;
 
 	const config: GenerateContentConfig = {
 		...(Object.keys(generationConfig).length > 0 && generationConfig),
