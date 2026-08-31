@@ -293,6 +293,19 @@ describe("TurnRecovery zero-billed empty-stop fallback", () => {
 		expect(getModel().id).toBe(model.id);
 	});
 
+	it("8d. does NOT promote a final zero-billed stop when earlier stops in the cycle were billed", async () => {
+		const { recovery, events, getModel } = makeRecovery({ fallbackChains });
+		const billed = makeMessage([], model, { usage: usage({ input: 100 }) });
+		expect(await recovery.handleEmptyAssistantStop(billed)).toBe("continue");
+		expect(await recovery.handleEmptyAssistantStop(billed)).toBe("continue");
+		expect(await recovery.handleEmptyAssistantStop(billed)).toBe("continue");
+		const finalZero = zeroBilled();
+		expect(await settle(recovery, finalZero)).toEqual(["terminal"]);
+		expect(getModel().id).toBe(model.id);
+		expect(events.some(e => e.type === "retry_fallback_applied")).toBe(false);
+		expect(events.filter(e => e.type === "auto_retry_end" && e.success === false).length).toBe(1);
+	});
+
 	it("9. no usable fallback chain settles terminal at the first cap", async () => {
 		const { recovery, events, getModel } = makeRecovery();
 		const msg = zeroBilled();

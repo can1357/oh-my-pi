@@ -263,6 +263,8 @@ export class TurnRecovery {
 	#unexpectedStopRetryCount = 0;
 	#acceptTerminalEmptyStopForPrompt = false;
 	#silentEmptyStopFallbackArmed = false;
+	/** True if any empty stop in the current retry cycle reported billed usage. */
+	#emptyStopCycleHadBilling = false;
 	// Three fields sit near the word "serve" and are deliberately distinct:
 	// `#activeRetryFallback.served` gates the one-shot `retry_fallback_succeeded`
 	// event for the current arm, `#fallbackRouted` says how the CURRENT model was
@@ -394,6 +396,7 @@ export class TurnRecovery {
 		this.#unexpectedStopRetryCount = 0;
 		this.#acceptTerminalEmptyStopForPrompt = false;
 		this.#silentEmptyStopFallbackArmed = false;
+		this.#emptyStopCycleHadBilling = false;
 	}
 
 	/** Sets whether one terminal empty stop is accepted for the current prompt. */
@@ -739,10 +742,41 @@ export class TurnRecovery {
 		);
 	}
 
+	/** True when this empty stop reported no billable usage in any meter. */
+	#isZeroBilledEmptyStop(assistantMessage: AssistantMessage, providerEmptyOutput: boolean): boolean {
+		if (providerEmptyOutput || assistantMessage.content.length > 0) return false;
+		const outputTokensExcludingKnownReasoning = Math.max(
+			0,
+			assistantMessage.usage.output - (assistantMessage.usage.reasoningTokens ?? 0),
+		);
+		const orchestration = assistantMessage.usage.orchestration;
+		const credits = assistantMessage.usage.credits;
+		return (
+			assistantMessage.usage.input === 0 &&
+			assistantMessage.usage.output === 0 &&
+			assistantMessage.usage.cacheRead === 0 &&
+			assistantMessage.usage.cacheWrite === 0 &&
+			assistantMessage.usage.totalTokens === 0 &&
+			(assistantMessage.usage.contextTokens ?? 0) === 0 &&
+			(orchestration?.input ?? 0) === 0 &&
+			(orchestration?.output ?? 0) === 0 &&
+			(orchestration?.cacheRead ?? 0) === 0 &&
+			(assistantMessage.usage.premiumRequests ?? 0) === 0 &&
+			(assistantMessage.usage.cost?.total ?? 0) === 0 &&
+			(assistantMessage.usage.server?.webSearch ?? 0) === 0 &&
+			(assistantMessage.usage.server?.webFetch ?? 0) === 0 &&
+			(credits?.cost ?? 0) === 0 &&
+			(credits?.committedCost ?? 0) === 0 &&
+			(credits?.acuCost ?? 0) === 0 &&
+			outputTokensExcludingKnownReasoning === 0
+		);
+	}
+
 	async #handleEmptyAssistantStop(assistantMessage: AssistantMessage): Promise<"continue" | "terminal" | undefined> {
 		const providerEmptyOutput = this.#isRecoverableProviderEmptyOutput(assistantMessage);
 		if (!isEmptyAssistantStop(assistantMessage) && !providerEmptyOutput) {
 			this.#emptyStopRetryCount = 0;
+			this.#emptyStopCycleHadBilling = false;
 			return undefined;
 		}
 
@@ -750,7 +784,12 @@ export class TurnRecovery {
 			this.#acceptTerminalEmptyStopForPrompt = false;
 			this.#discardAcceptedTerminalEmptyStop(assistantMessage);
 			this.#emptyStopRetryCount = 0;
+			this.#emptyStopCycleHadBilling = false;
 			return undefined;
+		}
+
+		if (!this.#isZeroBilledEmptyStop(assistantMessage, providerEmptyOutput)) {
+			this.#emptyStopCycleHadBilling = true;
 		}
 
 		this.#emptyStopRetryCount++;
@@ -776,28 +815,9 @@ export class TurnRecovery {
 				finalError =
 					"Assistant returned empty stop after retry cap; try switching models or `/shake images` to remove archived frames";
 			}
-			const orchestration = assistantMessage.usage.orchestration;
-			const credits = assistantMessage.usage.credits;
 			const zeroBilled =
-				!providerEmptyOutput &&
-				assistantMessage.content.length === 0 &&
-				assistantMessage.usage.input === 0 &&
-				assistantMessage.usage.output === 0 &&
-				assistantMessage.usage.cacheRead === 0 &&
-				assistantMessage.usage.cacheWrite === 0 &&
-				assistantMessage.usage.totalTokens === 0 &&
-				(assistantMessage.usage.contextTokens ?? 0) === 0 &&
-				(orchestration?.input ?? 0) === 0 &&
-				(orchestration?.output ?? 0) === 0 &&
-				(orchestration?.cacheRead ?? 0) === 0 &&
-				(assistantMessage.usage.premiumRequests ?? 0) === 0 &&
-				(assistantMessage.usage.cost?.total ?? 0) === 0 &&
-				(assistantMessage.usage.server?.webSearch ?? 0) === 0 &&
-				(assistantMessage.usage.server?.webFetch ?? 0) === 0 &&
-				(credits?.cost ?? 0) === 0 &&
-				(credits?.committedCost ?? 0) === 0 &&
-				(credits?.acuCost ?? 0) === 0 &&
-				outputTokensExcludingKnownReasoning === 0;
+				this.#isZeroBilledEmptyStop(assistantMessage, providerEmptyOutput) &&
+				!this.#emptyStopCycleHadBilling;
 
 			// Zero-billed empty stops are upstream dispatch failures laundered into a
 			// clean HTTP-200 stop (#9415): nothing was ever dispatched, so no usage
@@ -807,6 +827,9 @@ export class TurnRecovery {
 			// hardErrorFallback skips same-model retry: no usable candidate means the
 			// existing terminal settle. The synthetic object keeps the original turn
 			// untouched — the original is dropped durably either way.
+			// Promotion also requires the whole retry cycle to be zero-billed: an earlier
+			// billed empty in the same cycle means the provider did process work, so a
+			// final zero-usage stop must not launder that into silent model fallback.
 			if (zeroBilled && !this.#silentEmptyStopFallbackArmed) {
 				this.#silentEmptyStopFallbackArmed = true;
 				logger.warn("Promoting zero-billed empty stop to retriable error for model fallback", {
@@ -837,6 +860,7 @@ export class TurnRecovery {
 					!modelsAreEqual(modelBeforeFallback, modelAfterFallback);
 				if (didRetry && modelIdentityChanged) {
 					this.#emptyStopRetryCount = 0;
+					this.#emptyStopCycleHadBilling = false;
 					return "continue";
 				}
 				// No distinct model could take over: fall through to the visible
