@@ -821,9 +821,15 @@ function streamCursorWithWireMode(
 			// Always send the header: omitting it leaves Cursor's unrestricted native
 			// set enabled (including when tools is empty / text-only passthrough).
 			// toolChoice "none" disables tools; a named forced choice advertises that
-			// name alone (even when absent from context.tools — Cursor decides);
-			// "required"/unrestricted keep the full declared list.
+			// name alone (even when absent from context.tools — Cursor decides).
+			// Cursor has no required-call signal, so `toolChoice: "required"` would
+			// silently weaken to auto — reject it instead of advertising the full list.
 			if (options?.cursorToolPassthrough) {
+				if (options.toolChoice === "required") {
+					throw new AIError.ValidationError(
+						'Cursor passthrough does not support toolChoice "required"; use a named tool choice or omit toolChoice',
+					);
+				}
 				const forcedName = getNamedToolChoiceName(options.toolChoice);
 				// Interaction-only tools (e.g. connect_scm) are resolved entirely
 				// server-side with no deferrable exec frame — advertising them lets
@@ -4729,6 +4735,13 @@ export function processInteractionUpdate(
 			if (fetchCall || hostedFetchUnknown(toolCall)) {
 				// Hosted WebFetch / Fetch is permission-gated via InteractionQuery, then
 				// run server-side. Stamp resolved so agent-loop does not try a local tool.
+				// Passthrough: exclude from the allowlist; if Cursor still emits one,
+				// ignore it so we neither re-surface a server-finished call nor end the
+				// turn with a ToolCall the OpenAI client would execute again.
+				if (cursorToolPassthrough) {
+					log("passthrough", "ignoredServerOnlyHostedFetch");
+					return;
+				}
 				const url = fetchCall?.args?.url || extractHttpUrlFromUnknown(toolCall);
 				const callId = fetchCall?.args?.toolCallId || update.message.value.callId || crypto.randomUUID();
 				const block: ToolCallState = {

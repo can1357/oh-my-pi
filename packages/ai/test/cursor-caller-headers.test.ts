@@ -251,15 +251,25 @@ describe("Cursor passthrough allowed-tools header", () => {
 		expect(sent["x-cursor-agent-allowed-tools"]).toBe("report_delivery");
 	});
 
-	it("keeps the full declared list when toolChoice is required", async () => {
-		const sent = await send(
-			{},
+	it("rejects toolChoice required under passthrough instead of weakening to auto", async () => {
+		const baseUrl = await startServer();
+		const stream = streamCursor(
+			makeModel(baseUrl),
+			{ ...context, tools: passthroughTools },
 			{
-				context: { ...context, tools: passthroughTools },
-				options: { cursorToolPassthrough: true, toolChoice: "required" },
+				apiKey: "test-token",
+				cursorToolPassthrough: true,
+				toolChoice: "required",
 			},
 		);
-		expect(sent["x-cursor-agent-allowed-tools"]).toBe("bash,read");
+		for await (const _event of stream) {
+			// drain
+		}
+		const result = await stream.result();
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage ?? "").toMatch(/toolChoice "required"/);
+		// Request must not go out with the weakened full allowlist.
+		expect(received["x-cursor-agent-allowed-tools"]).toBeUndefined();
 	});
 
 	it("sends __none__ for empty tools under passthrough", async () => {
