@@ -3488,22 +3488,42 @@ describe("ExtensionRunner", () => {
 				expect(seenInputs).toEqual([{ command: "echo hi", nested: { flag: "keep" } }]);
 			});
 
-			it("extensions detect tool_approval_review support via pi.supportedEvents", async () => {
+			it("exposes immutable approval review capability metadata", async () => {
 				setTrace();
-				fs.writeFileSync(
+				await Bun.write(
 					path.join(extensionsDir, "review-capability.ts"),
 					`export default function(pi) {
+						const supportedEvents = pi.supportedEvents;
+						let mutationBlocked = false;
+						try {
+							supportedEvents.push("invented_event");
+						} catch {
+							mutationBlocked = true;
+						}
 						globalThis.__reviewTrace.push({
 							kind: "capability",
-							supported: pi.supportedEvents.includes("tool_approval_review"),
+							supported: supportedEvents?.includes("tool_approval_review") ?? false,
+							frozen: Object.isFrozen(supportedEvents),
+							mutationBlocked,
+							unchanged: !supportedEvents?.includes("invented_event"),
 						});
 					}`,
 				);
 				await loadTestExtensions();
 
 				const entry = (globalWithReview.__reviewTrace ?? []).find(item => item.kind === "capability");
-				expect(entry?.supported).toBe(true);
+				expect(entry).toMatchObject({
+					supported: true,
+					frozen: true,
+					mutationBlocked: true,
+					unchanged: true,
+				});
 				clearTrace();
+			});
+
+			it("treats missing supportedEvents on older hosts as unsupported", () => {
+				const legacyApi: { supportedEvents?: readonly string[] } = {};
+				expect(legacyApi.supportedEvents?.includes("tool_approval_review") ?? false).toBe(false);
 			});
 		});
 	});

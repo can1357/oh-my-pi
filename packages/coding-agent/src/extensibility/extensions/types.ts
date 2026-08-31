@@ -1229,11 +1229,13 @@ export type ExtensionServiceTier<Family extends ServiceTierFamily> = Family exte
 		: ServiceTier;
 
 /**
- * Event names the host dispatches to extension handlers. Plugins use this to
- * detect whether the running host supports a given seam (e.g.
- * `tool_approval_review`) — registering a handler for an event an older host
- * does not dispatch is a silent no-op. Keep in sync with the `on` overloads
- * below.
+ * Event names dispatched by the host to extension handlers.
+ *
+ * Exposed through `supportedEvents` for runtime capability detection.
+ * Extensions should treat `supportedEvents` as optional so they remain
+ * compatible with older hosts that predate capability reporting.
+ *
+ * Keep in sync with the `on()` overloads below.
  */
 export const EXTENSION_EVENT_NAMES: readonly string[] = Object.freeze([
 	"resources_discover",
@@ -1307,8 +1309,8 @@ export interface ExtensionAPI {
 	/** Injected pi-coding-agent exports for accessing SDK utilities */
 	pi: typeof PiCodingAgent;
 
-	/** Event names the host dispatches to extension handlers; plugins use it to detect seam support on older hosts. */
-	supportedEvents: readonly string[];
+	/** Event names dispatched by this host. Absent on older hosts. */
+	supportedEvents?: readonly string[];
 
 	// =========================================================================
 	// Event Subscription
