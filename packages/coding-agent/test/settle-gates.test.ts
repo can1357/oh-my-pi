@@ -128,6 +128,8 @@ describe("isTautologicalParentVerifyCommand", () => {
 	it("rejects status-negated verification as non-evidence", () => {
 		expect(isTautologicalParentVerifyCommand("! bun test")).toBe(true);
 		expect(isTautologicalParentVerifyCommand("!bun test")).toBe(true);
+		expect(isTautologicalParentVerifyCommand("time ! bun test")).toBe(true);
+		expect(isTautologicalParentVerifyCommand("time -p ! bun test")).toBe(true);
 	});
 
 	it("rejects status-masking shell chains as non-evidence", () => {

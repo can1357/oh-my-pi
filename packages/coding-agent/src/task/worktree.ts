@@ -1008,7 +1008,10 @@ export async function mergeTaskBranches(
 					break;
 				}
 
-				merged.push(branchName);
+				// Empty cherry-picks (equivalent changes already on the parent) must not
+				// count as a landed merge — otherwise `hadAnyChanges` latches verify for
+				// a no-op HEAD.
+				if (revisionsLanded > 0) merged.push(branchName);
 			}
 		} finally {
 			if (didStash) {

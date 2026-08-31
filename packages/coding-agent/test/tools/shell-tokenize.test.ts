@@ -106,6 +106,12 @@ describe("resolveLeadingCdChain", () => {
 			unresolvable: true,
 		});
 	});
+
+	it("marks unresolvable when cwd changes hide inside a shell group", () => {
+		expect(resolveLeadingCdChain("(cd /tmp && bun test)")).toEqual({ unresolvable: true });
+		expect(resolveLeadingCdChain("{ cd /tmp; bun test; }")).toEqual({ unresolvable: true });
+		expect(resolveLeadingCdChain("bun test")).toEqual({});
+	});
 });
 
 describe("hasTopLevelShellBackground", () => {

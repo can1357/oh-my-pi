@@ -68,7 +68,10 @@ export function isTautologicalParentVerifyCommand(command: string): boolean {
 	// trailing `true`/`pwd` masks a failed check. Reject any newline-separated chain.
 	if (/\r?\n/.test(trimmed)) return true;
 	// Bash `! cmd` inverts the exit status — success means the check failed.
-	if (/^!/.test(trimmed)) return true;
+	// Also strip a leading `time` / `time -p` reserved word so `time ! bun test`
+	// is classified the same way (Bash returns 0 when the negated check fails).
+	const withoutTime = trimmed.replace(/^(?:time(?:[ \t]+-p)?)[ \t]+/, "");
+	if (/^!/.test(withoutTime)) return true;
 	// Bash normalizes leading `cd <path> &&|; …` into cwd; strip those wrappers so
 	// `cd packages/foo && pwd` classifies as `pwd`, not as a real check.
 	for (;;) {

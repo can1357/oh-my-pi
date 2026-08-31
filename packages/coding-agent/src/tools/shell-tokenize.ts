@@ -335,7 +335,110 @@ export function stripLeadingEnvAndSudo(command: string): string {
  * preceding effective cwd), or `{ unresolvable: true }` when any leading `cd`
  * cannot be safely extracted (redirects, expansion, extra args).
  */
+/**
+ * True when a subshell / group / command substitution may change cwd without a
+ * leading top-level `cd` (e.g. `(cd /tmp && bun test)`). Callers that need a
+ * trusted verify cwd must treat these as unresolvable rather than falling back
+ * to the session/structured cwd.
+ */
+export function hasHiddenCwdChangeInShellGroup(command: string): boolean {
+	let inSingle = false;
+	let inDouble = false;
+	for (let i = 0; i < command.length; i++) {
+		const ch = command[i]!;
+		if (inSingle) {
+			if (ch === "'") inSingle = false;
+			continue;
+		}
+		if (inDouble) {
+			if (ch === "\\" && i + 1 < command.length) {
+				i++;
+				continue;
+			}
+			if (ch === '"') inDouble = false;
+			continue;
+		}
+		if (ch === "'") {
+			inSingle = true;
+			continue;
+		}
+		if (ch === '"') {
+			inDouble = true;
+			continue;
+		}
+		if (ch === "\\" && i + 1 < command.length) {
+			i++;
+			continue;
+		}
+		if (ch === "$" && command[i + 1] === "(") {
+			const end = findMatchingClose(command, i + 2, ")");
+			if (end >= 0 && commandWordCdIn(command.slice(i + 2, end))) return true;
+			if (end >= 0) i = end;
+			continue;
+		}
+		if (ch === "`") {
+			const end = command.indexOf("`", i + 1);
+			if (end > i && commandWordCdIn(command.slice(i + 1, end))) return true;
+			if (end > i) i = end;
+			continue;
+		}
+		if (ch === "(" || ch === "{") {
+			const close = ch === "(" ? ")" : "}";
+			const end = findMatchingClose(command, i + 1, close);
+			if (end >= 0 && commandWordCdIn(command.slice(i + 1, end))) return true;
+			if (end >= 0) i = end;
+		}
+	}
+	return false;
+}
+
+function findMatchingClose(command: string, start: number, close: string): number {
+	const open = close === ")" ? "(" : "{";
+	let depth = 1;
+	let inSingle = false;
+	let inDouble = false;
+	for (let i = start; i < command.length; i++) {
+		const ch = command[i]!;
+		if (inSingle) {
+			if (ch === "'") inSingle = false;
+			continue;
+		}
+		if (inDouble) {
+			if (ch === "\\" && i + 1 < command.length) {
+				i++;
+				continue;
+			}
+			if (ch === '"') inDouble = false;
+			continue;
+		}
+		if (ch === "'") {
+			inSingle = true;
+			continue;
+		}
+		if (ch === '"') {
+			inDouble = true;
+			continue;
+		}
+		if (ch === "\\" && i + 1 < command.length) {
+			i++;
+			continue;
+		}
+		if (ch === open) depth++;
+		else if (ch === close) {
+			depth--;
+			if (depth === 0) return i;
+		}
+	}
+	return -1;
+}
+
+/** True when `cd` appears as a shell command word (not inside a path/arg alone). */
+function commandWordCdIn(body: string): boolean {
+	return /(?:^|[\s;&|])cd(?:[\s;|&)]|$)/.test(body);
+}
+
 export function resolveLeadingCdChain(command: string): { path?: string; unresolvable?: boolean } {
+	if (hasHiddenCwdChangeInShellGroup(command)) return { unresolvable: true };
 	let rest = stripLeadingEnvAndSudo(command);
 	let lastPath: string | undefined;
 	let sawCd = false;
