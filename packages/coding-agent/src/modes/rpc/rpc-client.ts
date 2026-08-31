@@ -744,14 +744,14 @@ export class RpcClient {
 	/**
 	 * Set steering mode.
 	 */
-	async setSteeringMode(mode: "all" | "one-at-a-time"): Promise<void> {
+	async setSteeringMode(mode: "all" | "one-at-a-time" | "coalescing"): Promise<void> {
 		await this.#send({ type: "set_steering_mode", mode });
 	}
 
 	/**
 	 * Set follow-up mode.
 	 */
-	async setFollowUpMode(mode: "all" | "one-at-a-time"): Promise<void> {
+	async setFollowUpMode(mode: "all" | "one-at-a-time" | "coalescing"): Promise<void> {
 		await this.#send({ type: "set_follow_up_mode", mode });
 	}
 

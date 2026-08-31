@@ -5,6 +5,7 @@ import { QueueModeSelectorComponent } from "@oh-my-pi/pi-coding-agent/modes/comp
 import { ThemeSelectorComponent } from "@oh-my-pi/pi-coding-agent/modes/components/theme-selector";
 import { ThinkingSelectorComponent } from "@oh-my-pi/pi-coding-agent/modes/components/thinking-selector";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import type { QueueMode } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { SgrMouseEvent } from "@oh-my-pi/pi-tui";
 
 beforeAll(async () => {
@@ -63,9 +64,9 @@ describe("inline-picker wrapper routeMouse offset", () => {
 	});
 
 	it("QueueModeSelectorComponent ignores the border row and selects the first mode below it", () => {
-		let selected: "all" | "one-at-a-time" | undefined;
+		let selected: QueueMode | undefined;
 		const component = new QueueModeSelectorComponent(
-			"all",
+			"one-at-a-time",
 			value => {
 				selected = value;
 			},

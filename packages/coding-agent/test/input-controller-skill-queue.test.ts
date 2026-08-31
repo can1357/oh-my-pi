@@ -25,6 +25,8 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import { Container } from "@oh-my-pi/pi-tui";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
+const stripAnsi = (s: string): string => s.replace(/\u001b\[[0-9;]*m/g, "");
+
 type StubEditor = {
 	setText: (text: string) => void;
 	setCollapsedText: (text: string) => void;
@@ -751,13 +753,16 @@ function createStubInteractiveModeContextForUiHelpers(session: AgentSession) {
 
 	const ctx = {
 		editor,
-		ui: { requestRender, requestComponentRender },
+		ui: { requestRender, requestComponentRender, terminal: { columns: 80 } },
 		pendingMessagesContainer,
 		session,
 		viewSession: session,
 		compactionQueuedMessages: [],
 		keybindings: {
-			getDisplayString: (_action: string) => "Alt+Up",
+			getDisplayString: (action: string) => (action === "app.message.expandQueue" ? "Alt+O" : "Alt+Up"),
+		},
+		settings: {
+			get: (path: string) => (path === "pendingQueueCollapseLines" ? 3 : undefined),
 		},
 		updatePendingMessagesDisplay,
 		locallySubmittedUserSignatures: new Set<string>(),
@@ -785,7 +790,7 @@ describe("UiHelpers / InputController against derived queued custom display", ()
 		vi.restoreAllMocks();
 	});
 
-	it("renders the compact slash form for queued skills", async () => {
+	it("renders queued skills inside the compact steering box", async () => {
 		fixture = await createRealSession();
 		const { session } = fixture;
 		queueCustomSteer(session, "/skill:test-skill arg1 arg2");
@@ -794,53 +799,66 @@ describe("UiHelpers / InputController against derived queued custom display", ()
 		const uiHelpers = new UiHelpers(ctx);
 		uiHelpers.updatePendingMessagesDisplay();
 
-		const rendered = Bun.stripANSI(pendingMessagesContainer.render(120).join("\n"));
-		expect(rendered).toContain("Steering · 1");
-		expect(rendered).toContain("1. /skill:test-skill arg1 arg2");
-		expect(rendered).not.toContain("Steer:");
+		const rendered = stripAnsi(pendingMessagesContainer.render(120).join("\n"));
+		expect(rendered).toContain("Steer");
+		expect(rendered).toContain("└─ /skill:test-skill arg1 arg2");
+		expect(rendered).toContain("Alt+Up (or Up) to edit");
 	});
 
-	it("requests the pending-container repaint after rebuilding and clearing it", async () => {
+	it("renders a coalesced image/text queue entry as one compact box", async () => {
 		fixture = await createRealSession();
 		const { session } = fixture;
-		queueCustomSteer(session, "/skill:test-skill arg1 arg2");
+		session.agent.steer({
+			role: "user",
+			content: [
+				{ type: "text", text: "[Image #1] describe\nmore context" },
+				{ type: "image", data: "QUJD", mimeType: "image/png" },
+			],
+			steering: true,
+			attribution: "user",
+			timestamp: Date.now(),
+		});
 
-		const { ctx, pendingMessagesContainer, requestComponentRender } =
-			createStubInteractiveModeContextForUiHelpers(session);
+		const { ctx, pendingMessagesContainer } = createStubInteractiveModeContextForUiHelpers(session);
 		const uiHelpers = new UiHelpers(ctx);
 		uiHelpers.updatePendingMessagesDisplay();
 
-		expect(pendingMessagesContainer.children.length).toBeGreaterThan(0);
-		expect(requestComponentRender).toHaveBeenNthCalledWith(1, pendingMessagesContainer);
-
-		session.clearQueue();
-		uiHelpers.updatePendingMessagesDisplay();
-
-		expect(pendingMessagesContainer.children).toHaveLength(0);
-		expect(requestComponentRender).toHaveBeenNthCalledWith(2, pendingMessagesContainer);
+		const rendered = stripAnsi(pendingMessagesContainer.render(120).join("\n"));
+		expect(rendered.match(/ Steer /g)?.length).toBe(1);
+		expect(rendered).toContain("├─ [Image #1] describe");
+		expect(rendered).toContain("└─ more context");
+		expect(rendered).toContain("Alt+Up (or Up) to edit");
 	});
 
-	it("groups yield follow-ups under one heading", async () => {
+	it("collapses queued steering text with a row and character footer", async () => {
 		fixture = await createRealSession();
 		const { session } = fixture;
-		for (const text of ["inspect types", "run tests", "summarize"]) {
-			session.agent.followUp({
-				role: "user",
-				content: text,
-				attribution: "user",
-				timestamp: Date.now(),
-			});
-		}
+		queueCustomSteer(session, "one\ntwo\nthree\nfour");
 
 		const { ctx, pendingMessagesContainer } = createStubInteractiveModeContextForUiHelpers(session);
-		new UiHelpers(ctx).updatePendingMessagesDisplay();
+		const uiHelpers = new UiHelpers(ctx);
+		uiHelpers.updatePendingMessagesDisplay();
 
-		const rendered = Bun.stripANSI(pendingMessagesContainer.render(120).join("\n"));
-		expect(rendered).toContain("After yield · 3");
-		expect(rendered).toContain("1. inspect types");
-		expect(rendered).toContain("2. run tests");
-		expect(rendered).toContain("3. summarize");
-		expect(rendered).not.toContain("Follow-up:");
+		const rendered = stripAnsi(pendingMessagesContainer.render(120).join("\n"));
+		expect(rendered).toContain("├─ one");
+		expect(rendered).toContain("├─ two");
+		expect(rendered).toContain("├─ three");
+		expect(rendered).not.toContain("four");
+		expect(rendered).toContain("Alt+Up (or Up) to edit, Alt+O to expand");
+		expect(rendered).toContain("+1 rows · 4 chars");
+	});
+
+	it("shows the expand hint when a queued line wraps past the collapsed row limit", async () => {
+		fixture = await createRealSession();
+		const { session } = fixture;
+		queueCustomSteer(session, "wrapped ".repeat(80).trim());
+
+		const { ctx, pendingMessagesContainer } = createStubInteractiveModeContextForUiHelpers(session);
+		const uiHelpers = new UiHelpers(ctx);
+		uiHelpers.updatePendingMessagesDisplay();
+
+		const rendered = stripAnsi(pendingMessagesContainer.render(80).join("\n"));
+		expect(rendered).toContain("Alt+Up (or Up) to edit, Alt+O to expand");
 	});
 
 	it("restores the compact slash form into the editor and clears the queue", async () => {

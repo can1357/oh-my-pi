@@ -35,6 +35,7 @@ interface AppKeybindings {
 	"app.message.followUp": true;
 	"app.retry": true;
 	"app.message.dequeue": true;
+	"app.message.expandQueue": true;
 	"app.clipboard.pasteImage": true;
 	"app.clipboard.pasteTextRaw": true;
 	"app.clipboard.copyLine": true;
@@ -154,6 +155,10 @@ export const KEYBINDINGS = {
 		defaultKeys: ["alt+up", "shift+up"],
 		description: "Dequeue message",
 	},
+	"app.message.expandQueue": {
+		defaultKeys: "alt+o",
+		description: "Expand/collapse queued message preview",
+	},
 	"app.clipboard.pasteImage": {
 		defaultKeys: getDefaultPasteImageKeys(),
 		description: "Paste image or text from clipboard",
@@ -263,6 +268,7 @@ const KEYBINDING_NAME_MIGRATIONS = {
 	followUp: "app.message.followUp",
 	retry: "app.retry",
 	dequeue: "app.message.dequeue",
+	expandQueue: "app.message.expandQueue",
 	pasteImage: "app.clipboard.pasteImage",
 	pasteTextRaw: "app.clipboard.pasteTextRaw",
 	copyLine: "app.clipboard.copyLine",

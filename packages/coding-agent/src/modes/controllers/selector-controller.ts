@@ -489,10 +489,10 @@ export class SelectorController {
 				this.ctx.ui.requestRender();
 				break;
 			case "steeringMode":
-				this.ctx.session.setSteeringMode(value as "all" | "one-at-a-time");
+				this.ctx.session.setSteeringMode(value as "all" | "one-at-a-time" | "coalescing");
 				break;
 			case "followUpMode":
-				this.ctx.session.setFollowUpMode(value as "all" | "one-at-a-time");
+				this.ctx.session.setFollowUpMode(value as "all" | "one-at-a-time" | "coalescing");
 				break;
 			case "interruptMode":
 				this.ctx.session.setInterruptMode(value as "immediate" | "wait");

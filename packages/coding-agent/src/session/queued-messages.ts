@@ -13,7 +13,7 @@ function queuedTextContent(message: AgentMessage): string | undefined {
 	return undefined;
 }
 
-function queuedImageContent(message: AgentMessage): ImageContent[] | undefined {
+export function queuedImageContent(message: AgentMessage): ImageContent[] | undefined {
 	if (!("content" in message) || typeof message.content === "string") return undefined;
 	const images: ImageContent[] = [];
 	for (const part of message.content) {
@@ -58,7 +58,7 @@ export function isTerminalTextAssistantAnswer(message: AgentMessage | undefined)
 
 /** Whether queued content was authored by the user and can be restored to the editor. */
 export function isUserQueuedMessage(message: AgentMessage): boolean {
-	if (message.role === "user") return true;
+	if (message.role === "user") return message.attribution !== "agent";
 	return message.role === "custom" && message.attribution === "user" && message.display !== false;
 }
 

@@ -1,5 +1,6 @@
 import { type SelectItem, SelectList, type SgrMouseEvent } from "@oh-my-pi/pi-tui";
 import { getSelectListTheme } from "../../modes/theme/theme";
+import type { QueueMode } from "../../session/agent-session";
 import { OverlayPanel } from "./overlay-box";
 import { routeSelectListMouseWithTopBorder } from "./select-list-mouse-routing";
 
@@ -9,18 +10,19 @@ import { routeSelectListMouseWithTopBorder } from "./select-list-mouse-routing";
 export class QueueModeSelectorComponent extends OverlayPanel {
 	#selectList: SelectList;
 
-	constructor(
-		currentMode: "all" | "one-at-a-time",
-		onSelect: (mode: "all" | "one-at-a-time") => void,
-		onCancel: () => void,
-	) {
+	constructor(currentMode: QueueMode, onSelect: (mode: QueueMode) => void, onCancel: () => void) {
 		super("Queue Mode");
 
 		const queueModes: SelectItem[] = [
 			{
 				value: "one-at-a-time",
 				label: "one-at-a-time",
-				description: "Process queued messages one by one (recommended)",
+				description: "Process queued messages one by one (default)",
+			},
+			{
+				value: "coalescing",
+				label: "coalescing",
+				description: "Merge rapid consecutive queued messages into one pending entry",
 			},
 			{ value: "all", label: "all", description: "Process all queued messages at once" },
 		];
@@ -35,7 +37,7 @@ export class QueueModeSelectorComponent extends OverlayPanel {
 		}
 
 		this.#selectList.onSelect = item => {
-			onSelect(item.value as "all" | "one-at-a-time");
+			onSelect(item.value as QueueMode);
 		};
 
 		this.#selectList.onCancel = () => {

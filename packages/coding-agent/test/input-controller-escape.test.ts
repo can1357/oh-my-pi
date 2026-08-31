@@ -28,8 +28,10 @@ type FakeEditor = {
 	onToggleThinking?: () => void;
 	onExternalEditor?: () => void;
 	onDequeue?: () => void;
+	onUpWhenEmpty?: () => boolean;
 	onChange?: (text: string) => void;
 	setText(text: string): void;
+	setCollapsedText(text: string): void;
 	getText(): string;
 	addToHistory(text: string): void;
 	setActionKeys(action: string, keys: string[]): void;
@@ -119,6 +121,9 @@ function createContext(): {
 		setText(text: string) {
 			editorText = text;
 		},
+		setCollapsedText(text: string) {
+			editorText = text;
+		},
 		getText() {
 			return editorText;
 		},
@@ -184,6 +189,9 @@ function createContext(): {
 			abortCompaction: vi.fn(),
 			abortHandoff,
 			abortRetry: vi.fn(),
+			abort,
+			clearQueue,
+			getQueuedMessages,
 		} as unknown as InteractiveModeContext["viewSession"],
 		sessionManager: {
 			getSessionName: () => "existing session",
@@ -875,5 +883,67 @@ describe("InputController double-tap ← gesture", () => {
 		tap();
 		expect(unfocusSession).toHaveBeenCalledTimes(1);
 		expect(showAgentHub).not.toHaveBeenCalled();
+	});
+});
+
+describe("InputController Up-on-empty undo-send wiring", () => {
+	it("restores queued user work and consumes Up", () => {
+		const { ctx, editor, spies } = createContext();
+		spies.getQueuedMessages.mockReturnValue({ steering: ["queued line"], followUp: [] });
+		spies.clearQueue.mockReturnValue({ steering: [{ text: "queued line" }], followUp: [] });
+		const controller = new InputController(ctx);
+		controller.setupKeyHandlers();
+		const consumed = editor.onUpWhenEmpty?.();
+		expect(consumed).toBe(true);
+		expect(spies.clearQueue).toHaveBeenCalledTimes(1);
+		expect(editor.getText()).toBe("queued line");
+	});
+
+	it("falls through to history when the display reports work the queue cannot drain", () => {
+		const { ctx, editor, spies } = createContext();
+		spies.getQueuedMessages.mockReturnValue({ steering: ["ghost"], followUp: [] });
+		spies.clearQueue.mockReturnValue({ steering: [], followUp: [] });
+		const controller = new InputController(ctx);
+		controller.setupKeyHandlers();
+		const consumed = editor.onUpWhenEmpty?.();
+		expect(consumed).toBe(false);
+		expect(editor.getText()).toBe("");
+	});
+
+	it("restores the focused subagent's queue, not the main session's, when a subagent is focused", () => {
+		const { ctx, editor, spies } = createContext();
+		const viewClearQueue = vi.fn(() => ({ steering: [{ text: "focused line" }], followUp: [] }));
+		const viewGetQueuedMessages = vi.fn(() => ({ steering: ["focused line"], followUp: [] }));
+		Object.assign(ctx, {
+			viewSession: {
+				getQueuedMessages: viewGetQueuedMessages,
+				clearQueue: viewClearQueue,
+				abort: vi.fn(),
+			},
+		});
+		const controller = new InputController(ctx);
+		controller.setupKeyHandlers();
+		const consumed = editor.onUpWhenEmpty?.();
+		expect(consumed).toBe(true);
+		expect(viewClearQueue).toHaveBeenCalledTimes(1);
+		expect(spies.clearQueue).not.toHaveBeenCalled();
+		expect(editor.getText()).toBe("focused line");
+	});
+
+	it("clears only the restored messages' signatures, preserving main-session queued signatures", () => {
+		const { ctx } = createContext();
+		ctx.locallySubmittedUserSignatures.add("main queued steer\u00000");
+		ctx.locallySubmittedUserSignatures.add("focused line\u00000");
+		Object.assign(ctx, {
+			viewSession: {
+				getQueuedMessages: vi.fn(() => ({ steering: ["focused line"], followUp: [] })),
+				clearQueue: vi.fn(() => ({ steering: [{ text: "focused line" }], followUp: [] })),
+				abort: vi.fn(),
+			},
+		});
+		const controller = new InputController(ctx);
+		controller.restoreQueuedMessagesToEditor();
+		expect(ctx.locallySubmittedUserSignatures.has("focused line\u00000")).toBe(false);
+		expect(ctx.locallySubmittedUserSignatures.has("main queued steer\u00000")).toBe(true);
 	});
 });

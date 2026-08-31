@@ -313,6 +313,8 @@ export interface PromptOptions {
 	images?: ImageContent[];
 	/** Queue behavior while streaming. */
 	streamingBehavior?: "steer" | "followUp";
+	/** Called when a streaming prompt is queued or coalesced. */
+	onQueued?: (text: string, imageCount: number, replacedText?: string) => void;
 	/** Optional tool choice override for the next LLM call. */
 	toolChoice?: ToolChoice;
 	/** Send as a developer/system message instead of user. */

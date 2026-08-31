@@ -329,6 +329,7 @@ import {
 	isHiddenUserCompanion,
 	isUserQueuedMessage,
 	queueChipText,
+	queuedImageContent,
 	toRestoredQueuedMessage,
 } from "./queued-messages";
 import type { ServingModel } from "./retry-fallback-chains";
@@ -407,6 +408,47 @@ const noOpUIContext: ExtensionUIContext = {
 // ============================================================================
 // AgentSession Class
 // ============================================================================
+
+type UserQueueMessage = Extract<AgentMessage, { role: "user" }>;
+type QueuedUserMessageListener = (text: string, imageCount: number, replacedText?: string) => void;
+export type QueueMode = "all" | "one-at-a-time" | "coalescing";
+
+function coreQueueMode(mode: QueueMode): "all" | "one-at-a-time" {
+	return mode === "all" ? "all" : "one-at-a-time";
+}
+export type LocalQueueCoalescedListener = (
+	perSendText: string,
+	mergedText: string,
+	replacedText: string,
+	perSendImageCount: number,
+	mergedImageCount: number,
+	replacedImageCount: number,
+) => void;
+
+const IMAGE_MARKER_REGEX = /\[Image #([1-9]\d*)((?:,[^\]\n]*)?)\]/g;
+
+function shiftQueuedImageMarkers(text: string, offset: number): string {
+	if (offset === 0) return text;
+	return text.replace(
+		IMAGE_MARKER_REGEX,
+		(_match, idx: string, tail: string) => `[Image #${Number(idx) + offset}${tail}]`,
+	);
+}
+
+function queuedUserDraftText(message: AgentMessage): string | undefined {
+	if (message.role !== "user" || message.attribution === "agent") return undefined;
+	if (!("content" in message)) return undefined;
+	if (typeof message.content === "string") return message.content;
+	const text = message.content.find((part): part is TextContent => part.type === "text")?.text ?? "";
+	if (text) return text;
+	return queuedImageContent(message) ? "[Image]" : "";
+}
+
+function withQueuedUserContent(message: UserQueueMessage, text: string, images?: ImageContent[]): AgentMessage {
+	const content: (TextContent | ImageContent)[] = [{ type: "text", text }];
+	if (images?.length) content.push(...images);
+	return { ...message, content, timestamp: Date.now() };
+}
 
 type MessageEndPersistenceSlot = {
 	readonly promise: Promise<void>;
@@ -547,6 +589,7 @@ export class AgentSession {
 	#pendingNextTurnMessages: CustomMessage[] = [];
 	#scheduledHiddenNextTurnGeneration: number | undefined = undefined;
 	#queuedMessageDrainScheduled = false;
+	#queuedUserMessageTail: Promise<void> = Promise.resolve();
 	#planModeState: PlanModeState | undefined;
 	/** Session-scoped `/vision` override; undefined = follow persisted `inspect_image.mode`. */
 	#inspectImageModeOverride: InspectImageMode | undefined;
@@ -556,6 +599,7 @@ export class AgentSession {
 	readonly #advisors: SessionAdvisors;
 	/** Resolves once the resume-time advisor spend backfill settles. */
 	#advisorCostRestore: Promise<void> = Promise.resolve();
+	onLocalQueueCoalesced: LocalQueueCoalescedListener | undefined;
 	#goalTurnCounter = 0;
 	#planReferenceSent = false;
 	#planReferencePath = "local://PLAN.md";
@@ -5181,13 +5225,13 @@ export class AgentSession {
 	}
 
 	/** Current steering mode */
-	get steeringMode(): "all" | "one-at-a-time" {
-		return this.agent.getSteeringMode();
+	get steeringMode(): QueueMode {
+		return this.settings.get("steeringMode");
 	}
 
 	/** Current follow-up mode */
-	get followUpMode(): "all" | "one-at-a-time" {
-		return this.agent.getFollowUpMode();
+	get followUpMode(): QueueMode {
+		return this.settings.get("followUpMode");
 	}
 
 	/** Current interrupt mode */
@@ -5772,17 +5816,15 @@ export class AgentSession {
 		if (this.isStreaming) {
 			const streamingBehavior = options?.streamingBehavior;
 			if (!streamingBehavior) throw new AgentBusyError();
-
-			// Steer/follow-up the keyword notices BEFORE the queued user message so the
-			// model reads the steering notice ahead of the prompt it modifies.
-			for (const notice of keywordNotices) {
-				await this.#queueCustomMessage(notice, streamingBehavior);
-			}
-			if (streamingBehavior === "followUp") {
-				await this.#queueUserMessage(expandedText, options?.images, "followUp", submittedAt);
-			} else {
-				await this.#queueUserMessage(expandedText, options?.images, "steer", submittedAt);
-			}
+			const queueMode = streamingBehavior === "followUp" ? "followUp" : "steer";
+			await this.#queueUserMessageWithCompanions(
+				expandedText,
+				options?.images,
+				queueMode,
+				keywordNotices,
+				options.onQueued,
+				submittedAt,
+			);
 			return true;
 		}
 
@@ -6342,7 +6384,7 @@ export class AgentSession {
 	/**
 	 * Queue a steering message to interrupt the agent mid-run.
 	 */
-	async steer(text: string, images?: ImageContent[]): Promise<void> {
+	async steer(text: string, images?: ImageContent[], onQueued?: QueuedUserMessageListener): Promise<void> {
 		if (text.startsWith("/")) {
 			this.#throwIfExtensionCommand(text);
 		}
@@ -6351,7 +6393,7 @@ export class AgentSession {
 		// Stamp before image preprocessing so a queued image steer measures from
 		// the operator's submission, not after the vision-model description.
 		const submittedAt = Date.now();
-		await this.#queueUserMessage(expandedText, images, "steer", submittedAt);
+		await this.#queueUserMessage(expandedText, images, "steer", submittedAt, onQueued);
 	}
 
 	/**
@@ -6429,11 +6471,112 @@ export class AgentSession {
 		}
 	}
 
+	async #withQueuedUserMessageLock<T>(fn: () => Promise<T>): Promise<T> {
+		const previous = this.#queuedUserMessageTail;
+		const gate = Promise.withResolvers<void>();
+		this.#queuedUserMessageTail = previous.catch(() => undefined).then(() => gate.promise);
+		await previous.catch(() => undefined);
+		try {
+			return await fn();
+		} finally {
+			gate.resolve();
+		}
+	}
+
+	async #queueUserMessageWithCompanions(
+		text: string,
+		images: ImageContent[] | undefined,
+		mode: "steer" | "followUp",
+		companionMessages: readonly CustomMessage[],
+		onQueued: QueuedUserMessageListener | undefined,
+		timestamp?: number,
+	): Promise<void> {
+		await this.#withQueuedUserMessageLock(async () => {
+			for (const companion of companionMessages) {
+				await this.#queueCustomMessage(companion, mode);
+			}
+			await this.#queueUserMessageLocked(text, images, mode, timestamp, onQueued);
+		});
+	}
+
+	#tryCoalesceQueuedUserMessage(
+		text: string,
+		images: ImageContent[] | undefined,
+		mode: "steer" | "followUp",
+		companionMessages: readonly CustomMessage[],
+		onQueued: QueuedUserMessageListener | undefined,
+	): boolean {
+		const steering = [...this.agent.peekSteeringQueue()];
+		const followUp = [...this.agent.peekFollowUpQueue()];
+		const queue = mode === "steer" ? steering : followUp;
+		if (queue.length === 0) return false;
+		const perSendText = text || (images?.length ? "[Image]" : "");
+		if (!perSendText) return false;
+
+		let suffixCompanionStart = queue.length;
+		while (suffixCompanionStart > 0 && isHiddenUserCompanion(queue[suffixCompanionStart - 1])) {
+			suffixCompanionStart--;
+		}
+		const userIndex = suffixCompanionStart - 1;
+		const tail = queue[userIndex];
+		if (tail?.role !== "user") return false;
+		const replacedText = queuedUserDraftText(tail);
+		if (replacedText === undefined) return false;
+
+		let prefixCompanionStart = userIndex;
+		while (prefixCompanionStart > 0 && isHiddenUserCompanion(queue[prefixCompanionStart - 1])) {
+			prefixCompanionStart--;
+		}
+		const tailImages = queuedImageContent(tail);
+		const shiftedPerSendText = shiftQueuedImageMarkers(perSendText, tailImages?.length ?? 0);
+		const mergedImages = [...(tailImages ?? []), ...(images ?? [])];
+		const mergedText = `${replacedText}\n${shiftedPerSendText}`;
+		const replacement = withQueuedUserContent(tail, mergedText, mergedImages.length > 0 ? mergedImages : undefined);
+		const nextQueue = [
+			...queue.slice(0, prefixCompanionStart),
+			...queue.slice(prefixCompanionStart, userIndex),
+			...queue.slice(userIndex + 1),
+			...companionMessages,
+			replacement,
+		];
+		this.agent.replaceQueues(
+			mode === "steer" ? nextQueue : [...steering],
+			mode === "followUp" ? nextQueue : [...followUp],
+		);
+		const perSendImageCount = images?.length ?? 0;
+		const replacedImageCount = tailImages?.length ?? 0;
+		const mergedImageCount = mergedImages.length;
+		onQueued?.(mergedText, mergedImageCount, replacedText);
+		if (!onQueued) {
+			this.onLocalQueueCoalesced?.(
+				perSendText,
+				mergedText,
+				replacedText,
+				perSendImageCount,
+				mergedImageCount,
+				replacedImageCount,
+			);
+		}
+		return true;
+	}
 	async #queueUserMessage(
 		text: string,
 		images: ImageContent[] | undefined,
 		mode: "steer" | "followUp",
 		timestamp?: number,
+		onQueued?: QueuedUserMessageListener,
+	): Promise<void> {
+		await this.#withQueuedUserMessageLock(() =>
+			this.#queueUserMessageLocked(text, images, mode, timestamp, onQueued),
+		);
+	}
+
+	async #queueUserMessageLocked(
+		text: string,
+		images: ImageContent[] | undefined,
+		mode: "steer" | "followUp",
+		timestamp?: number,
+		onQueued?: QueuedUserMessageListener,
 	): Promise<void> {
 		// A queued user message (RPC/SDK/collab steer or follow-up, or a typed message
 		// while streaming) is a deliberate resume; re-enable advisor auto-resume that
@@ -6444,11 +6587,20 @@ export class AgentSession {
 		if (normalizedImages?.length) {
 			content.push(...normalizedImages);
 		}
-		// Text-only model + image attachment: describe via a vision model and enqueue the
-		// description as a hidden companion immediately before the user message.
 		const imageDescriptionNotice = normalizedImages?.length
 			? await this.#buildImageDescriptionNotice(normalizedImages)
 			: undefined;
+		const companionMessages = imageDescriptionNotice ? [imageDescriptionNotice] : [];
+		const queueMode = mode === "followUp" ? this.settings.get("followUpMode") : this.settings.get("steeringMode");
+		if (
+			queueMode === "coalescing" &&
+			this.#tryCoalesceQueuedUserMessage(text, normalizedImages, mode, companionMessages, onQueued)
+		) {
+			this.#scheduleIdleQueueDrain();
+			return;
+		}
+		// Text-only model + image attachment: describe via a vision model and enqueue the
+		// description as a hidden companion immediately before the user message.
 		this.#allowQueuedMessageDrainRetry();
 		if (mode === "followUp") {
 			if (imageDescriptionNotice) this.agent.followUp(imageDescriptionNotice);
@@ -6468,6 +6620,7 @@ export class AgentSession {
 				timestamp: timestamp ?? Date.now(),
 			});
 		}
+		onQueued?.(text, normalizedImages?.length ?? 0);
 		this.#scheduleIdleQueueDrain();
 	}
 
@@ -6486,23 +6639,34 @@ export class AgentSession {
 			return;
 		}
 		this.#queuedMessageDrainScheduled = true;
-		this.#scheduleAgentContinue({
-			source: "queued-message-drain",
-			shouldContinue: () => {
+		this.#schedulePostPromptTask(async signal => {
+			let observedTail: Promise<void>;
+			do {
+				observedTail = this.#queuedUserMessageTail;
+				await observedTail.catch(() => undefined);
+			} while (observedTail !== this.#queuedUserMessageTail);
+			if (signal.aborted) {
 				this.#queuedMessageDrainScheduled = false;
-				return (
-					this.#modeExitDrainSuppressionDepth === 0 &&
-					this.#canAutoContinueForFollowUp() &&
-					this.agent.hasQueuedMessages()
-				);
-			},
-			onSkip: () => {
-				this.#queuedMessageDrainScheduled = false;
-			},
-			onError: () => {
-				this.#queuedMessageDrainScheduled = false;
-				this.#queuedMessageDrainBlocked = this.agent.hasQueuedMessages();
-			},
+				return;
+			}
+			this.#scheduleAgentContinue({
+				source: "queued-message-drain",
+				shouldContinue: () => {
+					this.#queuedMessageDrainScheduled = false;
+					return (
+						this.#modeExitDrainSuppressionDepth === 0 &&
+						this.#canAutoContinueForFollowUp() &&
+						this.agent.hasQueuedMessages()
+					);
+				},
+				onSkip: () => {
+					this.#queuedMessageDrainScheduled = false;
+				},
+				onError: () => {
+					this.#queuedMessageDrainScheduled = false;
+					this.#queuedMessageDrainBlocked = this.agent.hasQueuedMessages();
+				},
+			});
 		});
 	}
 
@@ -7492,8 +7656,8 @@ export class AgentSession {
 	 * Set steering mode.
 	 * Saves to settings.
 	 */
-	setSteeringMode(mode: "all" | "one-at-a-time"): void {
-		this.agent.setSteeringMode(mode);
+	setSteeringMode(mode: QueueMode): void {
+		this.agent.setSteeringMode(coreQueueMode(mode));
 		this.settings.set("steeringMode", mode);
 	}
 
@@ -7501,8 +7665,8 @@ export class AgentSession {
 	 * Set follow-up mode.
 	 * Saves to settings.
 	 */
-	setFollowUpMode(mode: "all" | "one-at-a-time"): void {
-		this.agent.setFollowUpMode(mode);
+	setFollowUpMode(mode: QueueMode): void {
+		this.agent.setFollowUpMode(coreQueueMode(mode));
 		this.settings.set("followUpMode", mode);
 	}
 
