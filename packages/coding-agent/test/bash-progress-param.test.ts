@@ -178,6 +178,22 @@ describe("bash progress parameter", () => {
 		);
 	});
 
+	test("rejects background execution for advisor sessions without delivery sinks", async () => {
+		const manager = new AsyncJobManager({});
+		const session = {
+			...makeSession(manager),
+			getAgentId: () => "advisor",
+			agentRegistry: { get: () => ({ kind: "advisor" }) },
+		} as unknown as ToolSession;
+		const tool = new BashTool(session);
+
+		for (const asyncMode of [true, "auto"] as const) {
+			await expect(tool.execute("advisor-background", { command: "echo no", async: asyncMode })).rejects.toThrow(
+				"Advisor sessions cannot run background Bash jobs",
+			);
+		}
+	});
+
 	test("rejects PTY with async auto at the tool boundary", async () => {
 		const manager = new AsyncJobManager({});
 		const tool = new BashTool(makeSession(manager));
