@@ -19,7 +19,7 @@ function phase(
 }
 
 describe("incomplete todo snapshot helpers", () => {
-	it("collects pending, in_progress, and model-abandoned rows (not user drops)", () => {
+	it("collects pending, in_progress, blocked, and model-abandoned rows (not user drops)", () => {
 		const rows = collectIncompleteTodoRows([
 			phase(
 				"Work",
@@ -35,6 +35,7 @@ describe("incomplete todo snapshot helpers", () => {
 		expect(rows).toEqual([
 			{ phase: "Work", status: "pending", title: "do the thing" },
 			{ phase: "Work", status: "in_progress", title: "wire it" },
+			{ phase: "Work", status: "blocked", title: "blocked wait" },
 			{ phase: "Work", status: "abandoned", title: "model dropped" },
 			{ phase: "Later", status: "pending", title: "docs" },
 		]);
@@ -244,6 +245,19 @@ describe("getLatestTodoPhasesFromEntries reconstructs leftover todos after compa
 		const reconstructed = parseIncompleteTodosFromSummary(section ?? "");
 		expect(reconstructed[0]?.tasks).toHaveLength(INCOMPLETE_TODOS_SNAPSHOT_CAP + 5);
 		expect(getLatestTodoPhasesFromEntries([compaction("c1", null, section ?? "")])).toEqual(reconstructed);
+	});
+
+	it("round-trips CRLF and CR distinctly from LF in durable titles", () => {
+		const rows = [
+			{ phase: "Work", status: "pending" as const, title: "a\r\nb\rc\nd" },
+		];
+		const section = formatIncompleteTodosSection(rows);
+		expect(section).toContain("\\r\\n");
+		expect(section).toContain("\\r");
+		expect(section).toContain("\\n");
+		expect(parseIncompleteTodosFromSummary(section ?? "")).toEqual([
+			{ name: "Work", tasks: [{ content: "a\r\nb\rc\nd", status: "pending" }] },
+		]);
 	});
 
 	it("round-trips newline-bearing titles without injecting fake phase rows", () => {

@@ -6,7 +6,7 @@ const INCOMPLETE_TODOS_HEADING = "## Incomplete Todos";
 /** Exact h2, or the same heading with a trailing colon / extra text. */
 const INCOMPLETE_TODOS_HEADING_RE = /^## Incomplete Todos(?:[ \t]*:.*|[ \t]+.+)?[ \t]*$/m;
 
-export type IncompleteTodoStatus = "pending" | "in_progress" | "abandoned";
+export type IncompleteTodoStatus = "pending" | "in_progress" | "abandoned" | "blocked";
 
 export interface IncompleteTodoRow {
 	phase: string;
@@ -20,14 +20,19 @@ export interface CappedIncompleteTodos {
 }
 
 function isIncompleteTodoTask(task: TodoPhase["tasks"][number]): boolean {
-	if (task.status === "pending" || task.status === "in_progress") return true;
+	if (task.status === "pending" || task.status === "in_progress" || task.status === "blocked") return true;
 	// Model-abandoned rows stay incomplete at settle; user drops are intentional cancels.
 	return task.status === "abandoned" && task.droppedBy !== "user";
 }
 
 /** Escape title so a newline cannot inject fake phase/task markdown structure. */
 export function encodeIncompleteTodoTitle(title: string): string {
-	return title.replace(/\\/g, "\\\\").replace(/\r\n|\r|\n/g, "\\n");
+	// Encode CRLF / CR / LF distinctly so accepted strings round-trip exactly.
+	return title
+		.replace(/\\/g, "\\\\")
+		.replace(/\r\n/g, "\\r\\n")
+		.replace(/\r/g, "\\r")
+		.replace(/\n/g, "\\n");
 }
 
 /** Inverse of {@link encodeIncompleteTodoTitle}. */
@@ -36,6 +41,16 @@ export function decodeIncompleteTodoTitle(title: string): string {
 	for (let i = 0; i < title.length; i++) {
 		if (title[i] === "\\" && i + 1 < title.length) {
 			const next = title[i + 1];
+			if (next === "r" && title[i + 2] === "\\" && title[i + 3] === "n") {
+				out += "\r\n";
+				i += 3;
+				continue;
+			}
+			if (next === "r") {
+				out += "\r";
+				i++;
+				continue;
+			}
 			if (next === "n") {
 				out += "\n";
 				i++;
@@ -60,7 +75,14 @@ export function collectIncompleteTodoRows(phases: readonly TodoPhase[]): Incompl
 			if (!isIncompleteTodoTask(task)) continue;
 			rows.push({
 				phase: phase.name,
-				status: task.status === "abandoned" ? "abandoned" : task.status,
+				status:
+					task.status === "abandoned"
+						? "abandoned"
+						: task.status === "blocked"
+							? "blocked"
+							: task.status === "in_progress"
+								? "in_progress"
+								: "pending",
 				title: task.content,
 			});
 		}
@@ -167,7 +189,7 @@ function splitIncompleteTodosSection(summary: string): { before: string; body: s
 	};
 }
 
-const INCOMPLETE_TODO_TASK_RE = /^\s+- \[(pending|in_progress|abandoned)\] (.+)$/;
+const INCOMPLETE_TODO_TASK_RE = /^\s+- \[(pending|in_progress|abandoned|blocked)\] (.+)$/;
 const INCOMPLETE_TODO_PHASE_RE = /^- (.+)$/;
 const INCOMPLETE_TODO_OVERFLOW_RE = /^- \+ \d+ more$/;
 

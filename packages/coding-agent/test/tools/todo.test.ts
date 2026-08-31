@@ -505,6 +505,19 @@ describe("TodoTool operations", () => {
 		]);
 	});
 
+	it("preserves model-drop provenance when a phase is renamed in /todo edit", () => {
+		const prior: TodoPhase[] = [
+			{ name: "Old phase", tasks: [{ content: "model dropped", status: "abandoned" }] },
+		];
+		const { phases: parsed, errors } = markdownToPhases("# New phase\n- [-] model dropped\n");
+		expect(errors).toEqual([]);
+		const merged = applyUserMarkdownPhases(prior, parsed);
+		expect(merged[0]).toEqual({
+			name: "New phase",
+			tasks: [{ content: "model dropped", status: "abandoned" }],
+		});
+	});
+
 	it("keeps user droppedBy when the edit HTML comment is stripped", () => {
 		const prior: TodoPhase[] = [
 			{ name: "Work", tasks: [{ content: "ship it", status: "abandoned", droppedBy: "user" }] },

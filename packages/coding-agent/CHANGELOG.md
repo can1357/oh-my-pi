@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Incomplete-todo durable snapshots preserve blocked tasks, encode CRLF/CR/LF distinctly, and keep model-drop provenance across `/todo edit` phase renames.
+
 ### Added
 
 - Added provider-reported credits and concrete routed-model counts to `/session` statistics ([#8590](https://github.com/can1357/oh-my-pi/pull/8590) by [@will-bogusz](https://github.com/will-bogusz)).

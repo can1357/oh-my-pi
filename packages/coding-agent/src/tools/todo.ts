@@ -896,8 +896,20 @@ function takePriorOccurrence(
 	content: string,
 ): TodoItem | undefined {
 	const list = queues.get(phaseName)?.get(content);
-	if (!list || list.length === 0) return undefined;
-	return list.shift();
+	if (list && list.length > 0) return list.shift();
+	return undefined;
+}
+
+/** Content-only FIFO across all phases — used when a phase was renamed/moved. */
+function takePriorOccurrenceAnyPhase(
+	queues: Map<string, Map<string, TodoItem[]>>,
+	content: string,
+): TodoItem | undefined {
+	for (const byContent of queues.values()) {
+		const list = byContent.get(content);
+		if (list && list.length > 0) return list.shift();
+	}
+	return undefined;
 }
 
 /**
@@ -911,6 +923,8 @@ function takePriorOccurrence(
  *
  * Matching is by phase name + content occurrence order (not a last-content-wins
  * map), so duplicate texts with different provenance keep their stamps on a no-op edit.
+ * When a phase is renamed/moved, fall back to content-only matching so model-drop
+ * provenance is not rewritten as `droppedBy: "user"`.
  */
 export function applyUserMarkdownPhases(prior: TodoPhase[], parsed: TodoPhase[]): TodoPhase[] {
 	const { queues, empty } = buildPriorOccurrenceLookup(prior);
@@ -921,7 +935,8 @@ export function applyUserMarkdownPhases(prior: TodoPhase[], parsed: TodoPhase[])
 			const next = cloneTask(task);
 			// Consume FIFO for every status so a leading non-abandoned duplicate
 			// does not leave a later model-abandoned sibling matched against it.
-			const prev = takePriorOccurrence(queues, phase.name, next.content);
+			let prev = takePriorOccurrence(queues, phase.name, next.content);
+			if (!prev) prev = takePriorOccurrenceAnyPhase(queues, next.content);
 			if (next.status !== "abandoned") return next;
 			if (shouldStampAbandonedAsUser(prev, empty, next)) {
 				next.droppedBy = "user";
@@ -943,7 +958,8 @@ export function applyRpcTodoProvenance(prior: TodoPhase[], incoming: TodoPhase[]
 		...phase,
 		tasks: phase.tasks.map(task => {
 			// Same FIFO consume-all-statuses rule as applyUserMarkdownPhases.
-			const prev = takePriorOccurrence(queues, phase.name, task.content);
+			let prev = takePriorOccurrence(queues, phase.name, task.content);
+			if (!prev) prev = takePriorOccurrenceAnyPhase(queues, task.content);
 			if (task.status !== "abandoned") return task;
 			if (!shouldStampAbandonedAsUser(prev, empty, task)) return task;
 			return { ...task, droppedBy: "user" as const };
