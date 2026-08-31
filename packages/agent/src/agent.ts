@@ -373,7 +373,7 @@ export class Agent {
 	#transformProviderContext?: (context: Context, model: Model) => Context | Promise<Context>;
 	#steeringQueue: AgentMessage[] = [];
 	#followUpQueue: AgentMessage[] = [];
-	#steeringWaiters = new Set<() => void>();
+	#steeringWaiters = new Set<{ immediateOnly: boolean; resolve: () => void }>();
 
 	#steeringMode: "all" | "one-at-a-time";
 	#followUpMode: "all" | "one-at-a-time";
@@ -994,7 +994,7 @@ export class Agent {
 	 */
 	steer(m: AgentMessage) {
 		this.#steeringQueue.push(m);
-		this.#notifySteeringWaiters();
+		this.#notifySteeringWaiters(this.#isImmediateSteering(m));
 	}
 
 	/**
@@ -1109,26 +1109,35 @@ export class Agent {
 	}
 
 	/**
-	 * Wait for a steering message without consuming the steering queue.
-	 *
-	 * The signal releases the waiter when the prompt ends, so an in-flight
-	 * tool watcher never survives the tool batch that owns it.
+	 * Wait for steering that can interrupt the active batch without consuming it.
+	 * Global wait mode ignores ordinary queued steering and wakes only for a
+	 * message carrying the per-message immediate override.
 	 */
+	#isImmediateSteering(message: AgentMessage): boolean {
+		return (
+			(message as AgentMessage & { [STEERING_MESSAGE_IMMEDIATE]?: boolean })[STEERING_MESSAGE_IMMEDIATE] === true
+		);
+	}
+
 	#waitForSteeringMessages(signal?: AbortSignal): Promise<void> {
-		if (this.#steeringQueue.length > 0 || signal?.aborted) return Promise.resolve();
+		if (this.#steeringQueue.some(message => this.#isImmediateSteering(message)) || signal?.aborted) {
+			return Promise.resolve();
+		}
 		const { promise, resolve } = Promise.withResolvers<void>();
+		const waiter = { immediateOnly: this.#interruptMode === "wait", resolve };
 		const onAbort = (): void => resolve();
-		this.#steeringWaiters.add(resolve);
+		this.#steeringWaiters.add(waiter);
 		signal?.addEventListener("abort", onAbort, { once: true });
 		return promise.finally(() => {
-			this.#steeringWaiters.delete(resolve);
+			this.#steeringWaiters.delete(waiter);
 			signal?.removeEventListener("abort", onAbort);
 		});
 	}
 
-	#notifySteeringWaiters(): void {
-		const waiters = [...this.#steeringWaiters];
-		for (const resolve of waiters) resolve();
+	#notifySteeringWaiters(immediate = true): void {
+		for (const waiter of [...this.#steeringWaiters]) {
+			if (!waiter.immediateOnly || immediate) waiter.resolve();
+		}
 	}
 
 	reset() {
@@ -1492,31 +1501,22 @@ export class Agent {
 				return this.#dequeueSteeringMessagesAfterHooks(signal);
 			},
 			hasSteeringMessages: () => {
-				if (this.#steeringQueue.length === 0) {
-					return { queued: false };
-				}
+				if (this.#steeringQueue.length === 0) return { queued: false };
 				const messageCount = this.#steeringMode === "one-at-a-time" ? 1 : this.#steeringQueue.length;
 				let hasAgentSteering = false;
+				let hasUserSteering = false;
 				let hasImmediateSteering = false;
 				for (let i = 0; i < messageCount; i++) {
 					const message = this.#steeringQueue[i];
-					if ((message as AgentMessage & { [STEERING_MESSAGE_IMMEDIATE]?: boolean })[STEERING_MESSAGE_IMMEDIATE]) {
-						hasImmediateSteering = true;
-					}
+					if (this.#isImmediateSteering(message)) hasImmediateSteering = true;
 					const role = "role" in message ? message.role : undefined;
 					const attribution = "attribution" in message ? message.attribution : undefined;
-					if (attribution === "user") {
-						return { queued: true, source: "user", immediate: hasImmediateSteering };
-					}
-					if (role !== "user") continue;
-					if (attribution !== "agent") {
-						return { queued: true, source: "user", immediate: hasImmediateSteering };
-					}
-					hasAgentSteering = true;
+					if (attribution === "user" || (role === "user" && attribution !== "agent")) hasUserSteering = true;
+					else if (role === "user" && attribution === "agent") hasAgentSteering = true;
 				}
 				return {
 					queued: true,
-					source: hasAgentSteering ? "agent" : "system",
+					source: hasUserSteering ? "user" : hasAgentSteering ? "agent" : "system",
 					immediate: hasImmediateSteering,
 				};
 			},

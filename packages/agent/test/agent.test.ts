@@ -1,6 +1,14 @@
 import { describe, expect, it } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
-import { Agent, AgentBusyError, type AgentEvent, type AgentTool, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
+import {
+	Agent,
+	AgentBusyError,
+	type AgentEvent,
+	type AgentMessage,
+	type AgentTool,
+	STEERING_MESSAGE_IMMEDIATE,
+	ThinkingLevel,
+} from "@oh-my-pi/pi-agent-core";
 import type { SimpleStreamOptions, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { kCursorExecResolved } from "@oh-my-pi/pi-ai/utils/block-symbols";
@@ -151,6 +159,90 @@ describe("Agent", () => {
 		if (skippedContent?.type !== "text") throw new Error("skipped tool result must be text");
 		expect(skippedContent.text).toContain("Skipped due to queued user message");
 		expect(skippedContent.text).not.toContain("pending system advisory");
+	});
+
+	it("finds an immediate advisor steer behind ordinary steering in all mode", async () => {
+		const toolSchema = type({ value: type("string") });
+		const executed: string[] = [];
+		let agent: Agent;
+		const tool: AgentTool<typeof toolSchema, { value: string }> = {
+			name: "echo",
+			label: "Echo",
+			description: "Echo tool",
+			parameters: toolSchema,
+			concurrency: "exclusive",
+			async execute(_toolCallId, params) {
+				executed.push(params.value);
+				if (params.value === "first") {
+					agent.steer(createUserMessage("ordinary steer"));
+					const advisor = createUserMessage("immediate advisor") as AgentMessage & {
+						[STEERING_MESSAGE_IMMEDIATE]?: boolean;
+					};
+					advisor[STEERING_MESSAGE_IMMEDIATE] = true;
+					agent.steer(advisor);
+				}
+				return { content: [{ type: "text", text: params.value }], details: params };
+			},
+		};
+		const mock = createMockModel({
+			responses: [
+				{
+					content: [
+						{ type: "toolCall", id: "tool-1", name: "echo", arguments: { value: "first" } },
+						{ type: "toolCall", id: "tool-2", name: "echo", arguments: { value: "second" } },
+					],
+				},
+				{ content: ["done"] },
+			],
+		});
+		agent = new Agent({
+			initialState: { model: mock.model, systemPrompt: ["Test"], tools: [tool], messages: [] },
+			streamFn: mock.stream,
+			steeringMode: "all",
+			interruptMode: "wait",
+		});
+
+		await agent.prompt("start");
+
+		expect(executed).toEqual(["first"]);
+	});
+
+	it("global wait mode does not spin on an ordinary queued steer", async () => {
+		const toolSchema = type({});
+		const release = Promise.withResolvers<void>();
+		let started = false;
+		let agent: Agent;
+		const tool: AgentTool<typeof toolSchema, Record<string, never>> = {
+			name: "wait",
+			label: "Wait",
+			description: "Wait tool",
+			parameters: toolSchema,
+			async execute() {
+				started = true;
+				agent.steer(createUserMessage("ordinary steer"));
+				await release.promise;
+				return { content: [{ type: "text", text: "done" }], details: {} };
+			},
+		};
+		const mock = createMockModel({
+			responses: [
+				{ content: [{ type: "toolCall", id: "tool-1", name: "wait", arguments: {} }] },
+				{ content: ["done"] },
+			],
+		});
+		agent = new Agent({
+			initialState: { model: mock.model, systemPrompt: ["Test"], tools: [tool], messages: [] },
+			streamFn: mock.stream,
+			interruptMode: "wait",
+		});
+
+		const running = agent.prompt("start");
+		while (!started) await Bun.sleep(0);
+		await Bun.sleep(10);
+		release.resolve();
+		await running;
+
+		expect(agent.peekSteeringQueue()).toEqual([]);
 	});
 	it("continue() re-executes a trailing assistant's unpaired tool calls before the next model call", async () => {
 		const toolSchema = type({ value: type("string") });
