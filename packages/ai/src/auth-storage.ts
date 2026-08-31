@@ -119,18 +119,26 @@ function identityFieldMap(fingerprint: string): Map<string, string> {
 	return fields;
 }
 
-/** True when every old field is still present with the same value (new fields only). */
+/**
+ * True when fingerprints do not conflict: shared keys match, and keys present
+ * on only one side are inconclusive (enrichment or temporary field omission).
+ */
 function isConservativeIdentityEnrichment(oldFingerprint: string, newFingerprint: string): boolean {
 	const oldFields = identityFieldMap(oldFingerprint);
 	const newFields = identityFieldMap(newFingerprint);
 	for (const [key, value] of oldFields) {
-		if (newFields.get(key) !== value) return false;
+		const next = newFields.get(key);
+		if (next !== undefined && next !== value) return false;
 	}
 	return true;
 }
 
 function turnReservationKey(credentialId: number, incarnation: number): string {
 	return `${credentialId}:${incarnation}`;
+}
+
+function anonymousProbeRequestKey(credentialId: number, blockScope: string): string {
+	return `anon-probe:${credentialId}:${blockScope}`;
 }
 
 const WORKSPACE_DEACTIVATED_PATTERN = /\bdeactivated_workspace\b|\bdeactivated[_ ](?:org|organization|workspace)\b/i;
@@ -2062,6 +2070,7 @@ export class AuthStorage {
 		this.#credentialBackoff.set(backoffKey, backoffMap);
 		const probeAfterMap = this.#credentialBackoffProbeAfter.get(backoffKey) ?? new Map<number, number>();
 		probeAfterMap.set(credentialIndex, Math.min(nextBlockedUntil, Date.now() + USAGE_REPORT_TTL_MS));
+		this.#credentialBackoffProbeAfter.set(backoffKey, probeAfterMap);
 		this.#invalidateUsageReportCache(provider);
 
 		const credentialId = this.#getStoredCredentials(provider)[credentialIndex]?.id;
@@ -4861,6 +4870,19 @@ export class AuthStorage {
 		return this.recordQuotaProbeSuccess(probe.credentialId, probe.blockScope, probe.leaseId);
 	}
 
+	clearAnonymousQuotaProbe(credentialId: number, blockScope: string): void {
+		const key = anonymousProbeRequestKey(credentialId, blockScope);
+		if (!this.#inflightProbes.has(key)) return;
+		this.clearQuotaProbe(key);
+	}
+
+	settleAnonymousQuotaProbe(credentialId: number, blockScope: string): boolean {
+		const key = anonymousProbeRequestKey(credentialId, blockScope);
+		if (!this.#inflightProbes.has(key)) return false;
+		return this.settleQuotaProbeSuccess(key);
+	}
+
+
 	#resolveWindowResetAt(window: UsageLimit["window"]): number | undefined {
 		if (!window) return undefined;
 		if (typeof window.resetsAt === "number" && Number.isFinite(window.resetsAt)) {
@@ -5699,24 +5721,21 @@ export class AuthStorage {
 			const probeScope = blockScope ?? "";
 			const lease = this.tryAcquireQuotaProbeLease(blockedId, probeScope);
 			if (!lease) return undefined;
+			const probeRequestKey = options?.requestId ?? anonymousProbeRequestKey(blockedId, probeScope);
+			this.#inflightProbes.set(probeRequestKey, {
+				credentialId: blockedId,
+				blockScope: probeScope,
+				leaseId: lease,
+			});
+			// Exclusive turn reservation only for cooldown probes — normal OAuth
+			// selections must remain concurrently usable across request ids.
 			if (options?.requestId) {
-				this.#inflightProbes.set(options.requestId, {
-					credentialId: blockedId,
-					blockScope: probeScope,
-					leaseId: lease,
-				});
-			}
-		}
-		if (options?.requestId) {
-			const reserveId = this.#getStoredCredentials(provider)[selection.index]?.id;
-			if (reserveId !== undefined) {
 				const acquired = this.tryAcquireTurnReservation({
-					credentialId: reserveId,
-					incarnation: this.getCredentialIncarnation(reserveId),
+					credentialId: blockedId,
+					incarnation: this.getCredentialIncarnation(blockedId),
 					requestId: options.requestId,
 				});
 				if (!acquired.ok) {
-					// Probe may already be recorded; drop it without treating as success.
 					this.clearQuotaProbe(options.requestId);
 					return undefined;
 				}
@@ -5908,8 +5927,17 @@ export class AuthStorage {
 
 			return undefined;
 		} finally {
-			if (!keepReservation && options?.requestId) {
-				this.releaseTurnReservation(options.requestId);
+			const finishId = this.#getStoredCredentials(provider)[selection.index]?.id;
+			const finishScope = blockScope ?? "";
+			if (!keepReservation) {
+				if (options?.requestId) {
+					this.releaseTurnReservation(options.requestId);
+					this.clearQuotaProbe(options.requestId);
+				} else if (finishId !== undefined) {
+					this.clearAnonymousQuotaProbe(finishId, finishScope);
+				}
+			} else if (!options?.requestId && finishId !== undefined) {
+				this.settleAnonymousQuotaProbe(finishId, finishScope);
 			}
 		}
 	}

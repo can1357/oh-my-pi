@@ -207,6 +207,31 @@ describe("auth-gateway classifyGatewayError", () => {
 		expect(c.owner).toBe("provider");
 		expect(c.disposition).toBe("provider_unavailable");
 	});
+
+	it("maps status-less cyber_policy wording to policy_terminal before synthetic 502", () => {
+		const result = classifyGatewayError(
+			"Codex error event: This content was flagged for possible cybersecurity risk. Join Trusted Access for Cyber. (code=cyber_policy)",
+		);
+		expect(result.disposition).toBe("policy_terminal");
+		expect(result.owner).toBe("policy");
+	});
+
+	it("maps model-does-not-exist wording to model_unavailable", () => {
+		const result = classifyGatewayError(
+			Object.assign(new Error("The model does not exist or you do not have access to it."), { status: 404 }),
+		);
+		expect(result.disposition).toBe("model_unavailable");
+		expect(result.owner).toBe("model");
+	});
+
+	it("maps 400 model-not-supported wording to model_unavailable", () => {
+		const result = classifyGatewayError(
+			Object.assign(new Error("The requested model is not supported"), { status: 400 }),
+		);
+		expect(result.disposition).toBe("model_unavailable");
+		expect(result.owner).toBe("model");
+	});
+
 });
 
 describe("classifyGatewayError authoritative-status precedence", () => {
