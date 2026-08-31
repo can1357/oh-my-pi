@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { buildZedProviderRequest, streamZed } from "../src/providers/zed";
 import { invalidateZedLlmToken } from "../src/registry/oauth/zed-token-pool";
 import type {
@@ -7,6 +8,7 @@ import type {
 	Context,
 	FetchImpl,
 	Model,
+	ModelSpec,
 	ProviderResponseMetadata,
 	ToolChoice,
 	ToolResultMessage,
@@ -15,8 +17,8 @@ import { mockFetch } from "./helpers/fetch-mock";
 
 const zeroCost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
 
-function makeModel(id: string, reasoning = false): Model<"zed-agent"> {
-	return {
+function makeModel(id: string, reasoning = false, cost: ModelSpec<"zed-agent">["cost"] = zeroCost): Model<"zed-agent"> {
+	return buildModel({
 		id,
 		name: id,
 		api: "zed-agent",
@@ -26,9 +28,8 @@ function makeModel(id: string, reasoning = false): Model<"zed-agent"> {
 		contextWindow: 1_000_000,
 		maxTokens: 66_000,
 		input: ["text", "image"],
-		cost: zeroCost,
-		compat: undefined,
-	};
+		cost,
+	});
 }
 
 function ndjsonResponse(frames: unknown[], init: { status?: number; headers?: Record<string, string> } = {}): Response {
@@ -621,10 +622,12 @@ describe("Zed provider protocol regressions", () => {
 	});
 
 	it("reads nested xAI cached-token usage before completing the stream", async () => {
-		const model: Model<"zed-agent"> = {
-			...makeModel("grok-4.6"),
-			cost: { input: 1, output: 2, cacheRead: 0.25, cacheWrite: 0 },
-		};
+		const model: Model<"zed-agent"> = makeModel("grok-4.6", false, {
+			input: 1,
+			output: 2,
+			cacheRead: 0.25,
+			cacheWrite: 0,
+		});
 		const run = await runZedStream(model, [
 			{ event: { choices: [{ delta: { content: "answer" } }] } },
 			{ event: { choices: [{ delta: {}, finish_reason: "stop" }] } },
@@ -653,10 +656,12 @@ describe("Zed provider protocol regressions", () => {
 	});
 
 	it("reads nested OpenAI cached-token usage before completing the stream", async () => {
-		const model: Model<"zed-agent"> = {
-			...makeModel("gpt-5.6-luna"),
-			cost: { input: 1, output: 2, cacheRead: 0.25, cacheWrite: 0 },
-		};
+		const model: Model<"zed-agent"> = makeModel("gpt-5.6-luna", false, {
+			input: 1,
+			output: 2,
+			cacheRead: 0.25,
+			cacheWrite: 0,
+		});
 		const run = await runZedStream(model, [
 			{
 				event: {

@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -6,8 +6,10 @@ import { streamSimple } from "@oh-my-pi/pi-ai";
 import { withAuth } from "@oh-my-pi/pi-ai/auth-retry";
 import type { Api, Context, FetchImpl, Model } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { resolveConfigValue } from "@oh-my-pi/pi-coding-agent/config/model-config-values";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import * as piUtils from "@oh-my-pi/pi-utils";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 
 function shellQuote(value: string): string {
@@ -83,6 +85,15 @@ function refreshGateFetch(seen: Array<{ auth?: string; tenant?: string }>): Fetc
 }
 
 describe("ModelRegistry command-resolved models.yml values", () => {
+	test("does not run a command-backed value outside an enterable project", () => {
+		const enterable = spyOn(piUtils, "directoryIsEnterableSync").mockReturnValue(false);
+		try {
+			expect(resolveConfigValue("!printf %s home-secret")).toBeUndefined();
+		} finally {
+			enterable.mockRestore();
+		}
+	});
+
 	let tempDir = "";
 	let authStorage: AuthStorage;
 	let modelsPath = "";

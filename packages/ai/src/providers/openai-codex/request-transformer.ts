@@ -1,5 +1,4 @@
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
-import { supportsAllTurnsReasoningContext, supportsCodexReasoningSummary } from "@oh-my-pi/pi-catalog/identity";
 import { requireSupportedEffort } from "@oh-my-pi/pi-catalog/model-thinking";
 import { $env } from "@oh-my-pi/pi-utils";
 import type { Model } from "../../types";
@@ -169,12 +168,11 @@ function getReasoningConfig(
 	// `undefined` means "default on" — matching `applyResponsesCompatPolicy`
 	// on the plain Responses path — and only an explicit `null` (the caller
 	// hiding thinking) opts out.
-	if (options.reasoningSummary !== null && supportsCodexReasoningSummary(model.id)) {
+	if (options.reasoningSummary !== null && model.compat.supportsReasoningSummary) {
 		config.summary = options.reasoningSummary ?? "auto";
 	}
 	return config;
 }
-
 function filterInput(input: InputItem[] | undefined): InputItem[] | undefined {
 	if (!Array.isArray(input)) return input;
 
@@ -471,7 +469,7 @@ export async function transformRequestBody(
 		if (responsesLite) {
 			body.reasoning.context = "all_turns";
 		} else if (options.reasoningContext !== undefined) {
-			if (options.reasoningContext === "all_turns" && !supportsAllTurnsReasoningContext(model.id)) {
+			if (options.reasoningContext === "all_turns" && !model.compat.supportsAllTurnsReasoningContext) {
 				delete body.reasoning.context;
 			} else {
 				body.reasoning.context = options.reasoningContext;

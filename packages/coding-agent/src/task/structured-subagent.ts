@@ -427,6 +427,7 @@ function buildExecutorOptions(
 		keepAlive: request.keepAlive,
 		signal: request.signal,
 		eventBus: session.eventBus,
+		subagentEventBus: session.subagentEventBus,
 		onProgress: request.onProgress,
 		authStorage: session.authStorage,
 		modelRegistry: session.modelRegistry,

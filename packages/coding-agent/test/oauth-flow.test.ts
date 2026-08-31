@@ -84,6 +84,61 @@ describe("mcp oauth flow", () => {
 		expect(authUrl.searchParams.get("state")).toBe("test-state");
 	});
 
+	it("uses the issuer rather than the authorization endpoint to discover DCR metadata", async () => {
+		const calls: string[] = [];
+		const fetchImpl: FetchImpl = async input => {
+			const url = String(input);
+			calls.push(url);
+
+			if (url === "https://auth.example.com/auth/realms/myrealm/.well-known/oauth-authorization-server") {
+				return new Response(
+					JSON.stringify({
+						registration_endpoint:
+							"https://auth.example.com/auth/realms/myrealm/clients-registrations/openid-connect",
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}
+			if (url === "https://auth.example.com/auth/realms/myrealm/clients-registrations/openid-connect") {
+				return new Response(JSON.stringify({ client_id: "registered-client-id" }), {
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				});
+			}
+			return new Response("not found", { status: 404 });
+		};
+
+		const flow = new MCPOAuthFlow(
+			{
+				authorizationUrl: "https://auth.example.com/auth/realms/myrealm/protocol/openid-connect/auth",
+				tokenUrl: "https://auth.example.com/auth/realms/myrealm/protocol/openid-connect/token",
+				issuerUrl: "https://auth.example.com/auth/realms/myrealm",
+				fetch: fetchImpl,
+			},
+			{},
+		);
+
+		const { url } = await flow.generateAuthUrl("test-state", "http://127.0.0.1:53175/callback");
+
+		expect(new URL(url).searchParams.get("client_id")).toBe("registered-client-id");
+		expect(calls).toContain("https://auth.example.com/auth/realms/myrealm/.well-known/oauth-authorization-server");
+	});
+
+	it("removes a whitespace-only embedded client id before authorization", async () => {
+		const flow = new MCPOAuthFlow(
+			{
+				authorizationUrl: "https://provider.example/authorize?client_id=%20%09",
+				tokenUrl: "https://provider.example/token",
+				fetch: async () => new Response("not found", { status: 404 }),
+			},
+			{},
+		);
+
+		const { url } = await flow.generateAuthUrl("test-state", "http://127.0.0.1:53174/callback");
+
+		expect(new URL(url).searchParams.get("client_id")).toBeNull();
+	});
+
 	it("includes discovered scopes in dynamic client registration", async () => {
 		let registrationPayload: Record<string, unknown> | null = null;
 		const scopes = "openid profile email offline_access";
@@ -868,6 +923,17 @@ describe("mcp oauth flow", () => {
 
 		expect(tokenParams.get("grant_type")).toBe("refresh_token");
 		expect(tokenParams.get("resource")).toBeNull();
+	});
+	it("omits a whitespace-only client id from token refresh", async () => {
+		let tokenRequestBody = "";
+
+		await refreshMCPOAuthToken("https://provider.example/token", "refresh-token", " \t ", undefined, {
+			fetch: mockProviderTokenEndpoint(body => {
+				tokenRequestBody = body;
+			}),
+		});
+
+		expect(new URLSearchParams(tokenRequestBody).has("client_id")).toBe(false);
 	});
 	describe("RFC 8707 resource indicator", () => {
 		// Provider-advertised resource indicators are authoritative, including

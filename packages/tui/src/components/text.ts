@@ -46,6 +46,17 @@ export class Text implements Component {
 		this.#paddingY = paddingY;
 		this.#customBgFn = customBgFn;
 	}
+	/** Return bounded text and layout state for debug inspection. */
+	debugState(): Record<string, unknown> {
+		return {
+			textPreview: this.#text.slice(0, 120),
+			textLength: this.#text.length,
+			previewTruncated: this.#text.length > 120,
+			paddingX: this.#paddingX,
+			paddingY: this.#paddingY,
+			ignoreTight: this.#ignoreTight,
+		};
+	}
 
 	getText(): string {
 		return this.#text;

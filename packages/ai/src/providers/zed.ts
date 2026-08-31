@@ -1,6 +1,6 @@
 import * as crypto from "node:crypto";
+import { supportsAnthropicSampling } from "@oh-my-pi/pi-catalog/compat/resolve";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
-import { hasOpus47ApiRestrictions } from "@oh-my-pi/pi-catalog/identity";
 import { mapEffortToGoogleThinkingLevel } from "@oh-my-pi/pi-catalog/model-thinking";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import { parseZedCredentials, ZED_APP_VERSION, ZED_CLOUD_URL, ZED_HEADERS } from "@oh-my-pi/pi-catalog/wire/zed";
@@ -309,7 +309,7 @@ function mapContextToAnthropic(context: Context, model: Model<"zed-agent">, opti
 		}
 	}
 
-	const allowSamplingParams = !isReasoning && !hasOpus47ApiRestrictions(model.id);
+	const allowSamplingParams = supportsAnthropicSampling(model.identity) && !isReasoning;
 	if (allowSamplingParams) {
 		if (options?.temperature !== undefined) {
 			body.temperature = options.temperature;

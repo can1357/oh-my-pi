@@ -221,6 +221,10 @@ describe("openai-completions compatibility", () => {
 			emptyLengthFinishIsContextError: false,
 			usesOpenAIToolCallIdLimit: false,
 			dropThinkingWhenReasoningEffort: false,
+			nativeKimiK3Reasoning: false,
+			zaiReasoningEffortDialect: false,
+			clampOutputToModelMax: false,
+			stripImageInput: false,
 		} satisfies ResolvedOpenAICompat;
 		const assistantMessage: AssistantMessage = {
 			role: "assistant",

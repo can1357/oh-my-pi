@@ -3307,7 +3307,7 @@ function buildParams(
 	const { cacheControl } = getCacheControl(model, options?.cacheRetention);
 
 	// Pre-compute system blocks so they occupy the right slot in the serialized body.
-	const shouldInjectClaudeCodeInstruction = isOAuthToken && !model.id.startsWith("claude-3-5-haiku");
+	const shouldInjectClaudeCodeInstruction = isOAuthToken && model.compat.injectClaudeCodeInstruction !== false;
 	const firstUserMessageText = shouldInjectClaudeCodeInstruction
 		? extractClaudeCodeFirstUserMessageText(context.messages)
 		: "";

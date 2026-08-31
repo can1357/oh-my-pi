@@ -8,7 +8,16 @@ import {
 	SqliteAuthCredentialStore,
 	type StoredAuthCredential,
 } from "@oh-my-pi/pi-ai";
-import { AsyncDrain, getAgentDbPath, getDbBusyTimeoutMs, getStatsDbPath, isRecord, logger } from "@oh-my-pi/pi-utils";
+import {
+	AsyncDrain,
+	checkpointWal,
+	getAgentDbPath,
+	getDbBusyTimeoutMs,
+	getStatsDbPath,
+	isRecord,
+	logger,
+	postmortem,
+} from "@oh-my-pi/pi-utils";
 import type { RawSettings as Settings } from "../config/settings";
 
 /** Row shape for settings table queries */
@@ -121,6 +130,7 @@ const SQLITE_NOW_EPOCH = "CAST(strftime('%s','now') AS INTEGER)";
 
 /** Singleton instances per database path */
 const instances = new Map<string, AgentStorage>();
+let cancelExitCleanup: (() => void) | undefined;
 
 /**
  * Unified SQLite storage for agent settings, model usage, and auth credentials.
@@ -145,6 +155,7 @@ export class AgentStorage {
 	#perfBackfillChecked = false;
 	/** Coalesces per-turn perf samples into one deferred transaction off the turn's hot path. */
 	#perfDrain = new AsyncDrain<ModelPerfInsert>(MODEL_PERF_FLUSH_DELAY_MS);
+	#closing = false;
 
 	private constructor(dbPath: string) {
 		this.#autoPerfBackfill = dbPath === getAgentDbPath();
@@ -384,6 +395,11 @@ FROM model_usage_legacy
 		for (let attempt = 0; attempt < maxRetries; attempt++) {
 			try {
 				const storage = new AgentStorage(dbPath);
+				// Exit-only: a keep-alive cleanup leaves the open handle valid for the
+				// continuing process (Settings, MCP cache, callers hold it); the real
+				// exit closes. Register before publishing so a real-exit-in-progress
+				// late registration sees an empty map.
+				cancelExitCleanup ??= postmortem.register("agent-storage", () => AgentStorage.close(), { exitOnly: true });
 				instances.set(dbPath, storage);
 				return storage;
 			} catch (err) {
@@ -402,13 +418,21 @@ FROM model_usage_legacy
 			{ cause: lastError },
 		);
 	}
-	/** @internal Reset all singletons and close their databases — test-only. */
-	static resetInstance(): void {
+
+	/** Flushes deferred writes, closes every process-wide database, and permits reopening them. */
+	static close(): void {
 		for (const storage of instances.values()) storage.#close();
 		instances.clear();
+		cancelExitCleanup?.();
+		cancelExitCleanup = undefined;
 	}
 
 	#close(): void {
+		this.#closing = true;
+		// Model-performance batches are synchronous once invoked, so this
+		// persists them before finalizing their statements during process exit.
+		void this.#perfDrain.flush();
+		checkpointWal(this.#db);
 		this.#listSettingsStmt.finalize();
 		this.#upsertModelUsageStmt.finalize();
 		this.#listModelUsageStmt.finalize();
@@ -524,10 +548,9 @@ FROM model_usage_legacy
 	}
 
 	#flushModelPerf(rows: ModelPerfInsert[]): void {
-		// Kick the one-time history import too, so aggregates populate even if
-		// the user never opens /models. Additive merge makes ordering with live
-		// samples irrelevant.
-		this.#kickModelPerfBackfill();
+		// A close-triggered flush must persist only the queued live batch. Starting
+		// the async stats import here could commit aggregates without its marker.
+		if (!this.#closing) this.#kickModelPerfBackfill();
 		try {
 			this.#db.transaction((batch: ModelPerfInsert[]) => {
 				for (const row of batch) this.#foldModelPerf(row);

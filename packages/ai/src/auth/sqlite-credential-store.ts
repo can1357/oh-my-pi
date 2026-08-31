@@ -8,6 +8,7 @@ import { Database, type Statement } from "bun:sqlite";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { parseAlibabaTokenPlanCredential } from "@oh-my-pi/pi-catalog/wire/alibaba-token-plan";
+import { parseCloudflareAiGatewayCredential } from "@oh-my-pi/pi-catalog/wire/cloudflare-ai-gateway";
 import {
 	getAgentDbPath,
 	getDbBusyTimeoutMs,
@@ -215,10 +216,17 @@ function matchesReplacementCredential(
 	if (incoming.type === "api_key") {
 		if (existing.type !== "api_key") return false;
 		if (existing.key === incoming.key) return true;
-		if (provider !== "alibaba-token-plan") return false;
-		const existingToken = parseAlibabaTokenPlanCredential(existing.key)?.token;
-		const incomingToken = parseAlibabaTokenPlanCredential(incoming.key)?.token;
-		return existingToken !== undefined && existingToken === incomingToken;
+		if (provider === "alibaba-token-plan") {
+			const existingToken = parseAlibabaTokenPlanCredential(existing.key)?.token;
+			const incomingToken = parseAlibabaTokenPlanCredential(incoming.key)?.token;
+			return existingToken !== undefined && existingToken === incomingToken;
+		}
+		if (provider === "cloudflare-ai-gateway") {
+			const existingToken = parseCloudflareAiGatewayCredential(existing.key)?.token;
+			const incomingToken = parseCloudflareAiGatewayCredential(incoming.key)?.token;
+			return existingToken !== undefined && existingToken === incomingToken;
+		}
+		return false;
 	}
 	const incomingIdentifiers = extractOAuthCredentialIdentifiers(incoming);
 	const incomingIdentityKey = resolveProviderCredentialIdentityKey(provider, incomingIdentifiers);

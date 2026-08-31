@@ -6,7 +6,7 @@
  */
 import { type } from "@oh-my-pi/omptype";
 import type { FetchImpl, Provider } from "./types";
-export type UsageUnit = "percent" | "tokens" | "requests" | "usd" | "minutes" | "bytes" | "unknown";
+export type UsageUnit = "percent" | "tokens" | "requests" | "credits" | "usd" | "minutes" | "bytes" | "unknown";
 
 export type UsageStatus = "ok" | "warning" | "exhausted" | "unknown";
 
@@ -240,7 +240,9 @@ export interface ClientUsageSummary {
 
 // ─── Zod schemas (wire-shape validation for the broker `/v1/usage` endpoint) ─
 
-export const usageUnitSchema = type("'percent' | 'tokens' | 'requests' | 'usd' | 'minutes' | 'bytes' | 'unknown'");
+export const usageUnitSchema = type(
+	"'percent' | 'tokens' | 'requests' | 'credits' | 'usd' | 'minutes' | 'bytes' | 'unknown'",
+);
 export const usageStatusSchema = type("'ok' | 'warning' | 'exhausted' | 'unknown'");
 
 export const usageWindowSchema = type({
@@ -412,6 +414,14 @@ export interface CredentialRankingStrategy {
 		primaryMs: number;
 		secondaryMs: number;
 	};
-	/** Optional: priority boost for specific credential states (e.g., fresh 5h ticker start). */
-	hasPriorityBoost?(primary: UsageLimit | undefined): boolean;
+	/**
+	 * Optional: priority boost for specific credential states (e.g., fresh 5h
+	 * ticker start). `primaryUncapped` is true only when the fetched report has
+	 * an applicable secondary window but no applicable primary window.
+	 */
+	hasPriorityBoost?(
+		primary: UsageLimit | undefined,
+		primaryUncapped?: boolean,
+		context?: CredentialRankingContext,
+	): boolean;
 }

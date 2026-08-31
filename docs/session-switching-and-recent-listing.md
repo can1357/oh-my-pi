@@ -105,11 +105,11 @@ No match throws `Session "..." not found.`.
 Handled after initial session-manager construction:
 
 1. list current-folder sessions with `SessionManager.list(cwd, parsed.sessionDir)`
-2. if empty, probe `SessionManager.listAll()` only to distinguish globally empty state and preload the Tab scope; the picker still opens in current-folder scope
+2. if empty, probe `SessionManager.listAll()` only to distinguish globally empty state and preload the Tab scope; the picker itself never auto-switches into all-projects scope (issue #3099)
 3. if both lists are empty, print `No sessions found` and exit
 4. open the fullscreen TUI picker (`selectSession`)
 5. if canceled, print `No session selected` and exit
-6. on selection, switch process/project-scoped state to the session's cwd, then `SessionManager.open(selected.path)`
+6. on selection, `SessionManager.open(selected.path)`, then switch process/project-scoped state to the session's cwd (`switchToResumedProject`: `setProjectDir`, plugin-cache resets, settings reload) and re-resolve scoped models
 
 ### `--continue`
 
@@ -134,11 +134,11 @@ Uses `SessionManager.continueRecent(...)` directly (breadcrumb-first behavior ab
 Flow:
 
 1. fetch current-folder sessions via `SessionManager.list(currentCwd, currentSessionDir)`; the all-projects list remains lazy even when folder scope is empty
-2. mount `SessionSelectorComponent` in the editor area with lazy all-project loading and a `history.db` prompt matcher
+2. present `SessionSelectorComponent` as a fullscreen alternate-screen overlay via `ctx.ui.showOverlay` (anchored top-left at full size; the transcript underneath is untouched), wired with lazy all-project loading (`loadAllSessions`), a `history.db` prompt matcher, deletion, and pinned-session markers
 3. callbacks:
-   - select -> lock picker input and call `handleResumeSession(sessionPath)`; a recoverable pre-switch failure unlocks the picker
-   - cancel -> restore editor and rerender
-   - exit -> `ctx.shutdown()`
+   - select -> lock picker input and call `handleResumeSession(sessionPath)`; on success hide the overlay and restore editor focus, a recoverable pre-switch failure unlocks the picker and keeps it open
+   - cancel -> hide overlay, restore editor focus, rerender
+   - exit -> hide overlay, then `ctx.shutdown()`
 
 `/resume <id-prefix>` resolves local then global matches and switches directly. `/resume @claude` and `/resume @codex` instead open read-only-source import pickers: the selected foreign transcript is persisted as an OMP session, then switched to; deletion, history augmentation, and all-project scope are not offered in those pickers.
 
@@ -170,7 +170,7 @@ Lifecycle/state transition:
 2. disconnect agent listeners, abort active work, run the pre-switch reconciler, and flush pending bash/session writes
 3. snapshot rollback state (manager, queues, messages, model/thinking/tier, tools/prompts, provider-cache identity, and checkpoint/rewind state), then clear message queues
 4. for a different session, drain/detach advisor recorders
-5. `sessionManager.setSessionFile(sessionPath)`: update breadcrumb, load/migrate/blob-resolve/index entries, and adopt an existing recorded cwd
+5. `sessionManager.setSessionFile(sessionPath)`: update breadcrumb, load/migrate/blob-resolve/index entries, and adopt an existing recorded cwd when permitted by cwd policy
 6. sync session id, memory key, inherited provider-cache key, display context, and checkpoint/rewind state
 7. emit `session_switch`, replace messages, reset advisor session state, and sync todos
 8. close provider sessions for a different session, or for a same-session reload whose replay changed
@@ -178,19 +178,19 @@ Lifecycle/state transition:
 10. if the loaded branch ended with an interrupted tool flow, append a synthetic abort message and rebuild display context
 11. restore configured thinking (`auto` survives as auto) and per-family service tiers, falling back to current settings when no corresponding entry exists
 12. reset memory/tool session state as required, reconnect listeners, run mode reconciliation, and refresh the workspace-aware base system prompt
-13. restore advisor cost for a different session, finish the bash transition, notify session-change callbacks, and return `true`
+13. restore advisor cost for a different session, finish the bash transition, notify session-change callbacks, and return `true` on success
+`switchSession()` returns `false` when a before-switch hook cancels or cwd policy rejects the transition. A cross-project switch without a cwd-change callback is rejected rather than silently adopting the target cwd; callback rejection is also cancellation.
 
 Any failure after the snapshot restores the previous manager and runtime state, reconnects/reconciles it, marks the bash transition failed, then rethrows.
 
 ## UI state rebuild after interactive switch
 
-`SelectorController.handleResumeSession` performs UI reset around `switchSession`:
+`SelectorController.handleResumeSession` invokes `switchSession` first. If it returns `false`, the selector stops before applying any new-session UI updates and leaves the existing session/UI unchanged. After a successful switch, it:
 
 - stop loading animation
 - clear status container
 - clear pending-message UI and pending tool map
 - reset streaming component/message references
-- call `session.switchSession(...)`
 - if the resumed session's cwd differs from the previous one, re-point the process and cwd-derived caches at it (`applyCwdChange`)
 - clear chat container and rerender from session context (`renderInitialMessages`)
 - reload todos from new session artifacts
@@ -222,8 +222,7 @@ So visible conversation/todo state is rebuilt from the new session file.
 
 - CLI picker cancel -> returns `null`, caller prints `No session selected`, process exits.
 - Interactive picker cancel -> closes the overlay with no session change.
-- Core hook cancellation (`session_before_switch`) -> `switchSession()` returns `false`.
-- **Current interactive caveat:** `handleResumeSession` does not inspect that boolean and proceeds with its UI refresh/status path. A hook-cancelled interactive switch therefore keeps the old session but can display a misleading resumed status.
+- Core hook or cwd-policy cancellation -> `switchSession()` returns `false`; the interactive selector stops before its UI refresh/status path, preserving the old session and UI. Callback-free cross-project switches are rejected rather than silently adopting the target cwd.
 
 ### Empty list paths
 

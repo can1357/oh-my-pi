@@ -1,12 +1,25 @@
 import { describe, expect, it } from "bun:test";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { renderDemotedThinking } from "../src/dialect/demotion";
 import { NON_VISION_IMAGE_PLACEHOLDER } from "../src/providers/vision-guard";
 import { buildZedProviderRequest, resolveProviderKind } from "../src/providers/zed";
 import { invalidateZedLlmToken } from "../src/registry/oauth/zed-token-pool";
 import { streamSimple } from "../src/stream";
-import type { AssistantMessage, Context, FetchImpl, Model } from "../src/types";
+import type { AssistantMessage, Context, FetchImpl, Model, ModelSpec } from "../src/types";
 import { mockFetch } from "./helpers/fetch-mock";
+
+const zeroCost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+
+function makeModel(spec: Omit<ModelSpec<"zed-agent">, "api" | "provider" | "baseUrl" | "cost">): Model<"zed-agent"> {
+	return buildModel({
+		api: "zed-agent",
+		provider: "zed-agent",
+		baseUrl: "https://cloud.zed.dev",
+		cost: zeroCost,
+		...spec,
+	});
+}
 
 describe("Zed Provider Payload Construction", () => {
 	it("resolves exact provider kinds matching Zed serde conventions", () => {
@@ -20,19 +33,14 @@ describe("Zed Provider Payload Construction", () => {
 	});
 
 	it("preserves developer messages as developer-role Responses input", () => {
-		const model: Model<"zed-agent"> = {
+		const model: Model<"zed-agent"> = makeModel({
 			id: "gpt-5.6-luna",
 			name: "GPT-5.6 Luna",
-			api: "zed-agent",
-			provider: "zed-agent",
-			baseUrl: "https://cloud.zed.dev",
 			reasoning: true,
 			contextWindow: 400000,
 			maxTokens: 128000,
 			input: ["text", "image"],
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-			compat: undefined,
-		};
+		});
 
 		const payload = buildZedProviderRequest(
 			"open_ai",
@@ -51,19 +59,14 @@ describe("Zed Provider Payload Construction", () => {
 		]);
 	});
 	it("preserves ordered text and image content in GPT Responses tool outputs", () => {
-		const model: Model<"zed-agent"> = {
+		const model: Model<"zed-agent"> = makeModel({
 			id: "gpt-5.6-luna",
 			name: "GPT-5.6 Luna",
-			api: "zed-agent",
-			provider: "zed-agent",
-			baseUrl: "https://cloud.zed.dev",
 			reasoning: true,
 			contextWindow: 400000,
 			maxTokens: 128000,
 			input: ["text", "image"],
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-			compat: undefined,
-		};
+		});
 
 		const payload = buildZedProviderRequest(
 			"open_ai",
@@ -101,19 +104,14 @@ describe("Zed Provider Payload Construction", () => {
 		]);
 	});
 	it("preserves OpenAI Responses image detail and native image references", () => {
-		const model: Model<"zed-agent"> = {
+		const model: Model<"zed-agent"> = makeModel({
 			id: "gpt-5.6-luna",
 			name: "GPT-5.6 Luna",
-			api: "zed-agent",
-			provider: "zed-agent",
-			baseUrl: "https://cloud.zed.dev",
 			reasoning: true,
 			contextWindow: 400000,
 			maxTokens: 128000,
 			input: ["text", "image"],
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-			compat: undefined,
-		};
+		});
 		const imageData = "AQID";
 		const imageUrl = "https://blob.example.invalid/screenshot.png";
 		const providerFileId = "file_screenshot_123";
@@ -161,19 +159,14 @@ describe("Zed Provider Payload Construction", () => {
 	});
 
 	it("replaces images with the standard placeholder for text-only Zed xAI models", () => {
-		const model: Model<"zed-agent"> = {
+		const model: Model<"zed-agent"> = makeModel({
 			id: "grok-4.20",
 			name: "Grok 4.20",
-			api: "zed-agent",
-			provider: "zed-agent",
-			baseUrl: "https://cloud.zed.dev",
 			reasoning: false,
 			contextWindow: 1_000_000,
 			maxTokens: 128_000,
 			input: ["text"],
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-			compat: undefined,
-		};
+		});
 
 		const payload = buildZedProviderRequest(
 			"x_ai",
@@ -219,19 +212,14 @@ describe("Zed Provider Payload Construction", () => {
 				},
 			],
 		};
-		const visionModel: Model<"zed-agent"> = {
+		const visionModel: Model<"zed-agent"> = makeModel({
 			id: "grok-4.6",
 			name: "Grok 4.6",
-			api: "zed-agent",
-			provider: "zed-agent",
-			baseUrl: "https://cloud.zed.dev",
 			reasoning: false,
 			contextWindow: 1_000_000,
 			maxTokens: 128_000,
 			input: ["text", "image"],
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-			compat: undefined,
-		};
+		});
 		const visionPayload = buildZedProviderRequest("x_ai", context, visionModel) as {
 			messages: Array<{ role: string; tool_call_id?: string; content: unknown }>;
 		};
@@ -253,12 +241,14 @@ describe("Zed Provider Payload Construction", () => {
 			},
 		]);
 
-		const textOnlyModel: Model<"zed-agent"> = {
-			...visionModel,
+		const textOnlyModel: Model<"zed-agent"> = makeModel({
 			id: "grok-4.20",
 			name: "Grok 4.20",
+			reasoning: false,
+			contextWindow: 1_000_000,
+			maxTokens: 128_000,
 			input: ["text"],
-		};
+		});
 		const textOnlyPayload = buildZedProviderRequest("x_ai", context, textOnlyModel) as {
 			messages: Array<{ role: string; tool_call_id?: string; content: unknown }>;
 		};
@@ -272,19 +262,14 @@ describe("Zed Provider Payload Construction", () => {
 	});
 
 	it("forwards temperature and topP to Zed xAI chat requests", () => {
-		const model: Model<"zed-agent"> = {
+		const model: Model<"zed-agent"> = makeModel({
 			id: "grok-2",
 			name: "Grok 2",
-			api: "zed-agent",
-			provider: "zed-agent",
-			baseUrl: "https://cloud.zed.dev",
 			reasoning: false,
 			contextWindow: 131_072,
 			maxTokens: 8_192,
 			input: ["text"],
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-			compat: undefined,
-		};
+		});
 
 		const payload = buildZedProviderRequest(
 			"x_ai",
@@ -297,19 +282,14 @@ describe("Zed Provider Payload Construction", () => {
 	});
 
 	it("keeps mixed Anthropic tool-result text and image content in one tool_result block", () => {
-		const model: Model<"zed-agent"> = {
+		const model: Model<"zed-agent"> = makeModel({
 			id: "claude-sonnet-5",
 			name: "Claude Sonnet 5",
-			api: "zed-agent",
-			provider: "zed-agent",
-			baseUrl: "https://cloud.zed.dev",
 			reasoning: true,
 			contextWindow: 1000000,
 			maxTokens: 128000,
 			input: ["text", "image"],
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-			compat: undefined,
-		};
+		});
 
 		const payload = buildZedProviderRequest(
 			"anthropic",
@@ -356,19 +336,14 @@ describe("Zed Provider Payload Construction", () => {
 		]);
 	});
 	it("hoists images out of Anthropic error tool results", () => {
-		const model: Model<"zed-agent"> = {
+		const model: Model<"zed-agent"> = makeModel({
 			id: "claude-sonnet-5",
 			name: "Claude Sonnet 5",
-			api: "zed-agent",
-			provider: "zed-agent",
-			baseUrl: "https://cloud.zed.dev",
 			reasoning: true,
 			contextWindow: 1000000,
 			maxTokens: 128000,
 			input: ["text", "image"],
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-			compat: undefined,
-		};
+		});
 		const payload = buildZedProviderRequest(
 			"anthropic",
 			{
@@ -420,19 +395,14 @@ describe("Zed Provider Payload Construction", () => {
 	});
 
 	it("maps Claude 4.5 reasoning effort to budget and clamps it below maxTokens", () => {
-		const model: Model<"zed-agent"> = {
+		const model: Model<"zed-agent"> = makeModel({
 			id: "claude-sonnet-4-5",
 			name: "Claude Sonnet 4.5",
-			api: "zed-agent",
-			provider: "zed-agent",
-			baseUrl: "https://cloud.zed.dev",
 			reasoning: true,
 			contextWindow: 200000,
 			maxTokens: 128000,
 			input: ["text", "image"],
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-			compat: undefined,
-		};
+		});
 		const expectedBudgets = [
 			[Effort.Minimal, 1024],
 			[Effort.Low, 4096],
@@ -472,19 +442,14 @@ describe("Zed Provider Payload Construction", () => {
 	});
 
 	it("formats OpenAI Responses API payload for open_ai provider models", () => {
-		const mockModel: Model<"zed-agent"> = {
+		const mockModel: Model<"zed-agent"> = makeModel({
 			id: "gpt-5.6-luna",
 			name: "GPT-5.6 Luna",
-			api: "zed-agent",
-			provider: "zed-agent",
-			baseUrl: "https://cloud.zed.dev",
 			reasoning: true,
 			contextWindow: 400000,
 			maxTokens: 128000,
 			input: ["text", "image"],
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-			compat: undefined,
-		};
+		});
 
 		const mockContext: Context = {
 			systemPrompt: ["You are an assistant."],
@@ -520,19 +485,14 @@ describe("Zed Provider Payload Construction", () => {
 	});
 
 	it("demotes cross-model OpenAI reasoning instead of replaying it as a Responses item", () => {
-		const model: Model<"zed-agent"> = {
+		const model: Model<"zed-agent"> = makeModel({
 			id: "gpt-5.6-luna",
 			name: "GPT-5.6 Luna",
-			api: "zed-agent",
-			provider: "zed-agent",
-			baseUrl: "https://cloud.zed.dev",
 			reasoning: true,
 			contextWindow: 400_000,
 			maxTokens: 128_000,
 			input: ["text", "image"],
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-			compat: undefined,
-		};
+		});
 		const thinkingText = "Reasoning from the previous GPT model.";
 		const foreignReasoningItem = {
 			type: "reasoning",
@@ -583,19 +543,14 @@ describe("Zed Provider Payload Construction", () => {
 	});
 
 	it("formats Anthropic Messages API payload for anthropic provider models", () => {
-		const mockModel: Model<"zed-agent"> = {
+		const mockModel: Model<"zed-agent"> = makeModel({
 			id: "claude-sonnet-5",
 			name: "Claude Sonnet 5",
-			api: "zed-agent",
-			provider: "zed-agent",
-			baseUrl: "https://cloud.zed.dev",
 			reasoning: true,
 			contextWindow: 1000000,
 			maxTokens: 128000,
 			input: ["text", "image"],
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-			compat: undefined,
-		};
+		});
 
 		const mockContext: Context = {
 			systemPrompt: ["You are an assistant."],
@@ -625,12 +580,9 @@ describe("Zed Provider Payload Construction", () => {
 		expect(messages[0].content).toBe("Hello world");
 	});
 	it("disables Anthropic thinking for required and named tool choices", () => {
-		const model: Model<"zed-agent"> = {
+		const model: Model<"zed-agent"> = makeModel({
 			id: "claude-sonnet-5",
 			name: "Claude Sonnet 5",
-			api: "zed-agent",
-			provider: "zed-agent",
-			baseUrl: "https://cloud.zed.dev",
 			reasoning: true,
 			thinking: {
 				mode: "anthropic-adaptive",
@@ -640,9 +592,7 @@ describe("Zed Provider Payload Construction", () => {
 			contextWindow: 1000000,
 			maxTokens: 128000,
 			input: ["text", "image"],
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-			compat: undefined,
-		};
+		});
 		const context: Context = {
 			messages: [{ role: "user", content: "Use the search tool.", timestamp: 1 }],
 			tools: [
@@ -674,19 +624,14 @@ describe("Zed Provider Payload Construction", () => {
 	});
 
 	it("demotes foreign and unsigned thinking when switching Zed models to Claude", () => {
-		const model: Model<"zed-agent"> = {
+		const model: Model<"zed-agent"> = makeModel({
 			id: "claude-sonnet-5",
 			name: "Claude Sonnet 5",
-			api: "zed-agent",
-			provider: "zed-agent",
-			baseUrl: "https://cloud.zed.dev",
 			reasoning: true,
 			contextWindow: 1_000_000,
 			maxTokens: 128_000,
 			input: ["text", "image"],
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-			compat: undefined,
-		};
+		});
 		const cases = [
 			{
 				sourceModel: "gemini-3-flash",
@@ -743,19 +688,14 @@ describe("Zed Provider Payload Construction", () => {
 	});
 
 	it("forwards mixed Anthropic sampling controls only when thinking is inactive", () => {
-		const model: Model<"zed-agent"> = {
+		const model: Model<"zed-agent"> = makeModel({
 			id: "claude-sonnet-4-6",
 			name: "Claude Sonnet 4.6",
-			api: "zed-agent",
-			provider: "zed-agent",
-			baseUrl: "https://cloud.zed.dev",
 			reasoning: true,
 			contextWindow: 1_000_000,
 			maxTokens: 128_000,
 			input: ["text", "image"],
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-			compat: undefined,
-		};
+		});
 		const sampling = {
 			temperature: 0.25,
 			topP: 0.75,
@@ -792,7 +732,14 @@ describe("Zed Provider Payload Construction", () => {
 		const restrictedDisabledThinking = buildZedProviderRequest(
 			"anthropic",
 			{ messages: [{ role: "user", content: "hello", timestamp: 1 }] },
-			{ ...model, id: "claude-sonnet-5", name: "Claude Sonnet 5" },
+			makeModel({
+				id: "claude-sonnet-5",
+				name: "Claude Sonnet 5",
+				reasoning: true,
+				contextWindow: 1_000_000,
+				maxTokens: 128_000,
+				input: ["text", "image"],
+			}),
 			{ ...sampling, disableReasoning: true },
 		) as Record<string, unknown>;
 
@@ -806,12 +753,9 @@ describe("Zed Provider Payload Construction", () => {
 			["claude-sonnet-4-6", "Claude Sonnet 4.6"],
 			["claude-sonnet-5", "Claude Sonnet 5"],
 		] as const) {
-			const model: Model<"zed-agent"> = {
+			const model: Model<"zed-agent"> = makeModel({
 				id,
 				name,
-				api: "zed-agent",
-				provider: "zed-agent",
-				baseUrl: "https://cloud.zed.dev",
 				reasoning: true,
 				thinking: {
 					mode: "anthropic-adaptive",
@@ -821,9 +765,7 @@ describe("Zed Provider Payload Construction", () => {
 				contextWindow: 1000000,
 				maxTokens: 128000,
 				input: ["text", "image"],
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-				compat: undefined,
-			};
+			});
 			const payload = buildZedProviderRequest(
 				"anthropic",
 				{ messages: [{ role: "user", content: "Keep this short.", timestamp: 1 }] },
@@ -837,19 +779,14 @@ describe("Zed Provider Payload Construction", () => {
 	});
 
 	it("formats Google AI GenerateContentRequest payload and forwards all Gemini sampling controls", () => {
-		const mockModel: Model<"zed-agent"> = {
+		const mockModel: Model<"zed-agent"> = makeModel({
 			id: "gemini-3-flash",
 			name: "Gemini 3 Flash",
-			api: "zed-agent",
-			provider: "zed-agent",
-			baseUrl: "https://cloud.zed.dev",
 			reasoning: true,
 			contextWindow: 1000000,
 			maxTokens: 66000,
 			input: ["text", "image"],
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-			compat: undefined,
-		};
+		});
 
 		const mockContext: Context = {
 			systemPrompt: ["You are a Google assistant."],
@@ -912,19 +849,14 @@ describe("Zed Provider Payload Construction", () => {
 	});
 
 	it("nests Gemini function-response images with the tool result that produced them", () => {
-		const model: Model<"zed-agent"> = {
+		const model: Model<"zed-agent"> = makeModel({
 			id: "gemini-3-flash",
 			name: "Gemini 3 Flash",
-			api: "zed-agent",
-			provider: "zed-agent",
-			baseUrl: "https://cloud.zed.dev",
 			reasoning: true,
 			contextWindow: 1_000_000,
 			maxTokens: 66_000,
 			input: ["text", "image"],
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-			compat: undefined,
-		};
+		});
 		const payload = buildZedProviderRequest(
 			"google",
 			{
@@ -962,19 +894,14 @@ describe("Zed Provider Payload Construction", () => {
 	});
 
 	it("replays only valid same-model Gemini thought signatures", () => {
-		const mockModel: Model<"zed-agent"> = {
+		const mockModel: Model<"zed-agent"> = makeModel({
 			id: "gemini-3-flash",
 			name: "Gemini 3 Flash",
-			api: "zed-agent",
-			provider: "zed-agent",
-			baseUrl: "https://cloud.zed.dev",
 			reasoning: true,
 			contextWindow: 1_000_000,
 			maxTokens: 66_000,
 			input: ["text", "image"],
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-			compat: undefined,
-		};
+		});
 		const cases = [
 			{
 				sourceModel: mockModel.id,
@@ -1068,22 +995,17 @@ describe("Zed Provider Payload Construction", () => {
 		}
 	});
 
-	it("propagates forceReasoningOff to Zed provider options and disables Gemini thinking", async () => {
+	it("propagates forceReasoningOff to Zed provider options and reduces Gemini thinking to minimal level", async () => {
 		const userId = "user_force_reasoning_off";
 		const accessToken = "access-token-force-reasoning-off";
-		const mockModel: Model<"zed-agent"> = {
+		const mockModel: Model<"zed-agent"> = makeModel({
 			id: "gemini-3-flash",
 			name: "Gemini 3 Flash",
-			api: "zed-agent",
-			provider: "zed-agent",
-			baseUrl: "https://cloud.zed.dev",
 			reasoning: true,
 			contextWindow: 1_000_000,
 			maxTokens: 66_000,
 			input: ["text", "image"],
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-			compat: undefined,
-		};
+		});
 		const context: Context = {
 			messages: [{ role: "user", content: "hello", timestamp: 1 }],
 		};
@@ -1126,7 +1048,7 @@ describe("Zed Provider Payload Construction", () => {
 		const providerRequest = completionPayload.provider_request as Record<string, unknown>;
 		expect(providerRequest.generationConfig).toMatchObject({
 			maxOutputTokens: 66_000,
-			thinkingConfig: { thinkingBudget: 0 },
+			thinkingConfig: { thinkingLevel: "MINIMAL" },
 		});
 	});
 });

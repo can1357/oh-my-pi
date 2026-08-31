@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import * as fs from "node:fs/promises";
 import http2 from "node:http2";
+import { classifyModel } from "@oh-my-pi/pi-catalog/compat/taxonomy";
 import type {
 	ConversationStep,
 	CursorRule,
@@ -158,7 +159,6 @@ import {
 	toJson,
 } from "@oh-my-pi/pi-catalog/discovery/protobuf";
 import { THINKING_EFFORTS } from "@oh-my-pi/pi-catalog/effort";
-import { isKimiK3ModelId, parseOpenAIModel } from "@oh-my-pi/pi-catalog/identity";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import {
 	$env,
@@ -4513,7 +4513,7 @@ export function processInteractionUpdate(
 	} else if (updateCase === "turnEnded") {
 		output.stopReason = "stop";
 		if (
-			isKimiK3ModelId(output.model) &&
+			classifyModel("cursor", output.model).family === "k3" &&
 			!output.content.some(item => item.type === "thinking" && item.thinking.length > 0)
 		) {
 			logger.warn(
@@ -4721,7 +4721,7 @@ type CursorRootPromptAssistantContentPart =
 function canReplayCursorThinking(msg: AssistantMessage, targetModelId: string | undefined): boolean {
 	return (
 		targetModelId !== undefined &&
-		isKimiK3ModelId(targetModelId) &&
+		classifyModel("cursor", targetModelId).family === "k3" &&
 		msg.api === "cursor-agent" &&
 		msg.provider === "cursor" &&
 		msg.model === targetModelId
@@ -4769,7 +4769,7 @@ function assertCursorKimiK3HistoryReplayable(
 	activeUserMessageIndex: number,
 	targetModelId: string | undefined,
 ): void {
-	if (!targetModelId || !isKimiK3ModelId(targetModelId)) return;
+	if (!targetModelId || classifyModel("cursor", targetModelId).family !== "k3") return;
 	const historyEnd = activeUserMessageIndex >= 0 ? activeUserMessageIndex : messages.length;
 	const missingThinkingTurns: number[] = [];
 	const newlyWarnedKeys: string[] = [];
@@ -4844,6 +4844,27 @@ export function buildCursorSystemPromptJsons(systemPrompt: readonly string[] | u
 	return systemPrompts.map(content => JSON.stringify({ role: "system", content }));
 }
 
+function collectCursorToolHistory(messages: Message[], historyEnd: number) {
+	const toolResults = new Map<string, ToolResultMessage>();
+	const pairedToolCallIds = new Set<string>();
+	for (let index = 0; index < historyEnd; index++) {
+		const message = messages[index];
+		if (message.role === "toolResult") {
+			toolResults.set(message.toolCallId, message);
+		} else if (message.role === "assistant") {
+			for (const item of message.content) {
+				if (item.type === "toolCall") pairedToolCallIds.add(item.id);
+			}
+		}
+	}
+	return { toolResults, pairedToolCallIds };
+}
+
+function cursorOrphanToolResultText(result: ToolResultMessage): string {
+	const prefix = result.isError ? "[Tool Error]" : "[Tool Result]";
+	return `${prefix}\n${toolResultToText(result) || "(empty result)"}`;
+}
+
 function buildRootPromptMessagesJson(
 	messages: Message[],
 	systemPromptIds: Uint8Array[],
@@ -4852,6 +4873,8 @@ function buildRootPromptMessagesJson(
 	targetModelId?: string,
 ): Uint8Array[] {
 	assertCursorKimiK3HistoryReplayable(messages, activeUserMessageIndex, targetModelId);
+	const historyEnd = activeUserMessageIndex >= 0 ? activeUserMessageIndex : messages.length;
+	const { pairedToolCallIds } = collectCursorToolHistory(messages, historyEnd);
 	const entries: Uint8Array[] = [...systemPromptIds];
 	const pushJson = (obj: unknown) => {
 		const bytes = new TextEncoder().encode(JSON.stringify(obj));
@@ -4870,6 +4893,13 @@ function buildRootPromptMessagesJson(
 			if (content.length === 0) continue;
 			pushJson({ role: "assistant", content });
 		} else if (msg.role === "toolResult") {
+			if (!pairedToolCallIds.has(msg.toolCallId)) {
+				pushJson({
+					role: "assistant",
+					content: [{ type: "text", text: cursorOrphanToolResultText(msg) }],
+				});
+				continue;
+			}
 			// Emit even when the result text is empty: the assistant `tool-call` is
 			// already in history, so dropping the pair would replay an orphaned call.
 			const toolCallId = normalizeToolCallId(msg.toolCallId);
@@ -5008,18 +5038,7 @@ function buildConversationTurns(
 ): Uint8Array[] {
 	const turns: Uint8Array[] = [];
 	const historyEnd = activeUserMessageIndex >= 0 ? activeUserMessageIndex : messages.length;
-	const toolResults = new Map<string, ToolResultMessage>();
-	const pairedToolCallIds = new Set<string>();
-	for (let index = 0; index < historyEnd; index++) {
-		const message = messages[index];
-		if (message.role === "toolResult") {
-			toolResults.set(message.toolCallId, message);
-		} else if (message.role === "assistant") {
-			for (const item of message.content) {
-				if (item.type === "toolCall") pairedToolCallIds.add(item.id);
-			}
-		}
-	}
+	const { toolResults, pairedToolCallIds } = collectCursorToolHistory(messages, historyEnd);
 
 	let i = 0;
 	while (i < messages.length) {
@@ -5077,17 +5096,13 @@ function buildConversationTurns(
 					stepBlobIds.push(storeCursorBlob(blobStore, toBinary(ConversationStepSchema, step)));
 				}
 			} else if (stepMsg.role === "toolResult" && !pairedToolCallIds.has(stepMsg.toolCallId)) {
-				const text = toolResultToText(stepMsg);
-				if (text) {
-					const prefix = stepMsg.isError ? "[Tool Error]" : "[Tool Result]";
-					const step = create(ConversationStepSchema, {
-						message: {
-							case: "assistantMessage",
-							value: create(AssistantMessageSchema, { text: `${prefix}\n${text}` }),
-						},
-					});
-					stepBlobIds.push(storeCursorBlob(blobStore, toBinary(ConversationStepSchema, step)));
-				}
+				const step = create(ConversationStepSchema, {
+					message: {
+						case: "assistantMessage",
+						value: create(AssistantMessageSchema, { text: cursorOrphanToolResultText(stepMsg) }),
+					},
+				});
+				stepBlobIds.push(storeCursorBlob(blobStore, toBinary(ConversationStepSchema, step)));
 			}
 			i++;
 		}
@@ -5210,7 +5225,12 @@ function resolveCursorWireModel(
 	const match = /^(.*)-(minimal|low|medium|high|xhigh|max)(-fast)?$/.exec(wireModelId);
 	const base = match?.[1];
 	const effort = match?.[2];
-	if (base && effort && (THINKING_EFFORTS as readonly string[]).includes(effort) && parseOpenAIModel(base) !== null) {
+	if (
+		base &&
+		effort &&
+		(THINKING_EFFORTS as readonly string[]).includes(effort) &&
+		classifyModel("cursor", base).class === "openai"
+	) {
 		return {
 			modelId: `${base}${match[3] ?? ""}`,
 			parameters: [create(RequestedModel_ModelParameterbytesSchema, { id: "reasoning", value: effort })],

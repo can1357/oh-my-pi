@@ -253,6 +253,8 @@ function inferReasoningFromGeminiId(id: string): boolean {
 
 function inferInputFromGeminiId(id: string): ("text" | "image")[] {
 	const normalized = id.toLowerCase();
+	// residue: modality inference for discovery rows without metadata — the
+	// id shape is the only signal; no request policy hangs off this.
 	if (normalized.includes("vision") || normalized.includes("image") || normalized.includes("gemini")) {
 		return ["text", "image"];
 	}
