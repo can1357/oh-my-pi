@@ -2381,6 +2381,15 @@ export class ModelRegistry {
 	getProviderBaseUrl(provider: string): string | undefined {
 		return this.#modelsForProviderLookup(provider).find(m => m.provider === provider && m.baseUrl)?.baseUrl;
 	}
+
+	/**
+	 * Effective provider base URL: runtime override, then models.yml, then bundled
+	 * catalog model default (same precedence discovery uses).
+	 */
+	getEffectiveProviderBaseUrl(provider: string): string | undefined {
+		return this.#descriptorBaseUrl(provider);
+	}
+
 	/**
 	 * Get provider-level headers without including per-model overrides.
 	 */

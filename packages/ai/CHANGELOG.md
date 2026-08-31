@@ -9,6 +9,7 @@
 
 ### Fixed
 
+- `/grokbot` reports the configured provider base URL (proxy override) instead of always showing the default sand host.
 - Grok Bot connect trailer errors surface `ERROR_PROVIDER_ERROR` / HTTP status / detail instead of opaque `Error` / `internal error` messages.
 - Grok Bot sends complete sand parameter sets (`thinking` / `context` / `effort` / `fast`) when AvailableModels advertises them, matching Cursor variant wire (Anthropic defaults `fast:false`; context follows `sandMaxMode`).
 - Grok Bot bare-wire routing follows catalog `sandParameterIds` / `sandMaxMode` instead of a hard-coded model-id set.

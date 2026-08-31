@@ -517,6 +517,20 @@ describe("grokbot checksum", () => {
 		const withConfigured = await formatGrokbotStatus({ renewalCredential: "yml-or-runtime-renewal" });
 		expect(withConfigured).toContain("Renewer: present");
 	});
+
+	test("reports configured proxy baseUrl instead of the hard-coded default host", async () => {
+		spyOn(grokbotCatalogAuth, "loadGrokbotConfig").mockResolvedValue({
+			renewal: "renew-present",
+			machineId: "machine-present",
+			namespace: "prod",
+			clientVersion: "0.30.0",
+		});
+		spyOn(grokbotCatalogAuth, "grokbotSecretsPath").mockReturnValue("/tmp/agent/secrets/grokbot.env");
+
+		const status = await formatGrokbotStatus({ baseUrl: "https://proxy.example/grokbot/" });
+		expect(status).toContain("Host: https://proxy.example/grokbot");
+		expect(status).not.toContain("Host: https://api2.cursor.sh");
+	});
 });
 
 describe("grokbot sand-host client parity", () => {

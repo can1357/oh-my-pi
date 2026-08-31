@@ -56,17 +56,20 @@ export type FormatGrokbotStatusOptions = {
 	 * even if env/secrets file are empty.
 	 */
 	renewalCredential?: string;
+	/** Effective provider backend (runtime/models.yml override or catalog default). */
+	baseUrl?: string;
 };
 
 /** Human-readable status lines for `/grokbot` (no secret values). */
 export async function formatGrokbotStatus(options?: FormatGrokbotStatusOptions): Promise<string> {
 	const configured = typeof options?.renewalCredential === "string" ? options.renewalCredential.trim() : "";
 	const cfg = await loadGrokbotConfig(configured || undefined);
+	const host = (options?.baseUrl?.trim() || GROKBOT_BACKEND).replace(/\/+$/, "") || GROKBOT_BACKEND;
 	return [
 		"Grok Bot provider (`grokbot` / `grokbot-sand`) — InferenceService/Stream",
 		"Not the Cursor provider (`cursor` / AgentService/Run) and not xAI / Grok CLI (`xai`, `xai-oauth`).",
 		"Usage allowances are independent: Grok Bot, Cursor, and xAI / Grok CLI each have their own quota — using one does not consume the others.",
-		`Host: ${GROKBOT_BACKEND}`,
+		`Host: ${formatGrokbotStatusValue(host)}`,
 		"Wire: application/connect+proto (InferenceService/Stream only; no harness / AgentService fields)",
 		"Auth: Grok Bot renewal credential + machine-id checksum (not Cursor OAuth, not XAI_API_KEY)",
 		`Renewer: ${cfg.renewal ? "present" : "missing"}`,
