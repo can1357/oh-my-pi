@@ -363,15 +363,37 @@ function mapFinishReason(reason: StopReason): string {
 	return "STOP";
 }
 
-function geminiCandidate(text: string, finishReason: string | undefined): Record<string, unknown> {
+function geminiCandidate(parts: Record<string, unknown>[] | string, finishReason: string | undefined): Record<string, unknown> {
+	const partList = typeof parts === "string" ? [{ text: parts }] : parts.length > 0 ? parts : [{ text: "" }];
 	const candidate: Record<string, unknown> = {
 		content: {
 			role: "model",
-			parts: [{ text }],
+			parts: partList,
 		},
 	};
 	if (finishReason !== undefined) candidate.finishReason = finishReason;
 	return { candidates: [candidate] };
+}
+
+
+function flattenAssistantParts(message: AssistantMessage): Record<string, unknown>[] {
+	const parts: Record<string, unknown>[] = [];
+	for (const part of message.content) {
+		if (part.type === "text" && part.text.length > 0) {
+			parts.push({ text: part.text });
+			continue;
+		}
+		if (part.type === "toolCall") {
+			parts.push({
+				functionCall: {
+					name: part.name,
+					args: part.arguments ?? {},
+					id: part.id,
+				},
+			});
+		}
+	}
+	return parts;
 }
 
 export function encodeResponse(message: AssistantMessage, requestedModelId: string): Record<string, unknown> {
@@ -382,7 +404,7 @@ export function encodeResponse(message: AssistantMessage, requestedModelId: stri
 		});
 	}
 	return {
-		...geminiCandidate(flattenAssistantText(message), mapFinishReason(message.stopReason)),
+		...geminiCandidate(flattenAssistantParts(message), mapFinishReason(message.stopReason)),
 		modelVersion: requestedModelId,
 	};
 }
@@ -421,16 +443,41 @@ export function encodeStream(
 							if (event.delta.length > 0) {
 								writeSse(
 									controller,
-									{ ...geminiCandidate(event.delta, undefined), modelVersion: requestedModelId },
+									{ ...geminiCandidate([{ text: event.delta }], undefined), modelVersion: requestedModelId },
 									cancelled,
 								);
 							}
 							break;
+						case "toolcall_start":
+						case "toolcall_delta":
+						case "toolcall_end": {
+							const call = event.toolCall;
+							writeSse(
+								controller,
+								{
+									...geminiCandidate(
+										[
+											{
+												functionCall: {
+													name: call.name,
+													args: call.arguments ?? {},
+													id: call.id,
+												},
+											},
+										],
+										undefined,
+									),
+									modelVersion: requestedModelId,
+								},
+								cancelled,
+							);
+							break;
+						}
 						case "done":
 							writeSse(
 								controller,
 								{
-									...geminiCandidate("", mapFinishReason(event.reason)),
+									...geminiCandidate([{ text: "" }], mapFinishReason(event.reason)),
 									modelVersion: requestedModelId,
 								},
 								cancelled,
@@ -448,7 +495,7 @@ export function encodeStream(
 					}
 				}
 				if (!cancelled) {
-					writeSse(controller, { ...geminiCandidate("", "STOP"), modelVersion: requestedModelId }, cancelled);
+					writeSse(controller, { ...geminiCandidate([{ text: "" }], "STOP"), modelVersion: requestedModelId }, cancelled);
 					controller.close();
 				}
 			} catch (err) {

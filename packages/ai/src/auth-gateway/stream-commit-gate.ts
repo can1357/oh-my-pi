@@ -181,7 +181,7 @@ export function holdSseUntilCommit(
 					controller.enqueue(chunk);
 					return;
 				}
-				gate.bufferPrelude(chunk);
+				const buffered = gate.bufferPrelude(chunk);
 				pending += decoder.decode(chunk, { stream: true });
 				let next = nextSseFrame(pending);
 				while (next) {
@@ -190,16 +190,21 @@ export function holdSseUntilCommit(
 					pending = next.rest;
 					next = nextSseFrame(pending);
 					if (state === "terminated") {
-						// Dead attempt: its held frames belong to it and are never
-						// forwarded. The failover loop catches PreludeAbortedError,
-						// discards them, and dispatches a replacement attempt.
 						throw new PreludeAbortedError(gate.takePrelude() ?? [], eventType);
 					}
 					if (state === "committed") {
 						committed = true;
 						for (const held of gate.takePrelude() ?? []) controller.enqueue(held);
+						if (!buffered) controller.enqueue(chunk);
 						return;
 					}
+				}
+				if (!buffered) {
+					// Cap crossed: force commit observation and keep the rejected chunk.
+					gate.classifyAndObserve("response.output_item.added", chunk.byteLength);
+					committed = true;
+					for (const held of gate.takePrelude() ?? []) controller.enqueue(held);
+					controller.enqueue(chunk);
 				}
 			},
 			flush() {

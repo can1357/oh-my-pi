@@ -168,7 +168,9 @@ function resolveRouteRefs(node: RouteNode, lookup: (id: string) => RouteNode | u
 			return copyNode(resolved);
 		}
 		case "target":
-			return { type: "target", model: node.model };
+			return node.weight === undefined
+				? { type: "target", model: node.model }
+				: { type: "target", model: node.model, weight: node.weight };
 		case "fallback":
 			return {
 				type: "fallback",
@@ -261,7 +263,9 @@ function compileFlatten(children: readonly RouteNode[], seenOnPath: ReadonlySet<
 function copyNode(node: RouteNode): RouteNode {
 	switch (node.type) {
 		case "target":
-			return { type: "target", model: node.model };
+			return node.weight === undefined
+				? { type: "target", model: node.model }
+				: { type: "target", model: node.model, weight: node.weight };
 		case "fallback":
 			return {
 				type: "fallback",
