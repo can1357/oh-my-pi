@@ -196,3 +196,24 @@ it("rejects fileData / functionCall parts (negative)", () => {
 		}),
 	).toThrow(/unsupported part type/);
 });
+it("emits functionCall parts for toolCall content blocks", () => {
+	const message = {
+		role: "assistant",
+		content: [
+			{ type: "text", text: "calling" },
+			{ type: "toolCall", id: "call_1", name: "lookup", arguments: { q: "x" } },
+		],
+		api: "google-generative-ai",
+		provider: "google",
+		model: "gemini-2.5-flash",
+		usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+		stopReason: "toolUse",
+		timestamp: 0,
+	} as AssistantMessage;
+	const encoded = encodeResponse(message, "gemini-2.5-flash");
+	const parts = (encoded.candidates as Array<{ content: { parts: unknown[] } }>)[0]!.content.parts;
+	expect(parts).toEqual([
+		{ text: "calling" },
+		{ functionCall: { name: "lookup", args: { q: "x" }, id: "call_1" } },
+	]);
+});

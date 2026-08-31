@@ -4,6 +4,8 @@
 
 ### Fixed
 
+- Fixed Gemini responses dropping `toolCall` blocks (now encoded as `functionCall` parts).
+- Fixed OAuth quota probing acquiring an immortal lease when `getApiKey` is called without `requestId`.
 - Fixed Gemini `generateContent` defaulting to SSE; streaming now follows `streamGenerateContent` (or an explicit `stream` body field).
 - Fixed Gemini requests silently dropping non-text parts; `inlineData` is preserved and unsupported part types are rejected.
 
