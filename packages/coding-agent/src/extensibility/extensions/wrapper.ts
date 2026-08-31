@@ -24,8 +24,8 @@ import { defaultLoadModeForToolName } from "../../tools/essential-tools";
 import { withFileMutationSession } from "../../tools/file-write-fallback";
 import { normalizeToolEventInput, resolveToolEventInput } from "../tool-event-input";
 import { applyToolProxy } from "../tool-proxy";
-import type { ExtensionRunner } from "./runner";
-import type { RegisteredTool, ToolApprovalReviewResult, ToolCallEventResult } from "./types";
+import { assertReviewInputSafe, deepFreeze, type ExtensionRunner } from "./runner";
+import type { RegisteredTool, ToolApprovalReviewEvent, ToolApprovalReviewResult, ToolCallEventResult } from "./types";
 
 /**
  * Adapts a RegisteredTool into an AgentTool.
@@ -277,13 +277,9 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 		};
 
 		// Extension approval review between final input resolution and the native
-		// selector. Eligible only for mode-derived prompts: approve resolves the
-		// prompt positively, deny vetoes the call at the extension layer, and
-		// escalate leaves the decision to the ordinary native selector. Handlers
-		// review a deeply immutable snapshot of the owned params: freezing the
-		// owned params themselves would forbid tools from mutating their
-		// validated input internally. Clone or freeze failures fail closed to the
-		// native selector.
+		// selector. Eligible only for mode-derived prompts. The original input
+		// remains authoritative until every review precondition succeeds and an
+		// immutable snapshot is ready for handler dispatch.
 		let executionParams = effectiveParams;
 		if (
 			approvalCheck.required &&
@@ -292,45 +288,72 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 			!explicitPrompt &&
 			pendingSafetyChecks.length === 0 &&
 			!xdevBypass &&
-			!signal?.aborted
+			!signal?.aborted &&
+			this.runner.hasHandlers("tool_approval_review")
 		) {
-			// Ownership first: review may approve only input the wrapper owns, so the
-			// owned deep clone is established before any handler runs. A clone or
-			// re-resolution failure fails closed — review is skipped entirely and the
-			// ordinary native gate decides on the un-cloned input; clone failure can
-			// never approve.
-			let ownedReviewState:
+			let preparedReview:
 				| {
 						params: typeof effectiveParams;
 						args: unknown;
 						resolved: ResolvedApproval;
+						event: ToolApprovalReviewEvent;
 				  }
 				| undefined;
+			let ownedDeny: ResolvedApproval | undefined;
 			try {
+				// Inspect the source graph before cloning: structuredClone can hide
+				// unsupported prototypes and change exotic-value identity.
+				assertReviewInputSafe(effectiveParams);
 				const params = structuredClone(effectiveParams);
 				const args = approvalArgs(params, context);
-				// Policy re-resolves against the owned clone, so review approval can
-				// never attach to stale pre-clone material.
-				ownedReviewState = {
-					params,
-					args,
-					resolved: resolveApproval(this.tool, args, approvalMode, userPolicies),
-				};
-			} catch {
-				ownedReviewState = undefined;
-			}
-			if (ownedReviewState) {
-				const { params: ownedParams, args: ownedArgs, resolved: ownedResolved } = ownedReviewState;
+				const ownedResolved = resolveApproval(this.tool, args, approvalMode, userPolicies);
 				if (ownedResolved.policy === "deny") {
-					// Native deny is authoritative on the owned material that would execute.
-					throw denyError(ownedResolved, this.tool.name);
+					ownedDeny = ownedResolved;
+				} else {
+					const ownedExplicitPrompt = ownedResolved.override || ownedResolved.source === "user";
+					const ownedApprovalRequired =
+						pendingSafetyChecks.length > 0 ||
+						(ownedResolved.policy === "prompt" && (ownedExplicitPrompt || !xdevBypass));
+					if (
+						ownedApprovalRequired &&
+						ownedResolved.policy === "prompt" &&
+						ownedResolved.source === "mode" &&
+						!ownedExplicitPrompt
+					) {
+						preparedReview = {
+							params,
+							args,
+							resolved: ownedResolved,
+							event: deepFreeze({
+								type: "tool_approval_review",
+								sessionId: context?.sessionManager?.getSessionId() ?? "",
+								toolCallId,
+								toolName: this.tool.name,
+								input: structuredClone(params) as Record<string, unknown>,
+								approvalMode,
+								tier: ownedResolved.tier,
+							}),
+						};
+					}
 				}
+			} catch {
+				preparedReview = undefined;
+				ownedDeny = undefined;
+			}
 
-				// Adopt the owned material as the invocation that executes and re-derive
-				// the gate state from it.
-				executionParams = ownedParams;
-				resolvedArgs = ownedArgs;
-				resolved = ownedResolved;
+			if (ownedDeny) {
+				// Native deny is authoritative on owned material that passed every
+				// ownership and policy-resolution precondition.
+				throw denyError(ownedDeny, this.tool.name);
+			}
+
+			if (preparedReview) {
+				// Handler dispatch is now guaranteed to receive the prepared snapshot,
+				// so the owned invocation becomes authoritative through approval or
+				// native escalation.
+				executionParams = preparedReview.params;
+				resolvedArgs = preparedReview.args;
+				resolved = preparedReview.resolved;
 				context?.xdevTierResolved?.(resolved.tier);
 				explicitPrompt = resolved.override || resolved.source === "user";
 				approvalCheck = {
@@ -339,44 +362,18 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 					reason: resolved.reason,
 				};
 
-				// Dispatch only when the adopted owned material kept the eligible
-				// mode-derived prompt shape. No await has occurred since eligibility was
-				// established, so the remaining conditions cannot have changed.
-				if (
-					approvalCheck.required &&
-					resolved.policy === "prompt" &&
-					resolved.source === "mode" &&
-					!explicitPrompt
-				) {
-					let review: ToolApprovalReviewResult;
-					try {
-						review = await this.runner.emitToolApprovalReview(
-							{
-								type: "tool_approval_review",
-								sessionId: context?.sessionManager?.getSessionId() ?? "",
-								toolCallId,
-								toolName: this.tool.name,
-								input: structuredClone(executionParams) as Record<string, unknown>,
-								approvalMode,
-								tier: resolved.tier,
-							},
-							signal,
-						);
-					} catch {
-						// emitToolApprovalReview resolves to escalate on handler/freeze
-						// failures and never throws; a throw here can only be a
-						// snapshot-clone failure. Fail closed to the native selector;
-						// abort is re-raised by throwIfAborted below.
-						review = { decision: "escalate" };
-					}
-					signal?.throwIfAborted();
-					if (review.decision === "deny") {
-						throw extensionReviewDenyError(this.tool.name, review.reason);
-					}
-					if (review.decision === "approve") {
-						// Suppress only this eligible mode-derived native prompt.
-						approvalCheck.required = false;
-					}
+				let review: ToolApprovalReviewResult;
+				try {
+					review = await this.runner.emitToolApprovalReview(preparedReview.event, signal);
+				} catch {
+					review = { decision: "escalate" };
+				}
+				signal?.throwIfAborted();
+				if (review.decision === "deny") {
+					throw extensionReviewDenyError(this.tool.name, review.reason);
+				}
+				if (review.decision === "approve") {
+					approvalCheck.required = false;
 				}
 			}
 		}

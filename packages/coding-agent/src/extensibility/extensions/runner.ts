@@ -1875,9 +1875,9 @@ export class ExtensionRunner {
 	}
 }
 
-/** Recursively freezes a plain object/array value, rejecting unsupported mutable objects. */
-function deepFreeze<T>(value: T, seen = new WeakSet<object>()): T {
-	if (typeof value !== "object" || value === null || seen.has(value)) return value;
+/** Rejects values that cannot be exposed as a deeply immutable approval-review snapshot. */
+export function assertReviewInputSafe(value: unknown, seen = new WeakSet<object>()): void {
+	if (typeof value !== "object" || value === null || seen.has(value)) return;
 
 	const prototype = Object.getPrototypeOf(value);
 	if (prototype !== Object.prototype && prototype !== null && prototype !== Array.prototype) {
@@ -1889,7 +1889,25 @@ function deepFreeze<T>(value: T, seen = new WeakSet<object>()): T {
 		if (!descriptor || !("value" in descriptor)) {
 			throw new TypeError("Review input contains an accessor");
 		}
-		deepFreeze(descriptor.value, seen);
+		assertReviewInputSafe(descriptor.value, seen);
+	}
+}
+
+/** Recursively freezes a review-safe plain object/array value. */
+export function deepFreeze<T>(value: T): T {
+	assertReviewInputSafe(value);
+	return freezeReviewInput(value);
+}
+
+function freezeReviewInput<T>(value: T, seen = new WeakSet<object>()): T {
+	if (typeof value !== "object" || value === null || seen.has(value)) return value;
+
+	seen.add(value);
+	for (const key of Reflect.ownKeys(value)) {
+		const descriptor = Object.getOwnPropertyDescriptor(value, key);
+		if (descriptor && "value" in descriptor) {
+			freezeReviewInput(descriptor.value, seen);
+		}
 	}
 	Object.freeze(value);
 	return value;

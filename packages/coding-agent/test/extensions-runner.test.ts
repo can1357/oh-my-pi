@@ -2629,6 +2629,10 @@ describe("ExtensionRunner", () => {
 				constructor(command: string) {
 					this.command = command;
 				}
+
+				describe(): string {
+					return `prototype:${this.command}`;
+				}
 			}
 
 			const setTrace = (): Array<Record<string, unknown>> => {
@@ -3428,9 +3432,119 @@ describe("ExtensionRunner", () => {
 				expect(executed[0]).toBe(params);
 			});
 
+			it("cloneable class input skips review and native approval preserves the original instance", async () => {
+				const reviewHandler = vi.fn(async () => ({ decision: "approve" as const }));
+				const transformedInput = new PrototypeSensitiveInput("echo reviewed");
+				const runner = dispatchRunner([reviewHandler], [async () => ({ input: transformedInput })]);
+				const select = vi.fn(async () => "Approve");
+				initializeRunner(runner, select);
+				const executed: unknown[] = [];
+				const tool = {
+					...approvalTool,
+					approval: () => "exec" as const,
+					execute: async (_toolCallId: string, params: unknown) => {
+						executed.push(params);
+						return { content: [{ type: "text" as const, text: "ok" }] };
+					},
+				};
+
+				await executeReviewCase(runner, tool, "call-class-input", {
+					params: { command: "echo original" },
+				});
+
+				expect(reviewHandler).not.toHaveBeenCalled();
+				expect(select).toHaveBeenCalledTimes(1);
+				expect(executed[0]).toBe(transformedInput);
+				expect(executed[0]).toBeInstanceOf(PrototypeSensitiveInput);
+				expect((executed[0] as PrototypeSensitiveInput).describe()).toBe("prototype:echo reviewed");
+			});
+
+			it("cloneable exotic input skips review and native approval preserves original identity", async () => {
+				const reviewHandler = vi.fn(async () => ({ decision: "approve" as const }));
+				const timestamp = new Date("2026-08-31T00:00:00.000Z");
+				const transformedInput = { command: "echo reviewed", timestamp };
+				const runner = dispatchRunner([reviewHandler], [async () => ({ input: transformedInput })]);
+				const select = vi.fn(async () => "Approve");
+				initializeRunner(runner, select);
+				const executed: unknown[] = [];
+				const tool = {
+					...approvalTool,
+					approval: () => "exec" as const,
+					execute: async (_toolCallId: string, params: unknown) => {
+						executed.push(params);
+						return { content: [{ type: "text" as const, text: "ok" }] };
+					},
+				};
+
+				await executeReviewCase(runner, tool, "call-exotic-input", {
+					params: { command: "echo original" },
+				});
+
+				expect(reviewHandler).not.toHaveBeenCalled();
+				expect(select).toHaveBeenCalledTimes(1);
+				expect(executed[0]).toBe(transformedInput);
+				expect((executed[0] as typeof transformedInput).timestamp).toBe(timestamp);
+			});
+
+			it("plain input with no review handlers preserves original identity through native approval", async () => {
+				const transformedInput = { command: "echo reviewed" };
+				const runner = dispatchRunner([], [async () => ({ input: transformedInput })]);
+				const select = vi.fn(async () => "Approve");
+				initializeRunner(runner, select);
+				const executed: unknown[] = [];
+				const tool = {
+					...approvalTool,
+					execute: async (_toolCallId: string, params: unknown) => {
+						executed.push(params);
+						return { content: [{ type: "text" as const, text: "ok" }] };
+					},
+				};
+
+				await executeReviewCase(runner, tool, "call-no-review-plain-input", {
+					params: { command: "echo original" },
+				});
+
+				expect(select).toHaveBeenCalledTimes(1);
+				expect(executed[0]).toBe(transformedInput);
+			});
+
+			it("real review escalation keeps owned input authoritative through native approval", async () => {
+				const transformedInput = { command: "echo reviewed" };
+				const reviewed: Array<Readonly<Record<string, unknown>>> = [];
+				const runner = dispatchRunner(
+					[
+						async event => {
+							reviewed.push(event.input);
+							transformedInput.command = "rm -rf";
+							return { decision: "escalate" };
+						},
+					],
+					[async () => ({ input: transformedInput })],
+				);
+				const select = vi.fn(async () => "Approve");
+				initializeRunner(runner, select);
+				const executed: unknown[] = [];
+				const tool = {
+					...approvalTool,
+					execute: async (_toolCallId: string, params: unknown) => {
+						executed.push(params);
+						return { content: [{ type: "text" as const, text: "ok" }] };
+					},
+				};
+
+				await executeReviewCase(runner, tool, "call-reviewed-escalation", {
+					params: { command: "echo original" },
+				});
+
+				expect(reviewed).toEqual([{ command: "echo reviewed" }]);
+				expect(select).toHaveBeenCalledTimes(1);
+				expect(executed[0]).not.toBe(transformedInput);
+				expect(executed[0]).toEqual({ command: "echo reviewed" });
+			});
+
 			it("owned policy re-resolution failure skips review and uses native approval", async () => {
 				const reviewHandler = vi.fn(async () => ({ decision: "approve" as const }));
-				const transformedInput = new PrototypeSensitiveInput("echo hi");
+				const transformedInput = { command: "echo hi" };
 				const runner = dispatchRunner([reviewHandler], [async () => ({ input: transformedInput })]);
 				const select = vi.fn(async () => "Approve");
 				initializeRunner(runner, select);
@@ -3439,8 +3553,8 @@ describe("ExtensionRunner", () => {
 					...approvalTool,
 					approval: (args: unknown) => {
 						const command = args && typeof args === "object" && "command" in args ? args.command : undefined;
-						if (command !== "echo original" && !(args instanceof PrototypeSensitiveInput)) {
-							throw new Error("Approval input lost its prototype");
+						if (command !== "echo original" && args !== transformedInput) {
+							throw new Error("Approval input lost its source identity");
 						}
 						return "exec" as const;
 					},
@@ -3463,7 +3577,7 @@ describe("ExtensionRunner", () => {
 
 			it("owned policy re-resolution deny is authoritative before review", async () => {
 				const reviewHandler = vi.fn(async () => ({ decision: "approve" as const }));
-				const transformedInput = new PrototypeSensitiveInput("echo hi");
+				const transformedInput = { command: "echo hi" };
 				const runner = dispatchRunner([reviewHandler], [async () => ({ input: transformedInput })]);
 				const select = vi.fn(async () => "Approve");
 				initializeRunner(runner, select);
@@ -3472,7 +3586,7 @@ describe("ExtensionRunner", () => {
 					...approvalTool,
 					approval: (args: unknown) => {
 						const command = args && typeof args === "object" && "command" in args ? args.command : undefined;
-						if (command === "echo original" || args instanceof PrototypeSensitiveInput) {
+						if (command === "echo original" || args === transformedInput) {
 							return "exec" as const;
 						}
 						return { policy: "deny", tier: "exec", reason: "owned clone denied" } as const;
