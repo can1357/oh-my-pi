@@ -7,6 +7,7 @@ import { LspTool } from "../lsp/tool";
 import type { ToolSession } from "../tools";
 import { AstEditTool } from "../tools/ast-edit";
 import { WriteTool } from "../tools/write";
+import { stableJson } from "./canonical-json";
 import { ASSIGNMENT_TOOL_WORKER_SCHEMA } from "./tool-worker-protocol";
 
 const ASSIGNMENT_CAPABILITY_SCHEMA = "juiz.assignment-capability/1" as const;
@@ -36,13 +37,6 @@ function stringField(record: JsonRecord, field: string): string {
 async function sha256Hex(value: string): Promise<string> {
 	const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
 	return Buffer.from(digest).toString("hex");
-}
-
-function stableJson(value: unknown): string {
-	if (value === null || typeof value !== "object") return JSON.stringify(value);
-	if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
-	const entries = Object.entries(value as JsonRecord).sort(([left], [right]) => left.localeCompare(right));
-	return `{${entries.map(([key, entry]) => `${JSON.stringify(key)}:${stableJson(entry)}`).join(",")}}`;
 }
 
 async function effectiveArgsDigest(value: unknown): Promise<string> {

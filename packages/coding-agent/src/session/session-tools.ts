@@ -559,11 +559,9 @@ export class SessionTools {
 	}
 
 	#wrapRuntimeTool(tool: AgentTool): AgentTool {
+		const wrapped = wrapToolWithMetaNotice(tool);
 		const extensionRunner = this.#host.extensionRunner();
-		if (!extensionRunner) {
-			throw new Error(`Cannot register runtime tool "${tool.name}" without the universal capability gate`);
-		}
-		return new ExtensionToolWrapper(wrapToolWithMetaNotice(tool), extensionRunner);
+		return extensionRunner ? new ExtensionToolWrapper(wrapped, extensionRunner) : wrapped;
 	}
 
 	/** Installs and activates the ephemeral vibe tool set. */
@@ -863,7 +861,9 @@ export class SessionTools {
 
 	async #applyActiveToolsByName(toolNames: string[], forcePromptRefresh = false, signal?: AbortSignal): Promise<void> {
 		signal?.throwIfAborted();
-		toolNames = normalizeToolNames(toolNames);
+		toolNames = normalizeToolNames(
+			this.#toolRegistry.has("assignment_complete") ? [...toolNames, "assignment_complete"] : toolNames,
+		);
 		const codeMode = resolveCodeMode({
 			provider: this.#host.model()?.provider ?? "",
 			toolMode: this.#host.model()?.toolMode,

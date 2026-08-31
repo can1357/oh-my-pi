@@ -27,7 +27,6 @@ import {
 import { interceptUnhandledRejections } from "@oh-my-pi/pi-utils/postmortem";
 import { setProcessName } from "@oh-my-pi/pi-utils/process-name";
 import { declareWorkerHostEntry, installWorkerInbox, isWorkerHostSelector } from "@oh-my-pi/pi-utils/worker-host";
-import { runAssignmentToolWorker } from "./assignment-capability/tool-worker";
 import { ASSIGNMENT_TOOL_WORKER_ARG } from "./assignment-capability/tool-worker-protocol";
 import { BLOB_BROKER_WORKER_ARG } from "./blob-broker/protocol";
 import { installProfileAlias, resolveProfileAliasCommandFromProcess } from "./cli/profile-alias";
@@ -96,6 +95,7 @@ async function showHelp(config: CliConfig<CommandMetadata>): Promise<void> {
  */
 async function runSmokeTest(): Promise<void> {
 	const { smokeTestSyncWorker, startServer } = await import("@oh-my-pi/omp-stats");
+	const { smokeTestAssignmentToolWorker } = await import("./assignment-capability/tool-worker-client");
 	const { smokeTestTinyTitleWorker } = await import("./tiny/title-client");
 	const { smokeTestSttWorker } = await import("./stt/asr-client");
 	const { smokeTestTtsWorker } = await import("./tts/tts-client");
@@ -106,6 +106,7 @@ async function runSmokeTest(): Promise<void> {
 	const { smokeTestLspMux } = await import("./lsp/mux/daemon");
 	const { smokeTestBlobBroker } = await import("./blob-broker/daemon");
 	const { smokeTestTerminalOutputWorker } = await import("./launch/terminal-output-worker-client");
+	await smokeTestAssignmentToolWorker();
 	await smokeTestSyncWorker();
 
 	const statsServer = await startServer(0);
@@ -144,6 +145,9 @@ const MNEMOPI_EMBED_WORKER_ARG = "__omp_worker_mnemopi_embed";
 
 async function runWorkerEntrypoint(arg: string | undefined): Promise<boolean> {
 	if (arg === ASSIGNMENT_TOOL_WORKER_ARG) {
+		// This selector is the capability isolation boundary; keep its filesystem,
+		// LSP, and settings graph out of normal/profile-bootstrap CLI startup.
+		const { runAssignmentToolWorker } = await import("./assignment-capability/tool-worker");
 		await runAssignmentToolWorker();
 		return true;
 	}

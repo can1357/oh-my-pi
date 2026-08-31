@@ -89,10 +89,11 @@ describe("AgentSession memory backend lifecycle", () => {
 		return session;
 	}
 
-	it("switches runtime state, memory tools, and prompt in one apply", async () => {
+	it("switches runner-less memory runtime state, tools, and prompt in one apply", async () => {
 		const current = createSession(async () =>
 			settings.get("memory.backend") === "mnemopi" ? [createTool("retain"), createTool("memory_edit")] : [],
 		);
+		expect(current.extensionRunner).toBeUndefined();
 
 		settings.override("memory.backend", "mnemopi");
 		await current.applyMemoryBackend();

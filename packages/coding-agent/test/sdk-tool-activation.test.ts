@@ -543,6 +543,57 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		}
 	});
 
+	it("keeps registered Assignment completion active across direct and lifecycle tool selections", async () => {
+		const tempDir = makeTempDir();
+		const assignmentSelectionExtension: ExtensionFactory = pi => {
+			pi.registerTool({
+				name: "assignment_complete",
+				label: "Complete Assignment",
+				description: "Complete the active Assignment.",
+				parameters: type({}),
+				loadMode: "essential",
+				async execute() {
+					return { content: [{ type: "text", text: "complete" }] };
+				},
+			});
+			pi.on("session_start", async () => {
+				await pi.setActiveTools(["read"]);
+			});
+		};
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			extensions: [assignmentSelectionExtension],
+		});
+
+		try {
+			expect(session.getActiveToolNames()).toContain("assignment_complete");
+
+			await session.setActiveToolsByName(["read"]);
+			expect(session.getActiveToolNames()).toEqual(["read", "assignment_complete"]);
+
+			const runner = session.extensionRunner;
+			if (!runner) throw new Error("expected extension runner");
+			await runner.emit({ type: "session_start" });
+			expect(session.getActiveToolNames()).toEqual(["read", "assignment_complete"]);
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	it("does not inject Assignment completion into ordinary explicit tool selections", async () => {
+		const tempDir = makeTempDir();
+		const { session } = await createAgentSession(baseOptions(tempDir));
+
+		try {
+			await session.setActiveToolsByName(["read"]);
+
+			expect(session.getAllToolNames()).not.toContain("assignment_complete");
+			expect(session.getActiveToolNames()).toEqual(["read"]);
+		} finally {
+			await session.dispose();
+		}
+	});
+
 	it("deactivates an enabled tool when a late replacement is default-inactive", async () => {
 		const tempDir = makeTempDir();
 		const lateInactiveReplacement: ExtensionFactory = pi => {

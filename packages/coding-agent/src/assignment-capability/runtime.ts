@@ -1,3 +1,4 @@
+import { stableJson } from "./canonical-json";
 import type {
 	AssignmentCapabilityBinding,
 	AssignmentCapabilityLaunchOptions,
@@ -15,6 +16,8 @@ const CONNECT_TIMEOUT_MS = 5_000;
 const SAFE_CODE = /^[A-Z0-9_.-]{1,80}$/i;
 const MAX_RECONCILIATION_RESERVE_MS = 2_000;
 const MIN_RECONCILIATION_RESERVE_MS = 250;
+const TERMINATION_GRACE_MS = 50;
+const MIN_GATEWAY_ATTEMPT_MS = TERMINATION_GRACE_MS * 2 + 1;
 
 type JsonRecord = Record<string, unknown>;
 
@@ -77,18 +80,91 @@ function encodeFrame(value: unknown): Uint8Array {
 	return frame;
 }
 
-function goJsonString(value: string): string {
-	return JSON.stringify(value).replaceAll("\u2028", "\\u2028").replaceAll("\u2029", "\\u2029");
+class GatewayOutputOverflowError extends Error {}
+
+interface BoundedStreamRead {
+	readonly promise: Promise<string>;
+	cancel(): void;
 }
 
-function stableJson(value: unknown): string {
-	if (typeof value === "string") return goJsonString(value);
-	if (value === null || typeof value !== "object") return JSON.stringify(value);
-	if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
-	const entries = Object.entries(value as JsonRecord).sort(([left], [right]) =>
-		Buffer.from(left).compare(Buffer.from(right)),
-	);
-	return `{${entries.map(([key, entry]) => `${goJsonString(key)}:${stableJson(entry)}`).join(",")}}`;
+function readBoundedGatewayStream(stream: ReadableStream<Uint8Array>, capture: boolean): BoundedStreamRead {
+	const reader = stream.getReader();
+	let settled = false;
+	const chunks: Uint8Array[] = [];
+	const promise = (async () => {
+		let bytes = 0;
+		try {
+			while (true) {
+				const { value, done } = await reader.read();
+				if (done) break;
+				if (bytes + value.byteLength > MAX_FRAME_BYTES) throw new GatewayOutputOverflowError();
+				bytes += value.byteLength;
+				if (capture) chunks.push(value);
+			}
+			if (!capture) return "";
+			const output = new Uint8Array(bytes);
+			let offset = 0;
+			for (const chunk of chunks) {
+				output.set(chunk, offset);
+				offset += chunk.byteLength;
+			}
+			return new TextDecoder().decode(output);
+		} finally {
+			settled = true;
+			reader.releaseLock();
+		}
+	})();
+	return {
+		promise,
+		cancel: () => {
+			if (settled) return;
+			try {
+				void reader.cancel().catch(() => undefined);
+			} catch {
+				// The stream settled between the state check and cancellation.
+			}
+		},
+	};
+}
+
+function deadlineTimer(deadlineMillis: number): {
+	readonly promise: Promise<void>;
+	cancel(): void;
+} {
+	const { promise, resolve } = Promise.withResolvers<void>();
+	const timer = setTimeout(resolve, Math.max(0, deadlineMillis - Date.now()));
+	return { promise, cancel: () => clearTimeout(timer) };
+}
+
+async function waitForProcessExit(exitPromise: Promise<number>, deadlineMillis: number): Promise<boolean> {
+	if (Date.now() >= deadlineMillis) return false;
+	const timer = deadlineTimer(deadlineMillis);
+	try {
+		return await Promise.race([exitPromise.then(() => true), timer.promise.then(() => false)]);
+	} finally {
+		timer.cancel();
+	}
+}
+
+async function terminateGatewayProcess(
+	process: Bun.Subprocess,
+	exitPromise: Promise<number>,
+	deadlineMillis: number,
+): Promise<void> {
+	if (process.exitCode !== null) return;
+	try {
+		process.kill("SIGTERM");
+	} catch {
+		// The process exited between the exit-code check and the signal.
+	}
+	const gracefulDeadline = Math.min(deadlineMillis, Date.now() + TERMINATION_GRACE_MS);
+	if (await waitForProcessExit(exitPromise, gracefulDeadline)) return;
+	try {
+		process.kill("SIGKILL");
+	} catch {
+		// The process exited between the grace period and escalation.
+	}
+	await waitForProcessExit(exitPromise, Math.min(deadlineMillis, Date.now() + TERMINATION_GRACE_MS));
 }
 
 function denial(code?: unknown): Error {
@@ -111,6 +187,9 @@ export async function callAssignmentGateway(
 		Math.max(MIN_RECONCILIATION_RESERVE_MS, Math.floor(remaining / 4)),
 	);
 	const firstAttemptTimeout = Math.max(1, remaining - reconciliationReserve);
+	if (firstAttemptTimeout < MIN_GATEWAY_ATTEMPT_MS) {
+		return callAssignmentGatewayOnce(argv, request, deadlineMillis - Date.now());
+	}
 	try {
 		return await callAssignmentGatewayOnce(argv, request, firstAttemptTimeout);
 	} catch (error) {
@@ -126,7 +205,9 @@ async function callAssignmentGatewayOnce(
 	request: Readonly<JsonRecord>,
 	timeoutMs: number,
 ): Promise<unknown> {
-	if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw denial("GATEWAY_TIMEOUT");
+	if (!Number.isFinite(timeoutMs) || timeoutMs < MIN_GATEWAY_ATTEMPT_MS) throw denial("GATEWAY_TIMEOUT");
+	const attemptDeadline = Date.now() + timeoutMs;
+	const ioDeadline = attemptDeadline - TERMINATION_GRACE_MS * 2;
 	const process = Bun.spawn([...argv], {
 		cwd: "/",
 		env: { PATH: Bun.env.PATH ?? "" },
@@ -134,23 +215,45 @@ async function callAssignmentGatewayOnce(
 		stdout: "pipe",
 		stderr: "pipe",
 	});
-	process.stdin.write(JSON.stringify(request));
-	process.stdin.end();
-	const stdoutPromise = new Response(process.stdout as ReadableStream<Uint8Array>).text();
-	const stderrPromise = new Response(process.stderr as ReadableStream<Uint8Array>).text();
+	const stdout = readBoundedGatewayStream(process.stdout as ReadableStream<Uint8Array>, true);
+	const stderr = readBoundedGatewayStream(process.stderr as ReadableStream<Uint8Array>, false);
 	const exitPromise = process.exited;
-	const timeout = Bun.sleep(Math.max(1, timeoutMs)).then(() => "timeout" as const);
-	const outcome = await Promise.race([exitPromise, timeout]);
-	if (outcome === "timeout") {
-		process.kill();
-		await Promise.allSettled([stdoutPromise, stderrPromise, exitPromise]);
-		throw new GatewayAmbiguityError("GATEWAY_TIMEOUT");
+	const completed = Promise.all([exitPromise, stdout.promise, stderr.promise]);
+	const timeout = deadlineTimer(ioDeadline);
+	let output: string;
+	try {
+		process.stdin.write(JSON.stringify(request));
+		process.stdin.end();
+		const outcome = await Promise.race([
+			completed.then(([exitCode, stdoutText]) => ({
+				kind: "complete" as const,
+				exitCode,
+				stdout: stdoutText,
+			})),
+			timeout.promise.then(() => ({ kind: "timeout" as const })),
+		]);
+		if (outcome.kind === "timeout") throw new GatewayAmbiguityError("GATEWAY_TIMEOUT");
+		if (outcome.exitCode !== 0) throw new GatewayAmbiguityError("GATEWAY_UNAVAILABLE");
+		output = outcome.stdout;
+	} catch (error) {
+		stdout.cancel();
+		stderr.cancel();
+		try {
+			process.stdin.end();
+		} catch {
+			// The subprocess may already have closed its input pipe.
+		}
+		await terminateGatewayProcess(process, exitPromise, attemptDeadline);
+		if (error instanceof GatewayOutputOverflowError) {
+			throw new GatewayAmbiguityError("GATEWAY_UNAVAILABLE");
+		}
+		throw error;
+	} finally {
+		timeout.cancel();
 	}
-	const [stdout] = await Promise.all([stdoutPromise, stderrPromise]);
-	if (outcome !== 0 || stdout.length > MAX_FRAME_BYTES) throw new GatewayAmbiguityError("GATEWAY_UNAVAILABLE");
 	let decoded: JsonRecord;
 	try {
-		decoded = object(JSON.parse(stdout));
+		decoded = object(JSON.parse(output));
 	} catch {
 		throw new GatewayAmbiguityError("GATEWAY_INVALID_RESPONSE");
 	}
@@ -321,15 +424,20 @@ class HerdrCapabilityClient {
 	async connect(): Promise<void> {
 		let settled = false;
 		const { promise, resolve, reject } = Promise.withResolvers<void>();
-		const timer = setTimeout(
-			() => reject(new Error("Assignment capability denied: Herdr unavailable")),
-			CONNECT_TIMEOUT_MS,
-		);
-		void promise.finally(() => clearTimeout(timer));
+		const unavailable = (): void => {
+			if (settled) return;
+			settled = true;
+			reject(new Error("Assignment capability denied: Herdr unavailable"));
+		};
+		const timer = setTimeout(unavailable, CONNECT_TIMEOUT_MS);
 		void Bun.connect({
 			unix: this.#options.herdrSocketPath,
 			socket: {
 				open: socket => {
+					if (settled) {
+						socket.end();
+						return;
+					}
 					this.#socket = socket;
 					settled = true;
 					resolve();
@@ -337,12 +445,16 @@ class HerdrCapabilityClient {
 				data: (_socket, data) => this.#receive(new Uint8Array(data)),
 				close: () => this.#failAll(new Error("Assignment capability denied: Herdr connection closed")),
 				error: (_socket, error) => {
-					if (!settled) reject(new Error("Assignment capability denied: Herdr unavailable"));
+					unavailable();
 					this.#failAll(error instanceof Error ? error : new Error(String(error)));
 				},
 			},
-		}).catch(() => reject(new Error("Assignment capability denied: Herdr unavailable")));
-		await promise;
+		}).catch(unavailable);
+		try {
+			await promise;
+		} finally {
+			clearTimeout(timer);
+		}
 		const requestId = crypto.randomUUID();
 		const response = await this.#request({
 			schema: ASSIGNMENT_CAPABILITY_SCHEMA,

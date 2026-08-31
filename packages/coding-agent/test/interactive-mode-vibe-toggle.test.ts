@@ -143,7 +143,8 @@ describe("InteractiveMode vibe mode toggle", () => {
 		tempDir.removeSync();
 	});
 
-	it("preserves the parent Todo tool and restores the exact pre-vibe toolset on exit", async () => {
+	it("runs the runner-less vibe lifecycle and restores the exact pre-vibe toolset on exit", async () => {
+		expect(session.extensionRunner).toBeUndefined();
 		expect(session.getAllToolNames().toSorted()).toEqual(["read", "todo"]);
 		expect(session.getActiveToolNames()).toEqual([]);
 
