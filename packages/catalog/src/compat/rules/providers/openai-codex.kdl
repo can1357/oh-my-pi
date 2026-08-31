@@ -1,0 +1,112 @@
+// Provider-wire compat for "openai-codex"; regenerated from the frozen census using deployment contract selectors.
+
+provider "openai-codex" {
+	// Subscription (Codex) discovery reports no pricing; the curated Daybreak
+	// aliases carry the standard GPT-5.6 Sol/Cyber API list price so cost
+	// display reads as API-equivalent spend. The `-wm` worker sibling bills
+	// like its plain counterpart.
+	models "gpt-daybreak-blue-latest" "gpt-daybreak-blue-latest-wm" {
+		cost-patch {
+			input 5.0
+			output 30.0
+			cache-read 0.5
+			cache-write 6.25
+		}
+	}
+	models "gpt-daybreak-red-latest" "gpt-daybreak-red-latest-wm" {
+		cost-patch {
+			input 12.5
+			output 75.0
+			cache-read 1.25
+			cache-write 15.625
+		}
+	}
+	class "openai" {
+		revision ">=5.3 <5.7" {
+			thinking-mode "effort"
+		}
+		// gpt-5.4 wire generation: `reasoning.context: "all_turns"` and
+		// `reasoning.summary` become accepted; earlier Codex ids reject them.
+		revision ">=5.4" {
+			supports-all-turns-reasoning-context #true
+		}
+		revision "<5.4" {
+			supports-reasoning-summary #false
+		}
+		// Subscription Codex rates the priority service tier at 2.5x for the
+		// GPT-5.5 generation (2x elsewhere).
+		revision "=5.5" {
+			service-tier-cost {
+				priority 2.5
+			}
+		}
+		// Codex discovery reports inconsistent priorities for the GPT-5.4
+		// family; normalize by variant. Mini/nano also keep the lower prompt
+		// budget despite their plain OpenAI ids.
+		family "gpt" {
+			revision "=5.4" {
+				priority 0
+				models "*-mini*" {
+					priority 1
+					limits-patch {
+						context-window 272000
+					}
+				}
+				models "*-nano*" {
+					priority 2
+					limits-patch {
+						context-window 272000
+					}
+				}
+			}
+		}
+		// First-party GPT-5 Responses SKUs support the freeform apply_patch
+		// custom tool with a Lark grammar.
+		revision ">=5 <6" {
+			apply-patch-tool-type "freeform"
+		}
+	}
+	// Rolling Daybreak aliases ride the 5.6 wire generation.
+	class "unknown" {
+		revision ">=5.4" {
+			supports-all-turns-reasoning-context #true
+		}
+		revision ">=5.6" {
+			requires-reasoning-off-juice-instruction #true
+		}
+	}
+	// Subscription Codex SKUs use the same whole-request premium tier as the
+	// first-party API once prompt input exceeds 272K tokens.
+	models "gpt-5.6-luna*" {
+		long-context-cost {
+			inputThreshold 272000
+			input 0.4
+			output 1.8
+			cacheRead 0.04
+			cacheWrite 0.5
+		}
+	}
+	models "gpt-5.6-sol*" "gpt-5.6" {
+		long-context-cost {
+			inputThreshold 272000
+			input 10.0
+			output 45.0
+			cacheRead 1.0
+			cacheWrite 12.5
+		}
+	}
+	models "gpt-5.6-terra*" {
+		long-context-cost {
+			inputThreshold 272000
+			input 4.0
+			output 18.0
+			cacheRead 0.4
+			cacheWrite 5.0
+		}
+	}
+	// OpenAI enabled a 1M window for subscription Codex GPT-5.6 (2026-08-16);
+	// the Codex model registry still reports the stale 272000 figure.
+	models "gpt-5.6-luna" "gpt-5.6-sol" "gpt-5.6-terra" {
+		context-window-floor 1000000
+	}
+}

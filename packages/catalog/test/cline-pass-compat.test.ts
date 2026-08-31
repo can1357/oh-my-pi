@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { toClinePassPublicModelId, toClinePassWireModelId } from "@oh-my-pi/pi-catalog/cline-pass-model-id";
-import { buildOpenAICompat } from "@oh-my-pi/pi-catalog/compat/openai";
+import { resolveModelPolicy } from "@oh-my-pi/pi-catalog/compat/resolve";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { getBundledModels } from "@oh-my-pi/pi-catalog/models";
 import {
@@ -95,11 +95,13 @@ describe("ClinePass catalog", () => {
 
 	it("bundles the full current roster for offline startup", () => {
 		expect(getBundledModels("cline-pass").map(model => model.id)).toEqual([
+			"cline-free/longcat-2.0",
 			"deepseek-v4-flash",
 			"deepseek-v4-pro",
 			"deepseek/deepseek-v4-flash",
 			"glm-5.2",
 			"glm-5.3",
+			"glm-5.3-flash",
 			"kimi-k2.6",
 			"kimi-k2.7-code",
 			"kimi-k3",
@@ -110,7 +112,7 @@ describe("ClinePass catalog", () => {
 			"qwen3.7-max",
 			"qwen3.7-plus",
 			"qwen3.8-max",
-			"stealth/ox-alpha",
+			"z-ai/glm-5.3-flash",
 		]);
 	});
 
@@ -125,12 +127,12 @@ describe("ClinePass catalog", () => {
 		const reference = createReferenceResolver<"openai-completions">(new Map())("kimi-k3");
 
 		expect(reference?.provider).toBe("fireworks");
-		expect(reference?.maxTokens).toBe(131_072);
+		expect(reference?.maxTokens).toBe(1_048_576);
 	});
 
 	it("applies the verified Cline gateway request and reasoning compatibility", () => {
 		const model = sourceModel("kimi-k3");
-		const compat = buildOpenAICompat(model);
+		const compat = resolveModelPolicy(model).compat;
 
 		expect(compat.wireModelIdMode).toBe("cline-pass");
 		expect(compat.maxTokensField).toBe("max_completion_tokens");
@@ -150,7 +152,7 @@ describe("ClinePass catalog", () => {
 	});
 
 	it("downgrades forced tools for ClinePass Qwen without requiring reasoning replay", () => {
-		const compat = buildOpenAICompat(sourceModel("qwen3.7-max"));
+		const compat = resolveModelPolicy(sourceModel("qwen3.7-max")).compat;
 
 		expect(compat.supportsForcedToolChoice).toBe(false);
 		expect(compat.reasoningContentField).toBe("reasoning");
@@ -372,7 +374,7 @@ describe("ClinePass catalog", () => {
 		// …but the reference's native-host dialect does not: the gateway keeps the
 		// cline-pass `reasoning` field with family-scoped replay (DeepSeek requires
 		// it), and the bucket-derived raw tag keeps the id unprefixed on the wire.
-		const enrichedCompat = buildOpenAICompat(enriched);
+		const enrichedCompat = resolveModelPolicy(enriched).compat;
 		expect(enrichedCompat.wireModelIdMode).toBe("raw");
 		expect(enrichedCompat.reasoningContentField).toBe("reasoning");
 		expect(enrichedCompat.requiresReasoningContentForToolCalls).toBe(true);
@@ -393,7 +395,7 @@ describe("ClinePass catalog", () => {
 			maxTokens: 8_192,
 		});
 		// The cline-free/ shape Cline's SDK reserves passes through raw as well.
-		expect(buildOpenAICompat(models?.[4] as ModelSpec<"openai-completions">).wireModelIdMode).toBe("raw");
+		expect(resolveModelPolicy(models?.[4] as ModelSpec<"openai-completions">).compat.wireModelIdMode).toBe("raw");
 	});
 
 	it("skips malformed free entries without touching the pass roster", async () => {
@@ -419,6 +421,8 @@ describe("ClinePass catalog", () => {
 		expect(models?.map(model => model.id)).toEqual(["kimi-k3", "nvidia/nemotron-3.5-lightning"]);
 		// The pass entry keeps its enriched bundled metadata and cline-pass wire mode.
 		expect(models?.[0]?.maxTokens).toBe(1_048_576);
-		expect(buildOpenAICompat(models?.[0] as ModelSpec<"openai-completions">).wireModelIdMode).toBe("cline-pass");
+		expect(resolveModelPolicy(models?.[0] as ModelSpec<"openai-completions">).compat.wireModelIdMode).toBe(
+			"cline-pass",
+		);
 	});
 });

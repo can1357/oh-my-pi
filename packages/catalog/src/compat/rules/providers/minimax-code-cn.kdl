@@ -1,0 +1,11 @@
+// Provider-wire compat for "minimax-code-cn"; regenerated from the frozen census using deployment contract selectors.
+
+provider "minimax-code-cn" {
+	class "minimax" {
+		thinking-mode "effort"
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "MiniMax-M3" {
+		thinking-efforts "minimal" "low" "medium" "high"
+	}
+}
