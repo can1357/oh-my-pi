@@ -1842,6 +1842,52 @@ describe("RelayBridge tab grouping", () => {
 		expect(ext2.rpcs("send")).toHaveLength(1);
 	});
 
+	it("preserves packet-loss-only network profiles across recovery", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		const pageSession = await attachPage(bridge, ext, cdp, connId, 1);
+
+		const throttling = {
+			offline: false,
+			latency: 0,
+			downloadThroughput: -1,
+			uploadThroughput: -1,
+			packetLoss: 10,
+		};
+
+		const commandId = ++msgSeq;
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({
+				id: commandId,
+				sessionId: pageSession,
+				method: "Network.emulateNetworkConditions",
+				params: throttling,
+			}),
+		);
+		await flush();
+		ack(bridge, ext, "send");
+		await flush();
+		expect(cdp.messages.filter(message => message.id === commandId && "result" in message)).toHaveLength(1);
+
+		bridge.extClosed(ext);
+		const ext2 = new FakeExtSocket();
+		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], { recoverableTabIds: [1] });
+		await waitFor(() => ext2.rpcs("attach").length === 1, "recovery reattach RPC");
+		ack(bridge, ext2, "attach");
+
+		await waitFor(() => ext2.rpcs("send").length === 1, "packet-loss replay");
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual(["Network.emulateNetworkConditions"]);
+		expect(ext2.rpcs("send")[0]!.params).toEqual(throttling);
+		ack(bridge, ext2, "send");
+		await flush();
+
+		expect(ext2.rpcs("send")).toHaveLength(1);
+	});
+
 	it("replays preserved CPU throttling across recovery", async () => {
 		const bridge = new RelayBridge({});
 		const ext = new FakeExtSocket();
