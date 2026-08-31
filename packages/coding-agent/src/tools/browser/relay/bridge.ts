@@ -1432,6 +1432,7 @@ export class RelayBridge {
 			case "Emulation.setTimezoneOverride":
 			case "Emulation.setDefaultBackgroundColorOverride":
 			case "Emulation.setPageScaleFactor":
+			case "Emulation.resetPageScaleFactor":
 			case "Emulation.setEmulatedVisionDeficiency":
 			case "Emulation.setCPUThrottlingRate":
 			case "Emulation.setScriptExecutionDisabled":

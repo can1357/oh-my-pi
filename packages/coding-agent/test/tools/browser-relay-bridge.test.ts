@@ -2825,6 +2825,73 @@ describe("RelayBridge tab grouping", () => {
 		expect(ext2.rpcs("send")).toHaveLength(0);
 	});
 
+	it("tracks a page-scale reset while it is in flight so owner cleanup wins", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const owner = new FakeCdpSocket();
+		const ownerConn = bridge.cdpConnected(owner);
+		const ownerSession = await attachPage(bridge, ext, owner, ownerConn, 1);
+		const holder = new FakeCdpSocket();
+		const holderConn = bridge.cdpConnected(holder);
+		const holderSession = await attachPage(bridge, ext, holder, holderConn, 1);
+
+		bridge.cdpMessage(
+			ownerConn,
+			JSON.stringify({
+				id: ++msgSeq,
+				sessionId: ownerSession,
+				method: "Emulation.setPageScaleFactor",
+				params: { pageScaleFactor: 1.5 },
+			}),
+		);
+		await flush();
+		ack(bridge, ext, "send");
+		await flush();
+
+		bridge.cdpMessage(
+			holderConn,
+			JSON.stringify({
+				id: ++msgSeq,
+				sessionId: holderSession,
+				method: "Emulation.resetPageScaleFactor",
+			}),
+		);
+		await flush();
+		expect(ext.rpcs("send").map(rpc => rpc.method)).toEqual([
+			"Emulation.setPageScaleFactor",
+			"Emulation.resetPageScaleFactor",
+		]);
+
+		bridge.cdpClosed(holderConn);
+		ack(bridge, ext, "send");
+		await flush();
+
+		const commandId = ++msgSeq;
+		bridge.cdpMessage(
+			ownerConn,
+			JSON.stringify({ id: commandId, sessionId: ownerSession, method: "Network.getCookies" }),
+		);
+		await flush();
+		expect(ext.rpcs("send").map(rpc => rpc.method)).toEqual([
+			"Emulation.setPageScaleFactor",
+			"Emulation.resetPageScaleFactor",
+			"Network.getCookies",
+		]);
+		ack(bridge, ext, "send", { cookies: [] });
+		await flush();
+		expect(owner.messages.filter(message => message.id === commandId && "result" in message)).toHaveLength(1);
+
+		bridge.extClosed(ext);
+		const ext2 = new FakeExtSocket();
+		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], { recoverableTabIds: [1] });
+		await waitFor(() => ext2.rpcs("attach").length === 1, "page-scale reset cleanup recovery attach RPC");
+		ack(bridge, ext2, "attach");
+		await flush();
+
+		expect(ext2.rpcs("send")).toHaveLength(0);
+	});
+
 	it("does not replay a cleared persistent root setter after recovery", async () => {
 		const bridge = new RelayBridge({});
 		const ext = new FakeExtSocket();
