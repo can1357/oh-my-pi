@@ -247,6 +247,7 @@ export interface SessionAdvisorsHost {
 	onSseEvent: SimpleStreamOptions["onSseEvent"] | undefined;
 	isDisposed(): boolean;
 	abortInProgress(): boolean;
+	isAgentConnected(): boolean;
 	allowAgentInitiatedTurns(): boolean;
 	planModeState(): PlanModeState | undefined;
 	clientBridge(): ClientBridge | undefined;
@@ -628,7 +629,7 @@ export class SessionAdvisors {
 
 	/** Testable settle transition: preserve deferred notes once the primary loop is idle. */
 	preserveDeferredAdviceNow(): void {
-		if (this.#host.agent.state.isStreaming || this.#host.abortInProgress()) return;
+		if (!this.#host.isAgentConnected() || this.#host.agent.state.isStreaming || this.#host.abortInProgress()) return;
 		for (const card of this.drainDeferredAdvice()) this.#host.preserveAdvisorCard(card);
 	}
 

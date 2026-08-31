@@ -1609,6 +1609,7 @@ export class AgentSession {
 			onSseEvent: this.#onSseEvent,
 			isDisposed: () => this.#isDisposed,
 			abortInProgress: () => this.#abortInProgress,
+			isAgentConnected: () => this.#unsubscribeAgent !== undefined,
 			allowAgentInitiatedTurns: () => this.#allowAcpAgentInitiatedTurns,
 			planModeState: () => this.#planModeState,
 			clientBridge: () => this.#clientBridge,
@@ -4096,6 +4097,7 @@ export class AgentSession {
 	#reconnectToAgent(): void {
 		if (this.#unsubscribeAgent) return; // Already connected
 		this.#unsubscribeAgent = this.agent.subscribe(this.#handleAgentEvent);
+		this.#preserveSettledDeferredAdvice();
 	}
 
 	#activeProviderSessionId(sessionId?: string): string {
