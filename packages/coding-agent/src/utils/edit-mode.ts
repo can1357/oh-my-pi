@@ -36,7 +36,8 @@ function modelSupportsHashlineEdits(modelId: string): boolean {
 		identity.class === "kimi" ||
 		identity.class === "mimo" ||
 		(identity.class === "deepseek" && identity.family === "flash") ||
-		identity.class === "stepfun"
+		identity.class === "stepfun" ||
+		(identity.class === "glm" && identity.family === "flash")
 	);
 }
 
