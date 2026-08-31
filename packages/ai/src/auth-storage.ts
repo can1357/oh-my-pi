@@ -5696,16 +5696,17 @@ export class AuthStorage {
 			if (hasUsableSibling) return undefined;
 			const held = this.#activeTurnReservation(blockedId, this.getCredentialIncarnation(blockedId));
 			if (held && held.requestId !== options?.requestId) return undefined;
+			// Probe leases only release via request-keyed #inflightProbes — never
+			// acquire one without a requestId that can settle or clear it.
+			if (!options?.requestId) return undefined;
 			const probeScope = blockScope ?? "";
 			const lease = this.tryAcquireQuotaProbeLease(blockedId, probeScope);
 			if (!lease) return undefined;
-			if (options?.requestId) {
-				this.#inflightProbes.set(options.requestId, {
-					credentialId: blockedId,
-					blockScope: probeScope,
-					leaseId: lease,
-				});
-			}
+			this.#inflightProbes.set(options.requestId, {
+				credentialId: blockedId,
+				blockScope: probeScope,
+				leaseId: lease,
+			});
 		}
 		if (options?.requestId) {
 			const reserveId = this.#getStoredCredentials(provider)[selection.index]?.id;

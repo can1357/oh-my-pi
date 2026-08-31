@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Quota probe leases are not acquired without a `requestId` that can settle or release them.
 - Fixed Gemini responses dropping `toolCall` blocks (now encoded as `functionCall` parts).
 - Fixed OAuth quota probing acquiring an immortal lease when `getApiKey` is called without `requestId`.
 - Fixed Gemini `generateContent` defaulting to SSE; streaming now follows `streamGenerateContent` (or an explicit `stream` body field).
