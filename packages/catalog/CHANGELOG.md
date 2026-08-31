@@ -11,6 +11,7 @@
 ### Fixed
 
 - Grok Bot offline seeds stay neutral for image input and output caps so live AvailableModels rows are not enriched on merge.
+- Grok Bot bundled catalog no longer fabricates output caps from canonical or stencil.so fallbacks; reviewed limits stay KDL-owned.
 - Grok Bot live models with unrecognized-only effort vocabularies keep no thinking ladder after `buildModel` (KDL no longer backfills).
 - Grok Bot offline `sandParameterIds` for `grok-4.6` come from provider KDL (`sand-parameter-ids`) via `buildModel`, not TypeScript seed tables.
 - Grok Bot thinking fallback suppression uses KDL `preserve-authored-thinking` in `buildModel` (no provider/API TypeScript branch).

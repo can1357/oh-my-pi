@@ -215,6 +215,12 @@ export function applyCanonicalLimitFallback(models: ModelSpec<Api>[]): void {
 	const referenceIndex = buildModelReferenceIndex(catalog);
 
 	for (const model of models) {
+		// Credential-scoped sand rows: live AvailableModels owns output caps.
+		// Reviewed limits arrive via KDL (`limits-patch`, `context-window-floor`)
+		// in `buildModel`, not from unrelated canonical-family references.
+		if (model.provider === "grokbot") {
+			continue;
+		}
 		if (model.contextWindow !== null && model.maxTokens !== null) {
 			continue;
 		}

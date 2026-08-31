@@ -3,6 +3,7 @@ import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import type { Api, Model, ModelSpec, Provider } from "@oh-my-pi/pi-catalog/types";
 import {
 	applyAntigravityPricingFallback,
+	applyCanonicalLimitFallback,
 	applyGeneratedModelPolicies,
 	applyOllamaCloudOutputCap,
 	linkOpenAIPromotionTargets,
@@ -878,6 +879,17 @@ describe("Grok Bot generated thinking policy", () => {
 			maxTokens: null,
 		});
 		expect(live.thinking).toBeUndefined();
+	});
+
+	it("keeps grokbot offline seeds free of canonical maxTokens fallback before buildModel", () => {
+		const models = buildGrokbotStaticSeed().map(seed => ({ ...seed }));
+		applyCanonicalLimitFallback(models);
+		for (const model of models) {
+			expect(model.maxTokens).toBeNull();
+		}
+		const built = buildModel(models.find(m => m.id === "sand-default")!);
+		expect(built.maxTokens).toBeNull();
+		expect(built.contextWindow).toBe(200_000);
 	});
 
 	it("applies reviewed context-window-floor to known routers when discovery left limits unset", () => {
