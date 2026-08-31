@@ -138,6 +138,21 @@ describe("holdSseUntilCommit (prelude replay buffer)", () => {
 		expect(gate.state).toBe("committed");
 	});
 
+	it("observes output-plus-terminal frames in one chunk", async () => {
+		const gate = new StreamCommitGate();
+		const held = holdSseUntilCommit(
+			sse([
+				"event: response.output_text.delta\ndata: {\"delta\":\"hi\"}\n\nevent: response.failed\ndata: {}\n\n",
+			]),
+			gate,
+		);
+		const out = await collect(held);
+		expect(out).toContain("response.output_text.delta");
+		expect(out).toContain("response.failed");
+		expect(gate.state).toBe("terminated");
+		expect(gate.sawSuccessfulTerminal).toBe(false);
+	});
+
 	it("observes terminals after commit while forwarding unchanged", async () => {
 		const gate = new StreamCommitGate();
 		const held = holdSseUntilCommit(

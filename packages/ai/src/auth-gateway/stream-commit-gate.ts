@@ -206,6 +206,10 @@ export function holdSseUntilCommit(
 					pending = next.rest;
 					next = nextSseFrame(pending);
 					if (state === "terminated") {
+						if (committed) {
+							// Post-commit terminal in the same chunk: observation only.
+							continue;
+						}
 						if (gate.sawSuccessfulTerminal) {
 							// Metadata-only success (created → completed/incomplete):
 							// flush the held prelude and finish without failover.
@@ -221,8 +225,13 @@ export function holdSseUntilCommit(
 					if (state === "committed") {
 						committed = true;
 						for (const held of gate.takePrelude() ?? []) controller.enqueue(held);
-						return;
+						// Keep parsing sibling frames in this chunk (e.g. output+failed)
+						// so the gate can still transition committed→terminated.
+						continue;
 					}
+				}
+				if (committed) {
+					controller.enqueue(chunk);
 				}
 			},
 			flush(controller) {

@@ -1232,6 +1232,7 @@ function authCredentialEquals(left: AuthCredential, right: AuthCredential): bool
 		left.expires === right.expires &&
 		left.accountId === right.accountId &&
 		left.email === right.email &&
+		left.orgId === right.orgId &&
 		left.projectId === right.projectId &&
 		left.enterpriseUrl === right.enterpriseUrl
 	);
