@@ -266,12 +266,15 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	hasSteeringMessages?: () => boolean | SteeringQueueState | Promise<boolean | SteeringQueueState>;
 
 	/**
-	 * Wakes the in-flight tool interrupt watcher when a steering message is queued.
-	 * The callback must not consume the queue; the loop still calls
-	 * {@link hasSteeringMessages} before aborting and injects through
-	 * {@link getSteeringMessages}.
+	 * Wakes the in-flight tool interrupt watcher when any steering message is
+	 * queued. Used only when global interrupt mode is `immediate`.
 	 */
 	waitForSteeringMessages?: (signal?: AbortSignal) => Promise<void>;
+	/**
+	 * Wakes only when steering marked as an immediate override enters the active
+	 * dequeue window. Used when global interrupt mode is `wait`.
+	 */
+	waitForImmediateSteeringMessages?: (signal?: AbortSignal) => Promise<void>;
 
 	/**
 	 * Peeks whether IRC messages should interrupt an interruptible waiting tool.

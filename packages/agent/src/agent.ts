@@ -1127,12 +1127,12 @@ export class Agent {
 		return this.#steeringQueue.some(message => this.#isImmediateSteering(message));
 	}
 
-	#waitForSteeringMessages(signal?: AbortSignal): Promise<void> {
-		if (this.#hasImmediateSteeringInWindow() || signal?.aborted) {
+	#waitForSteeringMessages(signal?: AbortSignal, immediateOnly = false): Promise<void> {
+		if ((immediateOnly ? this.#hasImmediateSteeringInWindow() : this.#steeringQueue.length > 0) || signal?.aborted) {
 			return Promise.resolve();
 		}
 		const { promise, resolve } = Promise.withResolvers<void>();
-		const waiter = { immediateOnly: this.#interruptMode === "wait", resolve };
+		const waiter = { immediateOnly, resolve };
 		const onAbort = (): void => resolve();
 		this.#steeringWaiters.add(waiter);
 		signal?.addEventListener("abort", onAbort, { once: true });
@@ -1529,6 +1529,7 @@ export class Agent {
 				};
 			},
 			waitForSteeringMessages: signal => this.#waitForSteeringMessages(signal),
+			waitForImmediateSteeringMessages: signal => this.#waitForSteeringMessages(signal, true),
 			hasIrcInterrupts: this.hasIrcInterrupts,
 			getFollowUpMessages: signal => this.#dequeueFollowUpMessagesAfterHooks(signal),
 			getAsideMessages: async () => (await this.#asideMessageProvider?.()) ?? [],

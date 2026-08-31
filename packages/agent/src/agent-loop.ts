@@ -2314,6 +2314,7 @@ async function executeToolCalls(
 	const tools = currentContext.tools;
 	const {
 		hasSteeringMessages,
+		waitForImmediateSteeringMessages,
 		hasIrcInterrupts,
 		interruptMode = "immediate",
 		getToolContext,
@@ -2724,10 +2725,13 @@ async function executeToolCalls(
 	// (auto-background bash), and skips not-yet-started tools, so the boundary
 	// dequeue below injects the message promptly. Gated on immediate-interrupt
 	// mode; checkSteering is idempotent (no-op once triggered).
+	const waitForInterruptingSteering = globalInterruptsImmediate
+		? config.waitForSteeringMessages
+		: waitForImmediateSteeringMessages;
 	const watchSteeringWhileRunning =
 		hasSteeringMessages !== undefined || (globalInterruptsImmediate && hasIrcInterrupts !== undefined);
 	const eventDrivenSteeringWatch =
-		watchSteeringWhileRunning && config.waitForSteeringMessages !== undefined && hasSteeringMessages !== undefined;
+		watchSteeringWhileRunning && waitForInterruptingSteering !== undefined && hasSteeringMessages !== undefined;
 	const steeringWatchAbortController = new AbortController();
 	const steeringWatchSignal = signal
 		? AbortSignal.any([signal, steeringWatchAbortController.signal])
@@ -2750,7 +2754,7 @@ async function executeToolCalls(
 					// race where a steer arrives after a check but before listener
 					// registration: the subsequent check observes queued state,
 					// while later arrivals resolve this already-installed wait.
-					const steeringQueued = config.waitForSteeringMessages?.(steeringWatchSignal).then(
+					const steeringQueued = waitForInterruptingSteering?.(steeringWatchSignal).then(
 						() => true,
 						() => false,
 					);
@@ -2760,14 +2764,6 @@ async function executeToolCalls(
 					);
 					if (!(await Promise.race([steeringChecked, watchAbortedFalse]))) return;
 					if (steeringWatchSignal.aborted || interruptState.triggered) return;
-					if (!globalInterruptsImmediate) {
-						const state = await hasSteeringMessages?.();
-						if (typeof state === "boolean" || state?.immediate !== true) {
-							if (!(await Promise.race([steeringQueued, watchAbortedFalse]))) return;
-							if (!steeringWatchSignal.aborted) await Bun.sleep(STEERING_INTERRUPT_POLL_MS);
-							continue;
-						}
-					}
 					if (!(await Promise.race([steeringQueued, watchAbortedFalse]))) return;
 				}
 			})()
