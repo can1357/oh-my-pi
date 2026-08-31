@@ -2623,6 +2623,14 @@ describe("ExtensionRunner", () => {
 				__reviewController?: AbortController;
 				__reviewEntered?: () => void;
 			};
+			class PrototypeSensitiveInput {
+				command: string;
+
+				constructor(command: string) {
+					this.command = command;
+				}
+			}
+
 			const setTrace = (): Array<Record<string, unknown>> => {
 				const trace: Array<Record<string, unknown>> = [];
 				globalWithReview.__reviewTrace = trace;
@@ -3418,6 +3426,68 @@ describe("ExtensionRunner", () => {
 				expect(trace).toContainEqual({ kind: "requested" });
 				expect(trace).toContainEqual({ kind: "resolved", approved: true });
 				expect(executed[0]).toBe(params);
+			});
+
+			it("owned policy re-resolution failure skips review and uses native approval", async () => {
+				const reviewHandler = vi.fn(async () => ({ decision: "approve" as const }));
+				const transformedInput = new PrototypeSensitiveInput("echo hi");
+				const runner = dispatchRunner([reviewHandler], [async () => ({ input: transformedInput })]);
+				const select = vi.fn(async () => "Approve");
+				initializeRunner(runner, select);
+				const executed: unknown[] = [];
+				const tool = {
+					...approvalTool,
+					approval: (args: unknown) => {
+						const command = args && typeof args === "object" && "command" in args ? args.command : undefined;
+						if (command !== "echo original" && !(args instanceof PrototypeSensitiveInput)) {
+							throw new Error("Approval input lost its prototype");
+						}
+						return "exec" as const;
+					},
+					execute: async (_toolCallId: string, params: unknown) => {
+						executed.push(params);
+						return { content: [{ type: "text" as const, text: "ok" }] };
+					},
+				};
+
+				const result = await executeReviewCase(runner, tool, "call-owned-resolution-failure", {
+					params: { command: "echo original" },
+				});
+
+				expect(firstReviewText(result)).toBe("ok");
+				expect(reviewHandler).not.toHaveBeenCalled();
+				expect(select).toHaveBeenCalledTimes(1);
+				expect(executed).toEqual([transformedInput]);
+				expect(executed[0]).toBe(transformedInput);
+			});
+
+			it("owned policy re-resolution deny is authoritative before review", async () => {
+				const reviewHandler = vi.fn(async () => ({ decision: "approve" as const }));
+				const transformedInput = new PrototypeSensitiveInput("echo hi");
+				const runner = dispatchRunner([reviewHandler], [async () => ({ input: transformedInput })]);
+				const select = vi.fn(async () => "Approve");
+				initializeRunner(runner, select);
+				const execute = vi.fn(async () => ({ content: [{ type: "text" as const, text: "ran" }] }));
+				const tool = {
+					...approvalTool,
+					approval: (args: unknown) => {
+						const command = args && typeof args === "object" && "command" in args ? args.command : undefined;
+						if (command === "echo original" || args instanceof PrototypeSensitiveInput) {
+							return "exec" as const;
+						}
+						return { policy: "deny", tier: "exec", reason: "owned clone denied" } as const;
+					},
+					execute,
+				};
+
+				await expect(
+					executeReviewCase(runner, tool, "call-owned-resolution-deny", {
+						params: { command: "echo original" },
+					}),
+				).rejects.toThrow('Tool "dangerous_tool" is blocked by tool policy.\nReason: owned clone denied');
+				expect(reviewHandler).not.toHaveBeenCalled();
+				expect(select).not.toHaveBeenCalled();
+				expect(execute).not.toHaveBeenCalled();
 			});
 
 			it("native deny stays authoritative on non-cloneable input and never dispatches review", async () => {
