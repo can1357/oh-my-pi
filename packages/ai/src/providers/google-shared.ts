@@ -691,6 +691,10 @@ export async function consumeGoogleStream<T extends GoogleApiType>(args: {
 				}
 
 				if (part.functionCall) {
+					if (!firstTokenSeen) {
+						firstTokenSeen = true;
+						onFirstToken?.();
+					}
 					if (currentBlock) {
 						flushCurrent();
 						currentBlock = null;

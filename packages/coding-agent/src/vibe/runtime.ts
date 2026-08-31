@@ -1598,7 +1598,14 @@ export function aggregateVibeWorkerTokensPerSecond(
 	for (const id of ids) {
 		const workerSession = registry.get(id)?.session;
 		if (!workerSession?.isStreaming) continue;
-		const rate = calculateTokensPerSecond(workerSession.state.messages, true, undefined, options);
+		// Same gap as the main badge: the in-flight partial lives on
+		// `state.streamMessage` until `message_end` appends it to `messages`.
+		const partial = workerSession.state.streamMessage;
+		const messages =
+			partial && partial.role === "assistant"
+				? [...workerSession.state.messages, partial]
+				: workerSession.state.messages;
+		const rate = calculateTokensPerSecond(messages, true, undefined, options);
 		if (rate !== null) {
 			total += rate;
 			any = true;

@@ -1241,6 +1241,10 @@ const streamOpenAICompletionsOnce = (
 					}
 
 					if (choice?.delta?.tool_calls && choice.delta.tool_calls.length > 0) {
+						if (!firstTokenTime) {
+							firstTokenTime = performance.now();
+							output.ttft = firstTokenTime - startTime;
+						}
 						const toolCalls = choice.delta.tool_calls;
 						for (let toolCallOffset = 0; toolCallOffset < toolCalls.length; toolCallOffset++) {
 							const toolCall = toolCalls[toolCallOffset]!;

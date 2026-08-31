@@ -1262,9 +1262,16 @@ export class StatusLineComponent implements Component {
 			// only when it is itself streaming (a finalized last-turn rate would
 			// double-count and overstate throughput).
 			const mainRate = this.session.isStreaming
-				? calculateTokensPerSecond(this.session.state.messages, true, undefined, {
-						excludeTtft: this.#resolveSettings().tokenRateExcludesTtft ?? false,
-					})
+				? calculateTokensPerSecond(
+						this.session.state.streamMessage?.role === "assistant"
+							? [...this.session.state.messages, this.session.state.streamMessage]
+							: this.session.state.messages,
+						true,
+						undefined,
+						{
+							excludeTtft: this.#resolveSettings().tokenRateExcludesTtft ?? false,
+						},
+					)
 				: 0;
 			return (mainRate ?? 0) + workerRate;
 		}
@@ -1281,9 +1288,19 @@ export class StatusLineComponent implements Component {
 	 * workers are active.
 	 */
 	#getMainSessionTokensPerSecond(): number | null {
+		// The in-flight assistant partial lives on `state.streamMessage` until
+		// `message_end` appends it to `state.messages`; include it so the badge
+		// reflects the live turn while tokens are decoding instead of the
+		// previous completed turn's rate.
+		const streamingPartial = this.session.isStreaming ? this.session.state.streamMessage : null;
+		const messages =
+			streamingPartial && streamingPartial.role === "assistant"
+				? [...this.session.state.messages, streamingPartial]
+				: this.session.state.messages;
+
 		let lastAssistantTimestamp: number | null = null;
-		for (let i = this.session.state.messages.length - 1; i >= 0; i--) {
-			const message = this.session.state.messages[i];
+		for (let i = messages.length - 1; i >= 0; i--) {
+			const message = messages[i];
 			if (message?.role === "assistant") {
 				lastAssistantTimestamp = message.timestamp;
 				break;
@@ -1296,7 +1313,7 @@ export class StatusLineComponent implements Component {
 			return null;
 		}
 
-		const rate = calculateTokensPerSecond(this.session.state.messages, this.session.isStreaming, undefined, {
+		const rate = calculateTokensPerSecond(messages, this.session.isStreaming, undefined, {
 			excludeTtft: this.#resolveSettings().tokenRateExcludesTtft ?? false,
 		});
 		if (rate !== null) {

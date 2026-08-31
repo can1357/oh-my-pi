@@ -1,7 +1,7 @@
-import { beforeAll, describe, expect, it } from "bun:test";
+import { afterEach, beforeAll, describe, expect, it } from "bun:test";
 import { stripVTControlCharacters } from "node:util";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
-import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { StatusLineComponent } from "@oh-my-pi/pi-coding-agent/modes/components/status-line/component";
 import { renderSegment } from "@oh-my-pi/pi-coding-agent/modes/components/status-line/segments";
 import type { SegmentContext } from "@oh-my-pi/pi-coding-agent/modes/components/status-line/types";
@@ -147,6 +147,10 @@ describe("token rate calculation", () => {
 });
 
 describe("token rate runtime toggle", () => {
+	afterEach(() => {
+		resetSettingsForTest();
+	});
+
 	it("updateSettings on a live component flips the rate policy without reconstruction", async () => {
 		await Settings.init({ inMemory: true });
 		const assistant = assistantMessage({
@@ -156,7 +160,7 @@ describe("token rate runtime toggle", () => {
 			ttft: 1_500,
 		} as Partial<AssistantMessage>);
 		const session = {
-			state: { messages: [assistant] },
+			state: { messages: [], streamMessage: assistant },
 			isStreaming: true,
 			settings: { get: () => false },
 			sessionManager: { getSessionName: () => undefined },

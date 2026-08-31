@@ -132,3 +132,38 @@ describe("consumeGoogleStream leaked thinking-fence delimiter (#8719)", () => {
 		expect(thinking).toBe("");
 	});
 });
+
+describe("consumeGoogleStream first-token callback", () => {
+	it("fires onFirstToken for a functionCall-only stream (no text parts)", async () => {
+		const output = emptyAssistant();
+		const stream = new AssistantMessageEventStream();
+		let firstTokenFired = 0;
+		const done = (async () => {
+			for await (const _event of stream as AsyncIterable<AssistantMessageEvent> as AsyncIterable<AssistantMessageEvent>) {
+				// drain
+			}
+		})();
+
+		async function* googleStream(): AsyncGenerator<GenerateContentResponse> {
+			yield {
+				candidates: [{ content: { parts: [{ functionCall: { id: "call_1", name: "get_weather", args: {} } }] } }],
+			} as unknown as GenerateContentResponse;
+			yield { candidates: [{ finishReason: "STOP" }] } as unknown as GenerateContentResponse;
+		}
+
+		await consumeGoogleStream({
+			googleStream: googleStream(),
+			output,
+			stream,
+			model: vertexModel,
+			options: undefined,
+			onFirstToken: () => {
+				firstTokenFired++;
+			},
+		});
+		stream.end(output);
+		await done;
+
+		expect(firstTokenFired).toBe(1);
+	});
+});
