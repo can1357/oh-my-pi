@@ -238,6 +238,20 @@ function compileFallback(node: FallbackNode, seenOnPath: ReadonlySet<string>): N
 		mergeFallbacksByFrom(fallbacksByFrom, part.fallbacksByFrom);
 		if (child.type === "target") sequential.add(child.model);
 	}
+	// fallbackByTarget is keyed by model id; the same id in multiple sibling
+	// subtrees would merge nested edges across unreached branches.
+	const owner = new Map<string, number>();
+	for (let i = 0; i < childTargetGroups.length; i += 1) {
+		for (const id of childTargetGroups[i]!) {
+			const prev = owner.get(id);
+			if (prev !== undefined && prev !== i) {
+				throw new AIError.ValidationError(
+					`Ambiguous cross-branch reuse of model "${id}" under one fallback`,
+				);
+			}
+			owner.set(id, i);
+		}
+	}
 	// Each child must fall through to every later sibling (A->[B,C], B->[C]).
 	for (const disposition of node.on) {
 		let byFrom = fallbacksByFrom[disposition];
@@ -261,14 +275,30 @@ function compileFlatten(children: readonly RouteNode[], seenOnPath: ReadonlySet<
 	const targets: string[] = [];
 	const fallbacksByFrom: Partial<Record<GatewayErrorDisposition, Partial<Record<string, string[]>>>> = {};
 	const sequential = new Set(seenOnPath);
+	const childTargetGroups: string[][] = [];
 	for (const child of children) {
 		const childSeen = new Set(child.type === "target" ? sequential : seenOnPath);
 		const part = compileNode(child, childSeen);
 		targets.push(...part.targets);
+		childTargetGroups.push([...part.targets]);
 		// Keep nested fallback edges scoped to their subtree — do not invent
 		// cross-sibling edges for unreached branches.
 		mergeFallbacksByFrom(fallbacksByFrom, part.fallbacksByFrom);
 		if (child.type === "target") sequential.add(child.model);
+	}
+	// Same model id under sibling branches would collapse distinct fallback
+	// contexts onto one fallbackByTarget key.
+	const owner = new Map<string, number>();
+	for (let i = 0; i < childTargetGroups.length; i += 1) {
+		for (const id of childTargetGroups[i]!) {
+			const prev = owner.get(id);
+			if (prev !== undefined && prev !== i) {
+				throw new AIError.ValidationError(
+					`Ambiguous cross-branch reuse of model "${id}" under one parent`,
+				);
+			}
+			owner.set(id, i);
+		}
 	}
 	return { targets, fallbacksByFrom };
 }

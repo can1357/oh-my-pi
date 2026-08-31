@@ -78,6 +78,17 @@ describe("pickQuotaShare DRR fairness", () => {
 		expect(second.id).toBe("b");
 	});
 
+	it("lets accumulated deficit beat a higher weight peer", () => {
+		const light = { id: "light", weight: 1, inFlight: 0, saturated: false, deficit: 0 };
+		const heavy = { id: "heavy", weight: 3, inFlight: 0, saturated: false, deficit: 0 };
+		const first = pickQuotaShare([light, heavy])!;
+		expect(first.id).toBe("heavy");
+		light.deficit = first.deficitUpdates.find(u => u.id === "light")!.deficit;
+		heavy.deficit = first.deficitUpdates.find(u => u.id === "heavy")!.deficit;
+		const second = pickQuotaShare([light, heavy])!;
+		expect(second.id).toBe("light");
+	});
+
 	it("reproduces pure P2C when deficits are all zero (negative)", () => {
 		const pick = pickQuotaShare([
 			{ id: "a", weight: 1, inFlight: 0, saturated: false },

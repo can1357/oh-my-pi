@@ -4,6 +4,9 @@
 
 ### Fixed
 
+- Honor Retry-After blocks on the allow-blocked credential pass by still requiring a probe lease.
+- Let DRR deficit outrank weight in both directions so fair-share debt can repay.
+- Reject ambiguous cross-branch reuse of the same model id so fallback edges stay distinct.
 - Continue past unresolved catalog targets, gate previous_response_id cross-provider fallbacks, and reject non-OK discovery responses.
 
 - Fallback children chain to later siblings; successful terminal SSE settles probes; prelude cap keeps the crossing chunk.

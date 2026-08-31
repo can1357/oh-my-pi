@@ -84,6 +84,21 @@ describe("AuthStorage quota probe leases", () => {
 		expect(storage.tryAcquireQuotaProbeLease(idA, "")).toBeNull();
 	});
 
+	it("does not bypass Retry-After on allowBlocked getApiKey (requires probe lease)", async () => {
+		if (!storage) throw new Error("setup failed");
+		const soloProvider = `${PROVIDER}-solo-retry-after`;
+		await storage.set(soloProvider, [oauth("solo")]);
+		const id = storage.listStoredCredentials(soloProvider)[0]?.id;
+		if (id === undefined) throw new Error("expected credential");
+		await storage.markUsageLimitReached(soloProvider, undefined, { credentialId: id, retryAfterMs: 60_000 });
+		// Sole credential: allowBlocked would previously skip the block check and dispatch.
+		const key = await storage.getApiKey(soloProvider, undefined, {
+			requestId: "req-allow-blocked-retry-after",
+			checkUsage: true,
+		});
+		expect(key).toBeUndefined();
+	});
+
 	it("allows a probe once a Retry-After wait has elapsed (negative forever-block)", async () => {
 		if (!storage) throw new Error("setup failed");
 		const { idA } = await seed();
