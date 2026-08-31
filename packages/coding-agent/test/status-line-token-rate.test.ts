@@ -134,15 +134,44 @@ describe("token rate calculation", () => {
 		expect(rate).toBe(60);
 	});
 
-	it("ignores negative or non-numeric ttft values", () => {
+	it("ignores negative and non-finite ttft values", () => {
 		const base = assistantMessage();
+		for (const ttft of [-5, Number.NaN, Number.POSITIVE_INFINITY]) {
+			const rate = calculateTokensPerSecond(
+				[assistantMessage({ usage: { ...base.usage, output: 120 }, duration: 2_000, ttft })],
+				false,
+				undefined,
+				{ excludeTtft: true },
+			);
+			expect(rate).toBe(60);
+		}
+	});
+
+	it("excludes ttft from the streaming window (no duration, nowMs - timestamp)", () => {
+		const base = assistantMessage();
+		// timestamp=1000, ttft=1500, nowMs=4500: streaming duration is 3500ms,
+		// generation window 3500 - 1500 = 2000ms → 120 tokens / 2s = 60 tok/s.
+		// Without exclusion the streaming rate would be ~34.3 tok/s.
 		const rate = calculateTokensPerSecond(
-			[assistantMessage({ usage: { ...base.usage, output: 120 }, duration: 2_000, ttft: -5 })],
-			false,
-			undefined,
+			[assistantMessage({ usage: { ...base.usage, output: 120 }, timestamp: 1_000, ttft: 1_500 })],
+			true,
+			4_500,
 			{ excludeTtft: true },
 		);
 		expect(rate).toBe(60);
+	});
+
+	it("falls back to the streaming duration when ttft leaves no measurable window mid-stream", () => {
+		const base = assistantMessage();
+		// timestamp=1000, ttft=3410, nowMs=4500: generation window would be
+		// 90ms < MIN_DURATION_MS (100) → full 3500ms streaming duration applies.
+		const rate = calculateTokensPerSecond(
+			[assistantMessage({ usage: { ...base.usage, output: 350 }, timestamp: 1_000, ttft: 3_410 })],
+			true,
+			4_500,
+			{ excludeTtft: true },
+		);
+		expect(rate).toBe(100);
 	});
 });
 

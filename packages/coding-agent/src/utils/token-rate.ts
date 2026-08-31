@@ -31,9 +31,10 @@ type MaybeAssistantMessage = {
 export type CalculateTokensPerSecondOptions = {
 	/**
 	 * Exclude time-to-first-token from the denominator so the rate reflects
-	 * generation-only throughput (prompt evaluation / prefill is not counted).
-	 * Falls back to the full duration when the message has no usable TTFT or
-	 * the subtraction would leave less than {@link MIN_DURATION_MS}.
+	 * generation-only throughput (the initial latency before the first token
+	 * is not counted). Falls back to the full duration when the message has
+	 * no usable TTFT or the subtraction would leave less than
+	 * {@link MIN_DURATION_MS}.
 	 */
 	excludeTtft?: boolean;
 };
