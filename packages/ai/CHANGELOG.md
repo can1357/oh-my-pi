@@ -4,6 +4,8 @@
 
 ### Fixed
 
+- Fixed auth-gateway resetting StreamCommitGate between pre-commit attempts, releasing reservations when SSE reads reject, and only settling quota probes on committed streams.
+
 - Fixed auth-gateway nested fallback compilation leaking rules from unreached sibling branches onto earlier targets.
 - Fixed gateway classification treating OpenAI-style `model does not exist` 404s as `request_terminal` instead of `model_unavailable`.
 - Fixed auth-gateway inference error responses omitting `x-request-id` / `request-id` so callers could not look up the matching decision trace.
