@@ -1727,16 +1727,14 @@ export class AuthStorage {
 		const source = entries.find(entry => entry.id === credentialId);
 		if (source === undefined || source.credential.type !== "oauth") return;
 		const sourceKey = resolveCredentialIdentityKey(provider, source.credential);
-		const sourceAccount = source.credential.accountId?.trim();
 		const providerKey = this.#getProviderTypeKey(provider, "oauth");
 		for (let index = 0; index < entries.length; index += 1) {
 			const entry = entries[index]!;
 			if (entry.id === credentialId || entry.credential.type !== "oauth") continue;
 			const key = resolveCredentialIdentityKey(provider, entry.credential);
-			const account = entry.credential.accountId?.trim();
-			const sameIdentity =
-				(sourceKey !== null && key !== null && sourceKey === key) ||
-				(sourceAccount !== undefined && account !== undefined && sourceAccount === account);
+			// Match only by organization-qualified identity keys. A shared accountId
+			// across different orgId workspaces must not fan out deactivated_workspace.
+			const sameIdentity = sourceKey !== null && key !== null && sourceKey === key;
 			if (!sameIdentity) continue;
 			if (retryAfter) this.#probeLeases.noteRetryAfterBlock(entry.id, "", blockedUntil);
 			this.#markCredentialBlocked(provider, providerKey, index, blockedUntil);
@@ -5542,46 +5540,56 @@ export class AuthStorage {
 			blockScopes,
 			allowFallback = true,
 		} = usageOptions;
-		if (
-			!allowBlocked &&
-			this.#isCredentialBlocked(provider, providerKey, selection.index, blockScopes ?? blockScope)
-		) {
+		if (this.#isCredentialBlocked(provider, providerKey, selection.index, blockScopes ?? blockScope)) {
 			const entries = this.#getStoredCredentials(provider);
 			const blockedId = entries[selection.index]?.id;
 			if (blockedId === undefined) return undefined;
-			// A live block must never hijack rotation: while any same-type sibling
-			// is still usable, fall through so the caller rotates to it. Probing a
-			// cooled-down credential is a last resort for requests that have no
-			// unblocked sibling at all (one lease per cooldown generation).
-			const hasUsableSibling = entries.some(
-				(entry, index) =>
-					index !== selection.index &&
-					entry.credential.type === selection.credential.type &&
-					!this.#isCredentialBlocked(provider, providerKey, index, blockScopes ?? blockScope),
-			);
-			if (hasUsableSibling) return undefined;
-			if (!options?.requestId) return undefined;
 			const probeScope = blockScope ?? "";
-			// Only refresh an already Retry-After-sourced deadline. Re-labeling an
-			// ordinary hard cooldown as Retry-After would forbid last-resort probes.
-			if (this.#probeLeases.isRetryAfterSourced(blockedId, probeScope)) {
-				const blockedUntil = this.#getCredentialBlockedUntil(
-					provider,
-					providerKey,
-					selection.index,
-					blockScopes ?? blockScope,
+			if (!allowBlocked) {
+				// A live block must never hijack rotation: while any same-type sibling
+				// is still usable, fall through so the caller rotates to it. Probing a
+				// cooled-down credential is a last resort for requests that have no
+				// unblocked sibling at all (one lease per cooldown generation).
+				const hasUsableSibling = entries.some(
+					(entry, index) =>
+						index !== selection.index &&
+						entry.credential.type === selection.credential.type &&
+						!this.#isCredentialBlocked(provider, providerKey, index, blockScopes ?? blockScope),
 				);
-				if (blockedUntil !== undefined) {
-					this.#probeLeases.noteRetryAfterBlock(blockedId, probeScope, blockedUntil);
+				if (hasUsableSibling) return undefined;
+				if (!options?.requestId) return undefined;
+				// Only refresh an already Retry-After-sourced deadline. Re-labeling an
+				// ordinary hard cooldown as Retry-After would forbid last-resort probes.
+				if (this.#probeLeases.isRetryAfterSourced(blockedId, probeScope)) {
+					const blockedUntil = this.#getCredentialBlockedUntil(
+						provider,
+						providerKey,
+						selection.index,
+						blockScopes ?? blockScope,
+					);
+					if (blockedUntil !== undefined) {
+						this.#probeLeases.noteRetryAfterBlock(blockedId, probeScope, blockedUntil);
+					}
 				}
+				const lease = this.tryAcquireQuotaProbeLease(blockedId, probeScope);
+				if (!lease) return undefined;
+				this.#inflightProbes.set(options.requestId, {
+					credentialId: blockedId,
+					blockScope: probeScope,
+					leaseId: lease,
+				});
+			} else if (this.#probeLeases.isRetryAfterSourced(blockedId, probeScope)) {
+				// allowBlocked fallback must still honor active Retry-After: never vend
+				// without a probe lease while the provider-imposed wait is live.
+				if (!options?.requestId) return undefined;
+				const lease = this.tryAcquireQuotaProbeLease(blockedId, probeScope);
+				if (!lease) return undefined;
+				this.#inflightProbes.set(options.requestId, {
+					credentialId: blockedId,
+					blockScope: probeScope,
+					leaseId: lease,
+				});
 			}
-			const lease = this.tryAcquireQuotaProbeLease(blockedId, probeScope);
-			if (!lease) return undefined;
-			this.#inflightProbes.set(options.requestId, {
-				credentialId: blockedId,
-				blockScope: probeScope,
-				leaseId: lease,
-			});
 		}
 
 		if (!(await this.#prepareOAuthCredentialForRequest(provider, selection, options))) {
