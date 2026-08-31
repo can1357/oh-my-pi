@@ -180,12 +180,28 @@ describe("CustomEditor bracketed path paste", () => {
 		expect(extractBracketedImagePastePaths(bracketedPaste("icon-photo-default.png"))).toBeUndefined();
 	});
 
+	it("inserts a relative .png API address as text instead of treating it as a local image", () => {
+		const { editor } = makeEditor();
+		const address = "api/file/icon/867d45144217eec6d3c5805fd5a2d548.png";
+		const onPasteImagePath = vi.fn();
+		editor.onPasteImagePath = onPasteImagePath;
+
+		editor.handleInput(bracketedPaste(address));
+
+		expect(editor.getText()).toBe(address);
+		expect(onPasteImagePath).not.toHaveBeenCalled();
+		expect(extractImagePathFromText(address)).toBeUndefined();
+	});
+
 	it("extracts explicit local image paths for attachment", () => {
 		expect(extractBracketedImagePastePaths(bracketedPaste("/tmp/icon-photo-default.png"))).toEqual([
 			"/tmp/icon-photo-default.png",
 		]);
 		expect(extractBracketedImagePastePaths(bracketedPaste("C:\\Users\\me\\icon-photo-default.png"))).toEqual([
 			"C:\\Users\\me\\icon-photo-default.png",
+		]);
+		expect(extractBracketedImagePastePaths(bracketedPaste("./images/icon-photo-default.png"))).toEqual([
+			"./images/icon-photo-default.png",
 		]);
 	});
 

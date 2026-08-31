@@ -20,7 +20,7 @@ use gix::{
 	refs::transaction::PreviousValue,
 };
 
-use super::{GitRepo, mutate::update_reference};
+use super::{GitRepo, mutate::update_reference, open::load_index_or_head};
 use crate::{
 	error::{Error, Result},
 	types::{ApplyOptions, DiffOptions, HunkSelection, HunkSelectionError, HunkSpec},
@@ -1190,9 +1190,7 @@ fn blob_bytes(repo: &gix::Repository, id: gix::ObjectId) -> Result<Vec<u8>> {
 }
 
 fn index_map(repo: &gix::Repository) -> Result<BTreeMap<String, FileEntry>> {
-	let index = repo
-		.index_or_load_from_head_or_empty()
-		.map_err(|err| Error::backend("git read index", err))?;
+	let index = load_index_or_head(repo, "git read index")?;
 	Ok(index_state_map(&index))
 }
 
@@ -1306,10 +1304,7 @@ fn untracked_worktree_map(
 	gix_repo: &gix::Repository,
 	index: &BTreeMap<String, FileEntry>,
 ) -> Result<BTreeMap<String, FileEntry>> {
-	let mut walk_index = gix_repo
-		.index_or_load_from_head_or_empty()
-		.map_err(|err| Error::backend("git read index for untracked files", err))?
-		.into_owned();
+	let mut walk_index = load_index_or_head(gix_repo, "git read index for untracked files")?;
 	for entry in walk_index.entries_mut() {
 		entry.flags.insert(Flags::UPTODATE);
 	}
@@ -1658,6 +1653,53 @@ mod tests {
 		assert!(status.contains("A  picked.txt"), "picked.txt staged: {status}");
 		assert!(status.contains("M  base.txt"), "base.txt staged: {status}");
 		assert!(status.contains(" A promised.txt"), "promised.txt keeps intent-to-add: {status}");
+	}
+
+	#[test]
+	fn stage_hunks_commit_split_survives_unadvanced_index_mtime() {
+		// Regression for #10130 (the issue-966 split-commit repro): two
+		// back-to-back stage_hunks -> commit_create pairs on one reused handle
+		// read a stale in-memory index snapshot when every mutation landed in a
+		// single mtime tick, so the first commit errored "nothing to commit".
+		let temp = init(&[("tracked.txt", b"original\n")]);
+		fs::write(temp.path().join("tracked.txt"), b"updated\n").expect("edit tracked");
+		fs::write(temp.path().join("new-file.txt"), b"new\n").expect("write new");
+		git(temp.path(), &["add", "-N", "new-file.txt"]);
+		let repo = repo(temp.path());
+		let raw = repo.diff_text(&DiffOptions::default()).expect("diff");
+
+		// Freeze the index mtime so every read collides with the preceding write
+		// on the same tick — the exact race the fix removes.
+		crate::git::pin_index_mtime(&repo);
+
+		repo
+			.stage_hunks(
+				&[HunkSelection { path: "new-file.txt".into(), hunks: HunkSpec::All }],
+				Some(&raw),
+			)
+			.expect("stage new file");
+		crate::git::pin_index_mtime(&repo);
+		repo
+			.commit_create("feat: add new file", &crate::types::CommitOptions::default())
+			.expect("commit new file");
+		crate::git::pin_index_mtime(&repo);
+		repo
+			.stage_hunks(
+				&[HunkSelection { path: "tracked.txt".into(), hunks: HunkSpec::All }],
+				Some(&raw),
+			)
+			.expect("stage tracked file");
+		crate::git::pin_index_mtime(&repo);
+		repo
+			.commit_create("fix: update tracked file", &crate::types::CommitOptions::default())
+			.expect("commit tracked file");
+
+		assert_eq!(
+			git(temp.path(), &["log", "--format=%s", "-2"]).trim(),
+			"fix: update tracked file\nfeat: add new file"
+		);
+		assert_eq!(git(temp.path(), &["show", "HEAD:tracked.txt"]), "updated\n");
+		assert_eq!(git(temp.path(), &["show", "HEAD~1:new-file.txt"]), "new\n");
 	}
 
 	#[test]

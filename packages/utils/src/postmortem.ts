@@ -24,10 +24,25 @@ export enum Reason {
 	MANUAL = "manual", // Manual cleanup (not triggered by process)
 }
 
-// Internal list of active cleanup callbacks (in registration order)
-const callbackList: ((reason: Reason) => Promise<void> | void)[] = [];
-// Tracks cleanup run state (to prevent recursion/reentry issues)
+interface CleanupRegistration {
+	id: string;
+	callback: (reason: Reason) => Promise<void> | void;
+	exitOnly: boolean;
+	cancelled: boolean;
+	lastPass: number;
+}
+
+// Active cleanup callbacks in registration order. Registrations survive
+// keep-alive passes; `lastPass` enforces at-most-once invocation per pass.
+const callbackList: CleanupRegistration[] = [];
+// Tracks cleanup run state (to prevent recursion/reentry issues).
 let cleanupStage: "idle" | "running" | "complete" = "idle";
+let cleanupPass = 0;
+let activeCleanupReason: Reason | undefined;
+let activeCleanupKeepAlive = false;
+// Promises of callbacks invoked late (registered while a pass runs), joined by
+// the active pass before it settles so `cleanup()`/signal exits await them.
+let activeLatePromises: Promise<void>[] | undefined;
 const CLEANUP_DEADLINE_MS = 10_000;
 /**
  * Symbol stamped by the extension-load guard onto the throwing replacement it
@@ -78,13 +93,32 @@ export interface FatalRecoveryHint {
 type FatalRecoveryHintProvider = () => FatalRecoveryHint | undefined;
 const fatalRecoveryHintProviders = new Set<FatalRecoveryHintProvider>();
 
+function invokeCleanup(
+	registration: CleanupRegistration,
+	reason: Reason,
+	keepAlive: boolean,
+	pass: number,
+): Promise<void> | void {
+	if (registration.cancelled || registration.lastPass === pass) return;
+	if (registration.exitOnly && keepAlive) return;
+	registration.lastPass = pass;
+	return registration.callback(reason);
+}
+
 /**
  * Internal: runs all registered cleanup callbacks for the given reason.
- * Ensures each callback is invoked at most once. Handles errors and prevents reentrancy.
+ * Ensures each registration is invoked at most once per pass, handles errors,
+ * and prevents reentrancy.
+ *
+ * `keepAlive` marks a manual cleanup that keeps the process running (see
+ * {@link cleanup}). Such a pass returns the stage to `idle`; registrations stay
+ * active for later resources and the eventual real exit. Exit-only callbacks
+ * skip keep-alive passes without consuming their registration. An exit-driven
+ * pass instead settles to `complete` and stays there.
  *
  * Returns a Promise that settles after all cleanups complete or error out.
  */
-function runCleanup(reason: Reason): Promise<void> {
+function runCleanup(reason: Reason, keepAlive = false): Promise<void> {
 	switch (cleanupStage) {
 		case "idle":
 			cleanupStage = "running";
@@ -95,30 +129,52 @@ function runCleanup(reason: Reason): Promise<void> {
 			return Promise.resolve();
 	}
 
-	// Call .cleanup() for each callback that is still "armed".
-	// Use Promise.try to handle sync/async, but only those armed.
-	const promises = callbackList.toReversed().map(callback => {
-		return Promise.try(() => callback(reason));
+	const pass = ++cleanupPass;
+	activeCleanupReason = reason;
+	activeCleanupKeepAlive = keepAlive;
+	const late: Promise<void>[] = [];
+	activeLatePromises = late;
+	const settle = (): void => {
+		if (activeLatePromises === late) activeLatePromises = undefined;
+		if (cleanupPass !== pass) return;
+		cleanupStage = keepAlive ? "idle" : "complete";
+		if (keepAlive) {
+			activeCleanupReason = undefined;
+			activeCleanupKeepAlive = false;
+		}
+	};
+
+	// Snapshot the pass. Registrations added while a keep-alive cleanup runs are
+	// invoked by register() when appropriate and remain active for later passes.
+	const promises = callbackList.toReversed().map(registration => {
+		return Promise.try(() => invokeCleanup(registration, reason, keepAlive, pass));
 	});
 
-	const cleanupSettled = Promise.allSettled(promises).then(results => {
+	const cleanupSettled = Promise.allSettled(promises).then(async results => {
 		for (const result of results) {
 			if (result.status === "rejected") {
 				const err = result.reason instanceof Error ? result.reason : new Error(String(result.reason));
 				logger.error("Cleanup callback failed", { err, stack: err.stack });
 			}
 		}
-		cleanupStage = "complete";
+		// Join callbacks registered while this pass ran (already error-caught);
+		// each batch may register more. The deadline race still bounds the pass.
+		while (late.length > 0) await Promise.allSettled(late.splice(0));
+		settle();
 	});
 	const deadline = Promise.withResolvers<void>();
 	const deadlineTimer = setTimeout(() => {
 		logger.error("Cleanup deadline exceeded; proceeding with exit", { reason });
-		cleanupStage = "complete";
+		settle();
 		deadline.resolve();
 	}, CLEANUP_DEADLINE_MS);
-	cleanupPromise = Promise.race([cleanupSettled, deadline.promise]).finally(() => {
+	const passPromise = Promise.race([cleanupSettled, deadline.promise]).finally(() => {
 		clearTimeout(deadlineTimer);
+		// A re-armed pass must drop only its own settled promise; an older
+		// deadline-limited pass may finish after a newer one has already started.
+		if (keepAlive && cleanupPass === pass && cleanupPromise === passPromise) cleanupPromise = undefined;
 	});
+	cleanupPromise = passPromise;
 	return cleanupPromise;
 }
 
@@ -464,63 +520,110 @@ if (isMainThread) {
 	});
 }
 
+/** Controls when a registered cleanup callback participates in cleanup passes. */
+export interface CleanupRegistrationOptions {
+	/**
+	 * Run only on a real exit, never during a manual keep-alive cleanup.
+	 * The registration remains armed when a keep-alive pass skips it.
+	 */
+	exitOnly?: boolean;
+}
+
 /**
- * Register a process cleanup callback, to be run on shutdown, signal, or fatal error.
+ * Registers a cleanup callback for shutdown, signals, fatal errors, and
+ * repeatable manual cleanup passes.
  *
- * Returns a Callback instance that can be used to cancel (unregister) or manually clean up.
- * If register is called after cleanup already began, invokes callback on a microtask.
+ * Registrations persist across keep-alive {@link cleanup} passes and run at
+ * most once per pass. Set `exitOnly` for resources the continuing process still
+ * holds (open databases, cached handles): keep-alive passes skip the callback
+ * without consuming its registration, while the eventual real exit runs it.
+ *
+ * A callback registered during a running keep-alive pass joins future passes;
+ * normal callbacks also run immediately for the current pass. Registrations
+ * made during a real exit run immediately.
+ *
+ * Returns a function that permanently cancels the registration.
  */
-export function register(id: string, callback: (reason: Reason) => void | Promise<void>): () => void {
-	let done = false;
-	const exec = (reason: Reason) => {
-		if (done) return;
-		done = true;
+export function register(
+	id: string,
+	callback: (reason: Reason) => void | Promise<void>,
+	options: CleanupRegistrationOptions = {},
+): () => void {
+	const registration: CleanupRegistration = {
+		id,
+		callback,
+		exitOnly: options.exitOnly ?? false,
+		cancelled: false,
+		lastPass: 0,
+	};
+	const cancel = (): void => {
+		registration.cancelled = true;
+		const index = callbackList.indexOf(registration);
+		if (index >= 0) callbackList.splice(index, 1);
+	};
+	const invokeLate = (reason: Reason, keepAlive: boolean): void => {
 		try {
-			return callback(reason);
-		} catch (e) {
-			const err = e instanceof Error ? e : new Error(String(e));
+			const pending = invokeCleanup(registration, reason, keepAlive, cleanupPass);
+			if (!pending) return;
+			const tracked = pending.catch(error => {
+				const err = error instanceof Error ? error : new Error(String(error));
+				logger.error("Cleanup callback failed", { err, id, stack: err.stack });
+			});
+			// Join the active pass so cleanup()/signal exits await it; after a
+			// completed exit pass there is nothing left to join.
+			activeLatePromises?.push(tracked);
+		} catch (error) {
+			const err = error instanceof Error ? error : new Error(String(error));
 			logger.error("Cleanup callback failed", { err, id, stack: err.stack });
 		}
 	};
 
-	const cancel = () => {
-		const index = callbackList.indexOf(exec);
-		if (index >= 0) {
-			callbackList.splice(index, 1);
-		}
-		done = true;
-	};
-
-	if (cleanupStage !== "idle") {
-		// Cleanup is already in progress or complete; run late registrations once
-		// without re-entering the global cleanup pass.
-		logger.debug("Cleanup already started; running late callback once", { id });
-		try {
-			callback(Reason.MANUAL);
-		} catch (e) {
-			const err = e instanceof Error ? e : new Error(String(e));
-			logger.error("Cleanup callback failed", { err, id, stack: err.stack });
-		}
-		return () => {};
+	if (cleanupStage === "idle") {
+		callbackList.push(registration);
+		return cancel;
 	}
 
-	// Register callback as "armed" (active).
-	callbackList.push(exec);
+	const reason = activeCleanupReason ?? Reason.MANUAL;
+	if (cleanupStage === "running" && activeCleanupKeepAlive) {
+		// The current pass already snapshotted its callbacks. Keep the new owner
+		// registered for future passes; normal callbacks also join this pass now.
+		callbackList.push(registration);
+		if (!registration.exitOnly) invokeLate(reason, true);
+		return cancel;
+	}
+
+	// A real exit is running or complete. There is no later pass to arm for, so
+	// invoke every late registration now, including exit-only callbacks.
+	logger.debug("Cleanup already started; running late callback once", { id });
+	invokeLate(reason, false);
 	return cancel;
 }
 
 /**
- * Runs all cleanup callbacks without exiting.
+ * Runs all cleanup callbacks without exiting, then re-arms the system so
+ * resources opened afterwards are still cleaned at the eventual real exit.
  * Use this in workers or when you need to clean up but continue execution.
  */
 export function cleanup(): Promise<void> {
-	return runCleanup(Reason.MANUAL);
+	return runCleanup(Reason.MANUAL, true);
 }
 
 /** Controls how manual process shutdown handles terminal output. */
 export interface QuitOptions {
 	/** Wait for buffered stdout before exiting; disable after the terminal has disconnected. */
 	drainStdout?: boolean;
+}
+
+/**
+ * Waits (bounded) for buffered stdout to reach the terminal. Used before
+ * process exit and before an exec-replace, where unflushed output would be
+ * lost with the process image.
+ */
+export async function drainStdout(): Promise<void> {
+	if (process.stdout.writableLength === 0) return;
+	const { promise, resolve } = Promise.withResolvers<void>();
+	process.stdout.once("drain", resolve);
+	await Promise.race([promise, Bun.sleep(5000)]);
 }
 
 async function runQuit(code: number, exitMode: "guarded" | "native", options: QuitOptions = {}): Promise<void> {
@@ -530,10 +633,8 @@ async function runQuit(code: number, exitMode: "guarded" | "native", options: Qu
 		return; // Workers: cleanup done, let worker exit naturally
 	}
 
-	if (options.drainStdout !== false && process.stdout.writableLength > 0) {
-		const { promise, resolve } = Promise.withResolvers<void>();
-		process.stdout.once("drain", resolve);
-		await Promise.race([promise, Bun.sleep(5000)]);
+	if (options.drainStdout !== false) {
+		await drainStdout();
 	}
 
 	switch (exitMode) {

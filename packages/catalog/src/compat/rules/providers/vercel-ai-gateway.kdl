@@ -1,0 +1,73 @@
+// Provider-wire compat for "vercel-ai-gateway"; regenerated from the frozen census using deployment contract selectors.
+
+provider "vercel-ai-gateway" {
+	// residue: the bare `deepseek/*` namespace rides the Anthropic route, whose
+	// ladder is the generic five-tier scale.
+	models "deepseek/*" {
+		thinking-efforts "minimal" "low" "medium" "high" "xhigh"
+	}
+	class "anthropic" {
+		revision ">=3.7 <4.6" {
+			thinking-efforts "minimal" "low" "medium" "high" "xhigh"
+		}
+	}
+	class "gemini" {
+		revision ">=3 <3.7" {
+			thinking-mode "budget"
+		}
+	}
+	class "mimo" {
+		family "v2" {
+			thinking-efforts "minimal" "low" "medium" "high" "xhigh"
+			thinking-mode "budget"
+		}
+	}
+	class "stepfun" {
+		family "step" {
+			thinking-mode "budget"
+		}
+	}
+	class "unknown" {
+		thinking-efforts "minimal" "low" "medium" "high" "xhigh"
+		thinking-mode "budget"
+	}
+	class "xai" {
+		family "grok" {
+			thinking-mode "budget"
+		}
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "*fast-reasoning" "alibaba*thinking" "meituan/longcat-flash-thinking*" \
+		"*grok-4.20-reasoning*" "arcee-ai/trinity-large-thinking" "openai/gpt-5.1-thinking*" {
+		thinking-requires-effort #true
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "alibaba/qwen3-max" {
+		replay-unsigned-thinking #false
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "amazon/nova-2-lite" {
+		thinking-mode "budget"
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "deepseek/deepseek-v3.1*" "deepseek/deepseek-v3.2" {
+		requires-reasoning-content-for-all-assistant-turns #true
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "deepseek/deepseek-v3.2-thinking" {
+		requires-reasoning-content-for-all-assistant-turns #true
+		thinking-requires-effort #true
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "openai/codex-mini" {
+		thinking-efforts "minimal" "low" "medium" "high" "xhigh"
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "openai/gpt-5.1-codex" "openai/gpt-5.1-codex-max" {
+		thinking-efforts "minimal" "low" "medium" "high"
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "openai/gpt-5.1-codex-mini" {
+		thinking-efforts "medium" "high"
+	}
+}

@@ -1,0 +1,56 @@
+// Provider-wire compat for "github-copilot"; regenerated from the frozen census using deployment contract selectors.
+
+provider "github-copilot" {
+	class "anthropic" {
+		revision ">=4 <4.6" {
+			thinking-efforts "minimal" "low" "medium" "high" "xhigh"
+		}
+	}
+	class "gemini" {
+		family "flash" {
+			supports-developer-role #false
+		}
+		revision ">=2.5 <3.7" {
+			thinking-mode "effort"
+		}
+	}
+	class "kimi" {
+		thinking-mode "effort"
+	}
+	class "openai" {
+		revision ">=5 <5.7" {
+			thinking-mode "effort"
+		}
+	}
+	class "unknown" {
+		thinking-mode "effort"
+	}
+	class "xai" {
+		family "grok" {
+			thinking-mode "effort"
+		}
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "gemini-2.5-pro" "gemini-3.1-pro-preview" "gpt-4.1" {
+		supports-developer-role #false
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "gpt-5.1-codex" "gpt-5.1-codex-max" {
+		thinking-efforts "minimal" "low" "medium" "high"
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "gpt-5.1-codex-mini" {
+		thinking-efforts "medium" "high"
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "grok-4.5" "mai-code-1-flash-picker" {
+		thinking-efforts "minimal" "low" "medium" "high" "xhigh"
+	}
+	// Dormant until a catalog snapshot ships grok-4.6: Copilot serves
+	// grok-4.6 / grok-4.6-1m only via /responses, whose policy adds the
+	// native xhigh tier and drops the chat-completions compat block
+	// Discovered rows ride the openai-responses primary route.
+	models "grok-4.6" "grok-4.6-1m" {
+		thinking-efforts "minimal" "low" "medium" "high" "xhigh"
+	}
+}

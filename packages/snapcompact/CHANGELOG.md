@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added compat-compiler CLI to manage model identity and capability rules via KDL configuration files
+- Consolidated model identity, capability, and policy resolution into a unified rule-based engine
+- Implemented declarative rule system for provider-specific model behaviors and compatibility constraints
+- Added support for hierarchical cascade resolution of model properties based on class, family, and revision
+
+### Changed
+
+- Refactored model policy resolution to be driven by the generated compat rules instead of imperative code
+- Migrated model taxonomy, variant collapse tables, and provider-specific overrides to external KDL files
+- Standardized revision handling and model identification across discovery and runtime components
+
 ## [17.4.1] - 2026-08-21
 
 ### Added

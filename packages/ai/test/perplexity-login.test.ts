@@ -70,4 +70,64 @@ describe("Perplexity email OTP login", () => {
 			);
 		},
 	);
+
+	it("completes an authenticator challenge after email OTP verification", async () => {
+		vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("Unexpected global fetch"));
+		const requests: Array<CapturedRequest & { body: unknown }> = [];
+		const fetchMock: FetchImpl = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+			const url = new URL(input instanceof Request ? input.url : input.toString());
+			requests.push({
+				path: url.pathname,
+				cookie: new Headers(init?.headers).get("Cookie"),
+				body: init?.body ? JSON.parse(init.body.toString()) : undefined,
+			});
+
+			if (url.pathname.endsWith("/csrf")) {
+				return new Response(JSON.stringify({ csrfToken: "csrf-token" }), {
+					status: 200,
+					headers: {
+						"Content-Type": "application/json",
+						"Set-Cookie": "next-auth.csrf-token=csrf-cookie; Path=/; HttpOnly; Secure",
+					},
+				});
+			}
+			if (url.pathname.endsWith("/signin-email")) return new Response("{}", { status: 200 });
+			if (requests.length === 3) {
+				return new Response(
+					JSON.stringify({ challenge_token: "perplexity-challenge", status: "totp_challenge_required" }),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}
+			if (url.pathname.endsWith("/totp/challenge-verify")) {
+				return new Response(JSON.stringify({ redirect_url: "https://www.perplexity.ai/" }), {
+					status: 200,
+					headers: {
+						"Content-Type": "application/json",
+						"Set-Cookie": "next-auth.session-token=session-cookie; Path=/; HttpOnly; Secure",
+					},
+				});
+			}
+			throw new Error(`Unexpected request: ${url.pathname}`);
+		});
+		const answers = ["user@example.com", "123456", "654321"];
+
+		await withEnv({ PI_AUTH_NO_BORROW: "1" }, async () => {
+			const credentials = await loginPerplexity({
+				fetch: fetchMock,
+				onPrompt: async () => answers.shift() ?? "",
+			});
+			expect(credentials.access).toBe("session-cookie");
+		});
+		expect(requests.map(request => request.path)).toEqual([
+			"/api/auth/csrf",
+			"/api/auth/signin-email",
+			"/api/auth/signin-otp",
+			"/api/auth/totp/challenge-verify",
+		]);
+		expect(requests[3]?.body).toEqual({
+			token: "perplexity-challenge",
+			code: "654321",
+		});
+		expect(requests[3]?.cookie).toBe("next-auth.csrf-token=csrf-cookie");
+	});
 });

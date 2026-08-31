@@ -110,7 +110,7 @@ describe("Cloudflare AI Gateway", () => {
 		);
 
 		expect(prepared?.model.headers?.["cf-aig-authorization"]).toBe("Bearer gateway-token");
-		expect(prepared?.model.api).toBe("openai-responses");
+		expect(prepared?.model.api).toBe("openai-completions");
 		expect(prepared?.model.baseUrl).toBe("https://gateway.ai.cloudflare.com/v1/account-id/my-gateway/openai");
 		expect(prepared?.model.requestModelId).toBe("gpt-5.4");
 		expect(prepared?.model.headers?.Authorization).toBeUndefined();
@@ -141,7 +141,7 @@ describe("Cloudflare AI Gateway", () => {
 			maxTokens: 16,
 		}).result();
 
-		expect(captured.url).toBe("https://gateway.ai.cloudflare.com/v1/account-id/my-gateway/openai/responses");
+		expect(captured.url).toBe("https://gateway.ai.cloudflare.com/v1/account-id/my-gateway/openai/chat/completions");
 		expect(captured.headers?.get("cf-aig-authorization")).toBe("Bearer gateway-token");
 		expect(captured.headers?.get("authorization")).toBeNull();
 		expect(JSON.parse(captured.body ?? "{}").model).toBe("gpt-5.4");

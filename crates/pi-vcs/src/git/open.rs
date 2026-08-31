@@ -57,6 +57,79 @@ impl GitRepo {
 	}
 }
 
+/// Load the persisted worktree index straight from disk, reconstructing it from
+/// `HEAD^{tree}` (or an empty index when `HEAD` is unborn) if no index file
+/// exists.
+///
+/// Reads bypass gix's shared, mtime-gated index snapshot. The cached
+/// [`gix`](GitRepo::gix) handle shares one
+/// `SharedFileSnapshot<gix_index::File>` across every thread-local clone and
+/// only reloads it when the index file's mtime is *strictly* newer than the
+/// snapshot — gix's freshness check is deliberately sub-second-racy (`gix_fs`
+/// `recent_snapshot` notes it "relies on sub-section precision or else is a
+/// race … up to the caller"). The in-process mutators here write a fresh index
+/// within the same mtime tick as the read that populated the snapshot, so a
+/// later read through that snapshot would return the pre-mutation index — e.g.
+/// a commit right after staging sees an unchanged tree and fails with "nothing
+/// to commit, working tree clean". Reading the index from disk makes
+/// mutate→read deterministic regardless of filesystem timestamp granularity.
+pub(crate) fn load_index_or_head(
+	repo: &gix::Repository,
+	op: &'static str,
+) -> Result<gix::index::File> {
+	match repo.open_index() {
+		Ok(index) => Ok(index),
+		Err(gix::worktree::open_index::Error::IndexFile(gix::index::file::init::Error::Io(err)))
+			if err.kind() == std::io::ErrorKind::NotFound =>
+		{
+			Ok(repo
+				.index_or_load_from_head_or_empty()
+				.map_err(|err| Error::backend(op, err))?
+				.into_owned())
+		},
+		Err(err) => Err(Error::backend(op, err)),
+	}
+}
+
+/// Load the persisted worktree index straight from disk, falling back to an
+/// empty index (never `HEAD^{tree}`) when no index file exists.
+///
+/// Same snapshot-bypass rationale as [`load_index_or_head`]; the empty-index
+/// fallback matches gix's [`index_or_empty`](gix::Repository::index_or_empty).
+pub(crate) fn load_index_or_empty(
+	repo: &gix::Repository,
+	op: &'static str,
+) -> Result<gix::index::File> {
+	match repo.open_index() {
+		Ok(index) => Ok(index),
+		Err(gix::worktree::open_index::Error::IndexFile(gix::index::file::init::Error::Io(err)))
+			if err.kind() == std::io::ErrorKind::NotFound =>
+		{
+			Ok(repo
+				.index_or_empty()
+				.map_err(|err| Error::backend(op, err))?
+				.into_owned_or_cloned())
+		},
+		Err(err) => Err(Error::backend(op, err)),
+	}
+}
+
+/// Start a status query with an index loaded directly from disk.
+///
+/// Supplying the index is required even after other read paths bypass the
+/// shared snapshot: [`gix::Repository::status`] otherwise reacquires that same
+/// mtime-gated snapshot internally.
+pub(crate) fn status_with_fresh_index<'repo>(
+	repo: &'repo gix::Repository,
+	op: &'static str,
+) -> Result<gix::status::Platform<'repo, gix::progress::Discard>> {
+	let index = load_index_or_empty(repo, op)?;
+	Ok(repo
+		.status(gix::progress::Discard)
+		.map_err(|err| Error::backend(op, err))?
+		.index(index.into()))
+}
+
 /// Open options for repositories the agent operates on.
 ///
 /// - Environment: deny `GIT_*` location/object overrides — operations bind to

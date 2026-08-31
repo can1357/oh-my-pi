@@ -64,6 +64,7 @@ export type SymbolKey =
 	| "sep.powerlineRight"
 	| "sep.powerlineThinLeft"
 	| "sep.powerlineThinRight"
+	| "sep.powerlineCapLeft"
 	| "sep.block"
 	| "sep.space"
 	| "sep.asciiLeft"
@@ -93,7 +94,8 @@ export type SymbolKey =
 	| "icon.subscription"
 	| "icon.advisor"
 	| "icon.time"
-	| "icon.pi"
+	| "icon.omp"
+	| "icon.esc"
 	| "icon.ghost"
 	| "icon.agents"
 	| "icon.job"
@@ -409,6 +411,8 @@ const UNICODE_SYMBOLS: SymbolMap = {
 	"sep.powerlineRight": "◀",
 	"sep.powerlineThinLeft": ">",
 	"sep.powerlineThinRight": "<",
+	// Soft band opening cap: no unicode equivalent, bands start flat.
+	"sep.powerlineCapLeft": "",
 	"sep.block": "▌",
 	"sep.space": " ",
 	"sep.asciiLeft": ">",
@@ -438,7 +442,8 @@ const UNICODE_SYMBOLS: SymbolMap = {
 	"icon.subscription": "(sub)",
 	"icon.advisor": "👁",
 	"icon.time": "⏱",
-	"icon.pi": "π",
+	"icon.omp": "π",
+	"icon.esc": "⎋",
 	"icon.ghost": "👻",
 	"icon.agents": "👥",
 	"icon.job": "⚙",
@@ -721,6 +726,8 @@ const NERD_SYMBOLS: SymbolMap = {
 	"sep.powerlineThinLeft": "\ue0b1",
 	// pick:  | alt: 
 	"sep.powerlineThinRight": "\ue0b3",
+	// pick:  | alt: 
+	"sep.powerlineCapLeft": "\ue0b6",
 	// pick: █ | alt: ▓ ▒ ░ ▉ ▌
 	"sep.block": "█",
 	// pick: space | alt: ␠ ·
@@ -776,8 +783,10 @@ const NERD_SYMBOLS: SymbolMap = {
 	"icon.advisor": "\uea70",
 	// pick:  | alt: ◷ ◴
 	"icon.time": "\uf017",
-	// pick:  | alt: π ∏ ∑
-	"icon.pi": "\ue22c",
+	// pick: 󰵗 (nf-md-pi) | alt:  π ∏ ∑
+	"icon.omp": "\u{f0d57}",
+	// pick: 󱊷 (nf-md-keyboard_esc) | alt: ⎋
+	"icon.esc": "\u{f12b7}",
 	// pick: 󰊠 (nf-md-ghost) | alt: 👻
 	"icon.ghost": "\u{f02a0}",
 	// pick:  | alt: 
@@ -1094,6 +1103,7 @@ const ASCII_SYMBOLS: SymbolMap = {
 	"sep.powerlineRight": "<",
 	"sep.powerlineThinLeft": ">",
 	"sep.powerlineThinRight": "<",
+	"sep.powerlineCapLeft": "",
 	"sep.block": "#",
 	"sep.space": " ",
 	"sep.asciiLeft": ">",
@@ -1123,7 +1133,8 @@ const ASCII_SYMBOLS: SymbolMap = {
 	"icon.subscription": "(sub)",
 	"icon.advisor": "(adv)",
 	"icon.time": "t:",
-	"icon.pi": "pi",
+	"icon.omp": "pi",
+	"icon.esc": "esc",
 	"icon.ghost": "@",
 	"icon.agents": "AG",
 	"icon.job": "bg",

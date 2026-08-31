@@ -252,6 +252,16 @@ export function applyModelPatch(base: Model<Api>, patch: ModelPatch, transport: 
 		// first so non-reasoning and wire-disabled models still suppress it.
 		built.thinking = patch.thinking;
 	}
+	// Explicitly patched value fields outrank the engine's reviewed catalog
+	// corrections (`limits-patch`/`context-window-floor`/`cost-patch`/
+	// `input-modalities`): rebuild first for compat/identity, then re-assert
+	// the user-authored values.
+	if (patch.contextWindow !== undefined) built.contextWindow = patch.contextWindow;
+	if (patch.maxTokens !== undefined) built.maxTokens = patch.maxTokens;
+	if (patch.input !== undefined) built.input = patch.input;
+	if (patch.cost) {
+		built.cost = { ...result.cost };
+	}
 	return built;
 }
 
