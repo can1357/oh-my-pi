@@ -6,7 +6,7 @@
  */
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { type Component } from "../tui";
-import { formatBytes, formatDuration } from "@oh-my-pi/pi-utils";
+import { formatBytes, formatDuration, sanitizeText } from "@oh-my-pi/pi-utils";
 import type { JobSnapshot } from "../tools/hub";
 import type { DaemonSnapshot } from "../tools/hub";
 import { type CustomMessage, type FileMentionMessage, resolveAbortLabel, shouldRenderAbortReason } from "./messages";
@@ -108,6 +108,10 @@ export function buildLaunchCompletionBlock(message: CustomOrHookMessage): ToolAc
 		rows.push({ parts: [theme.fg("dim", `${theme.status.done} ${message.content}`)] });
 	}
 	for (const daemon of daemons) {
+		const normalizedName = shortenEmbeddedPaths(
+			replaceTabs(sanitizeText(daemon.name.replace(/[\r\n]+/g, " "))),
+		).trim();
+		const displayName = truncateToWidth(normalizedName || "unnamed", TRUNCATE_LENGTHS.TITLE);
 		const failed = daemon.state === "failed" || (daemon.exitCode !== undefined && daemon.exitCode !== 0);
 		const duration =
 			daemon.exitedAt !== undefined && daemon.startedAt !== undefined
@@ -118,7 +122,7 @@ export function buildLaunchCompletionBlock(message: CustomOrHookMessage): ToolAc
 				failed
 					? theme.fg("error", `${theme.status.error} Supervised process failed`)
 					: theme.fg("success", `${theme.status.done} Supervised process completed`),
-				theme.fg("accent", daemon.name),
+				theme.fg("accent", displayName),
 				daemon.exitCode !== undefined ? theme.fg("dim", `(exit ${daemon.exitCode})`) : undefined,
 				duration ? theme.fg("dim", `(${duration})`) : undefined,
 			],
