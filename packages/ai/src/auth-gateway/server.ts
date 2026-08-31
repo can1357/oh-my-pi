@@ -441,9 +441,13 @@ async function handleFormatEndpoint(
 	if (!compiled) {
 		return route.module.formatError(404, "invalid_request_error", `Unknown model: ${modelId}`);
 	}
-	const model = bootOpts.resolveModel(modelId);
-	if (!model) {
+	const firstTarget = compiled.targets[0];
+	if (firstTarget === undefined) {
 		return route.module.formatError(404, "invalid_request_error", `Unknown model: ${modelId}`);
+	}
+	const model = bootOpts.resolveModel(firstTarget);
+	if (!model) {
+		return route.module.formatError(404, "invalid_request_error", `Unknown model: ${firstTarget}`);
 	}
 	const client = resolveClientIdentity(req.headers);
 
@@ -512,12 +516,18 @@ async function handleFormatEndpoint(
 			requestId,
 		});
 	} catch (error) {
-		if (controller.signal.aborted) return clientClosedResponse(route);
+		if (controller.signal.aborted) {
+			bootOpts.storage.releaseTurnReservation(requestId);
+			return clientClosedResponse(route);
+		}
 		const classified = classifyGatewayError(error);
 		logger.warn("auth-gateway getApiKey threw", { provider: model.provider, peer, error: classified.message });
 		return route.module.formatError(classified.status, classified.type, classified.message);
 	}
-	if (controller.signal.aborted) return clientClosedResponse(route);
+	if (controller.signal.aborted) {
+		bootOpts.storage.releaseTurnReservation(requestId);
+		return clientClosedResponse(route);
+	}
 	const traces = bootOpts.decisionTraces ?? new RouteDecisionTraceLog();
 	if (!apiKey) {
 		const skipped = traces.record({
