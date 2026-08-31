@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed the TUI sometimes stopping repainting while the agent continued running.
+
 ## [18.0.11] - 2026-08-29
 
 ### Fixed
