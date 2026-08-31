@@ -13,7 +13,7 @@
 ### Changed
 
 - Disabled `hashline` edit mode for Kimi, Mimo, DeepSeek Flash, and Stepfun models for stability
-- Compaction summaries now resume work from a selective continuity capsule instead of retaining implementation-heavy progress chronicles, foregrounding the current outcome, owner conversation, one next action, volatile authorities, and exact archive pointers.
+- Compaction summaries now resume work from a selective continuity capsule instead of retaining implementation-heavy progress chronicles, foregrounding the current outcome, owner conversation, one next action, volatile authorities, and exact archive pointers. Interactive Ask selections remain owner intent while cancelled Ask questions remain explicitly unresolved.
 
 ### Fixed
 
