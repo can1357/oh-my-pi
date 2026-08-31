@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Fixed Gemini `generateContent` responses dropping `toolCall` blocks; they encode as `functionCall` parts.
 - Fixed Gemini v1beta requests dropping `tools[].functionDeclarations` / `toolConfig` before dispatch.
 - Fixed auth-gateway sibling-credential budget sticking across fallback targets (and raised the attempt cap).
 - Fixed multi-row stored API-key selection consulting turn reservations without acquiring one for the chosen key.
