@@ -3625,16 +3625,32 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.showWarning("Exit vibe mode first.");
 			return;
 		}
+		const personaActive =
+			this.session.getPersonaAppendPrompt() !== undefined || this.session.getSessionSpawns() !== null;
+		const personaSnapshot = personaActive ? snapshotPersonaSwitch(this.session) : undefined;
 		await this.#clearPersonaOwnedState();
 		const previousTools = this.session.getEnabledToolNames().filter(name => name !== "goal");
 		const goalTools = [...new Set([...previousTools, "goal"])];
 		this.#goalModePreviousTools = previousTools;
 		this.goalModePaused = false;
-		const state = options.resume
-			? await this.session.goalRuntime.resumeGoal()
-			: await this.session.goalRuntime.createGoal({ objective: options.objective ?? "" });
-		await this.session.setActiveToolsByName(goalTools);
-		this.session.setGoalModeState(state);
+		try {
+			const state = options.resume
+				? await this.session.goalRuntime.resumeGoal()
+				: await this.session.goalRuntime.createGoal({ objective: options.objective ?? "" });
+			await this.session.setActiveToolsByName(goalTools);
+			this.session.setGoalModeState(state);
+		} catch (error) {
+			// Goal setup failed after the persona was torn down: the persisted
+			// mode is still `agent`, so rebuild the persona state the clear
+			// discarded (tools, restriction, spawns, prompt) exactly like the
+			// plan-mode rollback.
+			this.#goalModePreviousTools = undefined;
+			this.goalModePaused = false;
+			if (personaSnapshot) {
+				await rollbackPersonaSwitch(this.session, personaSnapshot);
+			}
+			throw error;
+		}
 		this.goalModeEnabled = true;
 		this.#resetGoalContinuationSuppression();
 		this.#updateGoalModeStatus();
@@ -4289,6 +4305,9 @@ export class InteractiveMode implements InteractiveModeContext {
 			return;
 		}
 
+		const personaActive =
+			this.session.getPersonaAppendPrompt() !== undefined || this.session.getSessionSpawns() !== null;
+		const personaSnapshot = personaActive ? snapshotPersonaSwitch(this.session) : undefined;
 		await this.#clearPersonaOwnedState();
 
 		const vibeRegistry = VibeSessionRegistry.global();
@@ -4302,7 +4321,18 @@ export class InteractiveMode implements InteractiveModeContext {
 		const previousTools = options?.previousTools ?? this.session.getEnabledToolNames();
 		const vibeBaseTools = ["read"];
 		if (this.session.hasBuiltInTool("todo")) vibeBaseTools.push("todo");
-		await this.session.activateVibeTools(vibeBaseTools);
+		try {
+			await this.session.activateVibeTools(vibeBaseTools);
+		} catch (error) {
+			// Vibe activation failed after the persona was torn down: the
+			// persisted mode is still `agent`, so rebuild the persona state the
+			// clear discarded (tools, restriction, spawns, prompt) exactly like
+			// the plan-mode rollback.
+			if (personaSnapshot) {
+				await rollbackPersonaSwitch(this.session, personaSnapshot);
+			}
+			throw error;
+		}
 		this.#vibeModePreviousTools = previousTools;
 		this.#vibeModeOwnerScope = ownerScope;
 		this.vibeModeEnabled = true;

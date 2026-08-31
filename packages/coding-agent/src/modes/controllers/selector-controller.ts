@@ -806,6 +806,11 @@ export class SelectorController {
 					// restoring input focus so the next prompt cannot land on a
 					// partially applied or stale persona (codex #3818999442 / #3818955423).
 					await this.ctx.switchAgentPersona(agent.name);
+				} catch (error) {
+					// A rejected switch must be user-visible: the persona itself
+					// stayed intact, so a silent close would look like a no-op pick.
+					this.ctx.showError(error instanceof Error ? error.message : String(error));
+					throw error;
 				} finally {
 					// A rejected switch (e.g. agent discovery failing on an
 					// unreadable extension directory) must still settle the
