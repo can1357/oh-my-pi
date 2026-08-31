@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Fixed
+- Fixed format-endpoint streams marking failed/aborted `events.result()` outcomes on the commit gate before EOF can settle a quota probe.
 
 - Fixed releasing turn reservations on post-getApiKey aborts, settling foreign-format probing successes, and gating pi-native probe settlement on stream stopReason.
 - Fixed quota-probe settlement ignoring failed terminals, and reacquiring turn reservations after prepare/broker identity bumps.

@@ -669,10 +669,22 @@ async function handleFormatEndpoint(
 		bootOpts.storage.releaseTurnReservation(requestId);
 		return clientClosedResponse(route);
 	}
-	void events
-		.result()
-		.then(message => recordGatewayUsage(bootOpts.storage, model, client, message))
-		.catch(() => {});
+	const settled = events.result();
+	void settled.then(message => recordGatewayUsage(bootOpts.storage, model, client, message)).catch(() => {});
+	// Non-Responses formats may never feed onSseEvent; mirror pi-native and mark the
+	// commit gate from the canonical assistant result before EOF can settle a probe.
+	void settled
+		.then(message => {
+			if (message.stopReason === "error" || message.stopReason === "aborted") {
+				commitGate.classifyAndObserve("response.failed", 1);
+			} else {
+				commitGate.classifyAndObserve("response.output_text.delta", 1);
+				commitGate.classifyAndObserve("response.completed", 1);
+			}
+		})
+		.catch(() => {
+			commitGate.classifyAndObserve("response.failed", 1);
+		});
 
 	let sseStream = route.module.encodeStream(events, parsed.modelId, parsed.options, {
 		signal: controller.signal,
