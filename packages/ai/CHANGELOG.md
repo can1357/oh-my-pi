@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Fixed releasing turn reservations on post-getApiKey aborts, settling foreign-format probing successes, and gating pi-native probe settlement on stream stopReason.
 - Fixed quota-probe settlement ignoring failed terminals, and reacquiring turn reservations after prepare/broker identity bumps.
 - Fixed OpenAI Responses strict-tool retries reapplying explicit `store` / continuation requirements, and forwarded successful terminal-only Responses SSE preambles.
 

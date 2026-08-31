@@ -386,13 +386,16 @@ function releaseTurnOnStreamEnd(
 	const release = (settleProbe: boolean): void => {
 		if (released) return;
 		released = true;
-		// Settle only on successful completion evidence: committed streams, successful
-		// terminals (empty completed responses), or foreign-format paths with no gate.
-		// A terminated `response.failed` must not clear cooldown.
+		// Settle only on successful completion evidence:
+		// - committed streams (output observed or foreign commit)
+		// - successful terminals (empty completed responses)
+		// - still-probing gates that never saw SSE (foreign formats without onSseEvent)
+		// Never settle undefined gates (callers must attach a gate) or failed terminals.
 		if (
 			settleProbe &&
-			(commitGate === undefined ||
-				commitGate.state === "committed" ||
+			commitGate !== undefined &&
+			(commitGate.state === "committed" ||
+				commitGate.state === "probing" ||
 				(commitGate.state === "terminated" && commitGate.sawSuccessfulTerminal))
 		) {
 			storage.settleQuotaProbeSuccess(requestId);
@@ -526,12 +529,18 @@ async function handleFormatEndpoint(
 			requestId,
 		});
 	} catch (error) {
-		if (controller.signal.aborted) return clientClosedResponse(route);
+		if (controller.signal.aborted) {
+			bootOpts.storage.releaseTurnReservation(requestId);
+			return clientClosedResponse(route);
+		}
 		const classified = classifyGatewayError(error);
 		logger.warn("auth-gateway getApiKey threw", { provider: model.provider, peer, error: classified.message });
 		return route.module.formatError(classified.status, classified.type, classified.message);
 	}
-	if (controller.signal.aborted) return clientClosedResponse(route);
+	if (controller.signal.aborted) {
+		bootOpts.storage.releaseTurnReservation(requestId);
+		return clientClosedResponse(route);
+	}
 	const traces = bootOpts.decisionTraces ?? new RouteDecisionTraceLog();
 	if (!apiKey) {
 		const skipped = traces.record({
@@ -756,12 +765,18 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 			requestId,
 		});
 	} catch (error) {
-		if (controller.signal.aborted) return aborted();
+		if (controller.signal.aborted) {
+			bootOpts.storage.releaseTurnReservation(requestId);
+			return aborted();
+		}
 		const classified = classifyGatewayError(error);
 		logger.warn("auth-gateway getApiKey threw", { provider: model.provider, peer, error: classified.message });
 		return piNative.formatError(classified.status, classified.type, classified.message);
 	}
-	if (controller.signal.aborted) return aborted();
+	if (controller.signal.aborted) {
+		bootOpts.storage.releaseTurnReservation(requestId);
+		return aborted();
+	}
 	const traces = bootOpts.decisionTraces ?? new RouteDecisionTraceLog();
 	if (!apiKey) {
 		const skipped = traces.record({
@@ -892,7 +907,21 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 			}
 		},
 	});
-	sseStream = releaseTurnOnStreamEnd(sseStream, bootOpts.storage, requestId);
+	const piCommitGate = new StreamCommitGate();
+	void events
+		.result()
+		.then(message => {
+			if (message.stopReason === "error" || message.stopReason === "aborted") {
+				piCommitGate.classifyAndObserve("response.failed", 1);
+			} else {
+				piCommitGate.classifyAndObserve("response.output_text.delta", 1);
+				piCommitGate.classifyAndObserve("response.completed", 1);
+			}
+		})
+		.catch(() => {
+			piCommitGate.classifyAndObserve("response.failed", 1);
+		});
+	sseStream = releaseTurnOnStreamEnd(sseStream, bootOpts.storage, requestId, piCommitGate);
 	return new Response(sseStream, {
 		status: 200,
 		headers: {
