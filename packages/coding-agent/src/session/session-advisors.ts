@@ -627,10 +627,17 @@ export class SessionAdvisors {
 		});
 	}
 
-	/** Testable settle transition: preserve deferred notes once the primary loop is idle. */
+	/** Testable settle transition: route deferred notes once the primary loop is idle. */
 	preserveDeferredAdviceNow(): void {
 		if (!this.#host.isAgentConnected() || this.#host.agent.state.isStreaming || this.#host.abortInProgress()) return;
-		for (const card of this.drainDeferredAdvice()) this.#host.preserveAdvisorCard(card);
+		for (const card of this.drainDeferredAdvice()) {
+			const notes = (card.details as AdvisorMessageDetails | undefined)?.notes;
+			if (!Array.isArray(notes)) {
+				this.#host.preserveAdvisorCard(card);
+				continue;
+			}
+			for (const note of notes) this.#deliverAcceptedAdvice(note.note, note.severity, note.advisor);
+		}
 	}
 
 	// Advisor runtime lifecycle
@@ -1248,7 +1255,10 @@ export class SessionAdvisors {
 	#routeAdvice(advisor: ActiveAdvisor, note: string, severity?: AdvisorSeverity): void {
 		// The implicit single ("default") advisor stamps no source name, so its
 		// agent-facing `<advisory>` bytes stay identical to the pre-multi-advisor path.
-		const source = advisor.slug ? advisor.name : undefined;
+		this.#deliverAcceptedAdvice(note, severity, advisor.slug ? advisor.name : undefined);
+	}
+
+	#deliverAcceptedAdvice(note: string, severity?: AdvisorSeverity, source?: string): void {
 		const interrupting = isInterruptingSeverity(severity);
 		const planModeEnabled = this.#host.planModeState()?.enabled === true;
 		const deferInterruptingAdvice = shouldDeferAdvisorInterrupt(

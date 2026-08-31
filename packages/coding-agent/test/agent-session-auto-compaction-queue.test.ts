@@ -323,7 +323,7 @@ describe("AgentSession auto-compaction queue resume", () => {
 		expect(continueSpy).toHaveBeenCalledTimes(1);
 	});
 
-	it("preserves deferred advisor advice after manual compaction reconnects", async () => {
+	it("preserves a deferred concern after manual compaction reconnects", async () => {
 		session.settings.set("compaction.keepRecentTokens", 1);
 		sessionManager.appendMessage({
 			role: "assistant",
@@ -342,8 +342,12 @@ describe("AgentSession auto-compaction queue resume", () => {
 			},
 			timestamp: Date.now(),
 		});
-		sessionManager.appendMessage({ role: "user", content: "second turn", timestamp: Date.now() });
-		session.yieldQueue.register<{ note: string; deferredInterrupt: true }>("advisor", {
+		type DeferredAdvice = {
+			note: string;
+			severity: "concern" | "blocker";
+			deferredInterrupt: true;
+		};
+		session.yieldQueue.register<DeferredAdvice>("advisor", {
 			build: entries =>
 				({
 					role: "custom",
@@ -351,6 +355,7 @@ describe("AgentSession auto-compaction queue resume", () => {
 					content: entries.map(entry => entry.note).join("\n"),
 					display: true,
 					attribution: "agent",
+					details: { notes: entries },
 					timestamp: Date.now(),
 				}) as AgentMessage,
 			skipIdleFlush: true,
@@ -361,13 +366,69 @@ describe("AgentSession auto-compaction queue resume", () => {
 				persisted.push(typeof entry.content === "string" ? entry.content : JSON.stringify(entry.content));
 			}
 		};
-		session.yieldQueue.enqueue("advisor", { note: "deferred during compact", deferredInterrupt: true });
+		session.yieldQueue.enqueue("advisor", {
+			note: "deferred concern during compact",
+			severity: "concern",
+			deferredInterrupt: true,
+		});
+
+		await session.compact();
+		await session.waitForIdle();
+
+		expect(persisted).toEqual([expect.stringContaining("deferred concern during compact")]);
+		expect(session.yieldQueue.has("advisor")).toBe(false);
+	});
+
+	it("restarts after manual compaction to acknowledge a deferred blocker", async () => {
+		session.settings.set("compaction.keepRecentTokens", 1);
+		sessionManager.appendMessage({
+			role: "assistant",
+			content: [{ type: "text", text: "previous answer" }],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-sonnet-4-5",
+			stopReason: "stop",
+			usage: {
+				input: 1_000,
+				output: 100,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 1_100,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: Date.now(),
+		});
+		session.yieldQueue.register<{ note: string; severity: "blocker"; deferredInterrupt: true }>("advisor", {
+			build: entries =>
+				({
+					role: "custom",
+					customType: "advisor",
+					content: entries.map(entry => entry.note).join("\n"),
+					display: true,
+					attribution: "agent",
+					details: { notes: entries },
+					timestamp: Date.now(),
+				}) as AgentMessage,
+			skipIdleFlush: true,
+		});
+		const sendCustomMessage = vi.spyOn(session, "sendCustomMessage").mockResolvedValue(false);
+		session.yieldQueue.enqueue("advisor", {
+			note: "deferred blocker during compact",
+			severity: "blocker",
+			deferredInterrupt: true,
+		});
 
 		await session.compact();
 		await Promise.resolve();
-		await session.waitForIdle();
 
-		expect(persisted).toEqual(["deferred during compact"]);
+		expect(sendCustomMessage).toHaveBeenCalledWith(
+			expect.objectContaining({
+				customType: "advisor",
+				content: expect.stringContaining("deferred blocker during compact"),
+			}),
+			expect.objectContaining({ deliverAs: "steer", triggerTurn: true }),
+		);
+		expect(session.agent.state.messages.some(message => message.role === "custom")).toBe(false);
 		expect(session.yieldQueue.has("advisor")).toBe(false);
 	});
 
