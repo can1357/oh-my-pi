@@ -36,6 +36,12 @@ Color values accept:
 - variable reference string (resolved through `vars`)
 - empty string (`""`) meaning terminal default (`\x1b[39m` fg, `\x1b[49m` bg)
 
+Exception: an unset `userMessageText` inherits the theme `accent` when the
+accent keeps a WCAG contrast ratio of at least 3:1 against `userMessageBg`
+(so user input stays visually distinct from assistant replies, #1633);
+otherwise it remains the terminal default. Setting the token explicitly
+always wins.
+
 ## Required and optional color tokens
 
 All tokens below are required in `colors` except `thinkingMax`, which is optional for compatibility and falls back to `thinkingXhigh`.

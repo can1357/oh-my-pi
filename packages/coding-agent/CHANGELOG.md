@@ -13,6 +13,7 @@
 ### Changed
 
 - Disabled `hashline` edit mode for Kimi, Mimo, DeepSeek Flash, and Stepfun models for stability
+- User messages now render in the theme accent color when `userMessageText` is unset, making user input visually distinct from agent replies ([#1633](https://github.com/can1357/oh-my-pi/issues/1633) by [@Svtter](https://github.com/Svtter))
 
 ### Fixed
 

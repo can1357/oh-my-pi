@@ -3,7 +3,7 @@ import * as path from "node:path";
 import { detectMacOSAppearance, MacAppearanceObserver } from "@oh-my-pi/pi-natives";
 import type { Terminal, TerminalAppearance } from "@oh-my-pi/pi-tui";
 import { colorLuma, getCustomThemesDir, logger } from "@oh-my-pi/pi-utils";
-import { ansi256ToHex, resolveThemeColors, resolveVarRefs } from "./color";
+import { ansi256ToHex, deriveUserMessageTextDefault, resolveThemeColors, resolveVarRefs } from "./color";
 import { type CreateThemeOptions, getBuiltinThemes, loadTheme, loadThemeJson, loadThemeSync } from "./loader";
 import type { ThemeColor, ThemeJson } from "./schema";
 import type { SymbolPreset } from "./symbols";
@@ -718,9 +718,9 @@ export async function getResolvedThemeColors(themeName?: string): Promise<Record
 	const themeJson = await loadThemeJson(name);
 	const exportColors = resolveThemeExportColors(themeJson);
 	const resolved = resolveThemeColors(themeJson.colors, themeJson.vars);
+	resolved.userMessageText = deriveUserMessageTextDefault(resolved);
 
 	// Empty foreground tokens use the terminal default color. In HTML export,
-	// that default must contrast the export surface, not the TUI status line:
 	// custom light themes can still export dark transcript cards when they omit
 	// `export`, because generateThemeVars derives those cards from userMessageBg.
 	const defaultText = getHtmlDefaultTextForSurface(
