@@ -39,6 +39,7 @@ import {
 	augmentToolIndexForProductWire,
 	parseSendToUserContent,
 	type ProductWireToolIndexMeta,
+	rewriteInferenceMessagesForProductWire,
 	SEND_TO_USER_WIRE_NAME,
 } from "./grokbot/product-wire";
 import {
@@ -704,19 +705,24 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 					body.acceptedUnadvertisedToolNames = anthropicWire.acceptedUnadvertisedToolNames;
 				}
 				augmentToolIndexForProductWire(grammarTools, context.tools);
-				if (anthropicWire.wireMode === "sand-default-fallback") {
-					logger.warn("grokbot: anthropic sand tool wire fallback", {
-						originalModelId: anthropicWire.originalModelId,
-						fallbackModelId: anthropicWire.requestedModel.modelId,
-						tools: tools.length,
-					});
-				} else if (anthropicWire.wireMode === "automation" || anthropicWire.wireMode === "parent-chat") {
+				if (anthropicWire.wireMode === "automation" || anthropicWire.wireMode === "parent-chat") {
+					// History stores omp names (bash/read/write); product tools are
+					// Shell/Read/Write — rewrite replayed call/result names to match.
+					body.messages = rewriteInferenceMessagesForProductWire(
+						(body.messages as Record<string, unknown>[]) ?? [],
+					);
 					logger.info("grokbot: product sand tool wire", {
 						wireMode: anthropicWire.wireMode,
 						originalModelId: anthropicWire.originalModelId,
 						wireModelId: anthropicWire.requestedModel.modelId,
 						subagentType: anthropicWire.subagentType,
 						tools: anthropicWire.tools.length,
+					});
+				} else if (anthropicWire.wireMode === "sand-default-fallback") {
+					logger.warn("grokbot: anthropic sand tool wire fallback", {
+						originalModelId: anthropicWire.originalModelId,
+						fallbackModelId: anthropicWire.requestedModel.modelId,
+						tools: tools.length,
 					});
 				}
 			}

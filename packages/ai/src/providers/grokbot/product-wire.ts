@@ -255,6 +255,54 @@ export function augmentToolIndexForProductWire(
 	}
 }
 
+/**
+ * Rewrite historical inference tool call/result names to product field-2 aliases
+ * (bash→Shell, read→Read, write/edit→Write) so replayed history matches the
+ * advertised product-wire schema. Does not mutate the input array.
+ */
+export function rewriteInferenceMessagesForProductWire(
+	messages: readonly Record<string, unknown>[],
+): Record<string, unknown>[] {
+	return messages.map(msg => {
+		if (!msg || typeof msg !== "object") return msg;
+		const toolCalls = Reflect.get(msg, "toolCalls");
+		if (Array.isArray(toolCalls)) {
+			return {
+				...msg,
+				toolCalls: toolCalls.map(entry => {
+					if (!entry || typeof entry !== "object") return entry;
+					const tc = entry as Record<string, unknown>;
+					const name = typeof tc.toolName === "string" ? tc.toolName : "";
+					if (!name) return tc;
+					const sandName = toSandField2Name(name);
+					return sandName === name ? tc : { ...tc, toolName: sandName };
+				}),
+			};
+		}
+		const toolContent = Reflect.get(msg, "toolContent");
+		if (toolContent && typeof toolContent === "object") {
+			const parts = Reflect.get(toolContent, "parts");
+			if (Array.isArray(parts)) {
+				return {
+					...msg,
+					toolContent: {
+						...(toolContent as Record<string, unknown>),
+						parts: parts.map(part => {
+							if (!part || typeof part !== "object") return part;
+							const p = part as Record<string, unknown>;
+							const name = typeof p.toolName === "string" ? p.toolName : "";
+							if (!name) return p;
+							const sandName = toSandField2Name(name);
+							return sandName === name ? p : { ...p, toolName: sandName };
+						}),
+					},
+				};
+			}
+		}
+		return msg;
+	});
+}
+
 /** Parse SendToUser streaming args JSON; returns visible text when complete enough. */
 export function parseSendToUserContent(argsText: string): string | undefined {
 	if (!argsText.trim()) return undefined;

@@ -16,6 +16,7 @@
 - Grok Bot product wire prefers `write` over `edit` for the shared sand `Write` tool so advertised schema and dispatch stay aligned.
 - Grok Bot product wire aliases (Shell/Read/Write) stay off `customWireName` so later OpenAI Responses replay does not treat them as custom tools.
 - Grok Bot Anthropic sand tools routing uses catalog taxonomy identity (`classifyModel` class anthropic), not model-id string prefixes.
+- Grok Bot product-wire turns rewrite replayed history tool names (`bash`/`read`/`write`) to Shell/Read/Write to match advertised schemas.
 - Grok Bot bare-wire routing follows catalog `sandParameterIds` / `sandMaxMode` instead of a hard-coded model-id set.
 - Grok Bot preserves empty-string grammar `rawToolCallArgs` on history replay instead of dropping the raw oneof field.
 - `/grokbot` reports Renewer present when the credential comes from `providers.grokbot.apiKey` or a runtime API-key override.

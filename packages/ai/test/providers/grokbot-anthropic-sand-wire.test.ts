@@ -8,6 +8,7 @@ import {
 	OMP_TO_SAND_FIELD2,
 	augmentToolIndexForProductWire,
 	parseSendToUserContent,
+	rewriteInferenceMessagesForProductWire,
 	toOmpToolName,
 	toProductField2Tools,
 	wrapToolParameters,
@@ -204,6 +205,47 @@ describe("product wire helpers", () => {
 
 	test("parseSendToUserContent extracts text content", () => {
 		expect(parseSendToUserContent('{"type":"text","content":"hello-capture-42"}')).toBe("hello-capture-42");
+	});
+
+	test("rewrites replayed omp tool names to product field-2 aliases", () => {
+		const rewritten = rewriteInferenceMessagesForProductWire([
+			{
+				role: 2,
+				toolCalls: [
+					{ toolCallId: "c1", toolName: "bash", args: { command: "ls" } },
+					{ toolCallId: "c2", toolName: "read", args: { path: "a.ts" } },
+					{ toolCallId: "c3", toolName: "write", args: { path: "b.ts", content: "x" } },
+					{ toolCallId: "c4", toolName: "edit", args: { path: "c.ts" } },
+				],
+			},
+			{
+				role: 3,
+				toolContent: {
+					parts: [
+						{ toolCallId: "c1", toolName: "bash", result: "ok" },
+						{ toolCallId: "c2", toolName: "read", result: "src" },
+					],
+				},
+			},
+		]);
+		expect(rewritten[0]).toEqual({
+			role: 2,
+			toolCalls: [
+				{ toolCallId: "c1", toolName: "Shell", args: { command: "ls" } },
+				{ toolCallId: "c2", toolName: "Read", args: { path: "a.ts" } },
+				{ toolCallId: "c3", toolName: "Write", args: { path: "b.ts", content: "x" } },
+				{ toolCallId: "c4", toolName: "Write", args: { path: "c.ts" } },
+			],
+		});
+		expect(rewritten[1]).toEqual({
+			role: 3,
+			toolContent: {
+				parts: [
+					{ toolCallId: "c1", toolName: "Shell", result: "ok" },
+					{ toolCallId: "c2", toolName: "Read", result: "src" },
+				],
+			},
+		});
 	});
 });
 
