@@ -88,6 +88,11 @@ export function isAdvisorInterruptImmuneTurnActive(opts: {
 	return opts.completedTurns < opts.immuneTurnStart + opts.immuneTurns;
 }
 
+/** Plan mode keeps its stronger preserve-only contract even when wait mode is selected. */
+export function shouldDeferAdvisorInterrupt(mode: "immediate" | "wait", planModeEnabled: boolean): boolean {
+	return mode === "wait" && !planModeEnabled;
+}
+
 /**
  * Decide how one advisor note reaches the primary agent.
  *

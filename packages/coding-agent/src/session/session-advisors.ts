@@ -58,6 +58,7 @@ import {
 	isInterruptingSeverity,
 	quarantineAdvisorUnsafeOutput,
 	resolveAdvisorDeliveryChannel,
+	shouldDeferAdvisorInterrupt,
 	slugifyAdvisorName,
 } from "../advisor";
 import type { ModelRegistry } from "../config/model-registry";
@@ -1239,7 +1240,10 @@ export class SessionAdvisors {
 			aborting: this.#host.abortInProgress(),
 			terminalAnswerNoQueuedWork: this.#hasTerminalTextAnswerWithoutQueuedWork(),
 			interruptImmuneTurnActive: interrupting && this.#isAdvisorInterruptImmuneTurnActive(),
-			deferInterruptingAdvice: this.#host.settings.get("advisor.interruptMode") === "wait" && !planModeEnabled,
+			deferInterruptingAdvice: shouldDeferAdvisorInterrupt(
+				this.#host.settings.get("advisor.interruptMode"),
+				planModeEnabled,
+			),
 		});
 		if (channel === "aside") {
 			this.#host.yieldQueue.enqueue("advisor", { note, severity, advisor: source });
