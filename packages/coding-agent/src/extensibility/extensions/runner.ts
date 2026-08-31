@@ -370,6 +370,7 @@ type RunnerEmitEvent = Exclude<
 	ExtensionEvent,
 	| ToolCallEvent
 	| ToolResultEvent
+	| ToolApprovalReviewEvent
 	| UserBashEvent
 	| ContextEvent
 	| BeforeProviderRequestEvent
@@ -1871,13 +1872,23 @@ export class ExtensionRunner {
 		return undefined;
 	}
 }
-/** Recursively freezes a JSON value so event handlers cannot mutate it. */
-export function deepFreeze<T>(value: T): T {
-	if (typeof value === "object" && value !== null) {
-		for (const key of Object.keys(value as Record<string, unknown>)) {
-			deepFreeze((value as Record<string, unknown>)[key]);
-		}
-		Object.freeze(value);
+
+/** Recursively freezes a plain object/array value, rejecting unsupported mutable objects. */
+function deepFreeze<T>(value: T, seen = new WeakSet<object>()): T {
+	if (typeof value !== "object" || value === null || seen.has(value)) return value;
+
+	const prototype = Object.getPrototypeOf(value);
+	if (prototype !== Object.prototype && prototype !== null && prototype !== Array.prototype) {
+		throw new TypeError("Review input contains an unsupported mutable value");
 	}
+	seen.add(value);
+	for (const key of Reflect.ownKeys(value)) {
+		const descriptor = Object.getOwnPropertyDescriptor(value, key);
+		if (!descriptor || !("value" in descriptor)) {
+			throw new TypeError("Review input contains an accessor");
+		}
+		deepFreeze(descriptor.value, seen);
+	}
+	Object.freeze(value);
 	return value;
 }

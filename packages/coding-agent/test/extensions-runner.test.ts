@@ -3098,6 +3098,28 @@ describe("ExtensionRunner", () => {
 				expect(select).toHaveBeenCalledTimes(1);
 				expect(trace).toEqual([{ kind: "requested" }, { kind: "ui_select" }, { kind: "resolved", approved: true }]);
 			});
+			it("invalid user policies do not suppress eligible approval review", async () => {
+				const trace = setTrace();
+				const { runner, select } = await reviewRunnerFromFile(
+					"review-invalid-user-policy.ts",
+					reviewExtensionCode(`return { decision: "approve" };`),
+				);
+				const result = await executeReviewCase(runner, recordingApprovalTool(), "call-invalid-user-policy", {
+					settings: {
+						get: (key: string) =>
+							key === "tools.approvalMode"
+								? "always-ask"
+								: key === "tools.approval"
+									? { dangerous_tool: "not-a-policy" }
+									: {},
+					},
+				});
+
+				expect(firstReviewText(result)).toBe("ok");
+				expect(select).not.toHaveBeenCalled();
+				expect(trace).toContainEqual(expect.objectContaining({ kind: "review" }));
+				expect(trace).toContainEqual(expect.objectContaining({ kind: "executed" }));
+			});
 
 			it("tool override prompt never emits review", async () => {
 				const trace = setTrace();
@@ -3531,6 +3553,17 @@ describe("ExtensionRunner", () => {
 
 				expect(seenInputs).toEqual([{ command: "echo hi", nested: { flag: "keep" } }]);
 			});
+			it("unsupported mutable input escalates without dispatching a handler", async () => {
+				const handler = vi.fn(async () => ({ decision: "approve" as const }));
+				const runner = dispatchRunner([handler]);
+				const event = {
+					...dispatchEvent,
+					input: { commands: new Map([["command", "echo hi"]]) },
+				} as ToolApprovalReviewEvent;
+
+				await expect(runner.emitToolApprovalReview(event)).resolves.toEqual({ decision: "escalate" });
+				expect(handler).not.toHaveBeenCalled();
+			});
 
 			it("exposes immutable approval review capability metadata", async () => {
 				setTrace();
@@ -3564,9 +3597,22 @@ describe("ExtensionRunner", () => {
 				});
 			});
 
-			it("treats missing supportedEvents on older hosts as unsupported", () => {
-				const legacyApi: { supportedEvents?: readonly string[] } = {};
-				expect(legacyApi.supportedEvents?.includes("tool_approval_review") ?? false).toBe(false);
+			it("the documented capability pattern stays false without throwing when supportedEvents is absent", async () => {
+				setTrace();
+				await Bun.write(
+					path.join(extensionsDir, "review-capability-legacy.ts"),
+					`export default function(pi) {
+						delete pi.supportedEvents;
+						globalThis.__reviewTrace.push({
+							kind: "legacy-capability",
+							supported: pi.supportedEvents?.includes("tool_approval_review") ?? false,
+						});
+					}`,
+				);
+				await loadTestExtensions();
+
+				const entry = (globalWithReview.__reviewTrace ?? []).find(item => item.kind === "legacy-capability");
+				expect(entry).toEqual({ kind: "legacy-capability", supported: false });
 			});
 		});
 	});

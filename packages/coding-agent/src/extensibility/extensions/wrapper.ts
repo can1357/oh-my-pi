@@ -23,7 +23,7 @@ import { defaultLoadModeForToolName } from "../../tools/essential-tools";
 import { withFileMutationSession } from "../../tools/file-write-fallback";
 import { normalizeToolEventInput, resolveToolEventInput } from "../tool-event-input";
 import { applyToolProxy } from "../tool-proxy";
-import { deepFreeze, type ExtensionRunner } from "./runner";
+import type { ExtensionRunner } from "./runner";
 import type { RegisteredTool, ToolCallEventResult } from "./types";
 
 /**
@@ -244,9 +244,9 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 				throw new Error(`Extension failed, blocking execution: ${String(err)}`);
 			}
 		}
-
 		const inputMatchesDispatch = effectiveParams === params;
-		const finalParams = deepFreeze(structuredClone(effectiveParams));
+
+		const finalParams = structuredClone(effectiveParams);
 
 		// 2. Full approval gate against the owned final input that will actually run — resolves
 		// policy and prompts on `finalParams`, so the user approves exactly what executes. A revised
@@ -267,7 +267,7 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 		// and tool-demanded overrides still prompt. Provider safety checks are
 		// stronger: yolo, per-tool allow, and xdev approval never acknowledge
 		// them on the user's behalf.
-		const explicitPrompt = resolved.override || Object.hasOwn(userPolicies, resolved.policyKey ?? this.tool.name);
+		const explicitPrompt = resolved.override || resolved.source === "user";
 		const xdevBypass = context?.xdevApproved === true && inputMatchesDispatch;
 		const approvalCheck = {
 			required: pendingSafetyChecks.length > 0 || (resolved.policy === "prompt" && (explicitPrompt || !xdevBypass)),
