@@ -1146,6 +1146,7 @@ export class RelayBridge {
 			case "Network.setUserAgentOverride":
 			case "Emulation.setUserAgentOverride":
 			case "Emulation.setDefaultBackgroundColorOverride":
+			case "Emulation.setPageScaleFactor":
 			case "Network.setAcceptedEncodings":
 				// Persistent root setters survive as long as the shared debugger root.
 				// When a guard-authorized detach swaps that root, replay the latest
@@ -1423,6 +1424,7 @@ export class RelayBridge {
 			case "Emulation.setLocaleOverride":
 			case "Emulation.setTimezoneOverride":
 			case "Emulation.setDefaultBackgroundColorOverride":
+			case "Emulation.setPageScaleFactor":
 			case "Emulation.setEmulatedVisionDeficiency":
 			case "Emulation.setCPUThrottlingRate":
 			case "Emulation.setScriptExecutionDisabled":
@@ -1596,6 +1598,8 @@ export class RelayBridge {
 				return { method: subscription.method, params: { timezoneId: "" } };
 			case "Emulation.setDefaultBackgroundColorOverride":
 				return { method: subscription.method };
+			case "Emulation.setPageScaleFactor":
+				return { method: "Emulation.resetPageScaleFactor" };
 			case "Emulation.setEmulatedVisionDeficiency":
 				return { method: subscription.method, params: { type: "none" } };
 			case "Emulation.setIdleOverride":
