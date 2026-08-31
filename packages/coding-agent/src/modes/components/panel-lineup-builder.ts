@@ -17,7 +17,6 @@
  */
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
-import { modelFamilyToken } from "@oh-my-pi/pi-catalog/identity";
 import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import {
 	type Component,
@@ -31,7 +30,7 @@ import {
 } from "@oh-my-pi/pi-tui";
 import type { ModelRegistry } from "../../config/model-registry";
 import type { Settings } from "../../config/settings";
-import { BUILTIN_PANEL_PERSONAS } from "../../panel/config";
+import { BUILTIN_PANEL_PERSONAS, panelModelFamily } from "../../panel/config";
 import {
 	PANEL_MAX_MEMBERS,
 	type PanelMember,
@@ -278,7 +277,7 @@ export class PanelLineupBuilderOverlayComponent implements Component {
 	}
 
 	#memberPreview(member: DraftMember, index: number, bodyWidth: number): string[] {
-		const family = modelFamilyToken(member.model.id);
+		const family = panelModelFamily(member.model);
 		const efforts = getSupportedEfforts(member.model);
 		const lines = [
 			theme.bold(`Member ${index + 1}`),
@@ -306,7 +305,7 @@ export class PanelLineupBuilderOverlayComponent implements Component {
 			}
 		} else if (family) {
 			const clash = this.#members.findIndex(
-				(other, otherIndex) => otherIndex !== index && modelFamilyToken(other.model.id) === family,
+				(other, otherIndex) => otherIndex !== index && panelModelFamily(other.model) === family,
 			);
 			if (clash >= 0) {
 				lines.push("");
@@ -445,7 +444,7 @@ export class PanelLineupBuilderOverlayComponent implements Component {
 		}
 		const seenFamilies = new Map<string, number>();
 		this.#members.forEach((member, index) => {
-			const family = modelFamilyToken(member.model.id);
+			const family = panelModelFamily(member.model);
 			if (family.length === 0) {
 				issues.push(`member ${index + 1} model has no known family; independent panels need distinct families`);
 				return;
