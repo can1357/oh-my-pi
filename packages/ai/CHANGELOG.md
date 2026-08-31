@@ -4,6 +4,10 @@
 
 ### Fixed
 
+- Remember prompt-cache affinity under the derived session fingerprint when clients omit an explicit cache key.
+- Settle quota probes only after a successful stream result, not on post-commit failure or client cancel.
+- Preserve the SSE chunk that crosses the StreamCommitGate prelude byte cap instead of dropping it on commit.
+
 - Correlate Gemini functionResponse tool ids with the preceding same-name functionCall when wire ids are omitted.
 - Clear provider health after a successful gateway attempt so prior failures do not keep the circuit open.
 - Gateway error classifications now carry a failure owner and retry/failover disposition (`credential_permanent`, `provider_transient`, `policy_terminal`, …); provider status codes stay authoritative over message wording, and context-overflow detection reuses the central classifier.

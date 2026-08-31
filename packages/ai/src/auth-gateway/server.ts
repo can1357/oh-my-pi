@@ -642,16 +642,15 @@ function releaseTurnOnStreamEnd(
 	stream: ReadableStream<Uint8Array>,
 	storage: AuthStorage,
 	requestId: string,
-	commitGate?: StreamCommitGate,
 ): ReadableStream<Uint8Array> {
 	const reader = stream.getReader();
 	let released = false;
 	const release = (): void => {
 		if (released) return;
 		released = true;
-		if (commitGate && (commitGate.state === "committed" || commitGate.state === "terminated")) {
-			storage.settleQuotaProbeSuccess(requestId);
-		}
+		// Quota probes settle only from a successfully resolved events.result()
+		// (see streaming call sites). Gate state alone is insufficient: post-commit
+		// failures and cancellations also end as terminated/released.
 		storage.releaseTurnReservation(requestId);
 	};
 	return new ReadableStream({
@@ -852,7 +851,9 @@ async function handleFormatEndpoint(
 	const traces = bootOpts.decisionTraces ?? new RouteDecisionTraceLog();
 	const commitGate = new StreamCommitGate();
 	const formatError = route.module.formatError;
-	const fingerprint = resolvePromptCacheKey(body, req.headers) ?? requestId;
+	// Prefer an explicit cache-key header/body field; otherwise reuse the derived
+	// session fingerprint so affinity lookups match the sticky credential key.
+	const fingerprint = resolvePromptCacheKey(body, req.headers) ?? sessionId;
 	const attemptedTargets = new Set<string>();
 	const attemptedCredentials = new Set<number>();
 	let retryCount = 0;
@@ -1226,13 +1227,14 @@ async function handleFormatEndpoint(
 			bootOpts.storage.releaseTurnReservation(requestId);
 			return clientClosedResponse(route);
 		}
-		sseStream = releaseTurnOnStreamEnd(held.stream, bootOpts.storage, requestId, commitGate);
+		sseStream = releaseTurnOnStreamEnd(held.stream, bootOpts.storage, requestId);
 		health.recordSuccess(model.provider, model.id);
 		const affinityModel = model;
 		const affinityTarget = currentTarget;
 		void settled
 			.then(message => {
 				if (message.stopReason === "error" || message.stopReason === "aborted") return;
+				bootOpts.storage.settleQuotaProbeSuccess(requestId);
 				rememberPromptCacheHit(cacheStore, fingerprint, affinityModel, sessionId, affinityTarget);
 			})
 			.catch(() => {});
@@ -1335,7 +1337,9 @@ async function handlePiNative(
 	const traces = bootOpts.decisionTraces ?? new RouteDecisionTraceLog();
 	const commitGate = new StreamCommitGate();
 	const formatError = piNative.formatError;
-	const fingerprint = resolvePromptCacheKey(body, req.headers) ?? requestId;
+	// Prefer an explicit cache-key header/body field; otherwise reuse the derived
+	// session fingerprint so affinity lookups match the sticky credential key.
+	const fingerprint = resolvePromptCacheKey(body, req.headers) ?? sessionId;
 	const attemptedTargets = new Set<string>();
 	const attemptedCredentials = new Set<number>();
 	let retryCount = 0;
@@ -1713,13 +1717,14 @@ async function handlePiNative(
 			bootOpts.storage.releaseTurnReservation(requestId);
 			return aborted();
 		}
-		sseStream = releaseTurnOnStreamEnd(held.stream, bootOpts.storage, requestId, commitGate);
+		sseStream = releaseTurnOnStreamEnd(held.stream, bootOpts.storage, requestId);
 		health.recordSuccess(model.provider, model.id);
 		const affinityModel = model;
 		const affinityTarget = currentTarget;
 		void settled
 			.then(message => {
 				if (message.stopReason === "error" || message.stopReason === "aborted") return;
+				bootOpts.storage.settleQuotaProbeSuccess(requestId);
 				rememberPromptCacheHit(cacheStore, fingerprint, affinityModel, sessionId, affinityTarget);
 			})
 			.catch(() => {});
