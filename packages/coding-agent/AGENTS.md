@@ -14,3 +14,13 @@ Workers re-enter `cli.ts`, which dispatches hidden `__omp_worker_<name>` selecto
 ## System prompts
 
 Keep stable harness instructions separate from dynamic project context so providers can cache prefixes. Test rendered behavior, capability gating, and prompt deduplication rather than source text or exact defaults.
+
+## Selective PR 45 adoption
+
+- Build on current `main`; use PR 45 only as evidence and as a source of bounded hunks.
+- Follow the explicit pull-over inventory in [`.wiki/concepts/pr45-convergence.md`](../../.wiki/concepts/pr45-convergence.md); do not replay behavior that the inventory marks as already present in `main`.
+- The remaining coding-agent lanes are: terminal placement of dynamic Fusion prompt content, Fusion singleflight/CAS lifecycle hardening, failure-epoch gating/reset, and the missing CoLab bridge regression contract. Keep them independent from broad provider, task, MCP, SDK, identity, or release rewrites.
+- Cache-affinity changes must preserve provider wire contracts and breakpoint ceilings. Verify direct API, OAuth, OpenRouter, rolling-message, opt-out, and caller-override behavior where applicable.
+- Fusion is disabled by default. Any Fusion port must preserve that default, keep its dynamic system block terminal for prefix caching, and test session switching, singleflight creation, failure-epoch reset, and manual override behavior.
+- CoLab uses protocol v3 and trusted browser hosts. Preserve `/collab`, `/remote-control`, the `collab.json` bridge, `X-OMP-*` relay contracts, and the separation from extension-owned `/remote`.
+- A donor branch that needs a compile-clean overlay is not a merge candidate. The port itself must typecheck and test against current `main` source and dependencies.

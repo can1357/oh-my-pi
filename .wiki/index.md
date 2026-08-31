@@ -12,6 +12,10 @@ plain markdown + YAML frontmatter, diffable in git, readable by humans and agent
 
 * [Concepts](concepts/) - design decisions and synthesized patterns for this codebase.
 
+Recent additions (2026-08-30):
+
+* [PR 45 pull-over inventory](concepts/pr45-convergence.md) — exact remaining behaviors to port into `main`, plus the donor work already superseded there
+
 Recent additions (2026-08-06):
 
 * [@ompk GitHub mention agent and relay isolation](concepts/ompk-github-mention-agent.md) — account-wide GitHub App adapter, container-per-job relay, M2 verification gate

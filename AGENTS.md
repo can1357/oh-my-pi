@@ -10,6 +10,17 @@
 - Deeper `AGENTS.md` files contain package-specific rules; read them before editing those directories.
 - Before editing `packages/coding-agent/` or `packages/catalog/`, read that package's `AGENTS.md`.
 
+## PR 45 convergence policy
+
+- Treat `main` as the production baseline. PR 45 and `codex/pr45-minimal-reconciliation` are donor branches, not merge bases.
+- Do not merge or rebase the full PR 45 history into `main`. Port one coherent behavior lane at a time from a named donor commit, adapting it to current `main` architecture.
+- Pull only items marked **Pull into main** in [`.wiki/concepts/pr45-convergence.md`](.wiki/concepts/pr45-convergence.md). Items marked **Already in main** are verification anchors, not work to replay.
+- Before editing, prove that `main` does not already provide the behavior or a newer equivalent. Prefer the current `main` design when both exist.
+- Each port requires an observable contract, focused tests, package typecheck/lint, and a final union check after integration. Harness-only success does not make a source branch merge-ready.
+- Preserve the fork boundaries in `docs/fork-boundaries.md`. In particular, CoLab, Hub/IRC, pk-speak `/remote`, SSH, and remote-workspace transports have distinct lifetimes and API contracts.
+- Optimize provider caching by keeping stable prompt prefixes byte-stable and appending dynamic context late. Never trade away required instructions, tool schemas, or safety context merely to increase cache hits.
+- The durable rationale and lane order live in [`.wiki/concepts/pr45-convergence.md`](.wiki/concepts/pr45-convergence.md).
+
 ## Kade context
 
 - Use `C:\Users\prest\.agents\kade.md` and `human.md` as the minimal machine-level bootstrap; load the `kade-hq` skill for detailed rules.

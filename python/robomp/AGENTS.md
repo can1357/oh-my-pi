@@ -105,6 +105,9 @@ Lint + format: TypeScript via Biome (config in `biome.json`), Python via Ruff (c
 
 ## Runtime/Tooling Preferences
 
+- **PR 45 convergence boundary**: `main` remains the runtime/image base. Do not point roboomp at the PR 45 reconciliation branch or import its remote defaults wholesale. Adopt coding-agent changes only after they land on `main` and pass the normal RPC/container smoke path.
+- **Remote contracts**: preserve roboomp's webhook, RPC, proxy, mount, and service topology independently from CoLab, pk-speak `/remote`, Hub/IRC, SSH, and remote-workspace. A convergence change must not alias their commands, credentials, endpoints, or state directories.
+
 - **Python**: 3.11+ source target, 3.12 in container. Setuptools src layout (`pyproject.toml` `[tool.setuptools] package-dir = { "" = "src" }`).
 - **Package manager**: `pip` only. No poetry / uv / pdm files; don't introduce one.
 - **Task runner**: `bun` (root `package.json` `scripts`). Always reach for an existing `bun run` recipe before invoking `docker compose` or `pytest` directly.
