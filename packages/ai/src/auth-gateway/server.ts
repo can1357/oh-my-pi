@@ -500,6 +500,7 @@ async function holdSseUntilCommit(
 	sseStream: ReadableStream<Uint8Array>,
 	gate: StreamCommitGate,
 	settled: Promise<AssistantMessage>,
+	commitOnFirstEncodedByte = false,
 ): Promise<HeldSse> {
 	const reader = sseStream.getReader();
 	const prelude: Uint8Array[] = [];
@@ -541,6 +542,9 @@ async function holdSseUntilCommit(
 				if (!settleOutcome.ok) return failedFromOutcome();
 				const reason = settleOutcome.message.stopReason;
 				if (reason === "error" || reason === "aborted") return failedFromOutcome();
+				// Transports that never feed onSseEvent (Bedrock/Ollama/…) stay probing;
+				// mark committed so releaseTurnOnStreamEnd can settle the quota probe.
+				if (gate.state === "probing") gate.classifyAndObserve("", STREAM_PRELUDE_MAX_BYTES);
 				return forward();
 			}
 			pendingRead ??= reader.read();
@@ -557,6 +561,11 @@ async function holdSseUntilCommit(
 			}
 			prelude.push(value);
 			preludeBytes += value.byteLength;
+			// Providers that never invoke onSseEvent leave the gate probing; commit on
+			// the first encoded body byte so clients stream instead of buffering to settle.
+			if (commitOnFirstEncodedByte && gate.state === "probing") {
+				gate.classifyAndObserve("response.output_text.delta", value.byteLength);
+			}
 		}
 	} catch (error) {
 		return { type: "failed", error };
@@ -678,6 +687,27 @@ async function handleFormatEndpoint(
 	}
 	if (controller.signal.aborted) return clientClosedResponse(route);
 
+function targetRejectsOpenAIImageFileReferences(
+	routeLabel: string,
+	model: Model<Api>,
+	messages: Context["messages"],
+): boolean {
+	if (routeLabel !== "openai-responses") return false;
+	const supports =
+		model.api === "openai-responses" ||
+		model.api === "azure-openai-responses" ||
+		model.api === "openai-codex-responses";
+	if (supports) return false;
+	return messages.some(
+		message =>
+			message.role === "toolResult" &&
+			message.content.some(
+				block => block.type === "image" && block.providerFile?.provider === "openai" && block.providerFile.id,
+			),
+	);
+}
+
+
 	const supportsOpenAIImageFileReferences =
 		model.api === "openai-responses" ||
 		model.api === "azure-openai-responses" ||
@@ -748,6 +778,13 @@ async function handleFormatEndpoint(
 				: formatError(502, "upstream_error", "Upstream request failed");
 		}
 		model = resolved;
+		if (targetRejectsOpenAIImageFileReferences(route.label, model, parsed.context.messages)) {
+			return formatError(
+				400,
+				"invalid_request_error",
+				"OpenAI image file IDs in tool outputs require a Responses-compatible upstream model",
+			);
+		}
 		attemptedTargets.add(currentTarget);
 		return undefined;
 	};
@@ -826,7 +863,9 @@ async function handleFormatEndpoint(
 		);
 		// openai-responses wraps the downstream body in observeSseCommit. Feeding
 		// onSseEvent as well double-counts prelude bytes and trips the 4 MiB cap at ~2 MiB.
-		if (!commitGateObservesDownstreamSse(route.label)) {
+		// Non-streaming completeSimple still surfaces raw SSE to onSseEvent; keeping
+		// the gate out of that path preserves failover until the completed response returns.
+		if (parsed.stream && !commitGateObservesDownstreamSse(route.label)) {
 			attachCommitGateSseObserver(streamOpts, commitGate, route.label);
 		}
 		return streamOpts;
@@ -835,6 +874,7 @@ async function handleFormatEndpoint(
 	if (!parsed.stream) {
 		try {
 			for (let attempt = 0; attempt < attemptCap; attempt++) {
+				if (attempt > 0) commitGate.reset();
 				if (controller.signal.aborted) return clientClosedResponse(route);
 				const picked = pickTarget();
 				if (picked) return picked;
@@ -909,6 +949,7 @@ async function handleFormatEndpoint(
 	}
 
 	for (let attempt = 0; attempt < attemptCap; attempt++) {
+		if (attempt > 0) commitGate.reset();
 		if (controller.signal.aborted) {
 			bootOpts.storage.releaseTurnReservation(requestId);
 			return clientClosedResponse(route);
@@ -963,7 +1004,7 @@ async function handleFormatEndpoint(
 		if (route.label === "openai-responses") {
 			sseStream = observeSseCommit(sseStream, commitGate);
 		}
-		const held = await holdSseUntilCommit(sseStream, commitGate, settled);
+		const held = await holdSseUntilCommit(sseStream, commitGate, settled, route.label !== "openai-responses");
 		if (held.type === "failed") {
 			if (held.message && messageHasBillableUsage(held.message)) {
 				const errorMessage =
@@ -1119,6 +1160,13 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 				: formatError(502, "upstream_error", "Upstream request failed");
 		}
 		model = resolved;
+		if (targetRejectsOpenAIImageFileReferences(route.label, model, parsed.context.messages)) {
+			return formatError(
+				400,
+				"invalid_request_error",
+				"OpenAI image file IDs in tool outputs require a Responses-compatible upstream model",
+			);
+		}
 		attemptedTargets.add(currentTarget);
 		return undefined;
 	};
@@ -1214,7 +1262,7 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 		const captured = captureRequestHeaders(req.headers);
 		streamOpts.headers = { ...captured, ...(streamOpts.headers ?? {}) };
 		streamOpts.sessionId ??= sessionId;
-		if (!commitGateObservesDownstreamSse("pi-native")) {
+		if (parsed.stream && !commitGateObservesDownstreamSse("pi-native")) {
 			attachCommitGateSseObserver(streamOpts, commitGate, "pi-native");
 		}
 		return streamOpts;
@@ -1223,6 +1271,7 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 	if (!parsed.stream) {
 		try {
 			for (let attempt = 0; attempt < attemptCap; attempt++) {
+				if (attempt > 0) commitGate.reset();
 				if (controller.signal.aborted) return aborted();
 				const picked = pickTarget();
 				if (picked) return picked;
@@ -1293,6 +1342,7 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 	}
 
 	for (let attempt = 0; attempt < attemptCap; attempt++) {
+		if (attempt > 0) commitGate.reset();
 		if (controller.signal.aborted) {
 			bootOpts.storage.releaseTurnReservation(requestId);
 			return aborted();
@@ -1344,7 +1394,7 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 				}
 			},
 		});
-		const held = await holdSseUntilCommit(sseStream, commitGate, settled);
+		const held = await holdSseUntilCommit(sseStream, commitGate, settled, true);
 		if (held.type === "failed") {
 			if (held.message && messageHasBillableUsage(held.message)) {
 				const errorMessage =
