@@ -604,6 +604,12 @@ export class SessionAdvisors {
 		await Promise.allSettled(this.#pendingAdvisorCardEvents);
 	}
 
+	/** Remove deferred advice from the aside queue for explicit preservation. */
+	drainDeferredAdvice(): CustomMessage[] {
+		const message = this.#host.yieldQueue.drainKind("advisor");
+		return message && isAdvisorCard(message) ? [message] : [];
+	}
+
 	// Advisor runtime lifecycle
 	// -------------------------------------------------------------------------
 	#advisorImmuneTurnLimit(): number {

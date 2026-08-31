@@ -179,6 +179,18 @@ export class YieldQueue {
 		return thunks;
 	}
 
+	/** Build and remove all queued entries for one kind without injecting them. */
+	drainKind(kind: string): AgentMessage | null {
+		const dispatcher = this.#dispatchers.get(kind);
+		if (!dispatcher) return null;
+		const entries = this.#drain(kind);
+		if (entries.length === 0) return null;
+		const built = this.#build(kind, dispatcher, entries);
+		if (!built) return null;
+		this.#resolveEntries(built.entries);
+		return built.message;
+	}
+
 	/** Drop queued entries. With `kind`, drop only that kind's entries (leaving
 	 *  any pending idle-flush for other kinds intact); otherwise drop everything. */
 	clear(kind?: string): void {

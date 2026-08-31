@@ -108,6 +108,20 @@ describe("YieldQueue", () => {
 		expect(harness.idleBatches[0]?.map(messageText)).toEqual(["done"]);
 		expect(harness.queue.has("advisor")).toBe(true);
 	});
+
+	test("drainKind extracts skip-idle-flush entries for explicit preservation", () => {
+		const harness = createHarness(true);
+		harness.queue.register<Entry>("advisor", {
+			build: entries => userMessage(entries.map(entry => entry.id).join(",")),
+			skipIdleFlush: true,
+		});
+		harness.queue.enqueue("advisor", { id: "concern" });
+
+		const message = harness.queue.drainKind("advisor");
+
+		expect(message && messageText(message)).toBe("concern");
+		expect(harness.queue.has("advisor")).toBe(false);
+	});
 	test("enqueue while idle schedules one debounced idle flush", async () => {
 		const harness = createHarness(false);
 		harness.queue.register<Entry>("items", {
