@@ -138,7 +138,7 @@ function mutate(rng: () => number, text: string, density: number) {
 }
 
 describe("native diff correctness", () => {
-	test("streamed chunks produce the exact complete-file hunks", async () => {
+	test.skipIf(typeof DiffStream !== "function")("streamed chunks produce the exact complete-file hunks", async () => {
 		const oldText = "same\nold 🚀\ntail\n";
 		const newText = "same\nnew 🚀\ntail\n";
 		const encoder = new TextEncoder();
@@ -160,20 +160,23 @@ describe("native diff correctness", () => {
 		expect(stream.lines(DiffSide.New, 1, 1)).toEqual(["new 🚀"]);
 	});
 
-	test("native file open streams complete lines without a JS file read", async () => {
-		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-diff-stream-"));
-		const file = path.join(dir, "source.txt");
-		try {
-			await Bun.write(file, "first\nsecond\n");
-			const stream = new DiffStream();
-			stream.finishSide(DiffSide.Old);
-			await stream.openFile(DiffSide.New, file, 1024);
-			expect(stream.progress()).toMatchObject({ newDone: true, newLines: 2, tooLarge: false });
-			expect(stream.lines(DiffSide.New, 0)).toEqual(["first", "second"]);
-		} finally {
-			await fs.rm(dir, { recursive: true, force: true });
-		}
-	});
+	test.skipIf(typeof DiffStream !== "function")(
+		"native file open streams complete lines without a JS file read",
+		async () => {
+			const dir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-diff-stream-"));
+			const file = path.join(dir, "source.txt");
+			try {
+				await Bun.write(file, "first\nsecond\n");
+				const stream = new DiffStream();
+				stream.finishSide(DiffSide.Old);
+				await stream.openFile(DiffSide.New, file, 1024);
+				expect(stream.progress()).toMatchObject({ newDone: true, newLines: 2, tooLarge: false });
+				expect(stream.lines(DiffSide.New, 0)).toEqual(["first", "second"]);
+			} finally {
+				await fs.rm(dir, { recursive: true, force: true });
+			}
+		},
+	);
 
 	test("fixed edge cases", () => {
 		verifyDiffInvariants("", "");

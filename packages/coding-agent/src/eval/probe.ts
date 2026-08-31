@@ -20,7 +20,7 @@
  */
 
 /** Wall-clock ceiling for a runtime-availability probe when no smaller bound is supplied. */
-export const DEFAULT_PROBE_TIMEOUT_MS = 10_000;
+export const DEFAULT_PROBE_TIMEOUT_MS = 30_000;
 
 /**
  * Cancellation controls threaded from the eval tool through

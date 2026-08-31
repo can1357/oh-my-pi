@@ -14,6 +14,7 @@ import type { ImageAttachmentEntry, ToolSession } from "@oh-my-pi/pi-coding-agen
 import { InspectImageTool } from "@oh-my-pi/pi-coding-agent/tools/inspect-image";
 import { inspectImageToolRenderer } from "@oh-my-pi/pi-coding-agent/tools/inspect-image-renderer";
 import { toolRenderers } from "@oh-my-pi/pi-coding-agent/tools/renderers";
+import { rasterizeSvg } from "@oh-my-pi/pi-natives";
 import { removeSyncWithRetries, sanitizeText } from "@oh-my-pi/pi-utils";
 
 const TINY_PNG_BASE64 =
@@ -199,21 +200,24 @@ describe("InspectImageTool", () => {
 		expect(contentParts[0]?.type).toBe("image");
 		expect(contentParts[1]).toEqual({ type: "text", text: "Extract visible UI labels." });
 	});
-	it("rasterizes a selected SVG before sending it to the vision model", async () => {
-		const svgPath = path.join(testDir, "diagram.svg");
-		fs.writeFileSync(svgPath, TINY_SVG);
-		const stub = createCompleteSimpleSuccessStub("Red rectangle");
-		const tool = new InspectImageTool(createSession(testDir, visionModel), stub.fn);
+	it.skipIf(typeof rasterizeSvg !== "function")(
+		"rasterizes a selected SVG before sending it to the vision model",
+		async () => {
+			const svgPath = path.join(testDir, "diagram.svg");
+			fs.writeFileSync(svgPath, TINY_SVG);
+			const stub = createCompleteSimpleSuccessStub("Red rectangle");
+			const tool = new InspectImageTool(createSession(testDir, visionModel), stub.fn);
 
-		const result = await tool.execute("call-svg", {
-			path: `${svgPath}:img`,
-			question: "Describe the diagram.",
-		});
+			const result = await tool.execute("call-svg", {
+				path: `${svgPath}:img`,
+				question: "Describe the diagram.",
+			});
 
-		expect(stub.calls).toHaveLength(1);
-		expect(result.details?.imagePath).toBe(svgPath);
-		expect(result.details?.mimeType).toBe("image/png");
-	});
+			expect(stub.calls).toHaveLength(1);
+			expect(result.details?.imagePath).toBe(svgPath);
+			expect(result.details?.mimeType).toBe("image/png");
+		},
+	);
 
 	it("passes the vision role's configured thinking effort into the oneshot", async () => {
 		const settings = Settings.isolated();

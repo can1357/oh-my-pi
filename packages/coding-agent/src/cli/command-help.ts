@@ -39,6 +39,10 @@ export const compressHelp = {
 	description: "Rewrite a text file into the dense prompt register, reporting what it drops",
 } satisfies CommandMetadata;
 
+export const copyHelp = {
+	description: "Copy a fenced code block from an omp-copy: hyperlink",
+} satisfies CommandMetadata;
+
 export const configHelp = { description: "Manage configuration settings" } satisfies CommandMetadata;
 
 export const dryBalanceHelp = {

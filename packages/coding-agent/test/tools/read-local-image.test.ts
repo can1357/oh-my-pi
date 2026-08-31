@@ -15,6 +15,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InternalUrlRouter, LocalProtocolHandler, parseInternalUrl } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
+import { rasterizeSvg } from "@oh-my-pi/pi-natives";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 // 1x1 transparent PNG — small enough to pass through image loading untouched.
@@ -84,18 +85,21 @@ describe("read local:// images", () => {
 		// the replacement char; the fixed path must never emit it as text.
 		expect(joinText(result.content)).not.toContain("\uFFFDPNG");
 	});
-	it("rasterizes a local SVG into a PNG attachment when :img is selected", async () => {
-		await Bun.write(path.join(localRoot, "diagram.svg"), TINY_SVG);
-		const tool = new ReadTool(makeSession(testDir));
+	it.skipIf(typeof rasterizeSvg !== "function")(
+		"rasterizes a local SVG into a PNG attachment when :img is selected",
+		async () => {
+			await Bun.write(path.join(localRoot, "diagram.svg"), TINY_SVG);
+			const tool = new ReadTool(makeSession(testDir));
 
-		const result = await tool.execute("call", { path: `${path.join(localRoot, "diagram.svg")}:img` });
+			const result = await tool.execute("call", { path: `${path.join(localRoot, "diagram.svg")}:img` });
 
-		const image = result.content.find(content => content.type === "image");
-		expect(image && "mimeType" in image ? image.mimeType : undefined).toBe("image/png");
-		const png = image?.type === "image" ? Buffer.from(image.data, "base64") : Buffer.alloc(0);
-		expect(png.subarray(0, 8)).toEqual(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
-		expect(joinText(result.content)).toContain("Read SVG file [image/png]");
-	});
+			const image = result.content.find(content => content.type === "image");
+			expect(image && "mimeType" in image ? image.mimeType : undefined).toBe("image/png");
+			const png = image?.type === "image" ? Buffer.from(image.data, "base64") : Buffer.alloc(0);
+			expect(png.subarray(0, 8)).toEqual(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+			expect(joinText(result.content)).toContain("Read SVG file [image/png]");
+		},
+	);
 	it("directs a selected SVG through inspect_image when native vision is unavailable", async () => {
 		await Bun.write(path.join(localRoot, "diagram.svg"), TINY_SVG);
 		const tool = new ReadTool(makeSession(testDir, true));

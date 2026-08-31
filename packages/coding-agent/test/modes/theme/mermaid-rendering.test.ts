@@ -52,9 +52,10 @@ describe("Mermaid rendering setting", () => {
 		const markdown = new Markdown("```mermaid\ngraph TD\n  A --> B\n```", 0, 0, getMarkdownTheme());
 		const lines = stripAnsi(markdown.render(80).join("\n"));
 
-		expect(lines).toContain("```mermaid");
+		expect(lines).toContain("[mermaid]");
 		expect(lines).toContain("graph TD");
 		expect(lines).toContain("-->");
+		expect(lines).not.toContain("```");
 	});
 
 	it("uses content-visible Titanium colors for Mermaid structure", async () => {

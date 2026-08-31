@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added compact framed rendering for completed fenced Markdown code blocks, with width-aware wrapping and language labels while preserving raw delimiters for still-streaming fences.
+
+### Changed
+
+- Improved incremental Markdown lexing to reuse append-only guard scans and stable block boundaries during streaming.
+
+### Fixed
+
+- Fixed narrow and nested framed Markdown code blocks so wide graphemes stay within the requested width and copy targets preserve raw source boundaries without cache collisions.
+### Breaking Changes
 ## [18.0.11] - 2026-08-29
 
 ### Added

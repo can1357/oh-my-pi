@@ -17,6 +17,7 @@ import {
 	STRING_VALUE_FLAGS,
 	VALUELESS_FLAGS,
 } from "./cli/flag-tables";
+import Copy from "./commands/copy";
 import { launchHelp } from "./commands/launch-help";
 
 export const commands: CommandEntry[] = [
@@ -75,6 +76,11 @@ export const commands: CommandEntry[] = [
 		name: "compress",
 		load: () => import("./commands/compress").then(m => m.default),
 		help: commandHelp.compressHelp,
+	},
+	{
+		name: "copy",
+		load: async () => Copy,
+		help: commandHelp.copyHelp,
 	},
 	{
 		name: "config",

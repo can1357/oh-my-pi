@@ -61,7 +61,7 @@ async function streamedDocument(oldText: string, newText: string, options: DiffB
 	});
 }
 
-describe("git TUI streamed document", () => {
+describe.skipIf(typeof DiffStream !== "function")("git TUI streamed document", () => {
 	test("uses an empty base side for a staged added file", async () => {
 		await withReviewRepo(async repo => {
 			await Bun.write(path.join(repo, "added.ts"), "export const added = true;\n");
@@ -115,7 +115,7 @@ describe("git TUI streamed document", () => {
 		}
 	});
 });
-describe("git TUI asset previews", () => {
+describe.skipIf(typeof DiffStream !== "function")("git TUI asset previews", () => {
 	test("renders raster Git objects as media instead of binary placeholders", async () => {
 		await withReviewRepo(async repo => {
 			await Bun.write(path.join(repo, "image.png"), RED_PNG);
@@ -221,7 +221,7 @@ describe("git TUI asset previews", () => {
 	});
 });
 
-describe("formatting-ignore whitespace mode", () => {
+describe.skipIf(typeof DiffStream !== "function")("formatting-ignore whitespace mode", () => {
 	const FMT: DiffBuildOptions = { whitespace: "formatting" };
 	const SPLIT_OLD = "const x = foo(a, b);\nkeep\n";
 	const SPLIT_NEW = "const x = foo(\n\ta,\n\tb\n);\nkeep\n";

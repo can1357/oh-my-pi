@@ -116,23 +116,34 @@ describe("Markdown tree-guide hanging wrap", () => {
 		expect(plain).toEqual(["├── alpha", "│   └── beta", "└── gamma"]);
 	});
 
-	it("keeps the old column-0 wrap for '├── ' lines inside fenced code blocks", () => {
+	it("leaves '├── ' lines inside fenced code blocks to the code frame, not the tree wrap", () => {
 		const codeLine = "├── alpha bravo charlie delta echo foxtrot golf hotel india";
 		const raw = renderRaw(`\`\`\`\n${codeLine}\n\`\`\``);
 		const plain = raw.map(line => stripVTControlCharacters(line).trimEnd());
 
-		expect(plain[0]).toBe("```");
-		expect(plain[plain.length - 1]).toBe("```");
+		// Fences render as a compact frame; the tree glyph is code text here, so
+		// the markdown tree-hanging wrap must not claim it.
+		expect(plain[0]).toMatch(/^\+-+\+$/);
+		expect(plain[plain.length - 1]).toMatch(/^\+-+\+$/);
+		expect(plain.some(line => line.includes("```"))).toBe(false);
 
-		const treeRow = plain.findIndex(line => line.includes("├──"));
-		expect(treeRow).toBeGreaterThan(0);
-		// The code line overflows, so a continuation row exists before the
-		// closing fence — and it starts flush at column 0, no hanging prefix.
-		const continuation = plain[treeRow + 1]!;
-		expect(treeRow + 1).toBeLessThan(plain.length - 1);
-		expect(continuation.length).toBeGreaterThan(0);
-		expect(continuation[0]).not.toBe(" ");
-		expect(continuation[0]).not.toBe("│");
+		const body = plain.slice(1, -1);
+		expect(body.length).toBeGreaterThanOrEqual(2);
+		for (const line of body) {
+			expect(line.startsWith("| ")).toBeTruthy();
+			expect(line.endsWith("|")).toBeTruthy();
+		}
+		// The default ASCII preset keeps the frame gutter ASCII-only and never
+		// applies the markdown hanging indent to the code payload.
+		expect(body[0]).toContain("| 1 | ├── alpha");
+		expect(body[1]).toMatch(/^\|\s+\|\s/);
+
+		// No glyph lost or duplicated by the frame's wrap.
+		const text = body
+			.map(line => line.replace(/^\|\s*(?:\d+\s+)?\|\s/, "").replace(/\|$/, ""))
+			.join("")
+			.replace(/ /g, "");
+		expect(text).toBe(codeLine.replace(/ /g, ""));
 
 		for (const line of raw) {
 			expect(visibleWidth(line)).toBeLessThanOrEqual(WIDTH);

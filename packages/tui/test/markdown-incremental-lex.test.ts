@@ -117,6 +117,36 @@ const TABLE = (() => {
 })();
 
 describe("Markdown incremental streaming lex (E2)", () => {
+	it("renders a fenced JavaScript block and forwards its js language tag", () => {
+		let language: string | undefined;
+		const theme = {
+			...THEME,
+			highlightCode: (code: string, lang?: string) => {
+				language = lang;
+				return code.split("\n").map(line => `JS:${line}`);
+			},
+		};
+		const rendered = new Markdown("```js\nconst answer = 42;\n```", 0, 0, theme).render(80).join("\n");
+		expect(language).toBe("js");
+		expect(rendered).toContain("JS:const answer = 42;");
+		expect(rendered).toContain("js");
+		expect(rendered).not.toContain("```");
+	});
+
+	it("renders the semantic language icon instead of the raw fence language", () => {
+		const icon = "\u{E7A8}"; // Nerd Font Rust devicon
+		const theme = {
+			...THEME,
+			codeBlockLanguage: (lang: string) => `${icon} | ${lang}`,
+		};
+		const rendered = new Markdown("```rust\nfn main() {}\n```", 0, 0, theme).render(80).join("\n");
+		expect(rendered).toContain(icon);
+		expect(rendered).toContain("rust");
+		expect(rendered).toContain("| rust]");
+		expect(rendered).not.toContain("rust rust");
+		expect(rendered).not.toContain("```");
+	});
+
 	it("prose growth is byte-identical to full lex", () => {
 		assertIdenticalGrowth(PROSE);
 	});
