@@ -155,6 +155,7 @@ describe("YieldQueue", () => {
 		expect(harness.queue.has("advisor")).toBe(true);
 		expect(messageText(harness.queue.drainKind("advisor")!)).toBe("nit");
 	});
+
 	test("enqueue while idle schedules one debounced idle flush", async () => {
 		const harness = createHarness(false);
 		harness.queue.register<Entry>("items", {
