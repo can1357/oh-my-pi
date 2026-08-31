@@ -111,18 +111,25 @@ test.skipIf(process.platform === "win32")(
 		roots.push(root);
 		const pidFile = path.join(root, "escaped.pid");
 		const worker = path.join(root, "escaped-worker.sh");
-		await fs.promises.writeFile(worker, `#!/bin/sh\necho $$ > "${pidFile}"\nsleep 30\n`, { mode: 0o755 });
+		await fs.promises.writeFile(
+			worker,
+			`#!/bin/sh\nwhile [ "$(ps -o ppid= -p $$ | tr -d ' ')" = "$1" ]; do sleep 0.01; done\necho $$ > "${pidFile}"\nsleep 30\n`,
+			{ mode: 0o755 },
+		);
 
 		let escaped: Process | null = null;
 		try {
-			// The intermediate shell exits immediately after backgrounding the
-			// worker. Waiting for its pid file proves the worker started before
-			// the resolver timeout, but PID-tree traversal can no longer find it.
-			const command = `sh -c '"${worker}" &' & while [ ! -s "${pidFile}" ]; do :; done; sleep 10`;
-			const result = await runShellCommand(command, 150);
+			// The intermediate passes its pid to the worker, then exits. The worker
+			// writes its pid file only after `ps` proves it has reparented; a yielding
+			// poll waits for that precondition without starving the startup it waits
+			// on. At timeout, PID-tree traversal from the command shell can no longer
+			// find the worker.
+			const command = `sh -c '"${worker}" "$$" &' & until [ -s "${pidFile}" ]; do sleep 0.01; done; sleep 10`;
+			const result = await runShellCommand(command, 2000);
 			expect(result).toBeUndefined();
 
 			const pid = Number.parseInt((await Bun.file(pidFile).text()).trim(), 10);
+			expect(Number.isFinite(pid), "reparented worker never recorded its pid").toBe(true);
 			escaped = Process.fromPid(pid);
 			expect(escaped?.status(), `reparented descendant ${pid} survived the timeout`).not.toBe(ProcessStatus.Running);
 		} finally {
@@ -138,18 +145,26 @@ test.skipIf(process.platform !== "linux")(
 		roots.push(root);
 		const pidFile = path.join(root, "escaped.pid");
 		const worker = path.join(root, "escaped-worker.sh");
-		await fs.promises.writeFile(worker, `#!/bin/sh\necho $$ > "${pidFile}"\nexec sleep 30\n`, { mode: 0o755 });
+		await fs.promises.writeFile(
+			worker,
+			`#!/bin/sh\nwhile [ "$(ps -o ppid= -p $$ | tr -d ' ')" = "$1" ]; do sleep 0.01; done\necho $$ > "${pidFile}"\nexec sleep 30\n`,
+			{ mode: 0o755 },
+		);
 
 		let escaped: Process | null = null;
 		try {
 			// `setsid` moves the intermediate into a new session, then that
-			// intermediate backgrounds the worker and exits. The worker is no
-			// longer in the resolver shell's PID tree or original process group.
-			const command = `setsid sh -c '"${worker}" &' </dev/null >/dev/null 2>&1 & while [ ! -s "${pidFile}" ]; do :; done; sleep 10`;
-			const result = await runShellCommand(command, 150);
+			// intermediate passes its pid to the worker and exits. The worker
+			// writes its pid file only after `ps` proves it has reparented, so it
+			// is no longer in the command shell's PID tree or original process
+			// group before the timeout. A yielding poll waits for that precondition
+			// without starving the startup it waits on.
+			const command = `setsid sh -c '"${worker}" "$$" &' </dev/null >/dev/null 2>&1 & until [ -s "${pidFile}" ]; do sleep 0.01; done; sleep 10`;
+			const result = await runShellCommand(command, 2000);
 			expect(result).toBeUndefined();
 
 			const pid = Number.parseInt((await Bun.file(pidFile).text()).trim(), 10);
+			expect(Number.isFinite(pid), "session-escaping worker never recorded its pid").toBe(true);
 			escaped = Process.fromPid(pid);
 			expect(escaped?.status(), `session-escaping descendant ${pid} survived the timeout`).not.toBe(
 				ProcessStatus.Running,

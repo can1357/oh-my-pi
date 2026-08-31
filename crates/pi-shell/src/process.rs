@@ -1350,11 +1350,11 @@ impl Process {
 
 	/// Gracefully terminate this process and its descendants.
 	///
-	/// Sends `TERM_SIGNAL` to the optional process group, every live descendant,
-	/// and the root, then optionally waits up to `graceful_ms` for the tree to
-	/// exit before escalating to `KILL_SIGNAL`. Pass `graceful_ms < 0` to skip
-	/// the wait entirely (the polite signal is still emitted). Returns `true`
-	/// when the tree has exited by the end of the hard wave's wait window.
+	/// With a non-negative `graceful_ms`, sends `TERM_SIGNAL` to the optional
+	/// process group, every live descendant, and the root, then waits before
+	/// escalating to `KILL_SIGNAL`. A negative value skips the polite wave and
+	/// hard-kills immediately. Returns `true` when the tree has exited by the end
+	/// of the hard wave's wait window.
 	pub async fn terminate_tree(
 		&self,
 		group: bool,
@@ -1461,21 +1461,20 @@ impl Process {
 		let process_group = if group { self.group_id() } else { None };
 		let protected = host_protected_pids();
 
-		// Polite wave: SIGTERM the group, every live descendant, then the root.
-		if let Some(pgid) = process_group {
-			let _ = kill_process_group(pgid, TERM_SIGNAL);
-		}
-		let mut descendants = self.signalable_descendants(&protected);
-		for child in &descendants {
-			let _ = child.inner.kill(TERM_SIGNAL);
-		}
-		if !protected.contains(&self.pid()) {
-			let _ = self.inner.kill(TERM_SIGNAL);
-		}
-
-		// Optional grace wait. A negative `graceful_ms` skips the wait entirely
-		// (we still emit the polite signal so cleanup handlers can run before KILL).
+		// Polite wave. A negative grace skips this entire wave: a child subreaper
+		// must stay alive until the hard wave snapshots its adopted descendants.
 		if graceful_ms >= 0 {
+			let descendants = self.signalable_descendants(&protected);
+			if let Some(pgid) = process_group {
+				let _ = kill_process_group(pgid, TERM_SIGNAL);
+			}
+			for child in &descendants {
+				let _ = child.inner.kill(TERM_SIGNAL);
+			}
+			if !protected.contains(&self.pid()) {
+				let _ = self.inner.kill(TERM_SIGNAL);
+			}
+
 			let exited = wait_for_exit(
 				self,
 				&descendants,
@@ -1488,12 +1487,15 @@ impl Process {
 			}
 		}
 
-		// Hard wave. Re-walk the tree so any grandchild spawned during the grace
-		// period — or any process re-parented to the root — is signalled too.
+		// Hard wave. Snapshot the descendant tree before signalling the process
+		// group: a group SIGKILL can reap the subreaper root, and an adopted
+		// session-escaping worker (outside the group) would then reparent to init
+		// before any later walk. The pre-kill snapshot pins a stable pidfd handle
+		// so the worker still receives the hard kill and is awaited below.
+		let descendants = self.signalable_descendants(&protected);
 		if let Some(pgid) = process_group {
 			let _ = kill_process_group(pgid, KILL_SIGNAL);
 		}
-		descendants = self.signalable_descendants(&protected);
 		for child in &descendants {
 			let _ = child.inner.kill(KILL_SIGNAL);
 		}

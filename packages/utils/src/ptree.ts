@@ -341,13 +341,13 @@ export class ChildProcess<In extends InMask = InMask> {
 			if (this.proc.exitCode !== null) this.#exitReason = reason;
 		}
 		if (gracefulMs !== undefined && gracefulMs < 0 && this.#hardKillTree && this.proc.exitCode === null) {
-			// terminate() sends its polite wave to the root before rebuilding the
-			// hard-kill tree. A subreaper root can die in that gap and release its
-			// adopted descendants, so snapshot and hard-kill the live tree first.
+			// The subreaper must survive until the hard wave snapshots its adopted
+			// descendants. Negative grace makes native terminate() skip the polite
+			// wave, hard-kill the captured tree, and await every stable process
+			// handle before the timeout result is reported.
 			const root = Process.fromPid(this.proc.pid);
 			if (root) {
-				root.killTree(9);
-				this.#terminating = Promise.resolve();
+				this.#terminating = root.terminate({ group: this.#terminateGroup, gracefulMs: -1 });
 				return;
 			}
 		}
