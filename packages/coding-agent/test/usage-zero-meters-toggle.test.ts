@@ -1,10 +1,12 @@
-import { beforeAll, describe, expect, it, vi } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { stripVTControlCharacters } from "node:util";
 import type { UsageLimit, UsageReport } from "@oh-my-pi/pi-ai";
-import { CommandController } from "@oh-my-pi/pi-coding-agent/modes/controllers/command-controller";
-import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
-import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
+import { renderUsageReports } from "@oh-my-pi/pi-coding-agent/modes/controllers/command-controller";
+import { getThemeByName, setThemeInstance, type Theme, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { buildUsageReportText } from "@oh-my-pi/pi-coding-agent/slash-commands/helpers/usage-report";
+import { filterUsageReportsForDisplay } from "@oh-my-pi/pi-coding-agent/utils/usage-display";
+
+let priorTheme: Theme | undefined;
 
 function limit(id: string, label: string, usedFraction: number | undefined, scope: UsageLimit["scope"]): UsageLimit {
 	return {
@@ -46,14 +48,6 @@ function settingsDouble(showZeroUsageMeters: boolean) {
 	};
 }
 
-interface RenderableBlock {
-	render(width: number): string[];
-}
-
-function isRenderableBlock(value: unknown): value is RenderableBlock {
-	return value !== null && typeof value === "object" && "render" in value && typeof value.render === "function";
-}
-
 async function buildAcpText(showZeroUsageMeters: boolean, reports = usageReports()): Promise<string> {
 	return await buildUsageReportText({
 		settings: settingsDouble(showZeroUsageMeters),
@@ -65,30 +59,21 @@ async function buildAcpText(showZeroUsageMeters: boolean, reports = usageReports
 	} as never);
 }
 
-async function buildTuiText(showZeroUsageMeters: boolean, reports = usageReports()): Promise<string> {
-	const present = vi.fn();
-	const ctx = {
-		settings: settingsDouble(showZeroUsageMeters),
-		session: { getUsageReportingModelSelectors: () => [] },
-		ui: { terminal: { columns: 100 } },
-		presentCommandOutput: present,
-		showWarning: vi.fn(),
-		showError: vi.fn(),
-	} as unknown as InteractiveModeContext;
-	await new CommandController(ctx).handleUsageCommand(reports);
-	const blocks = present.mock.calls[0]?.[0];
-	const rendered = (Array.isArray(blocks) ? blocks : [blocks])
-		.filter(isRenderableBlock)
-		.flatMap(block => block.render(120))
-		.join("\n");
-	return stripVTControlCharacters(rendered);
+/** Mirrors `showUsageDashboard`: the detail view renders the filtered reports. */
+function buildTuiText(showZeroUsageMeters: boolean, reports = usageReports()): string {
+	const displayReports = filterUsageReportsForDisplay(reports, { showZeroUsageMeters });
+	return stripVTControlCharacters(renderUsageReports(displayReports, theme, Date.now(), 120));
 }
 
 describe("display.showZeroUsageMeters", () => {
 	beforeAll(async () => {
-		const theme = await getThemeByName("dark");
-		if (!theme) throw new Error("Expected dark theme");
-		setThemeInstance(theme);
+		priorTheme = theme;
+		const darkTheme = await getThemeByName("dark");
+		if (!darkTheme) throw new Error("Expected dark theme");
+		setThemeInstance(darkTheme);
+	});
+	afterAll(() => {
+		if (priorTheme) setThemeInstance(priorTheme);
 	});
 
 	for (const [label, build] of [
