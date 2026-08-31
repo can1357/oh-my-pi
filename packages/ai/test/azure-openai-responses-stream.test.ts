@@ -429,3 +429,61 @@ describe("azure openai responses streaming", () => {
 		]);
 	});
 });
+
+describe("azure openai responses streaming ttft", () => {
+	it("stamps ttft on the assistant message at first output item, before done", async () => {
+		const fetchMock = vi.fn(async () =>
+			createSseResponse([
+				{ type: "response.created", response: { status: "in_progress" } },
+				{
+					type: "response.output_item.added",
+					output_index: 0,
+					item: { type: "message", id: "msg_1" },
+				},
+				{
+					type: "response.output_text.done",
+					output_index: 0,
+					content_index: 0,
+					text: "Hi",
+				},
+				{
+					type: "response.completed",
+					response: {
+						status: "completed",
+						usage: {
+							input_tokens: 1,
+							output_tokens: 1,
+							total_tokens: 2,
+							input_tokens_details: { cached_tokens: 0 },
+						},
+					},
+				},
+			]),
+		);
+
+		const stream = streamAzureOpenAIResponses(
+			azureModel,
+			{ messages: [{ role: "user", content: "Say hello", timestamp: Date.now() }] },
+			{
+				apiKey: "test-key",
+				fetch: fetchMock as unknown as typeof fetch,
+				azureBaseUrl: azureModel.baseUrl,
+				azureApiVersion: "v1",
+			},
+		);
+
+		let ttftAtFirstUpdate: number | undefined;
+		for await (const event of stream) {
+			if ("partial" in event && ttftAtFirstUpdate === undefined) {
+				ttftAtFirstUpdate = event.partial.ttft;
+			}
+			if (event.type === "done") {
+				expect(event.message.ttft).toBeDefined();
+				expect(event.message.ttft).toBeGreaterThanOrEqual(0);
+			}
+		}
+		// The review's core complaint: ttft must be visible on the streaming
+		// partial, not only on the finalized message.
+		expect(ttftAtFirstUpdate).toBeDefined();
+	});
+});

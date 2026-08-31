@@ -2139,7 +2139,10 @@ class CodexStreamProcessor {
 
 		if (eventType === "response.output_item.added") {
 			this.runtime.whitespaceToolCallArgumentsDelta = undefined;
-			if (!firstTokenTime) firstTokenTime = performance.now();
+			if (!firstTokenTime) {
+				firstTokenTime = performance.now();
+				output.ttft = firstTokenTime - this.startTime;
+			}
 			const item = rawEvent.item as CodexEventItem;
 			this.runtime.currentItem = item;
 			this.runtime.currentBlock = createOutputBlockForItem(item);
@@ -2204,7 +2207,10 @@ class CodexStreamProcessor {
 			const entry = this.runtime.openItemForEvent(rawEvent);
 			if (entry?.item.type === "reasoning" && entry.block?.type === "thinking") {
 				this.runtime.takeSummaryDeltas(entry);
-				if (!firstTokenTime) firstTokenTime = performance.now();
+				if (!firstTokenTime) {
+					firstTokenTime = performance.now();
+					output.ttft = firstTokenTime - this.startTime;
+				}
 				const summaryIndex =
 					typeof rawEvent.summary_index === "number" && Number.isFinite(rawEvent.summary_index)
 						? Math.trunc(rawEvent.summary_index)

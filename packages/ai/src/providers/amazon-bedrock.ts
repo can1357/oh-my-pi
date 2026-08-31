@@ -531,12 +531,18 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 						break;
 					}
 					case "contentBlockStart": {
-						if (!firstTokenTime) firstTokenTime = performance.now();
+						if (!firstTokenTime) {
+							firstTokenTime = performance.now();
+							output.ttft = firstTokenTime - startTime;
+						}
 						handleContentBlockStart(payload as ContentBlockStartEvent, blocks, output, stream, sentinelInjected);
 						break;
 					}
 					case "contentBlockDelta": {
-						if (!firstTokenTime) firstTokenTime = performance.now();
+						if (!firstTokenTime) {
+							firstTokenTime = performance.now();
+							output.ttft = firstTokenTime - startTime;
+						}
 						handleContentBlockDelta(payload as ContentBlockDeltaEvent, blocks, output, stream);
 						break;
 					}

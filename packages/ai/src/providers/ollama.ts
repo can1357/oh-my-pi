@@ -509,7 +509,10 @@ const streamOllamaOnce = (
 					partial: output,
 				});
 			}
-			if (!firstTokenTime) firstTokenTime = performance.now();
+			if (!firstTokenTime) {
+				firstTokenTime = performance.now();
+				output.ttft = firstTokenTime - startTime;
+			}
 		};
 		const appendVisibleThinking = (thinking: string): void => {
 			if (thinking.length === 0) return;
@@ -529,7 +532,10 @@ const streamOllamaOnce = (
 					partial: output,
 				});
 			}
-			if (!firstTokenTime) firstTokenTime = performance.now();
+			if (!firstTokenTime) {
+				firstTokenTime = performance.now();
+				output.ttft = firstTokenTime - startTime;
+			}
 		};
 		const emitHealedToolCall = (call: HealedToolCall): void => {
 			endActiveThinkingBlock();
@@ -552,7 +558,10 @@ const streamOllamaOnce = (
 			});
 			endToolCallBlock(stream, output, index);
 			healedToolCallEmitted = true;
-			if (!firstTokenTime) firstTokenTime = performance.now();
+			if (!firstTokenTime) {
+				firstTokenTime = performance.now();
+				output.ttft = firstTokenTime - startTime;
+			}
 		};
 		const emitHealingEvent = (event: StreamMarkupHealingEvent): void => {
 			if (event.type === "text") {
@@ -650,6 +659,7 @@ const streamOllamaOnce = (
 					}
 					if (!firstTokenTime) {
 						firstTokenTime = performance.now();
+						output.ttft = firstTokenTime - startTime;
 					}
 				}
 				const chunkContent = chunk.message?.content;
@@ -692,6 +702,7 @@ const streamOllamaOnce = (
 						});
 						if (!firstTokenTime) {
 							firstTokenTime = performance.now();
+							output.ttft = firstTokenTime - startTime;
 						}
 					}
 				}

@@ -1028,6 +1028,7 @@ export function streamGoogleGenAI<T extends "google-generative-ai" | "google-ver
 					retainTextSignature,
 					onFirstToken: () => {
 						firstTokenTime = performance.now();
+						output.ttft = firstTokenTime - startTime;
 					},
 				});
 

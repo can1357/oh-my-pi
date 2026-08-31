@@ -759,7 +759,10 @@ const streamOpenAIResponsesOnce = (
 				try {
 					await processResponsesStream(observedOpenaiStream, output, attemptStream, model, {
 						onFirstToken: () => {
-							if (!firstTokenTime) firstTokenTime = performance.now();
+							if (!firstTokenTime) {
+								firstTokenTime = performance.now();
+								output.ttft = firstTokenTime - startTime;
+							}
 						},
 						onOutputItemDone: item => {
 							// `processResponsesStream` hands over a private clone already; no

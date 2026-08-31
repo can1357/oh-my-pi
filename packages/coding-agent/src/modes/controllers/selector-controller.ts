@@ -230,6 +230,7 @@ export class SelectorController {
 							sessionAccent: settings.get("statusLine.sessionAccent"),
 							transparent: settings.get("statusLine.transparent"),
 							compactThinkingLevel: settings.get("statusLine.compactThinkingLevel"),
+							tokenRateExcludesTtft: settings.get("statusLine.tokenRateExcludesTtft"),
 							contextLine: settings.get("statusLine.contextLine"),
 							...previewSettings,
 						});
@@ -261,6 +262,7 @@ export class SelectorController {
 							sessionAccent: settings.get("statusLine.sessionAccent"),
 							transparent: settings.get("statusLine.transparent"),
 							compactThinkingLevel: settings.get("statusLine.compactThinkingLevel"),
+							tokenRateExcludesTtft: settings.get("statusLine.tokenRateExcludesTtft"),
 							contextLine: settings.get("statusLine.contextLine"),
 						});
 						this.ctx.ui.requestRender();
@@ -706,6 +708,7 @@ export class SelectorController {
 			case "statusLine.sessionAccent":
 			case "statusLine.transparent":
 			case "statusLine.compactThinkingLevel":
+			case "statusLine.tokenRateExcludesTtft":
 			case "statusLineSegments":
 			case "statusLineModelThinking":
 			case "statusLinePathAbbreviate":
@@ -727,6 +730,7 @@ export class SelectorController {
 					transparent: settings.get("statusLine.transparent"),
 					segmentOptions: settings.get("statusLine.segmentOptions"),
 					compactThinkingLevel: settings.get("statusLine.compactThinkingLevel"),
+					tokenRateExcludesTtft: settings.get("statusLine.tokenRateExcludesTtft"),
 				};
 				this.ctx.statusLine.updateSettings(statusLineSettings);
 				this.ctx.ui.requestRender();

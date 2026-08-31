@@ -2354,7 +2354,10 @@ const streamAnthropicOnce = (
 								reportAnthropicEnvelopeAnomaly("content_block_start missing content_block payload");
 								continue;
 							}
-							if (!firstTokenTime) firstTokenTime = performance.now();
+							if (!firstTokenTime) {
+								firstTokenTime = performance.now();
+								output.ttft = firstTokenTime - startTime;
+							}
 							if (event.content_block.type === "fallback") {
 								// Fallback boundary is only meaningful when the request
 								// opted into the beta chain — silently drop otherwise so

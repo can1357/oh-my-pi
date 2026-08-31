@@ -1,6 +1,8 @@
 import { beforeAll, describe, expect, it } from "bun:test";
 import { stripVTControlCharacters } from "node:util";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { StatusLineComponent } from "@oh-my-pi/pi-coding-agent/modes/components/status-line/component";
 import { renderSegment } from "@oh-my-pi/pi-coding-agent/modes/components/status-line/segments";
 import type { SegmentContext } from "@oh-my-pi/pi-coding-agent/modes/components/status-line/types";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
@@ -141,5 +143,45 @@ describe("token rate calculation", () => {
 			{ excludeTtft: true },
 		);
 		expect(rate).toBe(60);
+	});
+});
+
+describe("token rate runtime toggle", () => {
+	it("updateSettings on a live component flips the rate policy without reconstruction", async () => {
+		await Settings.init({ inMemory: true });
+		const assistant = assistantMessage({
+			usage: { ...assistantMessage().usage, output: 120 },
+			timestamp: 1_000,
+			duration: 2_000,
+			ttft: 1_500,
+		} as Partial<AssistantMessage>);
+		const session = {
+			state: { messages: [assistant] },
+			isStreaming: true,
+			settings: { get: () => false },
+			sessionManager: { getSessionName: () => undefined },
+			modelRegistry: { isUsingOAuth: () => false },
+			getContextUsage: () => undefined,
+		} as unknown as ConstructorParameters<typeof StatusLineComponent>[0];
+		const component = new StatusLineComponent(session);
+
+		// Default: full-duration denominator → 120 tokens / 2000ms = 60 tok/s.
+		component.updateSettings({ preset: "custom", leftSegments: [], rightSegments: [], separator: "none" });
+		expect(component.getEffectiveSettingsForTest().tokenRateExcludesTtft ?? false).toBe(false);
+
+		// Runtime toggle on the already-running component.
+		component.updateSettings({
+			preset: "custom",
+			leftSegments: [],
+			rightSegments: [],
+			separator: "none",
+			tokenRateExcludesTtft: true,
+		});
+		expect(component.getEffectiveSettingsForTest().tokenRateExcludesTtft).toBe(true);
+
+		// A later sync that omits the field (as #syncStatusLineSettings sends a
+		// full payload read from the store) resolves through the store default.
+		component.updateSettings({ preset: "custom", leftSegments: [], rightSegments: [], separator: "none" });
+		expect(component.getEffectiveSettingsForTest().tokenRateExcludesTtft ?? false).toBe(false);
 	});
 });

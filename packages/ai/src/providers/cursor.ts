@@ -794,7 +794,10 @@ function streamCursorWithWireMode(
 					currentToolCall = t;
 				},
 				setFirstTokenTime: () => {
-					if (!firstTokenTime) firstTokenTime = performance.now();
+					if (!firstTokenTime) {
+						firstTokenTime = performance.now();
+						output.ttft = firstTokenTime - startTime;
+					}
 				},
 				onTodoSnapshot: options?.execHandlers?.todoSync?.bind(options.execHandlers),
 				onToolResult: options?.onToolResult,
