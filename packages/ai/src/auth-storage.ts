@@ -5708,17 +5708,24 @@ export class AuthStorage {
 					blockScope: probeScope,
 					leaseId: lease,
 				});
-			} else if (this.#probeLeases.isRetryAfterSourced(blockedId, probeScope)) {
-				// allowBlocked fallback must still honor active Retry-After: never vend
-				// without a probe lease while the provider-imposed wait is live.
-				if (!options?.requestId) return undefined;
-				const lease = this.tryAcquireQuotaProbeLease(blockedId, probeScope);
-				if (!lease) return undefined;
-				this.#inflightProbes.set(options.requestId, {
-					credentialId: blockedId,
-					blockScope: probeScope,
-					leaseId: lease,
-				});
+			} else {
+				// allowBlocked last resort must still refuse a foreign turn reservation —
+				// without requestId the later acquire is skipped, so denying here is the
+				// only way to keep the held credential exclusive.
+				const held = this.#activeTurnReservation(blockedId, this.getCredentialIncarnation(blockedId));
+				if (held && held.requestId !== options?.requestId) return undefined;
+				if (this.#probeLeases.isRetryAfterSourced(blockedId, probeScope)) {
+					// allowBlocked fallback must still honor active Retry-After: never vend
+					// without a probe lease while the provider-imposed wait is live.
+					if (!options?.requestId) return undefined;
+					const lease = this.tryAcquireQuotaProbeLease(blockedId, probeScope);
+					if (!lease) return undefined;
+					this.#inflightProbes.set(options.requestId, {
+						credentialId: blockedId,
+						blockScope: probeScope,
+						leaseId: lease,
+					});
+				}
 			}
 		}
 		if (options?.requestId) {
@@ -5749,6 +5756,22 @@ export class AuthStorage {
 			// usage/refresh awaits below can shift positional indices, so every later
 			// refresh / persist / CAS-disable addresses the row by this stable id.
 			const credentialId = this.#getStoredCredentials(provider)[selection.index]?.id;
+			// prepare/broker refresh may bump incarnation and purge the prior reservation;
+			// reacquire against the post-prepare incarnation before vending the bearer.
+			if (options?.requestId && credentialId !== undefined) {
+				const held = this.#activeTurnReservation(credentialId, this.getCredentialIncarnation(credentialId));
+				if (!held || held.requestId !== options.requestId) {
+					const acquired = this.tryAcquireTurnReservation({
+						credentialId,
+						incarnation: this.getCredentialIncarnation(credentialId),
+						requestId: options.requestId,
+					});
+					if (!acquired.ok) {
+						this.clearQuotaProbe(options.requestId);
+						return undefined;
+					}
+				}
+			}
 
 			const planRequirement =
 				providedPlanRequirement ?? resolveOpenAICodexPlanRequirement(provider, options?.modelId);
