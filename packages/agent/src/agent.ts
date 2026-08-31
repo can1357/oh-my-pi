@@ -994,7 +994,7 @@ export class Agent {
 	 */
 	steer(m: AgentMessage) {
 		this.#steeringQueue.push(m);
-		this.#notifySteeringWaiters(this.#isImmediateSteering(m));
+		this.#notifySteeringWaiters(this.#hasImmediateSteeringInWindow());
 	}
 
 	/**
@@ -1119,8 +1119,16 @@ export class Agent {
 		);
 	}
 
+	#hasImmediateSteeringInWindow(): boolean {
+		if (this.#steeringMode === "one-at-a-time") {
+			const first = this.#steeringQueue[0];
+			return first !== undefined && this.#isImmediateSteering(first);
+		}
+		return this.#steeringQueue.some(message => this.#isImmediateSteering(message));
+	}
+
 	#waitForSteeringMessages(signal?: AbortSignal): Promise<void> {
-		if (this.#steeringQueue.some(message => this.#isImmediateSteering(message)) || signal?.aborted) {
+		if (this.#hasImmediateSteeringInWindow() || signal?.aborted) {
 			return Promise.resolve();
 		}
 		const { promise, resolve } = Promise.withResolvers<void>();

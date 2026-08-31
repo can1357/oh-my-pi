@@ -244,6 +244,51 @@ describe("Agent", () => {
 
 		expect(agent.peekSteeringQueue()).toEqual([]);
 	});
+
+	it("one-at-a-time wait mode does not wake for an immediate steer behind an ordinary steer", async () => {
+		const toolSchema = type({});
+		const release = Promise.withResolvers<void>();
+		let started = false;
+		let agent: Agent;
+		const tool: AgentTool<typeof toolSchema, Record<string, never>> = {
+			name: "wait",
+			label: "Wait",
+			description: "Wait tool",
+			parameters: toolSchema,
+			async execute() {
+				started = true;
+				agent.steer(createUserMessage("ordinary steer"));
+				const advisor = createUserMessage("immediate advisor") as AgentMessage & {
+					[STEERING_MESSAGE_IMMEDIATE]?: boolean;
+				};
+				advisor[STEERING_MESSAGE_IMMEDIATE] = true;
+				agent.steer(advisor);
+				await release.promise;
+				return { content: [{ type: "text", text: "done" }], details: {} };
+			},
+		};
+		const mock = createMockModel({
+			responses: [
+				{ content: [{ type: "toolCall", id: "tool-1", name: "wait", arguments: {} }] },
+				{ content: ["ordinary handled"] },
+				{ content: ["advisor handled"] },
+			],
+		});
+		agent = new Agent({
+			initialState: { model: mock.model, systemPrompt: ["Test"], tools: [tool], messages: [] },
+			streamFn: mock.stream,
+			steeringMode: "one-at-a-time",
+			interruptMode: "wait",
+		});
+
+		const running = agent.prompt("start");
+		while (!started) await Bun.sleep(0);
+		await Bun.sleep(10);
+		release.resolve();
+		await running;
+
+		expect(agent.peekSteeringQueue()).toEqual([]);
+	});
 	it("continue() re-executes a trailing assistant's unpaired tool calls before the next model call", async () => {
 		const toolSchema = type({ value: type("string") });
 		const executed: string[] = [];
