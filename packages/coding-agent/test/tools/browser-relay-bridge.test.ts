@@ -1226,6 +1226,56 @@ describe("RelayBridge tab grouping", () => {
 		expect(holder.messages.filter(message => message.id === commandId && "result" in message)).toHaveLength(1);
 	});
 
+	it("clears departed emulated-media dimensions during live owner cleanup", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const mediaOwner = new FakeCdpSocket();
+		const mediaOwnerConn = bridge.cdpConnected(mediaOwner);
+		const mediaOwnerSession = await attachPage(bridge, ext, mediaOwner, mediaOwnerConn, 1);
+		const featuresOwner = new FakeCdpSocket();
+		const featuresOwnerConn = bridge.cdpConnected(featuresOwner);
+		const featuresOwnerSession = await attachPage(bridge, ext, featuresOwner, featuresOwnerConn, 1);
+
+		bridge.cdpMessage(
+			mediaOwnerConn,
+			JSON.stringify({
+				id: ++msgSeq,
+				sessionId: mediaOwnerSession,
+				method: "Emulation.setEmulatedMedia",
+				params: { media: "print" },
+			}),
+		);
+		await flush();
+		ack(bridge, ext, "send");
+		await flush();
+
+		bridge.cdpMessage(
+			featuresOwnerConn,
+			JSON.stringify({
+				id: ++msgSeq,
+				sessionId: featuresOwnerSession,
+				method: "Emulation.setEmulatedMedia",
+				params: { features: [{ name: "prefers-color-scheme", value: "dark" }] },
+			}),
+		);
+		await flush();
+		ack(bridge, ext, "send");
+		await flush();
+
+		bridge.cdpClosed(mediaOwnerConn);
+		await waitFor(() => ext.rpcs("send").length === 3, "live emulated-media cleanup");
+		expect(ext.rpcs("send")[2]).toMatchObject({
+			method: "Emulation.setEmulatedMedia",
+			params: {
+				media: "",
+				features: [{ name: "prefers-color-scheme", value: "dark" }],
+			},
+		});
+		ack(bridge, ext, "send");
+		await flush();
+	});
+
 	it("reapplies the latest surviving live root subscription when an orphaned in-flight setter completes", async () => {
 		const bridge = new RelayBridge({});
 		const ext = new FakeExtSocket();
@@ -2430,6 +2480,61 @@ describe("RelayBridge tab grouping", () => {
 			method: "Emulation.setEmulatedMedia",
 			params: {
 				media: "print",
+				features: [{ name: "prefers-color-scheme", value: "dark" }],
+			},
+		});
+	});
+
+	it("clears departed emulated-media dimensions when a replay owner disconnects", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const mediaOwner = new FakeCdpSocket();
+		const mediaOwnerConn = bridge.cdpConnected(mediaOwner);
+		const mediaOwnerSession = await attachPage(bridge, ext, mediaOwner, mediaOwnerConn, 1);
+		const featuresOwner = new FakeCdpSocket();
+		const featuresOwnerConn = bridge.cdpConnected(featuresOwner);
+		const featuresOwnerSession = await attachPage(bridge, ext, featuresOwner, featuresOwnerConn, 1);
+
+		const sendRootCommand = async (
+			connId: number,
+			sessionId: string,
+			method: string,
+			params?: Record<string, unknown>,
+		): Promise<void> => {
+			const id = ++msgSeq;
+			bridge.cdpMessage(connId, JSON.stringify({ id, sessionId, method, params }));
+			await flush();
+			ack(bridge, ext, "send");
+			await flush();
+		};
+
+		await sendRootCommand(mediaOwnerConn, mediaOwnerSession, "Emulation.setEmulatedMedia", { media: "print" });
+		await sendRootCommand(featuresOwnerConn, featuresOwnerSession, "Emulation.setEmulatedMedia", {
+			features: [{ name: "prefers-color-scheme", value: "dark" }],
+		});
+
+		bridge.extClosed(ext);
+		const ext2 = new FakeExtSocket();
+		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], { recoverableTabIds: [1] });
+		await waitFor(() => ext2.rpcs("attach").length === 1, "recovery attach RPC");
+		ack(bridge, ext2, "attach");
+		await waitFor(() => ext2.rpcs("send").length === 1, "emulated media replay");
+		expect(ext2.rpcs("send")[0]).toMatchObject({
+			method: "Emulation.setEmulatedMedia",
+			params: {
+				media: "print",
+				features: [{ name: "prefers-color-scheme", value: "dark" }],
+			},
+		});
+
+		bridge.cdpClosed(mediaOwnerConn);
+		ack(bridge, ext2, "send");
+		await waitFor(() => ext2.rpcs("send").length === 2, "replayed emulated-media cleanup");
+		expect(ext2.rpcs("send")[1]).toMatchObject({
+			method: "Emulation.setEmulatedMedia",
+			params: {
+				media: "",
 				features: [{ name: "prefers-color-scheme", value: "dark" }],
 			},
 		});
