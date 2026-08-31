@@ -54,7 +54,7 @@ import { SessionManager } from "../session/session-manager";
 import { truncateTail } from "../session/streaming-output";
 import { type ConfiguredThinkingLevel, prewalkWouldBeNoop, resolveTaskEffortLevel, type TaskEffort } from "../thinking";
 import type { ContextFileEntry, ToolSession } from "../tools";
-import { expandExecToolAlias } from "../tools/builtin-names";
+import { expandExecToolAlias, isToolDisallowed } from "../tools/builtin-names";
 import { resolveEvalBackends } from "../tools/eval-backends";
 import { isIrcEnabled } from "../tools/hub";
 import { LIST_STATUS_ORDER } from "../tools/hub/messaging";
@@ -2840,8 +2840,16 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 	let toolNames: string[] | undefined;
 	if (Array.isArray(agent.tools)) {
 		toolNames = agent.tools;
-		// Auto-include task tool if spawns defined but task not in tools
-		if (agent.spawns !== undefined && !toolNames.includes("task") && !atMaxDepth) {
+		// Auto-include task tool if spawns defined but task not in tools —
+		// unless the agent disallows it, matching isReadOnlyAgent's classifier:
+		// re-adding an explicitly-disallowed `task` would widen the effective
+		// grant past the declared scope.
+		if (
+			agent.spawns !== undefined &&
+			!toolNames.includes("task") &&
+			!atMaxDepth &&
+			!(agent.disallowedTools?.length && isToolDisallowed("task", agent.disallowedTools))
+		) {
 			toolNames = [...toolNames, "task"];
 		}
 	}
