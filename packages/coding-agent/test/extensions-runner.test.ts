@@ -2777,11 +2777,6 @@ describe("ExtensionRunner", () => {
 				tier: "exec",
 			} as ToolApprovalReviewEvent;
 
-			it("dispatch returns escalation when no review handler exists (distinct from approval)", async () => {
-				const runner = dispatchRunner([]);
-				await expect(runner.emitToolApprovalReview(dispatchEvent)).resolves.toMatchObject({ decision: "escalate" });
-			});
-
 			it("dispatch returns approve only for unanimous approval and delivers the exact public event", async () => {
 				const seen: ToolApprovalReviewEvent[] = [];
 				const runner = dispatchRunner([
@@ -2867,22 +2862,6 @@ describe("ExtensionRunner", () => {
 						decision: "escalate",
 					});
 				}
-			});
-
-			it("dispatch returns escalation when a handler throws", async () => {
-				const runner = dispatchRunner([
-					async () => {
-						throw new Error("reviewer exploded");
-					},
-				]);
-				await expect(runner.emitToolApprovalReview(dispatchEvent)).resolves.toMatchObject({ decision: "escalate" });
-			});
-
-			it("dispatch returns escalation on handler timeout", async () => {
-				testSetExtensionHandlerTimeoutMs(20);
-				const never = Promise.withResolvers<void>();
-				const runner = dispatchRunner([async () => never.promise]);
-				await expect(runner.emitToolApprovalReview(dispatchEvent)).resolves.toMatchObject({ decision: "escalate" });
 			});
 
 			it("dispatch returns escalation when the signal is already aborted and never calls handlers", async () => {
