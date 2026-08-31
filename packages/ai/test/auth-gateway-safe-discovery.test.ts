@@ -73,6 +73,15 @@ describe("safeDiscoverModels", () => {
 		expect(fetchSpy).not.toHaveBeenCalled();
 	});
 
+	it("rejects IPv6 ULA and link-local discovery hosts (negative)", async () => {
+		const fetchSpy = forbidFetch();
+		const hosts = ["[fd00::1]", "[fe80::1]", "[fc00::1]"];
+		for (const host of hosts) {
+			await expect(safeDiscoverModels(`https://${host}/models`)).rejects.toBeInstanceOf(SafeDiscoveryError);
+		}
+		expect(fetchSpy).not.toHaveBeenCalled();
+	});
+
 	it("accepts a top-level JSON array", async () => {
 		stubFetch(jsonResponse([{ id: "a" }, { id: "b" }]));
 		const models = await safeDiscoverModels("https://example.com/v1/models");

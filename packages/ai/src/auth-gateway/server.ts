@@ -843,7 +843,33 @@ async function handleFormatEndpoint(
 				return unknownModelResponse(formatError, modelId);
 			}
 			const bound = bindCurrentTarget(targetId);
-			if (bound === "skipped") continue;
+			if (bound === "skipped") {
+				// Keep incompatible fallback edges scoped: ask the disposition tree for
+				// the next reachable fallback instead of classification-free global redispatch.
+				if (lastClassified) {
+					const action = decideAttempt({
+						route: compiled,
+						state: conductorExecutionState(
+							compiled,
+							attemptedTargets,
+							attemptedCredentials,
+							retryCount,
+							fallbackCount,
+							currentTarget,
+							siblingsExhausted,
+							"probing",
+						),
+						classification: lastClassified,
+						commitState: "probing",
+					});
+					if (action.type === "fallback_target") {
+						pendingFallback = action.targetModelId;
+						fallbackCount += 1;
+						retryCount += 1;
+					}
+				}
+				continue;
+			}
 			return bound;
 		}
 	};
@@ -1294,7 +1320,33 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 				return unknownModelResponse(formatError, parsed.modelId);
 			}
 			const bound = bindCurrentTarget(targetId);
-			if (bound === "skipped") continue;
+			if (bound === "skipped") {
+				// Keep incompatible fallback edges scoped: ask the disposition tree for
+				// the next reachable fallback instead of classification-free global redispatch.
+				if (lastClassified) {
+					const action = decideAttempt({
+						route: compiled,
+						state: conductorExecutionState(
+							compiled,
+							attemptedTargets,
+							attemptedCredentials,
+							retryCount,
+							fallbackCount,
+							currentTarget,
+							siblingsExhausted,
+							"probing",
+						),
+						classification: lastClassified,
+						commitState: "probing",
+					});
+					if (action.type === "fallback_target") {
+						pendingFallback = action.targetModelId;
+						fallbackCount += 1;
+						retryCount += 1;
+					}
+				}
+				continue;
+			}
 			return bound;
 		}
 	};

@@ -174,6 +174,14 @@ describe("holdSseUntilCommit (prelude replay buffer)", () => {
 		expect(sawCreated).toBe(false);
 	});
 
+	it("flushes metadata-only preludes at EOF instead of dropping them", async () => {
+		const gate = new StreamCommitGate();
+		const held = holdSseUntilCommit(sse(["event: response.created\ndata: {}\n\n"]), gate);
+		const out = await collect(held);
+		expect(out).toContain("response.created");
+		expect(gate.state).toBe("committed");
+	});
+
 	it("stops buffering at commit and releases memory on drain (bounded)", () => {
 		const gate = new StreamCommitGate();
 		expect(gate.bufferPrelude(new Uint8Array(8))).toBe(true);

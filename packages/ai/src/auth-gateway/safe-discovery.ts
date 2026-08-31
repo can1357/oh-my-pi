@@ -95,9 +95,12 @@ function isPrivateHostname(hostname: string): boolean {
 	while (host.endsWith(".")) {
 		host = host.slice(0, -1);
 	}
-	if (host === "localhost" || host === "::1" || host === "0.0.0.0") {
+	if (host === "localhost" || host === "::1" || host === "::" || host === "0.0.0.0") {
 		return true;
 	}
+	// IPv6 link-local (fe80::/10) and unique-local (fc00::/7, covers fd00::/8 ULA).
+	if (/^fe[89ab][0-9a-f]:/.test(host)) return true;
+	if (/^f[cd][0-9a-f]{2}:/.test(host)) return true;
 	const v4 = parseIPv4(host);
 	if (v4 === undefined) {
 		return false;

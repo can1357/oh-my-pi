@@ -225,9 +225,16 @@ export function holdSseUntilCommit(
 					controller.enqueue(chunk);
 				}
 			},
-			flush() {
-				// truncated tail without commit: treat as metadata-only commit so
-				// a holding consumer never stalls
+			flush(controller) {
+				// Truncated / metadata-only EOF: commit and drain the held prelude so
+				// the client receives the frames instead of a silent empty success.
+				if (!committed && gate.state === "probing") {
+					gate.classifyAndObserve("", 0);
+				}
+				if (!committed) {
+					committed = true;
+					for (const held of gate.takePrelude() ?? []) controller.enqueue(held);
+				}
 			},
 		}),
 	);
