@@ -336,6 +336,7 @@ export class SessionAdvisors {
 	#advisorPrimaryTurnsCompleted = 0;
 	#advisorInterruptImmuneTurnStart: number | undefined;
 	#pendingAdvisorCardEvents = new Set<Promise<void>>();
+	#deferredAdviceDrainScheduled = false;
 	#advisorYieldQueueUnsubscribe: (() => void) | undefined;
 
 	constructor(host: SessionAdvisorsHost, options: SessionAdvisorsOptions) {
@@ -612,6 +613,17 @@ export class SessionAdvisors {
 			entry => (entry as AdvisorNote).deferredInterrupt === true,
 		);
 		return message && isAdvisorCard(message) ? [message] : [];
+	}
+
+	/** Reclassify wait-mode advice that arrived after the loop's final aside poll. */
+	preserveDeferredAdviceAfterSettle(): void {
+		if (this.#deferredAdviceDrainScheduled) return;
+		this.#deferredAdviceDrainScheduled = true;
+		queueMicrotask(() => {
+			this.#deferredAdviceDrainScheduled = false;
+			if (this.#host.agent.state.isStreaming || this.#host.abortInProgress()) return;
+			for (const card of this.drainDeferredAdvice()) this.#host.preserveAdvisorCard(card);
+		});
 	}
 
 	// Advisor runtime lifecycle

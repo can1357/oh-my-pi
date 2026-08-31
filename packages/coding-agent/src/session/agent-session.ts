@@ -802,8 +802,7 @@ export class AgentSession {
 	}
 
 	#preserveSettledDeferredAdvice(): void {
-		if (this.agent.state.isStreaming || this.#abortInProgress) return;
-		for (const card of this.#advisors.drainDeferredAdvice()) this.#preserveAdvisorCard(card);
+		this.#advisors.preserveDeferredAdviceAfterSettle();
 	}
 	#endInFlight(onSettled?: () => void | Promise<void>): void {
 		if (onSettled) this.#inFlightSettledCallbacks.push(onSettled);
