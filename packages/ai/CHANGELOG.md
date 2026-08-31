@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Quota probes require a requestId; balance routes pick the initial target via rr/weighted strategy.
 - Fixed auth-gateway credential disable returning success before a remote broker disable completed; the handler now awaits the remote path when present.
 
 ### Added

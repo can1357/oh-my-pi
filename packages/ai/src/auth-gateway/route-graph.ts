@@ -3,7 +3,7 @@ import type { GatewayErrorDisposition } from "../error/gateway";
 import type { Api, Model } from "../types";
 import type { AffinityLevel, StatePortability } from "./affinity";
 
-export type TargetNode = { type: "target"; model: string };
+export type TargetNode = { type: "target"; model: string; weight?: number };
 
 export type FallbackNode = {
 	type: "fallback";
@@ -313,4 +313,26 @@ function freezeFallbacks(
 		out[key] = Object.freeze([...list]);
 	}
 	return Object.freeze(out);
+}
+
+/** Choose the first dispatch target, honouring a root balance strategy when present. */
+export function pickInitialRouteTarget(compiled: CompiledRoute, salt = 0): string | undefined {
+	if (compiled.targets.length === 0) return undefined;
+	if (compiled.root.type !== "balance") return compiled.targets[0];
+	if (compiled.root.strategy === "weighted") {
+		let best: string | undefined;
+		let bestWeight = -Infinity;
+		for (const child of compiled.root.children) {
+			if (child.type !== "target") continue;
+			const weight = child.weight ?? 1;
+			if (weight > bestWeight) {
+				bestWeight = weight;
+				best = child.model;
+			}
+		}
+		return best ?? compiled.targets[0];
+	}
+	// Round-robin: rotate by salt so concurrent requests spread across children.
+	const idx = Math.abs(salt) % compiled.targets.length;
+	return compiled.targets[idx];
 }
