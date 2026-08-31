@@ -1923,6 +1923,7 @@ async function streamAssistantResponse(
 						case "toolcall_start":
 						case "toolcall_delta":
 						case "toolcall_end":
+						case "routed_model":
 							if (partialMessage) {
 								if (event.type === "toolcall_end") {
 									completedToolCallIds.add(event.toolCall.id);
