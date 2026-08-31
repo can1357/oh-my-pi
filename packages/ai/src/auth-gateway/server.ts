@@ -392,14 +392,19 @@ function releaseTurnOnStreamEnd(
 	};
 	return new ReadableStream({
 		async pull(controller) {
-			const { done, value } = await reader.read();
-			if (done) {
-				release();
-				controller.close();
-				return;
-			}
-			storage.renewTurnReservation(requestId);
+			try {
+				const { done, value } = await reader.read();
+				if (done) {
+					release();
+					controller.close();
+					return;
+				}
+				storage.renewTurnReservation(requestId);
 				controller.enqueue(value);
+			} catch (error) {
+				release();
+				controller.error(error);
+			}
 		},
 		cancel(reason) {
 			release();
