@@ -95,6 +95,16 @@ describe("task agent capability descriptions", () => {
 		// classification holds (the auto-added task row never applies).
 		expect(isReadOnlyAgent({ ...base, tools: [] })).toBe(true);
 		expect(isReadOnlyAgent({ ...base, tools: ["read"] })).toBe(true);
+		// The runtime does NOT auto-add `task` when the agent disallows it:
+		// `tools: [read]` + `spawns: "*"` + `disallowedTools: [task]` spawns a
+		// child that cannot delegate, so it stays read-only — re-adding `task`
+		// after filtering would misreport the effective grant as writable.
+		expect(isReadOnlyAgent({ ...base, tools: ["read"], spawns: "*", disallowedTools: ["task"] })).toBe(true);
+		// Denying task on an otherwise-empty allowlist keeps the protocol-only
+		// classification (the auto-add is suppressed, not filtered back in).
+		expect(isReadOnlyAgent({ ...base, tools: [], spawns: "*", disallowedTools: ["task"] })).toBe(true);
+		// Denying a different tool does not suppress the auto-add.
+		expect(isReadOnlyAgent({ ...base, tools: ["read"], spawns: "*", disallowedTools: ["write"] })).toBe(false);
 	});
 	it("classifies an empty effective allowlist as read-only", () => {
 		// An explicit `tools: []` is a hard allowlist (discovery preserves it):

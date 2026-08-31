@@ -64,8 +64,13 @@ export function isReadOnlyAgent(
 	// toward writable, matching the runtime default allowance).
 	// Mirror the executor spawn path's auto-adds BEFORE classification, so the
 	// grant the runtime actually creates is the set being classified:
-	// - `spawns:` auto-adds `task` (delegation to a writable child breaks the
-	//   read-only contract even when the agent's own allowlist is read-only);
+	// - `spawns:` auto-adds `task` ONLY when the runtime would: a declared
+	//   `disallowedTools` naming `task` suppresses the auto-add, and the
+	//   executor drops `task` entirely at max recursion depth (the classifier
+	//   has no depth input, so a parent spawning a spawns-scoped child at max
+	//   depth reads one notch conservative — fail-safe toward writable).
+	//   Delegation to a writable child breaks the read-only contract even when
+	//   the agent's own allowlist is read-only.
 	// - non-restricted spawn paths auto-add `hub` (`exec`-tier approval), so an
 	//   effective set that is otherwise read-only still cannot be flagged
 	//   read-only unless `READ_ONLY_TOOL_NAMES` already covers it.
@@ -74,6 +79,8 @@ export function isReadOnlyAgent(
 		patterns,
 		evalBackends ?? { python: true, js: true, ruby: false, julia: false },
 	).filter(tool => !isToolDisallowed(tool, patterns));
-	const withAutoAdds = agent.spawns !== undefined && !effective.includes("task") ? [...effective, "task"] : effective;
+	const taskAutoAdded =
+		agent.spawns !== undefined && !effective.includes("task") && !isToolDisallowed("task", patterns);
+	const withAutoAdds = taskAutoAdded ? [...effective, "task"] : effective;
 	return withAutoAdds.every(tool => READ_ONLY_TOOL_NAMES.has(tool));
 }

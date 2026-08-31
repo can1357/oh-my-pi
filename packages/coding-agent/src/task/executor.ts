@@ -3358,6 +3358,11 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				modelRole: modelRole ?? resolveExplicitModelRole(modelOverride ?? agent.model, subagentSettings),
 				resolvedModel: progress.resolvedModel,
 				spawns: spawnsEnv,
+				// Persist the resolved advisor opt-in for cold revival: `"on"` = the
+				// advisor-role model (no explicit pattern), otherwise the pattern the
+				// original spawn stamped onto `modelRoles.advisor`. Absent = unadvised
+				// (the createSubagentSettings default).
+				advisor: advisorSelection ? (advisorSelection.model ?? "on") : undefined,
 				readSummarize: agent.readSummarize,
 				readOnly: isReadOnlyAgent(agent, evalBackends),
 				outputSchema,
