@@ -24,6 +24,7 @@ import {
 	nextOrphanSweepDeadline,
 	orphanSweepAlarmDelayMinutes,
 	orphanSweepSeesRelayDisconnected,
+	shouldProceedWithOrphanSweep,
 	shouldRunOrphanSweep,
 } from "./orphan-sweep";
 import { snapshotAfterPendingOperationsSettle } from "./pending-ops";
@@ -160,6 +161,18 @@ async function maybeRunOrphanSweep(): Promise<void> {
 		return;
 	}
 	await setOrphanSweepDeadline(null);
+	if (
+		!shouldProceedWithOrphanSweep({
+			disconnected: orphanSweepSeesRelayDisconnected({
+				socketReadyState: ws?.readyState,
+				openReadyState: WebSocket.OPEN,
+			}),
+			hasTrackedAttachments: attachmentGuard.attachedTabIds().length > 0,
+		})
+	) {
+		await maybeScheduleOrphanSweep();
+		return;
+	}
 	attachmentGuard.onSuspend();
 }
 

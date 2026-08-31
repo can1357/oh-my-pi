@@ -3,6 +3,7 @@ import {
 	nextOrphanSweepDeadline,
 	orphanSweepAlarmDelayMinutes,
 	orphanSweepSeesRelayDisconnected,
+	shouldProceedWithOrphanSweep,
 	shouldRunOrphanSweep,
 } from "../../../browser-relay/extension/orphan-sweep";
 
@@ -105,5 +106,26 @@ describe("browser relay orphan sweep scheduling", () => {
 				forceDisconnected: true,
 			}),
 		).toBe(true);
+	});
+
+	it("revalidates reconnects before executing an expired orphan sweep", () => {
+		expect(
+			shouldProceedWithOrphanSweep({
+				disconnected: true,
+				hasTrackedAttachments: true,
+			}),
+		).toBe(true);
+		expect(
+			shouldProceedWithOrphanSweep({
+				disconnected: false,
+				hasTrackedAttachments: true,
+			}),
+		).toBe(false);
+		expect(
+			shouldProceedWithOrphanSweep({
+				disconnected: true,
+				hasTrackedAttachments: false,
+			}),
+		).toBe(false);
 	});
 });
