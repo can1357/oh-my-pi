@@ -193,6 +193,7 @@ function classifyOwnerDisposition(
 			PROVIDER_WIDE_PATTERN.test(message) ||
 			reason === "RATE_LIMIT_EXCEEDED" ||
 			reason === "MODEL_CAPACITY_EXHAUSTED" ||
+			reason === "CONCURRENT_LIMIT" ||
 			reason === "SERVER_ERROR"
 		) {
 			return { owner: "provider", disposition: "provider_transient" };
