@@ -1,4 +1,6 @@
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
+import type { Model } from "@oh-my-pi/pi-ai";
+import { classifyModel } from "@oh-my-pi/pi-catalog/identity";
 import { parseConfiguredThinkingLevel, parseThinkingLevel } from "../thinking";
 import {
 	PANEL_MAX_MEMBERS,
@@ -15,6 +17,10 @@ import {
 	type ResolvedPanelMember,
 	type ResolvedPanelRole,
 } from "./types";
+export function panelModelFamily(model: Model): string {
+	const family = classifyModel(model.provider, model.id, { lenient: true }).class;
+	return family === "unknown" ? "" : family;
+}
 
 /** A descriptive user-configuration error for panel settings or resolved roles. */
 export class PanelConfigError extends Error {
