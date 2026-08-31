@@ -493,6 +493,7 @@ export interface StreamOptions {
 	 * internal chain state (`statefulResponses` / lastResponseId) for this request.
 	 */
 	previousResponseId?: string;
+	store?: boolean;
 	/** OpenAI `parallel_tool_calls`. */
 	parallelToolCalls?: boolean;
 	/** OpenAI deterministic-sampling `seed`. */
