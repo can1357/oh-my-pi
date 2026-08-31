@@ -643,6 +643,28 @@ describe("formatUsageBreakdown", () => {
 		const occurrences = text.split(note).length - 1;
 		expect(occurrences).toBe(2);
 	});
+
+	it("filters zero supplemental meters before expanding multi-account templates", () => {
+		const provider = "meter-provider";
+		const reports = [
+			makeReport(provider, "account-a@example.test", [
+				makeLimit({ id: "base", provider, usedFraction: 0.2, windowId: "weekly" }),
+				makeLimit({ id: "supplemental", provider, tier: "unused-tier", usedFraction: 0, windowId: "weekly" }),
+			]),
+			makeReport(provider, "account-b@example.test", [
+				makeLimit({ id: "base", provider, usedFraction: 0.3, windowId: "weekly" }),
+			]),
+		];
+		const visible = stripVTControlCharacters(formatUsageBreakdown(reports, [], Date.now()));
+		const hidden = stripVTControlCharacters(
+			formatUsageBreakdown(reports, [], Date.now(), undefined, [], { showZeroUsageMeters: false }),
+		);
+
+		expect(visible).toContain("supplemental");
+		expect(hidden).toContain("base");
+		expect(hidden).not.toContain("supplemental");
+		expect(hidden).not.toContain("not reported");
+	});
 });
 
 describe("formatUsageHistory", () => {
