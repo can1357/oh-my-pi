@@ -1,5 +1,6 @@
 import { resolveUsedFraction, type UsageLimit, type UsageReport } from "@oh-my-pi/pi-ai";
 
+/** Controls whether untouched supplemental model and tier meters remain visible in formatted usage reports. */
 export interface UsageDisplayOptions {
 	showZeroUsageMeters?: boolean;
 }
