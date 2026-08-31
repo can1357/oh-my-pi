@@ -384,12 +384,7 @@ import {
 	queueChipText,
 	toRestoredQueuedMessage,
 } from "./queued-messages";
-import {
-	formatRetryFallbackSelector,
-	parseRetryFallbackSelector,
-	type RetryFallbackSelector,
-	type ServingModel,
-} from "./retry-fallback-chains";
+import { parseRetryFallbackSelector, type ServingModel } from "./retry-fallback-chains";
 import {
 	type AdvisorStats,
 	type AdvisorStatusOverviewEntry,
@@ -9465,7 +9460,7 @@ export class AgentSession implements SettingsScope {
 		const resolved = this.#models.resolveRoleModelWithThinking("default");
 		const target = resolved.model;
 		if (!target) return "declined";
-		if (this.retryFallbackModel !== undefined) {
+		if (this.servingModel?.isFallback === true) {
 			// Only a cascade that started from this session's role-bound model belongs to
 			// the role; one rooted at a manual pick must keep restoring to that pick.
 			if (!this.#roleBoundModel) return "declined";
