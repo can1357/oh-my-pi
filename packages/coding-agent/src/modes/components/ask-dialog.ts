@@ -599,7 +599,7 @@ export class AskDialogComponent implements Component {
 			: this.#renderQuestionBody(innerWidth, bodyRows);
 		const footer = this.#footerHintText(bodyLines.indicator);
 		return [
-			topBorder(width, this.#titleText()),
+			topBorder(width, this.#titleText(), undefined, this.#hasFocus() ? undefined : "dim"),
 			...headerLines.map(line => row(line, width)),
 			divider(width),
 			...bodyLines.lines.map(line => row(line, width)),
@@ -655,6 +655,10 @@ export class AskDialogComponent implements Component {
 
 	#titleText(): string {
 		return this.#remainingSeconds === undefined ? "Ask" : `Ask (${this.#remainingSeconds}s)`;
+	}
+
+	#hasFocus(): boolean {
+		return this.options.inputGuard == null || !this.options.inputGuard.draftOwnsInput();
 	}
 
 	#hasSubmitTab(): boolean {

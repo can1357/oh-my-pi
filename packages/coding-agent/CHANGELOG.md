@@ -112,6 +112,7 @@
 - The usage status line now labels untiered quota windows with the report's plan tier, surfacing Z.AI Coding Plan (`pro`) and Codex plan names next to the 5h/7d percentages.
 - Added `app.dialog.toggleFocus` (default Alt+E) to toggle input focus between a pending ask dialog and the chat draft in both directions; the chat editor now stays mounted beneath local ask dialogs so a draft can be started mid-ask.
 - Dequeueing steering/queued messages now works while an ask dialog is open. Restoring a queued message moves input focus to the chat draft.
+- The ask dialog's title bar now dims while the chat draft is in focus.
 
 ### Fixed
 

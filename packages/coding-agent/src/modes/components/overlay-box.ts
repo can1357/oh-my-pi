@@ -24,8 +24,10 @@ function paint(s: string, color: ThemeColor = "border"): string {
 	return theme.fg(color, s);
 }
 
-/** Top border with an optional title inset into the rule. `color` recolors border and title (default border/accent). */
-export function topBorder(width: number, title: string, color?: ThemeColor): string {
+/** Top border with an optional title inset into the rule.
+ *  `color` recolors border (defaults to "border").
+ *  `titleColor` recolors title (defaults to "accent") */
+export function topBorder(width: number, title: string, color?: ThemeColor, titleColor?: ThemeColor): string {
 	const box = theme.boxRound;
 	const inner = Math.max(0, width - 2);
 	if (!title) return paint(box.topLeft + box.horizontal.repeat(inner) + box.topRight, color);
@@ -33,7 +35,7 @@ export function topBorder(width: number, title: string, color?: ThemeColor): str
 	const fillWidth = Math.max(0, inner - 1 - visibleWidth(shown));
 	return (
 		paint(box.topLeft + box.horizontal, color) +
-		theme.bold(theme.fg(color ?? "accent", shown)) +
+		theme.bold(theme.fg(titleColor ?? "accent", shown)) +
 		paint(box.horizontal.repeat(fillWidth) + box.topRight, color)
 	);
 }
