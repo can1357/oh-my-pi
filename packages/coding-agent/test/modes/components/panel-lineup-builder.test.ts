@@ -106,7 +106,6 @@ describe("PanelLineupBuilderOverlayComponent", () => {
 
 	afterEach(() => {
 		setKeybindings(KeybindingsManager.inMemory());
-		vi.restoreAllMocks();
 	});
 
 	it("blocks Run below two members and never dispatches", () => {
