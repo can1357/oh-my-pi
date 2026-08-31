@@ -1145,6 +1145,7 @@ export class RelayBridge {
 			case "Emulation.setIdleOverride":
 			case "Network.setUserAgentOverride":
 			case "Emulation.setUserAgentOverride":
+			case "Emulation.setDefaultBackgroundColorOverride":
 			case "Network.setAcceptedEncodings":
 				// Persistent root setters survive as long as the shared debugger root.
 				// When a guard-authorized detach swaps that root, replay the latest
@@ -1154,6 +1155,10 @@ export class RelayBridge {
 					(msg.method === "Network.setUserAgentOverride" || msg.method === "Emulation.setUserAgentOverride") &&
 					isEmptyUserAgentOverride(msg.params)
 				) {
+					this.#forgetTabSubscription(tab, subscriptionKey(msg.method));
+					return;
+				}
+				if (msg.method === "Emulation.setDefaultBackgroundColorOverride" && !hasObjectKeys(msg.params)) {
 					this.#forgetTabSubscription(tab, subscriptionKey(msg.method));
 					return;
 				}
@@ -1417,6 +1422,7 @@ export class RelayBridge {
 			case "Emulation.setEmulatedMedia":
 			case "Emulation.setLocaleOverride":
 			case "Emulation.setTimezoneOverride":
+			case "Emulation.setDefaultBackgroundColorOverride":
 			case "Emulation.setEmulatedVisionDeficiency":
 			case "Emulation.setCPUThrottlingRate":
 			case "Emulation.setScriptExecutionDisabled":
@@ -1538,19 +1544,10 @@ export class RelayBridge {
 				return { method: subscription.method, params: { enabled: false } };
 			case "Network.setUserAgentOverride":
 			case "Emulation.setUserAgentOverride": {
-				// These persistent setters have no disable counterpart. If the replay
-				// owner disappears after the override was re-applied to Chrome's fresh
-				// root, restore the browser's default UA so surviving holders do not
-				// inherit a stale stealth fingerprint with no owner left to manage it.
-				const userAgent = this.#extInfo?.userAgent ?? "";
-				const platform = platformFromUserAgent(userAgent);
-				return {
-					method: subscription.method,
-					params: {
-						userAgent,
-						...(platform ? { platform } : {}),
-					},
-				};
+				// These setters clear with the protocol's empty-userAgent sentinel.
+				// Reconstructing a guessed default UA/platform pair can itself leave
+				// an observable override behind on Chrome's shared root.
+				return { method: subscription.method, params: { userAgent: "" } };
 			}
 			case "Network.emulateNetworkConditions":
 				// Chrome keeps the throttling profile on the shared root until another
@@ -1597,6 +1594,8 @@ export class RelayBridge {
 				// disable RPC. When its preserved owner disappears after replay, reset
 				// the shared root back to the browser default timezone.
 				return { method: subscription.method, params: { timezoneId: "" } };
+			case "Emulation.setDefaultBackgroundColorOverride":
+				return { method: subscription.method };
 			case "Emulation.setEmulatedVisionDeficiency":
 				return { method: subscription.method, params: { type: "none" } };
 			case "Emulation.setIdleOverride":

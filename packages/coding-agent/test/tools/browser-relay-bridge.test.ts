@@ -1582,8 +1582,8 @@ describe("RelayBridge tab grouping", () => {
 
 		// The owner disconnects after the override has been replayed to the fresh
 		// root but before replay observes completion. Another holder keeps the tab
-		// attached, so recovery must restore the browser's default UA instead of
-		// leaving the stealth override orphaned on the shared root.
+		// attached, so recovery must clear the override with CDP's empty-userAgent
+		// sentinel instead of guessing browser defaults.
 		bridge.cdpClosed(ownerConn);
 		ack(bridge, ext2, "send");
 		await waitFor(() => ext2.rpcs("send").length === 2, "orphaned user-agent cleanup");
@@ -1591,7 +1591,7 @@ describe("RelayBridge tab grouping", () => {
 			"Network.setUserAgentOverride",
 			"Network.setUserAgentOverride",
 		]);
-		expect(ext2.rpcs("send")[1]!.params).toEqual({ userAgent: "test" });
+		expect(ext2.rpcs("send")[1]!.params).toEqual({ userAgent: "" });
 		ack(bridge, ext2, "send");
 		await flush();
 
@@ -2501,6 +2501,66 @@ describe("RelayBridge tab grouping", () => {
 		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual([
 			"Network.setBypassServiceWorker",
 			"Network.setBypassServiceWorker",
+			"Network.getCookies",
+		]);
+		ack(bridge, ext2, "send", { cookies: [] });
+		await flush();
+		expect(holder.messages.filter(message => message.id === commandId && "result" in message)).toHaveLength(1);
+	});
+
+	it("replays default background overrides across recovery and clears orphaned owners", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const owner = new FakeCdpSocket();
+		const ownerConn = bridge.cdpConnected(owner);
+		const ownerSession = await attachPage(bridge, ext, owner, ownerConn, 1);
+		const holder = new FakeCdpSocket();
+		const holderConn = bridge.cdpConnected(holder);
+		const holderSession = await attachPage(bridge, ext, holder, holderConn, 1);
+
+		bridge.cdpMessage(
+			ownerConn,
+			JSON.stringify({
+				id: ++msgSeq,
+				sessionId: ownerSession,
+				method: "Emulation.setDefaultBackgroundColorOverride",
+				params: { color: { r: 0, g: 0, b: 0, a: 0 } },
+			}),
+		);
+		await flush();
+		ack(bridge, ext, "send");
+		await flush();
+
+		bridge.extClosed(ext);
+		const ext2 = new FakeExtSocket();
+		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], { recoverableTabIds: [1] });
+		await waitFor(() => ext2.rpcs("attach").length === 1, "recovery attach RPC");
+		ack(bridge, ext2, "attach");
+		await waitFor(() => ext2.rpcs("send").length === 1, "default background replay");
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual(["Emulation.setDefaultBackgroundColorOverride"]);
+		expect(ext2.rpcs("send")[0]!.params).toEqual({ color: { r: 0, g: 0, b: 0, a: 0 } });
+
+		bridge.cdpClosed(ownerConn);
+		ack(bridge, ext2, "send");
+		await waitFor(() => ext2.rpcs("send").length === 2, "default background cleanup");
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual([
+			"Emulation.setDefaultBackgroundColorOverride",
+			"Emulation.setDefaultBackgroundColorOverride",
+		]);
+		expect(ext2.rpcs("send")[1]!.params).toBeUndefined();
+		ack(bridge, ext2, "send");
+		await flush();
+
+		const commandId = ++msgSeq;
+		bridge.cdpMessage(
+			holderConn,
+			JSON.stringify({ id: commandId, sessionId: holderSession, method: "Network.getCookies" }),
+		);
+		await flush();
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual([
+			"Emulation.setDefaultBackgroundColorOverride",
+			"Emulation.setDefaultBackgroundColorOverride",
 			"Network.getCookies",
 		]);
 		ack(bridge, ext2, "send", { cookies: [] });
