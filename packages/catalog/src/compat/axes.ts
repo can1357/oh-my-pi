@@ -256,6 +256,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	},
 	"context-promotion-target": { key: "contextPromotionTarget", set: "catalog", shape: "scalar" },
 	"context-window-floor": { key: "contextWindowFloor", set: "catalog", shape: "scalar" },
+	"cost-fallback": { key: "costFallback", set: "catalog", shape: "object" },
 	"cost-patch": { key: "costPatch", set: "catalog", shape: "object" },
 	"edit-revision": { key: "editRevision", set: "catalog", shape: "scalar" },
 	"input-modalities": { key: "inputModalities", set: "catalog", shape: "array", values: ["text", "image"] },
@@ -270,6 +271,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	priority: { key: "priority", set: "catalog", shape: "scalar" },
 	reasoning: { key: "reasoning", set: "catalog", shape: "scalar" },
 	"service-tier-cost": { key: "serviceTierCost", set: "catalog", shape: "object" },
+	"supports-tools-fallback": { key: "supportsToolsFallback", set: "catalog", shape: "scalar" },
 	"supports-tools": { key: "supportsTools", set: "catalog", shape: "scalar" },
 };
 

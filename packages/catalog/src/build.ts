@@ -33,8 +33,10 @@ function isInputModalities(value: unknown): value is ("text" | "image")[] {
  * corrections (`cost-patch`, `limits-patch`, `long-context-cost`,
  * `context-window-floor`) overwrite upstream values; selection metadata
  * (`priority`, `apply-patch-tool-type`, `service-tier-cost`,
- * `requires-cursor-tool-schema-projection`) is rule-owned;
- * `context-promotion-target` fills only when the spec left it unset.
+ * `requires-cursor-tool-schema-projection`) is rule-owned; fallback metadata
+ * (`cost-fallback`, `supports-tools-fallback`) applies only
+ * when discovery left that value unknown; `context-promotion-target` fills
+ * only when the spec left it unset.
  */
 function applyCatalogAssignments<TApi extends Api>(model: Model<TApi>, catalog: Record<string, unknown>): void {
 	const serviceTierCost = objectPayload(catalog.serviceTierCost);
@@ -67,7 +69,8 @@ function applyCatalogAssignments<TApi extends Api>(model: Model<TApi>, catalog: 
 /**
  * Applies reviewed catalog-data value corrections (`cost-patch`,
  * `limits-patch`, `long-context-cost`, `context-window-floor`,
- * `input-modalities`) onto an upstream-sourced spec. Applied by
+ * `input-modalities`) and fallbacks (`cost-fallback`,
+ * `supports-tools-fallback`) onto an upstream-sourced spec. Applied by
  * `buildModel` to every upstream-sourced spec; user-authored overrides are
  * recomposed after building by the override applicators, so explicit user
  * limits, pricing, and capability values still win.
@@ -80,6 +83,10 @@ export function applyCatalogCorrections(
 	if (typeof reasoning === "boolean") model.reasoning = reasoning;
 	const supportsTools = catalog.supportsTools;
 	if (typeof supportsTools === "boolean") model.supportsTools = supportsTools;
+	const supportsToolsFallback = catalog.supportsToolsFallback;
+	if (typeof supportsToolsFallback === "boolean" && model.supportsTools === undefined) {
+		model.supportsTools = supportsToolsFallback;
+	}
 	const longContext = objectPayload(catalog.longContext);
 	if (longContext !== undefined) {
 		const inputThreshold = numberField(longContext, "inputThreshold");
@@ -125,6 +132,18 @@ export function applyCatalogCorrections(
 		if (cacheRead !== undefined) model.cost.cacheRead = cacheRead;
 		const cacheWrite = numberField(patch, "cacheWrite");
 		if (cacheWrite !== undefined) model.cost.cacheWrite = cacheWrite;
+	}
+	const costFallback = objectPayload(catalog.costFallback);
+	if (costFallback !== undefined) {
+		model.cost = { ...model.cost };
+		const input = numberField(costFallback, "input");
+		if (input !== undefined && model.cost.input === 0) model.cost.input = input;
+		const output = numberField(costFallback, "output");
+		if (output !== undefined && model.cost.output === 0) model.cost.output = output;
+		const cacheRead = numberField(costFallback, "cache-read");
+		if (cacheRead !== undefined && model.cost.cacheRead === 0) model.cost.cacheRead = cacheRead;
+		const cacheWrite = numberField(costFallback, "cache-write");
+		if (cacheWrite !== undefined && model.cost.cacheWrite === 0) model.cost.cacheWrite = cacheWrite;
 	}
 	const limitsPatch = objectPayload(catalog.limitsPatch);
 	if (limitsPatch !== undefined) {

@@ -506,6 +506,36 @@ describe("European gateway provider catalog support", () => {
 		});
 	});
 
+	test("preserves explicit gateway pricing and tool denials over catalog fallbacks", async () => {
+		const fetchMock: FetchImpl = vi.fn(async () => {
+			return Response.json({
+				data: [
+					{
+						id: "Qwen/Qwen3-235B-A22B-Instruct-2507",
+						name: "Qwen3 235B A22B Instruct 2507",
+						pricing: { prompt: "0.00000125", completion: "0.0000045" },
+						supports_tools: false,
+					},
+				],
+			});
+		});
+
+		const models = await nebiusModelManagerOptions({
+			apiKey: "nebius-test-key",
+			fetch: fetchMock,
+		}).fetchDynamicModels?.();
+
+		expect(models?.[0]).toMatchObject({
+			id: "Qwen/Qwen3-235B-A22B-Instruct-2507",
+			provider: "nebius",
+			cost: {
+				input: 1.25,
+				output: 4.5,
+			},
+			supportsTools: false,
+		});
+	});
+
 	test("preserves known reasoning capability for reordered Claude gateway ids", async () => {
 		const fetchMock: FetchImpl = vi.fn(async () => {
 			return new Response(

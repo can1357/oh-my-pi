@@ -1,10 +1,11 @@
 // Reviewed fallback metadata for the European OpenAI-compatible gateways.
 // Static seeds retain only identity and transport; buildModel applies these
-// facts equally to offline seeds and sparse discovery rows.
+// facts equally to offline seeds and sparse discovery rows. Pricing and tool
+// capability rules are fallbacks so explicit provider metadata remains authoritative.
 
 provider "aki-io" {
 	models "kimi-k2.7-code-1100b" {
-		cost-patch {
+		cost-fallback {
 			input 0.86
 			output 3.0
 			cache-read 0.0
@@ -15,13 +16,13 @@ provider "aki-io" {
 			max-tokens 262144
 		}
 		reasoning #true
-		supports-tools #true
+		supports-tools-fallback #true
 	}
 }
 
 provider "melious" {
 	models "gpt-oss-120b" {
-		cost-patch {
+		cost-fallback {
 			input 0.0
 			output 0.0
 			cache-read 0.0
@@ -37,7 +38,7 @@ provider "melious" {
 
 provider "nebius" {
 	models "Qwen/Qwen3-235B-A22B-Instruct-2507" {
-		cost-patch {
+		cost-fallback {
 			input 0.2
 			output 0.6
 			cache-read 0.0
@@ -47,13 +48,13 @@ provider "nebius" {
 			context-window 262144
 			max-tokens 262144
 		}
-		supports-tools #true
+		supports-tools-fallback #true
 	}
 }
 
 provider "cortecs" {
 	models "gpt-oss-120b" {
-		cost-patch {
+		cost-fallback {
 			input 0.0
 			output 0.0
 			cache-read 0.0
@@ -69,7 +70,7 @@ provider "cortecs" {
 
 provider "eurouter" {
 	models "mistral-large-3" {
-		cost-patch {
+		cost-fallback {
 			input 0.0
 			output 0.0
 			cache-read 0.0
@@ -84,7 +85,7 @@ provider "eurouter" {
 
 provider "scaleway" {
 	models "glm-5.2" {
-		cost-patch {
+		cost-fallback {
 			input 0.0
 			output 0.0
 			cache-read 0.0
@@ -95,13 +96,13 @@ provider "scaleway" {
 			max-tokens 16000
 		}
 		reasoning #true
-		supports-tools #true
+		supports-tools-fallback #true
 	}
 }
 
 provider "opper" {
 	models "mistral/devstral-2512" {
-		cost-patch {
+		cost-fallback {
 			input 0.0
 			output 0.0
 			cache-read 0.0
@@ -111,13 +112,13 @@ provider "opper" {
 			context-window 262144
 			max-tokens 262144
 		}
-		supports-tools #true
+		supports-tools-fallback #true
 	}
 }
 
 provider "ovhcloud" {
 	models "gpt-oss-120b" {
-		cost-patch {
+		cost-fallback {
 			input 0.09
 			output 0.47
 			cache-read 0.0
@@ -128,6 +129,6 @@ provider "ovhcloud" {
 			max-tokens 131072
 		}
 		reasoning #true
-		supports-tools #true
+		supports-tools-fallback #true
 	}
 }
