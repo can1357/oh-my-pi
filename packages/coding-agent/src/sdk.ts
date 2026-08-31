@@ -233,6 +233,8 @@ import { getImageGenTools } from "./tools/image-gen";
 import { wrapToolWithMetaNotice } from "./tools/output-meta";
 import { isFilesystemSourcePath } from "./tools/path-utils";
 import { isAutoQaEnabled } from "./tools/report-tool-issue";
+import { disposeAllPsHosts } from "./tools/pshost-manager";
+import { isAutoQaEnabled } from "./tools/report-tool-issue";
 import { queueResolveHandler } from "./tools/resolve";
 import { USER_TODO_EDIT_CUSTOM_TYPE } from "./tools/todo";
 import { ttsTool } from "./tools/tts";
@@ -984,6 +986,14 @@ function registerEvalCleanup(): void {
 	postmortem.register("julia-cleanup", disposeAllJuliaKernelSessions);
 }
 
+let powershellCleanupRegistered = false;
+
+function registerPowerShellCleanup(): void {
+	if (powershellCleanupRegistered) return;
+	powershellCleanupRegistered = true;
+	postmortem.register("powershell-cleanup", disposeAllPsHosts);
+}
+
 export function customToolToDefinition(tool: CustomTool, sourcePath?: string): ToolDefinition {
 	const definition: ToolDefinition & { [TOOL_DEFINITION_MARKER]: true } = {
 		name: tool.name,
@@ -1290,6 +1300,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 
 	registerSshCleanup();
 	registerEvalCleanup();
+	registerPowerShellCleanup();
 
 	const settings = await (options.settings ??
 		options.settingsManager ??

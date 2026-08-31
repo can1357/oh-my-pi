@@ -11,6 +11,11 @@ import { MnemopiSessionState, setMnemopiSessionState } from "@oh-my-pi/pi-coding
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import {
+	acquirePsHost,
+	disposeAllPsHosts,
+	setPsHostSpawnerForTests,
+} from "@oh-my-pi/pi-coding-agent/tools/pshost-manager";
 import { logger, TempDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
@@ -237,5 +242,37 @@ describe("AgentSession concurrent disposal", () => {
 		expect(warn).toHaveBeenCalledWith("Session dispose subsystem failed during parallel teardown", {
 			error: "Error: async dispose failed",
 		});
+	});
+
+	it("disposes the session's pooled PowerShell host", async () => {
+		const sess = createSession();
+		const sessionId = sess.sessionManager.getSessionId();
+		const disposed: number[] = [];
+		let spawned = 0;
+		setPsHostSpawnerForTests(
+			async () => {
+				const pid = ++spawned;
+				return {
+					pid,
+					alive: true,
+					async dispose() {
+						disposed.push(pid);
+					},
+				} as never;
+			},
+		);
+		try {
+			// The primary and advisor receive distinct ToolSession ids, and both
+			// sidecars must be reaped on primary session teardown.
+			for (const id of [sessionId, `${sessionId}-advisor`]) {
+				const lease = await acquirePsHost({ sessionId: id, cwd: tempDir.path(), historyDepth: 5, idleTtlMs: 0 });
+				lease.release();
+			}
+			await sess.dispose();
+			expect(disposed).toEqual([1, 2]);
+		} finally {
+			setPsHostSpawnerForTests(null);
+			await disposeAllPsHosts();
+		}
 	});
 });

@@ -1,7 +1,7 @@
 /**
  * Tests for the ACP permission gate in AgentSession.
  *
- * Verifies that tools with a real ACP approval policy (bash/delete/move) are gated behind
+ * Verifies that tools with a real ACP approval policy (bash/powershell/delete/move) are gated behind
  * `ClientBridge.requestPermission`, while regular file-editing tools keep the same no-approval
  * behavior they have in the TUI.
  */
@@ -201,6 +201,22 @@ it("eval bridge dispatch uses the same ACP gate as a direct tool call", async ()
 
 	expect(permissionSpy).toHaveBeenCalledTimes(1);
 	expect(bashTool.executeCalls).toBe(1);
+});
+
+it("powershell is gated behind the ACP permission bridge like bash", async () => {
+	const psTool = makeFakeTool("powershell");
+	const bridge = makeBridge({ outcome: "selected", optionId: "allow_once", kind: "allow_once" });
+	const permissionSpy = spyOn(bridge, "requestPermission");
+	session = await createSession([psTool], bridge);
+
+	await session.setActiveToolsByName(["powershell"]);
+	const wrapped = session.agent.state.tools.find(t => t.name === "powershell");
+	expect(wrapped).toBeDefined();
+
+	await wrapped!.execute("call-ps", { command: "Get-ChildItem" }, undefined, undefined as never, undefined as never);
+
+	expect(permissionSpy).toHaveBeenCalledTimes(1);
+	expect(psTool.executeCalls).toBe(1);
 });
 
 it("explicit yolo approval mode skips the ACP permission gate", async () => {

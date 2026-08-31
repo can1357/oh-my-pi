@@ -25,6 +25,7 @@ import { grepToolRenderer } from "./grep";
 import { hubToolRenderer } from "./hub";
 import { inspectImageToolRenderer } from "./inspect-image-renderer";
 import { recallToolRenderer, reflectToolRenderer, retainToolRenderer } from "./memory-render";
+import { powershellToolRenderer } from "./powershell";
 import { readToolRenderer } from "./read";
 import { resolveRenderer } from "./resolve";
 import { thinkToolRenderer } from "./think";
@@ -123,6 +124,7 @@ export const toolRenderers: Record<string, ToolRenderer> = {
 	// through the `resolve` entry. Both devices carry the same ResolveDetails.
 	resolve: resolveRenderer as ToolRenderer,
 	reject: resolveRenderer as ToolRenderer,
+	powershell: powershellToolRenderer as ToolRenderer,
 	retain: retainToolRenderer as ToolRenderer,
 	recall: recallToolRenderer as ToolRenderer,
 	reflect: reflectToolRenderer as ToolRenderer,

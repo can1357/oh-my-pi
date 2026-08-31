@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `PsHost`, a persistent PowerShell host sidecar. One long-lived `pwsh` process owns a shared runspace, so variables, imported modules, `$LASTEXITCODE`, and the live result objects in `$global:__omp` persist across `run()` calls and stay inspectable via `Enter-PSHostProcess -Id <pid>`. The expensive process spawn is paid once per session (~1s); warm per-call cost is ~20–30 ms. All PowerShell output streams are forwarded — Success and Information (`Write-Host`) verbatim, Warning/Verbose/Debug/Error labeled and ANSI color-coded like the console — with each `chunk` frame tagged by its stream. Cancellation maps to typed `cancelled`/`timedOut` flags (consistent with `Shell`) and stops only the in-flight pipeline, leaving runspace state intact; a parent-PID watchdog terminates the whole `pwsh` process tree if the host's owner dies.
+
+### Fixed
+
+- Fixed path-invoked native/external-script commands that repeat the previous native's non-zero exit code being misclassified as successful PowerShell-only runs, while user assignments to `$LASTEXITCODE` no longer create false failures.
+
 ## [18.0.11] - 2026-08-29
 
 ### Fixed
@@ -140,7 +148,6 @@
 ### Fixed
 
 - Fixed an issue where shell-internal background jobs (such as `yes >/dev/null &`) could survive a one-shot shell session and consume CPU indefinitely after the command returned.
-
 ## [17.2.12] - 2026-08-08
 
 ### Changed

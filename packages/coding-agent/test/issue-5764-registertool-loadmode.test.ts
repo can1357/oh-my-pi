@@ -42,6 +42,14 @@ describe("issue #5764: registerTool loadMode default", () => {
 		expect(isMountableUnderXdev({ name: "lsp", loadMode: "discoverable" })).toBe(true);
 	});
 
+	it("never mounts powershell under xdev despite its discoverable loadMode", () => {
+		// Exec-capable tools must stay behind the ACP client permission proxy,
+		// which wraps top-level tools and dynamic mounts but not construction-time
+		// built-in devices: mounted, `write xd://powershell` would execute without
+		// the approval prompt the equivalent top-level call receives.
+		expect(isMountableUnderXdev({ name: "powershell", loadMode: "discoverable" })).toBe(false);
+	});
+
 	it("defaults omitted loadMode to essential for essential built-in names, discoverable otherwise", () => {
 		expect(defaultLoadModeForToolName("read")).toBe("essential");
 		expect(defaultLoadModeForToolName("bash")).toBe("essential");

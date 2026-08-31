@@ -22,6 +22,7 @@ import { BASH_DEFAULT_PREVIEW_LINES } from "../../tools/bash";
 import { formatDefaultToolExecution } from "../../tools/default-renderer";
 import { EVAL_DEFAULT_PREVIEW_LINES } from "../../tools/eval";
 import { isWaitingPollDetails } from "../../tools/hub";
+import { POWERSHELL_DEFAULT_PREVIEW_LINES } from "../../tools/powershell";
 import { formatStatusIcon, replaceTabs, resolveImageOptions } from "../../tools/render-utils";
 import {
 	type FirstResultViewportRepaint,
@@ -1437,6 +1438,13 @@ export class ToolExecutionComponent extends Container {
 			context.output = output;
 			context.expanded = this.#expanded;
 			context.previewLines = EVAL_DEFAULT_PREVIEW_LINES;
+		} else if (this.#toolName === "powershell" && this.#result) {
+			// Sanitized output + tail-window inputs; without this the renderer's
+			// no-context fallback would pin collapsed previews to the first lines.
+			const output = this.#getTextOutput().trimEnd();
+			context.output = output;
+			context.expanded = this.#expanded;
+			context.previewLines = POWERSHELL_DEFAULT_PREVIEW_LINES;
 		} else if (this.#toolName === "task") {
 			// Once a result snapshot exists the task renderer's `renderResult`
 			// draws every dispatched agent as a progress/result line, so tell

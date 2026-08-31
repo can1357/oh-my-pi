@@ -21,6 +21,7 @@ rust_shared_library(
         "data/*.bin.zst",
         "src/utok/claude/testdata/*.json",
         "fixtures/*.json",
+        "src/*.ps1",
     ]),
     crate_features = [],
     edition = "2024",

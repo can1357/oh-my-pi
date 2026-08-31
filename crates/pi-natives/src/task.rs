@@ -91,9 +91,31 @@ impl CancelToken {
 	/// Create a new cancel token from optional timeout and abort signal.
 	pub fn new(timeout_ms: Option<u32>, signal: Option<Unknown>) -> Self {
 		let mut result = Self { core: core_cancel::CancelToken::new(timeout_ms) };
-		if let Some(signal) = signal.and_then(|value| AbortSignal::from_unknown(value).ok()) {
-			let abort_token = result.emplace_abort_token();
-			signal.on_abort(move || abort_token.abort(AbortReason::Signal));
+		if let Some(raw_signal) = signal {
+			// `on_abort` below only fires on a FUTURE JS 'abort' event; a signal
+			// that was already aborted before this constructor ran (e.g. the
+			// caller cancelled while the JS side was still awaiting host
+			// acquisition) would otherwise never fire it, leaving the token
+			// permanently un-cancelled even though the caller gave up. Read the
+			// standard `AbortSignal.aborted` boolean synchronously first so that
+			// case is caught immediately instead of silently ignored.
+			// SAFETY: `raw_signal` is the AbortSignal object `napi` already
+			// validated when converting the call's arguments; every JS object
+			// value is representable as `Object`, so this cast cannot fail in a
+			// way that produces an invalid reference (a wrong-typed value would
+			// just make the later `get_named_property` lookup return an error).
+			let already_aborted = unsafe { raw_signal.cast::<Object>() }
+				.ok()
+				.and_then(|obj| obj.get_named_property::<bool>("aborted").ok())
+				.unwrap_or(false);
+			if let Ok(signal) = AbortSignal::from_unknown(raw_signal) {
+				let abort_token = result.emplace_abort_token();
+				if already_aborted {
+					abort_token.abort(AbortReason::Signal);
+				} else {
+					signal.on_abort(move || abort_token.abort(AbortReason::Signal));
+				}
+			}
 		}
 		result
 	}

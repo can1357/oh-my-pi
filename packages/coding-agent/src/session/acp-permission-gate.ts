@@ -7,6 +7,7 @@ import type { ClientBridgePermissionOption } from "./client-bridge";
 /** Tools that require user permission before execution when an ACP client is connected. */
 export const PERMISSION_REQUIRED_TOOLS: Record<string, true> = {
 	bash: true,
+	powershell: true,
 	edit: true,
 	delete: true,
 	move: true,
@@ -74,7 +75,7 @@ export function getPermissionIntent(
 	args: unknown,
 ): { toolName: string; title: string; paths?: string[]; cacheKey: string } | undefined {
 	const input = isRecord(args) ? args : {};
-	if (toolName === "bash") {
+	if (toolName === "bash" || toolName === "powershell") {
 		const command = stringProperty(input, "command")?.slice(0, 80);
 		return { toolName, title: command || toolName, cacheKey: toolName };
 	}

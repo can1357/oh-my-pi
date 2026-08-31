@@ -770,12 +770,19 @@ export class SessionTools {
 					if (!permissionIntent) {
 						return await target.execute(toolCallId, args as never, signal, onUpdate, ctx);
 					}
+					const isCommandTool = target.name === "bash" || target.name === "powershell";
 					const command =
-						target.name === "bash" && args && typeof args === "object" && !Array.isArray(args)
+						isCommandTool && args && typeof args === "object" && !Array.isArray(args)
 							? stringProperty(args, "command")
 							: undefined;
+					const commandPrompt = target.name === "powershell" ? "PS> " : "$ ";
 					const commandContent = command
-						? [{ type: "content" as const, content: { type: "text" as const, text: `$ ${command}` } }]
+						? [
+								{
+									type: "content" as const,
+									content: { type: "text" as const, text: `${commandPrompt}${command}` },
+								},
+							]
 						: undefined;
 					// Short-circuit on persisted decisions.
 					const persisted = this.#acpPermissionDecisions.get(permissionIntent.cacheKey);
@@ -801,7 +808,7 @@ export class SessionTools {
 								toolCallId,
 								toolName: target.name,
 								title: permissionIntent.title,
-								...(target.name === "bash" ? { kind: "execute" } : {}),
+								...(isCommandTool ? { kind: "execute" } : {}),
 								status: "pending",
 								rawInput: args,
 								...(commandContent ? { content: commandContent } : {}),

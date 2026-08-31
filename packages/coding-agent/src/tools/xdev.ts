@@ -52,13 +52,18 @@ import { renderError, ToolAbortError, ToolError } from "./tool-errors";
  * bash interceptor rules, and `web_search` is invoked directly by most models
  * (which have no notion of the `xd://` protocol) so hiding it behind dispatch
  * makes it unreachable in practice (issue #5973) — each loses its harness
- * integration or usability if hidden behind dispatch.
+ * integration or usability if hidden behind dispatch. `powershell` is
+ * exec-capable and must stay behind the ACP client permission proxy, which
+ * wraps top-level tools and dynamic mounts but not construction-time built-in
+ * devices — mounted, `write xd://powershell` would execute without the
+ * approval prompt the equivalent top-level `bash`/`powershell` call receives.
  */
 export const XDEV_KEEP_TOP_LEVEL: Record<string, true> = {
 	todo: true,
 	ask: true,
 	grep: true,
 	web_search: true,
+	powershell: true,
 };
 
 /**
