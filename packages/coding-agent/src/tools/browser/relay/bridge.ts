@@ -115,6 +115,16 @@ function mergeSubscriptionFieldSequences(
 	return merged;
 }
 
+function isNeutralNetworkConditions(params: Record<string, unknown> | undefined): boolean {
+	if (!params) return false;
+	return (
+		params.offline === false &&
+		params.latency === 0 &&
+		params.downloadThroughput === -1 &&
+		params.uploadThroughput === -1
+	);
+}
+
 function subscriptionClearedFields(
 	key: string,
 	params: Record<string, unknown> | undefined,
@@ -1122,7 +1132,6 @@ export class RelayBridge {
 			case "Emulation.setGeolocationOverride":
 			case "Page.setGeolocationOverride":
 			case "Emulation.setIdleOverride":
-			case "Network.emulateNetworkConditions":
 			case "Network.setUserAgentOverride":
 			case "Emulation.setUserAgentOverride":
 				// Persistent root setters survive as long as the shared debugger root.
@@ -1137,11 +1146,30 @@ export class RelayBridge {
 					sequence: ++this.#subscriptionSeq,
 				});
 				return;
+			case "Network.emulateNetworkConditions":
+				// Chrome keeps a single throttling profile on the shared root, so a
+				// neutral restore (online, no latency, unlimited throughput) resets the
+				// whole tab regardless of which session sent it. Treat it as a tab-wide
+				// clear so a departed owner's stale offline/throttled state cannot be
+				// revived from another session's journal after the neutral command won.
+				if (isNeutralNetworkConditions(msg.params)) {
+					this.#forgetTabSubscription(tab, subscriptionKey(msg.method));
+					return;
+				}
+				if (!ownerIsCurrent) return;
+				this.#rememberSessionSubscription(tab, subscriptionKey(msg.method), ownerSessionId, {
+					method: msg.method,
+					params: msg.params,
+					ownerSessionId,
+					sequence: ++this.#subscriptionSeq,
+				});
+				return;
 			default:
 				return;
 		}
 		if (!enabled) {
 			switch (msg.method) {
+				case "Target.setAutoAttach":
 				case "Target.setDiscoverTargets":
 				case "Page.setLifecycleEventsEnabled":
 				case "Network.setCacheDisabled":
