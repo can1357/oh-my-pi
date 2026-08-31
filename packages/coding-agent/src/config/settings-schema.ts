@@ -848,6 +848,17 @@ export const SETTINGS_SCHEMA = {
 				"Show the thinking level as a single icon on the model name instead of a separate ` · <level>` suffix.",
 		},
 	},
+	"statusLine.tokenRateExcludesTtft": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "appearance",
+			group: "Status Line",
+			label: "Token Rate Excludes TTFT",
+			description:
+				"Compute the token_rate segment from generation time only (request duration minus time-to-first-token), so long-prefill requests no longer depress the displayed tok/s.",
+		},
+	},
 	"tools.artifactSpillThreshold": {
 		type: "number",
 		default: 50,

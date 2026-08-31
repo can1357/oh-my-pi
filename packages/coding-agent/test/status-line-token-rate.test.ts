@@ -100,4 +100,46 @@ describe("token rate calculation", () => {
 		);
 		expect(rate).toBeNull();
 	});
+
+	it("excludes ttft from the denominator when excludeTtft is set", () => {
+		const base = assistantMessage();
+		const rate = calculateTokensPerSecond(
+			[assistantMessage({ usage: { ...base.usage, output: 120 }, duration: 2_000, ttft: 1_500 })],
+			false,
+			undefined,
+			{ excludeTtft: true },
+		);
+		expect(rate).toBe(240);
+	});
+
+	it("keeps the full duration as the denominator by default", () => {
+		const base = assistantMessage();
+		const rate = calculateTokensPerSecond(
+			[assistantMessage({ usage: { ...base.usage, output: 120 }, duration: 2_000, ttft: 1_500 })],
+			false,
+		);
+		expect(rate).toBe(60);
+	});
+
+	it("falls back to the full duration when ttft leaves no measurable generation window", () => {
+		const base = assistantMessage();
+		const rate = calculateTokensPerSecond(
+			[assistantMessage({ usage: { ...base.usage, output: 120 }, duration: 2_000, ttft: 1_995 })],
+			false,
+			undefined,
+			{ excludeTtft: true },
+		);
+		expect(rate).toBe(60);
+	});
+
+	it("ignores negative or non-numeric ttft values", () => {
+		const base = assistantMessage();
+		const rate = calculateTokensPerSecond(
+			[assistantMessage({ usage: { ...base.usage, output: 120 }, duration: 2_000, ttft: -5 })],
+			false,
+			undefined,
+			{ excludeTtft: true },
+		);
+		expect(rate).toBe(60);
+	});
 });

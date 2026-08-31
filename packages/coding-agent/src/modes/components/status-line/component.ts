@@ -504,6 +504,7 @@ export class StatusLineComponent implements Component {
 			sessionAccent: settings.get("statusLine.sessionAccent"),
 			transparent: settings.get("statusLine.transparent"),
 			compactThinkingLevel: settings.get("statusLine.compactThinkingLevel"),
+			tokenRateExcludesTtft: settings.get("statusLine.tokenRateExcludesTtft"),
 			contextLine: settings.get("statusLine.contextLine"),
 		};
 	}
@@ -1260,7 +1261,11 @@ export class StatusLineComponent implements Component {
 			// At least one worker is streaming — add the director's live rate
 			// only when it is itself streaming (a finalized last-turn rate would
 			// double-count and overstate throughput).
-			const mainRate = this.session.isStreaming ? calculateTokensPerSecond(this.session.state.messages, true) : 0;
+			const mainRate = this.session.isStreaming
+				? calculateTokensPerSecond(this.session.state.messages, true, undefined, {
+						excludeTtft: this.#resolveSettings().tokenRateExcludesTtft ?? false,
+					})
+				: 0;
 			return (mainRate ?? 0) + workerRate;
 		}
 
@@ -1291,7 +1296,9 @@ export class StatusLineComponent implements Component {
 			return null;
 		}
 
-		const rate = calculateTokensPerSecond(this.session.state.messages, this.session.isStreaming);
+		const rate = calculateTokensPerSecond(this.session.state.messages, this.session.isStreaming, undefined, {
+			excludeTtft: this.#resolveSettings().tokenRateExcludesTtft ?? false,
+		});
 		if (rate !== null) {
 			this.#lastTokensPerSecond = rate;
 			this.#lastTokensPerSecondTimestamp = lastAssistantTimestamp;

@@ -44,6 +44,9 @@ export interface StatusLineSettings {
 	 *  usage. `embedded` moves configured context segments into the annotated
 	 *  gauge as percentage and window labels. Box composer only. */
 	contextLine?: ContextLineMode;
+	/** Compute the `token_rate` segment from generation time only (request
+	 *  duration minus time-to-first-token) instead of the full request. */
+	tokenRateExcludesTtft?: boolean;
 }
 
 export type EffectiveStatusLineSettings = Required<
