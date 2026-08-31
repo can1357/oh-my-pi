@@ -284,6 +284,13 @@ class CdpConnection {
 /** Transport replacement is retryable and must not permanently ban a tab. */
 class ExtensionReplacedError extends Error {}
 
+function isExtensionTransportInterrupted(error: unknown): boolean {
+	return (
+		error instanceof ExtensionReplacedError ||
+		(error instanceof Error && error.message === "relay extension disconnected")
+	);
+}
+
 class TabState {
 	url: string;
 	title: string;
@@ -1387,7 +1394,7 @@ export class RelayBridge {
 				}
 			})
 			.catch(err => {
-				if (err instanceof ExtensionReplacedError) return;
+				if (isExtensionTransportInterrupted(err)) return;
 				tab.pendingSubscriptionReconcile = [];
 				this.#log("live subscription cleanup failed", {
 					tabId: tab.tabId,

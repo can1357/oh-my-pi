@@ -1557,6 +1557,56 @@ describe("RelayBridge tab grouping", () => {
 		expect(holder.messages.filter(message => message.id === commandId && "result" in message)).toHaveLength(1);
 	});
 
+	it("retries live owner cleanup after an ordinary extension disconnect", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })], { attachedTabIds: [1] });
+		const owner = new FakeCdpSocket();
+		const ownerConn = bridge.cdpConnected(owner);
+		const ownerSession = await attachPage(bridge, ext, owner, ownerConn, 1);
+		const holder = new FakeCdpSocket();
+		const holderConn = bridge.cdpConnected(holder);
+		const holderSession = await attachPage(bridge, ext, holder, holderConn, 1);
+
+		bridge.cdpMessage(
+			ownerConn,
+			JSON.stringify({
+				id: ++msgSeq,
+				sessionId: ownerSession,
+				method: "Fetch.enable",
+				params: { patterns: [{ urlPattern: "https://owner.example/*" }] },
+			}),
+		);
+		await flush();
+		ack(bridge, ext, "send");
+		await flush();
+
+		bridge.cdpClosed(ownerConn);
+		await waitFor(() => ext.pending("send").length === 1, "live cleanup send before disconnect");
+		expect(ext.pending("send").map(rpc => rpc.method)).toEqual(["Fetch.disable"]);
+
+		bridge.extClosed(ext);
+		await flush();
+
+		const reconnected = new FakeExtSocket();
+		connect(bridge, reconnected, [tab({ tabId: 1 })], { attachedTabIds: [1], recoverableTabIds: [1] });
+		await waitFor(() => reconnected.pending("send").length === 1, "retried live cleanup after reconnect");
+		expect(reconnected.pending("send").map(rpc => rpc.method)).toEqual(["Fetch.disable"]);
+		ack(bridge, reconnected, "send");
+		await flush();
+
+		const commandId = ++msgSeq;
+		bridge.cdpMessage(
+			holderConn,
+			JSON.stringify({ id: commandId, sessionId: holderSession, method: "Network.getCookies" }),
+		);
+		await flush();
+		expect(reconnected.rpcs("send").map(rpc => rpc.method)).toEqual(["Fetch.disable", "Network.getCookies"]);
+		ack(bridge, reconnected, "send", { cookies: [] });
+		await flush();
+		expect(holder.messages.filter(message => message.id === commandId && "result" in message)).toHaveLength(1);
+	});
+
 	it("drains reconciliation changes queued while an earlier cleanup RPC is in flight", async () => {
 		const bridge = new RelayBridge({});
 		const ext = new FakeExtSocket();
