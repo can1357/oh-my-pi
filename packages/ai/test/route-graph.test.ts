@@ -44,6 +44,26 @@ describe("RouteRegistry", () => {
 		expect(registry.generation).toBe(1);
 	});
 
+	it("compiles suffix edges from each fallback sibling", () => {
+		const registry = new RouteRegistry(() => undefined);
+		registry.register({
+			id: "abc",
+			root: {
+				type: "fallback",
+				on: ["provider_unavailable"],
+				children: [
+					{ type: "target", model: "A" },
+					{ type: "target", model: "B" },
+					{ type: "target", model: "C" },
+				],
+			},
+		});
+		const route = registry.resolve("abc");
+		expect(route?.fallbackByTarget?.A?.provider_unavailable).toEqual(["B", "C"]);
+		expect(route?.fallbackByTarget?.B?.provider_unavailable).toEqual(["C"]);
+		expect(route?.fallbackByTarget?.C?.provider_unavailable).toBeUndefined();
+	});
+
 	it("register compiles a quota fallback list", () => {
 		const registry = new RouteRegistry(id => (id === "gpt-5" || id === "gpt-4o" ? fakeModel(id) : undefined));
 		registry.register({
@@ -86,26 +106,29 @@ describe("RouteRegistry", () => {
 		expect(registry.resolve("cyclic")).toBeUndefined();
 	});
 
-	it("allows sibling reuse of the same model id under a fallback", () => {
+	it("rejects ambiguous cross-branch reuse of the same model id", () => {
 		const registry = new RouteRegistry(() => undefined);
-		registry.register({
-			id: "sibling-reuse",
-			root: {
-				type: "fallback",
-				on: ["credential_quota"],
-				children: [
-					{ type: "target", model: "a" },
-					{
-						type: "fallback",
-						on: ["context_overflow"],
-						children: [{ type: "target", model: "a" }],
-					},
-				],
-			},
-		});
-		const route = registry.resolve("sibling-reuse");
-		expect(route?.targets).toEqual(["a", "a"]);
-		expect(registry.generation).toBe(2);
+		expect(() =>
+			registry.register({
+				id: "sibling-reuse",
+				root: {
+					type: "fallback",
+					on: ["credential_quota"],
+					children: [
+						{ type: "target", model: "a" },
+						{
+							type: "fallback",
+							on: ["context_overflow"],
+							children: [
+								{ type: "target", model: "a" },
+								{ type: "target", model: "b" },
+							],
+						},
+					],
+				},
+			}),
+		).toThrow(/ambiguous cross-branch reuse/i);
+		expect(registry.generation).toBe(1);
 	});
 
 	it("rejects a nested path that repeats a target model id", () => {
@@ -218,33 +241,6 @@ describe("RouteRegistry", () => {
 		expect(route?.fallbackByTarget?.A?.context_overflow).toEqual(["B"]);
 		expect(route?.fallbackByTarget?.C?.context_overflow).toEqual(["D"]);
 		expect(route?.fallbackByTarget?.A?.context_overflow ?? []).not.toContain("D");
-	});
-
-	it("keeps nested overflow conditional on entry target", () => {
-		const registry = new RouteRegistry(() => undefined);
-		registry.register({
-			id: "nested-entry",
-			root: {
-				type: "fallback",
-				on: ["credential_quota"],
-				children: [
-					{ type: "target", model: "A" },
-					{
-						type: "fallback",
-						on: ["context_overflow"],
-						children: [
-							{ type: "target", model: "B" },
-							{ type: "target", model: "C" },
-						],
-					},
-					{ type: "target", model: "D" },
-				],
-			},
-		});
-		const route = registry.resolve("nested-entry");
-		expect(route?.fallbackByTarget?.A?.credential_quota).toEqual(["B", "D"]);
-		expect(route?.fallbackByTarget?.A?.context_overflow).toBeUndefined();
-		expect(route?.fallbackByTarget?.B?.context_overflow).toEqual(["C"]);
 	});
 
 	it("preserves provider-qualified model ids as the compiled target", () => {

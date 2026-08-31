@@ -29,6 +29,7 @@ export class StreamCommitGate {
 	#maxPreludeBytes: number;
 	#prelude: Uint8Array[] = [];
 	#preludeBytes = 0;
+	#sawSuccessfulTerminal = false;
 
 	constructor(maxPreludeBytes: number = DEFAULT_MAX_PRELUDE_BYTES) {
 		this.#maxPreludeBytes = maxPreludeBytes;
@@ -38,12 +39,18 @@ export class StreamCommitGate {
 		return this.#state;
 	}
 
+	/** True once a successful terminal (`response.completed` / `incomplete`) was observed. */
+	get sawSuccessfulTerminal(): boolean {
+		return this.#sawSuccessfulTerminal;
+	}
+
 	/** Reset to probing for the next fallback attempt (clears prelude). */
 	reset(): void {
 		this.#state = "probing";
 		this.#bytes = 0;
 		this.#prelude = [];
 		this.#preludeBytes = 0;
+		this.#sawSuccessfulTerminal = false;
 	}
 
 	classifyAndObserve(eventType: string, byteLength: number): StreamCommitState {
@@ -58,6 +65,7 @@ export class StreamCommitGate {
 		}
 
 		const kind = classifyCommitEvent(eventType);
+		if (kind === "terminal-success") this.#sawSuccessfulTerminal = true;
 		if (this.#state === "committed") {
 			// Post-commit, every terminal event ends the stream's failover
 			// eligibility — including `response.failed` (retryable elsewhere),
@@ -190,6 +198,13 @@ export function holdSseUntilCommit(
 					pending = next.rest;
 					next = nextSseFrame(pending);
 					if (state === "terminated") {
+						const kind = classifyCommitEvent(eventType);
+						if (kind === "terminal-success") {
+							// Empty/metadata-only successful completions still need held frames flushed.
+							committed = true;
+							for (const held of gate.takePrelude() ?? []) controller.enqueue(held);
+							return;
+						}
 						// Dead attempt: its held frames belong to it and are never
 						// forwarded. The failover loop catches PreludeAbortedError,
 						// discards them, and dispatches a replacement attempt.

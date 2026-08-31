@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Fixed suffix fallback edges, rejected ambiguous cross-branch target reuse, distinguished failed terminals for probe settlement, and released reservations on abort.
 - Fixed nested route-graph fallback edges retaining their entry target via `fallbackByTarget` so unentered branches cannot steal failover.
 - Fixed caller-owned Responses continuations forcing `store: true`, and settled successful pi-native streaming probes without a commit gate.
 
