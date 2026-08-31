@@ -82,16 +82,12 @@ const GATEWAY_INVARIANT_PATTERN = /\bgateway_terminal\b|\binternal invariant\b/i
 export function classifyGatewayError(err: unknown): GatewayErrorClassification {
 	const message = err instanceof Error ? err.message : String(err);
 
+	// Structural AbortError stays first. Free-text "aborted" must not beat an
+	// authoritative provider status (e.g. "HTTP 503: upstream request aborted").
 	if (err instanceof Error && err.name === "AbortError") {
 		return withOwnerDisposition(err, { status: 499, type: "request_aborted", message });
 	}
-	if (/\baborted\b|\babort signal\b/i.test(message)) {
-		return withOwnerDisposition(err, { status: 499, type: "request_aborted", message });
-	}
 
-	// Honour an explicit numeric `status` property on the thrown error. This
-	// sits below the abort checks on purpose: acting on a stale transport
-	// status after the client cancelled could trigger post-abort failover.
 	let statusProp: number | undefined;
 	if (typeof err === "object" && err !== null && "status" in err && typeof err.status === "number") {
 		statusProp = err.status | 0;
@@ -105,6 +101,10 @@ export function classifyGatewayError(err: unknown): GatewayErrorClassification {
 	// don't trip on incidental three-digit numbers ("took 200ms").
 	const embedded = extractEmbeddedStatus(message);
 	if (embedded !== undefined) return withOwnerDisposition(err, bucketStatus(embedded, message));
+
+	if (/\baborted\b|\babort signal\b/i.test(message)) {
+		return withOwnerDisposition(err, { status: 499, type: "request_aborted", message });
+	}
 
 	if (
 		// Match rate-limit phrasings before auth wording: some providers
@@ -169,11 +169,12 @@ function classifyOwnerDisposition(
 ): { owner: GatewayErrorOwner; disposition: GatewayErrorDisposition } {
 	const { status, type, message } = http;
 
-	if (
-		status === 499 ||
-		(err instanceof Error && err.name === "AbortError") ||
-		/\baborted\b|\babort signal\b/i.test(message)
-	) {
+	if (status === 499 || (err instanceof Error && err.name === "AbortError")) {
+		return { owner: "cancelled", disposition: "cancelled" };
+	}
+	// Free-text "aborted" only cancels when there is no authoritative provider
+	// status. A 503 body that mentions "aborted" must stay provider-failoverable.
+	if (status <= 0 && /\baborted\b|\babort signal\b/i.test(message)) {
 		return { owner: "cancelled", disposition: "cancelled" };
 	}
 

@@ -620,6 +620,50 @@ function releaseTurnOnStreamEnd(
 	});
 }
 
+
+function payloadContainsOpenAIFileId(value: unknown): boolean {
+	if (value === null || value === undefined) return false;
+	if (typeof value === "string") return false;
+	if (Array.isArray(value)) return value.some(payloadContainsOpenAIFileId);
+	if (typeof value === "object") {
+		const record = value as Record<string, unknown>;
+		if (typeof record.file_id === "string" && record.file_id.length > 0) return true;
+		return Object.values(record).some(payloadContainsOpenAIFileId);
+	}
+	return false;
+}
+
+function targetRejectsOpenAIImageFileReferences(
+	routeLabel: string,
+	model: Model<Api>,
+	messages: Context["messages"],
+	options?: { providerPayload?: unknown },
+): boolean {
+	if (routeLabel !== "openai-responses") return false;
+	const supports =
+		model.api === "openai-responses" ||
+		model.api === "azure-openai-responses" ||
+		model.api === "openai-codex-responses";
+	if (supports) return false;
+	if (options?.providerPayload !== undefined && payloadContainsOpenAIFileId(options.providerPayload)) {
+		return true;
+	}
+	return messages.some(message => {
+		if (
+			message.role === "toolResult" &&
+			message.content.some(
+				block => block.type === "image" && block.providerFile?.provider === "openai" && block.providerFile.id,
+			)
+		) {
+			return true;
+		}
+		if ("providerPayload" in message && payloadContainsOpenAIFileId(message.providerPayload)) {
+			return true;
+		}
+		return false;
+	});
+}
+
 async function handleFormatEndpoint(
 	route: { module: FormatModule; label: string },
 	bootOpts: AuthGatewayBootOptions,
@@ -690,46 +734,11 @@ async function handleFormatEndpoint(
 	}
 	if (controller.signal.aborted) return clientClosedResponse(route);
 
-function targetRejectsOpenAIImageFileReferences(
-	routeLabel: string,
-	model: Model<Api>,
-	messages: Context["messages"],
-): boolean {
-	if (routeLabel !== "openai-responses") return false;
-	const supports =
-		model.api === "openai-responses" ||
-		model.api === "azure-openai-responses" ||
-		model.api === "openai-codex-responses";
-	if (supports) return false;
-	return messages.some(
-		message =>
-			message.role === "toolResult" &&
-			message.content.some(
-				block => block.type === "image" && block.providerFile?.provider === "openai" && block.providerFile.id,
-			),
-	);
-}
-
-
-	const supportsOpenAIImageFileReferences =
-		model.api === "openai-responses" ||
-		model.api === "azure-openai-responses" ||
-		model.api === "openai-codex-responses";
-	if (
-		route.label === "openai-responses" &&
-		!supportsOpenAIImageFileReferences &&
-		parsed.context.messages.some(
-			message =>
-				message.role === "toolResult" &&
-				message.content.some(
-					block => block.type === "image" && block.providerFile?.provider === "openai" && block.providerFile.id,
-				),
-		)
-	) {
+	if (targetRejectsOpenAIImageFileReferences(route.label, model, parsed.context.messages, parsed.options)) {
 		return route.module.formatError(
 			400,
 			"invalid_request_error",
-			"OpenAI image file IDs in tool outputs require a Responses-compatible upstream model",
+			"OpenAI image file IDs require a Responses-compatible upstream model",
 		);
 	}
 
