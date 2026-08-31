@@ -323,7 +323,8 @@ The host emits the review only for a mode-derived native prompt. Native tool or 
 
 - `approve` resolves the eligible prompt positively and suppresses the native selector;
 - `deny` vetoes the call at the extension-review layer, preserves its optional `reason`, and does not show the native selector;
-- `escalate` makes no decision and continues through the ordinary native selector.
+- `escalate` makes no decision and continues through the ordinary native selector;
+- input that is not a plain object/array tree (for example nested `Map`, `Set`, or `Date` values) cannot be frozen safely, so review escalates without dispatching handlers.
 
 The event and its nested `input` are immutable. `input` is the final owned tool input after host and `tool_call` transformations; native policy, prompt formatting, review, and execution all use that value. Review results cannot rewrite it.
 

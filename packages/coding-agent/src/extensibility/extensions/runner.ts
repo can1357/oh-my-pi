@@ -1552,9 +1552,10 @@ export class ExtensionRunner {
 	 *
 	 * Review of an eligible mode-derived approval prompt. A valid deny takes
 	 * precedence over escalation; escalation includes malformed results, throws,
-	 * timeouts, and cancellation. Approval is returned only when at least one
-	 * handler participates and every handler returns exactly a valid approve
-	 * result. No handlers escalate to the ordinary native approval path.
+	 * timeouts, cancellation, and non-plain (mutably cloneable) input values.
+	 * Approval is returned only when at least one handler participates and every
+	 * handler returns exactly a valid approve result. No handlers escalate to the
+	 * ordinary native approval path.
 	 */
 	async emitToolApprovalReview(
 		event: ToolApprovalReviewEvent,
