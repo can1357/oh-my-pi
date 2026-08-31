@@ -31,6 +31,8 @@ import type {
 	RpcHostToolDefinition,
 	RpcHostToolResult,
 	RpcHostToolUpdate,
+	RpcRecap,
+	RpcRecapUpdateFrame,
 	RpcResponse,
 	RpcSessionState,
 	RpcSubagentEventFrame,
@@ -99,6 +101,7 @@ export type RpcSubagentLifecycleListener = (payload: RpcSubagentLifecycleFrame["
 export type RpcSubagentProgressListener = (payload: RpcSubagentProgressFrame["payload"]) => void;
 export type RpcSubagentEventListener = (payload: RpcSubagentEventFrame["payload"]) => void;
 export type RpcAvailableCommandsUpdateListener = (commands: RpcAvailableSlashCommand[]) => void;
+export type RpcRecapUpdateListener = (recap: RpcRecap | null) => void;
 
 export interface RpcClientToolContext<TDetails = unknown> {
 	toolCallId: string;
@@ -213,6 +216,17 @@ function isRpcAvailableCommandsUpdateFrame(value: unknown): value is RpcAvailabl
 	return value.type === "available_commands_update" && Array.isArray(value.commands);
 }
 
+function isRpcRecapUpdateFrame(value: unknown): value is RpcRecapUpdateFrame {
+	if (!isRecord(value) || value.type !== "recap_update") return false;
+	if (value.recap === null) return true;
+	return (
+		isRecord(value.recap) &&
+		typeof value.recap.text === "string" &&
+		value.recap.trigger === "idle" &&
+		typeof value.recap.timestamp === "number"
+	);
+}
+
 function isRpcHostToolCallRequest(value: unknown): value is RpcHostToolCallRequest {
 	if (!isRecord(value)) return false;
 	return (
@@ -276,6 +290,7 @@ export class RpcClient {
 	#subagentProgressListeners = new Set<RpcSubagentProgressListener>();
 	#subagentEventListeners = new Set<RpcSubagentEventListener>();
 	#availableCommandsUpdateListeners = new Set<RpcAvailableCommandsUpdateListener>();
+	#recapUpdateListeners = new Set<RpcRecapUpdateListener>();
 	#pendingRequests: Map<string, { resolve: (response: RpcResponse) => void; reject: (error: Error) => void }> =
 		new Map();
 	#customTools: RpcClientCustomTool[] = [];
@@ -565,6 +580,11 @@ export class RpcClient {
 	onAvailableCommandsUpdate(listener: RpcAvailableCommandsUpdateListener): () => void {
 		this.#availableCommandsUpdateListeners.add(listener);
 		return () => this.#availableCommandsUpdateListeners.delete(listener);
+	}
+
+	onRecapUpdate(listener: RpcRecapUpdateListener): () => void {
+		this.#recapUpdateListeners.add(listener);
+		return () => this.#recapUpdateListeners.delete(listener);
 	}
 
 	/**
@@ -1106,6 +1126,13 @@ export class RpcClient {
 		if (isRpcAvailableCommandsUpdateFrame(data)) {
 			for (const listener of this.#availableCommandsUpdateListeners) {
 				listener(data.commands);
+			}
+			return;
+		}
+
+		if (isRpcRecapUpdateFrame(data)) {
+			for (const listener of this.#recapUpdateListeners) {
+				listener(data.recap);
 			}
 			return;
 		}

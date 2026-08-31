@@ -13,6 +13,7 @@
 ### Changed
 
 - Disabled `hashline` edit mode for Kimi, Mimo, DeepSeek Flash, and Stepfun models for stability
+- Added idle recap updates to JSONL RPC sessions, including reconnect state and bundled TypeScript/Python client listeners ([#10085](https://github.com/can1357/oh-my-pi/pull/10085) by [@rhlsthrm](https://github.com/rhlsthrm)).
 
 ### Fixed
 
