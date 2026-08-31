@@ -14,6 +14,7 @@
 ### Changed
 
 - Disabled `hashline` edit mode for Kimi, Mimo, DeepSeek Flash, and Stepfun models for stability
+- Pressing `n` on the ask dialog's "Other" row now opens the custom-answer prompt, so the typed text is the answer itself
 
 ### Fixed
 

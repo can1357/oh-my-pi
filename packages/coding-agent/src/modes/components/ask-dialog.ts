@@ -287,7 +287,6 @@ function clearNoteUnlessRow(state: QuestionState, rowKey: string): void {
 
 function noteForSubmittedAnswer(question: ExtensionAskDialogQuestion, state: QuestionState): string | undefined {
 	if (state.note === undefined || state.noteRowKey === undefined) return undefined;
-	if (state.noteRowKey === "other") return state.customInput !== undefined ? state.note : undefined;
 	const match = /^option:(\d+)$/.exec(state.noteRowKey);
 	const optionIndex = match?.[1] === undefined ? Number.NaN : Number.parseInt(match[1], 10);
 	const option = Number.isInteger(optionIndex) ? question.options[optionIndex] : undefined;
@@ -657,9 +656,18 @@ export class AskDialogComponent implements Component {
 			return `Enter submit · ↑/↓ scroll ·${scroll} ${cancel}`;
 		}
 		const question = this.#questions[this.#currentQuestionIndex()];
+		const state = this.#states[this.#currentQuestionIndex()];
+		const onOtherRow =
+			question !== undefined &&
+			state !== undefined &&
+			this.#questionRows(question)[state.cursorIndex]?.kind === "other";
 		// Enter advances in multi-question dialogs and submits single-question ones.
 		const enterAction = this.#questions.length > 1 ? "next" : "submit";
-		const action = question?.multi ? `Space toggle · Enter ${enterAction}` : "Enter select · n note";
+		const action = question?.multi
+			? `Space toggle · Enter ${enterAction}`
+			: onOtherRow
+				? "Enter answer"
+				: "Enter select · n note";
 		const tabs = this.#hasSubmitTab() ? " · Tab/←/→" : "";
 		const expand = this.#expandHint();
 		if (this.#questionCanPage && indicator) {
@@ -725,16 +733,15 @@ export class AskDialogComponent implements Component {
 		const rowItem = rows[state.cursorIndex];
 		if (!rowItem) return;
 		if (keyData === "n" || keyData === "N") {
-			if (rowItem.kind === "option" || rowItem.kind === "other") {
-				void this.#promptForNote(question, state, rowItem);
-			}
+			if (rowItem.kind === "other") void this.#promptForCustomInput(question, state);
+			else void this.#promptForNote(question, state, rowItem);
 			return;
 		}
 		const isEnter = matchesKey(keyData, "enter") || matchesKey(keyData, "return") || keyData === "\n";
 		const isSpace = matchesKey(keyData, "space") || keyData === " ";
 		if (!isEnter && !(question.multi && isSpace)) return;
 		if (rowItem.kind === "other") {
-			void this.#promptForCustomInput(question, state, rowItem);
+			void this.#promptForCustomInput(question, state);
 			return;
 		}
 		const option = question.options[rowItem.optionIndex ?? -1];
@@ -796,11 +803,7 @@ export class AskDialogComponent implements Component {
 		this.#requestRender();
 	}
 
-	async #promptForCustomInput(
-		question: ExtensionAskDialogQuestion,
-		state: QuestionState,
-		rowItem: QuestionRow,
-	): Promise<void> {
+	async #promptForCustomInput(question: ExtensionAskDialogQuestion, state: QuestionState): Promise<void> {
 		this.#promptActive = true;
 		try {
 			const input = await this.callbacks.onPrompt(
@@ -811,13 +814,12 @@ export class AskDialogComponent implements Component {
 			if (input.trim() === "") {
 				// Submitting an empty value unselects the custom answer.
 				state.customInput = undefined;
-				clearNoteIfRow(state, rowItem.key);
 				return;
 			}
 			state.customInput = input;
 			if (!question.multi) {
 				state.selectedOptions.clear();
-				clearNoteUnlessRow(state, rowItem.key);
+				clearNote(state);
 				this.#advanceAfterQuestion();
 			}
 		} finally {
