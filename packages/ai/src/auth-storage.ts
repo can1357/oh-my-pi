@@ -2331,20 +2331,31 @@ export class AuthStorage {
 			});
 
 		if (credentials.length === 0) return undefined;
-		if (credentials.length === 1) return credentials[0];
-
 		const providerKey = this.#getProviderTypeKey(provider, "api_key");
+		const tryVendApiKeySelection = (selection: ApiKeySelection): ApiKeySelection | undefined => {
+			if (!this.#isCredentialBlocked(provider, providerKey, selection.index)) return selection;
+			// Blocked API-key rows need the same request-owned probe lease as OAuth.
+			if (!options?.requestId) return undefined;
+			const blockedId = this.#getStoredCredentials(provider)[selection.index]?.id;
+			if (blockedId === undefined) return undefined;
+			const probeScope = "";
+			if (!this.#acquireOrReuseQuotaProbeLease(options.requestId, blockedId, probeScope)) {
+				return undefined;
+			}
+			return selection;
+		};
+		if (credentials.length === 1) return tryVendApiKeySelection(credentials[0]!);
+
 		const order = this.#getCredentialOrder(providerKey, sessionId, credentials.length);
 		const fallback = credentials[order[0]];
 		const strategy = this.#rankingStrategyResolver?.(provider);
 		if (!strategy) {
 			for (const idx of order) {
 				const candidate = credentials[idx];
-				if (!this.#isCredentialBlocked(provider, providerKey, candidate.index)) {
-					return candidate;
-				}
+				const vended = tryVendApiKeySelection(candidate);
+				if (vended) return vended;
 			}
-			return fallback;
+			return fallback ? tryVendApiKeySelection(fallback) : undefined;
 		}
 
 		const rankingContext: CredentialRankingContext = { modelId: options?.modelId };
@@ -2361,7 +2372,8 @@ export class AuthStorage {
 			blockScope,
 			blockScopes,
 		});
-		return candidates[0]?.selection ?? fallback;
+		const ranked = candidates[0]?.selection ?? fallback;
+		return ranked ? tryVendApiKeySelection(ranked) : undefined;
 	}
 
 	#clearProviderSessionCredentialCache(provider: string): void {

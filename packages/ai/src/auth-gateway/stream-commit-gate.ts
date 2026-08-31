@@ -230,9 +230,8 @@ export function holdSseUntilCommit(
 						continue;
 					}
 				}
-				if (committed) {
-					controller.enqueue(chunk);
-				}
+				// Do not enqueue `chunk` again: bufferPrelude already held it and
+				// takePrelude() drained it when we committed in this transform.
 			},
 			flush(controller) {
 				// Truncated tail without commit: drain the buffered prelude as a

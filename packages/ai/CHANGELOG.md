@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Require probe leases for blocked API-key selections, avoid double-forwarding the commit chunk, and skip settlement waits on failed stream release.
 - Persist Retry-After provenance in SQLite credential blocks, compare OAuth orgId on equality, and observe remaining SSE frames in the commit chunk.
 - Fixed OpenAI Responses continuation pairing a caller-supplied `previous_response_id` with an internally computed delta from a different stored response, and restricted stale-baseline recovery to internally owned chain ids so a stale caller id can no longer silently drop prior context.
 - Auth gateway observes Responses SSE through a StreamCommitGate: metadata-only preludes stay failover-eligible, the first output event or 4 MiB cap commits, and post-commit terminals (`response.completed`/`response.failed`/`response.incomplete`/`response.error`) end failover eligibility instead of being misread as output.
