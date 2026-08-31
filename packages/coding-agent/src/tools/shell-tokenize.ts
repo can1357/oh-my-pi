@@ -450,6 +450,10 @@ export function resolveLeadingCdChain(command: string): { path?: string; unresol
 		rest = cd.rest.trim();
 	}
 	if (sawCd && lastPath === undefined) return { unresolvable: true };
+	// A later `cd` after non-cd setup (`echo x && cd /tmp && bun test`) is not
+	# captured by the leading-only loop — treat as unresolvable so the latch
+	# cannot trust the structured/session cwd.
+	if (commandWordCdIn(rest)) return { unresolvable: true };
 	if (lastPath !== undefined) return { path: lastPath };
 	return {};
 }
