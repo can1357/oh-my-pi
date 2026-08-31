@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Reject RFC1918 172.16/12 discovery hosts, preserve stateful ownership when the primary is missing, recheck OpenAI file_id compat per target, require requestId for probe leases, and reset sibling exhaustion per fallback target.
 - Reject private IPv6 discovery hosts, keep incompatible previous_response_id fallbacks disposition-scoped, and flush metadata-only SSE preludes at EOF.
 - Honor Retry-After blocks on the allow-blocked credential pass by still requiring a probe lease.
 - Let DRR deficit outrank weight in both directions so fair-share debt can repay.

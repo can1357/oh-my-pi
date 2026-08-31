@@ -5695,18 +5695,19 @@ export class AuthStorage {
 						!this.#isCredentialBlocked(provider, providerKey, index, blockScopes ?? blockScope),
 				);
 				if (hasUsableSibling) return undefined;
+				// Probe leases only release via request-keyed #inflightProbes — never
+				// acquire one without a requestId that can settle or clear it.
+				if (!options?.requestId) return undefined;
 				const held = this.#activeTurnReservation(blockedId, this.getCredentialIncarnation(blockedId));
-				if (held && held.requestId !== options?.requestId) return undefined;
+				if (held && held.requestId !== options.requestId) return undefined;
 				const lease = this.tryAcquireQuotaProbeLease(blockedId, probeScope);
 				if (!lease) return undefined;
-				if (options?.requestId) {
-					this.clearQuotaProbe(options.requestId);
-					this.#inflightProbes.set(options.requestId, {
-						credentialId: blockedId,
-						blockScope: probeScope,
-						leaseId: lease,
-					});
-				}
+				this.clearQuotaProbe(options.requestId);
+				this.#inflightProbes.set(options.requestId, {
+					credentialId: blockedId,
+					blockScope: probeScope,
+					leaseId: lease,
+				});
 			} else {
 				// allowBlocked path: every blocked credential still needs the single-flight
 				// probe lease (Retry-After and ordinary hard cooldowns alike).

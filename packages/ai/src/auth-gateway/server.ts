@@ -694,28 +694,29 @@ async function handleFormatEndpoint(
 	}
 	if (controller.signal.aborted) return clientClosedResponse(route);
 
-	const supportsOpenAIImageFileReferences =
-		providerOrigin !== undefined &&
-		(model.api === "openai-responses" ||
-			model.api === "azure-openai-responses" ||
-			model.api === "openai-codex-responses");
-	if (
-		route.label === "openai-responses" &&
-		providerOrigin !== undefined &&
-		!supportsOpenAIImageFileReferences &&
-		parsed.context.messages.some(
-			message =>
-				message.role === "toolResult" &&
-				message.content.some(
-					block => block.type === "image" && block.providerFile?.provider === "openai" && block.providerFile.id,
-				),
-		)
-	) {
+	const requestHasOpenAIImageFileReferences = parsed.context.messages.some(
+		message =>
+			message.role === "toolResult" &&
+			message.content.some(
+				block => block.type === "image" && block.providerFile?.provider === "openai" && block.providerFile.id,
+			),
+	);
+	const openaiImageFileCompatError = (candidate: Model<Api>): Response | undefined => {
+		if (route.label !== "openai-responses" || !requestHasOpenAIImageFileReferences) return undefined;
+		const supportsOpenAIImageFileReferences =
+			candidate.api === "openai-responses" ||
+			candidate.api === "azure-openai-responses" ||
+			candidate.api === "openai-codex-responses";
+		if (supportsOpenAIImageFileReferences) return undefined;
 		return route.module.formatError(
 			400,
 			"invalid_request_error",
 			"OpenAI image file IDs in tool outputs require a Responses-compatible upstream model",
 		);
+	};
+	{
+		const incompat = openaiImageFileCompatError(model);
+		if (incompat) return incompat;
 	}
 
 	// Sticky credential id: honour the client's `prompt_cache_key` when
@@ -741,7 +742,7 @@ async function handleFormatEndpoint(
 	let pendingFallback: string | undefined;
 	let lastClassified: GatewayErrorClassification | undefined;
 	let siblingsExhausted = false;
-	const attemptCap = compiled.targets.length + 1;
+	const attemptCap = compiled.targets.length * 2 + 1;
 
 	const stateNow = (): ExecutionState =>
 		conductorExecutionState(
@@ -783,6 +784,8 @@ async function handleFormatEndpoint(
 			return true;
 		}
 		if (action.type === "fallback_target") {
+			// New target gets a fresh sibling-credential budget.
+			siblingsExhausted = false;
 			pendingFallback = action.targetModelId;
 			fallbackCount += 1;
 			retryCount += 1;
@@ -800,6 +803,11 @@ async function handleFormatEndpoint(
 				Object.assign(new Error(`Model not found: ${currentTarget}`), { status: 404 }),
 			);
 			lastClassified = classified;
+			// Stateful continuations must not cross providers when the original target's
+			// provider cannot be established (unresolved primary leaves providerOrigin unset).
+			if (parsed.options.previousResponseId && providerOrigin === undefined) {
+				return classifiedError(classified);
+			}
 			if (considerFallback(classified)) return "skipped";
 			return classifiedError(classified);
 		}
@@ -820,6 +828,8 @@ async function handleFormatEndpoint(
 			logger.debug("auth-gateway route decision", redactedDecisionSummary(skipped));
 			return "skipped";
 		}
+		const incompat = openaiImageFileCompatError(resolved);
+		if (incompat) return incompat;
 		model = resolved;
 		providerOrigin ??= resolved.provider;
 		attemptedTargets.add(currentTarget);
@@ -1218,7 +1228,7 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 	let pendingFallback: string | undefined;
 	let lastClassified: GatewayErrorClassification | undefined;
 	let siblingsExhausted = false;
-	const attemptCap = compiled.targets.length + 1;
+	const attemptCap = compiled.targets.length * 2 + 1;
 
 	const stateNow = (): ExecutionState =>
 		conductorExecutionState(
@@ -1260,6 +1270,8 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 			return true;
 		}
 		if (action.type === "fallback_target") {
+			// New target gets a fresh sibling-credential budget.
+			siblingsExhausted = false;
 			pendingFallback = action.targetModelId;
 			fallbackCount += 1;
 			retryCount += 1;
@@ -1277,6 +1289,11 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 				Object.assign(new Error(`Model not found: ${currentTarget}`), { status: 404 }),
 			);
 			lastClassified = classified;
+			// Stateful continuations must not cross providers when the original target's
+			// provider cannot be established (unresolved primary leaves providerOrigin unset).
+			if (parsed.options.previousResponseId && providerOrigin === undefined) {
+				return classifiedError(classified);
+			}
 			if (considerFallback(classified)) return "skipped";
 			return classifiedError(classified);
 		}
