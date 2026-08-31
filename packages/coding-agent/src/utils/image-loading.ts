@@ -9,7 +9,14 @@ import type {
 	TextContent,
 } from "@oh-my-pi/pi-ai";
 import { rasterizeSvg } from "@oh-my-pi/pi-natives";
-import { formatBytes, isRecord, logger, readImageMetadata, SUPPORTED_IMAGE_MIME_TYPES } from "@oh-my-pi/pi-utils";
+import {
+	formatBytes,
+	isRecord,
+	logger,
+	parseImageMetadata,
+	readImageMetadata,
+	SUPPORTED_IMAGE_MIME_TYPES,
+} from "@oh-my-pi/pi-utils";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import { resolveReadPath } from "../tools/path-utils";
 import { formatDimensionNote, type ImageResizeOptions, resizeImage } from "./image-resize";
@@ -214,6 +221,62 @@ export class ImageInputTooLargeError extends Error {
 	}
 }
 
+/**
+ * Raised when image bytes cannot be decoded — a truncated stream, a payload
+ * with a hole in the middle, or bytes that are not the container they claim.
+ * Failing at ingress keeps them out of the transcript, where they would
+ * otherwise be persisted and rejected by the provider on every later request,
+ * with no way to resume the session.
+ */
+export class InvalidImageDataError extends Error {
+	readonly reason: string;
+
+	constructor(label: string, mimeType: string, reason: string) {
+		super(`${label} is not a decodable ${mimeType} image: ${reason}`);
+		this.name = "InvalidImageDataError";
+		this.reason = reason;
+	}
+}
+
+/**
+ * Smallest raster the decode probe terminates into. The decode is the oracle,
+ * so the output size cannot change the verdict — a 1x1 sink keeps the check
+ * from allocating a full-size pixel buffer, a full-size PNG, and a base64
+ * string for a payload that may be up to {@link MAX_IMAGE_INPUT_BYTES}.
+ */
+const DECODE_PROBE_EDGE_PX = 1;
+
+/**
+ * Why an image cannot be decoded, or `null` when it decodes.
+ *
+ * A full decode is the only check that matches what vision backends accept: a
+ * middle-elided PNG keeps its signature, its header, and even a well-formed
+ * `IEND` trailer, so header sniffing and chunk-framing walks both pass it —
+ * while real-world images that decoders render happily do have odd framing, so
+ * a structural walk rejects payloads providers accept. Decoding is the ground
+ * truth on both sides. Callers on hot paths must cache the verdict.
+ */
+export async function imageDecodeFailureReason(image: ImageContent): Promise<string | null> {
+	if (!/^[A-Za-z0-9+/]*={0,2}$/.test(image.data)) return "invalid base64 image data";
+	const normalizedData = image.data.replace(/=+$/, "");
+	const bytes = Buffer.from(image.data, "base64");
+	if (bytes.length === 0) return "empty image data";
+	if (bytes.toString("base64").replace(/=+$/, "") !== normalizedData) return "invalid base64 image data";
+	const detected = parseImageMetadata(bytes);
+	if (detected && detected.mimeType !== image.mimeType.toLowerCase()) {
+		return `declared ${image.mimeType} but contains ${detected.mimeType}`;
+	}
+	try {
+		// Decode in full (that is what catches a hole in the compressed stream),
+		// then terminate into a 1x1 raster's bytes instead of re-encoding at the
+		// source dimensions and base64-ing a result nobody reads.
+		await new Bun.Image(bytes).resize(DECODE_PROBE_EDGE_PX, DECODE_PROBE_EDGE_PX).png().bytes();
+		return null;
+	} catch (error) {
+		return error instanceof Error ? error.message : String(error);
+	}
+}
+
 interface LoadInMemoryImageInputOptions {
 	image: ImageContent;
 	resolvedPath: string;
@@ -227,6 +290,14 @@ async function loadInMemoryImageInput(options: LoadInMemoryImageInputOptions): P
 	const inputBytes = Buffer.byteLength(options.image.data, "base64");
 	if (inputBytes > options.maxBytes) {
 		throw new ImageInputTooLargeError(inputBytes, options.maxBytes);
+	}
+
+	// Decode before anything else: a payload that cannot be decoded is rejected
+	// by the provider for the whole request, so it must fail here — where the
+	// caller still has a path to act on — instead of entering the transcript.
+	const decodeFailure = await imageDecodeFailureReason(options.image);
+	if (decodeFailure !== null) {
+		throw new InvalidImageDataError(options.resolvedPath, options.image.mimeType, decodeFailure);
 	}
 
 	let outputData = options.image.data;

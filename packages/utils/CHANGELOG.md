@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [18.0.11] - 2026-08-29
+
+### Fixed
+
+- Fixed runtime installation getting stuck for up to 60 seconds after an installer crash or forced termination, allowing subsequent installation attempts to proceed normally.
+
 ## [18.0.10] - 2026-08-28
 
 ### Added

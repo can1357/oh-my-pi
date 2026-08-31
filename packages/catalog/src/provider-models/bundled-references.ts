@@ -45,7 +45,9 @@ function getGlobalReferences(): Map<string, Model<Api>> {
 	for (const provider of getBundledProviders()) {
 		for (const model of getBundledModels(provider as Parameters<typeof getBundledModels>[0])) {
 			const candidate = model as Model<Api>;
-			if (isZeroCostXaiOAuthReference(candidate)) {
+			// ClinePass limits, pricing, and reasoning controls are gateway-specific;
+			// matching them by bare id would contaminate unrelated proxy models.
+			if (candidate.provider === "cline-pass" || isZeroCostXaiOAuthReference(candidate)) {
 				continue;
 			}
 			const existing = references.get(candidate.id);

@@ -47,6 +47,7 @@ import { isCpuProfilePath, renderCpuProfile } from "../utils/cpuprofile";
 import { resolveFileDisplayMode } from "../utils/file-display-mode";
 import {
 	ImageInputTooLargeError,
+	InvalidImageDataError,
 	loadImageInput,
 	loadSvgImageInput,
 	MAX_IMAGE_INPUT_BYTES,
@@ -875,7 +876,9 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				sourcePath: imageInput.resolvedPath,
 			};
 		} catch (error) {
-			if (error instanceof ImageInputTooLargeError) {
+			// Both surface as an actionable tool error so the model can fix the input
+			// instead of the corrupt/oversized payload entering the transcript.
+			if (error instanceof ImageInputTooLargeError || error instanceof InvalidImageDataError) {
 				throw new ToolError(error.message);
 			}
 			throw error;

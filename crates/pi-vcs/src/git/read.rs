@@ -7,7 +7,10 @@ use std::{
 
 use gix::bstr::ByteSlice;
 
-use super::GitRepo;
+use super::{
+	GitRepo,
+	open::{load_index_or_empty, status_with_fresh_index},
+};
 use crate::{
 	error::{Error, Result},
 	types::{
@@ -185,9 +188,7 @@ impl GitRepo {
 				.map(|status| !status.is_empty());
 		}
 		let repo = self.gix()?;
-		let platform = repo
-			.status(gix::progress::Discard)
-			.map_err(|err| Error::backend("git status", err))?
+		let platform = status_with_fresh_index(&repo, "git status")?
 			.untracked_files(gix::status::UntrackedFiles::Collapsed);
 		let iter = platform
 			.into_iter(options.pathspecs.iter().map(|path| path.as_bytes().into()))
@@ -246,10 +247,7 @@ impl GitRepo {
 			UntrackedMode::Normal => gix::status::UntrackedFiles::Collapsed,
 			UntrackedMode::All => gix::status::UntrackedFiles::Files,
 		};
-		let platform = repo
-			.status(gix::progress::Discard)
-			.map_err(|err| Error::backend("git status", err))?
-			.untracked_files(untracked);
+		let platform = status_with_fresh_index(&repo, "git status")?.untracked_files(untracked);
 		let iter = platform
 			.into_iter(options.pathspecs.iter().map(|path| path.as_bytes().into()))
 			.map_err(|err| Error::backend("git status", err))?;
@@ -700,9 +698,7 @@ impl GitRepo {
 		}
 		if !others {
 			let repo = self.gix()?;
-			let index = repo
-				.index_or_empty()
-				.map_err(|err| Error::backend("git ls-files", err))?;
+			let index = load_index_or_empty(&repo, "git ls-files")?;
 			let mut out: Vec<_> = index
 				.entries()
 				.iter()
@@ -714,9 +710,7 @@ impl GitRepo {
 			return Ok(out);
 		}
 		let repo = self.gix()?;
-		let mut platform = repo
-			.status(gix::progress::Discard)
-			.map_err(|e| Error::backend("git ls-files", e))?
+		let mut platform = status_with_fresh_index(&repo, "git ls-files")?
 			.untracked_files(gix::status::UntrackedFiles::Files);
 		if !exclude_standard {
 			platform = platform.dirwalk_options(|opts| {
