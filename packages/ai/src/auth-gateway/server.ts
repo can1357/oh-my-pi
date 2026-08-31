@@ -475,6 +475,14 @@ async function handleFormatEndpoint(
 	}
 	if (controller.signal.aborted) return clientClosedResponse(route);
 
+	if (model.api === "openai-codex-responses" && parsed.options.previousResponseId !== undefined) {
+		return route.module.formatError(
+			400,
+			"invalid_request_error",
+			"previous_response_id is not supported for openai-codex-responses over the gateway",
+		);
+	}
+
 	const supportsOpenAIImageFileReferences =
 		model.api === "openai-responses" ||
 		model.api === "azure-openai-responses" ||

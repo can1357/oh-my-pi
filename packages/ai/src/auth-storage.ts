@@ -2376,20 +2376,22 @@ export class AuthStorage {
 			});
 
 		if (credentials.length === 0) return undefined;
-		if (credentials.length === 1) return credentials[0];
+		if (credentials.length === 1) {
+			const only = credentials[0]!;
+			return this.#tryReserveApiKeySelection(provider, only, options?.requestId) ? only : undefined;
+		}
 
 		const providerKey = this.#getProviderTypeKey(provider, "api_key");
 		const order = this.#getCredentialOrder(providerKey, sessionId, credentials.length);
-		const fallback = credentials[order[0]];
 		const strategy = this.#rankingStrategyResolver?.(provider);
 		if (!strategy) {
 			for (const idx of order) {
 				const candidate = credentials[idx];
 				if (!this.#isCredentialBlocked(provider, providerKey, candidate.index, undefined, options?.requestId)) {
-					return candidate;
+					if (this.#tryReserveApiKeySelection(provider, candidate, options?.requestId)) return candidate;
 				}
 			}
-			return fallback;
+			return undefined;
 		}
 
 		const rankingContext: CredentialRankingContext = { modelId: options?.modelId };
@@ -2406,7 +2408,28 @@ export class AuthStorage {
 			blockScope,
 			blockScopes,
 		});
-		return candidates[0]?.selection ?? fallback;
+		for (const ranked of candidates) {
+			if (this.#tryReserveApiKeySelection(provider, ranked.selection, options?.requestId)) {
+				return ranked.selection;
+			}
+		}
+		return undefined;
+	}
+
+	/** Acquire an exclusive turn reservation for a stored API-key row when requestId is set. */
+	#tryReserveApiKeySelection(
+		provider: string,
+		selection: ApiKeySelection,
+		requestId: string | undefined,
+	): boolean {
+		if (!requestId) return true;
+		const reserveId = this.#getStoredCredentials(provider)[selection.index]?.id;
+		if (reserveId === undefined) return true;
+		return this.tryAcquireTurnReservation({
+			credentialId: reserveId,
+			incarnation: this.getCredentialIncarnation(reserveId),
+			requestId,
+		}).ok;
 	}
 
 	#clearProviderSessionCredentialCache(provider: string): void {

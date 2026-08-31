@@ -26,13 +26,12 @@ describe("RouteRegistry", () => {
 	it("wraps a known id as a single TargetNode", () => {
 		const registry = new RouteRegistry(id => (id === "gpt-5" ? fakeModel("gpt-5") : undefined));
 		const route = registry.resolve("gpt-5");
-		expect(route).toEqual({
-			generation: 1,
-			id: "gpt-5",
-			root: { type: "target", model: "gpt-5" },
-			targets: ["gpt-5"],
-			fallbacks: {},
-		});
+		expect(route?.generation).toBe(1);
+		expect(route?.id).toBe("gpt-5");
+		expect(route?.root).toEqual({ type: "target", model: "gpt-5" });
+		expect(route?.targets).toEqual(["gpt-5"]);
+		expect(route?.fallbacks).toEqual({});
+		expect(route?.fallbackByTarget).toEqual({});
 	});
 
 	it("keeps generation stable across resolves", () => {
@@ -60,20 +59,11 @@ describe("RouteRegistry", () => {
 		});
 		const route = registry.resolve("quota-route");
 		expect(registry.generation).toBe(2);
-		expect(route).toEqual({
-			generation: 2,
-			id: "quota-route",
-			root: {
-				type: "fallback",
-				on: ["credential_quota"],
-				children: [
-					{ type: "target", model: "gpt-5" },
-					{ type: "target", model: "gpt-4o" },
-				],
-			},
-			targets: ["gpt-5", "gpt-4o"],
-			fallbacks: { credential_quota: ["gpt-4o"] },
-		});
+		expect(route?.generation).toBe(2);
+		expect(route?.id).toBe("quota-route");
+		expect(route?.targets).toEqual(["gpt-5", "gpt-4o"]);
+		expect(route?.fallbacks).toEqual({ credential_quota: ["gpt-4o"] });
+		expect(route?.fallbackByTarget).toEqual({ "gpt-5": { credential_quota: ["gpt-4o"] } });
 	});
 
 	it("rejects a cycle on one root-to-leaf path", () => {
@@ -164,13 +154,9 @@ describe("RouteRegistry", () => {
 			root: { type: "target", model: "other" },
 		});
 		const route = registry.resolve("gpt-5");
-		expect(route).toEqual({
-			generation: 2,
-			id: "gpt-5",
-			root: { type: "target", model: "gpt-5" },
-			targets: ["gpt-5"],
-			fallbacks: {},
-		});
+		expect(route?.fallbackByTarget).toEqual({});
+		expect(route?.targets).toEqual(["gpt-5"]);
+		expect(route?.fallbacks).toEqual({});
 	});
 
 	it("does not leak quota targets into context_overflow fallbacks", () => {
@@ -198,6 +184,40 @@ describe("RouteRegistry", () => {
 		expect(route?.fallbacks.credential_quota).toEqual(["quota-backup"]);
 		expect(route?.fallbacks.context_overflow).toEqual(["overflow-backup"]);
 		expect(route?.fallbacks.context_overflow ?? []).not.toContain("quota-backup");
+	});
+
+	it("scopes nested sibling fallbacks per source target", () => {
+		const registry = new RouteRegistry(() => undefined);
+		registry.register({
+			id: "nested-siblings",
+			root: {
+				type: "fallback",
+				on: ["provider_unavailable"],
+				children: [
+					{
+						type: "fallback",
+						on: ["context_overflow"],
+						children: [
+							{ type: "target", model: "A" },
+							{ type: "target", model: "B" },
+						],
+					},
+					{
+						type: "fallback",
+						on: ["context_overflow"],
+						children: [
+							{ type: "target", model: "C" },
+							{ type: "target", model: "D" },
+						],
+					},
+				],
+			},
+		});
+		const route = registry.resolve("nested-siblings");
+		expect(route?.fallbacks.provider_unavailable).toEqual(["C"]);
+		expect(route?.fallbackByTarget?.A?.context_overflow).toEqual(["B"]);
+		expect(route?.fallbackByTarget?.C?.context_overflow).toEqual(["D"]);
+		expect(route?.fallbackByTarget?.A?.context_overflow ?? []).not.toContain("D");
 	});
 
 	it("preserves provider-qualified model ids as the compiled target", () => {
