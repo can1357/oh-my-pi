@@ -233,6 +233,50 @@ describe("getLatestTodoPhasesFromEntries reconstructs leftover todos after compa
 		expect(getLatestTodoPhasesFromEntries(entries)).toEqual([]);
 	});
 
+	it("treats an empty latest compaction as authoritative over older todo toolResults", () => {
+		const entries = [
+			{
+				type: "message",
+				id: "todo",
+				parentId: null,
+				timestamp: TIMESTAMP,
+				message: {
+					role: "toolResult",
+					toolName: "todo",
+					toolCallId: "call-1",
+					content: [{ type: "text", text: "ok" }],
+					isError: false,
+					details: {
+						phases: [{ name: "Work", tasks: [{ content: "cleared later", status: "pending" }] }],
+					},
+					timestamp: 1,
+				},
+			},
+			compaction("c1", "todo", "## Goal\nHost cleared todos before compact.\n"),
+		] as SessionEntry[];
+
+		expect(getLatestTodoPhasesFromEntries(entries)).toEqual([]);
+	});
+
+	it("round-trips blocked rows with blocker notes through the durable section", () => {
+		const rows = [
+			{
+				phase: "Work",
+				status: "blocked" as const,
+				title: "wait for keys",
+				blocker: "need API token from user",
+			},
+		];
+		const section = formatIncompleteTodosSection(rows);
+		expect(section).toContain("<!-- blocker: need API token from user -->");
+		expect(parseIncompleteTodosFromSummary(section ?? "")).toEqual([
+			{
+				name: "Work",
+				tasks: [{ content: "wait for keys", status: "blocked", blocker: "need API token from user" }],
+			},
+		]);
+	});
+
 	it("keeps the durable standing section uncapped so reconstruction does not drop overflow", () => {
 		const rows = Array.from({ length: INCOMPLETE_TODOS_SNAPSHOT_CAP + 5 }, (_, index) => ({
 			phase: "Work",

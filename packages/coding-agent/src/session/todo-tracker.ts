@@ -222,7 +222,9 @@ export class TodoTracker {
 	/** Builds reminder-only eager preludes after compaction. */
 	buildPostCompactionEagerNudges(): AgentMessage[] {
 		const nudges: AgentMessage[] = [];
-		const rows = collectIncompleteTodoRows(this.#phases);
+		// Keep blocked rows in durable snapshots / settle gates, but do not nudge
+		// the model to continue work that is waiting on user or external input.
+		const rows = collectIncompleteTodoRows(this.#phases).filter(row => row.status !== "blocked");
 		if (rows.length > 0) {
 			const capped = capIncompleteTodoRows(rows);
 			nudges.push({
