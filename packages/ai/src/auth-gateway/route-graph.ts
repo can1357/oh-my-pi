@@ -109,12 +109,14 @@ function compileNode(node: RouteNode, seenOnPath: ReadonlySet<string>): NodeComp
 	const sequential = new Set(seenOnPath);
 	const childParts: Array<{ entryTargets: string[]; after: string[] }> = [];
 	const entryTargetsPerChild: string[][] = [];
+	const allTargetsPerChild: string[][] = [];
 	for (const child of node.children) {
 		// Independent ancestor copy per sibling. Fallback subtrees must not
 		// inherit sequential sibling targets — those are other leaves.
 		const childSeen = new Set(child.type === "target" ? sequential : seenOnPath);
 		const part = compileNode(child, childSeen);
 		targets.push(...part.targets);
+		allTargetsPerChild.push([...part.targets]);
 		const entry =
 			child.type === "fallback"
 				? part.targets[0] !== undefined
@@ -124,6 +126,20 @@ function compileNode(node: RouteNode, seenOnPath: ReadonlySet<string>): NodeComp
 		entryTargetsPerChild.push(entry);
 		mergeFallbacksByFrom(fallbacksByFrom, part.fallbacksByFrom);
 		if (child.type === "target") sequential.add(child.model);
+	}
+	// fallbackByTarget is keyed by model id; the same id in multiple sibling
+	// subtrees would merge nested edges across unreached branches.
+	const owner = new Map<string, number>();
+	for (let i = 0; i < allTargetsPerChild.length; i += 1) {
+		for (const id of allTargetsPerChild[i]!) {
+			const prev = owner.get(id);
+			if (prev !== undefined && prev !== i) {
+				throw new AIError.ValidationError(
+					`Ambiguous cross-branch reuse of model "${id}" under one fallback`,
+				);
+			}
+			owner.set(id, i);
+		}
 	}
 	// From each sibling entry, edges go to the remaining suffix of entry targets.
 	for (let i = 0; i < entryTargetsPerChild.length; i += 1) {

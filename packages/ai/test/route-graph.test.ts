@@ -106,26 +106,29 @@ describe("RouteRegistry", () => {
 		expect(registry.resolve("cyclic")).toBeUndefined();
 	});
 
-	it("allows sibling reuse of the same model id under a fallback", () => {
+	it("rejects ambiguous cross-branch reuse of the same model id", () => {
 		const registry = new RouteRegistry(() => undefined);
-		registry.register({
-			id: "sibling-reuse",
-			root: {
-				type: "fallback",
-				on: ["credential_quota"],
-				children: [
-					{ type: "target", model: "a" },
-					{
-						type: "fallback",
-						on: ["context_overflow"],
-						children: [{ type: "target", model: "a" }],
-					},
-				],
-			},
-		});
-		const route = registry.resolve("sibling-reuse");
-		expect(route?.targets).toEqual(["a", "a"]);
-		expect(registry.generation).toBe(2);
+		expect(() =>
+			registry.register({
+				id: "sibling-reuse",
+				root: {
+					type: "fallback",
+					on: ["credential_quota"],
+					children: [
+						{ type: "target", model: "a" },
+						{
+							type: "fallback",
+							on: ["context_overflow"],
+							children: [
+								{ type: "target", model: "a" },
+								{ type: "target", model: "b" },
+							],
+						},
+					],
+				},
+			}),
+		).toThrow(/ambiguous cross-branch reuse/i);
+		expect(registry.generation).toBe(1);
 	});
 
 	it("rejects a nested path that repeats a target model id", () => {
