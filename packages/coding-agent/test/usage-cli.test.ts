@@ -62,6 +62,36 @@ function makeLimit(opts: {
 function makeReport(provider: string, email: string, limits: UsageReport["limits"], notes?: string[]): UsageReport {
 	return { provider, fetchedAt: Date.now(), limits, ...(notes ? { notes } : {}), metadata: { email } };
 }
+describe("runUsageCommand", () => {
+	it("reads display.showZeroUsageMeters for standalone text output", async () => {
+		const provider = "meter-provider";
+		const report = makeReport(provider, "user@example.test", [
+			makeLimit({ id: "Base quota", provider, usedFraction: 0.2 }),
+			makeLimit({ id: "Unused tier", provider, tier: "unused-tier", usedFraction: 0 }),
+		]);
+		const authStorage = createInMemoryAuthStorage();
+		vi.spyOn(authStorage.usage, "reports").mockResolvedValue([report]);
+		const discover = vi.spyOn(sdkModule, "discoverAuthStorage").mockResolvedValue(authStorage);
+		const loadSettings = vi
+			.spyOn(Settings, "loadReadOnly")
+			.mockResolvedValue(Settings.isolated({ display: { showZeroUsageMeters: false } }));
+		let output = "";
+		const write = vi.spyOn(process.stdout, "write").mockImplementation(chunk => {
+			output += String(chunk);
+			return true;
+		});
+
+		try {
+			await runUsageCommand({});
+			expect(output).toContain("Base quota");
+			expect(output).not.toContain("Unused tier");
+		} finally {
+			write.mockRestore();
+			loadSettings.mockRestore();
+			discover.mockRestore();
+		}
+	});
+});
 
 describe("buildRedactionMap", () => {
 	it("masks everything past a two-char anchor when the anchor is unique", () => {
