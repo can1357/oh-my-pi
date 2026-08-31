@@ -250,8 +250,6 @@ interface SpawnedUrlTunnel {
 	proc: Bun.Subprocess;
 	baseUrl: string;
 	lifecycle: SpawnedUrlTunnelLifecycle;
-	/** Resolves after the child exits and its temporary output log cleanup finishes best-effort. */
-	logCleaned: Promise<void>;
 }
 
 async function spawnUrlTunnel(
@@ -350,11 +348,11 @@ async function spawnUrlTunnel(
 				readyUrl = scanLog(text);
 				if (recoverPostExitUrl && readyUrl) {
 					lifecycleHandedOff = true;
+					void cleanupLogAfterExit();
 					return {
 						proc,
 						baseUrl: readyUrl,
 						lifecycle: "exited-after-ready",
-						logCleaned: cleanupLogAfterExit(),
 					};
 				}
 				const exitTiming = readyUrl ? "after reporting a tunnel URL" : "before reporting a tunnel URL";
@@ -362,7 +360,8 @@ async function spawnUrlTunnel(
 			}
 			if (readyUrl) {
 				lifecycleHandedOff = true;
-				return { proc, baseUrl: readyUrl, lifecycle: "running", logCleaned: cleanupLogAfterExit() };
+				void cleanupLogAfterExit();
+				return { proc, baseUrl: readyUrl, lifecycle: "running" };
 			}
 			await (signal ? Promise.race([Bun.sleep(150), aborted.promise]) : Bun.sleep(150));
 		}
@@ -376,17 +375,12 @@ async function spawnUrlTunnel(
 	}
 }
 
-function processExposure(
-	kind: ExposureKind,
-	baseUrl: string,
-	proc: Bun.Subprocess,
-	exited: Promise<void> = proc.exited.then(() => undefined),
-): ActiveExposure {
+function processExposure(kind: ExposureKind, baseUrl: string, proc: Bun.Subprocess): ActiveExposure {
 	proc.unref();
 	return {
 		kind,
 		baseUrl,
-		exited,
+		exited: proc.exited.then(() => undefined),
 		stop: () => killTunnelProcess(proc),
 	};
 }
@@ -408,7 +402,7 @@ async function restartingPinggyExposure(
 	argv: string[],
 	initial: SpawnedUrlTunnel,
 ): Promise<ActiveExposure> {
-	let { proc, logCleaned } = initial;
+	let { proc } = initial;
 	let stopping = false;
 	const startup = Promise.withResolvers<void>();
 	if (initial.lifecycle === "running" && proc.exitCode === null) startup.resolve();
@@ -418,7 +412,7 @@ async function restartingPinggyExposure(
 		let spawnedAt = Date.now();
 		let quickExits = 0;
 		while (true) {
-			await logCleaned;
+			await proc.exited;
 			if (stopping) return;
 			// A persistently failing tunnel (for example rejected auth) can print
 			// its URL and exit immediately, which would otherwise hot-loop this
@@ -447,7 +441,7 @@ async function restartingPinggyExposure(
 				});
 				if (stopping) {
 					killTunnelProcess(restarted.proc);
-					await restarted.logCleaned;
+					await restarted.proc.exited;
 					return;
 				}
 				// Measure the quick-exit window from readiness, matching the initial
@@ -455,7 +449,6 @@ async function restartingPinggyExposure(
 				// slow-to-publish child that dies right after publishing as long-lived.
 				spawnedAt = Date.now();
 				proc = restarted.proc;
-				logCleaned = restarted.logCleaned;
 				proc.unref();
 				if (restarted.lifecycle === "running" && proc.exitCode === null) startup.resolve();
 			} catch (error) {
@@ -495,32 +488,29 @@ export async function startExposure(config: ExposureConfig, port: number): Promi
 		}
 		case "cloudflared": {
 			const binary = requireBinary("cloudflared");
-			const { proc, baseUrl, logCleaned } = await spawnUrlTunnel(
+			const { proc, baseUrl } = await spawnUrlTunnel(
 				[binary, "tunnel", "--no-autoupdate", "--url", `http://127.0.0.1:${port}`],
 				parseCloudflaredUrl,
 				{ readyPattern: /Registered tunnel connection/ },
 			);
-			return processExposure("cloudflared", baseUrl, proc, logCleaned);
+			return processExposure("cloudflared", baseUrl, proc);
 		}
 		case "ngrok": {
 			const binary = requireBinary("ngrok");
-			const { proc, baseUrl, logCleaned } = await spawnUrlTunnel(
+			const { proc, baseUrl } = await spawnUrlTunnel(
 				[binary, "http", String(port), "--log", "stdout", "--log-format", "json"],
 				parseNgrokUrl,
 			);
-			return processExposure("ngrok", baseUrl, proc, logCleaned);
+			return processExposure("ngrok", baseUrl, proc);
 		}
 		case "tailscale": {
 			const binary = requireBinary("tailscale");
-			const { proc, baseUrl, logCleaned } = await spawnUrlTunnel(
-				[binary, "funnel", String(port)],
-				parseTailscaleUrl,
-			);
-			return processExposure("tailscale", baseUrl, proc, logCleaned);
+			const { proc, baseUrl } = await spawnUrlTunnel([binary, "funnel", String(port)], parseTailscaleUrl);
+			return processExposure("tailscale", baseUrl, proc);
 		}
 		case "localhost-run": {
 			const binary = requireBinary("ssh");
-			const { proc, baseUrl, logCleaned } = await spawnUrlTunnel(
+			const { proc, baseUrl } = await spawnUrlTunnel(
 				[
 					binary,
 					"-o",
@@ -542,7 +532,7 @@ export async function startExposure(config: ExposureConfig, port: number): Promi
 				],
 				parseLocalhostRunUrl,
 			);
-			return processExposure("localhost-run", baseUrl, proc, logCleaned);
+			return processExposure("localhost-run", baseUrl, proc);
 		}
 		case "pinggy": {
 			const binary = requireBinary("ssh");
@@ -585,23 +575,23 @@ export async function startExposure(config: ExposureConfig, port: number): Promi
 			if (token && config.publicBaseUrl) {
 				return restartingPinggyExposure(normalizeBaseUrl(config.publicBaseUrl), argv, spawned);
 			}
-			return processExposure("pinggy", spawned.baseUrl, spawned.proc, spawned.logCleaned);
+			return processExposure("pinggy", spawned.baseUrl, spawned.proc);
 		}
 		case "devtunnel": {
 			const binary = requireBinary("devtunnel");
-			const { proc, baseUrl, logCleaned } = await spawnUrlTunnel(
+			const { proc, baseUrl } = await spawnUrlTunnel(
 				[binary, "host", "-p", String(port), "--allow-anonymous", "--protocol", "http"],
 				parseDevtunnelUrl,
 			);
-			return processExposure("devtunnel", baseUrl, proc, logCleaned);
+			return processExposure("devtunnel", baseUrl, proc);
 		}
 		case "zrok": {
 			const binary = requireBinary("zrok");
-			const { proc, baseUrl, logCleaned } = await spawnUrlTunnel(
+			const { proc, baseUrl } = await spawnUrlTunnel(
 				[binary, "share", "public", `http://127.0.0.1:${port}`, "--headless", "--backend-mode", "proxy"],
 				parseZrokUrl,
 			);
-			return processExposure("zrok", baseUrl, proc, logCleaned);
+			return processExposure("zrok", baseUrl, proc);
 		}
 		case "bore": {
 			const binary = requireBinary("bore");
@@ -610,8 +600,8 @@ export async function startExposure(config: ExposureConfig, port: number): Promi
 			const secret = credentialString(config, "secret");
 			const argv = [binary, "local", String(port), "--to", server];
 			if (secret) argv.push("--secret", secret);
-			const { proc, baseUrl, logCleaned } = await spawnUrlTunnel(argv, line => parseBoreUrl(line, server));
-			return processExposure("bore", baseUrl, proc, logCleaned);
+			const { proc, baseUrl } = await spawnUrlTunnel(argv, line => parseBoreUrl(line, server));
+			return processExposure("bore", baseUrl, proc);
 		}
 		case "named-cloudflared": {
 			if (!config.publicBaseUrl) {
@@ -633,10 +623,10 @@ export async function startExposure(config: ExposureConfig, port: number): Promi
 				argv = [binary, "tunnel", "--no-autoupdate", "--config", configFile, "run", tunnelName];
 			}
 			const baseUrl = normalizeBaseUrl(config.publicBaseUrl);
-			const { proc, logCleaned } = await spawnUrlTunnel(argv, () => baseUrl, {
+			const { proc } = await spawnUrlTunnel(argv, () => baseUrl, {
 				readyPattern: /Registered tunnel connection|Connection [a-z0-9-]+ registered/i,
 			});
-			return processExposure("named-cloudflared", baseUrl, proc, logCleaned);
+			return processExposure("named-cloudflared", baseUrl, proc);
 		}
 		case "ssh": {
 			if (!config.publicBaseUrl) throw new Error('imageUrls exposure "ssh" requires imageUrls.publicBaseUrl');

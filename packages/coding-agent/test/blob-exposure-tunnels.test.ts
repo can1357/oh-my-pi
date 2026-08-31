@@ -63,29 +63,29 @@ function prepareFake(
 	fs.writeFileSync(
 		target,
 		`#!/bin/sh\n` +
-		`: > ${shellLiteral(argsFile)}\n` +
-		`for arg do printf '%s\\n' "$arg" >> ${shellLiteral(argsFile)}; done\n` +
-		`printf 'run\\n' >> ${shellLiteral(runsFile)}\n` +
-		`trap 'printf "SIGINT\\n" >> ${shellLiteral(signalsFile)}; exit 0' INT\n` +
-		`trap 'printf "SIGTERM\\n" >> ${shellLiteral(signalsFile)}; exit 0' TERM\n` +
-		(restartMarker
-			? `if [ ! -e ${shellLiteral(restartMarker)} ]; then\n` +
-			`  printf '%s\\n' ${shellLiteral(output)}\n` +
-			`  printf 'first\\n' > ${shellLiteral(restartMarker)}\n` +
-			(options.exitDelaySeconds === undefined ? "" : `  /bin/sleep ${options.exitDelaySeconds}\n`) +
-			`  exit 23\n` +
-			`fi\n` +
-			(options.restartReadyDelaySeconds === undefined
-				? ""
-				: `/bin/sleep ${options.restartReadyDelaySeconds}\n`) +
-			`printf 'restarted\\n' >> ${shellLiteral(restartMarker)}\n` +
-			(restartReadyGate === undefined
-				? ""
-				: `while [ ! -e ${shellLiteral(restartReadyGate)} ]; do /bin/sleep 0.05; done\n`)
-			: "") +
-		`printf '%s\\n' ${shellLiteral(output)}\n` +
-		(options.exitDelaySeconds === undefined ? "" : `/bin/sleep ${options.exitDelaySeconds}\n`) +
-		(options.exitCode === undefined ? `while :; do /bin/sleep 1; done\n` : `exit ${options.exitCode}\n`),
+			`: > ${shellLiteral(argsFile)}\n` +
+			`for arg do printf '%s\\n' "$arg" >> ${shellLiteral(argsFile)}; done\n` +
+			`printf 'run\\n' >> ${shellLiteral(runsFile)}\n` +
+			`trap 'printf "SIGINT\\n" >> ${shellLiteral(signalsFile)}; exit 0' INT\n` +
+			`trap 'printf "SIGTERM\\n" >> ${shellLiteral(signalsFile)}; exit 0' TERM\n` +
+			(restartMarker
+				? `if [ ! -e ${shellLiteral(restartMarker)} ]; then\n` +
+					`  printf '%s\\n' ${shellLiteral(output)}\n` +
+					`  printf 'first\\n' > ${shellLiteral(restartMarker)}\n` +
+					(options.exitDelaySeconds === undefined ? "" : `  /bin/sleep ${options.exitDelaySeconds}\n`) +
+					`  exit 23\n` +
+					`fi\n` +
+					(options.restartReadyDelaySeconds === undefined
+						? ""
+						: `/bin/sleep ${options.restartReadyDelaySeconds}\n`) +
+					`printf 'restarted\\n' >> ${shellLiteral(restartMarker)}\n` +
+					(restartReadyGate === undefined
+						? ""
+						: `while [ ! -e ${shellLiteral(restartReadyGate)} ]; do /bin/sleep 0.05; done\n`)
+				: "") +
+			`printf '%s\\n' ${shellLiteral(output)}\n` +
+			(options.exitDelaySeconds === undefined ? "" : `/bin/sleep ${options.exitDelaySeconds}\n`) +
+			(options.exitCode === undefined ? `while :; do /bin/sleep 1; done\n` : `exit ${options.exitCode}\n`),
 	);
 	fs.chmodSync(target, 0o755);
 	for (const name of ["ssh", "devtunnel", "zrok", "bore", "cloudflared"]) {
@@ -144,7 +144,6 @@ function currentProcessTunnelLogs(): string[] {
 
 beforeAll(() => {
 	fakeBinDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-blob-tunnels-"));
-
 });
 
 afterAll(async () => {
