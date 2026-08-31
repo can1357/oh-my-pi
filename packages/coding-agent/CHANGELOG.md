@@ -20,6 +20,7 @@
 - Fixed an issue where custom model overrides were lost during configuration updates
 - Fixed "Please use nerdfont" notification incorrectly persisting after theme configuration
 - Fixed sampling parameter errors for newer Anthropic models (Opus 4.7+, Sonnet 5+)
+- Fixed `omp auth-broker login --via` for manual-paste OAuth providers such as Z.AI so remote login no longer requires a loopback SSH tunnel.
 
 ## [18.0.11] - 2026-08-29
 

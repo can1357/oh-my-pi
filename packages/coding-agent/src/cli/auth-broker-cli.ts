@@ -372,19 +372,18 @@ async function pickProviderInteractively(providers: readonly OAuthProviderInfo[]
 
 async function runRemoteLogin(provider: string, via: string, dryRun: boolean): Promise<void> {
 	const port = CALLBACK_PORTS[provider];
-	if (port === undefined) {
+	if (port === undefined && !PASTE_CODE_LOGIN_PROVIDERS.has(provider)) {
 		throw new Error(
 			`No known OAuth callback port for '${provider}'. Use device-code flow on the broker host directly.`,
 		);
 	}
-	const sshArgs = [
-		"-L",
-		`${port}:127.0.0.1:${port}`,
-		"-o",
-		"ExitOnForwardFailure=yes",
-		via,
-		`${APP_NAME} auth-broker login ${provider}`,
-	];
+	// Paste-code providers such as Z.AI use a non-loopback redirect, so remote
+	// login is a plain SSH session — no `-L` tunnel or ExitOnForwardFailure.
+	const remoteCommand = `${APP_NAME} auth-broker login ${provider}`;
+	const sshArgs =
+		port === undefined
+			? [via, remoteCommand]
+			: ["-L", `${port}:127.0.0.1:${port}`, "-o", "ExitOnForwardFailure=yes", via, remoteCommand];
 	if (dryRun) {
 		process.stdout.write(`ssh ${sshArgs.map(a => (a.includes(" ") ? `'${a}'` : a)).join(" ")}\n`);
 		return;
