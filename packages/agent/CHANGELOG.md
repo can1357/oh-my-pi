@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Codex remote compaction retries for both Bun and proxy socket-closure messages and stopped falling back to the unsupported `/responses/compact` endpoint after V2 failures.
+
+
 ## [18.0.11] - 2026-08-29
 
 ### Fixed

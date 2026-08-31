@@ -904,6 +904,71 @@ describe("requestCompactionV2Streaming", () => {
 		expect(result.usage?.cachedInputTokens).toBe(7);
 		expect(result.usage?.reasoningOutputTokens).toBe(1);
 	});
+	test.each(["The socket connection was closed unexpectedly", "socket connection closed unexpectedly"] as const)(
+		"retries a transient socket closure: %s",
+		async socketCloseMessage => {
+			const model = makeOpenAiModel({
+				remoteCompaction: {
+					enabled: true,
+					v2StreamingEnabled: true,
+					v2Endpoint: "https://compact.example/v1/responses",
+				},
+			});
+			const userItem = { type: "message", role: "user", content: [{ type: "input_text", text: "real user" }] };
+			const request = buildCompactionV2Request(model, [userItem], "instructions");
+			const compactionItem = { type: "compaction", encrypted_content: "enc_123" };
+			let attempts = 0;
+			const fetchMock: FetchImpl = async () => {
+				attempts++;
+				if (attempts === 1) {
+					throw new Error(socketCloseMessage);
+				}
+				return sseResponse([
+					{ type: "response.output_item.done", output_index: 0, item: compactionItem },
+					{ type: "response.completed" },
+				]);
+			};
+
+			const result = await requestCompactionV2Streaming(model, "test-key", request, undefined, {
+				fetch: fetchMock,
+				retryWait: async () => {},
+			});
+
+			expect(attempts).toBe(2);
+			expect(result.compactionItem).toEqual(compactionItem);
+		},
+	);
+	test("does not select Codex's unsupported V1 compact endpoint by default", () => {
+		const model = makeOpenAiModel({
+			provider: "openai-codex",
+			remoteCompaction: {
+				enabled: true,
+				v2StreamingEnabled: true,
+			},
+		});
+
+		expect(shouldUseOpenAiRemoteCompaction(model)).toBe(false);
+	});
+	test("requires explicit opt-in for custom Codex API compaction", () => {
+		const model = buildModel({
+			id: "custom-gpt-5",
+			name: "Custom GPT-5",
+			api: "openai-codex-responses",
+			provider: "custom-provider",
+			baseUrl: "https://compact.example/v1",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 400000,
+			maxTokens: 128000,
+			remoteCompaction: {
+				api: "openai-codex-responses",
+				endpoint: "https://compact.example/v1/responses/compact",
+			},
+		});
+
+		expect(shouldUseOpenAiRemoteCompaction(model)).toBe(false);
+	});
 
 	test("negotiates Codex V2 compaction for an explicit Responses endpoint", async () => {
 		const model = buildModel({

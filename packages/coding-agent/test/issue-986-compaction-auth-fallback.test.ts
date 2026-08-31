@@ -33,12 +33,19 @@ describe("issue #986 compaction auth fallback", () => {
 	});
 
 	async function createSession(options?: { fallbackModelRole?: string; configureFallbackAuth?: boolean }) {
-		const currentModel = getBundledModel("openai-codex", "gpt-5.4-mini");
+		const bundledCurrentModel = getBundledModel("openai-codex", "gpt-5.4-mini");
+		const currentModel = bundledCurrentModel && {
+			...bundledCurrentModel,
+			remoteCompaction: {
+				...bundledCurrentModel.remoteCompaction,
+				enabled: true,
+				endpoint: "https://compact.example/v1/responses/compact",
+			},
+		};
 		const fallbackModel = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!currentModel || !fallbackModel) {
 			throw new Error("Expected bundled test models to exist");
 		}
-
 		const settings = Settings.isolated({
 			"compaction.keepRecentTokens": 1,
 			"compaction.methodOrder": ["remote", "soft"],
