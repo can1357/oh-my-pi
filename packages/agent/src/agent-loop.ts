@@ -2760,6 +2760,14 @@ async function executeToolCalls(
 					);
 					if (!(await Promise.race([steeringChecked, watchAbortedFalse]))) return;
 					if (steeringWatchSignal.aborted || interruptState.triggered) return;
+					if (!globalInterruptsImmediate) {
+						const state = await hasSteeringMessages?.();
+						if (typeof state === "boolean" || state?.immediate !== true) {
+							if (!(await Promise.race([steeringQueued, watchAbortedFalse]))) return;
+							if (!steeringWatchSignal.aborted) await Bun.sleep(STEERING_INTERRUPT_POLL_MS);
+							continue;
+						}
+					}
 					if (!(await Promise.race([steeringQueued, watchAbortedFalse]))) return;
 				}
 			})()
