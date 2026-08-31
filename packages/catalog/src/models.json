@@ -110946,9 +110946,9 @@
 				"image"
 			],
 			"cost": {
-				"input": 0.22,
-				"output": 0.66,
-				"cacheRead": 0.007,
+				"input": 0.44,
+				"output": 1.32,
+				"cacheRead": 0.014,
 				"cacheWrite": 0
 			},
 			"contextWindow": 1048576,
@@ -111202,8 +111202,8 @@
 				"cacheRead": 0.135,
 				"cacheWrite": 0
 			},
-			"contextWindow": 1024000,
-			"maxTokens": 384000,
+			"contextWindow": 1048576,
+			"maxTokens": 393216,
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
@@ -118475,8 +118475,8 @@
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
-			"contextWindow": 1048576,
-			"maxTokens": 16384,
+			"contextWindow": 128000,
+			"maxTokens": 115200,
 			"identity": {
 				"class": "meta",
 				"family": "llama"
@@ -141424,9 +141424,9 @@
 				"text"
 			],
 			"cost": {
-				"input": 0.0825,
-				"output": 0.33,
-				"cacheRead": 0.020625,
+				"input": 0.14,
+				"output": 0.58,
+				"cacheRead": 0.035,
 				"cacheWrite": 0
 			},
 			"contextWindow": 262144,
@@ -283736,9 +283736,9 @@
 				"image"
 			],
 			"cost": {
-				"input": 0.22,
-				"output": 0.66,
-				"cacheRead": 0.007,
+				"input": 0.44,
+				"output": 1.32,
+				"cacheRead": 0.014,
 				"cacheWrite": 0
 			},
 			"contextWindow": 1048576,
@@ -284015,9 +284015,9 @@
 				"text"
 			],
 			"cost": {
-				"input": 0.66,
-				"output": 1.9800000000000002,
-				"cacheRead": 0.022,
+				"input": 1.32,
+				"output": 3.9600000000000004,
+				"cacheRead": 0.044,
 				"cacheWrite": 0
 			},
 			"contextWindow": 1048576,
@@ -295534,9 +295534,9 @@
 				"image"
 			],
 			"cost": {
-				"input": 2.8499999999999996,
-				"output": 14.25,
-				"cacheRead": 0.28500000000000003,
+				"input": 3,
+				"output": 15,
+				"cacheRead": 0.3,
 				"cacheWrite": 0
 			},
 			"contextWindow": 1048576,
@@ -361180,7 +361180,13 @@
 			},
 			"requiresGlyphTokenization": true,
 			"tokenizer": "claude-v3",
-			"supportsComputerUse": false
+			"compat": {
+				"provider": "anthropic"
+			},
+			"supportsComputerUse": false,
+			"compatConfig": {
+				"provider": "anthropic"
+			}
 		},
 		"claude-sonnet-4-5": {
 			"id": "claude-sonnet-4-5",
@@ -361218,7 +361224,13 @@
 			},
 			"requiresGlyphTokenization": true,
 			"tokenizer": "claude-v3",
-			"supportsComputerUse": false
+			"compat": {
+				"provider": "anthropic"
+			},
+			"supportsComputerUse": false,
+			"compatConfig": {
+				"provider": "anthropic"
+			}
 		},
 		"claude-sonnet-4-6": {
 			"id": "claude-sonnet-4-6",
@@ -361256,7 +361268,13 @@
 			},
 			"requiresGlyphTokenization": true,
 			"tokenizer": "claude-v3",
-			"supportsComputerUse": false
+			"compat": {
+				"provider": "anthropic"
+			},
+			"supportsComputerUse": false,
+			"compatConfig": {
+				"provider": "anthropic"
+			}
 		},
 		"claude-sonnet-5": {
 			"id": "claude-sonnet-5",
@@ -361294,7 +361312,13 @@
 			},
 			"requiresGlyphTokenization": true,
 			"tokenizer": "claude-v5-sonnet",
-			"supportsComputerUse": false
+			"compat": {
+				"provider": "anthropic"
+			},
+			"supportsComputerUse": false,
+			"compatConfig": {
+				"provider": "anthropic"
+			}
 		},
 		"gemini-3-flash": {
 			"id": "gemini-3-flash",
@@ -361332,7 +361356,13 @@
 				"revision": "3.0.0"
 			},
 			"requiresGlyphTokenization": false,
-			"supportsComputerUse": false
+			"compat": {
+				"provider": "google"
+			},
+			"supportsComputerUse": false,
+			"compatConfig": {
+				"provider": "google"
+			}
 		},
 		"gemini-3.1-pro-preview": {
 			"id": "gemini-3.1-pro-preview",
@@ -361368,7 +361398,13 @@
 				"revision": "3.1.0"
 			},
 			"requiresGlyphTokenization": false,
-			"supportsComputerUse": false
+			"compat": {
+				"provider": "google"
+			},
+			"supportsComputerUse": false,
+			"compatConfig": {
+				"provider": "google"
+			}
 		},
 		"gemini-3.5-flash": {
 			"id": "gemini-3.5-flash",
@@ -361406,7 +361442,13 @@
 				"revision": "3.5.0"
 			},
 			"requiresGlyphTokenization": false,
-			"supportsComputerUse": false
+			"compat": {
+				"provider": "google"
+			},
+			"supportsComputerUse": false,
+			"compatConfig": {
+				"provider": "google"
+			}
 		},
 		"gpt-5-mini": {
 			"id": "gpt-5-mini",
@@ -361443,7 +361485,13 @@
 				"revision": "5.0.0"
 			},
 			"requiresGlyphTokenization": false,
-			"supportsComputerUse": false
+			"compat": {
+				"provider": "open_ai"
+			},
+			"supportsComputerUse": false,
+			"compatConfig": {
+				"provider": "open_ai"
+			}
 		},
 		"gpt-5-nano": {
 			"id": "gpt-5-nano",
@@ -361480,7 +361528,13 @@
 				"revision": "5.0.0"
 			},
 			"requiresGlyphTokenization": false,
-			"supportsComputerUse": false
+			"compat": {
+				"provider": "open_ai"
+			},
+			"supportsComputerUse": false,
+			"compatConfig": {
+				"provider": "open_ai"
+			}
 		},
 		"gpt-5.2": {
 			"id": "gpt-5.2",
@@ -361517,7 +361571,13 @@
 				"revision": "5.2.0"
 			},
 			"requiresGlyphTokenization": false,
-			"supportsComputerUse": false
+			"compat": {
+				"provider": "open_ai"
+			},
+			"supportsComputerUse": false,
+			"compatConfig": {
+				"provider": "open_ai"
+			}
 		},
 		"gpt-5.3-codex": {
 			"id": "gpt-5.3-codex",
@@ -361554,7 +361614,13 @@
 				"revision": "5.3.0"
 			},
 			"requiresGlyphTokenization": false,
-			"supportsComputerUse": false
+			"compat": {
+				"provider": "open_ai"
+			},
+			"supportsComputerUse": false,
+			"compatConfig": {
+				"provider": "open_ai"
+			}
 		},
 		"gpt-5.4": {
 			"id": "gpt-5.4",
@@ -361591,7 +361657,13 @@
 				"revision": "5.4.0"
 			},
 			"requiresGlyphTokenization": false,
-			"supportsComputerUse": false
+			"compat": {
+				"provider": "open_ai"
+			},
+			"supportsComputerUse": false,
+			"compatConfig": {
+				"provider": "open_ai"
+			}
 		},
 		"gpt-5.5": {
 			"id": "gpt-5.5",
@@ -361629,7 +361701,13 @@
 			},
 			"requiresGlyphTokenization": false,
 			"contextPromotionTarget": "zed-agent/gpt-5.4",
-			"supportsComputerUse": false
+			"compat": {
+				"provider": "open_ai"
+			},
+			"supportsComputerUse": false,
+			"compatConfig": {
+				"provider": "open_ai"
+			}
 		},
 		"gpt-5.6-luna": {
 			"id": "gpt-5.6-luna",
@@ -361667,7 +361745,13 @@
 				"revision": "5.6.0"
 			},
 			"requiresGlyphTokenization": false,
-			"supportsComputerUse": false
+			"compat": {
+				"provider": "open_ai"
+			},
+			"supportsComputerUse": false,
+			"compatConfig": {
+				"provider": "open_ai"
+			}
 		},
 		"gpt-5.6-sol": {
 			"id": "gpt-5.6-sol",
@@ -361705,7 +361789,13 @@
 				"revision": "5.6.0"
 			},
 			"requiresGlyphTokenization": false,
-			"supportsComputerUse": false
+			"compat": {
+				"provider": "open_ai"
+			},
+			"supportsComputerUse": false,
+			"compatConfig": {
+				"provider": "open_ai"
+			}
 		},
 		"gpt-5.6-terra": {
 			"id": "gpt-5.6-terra",
@@ -361743,7 +361833,13 @@
 				"revision": "5.6.0"
 			},
 			"requiresGlyphTokenization": false,
-			"supportsComputerUse": false
+			"compat": {
+				"provider": "open_ai"
+			},
+			"supportsComputerUse": false,
+			"compatConfig": {
+				"provider": "open_ai"
+			}
 		}
 	},
 	"zenmux": {

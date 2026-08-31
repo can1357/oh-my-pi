@@ -1,6 +1,7 @@
 import * as crypto from "node:crypto";
 import { supportsAnthropicSampling } from "@oh-my-pi/pi-catalog/compat/resolve";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
+import { classifyModel } from "@oh-my-pi/pi-catalog/identity";
 import { mapEffortToGoogleThinkingLevel } from "@oh-my-pi/pi-catalog/model-thinking";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import { parseZedCredentials, ZED_APP_VERSION, ZED_CLOUD_URL, ZED_HEADERS } from "@oh-my-pi/pi-catalog/wire/zed";
@@ -46,21 +47,39 @@ export interface ZedOptions extends StreamOptions {
 }
 export type ZedProviderKind = "anthropic" | "open_ai" | "google" | "x_ai";
 
-export function resolveProviderKind(modelId: string): ZedProviderKind {
-	const lower = modelId.toLowerCase();
-	if (lower.startsWith("claude-")) return "anthropic";
-	if (
-		lower.startsWith("gpt-") ||
-		lower.startsWith("o1") ||
-		lower.startsWith("o3") ||
-		lower.startsWith("codex") ||
-		lower.includes("openai")
-	) {
-		return "open_ai";
+function mapIdentityClassToZedProvider(identityClass: string | undefined): ZedProviderKind | undefined {
+	if (identityClass === "anthropic") return "anthropic";
+	if (identityClass === "openai") return "open_ai";
+	if (identityClass === "gemini") return "google";
+	if (identityClass === "xai") return "x_ai";
+	return undefined;
+}
+
+export function resolveProviderKind(modelOrId: Model<"zed-agent"> | string): ZedProviderKind {
+	if (typeof modelOrId !== "string") {
+		const compatProvider = ((modelOrId as Model<"zed-agent">).compat as { provider?: string } | undefined)?.provider;
+		if (compatProvider) {
+			if (
+				compatProvider === "anthropic" ||
+				compatProvider === "open_ai" ||
+				compatProvider === "google" ||
+				compatProvider === "x_ai"
+			) {
+				return compatProvider;
+			}
+			const mapped = mapIdentityClassToZedProvider(compatProvider);
+			if (mapped) return mapped;
+		}
+
+		const identityClass = modelOrId.identity?.class;
+		const mapped = mapIdentityClassToZedProvider(identityClass);
+		if (mapped) return mapped;
+
+		return resolveProviderKind(modelOrId.id);
 	}
-	if (lower.startsWith("gemini-")) return "google";
-	if (lower.startsWith("grok-")) return "x_ai";
-	return "anthropic";
+
+	const identity = classifyModel("zed-agent", modelOrId, { lenient: true });
+	return mapIdentityClassToZedProvider(identity.class) ?? "anthropic";
 }
 function extractToolChoiceFunctionName(choice: ToolChoice | undefined): string | undefined {
 	if (!choice || typeof choice === "string") return undefined;
@@ -374,7 +393,7 @@ function mapContextToOpenAiResponses(context: Context, model: Model<"zed-agent">
 				msg.provider === model.provider &&
 				msg.api === model.api &&
 				msg.model === model.id &&
-				resolveProviderKind(msg.model) === "open_ai";
+				resolveProviderKind(model) === "open_ai";
 
 			for (const block of msg.content) {
 				if (block.type === "text") {
@@ -829,7 +848,7 @@ export function streamZed(
 		let llmToken = userId
 			? await getOrMintZedLlmToken(userId, accessToken, options.signal, options.fetch)
 			: accessToken;
-		const providerKind = resolveProviderKind(model.id);
+		const providerKind = resolveProviderKind(model);
 		const providerRequest = buildZedProviderRequest(providerKind, context, model, options);
 
 		let completionBody: unknown = {
@@ -1743,8 +1762,15 @@ export function streamZed(
 									? `status_details: ${statusDetailsReason}`
 									: "Unknown error (no error details in response)";
 						throw new ProviderResponseError(message, { provider: model.provider, kind: "output" });
+					} else if (eventType === "error" || event.type === "error") {
+						const err = ((event.error ?? event) as { code?: string | number; message?: string }) ?? {};
+						const code = err.code ?? "unknown";
+						const message = err.message ?? "no message";
+						throw new ProviderResponseError(`Error Code ${code}: ${message}`, {
+							provider: model.provider,
+							kind: "output",
+						});
 					}
-
 					// ─── OPENAI CHAT & GOOGLE GEMINI EVENT FLAVORS ───
 					else if (Array.isArray(event.choices) && event.choices.length > 0) {
 						const choice = event.choices[0] as {

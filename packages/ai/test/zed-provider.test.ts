@@ -11,12 +11,22 @@ import { mockFetch } from "./helpers/fetch-mock";
 
 const zeroCost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
 
-function makeModel(spec: Omit<ModelSpec<"zed-agent">, "api" | "provider" | "baseUrl" | "cost">): Model<"zed-agent"> {
+function makeModel(
+	spec: Omit<
+		ModelSpec<"zed-agent">,
+		"api" | "provider" | "baseUrl" | "cost" | "reasoning" | "input" | "contextWindow" | "maxTokens"
+	> &
+		Partial<Pick<ModelSpec<"zed-agent">, "reasoning" | "input" | "contextWindow" | "maxTokens">>,
+): Model<"zed-agent"> {
 	return buildModel({
 		api: "zed-agent",
 		provider: "zed-agent",
 		baseUrl: "https://cloud.zed.dev",
 		cost: zeroCost,
+		reasoning: false,
+		input: ["text"],
+		contextWindow: 128_000,
+		maxTokens: 8_192,
 		...spec,
 	});
 }
@@ -30,6 +40,52 @@ describe("Zed Provider Payload Construction", () => {
 		expect(resolveProviderKind("claude-sonnet-4-6")).toBe("anthropic");
 		expect(resolveProviderKind("gemini-3.1-pro-preview")).toBe("google");
 		expect(resolveProviderKind("grok-2")).toBe("x_ai");
+	});
+
+	it("resolves provider kind from structured model compat and identity", () => {
+		const anthropicModel = makeModel({
+			id: "claude-sonnet-5",
+			name: "Claude Sonnet 5",
+		});
+		expect(resolveProviderKind(anthropicModel)).toBe("anthropic");
+
+		const openAiModel = makeModel({
+			id: "gpt-5.6-luna",
+			name: "GPT-5.6 Luna",
+		});
+		expect(resolveProviderKind(openAiModel)).toBe("open_ai");
+
+		const googleModel = makeModel({
+			id: "gemini-3.1-pro-preview",
+			name: "Gemini 3.1 Pro Preview",
+		});
+		expect(resolveProviderKind(googleModel)).toBe("google");
+
+		const xAiModel = makeModel({
+			id: "grok-2",
+			name: "Grok 2",
+		});
+		expect(resolveProviderKind(xAiModel)).toBe("x_ai");
+
+		const aliasedOpenAiModel = makeModel({
+			id: "my-custom-model",
+			name: "Internal GPT Alias",
+			compat: { provider: "open_ai" },
+		});
+		expect(resolveProviderKind(aliasedOpenAiModel)).toBe("open_ai");
+
+		const aliasedGoogleModel = makeModel({
+			id: "my-other-custom-model",
+			name: "Internal Gemini Alias",
+			compat: { provider: "google" },
+		});
+		expect(resolveProviderKind(aliasedGoogleModel)).toBe("google");
+		const taxonomyIdentityModel = {
+			...makeModel({ id: "vendor-model", name: "Vendor Model" }),
+			compat: {},
+			identity: { class: "gemini" },
+		} as Model<"zed-agent">;
+		expect(resolveProviderKind(taxonomyIdentityModel)).toBe("google");
 	});
 
 	it("preserves developer messages as developer-role Responses input", () => {
@@ -1050,5 +1106,55 @@ describe("Zed Provider Payload Construction", () => {
 			maxOutputTokens: 66_000,
 			thinkingConfig: { thinkingLevel: "MINIMAL" },
 		});
+	});
+
+	it("throws ProviderResponseError on standalone Responses error events", async () => {
+		const userId = "user_error_event";
+		const accessToken = "access-token-error-event";
+		const mockModel: Model<"zed-agent"> = makeModel({
+			id: "gpt-5.6-luna",
+			name: "GPT-5.6 Luna",
+			reasoning: true,
+			contextWindow: 400_000,
+			maxTokens: 128_000,
+			input: ["text", "image"],
+		});
+		const context: Context = {
+			messages: [{ role: "user", content: "hello", timestamp: 1 }],
+		};
+		const fetchMock: FetchImpl = mockFetch(async (_input, init) => {
+			const body = typeof init?.body === "string" ? (JSON.parse(init.body) as Record<string, unknown>) : undefined;
+			if (body?.organization_id === null) {
+				return new Response(JSON.stringify({ token: "llm-token-error-event" }), {
+					status: 200,
+					headers: { "content-type": "application/json" },
+				});
+			}
+			return new Response(
+				[
+					JSON.stringify({
+						event: {
+							type: "error",
+							error: { code: "invalid_request_error", message: "Invalid payload provided" },
+						},
+					}),
+				].join("\n"),
+				{
+					status: 200,
+					headers: { "content-type": "application/x-ndjson" },
+				},
+			);
+		});
+
+		try {
+			const result = await streamSimple(mockModel, context, {
+				apiKey: `${userId} ${accessToken}`,
+				fetch: fetchMock,
+			}).result();
+			expect(result.stopReason).toBe("error");
+			expect(result.errorMessage).toBe("Error Code invalid_request_error: Invalid payload provided");
+		} finally {
+			invalidateZedLlmToken(userId, accessToken);
+		}
 	});
 });

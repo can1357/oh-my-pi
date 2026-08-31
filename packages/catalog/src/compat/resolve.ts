@@ -30,6 +30,7 @@ import type {
 	ResolvedOpenAICompat,
 	ResolvedOpenAIResponsesCompat,
 	ResolvedOpenAISharedCompat,
+	ResolvedZedCompat,
 	ThinkingConfig,
 } from "../types";
 import { isAnthropicSigningProxyUrl, isAzureAnthropicRoute, isOfficialAnthropicApiUrl } from "./anthropic";
@@ -922,6 +923,22 @@ function resolveDevinPolicy(spec: ModelSpec<"devin-agent">, axes: ResolvedAxes):
 	return compat;
 }
 
+function resolveZedPolicy(spec: ModelSpec<"zed-agent">, facts: IdentityFacts): ResolvedZedCompat {
+	let provider = spec.compat?.provider;
+	if (!provider) {
+		if (facts.is("anthropic")) {
+			provider = "anthropic";
+		} else if (facts.is("gemini") || facts.is("google")) {
+			provider = "google";
+		} else if (facts.is("xai") || facts.is("x_ai")) {
+			provider = "x_ai";
+		} else {
+			provider = "open_ai";
+		}
+	}
+	return { provider };
+}
+
 function resolveGooglePolicy(
 	spec: ModelSpec<"google-generative-ai" | "google-vertex" | "google-gemini-cli">,
 	facts: IdentityFacts,
@@ -1253,6 +1270,8 @@ export function resolveModelPolicy(spec: ModelSpec<Api>): ResolvedModelPolicy<Ap
 		compat = resolveBedrockPolicy(spec, facts, axes);
 	} else if (specUsesApi(spec, "devin-agent")) {
 		compat = resolveDevinPolicy(spec, axes);
+	} else if (specUsesApi(spec, "zed-agent")) {
+		compat = resolveZedPolicy(spec, facts);
 	} else if (
 		specUsesApi(spec, "google-generative-ai") ||
 		specUsesApi(spec, "google-vertex") ||

@@ -1,7 +1,9 @@
 import { describe, expect, it, vi } from "bun:test";
+import { buildModel } from "../../src/build";
+import { resolveModelPolicy } from "../../src/compat/resolve";
 import { fetchZedModels } from "../../src/discovery/zed";
 import { Effort } from "../../src/effort";
-import type { FetchImpl } from "../../src/types";
+import type { FetchImpl, ModelSpec } from "../../src/types";
 import { ZED_APP_VERSION, ZED_CLOUD_URL, ZED_HEADERS } from "../../src/wire/zed";
 
 type PromiseOutcome<T> = { kind: "fulfilled"; value: T } | { kind: "rejected"; error: unknown };
@@ -183,8 +185,24 @@ describe("Zed Model Discovery", () => {
 		expect(grok?.contextWindow).toBe(256_000);
 		expect(grok?.maxTokens).toBe(8_192);
 		expect(grok?.input).toEqual(["text"]);
-	});
 
+		// 5. Assert compat.provider is preserved from discovered model.provider
+		expect(sonnet?.compat?.provider).toBe("anthropic");
+		expect(gpt?.compat?.provider).toBe("open_ai");
+		expect(grok?.compat?.provider).toBe("x_ai");
+
+		// 6. Assert discovered cost is seeded as neutral { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
+		expect(sonnet?.cost).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+		expect(gpt?.cost).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+		expect(grok?.cost).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+		if (!sonnet) throw new Error("Claude Sonnet discovery fixture was not returned");
+		expect(buildModel(sonnet).cost).toEqual({
+			input: 2.2,
+			output: 11.0,
+			cacheRead: 0.22,
+			cacheWrite: 2.75,
+		});
+	});
 	it("supports direct bearer token when no userId is present in credentials", async () => {
 		const recordedCalls: Array<{ url: string; headers: Record<string, string> }> = [];
 
@@ -517,5 +535,109 @@ describe("Zed Model Discovery", () => {
 		} finally {
 			vi.useRealTimers();
 		}
+	});
+
+	it("resolves ZedCompat provider and applies KDL cost-patch rules via buildModel", () => {
+		const sonnetSpec: ModelSpec<"zed-agent"> = {
+			id: "claude-sonnet-5",
+			name: "Claude Sonnet 5",
+			api: "zed-agent",
+			provider: "zed-agent",
+			baseUrl: ZED_CLOUD_URL,
+			reasoning: true,
+			input: ["text", "image"],
+			contextWindow: 1_000_000,
+			maxTokens: 64_000,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			compat: { provider: "anthropic" },
+		};
+
+		const sonnetPolicy = resolveModelPolicy(sonnetSpec);
+		expect(sonnetPolicy.compat.provider).toBe("anthropic");
+
+		const sonnetModel = buildModel(sonnetSpec);
+		expect(sonnetModel.compat.provider).toBe("anthropic");
+		expect(sonnetModel.cost).toEqual({
+			input: 2.2,
+			output: 11.0,
+			cacheRead: 0.22,
+			cacheWrite: 2.75,
+		});
+
+		// Fallback without explicit compat.provider resolves from taxonomy identity.class
+		const gptSpec: ModelSpec<"zed-agent"> = {
+			id: "gpt-5.6-sol",
+			name: "GPT-5.6 Sol",
+			api: "zed-agent",
+			provider: "zed-agent",
+			baseUrl: ZED_CLOUD_URL,
+			reasoning: true,
+			input: ["text", "image"],
+			contextWindow: 1_000_000,
+			maxTokens: 16_384,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		};
+
+		const gptPolicy = resolveModelPolicy(gptSpec);
+		expect(gptPolicy.compat.provider).toBe("open_ai");
+
+		const gptModel = buildModel(gptSpec);
+		expect(gptModel.compat.provider).toBe("open_ai");
+		expect(gptModel.cost).toEqual({
+			input: 5.5,
+			output: 33.0,
+			cacheRead: 0.55,
+			cacheWrite: 6.875,
+		});
+
+		const grokSpec: ModelSpec<"zed-agent"> = {
+			id: "grok-4.20",
+			name: "Grok 4.20",
+			api: "zed-agent",
+			provider: "zed-agent",
+			baseUrl: ZED_CLOUD_URL,
+			reasoning: false,
+			input: ["text"],
+			contextWindow: 256_000,
+			maxTokens: 8_192,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		};
+
+		const grokPolicy = resolveModelPolicy(grokSpec);
+		expect(grokPolicy.compat.provider).toBe("x_ai");
+
+		const grokModel = buildModel(grokSpec);
+		expect(grokModel.compat.provider).toBe("x_ai");
+		expect(grokModel.cost).toEqual({
+			input: 2.2,
+			output: 11.0,
+			cacheRead: 0.55,
+			cacheWrite: 2.75,
+		});
+
+		const geminiSpec: ModelSpec<"zed-agent"> = {
+			id: "gemini-3-flash",
+			name: "Gemini 3 Flash",
+			api: "zed-agent",
+			provider: "zed-agent",
+			baseUrl: ZED_CLOUD_URL,
+			reasoning: true,
+			input: ["text", "image"],
+			contextWindow: 1_000_000,
+			maxTokens: 8_192,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		};
+
+		const geminiPolicy = resolveModelPolicy(geminiSpec);
+		expect(geminiPolicy.compat.provider).toBe("google");
+
+		const geminiModel = buildModel(geminiSpec);
+		expect(geminiModel.compat.provider).toBe("google");
+		expect(geminiModel.cost).toEqual({
+			input: 0.55,
+			output: 3.3,
+			cacheRead: 0.1375,
+			cacheWrite: 0.6875,
+		});
 	});
 });

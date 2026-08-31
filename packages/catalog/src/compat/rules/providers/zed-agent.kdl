@@ -1,0 +1,123 @@
+// Provider-wire compat for "zed-agent"; official rate card and deployment contract.
+
+provider "zed-agent" {
+	// Anthropic
+	models "claude-sonnet-5" {
+		cost-patch {
+			input 2.2
+			output 11.0
+			cache-read 0.22
+			cache-write 2.75
+		}
+	}
+	models "claude-sonnet-4-6" "claude-sonnet-4-5" {
+		cost-patch {
+			input 3.3
+			output 16.5
+			cache-read 0.33
+			cache-write 4.125
+		}
+	}
+	models "claude-haiku-4-5" "claude-haiku-4-6" {
+		cost-patch {
+			input 1.1
+			output 5.5
+			cache-read 0.11
+			cache-write 1.375
+		}
+	}
+	models "claude-opus-5" "claude-opus-4-6" "claude-opus-4-5" {
+		cost-patch {
+			input 5.5
+			output 27.5
+			cache-read 0.55
+			cache-write 6.875
+		}
+	}
+
+	// OpenAI
+	models "gpt-5.6-sol" "gpt-5.5" {
+		cost-patch {
+			input 5.5
+			output 33.0
+			cache-read 0.55
+			cache-write 6.875
+		}
+	}
+	models "gpt-5.6-terra" "gpt-5.4" {
+		cost-patch {
+			input 2.75
+			output 16.5
+			cache-read 0.275
+			cache-write 3.4375
+		}
+	}
+	models "gpt-5.6-luna" {
+		cost-patch {
+			input 1.1
+			output 6.6
+			cache-read 0.11
+			cache-write 1.375
+		}
+	}
+	models "gpt-5.3-codex" "gpt-5.2" {
+		cost-patch {
+			input 1.925
+			output 15.4
+			cache-read 0.1925
+			cache-write 2.406
+		}
+	}
+	models "gpt-5-mini" {
+		cost-patch {
+			input 0.275
+			output 2.2
+			cache-read 0.0275
+			cache-write 0.343
+		}
+	}
+	models "gpt-5-nano" {
+		cost-patch {
+			input 0.055
+			output 0.44
+			cache-read 0.0055
+			cache-write 0.068
+		}
+	}
+
+	// Google
+	models "gemini-3.1-pro-preview" {
+		cost-patch {
+			input 2.2
+			output 13.2
+			cache-read 0.55
+			cache-write 2.75
+		}
+	}
+	models "gemini-3.5-flash" {
+		cost-patch {
+			input 1.65
+			output 9.9
+			cache-read 0.4125
+			cache-write 2.0625
+		}
+	}
+	models "gemini-3-flash" {
+		cost-patch {
+			input 0.55
+			output 3.3
+			cache-read 0.1375
+			cache-write 0.6875
+		}
+	}
+
+	// xAI Grok
+	models "grok-2" "grok-4.20" {
+		cost-patch {
+			input 2.2
+			output 11.0
+			cache-read 0.55
+			cache-write 2.75
+		}
+	}
+}

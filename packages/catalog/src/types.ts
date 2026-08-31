@@ -858,6 +858,15 @@ export interface DevinCompat {
 
 /** Fully-resolved devin-agent compat view. */
 export type ResolvedDevinCompat = Required<DevinCompat>;
+
+export type ZedWireProvider = "anthropic" | "open_ai" | "google" | "x_ai";
+
+/** Compatibility settings for zed-agent API. */
+export interface ZedCompat {
+	provider?: ZedWireProvider;
+}
+
+export type ResolvedZedCompat = ZedCompat;
 /**
  * Compatibility settings for the Google API family (google-generative-ai,
  * google-vertex, google-gemini-cli). Class-driven defaults come from the
@@ -919,9 +928,11 @@ export type CompatConfigOf<TApi extends Api> = TApi extends
 			? BedrockCompat
 			: TApi extends "devin-agent"
 				? DevinCompat
-				: TApi extends "google-generative-ai" | "google-vertex" | "google-gemini-cli"
-					? GoogleCompat
-					: undefined;
+				: TApi extends "zed-agent"
+					? ZedCompat
+					: TApi extends "google-generative-ai" | "google-vertex" | "google-gemini-cli"
+						? GoogleCompat
+						: undefined;
 
 /** Resolved compat for a given API: complete record, materialized once by `buildModel`. */
 export type CompatOf<TApi extends Api> = TApi extends "openrouter"
@@ -936,9 +947,11 @@ export type CompatOf<TApi extends Api> = TApi extends "openrouter"
 					? ResolvedBedrockCompat
 					: TApi extends "devin-agent"
 						? ResolvedDevinCompat
-						: TApi extends "google-generative-ai" | "google-vertex" | "google-gemini-cli"
-							? ResolvedGoogleCompat
-							: undefined;
+						: TApi extends "zed-agent"
+							? ResolvedZedCompat
+							: TApi extends "google-generative-ai" | "google-vertex" | "google-gemini-cli"
+								? ResolvedGoogleCompat
+								: undefined;
 
 /** Provider-native compaction endpoint configuration for one model. */
 export interface RemoteCompactionConfig<TApi extends Api = Api> {

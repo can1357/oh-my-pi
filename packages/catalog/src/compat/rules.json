@@ -78,6 +78,7 @@
 		"providers/xiaomi.kdl",
 		"providers/yolo-auto.kdl",
 		"providers/zai.kdl",
+		"providers/zed-agent.kdl",
 		"providers/zenmux.kdl",
 		"providers/zhipu-coding-plan.kdl",
 		"runtime/behavior.kdl",
@@ -12657,6 +12658,318 @@
 				],
 				"thinking": {
 					"mode": "anthropic-budget-effort"
+				}
+			},
+			{
+				"source": "providers/zed-agent.kdl:5",
+				"providers": [
+					"zed-agent"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "claude-sonnet-5"
+					}
+				],
+				"catalog": {
+					"costPatch": {
+						"input": 2.2,
+						"output": 11,
+						"cache-read": 0.22,
+						"cache-write": 2.75
+					}
+				}
+			},
+			{
+				"source": "providers/zed-agent.kdl:13",
+				"providers": [
+					"zed-agent"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "claude-sonnet-4-6"
+					},
+					{
+						"kind": "exact",
+						"value": "claude-sonnet-4-5"
+					}
+				],
+				"catalog": {
+					"costPatch": {
+						"input": 3.3,
+						"output": 16.5,
+						"cache-read": 0.33,
+						"cache-write": 4.125
+					}
+				}
+			},
+			{
+				"source": "providers/zed-agent.kdl:21",
+				"providers": [
+					"zed-agent"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "claude-haiku-4-5"
+					},
+					{
+						"kind": "exact",
+						"value": "claude-haiku-4-6"
+					}
+				],
+				"catalog": {
+					"costPatch": {
+						"input": 1.1,
+						"output": 5.5,
+						"cache-read": 0.11,
+						"cache-write": 1.375
+					}
+				}
+			},
+			{
+				"source": "providers/zed-agent.kdl:29",
+				"providers": [
+					"zed-agent"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "claude-opus-5"
+					},
+					{
+						"kind": "exact",
+						"value": "claude-opus-4-6"
+					},
+					{
+						"kind": "exact",
+						"value": "claude-opus-4-5"
+					}
+				],
+				"catalog": {
+					"costPatch": {
+						"input": 5.5,
+						"output": 27.5,
+						"cache-read": 0.55,
+						"cache-write": 6.875
+					}
+				}
+			},
+			{
+				"source": "providers/zed-agent.kdl:39",
+				"providers": [
+					"zed-agent"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "gpt-5.6-sol"
+					},
+					{
+						"kind": "exact",
+						"value": "gpt-5.5"
+					}
+				],
+				"catalog": {
+					"costPatch": {
+						"input": 5.5,
+						"output": 33,
+						"cache-read": 0.55,
+						"cache-write": 6.875
+					}
+				}
+			},
+			{
+				"source": "providers/zed-agent.kdl:47",
+				"providers": [
+					"zed-agent"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "gpt-5.6-terra"
+					},
+					{
+						"kind": "exact",
+						"value": "gpt-5.4"
+					}
+				],
+				"catalog": {
+					"costPatch": {
+						"input": 2.75,
+						"output": 16.5,
+						"cache-read": 0.275,
+						"cache-write": 3.4375
+					}
+				}
+			},
+			{
+				"source": "providers/zed-agent.kdl:55",
+				"providers": [
+					"zed-agent"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "gpt-5.6-luna"
+					}
+				],
+				"catalog": {
+					"costPatch": {
+						"input": 1.1,
+						"output": 6.6,
+						"cache-read": 0.11,
+						"cache-write": 1.375
+					}
+				}
+			},
+			{
+				"source": "providers/zed-agent.kdl:63",
+				"providers": [
+					"zed-agent"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "gpt-5.3-codex"
+					},
+					{
+						"kind": "exact",
+						"value": "gpt-5.2"
+					}
+				],
+				"catalog": {
+					"costPatch": {
+						"input": 1.925,
+						"output": 15.4,
+						"cache-read": 0.1925,
+						"cache-write": 2.406
+					}
+				}
+			},
+			{
+				"source": "providers/zed-agent.kdl:71",
+				"providers": [
+					"zed-agent"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "gpt-5-mini"
+					}
+				],
+				"catalog": {
+					"costPatch": {
+						"input": 0.275,
+						"output": 2.2,
+						"cache-read": 0.0275,
+						"cache-write": 0.343
+					}
+				}
+			},
+			{
+				"source": "providers/zed-agent.kdl:79",
+				"providers": [
+					"zed-agent"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "gpt-5-nano"
+					}
+				],
+				"catalog": {
+					"costPatch": {
+						"input": 0.055,
+						"output": 0.44,
+						"cache-read": 0.0055,
+						"cache-write": 0.068
+					}
+				}
+			},
+			{
+				"source": "providers/zed-agent.kdl:89",
+				"providers": [
+					"zed-agent"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "gemini-3.1-pro-preview"
+					}
+				],
+				"catalog": {
+					"costPatch": {
+						"input": 2.2,
+						"output": 13.2,
+						"cache-read": 0.55,
+						"cache-write": 2.75
+					}
+				}
+			},
+			{
+				"source": "providers/zed-agent.kdl:97",
+				"providers": [
+					"zed-agent"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "gemini-3.5-flash"
+					}
+				],
+				"catalog": {
+					"costPatch": {
+						"input": 1.65,
+						"output": 9.9,
+						"cache-read": 0.4125,
+						"cache-write": 2.0625
+					}
+				}
+			},
+			{
+				"source": "providers/zed-agent.kdl:105",
+				"providers": [
+					"zed-agent"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "gemini-3-flash"
+					}
+				],
+				"catalog": {
+					"costPatch": {
+						"input": 0.55,
+						"output": 3.3,
+						"cache-read": 0.1375,
+						"cache-write": 0.6875
+					}
+				}
+			},
+			{
+				"source": "providers/zed-agent.kdl:115",
+				"providers": [
+					"zed-agent"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "grok-2"
+					},
+					{
+						"kind": "exact",
+						"value": "grok-4.20"
+					}
+				],
+				"catalog": {
+					"costPatch": {
+						"input": 2.2,
+						"output": 11,
+						"cache-read": 0.55,
+						"cache-write": 2.75
+					}
 				}
 			},
 			{

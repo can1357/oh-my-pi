@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { buildZedProviderRequest, streamZed } from "../src/providers/zed";
 import { invalidateZedLlmToken } from "../src/registry/oauth/zed-token-pool";
+import { streamSimple } from "../src/stream";
 import type {
 	AssistantMessage,
 	AssistantMessageEvent,
@@ -508,6 +509,36 @@ describe("Zed provider protocol regressions", () => {
 		expect(run.events.some(event => event.type === "done")).toBe(false);
 		expect(run.events.at(-1)?.type).toBe("error");
 	});
+	it("surfaces standalone Responses error events instead of completing an empty turn", async () => {
+		const fetchMock: FetchImpl = mockFetch(async () =>
+			ndjsonResponse([
+				{
+					event: {
+						type: "error",
+						error: { code: "custom_err_code", message: "custom stream error" },
+					},
+				},
+				{ status: "stream_ended" },
+			]),
+		);
+
+		const stream = streamSimple(makeModel("gpt-5.6-luna"), userContext(), {
+			apiKey: "direct-zed-token",
+			fetch: fetchMock,
+		});
+		const events: AssistantMessageEvent[] = [];
+		for await (const event of stream) events.push(event);
+		const result = await stream.result();
+
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain("Error Code custom_err_code: custom stream error");
+		expect(result.content).not.toEqual([]);
+		expect(result.content).toEqual([
+			{ type: "text", text: "Error: Error Code custom_err_code: custom stream error" },
+		]);
+		expect(events.some(event => event.type === "done")).toBe(false);
+		expect(events.at(-1)?.type).toBe("error");
+	});
 
 	it("rejects prompt-level Gemini safety blocks instead of completing", async () => {
 		const run = await runZedStream(makeModel("gemini-3-flash", true), [
@@ -686,8 +717,8 @@ describe("Zed provider protocol regressions", () => {
 			cacheWrite: 0,
 			totalTokens: 128,
 		});
-		expect(run.result.usage.cost.input).toBeCloseTo(45 / 1_000_000, 12);
-		expect(run.result.usage.cost.cacheRead).toBeCloseTo((75 * 0.25) / 1_000_000, 12);
+		expect(run.result.usage.cost.input).toBeCloseTo((45 * 1.1) / 1_000_000, 12);
+		expect(run.result.usage.cost.cacheRead).toBeCloseTo((75 * 0.11) / 1_000_000, 12);
 	});
 
 	it("includes Gemini thought tokens in output usage and reasoning accounting", async () => {
