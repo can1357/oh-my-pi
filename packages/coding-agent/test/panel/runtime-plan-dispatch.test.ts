@@ -1,14 +1,37 @@
-import { expect, mock, test } from "bun:test";
+import { afterEach, expect, test, vi } from "bun:test";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createPanelPersonaAgent, type PanelPersona, renderPanelAssignment } from "@oh-my-pi/pi-coding-agent/panel";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { preparePanelRun, runPanel } from "../../src/panel/runtime";
 import type { StructuredSubagentRequest, StructuredSubagentResult } from "../../src/task/structured-subagent";
+import * as structuredSubagentModule from "../../src/task/structured-subagent";
 
 const dispatched: StructuredSubagentRequest[] = [];
+let restoreDispatch = (): void => {};
 
-mock.module("../../src/task/structured-subagent", () => ({
-	runStructuredSubagent: async (request: StructuredSubagentRequest) => {
+afterEach(() => {
+	restoreDispatch();
+	restoreDispatch = () => {};
+	dispatched.length = 0;
+});
+
+const reviewer: PanelPersona = {
+	label: "Initial reviewer",
+	modes: ["answer"],
+	instructions: "Assess the initial design for risks.",
+	tools: "workspace-read",
+};
+
+const implementer: PanelPersona = {
+	label: "Initial implementer",
+	modes: ["answer"],
+	instructions: "Assess the initial design for implementation constraints.",
+	tools: "none",
+};
+
+test("runtime dispatches the reviewed plan after settings and model availability change", async () => {
+	const dispatchSpy = vi.spyOn(structuredSubagentModule, "runStructuredSubagent").mockImplementation(async request => {
 		dispatched.push(request);
 		return {
 			result: {
@@ -26,26 +49,8 @@ mock.module("../../src/task/structured-subagent", () => ({
 				requests: 1,
 			},
 		} as StructuredSubagentResult;
-	},
-}));
-
-const { preparePanelRun, runPanel } = await import("../../src/panel/runtime");
-
-const reviewer: PanelPersona = {
-	label: "Initial reviewer",
-	modes: ["answer"],
-	instructions: "Assess the initial design for risks.",
-	tools: "workspace-read",
-};
-
-const implementer: PanelPersona = {
-	label: "Initial implementer",
-	modes: ["answer"],
-	instructions: "Assess the initial design for implementation constraints.",
-	tools: "none",
-};
-
-test("runtime dispatches the reviewed plan after settings and model availability change", async () => {
+	});
+	restoreDispatch = () => dispatchSpy.mockRestore();
 	const claude = getBundledModel("anthropic", "claude-sonnet-4-5");
 	const gpt = getBundledModel("openai", "gpt-5.4");
 	if (!claude || !gpt) throw new Error("Test models not found");
