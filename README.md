@@ -260,7 +260,7 @@ Stealth's on by default, so pages see a normal user instead of a headless bot. T
 
 **Files & search**
 
-- `read` — files, dirs, archives, SQLite, PDFs, notebooks, URLs, remote `ssh://` paths, and internal `://` schemes through one path.
+- `read` — files, dirs, archives, SQLite, PDFs, notebooks, URLs, remote `ssh://` paths, and [internal URL schemes](docs/internal-urls.md) through one path.
 - `write` — create or overwrite a file, archive entry, or SQLite row.
 - `edit` — hashline patches with content-hash anchors and stale-anchor recovery.
 - `ast_edit` — structural rewrites previewed before apply, via ast-grep.
