@@ -221,9 +221,8 @@ function splitIncompleteTodosSection(summary: string): { before: string; body: s
 }
 
 const INCOMPLETE_TODO_TASK_RE =
-	/^\s+- \[(pending|in_progress|abandoned|blocked)\] (.+?)(?:\s+<!--\s*blocker:\s*(.*?)\s*-->)?$/;
-const INCOMPLETE_TODO_PHASE_RE = /^- (.+)$/;
-const INCOMPLETE_TODO_OVERFLOW_RE = /^- \+ \d+ more$/;
+	/^\s+- \[(pending|in_progress|abandoned|blocked)\] (.*?)(?:\s+<!--\s*blocker:\s*(.*?)\s*-->)?$/;
+const INCOMPLETE_TODO_PHASE_RE = /^- (.*)$/;
 
 /**
  * Reconstruct leftover incomplete phases from a compaction summary's standing
@@ -235,8 +234,9 @@ export function parseIncompleteTodosFromSummary(summary: string): TodoPhase[] {
 	if (!split) return [];
 	const phases: TodoPhase[] = [];
 	for (const line of split.body.split(/\r?\n/)) {
-		if (INCOMPLETE_TODOS_HEADING_RE.test(line) || INCOMPLETE_TODO_OVERFLOW_RE.test(line)) continue;
+		if (INCOMPLETE_TODOS_HEADING_RE.test(line)) continue;
 		if (line.trim() === "(none)") continue;
+		// Durable section never emits `- + N more`; treat that shape as a real phase name.
 		const task = INCOMPLETE_TODO_TASK_RE.exec(line);
 		if (task) {
 			const last = phases.at(-1);
@@ -250,7 +250,7 @@ export function parseIncompleteTodosFromSummary(summary: string): TodoPhase[] {
 			continue;
 		}
 		const phase = INCOMPLETE_TODO_PHASE_RE.exec(line);
-		if (phase && !INCOMPLETE_TODO_OVERFLOW_RE.test(line)) {
+		if (phase) {
 			phases.push({ name: decodeIncompleteTodoTitle(phase[1]), tasks: [] });
 		}
 	}

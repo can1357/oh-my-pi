@@ -505,6 +505,21 @@ describe("TodoTool operations", () => {
 		]);
 	});
 
+	it("reserves exact-phase matches before content-only rename fallback", () => {
+		const prior = [
+			{ name: "A", tasks: [{ content: "Ship", status: "pending" as const }] },
+			{ name: "B", tasks: [{ content: "Ship", status: "abandoned" as const }] },
+		];
+		// Renamed B sorts first; must not consume A's pending Ship via any-phase FIFO.
+		const parsed = [
+			{ name: "B-renamed", tasks: [{ content: "Ship", status: "abandoned" as const }] },
+			{ name: "A", tasks: [{ content: "Ship", status: "pending" as const }] },
+		];
+		const merged = applyUserMarkdownPhases(prior, parsed);
+		expect(merged[0]?.tasks[0]?.droppedBy).toBeUndefined();
+		expect(merged[1]?.tasks[0]?.status).toBe("pending");
+	});
+
 	it("preserves model-drop provenance when a phase is renamed in /todo edit", () => {
 		const prior: TodoPhase[] = [
 			{ name: "Old phase", tasks: [{ content: "model dropped", status: "abandoned" }] },

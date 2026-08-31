@@ -930,13 +930,22 @@ function takePriorOccurrenceAnyPhase(
 export function applyUserMarkdownPhases(prior: TodoPhase[], parsed: TodoPhase[]): TodoPhase[] {
 	const { queues, empty } = buildPriorOccurrenceLookup(prior);
 
-	return parsed.map(phase => ({
+	// Pass 1: reserve every exact phase+content match so a renamed phase that
+	// sorts earlier cannot steal another phase's pending occurrence via the
+	// content-only fallback (which would mis-stamp model drops as user cancels).
+	const exact = parsed.map(phase => ({
 		name: phase.name,
 		tasks: phase.tasks.map(task => {
 			const next = cloneTask(task);
-			// Consume FIFO for every status so a leading non-abandoned duplicate
-			// does not leave a later model-abandoned sibling matched against it.
-			let prev = takePriorOccurrence(queues, phase.name, next.content);
+			const prev = takePriorOccurrence(queues, phase.name, next.content);
+			return { next, prev };
+		}),
+	}));
+
+	return exact.map(phase => ({
+		name: phase.name,
+		tasks: phase.tasks.map(({ next, prev: exactPrev }) => {
+			let prev = exactPrev;
 			if (!prev) prev = takePriorOccurrenceAnyPhase(queues, next.content);
 			if (next.status !== "abandoned") return next;
 			if (shouldStampAbandonedAsUser(prev, empty, next)) {
@@ -955,11 +964,18 @@ export function applyUserMarkdownPhases(prior: TodoPhase[], parsed: TodoPhase[])
 export function applyRpcTodoProvenance(prior: TodoPhase[], incoming: TodoPhase[]): TodoPhase[] {
 	const { queues, empty } = buildPriorOccurrenceLookup(prior);
 
-	return incoming.map(phase => ({
+	const exact = incoming.map(phase => ({
+		phase,
+		tasks: phase.tasks.map(task => ({
+			task,
+			prev: takePriorOccurrence(queues, phase.name, task.content),
+		})),
+	}));
+
+	return exact.map(({ phase, tasks }) => ({
 		...phase,
-		tasks: phase.tasks.map(task => {
-			// Same FIFO consume-all-statuses rule as applyUserMarkdownPhases.
-			let prev = takePriorOccurrence(queues, phase.name, task.content);
+		tasks: tasks.map(({ task, prev: exactPrev }) => {
+			let prev = exactPrev;
 			if (!prev) prev = takePriorOccurrenceAnyPhase(queues, task.content);
 			if (task.status !== "abandoned") return task;
 			if (!shouldStampAbandonedAsUser(prev, empty, task)) return task;

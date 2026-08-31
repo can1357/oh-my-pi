@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Durable incomplete-todo snapshots round-trip empty phase/title fields, keep overflow-shaped phase names, and reserve exact-phase provenance before rename fallback.
 - Incomplete-todo durable snapshots preserve blocked tasks, encode CRLF/CR/LF distinctly, and keep model-drop provenance across `/todo edit` phase renames.
 
 ### Added
