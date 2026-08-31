@@ -2376,20 +2376,22 @@ export class AuthStorage {
 			});
 
 		if (credentials.length === 0) return undefined;
-		if (credentials.length === 1) return credentials[0];
+		if (credentials.length === 1) {
+			const only = credentials[0]!;
+			return this.#tryReserveApiKeySelection(provider, only, options?.requestId) ? only : undefined;
+		}
 
 		const providerKey = this.#getProviderTypeKey(provider, "api_key");
 		const order = this.#getCredentialOrder(providerKey, sessionId, credentials.length);
-		const fallback = credentials[order[0]];
 		const strategy = this.#rankingStrategyResolver?.(provider);
 		if (!strategy) {
 			for (const idx of order) {
 				const candidate = credentials[idx];
 				if (!this.#isCredentialBlocked(provider, providerKey, candidate.index, undefined, options?.requestId)) {
-					return candidate;
+					if (this.#tryReserveApiKeySelection(provider, candidate, options?.requestId)) return candidate;
 				}
 			}
-			return fallback;
+			return undefined;
 		}
 
 		const rankingContext: CredentialRankingContext = { modelId: options?.modelId };
@@ -2406,7 +2408,49 @@ export class AuthStorage {
 			blockScope,
 			blockScopes,
 		});
-		return candidates[0]?.selection ?? fallback;
+		for (const ranked of candidates) {
+			if (this.#tryReserveApiKeySelection(provider, ranked.selection, options?.requestId)) {
+				return ranked.selection;
+			}
+		}
+		return undefined;
+	}
+
+	/** Resolve a reserved API-key selection; release the turn hold if the helper yields no secret. */
+	async #resolveReservedApiKey(
+		provider: string,
+		sessionId: string | undefined,
+		selection: ApiKeySelection,
+		requestId: string | undefined,
+	): Promise<string | undefined> {
+		try {
+			const resolved = await this.#configValueResolver(selection.credential.key);
+			if (resolved === undefined || resolved === "") {
+				if (requestId) this.releaseTurnReservation(requestId);
+				return undefined;
+			}
+			this.#recordSessionCredential(provider, sessionId, "api_key", selection.index);
+			return resolved;
+		} catch (error) {
+			if (requestId) this.releaseTurnReservation(requestId);
+			throw error;
+		}
+	}
+
+	/** Acquire an exclusive turn reservation for a stored API-key row when requestId is set. */
+	#tryReserveApiKeySelection(
+		provider: string,
+		selection: ApiKeySelection,
+		requestId: string | undefined,
+	): boolean {
+		if (!requestId) return true;
+		const reserveId = this.#getStoredCredentials(provider)[selection.index]?.id;
+		if (reserveId === undefined) return true;
+		return this.tryAcquireTurnReservation({
+			credentialId: reserveId,
+			incarnation: this.getCredentialIncarnation(reserveId),
+			requestId,
+		}).ok;
 	}
 
 	#clearProviderSessionCredentialCache(provider: string): void {
@@ -6092,8 +6136,13 @@ export class AuthStorage {
 			credential => credential.source === "login",
 		);
 		if (loginApiKeySelection) {
-			this.#recordSessionCredential(provider, sessionId, "api_key", loginApiKeySelection.index);
-			return this.#configValueResolver(loginApiKeySelection.credential.key);
+			const resolved = await this.#resolveReservedApiKey(
+				provider,
+				sessionId,
+				loginApiKeySelection,
+				options?.requestId,
+			);
+			if (resolved !== undefined) return resolved;
 		}
 
 		// Past OAuth: the session sticky (if any) is stale — the request authenticates via
@@ -6110,8 +6159,13 @@ export class AuthStorage {
 			credential => credential.source !== "login",
 		);
 		if (apiKeySelection) {
-			this.#recordSessionCredential(provider, sessionId, "api_key", apiKeySelection.index);
-			return this.#configValueResolver(apiKeySelection.credential.key);
+			const resolved = await this.#resolveReservedApiKey(
+				provider,
+				sessionId,
+				apiKeySelection,
+				options?.requestId,
+			);
+			if (resolved !== undefined) return resolved;
 		}
 
 		// Fall back to custom resolver (e.g., models.json custom providers)
