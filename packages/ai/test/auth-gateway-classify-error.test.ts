@@ -236,3 +236,33 @@ describe("classifyGatewayError authoritative-status precedence", () => {
 		expect(c.disposition).toBe("context_overflow");
 	});
 });
+
+describe("classifyGatewayError review follow-ups", () => {
+	it("does not let abort wording override an authoritative provider status", () => {
+		const c = classifyGatewayError(Object.assign(new Error("HTTP 503: upstream request aborted"), { status: 503 }));
+		expect(c.status).toBe(503);
+		expect(c.owner).toBe("provider");
+		expect(c.disposition).not.toBe("cancelled");
+	});
+
+	it("keeps no-status overflow evidence terminal instead of provider_unavailable", () => {
+		const c = classifyGatewayError(new Error("prompt is too long: context length exceeded"));
+		expect(c.disposition).toBe("context_overflow");
+		expect(c.disposition).not.toBe("provider_unavailable");
+	});
+});
+
+describe("classifyGatewayError policy before auth", () => {
+	it("maps 403 cyber_policy Trusted Access denials to policy_terminal", () => {
+		const c = classifyGatewayError(
+			Object.assign(
+				new Error(
+					"Codex error event: This content was flagged for possible cybersecurity risk. Join Trusted Access for Cyber. (code=cyber_policy)",
+				),
+				{ status: 403 },
+			),
+		);
+		expect(c.owner).toBe("policy");
+		expect(c.disposition).toBe("policy_terminal");
+	});
+});
