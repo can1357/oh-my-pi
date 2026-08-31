@@ -1,8 +1,8 @@
 // Reviewed fallback metadata for the European OpenAI-compatible gateways.
 // Static seeds retain only identity and transport; buildModel applies these
 // facts equally to offline seeds and sparse discovery rows. Pricing, limits,
-// and tool capability rules are fallbacks so explicit provider metadata remains
-// authoritative.
+// input modalities, and tool capability rules are fallbacks so explicit provider
+// metadata remains authoritative.
 
 provider "aki-io" {
 	models "kimi-k2.7-code-1100b" {
@@ -77,7 +77,7 @@ provider "eurouter" {
 			cache-read 0.0
 			cache-write 0.0
 		}
-		input-modalities "text" "image"
+		input-modalities-fallback "text" "image"
 		limits-fallback {
 			context-window 262144
 		}

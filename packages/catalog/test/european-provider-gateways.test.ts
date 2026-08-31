@@ -931,6 +931,28 @@ describe("European gateway provider catalog support", () => {
 		]);
 	});
 
+	test("preserves EURouter explicit text-only input over catalog fallbacks", async () => {
+		const fetchMock: FetchImpl = vi.fn(async () => {
+			return Response.json({
+				data: [
+					{
+						id: "mistral-large-3",
+						name: "Mistral Large 3",
+						input_modalities: ["text"],
+					},
+				],
+			});
+		});
+
+		const models = await eurouterModelManagerOptions({ fetch: fetchMock }).fetchDynamicModels?.();
+		const model = models?.[0];
+		if (!model) throw new Error("Expected EURouter discovery result");
+		expect(model.input).toEqual(["text"]);
+
+		const cachedSpec = JSON.parse(JSON.stringify(model)) as ModelSpec<"openai-completions">;
+		expect(buildModel(cachedSpec).input).toEqual(["text"]);
+	});
+
 	test("does not inherit unrelated provider transport metadata for common gateway model ids", async () => {
 		const fetchMock: FetchImpl = vi.fn(async () => {
 			return new Response(

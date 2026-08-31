@@ -69,8 +69,8 @@ function applyCatalogAssignments<TApi extends Api>(model: Model<TApi>, catalog: 
 /**
  * Applies reviewed catalog-data value corrections (`cost-patch`,
  * `limits-patch`, `long-context-cost`, `context-window-floor`,
- * `input-modalities`) and fallbacks (`cost-fallback`, `limits-fallback`,
- * `supports-tools-fallback`) onto an upstream-sourced spec. Applied by
+ * `input-modalities`) and fallbacks (`cost-fallback`, `input-modalities-fallback`,
+ * `limits-fallback`, `supports-tools-fallback`) onto an upstream-sourced spec. Applied by
  * `buildModel` to every upstream-sourced spec; user-authored overrides are
  * recomposed after building by the override applicators, so explicit user
  * limits, pricing, and capability values still win.
@@ -185,6 +185,10 @@ export function applyCatalogCorrections(
 	const contextWindowFloor = catalog.contextWindowFloor;
 	if (typeof contextWindowFloor === "number") {
 		model.contextWindow = Math.max(model.contextWindow ?? 0, contextWindowFloor);
+	}
+	const inputModalitiesFallback = catalog.inputModalitiesFallback;
+	if (isInputModalities(inputModalitiesFallback) && !model.catalogFallback?.liveInputModalities) {
+		model.input = inputModalitiesFallback;
 	}
 	const inputModalities = catalog.inputModalities;
 	if (isInputModalities(inputModalities)) {

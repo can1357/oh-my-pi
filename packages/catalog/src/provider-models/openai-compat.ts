@@ -844,6 +844,16 @@ function toGatewayInputCapabilities(
 	return getEuropeanGatewayKnownInput(model) ?? fallback;
 }
 
+function hasEuropeanGatewayInputModalityMetadata(entry: OpenAICompatibleModelRecord): boolean {
+	const architecture = isRecord(entry.architecture) ? entry.architecture : undefined;
+	const inputModalities = toStringArray(architecture?.input_modalities ?? entry.input_modalities);
+	if (inputModalities.length > 0) return true;
+	const rawModality = architecture?.modality ?? entry.modality;
+	if (typeof rawModality === "string" && rawModality.trim().length > 0) return true;
+	const tags = toStringArray(entry.tags).map(tag => tag.trim().toLowerCase());
+	return tags.includes("image") || tags.includes("vision");
+}
+
 function getGatewayOutputModalities(entry: OpenAICompatibleModelRecord): string[] {
 	const architecture = isRecord(entry.architecture) ? entry.architecture : undefined;
 	return toStringArray(architecture?.output_modalities ?? entry.output_modalities).map(modality =>
@@ -942,6 +952,7 @@ function mapEuropeanGatewayModel(
 	const topProvider = isRecord(entry.top_provider) ? entry.top_provider : undefined;
 	const supportsTools = getEuropeanGatewayToolCapability(entry);
 	const supportsReasoning = getEuropeanGatewayReasoningCapability(entry);
+	const liveInputModalities = hasEuropeanGatewayInputModalityMetadata(entry);
 	const inputCost = toGatewayCostPerMillion(pricing?.prompt ?? pricing?.input_token);
 	const outputCost = toGatewayCostPerMillion(pricing?.completion ?? pricing?.output_token);
 	const cacheReadCost = toGatewayCostPerMillion(pricing?.input_cache_read ?? pricing?.cache_read_cost);
@@ -951,6 +962,13 @@ function mapEuropeanGatewayModel(
 	if (outputCost !== undefined) liveCostFields.push("output");
 	if (cacheReadCost !== undefined) liveCostFields.push("cacheRead");
 	if (cacheWriteCost !== undefined) liveCostFields.push("cacheWrite");
+	const catalogFallback =
+		liveCostFields.length > 0 || liveInputModalities
+			? {
+					...(liveCostFields.length > 0 && { liveCostFields }),
+					...(liveInputModalities && { liveInputModalities: true }),
+				}
+			: undefined;
 	const mapped: ModelSpec<"openai-completions"> = {
 		...model,
 		name: toModelName(entry.name, model.name),
@@ -966,7 +984,7 @@ function mapEuropeanGatewayModel(
 			cacheWrite:
 				cacheWriteCost ?? reference?.cost.cacheWrite ?? knownReference?.cost.cacheWrite ?? model.cost.cacheWrite,
 		},
-		...(liveCostFields.length > 0 && { catalogFallback: { liveCostFields } }),
+		...(catalogFallback && { catalogFallback }),
 		contextWindow: toPositiveNumber(
 			entry.context_length,
 			toPositiveNumber(
