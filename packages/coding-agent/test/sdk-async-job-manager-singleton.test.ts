@@ -169,6 +169,58 @@ describe("AsyncJobManager singleton across concurrent top-level sessions", () =>
 		}
 	}, 60000);
 
+	it("keeps fast auto-managed foreground Bash out of the public async snapshot", async () => {
+		const session = await spawnTopLevelSession({ "bash.autoBackground.thresholdMs": 60_000 });
+		const manager = AsyncJobManager.instance();
+		expect(manager).toBeDefined();
+		const releaseMarker = Promise.withResolvers<string>();
+		const markerId = manager!.register("task", "visible recent marker", async () => releaseMarker.promise, {
+			ownerId: "Main",
+		});
+		manager!.acknowledgeDeliveries([markerId]);
+		releaseMarker.resolve("done");
+		await manager!.waitForAll();
+		manager!.getJob(markerId)!.startTime = 0;
+		const before = session.getAsyncJobSnapshot({ recentLimit: 1 });
+		expect(before?.recent.map(job => job.id)).toEqual([markerId]);
+
+		try {
+			const bashTool = session.getToolByName("bash");
+			expect(bashTool).toBeDefined();
+			const result = await bashTool!.execute("call-fast-foreground", { command: "printf 'fast foreground'" });
+			await manager!.waitForAll();
+
+			expect(result.content.find(block => block.type === "text")?.text).toContain("fast foreground");
+			expect(session.getAsyncJobSnapshot({ recentLimit: 1 })).toEqual(before);
+		} finally {
+			await session.dispose();
+		}
+	}, 60000);
+
+	it("publishes auto-managed Bash when it actually backgrounds", async () => {
+		const session = await spawnTopLevelSession({ "bash.autoBackground.thresholdMs": 10 });
+		const manager = AsyncJobManager.instance();
+		expect(manager).toBeDefined();
+
+		try {
+			const bashTool = session.getToolByName("bash");
+			expect(bashTool).toBeDefined();
+			// This exercises the real threshold race through BashTool, so the
+			// command must remain alive long enough for the platform timer to win.
+			const result = await bashTool!.execute("call-auto-background", {
+				command: "sleep 30",
+			});
+			const snapshot = session.getAsyncJobSnapshot();
+
+			expect(snapshot?.running).toHaveLength(1);
+			expect(snapshot?.running[0]?.type).toBe("bash");
+			const resultText = result.content.find(block => block.type === "text")?.text;
+			expect(resultText).toContain(`Backgrounded as job ${snapshot!.running[0]!.id}`);
+		} finally {
+			await session.dispose();
+		}
+	}, 60000);
+
 	it("refuses async bash from a secondary session instead of routing it to the primary's manager", async () => {
 		const primary = await spawnTopLevelSession({ "async.enabled": true });
 		try {

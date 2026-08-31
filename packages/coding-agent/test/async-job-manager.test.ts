@@ -42,6 +42,65 @@ describe("AsyncJobManager", () => {
 		expect(manager.getJob(jobId)?.status).toBe("completed");
 	});
 
+	test("defaults jobs to public and publishes hidden jobs one-way", async () => {
+		const manager = new AsyncJobManager({ onJobComplete: async () => {} });
+		const release = Promise.withResolvers<void>();
+		const publicJobId = manager.register("bash", "public", async () => {
+			await release.promise;
+			return "public done";
+		});
+		const hiddenJobId = manager.register(
+			"bash",
+			"hidden",
+			async () => {
+				await release.promise;
+				return "hidden done";
+			},
+			{ publiclyVisible: false },
+		);
+
+		expect(manager.getRunningJobs({ publiclyVisible: true }).map(job => job.id)).toEqual([publicJobId]);
+		expect(manager.getRunningJobs({ publiclyVisible: false }).map(job => job.id)).toEqual([hiddenJobId]);
+		expect(manager.publishJob("missing")).toBe(false);
+		expect(manager.publishJob(publicJobId)).toBe(false);
+		expect(manager.publishJob(hiddenJobId)).toBe(true);
+		expect(manager.publishJob(hiddenJobId)).toBe(false);
+		expect(manager.getRunningJobs({ publiclyVisible: true }).map(job => job.id)).toEqual([publicJobId, hiddenJobId]);
+
+		release.resolve();
+		await manager.waitForAll();
+		await manager.drainDeliveries({ timeoutMs: 2_000 });
+	});
+
+	test("keeps hidden deliveries out of public delivery state until publication", async () => {
+		const deliveryStarted = Promise.withResolvers<void>();
+		const releaseDelivery = Promise.withResolvers<void>();
+		const manager = new AsyncJobManager({
+			onJobComplete: async () => {
+				deliveryStarted.resolve();
+				await releaseDelivery.promise;
+			},
+		});
+		const jobId = manager.register("bash", "hidden delivery", async () => "done", {
+			publiclyVisible: false,
+		});
+
+		await manager.waitForAll();
+		await deliveryStarted.promise;
+		expect(manager.getDeliveryState({ publiclyVisible: true })).toEqual({
+			queued: 0,
+			delivering: false,
+			nextRetryAt: undefined,
+			pendingJobIds: [],
+		});
+		expect(manager.getDeliveryState({ publiclyVisible: false }).pendingJobIds).toEqual([jobId]);
+
+		expect(manager.publishJob(jobId)).toBe(true);
+		expect(manager.getDeliveryState({ publiclyVisible: true }).pendingJobIds).toEqual([jobId]);
+		releaseDelivery.resolve();
+		await manager.drainDeliveries({ timeoutMs: 2_000 });
+	});
+
 	test("swallows progress callback errors without failing the job", async () => {
 		const completions: Array<{ jobId: string; text: string }> = [];
 		const manager = new AsyncJobManager({

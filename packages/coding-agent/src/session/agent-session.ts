@@ -1915,8 +1915,8 @@ export class AgentSession {
 	getAsyncJobSnapshot(options?: { recentLimit?: number }): AsyncJobSnapshot | null {
 		const manager = this.#asyncJobManager;
 		if (!manager) return null;
-		const ownerFilter = this.#agentId ? { ownerId: this.#agentId } : undefined;
-		const running = manager.getRunningJobs(ownerFilter).map(job => ({
+		const snapshotFilter = { ownerId: this.#agentId, publiclyVisible: true };
+		const running = manager.getRunningJobs(snapshotFilter).map(job => ({
 			id: job.id,
 			type: job.type,
 			status: job.status,
@@ -1924,7 +1924,7 @@ export class AgentSession {
 			startTime: job.startTime,
 			agentId: job.agentId,
 		}));
-		const recent = manager.getRecentJobs(options?.recentLimit ?? 5, ownerFilter).map(job => ({
+		const recent = manager.getRecentJobs(options?.recentLimit ?? 5, snapshotFilter).map(job => ({
 			id: job.id,
 			type: job.type,
 			status: job.status,
@@ -1932,7 +1932,7 @@ export class AgentSession {
 			startTime: job.startTime,
 			agentId: job.agentId,
 		}));
-		const delivery = manager.getDeliveryState(ownerFilter);
+		const delivery = manager.getDeliveryState(snapshotFilter);
 		return { running, recent, delivery };
 	}
 

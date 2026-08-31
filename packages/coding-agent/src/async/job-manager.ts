@@ -58,6 +58,11 @@ export interface AsyncJob {
 	 */
 	agentId?: string;
 	/**
+	 * Whether this job is exposed through public session snapshots. Jobs hidden
+	 * during a foreground wait can only transition to visible via `publishJob`.
+	 */
+	publiclyVisible: boolean;
+	/**
 	 * Job is registered but parked behind a caller-managed gate (e.g. a task
 	 * batch semaphore). Queued jobs do not count toward the running-job limit
 	 * until the caller invokes `markRunning()` from the run context.
@@ -89,6 +94,7 @@ interface AsyncJobDelivery {
 	nextAttemptAt: number;
 	lastError?: string;
 	ownerId?: string;
+	publiclyVisible: boolean;
 	promise?: Promise<void>;
 }
 
@@ -112,17 +118,21 @@ export interface AsyncJobRegisterOptions {
 	/** Registry id of the subagent this job runs; see {@link AsyncJob.agentId}. */
 	agentId?: string;
 	onProgress?: (text: string, details?: Record<string, unknown>) => void | Promise<void>;
+	/** Expose the job through public session snapshots immediately. Defaults to true. */
+	publiclyVisible?: boolean;
 	/** Register the job in queued state; see {@link AsyncJob.queued}. */
 	queued?: boolean;
 }
 
 /**
- * Filter applied to job query/cancel APIs. With `ownerId`, results are
- * restricted to jobs registered by that agent (registry id from
- * `AgentRegistry`, e.g. "Main", "AuthLoader").
+ * Filter applied to job query/cancel APIs. `ownerId` restricts jobs to the
+ * registering agent (registry id from `AgentRegistry`, e.g. "Main",
+ * "AuthLoader"); `publiclyVisible` restricts public snapshot visibility.
  */
 export interface AsyncJobFilter {
 	ownerId?: string;
+	/** Restrict results to jobs with this public snapshot visibility. */
+	publiclyVisible?: boolean;
 }
 
 export class AsyncJobManager {
@@ -161,10 +171,13 @@ export class AsyncJobManager {
 
 	#filterJobs(jobs: Iterable<AsyncJob>, filter?: AsyncJobFilter): AsyncJob[] {
 		const ownerId = filter?.ownerId;
-		if (!ownerId) return Array.from(jobs);
+		const publiclyVisible = filter?.publiclyVisible;
+		if (!ownerId && publiclyVisible === undefined) return Array.from(jobs);
 		const out: AsyncJob[] = [];
 		for (const job of jobs) {
-			if (job.ownerId === ownerId) out.push(job);
+			if (ownerId && job.ownerId !== ownerId) continue;
+			if (publiclyVisible !== undefined && job.publiclyVisible !== publiclyVisible) continue;
+			out.push(job);
 		}
 		return out;
 	}
@@ -229,6 +242,7 @@ export class AsyncJobManager {
 			promise: Promise.resolve(),
 			ownerId: options?.ownerId,
 			agentId: options?.agentId,
+			publiclyVisible: options?.publiclyVisible !== false,
 			queued: options?.queued === true,
 		};
 
@@ -299,6 +313,23 @@ export class AsyncJobManager {
 
 	getJob(id: string): AsyncJob | undefined {
 		return this.#jobs.get(id);
+	}
+
+	/**
+	 * Publish a hidden job to public session snapshots. Publication is one-way;
+	 * missing and already-public jobs are safe no-ops.
+	 */
+	publishJob(id: string): boolean {
+		const job = this.#jobs.get(id);
+		if (!job || job.publiclyVisible) return false;
+		job.publiclyVisible = true;
+		for (const delivery of this.#deliveries) {
+			if (delivery.jobId === id) delivery.publiclyVisible = true;
+		}
+		for (const delivery of this.#inFlightDeliveries) {
+			if (delivery.jobId === id) delivery.publiclyVisible = true;
+		}
+		return true;
 	}
 
 	getRunningJobs(filter?: AsyncJobFilter): AsyncJob[] {
@@ -708,19 +739,20 @@ export class AsyncJobManager {
 		this.#evictionTimers.clear();
 	}
 
+	#deliveryMatchesFilter(delivery: AsyncJobDelivery, filter?: AsyncJobFilter): boolean {
+		if (filter?.ownerId && delivery.ownerId !== filter.ownerId) return false;
+		return filter?.publiclyVisible === undefined || delivery.publiclyVisible === filter.publiclyVisible;
+	}
+
 	#filterDeliveries(filter?: AsyncJobFilter): AsyncJobDelivery[] {
-		const ownerId = filter?.ownerId;
-		if (!ownerId) return this.#deliveries.filter(delivery => !this.isDeliverySuppressed(delivery.jobId));
 		return this.#deliveries.filter(
-			delivery => delivery.ownerId === ownerId && !this.isDeliverySuppressed(delivery.jobId),
+			delivery => this.#deliveryMatchesFilter(delivery, filter) && !this.isDeliverySuppressed(delivery.jobId),
 		);
 	}
 
 	#filterInFlightDeliveries(filter?: AsyncJobFilter): AsyncJobDelivery[] {
-		const ownerId = filter?.ownerId;
-		if (!ownerId) return this.#inFlightDeliveries.filter(delivery => !this.isDeliverySuppressed(delivery.jobId));
 		return this.#inFlightDeliveries.filter(
-			delivery => delivery.ownerId === ownerId && !this.isDeliverySuppressed(delivery.jobId),
+			delivery => this.#deliveryMatchesFilter(delivery, filter) && !this.isDeliverySuppressed(delivery.jobId),
 		);
 	}
 
@@ -728,7 +760,7 @@ export class AsyncJobManager {
 		while (true) {
 			let selected: AsyncJobDelivery | undefined;
 			for (const delivery of this.#deliveries) {
-				if (delivery.ownerId !== filter.ownerId) continue;
+				if (!this.#deliveryMatchesFilter(delivery, filter)) continue;
 				if (this.isDeliverySuppressed(delivery.jobId)) continue;
 				if (!selected || delivery.nextAttemptAt < selected.nextAttemptAt) {
 					selected = delivery;
@@ -773,6 +805,7 @@ export class AsyncJobManager {
 			attempt: 0,
 			nextAttemptAt: Date.now(),
 			ownerId: this.#jobs.get(jobId)?.ownerId,
+			publiclyVisible: this.#jobs.get(jobId)?.publiclyVisible ?? true,
 		});
 		this.#ensureDeliveryLoop();
 	}

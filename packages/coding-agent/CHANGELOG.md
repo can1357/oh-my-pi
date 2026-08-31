@@ -20,6 +20,9 @@
 - Fixed an issue where custom model overrides were lost during configuration updates
 - Fixed "Please use nerdfont" notification incorrectly persisting after theme configuration
 - Fixed sampling parameter errors for newer Anthropic models (Opus 4.7+, Sonnet 5+)
+### Fixed
+
+- Kept auto-managed Bash jobs out of public async snapshots while they are still foreground-waited, publishing them only when they actually transition to background execution.
 
 ## [18.0.11] - 2026-08-29
 
