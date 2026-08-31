@@ -10,7 +10,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { $which, getSafeProjectCwd, logger } from "@oh-my-pi/pi-utils";
+import { $which, getSafeProjectCwd, logger, removeWithRetries } from "@oh-my-pi/pi-utils";
 import { credentialString, type DestinationRuntimeConfig, optionString } from "./uploader-runtime";
 
 /** User-selectable exposure strategy. */
@@ -250,7 +250,7 @@ interface SpawnedUrlTunnel {
 	proc: Bun.Subprocess;
 	baseUrl: string;
 	lifecycle: SpawnedUrlTunnelLifecycle;
-	/** Resolves only after the child exits and its temporary output log is removed. */
+	/** Resolves after the child exits and its temporary output log cleanup finishes best-effort. */
 	logCleaned: Promise<void>;
 }
 
@@ -261,6 +261,13 @@ async function spawnUrlTunnel(
 ): Promise<SpawnedUrlTunnel> {
 	const { readyPattern, recoverPostExitUrl = false, signal } = options;
 	const logPath = path.join(os.tmpdir(), `omp-blob-tunnel-${Date.now().toString(36)}-${process.pid}.log`);
+	const removeLogBestEffort = async (): Promise<void> => {
+		try {
+			await removeWithRetries(logPath);
+		} catch (error) {
+			logger.warn("blob-broker: failed to remove temporary tunnel log", { path: logPath, error });
+		}
+	};
 	const fd = fs.openSync(logPath, "w");
 	let proc: Bun.Subprocess;
 	try {
@@ -276,14 +283,12 @@ async function spawnUrlTunnel(
 			fs.closeSync(fd);
 		}
 	} catch (error) {
-		await fs.promises.rm(logPath, { force: true });
+		await removeLogBestEffort();
 		throw error;
 	}
 	let logCleaned: Promise<void> | undefined;
 	const cleanupLogAfterExit = (): Promise<void> => {
-		logCleaned ??= proc.exited.then(async () => {
-			await fs.promises.rm(logPath, { force: true });
-		});
+		logCleaned ??= proc.exited.then(() => removeLogBestEffort());
 		return logCleaned;
 	};
 	let lifecycleHandedOff = false;
