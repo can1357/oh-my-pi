@@ -1092,7 +1092,10 @@ export async function executeLaunch(
 			outputLease.bindDaemon(result.daemon.id);
 			outputLease.registration.startedAt = result.daemon.startedAt;
 			await outputLease.retain();
-			if (params.op === "monitor" && !outputLease.registration.active) {
+			if (
+				params.op === "monitor" &&
+				(!outputLease.registration.active || outputLease.registration.terminalState !== undefined)
+			) {
 				throw new ToolError(
 					`Cannot monitor ${params.name}: process is ${outputLease.registration.terminalState ?? "exited"}`,
 				);
