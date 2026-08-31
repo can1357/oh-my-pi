@@ -731,16 +731,19 @@ async function handleFormatEndpoint(
 	if (!compiled) {
 		return unknownModelResponse(route.module.formatError, modelId);
 	}
-	const firstTarget = compiled.targets[0];
-	if (firstTarget === undefined) {
-		return unknownModelResponse(route.module.formatError, modelId);
+	let currentTarget: string | undefined;
+	let model: Model<Api> | undefined;
+	for (const candidate of compiled.targets) {
+		const resolved = bootOpts.resolveModel(candidate);
+		if (resolved) {
+			currentTarget = candidate;
+			model = resolved;
+			break;
+		}
 	}
-	let currentTarget = firstTarget;
-	const initialModel = bootOpts.resolveModel(currentTarget);
-	if (!initialModel) {
-		return unknownModelResponse(route.module.formatError, currentTarget);
+	if (currentTarget === undefined || model === undefined) {
+		return unknownModelResponse(route.module.formatError, compiled.targets[0] ?? modelId);
 	}
-	let model: Model<Api> = initialModel;
 	const client = resolveClientIdentity(req.headers);
 
 	// Parse the wire-format request BEFORE resolving the credential so we
@@ -1272,16 +1275,19 @@ async function handlePiNative(
 	if (!compiled) {
 		return unknownModelResponse(piNative.formatError, parsed.modelId);
 	}
-	const firstTarget = compiled.targets[0];
-	if (firstTarget === undefined) {
-		return unknownModelResponse(piNative.formatError, parsed.modelId);
+	let currentTarget: string | undefined;
+	let model: Model<Api> | undefined;
+	for (const candidate of compiled.targets) {
+		const resolved = bootOpts.resolveModel(candidate);
+		if (resolved) {
+			currentTarget = candidate;
+			model = resolved;
+			break;
+		}
 	}
-	let currentTarget = firstTarget;
-	const initialModel = bootOpts.resolveModel(currentTarget);
-	if (!initialModel) {
-		return unknownModelResponse(piNative.formatError, currentTarget);
+	if (currentTarget === undefined || model === undefined) {
+		return unknownModelResponse(piNative.formatError, compiled.targets[0] ?? parsed.modelId);
 	}
-	let model: Model<Api> = initialModel;
 	const client = resolveClientIdentity(req.headers);
 	// Pi-native already parsed `streamOpts.sessionId` (when set by the
 	// client); fall back to the derived key so credential-stickiness lines

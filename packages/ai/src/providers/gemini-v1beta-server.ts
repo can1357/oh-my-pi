@@ -454,6 +454,31 @@ export function encodeStream(
 								);
 							}
 							break;
+						case "toolcall_start":
+						case "toolcall_delta":
+						case "toolcall_end": {
+							const call = event.toolCall;
+							writeSse(
+								controller,
+								{
+									...geminiCandidate(
+										[
+											{
+												functionCall: {
+													name: call.name,
+													args: call.arguments ?? {},
+													id: call.id,
+												},
+											},
+										],
+										undefined,
+									),
+									modelVersion: requestedModelId,
+								},
+								cancelled,
+							);
+							break;
+						}
 						case "done":
 							writeSse(
 								controller,
