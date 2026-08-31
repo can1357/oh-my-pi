@@ -109,6 +109,12 @@ function fingerprintOAuthPhysicalIdentity(credential: AuthCredential): string | 
 	return parts.join("|");
 }
 
+/** Stable identity for API-key rows so key replacement bumps incarnation. */
+function fingerprintApiKeyPhysicalIdentity(credential: AuthCredential): string | null {
+	if (credential.type !== "api_key") return null;
+	return `api_key:${createHash("sha256").update(credential.key).digest("base64url")}`;
+}
+
 function identityFieldMap(fingerprint: string): Map<string, string> {
 	const fields = new Map<string, string>();
 	for (const part of fingerprint.split("|")) {
@@ -1712,10 +1718,26 @@ export class AuthStorage {
 	}
 
 	#maybeBumpIncarnation(provider: string, credentialId: number, previous: AuthCredential, next: AuthCredential): void {
+		// Type replacement (oauth ↔ api_key) always invalidates prior reservations.
+		if (previous.type !== next.type) {
+			this.#bumpCredentialIncarnation(provider, credentialId);
+			return;
+		}
+		if (previous.type === "api_key" && next.type === "api_key") {
+			const oldFp = fingerprintApiKeyPhysicalIdentity(previous);
+			const newFp = fingerprintApiKeyPhysicalIdentity(next);
+			if (!oldFp || !newFp || oldFp === newFp) return;
+			this.#bumpCredentialIncarnation(provider, credentialId);
+			return;
+		}
 		const oldFp = fingerprintOAuthPhysicalIdentity(previous);
 		const newFp = fingerprintOAuthPhysicalIdentity(next);
 		if (!oldFp || !newFp || oldFp === newFp) return;
 		if (isConservativeIdentityEnrichment(oldFp, newFp)) return;
+		this.#bumpCredentialIncarnation(provider, credentialId);
+	}
+
+	#bumpCredentialIncarnation(provider: string, credentialId: number): void {
 		const incarnation = (this.#credentialIncarnation.get(credentialId) ?? 1) + 1;
 		this.#credentialIncarnation.set(credentialId, incarnation);
 		this.#clearSessionStickiesForCredential(provider, credentialId);

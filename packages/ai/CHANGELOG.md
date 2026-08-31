@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Bump credential incarnation when a stored API-key row is replaced (or an OAuth row becomes an API key) so prior turn reservations cannot suppress the new key.
 - Settle gateway quota probes only on committed output or successful terminals, release pi-native reservations when abort wins lookup, lease probes against the active block scope, and skip cooldown-blocked API keys when healthy rows are reserved.
 
 - Require a quota probe lease on the allow-blocked OAuth fallback pass.
