@@ -52,18 +52,28 @@ OUT OF SCOPE (oh-my-pi grokbot provider): **grokbot-BYOK Anthropic Messages shim
 
 ## Honest ceiling (grokbot renewal only)
 
-**Selecting Opus with tools does not run Opus.** Default `auto` rewrites the *entire* tools turn to `sand-automation`; sand then routes to grok (not Claude). Sol+tools stays on Sol.
+**Selecting Claude/Opus with tools does not run Claude/Opus.** Default `auto` rewrites the *entire* tools turn to `sand-automation`; sand then routes to `cursor-grok-4.5/4.6-*`. Non-Claude families keep their label family.
 
-| Selection | Tools? | Wire model | Who runs (mitm 2026-08-31) |
-|-----------|--------|------------|----------------------------|
-| `gpt-5.6-sol*` | yes | `gpt-5.6-sol` | **Sol** (13/13) |
-| `claude-opus-*` / `claude-*` | no | Claude id | May be Opus |
-| `claude-opus-*` / `claude-*` | yes (`auto`) | **`sand-automation`** | **cursor-grok-4.5/4.6 only** (40/40 Opus ids; never Opus) |
-| `cursor/claude-opus-5:max` | yes | AgentService | Real Opus (separate auth) |
+### Full catalog tools sweep (mitm, 2026-08-31) — 199/199 ids
+
+| Catalog family | n | Stays on label? | Routed family with tools |
+|----------------|---|-----------------|--------------------------|
+| sol | 13 | **YES** | sol |
+| gpt | 80 | mostly YES (76 match; 2 fail; 2 no-tools) | gpt |
+| composer | 2 | **YES** | composer |
+| gemini | 13 | mostly YES (12; 1 model-not-found) | gemini |
+| glm | 3 | **YES** | glm |
+| kimi | 5 | mostly YES (4; 1 no-tools) | kimi |
+| grok | 16 | `grok-4.6` YES; `grok-4.5`+tools FAIL; `cursor-grok-*` selectors not valid wire ids | grok |
+| claude (non-opus) | 23 | **NO** | **grok** (all via `sand-automation`) |
+| opus | 40 | **NO** | **grok** (all via `sand-automation`) |
+| sand-router | 3 | routers OK | **grok** (`sand-default`/`cua`/`automation`) |
+
+Totals: **114** label-match+tools, **63** Claude/Opus→grok, **19** fail, **3** no-tools, **64** wire=`sand-automation`. Mitmproxy was used for capture then shut down.
 
 | Goal | Status |
 |------|--------|
-| `grokbot/claude-opus-5*` + omp tools (bash/read/…) | **Yes** via automation wire (`auto` default) — tools work |
-| Verified Opus backend on sand with tools | **No** — mitm: all 40 Opus catalog ids → `sand-automation` → `cursor-grok-4.5/4.6-*` |
-| `grokbot/gpt-5.6-sol*` + tools | **Yes** — stays on Sol (13/13) |
+| `grokbot/claude-*` + omp tools | **Yes** via automation — tools work; **backend is grok, not Claude** |
+| Verified Opus/Claude backend with tools on sand | **No** — 63/63 Claude+Opus catalog ids → `sand-automation` → `cursor-grok-*` |
+| Sol / GPT / Composer / Gemini / GLM / Kimi + tools | **Yes** — stay on that family |
 | Same as `cursor/claude-opus-5:max` AgentService | **No** — different RPC + auth |
