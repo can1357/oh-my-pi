@@ -1240,6 +1240,17 @@ describe("archive helpers", () => {
 			expect(snapcompact.providerImageBudget("umans", "anthropic-messages")).toBe(10);
 		});
 
+		it("sizes the frame archive by the same family fallback as the send path", () => {
+			expect(snapcompact.providerFrameBudget("custom-proxy", "anthropic-messages")).toBe(
+				snapcompact.MAX_FRAMES_DEFAULT,
+			);
+			expect(snapcompact.providerFrameBudget("custom-proxy", "openai-completions")).toBe(
+				snapcompact.DEFAULT_PROVIDER_IMAGE_BUDGET,
+			);
+			snapcompact.configureProviderImageBudgets({ "custom-proxy": 7 });
+			expect(snapcompact.providerFrameBudget("custom-proxy", "anthropic-messages")).toBe(7);
+		});
+
 		it("lets configuration override both the provider table and the API family", () => {
 			snapcompact.configureProviderImageBudgets({ "custom-proxy": 12, umans: 40 });
 			expect(snapcompact.providerImageBudget("custom-proxy", "anthropic-messages")).toBe(12);

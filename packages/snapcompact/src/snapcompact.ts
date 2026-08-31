@@ -566,8 +566,8 @@ export function providerImageBudget(provider: string | undefined, api?: Api): nu
 }
 
 /** Archive frame cap for `provider`: image budget, never above {@link MAX_FRAMES_DEFAULT}. */
-export function providerFrameBudget(provider: string | undefined): number {
-	return Math.min(providerImageBudget(provider), MAX_FRAMES_DEFAULT);
+export function providerFrameBudget(provider: string | undefined, api?: Api): number {
+	return Math.min(providerImageBudget(provider, api), MAX_FRAMES_DEFAULT);
 }
 
 /** Key under `CompactionEntry.preserveData` holding the frame archive. */

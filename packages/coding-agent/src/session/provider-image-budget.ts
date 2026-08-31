@@ -4,6 +4,7 @@ import type {
 	ImageContent,
 	Message,
 	Model,
+	OpenAIResponsesHistoryPayload,
 	ProviderPayload,
 	TextContent,
 	ToolResultMessage,
@@ -11,6 +12,7 @@ import type {
 	UserMessage,
 } from "@oh-my-pi/pi-ai";
 import { decodeDataUri } from "@oh-my-pi/pi-ai/providers/openai-data-uri";
+import { getOpenAIResponsesHistoryPayload } from "@oh-my-pi/pi-ai/utils";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import { providerImageBudget, providerImageByteBudget } from "@oh-my-pi/snapcompact";
@@ -22,6 +24,9 @@ const IMAGE_OMISSION: TextContent = {
 	text: "[image omitted: provider image limit]",
 };
 
+/** The same marker in the shape the Responses input schema accepts in an `input_image` position. */
+const NATIVE_IMAGE_OMISSION: Record<string, unknown> = { type: "input_text", text: IMAGE_OMISSION.text };
+
 /**
  * Providers skip blocks that carry nothing and then skip the message itself, so
  * a turn clamped down to no images and no non-blank text vanishes from the wire
@@ -32,21 +37,82 @@ function withOmissionFallback(content: (TextContent | ImageContent)[]): (TextCon
 	return survives ? content : [IMAGE_OMISSION];
 }
 
+/**
+ * The replayed native Responses payload when its items are what this message
+ * actually sends, else `undefined` for the generic `content` view.
+ *
+ * `openai-shared.ts` `buildResponsesInput()` pushes these items and `continue`s
+ * past `convertResponsesInputContent`, so content is not sent at all for such a
+ * message — and `openai-responses-server.ts` `inputContentParts()` keeps only
+ * text in that content, so a client's image can live nowhere else. Counting
+ * content here would bill blocks the provider never receives while the images
+ * that do travel stay invisible to both caps.
+ */
+function replayedNativePayload(message: Message, model: Model): OpenAIResponsesHistoryPayload | undefined {
+	if (message.role !== "user" && message.role !== "developer") return undefined;
+	switch (model.api) {
+		case "openai-responses":
+		case "openai-codex-responses":
+		case "azure-openai-responses":
+			return getOpenAIResponsesHistoryPayload(message.providerPayload, model.provider);
+		default:
+			return undefined;
+	}
+}
+
+/**
+ * Base64 length of an `input_image` part, `0` for a `file_id` or `https:`
+ * reference the provider resolves itself, and `undefined` when the part is not
+ * an image. Reference-backed parts still occupy the count budget, exactly as a
+ * reference-backed {@link ImageContent} with empty `data` does.
+ */
+function nativeImageBytes(part: unknown): number | undefined {
+	if (!isRecord(part) || part.type !== "input_image") return undefined;
+	const imageUrl = part.image_url;
+	if (typeof imageUrl !== "string" || imageUrl.slice(0, 5).toLowerCase() !== "data:") return 0;
+	const comma = imageUrl.indexOf(",");
+	return comma < 0 ? 0 : imageUrl.length - comma - 1;
+}
+
+/** Appends the size of every replayed image, in wire order. An image sits on the item or in `item.content`. */
+function collectNativeImageSizes(items: readonly Record<string, unknown>[], sizes: number[]): void {
+	for (const item of items) {
+		const topLevel = nativeImageBytes(item);
+		if (topLevel !== undefined) {
+			sizes.push(topLevel);
+			continue;
+		}
+		if (!Array.isArray(item.content)) continue;
+		for (const part of item.content) {
+			const bytes = nativeImageBytes(part);
+			if (bytes !== undefined) sizes.push(bytes);
+		}
+	}
+}
+
 /** Image sizes in message order; assistant images are never dropped, so their bytes are charged as retained. */
-function imageStats(context: Context): { droppable: number[]; retainedBytes: number; total: number } {
+function imageStats(context: Context, model: Model): { droppable: number[]; retainedBytes: number; total: number } {
 	const droppable: number[] = [];
+	let retained = 0;
 	let retainedBytes = 0;
-	let total = 0;
 	for (const message of context.messages) {
+		const native = replayedNativePayload(message, model);
+		if (native) {
+			collectNativeImageSizes(native.items, droppable);
+			continue;
+		}
 		if (!Array.isArray(message.content)) continue;
 		for (const part of message.content) {
 			if (part.type !== "image") continue;
-			total++;
-			if (message.role === "assistant") retainedBytes += part.data.length;
-			else droppable.push(part.data.length);
+			if (message.role === "assistant") {
+				retained++;
+				retainedBytes += part.data.length;
+			} else {
+				droppable.push(part.data.length);
+			}
 		}
 	}
-	return { droppable, retainedBytes, total };
+	return { droppable, retainedBytes, total: droppable.length + retained };
 }
 
 function clampContent(
@@ -66,13 +132,54 @@ function clampContent(
 	return changed ? clamped : undefined;
 }
 
-function clampUserMessage(message: UserMessage, state: { remainingDrops: number }): UserMessage {
-	if (!Array.isArray(message.content) || state.remainingDrops <= 0) return message;
-	const content = clampContent(message.content, state);
-	return content ? { ...message, content: withOmissionFallback(content), providerPayload: undefined } : message;
+/**
+ * `undefined` when nothing was dropped. Each removed image degrades to the
+ * `input_text` marker the Responses input schema accepts in its position, so
+ * the surrounding item keeps its shape, its ids, and its `compaction` /
+ * `compaction_summary` markers — clearing the payload instead would trade an
+ * oversized request for silent history loss.
+ */
+function clampNativeItems(
+	items: readonly Record<string, unknown>[],
+	state: { remainingDrops: number },
+): Array<Record<string, unknown>> | undefined {
+	let clamped: Array<Record<string, unknown>> | undefined;
+	for (let index = 0; index < items.length && state.remainingDrops > 0; index++) {
+		const item = items[index]!;
+		if (nativeImageBytes(item) !== undefined) {
+			state.remainingDrops--;
+			clamped ??= [...items];
+			clamped[index] = NATIVE_IMAGE_OMISSION;
+			continue;
+		}
+		if (!Array.isArray(item.content)) continue;
+		let content: unknown[] | undefined;
+		for (let part = 0; part < item.content.length && state.remainingDrops > 0; part++) {
+			if (nativeImageBytes(item.content[part]) === undefined) continue;
+			state.remainingDrops--;
+			content ??= [...item.content];
+			content[part] = NATIVE_IMAGE_OMISSION;
+		}
+		if (!content) continue;
+		clamped ??= [...items];
+		clamped[index] = { ...item, content };
+	}
+	return clamped;
 }
 
-function clampDeveloperMessage(message: DeveloperMessage, state: { remainingDrops: number }): DeveloperMessage {
+function clampNativeMessage<T extends UserMessage | DeveloperMessage>(
+	message: T,
+	payload: OpenAIResponsesHistoryPayload,
+	state: { remainingDrops: number },
+): T {
+	const items = clampNativeItems(payload.items, state);
+	return items ? { ...message, providerPayload: { ...payload, items } } : message;
+}
+
+function clampGenericMessage<T extends UserMessage | DeveloperMessage>(
+	message: T,
+	state: { remainingDrops: number },
+): T {
 	if (!Array.isArray(message.content) || state.remainingDrops <= 0) return message;
 	const content = clampContent(message.content, state);
 	return content ? { ...message, content: withOmissionFallback(content), providerPayload: undefined } : message;
@@ -88,7 +195,7 @@ function clampToolResultMessage(message: ToolResultMessage, state: { remainingDr
 /** Drops oldest transient image blocks so outgoing vision requests fit the active provider's image and byte caps. */
 export function clampProviderContextImages(context: Context, model: Model): Context {
 	if (!model.input.includes("image")) return context;
-	const { droppable, retainedBytes, total } = imageStats(context);
+	const { droppable, retainedBytes, total } = imageStats(context, model);
 	let drops = Math.max(0, total - providerImageBudget(model.provider, model.api));
 	const byteLimit = providerImageByteBudget(model.provider);
 	if (byteLimit !== undefined) {
@@ -107,9 +214,10 @@ export function clampProviderContextImages(context: Context, model: Model): Cont
 	const messages = context.messages.map(message => {
 		switch (message.role) {
 			case "user":
-				return clampUserMessage(message, state);
-			case "developer":
-				return clampDeveloperMessage(message, state);
+			case "developer": {
+				const native = replayedNativePayload(message, model);
+				return native ? clampNativeMessage(message, native, state) : clampGenericMessage(message, state);
+			}
 			case "toolResult":
 				return clampToolResultMessage(message, state);
 			case "assistant":
