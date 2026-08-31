@@ -776,6 +776,14 @@ function hasGatewayOnlyNonTextOutputModality(value: unknown): boolean {
 	return outputTokens.length > 0 && !outputTokens.includes("text");
 }
 
+function hasGatewayTextOutputModality(value: unknown): boolean {
+	if (typeof value !== "string") {
+		return false;
+	}
+	const [, outputSide = ""] = value.toLowerCase().split(/\s*(?:->|=>)\s*/, 2);
+	return outputSide.split(/[+\s,/_-]+/).includes("text");
+}
+
 function toAnthropicCanonicalReferenceId(modelId: string): string | undefined {
 	const identity = classifyModel("", modelId, { lenient: true });
 	if (identity.class !== "anthropic" || !identity.family || !identity.revision) {
@@ -893,8 +901,13 @@ function isLikelyEuropeanGatewayChatModel(entry: OpenAICompatibleModelRecord, mo
 	if (hasOnlyNonTextOutput(entry)) {
 		return false;
 	}
+	const architecture = isRecord(entry.architecture) ? entry.architecture : undefined;
 	const normalized = `${model.id} ${model.name}`.trim().toLowerCase();
-	return getGatewayOutputModalities(entry).includes("text") || !isExcludedModel(model.provider, normalized);
+	return (
+		getGatewayOutputModalities(entry).includes("text") ||
+		hasGatewayTextOutputModality(architecture?.modality ?? entry.modality) ||
+		!isExcludedModel(model.provider, normalized)
+	);
 }
 
 function hasEuropeanGatewayReasoningIdentity(model: ModelSpec<Api>): boolean {

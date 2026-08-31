@@ -945,6 +945,27 @@ describe("European gateway provider catalog support", () => {
 		});
 	});
 
+	test("keeps image-named gateway models with text output declared by modality", async () => {
+		const fetchMock: FetchImpl = vi.fn(async () => {
+			return Response.json({
+				data: [
+					{
+						id: "image-understanding-chat",
+						name: "Image Understanding Chat",
+						architecture: { modality: "text+image->text" },
+					},
+				],
+			});
+		});
+
+		const models = await eurouterModelManagerOptions({ fetch: fetchMock }).fetchDynamicModels?.();
+
+		expect(models?.[0]).toMatchObject({
+			id: "image-understanding-chat",
+			input: ["text", "image"],
+		});
+	});
+
 	test("filters modality-only image generation rows from European gateway discovery", async () => {
 		const fetchMock: FetchImpl = vi.fn(async () => {
 			return new Response(
