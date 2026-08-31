@@ -2748,6 +2748,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// A conditional runner means the approval system silently disappears for users with no
 		// extensions, contradicting non-yolo `tools.approvalMode` settings without feedback.
 		// (The builtin autoresearch extension is unconditionally loaded above, so this scenario
+		// is unreachable; unconditional runner construction keeps that invariant explicit and
 		// prevents future optional extensions from silently re-opening the hole.)
 		const extensionRunner: ExtensionRunner = new ExtensionRunner(
 			extensionsResult.extensions,
