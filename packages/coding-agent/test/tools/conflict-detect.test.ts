@@ -103,6 +103,160 @@ describe("scanConflictLines", () => {
 		expect(blocks[0].oursLines).toEqual(["ours"]);
 		expect(blocks[0].theirsLines).toEqual(["theirs"]);
 	});
+
+	it("parses Jujutsu diff markers into indexed sides and bases", () => {
+		const blocks = scanConflictLines(
+			[
+				"<<<<<<< conflict 1 of 1",
+				"%%%%%%% diff from: merge base",
+				`${"\\".repeat(7)}        to: commit A`,
+				" apple",
+				"-grape",
+				"+grapefruit",
+				" orange",
+				"+++++++ commit B",
+				"APPLE",
+				"GRAPE",
+				"ORANGE",
+				">>>>>>> conflict 1 of 1 ends",
+			],
+			1,
+		);
+		expect(blocks).toHaveLength(1);
+		expect(blocks[0].style).toBe("jj-diff");
+		expect(blocks[0].sides?.map(section => section.label)).toEqual(["commit A", "commit B"]);
+		expect(blocks[0].sides?.map(section => section.lines)).toEqual([
+			["apple", "grapefruit", "orange"],
+			["APPLE", "GRAPE", "ORANGE"],
+		]);
+		expect(blocks[0].bases?.map(section => section.label)).toEqual(["merge base"]);
+		expect(blocks[0].bases?.map(section => section.lines)).toEqual([["apple", "grape", "orange"]]);
+	});
+
+	it("parses multi-sided Jujutsu snapshot markers", () => {
+		const blocks = scanConflictLines(
+			[
+				"<<<<<<< conflict 1 of 1",
+				"+++++++ side one",
+				"one",
+				"------- base one",
+				"base-1",
+				"+++++++ side two",
+				"two",
+				"------- base two",
+				"base-2",
+				"+++++++ side three",
+				"three",
+				">>>>>>> conflict 1 of 1 ends",
+			],
+			1,
+		);
+		expect(blocks[0].style).toBe("jj-snapshot");
+		expect(blocks[0].sides?.map(section => section.lines)).toEqual([["one"], ["two"], ["three"]]);
+		expect(blocks[0].bases?.map(section => section.lines)).toEqual([["base-1"], ["base-2"]]);
+	});
+
+	it("accepts conflict markers longer than seven characters", () => {
+		const marker = 11;
+		const blocks = scanConflictLines(
+			[
+				`${"<".repeat(marker)} left`,
+				"ours",
+				`${"|".repeat(marker)} base`,
+				"ancestor",
+				"=".repeat(marker),
+				"theirs",
+				`${">".repeat(marker)} right`,
+			],
+			1,
+		);
+		expect(blocks[0].markerLength).toBe(marker);
+		expect(blocks[0].sides?.map(section => section.lines)).toEqual([["ours"], ["theirs"]]);
+	});
+
+	it("requires exact internal and closing marker lengths for Git conflicts", () => {
+		const blocks = scanConflictLines(
+			["<<<<<<< HEAD", "left", "========", "=======", "right", ">>>>>>>> literal", ">>>>>>> branch"],
+			1,
+		);
+		expect(blocks).toHaveLength(1);
+		expect(blocks[0].sides?.map(section => section.lines)).toEqual([
+			["left", "========"],
+			["right", ">>>>>>>> literal"],
+		]);
+	});
+
+	it("prefers a complete Git block when ours starts with a Jujutsu-looking marker", () => {
+		const blocks = scanConflictLines(
+			["<<<<<<< HEAD", "+++++++ patch", "left", "=======", "right", ">>>>>>> branch"],
+			1,
+		);
+		expect(blocks).toHaveLength(1);
+		expect(blocks[0].style).toBe("git");
+		expect(blocks[0].sides?.map(section => section.lines)).toEqual([["+++++++ patch", "left"], ["right"]]);
+	});
+
+	it("rejects Jujutsu grammar when repository authority allows Git only", () => {
+		const blocks = scanConflictLines(
+			["<<<<<<< conflict", "+++++++ side one", "left", "+++++++ side two", "right", ">>>>>>> conflict ends"],
+			1,
+			7,
+			true,
+			"git",
+		);
+		expect(blocks).toEqual([]);
+	});
+
+	it("keeps a shorter opener-looking line inside a lengthened Jujutsu term", () => {
+		const markerLength = 11;
+		const blocks = scanConflictLines(
+			[
+				`${"<".repeat(markerLength)} conflict 1 of 1`,
+				`${"+".repeat(markerLength)} left`,
+				"left body",
+				"<<<<<<< literal",
+				`${"-".repeat(markerLength)} base`,
+				"base body",
+				`${"+".repeat(markerLength)} right`,
+				"right body",
+				`${">".repeat(markerLength)} conflict 1 of 1 ends`,
+			],
+			1,
+		);
+		expect(blocks).toHaveLength(1);
+		expect(blocks[0].sides?.map(section => section.lines)).toEqual([
+			["left body", "<<<<<<< literal"],
+			["right body"],
+		]);
+		expect(blocks[0].bases?.map(section => section.lines)).toEqual([["base body"]]);
+	});
+
+	it("accepts Jujutsu term and closing markers longer than the opener", () => {
+		const blocks = scanConflictLines(
+			[
+				"<<<<<<< conflict 1 of 1",
+				"++++++++ left",
+				"left body",
+				"-------- base",
+				"base body",
+				"++++++++ right",
+				"right body",
+				">>>>>>>> conflict 1 of 1 ends",
+			],
+			1,
+		);
+		expect(blocks).toHaveLength(1);
+		expect(blocks[0].sides?.map(section => section.lines)).toEqual([["left body"], ["right body"]]);
+		expect(blocks[0].bases?.map(section => section.lines)).toEqual([["base body"]]);
+	});
+
+	it("accepts short marker sizes only when explicitly requested", () => {
+		const lines = ["<<< HEAD", "ours", "===", "theirs", ">>> branch"];
+		expect(scanConflictLines(lines, 1)).toEqual([]);
+		const [block] = scanConflictLines(lines, 1, 1);
+		expect(block.markerLength).toBe(3);
+		expect(block.sides?.map(section => section.lines)).toEqual([["ours"], ["theirs"]]);
+	});
 });
 
 describe("ConflictHistory", () => {
@@ -196,15 +350,18 @@ describe("parseConflictUri", () => {
 		expect(parseConflictUri("conflict://")).toBeNull();
 	});
 
-	it("parses an optional scope segment", () => {
-		expect(parseConflictUri("conflict://1/ours")).toEqual({ id: 1, scope: "ours" });
-		expect(parseConflictUri("conflict://2/theirs")).toEqual({ id: 2, scope: "theirs" });
-		expect(parseConflictUri("conflict://3/base")).toEqual({ id: 3, scope: "base" });
+	it("parses Git named and Jujutsu indexed scopes", () => {
+		expect(parseConflictUri("conflict://1/ours")).toEqual({ id: 1, scope: { role: "side", index: 1 } });
+		expect(parseConflictUri("conflict://2/theirs")).toEqual({ id: 2, scope: { role: "side", index: 2 } });
+		expect(parseConflictUri("conflict://3/base")).toEqual({ id: 3, scope: { role: "base", index: 1 } });
+		expect(parseConflictUri("conflict://1/side/1")).toEqual({ id: 1, scope: { role: "side", index: 1 } });
+		expect(parseConflictUri("conflict://2/side/3")).toEqual({ id: 2, scope: { role: "side", index: 3 } });
+		expect(parseConflictUri("conflict://3/base/2")).toEqual({ id: 3, scope: { role: "base", index: 2 } });
 	});
 
-	it("rejects unknown scope tokens", () => {
-		expect(() => parseConflictUri("conflict://1/both")).toThrow(/scope must be one of/);
-		expect(() => parseConflictUri("conflict://1/extras")).toThrow(/scope must be one of/);
+	it("rejects malformed scope tokens", () => {
+		expect(() => parseConflictUri("conflict://1/side/0")).toThrow(/scope/);
+		expect(() => parseConflictUri("conflict://1/mine")).toThrow(/scope/);
 	});
 
 	it("parses the bulk wildcard `conflict://*`", () => {
@@ -232,9 +389,9 @@ describe("parseConflictUri", () => {
 			id: "*",
 			recoveredPrefix: "packages/coding-agent/src/x.ts",
 		});
-		expect(parseConflictUri("a.ts:conflict://2/theirs")).toEqual({
+		expect(parseConflictUri("a.ts:conflict://2/side/2")).toEqual({
 			id: 2,
-			scope: "theirs",
+			scope: { role: "side", index: 2 },
 			recoveredPrefix: "a.ts",
 		});
 	});
@@ -314,159 +471,51 @@ describe("spliceConflict", () => {
 		const result = spliceConflict(crlfNoEof, entry, "resolved");
 		expect(result.text).toBe("before\r\nresolved");
 	});
-});
 
-describe("spliceConflict boundary-echo repair", () => {
-	// The 08-multi-file-rename shape: the two lines after the closer are the
-	// function tail models love to re-emit when they paste the "whole
-	// resolved function" as the replacement.
-	const fnLines = [
-		"const queue = [];",
-		"<<<<<<< HEAD",
-		"export function scheduleTask(task, priority = 0) {",
-		"\tif (dupe(task)) {",
-		"\t\treturn;",
-		"\t}",
-		"=======",
-		"export function enqueueTask(task) {",
-		"\tif (queued.has(task.id)) {",
-		"\t\treturn;",
-		"\t}",
-		">>>>>>> feature",
-		"\tqueue.push(task);",
-		"}",
-		"",
-	];
-	const fnEntry = makeEntry({
-		startLine: 2,
-		separatorLine: 7,
-		endLine: 12,
-		oursLabel: "HEAD",
-		theirsLabel: "feature",
-		oursLines: fnLines.slice(2, 6),
-		theirsLines: fnLines.slice(7, 11),
-	});
-
-	it("drops a multi-line trailing echo of the context below the region", () => {
-		const replacement = [
-			"export function scheduleTask(task, priority = 0) {",
-			"\tif (queued.has(task.id)) {",
-			"\t\treturn;",
-			"\t}",
-			"\tqueue.push(task);",
-			"}",
-		].join("\n");
-		const result = spliceConflict(fnLines.join("\n"), fnEntry, replacement);
-		expect(result.trimmedTrailing).toBe(2);
-		expect(result.trimmedLeading).toBe(0);
-		expect(result.text).toBe(
-			[
-				"const queue = [];",
-				"export function scheduleTask(task, priority = 0) {",
-				"\tif (queued.has(task.id)) {",
-				"\t\treturn;",
-				"\t}",
-				"\tqueue.push(task);",
-				"}",
-				"",
-			].join("\n"),
-		);
-	});
-
-	// The 02-rename-vs-limits shape: a lone `}` echoed after a body-only region.
-	const bodyLines = [
-		"function nextDelay(a) {",
-		"<<<<<<< HEAD",
-		"\tconst delay = BASE * 2 ** a;",
-		"\treturn Math.min(delay, 10_000);",
-		"=======",
-		"\tconst d = B * 2 ** a;",
-		"\treturn Math.min(d, 30_000);",
-		">>>>>>> tune",
-		"}",
-		"",
-	];
-	const bodyEntry = makeEntry({
-		startLine: 2,
-		separatorLine: 5,
-		endLine: 8,
-		oursLabel: "HEAD",
-		theirsLabel: "tune",
-		oursLines: bodyLines.slice(2, 4),
-		theirsLines: bodyLines.slice(5, 7),
-	});
-
-	it("drops a single-line echo when it fixes the region's delimiter balance", () => {
-		const replacement = ["\tconst delay = BASE * 2 ** a;", "\treturn Math.min(delay, 30_000);", "}"].join("\n");
-		const result = spliceConflict(bodyLines.join("\n"), bodyEntry, replacement);
-		expect(result.trimmedTrailing).toBe(1);
-		expect(result.text).toBe(
-			[
-				"function nextDelay(a) {",
-				"\tconst delay = BASE * 2 ** a;",
-				"\treturn Math.min(delay, 30_000);",
-				"}",
-				"",
-			].join("\n"),
-		);
-	});
-
-	it("keeps a single-line echo when the delimiter balance is already consistent", () => {
-		const file = ["start", "<<<<<<< HEAD", "a", "=======", "b", ">>>>>>> x", "done();", ""].join("\n");
-		const entry = makeEntry({
-			startLine: 2,
-			separatorLine: 4,
-			endLine: 6,
-			oursLabel: "HEAD",
-			theirsLabel: "x",
-			oursLines: ["a"],
-			theirsLines: ["b"],
-		});
-		const result = spliceConflict(file, entry, "merged\ndone();");
-		expect(result.trimmedTrailing).toBe(0);
-		expect(result.text).toBe("start\nmerged\ndone();\ndone();\n");
-	});
-
-	it("drops a multi-line leading echo of the context above the region", () => {
+	it("preserves a selected jj term's ending EOL at an unterminated conflict EOF", () => {
 		const file = [
-			"// header",
-			"const queue = [];",
-			"<<<<<<< HEAD",
-			"a",
-			"=======",
-			"b",
-			">>>>>>> x",
-			"tail",
-			"",
+			"<<<<<<< conflict 1 of 1",
+			"+++++++ side A (no terminating newline)",
+			"grapefruit",
+			"%%%%%%% diff from: base (no terminating newline)",
+			`${"\\".repeat(7)}        to: side B`,
+			" grape",
+			"+",
+			">>>>>>> conflict 1 of 1 ends",
 		].join("\n");
-		const entry = makeEntry({
-			startLine: 3,
-			separatorLine: 5,
-			endLine: 7,
-			oursLabel: "HEAD",
-			theirsLabel: "x",
-			oursLines: ["a"],
-			theirsLines: ["b"],
-		});
-		const result = spliceConflict(file, entry, "// header\nconst queue = [];\nmerged");
-		expect(result.trimmedLeading).toBe(2);
-		expect(result.text).toBe("// header\nconst queue = [];\nmerged\ntail\n");
-	});
+		const [block] = scanConflictLines(file.split("\n"), 1);
+		const entry: ConflictEntry = {
+			...block,
+			id: 1,
+			absolutePath: "/abs/file",
+			displayPath: "file",
+		};
+		const withEol = expandContentTokens("@side/2", entry);
+		expect(withEol).toBe("grape\n");
+		expect(spliceConflict(file, entry, withEol).text).toBe("grape\n");
+		expect(spliceConflict(file, entry, expandContentTokens("@side/1", entry)).text).toBe("grapefruit");
 
-	it("repairs echoes in CRLF files without breaking EOL round-trip", () => {
-		const crlf = bodyLines.join("\r\n");
-		const replacement = ["\tconst delay = BASE * 2 ** a;", "\treturn Math.min(delay, 30_000);", "}"].join("\n");
-		const result = spliceConflict(crlf, bodyEntry, replacement);
-		expect(result.trimmedTrailing).toBe(1);
-		expect(result.text).toBe(
-			[
-				"function nextDelay(a) {",
-				"\tconst delay = BASE * 2 ** a;",
-				"\treturn Math.min(delay, 30_000);",
-				"}",
-				"",
-			].join("\r\n"),
-		);
+		const snapshotWithEol = [
+			"<<<<<<< conflict 1 of 1",
+			"%%%%%%% diff from: base (no terminating newline)",
+			`${"\\".repeat(7)}        to: side A (no terminating newline)`,
+			"-grape",
+			"+grapefruit",
+			"+++++++ side B",
+			"GRAPE",
+			"",
+			">>>>>>> conflict 1 of 1 ends",
+		].join("\n");
+		const [snapshotBlock] = scanConflictLines(snapshotWithEol.split("\n"), 1);
+		const snapshotEntry: ConflictEntry = {
+			...snapshotBlock,
+			id: 2,
+			absolutePath: "/abs/file",
+			displayPath: "file",
+		};
+		const snapshotSide = expandContentTokens("@side/2", snapshotEntry);
+		expect(snapshotSide).toBe("GRAPE\n");
+		expect(spliceConflict(snapshotWithEol, snapshotEntry, snapshotSide).text).toBe("GRAPE\n");
 	});
 });
 
@@ -528,26 +577,12 @@ describe("renderConflictRegion", () => {
 		expect(region.lines[region.lines.length - 1]).toBe(">>>>>>>");
 	});
 
-	it("returns just the ours body with the line number after `<<<<<<<`", () => {
-		const region = renderConflictRegion(twoWay, "ours");
-		expect(region.startLine).toBe(11);
-		expect(region.lines).toEqual(["ours-1", "ours-2"]);
-	});
-
-	it("returns just the theirs body with the line number after `=======`", () => {
-		const region = renderConflictRegion(twoWay, "theirs");
-		expect(region.startLine).toBe(14);
-		expect(region.lines).toEqual(["theirs-1"]);
-	});
-
-	it("returns just the base body for a diff3 conflict", () => {
-		const region = renderConflictRegion(threeWay, "base");
-		expect(region.startLine).toBe(23);
-		expect(region.lines).toEqual(["b"]);
-	});
-
-	it("rejects `base` scope for a 2-way conflict", () => {
-		expect(() => renderConflictRegion(twoWay, "base")).toThrow(/no base section/);
+	it("returns normalized terms and rejects out-of-range terms", () => {
+		const second = renderConflictRegion(twoWay, { role: "side", index: 2 });
+		expect(second.startLine).toBe(14);
+		expect(second.lines).toEqual(["theirs-1"]);
+		expect(() => renderConflictRegion(twoWay, { role: "base", index: 1 })).toThrow(/0 bases/);
+		expect(() => renderConflictRegion(twoWay, { role: "side", index: 3 })).toThrow(/2 sides/);
 	});
 });
 
@@ -556,7 +591,7 @@ describe("formatConflictWarning", () => {
 		expect(formatConflictWarning([])).toBe("");
 	});
 
-	it("renders the compact diff-style block with labels aggregated at top", () => {
+	it("preserves Git ours/theirs/base terminology and resolution tokens", () => {
 		const entry = makeEntry({
 			id: 7,
 			startLine: 12,
@@ -566,99 +601,57 @@ describe("formatConflictWarning", () => {
 			theirsLabel: "feature/x",
 			oursLines: ["a", "b"],
 			theirsLines: ["c"],
+			baseLines: ["ancestor"],
+			baseLabel: "merge base",
 		});
 		const text = formatConflictWarning([entry]);
 		expect(text).toContain("⚠ 1 unresolved conflict detected");
-		expect(text).toContain("- ours = HEAD");
-		expect(text).toContain("- theirs = feature/x");
-		expect(text).toContain("──── #7  L12-16 ────");
-		expect(text).toContain("<<< ours");
-		expect(text).toContain("\na\n");
-		expect(text).toContain("\nb\n");
-		expect(text).toContain(">>> theirs");
-		expect(text).toContain("\nc");
-		// NOTICE line with shorthand tokens.
-		expect(text).toContain("NOTICE: Inspect a block by reading `conflict://<N>`");
-		expect(text).toContain('`write({ path: "conflict://<N>", content })`');
-		expect(text).toContain('`write({ path: "conflict://*", content })`');
+		expect(text).toContain("──── #7  L12-16  git ────");
+		expect(text).toContain("<<< ours  HEAD");
+		expect(text).toContain(">>> theirs  feature/x");
+		expect(text).toContain("=== base  merge base");
 		expect(text).toContain("@ours");
-		expect(text).toContain("@theirs");
-		// No per-block invocation; the old verbose header is gone.
-		expect(text).not.toContain('write({ path: "conflict://7"');
-		expect(text).not.toContain("--- ours");
-		expect(text).not.toContain("[conflict #7]");
+		expect(text).toContain("@both");
+		expect(text).not.toContain("@side/<M>");
 	});
 
-	it("pluralizes the summary count and emits one block per entry", () => {
-		const e1 = makeEntry({ id: 1 });
-		const e2 = makeEntry({ id: 2, startLine: 20, separatorLine: 22, endLine: 24 });
-		const text = formatConflictWarning([e1, e2]);
-		expect(text).toContain("⚠ 2 unresolved conflicts detected");
-		expect(text).toContain("──── #1  L2-6 ────");
-		expect(text).toContain("──── #2  L20-24 ────");
-	});
+	it("renders every side of a multi-sided Jujutsu conflict", () => {
+		const [block] = scanConflictLines(
+			[
+				"<<<<<<< conflict 1 of 1",
+				"+++++++ one",
+				"a",
+				"------- old",
+				"b",
+				"+++++++ two",
+				"c",
+				"------- older",
+				"d",
+				"+++++++ three",
+				"e",
+				">>>>>>> conflict 1 of 1 ends",
+			],
 
-	it("collapses base ≡ ours by skipping the redundant body", () => {
-		const entry = makeEntry({
-			id: 3,
-			baseLines: ["o"],
-			oursLines: ["o"],
-			theirsLines: ["t"],
-			baseLabel: "ancestor",
-		});
+			1,
+		);
+		const text = formatConflictWarning([{ ...block, id: 2, absolutePath: "/tmp/f", displayPath: "f" }]);
+		expect(text).toContain("+++ side/3  three");
+		expect(text).toContain("--- base/2  older");
+	});
+	it("uses indexed terms for Jujutsu authority with Git-style markers", () => {
+		const entry = makeEntry({ authority: "jj", style: "git" });
 		const text = formatConflictWarning([entry]);
-		expect(text).toContain("=== base ≡ ours");
-		// Base body should not be duplicated.
-		const baseHeaderIdx = text.indexOf("=== base ≡ ours");
-		const theirsHeaderIdx = text.indexOf(">>> theirs");
-		expect(theirsHeaderIdx).toBeGreaterThan(baseHeaderIdx);
-		const between = text.slice(baseHeaderIdx + "=== base ≡ ours".length, theirsHeaderIdx).trim();
-		expect(between).toBe("");
+		expect(text).toContain("+++ side/1");
+		expect(text).toContain("@side/<M>");
+		expect(text).not.toContain("@ours");
 	});
 
-	it("collapses base ≡ theirs the same way", () => {
-		const entry = makeEntry({
-			id: 4,
-			baseLines: ["t"],
-			oursLines: ["o"],
-			theirsLines: ["t"],
-		});
-		const text = formatConflictWarning([entry]);
-		expect(text).toContain("=== base ≡ theirs");
-	});
-
-	it("prints the base body when base differs from both sides", () => {
-		const entry = makeEntry({
-			id: 5,
-			baseLines: ["b"],
-			oursLines: ["o"],
-			theirsLines: ["t"],
-			baseLabel: "common ancestor",
-		});
-		const text = formatConflictWarning([entry]);
-		expect(text).toContain("- base = common ancestor");
-		expect(text).toContain("=== base");
-		expect(text).not.toContain("=== base ≡");
-		expect(text).toContain("\nb\n");
-	});
-
-	it("omits the ours/theirs label lines when no entry has labels", () => {
-		const entry = makeEntry({ oursLabel: undefined, theirsLabel: undefined });
-		const text = formatConflictWarning([entry]);
-		expect(text).not.toContain("- ours =");
-		expect(text).not.toContain("- theirs =");
-	});
-
-	it("caps the body preview at PREVIEW_SIDE_LINES with a `… N more lines` footer", () => {
-		const ours = Array.from({ length: 20 }, (_v, i) => `o${i}`);
-		const entry = makeEntry({ id: 6, oursLines: ours, theirsLines: ["t"] });
-		const text = formatConflictWarning([entry]);
-		expect(text).toContain("\no0\n");
-		expect(text).toContain("\no5\n");
-		// 6 lines shown, so 14 remain.
+	it("caps each term preview at six lines", () => {
+		const lines = Array.from({ length: 20 }, (_value, index) => `line-${index}`);
+		const text = formatConflictWarning([makeEntry({ oursLines: lines })]);
+		expect(text).toContain("line-5");
 		expect(text).toContain("… (14 more lines)");
-		// Lines past the cap are dropped from the preview.
-		expect(text).not.toContain("\no6\n");
+		expect(text).not.toContain("\nline-6\n");
 	});
 });
 
@@ -672,30 +665,38 @@ describe("expandContentTokens", () => {
 		expect(expandContentTokens("hand-written\nline\n", entry)).toBe("hand-written\nline\n");
 	});
 
-	it("expands a bare `@ours` token", () => {
-		expect(expandContentTokens("@ours", entry)).toBe("o1\no2");
-	});
-
-	it("expands `@theirs` and `@both` line tokens", () => {
-		expect(expandContentTokens("@theirs", entry)).toBe("t1");
-		expect(expandContentTokens("@both", entry)).toBe("o1\no2\nt1");
-	});
-
-	it("mixes tokens with literal lines", () => {
-		expect(expandContentTokens("// keep both\n@ours\n@theirs", entry)).toBe("// keep both\no1\no2\nt1");
-	});
-
-	it("expands `@base` only when the entry has a base section", () => {
-		const withBase = makeEntry({ baseLines: ["b1"], oursLines: ["o"], theirsLines: ["t"] });
+	it("expands Git named sides and base", () => {
+		const withBase = makeEntry({ baseLines: ["b1"], oursLines: ["o1", "o2"], theirsLines: ["t1"] });
+		expect(expandContentTokens("@ours", withBase)).toBe("o1\no2");
+		expect(expandContentTokens("@theirs", withBase)).toBe("t1");
 		expect(expandContentTokens("@base", withBase)).toBe("b1");
+		expect(expandContentTokens("@both", withBase)).toBe("o1\no2\nt1");
+	});
+
+	it("mixes Git named tokens with literal lines", () => {
+		expect(expandContentTokens("// merged\n@ours\n@theirs", entry)).toBe("// merged\no1\no2\nt1");
+	});
+
+	it("rejects an unavailable Git base", () => {
 		expect(() => expandContentTokens("@base", entry)).toThrow(ToolError);
 	});
 
-	it("leaves `@ours` inside a real code line literal (token must be the whole line)", () => {
+	it("uses indexed terms and lossless Git aliases for Jujutsu conflicts", () => {
+		const jj = makeEntry({ style: "jj-snapshot", baseLines: ["b1"], oursLines: ["o1", "o2"], theirsLines: ["t1"] });
+		expect(expandContentTokens("@side/1", jj)).toBe("o1\no2");
+		expect(expandContentTokens("@side/2", jj)).toBe("t1");
+		expect(expandContentTokens("@base/1", jj)).toBe("b1");
+		expect(expandContentTokens("@ours", jj)).toBe("o1\no2");
+		expect(expandContentTokens("@theirs", jj)).toBe("t1");
+		expect(expandContentTokens("@base", jj)).toBe("b1");
+		expect(() => expandContentTokens("@both", jj)).toThrow(/combine indexed terms explicitly/);
+	});
+
+	it("leaves token-like text inside code untouched", () => {
 		expect(expandContentTokens("const x = '@ours';", entry)).toBe("const x = '@ours';");
 	});
 
-	it("handles CRLF input lines", () => {
+	it("handles CRLF token lines", () => {
 		expect(expandContentTokens("@ours\r\n@theirs", entry)).toBe("o1\no2\nt1");
 	});
 });

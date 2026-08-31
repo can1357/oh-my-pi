@@ -412,10 +412,10 @@ export interface ToolSession {
 	 *  calls. Lazily initialized by `getEditClipboard`. */
 	editClipboard?: Clipboard;
 
-	/** Per-session log of unresolved git merge conflict regions surfaced by
-	 *  `read`. Each entry gets a stable id N referenced by `write conflict://N`
-	 *  to splice the recorded region with replacement content. Lazily initialized
-	 *  by `getConflictHistory`. */
+	/** Per-session log of repository-verified Git/Jujutsu or standalone
+	 *  materialized conflict hunks surfaced by `read`. Each entry gets a stable
+	 *  id N referenced by `write conflict://N`. Lazily initialized by
+	 *  `getConflictHistory`. */
 	conflictHistory?: import("./conflict-detect").ConflictHistory;
 
 	/** Per-session ledger of post-edit LSP diagnostics already surfaced to the

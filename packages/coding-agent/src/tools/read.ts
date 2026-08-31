@@ -58,15 +58,18 @@ import { CONVERTIBLE_EXTENSIONS, convertFileWithMarkit } from "../utils/markit";
 import { isSampleProfilePath, renderSampleProfile } from "../utils/sample-profile";
 import { buildDirectoryTree, type DirectoryTree } from "../workspace-tree";
 import {
+	type ConflictAuthority,
 	type ConflictEntry,
 	type ConflictScope,
 	formatConflictSummary,
 	formatConflictWarning,
 	getConflictHistory,
+	inspectConflictAuthority,
 	parseConflictUri,
 	renderConflictRegion,
 	scanConflictLines,
 	scanFileForConflicts,
+	scanRecordedConflictLines,
 } from "./conflict-detect";
 import { executeReadUrl, fetchReadUrl, parseReadUrlTarget } from "./fetch";
 import { type OutputMeta, resolveOutputMaxColumns } from "./output-meta";
@@ -1838,34 +1841,55 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 					}
 
 					if (!firstLineExceedsLimit && collectedLines.length > 0) {
-						const blocks = scanConflictLines(collectedLines, startLineDisplay);
-						if (blocks.length > 0) {
-							const history = getConflictHistory(this.session);
-							const displayPathForWarning = formatPathRelativeToCwd(absolutePath, this.session.cwd);
-							const entries = blocks.map(block =>
-								history.register({
-									absolutePath,
-									displayPath: displayPathForWarning,
-									...block,
-								}),
-							);
-							// Cheap full-file scan only when the window already showed
-							// at least one conflict — otherwise pay nothing on clean files.
-							let totalInFile = entries.length;
-							let scanTruncated = false;
+						const defaultBlocks = scanConflictLines(collectedLines, startLineDisplay);
+						const candidates =
+							defaultBlocks.length > 0 ? defaultBlocks : scanConflictLines(collectedLines, startLineDisplay, 1);
+						if (candidates.length > 0) {
+							let authority: ConflictAuthority | undefined;
 							try {
-								const fileScan = await scanFileForConflicts(absolutePath);
-								totalInFile = Math.max(entries.length, fileScan.blocks.length);
-								scanTruncated = fileScan.scanTruncated;
-							} catch {
-								// Best-effort enrichment; fall back to window-only count.
+								authority = await inspectConflictAuthority(absolutePath, signal);
+							} catch (error) {
+								logger.debug("Conflict authority lookup failed", {
+									path: absolutePath,
+									error: error instanceof Error ? error.message : String(error),
+								});
 							}
-							outputText += formatConflictWarning(entries, {
-								totalInFile,
-								displayPath: displayPathForWarning,
-								scanTruncated,
-							});
-							details.conflictCount = entries.length;
+							const blocks =
+								authority?.state === "recorded" && authority.kind === "file"
+									? scanRecordedConflictLines(collectedLines, startLineDisplay, authority)
+									: authority?.state === "unverified"
+										? defaultBlocks
+										: [];
+							if (authority && blocks.length > 0) {
+								const history = getConflictHistory(this.session);
+								const displayPathForWarning = formatPathRelativeToCwd(absolutePath, this.session.cwd);
+								const entries = blocks.map(block =>
+									history.register({
+										absolutePath,
+										displayPath: displayPathForWarning,
+										authority: authority.state === "recorded" ? authority.backend : "unverified",
+										...block,
+									}),
+								);
+								let totalInFile = entries.length;
+								let scanTruncated = false;
+								try {
+									const fileScan = await scanFileForConflicts(absolutePath, {
+										authority:
+											authority.state === "recorded" && authority.kind === "file" ? authority : undefined,
+									});
+									totalInFile = Math.max(entries.length, fileScan.blocks.length);
+									scanTruncated = fileScan.scanTruncated;
+								} catch {
+									// Best-effort enrichment; fall back to window-only count.
+								}
+								outputText += formatConflictWarning(entries, {
+									totalInFile,
+									displayPath: displayPathForWarning,
+									scanTruncated,
+								});
+								details.conflictCount = entries.length;
+							}
 						}
 					}
 
@@ -1946,22 +1970,68 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		signal: AbortSignal | undefined,
 	): Promise<AgentToolResult<ReadToolDetails>> {
 		throwIfAborted(signal);
-		const scan = await scanFileForConflicts(absolutePath);
+		const authority = await inspectConflictAuthority(absolutePath, signal);
 		const displayPath = formatPathRelativeToCwd(absolutePath, this.session.cwd);
+		if (authority.state === "clean") {
+			return toolResult<ReadToolDetails>({
+				resolvedPath: absolutePath,
+				suffixResolution,
+				conflictCount: 0,
+			})
+				.text(`No repository-recorded conflicts in ${displayPath}.`)
+				.sourcePath(absolutePath)
+				.done();
+		}
+		if (authority.state === "recorded" && authority.kind === "other") {
+			return toolResult<ReadToolDetails>({
+				resolvedPath: absolutePath,
+				suffixResolution,
+				conflictCount: 1,
+			})
+				.text(
+					`The ${authority.backend} repository records a non-file conflict at ${displayPath}; it cannot be resolved by editing text markers.`,
+				)
+				.sourcePath(absolutePath)
+				.done();
+		}
+		if (await isProbablyBinary(absolutePath)) {
+			return toolResult<ReadToolDetails>({
+				resolvedPath: absolutePath,
+				suffixResolution,
+				conflictCount: authority.state === "recorded" ? 1 : 0,
+			})
+				.text(
+					authority.state === "recorded"
+						? `The ${authority.backend} repository records a file conflict at ${displayPath}, but its working-copy content is binary and cannot be resolved through text markers.`
+						: `No resolvable text conflict markers in binary file ${displayPath}.`,
+				)
+				.sourcePath(absolutePath)
+				.done();
+		}
+
+		const scan = await scanFileForConflicts(absolutePath, {
+			authority: authority.state === "recorded" && authority.kind === "file" ? authority : undefined,
+		});
 		const history = getConflictHistory(this.session);
 		const entries = scan.blocks.map(block =>
 			history.register({
 				absolutePath,
 				displayPath,
+				authority: authority.state === "recorded" ? authority.backend : "unverified",
 				...block,
 			}),
 		);
-
-		const summary =
-			entries.length === 0
-				? `No unresolved git merge conflicts in ${displayPath}.`
-				: formatConflictSummary(entries, { displayPath, scanTruncated: scan.scanTruncated });
-
+		let summary: string;
+		if (entries.length > 0) {
+			summary = formatConflictSummary(entries, { displayPath, scanTruncated: scan.scanTruncated });
+		} else if (authority.state === "recorded") {
+			summary =
+				authority.backend === "git"
+					? `${displayPath} is still recorded as conflicted by git, but its working-copy file has no valid conflict markers. The current file content will resolve it after staging the path.`
+					: `${displayPath} is still recorded as conflicted by jj, but its working-copy file has no valid conflict markers. The conflict cannot be resolved through \`conflict://\`; edit the working-copy file directly.`;
+		} else {
+			summary = `No unresolved conflict markers in ${displayPath}.`;
+		}
 		const details: ReadToolDetails = {
 			resolvedPath: absolutePath,
 			suffixResolution,

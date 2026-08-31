@@ -45,6 +45,7 @@ import {
 	conflictRegionsEqual,
 	expandContentTokens,
 	getConflictHistory,
+	inspectConflictAuthority,
 	parseConflictUri,
 	spliceConflict,
 } from "./conflict-detect";
@@ -210,12 +211,9 @@ async function assertNotReadSelectorMisfire(target: string, content: string, cwd
 	throwReadSelectorMisfire(target, sel);
 }
 
-const BULK_DIRECTIVE_RE = /^#?(\d+)\s*[:=]\s*(@ours|@theirs|@base|@both)$/;
-/**
- * The head of a per-id directive line — `<id>:` / `<id>=` (optionally `#`-prefixed),
- * regardless of whether its value is a valid `@side` token. Used only to sharpen the
- * error message when a directive block is malformed (e.g. `15: some literal text`).
- */
+const CONFLICT_TERM_TOKEN = String.raw`@(?:(?:side|base)\/[1-9]\d*|ours|theirs|base|both)`;
+const CONFLICT_TERM_TOKEN_RE = new RegExp(`^${CONFLICT_TERM_TOKEN}$`);
+const BULK_DIRECTIVE_RE = new RegExp(String.raw`^#?(\d+)\s*[:=]\s*(${CONFLICT_TERM_TOKEN})$`);
 const BULK_DIRECTIVE_HEAD_RE = /^#?\d+\s*[:=]/;
 
 function truncateDirectiveLine(line: string): string {
@@ -223,18 +221,8 @@ function truncateDirectiveLine(line: string): string {
 }
 
 /**
- * Parse `conflict://*` per-id directive content: every non-empty line must be
- * `<id>: @side` (also accepted: `#<id> = @side`), where `@side` is one of
- * `@ours` / `@theirs` / `@base` / `@both`.
- *
- * Returns `null` only when NO line is directive-shaped (→ uniform bulk mode).
- * Throws on duplicate ids, and — critically — on a *partial* directive block:
- * content that mixes valid `<id>: @side` lines with lines that aren't. Without
- * that guard a per-id write carrying any non-token value (a literal or
- * multi-line replacement, e.g. `15: <multi-line content>`) fell through to
- * uniform bulk mode, which pasted the raw directive text verbatim into every
- * block and still reported success. Per-id bulk is token-only; literal or
- * multi-line replacements must go through individual `conflict://<N>` writes.
+ * Parse a token-only `conflict://*` directive block. Each non-empty line
+ * selects one Git named term or indexed Jujutsu term for one conflict id.
  */
 function parseBulkDirectives(content: string): Map<number, string> | null {
 	const map = new Map<number, string>();
@@ -260,13 +248,12 @@ function parseBulkDirectives(content: string): Map<number, string> | null {
 	if (stray.length > 0) {
 		const sample = stray[0]!;
 		const tokenHint = BULK_DIRECTIVE_HEAD_RE.test(sample)
-			? `Per-id bulk only accepts the tokens @ours/@theirs/@base/@both — one side per id, single line. `
+			? `Per-id bulk only accepts Git @ours/@theirs/@base/@both or Jujutsu @side/<N>/@base/<N> terms — one term per id, single line. `
 			: "";
 		throw new ToolError(
-			`Malformed \`conflict://*\` per-id block: ${stray.length} line(s) are not \`<id>: @side\` directives (first: \`${truncateDirectiveLine(sample)}\`). ` +
+			`Malformed \`conflict://*\` per-id block: ${stray.length} line(s) are not recognized \`<id>: <term>\` directives (first: \`${truncateDirectiveLine(sample)}\`). ` +
 				tokenHint +
-				`Literal or multi-line replacement content isn't supported in a per-id block — resolve those blocks with individual \`write({ path: "conflict://<N>", content })\` calls (you can issue several at once). ` +
-				`For a pure pick-a-side pass, make every non-empty line \`<id>: @ours\` (or @theirs/@base/@both).`,
+				`Resolve literal or combined text with individual \`conflict://<N>\` writes.`,
 		);
 	}
 	return map;
@@ -301,6 +288,30 @@ function resolveBulkDirectives(raw: string, stripped: string): Map<number, strin
 		throw rawError;
 	}
 	return rawResult ?? parseBulkDirectives(stripped);
+}
+
+async function assertConflictAuthorityCurrent(entry: ConflictEntry, signal: AbortSignal | undefined): Promise<void> {
+	if (entry.authority !== "git" && entry.authority !== "jj") return;
+	const recordedBackend = entry.authority;
+	const authority = await inspectConflictAuthority(entry.absolutePath, signal);
+	if (
+		authority.state === "recorded" &&
+		authority.kind === "file" &&
+		authority.backend === recordedBackend &&
+		authority.regions.some(
+			region =>
+				region.startLine === entry.startLine &&
+				region.endLine === entry.endLine &&
+				region.markerLength === entry.markerLength &&
+				region.sides.length === entry.sides?.length &&
+				region.bases.length === entry.bases?.length,
+		)
+	) {
+		return;
+	}
+	throw new ToolError(
+		`Conflict #${entry.id} is no longer recorded as an unresolved file conflict by ${recordedBackend}. Re-read '${entry.displayPath}' before writing.`,
+	);
 }
 
 const writeSchema = type({
@@ -853,6 +864,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 		if (!(await fs.exists(absolutePath))) {
 			throw new ToolError(`Conflict #${entry.id} target '${entry.displayPath}' no longer exists.`);
 		}
+		await assertConflictAuthorityCurrent(entry, signal);
 
 		const expanded = expandContentTokens(replacementContent, entry);
 		const originalText = await Bun.file(absolutePath).text();
@@ -887,14 +899,13 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			entry.startLine === entry.endLine
 				? `line ${entry.startLine}`
 				: `lines ${entry.startLine}\u2013${entry.endLine}`;
-		const summary = `Resolved conflict #${entry.id} at ${range} in ${entry.displayPath}.`;
+		const summary = `Resolved materialized conflict hunk #${entry.id} at ${range} in ${entry.displayPath}.`;
 		let resultText = header ? `${header}\n${summary}` : summary;
+		if (entry.authority === "git") {
+			resultText += "\nThe Git index remains unmerged until the path is staged.";
+		}
 		if (stripped) {
 			resultText += `\nNote: auto-stripped hashline display prefixes from content before writing.`;
-		}
-		const echoTrimmed = splice.trimmedLeading + splice.trimmedTrailing;
-		if (echoTrimmed > 0) {
-			resultText += `\nNote: dropped ${echoTrimmed} content line(s) that duplicated the code adjacent to the conflict region — writes replace only the marker block; surrounding lines stay in place.`;
 		}
 
 		return {
@@ -926,16 +937,13 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 	 * Bulk-resolve every registered conflict via `conflict://*`.
 	 *
 	 * Entries are grouped by file and applied bottom-up by recorded start
-	 * line so each splice keeps later anchors valid. `content` tokens are
-	 * expanded *per entry*, so `content: "@ours"` keeps each block's own
-	 * ours side rather than collapsing every conflict to the first
-	 * block's ours.
+	 * line so later anchors stay valid. Indexed side/base tokens expand per
+	 * entry, preserving each conflict's own arity and term contents.
 	 *
-	 * All-or-nothing semantics within a file: if any splice for a file
-	 * fails (stale anchors, missing base for `@base`, etc.), that file is
-	 * left untouched and the error is surfaced. Files that succeed are
-	 * still written. The result text reports per-file counts so the agent
-	 * can re-read the failed files and retry.
+	 * All-or-nothing semantics within a file: if any splice fails (stale
+	 * anchors, out-of-range term, etc.), that file is left untouched and the
+	 * error is surfaced. Files that succeed are still written, with per-file
+	 * counts in the result.
 	 */
 	async #resolveAllConflicts(
 		replacementContent: string,
@@ -951,13 +959,19 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			);
 		}
 
-		// Per-id directive mode: content made solely of `<id>: @side` lines
-		// resolves each listed conflict with that side in one call. Ideal for
+		// Per-id directive mode: content made solely of `<id>: <term>` lines
+		// resolves each listed conflict with that term in one call. Ideal for
 		// merge-hell files where dozens of pick-one blocks each need their own
 		// winner — one call instead of one write per conflict. Parsed from the
 		// PRE-strip content: hashline prefix stripping would otherwise eat the
 		// `<id>: ` heads as echoed line numbers.
 		const directives = resolveBulkDirectives(rawContent, replacementContent);
+		const sharedTerm = replacementContent.trim();
+		if (!directives && !CONFLICT_TERM_TOKEN_RE.test(sharedTerm)) {
+			throw new ToolError(
+				"`conflict://*` only accepts a shared Git @ours/@theirs/@base/@both or Jujutsu @side/<N>/@base/<N> term, or explicit `<id>: <term>` directives. Use individual conflict writes for literal or combined resolutions.",
+			);
+		}
 		if (directives) {
 			const known = new Set(allEntries.map(entry => entry.id));
 			const unknown = [...directives.keys()].filter(id => !known.has(id));
@@ -968,8 +982,6 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			}
 		}
 		const selectedEntries = directives ? allEntries.filter(entry => directives.has(entry.id)) : allEntries;
-		const contentFor = (entry: ConflictEntry): string =>
-			directives ? (directives.get(entry.id) as string) : replacementContent;
 
 		const byFile = new Map<string, ConflictEntry[]>();
 		for (const entry of selectedEntries) {
@@ -978,13 +990,13 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			byFile.set(entry.absolutePath, bucket);
 		}
 
-		const succeededFiles: { displayPath: string; count: number; header?: string }[] = [];
+		const succeededFiles: { displayPath: string; count: number; header?: string; authority?: "git" | "jj" }[] = [];
 		const failedFiles: { displayPath: string; count: number; error: string }[] = [];
 		let totalResolvedIds = 0;
-		let totalEchoTrimmed = 0;
 
 		for (const [absolutePath, fileEntries] of byFile) {
 			const sample = fileEntries[0]!;
+			const authoritativeEntry = fileEntries.find(entry => entry.authority === "git" || entry.authority === "jj");
 			if (!(await fs.exists(absolutePath))) {
 				failedFiles.push({
 					displayPath: sample.displayPath,
@@ -1001,6 +1013,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			const staleEntries: ConflictEntry[] = [];
 			let failure: string | undefined;
 			try {
+				if (authoritativeEntry) await assertConflictAuthorityCurrent(authoritativeEntry, signal);
 				text = await Bun.file(absolutePath).text();
 			} catch (error) {
 				failedFiles.push({
@@ -1012,10 +1025,10 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			}
 			for (const entry of fileEntries) {
 				try {
-					const expanded = expandContentTokens(contentFor(entry), entry);
+					const entryContent = directives ? directives.get(entry.id)! : sharedTerm;
+					const expanded = expandContentTokens(entryContent, entry);
 					const splice = spliceConflict(text, entry, expanded);
 					text = splice.text;
-					totalEchoTrimmed += splice.trimmedLeading + splice.trimmedTrailing;
 					resolvedEntries.push(entry);
 				} catch (error) {
 					// A locate-miss for a region an earlier entry already spliced
@@ -1045,7 +1058,12 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			for (const entry of resolvedEntries) history.invalidate(entry.id);
 			for (const entry of staleEntries) history.invalidate(entry.id);
 			const header = maybeWriteSnapshotHeader(this.session, absolutePath, text);
-			succeededFiles.push({ displayPath: sample.displayPath, count: resolvedEntries.length, header });
+			succeededFiles.push({
+				displayPath: sample.displayPath,
+				count: resolvedEntries.length,
+				header,
+				authority: authoritativeEntry?.authority === "unverified" ? undefined : authoritativeEntry?.authority,
+			});
 			totalResolvedIds += resolvedEntries.length;
 		}
 
@@ -1059,16 +1077,14 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			for (const file of succeededFiles) {
 				summaryLines.push(`  ${file.displayPath}: ${file.count} ${conflictWord(file.count)}`);
 			}
+			if (succeededFiles.some(file => file.authority === "git")) {
+				summaryLines.push("Git index entries remain unmerged until the resolved paths are staged.");
+			}
 		}
 		if (directives && selectedEntries.length < allEntries.length) {
 			const remaining = allEntries.filter(entry => !directives.has(entry.id)).map(entry => `#${entry.id}`);
 			summaryLines.push(
 				`Directive mode: ${remaining.length} unlisted ${conflictWord(remaining.length)} still registered (${remaining.join(", ")}).`,
-			);
-		}
-		if (totalEchoTrimmed > 0) {
-			summaryLines.push(
-				`Note: dropped ${totalEchoTrimmed} content line(s) that duplicated code adjacent to conflict regions — writes replace only the marker block; surrounding lines stay in place.`,
 			);
 		}
 		if (failedFiles.length > 0) {
@@ -1218,8 +1234,10 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			const conflictUri = parseConflictUri(path);
 			if (conflictUri) {
 				if (conflictUri.scope) {
+					const namedScope = path.match(/\/(ours|theirs|base)$/)?.[1];
+					const scope = namedScope ?? `${conflictUri.scope.role}/${conflictUri.scope.index}`;
 					throw new ToolError(
-						`Conflict URI scope '/${conflictUri.scope}' is read-only — read \`conflict://${conflictUri.id}/${conflictUri.scope}\` to inspect that side. To write, drop the scope (\`conflict://${conflictUri.id}\`) and put the chosen content (or shorthand like \`@${conflictUri.scope}\`) in \`content\`.`,
+						`Conflict URI scope '/${scope}' is read-only. Write to \`conflict://${conflictUri.id}\` and put \`@${scope}\` in content to choose that term.`,
 					);
 				}
 				emitWriteProgress(onUpdate, cleanContent, path);

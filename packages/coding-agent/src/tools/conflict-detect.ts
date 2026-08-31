@@ -1,40 +1,52 @@
 /**
- * Detect and resolve unresolved git merge conflicts that surface in `read`
- * output.
+ * Detect and resolve materialized Git and Jujutsu conflicts surfaced by
+ * `read`.
  *
- * Workflow:
- *   1. `read` collects lines from disk as usual.
- *   2. `scanConflictLines` inspects those lines (no extra I/O) for
- *      well-formed `<<<<<<<` / `=======` / `>>>>>>>` blocks.
- *   3. Each completed block is registered with the session's
- *      `ConflictHistory`, which assigns it a stable id.
- *   4. The read output is returned verbatim with a short footer naming
- *      every conflict id surfaced, and the agent calls
- *      `write({ path: "conflict://<id>", content })` to splice the
- *      recorded region with the chosen content.
- *
- * Marker shape is strict: only column-0 markers of the exact prefix length
- * followed by either EOL or a single space + label count. Lines that
- * merely start with `<` or `=` never match.
+ * Marker parsing supports Git diff3 plus Jujutsu diff/snapshot styles,
+ * arbitrary side/base arity, CRLF, and dynamically lengthened markers. Inside
+ * a repository, marker blocks are exposed only when the owning VCS records the
+ * path as conflicted; standalone marker files remain usable. Registered hunks
+ * receive session-stable ids which `write conflict://N` resolves by exact
+ * marker-block replacement.
  */
 
+import * as fs from "node:fs/promises";
+import * as path from "node:path";
+import type { VcsConflictRegion } from "@oh-my-pi/pi-natives";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import type { ToolSession } from "./index";
 import { ToolError } from "./tool-errors";
 
-const OURS_PREFIX = "<<<<<<<";
-const BASE_PREFIX = "|||||||";
-const SEPARATOR = "=======";
-const THEIRS_PREFIX = ">>>>>>>";
+const MIN_MARKER_LENGTH = 7;
+
+export type ConflictStyle = "git" | "jj-diff" | "jj-snapshot";
+export type ConflictGrammar = "all" | "git";
+
+export interface ConflictSection {
+	label?: string;
+	lines: string[];
+	/** Exact semantic term content, including its terminal EOL when present. */
+	content?: string;
+	/** 1-indexed file line of the first body line. */
+	startLine: number;
+}
 
 export interface ConflictBlock {
-	/** 1-indexed line of the `<<<<<<<` marker. */
+	/** 1-indexed line of the opening marker. */
 	startLine: number;
-	/** 1-indexed line of the `=======` separator. */
+	/** 1-indexed line of the Git separator, or first jj term marker. */
 	separatorLine: number;
-	/** 1-indexed line of the `>>>>>>>` marker. */
+	/** 1-indexed line of the closing marker. */
 	endLine: number;
-	/** 1-indexed line of the `|||||||` base marker (diff3 only). */
+	/** 1-indexed line of the first base marker, when present. */
 	baseLine?: number;
+	style?: ConflictStyle;
+	markerLength?: number;
+	/** Exact LF-normalized marker block, including its outer markers. */
+	rawLines?: string[];
+	sides?: ConflictSection[];
+	bases?: ConflictSection[];
+	/** Legacy two-side projection retained for callers constructing entries directly. */
 	oursLabel?: string;
 	baseLabel?: string;
 	theirsLabel?: string;
@@ -43,98 +55,91 @@ export interface ConflictBlock {
 	theirsLines: string[];
 }
 
+function contentLines(content: string): string[] {
+	const lines = content.split("\n").map(stripTrailingCr);
+	if (lines.at(-1) === "") lines.pop();
+	return lines;
+}
+
+function conflictStyle(style: string): ConflictStyle {
+	if (style === "git" || style === "jj-diff" || style === "jj-snapshot") return style;
+	throw new ToolError(`Native conflict parser returned unknown style '${style}'.`);
+}
+
+function buildConflictBlock(region: VcsConflictRegion, rawLines: string[], lineOffset: number): ConflictBlock {
+	const sides = region.sides.map((term, index) => ({
+		label: term.label,
+		lines: contentLines(term.content),
+		content: term.content,
+		startLine: (index === 0 ? region.startLine + 1 : region.separatorLine + 1) + lineOffset,
+	}));
+	const bases = region.bases.map(term => ({
+		label: term.label,
+		lines: contentLines(term.content),
+		content: term.content,
+		startLine: (region.baseLine ?? region.startLine) + 1 + lineOffset,
+	}));
+	const [ours, theirs = { label: undefined, lines: [], startLine: region.endLine + lineOffset }] = sides;
+	const base = bases[0];
+	return {
+		startLine: region.startLine + lineOffset,
+		separatorLine: region.separatorLine + lineOffset,
+		endLine: region.endLine + lineOffset,
+		baseLine: region.baseLine === undefined ? undefined : region.baseLine + lineOffset,
+		style: conflictStyle(region.style),
+		markerLength: region.markerLength,
+		rawLines,
+		sides,
+		bases,
+		oursLabel: ours?.label,
+		baseLabel: base?.label,
+		theirsLabel: theirs.label,
+		oursLines: ours?.lines ?? [],
+		baseLines: base?.lines,
+		theirsLines: theirs.lines,
+	};
+}
+
 /**
- * Scan an already-collected array of file lines for completed conflict
- * blocks. `firstLineNumber` is the 1-indexed line number of `lines[0]`
- * (so a windowed read starting at line 200 passes `firstLineNumber: 200`).
- *
- * Only fully-closed blocks (opener + separator + closer all present in
- * the window) are returned. A block whose closer is past the window's
- * tail is dropped — the agent will see the open marker and can widen
- * the read.
+ * Parse standalone marker content through the native Git grammar and jj-lib
+ * parser. Repository-backed callers use backend-validated regions instead.
  */
-export function scanConflictLines(lines: readonly string[], firstLineNumber: number): ConflictBlock[] {
-	const blocks: ConflictBlock[] = [];
-	let phase: "idle" | "ours" | "base" | "theirs" = "idle";
-	let partial: {
-		startLine: number;
-		oursLabel?: string;
-		oursLines: string[];
-		baseLine?: number;
-		baseLabel?: string;
-		baseLines?: string[];
-		separatorLine?: number;
-		theirsLines?: string[];
-	} | null = null;
+export function scanConflictLines(
+	lines: readonly string[],
+	firstLineNumber: number,
+	minimumMarkerLength = MIN_MARKER_LENGTH,
+	exactMarkerLength = false,
+	grammar: ConflictGrammar = "all",
+): ConflictBlock[] {
+	const normalized = lines.map(stripTrailingCr);
+	return vcs
+		.parseConflictMarkers(Buffer.from(normalized.join("\n")), minimumMarkerLength)
+		.filter(
+			region =>
+				(!exactMarkerLength || region.markerLength === minimumMarkerLength) &&
+				(grammar === "all" || region.style === "git"),
+		)
+		.map(region => {
+			const start = region.startLine - 1;
+			const end = region.endLine;
+			return buildConflictBlock(region, normalized.slice(start, end), firstLineNumber - 1);
+		});
+}
 
-	for (let i = 0; i < lines.length; i++) {
-		// Strip a trailing \r so CRLF checkouts match the same markers; stored
-		// section lines are LF-normalized (splice re-applies \r on write).
-		const line = stripTrailingCr(lines[i]);
-		const ln = firstLineNumber + i;
-
-		const oursLabel = matchMarker(line, OURS_PREFIX);
-		if (oursLabel !== null) {
-			partial = { startLine: ln, oursLabel: oursLabel || undefined, oursLines: [] };
-			phase = "ours";
-			continue;
-		}
-
-		if (phase === "idle" || partial === null) continue;
-
-		const baseLabel = matchMarker(line, BASE_PREFIX);
-		if (baseLabel !== null) {
-			if (phase !== "ours") {
-				partial = null;
-				phase = "idle";
-				continue;
-			}
-			partial.baseLine = ln;
-			partial.baseLabel = baseLabel || undefined;
-			partial.baseLines = [];
-			phase = "base";
-			continue;
-		}
-
-		if (line === SEPARATOR) {
-			if (phase === "ours" || phase === "base") {
-				partial.separatorLine = ln;
-				partial.theirsLines = [];
-				phase = "theirs";
-			} else {
-				partial = null;
-				phase = "idle";
-			}
-			continue;
-		}
-
-		const theirsLabel = matchMarker(line, THEIRS_PREFIX);
-		if (theirsLabel !== null) {
-			if (phase === "theirs" && partial.separatorLine !== undefined && partial.theirsLines) {
-				blocks.push({
-					startLine: partial.startLine,
-					separatorLine: partial.separatorLine,
-					endLine: ln,
-					baseLine: partial.baseLine,
-					oursLabel: partial.oursLabel,
-					baseLabel: partial.baseLabel,
-					theirsLabel: theirsLabel || undefined,
-					oursLines: partial.oursLines,
-					baseLines: partial.baseLines,
-					theirsLines: partial.theirsLines,
-				});
-			}
-			partial = null;
-			phase = "idle";
-			continue;
-		}
-
-		if (phase === "ours") partial.oursLines.push(line);
-		else if (phase === "base" && partial.baseLines) partial.baseLines.push(line);
-		else if (phase === "theirs" && partial.theirsLines) partial.theirsLines.push(line);
-	}
-
-	return blocks;
+export function scanRecordedConflictLines(
+	lines: readonly string[],
+	firstLineNumber: number,
+	authority: Extract<ConflictAuthority, { state: "recorded"; kind: "file" }>,
+): ConflictBlock[] {
+	const normalized = lines.map(stripTrailingCr);
+	const lastLineNumber = firstLineNumber + normalized.length - 1;
+	return authority.regions
+		.filter(region => region.startLine >= firstLineNumber && region.endLine <= lastLineNumber)
+		.map(region => {
+			const start = region.startLine - firstLineNumber;
+			const end = region.endLine - firstLineNumber + 1;
+			return buildConflictBlock(region, normalized.slice(start, end), 0);
+		});
 }
 
 const SCAN_FILE_DEFAULT_MAX_BYTES = 10 * 1024 * 1024;
@@ -149,7 +154,12 @@ const SCAN_FILE_DEFAULT_MAX_BYTES = 10 * 1024 * 1024;
  */
 export async function scanFileForConflicts(
 	absolutePath: string,
-	options: { maxBytes?: number } = {},
+	options: {
+		maxBytes?: number;
+		minimumMarkerLength?: number;
+		exactMarkerLength?: boolean;
+		authority?: Extract<ConflictAuthority, { state: "recorded"; kind: "file" }>;
+	} = {},
 ): Promise<{ blocks: ConflictBlock[]; scanTruncated: boolean }> {
 	const maxBytes = options.maxBytes ?? SCAN_FILE_DEFAULT_MAX_BYTES;
 	const file = Bun.file(absolutePath);
@@ -160,19 +170,12 @@ export async function scanFileForConflicts(
 	// `split("\n")` over a truncated read may leave a partial last line; the
 	// scanner already tolerates an unclosed opener, so no extra trimming.
 	const lines = text.split("\n");
-	return { blocks: scanConflictLines(lines, 1), scanTruncated: truncated };
-}
-
-/**
- * Return the label after a marker prefix when the line is a valid
- * column-0 marker, or `null` when it isn't. Strict shape: prefix alone,
- * or prefix + single space + label.
- */
-function matchMarker(line: string, prefix: string): string | null {
-	if (!line.startsWith(prefix)) return null;
-	if (line.length === prefix.length) return "";
-	if (line.charCodeAt(prefix.length) !== 32 /* space */) return null;
-	return line.slice(prefix.length + 1);
+	return {
+		blocks: options.authority
+			? scanRecordedConflictLines(lines, 1, options.authority)
+			: scanConflictLines(lines, 1, options.minimumMarkerLength, options.exactMarkerLength),
+		scanTruncated: truncated,
+	};
 }
 
 /**
@@ -184,6 +187,7 @@ export interface ConflictEntry extends ConflictBlock {
 	id: number;
 	absolutePath: string;
 	displayPath: string;
+	authority?: "git" | "jj" | "unverified";
 }
 
 /** Per-session log of conflict regions surfaced by `read`. */
@@ -242,10 +246,83 @@ export function getConflictHistory(session: ToolSession): ConflictHistory {
 	return session.conflictHistory;
 }
 
-/** A side of a conflict block that the `read` tool can render via `conflict://N/<scope>`. */
-export type ConflictScope = "ours" | "theirs" | "base";
+export type ConflictAuthorityRegion = VcsConflictRegion;
 
-const CONFLICT_SCOPES = new Set<ConflictScope>(["ours", "theirs", "base"]);
+export type ConflictAuthority =
+	| { state: "unverified" }
+	| { state: "clean"; backend: "git" | "jj" }
+	| { state: "recorded"; backend: "git" | "jj"; kind: "file"; regions: ConflictAuthorityRegion[] }
+	| { state: "recorded"; backend: "git" | "jj"; kind: "other" };
+
+/**
+ * Ask the owning VCS whether `absolutePath` is recorded as conflicted. A
+ * standalone file outside a repository remains marker-verifiable so conflict
+ * fixtures and exported merge results can still use the protocol.
+ */
+async function canonicalTrackedPath(absolutePath: string): Promise<string> {
+	const requested = path.resolve(absolutePath);
+	const parent = await fs.realpath(path.dirname(requested)).catch(() => path.dirname(requested));
+	const requestedName = path.basename(requested);
+	const entries = await fs.readdir(parent).catch(() => []);
+	const exactName = entries.find(name => name === requestedName);
+	const foldedNames = exactName ? [] : entries.filter(name => name.toLowerCase() === requestedName.toLowerCase());
+	const actualName = exactName ?? (foldedNames.length === 1 ? foldedNames[0]! : requestedName);
+	return path.join(parent, actualName);
+}
+
+export async function inspectConflictAuthority(absolutePath: string, signal?: AbortSignal): Promise<ConflictAuthority> {
+	const resolvedPath = await canonicalTrackedPath(absolutePath);
+	const directory = path.dirname(resolvedPath);
+	const repository = vcs.repo(directory);
+	const jjWorkspace = vcs.jj(directory);
+	if (!repository && !jjWorkspace) return { state: "unverified" };
+
+	const jjOwns =
+		jjWorkspace !== null &&
+		(repository === null ||
+			repository.kind() === "jj" ||
+			path.resolve(repository.root()) === path.resolve(jjWorkspace.root()));
+	const backend = jjOwns ? "jj" : "git";
+	const root = jjOwns ? jjWorkspace.root() : repository?.root();
+	if (!root) return { state: "unverified" };
+	const resolvedRoot = await fs.realpath(root).catch(() => path.resolve(root));
+	const relativePath = path.relative(resolvedRoot, resolvedPath).split(path.sep).join("/");
+	if (relativePath === ".." || relativePath.startsWith("../")) return { state: "clean", backend };
+
+	const conflicts = jjOwns
+		? await jjWorkspace.conflictedPaths([relativePath], signal)
+		: await repository!.conflictedPaths([relativePath], signal);
+	const conflict = conflicts.find(item => item.path === relativePath);
+	if (!conflict) return { state: "clean", backend };
+	if (conflict.kind === "other") return { state: "recorded", backend, kind: "other" };
+	const regions = conflict.regions;
+	if (
+		!Array.isArray(regions) ||
+		regions.some(
+			region =>
+				!Number.isInteger(region.startLine) ||
+				region.startLine < 1 ||
+				!Number.isInteger(region.separatorLine) ||
+				region.separatorLine <= region.startLine ||
+				!Number.isInteger(region.endLine) ||
+				region.endLine <= region.separatorLine ||
+				!Number.isInteger(region.markerLength) ||
+				region.markerLength < 1 ||
+				!Array.isArray(region.sides) ||
+				region.sides.length < 2 ||
+				!Array.isArray(region.bases),
+		)
+	) {
+		throw new ToolError(`The ${backend} conflict at '${relativePath}' has invalid materialized region metadata.`);
+	}
+	return { state: "recorded", backend, kind: "file", regions };
+}
+
+/** One indexed positive side or negative base. Git names normalize here. */
+export interface ConflictScope {
+	role: "side" | "base";
+	index: number;
+}
 
 /** Parsed `conflict://<N>` / `conflict://<N>/<scope>` / `conflict://*` URI. */
 export interface ParsedConflictUri {
@@ -267,16 +344,8 @@ export interface ParsedConflictUri {
 const CONFLICT_URI_RE = /^(?:(.+):)?conflict:\/\/(.+)$/;
 
 /**
- * Parse a `conflict://<N>`, `conflict://<N>/<scope>`, or `conflict://*` URI.
- *
- * Returns `null` for non-conflict paths; throws `ToolError` for a
- * well-formed scheme with an invalid id or scope so the agent gets a
- * clear actionable message rather than a confusing "not found" later.
- *
- * `*` is the bulk-write wildcard — only valid as `conflict://*` (no
- * scope segment). Use it with `write({ path: "conflict://*", content })`
- * to apply `content` (with optional `@ours` / `@theirs` / `@base` /
- * `@both` shorthand) to every currently-registered conflict in one shot.
+ * Parse a `conflict://<N>`, Git `/<ours|theirs|base>`, indexed
+ * Jujutsu `/side/<M>` or `/base/<M>`, or `conflict://*` URI.
  */
 export function parseConflictUri(raw: string): ParsedConflictUri | null {
 	const match = raw.match(CONFLICT_URI_RE);
@@ -289,16 +358,14 @@ export function parseConflictUri(raw: string): ParsedConflictUri | null {
 
 	if (idPart === "*") {
 		if (scopePart !== undefined) {
-			throw new ToolError(
-				`Invalid conflict URI '${raw}': wildcard 'conflict://*' does not accept a scope segment. Drop '/${scopePart}' or use a numeric id.`,
-			);
+			throw new ToolError(`Invalid conflict URI '${raw}': wildcard 'conflict://*' does not accept a scope segment.`);
 		}
 		return recoveredPrefix !== undefined ? { id: "*", recoveredPrefix } : { id: "*" };
 	}
 
 	if (!/^\d+$/.test(idPart)) {
 		throw new ToolError(
-			`Invalid conflict URI '${raw}': must be 'conflict://<N>', 'conflict://<N>/<scope>', or 'conflict://*' where N is a positive integer surfaced by a prior \`read\`.`,
+			`Invalid conflict URI '${raw}': use 'conflict://<N>', a Git '/ours', '/theirs', or '/base' scope, an indexed '/side/<M>' or '/base/<M>' scope, or 'conflict://*'.`,
 		);
 	}
 	const id = Number.parseInt(idPart, 10);
@@ -308,43 +375,35 @@ export function parseConflictUri(raw: string): ParsedConflictUri | null {
 
 	let scope: ConflictScope | undefined;
 	if (scopePart !== undefined) {
-		if (!CONFLICT_SCOPES.has(scopePart as ConflictScope)) {
-			throw new ToolError(
-				`Invalid conflict URI '${raw}': scope must be one of 'ours', 'theirs', 'base', or omitted (e.g. 'conflict://${id}/theirs').`,
-			);
+		if (scopePart === "ours") scope = { role: "side", index: 1 };
+		else if (scopePart === "theirs") scope = { role: "side", index: 2 };
+		else if (scopePart === "base") scope = { role: "base", index: 1 };
+		else {
+			const scopeMatch = scopePart.match(/^(side|base)\/([1-9]\d*)$/);
+			if (!scopeMatch) {
+				throw new ToolError(
+					`Invalid conflict URI '${raw}': use a Git 'ours', 'theirs', or 'base' scope, or an indexed 'side/<M>' or 'base/<M>' scope.`,
+				);
+			}
+			scope = {
+				role: scopeMatch[1] as ConflictScope["role"],
+				index: Number.parseInt(scopeMatch[2]!, 10),
+			};
 		}
-		scope = scopePart as ConflictScope;
 	}
 
 	return recoveredPrefix !== undefined ? { id, scope, recoveredPrefix } : { id, scope };
 }
 
-/** Result of {@link spliceConflict}: the new file text plus any boundary-echo repair applied. */
+/** Result of an exact marker-block replacement. */
 export interface ConflictSplice {
 	text: string;
-	/** Replacement lines dropped because they duplicated the context directly above the region. */
-	trimmedLeading: number;
-	/** Replacement lines dropped because they duplicated the context directly below the region. */
-	trimmedTrailing: number;
 }
 
 /**
- * Splice the conflict region recorded in `entry` out of `originalText`
- * and replace it with `replacement` (markers and all sides included).
- *
- * Works like the edit tool's patch infra: locates the recorded marker
- * block by content (anchored to `entry.startLine` as the preferred
- * match), so out-of-band edits earlier in the file that shift line
- * numbers don't break resolution. Throws clearly when the marker block
- * has actually been altered or removed.
- *
- * Boundary-echo repair (same philosophy as the edit tool's hashline
- * keeper repair): models frequently paste the "whole resolved function"
- * including the lines that live directly before/after the marker block,
- * which the verbatim splice would duplicate. Replacement lines that
- * exactly echo the adjacent context are dropped when the echo is
- * unambiguous — two or more consecutive lines, or a single line whose
- * removal fixes a delimiter-balance mismatch against the recorded sides.
+ * Locate the exact recorded marker block and replace it verbatim. Line numbers
+ * are only a preferred anchor; content identity tolerates unrelated edits
+ * earlier in the file without silently rewriting the supplied resolution.
  */
 export function spliceConflict(originalText: string, entry: ConflictEntry, replacement: string): ConflictSplice {
 	const lines = originalText.split("\n");
@@ -356,107 +415,36 @@ export function spliceConflict(originalText: string, entry: ConflictEntry, repla
 		);
 	}
 
-	const trimmed = normalizeTrailingNewline(replacement);
-	let replacementLines = trimmed.split("\n").map(stripTrailingCr);
-	const echo = trimBoundaryEcho(replacementLines, lines, match, entry);
-	replacementLines = echo.lines;
+	const hasFollowingLine = match.endIdx + 1 < lines.length;
+	const normalizedReplacement = hasFollowingLine ? normalizeTrailingNewline(replacement) : replacement;
+	let replacementLines = normalizedReplacement.split("\n").map(stripTrailingCr);
 	// Round-trip fidelity for CRLF files: recorded sections are LF-normalized,
 	// so re-apply \r to spliced lines when the matched region used CRLF. The
 	// final replacement line only carries \r when another line follows it.
 	if (lines[match.startIdx]!.endsWith("\r")) {
-		const hasFollowingLine = match.endIdx + 1 < lines.length;
+		// `hasFollowingLine` also preserves an intentional final EOL when the
+		// conflict itself occupies an unterminated EOF.
 		replacementLines = replacementLines.map((l, i) =>
 			i < replacementLines.length - 1 || hasFollowingLine ? `${l}\r` : l,
 		);
 	}
 	const next = [...lines.slice(0, match.startIdx), ...replacementLines, ...lines.slice(match.endIdx + 1)];
-	return { text: next.join("\n"), trimmedLeading: echo.leading, trimmedTrailing: echo.trailing };
-}
-
-const MAX_ECHO_LINES = 12;
-
-/**
- * Net `{}`/`()`/`[]` count over `lines`. Crude (string/comment-blind) —
- * used only to corroborate single-line echo trims, never alone.
- */
-function delimiterBalance(lines: readonly string[]): number {
-	let balance = 0;
-	for (const line of lines) {
-		for (let i = 0; i < line.length; i++) {
-			const ch = line.charCodeAt(i);
-			if (ch === 123 /* { */ || ch === 40 /* ( */ || ch === 91 /* [ */) balance++;
-			else if (ch === 125 /* } */ || ch === 41 /* ) */ || ch === 93 /* ] */) balance--;
-		}
-	}
-	return balance;
-}
-
-/**
- * Drop replacement lines that exactly echo the file lines adjacent to the
- * located region. A multi-line echo is trimmed unconditionally (a correct
- * resolution ending with the exact lines that already follow the region
- * would mean intentionally duplicated code — vanishingly unlikely, and the
- * untrimmed splice produces exactly that duplication). A single-line echo
- * is trimmed only when the recorded sides agree on the region's delimiter
- * balance and dropping the echo is what restores it.
- */
-function trimBoundaryEcho(
-	replacement: string[],
-	fileLines: readonly string[],
-	match: { startIdx: number; endIdx: number },
-	entry: ConflictBlock,
-): { lines: string[]; leading: number; trailing: number } {
-	const oursBalance = delimiterBalance(entry.oursLines);
-	const expectedBalance = oursBalance === delimiterBalance(entry.theirsLines) ? oursBalance : null;
-	const singleEchoJustified = (lines: string[], without: string[]) =>
-		expectedBalance !== null &&
-		delimiterBalance(lines) !== expectedBalance &&
-		delimiterBalance(without) === expectedBalance;
-
-	let lines = replacement;
-	let trailing = 0;
-	const after: string[] = [];
-	for (let i = match.endIdx + 1; i < fileLines.length && after.length < MAX_ECHO_LINES; i++) {
-		after.push(stripTrailingCr(fileLines[i]!));
-	}
-	for (let k = Math.min(after.length, lines.length - 1); k >= 1; k--) {
-		if (!after.slice(0, k).every((line, i) => lines[lines.length - k + i] === line)) continue;
-		if (k >= 2 || singleEchoJustified(lines, lines.slice(0, -1))) {
-			trailing = k;
-			lines = lines.slice(0, lines.length - k);
-		}
-		break;
-	}
-
-	let leading = 0;
-	const before: string[] = [];
-	for (let i = match.startIdx - 1; i >= 0 && before.length < MAX_ECHO_LINES; i--) {
-		before.unshift(stripTrailingCr(fileLines[i]!));
-	}
-	for (let k = Math.min(before.length, lines.length - 1); k >= 1; k--) {
-		if (!before.slice(before.length - k).every((line, i) => lines[i] === line)) continue;
-		if (k >= 2 || singleEchoJustified(lines, lines.slice(1))) {
-			leading = k;
-			lines = lines.slice(k);
-		}
-		break;
-	}
-
-	return { lines, leading, trailing };
+	return { text: next.join("\n") };
 }
 
 /** Reconstruct the recorded marker block as it should appear in the file. */
 function buildRecordedRegion(entry: ConflictBlock): string[] {
+	if (entry.rawLines) return [...entry.rawLines];
 	const out: string[] = [];
-	out.push(entry.oursLabel ? `${OURS_PREFIX} ${entry.oursLabel}` : OURS_PREFIX);
+	out.push(entry.oursLabel ? `<<<<<<< ${entry.oursLabel}` : "<<<<<<<");
 	out.push(...entry.oursLines);
 	if (entry.baseLines !== undefined) {
-		out.push(entry.baseLabel ? `${BASE_PREFIX} ${entry.baseLabel}` : BASE_PREFIX);
+		out.push(entry.baseLabel ? `||||||| ${entry.baseLabel}` : "|||||||");
 		out.push(...entry.baseLines);
 	}
-	out.push(SEPARATOR);
+	out.push("=======");
 	out.push(...entry.theirsLines);
-	out.push(entry.theirsLabel ? `${THEIRS_PREFIX} ${entry.theirsLabel}` : THEIRS_PREFIX);
+	out.push(entry.theirsLabel ? `>>>>>>> ${entry.theirsLabel}` : ">>>>>>>");
 	return out;
 }
 
@@ -539,133 +527,98 @@ function normalizeTrailingNewline(replacement: string): string {
 	return replacement;
 }
 
-/**
- * Expand `@ours` / `@theirs` / `@base` / `@both` line tokens against the
- * recorded sections of `entry`. A token only triggers when it is the
- * entire content of a line (after CRLF normalisation), so `@ours` inside
- * actual code is left alone. Other lines pass through verbatim.
- *
- * - `@ours`    → expands to the recorded `oursLines` (in order).
- * - `@theirs`  → expands to the recorded `theirsLines` (in order).
- * - `@base`    → expands to `baseLines`; throws if no base section was
- *               recorded (i.e. the conflict was 2-way, not diff3).
- * - `@both`    → expands to `oursLines` then `theirsLines`.
- */
+function conflictSides(entry: ConflictEntry): ConflictSection[] {
+	return (
+		entry.sides ?? [
+			{ label: entry.oursLabel, lines: entry.oursLines, startLine: entry.startLine + 1 },
+			{ label: entry.theirsLabel, lines: entry.theirsLines, startLine: entry.separatorLine + 1 },
+		]
+	);
+}
+
+function conflictBases(entry: ConflictEntry): ConflictSection[] {
+	if (entry.bases) return entry.bases;
+	if (entry.baseLines === undefined) return [];
+	return [{ label: entry.baseLabel, lines: entry.baseLines, startLine: (entry.baseLine ?? entry.startLine) + 1 }];
+}
+
+function usesGitConflictTerms(entry: ConflictEntry): boolean {
+	if (entry.authority === "jj") return false;
+	if (entry.authority === "git") return true;
+	return (entry.style ?? "git") === "git";
+}
+
+const GIT_CONFLICT_TERMS: Readonly<Record<string, ConflictScope>> = {
+	"@ours": { role: "side", index: 1 },
+	"@theirs": { role: "side", index: 2 },
+	"@base": { role: "base", index: 1 },
+};
+
+/** Expand Git named tokens or indexed Jujutsu term tokens. */
 export function expandContentTokens(content: string, entry: ConflictEntry): string {
-	const inputLines = content.split("\n");
+	const sides = conflictSides(entry);
+	const bases = conflictBases(entry);
 	const out: string[] = [];
-	for (const rawLine of inputLines) {
-		const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
-		switch (line) {
-			case "@ours":
-				out.push(...entry.oursLines);
-				break;
-			case "@theirs":
-				out.push(...entry.theirsLines);
-				break;
-			case "@base":
-				if (!entry.baseLines) {
-					throw new ToolError(
-						`Conflict #${entry.id} has no base section (2-way merge). \`@base\` is only valid for diff3 conflicts.`,
-					);
-				}
-				out.push(...entry.baseLines);
-				break;
-			case "@both":
-				out.push(...entry.oursLines, ...entry.theirsLines);
-				break;
-			default:
-				out.push(rawLine);
-				break;
+	for (const rawLine of content.split("\n")) {
+		const line = stripTrailingCr(rawLine);
+		if (line === "@both") {
+			if (!usesGitConflictTerms(entry)) {
+				throw new ToolError(`Conflict #${entry.id} is a Jujutsu conflict; combine indexed terms explicitly.`);
+			}
+			const first = sides[0]!.content ?? sides[0]!.lines.join("\n");
+			const second = sides[1]!.content ?? sides[1]!.lines.join("\n");
+			out.push(first + (first.endsWith("\n") || second.length === 0 ? "" : "\n") + second);
+			continue;
 		}
+		const gitTerm = GIT_CONFLICT_TERMS[line];
+		const indexed = line.match(/^@(side|base)\/([1-9]\d*)$/);
+		const term =
+			gitTerm ??
+			(indexed
+				? {
+						role: indexed[1] as ConflictScope["role"],
+						index: Number.parseInt(indexed[2]!, 10),
+					}
+				: undefined);
+		if (!term) {
+			out.push(rawLine);
+			continue;
+		}
+		const { role, index } = term;
+		const section = (role === "side" ? sides : bases)[index - 1];
+		if (!section) {
+			const count = role === "side" ? sides.length : bases.length;
+			throw new ToolError(
+				`Conflict #${entry.id} has ${count} ${role}${count === 1 ? "" : "s"}; \`@${role}/${index}\` is out of range.`,
+			);
+		}
+		out.push(section.content ?? section.lines.join("\n"));
 	}
 	return out.join("\n");
 }
 
-/** Reconstruct a conflict-marker line from prefix and optional label. */
-function markerLine(prefix: string, label: string | undefined): string {
-	return label && label.length > 0 ? `${prefix} ${label}` : prefix;
-}
-
-/**
- * Materialise a conflict block for `conflict://<N>` reads (and their
- * `/ours` / `/theirs` / `/base` scopes).
- *
- * Returns:
- * - `lines`: the lines to render, ordered top-to-bottom.
- * - `startLine`: the 1-indexed file line number `lines[0]` corresponds
- *   to, so the read formatter can label hashline anchors with the
- *   original file positions.
- *
- * Bare (no scope) returns the full block including marker lines. A
- * scoped view returns only that side's body — `base` throws when the
- * recorded conflict is a 2-way merge with no base section.
- */
+/** Materialize a full marker block or one normalized conflict term. */
 export function renderConflictRegion(
 	entry: ConflictEntry,
 	scope: ConflictScope | undefined,
 ): { lines: string[]; startLine: number } {
-	if (scope === "ours") {
-		return { lines: [...entry.oursLines], startLine: entry.startLine + 1 };
+	if (!scope) return { lines: buildRecordedRegion(entry), startLine: entry.startLine };
+	const sections = scope.role === "side" ? conflictSides(entry) : conflictBases(entry);
+	const section = sections[scope.index - 1];
+	if (!section) {
+		throw new ToolError(
+			`Conflict #${entry.id} has ${sections.length} ${scope.role}${sections.length === 1 ? "" : "s"}; ` +
+				`\`conflict://${entry.id}/${scope.role}/${scope.index}\` is out of range.`,
+		);
 	}
-	if (scope === "theirs") {
-		return { lines: [...entry.theirsLines], startLine: entry.separatorLine + 1 };
-	}
-	if (scope === "base") {
-		if (entry.baseLines === undefined || entry.baseLine === undefined) {
-			throw new ToolError(
-				`Conflict #${entry.id} has no base section (2-way merge). 'conflict://${entry.id}/base' is only valid for diff3 conflicts.`,
-			);
-		}
-		return { lines: [...entry.baseLines], startLine: entry.baseLine + 1 };
-	}
-	const out: string[] = [];
-	out.push(markerLine("<<<<<<<", entry.oursLabel));
-	out.push(...entry.oursLines);
-	if (entry.baseLines !== undefined) {
-		out.push(markerLine("|||||||", entry.baseLabel));
-		out.push(...entry.baseLines);
-	}
-	out.push("=======");
-	out.push(...entry.theirsLines);
-	out.push(markerLine(">>>>>>>", entry.theirsLabel));
-	return { lines: out, startLine: entry.startLine };
+	return { lines: [...section.lines], startLine: section.startLine };
 }
 
 const PREVIEW_SIDE_LINES = 6;
 
-/**
- * Build a compact diff-style footer describing the conflicts registered
- * during a read. Designed to be appended after the file content.
- *
- * Format:
- *
- *     ⚠ N unresolved conflicts detected
- *     - ours = HEAD
- *     - theirs = feature/x
- *     NOTICE: …
- *
- *     ──── #1  L42-48 ────
- *     <<< ours
- *     …ours body…
- *     === base ≡ ours
- *     >>> theirs
- *     …theirs body…
- *
- * Labels are aggregated once at the top from the first entry that has
- * them; when a section body equals another section's body the redundant
- * body is collapsed to `≡ <other>`.
- */
 export interface FormatConflictWarningOptions {
-	/**
-	 * Total number of conflicts in the underlying file. If greater than
-	 * `entries.length` the header notes how many are visible vs the total
-	 * and points at `:conflicts` for the compact list.
-	 */
 	totalInFile?: number;
-	/** Display path used inside the `:conflicts` hint. */
 	displayPath?: string;
-	/** Whether the underlying file scan hit its byte cap. */
 	scanTruncated?: boolean;
 }
 
@@ -676,8 +629,7 @@ export function formatConflictWarning(
 	if (entries.length === 0) return "";
 	const total = options.totalInFile ?? entries.length;
 	const partial = total > entries.length;
-	const out: string[] = [];
-	out.push("");
+	const out: string[] = [""];
 	const word = total === 1 ? "conflict" : "conflicts";
 	if (partial) {
 		const hintPath = options.displayPath ?? "<file>";
@@ -690,65 +642,47 @@ export function formatConflictWarning(
 	if (options.scanTruncated) {
 		out.push("- note: file scan hit the byte cap; additional conflicts may exist beyond the scanned prefix.");
 	}
-
-	const oursLabel = pickLabel(entries, e => e.oursLabel);
-	const theirsLabel = pickLabel(entries, e => e.theirsLabel);
-	const baseLabel = pickLabel(entries, e => (e.baseLines !== undefined ? e.baseLabel : undefined));
-	const anyBase = entries.some(e => e.baseLines !== undefined);
-	if (oursLabel) out.push(`- ours = ${oursLabel}`);
-	if (theirsLabel) out.push(`- theirs = ${theirsLabel}`);
-	if (anyBase) out.push(`- base = ${baseLabel ?? "(no label)"}`);
+	const termNotice = usesGitConflictTerms(entries[0]!)
+		? "NOTICE: Git terms use `/ours` / `/theirs` / `/base` and `@ours` / `@theirs` / `@base` / `@both`."
+		: "NOTICE: Jujutsu terms use indexed `/side/<M>` / `/base/<M>` and `@side/<M>` / `@base/<M>`.";
 	out.push(
-		'NOTICE: Inspect a block by reading `conflict://<N>` (add `/ours` / `/theirs` / `/base` to render a single side). Resolve with `write({ path: "conflict://<N>", content })`, or bulk-resolve every registered conflict with `write({ path: "conflict://*", content })`. Writes replace ONLY the marker block (markers + all sides) — never repeat the lines before/after it; they stay in place.',
-	);
-	out.push(
-		'`content` shorthand: a line that is exactly `@ours` / `@theirs` / `@base` / `@both` expands to that recorded section. `@both` is ours-then-theirs with no separator — only for additive conflicts where each side adds something different; NEVER for competing edits of the same lines (pick a side or write the combined text). Lines that are not a token pass through verbatim, so `"// keep both\\n@ours\\n@theirs"` literally writes the comment, then ours, then theirs.',
-	);
-	out.push(
-		'Per-id bulk: `write({ path: "conflict://*", content: "1: @ours\\n2: @theirs\\n…" })` resolves each listed id with that side in ONE call — the cheapest way through many pick-one conflicts; unlisted ids stay registered.',
-	);
-	out.push(
-		"Resolve each block faithfully: keep one side (`@ours`/`@theirs`), or combine them when both intents apply — never invent content beyond the recorded sides, and never stack both sides of competing edits. Resolve several conflicts in a single turn by issuing multiple `write` calls at once; ids stay valid as earlier blocks are resolved.",
+		termNotice,
+		'Write one block with `write({ path: "conflict://<N>", content })`, or bulk pick terms with `write({ path: "conflict://*", content: "1: <term>\\n2: <term>" })`. Writes replace only marker blocks; unlisted ids remain registered.',
 	);
 
 	for (const entry of entries) {
 		const range = entry.startLine === entry.endLine ? `L${entry.startLine}` : `L${entry.startLine}-${entry.endLine}`;
-		out.push("");
-		out.push(`──── #${entry.id}  ${range} ────`);
-
-		const baseEqualsOurs = entry.baseLines !== undefined && sectionsEqual(entry.baseLines, entry.oursLines);
-		const baseEqualsTheirs = entry.baseLines !== undefined && sectionsEqual(entry.baseLines, entry.theirsLines);
-		const theirsEqualsOurs = sectionsEqual(entry.theirsLines, entry.oursLines);
-
-		out.push("<<< ours");
-		appendBody(out, entry.oursLines);
-
-		if (entry.baseLines !== undefined) {
-			if (baseEqualsOurs) {
-				out.push("=== base ≡ ours");
-			} else if (baseEqualsTheirs) {
-				out.push("=== base ≡ theirs");
-			} else {
-				out.push("=== base");
-				appendBody(out, entry.baseLines);
+		const sides = conflictSides(entry);
+		const bases = conflictBases(entry);
+		out.push("", `──── #${entry.id}  ${range}  ${entry.style ?? "git"} ────`);
+		if (usesGitConflictTerms(entry)) {
+			const [ours, theirs] = sides;
+			out.push(`<<< ours${ours?.label ? `  ${ours.label}` : ""}`);
+			appendBody(out, ours?.lines ?? []);
+			const base = bases[0];
+			if (base) {
+				out.push(`=== base${base.label ? `  ${base.label}` : ""}`);
+				appendBody(out, base.lines);
 			}
-		}
-
-		if (theirsEqualsOurs) {
-			out.push(">>> theirs ≡ ours");
+			out.push(`>>> theirs${theirs?.label ? `  ${theirs.label}` : ""}`);
+			appendBody(out, theirs?.lines ?? []);
 		} else {
-			out.push(">>> theirs");
-			appendBody(out, entry.theirsLines);
+			for (let i = 0; i < sides.length; i++) {
+				const section = sides[i]!;
+				out.push(`+++ side/${i + 1}${section.label ? `  ${section.label}` : ""}`);
+				appendBody(out, section.lines);
+			}
+			for (let i = 0; i < bases.length; i++) {
+				const section = bases[i]!;
+				out.push(`--- base/${i + 1}${section.label ? `  ${section.label}` : ""}`);
+				appendBody(out, section.lines);
+			}
 		}
 	}
 	return out.join("\n");
 }
 
-/**
- * Render a single-line-per-block index of every conflict in a file.
- * Used by the `<path>:conflicts` read selector to give the agent a cheap overview
- * of a heavily-conflicted file without dumping every body.
- */
+/** Render a one-line-per-hunk index for the `<path>:conflicts` selector. */
 export function formatConflictSummary(
 	entries: readonly ConflictEntry[],
 	options: { displayPath: string; scanTruncated?: boolean } = { displayPath: "" },
@@ -760,47 +694,25 @@ export function formatConflictSummary(
 	if (options.scanTruncated) {
 		lines.push("- note: file scan hit the byte cap; additional conflicts may exist beyond the scanned prefix.");
 	}
-	const oursLabel = pickLabel(entries, e => e.oursLabel);
-	const theirsLabel = pickLabel(entries, e => e.theirsLabel);
-	const baseLabel = pickLabel(entries, e => (e.baseLines !== undefined ? e.baseLabel : undefined));
-	const anyBase = entries.some(e => e.baseLines !== undefined);
-	if (oursLabel) lines.push(`- ours = ${oursLabel}`);
-	if (theirsLabel) lines.push(`- theirs = ${theirsLabel}`);
-	if (anyBase) lines.push(`- base = ${baseLabel ?? "(no label)"}`);
+	const termNotice = usesGitConflictTerms(entries[0]!)
+		? "NOTICE: Git uses `/ours` / `/theirs` / `/base`; resolve with `@ours` / `@theirs` / `@base` / `@both`."
+		: "NOTICE: Jujutsu uses indexed `/side/<M>` / `/base/<M>`; resolve with `@side/<M>` / `@base/<M>`.";
 	lines.push(
-		'NOTICE: Bulk-resolve with `write({ path: "conflict://*", content })`, or address a single block with `write({ path: "conflict://<N>", content })`. Inspect a block by reading `conflict://<N>` (add `/ours` / `/theirs` / `/base` for a single side).',
+		termNotice,
+		"Write one `conflict://<N>` block, or bulk-resolve with per-id `<id>: <term>` directives.",
+		"",
 	);
-	lines.push(
-		'`content` shorthand: `@ours` / `@theirs` / `@base` / `@both` lines expand to the recorded sections; `@both` = ours-then-theirs (additive conflicts only — never for competing edits of the same lines). Per-id bulk: content of `<id>: @side` lines (e.g. "1: @ours\\n2: @theirs") resolves each listed id in one call. Non-token lines pass through verbatim. Writes replace ONLY the marker block — never repeat the surrounding lines. Keep one side or combine faithfully; never invent content beyond the recorded sides.',
-	);
-	lines.push("");
 	const idWidth = String(entries[entries.length - 1]?.id ?? 1).length;
 	for (const entry of entries) {
 		const range = entry.startLine === entry.endLine ? `L${entry.startLine}` : `L${entry.startLine}-${entry.endLine}`;
 		const idCell = `#${String(entry.id).padStart(idWidth, " ")}`;
-		const kind = entry.baseLines !== undefined ? "  (3-way)" : "";
-		lines.push(`${idCell}  ${range}${kind}`);
+		const sides = conflictSides(entry).length;
+		const bases = conflictBases(entry).length;
+		lines.push(
+			`${idCell}  ${range}  (${sides} side${sides === 1 ? "" : "s"}, ${bases} base${bases === 1 ? "" : "s"}, ${entry.style ?? "git"})`,
+		);
 	}
 	return lines.join("\n");
-}
-
-function pickLabel(
-	entries: readonly ConflictEntry[],
-	get: (e: ConflictEntry) => string | undefined,
-): string | undefined {
-	for (const e of entries) {
-		const label = get(e);
-		if (label && label.trim().length > 0) return label;
-	}
-	return undefined;
-}
-
-function sectionsEqual(a: readonly string[], b: readonly string[]): boolean {
-	if (a.length !== b.length) return false;
-	for (let i = 0; i < a.length; i++) {
-		if (a[i] !== b[i]) return false;
-	}
-	return true;
 }
 
 function appendBody(out: string[], section: readonly string[]): void {

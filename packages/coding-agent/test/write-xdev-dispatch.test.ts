@@ -778,7 +778,7 @@ describe("device-only write transport for explicit lists omitting write", () => 
 			await expect(
 				write!.execute("write-device-only-plan-conflict", {
 					path: "conflict://1",
-					content: "@ours",
+					content: "@side/1",
 				}),
 			).rejects.toThrow("Filesystem writes are not available");
 		} finally {

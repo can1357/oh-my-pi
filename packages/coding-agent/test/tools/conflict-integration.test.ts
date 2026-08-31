@@ -4,8 +4,9 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createTools, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import { ConflictHistory } from "@oh-my-pi/pi-coding-agent/tools/conflict-detect";
+import { ConflictHistory, inspectConflictAuthority } from "@oh-my-pi/pi-coding-agent/tools/conflict-detect";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { $ } from "bun";
 
 function createTestSession(cwd: string, overrides: Partial<ToolSession> = {}): ToolSession {
 	return {
@@ -70,6 +71,44 @@ const TWO_BLOCKS = [
 	"",
 ].join("\n");
 
+const JJ_DIFF = [
+	"before",
+	"<<<<<<< conflict 1 of 1",
+	"%%%%%%% diff from: merge base",
+	`${"\\".repeat(7)}        to: left change`,
+	" value = 1",
+	"-name = old",
+	"+name = left",
+	"+++++++ right change",
+	"value = 1",
+	"name = right",
+	">>>>>>> conflict 1 of 1 ends",
+	"after",
+	"",
+].join("\n");
+
+async function createGitConflict(root: string, fileName: string, markerSize?: number): Promise<string> {
+	await $`git init -q -b main`.cwd(root).quiet();
+	await $`git config user.name "Conflict Test"`.cwd(root).quiet();
+	await $`git config user.email conflict-test@example.test`.cwd(root).quiet();
+	const filePath = path.join(root, fileName);
+	await Bun.write(filePath, "base\n");
+	if (markerSize !== undefined) {
+		await Bun.write(path.join(root, ".gitattributes"), `${fileName} conflict-marker-size=${markerSize}\n`);
+	}
+	await $`git add --all`.cwd(root).quiet();
+	await $`git commit -qm base`.cwd(root).quiet();
+	await $`git checkout -qb left`.cwd(root).quiet();
+	await Bun.write(filePath, "left\n");
+	await $`git commit -qam left`.cwd(root).quiet();
+	await $`git checkout -q main`.cwd(root).quiet();
+	await Bun.write(filePath, "right\n");
+	await $`git commit -qam right`.cwd(root).quiet();
+	const merge = await $`git merge left`.cwd(root).quiet().nothrow();
+	if (merge.exitCode === 0) throw new Error("Expected Git merge conflict");
+	return filePath;
+}
+
 describe("read surfaces conflicts as a warning footer", () => {
 	let tempDir: string;
 
@@ -101,19 +140,31 @@ describe("read surfaces conflicts as a warning footer", () => {
 		// Warning footer is appended.
 		expect(text).toContain("⚠");
 		expect(text).toContain("⚠ 1 unresolved conflict detected");
-		expect(text).toContain("- ours = HEAD");
-		expect(text).toContain("- theirs = feature/x");
-		expect(text).toContain("──── #1  L2-6 ────");
-		expect(text).toContain("<<< ours");
-		expect(text).toContain(">>> theirs");
-		expect(text).toContain("NOTICE: Inspect a block by reading `conflict://<N>`");
+		expect(text).toContain("<<< ours  HEAD");
+		expect(text).toContain(">>> theirs  feature/x");
+		expect(text).toContain("──── #1  L2-6  git ────");
+		expect(text).toContain("NOTICE: Git terms");
 		expect(text).toContain('`write({ path: "conflict://<N>", content })`');
-		expect(text).toContain('`write({ path: "conflict://*", content })`');
 		expect(text).toContain("@ours");
 		// Registered on session.
 		const history = session.conflictHistory;
 		expect(history).toBeInstanceOf(ConflictHistory);
 		expect(history?.get(1)?.absolutePath).toBe(filePath);
+	});
+
+	it("recognizes Jujutsu diff-style markers and reconstructs both sides", async () => {
+		const filePath = path.join(tempDir, "jj.txt");
+		await Bun.write(filePath, JJ_DIFF);
+		const session = createTestSession(tempDir);
+		const read = await getTool(session, "read");
+
+		const result = await read.execute("read-jj", { path: "jj.txt" });
+		const text = getText(result);
+		expect(text).toContain("jj-diff");
+		expect(text).toContain("+++ side/1  left change");
+		expect(text).toContain("name = left");
+		expect(text).toContain("+++ side/2  right change");
+		expect(text).toContain("--- base/1  merge base");
 	});
 
 	it("registers diff3 conflicts with base section", async () => {
@@ -124,8 +175,7 @@ describe("read surfaces conflicts as a warning footer", () => {
 
 		const result = await read.execute("read-three", { path: "three.ts" });
 		const text = getText(result);
-		expect(text).toContain("- base = common ancestor");
-		expect(text).toContain("=== base");
+		expect(text).toContain("=== base  common ancestor");
 		expect(session.conflictHistory?.get(1)?.baseLines).toEqual(["base body"]);
 	});
 
@@ -137,8 +187,8 @@ describe("read surfaces conflicts as a warning footer", () => {
 
 		const result = await read.execute("read-two", { path: "two-blocks.ts" });
 		const text = getText(result);
-		expect(text).toContain("──── #1  L1-5 ────");
-		expect(text).toContain("──── #2  L7-11 ────");
+		expect(text).toContain("──── #1  L1-5  git ────");
+		expect(text).toContain("──── #2  L7-11  git ────");
 		expect(session.conflictHistory?.get(1)?.oursLines).toEqual(["a-ours"]);
 		expect(session.conflictHistory?.get(2)?.oursLines).toEqual(["b-ours"]);
 	});
@@ -155,6 +205,51 @@ describe("read surfaces conflicts as a warning footer", () => {
 		expect(text).not.toContain("conflict://");
 		expect(text).not.toContain("⚠");
 		expect(session.conflictHistory?.get(1)).toBeUndefined();
+	});
+
+	it("does not treat marker examples in a clean repository as conflicts", async () => {
+		await $`git init -q`.cwd(tempDir).quiet();
+		const filePath = path.join(tempDir, "example.md");
+		await Bun.write(filePath, `Example:\n\n${THREE_WAY}`);
+		const session = createTestSession(tempDir);
+		const read = await getTool(session, "read");
+
+		const result = await read.execute("read-marker-example", { path: "example.md" });
+		const text = getText(result);
+		expect(text).toContain("<<<<<<< HEAD");
+		expect(text).not.toContain("conflict://");
+		expect(session.conflictHistory).toBeUndefined();
+	});
+
+	it("keeps Git parsing when ours starts with a Jujutsu-looking marker", async () => {
+		const filePath = await createGitConflict(tempDir, "git-marker-content.txt");
+		await Bun.write(
+			filePath,
+			[
+				"<<<<<<< HEAD",
+				"+++++++ patch",
+				"left",
+				"=======",
+				"right",
+				">>>>>>> left",
+				"<<<<<<< conflict example",
+				"+++++++ side one",
+				"example left",
+				"+++++++ side two",
+				"example right",
+				">>>>>>> conflict example ends",
+				"",
+			].join("\n"),
+		);
+		const session = createTestSession(tempDir);
+		const read = await getTool(session, "read");
+
+		await read.execute("read-git-marker-content", { path: "git-marker-content.txt:conflicts" });
+		const entry = session.conflictHistory?.get(1);
+		expect(entry?.authority).toBe("git");
+		expect(entry?.style).toBe("git");
+		expect(entry?.sides?.map(section => section.lines)).toEqual([["+++++++ patch", "left"], ["right"]]);
+		expect(session.conflictHistory?.get(2)).toBeUndefined();
 	});
 
 	it("re-reading the same file reuses the existing id rather than inflating", async () => {
@@ -187,7 +282,7 @@ describe("read surfaces conflicts as a warning footer", () => {
 		expect(text).not.toContain("⚠");
 	});
 
-	it("renders only the theirs body via reads of `conflict://<N>/theirs`", async () => {
+	it("renders the Git theirs side via `conflict://<N>/theirs`", async () => {
 		const filePath = path.join(tempDir, "theirs.ts");
 		await Bun.write(filePath, TWO_WAY);
 		const session = createTestSession(tempDir);
@@ -203,7 +298,7 @@ describe("read surfaces conflicts as a warning footer", () => {
 		expect(text).not.toContain("oldApi(x)");
 	});
 
-	it("renders the base body for a diff3 conflict via `/base`", async () => {
+	it("renders the Git base via `/base`", async () => {
 		const filePath = path.join(tempDir, "base.ts");
 		await Bun.write(filePath, THREE_WAY);
 		const session = createTestSession(tempDir);
@@ -217,7 +312,7 @@ describe("read surfaces conflicts as a warning footer", () => {
 		expect(text).not.toContain("theirs body");
 	});
 
-	it("rejects `/base` on a 2-way conflict with a clear error", async () => {
+	it("rejects an unavailable Git base", async () => {
 		const filePath = path.join(tempDir, "no-base.ts");
 		await Bun.write(filePath, TWO_WAY);
 		const session = createTestSession(tempDir);
@@ -225,7 +320,7 @@ describe("read surfaces conflicts as a warning footer", () => {
 
 		await read.execute("read-no-base-init", { path: "no-base.ts" });
 		const promise = read.execute("read-no-base", { path: "conflict://1/base" });
-		await expect(promise).rejects.toThrow(/no base section/);
+		await expect(promise).rejects.toThrow(/0 bases/);
 	});
 
 	it("errors clearly when the conflict id is unknown", async () => {
@@ -260,7 +355,18 @@ describe("read surfaces conflicts as a warning footer", () => {
 		expect(session.conflictHistory?.get(2)).toBeDefined();
 	});
 
-	it("`:conflicts` marks 3-way blocks distinctly", async () => {
+	it("`:conflicts` refuses binary marker content", async () => {
+		const filePath = path.join(tempDir, "binary-conflict.bin");
+		await Bun.write(filePath, "<<<<<<<\nours\u0000bytes\n=======\ntheirs\n>>>>>>>\n");
+		const session = createTestSession(tempDir);
+		const read = await getTool(session, "read");
+
+		const result = await read.execute("read-binary-conflicts", { path: "binary-conflict.bin:conflicts" });
+		expect(getText(result)).toContain("binary file");
+		expect(session.conflictHistory).toBeUndefined();
+	});
+
+	it("`:conflicts` reports side/base arity", async () => {
 		const filePath = path.join(tempDir, "diff3.ts");
 		await Bun.write(filePath, THREE_WAY);
 		const session = createTestSession(tempDir);
@@ -268,7 +374,7 @@ describe("read surfaces conflicts as a warning footer", () => {
 
 		const result = await read.execute("read-diff3", { path: "diff3.ts:conflicts" });
 		const text = getText(result);
-		expect(text).toMatch(/#1\s+L2-8.*3-way/);
+		expect(text).toMatch(/#1\s+L2-8.*2 sides, 1 base, git/);
 	});
 
 	it("`:conflicts` on a clean file says so explicitly", async () => {
@@ -279,7 +385,7 @@ describe("read surfaces conflicts as a warning footer", () => {
 
 		const result = await read.execute("read-clean-conflicts", { path: "clean-conflicts.ts:conflicts" });
 		const text = getText(result);
-		expect(text).toContain("No unresolved git merge conflicts");
+		expect(text).toContain("No unresolved conflict markers");
 	});
 
 	it("window-mode warning shows visible-of-total when window misses some conflicts", async () => {
@@ -325,45 +431,109 @@ describe("write resolves conflicts via conflict://N", () => {
 			content: "newApi(x);\n",
 		});
 
-		expect(getText(result)).toContain("Resolved conflict #1");
+		expect(getText(result)).toContain("Resolved materialized conflict hunk #1");
 		const after = await Bun.file(filePath).text();
 		expect(after).toBe("line 1\nnewApi(x);\nline N\n");
 		// History is invalidated after resolve so the id no longer works.
 		expect(session.conflictHistory?.get(1)).toBeUndefined();
 	});
 
-	it("drops trailing lines that echo the context below the region and notes the repair", async () => {
-		const filePath = path.join(tempDir, "echo.ts");
-		const content = [
-			"function f() {",
-			"<<<<<<< HEAD",
-			"\tours();",
-			"=======",
-			"\ttheirs();",
-			">>>>>>> feature/x",
-			"\tdone();",
-			"}",
-			"",
-		].join("\n");
-		await Bun.write(filePath, content);
+	it("revalidates Git conflict authority immediately before writing", async () => {
+		const filePath = await createGitConflict(tempDir, "stale.txt");
 		const session = createTestSession(tempDir);
 		const read = await getTool(session, "read");
 		const write = await getTool(session, "write");
 
-		await read.execute("read-echo", { path: "echo.ts" });
-		// The classic failure: the model pastes the whole resolved function,
-		// including the two lines that live below the marker block.
-		const result = await write.execute("write-echo", {
-			path: "conflict://1",
-			content: "\tours();\n\ttheirs();\n\tdone();\n}\n",
-		});
+		await read.execute("read-stale-git", { path: "stale.txt" });
+		expect(session.conflictHistory?.get(1)?.authority).toBe("git");
+		await $`git add stale.txt`.cwd(tempDir).quiet();
 
-		const text = getText(result);
-		expect(text).toContain("Resolved conflict #1");
-		expect(text).toContain("dropped 2 content line(s)");
-		expect(await Bun.file(filePath).text()).toBe(
-			["function f() {", "\tours();", "\ttheirs();", "\tdone();", "}", ""].join("\n"),
+		await expect(write.execute("write-stale-git", { path: "conflict://1", content: "@ours" })).rejects.toThrow(
+			/no longer recorded/,
 		);
+		expect(await Bun.file(filePath).text()).toContain("<<<<<<<");
+	});
+
+	it.skipIf(process.platform === "win32")(
+		"preserves a conflicted tracked symlink path during authority lookup",
+		async () => {
+			await $`git init -q -b main`.cwd(tempDir).quiet();
+			await $`git config user.name "Conflict Test"`.cwd(tempDir).quiet();
+			await $`git config user.email conflict-test@example.test`.cwd(tempDir).quiet();
+			await Promise.all(["base", "left", "right"].map(name => Bun.write(path.join(tempDir, name), `${name}\n`)));
+			const linkPath = path.join(tempDir, "link");
+			await fs.symlink("base", linkPath);
+			await $`git add --all`.cwd(tempDir).quiet();
+			await $`git commit -qm base`.cwd(tempDir).quiet();
+			await $`git checkout -qb left`.cwd(tempDir).quiet();
+			await fs.unlink(linkPath);
+			await fs.symlink("left", linkPath);
+			await $`git commit -qam left`.cwd(tempDir).quiet();
+			await $`git checkout -q main`.cwd(tempDir).quiet();
+			await fs.unlink(linkPath);
+			await fs.symlink("right", linkPath);
+			await $`git commit -qam right`.cwd(tempDir).quiet();
+			expect((await $`git merge left`.cwd(tempDir).quiet().nothrow()).exitCode).not.toBe(0);
+
+			expect(await inspectConflictAuthority(linkPath)).toEqual({
+				state: "recorded",
+				backend: "git",
+				kind: "other",
+			});
+		},
+	);
+
+	it("reports the Git staging requirement after authoritative bulk resolution", async () => {
+		const filePath = await createGitConflict(tempDir, "bulk-git.txt");
+		const session = createTestSession(tempDir);
+		const read = await getTool(session, "read");
+		const write = await getTool(session, "write");
+
+		await read.execute("read-bulk-git", { path: "bulk-git.txt" });
+		const result = await write.execute("write-bulk-git", { path: "conflict://*", content: "@ours" });
+
+		expect(getText(result)).toContain("Git index entries remain unmerged");
+		expect(await Bun.file(filePath).text()).not.toContain("<<<<<<<");
+	});
+
+	it("uses the materialized Git marker size after attributes change", async () => {
+		const filePath = await createGitConflict(tempDir, "short-markers.txt", 3);
+		await Bun.write(path.join(tempDir, ".gitattributes"), "short-markers.txt conflict-marker-size=9\n");
+		const session = createTestSession(tempDir);
+		const read = await getTool(session, "read");
+		const write = await getTool(session, "write");
+
+		const readResult = await read.execute("read-short-git", { path: "short-markers.txt" });
+		expect(getText(readResult)).toContain("conflict://<N>");
+		expect(session.conflictHistory?.get(1)?.markerLength).toBe(3);
+		await write.execute("write-short-git", { path: "conflict://1", content: "@ours" });
+		expect(await Bun.file(filePath).text()).toBe("right\n");
+	});
+
+	it("ignores shorter marker-shaped content when Git uses the default marker length", async () => {
+		const filePath = await createGitConflict(tempDir, "marker-lookalike.txt");
+		const shortBlock = ["<<< example", "keep left", "===", "keep right", ">>> example"].join("\n");
+		await Bun.write(filePath, `${shortBlock}\n${await Bun.file(filePath).text()}`);
+		const session = createTestSession(tempDir);
+		const read = await getTool(session, "read");
+		const write = await getTool(session, "write");
+
+		await read.execute("read-marker-lookalike", { path: "marker-lookalike.txt:conflicts" });
+		expect(session.conflictHistory?.entries()).toHaveLength(1);
+		await write.execute("write-marker-lookalike", { path: "conflict://*", content: "@ours" });
+		expect(await Bun.file(filePath).text()).toBe(`${shortBlock}\nright\n`);
+	});
+
+	it("resolves a Jujutsu diff-style hunk by indexed side", async () => {
+		const filePath = path.join(tempDir, "jj.txt");
+		await Bun.write(filePath, JJ_DIFF);
+		const session = createTestSession(tempDir);
+		const read = await getTool(session, "read");
+		const write = await getTool(session, "write");
+
+		await read.execute("read-jj-write", { path: "jj.txt" });
+		await write.execute("write-jj-side", { path: "conflict://1", content: "@side/1" });
+		expect(await Bun.file(filePath).text()).toBe(["before", "value = 1", "name = left", "after", ""].join("\n"));
 	});
 
 	it("auto-recovers a `<file>:conflict://N` path and resolves the conflict", async () => {
@@ -378,11 +548,11 @@ describe("write resolves conflicts via conflict://N", () => {
 			// Malformed path mixing the `:conflicts` read selector with the
 			// `conflict://` scheme — the write tool MUST recover and resolve.
 			path: "prefix.ts:conflict://1",
-			content: "@theirs",
+			content: "@side/2",
 		});
 
 		const text = getText(result);
-		expect(text).toContain("Resolved conflict #1");
+		expect(text).toContain("Resolved materialized conflict hunk #1");
 		expect(text).toContain("stripped erroneous 'prefix.ts:' prefix");
 		expect(await Bun.file(filePath).text()).toBe("line 1\nnewApi(x)\nline N\n");
 	});
@@ -397,7 +567,7 @@ describe("write resolves conflicts via conflict://N", () => {
 		await read.execute("read-bulk-prefix", { path: "bulk-prefix.ts" });
 		const result = await write.execute("write-bulk-prefix", {
 			path: "bulk-prefix.ts:conflict://*",
-			content: "@ours",
+			content: "@side/1",
 		});
 
 		const text = getText(result);
@@ -477,7 +647,7 @@ describe("write resolves conflicts via conflict://N", () => {
 		// every block while reporting success. It must now hard-fail.
 		const promise = write.execute("write-directives-mixed", {
 			path: "conflict://*",
-			content: "1: @ours\n2: combined line A\ncombined line B\n",
+			content: "1: @side/1\n2: combined line A\ncombined line B\n",
 		});
 		await expect(promise).rejects.toThrow(/Malformed `conflict:\/\/\*` per-id block/);
 		// File untouched — the markers are still present, nothing leaked.
@@ -487,7 +657,7 @@ describe("write resolves conflicts via conflict://N", () => {
 		expect(session.conflictHistory?.get(2)).toBeDefined();
 	});
 
-	it("rejects a per-id line whose value is not a recognized @side token", async () => {
+	it("rejects a per-id line whose value is not a recognized term token", async () => {
 		const filePath = path.join(tempDir, "directives-badtoken.ts");
 		await Bun.write(filePath, TWO_BLOCKS);
 		const session = createTestSession(tempDir);
@@ -497,13 +667,13 @@ describe("write resolves conflicts via conflict://N", () => {
 		await read.execute("read-directives-badtoken", { path: "directives-badtoken.ts" });
 		const promise = write.execute("write-directives-badtoken", {
 			path: "conflict://*",
-			content: "1: @ours\n2: @mine",
+			content: "1: @side/1\n2: @mine",
 		});
-		await expect(promise).rejects.toThrow(/only accepts the tokens @ours\/@theirs\/@base\/@both/);
+		await expect(promise).rejects.toThrow(/Per-id bulk only accepts Git/);
 		expect(await Bun.file(filePath).text()).toBe(TWO_BLOCKS);
 	});
 
-	it("still treats pure-literal content as a uniform bulk write (no false directive rejection)", async () => {
+	it("rejects literal uniform bulk replacement", async () => {
 		const filePath = path.join(tempDir, "directives-literal.ts");
 		await Bun.write(filePath, TWO_WAY);
 		const session = createTestSession(tempDir);
@@ -511,13 +681,12 @@ describe("write resolves conflicts via conflict://N", () => {
 		const write = await getTool(session, "write");
 
 		await read.execute("read-directives-literal", { path: "directives-literal.ts" });
-		// No line is `<id>: @side`, so this is a uniform replacement, not a per-id block.
-		const result = await write.execute("write-directives-literal", {
+		const promise = write.execute("write-directives-literal", {
 			path: "conflict://*",
 			content: "resolvedApi(x)\n",
 		});
-		expect(getText(result)).toContain("Resolved 1 conflict");
-		expect(await Bun.file(filePath).text()).toBe("line 1\nresolvedApi(x)\nline N\n");
+		await expect(promise).rejects.toThrow(/only accepts a shared Git/);
+		expect(await Bun.file(filePath).text()).toBe(TWO_WAY);
 	});
 
 	it("can resolve two blocks in the same file by id, in either order", async () => {
@@ -545,7 +714,7 @@ describe("write resolves conflicts via conflict://N", () => {
 		expect(after).toBe("A-resolved\nmiddle\nB-resolved\ntail\n");
 	});
 
-	it("accepts `@ours`/`@theirs`/`@both` content tokens as shorthand", async () => {
+	it("accepts Git named tokens as shorthand", async () => {
 		const filePath = path.join(tempDir, "tokens.ts");
 		await Bun.write(filePath, TWO_WAY);
 		const session = createTestSession(tempDir);
@@ -559,21 +728,7 @@ describe("write resolves conflicts via conflict://N", () => {
 		expect(after).toBe("line 1\nnewApi(x)\nline N\n");
 	});
 
-	it("expands `@both` to ours then theirs without re-typing either side", async () => {
-		const filePath = path.join(tempDir, "both.ts");
-		await Bun.write(filePath, TWO_WAY);
-		const session = createTestSession(tempDir);
-		const read = await getTool(session, "read");
-		const write = await getTool(session, "write");
-
-		await read.execute("read-both", { path: "both.ts" });
-		await write.execute("write-both", { path: "conflict://1", content: "@both" });
-
-		const after = await Bun.file(filePath).text();
-		expect(after).toBe("line 1\noldApi(x)\nnewApi(x)\nline N\n");
-	});
-
-	it("rejects `@base` for a 2-way conflict with a clear error", async () => {
+	it("rejects an unavailable Git base token", async () => {
 		const filePath = path.join(tempDir, "nobase.ts");
 		await Bun.write(filePath, TWO_WAY);
 		const session = createTestSession(tempDir);
@@ -582,7 +737,7 @@ describe("write resolves conflicts via conflict://N", () => {
 
 		await read.execute("read-nobase", { path: "nobase.ts" });
 		const promise = write.execute("write-nobase", { path: "conflict://1", content: "@base" });
-		await expect(promise).rejects.toThrow(/no base section/);
+		await expect(promise).rejects.toThrow(/0 bases/);
 		// File untouched.
 		expect(await Bun.file(filePath).text()).toBe(TWO_WAY);
 	});
@@ -699,10 +854,26 @@ describe("write resolves conflicts via conflict://N", () => {
 		expect(session.conflictHistory?.entries()).toHaveLength(0);
 	});
 
+	it("normalizes surrounding whitespace on a shared bulk term", async () => {
+		const filePath = path.join(tempDir, "bulk-whitespace.ts");
+		await Bun.write(filePath, TWO_WAY);
+		const session = createTestSession(tempDir);
+		const read = await getTool(session, "read");
+		const write = await getTool(session, "write");
+
+		await read.execute("read-bulk-whitespace", { path: "bulk-whitespace.ts:conflicts" });
+		await write.execute("write-bulk-whitespace", {
+			path: "conflict://*",
+			content: " \n@ours\t ",
+		});
+
+		expect(await Bun.file(filePath).text()).toBe("line 1\noldApi(x)\nline N\n");
+	});
+
 	it("`write conflict://*` errors when no conflicts are registered", async () => {
 		const session = createTestSession(tempDir);
 		const write = await getTool(session, "write");
-		await expect(write.execute("write-bulk-empty", { path: "conflict://*", content: "@ours" })).rejects.toThrow(
+		await expect(write.execute("write-bulk-empty", { path: "conflict://*", content: "@side/1" })).rejects.toThrow(
 			/nothing to resolve/,
 		);
 	});
@@ -723,7 +894,7 @@ describe("write resolves conflicts via conflict://N", () => {
 			path: "conflict://1",
 			content: "@theirs",
 		});
-		expect(getText(result)).toContain("Resolved conflict #1");
+		expect(getText(result)).toContain("Resolved materialized conflict hunk #1");
 		const after = await Bun.file(filePath).text();
 		expect(after).toBe("// extra line\n// another extra\nline 1\nnewApi(x)\nline N\n");
 	});
