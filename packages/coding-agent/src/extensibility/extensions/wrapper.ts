@@ -209,7 +209,7 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 		// 1. Emit tool_call event first - extensions can block execution or revise the input the tool
 		// runs with. Doing this BEFORE the approval gate means approval (below) resolves against the
 		// input that actually executes, closing the "approve one thing, run another" gap: the prompt
-		// text, policy resolution, and provider safety checks all see `effectiveParams`.
+		// text, policy resolution, and provider safety checks all see the final owned input.
 		let effectiveParams = params;
 		if (!loopEmittedToolCall && this.runner.hasHandlers("tool_call")) {
 			try {
@@ -230,10 +230,10 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 					const reason = callResult.reason || "Tool execution was blocked by an extension";
 					throw new Error(reason);
 				}
-				// A non-blocking handler may replace the execution input. The returned object is the raw
-				// input passed to `execute` (handler-owned; not re-normalized). Skipped for `computer`
-				// tool calls, whose event input is a synthetic {actions,pendingSafetyChecks} view
-				// (see toolEventArgs) rather than the real execution params.
+				// A non-blocking handler may replace the execution input. The returned object is copied
+				// into the final owned input below. Skipped for `computer` tool calls, whose event input
+				// is a synthetic {actions,pendingSafetyChecks} view (see toolEventArgs) rather than the
+				// real execution params.
 				if (callResult?.input !== undefined && context?.toolCall?.providerMetadata?.type !== "computer") {
 					effectiveParams = callResult.input as typeof params;
 				}

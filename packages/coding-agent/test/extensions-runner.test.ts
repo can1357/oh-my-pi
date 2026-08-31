@@ -3267,7 +3267,16 @@ describe("ExtensionRunner", () => {
 					],
 					[async () => ({ input: retainedInput })],
 				);
-				const execution = executeReviewCase(runner, recordingApprovalTool(), "call-review-owned-input", {
+				const tool = {
+					...recordingApprovalTool(),
+					approval: (args: unknown) => {
+						const command = args && typeof args === "object" && "command" in args ? args.command : undefined;
+						return command === "rm -rf"
+							? ({ policy: "deny", tier: "exec", reason: "dangerous" } as const)
+							: ("exec" as const);
+					},
+				};
+				const execution = executeReviewCase(runner, tool, "call-review-owned-input", {
 					params: { command: "echo original" },
 				});
 
