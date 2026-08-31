@@ -4,11 +4,12 @@
  * Commands are sent as JSON lines on stdin.
  * Responses and events are emitted as JSON lines on stdout.
  */
-import type { AgentMessage, AgentToolResult, ThinkingLevel, ToolLoadMode } from "@oh-my-pi/pi-agent-core";
+import type { AgentMessage, AgentToolResult, ThinkingLevel, ToolLoadMode, ToolTier } from "@oh-my-pi/pi-agent-core";
 import type { CompactionResult } from "@oh-my-pi/pi-agent-core/compaction";
 import type { Effort, ImageContent, Model, ToolExample } from "@oh-my-pi/pi-ai";
 import type { BashResult } from "../../exec/bash-executor";
 import type { ContextUsage } from "../../extensibility/extensions/types";
+import type { IrcDeliveryReceipt } from "../../irc/bus";
 import type { AgentSessionEvent, SessionStats } from "../../session/agent-session";
 import type { FileEntry } from "../../session/session-entries";
 import type { AvailableSlashCommandSource } from "../../slash-commands/available-commands";
@@ -18,6 +19,8 @@ import type {
 	SubagentLifecyclePayload,
 	SubagentProgressPayload,
 } from "../../task";
+import type { ApprovalMode, ApprovalPolicy } from "../../tools/approval";
+import type { ApprovalRule } from "../../tools/approval-rules";
 import type { TodoPhase } from "../../tools/todo";
 import type { RpcMessagesPage } from "./rpc-messages";
 
@@ -47,6 +50,12 @@ export type RpcCommand =
 	| { id?: string; type: "set_subagent_subscription"; level: RpcSubagentSubscriptionLevel }
 	| { id?: string; type: "get_subagents" }
 	| { id?: string; type: "get_subagent_messages"; subagentId?: string; sessionFile?: string; fromByte?: number }
+
+	// Approval rules
+	| { id?: string; type: "add_approval_rule"; rule: ApprovalRule }
+	| { id?: string; type: "list_approval_rules" }
+	| { id?: string; type: "remove_approval_rule"; index: number }
+	| { id?: string; type: "steer_subagent"; subagentId: string; message: string }
 
 	// Model
 	| { id?: string; type: "set_model"; provider: string; modelId: string }
@@ -82,6 +91,7 @@ export type RpcCommand =
 	| { id?: string; type: "get_branch_messages" }
 	| { id?: string; type: "get_last_assistant_text" }
 	| { id?: string; type: "set_session_name"; name: string }
+	| { id?: string; type: "generate_title"; customInstructions?: string }
 	| { id?: string; type: "handoff"; customInstructions?: string }
 
 	// Messages
@@ -177,6 +187,12 @@ export interface RpcSubagentSnapshot {
 	lastUpdate: number;
 	progress?: AgentProgress;
 	parentToolCallId?: string;
+	/**
+	 * True when the subagent runs inside an isolation worktree
+	 * (task.isolation.*). Such runs cannot be steered over the hub/IRC bus;
+	 * steering them fails with error code `unsupported_isolated`.
+	 */
+	isolated?: boolean;
 }
 
 export interface RpcSubagentMessagesResult {
@@ -252,6 +268,36 @@ export type RpcResponse =
 			data: RpcSubagentMessagesResult;
 	  }
 
+	// Approval rules
+	| {
+			id?: string;
+			type: "response";
+			command: "add_approval_rule";
+			success: true;
+			data: { rules: ApprovalRule[] };
+	  }
+	| {
+			id?: string;
+			type: "response";
+			command: "list_approval_rules";
+			success: true;
+			data: { rules: ApprovalRule[] };
+	  }
+	| {
+			id?: string;
+			type: "response";
+			command: "remove_approval_rule";
+			success: true;
+			data: { rules: ApprovalRule[] };
+	  }
+	| {
+			id?: string;
+			type: "response";
+			command: "steer_subagent";
+			success: true;
+			data: { to: string; outcome: IrcDeliveryReceipt["outcome"] };
+	  }
+
 	// Model
 	| {
 			id?: string;
@@ -322,6 +368,7 @@ export type RpcResponse =
 			data: { text: string | null };
 	  }
 	| { id?: string; type: "response"; command: "set_session_name"; success: true }
+	| { id?: string; type: "response"; command: "generate_title"; success: true; data: { title: string | null } }
 	| { id?: string; type: "response"; command: "handoff"; success: true; data: RpcHandoffResult | null }
 
 	// Messages
@@ -363,6 +410,46 @@ export interface RpcSubagentEventFrame {
 export type RpcSubagentFrame = RpcSubagentLifecycleFrame | RpcSubagentProgressFrame | RpcSubagentEventFrame;
 
 export type RpcSessionEventFrame = AgentSessionEvent | RpcSubagentFrame;
+
+// ============================================================================
+// Tool Approval Frames (stdout)
+// ============================================================================
+/**
+ * Emitted when a tool call requires approval, synchronously before the paired
+ * legacy select {@link RpcExtensionUIRequest}. The select UI request that
+ * immediately follows carries its own generated `id`; the approval request's
+ * `id` therefore carries the `toolCallId` as the documented 1:1 correlation
+ * key — pair a `tool_approval_request` with the select request that arrives
+ * right after it, and join verdicts by `toolCallId`.
+ */
+export interface RpcToolApprovalRequestFrame {
+	type: "tool_approval_request";
+	/** Correlation id — always equal to `toolCallId` (see the type doc). */
+	id: string;
+	sessionId?: string;
+	toolCallId: string;
+	toolName: string;
+	tier: ToolTier;
+	policy: ApprovalPolicy;
+	source: "tool" | "user" | "mode" | "rule";
+	reason?: string;
+	approvalMode: ApprovalMode;
+	/** Untruncated `formatApprovalDetails` lines when the tool declares any. */
+	details?: string[];
+}
+
+/** Emitted when a pending {@link RpcToolApprovalRequestFrame} has been resolved. */
+export interface RpcToolApprovalResolvedFrame {
+	type: "tool_approval_resolved";
+	/** Correlation id — always equal to `toolCallId` (see the request type doc). */
+	id: string;
+	toolCallId: string;
+	approved: boolean;
+	/** Who resolved the approval: `"user"` or `"system"` (failed closed). */
+	by?: "user" | "system";
+}
+
+export type RpcToolApprovalFrame = RpcToolApprovalRequestFrame | RpcToolApprovalResolvedFrame;
 
 // ============================================================================
 // Extension UI Events (stdout)

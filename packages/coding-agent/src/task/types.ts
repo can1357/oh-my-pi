@@ -101,6 +101,14 @@ export interface SubagentLifecyclePayload {
 	 * unset — surfaces like the subagent HUD only list detached spawns.
 	 */
 	detached?: boolean;
+	/**
+	 * Spawn runs inside an isolation worktree (task.isolation.*). Isolated runs
+	 * cannot be steered through the hub/IRC bus — their session is confined to
+	 * the sandbox and there is no live in-process recipient — so consumers
+	 * (RPC steer_subagent) reject them with `unsupported_isolated` instead of
+	 * attempting delivery.
+	 */
+	isolated?: boolean;
 }
 
 /** Display cap for a normalized one-line label (roster line, registry `displayName`, prompt field). */

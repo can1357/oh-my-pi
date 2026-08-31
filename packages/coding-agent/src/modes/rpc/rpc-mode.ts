@@ -11,21 +11,26 @@
  * - Extension UI: Extension UI requests are emitted, client responds with extension_ui_response
  */
 import { once } from "node:events";
+import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { $env, isRecord, Snowflake } from "@oh-my-pi/pi-utils";
 import { reset as resetCapabilities } from "../../capability";
 import { clearPluginRootsAndCaches, resolveActiveProjectRegistryPath } from "../../discovery/helpers";
 import {
+	type ExtensionRunner,
 	type ExtensionUIContext,
 	type ExtensionUIDialogOptions,
 	type ExtensionUISelectItem,
 	type ExtensionWidgetOptions,
 	getExtensionUISelectOptionLabel,
 } from "../../extensibility/extensions";
+import type { ToolApprovalRequestedEvent, ToolApprovalResolvedEvent } from "../../extensibility/extensions/types";
 import { buildSkillPromptMessage, parseSkillInvocation } from "../../extensibility/skills";
 import { loadSlashCommands } from "../../extensibility/slash-commands";
+import { IrcBus, type IrcDeliveryReceipt } from "../../irc/bus";
 import { type Theme, theme } from "../../modes/theme/theme";
+import { MAIN_AGENT_ID } from "../../registry/agent-registry";
 import type { AgentSession } from "../../session/agent-session";
 import { SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "../../session/messages";
 import { executeAcpBuiltinSlashCommand } from "../../slash-commands/acp-builtins";
@@ -36,9 +41,21 @@ import { calculateTokensPerSecond } from "../../utils/token-rate";
 import { initializeExtensions } from "../runtime-init";
 import { isRpcHostToolResult, isRpcHostToolUpdate, RpcHostToolBridge } from "./host-tools";
 import { isRpcHostUriResult, RpcHostUriBridge } from "./host-uris";
+import {
+	addRpcApprovalRule,
+	listRpcApprovalRules,
+	type RpcApprovalRuleStore,
+	removeRpcApprovalRule,
+} from "./rpc-approval-rules";
 import { MAX_RPC_FRAME_BYTES, MAX_RPC_REASSEMBLED_BYTES, RpcFrameEncoder } from "./rpc-frame";
 import { claimRpcInput, readRpcInputFrames } from "./rpc-input";
-import { pageRpcMessages, RPC_MESSAGES_PAGE_BUSY_ERROR, RpcMessagesPageError } from "./rpc-messages";
+import {
+	pageRpcMessages,
+	RPC_MESSAGES_PAGE_BUSY_ERROR,
+	type RpcMessageSnapshot,
+	RpcMessagesPageError,
+	resolveRpcMessagePageSource,
+} from "./rpc-messages";
 import { RpcSubagentRegistry, readRpcSubagentTranscript } from "./rpc-subagents";
 import type {
 	RpcCommand,
@@ -56,6 +73,9 @@ import type {
 	RpcResponse,
 	RpcSessionState,
 	RpcSubagentSubscriptionLevel,
+	RpcToolApprovalFrame,
+	RpcToolApprovalRequestFrame,
+	RpcToolApprovalResolvedFrame,
 } from "./rpc-types";
 
 // Re-export types for consumers
@@ -466,6 +486,92 @@ export class RpcShutdownCoordinator {
 
 export type RpcSubagentResetRegistry = Pick<RpcSubagentRegistry, "clear">;
 
+type RpcSteerSubagentErrorCode = "unsupported_isolated";
+export type RpcSteerSubagentResult =
+	| { kind: "delivered"; to: string; outcome: IrcDeliveryReceipt["outcome"] }
+	| { kind: "error"; message: string; code?: RpcSteerSubagentErrorCode };
+
+/**
+ * Steer an in-process subagent over the hub/IRC bus (RPC `steer_subagent`).
+ *
+ * The `subagentId` is resolved through the RPC subagent registry, whose
+ * snapshot ids ARE the hub/IRC recipient ids: the task executor emits
+ * lifecycle frames with the same agent id it registers in the global
+ * `AgentRegistry` (see sdk.ts `createAgentSession`), so a "running"
+ * resolution addresses the live subagent directly.
+ *
+ * Delivery reuses the exact primitive the `hub` send tool executes
+ * (`IrcBus.global().send`, see tools/hub/messaging.ts `executeSend`): idle
+ * peers are woken, parked ones revived through the lifecycle manager, and
+ * busy ones receive the message as a non-interrupting aside at their next
+ * step boundary. The sender is attributed to the session owner so the
+ * subagent sees a normal steering DM rather than an anonymous peer.
+ *
+ * Only in-process subagents are steerable this pass: isolated worktree runs
+ * are rejected with error code `unsupported_isolated`.
+ */
+export async function handleRpcSteerSubagent(
+	subagentRegistry: RpcSubagentRegistry,
+	subagentId: string,
+	message: string,
+): Promise<RpcSteerSubagentResult> {
+	const resolution = subagentRegistry.resolveForSteer(subagentId);
+	switch (resolution.kind) {
+		case "unknown":
+			return { kind: "error", message: `Unknown subagent: ${subagentId}` };
+		case "not-running":
+			return { kind: "error", message: `Subagent not running: ${subagentId}` };
+		case "running":
+			if (resolution.snapshot.isolated === true) {
+				return {
+					kind: "error",
+					message: `Subagent ${subagentId} runs in an isolation worktree and cannot be steered over the hub yet.`,
+					code: "unsupported_isolated",
+				};
+			}
+			break;
+	}
+
+	const receipt = await IrcBus.global().send({ from: MAIN_AGENT_ID, to: subagentId, body: message });
+	if (receipt.outcome === "failed") {
+		return { kind: "error", message: `Delivery failed: ${receipt.error ?? "unknown error"}` };
+	}
+	return { kind: "delivered", to: receipt.to, outcome: receipt.outcome };
+}
+
+export type RpcGenerateTitleSession = Pick<AgentSession, "messages" | "generateTitle">;
+
+/**
+ * Handle the RPC `generate_title` command: wrap the session's public title
+ * generator, anchored on the first user message, with an optional
+ * title-prompt override. Returns `{ title: null }` when the session has no
+ * user message yet or the input is too low-signal to name. Extracted (like the
+ * other `handleRpc*` helpers) so the wire contract is testable without
+ * launching the full RPC mode.
+ */
+export async function handleRpcGenerateTitle(
+	id: string | undefined,
+	session: RpcGenerateTitleSession,
+	customInstructions: string | undefined,
+): Promise<RpcResponse> {
+	const firstUserText = firstRpcUserMessageText(session.messages);
+	if (firstUserText === undefined) {
+		return { id, type: "response", command: "generate_title", success: true, data: { title: null } };
+	}
+	try {
+		const title = await session.generateTitle(firstUserText, customInstructions);
+		return { id, type: "response", command: "generate_title", success: true, data: { title } };
+	} catch (titleError) {
+		return {
+			id,
+			type: "response",
+			command: "generate_title",
+			success: false,
+			error: titleError instanceof Error ? titleError.message : String(titleError),
+		};
+	}
+}
+
 export async function handleRpcSessionChange(
 	session: RpcSessionChangeSession,
 	command: RpcSessionChangeCommand,
@@ -536,6 +642,36 @@ function shouldEmitRpcTitles(): boolean {
 	if (!raw) return false;
 	const normalized = raw.trim().toLowerCase();
 	return normalized === "1" || normalized === "true" || normalized === "yes" || normalized === "on";
+}
+
+/** Opt-in auto session-title generation on `prompt` (default off preserves the historical no-title behavior). */
+function shouldAutoGenerateRpcTitles(): boolean {
+	const raw = $env.PI_RPC_TITLES;
+	if (!raw) return false;
+	const normalized = raw.trim().toLowerCase();
+	return normalized === "1" || normalized === "true" || normalized === "yes" || normalized === "on";
+}
+
+/**
+ * Plain-text content of the session's first user-attributed message — the same
+ * anchor auto-titling and `generate_title` use for naming a session. Returns
+ * undefined for a fresh session that has no user message yet.
+ */
+function firstRpcUserMessageText(messages: readonly AgentMessage[]): string | undefined {
+	for (const message of messages) {
+		if (message.role !== "user") continue;
+		const content = message.content;
+		const text =
+			typeof content === "string"
+				? content
+				: content
+						.filter((block): block is { type: "text"; text: string } => block.type === "text")
+						.map(block => block.text)
+						.join("\n");
+		const trimmed = text.trim();
+		if (trimmed) return trimmed;
+	}
+	return undefined;
 }
 
 function isSubagentSubscriptionLevel(value: unknown): value is RpcSubagentSubscriptionLevel {
@@ -692,6 +828,68 @@ export function requestRpcDialog<T>(
 	output({ type: "extension_ui_request", id, ...request } as RpcExtensionUIRequest);
 	return promise;
 }
+
+// ============================================================================
+// Structured tool approval frames
+// ============================================================================
+
+/**
+ * Serialize a `tool_approval_requested` extension event into the contract-1
+ * `tool_approval_request` wire frame. Emitted synchronously before the paired
+ * select UI request; the select's own request id is generated later inside
+ * `requestRpcDialog`, so `toolCallId` (also carried in `id`) is the documented
+ * 1:1 correlation key between the approval request, its select, and the
+ * eventual `tool_approval_resolved` verdict.
+ */
+function toRpcToolApprovalRequest(event: ToolApprovalRequestedEvent): RpcToolApprovalRequestFrame {
+	return {
+		type: "tool_approval_request",
+		id: event.toolCallId,
+		...(event.sessionId ? { sessionId: event.sessionId } : {}),
+		toolCallId: event.toolCallId,
+		toolName: event.toolName,
+		// Enriched at the emission site (ExtensionToolWrapper); the fallbacks keep a
+		// frame well-formed if an un-enriched event ever reaches a host handler.
+		tier: event.tier ?? "exec",
+		policy: event.policy ?? "prompt",
+		source: event.source ?? "mode",
+		...(event.reason ? { reason: event.reason } : {}),
+		approvalMode: event.approvalMode,
+		...(event.details && event.details.length > 0 ? { details: event.details } : {}),
+	};
+}
+
+/** Serialize a `tool_approval_resolved` extension event into the contract-1 verdict frame. */
+function toRpcToolApprovalResolved(event: ToolApprovalResolvedEvent): RpcToolApprovalResolvedFrame {
+	return {
+		type: "tool_approval_resolved",
+		id: event.toolCallId,
+		toolCallId: event.toolCallId,
+		approved: event.approved,
+		...(event.by ? { by: event.by } : {}),
+	};
+}
+
+/**
+ * Register the structured tool-approval host handlers on an extension runner.
+ *
+ * Used by {@link runRpcMode}; exported so the exact RPC-mode wire path can be
+ * exercised in tests without booting a full agent session. Each emitted frame
+ * is serialized from the enriched `tool_approval_requested`/`tool_approval_resolved`
+ * extension events and delivered through `output`.
+ */
+export function registerRpcApprovalHandlers(
+	runner: Pick<ExtensionRunner, "registerHostHandler">,
+	output: (frame: RpcToolApprovalFrame) => void,
+): void {
+	runner.registerHostHandler<ToolApprovalRequestedEvent>("tool_approval_requested", event => {
+		output(toRpcToolApprovalRequest(event));
+	});
+	runner.registerHostHandler<ToolApprovalResolvedEvent>("tool_approval_resolved", event => {
+		output(toRpcToolApprovalResolved(event));
+	});
+}
+
 /**
  * Run in RPC mode.
  * Listens for JSON commands on stdin, outputs events and responses on stdout.
@@ -739,6 +937,17 @@ export async function runRpcMode(
 			frameEncoder.setProtocolVersion(2);
 	};
 	const emitRpcTitles = shouldEmitRpcTitles();
+
+	/**
+	 * Frozen-snapshot cache backing `get_messages_page` while a turn streams.
+	 * The first page request in a streaming epoch freezes `session.messages`
+	 * once; later requests in the same epoch reuse the same frozen array so the
+	 * cursor stays coherent (messageCount and leafId cannot drift under the
+	 * walk). Once the session settles the cache is dropped on the next request,
+	 * which re-arms `stale_cursor` protection for any walk that outlived the
+	 * epoch.
+	 */
+	let messagePageCache: { messages: AgentMessage[]; snapshot: RpcMessageSnapshot } | undefined;
 
 	const success = <T extends RpcCommand["type"]>(
 		id: string | undefined,
@@ -956,6 +1165,18 @@ export async function runRpcMode(
 	const rpcUiContext = new RpcExtensionUIContext(pendingExtensionRequests, output);
 	setToolUIContext?.(rpcUiContext, true);
 
+	// Serialize structured tool-approval frames for hosts that cannot render the
+	// legacy select presentation. The host handlers run through the extension
+	// runner, so `tool_approval_request` is emitted synchronously inside the
+	// approval gate — immediately before the paired `extension_ui_request`
+	// select (the select's request id is generated later, so `toolCallId` in
+	// `id` is the documented 1:1 correlation key) — and `tool_approval_resolved`
+	// fires the moment the select resolves. The legacy select flow stays
+	// authoritative for the verdict and is otherwise untouched.
+	if (session.extensionRunner) {
+		registerRpcApprovalHandlers(session.extensionRunner, output);
+	}
+
 	// Set up extensions with RPC-based UI context
 	await initializeExtensions(session, {
 		mode: "rpc",
@@ -1002,6 +1223,13 @@ export async function runRpcMode(
 	});
 	await emitAvailableCommandsUpdate();
 
+	// Approval-rule commands persist through the existing session settings
+	// write path (`settings.set`), which queues a background save.
+	const approvalRuleStore = (): RpcApprovalRuleStore => ({
+		read: () => session.settings.get("tools.approvalRules"),
+		write: rules => session.settings.set("tools.approvalRules", rules),
+	});
+
 	// Handle a single command
 	const handleCommand = async (command: RpcCommand): Promise<RpcResponse> => {
 		const id = command.id;
@@ -1018,6 +1246,13 @@ export async function runRpcMode(
 			// =================================================================
 
 			case "prompt": {
+				// Opt-in auto-titling (PI_RPC_TITLES=1): mirrors the interactive
+				// bootstrap path so a headless first prompt can still name the
+				// session; session.maybeStartTitleGeneration self-guards on an
+				// existing name, low-signal input, and in-flight generation.
+				if (shouldAutoGenerateRpcTitles()) {
+					session.maybeStartTitleGeneration(command.message);
+				}
 				const skillResult = await tryRunRpcSkillCommand(session, command.message, command.streamingBehavior);
 				if (skillResult) {
 					return success(id, "prompt", skillResult);
@@ -1213,6 +1448,41 @@ export async function runRpcMode(
 				}
 			}
 
+			case "steer_subagent": {
+				if (!subagentRegistry) {
+					return error(id, "steer_subagent", "Subagent event bus is unavailable");
+				}
+				const message = command.message.trim();
+				if (!message) {
+					return error(id, "steer_subagent", "`message` is required for steer_subagent.");
+				}
+				const result = await handleRpcSteerSubagent(subagentRegistry, command.subagentId, message);
+				if (result.kind === "error") {
+					return error(id, "steer_subagent", result.message, result.code);
+				}
+				return success(id, "steer_subagent", { to: result.to, outcome: result.outcome });
+			}
+
+			// =================================================================
+			// Approval rules
+			// =================================================================
+
+			case "add_approval_rule": {
+				const result = addRpcApprovalRule(approvalRuleStore(), command.rule);
+				if (!result.ok) return error(id, "add_approval_rule", result.error);
+				return success(id, "add_approval_rule", { rules: result.rules });
+			}
+
+			case "list_approval_rules": {
+				return success(id, "list_approval_rules", listRpcApprovalRules(approvalRuleStore()));
+			}
+
+			case "remove_approval_rule": {
+				const result = removeRpcApprovalRule(approvalRuleStore(), command.index);
+				if (!result.ok) return error(id, "remove_approval_rule", result.error);
+				return success(id, "remove_approval_rule", { rules: result.rules });
+			}
+
 			// =================================================================
 			// Model
 			// =================================================================
@@ -1366,6 +1636,16 @@ export async function runRpcMode(
 				return success(id, "set_session_name");
 			}
 
+			case "generate_title": {
+				// Wrap the public session title generator, anchored on the first
+				// user message. The optional `customInstructions` swaps the title
+				// system prompt (the same override `generateTitle` exposes for
+				// special-purpose titling). The command only computes and returns
+				// the candidate; hosts persist it via `set_session_name` (or rely
+				// on `get_state.sessionName` / builtin `session_info_update`).
+				return await handleRpcGenerateTitle(id, session, command.customInstructions);
+			}
+
 			case "handoff": {
 				// Resetting the agent mid-stream lets the live turn keep emitting into a
 				// session that handoff has already torn down. Refuse while a prompt is in
@@ -1386,22 +1666,29 @@ export async function runRpcMode(
 			}
 
 			case "get_messages_page": {
-				if (session.isStreaming || session.isCompacting)
+				// Compaction rewrites the transcript mid-walk, so it still refuses
+				// the page with `session_busy`. Streaming is now allowed: each walk
+				// pages one frozen snapshot, and cursors are bound to that frozen
+				// length so a growing live array cannot shift offsets under the
+				// client. A cursor from before the current epoch (or across a
+				// session switch) still fails with `stale_cursor`.
+				if (session.isCompacting)
 					return error(id, "get_messages_page", RPC_MESSAGES_PAGE_BUSY_ERROR, "session_busy");
-				const messages = session.messages;
+				const cached = resolveRpcMessagePageSource(messagePageCache, {
+					isStreaming: session.isStreaming,
+					sessionId: session.sessionId,
+					messages: session.messages,
+					getLeafId: () => session.sessionManager.getLeafId(),
+				});
+				messagePageCache = cached;
 				try {
 					return success(
 						id,
 						"get_messages_page",
-						pageRpcMessages(
-							messages,
-							{
-								sessionId: session.sessionId,
-								leafId: session.sessionManager.getLeafId(),
-								messageCount: messages.length,
-							},
-							{ cursor: command.cursor, limit: command.limit },
-						),
+						pageRpcMessages(cached.messages, cached.snapshot, {
+							cursor: command.cursor,
+							limit: command.limit,
+						}),
 					);
 				} catch (pageError) {
 					return error(

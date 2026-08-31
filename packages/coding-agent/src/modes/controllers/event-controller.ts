@@ -265,6 +265,10 @@ export class EventController {
 			todo_auto_clear: e => this.#handleTodoAutoClear(e),
 			irc_message: e => this.#handleIrcMessage(e),
 			notice: e => this.#handleNotice(e),
+			// The advisor card itself is rendered from the transcript message
+			// events; this structured notification exists for headless hosts
+			// (RPC/ACP), so the interactive TUI has nothing to add here.
+			advisor_note: async () => {},
 			model_changed: async () => {
 				this.ctx.statusLine.invalidate();
 				this.ctx.ui.requestRender();
@@ -1557,7 +1561,7 @@ export class EventController {
 		if (!tool) return false;
 		const mode = (settings.get("tools.approvalMode") ?? "yolo") as ApprovalMode;
 		const userPolicies = (settings.get("tools.approval") ?? {}) as Record<string, unknown>;
-		return resolveApproval(tool, args, mode, userPolicies).policy === "prompt";
+		return resolveApproval(tool, args, mode, userPolicies, settings.get("tools.approvalRules")).policy === "prompt";
 	}
 
 	async #handleToolExecutionUpdate(

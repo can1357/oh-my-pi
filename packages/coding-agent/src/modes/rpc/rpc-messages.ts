@@ -89,6 +89,48 @@ function sameSnapshot(cursor: RpcMessageCursorPayload, snapshot: RpcMessageSnaps
 	);
 }
 
+/** A frozen message array and the snapshot cursors are bound to. */
+export interface RpcMessagePageSource {
+	messages: AgentMessage[];
+	snapshot: RpcMessageSnapshot;
+}
+
+/** The live-session inputs `resolveRpcMessagePageSource` needs. */
+export interface RpcMessagePageSessionState {
+	isStreaming: boolean;
+	sessionId: string;
+	messages: readonly AgentMessage[];
+	getLeafId(): string | null;
+}
+
+/**
+ * Resolve the message page source for one `get_messages_page` request.
+ *
+ * While the session is settling, every request takes a fresh frozen snapshot,
+ * so a cursor that outlived the epoch (or crossed a session switch) fails
+ * `stale_cursor` on the next page — the pre-existing strictness is preserved.
+ * While a turn is streaming, the first request of a walk freezes once and later
+ * requests in the same epoch reuse the same frozen array, keeping the cursor
+ * (messageCount/leafId) coherent against a live array that keeps growing.
+ */
+export function resolveRpcMessagePageSource(
+	cache: RpcMessagePageSource | undefined,
+	session: RpcMessagePageSessionState,
+): RpcMessagePageSource {
+	if (!session.isStreaming || cache?.snapshot.sessionId !== session.sessionId) {
+		const frozen = [...session.messages];
+		return {
+			messages: frozen,
+			snapshot: {
+				sessionId: session.sessionId,
+				leafId: session.getLeafId(),
+				messageCount: frozen.length,
+			},
+		};
+	}
+	return cache;
+}
+
 /** Page one stable in-memory message snapshot without crossing the v1 frame budget. */
 export function pageRpcMessages(
 	messages: readonly AgentMessage[],

@@ -81,6 +81,7 @@ Legacy clients may ignore the added ready fields and remain on v1. V1 retains it
 9. Prompt lifecycle hints (`{ type: "prompt_result", id?, agentInvoked }`) for scheduled prompts that later resolve without invoking the agent
 10. Subagent frames (`subagent_lifecycle`, `subagent_progress`, `subagent_event`), gated by `set_subagent_subscription`
 11. Builtin slash-command side channels (`command_output`, `session_info_update`, `config_update`)
+12. Tool approval frames (`tool_approval_request`, `tool_approval_resolved`), see the [Tool Approval Sub-Protocol](#tool-approval-sub-protocol)
 
 ### Inbound frame categories (stdin)
 
@@ -132,6 +133,37 @@ Important edge behavior from runtime:
 - `{ id?, type: "set_subagent_subscription", level: "off" | "progress" | "events" }`
 - `{ id?, type: "get_subagents" }`
 - `{ id?, type: "get_subagent_messages", subagentId?: string, sessionFile?: string, fromByte?: number }`
+- `{ id?, type: "steer_subagent", subagentId: string, message: string }`
+
+### Approval rules
+
+- `{ id?, type: "add_approval_rule", rule: { tool, match?, approval, reason? } }`
+- `{ id?, type: "list_approval_rules" }`
+- `{ id?, type: "remove_approval_rule", index: number }`
+
+`tools.approvalRules` is an ordered list of generic approval rules evaluated
+ahead of per-tool policy and approval mode; the first matching rule wins and
+is authoritative in every mode, including `yolo`. Each rule carries:
+
+- `tool` (string, required): the tool name the rule applies to.
+- `approval` (`"allow" | "deny" | "prompt"`, required).
+- `match` (string, optional): a `*`-wildcard glob (same syntax as
+  `bash.patterns`) matched against the tool's **primary string argument** —
+  the bash `command`, or the write/edit `path` (falling back to
+  `file_path`). Tools without a primary string argument match on tool name
+  alone; any `match` they carry is ignored. A rule with a `match` is skipped
+  when a primary-arg tool call carries no primary string (e.g. a sloppy edit
+  without a path). Bash commands are matched with shell-aware semantics:
+  `allow` must vouch for the entire command (never rides a compound line),
+  while `deny`/`prompt` fire on any matching shell segment.
+- `reason` (string, optional): surfaced when the rule prompts or denies.
+
+`add_approval_rule` validates the rule, appends it to the session settings,
+persists through the existing settings write path, and returns the full
+normalized list. `remove_approval_rule` removes the rule at `index`
+(0-based) and returns the remaining list; an out-of-range index is an error.
+Malformed entries in a hand-edited config are dropped on read and never
+reported by `list_approval_rules`.
 
 ### Model
 
@@ -181,14 +213,36 @@ correlate it via `id`. Ordering across concurrent commands is not guaranteed
 - `{ id?, type: "get_branch_messages" }`
 - `{ id?, type: "get_last_assistant_text" }`
 - `{ id?, type: "set_session_name", name: string }`
+- `{ id?, type: "generate_title", customInstructions?: string }`
 - `{ id?, type: "handoff", customInstructions?: string }`
+
+### Titles
+
+`generate_title` wraps the session's public title generator: it computes a
+candidate name from the session's first user message (the same anchor
+auto-titling uses) and responds `{ title }` — `null` when the session has no
+user message yet or the input is too low-signal to name. The optional
+`customInstructions` swaps the title-generation system prompt. The generated
+name is **not** applied automatically; hosts persist it with `set_session_name`
+when appropriate. Where the mode already applies a name (builtin/auto title
+paths such as `notifyTitleChanged`), the change is reported through
+`session_info_update` (`{ type: "session_info_update", title, sessionId }`).
+
+Separately, the `prompt` command starts background auto-titling of the first
+user message when the agent is launched with `PI_RPC_TITLES=1` (default off,
+preserving the historical no-title behavior). The auto path applies the name
+directly (mirroring the interactive bootstrap); `maybeStartTitleGeneration`
+self-guards on an existing name, low-signal input, and an in-flight
+generation, so the flag is safe to enable for unattended hosts. Hosts observe
+the applied name via `get_state` (`sessionName`); builtin-command title
+changes continue to stream through `session_info_update`.
 
 ### Messages
 
 - `{ id?, type: "get_messages" }`
 - `{ id?, type: "get_messages_page", cursor?: string, limit?: number }`
 
-`get_messages_page` returns a stable chronological page with `messages`, `totalMessages`, and an opaque `nextCursor` when more messages remain. Cursors are bound to the session ID, durable leaf, and message count. The server rejects stale cursors if the session changes between requests, and refuses to start a paging walk while the session is streaming or compacting. Failed page requests carry a machine-readable `code` on the error response — `session_busy` (session is streaming or compacting) or `stale_cursor` (the snapshot behind the cursor changed, e.g. a background bash appended a message between pages) — so clients can react without matching error-message text. Pages contain at most 256 messages and normally stay below the v1 physical-frame ceiling. A v1 caller can page ordinary histories, but an individual message whose response exceeds that ceiling produces an overflow error; retrieving it losslessly requires negotiated v2 framing.
+`get_messages_page` returns a stable chronological page with `messages`, `totalMessages`, and an opaque `nextCursor` when more messages remain. Cursors are bound to the session ID, durable leaf, and message count. The server rejects stale cursors if the session changes between requests, and refuses to start a paging walk while the session is compacting. While a turn streams, paging is allowed: the first request of a walk freezes a snapshot of the current messages and binds every cursor in that walk to the frozen length, so a growing live array cannot shift offsets under the client. Once the session settles, a new snapshot is taken; a cursor that outlived the streaming epoch (or crossed a session switch) fails with `stale_cursor`. Failed page requests carry a machine-readable `code` on the error response — `session_busy` (session is compacting) or `stale_cursor` (the snapshot behind the cursor changed, e.g. a background bash appended a message between pages) — so clients can react without matching error-message text. Pages contain at most 256 messages and normally stay below the v1 physical-frame ceiling. A v1 caller can page ordinary histories, but an individual message whose response exceeds that ceiling produces an overflow error; retrieving it losslessly requires negotiated v2 framing.
 
 The bundled TypeScript `RpcClient.getMessages()` and Python `RpcClient.get_messages()` drain this paged endpoint automatically after negotiating v2. They retain the legacy monolithic command when connected to a v1 server, and on either `session_busy` or `stale_cursor` they discard partial pages and fall back to the legacy best-effort snapshot. Direct `getMessagesPage()` and `get_messages_page()` calls remain strict so incremental hosts never mix snapshots silently.
 
@@ -359,6 +413,38 @@ The corresponding `get_state` result reports the same computed state:
 }
 ```
 
+### `add_approval_rule` / `list_approval_rules` / `remove_approval_rule` payload
+
+All three commands return the full ordered, normalized rule list. They
+persist through the existing session-settings write path.
+
+Example round trip — add a deny rule for destructive bash commands:
+
+```json
+{ "id": "rule-1", "type": "add_approval_rule", "rule": { "tool": "bash", "match": "rm -rf /*", "approval": "deny", "reason": "destructive" } }
+```
+
+Response:
+
+```json
+{
+  "id": "rule-1",
+  "type": "response",
+  "command": "add_approval_rule",
+  "success": true,
+  "data": {
+    "rules": [
+      { "tool": "bash", "match": "rm -rf /*", "approval": "deny", "reason": "destructive" }
+    ]
+  }
+}
+```
+
+`remove_approval_rule` uses the 0-based index from the returned list. Invalid
+rules (missing/empty `tool`, or an `approval` other than
+`allow`/`deny`/`prompt`) and out-of-range removals fail with `success: false`
+and a human-readable `error`.
+
 ### `set_todos` payload
 
 Replaces the in-memory todo state for the current session and returns the normalized phase list:
@@ -484,7 +570,25 @@ Common event types:
 - `model_changed`, `thinking_level_changed`
 - `ttsr_triggered`
 - `todo_reminder`, `todo_auto_clear`
-- `irc_message`, `notice`, `goal_updated`
+- `irc_message`, `advisor_note`, `notice`, `goal_updated`
+
+`advisor_note` is a structured mirror of one advisor note routed to the
+primary session:
+
+```ts
+{
+  type: "advisor_note";
+  advisor?: string;              // omitted for the default advisor
+  severity?: "nit" | "concern" | "blocker";
+  note: string;
+  deliveredAs: "card" | "steer" | "custom"; // how the note reached the primary
+}
+```
+
+It is emitted alongside the legacy advisor card / steered custom message (same
+`note` and `severity`), so hosts can surface the advisory without parsing
+`<advisory>` tags out of transcript text. Best-effort: a host that ignores it
+loses nothing — the legacy delivery remains authoritative.
 
 Extension runner errors are emitted separately as:
 
@@ -535,6 +639,37 @@ Subagent forwarding defaults to `"off"`. `set_subagent_subscription` selects:
 `fromByte`, `nextByte`, `reset`, raw transcript `entries`, and converted
 `messages`. If `fromByte` exceeds the current file size, reading restarts at
 byte zero and reports `reset: true`.
+
+### Steering subagents
+
+`steer_subagent` delivers a direct-message to a live **in-process** subagent
+over the same hub/IRC path the `hub` send tool uses (`IrcBus.global().send`):
+idle subagents are woken with a real turn, busy ones receive the message as a
+non-interrupting aside at their next step boundary, and parked ones are
+revived through the lifecycle manager. The sender is attributed to the session
+owner (`Main`), so the subagent sees a normal steering DM.
+
+```json
+{ "id": "req_1", "type": "steer_subagent", "subagentId": "OmpWorker", "message": "Drop the glob, keep the direct path." }
+```
+
+Failure responses include a machine-readable `code` when the cause is
+actionable:
+
+- unknown `subagentId` → `error: "Unknown subagent: <id>"` (no code)
+- subagent completed/released → `error: "Subagent not running: <id>"` (no code)
+- subagent runs in an isolation worktree (not steerable this pass) →
+  `error` with `code: "unsupported_isolated"`
+
+Success responses carry delivery metadata:
+
+```json
+{ "id": "req_1", "type": "response", "command": "steer_subagent", "success": true, "data": { "to": "OmpWorker", "outcome": "injected" } }
+```
+
+`outcome` is the hub delivery receipt: `"injected"` (aside into a busy agent or
+consumed waiter), `"woken"` (idle agent woke for a real turn), or `"revived"`
+(parked agent restored before delivery).
 
 ## Prompt/Queue Concurrency and Ordering
 
@@ -625,6 +760,73 @@ Example:
 - `{ type: "extension_ui_response", id: string, cancelled: true, timedOut?: boolean }`
 
 If a dialog has a timeout, RPC mode resolves to a default value when timeout/abort fires.
+
+## Tool Approval Sub-Protocol
+
+When a tool call requires approval, RPC mode emits a structured
+`tool_approval_request` frame **synchronously before** the paired legacy
+`extension_ui_request` select, and a `tool_approval_resolved` frame the moment
+that select resolves. The legacy select remains authoritative for the verdict:
+approve or deny it exactly as before, and the resolved frame reports the
+outcome without replacing the UI flow. Denying, aborting, or timing out the
+select still blocks the tool call through the existing semantics.
+
+### Outbound request
+
+`tool_approval_request` (`{ "type": "tool_approval_request" }`):
+
+```json
+{
+  "type": "tool_approval_request",
+  "id": "call_abc123",
+  "sessionId": "…",
+  "toolCallId": "call_abc123",
+  "toolName": "bash",
+  "tier": "exec",
+  "policy": "prompt",
+  "source": "tool",
+  "reason": "requires manual review",
+  "approvalMode": "always-ask",
+  "details": ["$ git reset --hard", "Deletes local changes."]
+}
+```
+
+- `tier`: resolved capability tier (`"read" | "write" | "exec"`).
+- `policy`: resolved policy that triggered the prompt (`"allow" | "deny" | "prompt"`).
+- `source`: origin of the resolved policy (`"tool" | "user" | "mode" | "rule"`).
+- `approvalMode`: the active approval mode (`"always-ask" | "write" | "yolo"`).
+- `details`: untruncated `formatApprovalDetails` lines when the tool declares any.
+- `reason`: present when the approval resolution carried one.
+
+### Outbound resolution
+
+`tool_approval_resolved` (`{ "type": "tool_approval_resolved" }`):
+
+```json
+{
+  "type": "tool_approval_resolved",
+  "id": "call_abc123",
+  "toolCallId": "call_abc123",
+  "approved": true,
+  "by": "user"
+}
+```
+
+`approved` mirrors the select outcome; `by` is `"user"` after an interactive
+decision or `"system"` when approval failed closed (no interactive UI, or the
+dialog was cancelled/aborted).
+
+### Correlation
+
+`tool_approval_request` is emitted inside the approval gate, **before** the RPC
+select request id exists, so the request frame's `id` carries the `toolCallId`
+as the documented 1:1 join key. Hosts MUST pair a `tool_approval_request` with
+the select `extension_ui_request` that arrives immediately after it, and join
+the verdict by `toolCallId` from the paired `tool_approval_resolved`. `details`
+may contain arbitrary tool output; treat it as untrusted text.
+
+The `RpcClient` exposes these as `onToolApproval(listener)` and
+`onToolApprovalResolved(listener)` subscriptions.
 
 ## Host Tool Sub-Protocol
 

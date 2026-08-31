@@ -3322,6 +3322,10 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				description: options.description,
 				status: "started" as const,
 				sessionFile: subtaskSessionFile,
+				// Only the isolation runner (runIsolatedSubprocess) sets `worktree`;
+				// any worktree-backed run is confined to its sandbox and cannot be
+				// steered over the hub/IRC bus. Consumers surface `unsupported_isolated`.
+				isolated: worktree !== undefined,
 				index,
 			};
 			emitSubagentFrame(options.eventBus, options.subagentEventBus, TASK_SUBAGENT_LIFECYCLE_CHANNEL, startedPayload);

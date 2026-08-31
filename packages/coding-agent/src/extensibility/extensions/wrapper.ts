@@ -145,6 +145,23 @@ function safetyCheckLines(checks: readonly ComputerSafetyCheck[]): string[] {
 }
 
 /**
+ * Normalize a tool's `formatApprovalDetails` output into untruncated detail
+ * lines for structured approval events, omitting empty entries. Returns
+ * `undefined` when the tool declares no details.
+ */
+function approvalDetailsLines(tool: AgentTool, args: unknown): string[] | undefined {
+	const details = tool.formatApprovalDetails?.(args);
+	if (typeof details === "string") {
+		return details.length > 0 ? [details] : undefined;
+	}
+	if (Array.isArray(details)) {
+		const lines = details.filter(line => line.length > 0);
+		return lines.length > 0 ? lines : undefined;
+	}
+	return undefined;
+}
+
+/**
  * Wraps a tool with extension callbacks for interception.
  * - Emits tool_call event before execution (can block)
  * - Emits tool_result event after execution (can modify result)
@@ -197,7 +214,14 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 		const configuredMode = (settings?.get("tools.approvalMode") ?? "yolo") as ApprovalMode;
 		const approvalMode: ApprovalMode = cliAutoApprove ? "yolo" : configuredMode;
 		const userPolicies = (settings?.get("tools.approval") ?? {}) as Record<string, unknown>;
-		const preResolved = resolveApproval(this.tool, approvalArgs(params, context), approvalMode, userPolicies);
+		const approvalRules = settings?.get("tools.approvalRules");
+		const preResolved = resolveApproval(
+			this.tool,
+			approvalArgs(params, context),
+			approvalMode,
+			userPolicies,
+			approvalRules,
+		);
 		if (preResolved.policy === "deny") {
 			throw denyError(preResolved, this.tool.name);
 		}
@@ -246,7 +270,7 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 		// input that newly resolves to `deny` is caught here even though the original passed the
 		// short-circuit above.
 		const resolvedArgs = approvalArgs(effectiveParams, context);
-		const resolved = resolveApproval(this.tool, resolvedArgs, approvalMode, userPolicies);
+		const resolved = resolveApproval(this.tool, resolvedArgs, approvalMode, userPolicies, approvalRules);
 		context?.xdevTierResolved?.(resolved.tier);
 		if (resolved.policy === "deny") {
 			throw denyError(resolved, this.tool.name);
@@ -280,17 +304,22 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 				this.runner.hasHandlers("tool_approval_requested") || this.runner.hasHandlers("tool_approval_resolved");
 			const sessionId = context?.sessionManager?.getSessionId() ?? "";
 			if (hasApprovalHandlers) {
+				const approvalDetails = approvalDetailsLines(this.tool, resolvedArgs);
 				await this.runner.emit({
 					type: "tool_approval_requested",
 					sessionId,
 					toolName: this.tool.name,
 					toolCallId,
+					tier: resolved.tier,
+					policy: resolved.policy,
+					source: resolved.source ?? "mode",
 					...(approvalCheck.reason ? { reason: approvalCheck.reason } : {}),
 					approvalMode,
+					...(approvalDetails ? { details: approvalDetails } : {}),
 				});
 			}
 
-			const emitApprovalResolved = async (approved: boolean, reason?: string) => {
+			const emitApprovalResolved = async (approved: boolean, reason?: string, by: "user" | "system" = "user") => {
 				if (!hasApprovalHandlers) return;
 				await this.runner.emit({
 					type: "tool_approval_resolved",
@@ -298,6 +327,7 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 					toolName: this.tool.name,
 					toolCallId,
 					approved,
+					by,
 					...(reason ? { reason } : {}),
 				});
 			};
@@ -306,7 +336,7 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 			// ordinary tier approval, no setting or yolo mode may bypass this gate.
 			if (!this.runner.hasUI()) {
 				const reason = "no interactive UI available";
-				await emitApprovalResolved(false, reason);
+				await emitApprovalResolved(false, reason, "system");
 				if (pendingSafetyChecks.length > 0) {
 					throw new Error(
 						`Tool "${this.tool.name}" has pending provider safety checks but no interactive UI is available.`,
@@ -331,7 +361,7 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 			try {
 				choice = await uiContext.select(safetyPrompt, ["Approve", "Deny"]);
 			} catch (err) {
-				await emitApprovalResolved(false, err instanceof Error ? err.message : "approval aborted");
+				await emitApprovalResolved(false, err instanceof Error ? err.message : "approval aborted", "system");
 				throw err;
 			}
 			const approved = choice === "Approve";

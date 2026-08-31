@@ -49,6 +49,7 @@ import type {
 	ExtensionShortcut,
 	ExtensionUIContext,
 	ExtensionUIDialogOptions,
+	HandlerFn,
 	InputEvent,
 	InputEventResult,
 	McpNotificationEvent,
@@ -427,6 +428,15 @@ const noOpUIContext: ExtensionUIContext = {
 	setToolsExpanded: () => {},
 };
 
+/**
+ * Synthetic `extensionPath` value used to attribute timeouts and errors from
+ * host-registered handlers (see {@link ExtensionRunner.registerHostHandler}).
+ */
+const HOST_EXTENSION_PATH = "<host>";
+
+/** Minimal extension identity for host-handler dispatch (only `path` is consulted). */
+const HOST_EXTENSION: Pick<Extension, "path"> = { path: HOST_EXTENSION_PATH };
+
 interface ToolRegistrationScope {
 	pending: Set<Promise<void>>;
 	signal?: AbortSignal;
@@ -458,6 +468,12 @@ export class ExtensionRunner {
 	#toolRegistrationScope = new AsyncLocalStorage<ToolRegistrationScope>();
 	#toolRegistrationBarrier: Promise<void> | undefined;
 	#initialized = false;
+	/**
+	 * Handlers registered by the host (mode controller) via {@link registerHostHandler},
+	 * keyed by event type. Dispatched through the same isolation as extension handlers;
+	 * consulted by {@link hasHandlers} so hosts can observe events no extension subscribes to.
+	 */
+	#hostHandlers: Map<string, HandlerFn[]> = new Map();
 	/**
 	 * Buffer for `credential_disabled` events received via {@link emitCredentialDisabled}
 	 * before {@link initialize} has run. Drained through {@link emit} once initialize sets
@@ -1075,6 +1091,34 @@ export class ExtensionRunner {
 		}
 	}
 
+	/**
+	 * Register a host-owned handler for an extension event type.
+	 *
+	 * Host handlers belong to the mode controller (not an extension): they are
+	 * dispatched through the same timeout and error-isolation machinery as
+	 * extension handlers but receive only the event (no `ExtensionContext`).
+	 * `hasHandlers` accounts for them, so hosts can observe events no extension
+	 * subscribes to — e.g. RPC mode serializing approval events onto its wire.
+	 *
+	 * Returns a disposer that removes the handler.
+	 */
+	registerHostHandler<TEvent extends { type: string }>(
+		eventType: TEvent["type"],
+		handler: (event: TEvent) => void | Promise<void>,
+	): () => void {
+		let handlers = this.#hostHandlers.get(eventType);
+		if (!handlers) {
+			handlers = [];
+			this.#hostHandlers.set(eventType, handlers);
+		}
+		const wrapped: HandlerFn = (event: unknown) => Promise.resolve(handler(event as TEvent));
+		handlers.push(wrapped);
+		return () => {
+			const index = handlers.indexOf(wrapped);
+			if (index !== -1) handlers.splice(index, 1);
+		};
+	}
+
 	hasHandlers(eventType: string): boolean {
 		for (const ext of this.extensions) {
 			const handlers = ext.handlers.get(eventType);
@@ -1082,7 +1126,8 @@ export class ExtensionRunner {
 				return true;
 			}
 		}
-		return false;
+		const hostHandlers = this.#hostHandlers.get(eventType);
+		return hostHandlers !== undefined && hostHandlers.length > 0;
 	}
 
 	getMessageRenderer(customType: string): MessageRenderer | undefined {
@@ -1252,7 +1297,7 @@ export class ExtensionRunner {
 		handler: (event: TEvent, ctx: ExtensionContext) => Promise<TResult | undefined> | TResult | undefined,
 		event: TEvent,
 		ctx: ExtensionContext,
-		ext: Extension,
+		ext: Pick<Extension, "path">,
 		timeoutMs: number,
 		onFailure?: (kind: "timeout" | "error", message: string) => TResult,
 		outerSignal?: AbortSignal,
@@ -1333,6 +1378,19 @@ export class ExtensionRunner {
 		return handlerResult as TResult | undefined;
 	}
 
+	/**
+	 * Dispatch host-registered handlers (see {@link registerHostHandler}) for an event
+	 * through the same timeout/error isolation as extension handlers. Returns without
+	 * doing anything when no host handler is registered for `event.type`.
+	 */
+	async #dispatchHostHandlers<TEvent extends RunnerEmitEvent>(event: TEvent, ctx: ExtensionContext): Promise<void> {
+		const handlers = this.#hostHandlers.get(event.type);
+		if (!handlers || handlers.length === 0) return;
+		for (const handler of handlers) {
+			await this.#runHandlerWithTimeout(handler, event, ctx, HOST_EXTENSION, handlerTimeoutForEvent(event.type));
+		}
+	}
+
 	async emit<TEvent extends RunnerEmitEvent>(event: TEvent): Promise<RunnerEmitResult<TEvent>> {
 		// Defer the per-event context allocation (and the Promise.race/Bun.sleep
 		// timeout machinery) to the first matching handler. Streaming sessions emit
@@ -1350,6 +1408,12 @@ export class ExtensionRunner {
 				ctx ??= this.createContext();
 				for (const handler of handlers) {
 					promises.push(this.#runHandlerWithTimeout(handler, event, ctx, ext, timeoutMs));
+				}
+			}
+			if (this.#hostHandlers.get(event.type)?.length) {
+				ctx ??= this.createContext();
+				for (const handler of this.#hostHandlers.get(event.type)!) {
+					promises.push(this.#runHandlerWithTimeout(handler, event, ctx, HOST_EXTENSION, timeoutMs));
 				}
 			}
 			if (promises.length > 0) await Promise.all(promises);
@@ -1391,6 +1455,11 @@ export class ExtensionRunner {
 					}
 				}
 			}
+		}
+
+		if (this.#hostHandlers.get(event.type)?.length) {
+			ctx ??= this.createContext();
+			await this.#dispatchHostHandlers(event, ctx);
 		}
 
 		return result as RunnerEmitResult<TEvent>;

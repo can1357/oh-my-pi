@@ -313,11 +313,15 @@ function refuseByWritePolicy(options: CursorExecBridgeOptions, toolName: string,
 		{ path: pathArg },
 		approvalMode,
 		(settings?.get("tools.approval") ?? {}) as Record<string, unknown>,
+		settings?.get("tools.approvalRules"),
 	);
 	if (approval.policy === "allow") return null;
-	return approval.policy === "deny"
-		? `Tool "${toolName}" is blocked by user policy.`
-		: `Tool "${toolName}" requires approval, which this channel cannot request.`;
+	if (approval.policy === "deny") {
+		return approval.source === "rule"
+			? `Tool "${toolName}" is blocked by an approval rule.`
+			: `Tool "${toolName}" is blocked by user policy.`;
+	}
+	return `Tool "${toolName}" requires approval, which this channel cannot request.`;
 }
 
 async function executeDelete(options: CursorExecBridgeOptions, pathArg: string, toolCallId: string) {
@@ -977,6 +981,7 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 			preferReplace ? normalizeCursorReplaceArgs(args) : args,
 			approvalMode,
 			(settings?.get("tools.approval") ?? {}) as Record<string, unknown>,
+			settings?.get("tools.approvalRules"),
 		);
 		return approval.policy === "allow";
 	}

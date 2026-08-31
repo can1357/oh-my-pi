@@ -3684,7 +3684,10 @@ export class AgentSession {
 		// the wrapper still enforces the mode-accurate gate before execution.
 		const userPolicies = (this.settings.get("tools.approval") ?? {}) as Record<string, unknown>;
 		const approvalArgs = computer ? { actions: computer.actions } : ctx.args;
-		if (resolveApproval(ctx.tool, approvalArgs, "yolo", userPolicies).policy === "deny") {
+		if (
+			resolveApproval(ctx.tool, approvalArgs, "yolo", userPolicies, this.settings.get("tools.approvalRules"))
+				.policy === "deny"
+		) {
 			return undefined;
 		}
 		const eventArgs = computer
