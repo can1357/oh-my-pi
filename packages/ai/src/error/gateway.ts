@@ -1,4 +1,4 @@
-import { isUsageLimit, matchesOverflowText } from "./flags";
+import { isClinePassSurfaceGateMessage, isUsageLimit, matchesOverflowText } from "./flags";
 
 /** Who owns a classified gateway failure. */
 export type GatewayErrorOwner =
@@ -204,6 +204,9 @@ function classifyOwnerDisposition(
 	}
 
 	if (status === 401 || status === 403 || type === "authentication_error") {
+		if (isClinePassSurfaceGateMessage(message)) {
+			return { owner: "policy", disposition: "policy_terminal" };
+		}
 		if (REVOKED_PATTERN.test(message)) {
 			return { owner: "credential", disposition: "credential_permanent" };
 		}
