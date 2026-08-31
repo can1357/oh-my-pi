@@ -27,8 +27,8 @@ const BIZ_BASE = env("ZAI_BIZ_BASE") ?? "https://api.z.ai";
 const BUSINESS_LOGIN_URL = env("ZAI_BUSINESS_LOGIN_URL") ?? "https://api.z.ai/api/auth/z/login";
 /** OMP's own key name so sign-in never mutates ZCode's `zcode-api-key`. */
 const KEY_NAME = "oh-my-pi";
-const CALLBACK_PORT = 54548;
-const CALLBACK_PATH = "/callback";
+/** Registered ZCode OAuth redirect; the custom scheme cannot reach a loopback listener. */
+const REDIRECT_URI = "zcode://zai-auth/callback";
 /** Durable minted key never expires; matches the perplexity NEVER_EXPIRES sentinel. */
 const NEVER_EXPIRES = 8.64e15;
 
@@ -218,9 +218,9 @@ export class ZaiOAuthFlow extends OAuthCallbackFlow {
 
 	constructor(ctrl: OAuthController) {
 		super(ctrl, {
-			preferredPort: CALLBACK_PORT,
-			callbackPath: CALLBACK_PATH,
-			allowPortFallback: false,
+			preferredPort: 0,
+			redirectUri: REDIRECT_URI,
+			manualInputOnly: true,
 		});
 		this.#fetch = ctrl.fetch ?? fetch;
 	}
@@ -236,7 +236,7 @@ export class ZaiOAuthFlow extends OAuthCallbackFlow {
 		return {
 			url: `${AUTHORIZE_URL}?${authParams.toString()}`,
 			instructions:
-				"Complete Z.ai login in your browser. If the browser cannot reach this machine, paste the final redirect URL or authorization code when prompted.",
+				"Complete Z.ai login in your browser. Copy the full final zcode:// callback URL or authorization code and paste it into OMP.",
 		};
 	}
 

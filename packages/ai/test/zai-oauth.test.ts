@@ -8,7 +8,7 @@ const TOKEN_URL = "https://zcode.z.ai/api/v1/oauth/token";
 const BUSINESS_LOGIN_URL = "https://api.z.ai/api/auth/z/login";
 const BIZ_BASE = "https://api.z.ai";
 const KEYS_URL = `${BIZ_BASE}/api/biz/v1/organization/org-1/projects/proj-1/api_keys`;
-const REDIRECT_URI = "http://localhost:54548/callback";
+const REDIRECT_URI = "zcode://zai-auth/callback";
 
 interface RecordedRequest {
 	url: string;
@@ -117,22 +117,49 @@ describe("zai oauth flow", () => {
 		expect(authUrl.searchParams.get("code_challenge_method")).toBeNull();
 	});
 
-	it("rejects an occupied fixed callback port before opening the browser", async () => {
-		const serveSpy = vi.spyOn(Bun, "serve").mockImplementation(() => {
-			throw Object.assign(new Error("EADDRINUSE"), { code: "EADDRINUSE" });
+	it("completes login from a pasted zcode:// callback using the registered redirect without binding Bun.serve", async () => {
+		const serveSpy = vi.spyOn(Bun, "serve");
+		const { fetchMock, requests } = makeBizFetch();
+		let capturedAuthUrl: string | undefined;
+		const flow = new ZaiOAuthFlow({
+			fetch: fetchMock as unknown as typeof fetch,
+			onAuth: info => {
+				capturedAuthUrl = info.url;
+			},
+			onManualCodeInput: async () => {
+				if (!capturedAuthUrl) {
+					throw new Error("onAuth did not capture the authorization URL");
+				}
+				const state = new URL(capturedAuthUrl).searchParams.get("state");
+				if (!state) {
+					throw new Error("authorization URL missing generated state");
+				}
+				return `${REDIRECT_URI}?code=auth-code&state=${encodeURIComponent(state)}`;
+			},
 		});
-		const onAuth = vi.fn();
-		const flow = new ZaiOAuthFlow({ onAuth });
 
-		const error = await flow.login().catch((caught: unknown) => caught);
+		const creds = await flow.login();
 
-		expect(error).toBeInstanceOf(AIError.ConfigurationError);
-		if (!(error instanceof AIError.ConfigurationError)) throw error;
-		expect(error.message).toContain(
-			"OAuth callback port 54548 is in use. The OAuth provider validates redirect URIs",
-		);
-		expect(onAuth).not.toHaveBeenCalled();
-		expect(serveSpy.mock.calls.every(([options]) => options.port === 54548)).toBe(true);
+		expect(serveSpy).not.toHaveBeenCalled();
+		expect(capturedAuthUrl).toBeDefined();
+		const authUrl = new URL(capturedAuthUrl ?? "");
+		const generatedState = authUrl.searchParams.get("state");
+		expect(generatedState).toBeTruthy();
+		expect(authUrl.origin + authUrl.pathname).toBe(AUTHORIZE_URL);
+		expect(authUrl.searchParams.get("client_id")).toBe(CLIENT_ID);
+		expect(authUrl.searchParams.get("redirect_uri")).toBe(REDIRECT_URI);
+
+		expect(creds.access).toBe("created-key.real-secret");
+		expect(creds.refresh).toBe("");
+		expect(creds.expires).toBe(8.64e15);
+
+		expect(requests[0]?.url).toBe(TOKEN_URL);
+		expect(requests[0]?.body).toEqual({
+			provider: "zai",
+			code: "auth-code",
+			redirect_uri: REDIRECT_URI,
+			state: generatedState,
+		});
 	});
 
 	it("exchanges the code, does business-login, then mints an id.secret key (create path)", async () => {
