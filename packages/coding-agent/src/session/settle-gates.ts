@@ -1,3 +1,4 @@
+import * as fs from "node:fs";
 import * as path from "node:path";
 import { extractLeadingCdTarget, hasTopLevelShellBackground, hasTopLevelStatusMaskingOperator } from "../tools/shell-tokenize";
 
@@ -66,6 +67,8 @@ export function isTautologicalParentVerifyCommand(command: string): boolean {
 	// Multiline scripts (`bun test\ntrue`) report the last statement's status, so a
 	// trailing `true`/`pwd` masks a failed check. Reject any newline-separated chain.
 	if (/\r?\n/.test(trimmed)) return true;
+	// Bash `! cmd` inverts the exit status — success means the check failed.
+	if (/^!/.test(trimmed)) return true;
 	// Bash normalizes leading `cd <path> &&|; …` into cwd; strip those wrappers so
 	// `cd packages/foo && pwd` classifies as `pwd`, not as a real check.
 	for (;;) {
@@ -122,7 +125,8 @@ export function isTrivialParentVerifyEvalCode(code: string | undefined): boolean
 /**
  * Parent bash verify must run inside the tree that received the merge
  * (session cwd, or optionally the repo root). `/tmp` and other outside paths
- * must not clear the unverified-merge latch.
+ * must not clear the unverified-merge latch. Symlink cwd values are compared
+ * after realpath so `/repo/external -> /tmp/project` cannot pass as in-tree.
  */
 export function isParentVerifyCwdInMergedTree(
 	bashCwd: string | undefined,
@@ -130,12 +134,34 @@ export function isParentVerifyCwdInMergedTree(
 	repoRoot?: string,
 ): boolean {
 	if (bashCwd === undefined || bashCwd.trim() === "") return true;
-	const resolvedBash = path.resolve(bashCwd);
-	const roots = [path.resolve(sessionCwd)];
+	const resolvedBash = realpathOrResolve(bashCwd);
+	const roots = [realpathOrResolve(sessionCwd)];
 	if (repoRoot !== undefined && repoRoot.trim() !== "") {
-		roots.push(path.resolve(repoRoot));
+		roots.push(realpathOrResolve(repoRoot));
 	}
 	return roots.some(root => resolvedBash === root || resolvedBash.startsWith(`${root}${path.sep}`));
+}
+
+function realpathOrResolve(target: string): string {
+	const absolute = path.resolve(target);
+	try {
+		return fs.realpathSync.native(absolute);
+	} catch {
+		// Path may not exist yet (verify cwd pointing at a to-be-created subdir).
+		// Realpath the deepest existing ancestor so /tmp vs /private/tmp matches.
+		let dir = path.dirname(absolute);
+		const parts: string[] = [path.basename(absolute)];
+		for (;;) {
+			try {
+				return path.join(fs.realpathSync.native(dir), ...parts.reverse());
+			} catch {
+				const parent = path.dirname(dir);
+				if (parent === dir) return absolute;
+				parts.push(path.basename(dir));
+				dir = parent;
+			}
+		}
+	}
 }
 
 /**

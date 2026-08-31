@@ -364,7 +364,8 @@ export function joinCdChainPath(base: string | undefined, next: string): string 
 
 /**
  * True when the command contains a top-level shell background operator (`&`
- * that is not part of `&&`). Sync bash success then races the backgrounded work.
+ * that is not part of `&&` and not part of redirection `>&` / `<&` / `&>`).
+ * Sync bash success then races the backgrounded work.
  */
 export function hasTopLevelShellBackground(command: string): boolean {
 	let inSingle = false;
@@ -397,6 +398,13 @@ export function hasTopLevelShellBackground(command: string): boolean {
 		}
 		if (ch === "&") {
 			if (command[i + 1] === "&") {
+				i++;
+				continue;
+			}
+			// Redirection: `2>&1`, `>&2`, `<&0`, `&>file`, `&>>file`.
+			const prev = i > 0 ? command[i - 1] : "";
+			if (prev === ">" || prev === "<") continue;
+			if (command[i + 1] === ">") {
 				i++;
 				continue;
 			}

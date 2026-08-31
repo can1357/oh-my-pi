@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Parent-verify gating rejects status-negated (`! cmd`) and newline-masked commands, ignores redirection ampersands (`2>&1` / `&>`), and realpath-compares verifier cwd so symlink escapes cannot clear the merge latch.
+
 ### Added
 
 - Added provider-reported credits and concrete routed-model counts to `/session` statistics ([#8590](https://github.com/can1357/oh-my-pi/pull/8590) by [@will-bogusz](https://github.com/will-bogusz)).

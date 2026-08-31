@@ -1,4 +1,7 @@
 import { describe, expect, it } from "bun:test";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import {
 	annotateUnverifiedMergeSummary,
 	isolatedApplyShouldLatch,
@@ -116,6 +119,17 @@ describe("isTautologicalParentVerifyCommand", () => {
 		expect(isTautologicalParentVerifyCommand("bun test && true")).toBe(false);
 	});
 
+	it("treats redirection ampersands as status-preserving verification", () => {
+		expect(isTautologicalParentVerifyCommand("bun test 2>&1")).toBe(false);
+		expect(isTautologicalParentVerifyCommand("bun test &>/tmp/log")).toBe(false);
+		expect(isTautologicalParentVerifyCommand("bun test <&0")).toBe(false);
+	});
+
+	it("rejects status-negated verification as non-evidence", () => {
+		expect(isTautologicalParentVerifyCommand("! bun test")).toBe(true);
+		expect(isTautologicalParentVerifyCommand("!bun test")).toBe(true);
+	});
+
 	it("rejects status-masking shell chains as non-evidence", () => {
 		expect(isTautologicalParentVerifyCommand("bun test || true")).toBe(true);
 		expect(isTautologicalParentVerifyCommand("bun test; true")).toBe(true);
@@ -157,5 +171,19 @@ describe("isParentVerifyCwdInMergedTree", () => {
 		expect(isParentVerifyCwdInMergedTree("/repo/.git", "/cwd", "/repo")).toBe(true);
 		expect(isParentVerifyCwdInMergedTree("/tmp", "/repo")).toBe(false);
 		expect(isParentVerifyCwdInMergedTree("/repo-other", "/repo")).toBe(false);
+	});
+
+	it("rejects symlink cwd that resolves outside the merged tree", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "omp-verify-cwd-"));
+		const outside = fs.mkdtempSync(path.join(os.tmpdir(), "omp-verify-out-"));
+		const link = path.join(root, "external");
+		try {
+			fs.symlinkSync(outside, link);
+			expect(isParentVerifyCwdInMergedTree(link, root)).toBe(false);
+			expect(isParentVerifyCwdInMergedTree(path.join(root, "src"), root)).toBe(true);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+			fs.rmSync(outside, { recursive: true, force: true });
+		}
 	});
 });
