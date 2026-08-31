@@ -14,7 +14,7 @@ import {
 import { tinyWorkerEnv } from "../tiny/title-client";
 import { safeSend } from "../utils/ipc";
 import type { SttProgressEvent, SttWorkerInbound, SttWorkerOutbound } from "./asr-protocol";
-import type { SttModelKey } from "./models";
+import type { SttModelKey } from "./local/models";
 
 type PendingRequest =
 	| { kind: "transcribe"; modelKey: SttModelKey; resolve: (text: string) => void; reject: (error: Error) => void }

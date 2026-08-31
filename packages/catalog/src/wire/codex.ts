@@ -38,11 +38,16 @@ export const OPENAI_HEADER_VALUES = {
 	BETA_RESPONSES_WEBSOCKETS_V2: "responses_websockets=2026-02-06",
 	REMOTE_COMPACTION_V2: "remote_compaction_v2",
 	ORIGINATOR_CODEX: "pi",
+	CODEX_DESKTOP: {
+		NAME: "Codex Desktop",
+		USER_AGENT: `Codex Desktop/${CODEX_CLIENT_VERSION}`,
+	},
 } as const;
 
 export const URL_PATHS = {
 	RESPONSES: "/responses",
 	CODEX_RESPONSES: "/codex/responses",
+	TRANSCRIBE: "/transcribe",
 } as const;
 
 export const JWT_CLAIM_PATH = "https://api.openai.com/auth" as const;

@@ -32,6 +32,7 @@
 - Standardized model display names for greater consistency.
 - Improved model compatibility classification and variant selection using structured model identities, providing more reliable detection of model families, revisions, reasoning variants, and provider-specific capabilities.
 
+- Added shared Codex wire constants and residency-header handling for ChatGPT OAuth request integrations ([#10374](https://github.com/can1357/oh-my-pi/pull/10374) by [@kml93](https://github.com/kml93)).
 ### Fixed
 
 - Fixed compatibility detection for vendor-prefixed GLM models on Mistral and Cerebras, restoring the appropriate tokenizer and reasoning-history behavior.

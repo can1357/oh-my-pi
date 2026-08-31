@@ -3,7 +3,7 @@ import * as path from "node:path";
 import { getTinyModelsCacheDir } from "@oh-my-pi/pi-utils";
 import { sttClient } from "./asr-client";
 import type { SttProgressStatus } from "./asr-protocol";
-import { resolveSttModelSpec } from "./models";
+import { resolveSttModelSpec } from "./local/models";
 
 export interface DownloadProgress {
 	stage: string;
