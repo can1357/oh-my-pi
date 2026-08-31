@@ -7147,6 +7147,30 @@ export class AuthStorage {
 	}
 
 	/**
+	 * Like {@link disableCredentialById}, but awaits a remote broker disable when
+	 * the store exposes `deleteAuthCredentialRemote` so callers can report failure
+	 * instead of returning success for a fire-and-forget sync delete.
+	 */
+	async disableCredentialByIdAsync(id: number, disabledCause: string): Promise<boolean> {
+		for (const [provider, entries] of this.#data) {
+			const index = entries.findIndex(entry => entry.id === id);
+			if (index === -1) continue;
+			if (this.#store.deleteAuthCredentialRemote) {
+				const deleted = await this.#store.deleteAuthCredentialRemote(id, disabledCause);
+				if (!deleted) return false;
+			} else {
+				this.#store.deleteAuthCredential(id, disabledCause);
+			}
+			const next = entries.filter((_value, idx) => idx !== index);
+			this.#setStoredCredentials(provider, next);
+			this.#resetProviderAssignments(provider);
+			this.#emitCredentialDisabled({ provider, disabledCause });
+			return true;
+		}
+		return false;
+	}
+
+	/**
 	 * Upsert a credential into the underlying store, refresh the in-memory
 	 * snapshot, and return the redacted snapshot entries for the provider.
 	 *

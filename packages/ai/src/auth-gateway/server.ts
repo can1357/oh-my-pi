@@ -1995,8 +1995,9 @@ function handleCredentialsList(storage: AuthStorage): Response {
 	return json(200, { object: "list", data });
 }
 
-function handleCredentialDisable(storage: AuthStorage, id: string): Response {
-	if (!storage.disableCredentialById(Number(id), "gateway")) {
+async function handleCredentialDisable(storage: AuthStorage, id: string): Promise<Response> {
+	const ok = await storage.disableCredentialByIdAsync(Number(id), "gateway");
+	if (!ok) {
 		return json(404, { error: `No credential with id=${id}` });
 	}
 	return json(200, { ok: true });
@@ -2078,7 +2079,7 @@ export function startAuthGateway(opts: AuthGatewayBootOptions): AuthGatewayServe
 				if (req.method === "POST" && credentialAction) {
 					const credentialId = credentialAction[1]!;
 					if (credentialAction[2] === "disable") {
-						return withCors(handleCredentialDisable(boot.storage, credentialId), req);
+						return withCors(await handleCredentialDisable(boot.storage, credentialId), req);
 					}
 					return withCors(await handleCredentialPin(boot.storage, credentialId, req), req);
 				}
