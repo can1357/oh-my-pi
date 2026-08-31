@@ -227,6 +227,7 @@ export interface SessionAdvisorsOptions {
 export interface AdvisorMessageDeliveryOptions {
 	triggerTurn?: boolean;
 	deliverAs?: "steer" | "followUp" | "nextTurn";
+	immediateInterrupt?: boolean;
 	queueChipText?: string;
 	acceptTerminalEmptyStop?: boolean;
 }
@@ -621,9 +622,14 @@ export class SessionAdvisors {
 		this.#deferredAdviceDrainScheduled = true;
 		queueMicrotask(() => {
 			this.#deferredAdviceDrainScheduled = false;
-			if (this.#host.agent.state.isStreaming || this.#host.abortInProgress()) return;
-			for (const card of this.drainDeferredAdvice()) this.#host.preserveAdvisorCard(card);
+			this.preserveDeferredAdviceNow();
 		});
+	}
+
+	/** Testable settle transition: preserve deferred notes once the primary loop is idle. */
+	preserveDeferredAdviceNow(): void {
+		if (this.#host.agent.state.isStreaming || this.#host.abortInProgress()) return;
+		for (const card of this.drainDeferredAdvice()) this.#host.preserveAdvisorCard(card);
 	}
 
 	// Advisor runtime lifecycle
@@ -1317,7 +1323,11 @@ export class SessionAdvisors {
 		void this.#host
 			.sendCustomMessage(
 				{ customType: "advisor", content, display: true, attribution: "agent", details },
-				{ deliverAs: "steer", triggerTurn: true },
+				{
+					deliverAs: "steer",
+					triggerTurn: true,
+					immediateInterrupt: this.#host.settings.get("advisor.interruptMode") === "immediate",
+				},
 			)
 			.catch(err => logger.debug("advisor delivery failed", { err: String(err) }));
 	}

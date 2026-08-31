@@ -39,6 +39,7 @@ import {
 	type BeforeToolCallResult,
 	EventLoopKeepalive,
 	resolveTelemetry,
+	STEERING_MESSAGE_IMMEDIATE,
 	type StreamFn,
 	TERMINAL_TOOL_RESULT_ABORT_REASON,
 	type ThinkingLevel,
@@ -6791,6 +6792,7 @@ export class AgentSession {
 			deliverAs?: "steer" | "followUp" | "nextTurn";
 			queueChipText?: string;
 			acceptTerminalEmptyStop?: boolean;
+			immediateInterrupt?: boolean;
 		},
 	): Promise<boolean> {
 		const normalizedPayload = normalizeCustomMessagePayload<T>(message);
@@ -6813,6 +6815,9 @@ export class AgentSession {
 			timestamp: Date.now(),
 		};
 		const normalizedAppMessage = await this.#normalizeAgentMessageImages(appMessage);
+		if (options?.immediateInterrupt) {
+			Object.defineProperty(normalizedAppMessage, STEERING_MESSAGE_IMMEDIATE, { value: true });
+		}
 		if (this.isStreaming) {
 			if (options?.deliverAs === "nextTurn") {
 				this.#queueHiddenNextTurnMessage(normalizedAppMessage, options?.triggerTurn ?? false);

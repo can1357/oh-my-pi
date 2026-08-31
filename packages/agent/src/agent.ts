@@ -54,7 +54,7 @@ import type {
 	ToolCallContext,
 	ToolChoiceDirective,
 } from "./types";
-import { isSoftToolRequirement } from "./types";
+import { isSoftToolRequirement, STEERING_MESSAGE_IMMEDIATE } from "./types";
 import { EventLoopKeepalive } from "./utils/yield";
 
 /**
@@ -1497,20 +1497,28 @@ export class Agent {
 				}
 				const messageCount = this.#steeringMode === "one-at-a-time" ? 1 : this.#steeringQueue.length;
 				let hasAgentSteering = false;
+				let hasImmediateSteering = false;
 				for (let i = 0; i < messageCount; i++) {
 					const message = this.#steeringQueue[i];
+					if ((message as AgentMessage & { [STEERING_MESSAGE_IMMEDIATE]?: boolean })[STEERING_MESSAGE_IMMEDIATE]) {
+						hasImmediateSteering = true;
+					}
 					const role = "role" in message ? message.role : undefined;
 					const attribution = "attribution" in message ? message.attribution : undefined;
 					if (attribution === "user") {
-						return { queued: true, source: "user" };
+						return { queued: true, source: "user", immediate: hasImmediateSteering };
 					}
 					if (role !== "user") continue;
 					if (attribution !== "agent") {
-						return { queued: true, source: "user" };
+						return { queued: true, source: "user", immediate: hasImmediateSteering };
 					}
 					hasAgentSteering = true;
 				}
-				return { queued: true, source: hasAgentSteering ? "agent" : "system" };
+				return {
+					queued: true,
+					source: hasAgentSteering ? "agent" : "system",
+					immediate: hasImmediateSteering,
+				};
 			},
 			waitForSteeringMessages: signal => this.#waitForSteeringMessages(signal),
 			hasIrcInterrupts: this.hasIrcInterrupts,

@@ -35,6 +35,8 @@ export type StreamFn = (
 export const ASIDE_MESSAGE_COMMIT = Symbol("aside-message-commit");
 /** Called when an aside was drained but the agent loop ended before inserting it. */
 export const ASIDE_MESSAGE_DISCARD = Symbol("aside-message-discard");
+/** Forces one queued steering message to interrupt even when the global mode waits. */
+export const STEERING_MESSAGE_IMMEDIATE = Symbol("steering-message-immediate");
 
 export type CommittableAsideMessage = AgentMessage & {
 	[ASIDE_MESSAGE_COMMIT]?: () => void;
@@ -139,6 +141,8 @@ export interface SteeringQueueState {
 	queued: boolean;
 	/** Best-effort origin used only to word synthetic skipped-tool results. */
 	source?: SteeringInterruptSource;
+	/** True when a marked message overrides global wait mode for this batch. */
+	immediate?: boolean;
 }
 
 /**
