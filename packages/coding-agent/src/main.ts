@@ -2229,6 +2229,10 @@ export async function runRootCommand(
 		sessionOptions.authStorage = authStorage;
 		sessionOptions.modelRegistry = modelRegistry;
 		sessionOptions.hasUI = isInteractive || mode === "rpc-ui";
+		// Main-session modes that offer live persona switching (`/agent`,
+		// `/switch-agent`) load capabilities under `--tools` too; the sdk keeps
+		// the active tool set restricted regardless.
+		sessionOptions.personaSwitchable = isInteractive || mode === "rpc-ui" || mode === "acp";
 		sessionOptions.settings = settingsInstance;
 
 		// OTEL: register global OTLP exporters when an endpoint is configured via

@@ -652,6 +652,16 @@ export interface CreateAgentSessionOptions {
 	 */
 	interactivePrompts?: boolean;
 	/**
+	 * The session is a MAIN session whose mode offers live persona switching
+	 * (`/agent`, `/switch-agent`): interactive TUI, rpc-ui, and ACP hosts.
+	 * Such restricted (`--tools`/`--no-tools`) sessions still LOAD custom
+	 * commands and extensions at creation so a later `/agent <name>` can
+	 * register persona-granted extension tools and resolve extension models;
+	 * the ACTIVE tool set stays restricted either way. Subagents and one-shot
+	 * sessions default to false and skip the module evaluation.
+	 */
+	personaSwitchable?: boolean;
+	/**
 	 * Defer `confirm` reserve-policy fallback until AgentSession prompt-time UI is configured.
 	 * ACP uses this while capabilities are negotiated without enabling UI-only tools.
 	 */
@@ -1433,8 +1443,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		? Promise.resolve(options.slashCommands)
 		: logger.time("discoverSlashCommands", discoverSlashCommands, cwd);
 	slashCommandsPromise.catch(() => {});
+	const canLiveSwitchPersona = options.personaSwitchable === true || options.personaName !== undefined;
 	const customCommandsPromise =
-		options.disableExtensionDiscovery || (options.restrictToolNames === true && options.personaName === undefined)
+		options.disableExtensionDiscovery || (options.restrictToolNames === true && !canLiveSwitchPersona)
 			? Promise.resolve<CustomCommandsLoadResult>({ commands: [], errors: [] })
 			: logger.time("discoverCustomCommands", loadCustomCommandsInternal, { cwd, agentDir });
 	customCommandsPromise.catch(() => {});
@@ -2268,7 +2279,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// the flag and pre-resolved the result already reflects that choice.
 		let extensionPaths: string[];
 		let extensionsResult: LoadExtensionsResult;
-		if (restrictToolNames && options.personaName === undefined) {
+		// Subagents and one-shot restricted sessions skip module evaluation; a
+		// MAIN session that can live-switch personas (`personaSwitchable`)
+		// loads extensions and custom commands even when its launch grant is
+		// restricted, so a later `/agent <name>` can register persona-granted
+		// extension tools and resolve extension models. The ACTIVE set stays
+		// restricted either way (registration gates below keep `personaName`).
+		if (restrictToolNames && !canLiveSwitchPersona) {
 			// Allocate a session runtime without evaluating caller-provided extension
 			// instances, paths, or factories.
 			extensionPaths = [];
@@ -2909,7 +2926,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// resolution and tool construction, so command module I/O stays off the
 		// session-creation critical path.
 		const customCommandsResult = await customCommandsPromise;
-		if (!options.disableExtensionDiscovery && (!restrictToolNames || options.personaName !== undefined)) {
+		if (!options.disableExtensionDiscovery && (!restrictToolNames || canLiveSwitchPersona)) {
 			for (const { path, error } of customCommandsResult.errors) {
 				logger.error("Failed to load custom command", { path, error });
 			}

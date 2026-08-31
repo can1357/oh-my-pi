@@ -131,6 +131,7 @@ import { formatDuration } from "../slash-commands/helpers/format";
 import { STTController, type SttState } from "../stt";
 import { resolveCliEntryCmd } from "../subprocess/worker-client";
 import { discoverTitleSystemPromptFile, resolvePromptInput } from "../system-prompt";
+import { refreshAgentDiscovery } from "../task";
 import { mainSessionTools, spawnsToString } from "../task/agent-tools";
 import { discoverAgents, getAgent } from "../task/discovery";
 import { labelEchoesHandle } from "../task/label";
@@ -1621,6 +1622,11 @@ export class InteractiveMode implements InteractiveModeContext {
 			resetCapabilities();
 			await this.refreshSkillState();
 			await this.refreshSlashCommandState(newCwd);
+			// Re-scan the new cwd's agent definitions and publish the roster to
+			// sibling task tools: without this an in-process session switch into a
+			// cwd with no published discovery snapshot leaves the TaskTool
+			// description pinned to the creation-time roster.
+			await refreshAgentDiscovery(newCwd, this.session.effectiveExtensionRoots);
 		} catch (error) {
 			// Undo the whole transition: the process cwd, Settings scope, and
 			// cwd-derived caches (provider globals, plugin roots, capabilities,
@@ -1636,6 +1642,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				clearClaudePluginRootsCache();
 				await this.refreshTitleSystemPrompt(previousCwd);
 				resetCapabilities();
+				await refreshAgentDiscovery(previousCwd, this.session.effectiveExtensionRoots);
 				await this.refreshSkillState();
 				await this.refreshSlashCommandState(previousCwd);
 			} catch (restoreError) {
@@ -1649,6 +1656,7 @@ export class InteractiveMode implements InteractiveModeContext {
 					clearClaudePluginRootsCache();
 					await this.refreshTitleSystemPrompt(actual);
 					resetCapabilities();
+					await refreshAgentDiscovery(actual, this.session.effectiveExtensionRoots);
 					await this.refreshSkillState();
 					await this.refreshSlashCommandState(actual);
 				} catch {}
