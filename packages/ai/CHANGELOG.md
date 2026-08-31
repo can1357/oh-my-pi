@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Fixed
+- Fixed API-key turn reservations releasing when credential-helper resolution fails, and renewing the hold as SSE chunks arrive so long streams outlive the idle TTL.
 
 - Fixed rejecting ambiguous cross-branch model reuse under a single fallback node.
 - Fixed pi-native virtual routes dispatching compiled.targets[0], suffix fallback edges per sibling, and a parse→wire Responses options contract test.

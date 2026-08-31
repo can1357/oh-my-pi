@@ -398,7 +398,8 @@ function releaseTurnOnStreamEnd(
 				controller.close();
 				return;
 			}
-			controller.enqueue(value);
+			storage.renewTurnReservation(requestId);
+				controller.enqueue(value);
 		},
 		cancel(reason) {
 			release();
