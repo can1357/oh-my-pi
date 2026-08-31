@@ -632,6 +632,117 @@ describe("AsyncJobManager model progress", () => {
 		expect(manager.getJob(jobId)?.completionLeftover).toBeUndefined();
 	}, 10_000);
 
+	test("single cancellation acknowledges and clears queued owner progress before abort", async () => {
+		vi.useFakeTimers();
+		const manager = new AsyncJobManager({});
+		const acknowledged: string[] = [];
+		const acknowledgedBeforeAbort: boolean[] = [];
+		const progress: string[] = [];
+		const completions: string[] = [];
+		manager.registerProgressSink("Main", {
+			deliver: (jobId, text) => {
+				progress.push(`${jobId}:${text}`);
+			},
+			acknowledge: jobId => {
+				const job = manager.getJob(jobId);
+				acknowledged.push(jobId);
+				acknowledgedBeforeAbort.push(job?.status === "running" && job.abortController.signal.aborted === false);
+			},
+		});
+		manager.registerDeliverySink("Main", (jobId, text) => {
+			completions.push(`${jobId}:${text}`);
+		});
+		const cancelled = heldJob(manager);
+		const unrelated = heldJob(manager);
+		const reportCancelled = await cancelled.report;
+		const reportUnrelated = await unrelated.report;
+		const cancelledPromise = manager.getJob(cancelled.jobId)?.promise;
+
+		reportCancelled("cancelled pending");
+		reportUnrelated("unrelated pending");
+		expect(manager.cancel(cancelled.jobId)).toBe(true);
+
+		expect(acknowledged).toEqual([cancelled.jobId]);
+		expect(acknowledgedBeforeAbort).toEqual([true]);
+		expect(manager.isDeliverySuppressed(cancelled.jobId)).toBe(true);
+		expect(manager.isDeliverySuppressed(unrelated.jobId)).toBe(false);
+		expect(manager.getJob(unrelated.jobId)?.status).toBe("running");
+		vi.advanceTimersByTime(200);
+		expect(progress).toEqual([`${unrelated.jobId}:unrelated pending`]);
+
+		cancelled.release();
+		await cancelledPromise;
+		expect(completions).toEqual([]);
+		expect(manager.isDeliverySuppressed(cancelled.jobId)).toBe(true);
+
+		unrelated.release();
+		await manager.waitForAll();
+	});
+
+	test("bulk cancellation acknowledges and clears only matching queued owner progress", async () => {
+		vi.useFakeTimers();
+		const manager = new AsyncJobManager({});
+		const acknowledged: string[] = [];
+		const acknowledgedBeforeAbort: boolean[] = [];
+		const mainProgress: string[] = [];
+		const otherProgress: string[] = [];
+		const mainCompletions: string[] = [];
+		manager.registerProgressSink("Main", {
+			deliver: (jobId, text) => {
+				mainProgress.push(`${jobId}:${text}`);
+			},
+			acknowledge: jobId => {
+				const job = manager.getJob(jobId);
+				acknowledged.push(jobId);
+				acknowledgedBeforeAbort.push(job?.status === "running" && job.abortController.signal.aborted === false);
+			},
+		});
+		manager.registerProgressSink("Other", {
+			deliver: (jobId, text) => {
+				otherProgress.push(`${jobId}:${text}`);
+			},
+			acknowledge: jobId => {
+				acknowledged.push(`other:${jobId}`);
+			},
+		});
+		manager.registerDeliverySink("Main", (jobId, text) => {
+			mainCompletions.push(`${jobId}:${text}`);
+		});
+		const first = heldJob(manager);
+		const second = heldJob(manager);
+		const unrelated = heldJob(manager, "Other");
+		const reportFirst = await first.report;
+		const reportSecond = await second.report;
+		const reportUnrelated = await unrelated.report;
+		const firstPromise = manager.getJob(first.jobId)?.promise;
+		const secondPromise = manager.getJob(second.jobId)?.promise;
+
+		reportFirst("first pending");
+		reportSecond("second pending");
+		reportUnrelated("other pending");
+		manager.cancelAll({ ownerId: "Main" });
+
+		expect(acknowledged).toEqual([first.jobId, second.jobId]);
+		expect(acknowledgedBeforeAbort).toEqual([true, true]);
+		expect(manager.isDeliverySuppressed(first.jobId)).toBe(true);
+		expect(manager.isDeliverySuppressed(second.jobId)).toBe(true);
+		expect(manager.isDeliverySuppressed(unrelated.jobId)).toBe(false);
+		expect(manager.getJob(unrelated.jobId)?.status).toBe("running");
+		vi.advanceTimersByTime(200);
+		expect(mainProgress).toEqual([]);
+		expect(otherProgress).toEqual([`${unrelated.jobId}:other pending`]);
+
+		first.release();
+		second.release();
+		await Promise.all([firstPromise, secondPromise]);
+		expect(mainCompletions).toEqual([]);
+		expect(manager.isDeliverySuppressed(first.jobId)).toBe(true);
+		expect(manager.isDeliverySuppressed(second.jobId)).toBe(true);
+
+		unrelated.release();
+		await manager.waitForAll();
+	});
+
 	test("cancellation wins while successful settlement drains final progress", async () => {
 		const manager = new AsyncJobManager({});
 		const progressStarted = Promise.withResolvers<void>();
