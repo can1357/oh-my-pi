@@ -201,7 +201,7 @@ export function holdSseUntilCommit(
 					controller.enqueue(chunk);
 					return;
 				}
-				gate.bufferPrelude(chunk);
+				const buffered = gate.bufferPrelude(chunk);
 				pending += decoder.decode(chunk, { stream: true });
 				let next = nextSseFrame(pending);
 				while (next) {
@@ -215,6 +215,7 @@ export function holdSseUntilCommit(
 							// Empty/metadata-only successful completions still need their held frames flushed.
 							committed = true;
 							for (const held of gate.takePrelude() ?? []) controller.enqueue(held);
+							if (!buffered) controller.enqueue(chunk);
 							return;
 						}
 						// Dead attempt: its held frames belong to it and are never
@@ -225,8 +226,18 @@ export function holdSseUntilCommit(
 					if (state === "committed") {
 						committed = true;
 						for (const held of gate.takePrelude() ?? []) controller.enqueue(held);
+						// Cap-crossing chunk was refused by bufferPrelude — still emit it.
+						if (!buffered) controller.enqueue(chunk);
 						return;
 					}
+				}
+				if (!buffered) {
+					// Cap crossed without a commit event in this chunk: force commit and
+					// keep the rejected chunk so the SSE stream is not corrupted.
+					gate.classifyAndObserve("response.output_item.added", chunk.byteLength);
+					committed = true;
+					for (const held of gate.takePrelude() ?? []) controller.enqueue(held);
+					controller.enqueue(chunk);
 				}
 			},
 			flush() {
