@@ -17,6 +17,7 @@ import {
 	deriveAdvisorTelemetry,
 	formatAdvisorBatchContent,
 	formatAdvisorContextPrompt,
+	formatPriorAdviceHistory,
 	isAdvisorInterruptImmuneTurnActive,
 	isAdvisorTranscriptName,
 	isInterruptingSeverity,
@@ -393,7 +394,7 @@ describe("advisor", () => {
 			const result = await tool.execute("tc-1", { note: "x", severity: "concern" });
 			expect(onAdvice).toHaveBeenCalledWith("x", "concern");
 			expect(result.details).toEqual({ note: "x", severity: "concern" });
-			expect(result.useless).toBe(true);
+			expect(result.useless).toBeUndefined();
 		});
 
 		it("suppresses duplicate advice notes from the same advisor session", async () => {
@@ -406,6 +407,8 @@ describe("advisor", () => {
 
 			expect(onAdvice).toHaveBeenCalledTimes(1);
 			expect(onAdvice).toHaveBeenCalledWith(note, "nit");
+			const duplicate = await tool.execute("tc-3", { note, severity: "nit" });
+			expect(duplicate.useless).toBe(true);
 		});
 
 		it("allows the same advice after delivered-note memory resets", async () => {
@@ -420,6 +423,36 @@ describe("advisor", () => {
 			expect(onAdvice).toHaveBeenCalledTimes(2);
 			expect(onAdvice).toHaveBeenNthCalledWith(1, note, "nit");
 			expect(onAdvice).toHaveBeenNthCalledWith(2, note, "nit");
+		});
+
+		it("exposes delivered advice as durable history and clears it only at conversation boundaries", async () => {
+			const tool = new AdviseTool(() => {});
+			await tool.execute("tc-1", { note: "Cover the retry boundary.", severity: "concern" });
+			await tool.execute("tc-2", { note: "Cover the retry boundary.", severity: "blocker" });
+
+			expect(tool.deliveredNotes()).toEqual([{ note: "Cover the retry boundary.", severity: "blocker" }]);
+			expect(formatPriorAdviceHistory(tool.deliveredNotes())).toContain(
+				'<advice severity="blocker">Cover the retry boundary.</advice>',
+			);
+
+			tool.resetDeliveredNotes();
+			expect(tool.deliveredNotes()).toEqual([]);
+			expect(formatPriorAdviceHistory(tool.deliveredNotes())).toBeUndefined();
+		});
+
+		it("bounds durable history and keeps a newly delivered escalation", async () => {
+			const tool = new AdviseTool(() => {});
+			await tool.execute("tc-original", { note: "Original issue.", severity: "nit" });
+			for (let i = 0; i < 32; i++) {
+				await tool.execute(`tc-${i}`, { note: `Distinct issue ${i}.`, severity: "nit" });
+			}
+			expect(tool.deliveredNotes()).toHaveLength(32);
+			expect(tool.deliveredNotes().some(({ note }) => note === "Original issue.")).toBe(false);
+
+			await tool.execute("tc-escalated", { note: "Distinct issue 0.", severity: "blocker" });
+
+			expect(tool.deliveredNotes()).toHaveLength(32);
+			expect(tool.deliveredNotes().at(-1)).toEqual({ note: "Distinct issue 0.", severity: "blocker" });
 		});
 
 		it("forwards escalations of an already-delivered note and suppresses downgrades", async () => {
@@ -2499,6 +2532,40 @@ describe("advisor", () => {
 			expect(promptText(promptInputs[1])).toContain("bbb");
 			expect(promptText(promptInputs[1])).not.toContain("aaa");
 			expect(resetCount).toBe(1);
+		});
+
+		it("reinjects delivered advice after private advisor context recovery", async () => {
+			const promptInputs: Array<string | AgentMessage[]> = [];
+			let resetCount = 0;
+			const agent: AdvisorAgent = {
+				prompt: async input => {
+					promptInputs.push(input);
+				},
+				abort: () => {},
+				reset: () => {
+					resetCount++;
+					agent.state.messages.length = 0;
+				},
+				state: { messages: [] },
+				appendContextMessage: message => {
+					agent.state.messages.push(message);
+				},
+			};
+			const messages: AgentMessage[] = [{ role: "user", content: "new evidence", timestamp: 1 } as AgentMessage];
+			const runtime = new AdvisorRuntime(agent, {
+				snapshotMessages: () => messages,
+				enqueueAdvice: () => {},
+				maintainContext: async () => true,
+				priorAdvice: () => '<prior-advice><advice severity="concern">Do not repeat this.</advice></prior-advice>',
+			});
+
+			runtime.onTurnEnd(messages);
+			await settleUntil(() => promptInputs.length === 1);
+
+			expect(resetCount).toBe(1);
+			expect(agent.state.messages[0]).toMatchObject({ role: "user" });
+			expect(promptText(agent.state.messages)).toContain("Do not repeat this.");
+			expect(promptText(promptInputs[0])).toContain("new evidence");
 		});
 
 		it("preserves updates queued while async maintenance resets the advisor context", async () => {

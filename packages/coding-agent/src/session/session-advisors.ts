@@ -53,6 +53,7 @@ import {
 	advisorTranscriptFilename,
 	buildAdvisorQuarantineSourceText,
 	formatAdvisorBatchContent,
+	formatPriorAdviceHistory,
 	getOrCreateAdvisorProviderSessionId,
 	isAdvisorInterruptImmuneTurnActive,
 	isInterruptingSeverity,
@@ -670,9 +671,9 @@ export class SessionAdvisors {
 		for (const a of this.#advisors) {
 			a.agentUnsubscribe?.();
 			a.agentUnsubscribe = undefined;
-			a.runtime.reset("conversation-boundary");
 			a.adviseTool.resetDeliveredNotes();
 			a.emissionGuard.reset();
+			a.runtime.reset("conversation-boundary");
 			this.#attachAdvisorRecorderFeed(a);
 		}
 		this.#advisorPrimaryTurnsCompleted = 0;
@@ -1019,6 +1020,10 @@ export class SessionAdvisors {
 					if (quarantined) throw new AdvisorOutputQuarantinedError(quarantined);
 				},
 				abort: reason => advisorAgent.abort(reason),
+				appendContextMessage: message => {
+					advisorAgent.state.messages.push(message);
+					appendOnlyContext.resetSyncCursor();
+				},
 				reset: () => {
 					advisorLoopGuard.reset();
 					advisorLoopGuardStopped = false;
@@ -1055,6 +1060,7 @@ export class SessionAdvisors {
 				snapshotMessages: () => this.#host.agent.state.messages,
 				enqueueAdvice: (note, severity) => this.#routeAdvice(advisorRef, note, severity),
 				maintainContext: (incoming, signal) => this.#maintainAdvisorContext(advisorRef, incoming, signal),
+				priorAdvice: () => formatPriorAdviceHistory(advisorRef.adviseTool.deliveredNotes()),
 				obfuscator: this.#host.obfuscator,
 				getModelIdentity: () => formatModelString(advisorRef.agent.state.model),
 				beginAdvisorUpdate: inProgress => {

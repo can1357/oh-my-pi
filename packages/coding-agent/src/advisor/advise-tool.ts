@@ -7,8 +7,9 @@ import type {
 	AgentToolResult,
 	AgentToolUpdateCallback,
 } from "@oh-my-pi/pi-agent-core";
-import { escapeXmlAttribute, escapeXmlText } from "@oh-my-pi/pi-utils";
+import { escapeXmlAttribute, escapeXmlText, prompt } from "@oh-my-pi/pi-utils";
 import adviseDescription from "../prompts/advisor/advise-tool.md" with { type: "text" };
+import priorAdviceTemplate from "../prompts/advisor/prior-advice.md" with { type: "text" };
 
 const adviseSchema = type({
 	note: type("string").describe(
@@ -159,6 +160,23 @@ export function deriveAdvisorTelemetry(
  */
 export const ADVISOR_DEFAULT_TOOL_NAMES: ReadonlySet<string> = new Set(["read", "grep", "glob"]);
 
+interface DeliveredAdvice {
+	note: string;
+	severity?: AdvisorSeverity;
+	rank: number;
+}
+const PRIOR_ADVICE_LIMIT = 32;
+
+/** Render the durable advice ledger injected after advisor-context resets. */
+export function formatPriorAdviceHistory(notes: readonly AdvisorNote[]): string | undefined {
+	if (notes.length === 0) return undefined;
+	return prompt
+		.render(priorAdviceTemplate, {
+			notes: notes.map(note => ({ note: escapeXmlText(note.note), severity: note.severity ?? "nit" })),
+		})
+		.trim();
+}
+
 function advisorNoteDedupeKey(note: string): string {
 	return note.trim().replace(/\s+/g, " ");
 }
@@ -177,17 +195,15 @@ export class AdviseTool implements AgentTool<typeof adviseSchema, AdviseDetails>
 	readonly description = adviseDescription;
 	readonly parameters = adviseSchema;
 	readonly intent = "omit" as const;
-	/** Highest delivered severity rank per normalized note. A new call passes
-	 *  through only when its rank strictly exceeds the recorded one (a real
-	 *  escalation: nit → concern → blocker), so an advisor cannot bypass dedupe
-	 *  by retagging the same text at a lower or equal severity. */
-	#deliveredNoteSeverities = new Map<string, number>();
+	/** Delivered advice is both the exact-text dedupe index and the durable
+	 *  ledger replayed after this advisor's private model context resets. */
+	#deliveredNotes = new Map<string, DeliveredAdvice>();
 	#inProgressUpdate = false;
 	/** Notes withheld while the primary was mid-turn, in arrival order. Flushed
 	 *  deterministically on the first `beginUpdate(false)` so delivery does not
 	 *  depend on the advisor model choosing to re-raise (it may not, since the
 	 *  tool previously returned "Recorded." for a note that was never routed).
-	 *  Cleared on `resetDeliveredNotes` alongside the delivered-rank map. */
+	 *  Cleared on `resetDeliveredNotes` alongside the durable ledger. */
 	#deferredNotes: { key: string; note: string; severity?: AdviseDetails["severity"] }[] = [];
 
 	constructor(private readonly onAdvice: (note: string, severity?: AdviseDetails["severity"]) => void) {}
@@ -211,9 +227,14 @@ export class AdviseTool implements AgentTool<typeof adviseSchema, AdviseDetails>
 		}
 	}
 
+	/** Advice already delivered in this conversation, in first-delivery order. */
+	deliveredNotes(): AdvisorNote[] {
+		return [...this.#deliveredNotes.values()].map(({ note, severity }) => ({ note, severity }));
+	}
+
 	/** Clear delivered-note memory when the advisor starts a fresh conversation. */
 	resetDeliveredNotes(): void {
-		this.#deliveredNoteSeverities.clear();
+		this.#deliveredNotes.clear();
 		this.#inProgressUpdate = false;
 		this.#deferredNotes = [];
 	}
@@ -253,7 +274,7 @@ export class AdviseTool implements AgentTool<typeof adviseSchema, AdviseDetails>
 		return {
 			content: [{ type: "text", text: delivered ? "Recorded." : "Duplicate advice ignored." }],
 			details: { note: args.note, severity: args.severity },
-			useless: true,
+			...(delivered ? {} : { useless: true }),
 		};
 	}
 
@@ -263,9 +284,16 @@ export class AdviseTool implements AgentTool<typeof adviseSchema, AdviseDetails>
 	#deliver(note: string, severity?: AdviseDetails["severity"]): boolean {
 		const key = advisorNoteDedupeKey(note);
 		const rank = advisorSeverityRank(severity);
-		const previousRank = this.#deliveredNoteSeverities.get(key) ?? 0;
-		if (rank <= previousRank) return false;
-		this.#deliveredNoteSeverities.set(key, rank);
+		const previous = this.#deliveredNotes.get(key);
+		if (rank <= (previous?.rank ?? 0)) return false;
+		// Map order is delivery order. Refresh escalations so a newly delivered
+		// blocker stays in the recent ledger rather than retaining its old slot.
+		if (previous) this.#deliveredNotes.delete(key);
+		this.#deliveredNotes.set(key, { note, severity, rank });
+		if (this.#deliveredNotes.size > PRIOR_ADVICE_LIMIT) {
+			const oldest = this.#deliveredNotes.keys().next().value;
+			if (oldest !== undefined) this.#deliveredNotes.delete(oldest);
+		}
 		this.onAdvice(note, severity);
 		return true;
 	}

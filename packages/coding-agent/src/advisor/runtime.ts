@@ -31,6 +31,7 @@ export interface AdvisorAgent {
 	 * turn `Agent.#runLoop` records on its internal state.
 	 */
 	rollbackTo?(count: number): void;
+	appendContextMessage?(message: AgentMessage): void;
 	readonly state: { messages: AgentMessage[]; error?: string };
 }
 
@@ -54,6 +55,8 @@ export interface AdvisorRuntimeHost {
 	 * Optional: hosts that omit it get no proactive maintenance.
 	 */
 	maintainContext?(incoming: AgentMessage, signal: AbortSignal): Promise<boolean>;
+	/** Previously delivered notes to preserve when private advisor context resets. */
+	priorAdvice?(): string | undefined;
 	/**
 	 * Called immediately before each `agent.prompt(batch)` cycle. Lets the host
 	 * clear per-update advisor state and apply the in-progress delivery policy.
@@ -470,6 +473,12 @@ export class AdvisorRuntime {
 		this.#clearSeenContext();
 		try {
 			this.agent.reset();
+			const priorAdvice = this.host.priorAdvice?.();
+			if (priorAdvice) {
+				const message = { role: "user", content: priorAdvice, timestamp: Date.now() } as AgentMessage;
+				if (this.agent.appendContextMessage) this.agent.appendContextMessage(message);
+				else this.agent.state.messages.push(message);
+			}
 		} catch {}
 		try {
 			this.agent.abort("advisor reset");
