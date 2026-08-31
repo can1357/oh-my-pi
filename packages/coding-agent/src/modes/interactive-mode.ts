@@ -4345,6 +4345,7 @@ export class InteractiveMode implements InteractiveModeContext {
 					});
 				}
 			}
+			throw error;
 		}
 		this.#vibeModePreviousTools = previousTools;
 		this.#vibeModeOwnerScope = ownerScope;
