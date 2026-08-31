@@ -137,6 +137,14 @@ describe("formatScreenshot", () => {
 		expect(new URL(shortened).protocol).toBe("file:");
 	});
 
+	it("keeps shortened UNC homes inside file URLs syntactically valid", () => {
+		const home = String.raw`\\server\share`;
+		const shortened = shortenEmbeddedPaths("file://server/share/project/output.log", home);
+
+		expect(shortened).toBe("file:///~/project/output.log");
+		expect(new URL(shortened).protocol).toBe("file:");
+	});
+
 	it("preserves non-file URI paths when shortening embedded homes", () => {
 		const home = "/home/alice";
 

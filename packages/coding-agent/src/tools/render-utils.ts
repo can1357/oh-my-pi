@@ -753,9 +753,12 @@ export function shortenEmbeddedPaths(text: string, homeDir = os.homedir()): stri
 		);
 		shortened = shortened.replace(homePrefix, (matchedHome, offset: number) => {
 			const prefix = shortened.slice(0, offset);
-			const uriPath = hasLeadingSeparator && uriPathContext.test(prefix);
+			const schemeConsumesUncHome = /^[A-Za-z][A-Za-z\d+.-]*:$/u.test(prefix) && /^[\\/]{2}/.test(matchedHome);
+			const uriPath = hasLeadingSeparator && (uriPathContext.test(prefix) || schemeConsumesUncHome);
 			if (!uriPath && /[\p{L}\p{N}_-]$/u.test(prefix)) return matchedHome;
-			return uriPath ? `${matchedHome[0]}~` : "~";
+			if (!uriPath) return "~";
+			if (schemeConsumesUncHome) return `${/^file:$/iu.test(prefix) ? "/" : ""}//~`;
+			return `${matchedHome[0]}~`;
 		});
 	}
 	return shortened;
