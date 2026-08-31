@@ -825,25 +825,28 @@ function streamCursorWithWireMode(
 			// Cursor has no required-call signal, so `toolChoice: "required"` would
 			// silently weaken to auto — reject it instead of advertising the full list.
 			if (options?.cursorToolPassthrough) {
-				if (options.toolChoice === "required") {
+				if (options.toolChoice === "required" || options.toolChoice === "any") {
 					throw new AIError.ValidationError(
-						'Cursor passthrough does not support toolChoice "required"; use a named tool choice or omit toolChoice',
+						`Cursor passthrough does not support toolChoice "${options.toolChoice}"; use a named tool choice or omit toolChoice`,
 					);
 				}
 				const forcedName = getNamedToolChoiceName(options.toolChoice);
-				// Interaction-only tools (e.g. connect_scm) are resolved entirely
-				// server-side with no deferrable exec frame — advertising them lets
-				// Cursor finish the work while an OpenAI client would still try to
-				// re-run the surfaced call. Exclude them from the allowlist.
+				// Interaction-only tools (e.g. connect_scm / native todos) are resolved
+				// entirely server-side with no deferrable exec frame — advertising them
+				// lets Cursor finish the work while an OpenAI client would still try to
+				// re-run the surfaced call. Exclude them from the allowlist, and reject
+				// a forced choice that names one rather than weakening to the remaining
+				// declared tools / `__none__`.
+				if (forcedName && CURSOR_PASSTHROUGH_SERVER_ONLY_TOOLS.has(forcedName)) {
+					throw new AIError.ValidationError(
+						`Cursor passthrough does not support forcing server-only tool "${forcedName}"`,
+					);
+				}
 				const declared = (context.tools ?? [])
 					.map(tool => tool.name)
 					.filter(name => name.length > 0 && !CURSOR_PASSTHROUGH_SERVER_ONLY_TOOLS.has(name));
 				const allowedTools =
-					options.toolChoice === "none"
-						? ""
-						: forcedName && !CURSOR_PASSTHROUGH_SERVER_ONLY_TOOLS.has(forcedName)
-							? forcedName
-							: declared.join(",");
+					options.toolChoice === "none" ? "" : forcedName ? forcedName : declared.join(",");
 				requestHeaders["x-cursor-agent-allowed-tools"] = allowedTools || "__none__";
 			}
 			const debugSession = isRequestDebugEnabled()
@@ -5681,7 +5684,10 @@ function resolveCursorWireModel(
 	modelId: string;
 	parameters: RequestedModel_ModelParameterbytes[];
 } {
-	const wireModelId = requestModelId ?? model.requestModelId ?? model.id;
+	const rawWireModelId = requestModelId ?? model.requestModelId ?? model.id;
+	// Synthetic catalog id `auto` is the Cursor router sentinel; the wire contract
+	// expects `default` (and gateway SSE already treats both as auto intent).
+	const wireModelId = rawWireModelId === "auto" ? "default" : rawWireModelId;
 	if (wireMode === "discovered") return { modelId: wireModelId, parameters: [] };
 	// Cursor's fast lane follows the effort token (`-high-fast`), while the
 	// standard lane ends at it (`-high`). Preserve the lane in the base id.

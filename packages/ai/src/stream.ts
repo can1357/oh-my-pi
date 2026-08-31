@@ -2380,7 +2380,12 @@ function mapOptionsForApi<TApi extends Api>(
 				cursorAgentSessionId: options?.cursorAgentSessionId,
 				// Auto mode sends the "default" wire id; otherwise the provider
 				// resolves the wire id from the model's own requestModelId.
-				wireModelId: options?.cursorAutoMode ? "default" : undefined,
+				// Also pin synthetic catalog `auto` so streamSimple without the
+				// gateway header still hits the Cursor router contract.
+				wireModelId:
+					options?.cursorAutoMode || model.id === "auto" || model.requestModelId === "auto"
+						? "default"
+						: undefined,
 			});
 		}
 
