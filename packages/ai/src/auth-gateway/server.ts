@@ -387,9 +387,9 @@ function releaseTurnOnStreamEnd(
 	const release = async (settleProbe: boolean): Promise<void> => {
 		if (released) return;
 		released = true;
-		// Wait for the canonical assistant result so probing/committed gates reflect
-		// error/abort outcomes before EOF can settle a quota probe.
-		if (settled) await settled.catch(() => {});
+		// Only successful EOF settlement needs the canonical result. Failed/cancelled
+		// releases must not await a pending events.result() or turn/probe locks stall.
+		if (settleProbe && settled) await settled.catch(() => {});
 		// Settle only on positive completion evidence (committed output or a
 		// successful terminal). Never settle a still-probing gate after pre-SSE
 		// failure — format encoders turn errors into frames + normal close.
