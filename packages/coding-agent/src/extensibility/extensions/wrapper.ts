@@ -23,7 +23,7 @@ import { defaultLoadModeForToolName } from "../../tools/essential-tools";
 import { withFileMutationSession } from "../../tools/file-write-fallback";
 import { normalizeToolEventInput, resolveToolEventInput } from "../tool-event-input";
 import { applyToolProxy } from "../tool-proxy";
-import type { ExtensionRunner } from "./runner";
+import { deepFreeze, type ExtensionRunner } from "./runner";
 import type { RegisteredTool, ToolCallEventResult } from "./types";
 
 /**
@@ -242,11 +242,14 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 			}
 		}
 
-		// 2. Full approval gate against the (possibly revised) input that will actually run — resolves
-		// policy and prompts on `effectiveParams`, so the user approves exactly what executes. A revised
+		const inputMatchesDispatch = effectiveParams === params;
+		const finalParams = deepFreeze(structuredClone(effectiveParams));
+
+		// 2. Full approval gate against the owned final input that will actually run — resolves
+		// policy and prompts on `finalParams`, so the user approves exactly what executes. A revised
 		// input that newly resolves to `deny` is caught here even though the original passed the
 		// short-circuit above.
-		const resolvedArgs = approvalArgs(effectiveParams, context);
+		const resolvedArgs = approvalArgs(finalParams, context);
 		const resolved = resolveApproval(this.tool, resolvedArgs, approvalMode, userPolicies);
 		context?.xdevTierResolved?.(resolved.tier);
 		if (resolved.policy === "deny") {
@@ -262,7 +265,7 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 		// stronger: yolo, per-tool allow, and xdev approval never acknowledge
 		// them on the user's behalf.
 		const explicitPrompt = resolved.override || Object.hasOwn(userPolicies, resolved.policyKey ?? this.tool.name);
-		const xdevBypass = context?.xdevApproved === true && effectiveParams === params;
+		const xdevBypass = context?.xdevApproved === true && inputMatchesDispatch;
 		const approvalCheck = {
 			required: pendingSafetyChecks.length > 0 || (resolved.policy === "prompt" && (explicitPrompt || !xdevBypass)),
 			reason: resolved.reason,
@@ -287,12 +290,13 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 					sessionId: context?.sessionManager?.getSessionId() ?? "",
 					toolCallId,
 					toolName: this.tool.name,
-					input: effectiveParams as Record<string, unknown>,
+					input: finalParams as Record<string, unknown>,
 					approvalMode,
 					tier: resolved.tier,
 				},
 				signal,
 			);
+			signal?.throwIfAborted();
 			if (review.decision === "deny") {
 				throw denyError(
 					{
@@ -396,10 +400,12 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 			// Name the owning session for process-wide file-mutation fallbacks and
 			// expose its settings to registered tools and any fallback handlers they
 			// trigger. `sdk.ts` wraps the whole tool registry with this class whenever
-			// a runner exists.
+			// a runner exists. A denied file write or delete inside this tool can be
+			// brokered to an extension handler, and that registry is PROCESS-WIDE.
+			// Inert with no fallback registered: no scope is entered.
 			result = await this.runner.runScoped(() =>
 				withFileMutationSession(this.runner.sessionId, () =>
-					this.tool.execute(toolCallId, effectiveParams, signal, onUpdate, context),
+					this.tool.execute(toolCallId, finalParams, signal, onUpdate, context),
 				),
 			);
 		} catch (err) {
@@ -418,7 +424,7 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 				toolCallId,
 				input: normalizeToolEventInput(
 					this.tool.name,
-					resolveToolEventInput(this.tool, toolEventArgs(effectiveParams, context)),
+					resolveToolEventInput(this.tool, toolEventArgs(finalParams, context)),
 				),
 				content: result.content,
 				details: result.details,

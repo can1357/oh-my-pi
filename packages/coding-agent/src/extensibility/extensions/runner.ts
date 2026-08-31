@@ -1865,7 +1865,7 @@ export class ExtensionRunner {
 	}
 }
 /** Recursively freezes a JSON value so event handlers cannot mutate it. */
-function deepFreeze<T>(value: T): T {
+export function deepFreeze<T>(value: T): T {
 	if (typeof value === "object" && value !== null) {
 		for (const key of Object.keys(value as Record<string, unknown>)) {
 			deepFreeze((value as Record<string, unknown>)[key]);

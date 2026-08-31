@@ -2731,12 +2731,16 @@ describe("ExtensionRunner", () => {
 
 			const dispatchRunner = (
 				reviewHandlers: Array<(event: ToolApprovalReviewEvent, ctx: unknown) => unknown>,
+				toolCallHandlers: Array<(event: unknown, ctx: unknown) => unknown> = [],
 			): ExtensionRunner => {
 				const extensionPath = path.join(extensionsDir, "review-dispatch.ts");
 				const extension: Extension = {
 					path: extensionPath,
 					resolvedPath: extensionPath,
-					handlers: new Map([["tool_approval_review", reviewHandlers as never]]),
+					handlers: new Map([
+						["tool_approval_review", reviewHandlers as never],
+						["tool_call", toolCallHandlers as never],
+					]),
 					tools: new Map(),
 					assistantThinkingRenderers: [],
 					fileWriteFallbackHandlers: [],
@@ -3014,6 +3018,23 @@ describe("ExtensionRunner", () => {
 				expect(trace.some(entry => entry.kind === "requested")).toBe(false);
 				clearTrace();
 			});
+			it("cancellation after an approve result still prevents execution", async () => {
+				const trace = setTrace();
+				const runner = dispatchRunner([]);
+				const controller = new AbortController();
+				vi.spyOn(runner, "emitToolApprovalReview").mockImplementation(async () => {
+					controller.abort();
+					return { decision: "approve" };
+				});
+
+				await expect(
+					executeReviewCase(runner, recordingApprovalTool(), "call-review-approve-abort", {
+						signal: controller.signal,
+					}),
+				).rejects.toThrow();
+				expect(trace.some(entry => entry.kind === "executed")).toBe(false);
+				clearTrace();
+			});
 
 			it("approve + escalate handlers are not last-result-wins: the native selector decides", async () => {
 				const trace = setTrace();
@@ -3200,6 +3221,35 @@ describe("ExtensionRunner", () => {
 				// executes — no derived view, no rewrite channel.
 				expect(review?.input).toEqual(executed?.params);
 				expect(Object.isFrozen(review?.input)).toBe(true);
+				clearTrace();
+			});
+
+			it("owns transformed input before review so a retained alias cannot change execution", async () => {
+				const trace = setTrace();
+				const retainedInput = { command: "echo reviewed" };
+				const reviewStarted = Promise.withResolvers<Readonly<Record<string, unknown>>>();
+				const releaseReview = Promise.withResolvers<void>();
+				const runner = dispatchRunner(
+					[
+						async event => {
+							reviewStarted.resolve(event.input);
+							await releaseReview.promise;
+							return { decision: "approve" };
+						},
+					],
+					[async () => ({ input: retainedInput })],
+				);
+				const execution = executeReviewCase(runner, recordingApprovalTool(), "call-review-owned-input", {
+					params: { command: "echo original" },
+				});
+
+				const reviewedInput = await reviewStarted.promise;
+				retainedInput.command = "rm -rf";
+				releaseReview.resolve();
+				await execution;
+
+				expect(reviewedInput).toEqual({ command: "echo reviewed" });
+				expect(trace).toContainEqual({ kind: "executed", params: { command: "echo reviewed" } });
 				clearTrace();
 			});
 
