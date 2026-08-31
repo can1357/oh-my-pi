@@ -572,7 +572,8 @@ function mirrorRequestAbort(req: Request): AbortController {
 
 // (handlePassthrough removed — see note above.)
 
-function releaseTurnOnStreamEnd(
+/** Wrap an SSE body so turn reservations (and settled probes) release on close, cancel, or read failure. */
+export function releaseTurnOnStreamEnd(
 	stream: ReadableStream<Uint8Array>,
 	storage: AuthStorage,
 	requestId: string,
@@ -590,13 +591,18 @@ function releaseTurnOnStreamEnd(
 	};
 	return new ReadableStream({
 		async pull(controller) {
-			const { done, value } = await reader.read();
-			if (done) {
+			try {
+				const { done, value } = await reader.read();
+				if (done) {
+					release();
+					controller.close();
+					return;
+				}
+				controller.enqueue(value);
+			} catch (error) {
 				release();
-				controller.close();
-				return;
+				controller.error(error);
 			}
-			controller.enqueue(value);
 		},
 		cancel(reason) {
 			release();
@@ -675,26 +681,29 @@ async function handleFormatEndpoint(
 	}
 	if (controller.signal.aborted) return clientClosedResponse(route);
 
-	const supportsOpenAIImageFileReferences =
-		model.api === "openai-responses" ||
-		model.api === "azure-openai-responses" ||
-		model.api === "openai-codex-responses";
-	if (
-		route.label === "openai-responses" &&
-		!supportsOpenAIImageFileReferences &&
-		parsed.context.messages.some(
-			message =>
-				message.role === "toolResult" &&
-				message.content.some(
-					block => block.type === "image" && block.providerFile?.provider === "openai" && block.providerFile.id,
-				),
-		)
-	) {
+	const requestHasOpenAIImageFileReferences = parsed.context.messages.some(
+		message =>
+			message.role === "toolResult" &&
+			message.content.some(
+				block => block.type === "image" && block.providerFile?.provider === "openai" && block.providerFile.id,
+			),
+	);
+	const openaiImageFileCompatError = (candidate: Model<Api>): Response | undefined => {
+		if (route.label !== "openai-responses" || !requestHasOpenAIImageFileReferences) return undefined;
+		const supportsOpenAIImageFileReferences =
+			candidate.api === "openai-responses" ||
+			candidate.api === "azure-openai-responses" ||
+			candidate.api === "openai-codex-responses";
+		if (supportsOpenAIImageFileReferences) return undefined;
 		return route.module.formatError(
 			400,
 			"invalid_request_error",
 			"OpenAI image file IDs in tool outputs require a Responses-compatible upstream model",
 		);
+	};
+	{
+		const incompat = openaiImageFileCompatError(model);
+		if (incompat) return incompat;
 	}
 
 	// Sticky credential id: honour the client's `prompt_cache_key` when
@@ -772,6 +781,8 @@ async function handleFormatEndpoint(
 				? classifiedError(lastClassified)
 				: formatError(502, "upstream_error", "Upstream request failed");
 		}
+		const incompat = openaiImageFileCompatError(resolved);
+		if (incompat) return incompat;
 		model = resolved;
 		attemptedTargets.add(currentTarget);
 		return undefined;

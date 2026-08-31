@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed auth-gateway model discovery treating non-2xx responses with array/`data` bodies as successful catalogs.
+- Fixed auth-gateway SSE streams leaking turn reservations when `reader.read()` rejects after the response is returned.
+- Fixed OpenAI Responses file-id compatibility being checked only against the initial route target; fallback targets are revalidated before dispatch.
+
 ### Added
 
 - Added API-key authentication for ClinePass through the official `CLINE_API_KEY` variable, including account-route validation and rolling quota-window reporting in `omp usage` ([#7863](https://github.com/can1357/oh-my-pi/pull/7863) by [@will-bogusz](https://github.com/will-bogusz)).

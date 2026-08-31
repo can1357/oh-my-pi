@@ -73,6 +73,21 @@ describe("safeDiscoverModels", () => {
 		expect(fetchSpy).not.toHaveBeenCalled();
 	});
 
+	it("rejects non-2xx responses even when the body looks like a model list (negative)", async () => {
+		const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(
+			Object.assign(
+				async () =>
+					new Response(JSON.stringify({ data: [] }), {
+						status: 500,
+						headers: { "content-type": "application/json" },
+					}),
+				{ preconnect: fetch.preconnect },
+			),
+		);
+		await expect(safeDiscoverModels("https://example.com/v1/models")).rejects.toBeInstanceOf(SafeDiscoveryError);
+		expect(fetchSpy).toHaveBeenCalledTimes(1);
+	});
+
 	it("accepts a top-level JSON array", async () => {
 		stubFetch(jsonResponse([{ id: "a" }, { id: "b" }]));
 		const models = await safeDiscoverModels("https://example.com/v1/models");
