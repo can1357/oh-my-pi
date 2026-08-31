@@ -3358,6 +3358,112 @@ describe("ExtensionRunner", () => {
 				expect(trace).toContainEqual({ kind: "executed", params: { command: "echo mutated-by-tool" } });
 			});
 
+			it("non-cloneable input on a yolo-allow path executes without cloning and never dispatches review", async () => {
+				const trace = setTrace();
+				const reviewHandler = vi.fn(async () => ({ decision: "approve" as const }));
+				const runner = dispatchRunner([reviewHandler]);
+				const executed: unknown[] = [];
+				const tool = {
+					...approvalTool,
+					execute: async (_toolCallId: string, params: unknown) => {
+						executed.push(params);
+						return { content: [{ type: "text" as const, text: "ok" }] };
+					},
+				};
+				const callback = () => "non-cloneable";
+				const params = { command: "echo hi", callback };
+				const result = await executeReviewCase(runner, tool, "call-yolo-non-cloneable", {
+					params,
+					settings: { get: (key: string) => (key === "tools.approvalMode" ? "yolo" : {}) },
+				});
+
+				expect(firstReviewText(result)).toBe("ok");
+				// Pre-review execution behavior: the original input object runs, function payload intact.
+				expect(executed).toHaveLength(1);
+				expect(executed[0]).toBe(params);
+				expect((executed[0] as typeof params).callback).toBe(callback);
+				expect(reviewHandler).not.toHaveBeenCalled();
+				expect(trace).toEqual([]);
+			});
+
+			it("non-cloneable input with no review handler keeps the native selector path without clone failure", async () => {
+				const trace = setTrace();
+				const { runner, select } = await reviewRunnerFromFile(
+					"review-non-cloneable-observers.ts",
+					reviewExtensionCode(null),
+				);
+				const executed: unknown[] = [];
+				const tool = {
+					...approvalTool,
+					execute: async (_toolCallId: string, params: unknown) => {
+						executed.push(params);
+						return { content: [{ type: "text" as const, text: "ok" }] };
+					},
+				};
+				const params = { command: "echo hi", callback: () => "non-cloneable" };
+				const result = await executeReviewCase(runner, tool, "call-no-review-non-cloneable", { params });
+
+				expect(firstReviewText(result)).toBe("ok");
+				expect(select).toHaveBeenCalledTimes(1);
+				expect(executed[0]).toBe(params);
+				// No review entry at all; the ordinary native approval events still fire.
+				expect(trace.find(entry => entry.kind === "review")).toBeUndefined();
+				expect(trace.filter(entry => entry.kind === "requested" || entry.kind === "resolved")).toEqual([
+					{ kind: "requested" },
+					{ kind: "resolved", approved: true },
+				]);
+			});
+
+			it("clone failure cannot approve: review-eligible non-cloneable input skips review and faces the native selector", async () => {
+				const trace = setTrace();
+				const { runner, select } = await reviewRunnerFromFile(
+					"review-non-cloneable.ts",
+					reviewExtensionCode(`return { decision: "approve" };`),
+				);
+				const executed: unknown[] = [];
+				const tool = {
+					...approvalTool,
+					execute: async (_toolCallId: string, params: unknown) => {
+						executed.push(params);
+						return { content: [{ type: "text" as const, text: "ok" }] };
+					},
+				};
+				const params = { command: "echo hi", callback: () => "non-cloneable" };
+				const result = await executeReviewCase(runner, tool, "call-non-cloneable-eligible", { params });
+
+				expect(firstReviewText(result)).toBe("ok");
+				// Review never dispatched — the approve handler cannot run, so clone failure can never approve.
+				expect(trace.find(entry => entry.kind === "review")).toBeUndefined();
+				// The ordinary native prompt still gates the call.
+				expect(select).toHaveBeenCalledTimes(1);
+				expect(trace).toContainEqual({ kind: "requested" });
+				expect(trace).toContainEqual({ kind: "resolved", approved: true });
+				expect(executed[0]).toBe(params);
+			});
+
+			it("native deny stays authoritative on non-cloneable input and never dispatches review", async () => {
+				const reviewHandler = vi.fn(async () => ({ decision: "approve" as const }));
+				const runner = dispatchRunner([reviewHandler]);
+				const execute = vi.fn(async () => ({ content: [{ type: "text" as const, text: "ran" }] }));
+				const tool = {
+					...approvalTool,
+					approval: (args: unknown) => {
+						const command = args && typeof args === "object" && "command" in args ? args.command : undefined;
+						return command === "rm -rf"
+							? ({ policy: "deny", tier: "exec", reason: "dangerous" } as const)
+							: ("exec" as const);
+					},
+					execute,
+				};
+				const params = { command: "rm -rf", callback: () => "non-cloneable" };
+
+				await expect(executeReviewCase(runner, tool, "call-deny-non-cloneable", { params })).rejects.toThrow(
+					/blocked by tool policy/,
+				);
+				expect(execute).not.toHaveBeenCalled();
+				expect(reviewHandler).not.toHaveBeenCalled();
+			});
+
 			it("reviews and executes the value produced by the real agent-loop transformation path", async () => {
 				const reviewedInputs: Array<Readonly<Record<string, unknown>>> = [];
 				const executedInputs: unknown[] = [];
