@@ -648,14 +648,17 @@ export class MCPManager {
 					void this.#onToolsChanged?.(this.#tools);
 					void this.toolCache?.set(name, config, serverTools);
 
-					if (customTools.length === 0 && serverTools.length > 0 && !reportedErrors.has(name)) {
-						// Filter excluded everything: record the failure for callers
-						// that only read `result.errors`, emit the per-server failure
-						// event, and mark the server as failed — never "connected".
-						const message = mcpFilterEmptyMessage(serverTools.length);
-						errors.set(name, message);
-						reportedErrors.add(name);
-						notify(createMcpStartupFailure(name, message, sources[name]));
+					if (customTools.length === 0 && serverTools.length > 0) {
+						// Filter excluded everything: the server contributes no tools —
+						// mark it failed even if a previous branch already recorded
+						// this failure. Reporting (errors map + status event) happens
+						// once, but `connected` must never follow a filter-empty.
+						if (!reportedErrors.has(name)) {
+							const message = mcpFilterEmptyMessage(serverTools.length);
+							errors.set(name, message);
+							reportedErrors.add(name);
+							notify(createMcpStartupFailure(name, message, sources[name]));
+						}
 						await this.#loadServerResourcesAndPrompts(name, connection);
 						return;
 					}
@@ -748,9 +751,12 @@ export class MCPManager {
 							task.config,
 						);
 						this.#replaceServerTools(name, deferredTools);
-						if (deferredTools.length === 0) {
-							// The cached list is known — surface a filter-empty failure now
-							// instead of reporting the server as silently connecting.
+						if (deferredTools.length === 0 && cached.length > 0) {
+							// The cached list is known and a filter excluded every entry —
+							// surface a filter-empty failure now instead of reporting
+							// the server as silently connecting. An empty cached list
+							// (server previously advertised zero tools) is unrelated to
+							// filtering and stays unreported, as before.
 							const message = mcpFilterEmptyMessage(cached.length);
 							errors.set(name, message);
 							reportedErrors.add(name);
@@ -1329,8 +1335,9 @@ export class MCPManager {
 		this.#replaceServerTools(name, customTools);
 		const wasFilterEmpty = customTools.length === 0 && serverTools.length > 0;
 		if (wasFilterEmpty) {
+			// The applyMCPToolFilter diagnostic inside fromTools already logged
+			// the error; only the status event is missing here.
 			const message = mcpFilterEmptyMessage(serverTools.length);
-			logger.error(`MCP server "${name}": ${message}`, { path: `mcp:${name}` });
 			this.#emitConnectionStatus({ type: "failed", serverName: name, error: message });
 		} else {
 			this.#emitConnectionStatus({ type: "connected", serverName: name });

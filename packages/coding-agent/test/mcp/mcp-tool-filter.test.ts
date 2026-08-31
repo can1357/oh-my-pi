@@ -99,3 +99,8 @@ test("normalized filter key collapses alias filter sets for connection dedup", (
 	expect(mcpToolFilterKey(undefined, ["x"])).toBe(mcpToolFilterKey(undefined, ["x"]));
 	expect(mcpToolFilterKey(["a"], undefined)).not.toBe(mcpToolFilterKey(undefined, ["a"]));
 });
+
+test("filter key treats absent and empty filters as equal", () => {
+	expect(mcpToolFilterKey(undefined, undefined)).toBe(mcpToolFilterKey([], undefined));
+	expect(mcpToolFilterKey(undefined, undefined)).toBe(mcpToolFilterKey(undefined, []));
+});

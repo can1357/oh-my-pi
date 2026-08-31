@@ -515,11 +515,13 @@ export class MCPTool implements CustomTool<TSchema, MCPToolDetails> {
 	 *  Applies the server's configured `enabledTools`/`disabledTools` filter to
 	 *  the raw advertised tool names. */
 	static fromTools(connection: MCPServerConnection, tools: MCPToolDefinition[], reconnect?: MCPReconnect): MCPTool[] {
-		return applyMCPToolFilter(connection.name, {
+		const byName = applyMCPToolFilter(connection.name, {
 			toolNames: tools.map(t => t.name),
 			enabledTools: connection.config.enabledTools,
 			disabledTools: connection.config.disabledTools,
-		}).map(toolName => new MCPTool(connection, tools.find(t => t.name === toolName)!, reconnect));
+		});
+		const definitions = new Map(tools.map(t => [t.name, t]));
+		return byName.map(toolName => new MCPTool(connection, definitions.get(toolName)!, reconnect));
 	}
 
 	constructor(
@@ -638,13 +640,14 @@ export class DeferredMCPTool implements CustomTool<TSchema, MCPToolDetails> {
 		reconnect?: MCPReconnect,
 		config?: MCPServerConfig,
 	): DeferredMCPTool[] {
-		return applyMCPToolFilter(serverName, {
+		const byName = applyMCPToolFilter(serverName, {
 			toolNames: tools.map(t => t.name),
 			enabledTools: config?.enabledTools,
 			disabledTools: config?.disabledTools,
-		}).map(
-			toolName =>
-				new DeferredMCPTool(serverName, tools.find(t => t.name === toolName)!, getConnection, source, reconnect),
+		});
+		const definitions = new Map(tools.map(t => [t.name, t]));
+		return byName.map(
+			toolName => new DeferredMCPTool(serverName, definitions.get(toolName)!, getConnection, source, reconnect),
 		);
 	}
 

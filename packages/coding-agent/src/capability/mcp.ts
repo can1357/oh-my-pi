@@ -76,7 +76,9 @@ export interface MCPServer {
 
 /** Compare the transport inputs that determine which MCP endpoint gets connected. */
 function isSameMCPConnection(left: MCPServer, right: MCPServer): boolean {
+	if (!Bun.deepEquals(left.auth, right.auth) || !Bun.deepEquals(left.oauth, right.oauth)) return false;
 	// Filter members determine which tools a connection contributes; compare
+	// normalized (unique, sorted) so alias order/duplicates dedup to one.
 	if (
 		mcpToolFilterKey(left.enabledTools, left.disabledTools) !==
 		mcpToolFilterKey(right.enabledTools, right.disabledTools)

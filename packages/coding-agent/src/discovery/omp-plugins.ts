@@ -277,6 +277,7 @@ const MCP_FILENAMES = [".mcp.json", "mcp.json"] as const;
 
 interface RawMcpServer {
 	enabled?: boolean;
+	timeout?: number;
 	requestIdFormat?: unknown;
 	enabledTools?: unknown;
 	disabledTools?: unknown;
@@ -334,6 +335,7 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 			items.push({
 				name: serverName,
 				...(cfg.enabled !== undefined && { enabled: cfg.enabled }),
+				...(cfg.timeout !== undefined && { timeout: cfg.timeout }),
 				...(requestIdFormat !== undefined && { requestIdFormat }),
 				...(enabledTools !== undefined && { enabledTools }),
 				...(disabledTools !== undefined && { disabledTools }),
