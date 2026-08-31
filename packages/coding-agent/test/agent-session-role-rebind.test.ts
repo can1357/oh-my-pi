@@ -160,7 +160,7 @@ describe("AgentSession default-role rebind", () => {
 		await session.prompt("force a fallback");
 		await session.waitForIdle();
 		// The cascade moved the session deliberately off its role model.
-		expect(session.retryFallbackModel).toBeTruthy();
+		expect(session.servingModel?.isFallback).toBe(true);
 		expect(selectorOf(session.model!)).toBe(selectorOf(otherModel));
 
 		settings.setModelRole("default", selectorOf(manualModel));
@@ -170,7 +170,7 @@ describe("AgentSession default-role rebind", () => {
 		// undo the recovery, so the session must stay put...
 		expect(result).toBe("fallback-retargeted");
 		expect(selectorOf(session.model!)).toBe(selectorOf(otherModel));
-		expect(session.retryFallbackModel).toBeTruthy();
+		expect(session.servingModel?.isFallback).toBe(true);
 		// ...but the role change must not be lost either: the cascade's restore target
 		// is retargeted, so releasing the fallback lands on the new default rather than
 		// the model the operator just stopped using.
@@ -214,7 +214,7 @@ describe("AgentSession default-role rebind", () => {
 		await session.setModel(manualModel);
 		await session.prompt("force a fallback off the manual pick");
 		await session.waitForIdle();
-		expect(session.retryFallbackModel).toBeTruthy();
+		expect(session.servingModel?.isFallback).toBe(true);
 		expect(session.retryFallbackRestoreSelector).toContain(selectorOf(manualModel));
 
 		settings.setModelRole("default", selectorOf(otherModel));
