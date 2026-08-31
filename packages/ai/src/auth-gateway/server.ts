@@ -1102,6 +1102,7 @@ async function handleFormatEndpoint(
 						return formatError(classified.status, classified.type, errorMessage);
 					}
 					bootOpts.storage.settleQuotaProbeSuccess(requestId);
+					health.recordSuccess(model.provider, model.id);
 					rememberPromptCacheHit(cacheStore, fingerprint, model, sessionId, currentTarget);
 					await runHook(bootOpts.hooks?.afterRequest, {
 						requestId,
@@ -1226,6 +1227,7 @@ async function handleFormatEndpoint(
 			return clientClosedResponse(route);
 		}
 		sseStream = releaseTurnOnStreamEnd(held.stream, bootOpts.storage, requestId, commitGate);
+		health.recordSuccess(model.provider, model.id);
 		const affinityModel = model;
 		const affinityTarget = currentTarget;
 		void settled
@@ -1600,6 +1602,7 @@ async function handlePiNative(
 						return formatError(classified.status, classified.type, errorMessage);
 					}
 					bootOpts.storage.settleQuotaProbeSuccess(requestId);
+					health.recordSuccess(model.provider, model.id);
 					rememberPromptCacheHit(cacheStore, fingerprint, model, sessionId, currentTarget);
 					return json(200, { message }, gatewayResponseHeaders(model, { requestId, message, startedAt }));
 				} catch (error) {
@@ -1711,6 +1714,7 @@ async function handlePiNative(
 			return aborted();
 		}
 		sseStream = releaseTurnOnStreamEnd(held.stream, bootOpts.storage, requestId, commitGate);
+		health.recordSuccess(model.provider, model.id);
 		const affinityModel = model;
 		const affinityTarget = currentTarget;
 		void settled

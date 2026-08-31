@@ -106,7 +106,10 @@ function contentFromGeminiParts(parts: unknown): string | (TextContent | ImageCo
 	return blocks;
 }
 
-function readFunctionCall(part: Record<string, unknown>): ToolCall | undefined {
+function readFunctionCall(
+	part: Record<string, unknown>,
+	lastCallIdByName?: Map<string, string>,
+): ToolCall | undefined {
 	const call = part.functionCall ?? part.function_call;
 	if (!isRecord(call)) return undefined;
 	const name = typeof call.name === "string" ? call.name : undefined;
@@ -115,6 +118,7 @@ function readFunctionCall(part: Record<string, unknown>): ToolCall | undefined {
 		typeof call.id === "string" && call.id.length > 0
 			? call.id
 			: `gemini_call_${name}_${Math.random().toString(36).slice(2, 10)}`;
+	lastCallIdByName?.set(name, id);
 	const args = call.args ?? call.arguments;
 	return {
 		type: "toolCall",
@@ -127,14 +131,19 @@ function readFunctionCall(part: Record<string, unknown>): ToolCall | undefined {
 function functionResponseToToolResult(
 	part: Record<string, unknown>,
 	timestamp: number,
+	lastCallIdByName?: Map<string, string>,
 ): ToolResultMessage | undefined {
 	const resp = part.functionResponse ?? part.function_response;
 	if (!isRecord(resp)) return undefined;
 	const name = typeof resp.name === "string" ? resp.name : "unknown";
+	const correlated = lastCallIdByName?.get(name);
 	const id =
 		typeof resp.id === "string" && resp.id.length > 0
 			? resp.id
-			: `gemini_resp_${name}_${Math.random().toString(36).slice(2, 10)}`;
+			: (correlated ?? `gemini_resp_${name}_${Math.random().toString(36).slice(2, 10)}`);
+	if (correlated !== undefined && id === correlated) {
+		lastCallIdByName?.delete(name);
+	}
 	const response = resp.response;
 	let isError = false;
 	let text = "";
@@ -278,6 +287,8 @@ function walkContents(
 	modelId: string,
 	timestamp: number,
 ): void {
+	// Correlate id-less functionResponse parts with the preceding functionCall of the same name.
+	const lastCallIdByName = new Map<string, string>();
 	for (const item of contents) {
 		if (!isRecord(item)) continue;
 		const role = classifyRole(item.role) ?? "user";
@@ -287,12 +298,12 @@ function walkContents(
 		const mediaParts: unknown[] = [];
 		for (const part of parts) {
 			if (!isRecord(part)) continue;
-			const call = readFunctionCall(part);
+			const call = readFunctionCall(part, lastCallIdByName);
 			if (call) {
 				toolCalls.push(call);
 				continue;
 			}
-			const result = functionResponseToToolResult(part, timestamp);
+			const result = functionResponseToToolResult(part, timestamp, lastCallIdByName);
 			if (result) {
 				toolResults.push(result);
 				continue;

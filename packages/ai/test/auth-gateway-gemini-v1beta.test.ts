@@ -196,6 +196,33 @@ it("rejects fileData / functionCall parts (negative)", () => {
 		}),
 	).toThrow(/unsupported part type/);
 });
+
+it("correlates id-less functionResponse with the preceding same-name functionCall", () => {
+	const parsed = parseRequest({
+		model: "gemini-2.5-flash",
+		contents: [
+			{
+				role: "model",
+				parts: [{ functionCall: { name: "lookup", args: { q: "x" } } }],
+			},
+			{
+				role: "user",
+				parts: [{ functionResponse: { name: "lookup", response: { output: "ok" } } }],
+			},
+		],
+	});
+	const assistant = parsed.context.messages.find(m => m.role === "assistant");
+	const toolResult = parsed.context.messages.find(m => m.role === "toolResult");
+	expect(assistant?.role).toBe("assistant");
+	const call = assistant && "content" in assistant
+		? assistant.content.find(c => typeof c === "object" && c !== null && "type" in c && c.type === "toolCall")
+		: undefined;
+	expect(call && "id" in call ? call.id : undefined).toBeTruthy();
+	expect(toolResult && "toolCallId" in toolResult ? toolResult.toolCallId : undefined).toBe(
+		call && "id" in call ? call.id : undefined,
+	);
+});
+
 it("emits functionCall parts for toolCall content blocks", () => {
 	const message = {
 		role: "assistant",
