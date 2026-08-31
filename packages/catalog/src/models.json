@@ -35582,6 +35582,7 @@
 			"compat": {
 				"officialEndpoint": true,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -35629,6 +35630,7 @@
 			"compat": {
 				"officialEndpoint": true,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -35676,6 +35678,7 @@
 			"compat": {
 				"officialEndpoint": true,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -35734,6 +35737,7 @@
 			"compat": {
 				"officialEndpoint": true,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -35790,6 +35794,7 @@
 			"compat": {
 				"officialEndpoint": true,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -35846,6 +35851,7 @@
 			"compat": {
 				"officialEndpoint": true,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -35902,6 +35908,7 @@
 			"compat": {
 				"officialEndpoint": true,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -35959,6 +35966,7 @@
 			"compat": {
 				"officialEndpoint": true,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -36016,6 +36024,7 @@
 			"compat": {
 				"officialEndpoint": true,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -36063,6 +36072,7 @@
 			"compat": {
 				"officialEndpoint": true,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -36110,6 +36120,7 @@
 			"compat": {
 				"officialEndpoint": true,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -36167,6 +36178,7 @@
 			"compat": {
 				"officialEndpoint": true,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -36223,6 +36235,7 @@
 			"compat": {
 				"officialEndpoint": true,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -36278,6 +36291,7 @@
 			"compat": {
 				"officialEndpoint": true,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -36335,6 +36349,7 @@
 			"compat": {
 				"officialEndpoint": true,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -36392,6 +36407,7 @@
 			"compat": {
 				"officialEndpoint": true,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -36449,6 +36465,7 @@
 			"compat": {
 				"officialEndpoint": true,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -36505,6 +36522,7 @@
 			"compat": {
 				"officialEndpoint": true,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -36552,6 +36570,7 @@
 			"compat": {
 				"officialEndpoint": true,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -36609,6 +36628,7 @@
 			"compat": {
 				"officialEndpoint": true,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -36665,6 +36685,7 @@
 			"compat": {
 				"officialEndpoint": true,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -36719,6 +36740,7 @@
 			"compat": {
 				"officialEndpoint": true,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -36776,6 +36798,7 @@
 			"compat": {
 				"officialEndpoint": true,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -43881,6 +43904,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -43936,6 +43960,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -43990,6 +44015,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -44045,6 +44071,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -44100,6 +44127,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -44145,6 +44173,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -44191,6 +44220,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -44237,6 +44267,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -44283,6 +44314,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -44329,6 +44361,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -44375,6 +44408,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -44433,6 +44467,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -44488,6 +44523,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -44545,6 +44581,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -44600,6 +44637,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -44656,6 +44694,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -44712,6 +44751,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -44767,6 +44807,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -44824,6 +44865,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -44881,6 +44923,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -44938,6 +44981,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -44993,6 +45037,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -45050,6 +45095,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -45107,6 +45153,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -45164,6 +45211,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -45219,6 +45267,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -45275,6 +45324,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -45329,6 +45379,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -45386,6 +45437,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -45440,6 +45492,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -45497,6 +45550,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -45552,6 +45606,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -45607,6 +45662,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -45663,6 +45719,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -45706,6 +45763,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -45751,6 +45809,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -45797,6 +45856,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -45842,6 +45902,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -45887,6 +45948,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -45931,6 +45993,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -45975,6 +46038,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -46029,6 +46093,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -46083,6 +46148,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -46137,6 +46203,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -46190,6 +46257,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -46245,6 +46313,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -46298,6 +46367,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -46352,6 +46422,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -46406,6 +46477,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -46460,6 +46532,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -46514,6 +46587,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -46559,6 +46633,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -46613,6 +46688,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -46668,6 +46744,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -46723,6 +46800,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -46777,6 +46855,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -46831,6 +46910,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -46885,6 +46965,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -46940,6 +47021,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -46995,6 +47077,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -47049,6 +47132,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -47105,6 +47189,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -47160,6 +47245,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -47215,6 +47301,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -47269,6 +47356,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -47325,6 +47413,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -47381,6 +47470,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -47436,6 +47526,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -47491,6 +47582,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -47548,6 +47640,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -48164,6 +48257,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -49164,6 +49258,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -49221,6 +49316,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -49277,6 +49373,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -49333,6 +49430,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -49389,6 +49487,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -69591,6 +69690,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -69652,6 +69752,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -69712,6 +69813,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -69772,6 +69874,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -69833,6 +69936,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -69894,6 +69998,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -69955,6 +70060,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -70015,6 +70121,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -70075,6 +70182,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -70133,6 +70241,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -70194,6 +70303,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -73251,6 +73361,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -73307,6 +73418,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -73363,6 +73475,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -73837,6 +73950,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -73890,6 +74004,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -73943,6 +74058,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -73996,6 +74112,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -74049,6 +74166,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -77831,6 +77949,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -77887,6 +78006,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -77943,6 +78063,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -77998,6 +78119,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -78055,6 +78177,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -78112,6 +78235,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -78169,6 +78293,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -78225,6 +78350,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -78279,6 +78405,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -78336,6 +78463,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -131523,6 +131651,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -131580,6 +131709,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -131637,6 +131767,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -131694,6 +131825,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -131750,6 +131882,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -131808,6 +131941,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -131865,6 +131999,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -131922,6 +132057,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -131981,6 +132117,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -132038,6 +132175,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -132095,6 +132233,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -132152,6 +132291,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -132208,6 +132348,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -132266,6 +132407,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -132323,6 +132465,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -132380,6 +132523,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -249406,6 +249550,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -250507,6 +250652,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -250827,6 +250973,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -250885,6 +251032,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -250941,6 +251089,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -250996,6 +251145,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -251053,6 +251203,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -251108,6 +251259,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -251165,6 +251317,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -251222,6 +251375,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -251279,6 +251433,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -251335,6 +251490,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -251391,6 +251547,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -251445,6 +251602,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -251502,6 +251660,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -257563,6 +257722,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -258743,6 +258903,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -258798,6 +258959,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -309104,6 +309266,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -309162,6 +309325,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -309220,6 +309384,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -309277,6 +309442,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -309331,6 +309497,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -309387,6 +309554,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -309446,6 +309614,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -309505,6 +309674,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -309563,6 +309733,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -309621,6 +309792,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -321840,6 +322012,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -321893,6 +322066,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -321946,6 +322120,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -321999,6 +322174,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -322054,6 +322230,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -322111,6 +322288,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -322165,6 +322343,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -322219,6 +322398,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -322273,6 +322453,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -322317,6 +322498,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -322361,6 +322543,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -322404,6 +322587,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -322448,6 +322632,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -322505,6 +322690,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -322550,6 +322736,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -322595,6 +322782,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -322653,6 +322841,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -322708,6 +322897,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -322763,6 +322953,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -322808,6 +322999,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -322863,6 +323055,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -322918,6 +323111,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -322972,6 +323166,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -323027,6 +323222,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -323082,6 +323278,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -323137,6 +323334,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -323192,6 +323390,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -323247,6 +323446,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -323301,6 +323501,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -323345,6 +323546,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -323388,6 +323590,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -323432,6 +323635,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -323478,6 +323682,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -323525,6 +323730,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -323572,6 +323778,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -323619,6 +323826,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -323676,6 +323884,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -323733,6 +323942,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -323789,6 +323999,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -323845,6 +324056,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -323902,6 +324114,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -323958,6 +324171,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -324013,6 +324227,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -324070,6 +324285,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -324128,6 +324344,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -324185,6 +324402,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -324242,6 +324460,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -324299,6 +324518,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -324356,6 +324576,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -324412,6 +324633,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -324468,6 +324690,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -324522,6 +324745,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -324579,6 +324803,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -324622,6 +324847,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -324677,6 +324903,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -324729,6 +324956,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -324782,6 +325010,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -324835,6 +325064,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -324878,6 +325108,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -324932,6 +325163,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -324977,6 +325209,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -325032,6 +325265,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -325087,6 +325321,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -325142,6 +325377,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -325199,6 +325435,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -325254,6 +325491,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -325309,6 +325547,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -325365,6 +325604,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -325420,6 +325660,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -325475,6 +325716,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -325522,6 +325764,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -325569,6 +325812,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -325624,6 +325868,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -325679,6 +325924,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -325735,6 +325981,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -325791,6 +326038,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -325847,6 +326095,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -325903,6 +326152,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -325958,6 +326208,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -326014,6 +326265,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -326061,6 +326313,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -326115,6 +326368,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -326171,6 +326425,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -326227,6 +326482,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -326283,6 +326539,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -326339,6 +326596,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -326393,6 +326651,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -326446,6 +326705,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -326498,6 +326758,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -326540,6 +326801,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -326592,6 +326854,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -326644,6 +326907,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -326696,6 +326960,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -326749,6 +327014,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -326802,6 +327068,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -326855,6 +327122,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -326897,6 +327165,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -326939,6 +327208,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -326981,6 +327251,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -327023,6 +327294,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -327066,6 +327338,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -327122,6 +327395,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -327176,6 +327450,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -327219,6 +327494,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -327262,6 +327538,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -327307,6 +327584,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -327352,6 +327630,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -327395,6 +327674,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -327439,6 +327719,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -327483,6 +327764,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -327536,6 +327818,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -327589,6 +327872,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -327642,6 +327926,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -327695,6 +327980,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -327752,6 +328038,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -327809,6 +328096,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -327866,6 +328154,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -327923,6 +328212,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -327981,6 +328271,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -328038,6 +328329,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -328095,6 +328387,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -328152,6 +328445,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -328209,6 +328503,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -328266,6 +328561,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -328308,6 +328604,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -328350,6 +328647,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -328393,6 +328691,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -328436,6 +328735,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -328491,6 +328791,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -328544,6 +328845,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -328587,6 +328889,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -328630,6 +328933,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -328673,6 +328977,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -328717,6 +329022,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -328763,6 +329069,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -328817,6 +329124,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -328861,6 +329169,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -328905,6 +329214,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -328948,6 +329258,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -328992,6 +329303,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -329036,6 +329348,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -329081,6 +329394,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -329136,6 +329450,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -329199,6 +329514,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -329254,6 +329570,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -329309,6 +329626,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -329364,6 +329682,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -329419,6 +329738,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -329474,6 +329794,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -329529,6 +329850,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -329581,6 +329903,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -329633,6 +329956,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -329685,6 +330009,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -329737,6 +330062,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -329789,6 +330115,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -329842,6 +330169,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -329894,6 +330222,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -329949,6 +330278,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -329993,6 +330323,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -330038,6 +330369,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -330083,6 +330415,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -330128,6 +330461,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -330173,6 +330507,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -330218,6 +330553,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -330263,6 +330599,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -330308,6 +330645,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -330352,6 +330690,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -330396,6 +330735,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -330440,6 +330780,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -330484,6 +330825,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -330538,6 +330880,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -330593,6 +330936,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -330647,6 +330991,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -330701,6 +331046,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -330755,6 +331101,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -330809,6 +331156,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -330863,6 +331211,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -330917,6 +331266,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -330971,6 +331321,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -331027,6 +331378,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -331079,6 +331431,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -331134,6 +331487,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -331191,6 +331545,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -331246,6 +331601,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -331300,6 +331656,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -331346,6 +331703,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -331400,6 +331758,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -331454,6 +331813,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -331508,6 +331868,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -331553,6 +331914,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -331607,6 +331969,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -331661,6 +332024,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -331715,6 +332079,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -331769,6 +332134,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -331823,6 +332189,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -331877,6 +332244,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -331931,6 +332299,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -331985,6 +332354,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -332040,6 +332410,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -332095,6 +332466,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -332150,6 +332522,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -332205,6 +332578,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -332260,6 +332634,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -332315,6 +332690,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -332370,6 +332746,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -332425,6 +332802,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -332480,6 +332858,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -332533,6 +332912,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -332586,6 +332966,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -332638,6 +333019,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -332690,6 +333072,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -332745,6 +333128,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -332800,6 +333184,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -332856,6 +333241,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -332912,6 +333298,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -332967,6 +333354,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -333023,6 +333411,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -333079,6 +333468,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -333135,6 +333525,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -333179,6 +333570,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -333223,6 +333615,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -333275,6 +333668,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -333327,6 +333721,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -333380,6 +333775,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -333433,6 +333829,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -333486,6 +333883,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -333531,6 +333929,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -333588,6 +333987,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -333644,6 +334044,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -333700,6 +334101,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -333746,6 +334148,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -333792,6 +334195,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -333849,6 +334253,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -333906,6 +334311,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -333962,6 +334368,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -334018,6 +334425,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -334074,6 +334482,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -334130,6 +334539,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -334184,6 +334594,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -334238,6 +334649,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -334290,6 +334702,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -334342,6 +334755,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -334395,6 +334809,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -334448,6 +334863,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -334492,6 +334908,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -334536,6 +334953,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -334582,6 +335000,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -334628,6 +335047,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -334674,6 +335094,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -334720,6 +335141,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -334766,6 +335188,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -334823,6 +335246,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -334870,6 +335294,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -334928,6 +335353,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -334974,6 +335400,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -335031,6 +335458,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -335087,6 +335515,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -335143,6 +335572,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -335189,6 +335619,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -335235,6 +335666,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -335292,6 +335724,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -335349,6 +335782,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -335405,6 +335839,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -335461,6 +335896,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -335517,6 +335953,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -335573,6 +336010,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -335629,6 +336067,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -335684,6 +336123,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -335738,6 +336178,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -335792,6 +336233,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -335845,6 +336287,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -335898,6 +336341,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -335952,6 +336396,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -336006,6 +336451,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -336059,6 +336505,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -336114,6 +336561,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -336170,6 +336618,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -336223,6 +336672,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -336277,6 +336727,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -336331,6 +336782,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -336385,6 +336837,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -336440,6 +336893,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -336495,6 +336949,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -336549,6 +337004,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -336603,6 +337059,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -336657,6 +337114,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -336713,6 +337171,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -336767,6 +337226,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -343860,6 +344320,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -343914,6 +344375,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -343968,6 +344430,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -344022,6 +344485,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -344075,6 +344539,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -344129,6 +344594,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -344182,6 +344648,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -344236,6 +344703,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -344290,6 +344758,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -344344,6 +344813,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -344399,6 +344869,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -344453,6 +344924,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -344504,6 +344976,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -344558,6 +345031,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -344614,6 +345088,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -344668,6 +345143,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -344716,6 +345192,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -344763,6 +345240,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -344820,6 +345298,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -344878,6 +345357,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -344935,6 +345415,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -344982,6 +345463,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -345038,6 +345520,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -345094,6 +345577,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -345150,6 +345634,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -345205,6 +345690,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -345262,6 +345748,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -345319,6 +345806,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -345375,6 +345863,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -345432,6 +345921,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -345488,6 +345978,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -345542,6 +346033,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -345599,6 +346091,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,
@@ -345656,6 +346149,7 @@
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": true,
+				"supportsContextManagement": true,
 				"disableStrictTools": false,
 				"disableAdaptiveThinking": false,
 				"allowAnthropicHeaderOverrides": false,

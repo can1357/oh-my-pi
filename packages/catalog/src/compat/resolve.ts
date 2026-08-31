@@ -857,6 +857,7 @@ function resolveAnthropicPolicy(
 	const compat: ResolvedAnthropicCompat = {
 		officialEndpoint: official,
 		signingEndpoint,
+		supportsContextManagement: true,
 		disableStrictTools: isAzure,
 		disableAdaptiveThinking: false,
 		allowAnthropicHeaderOverrides: false,

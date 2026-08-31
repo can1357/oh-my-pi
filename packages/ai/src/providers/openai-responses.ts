@@ -98,6 +98,7 @@ import {
 	resolveOpenAIOutputTokenParam,
 	resolveOpenAIRequestSetup,
 	resolveOpenAIResponsesOutputClamp,
+	resolveReasoningSummaryOption,
 	shouldDropAutoToolChoiceForReasoning,
 	shouldRetryWithoutStrictTools,
 } from "./openai-shared";
@@ -1281,13 +1282,8 @@ export function buildParams(
 		filterReasoningHistory: options?.filterReasoningHistory,
 		omitReasoningEffort: options?.omitReasoningEffort,
 	});
-	const reasoningSummary = model.compat.supportsReasoningSummary
-		? options?.reasoningSummary
-		: options?.reasoning === undefined
-			? undefined
-			: null;
 	applyResponsesCompatPolicy(params, reasoningPolicy, {
-		reasoningSummary,
+		reasoningSummary: resolveReasoningSummaryOption(model, options),
 		forceReasoningOff: options?.forceReasoningOff,
 		mapEffort: effort =>
 			model.compat.reasoningEffortMap?.[effort as NonNullable<OpenAIResponsesOptions["reasoning"]>] ??
