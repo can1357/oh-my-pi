@@ -566,7 +566,8 @@ async function handleFormatEndpoint(
 	let fallbackCount = 0;
 	let pendingFallback: string | undefined;
 	let lastClassified: GatewayErrorClassification | undefined;
-	const attemptCap = compiled.targets.length + 1;
+	// One dispatch + one sibling-credential retry per target, plus a spare iteration.
+	const attemptCap = compiled.targets.length * 2 + 1;
 
 	const stateNow = (): ExecutionState =>
 		conductorExecutionState(compiled, attemptedTargets, retryCount, fallbackCount, currentTarget, commitGate.state);
@@ -585,12 +586,16 @@ async function handleFormatEndpoint(
 			commitState: commitGate.state,
 		});
 		if (action.type === "sibling_credential") {
+			bootOpts.storage.clearQuotaProbe(requestId);
 			siblingsExhausted = true;
 			pendingFallback = currentTarget;
 			retryCount += 1;
 			return true;
 		}
 		if (action.type === "fallback_target") {
+			// Drop the failed attempt's probe so settle on the backup cannot clear
+			// the primary credential's cooldown, and so a new probe can be acquired.
+			bootOpts.storage.clearQuotaProbe(requestId);
 			siblingsExhausted = false;
 			pendingFallback = action.targetModelId;
 			fallbackCount += 1;
@@ -918,7 +923,8 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 	let fallbackCount = 0;
 	let pendingFallback: string | undefined;
 	let lastClassified: GatewayErrorClassification | undefined;
-	const attemptCap = compiled.targets.length + 1;
+	// One dispatch + one sibling-credential retry per target, plus a spare iteration.
+	const attemptCap = compiled.targets.length * 2 + 1;
 
 	const stateNow = (): ExecutionState =>
 		conductorExecutionState(compiled, attemptedTargets, retryCount, fallbackCount, currentTarget, commitGate.state);
@@ -937,12 +943,16 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 			commitState: commitGate.state,
 		});
 		if (action.type === "sibling_credential") {
+			bootOpts.storage.clearQuotaProbe(requestId);
 			siblingsExhausted = true;
 			pendingFallback = currentTarget;
 			retryCount += 1;
 			return true;
 		}
 		if (action.type === "fallback_target") {
+			// Drop the failed attempt's probe so settle on the backup cannot clear
+			// the primary credential's cooldown, and so a new probe can be acquired.
+			bootOpts.storage.clearQuotaProbe(requestId);
 			siblingsExhausted = false;
 			pendingFallback = action.targetModelId;
 			fallbackCount += 1;

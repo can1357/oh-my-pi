@@ -157,6 +157,28 @@ describe("holdSseUntilCommit (prelude replay buffer)", () => {
 		expect(gate.state).toBe("terminated");
 	});
 
+	it("metadata then failure never reaches the client (stream-commit contract)", async () => {
+		const gate = new StreamCommitGate();
+		const held = holdSseUntilCommit(
+			sse([
+				"event: response.created\ndata: {}\n\n",
+				"event: response.failed\ndata: {\"error\":{\"message\":\"upstream\"}}\n\n",
+			]),
+			gate,
+		);
+		let aborted: PreludeAbortedError | undefined;
+		try {
+			await collect(held);
+		} catch (error) {
+			aborted = error as PreludeAbortedError;
+		}
+		expect(aborted).toBeInstanceOf(PreludeAbortedError);
+		// Client must not observe the pre-commit failure frames; only the failover
+		// loop sees them via PreludeAbortedError.
+		expect(aborted?.frames.some(f => new TextDecoder().decode(f).includes("response.failed"))).toBe(true);
+		expect(gate.state).toBe("terminated");
+	});
+
 	it("never forwards a dead attempt's metadata to the client (negative)", async () => {
 		const gate = new StreamCommitGate();
 		const held = holdSseUntilCommit(
