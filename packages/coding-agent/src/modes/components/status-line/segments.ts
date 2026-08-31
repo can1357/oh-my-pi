@@ -1,7 +1,7 @@
 import * as os from "node:os";
 import * as path from "node:path";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
-import { TERMINAL } from "@oh-my-pi/pi-tui";
+import { SPINNER_ADVANCE_MS, TERMINAL } from "@oh-my-pi/pi-tui";
 import { formatDuration, formatNumber, getProjectDir, pathIsWithin, relativePathWithinRoot } from "@oh-my-pi/pi-utils";
 import { type Theme, type ThemeColor, theme } from "../../../modes/theme/theme";
 import { shortenPath, TRUNCATE_LENGTHS, truncateToWidth } from "../../../tools/render-utils";
@@ -19,6 +19,26 @@ export type { SegmentContext } from "./types";
 
 function withIcon(icon: string, text: string): string {
 	return icon ? `${icon} ${text}` : text;
+}
+/**
+ * Hash-derived accent ANSI for the session title (or preview stand-in title).
+ * Undefined when `statusLine.sessionAccent` is off or the session is unnamed,
+ * so callers fall back to their theme color.
+ */
+function sessionAccentAnsi(ctx: SegmentContext): string | undefined {
+	if (ctx.sessionAccent === false) return undefined;
+	const name = ctx.session?.sessionManager?.getSessionName() || ctx.previewTitle;
+	if (!name) return undefined;
+	return getSessionAccentAnsi(getSessionAccentHex(name, theme.sessionAccentInputs));
+}
+/**
+ * `theme.fg` for accent-role text: the hash-derived session accent when
+ * enabled, else the given theme color. Callers route only the parts that
+ * should carry the session identity color through this (pi icon, model name,
+ * PR link, mode badges, session title) — status colors stay `theme.fg`.
+ */
+function accentFg(ctx: SegmentContext, color: ThemeColor, text: string): string {
+	return `${sessionAccentAnsi(ctx) ?? theme.getFgAnsi(color)}${text}\x1b[39m`;
 }
 
 /** Left-truncate a path/label to `maxLen`, prefixing an ellipsis when clipped. */
@@ -106,10 +126,33 @@ const piSegment: StatusLineSegment = {
 			const icon = theme.icon.ghost ? `${theme.icon.ghost} ` : "";
 			return { content: theme.fg("warning", `${icon}${ctx.focusedAgentId} `), visible: true };
 		}
-		const content = theme.icon.pi ? `${theme.icon.pi} ` : "";
-		return { content: theme.fg("accent", content), visible: true };
+		// Brand fg fades between dim gray (idle) and the accent (working) across
+		// turn edges; the component samples the tween into `brandFgAnsi`.
+		const fgAnsi = ctx.brandFgAnsi ?? theme.getFgAnsi("dim");
+		// While a turn runs the brand icon becomes a braille spinner plus a
+		// whole-unit turn timer (port of rust omp's status-band active brand).
+		const content =
+			ctx.turnElapsedMs != null
+				? `${brandSpinnerFrame(ctx.now?.getTime())} ${brandTimer(ctx.turnElapsedMs)} `
+				: theme.icon.omp
+					? `${theme.icon.omp} `
+					: "";
+		return { content: `${fgAnsi}${content}\x1b[39m`, visible: true };
 	},
 };
+/** Current braille-spinner glyph on the shared clock, at the Loader's 80ms cadence. */
+function brandSpinnerFrame(nowMs = Date.now()): string {
+	const frames = theme.getSpinnerFrames("activity");
+	return frames[Math.floor(nowMs / SPINNER_ADVANCE_MS) % frames.length] ?? "";
+}
+
+/** Turn timer in omp's brand format: whole seconds → minutes → hours (capped at 99h). */
+function brandTimer(elapsedMs: number): string {
+	const seconds = Math.floor(elapsedMs / 1000);
+	if (seconds < 60) return `${seconds}s`;
+	if (seconds < 3600) return `${Math.floor(seconds / 60)}m`;
+	return `${Math.min(99, Math.floor(seconds / 3600))}h`;
+}
 
 const modelSegment: StatusLineSegment = {
 	id: "model",
@@ -162,7 +205,7 @@ const modelSegment: StatusLineSegment = {
 
 		// `statusLineModel` is aliased to `accent` in many themes, so the badge
 		// uses status colors to stay visibly distinct from the model name color.
-		let content = theme.fg("statusLineModel", withIcon(modelIcon, modelName));
+		let content = accentFg(ctx, "statusLineModel", withIcon(modelIcon, modelName));
 		// Advisor symbol, colored by the worst status in the roster:
 		// success = all running, warning = quota-exhausted, error = failed,
 		// dim = everything paused/no-model. Per-advisor detail lives in
@@ -183,7 +226,7 @@ const modelSegment: StatusLineSegment = {
 			content += theme.fg(badgeColor, ` ${advisorIcon}`);
 		}
 		if (tail) {
-			content += theme.fg("statusLineModel", tail);
+			content += accentFg(ctx, "statusLineModel", tail);
 		}
 
 		return { content, visible: true };
@@ -228,14 +271,20 @@ function renderGoalMode(ctx: SegmentContext, mode: { enabled: boolean; paused: b
 	if (showBudget && goal) {
 		parts.push(formatGoalBudget(goal.tokensUsed, goal.tokenBudget));
 	}
-	return { content: theme.fg(color, parts.join(" ")), visible: true };
+	return {
+		content: color === "accent" ? accentFg(ctx, color, parts.join(" ")) : theme.fg(color, parts.join(" ")),
+		visible: true,
+	};
 }
 
-function formatLoopLimit(limit: NonNullable<SegmentContext["loopMode"]>["limit"]): string | undefined {
+function formatLoopLimit(
+	limit: NonNullable<SegmentContext["loopMode"]>["limit"],
+	nowMs = Date.now(),
+): string | undefined {
 	if (!limit) return undefined;
 	if (limit.kind === "iterations") return `${limit.remaining}/${limit.initial}`;
 
-	const totalSeconds = Math.max(0, Math.ceil((limit.deadlineMs - Date.now()) / 1_000));
+	const totalSeconds = Math.max(0, Math.ceil((limit.deadlineMs - nowMs) / 1_000));
 	const hours = Math.floor(totalSeconds / 3_600);
 	const minutes = Math.floor((totalSeconds % 3_600) / 60);
 	const seconds = totalSeconds % 60;
@@ -253,14 +302,16 @@ const modeSegment: StatusLineSegment = {
 		if (plan && (plan.enabled || plan.paused)) {
 			const label = plan.paused ? `Plan${pauseSuffix}` : "Plan";
 			const content = withIcon(theme.icon.plan, label);
-			const color = plan.paused ? "warning" : "accent";
-			return { content: theme.fg(color, content), visible: true };
+			return {
+				content: plan.paused ? theme.fg("warning", content) : accentFg(ctx, "accent", content),
+				visible: true,
+			};
 		}
 
 		const prewalk = ctx.prewalk;
 		if (prewalk?.enabled) {
 			const content = withIcon(theme.icon.prewalk, "Prewalk");
-			return { content: theme.fg("accent", content), visible: true };
+			return { content: accentFg(ctx, "accent", content), visible: true };
 		}
 
 		const goal = ctx.goalMode;
@@ -271,7 +322,7 @@ const modeSegment: StatusLineSegment = {
 		const vibe = ctx.vibeMode;
 		if (vibe?.enabled) {
 			const content = withIcon(theme.icon.agents, "Vibe");
-			return { content: theme.fg("accent", content), visible: true };
+			return { content: accentFg(ctx, "accent", content), visible: true };
 		}
 
 		const loop = ctx.loopMode;
@@ -279,7 +330,7 @@ const modeSegment: StatusLineSegment = {
 			const icon = loop.state === "paused" ? theme.icon.pause || theme.icon.loop : theme.icon.loop;
 			const color: ThemeColor = loop.state === "paused" ? "warning" : "customMessageLabel";
 			const parts = [withIcon(icon, `Loop ${loop.state}`)];
-			const limit = formatLoopLimit(loop.limit);
+			const limit = formatLoopLimit(loop.limit, ctx.now?.getTime());
 			if (limit) parts.push(limit);
 			return { content: theme.fg(color, parts.join(" ")), visible: true };
 		}
@@ -384,7 +435,7 @@ const prSegment: StatusLineSegment = {
 
 		const label = withIcon(theme.icon.pr, `#${pr.number}`);
 		const content = TERMINAL.hyperlinks ? `\x1b]8;;${pr.url}\x07${label}\x1b]8;;\x07` : label;
-		return { content: theme.fg("accent", content), visible: true };
+		return { content: accentFg(ctx, "accent", content), visible: true };
 	},
 };
 
@@ -456,7 +507,6 @@ const costSegment: StatusLineSegment = {
 		const normalizedPremiumRequests = normalizePremiumRequests(premiumRequests);
 		const state = ctx.session.state;
 		const usingSubscription = state.model ? (ctx.session.modelRegistry?.isUsingOAuth(state.model) ?? false) : false;
-		const advisorUsingSubscription = ctx.session.isAdvisorUsingSubscription?.() ?? false;
 
 		if (!cost && !advisorCost && !usingSubscription && !normalizedPremiumRequests) {
 			return { content: "", visible: false };
@@ -473,6 +523,11 @@ const costSegment: StatusLineSegment = {
 		if (normalizedPremiumRequests) billingParts.push(`★ ${formatNumber(normalizedPremiumRequests)}`);
 		if (advisorCost) {
 			const prefix = billingParts.length ? "+ " : "";
+			// Resolve the advisor subscription flag lazily: with no active advisor
+			// it walks the whole model catalog (getAvailable → hasAuth per provider
+			// → credential-file reads), and the status line re-renders at the
+			// working-spinner cadence, so an eager per-frame probe pinned CPU (#10129).
+			const advisorUsingSubscription = ctx.session.isAdvisorUsingSubscription?.() ?? false;
 			billingParts.push(`${prefix}${formatAdvisorSpend(advisorCost, advisorUsingSubscription, theme)}`);
 		}
 		if (billingParts.length === 0) return { content: "", visible: false };
@@ -493,15 +548,16 @@ const contextPctSegment: StatusLineSegment = {
 		let autoIcon = "";
 		if (ctx.autoCompactEnabled && theme.icon.auto) {
 			const speculation = ctx.compactionSpeculation;
-			const iconColor =
+			const accentIcon = accentFg(ctx, "accent", theme.icon.auto);
+			autoIcon = ` ${
 				speculation === "running"
 					? ctx.speculationBlinkOn
-						? "accent"
-						: "muted"
+						? accentIcon
+						: theme.fg("muted", theme.icon.auto)
 					: speculation === "armed"
-						? "accent"
-						: color;
-			autoIcon = ` ${theme.fg(iconColor, theme.icon.auto)}`;
+						? accentIcon
+						: theme.fg(color, theme.icon.auto)
+			}`;
 		}
 		const text = theme.fg(color, formatContextUsage(pct, window, ctx.contextTokens));
 		const content = withIcon(theme.icon.context, `${text}${autoIcon}`);
@@ -542,7 +598,7 @@ const timeSegment: StatusLineSegment = {
 	id: "time",
 	render(ctx) {
 		const opts = ctx.options.time ?? {};
-		const now = new Date();
+		const now = ctx.now ?? new Date();
 
 		let hours = now.getHours();
 		let suffix = "";
@@ -575,9 +631,11 @@ const sessionSegment: StatusLineSegment = {
 
 const hostnameSegment: StatusLineSegment = {
 	id: "hostname",
-	render(_ctx) {
-		const name = os.hostname().split(".")[0];
-		return { content: withIcon(theme.icon.host, name), visible: true };
+	render(ctx) {
+		const name = ctx.hostname ?? os.hostname().split(".")[0];
+		const content = withIcon(theme.icon.host, name);
+		const ansi = sessionAccentAnsi(ctx);
+		return { content: ansi ? `${ansi}${content}\x1b[39m` : content, visible: true };
 	},
 };
 
@@ -634,13 +692,7 @@ const sessionNameSegment: StatusLineSegment = {
 		const name = sessionManager?.getSessionName() || ctx.previewTitle;
 		if (!name) return { content: "", visible: false };
 
-		const accentEnabled = ctx.sessionAccent !== false;
-		const ansi = accentEnabled
-			? (getSessionAccentAnsi(
-					getSessionAccentHex(name, theme.getMajorThemeColorHexes(), theme.accentSurfaceLuminance),
-				) ?? theme.getFgAnsi("accent"))
-			: theme.getFgAnsi("accent");
-		return { content: `${ansi}${sanitizeStatusText(name)}\x1b[39m`, visible: true };
+		return { content: accentFg(ctx, "accent", sanitizeStatusText(name)), visible: true };
 	},
 };
 
@@ -652,7 +704,7 @@ const collabSegment: StatusLineSegment = {
 			ctx.collab.role === "host"
 				? `⇄ collab:${ctx.collab.participantCount}`
 				: `⇄ collab guest:${ctx.collab.participantCount}`;
-		return { content: theme.fg("accent", label), visible: true };
+		return { content: accentFg(ctx, "accent", label), visible: true };
 	},
 };
 
@@ -664,7 +716,7 @@ function pickUsageColor(percent: number): "muted" | "warning" | "error" {
 
 function formatUsageReset(value: number, unit: "m" | "h"): string {
 	if (unit === "m") {
-		// total minutes (5h window: max 300)
+		// Short-window reset timers retain minute precision.
 		if (value < 60) return `${value}m`;
 		const hours = Math.floor(value / 60);
 		const mins = value % 60;
@@ -681,13 +733,13 @@ const usageSegment: StatusLineSegment = {
 	id: "usage",
 	render(ctx) {
 		const u = ctx.usage;
-		if (!u || (!u.fiveHour && !u.sevenDay && !u.monthly)) {
+		if (!u || (!u.fiveHour && !u.daily && !u.sevenDay && !u.monthly)) {
 			return { content: "", visible: false };
 		}
 		const parts: string[] = [];
 		if (u.tier) {
 			const tier = truncateToWidth(sanitizeStatusText(u.tier), TRUNCATE_LENGTHS.SHORT);
-			if (tier) parts.push(theme.fg("accent", tier));
+			if (tier) parts.push(accentFg(ctx, "accent", tier));
 		}
 		if (u.fiveHour) {
 			const pct = u.fiveHour.percent;
@@ -697,6 +749,15 @@ const usageSegment: StatusLineSegment = {
 					? theme.fg("muted", ` (${formatUsageReset(u.fiveHour.resetMinutes, "m")})`)
 					: "";
 			parts.push(`5h ${pctText}${reset}`);
+		}
+		if (u.daily) {
+			const pct = u.daily.percent;
+			const pctText = theme.fg(pickUsageColor(pct), `${Math.round(pct)}%`);
+			const reset =
+				u.daily.resetMinutes !== undefined
+					? theme.fg("muted", ` (${formatUsageReset(u.daily.resetMinutes, "m")})`)
+					: "";
+			parts.push(`1d ${pctText}${reset}`);
 		}
 		if (u.sevenDay) {
 			const pct = u.sevenDay.percent;

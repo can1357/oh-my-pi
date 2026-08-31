@@ -231,7 +231,7 @@ describe("AgentSession advisor auto-resume suppression", () => {
 		};
 	}
 
-	function isAdvisorCard(message: AgentMessage): boolean {
+	function isAdvisorCard(message: AgentMessage): message is AgentMessage & { role: "custom"; content: string } {
 		return message.role === "custom" && (message as { customType?: string }).customType === ADVISOR_TYPE;
 	}
 
@@ -258,6 +258,63 @@ describe("AgentSession advisor auto-resume suppression", () => {
 		};
 		return persisted;
 	}
+
+	it("preserves a final-yield blocker without starting a hidden post-yield turn", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const mock = createMockModel({
+			responses: [
+				createYieldMockResponse({ result: { data: "FINAL RESULT" } }),
+				{ content: ["must not run"], stopReason: "stop" },
+			],
+		});
+		const advisorMock = createMockModel({
+			responses: [
+				{
+					content: [
+						{
+							type: "toolCall",
+							name: "advise",
+							arguments: { note: "Final yield needs correction", severity: "blocker" },
+						},
+					],
+				},
+				{ content: [], stopReason: "stop" },
+			],
+		});
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [createMockYieldTool()] },
+			streamFn: mock.stream,
+		});
+		const sessionManager = SessionManager.inMemory();
+		const settings = Settings.isolated({
+			"advisor.syncBacklog": "1",
+			"compaction.enabled": false,
+			"retry.enabled": false,
+		});
+		settings.setModelRole("advisor", "anthropic/claude-sonnet-4-5");
+		const authStorage = await AuthStorage.create(":memory:");
+		authStorages.push(authStorage);
+		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		const modelRegistry = new ModelRegistry(authStorage, tempDir.join("models.yml"));
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settings,
+			modelRegistry,
+			advisorTools: [],
+			advisorStreamFn: advisorMock.stream,
+		});
+		expect(session.setAdvisorEnabled(true)).toBe(true);
+		await session.prompt("yield the final result");
+		expect(await session.waitForAdvisorCatchup(1000)).toBe(true);
+
+		expect(advisorMock.calls).toHaveLength(2);
+		expect(mock.calls).toHaveLength(1);
+		const advisorCards = session.agent.state.messages.filter(isAdvisorCard);
+		expect(advisorCards).toHaveLength(1);
+		expect(advisorCards[0].content).toContain("Final yield needs correction");
+	});
 
 	it("preserves a late advisor concern after a terminal answer without waking the primary", async () => {
 		const { session, sessionManager, mock, advisorMock } = await createCompletedAdvisorSession();

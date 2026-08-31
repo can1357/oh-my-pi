@@ -11,7 +11,7 @@ import { EventLoopKeepalive, type ThinkingLevel } from "@oh-my-pi/pi-agent-core"
 import type { ImageContent, Model } from "@oh-my-pi/pi-ai";
 import {
 	$env,
-	directoryExists,
+	directoryIsMissing,
 	getLogPath,
 	getProjectDir,
 	isBunTestRuntime,
@@ -36,6 +36,7 @@ import { ModelRegistry } from "./config/model-registry";
 import {
 	DEFAULT_PREWALK_TARGET,
 	expandRoleAlias,
+	formatModelSelectorValue,
 	getModelMatchPreferences,
 	resolveCliModel,
 	resolveModelRoleValue,
@@ -59,12 +60,22 @@ import { ExtensionRunner } from "./extensibility/extensions/runner";
 import type { ExtensionUIContext } from "./extensibility/extensions/types";
 import { scheduleMarketplaceAutoUpdate } from "./extensibility/plugins/marketplace-auto-update";
 import { registerDaemonProjectPresence } from "./launch/presence";
+import { discoverStartupLspServers } from "./lsp/servers";
 import type { MCPManager } from "./mcp";
 import { InteractiveMode } from "./modes/interactive-mode";
 import type { PrintModeOptions } from "./modes/print-mode";
 import { claimRpcInput } from "./modes/rpc/rpc-input";
 import { CURRENT_SETUP_VERSION } from "./modes/setup-version";
-import { initTheme, stopThemeWatcher } from "./modes/theme/theme";
+import type * as SetupWizardModule from "./modes/setup-wizard";
+import type { SetupScene } from "./modes/setup-wizard";
+import {
+	applyStartupComposerPreferences,
+	type ComposerLease,
+	setStartupComposerLspServers,
+	stopPendingStartupComposer,
+	takeStartupComposerLease,
+} from "./modes/startup-composer";
+import { ensureTheme, initTheme, stopThemeWatcher } from "./modes/theme/theme";
 import type { SubmittedUserInput } from "./modes/types";
 import { createWarpEventBridgeExtension } from "./modes/warp-events";
 import { AgentLifecycleManager } from "./registry/agent-lifecycle";
@@ -103,7 +114,7 @@ type RunPrintMode = (session: AgentSession, options: PrintModeOptions) => Promis
 type RunRpcMode = (
 	session: AgentSession,
 	setToolUIContext?: (uiContext: ExtensionUIContext, hasUI: boolean) => void,
-	eventBus?: EventBus,
+	subagentEventBus?: EventBus,
 	input?: ReadableStream<Uint8Array>,
 ) => Promise<never>;
 
@@ -116,7 +127,8 @@ async function checkForNewVersion(currentVersion: string): Promise<string | unde
 		return;
 	}
 	try {
-		const release = await getLatestRelease({ timeoutMs: 5_000 });
+		const channel = settings.get("update.channel");
+		const release = await getLatestRelease({ timeoutMs: 5_000, channel });
 		return Bun.semver.order(release.version, currentVersion) > 0 ? release.version : undefined;
 	} catch {
 		return undefined;
@@ -480,44 +492,68 @@ async function runInteractiveMode(
 	forceSetupWizard: boolean,
 	showStartupSplash: boolean,
 	eventBus?: EventBus,
+	subagentEventBus?: EventBus,
 	initialMessage?: string,
 	initialImages?: ImageContent[],
 	joinLink?: string,
+	startBackgroundModelDiscovery?: () => Promise<void>,
+	startupLease?: ComposerLease,
 ): Promise<void> {
-	const mode = new InteractiveMode(
-		session,
-		version,
-		startupChangelog,
-		setExtensionUIContext,
-		lspServers,
-		mcpManager,
-		eventBus,
-	);
+	let mode: InteractiveMode;
+	try {
+		mode = new InteractiveMode(
+			session,
+			version,
+			startupChangelog,
+			setExtensionUIContext,
+			lspServers,
+			mcpManager,
+			eventBus,
+			startupLease?.composer,
+			subagentEventBus,
+		);
+		startupLease?.adopt();
+	} catch (error) {
+		startupLease?.dispose();
+		throw error;
+	}
 
-	// Cold-launch gate: the full setup wizard (every scene + the overlay and
-	// their TUI/OAuth/search/theme deps) is heavy, yet the common case only needs
-	// to know whether the stored setup version is current. Lazy-load the wizard
-	// barrel only when setup is stale, forced, or the explicit startup splash
-	// setting needs the shared setup splash renderer.
-	const storedSetupVersion = settings.get("setupVersion");
-	const setupWizard =
-		forceSetupWizard || storedSetupVersion < CURRENT_SETUP_VERSION || showStartupSplash
-			? await import("./modes/setup-wizard")
-			: undefined;
-	const setupScenes = setupWizard
-		? await setupWizard.selectSetupScenes(storedSetupVersion, setupWizard.ALL_SCENES, mode, {
-				resuming,
-				isTTY: process.stdin.isTTY && process.stdout.isTTY,
-				setupWizardEnabled: settings.get("startup.setupWizard"),
-				force: forceSetupWizard,
-			})
-		: [];
-	const playStartupSplash = showStartupSplash && setupScenes.length === 0;
+	let setupWizard: typeof SetupWizardModule | undefined;
+	let setupScenes: SetupScene[] = [];
+	let playStartupSplash = false;
+	try {
+		// Cold-launch gate: the full setup wizard (every scene + the overlay and
+		// their TUI/OAuth/search/theme deps) is heavy, yet the common case only needs
+		// to know whether the stored setup version is current. Lazy-load the wizard
+		// barrel only when setup is stale, forced, or the explicit startup splash
+		// setting needs the shared setup splash renderer.
+		const storedSetupVersion = settings.get("setupVersion");
+		setupWizard =
+			forceSetupWizard || storedSetupVersion < CURRENT_SETUP_VERSION || showStartupSplash
+				? await import("./modes/setup-wizard")
+				: undefined;
+		setupScenes = setupWizard
+			? await setupWizard.selectSetupScenes(storedSetupVersion, setupWizard.ALL_SCENES, mode, {
+					resuming,
+					isTTY: process.stdin.isTTY && process.stdout.isTTY,
+					setupWizardEnabled: settings.get("startup.setupWizard"),
+					force: forceSetupWizard,
+				})
+			: [];
+		playStartupSplash = showStartupSplash && setupScenes.length === 0;
 
-	await mode.init({
-		suppressWelcomeIntro: resuming || setupScenes.length > 0 || playStartupSplash,
-		clearInitialTerminalHistory: true,
-	});
+		await logger.time("InteractiveMode.init", () =>
+			mode.init({
+				suppressWelcomeIntro: resuming || setupScenes.length > 0 || playStartupSplash,
+				clearInitialTerminalHistory: true,
+				recentSessions: startupLease?.recentSessions,
+			}),
+		);
+		void startBackgroundModelDiscovery?.();
+	} catch (error) {
+		mode.stop();
+		throw error;
+	}
 
 	if (setupWizard && playStartupSplash) {
 		await setupWizard.runStartupSplash(mode);
@@ -530,12 +566,13 @@ async function runInteractiveMode(
 	// Consume failures immediately, but defer any banner until the transcript is stable.
 	const checkedVersionPromise = versionCheckPromise.catch(() => undefined);
 
-	// Cold-launch cleanup: the first paint already clears native history, and this
-	// replay replaces the welcome/startup frame with the resumed/new transcript.
-	// Every in-process session load also uses `clearTerminalHistory`; cold launch
-	// follows the same clean-cutover path instead of preserving a previous run's
-	// transcript above the fresh one.
-	await mode.renderInitialMessages({ preserveExistingChat: true, clearTerminalHistory: true });
+	// `init` already cleared native history before painting the startup frame.
+	// Replaying resumed transcript rows and repainting the viewport is enough;
+	// another clear would only archive the startup frame. In-process session
+	// replacements still request `clearTerminalHistory` at their own callsites.
+	await logger.time("InteractiveMode.renderInitialMessages", () =>
+		mode.renderInitialMessages({ preserveExistingChat: true }),
+	);
 	// A resolved version check must not insert its banner into a partial transcript.
 	checkedVersionPromise.then(newVersion => {
 		if (!settings.get("startup.checkUpdate")) {
@@ -686,31 +723,74 @@ async function moveMissingCwdSessionIfNeeded(
 	return { status: "moved", manager };
 }
 
+type ResumedProjectResult = { cwd: string; chdirFailed?: string };
+
 async function switchToResumedProject(
 	resumedCwd: string | undefined,
 	activeSettings: Settings,
 	pluginPreloadPromise: Promise<unknown>,
-): Promise<string> {
+	sessionManager: SessionManager,
+): Promise<ResumedProjectResult> {
+	const launchCwd = getProjectDir();
 	if (
 		!resumedCwd ||
-		normalizePathForComparison(resumedCwd) === normalizePathForComparison(getProjectDir()) ||
-		!(await directoryExists(resumedCwd))
+		normalizePathForComparison(resumedCwd) === normalizePathForComparison(launchCwd) ||
+		(await directoryIsMissing(resumedCwd))
 	) {
-		return getProjectDir();
+		return { cwd: launchCwd };
 	}
 
 	// Let the launch-cwd preload settle before clearing and re-warming its caches.
 	await pluginPreloadPromise.catch(() => {});
-	setProjectDir(resumedCwd);
+	try {
+		setProjectDir(resumedCwd);
+	} catch (error) {
+		logger.warn("Could not switch to resumed project directory", { cwd: resumedCwd, error: String(error) });
+		sessionManager.setCwdWithoutRelocation(launchCwd);
+		return { cwd: launchCwd, chdirFailed: resumedCwd };
+	}
 	clearPluginRootsAndCaches();
 	resetCapabilities();
 	const cwd = getProjectDir();
 	// clearPluginRootsAndCaches only kicks off an unawaited re-warm; await a fresh
 	// destination preload so sync consumers (plugin-provided LSP/DAP config) never
 	// read the launch project's stale/empty roots during session creation.
-	await preloadPluginRoots(os.homedir(), cwd);
-	await activeSettings.reloadForCwd(cwd);
-	return cwd;
+	try {
+		await preloadPluginRoots(os.homedir(), cwd);
+		await activeSettings.reloadForCwd(cwd);
+		if (normalizePathForComparison(sessionManager.getCwd()) !== normalizePathForComparison(cwd)) {
+			sessionManager.adoptRecordedCwd();
+		}
+	} catch (error) {
+		// The process cwd is already committed to the target. If rescoping the
+		// cwd-derived state fails, undo the whole transition instead of building
+		// the session with target-scoped cwd and launch-scoped settings.
+		logger.warn("Could not rescope to resumed project directory", { cwd, error: String(error) });
+		try {
+			setProjectDir(launchCwd);
+			sessionManager.setCwdWithoutRelocation(launchCwd);
+			clearPluginRootsAndCaches();
+			await preloadPluginRoots(os.homedir(), launchCwd);
+			// Settings.#cwd was already assigned the destination; re-scope it
+			// back so path-derived values and project saves target the launch
+			// project, not the failed resume target.
+			await activeSettings.reloadForCwd(launchCwd);
+		} catch (rollbackError) {
+			throw new SessionResolutionError(
+				`Could not switch to resumed project ${resumedCwd} (${error instanceof Error ? error.message : String(error)}); failed to restore launch directory ${launchCwd}: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`,
+			);
+		}
+		return { cwd: launchCwd, chdirFailed: resumedCwd };
+	}
+	return { cwd };
+}
+
+function notifyResumeCwdFallback(parsedArgs: Args, resumedProject: ResumedProjectResult, cwd: string): void {
+	if (!resumedProject.chdirFailed) return;
+	writeStartupNotice(
+		parsedArgs,
+		`${chalk.yellow(`Could not switch to resumed project ${resumedProject.chdirFailed}; staying in ${cwd}.`)}\n`,
+	);
 }
 
 /**
@@ -1085,8 +1165,13 @@ export async function buildSessionOptions(
 			}
 		} else if (resolved.model) {
 			options.model = resolved.model;
+			// The recorded role must carry the effort the session actually starts
+			// at, or the first cycle back into `default` overrides it.
 			activeSettings.overrideModelRoles({
-				default: resolved.selector ?? `${resolved.model.provider}/${resolved.model.id}`,
+				default: formatModelSelectorValue(
+					resolved.selector ?? `${resolved.model.provider}/${resolved.model.id}`,
+					parsed.thinking ?? resolved.thinkingLevel,
+				),
 			});
 			if (!parsed.thinking && resolved.thinkingLevel) {
 				options.thinkingLevel = resolved.thinkingLevel;
@@ -1306,12 +1391,18 @@ export async function runRootCommand(
 	logger.startTiming();
 	startStartupWatchdog();
 	try {
-		// Initialize theme early with defaults (CLI commands need symbols)
-		// Will be re-initialized with user preferences later
-		await logger.time("initTheme:initial", initTheme);
+		// Non-prepaint commands still need a default theme; an existing Composer
+		// already initialized its cached theme synchronously for the first frame.
+		await logger.time("initTheme:initial", ensureTheme);
 
 		const parsedArgs = parsed;
-		await logger.time("applyStartupCwd", applyStartupCwd, parsedArgs);
+		try {
+			await logger.time("applyStartupCwd", applyStartupCwd, parsedArgs);
+		} catch (error: unknown) {
+			const message = error instanceof Error ? error.message : String(error);
+			process.stderr.write(`${chalk.red(`Error: ${message}`)}\n`);
+			process.exit(1);
+		}
 
 		const notifs: (InteractiveModeNotify | null)[] = [];
 
@@ -1382,12 +1473,21 @@ export async function runRootCommand(
 		// tree; declare it so headless subagent optimizations (e.g. skipping replan
 		// title refresh) can tell a focusable process from a print/RPC/eval one.
 		setInteractiveHost(isInteractive);
-		// Create AuthStorage upfront. A configured-but-unreachable auth broker throws
-		// here; convert it to an actionable stderr message + clean exit instead of a
-		// raw uncaught stack trace (issue #8096).
+		if (!isInteractive) {
+			stopPendingStartupComposer();
+		}
+		// Auth and settings are independent; start both before awaiting either.
+		// A configured-but-unreachable auth broker still receives the actionable
+		// startup error below, while its cache/config I/O overlaps settings I/O.
+		const authStoragePromise = logger.time("discoverAuthStorage", deps.discoverAuthStorage ?? discoverAuthStorage);
+		authStoragePromise.catch(() => {});
+		const settingsPromise = deps.settings
+			? Promise.resolve(deps.settings)
+			: logger.time("settings:init", Settings.init, { cwd, configFiles: parsedArgs.config });
+		settingsPromise.catch(() => {});
 		let authStorage: AuthStorage;
 		try {
-			authStorage = await logger.time("discoverAuthStorage", deps.discoverAuthStorage ?? discoverAuthStorage);
+			authStorage = await authStoragePromise;
 		} catch (error) {
 			const message = await describeAuthBrokerStartupError(error);
 			if (message === null) throw error;
@@ -1395,8 +1495,7 @@ export async function runRootCommand(
 			process.exit(1);
 		}
 
-		const settingsInstance =
-			deps.settings ?? (await logger.time("settings:init", Settings.init, { cwd, configFiles: parsedArgs.config }));
+		const settingsInstance = await settingsPromise;
 		if (parsedArgs.approvalMode) {
 			// Runtime override (not persisted): every settings.get("tools.approvalMode") downstream
 			// sees this value. The wrapper still honours --auto-approve / --yolo on top of it.
@@ -1474,6 +1573,26 @@ export async function runRootCommand(
 			settingsInstance.get("theme.dark"),
 			settingsInstance.get("theme.light"),
 		);
+
+		applyStartupComposerPreferences({
+			quiet: settingsInstance.get("startup.quiet"),
+			composerShape: settingsInstance.get("composer.shape") ?? "band",
+			showHardwareCursor: settingsInstance.get("showHardwareCursor"),
+			maxInlineImages: settingsInstance.get("tui.maxInlineImages"),
+			resizeScrollback: settingsInstance.get("tui.resizeScrollback"),
+			imeSafeCursor: settingsInstance.get("tui.imeSafeCursor"),
+			autocompleteMaxVisible: settingsInstance.get("autocompleteMaxVisible"),
+			spellingTypoDetection: settingsInstance.get("spelling.typoDetection"),
+			spellingAutocomplete: settingsInstance.get("spelling.autocomplete"),
+			spellingAutocorrect: settingsInstance.get("spelling.autocorrect"),
+			theme: {
+				symbolPreset: settingsInstance.get("symbolPreset"),
+				colorBlindMode: settingsInstance.get("colorBlindMode"),
+				darkTheme: settingsInstance.get("theme.dark"),
+				lightTheme: settingsInstance.get("theme.light"),
+			},
+		});
+		setStartupComposerLspServers(discoverStartupLspServers(cwd, "connecting"));
 
 		let scopedModels = await logger.time(
 			"resolveModelScope",
@@ -1577,7 +1696,15 @@ export async function runRootCommand(
 
 		if ((typeof parsedArgs.resume === "string" || foreignSource) && sessionManager) {
 			const previousCwd = cwd;
-			cwd = await switchToResumedProject(sessionManager.getCwd(), settingsInstance, pluginPreloadPromise);
+			const recordedCwd = sessionManager.getRecordedCwd() ?? sessionManager.getCwd();
+			const resumedProject = await switchToResumedProject(
+				recordedCwd,
+				settingsInstance,
+				pluginPreloadPromise,
+				sessionManager,
+			);
+			cwd = resumedProject.cwd;
+			notifyResumeCwdFallback(parsedArgs, resumedProject, cwd);
 			if (cwd !== previousCwd) {
 				// applyStartupCwd persists an explicit --cwd in parsedArgs; once resume
 				// switches projects, keep session construction on the destination too.
@@ -1636,14 +1763,21 @@ export async function runRootCommand(
 				stopStartupWatchdog();
 				process.exit(0);
 			}
-			// Re-scope every cwd-derived input before building the resumed session.
+			sessionManager = await SessionManager.open(selected.path);
 			const previousCwd = cwd;
-			cwd = await switchToResumedProject(selected.cwd, settingsInstance, pluginPreloadPromise);
+			const recordedCwd = selected.cwd || sessionManager.getRecordedCwd() || sessionManager.getCwd();
+			const resumedProject = await switchToResumedProject(
+				recordedCwd,
+				settingsInstance,
+				pluginPreloadPromise,
+				sessionManager,
+			);
+			cwd = resumedProject.cwd;
+			notifyResumeCwdFallback(parsedArgs, resumedProject, cwd);
 			if (cwd !== previousCwd) {
 				parsedArgs.cwd = cwd;
 				scopedModels = await resolveScopedModels(parsedArgs, modelRegistry, settingsInstance);
 			}
-			sessionManager = await SessionManager.open(selected.path);
 		}
 
 		if (sessionManager && (parsedArgs.continue || parsedArgs.resume || parsedArgs.fork || foreignSource)) {
@@ -1660,7 +1794,6 @@ export async function runRootCommand(
 				}
 			}
 		}
-
 		await pluginPreloadPromise;
 		if (deps === DEFAULT_RUN_ROOT_DEPENDENCIES) {
 			await logger.time("registerDaemonProjectPresence", registerDaemonProjectPresence, cwd);
@@ -1746,6 +1879,7 @@ export async function runRootCommand(
 			}
 
 			const eventBus = new EventBus();
+			const subagentEventBus = new EventBus();
 			const extensionsResult = parsedArgs.trustedExtensions?.length
 				? await loadTrustedSessionExtensions(sessionOptions, cwd, eventBus)
 				: await loadSessionExtensions(sessionOptions, cwd, settingsInstance, eventBus);
@@ -1815,9 +1949,17 @@ export async function runRootCommand(
 					)
 				: undefined;
 
-			const { session, setToolUIContext, modelFallbackMessage, lspServers, mcpManager } = await createSession({
+			const {
+				session,
+				setToolUIContext,
+				modelFallbackMessage,
+				lspServers,
+				mcpManager,
+				startBackgroundModelDiscovery,
+			} = await createSession({
 				...sessionOptions,
 				eventBus,
+				subagentEventBus,
 				preloadedExtensions: extensionsResult,
 			});
 
@@ -1843,6 +1985,7 @@ export async function runRootCommand(
 					settings: settingsInstance,
 					enableLsp: sessionOptions.enableLsp ?? true,
 					eventBus,
+					subagentEventBus,
 				}),
 				Math.trunc(Number(settingsInstance.get("task.agentIdleTtlMs") ?? 420_000) || 0),
 			);
@@ -1891,7 +2034,7 @@ export async function runRootCommand(
 				// Branch-only protocol runner: keep RPC host code out of normal interactive startup.
 				const runRpcMode: RunRpcMode = (await import("./modes/rpc/rpc-mode")).runRpcMode;
 				stopStartupWatchdog();
-				await runRpcMode(session, mode === "rpc-ui" ? setToolUIContext : undefined, eventBus, rpcInput);
+				await runRpcMode(session, mode === "rpc-ui" ? setToolUIContext : undefined, subagentEventBus, rpcInput);
 			} else if (isInteractive) {
 				const versionCheckPromise = checkForNewVersion(VERSION).catch(() => undefined);
 				const startupChangelog = await startupChangelogPromise;
@@ -1913,27 +2056,34 @@ export async function runRootCommand(
 						process.exit(0);
 					}
 				}
-
-				stopStartupWatchdog();
-				logger.endTiming();
-				await runInteractiveMode(
-					session,
-					VERSION,
-					startupChangelog,
-					notifs,
-					versionCheckPromise,
-					initialArgs.messages,
-					setToolUIContext,
-					lspServers,
-					mcpManager,
-					Boolean(parsedArgs.continue || parsedArgs.resume || parsedArgs.fork || foreignSource),
-					deps.forceSetupWizard === true,
-					showStartupSplash,
-					eventBus,
-					initialMessage,
-					initialImages,
-					parsedArgs.join,
-				);
+				const startupLease = takeStartupComposerLease();
+				try {
+					stopStartupWatchdog();
+					logger.endTiming();
+					await runInteractiveMode(
+						session,
+						VERSION,
+						startupChangelog,
+						notifs,
+						versionCheckPromise,
+						initialArgs.messages,
+						setToolUIContext,
+						lspServers,
+						mcpManager,
+						Boolean(parsedArgs.continue || parsedArgs.resume || parsedArgs.fork || foreignSource),
+						deps.forceSetupWizard === true,
+						showStartupSplash,
+						eventBus,
+						subagentEventBus,
+						initialMessage,
+						initialImages,
+						parsedArgs.join,
+						startBackgroundModelDiscovery,
+						startupLease,
+					);
+				} finally {
+					startupLease?.dispose();
+				}
 			} else {
 				// Branch-only single-shot runner: keep print-mode code out of normal interactive startup.
 				stopStartupWatchdog();
@@ -1955,6 +2105,7 @@ export async function runRootCommand(
 			}
 		}
 	} catch (error) {
+		stopPendingStartupComposer();
 		stopStartupWatchdog();
 		throw error;
 	}

@@ -633,6 +633,23 @@ export class HookSelectorComponent extends OverlayPanel {
 		return true;
 	}
 
+	/** Jump to (and, for single-select menus, immediately confirm) the option
+	 *  whose label starts with the pressed digit and a period. Numbered options
+	 *  can follow unnumbered rows, as in `/review` after a detected PR. Once
+	 *  type-to-search is active, digits stay searchable. Checkbox menus only
+	 *  move the cursor — confirmation stays on `enter`. */
+	#handleQuickSelect(keyData: string): boolean {
+		if (this.#searchQuery.length > 0 || keyData.length !== 1 || keyData < "1" || keyData > "9") return false;
+		const targetIndex = this.#filteredOptions.findIndex(({ option }) => option.label.startsWith(`${keyData}. `));
+		if (targetIndex < 0) return false;
+		const target = this.#filteredOptions[targetIndex];
+		if (!target || this.#isDisabled(target.index)) return true;
+		this.#selectedIndex = targetIndex;
+		this.#updateList();
+		if (this.#selectionMarker !== "checkbox") this.#onSelectCallback(target.option.label);
+		return true;
+	}
+
 	handleInput(keyData: string): void {
 		if (this.#countdown) {
 			this.#countdown.reset();
@@ -641,6 +658,10 @@ export class HookSelectorComponent extends OverlayPanel {
 
 		if (matchesSelectCancel(keyData)) {
 			this.#onCancelCallback();
+			return;
+		}
+
+		if (this.#handleQuickSelect(keyData)) {
 			return;
 		}
 

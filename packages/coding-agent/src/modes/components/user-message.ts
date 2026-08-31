@@ -1,7 +1,8 @@
 import { type Component, Container, Markdown } from "@oh-my-pi/pi-tui";
 import { formatBytes } from "@oh-my-pi/pi-utils";
 import { getMarkdownTheme, theme } from "../../modes/theme/theme";
-import { attachmentSgr, collapseImageMarkers, imageReferenceHyperlink, renderPlaceholders } from "../image-references";
+import { attachmentSgr, collapseImageMarkers, renderPlaceholders } from "../composer-attachments";
+import { imageReferenceHyperlink } from "../image-references";
 import { highlightMagicKeywords } from "../magic-keywords";
 
 // OSC 133 shell integration: marks prompt zones for terminal multiplexers.
@@ -49,10 +50,11 @@ export class UserMessageComponent extends Container {
 		// fenced blocks through its own code styling (never `color`), so those are already excluded;
 		// `highlightMagicKeywords` additionally restores the bubble's own foreground after each
 		// painted keyword so the gradient never bleeds into the rest of the line.
-		const keywordReset = theme.getFgAnsi("userMessageText") || "\x1b[39m";
+		const keywordReset = theme.getFgOnBgAnsi("userMessageText", "userMessageBg");
 		const baseText = synthetic
 			? (value: string) => theme.fg("dim", value)
-			: (value: string) => theme.fg("userMessageText", highlightMagicKeywords(value, keywordReset));
+			: (value: string) =>
+					theme.fgOnBg("userMessageText", "userMessageBg", highlightMagicKeywords(value, keywordReset));
 		const color = (value: string) =>
 			renderPlaceholders(value, {
 				renderText: baseText,

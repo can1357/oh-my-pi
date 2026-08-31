@@ -160,6 +160,16 @@ export interface RenderResultOptions {
 	isPartial: boolean;
 	/** Current spinner frame index for animated elements (0-9, only provided during partial results) */
 	spinnerFrame?: number;
+	/**
+	 * True once arguments are final (`message_end` / `setArgsComplete`).
+	 * Exclusive tools can sit here while an earlier call still runs.
+	 */
+	argsComplete?: boolean;
+	/**
+	 * True once this specific call has begun executing (`tool_execution_start`).
+	 * Streamed `xd://` previews stay queued until this is set.
+	 */
+	executionStarted?: boolean;
 }
 
 export type CustomToolResult<TDetails = any> = AgentToolResult<TDetails>;

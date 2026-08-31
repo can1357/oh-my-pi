@@ -4,6 +4,7 @@ import {
 	addKeyAliases,
 	canonicalKeyId,
 	Editor,
+	type EditorTextDecorationContext,
 	type EditorTheme,
 	type KeyId,
 	parseKey,
@@ -12,15 +13,14 @@ import {
 } from "@oh-my-pi/pi-tui";
 import { BracketedPasteHandler } from "@oh-my-pi/pi-tui/bracketed-paste";
 import type { AppKeybinding } from "../../config/keybindings";
-import { isSettingsInitialized, settings } from "../../config/settings";
 import {
 	attachmentSgr,
 	COMPOSER_TOKEN_REGEX,
 	chipLabel,
 	collapseImageMarkers,
-	imageReferenceHyperlink,
 	renderPlaceholders,
-} from "../image-references";
+} from "../composer-attachments";
+import { MacOSSpellingProvider, type SpellingFeatures } from "../macos-spelling";
 import { hasMagicKeyword, highlightMagicKeywords } from "../magic-keywords";
 import { isQueuedMessageList, parseQueueShorthand, QUEUE_LIST_MARKER_RE } from "../queue-input";
 import { fgOrPlain, theme } from "../theme/theme";
@@ -64,7 +64,7 @@ const DEFAULT_ACTION_KEYS: Record<ConfigurableEditorAction, KeyId[]> = {
 	"app.editor.external": ["ctrl+g"],
 	"app.history.search": ["ctrl+r"],
 	"app.message.dequeue": ["alt+up", "shift+up"],
-	"app.retry": ["alt+r"],
+	"app.retry": ["f5", "alt+r"],
 	"app.clipboard.pasteImage": ["ctrl+v"],
 	"app.clipboard.pasteTextRaw": ["ctrl+shift+v", "alt+shift+v"],
 	"app.clipboard.copyPrompt": ["alt+shift+c"],
@@ -92,7 +92,6 @@ const BRACKETED_IMAGE_PATH_REGEX = /\.(?:png|jpe?g|gif|webp)$/i;
 const SHELL_ESCAPED_PATH_CHAR_REGEX = /\\([\\\s'"()[\]{}&;<>|?*!$`])/g;
 const URI_SCHEME_REGEX = /^[a-z][a-z0-9+.-]*:/i;
 const FILE_URI_REGEX = /^file:\/\//i;
-const WINDOWS_DRIVE_PATH_REGEX = /^[a-z]:[\\/]/i;
 /**
  * Alternation of the filesystem prefixes that make a path unambiguously
  * absolute (POSIX root, home, `file://`, UNC, Windows drive). Shared by
@@ -179,9 +178,9 @@ function normalizePastedPath(path: string): string {
 }
 
 function isExplicitPastedPath(path: string): boolean {
-	if (WINDOWS_DRIVE_PATH_REGEX.test(path) || FILE_URI_REGEX.test(path)) return true;
+	if (ABSOLUTE_PATH_PREFIX_REGEX.test(path) || /^\.\.?[\\/]/.test(path)) return true;
 	if (URI_SCHEME_REGEX.test(path)) return false;
-	return path.includes("/") || path.includes("\\");
+	return path.includes("\\");
 }
 
 function isImagePath(path: string): boolean {
@@ -234,9 +233,9 @@ function splitPastedPathSegments(payload: string): string[] | undefined {
 /**
  * Extract whitespace/quoted-separated path-like segments from `payload`.
  * Shared backend of {@link extractBracketedPastePaths} and {@link extractPastePathsFromText}.
- * Returns the segments only when EVERY segment looks like an explicit path
- * (`/`, `\`, drive letter, or `file://`); otherwise undefined so the caller
- * falls back to a plain text paste.
+ * Returns the segments only when EVERY segment looks like an anchored local
+ * path or uses Windows separators; otherwise undefined so ambiguous relative
+ * URL/path text falls back to a plain text paste.
  */
 function extractExplicitPathSegments(payload: string): string[] | undefined {
 	const pasted = payload.trim();
@@ -403,6 +402,7 @@ export type ComposerChipDescriptor =
  * Custom editor that handles configurable app-level shortcuts for coding-agent.
  */
 export class CustomEditor extends Editor {
+	#spelling = new MacOSSpellingProvider();
 	imageLinks?: readonly (string | undefined)[];
 
 	/** Draft images pasted into the composer, consumed on submit. Co-located with
@@ -444,7 +444,19 @@ export class CustomEditor extends Editor {
 	 */
 	constructor(...args: readonly unknown[]) {
 		super(pickEditorTheme(args));
+		const requestTextAssistRepaint = (): void => {
+			this.invalidate();
+			this.#requestShimmerRepaint?.();
+		};
+		this.#spelling.onUpdate = requestTextAssistRepaint;
+		this.onTextAssistApplied = requestTextAssistRepaint;
+		this.setTextAssistProvider(this.#spelling);
 		if (args[0] instanceof TUI) this.tui = args[0];
+	}
+
+	/** Independently configure typo detection, word autocomplete, and autocorrect. */
+	setSpellingFeatures(features: SpellingFeatures): void {
+		this.#spelling.setFeatures(features);
 	}
 
 	/** Clear the composer draft: optionally commit `historyText` to history, then
@@ -555,26 +567,45 @@ export class CustomEditor extends Editor {
 	 *  listening (tests, headless callers); the timer chain still self-cleans. */
 	#requestShimmerRepaint: (() => void) | undefined;
 	#queueDecorationText: string | undefined;
+	#decorationLines: readonly string[] = [""];
 	#queueShorthandActive = false;
 	#queueListActive = false;
 
 	/** Decorate magic keywords, attachments, and the queue-composer header/list markers.
 	 *  Queue shorthand reserves its first logical line as a dim `Queueing` label; sequential
 	 *  item markers use the accent color so separate follow-ups remain visible while composing. */
-	override decorateText = (text: string): string => {
+	override decorateText = (text: string, context: EditorTextDecorationContext): string => {
 		const editorText = this.getText();
 		const animated = this.focused && this.#shimmerEnabled() && hasMagicKeyword(editorText);
 		const phase = animated ? (Date.now() % CustomEditor.SHIMMER_PERIOD_MS) / CustomEditor.SHIMMER_PERIOD_MS : 0;
 		if (animated) this.#scheduleShimmerFrame();
 		if (this.#queueDecorationText !== editorText) {
 			this.#queueDecorationText = editorText;
+			this.#decorationLines = this.getLines();
 			const queueBody = parseQueueShorthand(editorText);
 			this.#queueShorthandActive = queueBody !== undefined;
 			this.#queueListActive = queueBody !== undefined && isQueuedMessageList(queueBody);
 		}
+		let sourceSearchOffset = 0;
+		const locateSource = (value: string): number => {
+			const offset = text.indexOf(value, sourceSearchOffset);
+			if (offset === -1) return sourceSearchOffset;
+			sourceSearchOffset = offset + value.length;
+			return offset;
+		};
 		return renderPlaceholders(text, {
 			renderText: value => {
-				const highlighted = highlightMagicKeywords(value, undefined, phase);
+				const sourceOffset = locateSource(value);
+				const highlighted = this.#spelling.decorateTypos(
+					value,
+					{
+						editorText,
+						lines: this.#decorationLines,
+						line: context.line,
+						startCol: context.startCol + sourceOffset,
+					},
+					span => highlightMagicKeywords(span, undefined, phase),
+				);
 				if (this.#queueShorthandActive && (value.startsWith("->") || value.startsWith("=>"))) {
 					const icon = typeof theme === "undefined" ? "➤" : theme.nav.selected;
 					return `${fgOrPlain("dim", `Queueing ${icon}`)}${highlighted.slice(2)}`;
@@ -590,13 +621,16 @@ export class CustomEditor extends Editor {
 				return highlighted;
 			},
 			renderReference: (value, kind, index, form) => {
+				locateSource(value);
 				if (form === "chip") {
 					// Chip tokens carry their attachment identity color (matches the band card).
 					const styled = `${attachmentSgr(kind, index)}\x1b[1m${value}\x1b[22m\x1b[39m`;
-					return kind === "image" ? imageReferenceHyperlink(value, index, this.imageLinks, () => styled) : styled;
+					return kind === "image"
+						? this.imageReferenceHyperlink(value, index, this.imageLinks, () => styled)
+						: styled;
 				}
 				return kind === "image"
-					? imageReferenceHyperlink(value, index, this.imageLinks, label =>
+					? this.imageReferenceHyperlink(value, index, this.imageLinks, label =>
 							fgOrPlain("accent", label, `\x1b[1m\x1b[4m${label}\x1b[24m\x1b[22m`),
 						)
 					: fgOrPlain("accent", value, `\x1b[1m${value}\x1b[22m`);
@@ -604,22 +638,28 @@ export class CustomEditor extends Editor {
 		});
 	};
 
-	/** Optional test/host override for the magic-keyword shimmer gate. When
-	 *  defined, takes precedence over the global `magicKeywords.enabled` setting,
-	 *  letting tests assert the gating behaviour without mutating the
-	 *  process-wide Settings singleton (which races with parallel test files —
-	 *  see issue #2582). Production wires this through the host's Settings
-	 *  reader and updates it on the relevant setting change. */
+	/** Optional test override for the magic-keyword shimmer gate. */
 	magicKeywordsEnabledOverride: boolean | undefined;
 
-	/** Whether the shimmer should advance this frame. Defaults to "on" before
-	 *  settings have initialised (tests, early boot) so the animation does not
-	 *  silently disappear during a race; settings disabling the feature wins
-	 *  once they are loaded. An explicit `magicKeywordsEnabledOverride` overrides
-	 *  both paths. */
+	/**
+	 * Host-owned setting reader. Startup defaults to enabled without loading the
+	 * settings graph; InteractiveMode replaces this with the live session setting.
+	 */
+	magicKeywordsEnabled: () => boolean = () => true;
+
+	/**
+	 * Late-bound OSC hyperlink renderer. Startup stays plain until the full
+	 * interactive graph supplies the settings-aware implementation.
+	 */
+	imageReferenceHyperlink: (
+		label: string,
+		index: number,
+		imageLinks: readonly (string | undefined)[] | undefined,
+		renderLabel: (text: string) => string,
+	) => string = (label, _index, _imageLinks, renderLabel) => renderLabel(label);
+
 	#shimmerEnabled(): boolean {
-		if (this.magicKeywordsEnabledOverride !== undefined) return this.magicKeywordsEnabledOverride;
-		return isSettingsInitialized() ? settings.get("magicKeywords.enabled") : true;
+		return this.magicKeywordsEnabledOverride ?? this.magicKeywordsEnabled();
 	}
 
 	/** Bind the host's render request callback. Idempotent — the host wires this

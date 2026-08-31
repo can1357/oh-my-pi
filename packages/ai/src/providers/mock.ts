@@ -42,6 +42,7 @@
  *   expect(mock.calls).toHaveLength(2);
  */
 
+import { classifyModel } from "@oh-my-pi/pi-catalog/compat/taxonomy";
 import { registerCustomApi } from "../api-registry";
 import * as AIError from "../error";
 import type {
@@ -177,6 +178,7 @@ export class MockModel implements Model<MockApi> {
 	readonly contextWindow: number;
 	readonly maxTokens: number;
 	readonly compat = undefined;
+	readonly identity: Model["identity"];
 
 	/** Recorded calls in invocation order. */
 	readonly calls: MockCall[] = [];
@@ -191,6 +193,7 @@ export class MockModel implements Model<MockApi> {
 		this.id = options.id ?? "mock-model";
 		this.name = options.id ?? "mock-model";
 		this.provider = options.provider ?? "mock";
+		this.identity = classifyModel(this.provider, this.id, { lenient: true });
 		this.baseUrl = options.baseUrl ?? "mock://";
 		this.reasoning = options.reasoning ?? false;
 		this.cost = options.cost ?? ZERO_COST;

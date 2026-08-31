@@ -4,11 +4,20 @@ import * as os from "node:os";
 import * as path from "node:path";
 import {
 	legalPayloadFiles,
+	npmDistTag,
 	packages,
 	prepareNativeCorePackage,
 	rewriteManifest,
 	stageLegalPayloads,
 } from "./ci-release-publish";
+
+describe("npm dist-tags", () => {
+	it("routes canaries while rejecting other prereleases", () => {
+		expect(npmDistTag("0.13.0-canary.2")).toBe("canary");
+		expect(npmDistTag("0.13.0")).toBe("latest");
+		expect(() => npmDistTag("0.13.0-rc.1")).toThrow("Unsupported prerelease version");
+	});
+});
 
 describe("published legal payloads", () => {
 	it("selects the exact payload for MIT packages", () => {
@@ -56,6 +65,8 @@ describe("published legal payloads", () => {
 				"native/clipboard.d.ts",
 				"native/desktop.js",
 				"native/desktop.d.ts",
+				"native/desktop-adapter.js",
+				"native/desktop-adapter.d.ts",
 				"native/loader-state.js",
 				"native/loader-state.d.ts",
 				"native/embedded-addon.js",

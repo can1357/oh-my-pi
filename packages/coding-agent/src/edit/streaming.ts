@@ -78,7 +78,7 @@ export interface EditStreamingStrategy<Args = unknown> {
 	 * compute a diff against. Strategies drop the trailing incomplete entry
 	 * when `partialJson` indicates its closing `}` hasn't arrived yet.
 	 */
-	extractCompleteEdits(args: Args, partialJson: string | undefined): Args;
+	extractCompleteEdits(args: Args, partialJson: string | undefined, isStreaming: boolean): Args;
 	/**
 	 * Compute diff(s) for the given partial args. Returns `null` when args
 	 * do not yet carry enough structure to compute anything.
@@ -699,8 +699,9 @@ interface SloppyArgs {
  * result — the same pure engine the executor runs, never writing.
  */
 const sloppyStrategy: EditStreamingStrategy<SloppyArgs> = {
-	extractCompleteEdits(args) {
-		return args;
+	extractCompleteEdits(args, _partialJson, isStreaming) {
+		const input = args.input;
+		return isStreaming && typeof input === "string" ? { input: trimTrailingPartialLine(input, true) } : args;
 	},
 	async computeDiffPreview(args, ctx) {
 		if (typeof args.input !== "string" || args.input.length === 0) return null;

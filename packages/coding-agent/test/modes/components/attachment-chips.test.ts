@@ -1,9 +1,12 @@
 import { beforeAll, describe, expect, it } from "bun:test";
 import { AttachmentChipsBand } from "@oh-my-pi/pi-coding-agent/modes/components/attachment-chips";
 import { CustomEditor } from "@oh-my-pi/pi-coding-agent/modes/components/custom-editor";
-import { chipLabel } from "@oh-my-pi/pi-coding-agent/modes/image-references";
+import { chipLabel } from "@oh-my-pi/pi-coding-agent/modes/composer-attachments";
 import { getEditorTheme, initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { ImageBudget } from "@oh-my-pi/pi-tui";
+import { setKittyGraphics } from "@oh-my-pi/pi-tui/kitty-graphics";
+import { getCellDimensions, ImageProtocol, setCellDimensions, TERMINAL } from "@oh-my-pi/pi-tui/terminal-capabilities";
+import { visibleWidth } from "@oh-my-pi/pi-tui/utils";
 
 // 2x2 red PNG — real header so the band's dimension probe decodes 2x2.
 const TINY_PNG =
@@ -11,7 +14,7 @@ const TINY_PNG =
 
 function makeBand(): { editor: CustomEditor; band: AttachmentChipsBand } {
 	const editor = new CustomEditor(getEditorTheme());
-	return { editor, band: new AttachmentChipsBand(editor, new ImageBudget(8)) };
+	return { editor, band: new AttachmentChipsBand(editor, new ImageBudget(8), () => {}) };
 }
 
 beforeAll(async () => {
@@ -72,5 +75,75 @@ describe("AttachmentChipsBand", () => {
 		const rows = band.render(20).map(Bun.stripANSI);
 		expect(rows[0]).toContain(chipLabel("paste", 1));
 		expect(rows[0]).not.toContain(chipLabel("paste", 2));
+	});
+});
+
+describe("AttachmentChipsBand — Kitty placeholder thumbnails", () => {
+	it("keeps every card row exactly card-width so the borders align", () => {
+		const mutable = TERMINAL as unknown as { imageProtocol: ImageProtocol | null };
+		const originalProtocol = TERMINAL.imageProtocol;
+		const originalCellDims = { ...getCellDimensions() };
+		mutable.imageProtocol = ImageProtocol.Kitty;
+		setKittyGraphics({ unicodePlaceholders: true });
+		setCellDimensions({ widthPx: 10, heightPx: 21 });
+		try {
+			// Real PNG header for 560x502 so the probe yields a >1-column grid.
+			const header = Buffer.alloc(33);
+			header.write("\x89PNG\r\n\x1a\n", 0, "binary");
+			header.writeUInt32BE(13, 8);
+			header.write("IHDR", 12);
+			header.writeUInt32BE(560, 16);
+			header.writeUInt32BE(502, 20);
+			const { editor, band } = makeBand();
+			editor.pendingImages.push({ type: "image", data: header.toString("base64"), mimeType: "image/png" });
+			editor.insertAtom(chipLabel("image", 1), "[Image #1, 560x502]");
+			const rows = band.render(80);
+			expect(rows).toHaveLength(6);
+			// Thumbnail path actually engaged: the placement APC rides row 1.
+			expect(rows[1]).toContain("\x1b_Ga=p,U=1");
+			// Regression: the placement APC was counted as visible width, which
+			// dropped row 1's centering pad and painted its right border 3 cells
+			// inside the card. Every row must measure exactly the card width.
+			for (const row of rows) {
+				expect(visibleWidth(row)).toBe(14);
+			}
+		} finally {
+			mutable.imageProtocol = originalProtocol;
+			setKittyGraphics({ unicodePlaceholders: false });
+			setCellDimensions(originalCellDims);
+		}
+	});
+	it("converts a non-PNG attachment before the Kitty transmit (f=100 accepts only PNG)", async () => {
+		const mutable = TERMINAL as unknown as { imageProtocol: ImageProtocol | null };
+		const originalProtocol = TERMINAL.imageProtocol;
+		const originalCellDims = { ...getCellDimensions() };
+		mutable.imageProtocol = ImageProtocol.Kitty;
+		setKittyGraphics({ unicodePlaceholders: true });
+		setCellDimensions({ widthPx: 10, heightPx: 21 });
+		try {
+			// Regression: pasted images are re-encoded JPEG/WebP; transmitting those raw
+			// bytes as f=100 made Ghostty reject the data (EINVAL) and render blank cells.
+			const jpeg = await new Bun.Image(Buffer.from(TINY_PNG, "base64")).jpeg().toBase64();
+			const editor = new CustomEditor(getEditorTheme());
+			const budget = new ImageBudget(8);
+			const repaint = Promise.withResolvers<void>();
+			const band = new AttachmentChipsBand(editor, budget, () => repaint.resolve());
+			editor.pendingImages.push({ type: "image", data: jpeg, mimeType: "image/jpeg" });
+			editor.insertAtom(chipLabel("image", 1), "[Image #1, 2x2]");
+			// Conversion in flight: icon fallback, nothing transmitted yet.
+			band.render(80);
+			expect(budget.hasPendingTransmits()).toBe(false);
+			await repaint.promise;
+			const rows = band.render(80);
+			expect(rows.some(row => row.includes("\x1b_Ga=p,U=1"))).toBe(true);
+			const transmits = budget.takeTransmits();
+			expect(transmits).toHaveLength(1);
+			const payload = transmits[0]!.slice(transmits[0]!.indexOf(";") + 1);
+			expect(payload.startsWith("iVBOR")).toBe(true);
+		} finally {
+			mutable.imageProtocol = originalProtocol;
+			setKittyGraphics({ unicodePlaceholders: false });
+			setCellDimensions(originalCellDims);
+		}
 	});
 });

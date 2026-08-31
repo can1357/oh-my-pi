@@ -95,18 +95,36 @@ export class SessionStatsTracker {
 		let totalTokens = 0;
 		let totalCost = 0;
 		let totalPremiumRequests = 0;
+		let creditCost = 0;
+		let committedCreditCost = 0;
+		let committedAcuCost = 0;
+		let hasCredits = false;
+		const routedModels: Record<string, number> = {};
 		for (const message of state.messages) {
 			if (message.role === "assistant") {
 				const assistant = message;
 				toolCalls += assistant.content.filter(content => content.type === "toolCall").length;
-				totalInput += assistant.usage.input;
-				totalOutput += assistant.usage.output;
-				totalReasoning += assistant.usage.reasoningTokens ?? 0;
-				totalCacheRead += assistant.usage.cacheRead;
-				totalCacheWrite += assistant.usage.cacheWrite;
-				totalTokens += assistant.usage.totalTokens;
-				totalPremiumRequests += assistant.usage.premiumRequests ?? 0;
-				totalCost += assistant.usage.cost.total;
+				// Persisted and imported transcripts can predate usage metadata despite the current message type.
+				const usage = assistant.usage;
+				if (!usage) continue;
+				totalInput += usage.input;
+				totalOutput += usage.output;
+				totalReasoning += usage.reasoningTokens ?? 0;
+				totalCacheRead += usage.cacheRead;
+				totalCacheWrite += usage.cacheWrite;
+				totalTokens += usage.totalTokens;
+				totalPremiumRequests += usage.premiumRequests ?? 0;
+				totalCost += usage.cost.total;
+				const credits = usage.credits;
+				if (credits !== undefined) {
+					hasCredits = true;
+					creditCost += credits.cost ?? 0;
+					committedCreditCost += credits.committedCost ?? 0;
+					committedAcuCost += credits.acuCost ?? 0;
+				}
+				if (assistant.upstreamModel !== undefined) {
+					routedModels[assistant.upstreamModel] = (routedModels[assistant.upstreamModel] ?? 0) + 1;
+				}
 			}
 			if (message.role === "toolResult" && message.toolName === "task") {
 				const usage = taskToolUsage(message.details);
@@ -119,6 +137,13 @@ export class SessionStatsTracker {
 				totalTokens += usage.totalTokens;
 				totalPremiumRequests += usage.premiumRequests ?? 0;
 				totalCost += usage.cost.total;
+				const credits = usage.credits;
+				if (credits !== undefined) {
+					hasCredits = true;
+					creditCost += credits.cost ?? 0;
+					committedCreditCost += credits.committedCost ?? 0;
+					committedAcuCost += credits.acuCost ?? 0;
+				}
 			}
 		}
 		return {
@@ -139,6 +164,16 @@ export class SessionStatsTracker {
 			},
 			cost: totalCost,
 			premiumRequests: totalPremiumRequests,
+			...(hasCredits
+				? {
+						credits: {
+							cost: creditCost,
+							committedCost: committedCreditCost,
+							acuCost: committedAcuCost,
+						},
+					}
+				: undefined),
+			...(Object.keys(routedModels).length > 0 ? { routedModels } : undefined),
 			contextUsage: this.getContextUsage(),
 		};
 	}

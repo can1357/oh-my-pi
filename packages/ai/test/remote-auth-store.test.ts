@@ -834,6 +834,47 @@ describe("RemoteAuthCredentialStore + AuthStorage integration", () => {
 			remoteStore.close();
 		}
 	});
+	test("retains the legacy Codex shared block from an older broker snapshot", () => {
+		const blockedUntilMs = Date.now() + 60_000;
+		const remoteStore = new RemoteAuthCredentialStore({
+			client: new AuthBrokerClient({ url: "http://127.0.0.1:9", token: "unused" }),
+			streamSnapshots: false,
+			initialSnapshot: {
+				generation: 1,
+				generatedAt: Date.now(),
+				serverNowMs: Date.now(),
+				refresher: { enabled: false, intervalMs: 0, skewMs: 0, nextSweepInMs: Number.MAX_SAFE_INTEGER },
+				credentials: [
+					{
+						id: 7,
+						provider: "openai-codex",
+						credential: {
+							type: "oauth",
+							access: "remote-codex-access",
+							refresh: REMOTE_REFRESH_SENTINEL,
+							expires: blockedUntilMs,
+							accountId: "remote-codex-account",
+							email: "remote-codex@example.com",
+						},
+						identityKey: "email:remote-codex@example.com",
+						rotatesInMs: null,
+						blocks: [
+							{
+								providerKey: "openai-codex:oauth",
+								blockScope: "shared",
+								blockedUntilMs,
+							},
+						],
+					},
+				],
+			},
+		});
+		try {
+			expect(remoteStore.getCredentialBlock(7, "openai-codex:oauth", "shared")).toBe(blockedUntilMs);
+		} finally {
+			remoteStore.close();
+		}
+	});
 
 	test("ingestUsageReport overlays only the matching Anthropic report and getUsageReport returns the overlaid Fable row", async () => {
 		const brokerClient = new AuthBrokerClient({ url: handle!.url, token });

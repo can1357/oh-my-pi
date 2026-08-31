@@ -95,10 +95,10 @@ For each discovered server in `connectServers()`:
 `connectToServer()` behavior (`src/mcp/client.ts`):
 
 - creates stdio or HTTP/SSE transport,
-- performs MCP `initialize` using protocol version `2025-03-26` and advertises the `roots` capability,
+- performs MCP `initialize` using protocol version `2025-11-25` and advertises the `roots` capability,
 - answers server-to-client `ping` and `roots/list` requests; unsupported request methods return JSON-RPC `-32601`,
-- for HTTP/SSE, starts the background SSE listener before `notifications/initialized`,
-- sends `notifications/initialized`,
+- sends `notifications/initialized` before any further session traffic,
+- for Streamable HTTP, starts the background SSE listener only after `notifications/initialized`,
 - uses timeout precedence `OMP_MCP_TIMEOUT_MS`, then `config.timeout`, then 30s; `0` disables the client-side timeout,
 - closes transport on init failure.
 

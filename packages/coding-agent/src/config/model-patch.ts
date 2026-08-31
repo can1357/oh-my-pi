@@ -4,6 +4,7 @@ import { isVertexExpressOpenAIUrl } from "@oh-my-pi/pi-catalog/hosts";
 import { PROVIDER_DESCRIPTORS } from "@oh-my-pi/pi-catalog/provider-models";
 import { toModelSpec } from "@oh-my-pi/pi-catalog/provider-models/bundled-references";
 import { isRecord } from "@oh-my-pi/pi-utils";
+import { createLiveConfigHeaders } from "./model-config-values";
 import type { ModelOverride } from "./models-config-schema";
 /** Provider override config (baseUrl, headers, apiKey, compat, transport) without custom models */
 export interface ProviderOverride {
@@ -14,6 +15,9 @@ export interface ProviderOverride {
 	compat?: ModelSpec<Api>["compat"];
 	remoteCompaction?: RemoteCompactionConfig<Api>;
 	transport?: Model<Api>["transport"];
+	guardrailIdentifier?: Model<Api>["guardrailIdentifier"];
+	guardrailVersion?: Model<Api>["guardrailVersion"];
+	guardrailTrace?: Model<Api>["guardrailTrace"];
 }
 
 /**
@@ -182,6 +186,8 @@ export interface ModelPatch {
 	contextWindow?: number;
 	maxTokens?: number;
 	omitMaxOutputTokens?: boolean;
+	/** Whether Codex requests should prefer WebSocket transport. */
+	preferWebsockets?: boolean;
 	headers?: Record<string, string>;
 	compat?: ModelSpec<Api>["compat"];
 	contextPromotionTarget?: string;
@@ -210,6 +216,7 @@ export function applyModelPatch(base: Model<Api>, patch: ModelPatch, transport: 
 	if (patch.contextWindow !== undefined) result.contextWindow = patch.contextWindow;
 	if (patch.maxTokens !== undefined) result.maxTokens = patch.maxTokens;
 	if (patch.omitMaxOutputTokens !== undefined) result.omitMaxOutputTokens = patch.omitMaxOutputTokens;
+	if (patch.preferWebsockets !== undefined) result.preferWebsockets = patch.preferWebsockets;
 	if (patch.contextPromotionTarget !== undefined) result.contextPromotionTarget = patch.contextPromotionTarget;
 	if (patch.compactionModel !== undefined) result.compactionModel = patch.compactionModel;
 	if (patch.remoteCompaction !== undefined) {
@@ -229,7 +236,10 @@ export function applyModelPatch(base: Model<Api>, patch: ModelPatch, transport: 
 	let compat: ModelSpec<Api>["compat"];
 	if (transport === "merge") {
 		if (patch.headers) {
-			result.headers = { ...base.headers, ...patch.headers };
+			// Route merged headers through the live proxy so command-backed (`!cmd`)
+			// override values stay re-resolvable — a 401 refresh invalidates their
+			// cache and the next request re-runs the command (#9760).
+			result.headers = createLiveConfigHeaders([base.headers, patch.headers]);
 		}
 		compat = mergeCompat(base.compatConfig, patch.compat);
 	} else {
@@ -241,6 +251,16 @@ export function applyModelPatch(base: Model<Api>, patch: ModelPatch, transport: 
 		// Config-authored capability metadata owns the explicit surface; build
 		// first so non-reasoning and wire-disabled models still suppress it.
 		built.thinking = patch.thinking;
+	}
+	// Explicitly patched value fields outrank the engine's reviewed catalog
+	// corrections (`limits-patch`/`context-window-floor`/`cost-patch`/
+	// `input-modalities`): rebuild first for compat/identity, then re-assert
+	// the user-authored values.
+	if (patch.contextWindow !== undefined) built.contextWindow = patch.contextWindow;
+	if (patch.maxTokens !== undefined) built.maxTokens = patch.maxTokens;
+	if (patch.input !== undefined) built.input = patch.input;
+	if (patch.cost) {
+		built.cost = { ...result.cost };
 	}
 	return built;
 }

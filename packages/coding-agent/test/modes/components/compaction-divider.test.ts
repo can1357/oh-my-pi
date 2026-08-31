@@ -59,6 +59,19 @@ describe("CompactionSummaryMessageComponent", () => {
 		expect(rule).not.toContain("→");
 	});
 
+	it("does not render missing pre-compaction usage as a literal zero", () => {
+		const component = new CompactionSummaryMessageComponent(
+			createCompactionSummaryMessage(SUMMARY, 0, new Date().toISOString(), {
+				method: "handoff",
+				tokensAfter: 48_573,
+			}),
+		);
+		component.setExpanded(true);
+		const text = Bun.stripANSI(component.render(80).join("\n"));
+		expect(text).toContain("Compacted to 48,573 tokens");
+		expect(text).not.toContain("Compacted from 0");
+	});
+
 	it("expanded: reveals the summary (and snapcompact frame count) below the divider", () => {
 		const component = makeComponent([{ type: "image", data: "ZmFrZQ==", mimeType: "image/png" }]);
 		component.setExpanded(true);

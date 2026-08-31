@@ -49,7 +49,7 @@ export class ImageJobError extends Error {
 export interface ImageTarget {
 	readonly entryId: string;
 	readonly binding: ImageBinding;
-	readonly action: "generate" | "edit";
+	readonly action: "generate" | "edit" | "unsupported-edit";
 	/** Endpoint/model id for the chosen action. */
 	readonly endpoint: string;
 }
@@ -187,7 +187,15 @@ export async function resolveImageTargets(
 		if (!defaultEntry) continue;
 		const binding = defaultEntry.bindings.find(b => b.provider === provider);
 		if (!binding) continue;
-		if (hasInputImages && !binding.edit) continue;
+		if (hasInputImages && !binding.edit) {
+			targets.push({
+				entryId: defaultEntry.id,
+				binding,
+				action: "unsupported-edit",
+				endpoint: binding.generate,
+			});
+			continue;
+		}
 		targets.push(entryTarget(defaultEntry, binding, hasInputImages));
 	}
 	if (targets.length === 0) {

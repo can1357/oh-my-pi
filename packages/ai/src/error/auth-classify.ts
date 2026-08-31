@@ -1,5 +1,5 @@
 import { extractHttpStatusFromError } from "@oh-my-pi/pi-utils";
-import { isAccountPolicyError, isOAuthExpiry, isUsageLimit } from "./flags";
+import { isAccountPolicyError, isClinePassSurfaceGateMessage, isOAuthExpiry, isUsageLimit } from "./flags";
 import { OAuthError } from "./oauth";
 import { isConcurrencyCapExclusion, isUsageLimitOutcome } from "./rate-limit";
 
@@ -18,7 +18,8 @@ const INVALIDATED_OAUTH_TOKEN_PATTERN = /\binvalidated oauth token\b/i;
 /** Whether an upstream response explicitly says the supplied OAuth bearer was invalidated. */
 export function isInvalidatedOAuthTokenError(error: unknown): boolean {
 	if (typeof error === "object" && error !== null && "errorMessage" in error) {
-		const errorMessage = error.errorMessage;
+		const errorMessage =
+			"errorClassificationMessage" in error ? error.errorClassificationMessage : error.errorMessage;
 		if (typeof errorMessage === "string" && INVALIDATED_OAUTH_TOKEN_PATTERN.test(errorMessage)) return true;
 	}
 	const message = error instanceof Error ? error.message : typeof error === "string" ? error : undefined;
@@ -45,6 +46,9 @@ export function isAuthRetryableError(error: unknown): boolean {
 	const embeddedStatus = message ? extractHttpStatusFromError({ message }) : undefined;
 	const status = httpStatus ?? embeddedStatus;
 	if (isConcurrencyCapExclusion(status, message)) return false;
+	// A Cline surface-gate 403 is per-model client policy, not a credential
+	// problem: sibling keys fail identically, so rotation only burns them.
+	if (isClinePassSurfaceGateMessage(message)) return false;
 	if (status === 401 || status === 403) return true;
 	return isUsageLimitOutcome(status, message);
 }

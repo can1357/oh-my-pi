@@ -1,6 +1,5 @@
 import { scheduler } from "node:timers/promises";
 import { hostMatchesUrl } from "@oh-my-pi/pi-catalog/hosts";
-import { bareModelId, parseOpenAIModel, semverGte } from "@oh-my-pi/pi-catalog/identity";
 import { $flag, logger, structuredCloneJSON } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import { getEnvApiKey } from "../stream";
@@ -25,7 +24,7 @@ import {
 	sanitizeOpenAIResponsesAssistantHistoryItemsForReplay,
 } from "../utils";
 import { createAbortSourceTracker } from "../utils/abort";
-import { withEmptyCompletionRetry } from "../utils/empty-completion-retry";
+import { withReplaySafeStreamRetry } from "../utils/empty-completion-retry";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import type { RawHttpRequestDump } from "../utils/http-inspector";
 import {
@@ -99,6 +98,7 @@ import {
 	resolveOpenAIOutputTokenParam,
 	resolveOpenAIRequestSetup,
 	resolveOpenAIResponsesOutputClamp,
+	resolveReasoningSummaryOption,
 	shouldDropAutoToolChoiceForReasoning,
 	shouldRetryWithoutStrictTools,
 } from "./openai-shared";
@@ -190,7 +190,8 @@ function isOpenAIResponsesReplayUnsafeEvent(event: ResponseStreamEvent): boolean
 function isRetryableOpenAIResponsesStreamFailure(error: unknown): boolean {
 	return (
 		AIError.isTransientStreamParseError(error) ||
-		(error instanceof AIError.ProviderResponseError && error.kind === "incomplete-stream")
+		(error instanceof AIError.ProviderResponseError && error.kind === "incomplete-stream") ||
+		AIError.isProviderRetryableError(error)
 	);
 }
 
@@ -921,13 +922,14 @@ const streamOpenAIResponsesOnce = (
 };
 
 /**
- * Public entry: wrap the single-attempt Responses streamer with bounded
- * empty-completion retries — a `response.completed` carrying no content/usage
- * would otherwise stall the agent loop. Shared with the OpenAI-completions and
- * Anthropic providers via `withEmptyCompletionRetry`.
+ * Public entry: retry benign empty completions before they reach the agent
+ * loop. Transient stream failures are retried inside the attempt so stateful
+ * Responses request metadata remains stable.
  */
 export const streamOpenAIResponses: StreamFunction<"openai-responses"> = (model, context, options) =>
-	withEmptyCompletionRetry(model, context, options, streamOpenAIResponsesOnce);
+	withReplaySafeStreamRetry(model, context, options, streamOpenAIResponsesOnce, {
+		retryEmptyCompletion: true,
+	});
 
 function isOfficialOpenAIResponsesEndpoint(model: Model<"openai-responses">): boolean {
 	if (model.provider !== "openai") return false;
@@ -937,17 +939,6 @@ function isOfficialOpenAIResponsesEndpoint(model: Model<"openai-responses">): bo
 	} catch {
 		return false;
 	}
-}
-
-/**
- * GPT-5.6+ family check for Responses routes. The model id classifies the
- * reasoning family regardless of the provider/host serving it — a cliproxy or
- * other OpenAI-compatible gateway carrying `gpt-5.6-sol` gets the same
- * scaffolding as the official endpoint.
- */
-function isGpt56PlusResponsesModel(model: Model<"openai-responses">): boolean {
-	const parsed = parseOpenAIModel(bareModelId(model.requestModelId ?? model.id));
-	return parsed !== null && semverGte(parsed.version, "5.6");
 }
 
 function isResponsesPromptCacheableContentBlock(block: unknown): block is ResponseInputContent {
@@ -1291,13 +1282,8 @@ export function buildParams(
 		filterReasoningHistory: options?.filterReasoningHistory,
 		omitReasoningEffort: options?.omitReasoningEffort,
 	});
-	const reasoningSummary = model.compat.supportsReasoningSummary
-		? options?.reasoningSummary
-		: options?.reasoning === undefined
-			? undefined
-			: null;
 	applyResponsesCompatPolicy(params, reasoningPolicy, {
-		reasoningSummary,
+		reasoningSummary: resolveReasoningSummaryOption(model, options),
 		forceReasoningOff: options?.forceReasoningOff,
 		mapEffort: effort =>
 			model.compat.reasoningEffortMap?.[effort as NonNullable<OpenAIResponsesOptions["reasoning"]>] ??
@@ -1322,7 +1308,7 @@ export function buildParams(
 	applyOpenAIResponsesPromptCachePolicy(params, model, options, statefulCacheBaseline);
 
 	let trailingScaffoldingItems = 0;
-	if (options?.forceReasoningOff && isGpt56PlusResponsesModel(model)) {
+	if (options?.forceReasoningOff && model.compat.requiresReasoningOffJuiceInstruction) {
 		const effort = options.reasoning ?? "medium";
 		const juice = getJuiceValue(effort);
 		messages.push({

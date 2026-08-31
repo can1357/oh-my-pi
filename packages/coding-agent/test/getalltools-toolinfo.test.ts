@@ -78,6 +78,61 @@ describe("AgentSession.getAllToolInfos", () => {
 			// only non-builtin/non-sdk tools as "custom".
 			const customTools = allTools.filter(t => !["builtin", "sdk"].includes(t.sourceInfo.source));
 			expect(customTools.map(t => t.name)).toEqual(["my_ext_tool"]);
+			expect(byName.get("my_ext_tool")?.sourceInfo.path).toBe("<extension:my_ext_tool>");
+		} finally {
+			await session.dispose();
+			authStorage.close();
+			tempDir.removeSync();
+		}
+	});
+
+	it("reports the originating custom-tool file path instead of a synthetic stub", async () => {
+		const tempDir = TempDir.createSync("@getalltools-sourcepath-");
+		const authStorage = await AuthStorage.create(path.join(tempDir.path(), "auth.db"));
+		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		const settings = Settings.isolated({ "compaction.enabled": false });
+		const model = buildModel({
+			id: "mock",
+			name: "mock",
+			api: "openai-responses",
+			provider: "openai",
+			baseUrl: "https://example.invalid",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 8192,
+			maxTokens: 2048,
+		});
+		const custom = createTool("git");
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["initial"], tools: [custom] },
+			streamFn: createMockModel({ responses: [{ content: ["ok"] }] }).stream,
+		});
+		const sourcePath = "/tmp/tools/git.ts";
+		const session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(tempDir.path()),
+			settings,
+			modelRegistry: new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml")),
+			toolRegistry: new Map<string, AgentTool>([[custom.name, custom]]),
+			builtInToolNames: [],
+			rebuildSystemPrompt: async toolNames => ({ systemPrompt: [toolNames.join(",")] }),
+			extensionRunner: {
+				getRegisteredTool: (name: string) =>
+					name === "git"
+						? {
+								extensionPath: "<inline-0>",
+								definition: { sourcePath },
+							}
+						: undefined,
+			} as never,
+		});
+
+		try {
+			const info = session.getAllToolInfos().find(tool => tool.name === "git");
+			expect(info?.sourceInfo.source).toBe("extension");
+			expect(info?.sourceInfo.path).toBe(sourcePath);
 		} finally {
 			await session.dispose();
 			authStorage.close();

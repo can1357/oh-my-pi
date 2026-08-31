@@ -11,7 +11,9 @@ import {
 	truncateToWidth,
 	visibleWidth,
 } from "@oh-my-pi/pi-tui";
-import { attachmentSgr, cachedImageDimensions, setCachedImageDimensions } from "../image-references";
+import { convertImageToPng } from "../../utils/image-loading";
+import { attachmentSgr } from "../composer-attachments";
+import { cachedImageDimensions, setCachedImageDimensions } from "../image-references";
 import { theme } from "../theme/theme";
 import type { ComposerChipDescriptor, CustomEditor, TextAttachment } from "./custom-editor";
 
@@ -21,6 +23,15 @@ const INNER_ROWS = 4;
 const CARD_COLS = INNER_COLS + 2;
 const CARD_GAP = 2;
 const RESET_FG = "\x1b[39m";
+/** Symbol-keyed PNG conversion cache on the draft image (same pattern as the dimension
+ *  probe cache): Kitty's `f=100` transmit accepts only PNG, so non-PNG attachments
+ *  (pastes are usually re-encoded JPEG/WebP) convert before transmit — the same pipeline
+ *  the transcript uses. `null` = conversion in flight or failed. */
+const kImagePng = Symbol("omp.imagePng");
+
+interface ImageContentWithPng extends ImageContent {
+	[kImagePng]?: ImageContent | null;
+}
 
 /**
  * The composer attachment band: one rounded card per staged attachment, rendered directly above
@@ -35,6 +46,7 @@ export class AttachmentChipsBand implements Component {
 	constructor(
 		private readonly editor: CustomEditor,
 		private readonly budget: ImageBudget,
+		private readonly requestRender: () => void,
 	) {}
 
 	render(width: number): readonly string[] {
@@ -103,29 +115,51 @@ export class AttachmentChipsBand implements Component {
 	 *  iTerm2 output cursor-addressed sequences that cannot be composed into a border row. */
 	#imageInterior(image: ImageContent, dims: { width: number; height: number } | null): string[] {
 		if (dims && TERMINAL.imageProtocol === ImageProtocol.Kitty && getKittyGraphics().unicodePlaceholders) {
-			const budget = this.budget;
-			const imageId = budget.acquireId(`chip:${image.mimeType}:${image.data.length}:${image.data.slice(0, 32)}`);
-			// observe() keeps chip thumbnails inside the shared live-graphics budget so a
-			// paste-heavy session cannot pile up placements the way unbudgeted images would.
-			if (!budget.observe(imageId)) {
-				const result = renderImage(
-					image.data,
-					{ widthPx: dims.width, heightPx: dims.height },
-					{
-						maxWidthCells: INNER_COLS,
-						maxHeightCells: INNER_ROWS,
-						imageId,
-						includeTransmit: budget.shouldTransmit(imageId),
-					},
+			const display = this.#kittyDisplayImage(image);
+			if (display) {
+				const budget = this.budget;
+				const imageId = budget.acquireId(
+					`chip:${display.mimeType}:${display.data.length}:${display.data.slice(0, 32)}`,
 				);
-				if (result?.transmit) budget.enqueueTransmit(imageId, result.transmit);
-				if (result?.lines) return this.#centerGrid(result.lines);
+				// observe() keeps chip thumbnails inside the shared live-graphics budget so a
+				// paste-heavy session cannot pile up placements the way unbudgeted images would.
+				if (!budget.observe(imageId)) {
+					const result = renderImage(
+						display.data,
+						{ widthPx: dims.width, heightPx: dims.height },
+						{
+							maxWidthCells: INNER_COLS,
+							maxHeightCells: INNER_ROWS,
+							imageId,
+							includeTransmit: budget.shouldTransmit(imageId),
+						},
+					);
+					if (result?.transmit) budget.enqueueTransmit(imageId, result.transmit);
+					if (result?.lines) return this.#centerGrid(result.lines);
+				}
 			}
 		}
 		const icon = theme.symbol("chip.image");
 		const pad = INNER_COLS - visibleWidth(icon);
 		const iconRow = " ".repeat(Math.floor(pad / 2)) + theme.fg("muted", icon) + " ".repeat(Math.ceil(pad / 2));
 		return [" ".repeat(INNER_COLS), iconRow, " ".repeat(INNER_COLS), " ".repeat(INNER_COLS)];
+	}
+
+	/** PNG form of `image` for the Kitty transmit; non-PNG sources convert asynchronously.
+	 *  Returns undefined while the conversion is pending (or after it failed), letting the
+	 *  caller fall back to the icon; a finished conversion triggers a repaint. */
+	#kittyDisplayImage(image: ImageContent): ImageContent | undefined {
+		if (image.mimeType === "image/png") return image;
+		const cached = (image as ImageContentWithPng)[kImagePng];
+		if (cached !== undefined) return cached ?? undefined;
+		(image as ImageContentWithPng)[kImagePng] = null;
+		convertImageToPng(image)
+			.then(converted => {
+				(image as ImageContentWithPng)[kImagePng] = converted;
+				this.requestRender();
+			})
+			.catch(() => {});
+		return undefined;
 	}
 
 	/** Center a placeholder cell grid (≤ 12 columns, ≤ 4 rows) inside the content area. */

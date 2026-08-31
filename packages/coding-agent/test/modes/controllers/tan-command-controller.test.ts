@@ -393,7 +393,7 @@ describe("TanCommandController", () => {
 		expect(unregister).not.toHaveBeenCalled();
 	});
 
-	it("copies and persists the full enabled Code Mode tool set", async () => {
+	it("copies and persists the full enabled tool set", async () => {
 		const enabledToolNames = ["eval", "read", "bash"];
 		const harness = createContext({ activeToolNames: ["eval"], enabledToolNames });
 		vi.spyOn(SessionManager, "forkFrom").mockResolvedValue(harness.cloneManager);

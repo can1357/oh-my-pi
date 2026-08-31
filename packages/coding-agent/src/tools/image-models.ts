@@ -364,6 +364,17 @@ export const IMAGE_MODEL_CATALOG: readonly ImageModelEntry[] = [
 				supportsQuality: false,
 				supportsBackground: false,
 			},
+			{
+				provider: "deepinfra",
+				generate: "black-forest-labs/FLUX-2-pro",
+				sizeMode: "hosted_pixels",
+				aspectRatios: OPENAI_HOSTED_ASPECT_RATIOS,
+				maxImages: 1,
+				maxReferences: 0,
+				supportsSeed: false,
+				supportsQuality: false,
+				supportsBackground: false,
+			},
 		],
 	},
 	{
@@ -732,6 +743,7 @@ export const DEFAULT_IMAGE_MODEL_BY_PROVIDER: Record<ImageProvider, string> = {
 	openrouter: "nano-banana-pro",
 	gemini: "nano-banana-pro",
 	fal: "nano-banana-pro",
+	deepinfra: "flux-2-pro",
 };
 
 const CATALOG_BY_ID: Record<string, ImageModelEntry> = Object.fromEntries(

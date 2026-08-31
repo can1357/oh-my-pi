@@ -9,6 +9,7 @@
  */
 
 import type { Context, ImageContent, Message, Model, TextContent } from "@oh-my-pi/pi-ai";
+import { modelMatchesHost } from "@oh-my-pi/pi-catalog/hosts";
 
 /** Responses/Chat APIs whose `image_url` accepts arbitrary https URLs. */
 const URL_CAPABLE_OPENAI_APIS: Record<string, true> = {
@@ -29,6 +30,12 @@ const URL_CAPABLE_OPENAI_APIS: Record<string, true> = {
  */
 export function supportsRemoteImageUrls(model: Model): boolean {
 	if (!model.input.includes("image")) return false;
+	// Moonshot-native hosts (api.moonshot.ai / api.kimi.com) reject remote
+	// image URLs on both dialects: the OpenAI surface wants inline data and
+	// the kimiApiFormat="anthropic" transport 400s with "unsupported image
+	// url". Their catalog api is openai-completions, so the shape check
+	// below would wrongly admit them.
+	if (modelMatchesHost(model, "moonshotNative")) return false;
 	if (URL_CAPABLE_OPENAI_APIS[model.api]) return true;
 	if (model.api === "anthropic-messages") return model.provider === "anthropic";
 	// Antigravity's Cloud Code endpoint fetches arbitrary https fileUri;

@@ -1,5 +1,6 @@
 import { beforeAll, describe, expect, it, type Mock, vi } from "bun:test";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
+import { AskDialogComponent } from "@oh-my-pi/pi-coding-agent/modes/components/ask-dialog";
 import { TreeSelectorComponent } from "@oh-my-pi/pi-coding-agent/modes/components/tree-selector";
 import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
@@ -312,7 +313,7 @@ describe("InputController keybinding setup", () => {
 		expect(ctx.hideToolActivity).toBe(true);
 		expect(ctx.settings.set).toHaveBeenCalledWith("display.hideToolActivity", true);
 		expect(spies.clearInlineImages).toHaveBeenCalledTimes(1);
-		expect(spies.resetDisplay).toHaveBeenCalledTimes(1);
+		expect(spies.requestRender).toHaveBeenCalledWith(true);
 		expect(ctx.chatContainer.setToolActivityVisible).toHaveBeenCalledWith(false);
 	});
 
@@ -768,5 +769,43 @@ describe("InputController global tool-output expand (ctrl+o)", () => {
 
 		expect(dispatchInput(listeners, "\x18")).toEqual({ consume: true });
 		expect(context.ctx.toolOutputExpanded).toBe(true);
+	});
+
+	it("expands a truncated ask question instead of tool output when the ask dialog is focused", async () => {
+		const { ctx, listeners, setFocused } = await setup();
+		const dialog = new AskDialogComponent(
+			[
+				{
+					id: "q1",
+					question: "This is a very long question ".repeat(30),
+					options: [{ label: "Option A" }, { label: "Option B" }],
+				},
+			],
+			{ onSubmit: () => {}, onCancel: () => {}, onPrompt: async () => undefined },
+		);
+		const collapsed = dialog.render(80).join("\n");
+		setFocused(dialog);
+
+		expect(dispatchInput(listeners, "\x0f")).toEqual({ consume: true });
+		expect(ctx.toolOutputExpanded).toBe(false);
+		const expanded = dialog.render(80).join("\n");
+		const collapsedCount = collapsed.match(/This is a very long question/g)?.length ?? 0;
+		const expandedCount = expanded.match(/This is a very long question/g)?.length ?? 0;
+		expect(collapsedCount).toBeLessThan(10);
+		expect(expandedCount).toBeGreaterThan(collapsedCount);
+	});
+
+	it("still expands tool output when a short ask question has nothing to reveal", async () => {
+		const { ctx, listeners, setFocused } = await setup();
+		const dialog = new AskDialogComponent([{ id: "q1", question: "Choose one?", options: [{ label: "Option A" }] }], {
+			onSubmit: () => {},
+			onCancel: () => {},
+			onPrompt: async () => undefined,
+		});
+		dialog.render(80);
+		setFocused(dialog);
+
+		expect(dispatchInput(listeners, "\x0f")).toEqual({ consume: true });
+		expect(ctx.toolOutputExpanded).toBe(true);
 	});
 });
