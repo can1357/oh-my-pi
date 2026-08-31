@@ -289,6 +289,7 @@ function buildUsageLimit(args: {
 		label: usageWindow.label,
 		scope: {
 			provider: "openai-codex",
+			meter: "chat",
 			windowId: usageWindow.id,
 			shared: true,
 		},
@@ -345,6 +346,7 @@ function buildAdditionalUsageLimit(args: {
 		scope: {
 			provider: "openai-codex",
 			accountId: args.accountId,
+			meter: args.slug,
 			tier: args.slug,
 			modelId: args.limitName,
 			windowId: usageWindow.id,

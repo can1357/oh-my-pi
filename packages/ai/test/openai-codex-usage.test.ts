@@ -63,7 +63,7 @@ describe("openai-codex usage parser", () => {
 		expect(report).not.toBeNull();
 		const main = report?.limits.filter(l => l.id === "openai-codex:primary" || l.id === "openai-codex:secondary");
 		expect(main?.map(l => l.id)).toEqual(["openai-codex:primary", "openai-codex:secondary"]);
-		expect(main?.[0].scope).toEqual({ provider: "openai-codex", windowId: "5h", shared: true });
+		expect(main?.[0].scope).toEqual({ provider: "openai-codex", meter: "chat", windowId: "5h", shared: true });
 		expect(main?.[0].amount.usedFraction).toBeCloseTo(0.04, 5);
 	});
 
@@ -98,6 +98,7 @@ describe("openai-codex usage parser", () => {
 		expect(spark?.[0].label).toBe("5 hours (Spark)");
 		expect(spark?.[1].label).toBe("7 days (Spark)");
 		expect(spark?.[0].scope.tier).toBe("spark");
+		expect(spark?.[0].scope.meter).toBe("spark");
 		expect(spark?.[0].scope.modelId).toBe("GPT-5.3-Codex-Spark");
 		expect(spark?.[0].amount.usedFraction).toBeCloseTo(0.17, 5);
 		expect(spark?.[1].amount.usedFraction).toBeCloseTo(0.61, 5);
@@ -116,6 +117,7 @@ describe("openai-codex usage parser", () => {
 		const spark = report?.limits.find(l => l.id === "openai-codex:spark:primary");
 		expect(spark).toBeTruthy();
 		expect(spark?.scope.tier).toBe("spark");
+		expect(spark?.scope.meter).toBe("spark");
 	});
 
 	it("returns a report even when only additional_rate_limits are present (no main rate_limit)", async () => {

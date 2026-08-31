@@ -98,6 +98,6 @@ describe("issue #6767 /usage output during streaming", () => {
 		// streamedReply + the deferred usage panel (Spacer + Text).
 		expect(mode.chatContainer.children).toHaveLength(3);
 		const transcript = mode.chatContainer.render(80).join("\n");
-		expect(transcript.match(/Usage \(/g)).toHaveLength(1);
+		expect(transcript.match(/Usage · fetched /g)).toHaveLength(1);
 	});
 });

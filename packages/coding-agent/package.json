@@ -564,6 +564,10 @@
       "types": "./src/tui/*.ts",
       "import": "./src/tui/*.ts"
     },
+    "./usage/usage-breakdown": {
+      "types": "./src/usage/usage-breakdown.ts",
+      "import": "./src/usage/usage-breakdown.ts"
+    },
     "./utils/*": {
       "types": "./src/utils/*.ts",
       "import": "./src/utils/*.ts"
