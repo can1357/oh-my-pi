@@ -801,11 +801,16 @@ export class AgentSession {
 		}
 	}
 
+	#preserveSettledDeferredAdvice(): void {
+		if (this.agent.state.isStreaming || this.#abortInProgress) return;
+		for (const card of this.#advisors.drainDeferredAdvice()) this.#preserveAdvisorCard(card);
+	}
 	#endInFlight(onSettled?: () => void | Promise<void>): void {
 		if (onSettled) this.#inFlightSettledCallbacks.push(onSettled);
 		this.#promptInFlightCount = Math.max(0, this.#promptInFlightCount - 1);
 		if (this.#promptInFlightCount !== 0) return;
 		this.yieldQueue.requestIdleFlush();
+		this.#preserveSettledDeferredAdvice();
 		this.#releasePowerAssertion();
 		this.#flushPendingAgentEnd();
 		if (this.#inFlightSettledCallbacks.length === 0) {
@@ -998,6 +1003,7 @@ export class AgentSession {
 	#resetInFlight(): void {
 		this.#promptInFlightCount = 0;
 		this.yieldQueue.requestIdleFlush();
+		this.#preserveSettledDeferredAdvice();
 		this.#releasePowerAssertion();
 		this.#flushPendingAgentEnd();
 		if (this.#inFlightSettledCallbacks.length === 0) {
