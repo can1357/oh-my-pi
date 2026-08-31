@@ -172,12 +172,7 @@ function classifyOwnerDisposition(
 		ownerProp = err.owner;
 	}
 	const errName = err instanceof Error ? err.name : "";
-	if (
-		ownerProp === "gateway" ||
-		errName === "gateway_terminal" ||
-		GATEWAY_INVARIANT_PATTERN.test(message) ||
-		GATEWAY_INVARIANT_PATTERN.test(errName)
-	) {
+	if (ownerProp === "gateway" || errName === "gateway_terminal" || GATEWAY_INVARIANT_PATTERN.test(errName)) {
 		return { owner: "gateway", disposition: "gateway_terminal" };
 	}
 

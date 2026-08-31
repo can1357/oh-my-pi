@@ -5562,16 +5562,18 @@ export class AuthStorage {
 			if (hasUsableSibling) return undefined;
 			if (!options?.requestId) return undefined;
 			const probeScope = blockScope ?? "";
-			// Honor persisted Retry-After blocks loaded after restart / from another
-			// process: sync into the in-memory lease book before trying to acquire.
-			const blockedUntil = this.#getCredentialBlockedUntil(
-				provider,
-				providerKey,
-				selection.index,
-				blockScopes ?? blockScope,
-			);
-			if (blockedUntil !== undefined) {
-				this.#probeLeases.noteRetryAfterBlock(blockedId, probeScope, blockedUntil);
+			// Only refresh an already Retry-After-sourced deadline. Re-labeling an
+			// ordinary hard cooldown as Retry-After would forbid last-resort probes.
+			if (this.#probeLeases.isRetryAfterSourced(blockedId, probeScope)) {
+				const blockedUntil = this.#getCredentialBlockedUntil(
+					provider,
+					providerKey,
+					selection.index,
+					blockScopes ?? blockScope,
+				);
+				if (blockedUntil !== undefined) {
+					this.#probeLeases.noteRetryAfterBlock(blockedId, probeScope, blockedUntil);
+				}
 			}
 			const lease = this.tryAcquireQuotaProbeLease(blockedId, probeScope);
 			if (!lease) return undefined;
