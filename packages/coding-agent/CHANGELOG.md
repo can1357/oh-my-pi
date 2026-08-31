@@ -9,13 +9,6 @@
 ### Added
 
 - Added per-subagent MCP and extension tool scoping: an agent definition's `tools:` list is now a hard allowlist for custom, extension, and MCP proxy tools, and a new `disallowedTools:` frontmatter field removes tools by name, `mcp__*` / `mcp__<server>_*` wildcard, or bare `*` deny-all (the `<server>` is the sanitized tool-name prefix — a server named `db2` mints `mcp__db_query`, so the pattern is `mcp__db_*`). Hidden protocol tools (`yield`, `goal`, `think`) can never be disallowed; a scope's reach is uniform — the active tool set, the `xd://` catalog, Cursor bridge execution, MCP resources, and server instructions all follow the same allow/disallow decision. Subagents that do not declare `tools:` are unaffected; top-level sessions are unchanged ([#8599](https://github.com/can1357/oh-my-pi/issues/8599)).
-
-### Fixed
-
-- Fixed read-only classification ignoring the `exec` alias expansion: an agent declaring `tools: [exec]` with both concrete backends disallowed is now classified read-only (matching what the runtime actually spawns). Scoped sessions no longer advertise `inspect_image` in the `read` tool description when the scope removes it, and any description flip now also holds on the enable path.
-
-### Added
-
 - Added `injectV1: false` option to `openai-models-list` discovery to fetch the model list from `{baseUrl}/models` without injecting `/v1`, for gateways that root their OpenAI-compatible surface at a versioned URL (e.g. `https://api.opper.ai/v3/compat`) where the `/v1`-injected endpoint returns only a small subset.
 - Added provider-reported credits and concrete routed-model counts to `/session` statistics ([#8590](https://github.com/can1357/oh-my-pi/pull/8590) by [@will-bogusz](https://github.com/will-bogusz)).
 - Added `CLINE_API_KEY` to the CLI environment help for native ClinePass subscription inference ([#7863](https://github.com/can1357/oh-my-pi/pull/7863) by [@will-bogusz](https://github.com/will-bogusz)).
@@ -29,6 +22,7 @@
 
 ### Fixed
 
+- Fixed read-only classification ignoring the `exec` alias expansion: an agent declaring `tools: [exec]` with both concrete backends disallowed is now classified read-only (matching what the runtime actually spawns). Scoped sessions no longer advertise `inspect_image` in the `read` tool description when the scope removes it, and any description flip now also holds on the enable path.
 - Fixed an issue where custom model overrides were lost during configuration updates
 - Fixed "Please use nerdfont" notification incorrectly persisting after theme configuration
 - Fixed sampling parameter errors for newer Anthropic models (Opus 4.7+, Sonnet 5+)
