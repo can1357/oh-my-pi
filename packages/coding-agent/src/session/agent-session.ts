@@ -762,6 +762,7 @@ export class AgentSession implements SettingsScope {
 	 * priority request, so one rejection does not warn on every later turn.
 	 */
 	readonly #autoFastRejectionNoticed = new Set<string>();
+	#requestPrioritySource: "manual" | "auto" | undefined;
 
 	readonly #providerBoundary: SessionProviderBoundary;
 	#promptTemplates: PromptTemplate[];
@@ -1831,10 +1832,15 @@ export class AgentSession implements SettingsScope {
 			memoryTaskDepth: config.memoryTaskDepth,
 			createMemoryTools: config.createMemoryTools,
 		});
-		// Resolve the wire service-tier per request so the Fireworks Priority
-		// toggle scopes priority to Fireworks alone, without mutating the shared
-		// session `serviceTier` that drives `/fast` and OpenAI/Anthropic priority.
-		this.agent.serviceTierResolver = model => this.#resolveMainServiceTier(model);
+		// Resolve the wire service tier once per request and retain whether priority
+		// came from explicit configuration or the temporary activity lease.
+		this.agent.serviceTierResolver = model => {
+			const configuredTier = this.#models.effectiveServiceTier(model);
+			const resolvedTier = this.#resolveMainServiceTier(model);
+			this.#requestPrioritySource =
+				resolvedTier === "priority" ? (configuredTier === "priority" ? "manual" : "auto") : undefined;
+			return resolvedTier;
+		};
 		this.#titleSystemPrompt = config.titleSystemPrompt;
 		this.#transformContext = config.transformContext ?? (messages => messages);
 		this.#sideStreamFn = config.sideStreamFn ?? streamSimple;
@@ -3984,20 +3990,23 @@ export class AgentSession implements SettingsScope {
 						assistantMsg.serviceTier,
 					);
 				}
+				const requestPrioritySource = this.#requestPrioritySource;
+				this.#requestPrioritySource = undefined;
 				if (assistantMsg.disabledFeatures?.includes("priority")) {
-					if (this.serviceTierByFamily.anthropic === "priority") {
-						this.setServiceTierFamily("anthropic", undefined);
+					if (
+						requestPrioritySource === "manual" ||
+						(requestPrioritySource === undefined && this.serviceTierByFamily.anthropic === "priority")
+					) {
+						const fastModeStillEnabled = this.serviceTierByFamily.anthropic === "priority";
+						if (fastModeStillEnabled) this.setServiceTierFamily("anthropic", undefined);
 						this.emitNotice(
 							"warning",
-							"Priority/fast mode rejected for this model; retried without it. Fast mode is now off.",
+							fastModeStillEnabled
+								? "Priority/fast mode rejected for this model; retried without it. Fast mode is now off."
+								: "Priority/fast mode was rejected for this request and retried without it.",
 							"priority",
 						);
-					} else {
-						// An activity lease supplies `priority` per request without touching
-						// the family map, so the branch above never fires for it and the
-						// refusal would otherwise be silent: the status-line indicator just
-						// goes dark. Warn once per model — `disabledFeatures` repeats the
-						// marker on every later turn while the refusal stands.
+					} else if (requestPrioritySource === "auto") {
 						const key = `${assistantMsg.provider}/${assistantMsg.model}`;
 						if (!this.#autoFastRejectionNoticed.has(key)) {
 							this.#autoFastRejectionNoticed.add(key);
