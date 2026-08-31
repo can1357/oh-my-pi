@@ -538,10 +538,8 @@ export class AskDialogComponent implements Component {
 			this.#requestRender();
 			return;
 		}
-		if (focusGuard?.handleDequeue && matchesAppMessageDequeue(keyData)) {
-			if (focusGuard.handleDequeue()) {
-				this.#requestRender();
-			}
+		if (focusGuard?.handleDequeue && matchesAppMessageDequeue(keyData) && focusGuard.handleDequeue()) {
+			this.#requestRender();
 			return;
 		}
 		if (matchesSelectCancel(keyData)) {
