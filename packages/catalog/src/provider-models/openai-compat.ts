@@ -1833,6 +1833,32 @@ export function xaiOAuthModelManagerOptions(
 // 6.4 AIML API
 // ---------------------------------------------------------------------------
 
+/**
+ * Seeded AIML API default model.
+ *
+ * The bundled `aimlapi` slice predates AI/ML API's vendor-prefixed model ids,
+ * so the descriptor's `defaultModel` (`openai/gpt-5-5`) has no bundled row and
+ * first-run selection would fall through to whatever sorts first. Seeding it
+ * keeps the default resolvable at boot without a key; live `/v1/models`
+ * discovery is authoritative and replaces this row. Limits and tariff mirror
+ * the live catalog entry (1,050,000 context / 128,000 output; $6.50 in,
+ * $39 out, $0.65 cached per 1M tokens).
+ */
+export const AIMLAPI_STATIC_MODELS: readonly ModelSpec<"openai-completions">[] = [
+	{
+		id: "openai/gpt-5-5",
+		name: "GPT-5.5",
+		api: "openai-completions",
+		provider: "aimlapi",
+		baseUrl: "https://api.aimlapi.com/v1",
+		reasoning: true,
+		input: ["text", "image"],
+		cost: { input: 6.5, output: 39, cacheRead: 0.65, cacheWrite: 0 },
+		contextWindow: 1_050_000,
+		maxTokens: 128_000,
+	},
+];
+
 /** AIML API endpoint type carrying chat/LLM models (one id may be served under several types). */
 const AIML_API_CHAT_COMPLETIONS_TYPE = "openai/chat-completions";
 

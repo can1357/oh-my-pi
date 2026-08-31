@@ -33,6 +33,7 @@ import { PROVIDER_DESCRIPTORS } from "../src/provider-models/descriptors";
 import { filterModelsDevCatalogRows } from "../src/provider-models/models-dev-policies";
 import {
 	AIAND_STATIC_MODELS,
+	AIMLAPI_STATIC_MODELS,
 	ALIBABA_TOKEN_PLAN_STATIC_MODELS,
 	ANTHROPIC_CURATED_FALLBACK_MODELS,
 	applyXaiCatalogPricing,
@@ -614,6 +615,14 @@ async function generateModels() {
 	// at boot. If live `/v1/models` discovery succeeds, it is authoritative.
 	if (!authoritativeCatalogProviders.has("gmi-cloud")) {
 		allModels.push(...GMI_CLOUD_STATIC_MODELS);
+	}
+	// Seed the AIML API default model so a fresh install (and a regen without an
+	// AIMLAPI_API_KEY) still resolves the descriptor's `defaultModel`
+	// synchronously at boot: the bundled slice predates AI/ML API's
+	// vendor-prefixed ids, so `openai/gpt-5-5` has no previous-snapshot row. A
+	// live `/v1/models` snapshot is authoritative and replaces the seed.
+	if (!authoritativeCatalogProviders.has("aimlapi")) {
+		allModels.push(...AIMLAPI_STATIC_MODELS);
 	}
 	// Seed the GitLab Duo Agent fallback model so a fresh install (no credentialed
 	// dynamic discovery/cache yet) still surfaces the provider's default model in the
