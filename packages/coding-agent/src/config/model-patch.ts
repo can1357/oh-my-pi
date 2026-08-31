@@ -285,6 +285,10 @@ export function applyModelPatch(base: Model<Api>, patch: ModelPatch, transport: 
 	if (patch.cost) {
 		built.cost = { ...result.cost };
 	}
+	if (patch.reasoning !== undefined) {
+		built.reasoning = patch.reasoning;
+		if (!patch.reasoning) built.thinking = undefined;
+	}
 	return built;
 }
 
