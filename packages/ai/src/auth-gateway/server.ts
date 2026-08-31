@@ -591,7 +591,7 @@ export function releaseTurnOnStreamEnd(
 		released = true;
 		// Only a committed stream is a successful probe. Terminated/failed/cancelled
 		// streams must clear the lease without treating the cooldown as cleared.
-		if (commitGate?.state === "committed") {
+		if (commitGate?.state === "committed" || commitGate?.terminalSuccess) {
 			storage.settleQuotaProbeSuccess(requestId);
 		} else {
 			storage.clearQuotaProbe(requestId);

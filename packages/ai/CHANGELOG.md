@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Fallback children chain to later siblings; successful terminal SSE settles probes; prelude cap keeps the crossing chunk.
 - Fixed auth-gateway resetting StreamCommitGate between pre-commit attempts, releasing reservations when SSE reads reject, and only settling quota probes on committed streams.
 
 - Fixed auth-gateway nested fallback compilation leaking rules from unreached sibling branches onto earlier targets.

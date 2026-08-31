@@ -226,32 +226,32 @@ function compileFallback(node: FallbackNode, seenOnPath: ReadonlySet<string>): N
 
 	const targets: string[] = [];
 	const fallbacksByFrom: Partial<Record<GatewayErrorDisposition, Partial<Record<string, string[]>>>> = {};
-	const afterPrimary: string[] = [];
-	const primaryTargets: string[] = [];
+	const childTargetGroups: string[][] = [];
 	const sequential = new Set(seenOnPath);
-	let primary = true;
 	for (const child of node.children) {
 		// Independent ancestor copy per sibling. Fallback subtrees must not
 		// inherit sequential sibling targets — those are other leaves.
 		const childSeen = new Set(child.type === "target" ? sequential : seenOnPath);
 		const part = compileNode(child, childSeen);
 		targets.push(...part.targets);
-		if (primary) primaryTargets.push(...part.targets);
-		else afterPrimary.push(...part.targets);
+		childTargetGroups.push([...part.targets]);
 		mergeFallbacksByFrom(fallbacksByFrom, part.fallbacksByFrom);
 		if (child.type === "target") sequential.add(child.model);
-		primary = false;
 	}
+	// Each child must fall through to every later sibling (A->[B,C], B->[C]).
 	for (const disposition of node.on) {
-		if (afterPrimary.length === 0) continue;
 		let byFrom = fallbacksByFrom[disposition];
 		if (!byFrom) {
 			byFrom = {};
 			fallbacksByFrom[disposition] = byFrom;
 		}
-		for (const from of primaryTargets) {
-			const existing = byFrom[from];
-			byFrom[from] = existing ? [...existing, ...afterPrimary] : [...afterPrimary];
+		for (let i = 0; i < childTargetGroups.length - 1; i++) {
+			const later = childTargetGroups.slice(i + 1).flat();
+			if (later.length === 0) continue;
+			for (const from of childTargetGroups[i]!) {
+				const existing = byFrom[from];
+				byFrom[from] = existing ? [...existing, ...later] : [...later];
+			}
 		}
 	}
 	return { targets, fallbacksByFrom };

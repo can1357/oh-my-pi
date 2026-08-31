@@ -29,6 +29,7 @@ export class StreamCommitGate {
 	#maxPreludeBytes: number;
 	#prelude: Uint8Array[] = [];
 	#preludeBytes = 0;
+	#terminalSuccess = false;
 
 	constructor(maxPreludeBytes: number = DEFAULT_MAX_PRELUDE_BYTES) {
 		this.#maxPreludeBytes = maxPreludeBytes;
@@ -44,6 +45,12 @@ export class StreamCommitGate {
 		this.#bytes = 0;
 		this.#prelude = [];
 		this.#preludeBytes = 0;
+		this.#terminalSuccess = false;
+	}
+
+	/** True when the stream reached a successful terminal (e.g. response.completed). */
+	get terminalSuccess(): boolean {
+		return this.#terminalSuccess;
 	}
 
 	classifyAndObserve(eventType: string, byteLength: number): StreamCommitState {
@@ -64,6 +71,7 @@ export class StreamCommitGate {
 			// whose failure must surface to the client instead of re-dispatching.
 			if (kind === "terminal-success" || kind === "terminal-retryable" || kind === "terminal-failure") {
 				this.#state = "terminated";
+				if (kind === "terminal-success") this.#terminalSuccess = true;
 			}
 			return this.#state;
 		}
@@ -74,6 +82,7 @@ export class StreamCommitGate {
 		}
 		if (kind === "terminal-success" || kind === "terminal-retryable" || kind === "terminal-failure") {
 			this.#state = "terminated";
+			if (kind === "terminal-success") this.#terminalSuccess = true;
 			return this.#state;
 		}
 		return this.#state;
@@ -181,7 +190,7 @@ export function holdSseUntilCommit(
 					controller.enqueue(chunk);
 					return;
 				}
-				gate.bufferPrelude(chunk);
+				const buffered = gate.bufferPrelude(chunk);
 				pending += decoder.decode(chunk, { stream: true });
 				let next = nextSseFrame(pending);
 				while (next) {
@@ -190,16 +199,30 @@ export function holdSseUntilCommit(
 					pending = next.rest;
 					next = nextSseFrame(pending);
 					if (state === "terminated") {
-						// Dead attempt: its held frames belong to it and are never
-						// forwarded. The failover loop catches PreludeAbortedError,
-						// discards them, and dispatches a replacement attempt.
+						if (gate.terminalSuccess) {
+							committed = true;
+							for (const held of gate.takePrelude() ?? []) controller.enqueue(held);
+							if (!buffered) controller.enqueue(chunk);
+							return;
+						}
 						throw new PreludeAbortedError(gate.takePrelude() ?? [], eventType);
 					}
 					if (state === "committed") {
 						committed = true;
 						for (const held of gate.takePrelude() ?? []) controller.enqueue(held);
+						// Cap rejection drops the chunk from the prelude — still forward it.
+						if (!buffered) controller.enqueue(chunk);
 						return;
 					}
+				}
+				// Cap hit with no commit event yet: force-commit and keep the chunk.
+				if (!buffered && gate.state === "probing") {
+					gate.classifyAndObserve("response.output_item.added", gate.preludeByteLength);
+				}
+				if (!buffered && (gate.state === "committed" || gate.terminalSuccess)) {
+					committed = true;
+					for (const held of gate.takePrelude() ?? []) controller.enqueue(held);
+					controller.enqueue(chunk);
 				}
 			},
 			flush() {
