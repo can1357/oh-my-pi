@@ -36,18 +36,26 @@ export interface MCPToolFilterResult {
 	filterEmpty: boolean;
 }
 
+/**
+ * Picomatch treats `/` as a path separator: `*` and `?` never cross it and
+ * `[^/]` classes stop at it. MCP tool names are opaque strings — a denylist
+ * entry `*` must match a tool named `admin/delete` — so both the pattern and
+ * the name are matched in a slash-free domain: every `/` is transliterated
+ * to NUL (a character no glob metacharacter treats specially, and one that
+ * cannot appear in a JSON config string). Literal per-segment semantics are
+ * preserved because the transliteration is injective (`a/b` → `a\0b`).
+ * Patterns containing explicit `/` classes (`[/]`) are not supported.
+ */
 const MATCH_OPTIONS = { dot: true } as const;
 
-/**
- * Check `name` against one filter entry. Returns false when the entry is a
- * malformed pattern (picomatch returns a never-matching regex for syntactically
- * broken classes/ranges rather than throwing, so a typo degrades to "entry
- * matches nothing" — surfaced as `unmatched` — instead of disabling the server).
- */
+const SLASH_SENTINEL = "\0";
+
 function matches(name: string, pattern: string): boolean {
 	if (pattern === name) return true;
 	if (!/[*?[\]{}]/.test(pattern)) return false;
-	return picomatch.isMatch(name, pattern, MATCH_OPTIONS);
+	const p = pattern.replaceAll("/", SLASH_SENTINEL);
+	const n = name.replaceAll("/", SLASH_SENTINEL);
+	return picomatch.isMatch(n, p, MATCH_OPTIONS);
 }
 
 /**
@@ -85,8 +93,8 @@ export function filterMCPTools(input: MCPToolFilterInput): MCPToolFilterResult {
 }
 
 /**
- * Message describing a filter that excludes every advertised tool, shared by
- * the manager's startup failure and refresh diagnostics paths.
+ * Single source for the filter-empty failure message, used verbatim in the
+ * applyMCPToolFilter diagnostic and in every manager status/errors surface.
  */
 export function mcpFilterEmptyMessage(toolCount: number): string {
 	return `tool filter excludes all ${toolCount} advertised tools; the server would contribute nothing to the session. Remove the filter or widen it.`;
@@ -115,7 +123,7 @@ export function applyMCPToolFilter(serverName: string, input: MCPToolFilterInput
 
 	if (filterEmpty) {
 		logger.error(
-			`MCP server "${serverName}": tool filter (enabledTools=${JSON.stringify(input.enabledTools)}, disabledTools=${JSON.stringify(input.disabledTools)}) excludes all ${input.toolNames.length} advertised tools; the server would contribute nothing to the session. Remove the filter or widen it.`,
+			`MCP server "${serverName}": tool filter (enabledTools=${JSON.stringify(input.enabledTools)}, disabledTools=${JSON.stringify(input.disabledTools)}) ${mcpFilterEmptyMessage(input.toolNames.length)}`,
 			{ path: `mcp:${serverName}` },
 		);
 		return [];

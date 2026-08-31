@@ -1277,6 +1277,14 @@ export class MCPManager {
 			const reconnect = (options?: { authChallenge?: MCPAuthChallenge }) => this.reconnectServer(name, options);
 			const customTools = MCPTool.fromTools(connection, serverTools, reconnect);
 			void this.toolCache?.set(name, config, serverTools);
+			if (customTools.length === 0 && serverTools.length > 0) {
+				// The filter still excludes everything: keep the server failed
+				// instead of letting the caller mark it connected. The error
+				// itself is already logged by the applyMCPToolFilter diagnostic.
+				const message = mcpFilterEmptyMessage(serverTools.length);
+				this.#emitConnectionStatus({ type: "failed", serverName: name, error: message });
+				throw new Error(message);
+			}
 			this.#replaceServerTools(name, customTools);
 			void this.#onToolsChanged?.(this.#tools);
 			void this.#loadServerResourcesAndPrompts(name, connection);

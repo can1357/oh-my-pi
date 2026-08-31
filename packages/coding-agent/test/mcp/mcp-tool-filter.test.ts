@@ -29,10 +29,12 @@ test("allowlist keeps only matching tools in advertised order", () => {
 	expect(result.filterEmpty).toBe(false);
 });
 
-test("denylist removes matching tools and keeps the rest", () => {
-	const result = run(NAMES, undefined, ["send_message", "create_doc"]);
-	expect(result.allowed).toEqual(["search", "read_channel", "admin/delete"]);
-	expect(result.unmatched).toEqual([]);
+test("wildcards cross slashes: tool names are opaque, not paths", () => {
+	expect(run(NAMES, ["*"]).allowed).toEqual(NAMES);
+	expect(run(NAMES, ["admin*"]).allowed).toEqual(["admin/delete"]);
+	expect(run(NAMES, ["admin/*"]).allowed).toEqual(["admin/delete"]);
+	expect(run(NAMES, ["a?min/delete"]).allowed).toEqual(["admin/delete"]);
+	expect(run(NAMES, ["other/*"]).allowed).toEqual([]);
 });
 
 test("denylist subtracts from allowlist when both are set", () => {
@@ -70,7 +72,7 @@ test("filter that excludes every advertised tool reports filterEmpty", () => {
 });
 
 test("a denylist excluding everything also reports filterEmpty", () => {
-	const result = run(NAMES, undefined, ["**"]);
+	const result = run(NAMES, undefined, ["*"]);
 	expect(result.allowed).toEqual([]);
 	expect(result.filterEmpty).toBe(true);
 });

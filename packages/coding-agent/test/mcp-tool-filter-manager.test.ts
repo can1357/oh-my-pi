@@ -158,4 +158,33 @@ describe("MCP tool filtering through the manager", () => {
 			stop();
 		}
 	}, 20_000);
+
+	it("a reconnect keeps the server failed while the filter still excludes everything", async () => {
+		// Regression: a transport restart used to flip a filter-empty server
+		// back to `connected` — #doReconnect emitted connected unconditionally
+		// even though the filtered registration contributed zero tools.
+		const config = fixtureConfig({ enabledTools: ["zzz_nonexistent"] });
+		await manager.connectServers({ [SERVER]: config }, {});
+		expect(manager.getConnectionStatus(SERVER)).toBe("connected");
+
+		const events: string[] = [];
+		const stop = manager.addConnectionStatusListener(event => {
+			if (event.type !== "connecting" && event.serverName === SERVER) {
+				events.push(event.type);
+			}
+		});
+		try {
+			// Simulate a transport restart: reconnect while the filter (still)
+			// matches nothing.
+			await manager.reconnectServer(SERVER);
+			// The reconnect loop retries with backoff before terminating;
+			// wait out the backoff window for the terminal failed event.
+			await Bun.sleep(9500);
+			expect(manager.getTools()).toHaveLength(0);
+			expect(events).not.toContain("connected");
+			expect(events).toContain("failed");
+		} finally {
+			stop();
+		}
+	}, 30_000);
 });
