@@ -1,8 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { type } from "@oh-my-pi/omptype";
+import type { AgentTool, AgentToolContext } from "@oh-my-pi/pi-agent-core";
 import { Effort } from "@oh-my-pi/pi-ai";
 import { onModelRolesChanged, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
+import { ExtensionToolWrapper } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { YAML } from "bun";
 
@@ -87,6 +91,83 @@ describe("Settings.reloadGlobal", () => {
 		expect(report.error).toBeTruthy();
 		expect(s.get("defaultThinkingLevel")).toBe(Effort.High);
 		expect(s.get("hideThinkingBlock")).toBe(true);
+	});
+
+	it("refreshes direct and mounted approval policy before dispatch", async () => {
+		await writeConfig({
+			tools: {
+				approvalMode: "yolo",
+				approval: { direct_danger: "allow", mcp__slack_send_message: "allow" },
+			},
+		});
+		const s = await openSettings();
+		s.override("tools.approvalMode", "yolo");
+		const context = { settings: s } as AgentToolContext;
+		const runner = {
+			sessionId: "approval-reload-test",
+			consumeToolCallEmitted: () => false,
+			hasHandlers: () => false,
+			runScoped: <T>(fn: () => T): T => fn(),
+		} as unknown as ExtensionRunner;
+
+		let directExecutions = 0;
+		const directTool: AgentTool = {
+			name: "direct_danger",
+			label: "Direct danger",
+			description: "",
+			parameters: type({}),
+			approval: "exec",
+			async execute() {
+				directExecutions += 1;
+				return { content: [{ type: "text", text: "direct" }], details: {} };
+			},
+		};
+		let mountedExecutions = 0;
+		const mountedWrite: AgentTool = {
+			name: "write",
+			label: "Write",
+			description: "",
+			parameters: type({ path: "string" }),
+			approval: args =>
+				(args as { path?: string }).path === "xd://mcp__slack_send_message"
+					? { tier: "exec", policyKey: "mcp__slack_send_message" }
+					: "write",
+			async execute() {
+				mountedExecutions += 1;
+				return { content: [{ type: "text", text: "mounted" }], details: {} };
+			},
+		};
+		const direct = new ExtensionToolWrapper(directTool, runner);
+		const mounted = new ExtensionToolWrapper(mountedWrite, runner);
+		const mountedArgs = { path: "xd://mcp__slack_send_message" };
+
+		await direct.execute("direct-before", {}, undefined, undefined, context);
+		await mounted.execute("mounted-before", mountedArgs, undefined, undefined, context);
+		expect([directExecutions, mountedExecutions]).toEqual([1, 1]);
+
+		s.set("hideThinkingBlock", true);
+		await rewriteConfigWithNewMtime({
+			tools: {
+				approvalMode: "always-ask",
+				approval: { direct_danger: "deny", mcp__slack_send_message: "deny" },
+			},
+		});
+
+		await expect(direct.execute("direct-denied", {}, undefined, undefined, context)).rejects.toThrow(
+			/blocked by user policy/i,
+		);
+		await expect(mounted.execute("mounted-denied", mountedArgs, undefined, undefined, context)).rejects.toThrow(
+			/blocked by user policy/i,
+		);
+		expect([directExecutions, mountedExecutions]).toEqual([1, 1]);
+		expect(s.get("tools.approvalMode")).toBe("yolo");
+		expect(s.get("hideThinkingBlock")).toBe(true);
+
+		await Bun.write(configPath, "tools: [unclosed\n");
+		await expect(direct.execute("direct-malformed", {}, undefined, undefined, context)).rejects.toThrow(
+			/blocked by user policy/i,
+		);
+		expect(directExecutions).toBe(1);
 	});
 
 	it("keeps the previous layer when the document root is not a mapping", async () => {
