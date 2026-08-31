@@ -556,6 +556,27 @@ describe("European gateway provider catalog support", () => {
 		});
 	});
 
+	test("converts high gateway per-token prices without a magnitude cutoff", async () => {
+		const fetchMock: FetchImpl = vi.fn(async () => {
+			return Response.json({
+				data: [
+					{
+						id: "high-price-model",
+						name: "High Price Model",
+						pricing: { prompt: "0.0001", completion: "0.0002" },
+					},
+				],
+			});
+		});
+
+		const models = await cortecsModelManagerOptions({ fetch: fetchMock }).fetchDynamicModels?.();
+
+		expect(models?.[0]).toMatchObject({
+			id: "high-price-model",
+			cost: { input: 100, output: 200 },
+		});
+	});
+
 	test("preserves explicit zero gateway prices over catalog fallbacks", async () => {
 		const fetchMock: FetchImpl = vi.fn(async () => {
 			return Response.json({
@@ -627,6 +648,50 @@ describe("European gateway provider catalog support", () => {
 
 		const cachedSpec = JSON.parse(JSON.stringify(model)) as ModelSpec<"openai-completions">;
 		expect(buildModel(cachedSpec).reasoning).toBe(false);
+	});
+
+	test("preserves live gateway metadata through static model-manager merges", async () => {
+		const akiManager = createModelManager({
+			...akiIoModelManagerOptions({
+				apiKey: "aki-test-key",
+				fetch: async () =>
+					Response.json({
+						data: [
+							{
+								id: "kimi-k2.7-code-1100b",
+								name: "Kimi K2.7 Code 1100B",
+								pricing: { prompt: "0", completion: "0" },
+								supports_reasoning: false,
+							},
+						],
+					}),
+			}),
+			cacheDbPath: ":memory:",
+		});
+		const eurouterManager = createModelManager({
+			...eurouterModelManagerOptions({
+				fetch: async () =>
+					Response.json({
+						data: [
+							{
+								id: "mistral-large-3",
+								name: "Mistral Large 3",
+								input_modalities: ["text"],
+							},
+						],
+					}),
+			}),
+			cacheDbPath: ":memory:",
+		});
+
+		const [aki, eurouter] = await Promise.all([akiManager.refresh("online"), eurouterManager.refresh("online")]);
+
+		expect(aki.models[0]).toMatchObject({
+			cost: { input: 0, output: 0 },
+			reasoning: false,
+		});
+		expect(aki.models[0]?.thinking).toBeUndefined();
+		expect(eurouter.models[0]).toMatchObject({ input: ["text"] });
 	});
 
 	test("preserves known reasoning capability for reordered Claude gateway ids", async () => {

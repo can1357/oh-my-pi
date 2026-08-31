@@ -756,10 +756,7 @@ function toGatewayCostPerMillion(value: unknown): number | undefined {
 	if (parsed === undefined || parsed === null) {
 		return undefined;
 	}
-	if (parsed > 0 && parsed < 0.0001) {
-		return parsed * 1_000_000;
-	}
-	return parsed;
+	return parsed * 1_000_000;
 }
 
 function hasGatewayImageInputModality(value: unknown): boolean {
