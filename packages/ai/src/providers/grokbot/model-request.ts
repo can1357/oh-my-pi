@@ -31,10 +31,15 @@ export type GrokbotRequestedModelOptions = {
 	 */
 	thinking?: boolean;
 	/**
-	 * sand `context` tier (e.g. `300k` / `1m`); only sent when the model lists `context`.
-	 * Default: `1m` when `sandMaxMode`, otherwise `300k` (Cursor AvailableModels defaults).
+	 * sand `context` tier (e.g. `300k` / `1m` / `272k`); only sent when the model lists `context`.
+	 * Default: explicit `context`, then `sandParameterDefaults.context`, then
+	 * `1m` when `sandMaxMode`, otherwise `300k` when discovery left no default.
 	 */
 	context?: string;
+	/**
+	 * Default sand parameter values from live AvailableModels variants.
+	 */
+	sandParameterDefaults?: Readonly<Record<string, string>>;
 	/**
 	 * Allowed parameter ids from live `parameterDefinitions` / catalog `sandParameterIds`.
 	 * Empty/undefined ⇒ bare `{ modelId }` (routers and Auto) — the catalog fact
@@ -84,12 +89,15 @@ export function resolveGrokbotRequestedModel(
 			parameters.push({ id: "thinking", value: thinking ? "true" : "false" });
 		}
 		if (allowed.has("context")) {
+			const discoveredDefault = options?.sandParameterDefaults?.context?.trim();
 			const context =
 				typeof options?.context === "string" && options.context.trim()
 					? options.context.trim()
-					: options?.sandMaxMode === true
-						? "1m"
-						: "300k";
+					: discoveredDefault && discoveredDefault.length > 0
+						? discoveredDefault
+						: options?.sandMaxMode === true
+							? "1m"
+							: "300k";
 			parameters.push({ id: "context", value: context });
 		}
 		if (effortValue) {

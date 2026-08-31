@@ -188,6 +188,11 @@ describe("grokbot AvailableModels normalize", () => {
 
 		const sol = models.find(m => m.id === "gpt-5.6-sol");
 		expect(sol?.sandParameterIds).toEqual(["context", "reasoning", "fast"]);
+		expect(sol?.sandParameterDefaults).toEqual({
+			reasoning: "medium",
+			context: "272k",
+			fast: "false",
+		});
 		expect(sol?.aliases).toContain("gpt");
 
 		const auto = models.find(m => m.id === "default");

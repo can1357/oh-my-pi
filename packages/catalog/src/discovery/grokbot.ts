@@ -194,6 +194,7 @@ function toGrokbotModelSpecs(row: GrokbotAvailableModel, baseUrl: string, id: st
 			name: variant.displayName?.trim() || legacySlug,
 			requestModelId: id,
 			sandParameterIds: parameterIds,
+			sandParameterDefaults: collectVariantSandParameterDefaults(variant) ?? base.sandParameterDefaults,
 			sandMaxMode,
 			aliases: undefined,
 		});
@@ -207,6 +208,31 @@ function collectVariantParameterIds(variant: GrokbotAvailableModelVariant): stri
 		if (p.id?.trim()) ids.push(p.id.trim());
 	}
 	return uniqueStrings(ids);
+}
+
+function collectVariantSandParameterDefaults(
+	variant: GrokbotAvailableModelVariant,
+): Record<string, string> | undefined {
+	const out: Record<string, string> = {};
+	for (const p of variant.parameterValues ?? []) {
+		const id = p.id?.trim();
+		const value = p.value?.trim();
+		if (id && value) out[id] = value;
+	}
+	return Object.keys(out).length > 0 ? out : undefined;
+}
+
+function collectSandParameterDefaults(
+	row: GrokbotAvailableModel,
+	sandMaxMode: boolean,
+): Record<string, string> | undefined {
+	const variants = row.variants ?? [];
+	const preferred = sandMaxMode
+		? (variants.find(v => v.isDefaultMaxConfig === true) ??
+			variants.find(v => v.isDefaultNonMaxConfig !== true && (v.parameterValues?.length ?? 0) > 0))
+		: (variants.find(v => v.isDefaultNonMaxConfig === true) ??
+			variants.find(v => v.isDefaultMaxConfig !== true && (v.parameterValues?.length ?? 0) > 0));
+	return preferred ? collectVariantSandParameterDefaults(preferred) : undefined;
 }
 
 function toGrokbotModelSpec(row: GrokbotAvailableModel, baseUrl: string, id: string): ModelSpec<"grokbot-sand"> {
@@ -226,6 +252,7 @@ function toGrokbotModelSpec(row: GrokbotAvailableModel, baseUrl: string, id: str
 		[...(row.idAliases ?? []), ...(row.legacySlugs ?? []), ...variantLegacySlugs].filter(a => a.trim() !== id),
 	);
 	const sandMaxMode = resolveGrokbotSandMaxMode(row);
+	const sandParameterDefaults = collectSandParameterDefaults(row, sandMaxMode);
 
 	return {
 		id,
@@ -244,6 +271,7 @@ function toGrokbotModelSpec(row: GrokbotAvailableModel, baseUrl: string, id: str
 		supportsTools: true,
 		...(aliases.length > 0 ? { aliases } : undefined),
 		sandParameterIds: parameterIds,
+		...(sandParameterDefaults ? { sandParameterDefaults } : undefined),
 		sandMaxMode,
 	};
 }

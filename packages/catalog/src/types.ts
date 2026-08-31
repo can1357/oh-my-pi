@@ -1074,6 +1074,12 @@ export interface Model<TApi extends Api = Api> {
 	 * (e.g. `effort`, `fast`, `reasoning`, `context`). Empty/absent ⇒ bare modelId only.
 	 */
 	sandParameterIds?: readonly string[];
+	/**
+	 * Default Grok Bot `requestedModel.parameters` values from live AvailableModels
+	 * variants (e.g. default `context` tier). Wire mapping prefers explicit request
+	 * options, then these defaults, then reviewed fallbacks.
+	 */
+	sandParameterDefaults?: Readonly<Record<string, string>>;
 	/** When true, Grok Bot stream sets `requestedModel.maxMode`. Default false. */
 	sandMaxMode?: boolean;
 	cost: ModelCost;

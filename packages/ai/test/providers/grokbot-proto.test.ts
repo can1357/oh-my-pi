@@ -326,12 +326,23 @@ describe("grokbot requested model mapping", () => {
 			effort: "medium",
 			fast: true,
 			sandParameterIds: ["reasoning", "context", "fast"],
+			sandParameterDefaults: { context: "272k", fast: "false" },
 		});
 		expect(sol.parameters).toEqual([
-			{ id: "context", value: "300k" },
+			{ id: "context", value: "272k" },
 			{ id: "reasoning", value: "medium" },
 			{ id: "fast", value: "true" },
 		]);
+	});
+
+	test("uses discovered context default before sandMaxMode fallback", () => {
+		expect(
+			resolveGrokbotRequestedModel("custom-model", {
+				sandParameterIds: ["context"],
+				sandParameterDefaults: { context: "512k" },
+				sandMaxMode: true,
+			}).parameters,
+		).toEqual([{ id: "context", value: "512k" }]);
 	});
 
 	test("empty sandParameterIds omit parameters even when effort/fast are set", () => {
