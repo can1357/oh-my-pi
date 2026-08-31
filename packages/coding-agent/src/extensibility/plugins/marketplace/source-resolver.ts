@@ -50,6 +50,36 @@ const SENSITIVE_HEADERS: Record<string, true> = {
 	"x-api-key": true,
 };
 
+/** Resolved npm fetch/extraction limits (defaults with optional overrides applied). */
+interface NpmFetchLimits {
+	packumentMaxBytes: number;
+	tarballMaxBytes: number;
+	packumentTimeoutMs: number;
+	tarballTimeoutMs: number;
+	maxRedirects: number;
+}
+
+/** Resolve the five npm fetch limits, applying optional test-injectable overrides. */
+function resolveLimits(limits?: ResolveContext["limits"]): NpmFetchLimits {
+	return {
+		packumentMaxBytes: limits?.packumentMaxBytes ?? PACKUMENT_MAX_BYTES,
+		tarballMaxBytes: limits?.tarballMaxBytes ?? TARBALL_MAX_BYTES,
+		packumentTimeoutMs: limits?.packumentTimeoutMs ?? PACKUMENT_TIMEOUT_MS,
+		tarballTimeoutMs: limits?.tarballTimeoutMs ?? TARBALL_TIMEOUT_MS,
+		maxRedirects: limits?.maxRedirects ?? MAX_REDIRECTS,
+	};
+}
+
+/**
+ * Truncate and strip control/escape characters from an untrusted fragment
+ * before echoing it into a thrown error. Keeps registry- or archive-controlled
+ * strings from carrying arbitrary bytes, ANSI escapes, or unbounded length.
+ */
+function sanitizeFragment(s: unknown, maxLen = 64): string {
+	const stripped = String(s).replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, "");
+	return stripped.length > maxLen ? `${stripped.slice(0, maxLen)}…` : stripped;
+}
+
 export interface ResolveContext {
 	/** Absolute path to the cloned/local marketplace directory. Required for relative sources. */
 	marketplaceClonePath?: string;
@@ -57,6 +87,18 @@ export interface ResolveContext {
 	catalogMetadata?: MarketplaceCatalogMetadata;
 	/** Scratch directory for sources that require cloning or extraction. */
 	tmpDir: string;
+	/**
+	 * Test-injectable overrides for npm fetch limits. All five constants
+	 * (packumentMaxBytes, tarballMaxBytes, packumentTimeoutMs, tarballTimeoutMs,
+	 * maxRedirects) default to the pinned values when omitted.
+	 */
+	limits?: Partial<{
+		packumentMaxBytes: number;
+		tarballMaxBytes: number;
+		packumentTimeoutMs: number;
+		tarballTimeoutMs: number;
+		maxRedirects: number;
+	}>;
 }
 
 /**
@@ -196,17 +238,21 @@ async function resolveObjectSource(
  *   - Fetches packument with byte/time caps, manual redirects, no credential forwarding.
  *   - Selects version via dist-tags.latest, exact key, or highest semver match.
  *   - Requires HTTPS tarball URL and canonical SHA-512 SRI.
- *   - Streams tarball once to a private temp root while hashing.
- *   - Compares digest with timingSafeEqual before extraction.
+ *   - Streams tarball once to a private temp root, hashing incrementally.
+ *   - Compares the incremental digest with timingSafeEqual before extraction.
  *   - Extracts through extractArchive with pinned resource limits.
  *   - Requires exactly one top-level `package/` directory.
+ *   - Verifies the extracted package/package.json name (and version, when present)
+ *     matches the requested package and selected version.
  *
- * Errors include the package and stage but never response bodies, credentials,
- * or uncontrolled metadata.
+ * Errors include the package and stage. Untrusted registry- or archive-controlled
+ * fragments echoed into errors are truncated and stripped of control/escape bytes
+ * via sanitizeFragment; response bodies and credentials are never included.
  */
 async function resolveNpmSource(source: PluginSourceNpm, context: ResolveContext): Promise<ResolveResult> {
 	const pkg = assertRuntimePackageName(source.package);
 	const stage = (s: string) => `npm source for "${pkg}": ${s}`;
+	const lim = resolveLimits(context.limits);
 
 	// ── Validate version expression ──────────────────────────────────
 	let versionExpr: string | undefined;
@@ -224,7 +270,7 @@ async function resolveNpmSource(source: PluginSourceNpm, context: ResolveContext
 	const registryUrl = validateRegistryUrl(source.registry ?? DEFAULT_REGISTRY);
 
 	// ── Fetch packument ──────────────────────────────────────────────
-	const packument = await fetchPackument(pkg, registryUrl, stage);
+	const packument = await fetchPackument(pkg, registryUrl, stage, lim);
 
 	// ── Select version ───────────────────────────────────────────────
 	const selectedVersion = selectVersion(packument, versionExpr, stage);
@@ -236,7 +282,7 @@ async function resolveNpmSource(source: PluginSourceNpm, context: ResolveContext
 	}
 
 	if (versionMeta.name !== pkg) {
-		throw new Error(stage(`metadata name mismatch: expected "${pkg}", got "${String(versionMeta.name)}"`));
+		throw new Error(stage(`metadata name mismatch: expected "${pkg}", got "${sanitizeFragment(versionMeta.name)}"`));
 	}
 
 	// ── Validate tarball URL ─────────────────────────────────────────
@@ -257,14 +303,15 @@ async function resolveNpmSource(source: PluginSourceNpm, context: ResolveContext
 
 	// ── Stream tarball to temp root while hashing ────────────────────
 	const tempRoot = path.join(context.tmpDir, `npm-${pkg.replace(/[^a-z0-9._~-]/g, "-")}-${crypto.randomUUID()}`);
-	await fs.mkdir(tempRoot, { recursive: true });
+	await fs.mkdir(tempRoot, { recursive: true, mode: 0o700 });
 	const tarballPath = path.join(tempRoot, "package.tgz");
 
 	try {
-		await downloadTarball(tarballUrl, tarballPath, registryUrl, stage);
+		// downloadTarball streams the body, enforces byte/time caps, and feeds
+		// each chunk to an incremental SHA-512 hasher, returning the digest.
+		const actualDigest = await downloadTarball(tarballUrl, tarballPath, new URL(tarballUrl).origin, stage, lim);
 
 		// ── Verify SHA-512 digest before extraction ──────────────────
-		const actualDigest = await sha512File(tarballPath);
 		if (actualDigest.length !== 64 || !crypto.timingSafeEqual(actualDigest, expectedDigest)) {
 			throw new Error(stage(`integrity verification failed for version "${selectedVersion}"`));
 		}
@@ -282,13 +329,37 @@ async function resolveNpmSource(source: PluginSourceNpm, context: ResolveContext
 		}
 		const siblings = entries.filter(e => e.name !== "package");
 		if (siblings.length > 0) {
-			throw new Error(
-				stage(`archive must contain only "package/" — found siblings: ${siblings.map(s => s.name).join(", ")}`),
-			);
+			const shown = siblings
+				.slice(0, 5)
+				.map(s => sanitizeFragment(s.name))
+				.join(", ");
+			const extra = siblings.length > 5 ? ` (and ${siblings.length - 5} more)` : "";
+			throw new Error(stage(`archive must contain only "package/" — found siblings: ${shown}${extra}`));
 		}
 
 		const pkgPath = path.join(extractDir, "package");
 		await verifyDirExists(pkgPath, stage("extracted package/ directory does not exist"));
+
+		// ── Verify extracted package identity ────────────────────────
+		const manifestPath = path.join(pkgPath, "package.json");
+		let manifest: { name?: unknown; version?: unknown };
+		try {
+			manifest = JSON.parse(await Bun.file(manifestPath).text()) as { name?: unknown; version?: unknown };
+		} catch {
+			throw new Error(stage("extracted package/package.json is missing or not valid JSON"));
+		}
+		if (manifest.name !== pkg) {
+			throw new Error(
+				stage(`package identity mismatch: expected name "${pkg}", got "${sanitizeFragment(manifest.name)}"`),
+			);
+		}
+		if (manifest.version !== undefined && manifest.version !== selectedVersion) {
+			throw new Error(
+				stage(
+					`package identity mismatch: expected version "${selectedVersion}", got "${sanitizeFragment(manifest.version)}"`,
+				),
+			);
+		}
 
 		return { dir: pkgPath, tempCloneRoot: tempRoot, resolvedVersion: selectedVersion };
 	} catch (err) {
@@ -335,6 +406,46 @@ function isPublicHttpsUrl(url: string): boolean {
 	}
 }
 
+// ── RFC 3986 URI-reference validation ───────────────────────────────
+
+// RFC 3986 (Appendix A) URI-reference grammar, compiled to a single anchored
+// regex. The WHATWG URL parser accepts strings that are not valid URI-references
+// (e.g. "::" is silently treated as a relative path), so each redirect Location
+// is checked against this grammar before resolution. This rejects degenerate
+// values at the parsing stage without special-casing any particular literal.
+//
+// Notable structural rules enforced:
+//   - A URI scheme must start with ALPHA (scheme = ALPHA *( ALPHA / DIGIT / "+" / "-" / "." )).
+//   - A relative-ref's first segment must not contain ":" (segment-nz-nc),
+//     which is what rejects "::" — it has no valid scheme and its first
+//     segment contains a colon.
+const _PCHAR = "(?:[A-Za-z0-9._~!$&'()*+,;=:@-]|%[0-9A-Fa-f]{2})";
+const _SEGMENT_NZ_NC = "(?:[A-Za-z0-9._~!$&'()*+,;=@-]|%[0-9A-Fa-f]{2})+";
+const _SEG = `${_PCHAR}*`;
+const _SEG_NZ = `${_PCHAR}+`;
+const _PATH_ABE = `(?:/${_SEG})*`;
+const _PATH_ABS = `/(?:${_SEG_NZ}(?:/${_SEG})*)?`;
+const _PATH_NS = `${_SEGMENT_NZ_NC}(?:/${_SEG})*`;
+const _PATH_RTL = `${_SEG_NZ}(?:/${_SEG})*`;
+const _QF = `(?:[A-Za-z0-9._~!$&'()*+,;=:@/?-]|%[0-9A-Fa-f]{2})*`;
+const _SCHEME = "[A-Za-z][A-Za-z0-9+.-]*";
+const _REG_NAME = "(?:[A-Za-z0-9._~!$&'()*+,;=-]|%[0-9A-Fa-f]{2})*";
+const _IP_LITERAL = "\\[[0-9A-Fa-f:.]+\\]";
+const _HOST = `(?:${_IP_LITERAL}|${_REG_NAME})`;
+const _PORT = "[0-9]*";
+const _USERINFO = "(?:[A-Za-z0-9._~!$&'()*+,;=:-]|%[0-9A-Fa-f]{2})*";
+const _AUTHORITY = `(?:${_USERINFO}@)?${_HOST}(?::${_PORT})?`;
+const _HIER_PART = `(?://${_AUTHORITY}${_PATH_ABE}|${_PATH_ABS}|${_PATH_RTL}|)`;
+const _REL_PART = `(?://${_AUTHORITY}${_PATH_ABE}|${_PATH_ABS}|${_PATH_NS}|)`;
+const _URI = `${_SCHEME}:${_HIER_PART}(?:\\?${_QF})?(?:#${_QF})?`;
+const _REL_REF = `${_REL_PART}(?:\\?${_QF})?(?:#${_QF})?`;
+const URI_REFERENCE_RE = new RegExp(`^(?:${_URI}|${_REL_REF})$`);
+
+/** Check that `s` is a well-formed RFC 3986 URI-reference (URI or relative-ref). */
+function isValidUriReference(s: string): boolean {
+	return URI_REFERENCE_RE.test(s);
+}
+
 /** Packument shape (subset). */
 interface Packument {
 	name?: string;
@@ -354,49 +465,99 @@ interface Packument {
 
 /**
  * Fetch a packument with byte/time caps, manual redirects, and no credential forwarding.
- * Permits at most five redirects and keeps them on the registry origin.
+ * The deadline covers the entire body consumption (one AbortController from fetch
+ * through the final byte); redirects stay on the registry origin.
  */
-async function fetchPackument(pkg: string, registryUrl: string, stage: (s: string) => string): Promise<Packument> {
+async function fetchPackument(
+	pkg: string,
+	registryUrl: string,
+	stage: (s: string) => string,
+	lim: NpmFetchLimits,
+): Promise<Packument> {
 	const encodedName = pkg.startsWith("@") ? `@${encodeURIComponent(pkg.slice(1))}` : encodeURIComponent(pkg);
 	const packumentUrl = `${registryUrl}/${encodedName}`;
 
-	const response = await fetchWithRedirects(packumentUrl, registryUrl, {
-		maxBytes: PACKUMENT_MAX_BYTES,
-		timeoutMs: PACKUMENT_TIMEOUT_MS,
+	const { response, clearTimer } = await fetchWithRedirects(packumentUrl, new URL(registryUrl).origin, {
+		timeoutMs: lim.packumentTimeoutMs,
+		maxRedirects: lim.maxRedirects,
 		stage,
 		headers: { accept: "application/json" },
 	});
 
-	if (response.status === 404) {
-		throw new Error(stage(`package not found on registry`));
-	}
-	if (!response.ok) {
-		throw new Error(stage(`packument fetch failed: HTTP ${response.status}`));
-	}
-
-	let body: string;
 	try {
-		body = await response.text();
-	} catch (err) {
-		throw new Error(stage(`failed to read packument: ${err instanceof Error ? err.message : String(err)}`));
-	}
+		if (response.status === 404) {
+			throw new Error(stage(`package not found on registry`));
+		}
+		if (!response.ok) {
+			throw new Error(stage(`packument fetch failed: HTTP ${response.status}`));
+		}
 
-	if (body.length > PACKUMENT_MAX_BYTES) {
-		throw new Error(stage(`packument exceeds ${PACKUMENT_MAX_BYTES} bytes`));
-	}
+		// Stream the body counting BYTES (not UTF-16 units); abort past the cap.
+		let bytes: Uint8Array;
+		try {
+			bytes = await readCappedBytes(response, lim.packumentMaxBytes, stage);
+		} catch (err) {
+			if (err instanceof Error && err.name === "AbortError") {
+				throw new Error(stage(`request timed out after ${lim.packumentTimeoutMs}ms`));
+			}
+			throw err;
+		}
 
+		let body: string;
+		try {
+			body = Buffer.from(bytes).toString("utf8");
+		} catch (err) {
+			throw new Error(stage(`failed to read packument: ${err instanceof Error ? err.message : String(err)}`));
+		}
+
+		try {
+			return JSON.parse(body) as Packument;
+		} catch {
+			throw new Error(stage(`packument is not valid JSON`));
+		}
+	} finally {
+		clearTimer();
+	}
+}
+
+/** Read a response body as bytes, aborting once it exceeds `maxBytes`. */
+async function readCappedBytes(
+	response: Response,
+	maxBytes: number,
+	stage: (s: string) => string,
+): Promise<Uint8Array> {
+	const reader = response.body?.getReader();
+	if (!reader) {
+		throw new Error(stage(`response has no body`));
+	}
+	const chunks: Uint8Array[] = [];
+	let totalBytes = 0;
 	try {
-		return JSON.parse(body) as Packument;
-	} catch {
-		throw new Error(stage(`packument is not valid JSON`));
+		for (;;) {
+			const { done, value } = await reader.read();
+			if (done) break;
+			totalBytes += value.byteLength;
+			if (totalBytes > maxBytes) {
+				throw new Error(stage(`response exceeds ${maxBytes} bytes`));
+			}
+			chunks.push(value);
+		}
+	} finally {
+		reader.releaseLock();
 	}
+	return Buffer.concat(chunks);
 }
 
 /**
  * Select version from packument:
- *   1. Exact `versions` key when the expression is an exact version.
- *   2. `dist-tags.latest` when version is omitted.
+ *   1. `dist-tags.latest` when version is omitted.
+ *   2. Exact `versions` key when the expression is an exact version.
  *   3. Highest Bun-semver match for a range expression.
+ *
+ * Range expressions are validated against a conservative semver range grammar
+ * before the satisfies loop: Bun.semver.satisfies treats garbage like "foobar"
+ * or "latest" as a universal match, so an invalid expression must be rejected
+ * explicitly to avoid silently resolving to the highest published version.
  */
 function selectVersion(packument: Packument, versionExpr: string | undefined, stage: (s: string) => string): string {
 	const versions = packument.versions;
@@ -411,7 +572,7 @@ function selectVersion(packument: Packument, versionExpr: string | undefined, st
 			throw new Error(stage("no version specified and dist-tags.latest is missing"));
 		}
 		if (!versions[latest]) {
-			throw new Error(stage(`dist-tags.latest "${latest}" not found in versions`));
+			throw new Error(stage(`dist-tags.latest "${sanitizeFragment(latest)}" not found in versions`));
 		}
 		return latest;
 	}
@@ -421,21 +582,17 @@ function selectVersion(packument: Packument, versionExpr: string | undefined, st
 		return versionExpr;
 	}
 
-	// Range match — find highest satisfying version
-	const allVersions = Object.keys(versions).filter(v => {
-		try {
-			return Bun.semver.order(v, "0.0.0") >= 0;
-		} catch {
-			return false;
-		}
-	});
-	if (allVersions.length === 0) {
-		throw new Error(stage(`version "${versionExpr}" not found and no semver versions available`));
+	// Range expression — validate grammar before matching, since Bun.semver.satisfies
+	// silently treats unparseable ranges (e.g. "foobar", "latest") as a universal match.
+	if (!isValidSemverRange(versionExpr)) {
+		throw new Error(stage(`invalid version expression: "${sanitizeFragment(versionExpr)}"`));
 	}
 
-	// Try semver range match
+	// Find highest satisfying version. The satisfies call skips non-semver keys
+	// (it throws for unparseable versions, caught here); no prerelease prefilter
+	// so a range whose only match is e.g. 0.0.0-alpha resolves to it.
 	let best: string | undefined;
-	for (const v of allVersions) {
+	for (const v of Object.keys(versions)) {
 		try {
 			if (Bun.semver.satisfies(v, versionExpr)) {
 				if (best === undefined || Bun.semver.order(v, best) > 0) {
@@ -443,15 +600,33 @@ function selectVersion(packument: Packument, versionExpr: string | undefined, st
 				}
 			}
 		} catch {
-			// Invalid range or version — skip
+			// Non-semver version key or unsatisfiable — skip
 		}
 	}
 
 	if (best === undefined) {
-		throw new Error(stage(`no version matching "${versionExpr}"`));
+		throw new Error(stage(`no version matching "${sanitizeFragment(versionExpr)}"`));
 	}
 
 	return best;
+}
+
+// ── semver range grammar ────────────────────────────────────────────
+
+// Conservative semver range grammar. Accepts caret/tilde/comparator/hyphen/x-range
+// and OR (||) sets — the forms npm and Bun.semver.satisfies honor — while rejecting
+// garbage like "foobar", "latest", "@latest", "1..2", "==1.0.0", "1.2.3.4".
+const SEMVER_PART =
+	"(?:[vV]?\\d+(?:\\.(?:\\d+|[xX*])(?:\\.(?:\\d+|[xX*])(?:-[0-9A-Za-z.-]+)?(?:\\+[0-9A-Za-z.-]+)?)?)?|[xX*])";
+const SEMVER_OP = "(?:>=|<=|>|<|=|~|\\^)";
+const SEMVER_COMPARATOR = `(?:${SEMVER_OP}\\s*)?${SEMVER_PART}`;
+const SEMVER_HYPHEN_RANGE = `${SEMVER_PART}\\s+-\\s+${SEMVER_PART}`;
+const SEMVER_COMPARATOR_SET = `(?:${SEMVER_HYPHEN_RANGE}|${SEMVER_COMPARATOR})(?:\\s+${SEMVER_COMPARATOR})*`;
+const SEMVER_RANGE_RE = new RegExp(`^\\s*${SEMVER_COMPARATOR_SET}(?:\\s*\\|\\|\\s*${SEMVER_COMPARATOR_SET})*\\s*$`);
+
+/** Conservative check that `expr` looks like a valid semver range expression. */
+function isValidSemverRange(expr: string): boolean {
+	return SEMVER_RANGE_RE.test(expr);
 }
 
 /** Parse a canonical SHA-512 SRI string (`sha512-<base64>`) and return the 64-byte digest. */
@@ -467,33 +642,40 @@ function parseSriSha512(integrity: string, stage: (s: string) => string): Uint8A
 	return new Uint8Array(digest);
 }
 
-/** Compute SHA-512 of a file and return the 64-byte digest. */
-async function sha512File(filePath: string): Promise<Uint8Array> {
-	const file = Bun.file(filePath);
-	const buffer = await file.arrayBuffer();
-	const digest = crypto.createHash("sha512").update(Buffer.from(buffer)).digest();
-	return new Uint8Array(digest);
-}
-
 interface FetchOptions {
-	maxBytes: number;
 	timeoutMs: number;
+	maxRedirects: number;
 	stage: (s: string) => string;
 	headers?: Record<string, string>;
 }
 
 /**
- * Fetch with manual redirect handling: at most MAX_REDIRECTS redirects,
- * staying on the registry origin, never forwarding sensitive headers across origins.
+ * Fetch with manual redirect handling.
+ *
+ * One AbortController lives from fetch() through the final body byte: the timer
+ * is NOT cleared when headers arrive. Callers receive a `clearTimer` callback
+ * to invoke in a `finally` after body consumption, so the deadline covers the
+ * entire stream. Redirects are constrained to `allowedOrigin` (the registry
+ * origin for packuments, the tarball URL's own origin for tarballs). Every
+ * redirect target is rejected if it carries embedded credentials (userinfo).
+ * Sensitive headers are never forwarded across origins. Query strings and
+ * fragments are permitted on redirect hops only — signed CDN URLs commonly
+ * append query parameters (e.g. ?expires=…) on redirect, while the initial
+ * URL is validated strictly by the caller.
  */
-async function fetchWithRedirects(url: string, registryOrigin: string, opts: FetchOptions): Promise<Response> {
+async function fetchWithRedirects(
+	url: string,
+	allowedOrigin: string,
+	opts: FetchOptions,
+): Promise<{ response: Response; clearTimer: () => void }> {
 	let currentUrl = url;
-	const origin = new URL(registryOrigin).origin;
+	const origin = new URL(allowedOrigin).origin;
 
-	for (let i = 0; i <= MAX_REDIRECTS; i++) {
-		const controller = new AbortController();
-		const timer = setTimeout(() => controller.abort(), opts.timeoutMs);
+	const controller = new AbortController();
+	const timer = setTimeout(() => controller.abort(), opts.timeoutMs);
+	const clearTimer = () => clearTimeout(timer);
 
+	for (let i = 0; i <= opts.maxRedirects; i++) {
 		// Only forward non-sensitive headers; strip anything that could leak credentials.
 		const headers: Record<string, string> = {};
 		if (opts.headers) {
@@ -512,82 +694,105 @@ async function fetchWithRedirects(url: string, registryOrigin: string, opts: Fet
 				headers,
 			});
 		} catch (err) {
-			clearTimeout(timer);
+			clearTimer();
 			if (err instanceof Error && err.name === "AbortError") {
 				throw new Error(opts.stage(`request timed out after ${opts.timeoutMs}ms`));
 			}
 			throw new Error(opts.stage(`fetch failed: ${err instanceof Error ? err.message : String(err)}`));
 		}
-		clearTimeout(timer);
 
 		// Handle redirects (3xx)
 		if (response.status >= 300 && response.status < 400) {
 			const location = response.headers.get("location");
 			if (!location) {
+				clearTimer();
 				throw new Error(opts.stage(`redirect ${response.status} without Location header`));
+			}
+
+			// Validate the Location header as an RFC 3986 URI-reference before
+			// resolving it. The WHATWG URL parser accepts strings that are not
+			// valid URI-references (e.g. "::" is silently treated as a relative
+			// path), so the grammar check rejects degenerate values here.
+			if (!isValidUriReference(location)) {
+				clearTimer();
+				throw new Error(opts.stage(`invalid redirect Location: ${JSON.stringify(location)}`));
 			}
 
 			let nextUrl: string;
 			try {
 				nextUrl = new URL(location, currentUrl).href;
 			} catch {
+				clearTimer();
 				throw new Error(opts.stage(`invalid redirect Location: ${JSON.stringify(location)}`));
 			}
 
-			// Stay on registry origin
-			let nextOrigin: string;
+			let nextParsed: URL;
 			try {
-				nextOrigin = new URL(nextUrl).origin;
+				nextParsed = new URL(nextUrl);
 			} catch {
+				clearTimer();
 				throw new Error(opts.stage(`invalid redirect URL: ${JSON.stringify(nextUrl)}`));
 			}
-			if (nextOrigin !== origin) {
-				throw new Error(opts.stage(`redirect leaves registry origin: ${nextOrigin}`));
+
+			// Reject embedded credentials (userinfo) on every redirect target.
+			if (nextParsed.username || nextParsed.password) {
+				clearTimer();
+				throw new Error(opts.stage(`redirect target must not contain credentials`));
 			}
 
-			if (!nextUrl.startsWith("https://")) {
+			// Stay on the allowed origin.
+			if (nextParsed.origin !== origin) {
+				clearTimer();
+				throw new Error(opts.stage(`redirect leaves registry origin: ${nextParsed.origin}`));
+			}
+
+			if (nextParsed.protocol !== "https:") {
+				clearTimer();
 				throw new Error(opts.stage(`redirect must stay HTTPS: ${JSON.stringify(nextUrl)}`));
 			}
 
+			// Query/fragment are allowed on redirect hops (signed CDN URLs);
+			// the initial URL is validated strictly by the caller.
 			currentUrl = nextUrl;
 			continue;
 		}
 
-		return response;
+		return { response, clearTimer };
 	}
 
-	throw new Error(opts.stage(`exceeded ${MAX_REDIRECTS} redirects`));
+	clearTimer();
+	throw new Error(opts.stage(`exceeded ${opts.maxRedirects} redirects`));
 }
 
 /**
  * Download a tarball to a file path while enforcing byte and time limits.
- * Uses manual redirects with the same origin-staying and header-stripping policy.
+ * Streams the body under the single deadline from fetchWithRedirects, feeds
+ * each chunk to an incremental SHA-512 hasher, and returns the 64-byte digest
+ * so the caller can verify SRI integrity without re-reading the file.
  */
 async function downloadTarball(
 	tarballUrl: string,
 	destPath: string,
-	registryOrigin: string,
+	tarballOrigin: string,
 	stage: (s: string) => string,
-): Promise<void> {
-	const response = await fetchWithRedirects(tarballUrl, registryOrigin, {
-		maxBytes: TARBALL_MAX_BYTES,
-		timeoutMs: TARBALL_TIMEOUT_MS,
+	lim: NpmFetchLimits,
+): Promise<Uint8Array> {
+	const { response, clearTimer } = await fetchWithRedirects(tarballUrl, tarballOrigin, {
+		timeoutMs: lim.tarballTimeoutMs,
+		maxRedirects: lim.maxRedirects,
 		stage,
 	});
 
-	if (!response.ok) {
-		throw new Error(stage(`tarball download failed: HTTP ${response.status}`));
-	}
-
-	const contentLength = response.headers.get("content-length");
-	if (contentLength && parseInt(contentLength, 10) > TARBALL_MAX_BYTES) {
-		throw new Error(stage(`tarball exceeds ${TARBALL_MAX_BYTES} bytes`));
-	}
-
-	const controller = new AbortController();
-	const timer = setTimeout(() => controller.abort(), TARBALL_TIMEOUT_MS);
-
 	try {
+		if (!response.ok) {
+			throw new Error(stage(`tarball download failed: HTTP ${response.status}`));
+		}
+
+		const contentLength = response.headers.get("content-length");
+		if (contentLength && parseInt(contentLength, 10) > lim.tarballMaxBytes) {
+			throw new Error(stage(`tarball exceeds ${lim.tarballMaxBytes} bytes`));
+		}
+
 		const reader = response.body?.getReader();
 		if (!reader) {
 			throw new Error(stage(`tarball response has no body`));
@@ -595,6 +800,7 @@ async function downloadTarball(
 
 		const file = Bun.file(destPath);
 		const writer = file.writer();
+		const hasher = crypto.createHash("sha512");
 		let totalBytes = 0;
 
 		try {
@@ -602,22 +808,25 @@ async function downloadTarball(
 				const { done, value } = await reader.read();
 				if (done) break;
 				totalBytes += value.byteLength;
-				if (totalBytes > TARBALL_MAX_BYTES) {
-					throw new Error(stage(`tarball exceeds ${TARBALL_MAX_BYTES} compressed bytes`));
+				if (totalBytes > lim.tarballMaxBytes) {
+					throw new Error(stage(`tarball exceeds ${lim.tarballMaxBytes} compressed bytes`));
 				}
+				hasher.update(value);
 				writer.write(value);
 			}
 			await writer.end();
 		} finally {
 			reader.releaseLock();
 		}
+
+		return new Uint8Array(hasher.digest());
 	} catch (err) {
 		if (err instanceof Error && err.name === "AbortError") {
-			throw new Error(stage(`tarball download timed out after ${TARBALL_TIMEOUT_MS}ms`));
+			throw new Error(stage(`tarball download timed out after ${lim.tarballTimeoutMs}ms`));
 		}
 		throw err;
 	} finally {
-		clearTimeout(timer);
+		clearTimer();
 	}
 }
 

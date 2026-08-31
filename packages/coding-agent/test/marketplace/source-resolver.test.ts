@@ -3,10 +3,25 @@ import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { MarketplacePluginEntry } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/marketplace";
+import type {
+	MarketplacePluginEntry,
+	ResolveContext,
+} from "@oh-my-pi/pi-coding-agent/extensibility/plugins/marketplace";
 import { resolvePluginSource } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/marketplace";
 import { removeSyncWithRetries } from "@oh-my-pi/pi-utils";
 import { encodeArchive } from "@oh-my-pi/pi-utils/ar";
+
+// Test-injectable limits override (contract: ResolveContext.limits). The local type keeps
+// these tests compiling against the pre-contract source; the field is ignored at runtime
+// until the source worker lands the limits plumbing.
+type NpmLimits = Partial<{
+	packumentMaxBytes: number;
+	tarballMaxBytes: number;
+	packumentTimeoutMs: number;
+	tarballTimeoutMs: number;
+	maxRedirects: number;
+}>;
+type NpmResolveContext = ResolveContext & { limits?: NpmLimits };
 
 // Fixture: a cloned marketplace with a single plugin at ./plugins/hello-plugin
 const FIXTURE_DIR = path.resolve(import.meta.dir, "fixtures/valid-marketplace");
@@ -31,6 +46,9 @@ interface MockPackument {
 		}
 	>;
 }
+
+/** Wire payload the mock registry serializes; malformed-registry fixtures may omit fields the resolver rejects. */
+type MockPackumentPayload = Partial<MockPackument>;
 
 /** Build a valid tar.gz archive containing `package/` with a plugin.json. */
 async function makeValidTarball(packageName: string, packageVersion: string): Promise<Uint8Array> {
@@ -69,7 +87,7 @@ function makePackument(
 }
 
 /** Create a mock fetch that serves packuments and tarballs. */
-function createNpmFetchMock(packuments: Map<string, MockPackument>, tarballs: Map<string, Uint8Array>) {
+function createNpmFetchMock(packuments: Map<string, MockPackumentPayload>, tarballs: Map<string, Uint8Array>) {
 	return async (input: string | URL | Request): Promise<Response> => {
 		const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
 		// Tarball request — check before packument to avoid false matches
@@ -132,10 +150,12 @@ describe("resolvePluginSource", () => {
 		expect(resolved.tempCloneRoot).toBeUndefined();
 	});
 
-	it("throws when source string would escape marketplace root", async () => {
-		// "../../escape" does not start with "./" — hits the non-relative guard
-		const entry = makeEntry("../../escape");
-		await expect(resolvePluginSource(entry, { marketplaceClonePath: FIXTURE_DIR, tmpDir })).rejects.toThrow();
+	it("throws when source string lacks the ./ prefix", async () => {
+		// "plugins/hello-plugin" (no "./") hits the non-relative guard independently of pathIsWithin.
+		const entry = makeEntry("plugins/hello-plugin");
+		await expect(resolvePluginSource(entry, { marketplaceClonePath: FIXTURE_DIR, tmpDir })).rejects.toThrow(
+			/must start with/,
+		);
 	});
 
 	it("throws when relative source would escape via path traversal (./../../escape)", async () => {
@@ -418,9 +438,7 @@ describe("resolvePluginSource — npm", () => {
 		const integrity = sriSha512(tarballBytes);
 		const pkg = "test-plugin";
 		const packument = makePackument(pkg, [{ version: "1.0.0", integrity }]);
-		const packuments = new Map([[pkg, packument]]);
 		const tarballUrl = `${REGISTRY_ORIGIN}/${pkg}/-/${pkg}-1.0.0.tgz`;
-		const tarballs = new Map([[tarballUrl, tarballBytes]]);
 
 		// Need to also serve the redirected URL
 		fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async (input: string | URL | Request) => {
@@ -447,12 +465,6 @@ describe("resolvePluginSource — npm", () => {
 	});
 
 	it("rejects redirect that leaves registry origin", async () => {
-		const tarballBytes = await makeValidTarball("test-plugin", "1.0.0");
-		const integrity = sriSha512(tarballBytes);
-		const pkg = "test-plugin";
-		const packument = makePackument(pkg, [{ version: "1.0.0", integrity }]);
-		const tarballUrl = `${REGISTRY_ORIGIN}/${pkg}/-/${pkg}-1.0.0.tgz`;
-
 		fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async (input: string | URL | Request) => {
 			const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
 			if (url === `${REGISTRY_ORIGIN}/test-plugin`) {
@@ -586,5 +598,638 @@ describe("resolvePluginSource — npm", () => {
 
 		const entry = makeEntry({ source: "npm", package: "test-plugin", version: "^99.0.0", registry: REGISTRY_ORIGIN });
 		await expect(resolvePluginSource(entry, { tmpDir })).rejects.toThrow(/no version matching/);
+	});
+
+	// ── Contract: garbage range expression ───────────────────────────────
+
+	it("rejects garbage version expression with /invalid version expression/", async () => {
+		const tarballBytes = await makeValidTarball("test-plugin", "1.0.0");
+		const integrity = sriSha512(tarballBytes);
+		await setupNpmMock({
+			pkg: "test-plugin",
+			versions: [{ version: "1.0.0", integrity }],
+			tarballBytes,
+		});
+
+		const entry = makeEntry({
+			source: "npm",
+			package: "test-plugin",
+			version: "garbage-range!!!",
+			registry: REGISTRY_ORIGIN,
+		});
+		await expect(resolvePluginSource(entry, { tmpDir })).rejects.toThrow(/invalid version expression/);
+	});
+
+	// ── Contract: prerelease lowest line ─────────────────────────────────
+
+	it("resolves prerelease version when it is the only range match", async () => {
+		const tarballBytes = await makeValidTarball("test-plugin", "0.0.0-alpha");
+		const integrity = sriSha512(tarballBytes);
+		await setupNpmMock({
+			pkg: "test-plugin",
+			versions: [{ version: "0.0.0-alpha", integrity }],
+			tarballBytes,
+		});
+
+		const entry = makeEntry({
+			source: "npm",
+			package: "test-plugin",
+			version: ">=0.0.0-alpha",
+			registry: REGISTRY_ORIGIN,
+		});
+		const result = await resolvePluginSource(entry, { tmpDir });
+		expect(result.resolvedVersion).toBe("0.0.0-alpha");
+	});
+
+	// ── Contract: exact-version handoff (version omitted in tarball) ─────
+
+	it("persists selected version when tarball package.json omits version field", async () => {
+		// Tarball package.json has no "version" — only the resolver handoff can supply it.
+		const pluginJson = JSON.stringify({ name: "test-plugin", description: "test" });
+		const entries: readonly [string, string][] = [
+			["package/", ""],
+			["package/package.json", pluginJson],
+			["package/.claude-plugin/plugin.json", pluginJson],
+		];
+		const tarballBytes = await encodeArchive("tar.gz", entries);
+		const integrity = sriSha512(tarballBytes);
+		await setupNpmMock({
+			pkg: "test-plugin",
+			versions: [{ version: "1.0.0", integrity }],
+			tarballBytes,
+		});
+
+		const entry = makeEntry({ source: "npm", package: "test-plugin", version: "1.0.0", registry: REGISTRY_ORIGIN });
+		const result = await resolvePluginSource(entry, { tmpDir });
+		expect(result.resolvedVersion).toBe("1.0.0");
+	});
+
+	it("rejects tarball whose embedded package.json version differs from selected", async () => {
+		// Tarball package.json says 9.9.9 but packument selected 1.0.0 → identity mismatch.
+		const pluginJson = JSON.stringify({ name: "test-plugin", version: "9.9.9" });
+		const entries: readonly [string, string][] = [
+			["package/", ""],
+			["package/package.json", pluginJson],
+			["package/.claude-plugin/plugin.json", pluginJson],
+		];
+		const tarballBytes = await encodeArchive("tar.gz", entries);
+		const integrity = sriSha512(tarballBytes);
+		await setupNpmMock({
+			pkg: "test-plugin",
+			versions: [{ version: "1.0.0", integrity }],
+			tarballBytes,
+		});
+
+		const entry = makeEntry({ source: "npm", package: "test-plugin", version: "1.0.0", registry: REGISTRY_ORIGIN });
+		await expect(resolvePluginSource(entry, { tmpDir })).rejects.toThrow(/package identity/);
+	});
+
+	// ── Contract: identity name mismatch ─────────────────────────────────
+
+	it("rejects tarball whose embedded package.json name differs from requested", async () => {
+		const pluginJson = JSON.stringify({ name: "evil-package", version: "1.0.0" });
+		const entries: readonly [string, string][] = [
+			["package/", ""],
+			["package/package.json", pluginJson],
+			["package/.claude-plugin/plugin.json", pluginJson],
+		];
+		const tarballBytes = await encodeArchive("tar.gz", entries);
+		const integrity = sriSha512(tarballBytes);
+		await setupNpmMock({
+			pkg: "test-plugin",
+			versions: [{ version: "1.0.0", integrity }],
+			tarballBytes,
+		});
+
+		const entry = makeEntry({ source: "npm", package: "test-plugin", version: "1.0.0", registry: REGISTRY_ORIGIN });
+		await expect(resolvePluginSource(entry, { tmpDir })).rejects.toThrow(/package identity/);
+	});
+
+	// ── Contract: HTTPS-only tarball guard ───────────────────────────────
+
+	it("rejects non-HTTPS tarball URL and never fetches the tarball", async () => {
+		const tarballBytes = await makeValidTarball("test-plugin", "1.0.0");
+		const integrity = sriSha512(tarballBytes);
+		const pkg = "test-plugin";
+		const httpTarballUrl = `http://insecure.example/${pkg}/-/${pkg}-1.0.0.tgz`;
+		const packument = makePackument(pkg, [{ version: "1.0.0", integrity, tarball: httpTarballUrl }]);
+
+		let tarballFetched = false;
+		fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async (input: string | URL | Request) => {
+			const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+			if (url === `${REGISTRY_ORIGIN}/${pkg}`) {
+				return new Response(JSON.stringify(packument), {
+					status: 200,
+					headers: { "content-type": "application/json" },
+				});
+			}
+			if (url === httpTarballUrl) {
+				tarballFetched = true;
+				return new Response(tarballBytes, { status: 200 });
+			}
+			return new Response("not found", { status: 404 });
+		}) as unknown as typeof fetch);
+
+		const entry = makeEntry({ source: "npm", package: "test-plugin", version: "1.0.0", registry: REGISTRY_ORIGIN });
+		await expect(resolvePluginSource(entry, { tmpDir })).rejects.toThrow(/must be public HTTPS/);
+		expect(tarballFetched).toBe(false);
+	});
+
+	// ── Contract: redirect cap (6 hops) ──────────────────────────────────
+
+	it("rejects after exceeding max redirects (6 same-origin hops)", async () => {
+		const tarballBytes = await makeValidTarball("test-plugin", "1.0.0");
+		const pkg = "test-plugin";
+		const tarballUrl = `${REGISTRY_ORIGIN}/${pkg}/-/${pkg}-1.0.0.tgz`;
+
+		fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async (input: string | URL | Request) => {
+			const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+			if (url === `${REGISTRY_ORIGIN}/${pkg}`) {
+				return new Response(null, { status: 302, headers: { location: `${REGISTRY_ORIGIN}/r1` } });
+			}
+			if (url.startsWith(`${REGISTRY_ORIGIN}/r`)) {
+				const n = parseInt(url.slice(`${REGISTRY_ORIGIN}/r`.length), 10);
+				return new Response(null, { status: 302, headers: { location: `${REGISTRY_ORIGIN}/r${n + 1}` } });
+			}
+			if (url === tarballUrl) {
+				return new Response(tarballBytes, { status: 200 });
+			}
+			return new Response("not found", { status: 404 });
+		}) as unknown as typeof fetch);
+
+		const entry = makeEntry({ source: "npm", package: "test-plugin", version: "1.0.0", registry: REGISTRY_ORIGIN });
+		await expect(resolvePluginSource(entry, { tmpDir })).rejects.toThrow(/exceeded .* redirects/);
+	});
+
+	// ── Contract: redirect manualness ────────────────────────────────────
+
+	it("uses redirect:manual and AbortSignal on every fetch call", async () => {
+		const tarballBytes = await makeValidTarball("test-plugin", "1.0.0");
+		const integrity = sriSha512(tarballBytes);
+		const pkg = "test-plugin";
+		const packument = makePackument(pkg, [{ version: "1.0.0", integrity }]);
+		const tarballUrl = `${REGISTRY_ORIGIN}/${pkg}/-/${pkg}-1.0.0.tgz`;
+
+		const capturedInits: Array<{ redirect?: string; signal?: AbortSignal }> = [];
+		fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async (
+			input: string | URL | Request,
+			init?: RequestInit,
+		) => {
+			const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+			capturedInits.push({
+				redirect: init?.redirect as string | undefined,
+				signal: init?.signal as AbortSignal | undefined,
+			});
+			if (url === `${REGISTRY_ORIGIN}/${pkg}`) {
+				return new Response(null, { status: 302, headers: { location: `${REGISTRY_ORIGIN}/v1/${pkg}` } });
+			}
+			if (url === `${REGISTRY_ORIGIN}/v1/${pkg}`) {
+				return new Response(JSON.stringify(packument), {
+					status: 200,
+					headers: { "content-type": "application/json" },
+				});
+			}
+			if (url === tarballUrl) {
+				return new Response(tarballBytes, { status: 200 });
+			}
+			return new Response("not found", { status: 404 });
+		}) as unknown as typeof fetch);
+
+		const entry = makeEntry({ source: "npm", package: "test-plugin", version: "1.0.0", registry: REGISTRY_ORIGIN });
+		await resolvePluginSource(entry, { tmpDir });
+
+		expect(capturedInits.length).toBeGreaterThan(0);
+		for (const init of capturedInits) {
+			expect(init.redirect).toBe("manual");
+			expect(init.signal).toBeInstanceOf(AbortSignal);
+		}
+	});
+
+	// ── Contract: packument byte cap ─────────────────────────────────────
+
+	it("rejects packument exceeding byte limit", async () => {
+		const pkg = "test-plugin";
+		// Build a packument JSON padded with spaces to exceed the small limit.
+		const smallPackument = makePackument(pkg, [{ version: "1.0.0", integrity: `sha512-${"A".repeat(86)}` }]);
+		const paddedBody = JSON.stringify(smallPackument) + " ".repeat(2048);
+
+		fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async (input: string | URL | Request) => {
+			const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+			if (url === `${REGISTRY_ORIGIN}/${pkg}`) {
+				return new Response(paddedBody, {
+					status: 200,
+					headers: { "content-type": "application/json" },
+				});
+			}
+			return new Response("not found", { status: 404 });
+		}) as unknown as typeof fetch);
+
+		const entry = makeEntry({ source: "npm", package: "test-plugin", version: "1.0.0", registry: REGISTRY_ORIGIN });
+		const ctx: NpmResolveContext = { tmpDir, limits: { packumentMaxBytes: 1024 } };
+		await expect(resolvePluginSource(entry, ctx)).rejects.toThrow(/exceeds.*bytes/);
+	});
+
+	// ── Contract: tarball byte caps ──────────────────────────────────────
+
+	it("rejects tarball with huge content-length header", async () => {
+		const tarballBytes = await makeValidTarball("test-plugin", "1.0.0");
+		const integrity = sriSha512(tarballBytes);
+		const pkg = "test-plugin";
+		const tarballUrl = `${REGISTRY_ORIGIN}/${pkg}/-/${pkg}-1.0.0.tgz`;
+		const packument = makePackument(pkg, [{ version: "1.0.0", integrity }]);
+
+		fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async (input: string | URL | Request) => {
+			const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+			if (url === `${REGISTRY_ORIGIN}/${pkg}`) {
+				return new Response(JSON.stringify(packument), {
+					status: 200,
+					headers: { "content-type": "application/json" },
+				});
+			}
+			if (url === tarballUrl) {
+				return new Response(tarballBytes, {
+					status: 200,
+					headers: { "content-length": "999999999999" },
+				});
+			}
+			return new Response("not found", { status: 404 });
+		}) as unknown as typeof fetch);
+
+		const entry = makeEntry({ source: "npm", package: "test-plugin", version: "1.0.0", registry: REGISTRY_ORIGIN });
+		const ctx: NpmResolveContext = { tmpDir, limits: { tarballMaxBytes: 1024 } };
+		await expect(resolvePluginSource(entry, ctx)).rejects.toThrow(/tarball exceeds/);
+	});
+
+	it("rejects tarball whose streamed body exceeds byte limit", async () => {
+		const tarballBytes = await makeValidTarball("test-plugin", "1.0.0");
+		const integrity = sriSha512(tarballBytes);
+		const pkg = "test-plugin";
+		const tarballUrl = `${REGISTRY_ORIGIN}/${pkg}/-/${pkg}-1.0.0.tgz`;
+		const packument = makePackument(pkg, [{ version: "1.0.0", integrity }]);
+
+		fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async (input: string | URL | Request) => {
+			const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+			if (url === `${REGISTRY_ORIGIN}/${pkg}`) {
+				return new Response(JSON.stringify(packument), {
+					status: 200,
+					headers: { "content-type": "application/json" },
+				});
+			}
+			if (url === tarballUrl) {
+				// No content-length header — the cap must fire during streaming.
+				return new Response(tarballBytes, { status: 200 });
+			}
+			return new Response("not found", { status: 404 });
+		}) as unknown as typeof fetch);
+
+		const entry = makeEntry({ source: "npm", package: "test-plugin", version: "1.0.0", registry: REGISTRY_ORIGIN });
+		// tarballMaxBytes smaller than the served body so the streamed cap triggers.
+		const ctx: NpmResolveContext = { tmpDir, limits: { tarballMaxBytes: 32 } };
+		await expect(resolvePluginSource(entry, ctx)).rejects.toThrow(/tarball exceeds/);
+	});
+
+	// ── Contract: timeout translation ────────────────────────────────────
+
+	it("translates AbortError to /timed out after/ message", async () => {
+		const pkg = "test-plugin";
+		fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async (input: string | URL | Request) => {
+			const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+			if (url === `${REGISTRY_ORIGIN}/${pkg}`) {
+				const err = new Error("aborted");
+				err.name = "AbortError";
+				throw err;
+			}
+			return new Response("not found", { status: 404 });
+		}) as unknown as typeof fetch);
+
+		const entry = makeEntry({ source: "npm", package: "test-plugin", version: "1.0.0", registry: REGISTRY_ORIGIN });
+		const ctx: NpmResolveContext = { tmpDir, limits: { packumentTimeoutMs: 50 } };
+		await expect(resolvePluginSource(entry, ctx)).rejects.toThrow(/timed out after/);
+	});
+
+	// ── Contract: tarball redirect coverage ──────────────────────────────
+
+	it("follows same-origin CDN redirect for tarball and succeeds", async () => {
+		const tarballBytes = await makeValidTarball("test-plugin", "1.0.0");
+		const integrity = sriSha512(tarballBytes);
+		const pkg = "test-plugin";
+		const cdnOrigin = "https://cdn.example";
+		const cdnTarballUrl = `${cdnOrigin}/${pkg}/-/${pkg}-1.0.0.tgz`;
+		const cdnRedirectUrl = `${cdnOrigin}/redirect/${pkg}-1.0.0.tgz`;
+		const packument = makePackument(pkg, [{ version: "1.0.0", integrity, tarball: cdnTarballUrl }]);
+
+		fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async (input: string | URL | Request) => {
+			const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+			if (url === `${REGISTRY_ORIGIN}/${pkg}`) {
+				return new Response(JSON.stringify(packument), {
+					status: 200,
+					headers: { "content-type": "application/json" },
+				});
+			}
+			if (url === cdnTarballUrl) {
+				return new Response(null, { status: 302, headers: { location: cdnRedirectUrl } });
+			}
+			if (url === cdnRedirectUrl) {
+				return new Response(tarballBytes, { status: 200 });
+			}
+			return new Response("not found", { status: 404 });
+		}) as unknown as typeof fetch);
+
+		const entry = makeEntry({ source: "npm", package: "test-plugin", version: "1.0.0", registry: REGISTRY_ORIGIN });
+		const result = await resolvePluginSource(entry, { tmpDir });
+		expect(result.resolvedVersion).toBe("1.0.0");
+	});
+
+	it("rejects cross-origin tarball redirect (cdn → other origin)", async () => {
+		const tarballBytes = await makeValidTarball("test-plugin", "1.0.0");
+		const integrity = sriSha512(tarballBytes);
+		const pkg = "test-plugin";
+		const cdnOrigin = "https://cdn.example";
+		const cdnTarballUrl = `${cdnOrigin}/${pkg}/-/${pkg}-1.0.0.tgz`;
+		const otherOriginUrl = "https://other.example/pkg-1.0.0.tgz";
+		const packument = makePackument(pkg, [{ version: "1.0.0", integrity, tarball: cdnTarballUrl }]);
+
+		fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async (input: string | URL | Request) => {
+			const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+			if (url === `${REGISTRY_ORIGIN}/${pkg}`) {
+				return new Response(JSON.stringify(packument), {
+					status: 200,
+					headers: { "content-type": "application/json" },
+				});
+			}
+			if (url === cdnTarballUrl) {
+				return new Response(null, { status: 302, headers: { location: otherOriginUrl } });
+			}
+			return new Response("not found", { status: 404 });
+		}) as unknown as typeof fetch);
+
+		const entry = makeEntry({ source: "npm", package: "test-plugin", version: "1.0.0", registry: REGISTRY_ORIGIN });
+		await expect(resolvePluginSource(entry, { tmpDir })).rejects.toThrow(/leaves.*origin/);
+	});
+
+	// ── Contract: redirect target credentials ────────────────────────────
+
+	it("rejects same-origin redirect Location containing embedded credentials", async () => {
+		const pkg = "test-plugin";
+
+		fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async (input: string | URL | Request) => {
+			const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+			if (url === `${REGISTRY_ORIGIN}/${pkg}`) {
+				return new Response(null, {
+					status: 302,
+					headers: { location: `https://user:pass@${REGISTRY_ORIGIN.slice("https://".length)}/v1/${pkg}` },
+				});
+			}
+			return new Response("not found", { status: 404 });
+		}) as unknown as typeof fetch);
+
+		const entry = makeEntry({ source: "npm", package: "test-plugin", version: "1.0.0", registry: REGISTRY_ORIGIN });
+		await expect(resolvePluginSource(entry, { tmpDir })).rejects.toThrow(/credentials/);
+	});
+
+	// ── Contract: parseSriSha512 malformed inputs ────────────────────────
+
+	it("rejects non-sha512 SRI algorithm (sha1-)", async () => {
+		const tarballBytes = await makeValidTarball("test-plugin", "1.0.0");
+		const { packument } = await setupNpmMock({
+			pkg: "test-plugin",
+			versions: [{ version: "1.0.0" }],
+			tarballBytes,
+		});
+		// Wrong algorithm prefix
+		packument.versions["1.0.0"].dist.integrity = `sha1-${Buffer.from("x".repeat(20)).toString("base64")}`;
+
+		const entry = makeEntry({ source: "npm", package: "test-plugin", version: "1.0.0", registry: REGISTRY_ORIGIN });
+		await expect(resolvePluginSource(entry, { tmpDir })).rejects.toThrow(/SHA-512 SRI/);
+	});
+
+	it("rejects non-canonical base64 in SRI digest", async () => {
+		const tarballBytes = await makeValidTarball("test-plugin", "1.0.0");
+		const { packument } = await setupNpmMock({
+			pkg: "test-plugin",
+			versions: [{ version: "1.0.0" }],
+			tarballBytes,
+		});
+		// Contains invalid base64 chars (spaces, exclamation)
+		packument.versions["1.0.0"].dist.integrity = "sha512-!!!not base64!!!";
+
+		const entry = makeEntry({ source: "npm", package: "test-plugin", version: "1.0.0", registry: REGISTRY_ORIGIN });
+		await expect(resolvePluginSource(entry, { tmpDir })).rejects.toThrow(/SHA-512 SRI/);
+	});
+
+	it("rejects wrong digest length (sha512-AAAA)", async () => {
+		const tarballBytes = await makeValidTarball("test-plugin", "1.0.0");
+		const { packument } = await setupNpmMock({
+			pkg: "test-plugin",
+			versions: [{ version: "1.0.0" }],
+			tarballBytes,
+		});
+		// Valid base64 but decodes to only 4 bytes, not 64
+		packument.versions["1.0.0"].dist.integrity = "sha512-AAAA";
+
+		const entry = makeEntry({ source: "npm", package: "test-plugin", version: "1.0.0", registry: REGISTRY_ORIGIN });
+		await expect(resolvePluginSource(entry, { tmpDir })).rejects.toThrow(/64 bytes/);
+	});
+
+	// ── Contract: selectVersion branches ─────────────────────────────────
+
+	it("rejects packument with no versions map", async () => {
+		const tarballBytes = await makeValidTarball("test-plugin", "1.0.0");
+		const pkg = "test-plugin";
+		const packument: MockPackumentPayload = { name: pkg, "dist-tags": { latest: "1.0.0" } };
+		const packuments = new Map([[pkg, packument]]);
+		const tarballs = new Map([[`${REGISTRY_ORIGIN}/${pkg}/-/${pkg}-1.0.0.tgz`, tarballBytes]]);
+		fetchSpy = spyOn(globalThis, "fetch").mockImplementation(
+			createNpmFetchMock(packuments, tarballs) as typeof fetch,
+		);
+
+		const entry = makeEntry({ source: "npm", package: "test-plugin", version: "1.0.0", registry: REGISTRY_ORIGIN });
+		await expect(resolvePluginSource(entry, { tmpDir })).rejects.toThrow(/no versions/);
+	});
+
+	it("rejects when dist-tags.latest is missing and version is omitted", async () => {
+		const tarballBytes = await makeValidTarball("test-plugin", "1.0.0");
+		const integrity = sriSha512(tarballBytes);
+		const pkg = "test-plugin";
+		const packument = makePackument(pkg, [{ version: "1.0.0", integrity }]);
+		// Serve dist-tags with no `latest` tag
+		packument["dist-tags"] = {};
+		const packuments = new Map([[pkg, packument]]);
+		const tarballs = new Map([[`${REGISTRY_ORIGIN}/${pkg}/-/${pkg}-1.0.0.tgz`, tarballBytes]]);
+		fetchSpy = spyOn(globalThis, "fetch").mockImplementation(
+			createNpmFetchMock(packuments, tarballs) as typeof fetch,
+		);
+
+		const entry = makeEntry({ source: "npm", package: "test-plugin", registry: REGISTRY_ORIGIN });
+		await expect(resolvePluginSource(entry, { tmpDir })).rejects.toThrow(/dist-tags.latest is missing/);
+	});
+
+	it("rejects when dist-tags.latest points at a version absent from versions", async () => {
+		const tarballBytes = await makeValidTarball("test-plugin", "1.0.0");
+		const integrity = sriSha512(tarballBytes);
+		const pkg = "test-plugin";
+		const packument = makePackument(pkg, [{ version: "1.0.0", integrity }], "9.9.9");
+		const packuments = new Map([[pkg, packument]]);
+		const tarballs = new Map([[`${REGISTRY_ORIGIN}/${pkg}/-/${pkg}-1.0.0.tgz`, tarballBytes]]);
+		fetchSpy = spyOn(globalThis, "fetch").mockImplementation(
+			createNpmFetchMock(packuments, tarballs) as typeof fetch,
+		);
+
+		const entry = makeEntry({ source: "npm", package: "test-plugin", registry: REGISTRY_ORIGIN });
+		await expect(resolvePluginSource(entry, { tmpDir })).rejects.toThrow(/not found in versions/);
+	});
+
+	it("range resolution ignores non-semver version keys like 'next'", async () => {
+		const tarballBytes = await makeValidTarball("test-plugin", "1.5.0");
+		const integrity = sriSha512(tarballBytes);
+		const pkg = "test-plugin";
+		const packument = makePackument(pkg, [{ version: "1.0.0" }, { version: "1.5.0", integrity }], "1.5.0");
+		// Add a non-semver key "next" that must be ignored by range resolution.
+		(packument.versions as Record<string, { name: string; dist: { tarball: string; integrity: string } }>).next = {
+			name: pkg,
+			dist: { tarball: `${REGISTRY_ORIGIN}/${pkg}/-/${pkg}-next.tgz`, integrity },
+		};
+		const packuments = new Map([[pkg, packument]]);
+		const tarballs = new Map([
+			[`${REGISTRY_ORIGIN}/${pkg}/-/${pkg}-1.0.0.tgz`, tarballBytes],
+			[`${REGISTRY_ORIGIN}/${pkg}/-/${pkg}-1.5.0.tgz`, tarballBytes],
+		]);
+		fetchSpy = spyOn(globalThis, "fetch").mockImplementation(
+			createNpmFetchMock(packuments, tarballs) as typeof fetch,
+		);
+
+		const entry = makeEntry({ source: "npm", package: "test-plugin", version: "^1.0.0", registry: REGISTRY_ORIGIN });
+		const result = await resolvePluginSource(entry, { tmpDir });
+		expect(result.resolvedVersion).toBe("1.5.0");
+	});
+
+	// ── Contract: registry URL edges ─────────────────────────────────────
+
+	it("rejects 'not a url' as invalid registry URL", async () => {
+		const entry = makeEntry({ source: "npm", package: "test-plugin", version: "1.0.0", registry: "not a url" });
+		await expect(resolvePluginSource(entry, { tmpDir })).rejects.toThrow(/invalid registry URL/);
+	});
+
+	it("builds packument request URL with path prefix from registry", async () => {
+		const tarballBytes = await makeValidTarball("test-plugin", "1.0.0");
+		const integrity = sriSha512(tarballBytes);
+		const pkg = "test-plugin";
+		const registryWithPrefix = "https://reg.example/npm/";
+		const expectedPackumentUrl = "https://reg.example/npm/test-plugin";
+		const tarballUrl = `${registryWithPrefix}${pkg}/-/${pkg}-1.0.0.tgz`;
+		const packument = makePackument(pkg, [{ version: "1.0.0", integrity, tarball: tarballUrl }]);
+
+		let capturedUrl: string | undefined;
+		fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async (input: string | URL | Request) => {
+			const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+			if (url === expectedPackumentUrl) {
+				capturedUrl = url;
+				return new Response(JSON.stringify(packument), {
+					status: 200,
+					headers: { "content-type": "application/json" },
+				});
+			}
+			if (url === tarballUrl) {
+				return new Response(tarballBytes, { status: 200 });
+			}
+			return new Response("not found", { status: 404 });
+		}) as unknown as typeof fetch);
+
+		const entry = makeEntry({
+			source: "npm",
+			package: "test-plugin",
+			version: "1.0.0",
+			registry: registryWithPrefix,
+		});
+		const result = await resolvePluginSource(entry, { tmpDir });
+		expect(result.resolvedVersion).toBe("1.0.0");
+		expect(capturedUrl).toBe(expectedPackumentUrl);
+	});
+
+	// ── Contract: redirect degenerate ────────────────────────────────────
+
+	it("rejects 302 without Location header", async () => {
+		const pkg = "test-plugin";
+		fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async (input: string | URL | Request) => {
+			const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+			if (url === `${REGISTRY_ORIGIN}/${pkg}`) {
+				return new Response(null, { status: 302 });
+			}
+			return new Response("not found", { status: 404 });
+		}) as unknown as typeof fetch);
+
+		const entry = makeEntry({ source: "npm", package: "test-plugin", version: "1.0.0", registry: REGISTRY_ORIGIN });
+		await expect(resolvePluginSource(entry, { tmpDir })).rejects.toThrow(/without Location/);
+	});
+
+	it("rejects 302 with invalid Location '::'", async () => {
+		const pkg = "test-plugin";
+		fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async (input: string | URL | Request) => {
+			const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+			if (url === `${REGISTRY_ORIGIN}/${pkg}`) {
+				return new Response(null, { status: 302, headers: { location: "::" } });
+			}
+			return new Response("not found", { status: 404 });
+		}) as unknown as typeof fetch);
+
+		const entry = makeEntry({ source: "npm", package: "test-plugin", version: "1.0.0", registry: REGISTRY_ORIGIN });
+		await expect(resolvePluginSource(entry, { tmpDir })).rejects.toThrow(/invalid redirect Location/);
+	});
+
+	// ── Contract: archive shape — top-level FILE named 'package' ─────────
+
+	it("rejects archive with a top-level FILE named 'package' (not directory)", async () => {
+		const entries: readonly [string, string][] = [
+			["package", JSON.stringify({ name: "test-plugin", version: "1.0.0" })],
+		];
+		const tarballBytes = await encodeArchive("tar.gz", entries);
+		const integrity = sriSha512(tarballBytes);
+		await setupNpmMock({
+			pkg: "test-plugin",
+			versions: [{ version: "1.0.0", integrity }],
+			tarballBytes,
+		});
+
+		const entry = makeEntry({ source: "npm", package: "test-plugin", version: "1.0.0", registry: REGISTRY_ORIGIN });
+		await expect(resolvePluginSource(entry, { tmpDir })).rejects.toThrow(/top-level.*package/);
+	});
+
+	// ── Contract: version-expression boundary ────────────────────────────
+
+	it("accepts a 256-byte version expression", async () => {
+		const tarballBytes = await makeValidTarball("test-plugin", "1.0.0");
+		const integrity = sriSha512(tarballBytes);
+		await setupNpmMock({
+			pkg: "test-plugin",
+			versions: [{ version: "1.0.0", integrity }],
+			tarballBytes,
+		});
+
+		// Build a 256-byte expression: ">=1.0.0 <2.0.0" padded with trailing spaces.
+		let expr = ">=1.0.0 <2.0.0";
+		while (expr.length < 256) expr += " ";
+		expect(expr.length).toBe(256);
+
+		const entry = makeEntry({ source: "npm", package: "test-plugin", version: expr, registry: REGISTRY_ORIGIN });
+		const result = await resolvePluginSource(entry, { tmpDir });
+		expect(result.resolvedVersion).toBe("1.0.0");
+	});
+
+	it("rejects a 257-byte version expression", async () => {
+		const tarballBytes = await makeValidTarball("test-plugin", "1.0.0");
+		const integrity = sriSha512(tarballBytes);
+		await setupNpmMock({
+			pkg: "test-plugin",
+			versions: [{ version: "1.0.0", integrity }],
+			tarballBytes,
+		});
+
+		// Build a 257-byte expression.
+		let expr = ">=1.0.0 <2.0.0";
+		while (expr.length < 257) expr += " ";
+		expect(expr.length).toBe(257);
+
+		const entry = makeEntry({ source: "npm", package: "test-plugin", version: expr, registry: REGISTRY_ORIGIN });
+		await expect(resolvePluginSource(entry, { tmpDir })).rejects.toThrow(/256 bytes/);
 	});
 });
