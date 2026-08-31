@@ -29,6 +29,20 @@ type ConductorRoute = CompiledRoute & {
 	fallbacks: Readonly<Partial<Record<GatewayErrorDisposition, readonly string[]>>>;
 };
 
+
+const balanceRrCursor = new Map<string, number>();
+
+function pickBalanceTarget(route: ConductorRoute, attempted: ReadonlySet<string>): string | undefined {
+	if (route.root.type !== "balance") return undefined;
+	const unused = route.targets.filter(id => !attempted.has(id));
+	if (unused.length === 0) return undefined;
+	const key = `${route.id}:${route.generation}:${route.root.strategy}`;
+	const cursor = balanceRrCursor.get(key) ?? 0;
+	const pick = unused[cursor % unused.length]!;
+	balanceRrCursor.set(key, cursor + 1);
+	return pick;
+}
+
 function firstUnused(ids: readonly string[] | undefined, attempted: ReadonlySet<string>): string | undefined {
 	if (!ids) return undefined;
 	for (const id of ids) {
@@ -56,12 +70,16 @@ export function decideAttempt(args: {
 	}
 
 	if (!classification) {
-		const next =
+		const preferred =
 			preferredTargetId !== undefined &&
 			route.targets.includes(preferredTargetId) &&
 			!state.attemptedTargets.has(preferredTargetId)
 				? preferredTargetId
-				: firstUnused(route.targets, state.attemptedTargets);
+				: undefined;
+		const next =
+			preferred ??
+			pickBalanceTarget(route, state.attemptedTargets) ??
+			firstUnused(route.targets, state.attemptedTargets);
 		return next === undefined ? { type: "terminal" } : { type: "dispatch", targetModelId: next };
 	}
 

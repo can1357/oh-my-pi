@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed auth-gateway streaming retries leaving StreamCommitGate terminated; the gate resets between attempts.
+- Fixed bare `balance` routes always dispatching the first child; initial pick now rotates across children.
+- Fixed Anthropic count-tokens ignoring `system`/`tools` and accepting non-array `messages`.
+- Fixed quota-share DRR picking by weight when the first finalist already holds higher deficit than the second.
+
 ### Added
 
 - Added API-key authentication for ClinePass through the official `CLINE_API_KEY` variable, including account-route validation and rolling quota-window reporting in `omp usage` ([#7863](https://github.com/can1357/oh-my-pi/pull/7863) by [@will-bogusz](https://github.com/will-bogusz)).

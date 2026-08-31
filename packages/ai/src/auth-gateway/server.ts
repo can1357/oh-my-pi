@@ -1005,6 +1005,7 @@ async function handleFormatEndpoint(
 	if (!parsed.stream) {
 		try {
 			for (let attempt = 0; attempt < attemptCap; attempt++) {
+				if (attempt > 0) commitGate.reset();
 				if (controller.signal.aborted) return clientClosedResponse(route);
 				const picked = pickTarget();
 				if (picked) return picked;
@@ -1087,6 +1088,7 @@ async function handleFormatEndpoint(
 	}
 
 	for (let attempt = 0; attempt < attemptCap; attempt++) {
+		if (attempt > 0) commitGate.reset();
 		if (controller.signal.aborted) {
 			bootOpts.storage.releaseTurnReservation(requestId);
 			return clientClosedResponse(route);
@@ -1493,6 +1495,7 @@ async function handlePiNative(
 	if (!parsed.stream) {
 		try {
 			for (let attempt = 0; attempt < attemptCap; attempt++) {
+				if (attempt > 0) commitGate.reset();
 				if (controller.signal.aborted) return aborted();
 				const picked = pickTarget();
 				if (picked) return picked;
@@ -1565,6 +1568,7 @@ async function handlePiNative(
 	}
 
 	for (let attempt = 0; attempt < attemptCap; attempt++) {
+		if (attempt > 0) commitGate.reset();
 		if (controller.signal.aborted) {
 			bootOpts.storage.releaseTurnReservation(requestId);
 			return aborted();

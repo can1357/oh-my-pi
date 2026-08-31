@@ -214,3 +214,32 @@ describe("decideAttempt", () => {
 		expect(action).toEqual({ type: "terminal" });
 	});
 });
+
+it("rotates initial dispatch across balance children", () => {
+	const balanceRoute = {
+		generation: 1,
+		id: "bal",
+		root: {
+			type: "balance" as const,
+			strategy: "rr" as const,
+			children: [
+				{ type: "target" as const, model: "a" },
+				{ type: "target" as const, model: "b" },
+			],
+		},
+		targets: ["a", "b"],
+		fallbacks: {},
+	} satisfies CompiledRoute;
+	const first = decideAttempt({
+		route: balanceRoute,
+		state: state({ currentTarget: "a", attemptedTargets: new Set() }),
+		commitState: "probing",
+	});
+	const second = decideAttempt({
+		route: balanceRoute,
+		state: state({ currentTarget: "a", attemptedTargets: new Set() }),
+		commitState: "probing",
+	});
+	expect(first).toEqual({ type: "dispatch", targetModelId: "a" });
+	expect(second).toEqual({ type: "dispatch", targetModelId: "b" });
+});
