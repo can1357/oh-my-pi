@@ -1249,7 +1249,10 @@ export class ExtensionRunner {
 				parentChain: [],
 			};
 		} else {
-			const seen = new Set<string>();
+			// Seed the seen-set with this agent's own id so a registry cycle
+			// looping back through the current agent (A → B → A) ends the walk
+			// before the self id enters the reported ancestor chain.
+			const seen = new Set<string>([input.agentId]);
 			const parentChain: string[] = [];
 			let cursor = input.parentId;
 			while (cursor !== undefined && cursor !== MAIN_AGENT_ID && !seen.has(cursor)) {

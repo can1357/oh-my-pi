@@ -466,34 +466,37 @@ export type ExtensionMode = "tui" | "rpc" | "json" | "print";
  */
 export interface AgentIdentity {
 	/** Whether this is the top-level session or a subagent. */
-	kind: "main" | "sub";
+	readonly kind: "main" | "sub";
 	/**
-	 * Recursion depth of this agent: `0` = top-level. Mirrors the session's
-	 * own `taskDepth` (pre-existing gate input); it is NOT re-derived here from
-	 * the parent chain, so callers that omit `taskDepth` observe 1 for a
-	 * parent-linked session regardless of chain length — the depth gates
-	 * elsewhere already treat any linked child uniformly.
+	 * Recursion depth of this agent: `0` = top-level. Mirrors the session's own
+	 * `taskDepth` (the pre-existing gate input for IRC/memory/spawn capability
+	 * gates) exactly — it is NOT re-derived here from the parent chain, so a
+	 * caller that supplies parent linkage while omitting `taskDepth` (e.g. the
+	 * `/tan` clone path) observes `0` here, matching every other capability
+	 * gate for that session. Extensions asking "am I a child?" should test
+	 * `kind === "sub"` or `parentId !== undefined`, not `depth > 0`.
 	 */
-	depth: number;
+	readonly depth: number;
 	/**
 	 * Registry id of this agent: `"Main"` for the default top-level session.
-	 * Pre-existing registry semantics apply unchanged: a parent-linked session
-	 * that does not pass its own `agentId` still resolves to `"Main"` here, and
+	 * Pre-existing registry semantics apply unchanged: this mirrors the
+	 * session's resolved registry id (`options.agentId ??
+	 * options.parentTaskPrefix ?? "Main"` — no linkage-derived default), and
 	 * `AgentRegistry.register()` keeps replacing the entry keyed by that id
 	 * (documented registry behavior this interface observes, not changes).
 	 */
-	agentId: string;
+	readonly agentId: string;
 	/** Human-readable name of this agent. */
-	displayName: string;
+	readonly displayName: string;
 	/** Registry id of the direct parent agent; undefined for the top-level session. */
-	parentId?: string;
+	readonly parentId?: string;
 	/**
-	 * Ancestor registry ids, nearest-first. Excludes `"Main"` and is `[]` for the
-	 * top-level session. Runner-less sessions cannot resolve the chain, so it is
-	 * `[]` there even for subagents. Immutable: the identity is shared across
-	 * handlers, so extensions must copy rather than mutate it.
+	 * Ancestor registry ids, nearest-first. Excludes `"Main"` and this agent's
+	 * own id. `[]` for the top-level session; runner-less sessions cannot
+	 * resolve the chain and degrade to `[]` even for subagents. Frozen like the
+	 * surrounding identity: copy rather than mutate.
 	 */
-	parentChain: readonly string[];
+	readonly parentChain: readonly string[];
 }
 
 export interface ExtensionContext {
@@ -525,7 +528,7 @@ export interface ExtensionContext {
 	 * Identity of the agent this context serves: top-level or subagent,
 	 * depth, registry id, display name, and parent chain. Read lazily.
 	 */
-	agentIdentity: AgentIdentity;
+	readonly agentIdentity: AgentIdentity;
 	/** Whether the agent is idle (not streaming) */
 	isIdle(): boolean;
 	/** Abort the current agent operation */

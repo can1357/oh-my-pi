@@ -1,6 +1,13 @@
 import { describe, expect, it } from "bun:test";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+import { ModelRegistry } from "../src/config/model-registry";
+import { Settings } from "../src/config/settings";
 import { ExtensionRunner, type ExtensionRunnerIdentityInput } from "../src/extensibility/extensions/runner";
 import { AgentRegistry, MAIN_AGENT_ID } from "../src/registry/agent-registry";
+import { createAgentSession } from "../src/sdk";
+import { AuthStorage } from "../src/session/auth-storage";
 
 /**
  * Minimal construction matching test/extension-context-async-jobs.test.ts;
@@ -86,22 +93,24 @@ describe("ExtensionContext agentIdentity", () => {
 		expect(identity.parentChain).toEqual(["P1"]);
 	});
 
-	it("terminates on cyclic parent links instead of walking forever", () => {
+	it("terminates on cyclic parent links and never includes the agent's own id", () => {
 		const registry = new AgentRegistry();
 		registry.register({ id: "A", displayName: "a", kind: "sub", parentId: "B", session: null });
 		registry.register({ id: "B", displayName: "b", kind: "sub", parentId: "A", session: null });
-		const chain = makeRunner({
+		const identity = makeRunner({
 			kind: "sub",
 			depth: 1,
 			agentId: "A",
 			displayName: "a",
 			parentId: "B",
 			registry,
-		}).createContext().agentIdentity.parentChain;
+		}).createContext().agentIdentity;
 
-		expect(chain.length).toBeLessThanOrEqual(2);
+		// The cycle A -> B -> A is cut by seeding the walk with A's own id: the
+		// chain is the true ancestors reached before the loop closes ("B"), not
+		// `["B", "A"]` with A reappearing in its own ancestry.
+		expect(identity.parentChain).toEqual(["B"]);
 	});
-
 	it("hands handlers an immutable identity so one extension cannot corrupt it for others", () => {
 		const registry = new AgentRegistry();
 		registry.register({ id: "P1", displayName: "p1", kind: "sub", parentId: MAIN_AGENT_ID, session: null });
@@ -127,5 +136,46 @@ describe("ExtensionContext agentIdentity", () => {
 			// Frozen-array mutation may throw depending on runtime — both outcomes fine.
 		}
 		expect(runner.createContext().agentIdentity.parentChain).toEqual(["P2", "P1"]);
+	});
+
+	it("derives a parentAgentId-only SDK caller as a consistent sub identity", async () => {
+		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-identity-sdk-link-"));
+		const registry = new AgentRegistry();
+		registry.register({ id: "P1", displayName: "planner", kind: "sub", parentId: MAIN_AGENT_ID, session: null });
+		const authStorage = await AuthStorage.create(":memory:");
+		try {
+			const { session } = await createAgentSession({
+				cwd: path.join(tempDir, "project"),
+				agentDir: path.join(tempDir, "agent"),
+				authStorage,
+				modelRegistry: new ModelRegistry(authStorage),
+				settings: Settings.isolated(),
+				disableExtensionDiscovery: true,
+				skills: [],
+				contextFiles: [],
+				promptTemplates: [],
+				slashCommands: [],
+				toolNames: [],
+				enableMCP: false,
+				enableLsp: false,
+				agentRegistry: registry,
+				agentId: "C1",
+				parentAgentId: "P1",
+			});
+			try {
+				const identity = session.extensionRunner?.createContext().agentIdentity;
+				// kind is derived from ANY parent linkage, so a parentAgentId-only
+				// caller is a sub with a parent — never main-with-parent.
+				expect(identity?.kind).toBe("sub");
+				expect(identity?.parentId).toBe("P1");
+				expect(identity?.parentChain).toEqual(["P1"]);
+				expect(registry.get("C1")?.kind).toBe("sub");
+			} finally {
+				await session.dispose();
+			}
+		} finally {
+			authStorage.close();
+			fs.rmSync(tempDir, { recursive: true, force: true });
+		}
 	});
 });

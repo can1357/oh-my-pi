@@ -1712,6 +1712,19 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	const resolvedAgentDisplayName =
 		options.agentDisplayName ?? ((options.taskDepth ?? 0) > 0 || options.parentTaskPrefix ? "sub" : "main");
 	const agentKind = (options.taskDepth ?? 0) > 0 || options.parentTaskPrefix ? ("sub" as const) : ("main" as const);
+	/**
+	 * Kind exposed to extension identity and registry registration. Derived
+	 * from ANY parent linkage so a caller that supplies only `parentAgentId`
+	 * (a documented spawn-parent field) does not report a contradictory
+	 * `{ kind: "main", parentId }` identity. This is identity/registration
+	 * bookkeeping only: every capability gate keeps consuming the raw
+	 * `options.taskDepth` / `options.parentTaskPrefix` exactly as before
+	 * (see `taskDepth`, `isIrcEnabled`, `createVibeTools`, memory startup).
+	 */
+	const identityKind: "main" | "sub" =
+		(options.taskDepth ?? 0) > 0 || options.parentTaskPrefix !== undefined || options.parentAgentId !== undefined
+			? ("sub" as const)
+			: ("main" as const);
 	let registeredAgentRef: AgentRef | undefined;
 	/**
 	 * Forget the agent ref on teardown — unless it is a retained terminal ref.
@@ -2728,7 +2741,6 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// A conditional runner means the approval system silently disappears for users with no
 		// extensions, contradicting non-yolo `tools.approvalMode` settings without feedback.
 		// (The builtin autoresearch extension is unconditionally loaded above, so this scenario
-		// is unreachable; unconditional runner construction keeps that invariant explicit and
 		// prevents future optional extensions from silently re-opening the hole.)
 		const extensionRunner: ExtensionRunner = new ExtensionRunner(
 			extensionsResult.extensions,
@@ -2741,8 +2753,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			localProtocolOptions,
 			() => (hasSession ? session.getAsyncJobSnapshot() : null),
 			{
-				kind: agentKind,
 				depth: taskDepth,
+				kind: identityKind,
 				agentId: resolvedAgentId,
 				displayName: resolvedAgentDisplayName,
 				parentId: options.parentAgentId,
@@ -3238,7 +3250,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		const registrationInput = {
 			id: resolvedAgentId,
 			displayName: resolvedAgentDisplayName,
-			kind: agentKind,
+			kind: identityKind,
 			parentId: options.parentAgentId,
 			session: null,
 			sessionFile: sessionManager.getSessionFile() ?? null,
