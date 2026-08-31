@@ -1240,7 +1240,7 @@ mod tests {
 		let out = filter(&kubectl_ctx, input, 0).text;
 		// Falls back — table compaction would try to process this
 		// The key is: doesn't crash, doesn't lose data
-		assert!(!out.is_empty());
+		assert_ne!(out, "");
 	}
 
 	#[test]

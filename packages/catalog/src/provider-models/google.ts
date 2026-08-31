@@ -1,10 +1,10 @@
+import { reviewedCollapseTable } from "../compat/collapse";
+import { classifyModel } from "../compat/taxonomy";
 import { fetchAntigravityDiscoveryModels } from "../discovery/antigravity";
 import { fetchGeminiModels } from "../discovery/gemini";
 import { fetchGeminiCliQuotaModels } from "../discovery/gemini-cli";
-import { isGeminiModelId } from "../identity/family";
 import type { ModelManagerOptions } from "../model-manager";
 import type { FetchImpl } from "../types";
-import { GEMINI_CLI_VARIANT_COLLAPSE_TABLE } from "../variant-collapse";
 
 export interface GoogleModelManagerConfig {
 	apiKey?: string;
@@ -91,10 +91,14 @@ export function googleGeminiCliModelManagerOptions(
 			? {
 					fetchDynamicModels: async () => {
 						const fetcher = toDiscoveryFetch(config?.fetch);
+						const collapseTable = reviewedCollapseTable("google-gemini-cli");
+						if (collapseTable === undefined) {
+							throw new Error("missing reviewed collapse table for google-gemini-cli");
+						}
 						const models = await fetchAntigravityDiscoveryModels({
 							token,
 							fetcher,
-							collapseTable: GEMINI_CLI_VARIANT_COLLAPSE_TABLE,
+							collapseTable: collapseTable,
 						});
 						// Antigravity's fetchAvailableModels is unreachable for
 						// credentials without Antigravity entitlement (Code Assist
@@ -104,7 +108,7 @@ export function googleGeminiCliModelManagerOptions(
 							return fetchGeminiCliQuotaModels({ token, projectId: config?.projectId, endpoint, fetcher });
 						}
 						return models
-							.filter(m => isGeminiModelId(m.id))
+							.filter(m => classifyModel("google-gemini-cli", m.id, { lenient: true }).class === "gemini")
 							.map(m => ({
 								...m,
 								provider: "google-gemini-cli" as const,

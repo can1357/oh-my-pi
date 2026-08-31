@@ -64,7 +64,7 @@ const DEFAULT_ACTION_KEYS: Record<ConfigurableEditorAction, KeyId[]> = {
 	"app.editor.external": ["ctrl+g"],
 	"app.history.search": ["ctrl+r"],
 	"app.message.dequeue": ["alt+up", "shift+up"],
-	"app.retry": ["alt+r"],
+	"app.retry": ["f5", "alt+r"],
 	"app.clipboard.pasteImage": ["ctrl+v"],
 	"app.clipboard.pasteTextRaw": ["ctrl+shift+v", "alt+shift+v"],
 	"app.clipboard.copyPrompt": ["alt+shift+c"],
@@ -92,7 +92,6 @@ const BRACKETED_IMAGE_PATH_REGEX = /\.(?:png|jpe?g|gif|webp)$/i;
 const SHELL_ESCAPED_PATH_CHAR_REGEX = /\\([\\\s'"()[\]{}&;<>|?*!$`])/g;
 const URI_SCHEME_REGEX = /^[a-z][a-z0-9+.-]*:/i;
 const FILE_URI_REGEX = /^file:\/\//i;
-const WINDOWS_DRIVE_PATH_REGEX = /^[a-z]:[\\/]/i;
 /**
  * Alternation of the filesystem prefixes that make a path unambiguously
  * absolute (POSIX root, home, `file://`, UNC, Windows drive). Shared by
@@ -179,9 +178,9 @@ function normalizePastedPath(path: string): string {
 }
 
 function isExplicitPastedPath(path: string): boolean {
-	if (WINDOWS_DRIVE_PATH_REGEX.test(path) || FILE_URI_REGEX.test(path)) return true;
+	if (ABSOLUTE_PATH_PREFIX_REGEX.test(path) || /^\.\.?[\\/]/.test(path)) return true;
 	if (URI_SCHEME_REGEX.test(path)) return false;
-	return path.includes("/") || path.includes("\\");
+	return path.includes("\\");
 }
 
 function isImagePath(path: string): boolean {
@@ -234,9 +233,9 @@ function splitPastedPathSegments(payload: string): string[] | undefined {
 /**
  * Extract whitespace/quoted-separated path-like segments from `payload`.
  * Shared backend of {@link extractBracketedPastePaths} and {@link extractPastePathsFromText}.
- * Returns the segments only when EVERY segment looks like an explicit path
- * (`/`, `\`, drive letter, or `file://`); otherwise undefined so the caller
- * falls back to a plain text paste.
+ * Returns the segments only when EVERY segment looks like an anchored local
+ * path or uses Windows separators; otherwise undefined so ambiguous relative
+ * URL/path text falls back to a plain text paste.
  */
 function extractExplicitPathSegments(payload: string): string[] | undefined {
 	const pasted = payload.trim();

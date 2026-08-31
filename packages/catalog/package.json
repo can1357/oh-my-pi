@@ -1,7 +1,7 @@
 {
   "type": "module",
   "name": "@oh-my-pi/pi-catalog",
-  "version": "18.0.8",
+  "version": "18.0.11",
   "description": "Model catalog for omp: bundled model database, provider discovery descriptors, model identity, classification, and equivalence",
   "homepage": "https://omp.sh",
   "author": "Stencil Labs, Inc.",
@@ -31,6 +31,7 @@
     "fix": "biome check --write --unsafe .",
     "fmt": "biome format --write .",
     "gen:models": "bun scripts/generate-models.ts",
+    "gen:compat": "bun scripts/compile-compat.ts",
     "gen:proto": "bun scripts/generate-protocols.ts"
   },
   "dependencies": {
@@ -38,6 +39,7 @@
     "@oh-my-pi/pi-utils": "catalog:"
   },
   "devDependencies": {
+    "@bgotink/kdl": "0.4.0",
     "@oh-my-pi/pi-ai": "catalog:",
     "@types/bun": "catalog:"
   },

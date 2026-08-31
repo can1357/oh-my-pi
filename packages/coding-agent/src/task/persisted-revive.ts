@@ -34,6 +34,8 @@ export interface PersistedSubagentReviveContext {
 	 * the same lifecycle/progress frames a live run does.
 	 */
 	eventBus?: EventBus;
+	/** Root-scoped observability bus the revived run's frames also publish to. */
+	subagentEventBus?: EventBus;
 }
 
 /**
@@ -123,6 +125,9 @@ export function createPersistedSubagentReviverFactory(
 			const { session } = await createAgentSession({
 				cwd: ctx.session.sessionManager.getCwd(),
 				authStorage: ctx.authStorage,
+				// Revived agents join the root session tree, so their observability
+				// frames ride the same bus the RPC/collab surfaces subscribed to.
+				subagentEventBus: ctx.subagentEventBus,
 				modelRegistry: ctx.modelRegistry,
 				...(persistedModelPattern ? { modelPattern: persistedModelPattern } : {}),
 				modelPatternAuthFallback: init.resolvedModel,
@@ -191,6 +196,7 @@ export function createPersistedSubagentReviverFactory(
 				id: ref.id,
 				agent: wakeAgent,
 				eventBus: ctx.eventBus,
+				subagentEventBus: ctx.subagentEventBus,
 				sessionFile,
 				outputSchema: init.outputSchema,
 				outputSchemaMode: init.outputSchemaMode,

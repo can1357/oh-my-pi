@@ -46,7 +46,7 @@ export const dryBalanceHelp = {
 } satisfies CommandMetadata;
 
 export const galleryHelp = {
-	description: "Preview tool renderers across streaming, in-progress, success, and failure states",
+	description: "Preview tool, composer, and status-line renderers in a deterministic visual gallery",
 } satisfies CommandMetadata;
 
 export const gcHelp = { description: "Run storage garbage collection" } satisfies CommandMetadata;

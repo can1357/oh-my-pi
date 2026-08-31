@@ -1,0 +1,19 @@
+// Provider-wire compat for "aiand"; regenerated from the frozen census using deployment contract selectors.
+
+provider "aiand" {
+	models "moonshotai/kimi-k3" "deepseek-ai/deepseek-v4-pro" \
+		"deepseek-ai/deepseek-v4-flash" "openai/gpt-oss-120b" "zai-org/glm-5.2" \
+		"google/gemma-4-31b-it" "moonshotai/kimi-k2.7-code" "qwen/qwen3.6-27b" \
+		"motif-technologies/motif-3" {
+		thinking-mode "effort"
+	}
+	models "deepseek-ai/deepseek-v4-pro" {
+		thinking-efforts "low" "high" "max"
+	}
+	models "motif-technologies/motif-3" {
+		thinking-efforts "minimal" "low" "medium" "high" "xhigh"
+	}
+	models "moonshotai/kimi-k2.7-code" "deepseek-ai/deepseek-v4-flash" {
+		edit-revision "sloppy.1"
+	}
+}

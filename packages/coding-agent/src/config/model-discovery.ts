@@ -11,7 +11,6 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import {
 	getBundledModelReferenceIndex,
 	inheritReferenceThinking,
-	isQwenModelId,
 	resolveModelReference,
 	stripBracketedModelIdAffixes,
 } from "@oh-my-pi/pi-catalog/identity";
@@ -554,8 +553,8 @@ async function discoverLlamaCppServerMetadata(
 
 /**
  * PrismLM Ternary/1-bit Bonsai GGUFs are Qwen3.6-27B derivatives served locally
- * via llama.cpp; their ids do not contain "qwen", so match them explicitly here
- * rather than broadening the global `isQwenModelId` predicate.
+ * via llama.cpp; their ids do not carry classifiable Qwen lineage, so this
+ * reviewed local alias supplements the structured identity.
  */
 function isBonsaiQwenGguf(id: string): boolean {
 	return /(?:ternary-)?bonsai-27b/i.test(id);
@@ -578,7 +577,7 @@ function isBonsaiQwenGguf(id: string): boolean {
  * waiting for re-discovery.
  */
 export function applyLlamaCppQwenThinking(model: Model<Api>): Model<Api> {
-	if (!isQwenModelId(model.id) && !isBonsaiQwenGguf(model.id)) return model;
+	if (model.identity.class !== "qwen" && !isBonsaiQwenGguf(model.id)) return model;
 	return buildModel({
 		...model,
 		api: "openai-completions",
@@ -809,8 +808,17 @@ export async function discoverOpenAIModelsList(
 	providerConfig: DiscoveryProviderConfig,
 	ctx: DiscoveryContext,
 ): Promise<Model<Api>[]> {
-	const baseUrl = normalizeOpenAIModelsListBaseUrl(providerConfig.baseUrl);
-	const modelsUrl = `${baseUrl}/models`;
+	const injectV1 = providerConfig.discovery.injectV1 ?? true;
+	// `injectV1: false` resolves `/models` against the configured base URL
+	// verbatim — no `/v1` suffix is injected. Gateways that root their
+	// OpenAI-compatible surface at a versioned path (e.g.
+	// `https://api.opper.ai/v3/compat`) serve a different, often much smaller,
+	// model list under a forced `/v1/models`; discovery must match the chat
+	// base URL exactly so the full catalog is surfaced.
+	const baseUrl = injectV1
+		? normalizeOpenAIModelsListBaseUrl(providerConfig.baseUrl)
+		: normalizeBareDiscoveryBaseUrl(providerConfig.baseUrl);
+	const modelsUrl = appendModelsPath(baseUrl);
 
 	const baseHeaders: Record<string, string> = { ...(providerConfig.headers ?? {}) };
 	let headers = baseHeaders;
@@ -1124,6 +1132,43 @@ export function normalizeOpenAIModelsListBaseUrl(baseUrl?: string): string {
 		return `${parsed.protocol}//${parsed.host}${parsed.pathname}`;
 	} catch {
 		return raw;
+	}
+}
+
+/**
+ * Bare-shape discovery root: the configured base URL with trailing slashes
+ * trimmed and any query/hash dropped. Unlike
+ * {@link normalizeOpenAIModelsListBaseUrl} it never appends `/v1` — the
+ * configured URL is the full OpenAI-compatible root (e.g.
+ * `https://api.opper.ai/v3/compat`), and injecting `/v1` would point discovery
+ * at a different endpoint than chat. Query strings are stripped exactly like
+ * the default normalizer does: chat appends `/chat/completions` to the base
+ * string, so a retained query would corrupt the inference URL.
+ */
+export function normalizeBareDiscoveryBaseUrl(baseUrl: string | undefined): string {
+	const raw = baseUrl || "http://127.0.0.1:1234";
+	try {
+		const parsed = new URL(raw);
+		parsed.search = "";
+		parsed.hash = "";
+		return `${parsed.protocol}//${parsed.host}${parsed.pathname.replace(/\/+$/g, "")}`;
+	} catch {
+		return raw.replace(/\/+$/g, "");
+	}
+}
+
+/**
+ * Build the `/models` discovery URL by appending to the parsed pathname so
+ * query parameters survive (`https://host/root?token=x` must become
+ * `https://host/root/models?token=x`, not `https://host/root?token=x/models`).
+ */
+function appendModelsPath(baseUrl: string): string {
+	try {
+		const url = new URL(baseUrl);
+		url.pathname = `${url.pathname.replace(/\/+$/g, "")}/models`;
+		return url.toString();
+	} catch {
+		return `${baseUrl}/models`;
 	}
 }
 
