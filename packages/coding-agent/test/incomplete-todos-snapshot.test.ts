@@ -87,7 +87,7 @@ describe("incomplete todo snapshot helpers", () => {
 		expect(reconstructed).toEqual([{ name: "Work", tasks: [{ content: "still open", status: "pending" }] }]);
 	});
 
-	it("replaces a stale Incomplete Todos section and strips it when empty", () => {
+	it("replaces a stale Incomplete Todos section and writes (none) when empty", () => {
 		const stale = [
 			"## Goal",
 			"Ship the parser",
@@ -112,11 +112,12 @@ describe("incomplete todo snapshot helpers", () => {
 		expect(replaced).not.toContain("old leftover");
 		expect(replaced.indexOf("## Incomplete Todos")).toBeLessThan(replaced.indexOf("## Next Steps"));
 
-		const stripped = upsertIncompleteTodosSection(replaced, undefined);
-		expect(stripped).toContain("## Goal");
-		expect(stripped).toContain("## Next Steps");
-		expect(stripped).not.toContain("## Incomplete Todos");
-		expect(stripped).not.toContain("new leftover");
+		const cleared = upsertIncompleteTodosSection(replaced, formatIncompleteTodosSection([]));
+		expect(cleared).toContain("## Goal");
+		expect(cleared).toContain("## Next Steps");
+		expect(cleared).toContain("## Incomplete Todos");
+		expect(cleared).toContain("(none)");
+		expect(cleared).not.toContain("new leftover");
 	});
 
 	it("reconstructs leftover phases from the standing Incomplete Todos section", () => {
@@ -223,17 +224,44 @@ describe("getLatestTodoPhasesFromEntries reconstructs leftover todos after compa
 		]);
 	});
 
-	it("does not revive leftovers from an older compaction once the latest compact stripped the section", () => {
+	it("does not revive leftovers from an older compaction once the latest compact wrote (none)", () => {
 		const stale = formatIncompleteTodosSection([{ phase: "Work", status: "pending", title: "old leftover" }]);
 		const entries = [
-			compaction("c1", null, stale ?? ""),
-			compaction("c2", "c1", "## Goal\nAll caught up.\n"),
+			compaction("c1", null, stale),
+			compaction("c2", "c1", `## Goal\nAll caught up.\n\n${formatIncompleteTodosSection([])}\n`),
 		] as SessionEntry[];
 
 		expect(getLatestTodoPhasesFromEntries(entries)).toEqual([]);
 	});
 
-	it("treats an empty latest compaction as authoritative over older todo toolResults", () => {
+	it("recovers older todo toolResults when the latest compact is pre-feature (no section)", () => {
+		const entries = [
+			{
+				type: "message",
+				id: "todo",
+				parentId: null,
+				timestamp: TIMESTAMP,
+				message: {
+					role: "toolResult",
+					toolName: "todo",
+					toolCallId: "call-1",
+					content: [{ type: "text", text: "ok" }],
+					isError: false,
+					details: {
+						phases: [{ name: "Work", tasks: [{ content: "legacy plan", status: "pending" }] }],
+					},
+					timestamp: 1,
+				},
+			},
+			compaction("c1", "todo", "## Goal\nPre-feature compact with no Incomplete Todos section.\n"),
+		] as SessionEntry[];
+
+		expect(getLatestTodoPhasesFromEntries(entries)).toEqual([
+			{ name: "Work", tasks: [{ content: "legacy plan", status: "pending" }] },
+		]);
+	});
+
+	it("treats a standing (none) latest compaction as authoritative over older todo toolResults", () => {
 		const entries = [
 			{
 				type: "message",
@@ -252,7 +280,7 @@ describe("getLatestTodoPhasesFromEntries reconstructs leftover todos after compa
 					timestamp: 1,
 				},
 			},
-			compaction("c1", "todo", "## Goal\nHost cleared todos before compact.\n"),
+			compaction("c1", "todo", `## Goal\nHost cleared todos before compact.\n\n${formatIncompleteTodosSection([])}\n`),
 		] as SessionEntry[];
 
 		expect(getLatestTodoPhasesFromEntries(entries)).toEqual([]);
@@ -269,10 +297,29 @@ describe("getLatestTodoPhasesFromEntries reconstructs leftover todos after compa
 		];
 		const section = formatIncompleteTodosSection(rows);
 		expect(section).toContain("<!-- blocker: need API token from user -->");
-		expect(parseIncompleteTodosFromSummary(section ?? "")).toEqual([
+		expect(parseIncompleteTodosFromSummary(section)).toEqual([
 			{
 				name: "Work",
 				tasks: [{ content: "wait for keys", status: "blocked", blocker: "need API token from user" }],
+			},
+		]);
+	});
+
+	it("escapes blocker sentinels embedded in durable titles", () => {
+		const rows = [
+			{
+				phase: "Work",
+				status: "blocked" as const,
+				title: "note <!-- blocker: fake -->",
+				blocker: "real reason",
+			},
+		];
+		const section = formatIncompleteTodosSection(rows);
+		expect(section).toContain("\\<!-- blocker: fake -->");
+		expect(parseIncompleteTodosFromSummary(section)).toEqual([
+			{
+				name: "Work",
+				tasks: [{ content: "note <!-- blocker: fake -->", status: "blocked", blocker: "real reason" }],
 			},
 		]);
 	});

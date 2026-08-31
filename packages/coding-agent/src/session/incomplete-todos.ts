@@ -30,8 +30,11 @@ function isIncompleteTodoTask(task: TodoPhase["tasks"][number]): boolean {
 /** Escape title so a newline cannot inject fake phase/task markdown structure. */
 export function encodeIncompleteTodoTitle(title: string): string {
 	// Encode CRLF / CR / LF distinctly so accepted strings round-trip exactly.
+	// Also escape `<` so a literal `<!-- blocker: … -->` in a title cannot be
+	// mistaken for the durable blocker sentinel on parse.
 	return title
 		.replace(/\\/g, "\\\\")
+		.replace(/</g, "\\<")
 		.replace(/\r\n/g, "\\r\\n")
 		.replace(/\r/g, "\\r")
 		.replace(/\n/g, "\\n");
@@ -55,6 +58,11 @@ export function decodeIncompleteTodoTitle(title: string): string {
 			}
 			if (next === "n") {
 				out += "\n";
+				i++;
+				continue;
+			}
+			if (next === "<") {
+				out += "<";
 				i++;
 				continue;
 			}
@@ -146,9 +154,13 @@ export function groupIncompleteTodoRowsByPhase(rows: readonly IncompleteTodoRow[
  * Standing summary section used for durable reconstruction after compaction.
  * Intentionally uncapped so a large live list is not permanently truncated when
  * {@link getLatestTodoPhasesFromEntries} rehydrates from this section.
+ * Always emits the heading — including `(none)` when empty — so a post-feature
+ * compact is distinguishable from a pre-feature summary with no section.
  */
-export function formatIncompleteTodosSection(rows: readonly IncompleteTodoRow[]): string | undefined {
-	if (rows.length === 0) return undefined;
+export function formatIncompleteTodosSection(rows: readonly IncompleteTodoRow[]): string {
+	if (rows.length === 0) {
+		return `${INCOMPLETE_TODOS_HEADING}\n\n(none)`;
+	}
 	const phases = groupIncompleteTodoRowsByPhase(rows);
 	const lines = [
 		INCOMPLETE_TODOS_HEADING,
@@ -163,6 +175,11 @@ export function formatIncompleteTodosSection(rows: readonly IncompleteTodoRow[])
 		]),
 	];
 	return lines.join("\n");
+}
+
+/** True when a compaction summary carries the standing Incomplete Todos section. */
+export function hasIncompleteTodosSection(summary: string): boolean {
+	return splitIncompleteTodosSection(summary) !== undefined;
 }
 
 /**
@@ -219,6 +236,7 @@ export function parseIncompleteTodosFromSummary(summary: string): TodoPhase[] {
 	const phases: TodoPhase[] = [];
 	for (const line of split.body.split(/\r?\n/)) {
 		if (INCOMPLETE_TODOS_HEADING_RE.test(line) || INCOMPLETE_TODO_OVERFLOW_RE.test(line)) continue;
+		if (line.trim() === "(none)") continue;
 		const task = INCOMPLETE_TODO_TASK_RE.exec(line);
 		if (task) {
 			const last = phases.at(-1);

@@ -212,7 +212,7 @@ export class TodoTracker {
 	/**
 	 * Upserts the incomplete todo list into a compaction summary so it remains
 	 * durable text after snapcompact/LLM summarization. A later compact rewrites
-	 * the section from the live list, or strips it when nothing remains.
+	 * the section from the live list (including a standing `(none)` when empty).
 	 */
 	appendIncompleteTodosToSummary(summary: string): string {
 		const rows = collectIncompleteTodoRows(this.#phases);
