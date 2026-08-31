@@ -10,8 +10,21 @@
  * and re-dials after Chrome reaps it while disconnected.
  */
 import { AttachmentGuard } from "../../coding-agent/src/tools/browser/relay/attachment-guard";
-import type { ExtToRelayMessage, RelayToExtMessage, TabSnapshot } from "../../coding-agent/src/tools/browser/relay/protocol";
-import { filterFreshAttachmentState, noteAttachmentStateChange, snapshotAttachmentState } from "./attachment-state";
+import type {
+	ExtToRelayMessage,
+	RelayToExtMessage,
+	TabSnapshot,
+} from "../../coding-agent/src/tools/browser/relay/protocol";
+import {
+	filterFreshAttachmentState,
+	noteAttachmentStateChange,
+	snapshotAttachmentState,
+} from "./attachment-state";
+import {
+	nextOrphanSweepDeadline,
+	orphanSweepAlarmDelayMinutes,
+	shouldRunOrphanSweep,
+} from "./orphan-sweep";
 import { snapshotAfterPendingOperationsSettle } from "./pending-ops";
 
 const DEFAULT_PORT = 9224;
@@ -25,6 +38,9 @@ const RECONNECT_MAX_MS = 10_000;
  * "started debugging this browser" infobar forever (#8930).
  */
 const ORPHAN_GRACE_MS = 30_000;
+const KEEPALIVE_ALARM = "omp-relay-keepalive";
+const ORPHAN_SWEEP_ALARM = "omp-relay-orphan-sweep";
+const ORPHAN_SWEEP_DEADLINE_KEY = "ompOrphanSweepDeadlineMs";
 
 let ws: WebSocket | null = null;
 let reconnectDelay = RECONNECT_MIN_MS;
@@ -42,14 +58,19 @@ const relayInitiatedDetachTabs = new Set<number>();
 
 const RECOVERABLE_TAB_IDS_KEY = "ompRecoverableTabIds";
 const recoverableTabIds = new Set<number>();
+let orphanSweepDeadlineMs: number | null = null;
 const recoverableReady = chrome.storage.session
-	.get({ [RECOVERABLE_TAB_IDS_KEY]: [] })
-	.then(stored => {
+	.get({ [RECOVERABLE_TAB_IDS_KEY]: [], [ORPHAN_SWEEP_DEADLINE_KEY]: null })
+	.then((stored) => {
 		const ids = stored[RECOVERABLE_TAB_IDS_KEY];
-		if (!Array.isArray(ids)) return;
-		for (const id of ids) {
-			if (typeof id === "number") recoverableTabIds.add(id);
+		if (Array.isArray(ids)) {
+			for (const id of ids) {
+				if (typeof id === "number") recoverableTabIds.add(id);
+			}
 		}
+		const deadline = stored[ORPHAN_SWEEP_DEADLINE_KEY];
+		if (typeof deadline === "number" && Number.isFinite(deadline))
+			orphanSweepDeadlineMs = deadline;
 	})
 	.catch(() => {});
 let recoverableUpdates: Promise<void> = recoverableReady;
@@ -67,7 +88,9 @@ function trackPendingDetach<T>(promise: Promise<T>): Promise<T> {
 function updateRecoverable(update: () => void): Promise<void> {
 	recoverableUpdates = recoverableUpdates.then(async () => {
 		update();
-		await chrome.storage.session.set({ [RECOVERABLE_TAB_IDS_KEY]: [...recoverableTabIds] }).catch(() => {});
+		await chrome.storage.session
+			.set({ [RECOVERABLE_TAB_IDS_KEY]: [...recoverableTabIds] })
+			.catch(() => {});
 	});
 	return recoverableUpdates;
 }
@@ -84,6 +107,53 @@ function forgetRecoverable(tabId: number): Promise<void> {
 	});
 }
 
+async function setOrphanSweepDeadline(
+	deadlineMs: number | null,
+): Promise<void> {
+	orphanSweepDeadlineMs = deadlineMs;
+	if (deadlineMs === null) {
+		await chrome.alarms.clear(ORPHAN_SWEEP_ALARM).catch(() => {});
+	} else {
+		chrome.alarms.create(ORPHAN_SWEEP_ALARM, {
+			delayInMinutes: orphanSweepAlarmDelayMinutes(deadlineMs, Date.now()),
+		});
+	}
+	await chrome.storage.session
+		.set({ [ORPHAN_SWEEP_DEADLINE_KEY]: deadlineMs })
+		.catch(() => {});
+}
+
+async function maybeScheduleOrphanSweep(
+	disconnected = !ws || ws.readyState === WebSocket.CLOSED,
+): Promise<void> {
+	await recoverableUpdates;
+	const nextDeadlineMs = nextOrphanSweepDeadline({
+		nowMs: Date.now(),
+		graceMs: ORPHAN_GRACE_MS,
+		disconnected,
+		hasTrackedAttachments: attachmentGuard.attachedTabIds().length > 0,
+		existingDeadlineMs: orphanSweepDeadlineMs,
+	});
+	if (nextDeadlineMs !== orphanSweepDeadlineMs)
+		await setOrphanSweepDeadline(nextDeadlineMs);
+}
+
+async function maybeRunOrphanSweep(): Promise<void> {
+	if (
+		!shouldRunOrphanSweep({
+			nowMs: Date.now(),
+			deadlineMs: orphanSweepDeadlineMs,
+			disconnected: !ws || ws.readyState === WebSocket.CLOSED,
+			hasTrackedAttachments: attachmentGuard.attachedTabIds().length > 0,
+		})
+	) {
+		await maybeScheduleOrphanSweep();
+		return;
+	}
+	await setOrphanSweepDeadline(null);
+	attachmentGuard.onSuspend();
+}
+
 /**
  * The extension owns its `chrome.debugger` attachments: it outlives the relay,
  * so it must detach tabs the relay can no longer speak for. The relay reconciles
@@ -93,8 +163,8 @@ function forgetRecoverable(tabId: number): Promise<void> {
 const attachmentGuard = new AttachmentGuard<NodeJS.Timeout>({
 	graceMs: ORPHAN_GRACE_MS,
 	setTimer: (fn, ms) => setTimeout(fn, ms),
-	clearTimer: handle => clearTimeout(handle),
-	detachAll: tabIds => {
+	clearTimer: (handle) => clearTimeout(handle),
+	detachAll: (tabIds) => {
 		// trackAttachments persisted every id before handing it to the guard, so
 		// onSuspend can start these detaches without depending on a last-moment
 		// storage write that MV3 may terminate with the worker.
@@ -110,7 +180,9 @@ const attachmentGuard = new AttachmentGuard<NodeJS.Timeout>({
 					// the attachment truly survived so a subsequent sweep reclaims it;
 					// otherwise the onDetach listener already forgot it.
 					const targets = await chrome.debugger.getTargets().catch(() => []);
-					if (targets.some(target => target.tabId === tabId && target.attached)) {
+					if (
+						targets.some((target) => target.tabId === tabId && target.attached)
+					) {
 						void trackAttachments([tabId]);
 					}
 				}),
@@ -127,7 +199,13 @@ async function trackAttachments(
 ): Promise<void> {
 	if (tabIds.length === 0) return;
 	const freshTabIds = (): number[] =>
-		isFresh() ? filterFreshAttachmentState(attachmentStateEpochs, attachmentState, tabIds) : [];
+		isFresh()
+			? filterFreshAttachmentState(
+					attachmentStateEpochs,
+					attachmentState,
+					tabIds,
+				)
+			: [];
 	await rememberRecoverable(freshTabIds);
 	for (const tabId of freshTabIds()) attachmentGuard.track(tabId);
 }
@@ -138,10 +216,14 @@ interface RelaySettings {
 }
 
 async function loadSettings(): Promise<RelaySettings> {
-	const stored = await chrome.storage.local.get({ port: DEFAULT_PORT, token: "" });
+	const stored = await chrome.storage.local.get({
+		port: DEFAULT_PORT,
+		token: "",
+	});
 	const port = Number(stored.port);
 	return {
-		port: Number.isInteger(port) && port > 0 && port <= 65535 ? port : DEFAULT_PORT,
+		port:
+			Number.isInteger(port) && port > 0 && port <= 65535 ? port : DEFAULT_PORT,
 		token: typeof stored.token === "string" ? stored.token : "",
 	};
 }
@@ -175,7 +257,11 @@ function enqueueGroupOp<T>(fn: () => Promise<T>): Promise<T> {
 }
 
 /** Move tabs into the per-window omp group, creating or reusing it by title. */
-async function groupTabs(tabIds: number[], title: string, color: string): Promise<{ grouped: Record<string, number> }> {
+async function groupTabs(
+	tabIds: number[],
+	title: string,
+	color: string,
+): Promise<{ grouped: Record<string, number> }> {
 	ompGroupTitle = title;
 	void chrome.storage.session.set({ ompGroupTitle: title });
 	const byWindow = new Map<number, number[]>();
@@ -200,8 +286,11 @@ async function groupTabs(tabIds: number[], title: string, color: string): Promis
 			// Heal duplicate same-title groups left behind by older races.
 			for (const dupe of existing.slice(1)) {
 				const dupeTabs = await chrome.tabs.query({ groupId: dupe.id });
-				const dupeIds = dupeTabs.map(tab => tab.id).filter(id => id !== undefined);
-				if (dupeIds.length > 0) await chrome.tabs.group({ tabIds: dupeIds, groupId });
+				const dupeIds = dupeTabs
+					.map((tab) => tab.id)
+					.filter((id) => id !== undefined);
+				if (dupeIds.length > 0)
+					await chrome.tabs.group({ tabIds: dupeIds, groupId });
 			}
 			await chrome.tabs.group({ tabIds: ids, groupId });
 		} else {
@@ -217,14 +306,21 @@ async function groupTabs(tabIds: number[], title: string, color: string): Promis
 async function restoreGroups(): Promise<void> {
 	if (!ompGroupTitle) {
 		// Service worker restarted since the last group op; recover the title.
-		const stored = await chrome.storage.session.get({ ompGroupTitle: "" }).catch(() => ({ ompGroupTitle: "" }));
-		ompGroupTitle = typeof stored.ompGroupTitle === "string" && stored.ompGroupTitle ? stored.ompGroupTitle : null;
+		const stored = await chrome.storage.session
+			.get({ ompGroupTitle: "" })
+			.catch(() => ({ ompGroupTitle: "" }));
+		ompGroupTitle =
+			typeof stored.ompGroupTitle === "string" && stored.ompGroupTitle
+				? stored.ompGroupTitle
+				: null;
 	}
 	if (!ompGroupTitle) return;
-	const groups = await chrome.tabGroups.query({ title: ompGroupTitle }).catch(() => []);
+	const groups = await chrome.tabGroups
+		.query({ title: ompGroupTitle })
+		.catch(() => []);
 	for (const group of groups) {
 		const tabs = await chrome.tabs.query({ groupId: group.id }).catch(() => []);
-		const ids = tabs.map(tab => tab.id).filter(id => id !== undefined);
+		const ids = tabs.map((tab) => tab.id).filter((id) => id !== undefined);
 		if (ids.length > 0) await chrome.tabs.ungroup(ids).catch(() => {});
 	}
 }
@@ -236,13 +332,19 @@ function post(msg: ExtToRelayMessage): void {
 async function setBadge(connected: boolean): Promise<void> {
 	try {
 		await chrome.action.setBadgeText({ text: connected ? "on" : "off" });
-		await chrome.action.setBadgeBackgroundColor({ color: connected ? "#1a7f37" : "#8b8b8b" });
+		await chrome.action.setBadgeBackgroundColor({
+			color: connected ? "#1a7f37" : "#8b8b8b",
+		});
 	} catch {
 		// Badge is cosmetic; never let it break the relay loop.
 	}
 }
 
-let helloRefresh: { socket: WebSocket; done: Promise<void>; dirty: boolean } | null = null;
+let helloRefresh: {
+	socket: WebSocket;
+	done: Promise<void>;
+	dirty: boolean;
+} | null = null;
 
 /**
  * Send a fresh hello for the live socket, coalescing concurrent callers.
@@ -281,8 +383,8 @@ function refreshHello(): void {
 			dirty: false,
 			done: Promise.resolve(),
 		};
-			entry.done = buildHello()
-				.then(async hello => {
+		entry.done = buildHello()
+			.then(async (hello) => {
 				// Suppress a hello whose snapshot was invalidated before it could be
 				// sent. A guard detach that marks this refresh `dirty` in flight means
 				// `getTargets()` may predate the detach, so this hello can report a
@@ -292,21 +394,30 @@ function refreshHello(): void {
 				// attach. Skip the stale send and let the dirty rebuild below emit the
 				// single authoritative hello.
 				if (entry.dirty) return;
-					// Persist recovery markers only for the hello that is still current.
-					// A detach can invalidate this refresh after `buildHello()` snapshots
-					// targets but before the queued storage write runs; gating the write on
-					// the live refresh prevents a stale hello from re-adding a just-forgotten
-					// recoverable tab after `forgetRecoverable()` already queued the fix.
-					await trackAttachments(
-						hello.attachedTabIds,
-						() => helloRefresh === entry && !entry.dirty && ws === socket && socket.readyState === WebSocket.OPEN,
-					);
-					if (entry.dirty) return;
-				if (ws === socket && socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(hello));
+				// Persist recovery markers only for the hello that is still current.
+				// A detach can invalidate this refresh after `buildHello()` snapshots
+				// targets but before the queued storage write runs; gating the write on
+				// the live refresh prevents a stale hello from re-adding a just-forgotten
+				// recoverable tab after `forgetRecoverable()` already queued the fix.
+				await trackAttachments(
+					hello.attachedTabIds,
+					() =>
+						helloRefresh === entry &&
+						!entry.dirty &&
+						ws === socket &&
+						socket.readyState === WebSocket.OPEN,
+				);
+				if (entry.dirty) return;
+				if (ws === socket && socket.readyState === WebSocket.OPEN)
+					socket.send(JSON.stringify(hello));
 			})
 			.finally(() => {
 				if (helloRefresh !== entry) return;
-				if (entry.dirty && ws === socket && socket.readyState === WebSocket.OPEN) {
+				if (
+					entry.dirty &&
+					ws === socket &&
+					socket.readyState === WebSocket.OPEN
+				) {
 					// A refresh arrived while this one was in flight; its snapshot may be
 					// stale, so rebuild to capture the change it observed.
 					startRefresh();
@@ -323,7 +434,9 @@ function invalidateHelloRefresh(): void {
 	if (helloRefresh) helloRefresh.dirty = true;
 }
 
-async function buildHello(): Promise<Extract<ExtToRelayMessage, { t: "hello" }>> {
+async function buildHello(): Promise<
+	Extract<ExtToRelayMessage, { t: "hello" }>
+> {
 	// An attach requested by the previous socket can finish during a fast
 	// reconnect. Guard/internal detaches can be in flight for the same window,
 	// too. Wait until the pending attach/detach set stays stable through the
@@ -374,7 +487,10 @@ async function attachTab(tabId: number, socket: WebSocket): Promise<void> {
 	}
 }
 
-async function attachTabOperation(tabId: number, socket: WebSocket): Promise<void> {
+async function attachTabOperation(
+	tabId: number,
+	socket: WebSocket,
+): Promise<void> {
 	await chrome.debugger.attach({ tabId }, "1.3");
 	noteAttachmentStateChange(attachmentStateEpochs, tabId);
 	// The relay that requested this attachment disappeared while Chrome was
@@ -397,7 +513,9 @@ async function attachTabOperation(tabId: number, socket: WebSocket): Promise<voi
 				// survived, so a subsequent sweep reclaims it instead of leaving the
 				// debugger infobar orphaned indefinitely.
 				const targets = await chrome.debugger.getTargets().catch(() => []);
-				if (targets.some(target => target.tabId === tabId && target.attached)) {
+				if (
+					targets.some((target) => target.tabId === tabId && target.attached)
+				) {
 					void trackAttachments([tabId]);
 				}
 			}),
@@ -415,7 +533,10 @@ async function attachTabOperation(tabId: number, socket: WebSocket): Promise<voi
 	}
 }
 
-async function runRpc(msg: Extract<RelayToExtMessage, { t: "rpc" }>, socket: WebSocket): Promise<unknown> {
+async function runRpc(
+	msg: Extract<RelayToExtMessage, { t: "rpc" }>,
+	socket: WebSocket,
+): Promise<unknown> {
 	switch (msg.op) {
 		case "attach":
 			await attachTab(msg.tabId, socket);
@@ -433,7 +554,9 @@ async function runRpc(msg: Extract<RelayToExtMessage, { t: "rpc" }>, socket: Web
 			}
 		case "send":
 			return await chrome.debugger.sendCommand(
-				msg.sessionId ? { tabId: msg.tabId, sessionId: msg.sessionId } : { tabId: msg.tabId },
+				msg.sessionId
+					? { tabId: msg.tabId, sessionId: msg.sessionId }
+					: { tabId: msg.tabId },
 				msg.method,
 				msg.params,
 			);
@@ -453,9 +576,13 @@ async function runRpc(msg: Extract<RelayToExtMessage, { t: "rpc" }>, socket: Web
 			return {};
 		}
 		case "group":
-			return await enqueueGroupOp(() => groupTabs(msg.tabIds, msg.title, msg.color));
+			return await enqueueGroupOp(() =>
+				groupTabs(msg.tabIds, msg.title, msg.color),
+			);
 		case "ungroup":
-			await enqueueGroupOp(() => chrome.tabs.ungroup(msg.tabIds).catch(() => {}));
+			await enqueueGroupOp(() =>
+				chrome.tabs.ungroup(msg.tabIds).catch(() => {}),
+			);
 			return {};
 	}
 }
@@ -469,9 +596,16 @@ function handleRelayMessage(socket: WebSocket, raw: string): void {
 	}
 	if (msg.t === "pong") return;
 	void runRpc(msg, socket)
-		.then(result => {
+		.then((result) => {
 			if (ws === socket && socket.readyState === WebSocket.OPEN) {
-				socket.send(JSON.stringify({ t: "rpcResult", id: msg.id, ok: true, result } satisfies ExtToRelayMessage));
+				socket.send(
+					JSON.stringify({
+						t: "rpcResult",
+						id: msg.id,
+						ok: true,
+						result,
+					} satisfies ExtToRelayMessage),
+				);
 			}
 		})
 		.catch((err: unknown) => {
@@ -515,14 +649,25 @@ async function reconcileOrphans(): Promise<void> {
 	// standalone sweep when nothing is connecting to reclaim these tabs.
 	if (
 		attachedTabIds.length > 0 &&
-		!(ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING))
+		!(
+			ws &&
+			(ws.readyState === WebSocket.OPEN ||
+				ws.readyState === WebSocket.CONNECTING)
+		)
 	) {
 		attachmentGuard.onDisconnected();
+		await maybeRunOrphanSweep();
+		return;
 	}
+	await setOrphanSweepDeadline(null);
 }
 
 async function connect(): Promise<void> {
-	if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
+	if (
+		ws &&
+		(ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)
+	)
+		return;
 	const settings = await loadSettings();
 	const url = `ws://127.0.0.1:${settings.port}/ext${settings.token ? `?token=${encodeURIComponent(settings.token)}` : ""}`;
 	const socket = new WebSocket(url);
@@ -530,12 +675,13 @@ async function connect(): Promise<void> {
 	socket.onopen = () => {
 		reconnectDelay = RECONNECT_MIN_MS;
 		attachmentGuard.onConnected();
+		void setOrphanSweepDeadline(null);
 		void setBadge(true);
 		refreshHello();
 		clearInterval(pingTimer ?? undefined);
 		pingTimer = setInterval(() => post({ t: "ping" }), PING_INTERVAL_MS);
 	};
-	socket.onmessage = event => {
+	socket.onmessage = (event) => {
 		if (typeof event.data === "string") handleRelayMessage(socket, event.data);
 	};
 	socket.onclose = () => {
@@ -548,6 +694,7 @@ async function connect(): Promise<void> {
 		void setBadge(false);
 		void restoreGroups();
 		attachmentGuard.onDisconnected();
+		void maybeScheduleOrphanSweep();
 		scheduleReconnect();
 	};
 	socket.onerror = () => {
@@ -559,7 +706,13 @@ async function connect(): Promise<void> {
 
 chrome.debugger.onEvent.addListener((source, method, params) => {
 	if (source.tabId === undefined) return;
-	post({ t: "cdpEvent", tabId: source.tabId, sessionId: source.sessionId, method, params });
+	post({
+		t: "cdpEvent",
+		tabId: source.tabId,
+		sessionId: source.sessionId,
+		method,
+		params,
+	});
 });
 
 chrome.debugger.onDetach.addListener((source, reason) => {
@@ -576,7 +729,8 @@ chrome.debugger.onDetach.addListener((source, reason) => {
 	// attachment, so clear any stale guard/recovery bit and report it as a real
 	// user detach (which bans the tab) instead of silently reattaching it.
 	const guardMarked = guardDetachments.delete(source.tabId);
-	const userDetach = reason === "canceled_by_user" || reason === "replaced_with_devtools";
+	const userDetach =
+		reason === "canceled_by_user" || reason === "replaced_with_devtools";
 	if (guardMarked && !userDetach) {
 		// A reconnect can win the race with the asynchronous guard detach. Do not
 		// report it as a user detach (which bans the tab); refresh hello so the
@@ -588,7 +742,8 @@ chrome.debugger.onDetach.addListener((source, reason) => {
 	// A relay-requested detach is attributed explicitly so the bridge can
 	// reconcile the stale snapshot instead of treating it as a user cancel.
 	const relayInitiated = relayInitiatedDetachTabs.delete(source.tabId);
-	if (!relayInitiated && pendingAttachTabs.has(source.tabId)) canceledPendingAttachTabs.add(source.tabId);
+	if (!relayInitiated && pendingAttachTabs.has(source.tabId))
+		canceledPendingAttachTabs.add(source.tabId);
 	void forgetRecoverable(source.tabId);
 	post({ t: "detached", tabId: source.tabId, reason, relayInitiated });
 	// A detach can land after buildHello() snapshots getTargets() while that
@@ -599,7 +754,7 @@ chrome.debugger.onDetach.addListener((source, reason) => {
 	refreshHello();
 });
 
-chrome.tabs.onCreated.addListener(tab => {
+chrome.tabs.onCreated.addListener((tab) => {
 	const snap = snapshot(tab);
 	if (snap) post({ t: "tabCreated", tab: snap });
 });
@@ -609,16 +764,21 @@ chrome.tabs.onUpdated.addListener((_tabId, _changeInfo, tab) => {
 	if (snap) post({ t: "tabUpdated", tab: snap });
 });
 
-chrome.tabs.onRemoved.addListener(tabId => {
+chrome.tabs.onRemoved.addListener((tabId) => {
 	void forgetRecoverable(tabId);
 	post({ t: "tabRemoved", tabId });
 });
 
 // ---- lifecycle ----------------------------------------------------------------
 
-chrome.alarms.create("omp-relay-keepalive", { periodInMinutes: 0.5 });
-chrome.alarms.onAlarm.addListener(alarm => {
-	if (alarm.name === "omp-relay-keepalive") void connect();
+chrome.alarms.create(KEEPALIVE_ALARM, { periodInMinutes: 0.5 });
+chrome.alarms.onAlarm.addListener((alarm) => {
+	if (alarm.name === KEEPALIVE_ALARM) {
+		void reconcileOrphans();
+		void connect();
+		return;
+	}
+	if (alarm.name === ORPHAN_SWEEP_ALARM) void maybeRunOrphanSweep();
 });
 
 chrome.storage.onChanged.addListener((_changes, areaName) => {
@@ -628,7 +788,9 @@ chrome.storage.onChanged.addListener((_changes, areaName) => {
 	void connect();
 });
 
-chrome.action.onClicked.addListener(() => void chrome.runtime.openOptionsPage());
+chrome.action.onClicked.addListener(
+	() => void chrome.runtime.openOptionsPage(),
+);
 chrome.runtime.onInstalled.addListener(() => {
 	void reconcileOrphans();
 	void connect();
@@ -637,9 +799,13 @@ chrome.runtime.onStartup.addListener(() => {
 	void reconcileOrphans();
 	void connect();
 });
-// Clean teardown: detach any tab we still own before the worker is suspended,
-// so the debugger infobar never survives the extension going idle.
-chrome.runtime.onSuspend.addListener(() => attachmentGuard.onSuspend());
+// `runtime.onSuspend` cannot rely on async `chrome.debugger.detach()` calls:
+// Chrome may terminate the worker before they complete. Persist the orphan
+// deadline and let the next normal alarm/startup event perform the actual
+// reclaim if the relay stayed down through the full grace period.
+chrome.runtime.onSuspend.addListener(() => {
+	void maybeScheduleOrphanSweep(true);
+});
 
 void reconcileOrphans();
 void connect();

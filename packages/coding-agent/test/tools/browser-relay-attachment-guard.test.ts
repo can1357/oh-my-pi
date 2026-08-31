@@ -34,8 +34,8 @@ function makeGuard(graceMs = 5_000) {
 	const guard = new AttachmentGuard<number>({
 		graceMs,
 		setTimer: (fn, ms) => timers.set(fn, ms),
-		clearTimer: handle => timers.clear(handle),
-		detachAll: tabIds => detached.push(tabIds),
+		clearTimer: (handle) => timers.clear(handle),
+		detachAll: (tabIds) => detached.push(tabIds),
 	});
 	return { guard, timers, detached };
 }

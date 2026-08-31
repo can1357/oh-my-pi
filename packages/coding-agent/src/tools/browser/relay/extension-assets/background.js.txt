@@ -68,6 +68,21 @@ function filterFreshAttachmentState(epochs, snapshot, tabIds) {
   return tabIds.filter((tabId) => (epochs.get(tabId) ?? 0) === (snapshot.get(tabId) ?? 0));
 }
 
+// extension/orphan-sweep.ts
+function nextOrphanSweepDeadline(state) {
+  if (!state.disconnected || !state.hasTrackedAttachments)
+    return null;
+  if (state.existingDeadlineMs !== null)
+    return state.existingDeadlineMs;
+  return state.nowMs + state.graceMs;
+}
+function shouldRunOrphanSweep(state) {
+  return state.deadlineMs !== null && state.disconnected && state.hasTrackedAttachments && state.nowMs >= state.deadlineMs;
+}
+function orphanSweepAlarmDelayMinutes(deadlineMs, nowMs) {
+  return Math.max((deadlineMs - nowMs) / 60000, 0.01);
+}
+
 // extension/pending-ops.ts
 async function snapshotAfterPendingOperationsSettle(getGeneration, getPendingOperations, takeSnapshot) {
   for (;; ) {
@@ -87,6 +102,9 @@ var PING_INTERVAL_MS = 20000;
 var RECONNECT_MIN_MS = 1000;
 var RECONNECT_MAX_MS = 1e4;
 var ORPHAN_GRACE_MS = 30000;
+var KEEPALIVE_ALARM = "omp-relay-keepalive";
+var ORPHAN_SWEEP_ALARM = "omp-relay-orphan-sweep";
+var ORPHAN_SWEEP_DEADLINE_KEY = "ompOrphanSweepDeadlineMs";
 var ws = null;
 var reconnectDelay = RECONNECT_MIN_MS;
 var pingTimer = null;
@@ -100,14 +118,18 @@ var attachmentStateEpochs = new Map;
 var relayInitiatedDetachTabs = new Set;
 var RECOVERABLE_TAB_IDS_KEY = "ompRecoverableTabIds";
 var recoverableTabIds = new Set;
-var recoverableReady = chrome.storage.session.get({ [RECOVERABLE_TAB_IDS_KEY]: [] }).then((stored) => {
+var orphanSweepDeadlineMs = null;
+var recoverableReady = chrome.storage.session.get({ [RECOVERABLE_TAB_IDS_KEY]: [], [ORPHAN_SWEEP_DEADLINE_KEY]: null }).then((stored) => {
   const ids = stored[RECOVERABLE_TAB_IDS_KEY];
-  if (!Array.isArray(ids))
-    return;
-  for (const id of ids) {
-    if (typeof id === "number")
-      recoverableTabIds.add(id);
+  if (Array.isArray(ids)) {
+    for (const id of ids) {
+      if (typeof id === "number")
+        recoverableTabIds.add(id);
+    }
   }
+  const deadline = stored[ORPHAN_SWEEP_DEADLINE_KEY];
+  if (typeof deadline === "number" && Number.isFinite(deadline))
+    orphanSweepDeadlineMs = deadline;
 }).catch(() => {});
 var recoverableUpdates = recoverableReady;
 function trackPendingDetach(promise) {
@@ -136,6 +158,42 @@ function forgetRecoverable(tabId) {
   return updateRecoverable(() => {
     recoverableTabIds.delete(tabId);
   });
+}
+async function setOrphanSweepDeadline(deadlineMs) {
+  orphanSweepDeadlineMs = deadlineMs;
+  if (deadlineMs === null) {
+    await chrome.alarms.clear(ORPHAN_SWEEP_ALARM).catch(() => {});
+  } else {
+    chrome.alarms.create(ORPHAN_SWEEP_ALARM, {
+      delayInMinutes: orphanSweepAlarmDelayMinutes(deadlineMs, Date.now())
+    });
+  }
+  await chrome.storage.session.set({ [ORPHAN_SWEEP_DEADLINE_KEY]: deadlineMs }).catch(() => {});
+}
+async function maybeScheduleOrphanSweep(disconnected = !ws || ws.readyState === WebSocket.CLOSED) {
+  await recoverableUpdates;
+  const nextDeadlineMs = nextOrphanSweepDeadline({
+    nowMs: Date.now(),
+    graceMs: ORPHAN_GRACE_MS,
+    disconnected,
+    hasTrackedAttachments: attachmentGuard.attachedTabIds().length > 0,
+    existingDeadlineMs: orphanSweepDeadlineMs
+  });
+  if (nextDeadlineMs !== orphanSweepDeadlineMs)
+    await setOrphanSweepDeadline(nextDeadlineMs);
+}
+async function maybeRunOrphanSweep() {
+  if (!shouldRunOrphanSweep({
+    nowMs: Date.now(),
+    deadlineMs: orphanSweepDeadlineMs,
+    disconnected: !ws || ws.readyState === WebSocket.CLOSED,
+    hasTrackedAttachments: attachmentGuard.attachedTabIds().length > 0
+  })) {
+    await maybeScheduleOrphanSweep();
+    return;
+  }
+  await setOrphanSweepDeadline(null);
+  attachmentGuard.onSuspend();
 }
 var attachmentGuard = new AttachmentGuard({
   graceMs: ORPHAN_GRACE_MS,
@@ -435,7 +493,10 @@ async function reconcileOrphans() {
   await trackAttachments(attachedTabIds);
   if (attachedTabIds.length > 0 && !(ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING))) {
     attachmentGuard.onDisconnected();
+    await maybeRunOrphanSweep();
+    return;
   }
+  await setOrphanSweepDeadline(null);
 }
 async function connect() {
   if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING))
@@ -447,6 +508,7 @@ async function connect() {
   socket.onopen = () => {
     reconnectDelay = RECONNECT_MIN_MS;
     attachmentGuard.onConnected();
+    setOrphanSweepDeadline(null);
     setBadge(true);
     refreshHello();
     clearInterval(pingTimer ?? undefined);
@@ -467,6 +529,7 @@ async function connect() {
     setBadge(false);
     restoreGroups();
     attachmentGuard.onDisconnected();
+    maybeScheduleOrphanSweep();
     scheduleReconnect();
   };
   socket.onerror = () => {
@@ -510,10 +573,15 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   forgetRecoverable(tabId);
   post({ t: "tabRemoved", tabId });
 });
-chrome.alarms.create("omp-relay-keepalive", { periodInMinutes: 0.5 });
+chrome.alarms.create(KEEPALIVE_ALARM, { periodInMinutes: 0.5 });
 chrome.alarms.onAlarm.addListener((alarm) => {
-  if (alarm.name === "omp-relay-keepalive")
+  if (alarm.name === KEEPALIVE_ALARM) {
+    reconcileOrphans();
     connect();
+    return;
+  }
+  if (alarm.name === ORPHAN_SWEEP_ALARM)
+    maybeRunOrphanSweep();
 });
 chrome.storage.onChanged.addListener((_changes, areaName) => {
   if (areaName !== "local")
@@ -530,6 +598,8 @@ chrome.runtime.onStartup.addListener(() => {
   reconcileOrphans();
   connect();
 });
-chrome.runtime.onSuspend.addListener(() => attachmentGuard.onSuspend());
+chrome.runtime.onSuspend.addListener(() => {
+  maybeScheduleOrphanSweep(true);
+});
 reconcileOrphans();
 connect();
