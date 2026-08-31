@@ -126,7 +126,7 @@ function isNeutralNetworkConditions(params: Record<string, unknown> | undefined)
 		params.latency === 0 &&
 		params.downloadThroughput === -1 &&
 		params.uploadThroughput === -1 &&
-		params.connectionType === undefined &&
+		(params.connectionType === undefined || params.connectionType === "none") &&
 		(params.packetLoss === undefined || params.packetLoss === 0) &&
 		(params.packetQueueLength === undefined || params.packetQueueLength === 0) &&
 		(params.packetReordering === undefined || params.packetReordering === false)

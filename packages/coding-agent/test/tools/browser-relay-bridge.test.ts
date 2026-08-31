@@ -1032,6 +1032,65 @@ describe("RelayBridge tab grouping", () => {
 		expect(first.messages.filter(message => message.id === commandId && "result" in message)).toHaveLength(1);
 	});
 
+	it('treats `connectionType: "none"` as a neutral network-conditions reset', async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const first = new FakeCdpSocket();
+		const firstConn = bridge.cdpConnected(first);
+		const firstSession = await attachPage(bridge, ext, first, firstConn, 1);
+		const second = new FakeCdpSocket();
+		const secondConn = bridge.cdpConnected(second);
+		const secondSession = await attachPage(bridge, ext, second, secondConn, 1);
+
+		bridge.cdpMessage(
+			firstConn,
+			JSON.stringify({
+				id: ++msgSeq,
+				sessionId: firstSession,
+				method: "Network.emulateNetworkConditions",
+				params: {
+					offline: true,
+					latency: 250,
+					downloadThroughput: 128 * 1024,
+					uploadThroughput: 64 * 1024,
+					connectionType: "cellular3g",
+				},
+			}),
+		);
+		await flush();
+		ack(bridge, ext, "send");
+		await flush();
+
+		bridge.cdpMessage(
+			secondConn,
+			JSON.stringify({
+				id: ++msgSeq,
+				sessionId: secondSession,
+				method: "Network.emulateNetworkConditions",
+				params: {
+					offline: false,
+					latency: 0,
+					downloadThroughput: -1,
+					uploadThroughput: -1,
+					connectionType: "none",
+				},
+			}),
+		);
+		await flush();
+		ack(bridge, ext, "send");
+		await flush();
+
+		bridge.extClosed(ext);
+		const ext2 = new FakeExtSocket();
+		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], { recoverableTabIds: [1] });
+		await waitFor(() => ext2.rpcs("attach").length === 1, 'connectionType "none" recovery attach RPC');
+		ack(bridge, ext2, "attach");
+		await flush();
+
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual([]);
+	});
+
 	it("keeps the shared root disabled when another preserved session issued the latest disable", async () => {
 		const bridge = new RelayBridge({});
 		const ext = new FakeExtSocket();
