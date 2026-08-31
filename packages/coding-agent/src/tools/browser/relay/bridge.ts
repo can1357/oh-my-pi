@@ -86,6 +86,8 @@ function subscriptionKey(method: string): string {
 			return "GeolocationOverride";
 		case "Emulation.clearIdleOverride":
 			return "Emulation.setIdleOverride";
+		case "Emulation.resetPageScaleFactor":
+			return "Emulation.setPageScaleFactor";
 		case "Network.setUserAgentOverride":
 		case "Emulation.setUserAgentOverride":
 			return "UserAgentOverride";
@@ -1114,6 +1116,7 @@ export class RelayBridge {
 			case "Emulation.clearGeolocationOverride":
 			case "Page.clearGeolocationOverride":
 			case "Emulation.clearIdleOverride":
+			case "Emulation.resetPageScaleFactor":
 				this.#forgetTabSubscription(tab, subscriptionKey(msg.method));
 				return;
 			case "Network.setBypassServiceWorker":

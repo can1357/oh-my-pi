@@ -82,6 +82,9 @@ function nextOrphanSweepDeadline(state) {
 function shouldRunOrphanSweep(state) {
   return state.deadlineMs !== null && state.disconnected && state.hasTrackedAttachments && state.nowMs >= state.deadlineMs;
 }
+function shouldProceedWithOrphanSweep(state) {
+  return state.disconnected && state.hasTrackedAttachments;
+}
 function orphanSweepAlarmDelayMinutes(deadlineMs, nowMs) {
   return Math.max((deadlineMs - nowMs) / 60000, 0.01);
 }
@@ -204,6 +207,16 @@ async function maybeRunOrphanSweep() {
     return;
   }
   await setOrphanSweepDeadline(null);
+  if (!shouldProceedWithOrphanSweep({
+    disconnected: orphanSweepSeesRelayDisconnected({
+      socketReadyState: ws?.readyState,
+      openReadyState: WebSocket.OPEN
+    }),
+    hasTrackedAttachments: attachmentGuard.attachedTabIds().length > 0
+  })) {
+    await maybeScheduleOrphanSweep();
+    return;
+  }
   attachmentGuard.onSuspend();
 }
 var attachmentGuard = new AttachmentGuard({
