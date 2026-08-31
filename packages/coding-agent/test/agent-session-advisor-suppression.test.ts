@@ -514,6 +514,37 @@ describe("AgentSession advisor auto-resume suppression", () => {
 		await running.catch(() => {});
 	});
 
+	it("preserves wait-mode advice queued before a user interrupt", async () => {
+		const { session, sessionManager, mock, streamStarted } = await createParkedSession();
+		const persisted = capturePersistedAdvice(sessionManager);
+		session.settings.set("advisor.interruptMode", "wait");
+		session.yieldQueue.register<{ note: string; severity: "blocker" }>("advisor", {
+			build: entries =>
+				({
+					role: "custom",
+					...advisorCard(entries.map(entry => entry.note).join("\n")),
+					timestamp: Date.now(),
+				}) as AgentMessage,
+			skipIdleFlush: true,
+		});
+
+		const running = session.prompt("do the thing");
+		await streamStarted;
+		// The production wait-mode route uses this same skip-idle-flush advisor queue.
+		session.yieldQueue.enqueue("advisor", {
+			note: "deferred mid-tool",
+			severity: "blocker",
+		});
+
+		await session.abort({ reason: USER_INTERRUPT_LABEL });
+		await session.waitForIdle();
+
+		expect(session.agent.state.messages.filter(isAdvisorCard)).toHaveLength(1);
+		expect(persisted.at(-1)).toContain("deferred mid-tool");
+		expect(mock.calls.length).toBe(1);
+		await running.catch(() => {});
+	});
+
 	it("keeps advisor auto-resume for a non-user (internal) abort", async () => {
 		const { session, mock, streamStarted } = await createParkedSession([{ content: ["resumed after advice"] }]);
 
