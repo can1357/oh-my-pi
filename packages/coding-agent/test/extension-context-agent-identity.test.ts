@@ -41,15 +41,20 @@ describe("ExtensionContext agentIdentity", () => {
 		});
 	});
 
-	it("memoizes the identity: the same frozen object is served on every access", () => {
+	it("resolves deeper ancestors from the registry at first access and never re-queries after", () => {
 		const registry = new AgentRegistry();
-		const runner = makeRunner({ kind: "main", depth: 0, agentId: MAIN_AGENT_ID, displayName: "main", registry });
+		// Direct parent `P1` is snapshotted from the constructor input; only its
+		// own ancestor would come from a registry lookup (none registered yet).
+		const runner = makeRunner({ kind: "sub", depth: 2, agentId: "C2", displayName: "c2", parentId: "P1", registry });
 
-		const first = runner.createContext().agentIdentity;
-		const second = runner.createContext().agentIdentity;
-		// The memoized identity is shared across handlers by contract: every
-		// consumer must observe the one frozen instance, not a fresh copy.
-		expect(second).toBe(first);
+		expect(runner.createContext().agentIdentity.parentChain).toEqual(["P1"]);
+
+		// Registering P1's own parent afterwards does not retro-link the
+		// memoized identity — the chain is resolved once (structural for a live
+		// agent), not re-queried on every access.
+		registry.register({ id: "P1", displayName: "planner", kind: "sub", parentId: "GP", session: null });
+		registry.register({ id: "GP", displayName: "grand", kind: "sub", parentId: MAIN_AGENT_ID, session: null });
+		expect(runner.createContext().agentIdentity.parentChain).toEqual(["P1"]);
 	});
 
 	it("reports a subagent's direct parentId but excludes Main from the parent chain", () => {
