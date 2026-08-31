@@ -352,6 +352,7 @@ function projectCredentialBlocksForLegacyClient(blocks: readonly CredentialBlock
 			blockScope: "shared",
 			blockedUntilMs: Math.max(shared?.blockedUntilMs ?? 0, block.blockedUntilMs),
 			...(updatedAtMs !== undefined ? { updatedAtMs } : {}),
+			...(block.retryAfter === true || shared?.retryAfter === true ? { retryAfter: true } : {}),
 		};
 	}
 	if (shared) projected.push(shared);
@@ -371,6 +372,7 @@ function buildCredentialBlockGroups(
 			blockScope: block.blockScope,
 			blockedUntilMs: block.blockedUntilMs,
 			updatedAtMs: block.updatedAtMs,
+			...(block.retryAfter === true ? { retryAfter: true } : {}),
 		};
 		const existing = byCredentialId.get(block.credentialId);
 		if (existing) {
