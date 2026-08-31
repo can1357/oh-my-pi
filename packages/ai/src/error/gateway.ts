@@ -61,7 +61,8 @@ const REVOKED_PATTERN = /\brevoked\b|\binvalid_grant\b/i;
 const TIMEOUT_OR_CONNECTION_PATTERN =
 	/\b(?:operation\s+)?timed?\s*out\b|\btimeout\b|\bconnection(?:\s+error|\s+refused)?\b|\bsocket hang up\b|\bfetch failed\b/i;
 const POLICY_PATTERN = /\bcyber_policy\b|trusted access for cyber/i;
-const MODEL_UNAVAILABLE_PATTERN = /\bmodel[_ ]?(?:not[_ ]found|unavailable|not[_ ]supported)\b/i;
+const MODEL_UNAVAILABLE_PATTERN =
+	/\bmodel[_ ]?(?:not[_ ]found|unavailable|not[_ ]supported)\b|\bmodel does not exist\b/i;
 const INVALID_REQUEST_PATTERN =
 	/\b(?:unsupported|invalid_request|invalid request|bad request|malformed|GenerateContentRequest)\b/i;
 const GATEWAY_INVARIANT_PATTERN = /\bgateway_terminal\b|\binternal invariant\b/i;

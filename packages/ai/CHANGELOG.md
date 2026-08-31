@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed auth-gateway nested fallback compilation leaking rules from unreached sibling branches onto earlier targets.
+- Fixed gateway classification treating OpenAI-style `model does not exist` 404s as `request_terminal` instead of `model_unavailable`.
+- Fixed auth-gateway inference error responses omitting `x-request-id` / `request-id` so callers could not look up the matching decision trace.
+
 ### Added
 
 - Added API-key authentication for ClinePass through the official `CLINE_API_KEY` variable, including account-route validation and rolling quota-window reporting in `omp usage` ([#7863](https://github.com/can1357/oh-my-pi/pull/7863) by [@will-bogusz](https://github.com/will-bogusz)).

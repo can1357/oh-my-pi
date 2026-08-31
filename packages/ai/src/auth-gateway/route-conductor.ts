@@ -27,6 +27,9 @@ export interface ExecutionState {
 type ConductorRoute = CompiledRoute & {
 	targets: readonly string[];
 	fallbacks: Readonly<Partial<Record<GatewayErrorDisposition, readonly string[]>>>;
+	fallbackByTarget?: Readonly<
+		Partial<Record<string, Readonly<Partial<Record<GatewayErrorDisposition, readonly string[]>>>>>
+	>;
 };
 
 function firstUnused(ids: readonly string[] | undefined, attempted: ReadonlySet<string>): string | undefined {
@@ -35,6 +38,18 @@ function firstUnused(ids: readonly string[] | undefined, attempted: ReadonlySet<
 		if (!attempted.has(id)) return id;
 	}
 	return undefined;
+}
+
+function fallbackTargets(
+	route: ConductorRoute,
+	currentTarget: string,
+	disposition: GatewayErrorDisposition,
+): readonly string[] | undefined {
+	const byTarget = route.fallbackByTarget;
+	if (byTarget && Object.keys(byTarget).length > 0) {
+		return byTarget[currentTarget]?.[disposition];
+	}
+	return route.fallbacks[disposition];
 }
 
 /**
@@ -72,14 +87,14 @@ export function decideAttempt(args: {
 			if (!state.siblingsExhausted) {
 				return { type: "sibling_credential" };
 			}
-			const next = firstUnused(route.fallbacks[disposition], state.attemptedTargets);
+			const next = firstUnused(fallbackTargets(route, state.currentTarget, disposition), state.attemptedTargets);
 			return next === undefined ? { type: "terminal" } : { type: "fallback_target", targetModelId: next };
 		}
 		case "provider_transient":
 		case "provider_unavailable":
 		case "model_unavailable":
 		case "context_overflow": {
-			const next = firstUnused(route.fallbacks[disposition], state.attemptedTargets);
+			const next = firstUnused(fallbackTargets(route, state.currentTarget, disposition), state.attemptedTargets);
 			return next === undefined ? { type: "terminal" } : { type: "fallback_target", targetModelId: next };
 		}
 		default: {

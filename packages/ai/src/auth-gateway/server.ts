@@ -710,8 +710,14 @@ async function handleFormatEndpoint(
 	parsed.options.promptCacheKey ??= sessionId;
 
 	const traces = bootOpts.decisionTraces ?? new RouteDecisionTraceLog();
+	const formatError = (status: number, type: string, message: string): Response => {
+		const response = route.module.formatError(status, type, message);
+		const headers = new Headers(response.headers);
+		headers.set("x-request-id", requestId);
+		headers.set("request-id", requestId);
+		return new Response(response.body, { status: response.status, headers });
+	};
 	const commitGate = new StreamCommitGate();
-	const formatError = route.module.formatError;
 	const attemptedTargets = new Set<string>();
 	const attemptedCredentials = new Set<number>();
 	let retryCount = 0;
@@ -1114,7 +1120,13 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 
 	const traces = bootOpts.decisionTraces ?? new RouteDecisionTraceLog();
 	const commitGate = new StreamCommitGate();
-	const formatError = piNative.formatError;
+	const formatError = (status: number, type: string, message: string): Response => {
+		const response = piNative.formatError(status, type, message);
+		const headers = new Headers(response.headers);
+		headers.set("x-request-id", requestId);
+		headers.set("request-id", requestId);
+		return new Response(response.body, { status: response.status, headers });
+	};
 	const attemptedTargets = new Set<string>();
 	const attemptedCredentials = new Set<number>();
 	let retryCount = 0;

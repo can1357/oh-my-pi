@@ -32,6 +32,7 @@ describe("RouteRegistry", () => {
 			root: { type: "target", model: "gpt-5" },
 			targets: ["gpt-5"],
 			fallbacks: {},
+			fallbackByTarget: {},
 		});
 	});
 
@@ -73,6 +74,7 @@ describe("RouteRegistry", () => {
 			},
 			targets: ["gpt-5", "gpt-4o"],
 			fallbacks: { credential_quota: ["gpt-4o"] },
+			fallbackByTarget: { "gpt-5": { credential_quota: ["gpt-4o"] } },
 		});
 	});
 
@@ -170,6 +172,7 @@ describe("RouteRegistry", () => {
 			root: { type: "target", model: "gpt-5" },
 			targets: ["gpt-5"],
 			fallbacks: {},
+			fallbackByTarget: {},
 		});
 	});
 
@@ -198,6 +201,33 @@ describe("RouteRegistry", () => {
 		expect(route?.fallbacks.credential_quota).toEqual(["quota-backup"]);
 		expect(route?.fallbacks.context_overflow).toEqual(["overflow-backup"]);
 		expect(route?.fallbacks.context_overflow ?? []).not.toContain("quota-backup");
+	});
+
+	it("keeps nested fallback edges scoped away from sibling branches", () => {
+		const registry = new RouteRegistry(() => undefined);
+		registry.register({
+			id: "scoped",
+			root: {
+				type: "domain",
+				name: "outer",
+				children: [
+					{ type: "target", model: "A" },
+					{
+						type: "fallback",
+						on: ["credential_quota"],
+						children: [
+							{ type: "target", model: "B" },
+							{ type: "target", model: "C" },
+						],
+					},
+				],
+			},
+		});
+		const route = registry.resolve("scoped");
+		expect(route?.targets).toEqual(["A", "B", "C"]);
+		expect(route?.fallbacks.credential_quota).toEqual(["C"]);
+		expect(route?.fallbackByTarget?.A?.credential_quota).toBeUndefined();
+		expect(route?.fallbackByTarget?.B?.credential_quota).toEqual(["C"]);
 	});
 
 	it("get returns registered virtual routes and ignores catalog models (negative)", () => {
