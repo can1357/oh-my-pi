@@ -62,6 +62,10 @@ const compat: ResolvedOpenAICompat = {
 	emptyLengthFinishIsContextError: false,
 	usesOpenAIToolCallIdLimit: false,
 	dropThinkingWhenReasoningEffort: false,
+	nativeKimiK3Reasoning: false,
+	zaiReasoningEffortDialect: false,
+	clampOutputToModelMax: false,
+	stripImageInput: false,
 };
 
 function buildToolResult(toolCallId: string, timestamp: number): ToolResultMessage {
@@ -319,16 +323,20 @@ describe("openai-completions convertMessages", () => {
 		// turn (text-only message) and the tool-result image batching path drop
 		// images for that combination, substituting the standard placeholder.
 		const baseModel = getBundledModel("openai", "gpt-4o-mini") as Model<"openai-completions">;
-		const model: Model<"openai-completions"> = {
-			...baseModel,
+		const model: Model<"openai-completions"> = buildModel({
 			id: "qwen3.7-max",
-			provider: "bailian" as Model<"openai-completions">["provider"],
+			name: "qwen3.7-max",
+			provider: "alibaba-token-plan",
 			baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
 			api: "openai-completions",
+			reasoning: false,
 			// Wrong-but-realistic user config: claims vision capability even
 			// though qwen3.7-max on this endpoint is text-only upstream.
 			input: ["text", "image"],
-		};
+			cost: baseModel.cost,
+			contextWindow: baseModel.contextWindow,
+			maxTokens: baseModel.maxTokens,
+		});
 
 		const now = Date.now();
 		const assistantMessage: AssistantMessage = {
@@ -402,14 +410,18 @@ describe("openai-completions convertMessages", () => {
 		// known text-only families.
 		for (const id of ["qwen3.7-plus", "qwen-vl-max", "qwen3.8-max", "qwen3.8-max-preview", "qwen3.10-max"]) {
 			const baseModel = getBundledModel("openai", "gpt-4o-mini") as Model<"openai-completions">;
-			const model: Model<"openai-completions"> = {
-				...baseModel,
+			const model: Model<"openai-completions"> = buildModel({
 				id,
-				provider: "bailian" as Model<"openai-completions">["provider"],
+				name: id,
+				provider: "alibaba-token-plan",
 				baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
 				api: "openai-completions",
+				reasoning: false,
 				input: ["text", "image"],
-			};
+				cost: baseModel.cost,
+				contextWindow: baseModel.contextWindow,
+				maxTokens: baseModel.maxTokens,
+			});
 
 			const now = Date.now();
 			const assistantMessage: AssistantMessage = {
@@ -449,25 +461,28 @@ describe("openai-completions convertMessages", () => {
 			{ id: "deepseek-v4-flash", provider: "deepseek", baseUrl: "https://api.deepseek.com/v1" },
 			{ id: "deepseek-chat", provider: "deepseek", baseUrl: "https://api.deepseek.com" },
 			{ id: "deepseek-reasoner", provider: "deepseek", baseUrl: "https://api.deepseek.com" },
-			{ id: "deepseek-ai/DeepSeek-V4-Pro", provider: "custom-proxy", baseUrl: "https://llm-proxy.example.com/v1" },
+			{ id: "deepseek-ai/DeepSeek-V4-Pro", provider: "litellm", baseUrl: "https://llm-proxy.example.com/v1" },
 			// `vision` inside `revision` is a substring, not a multimodal token.
-			{ id: "deepseek-r1-revision-0528", provider: "custom-proxy", baseUrl: "https://llm-proxy.example.com/v1" },
+			{ id: "deepseek-r1-revision-0528", provider: "litellm", baseUrl: "https://llm-proxy.example.com/v1" },
 			// `vision` inside `provisioned` is a substring, not a multimodal token.
-			{ id: "deepseek-v4-provisioned", provider: "custom-proxy", baseUrl: "https://llm-proxy.example.com/v1" },
+			{ id: "deepseek-v4-provisioned", provider: "litellm", baseUrl: "https://llm-proxy.example.com/v1" },
 		];
 
 		const baseModel = getBundledModel("openai", "gpt-4o-mini") as Model<"openai-completions">;
 
 		for (const spec of deepseekModelIds) {
-			const model: Model<"openai-completions"> = {
-				...baseModel,
+			const model: Model<"openai-completions"> = buildModel({
 				id: spec.id,
 				name: spec.id,
 				provider: spec.provider as Model<"openai-completions">["provider"],
 				baseUrl: spec.baseUrl,
 				api: "openai-completions",
+				reasoning: true,
 				input: ["text", "image"],
-			};
+				cost: baseModel.cost,
+				contextWindow: baseModel.contextWindow,
+				maxTokens: baseModel.maxTokens,
+			});
 
 			const now = Date.now();
 			const assistantMessage: AssistantMessage = {

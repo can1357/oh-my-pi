@@ -27,8 +27,15 @@ const BIZ_BASE = env("ZAI_BIZ_BASE") ?? "https://api.z.ai";
 const BUSINESS_LOGIN_URL = env("ZAI_BUSINESS_LOGIN_URL") ?? "https://api.z.ai/api/auth/z/login";
 /** OMP's own key name so sign-in never mutates ZCode's `zcode-api-key`. */
 const KEY_NAME = "oh-my-pi";
-const CALLBACK_PORT = 54548;
+// ZCode reuses this OAuth client id server-side, so the redirect must match an
+// entry registered against it: the CLI flow's `http://127.0.0.1:9999/callback`
+// (the desktop app uses the `zcode://` scheme). Any other host/port — e.g. the
+// invented `localhost:54548` — is rejected with "Redirect URI not registered
+// for this client" before the login page renders (#10245).
+const CALLBACK_PORT = 9999;
+const CALLBACK_HOSTNAME = "127.0.0.1";
 const CALLBACK_PATH = "/callback";
+const REDIRECT_URI = `http://${CALLBACK_HOSTNAME}:${CALLBACK_PORT}${CALLBACK_PATH}`;
 /** Durable minted key never expires; matches the perplexity NEVER_EXPIRES sentinel. */
 const NEVER_EXPIRES = 8.64e15;
 
@@ -220,7 +227,10 @@ export class ZaiOAuthFlow extends OAuthCallbackFlow {
 		super(ctrl, {
 			preferredPort: CALLBACK_PORT,
 			callbackPath: CALLBACK_PATH,
-			allowPortFallback: false,
+			callbackHostname: CALLBACK_HOSTNAME,
+			// Pin the exact registered redirect: a busy port must fail fast, not
+			// fall back to a random port the provider's allowlist would reject.
+			redirectUri: REDIRECT_URI,
 		});
 		this.#fetch = ctrl.fetch ?? fetch;
 	}

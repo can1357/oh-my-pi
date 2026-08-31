@@ -472,7 +472,7 @@ const streamOllamaOnce = (
 		let activeThinkingIndex: number | undefined;
 		let activeTextIndex: number | undefined;
 		const activeToolIndices = new Set<number>();
-		const streamMarkupHealingPattern = getStreamMarkupHealingPattern(model.provider, model.id);
+		const streamMarkupHealingPattern = getStreamMarkupHealingPattern(model);
 		const streamMarkupHealing = streamMarkupHealingPattern
 			? new StreamMarkupHealing({ pattern: streamMarkupHealingPattern })
 			: undefined;

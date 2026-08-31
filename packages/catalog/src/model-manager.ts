@@ -1,9 +1,9 @@
 import { buildModel } from "./build";
+import { collapseBuiltVariants } from "./compat/collapse";
 import { readModelCache, writeModelCache } from "./model-cache";
 import { type GeneratedProvider, getBundledModels } from "./models";
 import type { Api, Model, ModelCost, ModelSpec, Provider, TokenCost } from "./types";
 import { isRecord } from "./utils";
-import { collapseBuiltModelVariants } from "./variant-collapse";
 
 const DEFAULT_CACHE_TTL_MS = 2 * 60 * 60 * 1000;
 const NON_AUTHORITATIVE_RETRY_MS = 5 * 60 * 1000;
@@ -261,7 +261,7 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 			: restoredCache.models;
 		const source: ModelResolutionSource = cacheContribution.length > 0 ? "cache" : "bundled";
 		return {
-			models: collapseBuiltModelVariants(cachedModels),
+			models: collapseBuiltVariants(cachedModels),
 			stale: false,
 			source,
 			...(source === "cache" ? { updatedAt: cache.updatedAt } : {}),
@@ -313,7 +313,7 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 	const mergedWithCache = mergeDynamicModels(staticModels, cacheModels);
 	const mergedWithModelsDev = mergeDynamicModels(mergedWithCache, modelsDevModels);
 	const mergedModels = mergeDynamicModels(mergedWithModelsDev, dynamicModels);
-	const models = collapseBuiltModelVariants(
+	const models = collapseBuiltVariants(
 		authoritativeDynamicFetchSucceeded ? retainModelIds(mergedModels, dynamicModels) : mergedModels,
 	);
 	const resolutionAuthoritative = !hasRemoteFetcher || remoteResolutionComplete || shouldUseFreshCacheAsAuthoritative;
@@ -354,7 +354,7 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 			const latestCacheModels = additiveStaticModelIds
 				? preparedLatestCacheModels.filter(model => !additiveStaticModelIds.has(model.id))
 				: preparedLatestCacheModels;
-			const fallbackSnapshotModels = collapseBuiltModelVariants(
+			const fallbackSnapshotModels = collapseBuiltVariants(
 				mergeDynamicModels(mergeDynamicModels(staticModels, latestCacheModels), modelsDevModels),
 			);
 			writeModelCache(
