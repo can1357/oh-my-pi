@@ -331,7 +331,7 @@ export function parseRequest(body: unknown, _headers?: Headers, defaultStream = 
 	return {
 		modelId,
 		context,
-		stream: typeof body.stream === "boolean" ? body.stream : false,
+		stream: typeof body.stream === "boolean" ? body.stream : defaultStream,
 		options,
 	};
 }
