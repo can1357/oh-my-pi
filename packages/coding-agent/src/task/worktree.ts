@@ -934,6 +934,8 @@ export async function commitToBranch(
 
 export interface MergeBranchResult {
 	merged: string[];
+	/** Branches whose revision loop finished (includes all-empty cherry-picks). */
+	processed: string[];
 	failed: string[];
 	conflict?: string;
 	/** Set when cherry-picks landed on HEAD but restoring the stashed working tree failed. */
@@ -965,6 +967,7 @@ export async function mergeTaskBranches(
 	return withRepoLock(repoRoot, async () => {
 		const repo = vcs.requireGit(repoRoot);
 		const merged: string[] = [];
+		const processed: string[] = [];
 		const failed: string[] = [];
 
 		// Stash dirty working tree so cherry-pick can operate on a clean HEAD.
@@ -1001,6 +1004,7 @@ export async function mergeTaskBranches(
 					failed.push(branchName);
 					conflictResult = {
 						merged,
+						processed,
 						failed: [...failed, ...branches.slice(merged.length + failed.length).map(b => b.branchName)],
 						conflict: `${branchName}: ${stderr}`,
 						partialCommitsLanded: revisionsLanded > 0,
@@ -1008,9 +1012,9 @@ export async function mergeTaskBranches(
 					break;
 				}
 
-				// Empty cherry-picks (equivalent changes already on the parent) must not
-				// count as a landed merge — otherwise `hadAnyChanges` latches verify for
-				// a no-op HEAD.
+				// Empty cherry-picks must not latch verify, but the branch was still
+				// fully processed — nested patches remain eligible.
+				processed.push(branchName);
 				if (revisionsLanded > 0) merged.push(branchName);
 			}
 		} finally {
@@ -1030,13 +1034,13 @@ export async function mergeTaskBranches(
 					if (conflictResult) {
 						conflictResult.stashConflict = stashConflict;
 					} else {
-						conflictResult = { merged, failed: [], stashConflict };
+						conflictResult = { merged, processed, failed: [], stashConflict };
 					}
 				}
 			}
 		}
 
-		return conflictResult ?? { merged, failed };
+		return conflictResult ?? { merged, processed, failed };
 	});
 }
 
