@@ -1709,9 +1709,6 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 
 	const agentRegistry = options.agentRegistry ?? AgentRegistry.global();
 	const resolvedAgentId = options.agentId ?? options.parentTaskPrefix ?? MAIN_AGENT_ID;
-	const resolvedAgentDisplayName =
-		options.agentDisplayName ?? ((options.taskDepth ?? 0) > 0 || options.parentTaskPrefix ? "sub" : "main");
-	const agentKind = (options.taskDepth ?? 0) > 0 || options.parentTaskPrefix ? ("sub" as const) : ("main" as const);
 	/**
 	 * Kind exposed to extension identity and registry registration. Derived
 	 * from ANY parent linkage so a caller that supplies only `parentAgentId`
@@ -1725,6 +1722,16 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		(options.taskDepth ?? 0) > 0 || options.parentTaskPrefix !== undefined || options.parentAgentId !== undefined
 			? ("sub" as const)
 			: ("main" as const);
+	// Default display name tracks the same classification as `identityKind` so
+	// a linkage-only caller registers as a sub named "sub", not "sub" named
+	// "main"; an explicit `agentDisplayName` always wins.
+	const resolvedAgentDisplayName = options.agentDisplayName ?? (identityKind === "sub" ? "sub" : "main");
+	// Pre-existing classification consumed by capability gates (personality
+	// suppression for subs, main-owned lifecycle teardown, ToolSession.kind).
+	// Deliberately NOT widened to cover `parentAgentId`: those gates keep their
+	// historical behavior for linkage-only callers; see `identityKind` above for
+	// the identity/registration-only classification.
+	const agentKind = (options.taskDepth ?? 0) > 0 || options.parentTaskPrefix ? ("sub" as const) : ("main" as const);
 	let registeredAgentRef: AgentRef | undefined;
 	/**
 	 * Forget the agent ref on teardown — unless it is a retained terminal ref.

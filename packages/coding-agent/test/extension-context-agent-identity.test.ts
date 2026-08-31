@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import * as fs from "node:fs";
+import * as fsp from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { ModelRegistry } from "../src/config/model-registry";
@@ -41,17 +41,15 @@ describe("ExtensionContext agentIdentity", () => {
 		});
 	});
 
-	it("passes a provided main identity through with an empty parent chain", () => {
+	it("memoizes the identity: the same frozen object is served on every access", () => {
 		const registry = new AgentRegistry();
 		const runner = makeRunner({ kind: "main", depth: 0, agentId: MAIN_AGENT_ID, displayName: "main", registry });
 
-		expect(runner.createContext().agentIdentity).toEqual({
-			kind: "main",
-			depth: 0,
-			agentId: MAIN_AGENT_ID,
-			displayName: "main",
-			parentChain: [],
-		});
+		const first = runner.createContext().agentIdentity;
+		const second = runner.createContext().agentIdentity;
+		// The memoized identity is shared across handlers by contract: every
+		// consumer must observe the one frozen instance, not a fresh copy.
+		expect(second).toBe(first);
 	});
 
 	it("reports a subagent's direct parentId but excludes Main from the parent chain", () => {
@@ -139,7 +137,7 @@ describe("ExtensionContext agentIdentity", () => {
 	});
 
 	it("derives a parentAgentId-only SDK caller as a consistent sub identity", async () => {
-		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-identity-sdk-link-"));
+		const tempDir = await fsp.mkdtemp(path.join(os.tmpdir(), "pi-identity-sdk-link-"));
 		const registry = new AgentRegistry();
 		registry.register({ id: "P1", displayName: "planner", kind: "sub", parentId: MAIN_AGENT_ID, session: null });
 		const authStorage = await AuthStorage.create(":memory:");
@@ -175,7 +173,7 @@ describe("ExtensionContext agentIdentity", () => {
 			}
 		} finally {
 			authStorage.close();
-			fs.rmSync(tempDir, { recursive: true, force: true });
+			await fsp.rm(tempDir, { recursive: true, force: true });
 		}
 	});
 });
