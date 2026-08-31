@@ -947,7 +947,9 @@ function mapEuropeanGatewayModel(
 	reference: ModelSpec<"openai-completions"> | undefined,
 ): ModelSpec<"openai-completions"> {
 	const model = mapWithBundledReference(entry, defaults, reference);
-	const knownReference = resolveEuropeanGatewayKnownReference(model);
+	// Exact gateway seeds use provider-scoped KDL fallbacks; global references
+	// only enrich unseeded discovery rows.
+	const knownReference = reference === undefined ? resolveEuropeanGatewayKnownReference(model) : undefined;
 	const pricing = isRecord(entry.pricing) ? entry.pricing : undefined;
 	const topProvider = isRecord(entry.top_provider) ? entry.top_provider : undefined;
 	const supportsTools = getEuropeanGatewayToolCapability(entry);

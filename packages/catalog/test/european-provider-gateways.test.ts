@@ -122,13 +122,16 @@ describe("European gateway provider catalog support", () => {
 				maxTokens: null,
 			});
 
-		expect(fallback("aki-io", "kimi-k2.7-code-1100b")).toMatchObject({
+		const akiFallback = fallback("aki-io", "kimi-k2.7-code-1100b");
+		expect(akiFallback).toMatchObject({
 			reasoning: true,
 			supportsTools: true,
 			cost: { input: 0.86, output: 3, cacheRead: 0, cacheWrite: 0 },
 			contextWindow: 262_144,
 			maxTokens: 262_144,
 		});
+		expect(akiFallback.thinking).toBeDefined();
+		expect(akiFallback.thinking?.efforts.length).toBeGreaterThan(0);
 		expect(fallback("eurouter", "mistral-large-3")).toMatchObject({
 			input: ["text", "image"],
 			contextWindow: 262_144,
@@ -503,6 +506,23 @@ describe("European gateway provider catalog support", () => {
 				cacheRead: 0,
 				cacheWrite: 0,
 			},
+		});
+	});
+
+	test("uses provider-local limits for sparse gateway default refreshes", async () => {
+		const fetchMock: FetchImpl = vi.fn(async () => {
+			return Response.json({
+				data: [{ id: "gpt-oss-120b", name: "GPT-OSS 120B" }],
+			});
+		});
+
+		const models = await cortecsModelManagerOptions({ fetch: fetchMock }).fetchDynamicModels?.();
+
+		expect(models?.[0]).toMatchObject({
+			id: "gpt-oss-120b",
+			provider: "cortecs",
+			contextWindow: 131_000,
+			maxTokens: 8_192,
 		});
 	});
 

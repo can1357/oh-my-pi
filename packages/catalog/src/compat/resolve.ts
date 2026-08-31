@@ -1192,10 +1192,14 @@ export function resolveModelPolicy(spec: ModelSpec<Api>): ResolvedModelPolicy<Ap
 	const facts = new IdentityFacts(identity);
 	const initialAxes = resolveCascade(buildResolveTarget(spec, identity));
 	const catalogReasoning = initialAxes.catalog.reasoning;
-	const effectiveSpec =
-		typeof catalogReasoning === "boolean" && catalogReasoning !== spec.reasoning
-			? { ...spec, reasoning: catalogReasoning }
-			: spec;
+	const catalogReasoningFallback = initialAxes.catalog.reasoningFallback;
+	const effectiveReasoning =
+		typeof catalogReasoning === "boolean"
+			? catalogReasoning
+			: typeof catalogReasoningFallback === "boolean" && !spec.catalogFallback?.liveReasoning
+				? catalogReasoningFallback
+				: spec.reasoning;
+	const effectiveSpec = effectiveReasoning !== spec.reasoning ? { ...spec, reasoning: effectiveReasoning } : spec;
 	const axes = effectiveSpec === spec ? initialAxes : resolveCascade(buildResolveTarget(effectiveSpec, identity));
 	let compat: CompatOf<Api>;
 	if (specUsesApi(effectiveSpec, "openrouter")) {
