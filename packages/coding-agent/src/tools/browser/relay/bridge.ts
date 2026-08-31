@@ -226,8 +226,28 @@ function mergeSubscriptionChanges(
 		}
 	>();
 	for (const change of existing) merged.set(change.key, change);
-	for (const change of incoming) merged.set(change.key, { ...merged.get(change.key), ...change });
+	for (const change of incoming) {
+		const prior = merged.get(change.key);
+		merged.set(change.key, {
+			key: change.key,
+			previous: prior?.previous ?? change.previous,
+			next: change.next,
+		});
+	}
 	return [...merged.values()];
+}
+
+function subscriptionChangeEquals(
+	left: {
+		previous: SessionRootSubscription | undefined;
+		next: SessionRootSubscription | undefined;
+	},
+	right: {
+		previous: SessionRootSubscription | undefined;
+		next: SessionRootSubscription | undefined;
+	},
+): boolean {
+	return subscriptionEquals(left.previous, right.previous) && subscriptionEquals(left.next, right.next);
 }
 
 interface TargetInfo {
@@ -952,38 +972,17 @@ export class RelayBridge {
 		} satisfies SessionRootSubscription;
 		const disable = this.#subscriptionDisableCommand(orphaned);
 		if (!disable) return;
-		const prior = tab.subscriptionReconciling ?? Promise.resolve();
-		const task = prior
-			.catch(() => {})
-			.then(async () => {
-				await this.#awaitPendingSubscriptions(tab, key);
-				if (!tab.attached || tab.detaching || tab.restoring || this.#sessionHolders(tabId).length === 0) return;
-				const current = this.#latestSubscriptionForKey(tab, key);
-				const previous =
-					key === "Emulation.setEmulatedMedia"
-						? {
-								...orphaned,
-								params: applySubscriptionUpdate(key, current?.params, orphaned.params),
-							}
-						: orphaned;
-				const command = this.#subscriptionReconcileCommand(previous, current);
-				if (!command) return;
-				this.#assertExtensionCurrent(expectedExt);
-				await this.#rpc({ op: "send", tabId, method: command.method, params: command.params });
-				this.#assertExtensionCurrent(expectedExt);
-			})
-			.catch(err => {
-				if (err instanceof ExtensionReplacedError) return;
-				this.#log("orphaned subscription cleanup failed", {
-					tabId,
-					method: msg.method,
-					error: err instanceof Error ? err.message : String(err),
-				});
-			});
-		tab.subscriptionReconciling = task.finally(() => {
-			if (tab.subscriptionReconciling === task) tab.subscriptionReconciling = null;
-		});
-		await task;
+		await this.#awaitPendingSubscriptions(tab, key);
+		if (!tab.attached || tab.detaching || tab.restoring || this.#sessionHolders(tabId).length === 0) return;
+		const current = this.#latestSubscriptionForKey(tab, key);
+		const previous =
+			key === "Emulation.setEmulatedMedia"
+				? {
+						...orphaned,
+						params: applySubscriptionUpdate(key, current?.params, orphaned.params),
+					}
+				: orphaned;
+		this.#scheduleLiveSubscriptionReconcile(tab, [{ key, previous, next: current }]);
 	}
 
 	#forwardingSessionIsCurrent(
@@ -1345,26 +1344,47 @@ export class RelayBridge {
 		const task = prior
 			.catch(() => {})
 			.then(async () => {
-				if (!tab.attached || tab.detaching || tab.restoring || this.#sessionHolders(tab.tabId).length === 0) return;
-				this.#assertExtensionCurrent(expectedExt);
-				const ordered = [...tab.pendingSubscriptionReconcile].sort((left, right) => {
-					const leftSeq = left.next?.sequence ?? left.previous?.sequence ?? Number.MAX_SAFE_INTEGER;
-					const rightSeq = right.next?.sequence ?? right.previous?.sequence ?? Number.MAX_SAFE_INTEGER;
-					return leftSeq - rightSeq;
-				});
-				for (const change of ordered) {
+				while (true) {
 					if (!tab.attached || tab.detaching || tab.restoring || this.#sessionHolders(tab.tabId).length === 0)
 						return;
+					this.#assertExtensionCurrent(expectedExt);
+					const change = [...tab.pendingSubscriptionReconcile].sort((left, right) => {
+						const leftSeq = left.next?.sequence ?? left.previous?.sequence ?? Number.MAX_SAFE_INTEGER;
+						const rightSeq = right.next?.sequence ?? right.previous?.sequence ?? Number.MAX_SAFE_INTEGER;
+						return leftSeq - rightSeq;
+					})[0];
+					if (!change) return;
 					await this.#awaitPendingSubscriptions(tab, change.key);
+					const queued = tab.pendingSubscriptionReconcile.find(candidate => candidate.key === change.key);
+					if (!queued) continue;
 					const current = this.#latestSubscriptionForKey(tab, change.key);
-					if (!subscriptionEquals(current, change.next)) continue;
-					const command = this.#subscriptionReconcileCommand(change.previous, current);
-					if (!command) continue;
+					if (!subscriptionEquals(current, queued.next)) {
+						if (subscriptionChangeEquals(queued, change)) {
+							tab.pendingSubscriptionReconcile = tab.pendingSubscriptionReconcile.filter(
+								candidate => candidate.key !== change.key,
+							);
+						}
+						continue;
+					}
+					const command = this.#subscriptionReconcileCommand(queued.previous, current);
+					if (!command) {
+						if (subscriptionChangeEquals(queued, change)) {
+							tab.pendingSubscriptionReconcile = tab.pendingSubscriptionReconcile.filter(
+								candidate => candidate.key !== change.key,
+							);
+						}
+						continue;
+					}
 					this.#assertExtensionCurrent(expectedExt);
 					await this.#rpc({ op: "send", tabId: tab.tabId, method: command.method, params: command.params });
 					this.#assertExtensionCurrent(expectedExt);
+					const after = tab.pendingSubscriptionReconcile.find(candidate => candidate.key === change.key);
+					if (after && subscriptionChangeEquals(after, queued)) {
+						tab.pendingSubscriptionReconcile = tab.pendingSubscriptionReconcile.filter(
+							candidate => candidate.key !== change.key,
+						);
+					}
 				}
-				tab.pendingSubscriptionReconcile = [];
 			})
 			.catch(err => {
 				if (err instanceof ExtensionReplacedError) return;

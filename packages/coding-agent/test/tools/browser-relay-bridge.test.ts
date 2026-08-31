@@ -1315,6 +1315,51 @@ describe("RelayBridge tab grouping", () => {
 		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual(["Fetch.enable", "Fetch.disable", "Network.getCookies"]);
 	});
 
+	it("retries orphaned subscription cleanup after an extension replacement", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })], { attachedTabIds: [1] });
+		const owner = new FakeCdpSocket();
+		const ownerConn = bridge.cdpConnected(owner);
+		const ownerSession = await attachPage(bridge, ext, owner, ownerConn, 1);
+		const holder = new FakeCdpSocket();
+		const holderConn = bridge.cdpConnected(holder);
+		const holderSession = await attachPage(bridge, ext, holder, holderConn, 1);
+
+		bridge.cdpMessage(
+			ownerConn,
+			JSON.stringify({
+				id: ++msgSeq,
+				sessionId: ownerSession,
+				method: "Fetch.enable",
+				params: { patterns: [{ urlPattern: "https://owner.example/*" }] },
+			}),
+		);
+		await flush();
+		bridge.cdpClosed(ownerConn);
+		ack(bridge, ext, "send");
+		await waitFor(() => ext.pending("send").length === 1, "orphaned subscription cleanup on old socket");
+		expect(ext.pending("send").map(rpc => rpc.method)).toEqual(["Fetch.disable"]);
+
+		const replacement = new FakeExtSocket();
+		connect(bridge, replacement, [tab({ tabId: 1 })], { attachedTabIds: [1], recoverableTabIds: [1] });
+		await waitFor(() => replacement.pending("send").length === 1, "retried orphaned cleanup on replacement socket");
+		expect(replacement.pending("send").map(rpc => rpc.method)).toEqual(["Fetch.disable"]);
+		ack(bridge, replacement, "send");
+		await flush();
+
+		const commandId = ++msgSeq;
+		bridge.cdpMessage(
+			holderConn,
+			JSON.stringify({ id: commandId, sessionId: holderSession, method: "Network.getCookies" }),
+		);
+		await flush();
+		expect(replacement.rpcs("send").map(rpc => rpc.method)).toEqual(["Fetch.disable", "Network.getCookies"]);
+		ack(bridge, replacement, "send", { cookies: [] });
+		await flush();
+		expect(holder.messages.filter(message => message.id === commandId && "result" in message)).toHaveLength(1);
+	});
+
 	it("reapplies the surviving subscription instead of disabling first when a replay owner disconnects", async () => {
 		const bridge = new RelayBridge({});
 		const ext = new FakeExtSocket();
@@ -1508,6 +1553,81 @@ describe("RelayBridge tab grouping", () => {
 		await flush();
 		expect(replacement.rpcs("send").map(rpc => rpc.method)).toEqual(["Fetch.disable", "Network.getCookies"]);
 		ack(bridge, replacement, "send", { cookies: [] });
+		await flush();
+		expect(holder.messages.filter(message => message.id === commandId && "result" in message)).toHaveLength(1);
+	});
+
+	it("drains reconciliation changes queued while an earlier cleanup RPC is in flight", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })], { attachedTabIds: [1] });
+		const survivingOwner = new FakeCdpSocket();
+		const survivingOwnerConn = bridge.cdpConnected(survivingOwner);
+		const survivingOwnerSession = await attachPage(bridge, ext, survivingOwner, survivingOwnerConn, 1);
+		const orphanedOwner = new FakeCdpSocket();
+		const orphanedOwnerConn = bridge.cdpConnected(orphanedOwner);
+		const orphanedOwnerSession = await attachPage(bridge, ext, orphanedOwner, orphanedOwnerConn, 1);
+		const holder = new FakeCdpSocket();
+		const holderConn = bridge.cdpConnected(holder);
+		const holderSession = await attachPage(bridge, ext, holder, holderConn, 1);
+
+		bridge.cdpMessage(
+			survivingOwnerConn,
+			JSON.stringify({
+				id: ++msgSeq,
+				sessionId: survivingOwnerSession,
+				method: "Fetch.enable",
+				params: { patterns: [{ urlPattern: "https://surviving.example/*" }] },
+			}),
+		);
+		await flush();
+		ack(bridge, ext, "send");
+		await flush();
+
+		bridge.cdpMessage(
+			orphanedOwnerConn,
+			JSON.stringify({
+				id: ++msgSeq,
+				sessionId: orphanedOwnerSession,
+				method: "Fetch.enable",
+				params: { patterns: [{ urlPattern: "https://orphaned.example/*" }] },
+			}),
+		);
+		await flush();
+		bridge.cdpClosed(orphanedOwnerConn);
+		ack(bridge, ext, "send");
+		await waitFor(() => ext.pending("send").length === 1, "reapply second owner while cleanup is in flight");
+		expect(ext.pending("send").map(rpc => rpc.method)).toEqual(["Fetch.enable"]);
+		expect(ext.pending("send")[0]!.params).toEqual({
+			patterns: [{ urlPattern: "https://surviving.example/*" }],
+		});
+
+		bridge.cdpClosed(survivingOwnerConn);
+		ack(bridge, ext, "send");
+		await waitFor(() => ext.rpcs("send").length === 4, "queued disable after second owner disconnects");
+		expect(ext.rpcs("send").map(rpc => rpc.method)).toEqual([
+			"Fetch.enable",
+			"Fetch.enable",
+			"Fetch.enable",
+			"Fetch.disable",
+		]);
+		ack(bridge, ext, "send");
+		await flush();
+
+		const commandId = ++msgSeq;
+		bridge.cdpMessage(
+			holderConn,
+			JSON.stringify({ id: commandId, sessionId: holderSession, method: "Network.getCookies" }),
+		);
+		await flush();
+		expect(ext.rpcs("send").map(rpc => rpc.method)).toEqual([
+			"Fetch.enable",
+			"Fetch.enable",
+			"Fetch.enable",
+			"Fetch.disable",
+			"Network.getCookies",
+		]);
+		ack(bridge, ext, "send", { cookies: [] });
 		await flush();
 		expect(holder.messages.filter(message => message.id === commandId && "result" in message)).toHaveLength(1);
 	});
@@ -3234,6 +3354,60 @@ describe("RelayBridge tab grouping", () => {
 			params: {
 				media: "",
 				features: [{ name: "prefers-color-scheme", value: "dark" }],
+			},
+		});
+	});
+
+	it("preserves the earliest previous media state when coalescing queued cleanup changes", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })], { attachedTabIds: [1] });
+		const mediaOwner = new FakeCdpSocket();
+		const mediaOwnerConn = bridge.cdpConnected(mediaOwner);
+		const mediaOwnerSession = await attachPage(bridge, ext, mediaOwner, mediaOwnerConn, 1);
+		const featuresOwner = new FakeCdpSocket();
+		const featuresOwnerConn = bridge.cdpConnected(featuresOwner);
+		const featuresOwnerSession = await attachPage(bridge, ext, featuresOwner, featuresOwnerConn, 1);
+		const holder = new FakeCdpSocket();
+		const holderConn = bridge.cdpConnected(holder);
+		void (await attachPage(bridge, ext, holder, holderConn, 1));
+
+		const sendRootCommand = async (
+			connId: number,
+			sessionId: string,
+			method: string,
+			params?: Record<string, unknown>,
+		): Promise<void> => {
+			const id = ++msgSeq;
+			bridge.cdpMessage(connId, JSON.stringify({ id, sessionId, method, params }));
+			await flush();
+			ack(bridge, ext, "send");
+			await flush();
+		};
+
+		await sendRootCommand(mediaOwnerConn, mediaOwnerSession, "Emulation.setEmulatedMedia", { media: "print" });
+		await sendRootCommand(featuresOwnerConn, featuresOwnerSession, "Emulation.setEmulatedMedia", {
+			features: [{ name: "prefers-color-scheme", value: "dark" }],
+		});
+
+		bridge.cdpClosed(mediaOwnerConn);
+		await waitFor(() => ext.pending("send").length === 1, "first queued emulated-media cleanup");
+		expect(ext.pending("send")[0]).toMatchObject({
+			method: "Emulation.setEmulatedMedia",
+			params: {
+				media: "",
+				features: [{ name: "prefers-color-scheme", value: "dark" }],
+			},
+		});
+
+		bridge.cdpClosed(featuresOwnerConn);
+		ack(bridge, ext, "send");
+		await waitFor(() => ext.rpcs("send").length === 4, "coalesced empty emulated-media cleanup");
+		expect(ext.rpcs("send")[3]).toMatchObject({
+			method: "Emulation.setEmulatedMedia",
+			params: {
+				media: "",
+				features: [],
 			},
 		});
 	});
