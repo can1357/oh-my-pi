@@ -246,6 +246,31 @@ describe("hub process output monitoring", () => {
 		]);
 	});
 
+	it("rejects an attach when the process completes during subscription publication", async () => {
+		const publication = Promise.withResolvers<void>();
+		const harness = createHarness(undefined, publication.promise);
+		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(harness.client);
+
+		const monitoring = executeLaunch(harness.session, {
+			op: "monitor",
+			name: daemon.name,
+			progress: "wake",
+		});
+		await drainMicrotasks();
+		const subscription = harness.getSubscription();
+		const sink = harness.getOutputSink();
+		if (!subscription || !sink) throw new Error("Expected output subscription");
+		await sink({
+			event: "daemon-monitor-completed",
+			monitorId: subscription.id,
+			daemon: { ...daemon, state: "exited", pid: undefined, exitedAt: 3, exitCode: 0 },
+		});
+		publication.resolve();
+
+		await expect(monitoring).rejects.toThrow(`Cannot monitor ${daemon.name}: process is exited`);
+		expect(harness.registrationCount()).toBe(0);
+	});
+
 	it("validates a monitored start before advertising its subscription", async () => {
 		const harness = createHarness();
 		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(harness.client);
