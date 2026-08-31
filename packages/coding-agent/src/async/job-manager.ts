@@ -597,6 +597,7 @@ export class AsyncJobManager {
 		if (!job) return false;
 		if (filter?.ownerId && job.ownerId !== filter.ownerId) return false;
 		if (job.status !== "running") return false;
+		this.acknowledgeDeliveries([id]);
 		job.status = "cancelled";
 		job.abortController.abort();
 		this.#scheduleEviction(job);
@@ -770,9 +771,13 @@ export class AsyncJobManager {
 	}
 
 	#cancelJobs(filter?: AsyncJobFilter, reason?: unknown): void {
+		const jobs: ManagedAsyncJob[] = [];
 		for (const publicJob of this.getRunningJobs(filter)) {
 			const job = this.#jobs.get(publicJob.id);
-			if (job !== publicJob) continue;
+			if (job === publicJob) jobs.push(job);
+		}
+		this.acknowledgeDeliveries(jobs.map(job => job.id));
+		for (const job of jobs) {
 			job.status = "cancelled";
 			job.abortController.abort(reason);
 			this.#scheduleEviction(job);
