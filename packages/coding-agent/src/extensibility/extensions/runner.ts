@@ -1561,8 +1561,9 @@ export class ExtensionRunner {
 		event: ToolApprovalReviewEvent,
 		signal?: AbortSignal,
 	): Promise<ToolApprovalReviewResult> {
-		// The wrapper already owns the final execution input. Freeze the complete
-		// host event so one handler cannot alter what later handlers review.
+		// The wrapper owns the final execution input and hands this event a
+		// snapshot of it. Freeze the complete host event so one handler cannot
+		// alter what later handlers review.
 		let reviewedEvent: ToolApprovalReviewEvent;
 		try {
 			reviewedEvent = deepFreeze(event);

@@ -931,7 +931,7 @@ export interface ToolApprovalResolvedEvent {
  * Fired after final tool-input resolution for an eligible mode-derived prompt,
  * before the native approval selector. The review may approve the call
  * (skipping the ordinary prompt), escalate back to it, or deny the call. It
- * cannot rewrite the final immutable input that execution will receive.
+ * cannot rewrite the deeply immutable snapshot of the input under review.
  */
 export interface ToolApprovalReviewEvent {
 	readonly type: "tool_approval_review";

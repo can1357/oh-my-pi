@@ -61,7 +61,7 @@ Review runs only after all tool-input transformations and native policy resoluti
 
 For an eligible prompt, unanimous valid `approve` suppresses the native selector, `deny` rejects as an extension-review veto, and `escalate` preserves the ordinary native selector. Any uncertainty fails to `escalate`: no handlers, disagreement, malformed output, handler failure, timeout, or cancellation cannot approve. A valid deny takes precedence over other handler results.
 
-Handlers receive the immutable final input that execution will use. A handler cannot rewrite the invocation, and cancellation before execution is committed prevents execution after review.
+Handlers receive a deeply immutable snapshot of the final input that execution will use. A handler cannot rewrite the invocation, and cancellation before execution is committed prevents execution after review.
 
 See [Approval review](./extensions.md#approval-review) for the event API, consensus rule, and older-host capability detection.
 
