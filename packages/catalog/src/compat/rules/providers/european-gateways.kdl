@@ -1,0 +1,133 @@
+// Reviewed fallback metadata for the European OpenAI-compatible gateways.
+// Static seeds retain only identity and transport; buildModel applies these
+// facts equally to offline seeds and sparse discovery rows.
+
+provider "aki-io" {
+	models "kimi-k2.7-code-1100b" {
+		cost-patch {
+			input 0.86
+			output 3.0
+			cache-read 0.0
+			cache-write 0.0
+		}
+		limits-patch {
+			context-window 262144
+			max-tokens 262144
+		}
+		reasoning #true
+		supports-tools #true
+	}
+}
+
+provider "melious" {
+	models "gpt-oss-120b" {
+		cost-patch {
+			input 0.0
+			output 0.0
+			cache-read 0.0
+			cache-write 0.0
+		}
+		limits-patch {
+			context-window 131000
+			max-tokens 8192
+		}
+		reasoning #true
+	}
+}
+
+provider "nebius" {
+	models "Qwen/Qwen3-235B-A22B-Instruct-2507" {
+		cost-patch {
+			input 0.2
+			output 0.6
+			cache-read 0.0
+			cache-write 0.0
+		}
+		limits-patch {
+			context-window 262144
+			max-tokens 262144
+		}
+		supports-tools #true
+	}
+}
+
+provider "cortecs" {
+	models "gpt-oss-120b" {
+		cost-patch {
+			input 0.0
+			output 0.0
+			cache-read 0.0
+			cache-write 0.0
+		}
+		limits-patch {
+			context-window 131000
+			max-tokens 8192
+		}
+		reasoning #true
+	}
+}
+
+provider "eurouter" {
+	models "mistral-large-3" {
+		cost-patch {
+			input 0.0
+			output 0.0
+			cache-read 0.0
+			cache-write 0.0
+		}
+		input-modalities "text" "image"
+		limits-patch {
+			context-window 262144
+		}
+	}
+}
+
+provider "scaleway" {
+	models "glm-5.2" {
+		cost-patch {
+			input 0.0
+			output 0.0
+			cache-read 0.0
+			cache-write 0.0
+		}
+		limits-patch {
+			context-window 256000
+			max-tokens 16000
+		}
+		reasoning #true
+		supports-tools #true
+	}
+}
+
+provider "opper" {
+	models "mistral/devstral-2512" {
+		cost-patch {
+			input 0.0
+			output 0.0
+			cache-read 0.0
+			cache-write 0.0
+		}
+		limits-patch {
+			context-window 262144
+			max-tokens 262144
+		}
+		supports-tools #true
+	}
+}
+
+provider "ovhcloud" {
+	models "gpt-oss-120b" {
+		cost-patch {
+			input 0.09
+			output 0.47
+			cache-read 0.0
+			cache-write 0.0
+		}
+		limits-patch {
+			context-window 131072
+			max-tokens 131072
+		}
+		reasoning #true
+		supports-tools #true
+	}
+}

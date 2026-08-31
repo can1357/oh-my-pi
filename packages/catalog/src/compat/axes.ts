@@ -268,7 +268,9 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 		shape: "scalar",
 	},
 	priority: { key: "priority", set: "catalog", shape: "scalar" },
+	reasoning: { key: "reasoning", set: "catalog", shape: "scalar" },
 	"service-tier-cost": { key: "serviceTierCost", set: "catalog", shape: "object" },
+	"supports-tools": { key: "supportsTools", set: "catalog", shape: "scalar" },
 };
 
 /** Records applicable to each API family; used by `resolve.ts` when applying wire axes. */

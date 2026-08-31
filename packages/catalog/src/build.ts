@@ -70,12 +70,16 @@ function applyCatalogAssignments<TApi extends Api>(model: Model<TApi>, catalog: 
  * `input-modalities`) onto an upstream-sourced spec. Applied by
  * `buildModel` to every upstream-sourced spec; user-authored overrides are
  * recomposed after building by the override applicators, so explicit user
- * limits and pricing still win.
+ * limits, pricing, and capability values still win.
  */
 export function applyCatalogCorrections(
-	model: Pick<ModelSpec<Api>, "cost" | "contextWindow" | "maxTokens" | "input">,
+	model: Pick<ModelSpec<Api>, "cost" | "contextWindow" | "maxTokens" | "input" | "reasoning" | "supportsTools">,
 	catalog: Record<string, unknown>,
 ): void {
+	const reasoning = catalog.reasoning;
+	if (typeof reasoning === "boolean") model.reasoning = reasoning;
+	const supportsTools = catalog.supportsTools;
+	if (typeof supportsTools === "boolean") model.supportsTools = supportsTools;
 	const longContext = objectPayload(catalog.longContext);
 	if (longContext !== undefined) {
 		const inputThreshold = numberField(longContext, "inputThreshold");

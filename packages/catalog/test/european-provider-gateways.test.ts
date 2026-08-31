@@ -3,13 +3,13 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { getEnvApiKey } from "@oh-my-pi/pi-ai/stream";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { isExcludedModel } from "@oh-my-pi/pi-catalog/compat/behavior";
 import { createModelManager } from "@oh-my-pi/pi-catalog/model-manager";
 import { getBundledModels } from "@oh-my-pi/pi-catalog/models";
 import { DEFAULT_MODEL_PER_PROVIDER, PROVIDER_DESCRIPTORS } from "@oh-my-pi/pi-catalog/provider-models/descriptors";
 import {
 	akiIoModelManagerOptions,
 	cortecsModelManagerOptions,
-	EUROPEAN_GATEWAY_STATIC_MODELS,
 	eurouterModelManagerOptions,
 	getEuropeanGatewayStaticFallbackModels,
 	meliousModelManagerOptions,
@@ -107,6 +107,47 @@ afterEach(() => {
 });
 
 describe("European gateway provider catalog support", () => {
+	test("materializes European gateway fallback metadata from KDL policy", () => {
+		const fallback = (provider: "aki-io" | "eurouter" | "nebius", id: string) =>
+			buildModel({
+				id,
+				name: id,
+				api: "openai-completions",
+				provider,
+				baseUrl: "https://gateway.example/v1",
+				reasoning: false,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: null,
+				maxTokens: null,
+			});
+
+		expect(fallback("aki-io", "kimi-k2.7-code-1100b")).toMatchObject({
+			reasoning: true,
+			supportsTools: true,
+			cost: { input: 0.86, output: 3, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 262_144,
+			maxTokens: 262_144,
+		});
+		expect(fallback("eurouter", "mistral-large-3")).toMatchObject({
+			input: ["text", "image"],
+			contextWindow: 262_144,
+			maxTokens: null,
+		});
+		expect(fallback("nebius", "Qwen/Qwen3-235B-A22B-Instruct-2507")).toMatchObject({
+			supportsTools: true,
+			cost: { input: 0.2, output: 0.6, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 262_144,
+			maxTokens: 262_144,
+		});
+	});
+
+	test("declares European gateway non-chat roster exclusions in KDL", () => {
+		expect(isExcludedModel("eurouter", "Flux 1.1 Pro")).toBe(true);
+		expect(isExcludedModel("cortecs", "qwen3guard-gen-8b")).toBe(true);
+		expect(isExcludedModel("nebius", "Qwen/Qwen3-235B-A22B-Instruct-2507")).toBe(false);
+	});
+
 	for (const provider of providerCases) {
 		test(`registers ${provider.id} descriptor, default model, and env var`, () => {
 			Bun.env[provider.envVar] = `${provider.id}-test-key`;
@@ -230,26 +271,6 @@ describe("European gateway provider catalog support", () => {
 					input: flavor.input_price_per_million_tokens,
 					output: flavor.output_price_per_million_tokens,
 				}),
-			}),
-		);
-	});
-
-	test("preserves EURouter fallback vision metadata for the default model", () => {
-		expect(EUROPEAN_GATEWAY_STATIC_MODELS).toContainEqual(
-			expect.objectContaining({
-				id: "mistral-large-3",
-				provider: "eurouter",
-				input: ["text", "image"],
-			}),
-		);
-	});
-
-	test("advertises the EURouter fallback context limit", () => {
-		expect(EUROPEAN_GATEWAY_STATIC_MODELS).toContainEqual(
-			expect.objectContaining({
-				id: "mistral-large-3",
-				provider: "eurouter",
-				contextWindow: 262_144,
 			}),
 		);
 	});

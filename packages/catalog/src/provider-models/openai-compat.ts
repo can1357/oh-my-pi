@@ -1,5 +1,6 @@
 import { USER_AGENT } from "@oh-my-pi/pi-utils";
 import * as logger from "@oh-my-pi/pi-utils/logger";
+import { applyCatalogCorrections } from "../build";
 import { toClinePassPublicModelId } from "../cline-pass-model-id";
 import {
 	apiRouteExactModelIds,
@@ -636,7 +637,7 @@ const EUROPEAN_GATEWAY_BASE_URLS: Record<EuropeanGatewayProviderId, string> = {
 };
 const NEBIUS_MODELS_PATH = "/models?verbose=true";
 
-const EUROPEAN_GATEWAY_ZERO_COST = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } as const;
+const EUROPEAN_GATEWAY_NEUTRAL_COST = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } as const;
 
 export const EUROPEAN_GATEWAY_STATIC_MODELS: readonly ModelSpec<"openai-completions">[] = [
 	{
@@ -645,12 +646,11 @@ export const EUROPEAN_GATEWAY_STATIC_MODELS: readonly ModelSpec<"openai-completi
 		api: "openai-completions",
 		provider: "aki-io",
 		baseUrl: EUROPEAN_GATEWAY_BASE_URLS["aki-io"],
-		reasoning: true,
+		reasoning: false,
 		input: ["text"],
-		cost: { input: 0.86, output: 3, cacheRead: 0, cacheWrite: 0 },
-		contextWindow: 262_144,
-		maxTokens: 262_144,
-		supportsTools: true,
+		cost: EUROPEAN_GATEWAY_NEUTRAL_COST,
+		contextWindow: null,
+		maxTokens: null,
 	},
 	{
 		id: "gpt-oss-120b",
@@ -658,11 +658,11 @@ export const EUROPEAN_GATEWAY_STATIC_MODELS: readonly ModelSpec<"openai-completi
 		api: "openai-completions",
 		provider: "melious",
 		baseUrl: EUROPEAN_GATEWAY_BASE_URLS.melious,
-		reasoning: true,
+		reasoning: false,
 		input: ["text"],
-		cost: EUROPEAN_GATEWAY_ZERO_COST,
-		contextWindow: 131_000,
-		maxTokens: 8192,
+		cost: EUROPEAN_GATEWAY_NEUTRAL_COST,
+		contextWindow: null,
+		maxTokens: null,
 	},
 	{
 		id: "Qwen/Qwen3-235B-A22B-Instruct-2507",
@@ -672,10 +672,9 @@ export const EUROPEAN_GATEWAY_STATIC_MODELS: readonly ModelSpec<"openai-completi
 		baseUrl: EUROPEAN_GATEWAY_BASE_URLS.nebius,
 		reasoning: false,
 		input: ["text"],
-		cost: { input: 0.2, output: 0.6, cacheRead: 0, cacheWrite: 0 },
-		contextWindow: 262_144,
-		maxTokens: 262_144,
-		supportsTools: true,
+		cost: EUROPEAN_GATEWAY_NEUTRAL_COST,
+		contextWindow: null,
+		maxTokens: null,
 	},
 	{
 		id: "gpt-oss-120b",
@@ -683,11 +682,11 @@ export const EUROPEAN_GATEWAY_STATIC_MODELS: readonly ModelSpec<"openai-completi
 		api: "openai-completions",
 		provider: "cortecs",
 		baseUrl: EUROPEAN_GATEWAY_BASE_URLS.cortecs,
-		reasoning: true,
+		reasoning: false,
 		input: ["text"],
-		cost: EUROPEAN_GATEWAY_ZERO_COST,
-		contextWindow: 131_000,
-		maxTokens: 8192,
+		cost: EUROPEAN_GATEWAY_NEUTRAL_COST,
+		contextWindow: null,
+		maxTokens: null,
 	},
 	{
 		id: "mistral-large-3",
@@ -696,9 +695,9 @@ export const EUROPEAN_GATEWAY_STATIC_MODELS: readonly ModelSpec<"openai-completi
 		provider: "eurouter",
 		baseUrl: EUROPEAN_GATEWAY_BASE_URLS.eurouter,
 		reasoning: false,
-		input: ["text", "image"],
-		cost: EUROPEAN_GATEWAY_ZERO_COST,
-		contextWindow: 262_144,
+		input: ["text"],
+		cost: EUROPEAN_GATEWAY_NEUTRAL_COST,
+		contextWindow: null,
 		maxTokens: null,
 	},
 	{
@@ -707,12 +706,11 @@ export const EUROPEAN_GATEWAY_STATIC_MODELS: readonly ModelSpec<"openai-completi
 		api: "openai-completions",
 		provider: "scaleway",
 		baseUrl: EUROPEAN_GATEWAY_BASE_URLS.scaleway,
-		reasoning: true,
+		reasoning: false,
 		input: ["text"],
-		cost: EUROPEAN_GATEWAY_ZERO_COST,
-		contextWindow: 256_000,
-		maxTokens: 16_000,
-		supportsTools: true,
+		cost: EUROPEAN_GATEWAY_NEUTRAL_COST,
+		contextWindow: null,
+		maxTokens: null,
 	},
 	{
 		id: "mistral/devstral-2512",
@@ -722,10 +720,9 @@ export const EUROPEAN_GATEWAY_STATIC_MODELS: readonly ModelSpec<"openai-completi
 		baseUrl: EUROPEAN_GATEWAY_BASE_URLS.opper,
 		reasoning: false,
 		input: ["text"],
-		cost: EUROPEAN_GATEWAY_ZERO_COST,
-		contextWindow: 262_144,
-		maxTokens: 262_144,
-		supportsTools: true,
+		cost: EUROPEAN_GATEWAY_NEUTRAL_COST,
+		contextWindow: null,
+		maxTokens: null,
 	},
 	{
 		id: "gpt-oss-120b",
@@ -733,12 +730,11 @@ export const EUROPEAN_GATEWAY_STATIC_MODELS: readonly ModelSpec<"openai-completi
 		api: "openai-completions",
 		provider: "ovhcloud",
 		baseUrl: EUROPEAN_GATEWAY_BASE_URLS.ovhcloud,
-		reasoning: true,
+		reasoning: false,
 		input: ["text"],
-		cost: { input: 0.09, output: 0.47, cacheRead: 0, cacheWrite: 0 },
-		contextWindow: 131_072,
-		maxTokens: 131_072,
-		supportsTools: true,
+		cost: EUROPEAN_GATEWAY_NEUTRAL_COST,
+		contextWindow: null,
+		maxTokens: null,
 	},
 ];
 
@@ -848,21 +844,6 @@ function toGatewayInputCapabilities(
 	return getEuropeanGatewayKnownInput(model) ?? fallback;
 }
 
-const EUROPEAN_GATEWAY_NON_CHAT_ID_PATTERN =
-	/(?:^|[\s/:._-])(?:audio|bge|clip|embed|embedding|embeddings|guard|i2i|i2v|image|moderation|rerank|reranker|safeguard|speech|stt|t2i|t2v|transcribe|tts|video|whisper)(?:$|[\s/:._-])/i;
-
-const EUROPEAN_GATEWAY_NON_CHAT_ID_SUBSTRINGS = [
-	"dall-e",
-	"dalle",
-	"flux",
-	"imagen",
-	"midjourney",
-	"qwen3guard",
-	"sora",
-	"stable-diffusion",
-	"veo",
-] as const;
-
 function getGatewayOutputModalities(entry: OpenAICompatibleModelRecord): string[] {
 	const architecture = isRecord(entry.architecture) ? entry.architecture : undefined;
 	return toStringArray(architecture?.output_modalities ?? entry.output_modalities).map(modality =>
@@ -906,10 +887,7 @@ function isLikelyEuropeanGatewayChatModel(entry: OpenAICompatibleModelRecord, mo
 		return false;
 	}
 	const normalized = `${model.id} ${model.name}`.trim().toLowerCase();
-	return (
-		(getGatewayOutputModalities(entry).includes("text") || !EUROPEAN_GATEWAY_NON_CHAT_ID_PATTERN.test(normalized)) &&
-		!EUROPEAN_GATEWAY_NON_CHAT_ID_SUBSTRINGS.some(token => normalized.includes(token))
-	);
+	return getGatewayOutputModalities(entry).includes("text") || !isExcludedModel(model.provider, normalized);
 }
 
 function hasEuropeanGatewayReasoningIdentity(model: ModelSpec<Api>): boolean {
@@ -964,7 +942,7 @@ function mapEuropeanGatewayModel(
 	const topProvider = isRecord(entry.top_provider) ? entry.top_provider : undefined;
 	const supportsTools = getEuropeanGatewayToolCapability(entry);
 	const supportsReasoning = getEuropeanGatewayReasoningCapability(entry);
-	return {
+	const mapped: ModelSpec<"openai-completions"> = {
 		...model,
 		name: toModelName(entry.name, model.name),
 		reasoning:
@@ -1006,6 +984,8 @@ function mapEuropeanGatewayModel(
 		),
 		...(supportsTools !== undefined ? { supportsTools } : {}),
 	};
+	applyCatalogCorrections(mapped, resolveModelPolicy(mapped).catalog);
+	return mapped;
 }
 
 function getEuropeanGatewayStaticModels(
