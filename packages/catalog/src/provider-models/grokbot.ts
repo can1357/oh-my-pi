@@ -44,10 +44,12 @@ export function buildGrokbotStaticSeed(baseUrl = GROKBOT_BACKEND): ModelSpec<"gr
 		provider: "grokbot",
 		baseUrl,
 		reasoning: seed.reasoning,
-		input: ["text", "image"] as ("text" | "image")[],
+		// Neutral offline fallback: live AvailableModels owns modality/limits.
+		// Reviewed floors/ladders come from `providers/grokbot.kdl` via `buildModel`.
+		input: ["text"] as ("text" | "image")[],
 		cost: COST,
-		contextWindow: 200_000,
-		maxTokens: 64_000,
+		contextWindow: null,
+		maxTokens: null,
 		supportsTools: true,
 		sandMaxMode: false,
 	}));

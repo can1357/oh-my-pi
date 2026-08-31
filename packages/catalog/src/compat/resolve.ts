@@ -1122,6 +1122,15 @@ function resolveThinkingPolicy<TApi extends Api>(
 	if (spec.thinking && Array.isArray(spec.thinking.efforts) && spec.thinking.efforts.length > 0) {
 		return fillExplicitThinking(spec, facts, compat, spec.thinking, rule);
 	}
+	// Grokbot AvailableModels marks unrecognized-only effort vocabularies with an
+	// explicit empty ladder; preserve-authored-thinking must not backfill KDL.
+	if (
+		axes.catalog.preserveAuthoredThinking === true &&
+		spec.thinking !== undefined &&
+		spec.thinking.efforts.length === 0
+	) {
+		return undefined;
+	}
 	if (compat !== undefined && "trustExplicitThinkingOnly" in compat && compat.trustExplicitThinkingOnly === true) {
 		return undefined;
 	}

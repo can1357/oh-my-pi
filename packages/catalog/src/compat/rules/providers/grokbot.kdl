@@ -12,8 +12,8 @@ provider "grokbot" {
 	models "sand-default" "sand-cua" "sand-automation" "default" "auto" {
 		context-window-floor 200000
 	}
-	// Static offline seed for grok-4.6: sand effort dial + wire params.
-	// Live AvailableModels may narrow thinking / replace sandParameterIds.
+	// Static offline seed for grok-4.6: sand effort dial + wire params when no
+	// live ladder was supplied (neutral seeds / unrecognized-only discovery).
 	models "grok-4.6*" {
 		thinking-mode "effort"
 		thinking-efforts "low" "medium" "high" "xhigh"

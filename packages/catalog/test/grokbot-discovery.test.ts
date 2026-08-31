@@ -235,7 +235,7 @@ describe("grokbot AvailableModels normalize", () => {
 		const models = normalizeGrokbotAvailableModels(rows!, "https://api2.cursor.sh");
 		const adaptive = models.find(m => m.id === "adaptive-only");
 		expect(adaptive?.sandParameterIds).toEqual(["effort"]);
-		expect(adaptive?.thinking).toBeUndefined();
+		expect(adaptive?.thinking).toEqual({ mode: "effort", efforts: [] });
 		const emptyValues = models.find(m => m.id === "effort-param-no-values");
 		expect(emptyValues?.sandParameterIds).toEqual(["effort"]);
 		expect([...((emptyValues?.thinking?.efforts as readonly string[] | undefined) ?? [])]).toEqual([

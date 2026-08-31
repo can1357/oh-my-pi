@@ -174,9 +174,14 @@ function resolveGrokbotContextWindow(row: GrokbotAvailableModel, sandMaxMode: bo
 
 function toGrokbotModelSpec(row: GrokbotAvailableModel, baseUrl: string): ModelSpec<"grokbot-sand"> {
 	const parameterIds = collectParameterIds(row);
-	const efforts = collectEffortValues(row, parameterIds);
-	const reasoning = row.supportsThinking === true || efforts.length > 0;
-	const thinking = efforts.length > 0 ? ({ mode: "effort", efforts } satisfies ThinkingConfig) : undefined;
+	const { efforts, unrecognizedEffortOnly } = collectEffortValues(row, parameterIds);
+	const reasoning = row.supportsThinking === true || efforts.length > 0 || unrecognizedEffortOnly;
+	const thinking =
+		efforts.length > 0
+			? ({ mode: "effort", efforts } satisfies ThinkingConfig)
+			: unrecognizedEffortOnly
+				? ({ mode: "effort", efforts: [] } satisfies ThinkingConfig)
+				: undefined;
 	const variantLegacySlugs = (row.variants ?? [])
 		.map(v => v.legacySlug?.trim())
 		.filter((slug): slug is string => Boolean(slug));
@@ -218,13 +223,16 @@ function collectParameterIds(row: GrokbotAvailableModel): string[] {
 	return uniqueStrings(fromVariants);
 }
 
-function collectEffortValues(row: GrokbotAvailableModel, parameterIds: readonly string[]): Effort[] {
+function collectEffortValues(
+	row: GrokbotAvailableModel,
+	parameterIds: readonly string[],
+): { efforts: Effort[]; unrecognizedEffortOnly: boolean } {
 	const effortParam = parameterIds.includes("effort")
 		? "effort"
 		: parameterIds.includes("reasoning")
 			? "reasoning"
 			: undefined;
-	if (!effortParam) return [];
+	if (!effortParam) return { efforts: [], unrecognizedEffortOnly: false };
 
 	const values = new Set<string>();
 	for (const def of row.parameterDefinitions ?? []) {
@@ -251,9 +259,12 @@ function collectEffortValues(row: GrokbotAvailableModel, parameterIds: readonly 
 		values.size === 0 &&
 		(parameterIds.includes("effort") || parameterIds.includes("reasoning"))
 	) {
-		return [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh];
+		return {
+			efforts: [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh],
+			unrecognizedEffortOnly: false,
+		};
 	}
-	return ordered;
+	return { efforts: ordered, unrecognizedEffortOnly: ordered.length === 0 && values.size > 0 };
 }
 
 function uniqueStrings(values: readonly string[]): string[] {

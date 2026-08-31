@@ -863,6 +863,23 @@ describe("Grok Bot generated thinking policy", () => {
 		expect(live.sandParameterIds).toEqual(["effort"]);
 	});
 
+	it("does not backfill grok-4.6 KDL ladder when live discovery marked unrecognized efforts", () => {
+		const live = buildModel({
+			id: "grok-4.6",
+			name: "Grok 4.6",
+			api: "grokbot-sand",
+			provider: "grokbot",
+			baseUrl: "https://api2.cursor.sh",
+			reasoning: true,
+			thinking: { mode: "effort", efforts: [] },
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: null,
+			maxTokens: null,
+		});
+		expect(live.thinking).toBeUndefined();
+	});
+
 	it("applies reviewed context-window-floor to known routers when discovery left limits unset", () => {
 		const router = buildModel({
 			id: "sand-default",
