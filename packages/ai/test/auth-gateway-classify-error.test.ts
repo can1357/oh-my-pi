@@ -257,4 +257,31 @@ describe("classifyGatewayError authoritative-status precedence", () => {
 		expect(c.owner).toBe("policy");
 		expect(c.disposition).toBe("policy_terminal");
 	});
+
+	it("does not rebrand an authoritative 5xx as gateway_terminal from body wording alone", () => {
+		const c = classifyGatewayError(
+			Object.assign(new Error("HTTP 503: internal invariant reported by upstream"), { status: 503 }),
+		);
+		expect(c.status).toBe(503);
+		expect(c.owner).toBe("provider");
+		expect(c.disposition).toBe("provider_unavailable");
+		expect(c.disposition).not.toBe("gateway_terminal");
+	});
+
+	it("keeps ordinary 429 throttles in the provider lane", () => {
+		const c = classifyGatewayError(Object.assign(new Error("Too many requests"), { status: 429 }));
+		expect(c.owner).toBe("provider");
+		expect(c.disposition).toBe("provider_transient");
+		expect(c.disposition).not.toBe("credential_transient");
+		expect(c.disposition).not.toBe("credential_quota");
+	});
+
+	it("does not assign credential_quota for informative non-billing 402 bodies", () => {
+		const c = classifyGatewayError(
+			Object.assign(new Error("A subscription is required for this endpoint"), { status: 402 }),
+		);
+		expect(c.disposition).not.toBe("credential_quota");
+		expect(c.owner).toBe("provider");
+		expect(c.disposition).toBe("provider_transient");
+	});
 });
