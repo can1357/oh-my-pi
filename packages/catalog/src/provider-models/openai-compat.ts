@@ -942,6 +942,15 @@ function mapEuropeanGatewayModel(
 	const topProvider = isRecord(entry.top_provider) ? entry.top_provider : undefined;
 	const supportsTools = getEuropeanGatewayToolCapability(entry);
 	const supportsReasoning = getEuropeanGatewayReasoningCapability(entry);
+	const inputCost = toGatewayCostPerMillion(pricing?.prompt ?? pricing?.input_token);
+	const outputCost = toGatewayCostPerMillion(pricing?.completion ?? pricing?.output_token);
+	const cacheReadCost = toGatewayCostPerMillion(pricing?.input_cache_read ?? pricing?.cache_read_cost);
+	const cacheWriteCost = toGatewayCostPerMillion(pricing?.input_cache_write ?? pricing?.cache_write_cost);
+	const liveCostFields: (keyof TokenCost)[] = [];
+	if (inputCost !== undefined) liveCostFields.push("input");
+	if (outputCost !== undefined) liveCostFields.push("output");
+	if (cacheReadCost !== undefined) liveCostFields.push("cacheRead");
+	if (cacheWriteCost !== undefined) liveCostFields.push("cacheWrite");
 	const mapped: ModelSpec<"openai-completions"> = {
 		...model,
 		name: toModelName(entry.name, model.name),
@@ -950,27 +959,14 @@ function mapEuropeanGatewayModel(
 			(model.reasoning || hasEuropeanGatewayReasoningIdentity(model) || hasEuropeanGatewayKnownReasoning(model)),
 		input: toGatewayInputCapabilities(entry, model, model.input),
 		cost: {
-			input:
-				toGatewayCostPerMillion(pricing?.prompt ?? pricing?.input_token) ??
-				reference?.cost.input ??
-				knownReference?.cost.input ??
-				model.cost.input,
-			output:
-				toGatewayCostPerMillion(pricing?.completion ?? pricing?.output_token) ??
-				reference?.cost.output ??
-				knownReference?.cost.output ??
-				model.cost.output,
+			input: inputCost ?? reference?.cost.input ?? knownReference?.cost.input ?? model.cost.input,
+			output: outputCost ?? reference?.cost.output ?? knownReference?.cost.output ?? model.cost.output,
 			cacheRead:
-				toGatewayCostPerMillion(pricing?.input_cache_read ?? pricing?.cache_read_cost) ??
-				reference?.cost.cacheRead ??
-				knownReference?.cost.cacheRead ??
-				model.cost.cacheRead,
+				cacheReadCost ?? reference?.cost.cacheRead ?? knownReference?.cost.cacheRead ?? model.cost.cacheRead,
 			cacheWrite:
-				toGatewayCostPerMillion(pricing?.input_cache_write ?? pricing?.cache_write_cost) ??
-				reference?.cost.cacheWrite ??
-				knownReference?.cost.cacheWrite ??
-				model.cost.cacheWrite,
+				cacheWriteCost ?? reference?.cost.cacheWrite ?? knownReference?.cost.cacheWrite ?? model.cost.cacheWrite,
 		},
+		...(liveCostFields.length > 0 && { catalogFallback: { liveCostFields } }),
 		contextWindow: toPositiveNumber(
 			entry.context_length,
 			toPositiveNumber(

@@ -1,7 +1,8 @@
 // Reviewed fallback metadata for the European OpenAI-compatible gateways.
 // Static seeds retain only identity and transport; buildModel applies these
-// facts equally to offline seeds and sparse discovery rows. Pricing and tool
-// capability rules are fallbacks so explicit provider metadata remains authoritative.
+// facts equally to offline seeds and sparse discovery rows. Pricing, limits,
+// and tool capability rules are fallbacks so explicit provider metadata remains
+// authoritative.
 
 provider "aki-io" {
 	models "kimi-k2.7-code-1100b" {
@@ -11,7 +12,7 @@ provider "aki-io" {
 			cache-read 0.0
 			cache-write 0.0
 		}
-		limits-patch {
+		limits-fallback {
 			context-window 262144
 			max-tokens 262144
 		}
@@ -28,7 +29,7 @@ provider "melious" {
 			cache-read 0.0
 			cache-write 0.0
 		}
-		limits-patch {
+		limits-fallback {
 			context-window 131000
 			max-tokens 8192
 		}
@@ -44,7 +45,7 @@ provider "nebius" {
 			cache-read 0.0
 			cache-write 0.0
 		}
-		limits-patch {
+		limits-fallback {
 			context-window 262144
 			max-tokens 262144
 		}
@@ -60,7 +61,7 @@ provider "cortecs" {
 			cache-read 0.0
 			cache-write 0.0
 		}
-		limits-patch {
+		limits-fallback {
 			context-window 131000
 			max-tokens 8192
 		}
@@ -77,7 +78,7 @@ provider "eurouter" {
 			cache-write 0.0
 		}
 		input-modalities "text" "image"
-		limits-patch {
+		limits-fallback {
 			context-window 262144
 		}
 	}
@@ -91,7 +92,7 @@ provider "scaleway" {
 			cache-read 0.0
 			cache-write 0.0
 		}
-		limits-patch {
+		limits-fallback {
 			context-window 256000
 			max-tokens 16000
 		}
@@ -108,7 +109,7 @@ provider "opper" {
 			cache-read 0.0
 			cache-write 0.0
 		}
-		limits-patch {
+		limits-fallback {
 			context-window 262144
 			max-tokens 262144
 		}
@@ -124,7 +125,7 @@ provider "ovhcloud" {
 			cache-read 0.0
 			cache-write 0.0
 		}
-		limits-patch {
+		limits-fallback {
 			context-window 131072
 			max-tokens 131072
 		}

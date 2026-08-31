@@ -18,7 +18,7 @@ import {
 	ovhcloudModelManagerOptions,
 	scalewayModelManagerOptions,
 } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
-import type { FetchImpl } from "@oh-my-pi/pi-catalog/types";
+import type { FetchImpl, ModelSpec } from "@oh-my-pi/pi-catalog/types";
 import nebiusModelsInfoFixture from "./fixtures/nebius-models-info-2026-08-13.json";
 
 const providerCases = [
@@ -534,6 +534,54 @@ describe("European gateway provider catalog support", () => {
 			},
 			supportsTools: false,
 		});
+	});
+
+	test("preserves explicit zero gateway prices over catalog fallbacks", async () => {
+		const fetchMock: FetchImpl = vi.fn(async () => {
+			return Response.json({
+				data: [
+					{
+						id: "Qwen/Qwen3-235B-A22B-Instruct-2507",
+						name: "Qwen3 235B A22B Instruct 2507",
+						pricing: { prompt: "0", completion: "0" },
+					},
+				],
+			});
+		});
+
+		const models = await nebiusModelManagerOptions({
+			apiKey: "nebius-test-key",
+			fetch: fetchMock,
+		}).fetchDynamicModels?.();
+
+		const model = models?.[0];
+		if (!model) throw new Error("Expected Nebius discovery result");
+		expect(model.cost).toMatchObject({ input: 0, output: 0 });
+
+		const cachedSpec = JSON.parse(JSON.stringify(model)) as ModelSpec<"openai-completions">;
+		expect(buildModel(cachedSpec).cost).toMatchObject({ input: 0, output: 0 });
+	});
+
+	test("preserves live gateway limits over catalog fallbacks", async () => {
+		const fetchMock: FetchImpl = vi.fn(async () => {
+			return Response.json({
+				data: [
+					{
+						id: "kimi-k2.7-code-1100b",
+						name: "Kimi K2.7 Code 1100B",
+						context_length: 32_768,
+						max_completion_tokens: 4_096,
+					},
+				],
+			});
+		});
+
+		const models = await akiIoModelManagerOptions({
+			apiKey: "aki-test-key",
+			fetch: fetchMock,
+		}).fetchDynamicModels?.();
+
+		expect(models?.[0]).toMatchObject({ contextWindow: 32_768, maxTokens: 4_096 });
 	});
 
 	test("preserves known reasoning capability for reordered Claude gateway ids", async () => {

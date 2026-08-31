@@ -1106,6 +1106,13 @@ export interface Model<TApi extends Api = Api> {
 	/** Cursor `max_mode` request flag returned by `GetUsableModels` for premium models that require max mode. */
 	cursorMaxMode?: boolean;
 	cost: ModelCost;
+	/**
+	 * Discovery-field provenance retained in cached model specs so catalog
+	 * fallbacks do not replace explicit provider values such as a zero price.
+	 */
+	catalogFallback?: {
+		liveCostFields?: readonly (keyof TokenCost)[];
+	};
 	/** Premium Copilot requests charged per user-initiated request (defaults to 1). */
 	premiumMultiplier?: number;
 	contextWindow: number | null;

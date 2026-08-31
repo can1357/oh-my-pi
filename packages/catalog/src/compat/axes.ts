@@ -260,6 +260,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"cost-patch": { key: "costPatch", set: "catalog", shape: "object" },
 	"edit-revision": { key: "editRevision", set: "catalog", shape: "scalar" },
 	"input-modalities": { key: "inputModalities", set: "catalog", shape: "array", values: ["text", "image"] },
+	"limits-fallback": { key: "limitsFallback", set: "catalog", shape: "object" },
 	"limits-patch": { key: "limitsPatch", set: "catalog", shape: "object" },
 	"long-context-cost": { key: "longContext", set: "catalog", shape: "object" },
 	"long-usage-limit-fallback": { key: "longUsageLimitFallback", set: "catalog", shape: "scalar" },

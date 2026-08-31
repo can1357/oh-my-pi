@@ -69,14 +69,17 @@ function applyCatalogAssignments<TApi extends Api>(model: Model<TApi>, catalog: 
 /**
  * Applies reviewed catalog-data value corrections (`cost-patch`,
  * `limits-patch`, `long-context-cost`, `context-window-floor`,
- * `input-modalities`) and fallbacks (`cost-fallback`,
+ * `input-modalities`) and fallbacks (`cost-fallback`, `limits-fallback`,
  * `supports-tools-fallback`) onto an upstream-sourced spec. Applied by
  * `buildModel` to every upstream-sourced spec; user-authored overrides are
  * recomposed after building by the override applicators, so explicit user
  * limits, pricing, and capability values still win.
  */
 export function applyCatalogCorrections(
-	model: Pick<ModelSpec<Api>, "cost" | "contextWindow" | "maxTokens" | "input" | "reasoning" | "supportsTools">,
+	model: Pick<
+		ModelSpec<Api>,
+		"cost" | "contextWindow" | "maxTokens" | "input" | "reasoning" | "supportsTools" | "catalogFallback"
+	>,
 	catalog: Record<string, unknown>,
 ): void {
 	const reasoning = catalog.reasoning;
@@ -137,13 +140,40 @@ export function applyCatalogCorrections(
 	if (costFallback !== undefined) {
 		model.cost = { ...model.cost };
 		const input = numberField(costFallback, "input");
-		if (input !== undefined && model.cost.input === 0) model.cost.input = input;
+		if (input !== undefined && model.cost.input === 0 && !model.catalogFallback?.liveCostFields?.includes("input")) {
+			model.cost.input = input;
+		}
 		const output = numberField(costFallback, "output");
-		if (output !== undefined && model.cost.output === 0) model.cost.output = output;
+		if (
+			output !== undefined &&
+			model.cost.output === 0 &&
+			!model.catalogFallback?.liveCostFields?.includes("output")
+		) {
+			model.cost.output = output;
+		}
 		const cacheRead = numberField(costFallback, "cache-read");
-		if (cacheRead !== undefined && model.cost.cacheRead === 0) model.cost.cacheRead = cacheRead;
+		if (
+			cacheRead !== undefined &&
+			model.cost.cacheRead === 0 &&
+			!model.catalogFallback?.liveCostFields?.includes("cacheRead")
+		) {
+			model.cost.cacheRead = cacheRead;
+		}
 		const cacheWrite = numberField(costFallback, "cache-write");
-		if (cacheWrite !== undefined && model.cost.cacheWrite === 0) model.cost.cacheWrite = cacheWrite;
+		if (
+			cacheWrite !== undefined &&
+			model.cost.cacheWrite === 0 &&
+			!model.catalogFallback?.liveCostFields?.includes("cacheWrite")
+		) {
+			model.cost.cacheWrite = cacheWrite;
+		}
+	}
+	const limitsFallback = objectPayload(catalog.limitsFallback);
+	if (limitsFallback !== undefined) {
+		const contextWindow = numberField(limitsFallback, "context-window");
+		if (contextWindow !== undefined && model.contextWindow === null) model.contextWindow = contextWindow;
+		const maxTokens = numberField(limitsFallback, "max-tokens");
+		if (maxTokens !== undefined && model.maxTokens === null) model.maxTokens = maxTokens;
 	}
 	const limitsPatch = objectPayload(catalog.limitsPatch);
 	if (limitsPatch !== undefined) {
