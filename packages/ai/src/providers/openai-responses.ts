@@ -666,7 +666,15 @@ const streamOpenAIResponsesOnce = (
 								chainState?.canAppend ? chainState.lastParams?.input : undefined,
 							);
 							const fallbackParams = fallbackBuilt.params;
-							if (chainState && !chainState.disabled) fallbackParams.store = true;
+							// Rebuild starts from store:false; reapply explicit client store /
+							// continuation and internal chain requirements onto the retry.
+							if (
+								(chainState && !chainState.disabled) ||
+								options?.previousResponseId ||
+								options?.store === true
+							) {
+								fallbackParams.store = true;
+							}
 							const fallbackClientPreviousResponseId = options?.previousResponseId;
 							let fallbackChained: OpenAIResponsesChainedParams = fallbackClientPreviousResponseId
 								? {
