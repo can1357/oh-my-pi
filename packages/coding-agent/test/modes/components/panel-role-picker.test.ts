@@ -41,7 +41,6 @@ describe("PanelRolePickerComponent", () => {
 
 	afterEach(() => {
 		setKeybindings(KeybindingsManager.inMemory());
-		vi.restoreAllMocks();
 	});
 
 	it("keeps configured rows stable and marks and preselects the default role", () => {
