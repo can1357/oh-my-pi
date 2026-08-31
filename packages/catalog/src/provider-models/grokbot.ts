@@ -50,7 +50,7 @@ export function buildGrokbotStaticSeed(baseUrl = GROKBOT_BACKEND): ModelSpec<"gr
 		cost: COST,
 		contextWindow: null,
 		maxTokens: null,
-		supportsTools: true,
+		// Tool support is reviewed via KDL (`supports-tools`); do not invent true here.
 		sandMaxMode: false,
 	}));
 }

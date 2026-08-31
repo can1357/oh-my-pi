@@ -4,7 +4,10 @@
  * Live probes (2026-08-31): explicit `claude-*` + omp field-2 tools → HTTP 400.
  * Product routes coding tasks through sand-automation + generalPurpose with
  * PascalCase field-2 tools and jsonSchema envelopes (see product-wire.ts).
+ *
+ * Anthropic identity comes from catalog taxonomy (`classifyModel`), not id spelling.
  */
+import { classifyModel } from "@oh-my-pi/pi-catalog/compat/taxonomy";
 import type { GrokbotRequestedModel } from "./model-request";
 import { resolveGrokbotRequestedModel } from "./model-request";
 import {
@@ -21,9 +24,10 @@ export type AnthropicSandToolsWire =
 	| "parent-chat"
 	| "auto";
 
-export function isAnthropicSandModelId(modelId: string): boolean {
-	const id = modelId.trim().toLowerCase();
-	return id.startsWith("claude-") || id.startsWith("claude_");
+export function isAnthropicSandModelId(modelId: string, provider = "grokbot"): boolean {
+	const id = modelId.trim();
+	if (!id) return false;
+	return classifyModel(provider, id, { lenient: true }).class === "anthropic";
 }
 
 export type AnthropicSandWireResolveContext = {

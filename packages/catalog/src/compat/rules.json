@@ -8233,6 +8233,21 @@
 				}
 			},
 			{
+				"source": "providers/grokbot.kdl:27",
+				"providers": [
+					"grokbot"
+				],
+				"models": [
+					{
+						"kind": "glob",
+						"value": "grok-4.5*"
+					}
+				],
+				"catalog": {
+					"supportsTools": false
+				}
+			},
+			{
 				"source": "providers/grokbot.kdl:5",
 				"providers": [
 					"grokbot"

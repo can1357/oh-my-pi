@@ -185,6 +185,8 @@ describe("grokbot AvailableModels normalize", () => {
 		expect(textOnlyOmitted?.contextWindow).toBeNull();
 		expect(models.find(m => m.id === "sand-default")?.maxTokens).toBeNull();
 		expect(models.find(m => m.id === "sand-default")?.contextWindow).toBeNull();
+		expect(models.find(m => m.id === "sand-default")?.supportsTools).toBeUndefined();
+		expect(grok?.supportsTools).toBeUndefined();
 
 		const sol = models.find(m => m.id === "gpt-5.6-sol");
 		expect(sol?.sandParameterIds).toEqual(["context", "reasoning", "fast"]);
@@ -234,6 +236,41 @@ describe("grokbot AvailableModels normalize", () => {
 		const sandDefault = models.find(m => m.id === "sand-default");
 		expect(sandDefault?.name).toBe("Sand Default");
 		expect(sandDefault?.aliases).toBeUndefined();
+	});
+
+	test("recomputes contextWindow for legacy max-mode variants", () => {
+		const rows = decodeGrokbotAvailableModelsResponse({
+			models: [
+				{
+					name: "dual-mode-model",
+					clientDisplayName: "Dual Mode",
+					supportsThinking: true,
+					supportsMaxMode: true,
+					supportsNonMaxMode: true,
+					contextTokenLimit: 200_000,
+					contextTokenLimitForMaxMode: 1_000_000,
+					parameterDefinitions: [{ id: "effort" }],
+					variants: [
+						{
+							isDefaultMaxConfig: true,
+							legacySlug: "dual-mode-max",
+							parameterValues: [{ id: "effort", value: "high" }],
+						},
+						{
+							isDefaultNonMaxConfig: true,
+							legacySlug: "dual-mode-normal",
+							parameterValues: [{ id: "effort", value: "low" }],
+						},
+					],
+				},
+			],
+		});
+		expect(rows).not.toBeNull();
+		const models = normalizeGrokbotAvailableModels(rows!);
+		expect(models.find(m => m.id === "dual-mode-max")?.contextWindow).toBe(1_000_000);
+		expect(models.find(m => m.id === "dual-mode-max")?.sandMaxMode).toBe(true);
+		expect(models.find(m => m.id === "dual-mode-normal")?.contextWindow).toBe(200_000);
+		expect(models.find(m => m.id === "dual-mode-normal")?.sandMaxMode).toBe(false);
 	});
 
 	test("does not invent common ladder when upstream values are all unrecognized", () => {

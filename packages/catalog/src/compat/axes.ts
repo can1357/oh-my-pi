@@ -261,6 +261,11 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	 * wins). Empty lists are unsupported — omit the property for bare routing.
 	 */
 	"sand-parameter-ids": { key: "sandParameterIds", set: "catalog", shape: "array" },
+	/**
+	 * Reviewed native tool-calling support. Applied as a correction so live
+	 * discovery can leave the field unset and KDL can force false (e.g. grok-4.5).
+	 */
+	"supports-tools": { key: "supportsTools", set: "catalog", shape: "scalar" },
 	"service-tier-cost": { key: "serviceTierCost", set: "catalog", shape: "object" },
 };
 

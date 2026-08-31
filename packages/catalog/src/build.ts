@@ -72,7 +72,7 @@ function applyCatalogAssignments<TApi extends Api>(model: Model<TApi>, catalog: 
  * limits and pricing still win.
  */
 export function applyCatalogCorrections(
-	model: Pick<ModelSpec<Api>, "cost" | "contextWindow" | "maxTokens" | "input">,
+	model: Pick<ModelSpec<Api>, "cost" | "contextWindow" | "maxTokens" | "input" | "supportsTools">,
 	catalog: Record<string, unknown>,
 ): void {
 	const longContext = objectPayload(catalog.longContext);
@@ -135,6 +135,9 @@ export function applyCatalogCorrections(
 	const inputModalities = catalog.inputModalities;
 	if (isInputModalities(inputModalities)) {
 		model.input = inputModalities;
+	}
+	if (typeof catalog.supportsTools === "boolean") {
+		model.supportsTools = catalog.supportsTools;
 	}
 }
 

@@ -18,7 +18,9 @@ import { decodeInferenceStreamRequest, encodeInferenceStreamRequest, fieldNumber
 describe("anthropic sand tool wire", () => {
 	test("detects anthropic sand model ids", () => {
 		expect(isAnthropicSandModelId("claude-opus-5")).toBe(true);
+		expect(isAnthropicSandModelId("claude_sonnet_4")).toBe(true);
 		expect(isAnthropicSandModelId("grok-4.6")).toBe(false);
+		expect(isAnthropicSandModelId("sand-automation")).toBe(false);
 	});
 
 	test("passes through non-anthropic tool requests", () => {

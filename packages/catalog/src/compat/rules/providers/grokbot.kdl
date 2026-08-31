@@ -23,4 +23,8 @@ provider "grokbot" {
 		context-window-floor 200000
 		sand-parameter-ids "effort" "fast"
 	}
+	// Sand rejects any tools payload for grok-4.5 (HTTP 422); keep text-only.
+	models "grok-4.5*" {
+		supports-tools #false
+	}
 }

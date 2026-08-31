@@ -898,6 +898,35 @@ describe("Grok Bot generated thinking policy", () => {
 		expect(resolveModelPolicy(seed).catalog.credentialScopedCatalog).toBe(true);
 	});
 
+	it("forces supportsTools false for grok-4.5 via provider KDL", () => {
+		const live = buildModel({
+			id: "grok-4.5",
+			name: "Grok 4.5",
+			api: "grokbot-sand",
+			provider: "grokbot",
+			baseUrl: "https://api2.cursor.sh",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: null,
+			maxTokens: null,
+		});
+		expect(live.supportsTools).toBe(false);
+		const grok46 = buildModel({
+			id: "grok-4.6",
+			name: "Grok 4.6",
+			api: "grokbot-sand",
+			provider: "grokbot",
+			baseUrl: "https://api2.cursor.sh",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: null,
+			maxTokens: null,
+		});
+		expect(grok46.supportsTools).toBeUndefined();
+	});
+
 	it("applies reviewed context-window-floor to known routers when discovery left limits unset", () => {
 		const router = buildModel({
 			id: "sand-default",

@@ -137,7 +137,7 @@ function buildSandRouterSpec(id: (typeof GROKBOT_SAND_ROUTER_IDS)[number], baseU
 		// Limits come from reviewed KDL floors / offline seeds — do not invent here.
 		contextWindow: null,
 		maxTokens: null,
-		supportsTools: true,
+		// Tool support is reviewed via KDL (`supports-tools`); do not invent true here.
 		sandParameterIds: [],
 		sandMaxMode: false,
 	};
@@ -196,6 +196,7 @@ function toGrokbotModelSpecs(row: GrokbotAvailableModel, baseUrl: string, id: st
 			sandParameterIds: parameterIds,
 			sandParameterDefaults: collectVariantSandParameterDefaults(variant) ?? base.sandParameterDefaults,
 			sandMaxMode,
+			contextWindow: resolveGrokbotContextWindow(row, sandMaxMode),
 			aliases: undefined,
 		});
 	}
@@ -268,7 +269,8 @@ function toGrokbotModelSpec(row: GrokbotAvailableModel, baseUrl: string, id: str
 		// Do not invent an output cap AvailableModels never supplied; reviewed
 		// offline seed caps stay on static seeds / optional KDL limits-patch.
 		maxTokens: null,
-		supportsTools: true,
+		// Native tool support is reviewed via KDL (`supports-tools`); leave unset
+		// so grok-4.5 can be forced off without discovery advertising true.
 		...(aliases.length > 0 ? { aliases } : undefined),
 		sandParameterIds: parameterIds,
 		...(sandParameterDefaults ? { sandParameterDefaults } : undefined),
