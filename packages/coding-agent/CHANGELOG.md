@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Unverified-merge latch treats read-only shell probes (`git status`, `cat`, `rg`, …) as non-acceptance, and LSP diagnostics regressions match the `waitForDiagnostics` result shape.
 - Parent-verify gating rejects status-negated (`! cmd`) and newline-masked commands, ignores redirection ampersands (`2>&1` / `&>`), and realpath-compares verifier cwd so symlink escapes cannot clear the merge latch.
 
 ### Added

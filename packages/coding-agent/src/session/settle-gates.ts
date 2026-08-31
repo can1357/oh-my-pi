@@ -37,6 +37,52 @@ const TAUTOLOGICAL_BASH_COMMANDS = new Set([
 	"printenv",
 	"env",
 	":",
+	// Read-only inspection probes — not parent acceptance of merged work.
+	"cat",
+	"head",
+	"tail",
+	"less",
+	"more",
+	"bat",
+	"rg",
+	"grep",
+	"ag",
+	"ack",
+	"find",
+	"fd",
+	"wc",
+	"file",
+	"stat",
+	"which",
+	"type",
+	"realpath",
+	"readlink",
+	"tree",
+	"du",
+]);
+
+/** `git status` / `git log` / … inspect state; they do not re-run acceptance. */
+const READONLY_GIT_SUBCOMMANDS = new Set([
+	"status",
+	"log",
+	"show",
+	"diff",
+	"blame",
+	"ls-files",
+	"ls-tree",
+	"rev-parse",
+	"rev-list",
+	"branch",
+	"remote",
+	"tag",
+	"describe",
+	"shortlog",
+	"cat-file",
+	"grep",
+	"whatchanged",
+	"name-rev",
+	"symbolic-ref",
+	"check-ignore",
 ]);
 
 /** Leading `NAME=value` tokens (including empty values) before the invoked command. */
@@ -99,7 +145,12 @@ export function isTautologicalParentVerifyCommand(command: string): boolean {
 		if (tokens.length === 0) return true;
 		const invoked = tokens[0] ?? "";
 		const base = invoked.split("/").pop() ?? invoked;
-		return TAUTOLOGICAL_BASH_COMMANDS.has(base);
+		if (TAUTOLOGICAL_BASH_COMMANDS.has(base)) return true;
+		if (base === "git") {
+			const sub = tokens.slice(1).find(token => token.length > 0 && !token.startsWith("-")) ?? "";
+			return READONLY_GIT_SUBCOMMANDS.has(sub);
+		}
+		return false;
 	});
 }
 

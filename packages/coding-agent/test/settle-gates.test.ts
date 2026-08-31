@@ -95,6 +95,10 @@ describe("isTautologicalParentVerifyCommand", () => {
 		expect(isTautologicalParentVerifyCommand("ls -la")).toBe(true);
 		expect(isTautologicalParentVerifyCommand("echo ok && pwd")).toBe(true);
 		expect(isTautologicalParentVerifyCommand("bun test test/foo.test.ts")).toBe(false);
+		expect(isTautologicalParentVerifyCommand("git status")).toBe(true);
+		expect(isTautologicalParentVerifyCommand("cat package.json")).toBe(true);
+		expect(isTautologicalParentVerifyCommand("rg TODO src")).toBe(true);
+		expect(isTautologicalParentVerifyCommand("git commit -m x")).toBe(false);
 	});
 
 	it("treats env-prefixed tautologies and assignment-only segments as non-evidence", () => {

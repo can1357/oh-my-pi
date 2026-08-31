@@ -1749,7 +1749,7 @@ describe("lsp regressions", () => {
 				});
 
 				if (scenario.acceptsPublish) {
-					expect(await diagnostics).toEqual([publishedDiagnostic]);
+					expect(await diagnostics).toEqual({ diagnostics: [publishedDiagnostic], timedOut: false });
 				} else {
 					await expect(diagnostics).rejects.toThrow("request failed");
 				}
