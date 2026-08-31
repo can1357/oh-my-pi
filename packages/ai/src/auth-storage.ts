@@ -4712,6 +4712,16 @@ export class AuthStorage {
 		return this.#blockCredentialForRotation(provider, credentialType, targetIndex, blockedUntil, routing);
 	}
 
+	/**
+	 * Prefer the scope that actually holds an active Retry-After (global `""` wins
+	 * over a derived chat/spark scope) so probes cannot bypass a workspace-wide wait.
+	 */
+	#resolveQuotaProbeLeaseScope(credentialId: number, blockScope: string): string {
+		if (this.#probeLeases.isRetryAfterSourced(credentialId, blockScope)) return blockScope;
+		if (blockScope !== "" && this.#probeLeases.isRetryAfterSourced(credentialId, "")) return "";
+		return blockScope;
+	}
+
 	tryAcquireQuotaProbeLease(credentialId: number, blockScope: string): string | null {
 		return this.#probeLeases.tryAcquire(credentialId, blockScope);
 	}
@@ -5560,7 +5570,8 @@ export class AuthStorage {
 			const entries = this.#getStoredCredentials(provider);
 			const blockedId = entries[selection.index]?.id;
 			if (blockedId === undefined) return undefined;
-			const probeScope = blockScope ?? "";
+			const requestedProbeScope = blockScope ?? "";
+			const probeScope = this.#resolveQuotaProbeLeaseScope(blockedId, requestedProbeScope);
 			if (!allowBlocked) {
 				// A live block must never hijack rotation: while any same-type sibling
 				// is still usable, fall through so the caller rotates to it. Probing a
@@ -5596,8 +5607,12 @@ export class AuthStorage {
 					blockScope: probeScope,
 					leaseId: lease,
 				});
-			} else if (this.#probeLeases.isRetryAfterSourced(blockedId, probeScope)) {
-				// allowBlocked fallback must still honor active Retry-After: never vend
+			} else if (
+				this.#probeLeases.isRetryAfterSourced(blockedId, probeScope) ||
+				this.#probeLeases.isRetryAfterSourced(blockedId, requestedProbeScope)
+			) {
+				// allowBlocked fallback must still honor active Retry-After (including a
+				// global workspace block while selection asks for chat/spark): never vend
 				// without a probe lease while the provider-imposed wait is live.
 				if (!options?.requestId) return undefined;
 				const lease = this.tryAcquireQuotaProbeLease(blockedId, probeScope);
@@ -6704,8 +6719,13 @@ export class AuthStorage {
 					credentialId: options?.credentialId,
 					apiKey: options?.apiKey,
 				});
-				const credentialId =
+				let credentialId =
 					options?.credentialId ?? (target ? this.#getStoredCredentials(provider)[target.index]?.id : undefined);
+				// Delayed deactivated_workspace can arrive after bearer rotation; reuse the
+				// same durable fingerprint history markUsageLimitReached already consults.
+				if (credentialId === undefined && options?.apiKey) {
+					credentialId = this.#findOAuthCredentialIdForBearer(provider, options.apiKey);
+				}
 				if (credentialId !== undefined) {
 					const sourceIndex = this.#getStoredCredentials(provider).findIndex(entry => entry.id === credentialId);
 					const providerKey = this.#getProviderTypeKey(provider, "oauth");

@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Fixed
+- Fixed quota probes honoring global Retry-After when selection uses a chat/spark scope, and workspace deactivation attributing rotated bearers via fingerprint history.
 - Fixed quota-probe leases releasing on abort/5xx/fallback via `clearQuotaProbe`, and settling only on successful stream completion.
 
 - Fixed deactivated_workspace fan-out tests for org-scoped identities, and treated empty previousResponseId as present rather than falling through to internal chaining.
