@@ -22,7 +22,6 @@ describe("PanelConfirmationComponent", () => {
 
 	afterEach(() => {
 		setKeybindings(KeybindingsManager.inMemory());
-		vi.restoreAllMocks();
 	});
 
 	it("renders a resolved lineup and confirms the explicit primary action", () => {

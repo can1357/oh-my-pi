@@ -7,7 +7,7 @@
  * tests exercise only the session-owned lifecycle wrapper, never a real
  * model provider.
  */
-import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -16,28 +16,16 @@ import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 import type { PanelRunOptions, PanelRunPlan, PanelRunResult } from "../../src/panel/runtime";
+import * as panelRuntime from "../../src/panel/runtime";
 
-// `runPanelImpl` is swapped per test; the mock factory below delegates to
-// whatever implementation the current test installed. Bun keys `mock.module`
-// overrides by resolved path, so this single top-level registration covers
-// every specifier that resolves to `src/panel/runtime.ts`, including the
-// relative one `agent-session.ts` uses internally.
 let runPanelImpl: (options: PanelRunOptions) => Promise<PanelRunResult>;
 let preparePanelRunImpl: (options: Omit<PanelRunOptions, "onProgress" | "plan" | "signal">) => PanelRunPlan;
-mock.module("../../src/panel/runtime", () => ({
-	preparePanelRun: (options: Omit<PanelRunOptions, "onProgress" | "plan" | "signal">) => preparePanelRunImpl(options),
-	runPanel: (options: PanelRunOptions) => runPanelImpl(options),
-}));
-
-// Deliberate dynamic import: `agent-session.ts` imports the real panel
-// runtime internally, so the mock above must be installed before that module
-// is first loaded, not after the static-import hoist would load it.
-const { AgentSession: AgentSessionCtor } = await import("@oh-my-pi/pi-coding-agent/session/agent-session");
+let runtimeSpies: Array<{ mockRestore(): void }> = [];
 
 function fakePanelResult(): PanelRunResult {
 	return {
@@ -56,6 +44,10 @@ describe("AgentSession panel lifecycle", () => {
 	let authStorage: AuthStorage | undefined;
 
 	beforeEach(async () => {
+		runtimeSpies = [
+			vi.spyOn(panelRuntime, "preparePanelRun").mockImplementation(options => preparePanelRunImpl(options)),
+			vi.spyOn(panelRuntime, "runPanel").mockImplementation(options => runPanelImpl(options)),
+		];
 		tempDir = path.join(os.tmpdir(), `pi-panel-lifecycle-${Snowflake.next()}`);
 		fs.mkdirSync(tempDir, { recursive: true });
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
@@ -68,7 +60,7 @@ describe("AgentSession panel lifecycle", () => {
 			initialState: { model, systemPrompt: ["t"], tools: [], messages: [] },
 			streamFn: mockModel.stream,
 		});
-		session = new AgentSessionCtor({
+		session = new AgentSession({
 			agent,
 			sessionManager: SessionManager.inMemory(),
 			settings: Settings.isolated(),
@@ -81,6 +73,8 @@ describe("AgentSession panel lifecycle", () => {
 
 	afterEach(async () => {
 		await session.dispose();
+		for (const spy of runtimeSpies) spy.mockRestore();
+		runtimeSpies = [];
 		authStorage?.close();
 		authStorage = undefined;
 		if (fs.existsSync(tempDir)) {
