@@ -18,6 +18,7 @@
 - Grok Bot AvailableModels preserves variant default sand parameter values (including `context` tiers) on catalog rows.
 - Grok Bot AvailableModels leaves native tool support unset; KDL forces `supportsTools: false` for grok-4.5 (sand HTTP 422 with tools).
 - Grok Bot legacy max/non-max variant rows recompute `contextWindow` for their own sandMaxMode.
+- Grok Bot live discovery reasoning is authoritative on merge (static seed reasoning is not OR-upgraded).
 - Grok Bot live models with unrecognized-only effort vocabularies keep no thinking ladder after `buildModel` (KDL no longer backfills).
 - Grok Bot offline `sandParameterIds` for `grok-4.6` come from provider KDL (`sand-parameter-ids`) via `buildModel`, not TypeScript seed tables.
 - Grok Bot thinking fallback suppression uses KDL `preserve-authored-thinking` in `buildModel` (no provider/API TypeScript branch).

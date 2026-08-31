@@ -555,10 +555,14 @@ function mergeDynamicModel<TApi extends Api>(existingModel: Model<TApi>, dynamic
 	// whole truth: when the wire advertises only the `none` off-state the
 	// mapper emits `reasoning: false`, and OR-ing the bundled reference's
 	// stale `reasoning: true` back would re-arm an effort dial the route
-	// doesn't expose. Other providers keep the OR so a bundled reasoning flag
-	// survives a discovery row that simply omits the capability.
+	// doesn't expose. Grokbot AvailableModels is similarly authoritative —
+	// a live `reasoning: false` must not be OR-upgraded by offline seed
+	// reasoning (or KDL would re-attach effort ladders at buildModel).
+	// Other providers keep the OR so a bundled reasoning flag survives a
+	// discovery row that simply omits the capability.
 	const dynamicReasoningAuthoritative =
-		existingModel.provider === "synthetic" && dynamicModel.provider === "synthetic";
+		(existingModel.provider === "synthetic" && dynamicModel.provider === "synthetic") ||
+		(existingModel.provider === "grokbot" && dynamicModel.provider === "grokbot");
 	const reasoning = dynamicReasoningAuthoritative
 		? dynamicModel.reasoning
 		: existingModel.reasoning || dynamicModel.reasoning;

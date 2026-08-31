@@ -1,9 +1,13 @@
 import { describe, expect, test } from "bun:test";
+import { buildModel } from "../src/build";
 import { normalizeGrokbotAvailableModels } from "../src/discovery/grokbot";
 import {
 	decodeGrokbotAvailableModelsResponse,
 	encodeGrokbotAvailableModelsRequest,
 } from "../src/discovery/grokbot-available-models";
+import { resolveProviderModels } from "../src/model-manager";
+import { buildGrokbotStaticSeed } from "../src/provider-models/grokbot";
+import type { ModelSpec } from "../src/types";
 
 const FIXTURE = {
 	models: [
@@ -320,5 +324,31 @@ describe("grokbot AvailableModels normalize", () => {
 		expect(decodeGrokbotAvailableModelsResponse({ error: "upstream" })).toBeNull();
 		expect(decodeGrokbotAvailableModelsResponse({ models: "not-an-array" })).toBeNull();
 		expect(decodeGrokbotAvailableModelsResponse({ models: [] })).toEqual([]);
+	});
+
+	test("live non-reasoning grok-4.6 is not OR-upgraded by static seed reasoning", async () => {
+		const staticModels = buildGrokbotStaticSeed().map(seed => buildModel(seed));
+		expect(staticModels.find(m => m.id === "grok-4.6")?.reasoning).toBe(true);
+		const live: ModelSpec<"grokbot-sand"> = {
+			id: "grok-4.6",
+			name: "Grok 4.6",
+			api: "grokbot-sand",
+			provider: "grokbot",
+			baseUrl: "https://api2.cursor.sh",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: null,
+			maxTokens: null,
+		};
+		const result = await resolveProviderModels({
+			providerId: "grokbot",
+			staticModels,
+			dynamicModelsAuthoritative: true,
+			fetchDynamicModels: async () => [live],
+		});
+		const merged = result.models.find(m => m.id === "grok-4.6");
+		expect(merged?.reasoning).toBe(false);
+		expect(merged?.thinking).toBeUndefined();
 	});
 });
