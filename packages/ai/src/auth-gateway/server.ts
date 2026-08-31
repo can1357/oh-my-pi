@@ -209,6 +209,7 @@ function buildStreamOptions(parsed: ParsedFormatRequest, api: Api, signal: Abort
 export function applyParsedGatewayOptions(opts: SimpleStreamOptions, options: AuthGatewayParsedRequestOptions): void {
 	if (options.parallelToolCalls !== undefined) opts.parallelToolCalls = options.parallelToolCalls;
 	if (options.previousResponseId !== undefined) opts.previousResponseId = options.previousResponseId;
+	if (options.store === true) opts.store = true;
 	if (options.seed !== undefined) opts.seed = options.seed;
 	if (options.logitBias !== undefined) opts.logitBias = options.logitBias;
 	if (options.user !== undefined) opts.user = options.user;
