@@ -4,6 +4,8 @@
 
 ### Fixed
 
+- Lease quota probes against the block scope that actually caused the cooldown (global Retry-After wins over chat/spark).
+
 - Await canonical stream settlement before EOF can settle quota probes.
 - Fixed format-endpoint streams marking failed/aborted `events.result()` outcomes on the commit gate before EOF can settle a quota probe.
 

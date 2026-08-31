@@ -4772,6 +4772,55 @@ export class AuthStorage {
 		return this.#blockCredentialForRotation(provider, credentialType, targetIndex, blockedUntil, routing);
 	}
 
+
+	/**
+	 * Prefer the block scope that is actually active for this credential (global
+	 * `""` and Retry-After provenance win over a derived chat/spark request scope).
+	 */
+	#resolveBlockingProbeScope(
+		provider: string,
+		providerKey: string,
+		credentialIndex: number,
+		credentialId: number,
+		blockScope: string | undefined,
+		blockScopes: readonly string[] | undefined,
+		requestId: string | undefined,
+	): string {
+		const candidates: string[] = [""];
+		if (blockScope) candidates.push(blockScope);
+		for (const scope of blockScopes ?? []) {
+			if (scope && !candidates.includes(scope)) candidates.push(scope);
+		}
+		for (const scope of candidates) {
+			if (
+				this.#probeLeases.isRetryAfterSourced(credentialId, scope) &&
+				this.#getCredentialBlockedUntil(
+					provider,
+					providerKey,
+					credentialIndex,
+					scope || undefined,
+					requestId,
+				) !== undefined
+			) {
+				return scope;
+			}
+		}
+		for (const scope of candidates) {
+			if (
+				this.#getCredentialBlockedUntil(
+					provider,
+					providerKey,
+					credentialIndex,
+					scope || undefined,
+					requestId,
+				) !== undefined
+			) {
+				return scope;
+			}
+		}
+		return blockScope ?? "";
+	}
+
 	tryAcquireQuotaProbeLease(credentialId: number, blockScope: string): string | null {
 		return this.#probeLeases.tryAcquire(credentialId, blockScope);
 	}
@@ -5681,7 +5730,15 @@ export class AuthStorage {
 			const entries = this.#getStoredCredentials(provider);
 			const blockedId = entries[selection.index]?.id;
 			if (blockedId === undefined) return undefined;
-			const probeScope = blockScope ?? "";
+			const probeScope = this.#resolveBlockingProbeScope(
+				provider,
+				providerKey,
+				selection.index,
+				blockedId,
+				blockScope,
+				blockScopes,
+				options?.requestId,
+			);
 			if (!allowBlocked) {
 				// A live block must never hijack rotation: while any same-type sibling
 				// is still usable, fall through so the caller rotates to it. Probing a
