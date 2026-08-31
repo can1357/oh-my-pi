@@ -1193,7 +1193,19 @@ export class MCPManager {
 			try {
 				const connection = await this.#connectAndWireServer(name, config, source, reconnectEpoch);
 				logger.debug("MCP reconnected", { path: `mcp:${name}`, tools: connection.tools?.length ?? 0 });
-				this.#emitConnectionStatus({ type: "connected", serverName: name });
+				if (connection.filterEmptyByToolFilter !== undefined) {
+					// The filter still excludes every advertised tool: the healthy
+					// transport is kept (resources/prompts stay available), but the
+					// server must keep its failed status instead of flipping back
+					// to connected. The error detail was logged during registration.
+					this.#emitConnectionStatus({
+						type: "failed",
+						serverName: name,
+						error: mcpFilterEmptyMessage(connection.filterEmptyByToolFilter),
+					});
+				} else {
+					this.#emitConnectionStatus({ type: "connected", serverName: name });
+				}
 				return connection;
 			} catch (error) {
 				if (this.#epoch !== reconnectEpoch) {
@@ -1278,14 +1290,14 @@ export class MCPManager {
 			const customTools = MCPTool.fromTools(connection, serverTools, reconnect);
 			void this.toolCache?.set(name, config, serverTools);
 			if (customTools.length === 0 && serverTools.length > 0) {
-				// The filter still excludes everything: keep the server failed
-				// instead of letting the caller mark it connected. The error
-				// itself is already logged by the applyMCPToolFilter diagnostic.
-				const message = mcpFilterEmptyMessage(serverTools.length);
-				this.#emitConnectionStatus({ type: "failed", serverName: name, error: message });
-				throw new Error(message);
+				// The filter still excludes everything. The transport itself is
+				// healthy — keep it (resources/prompts stay available) but tell
+				// the caller not to report the server as connected. The error
+				// itself is logged by the applyMCPToolFilter diagnostic.
+				connection.filterEmptyByToolFilter = serverTools.length;
+			} else {
+				this.#replaceServerTools(name, customTools);
 			}
-			this.#replaceServerTools(name, customTools);
 			void this.#onToolsChanged?.(this.#tools);
 			void this.#loadServerResourcesAndPrompts(name, connection);
 			return connection;

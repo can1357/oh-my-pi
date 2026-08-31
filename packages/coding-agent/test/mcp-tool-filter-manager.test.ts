@@ -177,12 +177,15 @@ describe("MCP tool filtering through the manager", () => {
 			// Simulate a transport restart: reconnect while the filter (still)
 			// matches nothing.
 			await manager.reconnectServer(SERVER);
-			// The reconnect loop retries with backoff before terminating;
-			// wait out the backoff window for the terminal failed event.
-			await Bun.sleep(9500);
+			// The reconnected transport is healthy and KEPT (resources/prompts
+			// stay available), the status stays failed, and `connected` never
+			// appears while the filter still excludes everything.
+			await Bun.sleep(400);
 			expect(manager.getTools()).toHaveLength(0);
 			expect(events).not.toContain("connected");
 			expect(events).toContain("failed");
+			expect(manager.getConnectionStatus(SERVER)).toBe("connected");
+			expect(manager.getConnection(SERVER)).toBeDefined();
 		} finally {
 			stop();
 		}

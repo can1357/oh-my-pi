@@ -377,6 +377,12 @@ export interface MCPServerConnection {
 	instructions?: string;
 	/** Cached prompts (populated on demand) */
 	prompts?: MCPPrompt[];
+	/** Set by the reconnection path when the configured tool filter excluded
+	 * every advertised tool: the transport stays connected, but the caller must
+	 * not report the server as `connected`. The value is the raw advertised
+	 * tool count for error messaging; a later registration that passes the
+	 * filter clears the flag and emits `connected` as usual. */
+	filterEmptyByToolFilter?: number;
 }
 
 /** MCP tool with server context */
