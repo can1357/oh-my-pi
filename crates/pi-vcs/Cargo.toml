@@ -11,6 +11,7 @@ workspace = true
 
 [dependencies]
 gix.workspace = true
+gix-zlib.workspace = true
 jj-lib.workspace = true
 thiserror.workspace = true
 tokio.workspace = true

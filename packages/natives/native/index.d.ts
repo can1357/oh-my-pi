@@ -478,6 +478,8 @@ export declare class VcsJjWorkspace {
   workingCopyLabel(signal?: unknown | undefined | null): Promise<string | undefined | null>
   /** Status counts. */
   statusSummary(signal?: unknown | undefined | null): Promise<VcsStatusSummary>
+  /** Repository-recorded conflicts in the working-copy commit. */
+  conflictedPaths(files: Array<string>, signal?: unknown | undefined | null): Promise<Array<VcsConflictInfo>>
   /** Render working-copy patch. */
   diffText(files: Array<string>, snapshot: boolean, signal?: unknown | undefined | null): Promise<string>
   /** List changed paths. */
@@ -508,6 +510,8 @@ export declare class VcsRepo {
   headId(signal?: unknown | undefined | null): Promise<string | undefined | null>
   /** Status counts. */
   statusSummary(signal?: unknown | undefined | null): Promise<VcsStatusSummary>
+  /** Repository-recorded conflicts in the working copy. */
+  conflictedPaths(files: Array<string>, signal?: unknown | undefined | null): Promise<Array<VcsConflictInfo>>
   /** Porcelain status. */
   statusPorcelain(options: VcsStatusOptions, signal?: unknown | undefined | null): Promise<string>
   /** Render a patch. */
@@ -1955,6 +1959,9 @@ export interface NodeSpan {
   kind: string
 }
 
+/** Parse standalone Git or Jujutsu marker content without repository authority. */
+export declare function parseConflictMarkers(content: Buffer, minimumMarkerLength?: number | undefined | null): Array<VcsConflictRegion>
+
 /** Parsed Kitty keyboard protocol sequence result for a Kitty input sequence. */
 export interface ParsedKittyResult {
   /** Primary codepoint associated with the key. */
@@ -2469,6 +2476,37 @@ export interface VcsCommitOptions {
   allowEmpty?: boolean
   amend?: boolean
   files?: Array<string>
+}
+
+/** Metadata for one repository-recorded conflict. */
+export interface VcsConflictInfo {
+  path: string
+  kind: VcsConflictKind
+  regions: Array<VcsConflictRegion>
+}
+
+/** Broad kind of a repository-recorded conflict. */
+export declare enum VcsConflictKind {
+  File = 'file',
+  Other = 'other'
+}
+
+/** One backend-validated materialized conflict block. */
+export interface VcsConflictRegion {
+  startLine: number
+  separatorLine: number
+  endLine: number
+  baseLine?: number
+  style: string
+  markerLength: number
+  sides: Array<VcsConflictTerm>
+  bases: Array<VcsConflictTerm>
+}
+
+/** One positive side or negative base term. */
+export interface VcsConflictTerm {
+  label?: string
+  content: string
 }
 
 /** Detach copied Git metadata. */

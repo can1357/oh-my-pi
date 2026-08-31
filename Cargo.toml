@@ -368,10 +368,9 @@ brush-parser = "0.3"
 # ──────────────────────────────────────────────────────────────────────────────
 # Version Control (in-process git + jujutsu)
 # ──────────────────────────────────────────────────────────────────────────────
-# gix is pinned to the minor jj-lib depends on so both VCS backends share one
-# gitoxide stack in the binary. No transport/credential features: network ops
-# (clone/fetch/push) deliberately shell out to the git CLI for auth parity.
-gix = { version = "0.85", default-features = false, features = [
+# Forks expose structured, range-aware materialized-conflict APIs that are not
+# yet available in the upstream releases.
+gix = { git = "https://github.com/0WD0/gitoxide.git", rev = "d26d3b019fecc96100e4232cf0d8c22a8ce5101d", default-features = false, features = [
    "attributes",
    "blob-diff",
    "dirwalk",
@@ -383,11 +382,10 @@ gix = { version = "0.85", default-features = false, features = [
    "sha1",
    "sha256",
    "status",
-   "tree-editor",
    "worktree-mutation",
-   "zlib-rs",
 ] }
-jj-lib = { version = "0.44", default-features = false, features = ["git"] }
+gix-zlib = { git = "https://github.com/0WD0/gitoxide.git", rev = "d26d3b019fecc96100e4232cf0d8c22a8ce5101d" }
+jj-lib = { git = "https://github.com/0WD0/jj.git", rev = "d967d70207834d9400e483edd02b6f1f49924330", default-features = false, features = ["git"] }
 
 # ──────────────────────────────────────────────────────────────────────────────
 # AST & Tree-Sitter

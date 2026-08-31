@@ -151,6 +151,7 @@ fn open_options() -> Options {
 				objects:         Permission::Deny,
 				git_prefix:      Permission::Deny,
 				ssh_prefix:      Permission::Deny,
+				other:           Permission::Allow,
 			},
 			config:     permissions::Config::all(),
 			attributes: permissions::Attributes::all(),

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added backend-neutral conflict metadata queries for Git and Jujutsu, including backend-validated materialized regions and classification of editable files versus non-file tree conflicts.
+
 ## [18.0.11] - 2026-08-29
 
 ### Fixed

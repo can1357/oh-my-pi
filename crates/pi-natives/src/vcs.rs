@@ -97,6 +97,40 @@ pub struct VcsStatusSummary {
 	pub unstaged:  u32,
 	pub untracked: u32,
 }
+/// Broad kind of a repository-recorded conflict.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[napi(string_enum)]
+pub enum VcsConflictKind {
+	#[napi(value = "file")]
+	File,
+	#[napi(value = "other")]
+	Other,
+}
+/// One positive side or negative base term.
+#[napi(object)]
+pub struct VcsConflictTerm {
+	pub label:   Option<String>,
+	pub content: String,
+}
+/// One backend-validated materialized conflict block.
+#[napi(object)]
+pub struct VcsConflictRegion {
+	pub start_line:     u32,
+	pub separator_line: u32,
+	pub end_line:       u32,
+	pub base_line:      Option<u32>,
+	pub style:          String,
+	pub marker_length:  u32,
+	pub sides:          Vec<VcsConflictTerm>,
+	pub bases:          Vec<VcsConflictTerm>,
+}
+/// Metadata for one repository-recorded conflict.
+#[napi(object)]
+pub struct VcsConflictInfo {
+	pub path:    String,
+	pub kind:    VcsConflictKind,
+	pub regions: Vec<VcsConflictRegion>,
+}
 /// Resolved HEAD state.
 #[napi(object)]
 pub struct VcsHeadState {
@@ -296,6 +330,49 @@ impl From<core::NumstatEntry> for VcsNumstatEntry {
 	fn from(v: core::NumstatEntry) -> Self {
 		Self { path: v.path, added: v.added, removed: v.removed }
 	}
+}
+impl From<core::ConflictRegion> for VcsConflictRegion {
+	fn from(region: core::ConflictRegion) -> Self {
+		let style = match region.style {
+			core::MaterializedConflictStyle::Git => "git",
+			core::MaterializedConflictStyle::JjDiff => "jj-diff",
+			core::MaterializedConflictStyle::JjSnapshot => "jj-snapshot",
+		}
+		.to_owned();
+		let convert_term =
+			|term: core::ConflictTerm| VcsConflictTerm { label: term.label, content: term.content };
+		Self {
+			start_line: region.start_line,
+			separator_line: region.separator_line,
+			end_line: region.end_line,
+			base_line: region.base_line,
+			style,
+			marker_length: region.marker_length,
+			sides: region.sides.into_iter().map(convert_term).collect(),
+			bases: region.bases.into_iter().map(convert_term).collect(),
+		}
+	}
+}
+impl From<core::ConflictInfo> for VcsConflictInfo {
+	fn from(v: core::ConflictInfo) -> Self {
+		let kind = match v.kind {
+			core::ConflictKind::File => VcsConflictKind::File,
+			core::ConflictKind::Other => VcsConflictKind::Other,
+		};
+		Self { path: v.path, kind, regions: v.regions.into_iter().map(Into::into).collect() }
+	}
+}
+/// Parse standalone Git or Jujutsu marker content without repository authority.
+#[napi]
+pub fn parse_conflict_markers(
+	content: Buffer,
+	minimum_marker_length: Option<u32>,
+) -> Vec<VcsConflictRegion> {
+	let minimum = minimum_marker_length.unwrap_or(7).max(1) as usize;
+	pi_vcs::parse_conflict_regions(content.as_ref(), minimum)
+		.into_iter()
+		.map(Into::into)
+		.collect()
 }
 impl From<core::ShowResult> for VcsShowResult {
 	fn from(v: core::ShowResult) -> Self {
@@ -538,6 +615,20 @@ impl VcsRepo {
 	pub fn status_summary(&self, signal: Option<Unknown>) -> Promise<VcsStatusSummary> {
 		repo_blocking("vcs.statusSummary", self.inner.clone(), signal, |repo| {
 			repo.status_summary().map(Into::into)
+		})
+	}
+
+	/// Repository-recorded conflicts in the working copy.
+	#[napi]
+	pub fn conflicted_paths(
+		&self,
+		files: Vec<String>,
+		signal: Option<Unknown>,
+	) -> Promise<Vec<VcsConflictInfo>> {
+		repo_blocking("vcs.conflictedPaths", self.inner.clone(), signal, move |repo| {
+			repo
+				.conflicted_paths(&files)
+				.map(|paths| paths.into_iter().map(Into::into).collect())
 		})
 	}
 
@@ -1413,6 +1504,19 @@ impl VcsJjWorkspace {
 	pub fn status_summary(&self, signal: Option<Unknown>) -> Promise<VcsStatusSummary> {
 		jj_blocking("vcs.jjStatusSummary", self.inner.clone(), signal, |w| {
 			w.status_summary().map(Into::into)
+		})
+	}
+
+	/// Repository-recorded conflicts in the working-copy commit.
+	#[napi]
+	pub fn conflicted_paths(
+		&self,
+		files: Vec<String>,
+		signal: Option<Unknown>,
+	) -> Promise<Vec<VcsConflictInfo>> {
+		jj_blocking("vcs.jjConflictedPaths", self.inner.clone(), signal, move |w| {
+			w.conflicted_paths(&files)
+				.map(|paths| paths.into_iter().map(Into::into).collect())
 		})
 	}
 

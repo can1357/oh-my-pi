@@ -81,6 +81,7 @@ export const matchesKittySequence = nativeBindings.matchesKittySequence;
 export const matchesLegacySequence = nativeBindings.matchesLegacySequence;
 export const mmrRerankIndices = nativeBindings.mmrRerankIndices;
 export const nodeChainAt = nativeBindings.nodeChainAt;
+export const parseConflictMarkers = nativeBindings.parseConflictMarkers;
 export const parseKey = nativeBindings.parseKey;
 export const parseKittySequence = nativeBindings.parseKittySequence;
 export const pdfToMarkdown = nativeBindings.pdfToMarkdown;
@@ -176,5 +177,9 @@ export const MacOSAppearance = {
 export const ProcessStatus = {
 	Running: "running",
 	Exited: "exited",
+};
+export const VcsConflictKind = {
+	File: "file",
+	Other: "other",
 };
 // --- end generated native exports ---

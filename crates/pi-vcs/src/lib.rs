@@ -15,6 +15,7 @@
 //! [`GitRepo::discover`]: git::GitRepo::discover
 //! [`JjWorkspace::discover`]: jj::JjWorkspace::discover
 
+mod conflict;
 pub mod error;
 pub mod git;
 pub mod jj;
@@ -25,6 +26,7 @@ use std::{
 	sync::Arc,
 };
 
+pub use conflict::standalone_regions as parse_conflict_regions;
 pub use error::{Error, Result};
 pub use types::*;
 
@@ -125,6 +127,14 @@ impl Repo {
 		match self {
 			Self::Git(repo) => repo.status_summary(),
 			Self::Jj(workspace) => workspace.status_summary(),
+		}
+	}
+
+	/// List repository-recorded conflicts in the working copy.
+	pub fn conflicted_paths(&self, files: &[String]) -> Result<Vec<ConflictInfo>> {
+		match self {
+			Self::Git(repo) => repo.conflicted_paths(files),
+			Self::Jj(workspace) => workspace.conflicted_paths(files),
 		}
 	}
 

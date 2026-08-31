@@ -1034,7 +1034,8 @@ const BASE85: &[u8; 85] =
 	b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz!#$%&()*+-;<=>?@^_`{|}~";
 
 fn zlib_compress(data: &[u8]) -> Result<Vec<u8>> {
-	let mut writer = gix::features::zlib::stream::deflate::Write::new(Vec::new());
+	let mut writer =
+		gix_zlib::stream::deflate::Write::new(Vec::new(), gix_zlib::Compression::default());
 	writer
 		.write_all(data)
 		.and_then(|()| writer.flush())

@@ -913,11 +913,11 @@ fn decode_binary_block(
 	}
 	let inflate_size = block.size;
 	let mut inflated = vec![0; inflate_size];
-	let mut decoder = gix::features::zlib::Inflate::default();
+	let mut decoder = gix_zlib::Inflate::default();
 	let (status, consumed, written) = decoder
 		.once(&compressed, &mut inflated)
 		.map_err(|err| ApplyFailure::Invalid(format!("invalid zlib stream: {err}")))?;
-	if status != gix::features::zlib::Status::StreamEnd || consumed != compressed.len() {
+	if status != gix_zlib::Status::StreamEnd || consumed != compressed.len() {
 		return Err(ApplyFailure::Invalid("incomplete zlib stream".into()));
 	}
 	inflated.truncate(written);

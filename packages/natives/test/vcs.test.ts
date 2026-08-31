@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { vcsDiscover, vcsGitClone, vcsGitDiscover, vcsGitRepoInfo } from "../native/index.js";
+import { VcsConflictKind, vcsDiscover, vcsGitClone, vcsGitDiscover, vcsGitRepoInfo } from "../native/index.js";
 import * as vcs from "../native/vcs.js";
 
 const roots: string[] = [];
@@ -149,6 +149,39 @@ describe("VcsRepo", () => {
 		const required = vcs.require(root, "stagedDiff");
 		expect(required.kind()).toBe("git");
 		expect(required.supports("revDiff")).toBe(true);
+	});
+	test("reports repository-recorded conflict paths", async () => {
+		const root = await repository();
+		await writeFile(join(root, ".gitattributes"), "tracked.txt conflict-marker-size=3\n");
+		await git(root, "add", ".gitattributes");
+		await git(root, "commit", "-m", "marker size");
+		await git(root, "checkout", "-b", "left");
+		await writeFile(join(root, "tracked.txt"), "left\n");
+		await git(root, "commit", "-am", "left");
+		await git(root, "checkout", "main");
+		await writeFile(join(root, "tracked.txt"), "right\n");
+		await git(root, "commit", "-am", "right");
+		const merge = Bun.spawn(["git", "merge", "left"], { cwd: root, stderr: "ignore", stdout: "ignore" });
+		expect(await merge.exited).not.toBe(0);
+		await writeFile(join(root, ".gitattributes"), "tracked.txt conflict-marker-size=9\n");
+
+		const repo = vcsDiscover(root)!;
+		const conflicts = await repo.conflictedPaths([]);
+		expect(conflicts).toHaveLength(1);
+		expect(conflicts[0]).toMatchObject({ path: "tracked.txt", kind: VcsConflictKind.File });
+		expect(conflicts[0].regions).toHaveLength(1);
+		const region = conflicts[0].regions[0];
+		expect(region).toMatchObject({
+			startLine: 1,
+			separatorLine: 6,
+			endLine: 8,
+			baseLine: 3,
+			style: "git",
+			markerLength: 3,
+		});
+		expect(region.sides.map(term => term.content)).toEqual(["right\n", "left\n"]);
+		expect(region.bases.map(term => term.content)).toEqual(["one\ntwo\n"]);
+		expect(await repo.conflictedPaths(["other.txt"])).toEqual([]);
 	});
 
 	test("discovers Jujutsu and rejects unsupported features", async () => {

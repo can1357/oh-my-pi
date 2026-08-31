@@ -75,6 +75,11 @@ export function jj(dir) {
 	return api().vcsJjDiscover(dir);
 }
 
+/** Parse standalone Git or Jujutsu conflict markers through the native grammars. */
+export function parseConflictMarkers(content, minimumMarkerLength) {
+	return api().parseConflictMarkers(content, minimumMarkerLength);
+}
+
 /** Whether jj is the nearest VCS ancestor, making git automation unsafe. */
 export function isPureJj(dir) {
 	return api().vcsIsPureJj(dir);

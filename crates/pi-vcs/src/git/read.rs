@@ -14,8 +14,8 @@ use super::{
 use crate::{
 	error::{Error, Result},
 	types::{
-		CommitAuthor, CommitDetails, HeadState, ShowResult, StatusOptions, StatusSummary,
-		UntrackedMode, WorktreeEntry,
+		CommitAuthor, CommitDetails, ConflictInfo, ConflictKind, HeadState, ShowResult,
+		StatusOptions, StatusSummary, UntrackedMode, WorktreeEntry,
 	},
 };
 
@@ -118,6 +118,8 @@ impl GitRepo {
 			return Ok(Vec::new());
 		};
 		let repo = self.gix()?;
+		let target_id = gix::ObjectId::from_hex(target.as_bytes())
+			.map_err(|err| Error::backend("git tags", err))?;
 		let refs = repo
 			.references()
 			.map_err(|err| Error::backend("git tags", err))?;
@@ -128,7 +130,7 @@ impl GitRepo {
 			let id = reference
 				.peel_to_id()
 				.map_err(|err| Error::backend("git tags", err))?;
-			if id.to_string() == target
+			if id.detach() == target_id
 				&& let Some(name) = reference
 					.name()
 					.as_bstr()
@@ -383,6 +385,77 @@ impl GitRepo {
 			}
 		}
 		Ok(summary)
+	}
+
+	/// List paths with unresolved index entries.
+	pub fn conflicted_paths(&self, files: &[String]) -> Result<Vec<ConflictInfo>> {
+		let mut paths = BTreeMap::new();
+		let configured_marker_lengths = if self.is_reftable() {
+			let args = ["ls-files".to_owned(), "--unmerged".to_owned(), "-z".to_owned()];
+			for record in cli_text_owned(self.root(), &args)?.split('\0') {
+				let Some((metadata, path)) = record.split_once('\t') else {
+					continue;
+				};
+				if !files.is_empty() && !files.iter().any(|wanted| path_matches(path, wanted)) {
+					continue;
+				}
+				let Some(mode) = metadata.split_ascii_whitespace().next() else {
+					continue;
+				};
+				let kind = match mode {
+					"100644" | "100755" => ConflictKind::File,
+					_ => ConflictKind::Other,
+				};
+				insert_conflict_path(&mut paths, path.to_owned(), kind);
+			}
+			cli_conflict_marker_lengths(self.root(), &paths)?
+		} else {
+			let repo = self.gix()?;
+			let index = load_index_or_empty(&repo, "git conflicts")?;
+			for entry in index
+				.entries()
+				.iter()
+				.filter(|entry| entry.stage() != gix::index::entry::Stage::Unconflicted)
+			{
+				let path = bytes_to_path(entry.path(&index));
+				if !files.is_empty() && !files.iter().any(|wanted| path_matches(&path, wanted)) {
+					continue;
+				}
+				let kind = if entry.mode == gix::index::entry::Mode::FILE
+					|| entry.mode == gix::index::entry::Mode::FILE_EXECUTABLE
+				{
+					ConflictKind::File
+				} else {
+					ConflictKind::Other
+				};
+				insert_conflict_path(&mut paths, path, kind);
+			}
+			gix_conflict_marker_lengths(&repo, &index, &paths)?
+		};
+		Ok(paths
+			.into_iter()
+			.map(|(path, kind)| {
+				let disk_path = self.root().join(&path);
+				let regions = if kind == ConflictKind::File
+					&& disk_path
+						.symlink_metadata()
+						.is_ok_and(|metadata| metadata.file_type().is_file())
+				{
+					std::fs::read(disk_path).map_or_else(
+						|_| Vec::new(),
+						|content| {
+							select_git_regions(
+								crate::conflict::git_regions(&content),
+								configured_marker_lengths.get(&path).copied(),
+							)
+						},
+					)
+				} else {
+					Vec::new()
+				};
+				ConflictInfo { path, kind, regions }
+			})
+			.collect())
 	}
 
 	/// Read a scalar git config value.
@@ -1144,9 +1217,118 @@ fn parse_commit_details(raw: &str) -> CommitDetails {
 		.to_owned();
 	CommitDetails { sha, parents, author: CommitAuthor { name, email, date }, message }
 }
+
+const DEFAULT_CONFLICT_MARKER_LENGTH: u32 = 7;
+
+fn parse_conflict_marker_length(value: Option<&str>) -> u32 {
+	value
+		.and_then(|value| value.parse::<i32>().ok())
+		.filter(|value| *value > 0)
+		.map_or(DEFAULT_CONFLICT_MARKER_LENGTH, |value| value as u32)
+}
+
+fn select_git_regions(
+	mut regions: Vec<crate::types::ConflictRegion>,
+	configured_marker_length: Option<u32>,
+) -> Vec<crate::types::ConflictRegion> {
+	let lengths = regions
+		.iter()
+		.map(|region| region.marker_length)
+		.collect::<BTreeSet<_>>();
+	if let Some(configured) = configured_marker_length.filter(|length| lengths.contains(length)) {
+		regions.retain(|region| region.marker_length == configured);
+		return regions;
+	}
+	if lengths.len() == 1 {
+		regions
+	} else {
+		Vec::new()
+	}
+}
+
+fn gix_conflict_marker_lengths(
+	repo: &gix::Repository,
+	index: &gix::index::State,
+	paths: &BTreeMap<String, ConflictKind>,
+) -> Result<BTreeMap<String, u32>> {
+	let mut attributes = repo
+		.attributes_only(
+			index,
+			gix::worktree::stack::state::attributes::Source::WorktreeThenIdMapping,
+		)
+		.map_err(|err| Error::backend("git conflict marker attributes", err))?;
+	let mut matches = attributes.selected_attribute_matches(["conflict-marker-size"]);
+	let mut lengths = BTreeMap::new();
+	for (path, kind) in paths {
+		if *kind != ConflictKind::File {
+			continue;
+		}
+		attributes
+			.at_entry(path.as_str(), None)?
+			.matching_attributes(&mut matches);
+		let marker_length =
+			matches
+				.iter_selected()
+				.next()
+				.map_or(DEFAULT_CONFLICT_MARKER_LENGTH, |matched| {
+					let value = matched
+						.assignment
+						.state
+						.as_bstr()
+						.and_then(|value| value.to_str().ok());
+					parse_conflict_marker_length(value)
+				});
+		lengths.insert(path.clone(), marker_length);
+	}
+	Ok(lengths)
+}
+
+fn cli_conflict_marker_lengths(
+	root: &Path,
+	paths: &BTreeMap<String, ConflictKind>,
+) -> Result<BTreeMap<String, u32>> {
+	let file_paths = paths
+		.iter()
+		.filter_map(|(path, kind)| (*kind == ConflictKind::File).then_some(path));
+	let mut args = vec![
+		"check-attr".to_owned(),
+		"-z".to_owned(),
+		"conflict-marker-size".to_owned(),
+		"--".to_owned(),
+	];
+	args.extend(file_paths.cloned());
+	if args.len() == 4 {
+		return Ok(BTreeMap::new());
+	}
+	let output = cli_text_owned(root, &args)?;
+	let mut lengths = BTreeMap::new();
+	let mut fields = output.split('\0');
+	while let (Some(path), Some(_attribute), Some(value)) =
+		(fields.next(), fields.next(), fields.next())
+	{
+		lengths.insert(path.to_owned(), parse_conflict_marker_length(Some(value)));
+	}
+	Ok(lengths)
+}
+
+fn insert_conflict_path(
+	paths: &mut BTreeMap<String, ConflictKind>,
+	path: String,
+	kind: ConflictKind,
+) {
+	paths
+		.entry(path)
+		.and_modify(|current| {
+			if kind == ConflictKind::Other {
+				*current = ConflictKind::Other;
+			}
+		})
+		.or_insert(kind);
+}
 fn path_matches(path: &str, wanted: &str) -> bool {
 	let wanted = wanted.trim_end_matches('/');
-	path == wanted
+	wanted.is_empty()
+		|| path == wanted
 		|| path
 			.strip_prefix(wanted)
 			.is_some_and(|rest| rest.starts_with('/'))
@@ -1373,7 +1555,6 @@ mod tests {
 		git(dir.path(), &["update-ref", "refs/remotes/origin/main", "HEAD"])?;
 		git(dir.path(), &["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main"])?;
 		assert_eq!(repo.default_branch()?, Some("main".to_owned()));
-
 		let linked = dir.path().join("linked");
 		let linked_text = linked.to_string_lossy().into_owned();
 		git(dir.path(), &["worktree", "add", "-b", "linked-branch", &linked_text])?;
@@ -1382,6 +1563,168 @@ mod tests {
 		assert_eq!(worktrees[0].path, dir.path());
 		assert_eq!(worktrees[1].path, linked.canonicalize()?);
 		assert_eq!(worktrees[1].branch.as_deref(), Some("refs/heads/linked-branch"));
+		Ok(())
+	}
+
+	#[test]
+	fn conflicted_paths_come_from_unmerged_index_entries() -> TestResult {
+		let (dir, repo) = repo()?;
+		commit(dir.path(), "file.txt", "base\n", "base")?;
+		git(dir.path(), &["checkout", "-b", "left"])?;
+		commit(dir.path(), "file.txt", "left\n", "left")?;
+		git(dir.path(), &["checkout", "main"])?;
+		commit(dir.path(), "file.txt", "right\n", "right")?;
+		let merge = Command::new("git")
+			.current_dir(dir.path())
+			.args(["merge", "left"])
+			.output()?;
+		assert!(!merge.status.success());
+
+		let conflicts = repo.conflicted_paths(&[])?;
+		assert_eq!(conflicts.len(), 1);
+		assert_eq!(conflicts[0].path, "file.txt");
+		assert_eq!(conflicts[0].kind, ConflictKind::File);
+		assert_eq!(conflicts[0].regions.len(), 1);
+		let region = &conflicts[0].regions[0];
+		assert_eq!((region.start_line, region.separator_line, region.end_line), (1, 5, 7));
+		assert_eq!(region.marker_length, 7);
+		assert_eq!(region.sides.len(), 2);
+		assert_eq!(region.bases.len(), 1);
+		assert_eq!(repo.conflicted_paths(&["/".to_owned()])?, conflicts);
+		assert!(repo.conflicted_paths(&["other.txt".to_owned()])?.is_empty());
+		Ok(())
+	}
+
+	#[test]
+	fn conflicted_paths_preserve_materialized_marker_length_after_attribute_change() -> TestResult {
+		let (dir, repo) = repo()?;
+		fs::write(dir.path().join(".gitattributes"), "file.txt conflict-marker-size=3\n")?;
+		commit(dir.path(), "file.txt", "base\n", "base")?;
+		git(dir.path(), &["checkout", "-b", "left"])?;
+		commit(dir.path(), "file.txt", "left\n", "left")?;
+		git(dir.path(), &["checkout", "main"])?;
+		commit(dir.path(), "file.txt", "right\n", "right")?;
+		let merge = Command::new("git")
+			.current_dir(dir.path())
+			.args(["merge", "left"])
+			.output()?;
+		assert!(!merge.status.success());
+		fs::write(dir.path().join(".gitattributes"), "file.txt conflict-marker-size=9\n")?;
+
+		let conflicts = repo.conflicted_paths(&["file.txt".to_owned()])?;
+		assert_eq!(conflicts.len(), 1);
+		assert_eq!(conflicts[0].regions.len(), 1);
+		assert_eq!(conflicts[0].regions[0].marker_length, 3);
+		Ok(())
+	}
+
+	#[test]
+	fn reftable_conflict_filters_treat_paths_literally() -> TestResult {
+		let dir = tempfile::tempdir()?;
+		let init = Command::new("git")
+			.current_dir(dir.path())
+			.args(["init", "--ref-format=reftable", "--initial-branch=main"])
+			.output()?;
+		if !init.status.success() {
+			return Ok(());
+		}
+		git(dir.path(), &["config", "user.name", "Test User"])?;
+		git(dir.path(), &["config", "user.email", "test@example.com"])?;
+		fs::write(dir.path().join("[x].txt"), "base\n")?;
+		git(dir.path(), &["add", "--all"])?;
+		git(dir.path(), &["commit", "-m", "base"])?;
+		git(dir.path(), &["checkout", "-b", "left"])?;
+		fs::write(dir.path().join("[x].txt"), "left\n")?;
+		git(dir.path(), &["commit", "-am", "left"])?;
+		git(dir.path(), &["checkout", "main"])?;
+		fs::write(dir.path().join("[x].txt"), "right\n")?;
+		git(dir.path(), &["commit", "-am", "right"])?;
+		let merge = Command::new("git")
+			.current_dir(dir.path())
+			.args(["merge", "left"])
+			.output()?;
+		assert!(!merge.status.success());
+
+		let repo = GitRepo::require(dir.path())?;
+		assert!(repo.is_reftable());
+		let conflicts = repo.conflicted_paths(&["[x].txt".to_owned()])?;
+		assert_eq!(conflicts.len(), 1);
+		assert_eq!(conflicts[0].path, "[x].txt");
+		assert_eq!(conflicts[0].kind, ConflictKind::File);
+		assert_eq!(conflicts[0].regions.len(), 1);
+		let region = &conflicts[0].regions[0];
+		assert_eq!((region.start_line, region.separator_line, region.end_line), (1, 5, 7));
+		assert_eq!(region.marker_length, 7);
+		assert_eq!(region.sides.len(), 2);
+		assert_eq!(region.bases.len(), 1);
+		assert!(repo.conflicted_paths(&["x.txt".to_owned()])?.is_empty());
+		Ok(())
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn conflicted_symlinks_are_non_file_conflicts() -> TestResult {
+		use std::os::unix::fs::symlink;
+
+		let (dir, repo) = repo()?;
+		symlink("base", dir.path().join("link"))?;
+		git(dir.path(), &["add", "link"])?;
+		git(dir.path(), &["commit", "-m", "base"])?;
+		git(dir.path(), &["checkout", "-b", "left"])?;
+		fs::remove_file(dir.path().join("link"))?;
+		symlink("left", dir.path().join("link"))?;
+		git(dir.path(), &["commit", "-am", "left"])?;
+		git(dir.path(), &["checkout", "main"])?;
+		fs::remove_file(dir.path().join("link"))?;
+		symlink("right", dir.path().join("link"))?;
+		git(dir.path(), &["commit", "-am", "right"])?;
+		let merge = Command::new("git")
+			.current_dir(dir.path())
+			.args(["merge", "left"])
+			.output()?;
+		assert!(!merge.status.success());
+
+		assert_eq!(repo.conflicted_paths(&[])?, vec![ConflictInfo {
+			path:    "link".to_owned(),
+			kind:    ConflictKind::Other,
+			regions: Vec::new(),
+		}]);
+		Ok(())
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn mixed_file_and_symlink_terms_are_non_file_conflicts() -> TestResult {
+		use std::os::unix::fs::symlink;
+
+		let (dir, repo) = repo()?;
+		git(dir.path(), &["commit", "--allow-empty", "-m", "base"])?;
+		git(dir.path(), &["checkout", "-b", "left"])?;
+		fs::write(dir.path().join("node"), "left\n")?;
+		git(dir.path(), &["add", "node"])?;
+		git(dir.path(), &["commit", "-m", "left"])?;
+		git(dir.path(), &["checkout", "main"])?;
+		symlink("right", dir.path().join("node"))?;
+		git(dir.path(), &["add", "node"])?;
+		git(dir.path(), &["commit", "-m", "right"])?;
+		let merge = Command::new("git")
+			.current_dir(dir.path())
+			.args(["merge", "left"])
+			.output()?;
+		assert!(!merge.status.success());
+
+		assert_eq!(repo.conflicted_paths(&[])?, vec![
+			ConflictInfo {
+				path:    "node".to_owned(),
+				kind:    ConflictKind::Other,
+				regions: Vec::new(),
+			},
+			ConflictInfo {
+				path:    "node~left".to_owned(),
+				kind:    ConflictKind::File,
+				regions: Vec::new(),
+			},
+		]);
 		Ok(())
 	}
 }

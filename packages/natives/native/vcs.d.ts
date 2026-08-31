@@ -1,5 +1,6 @@
 import type {
 	VcsCloneOptions,
+	VcsConflictRegion,
 	VcsGitRepo,
 	VcsGitRepoInfo,
 	VcsHunkSelection,
@@ -59,6 +60,12 @@ export declare function gitInfo(dir: string): VcsGitRepoInfo | null;
 
 /** Discover the Jujutsu workspace containing `dir`; `null` when absent. */
 export declare function jj(dir: string): VcsJjWorkspace | null;
+
+/** Parse standalone Git or Jujutsu conflict markers through the native grammars. */
+export declare function parseConflictMarkers(
+	content: Uint8Array,
+	minimumMarkerLength?: number,
+): VcsConflictRegion[];
 
 /** Whether jj is the nearest VCS ancestor, making git automation unsafe. */
 export declare function isPureJj(dir: string): boolean;

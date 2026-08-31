@@ -15,6 +15,69 @@ pub enum VcsKind {
 	Jj,
 }
 
+/// Broad kind of a recorded VCS conflict.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConflictKind {
+	/// A conflict whose terms are files or file absence and may be materialized
+	/// as conflict markers in the working copy.
+	File,
+	/// A tree-value conflict (for example file versus directory or symlink)
+	/// which cannot be represented as an editable text marker block.
+	Other,
+}
+
+/// Materialized conflict marker grammar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MaterializedConflictStyle {
+	/// Git merge or diff3 markers.
+	Git,
+	/// Jujutsu diff markers.
+	JjDiff,
+	/// Jujutsu snapshot markers.
+	JjSnapshot,
+}
+
+/// One positive side or negative base term in a materialized conflict.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConflictTerm {
+	/// Optional marker label.
+	pub label:   Option<String>,
+	/// Exact term content, including its original line endings.
+	pub content: String,
+}
+
+/// One complete materialized conflict block in the working-copy file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConflictRegion {
+	/// One-indexed line containing the opening marker.
+	pub start_line:     u32,
+	/// One-indexed line containing the primary separator or first term marker.
+	pub separator_line: u32,
+	/// One-indexed line containing the closing marker.
+	pub end_line:       u32,
+	/// One-indexed line containing the first base marker.
+	pub base_line:      Option<u32>,
+	/// Marker grammar used by this block.
+	pub style:          MaterializedConflictStyle,
+	/// Marker length used by this materialized block.
+	pub marker_length:  u32,
+	/// Positive merge terms.
+	pub sides:          Vec<ConflictTerm>,
+	/// Negative merge terms.
+	pub bases:          Vec<ConflictTerm>,
+}
+
+/// Metadata for one unresolved repository path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConflictInfo {
+	/// Worktree-relative path.
+	pub path:    String,
+	/// Whether the conflict can be represented as file contents.
+	pub kind:    ConflictKind,
+	/// Complete materialized marker blocks validated by the owning backend.
+	pub regions: Vec<ConflictRegion>,
+}
+
 /// Status counts shown by status displays.
 ///
 /// Jujutsu has no index, so its `staged` is always zero.

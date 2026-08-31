@@ -10,18 +10,22 @@ use std::{
 };
 
 use jj_lib::{
-	backend::{CommitId, CopyId, TreeValue},
+	backend::{CommitId, MergedTreeValue, MergedTreeValueExt as _},
 	commit::Commit,
 	config::{ConfigSource, StackedConfig},
-	conflicts::{ConflictMarkerStyle, ConflictMaterializeOptions, materialize_tree_value},
+	conflicts::{
+		ConflictMarkerStyle, ConflictMaterializeOptions, MIN_CONFLICT_MARKER_LEN,
+		materialize_tree_value,
+	},
 	default_backend_factories::{default_backend_factories, default_working_copy_factories},
 	diff_presentation::{
 		LineCompareMode,
 		unified::{DiffLineType, GitDiffPart, git_diff_part, unified_diff_hunks},
 	},
 	gitignore::GitIgnoreFile,
+	local_working_copy::LocalWorkingCopy,
 	matchers::{EverythingMatcher, NothingMatcher},
-	merge::{Diff, MergedTreeValue},
+	merge::Diff,
 	merged_tree::MergedTree,
 	object_id::{HexPrefix, ObjectId as _, PrefixResolution},
 	repo::{ReadonlyRepo, Repo},
@@ -34,7 +38,10 @@ use jj_lib::{
 use super::JjWorkspace;
 use crate::{
 	error::{Error, Result},
-	types::{CommitAuthor, CommitDetails, NumstatEntry, StatusOptions, StatusSummary},
+	types::{
+		CommitAuthor, CommitDetails, ConflictInfo, ConflictKind, NumstatEntry, StatusOptions,
+		StatusSummary,
+	},
 };
 
 const DIFF_CONTEXT: usize = 3;
@@ -101,6 +108,7 @@ impl JjWorkspace {
 
 				let prefix_len = repo
 					.shortest_unique_change_id_prefix_len(wc_commit.change_id())
+					.await
 					.map_err(|err| Error::backend("jj log", err))?
 					.max(8);
 				let change_id = wc_commit.change_id().reverse_hex();
@@ -141,6 +149,68 @@ impl JjWorkspace {
 					}
 				}
 				Ok(summary)
+			})
+		})
+	}
+
+	/// List paths whose working-copy commit records unresolved tree values.
+	pub fn conflicted_paths(&self, files: &[String]) -> Result<Vec<ConflictInfo>> {
+		let files = files.to_vec();
+		self.with_current_repo("jj conflicts", move |workspace, repo| {
+			Box::pin(async move {
+				let Some(wc_id) = repo.view().get_wc_commit_id(workspace.workspace_name()) else {
+					return Ok(Vec::new());
+				};
+				let commit = repo
+					.store()
+					.get_commit_async(wc_id)
+					.await
+					.map_err(|err| Error::backend("jj conflicts", err))?;
+				let file_states = workspace
+					.working_copy()
+					.downcast_ref::<LocalWorkingCopy>()
+					.map(LocalWorkingCopy::file_states)
+					.transpose()
+					.map_err(|err| Error::backend("jj conflicts", err))?;
+				let mut conflicts = Vec::new();
+				for (path, value) in commit.tree().conflicts() {
+					if !files.is_empty()
+						&& !files.iter().any(|wanted| {
+							matches_path(path.as_internal_file_string(), wanted.trim_matches('/'))
+						}) {
+						continue;
+					}
+					let value = value.map_err(|err| Error::backend("jj conflicts", err))?;
+					let file_merge = value.to_file_merge();
+					let kind = if file_merge.is_some() {
+						ConflictKind::File
+					} else {
+						ConflictKind::Other
+					};
+					let marker_length = file_states
+						.as_ref()
+						.and_then(|states| states.get(&path))
+						.and_then(|state| state.materialized_conflict_data)
+						.map_or(MIN_CONFLICT_MARKER_LEN as u32, |data| data.conflict_marker_len);
+					let regions = if let Some(file_merge) = file_merge {
+						let disk_path = path.to_fs_path_unchecked(workspace.workspace_root());
+						let content = tokio::fs::read(disk_path).await.unwrap_or_default();
+						crate::conflict::jj_regions(
+							&content,
+							file_merge.num_sides(),
+							marker_length as usize,
+						)
+					} else {
+						Vec::new()
+					};
+					conflicts.push(ConflictInfo {
+						path: path.as_internal_file_string().to_owned(),
+						kind,
+						regions,
+					});
+				}
+				conflicts.sort_by(|left, right| left.path.cmp(&right.path));
+				Ok(conflicts)
 			})
 		})
 	}
@@ -234,6 +304,7 @@ impl JjWorkspace {
 				for commit in commits {
 					let prefix_len = repo
 						.shortest_unique_change_id_prefix_len(commit.change_id())
+						.await
 						.map_err(|err| Error::backend("jj log", err))?
 						.max(8);
 					let change_id = commit.change_id().reverse_hex();
@@ -250,7 +321,8 @@ impl JjWorkspace {
 		let rev = rev.to_owned();
 		self.with_current_repo("jj show", move |workspace, repo| {
 			Box::pin(async move {
-				let commit_id = resolve_commit_id(workspace, repo.as_ref(), &rev)?
+				let commit_id = resolve_commit_id(workspace, repo.as_ref(), &rev)
+					.await?
 					.ok_or_else(|| Error::ObjectNotFound { spec: rev.clone() })?;
 				let commit = repo
 					.store()
@@ -413,7 +485,11 @@ fn commit_subject(commit: &Commit) -> String {
 		.to_owned()
 }
 
-fn resolve_commit_id(
+#[allow(
+	clippy::future_not_send,
+	reason = "jj-lib index futures are local to the blocking workspace task"
+)]
+async fn resolve_commit_id(
 	workspace: &Workspace,
 	repo: &dyn Repo,
 	rev: &str,
@@ -427,6 +503,7 @@ fn resolve_commit_id(
 	if let Some(prefix) = HexPrefix::try_from_reverse_hex(rev) {
 		let resolution = repo
 			.resolve_change_id_prefix(&prefix)
+			.await
 			.map_err(|err| Error::backend("jj show", err))?;
 		if let PrefixResolution::SingleMatch(targets) = resolution {
 			let mut visible = targets.visible_with_offsets().map(|(_, id)| id.clone());
@@ -440,6 +517,7 @@ fn resolve_commit_id(
 		let resolution = repo
 			.index()
 			.resolve_commit_id_prefix(&prefix)
+			.await
 			.map_err(|err| Error::backend("jj show", err))?;
 		if let PrefixResolution::SingleMatch(id) = resolution {
 			return Ok(Some(id));
@@ -1217,5 +1295,77 @@ mod tests {
 		let details = workspace.commit_details("@").unwrap();
 		assert_eq!(details.sha, workspace.head_id().unwrap().unwrap());
 		assert_eq!(details.parents.len(), 1);
+	}
+	#[test]
+	fn conflicted_paths_read_first_class_working_copy_conflicts() {
+		if !jj_available() {
+			return;
+		}
+		let temp = tempfile::tempdir().unwrap();
+		run_jj(temp.path(), &["git", "init", "."]);
+		fs::write(temp.path().join("file.txt"), "base\n").unwrap();
+		run_jj(temp.path(), &["commit", "-m", "base"]);
+		run_jj(temp.path(), &["bookmark", "create", "base", "-r", "@-"]);
+
+		fs::write(temp.path().join("file.txt"), "left\n").unwrap();
+		run_jj(temp.path(), &["commit", "-m", "left"]);
+		run_jj(temp.path(), &["bookmark", "create", "left", "-r", "@-"]);
+
+		run_jj(temp.path(), &["new", "base"]);
+		fs::write(temp.path().join("file.txt"), "right\n").unwrap();
+		run_jj(temp.path(), &["commit", "-m", "right"]);
+		run_jj(temp.path(), &["bookmark", "create", "right", "-r", "@-"]);
+		run_jj(temp.path(), &["new", "left", "right"]);
+		let file_path = temp.path().join("file.txt");
+		let mut materialized = fs::read(&file_path).unwrap();
+		materialized.extend_from_slice(
+			b"\n<<<<<<< example\n+++++++ side 1\none\n+++++++ side 2\ntwo\n+++++++ side 3\nthree\n>>>>>>> example ends\n",
+		);
+		fs::write(file_path, materialized).unwrap();
+
+		let workspace = JjWorkspace::require(temp.path()).unwrap();
+		let conflicts = workspace.conflicted_paths(&[]).unwrap();
+		assert_eq!(conflicts.len(), 1);
+		assert_eq!(conflicts[0].path, "file.txt");
+		assert_eq!(conflicts[0].kind, ConflictKind::File);
+		assert_eq!(conflicts[0].regions.len(), 1);
+		assert_eq!(conflicts[0].regions[0].marker_length, 7);
+		assert_eq!(conflicts[0].regions[0].sides.len(), 2);
+		assert_eq!(conflicts[0].regions[0].bases.len(), 1);
+		assert!(
+			workspace
+				.conflicted_paths(&["other.txt".to_owned()])
+				.unwrap()
+				.is_empty()
+		);
+	}
+
+	#[test]
+	fn conflicted_paths_classify_non_file_tree_conflicts() {
+		if !jj_available() {
+			return;
+		}
+		let temp = tempfile::tempdir().unwrap();
+		run_jj(temp.path(), &["git", "init", "."]);
+		run_jj(temp.path(), &["commit", "-m", "base"]);
+		run_jj(temp.path(), &["bookmark", "create", "base", "-r", "@-"]);
+
+		fs::write(temp.path().join("node"), "file\n").unwrap();
+		run_jj(temp.path(), &["commit", "-m", "file"]);
+		run_jj(temp.path(), &["bookmark", "create", "file", "-r", "@-"]);
+
+		run_jj(temp.path(), &["new", "base"]);
+		fs::create_dir_all(temp.path().join("node")).unwrap();
+		fs::write(temp.path().join("node/child"), "child\n").unwrap();
+		run_jj(temp.path(), &["commit", "-m", "directory"]);
+		run_jj(temp.path(), &["bookmark", "create", "directory", "-r", "@-"]);
+		run_jj(temp.path(), &["new", "file", "directory"]);
+
+		let workspace = JjWorkspace::require(temp.path()).unwrap();
+		assert_eq!(workspace.conflicted_paths(&[]).unwrap(), vec![ConflictInfo {
+			path:    "node".to_owned(),
+			kind:    ConflictKind::Other,
+			regions: Vec::new(),
+		}]);
 	}
 }
