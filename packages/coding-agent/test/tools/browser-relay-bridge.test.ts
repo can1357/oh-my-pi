@@ -1465,6 +1465,53 @@ describe("RelayBridge tab grouping", () => {
 		await flush();
 	});
 
+	it("retries live owner cleanup after an extension replacement", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })], { attachedTabIds: [1] });
+		const owner = new FakeCdpSocket();
+		const ownerConn = bridge.cdpConnected(owner);
+		const ownerSession = await attachPage(bridge, ext, owner, ownerConn, 1);
+		const holder = new FakeCdpSocket();
+		const holderConn = bridge.cdpConnected(holder);
+		const holderSession = await attachPage(bridge, ext, holder, holderConn, 1);
+
+		bridge.cdpMessage(
+			ownerConn,
+			JSON.stringify({
+				id: ++msgSeq,
+				sessionId: ownerSession,
+				method: "Fetch.enable",
+				params: { patterns: [{ urlPattern: "https://owner.example/*" }] },
+			}),
+		);
+		await flush();
+		ack(bridge, ext, "send");
+		await flush();
+
+		bridge.cdpClosed(ownerConn);
+		await waitFor(() => ext.pending("send").length === 1, "live cleanup send on the old socket");
+		expect(ext.pending("send").map(rpc => rpc.method)).toEqual(["Fetch.disable"]);
+
+		const replacement = new FakeExtSocket();
+		connect(bridge, replacement, [tab({ tabId: 1 })], { attachedTabIds: [1], recoverableTabIds: [1] });
+		await waitFor(() => replacement.pending("send").length === 1, "retried live cleanup on replacement socket");
+		expect(replacement.pending("send").map(rpc => rpc.method)).toEqual(["Fetch.disable"]);
+		ack(bridge, replacement, "send");
+		await flush();
+
+		const commandId = ++msgSeq;
+		bridge.cdpMessage(
+			holderConn,
+			JSON.stringify({ id: commandId, sessionId: holderSession, method: "Network.getCookies" }),
+		);
+		await flush();
+		expect(replacement.rpcs("send").map(rpc => rpc.method)).toEqual(["Fetch.disable", "Network.getCookies"]);
+		ack(bridge, replacement, "send", { cookies: [] });
+		await flush();
+		expect(holder.messages.filter(message => message.id === commandId && "result" in message)).toHaveLength(1);
+	});
+
 	it("reapplies the latest surviving live root subscription when an orphaned in-flight setter completes", async () => {
 		const bridge = new RelayBridge({});
 		const ext = new FakeExtSocket();

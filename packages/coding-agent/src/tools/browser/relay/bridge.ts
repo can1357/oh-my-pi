@@ -201,6 +201,35 @@ function subscriptionEquals(
 	);
 }
 
+function mergeSubscriptionChanges(
+	existing: Array<{
+		key: string;
+		previous: SessionRootSubscription | undefined;
+		next: SessionRootSubscription | undefined;
+	}>,
+	incoming: Array<{
+		key: string;
+		previous: SessionRootSubscription | undefined;
+		next: SessionRootSubscription | undefined;
+	}>,
+): Array<{
+	key: string;
+	previous: SessionRootSubscription | undefined;
+	next: SessionRootSubscription | undefined;
+}> {
+	const merged = new Map<
+		string,
+		{
+			key: string;
+			previous: SessionRootSubscription | undefined;
+			next: SessionRootSubscription | undefined;
+		}
+	>();
+	for (const change of existing) merged.set(change.key, change);
+	for (const change of incoming) merged.set(change.key, { ...merged.get(change.key), ...change });
+	return [...merged.values()];
+}
+
 interface TargetInfo {
 	targetId: string;
 	type: "tab" | "page" | "browser";
@@ -278,6 +307,12 @@ class TabState {
 	restoringExt: RelaySocket | null = null;
 	/** Serializes live root-state cleanup after owner loss while the tab stays attached. */
 	subscriptionReconciling: Promise<void> | null = null;
+	/** Live root-state cleanup interrupted by extension replacement; retry on the next hello. */
+	pendingSubscriptionReconcile: Array<{
+		key: string;
+		previous: SessionRootSubscription | undefined;
+		next: SessionRootSubscription | undefined;
+	}> = [];
 	/** Recovery replay must complete, including after an extension socket replacement. */
 	restorePending = false;
 	/** Effective root-domain state by subscription key and owning page pseudo-session. */
@@ -554,6 +589,9 @@ export class RelayBridge {
 			const holders = this.#sessionHolders(tab.tabId);
 			const preserve = holders.filter(conn => !conn.autoAttach && conn.sessionsForTab(tab.tabId).length > 0);
 			if (tab.attached) {
+				if (tab.pendingSubscriptionReconcile.length > 0) {
+					this.#scheduleLiveSubscriptionReconcile(tab, tab.pendingSubscriptionReconcile);
+				}
 				if (holders.length === 0 && (!hasRecoveryMetadata || recoverableNow.has(tab.tabId))) {
 					this.#detachIfUnheld(tab.tabId);
 					continue;
@@ -1299,6 +1337,7 @@ export class RelayBridge {
 		}>,
 	): void {
 		if (changes.length === 0) return;
+		tab.pendingSubscriptionReconcile = mergeSubscriptionChanges(tab.pendingSubscriptionReconcile, changes);
 		if (!tab.attached || tab.detaching || tab.restoring || this.#sessionHolders(tab.tabId).length === 0) return;
 		const expectedExt = this.#ext;
 		if (!expectedExt) return;
@@ -1308,7 +1347,7 @@ export class RelayBridge {
 			.then(async () => {
 				if (!tab.attached || tab.detaching || tab.restoring || this.#sessionHolders(tab.tabId).length === 0) return;
 				this.#assertExtensionCurrent(expectedExt);
-				const ordered = [...changes].sort((left, right) => {
+				const ordered = [...tab.pendingSubscriptionReconcile].sort((left, right) => {
 					const leftSeq = left.next?.sequence ?? left.previous?.sequence ?? Number.MAX_SAFE_INTEGER;
 					const rightSeq = right.next?.sequence ?? right.previous?.sequence ?? Number.MAX_SAFE_INTEGER;
 					return leftSeq - rightSeq;
@@ -1325,9 +1364,11 @@ export class RelayBridge {
 					await this.#rpc({ op: "send", tabId: tab.tabId, method: command.method, params: command.params });
 					this.#assertExtensionCurrent(expectedExt);
 				}
+				tab.pendingSubscriptionReconcile = [];
 			})
 			.catch(err => {
 				if (err instanceof ExtensionReplacedError) return;
+				tab.pendingSubscriptionReconcile = [];
 				this.#log("live subscription cleanup failed", {
 					tabId: tab.tabId,
 					error: err instanceof Error ? err.message : String(err),
