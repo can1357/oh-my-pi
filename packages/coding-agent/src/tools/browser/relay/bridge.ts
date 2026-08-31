@@ -995,6 +995,7 @@ export class RelayBridge {
 			case "Page.setBypassCSP":
 			case "Emulation.setTouchEmulationEnabled":
 			case "Page.setTouchEmulationEnabled":
+			case "Input.setInterceptDrags":
 				enabled = msg.params?.enabled === true;
 				break;
 			case "Network.setExtraHTTPHeaders": {
@@ -1176,6 +1177,7 @@ export class RelayBridge {
 				case "Page.setBypassCSP":
 				case "Emulation.setTouchEmulationEnabled":
 				case "Page.setTouchEmulationEnabled":
+				case "Input.setInterceptDrags":
 					this.#forgetTabSubscription(tab, subscriptionKey(msg.method));
 					break;
 				default:
@@ -1388,6 +1390,7 @@ export class RelayBridge {
 			case "Page.setBypassCSP":
 			case "Emulation.setTouchEmulationEnabled":
 			case "Page.setTouchEmulationEnabled":
+			case "Input.setInterceptDrags":
 			case "Network.setExtraHTTPHeaders":
 			case "Network.setBlockedURLs":
 			case "Emulation.setEmulatedMedia":
@@ -1553,6 +1556,7 @@ export class RelayBridge {
 			case "Page.setBypassCSP":
 			case "Emulation.setTouchEmulationEnabled":
 			case "Page.setTouchEmulationEnabled":
+			case "Input.setInterceptDrags":
 				return { method: subscription.method, params: { enabled: false } };
 			case "Emulation.setEmulatedMedia":
 				return {
