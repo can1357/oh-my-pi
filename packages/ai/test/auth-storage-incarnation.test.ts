@@ -118,7 +118,7 @@ describe("AuthStorage credential incarnation and workspace fan-out", () => {
 		expect(blocked.has(idSibling)).toBe(false);
 	});
 
-	it("fans a 402 deactivated workspace out to same-account siblings and leaves other Team accounts selectable", async () => {
+	it("does not fan deactivated_workspace across distinct organization-qualified identities", async () => {
 		if (!storage) throw new Error("setup failed");
 		await storage.set(PROVIDER, [
 			oauth({ suffix: "team-a", accountId: "chatgpt-shared", email: "shared@example.com", orgId: "ws-team-a" }),
@@ -153,10 +153,11 @@ describe("AuthStorage credential incarnation and workspace fan-out", () => {
 
 		const blocked = new Set(storage.listCredentialBlocks([idA, idSibling, idOther]).map(block => block.credentialId));
 		expect(blocked.has(idA)).toBe(true);
-		expect(blocked.has(idSibling)).toBe(true);
+		// Shared accountId alone must not fan out across different org workspaces.
+		expect(blocked.has(idSibling)).toBe(false);
 		expect(blocked.has(idOther)).toBe(false);
 
 		const key = await storage.getApiKey(PROVIDER, "fresh-session");
-		expect(key).toBe("access-team-b");
+		expect(key === "access-team-a-sibling" || key === "access-team-b").toBe(true);
 	});
 });

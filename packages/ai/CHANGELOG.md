@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Fixed deactivated_workspace fan-out tests for org-scoped identities, and treated empty previousResponseId as present rather than falling through to internal chaining.
 - Fixed quota-probe leases still applying on the allowBlocked OAuth pass for Retry-After blocks, workspace deactivation fan-out matching only organization-qualified identity keys, and Chat→Responses `json_schema.description` preservation.
 
 ### Added
