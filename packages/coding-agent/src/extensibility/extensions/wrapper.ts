@@ -9,8 +9,9 @@ import type {
 	ToolLoadMode,
 } from "@oh-my-pi/pi-agent-core";
 import type { ComputerSafetyCheck, ImageContent, Static, TextContent, TSchema } from "@oh-my-pi/pi-ai";
-import { sanitizeText, untilAborted } from "@oh-my-pi/pi-utils";
+import { logger, sanitizeText, untilAborted } from "@oh-my-pi/pi-utils";
 import type { Theme } from "@oh-my-pi/pi-tui/theme";
+import type { Settings } from "../../config/settings";
 import {
 	denyError,
 	formatApprovalPrompt,
@@ -181,6 +182,15 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 		onUpdate?: AgentToolUpdateCallback<TDetails, TParameters>,
 		context?: AgentToolContext,
 	): Promise<AgentToolResult<TDetails, TParameters>> {
+		const settings: Settings | undefined = context?.settings ?? this.runner.sessionSettings;
+		try {
+			await settings?.reloadGlobalIfChangedOnDisk?.();
+		} catch (error) {
+			logger.warn("Settings reload before tool approval failed", {
+				tool: this.tool.name,
+				error: String(error),
+			});
+		}
 		// The agent loop emits `tool_call` at arg-prep time (session
 		// `beforeToolCall` wiring) so a handler revision lands before concurrency
 		// scheduling and `tool_execution_start`. Consume the marker
@@ -193,7 +203,7 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 		// re-resolves against the (possibly revised) input so a handler cannot rewrite into a denied or
 		// newly prompt-gated command and have it run unapproved.
 		const { approvalMode, userPolicies } = resolveApprovalFromContext(
-			context ?? (this.runner.sessionSettings ? { settings: this.runner.sessionSettings } : undefined),
+			context ?? (settings ? { settings } : undefined),
 		);
 		const preResolved = resolveApproval(this.tool, approvalArgs(params, context), approvalMode, userPolicies);
 		if (preResolved.policy === "deny") {
