@@ -5560,16 +5560,26 @@ export class AuthStorage {
 					!this.#isCredentialBlocked(provider, providerKey, index, blockScopes ?? blockScope),
 			);
 			if (hasUsableSibling) return undefined;
+			if (!options?.requestId) return undefined;
 			const probeScope = blockScope ?? "";
+			// Honor persisted Retry-After blocks loaded after restart / from another
+			// process: sync into the in-memory lease book before trying to acquire.
+			const blockedUntil = this.#getCredentialBlockedUntil(
+				provider,
+				providerKey,
+				selection.index,
+				blockScopes ?? blockScope,
+			);
+			if (blockedUntil !== undefined) {
+				this.#probeLeases.noteRetryAfterBlock(blockedId, probeScope, blockedUntil);
+			}
 			const lease = this.tryAcquireQuotaProbeLease(blockedId, probeScope);
 			if (!lease) return undefined;
-			if (options?.requestId) {
-				this.#inflightProbes.set(options.requestId, {
-					credentialId: blockedId,
-					blockScope: probeScope,
-					leaseId: lease,
-				});
-			}
+			this.#inflightProbes.set(options.requestId, {
+				credentialId: blockedId,
+				blockScope: probeScope,
+				leaseId: lease,
+			});
 		}
 
 		if (!(await this.#prepareOAuthCredentialForRequest(provider, selection, options))) {
@@ -6662,6 +6672,11 @@ export class AuthStorage {
 								Date.now() + AuthStorage.#defaultBackoffMs)
 							: Date.now() + AuthStorage.#defaultBackoffMs;
 					this.#probeLeases.noteRetryAfterBlock(credentialId, "", until);
+					// markUsageLimitReached is chat/spark scoped for openai-codex; workspace
+					// deactivation must also block the source credential globally.
+					if (sourceIndex >= 0) {
+						this.#markCredentialBlocked(provider, providerKey, sourceIndex, until);
+					}
 					this.#fanOutWorkspaceDeactivation(provider, credentialId, until, true);
 				}
 			}
