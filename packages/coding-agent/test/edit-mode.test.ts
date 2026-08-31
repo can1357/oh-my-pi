@@ -67,6 +67,19 @@ describe("resolveEditMode", () => {
 		expect(resolveEditMode(createSession({ activeModel: "kilo/stepfun/step-3.7-flash:free" }))).toBe("sloppy");
 	});
 
+	test("falls back from hashline to sloppy for GLM Flash models", () => {
+		delete Bun.env.PI_EDIT_VARIANT;
+
+		expect(resolveEditMode(createSession({ activeModel: "zai/glm-5.3-flash" }))).toBe("sloppy");
+		expect(resolveEditMode(createSession({ activeModel: "glm-4.5-flashx" }))).toBe("sloppy");
+	});
+
+	test("does not exclude non-Flash GLM models", () => {
+		delete Bun.env.PI_EDIT_VARIANT;
+
+		expect(resolveEditMode(createSession({ activeModel: "zai/glm-5.3" }))).toBe("hashline");
+	});
+
 	test("does not exclude non-Kimi Moonshot models", () => {
 		delete Bun.env.PI_EDIT_VARIANT;
 

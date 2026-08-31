@@ -13,7 +13,7 @@
 
 ### Changed
 
-- Disabled `hashline` edit mode for Kimi, Mimo, DeepSeek Flash, and Stepfun models for stability
+- Disabled `hashline` edit mode for Kimi, Mimo, DeepSeek Flash, Stepfun, and GLM Flash models for stability
 
 ### Fixed
 
