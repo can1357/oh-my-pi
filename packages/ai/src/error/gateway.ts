@@ -238,28 +238,38 @@ function classifyOwnerDisposition(
 		return { owner: "request", disposition: "request_terminal" };
 	}
 
+	// Message heuristics for no authoritative status (synthesized 502) must run
+	// before the generic 5xx provider_unavailable bucket, otherwise overflow /
+	// policy / usage wording is unreachable.
+	const authoritativeStatus =
+		(typeof err === "object" && err !== null && "status" in err && typeof (err as { status: unknown }).status === "number") ||
+		extractEmbeddedStatus(message) !== undefined;
+	if (!authoritativeStatus || status < 500) {
+		if (isUsageLimit(err) || isUsageLimit(message)) {
+			return { owner: "quota", disposition: "credential_quota" };
+		}
+		if (POLICY_PATTERN.test(message)) {
+			return { owner: "policy", disposition: "policy_terminal" };
+		}
+		if (matchesOverflowText(message)) {
+			return { owner: "request", disposition: "context_overflow" };
+		}
+		if (!authoritativeStatus && TIMEOUT_OR_CONNECTION_PATTERN.test(message)) {
+			return { owner: "transport", disposition: "provider_transient" };
+		}
+		if (!authoritativeStatus && INVALID_REQUEST_PATTERN.test(message)) {
+			return { owner: "request", disposition: "request_terminal" };
+		}
+		if (!authoritativeStatus) {
+			return { owner: "provider", disposition: "provider_unavailable" };
+		}
+	}
+
 	if (status >= 500) {
 		if (TIMEOUT_OR_CONNECTION_PATTERN.test(message)) {
 			return { owner: "provider", disposition: "provider_transient" };
 		}
 		return { owner: "provider", disposition: "provider_unavailable" };
-	}
-
-	// No authoritative status signal (fall-through): message heuristics only.
-	if (isUsageLimit(err) || isUsageLimit(message)) {
-		return { owner: "quota", disposition: "credential_quota" };
-	}
-	if (POLICY_PATTERN.test(message)) {
-		return { owner: "policy", disposition: "policy_terminal" };
-	}
-	if (matchesOverflowText(message)) {
-		return { owner: "request", disposition: "context_overflow" };
-	}
-	if (TIMEOUT_OR_CONNECTION_PATTERN.test(message)) {
-		return { owner: "transport", disposition: "provider_transient" };
-	}
-	if (INVALID_REQUEST_PATTERN.test(message)) {
-		return { owner: "request", disposition: "request_terminal" };
 	}
 
 	return { owner: "provider", disposition: "provider_unavailable" };
