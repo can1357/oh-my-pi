@@ -7,7 +7,6 @@
  */
 
 import * as fs from "node:fs/promises";
-import * as os from "node:os";
 import * as path from "node:path";
 
 import { isEnoent, logger, pathIsWithin } from "@oh-my-pi/pi-utils";
@@ -289,7 +288,11 @@ export class MarketplaceManager {
 		} = await resolvePluginSource(pluginEntry, {
 			marketplaceClonePath,
 			catalogMetadata: catalog.metadata,
-			tmpDir: os.tmpdir(),
+			// Extract directly under the plugin cache staging area so the extracted
+			// tree lands on the same filesystem as the cache and cachePlugin's staged
+			// rename stays cheap. A sibling `.staging-tmp` dir keeps it out of the
+			// cache's own namespace; the resolver cleans up its temp root in finally.
+			tmpDir: path.join(this.#opts.pluginsCacheDir, ".staging-tmp"),
 		});
 
 		// 5. Determine version: npm resolved version > catalog entry > plugin manifest > git SHA > fallback
@@ -644,25 +647,58 @@ export class MarketplaceManager {
 				if (!mktEntry) continue;
 
 				let catalogVersion: string | undefined;
+				let npmSourceVersion: string | undefined;
 				try {
 					const catalog = await this.#readCatalog(mktEntry);
-					catalogVersion = catalog.plugins.find(p => p.name === parsed.name)?.version;
+					const pluginEntry = catalog.plugins.find(p => p.name === parsed.name);
+					catalogVersion = pluginEntry?.version;
+					// For npm-sourced plugins with no top-level entry.version, fall back to
+					// the npm source's version expression so a marketplace bump of
+					// source.version is detected as an update.
+					if (
+						!catalogVersion &&
+						pluginEntry &&
+						typeof pluginEntry.source === "object" &&
+						pluginEntry.source.source === "npm"
+					) {
+						npmSourceVersion = pluginEntry.source.version;
+					}
 				} catch {
 					continue;
 				}
 
-				if (!catalogVersion || catalogVersion === installed.version) continue;
+				// Use the top-level entry.version when present; otherwise the npm source
+				// version expression (which may be a range such as "^1.0.0").
+				const comparisonVersion = catalogVersion ?? npmSourceVersion;
+				if (!comparisonVersion || comparisonVersion === installed.version) continue;
+
+				// npm range-versus-selected-version rule:
+				// Installation resolves an npm source version expression (which may be a
+				// range like "^1.0.0") to an exact version and persists that exact version
+				// in the installed registry. The catalog keeps the original range. Do not
+				// report an update merely because the range string differs from the
+				// installed exact version when that exact version still satisfies the
+				// unchanged catalog range. Only flag an update when the expression changed
+				// so that the installed version no longer satisfies it.
+				if (npmSourceVersion && !catalogVersion) {
+					try {
+						if (Bun.semver.satisfies(installed.version, npmSourceVersion)) continue;
+					} catch {
+						// Non-semver expression (e.g. a dist-tag) — fall through to the
+						// string-inequality check below.
+					}
+				}
 
 				// Treat newer semver as an update; fall back to inequality for non-semver tags.
 				let isNewer: boolean;
 				try {
-					isNewer = Bun.semver.order(catalogVersion, installed.version) > 0;
+					isNewer = Bun.semver.order(comparisonVersion, installed.version) > 0;
 				} catch {
-					isNewer = catalogVersion !== installed.version;
+					isNewer = comparisonVersion !== installed.version;
 				}
 
 				if (isNewer) {
-					updates.push({ pluginId, scope, from: installed.version, to: catalogVersion });
+					updates.push({ pluginId, scope, from: installed.version, to: comparisonVersion });
 				}
 			}
 		}

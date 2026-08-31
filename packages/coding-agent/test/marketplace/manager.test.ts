@@ -1,4 +1,6 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, spyOn } from "bun:test";
+import * as childProcess from "node:child_process";
+import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -7,6 +9,8 @@ import { listOmpExtensionRoots } from "@oh-my-pi/pi-coding-agent/discovery/omp-e
 import { getEnabledPlugins } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/loader";
 import { PluginManager } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/manager";
 import {
+	assertRuntimePackageName,
+	MAX_RUNTIME_PACKAGE_NAME_LENGTH,
 	MarketplaceManager,
 	readInstalledPluginsRegistry,
 	readMarketplacesRegistry,
@@ -14,6 +18,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/marketplace";
 import * as piUtils from "@oh-my-pi/pi-utils";
 import { removeSyncWithRetries } from "@oh-my-pi/pi-utils";
+import { encodeArchive } from "@oh-my-pi/pi-utils/ar";
 
 // Minimal marketplace fixture, built once into a temp dir (see beforeAll). It carries only
 // what these tests assert — one plugin entry plus a plugin.json for the version-fallback path —
@@ -1010,9 +1015,6 @@ describe("MarketplaceManager", () => {
 
 // ── npm source integration tests ───────────────────────────────────
 
-import * as crypto from "node:crypto";
-import { encodeArchive } from "@oh-my-pi/pi-utils/ar";
-
 const NPM_REGISTRY = "https://registry.test-npm.example";
 
 async function makeNpmTarball(packageName: string, version: string): Promise<Uint8Array> {
@@ -1151,9 +1153,34 @@ describe("MarketplaceManager — npm source", () => {
 		// First install succeeds
 		const firstEntry = await ctx.manager.installPlugin("npm-plugin", "npm-test-marketplace");
 		expect(firstEntry.version).toBe(version);
+		const firstInstallPath = firstEntry.installPath;
+		// Force the downstream cache step to fail on a second forced install by
+		// pointing pluginsCacheDir at a path whose parent is a file (not a dir),
+		// so fs.mkdir(recursive) inside cachePlugin throws ENOTDIR.
+		const blockFile = path.join(ctx.tmpDir, "block-file");
+		fs.writeFileSync(blockFile, "block");
+		const badCacheDir = path.join(blockFile, "unreachable", "plugins");
 
-		// Verify the installed plugin is accessible
-		expect(fs.existsSync(path.join(firstEntry.installPath, "package.json"))).toBe(true);
+		// Build a manager with the broken cache dir but the same registries so
+		// the existing install entry is visible to the force-reinstall path.
+		const badManager = new MarketplaceManager({
+			marketplacesRegistryPath: path.join(ctx.tmpDir, "marketplaces.json"),
+			installedRegistryPath: ctx.installedRegistryPath,
+			projectInstalledRegistryPath: path.join(ctx.tmpDir, "project_installed_plugins.json"),
+			marketplacesCacheDir: path.join(ctx.tmpDir, "cache", "marketplaces"),
+			pluginsCacheDir: badCacheDir,
+			clearPluginRootsCache: () => {},
+		});
+
+		// The force reinstall must fail at the cache step.
+		await expect(badManager.installPlugin("npm-plugin", "npm-test-marketplace", { force: true })).rejects.toThrow();
+
+		// Original install path and registry entry must survive the failed reinstall.
+		const reg = await readInstalledPluginsRegistry(ctx.installedRegistryPath);
+		const installed = reg.plugins["npm-plugin@npm-test-marketplace"];
+		expect(installed).toBeDefined();
+		expect(installed?.[0]?.installPath).toBe(firstInstallPath);
+		expect(fs.existsSync(firstInstallPath)).toBe(true);
 	});
 
 	it("installPlugin with npm source does not launch processes", async () => {
@@ -1165,10 +1192,37 @@ describe("MarketplaceManager — npm source", () => {
 		npmFixtureDir = buildNpmMarketplaceFixture(pkg, version, NPM_REGISTRY);
 		await ctx.manager.addMarketplace(npmFixtureDir);
 
-		// Install should complete without spawning any child processes
-		const entry = await ctx.manager.installPlugin("npm-plugin", "npm-test-marketplace");
-		expect(entry.version).toBe(version);
-		expect(fs.existsSync(path.join(entry.installPath, "package.json"))).toBe(true);
+		// Spy on every process-spawning entry point to assert zero invocations.
+		const spawnSpy = spyOn(Bun, "spawn");
+		const spawnSyncSpy = spyOn(Bun, "spawnSync");
+		const cp = childProcess;
+		const cpSpawnSpy = spyOn(cp, "spawn");
+		const cpSpawnSyncSpy = spyOn(cp, "spawnSync");
+		const cpExecSpy = spyOn(cp, "exec");
+		const cpExecSyncSpy = spyOn(cp, "execSync");
+		const cpExecFileSpy = spyOn(cp, "execFile");
+
+		try {
+			const entry = await ctx.manager.installPlugin("npm-plugin", "npm-test-marketplace");
+			expect(entry.version).toBe(version);
+			expect(fs.existsSync(path.join(entry.installPath, "package.json"))).toBe(true);
+
+			expect(spawnSpy).toHaveBeenCalledTimes(0);
+			expect(spawnSyncSpy).toHaveBeenCalledTimes(0);
+			expect(cpSpawnSpy).toHaveBeenCalledTimes(0);
+			expect(cpSpawnSyncSpy).toHaveBeenCalledTimes(0);
+			expect(cpExecSpy).toHaveBeenCalledTimes(0);
+			expect(cpExecSyncSpy).toHaveBeenCalledTimes(0);
+			expect(cpExecFileSpy).toHaveBeenCalledTimes(0);
+		} finally {
+			spawnSpy.mockRestore();
+			spawnSyncSpy.mockRestore();
+			cpSpawnSpy.mockRestore();
+			cpSpawnSyncSpy.mockRestore();
+			cpExecSpy.mockRestore();
+			cpExecSyncSpy.mockRestore();
+			cpExecFileSpy.mockRestore();
+		}
 	});
 
 	it("installPlugin with npm source persists exact selected version", async () => {
@@ -1207,5 +1261,119 @@ describe("MarketplaceManager — npm source", () => {
 
 		// Should persist 1.0.0 (the exact resolved version), not 2.0.0 (latest)
 		expect(entry.version).toBe("1.0.0");
+	});
+
+	it("checkForUpdates reports update when npm plugin has no top-level version but source.version is bumped", async () => {
+		const pkg = "test-npm-plugin";
+		const version = "1.0.0";
+		const tarballBytes = await makeNpmTarball(pkg, version);
+		await setupNpmFetch(pkg, version, tarballBytes);
+
+		npmFixtureDir = buildNpmMarketplaceFixture(pkg, version, NPM_REGISTRY);
+		await ctx.manager.addMarketplace(npmFixtureDir);
+
+		// Install at 1.0.0
+		const firstEntry = await ctx.manager.installPlugin("npm-plugin", "npm-test-marketplace");
+		expect(firstEntry.version).toBe(version);
+
+		// Bump the source.version in the cached catalog (no top-level version field).
+		const list = await ctx.manager.listMarketplaces();
+		const catalogPath = list[0].catalogPath;
+		const content = await Bun.file(catalogPath).text();
+		const catalog = JSON.parse(content) as { plugins: Array<Record<string, unknown>> };
+		// Remove top-level version, bump source.version to 2.0.0
+		delete catalog.plugins[0].version;
+		const src = catalog.plugins[0].source as { version?: string };
+		src.version = "2.0.0";
+		await Bun.write(catalogPath, `${JSON.stringify(catalog, null, 2)}\n`);
+
+		// checkForUpdates should fall back to source.version and report the update.
+		const updates = await ctx.manager.checkForUpdates();
+		expect(updates).toHaveLength(1);
+		expect(updates[0].to).toBe("2.0.0");
+		expect(updates[0].from).toBe(version);
+	});
+
+	it("checkForUpdates does not report update when npm range is satisfied by installed exact version", async () => {
+		const pkg = "test-npm-plugin";
+		// Catalog declares a range; install resolves it to 1.5.0.
+		const range = "^1.0.0";
+		const installedVersion = "1.5.0";
+		const tarballBytes = await makeNpmTarball(pkg, installedVersion);
+		const integrity = npmSri(tarballBytes);
+		const tarballUrl = `${NPM_REGISTRY}/${pkg}/-/${pkg}-${installedVersion}.tgz`;
+
+		// Packument with the installed version available.
+		const packument = {
+			name: pkg,
+			"dist-tags": { latest: installedVersion },
+			versions: {
+				[installedVersion]: { name: pkg, dist: { tarball: tarballUrl, integrity } },
+			},
+		};
+
+		fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async (input: string | URL | Request) => {
+			const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+			if (url === `${NPM_REGISTRY}/${pkg}`) {
+				return new Response(JSON.stringify(packument), {
+					status: 200,
+					headers: { "content-type": "application/json" },
+				});
+			}
+			if (url === tarballUrl) {
+				return new Response(tarballBytes, { status: 200 });
+			}
+			return new Response("not found", { status: 404 });
+		}) as unknown as typeof fetch);
+
+		// Marketplace fixture uses the range, not an exact version.
+		npmFixtureDir = buildNpmMarketplaceFixture(pkg, range, NPM_REGISTRY);
+		await ctx.manager.addMarketplace(npmFixtureDir);
+
+		// Install — resolver selects 1.5.0 from the ^1.0.0 range.
+		const entry = await ctx.manager.installPlugin("npm-plugin", "npm-test-marketplace");
+		expect(entry.version).toBe(installedVersion);
+
+		// Remove top-level version so checkForUpdates falls back to source.version
+		// (the range "^1.0.0"), which differs as a string from "1.5.0" but is
+		// satisfied by it. Under the old unequal-string fallback this would
+		// falsely report an update; the fix suppresses it.
+		const list = await ctx.manager.listMarketplaces();
+		const catalogPath = list[0].catalogPath;
+		const content = await Bun.file(catalogPath).text();
+		const catalog = JSON.parse(content) as { plugins: Array<Record<string, unknown>> };
+		delete catalog.plugins[0].version;
+		await Bun.write(catalogPath, `${JSON.stringify(catalog, null, 2)}\n`);
+
+		const updates = await ctx.manager.checkForUpdates();
+		expect(updates).toHaveLength(0);
+	});
+});
+
+// ── Package-name invariant (types.ts) ────────────────────────────────
+
+describe("assertRuntimePackageName — 214-byte cap", () => {
+	it("accepts a 214-char lowercase name", () => {
+		const name = `a${"b".repeat(213)}`;
+		expect(name.length).toBe(214);
+		expect(assertRuntimePackageName(name)).toBe(name);
+	});
+
+	it("rejects a 215-char name", () => {
+		const name = `a${"b".repeat(214)}`;
+		expect(name.length).toBe(215);
+		expect(() => assertRuntimePackageName(name)).toThrow(/Invalid.*package name/);
+	});
+
+	it("rejects uppercase letters", () => {
+		expect(() => assertRuntimePackageName("UpperCase")).toThrow(/Invalid.*package name/);
+	});
+
+	it("rejects empty string", () => {
+		expect(() => assertRuntimePackageName("")).toThrow(/Invalid.*package name/);
+	});
+
+	it("MAX_RUNTIME_PACKAGE_NAME_LENGTH is 214", () => {
+		expect(MAX_RUNTIME_PACKAGE_NAME_LENGTH).toBe(214);
 	});
 });
