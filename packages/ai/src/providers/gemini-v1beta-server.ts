@@ -24,6 +24,8 @@ import type {
 	ServiceTier,
 	StopReason,
 	TextContent,
+	ToolCall,
+	ToolResultMessage,
 } from "../types";
 
 export type { ParsedRequest };
@@ -74,7 +76,7 @@ function readInlineData(part: Record<string, unknown>): ImageContent | undefined
 	return { type: "image", mimeType, data };
 }
 
-/** Map Gemini parts to user/assistant content, preserving inlineData images. */
+/** Map Gemini text/inlineData parts to user/assistant content. */
 function contentFromGeminiParts(parts: unknown): string | (TextContent | ImageContent)[] {
 	if (!Array.isArray(parts)) return "";
 	const blocks: (TextContent | ImageContent)[] = [];
@@ -94,21 +96,74 @@ function contentFromGeminiParts(parts: unknown): string | (TextContent | ImageCo
 			blocks.push(image);
 			continue;
 		}
-		if (
-			part.fileData !== undefined ||
-			part.file_data !== undefined ||
-			part.functionCall !== undefined ||
-			part.function_call !== undefined ||
-			part.functionResponse !== undefined ||
-			part.function_response !== undefined
-		) {
+		if (part.fileData !== undefined || part.file_data !== undefined) {
 			throw new AIError.ValidationError(
-				"gemini-v1beta: unsupported part type (fileData/functionCall/functionResponse); only text and inlineData are accepted",
+				"gemini-v1beta: unsupported part type (fileData); only text, inlineData, functionCall, and functionResponse are accepted",
 			);
 		}
 	}
 	if (!hasImage) return textOnly;
 	return blocks;
+}
+
+function readFunctionCall(part: Record<string, unknown>): ToolCall | undefined {
+	const call = part.functionCall ?? part.function_call;
+	if (!isRecord(call)) return undefined;
+	const name = typeof call.name === "string" ? call.name : undefined;
+	if (!name) return undefined;
+	const id =
+		typeof call.id === "string" && call.id.length > 0
+			? call.id
+			: `gemini_call_${name}_${Math.random().toString(36).slice(2, 10)}`;
+	const args = call.args ?? call.arguments;
+	return {
+		type: "toolCall",
+		id,
+		name,
+		arguments: isRecord(args) ? args : {},
+	};
+}
+
+function functionResponseToToolResult(
+	part: Record<string, unknown>,
+	timestamp: number,
+): ToolResultMessage | undefined {
+	const resp = part.functionResponse ?? part.function_response;
+	if (!isRecord(resp)) return undefined;
+	const name = typeof resp.name === "string" ? resp.name : "unknown";
+	const id =
+		typeof resp.id === "string" && resp.id.length > 0
+			? resp.id
+			: `gemini_resp_${name}_${Math.random().toString(36).slice(2, 10)}`;
+	const response = resp.response;
+	let isError = false;
+	let text = "";
+	if (typeof response === "string") {
+		text = response;
+	} else if (isRecord(response)) {
+		if (typeof response.error === "string") {
+			isError = true;
+			text = response.error;
+		} else if (typeof response.output === "string") {
+			text = response.output;
+		} else {
+			try {
+				text = JSON.stringify(response);
+			} catch {
+				text = String(response);
+			}
+		}
+	} else if (response !== undefined) {
+		text = String(response);
+	}
+	return {
+		role: "toolResult",
+		toolCallId: id,
+		toolName: name,
+		content: text.length > 0 ? [{ type: "text", text }] : [],
+		isError,
+		timestamp,
+	};
 }
 
 function textFromOpenAiContent(content: unknown): string {
@@ -155,17 +210,18 @@ function classifyRole(role: unknown): "user" | "assistant" | "system" | undefine
 }
 
 function makeAssistantMessage(
-	content: string | (TextContent | ImageContent)[],
+	content: string | (TextContent | ImageContent | ToolCall)[],
 	modelId: string,
 	timestamp: number,
 ): AssistantMessage {
-	const blocks: TextContent[] =
+	const blocks: (TextContent | ToolCall)[] =
 		typeof content === "string"
 			? content.length > 0
 				? [{ type: "text", text: content }]
 				: []
-			: content.filter((block): block is TextContent => block.type === "text");
-	// Assistant turns only carry text on this wire path; images stay on user turns.
+			: content.filter(
+					(block): block is TextContent | ToolCall => block.type === "text" || block.type === "toolCall",
+				);
 	return {
 		role: "assistant",
 		content: blocks,
@@ -189,7 +245,7 @@ function pushTurn(
 	messages: Message[],
 	systemParts: string[],
 	role: "user" | "assistant" | "system",
-	content: string | (TextContent | ImageContent)[],
+	content: string | (TextContent | ImageContent | ToolCall)[],
 	modelId: string,
 	timestamp: number,
 ): void {
@@ -204,11 +260,15 @@ function pushTurn(
 		if (text.length > 0) systemParts.push(text);
 		return;
 	}
-	const empty =
-		typeof content === "string" ? content.length === 0 : content.length === 0;
+	const empty = typeof content === "string" ? content.length === 0 : content.length === 0;
 	if (empty) return;
-	if (role === "user") messages.push({ role: "user", content, timestamp });
-	else messages.push(makeAssistantMessage(content, modelId, timestamp));
+	if (role === "user") {
+		const userContent: string | (TextContent | ImageContent)[] =
+			typeof content === "string"
+				? content
+				: content.filter((block): block is TextContent | ImageContent => block.type !== "toolCall");
+		messages.push({ role: "user", content: userContent, timestamp });
+	} else messages.push(makeAssistantMessage(content, modelId, timestamp));
 }
 
 function walkContents(
@@ -220,14 +280,41 @@ function walkContents(
 ): void {
 	for (const item of contents) {
 		if (!isRecord(item)) continue;
-		pushTurn(
-			messages,
-			systemParts,
-			classifyRole(item.role) ?? "user",
-			contentFromGeminiParts(item.parts),
-			modelId,
-			timestamp,
-		);
+		const role = classifyRole(item.role) ?? "user";
+		const parts = Array.isArray(item.parts) ? item.parts : [];
+		const toolCalls: ToolCall[] = [];
+		const toolResults: ToolResultMessage[] = [];
+		const mediaParts: unknown[] = [];
+		for (const part of parts) {
+			if (!isRecord(part)) continue;
+			const call = readFunctionCall(part);
+			if (call) {
+				toolCalls.push(call);
+				continue;
+			}
+			const result = functionResponseToToolResult(part, timestamp);
+			if (result) {
+				toolResults.push(result);
+				continue;
+			}
+			mediaParts.push(part);
+		}
+		const content = contentFromGeminiParts(mediaParts);
+		if (toolCalls.length > 0) {
+			const blocks: (TextContent | ImageContent | ToolCall)[] =
+				typeof content === "string"
+					? [...(content.length > 0 ? [{ type: "text" as const, text: content }] : []), ...toolCalls]
+					: [...content, ...toolCalls];
+			pushTurn(messages, systemParts, role === "system" ? "assistant" : role, blocks, modelId, timestamp);
+		} else {
+			const hasContent = !(typeof content === "string" ? content.length === 0 : content.length === 0);
+			if (hasContent) {
+				pushTurn(messages, systemParts, role, content, modelId, timestamp);
+			}
+		}
+		for (const result of toolResults) {
+			messages.push(result);
+		}
 	}
 }
 
@@ -265,6 +352,17 @@ function applyGenerationConfig(options: ParsedRequest["options"], config: Record
 	if (stopSequences) options.stopSequences = stopSequences;
 	const serviceTier = config.serviceTier ?? config.service_tier;
 	if (isServiceTier(serviceTier)) options.serviceTier = serviceTier;
+	const responseMimeType =
+		typeof config.responseMimeType === "string"
+			? config.responseMimeType
+			: typeof config.response_mime_type === "string"
+				? config.response_mime_type
+				: undefined;
+	if (responseMimeType !== undefined) options.responseMimeType = responseMimeType;
+	const responseSchema = config.responseSchema ?? config.response_schema;
+	if (isRecord(responseSchema)) options.responseSchema = responseSchema;
+	const responseJsonSchema = config.responseJsonSchema ?? config.response_json_schema;
+	if (isRecord(responseJsonSchema)) options.responseJsonSchema = responseJsonSchema;
 }
 
 function applyOpenAiSampling(options: ParsedRequest["options"], body: Record<string, unknown>): void {
@@ -303,7 +401,7 @@ export function parseRequest(body: unknown, _headers?: Headers, defaultStream = 
 		throw new AIError.ValidationError("gemini-v1beta: messages must be an array");
 	}
 
-	const modelId = typeof body.model === "string" ? body.model : "";
+	const modelId = typeof body.model === "string" && body.model.length > 0 ? body.model : "";
 	const now = Date.now();
 	const messages: Message[] = [];
 	const systemParts: string[] = [];

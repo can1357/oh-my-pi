@@ -140,6 +140,27 @@ export const FORMAT_ROUTES: Record<string, { module: FormatModule; label: string
 	"/v1beta/models/streamGenerateContent": { module: geminiV1beta, label: "gemini-v1beta" },
 };
 
+/** Canonical Gemini SDK paths: `/v1beta/models/{model}:generateContent[|stream…]`. */
+const GEMINI_CANONICAL_PATH =
+	/^\/v1beta\/models\/([^/:]+):(generateContent|streamGenerateContent)$/;
+
+function matchFormatRoute(
+	pathname: string,
+): { route: { module: FormatModule; label: string }; pathname: string; pathModel?: string } | undefined {
+	const exact = FORMAT_ROUTES[pathname];
+	if (exact) return { route: exact, pathname };
+	const gemini = GEMINI_CANONICAL_PATH.exec(pathname);
+	if (!gemini) return undefined;
+	const op = gemini[2]!;
+	const staticPath =
+		op === "streamGenerateContent"
+			? "/v1beta/models/streamGenerateContent"
+			: "/v1beta/models/generateContent";
+	const route = FORMAT_ROUTES[staticPath];
+	if (!route) return undefined;
+	return { route, pathname: staticPath, pathModel: decodeURIComponent(gemini[1]!) };
+}
+
 // (passthrough fast-path removed — it bypassed pi-ai provider logic, in
 // particular the Anthropic Claude-Code OAuth system-prompt prefix injection.
 // Every request now takes the translate path so credential-specific request
@@ -261,6 +282,9 @@ export function applyParsedGatewayOptions(opts: SimpleStreamOptions, options: Au
 	if (options.logitBias !== undefined) opts.logitBias = options.logitBias;
 	if (options.user !== undefined) opts.user = options.user;
 	if (options.responseFormat !== undefined) opts.responseFormat = options.responseFormat;
+	if (options.responseMimeType !== undefined) opts.responseMimeType = options.responseMimeType;
+	if (options.responseSchema !== undefined) opts.responseSchema = options.responseSchema;
+	if (options.responseJsonSchema !== undefined) opts.responseJsonSchema = options.responseJsonSchema;
 }
 
 /**
@@ -702,6 +726,7 @@ async function handleFormatEndpoint(
 	health: ProviderHealthBook,
 	cacheStore: PromptCacheAffinityStore,
 	pathname?: string,
+	pathModel?: string,
 ): Promise<Response> {
 	const startedAt = performance.now();
 	const requestId = crypto.randomUUID();
@@ -718,12 +743,12 @@ async function handleFormatEndpoint(
 	if (controller.signal.aborted) return clientClosedResponse(route);
 
 	// All three supported wire formats put the model id on a top-level `model`
-	// field. Read it without running the full strict schema so the route can
-	// produce a coherent error envelope when the model id is missing.
-	const modelId =
+	// field. Gemini SDKs encode it in the path instead (`/v1beta/models/{id}:…`).
+	const bodyModel =
 		typeof body === "object" && body !== null && typeof (body as { model?: unknown }).model === "string"
 			? (body as { model: string }).model
 			: undefined;
+	const modelId = bodyModel || pathModel;
 	if (!modelId) {
 		return route.module.formatError(400, "invalid_request_error", "Missing top-level `model` field");
 	}
@@ -769,6 +794,7 @@ async function handleFormatEndpoint(
 		const message = error instanceof Error ? error.message : String(error);
 		return route.module.formatError(400, "invalid_request_error", message);
 	}
+	if (!parsed.modelId) parsed.modelId = modelId;
 	// Native Gemini clients select streaming via the URL (`streamGenerateContent`)
 	// rather than a `stream` body field. Default generateContent to JSON; only the
 	// stream URL (or an explicit body.stream) opts into SSE.
@@ -1200,7 +1226,14 @@ async function handleFormatEndpoint(
 			return clientClosedResponse(route);
 		}
 		sseStream = releaseTurnOnStreamEnd(held.stream, bootOpts.storage, requestId, commitGate);
-		rememberPromptCacheHit(cacheStore, fingerprint, model, sessionId, currentTarget);
+		const affinityModel = model;
+		const affinityTarget = currentTarget;
+		void settled
+			.then(message => {
+				if (message.stopReason === "error" || message.stopReason === "aborted") return;
+				rememberPromptCacheHit(cacheStore, fingerprint, affinityModel, sessionId, affinityTarget);
+			})
+			.catch(() => {});
 		await runHook(bootOpts.hooks?.afterRequest, {
 			requestId,
 			routeId: compiled.id,
@@ -1678,7 +1711,14 @@ async function handlePiNative(
 			return aborted();
 		}
 		sseStream = releaseTurnOnStreamEnd(held.stream, bootOpts.storage, requestId, commitGate);
-		rememberPromptCacheHit(cacheStore, fingerprint, model, sessionId, currentTarget);
+		const affinityModel = model;
+		const affinityTarget = currentTarget;
+		void settled
+			.then(message => {
+				if (message.stopReason === "error" || message.stopReason === "aborted") return;
+				rememberPromptCacheHit(cacheStore, fingerprint, affinityModel, sessionId, affinityTarget);
+			})
+			.catch(() => {});
 		return new Response(sseStream, {
 			status: 200,
 			headers: {
@@ -1992,9 +2032,21 @@ export function startAuthGateway(opts: AuthGatewayBootOptions): AuthGatewayServe
 					return withCors(await handleImageGeneration(req), req);
 				}
 				// Provider-format dispatch.
-				const formatRoute = FORMAT_ROUTES[pathname];
-				if (formatRoute && req.method === "POST") {
-					return withCors(await handleFormatEndpoint(formatRoute, boot, req, peer, health, cacheStore, pathname), req);
+				const matched = matchFormatRoute(pathname);
+				if (matched && req.method === "POST") {
+					return withCors(
+						await handleFormatEndpoint(
+							matched.route,
+							boot,
+							req,
+							peer,
+							health,
+							cacheStore,
+							matched.pathname,
+							matched.pathModel,
+						),
+						req,
+					);
 				}
 
 				// Pi-native fast path. Same auth + provider plumbing as the

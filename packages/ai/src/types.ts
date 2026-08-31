@@ -503,6 +503,12 @@ export interface StreamOptions {
 	user?: string;
 	/** OpenAI `response_format` (text | json_object | json_schema). Opaque passthrough. */
 	responseFormat?: unknown;
+	/** Gemini structured-output mime type (`application/json`, …). */
+	responseMimeType?: string;
+	/** Gemini `responseSchema` (OpenAPI-ish schema object). */
+	responseSchema?: Record<string, unknown>;
+	/** Gemini `responseJsonSchema` (JSON Schema object). */
+	responseJsonSchema?: Record<string, unknown>;
 	/**
 	 * Disable native reasoning when the caller supplies an external scratchpad.
 	 * OpenAI Responses emits `reasoning: { effort: "none" }`; Anthropic and
