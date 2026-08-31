@@ -22,6 +22,7 @@ import {
 	type EmbeddableSchema,
 	embed,
 	expectedOf,
+	hasDeferredAlias,
 	hasMorph,
 	type IR,
 	IR_BRAND,
@@ -431,7 +432,15 @@ function descriptionOf(ir: IR, seen: Set<IR> = new Set()): string {
 	if (ir.desc !== undefined) return ir.desc;
 	if (seen.has(ir)) return ir.k === "alias" ? ir.name : expectedOf(ir);
 	seen.add(ir);
-	if (ir.k === "alias") return descriptionOf(ir.resolve(), seen);
+	if (ir.k === "alias") {
+		// Deferred alias (z.lazy): its getter must not run before first parse —
+		// appendPipes resolves descriptions eagerly at composition time via
+		// metaOf, so resolving here would break recursive `const` definitions.
+		// The internal `$defs` name is not a description, so report the only
+		// thing known about the node instead of leaking it into error prose.
+		if (ir.deferred === true) return "a recursive value";
+		return descriptionOf(ir.resolve(), seen);
+	}
 	if (ir.k === "object") {
 		return `{ ${ir.props.map(prop => `${String(prop.key)}${prop.opt ? "?" : ""}: ${descriptionOf(prop.val, seen)}`).join(", ")} }`;
 	}
@@ -1005,8 +1014,16 @@ const typeMethods = {
 			this.allows = allows;
 			return allows(data);
 		}
-		for (const step of steps) {
-			if (step.kind === "filter" && !step.fn(data, new Ctx(data))) return false;
+		if (steps.some(step => step.kind === "filter")) {
+			// Mirror the callable path, which validates the projected input before
+			// running any filter: a predicate receives a value of its declared
+			// input type, so `v.a.length` cannot throw on malformed data. Without
+			// this, `allows()` invoked the predicate first and a filter carried
+			// into `.in` turned a rejection into an exception.
+			if (walk(projectIO(this.ir, "in"), data) instanceof OmpErrors) return false;
+			for (const step of steps) {
+				if (step.kind === "filter" && !step.fn(data, new Ctx(data))) return false;
+			}
 		}
 		const out = this[kBase](data);
 		if (out instanceof OmpErrors) return false;
@@ -1088,7 +1105,11 @@ Object.defineProperty(typeMethods, "~standard", {
 
 Object.defineProperty(typeMethods, "in", {
 	get(this: InternalType): InternalType {
-		return makeType(projectIO(this.ir, "in"), [], {});
+		// Filter steps ARE the input side: dropping them would let `.in` admit
+		// values the schema itself rejects. `narrow`/`pipe` steps run on the
+		// output and are correctly absent here.
+		const filters = this[kSteps].filter(step => step.kind === "filter");
+		return makeType(projectIO(this.ir, "in"), filters, {});
 	},
 });
 
@@ -1406,15 +1427,24 @@ function morphIdentities(ir: IR, identities: unknown[] = [], seen = new Set<IR>(
 	if (seen.has(ir)) return identities;
 	seen.add(ir);
 	switch (ir.k) {
-		case "morph":
-			identities.push(
-				ir.out === undefined
-					? ir.fn
-					: `declared:${expressionOf(projectIO(ir.input, "in"))}=>${expressionOf(projectIO(ir.out, "out"))}`,
-			);
+		case "morph": {
+			// Deferred aliases must not resolve here (construction-time scan).
+			// A declared-out morph whose projected sides contain one falls back
+			// to its function identity — strictly finer than the string form.
+			const out = ir.out;
+			const projectedIn = out === undefined ? undefined : projectIO(ir.input, "in");
+			const projectedOut = out === undefined ? undefined : projectIO(out, "out");
+			const declared =
+				out !== undefined &&
+				projectedIn !== undefined &&
+				projectedOut !== undefined &&
+				!hasDeferredAlias(projectedIn) &&
+				!hasDeferredAlias(projectedOut);
+			identities.push(declared ? `declared:${expressionOf(projectedIn)}=>${expressionOf(projectedOut)}` : ir.fn);
 			morphIdentities(ir.input, identities, seen);
 			if (ir.out !== undefined) morphIdentities(ir.out, identities, seen);
 			break;
+		}
 		case "sub": {
 			const schema = ir.schema as InternalType;
 			for (const step of schema[kSteps]) if (step.kind === "pipe") identities.push(step.fn);
@@ -1444,6 +1474,9 @@ function morphIdentities(ir: IR, identities: unknown[] = [], seen = new Set<IR>(
 			morphIdentities(ir.base, identities, seen);
 			break;
 		case "alias":
+			// Deferred alias (z.lazy): no identities known without resolving the
+			// getter, and resolving here would run user code during construction.
+			if (ir.deferred === true) break;
 			morphIdentities(ir.resolve(), identities, seen);
 			break;
 	}
@@ -1467,12 +1500,16 @@ function assertDeterminateMorphUnions(ir: IR, seen = new Set<IR>()): void {
 				) {
 					continue;
 				}
-				// Unwrap one alias level eagerly: the disjointness probe relies on
-				// intersect() throwing, and deferred alias intersections resolve lazily.
+				// Unwrap one alias level eagerly — but never a deferred one: its
+				// getter must not run during construction, and intersect() with the
+				// unresolved alias returns a lazy reference, which the probe reads
+				// as "overlap unproven" → indeterminate → the shim's ordered
+				// dispatcher. The widening gates normally exclude such members;
+				// this guard is the backstop.
 				let leftInput = projectIO(left, "in");
 				let rightInput = projectIO(right, "in");
-				if (leftInput.k === "alias") leftInput = leftInput.resolve();
-				if (rightInput.k === "alias") rightInput = rightInput.resolve();
+				if (leftInput.k === "alias" && leftInput.deferred !== true) leftInput = leftInput.resolve();
+				if (rightInput.k === "alias" && rightInput.deferred !== true) rightInput = rightInput.resolve();
 				if (leftInput.k === "object" && rightInput.k === "object") {
 					const leftKeys = new Set(leftInput.props.map(prop => prop.key));
 					const rightKeys = new Set(rightInput.props.map(prop => prop.key));
@@ -1496,6 +1533,9 @@ function assertDeterminateMorphUnions(ir: IR, seen = new Set<IR>()): void {
 	}
 	switch (ir.k) {
 		case "alias":
+			// Deferred alias (z.lazy): skip — content unknown until first parse;
+			// its morph-ness is already handled conservatively by hasMorph.
+			if (ir.deferred === true) return;
 			assertDeterminateMorphUnions(ir.resolve(), seen);
 			break;
 		case "morph":
@@ -1867,6 +1907,9 @@ function mergeObjects(left: ObjectIR, right: ObjectIR): ObjectIR {
 				? undefined
 				: [...(left.patternIndexes ?? []), ...(right.patternIndexes ?? [])],
 		extras: right.extras === "keep" ? left.extras : right.extras,
+		// Spreading one object into another keeps the narrower input domain, for
+		// the same reason `intersect` does.
+		plain: left.plain === true || right.plain === true ? true : undefined,
 	};
 }
 
@@ -1999,6 +2042,23 @@ function intersect(a: IR, b: IR): IR {
 	return intersectResolved(a, b);
 }
 
+/**
+ * Whether a plain-only object node can accept an instance of `ctor`.
+ *
+ * The built-ins listed here are exactly the ones `isPlainRecord` refuses, so an
+ * intersection with them is empty and a union containing both branches is
+ * provably disjoint. An ordinary class instance IS plain-record input and stays
+ * satisfiable. A custom thenable is not detectable from a constructor, so it
+ * stays satisfiable too — conservative in the safe direction, since the union
+ * then keeps the ordered dispatcher instead of being proven disjoint.
+ */
+function plainAcceptsInstance(ctor: Constructor): boolean {
+	for (const excluded of [Array, Date, Map, Set, Promise]) {
+		if (ctor === excluded || ctor.prototype instanceof excluded) return false;
+	}
+	return true;
+}
+
 function intersectResolved(a: IR, b: IR): IR {
 	if (a.k === "never" || b.k === "never") throw new OmpTypeError("intersection with never is unsatisfiable");
 	if (a.k === "unknown") return b;
@@ -2078,7 +2138,11 @@ function intersectResolved(a: IR, b: IR): IR {
 					? "delete"
 					: "keep";
 		const index = a.index && b.index ? intersect(a.index, b.index) : (a.index ?? b.index);
-		return { k: "object", props, index, extras };
+		// An intersection accepts only what BOTH sides accept, so the narrower
+		// input domain wins: dropping `plain` here let `.and()` widen a schema
+		// back to accepting arrays and built-ins.
+		const plain = a.plain === true || b.plain === true ? true : undefined;
+		return { k: "object", props, index, extras, plain };
 	}
 	if (a.k === "string" && b.k === "string") {
 		const min = maxOf(a.min, b.min);
@@ -2130,7 +2194,22 @@ function intersectResolved(a: IR, b: IR): IR {
 		(a.k === "object" && (b.k === "array" || b.k === "tuple")) ||
 		(b.k === "object" && (a.k === "array" || a.k === "tuple"))
 	) {
+		// Without a domain restriction the intersection is inhabited — an array
+		// carrying the object's properties — but a plain-only object excludes
+		// arrays outright, which is what makes `z.union([z.object(…),
+		// z.array(…)])` provably disjoint and keeps its structural `anyOf`
+		// instead of erasing to the ordered dispatcher.
+		if ((a.k === "object" && a.plain === true) || (b.k === "object" && b.plain === true)) {
+			throw new OmpTypeError("intersection of a plain object and an array is unsatisfiable");
+		}
 		return { k: "intersection", members: [a, b] };
+	}
+	if (
+		(a.k === "object" && a.plain === true && b.k === "instance" && !plainAcceptsInstance(b.ctor)) ||
+		(b.k === "object" && b.plain === true && a.k === "instance" && !plainAcceptsInstance(a.ctor))
+	) {
+		const excluded = a.k === "instance" ? a : (b as Extract<IR, { k: "instance" }>);
+		throw new OmpTypeError(`intersection of a plain object and ${excluded.expected} is unsatisfiable`);
 	}
 	const leftDomain = domainOf(a);
 	const rightDomain = domainOf(b);
@@ -2382,6 +2461,11 @@ function isSubtype(source: IR, target: IR, seen = new WeakMap<IR, Set<IR>>()): b
 		return lengthWithin(source, target) && isSubtype(source.el, target.el, seen);
 	}
 	if (source.k === "object" && target.k === "object") {
+		// A plain-only target accepts strictly less than an unrestricted one, so
+		// an unrestricted source cannot be its subtype. Ignoring this let union
+		// normalization prune the wider member and make the union's accepted
+		// input depend on declaration order.
+		if (target.plain === true && source.plain !== true) return false;
 		for (const targetProp of target.props) {
 			const sourceProp = source.props.find(prop => prop.key === targetProp.key);
 			if (sourceProp === undefined) {

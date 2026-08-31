@@ -1,5 +1,6 @@
 import * as fs from "node:fs/promises";
 import { ensureChromiumExecutable } from "@oh-my-pi/pi-coding-agent/tools/browser/launch";
+import { hasDisplay } from "@oh-my-pi/pi-coding-agent/utils/display";
 
 /**
  * Whether the Chromium puppeteer resolves can actually execute on this host.
@@ -47,4 +48,17 @@ let probe: Promise<boolean> | undefined;
 export function chromiumAvailable(): Promise<boolean> {
 	probe ??= chromiumCanLaunch();
 	return probe;
+}
+
+/**
+ * Gate for tests that launch a VISIBLE Chromium (`headless: false`).
+ * {@link chromiumAvailable} only proves the binary execs — `--version` needs no
+ * display — while a headful launch on Linux needs X or Wayland, and puppeteer
+ * fails it with "Missing X server" rather than degrading. CI runners have
+ * neither, so without this the test's outcome depends on which shard it lands
+ * in. Same signal `src/utils/clipboard.ts` uses for the same reason; other
+ * platforms always have a window server.
+ */
+export async function headfulAvailable(): Promise<boolean> {
+	return (await chromiumAvailable()) && hasDisplay();
 }

@@ -16,7 +16,7 @@
  */
 import { MISSING, OmpErrors } from "./errors";
 import { canRefineUnionFailure, materializeDefault, unionFail, walk } from "./interp";
-import { expectedOf, hasMorph, type IR, type MorphContext, type PropIR, type TupleIR } from "./ir";
+import { expectedOf, hasMorph, type IR, isPlainRecord, type MorphContext, type PropIR, type TupleIR } from "./ir";
 
 const own = Object.prototype.hasOwnProperty;
 const IDENT = /^[A-Za-z_$][\w$]*$/;
@@ -210,6 +210,9 @@ class Builder {
 			}
 			case "object": {
 				const checks = [`typeof ${v}==="object"`, `${v}!==null`];
+				// Same predicate the interpreter uses: a compiled validator that
+				// disagreed would make the JIT threshold observable.
+				if (node.plain === true) checks.push(`${this.ref(isPlainRecord)}(${v})`);
 				for (const p of node.props) {
 					const av = this.access(v, p.key);
 					const present = `${this.lit(p.key)} in ${v}`;
@@ -408,10 +411,11 @@ class Builder {
 					this.emitCollectDelegate(node, v, segs, errors);
 					return;
 				}
+				const notRecord = node.plain === true ? `||!${this.ref(isPlainRecord)}(${v})` : "";
 				this.push(
-					`if(typeof ${v}!=="object"||${v}===null){${this.appendError(
+					`if(typeof ${v}!=="object"||${v}===null${notRecord}){${this.appendError(
 						errors,
-						this.error(segs, "an object", failureData),
+						this.error(segs, node.plain === true ? "a plain object" : "an object", failureData),
 					)}}else{`,
 				);
 				for (const prop of node.props) {
@@ -841,10 +845,11 @@ class Builder {
 					this.emitCollectDelegate(node, v, segs, errors, brk, out);
 					return;
 				}
+				const nonRecord = node.plain === true ? `||!${this.ref(isPlainRecord)}(${v})` : "";
 				this.push(
-					`if(typeof ${v}!=="object"||${v}===null){${this.appendError(
+					`if(typeof ${v}!=="object"||${v}===null${nonRecord}){${this.appendError(
 						errors,
-						this.error(segs, "an object", failureData),
+						this.error(segs, node.plain === true ? "a plain object" : "an object", failureData),
 					)}break ${brk};}`,
 				);
 				const object = this.next("o");
@@ -976,7 +981,10 @@ class Builder {
 			}
 			case "object": {
 				const object = this.next("o");
-				this.push(`const ${object}=${v};if(typeof ${object}!=="object"||${object}===null)return false;`);
+				const rejectNonRecord = node.plain === true ? `||!${this.ref(isPlainRecord)}(${object})` : "";
+				this.push(
+					`const ${object}=${v};if(typeof ${object}!=="object"||${object}===null${rejectNonRecord})return false;`,
+				);
 				for (const prop of node.props) {
 					const value = this.next("p");
 					const present = `${this.lit(prop.key)} in ${object}`;

@@ -16,16 +16,16 @@ import { keywordIR, patternIR, templateIR } from "./keywords";
 /** Brand carried by `Type` instances so the parser can embed them in defs. */
 export const IR_BRAND: unique symbol = Symbol("omptype.schema");
 
-const kMorph: unique symbol = Symbol("omptype.hasMorph");
-const kMorphOwner: unique symbol = Symbol("omptype.hasMorphOwner");
+const kScan: unique symbol = Symbol("omptype.scan");
+const kScanOwner: unique symbol = Symbol("omptype.scanOwner");
 const kAlias: unique symbol = Symbol("omptype.hasAlias");
 const kAliasOwner: unique symbol = Symbol("omptype.hasAliasOwner");
 const kSimple: unique symbol = Symbol("omptype.simple");
 const kSimpleOwner: unique symbol = Symbol("omptype.simpleOwner");
 
 interface IRAnalysis {
-	[kMorph]?: boolean;
-	[kMorphOwner]?: object;
+	[kScan]?: ScanResult;
+	[kScanOwner]?: object;
 	[kAlias]?: boolean;
 	[kAliasOwner]?: object;
 	[kSimple]?: boolean;
@@ -34,6 +34,14 @@ interface IRAnalysis {
 	cfg?: ErrorConfig;
 	/** True when `desc` was derived from the node itself rather than authored via `.describe()`. */
 	descAuto?: boolean;
+}
+
+/** One traversal's answer to the scan questions (see {@link scanIR}). */
+interface ScanResult {
+	/** Validating this node can produce an output different from its input. */
+	changesOutput: boolean;
+	/** Any node under this one defers resolution to first parse (`z.lazy`). */
+	hasDeferredAlias: boolean;
 }
 
 /**
@@ -130,6 +138,18 @@ export type IR = IRAnalysis &
 				symbolIndex?: IR;
 				patternIndexes?: { key: IR; val: IR }[];
 				extras: Extras;
+				/**
+				 * Restrict accepted input to plain records: reject arrays and the
+				 * built-ins that carry their own domain (`Date`, `Map`, `Set`,
+				 * thenables). Unset keeps omptype's default, where any non-null
+				 * object is object input.
+				 *
+				 * Structural rather than a validation step on purpose: it rides
+				 * through `projectIO` (so `.in`/`.out` keep it at any depth),
+				 * through embedded `sub` nodes, and through the compiler, none of
+				 * which can see a step attached to a nested schema.
+				 */
+				plain?: boolean;
 				desc?: string;
 		  }
 		| {
@@ -148,7 +168,35 @@ export type IR = IRAnalysis &
 				desc?: string;
 		  }
 		| { k: "instance"; ctor: Constructor; expected: string; desc?: string }
-		| { k: "alias"; name: string; resolve: () => IR; desc?: string }
+		| {
+				k: "alias";
+				name: string;
+				resolve: () => IR;
+				/**
+				 * Set when `resolve` must not run until validation or emission — a
+				 * `z.lazy` getter: resolving earlier breaks recursive `const`
+				 * definitions via TDZ and violates zod's defer-to-first-parse
+				 * contract.
+				 *
+				 * Invariant: resolve-on-demand paths MUST NOT consult this flag —
+				 * `walk`/`checks` (interp.ts), `compile` (compile.ts), `emit`
+				 * (json-schema.ts), and parse-time error formatting all run after
+				 * the definition is complete. Construction-time paths MUST either
+				 * skip resolution or honour the flag: `scanIR`'s alias arm
+				 * (conservative: changesOutput: true, hasDeferredAlias: true),
+				 * `morphIdentities` (skip deferred aliases; a declared-out morph
+				 * whose projected sides contain one falls back to its function
+				 * identity), `assertDeterminateMorphUnions` (recursive walk
+				 * skips; its disjointness probe leaves deferred alias inputs
+				 * unresolved, so intersect() cannot prove disjointness and the
+				 * union fails closed as indeterminate), and `descriptionOf` in
+				 * type.ts (reports a neutral phrase instead of resolving — it is
+				 * reachable eagerly via appendPipes → metaOf when composing
+				 * `.pipe()`/`.readonly()` after a `z.lazy`).
+				 */
+				deferred?: boolean;
+				desc?: string;
+		  }
 		/** Embedded schema with runtime steps; validated by calling `run`. */
 		| { k: "sub"; schema: EmbeddableSchema; desc?: string }
 	);
@@ -688,6 +736,9 @@ function mergeObjectIR(left: IR, right: IR): IR {
 				? undefined
 				: [...(left.patternIndexes ?? []), ...(right.patternIndexes ?? [])],
 		extras: right.extras === "keep" ? left.extras : right.extras,
+		// Merging keeps the narrower input domain, like `intersect` and
+		// `mergeObjects` in type.ts: a merge accepts only what both sides do.
+		plain: left.plain === true || right.plain === true ? true : undefined,
 	};
 }
 
@@ -1288,6 +1339,7 @@ function addObjectProp(props: PropIR[], spreadKeys: Set<PropertyKey> | undefined
 function parseObjectDefinition(def: Record<PropertyKey, unknown>, resolve?: AliasResolver): IR {
 	const props: PropIR[] = [];
 	let spreadKeys: Set<PropertyKey> | undefined;
+	let plain: true | undefined;
 	let normalizedKey: PropertyKey | undefined;
 	let normalizedKeys: PropertyKey[] | undefined;
 	let indexes:
@@ -1332,6 +1384,10 @@ function parseObjectDefinition(def: Record<PropertyKey, unknown>, resolve?: Alia
 				if (spread.patternIndexes !== undefined) objectIndexes.patterns.push(...spread.patternIndexes);
 			}
 			if (spread.extras !== "keep") extras = spread.extras;
+			// The spread contributes its input domain along with its props and
+			// extras policy: spreading a plain-only object cannot widen back to
+			// arrays and built-ins.
+			if (spread.plain === true) plain = true;
 			continue;
 		}
 		if (typeof originalKey === "string" && originalKey.startsWith("[") && originalKey.endsWith("]")) {
@@ -1483,6 +1539,7 @@ function parseObjectDefinition(def: Record<PropertyKey, unknown>, resolve?: Alia
 		symbolIndex: indexes?.symbol,
 		patternIndexes: indexes === undefined || indexes.patterns.length === 0 ? undefined : indexes.patterns,
 		extras,
+		plain,
 	};
 	object[kSimple] = simple;
 	object[kSimpleOwner] = object;
@@ -1589,83 +1646,165 @@ function scanSimpleIR(ir: IR): boolean {
 	}
 }
 
+/**
+ * True when `value` is acceptable input for an object node marked
+ * {@link IR.plain} — everything except arrays and the built-ins that carry
+ * their own domain. Mirrors zod's input classification, where `Date`, `Map`,
+ * `Set`, arrays and thenables are separate parsed types, so an object schema
+ * rejects them; plain objects and class instances are object input.
+ *
+ * Exported because the interpreter and the compiler both need the identical
+ * predicate — a compiled validator that disagreed with the walker would make
+ * the JIT threshold observable.
+ */
+export function isPlainRecord(value: object): boolean {
+	if (Array.isArray(value) || value instanceof Date || value instanceof Map || value instanceof Set) return false;
+	const thenable: { then?: unknown; catch?: unknown } = value;
+	return typeof thenable.then !== "function" || typeof thenable.catch !== "function";
+}
+
 /** True when validating `ir` can produce an output different from its input. */
 export function hasMorph(ir: IR): boolean {
-	const cached = ir[kMorphOwner] === ir ? ir[kMorph] : undefined;
+	return scanIRCached(ir).changesOutput;
+}
+
+/**
+ * Cached entry point for {@link scanIR}; the only place that writes the
+ * per-node scan cache, so results computed under a cycle guard are never
+ * memoized.
+ */
+function scanIRCached(ir: IR): ScanResult {
+	const cached = ir[kScanOwner] === ir ? ir[kScan] : undefined;
 	if (cached !== undefined) return cached;
-	const result = scanMorph(ir);
-	ir[kMorph] = result;
-	ir[kMorphOwner] = ir;
+	const result = scanIR(ir);
+	ir[kScan] = result;
+	ir[kScanOwner] = ir;
 	return result;
 }
 
-function scanMorph(ir: IR, activeAliases?: Set<IR>): boolean {
-	const cached = ir[kMorphOwner] === ir ? ir[kMorph] : undefined;
+/** True when any node under `ir` is a deferred alias (a `z.lazy` getter). */
+export function hasDeferredAlias(ir: IR): boolean {
+	return scanIRCached(ir).hasDeferredAlias;
+}
+
+/**
+ * One traversal answering two questions that would otherwise need two
+ * near-identical walks:
+ *
+ * - `changesOutput` — can validation produce an output different from its
+ *   input? (morphs, key-stripping objects, default-filled properties.)
+ * - `hasDeferredAlias` — does any node defer its resolution to first parse
+ *   (a `z.lazy` getter)? Union determinism cannot see through one, so
+ *   consumers must not build native unions containing it.
+ *
+ * Deferred aliases are conservatively `{ changesOutput: true,
+ * hasDeferredAlias: true }` — the getter must not run during
+ * construction-time scans, so their content is unknowable here.
+ */
+function scanIR(ir: IR, activeAliases?: Set<IR>): ScanResult {
+	const cached = ir[kScanOwner] === ir ? ir[kScan] : undefined;
 	if (cached !== undefined) return cached;
 
-	let result = false;
+	const result: ScanResult = { changesOutput: false, hasDeferredAlias: false };
 	switch (ir.k) {
 		case "sub":
+			result.changesOutput = true;
+			// A deferred alias behind a stepped embed must still be seen: the
+			// widening gates rely on this bit to route around it.
+			result.hasDeferredAlias = scanIR(ir.schema.ir, activeAliases).hasDeferredAlias;
+			break;
 		case "morph":
-			result = true;
+			result.changesOutput = true;
+			// Same as `sub`: restrictBase wraps stepped schemas in a step-free
+			// morph whose input is the original IR, so a z.lazy can hide here.
+			result.hasDeferredAlias = scanIR(ir.input, activeAliases).hasDeferredAlias;
+			if (!result.hasDeferredAlias && ir.out !== undefined) {
+				result.hasDeferredAlias = scanIR(ir.out, activeAliases).hasDeferredAlias;
+			}
 			break;
 		case "alias": {
-			if (activeAliases?.has(ir)) return false;
+			// Deferred alias (z.lazy): conservatively a morph without resolving
+			// — the getter must not run during construction-time scans.
+			if (ir.deferred === true) return { changesOutput: true, hasDeferredAlias: true };
+			if (activeAliases?.has(ir)) break;
 			const aliases = activeAliases ?? new Set<IR>();
 			aliases.add(ir);
-			result = scanMorph(ir.resolve(), aliases);
+			const inner = scanIR(ir.resolve(), aliases);
 			aliases.delete(ir);
-			return result;
+			result.changesOutput = inner.changesOutput;
+			result.hasDeferredAlias = inner.hasDeferredAlias;
+			break;
 		}
-		case "object":
-			result = ir.extras === "delete";
-			for (let index = 0; !result && index < ir.props.length; index++) {
-				const prop = ir.props[index];
-				result = prop.hasDefault === true || scanMorph(prop.val, activeAliases);
+		case "object": {
+			// Key-stripping (`extras: "delete"`) changes the output value, so a
+			// plain `z.object` counts as a morph here even though nothing about
+			// it is opaque.
+			result.changesOutput = ir.extras === "delete";
+			for (const prop of ir.props) {
+				const inner = scanIR(prop.val, activeAliases);
+				result.changesOutput ||= prop.hasDefault === true || inner.changesOutput;
+				result.hasDeferredAlias ||= inner.hasDeferredAlias;
+				// A deferred alias pins both bits at once (changesOutput: true,
+				// hasDeferredAlias: true), so this is the only early exit
+				// available.
+				if (result.hasDeferredAlias) break;
 			}
-			if (!result && ir.index !== undefined) result = scanMorph(ir.index, activeAliases);
-			if (!result && ir.symbolIndex !== undefined) result = scanMorph(ir.symbolIndex, activeAliases);
-			if (!result && ir.patternIndexes !== undefined) {
-				for (const pattern of ir.patternIndexes) {
-					if (scanMorph(pattern.val, activeAliases)) {
-						result = true;
-						break;
-					}
-				}
+			if (ir.index !== undefined) {
+				const inner = scanIR(ir.index, activeAliases);
+				result.changesOutput ||= inner.changesOutput;
+				result.hasDeferredAlias ||= inner.hasDeferredAlias;
+			}
+			if (ir.symbolIndex !== undefined) {
+				const inner = scanIR(ir.symbolIndex, activeAliases);
+				result.changesOutput ||= inner.changesOutput;
+				result.hasDeferredAlias ||= inner.hasDeferredAlias;
+			}
+			for (const pattern of ir.patternIndexes ?? []) {
+				const inner = scanIR(pattern.val, activeAliases);
+				result.changesOutput ||= inner.changesOutput;
+				result.hasDeferredAlias ||= inner.hasDeferredAlias;
 			}
 			break;
-		case "array":
-			result = scanMorph(ir.el, activeAliases);
+		}
+		case "array": {
+			const inner = scanIR(ir.el, activeAliases);
+			result.changesOutput = inner.changesOutput;
+			result.hasDeferredAlias = inner.hasDeferredAlias;
 			break;
+		}
 		case "union":
 		case "intersection":
 			for (const member of ir.members) {
-				if (scanMorph(member, activeAliases)) {
-					result = true;
-					break;
-				}
+				const inner = scanIR(member, activeAliases);
+				result.changesOutput ||= inner.changesOutput;
+				result.hasDeferredAlias ||= inner.hasDeferredAlias;
+				if (result.hasDeferredAlias) break;
 			}
 			break;
-		case "refine":
-			result = scanMorph(ir.base, activeAliases);
+		case "refine": {
+			const inner = scanIR(ir.base, activeAliases);
+			result.changesOutput = inner.changesOutput;
+			result.hasDeferredAlias = inner.hasDeferredAlias;
 			break;
-		case "tuple":
+		}
+		case "tuple": {
 			for (const item of ir.prefix) {
-				if (item.hasDefault === true || scanMorph(item.val, activeAliases)) {
-					result = true;
-					break;
-				}
+				const inner = scanIR(item.val, activeAliases);
+				result.changesOutput ||= item.hasDefault === true || inner.changesOutput;
+				result.hasDeferredAlias ||= inner.hasDeferredAlias;
 			}
-			if (!result && ir.variadic !== undefined) result = scanMorph(ir.variadic, activeAliases);
-			if (!result) {
-				for (const item of ir.postfix) {
-					if (scanMorph(item, activeAliases)) {
-						result = true;
-						break;
-					}
-				}
+			if (ir.variadic !== undefined) {
+				const inner = scanIR(ir.variadic, activeAliases);
+				result.changesOutput ||= inner.changesOutput;
+				result.hasDeferredAlias ||= inner.hasDeferredAlias;
+			}
+			for (const item of ir.postfix) {
+				const inner = scanIR(item, activeAliases);
+				result.changesOutput ||= inner.changesOutput;
+				result.hasDeferredAlias ||= inner.hasDeferredAlias;
 			}
 			break;
+		}
 	}
 	return result;
 }

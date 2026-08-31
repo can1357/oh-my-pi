@@ -5,6 +5,7 @@ import {
 } from "@oh-my-pi/pi-natives/clipboard";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import { SUPPORTED_IMAGE_MIME_TYPES } from "@oh-my-pi/pi-utils/mime";
+import { hasDisplay } from "./display";
 import MAC_FILE_URL_SCRIPT from "./mac-file-urls.applescript" with { type: "text" };
 
 type SpawnCaptureOptions = { input?: string; timeoutMs?: number };
@@ -56,10 +57,6 @@ async function spawnCapture(
 	} finally {
 		clearTimeout(timer);
 	}
-}
-
-function hasDisplay(): boolean {
-	return process.platform !== "linux" || Boolean(process.env.DISPLAY || process.env.WAYLAND_DISPLAY);
 }
 
 function isWsl(): boolean {
