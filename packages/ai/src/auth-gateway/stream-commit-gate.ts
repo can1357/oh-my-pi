@@ -202,9 +202,15 @@ export function holdSseUntilCommit(
 					}
 				}
 			},
-			flush() {
-				// truncated tail without commit: treat as metadata-only commit so
-				// a holding consumer never stalls
+			flush(controller) {
+				// Truncated tail without commit: drain the buffered prelude as a
+				// metadata-only commit so a holding consumer receives the upstream
+				// bytes instead of an empty successful stream.
+				if (!committed) {
+					committed = true;
+					gate.classifyAndObserve("response.completed", 0);
+					for (const held of gate.takePrelude() ?? []) controller.enqueue(held);
+				}
 			},
 		}),
 	);
