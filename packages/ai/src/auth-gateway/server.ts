@@ -382,26 +382,36 @@ function releaseTurnOnStreamEnd(
 ): ReadableStream<Uint8Array> {
 	const reader = stream.getReader();
 	let released = false;
-	const release = (): void => {
+	const release = (settleProbe: boolean): void => {
 		if (released) return;
 		released = true;
-		if (commitGate && (commitGate.state === "committed" || commitGate.state === "terminated")) {
+		// Settle on committed/terminated gates, or foreign-format paths with no gate
+		// (pi-native streaming probes never attach a commit gate).
+		if (
+			settleProbe &&
+			(commitGate === undefined || commitGate.state === "committed" || commitGate.state === "terminated")
+		) {
 			storage.settleQuotaProbeSuccess(requestId);
 		}
 		storage.releaseTurnReservation(requestId);
 	};
 	return new ReadableStream({
 		async pull(controller) {
-			const { done, value } = await reader.read();
-			if (done) {
-				release();
-				controller.close();
-				return;
+			try {
+				const { done, value } = await reader.read();
+				if (done) {
+					release(true);
+					controller.close();
+					return;
+				}
+				controller.enqueue(value);
+			} catch (error) {
+				release(false);
+				controller.error(error);
 			}
-			controller.enqueue(value);
 		},
 		cancel(reason) {
-			release();
+			release(false);
 			return reader.cancel(reason);
 		},
 	});

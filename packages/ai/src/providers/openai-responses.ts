@@ -504,6 +504,10 @@ const streamOpenAIResponsesOnce = (
 				// Platform `previous_response_id` chaining only resolves stored responses.
 				params.store = true;
 			}
+			if (options?.previousResponseId || options?.store === true) {
+				// Continuations and explicit store requests need persisted responses.
+				params.store = true;
+			}
 			applyReasoningEffortFallbackForRequest(params);
 			// A caller-supplied `previous_response_id` names the client's own stored
 			// response; internal chain deltas are computed against a DIFFERENT
