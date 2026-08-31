@@ -20,7 +20,7 @@ import {
 } from "@oh-my-pi/pi-utils";
 import type { StructuredSubagentSchemaMode } from "../task/types";
 import { ArtifactManager } from "./artifacts";
-import { type BlobPutOptions, type BlobPutResult, BlobStore } from "./blob-store";
+import { type BlobPutOptions, type BlobPutResult, BlobStore, lazyImageDataSync } from "./blob-store";
 import type { CompactionMethod } from "./compaction-methods";
 import {
 	type BashExecutionMessage,
@@ -2569,7 +2569,10 @@ export class SessionManager {
 	 * the full-history display transcript, from the current leaf path.
 	 */
 	buildSessionContext(options?: BuildSessionContextOptions): SessionContext {
-		return buildSessionContext(this.#entries, this.#index.leafId(), this.#index.entriesById(), options);
+		return buildSessionContext(this.#entries, this.#index.leafId(), this.#index.entriesById(), {
+			resolveFrameData: data => lazyImageDataSync(this.#blobs, data),
+			...options,
+		});
 	}
 
 	/** Strip stale OpenAI Responses assistant replay metadata from loaded entries. */

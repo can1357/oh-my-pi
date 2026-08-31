@@ -1,7 +1,7 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { getBlobsDir, isEnoent, parseJsonlLenient } from "@oh-my-pi/pi-utils";
 import * as snapcompact from "@oh-my-pi/snapcompact";
-import { BlobStore, isBlobRef, resolveImageData, resolveImageDataUrl } from "./blob-store";
+import { BlobStore, isBlobRef, lazyImageDataSync, resolveImageData, resolveImageDataUrl } from "./blob-store";
 import { buildSessionContext } from "./session-context";
 import type { FileEntry, RawFileEntry, SessionEntry, SessionHeader } from "./session-entries";
 import { migrateToCurrentVersion } from "./session-migrations";
@@ -324,15 +324,16 @@ export async function visitEntriesFromFile(
 }
 
 /**
- * Resolve blob references in loaded entries, restoring both session image blocks and persisted
- * provider image URLs back to the inline data expected by downstream transports. Mutates entries in place.
+ * Resolve blob references in loaded entries, restoring session image blocks and
+ * provider image URLs for downstream transports. Snapcompact frames stay as
+ * references until context rebuilding selects them.
  */
 function hasImageUrl(value: unknown): value is { image_url: string } {
 	return typeof value === "object" && value !== null && "image_url" in value && typeof value.image_url === "string";
 }
 
 async function resolvePersistedBlobRefs(value: unknown, blobStore: BlobStore, key?: string): Promise<void> {
-	if (isExternalizableImagePosition(value, key) && isBlobRef(value.data)) {
+	if (key !== "frames" && isExternalizableImagePosition(value, key) && isBlobRef(value.data)) {
 		value.data = await resolveImageData(blobStore, value.data);
 		return;
 	}
@@ -430,10 +431,12 @@ export async function loadSessionMessagesReadOnly(filePath: string): Promise<Age
 	const entries = await loadEntriesFromFile(filePath);
 	if (entries.length === 0) return [];
 	migrateToCurrentVersion(entries);
-	await resolveBlobRefsInEntries(entries, new BlobStore(getBlobsDir()));
+	const blobs = new BlobStore(getBlobsDir());
+	await resolveBlobRefsInEntries(entries, blobs);
 	const sessionEntries = entries.filter((e): e is SessionEntry => e.type !== "session");
 	return buildSessionContext(sessionEntries, undefined, undefined, {
 		transcript: true,
 		collapseCompactedHistory: true,
+		resolveFrameData: data => lazyImageDataSync(blobs, data),
 	}).messages;
 }
