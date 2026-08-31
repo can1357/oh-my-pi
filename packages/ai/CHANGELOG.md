@@ -4,6 +4,8 @@
 
 ### Fixed
 
+- Settle gateway quota probes only on committed output or successful terminals, release pi-native reservations when abort wins lookup, lease probes against the active block scope, and skip cooldown-blocked API keys when healthy rows are reserved.
+
 - Require a quota probe lease on the allow-blocked OAuth fallback pass.
 - Add parent fallback edges from every nested child target to the later sibling entry.
 - Preserve JSON-schema descriptions when flattening Chat Completions response_format for Responses, and store in-memory Codex reconciliation deadlines.
