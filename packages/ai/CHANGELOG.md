@@ -4,6 +4,8 @@
 
 ### Fixed
 
+- Renew turn reservations while SSE chunks arrive so long streams outlive the idle TTL, and skip cooldown-blocked API keys when healthy rows are already reserved.
+
 - Reserve stored API-key rows before returning them, and flush metadata-only held SSE preludes at EOF.
 - Cancel the upstream stream before awaiting settlement on client disconnect so turn reservations are not held while the model finishes.
 - Lease quota probes against the block scope that actually caused the cooldown (global Retry-After wins over chat/spark).

@@ -415,6 +415,7 @@ function releaseTurnOnStreamEnd(
 					controller.close();
 					return;
 				}
+				storage.renewTurnReservation(requestId);
 				controller.enqueue(value);
 			} catch (error) {
 				await release(false);

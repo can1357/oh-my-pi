@@ -2409,6 +2409,19 @@ export class AuthStorage {
 			blockScopes,
 		});
 		for (const ranked of candidates) {
+			// Recheck quota/usage blocks before reserving: ranking still returns blocked
+			// rows after healthy ones, and reservation conflicts must not promote them.
+			if (
+				this.#isCredentialBlocked(
+					provider,
+					providerKey,
+					ranked.selection.index,
+					blockScopes,
+					options?.requestId,
+				)
+			) {
+				continue;
+			}
 			if (this.#tryReserveApiKeySelection(provider, ranked.selection, options?.requestId)) {
 				return ranked.selection;
 			}
@@ -4933,6 +4946,16 @@ export class AuthStorage {
 		}
 		// Abandon any inflight probe for this request without treating it as success.
 		this.clearQuotaProbe(requestId);
+	}
+
+	/** Extend every live reservation held by `requestId` so long streams outlive the idle TTL. */
+	renewTurnReservation(requestId: string, ttlMs: number = DEFAULT_TURN_RESERVATION_TTL_MS): void {
+		const expiresAtMs = Date.now() + ttlMs;
+		for (const [key, held] of this.#turnReservations) {
+			if (held.requestId === requestId) {
+				this.#turnReservations.set(key, { ...held, expiresAtMs });
+			}
+		}
 	}
 
 	/**
