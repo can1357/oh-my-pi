@@ -316,6 +316,75 @@ describe("AgentSession advisor auto-resume suppression", () => {
 		expect(advisorCards[0].content).toContain("Final yield needs correction");
 	});
 
+	it("preserves wait-mode advice through the live session route in plan mode", async () => {
+		const started = Promise.withResolvers<void>();
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const mock = createMockModel({
+			responses: [
+				() => {
+					started.resolve();
+					return { content: ["working"], delayMs: 60_000 };
+				},
+			],
+		});
+		const advisorMock = createMockModel({
+			responses: [
+				{
+					content: [
+						{
+							type: "toolCall",
+							name: "advise",
+							arguments: { note: "Plan needs correction", severity: "blocker" },
+						},
+					],
+				},
+				{ content: [], stopReason: "stop" },
+			],
+		});
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			streamFn: mock.stream,
+		});
+		const sessionManager = SessionManager.inMemory();
+		const settings = Settings.isolated({
+			"advisor.interruptMode": "wait",
+			"compaction.enabled": false,
+			"retry.enabled": false,
+		});
+		settings.setModelRole("advisor", "anthropic/claude-sonnet-4-5");
+		const authStorage = await AuthStorage.create(":memory:");
+		authStorages.push(authStorage);
+		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		const modelRegistry = new ModelRegistry(authStorage, tempDir.join("models.yml"));
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settings,
+			modelRegistry,
+			advisorTools: [],
+			advisorStreamFn: advisorMock.stream,
+		});
+		const persisted = capturePersistedAdvice(sessionManager);
+		session.setPlanModeState({ enabled: true, planFilePath: "local://PLAN.md" });
+		expect(session.setAdvisorEnabled(true)).toBe(true);
+
+		const running = session.prompt("inspect the plan");
+		await started.promise;
+		const advisor = session.getAdvisorAgent();
+		if (!advisor) throw new Error("Expected advisor agent to be live");
+		await advisor.prompt("review the active plan");
+		await session.waitForAdvisorCatchup(1000);
+
+		expect(session.yieldQueue.has("advisor")).toBe(false);
+		expect(session.agent.state.messages.filter(isAdvisorCard)).toHaveLength(1);
+		expect(persisted.at(-1)).toContain("Plan needs correction");
+		expect(mock.calls).toHaveLength(1);
+
+		await session.abort({ reason: USER_INTERRUPT_LABEL });
+		await running.catch(() => {});
+	});
+
 	it("preserves a late advisor concern after a terminal answer without waking the primary", async () => {
 		const { session, sessionManager, mock, advisorMock } = await createCompletedAdvisorSession();
 		const persisted = capturePersistedAdvice(sessionManager);
