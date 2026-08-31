@@ -4,6 +4,8 @@
 
 ### Fixed
 
+- Preserve JSON-schema descriptions when flattening Chat Completions response_format for Responses, and store in-memory Codex reconciliation deadlines.
+
 - Renew turn reservations while streams are active; release API-key holds when secret resolution fails.
 - Fixed API-key turn reservations releasing when credential-helper resolution fails, and renewing the hold as SSE chunks arrive so long streams outlive the idle TTL.
 

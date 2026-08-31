@@ -2062,6 +2062,7 @@ export class AuthStorage {
 		this.#credentialBackoff.set(backoffKey, backoffMap);
 		const probeAfterMap = this.#credentialBackoffProbeAfter.get(backoffKey) ?? new Map<number, number>();
 		probeAfterMap.set(credentialIndex, Math.min(nextBlockedUntil, Date.now() + USAGE_REPORT_TTL_MS));
+		this.#credentialBackoffProbeAfter.set(backoffKey, probeAfterMap);
 		this.#invalidateUsageReportCache(provider);
 
 		const credentialId = this.#getStoredCredentials(provider)[credentialIndex]?.id;
