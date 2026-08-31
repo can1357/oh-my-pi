@@ -9,6 +9,7 @@
 - Devin model selectors now accept the native CLI's short aliases (`devin/opus`, `devin/swe`), dotted upstream spellings (`devin/gemini-3.7-flash`), and raw effort-route wire uids for dynamically collapsed families ([#8590](https://github.com/can1357/oh-my-pi/pull/8590) by [@will-bogusz](https://github.com/will-bogusz)).
 - Added provider-supplied model metadata to the `/models` detail line: `new`, `beta`, and `recommended` badges beside the model name, and the upstream description after the context, cost, and perf facts ([#8590](https://github.com/can1357/oh-my-pi/pull/8590) by [@will-bogusz](https://github.com/will-bogusz)).
 - Standalone `CLAUDE.md` files in the project root (and ancestor directories) are now loaded as context, mirroring `AGENTS.md` discovery; config-directory context files still take precedence per scope.
+- Added `providers.maxImagesPerRequest` and `providers.maxImageBytesPerRequest`: per-provider budgets for how many images and how many total base64 image bytes a single request may carry, settable per provider id from `config.yml`, `omp config set`, or the settings panel. A custom gateway that is unknown by id now inherits its wire API family's image budget (`anthropic-messages` 90, `google-generative-ai` 200) instead of falling to the 5-image floor, which keeps a compaction archive readable on a private gateway. The byte budget removes the oldest droppable images until the request fits or none are left; images retained in assistant turns are never removed and count against the budget. Snapcompact's inline imaging plans against both budgets, so a tool result or system prompt whose frames would not fit ships as text instead of a note pointing at frames the clamp would remove. A turn the clamp leaves with no images and no text keeps an `[image omitted: provider image limit]` placeholder, so an image-only user turn is not silently dropped from the request
 
 ### Changed
 
@@ -1147,9 +1148,6 @@
 - Fixed install.sh falsely reporting success on musl-based systems (such as Alpine Linux) when the binary fails to start; the installer now smoke-tests the binary, exits non-zero on failure, and provides remediation steps.
 - Fixed Codex config.toml discovery incorrectly importing MCP servers that are configured with enabled = false.
 - Fixed bash.patterns allow rules rejecting valid commands when quoted arguments contained shell metacharacters (such as Cargo benchmark regex filters).
-### Added
-
-- Added `providers.maxImagesPerRequest` and `providers.maxImageBytesPerRequest`: per-provider budgets for how many images and how many total base64 image bytes a single request may carry, settable per provider id from `config.yml`, `omp config set`, or the settings panel. A custom gateway that is unknown by id now inherits its wire API family's image budget (`anthropic-messages` 90, `google-generative-ai` 200) instead of falling to the 5-image floor, which keeps a compaction archive readable on a private gateway. The byte budget removes the oldest droppable images until the request fits or none are left; images retained in assistant turns are never removed and count against the budget. Snapcompact's inline imaging plans against both budgets, so a tool result or system prompt whose frames would not fit ships as text instead of a note pointing at frames the clamp would remove. A turn the clamp leaves with no images and no text keeps an `[image omitted: provider image limit]` placeholder, so an image-only user turn is not silently dropped from the request
 
 ## [17.2.6] - 2026-08-03
 

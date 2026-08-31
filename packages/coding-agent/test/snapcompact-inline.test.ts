@@ -464,7 +464,9 @@ describe("SnapcompactInlineTransformer", () => {
 				toolResult("call_newest", LARGE),
 			],
 		};
-		const model = makeModel({ provider: "groq" });
+		// Groq speaks openai-completions, the one API family with no budget of its
+		// own, so this provider keeps the floor of 5 and the source images spend it.
+		const model = makeModel({ provider: "groq", api: "openai-completions" });
 		const estimate = estimateInlineSavings({
 			options,
 			model,
