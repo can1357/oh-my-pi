@@ -41,6 +41,10 @@ export async function safeDiscoverModels(url: string, opts?: SafeDiscoveryOption
 	} catch (err) {
 		throw wrapDiscoveryError(err, "discovery fetch failed");
 	}
+	if (!response.ok) {
+		await cancelBody(response);
+		throw new SafeDiscoveryError(`discovery endpoint returned HTTP ${response.status}`);
+	}
 
 	const text = await readLimitedBody(response, maxBytes);
 

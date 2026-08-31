@@ -659,11 +659,15 @@ async function handleFormatEndpoint(
 		return unknownModelResponse(route.module.formatError, modelId);
 	}
 	let currentTarget = firstTarget;
-	const initialModel = bootOpts.resolveModel(currentTarget);
-	if (!initialModel) {
-		return unknownModelResponse(route.module.formatError, currentTarget);
+	let model!: Model<Api>;
+	let providerOrigin: string | undefined;
+	{
+		const initial = bootOpts.resolveModel(currentTarget);
+		if (initial) {
+			model = initial;
+			providerOrigin = initial.provider;
+		}
 	}
-	let model: Model<Api> = initialModel;
 	const client = resolveClientIdentity(req.headers);
 
 	// Parse the wire-format request BEFORE resolving the credential so we
@@ -691,11 +695,13 @@ async function handleFormatEndpoint(
 	if (controller.signal.aborted) return clientClosedResponse(route);
 
 	const supportsOpenAIImageFileReferences =
-		model.api === "openai-responses" ||
-		model.api === "azure-openai-responses" ||
-		model.api === "openai-codex-responses";
+		providerOrigin !== undefined &&
+		(model.api === "openai-responses" ||
+			model.api === "azure-openai-responses" ||
+			model.api === "openai-codex-responses");
 	if (
 		route.label === "openai-responses" &&
+		providerOrigin !== undefined &&
 		!supportsOpenAIImageFileReferences &&
 		parsed.context.messages.some(
 			message =>
@@ -785,31 +791,61 @@ async function handleFormatEndpoint(
 		return false;
 	};
 
-	const bindCurrentTarget = (targetId: string): Response | undefined => {
+	const bindCurrentTarget = (targetId: string): Response | undefined | "skipped" => {
 		currentTarget = targetId;
 		const resolved = bootOpts.resolveModel(currentTarget);
 		if (!resolved) {
-			return lastClassified
-				? classifiedError(lastClassified)
-				: formatError(502, "upstream_error", "Upstream request failed");
+			attemptedTargets.add(currentTarget);
+			const classified = classifyGatewayError(
+				Object.assign(new Error(`Model not found: ${currentTarget}`), { status: 404 }),
+			);
+			lastClassified = classified;
+			if (considerFallback(classified)) return "skipped";
+			return classifiedError(classified);
+		}
+		if (
+			parsed.options.previousResponseId &&
+			providerOrigin !== undefined &&
+			resolved.provider !== providerOrigin
+		) {
+			attemptedTargets.add(currentTarget);
+			const skipped = traces.record({
+				requestId,
+				routeId: compiled.id,
+				generation: compiled.generation,
+				selectedTarget: currentTarget,
+				disposition: "skipped",
+				reason: "state_incompatible",
+			});
+			logger.debug("auth-gateway route decision", redactedDecisionSummary(skipped));
+			return "skipped";
 		}
 		model = resolved;
+		providerOrigin ??= resolved.provider;
 		attemptedTargets.add(currentTarget);
 		return undefined;
 	};
 
 	const pickTarget = (): Response | undefined => {
-		if (pendingFallback !== undefined) {
-			const targetId = pendingFallback;
-			pendingFallback = undefined;
-			return bindCurrentTarget(targetId);
+		for (;;) {
+			let targetId: string | undefined;
+			if (pendingFallback !== undefined) {
+				targetId = pendingFallback;
+				pendingFallback = undefined;
+			} else {
+				targetId = dispatchTargetId(compiled, stateNow(), commitGate.state);
+			}
+			if (targetId === undefined) {
+				if (lastClassified) return classifiedError(lastClassified);
+				if (attemptedTargets.size > 0) {
+					return formatError(502, "upstream_error", "Upstream request failed");
+				}
+				return unknownModelResponse(formatError, modelId);
+			}
+			const bound = bindCurrentTarget(targetId);
+			if (bound === "skipped") continue;
+			return bound;
 		}
-		const targetId = dispatchTargetId(compiled, stateNow(), commitGate.state);
-		if (targetId === undefined) {
-			if (lastClassified) return classifiedError(lastClassified);
-			return unknownModelResponse(formatError, modelId);
-		}
-		return bindCurrentTarget(targetId);
 	};
 
 	const resolveCredential = async (): Promise<AttemptPrep> => {
@@ -970,6 +1006,12 @@ async function handleFormatEndpoint(
 			bootOpts.storage.releaseTurnReservation(requestId);
 			return picked;
 		}
+		if (!model) {
+			bootOpts.storage.releaseTurnReservation(requestId);
+			return lastClassified
+				? classifiedError(lastClassified)
+				: formatError(502, "upstream_error", "Upstream request failed");
+		}
 		const cred = await resolveCredential();
 		if (cred.type === "retry") {
 			bootOpts.storage.releaseTurnReservation(requestId);
@@ -1116,11 +1158,15 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 		return unknownModelResponse(piNative.formatError, parsed.modelId);
 	}
 	let currentTarget = firstTarget;
-	const initialModel = bootOpts.resolveModel(currentTarget);
-	if (!initialModel) {
-		return unknownModelResponse(piNative.formatError, currentTarget);
+	let model!: Model<Api>;
+	let providerOrigin: string | undefined;
+	{
+		const initial = bootOpts.resolveModel(currentTarget);
+		if (initial) {
+			model = initial;
+			providerOrigin = initial.provider;
+		}
 	}
-	let model: Model<Api> = initialModel;
 	const client = resolveClientIdentity(req.headers);
 	// Pi-native already parsed `streamOpts.sessionId` (when set by the
 	// client); fall back to the derived key so credential-stickiness lines
@@ -1196,31 +1242,61 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 		return false;
 	};
 
-	const bindCurrentTarget = (targetId: string): Response | undefined => {
+	const bindCurrentTarget = (targetId: string): Response | undefined | "skipped" => {
 		currentTarget = targetId;
 		const resolved = bootOpts.resolveModel(currentTarget);
 		if (!resolved) {
-			return lastClassified
-				? classifiedError(lastClassified)
-				: formatError(502, "upstream_error", "Upstream request failed");
+			attemptedTargets.add(currentTarget);
+			const classified = classifyGatewayError(
+				Object.assign(new Error(`Model not found: ${currentTarget}`), { status: 404 }),
+			);
+			lastClassified = classified;
+			if (considerFallback(classified)) return "skipped";
+			return classifiedError(classified);
+		}
+		if (
+			parsed.options.previousResponseId &&
+			providerOrigin !== undefined &&
+			resolved.provider !== providerOrigin
+		) {
+			attemptedTargets.add(currentTarget);
+			const skipped = traces.record({
+				requestId,
+				routeId: compiled.id,
+				generation: compiled.generation,
+				selectedTarget: currentTarget,
+				disposition: "skipped",
+				reason: "state_incompatible",
+			});
+			logger.debug("auth-gateway route decision", redactedDecisionSummary(skipped));
+			return "skipped";
 		}
 		model = resolved;
+		providerOrigin ??= resolved.provider;
 		attemptedTargets.add(currentTarget);
 		return undefined;
 	};
 
 	const pickTarget = (): Response | undefined => {
-		if (pendingFallback !== undefined) {
-			const targetId = pendingFallback;
-			pendingFallback = undefined;
-			return bindCurrentTarget(targetId);
+		for (;;) {
+			let targetId: string | undefined;
+			if (pendingFallback !== undefined) {
+				targetId = pendingFallback;
+				pendingFallback = undefined;
+			} else {
+				targetId = dispatchTargetId(compiled, stateNow(), commitGate.state);
+			}
+			if (targetId === undefined) {
+				if (lastClassified) return classifiedError(lastClassified);
+				if (attemptedTargets.size > 0) {
+					return formatError(502, "upstream_error", "Upstream request failed");
+				}
+				return unknownModelResponse(formatError, parsed.modelId);
+			}
+			const bound = bindCurrentTarget(targetId);
+			if (bound === "skipped") continue;
+			return bound;
 		}
-		const targetId = dispatchTargetId(compiled, stateNow(), commitGate.state);
-		if (targetId === undefined) {
-			if (lastClassified) return classifiedError(lastClassified);
-			return unknownModelResponse(formatError, parsed.modelId);
-		}
-		return bindCurrentTarget(targetId);
 	};
 
 	const resolveCredential = async (): Promise<AttemptPrep> => {
@@ -1393,6 +1469,12 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 		if (picked) {
 			bootOpts.storage.releaseTurnReservation(requestId);
 			return picked;
+		}
+		if (!model) {
+			bootOpts.storage.releaseTurnReservation(requestId);
+			return lastClassified
+				? classifiedError(lastClassified)
+				: formatError(502, "upstream_error", "Upstream request failed");
 		}
 		const cred = await resolveCredential();
 		if (cred.type === "retry") {
