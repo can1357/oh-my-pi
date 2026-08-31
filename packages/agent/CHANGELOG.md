@@ -4,7 +4,7 @@
 
 ### Changed
 
-- Compaction summaries now use a selective, deterministic continuity capsule that foregrounds the current outcome, owner conversation, one next action, volatile authorities, blockers, and exact archive pointers, capped at 2,048 output tokens. Interactive Ask selections remain owner intent while cancelled Ask questions remain explicitly unresolved.
+- Compaction summaries now use a selective, deterministic continuity capsule that foregrounds the current outcome, owner conversation, one next action, volatile authorities, blockers, and exact archive pointers, capped at 2,048 output tokens.
 
 ## [18.0.11] - 2026-08-29
 

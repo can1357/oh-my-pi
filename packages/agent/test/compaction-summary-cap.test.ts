@@ -85,8 +85,6 @@ describe("compaction summary output budget", () => {
 		}
 		expect(request).toContain("Observed tool result (not re-verified)");
 		expect(request).toContain("quoted or pasted material");
-		expect(request).toContain("An Ask selection, custom input, or note carries owner intent");
-		expect(request).toContain("An Ask cancellation means only that its question remains unanswered");
 		expect(request).toContain("A tool call proves only that an action was attempted");
 		expect(request).toContain("last-observed coordinates");
 		expect(request).toContain("Exactly one concrete action");
@@ -102,8 +100,6 @@ describe("compaction summary output budget", () => {
 		expect(request).toContain("never append to it mechanically");
 		expect(request).toContain("Remove completed-lane chronology, superseded hypotheses, completed next actions");
 		expect(request).toContain("<previous-summary>\nold capsule\n</previous-summary>");
-		expect(request).toContain("An Ask selection, custom input, or note carries owner intent");
-		expect(request).toContain("An Ask cancellation means only that its question remains unanswered");
 	});
 
 	test("forwards the cap to remote compaction", async () => {
@@ -148,9 +144,7 @@ describe("compaction summary output budget", () => {
 					request.includes("## Owner request") &&
 					request.includes("## Verified prefix evidence") &&
 					request.includes("## Unverified prefix state") &&
-					request.includes("under 250 words") &&
-					request.includes("An Ask selection, custom input, or note carries owner intent") &&
-					request.includes("an Ask cancellation means only that its question remains unanswered"),
+					request.includes("under 250 words"),
 			),
 		).toBeTrue();
 	});
