@@ -14,6 +14,7 @@ const METADATA_EVENTS: Record<string, true> = {
 	"response.created": true,
 	"response.in_progress": true,
 	"response.queued": true,
+	message_start: true,
 	heartbeat: true,
 	ping: true,
 };
