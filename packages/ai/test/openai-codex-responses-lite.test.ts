@@ -12,7 +12,13 @@ import {
 } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import { isOpenAIResponsesProgressEvent } from "@oh-my-pi/pi-ai/providers/openai-shared";
 import { configureCredentialRedaction } from "@oh-my-pi/pi-ai/providers/transform-messages";
-import type { CodexCompactionRequestContext, Context, FetchImpl, ProviderSessionState } from "@oh-my-pi/pi-ai/types";
+import type {
+	CodexCompactionRequestContext,
+	Context,
+	FetchImpl,
+	ModelSpec,
+	ProviderSessionState,
+} from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import * as piUtils from "@oh-my-pi/pi-utils";
 import { createCodexModel } from "./helpers";
@@ -164,6 +170,22 @@ describe("openai-codex optional response controls", () => {
 		expect(suppressed.reasoning).toEqual({ effort: "medium" });
 		expect("summary" in (suppressed.reasoning ?? {})).toBe(false);
 		expect("stream_options" in suppressed).toBe(false);
+	});
+
+	it("removes inherited reasoning summaries when model compatibility disables them", async () => {
+		const base = createCodexModel("gpt-5.5");
+		const model = buildModel({
+			...base,
+			compat: { ...base.compatConfig, supportsReasoningSummary: false },
+		} as ModelSpec<"openai-codex-responses">);
+
+		const body = await transformRequestBody({ model: model.id, reasoning: { summary: "auto" } }, model, {
+			reasoningEffort: "medium",
+			reasoningSummary: "detailed",
+		});
+
+		expect(body.reasoning).toEqual({ effort: "medium" });
+		expect("stream_options" in body).toBe(false);
 	});
 
 	it("disables native reasoning with effort none when an external scratchpad replaces it", async () => {

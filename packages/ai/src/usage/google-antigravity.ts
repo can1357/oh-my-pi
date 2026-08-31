@@ -1,3 +1,4 @@
+import { quotaTierFor } from "@oh-my-pi/pi-catalog/compat/behavior";
 import { getAntigravityUserAgent } from "@oh-my-pi/pi-catalog/wire/gemini-headers";
 import * as AIError from "../error";
 import type {
@@ -428,18 +429,7 @@ export const antigravityUsageProvider: UsageProvider = {
 
 /** Map an Antigravity model id to its backend quota-counter key. */
 export function getAntigravityCounterKeyForModel(modelId: string | undefined): string | undefined {
-	const normalizedModelId = modelId?.toLowerCase();
-	if (!normalizedModelId) return undefined;
-	if (normalizedModelId.startsWith("claude-")) return "anthropic";
-	if (
-		normalizedModelId.startsWith("gemini-") ||
-		normalizedModelId.startsWith("gemma-") ||
-		normalizedModelId.startsWith("tab_")
-	) {
-		return "google";
-	}
-	if (normalizedModelId.startsWith("gpt-") || normalizedModelId.startsWith("openai/")) return "openai";
-	return undefined;
+	return modelId ? quotaTierFor("google-antigravity", modelId) : undefined;
 }
 
 function getAntigravityCounterLimits(report: UsageReport, counterKey: string): UsageLimit[] {

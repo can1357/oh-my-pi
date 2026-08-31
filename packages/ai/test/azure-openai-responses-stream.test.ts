@@ -155,6 +155,22 @@ describe("azure openai responses streaming", () => {
 		]);
 	});
 
+	it("omits reasoning summaries when model compatibility disables them", async () => {
+		const model: Model<"azure-openai-responses"> = buildModel({
+			...azureModel,
+			reasoning: true,
+			compat: { ...azureModel.compatConfig, supportsReasoningSummary: false },
+		} as ModelSpec<"azure-openai-responses">);
+
+		const payload = await captureAzurePayload(
+			{ messages: [{ role: "user", content: "Say hello", timestamp: Date.now() }] },
+			model,
+			{ reasoning: "high", reasoningSummary: "detailed" },
+		);
+
+		expect(payload.reasoning).toEqual({ effort: "high" });
+	});
+
 	it("keeps Azure Responses prompt_cache_key separate from Anthropic cache controls", async () => {
 		const payload = await captureAzurePayload(
 			{

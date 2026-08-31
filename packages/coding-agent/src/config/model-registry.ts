@@ -16,6 +16,7 @@ import type {
 } from "@oh-my-pi/pi-ai/types";
 import type { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { collapseBuiltVariants } from "@oh-my-pi/pi-catalog/compat/collapse";
 import { readModelCache, writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import {
 	createModelManager,
@@ -36,7 +37,6 @@ import {
 	resolveOllamaModelCacheProviderId,
 } from "@oh-my-pi/pi-catalog/provider-models";
 import { toModelSpec } from "@oh-my-pi/pi-catalog/provider-models/bundled-references";
-import { collapseBuiltModelVariants } from "@oh-my-pi/pi-catalog/variant-collapse";
 import { getAgentDir, isBunTestRuntime, logger, wrapFetchForExtraCa } from "@oh-my-pi/pi-utils";
 import { resolveProviderModelReference } from "../config/model-resolver";
 import { generateCodexAttestation } from "../live/attestation";
@@ -71,6 +71,7 @@ import {
 	ensureLlamaCppV1BaseUrl,
 	getImplicitOllamaBaseUrl,
 	getOllamaContextLengthOverride,
+	normalizeBareDiscoveryBaseUrl,
 	normalizeLiteLLMDiscoveryBaseUrl,
 	normalizeLlamaCppBaseUrl,
 } from "./model-discovery";
@@ -836,7 +837,7 @@ export class ModelRegistry {
 		resolvedDefaults = this.#mergeResolvedModels(resolvedDefaults, select(this.#runtimeDiscoveredModels));
 		const withConfigModels = this.#mergeCustomModels(resolvedDefaults, select(this.#customModelOverlays));
 		const combined = this.#mergeCustomModels(withConfigModels, select(this.#runtimeModelOverlays));
-		const withModelOverrides = this.#applyModelOverrides(collapseBuiltModelVariants(combined), this.#modelOverrides);
+		const withModelOverrides = this.#applyModelOverrides(collapseBuiltVariants(combined), this.#modelOverrides);
 		const withProviderGuardrails = this.#applyProviderGuardrailOverrides(withModelOverrides);
 		return this.#applyLlamaCppModelFixups(this.#applyRuntimeProviderOverrides(withProviderGuardrails));
 	}
@@ -1331,7 +1332,10 @@ export class ModelRegistry {
 					baseUrl:
 						providerConfig.discovery?.type === "litellm"
 							? normalizeLiteLLMDiscoveryBaseUrl(providerConfig.baseUrl)
-							: providerConfig.baseUrl,
+							: providerConfig.discovery?.type === "openai-models-list" &&
+									providerConfig.discovery.injectV1 === false
+								? normalizeBareDiscoveryBaseUrl(providerConfig.baseUrl)
+								: providerConfig.baseUrl,
 					headers: providerConfig.headers,
 					apiKey: providerConfig.apiKey,
 					authHeader: providerConfig.authHeader,
@@ -1470,7 +1474,7 @@ export class ModelRegistry {
 		const resolved = this.#mergeResolvedModels(baseModels, discoveredModels);
 		const withConfigModels = this.#mergeCustomModels(resolved, this.#customModelOverlays);
 		const combined = this.#mergeCustomModels(withConfigModels, this.#runtimeModelOverlays);
-		const withModelOverrides = this.#applyModelOverrides(collapseBuiltModelVariants(combined), this.#modelOverrides);
+		const withModelOverrides = this.#applyModelOverrides(collapseBuiltVariants(combined), this.#modelOverrides);
 		const withProviderGuardrails = this.#applyProviderGuardrailOverrides(withModelOverrides);
 		this.#unprojectedModels = this.#applyLlamaCppModelFixups(
 			this.#applyRuntimeProviderOverrides(withProviderGuardrails),
@@ -1512,7 +1516,12 @@ export class ModelRegistry {
 			// context-v3 invalidates rows cached before server-advertised input
 			// modalities were parsed from `/v1/models`; warm v2 rows pinned
 			// vision-capable ids at `input: ["text"]` until a forced refresh.
-			return `${providerConfig.provider}:openai-models-list-context-v3`;
+			// `injectV1: false` additionally splits off its own namespace: rows
+			// cached from the `/v1`-injected URL can hold a different (smaller)
+			// model set and must never satisfy a bare provider's cache read.
+			return providerConfig.discovery.injectV1 === false
+				? `${providerConfig.provider}:openai-models-list-bare-context-v3`
+				: `${providerConfig.provider}:openai-models-list-context-v3`;
 		}
 		if (providerConfig.discovery.type === "litellm") {
 			// rich-v4 invalidates rows whose `compatConfig` retained a colliding
