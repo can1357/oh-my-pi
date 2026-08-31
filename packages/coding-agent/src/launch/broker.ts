@@ -213,6 +213,8 @@ interface OutputRegistration extends DaemonOutputWireSubscription {
 	offlineTimer?: NodeJS.Timeout;
 	/** Delivery is terminally expired; retain only its expiry through one final reconnect grace. */
 	disabled?: boolean;
+	/** Set only when offline capture grace elapsed; final reap expires the client subscription. */
+	captureExpired?: boolean;
 	/** Model-facing line previews accumulated from this registration's attach point. */
 	progressPreview: ProgressPreviewAccumulator;
 	progressLines: ProgressLines;
@@ -537,6 +539,19 @@ class DaemonBroker {
 	readonly #pendingCompletions = new Map<string, Map<string, DaemonCompletionNotification>>();
 	readonly #outputRegistrations = new Map<string, OutputRegistration>();
 	readonly #outputSubscriptionSyncTokens = new Map<string, symbol>();
+	/**
+	 * Compact terminal tokens for client output subscriptions whose final
+	 * registration retention elapsed. A late publication is rejected until an
+	 * empty advertisement consumes the expired subscription, preventing a stale
+	 * identity from opening a new append sink against its old artifact.
+	 */
+	readonly #expiredOutputSubscriptions = new Set<string>();
+	/**
+	 * Subscriptions awaiting the last sibling registration's cleanup before
+	 * becoming expired. This preserves still-retained monitors from the same
+	 * client while preventing the final one from being recreated.
+	 */
+	readonly #outputSubscriptionsPendingExpiration = new Set<string>();
 	readonly #subscriptionMutationQueues = new WeakMap<net.Socket, Promise<void>>();
 	readonly #progressBatcher: ProgressBatcher<MonitorProgressChunk>;
 	readonly #finished = Promise.withResolvers<void>();
@@ -612,6 +627,8 @@ class DaemonBroker {
 			outputDisposals.push(this.#disposeOutputArtifact(registration));
 		}
 		this.#outputRegistrations.clear();
+		this.#expiredOutputSubscriptions.clear();
+		this.#outputSubscriptionsPendingExpiration.clear();
 		this.#progressBatcher.dispose();
 		await Promise.all(outputDisposals);
 		for (const socket of this.#sockets) socket.destroy();
@@ -1184,6 +1201,14 @@ class DaemonBroker {
 		});
 		return registration.artifactDisposal;
 	}
+	#finalizeOutputSubscriptionExpiration(subscriptionId: string): void {
+		if (!this.#outputSubscriptionsPendingExpiration.has(subscriptionId)) return;
+		for (const registration of this.#outputRegistrations.values()) {
+			if (registration.subscriptionId === subscriptionId) return;
+		}
+		this.#outputSubscriptionsPendingExpiration.delete(subscriptionId);
+		this.#expiredOutputSubscriptions.add(subscriptionId);
+	}
 
 	#disposeOutputRegistration(registrationKey: string, registration: OutputRegistration): void {
 		if (this.#outputRegistrations.get(registrationKey) !== registration) return;
@@ -1194,6 +1219,7 @@ class DaemonBroker {
 		registration.pendingBytes = 0;
 		this.#progressBatcher.clear(registration.batchKey);
 		void this.#disposeOutputArtifact(registration);
+		this.#finalizeOutputSubscriptionExpiration(registration.subscriptionId);
 	}
 
 	/**
@@ -1207,11 +1233,24 @@ class DaemonBroker {
 	 */
 	#expireOfflineOutputRegistration(registrationKey: string, registration: OutputRegistration): void {
 		if (this.#outputRegistrations.get(registrationKey) !== registration) return;
-		if (registration.disabled || registration.daemonId === undefined) {
+		// A registration disabled by offline capture expiry carries a retained
+		// tombstone through one final reconnect grace. Reaping that tombstone
+		// terminalizes the client subscription; a registration disabled for a
+		// recoverable artifact failure remains replaceable after cleanup.
+		if (registration.disabled) {
+			if (registration.captureExpired) {
+				this.#outputSubscriptionsPendingExpiration.add(registration.subscriptionId);
+			}
+			this.#disposeOutputRegistration(registrationKey, registration);
+			return;
+		}
+		// An unbound start-pending registration has no daemon output gap to preserve.
+		if (registration.daemonId === undefined) {
 			this.#disposeOutputRegistration(registrationKey, registration);
 			return;
 		}
 		registration.disabled = true;
+		registration.captureExpired = true;
 		this.#progressBatcher.clear(registration.batchKey);
 		void this.#disposeOutputArtifact(registration);
 		const expired: DaemonMonitorWireNotification = {
@@ -1227,7 +1266,7 @@ class DaemonBroker {
 		this.#writeMonitorNotification(registration, expired);
 		// Bound the terminal tombstone to one additional reconnect grace. An
 		// exact-identity reconnect cancels this timer and consumes the expiry;
-		// otherwise the disabled branch above disposes the registration.
+		// otherwise the disabled branch terminalizes the client subscription.
 		this.#scheduleOutputRegistrationCleanup(registrationKey, registration);
 	}
 
@@ -1255,12 +1294,48 @@ class DaemonBroker {
 		subscriptions: DaemonOutputWireSubscription[] | undefined,
 	): Promise<void> {
 		if (!subscriptionId || !subscriptions) return;
+		if (this.#expiredOutputSubscriptions.has(subscriptionId)) {
+			if (subscriptions.length === 0) {
+				this.#expiredOutputSubscriptions.delete(subscriptionId);
+				return;
+			}
+			const superseded = subscriptions.every(subscription => {
+				if (subscription.daemonId === undefined) return false;
+				return this.#records.get(subscription.name)?.snapshot.id !== subscription.daemonId;
+			});
+			if (superseded) {
+				for (const subscription of subscriptions) {
+					const daemonId = subscription.daemonId;
+					if (daemonId === undefined) continue;
+					this.#writeMonitorNotificationToSocket(socket, {
+						event: "daemon-monitor-expired",
+						monitorId: subscription.id,
+						registrationId: subscription.registrationId,
+						name: subscription.name,
+						daemonId,
+					});
+				}
+				return;
+			}
+			throw new Error("Daemon output subscription expired");
+		}
+		if (subscriptions.length === 0) this.#outputSubscriptionsPendingExpiration.delete(subscriptionId);
 		const syncToken = Symbol(subscriptionId);
 		this.#outputSubscriptionSyncTokens.set(subscriptionId, syncToken);
 		const current = (): boolean =>
 			!socket.destroyed && this.#outputSubscriptionSyncTokens.get(subscriptionId) === syncToken;
 		try {
 			const advertised = new Set(subscriptions.map(subscription => subscription.id));
+			const reconnectedRetainedRegistration = subscriptions.some(subscription => {
+				const existing = this.#outputRegistrations.get(outputRegistrationKey(subscriptionId, subscription.id));
+				return (
+					existing !== undefined &&
+					existing.name === subscription.name &&
+					existing.registrationId === subscription.registrationId &&
+					existing.artifactPath === subscription.artifactPath
+				);
+			});
+			if (reconnectedRetainedRegistration) this.#outputSubscriptionsPendingExpiration.delete(subscriptionId);
 			const removed = [...this.#outputRegistrations.values()].filter(
 				registration => registration.subscriptionId === subscriptionId && !advertised.has(registration.id),
 			);
@@ -1523,14 +1598,19 @@ class DaemonBroker {
 	}
 
 	#writeMonitorNotification(registration: OutputRegistration, notification: DaemonMonitorWireNotification): void {
-		if (!registration.socket || registration.socket.destroyed) return;
+		if (!registration.socket) return;
+		this.#writeMonitorNotificationToSocket(registration.socket, notification);
+	}
+
+	#writeMonitorNotificationToSocket(socket: net.Socket, notification: DaemonMonitorWireNotification): void {
+		if (socket.destroyed) return;
 		try {
-			registration.socket.write(`${JSON.stringify(notification)}\n`);
+			socket.write(`${JSON.stringify(notification)}\n`);
 		} catch (error) {
-			registration.socket.destroy();
+			socket.destroy();
 			logger.warn("Failed to write daemon monitor notification", {
-				monitorId: registration.id,
-				name: registration.name,
+				monitorId: notification.monitorId,
+				name: notification.event === "daemon-monitor-completed" ? notification.daemon.name : notification.name,
 				error: error instanceof Error ? error.message : String(error),
 			});
 		}

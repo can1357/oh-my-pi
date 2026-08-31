@@ -2022,21 +2022,27 @@ process.stdin.on("data", chunk => {
 			});
 			if (exited.op !== "wait") throw new Error("unexpected wait result");
 			expect(exited.daemon).toMatchObject({ state: "exited", exitCode: 0 });
-			// Cross the second grace without any reconnect. Re-advertising the exact
-			// identity must now create a terminal registration, not replay expiry.
+			// Cross the real socket timer's second grace without any reconnect; fake
+			// timers cannot drive that lifecycle. The final tombstone reap expires
+			// this client output subscription, so a late retry of the exact identity
+			// cannot manufacture a terminal registration and claim a full capture
+			// that skipped the offline gap.
 			await Bun.sleep(300);
 
 			second = await openRawBrokerSocket(endpoint);
 			second.socket.write(envelope("register-after-expired-reap"));
-			await second.waitFor(message => message.id === "register-after-expired-reap");
-			const completed = await second.waitFor(
-				message => message.event === "daemon-monitor-completed" && message.monitorId === subscription.id,
-			);
-			expect(completed).toMatchObject({
-				monitorId: subscription.id,
-				registrationId: subscription.registrationId,
-				daemon: { id: started.daemon.id, state: "exited", exitCode: 0 },
+			const rejected = await second.waitFor(message => message.id === "register-after-expired-reap");
+			expect(rejected).toMatchObject({
+				ok: false,
+				error: "Daemon output subscription expired",
 			});
+			second.socket.write(envelope("retry-after-expired-reap"));
+			const retried = await second.waitFor(message => message.id === "retry-after-expired-reap");
+			expect(retried).toMatchObject({
+				ok: false,
+				error: "Daemon output subscription expired",
+			});
+			expect(second.messages.some(message => message.event === "daemon-monitor-completed")).toBeFalse();
 			expect(second.messages.some(message => message.event === "daemon-monitor-expired")).toBeFalse();
 		} finally {
 			first?.socket.destroy();
