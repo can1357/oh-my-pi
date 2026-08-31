@@ -1,11 +1,10 @@
 /**
  * Agent Hub overlay component.
  *
- * One overlay, two views:
- * - Table view: every registered agent except Main (Main IS the ambient
- *   chat), live from the global AgentRegistry — status, unread irc count,
- *   current/last task, last activity. Navigate with keys, wheel, hover, and
- *   click; `r` revives a parked agent, `x` aborts + releases one.
+ * - Table view: every registered subagent in a stable operational roster. Tree
+ *   mode adds Main as the selectable root, letting focused users return without
+ *   interrupting a working child. Navigate with keys, wheel, hover, and click;
+ *   `r` revives a parked subagent, `x` aborts + releases one.
  * - Chat view: per-agent transcript (incremental session-file tail, absorbed
  *   from the old session observer overlay) plus an input line. Submitting
  *   revives a parked agent, then prompts/steers it; the message lands in the
@@ -63,6 +62,7 @@ import {
 	statusGlyph,
 	statusText,
 	treeBranch,
+	treeContinuation,
 } from "./agent-hub-renderer";
 import { AgentTranscriptViewer } from "./agent-transcript-viewer";
 import {
@@ -165,6 +165,7 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 
 	// Table state
 	#rows: AgentRef[] = [];
+	#subagentCount = 0;
 	#statusCounts: Record<AgentStatus, number> = { running: 0, idle: 0, parked: 0, aborted: 0 };
 	#selectedRow = 0;
 	#hoveredRow: number | null = null;
@@ -176,8 +177,8 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 	#nextRowOrder = 0;
 	/** Double-tap window state for the table's left-left "close hub" gesture. */
 	#lastLeftTap = 0;
-	/** Operational ordering by default; tree mode groups descendants under their spawner. */
-	#viewMode: HubViewMode = "roster";
+	/** Current projection; initialised from the Agent Hub default-view setting. */
+	#viewMode: HubViewMode;
 	#treeDepthById = new Map<string, number>();
 	#treeParentById = new Map<string, string>();
 	#treeLastSiblingById = new Map<string, boolean>();
@@ -226,6 +227,7 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 		this.#registry = deps.registry ?? AgentRegistry.global();
 		this.#observers = deps.observers;
 		this.#settings = deps.settings;
+		this.#viewMode = deps.settings?.get("agentHub.defaultView") ?? "roster";
 		this.#irc = deps.irc ?? IrcBus.global();
 		// Lazy: the lifecycle global self-constructs against the global
 		// registry, so only touch it when revive/kill actually needs it.
@@ -284,7 +286,7 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 	 * those included must wait for {@link persistedSubagentsReady} first.
 	 */
 	get isEmpty(): boolean {
-		return this.#rows.length === 0;
+		return this.#subagentCount === 0;
 	}
 
 	/** Tear down every subscription and timer. Called by the overlay owner on close. */
@@ -450,7 +452,8 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 		}
 
 		if (this.#viewMode === "tree") {
-			const tree = projectAgentTree(rosterRows);
+			const mainRoot = !this.#remote && this.#focusAgent ? this.#registry.get(MAIN_AGENT_ID) : undefined;
+			const tree = projectAgentTree(rosterRows, mainRoot);
 			this.#rows = tree.rows;
 			this.#treeDepthById = tree.depthById;
 			this.#treeParentById = tree.parentById;
@@ -461,6 +464,7 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 			this.#treeParentById.clear();
 			this.#treeLastSiblingById.clear();
 		}
+		this.#subagentCount = rosterRows.length;
 		const keptIndex = selectedId ? this.#rows.findIndex(ref => ref.id === selectedId) : -1;
 		this.#selectedRow = keptIndex >= 0 ? keptIndex : Math.min(this.#selectedRow, Math.max(0, this.#rows.length - 1));
 		const detailAgentId = this.#rows[this.#selectedRow]?.id;
@@ -713,7 +717,7 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 		if (metrics.reportedAgents === 0) {
 			lines.push(
 				...wrapTextWithAnsi(
-					theme.fg("dim", `Usage —${theme.sep.dot}0/${this.#rows.length} measured`),
+					theme.fg("dim", `Usage —${theme.sep.dot}0/${this.#subagentCount} measured`),
 					Math.max(1, width),
 				),
 			);
@@ -727,7 +731,7 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 			theme.fg("dim", `${formatNumber(metrics.tools)} tools`),
 			theme.fg("dim", `${formatNumber(metrics.tokens)} tok`),
 			theme.fg("dim", `${metrics.activeDurationAgents}/${metrics.reportedAgents} timed`),
-			theme.fg("dim", `${metrics.reportedAgents}/${this.#rows.length} measured`),
+			theme.fg("dim", `${metrics.reportedAgents}/${this.#subagentCount} measured`),
 		].join(theme.fg("dim", theme.sep.dot));
 		lines.push(...wrapTextWithAnsi(usage, Math.max(1, width)));
 		return lines;
@@ -746,8 +750,9 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 		const result = aggregateMetrics({
 			rows: this.#rows,
 			observedById: this.#observedById,
-			metricsFor: (ref, observed) => this.#metricsFor(ref, observed),
-			fallbackStatsSession: (ref, observed) => this.#fallbackStatsSession(ref, observed),
+			metricsFor: (ref, observed) => (ref.id === MAIN_AGENT_ID ? undefined : this.#metricsFor(ref, observed)),
+			fallbackStatsSession: (ref, observed) =>
+				ref.id === MAIN_AGENT_ID ? undefined : this.#fallbackStatsSession(ref, observed),
 			sessionMetrics: this.#sessionMetrics,
 			refreshFallback,
 		});
@@ -826,9 +831,13 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 		}
 
 		section("Lineage");
-		add(
-			`Spawned by ${sanitizeDisplayText(ref.parentId ?? MAIN_AGENT_ID)}${children.length > 0 ? ` · ${children.length} children` : ""}`,
-		);
+		if (ref.id === MAIN_AGENT_ID) {
+			add(`Root session${children.length > 0 ? ` · ${children.length} children` : ""}`);
+		} else {
+			add(
+				`Spawned by ${sanitizeDisplayText(ref.parentId ?? MAIN_AGENT_ID)}${children.length > 0 ? ` · ${children.length} children` : ""}`,
+			);
+		}
 		if (children.length > 0) add(theme.fg("dim", formatChildIds(children, width)));
 		add(theme.fg("dim", `Registered ${formatLocalDateTimeWithOffset(new Date(ref.createdAt))}`));
 
@@ -867,10 +876,13 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 	): string[] {
 		const max = Math.max(1, width);
 		const cursor = selected ? theme.fg("accent", theme.nav.cursor) : " ";
-		const depth = this.#viewMode === "tree" ? (this.#treeDepthById.get(ref.id) ?? 0) : 0;
 		const branch =
 			this.#viewMode === "tree"
 				? treeBranch(ref, max, this.#treeDepthById, this.#treeParentById, this.#treeLastSiblingById)
+				: "";
+		const continuation =
+			this.#viewMode === "tree"
+				? treeContinuation(ref, max, this.#treeDepthById, this.#treeParentById, this.#treeLastSiblingById)
 				: "";
 		const id = sanitizeDisplayText(ref.id);
 		const styledId = selected ? theme.bold(theme.fg("accent", id)) : theme.bold(id);
@@ -903,12 +915,17 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 		const leftWidth = visibleWidth(left);
 		const rightWidth = visibleWidth(right);
 		const entry: string[] = [];
-		const detailIndent = Math.min(max - 1, 4 + depth * 2);
+		const availableDetailPrefixWidth = Math.max(0, max - 1);
+		const detailPrefix =
+			availableDetailPrefixWidth > 0
+				? truncateToWidth(`${padding(4)}${continuation}`, availableDetailPrefixWidth)
+				: "";
+		const detailIndent = visibleWidth(detailPrefix);
 		if (leftWidth + 2 + rightWidth <= max) {
 			entry.push(left + padding(max - leftWidth - rightWidth) + right);
 		} else {
 			entry.push(truncateToWidth(left.replace(/[\r\n]+/g, " "), max));
-			entry.push(`${padding(Math.max(0, detailIndent))}${truncateToWidth(right, Math.max(1, max - detailIndent))}`);
+			entry.push(`${detailPrefix}${truncateToWidth(right, Math.max(1, max - detailIndent))}`);
 		}
 
 		const metrics = this.#metricsFor(ref, observed);
@@ -919,7 +936,7 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 			? `${theme.fg("muted", sanitizeLine(task, detailWidth))}${theme.fg("dim", theme.sep.dot)}${usage}`
 			: usage;
 		for (const wrapped of wrapTextWithAnsi(details, detailWidth)) {
-			entry.push(`${padding(Math.max(0, detailIndent))}${wrapped}`);
+			entry.push(`${detailPrefix}${wrapped}`);
 		}
 		if (!hovered) return entry;
 		return entry.map(lineRow => {
@@ -1074,6 +1091,11 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 	#reviveSelected(): void {
 		const ref = this.#rows[this.#selectedRow];
 		if (!ref) return;
+		if (ref.id === MAIN_AGENT_ID) {
+			this.#notice = "Main is the root session — it does not need revival.";
+			this.#requestRender();
+			return;
+		}
 		if (ref.kind === "advisor") {
 			this.#notice = `"${ref.id}" is a read-only advisor transcript — nothing to revive.`;
 			this.#requestRender();
@@ -1103,6 +1125,11 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 	#killSelected(): void {
 		const ref = this.#rows[this.#selectedRow];
 		if (!ref) return;
+		if (ref.id === MAIN_AGENT_ID) {
+			this.#notice = "Main is the root session — it cannot be killed from Agent Hub.";
+			this.#requestRender();
+			return;
+		}
 		if (ref.kind === "advisor") {
 			this.#notice = `"${ref.id}" is a read-only advisor transcript — cannot be killed.`;
 			this.#requestRender();

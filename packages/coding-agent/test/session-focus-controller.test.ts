@@ -47,6 +47,8 @@ interface Harness {
 	handledEvents: unknown[];
 	setSessionCalls: Array<[AgentSession, string | undefined]>;
 	reloadTodoSessions: AgentSession[];
+	composerSwitches: Array<[string | undefined, string | undefined]>;
+	discardedComposerDrafts: string[];
 	counts: {
 		clearTransientSessionUi: () => number;
 		resetTranscriptAnchors: () => number;
@@ -60,6 +62,8 @@ function makeHarness(options: { renderInitialMessages?: () => void | Promise<voi
 	const handledEvents: unknown[] = [];
 	const setSessionCalls: Array<[AgentSession, string | undefined]> = [];
 	const reloadTodoSessions: AgentSession[] = [];
+	const composerSwitches: Array<[string | undefined, string | undefined]> = [];
+	const discardedComposerDrafts: string[] = [];
 	let clearTransientSessionUi = 0;
 	let resetTranscriptAnchors = 0;
 	let renderInitialMessages = 0;
@@ -94,6 +98,12 @@ function makeHarness(options: { renderInitialMessages?: () => void | Promise<voi
 		reloadTodos: async (source?: AgentSession) => {
 			reloadTodoSessions.push(source ?? main.session);
 		},
+		switchComposerDraft: (fromAgentId: string | undefined, toAgentId: string | undefined) => {
+			composerSwitches.push([fromAgentId, toAgentId]);
+		},
+		discardComposerDraft: (agentId: string) => {
+			discardedComposerDrafts.push(agentId);
+		},
 		updateEditorBorderColor() {},
 		ui: { requestRender() {} },
 		showStatus() {},
@@ -112,6 +122,8 @@ function makeHarness(options: { renderInitialMessages?: () => void | Promise<voi
 		handledEvents,
 		setSessionCalls,
 		reloadTodoSessions,
+		composerSwitches,
+		discardedComposerDrafts,
 		counts: {
 			clearTransientSessionUi: () => clearTransientSessionUi,
 			resetTranscriptAnchors: () => resetTranscriptAnchors,
@@ -146,6 +158,7 @@ describe("SessionFocusController", () => {
 		expect(h.counts.renderInitialMessages()).toBe(1);
 		expect(h.reloadTodoSessions).toEqual([worker.session]);
 		expect(h.setSessionCalls).toEqual([[worker.session, "Worker"]]);
+		expect(h.composerSwitches).toEqual([[undefined, "Worker"]]);
 
 		const event = { type: "message_start", message: { role: "user" } };
 		await worker.emit(event);
@@ -169,6 +182,10 @@ describe("SessionFocusController", () => {
 		expect(h.controller.focusedAgentId).toBeUndefined();
 		expect(h.setSessionCalls.at(-1)).toEqual([h.main.session, undefined]);
 		expect(h.reloadTodoSessions).toEqual([worker.session, h.main.session]);
+		expect(h.composerSwitches).toEqual([
+			[undefined, "Worker"],
+			["Worker", undefined],
+		]);
 	});
 
 	it("does not let a superseded focus attachment restore the worker todo HUD after unfocusing", async () => {
@@ -248,6 +265,11 @@ describe("SessionFocusController", () => {
 			[parent.session, "Parent"],
 			[h.main.session, undefined],
 		]);
+		expect(h.composerSwitches).toEqual([
+			[undefined, "Worker"],
+			["Worker", "Parent"],
+			["Parent", undefined],
+		]);
 	});
 
 	it("parking the focused agent auto-unfocuses back to the main session", async () => {
@@ -266,5 +288,32 @@ describe("SessionFocusController", () => {
 			[worker.session, "Worker"],
 			[h.main.session, undefined],
 		]);
+		expect(h.discardedComposerDrafts).toEqual([]);
+	});
+
+	it("discards the focused agent draft when a hard kill becomes terminal", async () => {
+		const h = makeHarness();
+		const worker = makeSessionStub();
+		const ref = registerSub(h.registry, "Worker", worker.session, MAIN_AGENT_ID);
+
+		await h.controller.focusAgent("Worker");
+		h.registry.setStatus("Worker", "aborted", ref);
+		await flushAsync();
+
+		expect(h.controller.focusedAgentId).toBeUndefined();
+		expect(h.composerSwitches.at(-1)).toEqual(["Worker", undefined]);
+		expect(h.discardedComposerDrafts).toEqual(["Worker"]);
+	});
+
+	it("discards an unfocused agent draft when its registry generation is removed", async () => {
+		const h = makeHarness();
+		const worker = makeSessionStub();
+		const ref = registerSub(h.registry, "Worker", worker.session, MAIN_AGENT_ID);
+
+		await h.controller.focusAgent("Worker");
+		await h.controller.unfocus();
+		h.registry.unregister("Worker", ref);
+
+		expect(h.discardedComposerDrafts).toEqual(["Worker"]);
 	});
 });

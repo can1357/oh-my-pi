@@ -159,7 +159,7 @@ export function aggregateMetrics(args: {
 }
 
 /** Parent-before-child projection preserving the roster's stable sibling order. */
-export function projectAgentTree(refs: readonly AgentRef[]): AgentTreeProjection {
+export function projectAgentTree(refs: readonly AgentRef[], mainRoot?: AgentRef): AgentTreeProjection {
 	const ids = new Set<string>();
 	const operationalIndex = new Map<string, number>();
 	for (let i = 0; i < refs.length; i++) {
@@ -241,8 +241,14 @@ export function projectAgentTree(refs: readonly AgentRef[]): AgentTreeProjection
 				stack.push({ ref: descendants[i], depth: current.depth + 1 });
 		}
 	};
-	for (const root of children.get(MAIN_AGENT_ID) ?? []) visit(root, 0);
-	// Corrupt persisted parent cycles remain visible as roots instead of disappearing.
-	for (const ref of refs) visit(ref, 0);
+	if (mainRoot) {
+		parentById.set(mainRoot.id, MAIN_AGENT_ID);
+		lastSiblingById.set(mainRoot.id, true);
+		visit(mainRoot, 0);
+	} else {
+		for (const root of children.get(MAIN_AGENT_ID) ?? []) visit(root, 0);
+	}
+	// Corrupt persisted parent cycles remain visible instead of disappearing.
+	for (const ref of refs) visit(ref, mainRoot ? 1 : 0);
 	return { rows, depthById, parentById, lastSiblingById };
 }

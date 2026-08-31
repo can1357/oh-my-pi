@@ -3,7 +3,7 @@ import { Ellipsis, visibleWidth } from "@oh-my-pi/pi-tui";
 import { formatDuration, formatNumber, sanitizeText } from "@oh-my-pi/pi-utils";
 import { getRoleInfo } from "../../config/model-roles";
 import type { Settings } from "../../config/settings";
-import { type AgentRef, MAIN_AGENT_ID } from "../../registry/agent-registry";
+import type { AgentRef } from "../../registry/agent-registry";
 import { parseThinkingLevel } from "../../thinking";
 import { replaceTabs, TRUNCATE_LENGTHS, truncateToWidth } from "../../tools/render-utils";
 import type { ObservableSession } from "../session-observer-registry";
@@ -172,6 +172,32 @@ export function formatChildIds(children: readonly AgentRef[], width: number): st
 	return text;
 }
 
+function treePrefix(
+	ref: AgentRef,
+	maxWidth: number,
+	depthById: ReadonlyMap<string, number>,
+	parentById: ReadonlyMap<string, string>,
+	lastSiblingById: ReadonlyMap<string, boolean>,
+	ownSegment: string,
+): string {
+	const depth = depthById.get(ref.id) ?? 0;
+	if (depth === 0) return "";
+	const segments: string[] = [ownSegment];
+	const ancestry = new Set<string>();
+	let remainingAncestors = depth - 1;
+	let parent = parentById.get(ref.id);
+	while (parent && remainingAncestors > 0 && !ancestry.has(parent)) {
+		ancestry.add(parent);
+		segments.push(lastSiblingById.get(parent) ? "    " : "│   ");
+		parent = parentById.get(parent);
+		remainingAncestors--;
+	}
+	const maxSegments = Math.max(1, Math.floor(Math.max(4, maxWidth - 2) / 4));
+	const omitted = Math.max(0, segments.length - maxSegments);
+	const prefix = segments.slice(0, maxSegments).reverse().join("");
+	return theme.fg("dim", `${omitted > 0 ? "… " : ""}${prefix}`);
+}
+
 /** Bash `tree`-style ancestry prefix, clipped from the left on pathological depth. */
 export function treeBranch(
 	ref: AgentRef,
@@ -180,17 +206,30 @@ export function treeBranch(
 	parentById: ReadonlyMap<string, string>,
 	lastSiblingById: ReadonlyMap<string, boolean>,
 ): string {
-	if ((depthById.get(ref.id) ?? 0) === 0) return "";
-	const segments: string[] = [lastSiblingById.get(ref.id) ? "└── " : "├── "];
-	const ancestry = new Set<string>();
-	let parent = parentById.get(ref.id);
-	while (parent && parentById.get(parent) !== MAIN_AGENT_ID && !ancestry.has(parent)) {
-		ancestry.add(parent);
-		segments.push(lastSiblingById.get(parent) ? "    " : "│   ");
-		parent = parentById.get(parent);
-	}
-	const maxSegments = Math.max(1, Math.floor(Math.max(4, maxWidth - 2) / 4));
-	const omitted = Math.max(0, segments.length - maxSegments);
-	const prefix = segments.slice(0, maxSegments).reverse().join("");
-	return theme.fg("dim", `${omitted > 0 ? "… " : ""}${prefix}`);
+	return treePrefix(
+		ref,
+		maxWidth,
+		depthById,
+		parentById,
+		lastSiblingById,
+		lastSiblingById.get(ref.id) ? "└── " : "├── ",
+	);
+}
+
+/** Ancestry gutter continued through an agent entry's wrapped detail rows. */
+export function treeContinuation(
+	ref: AgentRef,
+	maxWidth: number,
+	depthById: ReadonlyMap<string, number>,
+	parentById: ReadonlyMap<string, string>,
+	lastSiblingById: ReadonlyMap<string, boolean>,
+): string {
+	return treePrefix(
+		ref,
+		maxWidth,
+		depthById,
+		parentById,
+		lastSiblingById,
+		lastSiblingById.get(ref.id) ? "    " : "│   ",
+	);
 }

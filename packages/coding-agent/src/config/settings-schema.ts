@@ -2001,6 +2001,22 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"agentHub.defaultView": {
+		type: "enum",
+		values: ["roster", "tree"] as const,
+		default: "roster",
+		ui: {
+			tab: "interaction",
+			group: "Input",
+			label: "Agent Hub Default View",
+			description: "Initial Agent Hub layout",
+			options: [
+				{ value: "roster", label: "Flat roster" },
+				{ value: "tree", label: "Parent/child tree" },
+			],
+		},
+	},
+
 	treeFilterMode: {
 		type: "enum",
 		values: ["default", "no-tools", "user-only", "labeled-only", "all"] as const,

@@ -4,9 +4,8 @@
  *
  * Focusing re-points the transcript, streaming event subscription, status
  * line, and editor prompt/interrupt at a subagent's live AgentSession (from
- * AgentRegistry) without touching the main session underneath; unfocusing
- * re-attaches the main session and rebuilds the transcript from its
- * authoritative state.
+ * AgentRegistry). Each session keeps its own composer draft while the
+ * transcript view moves between agents.
  */
 
 import { AgentLifecycleManager } from "../../registry/agent-lifecycle";
@@ -43,6 +42,7 @@ export class SessionFocusController {
 		if (id === MAIN_AGENT_ID) return this.unfocus();
 		const session = await this.lifecycle().ensureLive(id);
 		if (id === this.#focusedAgentId && session === this.#attachedSession) return;
+		this.ctx.switchComposerDraft(this.#focusedAgentId, id);
 		this.#focusedAgentId = id;
 		this.#attachedSession = session;
 		this.#registryUnsubscribe ??= this.registry.onChange(e => this.#onRegistryEvent(e));
@@ -63,8 +63,15 @@ export class SessionFocusController {
 	}
 
 	/** Return to the main session. No-op when unfocused. */
-	async unfocus(): Promise<void> {
+	unfocus(): Promise<void> {
+		return this.#unfocus(false);
+	}
+
+	async #unfocus(discardFocusedDraft: boolean): Promise<void> {
 		if (!this.#focusedAgentId) return;
+		const focusedAgentId = this.#focusedAgentId;
+		this.ctx.switchComposerDraft(focusedAgentId, undefined);
+		if (discardFocusedDraft) this.ctx.discardComposerDraft(focusedAgentId);
 		this.#focusedAgentId = undefined;
 		this.#attachedSession = undefined;
 		const attached = await this.#attach(this.ctx.session);
@@ -77,11 +84,16 @@ export class SessionFocusController {
 	}
 
 	#onRegistryEvent(event: RegistryEvent): void {
-		if (event.ref.id !== this.#focusedAgentId) return;
 		const gone = event.type === "removed";
-		const dead = event.type === "status_changed" && (event.ref.status === "parked" || event.ref.status === "aborted");
-		if (!gone && !dead) return;
-		void this.unfocus().then(() => {
+		const aborted = event.type === "status_changed" && event.ref.status === "aborted";
+		const parked = event.type === "status_changed" && event.ref.status === "parked";
+		const terminal = gone || aborted;
+		if (event.ref.id !== this.#focusedAgentId) {
+			if (terminal) this.ctx.discardComposerDraft(event.ref.id);
+			return;
+		}
+		if (!terminal && !parked) return;
+		void this.#unfocus(terminal).then(() => {
 			this.ctx.showStatus(`Agent ${event.ref.id} is ${gone ? "gone" : event.ref.status}; returned to main session`);
 		});
 	}

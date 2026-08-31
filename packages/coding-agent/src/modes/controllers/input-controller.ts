@@ -21,6 +21,7 @@ import { parseQueueShorthand, splitQueuedMessages } from "../../modes/queue-inpu
 import { buildSkillCommandPrompt, isKnownSkillCommand } from "../../modes/skill-command";
 import type { InteractiveModeContext } from "../../modes/types";
 import manualContinuePrompt from "../../prompts/system/manual-continue.md" with { type: "text" };
+import { MAIN_AGENT_ID } from "../../registry/agent-registry";
 import { USER_INTERRUPT_LABEL } from "../../session/messages";
 import { executeBuiltinSlashCommand, lookupBuiltinSlashCommand } from "../../slash-commands/builtin-registry";
 import { parseSlashCommand } from "../../slash-commands/helpers/parse";
@@ -182,15 +183,37 @@ export class InputController {
 
 	#enhancedPaste?: EnhancedPasteController;
 	#draftText: string | undefined;
+	#sessionDrafts = new Map<string, { text: string; images: ImageContent[] }>();
 	#focusedLeftTapListenerInstalled = false;
 	#focusedPasteListenerInstalled = false;
 	#btwBranchListenerInstalled = false;
 	#btwCopyListenerInstalled = false;
 	#expandToolsListenerInstalled = false;
 
-	/** Return the last full editor snapshot delivered by its change contract. */
+	/** Save the current composer and restore the composer owned by the target session. */
+	switchComposerDraft(fromAgentId: string | undefined, toAgentId: string | undefined): void {
+		const fromId = fromAgentId ?? MAIN_AGENT_ID;
+		const toId = toAgentId ?? MAIN_AGENT_ID;
+		this.#sessionDrafts.set(fromId, {
+			text: this.ctx.editor.getExpandedText(),
+			images: [...this.ctx.editor.pendingImages],
+		});
+		const target = this.#sessionDrafts.get(toId);
+		if (target) this.ctx.editor.setDraft(target.text, target.images);
+		else this.ctx.editor.clearDraft();
+		this.#draftText = this.ctx.editor.getText();
+		this.ctx.ui.requestRender();
+	}
+
+	/** Drop text and image payloads retained for a terminal agent generation. */
+	discardComposerDraft(agentId: string): void {
+		this.#sessionDrafts.delete(agentId);
+	}
+
+	/** Return Main's draft even when teardown begins from a focused subagent. */
 	getDraftText(): string {
-		return this.#draftText ?? this.ctx.editor.getText();
+		if (!this.ctx.focusedAgentId) return this.#draftText ?? this.ctx.editor.getExpandedText();
+		return this.#sessionDrafts.get(MAIN_AGENT_ID)?.text ?? "";
 	}
 
 	// Tap counter for the double-← gesture; reset whenever a quiet gap

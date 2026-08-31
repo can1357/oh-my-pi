@@ -34,6 +34,7 @@ type FakeEditor = {
 	getText(): string;
 	getExpandedText(): string;
 	setCollapsedText(text: string): void;
+	setDraft(text: string, images?: readonly ImageContent[]): void;
 	composerChips(): unknown[];
 	addToHistory(text: string): void;
 	setActionKeys(action: string, keys: string[]): void;
@@ -86,6 +87,7 @@ async function createContext() {
 	const requestRender = vi.fn();
 	const showError = vi.fn();
 	let focused: unknown;
+	let focusedAgentId: string | undefined;
 	let overlayVisible = false;
 	const addInputListener = vi.fn((listener: InputListener) => {
 		void listener;
@@ -132,6 +134,10 @@ async function createContext() {
 		setCollapsedText(text: string) {
 			editorText = text;
 		},
+		setDraft(text: string, images?: readonly ImageContent[]) {
+			editorText = text;
+			this.pendingImages = images ? [...images] : [];
+		},
 		composerChips() {
 			return [];
 		},
@@ -173,6 +179,9 @@ async function createContext() {
 		retryEscapeHandler: undefined,
 		session: session as unknown as InteractiveModeContext["session"],
 		viewSession: session as unknown as InteractiveModeContext["viewSession"],
+		get focusedAgentId() {
+			return focusedAgentId;
+		},
 		keybindings: {
 			getKeys(action: string) {
 				return keyMap[action] ? [...keyMap[action]] : [];
@@ -248,6 +257,9 @@ async function createContext() {
 		setOverlayVisible(visible: boolean) {
 			overlayVisible = visible;
 		},
+		setFocusedAgentId(id: string | undefined) {
+			focusedAgentId = id;
+		},
 		setKeybinding(action: string, keys: KeyId[]) {
 			keyMap[action] = keys;
 		},
@@ -297,6 +309,49 @@ describe("InputController keybinding setup", () => {
 		expect(spies.showModelSelector).toHaveBeenNthCalledWith(1, { temporaryOnly: true });
 		expect(spies.showModelSelector).toHaveBeenNthCalledWith(2);
 		expect(spies.resetDisplayAfterAppearanceRefresh).toHaveBeenCalledTimes(1);
+	});
+
+	it("keeps independent main and focused-agent composer drafts", async () => {
+		const { InputController, ctx, editor, setFocusedAgentId } = await createContext();
+		const controller = new InputController(ctx);
+		const mainImage: ImageContent = { type: "image", mimeType: "image/png", data: "main" };
+		const workerImage: ImageContent = { type: "image", mimeType: "image/jpeg", data: "worker" };
+
+		editor.setText("main draft");
+		editor.pendingImages = [mainImage];
+		controller.switchComposerDraft(undefined, "Worker");
+		expect(editor.getText()).toBe("");
+		expect(editor.pendingImages).toEqual([]);
+
+		editor.setText("worker draft");
+		editor.pendingImages = [workerImage];
+		setFocusedAgentId("Worker");
+		expect(controller.getDraftText()).toBe("main draft");
+
+		controller.switchComposerDraft("Worker", undefined);
+		expect(editor.getText()).toBe("main draft");
+		expect(editor.pendingImages).toEqual([mainImage]);
+		controller.switchComposerDraft(undefined, "Worker");
+		expect(editor.getText()).toBe("worker draft");
+		expect(editor.pendingImages).toEqual([workerImage]);
+	});
+
+	it("drops terminal agent composer text and image payloads", async () => {
+		const { InputController, ctx, editor } = await createContext();
+		const controller = new InputController(ctx);
+		const workerImage: ImageContent = { type: "image", mimeType: "image/png", data: "worker" };
+
+		editor.setText("main draft");
+		controller.switchComposerDraft(undefined, "Worker");
+		editor.setText("worker draft");
+		editor.pendingImages = [workerImage];
+		controller.switchComposerDraft("Worker", undefined);
+
+		controller.discardComposerDraft("Worker");
+		controller.switchComposerDraft(undefined, "Worker");
+
+		expect(editor.getText()).toBe("");
+		expect(editor.pendingImages).toEqual([]);
 	});
 
 	it("registers the tool activity visibility action", async () => {
@@ -352,11 +407,10 @@ describe("InputController keybinding setup", () => {
 	});
 
 	it("retries the focused view session instead of the main session", async () => {
-		const { InputController, ctx, editor, spies } = await createContext();
+		const { InputController, ctx, editor, setFocusedAgentId, spies } = await createContext();
 		const focusedRetry = vi.fn(async () => true);
-		(ctx as unknown as { focusedAgentId: string; viewSession: { retry: typeof focusedRetry } }).focusedAgentId =
-			"worker";
-		(ctx as unknown as { viewSession: { retry: typeof focusedRetry } }).viewSession = { retry: focusedRetry };
+		setFocusedAgentId("worker");
+		Reflect.set(ctx, "viewSession", { retry: focusedRetry });
 		const controller = new InputController(ctx);
 
 		controller.setupKeyHandlers();
