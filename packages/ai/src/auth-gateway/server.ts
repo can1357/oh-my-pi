@@ -467,6 +467,7 @@ async function handleFormatEndpoint(
 	// expected to resolve the credential and pass it as `options.apiKey`.
 	// For OAuth providers this returns the access token (refreshed via the
 	// broker override on AuthStorage when needed).
+	const traces = bootOpts.decisionTraces ?? new RouteDecisionTraceLog();
 	let apiKey: string | undefined;
 	try {
 		apiKey = await bootOpts.storage.getApiKey(model.provider, sessionId, {
@@ -476,11 +477,19 @@ async function handleFormatEndpoint(
 	} catch (error) {
 		if (controller.signal.aborted) return clientClosedResponse(route);
 		const classified = classifyGatewayError(error);
+		const skipped = traces.record({
+			requestId,
+			routeId: compiled.id,
+			generation: compiled.generation,
+			selectedTarget: compiled.root.model,
+			disposition: "skipped",
+			reason: "credential_lookup_failed",
+		});
+		logger.debug("auth-gateway route decision", redactedDecisionSummary(skipped));
 		logger.warn("auth-gateway getApiKey threw", { provider: model.provider, peer, error: classified.message });
 		return route.module.formatError(classified.status, classified.type, classified.message);
 	}
 	if (controller.signal.aborted) return clientClosedResponse(route);
-	const traces = bootOpts.decisionTraces ?? new RouteDecisionTraceLog();
 	if (!apiKey) {
 		const skipped = traces.record({
 			requestId,
@@ -684,6 +693,7 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 	const sessionId = parsed.options.sessionId ?? deriveSessionId(parsed.modelId, parsed.context);
 	parsed.options.sessionId ??= sessionId;
 
+	const traces = bootOpts.decisionTraces ?? new RouteDecisionTraceLog();
 	let apiKey: string | undefined;
 	try {
 		apiKey = await bootOpts.storage.getApiKey(model.provider, sessionId, {
@@ -693,11 +703,19 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 	} catch (error) {
 		if (controller.signal.aborted) return aborted();
 		const classified = classifyGatewayError(error);
+		const skipped = traces.record({
+			requestId,
+			routeId: compiled.id,
+			generation: compiled.generation,
+			selectedTarget: compiled.root.model,
+			disposition: "skipped",
+			reason: "credential_lookup_failed",
+		});
+		logger.debug("auth-gateway route decision", redactedDecisionSummary(skipped));
 		logger.warn("auth-gateway getApiKey threw", { provider: model.provider, peer, error: classified.message });
 		return piNative.formatError(classified.status, classified.type, classified.message);
 	}
 	if (controller.signal.aborted) return aborted();
-	const traces = bootOpts.decisionTraces ?? new RouteDecisionTraceLog();
 	if (!apiKey) {
 		const skipped = traces.record({
 			requestId,
