@@ -181,14 +181,36 @@ correlate it via `id`. Ordering across concurrent commands is not guaranteed
 - `{ id?, type: "get_branch_messages" }`
 - `{ id?, type: "get_last_assistant_text" }`
 - `{ id?, type: "set_session_name", name: string }`
+- `{ id?, type: "generate_title", customInstructions?: string }`
 - `{ id?, type: "handoff", customInstructions?: string }`
+
+### Titles
+
+`generate_title` wraps the session's public title generator: it computes a
+candidate name from the session's first user message (the same anchor
+auto-titling uses) and responds `{ title }` — `null` when the session has no
+user message yet or the input is too low-signal to name. The optional
+`customInstructions` swaps the title-generation system prompt. The generated
+name is **not** applied automatically; hosts persist it with `set_session_name`
+when appropriate. Where the mode already applies a name (builtin/auto title
+paths such as `notifyTitleChanged`), the change is reported through
+`session_info_update` (`{ type: "session_info_update", title, sessionId }`).
+
+Separately, the `prompt` command starts background auto-titling of the first
+user message when the agent is launched with `PI_RPC_TITLES=1` (default off,
+preserving the historical no-title behavior). The auto path applies the name
+directly (mirroring the interactive bootstrap); `maybeStartTitleGeneration`
+self-guards on an existing name, low-signal input, and an in-flight
+generation, so the flag is safe to enable for unattended hosts. Hosts observe
+the applied name via `get_state` (`sessionName`); builtin-command title
+changes continue to stream through `session_info_update`.
 
 ### Messages
 
 - `{ id?, type: "get_messages" }`
 - `{ id?, type: "get_messages_page", cursor?: string, limit?: number }`
 
-`get_messages_page` returns a stable chronological page with `messages`, `totalMessages`, and an opaque `nextCursor` when more messages remain. Cursors are bound to the session ID, durable leaf, and message count. The server rejects stale cursors if the session changes between requests, and refuses to start a paging walk while the session is streaming or compacting. Failed page requests carry a machine-readable `code` on the error response — `session_busy` (session is streaming or compacting) or `stale_cursor` (the snapshot behind the cursor changed, e.g. a background bash appended a message between pages) — so clients can react without matching error-message text. Pages contain at most 256 messages and normally stay below the v1 physical-frame ceiling. A v1 caller can page ordinary histories, but an individual message whose response exceeds that ceiling produces an overflow error; retrieving it losslessly requires negotiated v2 framing.
+`get_messages_page` returns a stable chronological page with `messages`, `totalMessages`, and an opaque `nextCursor` when more messages remain. Cursors are bound to the session ID, durable leaf, and message count. The server rejects stale cursors if the session changes between requests, and refuses to start a paging walk while the session is compacting. While a turn streams, paging is allowed: the first request of a walk freezes a snapshot of the current messages and binds every cursor in that walk to the frozen length, so a growing live array cannot shift offsets under the client. Once the session settles, a new snapshot is taken; a cursor that outlived the streaming epoch (or crossed a session switch) fails with `stale_cursor`. Failed page requests carry a machine-readable `code` on the error response — `session_busy` (session is compacting) or `stale_cursor` (the snapshot behind the cursor changed, e.g. a background bash appended a message between pages) — so clients can react without matching error-message text. Pages contain at most 256 messages and normally stay below the v1 physical-frame ceiling. A v1 caller can page ordinary histories, but an individual message whose response exceeds that ceiling produces an overflow error; retrieving it losslessly requires negotiated v2 framing.
 
 The bundled TypeScript `RpcClient.getMessages()` and Python `RpcClient.get_messages()` drain this paged endpoint automatically after negotiating v2. They retain the legacy monolithic command when connected to a v1 server, and on either `session_busy` or `stale_cursor` they discard partial pages and fall back to the legacy best-effort snapshot. Direct `getMessagesPage()` and `get_messages_page()` calls remain strict so incremental hosts never mix snapshots silently.
 
@@ -484,7 +506,25 @@ Common event types:
 - `model_changed`, `thinking_level_changed`
 - `ttsr_triggered`
 - `todo_reminder`, `todo_auto_clear`
-- `irc_message`, `notice`, `goal_updated`
+- `irc_message`, `advisor_note`, `notice`, `goal_updated`
+
+`advisor_note` is a structured mirror of one advisor note routed to the
+primary session:
+
+```ts
+{
+  type: "advisor_note";
+  advisor?: string;              // omitted for the default advisor
+  severity?: "nit" | "concern" | "blocker";
+  note: string;
+  deliveredAs: "card" | "steer" | "custom"; // how the note reached the primary
+}
+```
+
+It is emitted alongside the legacy advisor card / steered custom message (same
+`note` and `severity`), so hosts can surface the advisory without parsing
+`<advisory>` tags out of transcript text. Best-effort: a host that ignores it
+loses nothing — the legacy delivery remains authoritative.
 
 Extension runner errors are emitted separately as:
 

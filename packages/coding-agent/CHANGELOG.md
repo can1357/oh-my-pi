@@ -4,6 +4,9 @@
 
 ### Added
 
+- Added a structured `advisor_note` session event mirroring every routed advisor delivery (preserved card or steered message), so headless RPC/ACP hosts can surface advisories without parsing transcript text.
+- RPC `get_messages_page` now pages a frozen snapshot while a turn streams (compaction still refuses with `session_busy`); cursors stay bound to the frozen length and stale cursors across epochs/session switches still fail.
+- Added the RPC `generate_title` command wrapping the session title generator, plus opt-in auto-titling on `prompt` via `PI_RPC_TITLES=1`.
 - Added `injectV1: false` option to `openai-models-list` discovery to fetch the model list from `{baseUrl}/models` without injecting `/v1`, for gateways that root their OpenAI-compatible surface at a versioned URL (e.g. `https://api.opper.ai/v3/compat`) where the `/v1`-injected endpoint returns only a small subset.
 - Added provider-reported credits and concrete routed-model counts to `/session` statistics ([#8590](https://github.com/can1357/oh-my-pi/pull/8590) by [@will-bogusz](https://github.com/will-bogusz)).
 - Added `CLINE_API_KEY` to the CLI environment help for native ClinePass subscription inference ([#7863](https://github.com/can1357/oh-my-pi/pull/7863) by [@will-bogusz](https://github.com/will-bogusz)).

@@ -151,6 +151,7 @@ const sessionEventTypes = new Set<AgentSessionEvent["type"]>([
 	"todo_reminder",
 	"todo_auto_clear",
 	"irc_message",
+	"advisor_note",
 	"notice",
 	"thinking_level_changed",
 	"model_changed",
@@ -855,6 +856,18 @@ export class RpcClient {
 	async getLastAssistantText(): Promise<string | null> {
 		const response = await this.#send({ type: "get_last_assistant_text" });
 		return this.#getData<{ text: string | null }>(response).text;
+	}
+
+	/**
+	 * Generate a session title candidate from the first user message.
+	 * `customInstructions` optionally swaps the title-generation system prompt.
+	 * Returns `null` when the session has no user message yet or the input was
+	 * deemed too low-signal to title. The generated name is not applied
+	 * automatically — hosts persist it via `setSessionName` when appropriate.
+	 */
+	async generateTitle(customInstructions?: string): Promise<string | null> {
+		const response = await this.#send({ type: "generate_title", customInstructions });
+		return this.#getData<{ title: string | null }>(response).title;
 	}
 
 	/**

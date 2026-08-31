@@ -1193,6 +1193,7 @@ export class SessionAdvisors {
 		const content = formatAdvisorBatchContent(notes);
 		const details = { notes } satisfies AdvisorMessageDetails;
 		if (channel === "preserve") {
+			this.#emitAdvisorDeliveryNote(source, severity, note, "card");
 			this.#host.preserveAdvisorCard({
 				role: "custom",
 				customType: "advisor",
@@ -1217,6 +1218,7 @@ export class SessionAdvisors {
 			this.#host.clientBridge()?.deferAgentInitiatedTurns === true &&
 			!this.#host.allowAgentInitiatedTurns();
 		if (this.#host.planModeState()?.enabled || cannotAutoTrigger) {
+			this.#emitAdvisorDeliveryNote(source, severity, note, "card");
 			this.#host.preserveAdvisorCard({
 				role: "custom",
 				customType: "advisor",
@@ -1233,12 +1235,30 @@ export class SessionAdvisors {
 		// arming earlier would downgrade the next `advisor.immuneTurns` worth of
 		// real concerns/blockers to skip-idle-flush asides (#5628 review).
 		this.#recordAdvisorInterruptDelivered();
+		this.#emitAdvisorDeliveryNote(source, severity, note, "steer");
 		void this.#host
 			.sendCustomMessage(
 				{ customType: "advisor", content, display: true, attribution: "agent", details },
 				{ deliverAs: "steer", triggerTurn: true },
 			)
 			.catch(err => logger.debug("advisor delivery failed", { err: String(err) }));
+	}
+
+	/**
+	 * Surface one routed advice note to session-event subscribers (RPC hosts,
+	 * ACP bridge, TUI debuggers) mirroring the delivery path that just handled
+	 * it. Best-effort only: a subscriber that throws must never break the real
+	 * deliverable (the preserved card or steered message) it duplicates.
+	 */
+	#emitAdvisorDeliveryNote(
+		advisor: string | undefined,
+		severity: AdvisorSeverity | undefined,
+		note: string,
+		deliveredAs: "card" | "steer",
+	): void {
+		void this.#host
+			.emitSessionEvent({ type: "advisor_note", advisor, severity, note, deliveredAs })
+			.catch(err => logger.debug("advisor_note event emission failed", { err: String(err) }));
 	}
 
 	/** Re-prime every advisor's transcript view after an in-conversation history rewrite. */

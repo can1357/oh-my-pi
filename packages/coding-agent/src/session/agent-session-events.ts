@@ -54,6 +54,15 @@ export type AgentSessionEvent =
 	| { type: "todo_reminder"; todos: TodoItem[]; attempt: number; maxAttempts: number }
 	| { type: "todo_auto_clear" }
 	| { type: "irc_message"; message: CustomMessage }
+	| {
+			type: "advisor_note";
+			/** Which configured advisor produced the note (omitted for the default advisor). */
+			advisor?: string;
+			severity?: "nit" | "concern" | "blocker";
+			note: string;
+			/** How the note reached the primary: a preserved visible card, a live steer, or a custom delivery. */
+			deliveredAs: "card" | "steer" | "custom";
+	  }
 	| { type: "notice"; level: "info" | "warning" | "error"; message: string; source?: string }
 	| {
 			type: "thinking_level_changed";

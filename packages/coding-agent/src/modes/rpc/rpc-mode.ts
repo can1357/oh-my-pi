@@ -11,6 +11,7 @@
  * - Extension UI: Extension UI requests are emitted, client responds with extension_ui_response
  */
 import { once } from "node:events";
+import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { $env, isRecord, Snowflake } from "@oh-my-pi/pi-utils";
@@ -38,7 +39,13 @@ import { isRpcHostToolResult, isRpcHostToolUpdate, RpcHostToolBridge } from "./h
 import { isRpcHostUriResult, RpcHostUriBridge } from "./host-uris";
 import { MAX_RPC_FRAME_BYTES, MAX_RPC_REASSEMBLED_BYTES, RpcFrameEncoder } from "./rpc-frame";
 import { claimRpcInput, readRpcInputFrames } from "./rpc-input";
-import { pageRpcMessages, RPC_MESSAGES_PAGE_BUSY_ERROR, RpcMessagesPageError } from "./rpc-messages";
+import {
+	pageRpcMessages,
+	RPC_MESSAGES_PAGE_BUSY_ERROR,
+	type RpcMessageSnapshot,
+	RpcMessagesPageError,
+	resolveRpcMessagePageSource,
+} from "./rpc-messages";
 import { RpcSubagentRegistry, readRpcSubagentTranscript } from "./rpc-subagents";
 import type {
 	RpcCommand,
@@ -466,6 +473,39 @@ export class RpcShutdownCoordinator {
 
 export type RpcSubagentResetRegistry = Pick<RpcSubagentRegistry, "clear">;
 
+export type RpcGenerateTitleSession = Pick<AgentSession, "messages" | "generateTitle">;
+
+/**
+ * Handle the RPC `generate_title` command: wrap the session's public title
+ * generator, anchored on the first user message, with an optional
+ * title-prompt override. Returns `{ title: null }` when the session has no
+ * user message yet or the input is too low-signal to name. Extracted (like the
+ * other `handleRpc*` helpers) so the wire contract is testable without
+ * launching the full RPC mode.
+ */
+export async function handleRpcGenerateTitle(
+	id: string | undefined,
+	session: RpcGenerateTitleSession,
+	customInstructions: string | undefined,
+): Promise<RpcResponse> {
+	const firstUserText = firstRpcUserMessageText(session.messages);
+	if (firstUserText === undefined) {
+		return { id, type: "response", command: "generate_title", success: true, data: { title: null } };
+	}
+	try {
+		const title = await session.generateTitle(firstUserText, customInstructions);
+		return { id, type: "response", command: "generate_title", success: true, data: { title } };
+	} catch (titleError) {
+		return {
+			id,
+			type: "response",
+			command: "generate_title",
+			success: false,
+			error: titleError instanceof Error ? titleError.message : String(titleError),
+		};
+	}
+}
+
 export async function handleRpcSessionChange(
 	session: RpcSessionChangeSession,
 	command: RpcSessionChangeCommand,
@@ -536,6 +576,36 @@ function shouldEmitRpcTitles(): boolean {
 	if (!raw) return false;
 	const normalized = raw.trim().toLowerCase();
 	return normalized === "1" || normalized === "true" || normalized === "yes" || normalized === "on";
+}
+
+/** Opt-in auto session-title generation on `prompt` (default off preserves the historical no-title behavior). */
+function shouldAutoGenerateRpcTitles(): boolean {
+	const raw = $env.PI_RPC_TITLES;
+	if (!raw) return false;
+	const normalized = raw.trim().toLowerCase();
+	return normalized === "1" || normalized === "true" || normalized === "yes" || normalized === "on";
+}
+
+/**
+ * Plain-text content of the session's first user-attributed message — the same
+ * anchor auto-titling and `generate_title` use for naming a session. Returns
+ * undefined for a fresh session that has no user message yet.
+ */
+function firstRpcUserMessageText(messages: readonly AgentMessage[]): string | undefined {
+	for (const message of messages) {
+		if (message.role !== "user") continue;
+		const content = message.content;
+		const text =
+			typeof content === "string"
+				? content
+				: content
+						.filter((block): block is { type: "text"; text: string } => block.type === "text")
+						.map(block => block.text)
+						.join("\n");
+		const trimmed = text.trim();
+		if (trimmed) return trimmed;
+	}
+	return undefined;
 }
 
 function isSubagentSubscriptionLevel(value: unknown): value is RpcSubagentSubscriptionLevel {
@@ -739,6 +809,17 @@ export async function runRpcMode(
 			frameEncoder.setProtocolVersion(2);
 	};
 	const emitRpcTitles = shouldEmitRpcTitles();
+
+	/**
+	 * Frozen-snapshot cache backing `get_messages_page` while a turn streams.
+	 * The first page request in a streaming epoch freezes `session.messages`
+	 * once; later requests in the same epoch reuse the same frozen array so the
+	 * cursor stays coherent (messageCount and leafId cannot drift under the
+	 * walk). Once the session settles the cache is dropped on the next request,
+	 * which re-arms `stale_cursor` protection for any walk that outlived the
+	 * epoch.
+	 */
+	let messagePageCache: { messages: AgentMessage[]; snapshot: RpcMessageSnapshot } | undefined;
 
 	const success = <T extends RpcCommand["type"]>(
 		id: string | undefined,
@@ -1018,6 +1099,13 @@ export async function runRpcMode(
 			// =================================================================
 
 			case "prompt": {
+				// Opt-in auto-titling (PI_RPC_TITLES=1): mirrors the interactive
+				// bootstrap path so a headless first prompt can still name the
+				// session; session.maybeStartTitleGeneration self-guards on an
+				// existing name, low-signal input, and in-flight generation.
+				if (shouldAutoGenerateRpcTitles()) {
+					session.maybeStartTitleGeneration(command.message);
+				}
 				const skillResult = await tryRunRpcSkillCommand(session, command.message, command.streamingBehavior);
 				if (skillResult) {
 					return success(id, "prompt", skillResult);
@@ -1366,6 +1454,16 @@ export async function runRpcMode(
 				return success(id, "set_session_name");
 			}
 
+			case "generate_title": {
+				// Wrap the public session title generator, anchored on the first
+				// user message. The optional `customInstructions` swaps the title
+				// system prompt (the same override `generateTitle` exposes for
+				// special-purpose titling). The command only computes and returns
+				// the candidate; hosts persist it via `set_session_name` (or rely
+				// on `get_state.sessionName` / builtin `session_info_update`).
+				return await handleRpcGenerateTitle(id, session, command.customInstructions);
+			}
+
 			case "handoff": {
 				// Resetting the agent mid-stream lets the live turn keep emitting into a
 				// session that handoff has already torn down. Refuse while a prompt is in
@@ -1386,22 +1484,29 @@ export async function runRpcMode(
 			}
 
 			case "get_messages_page": {
-				if (session.isStreaming || session.isCompacting)
+				// Compaction rewrites the transcript mid-walk, so it still refuses
+				// the page with `session_busy`. Streaming is now allowed: each walk
+				// pages one frozen snapshot, and cursors are bound to that frozen
+				// length so a growing live array cannot shift offsets under the
+				// client. A cursor from before the current epoch (or across a
+				// session switch) still fails with `stale_cursor`.
+				if (session.isCompacting)
 					return error(id, "get_messages_page", RPC_MESSAGES_PAGE_BUSY_ERROR, "session_busy");
-				const messages = session.messages;
+				const cached = resolveRpcMessagePageSource(messagePageCache, {
+					isStreaming: session.isStreaming,
+					sessionId: session.sessionId,
+					messages: session.messages,
+					getLeafId: () => session.sessionManager.getLeafId(),
+				});
+				messagePageCache = cached;
 				try {
 					return success(
 						id,
 						"get_messages_page",
-						pageRpcMessages(
-							messages,
-							{
-								sessionId: session.sessionId,
-								leafId: session.sessionManager.getLeafId(),
-								messageCount: messages.length,
-							},
-							{ cursor: command.cursor, limit: command.limit },
-						),
+						pageRpcMessages(cached.messages, cached.snapshot, {
+							cursor: command.cursor,
+							limit: command.limit,
+						}),
 					);
 				} catch (pageError) {
 					return error(

@@ -265,6 +265,10 @@ export class EventController {
 			todo_auto_clear: e => this.#handleTodoAutoClear(e),
 			irc_message: e => this.#handleIrcMessage(e),
 			notice: e => this.#handleNotice(e),
+			// The advisor card itself is rendered from the transcript message
+			// events; this structured notification exists for headless hosts
+			// (RPC/ACP), so the interactive TUI has nothing to add here.
+			advisor_note: async () => {},
 			model_changed: async () => {
 				this.ctx.statusLine.invalidate();
 				this.ctx.ui.requestRender();
