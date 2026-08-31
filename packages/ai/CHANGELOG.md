@@ -4,6 +4,8 @@
 
 ### Fixed
 
+- Forward OpenRouter Responses `previous_response_id` / `parallel_tool_calls` and Chat Completions `parallel_tool_calls` through the API mapper.
+- Keep the leased credential id for anonymous cooldown-probe cleanup when concurrent reorders shift selection indices.
 - Delay pi-native stream commit until text/thinking/tool deltas; keep Responses structural item/part events pre-commit.
 - Forward `previous_response_id` onto Azure Responses wire params and Chat Completions seed/logit_bias/user/response_format through the API mapper.
 - Treat Anthropic message_start as stream metadata; restore Cloudflare and MCP OAuth notes to their released sections.
