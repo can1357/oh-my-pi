@@ -38,6 +38,7 @@ import {
 import {
 	augmentToolIndexForProductWire,
 	parseSendToUserContent,
+	type ProductWireToolIndexMeta,
 	SEND_TO_USER_WIRE_NAME,
 } from "./grokbot/product-wire";
 import {
@@ -209,11 +210,9 @@ function toInferenceTools(tools: Context["tools"]) {
 	return out;
 }
 
-/** Map wire tool names (incl. customWireName) back to internal tool metadata. */
-function buildGrammarToolIndex(
-	tools: Context["tools"],
-): Map<string, { name: string; customWireName?: string; isGrammar: boolean }> {
-	const index = new Map<string, { name: string; customWireName?: string; isGrammar: boolean }>();
+/** Map wire tool names (incl. customWireName / productWireName) back to internal tool metadata. */
+function buildGrammarToolIndex(tools: Context["tools"]): Map<string, ProductWireToolIndexMeta> {
+	const index = new Map<string, ProductWireToolIndexMeta>();
 	if (!Array.isArray(tools)) return index;
 	for (const tool of tools) {
 		if (!tool || typeof tool !== "object") continue;
@@ -222,7 +221,7 @@ function buildGrammarToolIndex(
 		const customWireName =
 			typeof tool.customWireName === "string" && tool.customWireName.trim() ? tool.customWireName.trim() : undefined;
 		const isGrammar = Boolean(tool.customFormat && typeof tool.customFormat === "object");
-		const meta = { name, customWireName, isGrammar };
+		const meta: ProductWireToolIndexMeta = { name, customWireName, isGrammar };
 		index.set(name, meta);
 		if (customWireName) index.set(customWireName, meta);
 	}
@@ -242,10 +241,7 @@ function parseCompletedToolArgs(raw: unknown, isGrammar: boolean): Record<string
 	return parseToolArgs(raw, true);
 }
 
-function toolCallFromPart(
-	part: unknown,
-	grammarTools?: Map<string, { name: string; customWireName?: string; isGrammar: boolean }>,
-) {
+function toolCallFromPart(part: unknown, grammarTools?: Map<string, ProductWireToolIndexMeta>) {
 	if (!part || typeof part !== "object") return undefined;
 	const p = part as Record<string, unknown>;
 	const type = p.type;
@@ -888,6 +884,8 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 					const meta = (name ? grammarTools.get(name) : undefined) ?? undefined;
 					// Mark every grammar/customFormat call (hashline/sloppy have no
 					// customWireName) so live preview + history replay stay on raw args.
+					// Do not persist productWireName (Shell/Read/Write) — that alias is
+					// lookup-only and must not flip OpenAI Responses into custom_tool_call.
 					const grammarWire = meta?.isGrammar
 						? meta.customWireName || meta.name || name || undefined
 						: meta?.customWireName;

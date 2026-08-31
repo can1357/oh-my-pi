@@ -217,9 +217,19 @@ export function toProductField2Tools(tools: Context["tools"], profile: ProductWi
 	return out;
 }
 
+/** Tool-index entry used while decoding product sand streams. */
+export type ProductWireToolIndexMeta = {
+	name: string;
+	/** Grammar/customFormat wire discriminator — never a product PascalCase alias. */
+	customWireName?: string;
+	/** Product field-2 alias (Shell/Read/Write) for lookup only; not persisted. */
+	productWireName?: string;
+	isGrammar: boolean;
+};
+
 /** Extend grammar tool index so Shell/Read wire names resolve to omp bash/read. */
 export function augmentToolIndexForProductWire(
-	index: Map<string, { name: string; customWireName?: string; isGrammar: boolean }>,
+	index: Map<string, ProductWireToolIndexMeta>,
 	tools: Context["tools"],
 ): void {
 	if (!Array.isArray(tools)) return;
@@ -230,7 +240,10 @@ export function augmentToolIndexForProductWire(
 		const sandName = toSandField2Name(name);
 		const meta = index.get(name);
 		if (!meta || sandName === name) continue;
-		const wired = { ...meta, customWireName: sandName };
+		// Keep product aliases off `customWireName` — that marker means grammar /
+		// custom_tool_call for openai-shared and TUI previews. Index by product
+		// wire name for stream decode only.
+		const wired: ProductWireToolIndexMeta = { ...meta, productWireName: sandName };
 		index.set(name, wired);
 		const existing = index.get(sandName);
 		const preferred = SAND_FIELD2_PREFERRED_OMP[sandName];

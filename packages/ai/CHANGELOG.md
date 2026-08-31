@@ -14,6 +14,7 @@
 - Grok Bot sends complete sand parameter sets (`thinking` / `context` / `effort` / `fast`) when AvailableModels advertises them, matching Cursor variant wire (Anthropic defaults `fast:false`; context follows `sandMaxMode`).
 - Grok Bot context tiers follow discovered AvailableModels variant defaults instead of hard-coded `300k` / `1m` when upstream advertises different values.
 - Grok Bot product wire prefers `write` over `edit` for the shared sand `Write` tool so advertised schema and dispatch stay aligned.
+- Grok Bot product wire aliases (Shell/Read/Write) stay off `customWireName` so later OpenAI Responses replay does not treat them as custom tools.
 - Grok Bot bare-wire routing follows catalog `sandParameterIds` / `sandMaxMode` instead of a hard-coded model-id set.
 - Grok Bot preserves empty-string grammar `rawToolCallArgs` on history replay instead of dropping the raw oneof field.
 - `/grokbot` reports Renewer present when the credential comes from `providers.grokbot.apiKey` or a runtime API-key override.

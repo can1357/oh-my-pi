@@ -158,13 +158,32 @@ describe("product wire helpers", () => {
 		expect(writes[0]?.description).toBe("write file");
 		expect(writes[0]?.parameters).toEqual(wrapToolParameters(writeSchema));
 
-		const index = new Map<string, { name: string; customWireName?: string; isGrammar: boolean }>([
+		const index = new Map<string, { name: string; customWireName?: string; productWireName?: string; isGrammar: boolean }>([
 			["edit", { name: "edit", isGrammar: false }],
 			["write", { name: "write", isGrammar: false }],
 		]);
 		augmentToolIndexForProductWire(index, tools);
 		expect(index.get("Write")?.name).toBe("write");
+		expect(index.get("Write")?.productWireName).toBe("Write");
+		expect(index.get("Write")?.customWireName).toBeUndefined();
+		expect(index.get("write")?.customWireName).toBeUndefined();
 		expect(toOmpToolName("Write")).toBe("write");
+	});
+
+	test("keeps product aliases off customWireName for ordinary JSON tools", () => {
+		const tools = [
+			{ name: "bash", description: "shell", parameters: { type: "object", properties: {} } },
+			{ name: "read", description: "read", parameters: { type: "object", properties: {} } },
+		];
+		const index = new Map<string, { name: string; customWireName?: string; productWireName?: string; isGrammar: boolean }>([
+			["bash", { name: "bash", isGrammar: false }],
+			["read", { name: "read", isGrammar: false }],
+		]);
+		augmentToolIndexForProductWire(index, tools);
+		expect(index.get("Shell")).toEqual({ name: "bash", productWireName: "Shell", isGrammar: false });
+		expect(index.get("Read")).toEqual({ name: "read", productWireName: "Read", isGrammar: false });
+		expect(index.get("bash")?.customWireName).toBeUndefined();
+		expect(index.get("read")?.customWireName).toBeUndefined();
 	});
 
 	test("maps edit to Write when write is absent", () => {
