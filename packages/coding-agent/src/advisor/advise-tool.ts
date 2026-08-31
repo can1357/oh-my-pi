@@ -115,6 +115,9 @@ export function isAdvisorInterruptImmuneTurnActive(opts: {
  *   downgraded to asides; preservation still wins. A `blocker` is exempt: it
  *   means the agent handed off broken or unexercised work, so it still steers a
  *   triggered turn even right after a prior interrupt (#5628).
+ * When `deferInterruptingAdvice` is active during a live turn, concern and
+ * blocker notes use the aside channel so the active tool batch completes before
+ * the next model step receives them. Idle and aborting policy remains unchanged.
  */
 export function resolveAdvisorDeliveryChannel(opts: {
 	severity: AdvisorSeverity | undefined;
@@ -123,11 +126,13 @@ export function resolveAdvisorDeliveryChannel(opts: {
 	aborting: boolean;
 	terminalAnswerNoQueuedWork?: boolean;
 	interruptImmuneTurnActive?: boolean;
+	deferInterruptingAdvice?: boolean;
 	preserveOnly?: boolean;
 }): AdvisorDeliveryChannel {
 	if (opts.preserveOnly && !opts.streaming) return "preserve";
 	if (!isInterruptingSeverity(opts.severity)) return "aside";
 	if (opts.autoResumeSuppressed && (opts.aborting || !opts.streaming)) return "preserve";
+	if (opts.deferInterruptingAdvice && opts.streaming && !opts.aborting) return "aside";
 	if (opts.terminalAnswerNoQueuedWork && opts.severity !== "blocker" && !opts.streaming && !opts.aborting)
 		return "preserve";
 	if (opts.interruptImmuneTurnActive && opts.severity !== "blocker") return "aside";

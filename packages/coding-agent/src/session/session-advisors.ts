@@ -1184,16 +1184,15 @@ export class SessionAdvisors {
 
 	/**
 	 * Route one accepted advice note from `advisor` to the primary. Concern and
-	 * blocker interrupt the running agent through the steering channel; once the
-	 * loop has yielded, `triggerTurn` resumes it. After a terminal text answer with
-	 * no queued work, a concern is preserved as a visible advisor card, while a
-	 * blocker wakes the primary to acknowledge work it handed off incorrectly.
+	 * blocker normally interrupt through steering; `advisor.interruptMode: wait`
+	 * instead queues them while the primary is streaming so the current tool batch
+	 * completes before the next model step receives the advice. Once the loop has
+	 * yielded, the existing terminal/trigger/preserve policy remains unchanged.
 	 * After a deliberate user interrupt auto-resume is suppressed while idle/unwinding
-	 * (the note becomes a preserved card re-entering on resume); a live-streaming turn is
-	 * steered in directly. A plain nit always rides the non-interrupting YieldQueue
-	 * aside. Suppression by the per-advisor emission guard drops the note silently —
-	 * the model still saw `Recorded.`, so it isn't tempted to rephrase the same note
-	 * past the dedupe.
+	 * (the note becomes a preserved card re-entering on resume). A plain nit always
+	 * rides the non-interrupting YieldQueue aside. Suppression by the per-advisor
+	 * emission guard drops the note silently — the model still saw `Recorded.`, so
+	 * it isn't tempted to rephrase the same note past the dedupe.
 	 */
 	#hasTerminalTextAnswerWithoutQueuedWork(): boolean {
 		if (this.#host.agent.hasQueuedMessages() || this.#host.hasPendingNextTurnMessages()) return false;
@@ -1222,6 +1221,7 @@ export class SessionAdvisors {
 		// agent-facing `<advisory>` bytes stay identical to the pre-multi-advisor path.
 		const source = advisor.slug ? advisor.name : undefined;
 		const interrupting = isInterruptingSeverity(severity);
+		const planModeEnabled = this.#host.planModeState()?.enabled === true;
 		const channel = resolveAdvisorDeliveryChannel({
 			severity,
 			autoResumeSuppressed: this.#advisorAutoResumeSuppressed,
@@ -1233,6 +1233,7 @@ export class SessionAdvisors {
 			aborting: this.#host.abortInProgress(),
 			terminalAnswerNoQueuedWork: this.#hasTerminalTextAnswerWithoutQueuedWork(),
 			interruptImmuneTurnActive: interrupting && this.#isAdvisorInterruptImmuneTurnActive(),
+			deferInterruptingAdvice: this.#host.settings.get("advisor.interruptMode") === "wait" && !planModeEnabled,
 		});
 		if (channel === "aside") {
 			this.#host.yieldQueue.enqueue("advisor", { note, severity, advisor: source });
@@ -1265,7 +1266,7 @@ export class SessionAdvisors {
 			!this.#host.agent.state.isStreaming &&
 			this.#host.clientBridge()?.deferAgentInitiatedTurns === true &&
 			!this.#host.allowAgentInitiatedTurns();
-		if (this.#host.planModeState()?.enabled || cannotAutoTrigger) {
+		if (planModeEnabled || cannotAutoTrigger) {
 			this.#host.preserveAdvisorCard({
 				role: "custom",
 				customType: "advisor",

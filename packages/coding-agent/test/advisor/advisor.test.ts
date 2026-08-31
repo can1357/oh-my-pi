@@ -6021,6 +6021,41 @@ describe("advisor", () => {
 			}
 		});
 
+		it("defers concern and blocker to the next tool-batch boundary when configured", () => {
+			for (const severity of ["concern", "blocker"] as const) {
+				expect(
+					resolveAdvisorDeliveryChannel({
+						severity,
+						autoResumeSuppressed: false,
+						streaming: true,
+						aborting: false,
+						deferInterruptingAdvice: true,
+					}),
+				).toBe("aside");
+			}
+		});
+
+		it("keeps idle and aborting delivery policy unchanged in after-tool mode", () => {
+			expect(
+				resolveAdvisorDeliveryChannel({
+					severity: "blocker",
+					autoResumeSuppressed: false,
+					streaming: false,
+					aborting: false,
+					deferInterruptingAdvice: true,
+				}),
+			).toBe("steer");
+			expect(
+				resolveAdvisorDeliveryChannel({
+					severity: "blocker",
+					autoResumeSuppressed: true,
+					streaming: true,
+					aborting: true,
+					deferInterruptingAdvice: true,
+				}),
+			).toBe("preserve");
+		});
+
 		it("preserves a late concern when the primary already ended with a terminal answer", () => {
 			expect(
 				resolveAdvisorDeliveryChannel({
