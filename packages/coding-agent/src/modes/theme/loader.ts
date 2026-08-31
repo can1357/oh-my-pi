@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import { adjustHsv, getCustomThemesDir, isEnoent } from "@oh-my-pi/pi-utils";
-import { detectColorMode, resolveThemeColors } from "./color";
+import { deriveUserMessageTextDefault, detectColorMode, resolveThemeColors } from "./color";
 import darkThemeJson from "./dark.json" with { type: "json" };
 import { defaultThemes } from "./defaults";
 import lightThemeJson from "./light.json" with { type: "json" };
@@ -156,6 +156,9 @@ export function createTheme(themeJson: ThemeJson, options: CreateThemeOptions = 
 		}
 	}
 
+	// #1633: unset userMessageText renders user input identically to assistant
+	// output. Default it to the accent when that stays readable on the bubble.
+	resolvedColors.userMessageText = deriveUserMessageTextDefault(resolvedColors, undefined, colorMode);
 	const fgColors: Record<ThemeColor, string | number> = {} as Record<ThemeColor, string | number>;
 	const bgColors: Record<ThemeBg, string | number> = {} as Record<ThemeBg, string | number>;
 	const bgColorKeys: Set<string> = new Set([

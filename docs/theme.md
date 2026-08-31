@@ -36,6 +36,16 @@ Color values accept:
 - variable reference string (resolved through `vars`)
 - empty string (`""`) meaning terminal default (`\x1b[39m` fg, `\x1b[49m` bg)
 
+Exception: `userMessageText: ""` does not keep the terminal default — it
+inherits the theme `accent` while that keeps a WCAG contrast ratio of at
+least 3:1 against the surface the message is painted on, using the colors
+the output device actually renders (quantized to the xterm palette in
+256-color terminals): `userMessageBg` in the TUI, and the exported
+6%-accent-over-page background in HTML export (#1633). Below the threshold
+the terminal default (and, in HTML export, the readable text fallback)
+applies. Setting the token to a non-empty color always wins; to restore the
+pre-#1633 look, set an explicit foreground color.
+
 ## Required and optional color tokens
 
 All tokens below are required in `colors` except `thinkingMax`, which is optional for compatibility and falls back to `thinkingXhigh`.

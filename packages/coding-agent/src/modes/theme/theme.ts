@@ -3,7 +3,8 @@ import * as path from "node:path";
 import { detectMacOSAppearance, MacAppearanceObserver } from "@oh-my-pi/pi-natives";
 import type { Terminal, TerminalAppearance } from "@oh-my-pi/pi-tui";
 import { colorLuma, getCustomThemesDir, logger } from "@oh-my-pi/pi-utils";
-import { ansi256ToHex, resolveThemeColors, resolveVarRefs } from "./color";
+import { exportUserMessageSurface } from "../../export/html/export-surface";
+import { ansi256ToHex, deriveUserMessageTextDefault, resolveThemeColors, resolveVarRefs } from "./color";
 import { type CreateThemeOptions, getBuiltinThemes, loadTheme, loadThemeJson, loadThemeSync } from "./loader";
 import type { ThemeColor, ThemeJson } from "./schema";
 import type { SymbolPreset } from "./symbols";
@@ -718,9 +719,25 @@ export async function getResolvedThemeColors(themeName?: string): Promise<Record
 	const themeJson = await loadThemeJson(name);
 	const exportColors = resolveThemeExportColors(themeJson);
 	const resolved = resolveThemeColors(themeJson.colors, themeJson.vars);
+	// #10344 review: the exported .user-message paints color-mix(accent 6%,
+	// transparent) over --body-bg, NOT userMessageBg — guard the derived accent
+	// against that actual surface (dark-slate clears 3:1 on the TUI bubble but
+	// only reaches ~2.9:1 on the export surface).
+	const toHex = (value: string | number | undefined): string | undefined => {
+		if (value === undefined || value === "") return undefined;
+		return typeof value === "number" ? ansi256ToHex(value) : value;
+	};
+	const accentHex = toHex(resolved.accent);
+	const bubbleHex = toHex(resolved.userMessageBg);
+	resolved.userMessageText =
+		accentHex === undefined
+			? deriveUserMessageTextDefault(resolved)
+			: deriveUserMessageTextDefault(
+					resolved,
+					exportUserMessageSurface(accentHex, exportColors.pageBg, bubbleHex ?? ""),
+				);
 
 	// Empty foreground tokens use the terminal default color. In HTML export,
-	// that default must contrast the export surface, not the TUI status line:
 	// custom light themes can still export dark transcript cards when they omit
 	// `export`, because generateThemeVars derives those cards from userMessageBg.
 	const defaultText = getHtmlDefaultTextForSurface(

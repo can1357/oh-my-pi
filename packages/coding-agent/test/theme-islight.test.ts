@@ -51,15 +51,16 @@ describe("empty foreground contrast", () => {
 		const { light, dark } = createBaseThemes();
 
 		expect(light.getFgAnsi("text")).toBe("\x1b[39m");
-		expect(light.getFgAnsi("userMessageText")).toBe("\x1b[39m");
 		expect(dark.getFgAnsi("text")).toBe("\x1b[39m");
 	});
 
 	it("chooses empty-token contrast from the controlled background", () => {
 		const { light } = createBaseThemes();
 		const porcelain = createTheme(defaultThemes.porcelain, { mode: "truecolor" });
-
-		expect(light.getFgOnBgAnsi("userMessageText", "userMessageBg")).toBe("\x1b[38;2;0;0;0m");
+		// light derives userMessageText from its accent (#5a8080, contrast 3.55
+		// on the #e8e8e8 bubble); porcelain's accent IS its bubble color, so it
+		// keeps the terminal default and the near-white fallback.
+		expect(light.getFgOnBgAnsi("userMessageText", "userMessageBg")).toBe("\x1b[38;2;90;128;128m");
 		expect(porcelain.getFgOnBgAnsi("userMessageText", "userMessageBg")).toBe("\x1b[38;2;229;229;231m");
 	});
 
@@ -91,8 +92,7 @@ describe("empty foreground contrast", () => {
 			setThemeInstance(light);
 			const surfaceColor = getEditorTheme().surfaceColor;
 			if (!surfaceColor) throw new Error("Editor surface color is unavailable");
-
-			expect(surfaceColor("typed")).toContain("\x1b[48;2;232;232;232m\x1b[38;2;0;0;0mtyped");
+			expect(surfaceColor("typed")).toContain("\x1b[48;2;232;232;232m\x1b[38;2;90;128;128mtyped");
 		} finally {
 			setThemeInstance(dark);
 		}
@@ -138,8 +138,8 @@ describe("empty foreground contrast", () => {
 			if (!surfaceColor) throw new Error("Editor surface color is unavailable");
 
 			const styled = surfaceColor("before\x1b[39mafter-default\x1b[0mafter-full");
-			expect(styled).toContain("\x1b[39m\x1b[38;2;0;0;0mafter-default");
-			expect(styled).toContain("\x1b[0m\x1b[48;2;232;232;232m\x1b[38;2;0;0;0mafter-full");
+			expect(styled).toContain("\x1b[39m\x1b[38;2;90;128;128mafter-default");
+			expect(styled).toContain("\x1b[0m\x1b[48;2;232;232;232m\x1b[38;2;90;128;128mafter-full");
 		} finally {
 			setThemeInstance(dark);
 		}
@@ -170,7 +170,7 @@ describe("getResolvedThemeColors HTML export defaults", () => {
 	it("uses near-black for empty text tokens on light themes", async () => {
 		const colors = await getResolvedThemeColors("sandstone");
 		expect(colors.text).toBe("#000000");
-		expect(colors.userMessageText).toBe("#000000");
+		expect(colors.userMessageText).toBe("#b86040");
 		expect(colors.customMessageText).toBe("#000000");
 		expect(colors.toolTitle).toBe("#000000");
 	});
@@ -178,7 +178,7 @@ describe("getResolvedThemeColors HTML export defaults", () => {
 	it("uses light grey for empty text tokens on dark themes", async () => {
 		const colors = await getResolvedThemeColors("dark");
 		expect(colors.text).toBe("#e5e5e7");
-		expect(colors.userMessageText).toBe("#e5e5e7");
+		expect(colors.userMessageText).toBe("#febc38");
 	});
 	let tempAgentDir: string | undefined;
 	let originalAgentDir = "";

@@ -1,4 +1,5 @@
 import { detectTerminalId, getTerminalInfo } from "@oh-my-pi/pi-tui";
+import { relativeLuminance } from "@oh-my-pi/pi-utils";
 import type { ColorMode, ColorValue } from "./schema";
 
 // ============================================================================
@@ -64,6 +65,53 @@ export function resolveThemeColors<T extends Record<string, ColorValue>>(
 		resolved[key] = resolveVarRefs(value, vars);
 	}
 	return resolved as Record<keyof T, string | number>;
+}
+
+/**
+ * Minimum WCAG contrast ratio for the accent to qualify as user bubble text —
+ * the AA bar for large text / UI components. Body text asks for 4.5, but the
+ * state this replaces offered no distinction at all, and any theme can set
+ * `userMessageText` explicitly to opt out.
+ */
+const USER_MESSAGE_ACCENT_CONTRAST_MIN = 3;
+
+/**
+ * Themes that leave `userMessageText` unset paint user input with the terminal
+ * default — indistinguishable from assistant output (#1633). Inherit the theme
+ * accent when it stays readable on the bubble background; otherwise return the
+ * token unchanged so `Theme.getFgOnBgAnsi` keeps its near-black/near-white
+ * fallback. Explicit non-empty theme values always win; `""` derives.
+ */
+export function deriveUserMessageTextDefault(
+	resolved: Record<string, string | number>,
+	surface?: string,
+	mode?: ColorMode,
+): string | number {
+	const current = resolved.userMessageText;
+	if (current !== undefined && current !== "") return current;
+	const accent = resolved.accent;
+	if (accent === undefined || accent === "") return current ?? "";
+	const background = surface ?? resolved.userMessageBg;
+	const accentLuminance = relativeLuminance(renderedHex(accent, mode));
+	const backgroundLuminance = relativeLuminance(renderedHex(background, mode));
+	if (accentLuminance === undefined || backgroundLuminance === undefined) return current ?? "";
+	const contrast =
+		(Math.max(accentLuminance, backgroundLuminance) + 0.05) / (Math.min(accentLuminance, backgroundLuminance) + 0.05);
+	return contrast >= USER_MESSAGE_ACCENT_CONTRAST_MIN ? accent : (current ?? "");
+}
+
+/**
+ * Hex actually painted for a color token in `mode`. Truecolor terminals render
+ * the value as-is; 256-color terminals quantize both the accent and the bubble
+ * to the xterm palette, so contrast decisions must use the quantized pair —
+ * e.g. limestone passes 3.38:1 in truecolor but its palette colors (137 on
+ * 255) only reach 2.80:1 (#10344 review).
+ */
+function renderedHex(value: string | number, mode: ColorMode | undefined): string | number {
+	if (mode !== "256color") return value;
+	const ansi = colorToAnsi(typeof value === "number" ? ansi256ToHex(value) : value, mode);
+	const paletteIndex = /38;5;(\d+)/.exec(ansi);
+	return paletteIndex ? ansi256ToHex(Number(paletteIndex[1])) : value;
 }
 
 /**
