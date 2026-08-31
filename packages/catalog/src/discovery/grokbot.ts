@@ -22,6 +22,7 @@ import {
 	encodeGrokbotAvailableModelsRequest,
 	GROKBOT_AVAILABLE_MODELS_PATH,
 	type GrokbotAvailableModel,
+	type GrokbotAvailableModelVariant,
 } from "./grokbot-available-models";
 
 const COST = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } as const;
@@ -108,9 +109,10 @@ export function normalizeGrokbotAvailableModels(
 		if (row.isHidden === true) continue;
 		const id = row.name?.trim();
 		if (!id) continue;
-		const spec = toGrokbotModelSpec(row, baseUrl, id);
-		if (!byId.has(spec.id)) {
-			byId.set(spec.id, spec);
+		for (const spec of toGrokbotModelSpecs(row, baseUrl, id)) {
+			if (!byId.has(spec.id)) {
+				byId.set(spec.id, spec);
+			}
 		}
 	}
 
@@ -170,6 +172,41 @@ function resolveGrokbotContextWindow(row: GrokbotAvailableModel, sandMaxMode: bo
 		return row.contextTokenLimit;
 	}
 	return null;
+}
+
+function toGrokbotModelSpecs(row: GrokbotAvailableModel, baseUrl: string, id: string): ModelSpec<"grokbot-sand">[] {
+	const base = toGrokbotModelSpec(row, baseUrl, id);
+	const out: ModelSpec<"grokbot-sand">[] = [base];
+	for (const variant of row.variants ?? []) {
+		const legacySlug = variant.legacySlug?.trim();
+		if (!legacySlug || legacySlug === id) continue;
+		const variantParams = collectVariantParameterIds(variant);
+		const parameterIds = variantParams.length > 0 ? variantParams : base.sandParameterIds;
+		const sandMaxMode =
+			variant.isDefaultMaxConfig === true
+				? true
+				: variant.isDefaultNonMaxConfig === true
+					? false
+					: base.sandMaxMode;
+		out.push({
+			...base,
+			id: legacySlug,
+			name: variant.displayName?.trim() || legacySlug,
+			requestModelId: id,
+			sandParameterIds: parameterIds,
+			sandMaxMode,
+			aliases: undefined,
+		});
+	}
+	return out;
+}
+
+function collectVariantParameterIds(variant: GrokbotAvailableModelVariant): string[] {
+	const ids: string[] = [];
+	for (const p of variant.parameterValues ?? []) {
+		if (p.id?.trim()) ids.push(p.id.trim());
+	}
+	return uniqueStrings(ids);
 }
 
 function toGrokbotModelSpec(row: GrokbotAvailableModel, baseUrl: string, id: string): ModelSpec<"grokbot-sand"> {

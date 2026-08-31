@@ -1318,6 +1318,8 @@ export async function buildSessionOptions(
 	// Tools
 	if (parsed.noTools) {
 		options.toolNames = parsed.tools && parsed.tools.length > 0 ? parsed.tools : [];
+		// Honor --no-tools for MCP/extension tools too (alwaysInclude path in sdk.ts).
+		options.restrictToolNames = true;
 	} else if (parsed.tools) {
 		options.toolNames = parsed.tools;
 	}

@@ -155,6 +155,9 @@ describe("grokbot AvailableModels normalize", () => {
 		const composer = models.find(m => m.id === "composer-2.5");
 		expect(composer?.aliases).toEqual(["composer-latest", "composer", "composer-2-5", "composer-2"]);
 		expect(composer?.sandParameterIds).toEqual(["fast"]);
+		const composerLegacy = models.find(m => m.id === "composer-2");
+		expect(composerLegacy?.requestModelId).toBe("composer-2.5");
+		expect(composerLegacy?.sandParameterIds).toEqual(["fast"]);
 		expect(composer?.input).toEqual(["text"]);
 		expect(composer?.sandMaxMode).toBe(false);
 

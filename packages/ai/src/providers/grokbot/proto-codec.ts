@@ -1,7 +1,9 @@
 /**
  * Hand-rolled protobuf codec for Grok Bot InferenceService Stream.
- * Request fields sent: 1 messages, 2 tools, 4 model_config, 6 invocation_id,
- * 7 requested_model, 8 conversation_id. Harness fields 3/5/9–16 are never encoded.
+ * Request fields sent: 1 messages, 2 tools, 3 provider_defined_tools (optional),
+ * 4 model_config, 6 invocation_id, 7 requested_model, 8 conversation_id,
+ * 9 accepted_unadvertised_tool_names (optional), 16 subagent_type (optional).
+ * Fields 5/10–15 are decode-only (legacy model_id, automation, lineage).
  *
  * Typed exports live in `./proto.ts`. This file stays `@ts-nocheck` for the
  * hand-rolled field walkers; do not import it from outside this folder.
@@ -198,6 +200,20 @@ function encodeTool(tool) {
 	return concat(chunks);
 }
 
+/** InferenceNamedProviderDefinedTool — field 3 (distinct from field 2 agent tools). */
+function encodeNamedProviderDefinedTool(tool) {
+	const chunks = [
+		encodeString(1, tool.name || "", { force: true }),
+		encodeString(2, tool.id || "", { force: true }),
+		encodeString(3, tool.type || "", { force: true }),
+	];
+	const options = tool.options ?? tool.parameters;
+	if (options && typeof options === "object" && !Array.isArray(options)) {
+		chunks.push(encodeMessage(4, encodeStruct(options), { omitEmpty: false }));
+	}
+	return concat(chunks);
+}
+
 function encodeToolCall(tc) {
 	const chunks = [
 		encodeString(1, tc.toolCallId || tc.tool_call_id || ""),
@@ -302,6 +318,8 @@ export function encodeInferenceStreamRequest(req) {
 	const chunks = [];
 	for (const m of req.messages || []) chunks.push(encodeMessage(1, encodeCoreMessage(m)));
 	for (const t of req.tools || []) chunks.push(encodeMessage(2, encodeTool(t)));
+	const providerTools = req.providerDefinedTools || req.provider_defined_tools || [];
+	for (const t of providerTools) chunks.push(encodeMessage(3, encodeNamedProviderDefinedTool(t)));
 	const modelConfig = req.modelConfig || req.model_config;
 	if (modelConfig) chunks.push(encodeMessage(4, encodeModelConfig(modelConfig)));
 	const invocationId = req.invocationId || req.invocation_id;
@@ -310,6 +328,40 @@ export function encodeInferenceStreamRequest(req) {
 	if (requested) chunks.push(encodeMessage(7, encodeRequestedModel(requested)));
 	const conversationId = req.conversationId || req.conversation_id;
 	if (conversationId) chunks.push(encodeString(8, conversationId));
+	const acceptedNames =
+		req.acceptedUnadvertisedToolNames ||
+		req.accepted_unadvertised_tool_names ||
+		req.acceptedUnadvertisedToolName ||
+		[];
+	if (Array.isArray(acceptedNames)) {
+		for (const name of acceptedNames) {
+			if (typeof name === "string" && name.trim()) chunks.push(encodeString(9, name.trim()));
+		}
+	}
+	const automationId = req.automationId || req.automation_id;
+	if (typeof automationId === "string" && automationId.trim()) {
+		chunks.push(encodeString(10, automationId.trim()));
+	}
+	const conversationGroupId = req.conversationGroupId || req.conversation_group_id;
+	if (typeof conversationGroupId === "string" && conversationGroupId.trim()) {
+		chunks.push(encodeString(12, conversationGroupId.trim()));
+	}
+	const parentRequestId = req.parentRequestId || req.parent_request_id;
+	if (typeof parentRequestId === "string" && parentRequestId.trim()) {
+		chunks.push(encodeString(13, parentRequestId.trim()));
+	}
+	const rootParentRequestId = req.rootParentRequestId || req.root_parent_request_id;
+	if (typeof rootParentRequestId === "string" && rootParentRequestId.trim()) {
+		chunks.push(encodeString(14, rootParentRequestId.trim()));
+	}
+	const parentAgentToolCallId = req.parentAgentToolCallId || req.parent_agent_tool_call_id;
+	if (typeof parentAgentToolCallId === "string" && parentAgentToolCallId.trim()) {
+		chunks.push(encodeString(15, parentAgentToolCallId.trim()));
+	}
+	const subagentType = req.subagentType || req.subagent_type;
+	if (typeof subagentType === "string" && subagentType.trim()) {
+		chunks.push(encodeString(16, subagentType.trim()));
+	}
 	return concat(chunks);
 }
 
@@ -513,6 +565,17 @@ function decodeTool(buf) {
 	return out;
 }
 
+function decodeNamedProviderDefinedTool(buf) {
+	const fields = decodeFields(buf);
+	const out = {
+		name: asString(first(fields, 1)),
+		id: asString(first(fields, 2)),
+		type: asString(first(fields, 3)),
+	};
+	if (first(fields, 4)) out.options = decodeStruct(first(fields, 4).bytes);
+	return out;
+}
+
 function decodeToolCall(buf) {
 	const fields = decodeFields(buf);
 	const out = {
@@ -600,13 +663,20 @@ export function decodeInferenceStreamRequest(buf) {
 		tools: all(fields, 2).map(f => decodeTool(f.bytes)),
 		_fieldNumbers: fields.map(f => f.fieldNo),
 	};
-	if (first(fields, 3)) out.providerDefinedTools = true;
+	const providerDefined = all(fields, 3).map(f => decodeNamedProviderDefinedTool(f.bytes));
+	if (providerDefined.length > 0) out.providerDefinedTools = providerDefined;
 	if (first(fields, 4)) out.modelConfig = decodeModelConfig(first(fields, 4).bytes);
 	if (first(fields, 5)) out.modelId = asString(first(fields, 5));
 	if (first(fields, 6)) out.invocationId = asString(first(fields, 6));
 	if (first(fields, 7)) out.requestedModel = decodeRequestedModel(first(fields, 7).bytes);
 	if (first(fields, 8)) out.conversationId = asString(first(fields, 8));
-	if (first(fields, 9)) out.acceptedUnadvertised = true;
+	if (first(fields, 9)) {
+		const names = all(fields, 9)
+			.map(f => asString(f))
+			.filter(name => typeof name === "string" && name.length > 0);
+		if (names.length > 0) out.acceptedUnadvertisedToolNames = names;
+		else out.acceptedUnadvertised = true;
+	}
 	if (first(fields, 10)) out.automationId = asString(first(fields, 10));
 	if (first(fields, 11)) out.inferenceReason = asInt(first(fields, 11));
 	if (first(fields, 12)) out.conversationGroupId = asString(first(fields, 12));

@@ -1,0 +1,236 @@
+/**
+ * Product-shaped Grok Bot sand InferenceService wire helpers (mitm-validated).
+ *
+ * Field-2 tools use PascalCase names and `{ jsonSchema: … }` parameter envelopes.
+ * Field-9 carries host tool allowlists; automation uses sand-automation + generalPurpose.
+ */
+import type { Context } from "../../types";
+import { toolWireSchema } from "../../utils/schema/wire";
+
+export type ProductWireProfile = "automation" | "parent-chat";
+
+export type ProductWireTool = {
+	name: string;
+	description: string;
+	parameters: Record<string, unknown>;
+	customToolFormat?: { type: string; definition: string; syntax: string };
+};
+
+/** omp internal tool name → product field-2 wire name (captures 1–4). */
+export const OMP_TO_SAND_FIELD2: Record<string, string> = {
+	bash: "Shell",
+	read: "Read",
+	write: "Write",
+	edit: "Write",
+	grep: "Grep",
+	glob: "Glob",
+};
+
+/** Field 9 allowlist from capture-1 / automation worker. */
+export const FIELD9_ALLOWLIST_AUTOMATION = [
+	"Task",
+	"TodoWrite",
+	"SendFeedback",
+	"CreateAgent",
+	"UpdateAgent",
+	"CreateChannel",
+	"UpdateChannel",
+	"ListMachines",
+	"WebSearch",
+	"WebFetch",
+	"GenerateImage",
+	"CloudAgent",
+	"AwaitShell",
+	"CopyToBox",
+	"CopyFromBox",
+	"SearchPlugins",
+	"GetPlugin",
+	"UninstallMcpServer",
+	"UninstallPlugin",
+	"GetMcpServerStatus",
+	"SetMcpInstructions",
+	"RestartMcpServers",
+	"RemoveMcpAccount",
+	"RenameMcpAccount",
+	"CheckSubagent",
+	"MessageSubagent",
+	"StopSubagent",
+] as const;
+
+/** Field 9 allowlist from capture-4 / parent sand-default chat. */
+export const FIELD9_ALLOWLIST_PARENT = [
+	"Task",
+	"TodoWrite",
+	"SendToAgent",
+	"SendFeedback",
+	"CreateAgent",
+	"UpdateAgent",
+	"create_bot_share_json",
+	"CreateChannel",
+	"UpdateChannel",
+	"ListMachines",
+	"WebSearch",
+	"WebFetch",
+	"GenerateImage",
+	"CloudAgent",
+	"AwaitShell",
+	"CopyToBox",
+	"CopyFromBox",
+	"request_box_help",
+	"SearchPlugins",
+	"GetPlugin",
+	"InstallPlugin",
+	"AddMcpServer",
+	"UninstallMcpServer",
+	"UninstallPlugin",
+	"GetMcpServerStatus",
+	"SetMcpInstructions",
+	"RestartMcpServers",
+	"AuthenticateMcpServer",
+	"RemoveMcpAccount",
+	"RenameMcpAccount",
+	"CheckSubagent",
+	"MessageSubagent",
+	"StopSubagent",
+	"SendMessage",
+] as const;
+
+export const SEND_TO_USER_WIRE_NAME = "SendToUser";
+
+export function wrapToolParameters(schema: Record<string, unknown>): Record<string, unknown> {
+	return { jsonSchema: schema };
+}
+
+export function toSandField2Name(ompName: string): string {
+	return OMP_TO_SAND_FIELD2[ompName] ?? ompName;
+}
+
+export function toOmpToolName(sandName: string): string {
+	for (const [omp, sand] of Object.entries(OMP_TO_SAND_FIELD2)) {
+		if (sand === sandName) return omp;
+	}
+	return sandName;
+}
+
+export function field9AllowlistForProfile(profile: ProductWireProfile): readonly string[] {
+	return profile === "parent-chat" ? FIELD9_ALLOWLIST_PARENT : FIELD9_ALLOWLIST_AUTOMATION;
+}
+
+function toolParametersToJson(tool: Tool): Record<string, unknown> {
+	try {
+		return toolWireSchema(tool);
+	} catch {
+		return { type: "object", properties: {} };
+	}
+}
+
+type Tool = NonNullable<Context["tools"]>[number];
+
+function mapOmpToolToProduct(tool: Tool): ProductWireTool | undefined {
+	if (!tool || typeof tool !== "object") return undefined;
+	const name = typeof tool.name === "string" ? tool.name : "";
+	if (!name) return undefined;
+	const wireName =
+		typeof tool.customWireName === "string" && tool.customWireName.trim()
+			? tool.customWireName.trim()
+			: toSandField2Name(name);
+	const entry: ProductWireTool = {
+		name: wireName,
+		description: typeof tool.description === "string" ? tool.description : "",
+		parameters: wrapToolParameters(toolParametersToJson(tool)),
+	};
+	if (tool.customFormat && typeof tool.customFormat === "object") {
+		entry.customToolFormat = {
+			type: "grammar",
+			definition: tool.customFormat.definition || "",
+			syntax: tool.customFormat.syntax || "",
+		};
+	}
+	return entry;
+}
+
+/** SendToUser tool from capture-4 (parent chat visible replies). */
+export function sendToUserProductTool(): ProductWireTool {
+	return {
+		name: SEND_TO_USER_WIRE_NAME,
+		description:
+			"Send a user-visible message. The user cannot see tool output or your thinking — only SendToUser.",
+		parameters: wrapToolParameters({
+			type: "object",
+			properties: {
+				type: {
+					type: "string",
+					enum: ["text"],
+					description: "text for chat messages visible to the user",
+				},
+				content: {
+					type: "string",
+					description: "Message content the user will see",
+				},
+			},
+			required: ["type", "content"],
+		}),
+	};
+}
+
+/**
+ * Map omp catalog tools to product field-2 tools with jsonSchema envelopes.
+ * Parent profile injects SendToUser when absent.
+ */
+export function toProductField2Tools(tools: Context["tools"], profile: ProductWireProfile): ProductWireTool[] {
+	const out: ProductWireTool[] = [];
+	const seen = new Set<string>();
+	if (!Array.isArray(tools)) {
+		if (profile === "parent-chat") out.push(sendToUserProductTool());
+		return out;
+	}
+	for (const tool of tools) {
+		const mapped = mapOmpToolToProduct(tool);
+		if (!mapped || seen.has(mapped.name)) continue;
+		seen.add(mapped.name);
+		out.push(mapped);
+	}
+	if (profile === "parent-chat" && !seen.has(SEND_TO_USER_WIRE_NAME)) {
+		out.unshift(sendToUserProductTool());
+	}
+	return out;
+}
+
+/** Extend grammar tool index so Shell/Read wire names resolve to omp bash/read. */
+export function augmentToolIndexForProductWire(
+	index: Map<string, { name: string; customWireName?: string; isGrammar: boolean }>,
+	tools: Context["tools"],
+): void {
+	if (!Array.isArray(tools)) return;
+	for (const tool of tools) {
+		if (!tool || typeof tool !== "object") continue;
+		const name = typeof tool.name === "string" ? tool.name : "";
+		if (!name) continue;
+		const sandName = toSandField2Name(name);
+		const meta = index.get(name);
+		if (!meta || sandName === name) continue;
+		const wired = { ...meta, customWireName: sandName };
+		index.set(name, wired);
+		index.set(sandName, wired);
+	}
+}
+
+/** Parse SendToUser streaming args JSON; returns visible text when complete enough. */
+export function parseSendToUserContent(argsText: string): string | undefined {
+	if (!argsText.trim()) return undefined;
+	try {
+		const parsed = JSON.parse(argsText) as { type?: string; content?: string };
+		if (parsed.type === "text" && typeof parsed.content === "string") return parsed.content;
+	} catch {
+		// partial JSON — try regex fallback for content field during stream
+		const match = /"content"\s*:\s*"((?:\\.|[^"\\])*)"/s.exec(argsText);
+		if (match?.[1]) {
+			try {
+				return JSON.parse(`"${match[1]}"`) as string;
+			} catch {
+				return match[1].replace(/\\"/g, '"').replace(/\\\\/g, "\\");
+			}
+		}
+	}
+	return undefined;
+}

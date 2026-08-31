@@ -29,7 +29,17 @@ import {
 	mergeGrokbotHeaders,
 	mintGrokbotAccessToken,
 } from "./grokbot/auth";
-import { resolveGrokbotRequestedModel } from "./grokbot/model-request";
+import { resolveGrokbotRequestedModel, type GrokbotRequestedModel } from "./grokbot/model-request";
+import {
+	applyAnthropicSandToolWire,
+	resolveAnthropicSandToolsWire,
+	type AnthropicSandToolsWire,
+} from "./grokbot/anthropic-sand-wire";
+import {
+	augmentToolIndexForProductWire,
+	parseSendToUserContent,
+	SEND_TO_USER_WIRE_NAME,
+} from "./grokbot/product-wire";
 import {
 	CONNECT_END_STREAM_FLAG,
 	decodeInferenceStreamResponse,
@@ -66,6 +76,12 @@ export interface GrokbotOptions extends StreamOptions {
 	thinking?: boolean;
 	/** Sand `context` tier (`300k` / `1m`); when omitted, follows sandMaxMode. */
 	context?: string;
+	/**
+	 * Explicit Anthropic sand ids reject field-2 agent tools (HTTP 400). `error` throws;
+	 * `sand-default-fallback` rewrites to bare sand-default (tools work; model not guaranteed Opus).
+	 * Default/error unless `GROKBOT_ANTHROPIC_TOOLS_WIRE=sand-default-fallback`.
+	 */
+	anthropicToolsWire?: AnthropicSandToolsWire;
 }
 
 const ROLE = {
@@ -652,7 +668,7 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 			);
 			const messages = toInferenceMessages(context);
 			const tools = toInferenceTools(context.tools);
-			const grammarTools = buildGrammarToolIndex(context.tools);
+			let grammarTools = buildGrammarToolIndex(context.tools);
 			const modelConfig = buildModelConfig(model, options);
 			const conversationId = options?.conversationId || options?.sessionId || crypto.randomUUID();
 			const reqModel = resolveGrokbotRequestedModel(model.id, {
@@ -673,13 +689,48 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 				conversationId,
 			};
 			if (modelConfig) body.modelConfig = modelConfig;
+			const resolvedWire = resolveAnthropicSandToolsWire(
+				typeof process !== "undefined" ? process.env.GROKBOT_ANTHROPIC_TOOLS_WIRE : undefined,
+				options?.anthropicToolsWire,
+				{ modelId: model.id, toolCount: tools.length },
+			);
+			const anthropicWire = applyAnthropicSandToolWire(
+				{ requestedModel: reqModel, tools, modelId: model.id, ompTools: context.tools },
+				resolvedWire,
+			);
+			if (anthropicWire.wireMode) {
+				body.requestedModel = anthropicWire.requestedModel;
+				body.tools = anthropicWire.tools;
+				if (anthropicWire.subagentType) body.subagentType = anthropicWire.subagentType;
+				if (anthropicWire.automationId) body.automationId = anthropicWire.automationId;
+				if (anthropicWire.acceptedUnadvertisedToolNames?.length) {
+					body.acceptedUnadvertisedToolNames = anthropicWire.acceptedUnadvertisedToolNames;
+				}
+				augmentToolIndexForProductWire(grammarTools, context.tools);
+				if (anthropicWire.wireMode === "sand-default-fallback") {
+					logger.warn("grokbot: anthropic sand tool wire fallback", {
+						originalModelId: anthropicWire.originalModelId,
+						fallbackModelId: anthropicWire.requestedModel.modelId,
+						tools: tools.length,
+					});
+				} else if (anthropicWire.wireMode === "automation" || anthropicWire.wireMode === "parent-chat") {
+					logger.info("grokbot: product sand tool wire", {
+						wireMode: anthropicWire.wireMode,
+						originalModelId: anthropicWire.originalModelId,
+						wireModelId: anthropicWire.requestedModel.modelId,
+						subagentType: anthropicWire.subagentType,
+						tools: anthropicWire.tools.length,
+					});
+				}
+			}
 			const replacementPayload = await options?.onPayload?.(body, model);
 			if (replacementPayload !== undefined) {
 				body = replacementPayload as Record<string, unknown>;
 			}
 			const protoBytes = encodeInferenceStreamRequest(body);
-			const effort = (reqModel.parameters || []).find(p => p.id === "effort")?.value || "";
-			const fast = (reqModel.parameters || []).find(p => p.id === "fast")?.value || "";
+			const wireModel = body.requestedModel as GrokbotRequestedModel;
+			const effort = (wireModel.parameters || []).find(p => p.id === "effort")?.value || "";
+			const fast = (wireModel.parameters || []).find(p => p.id === "fast")?.value || "";
 
 			// model.headers + options.headers first; provider-owned auth/client
 			// headers win so reverse-proxy keys cannot override sand identity.
@@ -695,14 +746,16 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 			});
 
 			logger.debug("grokbot: stream request", {
-				modelId: reqModel.modelId,
-				maxMode: Boolean(reqModel.maxMode),
+				modelId: (body.requestedModel as GrokbotRequestedModel).modelId,
+				maxMode: Boolean((body.requestedModel as GrokbotRequestedModel).maxMode),
 				effort,
 				fast,
 				tools: tools.length,
 				toolNames: tools.map(t => t.name),
 				messages: messages.length,
 				hasModelConfig: Boolean(modelConfig),
+				anthropicWireMode: anthropicWire.wireMode,
+				anthropicOriginalModelId: anthropicWire.originalModelId,
 			});
 
 			const backend = (model.baseUrl || GROKBOT_BACKEND).replace(/\/+$/, "");
@@ -727,6 +780,9 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 
 			let openKind: "" | "text" | "thinking" = "";
 			let openIndex = -1;
+			let sendToUserArgsText = "";
+			let sendToUserLastContent = "";
+			let routedResponseModel = "";
 			const toolStates = new Map<
 				string,
 				{ key: string; index: number; block: ToolCall; argsText: string; ended: boolean; isGrammar: boolean }
@@ -793,6 +849,25 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 					toolCall: state.block,
 					partial: output,
 				});
+			};
+
+			const handleSendToUser = (part: Record<string, unknown>) => {
+				const argsText =
+					part.args == null ? "" : typeof part.args === "string" ? part.args : JSON.stringify(part.args);
+				if (argsText) sendToUserArgsText = argsText;
+				const parsed = parseSendToUserContent(sendToUserArgsText);
+				if (parsed !== undefined && parsed !== sendToUserLastContent) {
+					const delta = parsed.startsWith(sendToUserLastContent)
+						? parsed.slice(sendToUserLastContent.length)
+						: parsed;
+					sendToUserLastContent = parsed;
+					if (delta) {
+						const idx = ensureText();
+						(output.content[idx] as TextContent).text += delta;
+						stream.push({ type: "text_delta", contentIndex: idx, delta, partial: output });
+					}
+				}
+				if (part.isComplete ?? part.is_complete) closeOpen();
 			};
 
 			const upsertTool = (part: Record<string, unknown>) => {
@@ -994,7 +1069,18 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 					if (textPart && (textPart.isFinal || textPart.is_final)) closeOpen();
 
 					const toolPart = firstPresent(parsed, ["toolCallPart", "tool_call_part"]);
-					if (toolPart && typeof toolPart === "object") upsertTool(toolPart as Record<string, unknown>);
+					if (toolPart && typeof toolPart === "object") {
+						const wireToolName = String(
+							(toolPart as Record<string, unknown>).toolName ||
+								(toolPart as Record<string, unknown>).tool_name ||
+								"",
+						);
+						if (wireToolName === SEND_TO_USER_WIRE_NAME) {
+							handleSendToUser(toolPart as Record<string, unknown>);
+						} else {
+							upsertTool(toolPart as Record<string, unknown>);
+						}
+					}
 
 					const usage = firstPresent(parsed, ["usage", "extendedUsage", "extended_usage"]);
 					if (usage && typeof usage === "object") applyUsage(output, usage as Record<string, unknown>);
@@ -1011,8 +1097,12 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 							throw new Error(errorMessage);
 						}
 						if (typeof info.id === "string" && info.id) output.responseId = info.id;
-						// responseInfo.model is a routed model id (e.g. grok-4.5), not a
-						// provider name — leave upstreamProvider unset unless wire exposes one.
+						const routedModel =
+							(typeof info.model === "string" && info.model) ||
+							(typeof (info as { modelId?: string }).modelId === "string" &&
+								(info as { modelId?: string }).modelId) ||
+							"";
+						if (routedModel) routedResponseModel = routedModel;
 					}
 				}
 			}
@@ -1051,6 +1141,9 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 				stopReason: output.stopReason,
 				contentTypes: output.content.map(b => b.type),
 				upstreamProvider: output.upstreamProvider,
+				routedResponseModel: routedResponseModel || undefined,
+				anthropicWireMode: anthropicWire.wireMode,
+				anthropicOriginalModelId: anthropicWire.originalModelId,
 				usage: {
 					input: output.usage.input,
 					output: output.usage.output,

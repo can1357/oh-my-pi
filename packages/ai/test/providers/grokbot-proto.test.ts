@@ -1107,7 +1107,11 @@ describe("grokbot incomplete tool calls", () => {
 			],
 		};
 
-		const result = await streamGrokBot(model, grammarContext, { apiKey: "renew", fetch: fetchImpl }).result();
+		const result = await streamGrokBot(model, grammarContext, {
+			apiKey: "renew",
+			fetch: fetchImpl,
+			anthropicToolsWire: "error",
+		}).result();
 		expect(result.stopReason).toBe("toolUse");
 		expect(result.errorMessage).toBeUndefined();
 		expect(result.content).toEqual([
@@ -1148,7 +1152,11 @@ describe("grokbot incomplete tool calls", () => {
 			],
 		};
 
-		const result = await streamGrokBot(model, hashlineContext, { apiKey: "renew", fetch: fetchImpl }).result();
+		const result = await streamGrokBot(model, hashlineContext, {
+			apiKey: "renew",
+			fetch: fetchImpl,
+			anthropicToolsWire: "error",
+		}).result();
 		expect(result.stopReason).toBe("toolUse");
 		expect(result.errorMessage).toBeUndefined();
 		expect(result.content).toEqual([

@@ -3,10 +3,10 @@
  * Live grokbot multi-model matrix for ompa / sand InferenceService.
  *
  * Usage:
- *   bun scripts/grokbot-matrix.mjs --mode text|tools|ompa-smoke|all
+ *   bun scripts/grokbot-matrix.mjs --mode text|tools|opus-tools|ompa-smoke|ompa-integration|all
  *
  * Success markers (EXPECT tokens):
- *   MATRIX_TEXT_PASS | MATRIX_TOOLS_PASS | OMPA_SMOKE_PASS
+ *   MATRIX_TEXT_PASS | MATRIX_TOOLS_PASS | MATRIX_OPUS_TOOLS_PASS | OMPA_SMOKE_PASS | OMPA_INTEGRATION_PASS
  */
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
@@ -19,6 +19,7 @@ import {
 	loadGrokbotConfig,
 	mintGrokbotAccessToken,
 } from "../packages/catalog/src/discovery/grokbot-auth.ts";
+import { applyAnthropicSandToolWire } from "../packages/ai/src/providers/grokbot/anthropic-sand-wire.ts";
 import { resolveGrokbotRequestedModel } from "../packages/ai/src/providers/grokbot/model-request.ts";
 import {
 	CONNECT_END_STREAM_FLAG,
@@ -61,6 +62,7 @@ function parseFrames(buf) {
 	let texts = "";
 	let end;
 	let responseModel = "";
+	const toolNames = [];
 	while (o + 5 <= buf.length) {
 		const flags = buf[o];
 		const len = buf.readUInt32BE(o + 1);
@@ -78,6 +80,7 @@ function parseFrames(buf) {
 				const msg = decodeInferenceStreamResponse(bytes);
 				if (msg.textPart?.text) texts += msg.textPart.text;
 				if (msg.responseInfo?.model) responseModel = String(msg.responseInfo.model);
+				if (msg.toolCallPart?.toolName) toolNames.push(String(msg.toolCallPart.toolName));
 			} catch {
 				/* ignore partial */
 			}
@@ -88,6 +91,7 @@ function parseFrames(buf) {
 		ok: !end?.error,
 		texts,
 		responseModel,
+		toolNames,
 		message: end?.error?.message,
 		status: dbg?.details?.additionalInfo?.providerStatusCode,
 		providerError: dbg?.error,
@@ -156,30 +160,39 @@ function resolveOmpaBin() {
 	return `${process.env.HOME}/.local/bin/ompa`;
 }
 
-function ompaSmoke(model) {
+function runOmpa(args, { timeout = 120_000, cwd = ROOT } = {}) {
 	const ompa = resolveOmpaBin();
+	const r = spawnSync(ompa, args, {
+		cwd,
+		encoding: "utf8",
+		timeout,
+		env: { ...process.env, PI_NO_MCP: "1" },
+	});
+	const out = `${r.stdout || ""}\n${r.stderr || ""}`;
+	return { status: r.status, out, signal: r.signal };
+}
+
+function ompaPrint(model, { tools = false, thinking = "low", prompt = `Reply with exactly: ${TOKEN}` } = {}) {
 	const args = [
 		"-p",
 		"--no-session",
 		"--no-extensions",
 		"--no-skills",
 		"--no-title",
-		"--no-tools",
+		...(tools ? [] : ["--no-tools"]),
 		"--model",
 		model,
 		"--thinking",
-		"low",
-		`Reply with exactly: ${TOKEN}`,
+		thinking,
+		prompt,
 	];
-	const r = spawnSync(ompa, args, {
-		cwd: ROOT,
-		encoding: "utf8",
-		timeout: 120_000,
-		env: { ...process.env, PI_NO_MCP: "1" },
-	});
-	const out = `${r.stdout || ""}\n${r.stderr || ""}`;
-	const pass = r.status === 0 && out.includes(TOKEN);
-	return { model, status: r.status, pass, out: out.slice(-400) };
+	const r = runOmpa(args);
+	const pass = r.status === 0 && r.out.includes(TOKEN);
+	return { model, tools, status: r.status, pass, out: r.out.slice(-600) };
+}
+
+function ompaSmoke(model) {
+	return ompaPrint(model);
 }
 
 function printRow(row) {
@@ -239,8 +252,119 @@ async function runTools() {
 	console.log("MATRIX_TOOLS_PASS");
 }
 
+const AUTOMATION_OMP_TOOLS = [
+	{
+		name: "bash",
+		description: "Run a shell command.",
+		parameters: {
+			type: "object",
+			properties: { command: { type: "string" } },
+			required: ["command"],
+		},
+	},
+	{
+		name: "read",
+		description: "Read a file.",
+		parameters: {
+			type: "object",
+			properties: { path: { type: "string" } },
+			required: ["path"],
+		},
+	},
+];
+
+async function sandAutomationProbe() {
+	const cfg = await loadGrokbotConfig();
+	const token = await mintGrokbotAccessToken(cfg, fetch, GROKBOT_BACKEND);
+	const headers = {
+		...grokbotClientHeaders(cfg),
+		authorization: `Bearer ${token}`,
+		"x-cursor-checksum": createGrokbotChecksum(cfg.machineId),
+		"x-ghost-mode": "true",
+		"content-type": "application/connect+proto",
+		accept: "application/connect+proto",
+		"connect-protocol-version": "1",
+		"x-request-id": crypto.randomUUID(),
+	};
+	const requestedModel = resolveGrokbotRequestedModel("claude-opus-5", {
+		effort: "low",
+		sandParameterIds: ["thinking", "context", "effort", "fast"],
+		sandMaxMode: false,
+	});
+	const wired = applyAnthropicSandToolWire(
+		{
+			requestedModel,
+			tools: AUTOMATION_OMP_TOOLS,
+			modelId: "claude-opus-5",
+			ompTools: AUTOMATION_OMP_TOOLS,
+		},
+		"automation",
+	);
+	const body = {
+		messages: [
+			{ role: 4, text: "You are a coding agent." },
+			{ role: 1, text: "Use Shell to run: echo opus-tools-matrix. Reply briefly after." },
+		],
+		tools: wired.tools,
+		requestedModel: wired.requestedModel,
+		subagentType: wired.subagentType,
+		automationId: wired.automationId,
+		acceptedUnadvertisedToolNames: wired.acceptedUnadvertisedToolNames,
+		modelConfig: { maxTokens: 512 },
+		invocationId: crypto.randomUUID(),
+		conversationId: crypto.randomUUID(),
+	};
+	const res = await fetch(joinGrokbotBackendUrl(GROKBOT_BACKEND, STREAM), {
+		method: "POST",
+		headers,
+		body: frameConnectProto(encodeInferenceStreamRequest(body)),
+	});
+	const result = parseFrames(Buffer.from(await res.arrayBuffer()));
+	const sawShell = result.toolNames?.includes("Shell");
+	const pass = res.ok && result.ok && sawShell;
+	return {
+		id: "claude-opus-5:automation",
+		tools: true,
+		...result,
+		toolNames: result.toolNames || [],
+		pass,
+	};
+}
+
+async function runOpusTools() {
+	console.log("=== OPUS AUTOMATION TOOLS (G5 sand probe) ===");
+	const row = await sandAutomationProbe();
+	printRow({
+		...row,
+		id: row.id,
+		responseModel: `${row.responseModel || ""} tools=${(row.toolNames || []).join(",")}`,
+	});
+	if (!row.pass) {
+		process.exitCode = 1;
+		return;
+	}
+	console.log("=== OPUS OMPA SMOKE (G5 integration; requires grokbot renewal) ===");
+	const prevWire = process.env.GROKBOT_ANTHROPIC_TOOLS_WIRE;
+	process.env.GROKBOT_ANTHROPIC_TOOLS_WIRE = "automation";
+	const g5 = ompaPrint("grokbot/claude-opus-5:max", {
+		tools: true,
+		thinking: "low",
+		prompt: `Use bash to run: echo ${TOKEN}. Then reply with exactly: ${TOKEN}`,
+	});
+	if (prevWire === undefined) delete process.env.GROKBOT_ANTHROPIC_TOOLS_WIRE;
+	else process.env.GROKBOT_ANTHROPIC_TOOLS_WIRE = prevWire;
+	console.log(`${g5.pass ? "PASS" : "FAIL"}  G5  ompa  grokbot/claude-opus-5:max  exit=${g5.status}`);
+	if (!g5.pass) console.log(g5.out);
+	if (!g5.pass) {
+		console.log("MATRIX_OPUS_TOOLS_SAND_PASS (ompa step failed; sand probe ok)");
+		process.exitCode = 1;
+		return;
+	}
+	console.log("MATRIX_OPUS_TOOLS_PASS");
+}
+
 function runOmpaSmoke() {
-	console.log("=== OMPA SMOKE ===");
+	console.log("=== OMPA SMOKE (G3) ===");
 	const models = ["grokbot/grok-4.6", "grokbot/composer-2.5", "grokbot/gpt-5.6-sol"];
 	const rows = models.map(ompaSmoke);
 	for (const r of rows) {
@@ -254,6 +378,66 @@ function runOmpaSmoke() {
 	console.log("OMPA_SMOKE_PASS");
 }
 
+function runOmpaIntegration() {
+	console.log("=== OMPA INTEGRATION (G5–G8) ===");
+	const rows = [];
+
+	// G5: agent turn with built-in tools enabled
+	const g5 = ompaPrint("grokbot/grok-4.6", {
+		tools: true,
+		prompt: `Use bash to run: echo ${TOKEN}. Then reply with exactly: ${TOKEN}.`,
+	});
+	rows.push({ gate: "G5", label: "ompa tools grok-4.6", ...g5 });
+	console.log(`${g5.pass ? "PASS" : "FAIL"}  G5  ompa+tools  grokbot/grok-4.6  exit=${g5.status}`);
+	if (!g5.pass) console.log(g5.out);
+
+	// G6: sand-default bare router
+	const g6 = ompaPrint("grokbot/sand-default", {
+		thinking: "off",
+		prompt: `Reply with exactly: ${TOKEN}`,
+	});
+	rows.push({ gate: "G6", label: "sand-default", ...g6 });
+	console.log(`${g6.pass ? "PASS" : "FAIL"}  G6  sand-default  exit=${g6.status}`);
+	if (!g6.pass) console.log(g6.out);
+
+	// G7: composer alias → composer-2.5
+	const g7 = ompaPrint("grokbot/composer", { prompt: `Reply with exactly: ${TOKEN}` });
+	rows.push({ gate: "G7", label: "composer alias", ...g7 });
+	console.log(`${g7.pass ? "PASS" : "FAIL"}  G7  grokbot/composer  exit=${g7.status}`);
+	if (!g7.pass) console.log(g7.out);
+
+	// G8: live catalog lists sand routers + grok-4.6
+	const g8r = runOmpa(["models", "grokbot", "--json"], { timeout: 180_000 });
+	let g8pass = false;
+	let g8detail = "";
+	try {
+		const payload = JSON.parse(g8r.out);
+		const ids = new Set((payload.models || []).map(m => String(m.id)));
+		const need = ["sand-default", "sand-cua", "sand-automation", "grok-4.6", "composer-2.5"];
+		const missing = need.filter(id => !ids.has(id));
+		g8pass = g8r.status === 0 && missing.length === 0;
+		g8detail = g8pass ? `${ids.size} models` : `missing: ${missing.join(", ")}`;
+	} catch {
+		g8detail = g8r.out.slice(-200);
+	}
+	rows.push({ gate: "G8", pass: g8pass, status: g8r.status, detail: g8detail });
+	console.log(`${g8pass ? "PASS" : "FAIL"}  G8  models grokbot  ${g8detail}  exit=${g8r.status}`);
+
+	// G8b: bare Model.aliases selector (no grokbot/ prefix)
+	const g8b = ompaPrint("composer", { prompt: `Reply with exactly: ${TOKEN}` });
+	rows.push({ gate: "G8b", label: "bare composer alias", ...g8b });
+	console.log(`${g8b.pass ? "PASS" : "FAIL"}  G8b  bare composer  exit=${g8b.status}`);
+	if (!g8b.pass) console.log(g8b.out);
+
+	if (rows.some(r => !r.pass)) {
+		process.exitCode = 1;
+		return;
+	}
+	console.log("OMPA_INTEGRATION_PASS");
+}
+
 if (mode === "text" || mode === "all") await runText();
 if (mode === "tools" || mode === "all") await runTools();
+if (mode === "opus-tools" || mode === "all") await runOpusTools();
 if (mode === "ompa-smoke" || mode === "all") runOmpaSmoke();
+if (mode === "ompa-integration" || mode === "all") runOmpaIntegration();
