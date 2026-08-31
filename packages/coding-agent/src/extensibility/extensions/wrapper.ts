@@ -24,7 +24,7 @@ import { withFileMutationSession } from "../../tools/file-write-fallback";
 import { normalizeToolEventInput, resolveToolEventInput } from "../tool-event-input";
 import { applyToolProxy } from "../tool-proxy";
 import type { ExtensionRunner } from "./runner";
-import type { RegisteredTool, ToolCallEventResult } from "./types";
+import type { RegisteredTool, ToolApprovalReviewResult, ToolCallEventResult } from "./types";
 
 /**
  * Adapts a RegisteredTool into an AgentTool.
@@ -274,10 +274,14 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 			reason: resolved.reason,
 		};
 
-		// Advisory extension review, exactly between final input resolution and
-		// the native selector. Eligible only for mode-derived prompts: approve
-		// suppresses the ordinary prompt, escalate keeps it unchanged, and deny
-		// rejects at the extension review layer without UI or execution.
+		// Extension approval review between final input resolution and the native
+		// selector. Eligible only for mode-derived prompts: approve resolves the
+		// prompt positively, deny vetoes the call at the extension layer, and
+		// escalate leaves the decision to the ordinary native selector. Handlers
+		// review a deeply immutable snapshot of the owned params: freezing the
+		// owned params themselves would forbid tools from mutating their
+		// validated input internally. Clone or freeze failures fail closed to the
+		// native selector.
 		if (
 			approvalCheck.required &&
 			resolved.policy === "prompt" &&
@@ -287,18 +291,28 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 			!xdevBypass &&
 			!signal?.aborted
 		) {
-			const review = await this.runner.emitToolApprovalReview(
-				{
-					type: "tool_approval_review",
-					sessionId: context?.sessionManager?.getSessionId() ?? "",
-					toolCallId,
-					toolName: this.tool.name,
-					input: finalParams as Record<string, unknown>,
-					approvalMode,
-					tier: resolved.tier,
-				},
-				signal,
-			);
+			let review: ToolApprovalReviewResult;
+			try {
+				review = await this.runner.emitToolApprovalReview(
+					{
+						type: "tool_approval_review",
+						sessionId: context?.sessionManager?.getSessionId() ?? "",
+						toolCallId,
+						toolName: this.tool.name,
+						input: structuredClone(finalParams) as Record<string, unknown>,
+						approvalMode,
+						tier: resolved.tier,
+					},
+					signal,
+				);
+			} catch (err) {
+				// emitToolApprovalReview resolves to escalate on handler/freeze
+				// failures; a throw here can only be a snapshot-clone failure or an
+				// abort. Either way the native selector must decide; abort is
+				// re-raised by throwIfAborted below.
+				review = { decision: "escalate" };
+				if (!(err instanceof TypeError)) throw err;
+			}
 			signal?.throwIfAborted();
 			if (review.decision === "deny") {
 				throw extensionReviewDenyError(this.tool.name, review.reason);

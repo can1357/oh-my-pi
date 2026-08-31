@@ -3311,6 +3311,53 @@ describe("ExtensionRunner", () => {
 				expect(trace).toContainEqual({ kind: "executed", params: { command: "echo reviewed" } });
 			});
 
+			it("reviews an immutable snapshot while execution keeps mutable owned params", async () => {
+				const trace = setTrace();
+				const retainedInput = { command: "echo reviewed" };
+				const reviewStarted = Promise.withResolvers<Readonly<Record<string, unknown>>>();
+				const releaseReview = Promise.withResolvers<void>();
+				const reviewed: Array<Readonly<Record<string, unknown>>> = [];
+				const executed: Array<{ command: string }> = [];
+				const runner = dispatchRunner(
+					[
+						async event => {
+							reviewStarted.resolve(event.input);
+							await releaseReview.promise;
+							reviewed.push(event.input);
+							return { decision: "approve" };
+						},
+					],
+					[async () => ({ input: retainedInput })],
+				);
+				const base = recordingApprovalTool();
+				const tool = {
+					...base,
+					execute: async (toolCallId: string, params: unknown) => {
+						const owned = params as { command: string };
+						executed.push(owned);
+						// A tool may mutate its own validated params internally.
+						owned.command = "echo mutated-by-tool";
+						return base.execute(toolCallId, owned);
+					},
+				};
+				const execution = executeReviewCase(runner, tool, "call-review-snapshot-isolation", {
+					params: { command: "echo original" },
+				});
+
+				const reviewedInput = await reviewStarted.promise;
+				retainedInput.command = "rm -rf";
+				releaseReview.resolve();
+				const result = await execution;
+
+				expect(firstReviewText(result)).toBe("ok");
+				expect(reviewedInput).toEqual({ command: "echo reviewed" });
+				expect(reviewed).toEqual([{ command: "echo reviewed" }]);
+				expect(Object.isFrozen(reviewed[0])).toBe(true);
+				expect(Object.isFrozen(executed[0])).toBe(false);
+				expect(executed[0]).toEqual({ command: "echo mutated-by-tool" });
+				expect(trace).toContainEqual({ kind: "executed", params: { command: "echo mutated-by-tool" } });
+			});
+
 			it("reviews and executes the value produced by the real agent-loop transformation path", async () => {
 				const reviewedInputs: Array<Readonly<Record<string, unknown>>> = [];
 				const executedInputs: unknown[] = [];
