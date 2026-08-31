@@ -749,7 +749,16 @@ async function handleFormatEndpoint(
 	// credential it last handed out to that session).
 	let parsed: ParsedFormatRequest;
 	try {
-		parsed = route.module.parseRequest(body, req.headers);
+		{
+			const geminiStreamDefault =
+				route.label === "gemini-v1beta" && typeof pathname === "string"
+					? pathname.includes("streamGenerateContent")
+					: false;
+			parsed =
+				route.label === "gemini-v1beta"
+					? geminiV1beta.parseRequest(body, req.headers, geminiStreamDefault)
+					: route.module.parseRequest(body, req.headers);
+		}
 	} catch (error) {
 		if (controller.signal.aborted) return clientClosedResponse(route);
 		const message = error instanceof Error ? error.message : String(error);

@@ -286,7 +286,7 @@ function applyOpenAiSampling(options: ParsedRequest["options"], body: Record<str
 // parseRequest
 // ---------------------------------------------------------------------------
 
-export function parseRequest(body: unknown, _headers?: Headers): ParsedRequest {
+export function parseRequest(body: unknown, _headers?: Headers, defaultStream = false): ParsedRequest {
 	if (!isRecord(body)) {
 		throw new AIError.ValidationError("gemini-v1beta: request body must be a JSON object");
 	}

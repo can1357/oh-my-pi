@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Gemini `generateContent` defaulting to SSE; streaming now follows `streamGenerateContent` (or an explicit `stream` body field).
+- Fixed Gemini requests silently dropping non-text parts; `inlineData` is preserved and unsupported part types are rejected.
+
 ### Added
 
 - Added API-key authentication for ClinePass through the official `CLINE_API_KEY` variable, including account-route validation and rolling quota-window reporting in `omp usage` ([#7863](https://github.com/can1357/oh-my-pi/pull/7863) by [@will-bogusz](https://github.com/will-bogusz)).

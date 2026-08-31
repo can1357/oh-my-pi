@@ -64,7 +64,7 @@ describe("auth-gateway gemini-v1beta: parseRequest", () => {
 			contents: [{ role: "user", parts: [{ text: "hello gemini" }] }],
 		});
 		expect(parsed.modelId).toBe("gemini-2.0-flash");
-		expect(parsed.stream).toBe(true);
+		expect(parsed.stream).toBe(false);
 		expect(parsed.context.messages).toEqual([expect.objectContaining({ role: "user", content: "hello gemini" })]);
 	});
 
@@ -169,4 +169,30 @@ describe("auth-gateway gemini-v1beta: formatError", () => {
 			error: { message: "bad request", status: "INVALID_ARGUMENT", code: 400 },
 		});
 	});
+});
+
+it("defaults stream false for generateContent and true when requested", () => {
+	const nonStream = parseRequest({
+		model: "gemini-2.5-flash",
+		contents: [{ role: "user", parts: [{ text: "hi" }] }],
+	});
+	expect(nonStream.stream).toBe(false);
+	const streamed = parseRequest(
+		{
+			model: "gemini-2.5-flash",
+			contents: [{ role: "user", parts: [{ text: "hi" }] }],
+		},
+		undefined,
+		true,
+	);
+	expect(streamed.stream).toBe(true);
+});
+
+it("rejects fileData / functionCall parts (negative)", () => {
+	expect(() =>
+		parseRequest({
+			model: "gemini-2.5-flash",
+			contents: [{ role: "user", parts: [{ fileData: { fileUri: "gs://x" } }] }],
+		}),
+	).toThrow(/unsupported part type/);
 });
