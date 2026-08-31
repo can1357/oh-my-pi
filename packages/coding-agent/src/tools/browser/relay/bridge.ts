@@ -89,6 +89,8 @@ function subscriptionKey(method: string): string {
 		case "Network.setUserAgentOverride":
 		case "Emulation.setUserAgentOverride":
 			return "UserAgentOverride";
+		case "Network.clearAcceptedEncodings":
+			return "Network.setAcceptedEncodings";
 		default:
 			return method;
 	}
@@ -123,6 +125,10 @@ function isNeutralNetworkConditions(params: Record<string, unknown> | undefined)
 		params.downloadThroughput === -1 &&
 		params.uploadThroughput === -1
 	);
+}
+
+function isEmptyUserAgentOverride(params: Record<string, unknown> | undefined): boolean {
+	return typeof params?.userAgent === "string" && params.userAgent === "";
 }
 
 function subscriptionClearedFields(
@@ -1015,7 +1021,11 @@ export class RelayBridge {
 			}
 			case "Network.setBlockedURLs": {
 				const urls = msg.params?.urls;
-				if (!Array.isArray(urls) || urls.length === 0) {
+				const urlPatterns = msg.params?.urlPatterns;
+				if (
+					(!Array.isArray(urls) || urls.length === 0) &&
+					(!Array.isArray(urlPatterns) || urlPatterns.length === 0)
+				) {
 					this.#forgetTabSubscription(tab, msg.method);
 					return;
 				}
@@ -1135,10 +1145,18 @@ export class RelayBridge {
 			case "Emulation.setIdleOverride":
 			case "Network.setUserAgentOverride":
 			case "Emulation.setUserAgentOverride":
+			case "Network.setAcceptedEncodings":
 				// Persistent root setters survive as long as the shared debugger root.
 				// When a guard-authorized detach swaps that root, replay the latest
 				// winning command for each setter so preserved pseudo-sessions keep the
 				// state they previously established.
+				if (
+					(msg.method === "Network.setUserAgentOverride" || msg.method === "Emulation.setUserAgentOverride") &&
+					isEmptyUserAgentOverride(msg.params)
+				) {
+					this.#forgetTabSubscription(tab, subscriptionKey(msg.method));
+					return;
+				}
 				if (!ownerIsCurrent) return;
 				this.#rememberSessionSubscription(tab, subscriptionKey(msg.method), ownerSessionId, {
 					method: msg.method,
@@ -1146,6 +1164,9 @@ export class RelayBridge {
 					ownerSessionId,
 					sequence: ++this.#subscriptionSeq,
 				});
+				return;
+			case "Network.clearAcceptedEncodings":
+				this.#forgetTabSubscription(tab, subscriptionKey(msg.method));
 				return;
 			case "Network.emulateNetworkConditions":
 				// Chrome keeps a single throttling profile on the shared root, so a
@@ -1181,7 +1202,7 @@ export class RelayBridge {
 					this.#forgetTabSubscription(tab, subscriptionKey(msg.method));
 					break;
 				default:
-					this.#forgetSessionSubscription(tab, msg.method, ownerSessionId);
+					this.#forgetSessionSubscription(tab, subscriptionKey(msg.method), ownerSessionId);
 					break;
 			}
 			return;
@@ -1413,6 +1434,8 @@ export class RelayBridge {
 			case "Network.setBypassServiceWorker":
 			case "Network.setUserAgentOverride":
 			case "Emulation.setUserAgentOverride":
+			case "Network.setAcceptedEncodings":
+			case "Network.clearAcceptedEncodings":
 			case "Security.setIgnoreCertificateErrors":
 				return subscriptionKey(msg.method);
 			default:
@@ -1546,11 +1569,13 @@ export class RelayBridge {
 			case "Network.setExtraHTTPHeaders":
 				return { method: subscription.method, params: { headers: {} } };
 			case "Network.setBlockedURLs":
-				return { method: subscription.method, params: { urls: [] } };
+				return { method: subscription.method, params: { urls: [], urlPatterns: [] } };
 			case "Network.setCacheDisabled":
 				return { method: subscription.method, params: { cacheDisabled: false } };
 			case "Network.setBypassServiceWorker":
 				return { method: subscription.method, params: { bypass: false } };
+			case "Network.setAcceptedEncodings":
+				return { method: "Network.clearAcceptedEncodings" };
 			case "Security.setIgnoreCertificateErrors":
 				return { method: subscription.method, params: { ignore: false } };
 			case "Page.setBypassCSP":

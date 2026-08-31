@@ -1709,6 +1709,46 @@ describe("RelayBridge tab grouping", () => {
 		]);
 	});
 
+	it("treats empty user-agent overrides as a tab-wide clear across aliases", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const owner = new FakeCdpSocket();
+		const ownerConn = bridge.cdpConnected(owner);
+		const ownerSession = await attachPage(bridge, ext, owner, ownerConn, 1);
+		const clearer = new FakeCdpSocket();
+		const clearerConn = bridge.cdpConnected(clearer);
+		const clearerSession = await attachPage(bridge, ext, clearer, clearerConn, 1);
+
+		const sendRootCommand = async (
+			connId: number,
+			sessionId: string,
+			method: string,
+			params?: Record<string, unknown>,
+		): Promise<void> => {
+			const id = ++msgSeq;
+			bridge.cdpMessage(connId, JSON.stringify({ id, sessionId, method, params }));
+			await flush();
+			ack(bridge, ext, "send");
+			await flush();
+		};
+
+		await sendRootCommand(ownerConn, ownerSession, "Network.setUserAgentOverride", {
+			userAgent: "Mozilla/5.0 custom",
+			platform: "Win32",
+		});
+		await sendRootCommand(clearerConn, clearerSession, "Emulation.setUserAgentOverride", { userAgent: "" });
+
+		bridge.extClosed(ext);
+		const ext2 = new FakeExtSocket();
+		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], { recoverableTabIds: [1] });
+		await waitFor(() => ext2.rpcs("attach").length === 1, "recovery reattach RPC");
+		ack(bridge, ext2, "attach");
+		await flush();
+
+		expect(ext2.rpcs("send")).toHaveLength(0);
+	});
+
 	it("replays non-UA persistent root setters for a preserved session across recovery", async () => {
 		const bridge = new RelayBridge({});
 		const ext = new FakeExtSocket();
@@ -2996,6 +3036,10 @@ describe("RelayBridge tab grouping", () => {
 			urls: ["https://blocked.example/*"],
 		});
 		await sendRootCommand(clearerConn, clearerSession, "Network.setBlockedURLs", { urls: [] });
+		await sendRootCommand(ownerConn, ownerSession, "Network.setBlockedURLs", {
+			urlPatterns: [{ urlPattern: "https://pattern.example/*" }],
+		});
+		await sendRootCommand(clearerConn, clearerSession, "Network.setBlockedURLs", { urlPatterns: [] });
 
 		await sendRootCommand(ownerConn, ownerSession, "Emulation.setLocaleOverride", { locale: "fr-FR" });
 		await sendRootCommand(clearerConn, clearerSession, "Emulation.setLocaleOverride", {});
@@ -3016,6 +3060,135 @@ describe("RelayBridge tab grouping", () => {
 		await flush();
 
 		expect(ext2.rpcs("send")).toHaveLength(0);
+	});
+
+	it("tracks urlPatterns-only blocked URL rules across recovery and cleanup", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const owner = new FakeCdpSocket();
+		const ownerConn = bridge.cdpConnected(owner);
+		const ownerSession = await attachPage(bridge, ext, owner, ownerConn, 1);
+		const holder = new FakeCdpSocket();
+		const holderConn = bridge.cdpConnected(holder);
+		const holderSession = await attachPage(bridge, ext, holder, holderConn, 1);
+
+		const sendRootCommand = async (
+			connId: number,
+			sessionId: string,
+			method: string,
+			params?: Record<string, unknown>,
+		): Promise<void> => {
+			const id = ++msgSeq;
+			bridge.cdpMessage(connId, JSON.stringify({ id, sessionId, method, params }));
+			await flush();
+			ack(bridge, ext, "send");
+			await flush();
+		};
+
+		await sendRootCommand(ownerConn, ownerSession, "Network.setBlockedURLs", {
+			urlPatterns: [{ urlPattern: "https://pattern.example/*" }],
+		});
+
+		bridge.extClosed(ext);
+		const ext2 = new FakeExtSocket();
+		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], { recoverableTabIds: [1] });
+		await waitFor(() => ext2.rpcs("attach").length === 1, "recovery attach RPC");
+		ack(bridge, ext2, "attach");
+		await waitFor(() => ext2.rpcs("send").length === 1, "blocked URL replay");
+		expect(ext2.rpcs("send")[0]).toMatchObject({
+			method: "Network.setBlockedURLs",
+			params: { urlPatterns: [{ urlPattern: "https://pattern.example/*" }] },
+		});
+
+		bridge.cdpClosed(ownerConn);
+		ack(bridge, ext2, "send");
+		await waitFor(() => ext2.rpcs("send").length === 2, "blocked URL cleanup");
+		expect(ext2.rpcs("send")[1]).toMatchObject({
+			method: "Network.setBlockedURLs",
+			params: { urls: [], urlPatterns: [] },
+		});
+		ack(bridge, ext2, "send");
+		await flush();
+
+		const commandId = ++msgSeq;
+		bridge.cdpMessage(
+			holderConn,
+			JSON.stringify({ id: commandId, sessionId: holderSession, method: "Network.getCookies" }),
+		);
+		await waitFor(() => ext2.rpcs("send").length === 3, "holder command after blocked URL cleanup");
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual([
+			"Network.setBlockedURLs",
+			"Network.setBlockedURLs",
+			"Network.getCookies",
+		]);
+		ack(bridge, ext2, "send", { cookies: [] });
+		await flush();
+		expect(holder.messages.filter(message => message.id === commandId && "result" in message)).toHaveLength(1);
+	});
+
+	it("replays accepted encodings across recovery and clears them when the owner disappears", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const owner = new FakeCdpSocket();
+		const ownerConn = bridge.cdpConnected(owner);
+		const ownerSession = await attachPage(bridge, ext, owner, ownerConn, 1);
+		const holder = new FakeCdpSocket();
+		const holderConn = bridge.cdpConnected(holder);
+		const holderSession = await attachPage(bridge, ext, holder, holderConn, 1);
+
+		const sendRootCommand = async (
+			connId: number,
+			sessionId: string,
+			method: string,
+			params?: Record<string, unknown>,
+		): Promise<void> => {
+			const id = ++msgSeq;
+			bridge.cdpMessage(connId, JSON.stringify({ id, sessionId, method, params }));
+			await flush();
+			ack(bridge, ext, "send");
+			await flush();
+		};
+
+		await sendRootCommand(ownerConn, ownerSession, "Network.setAcceptedEncodings", {
+			encodings: ["gzip", "br"],
+		});
+
+		bridge.extClosed(ext);
+		const ext2 = new FakeExtSocket();
+		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], { recoverableTabIds: [1] });
+		await waitFor(() => ext2.rpcs("attach").length === 1, "recovery attach RPC");
+		ack(bridge, ext2, "attach");
+		await waitFor(() => ext2.rpcs("send").length === 1, "accepted encodings replay");
+		expect(ext2.rpcs("send")[0]).toMatchObject({
+			method: "Network.setAcceptedEncodings",
+			params: { encodings: ["gzip", "br"] },
+		});
+
+		bridge.cdpClosed(ownerConn);
+		ack(bridge, ext2, "send");
+		await waitFor(() => ext2.rpcs("send").length === 2, "accepted encodings cleanup");
+		expect(ext2.rpcs("send")[1]).toMatchObject({
+			method: "Network.clearAcceptedEncodings",
+		});
+		ack(bridge, ext2, "send");
+		await flush();
+
+		const commandId = ++msgSeq;
+		bridge.cdpMessage(
+			holderConn,
+			JSON.stringify({ id: commandId, sessionId: holderSession, method: "Network.getCookies" }),
+		);
+		await waitFor(() => ext2.rpcs("send").length === 3, "holder command after accepted encodings cleanup");
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual([
+			"Network.setAcceptedEncodings",
+			"Network.clearAcceptedEncodings",
+			"Network.getCookies",
+		]);
+		ack(bridge, ext2, "send", { cookies: [] });
+		await flush();
+		expect(holder.messages.filter(message => message.id === commandId && "result" in message)).toHaveLength(1);
 	});
 
 	it("drops idle override clears before recovery", async () => {
@@ -4301,6 +4474,28 @@ describe("RelayBridge attachment release", () => {
 				message => message.sessionId === sessionId && message.method === "Runtime.executionContextCreated",
 			),
 		).toEqual(received);
+	});
+
+	it("treats DevTools replacement detaches as user takeovers", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		await attachPage(bridge, ext, cdp, connId, 1);
+
+		bridge.extClosed(ext);
+
+		const ext2 = new FakeExtSocket();
+		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], { recoverableTabIds: [1] });
+		await flush();
+		expect(ext2.rpcs("attach")).toHaveLength(1);
+
+		// DevTools taking over the debugger is a real user takeover, not an
+		// internal guard detach, so the preserved session must be retracted.
+		bridge.extMessage(ext2, JSON.stringify({ t: "detached", tabId: 1, reason: "replaced_with_devtools" }));
+		await flush();
+		expect(cdp.messages.some(message => message.method === "Target.detachedFromTarget")).toBe(true);
 	});
 
 	it("holds a pipelined duplicate Runtime.enable until the in-flight enable settles", async () => {

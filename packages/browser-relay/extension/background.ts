@@ -576,7 +576,8 @@ chrome.debugger.onDetach.addListener((source, reason) => {
 	// attachment, so clear any stale guard/recovery bit and report it as a real
 	// user detach (which bans the tab) instead of silently reattaching it.
 	const guardMarked = guardDetachments.delete(source.tabId);
-	if (guardMarked && reason !== "canceled_by_user") {
+	const userDetach = reason === "canceled_by_user" || reason === "replaced_with_devtools";
+	if (guardMarked && !userDetach) {
 		// A reconnect can win the race with the asynchronous guard detach. Do not
 		// report it as a user detach (which bans the tab); refresh hello so the
 		// relay can restore only this guard-authorized attachment. Coalesce with
