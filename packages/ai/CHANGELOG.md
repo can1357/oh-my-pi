@@ -12,6 +12,7 @@
 - Devin router models (`compat.modelRouter`, e.g. `adaptive`) now resolve through `AssignModel` before chatting: the provider sends the current user prompt with the turn's cascade id, then issues `GetChatMessage` with the assigned model uid and its assignment JWT. The router uid is never sent as `chatModelUid`, and a missing assignment fails the turn instead of silently degrading ([#8590](https://github.com/can1357/oh-my-pi/pull/8590) by [@will-bogusz](https://github.com/will-bogusz)).
 - Devin responses surface credit metering on `usage.credits` (`cost`, `committedCost`, `acuCost`) and the concrete routed model on `upstreamModel` (assigned uid, replaced by the response's `actualModelUid` when reported) ([#8590](https://github.com/can1357/oh-my-pi/pull/8590) by [@will-bogusz](https://github.com/will-bogusz)).
 - Devin accounts report plan and credit usage in `/usage` through a new `devin` usage provider backed by `SeatManagementService/GetUserStatus`: prompt/flow/flex credit balances against the plan period, daily and weekly quota percent windows with their reset timestamps, plan tier, overage balance, and account/org identity. Credit-billed plans (no dated quota window) surface credits only ([#8590](https://github.com/can1357/oh-my-pi/pull/8590) by [@will-bogusz](https://github.com/will-bogusz)).
+- Added a "Get API key" device-authorization login for the AIML API provider (RFC 8628): selecting AIML API in `/login` starts a device authorization, opens a browser consent link, and polls until the user approves, then stores the minted API key — no manual key paste required.
 
 ### Changed
 
@@ -19,6 +20,8 @@
 - Updated Devin auth, assignment, chat, and usage requests to the current released CLI identity, version `3000.6.2` ([#8590](https://github.com/can1357/oh-my-pi/pull/8590) by [@will-bogusz](https://github.com/will-bogusz)).
 - Devin auth, model assignment, and chat requests now send the native Devin CLI identity (`ideName: devin-cli`, `ideType: chisel`, `extensionName: chisel`, mapped `os`) instead of the Windsurf IDE identity; `ideType: chisel` is what the backend requires for router assignment ([#8590](https://github.com/can1357/oh-my-pi/pull/8590) by [@will-bogusz](https://github.com/will-bogusz)).
 - Devin parallel tool calls follow `compat.supportsParallelToolCalls` instead of being disabled unconditionally, so natively discovered configs that support parallelism can use it ([#8590](https://github.com/can1357/oh-my-pi/pull/8590) by [@will-bogusz](https://github.com/will-bogusz)).
+- AIML API requests now carry client attribution headers (`X-AIMLAPI-Source`, `X-AIMLAPI-Partner-ID`) on inference calls.
+- Moved AIML API to the top of the interactive `/login` provider list.
 
 ## [18.0.11] - 2026-08-29
 

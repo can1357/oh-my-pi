@@ -44,6 +44,10 @@ class CopyablePromptInput implements Component, Focusable {
 		this.#input.setUseTerminalCursor(useTerminalCursor);
 	}
 
+	setValue(value: string): void {
+		this.#input.setValue(value);
+	}
+
 	render(width: number): readonly string[] {
 		return this.#input.render(width);
 	}
@@ -65,6 +69,8 @@ interface PromptState {
 	message: string;
 	placeholder?: string;
 	input: CopyablePromptInput;
+	/** Success line rendered under the field once a flow auto-fills it (see #autofillPrompt). */
+	successMessage?: string;
 }
 
 /**
@@ -81,6 +87,8 @@ export class SignInTab implements SetupTab {
 	#statusLines: string[] = [];
 	#authUrl: string | undefined;
 	#authLaunchUrl: string | undefined;
+	/** onAuth instructions, rendered right under the login URL they reference (not in #statusLines). */
+	#authInstructions: string[] = [];
 	#prompt: PromptState | undefined;
 	#promptResolve: ((value: string) => void) | undefined;
 	#loginAbort: AbortController | undefined;
@@ -157,12 +165,20 @@ export class SignInTab implements SetupTab {
 				lines.push(theme.fg("dim", `Local shortcut (this machine only): ${this.#authLaunchUrl}`));
 			}
 		}
+		// Auth instructions belong right under the URL they reference ("Sign in via
+		// the link above…"), separated by a blank line, before any paste field.
+		if (this.#authUrl && this.#authInstructions.length > 0) {
+			lines.push("", ...this.#authInstructions.flatMap(line => wrapTextWithAnsi(line, width)));
+		}
 		if (this.#prompt) {
-			lines.push(theme.fg("warning", this.#prompt.message));
+			lines.push("", theme.fg("warning", this.#prompt.message));
 			if (this.#prompt.placeholder) {
 				lines.push(theme.fg("dim", this.#prompt.placeholder));
 			}
 			lines.push(this.#prompt.input.render(width)[0] ?? "");
+			if (this.#prompt.successMessage) {
+				lines.push(this.#prompt.successMessage);
+			}
 		}
 		if (urlLines.length > 2) {
 			lines.push(...urlLines);
@@ -193,6 +209,7 @@ export class SignInTab implements SetupTab {
 		this.#statusLines = [theme.fg("dim", "Starting OAuth flow…")];
 		this.#authUrl = undefined;
 		this.#authLaunchUrl = undefined;
+		this.#authInstructions = [];
 		this.#loginAbort = new AbortController();
 		this.host.restoreFocus();
 		this.host.requestRender();
@@ -212,17 +229,21 @@ export class SignInTab implements SetupTab {
 					this.#authUrl = info.url;
 					this.#authLaunchUrl = info.launchUrl && info.launchUrl !== info.url ? info.launchUrl : undefined;
 					this.#statusLines = [];
+					this.#authInstructions = [];
 					if (info.instructions) {
-						this.#statusLines.push(theme.fg("warning", info.instructions));
+						this.#authInstructions.push(theme.fg("warning", info.instructions));
 					}
 					if (useManualInput) {
-						this.#statusLines.push(theme.fg("dim", "Paste the returned code or redirect URL when prompted."));
+						this.#authInstructions.push(
+							theme.fg("dim", "Paste the returned code or redirect URL when prompted."),
+						);
 					}
 					void this.#copyAuthUrl();
 					this.host.ctx.openInBrowser(info.url);
 					this.host.requestRender();
 				},
 				onPrompt: prompt => this.#showPrompt(prompt),
+				onPromptResolve: (value, message) => this.#autofillPrompt(value, message),
 				onProgress: message => {
 					this.#statusLines.push(theme.fg("dim", message));
 					this.host.requestRender();
@@ -242,6 +263,7 @@ export class SignInTab implements SetupTab {
 			this.#authLaunchUrl = undefined;
 			this.#loggingInProvider = undefined;
 			this.#loginAbort = undefined;
+			this.#clearPrompt();
 			this.#selector.stopValidation();
 			this.#selector = this.#createSelector();
 			this.host.restoreFocus();
@@ -263,6 +285,7 @@ export class SignInTab implements SetupTab {
 			}
 			this.#loggingInProvider = undefined;
 			this.#loginAbort = undefined;
+			this.#clearPrompt();
 			this.host.restoreFocus();
 			this.host.requestRender();
 		}
@@ -308,5 +331,32 @@ export class SignInTab implements SetupTab {
 		this.host.restoreFocus();
 		resolve(value);
 		this.host.requestRender();
+	}
+
+	/**
+	 * Fill and resolve the active paste field from the flow side (a concurrent
+	 * browser flow obtained the key itself). Unlike {@link #resolvePrompt} the
+	 * field is kept rendered — now showing the key and a green success line —
+	 * until the login teardown clears it, so the user sees what was generated.
+	 */
+	#autofillPrompt(value: string, message?: string): void {
+		const prompt = this.#prompt;
+		const resolve = this.#promptResolve;
+		if (!prompt || !resolve) return;
+		prompt.input.setValue(value);
+		// Bold accent, not success/green: a green theme would wash a green line out;
+		// bold accent reads as a clear confirmation and stays legible on every theme.
+		prompt.successMessage = theme.bold(theme.fg("accent", message ?? "Your API key was generated and added above."));
+		this.#promptResolve = undefined;
+		this.host.restoreFocus();
+		resolve(value);
+		this.host.requestRender();
+	}
+
+	/** Tear down any prompt state (including an auto-filled, already-resolved field). */
+	#clearPrompt(): void {
+		this.#resolvePrompt("");
+		this.#prompt = undefined;
+		this.#promptResolve = undefined;
 	}
 }

@@ -75,6 +75,17 @@ export interface OAuthController {
 	onProgress?(message: string): void;
 	onManualCodeInput?(): Promise<string>;
 	onPrompt?(prompt: OAuthPrompt): Promise<string>;
+	/**
+	 * Fill and resolve the active {@link onPrompt} field from the flow side.
+	 *
+	 * For flows that render a manual paste field ({@link onPrompt}) *and* run a
+	 * concurrent browser flow that can mint the value itself (e.g. AIML API's
+	 * device grant): when the browser side wins, the flow calls this to drop the
+	 * obtained `value` into the visible input, show `message` as a success line
+	 * beneath it, and resolve the pending `onPrompt` promise with `value` — so
+	 * the user gets their key without typing. No-op when no prompt is active.
+	 */
+	onPromptResolve?(value: string, message?: string): void;
 	signal?: AbortSignal;
 	fetch?: FetchImpl;
 }

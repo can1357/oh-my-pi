@@ -15,6 +15,9 @@
 - Devin discovery now announces the native `chisel` client and display slots, filters internal configs, reads server pricing/capability/output-limit metadata, exposes the router config as `adaptive`, and collapses server-declared effort families onto each family's native default wire uid ([#8590](https://github.com/can1357/oh-my-pi/pull/8590) by [@will-bogusz](https://github.com/will-bogusz)).
 - Added Devin selector aliases for the native short and dotted model names, plus static SWE-1.6 seeds so the provider default resolves before credential-scoped discovery runs ([#8590](https://github.com/can1357/oh-my-pi/pull/8590) by [@will-bogusz](https://github.com/will-bogusz)).
 - Added optional `description`, `isNew`, `isBeta`, and `isRecommended` model metadata, populated from Devin's `GetCliModelConfigs` so discovered Cascade models keep the server's blurb and badges ([#8590](https://github.com/can1357/oh-my-pi/pull/8590) by [@will-bogusz](https://github.com/will-bogusz)).
+- AIML API model discovery now surfaces per-model **pricing** and **modalities** (via `/v1/models?include=pricing,modalities`), so cost and vision render instead of "Free"/text-only, and populates friendly model names and context/output limits from the catalog.
+- AIML API model list is now **chat (LLM) models only** and ordered with **featured models first**, then the rest, alphabetically within each group.
+- Seeded the AIML API default model (`openai/gpt-5-5`) so a fresh install resolves the provider default before credentialed discovery runs; the bundled slice predates AI/ML API's vendor-prefixed model ids.
 
 ### Fixed
 
@@ -25,10 +28,15 @@
 - Fixed native Devin families with independent Thinking and 1M Context axes losing wire variants or advertising the wrong context window; each context lane now preserves its complete off/effort routing and server-selected default ([#8590](https://github.com/can1357/oh-my-pi/pull/8590) by [@will-bogusz](https://github.com/will-bogusz)).
 - Stripped the image modality from Devin's `swe-1-6`/`swe-1-6-fast`: their configs advertise `supports_images` but the backend silently drops inline images (verified live against every other Cascade model), so clients now engage their text-only image fallback instead of losing attachments ([#6072](https://github.com/can1357/oh-my-pi/issues/6072)).
 - Devin discovery now logs a warning when the backend returns an empty native catalog, the failure signature of a stale pinned CLI identity ([#8590](https://github.com/can1357/oh-my-pi/pull/8590) by [@will-bogusz](https://github.com/will-bogusz)).
+- Corrected the AIML API default model to a real catalog id (`openai/gpt-5-5`); the previous value used a bare alias that didn't match AIML API's namespaced model ids, so the provider default silently fell back to the first available model.
+
 ### Changed
 
 - Variant collapse moved to `@oh-my-pi/pi-catalog/compat/collapse` with a consolidated API (`collapseVariants`/`collapseBuiltVariants`/`resolveVariantSelector`/`resolveBareVariantSelector`/`isCollapsedVariantSpec`); the reviewed per-provider families (Antigravity, Gemini CLI, Devin, Cursor) are authored in `_collapse.kdl` and compiled, not hand-written tables.
 - The identity surface is rebuilt around `classifyModel`/`ModelIdentity`: version floors, family checks, and capability predicates resolve from structured identity and rules instead of id regexes, and trailing-marker/thinking-pair vocabularies are compiled from the rule tree.
+- AIML API model-discovery requests now carry client attribution headers (`X-AIMLAPI-Source`, `X-AIMLAPI-Partner-ID`).
+- AIML API base URL (model discovery + inference) is overridable via the `AIMLAPI_INFERENCE_URL` environment variable (defaults to `https://api.aimlapi.com/v1`); the model cache is keyed by this base URL so switching it serves a fresh model list.
+- `fetchOpenAICompatibleModels` accepts an optional `query` to append parameters to the `/models` request URL.
 
 ### Removed
 

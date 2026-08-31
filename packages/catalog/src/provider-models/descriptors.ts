@@ -80,7 +80,7 @@ export const CATALOG_PROVIDERS = [
 	},
 	{
 		id: "aimlapi",
-		defaultModel: "gpt-5.5-2026-04-23",
+		defaultModel: "openai/gpt-5-5",
 		envVars: ["AIMLAPI_API_KEY"],
 		createModelManagerOptions: (config: ModelManagerConfig) => aimlApiModelManagerOptions(config),
 		dynamicModelsAuthoritative: true,

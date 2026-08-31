@@ -17,6 +17,8 @@
 
 ### Fixed
 
+- The AIML API "Get API key" sign-in now renders an API-key paste field alongside the browser device flow: the first key wins, a browser-minted key auto-fills the visible field with a confirmation line (via the new optional `OAuthController.onPromptResolve` callback), a manually pasted key is validated before being accepted, and auth instructions render directly under the login URL they reference.
+- Fixed `import numpy` (and other native-extension imports) hanging indefinitely in the Python eval tool on Windows, where the runner's always-on background stdin reader deadlocked native DLL loading; Windows now reads the control channel serially between requests while POSIX keeps concurrent request dispatch ([#7985](https://github.com/can1357/oh-my-pi/issues/7985)).
 - Fixed an issue where custom model overrides were lost during configuration updates
 - Fixed "Please use nerdfont" notification incorrectly persisting after theme configuration
 - Fixed sampling parameter errors for newer Anthropic models (Opus 4.7+, Sonnet 5+)

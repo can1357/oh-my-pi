@@ -1,6 +1,7 @@
 import type { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { resolveWireModelId } from "@oh-my-pi/pi-catalog/model-thinking";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
+import { getAimlApiCommonHeaders } from "@oh-my-pi/pi-catalog/provider-models/aimlapi";
 import type { ResolvedOpenAICompat } from "@oh-my-pi/pi-catalog/types";
 import { clinePassClientHeaders } from "@oh-my-pi/pi-catalog/wire/cline-pass";
 import { $env, logger, parseStreamingJson, parseStreamingJsonThrottled } from "@oh-my-pi/pi-utils";
@@ -1519,16 +1520,20 @@ function createRequestSetup(
 		promptCacheSessionId,
 		messages: context.messages,
 		defaultBaseUrl: "https://api.openai.com/v1",
-		// Provider auth/header overlay: Kimi-code hosts require shared client
+		// Provider auth/header overlay: some hosts require shared client
 		// attribution headers prepended before caller headers. Kept here (not in
 		// the shared helper) because it is provider-specific request setup.
-		// ClinePass sends the mirrored Cline CLI identity; documented in wire/cline-pass.ts.
+		// - Kimi-code: device/platform identification headers.
+		// - ClinePass sends the mirrored Cline CLI identity; documented in wire/cline-pass.ts.
+		// - AIML API: client source + partner id for request attribution.
 		prependHeaders:
 			model.provider === "kimi-code"
 				? getKimiCommonHeaders
 				: model.provider === "cline-pass"
 					? () => clinePassClientHeaders(promptCacheSessionId)
-					: undefined,
+					: model.provider === "aimlapi"
+						? getAimlApiCommonHeaders
+						: undefined,
 		alibabaCodingPlanAuth: true,
 		azureChatCompletions: { apiVersion, deploymentName },
 	});

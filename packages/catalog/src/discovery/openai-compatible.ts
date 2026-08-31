@@ -106,6 +106,8 @@ export interface FetchOpenAICompatibleModelsOptions<TApi extends Api> {
 	apiKey?: string;
 	/** Additional request headers. */
 	headers?: Record<string, string>;
+	/** Optional query parameters appended to the `/models` request URL. */
+	query?: Record<string, string>;
 	/** Optional AbortSignal for request cancellation; caller owns its lifecycle. */
 	signal?: AbortSignal;
 	/**
@@ -154,11 +156,14 @@ export async function fetchOpenAICompatibleModels<TApi extends Api>(
 		requestHeaders.Authorization = `Bearer ${options.apiKey}`;
 	}
 
+	const queryString = options.query ? new URLSearchParams(options.query).toString() : "";
+	const modelsUrl = queryString ? `${baseUrl}${MODELS_PATH}?${queryString}` : `${baseUrl}${MODELS_PATH}`;
+
 	const fetchImpl = discoveryFetch(options.fetch);
 	const fetchPayload = async (signal?: AbortSignal): Promise<unknown | null> => {
 		let response: Response;
 		try {
-			response = await fetchImpl(`${baseUrl}${MODELS_PATH}`, {
+			response = await fetchImpl(modelsUrl, {
 				method: "GET",
 				headers: requestHeaders,
 				signal,
