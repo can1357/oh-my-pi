@@ -2344,8 +2344,9 @@ export class TurnRecovery {
 				// outer empty-stop cap (sole auto_retry_end). Ordinary hardErrorFallback
 				// callers have no such owner and must settle here.
 				if (options?.deferTerminalSettlement) {
-					this.#retryAttempt = 0;
-					this.resolveRetry();
+					// Outer empty-stop cap owns terminal settlement (`auto_retry_end`,
+					// `#retryAttempt` reset, and `resolveRetry()`). Clearing here races
+					// `#waitForPostPromptRecovery()` ahead of that owner.
 					return false;
 				}
 				const attempt = this.#retryAttempt - 1;
