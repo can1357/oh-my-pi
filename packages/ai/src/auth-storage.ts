@@ -4736,6 +4736,18 @@ export class AuthStorage {
 		return this.#credentialIncarnation.get(credentialId) ?? 1;
 	}
 
+	/**
+	 * Drop an inflight quota probe for `requestId` without clearing cooldown.
+	 * Call when the attempt is abandoned (abort / 5xx / fallback) so a later
+	 * request can acquire a fresh lease.
+	 */
+	clearQuotaProbe(requestId: string): void {
+		const probe = this.#inflightProbes.get(requestId);
+		if (!probe) return;
+		this.#inflightProbes.delete(requestId);
+		this.#probeLeases.release(probe.credentialId, probe.blockScope, probe.leaseId);
+	}
+
 	settleQuotaProbeSuccess(requestId: string): boolean {
 		const probe = this.#inflightProbes.get(requestId);
 		if (!probe) return false;
@@ -5527,6 +5539,10 @@ export class AuthStorage {
 			allowFallback?: boolean;
 		},
 	): Promise<OAuthResolutionResult | undefined> {
+		// Hold any probe lease until success, or release on every abandon path so a
+		// later request is not denied a probe until process restart.
+		let keepProbe = false;
+		try {
 		const {
 			checkUsage,
 			allowBlocked,
@@ -5573,6 +5589,8 @@ export class AuthStorage {
 				}
 				const lease = this.tryAcquireQuotaProbeLease(blockedId, probeScope);
 				if (!lease) return undefined;
+				// Replace any prior inflight probe for this request without treating it as success.
+				this.clearQuotaProbe(options.requestId);
 				this.#inflightProbes.set(options.requestId, {
 					credentialId: blockedId,
 					blockScope: probeScope,
@@ -5584,6 +5602,7 @@ export class AuthStorage {
 				if (!options?.requestId) return undefined;
 				const lease = this.tryAcquireQuotaProbeLease(blockedId, probeScope);
 				if (!lease) return undefined;
+				this.clearQuotaProbe(options.requestId);
 				this.#inflightProbes.set(options.requestId, {
 					credentialId: blockedId,
 					blockScope: probeScope,
@@ -5718,6 +5737,7 @@ export class AuthStorage {
 			}
 			this.#recordOAuthBearerCredentialId(provider, result.apiKey, credentialId);
 			this.#recordSessionCredential(provider, sessionId, "oauth", selection.index);
+			keepProbe = true;
 			return { apiKey: result.apiKey, credential: updated, credentialId };
 		} catch (error) {
 			const errorMsg = String(error);
@@ -5741,12 +5761,20 @@ export class AuthStorage {
 					errorMsg,
 				);
 				if (outcome === "peer-rotated") {
-					if (allowFallback) return this.#resolveOAuthSelection(provider, sessionId, options);
+					if (allowFallback) {
+						if (options?.requestId) this.clearQuotaProbe(options.requestId);
+						keepProbe = true;
+						return this.#resolveOAuthSelection(provider, sessionId, options);
+					}
 					return undefined;
 				}
 				if (outcome === "cas-lost") return undefined;
 				if (this.#getCredentialsForProvider(provider).some(credential => credential.type === "oauth")) {
-					if (allowFallback) return this.#resolveOAuthSelection(provider, sessionId, options);
+					if (allowFallback) {
+						if (options?.requestId) this.clearQuotaProbe(options.requestId);
+						keepProbe = true;
+						return this.#resolveOAuthSelection(provider, sessionId, options);
+					}
 				}
 			} else {
 				// Block temporarily for transient failures (5 minutes)
@@ -5760,6 +5788,11 @@ export class AuthStorage {
 		}
 
 		return undefined;
+		} finally {
+			if (!keepProbe && options?.requestId) {
+				this.clearQuotaProbe(options.requestId);
+			}
+		}
 	}
 
 	/**

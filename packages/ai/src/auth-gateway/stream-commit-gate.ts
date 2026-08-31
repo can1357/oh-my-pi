@@ -29,6 +29,7 @@ export class StreamCommitGate {
 	#maxPreludeBytes: number;
 	#prelude: Uint8Array[] = [];
 	#preludeBytes = 0;
+	#sawSuccessfulTerminal = false;
 
 	constructor(maxPreludeBytes: number = DEFAULT_MAX_PRELUDE_BYTES) {
 		this.#maxPreludeBytes = maxPreludeBytes;
@@ -38,12 +39,17 @@ export class StreamCommitGate {
 		return this.#state;
 	}
 
+	get sawSuccessfulTerminal(): boolean {
+		return this.#sawSuccessfulTerminal;
+	}
+
 	/** Reset to probing for the next fallback attempt (clears prelude). */
 	reset(): void {
 		this.#state = "probing";
 		this.#bytes = 0;
 		this.#prelude = [];
 		this.#preludeBytes = 0;
+		this.#sawSuccessfulTerminal = false;
 	}
 
 	classifyAndObserve(eventType: string, byteLength: number): StreamCommitState {
@@ -58,6 +64,7 @@ export class StreamCommitGate {
 		}
 
 		const kind = classifyCommitEvent(eventType);
+		if (kind === "terminal-success") this.#sawSuccessfulTerminal = true;
 		if (this.#state === "committed") {
 			// Post-commit, every terminal event ends the stream's failover
 			// eligibility — including `response.failed` (retryable elsewhere),

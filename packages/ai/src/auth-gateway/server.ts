@@ -241,6 +241,7 @@ async function refreshGatewayApiKeyAfterAuthError(
 	signal: AbortSignal,
 	format: string,
 	peer: string,
+	requestId: string,
 ): Promise<string | undefined> {
 	const message = error instanceof Error ? error.message : String(error);
 	const status = extractHttpStatusFromError(error);
@@ -263,7 +264,7 @@ async function refreshGatewayApiKeyAfterAuthError(
 			error: message,
 		});
 		if (!switched) return undefined;
-		return storage.getApiKey(provider, sessionId, { modelId: model.id, signal });
+		return storage.getApiKey(provider, sessionId, { modelId: model.id, signal, requestId });
 	}
 	await storage.invalidateCredentialMatching(provider, oldKey, { sessionId, signal });
 	logger.debug("auth-gateway retrying provider request after credential invalidation", {
@@ -272,7 +273,7 @@ async function refreshGatewayApiKeyAfterAuthError(
 		peer,
 		error: message,
 	});
-	return storage.getApiKey(provider, sessionId, { modelId: model.id, signal });
+	return storage.getApiKey(provider, sessionId, { modelId: model.id, signal, requestId });
 }
 
 /**
@@ -296,6 +297,7 @@ function buildGatewayApiKeyResolver(
 	requestSignal: AbortSignal,
 	format: string,
 	peer: string,
+	requestId: string,
 ): ApiKeyResolver {
 	let lastKey = initialKey;
 	return async ({ lastChance, error, signal }) => {
@@ -309,6 +311,7 @@ function buildGatewayApiKeyResolver(
 				modelId: model.id,
 				signal: sig,
 				forceRefresh: true,
+				requestId,
 			});
 			lastKey = refreshed ?? lastKey;
 			return refreshed;
@@ -323,6 +326,7 @@ function buildGatewayApiKeyResolver(
 			sig,
 			format,
 			peer,
+			requestId,
 		);
 		lastKey = next ?? lastKey;
 		return next;
@@ -369,6 +373,57 @@ function mirrorRequestAbort(req: Request): AbortController {
 }
 
 // (handlePassthrough removed — see note above.)
+
+/** Wrap an SSE body so quota-probe leases settle on success or release on abandon. */
+export function releaseProbeOnStreamEnd(
+	stream: ReadableStream<Uint8Array>,
+	storage: AuthStorage,
+	requestId: string,
+	commitGate?: StreamCommitGate,
+): ReadableStream<Uint8Array> {
+	const reader = stream.getReader();
+	let released = false;
+	const release = (settleProbe: boolean): void => {
+		if (released) return;
+		released = true;
+		// Settle only on successful completion evidence:
+		// - committed streams (output observed or foreign commit)
+		// - successful terminals (empty completed responses)
+		// - still-probing gates that never saw SSE (foreign formats without onSseEvent)
+		// Never settle undefined gates (callers must attach a gate) or failed terminals.
+		if (
+			settleProbe &&
+			commitGate !== undefined &&
+			(commitGate.state === "committed" ||
+				commitGate.state === "probing" ||
+				(commitGate.state === "terminated" && commitGate.sawSuccessfulTerminal))
+		) {
+			storage.settleQuotaProbeSuccess(requestId);
+		}
+		storage.clearQuotaProbe(requestId);
+	};
+	return new ReadableStream({
+		async pull(controller) {
+			try {
+				const { done, value } = await reader.read();
+				if (done) {
+					release(true);
+					controller.close();
+					return;
+				}
+				controller.enqueue(value);
+			} catch (error) {
+				release(false);
+				controller.error(error);
+			}
+		},
+		cancel(reason) {
+			release(false);
+			return reader.cancel(reason);
+		},
+	});
+}
+
 
 async function handleFormatEndpoint(
 	route: { module: FormatModule; label: string },
@@ -472,14 +527,22 @@ async function handleFormatEndpoint(
 		apiKey = await bootOpts.storage.getApiKey(model.provider, sessionId, {
 			modelId: model.id,
 			signal: controller.signal,
+			requestId,
 		});
 	} catch (error) {
-		if (controller.signal.aborted) return clientClosedResponse(route);
+		if (controller.signal.aborted) {
+			bootOpts.storage.clearQuotaProbe(requestId);
+			return clientClosedResponse(route);
+		}
 		const classified = classifyGatewayError(error);
 		logger.warn("auth-gateway getApiKey threw", { provider: model.provider, peer, error: classified.message });
+		bootOpts.storage.clearQuotaProbe(requestId);
 		return route.module.formatError(classified.status, classified.type, classified.message);
 	}
-	if (controller.signal.aborted) return clientClosedResponse(route);
+	if (controller.signal.aborted) {
+		bootOpts.storage.clearQuotaProbe(requestId);
+		return clientClosedResponse(route);
+	}
 	const traces = bootOpts.decisionTraces ?? new RouteDecisionTraceLog();
 	if (!apiKey) {
 		const skipped = traces.record({
@@ -491,6 +554,7 @@ async function handleFormatEndpoint(
 			reason: "credential_unavailable",
 		});
 		logger.debug("auth-gateway route decision", redactedDecisionSummary(skipped));
+		bootOpts.storage.clearQuotaProbe(requestId);
 		return route.module.formatError(
 			401,
 			"authentication_error",
@@ -515,6 +579,7 @@ async function handleFormatEndpoint(
 		controller.signal,
 		route.label,
 		peer,
+		requestId,
 	);
 	const commitGate = new StreamCommitGate();
 	// openai-responses wraps the downstream body in observeSseCommit. Feeding
@@ -570,6 +635,7 @@ async function handleFormatEndpoint(
 				const classified = classifyGatewayError(message.errorClassificationMessage ?? errorMessage);
 				return route.module.formatError(classified.status, classified.type, errorMessage);
 			}
+			bootOpts.storage.settleQuotaProbeSuccess(requestId);
 			return json(
 				200,
 				route.module.encodeResponse(message, parsed.modelId),
@@ -584,19 +650,28 @@ async function handleFormatEndpoint(
 				peer,
 			});
 			return route.module.formatError(classified.status, classified.type, classified.message);
+		} finally {
+			bootOpts.storage.clearQuotaProbe(requestId);
 		}
 	}
 
 	let events: AssistantMessageEventStream;
 	try {
-		if (controller.signal.aborted) return clientClosedResponse(route);
+		if (controller.signal.aborted) {
+			bootOpts.storage.clearQuotaProbe(requestId);
+			return clientClosedResponse(route);
+		}
 		events = streamSimple(model, parsed.context, streamOpts);
 	} catch (error) {
+		bootOpts.storage.clearQuotaProbe(requestId);
 		const classified = classifyGatewayError(error);
 		logger.warn("auth-gateway streamSimple threw", { format: route.label, error: classified.message, peer });
 		return route.module.formatError(classified.status, classified.type, classified.message);
 	}
-	if (controller.signal.aborted) return clientClosedResponse(route);
+	if (controller.signal.aborted) {
+		bootOpts.storage.clearQuotaProbe(requestId);
+		return clientClosedResponse(route);
+	}
 	void events
 		.result()
 		.then(message => recordGatewayUsage(bootOpts.storage, model, client, message))
@@ -613,6 +688,7 @@ async function handleFormatEndpoint(
 	if (route.label === "openai-responses") {
 		sseStream = observeSseCommit(sseStream, commitGate);
 	}
+	sseStream = releaseProbeOnStreamEnd(sseStream, bootOpts.storage, requestId, commitGate);
 	return new Response(sseStream, {
 		status: 200,
 		headers: {
@@ -689,14 +765,22 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 		apiKey = await bootOpts.storage.getApiKey(model.provider, sessionId, {
 			modelId: model.id,
 			signal: controller.signal,
+			requestId,
 		});
 	} catch (error) {
-		if (controller.signal.aborted) return aborted();
+		if (controller.signal.aborted) {
+			bootOpts.storage.clearQuotaProbe(requestId);
+			return aborted();
+		}
 		const classified = classifyGatewayError(error);
 		logger.warn("auth-gateway getApiKey threw", { provider: model.provider, peer, error: classified.message });
+		bootOpts.storage.clearQuotaProbe(requestId);
 		return piNative.formatError(classified.status, classified.type, classified.message);
 	}
-	if (controller.signal.aborted) return aborted();
+	if (controller.signal.aborted) {
+		bootOpts.storage.clearQuotaProbe(requestId);
+		return aborted();
+	}
 	const traces = bootOpts.decisionTraces ?? new RouteDecisionTraceLog();
 	if (!apiKey) {
 		const skipped = traces.record({
@@ -708,6 +792,7 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 			reason: "credential_unavailable",
 		});
 		logger.debug("auth-gateway route decision", redactedDecisionSummary(skipped));
+		bootOpts.storage.clearQuotaProbe(requestId);
 		return piNative.formatError(
 			401,
 			"authentication_error",
@@ -736,6 +821,7 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 		controller.signal,
 		"pi-native",
 		peer,
+		requestId,
 	);
 	if (model.api === "openai-codex-responses") {
 		delete streamOpts.temperature;
@@ -784,31 +870,41 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 				const classified = classifyGatewayError(message.errorClassificationMessage ?? errorMessage);
 				return piNative.formatError(classified.status, classified.type, errorMessage);
 			}
+			bootOpts.storage.settleQuotaProbeSuccess(requestId);
 			return json(200, { message }, gatewayResponseHeaders(model, { requestId, message, startedAt }));
 		} catch (error) {
 			if (controller.signal.aborted) return aborted();
 			const classified = classifyGatewayError(error);
 			logger.warn("auth-gateway non-streaming aborted", { format: "pi-native", error: classified.message, peer });
 			return piNative.formatError(classified.status, classified.type, classified.message);
+		} finally {
+			bootOpts.storage.clearQuotaProbe(requestId);
 		}
 	}
 
 	let events: AssistantMessageEventStream;
 	try {
-		if (controller.signal.aborted) return aborted();
+		if (controller.signal.aborted) {
+			bootOpts.storage.clearQuotaProbe(requestId);
+			return aborted();
+		}
 		events = streamSimple(model, parsed.context, streamOpts);
 	} catch (error) {
+		bootOpts.storage.clearQuotaProbe(requestId);
 		const classified = classifyGatewayError(error);
 		logger.warn("auth-gateway streamSimple threw", { format: "pi-native", error: classified.message, peer });
 		return piNative.formatError(classified.status, classified.type, classified.message);
 	}
-	if (controller.signal.aborted) return aborted();
+	if (controller.signal.aborted) {
+		bootOpts.storage.clearQuotaProbe(requestId);
+		return aborted();
+	}
 	void events
 		.result()
 		.then(message => recordGatewayUsage(bootOpts.storage, model, client, message))
 		.catch(() => {});
 
-	const sseStream = piNative.encodeStream(events, parsed.modelId, parsed.options, {
+	let sseStream = piNative.encodeStream(events, parsed.modelId, parsed.options, {
 		signal: controller.signal,
 		onCancel: reason => {
 			if (!controller.signal.aborted) {
@@ -816,6 +912,21 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 			}
 		},
 	});
+	const piCommitGate = new StreamCommitGate();
+	void events
+		.result()
+		.then(message => {
+			if (message.stopReason === "error" || message.stopReason === "aborted") {
+				piCommitGate.classifyAndObserve("response.failed", 1);
+			} else {
+				piCommitGate.classifyAndObserve("response.output_text.delta", 1);
+				piCommitGate.classifyAndObserve("response.completed", 1);
+			}
+		})
+		.catch(() => {
+			piCommitGate.classifyAndObserve("response.failed", 1);
+		});
+	sseStream = releaseProbeOnStreamEnd(sseStream, bootOpts.storage, requestId, piCommitGate);
 	return new Response(sseStream, {
 		status: 200,
 		headers: {

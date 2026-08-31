@@ -109,4 +109,17 @@ describe("AuthStorage quota probe leases", () => {
 		expect(storage.tryAcquireQuotaProbeLease(idA, "")).toBeNull();
 		expect(storage.listStoredCredentials(PROVIDER).some(row => row.id === idA)).toBe(true);
 	});
+
+	it("clearQuotaProbe is a no-op for unknown request ids and frees nothing incorrectly", async () => {
+		if (!storage) throw new Error("setup failed");
+		const { idA } = await seed();
+		await storage.markUsageLimitReached(PROVIDER, undefined, { credentialId: idA });
+		const lease = storage.tryAcquireQuotaProbeLease(idA, "");
+		expect(typeof lease).toBe("string");
+		storage.clearQuotaProbe("never-acquired");
+		// Lease still held (clear only touches request-keyed inflight entries).
+		expect(storage.tryAcquireQuotaProbeLease(idA, "")).toBeNull();
+		expect(storage.settleQuotaProbeSuccess("never-acquired")).toBe(false);
+		expect(storage.recordQuotaProbeSuccess(idA, "", lease)).toBe(true);
+	});
 });
