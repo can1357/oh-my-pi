@@ -454,9 +454,13 @@ async function handleFormatEndpoint(
 	if (!compiled) {
 		return route.module.formatError(404, "invalid_request_error", `Unknown model: ${modelId}`);
 	}
-	const model = bootOpts.resolveModel(modelId);
-	if (!model) {
+	const firstTarget = compiled.targets[0];
+	if (!firstTarget) {
 		return route.module.formatError(404, "invalid_request_error", `Unknown model: ${modelId}`);
+	}
+	const model = bootOpts.resolveModel(firstTarget);
+	if (!model) {
+		return route.module.formatError(404, "invalid_request_error", `Unknown model: ${firstTarget}`);
 	}
 	const client = resolveClientIdentity(req.headers);
 
@@ -740,9 +744,13 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 	if (!compiled) {
 		return piNative.formatError(404, "invalid_request_error", `Unknown model: ${parsed.modelId}`);
 	}
-	const model = bootOpts.resolveModel(parsed.modelId);
-	if (!model) {
+	const firstTarget = compiled.targets[0];
+	if (!firstTarget) {
 		return piNative.formatError(404, "invalid_request_error", `Unknown model: ${parsed.modelId}`);
+	}
+	const model = bootOpts.resolveModel(firstTarget);
+	if (!model) {
+		return piNative.formatError(404, "invalid_request_error", `Unknown model: ${firstTarget}`);
 	}
 	const client = resolveClientIdentity(req.headers);
 	// Pi-native already parsed `streamOpts.sessionId` (when set by the

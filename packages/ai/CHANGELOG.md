@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Fixed
+- Fixed virtual route dispatch resolving `compiled.targets[0]`, and reacquiring turn reservations after broker prepare/incarnation bump.
 
 - Fixed suffix fallback edges, rejected ambiguous cross-branch target reuse, distinguished failed terminals for probe settlement, and released reservations on abort.
 - Fixed nested route-graph fallback edges retaining their entry target via `fallbackByTarget` so unentered branches cannot steal failover.
@@ -28,11 +29,6 @@
 - Devin auth, model assignment, and chat requests now send the native Devin CLI identity (`ideName: devin-cli`, `ideType: chisel`, `extensionName: chisel`, mapped `os`) instead of the Windsurf IDE identity; `ideType: chisel` is what the backend requires for router assignment ([#8590](https://github.com/can1357/oh-my-pi/pull/8590) by [@will-bogusz](https://github.com/will-bogusz)).
 - Devin parallel tool calls follow `compat.supportsParallelToolCalls` instead of being disabled unconditionally, so natively discovered configs that support parallelism can use it ([#8590](https://github.com/can1357/oh-my-pi/pull/8590) by [@will-bogusz](https://github.com/will-bogusz)).
 
-### Fixed
-
-- Fixed Cloudflare AI Gateway onboarding and routing so gateway account and endpoint configuration is preserved correctly while gateway credentials are not sent as upstream OpenAI authorization headers.
-
-
 ## [18.0.11] - 2026-08-29
 
 ### Fixed
@@ -49,6 +45,7 @@
 ### Fixed
 
 - Improved OAuth sign-in flows, including a fallback message when the browser cannot automatically close the OAuth success tab.
+- Fixed Cloudflare AI Gateway onboarding and routing so gateway account and endpoint configuration is preserved correctly while gateway credentials are not sent as upstream OpenAI authorization headers.
 - Fixed Codex OAuth quota handling so chat and Spark usage remain independent, legacy shared quota limits continue to work, and incomplete usage reports are not incorrectly treated as unlimited.
 
 ### Fixed
