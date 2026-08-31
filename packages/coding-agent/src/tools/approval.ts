@@ -2,11 +2,13 @@
  * Tool approval resolution.
  *
  * Approval policy is declared by each tool. This module only knows how to:
+ * - apply ordered user `tools.approvalRules` entries ahead of per-tool policy,
  * - normalize user `tools.approval.<tool>: allow | deny | prompt` overrides,
  * - compare a tool capability tier against the active approval mode,
  * - format the generic approval prompt body.
  */
 import type { AgentTool, ToolApprovalDecision, ToolTier } from "@oh-my-pi/pi-agent-core";
+import { findApprovalRule, normalizeApprovalRules } from "./approval-rules";
 
 export type { ToolApproval, ToolApprovalDecision, ToolTier } from "@oh-my-pi/pi-agent-core";
 
@@ -20,7 +22,7 @@ export interface ResolvedApproval {
 	tier: ToolTier;
 	reason?: string;
 	override: boolean;
-	source?: "tool" | "user" | "mode";
+	source?: "tool" | "user" | "mode" | "rule";
 	/** User-policy key that produced `source: "user"` (defaults to the tool name). */
 	policyKey?: string;
 }
@@ -105,14 +107,18 @@ function modeApprovesTier(mode: ApprovalMode, tier: ToolTier): boolean {
  * Resolve approval policy for a tool call.
  *
  * Resolution order:
- *  1. Tool `approval(args)` decision, defaulting to tier "exec" when omitted.
+ *  1. Ordered `tools.approvalRules` — the first rule whose tool matches (and,
+ *     for bash/write/edit, whose `match` glob hits the primary string arg)
+ *     wins outright, before any per-tool or mode-derived policy. Rules are
+ *     authoritative in every approval mode, including yolo.
+ *  2. Tool `approval(args)` decision, defaulting to tier "exec" when omitted.
  *     A decision may carry a `policyKey` — `tools.approval.<policyKey>` is then
  *     the user override consulted instead of `tools.approval.<tool.name>`, with
  *     the invoking tool's own policy as the fallback when the user set none for
  *     the keyed sub-tool (e.g. an `xd://` device dispatch without a device
  *     policy still honors `tools.approval.write`).
- *  2. User per-tool override, if set and valid.
- *  3. Active mode tier comparison.
+ *  3. User per-tool override, if set and valid.
+ *  4. Active mode tier comparison.
  *
  * In yolo mode, override-based tool prompts are ignored; user `tools.approval`
  * settings remain authoritative.
@@ -122,7 +128,22 @@ export function resolveApproval(
 	args: unknown,
 	mode: ApprovalMode,
 	userConfig: Record<string, unknown> = {},
+	approvalRulesConfig: unknown = [],
 ): ResolvedApproval {
+	const ruleHit = findApprovalRule(tool.name, args, normalizeApprovalRules(approvalRulesConfig));
+	if (ruleHit) {
+		const { rule, index } = ruleHit;
+		// A rule forces its approval regardless of tier, per-tool policy, or
+		// mode. `policyKey` identifies the rule for diagnostics/deny messages.
+		return {
+			policy: rule.approval,
+			tier: "exec",
+			override: true,
+			source: "rule",
+			policyKey: `tools.approvalRules[${index}]`,
+			...(rule.reason ? { reason: rule.reason } : {}),
+		};
+	}
 	const decision = getToolDecision(tool, args);
 	const policyKey = decision.policyKey ?? tool.name;
 	const userPolicy = Object.hasOwn(userConfig, policyKey) ? normalizePolicy(userConfig[policyKey]) : undefined;
@@ -219,12 +240,19 @@ export function resolveApproval(
 }
 
 /**
- * Error for a resolved deny. Distinguishes tool-owned policy from user config.
+ * Error for a resolved deny. Distinguishes tool-owned policy, approval-rule
+ * overrides, and user config.
  */
 export function denyError(resolved: ResolvedApproval, toolName: string): Error {
 	const { source, reason, policyKey } = resolved;
 	if (source === "tool") {
 		return new Error(`Tool "${toolName}" is blocked by tool policy.${reason ? `\nReason: ${reason}` : ""}`);
+	}
+	if (source === "rule") {
+		return new Error(
+			`Tool "${toolName}" is blocked by an approval rule.${reason ? `\nReason: ${reason}` : ""}\n` +
+				`To allow: remove or change the matching rule in "tools.approvalRules".`,
+		);
 	}
 	return new Error(
 		`Tool "${policyKey ?? toolName}" is blocked by user policy.\n` +
@@ -243,8 +271,9 @@ export function requiresApproval(
 	args: unknown,
 	mode: ApprovalMode,
 	userConfig: Record<string, unknown> = {},
+	approvalRulesConfig: unknown = [],
 ): { required: boolean; reason?: string } {
-	const resolved = resolveApproval(tool, args, mode, userConfig);
+	const resolved = resolveApproval(tool, args, mode, userConfig, approvalRulesConfig);
 	const { policy, reason } = resolved;
 
 	if (policy === "deny") {

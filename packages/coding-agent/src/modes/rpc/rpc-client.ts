@@ -12,6 +12,7 @@ import { isRecord, ptree, readJsonl } from "@oh-my-pi/pi-utils";
 import type { FileSink } from "bun";
 import type { BashResult } from "../../exec/bash-executor";
 import type { AgentSessionEvent, SessionStats } from "../../session/agent-session";
+import type { ApprovalRule } from "../../tools/approval-rules";
 import { MAX_RPC_FRAME_BYTES, MAX_RPC_REASSEMBLED_BYTES, RpcFrameDecoder, type RpcProtocolVersion } from "./rpc-frame";
 import {
 	RPC_MESSAGES_PAGE_BUSY_ERROR,
@@ -39,6 +40,8 @@ import type {
 	RpcSubagentProgressFrame,
 	RpcSubagentSnapshot,
 	RpcSubagentSubscriptionLevel,
+	RpcToolApprovalRequestFrame,
+	RpcToolApprovalResolvedFrame,
 } from "./rpc-types";
 
 /** Distributive Omit that works with union types */
@@ -99,6 +102,8 @@ export type RpcSubagentLifecycleListener = (payload: RpcSubagentLifecycleFrame["
 export type RpcSubagentProgressListener = (payload: RpcSubagentProgressFrame["payload"]) => void;
 export type RpcSubagentEventListener = (payload: RpcSubagentEventFrame["payload"]) => void;
 export type RpcAvailableCommandsUpdateListener = (commands: RpcAvailableSlashCommand[]) => void;
+export type RpcToolApprovalRequestListener = (frame: RpcToolApprovalRequestFrame) => void;
+export type RpcToolApprovalResolvedListener = (frame: RpcToolApprovalResolvedFrame) => void;
 
 export interface RpcClientToolContext<TDetails = unknown> {
 	toolCallId: string;
@@ -235,6 +240,26 @@ function isRpcExtensionUiRequest(value: unknown): value is RpcExtensionUIRequest
 	return value.type === "extension_ui_request" && typeof value.id === "string" && typeof value.method === "string";
 }
 
+function isRpcToolApprovalRequestFrame(value: unknown): value is RpcToolApprovalRequestFrame {
+	if (!isRecord(value)) return false;
+	return (
+		value.type === "tool_approval_request" &&
+		typeof value.id === "string" &&
+		typeof value.toolCallId === "string" &&
+		typeof value.toolName === "string"
+	);
+}
+
+function isRpcToolApprovalResolvedFrame(value: unknown): value is RpcToolApprovalResolvedFrame {
+	if (!isRecord(value)) return false;
+	return (
+		value.type === "tool_approval_resolved" &&
+		typeof value.id === "string" &&
+		typeof value.toolCallId === "string" &&
+		typeof value.approved === "boolean"
+	);
+}
+
 function normalizeToolResult<TDetails>(result: RpcClientToolResult<TDetails>): AgentToolResult<TDetails> {
 	if (typeof result === "string") {
 		return {
@@ -284,6 +309,8 @@ export class RpcClient {
 	#requestId = 0;
 	#protocolVersion: RpcProtocolVersion = 1;
 	#extensionUiListeners: Set<(req: RpcExtensionUIRequest) => void> = new Set();
+	#toolApprovalRequestListeners = new Set<RpcToolApprovalRequestListener>();
+	#toolApprovalResolvedListeners = new Set<RpcToolApprovalResolvedListener>();
 	#abortController = new AbortController();
 
 	constructor(private options: RpcClientOptions = {}) {
@@ -569,6 +596,27 @@ export class RpcClient {
 	}
 
 	/**
+	 * Subscribe to structured tool-approval requests. Each frame is emitted
+	 * synchronously before the paired `extension_ui_request` select; both are
+	 * correlated 1:1 by `toolCallId` (also carried in `id`). The select remains
+	 * authoritative for the verdict — approve or deny it and the server emits a
+	 * matching `tool_approval_resolved` frame.
+	 */
+	onToolApproval(listener: RpcToolApprovalRequestListener): () => void {
+		this.#toolApprovalRequestListeners.add(listener);
+		return () => this.#toolApprovalRequestListeners.delete(listener);
+	}
+
+	/**
+	 * Subscribe to structured tool-approval verdicts. A resolved frame reports
+	 * the outcome of the paired select (by `toolCallId`) without replacing it.
+	 */
+	onToolApprovalResolved(listener: RpcToolApprovalResolvedListener): () => void {
+		this.#toolApprovalResolvedListeners.add(listener);
+		return () => this.#toolApprovalResolvedListeners.delete(listener);
+	}
+
+	/**
 	 * Get collected stderr output (useful for debugging).
 	 */
 	getStderr(): string {
@@ -655,6 +703,33 @@ export class RpcClient {
 	async setFastMode(enabled: boolean): Promise<{ enabled: boolean; active: boolean }> {
 		const response = await this.#send({ type: "set_fast_mode", enabled });
 		return this.#getData(response);
+	}
+
+	/**
+	 * Append an approval rule to `tools.approvalRules` (persisted). Returns the
+	 * full normalized rule list.
+	 */
+	async addApprovalRule(rule: ApprovalRule): Promise<ApprovalRule[]> {
+		const response = await this.#send({ type: "add_approval_rule", rule });
+		return this.#getData<{ rules: ApprovalRule[] }>(response).rules;
+	}
+
+	/**
+	 * List the current `tools.approvalRules` (normalized; malformed entries are
+	 * dropped).
+	 */
+	async listApprovalRules(): Promise<ApprovalRule[]> {
+		const response = await this.#send({ type: "list_approval_rules" });
+		return this.#getData<{ rules: ApprovalRule[] }>(response).rules;
+	}
+
+	/**
+	 * Remove the approval rule at `index` (0-based) from `tools.approvalRules`
+	 * (persisted). Returns the full remaining list.
+	 */
+	async removeApprovalRule(index: number): Promise<ApprovalRule[]> {
+		const response = await this.#send({ type: "remove_approval_rule", index });
+		return this.#getData<{ rules: ApprovalRule[] }>(response).rules;
 	}
 
 	/**
@@ -1119,6 +1194,20 @@ export class RpcClient {
 		if (isRpcAvailableCommandsUpdateFrame(data)) {
 			for (const listener of this.#availableCommandsUpdateListeners) {
 				listener(data.commands);
+			}
+			return;
+		}
+
+		if (isRpcToolApprovalRequestFrame(data)) {
+			for (const listener of this.#toolApprovalRequestListeners) {
+				listener(data);
+			}
+			return;
+		}
+
+		if (isRpcToolApprovalResolvedFrame(data)) {
+			for (const listener of this.#toolApprovalResolvedListeners) {
+				listener(data);
 			}
 			return;
 		}

@@ -18,12 +18,14 @@ import { $env, isRecord, Snowflake } from "@oh-my-pi/pi-utils";
 import { reset as resetCapabilities } from "../../capability";
 import { clearPluginRootsAndCaches, resolveActiveProjectRegistryPath } from "../../discovery/helpers";
 import {
+	type ExtensionRunner,
 	type ExtensionUIContext,
 	type ExtensionUIDialogOptions,
 	type ExtensionUISelectItem,
 	type ExtensionWidgetOptions,
 	getExtensionUISelectOptionLabel,
 } from "../../extensibility/extensions";
+import type { ToolApprovalRequestedEvent, ToolApprovalResolvedEvent } from "../../extensibility/extensions/types";
 import { buildSkillPromptMessage, parseSkillInvocation } from "../../extensibility/skills";
 import { loadSlashCommands } from "../../extensibility/slash-commands";
 import { type Theme, theme } from "../../modes/theme/theme";
@@ -37,6 +39,12 @@ import { calculateTokensPerSecond } from "../../utils/token-rate";
 import { initializeExtensions } from "../runtime-init";
 import { isRpcHostToolResult, isRpcHostToolUpdate, RpcHostToolBridge } from "./host-tools";
 import { isRpcHostUriResult, RpcHostUriBridge } from "./host-uris";
+import {
+	addRpcApprovalRule,
+	listRpcApprovalRules,
+	type RpcApprovalRuleStore,
+	removeRpcApprovalRule,
+} from "./rpc-approval-rules";
 import { MAX_RPC_FRAME_BYTES, MAX_RPC_REASSEMBLED_BYTES, RpcFrameEncoder } from "./rpc-frame";
 import { claimRpcInput, readRpcInputFrames } from "./rpc-input";
 import {
@@ -63,6 +71,9 @@ import type {
 	RpcResponse,
 	RpcSessionState,
 	RpcSubagentSubscriptionLevel,
+	RpcToolApprovalFrame,
+	RpcToolApprovalRequestFrame,
+	RpcToolApprovalResolvedFrame,
 } from "./rpc-types";
 
 // Re-export types for consumers
@@ -762,6 +773,68 @@ export function requestRpcDialog<T>(
 	output({ type: "extension_ui_request", id, ...request } as RpcExtensionUIRequest);
 	return promise;
 }
+
+// ============================================================================
+// Structured tool approval frames
+// ============================================================================
+
+/**
+ * Serialize a `tool_approval_requested` extension event into the contract-1
+ * `tool_approval_request` wire frame. Emitted synchronously before the paired
+ * select UI request; the select's own request id is generated later inside
+ * `requestRpcDialog`, so `toolCallId` (also carried in `id`) is the documented
+ * 1:1 correlation key between the approval request, its select, and the
+ * eventual `tool_approval_resolved` verdict.
+ */
+function toRpcToolApprovalRequest(event: ToolApprovalRequestedEvent): RpcToolApprovalRequestFrame {
+	return {
+		type: "tool_approval_request",
+		id: event.toolCallId,
+		...(event.sessionId ? { sessionId: event.sessionId } : {}),
+		toolCallId: event.toolCallId,
+		toolName: event.toolName,
+		// Enriched at the emission site (ExtensionToolWrapper); the fallbacks keep a
+		// frame well-formed if an un-enriched event ever reaches a host handler.
+		tier: event.tier ?? "exec",
+		policy: event.policy ?? "prompt",
+		source: event.source ?? "mode",
+		...(event.reason ? { reason: event.reason } : {}),
+		approvalMode: event.approvalMode,
+		...(event.details && event.details.length > 0 ? { details: event.details } : {}),
+	};
+}
+
+/** Serialize a `tool_approval_resolved` extension event into the contract-1 verdict frame. */
+function toRpcToolApprovalResolved(event: ToolApprovalResolvedEvent): RpcToolApprovalResolvedFrame {
+	return {
+		type: "tool_approval_resolved",
+		id: event.toolCallId,
+		toolCallId: event.toolCallId,
+		approved: event.approved,
+		...(event.by ? { by: event.by } : {}),
+	};
+}
+
+/**
+ * Register the structured tool-approval host handlers on an extension runner.
+ *
+ * Used by {@link runRpcMode}; exported so the exact RPC-mode wire path can be
+ * exercised in tests without booting a full agent session. Each emitted frame
+ * is serialized from the enriched `tool_approval_requested`/`tool_approval_resolved`
+ * extension events and delivered through `output`.
+ */
+export function registerRpcApprovalHandlers(
+	runner: Pick<ExtensionRunner, "registerHostHandler">,
+	output: (frame: RpcToolApprovalFrame) => void,
+): void {
+	runner.registerHostHandler<ToolApprovalRequestedEvent>("tool_approval_requested", event => {
+		output(toRpcToolApprovalRequest(event));
+	});
+	runner.registerHostHandler<ToolApprovalResolvedEvent>("tool_approval_resolved", event => {
+		output(toRpcToolApprovalResolved(event));
+	});
+}
+
 /**
  * Run in RPC mode.
  * Listens for JSON commands on stdin, outputs events and responses on stdout.
@@ -1037,6 +1110,18 @@ export async function runRpcMode(
 	const rpcUiContext = new RpcExtensionUIContext(pendingExtensionRequests, output);
 	setToolUIContext?.(rpcUiContext, true);
 
+	// Serialize structured tool-approval frames for hosts that cannot render the
+	// legacy select presentation. The host handlers run through the extension
+	// runner, so `tool_approval_request` is emitted synchronously inside the
+	// approval gate — immediately before the paired `extension_ui_request`
+	// select (the select's request id is generated later, so `toolCallId` in
+	// `id` is the documented 1:1 correlation key) — and `tool_approval_resolved`
+	// fires the moment the select resolves. The legacy select flow stays
+	// authoritative for the verdict and is otherwise untouched.
+	if (session.extensionRunner) {
+		registerRpcApprovalHandlers(session.extensionRunner, output);
+	}
+
 	// Set up extensions with RPC-based UI context
 	await initializeExtensions(session, {
 		mode: "rpc",
@@ -1082,6 +1167,13 @@ export async function runRpcMode(
 		void emitAvailableCommandsUpdate();
 	});
 	await emitAvailableCommandsUpdate();
+
+	// Approval-rule commands persist through the existing session settings
+	// write path (`settings.set`), which queues a background save.
+	const approvalRuleStore = (): RpcApprovalRuleStore => ({
+		read: () => session.settings.get("tools.approvalRules"),
+		write: rules => session.settings.set("tools.approvalRules", rules),
+	});
 
 	// Handle a single command
 	const handleCommand = async (command: RpcCommand): Promise<RpcResponse> => {
@@ -1299,6 +1391,26 @@ export async function runRpcMode(
 				} catch (err) {
 					return error(id, "get_subagent_messages", err instanceof Error ? err.message : String(err));
 				}
+			}
+
+			// =================================================================
+			// Approval rules
+			// =================================================================
+
+			case "add_approval_rule": {
+				const result = addRpcApprovalRule(approvalRuleStore(), command.rule);
+				if (!result.ok) return error(id, "add_approval_rule", result.error);
+				return success(id, "add_approval_rule", { rules: result.rules });
+			}
+
+			case "list_approval_rules": {
+				return success(id, "list_approval_rules", listRpcApprovalRules(approvalRuleStore()));
+			}
+
+			case "remove_approval_rule": {
+				const result = removeRpcApprovalRule(approvalRuleStore(), command.index);
+				if (!result.ok) return error(id, "remove_approval_rule", result.error);
+				return success(id, "remove_approval_rule", { rules: result.rules });
 			}
 
 			// =================================================================

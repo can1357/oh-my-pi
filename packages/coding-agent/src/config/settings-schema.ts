@@ -37,6 +37,7 @@ import {
 	TINY_TITLE_MODEL_OPTIONS,
 	TINY_TITLE_MODEL_VALUES,
 } from "../tiny/models";
+import type { ApprovalRule } from "../tools/approval-rules";
 import { IMAGE_PROVIDER_CHOICES, type ImageProvider } from "../tools/image-providers";
 import {
 	DEFAULT_TTS_LOCAL_MODEL_KEY,
@@ -4051,6 +4052,24 @@ export const SETTINGS_SCHEMA = {
 			label: "Tool Approval Policies",
 			description:
 				"Per-tool approval policies. Set to 'allow' to auto-approve, 'prompt' to require confirmation, or 'deny' to block. Overrides are honored in every approval mode.",
+		},
+	},
+
+	// Generic approval rules, evaluated BEFORE per-tool policy and any mode
+	// comparison. First match wins and is authoritative in every approval mode,
+	// including yolo. `match` uses the same glob syntax as bash.patterns (only
+	// `*` wildcards) and applies to a tool's primary string argument — the bash
+	// command, or the write/edit path. Tools without a primary string argument
+	// match on tool name alone; any `match` they carry is ignored.
+	"tools.approvalRules": {
+		type: "array",
+		default: [] as ApprovalRule[],
+		ui: {
+			tab: "interaction",
+			group: "Approvals",
+			label: "Approval Rules",
+			description:
+				"Ordered generic approval rules evaluated before per-tool policies and modes. Each item has tool and approval fields (allow | prompt | deny), an optional match glob ('*' wildcards only; matched against the bash command or write/edit path; ignored for other tools), and an optional reason. First match wins and overrides every approval mode.",
 		},
 	},
 

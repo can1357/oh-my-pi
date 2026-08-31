@@ -1561,7 +1561,7 @@ export class EventController {
 		if (!tool) return false;
 		const mode = (settings.get("tools.approvalMode") ?? "yolo") as ApprovalMode;
 		const userPolicies = (settings.get("tools.approval") ?? {}) as Record<string, unknown>;
-		return resolveApproval(tool, args, mode, userPolicies).policy === "prompt";
+		return resolveApproval(tool, args, mode, userPolicies, settings.get("tools.approvalRules")).policy === "prompt";
 	}
 
 	async #handleToolExecutionUpdate(

@@ -77,7 +77,7 @@ import type {
 	ReadToolInput,
 	WriteToolInput,
 } from "../../tools";
-import type { ApprovalMode } from "../../tools/approval";
+import type { ApprovalMode, ApprovalPolicy, ToolTier } from "../../tools/approval";
 import type { FileDeleteFallbackHandler, FileWriteFallbackHandler } from "../../tools/file-write-fallback";
 import type { EventBus } from "../../utils/event-bus";
 import type {
@@ -914,8 +914,16 @@ export interface ToolApprovalRequestedEvent {
 	sessionId: string;
 	toolCallId: string;
 	toolName: string;
+	/** Resolved capability tier of the pending approval (enriched at emission time). */
+	tier?: ToolTier;
+	/** Resolved approval policy that triggered the prompt ("prompt" when requiring approval). */
+	policy?: ApprovalPolicy;
+	/** Origin of the resolved policy: the tool, user configuration, an approval rule, or the active mode. */
+	source?: "tool" | "user" | "mode" | "rule";
 	reason?: string;
 	approvalMode: ApprovalMode;
+	/** `formatApprovalDetails` lines, untruncated, when the tool declares any. */
+	details?: string[];
 }
 
 export interface ToolApprovalResolvedEvent {
@@ -925,6 +933,8 @@ export interface ToolApprovalResolvedEvent {
 	toolName: string;
 	approved: boolean;
 	reason?: string;
+	/** Who resolved the approval: "user" after an interactive decision, "system" when it failed closed. */
+	by?: "user" | "system";
 }
 
 interface ToolCallEventBase {
@@ -1635,7 +1645,7 @@ export interface ExtensionShortcut {
 	extensionPath: string;
 }
 
-type HandlerFn = (...args: unknown[]) => Promise<unknown>;
+export type HandlerFn = (...args: unknown[]) => Promise<unknown>;
 
 export type SendMessageHandler = <T = unknown>(
 	message: CustomMessagePayload<T>,

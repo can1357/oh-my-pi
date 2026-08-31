@@ -81,6 +81,7 @@ Legacy clients may ignore the added ready fields and remain on v1. V1 retains it
 9. Prompt lifecycle hints (`{ type: "prompt_result", id?, agentInvoked }`) for scheduled prompts that later resolve without invoking the agent
 10. Subagent frames (`subagent_lifecycle`, `subagent_progress`, `subagent_event`), gated by `set_subagent_subscription`
 11. Builtin slash-command side channels (`command_output`, `session_info_update`, `config_update`)
+12. Tool approval frames (`tool_approval_request`, `tool_approval_resolved`), see the [Tool Approval Sub-Protocol](#tool-approval-sub-protocol)
 
 ### Inbound frame categories (stdin)
 
@@ -132,6 +133,36 @@ Important edge behavior from runtime:
 - `{ id?, type: "set_subagent_subscription", level: "off" | "progress" | "events" }`
 - `{ id?, type: "get_subagents" }`
 - `{ id?, type: "get_subagent_messages", subagentId?: string, sessionFile?: string, fromByte?: number }`
+
+### Approval rules
+
+- `{ id?, type: "add_approval_rule", rule: { tool, match?, approval, reason? } }`
+- `{ id?, type: "list_approval_rules" }`
+- `{ id?, type: "remove_approval_rule", index: number }`
+
+`tools.approvalRules` is an ordered list of generic approval rules evaluated
+ahead of per-tool policy and approval mode; the first matching rule wins and
+is authoritative in every mode, including `yolo`. Each rule carries:
+
+- `tool` (string, required): the tool name the rule applies to.
+- `approval` (`"allow" | "deny" | "prompt"`, required).
+- `match` (string, optional): a `*`-wildcard glob (same syntax as
+  `bash.patterns`) matched against the tool's **primary string argument** —
+  the bash `command`, or the write/edit `path` (falling back to
+  `file_path`). Tools without a primary string argument match on tool name
+  alone; any `match` they carry is ignored. A rule with a `match` is skipped
+  when a primary-arg tool call carries no primary string (e.g. a sloppy edit
+  without a path). Bash commands are matched with shell-aware semantics:
+  `allow` must vouch for the entire command (never rides a compound line),
+  while `deny`/`prompt` fire on any matching shell segment.
+- `reason` (string, optional): surfaced when the rule prompts or denies.
+
+`add_approval_rule` validates the rule, appends it to the session settings,
+persists through the existing settings write path, and returns the full
+normalized list. `remove_approval_rule` removes the rule at `index`
+(0-based) and returns the remaining list; an out-of-range index is an error.
+Malformed entries in a hand-edited config are dropped on read and never
+reported by `list_approval_rules`.
 
 ### Model
 
@@ -380,6 +411,38 @@ The corresponding `get_state` result reports the same computed state:
   "fastModeActive": true
 }
 ```
+
+### `add_approval_rule` / `list_approval_rules` / `remove_approval_rule` payload
+
+All three commands return the full ordered, normalized rule list. They
+persist through the existing session-settings write path.
+
+Example round trip — add a deny rule for destructive bash commands:
+
+```json
+{ "id": "rule-1", "type": "add_approval_rule", "rule": { "tool": "bash", "match": "rm -rf /*", "approval": "deny", "reason": "destructive" } }
+```
+
+Response:
+
+```json
+{
+  "id": "rule-1",
+  "type": "response",
+  "command": "add_approval_rule",
+  "success": true,
+  "data": {
+    "rules": [
+      { "tool": "bash", "match": "rm -rf /*", "approval": "deny", "reason": "destructive" }
+    ]
+  }
+}
+```
+
+`remove_approval_rule` uses the 0-based index from the returned list. Invalid
+rules (missing/empty `tool`, or an `approval` other than
+`allow`/`deny`/`prompt`) and out-of-range removals fail with `success: false`
+and a human-readable `error`.
 
 ### `set_todos` payload
 
@@ -665,6 +728,73 @@ Example:
 - `{ type: "extension_ui_response", id: string, cancelled: true, timedOut?: boolean }`
 
 If a dialog has a timeout, RPC mode resolves to a default value when timeout/abort fires.
+
+## Tool Approval Sub-Protocol
+
+When a tool call requires approval, RPC mode emits a structured
+`tool_approval_request` frame **synchronously before** the paired legacy
+`extension_ui_request` select, and a `tool_approval_resolved` frame the moment
+that select resolves. The legacy select remains authoritative for the verdict:
+approve or deny it exactly as before, and the resolved frame reports the
+outcome without replacing the UI flow. Denying, aborting, or timing out the
+select still blocks the tool call through the existing semantics.
+
+### Outbound request
+
+`tool_approval_request` (`{ "type": "tool_approval_request" }`):
+
+```json
+{
+  "type": "tool_approval_request",
+  "id": "call_abc123",
+  "sessionId": "…",
+  "toolCallId": "call_abc123",
+  "toolName": "bash",
+  "tier": "exec",
+  "policy": "prompt",
+  "source": "tool",
+  "reason": "requires manual review",
+  "approvalMode": "always-ask",
+  "details": ["$ git reset --hard", "Deletes local changes."]
+}
+```
+
+- `tier`: resolved capability tier (`"read" | "write" | "exec"`).
+- `policy`: resolved policy that triggered the prompt (`"allow" | "deny" | "prompt"`).
+- `source`: origin of the resolved policy (`"tool" | "user" | "mode" | "rule"`).
+- `approvalMode`: the active approval mode (`"always-ask" | "write" | "yolo"`).
+- `details`: untruncated `formatApprovalDetails` lines when the tool declares any.
+- `reason`: present when the approval resolution carried one.
+
+### Outbound resolution
+
+`tool_approval_resolved` (`{ "type": "tool_approval_resolved" }`):
+
+```json
+{
+  "type": "tool_approval_resolved",
+  "id": "call_abc123",
+  "toolCallId": "call_abc123",
+  "approved": true,
+  "by": "user"
+}
+```
+
+`approved` mirrors the select outcome; `by` is `"user"` after an interactive
+decision or `"system"` when approval failed closed (no interactive UI, or the
+dialog was cancelled/aborted).
+
+### Correlation
+
+`tool_approval_request` is emitted inside the approval gate, **before** the RPC
+select request id exists, so the request frame's `id` carries the `toolCallId`
+as the documented 1:1 join key. Hosts MUST pair a `tool_approval_request` with
+the select `extension_ui_request` that arrives immediately after it, and join
+the verdict by `toolCallId` from the paired `tool_approval_resolved`. `details`
+may contain arbitrary tool output; treat it as untrusted text.
+
+The `RpcClient` exposes these as `onToolApproval(listener)` and
+`onToolApprovalResolved(listener)` subscriptions.
 
 ## Host Tool Sub-Protocol
 
