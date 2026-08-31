@@ -289,6 +289,67 @@ describe("Agent", () => {
 
 		expect(agent.peekSteeringQueue()).toEqual([]);
 	});
+
+	it("wakes immediate steering when one-at-a-time mode widens to all", async () => {
+		const toolSchema = type({});
+		const started = Promise.withResolvers<void>();
+		let observedAbort = false;
+		let resolvedByTimeout = false;
+		const tool: AgentTool<typeof toolSchema, Record<string, never>> = {
+			name: "wait",
+			label: "Wait",
+			description: "Wait tool",
+			parameters: toolSchema,
+			interruptible: true,
+			async execute(_toolCallId, _params, signal) {
+				if (!signal) throw new Error("missing tool abort signal");
+				started.resolve();
+				const { promise, resolve } = Promise.withResolvers<void>();
+				const timer = setTimeout(() => {
+					resolvedByTimeout = true;
+					resolve();
+				}, 500);
+				signal.addEventListener(
+					"abort",
+					() => {
+						clearTimeout(timer);
+						resolve();
+					},
+					{ once: true },
+				);
+				await promise;
+				observedAbort = signal.aborted;
+				return { content: [{ type: "text", text: "done" }], details: {} };
+			},
+		};
+		const mock = createMockModel({
+			responses: [
+				{ content: [{ type: "toolCall", id: "tool-1", name: "wait", arguments: {} }] },
+				{ content: ["done"] },
+				{ content: ["done"] },
+			],
+		});
+		const agent = new Agent({
+			initialState: { model: mock.model, systemPrompt: ["Test"], tools: [tool], messages: [] },
+			streamFn: mock.stream,
+			steeringMode: "one-at-a-time",
+			interruptMode: "wait",
+		});
+
+		const running = agent.prompt("start");
+		await started.promise;
+		agent.steer(createUserMessage("ordinary steer"));
+		const advisor = createUserMessage("immediate advisor") as AgentMessage & {
+			[STEERING_MESSAGE_IMMEDIATE]?: boolean;
+		};
+		advisor[STEERING_MESSAGE_IMMEDIATE] = true;
+		agent.steer(advisor);
+		agent.setSteeringMode("all");
+		await running;
+
+		expect(observedAbort).toBe(true);
+		expect(resolvedByTimeout).toBe(false);
+	});
 	it("continue() re-executes a trailing assistant's unpaired tool calls before the next model call", async () => {
 		const toolSchema = type({ value: type("string") });
 		const executed: string[] = [];

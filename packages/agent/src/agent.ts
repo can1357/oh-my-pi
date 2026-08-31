@@ -937,7 +937,11 @@ export class Agent {
 	}
 
 	setSteeringMode(mode: "all" | "one-at-a-time") {
+		const hadImmediateSteering = this.#hasImmediateSteeringInWindow();
 		this.#steeringMode = mode;
+		if (!hadImmediateSteering && this.#hasImmediateSteeringInWindow()) {
+			this.#notifySteeringWaiters(true);
+		}
 	}
 
 	getSteeringMode(): "all" | "one-at-a-time" {
