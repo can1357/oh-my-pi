@@ -57,6 +57,7 @@ import { getSessionSlashCommands } from "../../extensibility/extensions/get-comm
 import { buildSkillPromptMessage, parseSkillInvocation } from "../../extensibility/skills";
 import { loadSlashCommands } from "../../extensibility/slash-commands";
 import { resolveLocalUrlToPath } from "../../internal-urls";
+import { reconcilePersistedPersona } from "../../main";
 import { MCPManager } from "../../mcp/manager";
 import type { MCPServerConfig } from "../../mcp/types";
 import { loadAllExtensions } from "../../modes/components/extensions/state-manager";
@@ -65,6 +66,7 @@ import { normalizePlanTitle, type PlanApprovalDetails, resolveApprovedPlan } fro
 import type { AgentSession, AgentSessionEvent } from "../../session/agent-session";
 import { BlobStore, resolveImageDataSync } from "../../session/blob-store";
 import { isSilentAbort, SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "../../session/messages";
+import { EMPTY_PERSONA_OVERRIDES } from "../../session/persona-apply";
 import type { UsageStatistics } from "../../session/session-entries";
 import type { SessionInfo as StoredSessionInfo } from "../../session/session-listing";
 import { SessionManager } from "../../session/session-manager";
@@ -1290,6 +1292,15 @@ export class AcpAgent implements Agent {
 			await this.#disposeStandaloneSession(session);
 			throw error;
 		}
+		// The forked transcript can end under agent mode; restore the persisted
+		// persona exactly like #openStoredSession so resume coherence holds.
+		try {
+			await reconcilePersistedPersona(session, session.sessionManager, EMPTY_PERSONA_OVERRIDES);
+		} catch (error) {
+			logger.warn("Failed to reconcile persisted persona on ACP fork", {
+				error: error instanceof Error ? error.message : String(error),
+			});
+		}
 		return await this.#registerPreparedSession(session, params.mcpServers ?? [], setToolUIContext);
 	}
 
@@ -1312,6 +1323,17 @@ export class AcpAgent implements Agent {
 		} catch (error) {
 			await this.#disposeStandaloneSession(session);
 			throw error;
+		}
+		// A stored session can end under agent mode (`mode_change agent
+		// {name}`); re-apply the persisted persona (or clear its state when the
+		// definition is gone/disabled) so an ACP resume/coherence matches
+		// `omp --resume` and the rpc/print resume paths.
+		try {
+			await reconcilePersistedPersona(session, session.sessionManager, EMPTY_PERSONA_OVERRIDES);
+		} catch (error) {
+			logger.warn("Failed to reconcile persisted persona on ACP resume", {
+				error: error instanceof Error ? error.message : String(error),
+			});
 		}
 		return await this.#registerPreparedSession(session, mcpServers, setToolUIContext);
 	}
