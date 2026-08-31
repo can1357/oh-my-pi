@@ -26,6 +26,14 @@ export const OMP_TO_SAND_FIELD2: Record<string, string> = {
 	glob: "Glob",
 };
 
+/**
+ * When multiple omp tools share one sand field-2 name, prefer this omp owner so
+ * advertised schema and dispatch index stay one-to-one (edit+write both → Write).
+ */
+const SAND_FIELD2_PREFERRED_OMP: Readonly<Record<string, string>> = {
+	Write: "write",
+};
+
 /** Field 9 allowlist from capture-1 / automation worker. */
 export const FIELD9_ALLOWLIST_AUTOMATION = [
 	"Task",
@@ -106,6 +114,8 @@ export function toSandField2Name(ompName: string): string {
 }
 
 export function toOmpToolName(sandName: string): string {
+	const preferred = SAND_FIELD2_PREFERRED_OMP[sandName];
+	if (preferred) return preferred;
 	for (const [omp, sand] of Object.entries(OMP_TO_SAND_FIELD2)) {
 		if (sand === sandName) return omp;
 	}
@@ -176,18 +186,29 @@ export function sendToUserProductTool(): ProductWireTool {
 /**
  * Map omp catalog tools to product field-2 tools with jsonSchema envelopes.
  * Parent profile injects SendToUser when absent.
+ * Shared sand names (edit+write → Write) keep the preferred omp owner's schema.
  */
 export function toProductField2Tools(tools: Context["tools"], profile: ProductWireProfile): ProductWireTool[] {
 	const out: ProductWireTool[] = [];
-	const seen = new Set<string>();
+	const seen = new Map<string, string>();
 	if (!Array.isArray(tools)) {
 		if (profile === "parent-chat") out.push(sendToUserProductTool());
 		return out;
 	}
 	for (const tool of tools) {
+		const ompName = typeof tool?.name === "string" ? tool.name : "";
 		const mapped = mapOmpToolToProduct(tool);
-		if (!mapped || seen.has(mapped.name)) continue;
-		seen.add(mapped.name);
+		if (!mapped || !ompName) continue;
+		const previousOmp = seen.get(mapped.name);
+		if (previousOmp !== undefined) {
+			const preferred = SAND_FIELD2_PREFERRED_OMP[mapped.name];
+			if (preferred !== ompName) continue;
+			const idx = out.findIndex(entry => entry.name === mapped.name);
+			if (idx >= 0) out[idx] = mapped;
+			seen.set(mapped.name, ompName);
+			continue;
+		}
+		seen.set(mapped.name, ompName);
 		out.push(mapped);
 	}
 	if (profile === "parent-chat" && !seen.has(SEND_TO_USER_WIRE_NAME)) {
@@ -211,6 +232,12 @@ export function augmentToolIndexForProductWire(
 		if (!meta || sandName === name) continue;
 		const wired = { ...meta, customWireName: sandName };
 		index.set(name, wired);
+		const existing = index.get(sandName);
+		const preferred = SAND_FIELD2_PREFERRED_OMP[sandName];
+		if (existing && preferred && preferred !== name && existing.name === preferred) {
+			// Keep the preferred omp owner on the shared sand name.
+			continue;
+		}
 		index.set(sandName, wired);
 	}
 }

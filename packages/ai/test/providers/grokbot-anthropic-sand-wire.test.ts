@@ -6,7 +6,9 @@ import {
 } from "../../src/providers/grokbot/anthropic-sand-wire";
 import {
 	OMP_TO_SAND_FIELD2,
+	augmentToolIndexForProductWire,
 	parseSendToUserContent,
+	toOmpToolName,
 	toProductField2Tools,
 	wrapToolParameters,
 } from "../../src/providers/grokbot/product-wire";
@@ -133,6 +135,50 @@ describe("product wire helpers", () => {
 	test("parent profile injects SendToUser", () => {
 		const tools = toProductField2Tools([], "parent-chat");
 		expect(tools[0]?.name).toBe("SendToUser");
+	});
+
+	test("prefers write over edit for the shared Write wire slot", () => {
+		const editSchema = {
+			type: "object",
+			properties: { path: { type: "string" }, old: { type: "string" }, new: { type: "string" } },
+			required: ["path", "old", "new"],
+		};
+		const writeSchema = {
+			type: "object",
+			properties: { path: { type: "string" }, content: { type: "string" } },
+			required: ["path", "content"],
+		};
+		const tools = [
+			{ name: "edit", description: "patch file", parameters: editSchema },
+			{ name: "write", description: "write file", parameters: writeSchema },
+		];
+		const product = toProductField2Tools(tools, "automation");
+		const writes = product.filter(t => t.name === "Write");
+		expect(writes).toHaveLength(1);
+		expect(writes[0]?.description).toBe("write file");
+		expect(writes[0]?.parameters).toEqual(wrapToolParameters(writeSchema));
+
+		const index = new Map<string, { name: string; customWireName?: string; isGrammar: boolean }>([
+			["edit", { name: "edit", isGrammar: false }],
+			["write", { name: "write", isGrammar: false }],
+		]);
+		augmentToolIndexForProductWire(index, tools);
+		expect(index.get("Write")?.name).toBe("write");
+		expect(toOmpToolName("Write")).toBe("write");
+	});
+
+	test("maps edit to Write when write is absent", () => {
+		const product = toProductField2Tools(
+			[{ name: "edit", description: "patch only", parameters: { type: "object", properties: {} } }],
+			"automation",
+		);
+		expect(product).toEqual([
+			{
+				name: "Write",
+				description: "patch only",
+				parameters: wrapToolParameters({ type: "object", properties: {} }),
+			},
+		]);
 	});
 
 	test("parseSendToUserContent extracts text content", () => {
