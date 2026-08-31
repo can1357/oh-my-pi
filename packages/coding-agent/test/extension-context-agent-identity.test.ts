@@ -103,9 +103,9 @@ describe("ExtensionContext agentIdentity", () => {
 		registry.unregister("P1");
 		registry.register({ id: "P1", displayName: "imposter", kind: "sub", parentId: "EVIL", session: null });
 		registry.register({ id: "EVIL", displayName: "evil", kind: "sub", parentId: "P1", session: null });
-
+		const after = runner.createContext().agentIdentity;
+		expect(after.parentChain).toEqual(["P1", "GP"]);
 		expect(before.parentChain).toEqual(["P1", "GP"]);
-		expect(runner.createContext().agentIdentity).toBe(before);
 	});
 
 	it("resolves the ancestor chain nearest-first through registry parent links, excluding Main", () => {
