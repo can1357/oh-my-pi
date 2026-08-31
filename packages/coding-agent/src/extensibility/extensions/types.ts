@@ -452,6 +452,50 @@ export interface ExtensionModelQuery {
 /** Runtime host mode exposed to Pi-compatible extensions. */
 export type ExtensionMode = "tui" | "rpc" | "json" | "print";
 
+/**
+ * Identity of the agent an extension context serves.
+ *
+ * Purely descriptive: everything here is derived from state that already
+ * exists (registry identity, spawn options) and nothing in this feature
+ * changes how sessions behave. Where a session is linked to a parent through
+ * options that predate this interface (see `parentAgentId` in
+ * `CreateAgentSessionOptions`), the pre-existing semantics of those options —
+ * including resource-ownership checks keyed on `parentTaskPrefix` and the
+ * registry's unconditional `register()` replacement — are unchanged; this
+ * type only observes them.
+ */
+export interface AgentIdentity {
+	/** Whether this is the top-level session or a subagent. */
+	kind: "main" | "sub";
+	/**
+	 * Recursion depth of this agent: `0` = top-level. Mirrors the session's
+	 * own `taskDepth` (pre-existing gate input); it is NOT re-derived here from
+	 * the parent chain, so callers that omit `taskDepth` observe 1 for a
+	 * parent-linked session regardless of chain length — the depth gates
+	 * elsewhere already treat any linked child uniformly.
+	 */
+	depth: number;
+	/**
+	 * Registry id of this agent: `"Main"` for the default top-level session.
+	 * Pre-existing registry semantics apply unchanged: a parent-linked session
+	 * that does not pass its own `agentId` still resolves to `"Main"` here, and
+	 * `AgentRegistry.register()` keeps replacing the entry keyed by that id
+	 * (documented registry behavior this interface observes, not changes).
+	 */
+	agentId: string;
+	/** Human-readable name of this agent. */
+	displayName: string;
+	/** Registry id of the direct parent agent; undefined for the top-level session. */
+	parentId?: string;
+	/**
+	 * Ancestor registry ids, nearest-first. Excludes `"Main"` and is `[]` for the
+	 * top-level session. Runner-less sessions cannot resolve the chain, so it is
+	 * `[]` there even for subagents. Immutable: the identity is shared across
+	 * handlers, so extensions must copy rather than mutate it.
+	 */
+	parentChain: readonly string[];
+}
+
 export interface ExtensionContext {
 	/** UI methods for user interaction */
 	ui: ExtensionUIContext;
@@ -477,6 +521,11 @@ export interface ExtensionContext {
 	model: Model | undefined;
 	/** Read-only model query facade: list / current / resolve / family. */
 	models: ExtensionModelQuery;
+	/**
+	 * Identity of the agent this context serves: top-level or subagent,
+	 * depth, registry id, display name, and parent chain. Read lazily.
+	 */
+	agentIdentity: AgentIdentity;
 	/** Whether the agent is idle (not streaming) */
 	isIdle(): boolean;
 	/** Abort the current agent operation */

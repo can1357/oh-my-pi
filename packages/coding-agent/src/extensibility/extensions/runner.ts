@@ -17,6 +17,7 @@ import type { Settings } from "../../config/settings";
 import type { LocalProtocolOptions } from "../../internal-urls/local-protocol";
 import type { MemoryRuntimeContext } from "../../memory-backend";
 import { type Theme, theme } from "../../modes/theme/theme";
+import { type AgentRegistry, MAIN_AGENT_ID } from "../../registry/agent-registry";
 import type { AsyncJobSnapshot } from "../../session/agent-session";
 import type { SessionManager } from "../../session/session-manager";
 import { addFileDeleteFallback, addFileWriteFallback } from "../../tools/file-write-fallback";
@@ -25,6 +26,7 @@ import { ManagedTimers } from "./managed-timers";
 import { createExtensionModelQuery } from "./model-api";
 import type {
 	AfterProviderResponseEvent,
+	AgentIdentity,
 	AssistantThinkingRenderer,
 	BeforeAgentStartEvent,
 	BeforeAgentStartEventResult,
@@ -433,6 +435,20 @@ interface ToolRegistrationScope {
 	closed: boolean;
 }
 
+/**
+ * Identity of the agent a runner serves, passed at construction so extension
+ * contexts can expose {@link AgentIdentity}. `registry` resolves the parent
+ * chain lazily; `parentId` is omitted for the top-level session.
+ */
+export interface ExtensionRunnerIdentityInput {
+	kind: "main" | "sub";
+	depth: number;
+	agentId: string;
+	displayName: string;
+	parentId?: string;
+	registry: Pick<AgentRegistry, "get">;
+}
+
 export class ExtensionRunner {
 	#uiContext: ExtensionUIContext;
 	#mode: ExtensionMode = "print";
@@ -442,6 +458,13 @@ export class ExtensionRunner {
 	#isIdleFn: () => boolean = () => true;
 	#waitForIdleFn: () => Promise<void> = async () => {};
 	#abortFn: () => void = () => {};
+	#agentIdentityInput?: ExtensionRunnerIdentityInput;
+	/**
+	 * Memoized identity: the parent chain is structural for a live agent —
+	 * registry parent links don't mutate mid-session — so it is computed once
+	 * on first `ctx.agentIdentity` access.
+	 */
+	#agentIdentityCache: AgentIdentity | undefined;
 	#hasPendingMessagesFn: () => boolean = () => false;
 	#getContextUsageFn: () => ContextUsage | undefined = () => undefined;
 	#compactFn: (instructionsOrOptions?: string | CompactOptions) => Promise<void> = async () => {};
@@ -607,10 +630,12 @@ export class ExtensionRunner {
 		private readonly settings?: Settings,
 		private readonly localProtocolOptions?: LocalProtocolOptions,
 		getAsyncJobSnapshot?: () => AsyncJobSnapshot | null,
+		agentIdentity?: ExtensionRunnerIdentityInput,
 	) {
 		this.#uiContext = noOpUIContext;
 		this.#getMemoryFn = getMemory;
 		this.#getAsyncJobSnapshotFn = getAsyncJobSnapshot ?? (() => null);
+		this.#agentIdentityInput = agentIdentity;
 	}
 
 	/**
@@ -1156,6 +1181,7 @@ export class ExtensionRunner {
 		},
 	): ExtensionContext {
 		const getModel = model ? () => model : this.#getModel;
+		const runner = this;
 		return {
 			ui: this.#uiContext,
 			mode: this.#mode,
@@ -1169,6 +1195,9 @@ export class ExtensionRunner {
 			isProjectTrusted: () => true,
 			get model() {
 				return getModel();
+			},
+			get agentIdentity() {
+				return runner.#getAgentIdentity();
 			},
 			models: createExtensionModelQuery(this.modelRegistry, this.settings, getModel),
 			isIdle: () => this.#isIdleFn(),
@@ -1194,6 +1223,58 @@ export class ExtensionRunner {
 							})
 					: undefined,
 		};
+	}
+
+	/**
+	 * Identity exposed at `ctx.agentIdentity`. Computed once and memoized: the
+	 * parent chain is structural for a live agent (registry parent links don't
+	 * mutate mid-session). When the runner was constructed without an identity
+	 * input (tests, legacy hosts, provider-only registration), falls back to a
+	 * top-level identity. The chain walk is cycle-guarded and excludes `"Main"`.
+	 *
+	 * Purely observational: this resolves registry links that predate this
+	 * feature; it does not create, re-key, or validate them (registry
+	 * registration ownership remains the caller's pre-existing contract).
+	 */
+	#getAgentIdentity(): AgentIdentity {
+		if (this.#agentIdentityCache) return this.#agentIdentityCache;
+		const input = this.#agentIdentityInput;
+		let identity: AgentIdentity;
+		if (!input) {
+			identity = {
+				kind: "main",
+				depth: 0,
+				agentId: MAIN_AGENT_ID,
+				displayName: "main",
+				parentChain: [],
+			};
+		} else {
+			const seen = new Set<string>();
+			const parentChain: string[] = [];
+			let cursor = input.parentId;
+			while (cursor !== undefined && cursor !== MAIN_AGENT_ID && !seen.has(cursor)) {
+				parentChain.push(cursor);
+				seen.add(cursor);
+				cursor = input.registry.get(cursor)?.parentId;
+			}
+			identity = {
+				kind: input.kind,
+				depth: input.depth,
+				agentId: input.agentId,
+				displayName: input.displayName,
+				...(input.parentId !== undefined ? { parentId: input.parentId } : {}),
+				parentChain,
+			};
+		}
+		// Frozen deeply: the memoized object is handed to every handler for the
+		// session, so a mutating extension cannot corrupt the documented identity
+		// (e.g. reversing `parentChain`) for unrelated extensions.
+		const frozen: AgentIdentity = Object.freeze({
+			...identity,
+			parentChain: Object.freeze([...identity.parentChain]),
+		});
+		this.#agentIdentityCache = frozen;
+		return this.#agentIdentityCache;
 	}
 
 	/**
