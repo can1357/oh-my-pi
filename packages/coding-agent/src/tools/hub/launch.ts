@@ -92,6 +92,8 @@ interface OutputRegistration {
 	/** Whether the broker must defer binding until a new start replaces the current record. */
 	binding: "start-pending" | "attached";
 	active: boolean;
+	/** Terminal daemon state observed while an attach was still being published. */
+	terminalState?: DaemonState;
 	/** Readiness of the initial broker publication for this registration. */
 	ready: Promise<void>;
 	/**
@@ -499,6 +501,7 @@ async function registerOutputSink(
 				return;
 			}
 		}
+		registration.terminalState = notification.daemon.state;
 		await registration.cleanup();
 		// The owner session receives the real daemon-completed through its
 		// completion subscription, so a synthesized one would duplicate it — but
@@ -1172,6 +1175,11 @@ export async function executeLaunch(
 			outputLease.bindDaemon(result.daemon.id);
 			outputLease.registration.startedAt = result.daemon.startedAt;
 			await outputLease.retain();
+			if (params.op === "monitor" && !outputLease.registration.active) {
+				throw new ToolError(
+					`Cannot monitor ${params.name}: process is ${outputLease.registration.terminalState ?? "exited"}`,
+				);
+			}
 		}
 		const sessionOwner = session.getSessionId?.();
 		let resumedDaemonFound = false;
