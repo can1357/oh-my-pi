@@ -406,5 +406,61 @@ describe("/fast targets the current model's service-tier family", () => {
 			// other model keeps its own lease.
 			expect(session.serviceTierByFamily).toEqual({});
 		});
+		it("keeps a manual rejection distinct when fast mode is turned off before completion", async () => {
+			const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+			if (!model) throw new Error("Expected bundled claude-sonnet-4-5 model to exist");
+			const requestStarted = Promise.withResolvers<void>();
+			const releaseResponse = Promise.withResolvers<void>();
+			const session = await createSessionForModel(
+				model,
+				Settings.isolated({ "tier.autoFastMode": false, "compaction.enabled": false }),
+				(streamModel, _context, options) => {
+					expect(options?.serviceTier).toBe("priority");
+					requestStarted.resolve();
+					const stream = new AssistantMessageEventStream();
+					void releaseResponse.promise.then(() => {
+						const message: AssistantMessage = {
+							role: "assistant",
+							content: [{ type: "text", text: "Done" }],
+							api: streamModel.api,
+							provider: streamModel.provider,
+							model: streamModel.id,
+							usage: {
+								input: 0,
+								output: 0,
+								cacheRead: 0,
+								cacheWrite: 0,
+								totalTokens: 0,
+								cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+							},
+							stopReason: "stop",
+							disabledFeatures: ["priority"],
+							timestamp: Date.now(),
+						};
+						stream.push({ type: "start", partial: message });
+						stream.push({ type: "text_start", contentIndex: 0, partial: message });
+						stream.push({ type: "text_delta", contentIndex: 0, delta: "Done", partial: message });
+						stream.push({ type: "text_end", contentIndex: 0, content: "Done", partial: message });
+						stream.push({ type: "done", reason: "stop", message });
+					});
+					return stream;
+				},
+			);
+			const notices: string[] = [];
+			session.subscribe(event => {
+				if (event.type === "notice" && event.source === "priority") notices.push(event.message);
+			});
+			expect(session.setFastMode(true)).toBe(true);
+
+			const prompt = session.prompt("Manual fast request");
+			await requestStarted.promise;
+			expect(session.setFastMode(false)).toBe(true);
+			releaseResponse.resolve();
+			await prompt;
+			await session.waitForIdle();
+
+			expect(notices).toEqual(["Priority/fast mode was rejected for this request and retried without it."]);
+			expect(session.serviceTierByFamily).toEqual({});
+		});
 	});
 });
