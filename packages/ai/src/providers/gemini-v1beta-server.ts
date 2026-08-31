@@ -19,6 +19,7 @@ import type {
 	AssistantMessage,
 	AssistantMessageEventStream,
 	Context,
+	ImageContent,
 	Message,
 	ServiceTier,
 	StopReason,
@@ -57,6 +58,57 @@ function textFromGeminiParts(parts: unknown): string {
 		if (typeof part.text === "string") text += part.text;
 	}
 	return text;
+}
+
+function readInlineData(part: Record<string, unknown>): ImageContent | undefined {
+	const inline = part.inlineData ?? part.inline_data;
+	if (!isRecord(inline)) return undefined;
+	const mimeType =
+		typeof inline.mimeType === "string"
+			? inline.mimeType
+			: typeof inline.mime_type === "string"
+				? inline.mime_type
+				: undefined;
+	const data = typeof inline.data === "string" ? inline.data : undefined;
+	if (!mimeType || !data) return undefined;
+	return { type: "image", mimeType, data };
+}
+
+/** Map Gemini parts to user/assistant content, preserving inlineData images. */
+function contentFromGeminiParts(parts: unknown): string | (TextContent | ImageContent)[] {
+	if (!Array.isArray(parts)) return "";
+	const blocks: (TextContent | ImageContent)[] = [];
+	let textOnly = "";
+	let hasImage = false;
+	for (const part of parts) {
+		if (!isRecord(part)) continue;
+		if (part.thought === true) continue;
+		if (typeof part.text === "string" && part.text.length > 0) {
+			textOnly += part.text;
+			blocks.push({ type: "text", text: part.text });
+			continue;
+		}
+		const image = readInlineData(part);
+		if (image) {
+			hasImage = true;
+			blocks.push(image);
+			continue;
+		}
+		if (
+			part.fileData !== undefined ||
+			part.file_data !== undefined ||
+			part.functionCall !== undefined ||
+			part.function_call !== undefined ||
+			part.functionResponse !== undefined ||
+			part.function_response !== undefined
+		) {
+			throw new AIError.ValidationError(
+				"gemini-v1beta: unsupported part type (fileData/functionCall/functionResponse); only text and inlineData are accepted",
+			);
+		}
+	}
+	if (!hasImage) return textOnly;
+	return blocks;
 }
 
 function textFromOpenAiContent(content: unknown): string {
@@ -102,11 +154,21 @@ function classifyRole(role: unknown): "user" | "assistant" | "system" | undefine
 	return undefined;
 }
 
-function makeAssistantMessage(text: string, modelId: string, timestamp: number): AssistantMessage {
-	const content: TextContent[] = text.length > 0 ? [{ type: "text", text }] : [];
+function makeAssistantMessage(
+	content: string | (TextContent | ImageContent)[],
+	modelId: string,
+	timestamp: number,
+): AssistantMessage {
+	const blocks: TextContent[] =
+		typeof content === "string"
+			? content.length > 0
+				? [{ type: "text", text: content }]
+				: []
+			: content.filter((block): block is TextContent => block.type === "text");
+	// Assistant turns only carry text on this wire path; images stay on user turns.
 	return {
 		role: "assistant",
-		content,
+		content: blocks,
 		api: GEMINI_API,
 		provider: GEMINI_PROVIDER,
 		model: modelId,
@@ -127,17 +189,26 @@ function pushTurn(
 	messages: Message[],
 	systemParts: string[],
 	role: "user" | "assistant" | "system",
-	text: string,
+	content: string | (TextContent | ImageContent)[],
 	modelId: string,
 	timestamp: number,
 ): void {
 	if (role === "system") {
+		const text =
+			typeof content === "string"
+				? content
+				: content
+						.filter((block): block is TextContent => block.type === "text")
+						.map(block => block.text)
+						.join("");
 		if (text.length > 0) systemParts.push(text);
 		return;
 	}
-	if (text.length === 0) return;
-	if (role === "user") messages.push({ role: "user", content: text, timestamp });
-	else messages.push(makeAssistantMessage(text, modelId, timestamp));
+	const empty =
+		typeof content === "string" ? content.length === 0 : content.length === 0;
+	if (empty) return;
+	if (role === "user") messages.push({ role: "user", content, timestamp });
+	else messages.push(makeAssistantMessage(content, modelId, timestamp));
 }
 
 function walkContents(
@@ -153,7 +224,7 @@ function walkContents(
 			messages,
 			systemParts,
 			classifyRole(item.role) ?? "user",
-			textFromGeminiParts(item.parts),
+			contentFromGeminiParts(item.parts),
 			modelId,
 			timestamp,
 		);
@@ -250,17 +321,43 @@ export function parseRequest(body: unknown, _headers?: Headers): ParsedRequest {
 	if (isRecord(generationConfig)) applyGenerationConfig(options, generationConfig);
 	applyOpenAiSampling(options, body);
 
+	const tools = buildToolsFromGeminiBody(body.tools);
 	const context: Context = {
 		messages,
 		...(systemParts.length > 0 ? { systemPrompt: systemParts } : {}),
+		...(tools ? { tools } : {}),
 	};
 
 	return {
 		modelId,
 		context,
-		stream: typeof body.stream === "boolean" ? body.stream : true,
+		stream: typeof body.stream === "boolean" ? body.stream : false,
 		options,
 	};
+}
+
+/** Translate Gemini `tools[].functionDeclarations` into canonical `Context.tools`. */
+function buildToolsFromGeminiBody(tools: unknown): Context["tools"] | undefined {
+	if (!Array.isArray(tools) || tools.length === 0) return undefined;
+	const out: NonNullable<Context["tools"]> = [];
+	for (const entry of tools) {
+		if (!isRecord(entry)) continue;
+		const decls = entry.functionDeclarations ?? entry.function_declarations;
+		if (!Array.isArray(decls)) continue;
+		for (const decl of decls) {
+			if (!isRecord(decl) || typeof decl.name !== "string" || decl.name.length === 0) continue;
+			const parameters = (decl.parametersJsonSchema ??
+				decl.parameters_json_schema ??
+				decl.parameters ??
+				{}) as NonNullable<Context["tools"]>[number]["parameters"];
+			out.push({
+				name: decl.name,
+				description: typeof decl.description === "string" ? decl.description : "",
+				parameters,
+			});
+		}
+	}
+	return out.length > 0 ? out : undefined;
 }
 
 // ---------------------------------------------------------------------------
