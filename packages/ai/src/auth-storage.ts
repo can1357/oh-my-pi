@@ -5727,7 +5727,6 @@ export class AuthStorage {
 			allowFallback = true,
 		} = usageOptions;
 		if (
-			!allowBlocked &&
 			this.#isCredentialBlocked(
 				provider,
 				providerKey,
@@ -5739,30 +5738,45 @@ export class AuthStorage {
 			const entries = this.#getStoredCredentials(provider);
 			const blockedId = entries[selection.index]?.id;
 			if (blockedId === undefined) return undefined;
-			// A live block must never hijack rotation: while any same-type sibling
-			// is still usable, fall through so the caller rotates to it. Probing a
-			// cooled-down credential is a last resort for requests that have no
-			// unblocked sibling at all (one lease per cooldown generation).
-			const hasUsableSibling = entries.some(
-				(entry, index) =>
-					index !== selection.index &&
-					entry.credential.type === selection.credential.type &&
-					!this.#isCredentialBlocked(provider, providerKey, index, blockScopes ?? blockScope),
-			);
-			if (hasUsableSibling) return undefined;
-			// Probe leases are only settleable via requestId → #inflightProbes.
-			// Callers that omit requestId must not acquire an untrackable lease.
-			if (!options?.requestId) return undefined;
-			const held = this.#activeTurnReservation(blockedId, this.getCredentialIncarnation(blockedId));
-			if (held && held.requestId !== options.requestId) return undefined;
 			const probeScope = blockScope ?? "";
-			const lease = this.tryAcquireQuotaProbeLease(blockedId, probeScope);
-			if (!lease) return undefined;
-			this.#inflightProbes.set(options.requestId, {
-				credentialId: blockedId,
-				blockScope: probeScope,
-				leaseId: lease,
-			});
+			if (!allowBlocked) {
+				// A live block must never hijack rotation: while any same-type sibling
+				// is still usable, fall through so the caller rotates to it. Probing a
+				// cooled-down credential is a last resort for requests that have no
+				// unblocked sibling at all (one lease per cooldown generation).
+				const hasUsableSibling = entries.some(
+					(entry, index) =>
+						index !== selection.index &&
+						entry.credential.type === selection.credential.type &&
+						!this.#isCredentialBlocked(provider, providerKey, index, blockScopes ?? blockScope),
+				);
+				if (hasUsableSibling) return undefined;
+				// Probe leases are only settleable via requestId → #inflightProbes.
+				// Callers that omit requestId must not acquire an untrackable lease.
+				if (!options?.requestId) return undefined;
+				const held = this.#activeTurnReservation(blockedId, this.getCredentialIncarnation(blockedId));
+				if (held && held.requestId !== options.requestId) return undefined;
+				const lease = this.tryAcquireQuotaProbeLease(blockedId, probeScope);
+				if (!lease) return undefined;
+				this.clearQuotaProbe(options.requestId);
+				this.#inflightProbes.set(options.requestId, {
+					credentialId: blockedId,
+					blockScope: probeScope,
+					leaseId: lease,
+				});
+			} else {
+				// allowBlocked path: every blocked credential still needs the single-flight
+				// probe lease (Retry-After and ordinary hard cooldowns alike).
+				if (!options?.requestId) return undefined;
+				const lease = this.tryAcquireQuotaProbeLease(blockedId, probeScope);
+				if (!lease) return undefined;
+				this.clearQuotaProbe(options.requestId);
+				this.#inflightProbes.set(options.requestId, {
+					credentialId: blockedId,
+					blockScope: probeScope,
+					leaseId: lease,
+				});
+			}
 		}
 		if (options?.requestId) {
 			const reserveId = this.#getStoredCredentials(provider)[selection.index]?.id;

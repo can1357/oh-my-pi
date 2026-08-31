@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Require a quota probe lease on the allow-blocked OAuth fallback pass.
 - Add parent fallback edges from every nested child target to the later sibling entry.
 - Preserve JSON-schema descriptions when flattening Chat Completions response_format for Responses, and store in-memory Codex reconciliation deadlines.
 
