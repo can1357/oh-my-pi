@@ -54,7 +54,6 @@ describe("PanelPersonaEditorComponent", () => {
 
 	afterEach(() => {
 		setKeybindings(KeybindingsManager.inMemory());
-		vi.restoreAllMocks();
 	});
 
 	it("creates a persona, sets its required instructions, and persists only through explicit Save", () => {
