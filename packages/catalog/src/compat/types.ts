@@ -305,6 +305,8 @@ export interface CompiledBehavior {
 	planRequirements: CompiledPlanRequirement[];
 	pricingPeers: CompiledPricingPeer[];
 	retiredProviders: string[];
+	/** Providers whose resale metadata stays provider-local during reference lookup. */
+	crossProviderReferenceExclusions: string[];
 }
 
 /** The complete compiled rule tree persisted as `rules.json`. */

@@ -205,3 +205,8 @@ export function pricingPeerFor(
 	const alias = rule.aliases.find(candidate => candidate.model === model);
 	return { peers: rule.peers, peerId: alias?.peerId ?? model };
 }
+
+/** Whether a provider's resale rows stay provider-local during reference lookup. */
+export function isCrossProviderReferenceExcluded(provider: string): boolean {
+	return behavior.crossProviderReferenceExclusions.includes(provider.toLowerCase());
+}

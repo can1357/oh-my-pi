@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { buildModel } from "../src/build";
 import { getBundledModelReferenceIndex } from "../src/identity/bundled";
-import { inheritReferenceThinking, resolveModelReference } from "../src/identity/reference";
+import { buildModelReferenceIndex, inheritReferenceThinking, resolveModelReference } from "../src/identity/reference";
 import type { ModelSpec } from "../src/types";
 
 describe("Portkey gateway model references", () => {
@@ -28,6 +28,27 @@ describe("Portkey gateway model references", () => {
 		expect(kiloGigaPotato?.provider).toBe("kilo");
 		expect(kiloGigaPotato?.thinking?.effortRouting).toBeDefined();
 		expect(inheritReferenceThinking(undefined, kiloGigaPotato, "gateway")).toBeUndefined();
+	});
+
+	test("keeps regional gateway resale metadata out of global references", () => {
+		const createModel = (provider: string, baseUrl: string, contextWindow: number, maxTokens: number) =>
+			buildModel({
+				id: "shared-model",
+				name: "Shared model",
+				api: "openai-completions",
+				provider,
+				baseUrl,
+				reasoning: false,
+				input: ["text"],
+				cost: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0 },
+				contextWindow,
+				maxTokens,
+			} satisfies ModelSpec<"openai-completions">);
+		const direct = createModel("openai", "https://api.openai.com/v1", 128_000, 16_384);
+		const reseller = createModel("nebius", "https://api.studio.nebius.ai/v1", 1_000_000, 100_000);
+
+		const index = buildModelReferenceIndex([direct, reseller]);
+		expect(index.exact.get("shared-model")?.provider).toBe("openai");
 	});
 });
 

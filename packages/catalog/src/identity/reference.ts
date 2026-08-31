@@ -8,6 +8,7 @@
  * may strip `search`-style markers and prefers cache-pricing-complete
  * references, both of which would be wrong for canonical coalescing.
  */
+import { isCrossProviderReferenceExcluded } from "../compat/behavior";
 import { collapseVocabulary, discoveryVocabulary } from "../compat/taxonomy";
 import type { Api, Model, ThinkingConfig } from "../types";
 import { getBracketStrippedModelIdCandidates, getLongestModelLikeIdSegment, getModelLikeIdSegments } from "./id";
@@ -40,26 +41,8 @@ export function isZeroCostXaiOAuthReference(candidate: Model<Api>): boolean {
 	);
 }
 
-const CROSS_PROVIDER_REFERENCE_EXCLUDED_PROVIDERS = new Set([
-	"aki-io",
-	"cortecs",
-	"eurouter",
-	"melious",
-	"nebius",
-	"opper",
-	"ovhcloud",
-	"scaleway",
-]);
-
-/**
- * European gateway catalog rows describe a provider-specific resale surface.
- * They are valid as provider-local references but must not become metadata
- * sources for unrelated proxies that only share a bare upstream model id.
- */
 export function isCrossProviderReferenceEligible(candidate: Model<Api>): boolean {
-	return (
-		!isZeroCostXaiOAuthReference(candidate) && !CROSS_PROVIDER_REFERENCE_EXCLUDED_PROVIDERS.has(candidate.provider)
-	);
+	return !isZeroCostXaiOAuthReference(candidate) && !isCrossProviderReferenceExcluded(candidate.provider);
 }
 
 // Prefer the reference with the largest limits and complete cache pricing, then

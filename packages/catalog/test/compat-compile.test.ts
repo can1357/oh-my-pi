@@ -78,6 +78,15 @@ describe("compat compiler grammar", () => {
 		).toThrow(/malformed value/);
 	});
 
+	test("compiles cross-provider reference exclusions", () => {
+		const behavior = compileBehavior({
+			file: "runtime/behavior.kdl",
+			text: 'behavior {\n\tcross-provider-reference-exclusions "gateway-a" "gateway-b"\n}',
+		});
+
+		expect(Reflect.get(behavior, "crossProviderReferenceExclusions")).toEqual(["gateway-a", "gateway-b"]);
+	});
+
 	test("duplicate axis in one block is rejected", () => {
 		expect(() =>
 			compileCascade([

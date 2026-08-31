@@ -14658,6 +14658,16 @@
 				]
 			}
 		],
+		"crossProviderReferenceExclusions": [
+			"aki-io",
+			"cortecs",
+			"eurouter",
+			"melious",
+			"nebius",
+			"opper",
+			"ovhcloud",
+			"scaleway"
+		],
 		"openaiResponsesHeuristic": {
 			"includePrefixes": [
 				"gpt-",
