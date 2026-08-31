@@ -284,6 +284,15 @@ describe("TurnRecovery zero-billed empty-stop fallback", () => {
 		expect(getModel2().id).toBe(model.id);
 	});
 
+	it("8c. does NOT promote credit-meter billed empties (Devin committedCost/acuCost)", async () => {
+		const { recovery, getModel } = makeRecovery({ fallbackChains });
+		const msg = makeMessage([], model, {
+			usage: usage({ credits: { cost: 0, committedCost: 2, acuCost: 0.25 } }),
+		});
+		expect(await settle(recovery, msg)).toEqual(LEGACY_CAP);
+		expect(getModel().id).toBe(model.id);
+	});
+
 	it("9. no usable fallback chain settles terminal at the first cap", async () => {
 		const { recovery, events, getModel } = makeRecovery();
 		const msg = zeroBilled();

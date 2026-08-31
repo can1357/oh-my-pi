@@ -777,6 +777,7 @@ export class TurnRecovery {
 					"Assistant returned empty stop after retry cap; try switching models or `/shake images` to remove archived frames";
 			}
 			const orchestration = assistantMessage.usage.orchestration;
+			const credits = assistantMessage.usage.credits;
 			const zeroBilled =
 				!providerEmptyOutput &&
 				assistantMessage.content.length === 0 &&
@@ -793,6 +794,9 @@ export class TurnRecovery {
 				(assistantMessage.usage.cost?.total ?? 0) === 0 &&
 				(assistantMessage.usage.server?.webSearch ?? 0) === 0 &&
 				(assistantMessage.usage.server?.webFetch ?? 0) === 0 &&
+				(credits?.cost ?? 0) === 0 &&
+				(credits?.committedCost ?? 0) === 0 &&
+				(credits?.acuCost ?? 0) === 0 &&
 				outputTokensExcludingKnownReasoning === 0;
 
 			// Zero-billed empty stops are upstream dispatch failures laundered into a
