@@ -108,7 +108,7 @@ export function normalizeGrokbotAvailableModels(
 		if (row.isHidden === true) continue;
 		const id = row.name?.trim();
 		if (!id) continue;
-		const spec = toGrokbotModelSpec(row, baseUrl);
+		const spec = toGrokbotModelSpec(row, baseUrl, id);
 		if (!byId.has(spec.id)) {
 			byId.set(spec.id, spec);
 		}
@@ -172,7 +172,7 @@ function resolveGrokbotContextWindow(row: GrokbotAvailableModel, sandMaxMode: bo
 	return null;
 }
 
-function toGrokbotModelSpec(row: GrokbotAvailableModel, baseUrl: string): ModelSpec<"grokbot-sand"> {
+function toGrokbotModelSpec(row: GrokbotAvailableModel, baseUrl: string, id: string): ModelSpec<"grokbot-sand"> {
 	const parameterIds = collectParameterIds(row);
 	const { efforts, unrecognizedEffortOnly } = collectEffortValues(row, parameterIds);
 	const reasoning = row.supportsThinking === true || efforts.length > 0 || unrecognizedEffortOnly;
@@ -186,13 +186,13 @@ function toGrokbotModelSpec(row: GrokbotAvailableModel, baseUrl: string): ModelS
 		.map(v => v.legacySlug?.trim())
 		.filter((slug): slug is string => Boolean(slug));
 	const aliases = uniqueStrings(
-		[...(row.idAliases ?? []), ...(row.legacySlugs ?? []), ...variantLegacySlugs].filter(a => a !== row.name),
+		[...(row.idAliases ?? []), ...(row.legacySlugs ?? []), ...variantLegacySlugs].filter(a => a.trim() !== id),
 	);
 	const sandMaxMode = resolveGrokbotSandMaxMode(row);
 
 	return {
-		id: row.name,
-		name: row.clientDisplayName?.trim() || row.name,
+		id,
+		name: row.clientDisplayName?.trim() || id,
 		api: GROKBOT_API,
 		provider: "grokbot",
 		baseUrl,

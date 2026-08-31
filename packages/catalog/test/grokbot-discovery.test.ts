@@ -207,6 +207,27 @@ describe("grokbot AvailableModels normalize", () => {
 		]);
 	});
 
+	test("trims whitespace from AvailableModels model ids", () => {
+		const rows = decodeGrokbotAvailableModelsResponse({
+			models: [
+				{
+					name: " sand-default ",
+					clientDisplayName: "Sand Default",
+					supportsThinking: true,
+					idAliases: [" sand-default "],
+					parameterDefinitions: [],
+					variants: [{ parameterValues: [] }],
+				},
+			],
+		});
+		expect(rows).not.toBeNull();
+		const models = normalizeGrokbotAvailableModels(rows!);
+		expect(models.filter(m => m.id === "sand-default")).toHaveLength(1);
+		const sandDefault = models.find(m => m.id === "sand-default");
+		expect(sandDefault?.name).toBe("Sand Default");
+		expect(sandDefault?.aliases).toBeUndefined();
+	});
+
 	test("does not invent common ladder when upstream values are all unrecognized", () => {
 		const rows = decodeGrokbotAvailableModelsResponse({
 			models: [
