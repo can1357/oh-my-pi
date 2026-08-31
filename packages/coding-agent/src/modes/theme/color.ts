@@ -85,18 +85,33 @@ const USER_MESSAGE_ACCENT_CONTRAST_MIN = 3;
 export function deriveUserMessageTextDefault(
 	resolved: Record<string, string | number>,
 	surface?: string,
+	mode?: ColorMode,
 ): string | number {
 	const current = resolved.userMessageText;
 	if (current !== undefined && current !== "") return current;
 	const accent = resolved.accent;
 	if (accent === undefined || accent === "") return current ?? "";
 	const background = surface ?? resolved.userMessageBg;
-	const accentLuminance = relativeLuminance(accent);
-	const backgroundLuminance = relativeLuminance(background);
+	const accentLuminance = relativeLuminance(renderedHex(accent, mode));
+	const backgroundLuminance = relativeLuminance(renderedHex(background, mode));
 	if (accentLuminance === undefined || backgroundLuminance === undefined) return current ?? "";
 	const contrast =
 		(Math.max(accentLuminance, backgroundLuminance) + 0.05) / (Math.min(accentLuminance, backgroundLuminance) + 0.05);
 	return contrast >= USER_MESSAGE_ACCENT_CONTRAST_MIN ? accent : (current ?? "");
+}
+
+/**
+ * Hex actually painted for a color token in `mode`. Truecolor terminals render
+ * the value as-is; 256-color terminals quantize both the accent and the bubble
+ * to the xterm palette, so contrast decisions must use the quantized pair —
+ * e.g. limestone passes 3.38:1 in truecolor but its palette colors (137 on
+ * 255) only reach 2.80:1 (#10344 review).
+ */
+function renderedHex(value: string | number, mode: ColorMode | undefined): string | number {
+	if (mode !== "256color") return value;
+	const ansi = colorToAnsi(typeof value === "number" ? ansi256ToHex(value) : value, mode);
+	const paletteIndex = /38;5;(\d+)/.exec(ansi);
+	return paletteIndex ? ansi256ToHex(Number(paletteIndex[1])) : value;
 }
 
 /**

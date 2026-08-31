@@ -39,6 +39,20 @@ describe("userMessageText derived default", () => {
 		expect(birch.getFgOnBgAnsi("userMessageText", "userMessageBg")).toBe("\x1b[38;2;40;40;32m");
 	});
 
+	it("guards against 256-color quantization of the rendered palette", async () => {
+		// limestone passes 3.38:1 in truecolor but its quantized palette colors
+		// (137 on 255) only reach 2.80:1, so the 256-color terminal keeps the
+		// contrast fallback while the truecolor terminal derives the accent.
+		const json = getBuiltinThemes().limestone;
+		if (!json) throw new Error("limestone theme is unavailable");
+		const truecolor = createTheme(json, { mode: "truecolor" });
+		const quantized = createTheme(json, { mode: "256color" });
+
+		expect(truecolor.getFgOnBgAnsi("userMessageText", "userMessageBg")).toBe(truecolor.getFgAnsi("accent"));
+		expect(quantized.getFgOnBgAnsi("userMessageText", "userMessageBg")).toBe("\x1b[38;5;16m");
+		expect(quantized.getFgOnBgAnsi("userMessageText", "userMessageBg")).not.toBe(quantized.getFgAnsi("accent"));
+	});
+
 	it("feeds the derived accent into HTML export colors", async () => {
 		const dark = await getResolvedThemeColors("dark");
 
