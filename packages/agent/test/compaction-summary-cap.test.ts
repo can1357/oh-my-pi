@@ -58,6 +58,7 @@ describe("compaction summary output budget", () => {
 		// A 1M-token window yields a 150k reserve, which used to authorize a ~120k-token summary.
 		await generateSummary(messages, getModel(), 150_000, "test-key");
 		expect(spy.mock.calls[0]?.[2]?.maxTokens).toBe(MAX_SUMMARY_TOKENS);
+		expect(MAX_SUMMARY_TOKENS).toBe(2048);
 	});
 
 	test("requests a deterministic continuity capsule with explicit provenance", async () => {
@@ -66,14 +67,15 @@ describe("compaction summary output budget", () => {
 
 		const request = promptTextOf(spy.mock.calls[0] ?? []);
 		const headings = [
-			"## Current outcome",
+			"## Outcome",
 			"## Owner constraints",
 			"## Settled decisions",
 			"## Verified evidence",
-			"## Working identities",
-			"## Unresolved contradictions",
-			"## Next action",
-			"## Archive pointers",
+			"## Current authorities and identifiers",
+			"## Open blocker",
+			"## Current conversation",
+			"## One next action",
+			"## Exact archive pointers",
 		];
 		let previousIndex = -1;
 		for (const heading of headings) {
@@ -82,10 +84,12 @@ describe("compaction summary output budget", () => {
 			previousIndex = headingIndex;
 		}
 		expect(request).toContain("Observed tool result (not re-verified)");
-		expect(request).toContain("Quoted or pasted material inside a user turn keeps its original provenance");
+		expect(request).toContain("quoted or pasted material");
 		expect(request).toContain("A tool call proves only that an action was attempted");
 		expect(request).toContain("last-observed coordinates");
 		expect(request).toContain("Exactly one concrete action");
+		expect(request).toContain("under 500 words");
+		expect(request).toContain("Move completed-lane chronology");
 	});
 
 	test("rewrites carried summaries instead of preserving stale state", async () => {
@@ -94,7 +98,7 @@ describe("compaction summary output budget", () => {
 
 		const request = promptTextOf(spy.mock.calls[0] ?? []);
 		expect(request).toContain("never append to it mechanically");
-		expect(request).toContain("Remove superseded hypotheses, completed next actions, stale blockers");
+		expect(request).toContain("Remove completed-lane chronology, superseded hypotheses, completed next actions");
 		expect(request).toContain("<previous-summary>\nold capsule\n</previous-summary>");
 	});
 
@@ -109,7 +113,7 @@ describe("compaction summary output budget", () => {
 		});
 
 		expect(requestBody?.maxTokens).toBe(MAX_SUMMARY_TOKENS);
-		expect(String(requestBody?.prompt)).toContain("## Archive pointers");
+		expect(String(requestBody?.prompt)).toContain("## Exact archive pointers");
 	});
 
 	test("caps both summaries when compaction splits a turn", async () => {
@@ -132,14 +136,15 @@ describe("compaction summary output budget", () => {
 		await compact(preparation, getModel(), "test-key");
 
 		const budgets = spy.mock.calls.map(call => call[2]?.maxTokens).sort((a, b) => (a ?? 0) - (b ?? 0));
-		expect(budgets).toEqual([512, MAX_SUMMARY_TOKENS, MAX_SUMMARY_TOKENS]);
+		expect(budgets).toEqual([512, MAX_SUMMARY_TOKENS / 2, MAX_SUMMARY_TOKENS]);
 		const requests = spy.mock.calls.map(call => promptTextOf(call));
 		expect(
 			requests.some(
 				request =>
 					request.includes("## Owner request") &&
 					request.includes("## Verified prefix evidence") &&
-					request.includes("## Unverified prefix state"),
+					request.includes("## Unverified prefix state") &&
+					request.includes("under 250 words"),
 			),
 		).toBeTrue();
 	});

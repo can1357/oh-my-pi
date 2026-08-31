@@ -194,11 +194,12 @@ export const DEFAULT_RESERVE_TOKENS = 16384;
  * Hard ceiling on a generated continuity capsule.
  *
  * Large model windows can otherwise authorize summaries that copy implementation
- * chronology instead of preserving the small set of facts needed to resume. Four
- * thousand tokens leave room for a complex lane's constraints, evidence, and exact
- * identities while forcing omitted detail back to transcript or archive evidence.
+ * chronology instead of preserving the small set of facts needed to resume. Two
+ * thousand tokens leave ample room for the selective 500-word capsule contract
+ * while programmatically bounding noncompliant output.
  */
-export const MAX_SUMMARY_TOKENS = 4096;
+export const MAX_SUMMARY_TOKENS = 2048;
+const MAX_TURN_PREFIX_SUMMARY_TOKENS = 1024;
 
 // reserveTokens is deliberately absent: an unset reserve is what marks it as
 // defaulted, which resolveBudgetReserveTokens needs to distinguish "user never
@@ -1809,7 +1810,7 @@ async function generateTurnPrefixSummary(
 	signal?: AbortSignal,
 	options?: SummaryOptions,
 ): Promise<string> {
-	const maxTokens = Math.min(Math.floor(0.5 * reserveTokens), MAX_SUMMARY_TOKENS); // Smaller budget for turn prefix
+	const maxTokens = Math.min(Math.floor(0.5 * reserveTokens), MAX_TURN_PREFIX_SUMMARY_TOKENS);
 
 	const llmMessages = (options?.convertToLlm ?? defaultConvertToLlm)(messages);
 	const conversationText = serializeConversationForSummary(llmMessages, preferredDialect(model.id));
