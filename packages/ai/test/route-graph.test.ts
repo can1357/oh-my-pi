@@ -210,4 +210,31 @@ describe("RouteRegistry", () => {
 		expect(compiled?.id).toBe("openai/gpt-5");
 	});
 
+
+	it("keeps nested-only targets out of parent fallback lists", () => {
+		const registry = new RouteRegistry(() => undefined);
+		registry.register({
+			id: "nested-quota",
+			root: {
+				type: "fallback",
+				on: ["credential_quota"],
+				children: [
+					{ type: "target", model: "A" },
+					{
+						type: "fallback",
+						on: ["context_overflow"],
+						children: [
+							{ type: "target", model: "B" },
+							{ type: "target", model: "C" },
+						],
+					},
+					{ type: "target", model: "D" },
+				],
+			},
+		});
+		const compiled = registry.resolve("nested-quota")!;
+		expect(compiled.fallbacks.credential_quota).toEqual(["B", "D"]);
+		expect(compiled.fallbacks.context_overflow).toEqual(["C"]);
+	});
+
 });

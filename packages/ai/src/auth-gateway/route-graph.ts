@@ -102,7 +102,16 @@ function compileNode(node: RouteNode, seenOnPath: ReadonlySet<string>): NodeComp
 		const childSeen = new Set(child.type === "target" ? sequential : seenOnPath);
 		const part = compileNode(child, childSeen);
 		targets.push(...part.targets);
-		if (!primary) afterPrimary.push(...part.targets);
+		if (!primary) {
+			// Nested fallback subtrees only contribute their primary target to the
+			// parent's disposition list; conditional alternatives stay in part.fallbacks.
+			if (child.type === "fallback") {
+				const nestedPrimary = part.targets[0];
+				if (nestedPrimary !== undefined) afterPrimary.push(nestedPrimary);
+			} else {
+				afterPrimary.push(...part.targets);
+			}
+		}
 		mergeFallbacks(fallbacks, part.fallbacks);
 		if (child.type === "target") sequential.add(child.model);
 		primary = false;
