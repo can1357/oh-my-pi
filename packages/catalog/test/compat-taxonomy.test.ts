@@ -11,6 +11,14 @@ describe("classifyModel", () => {
 		});
 	});
 
+	test("anthropic gateway spelling extracts family and revision", () => {
+		expect(classifyModel("cortecs", "claude-opus4-6")).toEqual({
+			class: "anthropic",
+			family: "opus",
+			revision: "4.6.0",
+		});
+	});
+
 	test("namespaced aggregator ids classify by bare name", () => {
 		expect(classifyModel("openrouter", "anthropic/claude-opus-4-6")).toEqual({
 			class: "anthropic",

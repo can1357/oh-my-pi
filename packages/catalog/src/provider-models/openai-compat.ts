@@ -784,11 +784,7 @@ function hasGatewayOnlyNonTextOutputModality(value: unknown): boolean {
 }
 
 function toAnthropicCanonicalReferenceId(modelId: string): string | undefined {
-	const normalizedModelId = modelId.replace(
-		/\bclaude-(opus|sonnet|fable|mythos)(\d{1,2})(?=$|[.-])/gi,
-		"claude-$1-$2",
-	);
-	const identity = classifyModel("", normalizedModelId, { lenient: true });
+	const identity = classifyModel("", modelId, { lenient: true });
 	if (identity.class !== "anthropic" || !identity.family || !identity.revision) {
 		return undefined;
 	}
