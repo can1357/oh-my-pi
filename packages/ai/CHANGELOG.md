@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Add parent fallback edges from every nested child target to the later sibling entry.
 - Preserve JSON-schema descriptions when flattening Chat Completions response_format for Responses, and store in-memory Codex reconciliation deadlines.
 
 - Renew turn reservations while streams are active; release API-key holds when secret resolution fails.

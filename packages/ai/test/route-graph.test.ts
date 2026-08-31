@@ -238,9 +238,37 @@ describe("RouteRegistry", () => {
 		});
 		const route = registry.resolve("nested-siblings");
 		expect(route?.fallbacks.provider_unavailable).toEqual(["C"]);
+		expect(route?.fallbackByTarget?.A?.provider_unavailable).toEqual(["C"]);
+		expect(route?.fallbackByTarget?.B?.provider_unavailable).toEqual(["C"]);
 		expect(route?.fallbackByTarget?.A?.context_overflow).toEqual(["B"]);
 		expect(route?.fallbackByTarget?.C?.context_overflow).toEqual(["D"]);
 		expect(route?.fallbackByTarget?.A?.context_overflow ?? []).not.toContain("D");
+	});
+
+	it("adds outer fallback edges from every nested child target to the later entry", () => {
+		const registry = new RouteRegistry(() => undefined);
+		registry.register({
+			id: "nested-overflow-then-c",
+			root: {
+				type: "fallback",
+				on: ["provider_unavailable"],
+				children: [
+					{
+						type: "fallback",
+						on: ["context_overflow"],
+						children: [
+							{ type: "target", model: "A" },
+							{ type: "target", model: "B" },
+						],
+					},
+					{ type: "target", model: "C" },
+				],
+			},
+		});
+		const route = registry.resolve("nested-overflow-then-c");
+		expect(route?.fallbackByTarget?.A?.context_overflow).toEqual(["B"]);
+		expect(route?.fallbackByTarget?.A?.provider_unavailable).toEqual(["C"]);
+		expect(route?.fallbackByTarget?.B?.provider_unavailable).toEqual(["C"]);
 	});
 
 	it("preserves provider-qualified model ids as the compiled target", () => {

@@ -141,13 +141,15 @@ function compileNode(node: RouteNode, seenOnPath: ReadonlySet<string>): NodeComp
 			owner.set(id, i);
 		}
 	}
-	// From each sibling entry, edges go to the remaining suffix of entry targets.
-	for (let i = 0; i < entryTargetsPerChild.length; i += 1) {
+	// From every reachable target in an earlier sibling subtree, edges go to
+	// the entry of each later sibling (not the full later subtree). Nested
+	// overflow can move A→B; B must still carry the outer edge to C.
+	for (let i = 0; i < allTargetsPerChild.length; i += 1) {
 		const suffix: string[] = [];
 		for (let j = i + 1; j < entryTargetsPerChild.length; j += 1) {
 			suffix.push(...entryTargetsPerChild[j]!);
 		}
-		childParts.push({ entryTargets: entryTargetsPerChild[i]!, after: suffix });
+		childParts.push({ entryTargets: allTargetsPerChild[i]!, after: suffix });
 	}
 	for (const disposition of node.on) {
 		let byFrom = fallbacksByFrom[disposition];
