@@ -606,7 +606,8 @@ function mirrorRequestAbort(req: Request): AbortController {
 
 // (handlePassthrough removed — see note above.)
 
-function releaseTurnOnStreamEnd(
+/** Wrap an SSE body so turn reservations release on close, cancel, or read failure. */
+export function releaseTurnOnStreamEnd(
 	stream: ReadableStream<Uint8Array>,
 	storage: AuthStorage,
 	requestId: string,
@@ -624,13 +625,18 @@ function releaseTurnOnStreamEnd(
 	};
 	return new ReadableStream({
 		async pull(controller) {
-			const { done, value } = await reader.read();
-			if (done) {
+			try {
+				const { done, value } = await reader.read();
+				if (done) {
+					release();
+					controller.close();
+					return;
+				}
+				controller.enqueue(value);
+			} catch (error) {
 				release();
-				controller.close();
-				return;
+				controller.error(error);
 			}
-			controller.enqueue(value);
 		},
 		cancel(reason) {
 			release();
@@ -1946,7 +1952,15 @@ export function startAuthGateway(opts: AuthGatewayBootOptions): AuthGatewayServe
 				}
 
 				if (req.method === "POST" && pathname === "/v1/messages/count_tokens") {
-					return withCors(await handleCountTokens(req, boot.resolveModel), req);
+					return withCors(
+						await handleCountTokens(req, modelId => {
+							const compiled = registry.resolve(modelId);
+							if (!compiled) return undefined;
+							const target = compiled.targets[0];
+							return target ? boot.resolveModel(target) : undefined;
+						}),
+						req,
+					);
 				}
 				if (req.method === "POST" && (pathname === "/v1/realtime" || pathname === "/v1/audio/speech")) {
 					return withCors(json(501, { error: "not available on this gateway" }), req);

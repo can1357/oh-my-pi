@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed auth-gateway SSE streams leaking turn reservations when `reader.read()` rejects.
+- Fixed `/v1/messages/count_tokens` resolving only concrete catalog models; virtual routes are registry-aware.
+- Fixed Anthropic count-tokens accepting missing/non-array `messages` and ignoring `system`/`tools` in the estimate.
+
 ### Added
 
 - Added API-key authentication for ClinePass through the official `CLINE_API_KEY` variable, including account-route validation and rolling quota-window reporting in `omp usage` ([#7863](https://github.com/can1357/oh-my-pi/pull/7863) by [@will-bogusz](https://github.com/will-bogusz)).
