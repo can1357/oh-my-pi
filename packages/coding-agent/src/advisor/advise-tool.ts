@@ -115,9 +115,9 @@ export function isAdvisorInterruptImmuneTurnActive(opts: {
  *   run instead strands it (it never reaches the running agent) and the withheld
  *   notes dump as one burst at the next user prompt — the bug this guards.
  * - During the post-interrupt immune-turn window, further `concern` notes are
- *   downgraded to asides; preservation still wins. A `blocker` is exempt: it
- *   means the agent handed off broken or unexercised work, so it still steers a
- *   triggered turn even right after a prior interrupt (#5628).
+ *   downgraded to asides. Preserved late concerns and opted-in late steering take
+ *   precedence. A `blocker` is also exempt and still starts a triggered turn
+ *   right after a prior interrupt (#5628).
  */
 export function resolveAdvisorDeliveryChannel(opts: {
 	severity: AdvisorSeverity | undefined;
@@ -132,14 +132,8 @@ export function resolveAdvisorDeliveryChannel(opts: {
 	if (opts.preserveOnly && !opts.streaming) return "preserve";
 	if (!isInterruptingSeverity(opts.severity)) return "aside";
 	if (opts.autoResumeSuppressed && (opts.aborting || !opts.streaming)) return "preserve";
-	if (
-		opts.terminalAnswerNoQueuedWork &&
-		opts.severity !== "blocker" &&
-		opts.lateConcern !== "steer" &&
-		!opts.streaming &&
-		!opts.aborting
-	)
-		return "preserve";
+	if (opts.terminalAnswerNoQueuedWork && opts.severity !== "blocker" && !opts.streaming && !opts.aborting)
+		return opts.lateConcern === "steer" ? "steer" : "preserve";
 	if (opts.interruptImmuneTurnActive && opts.severity !== "blocker") return "aside";
 	return "steer";
 }

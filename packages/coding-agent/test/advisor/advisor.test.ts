@@ -6132,7 +6132,7 @@ describe("advisor", () => {
 			).toBe("preserve");
 		});
 
-		it("steers a late concern after a terminal answer when lateConcern is 'steer'", () => {
+		it("steers an opted-in late concern during interrupt immunity", () => {
 			expect(
 				resolveAdvisorDeliveryChannel({
 					severity: "concern",
@@ -6141,6 +6141,7 @@ describe("advisor", () => {
 					aborting: false,
 					terminalAnswerNoQueuedWork: true,
 					lateConcern: "steer",
+					interruptImmuneTurnActive: true,
 				}),
 			).toBe("steer");
 		});
