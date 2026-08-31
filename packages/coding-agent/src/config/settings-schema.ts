@@ -1513,6 +1513,32 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	contextProfile: {
+		type: "enum",
+		values: ["full", "balanced", "aggressive"] as const,
+		default: "full",
+		ui: {
+			tab: "model",
+			group: "Prompt",
+			label: "Context Profile",
+			description:
+				"Choose one integrated static-context budget. Full preserves the complete prompt, skill list, and native tool presentation. Balanced keeps core editing and search tools native while moving the rest behind bounded internal-URL discovery. Aggressive keeps the internal-URL transport and bash native. Interaction-integrated todo and ask remain native in reduced profiles when enabled. A custom SYSTEM.md still replaces the bundled instruction template.",
+			options: [
+				{ value: "full", label: "Full", description: "Complete prompt and default tool presentation." },
+				{
+					value: "balanced",
+					label: "Balanced",
+					description: "Compact prompt with core editing and search tools kept native.",
+				},
+				{
+					value: "aggressive",
+					label: "Aggressive",
+					description: "Compact prompt with the internal-URL transport and bash kept native.",
+				},
+			],
+		},
+	},
+
 	includeModelInPrompt: {
 		type: "boolean",
 		default: true,
@@ -6110,6 +6136,7 @@ export type TreeFilterMode = SettingValue<"treeFilterMode">;
 
 /** Personality preset - derived from schema */
 export type Personality = SettingValue<"personality">;
+export type ContextProfile = SettingValue<"contextProfile">;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Typed Group Definitions

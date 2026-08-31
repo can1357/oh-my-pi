@@ -51,7 +51,7 @@ The separate project/environment footer remains and carries workstation data, de
 
 The current date and working directory no longer live in the footer: they are emitted as a `<system-reminder>` block on the first user turn of each provider request (`date-cwd-reminder.md`). Keeping per-request bytes out of the system prompt lets open-weight providers (DeepSeek, Qwen, GLM, …) that render tool schemas after the system content keep their prefix cache, and lets a session crossing midnight refresh the date without rebuilding the prompt (#7404).
 
-What disappears is the content unique to the default instruction template: its built-in role/personality text, tool inventory and general tool policy, internal-URL catalog, exploration/delegation/workflow rules, and `xd://` protocol guidance. Generated skills and rules are **not** lost; the custom template renders them explicitly.
+With `contextProfile: full`, what disappears is the content unique to the default instruction template: its built-in role/personality text, tool inventory and general tool policy, internal-URL catalog, exploration/delegation/workflow rules, and `xd://` protocol guidance. Generated skills and rules are **not** lost; the custom template renders them explicitly. Reduced profiles still omit the bundled instruction template, but append the minimal `skill://` and `xd://` discovery instructions required by their presentation policy.
 
 Consequences:
 
@@ -135,6 +135,30 @@ quotes, `<title>...</title>` markers, and terminal punctuation, and treats
 12 words is rejected rather than truncated. Empty, deferred, or rejected output
 leaves the session unnamed, so a later eligible title attempt can name it.
 
+## Context profiles
+
+`contextProfile` controls the bundled instruction template, the eager skill list,
+the native tool set, and the `xd://` documentation policy as one setting:
+
+- `full` preserves the complete prompt and the default tool presentation.
+- `balanced` uses the compact prompt and keeps `read`, `write`, `bash`, `edit`,
+  `grep`, and `glob` native.
+- `aggressive` uses the compact prompt and keeps `read`, `write`, and `bash`
+  native.
+- Both reduced profiles also keep `todo` and `ask` native when enabled because
+  their session and interaction integrations depend on native tool identity.
+
+Both reduced profiles keep every enabled capability. Read `skill://` or
+`skill://?q=<term>` to find skills. Read `xd://` or `xd://?q=<term>` to find
+mounted tools, then read the exact URL for its documentation. Catalog and search
+results have fixed limits, so installed skill and MCP counts do not expand every
+model request.
+
+`SYSTEM.md` and `--system-prompt` replace the bundled instruction template.
+They do not disable the profile's skill and tool presentation policy; reduced
+profiles append only the minimal `skill://` and `xd://` transport instructions
+needed to reach deferred capabilities.
+
 ## Full provider-facing replacement (SDK only)
 
 `CreateAgentSessionOptions.systemPrompt` is a different, lower-level API. A string or array replaces the fully rendered default blocks; a callback receives the rendered block array and returns its replacement. This can omit all generated context and safety blocks.
@@ -146,6 +170,7 @@ The CLI flags and files do **not** set this property: they set `customSystemProm
 | Goal                                                                                   | Use                                                                      |
 | -------------------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
 | Add instructions while keeping the complete default prompt                             | `APPEND_SYSTEM.md` or `--append-system-prompt`                           |
+| Reduce static context while keeping bounded access to enabled skills and tools         | `contextProfile: balanced` or `contextProfile: aggressive`               |
 | Replace the default instruction template but keep generated context, skills, and rules | `SYSTEM.md` or `--system-prompt`                                         |
 | Replace every provider-facing system block                                             | SDK `CreateAgentSessionOptions.systemPrompt`                             |
 | Customize automatic session titles                                                     | `TITLE_SYSTEM.md`                                                        |

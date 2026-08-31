@@ -160,7 +160,12 @@ import { containsOrchestrate, renderOrchestrateNotice } from "../modes/orchestra
 import { theme } from "../modes/theme/theme";
 import { parseTurnBudget } from "../modes/turn-budget";
 import { containsUltrathink, ULTRATHINK_NOTICE } from "../modes/ultrathink";
-import { computeNonMessageTokens } from "../modes/utils/context-usage";
+import { buildNativeToolSchemaFragments, computeNonMessageTokens } from "../modes/utils/context-usage";
+import {
+	combineStaticContextSources,
+	reconcileStaticPromptContextSources,
+	type StaticContextSources,
+} from "../modes/utils/static-context-report";
 import { containsWorkflow, renderWorkflowNotice } from "../modes/workflow";
 import { type PlanApprovalDetails, resolveApprovedPlan } from "../plan-mode/approved-plan";
 import { listPlanFiles, readPlanFile } from "../plan-mode/plan-files";
@@ -497,6 +502,7 @@ export class AgentSession {
 	readonly settings: Settings;
 	/** Entries of tools mounted under `xd://`; empty when virtual devices are unmounted. */
 	getXdevToolEntries: () => Array<{ name: string; summary: string }>;
+	readonly #getStaticPromptContext: NonNullable<AgentSessionConfig["getStaticPromptContext"]>;
 	readonly yieldQueue: YieldQueue;
 	fileSnapshotStore?: InMemorySnapshotStore;
 	/** Per-session `CUT`/`PASTE` clipboard register shared across edit calls. */
@@ -1374,6 +1380,7 @@ export class AgentSession {
 		});
 		this.#convertToLlm = config.convertToLlm ?? convertToLlm;
 		this.getXdevToolEntries = config.getXdevToolEntries ?? (() => []);
+		this.#getStaticPromptContext = config.getStaticPromptContext ?? (() => undefined);
 		const sessionToolsHost: SessionToolsHost = {
 			agent: this.agent,
 			sessionManager: this.sessionManager,
@@ -1413,6 +1420,8 @@ export class AgentSession {
 			builtInToolNames: config.builtInToolNames,
 			mcpManagerToolNames: config.mcpManagerToolNames,
 			presentationPinnedToolNames: config.presentationPinnedToolNames,
+			ensureXdevState: config.ensureXdevState,
+			clearXdevState: config.clearXdevState,
 			ensureWriteRegistered: config.ensureWriteRegistered,
 			isDeviceOnlyWrite: config.isDeviceOnlyWrite,
 			setDeviceOnlyWrite: config.setDeviceOnlyWrite,
@@ -4801,6 +4810,17 @@ export class AgentSession {
 		return this.agent.state.systemPrompt;
 	}
 
+	/** Exact no-message context fragments captured from the latest prompt and tool presentation. */
+	getStaticContextSources(): StaticContextSources | undefined {
+		const capturedPromptSources = this.#getStaticPromptContext();
+		if (!capturedPromptSources) return undefined;
+		const promptSources = reconcileStaticPromptContextSources(capturedPromptSources, this.agent.state.systemPrompt);
+		return combineStaticContextSources(
+			promptSources,
+			buildNativeToolSchemaFragments(this.agent.state.tools, this.model),
+		);
+	}
+
 	/** Marks streamed text as committed or buffered for turn-recovery replay decisions. */
 	setTextOutputCommitted(committed: boolean): void {
 		this.#textOutputCommitted = committed;
@@ -5021,6 +5041,11 @@ export class AgentSession {
 	 */
 	applyInspectImageModeChange(): Promise<boolean> {
 		return this.#tools.reconcileInspectImageTool();
+	}
+
+	/** Applies a context-profile setting change to tools and prompt immediately. */
+	applyContextProfileChange(): Promise<void> {
+		return this.#tools.reconcileContextProfile();
 	}
 
 	/** Cancels the local rollout-memory startup owned by this session. */

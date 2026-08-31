@@ -115,9 +115,9 @@ export interface ResolveContext {
 	localProtocolOptions?: LocalProtocolOptions;
 	/** Calling session's loaded skills. Prefer this over process-global skill state. */
 	skills?: readonly Skill[];
-	/** Session-bound `xd://` documentation resolver. */
+	/** Session-bound `xd://` documentation and catalog resolver. */
 	xd?: {
-		read(name: string | null): Promise<string>;
+		read(name: string | null, query?: string): Promise<string>;
 	};
 	/**
 	 * When set, handlers that would otherwise materialize an expensive directory

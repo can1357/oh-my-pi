@@ -5,9 +5,10 @@
  * tools array and exposed as internal URLs driven through the `read`/`write`
  * tools the model already has:
  *
- *   read  xd://          → mounted tool listing (discovery)
- *   read  xd://<tool>    → tool docs + JSON parameter schema
- *   write xd://<tool>    → execute: `content` is the JSON args object
+ *   read  xd://           → bounded mounted tool listing (discovery)
+ *   read  xd://?q=<term>  → bounded name and summary/description search
+ *   read  xd://<tool>     → tool docs + JSON parameter schema
+ *   write xd://<tool>     → execute: `content` is the JSON args object
  *
  * Direct and device dispatch share one canonical tool map. The mounted-name
  * set controls presentation only; dispatch accepts the enabled union of
@@ -32,9 +33,17 @@
 import type { AgentToolContext, AgentToolResult, AgentToolUpdateCallback, ToolLoadMode } from "@oh-my-pi/pi-agent-core";
 import { type Tool as AiTool, jsonSchemaToTypeScript, toolWireSchema, validateToolArguments } from "@oh-my-pi/pi-ai";
 import { type Component, Container, Text } from "@oh-my-pi/pi-tui";
-import { parseStreamingJson } from "@oh-my-pi/pi-utils";
+import { parseStreamingJson, truncate } from "@oh-my-pi/pi-utils";
+import type { ContextProfile } from "../config/settings";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
-import { XD_URL_PREFIX } from "../internal-urls/xd-protocol";
+import {
+	parseXdUrl,
+	sanitizeDiscoveryLine,
+	XD_URL_PREFIX,
+	xdevAliasId,
+	xdevAliasIdFromReference,
+	xdevToolUrl,
+} from "../internal-urls/xd-protocol";
 import { parseMCPToolName } from "../mcp/tool-bridge";
 import type { Theme } from "../modes/theme/theme";
 import { truncateHeadBytes } from "../session/streaming-output";
@@ -74,14 +83,40 @@ export const XDEV_TRANSPORT_TOOLS: Record<string, true> = { read: true, write: t
 export type XdevDocsMode = "inline" | "builtins" | "catalog";
 
 /**
- * Whether an enabled tool is presented under `xd://` (rather than top-level)
- * while the `xd://` transport is active. Discoverable tools mount unless they
- * are pinned top-level by {@link XDEV_KEEP_TOP_LEVEL} or carry the transport
- * itself ({@link XDEV_TRANSPORT_TOOLS}); essential tools never do. The caller
- * gates this on the transport being active.
+ * These tools have harness integrations keyed to their native tool name.
+ * Mounting them preserves execution but loses todo tracking, interactive
+ * question handling, or provider hard tool choices, so every profile keeps
+ * them native when enabled.
  */
-export function isMountableUnderXdev(tool: { name: string; loadMode?: ToolLoadMode }): boolean {
-	if (tool.name in XDEV_TRANSPORT_TOOLS || tool.name in XDEV_KEEP_TOP_LEVEL) return false;
+const XDEV_INTEGRATED_TOP_LEVEL: Record<string, true> = { todo: true, ask: true, think: true };
+
+const BALANCED_DIRECT_TOOLS: Record<string, true> = {
+	read: true,
+	write: true,
+	bash: true,
+	edit: true,
+	grep: true,
+	glob: true,
+};
+const AGGRESSIVE_DIRECT_TOOLS: Record<string, true> = { read: true, write: true, bash: true };
+
+/**
+ * Whether an enabled tool is presented under `xd://` while the transport is
+ * active. `full` preserves the existing load-mode and pinned-tool behavior.
+ * Reduced profiles keep a small native set plus tools whose harness integration
+ * depends on their native identity, and mount every other enabled tool,
+ * including tools that normally declare themselves essential. Callers still
+ * keep explicitly requested tools top-level.
+ */
+export function isMountableUnderXdev(
+	tool: { name: string; loadMode?: ToolLoadMode },
+	contextProfile: ContextProfile = "full",
+): boolean {
+	if (tool.name in XDEV_TRANSPORT_TOOLS) return false;
+	if (tool.name in XDEV_INTEGRATED_TOP_LEVEL) return false;
+	if (contextProfile === "balanced") return !(tool.name in BALANCED_DIRECT_TOOLS);
+	if (contextProfile === "aggressive") return !(tool.name in AGGRESSIVE_DIRECT_TOOLS);
+	if (tool.name in XDEV_KEEP_TOP_LEVEL) return false;
 	return tool.loadMode === "discoverable";
 }
 
@@ -121,13 +156,13 @@ function schemaDeclaresIntentField(schema: unknown): boolean {
 	return !!props && typeof props === "object" && "i" in props;
 }
 
-function renderDocs(inst: Tool, heading = "#", descriptionCap?: number): string {
+function renderDocs(inst: Tool, heading = "#", descriptionCap?: number, includeExample = false): string {
 	const schema = jsonSchemaToTypeScript(toolWireSchema(inst as AiTool));
 	let description = inst.description ?? "";
 	if (descriptionCap !== undefined && description.length > descriptionCap) {
-		description = `${description.slice(0, descriptionCap).trimEnd()}… (full docs: read ${XD_URL_PREFIX}${inst.name})`;
+		description = `${description.slice(0, descriptionCap).trimEnd()}… (full docs: read ${xdevToolUrl(inst.name)})`;
 	}
-	return [
+	const lines = [
 		`${heading} ${inst.name}${inst.label ? ` — ${inst.label}` : ""}`,
 		"",
 		description,
@@ -136,8 +171,36 @@ function renderDocs(inst: Tool, heading = "#", descriptionCap?: number): string 
 		"```ts",
 		`type Args = ${schema};`,
 		"```",
-		`Execute by writing JSON to ${XD_URL_PREFIX}${inst.name}.`,
-	].join("\n");
+		`Execute by writing JSON to ${xdevToolUrl(inst.name)}.`,
+	];
+	const example = includeExample ? exampleArgs(inst) : undefined;
+	if (example) {
+		lines.push(
+			`Example: write(path="${xdevToolUrl(inst.name)}", content=${JSON.stringify(JSON.stringify(example))}) — one JSON object, newlines inside strings as \\n.`,
+		);
+	}
+	return lines.join("\n");
+}
+
+/** First authored call that validates against the live mounted-tool schema. */
+function exampleArgs(inst: Tool): Record<string, unknown> | undefined {
+	for (const example of inst.examples ?? []) {
+		const authored = "call" in example ? example.call : "good" in example ? example.good : undefined;
+		if (!authored || typeof authored !== "object" || Array.isArray(authored)) continue;
+		const args = { ...authored } as Record<string, unknown>;
+		if (schemaDeclaresIntentField(toolWireSchema(inst as AiTool)) && !("i" in args)) args.i = "…";
+		try {
+			return validateToolArguments(inst as AiTool, {
+				type: "toolCall",
+				id: "xdev-doc-example",
+				name: inst.name,
+				arguments: args,
+			});
+		} catch {
+			// Ignore stale or provider-specific authored examples.
+		}
+	}
+	return undefined;
 }
 
 /**
@@ -157,12 +220,12 @@ function parseDeviceArgs(
 		parsed = JSON.parse(content);
 	} catch (error) {
 		throw new ToolError(
-			`${XD_URL_PREFIX}${device.name} expects a JSON args object as content (${error instanceof Error ? error.message : String(error)}). Write \`?\` for docs.`,
+			`${xdevToolUrl(device.name)} expects a JSON args object as content (${error instanceof Error ? error.message : String(error)}). Write \`?\` for docs.`,
 		);
 	}
 	if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
 		throw new ToolError(
-			`${XD_URL_PREFIX}${device.name} content must be a JSON object, got ${Array.isArray(parsed) ? "array" : typeof parsed}.`,
+			`${xdevToolUrl(device.name)} content must be a JSON object, got ${Array.isArray(parsed) ? "array" : typeof parsed}.`,
 		);
 	}
 	// The harness only injects the intent field into top-level schemas; strip a
@@ -178,7 +241,7 @@ function parseDeviceArgs(
 		});
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
-		throw new ToolError(`Invalid args for ${XD_URL_PREFIX}${device.name}: ${message}\n\n${docs()}`);
+		throw new ToolError(`Invalid args for ${xdevToolUrl(device.name)}: ${message}\n\n${docs()}`);
 	}
 }
 
@@ -219,9 +282,9 @@ function promptCatalogSummary(inst: Tool, maxBytes?: number): string {
 	return sanitizeCatalogSummary(summary, maxBytes) || inst.name;
 }
 
-/** Compile the `tools.xdevInlineDevices` allowlist once per render, dropping
- *  non-string entries so malformed user config cannot break prompt builds. */
-function compileInlineGlobs(patterns: readonly string[]): Bun.Glob[] {
+/** Compile `tools.xdevInlineDevices` globs once per use, dropping malformed
+ * entries so user config cannot break prompt builds. */
+export function compileToolNameGlobs(patterns: readonly string[]): Bun.Glob[] {
 	if (!Array.isArray(patterns)) return [];
 	const globs: Bun.Glob[] = [];
 	for (const pattern of patterns) {
@@ -263,16 +326,51 @@ export const XDEV_DOCS_TOTAL_BUDGET = 48_000;
 export const XDEV_DOCS_PER_DEVICE_CAP = 10_000;
 /** Description cap for external mounted tools; their full docs remain readable on demand. */
 export const XDEV_EXTERNAL_DESCRIPTION_CAP = 200;
+/**
+ * Catalog-row cap in "catalog" mode, where a row exists to say the device is
+ * there and roughly what it does; `read xd://<tool>` carries the rest. A first
+ * clause is enough for that, and the uncapped built-in summaries were the
+ * largest block left in a small-context prompt.
+ */
+export const XDEV_CATALOG_DESCRIPTION_CAP = 90;
+/** Maximum rows returned by `read xd://` and `read xd://?q=<term>`. */
+export const XDEV_DISCOVERY_LIMIT = 50;
+/** Character cap for descriptions returned by xd catalog discovery. */
+export const XDEV_DISCOVERY_DESCRIPTION_LIMIT = 200;
+const XDEV_DISCOVERY_QUERY_DISPLAY_LIMIT = 100;
 
 /** Resolve any enabled tool through the canonical session map. */
 export function resolveXdevTool(state: XdevState, name: string): Tool | undefined {
-	if (!state.mountedNames.has(name) && !state.isActive(name)) return undefined;
-	return state.tools.get(name);
+	if (state.mountedNames.has(name) || state.isActive(name)) return state.tools.get(name);
+	const aliasId = xdevAliasIdFromReference(name);
+	if (!aliasId) return undefined;
+	for (const tool of state.tools.values()) {
+		if (!state.mountedNames.has(tool.name) && !state.isActive(tool.name)) continue;
+		try {
+			encodeURIComponent(tool.name);
+		} catch {
+			if (xdevAliasId(tool.name) === aliasId) return tool;
+		}
+	}
+	return undefined;
 }
 
-/** Resolve a mounted tool for top-level fallback execution. */
+/**
+ * A tool call named after a device path. The compact profile refers to mounted
+ * tools as `xd://grep`, and a local model then calls `xd://grep` as if it were
+ * a tool name (five "Tool not found" results in one benchmark run). The device
+ * is the intended target, so the prefix is accepted here.
+ */
+function stripXdevPrefix(name: string): string {
+	if (!name.startsWith(XD_URL_PREFIX)) return name;
+	const target = parseXdUrl(name);
+	return target?.query === null ? (target.name ?? "") : "";
+}
+
+/** Resolve a mounted tool for top-level fallback execution; accepts `xd://<tool>` as the name. */
 export function resolveMountedXdevTool(state: XdevState, name: string): Tool | undefined {
-	return state.mountedNames.has(name) ? state.tools.get(name) : undefined;
+	const tool = resolveXdevTool(state, stripXdevPrefix(name));
+	return tool && state.mountedNames.has(tool.name) ? tool : undefined;
 }
 
 /** Resolve a mounted tool with its execution-only permission decorator. */
@@ -303,20 +401,63 @@ export function xdevEntries(state: XdevState): Array<{ name: string; summary: st
 	});
 }
 
-/** `read xd://` listing with one device per line. */
-export function xdevListing(state: XdevState): string {
-	const rows = xdevEntries(state).map(({ name, summary }) => `${XD_URL_PREFIX}${name.padEnd(14)} ${summary}`);
-	return [
-		`${XD_URL_PREFIX} ${state.mountedNames.size} mounted tool devices.`,
-		...rows,
+function discoveryCatalogSummary(tool: Tool): string {
+	return truncate(sanitizeDiscoveryLine(toolSummary(tool)), XDEV_DISCOVERY_DESCRIPTION_LIMIT);
+}
+
+/** Bounded, deterministic `read xd://` catalog and `read xd://?q=<term>` search. */
+export function xdevListing(state: XdevState, query?: string): string {
+	const normalizedQuery = query?.trim().toLowerCase();
+	const matches = listXdevTools(state)
+		.filter(tool => {
+			if (!normalizedQuery) return true;
+			return (
+				tool.name.toLowerCase().includes(normalizedQuery) ||
+				(tool.summary ?? "").toLowerCase().includes(normalizedQuery) ||
+				(tool.description ?? "").toLowerCase().includes(normalizedQuery)
+			);
+		})
+		.sort((left, right) => (left.name < right.name ? -1 : left.name > right.name ? 1 : 0));
+	const shown = matches.slice(0, XDEV_DISCOVERY_LIMIT);
+	const lines =
+		normalizedQuery === undefined
+			? [`Mounted tool devices (${shown.length} of ${matches.length})`, `Search with ${XD_URL_PREFIX}?q=<term>.`]
+			: [
+					`Mounted tool devices matching "${truncate(
+						sanitizeDiscoveryLine(query ?? ""),
+						XDEV_DISCOVERY_QUERY_DISPLAY_LIMIT,
+					)}" (${shown.length} of ${matches.length})`,
+				];
+
+	if (shown.length > 0) {
+		lines.push(
+			"",
+			...shown.map(tool => {
+				const summary = discoveryCatalogSummary(tool);
+				return summary ? `${xdevToolUrl(tool.name)} — ${summary}` : xdevToolUrl(tool.name);
+			}),
+		);
+	} else {
+		lines.push("", `No mounted tools matched. Try a different term with ${XD_URL_PREFIX}?q=<term>.`);
+	}
+
+	const omitted = matches.length - shown.length;
+	if (omitted > 0) {
+		lines.push(
+			"",
+			`Results truncated at ${XDEV_DISCOVERY_LIMIT}; ${omitted} omitted. Refine with a narrower ${XD_URL_PREFIX}?q=<term> search.`,
+		);
+	}
+	lines.push(
 		"",
 		`Read ${XD_URL_PREFIX}<tool> for docs + JSON schema; write the JSON args object to ${XD_URL_PREFIX}<tool> to execute. Active top-level tools accept the same dispatch.`,
-	].join("\n");
+	);
+	return lines.join("\n");
 }
 
 /** Docs + schema for any enabled tool. */
 export function xdevDocs(state: XdevState, name: string): string {
-	return renderDocs(resolveRequiredXdevTool(state, name));
+	return renderDocs(resolveRequiredXdevTool(state, name), "#", undefined, true);
 }
 
 /** Docs + schema for mounted devices under the configured prompt-doc policy. */
@@ -324,10 +465,11 @@ export function xdevDocsAll(
 	state: XdevState,
 	mode: XdevDocsMode = "inline",
 	inlinePatterns: readonly string[] = [],
+	compactPresentation = false,
 ): string {
 	const sections: string[] = [];
 	const overflow: Tool[] = [];
-	const inlineGlobs = compileInlineGlobs(inlinePatterns);
+	const inlineGlobs = compileToolNameGlobs(inlinePatterns);
 	let used = 0;
 	for (const tool of listXdevTools(state)) {
 		if (!shouldInlineXdevTool(state, tool, mode, inlineGlobs)) {
@@ -335,7 +477,7 @@ export function xdevDocsAll(
 			continue;
 		}
 		const descriptionCap = state.builtInNames.has(tool.name) ? undefined : XDEV_EXTERNAL_DESCRIPTION_CAP;
-		const docs = renderDocs(tool, "##", descriptionCap);
+		const docs = renderDocs(tool, "##", descriptionCap, compactPresentation);
 		if (docs.length > XDEV_DOCS_PER_DEVICE_CAP || used + docs.length > XDEV_DOCS_TOTAL_BUDGET) {
 			overflow.push(tool);
 			continue;
@@ -344,13 +486,18 @@ export function xdevDocsAll(
 		sections.push(docs);
 	}
 	if (overflow.length > 0) {
+		const boundedCatalog = compactPresentation && mode === "catalog";
+		const visibleOverflow = boundedCatalog ? overflow.slice(0, XDEV_DISCOVERY_LIMIT) : overflow;
+		const catalog = renderOverflowCatalog(state, visibleOverflow, mode, compactPresentation);
+		if (boundedCatalog && overflow.length > visibleOverflow.length) {
+			catalog.push(
+				`- Static catalog truncated at ${XDEV_DISCOVERY_LIMIT} devices; ${overflow.length - visibleOverflow.length} omitted. Search with ${XD_URL_PREFIX}?q=<term>.`,
+			);
+		}
 		sections.push(
 			[
 				"## Additional devices (docs on demand)",
-				...overflow.map(tool => {
-					const maxBytes = state.builtInNames.has(tool.name) ? undefined : XDEV_EXTERNAL_DESCRIPTION_CAP;
-					return `- ${XD_URL_PREFIX}${tool.name} — ${promptCatalogSummary(tool, maxBytes)}`;
-				}),
+				...catalog,
 				"",
 				`Read ${XD_URL_PREFIX}<tool> for full docs + JSON schema before first use.`,
 			].join("\n"),
@@ -359,21 +506,92 @@ export function xdevDocsAll(
 	return sections.join("\n\n");
 }
 
+/**
+ * Catalog rows for devices whose docs are not inlined.
+ *
+ * Compact catalog mode lists a bounded device sample and fetches all docs on
+ * demand. It groups an MCP server's visible tools by name under one heading
+ * instead of spending a summary line on each tool. Built-in devices keep their
+ * one-line summary because there are few of them and names such as `xd://hub`
+ * do not explain their purpose. Full-profile rendering preserves the previous
+ * per-device catalog.
+ */
+/** Shortest mounted-name prefix worth factoring out of an MCP catalog row. */
+const XD_MCP_PREFIX_MIN = "mcp__".length + 1;
+
+function commonPrefix(names: readonly string[]): string {
+	let prefix = names[0] ?? "";
+	for (const name of names.slice(1)) {
+		let k = 0;
+		while (k < prefix.length && k < name.length && prefix[k] === name[k]) k++;
+		prefix = prefix.slice(0, k);
+	}
+	// Cut at the last underscore so the brace list starts on a name boundary.
+	const cut = prefix.lastIndexOf("_");
+	return cut > 0 ? prefix.slice(0, cut + 1) : "";
+}
+
+function renderOverflowCatalog(
+	state: XdevState,
+	overflow: readonly Tool[],
+	mode: XdevDocsMode,
+	compactPresentation: boolean,
+): string[] {
+	const summaryRow = (tool: Tool): string => {
+		const externalCap = state.builtInNames.has(tool.name) ? undefined : XDEV_EXTERNAL_DESCRIPTION_CAP;
+		const maxBytes =
+			compactPresentation && mode === "catalog"
+				? Math.min(externalCap ?? Infinity, XDEV_CATALOG_DESCRIPTION_CAP)
+				: externalCap;
+		return `- ${xdevToolUrl(tool.name)} — ${promptCatalogSummary(tool, maxBytes)}`;
+	};
+	if (mode !== "catalog" || !compactPresentation) return overflow.map(summaryRow);
+
+	const rows: string[] = [];
+	const byServer = new Map<string, string[]>();
+	for (const tool of overflow) {
+		const parsed = state.builtInNames.has(tool.name) ? null : parseMCPToolName(tool.name);
+		if (!parsed) {
+			rows.push(summaryRow(tool));
+			continue;
+		}
+		const names = byServer.get(parsed.serverName);
+		if (names) names.push(tool.name);
+		else byServer.set(parsed.serverName, [tool.name]);
+	}
+	for (const [serverName, names] of byServer) {
+		// One prefix + a brace list instead of the full mounted name per tool:
+		// with a 21-tool server that is ~420 fewer characters on every request.
+		const routes = names.map(xdevToolUrl);
+		const prefix = commonPrefix(names);
+		const canFactor =
+			names.length > 1 &&
+			prefix.length > XD_MCP_PREFIX_MIN &&
+			routes.every((route, index) => route === `${XD_URL_PREFIX}${names[index]}`);
+		const body = canFactor
+			? `${XD_URL_PREFIX}${prefix}{${names.map(name => name.slice(prefix.length)).join("|")}}`
+			: routes.join(", ");
+		rows.push(`- MCP server \`${serverName}\` (${names.length}): ${body}`);
+	}
+	return rows;
+}
+
 /** Docs for selected mounted devices under the configured prompt-doc policy. */
 export function xdevDocsFor(
 	state: XdevState,
 	names: Iterable<string>,
 	mode: XdevDocsMode,
 	inlinePatterns: readonly string[] = [],
+	compactPresentation = false,
 ): string {
 	const sections: string[] = [];
-	const inlineGlobs = compileInlineGlobs(inlinePatterns);
+	const inlineGlobs = compileToolNameGlobs(inlinePatterns);
 	let used = 0;
 	for (const name of names) {
 		const tool = resolveMountedXdevTool(state, name);
 		if (!tool || !shouldInlineXdevTool(state, tool, mode, inlineGlobs)) continue;
 		const descriptionCap = state.builtInNames.has(tool.name) ? undefined : XDEV_EXTERNAL_DESCRIPTION_CAP;
-		const docs = renderDocs(tool, "##", descriptionCap);
+		const docs = renderDocs(tool, "##", descriptionCap, compactPresentation);
 		if (docs.length > XDEV_DOCS_PER_DEVICE_CAP || used + docs.length > XDEV_DOCS_TOTAL_BUDGET) continue;
 		used += docs.length;
 		sections.push(docs);
@@ -397,7 +615,7 @@ function resolveRequiredXdevTool(state: XdevState, name: string): Tool {
 	const inst = resolveXdevTool(state, name);
 	if (!inst) {
 		throw new ToolError(
-			`No such tool: ${XD_URL_PREFIX}${name}. Mounted devices: ${[...state.mountedNames].join(", ")}. Active top-level tools are also dispatchable via ${XD_URL_PREFIX}<tool>.`,
+			`No such tool: ${xdevToolUrl(name)}. Search mounted devices with ${XD_URL_PREFIX}?q=<term>. Active top-level tools are also dispatchable via ${XD_URL_PREFIX}<tool>.`,
 		);
 	}
 	return inst;
@@ -416,15 +634,18 @@ export async function dispatchXdevTool(
 	let xdev: XdevDispatch = { tool: name, mode: "execute" };
 	try {
 		const canonical = resolveRequiredXdevTool(state, name);
+		xdev = { tool: canonical.name, mode: "execute" };
 
 		if (HELP_CONTENT_RE.test(content)) {
 			return {
-				result: { content: [{ type: "text", text: renderDocs(canonical) }] },
-				xdev: { tool: name, mode: "help" },
+				result: { content: [{ type: "text", text: renderDocs(canonical, "#", undefined, true) }] },
+				xdev: { tool: canonical.name, mode: "help" },
 			};
 		}
 
-		const validated = parseDeviceArgs(canonical as AiTool, content, toolCallId, () => renderDocs(canonical));
+		const validated = parseDeviceArgs(canonical as AiTool, content, toolCallId, () =>
+			renderDocs(canonical, "#", undefined, true),
+		);
 		// Record the wrapped tool's approval tier so the prewalk coordinator can
 		// tell a read-only device call (e.g. `lsp` navigation) from a real
 		// workspace mutation without re-decoding the payload. Best-effort: a

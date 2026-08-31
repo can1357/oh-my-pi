@@ -120,6 +120,7 @@ import {
 import { type FileSlashCommand, loadSlashCommands as loadSlashCommandsInternal } from "./extensibility/slash-commands";
 import type { HindsightSessionState } from "./hindsight/state";
 import { LocalProtocolHandler, type LocalProtocolOptions } from "./internal-urls";
+import { XD_URL_PREFIX } from "./internal-urls/xd-protocol";
 import { setSharedLspEnabled } from "./lsp/client";
 import { LSP_STARTUP_EVENT_CHANNEL, type LspStartupEvent } from "./lsp/startup-events";
 import {
@@ -137,6 +138,7 @@ import { createSessionMemoryRuntimeContext, resolveMemoryBackend } from "./memor
 import { MEMORY_BACKEND_TOOL_NAMES } from "./memory-backend/tool-names";
 import type { MnemopiSessionState } from "./mnemopi/state";
 import mcpXdevGuidanceTemplate from "./prompts/system/mcp-xdev-guidance.md" with { type: "text" };
+import mcpXdevGuidanceCompactTemplate from "./prompts/system/mcp-xdev-guidance-compact.md" with { type: "text" };
 import lateDiagnosticTemplate from "./prompts/tools/lsp-late-diagnostic.md" with { type: "text" };
 import { AgentLifecycleManager } from "./registry/agent-lifecycle";
 import { type AgentRef, AgentRegistry, MAIN_AGENT_ID } from "./registry/agent-registry";
@@ -181,6 +183,7 @@ import {
 	buildSystemPrompt as buildSystemPromptInternal,
 	loadProjectContextFiles as loadContextFilesInternal,
 	projectSystemPromptToolMetadata,
+	type StaticPromptContextSources,
 } from "./system-prompt";
 import { AgentOutputManager } from "./task/output-manager";
 import { wrapStreamFnWithProviderConcurrency } from "./task/provider-concurrency";
@@ -3004,6 +3007,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		const eagerTasksAlways = settings.get("task.eager") === "always";
 		const intentField = $flag("PI_INTENT_TRACING", settings.get("tools.intentTracing")) ? INTENT_FIELD : undefined;
 		const includeWorkspaceTree = settings.get("includeWorkspaceTree") ?? false;
+		let latestStaticPromptContext: StaticPromptContextSources | undefined;
 		const rebuildSystemPrompt = async (
 			toolNames: string[],
 			tools: Map<string, AgentTool>,
@@ -3047,17 +3051,21 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			const appendParts: string[] = [];
 			if (memoryInstructions) appendParts.push(memoryInstructions);
 			if (autoLearnInstructions) appendParts.push(autoLearnInstructions);
+			const compactContextProfile = settings.get("contextProfile") !== "full";
 			const projection = projectMountedMCPXdevGuidance(
 				collectMountedMCPToolRoutes(toolSession.xdev ? listXdevTools(toolSession.xdev) : []),
+				compactContextProfile,
 			);
-			if (projection.mappings.length > 0 || projection.hasOmittedMappings) {
+			if (projection.mappings.length > 0 || projection.ruleServerNames.length > 0 || projection.hasOmittedMappings) {
 				appendParts.push(
 					prompt
-						.render(mcpXdevGuidanceTemplate, {
+						.render(compactContextProfile ? mcpXdevGuidanceCompactTemplate : mcpXdevGuidanceTemplate, {
 							tools: projection.mappings.map(mapping => ({
 								mcpToolName: mapping.label,
 								path: mapping.path,
 							})),
+							ruleServers: projection.ruleServerLabels,
+							xdPrefix: XD_URL_PREFIX,
 							hasOmittedTools: projection.hasOmittedMappings,
 						})
 						.trim(),
@@ -3093,7 +3101,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				additionalWorkspaceRoots: sessionManager.getAdditionalDirectories(),
 				xdevTools: toolSession.xdev ? xdevEntries(toolSession.xdev) : [],
 				xdevDocs: toolSession.xdev
-					? xdevDocsAll(toolSession.xdev, settings.get("tools.xdevDocs"), settings.get("tools.xdevInlineDevices"))
+					? xdevDocsAll(
+							toolSession.xdev,
+							compactContextProfile ? "catalog" : settings.get("tools.xdevDocs"),
+							settings.get("tools.xdevInlineDevices"),
+							compactContextProfile,
+						)
 					: "",
 				resolvedCustomPrompt: options.customSystemPrompt,
 				skills: session?.skills ?? skills,
@@ -3128,20 +3141,28 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				model: getActiveModelString(),
 				includeModelInPrompt: settings.get("includeModelInPrompt"),
 				personality: agentKind === "sub" ? "none" : settings.get("personality"),
+				contextProfile: settings.get("contextProfile"),
 				renderMermaid: settings.get("tui.renderMermaid"),
 				activeRepoContext,
 			});
 
 			if (options.systemPrompt === undefined) {
+				latestStaticPromptContext = defaultPrompt.staticContext;
 				return defaultPrompt;
 			}
 			const customPrompt =
 				typeof options.systemPrompt === "function"
 					? options.systemPrompt(defaultPrompt.systemPrompt)
 					: options.systemPrompt;
-			return {
-				systemPrompt: typeof customPrompt === "string" ? [customPrompt] : customPrompt,
+			const systemPrompt = typeof customPrompt === "string" ? [customPrompt] : customPrompt;
+			const staticContext: StaticPromptContextSources = {
+				completeSystemPrompt: systemPrompt,
+				renderedSystemTemplate: systemPrompt,
+				projectContextBlocks: [],
+				skillCatalog: [],
 			};
+			latestStaticPromptContext = staticContext;
+			return { systemPrompt, staticContext };
 		};
 
 		const toolNamesFromRegistry = Array.from(toolRegistry.keys());
@@ -3273,7 +3294,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			for (const name of initialToolNames) {
 				const tool = toolRegistry.get(name);
 				const explicitlyRequested = explicitlyRequestedToolNameSet?.has(name) === true;
-				if (tool && xdevReadAvailable && xdevWriteAvailable && !explicitlyRequested && isMountableUnderXdev(tool))
+				if (
+					tool &&
+					xdevReadAvailable &&
+					xdevWriteAvailable &&
+					!explicitlyRequested &&
+					isMountableUnderXdev(tool, settings.get("contextProfile"))
+				)
 					mountedNames.push(name);
 				else topLevelToolNames.push(name);
 			}
@@ -3687,7 +3714,24 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			convertToLlm: convertToLlmFinal,
 			rebuildSystemPrompt,
 			getXdevToolEntries: () => (toolSession.xdev ? xdevEntries(toolSession.xdev) : []),
+			getStaticPromptContext: () => latestStaticPromptContext,
 			xdev: toolSession.xdev,
+			ensureXdevState: restrictToolNames
+				? undefined
+				: () => {
+						if (!toolSession.xdev) {
+							toolSession.xdev = {
+								tools: toolRegistry,
+								mountedNames: new Set(),
+								builtInNames: new Set(builtInRegistryToolNames),
+								isActive: name => toolSession.isToolActive?.(name) === true,
+							};
+						}
+						return toolSession.xdev;
+					},
+			clearXdevState: state => {
+				if (toolSession.xdev === state) toolSession.xdev = undefined;
+			},
 			presentationPinnedToolNames: explicitlyRequestedToolNameSet,
 			setActiveToolNames: setSessionActiveToolNames,
 			ensureWriteRegistered,
@@ -3811,7 +3855,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						builtInRegistryToolNames.has("write") &&
 						enabled.includes("read") &&
 						(enabled.includes("write") || toolSession.deviceOnlyWrite === true) &&
-						isMountableUnderXdev(liveTool);
+						isMountableUnderXdev(liveTool, settings.get("contextProfile"));
 					const nextMounted = shouldMount
 						? mounted.includes(name)
 							? mounted

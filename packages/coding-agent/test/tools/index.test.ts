@@ -68,6 +68,22 @@ describe("createTools", () => {
 		expect(names).not.toContain("vim");
 	});
 
+	it("preserves the enabled capability set under reduced profiles", async () => {
+		const baselineSession = createTestSession({
+			settings: createSettingsWithOverrides({ "tools.xdev": false, contextProfile: "full" }),
+		});
+		const baseline = (await createTools(baselineSession)).map(tool => tool.name).sort();
+
+		for (const contextProfile of ["balanced", "aggressive"] as const) {
+			const session = createTestSession({
+				settings: createSettingsWithOverrides({ "tools.xdev": false, contextProfile }),
+			});
+			const topLevel = (await createTools(session)).map(tool => tool.name);
+			const mounted = [...(session.xdev?.mountedNames ?? [])];
+			expect([...new Set([...topLevel, ...mounted])].sort()).toEqual(baseline);
+		}
+	});
+
 	it("normalizes legacy explicit tool names", async () => {
 		const session = createTestSession({
 			settings: createSettingsWithOverrides({ "astGrep.enabled": false }),

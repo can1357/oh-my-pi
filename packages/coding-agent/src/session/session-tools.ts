@@ -13,7 +13,7 @@ import type { ExtensionRunner, SourceInfo, ToolInfo } from "../extensibility/ext
 import { ExtensionToolWrapper } from "../extensibility/extensions/wrapper";
 import { loadSkills, type Skill, type SkillWarning, setActiveSkills } from "../extensibility/skills";
 import { type LocalProtocolOptions, XD_URL_PREFIX } from "../internal-urls";
-import { deduplicateMCPToolsByName } from "../mcp/tool-bridge";
+import { createMCPToolName, deduplicateMCPToolsByName } from "../mcp/tool-bridge";
 import { resolveMemoryBackend } from "../memory-backend/resolve";
 import { MEMORY_BACKEND_TOOL_NAMES } from "../memory-backend/tool-names";
 import type { MemoryBackendStartOptions } from "../memory-backend/types";
@@ -25,7 +25,14 @@ import { wrapToolWithMetaNotice } from "../tools/output-meta";
 import { isFilesystemSourcePath } from "../tools/path-utils";
 import { supportsExternalThinking } from "../tools/think";
 import { ToolAbortError, ToolError } from "../tools/tool-errors";
-import { isMountableUnderXdev, listXdevTools, type XdevState, xdevDocsFor, xdevEntries } from "../tools/xdev";
+import {
+	isMountableUnderXdev,
+	listXdevTools,
+	XDEV_DISCOVERY_LIMIT,
+	type XdevState,
+	xdevDocsFor,
+	xdevEntries,
+} from "../tools/xdev";
 import { type EditMode, resolveEditMode } from "../utils/edit-mode";
 import { type InspectImageMode, isInspectImageToolActive } from "../utils/inspect-image-mode";
 import {
@@ -96,6 +103,8 @@ interface SessionToolsOptions {
 	) => Promise<{ systemPrompt: string[]; xdevCatalogNames?: readonly string[] }>;
 	getMcpServerInstructions?: () => Map<string, string> | undefined;
 	xdev?: XdevState;
+	ensureXdevState?: () => XdevState | undefined;
+	clearXdevState?: (state: XdevState) => void;
 	setActiveToolNames?: (names: Iterable<string>) => void;
 	baseSystemPrompt: string[];
 	skills?: Skill[];
@@ -122,12 +131,32 @@ export interface MCPXdevGuidanceMapping extends MountedMCPToolRoute {
 }
 
 export interface MCPXdevGuidanceProjection {
+	/** Routes whose path the naming rule cannot produce, listed one by one. */
 	readonly mappings: readonly MCPXdevGuidanceMapping[];
 	readonly hasOmittedMappings: boolean;
+	/**
+	 * Servers whose every mounted route the naming rule reproduces exactly, so
+	 * the prompt states the rule once instead of one line per tool. A server
+	 * with even one deviating route stays out and its routes are listed.
+	 */
+	readonly ruleServerNames: readonly string[];
+	/** Markdown-safe JSON labels corresponding to {@link ruleServerNames}. */
+	readonly ruleServerLabels: readonly string[];
+	/**
+	 * Sorted names of the routes {@link ruleServerNames} covers, bounded by the
+	 * same cap as {@link mappings}. Not rendered: the rule replaces them in the
+	 * guidance. It exists so the applied-tool signature still notices a tool
+	 * appearing on or leaving an already-covered server — the rule text alone
+	 * does not change when a server gains its second tool, but the `xd://`
+	 * catalog that lists it does.
+	 */
+	readonly ruleRouteNames: readonly string[];
 }
 
 const MAX_MCP_XDEV_GUIDANCE_MAPPING_DATA_LENGTH = 4000;
 const MAX_MCP_XDEV_GUIDANCE_MAPPINGS = 64;
+const MAX_MCP_XDEV_GUIDANCE_RULE_SERVERS = 50;
+const MAX_MCP_TOOL_NAME_LENGTH = 64;
 
 /** Yield exact mounted MCP ownership and route metadata. */
 export function* collectMountedMCPToolRoutes(
@@ -154,11 +183,72 @@ function formatMCPXdevGuidanceLabel(label: string): string {
  * Project exact live MCP routes into the bounded, Markdown-safe mapping data
  * rendered by the static MCP guidance prompt.
  */
-export function projectMountedMCPXdevGuidance(routes: Iterable<MountedMCPToolRoute>): MCPXdevGuidanceProjection {
+export function projectMountedMCPXdevGuidance(
+	routes: Iterable<MountedMCPToolRoute>,
+	compact = false,
+): MCPXdevGuidanceProjection {
 	const mappings: MCPXdevGuidanceMapping[] = [];
 	let remainingMappingDataLength = MAX_MCP_XDEV_GUIDANCE_MAPPING_DATA_LENGTH;
 	let hasOmittedMappings = false;
-	for (const route of routes) {
+	// `createMCPToolName` derives a mounted name from (server, tool). When it
+	// reproduces the live name, the prompt can state that rule once for the
+	// whole server instead of spending a line per tool: with two MCP servers
+	// mounted that is the difference between three lines and thirty. Sanitizing,
+	// redundant-prefix stripping, and the 64-char hash cap can all make a name
+	// underivable, so any server with a single deviating route is excluded and
+	// its routes are listed explicitly.
+	const materialized = [...routes];
+	if (!compact) {
+		for (const route of materialized) {
+			const label = formatMCPXdevGuidanceLabel(route.mcpToolName);
+			const path = `${XD_URL_PREFIX}${route.name}`;
+			const mappingDataLength = label.length + path.length;
+			if (mappings.length >= MAX_MCP_XDEV_GUIDANCE_MAPPINGS || mappingDataLength > remainingMappingDataLength) {
+				hasOmittedMappings = true;
+				continue;
+			}
+			mappings.push({ ...route, label, path });
+			remainingMappingDataLength -= mappingDataLength;
+		}
+		return {
+			mappings,
+			hasOmittedMappings,
+			ruleServerNames: [],
+			ruleServerLabels: [],
+			ruleRouteNames: [],
+		};
+	}
+	const deviatingServerNames = new Set<string>();
+	const candidateServerNames = new Set<string>();
+	for (const route of materialized) {
+		candidateServerNames.add(route.mcpServerName);
+		// A 64-byte minted name can carry the implementation's hash suffix. The
+		// model cannot derive that suffix from the documented naming rule, so
+		// list the live route explicitly. Treating an unhashed name of exactly
+		// 64 characters the same way is conservative and still exact.
+		if (
+			createMCPToolName(route.mcpServerName, route.mcpToolName) !== route.name ||
+			route.name.length >= MAX_MCP_TOOL_NAME_LENGTH
+		) {
+			deviatingServerNames.add(route.mcpServerName);
+		}
+	}
+	const derivableServerNames = [...candidateServerNames].filter(name => !deviatingServerNames.has(name)).sort();
+	const ruleServerNames: string[] = [];
+	const ruleServerLabels: string[] = [];
+	for (const serverName of derivableServerNames) {
+		const label = formatMCPXdevGuidanceLabel(serverName);
+		if (ruleServerNames.length >= MAX_MCP_XDEV_GUIDANCE_RULE_SERVERS || label.length > remainingMappingDataLength) {
+			hasOmittedMappings = true;
+			continue;
+		}
+		ruleServerNames.push(serverName);
+		ruleServerLabels.push(label);
+		remainingMappingDataLength -= label.length;
+	}
+	const selectedRuleServerNames = new Set(ruleServerNames);
+	for (const route of materialized) {
+		if (!deviatingServerNames.has(route.mcpServerName)) continue;
 		const rawMappingDataLength = route.mcpToolName.length + XD_URL_PREFIX.length + route.name.length;
 		if (mappings.length >= MAX_MCP_XDEV_GUIDANCE_MAPPINGS || rawMappingDataLength > remainingMappingDataLength) {
 			hasOmittedMappings = true;
@@ -174,7 +264,11 @@ export function projectMountedMCPXdevGuidance(routes: Iterable<MountedMCPToolRou
 		mappings.push({ ...route, label, path });
 		remainingMappingDataLength -= mappingDataLength;
 	}
-	return { mappings, hasOmittedMappings };
+	const ruleRouteNames = materialized
+		.filter(route => selectedRuleServerNames.has(route.mcpServerName))
+		.map(route => route.name)
+		.slice(0, XDEV_DISCOVERY_LIMIT);
+	return { mappings, hasOmittedMappings, ruleServerNames, ruleServerLabels, ruleRouteNames };
 }
 
 const XDEV_MOUNT_NOTICE_MESSAGE_TYPE = "xdev-mount-notice";
@@ -207,6 +301,8 @@ export class SessionTools {
 	#extensionMcpTools = new Map<string, AgentTool>();
 	#xdev: XdevState | undefined;
 	#pendingXdevMountDelta: { added: Set<string>; removed: Set<string> } | undefined;
+	#ensureXdevState: SessionToolsOptions["ensureXdevState"];
+	#clearXdevState: SessionToolsOptions["clearXdevState"];
 	/**
 	 * Dynamic (`xd://`) devices the model has already been told are mounted.
 	 * Seeded lazily from persisted history on resume (see
@@ -296,6 +392,8 @@ export class SessionTools {
 		this.#rebuildSystemPrompt = options.rebuildSystemPrompt;
 		this.#getMcpServerInstructions = options.getMcpServerInstructions;
 		this.#xdev = options.xdev;
+		this.#ensureXdevState = options.ensureXdevState;
+		this.#clearXdevState = options.clearXdevState;
 		if (this.#xdev && this.#xdev.tools !== this.#toolRegistry) {
 			throw new Error("xd:// state must reference the canonical session tool map");
 		}
@@ -725,6 +823,30 @@ export class SessionTools {
 		});
 	}
 
+	/** Repartitions the enabled tools and rebuilds the prompt for a profile change. */
+	reconcileContextProfile(): Promise<void> {
+		return this.runToolRegistryMutation(async () => {
+			const contextProfile = this.#host.settings.get("contextProfile");
+			if (contextProfile !== "full" && !this.#xdev) {
+				const xdev = this.#ensureXdevState?.();
+				if (xdev) {
+					if (xdev.tools !== this.#toolRegistry) {
+						throw new Error("xd:// state must reference the canonical session tool map");
+					}
+					xdev.decorateExecution = tool => this.#wrapToolForAcpPermission(tool);
+					this.#xdev = xdev;
+				}
+			}
+			const releasableXdev =
+				contextProfile === "full" && !this.#host.settings.get("tools.xdev") ? this.#xdev : undefined;
+			await this.#applyActiveToolsByName(this.getEnabledToolNames(), true);
+			if (releasableXdev && this.#xdev === releasableXdev) {
+				this.#clearXdevState?.(releasableXdev);
+				this.#xdev = undefined;
+			}
+		});
+	}
+
 	/** Enabled MCP tools in their current presentation partition. */
 	getSelectedMCPToolNames(): string[] {
 		// Every connected MCP tool is enabled; presentation (top-level vs xd://) is
@@ -906,13 +1028,16 @@ export class SessionTools {
 			(selectedTools.some(({ name }) => name === "write") || this.#deviceOnlyWriteTransportAvailable);
 		const isPresentationPinned = (name: string): boolean =>
 			this.#presentationPinnedToolNames?.has(name) === true || this.#runtimeSelectedToolNames?.has(name) === true;
+		const contextProfile = this.#host.settings.get("contextProfile");
+		const xdevPresentationEnabled = this.#host.settings.get("tools.xdev") || contextProfile !== "full";
 		const mountCandidates = selectedTools.filter(
 			({ name, tool }) =>
+				xdevPresentationEnabled &&
 				this.#xdev !== undefined &&
 				xdevReadAvailable &&
 				xdevWriteAvailable &&
 				!isPresentationPinned(name) &&
-				isMountableUnderXdev(tool),
+				isMountableUnderXdev(tool, contextProfile),
 		);
 		const mountNames = new Set(mountCandidates.map(({ name }) => name));
 		// Demoted tools stay reachable through the eval bridge, so nothing is
@@ -1235,8 +1360,11 @@ export class SessionTools {
 			? xdevDocsFor(
 					this.#xdev,
 					new Set(addedNames),
-					this.#host.settings.get("tools.xdevDocs"),
+					this.#host.settings.get("contextProfile") === "full"
+						? this.#host.settings.get("tools.xdevDocs")
+						: "catalog",
 					this.#host.settings.get("tools.xdevInlineDevices"),
+					this.#host.settings.get("contextProfile") !== "full",
 				)
 			: "";
 		for (const name of addedNames) this.#announcedMounts.add(name);
@@ -1701,13 +1829,24 @@ export class SessionTools {
 		const describeTool = (tool: AgentTool): string =>
 			`${tool.name}=${tool.label ?? ""}|${tool.description ?? ""}|${tool.customWireName ?? ""}`;
 		const descriptionSegment = tools.map(describeTool).join("\u0002");
+		const mountedXdevTools = this.#xdev ? listXdevTools(this.#xdev) : [];
+		const compactContextProfile = this.#host.settings.get("contextProfile") !== "full";
 		const mountedMCPProjection = projectMountedMCPXdevGuidance(
-			collectMountedMCPToolRoutes(this.#xdev ? listXdevTools(this.#xdev) : []),
+			collectMountedMCPToolRoutes(mountedXdevTools),
+			compactContextProfile,
 		);
 		const mountedMCPRouteSegment =
 			JSON.stringify({
 				mappings: mountedMCPProjection.mappings.map(mapping => [mapping.label, mapping.path] as const),
 				hasOmittedMappings: mountedMCPProjection.hasOmittedMappings,
+				// Reduced profiles render the first bounded xd:// catalog page in
+				// insertion order. Sign that exact projection so changes within the
+				// visible page rebuild while churn behind the cap does not.
+				catalogRouteNames: compactContextProfile
+					? mountedXdevTools.slice(0, XDEV_DISCOVERY_LIMIT).map(tool => tool.name)
+					: [],
+				ruleServerNames: mountedMCPProjection.ruleServerNames,
+				ruleRouteNames: mountedMCPProjection.ruleRouteNames,
 			}) ?? "{}";
 		const serverInstructions = this.#getMcpServerInstructions?.();
 		let instructionsSegment = "";
@@ -1720,12 +1859,10 @@ export class SessionTools {
 			entries.sort();
 			instructionsSegment = entries.join("\u0006");
 		}
-		// The non-MCP remainder of the xd:// inventory is deliberately NOT part
-		// of the signature: its mount/unmount announces itself through
-		// `#notifyXdevMountDelta` rather than rewriting the system prompt, keeping
-		// the provider cache prefix byte-stable. Mounted MCP routes are the narrow
-		// exception above, bounded to the exact projection rendered in the global
-		// route guidance so churn wholly behind its fallback does not rebuild.
+		// Full-profile non-MCP mount changes announce themselves through
+		// `#notifyXdevMountDelta` instead of rewriting the static prompt. Reduced
+		// profiles sign their bounded visible catalog above because it is rendered
+		// directly into the prompt.
 		// Direct Code Mode names render the restricted tool inventory, so a
 		// `codeModeDirectTools` change must rebuild even when the enabled set is
 		// unchanged.

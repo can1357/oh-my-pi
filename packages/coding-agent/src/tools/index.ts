@@ -736,7 +736,8 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 	const builtInNames = new Set(tools.map(tool => tool.name));
 	for (const tool of tools) toolRegistry.set(tool.name, tool);
 
-	const xdevRequested = !restrictToolNames && session.settings.get("tools.xdev");
+	const contextProfile = session.settings.get("contextProfile");
+	const xdevRequested = !restrictToolNames && (session.settings.get("tools.xdev") || contextProfile !== "full");
 	// xd:// mounting rides the write tool as its execution transport, so a
 	// session whose explicit tool list grants `read` but omits `write` would
 	// allocate no xd:// state and expose every later-registered MCP/extension
@@ -775,7 +776,8 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 		const mountedNames = new Set<string>();
 		const kept: Tool[] = [];
 		for (const tool of tools) {
-			const mountable = mountBuiltinTools && isMountableUnderXdev(tool) && tool.name in BUILTIN_TOOLS;
+			const mountable =
+				mountBuiltinTools && isMountableUnderXdev(tool, contextProfile) && tool.name in BUILTIN_TOOLS;
 			if (mountable) mountedNames.add(tool.name);
 			else kept.push(tool);
 		}

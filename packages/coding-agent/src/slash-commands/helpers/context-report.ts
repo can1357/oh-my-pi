@@ -1,6 +1,22 @@
 import { computeContextBreakdown } from "../../modes/utils/context-usage";
+import { buildStaticContextReport, formatStaticContextReport } from "../../modes/utils/static-context-report";
 import type { SlashCommandRuntime } from "../types";
 import { renderAsciiBar } from "./format";
+
+function appendStaticContextReport(lines: string[], runtime: SlashCommandRuntime, contextWindowTokens?: number): void {
+	const sources = runtime.session.getStaticContextSources();
+	if (!sources) return;
+	lines.push(
+		"",
+		formatStaticContextReport(
+			buildStaticContextReport({
+				sources,
+				tokenizer: runtime.session.agent.tokenizer,
+				contextWindowTokens,
+			}),
+		),
+	);
+}
 
 /**
  * Build the `/context` ACP-mode text. Tries the rich breakdown first
@@ -11,7 +27,9 @@ export function buildContextReportText(runtime: SlashCommandRuntime): string {
 	try {
 		const breakdown = computeContextBreakdown(runtime.session, { snapcompactSavings: true });
 		if (breakdown.contextWindow <= 0) {
-			return "Context usage is unavailable: no model is selected for this session.";
+			const lines = ["Context usage is unavailable: no model is selected for this session."];
+			appendStaticContextReport(lines, runtime);
+			return lines.join("\n");
 		}
 		const usedPct = Math.round((breakdown.usedTokens / breakdown.contextWindow) * 100);
 		const lines = [`Context window: ${breakdown.contextWindow} tokens (${usedPct}% used)`];
@@ -30,6 +48,7 @@ export function buildContextReportText(runtime: SlashCommandRuntime): string {
 			const fraction = breakdown.freeTokens / breakdown.contextWindow;
 			lines.push(`  ${"Free".padEnd(16)} ${renderAsciiBar(fraction)}  ${breakdown.freeTokens} tokens`);
 		}
+		appendStaticContextReport(lines, runtime, breakdown.contextWindow);
 		const snap = breakdown.snapcompact;
 		if (snap) {
 			if (!snap.visionCapable) {

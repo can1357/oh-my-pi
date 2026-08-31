@@ -10,6 +10,7 @@ import { type } from "@oh-my-pi/omptype";
 import { Tokenizer } from "@oh-my-pi/pi-agent-core";
 import { arkToWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import {
+	buildNativeToolSchemaFragments,
 	type ContextBreakdown,
 	computeNonMessageBreakdown,
 	computeNonMessageTokens,
@@ -96,6 +97,48 @@ describe("estimateToolSchemaTokens", () => {
 			tokenizer,
 		);
 		expect(estimate).toBeGreaterThan(0);
+	});
+
+	it("accounts for a custom tool's provider wire name and grammar instead of its JSON function shape", () => {
+		const fragments = buildNativeToolSchemaFragments(
+			[
+				{
+					name: "edit",
+					customWireName: "apply_patch",
+					description: "Apply a patch",
+					parameters: type({ input: "string" }),
+					customFormat: { syntax: "lark", definition: 'start: "PATCH" LF\nLF: /\\n/' },
+				},
+			],
+			{ api: "openai-responses", applyPatchToolType: "freeform" } as never,
+		);
+		const wire = fragments.join("\n");
+
+		expect(wire).toContain("apply_patch");
+		expect(wire).toContain('"syntax":"lark"');
+		expect(wire).toContain('"definition":"start: \\"PATCH\\" LF');
+		expect(wire).not.toContain('"input"');
+		expect(wire).not.toContain("\nedit\n");
+	});
+
+	it("keeps custom-format tools as JSON functions for providers that do not emit custom grammar tools", () => {
+		const fragments = buildNativeToolSchemaFragments(
+			[
+				{
+					name: "edit",
+					customWireName: "apply_patch",
+					description: "Apply a patch",
+					parameters: type({ input: "string" }),
+					customFormat: { syntax: "lark", definition: 'start: "PATCH"' },
+				},
+			],
+			{ api: "anthropic-messages", applyPatchToolType: "freeform" } as never,
+		);
+		const wire = fragments.join("\n");
+
+		expect(wire).toContain("edit");
+		expect(wire).toContain('"input"');
+		expect(wire).not.toContain("apply_patch");
 	});
 });
 
@@ -221,8 +264,13 @@ describe("computeNonMessageBreakdown skills filtering", () => {
 	// First prompt block as rendered: only the visible skill appears.
 	const renderedPrompt = "You are an agent.\nSkills:\n- vis: small visible skill\n";
 
-	function session(tools: unknown[], skills: unknown[]) {
-		return { systemPrompt: [renderedPrompt], agent: { state: { tools } }, skills } as never;
+	function session(tools: unknown[], skills: unknown[], contextProfile: "full" | "balanced" | "aggressive" = "full") {
+		return {
+			systemPrompt: [renderedPrompt],
+			agent: { state: { tools } },
+			skills,
+			settings: { get: () => contextProfile },
+		} as never;
 	}
 
 	it("excludes hidden skills and does not clamp System prompt to 0", () => {
@@ -237,6 +285,14 @@ describe("computeNonMessageBreakdown skills filtering", () => {
 		const b = computeNonMessageBreakdown(session([], [hidden, visible]), tokenizer);
 		expect(b.skillsTokens).toBe(0);
 		expect(b.systemPromptTokens).toBe(computeNonMessageBreakdown(session([], []), tokenizer).systemPromptTokens);
+	});
+
+	it("counts zero Skills tokens when a reduced profile uses discovery instead of eager skill metadata", () => {
+		const b = computeNonMessageBreakdown(session([readTool], [visible], "balanced"), tokenizer);
+		expect(b.skillsTokens).toBe(0);
+		expect(b.systemPromptTokens).toBe(
+			computeNonMessageBreakdown(session([readTool], []), tokenizer).systemPromptTokens,
+		);
 	});
 });
 

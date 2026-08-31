@@ -34,6 +34,7 @@ import type { ContextUsage } from "../extensibility/extensions/types";
 import type { Skill, SkillWarning } from "../extensibility/skills";
 import type { FileSlashCommand } from "../extensibility/slash-commands";
 import type { SecretObfuscator } from "../secrets/obfuscator";
+import type { StaticPromptContextSources } from "../system-prompt";
 import type { ConfiguredThinkingLevel } from "../thinking";
 import type { XdevState } from "../tools/xdev";
 import type { CodexAutoRedeemCoordinator } from "./codex-auto-reset";
@@ -230,10 +231,16 @@ export interface AgentSessionConfig {
 		toolNames: string[],
 		tools: Map<string, AgentTool>,
 	) => Promise<{ systemPrompt: string[]; xdevCatalogNames?: readonly string[] }>;
+	/** Exact prompt fragments captured by the latest system-prompt rebuild. */
+	getStaticPromptContext?: () => StaticPromptContextSources | undefined;
 	/** Tools mounted under `xd://`, for `/tools` display. */
 	getXdevToolEntries?: () => Array<{ name: string; summary: string }>;
 	/** `xd://` presentation state backed by the canonical tool map. */
 	xdev?: XdevState;
+	/** Lazily allocate shared `xd://` state when a reduced profile enables the transport at runtime. */
+	ensureXdevState?: () => XdevState | undefined;
+	/** Release lazily allocated `xd://` state after full-profile repartitioning disables the transport. */
+	clearXdevState?: (state: XdevState) => void;
 	/** Names pinned top-level during runtime repartitioning. */
 	presentationPinnedToolNames?: ReadonlySet<string>;
 	/** Accessor for live MCP server instructions. */
