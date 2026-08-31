@@ -555,10 +555,13 @@ async function handleFormatEndpoint(
 		});
 		logger.debug("auth-gateway route decision", redactedDecisionSummary(skipped));
 		bootOpts.storage.clearQuotaProbe(requestId);
+		const coolingDown = bootOpts.storage.hasCoolingDownCredentials(model.provider, model.id);
 		return route.module.formatError(
-			401,
-			"authentication_error",
-			`No credential available for provider ${model.provider}`,
+			coolingDown ? 429 : 401,
+			coolingDown ? "rate_limit_error" : "authentication_error",
+			coolingDown
+				? `All credentials for provider ${model.provider} are temporarily unavailable (quota or probe lease)`
+				: `No credential available for provider ${model.provider}`,
 		);
 	}
 	const dispatched = traces.record({
@@ -793,10 +796,13 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 		});
 		logger.debug("auth-gateway route decision", redactedDecisionSummary(skipped));
 		bootOpts.storage.clearQuotaProbe(requestId);
+		const coolingDown = bootOpts.storage.hasCoolingDownCredentials(model.provider, model.id);
 		return piNative.formatError(
-			401,
-			"authentication_error",
-			`No credential available for provider ${model.provider}`,
+			coolingDown ? 429 : 401,
+			coolingDown ? "rate_limit_error" : "authentication_error",
+			coolingDown
+				? `All credentials for provider ${model.provider} are temporarily unavailable (quota or probe lease)`
+				: `No credential available for provider ${model.provider}`,
 		);
 	}
 	const dispatched = traces.record({

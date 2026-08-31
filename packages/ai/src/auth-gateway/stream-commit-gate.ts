@@ -197,6 +197,13 @@ export function holdSseUntilCommit(
 					pending = next.rest;
 					next = nextSseFrame(pending);
 					if (state === "terminated") {
+						if (gate.sawSuccessfulTerminal) {
+							// Metadata-only success (created → completed/incomplete):
+							// flush the held prelude and finish without failover.
+							committed = true;
+							for (const held of gate.takePrelude() ?? []) controller.enqueue(held);
+							return;
+						}
 						// Dead attempt: its held frames belong to it and are never
 						// forwarded. The failover loop catches PreludeAbortedError,
 						// discards them, and dispatches a replacement attempt.

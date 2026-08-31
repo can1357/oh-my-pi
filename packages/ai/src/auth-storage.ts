@@ -216,6 +216,8 @@ export interface StoredCredentialBlock {
 	blockScope: string;
 	/** Epoch milliseconds. */
 	blockedUntilMs: number;
+	/** True when the block came from a provider Retry-After / usage wait window. */
+	retryAfter?: boolean;
 	/** Last row update timestamp in epoch milliseconds, when provided by the backing store. */
 	updatedAtMs?: number;
 }
@@ -1892,6 +1894,16 @@ export class AuthStorage {
 		return blockedUntil;
 	}
 
+
+	/** Re-apply Retry-After provenance from durable blocks after restart / peer reload. */
+	#hydrateRetryAfterProvenanceFromStore(credentialId: number): void {
+		for (const block of this.listCredentialBlocks([credentialId])) {
+			if (!block.retryAfter) continue;
+			if (block.blockedUntilMs <= Date.now()) continue;
+			this.#probeLeases.noteRetryAfterBlock(credentialId, block.blockScope, block.blockedUntilMs);
+		}
+	}
+
 	#readPersistedCredentialBlock(
 		credentialId: number,
 		providerKey: string,
@@ -1959,6 +1971,7 @@ export class AuthStorage {
 
 		const credentialId = this.#getStoredCredentials(provider)[credentialIndex]?.id;
 		if (credentialId === undefined) return blockedUntil;
+		this.#hydrateRetryAfterProvenanceFromStore(credentialId);
 		const persistedGlobalBlockedUntil = this.#readPersistedCredentialBlock(credentialId, providerKey, "");
 		if (
 			persistedGlobalBlockedUntil !== undefined &&
@@ -2022,6 +2035,7 @@ export class AuthStorage {
 				providerKey,
 				blockScope: blockScope ?? "",
 				blockedUntilMs: nextBlockedUntil,
+				retryAfter: this.#probeLeases.isRetryAfterSourced(credentialId, blockScope ?? ""),
 			});
 		} catch (err) {
 			if (this.#handlePersistedBlockStoreError(err)) return;
@@ -5607,13 +5621,9 @@ export class AuthStorage {
 					blockScope: probeScope,
 					leaseId: lease,
 				});
-			} else if (
-				this.#probeLeases.isRetryAfterSourced(blockedId, probeScope) ||
-				this.#probeLeases.isRetryAfterSourced(blockedId, requestedProbeScope)
-			) {
-				// allowBlocked fallback must still honor active Retry-After (including a
-				// global workspace block while selection asks for chat/spark): never vend
-				// without a probe lease while the provider-imposed wait is live.
+			} else {
+				// allowBlocked path: every blocked credential still needs the single-flight
+				// probe lease (Retry-After and ordinary hard cooldowns alike).
 				if (!options?.requestId) return undefined;
 				const lease = this.tryAcquireQuotaProbeLease(blockedId, probeScope);
 				if (!lease) return undefined;
@@ -5816,6 +5826,33 @@ export class AuthStorage {
 	 * and get a best-effort token. For GitHub Copilot we preserve enterprise
 	 * routing metadata so discovery can hit the correct host.
 	 */
+
+	/**
+	 * True when the provider has stored credentials but every candidate is under
+	 * an active backoff / Retry-After / probe-lease hold (so getApiKey returned
+	 * undefined for quota reasons rather than missing auth).
+	 */
+	hasCoolingDownCredentials(provider: string, modelId?: string): boolean {
+		const entries = this.#getStoredCredentials(provider);
+		if (entries.length === 0) return false;
+		const rankingContext = { modelId };
+		const strategy = this.#rankingStrategyResolver?.(provider);
+		for (const credType of ["oauth", "api_key"] as const) {
+			const typed = entries
+				.map((entry, index) => ({ entry, index }))
+				.filter(item => item.entry.credential.type === credType);
+			if (typed.length === 0) continue;
+			const providerKey = this.#getProviderTypeKey(provider, credType);
+			const blockScope = strategy?.blockScope?.(rankingContext);
+			const blockScopes = credentialBlockScopesForRequest(provider, strategy, rankingContext, blockScope);
+			const anyUnblocked = typed.some(
+				item => !this.#isCredentialBlocked(provider, providerKey, item.index, blockScopes ?? blockScope),
+			);
+			if (!anyUnblocked) return true;
+		}
+		return false;
+	}
+
 	async peekApiKey(provider: string): Promise<string | undefined> {
 		const runtimeKey = this.#runtimeOverrides.get(provider);
 		if (runtimeKey) {
