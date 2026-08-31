@@ -80,6 +80,11 @@ export class CheckpointTool implements AgentTool<typeof checkpointSchema, Checkp
 			throw new ToolError("Checkpoint already active.");
 		}
 		const startedAt = new Date().toISOString();
+		this.session.setCheckpointState?.({
+			checkpointMessageCount: 0,
+			checkpointEntryId: null,
+			startedAt,
+		});
 		return toolResult<CheckpointToolDetails>({ goal: params.goal, startedAt })
 			.text([`Checkpoint: ${params.goal}`, "Finish exploration and formulate findings."].join("\n"))
 			.done();

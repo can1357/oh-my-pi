@@ -17,7 +17,13 @@ import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { CheckpointTool, RewindTool, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import {
+	type CheckpointState,
+	CheckpointTool,
+	ReadTool,
+	RewindTool,
+	type ToolSession,
+} from "@oh-my-pi/pi-coding-agent/tools";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
@@ -360,6 +366,24 @@ describe("AgentSession checkpoint rewind branch context", () => {
 		expect(text).toBe("Checkpoint: inspect\nFinish exploration and formulate findings.");
 		expect(text).not.toContain("Run your investigation");
 		expect(text).not.toContain("call rewind");
+	});
+
+	it("keeps a direct checkpoint active across a read", async () => {
+		let state: CheckpointState | undefined;
+		const session = createToolSession({
+			cwd: path.join(import.meta.dir, "../../.."),
+			getCheckpointState: () => state,
+			setCheckpointState: value => {
+				state = value ?? undefined;
+			},
+		});
+
+		await new CheckpointTool(session).execute("call_checkpoint", { goal: "inspect package" });
+		await new ReadTool(session).execute("call_read", { path: "package.json" });
+
+		await expect(
+			new RewindTool(session).execute("call_rewind", { report: "package inspected" }),
+		).resolves.toMatchObject({ details: { report: "package inspected", rewound: true } });
 	});
 
 	it("ignores a completed cycle's rewind result after rebuilding context", async () => {
