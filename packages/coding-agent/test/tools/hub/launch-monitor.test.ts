@@ -260,14 +260,17 @@ describe("hub process output monitoring", () => {
 		const subscription = harness.getSubscription();
 		const sink = harness.getOutputSink();
 		if (!subscription || !sink) throw new Error("Expected output subscription");
-		await sink({
-			event: "daemon-monitor-completed",
-			monitorId: subscription.id,
-			daemon: { ...daemon, state: "exited", pid: undefined, exitedAt: 3, exitCode: 0 },
-		});
+		const terminalDelivery = Promise.resolve(
+			sink({
+				event: "daemon-monitor-completed",
+				monitorId: subscription.id,
+				daemon: { ...daemon, state: "exited", pid: undefined, exitedAt: 3, exitCode: 0 },
+			}),
+		);
 		publication.resolve();
 
 		await expect(monitoring).rejects.toThrow(`Cannot monitor ${daemon.name}: process is exited`);
+		await terminalDelivery;
 		expect(harness.registrationCount()).toBe(0);
 	});
 
