@@ -1293,9 +1293,13 @@ export class MCPManager {
 				// The filter still excludes everything. The transport itself is
 				// healthy — keep it (resources/prompts stay available) but tell
 				// the caller not to report the server as connected. The error
-				// itself is logged by the applyMCPToolFilter diagnostic.
+				// itself is logged by the applyMCPToolFilter diagnostic. Stale
+				// tools from the previous registration are cleared: the
+				// reconnected server does not advertise them anymore.
 				connection.filterEmptyByToolFilter = serverTools.length;
+				this.#replaceServerTools(name, []);
 			} else {
+				connection.filterEmptyByToolFilter = undefined;
 				this.#replaceServerTools(name, customTools);
 			}
 			void this.#onToolsChanged?.(this.#tools);
