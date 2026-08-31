@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Reject shared 100.64/10 discovery hosts, gate previous_response_id fallbacks by Responses-compatible APIs, and detect OpenAI file refs in user/assistant messages.
 - Reject RFC1918 172.16/12 discovery hosts, preserve stateful ownership when the primary is missing, recheck OpenAI file_id compat per target, require requestId for probe leases, and reset sibling exhaustion per fallback target.
 - Reject private IPv6 discovery hosts, keep incompatible previous_response_id fallbacks disposition-scoped, and flush metadata-only SSE preludes at EOF.
 - Honor Retry-After blocks on the allow-blocked credential pass by still requiring a probe lease.

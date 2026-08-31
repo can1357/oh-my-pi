@@ -694,13 +694,25 @@ async function handleFormatEndpoint(
 	}
 	if (controller.signal.aborted) return clientClosedResponse(route);
 
-	const requestHasOpenAIImageFileReferences = parsed.context.messages.some(
-		message =>
-			message.role === "toolResult" &&
-			message.content.some(
-				block => block.type === "image" && block.providerFile?.provider === "openai" && block.providerFile.id,
-			),
-	);
+	const requestHasOpenAIImageFileReferences = parsed.context.messages.some(message => {
+		const blocks =
+			message.role === "toolResult"
+				? message.content
+				: message.role === "user" || message.role === "assistant"
+					? message.content
+					: [];
+		return blocks.some(
+			block =>
+				typeof block === "object" &&
+				block !== null &&
+				"type" in block &&
+				(block as { type?: string }).type === "image" &&
+				"providerFile" in block &&
+				(block as { providerFile?: { provider?: string; id?: string } }).providerFile?.provider ===
+					"openai" &&
+				Boolean((block as { providerFile?: { id?: string } }).providerFile?.id),
+		);
+	});
 	const openaiImageFileCompatError = (candidate: Model<Api>): Response | undefined => {
 		if (route.label !== "openai-responses" || !requestHasOpenAIImageFileReferences) return undefined;
 		const supportsOpenAIImageFileReferences =
@@ -811,22 +823,28 @@ async function handleFormatEndpoint(
 			if (considerFallback(classified)) return "skipped";
 			return classifiedError(classified);
 		}
-		if (
-			parsed.options.previousResponseId &&
-			providerOrigin !== undefined &&
-			resolved.provider !== providerOrigin
-		) {
-			attemptedTargets.add(currentTarget);
-			const skipped = traces.record({
-				requestId,
-				routeId: compiled.id,
-				generation: compiled.generation,
-				selectedTarget: currentTarget,
-				disposition: "skipped",
-				reason: "state_incompatible",
-			});
-			logger.debug("auth-gateway route decision", redactedDecisionSummary(skipped));
-			return "skipped";
+		if (parsed.options.previousResponseId) {
+			const originOk =
+				providerOrigin === undefined
+					? false
+					: resolved.provider === providerOrigin;
+			const apiOk =
+				resolved.api === "openai-responses" ||
+				resolved.api === "azure-openai-responses" ||
+				resolved.api === "openai-codex-responses";
+			if (!originOk || !apiOk) {
+				attemptedTargets.add(currentTarget);
+				const skipped = traces.record({
+					requestId,
+					routeId: compiled.id,
+					generation: compiled.generation,
+					selectedTarget: currentTarget,
+					disposition: "skipped",
+					reason: "state_incompatible",
+				});
+				logger.debug("auth-gateway route decision", redactedDecisionSummary(skipped));
+				return "skipped";
+			}
 		}
 		const incompat = openaiImageFileCompatError(resolved);
 		if (incompat) return incompat;
@@ -1297,22 +1315,28 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 			if (considerFallback(classified)) return "skipped";
 			return classifiedError(classified);
 		}
-		if (
-			parsed.options.previousResponseId &&
-			providerOrigin !== undefined &&
-			resolved.provider !== providerOrigin
-		) {
-			attemptedTargets.add(currentTarget);
-			const skipped = traces.record({
-				requestId,
-				routeId: compiled.id,
-				generation: compiled.generation,
-				selectedTarget: currentTarget,
-				disposition: "skipped",
-				reason: "state_incompatible",
-			});
-			logger.debug("auth-gateway route decision", redactedDecisionSummary(skipped));
-			return "skipped";
+		if (parsed.options.previousResponseId) {
+			const originOk =
+				providerOrigin === undefined
+					? false
+					: resolved.provider === providerOrigin;
+			const apiOk =
+				resolved.api === "openai-responses" ||
+				resolved.api === "azure-openai-responses" ||
+				resolved.api === "openai-codex-responses";
+			if (!originOk || !apiOk) {
+				attemptedTargets.add(currentTarget);
+				const skipped = traces.record({
+					requestId,
+					routeId: compiled.id,
+					generation: compiled.generation,
+					selectedTarget: currentTarget,
+					disposition: "skipped",
+					reason: "state_incompatible",
+				});
+				logger.debug("auth-gateway route decision", redactedDecisionSummary(skipped));
+				return "skipped";
+			}
 		}
 		model = resolved;
 		providerOrigin ??= resolved.provider;
