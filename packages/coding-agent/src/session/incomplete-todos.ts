@@ -3,8 +3,10 @@ import type { TodoPhase } from "../tools/todo";
 /** Cap leftover-todo dumps so a huge list cannot overflow summarizer / nudge prompts. */
 export const INCOMPLETE_TODOS_SNAPSHOT_CAP = 40;
 const INCOMPLETE_TODOS_HEADING = "## Incomplete Todos";
-/** Exact h2, or the same heading with a trailing colon / extra text. */
-const INCOMPLETE_TODOS_HEADING_RE = /^## Incomplete Todos(?:[ \t]*:.*|[ \t]+.+)?[ \t]*$/m;
+/** Unique marker emitted by {@link formatIncompleteTodosSection}; required for durable parse. */
+export const INCOMPLETE_TODOS_MARKER = "<!-- omp-incomplete-todos-v1 -->";
+/** Exact h2 plus required durable marker on the following line. */
+const INCOMPLETE_TODOS_HEADING_RE = /^## Incomplete Todos(?:[ \t]*:.*|[ \t]+.+)?[ \t]*\n[ \t]*<!-- omp-incomplete-todos-v1 -->[ \t]*$/m;
 
 export type IncompleteTodoStatus = "pending" | "in_progress" | "abandoned" | "blocked";
 
@@ -159,11 +161,12 @@ export function groupIncompleteTodoRowsByPhase(rows: readonly IncompleteTodoRow[
  */
 export function formatIncompleteTodosSection(rows: readonly IncompleteTodoRow[]): string {
 	if (rows.length === 0) {
-		return `${INCOMPLETE_TODOS_HEADING}\n\n(none)`;
+		return `${INCOMPLETE_TODOS_HEADING}\n${INCOMPLETE_TODOS_MARKER}\n\n(none)`;
 	}
 	const phases = groupIncompleteTodoRowsByPhase(rows);
 	const lines = [
 		INCOMPLETE_TODOS_HEADING,
+		INCOMPLETE_TODOS_MARKER,
 		"These incomplete items remain after compaction; continue them. A text-only stop is not completion.",
 		...phases.flatMap(phase => [
 			`- ${encodeIncompleteTodoTitle(phase.name)}`,

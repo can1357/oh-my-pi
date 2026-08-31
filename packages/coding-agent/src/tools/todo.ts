@@ -547,8 +547,29 @@ function applyEntry(
 	options?: { userAuthored?: boolean },
 ): TodoPhase[] {
 	switch (entry.op) {
-		case "init":
-			return initPhases(entry, errors);
+		case "init": {
+			const next = initPhases(entry, errors);
+			if (options?.userAuthored) return next;
+			// Model init must not erase unresolved model drops the settle gate protects.
+			const retained: TodoPhase[] = [];
+			for (const phase of phases) {
+				const drops = phase.tasks.filter(
+					t => t.status === "abandoned" && t.droppedBy !== "user",
+				);
+				if (drops.length === 0) continue;
+				const existing = next.find(p => p.name === phase.name);
+				if (existing) {
+					for (const drop of drops) {
+						if (!existing.tasks.some(t => t.content === drop.content && t.status === "abandoned")) {
+							existing.tasks.push(cloneTask(drop));
+						}
+					}
+				} else {
+					retained.push({ name: phase.name, tasks: drops.map(cloneTask) });
+				}
+			}
+			return retained.length === 0 ? next : [...next, ...retained];
+		}
 		case "start": {
 			const hit = resolveTaskOrError(phases, entry.task, errors);
 			if (!hit) return phases;
@@ -942,11 +963,20 @@ export function applyUserMarkdownPhases(prior: TodoPhase[], parsed: TodoPhase[])
 		}),
 	}));
 
+	const priorAbandoned = prior.flatMap(phase =>
+		phase.tasks.filter(task => task.status === "abandoned").map(task => ({ phase: phase.name, task })),
+	);
+	let abandonedIdx = 0;
 	return exact.map(phase => ({
 		name: phase.name,
 		tasks: phase.tasks.map(({ next, prev: exactPrev }) => {
 			let prev = exactPrev;
 			if (!prev) prev = takePriorOccurrenceAnyPhase(queues, next.content);
+			if (!prev && next.status === "abandoned") {
+				const positional = priorAbandoned[abandonedIdx];
+				if (positional) prev = positional.task;
+			}
+			if (next.status === "abandoned") abandonedIdx++;
 			if (next.status !== "abandoned") return next;
 			if (shouldStampAbandonedAsUser(prev, empty, next)) {
 				next.droppedBy = "user";
