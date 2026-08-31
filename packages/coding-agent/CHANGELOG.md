@@ -5,6 +5,7 @@
 ### Added
 
 - Added `/grokbot` to show Grok Bot provider status (credentials/client; no secrets). Distinct from Cursor (`/login cursor`) and xAI / Grok CLI (`xai`, `xai-oauth`), with independent usage allowances. `/login grokbot` surfaces the host-install prompt for the Grok Bot system. Model lookup resolves Grok Bot `idAliases` (e.g. `grokbot/composer` → live `composer-2.5`) without separate catalog rows.
+- Added `injectV1: false` option to `openai-models-list` discovery to fetch the model list from `{baseUrl}/models` without injecting `/v1`, for gateways that root their OpenAI-compatible surface at a versioned URL (e.g. `https://api.opper.ai/v3/compat`) where the `/v1`-injected endpoint returns only a small subset.
 
 ### Fixed
 
@@ -16,7 +17,6 @@
 - Grok Bot warm-start cache load uses the renewer-scoped cache id (env/secrets credential + identity) so previously discovered models are visible before async refresh.
 - Model lookup keeps a canonical model id resolvable when another catalog row lists that id as an alias (aliases no longer null out exact matches).
 - Login success UI only claims credentials were saved to the agent DB when AuthStorage actually stored an identity (host-secret flows like Grok Bot no longer misreport the backup location).
-- Added `injectV1: false` option to `openai-models-list` discovery to fetch the model list from `{baseUrl}/models` without injecting `/v1`, for gateways that root their OpenAI-compatible surface at a versioned URL (e.g. `https://api.opper.ai/v3/compat`) where the `/v1`-injected endpoint returns only a small subset.
 - Added provider-reported credits and concrete routed-model counts to `/session` statistics ([#8590](https://github.com/can1357/oh-my-pi/pull/8590) by [@will-bogusz](https://github.com/will-bogusz)).
 - Added `CLINE_API_KEY` to the CLI environment help for native ClinePass subscription inference ([#7863](https://github.com/can1357/oh-my-pi/pull/7863) by [@will-bogusz](https://github.com/will-bogusz)).
 - Devin model selectors now accept the native CLI's short aliases (`devin/opus`, `devin/swe`), dotted upstream spellings (`devin/gemini-3.7-flash`), and raw effort-route wire uids for dynamically collapsed families ([#8590](https://github.com/can1357/oh-my-pi/pull/8590) by [@will-bogusz](https://github.com/will-bogusz)).
