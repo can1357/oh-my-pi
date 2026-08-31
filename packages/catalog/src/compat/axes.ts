@@ -277,6 +277,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	},
 	priority: { key: "priority", set: "catalog", shape: "scalar" },
 	reasoning: { key: "reasoning", set: "catalog", shape: "scalar" },
+	"reasoning-fallback": { key: "reasoningFallback", set: "catalog", shape: "scalar" },
 	"service-tier-cost": { key: "serviceTierCost", set: "catalog", shape: "object" },
 	"supports-tools-fallback": { key: "supportsToolsFallback", set: "catalog", shape: "scalar" },
 	"supports-tools": { key: "supportsTools", set: "catalog", shape: "scalar" },

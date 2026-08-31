@@ -1108,12 +1108,13 @@ export interface Model<TApi extends Api = Api> {
 	cost: ModelCost;
 	/**
 	 * Discovery-field provenance retained in cached model specs so catalog
-	 * fallbacks do not replace explicit provider values such as a zero price or
-	 * text-only input capability.
+	 * fallbacks do not replace explicit provider values such as a zero price,
+	 * text-only input capability, or a reasoning denial.
 	 */
 	catalogFallback?: {
 		liveCostFields?: readonly (keyof TokenCost)[];
 		liveInputModalities?: boolean;
+		liveReasoning?: boolean;
 	};
 	/** Premium Copilot requests charged per user-initiated request (defaults to 1). */
 	premiumMultiplier?: number;

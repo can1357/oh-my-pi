@@ -70,7 +70,7 @@ function applyCatalogAssignments<TApi extends Api>(model: Model<TApi>, catalog: 
  * Applies reviewed catalog-data value corrections (`cost-patch`,
  * `limits-patch`, `long-context-cost`, `context-window-floor`,
  * `input-modalities`) and fallbacks (`cost-fallback`, `input-modalities-fallback`,
- * `limits-fallback`, `supports-tools-fallback`) onto an upstream-sourced spec. Applied by
+ * `limits-fallback`, `reasoning-fallback`, `supports-tools-fallback`) onto an upstream-sourced spec. Applied by
  * `buildModel` to every upstream-sourced spec; user-authored overrides are
  * recomposed after building by the override applicators, so explicit user
  * limits, pricing, and capability values still win.
@@ -84,6 +84,10 @@ export function applyCatalogCorrections(
 ): void {
 	const reasoning = catalog.reasoning;
 	if (typeof reasoning === "boolean") model.reasoning = reasoning;
+	const reasoningFallback = catalog.reasoningFallback;
+	if (typeof reasoningFallback === "boolean" && !model.catalogFallback?.liveReasoning) {
+		model.reasoning = reasoningFallback;
+	}
 	const supportsTools = catalog.supportsTools;
 	if (typeof supportsTools === "boolean") model.supportsTools = supportsTools;
 	const supportsToolsFallback = catalog.supportsToolsFallback;

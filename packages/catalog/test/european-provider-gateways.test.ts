@@ -584,6 +584,31 @@ describe("European gateway provider catalog support", () => {
 		expect(models?.[0]).toMatchObject({ contextWindow: 32_768, maxTokens: 4_096 });
 	});
 
+	test("preserves explicit gateway reasoning denials over catalog fallbacks", async () => {
+		const fetchMock: FetchImpl = vi.fn(async () => {
+			return Response.json({
+				data: [
+					{
+						id: "kimi-k2.7-code-1100b",
+						name: "Kimi K2.7 Code 1100B",
+						supports_reasoning: false,
+					},
+				],
+			});
+		});
+
+		const models = await akiIoModelManagerOptions({
+			apiKey: "aki-test-key",
+			fetch: fetchMock,
+		}).fetchDynamicModels?.();
+		const model = models?.[0];
+		if (!model) throw new Error("Expected AKI.IO discovery result");
+		expect(model.reasoning).toBe(false);
+
+		const cachedSpec = JSON.parse(JSON.stringify(model)) as ModelSpec<"openai-completions">;
+		expect(buildModel(cachedSpec).reasoning).toBe(false);
+	});
+
 	test("preserves known reasoning capability for reordered Claude gateway ids", async () => {
 		const fetchMock: FetchImpl = vi.fn(async () => {
 			return new Response(

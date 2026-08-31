@@ -1,8 +1,8 @@
 // Reviewed fallback metadata for the European OpenAI-compatible gateways.
 // Static seeds retain only identity and transport; buildModel applies these
 // facts equally to offline seeds and sparse discovery rows. Pricing, limits,
-// input modalities, and tool capability rules are fallbacks so explicit provider
-// metadata remains authoritative.
+// input modalities, reasoning, and tool capability rules are fallbacks so
+// explicit provider metadata remains authoritative.
 
 provider "aki-io" {
 	models "kimi-k2.7-code-1100b" {
@@ -16,7 +16,7 @@ provider "aki-io" {
 			context-window 262144
 			max-tokens 262144
 		}
-		reasoning #true
+		reasoning-fallback #true
 		supports-tools-fallback #true
 	}
 }
@@ -33,7 +33,7 @@ provider "melious" {
 			context-window 131000
 			max-tokens 8192
 		}
-		reasoning #true
+		reasoning-fallback #true
 	}
 }
 
@@ -65,7 +65,7 @@ provider "cortecs" {
 			context-window 131000
 			max-tokens 8192
 		}
-		reasoning #true
+		reasoning-fallback #true
 	}
 }
 
@@ -96,7 +96,7 @@ provider "scaleway" {
 			context-window 256000
 			max-tokens 16000
 		}
-		reasoning #true
+		reasoning-fallback #true
 		supports-tools-fallback #true
 	}
 }
@@ -129,7 +129,7 @@ provider "ovhcloud" {
 			context-window 131072
 			max-tokens 131072
 		}
-		reasoning #true
+		reasoning-fallback #true
 		supports-tools-fallback #true
 	}
 }

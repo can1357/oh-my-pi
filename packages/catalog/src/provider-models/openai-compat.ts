@@ -953,6 +953,7 @@ function mapEuropeanGatewayModel(
 	const supportsTools = getEuropeanGatewayToolCapability(entry);
 	const supportsReasoning = getEuropeanGatewayReasoningCapability(entry);
 	const liveInputModalities = hasEuropeanGatewayInputModalityMetadata(entry);
+	const liveReasoning = supportsReasoning !== undefined;
 	const inputCost = toGatewayCostPerMillion(pricing?.prompt ?? pricing?.input_token);
 	const outputCost = toGatewayCostPerMillion(pricing?.completion ?? pricing?.output_token);
 	const cacheReadCost = toGatewayCostPerMillion(pricing?.input_cache_read ?? pricing?.cache_read_cost);
@@ -963,10 +964,11 @@ function mapEuropeanGatewayModel(
 	if (cacheReadCost !== undefined) liveCostFields.push("cacheRead");
 	if (cacheWriteCost !== undefined) liveCostFields.push("cacheWrite");
 	const catalogFallback =
-		liveCostFields.length > 0 || liveInputModalities
+		liveCostFields.length > 0 || liveInputModalities || liveReasoning
 			? {
 					...(liveCostFields.length > 0 && { liveCostFields }),
 					...(liveInputModalities && { liveInputModalities: true }),
+					...(liveReasoning && { liveReasoning: true }),
 				}
 			: undefined;
 	const mapped: ModelSpec<"openai-completions"> = {
