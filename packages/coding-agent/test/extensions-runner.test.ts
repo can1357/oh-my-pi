@@ -2815,7 +2815,7 @@ describe("ExtensionRunner", () => {
 					},
 					async () => {
 						seen.push("escalate");
-						return { decision: "escalate", reason: "second opinion" };
+						return { decision: "escalate" };
 					},
 					async () => {
 						seen.push("deny");
@@ -2826,19 +2826,37 @@ describe("ExtensionRunner", () => {
 				expect(seen).toEqual(["approve", "escalate", "deny"]);
 			});
 
-			it("dispatch returns escalation for malformed handler results", async () => {
+			it("dispatch returns escalation for malformed or adversarial handler results", async () => {
+				const inheritedDecision = Object.create({ decision: "approve" });
+				const throwingDecision = Object.defineProperty({}, "decision", {
+					get: () => {
+						throw new Error("getter exploded");
+					},
+					enumerable: true,
+				});
+				const throwingProxy = new Proxy(
+					{ decision: "approve" },
+					{
+						ownKeys: () => {
+							throw new Error("proxy exploded");
+						},
+					},
+				);
 				const malformed = [
 					undefined,
 					"approve",
 					{},
+					inheritedDecision,
+					throwingDecision,
+					throwingProxy,
 					{ decision: "deny", extra: true },
 					{ decision: "deny", reason: 123 },
-					{ decision: "approve", rationale: 123 },
+					{ decision: "approve", rationale: "unused" },
 					{ decision: "approve", input: { command: "rewritten" } },
 				];
 				for (const result of malformed) {
 					const runner = dispatchRunner([async () => result]);
-					await expect(runner.emitToolApprovalReview(dispatchEvent)).resolves.toMatchObject({
+					await expect(runner.emitToolApprovalReview(dispatchEvent)).resolves.toEqual({
 						decision: "escalate",
 					});
 				}
@@ -2872,9 +2890,7 @@ describe("ExtensionRunner", () => {
 			});
 			it("exposes the public result contract types", () => {
 				expectTypeOf<ToolApprovalReviewResult>().toEqualTypeOf<
-					| { decision: "approve"; rationale?: string }
-					| { decision: "escalate"; reason?: string }
-					| { decision: "deny"; reason?: string }
+					{ decision: "approve" } | { decision: "escalate" } | { decision: "deny"; reason?: string }
 				>();
 			});
 
@@ -3119,14 +3135,39 @@ describe("ExtensionRunner", () => {
 										: {},
 						},
 					}),
-				).rejects.toThrow();
+				).rejects.toThrow('Tool "dangerous_tool" is blocked by user policy.');
 				const denyTool = { ...approvalTool, approval: { policy: "deny", tier: "exec", reason: "no" } as const };
-				await expect(executeReviewCase(runner, denyTool, "call-tool-deny")).rejects.toThrow();
+				await expect(executeReviewCase(runner, denyTool, "call-tool-deny")).rejects.toThrow(
+					'Tool "dangerous_tool" is blocked by tool policy.\nReason: no',
+				);
 
 				expect(select).not.toHaveBeenCalled();
 				expect(trace.some(entry => entry.kind === "review")).toBe(false);
 				expect(trace.some(entry => entry.kind === "executed")).toBe(false);
 				clearTrace();
+			});
+			it("transformed native deny never dispatches approval review", async () => {
+				const reviewHandler = vi.fn(async () => ({ decision: "approve" }));
+				const execute = vi.fn(async () => ({ content: [{ type: "text" as const, text: "ran" }] }));
+				const runner = dispatchRunner([reviewHandler], [async () => ({ input: { command: "rm -rf" } })]);
+				const tool = {
+					...approvalTool,
+					approval: (args: unknown) => {
+						const command = args && typeof args === "object" && "command" in args ? args.command : undefined;
+						return command === "rm -rf"
+							? ({ policy: "deny", tier: "exec", reason: "dangerous" } as const)
+							: ("exec" as const);
+					},
+					execute,
+				} as AgentTool;
+
+				await expect(
+					executeReviewCase(runner, tool, "call-transformed-native-deny", {
+						params: { command: "echo original" },
+					}),
+				).rejects.toThrow('Tool "dangerous_tool" is blocked by tool policy.\nReason: dangerous');
+				expect(reviewHandler).not.toHaveBeenCalled();
+				expect(execute).not.toHaveBeenCalled();
 			});
 
 			it("provider computer safety never emits review and still requires native approval", async () => {
@@ -3293,7 +3334,7 @@ describe("ExtensionRunner", () => {
 				clearTrace();
 			});
 
-			it("review deny rejects via native denial path without selector or execution", async () => {
+			it("review deny reports an extension veto without selector or execution", async () => {
 				const trace = setTrace();
 				const { runner, select } = await reviewRunnerFromFile(
 					"review-deny.ts",
@@ -3304,7 +3345,7 @@ describe("ExtensionRunner", () => {
 					executeReviewCase(runner, recordingApprovalTool(), "call-review-deny", {
 						params: { command: "echo good" },
 					}),
-				).rejects.toThrow('Tool "dangerous_tool" is blocked by tool policy.\nReason: reviewer refuses');
+				).rejects.toThrow('Tool "dangerous_tool" was denied by an extension approval review: reviewer refuses');
 
 				expect(select).not.toHaveBeenCalled();
 				expect(trace).toHaveLength(1);
@@ -3384,26 +3425,44 @@ describe("ExtensionRunner", () => {
 				clearTrace();
 			});
 
-			it("a mutation attempt cannot leak to later handlers or the caller's event", async () => {
-				const seenInputs: Array<Record<string, unknown>> = [];
+			it("top-level mutation attempts cannot change what later handlers review", async () => {
+				const seenEvents: ToolApprovalReviewEvent[] = [];
 				const runner = dispatchRunner([
 					async event => {
-						event.input.command = "evil";
+						const writableEvent = event as {
+							input: Record<string, unknown>;
+							toolName: string;
+							tier: string;
+						};
+						for (const mutate of [
+							() => {
+								writableEvent.input = { command: "evil" };
+							},
+							() => {
+								writableEvent.toolName = "other_tool";
+							},
+							() => {
+								writableEvent.tier = "read";
+							},
+						]) {
+							try {
+								mutate();
+							} catch {}
+						}
 						return { decision: "approve" };
 					},
 					async event => {
-						seenInputs.push(event.input);
+						seenEvents.push(event);
 						return { decision: "approve" };
 					},
 				]);
-				await expect(runner.emitToolApprovalReview(dispatchEvent)).resolves.toMatchObject({
-					decision: "escalate",
+				await expect(runner.emitToolApprovalReview(dispatchEvent)).resolves.toEqual({
+					decision: "approve",
 				});
 
-				expect(seenInputs).toEqual([{ command: "echo hi" }]);
-				expect(Object.isFrozen(seenInputs[0])).toBe(true);
-				expect(dispatchEvent.input).toEqual({ command: "echo hi" });
-				expect(Object.isFrozen(dispatchEvent.input)).toBe(false);
+				expect(seenEvents).toEqual([dispatchEvent]);
+				expect(Object.isFrozen(seenEvents[0])).toBe(true);
+				expect(Object.isFrozen(seenEvents[0]?.input)).toBe(true);
 			});
 
 			it("a nested mutation attempt cannot alter the reviewed snapshot", async () => {

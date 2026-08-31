@@ -931,23 +931,21 @@ export interface ToolApprovalResolvedEvent {
  * Fired after final tool-input resolution for an eligible mode-derived prompt,
  * before the native approval selector. The review may approve the call
  * (skipping the ordinary prompt), escalate back to it, or deny the call. It
- * cannot rewrite the input. `input` is an immutable snapshot, identical to the
- * input that will reach execution; mutation attempts throw and escalate to the
- * native approval path.
+ * cannot rewrite the final immutable input that execution will receive.
  */
 export interface ToolApprovalReviewEvent {
-	type: "tool_approval_review";
-	sessionId: string;
-	toolCallId: string;
-	toolName: string;
-	input: Record<string, unknown>;
-	approvalMode: ApprovalMode;
-	tier: ToolTier;
+	readonly type: "tool_approval_review";
+	readonly sessionId: string;
+	readonly toolCallId: string;
+	readonly toolName: string;
+	readonly input: Readonly<Record<string, unknown>>;
+	readonly approvalMode: ApprovalMode;
+	readonly tier: ToolTier;
 }
 
 export type ToolApprovalReviewResult =
-	| { decision: "approve"; rationale?: string }
-	| { decision: "escalate"; reason?: string }
+	| { decision: "approve" }
+	| { decision: "escalate" }
 	| { decision: "deny"; reason?: string };
 
 interface ToolCallEventBase {

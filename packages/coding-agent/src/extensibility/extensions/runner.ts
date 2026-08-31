@@ -125,23 +125,38 @@ function handlerTimeoutForEvent(eventType: string): number {
 const EXTENSION_HANDLER_TIMEOUT = Symbol("extensionHandlerTimeout");
 const EXTENSION_HANDLER_ABORTED = Symbol("extensionHandlerAborted");
 
-function isToolApprovalReviewResult(value: unknown): value is ToolApprovalReviewResult {
-	if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
-	const record = value as Record<string, unknown>;
-	const keys = Object.keys(record);
-	if (record.decision === "approve") {
-		return (
-			keys.every(key => key === "decision" || key === "rationale") &&
-			(record.rationale === undefined || typeof record.rationale === "string")
-		);
+function normalizeToolApprovalReviewResult(value: unknown): ToolApprovalReviewResult | undefined {
+	try {
+		if (value === null || typeof value !== "object" || Array.isArray(value)) return undefined;
+		const keys = Reflect.ownKeys(value);
+		const decisionDescriptor = Object.getOwnPropertyDescriptor(value, "decision");
+		if (!decisionDescriptor || !("value" in decisionDescriptor)) return undefined;
+
+		if (decisionDescriptor.value === "approve" || decisionDescriptor.value === "escalate") {
+			return keys.length === 1 && keys[0] === "decision" ? { decision: decisionDescriptor.value } : undefined;
+		}
+		if (
+			decisionDescriptor.value !== "deny" ||
+			!keys.includes("decision") ||
+			keys.some(key => key !== "decision" && key !== "reason")
+		) {
+			return undefined;
+		}
+		const reasonDescriptor = Object.getOwnPropertyDescriptor(value, "reason");
+		if (!reasonDescriptor) return { decision: "deny" };
+		if (
+			!("value" in reasonDescriptor) ||
+			(reasonDescriptor.value !== undefined && typeof reasonDescriptor.value !== "string")
+		) {
+			return undefined;
+		}
+		return {
+			decision: "deny",
+			...(reasonDescriptor.value ? { reason: reasonDescriptor.value } : {}),
+		};
+	} catch {
+		return undefined;
 	}
-	if (record.decision === "escalate" || record.decision === "deny") {
-		return (
-			keys.every(key => key === "decision" || key === "reason") &&
-			(record.reason === undefined || typeof record.reason === "string")
-		);
-	}
-	return false;
 }
 
 interface HandlerTimeoutBudget {
@@ -1544,25 +1559,17 @@ export class ExtensionRunner {
 		event: ToolApprovalReviewEvent,
 		signal?: AbortSignal,
 	): Promise<ToolApprovalReviewResult> {
-		// Host invariant: the material input reviewed must be the material input
-		// executed. Dispatch an immutable snapshot instead of the live object so a
-		// mutation attempt cannot reach later handlers or eventual execution. A
-		// non-JSON input (cannot happen for schema-validated tool params) fails
-		// closed to the native approval path.
-		let reviewedInput: Record<string, unknown>;
+		// The wrapper already owns the final execution input. Freeze the complete
+		// host event so one handler cannot alter what later handlers review.
+		let reviewedEvent: ToolApprovalReviewEvent;
 		try {
-			reviewedInput = deepFreeze(structuredClone(event.input));
-		} catch (error) {
-			return {
-				decision: "escalate",
-				reason: `tool input could not be snapshotted for review: ${error instanceof Error ? error.message : String(error)}`,
-			};
+			reviewedEvent = deepFreeze(event);
+		} catch {
+			return { decision: "escalate" };
 		}
-		const reviewedEvent: ToolApprovalReviewEvent = { ...event, input: reviewedInput };
 		let ctx: ExtensionContext | undefined;
 		let participated = false;
 		let hasEscalation = false;
-		let escalationReason: string | undefined;
 		let hasDenial = false;
 		let denialReason: string | undefined;
 
@@ -1572,7 +1579,7 @@ export class ExtensionRunner {
 			ctx ??= this.createContext();
 
 			for (const handler of handlers) {
-				const result = await this.#runHandlerWithTimeout<ToolApprovalReviewEvent, ToolApprovalReviewResult>(
+				const handlerResult = await this.#runHandlerWithTimeout<ToolApprovalReviewEvent, ToolApprovalReviewResult>(
 					handler as (
 						event: ToolApprovalReviewEvent,
 						ctx: ExtensionContext,
@@ -1583,11 +1590,12 @@ export class ExtensionRunner {
 					normalizeHandlerTimeout(
 						this.settings?.get("extensionHandlers.toolCallTimeoutMs") ?? extensionHandlerTimeoutMs,
 					),
-					() => ({ decision: "escalate", reason: `Extension ${ext.path} failed or timed out` }),
+					() => ({ decision: "escalate" }),
 					signal,
 				);
 				participated = true;
-				if (!isToolApprovalReviewResult(result)) {
+				const result = normalizeToolApprovalReviewResult(handlerResult);
+				if (!result) {
 					hasEscalation = true;
 					continue;
 				}
@@ -1598,14 +1606,13 @@ export class ExtensionRunner {
 				}
 				if (result.decision === "escalate") {
 					hasEscalation = true;
-					escalationReason ??= result.reason;
 				}
 			}
 		}
 
 		if (hasDenial) return { decision: "deny", ...(denialReason ? { reason: denialReason } : {}) };
-		if (hasEscalation) return { decision: "escalate", ...(escalationReason ? { reason: escalationReason } : {}) };
-		if (!participated) return { decision: "escalate", reason: "no review handlers" };
+		if (hasEscalation) return { decision: "escalate" };
+		if (!participated) return { decision: "escalate" };
 		return { decision: "approve" };
 	}
 
