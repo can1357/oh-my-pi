@@ -504,8 +504,9 @@ const streamOpenAIResponsesOnce = (
 				// Platform `previous_response_id` chaining only resolves stored responses.
 				params.store = true;
 			}
-			if (options?.previousResponseId) {
-				// Explicit client continuation chains also require stored responses.
+			if (options?.previousResponseId || options?.store === true) {
+				// Continuations and explicit store requests need persisted responses.
+				// store must be true on the *creating* turn as well as the follow-up.
 				params.store = true;
 			}
 			applyReasoningEffortFallbackForRequest(params);

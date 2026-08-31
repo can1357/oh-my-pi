@@ -203,6 +203,7 @@ function buildStreamOptions(parsed: ParsedFormatRequest, api: Api, signal: Abort
 export function applyParsedGatewayOptions(opts: SimpleStreamOptions, options: AuthGatewayParsedRequestOptions): void {
 	if (options.parallelToolCalls !== undefined) opts.parallelToolCalls = options.parallelToolCalls;
 	if (options.previousResponseId !== undefined) opts.previousResponseId = options.previousResponseId;
+	if (options.store !== undefined) opts.store = options.store;
 	if (options.seed !== undefined) opts.seed = options.seed;
 	if (options.logitBias !== undefined) opts.logitBias = options.logitBias;
 	if (options.user !== undefined) opts.user = options.user;
@@ -378,30 +379,38 @@ function releaseTurnOnStreamEnd(
 	stream: ReadableStream<Uint8Array>,
 	storage: AuthStorage,
 	requestId: string,
-	_commitGate?: StreamCommitGate,
+	commitGate?: StreamCommitGate,
 ): ReadableStream<Uint8Array> {
 	const reader = stream.getReader();
 	let released = false;
 	const release = (settleProbe: boolean): void => {
 		if (released) return;
 		released = true;
-		// Foreign-format / non-SSE transports may never invoke onSseEvent, so the
-		// commit gate can remain `probing` after a successful stream. Settle on
-		// normal completion; abandon (cancel) must not clear cooldown.
-		if (settleProbe) {
+		// Settle only on successful completion evidence: committed/terminated gates,
+		// or foreign-format paths with no gate. A probing gate after an encoded error
+		// prelude must not clear cooldown. Always release the turn reservation.
+		if (
+			settleProbe &&
+			(commitGate === undefined || commitGate.state === "committed" || commitGate.state === "terminated")
+		) {
 			storage.settleQuotaProbeSuccess(requestId);
 		}
 		storage.releaseTurnReservation(requestId);
 	};
 	return new ReadableStream({
 		async pull(controller) {
-			const { done, value } = await reader.read();
-			if (done) {
-				release(true);
-				controller.close();
-				return;
+			try {
+				const { done, value } = await reader.read();
+				if (done) {
+					release(true);
+					controller.close();
+					return;
+				}
+				controller.enqueue(value);
+			} catch (error) {
+				release(false);
+				controller.error(error);
 			}
-			controller.enqueue(value);
 		},
 		cancel(reason) {
 			release(false);
