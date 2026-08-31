@@ -2351,11 +2351,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// Process provider registrations queued during extension loading.
 		// This must happen before the runner is created so that models registered by
 		// extensions are available for model selection on session resume / fallback.
-		// A launch `--agent` persona loads extensions (so extension-provided models
-		// resolve and persona-granted extension tools register) while keeping the
-		// ACTIVE set restricted — only the extension loading itself is gated on
-		// `restrictToolNames` for subagents/`--tools` sessions (codex #3821198710).
-		if (!restrictToolNames || options.personaName !== undefined) {
+		// A launch `--agent` persona or a personaSwitchable main session loads
+		// extensions (so extension-provided models resolve and persona-granted
+		// extension tools register) while keeping the ACTIVE set restricted —
+		// only the extension loading itself is gated on `restrictToolNames` for
+		// subagents/one-shot `--tools` sessions (codex #3821198710).
+		if (!restrictToolNames || canLiveSwitchPersona) {
 			const activeExtensionSources = extensionsResult.extensions.map(extension => extension.path);
 			modelRegistry.syncExtensionSources(activeExtensionSources);
 			for (const sourceId of new Set(activeExtensionSources)) {
@@ -2994,11 +2995,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// (so a persona-granted tool by name can activate) while the active set
 		// stays restricted to the persona's `tools:` list — `alwaysInclude` below
 		// only widens the active set for unrestricted sessions (codex #3821198710).
-		const registeredTools =
-			restrictToolNames && options.personaName === undefined ? [] : extensionRunner.getAllRegisteredTools();
+		const registeredTools = restrictToolNames && !canLiveSwitchPersona ? [] : extensionRunner.getAllRegisteredTools();
 		const initialRegisteredTools = new WeakSet(registeredTools);
 		const sdkCustomTools =
-			restrictToolNames && options.personaName === undefined && options.allowRestrictedCustomTools !== true
+			restrictToolNames && !canLiveSwitchPersona && options.allowRestrictedCustomTools !== true
 				? []
 				: (options.customTools?.filter(tool => !isLegacyBuiltinToolDefinition(tool)) ?? []);
 		const sdkCustomToolNames = new Set(sdkCustomTools.map(tool => tool.name));
@@ -4380,7 +4380,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			scheduledToolRegistrations.set(registered, activation);
 			return activation;
 		};
-		if (!restrictToolNames || options.personaName !== undefined) {
+		if (!restrictToolNames || canLiveSwitchPersona) {
 			const unsubscribeToolRegistrations = extensionRunner.onToolRegistered(scheduleToolRegistration);
 			disposeCallbacks.add(unsubscribeToolRegistrations);
 

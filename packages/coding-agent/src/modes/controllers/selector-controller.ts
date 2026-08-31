@@ -809,8 +809,10 @@ export class SelectorController {
 				} catch (error) {
 					// A rejected switch must be user-visible: the persona itself
 					// stayed intact, so a silent close would look like a no-op pick.
+					// Swallow after showError — onSelect invokes the async onPick
+					// fire-and-forget, so a rethrow reaches the process-level
+					// unhandledRejection fatal handler and tears the session down.
 					this.ctx.showError(error instanceof Error ? error.message : String(error));
-					throw error;
 				} finally {
 					// A rejected switch (e.g. agent discovery failing on an
 					// unreadable extension directory) must still settle the

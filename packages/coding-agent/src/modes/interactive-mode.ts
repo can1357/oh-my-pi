@@ -3647,7 +3647,14 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.#goalModePreviousTools = undefined;
 			this.goalModePaused = false;
 			if (personaSnapshot) {
-				await rollbackPersonaSwitch(this.session, personaSnapshot);
+				try {
+					await rollbackPersonaSwitch(this.session, personaSnapshot);
+				} catch (rollbackError) {
+					// Never mask the original setup error with a rollback failure.
+					logger.warn("Failed to roll back persona after failed goal entry", {
+						error: String(rollbackError),
+					});
+				}
 			}
 			throw error;
 		}
@@ -4329,9 +4336,15 @@ export class InteractiveMode implements InteractiveModeContext {
 			// clear discarded (tools, restriction, spawns, prompt) exactly like
 			// the plan-mode rollback.
 			if (personaSnapshot) {
-				await rollbackPersonaSwitch(this.session, personaSnapshot);
+				try {
+					await rollbackPersonaSwitch(this.session, personaSnapshot);
+				} catch (rollbackError) {
+					// Never mask the original activation error with a rollback failure.
+					logger.warn("Failed to roll back persona after failed vibe entry", {
+						error: String(rollbackError),
+					});
+				}
 			}
-			throw error;
 		}
 		this.#vibeModePreviousTools = previousTools;
 		this.#vibeModeOwnerScope = ownerScope;
