@@ -478,6 +478,9 @@ export async function transformRequestBody(
 	} else {
 		delete body.reasoning;
 	}
+	if (!model.compat.supportsReasoningSummary && body.reasoning) {
+		delete body.reasoning.summary;
+	}
 	// Catalog pro aliases (`gpt-5.6-*-pro`): applied after the effort branch so
 	// the mode is sent even when no effort is set (the branch above deletes
 	// `body.reasoning` in that case) — mode and effort are independent fields.

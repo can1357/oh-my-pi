@@ -393,6 +393,8 @@ export interface OpenAICompat {
 	toolStrictMode?: "all_strict" | "none";
 	/** Whether request shaping may send reasoning params at all. Default: auto-detected (disabled for GitHub Copilot chat-completions). */
 	supportsReasoningParams?: boolean;
+	/** Whether Responses requests may include `reasoning.summary`. Default: true except on known incompatible hosts. */
+	supportsReasoningSummary?: boolean;
 	/**
 	 * Whether the endpoint accepts explicit sampling parameters (`temperature`,
 	 * `top_p`, `top_k`, `min_p`, penalties). OpenAI proprietary reasoning models
@@ -451,6 +453,8 @@ export interface OpenAICompat {
  * that proxy gateways (Vertex AI, AWS Bedrock-style fronts, etc.) reject.
  */
 export interface AnthropicCompat {
+	/** Whether thinking requests may include `context_management` and its beta header. Default: true. */
+	supportsContextManagement?: boolean;
 	/**
 	 * Stream-watchdog idle-timeout fallback in ms for slow reasoning hosts.
 	 * Set to 0 to disable the inter-event idle watchdog entirely, matching
@@ -713,6 +717,7 @@ export type ResolvedOpenAICompat = ResolvedOpenAISharedCompat &
 			| "supportsReasoningEffort"
 			| "reasoningEffortMap"
 			| "supportsReasoningParams"
+			| "supportsReasoningSummary"
 			| "supportsSamplingParams"
 			| "supportsPenaltyAndStopParams"
 			| "thinkingFormat"

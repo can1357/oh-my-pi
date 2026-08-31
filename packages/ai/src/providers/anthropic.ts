@@ -187,20 +187,27 @@ const taskBudgetBeta = "task-budgets-2026-03-13";
 const effortBeta = "effort-2025-11-24";
 const serverSideFallbackBeta = "server-side-fallback-2026-06-01";
 
-function buildCoworkBetas(
-	agentRequest: boolean,
-	thinkingRequest: boolean,
+function buildCoworkBetas({
+	agentRequest,
+	thinkingRequest,
 	disableStrictTools = false,
-): readonly string[] {
+	supportsContextManagement = true,
+}: {
+	agentRequest: boolean;
+	thinkingRequest: boolean;
+	disableStrictTools?: boolean;
+	supportsContextManagement?: boolean;
+}): readonly string[] {
 	// `context-1m-2025-08-07` is intentionally never advertised. OAuth
 	// subscription credentials have no long-context credit balance, so Anthropic
 	// hard-429s ("Usage credits are required for long context requests") on any
 	// beta-gated 1M model regardless of prompt size (#7238). Natively-1M models
 	// (e.g. claude-sonnet-5) serve their full window without the beta anyway.
-	if (!agentRequest && !disableStrictTools) return coworkUtilityBetaDefaults;
+	if (!agentRequest && !disableStrictTools && supportsContextManagement) return coworkUtilityBetaDefaults;
 	const betas: string[] = [];
 	for (const beta of agentRequest ? coworkAgentBetaDefaults : coworkUtilityBetaDefaults) {
 		if (disableStrictTools && beta === structuredOutputsBeta) continue;
+		if (!supportsContextManagement && beta === contextManagementBeta) continue;
 		betas.push(beta);
 	}
 	if (!agentRequest) return betas;
@@ -251,7 +258,7 @@ export function buildAnthropicHeaders(options: AnthropicHeaderOptions): Record<s
 	// Cowork's beta profile is part of the OAuth fingerprint; API-key requests
 	// default to extras only, matching the streaming path.
 	const betaHeader = buildBetaHeader(
-		options.coworkBetas ?? (oauthToken ? buildCoworkBetas(true, true) : []),
+		options.coworkBetas ?? (oauthToken ? buildCoworkBetas({ agentRequest: true, thinkingRequest: true }) : []),
 		extraBetas,
 	);
 	const acceptHeader = oauthToken ? "application/json" : stream ? "text/event-stream" : "application/json";
@@ -1935,6 +1942,7 @@ const streamAnthropicOnce = (
 					model.provider !== "github-copilot" &&
 					model.provider !== "google-vertex" &&
 					model.provider !== "opencode-zen" &&
+					model.compat.supportsContextManagement !== false &&
 					!extraBetas.includes(contextManagementBeta)
 				) {
 					extraBetas.push(contextManagementBeta);
@@ -3050,7 +3058,14 @@ export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): A
 		isCloudflareAiGateway: model.provider === "cloudflare-ai-gateway",
 		allowAnthropicHeaderOverrides: model.compat.allowAnthropicHeaderOverrides,
 		claudeCodeSessionId,
-		coworkBetas: oauthToken ? buildCoworkBetas(hasTools || thinkingEnabled, thinkingEnabled, disableStrictTools) : [],
+		coworkBetas: oauthToken
+			? buildCoworkBetas({
+					agentRequest: hasTools || thinkingEnabled,
+					thinkingRequest: thinkingEnabled,
+					disableStrictTools,
+					supportsContextManagement: model.compat.supportsContextManagement,
+				})
+			: [],
 	});
 
 	if (model.provider === "cloudflare-ai-gateway") {
@@ -3411,6 +3426,7 @@ function buildParams(
 		model.provider !== "github-copilot" &&
 		model.provider !== "google-vertex" &&
 		model.provider !== "opencode-zen" &&
+		model.compat.supportsContextManagement !== false &&
 		(thinking?.type === "adaptive" || thinking?.type === "enabled");
 	const contextManagement = shouldKeepThinkingContext
 		? { edits: [{ type: "clear_thinking_20251015" as const, keep: "all" as const }] }

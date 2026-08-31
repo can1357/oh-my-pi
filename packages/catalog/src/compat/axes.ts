@@ -178,6 +178,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"requires-thinking-enabled": wire("requiresThinkingEnabled", ["anthropic"]),
 	"requires-tool-result-id": wire("requiresToolResultId", ["anthropic"]),
 	"signing-endpoint": wire("signingEndpoint", ["anthropic"]),
+	"supports-context-management": wire("supportsContextManagement", ["anthropic"]),
 	"supports-eager-tool-input-streaming": wire("supportsEagerToolInputStreaming", ["anthropic"]),
 	"supports-long-cache-retention": wire("supportsLongCacheRetention", ["anthropic"]),
 	"supports-mid-conversation-system": wire("supportsMidConversationSystem", ["anthropic"]),
