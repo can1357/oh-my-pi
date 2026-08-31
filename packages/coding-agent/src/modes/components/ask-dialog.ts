@@ -27,6 +27,7 @@ import { getTabBarTheme } from "../shared";
 import { getMarkdownTheme, highlightCode, theme } from "../theme/theme";
 import {
 	matchesAppDialogFocusToggle,
+	matchesAppMessageDequeue,
 	matchesAppToolsExpand,
 	matchesSelectCancel,
 	matchesSelectDown,
@@ -84,6 +85,7 @@ interface AskDialogCallbacks {
 	onCancel(): void;
 	onPrompt(title: string, prefill?: string): Promise<string | undefined>;
 }
+
 /** Gate on the dialog's input stream. The dialog holds TUI focus, so every
  *  keystroke arrives at its `handleInput` first; a guard can take over that
  *  stream and reroute it — the draft-focus guard routes it to the chat draft.
@@ -95,6 +97,9 @@ export interface AskDialogInputGuard {
 	handleInput(keyData: string): void;
 	/** Move input ownership between the dialog and the guarded draft. */
 	toggleFocus(): void;
+	/** Consume the queued-message dequeue chord. Returns false when this guard
+	 *  has no dequeue wiring and the dialog should keep the key. */
+	handleDequeue?(): boolean;
 	/** Mirror the guard's ownership state onto the proxied draft surface each
 	 *  render, so a draft that owns input shows a visible insertion cursor even
 	 *  though this dialog holds TUI focus. */
@@ -106,6 +111,7 @@ export interface DraftFocusEditor {
 	getText(): string;
 	handleDraftEdit(data: string): void;
 	focused: boolean;
+	onDequeue?: () => void;
 }
 
 /** Guard that routes dialog input to the chat draft. Ownership is explicit:
@@ -119,6 +125,10 @@ export function createDraftFocusGuard(draft: DraftFocusEditor): AskDialogInputGu
 	return {
 		draftOwnsInput: () => draftOwnsInput,
 		handleInput: keyData => {
+			if (matchesAppMessageDequeue(keyData) && draft.onDequeue) {
+				draft.onDequeue();
+				return;
+			}
 			const hadText = draft.getText().length > 0;
 			draft.handleDraftEdit(keyData);
 			if (draftOwnsInput && hadText && draft.getText().length === 0) {
@@ -130,6 +140,13 @@ export function createDraftFocusGuard(draft: DraftFocusEditor): AskDialogInputGu
 		},
 		syncPresentation: () => {
 			draft.focused = draftOwnsInput;
+		},
+		handleDequeue: () => {
+			if (!draft.onDequeue) return false;
+			draft.onDequeue();
+			// A restore puts text into the draft. It owns input now.
+			draftOwnsInput = draft.getText().length > 0;
+			return true;
 		},
 	};
 }
@@ -519,6 +536,12 @@ export class AskDialogComponent implements Component {
 		if (focusGuard && matchesAppDialogFocusToggle(keyData)) {
 			focusGuard.toggleFocus();
 			this.#requestRender();
+			return;
+		}
+		if (focusGuard?.handleDequeue && matchesAppMessageDequeue(keyData)) {
+			if (focusGuard.handleDequeue()) {
+				this.#requestRender();
+			}
 			return;
 		}
 		if (matchesSelectCancel(keyData)) {

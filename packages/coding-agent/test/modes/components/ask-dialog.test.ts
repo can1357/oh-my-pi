@@ -2,7 +2,11 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:
 import { stripVTControlCharacters } from "node:util";
 import { KeybindingsManager } from "@oh-my-pi/pi-coding-agent/config/keybindings";
 import type { ExtensionAskDialogQuestion } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
-import { AskDialogComponent, createDraftFocusGuard } from "@oh-my-pi/pi-coding-agent/modes/components/ask-dialog";
+import {
+	AskDialogComponent,
+	createDraftFocusGuard,
+	type DraftFocusEditor,
+} from "@oh-my-pi/pi-coding-agent/modes/components/ask-dialog";
 import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { setKeybindings } from "@oh-my-pi/pi-tui";
 
@@ -13,6 +17,8 @@ const PAGE_UP = "\x1b[5~";
 const ENTER = "\n";
 const CANCEL = "\x07";
 const ALT_E = "\x1be";
+const SHIFT_UP = "\x1b[1;2A";
+const ALT_UP = "\x1b[1;3A";
 const BACKSPACE = "\x7f";
 const SPACE = " ";
 const TAB = "\t";
@@ -27,7 +33,7 @@ function render(component: AskDialogComponent): string {
 /** Minimal DraftFocusEditor stand-in: models the editor semantics the guard's
  *  ownership rules observe. */
 function fakeDraft(text: string) {
-	const draft = {
+	const draft: DraftFocusEditor & { text: string } = {
 		text,
 		focused: false,
 		handleDraftEdit: vi.fn((data: string) => {
@@ -1779,5 +1785,38 @@ describe("AskDialogComponent", () => {
 		component.handleInput(ENTER);
 		expect(onSubmit).toHaveBeenCalledTimes(1);
 		expect(draft.handleDraftEdit).toHaveBeenCalledTimes(2);
+	});
+
+	it("dequeues queued messages from both ownership states", () => {
+		const draft = fakeDraft("");
+		const queuedText = "queued";
+		// Imitate restoreQueuedMessagesToEditor: queued text is prepended to the
+		// current draft.
+		draft.onDequeue = vi.fn(() => {
+			draft.text = draft.text ? `${queuedText} ${draft.text}` : queuedText;
+		});
+		const questions: ExtensionAskDialogQuestion[] = [
+			{ id: "q1", question: "Choose one?", options: [{ label: "Option A" }, { label: "Option B" }] },
+		];
+
+		const component = new AskDialogComponent(
+			questions,
+			{ onSubmit: vi.fn(), onCancel: vi.fn(), onPrompt: vi.fn() },
+			{ inputGuard: createDraftFocusGuard(draft) },
+		);
+
+		// Dialog owns input (empty draft): the dequeue chord restores the
+		// message and moves input to the draft — the next keystroke edits it.
+		component.handleInput(SHIFT_UP);
+		expect(draft.onDequeue).toHaveBeenCalledTimes(1);
+		expect(draft.text).toBe(queuedText);
+		component.handleInput("!");
+		expect(draft.text).toBe(`${queuedText}!`);
+
+		// Draft owns input: the other default chord also restores, without
+		// leaking the key into the draft as text.
+		component.handleInput(ALT_UP);
+		expect(draft.onDequeue).toHaveBeenCalledTimes(2);
+		expect(draft.text).toBe(`${queuedText} ${queuedText}!`);
 	});
 });

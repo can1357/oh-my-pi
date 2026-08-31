@@ -36,6 +36,11 @@ export function matchesAppDialogFocusToggle(data: string): boolean {
 	return matchesKey(data, "alt+e");
 }
 
+/** Match the queued-message dequeue keybinding (`app.message.dequeue`). */
+export function matchesAppMessageDequeue(data: string): boolean {
+	return getKeybindings().matches(data, "app.message.dequeue");
+}
+
 /** Match the generic selector cancel keybinding. */
 export function matchesSelectCancel(data: string): boolean {
 	return getKeybindings().matches(data, "tui.select.cancel");
