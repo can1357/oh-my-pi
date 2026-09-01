@@ -16,6 +16,7 @@
 - Disabled `hashline` edit mode for Kimi, Mimo, DeepSeek Flash, and Stepfun models for stability
 
 ### Fixed
+- Failed checkpoint results no longer leave a session in checkpoint mode.
 
 - Fixed an issue where custom model overrides were lost during configuration updates
 - Fixed "Please use nerdfont" notification incorrectly persisting after theme configuration
