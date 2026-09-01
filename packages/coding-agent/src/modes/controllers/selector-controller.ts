@@ -52,7 +52,7 @@ import {
 	persistForeignSession,
 } from "../../session/foreign-session-import";
 import type { ForeignSessionInfo, ForeignSessionSource } from "../../session/foreign-session-store";
-import type { SessionEntry } from "../../session/session-entries";
+import type { SessionEntry, SessionMessageEntry, SessionTreeNode } from "../../session/session-entries";
 import type { SessionInfo } from "../../session/session-listing";
 import { SessionManager } from "../../session/session-manager";
 import { loadPinnedSessionIds } from "../../session/session-pins";
@@ -99,6 +99,7 @@ import { OAuthSelectorComponent } from "../components/oauth-selector";
 import { PluginSelectorComponent } from "../components/plugin-selector";
 import { ReadToolGroupComponent } from "../components/read-tool-group";
 import { ResetUsageSelectorComponent } from "../components/reset-usage-selector";
+import { type BranchVariantPath, RewindSelectorComponent } from "../components/rewind-selector";
 import { renderSegmentTrack } from "../components/segment-track";
 import { SessionAccountSelectorComponent } from "../components/session-account-selector";
 import { SessionSelectorComponent, type SessionSelectorOptions } from "../components/session-selector";
@@ -106,9 +107,7 @@ import { SettingsSelectorComponent } from "../components/settings-selector";
 import { ToolExecutionComponent } from "../components/tool-execution";
 import { TranscriptBlock } from "../components/transcript-container";
 import { TreeSelectorComponent } from "../components/tree-selector";
-import { UserMessageSelectorComponent } from "../components/user-message-selector";
 import type { SessionObserverRegistry } from "../session-observer-registry";
-import { buildCopyTargets } from "../utils/copy-targets";
 
 const MANUAL_LOGIN_PROMPT = "Paste the authorization code (or full redirect URL), then press Enter:";
 
@@ -1212,86 +1211,212 @@ export class SelectorController {
 	}
 
 	showUserMessageSelector(): void {
-		const userMessages = this.ctx.session.getUserMessagesForBranching();
-
-		if (userMessages.length === 0) {
+		const entries = this.ctx.sessionManager
+			.getBranch()
+			.filter((entry): entry is SessionMessageEntry => entry.type === "message");
+		if (entries.length === 0) {
 			this.ctx.showStatus("No messages to branch from");
 			return;
 		}
 
-		this.showSelector(done => {
-			const selector = new UserMessageSelectorComponent(
-				userMessages.map(m => ({ id: m.entryId, text: m.text })),
-				async entryId => {
-					// Branching rewinds to a strict prefix of the rendered transcript:
-					// the selected user message and everything after it are dropped.
-					// Capture the boundary before branch() so the tail can be dropped
-					// in place when it never reached native scrollback.
-					const branchEntry = this.ctx.sessionManager.getEntry(entryId);
-					const branchMessage =
-						branchEntry?.type === "message" && branchEntry.message.role === "user"
-							? branchEntry.message
-							: undefined;
-					const result = await this.ctx.session.branch(entryId);
-					if (result.cancelled) {
-						// Hook cancelled the branch
-						done();
-						this.ctx.ui.requestRender();
-						return;
-					}
-
-					// A leaf that moved past the branch point (e.g. a session_branch
-					// hook persisted entries) invalidates the prefix assumption.
-					// Root branches (parentId null) start a fresh session file and may
-					// leave pre-message components stale — always replay those.
-					const fastRewind =
-						branchMessage !== undefined &&
-						branchEntry?.parentId != null &&
-						this.ctx.sessionManager.getLeafId() === branchEntry.parentId &&
-						this.ctx.truncateTranscriptFromMessage(branchMessage);
-					if (!fastRewind) {
-						await this.ctx.renderInitialMessages({ clearTerminalHistory: true });
-					}
-					this.ctx.editor.setDraft(result.selectedText, result.selectedImages);
-					done();
-					this.ctx.showStatus("Branched to new session");
-				},
-				() => {
-					done();
-					this.ctx.ui.requestRender();
-				},
-			);
-			return { component: selector, focus: selector.getMessageList() };
-		});
-	}
-
-	showCopySelector(): void {
-		const targets = buildCopyTargets(this.ctx.session);
-		if (targets.length === 0) {
-			this.ctx.showStatus("Nothing to copy yet.");
-			return;
-		}
-
 		let overlayHandle: OverlayHandle | undefined;
+		let selector: RewindSelectorComponent | undefined;
 		const done = () => {
 			overlayHandle?.hide();
+			selector?.dispose();
+			this.focusActiveEditorArea();
 			this.ctx.ui.requestRender();
 		};
-		const selector = new CopySelectorComponent(targets, {
-			onPick: target => {
-				done();
-				if (target.content === undefined) return;
-				void copyToClipboard(target.content);
-				this.ctx.showStatus(target.copyMessage ?? "Copied to clipboard");
-			},
+		selector = new RewindSelectorComponent(entries, {
+			ui: this.ctx.ui,
+			getTool: name => this.ctx.session.getToolByName(name),
+			isBuiltInTool: name => this.ctx.session.hasBuiltInTool(name),
+			getMessageRenderer: type => this.ctx.session.extensionRunner?.getMessageRenderer(type),
+			cwd: this.ctx.sessionManager.getCwd(),
+			hideThinkingBlock: () => this.ctx.effectiveHideThinkingBlock,
+			proseOnlyThinking: () => this.ctx.proseOnlyThinking,
+			requestRender: () => this.ctx.ui.requestRender(),
+			siblingPaths: entryId => this.#siblingBranchPaths(entryId),
+			onSelect: entryId => void this.#rewindFromTranscript(entryId, done),
 			onCancel: done,
 		});
-
+		if (selector.targetCount === 0) {
+			selector.dispose();
+			this.ctx.showStatus("No messages to branch from");
+			return;
+		}
+		// Fullscreen alternate-screen overlay: the transcript replica draws over
+		// the live one, and the normal screen stays untouched until the rewind
+		// itself rewrites it.
 		overlayHandle = this.ctx.ui.showOverlay(selector, {
 			anchor: "bottom-center",
 			width: "100%",
 			maxHeight: "100%",
 			margin: 0,
+			fullscreen: true,
+		});
+		this.ctx.ui.setFocus(selector);
+		this.ctx.ui.requestRender();
+	}
+
+	/**
+	 * Alternate branches of `entryId`'s turn for the rewind selector's strip:
+	 * every other child of its parent, each unrolled along its most-recent
+	 * descendants (children are timestamp-ordered, so the last child chain is
+	 * the branch's latest continuation) and filtered to message entries.
+	 */
+	#siblingBranchPaths(entryId: string): BranchVariantPath[] {
+		const entry = this.ctx.sessionManager.getEntry(entryId);
+		if (!entry) return [];
+		const forest = this.ctx.sessionManager.getTree();
+		const byId = new Map<string, SessionTreeNode>();
+		const stack = [...forest];
+		while (stack.length > 0) {
+			const node = stack.pop()!;
+			byId.set(node.entry.id, node);
+			stack.push(...node.children);
+		}
+		const siblings =
+			entry.parentId === null
+				? forest.filter(node => node.entry.id !== entryId)
+				: (byId.get(entry.parentId)?.children ?? []).filter(node => node.entry.id !== entryId);
+		const paths: BranchVariantPath[] = [];
+		for (const sibling of siblings) {
+			const entries: SessionMessageEntry[] = [];
+			let node: SessionTreeNode | undefined = sibling;
+			while (node) {
+				if (node.entry.type === "message") entries.push(node.entry);
+				node = node.children.at(-1);
+			}
+			if (entries.length > 0) paths.push({ rootId: sibling.entry.id, entries });
+		}
+		return paths;
+	}
+
+	/**
+	 * Complete an esc-esc rewind: user-message targets take the branch flow
+	 * (rewind past the prompt, hand its text back as an editor draft); every
+	 * other target lands the leaf on the entry via `navigateTree`. `done`
+	 * closes the fullscreen selector after the transcript is rebuilt so the
+	 * alternate screen never flashes a stale transcript.
+	 */
+	async #rewindFromTranscript(entryId: string, done: () => void): Promise<void> {
+		const entry = this.ctx.sessionManager.getEntry(entryId);
+		if (entry?.type !== "message") {
+			done();
+			return;
+		}
+
+		if (entry.message.role === "user") {
+			// Branching rewinds to a strict prefix of the rendered transcript:
+			// the selected user message and everything after it are dropped.
+			// Capture the boundary before branch() so the tail can be dropped
+			// in place when it never reached native scrollback.
+			const branchMessage = entry.message;
+			const result = await this.ctx.session.branch(entryId);
+			if (result.cancelled) {
+				// Hook cancelled the branch
+				done();
+				return;
+			}
+			// A leaf that moved past the branch point (e.g. a session_branch
+			// hook persisted entries) invalidates the prefix assumption.
+			// Root branches (parentId null) start a fresh session file and may
+			// leave pre-message components stale — always replay those.
+			const fastRewind =
+				entry.parentId != null &&
+				this.ctx.sessionManager.getLeafId() === entry.parentId &&
+				this.ctx.truncateTranscriptFromMessage(branchMessage);
+			if (!fastRewind) {
+				await this.ctx.renderInitialMessages({ clearTerminalHistory: true });
+			}
+			this.ctx.editor.setDraft(result.selectedText, result.selectedImages);
+			done();
+			this.ctx.showStatus("Branched to new session");
+			return;
+		}
+
+		const realLeafId = this.ctx.sessionManager.getLeafId();
+		if (entryId === realLeafId) {
+			done();
+			this.ctx.showStatus("Already at this point");
+			return;
+		}
+		const treeRewind = this.#treeRewindBoundary(entryId, realLeafId);
+		try {
+			const result = await this.ctx.session.navigateTree(entryId, { summarize: false });
+			if (result.cancelled) {
+				done();
+				this.ctx.showStatus("Navigation cancelled");
+				return;
+			}
+			const fastRewind =
+				treeRewind !== undefined &&
+				this.ctx.sessionManager.getLeafId() === treeRewind.expectedLeafId &&
+				this.ctx.truncateTranscriptFromMessage(treeRewind.message);
+			if (!fastRewind) {
+				await this.ctx.renderInitialMessages({ clearTerminalHistory: true });
+			}
+			await this.ctx.reloadTodos();
+			if (result.editorText && !this.ctx.editor.getText().trim()) {
+				this.ctx.editor.setDraft(result.editorText, result.editorImages);
+			}
+			done();
+			this.ctx.showStatus("Rewound to selected point");
+		} catch (error) {
+			done();
+			this.ctx.showError(error instanceof Error ? error.message : String(error));
+		}
+	}
+
+	showCopySelector(): void {
+		const entries = this.ctx.sessionManager
+			.getBranch()
+			.filter((entry): entry is SessionMessageEntry => entry.type === "message");
+		if (entries.length === 0) {
+			this.ctx.showStatus("Nothing to copy yet.");
+			return;
+		}
+
+		let overlayHandle: OverlayHandle | undefined;
+		let selector: CopySelectorComponent | undefined;
+		const done = () => {
+			overlayHandle?.hide();
+			selector?.dispose();
+			this.focusActiveEditorArea();
+			this.ctx.ui.requestRender();
+		};
+		selector = new CopySelectorComponent(entries, {
+			ui: this.ctx.ui,
+			getTool: name => this.ctx.session.getToolByName(name),
+			isBuiltInTool: name => this.ctx.session.hasBuiltInTool(name),
+			getMessageRenderer: type => this.ctx.session.extensionRunner?.getMessageRenderer(type),
+			cwd: this.ctx.sessionManager.getCwd(),
+			hideThinkingBlock: () => this.ctx.effectiveHideThinkingBlock,
+			proseOnlyThinking: () => this.ctx.proseOnlyThinking,
+			requestRender: () => this.ctx.ui.requestRender(),
+			onPick: (content, label) => {
+				done();
+				if (!content.trim()) {
+					this.ctx.showStatus("Nothing to copy in that item");
+					return;
+				}
+				void copyToClipboard(content);
+				this.ctx.showStatus(`Copied ${label} to clipboard`);
+			},
+			onCancel: done,
+		});
+		if (selector.targetCount === 0) {
+			selector.dispose();
+			this.ctx.showStatus("Nothing to copy yet.");
+			return;
+		}
+		overlayHandle = this.ctx.ui.showOverlay(selector, {
+			anchor: "bottom-center",
+			width: "100%",
+			maxHeight: "100%",
+			margin: 0,
+			fullscreen: true,
 		});
 		this.ctx.ui.setFocus(selector);
 		this.ctx.ui.requestRender();

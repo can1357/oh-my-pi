@@ -1,0 +1,8 @@
+// Provider-wire compat for "vllm".
+
+provider "vllm" {
+	class "qwen" {
+		// Replaces the vLLM Qwen thinking-format branch.
+		thinking-format "qwen-chat-template"
+	}
+}

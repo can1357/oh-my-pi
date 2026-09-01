@@ -1647,6 +1647,11 @@ export class Settings {
 			raw.steeringMode = raw.queueMode;
 			delete raw.queueMode;
 		}
+		// doubleEscapeAction: "branch"/"tree" -> "rewind". Both legacy actions are
+		// superseded by the in-transcript rewind selector; only "none" survives.
+		if (raw.doubleEscapeAction === "branch" || raw.doubleEscapeAction === "tree") {
+			raw.doubleEscapeAction = "rewind";
+		}
 
 		// lastChangelogVersion moved out of config.yml into the
 		// <agentDir>/last-changelog-version marker file so version bumps no

@@ -38,7 +38,6 @@ class "anthropic" {
 		"opencode-zen" "vercel-ai-gateway" "zenmux" {
 		revision ">=4.7 <45.1" {
 			thinking-mode "anthropic-adaptive"
-			thinking-supports-display #true
 		}
 	}
 	on "amazon-bedrock" "anthropic" "cloudflare-ai-gateway" "opencode-zen" "vercel-ai-gateway" \

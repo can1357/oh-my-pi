@@ -1,6 +1,8 @@
 // Provider-wire compat for "zai"; regenerated from the frozen census using deployment contract selectors.
 
 provider "zai" {
+	// Replaces resolve.ts's ZAI provider baseline for Anthropic tool-result IDs.
+	requires-tool-result-id #true
 	class "glm" {
 		family "flash" {
 			thinking-efforts "minimal" "low" "medium" "high" "xhigh"

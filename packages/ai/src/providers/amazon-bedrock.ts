@@ -799,6 +799,8 @@ function resolvePromptCachePolicy(
 	}
 
 	return {
+		// This emitter has only two placement sites (final user and system); the
+		// provider's wire-level maximum remains authoritative in catalog compat.
 		remainingCheckpoints: Math.min(configuredMaximum, 2),
 		...(cacheRetention === "long" && model.compat.supportsLongPromptCacheRetention ? { ttl: "1h" } : {}),
 	};

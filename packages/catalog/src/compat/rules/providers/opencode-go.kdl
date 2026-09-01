@@ -1,6 +1,12 @@
 // Provider-wire compat for "opencode-go"; regenerated from the frozen census using deployment contract selectors.
 
 provider "opencode-go" {
+	// Replaces the OpenCode reasoning-model whenThinking fallback object.
+	when-thinking {
+		requires-reasoning-content-for-tool-calls #true
+		allows-synthetic-reasoning-content-for-tool-calls #false
+		reasoning-content-field "reasoning_content"
+	}
 	class "deepseek" {
 		thinking-mode "effort"
 		family "flash" {
@@ -77,6 +83,12 @@ provider "opencode-go" {
 	}
 	// residue: taxonomy ranks and exact globs do not isolate these models.
 	models "minimax-m2.5" {
+		// Replaces the Anthropic-route MiniMax effort remap table.
+		thinking-effort-map {
+			low "adaptive"
+			medium "adaptive"
+			high "adaptive"
+		}
 		thinking-mode "anthropic-adaptive"
 	}
 }

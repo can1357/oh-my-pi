@@ -45,6 +45,9 @@ export type SymbolKey =
 	| "boxRound.bottomRight"
 	| "boxRound.horizontal"
 	| "boxRound.vertical"
+	// Box Drawing - Dotted (selection outlines)
+	| "boxDotted.horizontal"
+	| "boxDotted.vertical"
 	// Box Drawing - Sharp
 	| "boxSharp.topLeft"
 	| "boxSharp.topRight"
@@ -392,6 +395,9 @@ const UNICODE_SYMBOLS: SymbolMap = {
 	"boxRound.bottomRight": "╯",
 	"boxRound.horizontal": "─",
 	"boxRound.vertical": "│",
+	// Box (dotted)
+	"boxDotted.horizontal": "┄",
+	"boxDotted.vertical": "┆",
 	// Box (sharp)
 	"boxSharp.topLeft": "┌",
 	"boxSharp.topRight": "┐",
@@ -690,6 +696,11 @@ const NERD_SYMBOLS: SymbolMap = {
 	"boxRound.horizontal": "─",
 	// pick: │ | alt: ┃ ║ ▏
 	"boxRound.vertical": "│",
+	// Box Drawing - Dotted (same as unicode)
+	// pick: ┄ | alt: ╌ ┈ ⋯
+	"boxDotted.horizontal": "┄",
+	// pick: ┆ | alt: ╎ ┊ ⋮
+	"boxDotted.vertical": "┆",
 	// Box Drawing - Sharp (same as unicode)
 	// pick: ┌ | alt: ┏ ╭ ╔
 	"boxSharp.topLeft": "┌",
@@ -1084,6 +1095,9 @@ const ASCII_SYMBOLS: SymbolMap = {
 	"boxRound.bottomRight": "+",
 	"boxRound.horizontal": "-",
 	"boxRound.vertical": "|",
+	// Box Drawing - Dotted (ASCII fallback)
+	"boxDotted.horizontal": "-",
+	"boxDotted.vertical": ":",
 	// Box Drawing - Sharp (ASCII fallback)
 	"boxSharp.topLeft": "+",
 	"boxSharp.topRight": "+",

@@ -4,6 +4,9 @@
 
 ### Added
 
+- Added support for GitLab Duo models
+- Added provider support for Llama.cpp, LM Studio, and Minimax
+- Added support for new models: Qwen 3.8 27B, Granite 4.2 8B, Abliterated variants, GLM 5.3, and Qwen 3.8 Flash Next
 - Added `supportsContextManagement` and `supportsReasoningSummary` compatibility metadata for provider-compatible model endpoints ([#10358](https://github.com/can1357/oh-my-pi/pull/10358) by [@jubueche](https://github.com/jubueche)).
 - Model identity and compatibility policy now live in a checked-in KDL rule tree (`src/compat/rules/`: taxonomy, class, provider, and runtime files) compiled by `bun run gen:compat` into a committed `rules.json`; the runtime engine (`resolveModelPolicy`/`classifyModel`) resolves every model's wire compat, thinking surface, and catalog metadata from these rules instead of scattered model-name matching in TypeScript.
 - Built models carry a structured `identity` (`class`, `family`, `revision`, effort/thinking-variant facts) baked into `models.json`, and Google APIs (`google-generative-ai`, `google-vertex`, `google-gemini-cli`) gain a resolved compat record instead of `undefined`.
@@ -17,8 +20,21 @@
 - Added Devin selector aliases for the native short and dotted model names, plus static SWE-1.6 seeds so the provider default resolves before credential-scoped discovery runs ([#8590](https://github.com/can1357/oh-my-pi/pull/8590) by [@will-bogusz](https://github.com/will-bogusz)).
 - Added optional `description`, `isNew`, `isBeta`, and `isRecommended` model metadata, populated from Devin's `GetCliModelConfigs` so discovered Cascade models keep the server's blurb and badges ([#8590](https://github.com/can1357/oh-my-pi/pull/8590) by [@will-bogusz](https://github.com/will-bogusz)).
 
+### Changed
+
+- Updated pricing data for multiple models to reflect current provider rates
+- Standardized model display names across the catalog for improved consistency
+- Variant collapse moved to `@oh-my-pi/pi-catalog/compat/collapse` with a consolidated API (`collapseVariants`/`collapseBuiltVariants`/`resolveVariantSelector`/`resolveBareVariantSelector`/`isCollapsedVariantSpec`); the reviewed per-provider families (Antigravity, Gemini CLI, Devin, Cursor) are authored in `_collapse.kdl` and compiled, not hand-written tables.
+- The identity surface is rebuilt around `classifyModel`/`ModelIdentity`: version floors, family checks, and capability predicates resolve from structured identity and rules instead of id regexes, and trailing-marker/thinking-pair vocabularies are compiled from the rule tree.
+
+### Removed
+
+- Removed legacy DeepSeek V3 model variants from the Novita provider catalog
+- Removed the legacy id-heuristic identity modules (`identity/classify`, `identity/family`, `identity/markers`), the per-model TypeScript policy tables in the generator, and the hand-maintained variant-collapse table exports.
+
 ### Fixed
 
+- Vendor-prefixed bare GLM ids (`zai-glm-5-2` on Mistral, `zai-glm-4.7` on Cerebras) classify as GLM again, restoring their tokenizer and `<think>` history-replay dialect lost in the KDL taxonomy migration.
 - Model-id revision parsing no longer mistakes parameter-count tokens for versions (`qwen3-32b` is generation 3, not 3.32), Fireworks' `p`-spelled Kimi ids classify as K2.6 (restoring their widened reasoning stream timeout), and Kimi K3's `reasoning_effort` remap now applies on any OpenAI-compatible host (LiteLLM, vLLM) instead of only census-listed providers.
 - Cursor's wrapped per-tier Grok ids (`cursor-grok-4.5`, `cursor-grok-4.6-high`) now carry structured xAI identity with a parsed revision, so revision-gated behavior (reasoning classification, thinking-loop guard) applies to them like any other Grok deployment.
 - Codex Daybreak aliases keep their standard API list price through the rule tree (`cost-patch`) instead of a TypeScript pricing table, covering the `-wm` worker siblings that the old exact-id switch missed.
@@ -26,14 +42,6 @@
 - Fixed native Devin families with independent Thinking and 1M Context axes losing wire variants or advertising the wrong context window; each context lane now preserves its complete off/effort routing and server-selected default ([#8590](https://github.com/can1357/oh-my-pi/pull/8590) by [@will-bogusz](https://github.com/will-bogusz)).
 - Stripped the image modality from Devin's `swe-1-6`/`swe-1-6-fast`: their configs advertise `supports_images` but the backend silently drops inline images (verified live against every other Cascade model), so clients now engage their text-only image fallback instead of losing attachments ([#6072](https://github.com/can1357/oh-my-pi/issues/6072)).
 - Devin discovery now logs a warning when the backend returns an empty native catalog, the failure signature of a stale pinned CLI identity ([#8590](https://github.com/can1357/oh-my-pi/pull/8590) by [@will-bogusz](https://github.com/will-bogusz)).
-### Changed
-
-- Variant collapse moved to `@oh-my-pi/pi-catalog/compat/collapse` with a consolidated API (`collapseVariants`/`collapseBuiltVariants`/`resolveVariantSelector`/`resolveBareVariantSelector`/`isCollapsedVariantSpec`); the reviewed per-provider families (Antigravity, Gemini CLI, Devin, Cursor) are authored in `_collapse.kdl` and compiled, not hand-written tables.
-- The identity surface is rebuilt around `classifyModel`/`ModelIdentity`: version floors, family checks, and capability predicates resolve from structured identity and rules instead of id regexes, and trailing-marker/thinking-pair vocabularies are compiled from the rule tree.
-
-### Removed
-
-- Removed the legacy id-heuristic identity modules (`identity/classify`, `identity/family`, `identity/markers`), the per-model TypeScript policy tables in the generator, and the hand-maintained variant-collapse table exports.
 
 ## [18.0.11] - 2026-08-29
 
