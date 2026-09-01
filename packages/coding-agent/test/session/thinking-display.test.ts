@@ -193,6 +193,7 @@ describe("formatThinkingForDisplay seam-transition battery", () => {
 		it(`byte-identical at every split point across cap/fence/marker transitions (mode=${proseOnly ? "prose" : "raw"})`, () => {
 			const fixture = `${"x".repeat(8300)}\n\`\`\`js\nstep one\nstep two\n\`\`\`\ntail prose.\n<!-- -->\nappended`;
 			const n = fixture.length;
+			// oxlint-disable-next-line unicorn/no-new-array -- length preallocation
 			const refs: string[] = new Array(n + 1);
 			for (let i = 0; i <= n; i++) {
 				formatThinkingForDisplay(POISON_BATTERY, proseOnly);

@@ -420,7 +420,7 @@ async function main() {
 			const refs = corpusIdents.get(name);
 			if (!refs) continue;
 			const others = [...refs].filter(r => r !== f.rel && r !== `test:${f.rel}`);
-			if (others.length > 0 && others.some(r => !r.startsWith("test:"))) continue;
+			if (others.some(r => !r.startsWith("test:"))) continue;
 			deadExports.push({
 				file: f.rel,
 				name,

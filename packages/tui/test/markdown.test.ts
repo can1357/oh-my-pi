@@ -1361,7 +1361,7 @@ bar`,
 			let visible = "";
 			const targets: Array<string | null> = [];
 
-			for (let i = 0; i < line.length; ) {
+			for (let i = 0; i < line.length;) {
 				if (line.startsWith("\x1b]8;;", i)) {
 					const terminator = line.indexOf("\x07", i + 5);
 					activeTarget = line.slice(i + 5, terminator) || null;
@@ -1454,15 +1454,15 @@ bar`,
 			const labelStart = issueRow.visible.indexOf("#5860");
 			const separator = issueRow.visible.indexOf("|", labelStart);
 			expect(issueRow.targets.slice(labelStart, labelStart + "#5860".length)).toEqual(
-				new Array("#5860".length).fill(issueUrl),
+				Array.from({ length: "#5860".length }, () => issueUrl),
 			);
 			expect(issueRow.targets.slice(labelStart + "#5860".length, separator)).toEqual(
-				new Array(separator - labelStart - "#5860".length).fill(null),
+				Array.from({ length: separator - labelStart - "#5860".length }, () => null),
 			);
 
 			const titleStart = issueRow.visible.indexOf("feat(extensions)");
 			expect(issueRow.targets.slice(titleStart, titleStart + "feat(extensions)".length)).toEqual(
-				new Array("feat(extensions)".length).fill(null),
+				Array.from({ length: "feat(extensions)".length }, () => null),
 			);
 
 			const linkedText = lines
@@ -1506,10 +1506,12 @@ bar`,
 				[secondRow, "second"],
 			] as const) {
 				const start = row.visible.indexOf(label);
-				expect(row.targets.slice(start, start + label.length)).toEqual(new Array(label.length).fill(issueUrl));
+				expect(row.targets.slice(start, start + label.length)).toEqual(
+					Array.from({ length: label.length }, () => issueUrl),
+				);
 				const separator = row.visible.indexOf("|", start);
 				expect(row.targets.slice(start + label.length, separator)).toEqual(
-					new Array(separator - start - label.length).fill(null),
+					Array.from({ length: separator - start - label.length }, () => null),
 				);
 			}
 

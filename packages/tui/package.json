@@ -29,12 +29,12 @@
   "main": "./src/index.ts",
   "types": "./src/index.ts",
   "scripts": {
-    "check": "biome check . && bun run check:types",
+    "check": "oxlint . && oxfmt --check --no-error-on-unmatched-pattern 'src/**/*.{ts,tsx}' '{test,bench,examples,scripts}/**/*.ts' '*.ts' && bun run check:types",
     "check:types": "tsgo -p tsconfig.json --noEmit",
-    "lint": "biome lint .",
+    "lint": "oxlint .",
     "test": "bun test --parallel test/*.test.ts",
-    "fix": "biome check --write --unsafe .",
-    "fmt": "biome format --write ."
+    "fix": "oxlint --fix --fix-suggestions . && bun run fmt",
+    "fmt": "oxfmt --no-error-on-unmatched-pattern 'src/**/*.{ts,tsx}' '{test,bench,examples,scripts}/**/*.ts' '*.ts'"
   },
   "dependencies": {
     "@oh-my-pi/pi-natives": "catalog:",

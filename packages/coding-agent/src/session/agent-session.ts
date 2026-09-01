@@ -98,7 +98,7 @@ import {
 	stringProperty,
 	withTimeout,
 } from "@oh-my-pi/pi-utils";
-import { type AdvisorConfig, type AdvisorRuntimeStatus, loadAdvisorTranscriptCosts } from "../advisor";
+import { type AdvisorConfig, loadAdvisorTranscriptCosts } from "../advisor";
 import { ASYNC_JOB_MANAGER_SHUTDOWN_REASON, type AsyncJob, AsyncJobManager } from "../async";
 import { reset as resetCapabilities } from "../capability";
 import type { EffectiveExtensionRoots } from "../capability/types";
@@ -173,9 +173,7 @@ import checkpointActiveNoticeTemplate from "../prompts/system/checkpoint-active-
 import interruptedThinkingTemplate from "../prompts/system/interrupted-thinking.md" with { type: "text" };
 import planModeActivePrompt from "../prompts/system/plan-mode-active.md" with { type: "text" };
 import planModeReferencePrompt from "../prompts/system/plan-mode-reference.md" with { type: "text" };
-import planModeToolDecisionReminderPrompt from "../prompts/system/plan-mode-tool-decision-reminder.md" with {
-	type: "text",
-};
+import planModeToolDecisionReminderPrompt from "../prompts/system/plan-mode-tool-decision-reminder.md" with { type: "text" };
 import rewindReportTemplate from "../prompts/system/rewind-report.md" with { type: "text" };
 import sideChannelNoToolsReminder from "../prompts/system/side-channel-no-tools.md" with { type: "text" };
 import vibeModeActivePrompt from "../prompts/system/vibe-mode-active.md" with { type: "text" };
@@ -333,7 +331,12 @@ import {
 	toRestoredQueuedMessage,
 } from "./queued-messages";
 import type { ServingModel } from "./retry-fallback-chains";
-import { type AdvisorStats, SessionAdvisors, type SessionAdvisorsHost } from "./session-advisors";
+import {
+	type AdvisorStats,
+	type AdvisorStatusOverviewEntry,
+	SessionAdvisors,
+	type SessionAdvisorsHost,
+} from "./session-advisors";
 import type { BuildSessionContextOptions, SessionContext } from "./session-context";
 import { getRestorableSessionModels } from "./session-context";
 import { formatSessionDumpText } from "./session-dump-format";
@@ -360,7 +363,7 @@ import { YieldQueue } from "./yield-queue";
 
 export * from "./agent-session-events";
 export * from "./agent-session-types";
-export type { AdvisorStats, PerAdvisorStat } from "./session-advisors";
+export type { AdvisorStats, AdvisorStatusOverviewEntry, PerAdvisorStat } from "./session-advisors";
 
 const SESSION_STOP_CONTINUATION_CAP = 8;
 
@@ -2317,7 +2320,7 @@ export class AgentSession {
 	 * provider-backed compaction and must not block switching sessions.
 	 */
 	async settleInFlightMessagePersistence(): Promise<void> {
-		await Promise.allSettled([...this.#pendingMessageEndPersistence.values()]);
+		await Promise.allSettled(this.#pendingMessageEndPersistence.values());
 	}
 
 	/**
@@ -2328,7 +2331,7 @@ export class AgentSession {
 	 */
 	async #drainInFlightEventHandlers(): Promise<void> {
 		while (this.#inFlightEventHandlers.size > 0) {
-			await Promise.allSettled([...this.#inFlightEventHandlers]);
+			await Promise.allSettled(this.#inFlightEventHandlers);
 		}
 	}
 
@@ -4147,7 +4150,7 @@ export class AgentSession {
 	}
 
 	#notifySessionChangeCallbacks(): void {
-		for (const callback of [...this.#sessionChangeCallbacks]) {
+		for (const callback of Array.from(this.#sessionChangeCallbacks)) {
 			try {
 				callback();
 			} catch (error) {
@@ -4961,17 +4964,9 @@ export class AgentSession {
 		return this.#tools.resolveActiveEditMode();
 	}
 
-	#syncAfterModelChange(previousEditMode: EditMode): Promise<void> {
-		return this.#tools.syncAfterModelChange(previousEditMode);
-	}
-
 	/** Enabled MCP tools in their current presentation partition. */
 	getSelectedMCPToolNames(): string[] {
 		return this.#tools.getSelectedMCPToolNames();
-	}
-
-	#applyActiveToolsByName(toolNames: string[]): Promise<void> {
-		return this.#tools.applyActiveToolsByName(toolNames);
 	}
 
 	/** Rediscovers reloadable skills and refreshes prompt metadata. */
@@ -10073,7 +10068,7 @@ export class AgentSession {
 	 * flag and per-advisor name/status without computing token/cost breakdowns.
 	 * Avoids re-tokenizing the advisor transcript on every render frame.
 	 */
-	getAdvisorStatusOverview(): { configured: boolean; advisors: { name: string; status: AdvisorRuntimeStatus }[] } {
+	getAdvisorStatusOverview(): { configured: boolean; advisors: AdvisorStatusOverviewEntry[] } {
 		return this.#advisors.getAdvisorStatusOverview();
 	}
 

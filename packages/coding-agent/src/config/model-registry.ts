@@ -1333,7 +1333,7 @@ export class ModelRegistry {
 						providerConfig.discovery?.type === "litellm"
 							? normalizeLiteLLMDiscoveryBaseUrl(providerConfig.baseUrl)
 							: providerConfig.discovery?.type === "openai-models-list" &&
-									providerConfig.discovery.injectV1 === false
+								  providerConfig.discovery.injectV1 === false
 								? normalizeBareDiscoveryBaseUrl(providerConfig.baseUrl)
 								: providerConfig.baseUrl,
 					headers: providerConfig.headers,

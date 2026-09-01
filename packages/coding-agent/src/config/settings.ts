@@ -2991,7 +2991,7 @@ class SettingSignal<A extends unknown[] = []> {
 	 * rest.
 	 */
 	fire(...args: A): void {
-		for (const cb of [...this.#listeners]) {
+		for (const cb of Array.from(this.#listeners)) {
 			try {
 				cb(...args);
 			} catch (err) {

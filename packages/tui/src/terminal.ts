@@ -1475,6 +1475,7 @@ export class ProcessTerminal implements Terminal {
 		const mode: TerminalAppearance = luminance < 0.5 ? "dark" : "light";
 		const changed = mode !== this.#appearance;
 		this.#appearance = mode;
+		// oxlint-disable-next-line unicorn/no-useless-spread -- callbacks may unsubscribe while reporting
 		for (const cb of [...this.#appearanceReportCallbacks]) {
 			try {
 				cb(mode, requestToken);

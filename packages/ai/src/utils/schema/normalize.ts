@@ -100,7 +100,7 @@ const SUBSCHEMA_VALUE_KEYS: Record<string, true> = {
 	unevaluatedItems: true,
 	not: true,
 	if: true,
-	// biome-ignore lint/suspicious/noThenProperty: JSON Schema keyword
+	// oxlint-disable-next-line unicorn/no-thenable -- JSON Schema keyword
 	then: true,
 	else: true,
 	contains: true,
@@ -1178,11 +1178,11 @@ function projectNodeCombinersForCursor(node: JsonObject): JsonObject {
 	return current;
 }
 
-function projectSchemaForCursor(value: unknown, insideSchemaMap: boolean, epoch: number = epochNext()): unknown {
+function projectSchemaForCursor(value: unknown, insideSchemaMap: boolean): unknown {
 	if (Array.isArray(value)) {
 		if (!enter(value)) return [];
 		try {
-			return value.map(entry => projectSchemaForCursor(entry, false, epoch));
+			return value.map(entry => projectSchemaForCursor(entry, false));
 		} finally {
 			exit(value);
 		}
@@ -1203,7 +1203,7 @@ function projectSchemaForCursor(value: unknown, insideSchemaMap: boolean, epoch:
 				continue;
 			}
 			const childKind = classifySchemaChild(key, entry, insideSchemaMap);
-			result[key] = childKind ? projectSchemaForCursor(entry, childKind === "map", epoch) : entry;
+			result[key] = childKind ? projectSchemaForCursor(entry, childKind === "map") : entry;
 		}
 		return insideSchemaMap ? result : projectNodeCombinersForCursor(result);
 	} finally {
@@ -1507,7 +1507,7 @@ const GRAMMAR_SCHEMA_VALUE_KEYS: Record<string, true> = {
 	contentSchema: true,
 	propertyNames: true,
 	if: true,
-	// biome-ignore lint/suspicious/noThenProperty: JSON Schema keyword
+	// oxlint-disable-next-line unicorn/no-thenable -- JSON Schema keyword
 	then: true,
 	else: true,
 	not: true,

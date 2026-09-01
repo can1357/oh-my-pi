@@ -13,8 +13,9 @@ import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
 import type { SessionContext } from "@oh-my-pi/pi-coding-agent/session/session-context";
-import { Container, TUI, VirtualTerminal } from "@oh-my-pi/pi-tui";
+import { Container, TUI } from "@oh-my-pi/pi-tui";
 import { formatNumber } from "@oh-my-pi/pi-utils";
+import { VirtualTerminal } from "../../tui/test/virtual-terminal";
 
 // 4242 → "4.2K": distinctive enough not to collide with a read group's render.
 const USAGE_INPUT = 4242;
@@ -60,7 +61,6 @@ function readTurn(
 }
 
 function makeHarness(showTokenUsage: boolean): { ctx: InteractiveModeContext; helpers: UiHelpers } {
-	let helpers: UiHelpers;
 	const ctx = {
 		chatContainer: new Container(),
 		transcriptMessageComponents: new WeakMap(),
@@ -82,7 +82,7 @@ function makeHarness(showTokenUsage: boolean): { ctx: InteractiveModeContext; he
 		hideThinkingBlock: false,
 		clearTransientSessionUi: () => {},
 	} as unknown as InteractiveModeContext;
-	helpers = new UiHelpers(ctx);
+	const helpers = new UiHelpers(ctx);
 	return { ctx, helpers };
 }
 

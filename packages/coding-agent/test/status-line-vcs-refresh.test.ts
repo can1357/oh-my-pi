@@ -92,9 +92,11 @@ const gitControls = {
 	defaultBranch: vi.fn(async (_signal?: AbortSignal): Promise<string | null> => null),
 	head: vi.fn(async (_signal?: AbortSignal): Promise<VcsHeadState | null> => fakeRefHead),
 	headSync: vi.fn((): VcsHeadState | null => fakeRefHead),
-	statusSummary: vi.fn(
-		async (_signal?: AbortSignal): Promise<GitStatus | null> => ({ staged: 0, unstaged: 0, untracked: 0 }),
-	),
+	statusSummary: vi.fn(async (_signal?: AbortSignal): Promise<GitStatus | null> => ({
+		staged: 0,
+		unstaged: 0,
+		untracked: 0,
+	})),
 };
 
 const fakeRepository = {
@@ -106,9 +108,11 @@ const fakeRepository = {
 } as unknown as VcsGitRepo;
 
 const jjControls = {
-	statusSummary: vi.fn(
-		async (_signal?: AbortSignal): Promise<GitStatus | null> => ({ staged: 0, unstaged: 0, untracked: 0 }),
-	),
+	statusSummary: vi.fn(async (_signal?: AbortSignal): Promise<GitStatus | null> => ({
+		staged: 0,
+		unstaged: 0,
+		untracked: 0,
+	})),
 	label: vi.fn(async (_signal?: AbortSignal): Promise<string | null> => null),
 };
 

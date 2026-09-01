@@ -286,6 +286,17 @@ export interface SessionAdvisorsHost {
 	sessionId(): string;
 }
 
+/**
+ * One advisor's status-line slice: runtime status plus whether it has
+ * finished reviewing the current yield — i.e. it is not going to add any
+ * more comments until a new primary turn starts (or an explicit reset).
+ */
+export interface AdvisorStatusOverviewEntry {
+	name: string;
+	status: AdvisorRuntimeStatus;
+	yielded: boolean;
+}
+
 /** Owns advisor runtimes, delivery policy, context maintenance, and status reporting. */
 export class SessionAdvisors {
 	readonly #host: SessionAdvisorsHost;
@@ -586,7 +597,7 @@ export class SessionAdvisors {
 
 	/** Waits for all advisor-card persistence handlers currently in flight. */
 	async waitForPendingCardEvents(): Promise<void> {
-		await Promise.allSettled([...this.#pendingAdvisorCardEvents]);
+		await Promise.allSettled(this.#pendingAdvisorCardEvents);
 	}
 
 	// Advisor runtime lifecycle
@@ -1100,6 +1111,17 @@ export class SessionAdvisors {
 						`Advisor "${advisorName}" quota exhausted — pausing until reset.`,
 						"advisor",
 					);
+				},
+				notifyIdle: () => {
+					// Repaint on every idle transition, streaming or not: the status
+					// line masks `yielded` back to open while the primary streams, so
+					// mid-turn drain completions stay open, while post-yield
+					// completions — including the quota/halt latches, which can land
+					// after the agent_end repaint — close the eye without waiting for
+					// an unrelated event.
+					void this.#host
+						.emitSessionEvent({ type: "advisor_yielded" })
+						.catch(err => logger.debug("advisor yield notification failed", { err: String(err) }));
 				},
 			});
 
@@ -1738,7 +1760,7 @@ export class SessionAdvisors {
 		while (this.#pendingAdvisorCardEvents.size > 0) {
 			const remainingMs = deadline - Date.now();
 			if (remainingMs <= 0) return false;
-			const settled = Promise.allSettled([...this.#pendingAdvisorCardEvents]).then(() => true as const);
+			const settled = Promise.allSettled(this.#pendingAdvisorCardEvents).then(() => true as const);
 			const { promise: timedOut, resolve } = Promise.withResolvers<false>();
 			const timer = setTimeout(() => resolve(false), remainingMs);
 			try {
@@ -1872,20 +1894,34 @@ export class SessionAdvisors {
 	 * flag and per-advisor name/status without computing token/cost breakdowns.
 	 * Avoids re-tokenizing the advisor transcript on every render frame.
 	 */
-	getAdvisorStatusOverview(): { configured: boolean; advisors: { name: string; status: AdvisorRuntimeStatus }[] } {
+	getAdvisorStatusOverview(): { configured: boolean; advisors: AdvisorStatusOverviewEntry[] } {
 		// Override stale map entries with live runtime status: failureNotified/quotaExhausted
 		// clear on reset() but #advisorStatuses lags until the next build.
-		const liveStatusBySlug = new Map<string, AdvisorRuntimeStatus>();
+		const liveStatusBySlug = new Map<
+			string,
+			{ status: AdvisorRuntimeStatus; yielded: boolean; canReview: boolean }
+		>();
 		for (const a of this.#advisors) {
-			liveStatusBySlug.set(
-				a.slug,
-				a.runtime.quotaExhausted ? "quota_exhausted" : a.runtime.failureNotified ? "error" : "running",
-			);
+			liveStatusBySlug.set(a.slug, {
+				status: a.runtime.quotaExhausted ? "quota_exhausted" : a.runtime.failureNotified ? "error" : "running",
+				yielded: a.runtime.yielded,
+				canReview: !a.runtime.quotaExhausted && !a.runtime.halted && !a.runtime.disposed,
+			});
 		}
-		const advisors = [...this.#advisorStatuses.entries()].map(([slug, { name, status }]) => ({
-			name,
-			status: liveStatusBySlug.get(slug) ?? status,
-		}));
+		const advisors = [...this.#advisorStatuses.entries()].map(([slug, { name, status }]) => {
+			const live = liveStatusBySlug.get(slug);
+			return {
+				name,
+				status: live?.status ?? status,
+				// The eye only closes after the primary itself has yielded: while it
+				// is streaming, an advisor that can still accept review work may
+				// receive (and comment on) new deltas even when its backlog is
+				// empty. Advisors that cannot accept work — no live runtime
+				// (paused/no-model) or a quota-exhausted/halted runtime — stay
+				// yielded regardless of the primary's stream state.
+				yielded: live?.canReview && this.#host.agent.state.isStreaming ? false : (live?.yielded ?? true),
+			};
+		});
 		return { configured: this.#advisorEnabled, advisors };
 	}
 

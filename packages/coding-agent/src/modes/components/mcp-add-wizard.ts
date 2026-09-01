@@ -1098,7 +1098,7 @@ export class MCPAddWizard extends OverlayPanel {
 
 			if (includeAuth && this.#state.authMethod === "manual" && this.#state.apiKey) {
 				config.env = {
-					...(config.env ?? {}),
+					...config.env,
 					[this.#state.envVarName || "API_KEY"]: this.#state.apiKey,
 				};
 			}
@@ -1128,13 +1128,13 @@ export class MCPAddWizard extends OverlayPanel {
 			if (this.#state.authLocation === "env") {
 				// For HTTP with env location, store in headers using the env var name as-is
 				config.headers = {
-					...(config.headers ?? {}),
+					...config.headers,
 					[this.#state.headerName || "Authorization"]: this.#state.apiKey,
 				};
 			} else {
 				const headerName = this.#state.headerName || "Authorization";
 				config.headers = {
-					...(config.headers ?? {}),
+					...config.headers,
 					[headerName]: this.#state.apiKey,
 				};
 			}

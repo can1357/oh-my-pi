@@ -752,8 +752,9 @@ const streamOpenAICompletionsOnce = (
 				: `${trimmedBaseUrl}/chat/completions`;
 			const createCompletionsStream = async (toolStrictModeOverride?: ToolStrictModeOverride) => {
 				const effectiveToolStrictModeOverride = disableStrictTools ? "none" : toolStrictModeOverride;
-				let { params, strictToolsApplied } = buildParams(model, context, options, effectiveToolStrictModeOverride);
-				appliedStrictTools = strictToolsApplied;
+				const builtParams = buildParams(model, context, options, effectiveToolStrictModeOverride);
+				appliedStrictTools = builtParams.strictToolsApplied;
+				let params = builtParams.params;
 				const reasoningEffortFallbackKey = createOpenAIReasoningEffortFallbackKey(
 					"chat-completions",
 					trimmedBaseUrl,
@@ -924,7 +925,7 @@ const streamOpenAICompletionsOnce = (
 				stream.push({ type: "toolcall_end", contentIndex, toolCall: block, partial: output });
 			};
 			const finishPendingToolCallBlocks = (): void => {
-				for (const block of [...pendingToolCallBlocks]) {
+				for (const block of Array.from(pendingToolCallBlocks)) {
 					finishToolCallBlock(block);
 				}
 			};

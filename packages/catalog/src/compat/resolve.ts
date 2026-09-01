@@ -248,8 +248,8 @@ function hasLocalLoopbackBaseUrl(baseUrl: string | undefined): boolean {
 	) {
 		return true;
 	}
-	if (/^10\./.test(hostname)) return true;
-	if (/^192\.168\./.test(hostname)) return true;
+	if (hostname.startsWith("10.")) return true;
+	if (hostname.startsWith("192.168.")) return true;
 	if (/^172\.(1[6-9]|2[0-9]|3[01])\./.test(hostname)) return true;
 	if (hostname.endsWith(".local")) return true;
 	return false;
@@ -436,9 +436,9 @@ function detectOpenAICompat(
 			: facts.is("mimo") && hostMatchesUrl(baseUrl, "xiaomi")
 				? 300_000
 				: spec.reasoning &&
-						facts.is("kimi") &&
-						(facts.family("k3") || facts.family("k2.7-code")) &&
-						hostMatchesUrl(baseUrl, "moonshotNative")
+					  facts.is("kimi") &&
+					  (facts.family("k3") || facts.family("k2.7-code")) &&
+					  hostMatchesUrl(baseUrl, "moonshotNative")
 					? 300_000
 					: spec.reasoning && facts.is("deepseek") && hostMatchesUrl(baseUrl, "deepseekDirect")
 						? 300_000

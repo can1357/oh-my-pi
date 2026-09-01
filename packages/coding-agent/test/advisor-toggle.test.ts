@@ -314,6 +314,18 @@ describe("AgentSession advisor toggle", () => {
 			"Advisor setting is enabled, but no model is assigned to the 'advisor' role.",
 		);
 	});
+	it("keeps advisors without a live runtime yielded during a primary turn", () => {
+		// A configured advisor with no resolvable model has no runtime and can
+		// never review — the streaming mask must not reopen its eye mid-turn.
+		session.settings.setModelRole("advisor", "nonexistent/advisor-model");
+		expect(session.setAdvisorEnabled(true)).toBe(false);
+
+		const yielded = () => session.getAdvisorStatusOverview().advisors[0]?.yielded;
+		expect(yielded()).toBe(true);
+		session.agent.state.isStreaming = true;
+		expect(yielded()).toBe(true);
+		session.agent.state.isStreaming = false;
+	});
 
 	it("activates an enabled advisor once background model discovery settles", async () => {
 		// Advisor role points at a valid model that is missing from the catalog at
@@ -419,6 +431,60 @@ describe("AgentSession advisor toggle", () => {
 		// Full UUIDv7 — must not contain the display-label "-advisor" suffix
 		expect(sid).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
 		expect(sid).not.toContain("-advisor");
+	});
+	it("closes the eye only after a review completes on a yielded primary", async () => {
+		// Review feedback on #10463: `yielded` must mean "finished reviewing, no
+		// more comments" — not merely "no queued work". A fresh runtime that has
+		// never reviewed anything stays open at rest, mid-turn repaints stay open
+		// while the primary streams, and only after a completed advisor review
+		// does the eye close.
+		const mock = createMockModel({ responses: [{ content: ["primary complete"] }] });
+		const primaryAgent = new Agent({
+			initialState: {
+				model,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
+			streamFn: mock.stream,
+		});
+		const settings = Settings.isolated({ "compaction.enabled": false });
+		settings.setModelRole("advisor", `${model.provider}/${model.id}`);
+		const reviewSession = new AgentSession({
+			agent: primaryAgent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+			advisorTools: [],
+		});
+
+		try {
+			expect(reviewSession.setAdvisorEnabled(true)).toBe(true);
+			const advisorAgent = reviewSession.getAdvisorAgent();
+			if (!advisorAgent) throw new Error("Expected advisor agent to exist");
+			// Deterministically complete the advisor review: append an assistant
+			// message so the runtime's turn-error check sees a finished turn.
+			vi.spyOn(advisorAgent, "prompt").mockImplementation(async () => {
+				advisorAgent.state.messages.push(advisorMessage(0.1, 1));
+			});
+
+			const yielded = () => reviewSession.getAdvisorStatusOverview().advisors[0]?.yielded;
+
+			// Fresh runtime, nothing reviewed yet — the eye stays open at rest.
+			expect(yielded()).toBe(false);
+
+			// Mid-turn — masked open even with an empty backlog.
+			reviewSession.agent.state.isStreaming = true;
+			expect(yielded()).toBe(false);
+			reviewSession.agent.state.isStreaming = false;
+
+			// A primary turn completes and the advisor reviews it — eye closes.
+			await reviewSession.agent.prompt("do work");
+			await reviewSession.waitForAdvisorCatchup(2000);
+			expect(yielded()).toBe(true);
+		} finally {
+			await reviewSession.dispose();
+		}
 	});
 	it("retains cumulative advisor cost after the advisor is disabled", () => {
 		const advisor = enableAdvisor();
@@ -935,12 +1001,27 @@ describe("AgentSession advisor toggle", () => {
 			const markUsageLimitReached = vi
 				.spyOn(authStorage, "markUsageLimitReached")
 				.mockResolvedValue({ switched: false });
+			const advisorYielded = Promise.withResolvers<void>();
+			const unsubscribe = quotaSession.subscribe(event => {
+				if (event.type === "advisor_yielded") advisorYielded.resolve();
+			});
 
 			await quotaSession.prompt("Trigger advisor");
 			await quotaSession.waitForIdle();
 
 			expect(markUsageLimitReached).toHaveBeenCalledTimes(1);
 			expect(markUsageLimitReached.mock.calls[0]?.[0]).toBe(model.provider);
+			expect(quotaSession.getAdvisorStatusOverview().advisors[0]?.yielded).toBe(true);
+			// A quota-paused runtime cannot accept work either — the streaming
+			// mask must not reopen its eye mid-turn.
+			quotaSession.agent.state.isStreaming = true;
+			expect(quotaSession.getAdvisorStatusOverview().advisors[0]?.yielded).toBe(true);
+			quotaSession.agent.state.isStreaming = false;
+
+			// Repaint contract: advisor_yielded must have fired even though the
+			// failed batch stays requeued (the quota latch makes yielded true).
+			await advisorYielded.promise;
+			unsubscribe();
 		} finally {
 			await quotaSession.dispose();
 			vi.restoreAllMocks();

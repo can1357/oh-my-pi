@@ -890,7 +890,7 @@ exit 64
 		const aborted = await abortPromise;
 		expect(aborted.cancelled).toBe(true);
 
-		// biome-ignore lint/suspicious/noTemplateCurlyInString: this is a bash variable expansion
+		// oxlint-disable-next-line no-template-curly-in-string -- this is a bash variable expansion
 		const afterAbort = await executeBash("echo ${PI_RESET_VAR:-unset}", {
 			cwd: tempDir,
 			timeout: 5000,

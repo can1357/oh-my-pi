@@ -78,7 +78,7 @@ export function withRequestDebugFetch<T extends { fetch?: FetchImpl } | undefine
 	if (!isRequestDebugEnabled()) return options;
 	const fetchImpl = options?.fetch ?? (globalThis.fetch as FetchImpl);
 	const wrapped = wrapFetchForRequestDebug(fetchImpl);
-	return { ...(options ?? {}), fetch: wrapped } as T;
+	return { ...options, fetch: wrapped } as T;
 }
 
 export async function createRequestDebugSession(payload: RequestDebugPayload): Promise<RequestDebugSession> {

@@ -574,7 +574,7 @@ function renderThinking(text: string): string {
 function renderTranscript(messages: readonly Message[], options: DialectRenderOptions = {}): string {
 	if (messages.length === 0) return "";
 	let out = DEEPSEEK_BOS;
-	for (let i = 0; i < messages.length; ) {
+	for (let i = 0; i < messages.length;) {
 		const message = messages[i]!;
 		if (message.role === "assistant") {
 			const parts = assistantTranscriptParts(message);

@@ -474,6 +474,7 @@ export class Container implements Component {
 		let refs = this.#memoChildLines;
 		let unchanged = this.#memoLines !== undefined && this.#memoWidth === width && refs.length === count;
 		if (refs.length !== count) {
+			// oxlint-disable-next-line unicorn/no-new-array -- render-frame length preallocation
 			refs = new Array(count);
 			this.#memoChildLines = refs;
 		}
@@ -2664,6 +2665,7 @@ export class TUI extends Container {
 
 	/** Stateless variant for overlay-composited windows and alt-screen frames. */
 	#prepareLinesArray(lines: readonly string[], width: number): string[] {
+		// oxlint-disable-next-line unicorn/no-new-array -- render-frame length preallocation
 		const prepared: string[] = new Array(lines.length);
 		for (let i = 0; i < lines.length; i++) {
 			prepared[i] = this.#prepareLine(lines[i]!, width).line;
@@ -2695,7 +2697,7 @@ export class TUI extends Container {
 
 		let output = "";
 		let cells = 0;
-		for (let i = 0; i < raw.length && cells < safeWidth; ) {
+		for (let i = 0; i < raw.length && cells < safeWidth;) {
 			if (raw.charCodeAt(i) === 0x1b) {
 				const end = this.#ansiSequenceEnd(raw, i);
 				if (end < 0) break;
@@ -2791,7 +2793,7 @@ export class TUI extends Container {
 
 	#ansiAsciiLineWidth(line: string, maxWidth: number): number | undefined {
 		let col = 0;
-		for (let i = 0; i < line.length; ) {
+		for (let i = 0; i < line.length;) {
 			const code = line.charCodeAt(i);
 			if (code === 0x1b) {
 				const next = line.charCodeAt(i + 1);
@@ -2952,6 +2954,7 @@ export class TUI extends Container {
 	 * blank base — the transcript is never touched while the alt buffer is up.
 	 */
 	#renderAltFrame(width: number, height: number): void {
+		// oxlint-disable-next-line unicorn/no-new-array -- alt-frame length preallocation
 		const base: string[] = new Array(Math.max(0, height)).fill("");
 		let lines = this.#compositeOverlaysIntoWindow(base, width, height);
 		this.#extractCursorMarkers(lines);
@@ -2965,6 +2968,7 @@ export class TUI extends Container {
 	 * native-scrollback byte. The hardware cursor stays hidden here.
 	 */
 	#emitAltFrame(lines: string[], width: number, height: number): void {
+		// oxlint-disable-next-line unicorn/no-new-array -- alt-frame length preallocation
 		const fitted: string[] = new Array(height);
 		for (let r = 0; r < height; r++) fitted[r] = lines[r] ?? "";
 		// Flush queued image-data transmits (`a=t`, no visible output) before the

@@ -213,7 +213,6 @@ describe("auth-broker public wire schemas", () => {
 	test("exports all 31 real callable ArkType values with canonical behavior", () => {
 		expect(Object.keys(wireSchemas).sort()).toEqual([...schemaNames].sort());
 		for (const name of schemaNames) {
-			// biome-ignore lint/performance/noDynamicNamespaceImportAccess: this contract intentionally verifies the public namespace.
 			const schema = wireSchemas[name];
 			expect(typeof schema).toBe("function");
 			expect(schema).toBeInstanceOf(Type);

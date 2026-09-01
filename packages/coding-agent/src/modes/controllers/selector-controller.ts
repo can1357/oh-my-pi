@@ -188,7 +188,6 @@ export class SelectorController {
 			// Fullscreen settings editor on the alternate screen: the overlay
 			// enables mouse tracking (click/hover/wheel) for its lifetime and
 			// the transcript stays untouched underneath.
-			let overlayHandle: OverlayHandle | undefined;
 			const done = () => {
 				overlayHandle?.hide();
 				this.focusActiveEditorArea();
@@ -266,7 +265,7 @@ export class SelectorController {
 					},
 				},
 			);
-			overlayHandle = this.#showFullscreenMenu(selector);
+			const overlayHandle = this.#showFullscreenMenu(selector);
 		});
 	}
 
@@ -287,7 +286,6 @@ export class SelectorController {
 			const initialDoc = await loadWatchdogConfigFile(await resolveAdvisorConfigEditPath(initialScope, dirs));
 			// Fullscreen editor on the alternate screen (the /settings idiom): the
 			// overlay holds the alt buffer + mouse tracking; the transcript stays put.
-			let overlayHandle: OverlayHandle | undefined;
 			const done = () => {
 				overlayHandle?.hide();
 				this.focusActiveEditorArea();
@@ -336,7 +334,7 @@ export class SelectorController {
 						sessionId ?? this.ctx.session.sessionId,
 					),
 			});
-			overlayHandle = this.ctx.ui.showOverlay(overlay, {
+			const overlayHandle = this.ctx.ui.showOverlay(overlay, {
 				anchor: "bottom-center",
 				width: "100%",
 				maxHeight: "100%",
@@ -430,8 +428,6 @@ export class SelectorController {
 		const activeModel = this.ctx.session.model;
 		const activeModelPattern = activeModel ? `${activeModel.provider}/${activeModel.id}` : undefined;
 		const defaultModelPattern = this.ctx.settings.getModelRole("default");
-		let overlayHandle: OverlayHandle | undefined;
-		let hub: AgentsHubComponent | undefined;
 		let closed = false;
 		const done = () => {
 			if (closed) return;
@@ -441,7 +437,7 @@ export class SelectorController {
 			this.focusActiveEditorArea();
 			this.ctx.ui.requestRender();
 		};
-		hub = await AgentsHubComponent.create(
+		const hub = await AgentsHubComponent.create(
 			this.ctx.ui,
 			getProjectDir(),
 			this.ctx.settings,
@@ -453,7 +449,7 @@ export class SelectorController {
 			},
 			{ onCancel: () => done() },
 		);
-		overlayHandle = this.#showFullscreenMenu(hub);
+		const overlayHandle = this.#showFullscreenMenu(hub);
 	}
 
 	/**
@@ -782,7 +778,6 @@ export class SelectorController {
 		// else the session model (the bundled task agent inherits it by default).
 		const taskOverride = this.ctx.settings.get("task.agentModelOverrides").task;
 		const taskSelector = (Array.isArray(taskOverride) ? taskOverride[0] : taskOverride) ?? currentSelector;
-		let overlayHandle: OverlayHandle | undefined;
 		let closed = false;
 		const done = () => {
 			if (closed) return;
@@ -873,7 +868,7 @@ export class SelectorController {
 				currentQuickRole: quickRoleCycle?.models[quickRoleCycle.currentIndex]?.role,
 			},
 		);
-		overlayHandle = this.ctx.ui.showOverlay(picker, {
+		const overlayHandle = this.ctx.ui.showOverlay(picker, {
 			anchor: "bottom-center",
 			width: "100%",
 			maxHeight: "100%",
@@ -890,8 +885,6 @@ export class SelectorController {
 	 * entry — used when reopening the hub after a /login round-trip.
 	 */
 	#showModelHub(hubOptions: { initialProviderId?: string }): void {
-		let overlayHandle: OverlayHandle | undefined;
-		let hub: ModelHubComponent | undefined;
 		let closed = false;
 		const done = () => {
 			// Re-entrant guard: cancel paths (Esc, login forward) may race;
@@ -903,7 +896,7 @@ export class SelectorController {
 			this.focusActiveEditorArea();
 			this.ctx.ui.requestRender();
 		};
-		hub = new ModelHubComponent(
+		const hub = new ModelHubComponent(
 			this.ctx.ui,
 			this.ctx.settings,
 			this.ctx.session.modelRegistry,
@@ -1112,7 +1105,7 @@ export class SelectorController {
 				initialProviderId: hubOptions.initialProviderId,
 			},
 		);
-		overlayHandle = this.#showFullscreenMenu(hub);
+		const overlayHandle = this.#showFullscreenMenu(hub);
 	}
 
 	/** /login round-trip for a locked provider; reopen the hub on that provider only after a successful login. */
@@ -1219,15 +1212,13 @@ export class SelectorController {
 			return;
 		}
 
-		let overlayHandle: OverlayHandle | undefined;
-		let selector: RewindSelectorComponent | undefined;
 		const done = () => {
 			overlayHandle?.hide();
 			selector?.dispose();
 			this.focusActiveEditorArea();
 			this.ctx.ui.requestRender();
 		};
-		selector = new RewindSelectorComponent(entries, {
+		const selector = new RewindSelectorComponent(entries, {
 			ui: this.ctx.ui,
 			getTool: name => this.ctx.session.getToolByName(name),
 			isBuiltInTool: name => this.ctx.session.hasBuiltInTool(name),
@@ -1248,7 +1239,7 @@ export class SelectorController {
 		// Fullscreen alternate-screen overlay: the transcript replica draws over
 		// the live one, and the normal screen stays untouched until the rewind
 		// itself rewrites it.
-		overlayHandle = this.ctx.ui.showOverlay(selector, {
+		const overlayHandle = this.ctx.ui.showOverlay(selector, {
 			anchor: "bottom-center",
 			width: "100%",
 			maxHeight: "100%",
@@ -1378,15 +1369,13 @@ export class SelectorController {
 			return;
 		}
 
-		let overlayHandle: OverlayHandle | undefined;
-		let selector: CopySelectorComponent | undefined;
 		const done = () => {
 			overlayHandle?.hide();
 			selector?.dispose();
 			this.focusActiveEditorArea();
 			this.ctx.ui.requestRender();
 		};
-		selector = new CopySelectorComponent(entries, {
+		const selector = new CopySelectorComponent(entries, {
 			ui: this.ctx.ui,
 			getTool: name => this.ctx.session.getToolByName(name),
 			isBuiltInTool: name => this.ctx.session.hasBuiltInTool(name),
@@ -1411,7 +1400,7 @@ export class SelectorController {
 			this.ctx.showStatus("Nothing to copy yet.");
 			return;
 		}
-		overlayHandle = this.ctx.ui.showOverlay(selector, {
+		const overlayHandle = this.ctx.ui.showOverlay(selector, {
 			anchor: "bottom-center",
 			width: "100%",
 			maxHeight: "100%",
@@ -1772,7 +1761,6 @@ export class SelectorController {
 
 		// Keep the fullscreen picker on the alternate buffer while a selected
 		// session is loaded and its transcript is rebuilt.
-		let overlayHandle: OverlayHandle | undefined;
 		const done = () => {
 			overlayHandle?.hide();
 			this.focusActiveEditorArea();
@@ -1810,7 +1798,7 @@ export class SelectorController {
 			},
 		);
 		selector.setOnRequestRender(() => this.ctx.ui.requestRender());
-		overlayHandle = this.ctx.ui.showOverlay(selector, {
+		const overlayHandle = this.ctx.ui.showOverlay(selector, {
 			anchor: "top-left",
 			width: "100%",
 			maxHeight: "100%",
@@ -2118,8 +2106,7 @@ export class SelectorController {
 		}
 
 		this.showSelector(done => {
-			let selector: OAuthSelectorComponent;
-			selector = new OAuthSelectorComponent(
+			const selector = new OAuthSelectorComponent(
 				mode,
 				this.ctx.session.modelRegistry.authStorage,
 				async (selectedProviderId: string) => {
