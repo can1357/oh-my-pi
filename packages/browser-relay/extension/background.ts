@@ -665,6 +665,7 @@ function scheduleReconnect(): void {
  * reclaims the surviving `chrome.debugger` infobar.
  */
 async function reconcileOrphans(): Promise<void> {
+	const attachmentState = snapshotAttachmentState(attachmentStateEpochs);
 	const targets = await chrome.debugger.getTargets().catch(() => []);
 	const attachedTabIds: number[] = [];
 	for (const target of targets) {
@@ -672,7 +673,7 @@ async function reconcileOrphans(): Promise<void> {
 			attachedTabIds.push(target.tabId);
 		}
 	}
-	await trackAttachments(attachedTabIds);
+	await trackAttachments(attachedTabIds, () => true, attachmentState);
 	// Only an open socket owns reconciliation via hello. A merely CONNECTING
 	// socket may still stall/fail before any hello or in-memory timer exists, so
 	// the persisted deadline must stay armed until the connection is proven live.

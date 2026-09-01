@@ -3477,6 +3477,58 @@ describe("RelayBridge tab grouping", () => {
 		).toHaveLength(1);
 	});
 
+	it("does not rerun preload scripts immediately when replaying them after recovery", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		const pageSession = await attachPage(bridge, ext, cdp, connId, 1);
+
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({
+				id: ++msgSeq,
+				sessionId: pageSession,
+				method: "Page.addScriptToEvaluateOnNewDocument",
+				params: {
+					source: "window.__relayInjected = true;",
+					runImmediately: true,
+				},
+			}),
+		);
+		await flush();
+		ack(bridge, ext, "send", { identifier: "root-script-before-recovery" });
+		await flush();
+
+		bridge.extClosed(ext);
+		const ext2 = new FakeExtSocket();
+		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], {
+			recoverableTabIds: [1],
+		});
+		await waitFor(
+			() => ext2.rpcs("attach").length === 1,
+			"preload-script runImmediately recovery attach RPC",
+		);
+		ack(bridge, ext2, "attach");
+		await waitFor(
+			() =>
+				ext2
+					.rpcs("send")
+					.some(
+						(rpc) => rpc.method === "Page.addScriptToEvaluateOnNewDocument",
+					),
+			"preload-script runImmediately replay",
+		);
+		const replay = ext2
+			.rpcs("send")
+			.find((rpc) => rpc.method === "Page.addScriptToEvaluateOnNewDocument");
+		expect(replay?.params).toEqual({
+			source: "window.__relayInjected = true;",
+			runImmediately: false,
+		});
+	});
+
 	it("removes preload scripts when their connection closes", async () => {
 		const bridge = new RelayBridge({});
 		const ext = new FakeExtSocket();

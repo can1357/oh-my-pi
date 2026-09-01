@@ -3044,11 +3044,20 @@ export class RelayBridge {
 			.sort((left, right) => left.sequence - right.sequence);
 		for (const script of preloadScripts) {
 			this.#assertExtensionCurrent(expectedExt);
+			const replayParams =
+				script.params &&
+				typeof script.params === "object" &&
+				"runImmediately" in script.params
+					? {
+							...script.params,
+							runImmediately: false,
+						}
+					: script.params;
 			const result = (await this.#rpc({
 				op: "send",
 				tabId: tab.tabId,
 				method: "Page.addScriptToEvaluateOnNewDocument",
-				params: script.params,
+				params: replayParams,
 			})) as Record<string, unknown> | undefined;
 			this.#assertExtensionCurrent(expectedExt);
 			const identifier = result?.identifier;

@@ -519,6 +519,7 @@ function scheduleReconnect() {
   setTimeout(() => void connect(), delay);
 }
 async function reconcileOrphans() {
+  const attachmentState = snapshotAttachmentState(attachmentStateEpochs);
   const targets = await chrome.debugger.getTargets().catch(() => []);
   const attachedTabIds = [];
   for (const target of targets) {
@@ -526,7 +527,7 @@ async function reconcileOrphans() {
       attachedTabIds.push(target.tabId);
     }
   }
-  await trackAttachments(attachedTabIds);
+  await trackAttachments(attachedTabIds, () => true, attachmentState);
   if (attachedTabIds.length > 0 && orphanSweepSeesRelayDisconnected({
     socketReadyState: ws?.readyState,
     openReadyState: WebSocket.OPEN
