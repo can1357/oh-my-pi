@@ -19,6 +19,7 @@ import * as path from "node:path";
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { getConfigRootDir, logger } from "@oh-my-pi/pi-utils";
+import type { IrcHistoryRecord } from "../irc/bus";
 import type { AgentHubRemote, AgentHubRemoteTranscript } from "../modes/components/agent-hub";
 import type { InteractiveModeContext } from "../modes/types";
 import { AgentRegistry } from "../registry/agent-registry";
@@ -194,6 +195,8 @@ export class CollabGuestLink {
 	/** Per-agent `hasSessionFile` from the last snapshot; gates remote transcript fetches. */
 	#agentHasTranscript = new Map<string, boolean>();
 	#pendingTranscripts = new Map<number, (r: AgentHubRemoteTranscript | null) => void>();
+	#pendingIrcHistory = new Map<number, (records: IrcHistoryRecord[] | null) => void>();
+	#pendingIrcSends = new Map<number, (error: string | undefined) => void>();
 	/** Host `ui-request`s presented (or queued) locally, keyed by reqId; aborting dismisses. */
 	#pendingUiRequests = new Map<number, AbortController>();
 	#nextReqId = 1;
@@ -209,6 +212,39 @@ export class CollabGuestLink {
 		revive: id => {
 			if (this.#rejectReadOnly()) return;
 			this.#socket?.send({ t: "agent-cmd", cmd: "revive", agentId: id });
+		},
+		readMessages: () => {
+			const socket = this.#socket;
+			if (!socket) return Promise.resolve(null);
+			const reqId = this.#nextReqId++;
+			const { promise, resolve } = Promise.withResolvers<IrcHistoryRecord[] | null>();
+			const timer = setTimeout(() => {
+				this.#pendingIrcHistory.delete(reqId);
+				resolve(null);
+			}, TRANSCRIPT_TIMEOUT_MS);
+			this.#pendingIrcHistory.set(reqId, records => {
+				clearTimeout(timer);
+				resolve(records);
+			});
+			socket.send({ t: "fetch-irc-history", reqId });
+			return promise;
+		},
+		sendMessage: (to, body, replyTo) => {
+			if (this.#rejectReadOnly()) return Promise.resolve("IRC send is disabled on a read-only link");
+			const socket = this.#socket;
+			if (!socket) return Promise.resolve("Collab host is disconnected");
+			const reqId = this.#nextReqId++;
+			const { promise, resolve } = Promise.withResolvers<string | undefined>();
+			const timer = setTimeout(() => {
+				this.#pendingIrcSends.delete(reqId);
+				resolve("IRC send timed out");
+			}, TRANSCRIPT_TIMEOUT_MS);
+			this.#pendingIrcSends.set(reqId, error => {
+				clearTimeout(timer);
+				resolve(error);
+			});
+			socket.send({ t: "irc-send", reqId, to, body, replyTo });
+			return promise;
 		},
 		readTranscript: (id, fromByte) => {
 			const socket = this.#socket;
@@ -554,6 +590,22 @@ export class CollabGuestLink {
 				}
 				break;
 			}
+			case "irc-history": {
+				const resolve = this.#pendingIrcHistory.get(frame.reqId);
+				if (resolve) {
+					this.#pendingIrcHistory.delete(frame.reqId);
+					resolve(frame.error ? null : frame.records);
+				}
+				break;
+			}
+			case "irc-sent": {
+				const resolve = this.#pendingIrcSends.get(frame.reqId);
+				if (resolve) {
+					this.#pendingIrcSends.delete(frame.reqId);
+					resolve(frame.error);
+				}
+				break;
+			}
 			case "bye": {
 				this.#ctx.showStatus(`Collab session ended (${frame.reason})`);
 				this.#socket?.close();
@@ -649,12 +701,14 @@ export class CollabGuestLink {
 		this.#agentHasTranscript.clear();
 	}
 
-	/** Resolve every in-flight transcript request with null (resolvers clear their own timers). */
+	/** Resolve every in-flight Agent Hub request during disconnect. */
 	#flushPendingTranscripts(): void {
-		for (const resolve of this.#pendingTranscripts.values()) {
-			resolve(null);
-		}
+		for (const resolve of this.#pendingTranscripts.values()) resolve(null);
 		this.#pendingTranscripts.clear();
+		for (const resolve of this.#pendingIrcHistory.values()) resolve(null);
+		this.#pendingIrcHistory.clear();
+		for (const resolve of this.#pendingIrcSends.values()) resolve("Collab host disconnected");
+		this.#pendingIrcSends.clear();
 	}
 
 	/**

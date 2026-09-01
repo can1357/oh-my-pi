@@ -30,7 +30,7 @@ import type { RenderResultOptions } from "../../extensibility/custom-tools/types
 import { IrcBus } from "../../irc/bus";
 import type { Theme } from "../../modes/theme/theme";
 import hubDescription from "../../prompts/tools/hub.md" with { type: "text" };
-import type { AgentRegistry } from "../../registry/agent-registry";
+import { type AgentRegistry, MAIN_AGENT_ID } from "../../registry/agent-registry";
 import type { ToolSession } from "..";
 import type { ToolActivitySummary } from "../renderers";
 import {
@@ -132,6 +132,8 @@ interface MessagingDeps {
 	registry: AgentRegistry;
 	senderId: string;
 	settings: ToolSession["settings"];
+	/** Root session manager that owns persisted Agent Hub history. */
+	historySession: ToolSession["sessionManager"];
 	/** Caller session file: direct sends refresh this root's persisted roster before resolving the target. */
 	sessionFileHint?: string | null;
 }
@@ -261,7 +263,10 @@ export class HubTool implements AgentTool<typeof hubSchema, HubDetails> {
 			registry,
 			senderId,
 			settings: this.session.settings,
-			sessionFileHint: this.session.getSessionFile?.() ?? null,
+			historySession: registry.get(MAIN_AGENT_ID)?.session?.sessionManager ?? this.session.sessionManager,
+			sessionFileHint:
+				registry.get(MAIN_AGENT_ID)?.sessionFile ??
+				(typeof this.session.getSessionFile === "function" ? this.session.getSessionFile() : null),
 		};
 	}
 

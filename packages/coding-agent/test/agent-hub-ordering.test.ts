@@ -9,12 +9,15 @@ import { afterEach, beforeAll, describe, expect, it, setSystemTime, vi } from "b
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
+import { IRC_HISTORY_CUSTOM_TYPE } from "@oh-my-pi/pi-coding-agent/irc/history";
 import { type AgentHubDeps, AgentHubOverlayComponent } from "@oh-my-pi/pi-coding-agent/modes/components/agent-hub";
 import { SessionObserverRegistry } from "@oh-my-pi/pi-coding-agent/modes/session-observer-registry";
 import { initTheme, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { visibleWidth } from "@oh-my-pi/pi-tui/utils";
+import { TempDir } from "@oh-my-pi/pi-utils";
 import { AgentActivityIndex, type AgentActivityRow } from "../src/activity";
 
 interface GeometryStub {
@@ -148,6 +151,26 @@ describe("Agent hub row ordering", () => {
 			expect(rendered).toContain("No agents in this session");
 			expect(rendered).toContain("Finished, parked, and killed subagents remain with the session");
 			expect(rendered).toContain("Resume that session with omp-dev --continue, or spawn a task here.");
+		} finally {
+			hub.dispose();
+		}
+	});
+
+	it("keeps section navigation visible in Agents and moves right to Activity", () => {
+		geometry = stubStdoutGeometry(120);
+		const agents = new AgentRegistry();
+		agents.register({ id: "Worker", displayName: "Worker", kind: "sub", session: null });
+		const hub = makeHub(agents);
+
+		try {
+			const agentsFrame = Bun.stripANSI(hub.render(120).join("\n"));
+			expect(agentsFrame).toContain("1 Agents");
+			expect(agentsFrame).toContain("2 Activity");
+			expect(agentsFrame).toContain("3 Messages");
+
+			hub.handleInput("\x1b[C");
+			const activityFrame = Bun.stripANSI(hub.render(120).join("\n"));
+			expect(activityFrame).toContain("No agent activity recorded yet");
 		} finally {
 			hub.dispose();
 		}
@@ -424,6 +447,59 @@ describe("Agent hub row ordering", () => {
 			expect(selectedAgentId(hub)).toBe("Alpha");
 			expect(focused).toEqual(["Alpha"]);
 			expect(done).toHaveBeenCalledTimes(1);
+		} finally {
+			hub.dispose();
+		}
+	});
+
+	it("routes wheel and hover by pane: lists select, detail scrolls, hover highlights", () => {
+		geometry = stubStdoutGeometry(120);
+		geometry.setRows(30);
+		const agents = new AgentRegistry();
+		setSystemTime(1_000);
+		agents.register({ id: "Alpha", displayName: "Alpha", kind: "sub", session: null });
+		setSystemTime(2_000);
+		agents.register({ id: "Beta", displayName: "Beta", kind: "sub", session: null });
+		const irc = new IrcBus(agents);
+		irc.history.recordMessage({ id: "a1", from: "Alpha", to: "Main", body: "alpha says hi", ts: 5_000 });
+		irc.history.recordDelivery("a1", { to: "Main", outcome: "injected" });
+		const hub = makeHub(agents, { irc });
+		try {
+			// Agents: wheel over the left roster pane moves the selection...
+			expect(selectedAgentId(hub)).toBe("Beta");
+			hub.handleInput(wheel("down"));
+			expect(selectedAgentId(hub)).toBe("Alpha");
+			// ...while wheel over the right detail pane scrolls content only.
+			hub.handleInput("\x1b[<65;110;10M");
+			expect(selectedAgentId(hub)).toBe("Alpha");
+			// Hovering a detail line highlights it; re-hovering the same line is
+			// stable; a roster hover replaces it (roster rows hover-highlight too).
+			const baseline = hub.render(120).join("\n");
+			hub.handleInput("\x1b[<35;110;9M");
+			const hovered = hub.render(120).join("\n");
+			expect(hovered).not.toBe(baseline);
+			hub.handleInput("\x1b[<35;110;9M");
+			expect(hub.render(120).join("\n")).toBe(hovered);
+			hub.handleInput("\x1b[<35;10;9M");
+			expect(Bun.stripANSI(hub.render(120).join("\n"))).toBe(Bun.stripANSI(baseline));
+
+			// Messages: wheel over the conversation list changes conversations;
+			// wheel over the thread pane transfers focus to the selected card.
+			hub.handleInput("3");
+			const frame = hub.render(120).map(Bun.stripANSI);
+			const alphaRow = frame.findIndex(line => line.includes("❯") && line.includes("Main ⇄ Alpha"));
+			expect(alphaRow).toBeGreaterThanOrEqual(0);
+			hub.handleInput(`\x1b[<65;10;${alphaRow + 1}M`);
+			const afterListWheel = Bun.stripANSI(hub.render(120).join("\n"));
+			expect(afterListWheel).toContain("Main ⇄ Beta");
+			expect(afterListWheel).toMatch(/Main ⇄ Beta.*0.*new/u);
+			hub.handleInput(`\x1b[<64;10;${alphaRow + 1}M`);
+			const alphaThread = Bun.stripANSI(hub.render(120).join("\n"));
+			expect(alphaThread).toContain("Main ⇄ Alpha");
+			// Expanded cards are the default even while the conversation pane owns focus.
+			expect(alphaThread).toContain("id a1 · injected");
+			hub.handleInput(`\x1b[<65;110;${alphaRow + 1}M`);
+			expect(Bun.stripANSI(hub.render(120).join("\n"))).toContain("❯ ┌ Alpha → Main");
 		} finally {
 			hub.dispose();
 		}
@@ -1138,6 +1214,324 @@ describe("Agent hub row ordering", () => {
 			expect(Bun.stripANSI(hub.render(120).join("\n"))).toContain("paused");
 			hub.handleInput("1");
 			expect(Bun.stripANSI(hub.render(120).join("\n"))).toContain("Roster");
+		} finally {
+			hub.dispose();
+		}
+	});
+
+	it("loads the resumed session's persisted IRC history when the Hub opens", async () => {
+		geometry = stubStdoutGeometry(120);
+		geometry.setRows(28);
+		using tempDir = TempDir.createSync("@omp-agent-hub-irc-resume-");
+		const source = SessionManager.create(tempDir.path(), tempDir.path());
+		source.appendCustomEntry(IRC_HISTORY_CUSTOM_TYPE, {
+			message: {
+				id: "resumed-message",
+				from: "Worker",
+				to: "Main",
+				body: "Loaded from the resumed history",
+				ts: 1_000,
+			},
+			outcome: "injected",
+			updatedAt: 1_001,
+		});
+		await source.ensureOnDisk();
+		await source.flush();
+		const sessionFile = source.getSessionFile();
+		if (!sessionFile) throw new Error("Expected persisted session file");
+		await source.close();
+
+		const resumed = await SessionManager.open(sessionFile, tempDir.path());
+		const agents = new AgentRegistry();
+		const irc = new IrcBus(agents);
+		const hub = makeHub(agents, {
+			irc,
+			initialSection: "messages",
+			sessionFile,
+			sessionManager: resumed,
+		});
+
+		try {
+			const rendered = Bun.stripANSI(hub.render(120).join("\n"));
+			expect(rendered).toContain("Loaded from the resumed history");
+		} finally {
+			hub.dispose();
+			await resumed.close();
+		}
+	});
+
+	it("renders durable IRC conversations and sends replies from the Messages view", async () => {
+		geometry = stubStdoutGeometry(120);
+		geometry.setRows(28);
+		const agents = new AgentRegistry();
+		const delivered: Array<{ body: string; replyTo?: string }> = [];
+		const { promise: deliveryObserved, resolve: resolveDelivery } = Promise.withResolvers<void>();
+		const session = {
+			deliverIrcMessage: async (message: { body: string; replyTo?: string }) => {
+				delivered.push(message);
+				resolveDelivery();
+				return "injected" as const;
+			},
+			emitIrcRelayObservation() {},
+		} as unknown as AgentSession;
+		agents.register({ id: "Worker", displayName: "Worker", kind: "sub", parentId: "Main", session });
+		const irc = new IrcBus(agents);
+		irc.history.recordMessage({ id: "m1", from: "Main", to: "Worker", body: "Inspect auth", ts: 1_000 });
+		irc.history.recordDelivery("m1", { to: "Worker", outcome: "injected" });
+		irc.history.recordMessage({
+			id: "m2",
+			from: "Worker",
+			to: "Main",
+			body: "Found one issue\n- auth bypass",
+			ts: 2_000,
+			replyTo: "m1",
+		});
+		irc.history.recordDelivery("m2", { to: "Main", outcome: "injected" });
+		const hub = makeHub(agents, { irc, initialSection: "messages" });
+
+		try {
+			const wide = Bun.stripANSI(hub.render(120).join("\n"));
+			expect(wide).toContain("3 Messages");
+			expect(wide).toContain("Conversations");
+			expect(wide).toContain("Main ⇄ Worker");
+			expect(wide).toContain("2 messages");
+			expect(wide).toContain("2 delivered");
+			expect(wide).toContain("Found one issue");
+			expect(wide).toContain("↳ m1");
+			expect(wide).toContain("Expanded / Compact");
+			expect(wide).toContain("id m1 · injected");
+			expect(wide).toContain("id m2 · injected");
+			const wideLines = wide.split("\n");
+			const workerConversationRow = wideLines.findIndex(
+				line => line.includes("❯") && line.includes("Main ⇄ Worker"),
+			);
+			expect(workerConversationRow).toBeGreaterThanOrEqual(0);
+			expect(wideLines[workerConversationRow + 1]).toContain("2 messages");
+
+			const narrowList = Bun.stripANSI(hub.render(80).join("\n"));
+			expect(narrowList).toContain("Conversations");
+			hub.handleInput("\r");
+			const narrowThread = Bun.stripANSI(hub.render(80).join("\n"));
+			expect(narrowThread).toContain("Inspect auth");
+			expect(narrowThread).toContain("Found one issue");
+			expect(narrowThread).toContain("│ - auth bypass");
+			expect(narrowThread).toContain("id m2 · injected · ↳ m1");
+			hub.handleInput(" ");
+			expect(Bun.stripANSI(hub.render(80).join("\n"))).not.toContain("id m2 · injected");
+			expect(Bun.stripANSI(hub.render(80).join("\n"))).toContain("Space:expanded");
+			hub.handleInput(" ");
+			expect(Bun.stripANSI(hub.render(80).join("\n"))).toContain("Space:compact");
+			const open = vi.spyOn(hub, "openChat");
+			hub.handleInput("o");
+			expect(open).toHaveBeenCalledWith("Worker");
+
+			hub.handleInput("R");
+			for (const key of "Please patch it") hub.handleInput(key);
+			hub.handleInput("\r");
+			await deliveryObserved;
+			expect(delivered).toHaveLength(1);
+			expect(delivered[0]).toMatchObject({ body: "Please patch it", replyTo: "m2" });
+			expect(Bun.stripANSI(hub.render(80).join("\n"))).toContain("Please patch it");
+		} finally {
+			hub.dispose();
+		}
+	});
+
+	it("keeps scrolled Messages selections visible and mouse hit targets aligned", () => {
+		geometry = stubStdoutGeometry(120);
+		geometry.setRows(14);
+		const agents = new AgentRegistry();
+		agents.register({ id: "Target", displayName: "Target", kind: "sub", parentId: "Main", session: null });
+		const irc = new IrcBus(agents);
+		for (let index = 0; index < 30; index++) {
+			irc.history.recordMessage({
+				id: `target-${index}`,
+				from: "Target",
+				to: "Main",
+				body: `Target update ${index}`,
+				ts: 10_000 + index,
+			});
+		}
+		for (let index = 0; index < 20; index++) {
+			const id = `Other-${index.toString().padStart(2, "0")}`;
+			agents.register({
+				id,
+				displayName: `Other ${index.toString().padStart(2, "0")}`,
+				kind: "sub",
+				parentId: "Main",
+				session: null,
+			});
+			irc.history.recordMessage({
+				id: `other-${index}`,
+				from: id,
+				to: "Main",
+				body: `Other update ${index}`,
+				ts: 2_000 + index,
+			});
+		}
+		const hub = makeHub(agents, { irc, initialSection: "messages" });
+
+		try {
+			hub.handleInput("\t");
+			for (let index = 0; index < 20; index++) hub.handleInput("k");
+			const scrolledThread = Bun.stripANSI(hub.render(120).join("\n"));
+			expect(scrolledThread).toContain("Target update 9");
+
+			hub.handleInput("\t");
+			for (let index = 0; index < 10; index++) hub.handleInput("j");
+			const frame = hub.render(120).map(Bun.stripANSI);
+			const visible = frame
+				.map((line, index) => ({ line, index, match: / (Other \d{2}) /u.exec(line) }))
+				.find(entry => entry.match);
+			expect(visible).toBeDefined();
+			hub.handleInput(leftClick(visible!.index + 2));
+			const selected = Bun.stripANSI(hub.render(120).join("\n"));
+			expect(selected).toContain(`⇄ ${visible!.match![1]}`);
+		} finally {
+			hub.dispose();
+		}
+	});
+	it("loads and sends Messages through the collab Agent Hub remote", async () => {
+		geometry = stubStdoutGeometry(120);
+		geometry.setRows(28);
+		const agents = new AgentRegistry();
+		agents.register({ id: "Worker", displayName: "Worker", kind: "sub", parentId: "Main", session: null });
+		const records = [
+			{
+				message: { id: "m1", from: "Main", to: "Worker", body: "Inspect auth", ts: 1_000 },
+				outcome: "injected" as const,
+				updatedAt: 1_000,
+			},
+			{
+				message: { id: "m2", from: "Worker", to: "Main", body: "Found one issue", ts: 2_000, replyTo: "m1" },
+				outcome: "injected" as const,
+				updatedAt: 2_000,
+			},
+		];
+		const sent: Array<{ to: string; body: string; replyTo?: string }> = [];
+		const firstRender = Promise.withResolvers<void>();
+		const sendObserved = Promise.withResolvers<void>();
+		const refreshObserved = Promise.withResolvers<void>();
+		let readCount = 0;
+		const hub = makeHub(agents, {
+			initialSection: "messages",
+			requestRender: () => firstRender.resolve(),
+			remote: {
+				chat: () => {},
+				kill: () => {},
+				revive: () => {},
+				readTranscript: async () => null,
+				readMessages: async () => {
+					readCount++;
+					if (readCount === 2) refreshObserved.resolve();
+					return records;
+				},
+				sendMessage: async (to, body, replyTo) => {
+					sent.push({ to, body, replyTo });
+					sendObserved.resolve();
+					return undefined;
+				},
+			},
+		});
+
+		try {
+			await firstRender.promise;
+			const rendered = Bun.stripANSI(hub.render(120).join("\n"));
+			expect(rendered).toContain("Main ⇄ Worker");
+			expect(rendered).toContain("2 messages");
+			expect(rendered).toContain("2 delivered");
+			expect(rendered).toContain("Found one issue");
+
+			records.push({
+				message: { id: "m3", from: "Worker", to: "Main", body: "New remote update", ts: 3_000 },
+				outcome: "injected",
+				updatedAt: 3_000,
+			});
+			hub.handleInput("1");
+			hub.handleInput("3");
+			await refreshObserved.promise;
+			await Promise.resolve();
+			expect(Bun.stripANSI(hub.render(120).join("\n"))).toContain("New remote update");
+
+			hub.handleInput("R");
+			for (const key of "Please patch it remotely") hub.handleInput(key);
+			hub.handleInput("\r");
+			await sendObserved.promise;
+			expect(sent).toEqual([{ to: "Worker", body: "Please patch it remotely", replyTo: "m2" }]);
+		} finally {
+			hub.dispose();
+		}
+	});
+
+	it("preserves unread on narrow conversation list until the thread is opened", () => {
+		geometry = stubStdoutGeometry(80);
+		geometry.setRows(28);
+		const agents = new AgentRegistry();
+		agents.register({ id: "Worker", displayName: "Worker", kind: "sub", parentId: "Main", session: null });
+		const irc = new IrcBus(agents);
+		irc.history.recordMessage({
+			id: "m1",
+			from: "Worker",
+			to: "Main",
+			body: "Needs attention",
+			ts: 2_000,
+		});
+		irc.history.recordDelivery("m1", { to: "Main", outcome: "injected" });
+		const hub = makeHub(agents, { irc, initialSection: "messages" });
+		try {
+			const list = Bun.stripANSI(hub.render(80).join("\n"));
+			expect(list).toContain("Conversations");
+			expect(list).toContain("Main ⇄ Worker");
+			// The list shows participant pairs only — bodies live in the thread pane.
+			expect(list).not.toContain("Needs attention");
+			expect(list).toMatch(/Worker.*●1/u);
+			// Periodic/history refresh and list navigation must not clear unread while only the list is visible.
+			hub.handleInput("k"); // up to the pinned All-agents row
+			hub.handleInput("j"); // back down to the Worker thread
+			const stillUnread = Bun.stripANSI(hub.render(80).join("\n"));
+			expect(stillUnread).toMatch(/Worker.*●1/u);
+			hub.handleInput("\r");
+			const thread = Bun.stripANSI(hub.render(80).join("\n"));
+			expect(thread).toContain("Needs attention");
+			expect(thread).not.toMatch(/Worker.*●1/u);
+		} finally {
+			hub.dispose();
+		}
+	});
+
+	it("lets compose start a fresh direct or broadcast conversation with no prior history", async () => {
+		geometry = stubStdoutGeometry(120);
+		geometry.setRows(28);
+		const agents = new AgentRegistry();
+		const delivered: string[] = [];
+		const { promise: deliveryObserved, resolve: resolveDelivery } = Promise.withResolvers<void>();
+		const session = {
+			deliverIrcMessage: async (message: { body: string }) => {
+				delivered.push(message.body);
+				resolveDelivery();
+				return "injected" as const;
+			},
+			emitIrcRelayObservation() {},
+		} as unknown as AgentSession;
+		agents.register({ id: "Worker", displayName: "Worker", kind: "sub", parentId: "Main", session, status: "idle" });
+		const irc = new IrcBus(agents);
+		const hub = makeHub(agents, { irc, initialSection: "messages" });
+		try {
+			const empty = Bun.stripANSI(hub.render(120).join("\n"));
+			expect(empty).toContain("All agents");
+			expect(empty).toContain("Worker");
+			hub.handleInput("j"); // move from All agents to Worker if needed
+			// Ensure Worker direct conversation is selected
+			for (let i = 0; i < 3; i++) {
+				const frame = Bun.stripANSI(hub.render(120).join("\n"));
+				if (frame.includes("❯ Worker") || frame.includes("Worker · 0 messages") || frame.includes("Message")) break;
+				hub.handleInput("j");
+			}
+			hub.handleInput("c");
+			for (const key of "Hello fresh") hub.handleInput(key);
+			hub.handleInput("\r");
+			await deliveryObserved;
+			expect(delivered).toEqual(["Hello fresh"]);
 		} finally {
 			hub.dispose();
 		}

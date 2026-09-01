@@ -17,6 +17,7 @@ import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { visitEntriesFromFileStream } from "@oh-my-pi/pi-coding-agent/session/session-loader";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { executeBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-registry";
 import { getBundledAgent } from "@oh-my-pi/pi-coding-agent/task/agents";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
@@ -531,7 +532,13 @@ describe("Agent hub Enter activation", () => {
 				focusResolved.resolve();
 			},
 			session: { getToolByName: () => undefined, extensionRunner: undefined },
-			sessionManager: { getCwd: () => TEST_CWD, getSessionFile: () => null },
+			sessionManager: {
+				getCwd: () => TEST_CWD,
+				getSessionFile: () => null,
+				getSessionId: () => "selector-session",
+				getEntries: () => [],
+				appendCustomEntry: () => "irc-history-entry",
+			},
 			hideThinkingBlock: false,
 		};
 		const controller = new SelectorController(ctx as unknown as InteractiveModeContext);
@@ -588,7 +595,13 @@ describe("Agent hub double-← gating", () => {
 			collabGuest: { agentRegistry: agents, hubRemote: undefined },
 			focusAgentSession: async () => {},
 			session: { getToolByName: () => undefined, extensionRunner: undefined },
-			sessionManager: { getCwd: () => TEST_CWD, getSessionFile: () => sessionFile },
+			sessionManager: {
+				getCwd: () => TEST_CWD,
+				getSessionFile: () => sessionFile,
+				getSessionId: () => "gating-session",
+				getEntries: () => [],
+				appendCustomEntry: () => "irc-history-entry",
+			},
 			hideThinkingBlock: false,
 		};
 		const controller = new SelectorController(ctx as unknown as InteractiveModeContext);
@@ -885,5 +898,29 @@ describe("Agent hub data refresh coalescing", () => {
 		} finally {
 			hub.dispose();
 		}
+	});
+});
+
+describe("Agent hub slash deep-links", () => {
+	it("opens Activity from /hub and Messages from /irc", async () => {
+		const showAgentHub = vi.fn();
+		const showAgentsDashboard = vi.fn();
+		const setText = vi.fn();
+		const runtime = {
+			ctx: {
+				showAgentHub,
+				showAgentsDashboard,
+				editor: { setText },
+			} as unknown as InteractiveModeContext,
+		};
+
+		expect(await executeBuiltinSlashCommand("/hub", runtime)).toBe(true);
+		expect(showAgentHub).toHaveBeenLastCalledWith({ initialSection: "activity" });
+		expect(await executeBuiltinSlashCommand("/irc", runtime)).toBe(true);
+		expect(showAgentHub).toHaveBeenLastCalledWith({ initialSection: "messages" });
+		expect(await executeBuiltinSlashCommand("/agents", runtime)).toBe(true);
+		expect(showAgentsDashboard).toHaveBeenCalledTimes(1);
+		expect(showAgentHub).toHaveBeenCalledTimes(2);
+		expect(setText).toHaveBeenCalledTimes(3);
 	});
 });

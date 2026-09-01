@@ -2353,6 +2353,7 @@ export class SelectorController {
 			proseOnlyThinking: () => this.ctx.proseOnlyThinking,
 			focusAgent: id => this.ctx.focusAgentSession(id),
 			sessionFile: this.ctx.sessionManager.getSessionFile() ?? null,
+			sessionManager: this.ctx.sessionManager,
 		});
 
 		const showReadyHub = () => {

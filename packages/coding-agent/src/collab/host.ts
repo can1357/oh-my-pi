@@ -12,7 +12,7 @@
 import { timingSafeEqual } from "node:crypto";
 import * as fs from "node:fs/promises";
 import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
-import { logger } from "@oh-my-pi/pi-utils";
+import { logger, Snowflake } from "@oh-my-pi/pi-utils";
 import type {
 	BusChannel,
 	CollabUiRequest,
@@ -21,9 +21,10 @@ import type {
 	AgentEvent as WireAgentEvent,
 	SessionEntry as WireSessionEntry,
 } from "@oh-my-pi/pi-wire";
+import { IrcBus } from "../irc/bus";
 import type { InteractiveModeContext } from "../modes/types";
 import { AgentLifecycleManager } from "../registry/agent-lifecycle";
-import { type AgentRef, AgentRegistry } from "../registry/agent-registry";
+import { type AgentRef, AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import type { AgentSessionEvent } from "../session/agent-session";
 import { stripImagesFromMessage, USER_INTERRUPT_LABEL } from "../session/messages";
 import type { SessionEntry as StoredSessionEntry } from "../session/session-entries";
@@ -105,6 +106,16 @@ const CONNECT_TIMEOUT_MS = 15_000;
 /** Max bytes served per fetch-transcript reply (guest re-requests from `newSize`). */
 export const TRANSCRIPT_READ_CAP = 4 * 1024 * 1024;
 const TRANSCRIPT_ENTRY_TOO_LARGE_ERROR = `transcript entry exceeds transcript fetch cap (${TRANSCRIPT_READ_CAP} bytes)`;
+const IRC_HISTORY_RECORD_CAP = 1_000;
+const IRC_HISTORY_BYTES_CAP = 512 * 1024;
+const IRC_BODY_BYTES_CAP = 64 * 1024;
+const IRC_BODY_CODE_UNIT_CAP = 16_000;
+const IRC_ID_LENGTH_CAP = 512;
+const IRC_HISTORY_FETCH_INTERVAL_MS = 250;
+
+function isValidRequestId(value: unknown): value is number {
+	return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
 /**
  * Soft byte cap per `snapshot-chunk` frame. The first MB of a snapshot takes
  * ~3s through the default relay, so a 512 KB chunk lands well under the
@@ -120,8 +131,17 @@ const SNAPSHOT_CHUNK_BYTES = 512 * 1024;
  */
 export type CollabGuestUiResult = { kind: "answered"; value: CollabUiResponseValue } | { kind: "unavailable" };
 
+export interface CollabHostDeps {
+	registry: AgentRegistry;
+	lifecycle: AgentLifecycleManager;
+	irc: IrcBus;
+}
+
 export class CollabHost {
 	#ctx: InteractiveModeContext;
+	#registry: AgentRegistry;
+	#lifecycle: AgentLifecycleManager;
+	#irc: IrcBus;
 	#socket: CollabSocket | null = null;
 	#link = "";
 	#webLink = "";
@@ -131,6 +151,7 @@ export class CollabHost {
 	#sessionId = "";
 	#unsubscribe?: () => void;
 	#peers = new Map<number, { name: string; canWrite: boolean }>();
+	#ircHistoryFetchAt = new Map<number, number>();
 	#uiReqSeq = 0;
 	#pendingUi = new Map<number, { request: CollabUiRequest; settle(result: CollabGuestUiResult): void }>();
 	#lastStateJson = "";
@@ -141,8 +162,11 @@ export class CollabHost {
 	#registryUnsubscribe?: () => void;
 	#stopped = false;
 
-	constructor(ctx: InteractiveModeContext) {
+	constructor(ctx: InteractiveModeContext, deps?: CollabHostDeps) {
 		this.#ctx = ctx;
+		this.#registry = deps?.registry ?? AgentRegistry.global();
+		this.#lifecycle = deps?.lifecycle ?? AgentLifecycleManager.global();
+		this.#irc = deps?.irc ?? IrcBus.global();
 	}
 
 	get link(): string {
@@ -284,7 +308,7 @@ export class CollabHost {
 				);
 			}
 		}
-		this.#registryUnsubscribe = AgentRegistry.global().onChange(() => this.#scheduleAgentsBroadcast());
+		this.#registryUnsubscribe = this.#registry.onChange(() => this.#scheduleAgentsBroadcast());
 		this.#ctx.sessionManager.onEntryAppended = entry => {
 			if (isWireSessionEntry(entry)) this.#broadcast({ t: "entry", entry: shrinkForReplication(entry) });
 			// Model/thinking/title changes land as entries while idle; refresh
@@ -320,6 +344,7 @@ export class CollabHost {
 		for (const pending of this.#pendingUi.values()) pending.settle({ kind: "unavailable" });
 		this.#pendingUi.clear();
 		this.#peers.clear();
+		this.#ircHistoryFetchAt.clear();
 		this.#socket?.close();
 		this.#socket = null;
 		this.#ctx.collabHost = undefined;
@@ -356,6 +381,12 @@ export class CollabHost {
 				break;
 			case "fetch-transcript":
 				void this.#handleFetchTranscript(frame.reqId, frame.agentId, frame.fromByte, fromPeer);
+				break;
+			case "fetch-irc-history":
+				this.#handleFetchIrcHistory(frame.reqId, fromPeer);
+				break;
+			case "irc-send":
+				void this.#handleIrcSend(frame.reqId, frame.to, frame.body, frame.replyTo, fromPeer);
 				break;
 			default:
 				logger.debug("collab host ignoring unexpected frame", { type: frame.t, fromPeer });
@@ -521,6 +552,7 @@ export class CollabHost {
 	#handlePeerLeft(peer: number): void {
 		const name = this.#peers.get(peer)?.name;
 		this.#peers.delete(peer);
+		this.#ircHistoryFetchAt.delete(peer);
 		if (name) this.#ctx.session.emitNotice("info", `${name} left the collab session`, "collab");
 		this.#updateStatusSegment();
 		this.#scheduleStateBroadcast();
@@ -563,7 +595,7 @@ export class CollabHost {
 
 	#snapshotAgents(): AgentSnapshot[] {
 		return (
-			AgentRegistry.global()
+			this.#registry
 				.list()
 				// Advisor transcripts are local observability only; never mirror them to
 				// guests (the wire AgentSnapshot kind has no `advisor`, and guests must not
@@ -597,7 +629,7 @@ export class CollabHost {
 		}
 		// Advisor refs are excluded from snapshots, but reject control by id defensively:
 		// a stale/malicious client must never chat/kill/revive a read-only advisor transcript.
-		if (AgentRegistry.global().get(agentId)?.kind === "advisor") {
+		if (this.#registry.get(agentId)?.kind === "advisor") {
 			this.#socket?.send({ t: "error", message: `agent ${agentId}: advisor transcripts are read-only` }, fromPeer);
 			return;
 		}
@@ -613,7 +645,7 @@ export class CollabHost {
 					return;
 				}
 				// Mirrors the hub's #submitChatMessage: revive if parked, steer if mid-turn.
-				AgentLifecycleManager.global()
+				this.#lifecycle
 					.ensureLive(agentId)
 					.then(session => session.prompt(trimmed, { streamingBehavior: "steer" }))
 					.catch(fail);
@@ -621,18 +653,18 @@ export class CollabHost {
 			}
 			case "kill": {
 				const kill = async () => {
-					const ref = AgentRegistry.global().get(agentId);
+					const ref = this.#registry.get(agentId);
 					if (!ref) return;
 					if (ref.status === "running" && ref.session) {
 						await ref.session.abort({ reason: USER_INTERRUPT_LABEL });
 					}
-					await AgentLifecycleManager.global().release(agentId, ref, { tombstone: true });
+					await this.#lifecycle.release(agentId, ref, { tombstone: true });
 				};
 				kill().catch(fail);
 				break;
 			}
 			case "revive":
-				AgentLifecycleManager.global().ensureLive(agentId).catch(fail);
+				this.#lifecycle.ensureLive(agentId).catch(fail);
 				break;
 		}
 	}
@@ -641,7 +673,7 @@ export class CollabHost {
 	async #handleFetchTranscript(reqId: number, agentId: string, fromByte: number, fromPeer: number): Promise<void> {
 		const reply = (text: string, newSize: number, error?: string) =>
 			this.#socket?.send({ t: "transcript", reqId, text, newSize, error }, fromPeer);
-		const file = AgentRegistry.global().get(agentId)?.sessionFile;
+		const file = this.#registry.get(agentId)?.sessionFile;
 		if (!file) {
 			reply("", fromByte, "no transcript available");
 			return;
@@ -677,6 +709,106 @@ export class CollabHost {
 			logger.debug("collab transcript read failed", { agentId, error: String(err) });
 			reply("", fromByte, String(err));
 		}
+	}
+
+	#handleFetchIrcHistory(reqId: number, fromPeer: number): void {
+		if (!isValidRequestId(reqId)) return;
+		const bus = this.#irc;
+		const now = Date.now();
+		const lastFetch = this.#ircHistoryFetchAt.get(fromPeer);
+		if (lastFetch !== undefined && now - lastFetch < IRC_HISTORY_FETCH_INTERVAL_MS) {
+			this.#socket?.send({ t: "irc-history", reqId, records: [], error: "IRC history fetch rate limit" }, fromPeer);
+			return;
+		}
+		this.#ircHistoryFetchAt.set(fromPeer, now);
+		bus.configureHistory(this.#ctx.sessionManager);
+		const records = bus.historyRecords().slice(-IRC_HISTORY_RECORD_CAP);
+		const bounded: typeof records = [];
+		let bytes = Buffer.byteLength(JSON.stringify({ t: "irc-history", reqId, records: [] }), "utf8");
+		for (let index = records.length - 1; index >= 0; index--) {
+			const record = records[index]!;
+			const body =
+				Buffer.byteLength(record.message.body, "utf8") > IRC_BODY_BYTES_CAP
+					? `${record.message.body.slice(0, IRC_BODY_CODE_UNIT_CAP)}…`
+					: record.message.body;
+			const projected = body === record.message.body ? record : { ...record, message: { ...record.message, body } };
+			const size = Buffer.byteLength(JSON.stringify(projected), "utf8") + Number(bounded.length > 0);
+			if (bytes + size > IRC_HISTORY_BYTES_CAP) break;
+			bytes += size;
+			bounded.push(projected);
+		}
+		this.#socket?.send({ t: "irc-history", reqId, records: bounded.reverse() }, fromPeer);
+	}
+
+	async #handleIrcSend(
+		reqId: number,
+		to: string,
+		body: string,
+		replyTo: string | undefined,
+		fromPeer: number,
+	): Promise<void> {
+		if (!isValidRequestId(reqId)) return;
+		const reply = (error?: string) => this.#socket?.send({ t: "irc-sent", reqId, error }, fromPeer);
+		if (!this.#peers.get(fromPeer)?.canWrite) {
+			reply("IRC send is disabled on a read-only link");
+			return;
+		}
+		if (
+			typeof to !== "string" ||
+			typeof body !== "string" ||
+			(replyTo !== undefined && typeof replyTo !== "string")
+		) {
+			reply("Malformed IRC send request");
+			return;
+		}
+		const target = to.trim();
+		if (!target || target.length > IRC_ID_LENGTH_CAP || (replyTo?.length ?? 0) > IRC_ID_LENGTH_CAP) {
+			reply("IRC recipient or reply id is invalid");
+			return;
+		}
+		if (target === MAIN_AGENT_ID) {
+			reply("Cannot message yourself");
+			return;
+		}
+		if (Buffer.byteLength(body, "utf8") > IRC_BODY_BYTES_CAP) {
+			reply(`IRC message exceeds ${IRC_BODY_BYTES_CAP} bytes`);
+			return;
+		}
+		const trimmed = body.trim();
+		if (!trimmed) {
+			reply("Message body is empty");
+			return;
+		}
+		const registry = this.#registry;
+		const bus = this.#irc;
+		bus.configureHistory(this.#ctx.sessionManager);
+		if (target === "all") {
+			const targets = registry
+				.listVisibleTo(MAIN_AGENT_ID)
+				.filter(
+					ref =>
+						ref.id !== MAIN_AGENT_ID &&
+						ref.kind !== "advisor" &&
+						(ref.status === "running" || ref.status === "idle"),
+				);
+			const broadcastId = Snowflake.next();
+			const receipts = await Promise.all(
+				targets.map(ref => bus.send({ from: MAIN_AGENT_ID, to: ref.id, body: trimmed, replyTo, broadcastId })),
+			);
+			const errors = receipts.filter(receipt => receipt.outcome === "failed").map(receipt => receipt.error);
+			reply(
+				targets.length === 0
+					? "No live agents available for broadcast"
+					: errors.length > 0
+						? `Broadcast delivered to ${targets.length - errors.length}/${targets.length} agents${
+								errors.some(Boolean) ? `: ${errors.filter(Boolean).join("; ")}` : ""
+							}`
+						: undefined,
+			);
+			return;
+		}
+		const receipt = await bus.send({ from: MAIN_AGENT_ID, to: target, body: trimmed, replyTo });
+		reply(receipt.outcome === "failed" ? (receipt.error ?? `Delivery to ${target} failed`) : undefined);
 	}
 
 	#scheduleStateBroadcast(): void {
