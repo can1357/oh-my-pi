@@ -1131,7 +1131,7 @@ function resolveThinkingPolicy<TApi extends Api>(
  */
 function defaultSupportsDisplay<TApi extends Api>(spec: ModelSpec<TApi>, facts: IdentityFacts): boolean {
 	return (
-		(spec.api === "anthropic-messages" || spec.api === "bedrock-converse-stream") &&
+		(spec.api === "anthropic-messages" || spec.api === "bedrock-converse-stream" || spec.api === "zed-agent") &&
 		facts.anthropicAdaptiveGenAtLeast("4.7")
 	);
 }

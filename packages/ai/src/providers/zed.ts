@@ -5,6 +5,7 @@ import { classifyModel } from "@oh-my-pi/pi-catalog/identity";
 import { mapEffortToGoogleThinkingLevel } from "@oh-my-pi/pi-catalog/model-thinking";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import { parseZedCredentials, ZED_APP_VERSION, ZED_CLOUD_URL, ZED_HEADERS } from "@oh-my-pi/pi-catalog/wire/zed";
+import { parseJsonWithRepair } from "@oh-my-pi/pi-utils";
 import { AbortError, finalize, ProviderHttpError, ProviderResponseError } from "../../src/error";
 import { OAuthError } from "../../src/error/oauth";
 import { renderDemotedThinking } from "../dialect/demotion";
@@ -43,6 +44,7 @@ export interface ZedOptions extends StreamOptions {
 	reasoning?: Effort;
 	disableReasoning?: boolean;
 	toolChoice?: ToolChoice;
+	thinkingDisplay?: "summarized" | "omitted";
 }
 export type ZedProviderKind = "anthropic" | "open_ai" | "google" | "x_ai";
 
@@ -308,12 +310,15 @@ function mapContextToAnthropic(context: Context, model: Model<"zed-agent">, opti
 				budget_tokens: Math.max(1, Math.min(targetBudget, effectiveMaxTokens - 1)),
 			};
 		} else {
-			body.thinking = {
+			const adaptive: { type: "adaptive"; display?: "summarized" | "omitted" } = {
 				type: "adaptive",
 			};
+			if (model.thinking?.supportsDisplay) {
+				adaptive.display = options?.thinkingDisplay ?? "summarized";
+			}
+			body.thinking = adaptive;
 			body.output_config = {
 				effort: options?.reasoning ?? "medium",
-				include: ["summary"],
 			};
 		}
 	} else if (model.reasoning && options?.disableReasoning) {
@@ -1520,30 +1525,26 @@ export function streamZed(
 								partial: outputMessage,
 							});
 						} else if (anthropicToolCall) {
-							let parsedArgs: Record<string, unknown> | null = null;
-							if (anthropicToolArgsJson && anthropicToolArgsJson.trim().length > 0) {
-								try {
-									parsedArgs = JSON.parse(anthropicToolArgsJson);
-								} catch {
-									parsedArgs = null;
-								}
-							} else {
-								parsedArgs = {};
+							const rawJson = anthropicToolArgsJson;
+							try {
+								anthropicToolCall.arguments = parseJsonWithRepair(rawJson) as Record<string, unknown>;
+							} catch (parseError) {
+								const maxLen = 512;
+								const truncatedJson =
+									rawJson.length <= maxLen
+										? rawJson
+										: `${rawJson.slice(0, maxLen)}… [truncated ${rawJson.length - maxLen} chars]`;
+								anthropicToolCall.arguments = {
+									__parseError: parseError instanceof Error ? parseError.message : String(parseError),
+									__rawJson: truncatedJson,
+								};
 							}
-							if (parsedArgs !== null && typeof parsedArgs === "object") {
-								anthropicToolCall.arguments = parsedArgs;
-								stream.push({
-									type: "toolcall_end",
-									contentIndex: anthropicCurrentIndex,
-									toolCall: anthropicToolCall,
-									partial: outputMessage,
-								});
-							} else {
-								const contentIdx = outputMessage.content.indexOf(anthropicToolCall);
-								if (contentIdx >= 0) {
-									outputMessage.content.splice(contentIdx, 1);
-								}
-							}
+							stream.push({
+								type: "toolcall_end",
+								contentIndex: anthropicCurrentIndex,
+								toolCall: anthropicToolCall,
+								partial: outputMessage,
+							});
 							anthropicToolCall = null;
 						}
 					} else if (eventType === "message_delta") {

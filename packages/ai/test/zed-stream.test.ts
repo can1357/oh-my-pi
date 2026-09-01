@@ -1185,4 +1185,33 @@ describe("Zed provider protocol regressions", () => {
 
 		expect(capturedPayload?.stop_sequences).toEqual(["\n\nHuman:"]);
 	});
+
+	it("retains __parseError and pre-truncated __rawJson on malformed Anthropic tool call arguments and emits toolcall_end", async () => {
+		const model = makeModel("claude-sonnet-5", true);
+		const malformedJson = '{"path": /invalid json';
+		const run = await runZedStream(model, [
+			{
+				event: {
+					type: "content_block_start",
+					content_block: { type: "tool_use", id: "call_broken", name: "read_file" },
+				},
+			},
+			{
+				event: {
+					type: "content_block_delta",
+					delta: { type: "input_json_delta", partial_json: malformedJson },
+				},
+			},
+			{ event: { type: "content_block_stop" } },
+			{ status: "stream_ended" },
+		]);
+
+		const toolCall = run.result.content.find(block => block.type === "toolCall");
+		expect(toolCall).toBeDefined();
+		if (toolCall?.type !== "toolCall") throw new Error("Expected toolCall block");
+		expect(toolCall.id).toBe("call_broken");
+		expect(toolCall.arguments.__parseError).toBeDefined();
+		expect(toolCall.arguments.__rawJson).toBe(malformedJson);
+		expect(run.events.some(e => e.type === "toolcall_end")).toBe(true);
+	});
 });

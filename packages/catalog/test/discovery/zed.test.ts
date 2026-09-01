@@ -2,7 +2,6 @@ import { describe, expect, it, vi } from "bun:test";
 import { buildModel } from "../../src/build";
 import { resolveModelPolicy } from "../../src/compat/resolve";
 import { fetchZedModels } from "../../src/discovery/zed";
-import { Effort } from "../../src/effort";
 import type { FetchImpl, ModelSpec } from "../../src/types";
 import { ZED_APP_VERSION, ZED_CLOUD_URL, ZED_HEADERS } from "../../src/wire/zed";
 
@@ -159,9 +158,8 @@ describe("Zed Model Discovery", () => {
 		expect(sonnet?.provider).toBe("zed-agent");
 		expect(sonnet?.baseUrl).toBe(ZED_CLOUD_URL);
 		expect(sonnet?.reasoning).toBeTrue();
-		expect(sonnet?.thinking?.mode).toBe("anthropic-adaptive");
-		expect(sonnet?.thinking?.efforts).toEqual([Effort.Low, Effort.Medium, Effort.High]);
-		expect(sonnet?.thinking?.defaultLevel).toBe(Effort.Medium);
+		expect(sonnet?.thinking).toBeUndefined();
+		expect(buildModel(sonnet!).thinking?.mode).toBe("anthropic-adaptive");
 		expect(sonnet?.contextWindow).toBe(1_000_000);
 		expect(sonnet?.maxTokens).toBe(64_000);
 		expect(sonnet?.input).toEqual(["text", "image"]);
@@ -171,9 +169,8 @@ describe("Zed Model Discovery", () => {
 		expect(gpt).toBeDefined();
 		expect(gpt?.name).toBe("GPT-5.6 Sol");
 		expect(gpt?.reasoning).toBeTrue();
-		expect(gpt?.thinking?.mode).toBe("effort");
-		expect(gpt?.thinking?.efforts).toEqual([Effort.High]);
-		expect(gpt?.thinking?.defaultLevel).toBe(Effort.High);
+		expect(gpt?.thinking).toBeUndefined();
+		expect(buildModel(gpt!).thinking?.mode).toBe("effort");
 		expect(gpt?.contextWindow).toBe(1_000_000);
 		expect(gpt?.maxTokens).toBe(16_384);
 
@@ -559,6 +556,7 @@ describe("Zed Model Discovery", () => {
 		const sonnetModel = buildModel(sonnetSpec);
 		expect(sonnetModel.compat.provider).toBe("anthropic");
 		expect(sonnetModel.compat.multimodalFunctionResponse).toBe(false);
+		expect(sonnetModel.thinking?.mode).toBe("anthropic-adaptive");
 		expect(sonnetModel.cost).toEqual({
 			input: 2.2,
 			output: 11.0,
@@ -566,6 +564,20 @@ describe("Zed Model Discovery", () => {
 			cacheWrite: 2.75,
 		});
 
+		const sonnet45Spec: ModelSpec<"zed-agent"> = {
+			id: "claude-sonnet-4-5",
+			name: "Claude Sonnet 4.5",
+			api: "zed-agent",
+			provider: "zed-agent",
+			baseUrl: ZED_CLOUD_URL,
+			reasoning: true,
+			input: ["text", "image"],
+			contextWindow: 200_000,
+			maxTokens: 8_192,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		};
+		const sonnet45Model = buildModel(sonnet45Spec);
+		expect(sonnet45Model.thinking?.mode).toBe("budget");
 		// Fallback without explicit compat.provider resolves from taxonomy identity.class
 		const gptSpec: ModelSpec<"zed-agent"> = {
 			id: "gpt-5.6-sol",
@@ -650,5 +662,23 @@ describe("Zed Model Discovery", () => {
 			compat: { multimodalFunctionResponse: false },
 		};
 		expect(resolveModelPolicy(geminiExplicitFalse).compat.multimodalFunctionResponse).toBe(false);
+
+		// Thinking mode resolution derived from catalog policy
+
+		const sonnet46Spec: ModelSpec<"zed-agent"> = {
+			...sonnet45Spec,
+			id: "claude-sonnet-4-6",
+			name: "Claude Sonnet 4.6",
+		};
+		expect(buildModel(sonnet46Spec).thinking?.mode).toBe("anthropic-adaptive");
+
+		const sonnet5Spec: ModelSpec<"zed-agent"> = {
+			...sonnet45Spec,
+			id: "claude-sonnet-5",
+			name: "Claude Sonnet 5",
+		};
+		const sonnet5Model = buildModel(sonnet5Spec);
+		expect(sonnet5Model.thinking?.mode).toBe("anthropic-adaptive");
+		expect(sonnet5Model.thinking?.supportsDisplay).toBe(true);
 	});
 });

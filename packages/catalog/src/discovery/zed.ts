@@ -1,14 +1,7 @@
 import { type } from "@oh-my-pi/omptype";
-import { Effort } from "../effort";
 import type { FetchImpl, ModelCost, ModelSpec, ZedWireProvider } from "../types";
 import { discoveryFetch } from "../utils";
 import { parseZedCredentials, ZED_APP_VERSION, ZED_CLOUD_URL, ZED_HEADERS } from "../wire/zed";
-
-const zedSupportedEffortLevelSchema = type({
-	name: "string",
-	value: "string",
-	"is_default?": "boolean",
-});
 
 const zedLanguageModelSchema = type({
 	provider: "string",
@@ -19,7 +12,6 @@ const zedLanguageModelSchema = type({
 	"supports_tools?": "boolean",
 	"supports_images?": "boolean",
 	"supports_thinking?": "boolean",
-	"supported_effort_levels?": zedSupportedEffortLevelSchema.array(),
 	"is_disabled?": "boolean",
 	"disabled_reason?": "string",
 });
@@ -41,7 +33,6 @@ export interface FetchZedModelsOptions {
 	fetcher?: FetchImpl;
 }
 
-const FALLBACK_EFFORTS: readonly Effort[] = [Effort.Low, Effort.Medium, Effort.High] as const;
 const ZED_DISCOVERY_TIMEOUT_MS = 10_000;
 const ZED_LLM_TOKEN_TIMEOUT_MS = 10_000;
 
@@ -176,29 +167,6 @@ export async function fetchZedModels(options: FetchZedModelsOptions = {}): Promi
 			if (model.is_disabled) continue;
 
 			const isReasoning = model.supports_thinking === true;
-			const efforts: Effort[] = [];
-			let defaultEffort: Effort | undefined;
-
-			if (model.supported_effort_levels && model.supported_effort_levels.length > 0) {
-				for (const level of model.supported_effort_levels) {
-					const val = level.value.toLowerCase();
-					let effortEnum: Effort | undefined;
-					if (
-						val === Effort.Low ||
-						val === Effort.Medium ||
-						val === Effort.High ||
-						val === Effort.Max ||
-						val === Effort.Minimal ||
-						val === Effort.XHigh
-					) {
-						effortEnum = val;
-						efforts.push(val);
-					}
-					if (level.is_default && effortEnum) {
-						defaultEffort = effortEnum;
-					}
-				}
-			}
 
 			specs.push({
 				id: model.id,
@@ -207,13 +175,6 @@ export async function fetchZedModels(options: FetchZedModelsOptions = {}): Promi
 				provider: "zed-agent",
 				baseUrl: ZED_CLOUD_URL,
 				reasoning: isReasoning,
-				thinking: isReasoning
-					? {
-							mode: model.provider === "anthropic" ? "anthropic-adaptive" : "effort",
-							efforts: efforts.length > 0 ? efforts : FALLBACK_EFFORTS,
-							defaultLevel: defaultEffort ?? Effort.Medium,
-						}
-					: undefined,
 				contextWindow: model.max_token_count || 128_000,
 				maxTokens: model.max_output_tokens || 8_192,
 				input: model.supports_images ? ["text", "image"] : ["text"],

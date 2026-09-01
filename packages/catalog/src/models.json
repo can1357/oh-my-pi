@@ -118898,22 +118898,33 @@
 			"api": "openai-completions",
 			"provider": "kilo",
 			"baseUrl": "https://api.kilo.ai/api/gateway",
-			"reasoning": false,
+			"reasoning": true,
 			"input": [
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
-				"cacheRead": 0,
+				"input": 0.2,
+				"output": 0.75,
+				"cacheRead": 0.02,
 				"cacheWrite": 0
 			},
 			"contextWindow": 260000,
 			"maxTokens": 65536,
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"minimal",
+					"low",
+					"medium",
+					"high",
+					"xhigh"
+				]
+			},
 			"identity": {
 				"class": "unknown"
 			},
 			"requiresGlyphTokenization": false,
+			"supportsComputerUse": false,
 			"compat": {
 				"supportsStore": false,
 				"supportsDeveloperRole": false,
@@ -118967,8 +118978,7 @@
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
 				"supportsPromptCacheKey": false
-			},
-			"supportsComputerUse": false
+			}
 		},
 		"inception/mercury-coder": {
 			"id": "inception/mercury-coder",
@@ -189360,6 +189370,94 @@
 			},
 			"contextWindow": 131072,
 			"maxTokens": 117964,
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"minimal",
+					"low",
+					"medium",
+					"high",
+					"xhigh"
+				]
+			},
+			"identity": {
+				"class": "unknown"
+			},
+			"requiresGlyphTokenization": false,
+			"supportsComputerUse": false,
+			"compat": {
+				"supportsStore": true,
+				"supportsDeveloperRole": false,
+				"supportsMultipleSystemMessages": false,
+				"supportsReasoningEffort": true,
+				"supportsReasoningParams": true,
+				"supportsSamplingParams": true,
+				"supportsPenaltyAndStopParams": true,
+				"reasoningEffortMap": {},
+				"supportsUsageInStreaming": true,
+				"alwaysSendMaxTokens": false,
+				"disableReasoningOnForcedToolChoice": false,
+				"disableReasoningOnToolChoice": false,
+				"supportsToolChoice": true,
+				"supportsForcedToolChoice": true,
+				"supportsNamedToolChoice": true,
+				"maxTokensField": "max_completion_tokens",
+				"requiresToolResultName": false,
+				"requiresAssistantAfterToolResult": false,
+				"requiresThinkingAsText": false,
+				"requiresMistralToolIds": false,
+				"thinkingFormat": "openai",
+				"reasoningDisableMode": "lowest-effort",
+				"omitReasoningEffort": false,
+				"includeEncryptedReasoning": true,
+				"filterReasoningHistory": false,
+				"reasoningContentField": "reasoning_content",
+				"requiresReasoningContentForToolCalls": false,
+				"requiresReasoningContentForAllAssistantTurns": false,
+				"allowsSyntheticReasoningContentForToolCalls": true,
+				"replayReasoningContent": false,
+				"qwenPreserveThinking": false,
+				"qwenTemplateReasoningEffort": false,
+				"requiresAssistantContentForToolCalls": false,
+				"supportsPromptCacheBreakpoints": false,
+				"isOpenRouterHost": false,
+				"wireModelIdMode": "raw",
+				"isVercelGatewayHost": false,
+				"supportsStrictMode": false,
+				"toolStrictMode": "mixed",
+				"stripDeepseekSpecialTokens": false,
+				"streamMarkupHealingPattern": "thinking",
+				"reasoningDeltasMayBeCumulative": false,
+				"emptyLengthFinishIsContextError": false,
+				"usesOpenAIToolCallIdLimit": false,
+				"dropThinkingWhenReasoningEffort": false,
+				"nativeKimiK3Reasoning": false,
+				"zaiReasoningEffortDialect": false,
+				"clampOutputToModelMax": false,
+				"stripImageInput": false,
+				"rejectRootObjectUnion": false,
+				"retryWithoutStrictOnGrammarError": false,
+				"supportsPromptCacheKey": false
+			}
+		},
+		"inception/mercury-2.5-preview": {
+			"id": "inception/mercury-2.5-preview",
+			"name": "Mercury 2.5 Preview",
+			"api": "openai-completions",
+			"provider": "nanogpt",
+			"baseUrl": "https://nano-gpt.com/api/v1",
+			"reasoning": true,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0.04,
+				"output": 0.15,
+				"cacheRead": 0.004,
+				"cacheWrite": 0
+			},
+			"contextWindow": 260000,
+			"maxTokens": 65536,
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
@@ -293491,9 +293589,9 @@
 				"text"
 			],
 			"cost": {
-				"input": 0.07784,
-				"output": 0.15568,
-				"cacheRead": 0.015568,
+				"input": 0.0763,
+				"output": 0.1526,
+				"cacheRead": 0.01526,
 				"cacheWrite": 0
 			},
 			"contextWindow": 1048576,
@@ -375276,7 +375374,7 @@
 			"baseUrl": "https://cloud.zed.dev",
 			"reasoning": true,
 			"thinking": {
-				"mode": "budget",
+				"mode": "anthropic-adaptive",
 				"efforts": [
 					"minimal",
 					"low",
@@ -375327,7 +375425,8 @@
 					"low",
 					"medium",
 					"high"
-				]
+				],
+				"supportsDisplay": true
 			},
 			"contextWindow": 1000000,
 			"maxTokens": 128000,

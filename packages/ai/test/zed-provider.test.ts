@@ -623,8 +623,8 @@ describe("Zed Provider Payload Construction", () => {
 		expect(payload.model).toBe("claude-sonnet-5");
 		expect(payload.system).toBe("You are an assistant.");
 		expect(payload.max_tokens).toBe(128000);
-		expect(payload.thinking).toEqual({ type: "adaptive" });
-		expect(payload.output_config).toEqual({ effort: "high", include: ["summary"] });
+		expect(payload.thinking).toEqual({ type: "adaptive", display: "summarized" });
+		expect(payload.output_config).toEqual({ effort: "high" });
 
 		const messages = payload.messages as Array<{ role: string; content: string }>;
 		expect(messages).toBeArray();
@@ -1387,13 +1387,24 @@ describe("Zed Provider Payload Construction", () => {
 		const adaptiveRequest = buildZedProviderRequest("anthropic", { messages: [] }, adaptiveModel, {
 			reasoning: Effort.High,
 		}) as {
-			thinking: { type: string };
-			output_config?: { effort?: string; include?: string[] };
+			thinking: { type: string; display?: string };
+			output_config?: { effort?: string };
 		};
 
 		expect(budgetRequest.thinking.type).toBe("enabled");
 		expect(budgetRequest.thinking.budget_tokens).toBe(8192);
 		expect(adaptiveRequest.thinking.type).toBe("adaptive");
-		expect(adaptiveRequest.output_config).toEqual({ effort: "high", include: ["summary"] });
+		expect(adaptiveRequest.thinking.display).toBe("summarized");
+		expect(adaptiveRequest.output_config).toEqual({ effort: "high" });
+
+		const omittedRequest = buildZedProviderRequest("anthropic", { messages: [] }, adaptiveModel, {
+			reasoning: Effort.High,
+			thinkingDisplay: "omitted",
+		}) as {
+			thinking: { type: string; display?: string };
+			output_config?: { effort?: string };
+		};
+		expect(omittedRequest.thinking).toEqual({ type: "adaptive", display: "omitted" });
+		expect(omittedRequest.output_config).toEqual({ effort: "high" });
 	});
 });
