@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.1.0] - 2026-09-01
+
 ### Added
 
 - Grok Bot AvailableModels discovery emits separate catalog rows for variant **`legacySlug`** values with `requestModelId` pointing at the canonical model and variant `sandParameterIds`.

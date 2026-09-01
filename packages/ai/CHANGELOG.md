@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.1.0] - 2026-09-01
+
 ### Added
 
 - Grok Bot **product sand wire** for Anthropic-labeled models + tools: `GROKBOT_ANTHROPIC_TOOLS_WIRE=auto` (default) rewrites to `sand-automation` + `generalPurpose`, maps omp tools to PascalCase field-2 names (`bash`→`Shell`, `read`→`Read`) with `{ jsonSchema: … }` envelopes, field-9 host allowlists, and `automationId`. Parent-chat profile (`parent-chat` / `sand-default`) injects `SendToUser`; responses promote `SendToUser` toolCallPart streams to assistant text. Probe: `scripts/grokbot-automation-tools-probe.mjs`; matrix gate: `--mode opus-tools`.

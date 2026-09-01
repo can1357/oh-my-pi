@@ -5,6 +5,8 @@
 ### Added
 
 - Exported shared `TRUNCATE_LENGTHS` and `PREVIEW_LIMITS` display budgets for consumers outside coding-agent (e.g. provider status sanitization).
+## [18.1.0] - 2026-09-01
+
 ### Fixed
 
 - Improved terminal stability when resuming image-heavy sessions, preventing large transcript repaints from being mistaken for stalled output or exceeding the terminal output limit.
