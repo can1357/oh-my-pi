@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import * as fs from "node:fs/promises";
 import http2 from "node:http2";
+import { classifyModel } from "@oh-my-pi/pi-catalog/compat/taxonomy";
 import type {
 	ConversationStep,
 	CursorRule,
@@ -158,7 +159,6 @@ import {
 	toJson,
 } from "@oh-my-pi/pi-catalog/discovery/protobuf";
 import { THINKING_EFFORTS } from "@oh-my-pi/pi-catalog/effort";
-import { isKimiK3ModelId, parseOpenAIModel } from "@oh-my-pi/pi-catalog/identity";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import {
 	$env,
@@ -209,7 +209,7 @@ import { deterministicUuid } from "../utils/deterministic-id";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import { connectProxiedSocket, getProxyForUrl } from "../utils/proxy";
 import { createRequestDebugSession, isRequestDebugEnabled, type RequestDebugResponseLog } from "../utils/request-debug";
-import { toolWireSchema } from "../utils/schema/wire";
+import { sanitizeSchemaForCursor, toolWireSchema } from "../utils/schema";
 import { formatConnectEndStreamError } from "./connect-error-detail";
 import {
 	buildMcpStateResult,
@@ -618,7 +618,7 @@ function streamCursorWithWireMode(
 			const signal = options?.signal;
 			while (inFlightDispatches.size > 0) {
 				if (signal?.aborted) return;
-				const settled = Promise.all([...inFlightDispatches]);
+				const settled = Promise.all(inFlightDispatches);
 				if (!signal) {
 					await settled;
 					continue;
@@ -4047,7 +4047,7 @@ export function mergeCursorMcpToolCallArgs(
 	streamed: Record<string, unknown> | undefined,
 	completion: Record<string, unknown> | undefined,
 ): Record<string, unknown> {
-	const merged: Record<string, unknown> = { ...(streamed ?? {}) };
+	const merged: Record<string, unknown> = { ...streamed };
 	if (!completion) return merged;
 	for (const [key, completionValue] of Object.entries(completion)) {
 		const streamedValue = merged[key];
@@ -4513,7 +4513,7 @@ export function processInteractionUpdate(
 	} else if (updateCase === "turnEnded") {
 		output.stopReason = "stop";
 		if (
-			isKimiK3ModelId(output.model) &&
+			classifyModel("cursor", output.model).family === "k3" &&
 			!output.content.some(item => item.type === "thinking" && item.thinking.length > 0)
 		) {
 			logger.warn(
@@ -4632,7 +4632,7 @@ export function buildMcpToolDefinitions(tools: Tool[] | undefined): McpToolDefin
 	const forwarded = writeTool ? [...advertisedTools, writeTool] : advertisedTools;
 
 	return forwarded.map(tool => {
-		const jsonSchema = toolWireSchema(tool);
+		const jsonSchema = sanitizeSchemaForCursor(toolWireSchema(tool));
 		const schemaValue: JsonValue =
 			jsonSchema !== null && !Array.isArray(jsonSchema) && isJsonValue(jsonSchema)
 				? jsonSchema
@@ -4721,7 +4721,7 @@ type CursorRootPromptAssistantContentPart =
 function canReplayCursorThinking(msg: AssistantMessage, targetModelId: string | undefined): boolean {
 	return (
 		targetModelId !== undefined &&
-		isKimiK3ModelId(targetModelId) &&
+		classifyModel("cursor", targetModelId).family === "k3" &&
 		msg.api === "cursor-agent" &&
 		msg.provider === "cursor" &&
 		msg.model === targetModelId
@@ -4769,7 +4769,7 @@ function assertCursorKimiK3HistoryReplayable(
 	activeUserMessageIndex: number,
 	targetModelId: string | undefined,
 ): void {
-	if (!targetModelId || !isKimiK3ModelId(targetModelId)) return;
+	if (!targetModelId || classifyModel("cursor", targetModelId).family !== "k3") return;
 	const historyEnd = activeUserMessageIndex >= 0 ? activeUserMessageIndex : messages.length;
 	const missingThinkingTurns: number[] = [];
 	const newlyWarnedKeys: string[] = [];
@@ -5225,7 +5225,12 @@ function resolveCursorWireModel(
 	const match = /^(.*)-(minimal|low|medium|high|xhigh|max)(-fast)?$/.exec(wireModelId);
 	const base = match?.[1];
 	const effort = match?.[2];
-	if (base && effort && (THINKING_EFFORTS as readonly string[]).includes(effort) && parseOpenAIModel(base) !== null) {
+	if (
+		base &&
+		effort &&
+		(THINKING_EFFORTS as readonly string[]).includes(effort) &&
+		classifyModel("cursor", base).class === "openai"
+	) {
 		return {
 			modelId: `${base}${match[3] ?? ""}`,
 			parameters: [create(RequestedModel_ModelParameterbytesSchema, { id: "reasoning", value: effort })],

@@ -1,4 +1,4 @@
-import { supportsHashlineEdits } from "@oh-my-pi/pi-catalog/identity";
+import { classifyModel } from "@oh-my-pi/pi-catalog/identity";
 import { $env, $flag } from "@oh-my-pi/pi-utils";
 
 export type EditMode = "replace" | "patch" | "hashline" | "apply_patch" | "sloppy";
@@ -30,6 +30,16 @@ export interface EditModeSessionLike {
 	getActiveModelString?: () => string | undefined;
 }
 
+function modelSupportsHashlineEdits(modelId: string): boolean {
+	const identity = classifyModel("", modelId, { lenient: true });
+	return !(
+		identity.class === "kimi" ||
+		identity.class === "mimo" ||
+		(identity.class === "deepseek" && identity.family === "flash") ||
+		identity.class === "stepfun"
+	);
+}
+
 export function resolveEditMode(session: EditModeSessionLike): EditMode {
 	const activeModel = session.getActiveModelString?.();
 	const modelVariant = session.settings.getEditVariantForModel?.(activeModel);
@@ -40,7 +50,12 @@ export function resolveEditMode(session: EditModeSessionLike): EditMode {
 
 	const settingsMode = normalizeEditMode(String(session.settings.get("edit.mode") ?? ""));
 	const mode = settingsMode ?? DEFAULT_EDIT_MODE;
-	if (mode === "hashline" && !$flag("PI_STRICT_EDIT_MODE") && activeModel && !supportsHashlineEdits(activeModel)) {
+	if (
+		mode === "hashline" &&
+		!$flag("PI_STRICT_EDIT_MODE") &&
+		activeModel &&
+		!modelSupportsHashlineEdits(activeModel)
+	) {
 		return "sloppy";
 	}
 	return mode;

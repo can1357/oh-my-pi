@@ -114,7 +114,7 @@ type RunPrintMode = (session: AgentSession, options: PrintModeOptions) => Promis
 type RunRpcMode = (
 	session: AgentSession,
 	setToolUIContext?: (uiContext: ExtensionUIContext, hasUI: boolean) => void,
-	eventBus?: EventBus,
+	subagentEventBus?: EventBus,
 	input?: ReadableStream<Uint8Array>,
 ) => Promise<never>;
 
@@ -492,6 +492,7 @@ async function runInteractiveMode(
 	forceSetupWizard: boolean,
 	showStartupSplash: boolean,
 	eventBus?: EventBus,
+	subagentEventBus?: EventBus,
 	initialMessage?: string,
 	initialImages?: ImageContent[],
 	joinLink?: string,
@@ -509,6 +510,7 @@ async function runInteractiveMode(
 			mcpManager,
 			eventBus,
 			startupLease?.composer,
+			subagentEventBus,
 		);
 		startupLease?.adopt();
 	} catch (error) {
@@ -604,7 +606,11 @@ async function runInteractiveMode(
 		session.maybeStartTitleGeneration(initialMessage);
 		try {
 			using _keepalive = new EventLoopKeepalive();
-			await session.prompt(initialMessage, { images: initialImages });
+			// `steer` covers the race where the user submits a prompt of their own
+			// before this dispatch runs (the composer accepts input as soon as the
+			// first turn starts): the CLI message queues into that turn instead of
+			// dying with AgentBusyError.
+			await session.prompt(initialMessage, { images: initialImages, streamingBehavior: "steer" });
 		} catch (error: unknown) {
 			const errorMessage = error instanceof Error ? error.message : "Unknown error occurred";
 			mode.showError(errorMessage);
@@ -615,7 +621,7 @@ async function runInteractiveMode(
 		session.maybeStartTitleGeneration(message);
 		try {
 			using _keepalive = new EventLoopKeepalive();
-			await session.prompt(message);
+			await session.prompt(message, { streamingBehavior: "steer" });
 		} catch (error: unknown) {
 			const errorMessage = error instanceof Error ? error.message : "Unknown error occurred";
 			mode.showError(errorMessage);
@@ -1163,6 +1169,7 @@ export async function buildSessionOptions(
 			}
 		} else if (resolved.model) {
 			options.model = resolved.model;
+			options.rebindModelAfterDiscovery = true;
 			// The recorded role must carry the effort the session actually starts
 			// at, or the first cycle back into `default` overrides it.
 			activeSettings.overrideModelRoles({
@@ -1196,6 +1203,7 @@ export async function buildSessionOptions(
 				: scopedModels.find(scopedModel => scopedModel.model.id.toLowerCase() === remembered.toLowerCase());
 			if (rememberedModel) {
 				options.model = rememberedModel.model;
+				options.rebindModelAfterDiscovery = true;
 				// Apply explicit thinking level from remembered role value
 				if (!parsed.thinking && rememberedSpec.explicitThinkingLevel && rememberedSpec.thinkingLevel) {
 					options.thinkingLevel = rememberedSpec.thinkingLevel;
@@ -1215,7 +1223,10 @@ export async function buildSessionOptions(
 		// deferring under an explicit CLI scope would let the saved default
 		// escape it — keep pinning the first scoped model there.
 		deferredDefaultRole = !options.model && Boolean(remembered) && !((parsed.models?.length ?? 0) > 0);
-		if (!options.model && !deferredDefaultRole) options.model = scopedModels[0].model;
+		if (!options.model && !deferredDefaultRole) {
+			options.model = scopedModels[0].model;
+			options.rebindModelAfterDiscovery = true;
+		}
 	} else if ((parsed.models?.length ?? 0) > 0 && !restoringSession) {
 		// A CLI `--models` scope that resolved to zero models at startup: its
 		// selectors name only models supplied by extension providers (or discovery)
@@ -1574,7 +1585,7 @@ export async function runRootCommand(
 
 		applyStartupComposerPreferences({
 			quiet: settingsInstance.get("startup.quiet"),
-			composerShape: settingsInstance.get("composer.shape") ?? "box",
+			composerShape: settingsInstance.get("composer.shape") ?? "band",
 			showHardwareCursor: settingsInstance.get("showHardwareCursor"),
 			maxInlineImages: settingsInstance.get("tui.maxInlineImages"),
 			resizeScrollback: settingsInstance.get("tui.resizeScrollback"),
@@ -1877,6 +1888,7 @@ export async function runRootCommand(
 			}
 
 			const eventBus = new EventBus();
+			const subagentEventBus = new EventBus();
 			const extensionsResult = parsedArgs.trustedExtensions?.length
 				? await loadTrustedSessionExtensions(sessionOptions, cwd, eventBus)
 				: await loadSessionExtensions(sessionOptions, cwd, settingsInstance, eventBus);
@@ -1956,6 +1968,7 @@ export async function runRootCommand(
 			} = await createSession({
 				...sessionOptions,
 				eventBus,
+				subagentEventBus,
 				preloadedExtensions: extensionsResult,
 			});
 
@@ -1981,6 +1994,7 @@ export async function runRootCommand(
 					settings: settingsInstance,
 					enableLsp: sessionOptions.enableLsp ?? true,
 					eventBus,
+					subagentEventBus,
 				}),
 				Math.trunc(Number(settingsInstance.get("task.agentIdleTtlMs") ?? 420_000) || 0),
 			);
@@ -2029,7 +2043,7 @@ export async function runRootCommand(
 				// Branch-only protocol runner: keep RPC host code out of normal interactive startup.
 				const runRpcMode: RunRpcMode = (await import("./modes/rpc/rpc-mode")).runRpcMode;
 				stopStartupWatchdog();
-				await runRpcMode(session, mode === "rpc-ui" ? setToolUIContext : undefined, eventBus, rpcInput);
+				await runRpcMode(session, mode === "rpc-ui" ? setToolUIContext : undefined, subagentEventBus, rpcInput);
 			} else if (isInteractive) {
 				const versionCheckPromise = checkForNewVersion(VERSION).catch(() => undefined);
 				const startupChangelog = await startupChangelogPromise;
@@ -2069,6 +2083,7 @@ export async function runRootCommand(
 						deps.forceSetupWizard === true,
 						showStartupSplash,
 						eventBus,
+						subagentEventBus,
 						initialMessage,
 						initialImages,
 						parsedArgs.join,

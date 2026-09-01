@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+## [18.1.0] - 2026-09-01
+
+### Added
+
+- Added API for daily activity tracking, including cost, requests, and token usage aggregates
+- Added a Traces dashboard for detailed session analysis, including an interactive timeline, searchable and filterable transcripts, token and cost summaries, and aggregate tool-usage and timing insights.
+
+### Fixed
+
+- Fixed `omp stats` omitting usage from online auto-thinking classifier calls.
+
+## [18.0.9] - 2026-08-28
+
+### Fixed
+
+- Fixed inconsistent model colors between the Model Preference chart and Model Statistics table.
+
 ## [18.0.4] - 2026-08-24
 
 ### Fixed

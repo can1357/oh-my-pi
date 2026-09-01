@@ -247,7 +247,7 @@ function trackVibeTeardown(promise: Promise<unknown>, onError: (error: unknown) 
 
 /** Wait for cleanup only until the caller's shared absolute deadline. */
 async function waitForVibeTeardown(tasks: readonly TrackedVibeTeardown[], deadline: number): Promise<boolean> {
-	if (tasks.length === 0 || tasks.every(task => task.status() !== "pending")) return true;
+	if (tasks.every(task => task.status() !== "pending")) return true;
 	const remainingMs = deadline - Date.now();
 	if (remainingMs <= 0) return false;
 	const timeout = Promise.withResolvers<void>();
@@ -1344,6 +1344,7 @@ export class VibeSessionRegistry {
 			enableLsp: (session.enableLsp ?? true) && session.settings.get("task.enableLsp"),
 			signal,
 			eventBus: session.eventBus,
+			subagentEventBus: session.subagentEventBus,
 			onProgress,
 			authStorage: session.authStorage,
 			modelRegistry: session.modelRegistry,
@@ -1432,6 +1433,7 @@ export class VibeSessionRegistry {
 								signal,
 								onProgress,
 								eventBus: session.eventBus,
+								subagentEventBus: session.subagentEventBus,
 								artifactsDir: session.getSessionFile()?.slice(0, -6),
 							});
 					return await this.#settleTurn(session, manager, record, turn, ownJobId, turnIndex, result);

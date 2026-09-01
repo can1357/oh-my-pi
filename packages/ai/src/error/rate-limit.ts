@@ -33,6 +33,10 @@ function matchesSubscriptionCapText(errorMessage: string): boolean {
 	return SUBSCRIPTION_CAP_PATTERN.test(errorMessage) && !TRANSIENT_INTERVAL_RATE_LIMIT_PATTERN.test(errorMessage);
 }
 const OPENROUTER_DAILY_FREE_LIMIT_PATTERN = /\bfree[-_ ]models[-_ ]per[-_ ]day\b/i;
+// ClinePass subscription-window exhaustion ("clinepass limit …") and free-tier
+// model caps ("free limit reached on model … try again in …") are account-local
+// quota exhaustion, not per-minute rate limiting.
+const CLINE_PASS_QUOTA_PATTERN = /clinepass limit|free limit reached on model/i;
 // gRPC/Connect end-streams carry the status as its name (`resource_exhausted`),
 // while HTTP bodies use the phrase ("resource exhausted"). Strip either form
 // before classifying explicit details; an otherwise opaque status is transient
@@ -91,6 +95,7 @@ export function isDashScopeTokenLimitText(errorMessage: string): boolean {
 }
 
 const GOOGLE_RPC_ERROR_INFO_TYPE = "type.googleapis.com/google.rpc.ErrorInfo";
+const ANTIGRAVITY_MODEL_QUOTA_PATTERN = /\bexhausted your capacity on this model\b/i;
 const LONG_RATE_LIMIT_DELAY_MS = 5 * 60 * 1000;
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
@@ -136,6 +141,11 @@ function parseGoogleRpcRateLimitReason(errorMessage: string): RateLimitReason | 
 				// and callers while treating it as credential-rotatable below.
 				return "INSUFFICIENT_G1_CREDITS_BALANCE";
 			case "RATE_LIMIT_EXCEEDED": {
+				// Cloud Code Assist also uses this reason for an account's
+				// per-model quota, even when that quota resets within seconds.
+				if (typeof error.message === "string" && ANTIGRAVITY_MODEL_QUOTA_PATTERN.test(error.message)) {
+					return "QUOTA_EXHAUSTED";
+				}
 				const retryDelayMs = extractRetryHint(undefined, errorMessage);
 				return retryDelayMs !== undefined && retryDelayMs >= LONG_RATE_LIMIT_DELAY_MS
 					? "QUOTA_EXHAUSTED"
@@ -214,6 +224,10 @@ export function parseRateLimitReason(errorMessage: string): RateLimitReason {
 		return "QUOTA_EXHAUSTED";
 	}
 
+	if (CLINE_PASS_QUOTA_PATTERN.test(errorMessage)) {
+		return "QUOTA_EXHAUSTED";
+	}
+
 	if (
 		lower.includes("per minute") ||
 		lower.includes("rate limit") ||
@@ -273,19 +287,29 @@ export function calculateRateLimitBackoffMs(reason: RateLimitReason): number {
 
 /** Detect usage/quota limit errors in error messages (persistent, requires credential switch). */
 const USAGE_LIMIT_PATTERN =
-	/usage.?limit|usage_limit_reached|usage_not_included|limit_reached|quota.?(?:exceeded|reached|insufficient)|额度不足|额度耗尽|resource.?exhausted|exhausted your capacity|quota will reset|insufficient.?(?:balance|quota)|balance.?exhausted|run out of credits|out of credits|spending[- _]?limit|personal-team-blocked/i;
+	/usage.?limit|usage_limit_reached|usage_not_included|limit_reached|quota.?(?:exceeded|reached|insufficient)|额度不足|额度耗尽|resource.?exhausted|exhausted your capacity|quota will reset|insufficient.?(?:balance|quota)|balance.?exhausted|run out of credits|out of credits|spending[- _]?limit|personal-team-blocked|clinepass limit|free limit reached on model/i;
 
 /**
  * HTTP status codes that, absent richer body classification, represent an
  * account-local usage cap rather than a bad credential or a transient blip.
- * HTTP 402 Payment Required is categorically an account-billing cap (xAI
+ * HTTP 402 Payment Required represents an account-billing cap (xAI
  * Grok Build "usage balance exhausted", DeepSeek "Insufficient Balance",
- * OpenRouter credit exhaustion) — never a transient blip or bad credential.
- * Always combine with {@link isUsageLimitOutcome} when a message is available
- * — a 429 carrying transient rate-limit wording is NOT a usage cap.
+ * OpenRouter credit exhaustion) when opaque, payment/deactivation/balance-worded,
+ * or QUOTA_EXHAUSTED/CONCURRENT_LIMIT, while informative non-quota 402s (e.g.
+ * endpoint subscription requirements) remain non-usage-limits. Always combine
+ * with {@link isUsageLimitOutcome} when a message is available.
  */
 export function isUsageLimitStatus(status: number | undefined): boolean {
 	return status === 429 || status === 402;
+}
+const STATUS_402_QUOTA_PATTERN =
+	/\b(?:payment(?:\s+is)?[-_.\s]*required|deactivated_workspace|insufficient.?balance)\b/i;
+
+export function is402BillingCapBody(message: string | undefined): boolean {
+	if (message === undefined || isOpaqueStatusBody(message)) return true;
+	if (STATUS_402_QUOTA_PATTERN.test(message)) return true;
+	const reason = parseRateLimitReason(message);
+	return isQuotaExhaustedReason(reason) || reason === "CONCURRENT_LIMIT";
 }
 
 /**
@@ -300,23 +324,17 @@ export function isUsageLimitStatus(status: number | undefined): boolean {
  *     empty JSON, HTTP framing only) → rotate conservatively: the server
  *     gave us nothing else to go on.
  *  4. Body has content → defer to {@link parseRateLimitReason}. `QUOTA_EXHAUSTED`
- *     rotates; for the categorical 402 billing cap a `CONCURRENT_LIMIT` body
- *     also rotates (the cap is concurrent-worded but the status is still an
- *     exhausted billing cap). `RATE_LIMIT_EXCEEDED` (`Too many requests`,
- *     per-minute caps), `MODEL_CAPACITY_EXHAUSTED` (`Service overloaded`),
- *     `SERVER_ERROR`, and `UNKNOWN` (`Please retry in 5s`) stay in the
- *     provider's own backoff layer so transient 429s don't burn sibling
- *     credentials.
+ *     rotates; for a 402 status a `CONCURRENT_LIMIT` body also rotates (the cap
+ *     is concurrent-worded but the status is an exhausted billing cap).
+ *     `RATE_LIMIT_EXCEEDED` (`Too many requests`, per-minute caps),
+ *     `MODEL_CAPACITY_EXHAUSTED` (`Service overloaded`), `SERVER_ERROR`, and
+ *     `UNKNOWN` (e.g. "A subscription is required for this endpoint" or
+ *     "Please retry in 5s") stay in the provider's own backoff / failure
+ *     layer so transient or non-quota responses don't burn sibling credentials.
  */
 export function isUsageLimitOutcome(status: number | undefined, message: string | undefined): boolean {
 	const structuredReason = message ? parseGoogleRpcRateLimitReason(message) : undefined;
 	if (structuredReason !== undefined) return isQuotaExhaustedReason(structuredReason);
-	// Concurrency caps are shed-and-backoff, not credential-rotatable — but only
-	// for quota-worded 429 / other statuses. HTTP 402 is categorically an
-	// account-billing cap, so a 402 whose body happens to mention concurrency is
-	// still an exhausted billing cap and must rotate; gate the exclusion on the
-	// status not being that categorical billing cap.
-	const isBillingCapStatus = status === 402;
 	if (isConcurrencyCapExclusion(status, message)) return false;
 	if (message && matchesUsageLimitText(message)) return true;
 	// A 403 is normally an auth failure, but several providers deliver an
@@ -326,14 +344,12 @@ export function isUsageLimitOutcome(status: number | undefined, message: string 
 	// accept an undefined status too — but only when the body names a cap that
 	// resets, never on a bare 403, which stays an auth failure.
 	if ((status === 403 || status === undefined) && message && isAccountScopedCapText(message)) return true;
+	if (status === 402 && is402BillingCapBody(message)) return true;
 	if (!isUsageLimitStatus(status)) return false;
 	if (!message || isOpaqueStatusBody(message)) return true;
 	const reason = parseRateLimitReason(message);
-	// For the categorical 402 billing cap a concurrency-worded body is still an
-	// exhausted cap (rotate); for 429 / other only QUOTA_EXHAUSTED rotates.
-	return isQuotaExhaustedReason(reason) || (isBillingCapStatus && reason === "CONCURRENT_LIMIT");
+	return isQuotaExhaustedReason(reason);
 }
-
 /**
  * A usage-limit status body is opaque when it carries no signal beyond the
  * status itself — empty, whitespace-only, the status digits with HTTP/JSON
@@ -344,7 +360,8 @@ export function isUsageLimitOutcome(status: number | undefined, message: string 
 export function isOpaqueStatusBody(message: string): boolean {
 	const cleaned = message
 		.replace(/\b(?:429|402)\b/g, "")
-		.replace(/\b(?:http|https|status|error|code|response|message)\b/gi, "");
+		.replace(/\b(?:http|https|status|error|code|response|message)\b/gi, "")
+		.replace(/\(?\bno body\b\)?/gi, "");
 	// A body is informative when the text classifier can act on it. Any Latin
 	// word or Simplified Chinese phrasing the classifier recognizes (quota
 	// exhaustion or a throttle) defers to parseRateLimitReason; a body that
@@ -395,7 +412,7 @@ export function isAccountScopedCapText(message: string): boolean {
 /**
  * A concurrency cap on a non-billing status is shed-and-backoff, not
  * credential-rotatable. This mirrors the exclusion in {@link isUsageLimitOutcome}
- * for the 403 auth-retry entry points. A 402 remains a categorical billing cap.
+ * for the 403 auth-retry entry points. A 402 remains an account-billing cap.
  */
 export function isConcurrencyCapExclusion(status: number | undefined, message: string | undefined): boolean {
 	return message !== undefined && parseRateLimitReason(message) === "CONCURRENT_LIMIT" && status !== 402;

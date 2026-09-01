@@ -84,7 +84,11 @@ export function stripOpenAIResponsesOutputOnlyStatusesForReplay<TItem extends { 
 	for (let index = 0; index < items.length; index++) {
 		const item = items[index]!;
 		const rejectsOutputStatus =
-			item.type === "message" || item.type === "function_call" || item.type === "custom_tool_call";
+			item.type === "message" ||
+			item.type === "function_call" ||
+			item.type === "custom_tool_call" ||
+			item.type === "compaction" ||
+			item.type === "compaction_summary";
 		if (!rejectsOutputStatus || !Object.hasOwn(item, "status")) {
 			sanitized?.push(item);
 			continue;
@@ -389,6 +393,14 @@ function sanitizeOpenAIResponsesHistoryItemForReplay(
 	supportsImageDetailOriginal: boolean,
 	preserveReasoningItemIds: boolean,
 ): OpenAIResponsesReplayItem | undefined {
+	if (item.type === "function_call") {
+		if (typeof item.arguments !== "string" || item.arguments.trim().length === 0) return undefined;
+		try {
+			JSON.parse(item.arguments);
+		} catch {
+			return undefined;
+		}
+	}
 	if (item.type === "item_reference") return undefined;
 	if (item.type === "image_generation_call") return sanitizeOpenAIResponsesImageGenerationCallForReplay(item);
 	if (item.type === "reasoning") {

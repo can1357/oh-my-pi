@@ -46,6 +46,17 @@ export class Text implements Component {
 		this.#paddingY = paddingY;
 		this.#customBgFn = customBgFn;
 	}
+	/** Return bounded text and layout state for debug inspection. */
+	debugState(): Record<string, unknown> {
+		return {
+			textPreview: this.#text.slice(0, 120),
+			textLength: this.#text.length,
+			previewTruncated: this.#text.length > 120,
+			paddingX: this.#paddingX,
+			paddingY: this.#paddingY,
+			ignoreTight: this.#ignoreTight,
+		};
+	}
 
 	getText(): string {
 		return this.#text;
@@ -157,7 +168,7 @@ export class Text implements Component {
 
 		const result = [...emptyLines, ...contentLines, ...emptyLines];
 		if (resultWidths !== undefined) {
-			// Pad rows are exactly `width` cells wide.
+			// oxlint-disable-next-line unicorn/no-new-array -- line-width allocation
 			const emptyWidths = new Array<number>(emptyLines.length).fill(width);
 			publishLineWidths(result, [...emptyWidths, ...resultWidths, ...emptyWidths]);
 		}

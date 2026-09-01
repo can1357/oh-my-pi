@@ -2,6 +2,180 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Claude marketplace MCP servers now resolve environment placeholders in stdio environment values instead of passing strings such as `${NAME:-}` literally ([#10481](https://github.com/can1357/oh-my-pi/pull/10481) by [@mrexodia](https://github.com/mrexodia)).
+## [18.1.2] - 2026-09-01
+
+### Added
+
+- Recover stray <SM:EDIT> payloads emitted as plain text into real edit tool calls, with support for disabling this behavior through the edit.recoverInlineEdits setting.
+- Advisors now receive context from the active memory backend, including project decisions and recalled instructions; advisors also gain the recall tool when supported by the backend.
+
+### Changed
+
+- Replaced the sloppy edit format's symbolic markers with a clearer XML-based format using <SM:EDIT>, <SM:FIND>, and <SM:PUT> tags. Edit errors now include copy-ready XML payloads.
+- Increased the default input delay for the trace CLI to 3 seconds.
+
+### Fixed
+
+- Improved chat history stability in long-running sessions by avoiding unnecessary updates when date or directory context changes.
+- Fixed the trace CLI hanging during proxy connections and added support for forward HTTP proxies.
+- Fixed newly started sessions using stale model context-window limits after background model discovery completes; the active model now refreshes automatically so context usage and compaction thresholds match the model catalog.
+
+## [18.1.1] - 2026-09-01
+
+### Fixed
+
+- Fixed a native crash (and multi-gigabyte committed-memory growth held until exit) when git status ran over worktrees with tens of thousands of untracked files: whole-worktree porcelain status now runs through the git CLI with bounded output capture, falling back to the in-process gitoxide walk only when git is not installed, and any panic escaping a native VCS operation now surfaces as a structured `VcsError` instead of a process-level failure.
+
+## [18.1.0] - 2026-09-01
+
+### Added
+
+- Added the `/trace` slash command to display session trace URLs in the stats dashboard.
+- Added support for OpenAI-compatible gateways whose model-list endpoint is rooted at a versioned URL, with an `injectV1: false` discovery option to request `{baseUrl}/models` directly.
+- Added provider-reported credits and concrete routed-model counts to `/session` statistics.
+- Added `CLINE_API_KEY` to CLI environment help for native ClinePass subscription inference.
+- Expanded Devin model selection to support native CLI aliases, dotted upstream model names, and raw effort-route identifiers.
+- Added provider-supplied model metadata to `/models`, including new, beta, and recommended badges plus model descriptions.
+- Standalone `CLAUDE.md` files in project and ancestor directories are now loaded as context alongside `AGENTS.md`, while preserving config-directory precedence.
+- Added an Activity view to Agent Hub with searchable and filterable timelines spanning live progress and persisted transcripts; `/hub` is now the live-operations entry point while `/agents` retains Control Center behavior.
+- Added an `icon.advisorClosed` symbol-theme token: the advisor eye in the status line now closes once the advisor has finished reviewing and will not add further comments.
+
+### Changed
+
+- Disabled hashline editing for Kimi, Mimo, DeepSeek Flash, and Stepfun models for improved stability.
+- Reworked `/usage` into a fullscreen dashboard overlay (no transcript output): a compact per-provider subscriptions grid with untouched providers collapsed into one line, a GitHub-style daily activity heatmap fed by local stats, and the classic full report one keypress away.
+- Reworked transcript navigation with a fullscreen rewind selector opened by double-Escape, supporting rendered-item navigation, user-turn jumps, branching rewinds, and alternate session-tree branch selection.
+- Updated `/copy` to use the fullscreen transcript selector, allowing users to copy a turn or navigate into nested content such as code, quotes, commands, and tool output.
+
+### Fixed
+
+- Improved edit-tool error guidance for operations missing the `»` separator, identifying redundant context-only operations
+- Fixed OAuth provider `modifyModels` projections being silently dropped after a discovery refresh introduced live-config headers.
+- Edit-tool `＋`/`－` line operations now match their anchors leniently across whitespace drift (indentation, blank-line miscounts) instead of failing with a byte-for-byte error; a note reports the lenient match.
+- Fixed an edit-tool REWRITE consisting only of `＋` add lines silently replacing (deleting) the matched text; it now inserts after the kept MATCH.
+- Edit-tool no-match errors now name MATCH lines that exist nowhere in the file and suggest marking them with `＋`, and errors without a located region no longer append a misleading file-head "closest match" preview.
+- Fixed ordinary CLI startup eagerly loading the computer worker graph (native desktop addon and early environment), restoring lazy startup and profile `.env` ordering.
+- Fixed online auto-thinking classifier usage being omitted from session token and cost totals.
+- Fixed image generation with custom provider endpoints when using `openai-codex` credentials and a non-OpenAI chat model.
+- Fixed custom hook UI factories not receiving the documented `keybindings` argument.
+- Fixed MCP OAuth token exchange for authorization endpoints that use a different resource indicator.
+- Fixed custom extension `web_search` tools being shadowed by the built-in search tool.
+- Fixed Agent Hub task boards collapsing to summary rows after returning from a focused session.
+- Improved Linux ARM64 browser startup messaging when managed Chrome for Testing builds are unavailable, with guidance for using system Chromium or `PUPPETEER_EXECUTABLE_PATH`.
+- Fixed resuming image-heavy sessions that previously terminated while replaying transcripts.
+- Fixed custom agents declaring `hub` being incorrectly treated as read-only.
+- Restored compatibility for legacy Pi extensions that import `calculateContextTokens` or use the synchronous `SettingsManager.create()` API.
+- Fixed custom model overrides being lost during configuration updates.
+- Clarified that the default task-delegation setting follows the selected model's policy.
+- Fixed `/rename` without a title interrupting active session activity.
+- Fixed the Nerd Font notification persisting incorrectly after theme configuration.
+- Fixed sampling parameter errors with newer Anthropic models.
+- Long OpenCode Go usage-limit waits now switch replay-safe turns to a configured alternate provider when the delay exceeds `retry.maxDelayMs`.
+- Fixed OpenAI Codex Responses tool results being lost when composite and plain tool-call identifiers did not match.
+- Fixed `/tan` background agents failing to resolve credentials for providers supplied by extensions.
+- Fixed Mnemopi saving session transcripts on exit when automatic retention is disabled.
+- Fixed configuration writes through chained symlinks so the final target and intermediate links are preserved.
+- Fixed direct tool calls using full `xd://` device URLs.
+- Fixed command-backed headers in custom discovery providers being resolved for discovered models.
+- Fixed Windows drive paths pasted under WSL being resolved through their `/mnt/<drive>` mounts for images and file reads.
+- Improved sloppy/SPARSE edit no-match guidance so low-confidence matches are clearly presented without unsafe copy-ready operations.
+- Fixed agents in Hub wait loops failing to respond to user steering messages.
+- Fixed `/tan` sessions inheriting parent costs and overstating subagent totals.
+- Fixed prompt action labels being truncated.
+- Fixed assistant text being truncated when a tool call begins during streaming.
+- Fixed the advisor dropping concerns when catching up on multiple turns and improved review context with bounded tool-result excerpts plus complete `ask` exchanges.
+- Fixed bash command timeouts being delayed by child processes holding output pipes open, while improving timeout reporting and cleanup.
+- Fixed retry countdowns and capped-wait errors displaying floating-point noise in millisecond durations.
+- Prevented browser `app.path` from terminating existing same-executable applications when no reusable CDP endpoint is available.
+- Fixed top-level errors overwriting the active composer before terminal restoration.
+- Fixed Enter being ignored during the first turn when omp starts with an initial prompt.
+
+## [18.0.11] - 2026-08-29
+
+### Added
+
+- Added gallery previews for composer and status-line components, with CLI filters for browsing by surface, composer, or segment.
+
+### Changed
+
+- The status line now displays the thinking level as a compact icon alongside the model name by default; set `statusLine.compactThinkingLevel` to `false` to restore the previous display.
+
+### Fixed
+
+- Fixed MCP OAuth discovery for shared API gateways and authorization servers with nested paths, including Keycloak realms, so authentication targets the correct resource issuer and supports endpoint and dynamic client-registration discovery.
+- Fixed credential rotation for HTTP 402 payment-required responses so sibling credentials are tried before model fallback without misclassifying informative non-quota errors.
+- Transport errors after a complete, non-executed tool call can now retry through configured retry budgets and fallback chains when it is safe to do so, instead of ending the turn prematurely.
+- Improved handling of truncated or otherwise undecodable images so they produce an actionable error and no longer permanently block subsequent requests or resumed sessions.
+- Fixed Sharpshooter consolidation preserving memory files and queued changes when an empty replacement is returned.
+- Fixed `omp plugin features` so it discovers marketplace-installed plugins.
+- Fixed Escape handling when closing the `/session` information panel; the panel now retains focus until dismissed.
+- Fixed the thinking-block visibility toggle so streamed reasoning is correctly hidden when thinking blocks are set to hidden.
+- Reduced high idle CPU usage while the agent is working.
+- Fixed resumed advisor subscription usage being displayed as a dollar amount instead of as a subscription.
+- Fixed relative API addresses whose names end in image extensions being pasted as text instead of incorrectly treated as missing local image files.
+- Fixed chat Markdown links and bare URLs so they become clickable OSC 8 hyperlinks when `tui.hyperlinks=always` is enabled.
+- Fixed unreadable composer text on light terminal backgrounds when using transparent composer styles.
+- Fixed `retry.fallbackChains` warnings for valid selectors from providers whose model discovery is still pending; validation now updates after discovery completes.
+- Fixed visible browser windows launched by OMP so page content resizes with the operating-system window.
+- Fixed Python evaluation hanging on Windows when importing native-extension modules such as NumPy.
+- Fixed subagent extension context helpers so `ctx.getContextUsage()` and `ctx.compact()` operate on the child session.
+- Fixed `lsp diagnostics` incorrectly reporting success for project-aware pull-diagnostic servers when diagnostics time out or fail.
+- Corrected labels under `Settings > Context > Compaction Token Limit`.
+- Fixed orphaned pages, iframes, and workers accumulating in the shared headless browser after abnormal OMP session termination.
+
+## [18.0.10] - 2026-08-28
+
+### Added
+
+- Added the Sharpshooter memory backend for tracking friction-earned project decisions, with `/memory queue` and `/memory sync` controls.
+- Added `/restart` to relaunch omp with its original launch flags and resume the current session in place.
+- Added the `band` composer shape, a flush powerline status band above the prompt; it is now the default while existing `composer.shape` settings remain unchanged.
+- Added in-place retry for interrupted or failed tool calls: use F5, Alt+R (`app.retry`), or `/retry` to replay an intact failed batch without an additional model round trip.
+- Improved the working status display with a timed braille spinner, streamed intent, session accent colors across relevant status elements, and theme-aware session accent generation.
+- Updated the `unicode` and `ascii` symbol presets to use `π`/`pi` for the brand icon, avoiding tofu on fonts without the nerd-font glyph.
+
+### Changed
+
+- The `/review` command's PR-style comparison now uses the merge base against the current branch, excluding commits that exist only on the base branch; selecting the current branch reports no changes.
+- Prompt history is now persisted immediately when submitted, and session database state is checkpointed on exit to improve durability and prevent unbounded WAL growth.
+
+### Fixed
+
+- Fixed edit-tool parsing of `－`-prefixed MATCH lines so they correctly represent whole-line deletions and can be replaced by a following `＋` run.
+- Fixed interrupted and failed Python evaluation cells being reported as successful results instead of errors, improving model handling, telemetry, retries, and background-job failure reporting.
+- Fixed native-extension imports such as `numpy` hanging indefinitely in the Python evaluation tool on Windows.
+- Fixed a macOS composer display issue where undercurl could remain attached to stale text after rapid typing.
+- Improved `xd://` MCP failure messages with actionable transport stages, failure categories, server and tool context, retryability, trace IDs, and redacted JSON-RPC details.
+- Fixed ACP `read` tool-call locations so clients such as Zed Follow receive the resolved filesystem path rather than the OMP line-range selector.
+
+## [18.0.9] - 2026-08-28
+
+### Breaking Changes
+
+- Removed the `git` and `jj` wrapper modules from the SDK surface. VCS operations are now available through `@oh-my-pi/pi-natives/vcs`, including native handles and typed `VcsError` support; the package continues to re-export the `github` (gh CLI) helpers.
+
+### Changed
+
+- `extendedContext` now defaults to off: models with premium long-context pricing tiers (e.g. GPT-5.6 1M) stay capped at their standard-pricing window unless the setting or `/extended-context on` enables the extended window.
+
+### Fixed
+
+- Improved terminal readability on light backgrounds by ensuring TUI surfaces use contrasting foreground colors.
+- Coalesced simultaneous autonomous continuation requests to prevent repeated calls while the agent is busy, with clearer continuation diagnostics.
+- Fixed Snapcompact so it skips or falls back when compaction would not reduce context size, and now compacts text in mixed tool results while preserving all source images.
+- Added Google Antigravity daily quota usage to the status line.
+- Fixed status-line background-work counts so queued tasks and evaluation jobs remain visible without double-counting running subagents.
+- Fixed nested subagent visibility in RPC subscriptions, the subagent HUD, `get_subagents`, `subagent_*` events, and `get_subagent_messages`.
+- Fixed `omp token` refreshing local MCP OAuth credentials without blocking or losing rotating refresh tokens, and preserved OpenCode MCP OAuth configuration during discovery.
+- Prevented process crashes caused by socket-closed errors and unhandled promise rejections during concurrent subagent shutdowns, timeouts, and MCP transport disconnects.
+- Fixed automatic startup model selection so ambient AWS credentials do not incorrectly select an unavailable Amazon Bedrock model over a provider the user has authenticated with.
+- Kept embedded context usage visible in the status line when long session names or paths consume available space.
+- Added a status message when `CTRL-O` toggles tool-output expansion.
+- Fixed `omp usage` to report Codex Chat and Spark capacity meters separately when they share a usage window.
+
 ## [18.0.8] - 2026-08-27
 
 ### Added
@@ -36,6 +210,30 @@
 - Fixed the git TUI sidebar jumping back to the top of the file list after staging or unstaging a file; selection now stays on the nearest remaining row
 - Fixed the `aarch64-linux` `nix build` output segfaulting in the dynamic loader before startup by repointing the stale `DT_VERDEF` that `patchelf` leaves behind when it grows `.dynamic`, and surfaced smoke-test signal deaths in the build log instead of masking them ([#9881](https://github.com/can1357/oh-my-pi/issues/9881)).
 - Added custom RPC launcher builders so embedded clients can transport omp RPC through SSH and remote process managers.
+
+## [18.0.7] - 2026-08-26
+
+### Added
+
+- Git and Jujutsu operations now run in-process (gitoxide/jj-lib) instead of spawning `git`/`jj` subprocesses — faster status lines, diffs, staging, and worktree operations. The git binary is only used for credential-bound network transfers (push/fetch/clone) and reftable repositories.
+- Status lines, footers, reviews, project identity, cleanse, and autoresearch reads now work in pure Jujutsu workspaces as well as Git checkouts.
+- Include token usage statistics in inspect_image tool output
+- Pressing the session model shortcut (alt+p) again inside the picker toggles a red Task mode that switches the Task subagent's model for this session instead.
+- Git TUI: an AI staging wand next to "Stage All" asks "What should we stage?" and stages only the matching changes — the tiny/smol model picks the matching files from the whole change list, then filters their hunks in parallel; file-scoped requests ("git stuff") stage the picked files whole, content-scoped ones ("all comment changes") stage only the matching hunks.
+
+### Changed
+
+- Enforce a 5-minute timeout and 8 MiB output limit for GitHub CLI operations
+- Apply a 30-minute timeout for marketplace plugin repository cloning
+- Improve large file handling with blob streaming and explicit truncation support
+
+### Fixed
+
+- Fixed the VCS status line counting every file inside an untracked directory instead of collapsing it to one entry like `git status`.
+- Fixed git TUI sidebar wheel scrolling snapping back to the selected row after staging or collapsing entries; the list now follows the selection only when it actually changes.
+- Fixed `inspect_image` selecting a text-only vision/default role when an image-capable model was available on the active provider.
+- Improved unexpected-stop recovery for reasoning-only stalls by requiring the next concrete tool action instead of repeated analysis.
+- The edit tool now repairs a stray closing marker typed in place of the divider in a selection (`old⟫new` inside one selection instead of `old│new`) and applies the intended replacement with a note, instead of failing with an unmatched-marker error.
 
 ## [18.0.7] - 2026-08-26
 
@@ -1519,115 +1717,4 @@
 
 - Removed the `model` parameter from `task` and `agent()`: explicit per-spawn model selectors and fallback chains are no longer supported; spawns always use the agent's configured model
 
-## [17.1.1] - 2026-07-24
-
-### Added
-
-- Added the `/session pin` subcommand and account picker to pin provider OAuth accounts for the current session
-- Added the disabled-by-default `computer` essential tool with configurable enablement, backend, display, and maximum width/height settings. Native desktop execution runs through a `DesktopSession` worker; observation uses read approval, input uses exec approval, and provider checks always prompt and fail closed.
-- Added the `/computer` slash command (`on`/`off`/`status`/toggle) to enable or disable the computer tool for the current session without persisting settings.
-- Exposed `computer` to models without native OpenAI computer-use support as a regular function tool with a typed GA action schema; the same native desktop backend and approval policy apply on both paths.
-- Hardened computer action ingress: action-specific fields, modifier/key arrays, coordinates, drag points, and scroll deltas fail closed before native input; numeric fields must be signed 32-bit integers and coordinates must be non-negative.
-
-### Changed
-
-- Replaced Chromium-backed `/live` media and external speech recorder/player subprocesses with the cross-platform native microphone, speaker, Opus, and WebRTC stack from `@oh-my-pi/pi-natives`.
-
-### Fixed
-
-- Fixed live-call attestation depending on the ChatGPT desktop app being installed: `generateLiveAttestation` now mints DeviceCheck tokens in-process through the `@oh-my-pi/pi-natives` `deviceCheckGenerateToken` binding instead of probing `/Applications` for the app's `devicecheck.node` addon, so the `x-oai-attestation` header works on hosts without the desktop app and drops the `createRequire` addon probing; the attestation provider is now wired up to `@oh-my-pi/pi-ai` for ChatGPT-OAuth Codex requests.
-- Fixed `xd://` device execution failures rendering as `write` errors instead of using the mounted tool's own error renderer.
-- Fixed custom tools without bespoke renderers losing the default state-tinted card when mounted under `xd://`; dispatched calls now keep their label, arguments, status, output preview, and expansion affordance instead of dumping a bare result line into the transcript.
-- Fixed the clipboard image-paste keybind mangling copied URL text into a bogus path error on macOS (e.g. `Image not found at /https/::i.can.ac:CE4Ek3.png` for a copied `https://i.can.ac/CE4Ek3.png`). AppleScript's `the clipboard as «class furl»` coerces plain *text* into a file URL by treating the string as an HFS path (`:`↔`/` swap), so `readMacFileUrlsFromClipboard` returned a garbage path that dead-ended in `handleImagePathPaste` instead of falling through to the text paste. The script now bails early via `clipboard info for «class furl»` unless the pasteboard actually carries a `public.file-url` representation, so URL/text clipboards paste as text.
-- Fixed spilled tool-output artifact descriptors leaking on error/abort paths. `OutputSink.dump()` was the only path that closed the spill `Bun.FileSink`, but the bash and Python executors re-throw on failure and their `finally` blocks never closed the sink, so a large-output command that errored leaked the artifact descriptor until an unrelated read (e.g. a `SKILL.md` load) hit `EMFILE`. `OutputSink` now exposes an idempotent `dispose()` that closes the sink exactly once, wired into every executor's `finally` ([#6463](https://github.com/can1357/oh-my-pi/issues/6463)).
-- Fixed the first submitted prompt stalling while the local tiny-title worker started: the interactive submit handler now paints the pending user row before starting title generation, and startup prewarms an idle, unref'd worker so the first submit reuses a live subprocess instead of paying spawn latency ahead of the first frame ([#6462](https://github.com/can1357/oh-my-pi/issues/6462)).
-- Fixed legacy Pi extensions failing validation when importing the upstream `keyText` keybinding helper ([#6470](https://github.com/can1357/oh-my-pi/issues/6470)).
-
-## [17.1.0] - 2026-07-24
-
-### Breaking Changes
-
-- Replaced the `providers.webSearch` and `providers.image` single-preference configuration options with `providers.webSearchOrder` and `providers.imageOrder` priority lists. Existing configurations migrate automatically on startup.
-
-### Added
-
-- Added dynamic multi-root workspace context support, allowing users to manage multiple workspace directories mid-session via `/add-dir`, `/remove-dir`, and `/dirs` slash commands, or seed them at launch using the `--add-dir` CLI flag.
-- Added `/live`, a Codex-authenticated real-time voice interface that streams microphone audio over WebRTC and routes coding tasks through the active agent session.
-- Added opt-in usage-aware model fallback for rationed coding plans, including a `/usage` command to view live quantitative usage data and automatic fallback chain traversal.
-- Added `error.notify` configuration to allow failed model turns to trigger distinct terminal or desktop notifications.
-- Added auto-following light and dark themes to HTML session exports, with a `/export --themes` option to bundle selected TUI themes.
-- Added owner-routed asynchronous job delivery, ensuring background bash and task results are injected directly into the owning subagent or agent session rather than the top-level session.
-- Added background-on-steer capability for auto-backgrounded bash commands, allowing incoming user or peer messages to immediately background running commands.
-- Added `friendlyName` support for hidden secrets, allowing model-visible placeholders to carry sanitized semantic labels, hashes, and case hints.
-- Added support for Jujutsu (`jj`) repositories in the statusline `git` segment, displaying the nearest bookmark or change ID and retrieving working-copy change counts.
-- Added `block` and `unblock` operations for tasks, introducing a `blocked` status for tasks waiting on external input to exclude them from incomplete-todo reminders.
-- Added a toggle-list editor in `/settings` for managing array-of-enum settings like search and image provider orders.
-- Added `models.yml` Bedrock Converse prompt-cache capability overrides for bundled and opaque inference profiles.
-- Added `getServiceTiers()` and `setServiceTier()` extension APIs to read and modify the live per-family service tier for session requests.
-- Added opt-in `omp bench --cache` for independent cold/warm prompt-cache benchmarking with stable-prefix controls.
-- Added `tools.xdevDocs` prompt-doc modes and the `tools.xdevInlineDevices` glob allowlist to control which mounted device documentation is inlined into the system prompt.
-- Added the opt-in `read.renderMarkdown` setting for formatted Markdown read previews.
-
-### Changed
-
-- Updated subagent behavior to inherit `async.enabled` and `bash.autoBackground.enabled` from parent sessions, and refined subagent run completion to wait for background jobs to settle.
-- Added ordered `bash.patterns` command approval rules to allow, prompt, or deny bash commands by pattern.
-- Updated Markdown file handling so all Markdown flavors (`.markdown`, `.mdx`, `.mdc`, etc.) respect the `read.summarize.prose` setting.
-- Upgraded xAI web search to use `grok-4.5` at low reasoning effort instead of `grok-4.3`.
-- Improved search provider resilience by cascading and falling back through other configured search providers when the preferred provider fails.
-- Extended the bash tool's `direnv` and `devenv` auto-loading to all backends (including the ACP client terminal and interactive PTY) while honoring `direnv`'s local allow list.
-
-### Fixed
-
-- Fixed a path traversal vulnerability in blob reference resolution by rejecting non-canonical hashes in `parseBlobRef`.
-- Fixed multiple edge cases in the secret obfuscation and redaction engine, including handling of context-sensitive regexes, placeholder key requirements in unwritable directories, friendly-name forgery vulnerabilities, and regex match boundaries straddling existing placeholders.
-- Fixed a first-use race condition in `ArtifactManager` where concurrent callers could allocate duplicate artifact IDs.
-- Fixed Vibe-mode session stability, resolving issues with workers disappearing across restarts, hanging during teardown, clobbering target tools during session switches, and resolving against incorrect models.
-- Fixed concurrent MCP configuration mutations losing updates by serializing read-modify-write operations under a per-file lock with atomic writes.
-- Fixed legacy extensions failing to load on npm/source-link installs due to transitive CommonJS dependency graph clobbering.
-- Fixed `omp auth-gateway` commands bypassing the process-scoped OAuth account pool configured via environment variables.
-- Fixed terminal transcript rendering issues where displaceable snapshots (like waiting polls and todo lists) spammed native scrollback.
-- Fixed the terminal title to reflect the active agent run state (working, waiting, or blocked) when `tui.titleState` is enabled.
-- Fixed the `browser` tool's `open` action ignoring timeouts during browser acquisition and leaking orphaned browser instances.
-- Fixed the `write` tool silently creating empty files when a read-tool selector was mis-dispatched as a write.
-- Fixed snapcompact archiving reproducing assistant reasoning (`¶think:` sections) into replayed frames for Anthropic-dialect models.
-- Fixed Linux socket-mode DAP launches hanging indefinitely on connection failures.
-- Fixed Plan Review annotations being discarded on dismissal and limited to headings.
-- Fixed Assistant-mode TTS playback aborting prematurely when an agent continued after a tool call.
-- Fixed absolute usage amounts rendering inconsistently across CLI, TUI, and ACP output surfaces.
-- Fixed MCP sessions dropping tools from servers that finished connecting after the initial startup window.
-
-## [17.0.9] - 2026-07-23
-
-### Added
-
-- Added per-call `model` selection to the `task` tool, including per-item batch selectors, fallback chains, and explicit reasoning suffixes.
-- Added Firecrawl keyless mode: explicitly selecting `firecrawl` as the web-search provider now works without `FIRECRAWL_API_KEY` by calling the Firecrawl REST API without an `Authorization` header; the automatic provider chain remains credential-gated (#4332).
-- Added `mcp.renderMarkdownResults` (enabled by default): non-JSON MCP text results render as Markdown in the terminal transcript; set it to `false` to keep raw text.
-
-### Changed
-
-- Adjusted retry fallback handling to recognize discovery-only and runtime extension providers, preventing spurious unknown-provider warnings.
-- Restored Auto QA's ask-the-user default: `dev.autoqa` defaults to `true` again, so the first `xd://report_issue` write pops the consent dialog instead of the feature being silently off. Denying consent (or `dev.autoqa: false` / `PI_AUTO_QA=0`) fully disables prompt injection; an explicitly configured `dev.autoqa: true` overrides a past denial. Also restored the #1224 guarantee lost in the xd:// device consolidation: the grievance row is inserted only after consent resolves to granted (or `PI_AUTO_QA_PUSH=1`), so nothing touches the local database while consent is unset or denied.
-
-### Fixed
-
-- Fixed Auto QA grievance recording silently dropping every report since the xd:// device consolidation: `openAutoQaDb` treated the database file path (`~/.omp/autoqa.db`) as a directory and tried to open `autoqa.db/autoqa.db` inside it, which fails on legacy installs (the flat file blocks the directory) and fresh ones alike (SQLite does not create parent directories). Also restored the `busy_timeout` pragma dropped in the same refactor (#2421). Renamed `getAutoQaDbDir` to `getAutoQaDbPath` to match what it returns.
-- Fixed the setup wizard hiding the selected row on short terminals (e.g. 24x80): the provider sign-in, theme, and web-search lists now fit their windows to the visible height, and decorative chrome (sign-in hint, theme mock preview) yields to the list when space is tight.
-- Fixed restored sessions replaying terminal aborted or errored assistant turns, which could repeatedly fail continuation from an assistant role; `/retry` now consults the persisted transcript so the failed turn remains retryable without re-entering provider context.
-- Fixed `get_available_models` and `set_model` RPCs racing background model discovery on cold start by awaiting the in-flight refresh before reading the registry. RPC/ACP clients that query the catalog or select a model immediately after session ready previously saw only statically-bundled models until discovery completed seconds later.
-- Fixed deferred `--model <provider>/<pattern>` CLI resolution failing on cold start with "Model not found" when the selector pointed at a discovery-backed provider (proxy / ollama / lm-studio / llama.cpp / litellm). The deferred retry now runs a cache-aware discovery pass before resolving, mirroring the default-role fallback's cold-cache race fix (issues #6114, #6162).
-- Fixed MCP tool calls that return a `WWW-Authenticate` challenge by preserving the structured metadata, completing the configured OAuth flow, and retrying the call once on the refreshed connection.
-- Fixed the Hindsight API token setting being absent from the Memory tab, so authenticated servers can be configured entirely in the TUI.
-- Fixed aborted-task follow-up hints pointing at `history://` transcripts that cannot resolve: the hint now reports the transcript as unavailable when the agent ref retains no session file, while still-resumable agents keep their `hub` resume hint.
-- Fixed compiled binaries failing to load legacy Pi extensions with minified imports, `pi-ai/compat`, or transitive runtime dependencies. The compatibility loader now follows compact static imports, resolves transitive on-disk ESM imports and CommonJS requires with package conditions, and restores the legacy `copyToClipboard` and `decodeKittyPrintable` root exports used by `pi-vimmode` and `pi-web-access`.
-- Fixed a budget-aborted keep-alive subagent becoming an unkillable registration with no `hub`-level stop. A subagent force-stopped for exceeding its soft request budget is kept resumable (status `idle`, adopted by the lifecycle) so its context can be salvaged, but its async job row settles and is reaped after ~5 min — after which `hub cancel <id>` could only report `Background job not found` because it consulted the job manager alone. `hub cancel` now falls through to the agent registration: for an id the caller spawned that has no live job, it aborts any in-flight turn, disposes the session, and drops the registration (the interactive Agent Hub `x` and collab `kill` already did this; the model-facing `hub` did not). Cross-agent kills stay impossible and Main/advisor refs are never targeted ([#6315](https://github.com/can1357/oh-my-pi/issues/6315)).
-- Fixed Agent Hub fallback rows hiding routing provenance and the resolved provider/model ([#6316](https://github.com/can1357/oh-my-pi/issues/6316)).
-- Reduced format-on-write latency by avoiding cold language-server startup when diagnostics are disabled.
-- Rewrote the `/guided-goal` interviewer rubric around loop-engineering: deterministic success criteria, verification commands, attempt caps, scope boundaries, and stop conditions. Ready objectives must use the five-section structured markdown form.
-- Added `task.isolation.apply` (default `true`) to choose whether successful isolated `task` runs automatically apply their changes to the parent checkout or retain patch/branch artifacts for later integration.
-- Added opt-in RPC protocol v2 negotiation with bounded, lossless chunking for stdout objects up to 64 MiB, plus stable cursor-based message pages for histories that should not travel as one response. Legacy JSONL clients remain on protocol v1, while the bundled TypeScript and Python RPC clients negotiate, reassemble, and drain message pages automatically.
-- Fixed protocol v2 chunked framing materializing the whole base64 transport in memory: near-limit logical frames (~63 MiB) peaked around 686 MB RSS and over-ceiling frames allocated the full payload buffer before rejection. Chunk lines are now produced lazily from a single serialization, the 64 MiB ceiling is checked before any full-payload allocation, and RPC stdout writes honor backpressure line by line.
-- Fixed the bundled TypeScript and Python RPC clients throwing when a `get_messages_page` cursor went stale mid-walk (e.g. a background bash appending a message between pages): the high-level `getMessages()` drains now discard partial pages and fall back to the legacy snapshot on both `session_busy` and `stale_cursor`, driven by a new machine-readable `code` field on RPC error responses. Direct page calls remain strict.
-
-Older entries are archived in [packages/coding-agent/CHANGELOG.md@d3bcb281bd68](https://github.com/can1357/oh-my-pi/blob/d3bcb281bd685aeb87a01a131542ab3ffc3d6eb0/packages/coding-agent/CHANGELOG.md).
+Older entries are archived in [packages/coding-agent/CHANGELOG.md@0045e59216f5](https://github.com/can1357/oh-my-pi/blob/0045e59216f5911ea4ebeb960c3bc0b96f254f8c/packages/coding-agent/CHANGELOG.md).

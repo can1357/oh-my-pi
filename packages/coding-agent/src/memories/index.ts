@@ -1427,6 +1427,7 @@ async function runWithConcurrency<T>(
 	worker: (item: T) => Promise<void>,
 ): Promise<void> {
 	const queue = [...items];
+	// oxlint-disable-next-line unicorn/no-new-array -- length preallocation
 	const workers = new Array(Math.max(1, concurrency)).fill(0).map(async () => {
 		while (queue.length > 0) {
 			const item = queue.shift();

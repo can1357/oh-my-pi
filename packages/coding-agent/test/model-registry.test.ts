@@ -1681,6 +1681,7 @@ describe("ModelRegistry", () => {
 
 		test("reapplyModelPolicies re-clamps and restores premium windows on toggle", async () => {
 			await Settings.init({ inMemory: true });
+			settings.set("extendedContext", true);
 			const registry = new ModelRegistry(authStorage, modelsJsonPath);
 			expect(registry.find("openai", "gpt-5.6-terra")?.contextWindow).toBe(1_050_000);
 
@@ -2048,8 +2049,8 @@ describe("ModelRegistry", () => {
 								},
 								...bundledModels.slice(1),
 								buildModel({
-									id: "glm-5.3-flash",
-									name: "GLM-5.3-Flash",
+									id: "glm-experimental-probe",
+									name: "GLM Experimental Probe",
 									api: "anthropic-messages",
 									provider: "zai",
 									baseUrl: "https://api.z.ai/api/anthropic",
@@ -2527,7 +2528,7 @@ describe("ModelRegistry", () => {
 				contextWindow: bundledModel.contextWindow,
 				maxTokens: bundledModel.maxTokens,
 			});
-			expect(sharedCatalogCache.find("zai", "glm-5.3-flash")).toMatchObject({
+			expect(sharedCatalogCache.find("zai", "glm-experimental-probe")).toMatchObject({
 				contextWindow: 1_000_000,
 				maxTokens: 131_072,
 			});

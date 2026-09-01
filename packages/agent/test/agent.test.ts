@@ -5,7 +5,7 @@ import type { SimpleStreamOptions, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { kCursorExecResolved } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
-import { createAssistantMessage } from "./helpers";
+import { createAssistantMessage, createUserMessage } from "./helpers";
 
 describe("Agent", () => {
 	it("should support steering message queueing", async () => {
@@ -21,7 +21,7 @@ describe("Agent", () => {
 	it("classifies agent-authored steering as a parent steering message", async () => {
 		const toolSchema = type({ value: type("string") });
 		const executed: string[] = [];
-		let agent: Agent;
+		const agentRef = {} as { current: Agent };
 		const tool: AgentTool<typeof toolSchema, { value: string }> = {
 			name: "echo",
 			label: "Echo",
@@ -31,7 +31,7 @@ describe("Agent", () => {
 			async execute(_toolCallId, params) {
 				executed.push(params.value);
 				if (params.value === "first") {
-					agent.steer({
+					agentRef.current.steer({
 						role: "user",
 						content: "parent steering",
 						attribution: "agent",
@@ -55,11 +55,12 @@ describe("Agent", () => {
 				{ content: ["done"] },
 			],
 		});
-		agent = new Agent({
+		const agent = new Agent({
 			initialState: { model: mock.model, systemPrompt: ["Test"], tools: [tool], messages: [] },
 			streamFn: mock.stream,
 			interruptMode: "immediate",
 		});
+		agentRef.current = agent;
 		const events: AgentEvent[] = [];
 		const unsubscribe = agent.subscribe(event => events.push(event));
 
@@ -84,7 +85,7 @@ describe("Agent", () => {
 	it("classifies user-attributed custom steering as a queued user message", async () => {
 		const toolSchema = type({ value: type("string") });
 		const executed: string[] = [];
-		let agent: Agent;
+		const agentRef = {} as { current: Agent };
 		const tool: AgentTool<typeof toolSchema, { value: string }> = {
 			name: "echo",
 			label: "Echo",
@@ -94,7 +95,7 @@ describe("Agent", () => {
 			async execute(_toolCallId, params) {
 				executed.push(params.value);
 				if (params.value === "first") {
-					agent.steer({
+					agentRef.current.steer({
 						role: "custom",
 						customType: "visible-user-steer",
 						content: "visible custom steering",
@@ -102,7 +103,7 @@ describe("Agent", () => {
 						attribution: "user",
 						timestamp: Date.now(),
 					});
-					agent.steer({
+					agentRef.current.steer({
 						role: "user",
 						content: "normal user steering",
 						timestamp: Date.now(),
@@ -126,12 +127,13 @@ describe("Agent", () => {
 				{ content: ["done"] },
 			],
 		});
-		agent = new Agent({
+		const agent = new Agent({
 			initialState: { model: mock.model, systemPrompt: ["Test"], tools: [tool], messages: [] },
 			streamFn: mock.stream,
 			steeringMode: "one-at-a-time",
 			interruptMode: "immediate",
 		});
+		agentRef.current = agent;
 		const events: AgentEvent[] = [];
 		const unsubscribe = agent.subscribe(event => events.push(event));
 
@@ -149,6 +151,51 @@ describe("Agent", () => {
 		if (skippedContent?.type !== "text") throw new Error("skipped tool result must be text");
 		expect(skippedContent.text).toContain("Skipped due to queued user message");
 		expect(skippedContent.text).not.toContain("pending system advisory");
+	});
+	it("continue() re-executes a trailing assistant's unpaired tool calls before the next model call", async () => {
+		const toolSchema = type({ value: type("string") });
+		const executed: string[] = [];
+		const tool: AgentTool<typeof toolSchema, { value: string }> = {
+			name: "probe",
+			label: "Probe",
+			description: "Probe tool",
+			parameters: toolSchema,
+			async execute(_toolCallId, params) {
+				executed.push(params.value);
+				return { content: [{ type: "text", text: `ok:${params.value}` }], details: params };
+			},
+		};
+		// One response only: the tool must run WITHOUT a model call re-issuing it,
+		// and the single call is the post-tool continuation on the fresh result.
+		const mock = createMockModel({ responses: [{ content: ["done after replay"] }] });
+		const agent = new Agent({
+			initialState: {
+				model: mock.model,
+				systemPrompt: ["Test"],
+				tools: [tool],
+				// A harness stripped the failed tool result (AgentSession.retry's tool
+				// replay), leaving the tool-calling assistant as the transcript tail.
+				messages: [
+					createUserMessage("run the probe"),
+					createAssistantMessage(
+						[{ type: "toolCall", id: "call_1", name: "probe", arguments: { value: "again" } }],
+						"toolUse",
+					),
+				],
+			},
+			streamFn: mock.stream,
+		});
+
+		await agent.continue();
+
+		expect(executed).toEqual(["again"]);
+		expect(mock.calls.length).toBe(1);
+		const roles = agent.state.messages.map(message => message.role);
+		expect(roles).toEqual(["user", "assistant", "toolResult", "assistant"]);
+		const result = agent.state.messages[2] as ToolResultMessage;
+		expect(result.toolCallId).toBe("call_1");
+		expect(result.isError).not.toBe(true);
+		expect(result.content).toContainEqual({ type: "text", text: "ok:again" });
 	});
 
 	it("classifies one-at-a-time steering from the next queued mixed source", async () => {
@@ -168,7 +215,7 @@ describe("Agent", () => {
 		for (const scenario of cases) {
 			const toolSchema = type({ value: type("string") });
 			const executed: string[] = [];
-			let agent: Agent;
+			const agentRef = {} as { current: Agent };
 			const tool: AgentTool<typeof toolSchema, { value: string }> = {
 				name: "echo",
 				label: "Echo",
@@ -180,14 +227,14 @@ describe("Agent", () => {
 					if (params.value === "first") {
 						for (const source of scenario.order) {
 							if (source === "agent") {
-								agent.steer({
+								agentRef.current.steer({
 									role: "user",
 									content: "parent steering",
 									attribution: "agent",
 									timestamp: Date.now(),
 								});
 							} else {
-								agent.steer({
+								agentRef.current.steer({
 									role: "custom",
 									customType: "advisor",
 									content: "advisor steering",
@@ -216,11 +263,12 @@ describe("Agent", () => {
 					{ content: ["done"] },
 				],
 			});
-			agent = new Agent({
+			const agent = new Agent({
 				initialState: { model: mock.model, systemPrompt: ["Test"], tools: [tool], messages: [] },
 				streamFn: mock.stream,
 				interruptMode: "immediate",
 			});
+			agentRef.current = agent;
 			const events: AgentEvent[] = [];
 			const unsubscribe = agent.subscribe(event => events.push(event));
 

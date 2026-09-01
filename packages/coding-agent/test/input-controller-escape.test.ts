@@ -130,12 +130,11 @@ function createContext(): {
 		pendingImageLinks: [],
 	};
 
-	let ctx!: InteractiveModeContext;
 	const ensureLoadingAnimation = vi.fn(() => {
 		ctx.loadingAnimation = {} as InteractiveModeContext["loadingAnimation"];
 	});
 
-	ctx = {
+	const ctx = {
 		editor: editor as unknown as InteractiveModeContext["editor"],
 		ui: {
 			requestRender,
@@ -680,25 +679,7 @@ describe("InputController escape behavior", () => {
 		expect(ctx.unfocusSession).toHaveBeenCalledTimes(1);
 		expect(ctx.focusParentSession).not.toHaveBeenCalled();
 	});
-	it("opens the tree selector and forces a viewport repaint on default double-Esc", () => {
-		const { ctx, editor, spies } = createContext();
-		const controller = new InputController(ctx);
-
-		controller.setupKeyHandlers();
-		editor.onEscape?.();
-		editor.onEscape?.();
-
-		expect(ctx.showTreeSelector).toHaveBeenCalledTimes(1);
-		expect(ctx.showUserMessageSelector).not.toHaveBeenCalled();
-		// Never `resetDisplay()`: that replays the whole transcript and wedges
-		// double-Esc on long sessions (invisible selector behind a multi-second
-		// scrollback replay).
-		expect(spies.requestRender).toHaveBeenCalledWith(true);
-		expect(spies.resetDisplay).not.toHaveBeenCalled();
-	});
-
-	it("opens the message selector and forces a viewport repaint when double-Esc is configured for branch", () => {
-		Settings.instance.override("doubleEscapeAction", "branch");
+	it("opens the rewind selector and forces a viewport repaint on default double-Esc", () => {
 		const { ctx, editor, spies } = createContext();
 		const controller = new InputController(ctx);
 
@@ -708,7 +689,24 @@ describe("InputController escape behavior", () => {
 
 		expect(ctx.showUserMessageSelector).toHaveBeenCalledTimes(1);
 		expect(ctx.showTreeSelector).not.toHaveBeenCalled();
+		// Never `resetDisplay()`: that replays the whole transcript and wedges
+		// double-Esc on long sessions (invisible selector behind a multi-second
+		// scrollback replay).
 		expect(spies.requestRender).toHaveBeenCalledWith(true);
+		expect(spies.resetDisplay).not.toHaveBeenCalled();
+	});
+
+	it("ignores double-Esc when the action is disabled", () => {
+		Settings.instance.override("doubleEscapeAction", "none");
+		const { ctx, editor, spies } = createContext();
+		const controller = new InputController(ctx);
+
+		controller.setupKeyHandlers();
+		editor.onEscape?.();
+		editor.onEscape?.();
+
+		expect(ctx.showUserMessageSelector).not.toHaveBeenCalled();
+		expect(ctx.showTreeSelector).not.toHaveBeenCalled();
 		expect(spies.resetDisplay).not.toHaveBeenCalled();
 	});
 	it("preserves typed editor text on Esc without opening selectors or aborting", () => {

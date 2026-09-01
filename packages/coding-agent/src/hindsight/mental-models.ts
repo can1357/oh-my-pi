@@ -396,6 +396,7 @@ function longestCommonSubsequence(a: string[], b: string[]): string[] {
 	const n = a.length;
 	const m = b.length;
 	if (n === 0 || m === 0) return [];
+	// oxlint-disable-next-line unicorn/no-new-array -- length preallocation
 	const table: number[][] = Array.from({ length: n + 1 }, () => new Array(m + 1).fill(0));
 	for (let i = 0; i < n; i++) {
 		for (let j = 0; j < m; j++) {

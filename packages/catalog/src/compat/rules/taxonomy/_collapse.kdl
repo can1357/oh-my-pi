@@ -1,0 +1,767 @@
+collapse {
+	thinking-suffix "-thinking"
+	// Thinking-pair tokens: bounded (possibly infix) markers that name the
+	// thinking sibling of a live bare twin (`sonar-reasoning-pro` beside
+	// `sonar-pro`). Consumed only by thinking-pair derivation - never by
+	// identity suffix collapse, which stays on `thinking-suffix`.
+	pair-token "thinking" "reasoning" "reasoner"
+	effort-suffix "-extra-high" tier="xhigh"
+	effort-suffix "-none" tier="off"
+	effort-suffix "-minimal" tier="minimal"
+	effort-suffix "-medium" tier="medium"
+	effort-suffix "-xhigh" tier="xhigh"
+	effort-suffix "-high" tier="high"
+	effort-suffix "-low" tier="low"
+	effort-suffix "-max" tier="max" except-bare-prefix="qwen"
+	// Codex backend discovery advertises worker-mode routing variants under a
+	// `-wm` suffix (`gpt-5.6-luna-wm`): the same model behind a different route,
+	// with base-model metadata owned by the plain bundled SKU.
+	routing-variant-suffix "-wm" "openai-codex" "openai-codex-device"
+	// Cursor discovery serves pure effort-suffixed siblings as one logical
+	// model. The reviewed GPT-5.6 seeds enable the generic grouping rule for
+	// the provider; live metadata and duplicate-tier checks decide every
+	// candidate family, including later model generations.
+	effort-family "cursor" "gpt-5.6-luna"
+	effort-family "cursor" "gpt-5.6-sol"
+	effort-family "cursor" "gpt-5.6-terra"
+	// Cloud Code Assist advertises `-tiered` aliases beside effort-suffixed
+	// Gemini Flash siblings. Fold each alias into the canonical routed family;
+	// its minimal/off tier is served by the `-low` SKU.
+	effort-family "google-antigravity" "gemini-3.6-flash" "gemini-3.6-flash-tiered"
+	effort-family "google-antigravity" "gemini-3.7-flash" "gemini-3.7-flash-tiered"
+	// `-fast` is a parallel SKU lane. It stays in the logical identifier while
+	// the effort token immediately before it selects the wire sibling.
+	effort-lane-suffix "-fast" "cursor"
+
+	// Reviewed per-provider variant families: logical models served as
+	// per-effort/thinking sibling wire ids, with explicit routing, ladders,
+	// budgets, and wire facts. Ported verbatim from the legacy hand tables.
+	variant-family "google-antigravity" "gemini-3.6-flash" name="Gemini 3.6 Flash" {
+		members "gemini-3.6-flash-low" "gemini-3.6-flash-medium" "gemini-3.6-flash-high" "gemini-3.6-flash-tiered"
+		route "minimal" "gemini-3.6-flash-low"
+		route "low" "gemini-3.6-flash-low"
+		route "medium" "gemini-3.6-flash-medium"
+		route "high" "gemini-3.6-flash-high"
+		mode "google-level"
+		efforts "minimal" "low" "medium" "high"
+		requires-effort #true
+	}
+	variant-family "google-antigravity" "gemini-3.7-flash" name="Gemini 3.7 Flash" {
+		members "gemini-3.7-flash-low" "gemini-3.7-flash-medium" "gemini-3.7-flash-high" "gemini-3.7-flash-tiered"
+		route "minimal" "gemini-3.7-flash-low"
+		route "low" "gemini-3.7-flash-low"
+		route "medium" "gemini-3.7-flash-medium"
+		route "high" "gemini-3.7-flash-high"
+		mode "google-level"
+		efforts "minimal" "low" "medium" "high"
+		requires-effort #true
+	}
+	variant-family "google-antigravity" "gemini-3.5-flash" name="Gemini 3.5 Flash" {
+		members "gemini-3.5-flash-extra-low" "gemini-3.5-flash-low" "gemini-3-flash-agent"
+		route "off" "gemini-3.5-flash-extra-low"
+		route "minimal" "gemini-3.5-flash-extra-low"
+		route "low" "gemini-3.5-flash-extra-low"
+		route "medium" "gemini-3.5-flash-low"
+		route "high" "gemini-3-flash-agent"
+		mode "budget"
+		efforts "minimal" "low" "medium" "high"
+		budget "minimal" "1000"
+		budget "low" "1000"
+		budget "medium" "4000"
+		budget "high" "10000"
+		aliases "gemini-3-flash"
+		suppress-when-off #true
+	}
+	variant-family "google-antigravity" "gemini-3.1-pro" name="Gemini 3.1 Pro" {
+		members "gemini-3.1-pro-low" "gemini-pro-agent" "gemini-3.1-pro-high"
+		route "off" "gemini-3.1-pro-low"
+		route "low" "gemini-3.1-pro-low"
+		route "high" "gemini-pro-agent"
+		mode "budget"
+		efforts "low" "high"
+		budget "low" "1001"
+		budget "high" "10001"
+		retired "gemini-3.1-pro-high"
+		suppress-when-off #true
+	}
+	variant-family "google-antigravity" "gemini-3-pro" name="Gemini 3 Pro" {
+		members "gemini-3-pro-low" "gemini-3-pro-high"
+		route "off" "gemini-3-pro-low"
+		route "low" "gemini-3-pro-low"
+		route "high" "gemini-3-pro-high"
+		mode "google-level"
+		efforts "low" "high"
+		suppress-when-off #true
+	}
+	variant-family "google-antigravity" "gpt-oss-120b" name="GPT-OSS 120B" {
+		members "gpt-oss-120b-medium"
+		mode "budget"
+		efforts "minimal" "low" "medium" "high"
+	}
+	variant-family "google-antigravity" "claude-sonnet-4-6" name="Claude Sonnet 4.6" {
+		members "claude-sonnet-4-6" "claude-sonnet-4-6-thinking"
+		mode "budget"
+		efforts "minimal" "low" "medium" "high"
+		retired "claude-sonnet-4-6-thinking"
+	}
+	variant-family "google-antigravity" "claude-opus-4-6" name="Claude Opus 4.6" {
+		members "claude-opus-4-6-thinking" "claude-opus-4-6"
+		mode "budget"
+		efforts "minimal" "low" "medium" "high"
+		retired "claude-opus-4-6"
+	}
+	variant-family "google-antigravity" "claude-sonnet-4-5" name="Claude Sonnet 4.5" {
+		members "claude-sonnet-4-5" "claude-sonnet-4-5-thinking"
+		route "off" "claude-sonnet-4-5"
+		route "minimal" "claude-sonnet-4-5-thinking"
+		route "low" "claude-sonnet-4-5-thinking"
+		route "medium" "claude-sonnet-4-5-thinking"
+		route "high" "claude-sonnet-4-5-thinking"
+		mode "budget"
+		efforts "minimal" "low" "medium" "high"
+		preserve-absent-effort-routes #true
+	}
+	variant-family "google-antigravity" "claude-opus-4-5" name="Claude Opus 4.5" {
+		members "claude-opus-4-5" "claude-opus-4-5-thinking"
+		route "off" "claude-opus-4-5"
+		route "minimal" "claude-opus-4-5-thinking"
+		route "low" "claude-opus-4-5-thinking"
+		route "medium" "claude-opus-4-5-thinking"
+		route "high" "claude-opus-4-5-thinking"
+		mode "budget"
+		efforts "minimal" "low" "medium" "high"
+		preserve-absent-effort-routes #true
+	}
+	variant-family "google-antigravity" "gemini-2.5-flash" name="Gemini 2.5 Flash" {
+		members "gemini-2.5-flash" "gemini-2.5-flash-thinking"
+		route "off" "gemini-2.5-flash"
+		route "minimal" "gemini-2.5-flash-thinking"
+		route "low" "gemini-2.5-flash-thinking"
+		route "medium" "gemini-2.5-flash-thinking"
+		route "high" "gemini-2.5-flash-thinking"
+		mode "budget"
+		efforts "minimal" "low" "medium" "high"
+		preserve-absent-effort-routes #true
+	}
+	variant-family "google-gemini-cli" "gemini-3.6-flash" name="Gemini 3.6 Flash" {
+		members "gemini-3.6-flash-low" "gemini-3.6-flash-medium" "gemini-3.6-flash-high" "gemini-3.6-flash-tiered"
+		route "minimal" "gemini-3.6-flash-low"
+		route "low" "gemini-3.6-flash-low"
+		route "medium" "gemini-3.6-flash-medium"
+		route "high" "gemini-3.6-flash-high"
+		mode "google-level"
+		efforts "minimal" "low" "medium" "high"
+		requires-effort #true
+	}
+	variant-family "google-gemini-cli" "gemini-3.7-flash" name="Gemini 3.7 Flash" {
+		members "gemini-3.7-flash-low" "gemini-3.7-flash-medium" "gemini-3.7-flash-high" "gemini-3.7-flash-tiered"
+		route "minimal" "gemini-3.7-flash-low"
+		route "low" "gemini-3.7-flash-low"
+		route "medium" "gemini-3.7-flash-medium"
+		route "high" "gemini-3.7-flash-high"
+		mode "google-level"
+		efforts "minimal" "low" "medium" "high"
+		requires-effort #true
+	}
+	variant-family "google-gemini-cli" "gemini-3.5-flash" name="Gemini 3.5 Flash" {
+		members "gemini-3.5-flash-extra-low" "gemini-3.5-flash-low" "gemini-3-flash-agent"
+		route "off" "gemini-3.5-flash-extra-low"
+		route "minimal" "gemini-3-flash-agent"
+		route "low" "gemini-3.5-flash-extra-low"
+		route "medium" "gemini-3.5-flash-extra-low"
+		route "high" "gemini-3.5-flash-low"
+		mode "google-level"
+		efforts "minimal" "low" "medium" "high"
+		aliases "gemini-3-flash"
+		suppress-when-off #true
+	}
+	variant-family "google-gemini-cli" "gemini-3.1-pro" name="Gemini 3.1 Pro" {
+		members "gemini-3.1-pro-low" "gemini-pro-agent" "gemini-3.1-pro-high"
+		route "off" "gemini-3.1-pro-low"
+		route "low" "gemini-3.1-pro-low"
+		route "high" "gemini-pro-agent"
+		mode "google-level"
+		efforts "low" "high"
+		retired "gemini-3.1-pro-high"
+		suppress-when-off #true
+	}
+	variant-family "google-gemini-cli" "gemini-3-pro" name="Gemini 3 Pro" {
+		members "gemini-3-pro-low" "gemini-3-pro-high"
+		route "off" "gemini-3-pro-low"
+		route "low" "gemini-3-pro-low"
+		route "high" "gemini-3-pro-high"
+		mode "google-level"
+		efforts "low" "high"
+		suppress-when-off #true
+	}
+	variant-family "google-gemini-cli" "gpt-oss-120b" name="GPT-OSS 120B" {
+		members "gpt-oss-120b-medium"
+		mode "budget"
+		efforts "minimal" "low" "medium" "high"
+	}
+	variant-family "google-gemini-cli" "claude-sonnet-4-6" name="Claude Sonnet 4.6" {
+		members "claude-sonnet-4-6" "claude-sonnet-4-6-thinking"
+		mode "budget"
+		efforts "minimal" "low" "medium" "high"
+		retired "claude-sonnet-4-6-thinking"
+	}
+	variant-family "google-gemini-cli" "claude-opus-4-6" name="Claude Opus 4.6" {
+		members "claude-opus-4-6-thinking" "claude-opus-4-6"
+		mode "budget"
+		efforts "minimal" "low" "medium" "high"
+		retired "claude-opus-4-6"
+	}
+	variant-family "google-gemini-cli" "claude-sonnet-4-5" name="Claude Sonnet 4.5" {
+		members "claude-sonnet-4-5" "claude-sonnet-4-5-thinking"
+		route "off" "claude-sonnet-4-5"
+		route "minimal" "claude-sonnet-4-5-thinking"
+		route "low" "claude-sonnet-4-5-thinking"
+		route "medium" "claude-sonnet-4-5-thinking"
+		route "high" "claude-sonnet-4-5-thinking"
+		mode "budget"
+		efforts "minimal" "low" "medium" "high"
+		preserve-absent-effort-routes #true
+	}
+	variant-family "google-gemini-cli" "claude-opus-4-5" name="Claude Opus 4.5" {
+		members "claude-opus-4-5" "claude-opus-4-5-thinking"
+		route "off" "claude-opus-4-5"
+		route "minimal" "claude-opus-4-5-thinking"
+		route "low" "claude-opus-4-5-thinking"
+		route "medium" "claude-opus-4-5-thinking"
+		route "high" "claude-opus-4-5-thinking"
+		mode "budget"
+		efforts "minimal" "low" "medium" "high"
+		preserve-absent-effort-routes #true
+	}
+	variant-family "google-gemini-cli" "gemini-2.5-flash" name="Gemini 2.5 Flash" {
+		members "gemini-2.5-flash" "gemini-2.5-flash-thinking"
+		route "off" "gemini-2.5-flash"
+		route "minimal" "gemini-2.5-flash-thinking"
+		route "low" "gemini-2.5-flash-thinking"
+		route "medium" "gemini-2.5-flash-thinking"
+		route "high" "gemini-2.5-flash-thinking"
+		mode "budget"
+		efforts "minimal" "low" "medium" "high"
+		preserve-absent-effort-routes #true
+	}
+	variant-family "devin" "claude-opus-5" name="Claude Opus 5" {
+		members "claude-opus-5-low" "claude-opus-5-medium" "claude-opus-5-high" "claude-opus-5-xhigh" "claude-opus-5-max"
+		route "low" "claude-opus-5-low"
+		route "medium" "claude-opus-5-medium"
+		route "high" "claude-opus-5-high"
+		route "xhigh" "claude-opus-5-xhigh"
+		route "max" "claude-opus-5-max"
+		mode "effort"
+		efforts "low" "medium" "high" "xhigh" "max"
+		requires-effort #true
+	}
+	variant-family "devin" "claude-opus-5-fast" name="Claude Opus 5 Fast" {
+		members "claude-opus-5-low-fast" "claude-opus-5-medium-fast" "claude-opus-5-high-fast" "claude-opus-5-xhigh-fast" "claude-opus-5-max-fast"
+		route "low" "claude-opus-5-low-fast"
+		route "medium" "claude-opus-5-medium-fast"
+		route "high" "claude-opus-5-high-fast"
+		route "xhigh" "claude-opus-5-xhigh-fast"
+		route "max" "claude-opus-5-max-fast"
+		mode "effort"
+		efforts "low" "medium" "high" "xhigh" "max"
+		requires-effort #true
+	}
+	variant-family "devin" "claude-fable-5" name="Claude Fable 5" {
+		members "claude-5-fable-low" "claude-5-fable-medium" "claude-5-fable-high" "claude-5-fable-xhigh" "claude-5-fable-max"
+		route "low" "claude-5-fable-low"
+		route "medium" "claude-5-fable-medium"
+		route "high" "claude-5-fable-high"
+		route "xhigh" "claude-5-fable-xhigh"
+		route "max" "claude-5-fable-max"
+		mode "effort"
+		efforts "low" "medium" "high" "xhigh" "max"
+		requires-effort #true
+	}
+	variant-family "devin" "claude-sonnet-5" name="Claude Sonnet 5" {
+		members "claude-sonnet-5-low" "claude-sonnet-5-medium" "claude-sonnet-5-high" "claude-sonnet-5-xhigh" "claude-sonnet-5-max"
+		route "low" "claude-sonnet-5-low"
+		route "medium" "claude-sonnet-5-medium"
+		route "high" "claude-sonnet-5-high"
+		route "xhigh" "claude-sonnet-5-xhigh"
+		route "max" "claude-sonnet-5-max"
+		mode "effort"
+		efforts "low" "medium" "high" "xhigh" "max"
+		requires-effort #true
+	}
+	variant-family "devin" "claude-opus-4-7" name="Claude Opus 4.7" {
+		members "claude-opus-4-7-low" "claude-opus-4-7-medium" "claude-opus-4-7-high" "claude-opus-4-7-xhigh" "claude-opus-4-7-max"
+		route "low" "claude-opus-4-7-low"
+		route "medium" "claude-opus-4-7-medium"
+		route "high" "claude-opus-4-7-high"
+		route "xhigh" "claude-opus-4-7-xhigh"
+		route "max" "claude-opus-4-7-max"
+		mode "effort"
+		efforts "low" "medium" "high" "xhigh" "max"
+		requires-effort #true
+	}
+	variant-family "devin" "claude-opus-4-7-fast" name="Claude Opus 4.7 Fast" {
+		members "claude-opus-4-7-low-fast" "claude-opus-4-7-medium-fast" "claude-opus-4-7-high-fast" "claude-opus-4-7-xhigh-fast" "claude-opus-4-7-max-fast"
+		route "low" "claude-opus-4-7-low-fast"
+		route "medium" "claude-opus-4-7-medium-fast"
+		route "high" "claude-opus-4-7-high-fast"
+		route "xhigh" "claude-opus-4-7-xhigh-fast"
+		route "max" "claude-opus-4-7-max-fast"
+		mode "effort"
+		efforts "low" "medium" "high" "xhigh" "max"
+		requires-effort #true
+	}
+	variant-family "devin" "claude-opus-4-8" name="Claude Opus 4.8" {
+		members "claude-opus-4-8-low" "claude-opus-4-8-medium" "claude-opus-4-8-high" "claude-opus-4-8-xhigh" "claude-opus-4-8-max"
+		route "low" "claude-opus-4-8-low"
+		route "medium" "claude-opus-4-8-medium"
+		route "high" "claude-opus-4-8-high"
+		route "xhigh" "claude-opus-4-8-xhigh"
+		route "max" "claude-opus-4-8-max"
+		mode "effort"
+		efforts "low" "medium" "high" "xhigh" "max"
+		requires-effort #true
+	}
+	variant-family "devin" "claude-opus-4-8-fast" name="Claude Opus 4.8 Fast" {
+		members "claude-opus-4-8-low-fast" "claude-opus-4-8-medium-fast" "claude-opus-4-8-high-fast" "claude-opus-4-8-xhigh-fast" "claude-opus-4-8-max-fast"
+		route "low" "claude-opus-4-8-low-fast"
+		route "medium" "claude-opus-4-8-medium-fast"
+		route "high" "claude-opus-4-8-high-fast"
+		route "xhigh" "claude-opus-4-8-xhigh-fast"
+		route "max" "claude-opus-4-8-max-fast"
+		mode "effort"
+		efforts "low" "medium" "high" "xhigh" "max"
+		requires-effort #true
+	}
+	variant-family "devin" "gpt-5-2" name="GPT-5.2" {
+		members "MODEL_GPT_5_2_NONE" "MODEL_GPT_5_2_LOW" "MODEL_GPT_5_2_MEDIUM" "MODEL_GPT_5_2_HIGH" "MODEL_GPT_5_2_XHIGH"
+		route "off" "MODEL_GPT_5_2_NONE"
+		route "low" "MODEL_GPT_5_2_LOW"
+		route "medium" "MODEL_GPT_5_2_MEDIUM"
+		route "high" "MODEL_GPT_5_2_HIGH"
+		route "xhigh" "MODEL_GPT_5_2_XHIGH"
+		mode "effort"
+		efforts "low" "medium" "high" "xhigh"
+	}
+	variant-family "devin" "gpt-5-3-codex" name="GPT-5.3 Codex" {
+		members "gpt-5-3-codex-low" "gpt-5-3-codex-medium" "gpt-5-3-codex-high" "gpt-5-3-codex-xhigh"
+		route "low" "gpt-5-3-codex-low"
+		route "medium" "gpt-5-3-codex-medium"
+		route "high" "gpt-5-3-codex-high"
+		route "xhigh" "gpt-5-3-codex-xhigh"
+		mode "effort"
+		efforts "low" "medium" "high" "xhigh"
+		requires-effort #true
+	}
+	variant-family "devin" "gpt-5-3-codex-fast" name="GPT-5.3 Codex Fast" {
+		members "gpt-5-3-codex-low-priority" "gpt-5-3-codex-medium-priority" "gpt-5-3-codex-high-priority" "gpt-5-3-codex-xhigh-priority"
+		route "low" "gpt-5-3-codex-low-priority"
+		route "medium" "gpt-5-3-codex-medium-priority"
+		route "high" "gpt-5-3-codex-high-priority"
+		route "xhigh" "gpt-5-3-codex-xhigh-priority"
+		mode "effort"
+		efforts "low" "medium" "high" "xhigh"
+		requires-effort #true
+	}
+	variant-family "devin" "gpt-5-4" name="GPT-5.4" {
+		members "gpt-5-4-none" "gpt-5-4-low" "gpt-5-4-medium" "gpt-5-4-high" "gpt-5-4-xhigh"
+		route "off" "gpt-5-4-none"
+		route "low" "gpt-5-4-low"
+		route "medium" "gpt-5-4-medium"
+		route "high" "gpt-5-4-high"
+		route "xhigh" "gpt-5-4-xhigh"
+		mode "effort"
+		efforts "low" "medium" "high" "xhigh"
+	}
+	variant-family "devin" "gpt-5-4-fast" name="GPT-5.4 Fast" {
+		members "gpt-5-4-none-priority" "gpt-5-4-low-priority" "gpt-5-4-medium-priority" "gpt-5-4-high-priority" "gpt-5-4-xhigh-priority"
+		route "off" "gpt-5-4-none-priority"
+		route "low" "gpt-5-4-low-priority"
+		route "medium" "gpt-5-4-medium-priority"
+		route "high" "gpt-5-4-high-priority"
+		route "xhigh" "gpt-5-4-xhigh-priority"
+		mode "effort"
+		efforts "low" "medium" "high" "xhigh"
+	}
+	variant-family "devin" "gpt-5-4-mini" name="GPT-5.4 Mini" {
+		members "gpt-5-4-mini-low" "gpt-5-4-mini-medium" "gpt-5-4-mini-high" "gpt-5-4-mini-xhigh"
+		route "low" "gpt-5-4-mini-low"
+		route "medium" "gpt-5-4-mini-medium"
+		route "high" "gpt-5-4-mini-high"
+		route "xhigh" "gpt-5-4-mini-xhigh"
+		mode "effort"
+		efforts "low" "medium" "high" "xhigh"
+		requires-effort #true
+	}
+	variant-family "devin" "gpt-5-5" name="GPT-5.5" {
+		members "gpt-5-5-none" "gpt-5-5-low" "gpt-5-5-medium" "gpt-5-5-high" "gpt-5-5-xhigh"
+		route "off" "gpt-5-5-none"
+		route "low" "gpt-5-5-low"
+		route "medium" "gpt-5-5-medium"
+		route "high" "gpt-5-5-high"
+		route "xhigh" "gpt-5-5-xhigh"
+		mode "effort"
+		efforts "low" "medium" "high" "xhigh"
+	}
+	variant-family "devin" "gpt-5-5-fast" name="GPT-5.5 Fast" {
+		members "gpt-5-5-none-priority" "gpt-5-5-low-priority" "gpt-5-5-medium-priority" "gpt-5-5-high-priority" "gpt-5-5-xhigh-priority"
+		route "off" "gpt-5-5-none-priority"
+		route "low" "gpt-5-5-low-priority"
+		route "medium" "gpt-5-5-medium-priority"
+		route "high" "gpt-5-5-high-priority"
+		route "xhigh" "gpt-5-5-xhigh-priority"
+		mode "effort"
+		efforts "low" "medium" "high" "xhigh"
+	}
+	variant-family "devin" "gpt-5-6-luna" name="GPT-5.6 Luna" {
+		members "gpt-5-6-luna-none" "gpt-5-6-luna-low" "gpt-5-6-luna-medium" "gpt-5-6-luna-high" "gpt-5-6-luna-xhigh" "gpt-5-6-luna-max"
+		route "off" "gpt-5-6-luna-none"
+		route "low" "gpt-5-6-luna-low"
+		route "medium" "gpt-5-6-luna-medium"
+		route "high" "gpt-5-6-luna-high"
+		route "xhigh" "gpt-5-6-luna-xhigh"
+		route "max" "gpt-5-6-luna-max"
+		mode "effort"
+		efforts "low" "medium" "high" "xhigh" "max"
+	}
+	variant-family "devin" "gpt-5-6-luna-fast" name="GPT-5.6 Luna Fast" {
+		members "gpt-5-6-luna-none-priority" "gpt-5-6-luna-low-priority" "gpt-5-6-luna-medium-priority" "gpt-5-6-luna-high-priority" "gpt-5-6-luna-xhigh-priority" "gpt-5-6-luna-max-priority"
+		route "off" "gpt-5-6-luna-none-priority"
+		route "low" "gpt-5-6-luna-low-priority"
+		route "medium" "gpt-5-6-luna-medium-priority"
+		route "high" "gpt-5-6-luna-high-priority"
+		route "xhigh" "gpt-5-6-luna-xhigh-priority"
+		route "max" "gpt-5-6-luna-max-priority"
+		mode "effort"
+		efforts "low" "medium" "high" "xhigh" "max"
+	}
+	variant-family "devin" "gpt-5-6-sol" name="GPT-5.6 Sol" {
+		members "gpt-5-6-sol-none" "gpt-5-6-sol-low" "gpt-5-6-sol-medium" "gpt-5-6-sol-high" "gpt-5-6-sol-xhigh" "gpt-5-6-sol-max"
+		route "off" "gpt-5-6-sol-none"
+		route "low" "gpt-5-6-sol-low"
+		route "medium" "gpt-5-6-sol-medium"
+		route "high" "gpt-5-6-sol-high"
+		route "xhigh" "gpt-5-6-sol-xhigh"
+		route "max" "gpt-5-6-sol-max"
+		mode "effort"
+		efforts "low" "medium" "high" "xhigh" "max"
+	}
+	variant-family "devin" "gpt-5-6-sol-fast" name="GPT-5.6 Sol Fast" {
+		members "gpt-5-6-sol-none-priority" "gpt-5-6-sol-low-priority" "gpt-5-6-sol-medium-priority" "gpt-5-6-sol-high-priority" "gpt-5-6-sol-xhigh-priority" "gpt-5-6-sol-max-priority"
+		route "off" "gpt-5-6-sol-none-priority"
+		route "low" "gpt-5-6-sol-low-priority"
+		route "medium" "gpt-5-6-sol-medium-priority"
+		route "high" "gpt-5-6-sol-high-priority"
+		route "xhigh" "gpt-5-6-sol-xhigh-priority"
+		route "max" "gpt-5-6-sol-max-priority"
+		mode "effort"
+		efforts "low" "medium" "high" "xhigh" "max"
+	}
+	variant-family "devin" "gpt-5-6-terra" name="GPT-5.6 Terra" {
+		members "gpt-5-6-terra-none" "gpt-5-6-terra-low" "gpt-5-6-terra-medium" "gpt-5-6-terra-high" "gpt-5-6-terra-xhigh" "gpt-5-6-terra-max"
+		route "off" "gpt-5-6-terra-none"
+		route "low" "gpt-5-6-terra-low"
+		route "medium" "gpt-5-6-terra-medium"
+		route "high" "gpt-5-6-terra-high"
+		route "xhigh" "gpt-5-6-terra-xhigh"
+		route "max" "gpt-5-6-terra-max"
+		mode "effort"
+		efforts "low" "medium" "high" "xhigh" "max"
+	}
+	variant-family "devin" "gpt-5-6-terra-fast" name="GPT-5.6 Terra Fast" {
+		members "gpt-5-6-terra-none-priority" "gpt-5-6-terra-low-priority" "gpt-5-6-terra-medium-priority" "gpt-5-6-terra-high-priority" "gpt-5-6-terra-xhigh-priority" "gpt-5-6-terra-max-priority"
+		route "off" "gpt-5-6-terra-none-priority"
+		route "low" "gpt-5-6-terra-low-priority"
+		route "medium" "gpt-5-6-terra-medium-priority"
+		route "high" "gpt-5-6-terra-high-priority"
+		route "xhigh" "gpt-5-6-terra-xhigh-priority"
+		route "max" "gpt-5-6-terra-max-priority"
+		mode "effort"
+		efforts "low" "medium" "high" "xhigh" "max"
+	}
+	variant-family "devin" "kimi-k3" name="Kimi K3" {
+		members "kimi-k3-low" "kimi-k3-high" "kimi-k3-max"
+		route "low" "kimi-k3-low"
+		route "high" "kimi-k3-high"
+		route "max" "kimi-k3-max"
+		mode "effort"
+		efforts "low" "high" "max"
+		requires-effort #true
+	}
+	variant-family "devin" "swe-1-7" name="SWE-1.7" {
+		members "swe-1-7-medium" "swe-1-7"
+		route "medium" "swe-1-7-medium"
+		route "max" "swe-1-7"
+		mode "effort"
+		efforts "medium" "max"
+		requires-effort #true
+	}
+	variant-family "devin" "grok-4-5" name="Grok 4.5" {
+		members "grok-4-5-low" "grok-4-5-medium" "grok-4-5-high"
+		route "low" "grok-4-5-low"
+		route "medium" "grok-4-5-medium"
+		route "high" "grok-4-5-high"
+		mode "effort"
+		efforts "low" "medium" "high"
+		requires-effort #true
+	}
+	variant-family "devin" "inkling" name="Inkling" {
+		members "inkling-none" "inkling-low" "inkling-medium" "inkling-high" "inkling-xhigh" "inkling-max"
+		route "off" "inkling-none"
+		route "low" "inkling-low"
+		route "medium" "inkling-medium"
+		route "high" "inkling-high"
+		route "xhigh" "inkling-xhigh"
+		route "max" "inkling-max"
+		mode "effort"
+		efforts "low" "medium" "high" "xhigh" "max"
+	}
+	variant-family "devin" "gemini-3-1-pro" name="Gemini 3.1 Pro" {
+		members "gemini-3-1-pro-low" "gemini-3-1-pro-high"
+		route "low" "gemini-3-1-pro-low"
+		route "high" "gemini-3-1-pro-high"
+		mode "effort"
+		efforts "low" "high"
+		requires-effort #true
+	}
+	variant-family "devin" "gemini-3-5-flash" name="Gemini 3.5 Flash" {
+		members "gemini-3-5-flash-minimal" "gemini-3-5-flash-low" "gemini-3-5-flash-medium" "gemini-3-5-flash-high"
+		route "minimal" "gemini-3-5-flash-minimal"
+		route "low" "gemini-3-5-flash-low"
+		route "medium" "gemini-3-5-flash-medium"
+		route "high" "gemini-3-5-flash-high"
+		mode "effort"
+		efforts "minimal" "low" "medium" "high"
+		requires-effort #true
+	}
+	variant-family "devin" "gemini-3-6-flash" name="Gemini 3.6 Flash" {
+		members "gemini-3-6-flash-minimal" "gemini-3-6-flash-low" "gemini-3-6-flash-medium" "gemini-3-6-flash-high"
+		route "minimal" "gemini-3-6-flash-minimal"
+		route "low" "gemini-3-6-flash-low"
+		route "medium" "gemini-3-6-flash-medium"
+		route "high" "gemini-3-6-flash-high"
+		mode "effort"
+		efforts "minimal" "low" "medium" "high"
+		requires-effort #true
+	}
+	variant-family "devin" "gemini-3-flash" name="Gemini 3 Flash" {
+		members "MODEL_GOOGLE_GEMINI_3_0_FLASH_MINIMAL" "MODEL_GOOGLE_GEMINI_3_0_FLASH_LOW" "MODEL_GOOGLE_GEMINI_3_0_FLASH_MEDIUM" "MODEL_GOOGLE_GEMINI_3_0_FLASH_HIGH"
+		route "minimal" "MODEL_GOOGLE_GEMINI_3_0_FLASH_MINIMAL"
+		route "low" "MODEL_GOOGLE_GEMINI_3_0_FLASH_LOW"
+		route "medium" "MODEL_GOOGLE_GEMINI_3_0_FLASH_MEDIUM"
+		route "high" "MODEL_GOOGLE_GEMINI_3_0_FLASH_HIGH"
+		mode "effort"
+		efforts "minimal" "low" "medium" "high"
+		requires-effort #true
+	}
+	variant-family "devin" "glm-5-2" name="GLM-5.2" {
+		members "glm-5-2" "glm-5-2-none" "glm-5-2-max"
+		route "high" "glm-5-2"
+		route "xhigh" "glm-5-2"
+		mode "effort"
+		efforts "high" "xhigh"
+		requires-effort #true
+	}
+	variant-family "devin" "glm-5-2-1m" name="GLM-5.2 1M" {
+		members "glm-5-2-none-1m" "glm-5-2-1m" "glm-5-2-max-1m"
+		route "off" "glm-5-2-none-1m"
+		route "high" "glm-5-2-1m"
+		route "xhigh" "glm-5-2-max-1m"
+		mode "effort"
+		efforts "high" "xhigh"
+	}
+	variant-family "devin" "gemini-3-7-flash" name="Gemini 3.7 Flash" {
+		members "gemini-3-7-flash-medium" "gemini-3-7-flash-minimal" "gemini-3-7-flash-low" "gemini-3-7-flash-high"
+		route "minimal" "gemini-3-7-flash-minimal"
+		route "low" "gemini-3-7-flash-low"
+		route "medium" "gemini-3-7-flash-medium"
+		route "high" "gemini-3-7-flash-high"
+		mode "effort"
+		efforts "minimal" "low" "medium" "high"
+		default-level "medium"
+		requires-effort #true
+		default-member "gemini-3-7-flash-medium"
+	}
+	variant-family "devin" "swe-1-7-lightning" name="SWE-1.7 Lightning" {
+		members "swe-1-7-lightning-medium" "swe-1-7-lightning"
+		route "medium" "swe-1-7-lightning-medium"
+		route "max" "swe-1-7-lightning"
+		mode "effort"
+		efforts "medium" "max"
+		default-level "medium"
+		requires-effort #true
+		default-member "swe-1-7-lightning-medium"
+	}
+	variant-family "devin" "grok-4-6" name="Grok 4.6" {
+		members "grok-4-6-medium" "grok-4-6-low" "grok-4-6-high" "grok-4-6-xhigh"
+		route "low" "grok-4-6-low"
+		route "medium" "grok-4-6-medium"
+		route "high" "grok-4-6-high"
+		route "xhigh" "grok-4-6-xhigh"
+		mode "effort"
+		efforts "low" "medium" "high" "xhigh"
+		default-level "medium"
+		requires-effort #true
+		default-member "grok-4-6-medium"
+	}
+	variant-family "devin" "deepseek-v4-flash" name="DeepSeek V4 Flash" {
+		members "deepseek-v4-flash-high" "deepseek-v4-flash-low" "deepseek-v4-flash-max"
+		route "low" "deepseek-v4-flash-low"
+		route "high" "deepseek-v4-flash-high"
+		route "max" "deepseek-v4-flash-max"
+		mode "effort"
+		efforts "low" "high" "max"
+		default-level "high"
+		requires-effort #true
+		default-member "deepseek-v4-flash-high"
+	}
+	variant-family "devin" "deepseek-v4-pro" name="DeepSeek V4 Pro" {
+		members "deepseek-v4-pro-high" "deepseek-v4-pro-low" "deepseek-v4-pro-max"
+		route "low" "deepseek-v4-pro-low"
+		route "high" "deepseek-v4-pro-high"
+		route "max" "deepseek-v4-pro-max"
+		mode "effort"
+		efforts "low" "high" "max"
+		default-level "high"
+		requires-effort #true
+		default-member "deepseek-v4-pro-high"
+	}
+	variant-family "devin" "nemotron-3-ultra" name="Nemotron 3 Ultra" {
+		members "nemotron-3-ultra-high" "nemotron-3-ultra-none" "nemotron-3-ultra-medium"
+		route "off" "nemotron-3-ultra-none"
+		route "medium" "nemotron-3-ultra-medium"
+		route "high" "nemotron-3-ultra-high"
+		mode "effort"
+		efforts "medium" "high"
+		default-level "high"
+		default-member "nemotron-3-ultra-high"
+	}
+	variant-family "devin" "claude-haiku-4-5" name="Claude Haiku 4.5" {
+		members "MODEL_PRIVATE_11"
+		no-thinking #true
+	}
+	provider-alias "devin" "claude" "claude-sonnet-5"
+	provider-alias "devin" "codex" "gpt-5-3-codex"
+	provider-alias "devin" "gemini" "gemini-3-7-flash"
+	provider-alias "devin" "gpt" "gpt-5-6-terra"
+	provider-alias "devin" "haiku" "claude-haiku-4-5"
+	provider-alias "devin" "opus" "claude-opus-5"
+	provider-alias "devin" "sonnet" "claude-sonnet-5"
+	provider-alias "devin" "swe" "swe-1-7-lightning"
+	provider-alias "devin" "claude-haiku-4.5" "claude-haiku-4-5"
+	provider-alias "devin" "gemini-3.7-flash" "gemini-3-7-flash"
+	provider-alias "devin" "glm-5.2" "glm-5-2"
+	provider-alias "devin" "gpt-5.6-luna" "gpt-5-6-luna"
+	provider-alias "devin" "gpt-5.6-sol" "gpt-5-6-sol"
+	provider-alias "devin" "gpt-5.6-terra" "gpt-5-6-terra"
+	provider-alias "devin" "grok-4.6" "grok-4-6"
+	provider-alias "devin" "swe-1.7" "swe-1-7"
+	provider-alias "devin" "swe-1.7-lightning" "swe-1-7-lightning"
+	variant-family "cursor" "cursor-grok-4.5" name="Grok 4.5" {
+		members "cursor-grok-4.5-low" "cursor-grok-4.5-medium" "cursor-grok-4.5-high"
+		route "low" "cursor-grok-4.5-low"
+		route "medium" "cursor-grok-4.5-medium"
+		route "high" "cursor-grok-4.5-high"
+		mode "effort"
+		efforts "low" "medium" "high"
+		requires-effort #true
+		default-member "cursor-grok-4.5-medium"
+	}
+	variant-family "cursor" "cursor-grok-4.5-fast" name="Grok 4.5 Fast" {
+		members "cursor-grok-4.5-low-fast" "cursor-grok-4.5-medium-fast" "cursor-grok-4.5-high-fast"
+		route "low" "cursor-grok-4.5-low-fast"
+		route "medium" "cursor-grok-4.5-medium-fast"
+		route "high" "cursor-grok-4.5-high-fast"
+		mode "effort"
+		efforts "low" "medium" "high"
+		requires-effort #true
+		default-member "cursor-grok-4.5-medium-fast"
+	}
+	variant-family "cursor" "cursor-grok-4.6" name="Grok 4.6" {
+		members "cursor-grok-4.6-low" "cursor-grok-4.6-medium" "cursor-grok-4.6-high" "cursor-grok-4.6-xhigh"
+		route "low" "cursor-grok-4.6-low"
+		route "medium" "cursor-grok-4.6-medium"
+		route "high" "cursor-grok-4.6-high"
+		route "xhigh" "cursor-grok-4.6-xhigh"
+		mode "effort"
+		efforts "low" "medium" "high" "xhigh"
+		requires-effort #true
+		default-member "cursor-grok-4.6-medium"
+	}
+	variant-family "cursor" "cursor-grok-4.6-fast" name="Grok 4.6 Fast" {
+		members "cursor-grok-4.6-low-fast" "cursor-grok-4.6-medium-fast" "cursor-grok-4.6-high-fast" "cursor-grok-4.6-xhigh-fast"
+		route "low" "cursor-grok-4.6-low-fast"
+		route "medium" "cursor-grok-4.6-medium-fast"
+		route "high" "cursor-grok-4.6-high-fast"
+		route "xhigh" "cursor-grok-4.6-xhigh-fast"
+		mode "effort"
+		efforts "low" "medium" "high" "xhigh"
+		requires-effort #true
+		default-member "cursor-grok-4.6-medium-fast"
+	}
+	variant-family "cursor" "gpt-5.6-luna" name="GPT-5.6 Luna" {
+		members "gpt-5.6-luna-none" "gpt-5.6-luna-low" "gpt-5.6-luna-medium" "gpt-5.6-luna-high" "gpt-5.6-luna-xhigh" "gpt-5.6-luna-max"
+		route "off" "gpt-5.6-luna-none"
+		route "low" "gpt-5.6-luna-low"
+		route "medium" "gpt-5.6-luna-medium"
+		route "high" "gpt-5.6-luna-high"
+		route "xhigh" "gpt-5.6-luna-xhigh"
+		route "max" "gpt-5.6-luna-max"
+		mode "effort"
+		efforts "low" "medium" "high" "xhigh" "max"
+	}
+	variant-family "cursor" "gpt-5.6-luna-fast" name="GPT-5.6 Luna Fast" {
+		members "gpt-5.6-luna-none-fast" "gpt-5.6-luna-low-fast" "gpt-5.6-luna-medium-fast" "gpt-5.6-luna-high-fast" "gpt-5.6-luna-xhigh-fast" "gpt-5.6-luna-max-fast"
+		route "off" "gpt-5.6-luna-none-fast"
+		route "low" "gpt-5.6-luna-low-fast"
+		route "medium" "gpt-5.6-luna-medium-fast"
+		route "high" "gpt-5.6-luna-high-fast"
+		route "xhigh" "gpt-5.6-luna-xhigh-fast"
+		route "max" "gpt-5.6-luna-max-fast"
+		mode "effort"
+		efforts "low" "medium" "high" "xhigh" "max"
+	}
+	variant-family "cursor" "gpt-5.6-sol" name="GPT-5.6 Sol" {
+		members "gpt-5.6-sol-none" "gpt-5.6-sol-low" "gpt-5.6-sol-medium" "gpt-5.6-sol-high" "gpt-5.6-sol-xhigh" "gpt-5.6-sol-max"
+		route "off" "gpt-5.6-sol-none"
+		route "low" "gpt-5.6-sol-low"
+		route "medium" "gpt-5.6-sol-medium"
+		route "high" "gpt-5.6-sol-high"
+		route "xhigh" "gpt-5.6-sol-xhigh"
+		route "max" "gpt-5.6-sol-max"
+		mode "effort"
+		efforts "low" "medium" "high" "xhigh" "max"
+	}
+	variant-family "cursor" "gpt-5.6-sol-fast" name="GPT-5.6 Sol Fast" {
+		members "gpt-5.6-sol-none-fast" "gpt-5.6-sol-low-fast" "gpt-5.6-sol-medium-fast" "gpt-5.6-sol-high-fast" "gpt-5.6-sol-xhigh-fast" "gpt-5.6-sol-max-fast"
+		route "off" "gpt-5.6-sol-none-fast"
+		route "low" "gpt-5.6-sol-low-fast"
+		route "medium" "gpt-5.6-sol-medium-fast"
+		route "high" "gpt-5.6-sol-high-fast"
+		route "xhigh" "gpt-5.6-sol-xhigh-fast"
+		route "max" "gpt-5.6-sol-max-fast"
+		mode "effort"
+		efforts "low" "medium" "high" "xhigh" "max"
+	}
+	variant-family "cursor" "gpt-5.6-terra" name="GPT-5.6 Terra" {
+		members "gpt-5.6-terra-none" "gpt-5.6-terra-low" "gpt-5.6-terra-medium" "gpt-5.6-terra-high" "gpt-5.6-terra-xhigh" "gpt-5.6-terra-max"
+		route "off" "gpt-5.6-terra-none"
+		route "low" "gpt-5.6-terra-low"
+		route "medium" "gpt-5.6-terra-medium"
+		route "high" "gpt-5.6-terra-high"
+		route "xhigh" "gpt-5.6-terra-xhigh"
+		route "max" "gpt-5.6-terra-max"
+		mode "effort"
+		efforts "low" "medium" "high" "xhigh" "max"
+	}
+	variant-family "cursor" "gpt-5.6-terra-fast" name="GPT-5.6 Terra Fast" {
+		members "gpt-5.6-terra-none-fast" "gpt-5.6-terra-low-fast" "gpt-5.6-terra-medium-fast" "gpt-5.6-terra-high-fast" "gpt-5.6-terra-xhigh-fast" "gpt-5.6-terra-max-fast"
+		route "off" "gpt-5.6-terra-none-fast"
+		route "low" "gpt-5.6-terra-low-fast"
+		route "medium" "gpt-5.6-terra-medium-fast"
+		route "high" "gpt-5.6-terra-high-fast"
+		route "xhigh" "gpt-5.6-terra-xhigh-fast"
+		route "max" "gpt-5.6-terra-max-fast"
+		mode "effort"
+		efforts "low" "medium" "high" "xhigh" "max"
+	}
+}

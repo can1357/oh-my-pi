@@ -414,6 +414,14 @@ export interface CredentialRankingStrategy {
 		primaryMs: number;
 		secondaryMs: number;
 	};
-	/** Optional: priority boost for specific credential states (e.g., fresh 5h ticker start). */
-	hasPriorityBoost?(primary: UsageLimit | undefined): boolean;
+	/**
+	 * Optional: priority boost for specific credential states (e.g., fresh 5h
+	 * ticker start). `primaryUncapped` is true only when the fetched report has
+	 * an applicable secondary window but no applicable primary window.
+	 */
+	hasPriorityBoost?(
+		primary: UsageLimit | undefined,
+		primaryUncapped?: boolean,
+		context?: CredentialRankingContext,
+	): boolean;
 }

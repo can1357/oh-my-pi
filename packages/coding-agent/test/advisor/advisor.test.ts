@@ -8,6 +8,7 @@ import type { TUI } from "@oh-my-pi/pi-tui";
 import {
 	AdviseTool,
 	type AdvisorAgent,
+	AdvisorEmissionGuard,
 	type AdvisorNote,
 	AdvisorOutputQuarantinedError,
 	AdvisorRuntime,
@@ -298,6 +299,277 @@ describe("advisor", () => {
 		});
 	});
 
+	describe("formatSessionHistoryMarkdown expandToolIO", () => {
+		const askCall = {
+			role: "assistant",
+			content: [
+				{
+					type: "toolCall",
+					id: "ask-1",
+					name: "ask",
+					arguments: {
+						questions: [
+							{
+								id: "deploy",
+								question: "Authorize deployment?",
+								options: [{ label: "Yes" }, { label: "No" }],
+							},
+						],
+					},
+				},
+			],
+			timestamp: 1,
+		} as unknown as AgentMessage;
+		const askResult = {
+			role: "toolResult",
+			toolCallId: "ask-1",
+			toolName: "ask",
+			content: [{ type: "text", text: "User selected: Yes" }],
+			details: { selectedOptions: ["Yes"] },
+			isError: false,
+			timestamp: 2,
+		} as unknown as AgentMessage;
+
+		it("includes the full ask question and user answer for advisor reviews", () => {
+			const compact = formatSessionHistoryMarkdown([askCall, askResult], { watchedRoles: true });
+			const expanded = formatSessionHistoryMarkdown([askCall, askResult], {
+				watchedRoles: true,
+				expandToolIO: true,
+			});
+
+			expect(compact).not.toContain("User selected: Yes");
+			expect(expanded).toContain('"question": "Authorize deployment?"');
+			expect(expanded).toContain('"label": "Yes"');
+			expect(expanded).toContain("User selected: Yes");
+		});
+
+		it("bounds long ask questions and custom answers with visible head and tail context", () => {
+			const questionEnd = "question-at-end";
+			const answerEnd = "answer-at-end";
+			const longQuestion = {
+				...(askCall as unknown as { content: { arguments: { questions: unknown[] } }[] }),
+				content: [
+					{
+						...(askCall as unknown as { content: Record<string, unknown>[] }).content[0],
+						arguments: {
+							questions: [
+								{
+									id: "deploy",
+									question: `question-start ${"context ".repeat(1200)}${questionEnd}`,
+									options: [{ label: "Custom" }],
+								},
+							],
+						},
+					},
+				],
+			} as unknown as AgentMessage;
+			const longAnswer = {
+				...(askResult as unknown as Record<string, unknown>),
+				content: [{ type: "text", text: `answer-start ${"detail ".repeat(1200)}${answerEnd}` }],
+			} as unknown as AgentMessage;
+
+			const expanded = formatSessionHistoryMarkdown([longQuestion, longAnswer], { expandToolIO: true });
+
+			expect(expanded).toContain("question-start");
+			expect(expanded).toContain(questionEnd);
+			expect(expanded).toContain("answer-start");
+			expect(expanded).toContain(answerEnd);
+			expect(expanded.match(/elided/g)?.length).toBeGreaterThanOrEqual(2);
+			expect(Buffer.byteLength(expanded)).toBeLessThan(18 * 1024);
+		});
+
+		it("recovers questions from orphaned ask result details", () => {
+			const orphan = {
+				role: "toolResult",
+				toolCallId: "ask-orphan",
+				toolName: "ask",
+				content: [{ type: "text", text: "deploy: Yes" }],
+				details: {
+					results: [
+						{
+							id: "deploy",
+							question: "Authorize production deployment?",
+							options: ["Yes", "No"],
+							multi: false,
+							selectedOptions: ["Yes"],
+						},
+					],
+				},
+				isError: false,
+				timestamp: 2,
+			} as unknown as AgentMessage;
+
+			const expanded = formatSessionHistoryMarkdown([orphan], { expandToolIO: true });
+
+			expect(expanded).toContain("Authorize production deployment?");
+			expect(expanded).toContain("deploy: Yes");
+		});
+
+		it("bounds expanded tool results with visible head and tail context", () => {
+			const result = {
+				role: "toolResult",
+				toolCallId: "read-1",
+				toolName: "read",
+				content: [{ type: "text", text: `first\n${"middle\n".repeat(2000)}last` }],
+				isError: false,
+				timestamp: 2,
+			} as unknown as AgentMessage;
+
+			const expanded = formatSessionHistoryMarkdown([result], { expandToolIO: true });
+
+			expect(expanded).toContain("first");
+			expect(expanded).toContain("last");
+			expect(expanded).toContain("elided");
+			expect(Buffer.byteLength(expanded)).toBeLessThan(9 * 1024);
+		});
+
+		it("counts adaptive Markdown fences inside the result budget", () => {
+			const result = {
+				role: "toolResult",
+				toolCallId: "read-fence",
+				toolName: "read",
+				content: [{ type: "text", text: "`".repeat(8_000) }],
+				isError: false,
+				timestamp: 2,
+			} as unknown as AgentMessage;
+
+			const expanded = formatSessionHistoryMarkdown([result], { expandToolIO: true });
+
+			expect(expanded).toContain("Tool result:");
+			expect(Buffer.byteLength(expanded)).toBeLessThan(9 * 1024);
+		});
+
+		it("does not mark complete pathological fence content as elided", () => {
+			const result = {
+				role: "toolResult",
+				toolCallId: "read-fence-complete",
+				toolName: "read",
+				content: [{ type: "text", text: "`".repeat(3_000) }],
+				isError: false,
+				timestamp: 2,
+			} as unknown as AgentMessage;
+
+			const expanded = formatSessionHistoryMarkdown([result], { expandToolIO: true });
+
+			expect(expanded).not.toContain("elided");
+			expect(expanded).toContain("`".repeat(3_000));
+		});
+
+		it("preserves head and tail for oversized single-line results", () => {
+			const result = {
+				role: "toolResult",
+				toolCallId: "read-1",
+				toolName: "read",
+				content: [{ type: "text", text: `head-${"x".repeat(20_000)}-tail` }],
+				isError: false,
+				timestamp: 2,
+			} as unknown as AgentMessage;
+
+			const expanded = formatSessionHistoryMarkdown([result], { expandToolIO: true });
+
+			expect(expanded).toContain("head-");
+			expect(expanded).toContain("elided");
+			expect(expanded).toContain("-tail");
+			expect(Buffer.byteLength(expanded)).toBeLessThan(9 * 1024);
+		});
+
+		it("still adds its own head-tail marker when retained output contains an upstream elision marker", () => {
+			const result = {
+				role: "toolResult",
+				toolCallId: "read-1",
+				toolName: "read",
+				content: [{ type: "text", text: `head-${"x".repeat(20_000)}-[…9B elided…]-tail` }],
+				isError: false,
+				timestamp: 2,
+			} as unknown as AgentMessage;
+
+			const expanded = formatSessionHistoryMarkdown([result], { expandToolIO: true });
+
+			expect(expanded).toContain("head-");
+			expect(expanded).toContain("-tail");
+			expect(expanded.match(/elided/g)).toHaveLength(2);
+		});
+
+		it("keeps failure details alongside a partial edit diff", () => {
+			const result = {
+				role: "toolResult",
+				toolCallId: "edit-1",
+				toolName: "edit",
+				content: [{ type: "text", text: "Applied first file.\nFailed to match second file; no later edits ran." }],
+				details: { diff: "--- a/first.ts\n+++ b/first.ts\n@@\n-old\n+new" },
+				isError: true,
+				timestamp: 2,
+			} as unknown as AgentMessage;
+
+			const expanded = formatSessionHistoryMarkdown([result], {
+				expandEditDiffs: true,
+				expandToolIO: true,
+			});
+
+			expect(expanded).toContain("+++ b/first.ts");
+			expect(expanded).toContain("Failed to match second file");
+		});
+
+		it("keeps successful edit results when no textual diff was rendered", () => {
+			const result = {
+				role: "toolResult",
+				toolCallId: "edit-1",
+				toolName: "edit",
+				content: [{ type: "text", text: "Moved to src/new-name.ts" }],
+				details: { diff: "" },
+				isError: false,
+				timestamp: 2,
+			} as unknown as AgentMessage;
+
+			const expanded = formatSessionHistoryMarkdown([result], {
+				expandEditDiffs: true,
+				expandToolIO: true,
+			});
+
+			expect(expanded).toContain("Moved to src/new-name.ts");
+		});
+
+		it("keeps warnings alongside a successful edit diff", () => {
+			const result = {
+				role: "toolResult",
+				toolCallId: "edit-1",
+				toolName: "edit",
+				content: [{ type: "text", text: "[a.ts]\n-old\n+new\n\nWarnings:\nMatched ambiguous context." }],
+				details: { diff: "--- a/a.ts\n+++ b/a.ts\n@@\n-old\n+new" },
+				isError: false,
+				timestamp: 2,
+			} as unknown as AgentMessage;
+
+			const expanded = formatSessionHistoryMarkdown([result], {
+				expandEditDiffs: true,
+				expandToolIO: true,
+			});
+
+			expect(expanded).toContain("+++ b/a.ts");
+			expect(expanded).toContain("Warnings:\nMatched ambiguous context.");
+		});
+
+		it("keeps rename metadata alongside a successful edit diff", () => {
+			const result = {
+				role: "toolResult",
+				toolCallId: "edit-1",
+				toolName: "edit",
+				content: [{ type: "text", text: "[src/old.ts]\nMoved to src/new.ts\n-old\n+new" }],
+				details: { diff: "@@\n-old\n+new", move: "src/new.ts" },
+				isError: false,
+				timestamp: 2,
+			} as unknown as AgentMessage;
+
+			const expanded = formatSessionHistoryMarkdown([result], {
+				expandEditDiffs: true,
+				expandToolIO: true,
+			});
+
+			expect(expanded).toContain("@@\n-old\n+new");
+			expect(expanded).toContain("Moved to src/new.ts");
+		});
+	});
+
 	describe("advisor yield-queue dispatcher", () => {
 		it("batches advice notes into one custom message", async () => {
 			const injected: AgentMessage[] = [];
@@ -440,21 +712,24 @@ describe("advisor", () => {
 			expect(onAdvice).toHaveBeenNthCalledWith(3, note, "blocker");
 		});
 
-		it("defers non-blockers during in-progress updates and flushes them on the next completed update", async () => {
+		it("defers non-blockers per update and flushes the backlog on the next completed update", async () => {
 			const onAdvice = vi.fn();
 			const tool = new AdviseTool(onAdvice);
 			const note = "The result still needs a focused regression test.";
 
 			tool.beginUpdate(true);
 			const deferred = await tool.execute("tc-1", { note, severity: "concern" });
-			await tool.execute("tc-2", { note: "Minor naming cleanup.", severity: "nit" });
-			await tool.execute("tc-3", { note: "A destructive command is running.", severity: "blocker" });
+			await tool.execute("tc-2", { note: "A destructive command is running.", severity: "blocker" });
 
 			// Deferred notes are NOT delivered mid-turn; blocker still goes through.
 			expect(onAdvice).toHaveBeenCalledTimes(1);
 			expect(onAdvice).toHaveBeenCalledWith("A destructive command is running.", "blocker");
 			// The tool tells the advisor the note is deferred, not silently "Recorded.".
 			expect(JSON.stringify(deferred.content)).toContain("Deferred");
+
+			// A second distinct concern in a later in-progress update queues its own slot.
+			tool.beginUpdate(true);
+			await tool.execute("tc-3", { note: "Minor naming cleanup.", severity: "nit" });
 
 			// Completing the turn deterministically flushes both withheld notes,
 			// oldest first — no reliance on the advisor model re-raising them.
@@ -495,6 +770,147 @@ describe("advisor", () => {
 			tool.beginUpdate(false);
 			expect(onAdvice).toHaveBeenCalledTimes(1);
 			expect(onAdvice).toHaveBeenCalledWith("Same point raised repeatedly.", "concern");
+		});
+
+		it("flushes one deferred concern per update past the per-update emission budget on a late catch-up", async () => {
+			// Regression for #10271 ("The Advisor is Late"): in yolo mode the primary
+			// is continuously mid-turn, so the advisor runs many in-progress updates
+			// (one concern each) and the whole backlog is replayed in a single catch-up
+			// flush. Each note cleared the emission guard when it was emitted, so the
+			// flush must deliver the full backlog instead of collapsing it to one note.
+			const delivered: string[] = [];
+			const guard = new AdvisorEmissionGuard();
+			// Mirror AgentSession: accept (filter + per-update budget) runs at emission;
+			// routing never re-filters.
+			const tool = new AdviseTool(
+				note => delivered.push(note),
+				note => guard.accept(note),
+			);
+			const beginUpdate = (inProgress: boolean) => {
+				tool.beginUpdate(inProgress);
+				guard.beginUpdate();
+			};
+			const concerns = [
+				"Bare `location` cannot work outside the page; inspect with `await page.url()`.",
+				"Scope navigation to the visualizer's own `.viz-container`.",
+				'BFS uses `progressType="bar"`, so it has no `.viz-pill` controls.',
+				"Tab switching delegates from a trusted click; a dispatched KeyboardEvent is untrusted.",
+			];
+
+			// Each concern arrives in its own in-progress advisor update.
+			for (const [i, note] of concerns.entries()) {
+				beginUpdate(true);
+				await tool.execute(`c-${i}`, { note, severity: "concern" });
+			}
+			// All withheld mid-turn — nothing reaches the primary yet.
+			expect(delivered).toEqual([]);
+
+			// Turn completes: the deferred backlog flushes, oldest first, in full.
+			beginUpdate(false);
+			expect(delivered).toEqual(concerns);
+		});
+
+		it("caps a single in-progress prompt spraying distinct notes to one deferred note", async () => {
+			// A single in-progress advisor prompt that emits several distinct notes
+			// spends the update's one budget slot on the first; the rest are dropped
+			// at emission, so the flush cannot deliver an unbounded batch (#3520).
+			const delivered: string[] = [];
+			const guard = new AdvisorEmissionGuard();
+			const tool = new AdviseTool(
+				note => delivered.push(note),
+				note => guard.accept(note),
+			);
+			const beginUpdate = (inProgress: boolean) => {
+				tool.beginUpdate(inProgress);
+				guard.beginUpdate();
+			};
+
+			beginUpdate(true);
+			await tool.execute("x-0", { note: "First mid-turn concern.", severity: "concern" });
+			await tool.execute("x-1", { note: "Second mid-turn concern.", severity: "concern" });
+			await tool.execute("x-2", { note: "Third mid-turn concern.", severity: "concern" });
+			beginUpdate(false);
+			expect(delivered).toEqual(["First mid-turn concern."]);
+		});
+
+		it("does not let a suppressed phrase burn the deferred slot ahead of a real concern", async () => {
+			// P1 review regression: a noise phrase emitted before a substantive concern
+			// in the same in-progress update must not consume the update's slot. The
+			// emission guard filters it out at emission without spending the budget, so
+			// the following concern is still reserved and flushed.
+			const delivered: string[] = [];
+			const guard = new AdvisorEmissionGuard();
+			const tool = new AdviseTool(
+				note => delivered.push(note),
+				note => guard.accept(note),
+			);
+			const beginUpdate = (inProgress: boolean) => {
+				tool.beginUpdate(inProgress);
+				guard.beginUpdate();
+			};
+
+			beginUpdate(true);
+			await tool.execute("n-0", { note: "Stop.", severity: "concern" });
+			await tool.execute("n-1", {
+				note: "The migration drops the users table without a backup.",
+				severity: "concern",
+			});
+			beginUpdate(false);
+			expect(delivered).toEqual(["The migration drops the users table without a backup."]);
+		});
+
+		it("still caps a single model turn spraying many distinct notes to one accepted note", async () => {
+			// Live path: notes emitted in one completed-turn update stay capped at one.
+			const delivered: string[] = [];
+			const guard = new AdvisorEmissionGuard();
+			const tool = new AdviseTool(
+				note => delivered.push(note),
+				note => guard.accept(note),
+			);
+			const beginUpdate = (inProgress: boolean) => {
+				tool.beginUpdate(inProgress);
+				guard.beginUpdate();
+			};
+
+			beginUpdate(false);
+			await tool.execute("s-0", { note: "First distinct live concern.", severity: "concern" });
+			await tool.execute("s-1", { note: "Second distinct live concern.", severity: "concern" });
+			await tool.execute("s-2", { note: "Third distinct live concern.", severity: "concern" });
+			expect(delivered).toEqual(["First distinct live concern."]);
+		});
+
+		it("delivers a blocker escalation of a reserved note live instead of dropping it as already seen", async () => {
+			// P1 review regression: a note reserved as a nit/concern during an
+			// in-progress update, then escalated to blocker before the backlog flushes,
+			// even with casing/punctuation changed, must reuse its normalized reservation,
+			// and interrupt at blocker severity now — not be rejected as already-seen
+			// and arrive late at the lower deferred severity.
+			const delivered: { note: string; severity?: string }[] = [];
+			const guard = new AdvisorEmissionGuard();
+			const tool = new AdviseTool(
+				(note, severity) => delivered.push({ note, severity }),
+				note => guard.accept(note),
+			);
+			const beginUpdate = (inProgress: boolean) => {
+				tool.beginUpdate(inProgress);
+				guard.beginUpdate();
+			};
+			const note = "The migration drops the users table without a backup.";
+			const escalatedNote = "THE MIGRATION DROPS THE USERS TABLE WITHOUT A BACKUP!";
+
+			beginUpdate(true);
+			await tool.execute("e-0", { note, severity: "concern" });
+			// Reserved, not delivered.
+			expect(delivered).toEqual([]);
+
+			beginUpdate(true);
+			await tool.execute("e-1", { note: escalatedNote, severity: "blocker" });
+			// The blocker escalation is delivered live, at blocker severity.
+			expect(delivered).toEqual([{ note: escalatedNote, severity: "blocker" }]);
+
+			// The consumed reservation is not re-delivered as a stale concern at flush.
+			beginUpdate(false);
+			expect(delivered).toEqual([{ note: escalatedNote, severity: "blocker" }]);
 		});
 
 		it("validates parameters using ArkType", () => {
@@ -963,6 +1379,50 @@ describe("advisor", () => {
 			expect(promptText(promptInputs[1])).toContain("second");
 		});
 
+		it("clears the review latch on reset so a re-primed advisor is not yielded", async () => {
+			// Review feedback on #10463: after a successful review the runtime is
+			// yielded, but reset() (/new, branch, session switch, rewrites) must
+			// drop the latch — the advisor has not reviewed the new conversation,
+			// so the eye stays open until its first post-reset review, and an
+			// aborted prior drain cannot emit a stale advisor_yielded.
+			const promptInputs: Array<string | AgentMessage[]> = [];
+			const idleNotifications: number[] = [];
+			const agent: AdvisorAgent = {
+				prompt: async input => {
+					promptInputs.push(input);
+					// Complete the review: an assistant message makes the runtime's
+					// turn-error check see a finished turn.
+					agent.state.messages.push({
+						role: "assistant",
+						content: [{ type: "text", text: "no issues" }],
+						stopReason: "stop",
+					} as AssistantMessage);
+				},
+				abort: () => {},
+				reset: () => {},
+				state: { messages: [] },
+			};
+			const messages: AgentMessage[] = [{ role: "user", content: "work", timestamp: 1 } as AgentMessage];
+			const host: AdvisorRuntimeHost = {
+				snapshotMessages: () => messages,
+				enqueueAdvice: () => {},
+				notifyIdle: () => idleNotifications.push(1),
+			};
+			const runtime = new AdvisorRuntime(agent, host);
+
+			expect(runtime.yielded).toBe(false); // nothing reviewed yet
+
+			runtime.onTurnEnd(messages);
+			await runtime.waitForCatchup(1000, 1);
+			expect(runtime.yielded).toBe(true); // review completed
+			expect(idleNotifications).toHaveLength(1);
+
+			runtime.reset("conversation-boundary");
+			expect(runtime.yielded).toBe(false); // re-primed: nothing reviewed in the new conversation
+			await Promise.resolve();
+			expect(idleNotifications).toHaveLength(1); // no stale idle notification after reset
+		});
+
 		it("waits for an in-flight review within the catch-up deadline", async () => {
 			const promptStarted = Promise.withResolvers<void>();
 			const releasePrompt = Promise.withResolvers<void>();
@@ -1186,7 +1646,6 @@ describe("advisor", () => {
 			const promptInputs: Array<string | AgentMessage[]> = [];
 			const { promise: promptStarted, resolve: startPrompt } = Promise.withResolvers<void>();
 			let maintainCalls = 0;
-			let runtime!: AdvisorRuntime;
 			const messages: AgentMessage[] = [{ role: "user", content: "t0", timestamp: 0 } as AgentMessage];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
@@ -1215,7 +1674,7 @@ describe("advisor", () => {
 				reset: () => {},
 				state: { messages: [] },
 			};
-			runtime = new AdvisorRuntime(agent, host);
+			const runtime = new AdvisorRuntime(agent, host);
 
 			runtime.onTurnEnd(messages);
 			await promptStarted;
@@ -1674,7 +2133,7 @@ describe("advisor", () => {
 			expect(promptText(promptInputs[0])).toContain("$$TOKABC123_");
 			expect(promptText(promptInputs[0])).not.toContain("tok_abc123");
 		});
-		it("does not scan advisor-hidden successful tool-result bodies", async () => {
+		it("obfuscates advisor-visible successful tool-result bodies", async () => {
 			const obfuscator = new SecretObfuscator([
 				{ type: "plain", content: "OTHERSECRET", friendlyName: "TOKABC123" },
 				{ type: "regex", content: "tok_[a-z0-9]+" },
@@ -1703,8 +2162,39 @@ describe("advisor", () => {
 			await Promise.resolve();
 
 			expect(promptInputs).toHaveLength(1);
-			expect(promptText(promptInputs[0])).toContain("$$TOKABC123_");
+			expect(promptText(promptInputs[0])).toContain("$$");
 			expect(promptText(promptInputs[0])).not.toContain("tok_abc123");
+		});
+
+		it("redacts expanded tool results before middle truncation", async () => {
+			const secret = `BEGIN_SECRET_${"x".repeat(5_000)}_END_SECRET`;
+			const obfuscator = new SecretObfuscator([{ type: "plain", content: secret }]);
+			const placeholder = obfuscator.obfuscate(secret);
+			const promptInputs: Array<string | AgentMessage[]> = [];
+			const agent = makeAgent(promptInputs);
+			const messages: AgentMessage[] = [
+				{
+					role: "toolResult",
+					toolCallId: "c1",
+					toolName: "read",
+					content: `${"head".repeat(1_000)}${secret}${"tail".repeat(1_000)}`,
+					isError: false,
+					timestamp: 1,
+				} as unknown as AgentMessage,
+			];
+			const runtime = new AdvisorRuntime(agent, {
+				snapshotMessages: () => messages,
+				enqueueAdvice: () => {},
+				obfuscator,
+			});
+
+			runtime.onTurnEnd();
+			await runtime.waitForCatchup(1_000, 1);
+
+			const rendered = promptText(promptInputs[0]);
+			expect(rendered).toContain(placeholder);
+			expect(rendered).not.toContain("BEGIN_SECRET_");
+			expect(rendered).not.toContain("_END_SECRET");
 		});
 		it("does not scan tool-call arguments hidden by the primary-argument preview", async () => {
 			const obfuscator = new SecretObfuscator([
@@ -1734,7 +2224,7 @@ describe("advisor", () => {
 			expect(promptText(promptInputs[0])).not.toContain("tok_abc123");
 		});
 
-		it("does not scan failed tool-result text beyond its visible preview", async () => {
+		it("obfuscates failed tool-result text beyond its one-line preview", async () => {
 			const obfuscator = new SecretObfuscator([
 				{ type: "plain", content: "OTHERSECRET", friendlyName: "TOKABC123" },
 				{ type: "regex", content: "tok_[a-z0-9]+", mode: "replace" },
@@ -1759,7 +2249,7 @@ describe("advisor", () => {
 			});
 			runtime.onTurnEnd();
 			await runtime.waitForCatchup(1000, 1);
-			expect(promptText(promptInputs[0])).toContain("$$TOKABC123_");
+			expect(promptText(promptInputs[0])).toContain("$$");
 			expect(promptText(promptInputs[0])).not.toContain("tok_abc123");
 		});
 
@@ -4787,7 +5277,6 @@ describe("advisor", () => {
 			const maintenancePaused = Promise.withResolvers<void>();
 			const prompted = Promise.withResolvers<void>();
 			let maintenanceCalls = 0;
-			let runtime: AdvisorRuntime;
 			const agent: AdvisorAgent = {
 				prompt: async input => {
 					promptInputs.push(input);
@@ -4807,7 +5296,7 @@ describe("advisor", () => {
 					timestamp: 2,
 				} as AgentMessage,
 			];
-			runtime = new AdvisorRuntime(agent, {
+			const runtime = new AdvisorRuntime(agent, {
 				snapshotMessages: () => messages,
 				enqueueAdvice: () => {},
 				maintainContext: async () => {

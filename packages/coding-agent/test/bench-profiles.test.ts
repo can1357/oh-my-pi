@@ -9,17 +9,22 @@ import type {
 	Model,
 	SimpleStreamOptions,
 } from "@oh-my-pi/pi-ai";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { runBenchCommand } from "@oh-my-pi/pi-coding-agent/cli/bench-cli";
 import type { BenchModelRegistry } from "@oh-my-pi/pi-coding-agent/cli/bench-runtime";
 
-const model = {
+const model: Model<Api> = buildModel({
 	provider: "acme",
 	id: "bench-model",
 	name: "bench-model",
 	api: "openai-completions",
+	baseUrl: "https://example.test/v1",
+	reasoning: false,
+	input: ["text"],
+	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 	maxTokens: 4096,
 	contextWindow: 128_000,
-} as unknown as Model<Api>;
+});
 
 const registry: BenchModelRegistry = {
 	getAll: () => [model],

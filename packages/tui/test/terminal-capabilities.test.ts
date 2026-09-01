@@ -227,6 +227,7 @@ function subprocessEnv(overrides: Record<string, string | undefined>): Record<st
 		"PASEO_TERMINAL_ID",
 		"KITTY_WINDOW_ID",
 		"GHOSTTY_RESOURCES_DIR",
+		"HERDR_ENV",
 		"WEZTERM_PANE",
 		"ITERM_SESSION_ID",
 		"VSCODE_PID",
@@ -236,6 +237,22 @@ function subprocessEnv(overrides: Record<string, string | undefined>): Record<st
 	}
 	return { ...env, ...overrides };
 }
+
+describe("Herdr image protocol mask", () => {
+	it("rejects a leaked Ghostty protocol when Herdr owns the pane grid", () => {
+		const env = {
+			COLORTERM: "truecolor",
+			GHOSTTY_RESOURCES_DIR: "/usr/share/ghostty",
+			HERDR_ENV: "1",
+			TERM: "xterm-256color",
+			TERM_PROGRAM: "ghostty",
+		};
+		const terminalId = detectTerminalId(env);
+
+		expect(terminalId).toBe("ghostty");
+		expect(resolveImageProtocol(terminalId, env, true)).toBeNull();
+	});
+});
 
 describe("Paseo embedder carve-out", () => {
 	it("detects Paseo via PASEO_TERMINAL_ID", () => {

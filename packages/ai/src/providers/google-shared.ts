@@ -153,29 +153,6 @@ function resolveThoughtSignature(isSameProviderAndModel: boolean, signature: str
 	return isSameProviderAndModel && isValidThoughtSignature(signature) ? signature : undefined;
 }
 
-function supportsFunctionPartId<T extends GoogleApiType>(model: Model<T>): boolean {
-	if (model.api === "google-vertex") return false;
-	return model.id.startsWith("claude-") || (model.api === "google-generative-ai" && isGemini3Model(model.id));
-}
-
-function getGeminiMajorVersion(modelId: string): number | undefined {
-	const match = modelId.toLowerCase().match(/^gemini(?:-live)?-(\d+)/);
-	if (!match) return undefined;
-	return Number.parseInt(match[1], 10);
-}
-
-function supportsMultimodalFunctionResponse(modelId: string): boolean {
-	const geminiMajorVersion = getGeminiMajorVersion(modelId);
-	if (geminiMajorVersion !== undefined) {
-		return geminiMajorVersion >= 3;
-	}
-	return true;
-}
-
-function isGemini3Model(modelId: string): boolean {
-	return modelId.includes("gemini-3");
-}
-
 /**
  * Convert internal messages to Gemini Content[] format.
  */
@@ -238,8 +215,7 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 			const parts: Part[] = [];
 			// Check if message is from same provider and model - only then keep thinking blocks
 			const isSameProviderAndModel = msg.provider === model.provider && msg.model === model.id;
-			const dropsUnsignedThinking =
-				model.provider === "google-antigravity" && model.id.toLowerCase().includes("claude");
+			const dropsUnsignedThinking = model.compat.dropUnsignedThinking;
 
 			for (const block of msg.content) {
 				if (block.type === "text") {
@@ -270,18 +246,15 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 					emittedToolCallNames.set(block.id, block.name);
 					const thoughtSignature = resolveThoughtSignature(isSameProviderAndModel, block.thoughtSignature);
 					const effectiveSignature =
-						thoughtSignature || (isGemini3Model(model.id) ? SKIP_THOUGHT_SIGNATURE : undefined);
+						thoughtSignature || (model.compat.requiresSkipThoughtSignature ? SKIP_THOUGHT_SIGNATURE : undefined);
 
 					const part: Part = {
 						functionCall: {
 							name: block.name,
 							args: block.arguments ?? {},
-							...(supportsFunctionPartId(model) ? { id: block.id } : {}),
+							...(model.compat.supportsFunctionPartId ? { id: block.id } : {}),
 						},
 					};
-					if (model.provider === "google-vertex" && part?.functionCall?.id) {
-						delete part.functionCall.id; // Vertex AI GenerateContent rejects 'id' in functionCall parts.
-					}
 					if (effectiveSignature) {
 						part.thoughtSignature = effectiveSignature;
 					}
@@ -308,7 +281,7 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 			// Gemini 3+ models support multimodal function responses with images nested inside
 			// functionResponse.parts. Claude and other non-Gemini models behind Cloud Code Assist /
 			// Antigravity also accept this shape. Gemini < 3 still needs a separate user image turn.
-			const modelSupportsMultimodalFunctionResponse = supportsMultimodalFunctionResponse(model.id);
+			const modelSupportsMultimodalFunctionResponse = model.compat.multimodalFunctionResponse;
 
 			// Use "output" key for success, "error" key for errors as per SDK documentation
 			const responseValue = omittedImages
@@ -321,7 +294,7 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 
 			const imageParts = imageContent.map(convertGoogleImagePart);
 
-			const includeId = supportsFunctionPartId(model);
+			const includeId = model.compat.supportsFunctionPartId;
 			const emittedName = emittedToolCallNames.get(msg.toolCallId);
 			const functionResponsePart: Part = {
 				functionResponse: {
@@ -331,10 +304,6 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 					...(includeId ? { id: msg.toolCallId } : {}),
 				},
 			};
-
-			if (model.provider === "google-vertex" && functionResponsePart.functionResponse?.id) {
-				delete functionResponsePart.functionResponse.id; // Vertex AI GenerateContent rejects 'id' in functionResponse parts.
-			}
 
 			// Cloud Code Assist API requires all function responses to be in a single user turn.
 			// Check if the last content is already a user turn with function responses and merge.
@@ -378,7 +347,7 @@ export function convertTools(
 	 * Claude models on Cloud Code Assist need the legacy `parameters` field;
 	 * the API translates it into Anthropic's `input_schema`.
 	 */
-	const useParameters = model.id.startsWith("claude-");
+	const useParameters = model.compat.ccaLegacyParametersSchema;
 
 	return [
 		{

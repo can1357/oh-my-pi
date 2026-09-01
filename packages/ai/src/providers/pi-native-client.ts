@@ -125,7 +125,7 @@ function buildHeaders(model: Model<Api>, apiKey: string | undefined): Record<str
 		"x-omp-install-id": getInstallId(),
 		"x-omp-hostname": os.hostname().replace(/[^\x20-\x7e]/g, "?"),
 		"x-omp-app": getAppName(),
-		...(model.headers ?? {}),
+		...model.headers,
 	};
 	if (apiKey && !headers.Authorization) {
 		headers.Authorization = `Bearer ${apiKey}`;

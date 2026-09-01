@@ -1,6 +1,6 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
 import { Agent } from "@oh-my-pi/pi-agent-core";
-import type { AssistantMessage, Message, UserMessage } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, Message, Model, Usage, UserMessage } from "@oh-my-pi/pi-ai";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
@@ -12,6 +12,46 @@ describe("AgentSession session stats", () => {
 	let authStorage: AuthStorage;
 	let modelRegistry: ModelRegistry;
 	let session: AgentSession | undefined;
+	const model = (): Model => {
+		const found = modelRegistry.getAll().find(candidate => candidate.contextWindow && candidate.contextWindow > 0);
+		if (!found) throw new Error("Expected a bundled model");
+		return found;
+	};
+	const appendUsage = (manager: SessionManager, target: Model, input: number, overrides: Partial<Usage> = {}) =>
+		manager.appendModelUsage(
+			{
+				purpose: "auto-thinking",
+				role: "smol",
+				api: target.api,
+				provider: target.provider,
+				model: target.id,
+				stopReason: "stop",
+				usage: {
+					input,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: input,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: input },
+					...overrides,
+				},
+			},
+			{ sessionId: manager.getSessionId(), parentId: manager.getLeafId() },
+		);
+	const createStatsSession = (manager: SessionManager, target: Model): AgentSession =>
+		new AgentSession({
+			agent: new Agent({
+				initialState: {
+					model: target,
+					systemPrompt: ["Test"],
+					tools: [],
+					messages: manager.buildSessionContext().messages,
+				},
+			}),
+			sessionManager: manager,
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry,
+		});
 
 	beforeAll(async () => {
 		authStorage = await AuthStorage.create(":memory:");
@@ -25,6 +65,54 @@ describe("AgentSession session stats", () => {
 	afterEach(async () => {
 		await session?.dispose();
 		session = undefined;
+	});
+
+	it("includes non-transcript model usage without inflating message counts", () => {
+		const target = model();
+		const sessionManager = SessionManager.inMemory();
+		appendUsage(sessionManager, target, 11, {
+			output: 2,
+			cacheRead: 3,
+			totalTokens: 16,
+			reasoningTokens: 1,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 6 },
+		});
+		session = createStatsSession(sessionManager, target);
+
+		const stats = session.getSessionStats();
+
+		expect(stats.tokens).toEqual({
+			input: 11,
+			output: 2,
+			reasoning: 1,
+			cacheRead: 3,
+			cacheWrite: 0,
+			total: 16,
+		});
+		expect(stats.cost).toBe(6);
+		expect(stats.totalMessages).toBe(0);
+		expect(stats.assistantMessages).toBe(0);
+	});
+
+	it.each([
+		["reset", (manager: SessionManager) => manager.appendResetBoundary()],
+		[
+			"compaction",
+			(manager: SessionManager) => {
+				manager.appendMessage({ role: "user", content: "old", timestamp: 1 });
+				const kept = manager.appendMessage({ role: "user", content: "kept", timestamp: 2 });
+				manager.appendCompaction("summary", undefined, kept, 100);
+			},
+		],
+	] as const)("excludes model usage outside the latest %s window", (_name, boundary) => {
+		const target = model();
+		const manager = SessionManager.inMemory();
+		appendUsage(manager, target, 100);
+		boundary(manager);
+		appendUsage(manager, target, 7);
+		session = createStatsSession(manager, target);
+
+		expect(session.getSessionStats()).toMatchObject({ tokens: { total: 7 }, cost: 7 });
 	});
 
 	it("preserves authoritative provider occupancy above the local transcript estimate", () => {
@@ -262,5 +350,70 @@ describe("AgentSession session stats", () => {
 			expect(candidateSession.getContextUsage()?.tokens).toBeGreaterThan(1_000);
 			await candidateSession.dispose();
 		}
+	});
+
+	it("aggregates provider credits and concrete routed models", () => {
+		const model = modelRegistry.getAll().find(candidate => candidate.contextWindow && candidate.contextWindow > 0);
+		if (!model) throw new Error("Expected a bundled model");
+
+		const usage = {
+			input: 1,
+			output: 1,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 2,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		};
+		const messages: Message[] = [
+			{
+				role: "assistant",
+				content: [{ type: "text", text: "first" }],
+				api: model.api,
+				provider: model.provider,
+				model: model.id,
+				upstreamModel: "claude-opus-4-6",
+				usage: { ...usage, credits: { cost: 2.5, committedCost: 2, acuCost: 0.25 } },
+				stopReason: "stop",
+				timestamp: 1,
+			},
+			{
+				role: "assistant",
+				content: [{ type: "text", text: "second" }],
+				api: model.api,
+				provider: model.provider,
+				model: model.id,
+				upstreamModel: "claude-opus-4-6",
+				usage: { ...usage, credits: { cost: 1.5, committedCost: 1, acuCost: 0.75 } },
+				stopReason: "stop",
+				timestamp: 2,
+			},
+			{
+				role: "assistant",
+				content: [{ type: "text", text: "third" }],
+				api: model.api,
+				provider: model.provider,
+				model: model.id,
+				upstreamModel: "swe-1-7-medium",
+				usage,
+				stopReason: "stop",
+				timestamp: 3,
+			},
+		];
+		const agent = new Agent({
+			initialState: { model, systemPrompt: ["Test"], tools: [], messages },
+		});
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry,
+		});
+
+		const stats = session.getSessionStats();
+		expect(stats.credits).toEqual({ cost: 4, committedCost: 3, acuCost: 1 });
+		expect(stats.routedModels).toEqual({
+			"claude-opus-4-6": 2,
+			"swe-1-7-medium": 1,
+		});
 	});
 });

@@ -15,6 +15,7 @@ import type { AgentSession, AgentSessionEvent, PromptOptions } from "@oh-my-pi/p
 import type { CustomMessage } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { resolveSoftRequestBudget, runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
+import { TASK_SUBAGENT_LIFECYCLE_CHANNEL } from "@oh-my-pi/pi-coding-agent/task/types";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
@@ -62,6 +63,7 @@ function createMockSession(
 		| undefined;
 
 	const emit = (event: AgentSessionEvent) => {
+		// oxlint-disable-next-line unicorn/no-useless-spread -- listeners may change during dispatch
 		for (const listener of [...listeners]) listener(event);
 	};
 
@@ -185,7 +187,7 @@ describe("runSubprocess soft request budget", () => {
 		tempDir[Symbol.dispose]();
 	});
 
-	function baseOptions(id: string, eventBus?: EventBus) {
+	function baseOptions(id: string, eventBus?: EventBus, subagentEventBus?: EventBus) {
 		return {
 			cwd: "/tmp",
 			agent: baseAgent,
@@ -197,6 +199,7 @@ describe("runSubprocess soft request budget", () => {
 			enableLsp: false,
 			artifactsDir: tempDir.path(),
 			eventBus,
+			subagentEventBus: subagentEventBus ?? eventBus,
 		};
 	}
 
@@ -457,6 +460,103 @@ describe("runSubprocess soft request budget", () => {
 		const restoredRegistry = new AgentRegistry();
 		await registerPersistedSubagents(restoredRegistry, rootSessionFile);
 		expect(restoredRegistry.get(id)?.status).toBe("parked");
+	});
+
+	it("a nested spawn reaches the root RPC surface through the inherited observability bus", async () => {
+		const id = "WiringScout";
+		// Separate session and observability buses, the way the CLI wires them.
+		const sessionBus = new EventBus();
+		const treeBus = new EventBus();
+		const frames: RpcSubagentFrame[] = [];
+		let resolveTerminalLatch: (() => void) | undefined;
+		const waitForTerminal = (): Promise<void> => {
+			const deferred = Promise.withResolvers<void>();
+			resolveTerminalLatch = deferred.resolve;
+			return deferred.promise;
+		};
+		const rpcRegistry = new RpcSubagentRegistry(treeBus, frame => {
+			frames.push(frame);
+			if (frame.type !== "subagent_lifecycle" || frame.payload.status === "started") return;
+			resolveTerminalLatch?.();
+			resolveTerminalLatch = undefined;
+		});
+		rpcRegistry.setSubscriptionLevel("events");
+		const handle = createMockSession(({ promptIndex, emit, pushMessage }) => {
+			if (promptIndex !== 1) return;
+			// The depth-2 executor publishes on the bus its spawner handed down —
+			// captured from the real spawn options, not the test's own bus.
+			capturedOptions?.subagentEventBus?.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
+				id: `${id}.Grandkid`,
+				agent: "task",
+				agentSource: "bundled",
+				status: "started",
+				parentToolCallId: "call-grandkid",
+				index: 2,
+			});
+			const message = assistantText("settling");
+			pushMessage(message);
+			emit({ type: "message_end", message } as unknown as AgentSessionEvent);
+		});
+		let capturedOptions: { subagentEventBus?: EventBus } | undefined;
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+			capturedOptions = options;
+			return {
+				session: handle.session,
+				extensionsResult: {} as unknown as LoadExtensionsResult,
+				setToolUIContext: () => {},
+				eventBus: new EventBus(),
+			} satisfies CreateAgentSessionResult;
+		});
+		registerRunning(id, handle.session);
+
+		const terminal = waitForTerminal();
+		await runSubprocess(baseOptions(id, sessionBus, treeBus));
+		await terminal;
+
+		// The spawn wiring inherited the tree bus into the nested session.
+		expect(capturedOptions?.subagentEventBus).toBe(treeBus);
+		// The root RPC surface observed the depth-1 run…
+		expect(frames.some(frame => frame.type === "subagent_lifecycle" && frame.payload.id === id)).toBe(true);
+		// …and the depth-2 frame published on the inherited bus.
+		expect(frames.some(frame => frame.type === "subagent_lifecycle" && frame.payload.id === `${id}.Grandkid`)).toBe(
+			true,
+		);
+	});
+
+	it("an aliased observability bus does not duplicate lifecycle frames", async () => {
+		const id = "AliasScout";
+		// An SDK caller wiring the same EventBus into both slots must not see
+		// every frame twice — the executor skips the aliased re-emit.
+		const sharedBus = new EventBus();
+		const settled: string[] = [];
+		const terminal = Promise.withResolvers<void>();
+		sharedBus.on(TASK_SUBAGENT_LIFECYCLE_CHANNEL, frame => {
+			const payload = frame as { id?: string; status?: string };
+			if (payload.id !== id) return;
+			if (payload.status === "started") return;
+			settled.push(payload.status ?? "");
+			terminal.resolve();
+		});
+		const handle = createMockSession(({ promptIndex, emit, pushMessage }) => {
+			if (promptIndex !== 1) return;
+			const message = assistantText("settling");
+			pushMessage(message);
+			emit({ type: "message_end", message } as unknown as AgentSessionEvent);
+		});
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async () => {
+			return {
+				session: handle.session,
+				extensionsResult: {} as unknown as LoadExtensionsResult,
+				setToolUIContext: () => {},
+				eventBus: new EventBus(),
+			} satisfies CreateAgentSessionResult;
+		});
+		registerRunning(id, handle.session);
+
+		await runSubprocess(baseOptions(id, sharedBus, sharedBus));
+		await terminal.promise;
+
+		expect(settled).toEqual(["completed"]);
 	});
 
 	it("a caller-signal abort stays terminal and irc names the aborted agent precisely", async () => {

@@ -96,6 +96,35 @@ describe("Anthropic mid-conversation system messages", () => {
 		expect(params.map(p => p.role)).toEqual(["user", "system"]);
 	});
 
+	it("preserves turn scope, effort, and tool changes on Fable 5.1", () => {
+		const model = makeModel({ id: "claude-fable-5-1", name: "Claude Fable 5.1" });
+		const controlled: DeveloperMessage = {
+			role: "developer",
+			content: [{ type: "text", text: "Use fewer tokens this turn." }],
+			providerPayload: {
+				type: "anthropicMessage",
+				clearAt: "next_user_message",
+				effort: "low",
+				toolChanges: [{ type: "tool_removal", name: "write" }],
+			},
+			timestamp: Date.now(),
+		};
+		const params = convertAnthropicMessages([user("hi"), controlled], model, false);
+
+		expect(params[1]).toEqual({
+			role: "system",
+			clear_at: "next_user_message",
+			output_config: { effort: "low" },
+			content: [
+				{ type: "text", text: "Use fewer tokens this turn." },
+				{
+					type: "tool_removal",
+					tool: { type: "tool_reference", name: "write" },
+				},
+			],
+		});
+	});
+
 	it("maps a developer message that precedes an assistant turn to role: system", () => {
 		const model = makeModel();
 		const params = convertAnthropicMessages(

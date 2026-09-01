@@ -16,9 +16,8 @@ import {
 	mergeTaskBranches,
 	parseIsolationMode,
 } from "@oh-my-pi/pi-coding-agent/task/worktree";
-import * as git from "@oh-my-pi/pi-coding-agent/utils/git";
-import * as jj from "@oh-my-pi/pi-coding-agent/utils/jj";
 import * as natives from "@oh-my-pi/pi-natives";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { removeWithRetries, setWorktreesDir } from "@oh-my-pi/pi-utils";
 
 const tempDirs: string[] = [];
@@ -50,7 +49,6 @@ async function createGitRepo(): Promise<string> {
 
 afterEach(async () => {
 	vi.restoreAllMocks();
-	jj.repo.clearRootCache();
 	await Promise.all(tempDirs.splice(0).map(dir => removeWithRetries(dir)));
 });
 describe("worktree isolation helpers", () => {
@@ -344,7 +342,7 @@ describe("worktree isolation helpers", () => {
 				await runGit(repo, ["commit", "-q", "-m", "task-change-ignored-note"]);
 				await runGit(repo, ["checkout", "-q", BASE_BRANCH]);
 				try {
-					vi.spyOn(git.patch, "canApplyText").mockResolvedValue(true);
+					vi.spyOn(natives.VcsGitRepo.prototype, "canApplyPatch").mockResolvedValue(true);
 					await fs.writeFile(path.join(repo, "merged.txt"), "user wip\n");
 					await fs.writeFile(path.join(repo, magicName), "untracked wip\n");
 					await fs.writeFile(buildLog, "ignored build artifact\n");
@@ -637,7 +635,7 @@ describe("detachGitDir", () => {
 		const iso = await copyTree(wt);
 		const statusBefore = await runGit(iso, ["status", "--porcelain=v1"]);
 
-		const result = await git.detachGitDir(iso, commonDir);
+		const result = await vcs.detachGitDir(iso, commonDir);
 
 		expect(result).toBe("detached");
 		// Working tree (staged/unstaged/untracked) is preserved verbatim.
@@ -667,24 +665,22 @@ describe("detachGitDir", () => {
 		expect(await runGit(wt, ["rev-parse", "omp-fetched"])).toBe(taskCommit);
 	});
 
-	it("keeps shared git metadata intact when the index cannot be read", async () => {
+	it.skipIf(process.getuid?.() === 0)("keeps shared git metadata intact when the index cannot be read", async () => {
 		const { wt, commonDir } = await makeLinkedWorktree();
 		const iso = await copyTree(wt);
 		const gitEntry = path.join(iso, ".git");
 		const pointerBefore = await fs.readFile(gitEntry, "utf8");
 		const indexPath = await runGit(iso, ["rev-parse", "--path-format=absolute", "--git-path", "index"]);
-		const bunFile = Bun.file;
-		vi.spyOn(Bun, "file").mockImplementation(((file: string | URL, options?: BlobPropertyBag) => {
-			const handle = bunFile(file, options);
-			if (file.toString() === indexPath) {
-				vi.spyOn(handle, "bytes").mockRejectedValue(
-					Object.assign(new Error("permission denied"), { code: "EACCES" }),
-				);
-			}
-			return handle;
-		}) as typeof Bun.file);
-
-		await expect(git.detachGitDir(iso, commonDir)).rejects.toMatchObject({ code: "EACCES" });
+		const indexMode = (await fs.stat(indexPath)).mode;
+		await fs.chmod(indexPath, 0);
+		try {
+			await expect(vcs.detachGitDir(iso, commonDir)).rejects.toMatchObject({
+				code: "Io",
+				stderr: expect.stringContaining("Permission denied"),
+			});
+		} finally {
+			await fs.chmod(indexPath, indexMode);
+		}
 		expect(await fs.readFile(gitEntry, "utf8")).toBe(pointerBefore);
 		expect(await runGit(iso, ["status", "--porcelain=v1"])).toBe("");
 	});
@@ -703,7 +699,7 @@ describe("detachGitDir", () => {
 		);
 		const iso = await copyTree(src); // full `.git` directory copied — its own ODB
 
-		expect(await git.detachGitDir(iso, srcCommon)).toBe("independent");
+		expect(await vcs.detachGitDir(iso, srcCommon)).toBe("independent");
 		// Its objects are self-contained: no alternates file was written.
 		expect(await Bun.file(path.join(iso, ".git", "objects", "info", "alternates")).exists()).toBe(false);
 	});
@@ -721,7 +717,7 @@ describe("detachGitDir", () => {
 		const iso = await copyTree(wt);
 		const statusBefore = await runGit(iso, ["status", "--porcelain=v1"]);
 
-		expect(await git.detachGitDir(iso, commonDir)).toBe("detached");
+		expect(await vcs.detachGitDir(iso, commonDir)).toBe("detached");
 		// The unborn branch name is preserved and the common dir is now private.
 		expect(await runGit(iso, ["symbolic-ref", "HEAD"])).toBe("refs/heads/fresh-orphan");
 		const isoCommon = path.resolve(
@@ -760,7 +756,7 @@ describe("detachGitDir", () => {
 		expect(await Bun.file(path.join(wt, "drop", "d.txt")).exists()).toBe(false);
 
 		const iso = await copyTree(wt);
-		expect(await git.detachGitDir(iso, commonDir)).toBe("detached");
+		expect(await vcs.detachGitDir(iso, commonDir)).toBe("detached");
 
 		// The detached isolation still honours sparse checkout: `drop/d.txt` keeps
 		// its skip-worktree bit and is NOT reported as a deletion (which delta
@@ -801,7 +797,7 @@ describe("detachGitDir", () => {
 		);
 
 		const iso = await copyTree(wt);
-		expect(await git.detachGitDir(iso, commonDir)).toBe("detached");
+		expect(await vcs.detachGitDir(iso, commonDir)).toBe("detached");
 
 		// filemode parity: an explicit core.fileMode=false survives re-init.
 		expect(await runGit(iso, ["config", "core.fileMode"])).toBe("false");
@@ -827,7 +823,7 @@ describe("detachGitDir", () => {
 		const aliasCommonDir = path.join(aliasMain, ".git");
 
 		const iso = await copyTree(wt);
-		expect(await git.detachGitDir(iso, aliasCommonDir)).toBe("detached");
+		expect(await vcs.detachGitDir(iso, aliasCommonDir)).toBe("detached");
 
 		// Isolation is fully functional: task branch + commit stay private.
 		await runGit(iso, ["checkout", "-q", "-b", "feature/a", baseSha]);

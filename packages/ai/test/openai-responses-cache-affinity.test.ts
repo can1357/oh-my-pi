@@ -11,15 +11,40 @@ import {
 import { stream as streamModel, streamSimple } from "@oh-my-pi/pi-ai/stream";
 import type { Context, FetchImpl, Model, ProviderSessionState, SimpleStreamOptions } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
-import { buildOpenAIResponsesCompat } from "@oh-my-pi/pi-catalog/compat/openai";
+import { resolveModelPolicy } from "@oh-my-pi/pi-catalog/compat/resolve";
+import { classifyModel } from "@oh-my-pi/pi-catalog/compat/taxonomy";
 
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { withEnv } from "./helpers";
+
+interface ResponsesCompatTestSpec {
+	id?: string;
+	name: string;
+	provider: string;
+	baseUrl: string;
+	reasoning?: boolean;
+}
+
+function buildOpenAIResponsesCompat(spec: ResponsesCompatTestSpec) {
+	return resolveModelPolicy({
+		id: spec.id ?? "test-model",
+		api: "openai-responses",
+		provider: spec.provider,
+		baseUrl: spec.baseUrl,
+		name: spec.name,
+		reasoning: spec.reasoning ?? false,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 128_000,
+		maxTokens: 16_384,
+	}).compat;
+}
 
 const model = getBundledModel("openai", "gpt-5-mini") as Model<"openai-responses">;
 const openRouterResponsesModel: Model<"openai-responses"> = {
 	...model,
 	id: "openai/gpt-5.5",
+	identity: classifyModel("openrouter", "openai/gpt-5.5"),
 	name: "OpenRouter GPT 5.5",
 	provider: "openrouter",
 	baseUrl: "https://openrouter.ai/api/v1",
@@ -33,6 +58,7 @@ const openRouterResponsesModel: Model<"openai-responses"> = {
 const openRouterAnthropicResponsesModel: Model<"openai-responses"> = {
 	...model,
 	id: "anthropic/claude-sonnet-4.5",
+	identity: classifyModel("openrouter", "anthropic/claude-sonnet-4.5"),
 	name: "OpenRouter Claude Sonnet 4.5",
 	provider: "openrouter",
 	baseUrl: "https://openrouter.ai/api/v1",
@@ -46,6 +72,7 @@ const openRouterAnthropicResponsesModel: Model<"openai-responses"> = {
 const xaiOAuthResponsesModel: Model<"openai-responses"> = {
 	...model,
 	id: "grok-build",
+	identity: classifyModel("xai-oauth", "grok-build"),
 	name: "Grok Build",
 	provider: "xai-oauth",
 	baseUrl: "https://api.x.ai/v1",
@@ -60,6 +87,7 @@ const xaiOAuthResponsesModel: Model<"openai-responses"> = {
 const xaiApiKeyResponsesModel: Model<"openai-responses"> = {
 	...model,
 	id: "grok-code-fast-1",
+	identity: classifyModel("xai", "grok-code-fast-1"),
 	name: "Grok Code Fast 1",
 	provider: "xai",
 	baseUrl: "https://api.x.ai/v1",
@@ -75,6 +103,7 @@ const xaiApiKeyResponsesModel: Model<"openai-responses"> = {
 const openAI56ResponsesModel: Model<"openai-responses"> = {
 	...model,
 	id: "gpt-5.6",
+	identity: classifyModel("openai", "gpt-5.6"),
 	name: "GPT-5.6",
 	compat: buildOpenAIResponsesCompat({
 		id: "gpt-5.6",
@@ -460,6 +489,7 @@ describe("OpenAI Responses explicit prompt cache policy", () => {
 		const unsupportedModel: Model<"openai-responses"> = {
 			...openAI56ResponsesModel,
 			id: "gpt-5.5",
+			identity: classifyModel("openai", "gpt-5.5"),
 			compat: buildOpenAIResponsesCompat({
 				id: "gpt-5.5",
 				name: "GPT-5.5",
@@ -514,6 +544,7 @@ describe("OpenAI Responses explicit prompt cache policy", () => {
 		const sidecarModel: Model<"openai-responses"> = {
 			...openAI56ResponsesModel,
 			id: "gateway-model",
+			identity: classifyModel("openai", "gateway-model"),
 			baseUrl: "http://gateway.internal",
 			transport: "pi-native",
 			compat: buildOpenAIResponsesCompat({
@@ -565,6 +596,7 @@ describe("OpenAI Responses explicit prompt cache policy", () => {
 		const unsupportedModel: Model<"openai-responses"> = {
 			...openAI56ResponsesModel,
 			id: "gpt-5.5",
+			identity: classifyModel("openai", "gpt-5.5"),
 			compat: buildOpenAIResponsesCompat({
 				id: "gpt-5.5",
 				name: "GPT-5.5",
@@ -598,6 +630,7 @@ describe("OpenAI Responses explicit prompt cache policy", () => {
 		const unsupportedModel: Model<"openai-responses"> = {
 			...openAI56ResponsesModel,
 			id: "gpt-5.5",
+			identity: classifyModel("openai", "gpt-5.5"),
 			compat: buildOpenAIResponsesCompat({
 				id: "gpt-5.5",
 				name: "GPT-5.5",

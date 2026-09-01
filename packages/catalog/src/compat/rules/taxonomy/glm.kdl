@@ -1,0 +1,14 @@
+class "glm" {
+    bounded "glm"
+    // Vendor-prefixed bare ids (mistral `zai-glm-5-2`, cerebras `zai-glm-4.7`):
+    // bounded matchers are prefix-anchored, so `bounded "glm"` never sees them.
+    bounded "zai-glm"
+
+    family "flash" glob="*flash*"
+    family "air" glob="*air*"
+    family "turbo" glob="*turbo*"
+    family "vision" glob="*glm-5v*" priority=20
+
+    override id="umans-glm-5-3-flash-lab-family" provider="umans" model="umans-glm-5.3-flash-lab" class="glm" rationale="The opaque Umans lab deployment is backed by the reviewed GLM 5.3 Flash family" provenance="models.json census"
+    revision prefix="glm-" anywhere=#true
+}

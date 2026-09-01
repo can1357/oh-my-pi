@@ -145,11 +145,21 @@ function isOfficialOpenAIApiUrl(baseUrl: string | undefined): boolean {
 	}
 }
 
+const OFFICIAL_CODEX_URL = new URL(CODEX_BASE_URL);
+
 /** Strict official-Codex endpoint check; exact origin or a path boundary after {@link CODEX_BASE_URL}. */
 export function isOfficialCodexApiUrl(baseUrl: string | undefined): boolean {
 	if (!baseUrl) return true;
-	const lower = baseUrl.toLowerCase().replace(/\/+$/, "");
-	return lower === CODEX_BASE_URL || lower.startsWith(`${CODEX_BASE_URL}/`);
+	try {
+		const candidate = new URL(baseUrl);
+		const candidatePath = candidate.pathname.replace(/\/+$/, "");
+		return (
+			candidate.origin === OFFICIAL_CODEX_URL.origin &&
+			(candidatePath === OFFICIAL_CODEX_URL.pathname || candidatePath.startsWith(`${OFFICIAL_CODEX_URL.pathname}/`))
+		);
+	} catch {
+		return false;
+	}
 }
 
 /**
@@ -939,9 +949,10 @@ function streamDispatch<TApi extends Api>(
 		return streamBedrock(model as Model<"bedrock-converse-stream">, context, requestOptions as BedrockOptions);
 	}
 
-	const prepareRequest = getProviderDefinition(model.provider)?.prepareRequest;
-	const prepared = prepareRequest?.(model as Model<Api>, requestOptions as StreamOptions);
-	const providerModel = prepared?.model ?? (model as Model<Api>);
+	const providerDefinition = getProviderDefinition(model.provider);
+	const requestModel = providerDefinition?.prepareModel?.(model) ?? model;
+	const prepared = providerDefinition?.prepareRequest?.(requestModel, requestOptions as StreamOptions);
+	const providerModel = prepared?.model ?? requestModel;
 	const preparedOptions = prepared?.options ?? (requestOptions as StreamOptions);
 	const apiKey = preparedOptions.apiKey || getEnvApiKey(providerModel.provider);
 	if (!apiKey) {
@@ -1059,8 +1070,14 @@ function isRetryableThinkingLoop(message: AssistantMessage): boolean {
 async function resolveWithThinkingLoopRetries(
 	signal: AbortSignal | undefined,
 	dispatch: () => AssistantMessageEventStream,
+	onAttempt?: (message: AssistantMessage) => void,
 ): Promise<AssistantMessage> {
-	let message = await dispatch().result();
+	const dispatchAttempt = async (): Promise<AssistantMessage> => {
+		const message = await dispatch().result();
+		onAttempt?.(message);
+		return message;
+	};
+	let message = await dispatchAttempt();
 	let thinkingLoopRetry = isRetryableThinkingLoop(message);
 	for (let attempt = 1; thinkingLoopRetry && attempt < THINKING_LOOP_MAX_ATTEMPTS; attempt += 1) {
 		// A caller abort surfaces as a thrown abort (never the stall, which would
@@ -1069,7 +1086,7 @@ async function resolveWithThinkingLoopRetries(
 		signal?.throwIfAborted();
 		const delay = Math.min(THINKING_LOOP_RETRY_BASE_DELAY_MS * 2 ** (attempt - 1), THINKING_LOOP_RETRY_MAX_DELAY_MS);
 		await scheduler.wait(delay, { signal });
-		message = await dispatch().result();
+		message = await dispatchAttempt();
 		thinkingLoopRetry = isRetryableThinkingLoop(message);
 	}
 	if (thinkingLoopRetry) signal?.throwIfAborted();
@@ -1589,7 +1606,7 @@ function streamSimpleRequest<TApi extends Api>(
 				const nativeOptions =
 					model.api === "bedrock-converse-stream"
 						? {
-								...(opts ?? {}),
+								...opts,
 								guardrailIdentifier: model.guardrailIdentifier ?? opts?.guardrailIdentifier,
 								guardrailVersion: model.guardrailVersion ?? opts?.guardrailVersion,
 								guardrailTrace: model.guardrailTrace ?? opts?.guardrailTrace,
@@ -1691,16 +1708,21 @@ function streamSimpleRequest<TApi extends Api>(
 			),
 		);
 	}
-	const providerOptions = mapOptionsForApi(model, requestOptions, apiKey);
-	return stream(model, context, providerOptions);
+	const providerModel = getProviderDefinition(model.provider)?.prepareModel?.(model) ?? model;
+	const providerOptions = mapOptionsForApi(providerModel, requestOptions, apiKey);
+	return stream(providerModel, context, providerOptions);
 }
 
 export async function completeSimple<TApi extends Api>(
 	model: Model<TApi>,
 	context: Context,
-	options?: SimpleStreamOptions,
+	options?: SimpleStreamOptions & {
+		/** Receives every completed result, including results retried by the thinking-loop guard. */
+		onAttempt?: (message: AssistantMessage) => void;
+	},
 ): Promise<AssistantMessage> {
-	return resolveWithThinkingLoopRetries(options?.signal, () => streamSimple(model, context, options));
+	const { onAttempt, ...streamOptions } = options ?? {};
+	return resolveWithThinkingLoopRetries(options?.signal, () => streamSimple(model, context, streamOptions), onAttempt);
 }
 
 const MIN_OUTPUT_TOKENS = 1024;
@@ -1969,6 +1991,7 @@ function mapOptionsForApi<TApi extends Api>(
 		fallbacks: options?.fallbacks,
 		acceptEmptyResponse: options?.acceptEmptyResponse,
 		anthropicCacheRefreshRequest: options?.anthropicCacheRefreshRequest,
+		anthropicPrefixMismatchBehavior: options?.anthropicPrefixMismatchBehavior,
 		...simpleProviderOptions,
 	};
 
@@ -2099,7 +2122,7 @@ function mapOptionsForApi<TApi extends Api>(
 			}
 			if (maxTokens <= budgetInfo.budget) {
 				const adjustedBudget = Math.max(0, maxTokens - MIN_OUTPUT_TOKENS);
-				thinkingBudgets = { ...(thinkingBudgets ?? {}), [budgetInfo.level]: adjustedBudget };
+				thinkingBudgets = { ...thinkingBudgets, [budgetInfo.level]: adjustedBudget };
 			}
 			return castApi<"bedrock-converse-stream">({ ...bedrockBase, maxTokens, thinkingBudgets });
 		}
@@ -2397,20 +2420,8 @@ function getGoogleBudget(
 	}
 
 	// See https://ai.google.dev/gemini-api/docs/thinking#set-budget
-	if (model.id.includes("2.5-")) {
-		switch (effort) {
-			case "minimal":
-				return 128;
-			case "low":
-				return 2048;
-			case "medium":
-				return 8192;
-			case "high":
-			case "xhigh":
-			case "max":
-				return model.id.includes("2.5-flash") ? 24576 : 32768;
-		}
-	}
+	const resolvedBudget = model.thinking?.effortBudgets?.[effort];
+	if (resolvedBudget !== undefined) return resolvedBudget;
 
 	// Unknown model - use dynamic
 	return -1;

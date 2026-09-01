@@ -132,6 +132,7 @@ export async function searchPublicWeb(
 	const straggler = new AbortController();
 	const signal = AbortSignal.any([withHardTimeout(params.signal, params.timeoutMs), straggler.signal]);
 
+	// oxlint-disable-next-line unicorn/no-new-array -- length preallocation
 	const responses: (SearchResponse | undefined)[] = new Array(engineIds.length);
 	const failures: { provider: { id: SearchProviderId; label: string }; error: unknown }[] = [];
 	const firstSuccess = Promise.withResolvers<void>();
