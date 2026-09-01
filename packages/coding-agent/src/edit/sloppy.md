@@ -11,7 +11,7 @@ One rewrite form per operation:
 In MATCH: `…` = gap/capture — stays on its line between fragments, spans lines at line end. No markers → REWRITE replaces the whole MATCH.
 In REWRITE or a desired side: `…` re-emits captured gaps in order — one MATCH gap each; a `…` with no MATCH gap left to claim mid-line is written as a literal `…`, and alone on its line is an error (context elision — type the lines out).
 
-Move code by deleting it where it is (`⟪old lines│⟫`, or MATCH + `»` + `»N` re-emit at the destination) and re-stating it with `＋` lines at its destination.
+Move code by deleting it where it is with `⟪old lines│⟫` and re-stating it with `＋` lines at its destination — or, to re-emit the deleted block verbatim, delete it with `⟪old lines│⟫` and reference it from the destination with a `»N` REWRITE line (`MATCH` + `»` + `»N`).
 </ops>
 
 <rules>
