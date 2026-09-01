@@ -486,7 +486,7 @@ async function buildHello(): Promise<
 	const versionMatch = /Chrome\/[\d.]+/.exec(navigator.userAgent);
 	const hardwareConcurrency =
 		Number.isInteger(navigator.hardwareConcurrency) &&
-			navigator.hardwareConcurrency > 0
+		navigator.hardwareConcurrency > 0
 			? navigator.hardwareConcurrency
 			: undefined;
 	return {

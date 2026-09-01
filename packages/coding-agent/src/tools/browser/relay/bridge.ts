@@ -21,7 +21,12 @@
  * - real child session ids (OOPIFs, workers) — created by Chrome under the
  *   shared root session and passed through verbatim
  */
-import type { ExtToRelayMessage, RelayRpcRequest, RelayToExtMessage, TabSnapshot } from "./protocol";
+import type {
+	ExtToRelayMessage,
+	RelayRpcRequest,
+	RelayToExtMessage,
+	TabSnapshot,
+} from "./protocol";
 
 /** Transport-agnostic websocket surface the bridge writes to. */
 export interface RelaySocket {
@@ -67,6 +72,16 @@ interface SessionRootSubscription {
 	sequence: number;
 	/** Field-level update order for partial setters like Emulation.setEmulatedMedia. */
 	fieldSequences?: Record<string, number>;
+}
+
+interface PreservedPreloadScript {
+	ownerSessionId: string;
+	/** Stable identifier returned to the downstream page session. */
+	clientIdentifier: string;
+	/** Current root-side identifier, remapped after recovery replay. */
+	rootIdentifier: string;
+	params?: Record<string, unknown>;
+	sequence: number;
 }
 
 function subscriptionKey(method: string): string {
@@ -119,7 +134,9 @@ function mergeSubscriptionFieldSequences(
 	return merged;
 }
 
-function isNeutralNetworkConditions(params: Record<string, unknown> | undefined): boolean {
+function isNeutralNetworkConditions(
+	params: Record<string, unknown> | undefined,
+): boolean {
 	if (!params) return false;
 	return (
 		params.offline === false &&
@@ -128,12 +145,15 @@ function isNeutralNetworkConditions(params: Record<string, unknown> | undefined)
 		params.uploadThroughput === -1 &&
 		(params.connectionType === undefined || params.connectionType === "none") &&
 		(params.packetLoss === undefined || params.packetLoss === 0) &&
-		(params.packetQueueLength === undefined || params.packetQueueLength === 0) &&
+		(params.packetQueueLength === undefined ||
+			params.packetQueueLength === 0) &&
 		(params.packetReordering === undefined || params.packetReordering === false)
 	);
 }
 
-function isEmptyUserAgentOverride(params: Record<string, unknown> | undefined): boolean {
+function isEmptyUserAgentOverride(
+	params: Record<string, unknown> | undefined,
+): boolean {
 	return typeof params?.userAgent === "string" && params.userAgent === "";
 }
 
@@ -156,7 +176,12 @@ function subscriptionClearedFields(
 	if (key !== "Emulation.setEmulatedMedia" || !params) return undefined;
 	const cleared: Record<string, number> = {};
 	if ("media" in params && params.media === "") cleared.media = 0;
-	if ("features" in params && Array.isArray(params.features) && params.features.length === 0) cleared.features = 0;
+	if (
+		"features" in params &&
+		Array.isArray(params.features) &&
+		params.features.length === 0
+	)
+		cleared.features = 0;
 	return Object.keys(cleared).length > 0 ? cleared : undefined;
 }
 
@@ -188,8 +213,10 @@ function reconcileSubscriptionParams(
 ): Record<string, unknown> | undefined {
 	if (key !== "Emulation.setEmulatedMedia") return next;
 	const params = { ...(next ?? {}) };
-	if (previous && "media" in previous && (!next || !("media" in next))) params.media = "";
-	if (previous && "features" in previous && (!next || !("features" in next))) params.features = [];
+	if (previous && "media" in previous && (!next || !("media" in next)))
+		params.media = "";
+	if (previous && "features" in previous && (!next || !("features" in next)))
+		params.features = [];
 	return Object.keys(params).length > 0 ? params : undefined;
 }
 
@@ -259,7 +286,10 @@ function subscriptionChangeEquals(
 		next: SessionRootSubscription | undefined;
 	},
 ): boolean {
-	return subscriptionEquals(left.previous, right.previous) && subscriptionEquals(left.next, right.next);
+	return (
+		subscriptionEquals(left.previous, right.previous) &&
+		subscriptionEquals(left.next, right.next)
+	);
 }
 
 interface TargetInfo {
@@ -287,7 +317,8 @@ class CdpConnection {
 	sessionsForTab(tabId: number, kind?: "tab" | "page"): string[] {
 		const out: string[] = [];
 		for (const [sessionId, ref] of this.sessions) {
-			if (ref.tabId === tabId && (!kind || ref.kind === kind)) out.push(sessionId);
+			if (ref.tabId === tabId && (!kind || ref.kind === kind))
+				out.push(sessionId);
 		}
 		return out;
 	}
@@ -357,11 +388,23 @@ class TabState {
 	/** Recovery replay must complete, including after an extension socket replacement. */
 	restorePending = false;
 	/** Effective root-domain state by subscription key and owning page pseudo-session. */
-	readonly subscriptions = new Map<string, Map<string, SessionRootSubscription>>();
+	readonly subscriptions = new Map<
+		string,
+		Map<string, SessionRootSubscription>
+	>();
 	/** Tab-wide clear tombstones for partial setters like Emulation.setEmulatedMedia. */
 	readonly subscriptionClears = new Map<string, Record<string, number>>();
 	/** In-flight root-state commands by subscription key. */
 	readonly pendingSubscriptions = new Map<string, Set<Promise<void>>>();
+	/** Preserved per-session preload scripts from Page.addScriptToEvaluateOnNewDocument. */
+	readonly preloadScripts = new Map<
+		string,
+		Map<string, PreservedPreloadScript>
+	>();
+	/** Live cleanup of replayed preload scripts whose owner disappeared. */
+	preloadScriptCleaning: Promise<void> | null = null;
+	/** Root identifiers that must be removed once recovery / attach settles. */
+	pendingPreloadScriptCleanup: PreservedPreloadScript[] = [];
 
 	constructor(
 		readonly tabId: number,
@@ -386,7 +429,8 @@ class TabState {
 }
 
 /** URLs `chrome.debugger` cannot attach to; hidden from downstream discovery entirely. */
-const INELIGIBLE_URL = /^(chrome|devtools|edge|view-source|chrome-extension|chrome-untrusted|chrome-search):/i;
+const INELIGIBLE_URL =
+	/^(chrome|devtools|edge|view-source|chrome-extension|chrome-untrusted|chrome-search):/i;
 
 const RPC_TIMEOUT_MS = 20_000;
 const CDP_ERROR_METHOD_NOT_FOUND = -32601;
@@ -402,7 +446,12 @@ function platformFromUserAgent(userAgent: string): string | undefined {
 }
 
 function hasObjectKeys(value: unknown): value is Record<string, unknown> {
-	return typeof value === "object" && value !== null && !Array.isArray(value) && Object.keys(value).length > 0;
+	return (
+		typeof value === "object" &&
+		value !== null &&
+		!Array.isArray(value) &&
+		Object.keys(value).length > 0
+	);
 }
 
 function tabTargetId(tabId: number): string {
@@ -414,7 +463,9 @@ function pageTargetId(tabId: number): string {
 }
 
 /** Reverse of {@link tabTargetId}/{@link pageTargetId}; null for foreign ids. */
-function parseTargetId(targetId: string): { kind: "tab" | "page"; tabId: number } | null {
+function parseTargetId(
+	targetId: string,
+): { kind: "tab" | "page"; tabId: number } | null {
 	const match = /^(TAB|PAGE)(\d+)$/.exec(targetId);
 	if (!match) return null;
 	return { kind: match[1] === "TAB" ? "tab" : "page", tabId: Number(match[2]) };
@@ -433,10 +484,18 @@ export class RelayBridge {
 	#subscriptionSeq = 0;
 	#rpcSeq = 0;
 	#ext: RelaySocket | null = null;
-	#extInfo: { userAgent: string; browserVersion: string; hardwareConcurrency?: number } | null = null;
+	#extInfo: {
+		userAgent: string;
+		browserVersion: string;
+		hardwareConcurrency?: number;
+	} | null = null;
 	#pendingRpc = new Map<
 		number,
-		{ resolve: (value: unknown) => void; reject: (err: Error) => void; timer: NodeJS.Timeout }
+		{
+			resolve: (value: unknown) => void;
+			reject: (err: Error) => void;
+			timer: NodeJS.Timeout;
+		}
 	>();
 	/** Real child session id → owning tab, learned from `Target.attachedToTarget` events. */
 	#realSessionTabs = new Map<string, number>();
@@ -484,7 +543,12 @@ export class RelayBridge {
 		const out: Array<Record<string, string>> = [];
 		for (const tab of this.#tabs.values()) {
 			if (!this.#eligible(tab)) continue;
-			out.push({ id: pageTargetId(tab.tabId), type: "page", title: tab.title, url: tab.url });
+			out.push({
+				id: pageTargetId(tab.tabId),
+				type: "page",
+				title: tab.title,
+				url: tab.url,
+			});
 		}
 		return out;
 	}
@@ -629,18 +693,28 @@ export class RelayBridge {
 			// replay is bound to: keep an active same-socket replay (do not relaunch a
 			// second, concurrent one below); reset only when the socket actually
 			// changed, so the replacement hello restarts the interrupted replay.
-			const sameSocketReplay = tab.restoring !== null && tab.restoringExt === this.#ext;
+			const sameSocketReplay =
+				tab.restoring !== null && tab.restoringExt === this.#ext;
 			if (!sameSocketReplay) tab.restoring = null;
 			const holders = this.#sessionHolders(tab.tabId);
-			const preserve = holders.filter(conn => !conn.autoAttach && conn.sessionsForTab(tab.tabId).length > 0);
+			const preserve = holders.filter(
+				(conn) => !conn.autoAttach && conn.sessionsForTab(tab.tabId).length > 0,
+			);
 			if (tab.attached) {
 				const needsRecoveryReplay = tab.restorePending && !sameSocketReplay;
 				tab.resumeSubscriptionReconcileAfterRestore =
 					needsRecoveryReplay && tab.pendingSubscriptionReconcile.length > 0;
 				if (tab.pendingSubscriptionReconcile.length > 0) {
-					this.#scheduleLiveSubscriptionReconcile(tab, tab.pendingSubscriptionReconcile);
+					this.#scheduleLiveSubscriptionReconcile(
+						tab,
+						tab.pendingSubscriptionReconcile,
+					);
 				}
-				if (holders.length === 0 && (!hasRecoveryMetadata || recoverableNow.has(tab.tabId))) {
+				this.#scheduleLivePreloadScriptCleanup(tab);
+				if (
+					holders.length === 0 &&
+					(!hasRecoveryMetadata || recoverableNow.has(tab.tabId))
+				) {
 					this.#detachIfUnheld(tab.tabId);
 					continue;
 				}
@@ -649,6 +723,7 @@ export class RelayBridge {
 					// part of it. The replacement hello still reports the debugger attached,
 					// so resume the pending journal instead of treating the root as ready.
 					this.#pruneSubscriptions(tab, preserve);
+					this.#prunePreloadScripts(tab, preserve);
 					this.#startTabRecovery(tab, false, preserve);
 				}
 				continue;
@@ -688,7 +763,10 @@ export class RelayBridge {
 			this.#announceTab(tab, true, preserve);
 		}
 		this.#syncGrouping();
-		this.#log("extension connected", { tabs: this.#tabs.size, version: msg.browserVersion });
+		this.#log("extension connected", {
+			tabs: this.#tabs.size,
+			version: msg.browserVersion,
+		});
 		// Release any commands that arrived on surviving sessions after the socket
 		// reopened but before this hello was processed — recovery bookkeeping
 		// (retract/reattach, tab.attaching) is now in place, so they route correctly.
@@ -714,7 +792,8 @@ export class RelayBridge {
 		const touched = new Set<number>();
 		for (const [sessionId, ref] of conn.sessions) {
 			touched.add(ref.tabId);
-			if (ref.kind === "page") this.#forgetSessionSubscriptions(ref.tabId, [sessionId]);
+			if (ref.kind === "page")
+				this.#forgetSessionSubscriptions(ref.tabId, [sessionId]);
 		}
 		conn.sessions.clear();
 		// Tabs this client claimed leave the omp group unless another claimant
@@ -740,8 +819,12 @@ export class RelayBridge {
 			return;
 		}
 		if (typeof msg.id !== "number" || typeof msg.method !== "string") return;
-		void this.#handleCdpCommand(conn, msg).catch(err => {
-			this.#replyError(conn, msg, err instanceof Error ? err.message : String(err));
+		void this.#handleCdpCommand(conn, msg).catch((err) => {
+			this.#replyError(
+				conn,
+				msg,
+				err instanceof Error ? err.message : String(err),
+			);
 		});
 	}
 
@@ -776,6 +859,14 @@ export class RelayBridge {
 		sessionId: string,
 		ref: SessionRef,
 	): Promise<void> {
+		if (msg.method === "Page.addScriptToEvaluateOnNewDocument") {
+			await this.#handlePreloadScriptAdd(conn, msg, sessionId, ref);
+			return;
+		}
+		if (msg.method === "Page.removeScriptToEvaluateOnNewDocument") {
+			await this.#handlePreloadScriptRemove(conn, msg, sessionId, ref);
+			return;
+		}
 		if (msg.method === "Runtime.disable") {
 			ref.runtimeState = "disabled";
 			ref.runtimeEpoch++;
@@ -823,13 +914,114 @@ export class RelayBridge {
 		}
 	}
 
+	async #handlePreloadScriptAdd(
+		conn: CdpConnection,
+		msg: CdpCommand,
+		sessionId: string,
+		ref: SessionRef,
+	): Promise<void> {
+		await this.#awaitTabReady(ref.tabId);
+		if (conn.sessions.get(sessionId) !== ref) {
+			this.#replyError(conn, msg, `Unknown session id ${sessionId}`);
+			return;
+		}
+		const tab = this.#tabs.get(ref.tabId);
+		if (!tab) {
+			this.#replyError(conn, msg, `No tab with id ${ref.tabId}`);
+			return;
+		}
+		const result = (await this.#rpc({
+			op: "send",
+			tabId: ref.tabId,
+			method: msg.method,
+			params: msg.params,
+		})) as Record<string, unknown> | undefined;
+		const rootIdentifier = result?.identifier;
+		if (typeof rootIdentifier !== "string") {
+			this.#replyError(
+				conn,
+				msg,
+				"Page.addScriptToEvaluateOnNewDocument did not return an identifier",
+			);
+			return;
+		}
+		if (conn.sessions.get(sessionId) !== ref) {
+			this.#enqueuePreloadScriptCleanup(tab, [
+				{
+					ownerSessionId: sessionId,
+					clientIdentifier: rootIdentifier,
+					rootIdentifier,
+					params: msg.params,
+					sequence: 0,
+				},
+			]);
+			this.#replyError(conn, msg, `Unknown session id ${sessionId}`);
+			return;
+		}
+		const clientIdentifier = `preload:${ref.tabId}:${++this.#sessionSeq}`;
+		this.#rememberPreloadScript(
+			tab,
+			sessionId,
+			clientIdentifier,
+			rootIdentifier,
+			msg.params,
+		);
+		this.#reply(conn, msg, { ...(result ?? {}), identifier: clientIdentifier });
+	}
+
+	async #handlePreloadScriptRemove(
+		conn: CdpConnection,
+		msg: CdpCommand,
+		sessionId: string,
+		ref: SessionRef,
+	): Promise<void> {
+		await this.#awaitTabReady(ref.tabId);
+		if (conn.sessions.get(sessionId) !== ref) {
+			this.#replyError(conn, msg, `Unknown session id ${sessionId}`);
+			return;
+		}
+		const tab = this.#tabs.get(ref.tabId);
+		if (!tab) {
+			this.#replyError(conn, msg, `No tab with id ${ref.tabId}`);
+			return;
+		}
+		const clientIdentifier =
+			typeof msg.params?.identifier === "string"
+				? msg.params.identifier
+				: undefined;
+		const script = clientIdentifier
+			? this.#preloadScript(tab, sessionId, clientIdentifier)
+			: undefined;
+		const params =
+			script && clientIdentifier
+				? { ...(msg.params ?? {}), identifier: script.rootIdentifier }
+				: msg.params;
+		await this.#rpc({
+			op: "send",
+			tabId: ref.tabId,
+			method: msg.method,
+			params,
+		});
+		if (script && clientIdentifier)
+			this.#forgetPreloadScript(tab, sessionId, clientIdentifier);
+		this.#reply(conn, msg, {});
+	}
+
 	/** Reply to one `Runtime.enable` command with the shared enable's outcome. */
-	async #awaitEnable(conn: CdpConnection, msg: CdpCommand, enabling: Promise<void>): Promise<void> {
+	async #awaitEnable(
+		conn: CdpConnection,
+		msg: CdpCommand,
+		enabling: Promise<void>,
+	): Promise<void> {
 		try {
 			await enabling;
 			this.#reply(conn, msg, {});
 		} catch (err) {
-			this.#replyError(conn, msg, err instanceof Error ? err.message : String(err));
+			this.#replyError(
+				conn,
+				msg,
+				err instanceof Error ? err.message : String(err),
+			);
 		}
 	}
 
@@ -838,7 +1030,11 @@ export class RelayBridge {
 	 * contexts to it. Rejects if the root cycle fails so every joined caller
 	 * observes the failure instead of a spurious success.
 	 */
-	async #enableSessionRuntime(conn: CdpConnection, sessionId: string, ref: SessionRef): Promise<void> {
+	async #enableSessionRuntime(
+		conn: CdpConnection,
+		sessionId: string,
+		ref: SessionRef,
+	): Promise<void> {
 		const prev = ref.runtimeState;
 		const epoch = ++ref.runtimeEpoch;
 		ref.runtimeState = "enabled";
@@ -851,7 +1047,11 @@ export class RelayBridge {
 			await this.#ensureRuntimeEnabled(tab);
 			// A disable or newer enable may have taken ownership while the root
 			// RPC was in flight; only the latest enable may replay or roll back.
-			if (conn.sessions.get(sessionId) === ref && ref.runtimeEpoch === epoch && ref.runtimeState === "enabled") {
+			if (
+				conn.sessions.get(sessionId) === ref &&
+				ref.runtimeEpoch === epoch &&
+				ref.runtimeState === "enabled"
+			) {
 				this.#replayRuntimeContexts(conn, sessionId, ref, tab);
 			}
 		} catch (err) {
@@ -886,15 +1086,30 @@ export class RelayBridge {
 		// rejects the initialization. Wait for the tab to settle (hello + attach,
 		// looping across any socket swap) before cycling.
 		await this.#awaitTabReady(tab.tabId);
-		await this.#rpc({ op: "send", tabId: tab.tabId, method: "Runtime.disable" });
+		await this.#rpc({
+			op: "send",
+			tabId: tab.tabId,
+			method: "Runtime.disable",
+		});
 		await this.#rpc({ op: "send", tabId: tab.tabId, method: "Runtime.enable" });
 	}
 
-	#replayRuntimeContexts(conn: CdpConnection, sessionId: string, ref: SessionRef, tab: TabState): void {
+	#replayRuntimeContexts(
+		conn: CdpConnection,
+		sessionId: string,
+		ref: SessionRef,
+		tab: TabState,
+	): void {
 		for (const [contextId, params] of tab.runtimeContexts) {
 			if (ref.runtimeContexts.has(contextId)) continue;
 			ref.runtimeContexts.add(contextId);
-			conn.socket.send(JSON.stringify({ sessionId, method: "Runtime.executionContextCreated", params }));
+			conn.socket.send(
+				JSON.stringify({
+					sessionId,
+					method: "Runtime.executionContextCreated",
+					params,
+				}),
+			);
 		}
 	}
 
@@ -924,8 +1139,20 @@ export class RelayBridge {
 		// then sending would still race B's chrome.debugger.attach(). Loop until the
 		// tab settles against the current socket (hello delivered, attach quiesced).
 		await this.#awaitTabReady(tabId);
-		if (!this.#forwardingSessionIsCurrent(conn, msg, tabId, realSessionId, pageRef)) {
-			this.#replyError(conn, msg, `Unknown session id ${String(msg.sessionId)}`);
+		if (
+			!this.#forwardingSessionIsCurrent(
+				conn,
+				msg,
+				tabId,
+				realSessionId,
+				pageRef,
+			)
+		) {
+			this.#replyError(
+				conn,
+				msg,
+				`Unknown session id ${String(msg.sessionId)}`,
+			);
 			return;
 		}
 		// Relay-private claim: the omp tab worker marks the page it was spawned
@@ -937,7 +1164,10 @@ export class RelayBridge {
 			this.#reply(conn, msg, {});
 			return;
 		}
-		const pendingSubscription = pageRef && msg.sessionId ? this.#trackPendingSubscription(tabId, msg) : null;
+		const pendingSubscription =
+			pageRef && msg.sessionId
+				? this.#trackPendingSubscription(tabId, msg)
+				: null;
 		try {
 			const result = await this.#rpc({
 				op: "send",
@@ -946,26 +1176,52 @@ export class RelayBridge {
 				method: msg.method,
 				params: msg.params,
 			});
-			const forwardingSessionIsCurrent = this.#forwardingSessionIsCurrent(conn, msg, tabId, realSessionId, pageRef);
+			const forwardingSessionIsCurrent = this.#forwardingSessionIsCurrent(
+				conn,
+				msg,
+				tabId,
+				realSessionId,
+				pageRef,
+			);
 			if (pageRef && msg.sessionId) {
-				this.#recordSubscription(tabId, msg, msg.sessionId, forwardingSessionIsCurrent);
+				this.#recordSubscription(
+					tabId,
+					msg,
+					msg.sessionId,
+					forwardingSessionIsCurrent,
+				);
 			}
 			pendingSubscription?.resolve();
 			if (pageRef && msg.sessionId && !forwardingSessionIsCurrent) {
 				await this.#cleanupOrphanedCompletedSubscription(tabId, msg);
 			}
 			if (!forwardingSessionIsCurrent) {
-				this.#replyError(conn, msg, `Unknown session id ${String(msg.sessionId)}`);
+				this.#replyError(
+					conn,
+					msg,
+					`Unknown session id ${String(msg.sessionId)}`,
+				);
 				return;
 			}
-			this.#reply(conn, msg, (result as Record<string, unknown> | undefined) ?? {});
+			this.#reply(
+				conn,
+				msg,
+				(result as Record<string, unknown> | undefined) ?? {},
+			);
 		} catch (err) {
 			pendingSubscription?.resolve();
-			this.#replyError(conn, msg, err instanceof Error ? err.message : String(err));
+			this.#replyError(
+				conn,
+				msg,
+				err instanceof Error ? err.message : String(err),
+			);
 		}
 	}
 
-	#trackPendingSubscription(tabId: number, msg: CdpCommand): { resolve: () => void } | null {
+	#trackPendingSubscription(
+		tabId: number,
+		msg: CdpCommand,
+	): { resolve: () => void } | null {
 		const tab = this.#tabs.get(tabId);
 		const key = this.#subscriptionTrackingKey(msg);
 		if (!tab || !key) return null;
@@ -985,11 +1241,20 @@ export class RelayBridge {
 		};
 	}
 
-	async #cleanupOrphanedCompletedSubscription(tabId: number, msg: CdpCommand): Promise<void> {
+	async #cleanupOrphanedCompletedSubscription(
+		tabId: number,
+		msg: CdpCommand,
+	): Promise<void> {
 		const tab = this.#tabs.get(tabId);
 		const key = this.#subscriptionTrackingKey(msg);
 		if (!tab || !key) return;
-		if (!tab.attached || tab.detaching || tab.restoring || this.#sessionHolders(tabId).length === 0) return;
+		if (
+			!tab.attached ||
+			tab.detaching ||
+			tab.restoring ||
+			this.#sessionHolders(tabId).length === 0
+		)
+			return;
 		const expectedExt = this.#ext;
 		if (!expectedExt) return;
 		const orphaned = {
@@ -1001,16 +1266,28 @@ export class RelayBridge {
 		const disable = this.#subscriptionDisableCommand(orphaned);
 		if (!disable) return;
 		await this.#awaitPendingSubscriptions(tab, key);
-		if (!tab.attached || tab.detaching || tab.restoring || this.#sessionHolders(tabId).length === 0) return;
+		if (
+			!tab.attached ||
+			tab.detaching ||
+			tab.restoring ||
+			this.#sessionHolders(tabId).length === 0
+		)
+			return;
 		const current = this.#latestSubscriptionForKey(tab, key);
 		const previous =
 			key === "Emulation.setEmulatedMedia"
 				? {
 						...orphaned,
-						params: applySubscriptionUpdate(key, current?.params, orphaned.params),
+						params: applySubscriptionUpdate(
+							key,
+							current?.params,
+							orphaned.params,
+						),
 					}
 				: orphaned;
-		this.#scheduleLiveSubscriptionReconcile(tab, [{ key, previous, next: current }]);
+		this.#scheduleLiveSubscriptionReconcile(tab, [
+			{ key, previous, next: current },
+		]);
 	}
 
 	#forwardingSessionIsCurrent(
@@ -1020,8 +1297,13 @@ export class RelayBridge {
 		realSessionId: string | undefined,
 		pageRef: SessionRef | undefined,
 	): boolean {
-		if (pageRef) return typeof msg.sessionId === "string" && conn.sessions.get(msg.sessionId) === pageRef;
-		if (realSessionId) return this.#realSessionTabs.get(realSessionId) === tabId;
+		if (pageRef)
+			return (
+				typeof msg.sessionId === "string" &&
+				conn.sessions.get(msg.sessionId) === pageRef
+			);
+		if (realSessionId)
+			return this.#realSessionTabs.get(realSessionId) === tabId;
 		return true;
 	}
 
@@ -1034,13 +1316,22 @@ export class RelayBridge {
 	 * Owner-bound enables/setters, however, should only be journaled while the
 	 * originating pseudo-session is still live.
 	 */
-	#recordSubscription(tabId: number, msg: CdpCommand, ownerSessionId: string, ownerIsCurrent: boolean): void {
+	#recordSubscription(
+		tabId: number,
+		msg: CdpCommand,
+		ownerSessionId: string,
+		ownerIsCurrent: boolean,
+	): void {
 		const tab = this.#tabs.get(tabId);
 		if (!tab) return;
 		const separator = msg.method.indexOf(".");
 		const domain = separator > 0 ? msg.method.slice(0, separator) : "";
 		const command = separator > 0 ? msg.method.slice(separator + 1) : "";
-		if (domain && domain !== "Runtime" && (command === "enable" || command === "disable")) {
+		if (
+			domain &&
+			domain !== "Runtime" &&
+			(command === "enable" || command === "disable")
+		) {
 			const key = `${domain}.enable`;
 			if (command === "disable") {
 				tab.subscriptions.delete(key);
@@ -1116,10 +1407,14 @@ export class RelayBridge {
 			case "Emulation.setEmulatedVisionDeficiency": {
 				if (
 					!hasObjectKeys(msg.params) ||
-					(msg.method === "Emulation.setFocusEmulationEnabled" && msg.params?.enabled === false) ||
-					(msg.method === "Emulation.setScrollbarsHidden" && msg.params?.hidden === false) ||
-					(msg.method === "Emulation.setLocaleOverride" && msg.params?.locale === "") ||
-					(msg.method === "Emulation.setEmulatedVisionDeficiency" && msg.params?.type === "none")
+					(msg.method === "Emulation.setFocusEmulationEnabled" &&
+						msg.params?.enabled === false) ||
+					(msg.method === "Emulation.setScrollbarsHidden" &&
+						msg.params?.hidden === false) ||
+					(msg.method === "Emulation.setLocaleOverride" &&
+						msg.params?.locale === "") ||
+					(msg.method === "Emulation.setEmulatedVisionDeficiency" &&
+						msg.params?.type === "none")
 				) {
 					this.#forgetTabSubscription(tab, subscriptionKey(msg.method));
 					return;
@@ -1128,7 +1423,8 @@ export class RelayBridge {
 				const sequence = ++this.#subscriptionSeq;
 				if (msg.method === "Emulation.setEmulatedMedia") {
 					const clears = subscriptionClearedFields(key, msg.params);
-					if (clears) this.#rememberTabSubscriptionClear(tab, key, clears, sequence);
+					if (clears)
+						this.#rememberTabSubscriptionClear(tab, key, clears, sequence);
 				}
 				if (!ownerIsCurrent) return;
 				this.#rememberSessionSubscription(tab, key, ownerSessionId, {
@@ -1145,12 +1441,17 @@ export class RelayBridge {
 					return;
 				}
 				if (!ownerIsCurrent) return;
-				this.#rememberSessionSubscription(tab, subscriptionKey(msg.method), ownerSessionId, {
-					method: msg.method,
-					params: msg.params,
+				this.#rememberSessionSubscription(
+					tab,
+					subscriptionKey(msg.method),
 					ownerSessionId,
-					sequence: ++this.#subscriptionSeq,
-				});
+					{
+						method: msg.method,
+						params: msg.params,
+						ownerSessionId,
+						sequence: ++this.#subscriptionSeq,
+					},
+				);
 				return;
 			case "Emulation.setCPUThrottlingRate":
 				if (msg.params?.rate === 1) {
@@ -1158,12 +1459,17 @@ export class RelayBridge {
 					return;
 				}
 				if (!ownerIsCurrent) return;
-				this.#rememberSessionSubscription(tab, subscriptionKey(msg.method), ownerSessionId, {
-					method: msg.method,
-					params: msg.params,
+				this.#rememberSessionSubscription(
+					tab,
+					subscriptionKey(msg.method),
 					ownerSessionId,
-					sequence: ++this.#subscriptionSeq,
-				});
+					{
+						method: msg.method,
+						params: msg.params,
+						ownerSessionId,
+						sequence: ++this.#subscriptionSeq,
+					},
+				);
 				return;
 			case "Emulation.setScriptExecutionDisabled":
 				if (msg.params?.value === false) {
@@ -1171,12 +1477,17 @@ export class RelayBridge {
 					return;
 				}
 				if (!ownerIsCurrent) return;
-				this.#rememberSessionSubscription(tab, subscriptionKey(msg.method), ownerSessionId, {
-					method: msg.method,
-					params: msg.params,
+				this.#rememberSessionSubscription(
+					tab,
+					subscriptionKey(msg.method),
 					ownerSessionId,
-					sequence: ++this.#subscriptionSeq,
-				});
+					{
+						method: msg.method,
+						params: msg.params,
+						ownerSessionId,
+						sequence: ++this.#subscriptionSeq,
+					},
+				);
 				return;
 			case "Emulation.clearDeviceMetricsOverride":
 			case "Page.clearDeviceMetricsOverride":
@@ -1194,12 +1505,17 @@ export class RelayBridge {
 					return;
 				}
 				if (!ownerIsCurrent) return;
-				this.#rememberSessionSubscription(tab, subscriptionKey(msg.method), ownerSessionId, {
-					method: msg.method,
-					params: msg.params,
+				this.#rememberSessionSubscription(
+					tab,
+					subscriptionKey(msg.method),
 					ownerSessionId,
-					sequence: ++this.#subscriptionSeq,
-				});
+					{
+						method: msg.method,
+						params: msg.params,
+						ownerSessionId,
+						sequence: ++this.#subscriptionSeq,
+					},
+				);
 				return;
 			case "Security.setIgnoreCertificateErrors":
 				if (msg.params?.ignore === false) {
@@ -1207,12 +1523,17 @@ export class RelayBridge {
 					return;
 				}
 				if (!ownerIsCurrent) return;
-				this.#rememberSessionSubscription(tab, subscriptionKey(msg.method), ownerSessionId, {
-					method: msg.method,
-					params: msg.params,
+				this.#rememberSessionSubscription(
+					tab,
+					subscriptionKey(msg.method),
 					ownerSessionId,
-					sequence: ++this.#subscriptionSeq,
-				});
+					{
+						method: msg.method,
+						params: msg.params,
+						ownerSessionId,
+						sequence: ++this.#subscriptionSeq,
+					},
+				);
 				return;
 			case "Emulation.setDeviceMetricsOverride":
 			case "Page.setDeviceMetricsOverride":
@@ -1230,7 +1551,8 @@ export class RelayBridge {
 				// winning command for each setter so preserved pseudo-sessions keep the
 				// state they previously established.
 				if (
-					(msg.method === "Network.setUserAgentOverride" || msg.method === "Emulation.setUserAgentOverride") &&
+					(msg.method === "Network.setUserAgentOverride" ||
+						msg.method === "Emulation.setUserAgentOverride") &&
 					isEmptyUserAgentOverride(msg.params)
 				) {
 					this.#forgetTabSubscription(tab, subscriptionKey(msg.method));
@@ -1238,22 +1560,33 @@ export class RelayBridge {
 				}
 				if (
 					msg.method === "Emulation.setHardwareConcurrencyOverride" &&
-					isDefaultHardwareConcurrency(msg.params, this.#extInfo?.hardwareConcurrency)
+					isDefaultHardwareConcurrency(
+						msg.params,
+						this.#extInfo?.hardwareConcurrency,
+					)
 				) {
 					this.#forgetTabSubscription(tab, subscriptionKey(msg.method));
 					return;
 				}
-				if (msg.method === "Emulation.setDefaultBackgroundColorOverride" && !hasObjectKeys(msg.params)) {
+				if (
+					msg.method === "Emulation.setDefaultBackgroundColorOverride" &&
+					!hasObjectKeys(msg.params)
+				) {
 					this.#forgetTabSubscription(tab, subscriptionKey(msg.method));
 					return;
 				}
 				if (!ownerIsCurrent) return;
-				this.#rememberSessionSubscription(tab, subscriptionKey(msg.method), ownerSessionId, {
-					method: msg.method,
-					params: msg.params,
+				this.#rememberSessionSubscription(
+					tab,
+					subscriptionKey(msg.method),
 					ownerSessionId,
-					sequence: ++this.#subscriptionSeq,
-				});
+					{
+						method: msg.method,
+						params: msg.params,
+						ownerSessionId,
+						sequence: ++this.#subscriptionSeq,
+					},
+				);
 				return;
 			case "Network.clearAcceptedEncodings":
 				this.#forgetTabSubscription(tab, subscriptionKey(msg.method));
@@ -1269,12 +1602,17 @@ export class RelayBridge {
 					return;
 				}
 				if (!ownerIsCurrent) return;
-				this.#rememberSessionSubscription(tab, subscriptionKey(msg.method), ownerSessionId, {
-					method: msg.method,
-					params: msg.params,
+				this.#rememberSessionSubscription(
+					tab,
+					subscriptionKey(msg.method),
 					ownerSessionId,
-					sequence: ++this.#subscriptionSeq,
-				});
+					{
+						method: msg.method,
+						params: msg.params,
+						ownerSessionId,
+						sequence: ++this.#subscriptionSeq,
+					},
+				);
 				return;
 			default:
 				return;
@@ -1292,18 +1630,27 @@ export class RelayBridge {
 					this.#forgetTabSubscription(tab, subscriptionKey(msg.method));
 					break;
 				default:
-					this.#forgetSessionSubscription(tab, subscriptionKey(msg.method), ownerSessionId);
+					this.#forgetSessionSubscription(
+						tab,
+						subscriptionKey(msg.method),
+						ownerSessionId,
+					);
 					break;
 			}
 			return;
 		}
 		if (!ownerIsCurrent) return;
-		this.#rememberSessionSubscription(tab, subscriptionKey(msg.method), ownerSessionId, {
-			method: msg.method,
-			params: msg.params,
+		this.#rememberSessionSubscription(
+			tab,
+			subscriptionKey(msg.method),
 			ownerSessionId,
-			sequence: ++this.#subscriptionSeq,
-		});
+			{
+				method: msg.method,
+				params: msg.params,
+				ownerSessionId,
+				sequence: ++this.#subscriptionSeq,
+			},
+		);
 	}
 
 	#rememberSessionSubscription(
@@ -1320,7 +1667,11 @@ export class RelayBridge {
 		const previous = owners.get(ownerSessionId);
 		owners.set(ownerSessionId, {
 			...subscription,
-			params: mergeSubscriptionParams(key, previous?.params, subscription.params),
+			params: mergeSubscriptionParams(
+				key,
+				previous?.params,
+				subscription.params,
+			),
 			fieldSequences: mergeSubscriptionFieldSequences(
 				key,
 				previous?.fieldSequences,
@@ -1330,13 +1681,22 @@ export class RelayBridge {
 		});
 	}
 
-	#rememberTabSubscriptionClear(tab: TabState, key: string, clears: Record<string, number>, sequence: number): void {
+	#rememberTabSubscriptionClear(
+		tab: TabState,
+		key: string,
+		clears: Record<string, number>,
+		sequence: number,
+	): void {
 		const merged = { ...(tab.subscriptionClears.get(key) ?? {}) };
 		for (const field of Object.keys(clears)) merged[field] = sequence;
 		tab.subscriptionClears.set(key, merged);
 	}
 
-	#forgetSessionSubscription(tab: TabState, key: string, ownerSessionId: string): void {
+	#forgetSessionSubscription(
+		tab: TabState,
+		key: string,
+		ownerSessionId: string,
+	): void {
 		const owners = tab.subscriptions.get(key);
 		if (!owners) return;
 		owners.delete(ownerSessionId);
@@ -1348,10 +1708,134 @@ export class RelayBridge {
 		tab.subscriptionClears.delete(key);
 	}
 
-	#forgetSessionSubscriptions(tabId: number, sessionIds: Iterable<string>): void {
+	#rememberPreloadScript(
+		tab: TabState,
+		ownerSessionId: string,
+		clientIdentifier: string,
+		rootIdentifier: string,
+		params: Record<string, unknown> | undefined,
+	): void {
+		let scripts = tab.preloadScripts.get(ownerSessionId);
+		if (!scripts) {
+			scripts = new Map();
+			tab.preloadScripts.set(ownerSessionId, scripts);
+		}
+		scripts.set(clientIdentifier, {
+			ownerSessionId,
+			clientIdentifier,
+			rootIdentifier,
+			params,
+			sequence: ++this.#subscriptionSeq,
+		});
+	}
+
+	#preloadScript(
+		tab: TabState,
+		ownerSessionId: string,
+		clientIdentifier: string,
+	): PreservedPreloadScript | undefined {
+		return tab.preloadScripts.get(ownerSessionId)?.get(clientIdentifier);
+	}
+
+	#forgetPreloadScript(
+		tab: TabState,
+		ownerSessionId: string,
+		clientIdentifier: string,
+	): PreservedPreloadScript | undefined {
+		const scripts = tab.preloadScripts.get(ownerSessionId);
+		if (!scripts) return undefined;
+		const script = scripts.get(clientIdentifier);
+		if (!script) return undefined;
+		scripts.delete(clientIdentifier);
+		if (scripts.size === 0) tab.preloadScripts.delete(ownerSessionId);
+		return script;
+	}
+
+	#enqueuePreloadScriptCleanup(
+		tab: TabState,
+		scripts: PreservedPreloadScript[],
+	): void {
+		if (scripts.length === 0) return;
+		tab.pendingPreloadScriptCleanup.push(...scripts);
+		this.#scheduleLivePreloadScriptCleanup(tab);
+	}
+
+	#scheduleLivePreloadScriptCleanup(tab: TabState): void {
+		if (tab.pendingPreloadScriptCleanup.length === 0) return;
+		if (
+			!tab.attached ||
+			tab.detaching ||
+			tab.restoring ||
+			this.#sessionHolders(tab.tabId).length === 0
+		)
+			return;
+		const expectedExt = this.#ext;
+		if (!expectedExt) return;
+		const prior = tab.preloadScriptCleaning ?? Promise.resolve();
+		const task = prior
+			.catch(() => {})
+			.then(async () => {
+				while (true) {
+					if (tab.pendingPreloadScriptCleanup.length === 0) return;
+					if (
+						!tab.attached ||
+						tab.detaching ||
+						tab.restoring ||
+						this.#sessionHolders(tab.tabId).length === 0
+					)
+						return;
+					const script = tab.pendingPreloadScriptCleanup[0];
+					this.#assertExtensionCurrent(expectedExt);
+					await this.#rpc({
+						op: "send",
+						tabId: tab.tabId,
+						method: "Page.removeScriptToEvaluateOnNewDocument",
+						params: { identifier: script.rootIdentifier },
+					});
+					this.#assertExtensionCurrent(expectedExt);
+					if (tab.pendingPreloadScriptCleanup[0] === script)
+						tab.pendingPreloadScriptCleanup.shift();
+				}
+			})
+			.catch((err) => {
+				if (isExtensionTransportInterrupted(err)) return;
+				tab.pendingPreloadScriptCleanup = [];
+				this.#log("preload script cleanup failed", {
+					tabId: tab.tabId,
+					error: err instanceof Error ? err.message : String(err),
+				});
+			});
+		tab.preloadScriptCleaning = task.finally(() => {
+			if (tab.preloadScriptCleaning === task) tab.preloadScriptCleaning = null;
+		});
+	}
+
+	#forgetSessionPreloadScripts(
+		tabId: number,
+		sessionIds: Iterable<string>,
+	): void {
 		const tab = this.#tabs.get(tabId);
 		if (!tab) return;
-		const previousByKey = new Map<string, SessionRootSubscription | undefined>();
+		const removed: PreservedPreloadScript[] = [];
+		for (const sessionId of sessionIds) {
+			const scripts = tab.preloadScripts.get(sessionId);
+			if (!scripts) continue;
+			removed.push(...scripts.values());
+			tab.preloadScripts.delete(sessionId);
+		}
+		this.#enqueuePreloadScriptCleanup(tab, removed);
+	}
+
+	#forgetSessionSubscriptions(
+		tabId: number,
+		sessionIds: Iterable<string>,
+	): void {
+		const tab = this.#tabs.get(tabId);
+		if (!tab) return;
+		const previousByKey = new Map<
+			string,
+			SessionRootSubscription | undefined
+		>();
 		for (const key of tab.subscriptions.keys()) {
 			previousByKey.set(key, this.#latestSubscriptionForKey(tab, key));
 		}
@@ -1362,7 +1846,11 @@ export class RelayBridge {
 			}
 		}
 		const changes = [...previousByKey.entries()]
-			.map(([key, previous]) => ({ key, previous, next: this.#latestSubscriptionForKey(tab, key) }))
+			.map(([key, previous]) => ({
+				key,
+				previous,
+				next: this.#latestSubscriptionForKey(tab, key),
+			}))
 			.filter(({ previous, next }) => !subscriptionEquals(previous, next));
 		this.#scheduleLiveSubscriptionReconcile(tab, changes);
 	}
@@ -1376,8 +1864,17 @@ export class RelayBridge {
 		}>,
 	): void {
 		if (changes.length === 0) return;
-		tab.pendingSubscriptionReconcile = mergeSubscriptionChanges(tab.pendingSubscriptionReconcile, changes);
-		if (!tab.attached || tab.detaching || tab.restoring || this.#sessionHolders(tab.tabId).length === 0) return;
+		tab.pendingSubscriptionReconcile = mergeSubscriptionChanges(
+			tab.pendingSubscriptionReconcile,
+			changes,
+		);
+		if (
+			!tab.attached ||
+			tab.detaching ||
+			tab.restoring ||
+			this.#sessionHolders(tab.tabId).length === 0
+		)
+			return;
 		const expectedExt = this.#ext;
 		if (!expectedExt) return;
 		const prior = tab.subscriptionReconciling ?? Promise.resolve();
@@ -1385,48 +1882,76 @@ export class RelayBridge {
 			.catch(() => {})
 			.then(async () => {
 				while (true) {
-					if (!tab.attached || tab.detaching || tab.restoring || this.#sessionHolders(tab.tabId).length === 0)
+					if (
+						!tab.attached ||
+						tab.detaching ||
+						tab.restoring ||
+						this.#sessionHolders(tab.tabId).length === 0
+					)
 						return;
 					this.#assertExtensionCurrent(expectedExt);
-					const change = [...tab.pendingSubscriptionReconcile].sort((left, right) => {
-						const leftSeq = left.next?.sequence ?? left.previous?.sequence ?? Number.MAX_SAFE_INTEGER;
-						const rightSeq = right.next?.sequence ?? right.previous?.sequence ?? Number.MAX_SAFE_INTEGER;
-						return leftSeq - rightSeq;
-					})[0];
+					const change = [...tab.pendingSubscriptionReconcile].sort(
+						(left, right) => {
+							const leftSeq =
+								left.next?.sequence ??
+								left.previous?.sequence ??
+								Number.MAX_SAFE_INTEGER;
+							const rightSeq =
+								right.next?.sequence ??
+								right.previous?.sequence ??
+								Number.MAX_SAFE_INTEGER;
+							return leftSeq - rightSeq;
+						},
+					)[0];
 					if (!change) return;
 					await this.#awaitPendingSubscriptions(tab, change.key);
-					const queued = tab.pendingSubscriptionReconcile.find(candidate => candidate.key === change.key);
+					const queued = tab.pendingSubscriptionReconcile.find(
+						(candidate) => candidate.key === change.key,
+					);
 					if (!queued) continue;
 					const current = this.#latestSubscriptionForKey(tab, change.key);
 					if (!subscriptionEquals(current, queued.next)) {
 						if (subscriptionChangeEquals(queued, change)) {
-							tab.pendingSubscriptionReconcile = tab.pendingSubscriptionReconcile.filter(
-								candidate => candidate.key !== change.key,
-							);
+							tab.pendingSubscriptionReconcile =
+								tab.pendingSubscriptionReconcile.filter(
+									(candidate) => candidate.key !== change.key,
+								);
 						}
 						continue;
 					}
-					const command = this.#subscriptionReconcileCommand(queued.previous, current);
+					const command = this.#subscriptionReconcileCommand(
+						queued.previous,
+						current,
+					);
 					if (!command) {
 						if (subscriptionChangeEquals(queued, change)) {
-							tab.pendingSubscriptionReconcile = tab.pendingSubscriptionReconcile.filter(
-								candidate => candidate.key !== change.key,
-							);
+							tab.pendingSubscriptionReconcile =
+								tab.pendingSubscriptionReconcile.filter(
+									(candidate) => candidate.key !== change.key,
+								);
 						}
 						continue;
 					}
 					this.#assertExtensionCurrent(expectedExt);
-					await this.#rpc({ op: "send", tabId: tab.tabId, method: command.method, params: command.params });
+					await this.#rpc({
+						op: "send",
+						tabId: tab.tabId,
+						method: command.method,
+						params: command.params,
+					});
 					this.#assertExtensionCurrent(expectedExt);
-					const after = tab.pendingSubscriptionReconcile.find(candidate => candidate.key === change.key);
+					const after = tab.pendingSubscriptionReconcile.find(
+						(candidate) => candidate.key === change.key,
+					);
 					if (after && subscriptionChangeEquals(after, queued)) {
-						tab.pendingSubscriptionReconcile = tab.pendingSubscriptionReconcile.filter(
-							candidate => candidate.key !== change.key,
-						);
+						tab.pendingSubscriptionReconcile =
+							tab.pendingSubscriptionReconcile.filter(
+								(candidate) => candidate.key !== change.key,
+							);
 					}
 				}
 			})
-			.catch(err => {
+			.catch((err) => {
 				if (isExtensionTransportInterrupted(err)) return;
 				tab.pendingSubscriptionReconcile = [];
 				this.#log("live subscription cleanup failed", {
@@ -1435,14 +1960,16 @@ export class RelayBridge {
 				});
 			});
 		tab.subscriptionReconciling = task.finally(() => {
-			if (tab.subscriptionReconciling === task) tab.subscriptionReconciling = null;
+			if (tab.subscriptionReconciling === task)
+				tab.subscriptionReconciling = null;
 		});
 	}
 
 	#pruneSubscriptions(tab: TabState, keepPageSessions: CdpConnection[]): void {
 		const liveSessions = new Set<string>();
 		for (const conn of keepPageSessions) {
-			for (const pageSession of conn.sessionsForTab(tab.tabId, "page")) liveSessions.add(pageSession);
+			for (const pageSession of conn.sessionsForTab(tab.tabId, "page"))
+				liveSessions.add(pageSession);
 		}
 		if (liveSessions.size === 0) {
 			tab.subscriptions.clear();
@@ -1456,16 +1983,45 @@ export class RelayBridge {
 		}
 	}
 
-	#sessionOwnsTab(conn: CdpConnection, tabId: number, sessionId: string): boolean {
+	#prunePreloadScripts(tab: TabState, keepPageSessions: CdpConnection[]): void {
+		const liveSessions = new Set<string>();
+		for (const conn of keepPageSessions) {
+			for (const pageSession of conn.sessionsForTab(tab.tabId, "page"))
+				liveSessions.add(pageSession);
+		}
+		if (liveSessions.size === 0) {
+			tab.preloadScripts.clear();
+			tab.pendingPreloadScriptCleanup = [];
+			return;
+		}
+		const removed: PreservedPreloadScript[] = [];
+		for (const [ownerSessionId, scripts] of tab.preloadScripts) {
+			if (liveSessions.has(ownerSessionId)) continue;
+			removed.push(...scripts.values());
+			tab.preloadScripts.delete(ownerSessionId);
+		}
+		this.#enqueuePreloadScriptCleanup(tab, removed);
+	}
+
+	#sessionOwnsTab(
+		conn: CdpConnection,
+		tabId: number,
+		sessionId: string,
+	): boolean {
 		const ref = conn.sessions.get(sessionId);
 		return ref?.kind === "page" && ref.tabId === tabId;
 	}
 
-	#latestSubscriptionForKey(tab: TabState, key: string): SessionRootSubscription | undefined {
+	#latestSubscriptionForKey(
+		tab: TabState,
+		key: string,
+	): SessionRootSubscription | undefined {
 		const owners = tab.subscriptions.get(key);
 		if (!owners && !tab.subscriptionClears.has(key)) return undefined;
 		if (!owners) return undefined;
-		const ordered = [...owners.values()].sort((left, right) => left.sequence - right.sequence);
+		const ordered = [...owners.values()].sort(
+			(left, right) => left.sequence - right.sequence,
+		);
 		const latest = ordered.at(-1);
 		if (!latest) return undefined;
 		if (key !== "Emulation.setEmulatedMedia") return latest;
@@ -1473,8 +2029,15 @@ export class RelayBridge {
 		const fieldSequences: Record<string, number> = {};
 		const fieldOwners: Record<string, string> = {};
 		for (const subscription of ordered) {
-			for (const [field, sequence] of Object.entries(subscription.fieldSequences ?? {})) {
-				if (fieldSequences[field] !== undefined && fieldSequences[field]! >= sequence) continue;
+			for (const [field, sequence] of Object.entries(
+				subscription.fieldSequences ?? {},
+			)) {
+				const existingSequence = fieldSequences[field];
+				if (
+					existingSequence !== undefined &&
+					existingSequence >= sequence
+				)
+					continue;
 				if (subscription.params && field in subscription.params) {
 					params[field] = subscription.params[field];
 					fieldSequences[field] = sequence;
@@ -1482,8 +2045,11 @@ export class RelayBridge {
 				}
 			}
 		}
-		for (const [field, sequence] of Object.entries(tab.subscriptionClears.get(key) ?? {})) {
-			if (fieldSequences[field] === undefined || fieldSequences[field]! <= sequence) {
+		for (const [field, sequence] of Object.entries(
+			tab.subscriptionClears.get(key) ?? {},
+		)) {
+			const existingSequence = fieldSequences[field];
+			if (existingSequence === undefined || existingSequence <= sequence) {
 				delete params[field];
 				delete fieldSequences[field];
 				delete fieldOwners[field];
@@ -1495,10 +2061,13 @@ export class RelayBridge {
 			.at(-1);
 		return {
 			...latest,
-			ownerSessionId: latestField ? fieldOwners[latestField[0]] : latest.ownerSessionId,
+			ownerSessionId: latestField
+				? fieldOwners[latestField[0]]
+				: latest.ownerSessionId,
 			sequence: latestField?.[1] ?? latest.sequence,
 			params: Object.keys(params).length > 0 ? params : undefined,
-			fieldSequences: Object.keys(fieldSequences).length > 0 ? fieldSequences : undefined,
+			fieldSequences:
+				Object.keys(fieldSequences).length > 0 ? fieldSequences : undefined,
 		};
 	}
 
@@ -1514,7 +2083,11 @@ export class RelayBridge {
 		const separator = msg.method.indexOf(".");
 		const domain = separator > 0 ? msg.method.slice(0, separator) : "";
 		const command = separator > 0 ? msg.method.slice(separator + 1) : "";
-		if (domain && domain !== "Runtime" && (command === "enable" || command === "disable")) {
+		if (
+			domain &&
+			domain !== "Runtime" &&
+			(command === "enable" || command === "disable")
+		) {
 			return `${domain}.enable`;
 		}
 		switch (msg.method) {
@@ -1569,8 +2142,16 @@ export class RelayBridge {
 		subscription: SessionRootSubscription,
 		conns: CdpConnection[],
 	): boolean {
-		if (!subscriptionEquals(this.#latestSubscriptionForKey(tab, key), subscription)) return false;
-		return conns.some(conn => this.#sessionOwnsTab(conn, tab.tabId, subscription.ownerSessionId));
+		if (
+			!subscriptionEquals(
+				this.#latestSubscriptionForKey(tab, key),
+				subscription,
+			)
+		)
+			return false;
+		return conns.some((conn) =>
+			this.#sessionOwnsTab(conn, tab.tabId, subscription.ownerSessionId),
+		);
 	}
 
 	#nextPreservedSubscription(
@@ -1578,15 +2159,25 @@ export class RelayBridge {
 		conns: CdpConnection[],
 		replayed: Map<string, SessionRootSubscription>,
 	): { key: string; subscription: SessionRootSubscription } | undefined {
-		const subscriptions: Array<{ key: string; subscription: SessionRootSubscription }> = [];
+		const subscriptions: Array<{
+			key: string;
+			subscription: SessionRootSubscription;
+		}> = [];
 		for (const key of tab.subscriptions.keys()) {
 			const subscription = this.#latestSubscriptionForKey(tab, key);
 			if (!subscription) continue;
 			if (subscriptionEquals(replayed.get(key), subscription)) continue;
-			if (!conns.some(conn => this.#sessionOwnsTab(conn, tab.tabId, subscription.ownerSessionId))) continue;
+			if (
+				!conns.some((conn) =>
+					this.#sessionOwnsTab(conn, tab.tabId, subscription.ownerSessionId),
+				)
+			)
+				continue;
 			subscriptions.push({ key, subscription });
 		}
-		subscriptions.sort((a, b) => a.subscription.sequence - b.subscription.sequence);
+		subscriptions.sort(
+			(a, b) => a.subscription.sequence - b.subscription.sequence,
+		);
 		return subscriptions[0];
 	}
 
@@ -1597,7 +2188,10 @@ export class RelayBridge {
 		replayed: Map<string, SessionRootSubscription>,
 	): Promise<void> {
 		const stale = [...replayed.entries()]
-			.filter(([key, subscription]) => !this.#isCurrentPreservedSubscription(tab, key, subscription, conns))
+			.filter(
+				([key, subscription]) =>
+					!this.#isCurrentPreservedSubscription(tab, key, subscription, conns),
+			)
 			.sort((a, b) => a[1].sequence - b[1].sequence);
 		for (const [key, subscription] of stale) {
 			replayed.delete(key);
@@ -1623,7 +2217,11 @@ export class RelayBridge {
 			if (previous && subscriptionEquals(next, previous)) return null;
 			return {
 				method: next.method,
-				params: reconcileSubscriptionParams(subscriptionKey(next.method), previous?.params, next.params),
+				params: reconcileSubscriptionParams(
+					subscriptionKey(next.method),
+					previous?.params,
+					next.params,
+				),
 			};
 		}
 		return previous ? this.#subscriptionDisableCommand(previous) : null;
@@ -1633,7 +2231,9 @@ export class RelayBridge {
 		subscription: SessionRootSubscription,
 	): { method: string; params?: Record<string, unknown> } | null {
 		if (subscription.method.endsWith(".enable")) {
-			return { method: `${subscription.method.slice(0, -".enable".length)}.disable` };
+			return {
+				method: `${subscription.method.slice(0, -".enable".length)}.disable`,
+			};
 		}
 		switch (subscription.method) {
 			case "Target.setAutoAttach": {
@@ -1648,7 +2248,9 @@ export class RelayBridge {
 						...params,
 						autoAttach: false,
 						waitForDebuggerOnStart:
-							typeof params.waitForDebuggerOnStart === "boolean" ? params.waitForDebuggerOnStart : false,
+							typeof params.waitForDebuggerOnStart === "boolean"
+								? params.waitForDebuggerOnStart
+								: false,
 					},
 				};
 			}
@@ -1680,9 +2282,15 @@ export class RelayBridge {
 			case "Network.setExtraHTTPHeaders":
 				return { method: subscription.method, params: { headers: {} } };
 			case "Network.setBlockedURLs":
-				return { method: subscription.method, params: { urls: [], urlPatterns: [] } };
+				return {
+					method: subscription.method,
+					params: { urls: [], urlPatterns: [] },
+				};
 			case "Network.setCacheDisabled":
-				return { method: subscription.method, params: { cacheDisabled: false } };
+				return {
+					method: subscription.method,
+					params: { cacheDisabled: false },
+				};
 			case "Network.setBypassServiceWorker":
 				return { method: subscription.method, params: { bypass: false } };
 			case "Network.setAcceptedEncodings":
@@ -1701,8 +2309,11 @@ export class RelayBridge {
 				return {
 					method: subscription.method,
 					params:
-						reconcileSubscriptionParams(subscriptionKey(subscription.method), subscription.params, undefined) ??
-						{},
+						reconcileSubscriptionParams(
+							subscriptionKey(subscription.method),
+							subscription.params,
+							undefined,
+						) ?? {},
 				};
 			case "Emulation.setLocaleOverride":
 				return { method: subscription.method, params: {} };
@@ -1776,7 +2387,11 @@ export class RelayBridge {
 	}
 
 	/** Tab pseudo-sessions only exist to satisfy puppeteer's Target hierarchy. */
-	#handleTabSessionCommand(conn: CdpConnection, msg: CdpCommand, ref: SessionRef): void {
+	#handleTabSessionCommand(
+		conn: CdpConnection,
+		msg: CdpCommand,
+		ref: SessionRef,
+	): void {
 		switch (msg.method) {
 			case "Target.setAutoAttach": {
 				const tab = this.#tabs.get(ref.tabId);
@@ -1804,17 +2419,28 @@ export class RelayBridge {
 				this.#reply(conn, msg, {});
 				return;
 			case "Target.detachFromTarget": {
-				const child = typeof msg.params?.sessionId === "string" ? msg.params.sessionId : undefined;
+				const child =
+					typeof msg.params?.sessionId === "string"
+						? msg.params.sessionId
+						: undefined;
 				if (child) this.#releaseSession(conn, child, msg.sessionId);
 				this.#reply(conn, msg, {});
 				return;
 			}
 			default:
-				this.#replyError(conn, msg, `'${msg.method}' is not supported on a tab target`, CDP_ERROR_METHOD_NOT_FOUND);
+				this.#replyError(
+					conn,
+					msg,
+					`'${msg.method}' is not supported on a tab target`,
+					CDP_ERROR_METHOD_NOT_FOUND,
+				);
 		}
 	}
 
-	async #handleBrowserCommand(conn: CdpConnection, msg: CdpCommand): Promise<void> {
+	async #handleBrowserCommand(
+		conn: CdpConnection,
+		msg: CdpCommand,
+	): Promise<void> {
 		switch (msg.method) {
 			case "Browser.getVersion": {
 				this.#reply(conn, msg, {
@@ -1834,8 +2460,12 @@ export class RelayBridge {
 				for (const tab of this.#tabs.values()) {
 					if (!this.#eligible(tab)) continue;
 					tab.announced = true;
-					this.#emit(conn, "Target.targetCreated", { targetInfo: this.#tabInfo(tab, tab.attached) });
-					this.#emit(conn, "Target.targetCreated", { targetInfo: this.#pageInfo(tab, tab.attached) });
+					this.#emit(conn, "Target.targetCreated", {
+						targetInfo: this.#tabInfo(tab, tab.attached),
+					});
+					this.#emit(conn, "Target.targetCreated", {
+						targetInfo: this.#pageInfo(tab, tab.attached),
+					});
 				}
 				this.#reply(conn, msg, {});
 				return;
@@ -1844,10 +2474,14 @@ export class RelayBridge {
 				// A replacement extension socket can open before its hello arrives.
 				// Reconcile every previously known tab before an attachment command can
 				// create a fresh debugger root and make the hello skip recovery.
-				await Promise.all([...this.#tabs.values()].map(tab => this.#awaitTabReady(tab.tabId)));
+				await Promise.all(
+					[...this.#tabs.values()].map((tab) => this.#awaitTabReady(tab.tabId)),
+				);
 				conn.autoAttach = true;
-				const tabs = [...this.#tabs.values()].filter(tab => this.#eligible(tab));
-				await Promise.all(tabs.map(tab => this.#ensureAttached(tab)));
+				const tabs = [...this.#tabs.values()].filter((tab) =>
+					this.#eligible(tab),
+				);
+				await Promise.all(tabs.map((tab) => this.#ensureAttached(tab)));
 				for (const tab of tabs) {
 					if (!tab.attached) {
 						// Attach failed (DevTools open, another debugger, …): retract
@@ -1861,38 +2495,71 @@ export class RelayBridge {
 				return;
 			}
 			case "Target.attachToTarget": {
-				const parsed = typeof msg.params?.targetId === "string" ? parseTargetId(msg.params.targetId) : null;
+				const parsed =
+					typeof msg.params?.targetId === "string"
+						? parseTargetId(msg.params.targetId)
+						: null;
 				const tab = parsed ? this.#tabs.get(parsed.tabId) : undefined;
 				if (!parsed || !tab) {
-					this.#replyError(conn, msg, `No target with id ${String(msg.params?.targetId)}`);
+					this.#replyError(
+						conn,
+						msg,
+						`No target with id ${String(msg.params?.targetId)}`,
+					);
 					return;
 				}
 				await this.#awaitTabReady(tab.tabId);
 				const currentTab = this.#tabs.get(parsed.tabId);
 				if (!currentTab) {
-					this.#replyError(conn, msg, `No target with id ${String(msg.params?.targetId)}`);
+					this.#replyError(
+						conn,
+						msg,
+						`No target with id ${String(msg.params?.targetId)}`,
+					);
 					return;
 				}
 				if (!(await this.#ensureAttached(currentTab))) {
-					this.#replyError(conn, msg, `Cannot attach to tab ${currentTab.tabId} (${currentTab.url})`);
+					this.#replyError(
+						conn,
+						msg,
+						`Cannot attach to tab ${currentTab.tabId} (${currentTab.url})`,
+					);
 					return;
 				}
-				const sessionId = this.#mintSession(conn, parsed.kind, currentTab.tabId);
-				const info = parsed.kind === "tab" ? this.#tabInfo(currentTab, true) : this.#pageInfo(currentTab, true);
-				this.#emit(conn, "Target.attachedToTarget", { sessionId, targetInfo: info, waitingForDebugger: false });
+				const sessionId = this.#mintSession(
+					conn,
+					parsed.kind,
+					currentTab.tabId,
+				);
+				const info =
+					parsed.kind === "tab"
+						? this.#tabInfo(currentTab, true)
+						: this.#pageInfo(currentTab, true);
+				this.#emit(conn, "Target.attachedToTarget", {
+					sessionId,
+					targetInfo: info,
+					waitingForDebugger: false,
+				});
 				this.#reply(conn, msg, { sessionId });
 				return;
 			}
 			case "Target.detachFromTarget": {
-				const sessionId = typeof msg.params?.sessionId === "string" ? msg.params.sessionId : undefined;
+				const sessionId =
+					typeof msg.params?.sessionId === "string"
+						? msg.params.sessionId
+						: undefined;
 				if (sessionId) this.#releaseSession(conn, sessionId, undefined);
 				this.#reply(conn, msg, {});
 				return;
 			}
 			case "Target.createTarget": {
 				const url =
-					typeof msg.params?.url === "string" && msg.params.url.length > 0 ? msg.params.url : "about:blank";
-				const result = (await this.#rpc({ op: "createTab", url })) as { tab: TabSnapshot };
+					typeof msg.params?.url === "string" && msg.params.url.length > 0
+						? msg.params.url
+						: "about:blank";
+				const result = (await this.#rpc({ op: "createTab", url })) as {
+					tab: TabSnapshot;
+				};
 				this.#onTabUpsert(result.tab);
 				// Creating a tab is an explicit act of driving it.
 				this.#claimTab(conn, result.tab.tabId);
@@ -1900,9 +2567,16 @@ export class RelayBridge {
 				return;
 			}
 			case "Target.closeTarget": {
-				const parsed = typeof msg.params?.targetId === "string" ? parseTargetId(msg.params.targetId) : null;
+				const parsed =
+					typeof msg.params?.targetId === "string"
+						? parseTargetId(msg.params.targetId)
+						: null;
 				if (!parsed) {
-					this.#replyError(conn, msg, `No target with id ${String(msg.params?.targetId)}`);
+					this.#replyError(
+						conn,
+						msg,
+						`No target with id ${String(msg.params?.targetId)}`,
+					);
 					return;
 				}
 				await this.#rpc({ op: "removeTab", tabId: parsed.tabId });
@@ -1910,18 +2584,26 @@ export class RelayBridge {
 				return;
 			}
 			case "Target.activateTarget": {
-				const parsed = typeof msg.params?.targetId === "string" ? parseTargetId(msg.params.targetId) : null;
+				const parsed =
+					typeof msg.params?.targetId === "string"
+						? parseTargetId(msg.params.targetId)
+						: null;
 				if (parsed) await this.#rpc({ op: "activateTab", tabId: parsed.tabId });
 				this.#reply(conn, msg, {});
 				return;
 			}
 			case "Target.getTargetInfo": {
-				const raw = typeof msg.params?.targetId === "string" ? msg.params.targetId : undefined;
+				const raw =
+					typeof msg.params?.targetId === "string"
+						? msg.params.targetId
+						: undefined;
 				const parsed = raw ? parseTargetId(raw) : null;
 				const tab = parsed ? this.#tabs.get(parsed.tabId) : undefined;
 				if (parsed && tab) {
 					const info =
-						parsed.kind === "tab" ? this.#tabInfo(tab, tab.attached) : this.#pageInfo(tab, tab.attached);
+						parsed.kind === "tab"
+							? this.#tabInfo(tab, tab.attached)
+							: this.#pageInfo(tab, tab.attached);
 					this.#reply(conn, msg, { targetInfo: info });
 					return;
 				}
@@ -1939,17 +2621,28 @@ export class RelayBridge {
 			}
 			case "Browser.close":
 				// Never close the user's browser; acknowledge and ignore.
-				this.#log("refusing Browser.close from downstream client", { conn: conn.id });
+				this.#log("refusing Browser.close from downstream client", {
+					conn: conn.id,
+				});
 				this.#reply(conn, msg, {});
 				return;
 			case "Browser.setDownloadBehavior":
 				this.#reply(conn, msg, {});
 				return;
 			case "Target.createBrowserContext":
-				this.#replyError(conn, msg, "Browser contexts are not supported by the omp browser relay");
+				this.#replyError(
+					conn,
+					msg,
+					"Browser contexts are not supported by the omp browser relay",
+				);
 				return;
 			default:
-				this.#replyError(conn, msg, `'${msg.method}' wasn't found`, CDP_ERROR_METHOD_NOT_FOUND);
+				this.#replyError(
+					conn,
+					msg,
+					`'${msg.method}' wasn't found`,
+					CDP_ERROR_METHOD_NOT_FOUND,
+				);
 		}
 	}
 
@@ -1980,14 +2673,22 @@ export class RelayBridge {
 		if (sourceSessionId) {
 			// Event from a real child session: pass through verbatim to every
 			// connection that observes this tab.
-			const payload = JSON.stringify({ sessionId: sourceSessionId, method, params });
+			const payload = JSON.stringify({
+				sessionId: sourceSessionId,
+				method,
+				params,
+			});
 			for (const conn of this.#conns.values()) {
-				if (conn.sessionsForTab(tabId, "page").length > 0) conn.socket.send(payload);
+				if (conn.sessionsForTab(tabId, "page").length > 0)
+					conn.socket.send(payload);
 			}
 			return;
 		}
 		if (method.startsWith("Runtime.")) {
-			const createdContext = method === "Runtime.executionContextCreated" ? params?.context : undefined;
+			const createdContext =
+				method === "Runtime.executionContextCreated"
+					? params?.context
+					: undefined;
 			const createdContextId =
 				createdContext &&
 				typeof createdContext === "object" &&
@@ -1996,18 +2697,24 @@ export class RelayBridge {
 					? createdContext.id
 					: undefined;
 			const destroyedContextId =
-				method === "Runtime.executionContextDestroyed" && typeof params?.executionContextId === "number"
+				method === "Runtime.executionContextDestroyed" &&
+				typeof params?.executionContextId === "number"
 					? params.executionContextId
 					: undefined;
-			if (createdContextId !== undefined && params) tab.runtimeContexts.set(createdContextId, params);
-			if (destroyedContextId !== undefined) tab.runtimeContexts.delete(destroyedContextId);
-			if (method === "Runtime.executionContextsCleared") tab.runtimeContexts.clear();
+			if (createdContextId !== undefined && params)
+				tab.runtimeContexts.set(createdContextId, params);
+			if (destroyedContextId !== undefined)
+				tab.runtimeContexts.delete(destroyedContextId);
+			if (method === "Runtime.executionContextsCleared")
+				tab.runtimeContexts.clear();
 
 			for (const conn of this.#conns.values()) {
 				for (const [pageSession, ref] of conn.sessions) {
 					if (ref.kind !== "page" || ref.tabId !== tabId) continue;
-					if (destroyedContextId !== undefined) ref.runtimeContexts.delete(destroyedContextId);
-					if (method === "Runtime.executionContextsCleared") ref.runtimeContexts.clear();
+					if (destroyedContextId !== undefined)
+						ref.runtimeContexts.delete(destroyedContextId);
+					if (method === "Runtime.executionContextsCleared")
+						ref.runtimeContexts.clear();
 					// `default` sessions never enabled Runtime but still get the
 					// legacy fan-out; only an explicit `Runtime.disable` silences one.
 					if (ref.runtimeState === "disabled") continue;
@@ -2015,7 +2722,9 @@ export class RelayBridge {
 						if (ref.runtimeContexts.has(createdContextId)) continue;
 						ref.runtimeContexts.add(createdContextId);
 					}
-					conn.socket.send(JSON.stringify({ sessionId: pageSession, method, params }));
+					conn.socket.send(
+						JSON.stringify({ sessionId: pageSession, method, params }),
+					);
 				}
 			}
 			return;
@@ -2023,7 +2732,9 @@ export class RelayBridge {
 		// Other root-session events fan out once per minted page session.
 		for (const conn of this.#conns.values()) {
 			for (const pageSession of conn.sessionsForTab(tabId, "page")) {
-				conn.socket.send(JSON.stringify({ sessionId: pageSession, method, params }));
+				conn.socket.send(
+					JSON.stringify({ sessionId: pageSession, method, params }),
+				);
 			}
 		}
 	}
@@ -2070,7 +2781,11 @@ export class RelayBridge {
 			if (tab.url !== snap.url) tab.banned = false;
 			// The user dragging a tab out of the omp group is an opt-out; the
 			// relay never fights the user over grouping.
-			if (tab.grouped && tab.ompGroupId !== undefined && snap.groupId !== tab.ompGroupId) {
+			if (
+				tab.grouped &&
+				tab.ompGroupId !== undefined &&
+				snap.groupId !== tab.ompGroupId
+			) {
 				tab.grouped = false;
 				tab.groupOptOut = true;
 			}
@@ -2090,13 +2805,21 @@ export class RelayBridge {
 		if (eligible && tab.announced) {
 			for (const conn of this.#conns.values()) {
 				if (!conn.discover) continue;
-				this.#emit(conn, "Target.targetInfoChanged", { targetInfo: this.#tabInfo(tab, tab.attached) });
-				this.#emit(conn, "Target.targetInfoChanged", { targetInfo: this.#pageInfo(tab, tab.attached) });
+				this.#emit(conn, "Target.targetInfoChanged", {
+					targetInfo: this.#tabInfo(tab, tab.attached),
+				});
+				this.#emit(conn, "Target.targetInfoChanged", {
+					targetInfo: this.#pageInfo(tab, tab.attached),
+				});
 			}
 		}
 	}
 
-	#announceTab(tab: TabState, forceAttach = false, keepPageSessions: CdpConnection[] = []): void {
+	#announceTab(
+		tab: TabState,
+		forceAttach = false,
+		keepPageSessions: CdpConnection[] = [],
+	): void {
 		tab.announced = true;
 		for (const conn of this.#conns.values()) {
 			if (!conn.discover) continue;
@@ -2105,10 +2828,16 @@ export class RelayBridge {
 			// would duplicate a targetCreated for a target it still holds. Skip it:
 			// its consumer-visible page lifecycle is unbroken by design.
 			if (keepPageSessions.includes(conn)) continue;
-			this.#emit(conn, "Target.targetCreated", { targetInfo: this.#tabInfo(tab, tab.attached) });
-			this.#emit(conn, "Target.targetCreated", { targetInfo: this.#pageInfo(tab, tab.attached) });
+			this.#emit(conn, "Target.targetCreated", {
+				targetInfo: this.#tabInfo(tab, tab.attached),
+			});
+			this.#emit(conn, "Target.targetCreated", {
+				targetInfo: this.#pageInfo(tab, tab.attached),
+			});
 		}
-		const autoAttachConns = [...this.#conns.values()].filter(conn => conn.autoAttach);
+		const autoAttachConns = [...this.#conns.values()].filter(
+			(conn) => conn.autoAttach,
+		);
 		// Ensure the underlying debugger attachment whenever a client actually needs
 		// it: auto-attach connections expect a replacement session, and recovery of a
 		// still-claimed tab (forceAttach, set by #onHello) must restore the Chrome
@@ -2121,8 +2850,14 @@ export class RelayBridge {
 	}
 
 	/** Attach if needed, replay pending root state, then expose replacement sessions. */
-	#startTabRecovery(tab: TabState, attach: boolean, keepPageSessions: CdpConnection[]): void {
-		const autoAttachConns = [...this.#conns.values()].filter(conn => conn.autoAttach);
+	#startTabRecovery(
+		tab: TabState,
+		attach: boolean,
+		keepPageSessions: CdpConnection[],
+	): void {
+		const autoAttachConns = [...this.#conns.values()].filter(
+			(conn) => conn.autoAttach,
+		);
 		// Capture the socket driving this recovery. If it is replaced (or dropped)
 		// while the attach is in flight, the replacement's hello re-runs
 		// reconciliation, so a `false` here is a retryable transport swap — not a
@@ -2156,7 +2891,8 @@ export class RelayBridge {
 					// A replacement keeps the journal pending. Its hello restarts the
 					// complete replay even when Chrome still reports the root attached,
 					// repairing interruptions such as Runtime.disable without enable.
-					if (this.#ext !== ext || err instanceof ExtensionReplacedError) return;
+					if (this.#ext !== ext || err instanceof ExtensionReplacedError)
+						return;
 					this.#log("subscription recovery failed", {
 						tabId: tab.tabId,
 						error: err instanceof Error ? err.message : String(err),
@@ -2178,7 +2914,12 @@ export class RelayBridge {
 			// fresh auto-attach sessions for a now-detached tab. Those sessions look
 			// usable but every forwarded command fails, and they keep the tab
 			// recorded as held. Revalidate against the live state before emitting.
-			if (this.#tabs.get(tab.tabId) !== tab || tab.banned || !tab.attached || this.#ext !== ext) {
+			if (
+				this.#tabs.get(tab.tabId) !== tab ||
+				tab.banned ||
+				!tab.attached ||
+				this.#ext !== ext
+			) {
 				this.#detachIfUnheld(tab.tabId);
 				return;
 			}
@@ -2199,9 +2940,17 @@ export class RelayBridge {
 				tab.restoring = null;
 				tab.restoringExt = null;
 				tab.resumeSubscriptionReconcileAfterRestore = false;
-				if (resumeQueuedCleanup && tab.pendingSubscriptionReconcile.length > 0) {
-					this.#scheduleLiveSubscriptionReconcile(tab, tab.pendingSubscriptionReconcile);
+				if (
+					resumeQueuedCleanup &&
+					tab.pendingSubscriptionReconcile.length > 0
+				) {
+					this.#scheduleLiveSubscriptionReconcile(
+						tab,
+						tab.pendingSubscriptionReconcile,
+					);
 				}
+				if (tab.pendingPreloadScriptCleanup.length > 0)
+					this.#scheduleLivePreloadScriptCleanup(tab);
 			}
 		});
 		tab.restoring = task;
@@ -2222,20 +2971,34 @@ export class RelayBridge {
 			}
 		}
 		const needsRuntimeRestore =
-			refs.some(ref => ref.runtimeState === "enabled") ||
-			(tab.restoreRootRuntime && refs.some(ref => ref.runtimeState === "default"));
+			refs.some((ref) => ref.runtimeState === "enabled") ||
+			(tab.restoreRootRuntime &&
+				refs.some((ref) => ref.runtimeState === "default"));
 		if (needsRuntimeRestore) {
 			this.#assertExtensionCurrent(expectedExt);
-			await this.#rpc({ op: "send", tabId: tab.tabId, method: "Runtime.disable" });
+			await this.#rpc({
+				op: "send",
+				tabId: tab.tabId,
+				method: "Runtime.disable",
+			});
 			this.#assertExtensionCurrent(expectedExt);
-			await this.#rpc({ op: "send", tabId: tab.tabId, method: "Runtime.enable" });
+			await this.#rpc({
+				op: "send",
+				tabId: tab.tabId,
+				method: "Runtime.enable",
+			});
 			this.#assertExtensionCurrent(expectedExt);
 			tab.rootRuntimeEnabled = true;
 		}
 		tab.restoreRootRuntime = false;
 		const replayed = new Map<string, SessionRootSubscription>();
 		while (true) {
-			await this.#cleanupReplayedPreservedSubscriptions(tab, conns, expectedExt, replayed);
+			await this.#cleanupReplayedPreservedSubscriptions(
+				tab,
+				conns,
+				expectedExt,
+				replayed,
+			);
 			const next = this.#nextPreservedSubscription(tab, conns, replayed);
 			if (!next) break;
 			const { key, subscription } = next;
@@ -2263,7 +3026,49 @@ export class RelayBridge {
 			});
 			this.#assertExtensionCurrent(expectedExt);
 		}
-		await this.#cleanupReplayedPreservedSubscriptions(tab, conns, expectedExt, replayed);
+		await this.#cleanupReplayedPreservedSubscriptions(
+			tab,
+			conns,
+			expectedExt,
+			replayed,
+		);
+		const preloadScripts = [...tab.preloadScripts.values()]
+			.flatMap((scripts) => [...scripts.values()])
+			.filter((script) =>
+				conns.some((conn) =>
+					this.#sessionOwnsTab(conn, tab.tabId, script.ownerSessionId),
+				),
+			)
+			.sort((left, right) => left.sequence - right.sequence);
+		for (const script of preloadScripts) {
+			this.#assertExtensionCurrent(expectedExt);
+			const result = (await this.#rpc({
+				op: "send",
+				tabId: tab.tabId,
+				method: "Page.addScriptToEvaluateOnNewDocument",
+				params: script.params,
+			})) as Record<string, unknown> | undefined;
+			this.#assertExtensionCurrent(expectedExt);
+			const identifier = result?.identifier;
+			if (typeof identifier !== "string") {
+				throw new Error(
+					"Page.addScriptToEvaluateOnNewDocument replay did not return an identifier",
+				);
+			}
+			const current = this.#preloadScript(
+				tab,
+				script.ownerSessionId,
+				script.clientIdentifier,
+			);
+			if (!current) {
+				this.#enqueuePreloadScriptCleanup(tab, [
+					{ ...script, rootIdentifier: identifier },
+				]);
+				continue;
+			}
+			current.rootIdentifier = identifier;
+		}
+		this.#scheduleLivePreloadScriptCleanup(tab);
 	}
 
 	#assertExtensionCurrent(expected: RelaySocket | null): void {
@@ -2274,14 +3079,22 @@ export class RelayBridge {
 
 	/** A tab belongs in the omp group when claimed by a client, controllable, unpinned, not user-opted-out, and not already in a user group. */
 	#groupWorthy(tab: TabState): boolean {
-		if (!this.#claimed(tab.tabId) || !this.#eligible(tab) || tab.pinned || tab.groupOptOut) return false;
+		if (
+			!this.#claimed(tab.tabId) ||
+			!this.#eligible(tab) ||
+			tab.pinned ||
+			tab.groupOptOut
+		)
+			return false;
 		return tab.grouped || tab.groupId === -1;
 	}
 
 	/** Re-group every claimed tab (extension hello / reconnect). */
 	#syncGrouping(): void {
 		if (!this.#group) return;
-		const worthy = [...this.#tabs.values()].filter(tab => this.#groupWorthy(tab) && !tab.grouped && !tab.grouping);
+		const worthy = [...this.#tabs.values()].filter(
+			(tab) => this.#groupWorthy(tab) && !tab.grouped && !tab.grouping,
+		);
 		if (worthy.length > 0) this.#requestGroup(worthy);
 	}
 
@@ -2320,9 +3133,14 @@ export class RelayBridge {
 		try {
 			while (this.#groupQueue.length > 0) {
 				const batch = this.#groupQueue.splice(0);
-				const tabIds = batch.map(tab => tab.tabId);
+				const tabIds = batch.map((tab) => tab.tabId);
 				try {
-					const result = await this.#rpc({ op: "group", tabIds, title: group.title, color: group.color });
+					const result = await this.#rpc({
+						op: "group",
+						tabIds,
+						title: group.title,
+						color: group.color,
+					});
 					// Extension replies { grouped: { [tabId]: groupId } }; validate per entry.
 					const grouped: Record<string, unknown> =
 						result &&
@@ -2340,7 +3158,9 @@ export class RelayBridge {
 					}
 					this.#log("grouped tabs", { tabIds, grouped });
 				} catch (err) {
-					this.#log("tab grouping failed", { error: err instanceof Error ? err.message : String(err) });
+					this.#log("tab grouping failed", {
+						error: err instanceof Error ? err.message : String(err),
+					});
 				} finally {
 					for (const tab of batch) tab.grouping = false;
 				}
@@ -2358,10 +3178,12 @@ export class RelayBridge {
 	 */
 	#retractTab(tab: TabState, keepPageSessions: CdpConnection[] = []): void {
 		this.#pruneSubscriptions(tab, keepPageSessions);
+		this.#prunePreloadScripts(tab, keepPageSessions);
 		if (keepPageSessions.length === 0) tab.restorePending = false;
 		if (keepPageSessions.length === 0) tab.restoreRootRuntime = false;
 		const staleRealSessions = [...tab.realSessions];
-		for (const realSession of staleRealSessions) this.#realSessionTabs.delete(realSession);
+		for (const realSession of staleRealSessions)
+			this.#realSessionTabs.delete(realSession);
 		tab.realSessions.clear();
 		for (const conn of this.#conns.values()) {
 			const preservePages = keepPageSessions.includes(conn);
@@ -2390,7 +3212,12 @@ export class RelayBridge {
 					const ref = conn.sessions.get(pageSession);
 					if (!ref) continue;
 					for (const realSession of staleRealSessions) {
-						this.#emit(conn, "Target.detachedFromTarget", { sessionId: realSession }, pageSession);
+						this.#emit(
+							conn,
+							"Target.detachedFromTarget",
+							{ sessionId: realSession },
+							pageSession,
+						);
 					}
 					ref.runtimeContexts.clear();
 					ref.runtimeEnabling = null;
@@ -2414,8 +3241,12 @@ export class RelayBridge {
 				}
 			}
 			if (conn.discover && tab.announced && !preservePages) {
-				this.#emit(conn, "Target.targetDestroyed", { targetId: pageTargetId(tab.tabId) });
-				this.#emit(conn, "Target.targetDestroyed", { targetId: tabTargetId(tab.tabId) });
+				this.#emit(conn, "Target.targetDestroyed", {
+					targetId: pageTargetId(tab.tabId),
+				});
+				this.#emit(conn, "Target.targetDestroyed", {
+					targetId: tabTargetId(tab.tabId),
+				});
 			}
 		}
 		tab.announced = false;
@@ -2423,7 +3254,11 @@ export class RelayBridge {
 
 	// ---- session + attach bookkeeping --------------------------------------------
 
-	#mintSession(conn: CdpConnection, kind: "tab" | "page", tabId: number): string {
+	#mintSession(
+		conn: CdpConnection,
+		kind: "tab" | "page",
+		tabId: number,
+	): string {
 		const sessionId = `S${kind === "tab" ? "T" : "P"}${tabId}.${conn.id}.${++this.#sessionSeq}`;
 		conn.sessions.set(sessionId, {
 			kind,
@@ -2436,13 +3271,26 @@ export class RelayBridge {
 		return sessionId;
 	}
 
-	#releaseSession(conn: CdpConnection, sessionId: string, parentSessionId: string | undefined): void {
+	#releaseSession(
+		conn: CdpConnection,
+		sessionId: string,
+		parentSessionId: string | undefined,
+	): void {
 		const ref = conn.sessions.get(sessionId);
 		if (!ref) return;
 		conn.sessions.delete(sessionId);
-		if (ref.kind === "page") this.#forgetSessionSubscriptions(ref.tabId, [sessionId]);
-		const targetId = ref.kind === "tab" ? tabTargetId(ref.tabId) : pageTargetId(ref.tabId);
-		this.#emit(conn, "Target.detachedFromTarget", { sessionId, targetId }, parentSessionId);
+		if (ref.kind === "page") {
+			this.#forgetSessionSubscriptions(ref.tabId, [sessionId]);
+			this.#forgetSessionPreloadScripts(ref.tabId, [sessionId]);
+		}
+		const targetId =
+			ref.kind === "tab" ? tabTargetId(ref.tabId) : pageTargetId(ref.tabId);
+		this.#emit(
+			conn,
+			"Target.detachedFromTarget",
+			{ sessionId, targetId },
+			parentSessionId,
+		);
 		// An explicit release of the last session must drop the attachment too,
 		// or it outlives every downstream session: the infobar stays up, and
 		// dismissing it bans the tab for the rest of the epoch.
@@ -2465,9 +3313,11 @@ export class RelayBridge {
 				tab.restorePending = false;
 				tab.subscriptionReconciling = null;
 				tab.subscriptions.clear();
+				tab.preloadScripts.clear();
+				tab.pendingPreloadScriptCleanup = [];
 				this.#resetRuntime(tab);
 			})
-			.catch(err => {
+			.catch((err) => {
 				this.#log("detach failed", {
 					tabId,
 					error: err instanceof Error ? err.message : String(err),
@@ -2518,7 +3368,7 @@ export class RelayBridge {
 				tab.reattachedAfterDetach = true;
 				return true;
 			})
-			.catch(err => {
+			.catch((err) => {
 				this.#log("attach failed", {
 					tabId: tab.tabId,
 					url: tab.url,
@@ -2564,15 +3414,37 @@ export class RelayBridge {
 
 	// ---- plumbing ---------------------------------------------------------------
 
-	#reply(conn: CdpConnection, msg: CdpCommand, result: Record<string, unknown>): void {
-		conn.socket.send(JSON.stringify({ id: msg.id, sessionId: msg.sessionId, result }));
+	#reply(
+		conn: CdpConnection,
+		msg: CdpCommand,
+		result: Record<string, unknown>,
+	): void {
+		conn.socket.send(
+			JSON.stringify({ id: msg.id, sessionId: msg.sessionId, result }),
+		);
 	}
 
-	#replyError(conn: CdpConnection, msg: CdpCommand, message: string, code = CDP_ERROR_SERVER): void {
-		conn.socket.send(JSON.stringify({ id: msg.id, sessionId: msg.sessionId, error: { code, message } }));
+	#replyError(
+		conn: CdpConnection,
+		msg: CdpCommand,
+		message: string,
+		code = CDP_ERROR_SERVER,
+	): void {
+		conn.socket.send(
+			JSON.stringify({
+				id: msg.id,
+				sessionId: msg.sessionId,
+				error: { code, message },
+			}),
+		);
 	}
 
-	#emit(conn: CdpConnection, method: string, params: Record<string, unknown>, sessionId?: string): void {
+	#emit(
+		conn: CdpConnection,
+		method: string,
+		params: Record<string, unknown>,
+		sessionId?: string,
+	): void {
 		conn.socket.send(JSON.stringify({ sessionId, method, params }));
 	}
 
@@ -2623,15 +3495,20 @@ export class RelayBridge {
 
 	#rpc(req: RelayRpcRequest, timeoutMs = RPC_TIMEOUT_MS): Promise<unknown> {
 		const ext = this.#ext;
-		if (!ext) return Promise.reject(new Error("relay extension is not connected"));
+		if (!ext)
+			return Promise.reject(new Error("relay extension is not connected"));
 		const id = ++this.#rpcSeq;
 		const { promise, resolve, reject } = Promise.withResolvers<unknown>();
 		const timer = setTimeout(() => {
 			this.#pendingRpc.delete(id);
-			reject(new Error(`extension rpc '${req.op}' timed out after ${timeoutMs}ms`));
+			reject(
+				new Error(`extension rpc '${req.op}' timed out after ${timeoutMs}ms`),
+			);
 		}, timeoutMs);
 		this.#pendingRpc.set(id, { resolve, reject, timer });
-		ext.send(JSON.stringify({ t: "rpc", id, ...req } satisfies RelayToExtMessage));
+		ext.send(
+			JSON.stringify({ t: "rpc", id, ...req } satisfies RelayToExtMessage),
+		);
 		return promise;
 	}
 }
