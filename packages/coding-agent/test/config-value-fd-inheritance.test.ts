@@ -36,6 +36,31 @@ afterEach(async () => {
 	for (const root of roots.splice(0)) await fs.promises.rm(root, { recursive: true, force: true });
 });
 
+/**
+ * Sample a doomed descendant's status until it actually leaves the run queue.
+ *
+ * `runShellCommand` returns once the timeout kill has been issued, but signal
+ * delivery and reaping are asynchronous: on a loaded runner (4 cores, four test
+ * chunks in parallel) a killed pid can still sample as `Running` for a few
+ * scheduler ticks. Reading `status()` exactly once therefore races the kernel
+ * rather than the product contract, which made these two tests flaky in CI.
+ *
+ * Polling costs nothing on green and preserves the oracle: both escape workers
+ * `sleep 30`, so a descendant that genuinely survived the timeout is still
+ * `Running` when the deadline expires and the assertion still fails. This
+ * mirrors the bounded-poll idiom the marker-based tests below already use for
+ * exactly the same reason.
+ */
+async function waitForExit(proc: Process | null, timeoutMs = 2_000): Promise<ProcessStatus | undefined> {
+	const deadline = Date.now() + timeoutMs;
+	let status = proc?.status();
+	while (status === ProcessStatus.Running && Date.now() < deadline) {
+		await Bun.sleep(50);
+		status = proc?.status();
+	}
+	return status;
+}
+
 test.skipIf(process.platform === "win32")(
 	"config !command children cannot read descriptors the launcher passed omp",
 	async () => {
@@ -124,7 +149,9 @@ test.skipIf(process.platform === "win32")(
 
 			const pid = Number.parseInt((await Bun.file(pidFile).text()).trim(), 10);
 			escaped = Process.fromPid(pid);
-			expect(escaped?.status(), `reparented descendant ${pid} survived the timeout`).not.toBe(ProcessStatus.Running);
+			expect(await waitForExit(escaped), `reparented descendant ${pid} survived the timeout`).not.toBe(
+				ProcessStatus.Running,
+			);
 		} finally {
 			escaped?.killTree(9);
 		}
@@ -151,7 +178,7 @@ test.skipIf(process.platform !== "linux")(
 
 			const pid = Number.parseInt((await Bun.file(pidFile).text()).trim(), 10);
 			escaped = Process.fromPid(pid);
-			expect(escaped?.status(), `session-escaping descendant ${pid} survived the timeout`).not.toBe(
+			expect(await waitForExit(escaped), `session-escaping descendant ${pid} survived the timeout`).not.toBe(
 				ProcessStatus.Running,
 			);
 		} finally {

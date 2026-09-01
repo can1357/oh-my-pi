@@ -48,3 +48,33 @@ export function chromiumAvailable(): Promise<boolean> {
 	probe ??= chromiumCanLaunch();
 	return probe;
 }
+
+/**
+ * Whether this host can present a browser window at all.
+ *
+ * Mirrors `hasDisplay()` in `src/utils/clipboard.ts`: on Linux a GUI process
+ * needs an X11 or Wayland server, and headless CI runners have neither. Every
+ * other platform runs its tests from a desktop session.
+ */
+function hasDisplay(): boolean {
+	return process.platform !== "linux" || Boolean(process.env.DISPLAY || process.env.WAYLAND_DISPLAY);
+}
+
+let headfulProbe: Promise<boolean> | undefined;
+
+/**
+ * Gate for tests that launch Chromium *headful* (`headless: false`).
+ *
+ * `chromiumAvailable()` is necessary but not sufficient here: its probe is
+ * `chrome --version`, which needs no display and so still reports `true` on a
+ * display-less runner. A headful suite gated on it therefore clears the skip
+ * and then dies inside Puppeteer with "Missing X server to start the headful
+ * browser. Either set headless to true or use xvfb-run to run your Puppeteer
+ * script." (`BrowserLauncher.js:160`), which reads as a product failure rather
+ * than the environment gap it is. Headful needs a working binary *and* a
+ * display, so require both.
+ */
+export function headfulChromiumAvailable(): Promise<boolean> {
+	headfulProbe ??= hasDisplay() ? chromiumAvailable() : Promise.resolve(false);
+	return headfulProbe;
+}
