@@ -326,27 +326,22 @@ function installSubagentRetryFallbackChain(args: {
 	settings.override("retry.fallbackChains", fallbackChains);
 	return role;
 }
-export function retryFallbackMayReachProvider(args: {
+export async function retryFallbackMayReachProvider(args: {
 	settings: Settings;
 	modelRegistry: ModelRegistry;
 	initialSelector: string | undefined;
 	roleHint: string | undefined;
 	targetProvider: string;
-}): boolean {
+}): Promise<boolean> {
 	const { settings, modelRegistry, initialSelector, roleHint, targetProvider } = args;
 	if (!initialSelector) return false;
 	const chains = getRetryFallbackChains(settings);
-	if (typeof modelRegistry.find !== "function" || typeof modelRegistry.hasProvider !== "function") {
-		return (
-			modelPatternTargetsProvider(initialSelector, targetProvider) ||
-			Object.values(chains).some(
-				chain =>
-					Array.isArray(chain) &&
-					chain.some(
-						selector => typeof selector === "string" && modelPatternTargetsProvider(selector, targetProvider),
-					),
-			)
-		);
+	if (
+		typeof modelRegistry.find !== "function" ||
+		typeof modelRegistry.hasProvider !== "function" ||
+		typeof modelRegistry.getApiKey !== "function"
+	) {
+		return false;
 	}
 	const context = {
 		chains,
@@ -360,10 +355,9 @@ export function retryFallbackMayReachProvider(args: {
 		const visitKey = `${current.selector}\u0000${current.roleHint ?? ""}`;
 		if (seen.has(visitKey)) continue;
 		seen.add(visitKey);
-		if (modelPatternTargetsProvider(current.selector, targetProvider)) return true;
 		const parsed = parseRetryFallbackSelector(current.selector, modelRegistry);
 		const currentModel = parsed ? modelRegistry.find(parsed.provider, parsed.id) : undefined;
-		if (currentModel?.provider === targetProvider) return true;
+		if (currentModel?.provider === targetProvider && (await modelRegistry.getApiKey(currentModel))) return true;
 		const chainKey = resolveRetryFallbackChainKey(context, current.selector, currentModel, current.roleHint);
 		const candidates = chainKey
 			? findRetryFallbackCandidates(context, chainKey, current.selector, currentModel, {
@@ -3159,17 +3153,17 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				prewalkTarget !== undefined &&
 				modelRegistry.hasConfiguredAuth(prewalkTarget) &&
 				(prewalkTarget.provider === "merge-gateway" ||
-					retryFallbackMayReachProvider({
+					(await retryFallbackMayReachProvider({
 						settings: subagentSettings,
 						modelRegistry,
 						initialSelector: formatModelStringWithRouting(prewalkTarget),
 						roleHint: prewalkPattern ? resolveExplicitModelRole([prewalkPattern], subagentSettings) : undefined,
 						targetProvider: "merge-gateway",
-					}));
+					})));
 			const mergeMayServe = mergeMayServeSubagent({
 				actualProvider: model?.provider,
 				requestedPatterns: modelPatterns,
-				fallbackMayReachMerge: retryFallbackMayReachProvider({
+				fallbackMayReachMerge: await retryFallbackMayReachProvider({
 					settings: subagentSettings,
 					modelRegistry,
 					initialSelector: initialFallbackSelector,

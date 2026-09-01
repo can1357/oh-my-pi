@@ -103,7 +103,17 @@ export function applyGeneratedModelPolicies(models: ModelSpec<Api>[]): void {
  */
 export function rebakeModelThinking(model: ModelSpec<Api>): void {
 	if (isCollapsedVariantSpec(model)) return;
-	if (model.provider === "merge-gateway" && model.thinking) return;
+	if (model.thinking) {
+		const explicitPolicy = resolveModelPolicy(model);
+		if (
+			explicitPolicy.compat !== undefined &&
+			"trustExplicitThinkingOnly" in explicitPolicy.compat &&
+			explicitPolicy.compat.trustExplicitThinkingOnly === true
+		) {
+			model.thinking = explicitPolicy.thinking;
+			return;
+		}
+	}
 	if (
 		model.compat &&
 		"thinkingFormat" in model.compat &&

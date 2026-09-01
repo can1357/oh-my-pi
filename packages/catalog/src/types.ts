@@ -214,6 +214,11 @@ export interface OpenAICompat {
 	supportsReasoningEffort?: boolean;
 	/** Optional mapping from pi-ai reasoning levels to provider/model-specific `reasoning_effort` values. */
 	reasoningEffortMap?: Partial<Record<Effort, string>>;
+	/**
+	 * Trust only explicit `thinking` metadata; never derive or expand an effort
+	 * surface from model identity or provider defaults.
+	 */
+	trustExplicitThinkingOnly?: boolean;
 	/** Whether the provider supports `stream_options: { include_usage: true }` for token usage in streaming responses. Default: true. */
 	supportsUsageInStreaming?: boolean;
 	/** Which field to use for max tokens. Default: auto-detected from URL. */
@@ -737,6 +742,7 @@ export type ResolvedOpenAICompat = ResolvedOpenAISharedCompat &
 			| "supportsDeveloperRole"
 			| "supportsReasoningEffort"
 			| "reasoningEffortMap"
+			| "trustExplicitThinkingOnly"
 			| "supportsReasoningParams"
 			| "supportsReasoningSummary"
 			| "supportsSamplingParams"
@@ -793,6 +799,7 @@ export type ResolvedOpenAICompat = ResolvedOpenAISharedCompat &
 			| "whenThinking"
 		>
 	> & {
+		trustExplicitThinkingOnly?: boolean;
 		vercelGatewayRouting?: OpenAICompat["vercelGatewayRouting"];
 		extraBody?: OpenAICompat["extraBody"];
 		cacheControlFormat?: OpenAICompat["cacheControlFormat"];

@@ -403,7 +403,7 @@ describe("Merge Gateway provider", () => {
 		).toBeNull();
 	});
 
-	test("keeps Merge declarations separate from DeepSeek DSML harness policy", () => {
+	test("keeps Merge declarations separate from KDL-owned provider policy", () => {
 		const mapped = mapMergeGatewayModel(
 			model("deepseek/deepseek-v3.2", { gateway: route() }),
 			"https://api-gateway.merge.dev/v1/openai",
@@ -413,10 +413,11 @@ describe("Merge Gateway provider", () => {
 				nativeToolCalling: true,
 				nativeStructuredOutputs: true,
 			},
-			compat: {
-				streamMarkupHealingPattern: "dsml",
-			},
 		});
+		expect(mapped?.compat).not.toHaveProperty("streamMarkupHealingPattern");
+		const built = buildModel(mapped!);
+		expect(built.compat.streamMarkupHealingPattern).toBe("dsml");
+		expect(built.compat.trustExplicitThinkingOnly).toBe(true);
 	});
 
 	test("paginates the native model envelope and preserves provider-prefixed IDs", async () => {

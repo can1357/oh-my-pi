@@ -181,15 +181,16 @@ describe("structured subagent primitive", () => {
 		).toBe(true);
 	});
 
-	it("finds Merge through nested exact-model fallback chains", () => {
-		const models = new Map([
-			["anthropic/a", { provider: "anthropic", id: "a" }],
-			["openrouter/b", { provider: "openrouter", id: "b" }],
-			["merge-gateway/c", { provider: "merge-gateway", id: "c" }],
-		]);
+	it("finds Merge through nested exact-model fallback chains", async () => {
+		const models: Record<string, { provider: string; id: string }> = {
+			"anthropic/a": { provider: "anthropic", id: "a" },
+			"openrouter/b": { provider: "openrouter", id: "b" },
+			"merge-gateway/c": { provider: "merge-gateway", id: "c" },
+		};
 		const modelRegistry = {
-			find: (provider: string, id: string) => models.get(`${provider}/${id}`),
-			hasProvider: (provider: string) => [...models.values()].some(model => model.provider === provider),
+			find: (provider: string, id: string) => models[`${provider}/${id}`],
+			hasProvider: (provider: string) => Object.values(models).some(model => model.provider === provider),
+			getApiKey: async () => "merge-key",
 		} as unknown as ModelRegistry;
 		const settings = Settings.isolated({
 			"retry.fallbackChains": {
@@ -198,7 +199,7 @@ describe("structured subagent primitive", () => {
 			},
 		});
 		expect(
-			executorModule.retryFallbackMayReachProvider({
+			await executorModule.retryFallbackMayReachProvider({
 				settings,
 				modelRegistry,
 				initialSelector: "anthropic/a",
@@ -208,21 +209,48 @@ describe("structured subagent primitive", () => {
 		).toBe(true);
 	});
 
-	it("hardens a non-Merge prewalk target whose runtime fallback reaches Merge", () => {
-		const models = new Map([
-			["openrouter/b", { provider: "openrouter", id: "b" }],
-			["merge-gateway/c", { provider: "merge-gateway", id: "c" }],
-		]);
+	it("ignores Merge fallback targets without a usable credential", async () => {
+		const models: Record<string, { provider: string; id: string }> = {
+			"anthropic/a": { provider: "anthropic", id: "a" },
+			"merge-gateway/c": { provider: "merge-gateway", id: "c" },
+		};
 		const modelRegistry = {
-			find: (provider: string, id: string) => models.get(`${provider}/${id}`),
-			hasProvider: (provider: string) => [...models.values()].some(model => model.provider === provider),
+			find: (provider: string, id: string) => models[`${provider}/${id}`],
+			hasProvider: (provider: string) => Object.values(models).some(model => model.provider === provider),
+			getApiKey: async () => undefined,
+		} as unknown as ModelRegistry;
+		const settings = Settings.isolated({
+			"retry.fallbackChains": {
+				"anthropic/a": ["merge-gateway/c"],
+			},
+		});
+		expect(
+			await executorModule.retryFallbackMayReachProvider({
+				settings,
+				modelRegistry,
+				initialSelector: "anthropic/a",
+				roleHint: undefined,
+				targetProvider: "merge-gateway",
+			}),
+		).toBe(false);
+	});
+
+	it("hardens a non-Merge prewalk target whose runtime fallback reaches Merge", async () => {
+		const models: Record<string, { provider: string; id: string }> = {
+			"openrouter/b": { provider: "openrouter", id: "b" },
+			"merge-gateway/c": { provider: "merge-gateway", id: "c" },
+		};
+		const modelRegistry = {
+			find: (provider: string, id: string) => models[`${provider}/${id}`],
+			hasProvider: (provider: string) => Object.values(models).some(model => model.provider === provider),
+			getApiKey: async () => "merge-key",
 		} as unknown as ModelRegistry;
 		const settings = Settings.isolated({
 			"retry.fallbackChains": {
 				"openrouter/b": ["merge-gateway/c"],
 			},
 		});
-		const prewalkMayServeMerge = executorModule.retryFallbackMayReachProvider({
+		const prewalkMayServeMerge = await executorModule.retryFallbackMayReachProvider({
 			settings,
 			modelRegistry,
 			initialSelector: "openrouter/b",
@@ -241,15 +269,16 @@ describe("structured subagent primitive", () => {
 		).toBe(true);
 	});
 
-	it("expands provider wildcards before following nested model-key chains", () => {
-		const models = new Map([
-			["anthropic/a", { provider: "anthropic", id: "a" }],
-			["openrouter/a", { provider: "openrouter", id: "a" }],
-			["merge-gateway/a", { provider: "merge-gateway", id: "a" }],
-		]);
+	it("expands provider wildcards before following nested model-key chains", async () => {
+		const models: Record<string, { provider: string; id: string }> = {
+			"anthropic/a": { provider: "anthropic", id: "a" },
+			"openrouter/a": { provider: "openrouter", id: "a" },
+			"merge-gateway/a": { provider: "merge-gateway", id: "a" },
+		};
 		const modelRegistry = {
-			find: (provider: string, id: string) => models.get(`${provider}/${id}`),
-			hasProvider: (provider: string) => [...models.values()].some(model => model.provider === provider),
+			find: (provider: string, id: string) => models[`${provider}/${id}`],
+			hasProvider: (provider: string) => Object.values(models).some(model => model.provider === provider),
+			getApiKey: async () => "merge-key",
 		} as unknown as ModelRegistry;
 		const settings = Settings.isolated({
 			"retry.fallbackChains": {
@@ -258,7 +287,7 @@ describe("structured subagent primitive", () => {
 			},
 		});
 		expect(
-			executorModule.retryFallbackMayReachProvider({
+			await executorModule.retryFallbackMayReachProvider({
 				settings,
 				modelRegistry,
 				initialSelector: "anthropic/a",
@@ -268,7 +297,7 @@ describe("structured subagent primitive", () => {
 		).toBe(true);
 	});
 
-	it("tolerates malformed fallback chains with an incomplete model-registry test double", () => {
+	it("tolerates malformed fallback chains with an incomplete model-registry test double", async () => {
 		const settings = Settings.isolated({
 			"retry.fallbackChains": {
 				default: [123],
@@ -276,7 +305,7 @@ describe("structured subagent primitive", () => {
 			} as never,
 		});
 		expect(
-			executorModule.retryFallbackMayReachProvider({
+			await executorModule.retryFallbackMayReachProvider({
 				settings,
 				modelRegistry: {} as ModelRegistry,
 				initialSelector: "anthropic/a",

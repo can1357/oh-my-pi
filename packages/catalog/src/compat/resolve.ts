@@ -1080,7 +1080,9 @@ function resolveThinkingPolicy<TApi extends Api>(
 	if (omitsWireReasoningEffort(spec, compat)) return undefined;
 	const rule = readRuleThinking(axes);
 	if (spec.thinking && Array.isArray(spec.thinking.efforts) && spec.thinking.efforts.length > 0) {
-		if (spec.provider === "merge-gateway") return spec.thinking;
+		if (compat !== undefined && "trustExplicitThinkingOnly" in compat && compat.trustExplicitThinkingOnly === true) {
+			return spec.thinking;
+		}
 		return fillExplicitThinking(spec, facts, compat, spec.thinking, rule);
 	}
 	if (compat !== undefined && "trustExplicitThinkingOnly" in compat && compat.trustExplicitThinkingOnly === true) {

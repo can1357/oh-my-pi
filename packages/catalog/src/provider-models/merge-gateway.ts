@@ -163,7 +163,6 @@ export function mapMergeGatewayModel(value: unknown, baseUrl: string): ModelSpec
 	const reasoningEfforts = reasoning ? commonReasoningEfforts(routes) : [];
 	const supportsReasoningEffort = reasoningEfforts.length > 0;
 	const supportsReasoningDisable = reasoning && routes.every(route => route.supportsDisable);
-	const useDsmlHealing = value.provider === "deepseek" || value.model.startsWith("deepseek/");
 	return {
 		id: value.model,
 		name: typeof value.display_name === "string" && value.display_name.length > 0 ? value.display_name : value.model,
@@ -202,7 +201,6 @@ export function mapMergeGatewayModel(value: unknown, baseUrl: string): ModelSpec
 			supportsForcedToolChoice: supportsToolChoice,
 			supportsNamedToolChoice: supportsToolChoice,
 			...(supportsReasoningDisable && { reasoningDisableMode: "none-effort" as const }),
-			...(useDsmlHealing && { streamMarkupHealingPattern: "dsml" as const }),
 		},
 	};
 }

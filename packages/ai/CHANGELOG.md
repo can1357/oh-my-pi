@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added API-key login and validation for Merge Gateway.
+
 ## [18.1.2] - 2026-09-01
 
 ### Added
@@ -63,7 +67,6 @@
 
 ### Added
 
-- Added API-key login and validation for Merge Gateway.
 - Added Z.AI GLM Coding Plan usage tracking: credit-based `CREDIT_LIMIT` windows (5h + weekly) now surface in `omp usage` and the status line with the plan tier (`plan: lite/pro/max`).
 
 ### Fixed

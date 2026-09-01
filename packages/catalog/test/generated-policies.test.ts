@@ -130,6 +130,28 @@ describe("generated model policies", () => {
 		});
 	});
 
+	it("preserves Merge Gateway route-authored thinking through KDL compatibility", () => {
+		const thinking = {
+			mode: "effort" as const,
+			efforts: [Effort.Low, Effort.High],
+			defaultLevel: Effort.High,
+			requiresEffort: true,
+			supportsDisplay: true,
+		};
+		const models: ModelSpec<Api>[] = [
+			createSpec({
+				id: "vendor/reasoner",
+				api: "openai-completions",
+				provider: "merge-gateway",
+				thinking,
+			}),
+		];
+
+		applyGeneratedModelPolicies(models);
+
+		expect(models[0]?.thinking).toEqual(thinking);
+	});
+
 	it("preserves generic chat-template provider-authored effort mappings", () => {
 		const thinking = {
 			mode: "effort" as const,
