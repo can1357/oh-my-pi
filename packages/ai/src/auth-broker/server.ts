@@ -11,6 +11,7 @@
  */
 
 import { type Type, type } from "@oh-my-pi/omptype";
+import { usesOAuthMintedApiKeyWithDirectApiKey } from "@oh-my-pi/pi-catalog/compat/behavior";
 import { logger } from "@oh-my-pi/pi-utils";
 import type {
 	AuthCredentialSnapshotEntry,
@@ -405,12 +406,15 @@ function buildCredentialBlockGroups(
 }
 
 function projectCredentialForClient(
+	provider: string,
 	credential: SnapshotCredential,
 	clientSupportsMetaApiKeyAuthorizedAt: boolean,
-): SnapshotCredential {
-	if (clientSupportsMetaApiKeyAuthorizedAt || credential.type !== "api_key" || credential.authorizedAt === undefined) {
+): SnapshotCredential | undefined {
+	if (clientSupportsMetaApiKeyAuthorizedAt || !usesOAuthMintedApiKeyWithDirectApiKey(provider)) {
 		return credential;
 	}
+	if (credential.type === "oauth") return undefined;
+	if (credential.authorizedAt === undefined) return credential;
 	return {
 		type: "api_key",
 		key: credential.key,
@@ -421,8 +425,13 @@ function projectCredentialForClient(
 function projectCredentialEntryForClient(
 	entry: AuthCredentialSnapshotEntry,
 	clientSupportsMetaApiKeyAuthorizedAt: boolean,
-): AuthCredentialSnapshotEntry {
-	const credential = projectCredentialForClient(entry.credential, clientSupportsMetaApiKeyAuthorizedAt);
+): AuthCredentialSnapshotEntry | undefined {
+	const credential = projectCredentialForClient(
+		entry.provider,
+		entry.credential,
+		clientSupportsMetaApiKeyAuthorizedAt,
+	);
+	if (!credential) return undefined;
 	return credential === entry.credential ? entry : { ...entry, credential };
 }
 
@@ -440,12 +449,14 @@ function buildSnapshot(
 		serverNowMs,
 		capabilities.codexMeterBlockScopes,
 	);
-	const credentials: SnapshotEntry[] = base.credentials.map(rawEntry => {
+	const credentials: SnapshotEntry[] = [];
+	for (const rawEntry of base.credentials) {
 		const entry = projectCredentialEntryForClient(rawEntry, capabilities.metaApiKeyAuthorizedAt);
+		if (!entry) continue;
 		const blocks = blocksByCredentialId.get(entry.id);
 		const rotatesInMs = computeRotatesInMs(entry, wire, nextSweepAt, serverNowMs);
-		return blocks && blocks.length > 0 ? { ...entry, rotatesInMs, blocks } : { ...entry, rotatesInMs };
-	});
+		credentials.push(blocks && blocks.length > 0 ? { ...entry, rotatesInMs, blocks } : { ...entry, rotatesInMs });
+	}
 	return {
 		generation: base.generation,
 		generatedAt: base.generatedAt,
@@ -894,17 +905,19 @@ export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServer
 					if (!parsed.ok) return parsed.response;
 					const { provider, credential } = parsed.data;
 					try {
-						const isMetaInteractiveLogin =
-							provider === "meta" &&
+						const isDualInteractiveLogin =
+							usesOAuthMintedApiKeyWithDirectApiKey(provider) &&
 							(credential.type === "oauth" || (credential.type === "api_key" && credential.source === "login"));
-						const storedCredential = isMetaInteractiveLogin
+						const storedCredential = isDualInteractiveLogin
 							? { ...credential, authorizedAt: Date.now() }
 							: credential;
-						const entries = opts.storage
-							.upsertCredential(provider, storedCredential)
-							.map(entry =>
-								projectCredentialEntryForClient(entry, getClientCapabilities(req).metaApiKeyAuthorizedAt),
-							);
+						const storedEntries = opts.storage.upsertCredential(provider, storedCredential);
+						const clientSupportsMetaApiKeyAuthorizedAt = getClientCapabilities(req).metaApiKeyAuthorizedAt;
+						const entries: AuthCredentialSnapshotEntry[] = [];
+						for (const entry of storedEntries) {
+							const projected = projectCredentialEntryForClient(entry, clientSupportsMetaApiKeyAuthorizedAt);
+							if (projected) entries.push(projected);
+						}
 						const identity =
 							storedCredential.type === "oauth"
 								? (storedCredential.email ??

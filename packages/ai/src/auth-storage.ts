@@ -8,7 +8,7 @@
  * - re-exported `SqliteAuthCredentialStore`: concrete SQLite-backed implementation
  */
 import { createHash } from "node:crypto";
-import { planRequirementFor } from "@oh-my-pi/pi-catalog/compat/behavior";
+import { planRequirementFor, usesOAuthMintedApiKeyWithDirectApiKey } from "@oh-my-pi/pi-catalog/compat/behavior";
 import { $env, $envExact, extractRetryHint, getAgentDbPath, logger } from "@oh-my-pi/pi-utils";
 import {
 	isSqliteCorruptionError,
@@ -3033,9 +3033,8 @@ export class AuthStorage {
 				type: "api_key",
 				key: result,
 				source: "login",
-				// Meta supports both direct PAYG keys and Muse OAuth under one
-				// transport provider; persist which interactive source won last.
-				...(provider === "meta" ? { authorizedAt: Date.now() } : {}),
+				// Providers with dual interactive credentials persist which source won last.
+				...(usesOAuthMintedApiKeyWithDirectApiKey(provider) ? { authorizedAt: Date.now() } : {}),
 			};
 			const stored = this.#store.upsertAuthCredentialRemote
 				? await this.#store.upsertAuthCredentialRemote(provider, newCredential)

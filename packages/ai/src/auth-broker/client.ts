@@ -6,6 +6,7 @@
  * `/v1/healthz` require a bearer token.
  */
 
+import { usesOAuthMintedApiKeyWithDirectApiKey } from "@oh-my-pi/pi-catalog/compat/behavior";
 import { type } from "@oh-my-pi/omptype";
 import { readSseEvents } from "@oh-my-pi/pi-utils";
 import type { AuthCredential, DisabledCredentialSummary } from "../auth-storage";
@@ -385,13 +386,13 @@ export class AuthBrokerClient {
 			if (
 				error instanceof AuthBrokerError &&
 				error.status === 400 &&
-				provider === "meta" &&
+				usesOAuthMintedApiKeyWithDirectApiKey(provider) &&
 				credential.type === "api_key" &&
 				credential.source === "login" &&
 				credential.authorizedAt !== undefined
 			) {
 				throw new AuthBrokerError(
-					"Auth broker does not support Meta API-key login recency; upgrade the broker before using Meta PAYG login",
+					`Auth broker does not support ${provider} API-key login recency; upgrade the broker before using this login`,
 					{ status: error.status, body: error.body, cause: error },
 				);
 			}

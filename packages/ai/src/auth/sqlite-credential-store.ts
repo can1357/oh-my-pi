@@ -9,6 +9,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { parseAlibabaTokenPlanCredential } from "@oh-my-pi/pi-catalog/wire/alibaba-token-plan";
 import { parseCloudflareAiGatewayCredential } from "@oh-my-pi/pi-catalog/wire/cloudflare-ai-gateway";
+import { usesOAuthMintedApiKeyWithDirectApiKey } from "@oh-my-pi/pi-catalog/compat/behavior";
 import {
 	getAgentDbPath,
 	getDbBusyTimeoutMs,
@@ -1310,9 +1311,9 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 				identityKey: resolveRowCredentialIdentityKey(providerName, row),
 			}));
 
-			// Meta OAuth mints a Muse transport key, so its subscription grant is
-			// distinct from direct PAYG keys and both login sources must coexist.
-			if (item.type === "oauth" && !(providerName === "meta" && item.apiKey)) {
+			// OAuth-minted transport keys are distinct from direct API keys, so
+			// both interactive login sources must coexist.
+			if (item.type === "oauth" && !(usesOAuthMintedApiKeyWithDirectApiKey(providerName) && item.apiKey)) {
 				for (const row of existing) {
 					if (row.credential && row.credential.type === "api_key") {
 						this.#deleteStmt.run("replaced by oauth login", row.id);

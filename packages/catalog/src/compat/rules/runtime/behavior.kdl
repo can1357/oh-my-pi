@@ -1,6 +1,10 @@
 // Provider and model behavior needed before or outside exact bundled-model lookup.
 
 behavior {
+	// OAuth account grants mint transport API keys, while users may also log in
+	// with direct PAYG keys. Both sources coexist and the newest login wins.
+	credential-policy provider="meta" mode="oauth-minted-api-key-with-direct-api-key"
+
 	// LiteLLM may discover ids absent from the bundled catalog. This conservative
 	// heuristic routes likely OpenAI text/reasoning ids to Responses while
 	// excluding other OpenAI product surfaces.

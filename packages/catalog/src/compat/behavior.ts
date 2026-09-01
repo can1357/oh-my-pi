@@ -7,7 +7,7 @@
  */
 import { globMatch } from "./cascade";
 import rules from "./rules.json";
-import type { CompiledMatchList } from "./types";
+import type { CompiledCredentialPolicy, CompiledMatchList } from "./types";
 
 const behavior = rules.behavior;
 
@@ -21,6 +21,16 @@ function matchesList(match: CompiledMatchList, model: string, modelLower: string
 	}
 	if (match.glob?.some(pattern => globMatch(pattern, modelLower))) return true;
 	return false;
+}
+
+/** Provider credential policy declared in the runtime behavior rules. */
+export function credentialPolicyFor(provider: string): CompiledCredentialPolicy | undefined {
+	return behavior.credentialPolicies.find(policy => policy.provider === provider);
+}
+
+/** Whether OAuth mints an API key that coexists with a direct login API key. */
+export function usesOAuthMintedApiKeyWithDirectApiKey(provider: string): boolean {
+	return credentialPolicyFor(provider)?.mode === "oauth-minted-api-key-with-direct-api-key";
 }
 
 /**

@@ -85,4 +85,36 @@ describe("Muse Code subscription usage", () => {
 			storage.close();
 		}
 	});
+
+	test("reports inactive Muse subscriptions as invalid credentials", async () => {
+		const storage = new AuthStorage(new SqliteAuthCredentialStore(new Database(":memory:")), {
+			usageProviderResolver: provider => (provider === "meta" ? metaMuseUsageProvider : undefined),
+			usageFetch: Object.assign(
+				() =>
+					Promise.resolve(
+						Response.json({
+							api_key: "LLM|subscription-key",
+							is_subs_active: false,
+						}),
+					),
+				{ preconnect: fetch.preconnect },
+			),
+		});
+		try {
+			await storage.reload();
+			await storage.set("meta", {
+				type: "oauth",
+				access: "inactive-meta-access",
+				refresh: "meta-refresh",
+				expires: Date.now() + 3_600_000,
+				apiKey: "LLM|subscription-key",
+			});
+
+			const [result] = await storage.checkCredentials();
+			expect(result.ok).toBe(false);
+			expect(result.reason).toContain("inactive");
+		} finally {
+			storage.close();
+		}
+	});
 });

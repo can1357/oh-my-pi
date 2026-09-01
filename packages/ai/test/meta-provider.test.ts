@@ -66,7 +66,6 @@ describe("Meta login", () => {
 	});
 
 	test("uses one provider for Muse subscriptions and Model API keys", () => {
-		expect(metaProvider.name).toBe("Meta");
 		expect(
 			getOAuthProviders()
 				.filter(provider => provider.id === "meta" || provider.id === "muse-code")

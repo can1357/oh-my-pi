@@ -9,6 +9,7 @@
  */
 import type {
 	CompiledApiRoutes,
+	CompiledCredentialPolicy,
 	CompiledBehavior,
 	CompiledExcludeModels,
 	CompiledMatchList,
@@ -269,6 +270,7 @@ function parsePricingPeer(node: KdlNodeView): CompiledPricingPeer {
 /** Compiles the runtime behavior source (may be absent → empty vocabulary). */
 export function compileBehavior(source: { file: string; text: string } | undefined): CompiledBehavior {
 	const behavior: CompiledBehavior = {
+		credentialPolicies: [],
 		modelOperations: [],
 		cursorParameters: [],
 		quotaTiers: [],
@@ -327,6 +329,22 @@ export function compileBehavior(source: { file: string; text: string } | undefin
 				const model = requiredProp(node, "model");
 				if (!provider || !model || node.args.length > 0) malformed(node);
 				behavior.hostedDefaults.push({ provider, model });
+				break;
+			}
+			case "credential-policy": {
+				ensureLeaf(node, ["provider", "mode"]);
+				const provider = requiredProp(node, "provider");
+				const mode = requiredProp(node, "mode");
+				if (
+					!provider ||
+					mode !== "oauth-minted-api-key-with-direct-api-key" ||
+					node.args.length > 0 ||
+					behavior.credentialPolicies.some(policy => policy.provider === provider)
+				) {
+					malformed(node);
+				}
+				const policy: CompiledCredentialPolicy = { provider, mode };
+				behavior.credentialPolicies.push(policy);
 				break;
 			}
 			case "api-routes":

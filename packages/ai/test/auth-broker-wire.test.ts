@@ -287,6 +287,11 @@ describe("auth-broker wire surface", () => {
 		});
 		const legacyResult = await legacyClient.fetchSnapshot();
 		if (legacyResult.status !== 200) throw new Error("expected legacy-client snapshot");
+		expect(
+			legacyResult.snapshot.credentials
+				.filter(entry => entry.provider === "meta")
+				.map(entry => entry.credential.type),
+		).toEqual(["api_key"]);
 		const legacyCredential = legacyResult.snapshot.credentials.find(
 			entry => entry.provider === "meta" && entry.credential.type === "api_key",
 		)?.credential;
@@ -319,7 +324,7 @@ describe("auth-broker wire surface", () => {
 				source: "login",
 				authorizedAt: 123,
 			}),
-		).rejects.toThrow("upgrade the broker before using Meta PAYG login");
+		).rejects.toThrow("upgrade the broker");
 		expect(uploadedCredential?.authorizedAt).toBe(123);
 	});
 

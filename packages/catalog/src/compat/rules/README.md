@@ -233,6 +233,7 @@ behavior {
     model-operations provider="openai" { exact "o3"; prefix "gpt-"; operation "generate_image" }
     cursor-effort family-marker="gpt-" { tier "minimal" "low" "medium" "high" "xhigh" "max" }
     cursor-model-parameter model="composer-2.5" id="fast" value="false"
+    credential-policy provider="meta" mode="oauth-minted-api-key-with-direct-api-key"
     quota-tiers provider="openai-codex" {
         tier "spark" "gpt-5.3-codex-spark"
         fallback "chat" substring="gpt-"

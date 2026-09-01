@@ -110,7 +110,9 @@ export const metaMuseUsageProvider: UsageProvider = {
 			}
 			return null;
 		}
-		if (payload.is_subs_active === false) return null;
+		if (payload.is_subs_active === false) {
+			throw new AIError.ProviderHttpError("Muse Code subscription is inactive", 403);
+		}
 		const email = payload.user_email?.trim().toLowerCase() || params.credential.email;
 		const accountId = payload.user_id?.trim() || params.credential.accountId || email;
 		const limits = buildLimits(payload, accountId);

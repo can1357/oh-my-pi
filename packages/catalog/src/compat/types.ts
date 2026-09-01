@@ -291,6 +291,11 @@ export interface CompiledPricingPeer {
 	aliases: { model: string; peerId: string }[];
 }
 
+/** Provider credential coexistence and selection policy. */
+export interface CompiledCredentialPolicy {
+	provider: string;
+	mode: "oauth-minted-api-key-with-direct-api-key";
+}
 /** Compiled runtime behavior vocabulary (`runtime/behavior.kdl`). */
 export interface CompiledBehavior {
 	openaiResponsesHeuristic?: CompiledResponsesHeuristic;
@@ -304,6 +309,7 @@ export interface CompiledBehavior {
 	excludeModels: CompiledExcludeModels[];
 	planRequirements: CompiledPlanRequirement[];
 	pricingPeers: CompiledPricingPeer[];
+	credentialPolicies: CompiledCredentialPolicy[];
 	retiredProviders: string[];
 }
 
