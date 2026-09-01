@@ -21,6 +21,8 @@ describe("parseCallbackInput", () => {
 	it("accepts a bare code split across rows, and keeps a spec-legal interior space", () => {
 		// Row breaks are never VSCHAR, so they always go.
 		expect(parseCallbackInput("ABC\n123").code).toBe("ABC123");
+		// Padding around a break is part of the same artifact as the break.
+		expect(parseCallbackInput("ABC \n 123").code).toBe("ABC123");
 		// A space is %x20, inside 1*VSCHAR: part of the code, not terminal noise.
 		expect(parseCallbackInput("ABC DEF").code).toBe("ABC DEF");
 	});

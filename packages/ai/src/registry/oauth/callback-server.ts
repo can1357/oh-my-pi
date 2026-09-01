@@ -531,15 +531,17 @@ export abstract class OAuthCallbackFlow {
  *
  * Input arrives carrying terminal artifacts: a URL copied out of a full-screen
  * TUI includes the row breaks the frame painted, and a terminal that pads rows
- * includes spaces at the break points. Row breaks and tabs are never valid in
- * any accepted form (RFC 6749 defines `code` as `1*VSCHAR`, which is %x20-7E),
- * so they are always removed. Spaces are removed only from the URL and
- * query-string forms, where a raw space cannot be legitimate; a bare code keeps
- * its interior spaces, because VSCHAR includes %x20 and stripping it would
- * corrupt a spec-legal code.
+ * includes spaces at the break points. Control whitespace is never valid in any
+ * accepted form (RFC 6749 defines `code` as `1*VSCHAR`, which is %x20-7E), so
+ * each control-whitespace run is removed together with its adjacent spaces:
+ * the padding belongs to the same artifact as the break it surrounds, and
+ * `ABC \n 123` means `ABC123`, not `ABC  123`. Remaining spaces are removed
+ * from the URL and query-string forms, where a raw space cannot be legitimate;
+ * a bare code keeps them, because VSCHAR includes %x20 and stripping a genuine
+ * interior space would corrupt a spec-legal code.
  */
 export function parseCallbackInput(input: string): { code?: string; state?: string } {
-	const value = input.replace(/[\r\n\t\v\f]+/g, "").trim();
+	const value = input.replace(/ *[\r\n\t\v\f]+ */g, "").trim();
 	if (!value) return {};
 	const compact = value.replace(/ +/g, "");
 
