@@ -5,7 +5,9 @@
  * (scope chip, file/diff toggle, hunk navigation, hunk/inline/split view
  * buttons, whitespace + word-wrap toggles), center diff pane with a minimap
  * scrollbar, right sidebar (file management + commit form while dirty, HEAD
- * commit details with author avatar when clean), and a footer with key hints.
+ * commit details with author avatar when clean). Submitting an empty commit
+ * form generates an llm-git-compatible message; submitting populated fields
+ * commits them. A footer shows key hints.
  *
  * `tab` moves focus between the diff and the sidebar; both panes take
  * arrows/PgUp/PgDn, vim motions (`j`/`k`/`h`/`l`/`g`/`G`), and mouse
@@ -15,9 +17,12 @@
  * stage/unstage (hunk-aware), `x` discards a hunk, `w` wraps, `b` cycles
  * whitespace handling (exact → ignore whitespace → ignore
  * formatting/import-only changes), `c` jumps to the commit form, `r`
- * refreshes. In the sidebar tree `←`/`→` collapse/expand directories and
- * `enter` opens the selected file in the diff pane.
+ * refreshes. In the sidebar tree `←`/`→` collapse/expand directories,
+ * `enter` opens the selected file in the diff pane, and `space` stages or
+ * unstages the selected row — on a directory, every file underneath it.
  */
+
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import {
 	type Component,
 	matchesKey,
@@ -27,8 +32,9 @@ import {
 	truncateToWidth,
 	visibleWidth,
 } from "@oh-my-pi/pi-tui";
+import { generateGitCommit } from "../../commit/conventional/service";
 import { theme, warmHighlighter } from "../../modes/theme/theme";
-import * as git from "../../utils/git";
+import { aiStage } from "./ai-stage";
 import { AvatarLoader } from "./avatar";
 import { pill, softPill, tintChip } from "./colors";
 import {
@@ -113,10 +119,13 @@ class GitTuiComponent implements Component {
 	#loadSeq = 0;
 	#loadAbort: AbortController | null = null;
 	#highlightAbort: AbortController | null = null;
+	#generationAbort: AbortController | null = null;
+	#aiStageAbort: AbortController | null = null;
 	#refreshTimer: NodeJS.Timeout | undefined;
 	#busy = false;
 	#status = "";
 	#statusAt = 0;
+	#statusSticky = false;
 	#centerWidth = 0;
 	#contentHeight = 20;
 	#headerHits: UiHit[] = [];
@@ -153,6 +162,8 @@ class GitTuiComponent implements Component {
 		this.#disposed = true;
 		this.#loadAbort?.abort();
 		this.#highlightAbort?.abort();
+		this.#generationAbort?.abort();
+		this.#aiStageAbort?.abort();
 		clearInterval(this.#refreshTimer);
 	}
 
@@ -166,7 +177,7 @@ class GitTuiComponent implements Component {
 			this.#syncSidebar(true);
 			this.#loadDeferredDetails();
 		} catch (error) {
-			this.#setStatus(theme.fg("error", error instanceof Error ? error.message : String(error)));
+			this.#setError(error);
 		}
 	}
 
@@ -191,8 +202,7 @@ class GitTuiComponent implements Component {
 			if (changed && !this.#disposed) this.#syncSidebar(false);
 		};
 		const fail = (error: unknown): void => {
-			if (!this.#disposed)
-				this.#setStatus(theme.fg("error", error instanceof Error ? error.message : String(error)));
+			if (!this.#disposed) this.#setError(error);
 		};
 		void this.#model.loadChangeStats().then(apply).catch(fail);
 		if (this.#model.clean) void this.#model.loadHeadFiles().then(apply).catch(fail);
@@ -243,7 +253,7 @@ class GitTuiComponent implements Component {
 			.catch(error => {
 				if (seq !== this.#loadSeq || abort.signal.aborted) return;
 				this.#pane.setDocument(null, "empty");
-				this.#setStatus(theme.fg("error", error instanceof Error ? error.message : String(error)));
+				this.#setError(error);
 			});
 	}
 
@@ -286,15 +296,82 @@ class GitTuiComponent implements Component {
 		try {
 			switch (action.type) {
 				case "stage":
-					await this.#model.stage(action.file);
-					this.#setStatus(theme.fg("success", action.file ? `Staged ${action.file.path}` : "Staged all changes"));
-					break;
-				case "unstage":
-					await this.#model.unstage(action.file);
+					await this.#model.stage(action.selection?.files);
 					this.#setStatus(
-						theme.fg("success", action.file ? `Unstaged ${action.file.path}` : "Unstaged all changes"),
+						theme.fg("success", action.selection ? `Staged ${action.selection.label}` : "Staged all changes"),
 					);
 					break;
+				case "unstage":
+					await this.#model.unstage(action.selection?.files);
+					this.#setStatus(
+						theme.fg("success", action.selection ? `Unstaged ${action.selection.label}` : "Unstaged all changes"),
+					);
+					break;
+				case "stage-ai": {
+					const abort = new AbortController();
+					this.#aiStageAbort = abort;
+					this.#setStatus(theme.fg("accent", `Filtering changes: ${action.prompt}`));
+					try {
+						const outcome = await aiStage({
+							cwd: this.#model.cwd,
+							instruction: action.prompt,
+							files: this.#model.unstaged,
+							signal: abort.signal,
+							onProgress: message => {
+								if (!this.#disposed) this.#setStatus(theme.fg("dim", message));
+							},
+						});
+						if (outcome.stagedHunks === 0 && outcome.wholeFiles === 0) {
+							this.#setStatus(theme.fg("warning", `No changes matched "${action.prompt}"`));
+						} else {
+							const parts: string[] = [];
+							if (outcome.stagedHunks > 0) parts.push(`${outcome.stagedHunks} of ${outcome.totalHunks} hunks`);
+							if (outcome.wholeFiles > 0) {
+								parts.push(`${outcome.wholeFiles} whole file${outcome.wholeFiles === 1 ? "" : "s"}`);
+							}
+							this.#setStatus(
+								theme.fg(
+									"success",
+									`Staged ${parts.join(" + ")} (${outcome.matchedFiles}/${outcome.totalFiles} files matched)`,
+								),
+							);
+						}
+					} finally {
+						if (this.#aiStageAbort === abort) this.#aiStageAbort = null;
+					}
+					break;
+				}
+				case "generate": {
+					const abort = new AbortController();
+					this.#generationAbort = abort;
+					this.#sidebar.setGenerating(true);
+					this.#setStatus(theme.fg("accent", "Generating commit message…"));
+					try {
+						const generated = await generateGitCommit({
+							cwd: this.#model.cwd,
+							stageIfEmpty: true,
+							signal: abort.signal,
+							onProgress: message => {
+								if (!this.#disposed) this.#setStatus(theme.fg("dim", message));
+							},
+						});
+						this.#sidebar.setGeneratedCommit(generated.commit);
+						this.#setStatus(
+							generated.validationError
+								? theme.fg("warning", `Generated message needs review: ${generated.validationError}`)
+								: theme.fg(
+										"success",
+										generated.stagedAll
+											? "Staged all changes and generated commit message"
+											: "Generated commit message",
+									),
+						);
+					} finally {
+						if (this.#generationAbort === abort) this.#generationAbort = null;
+						this.#sidebar.setGenerating(false);
+					}
+					break;
+				}
 				case "commit": {
 					if (action.stageAll) await this.#model.stage();
 					await this.#model.commit(action.message, { amend: action.amend });
@@ -305,7 +382,7 @@ class GitTuiComponent implements Component {
 			}
 			await this.#refresh(true);
 		} catch (error) {
-			this.#setStatus(theme.fg("error", error instanceof Error ? error.message : String(error)));
+			this.#setError(error);
 		} finally {
 			this.#busy = false;
 		}
@@ -333,7 +410,7 @@ class GitTuiComponent implements Component {
 			);
 			await this.#refresh(true);
 		} catch (error) {
-			this.#setStatus(theme.fg("error", error instanceof Error ? error.message : String(error)));
+			this.#setError(error);
 		} finally {
 			this.#busy = false;
 		}
@@ -374,7 +451,7 @@ class GitTuiComponent implements Component {
 			);
 			await this.#refresh(true);
 		} catch (error) {
-			this.#setStatus(theme.fg("error", error instanceof Error ? error.message : String(error)));
+			this.#setError(error);
 		} finally {
 			this.#busy = false;
 		}
@@ -383,7 +460,14 @@ class GitTuiComponent implements Component {
 	#setStatus(text: string): void {
 		this.#status = text;
 		this.#statusAt = Date.now();
+		this.#statusSticky = false;
 		this.#ui.requestRender();
+	}
+	/** Persistent single-line error status; provider/git messages may span lines. */
+	#setError(error: unknown): void {
+		const message = error instanceof Error ? error.message : String(error);
+		this.#setStatus(theme.fg("error", message.replace(/\s+/g, " ").trim()));
+		this.#statusSticky = true;
 	}
 
 	// ── input ──────────────────────────────────────────────────────────────
@@ -398,8 +482,9 @@ class GitTuiComponent implements Component {
 	#stageCurrentFile(): void {
 		const file = this.#currentFile;
 		if (!file) return;
-		if (file.area === "unstaged") void this.#runAction({ type: "stage", file });
-		else if (file.area === "staged") void this.#runAction({ type: "unstage", file });
+		const selection = { files: [file], label: file.path };
+		if (file.area === "unstaged") void this.#runAction({ type: "stage", selection });
+		else if (file.area === "staged") void this.#runAction({ type: "unstage", selection });
 	}
 
 	#setMode(mode: ViewMode): void {
@@ -613,7 +698,7 @@ class GitTuiComponent implements Component {
 		right.add(" ").button(softPill(` ${glyphs.close} `), () => this.#done.resolve());
 
 		// The empty middle carries the key hints (or a fresh status message).
-		const status = Date.now() - this.#statusAt < STATUS_TTL_MS ? this.#status : "";
+		const status = this.#statusSticky || Date.now() - this.#statusAt < STATUS_TTL_MS ? this.#status : "";
 		const middle =
 			status ||
 			theme.fg(
@@ -716,11 +801,12 @@ export interface GitTuiOptions {
  */
 export async function showGitOverlay(ui: TUI, options: GitTuiOptions = {}): Promise<void> {
 	const cwd = options.cwd ?? process.cwd();
-	const root = await git.repo.root(cwd);
+	const repo = vcs.git(cwd);
+	const root = repo?.info().repoRoot ?? null;
 	if (!root) throw new Error(`Not a git repository: ${cwd}`);
 	let pinnedSha: string | undefined;
 	if (options.revision) {
-		pinnedSha = (await git.ref.resolve(root, options.revision)) ?? undefined;
+		pinnedSha = (await repo?.resolveRef(options.revision)) ?? undefined;
 		if (!pinnedSha) throw new Error(`Cannot resolve revision: ${options.revision}`);
 	}
 	const component = new GitTuiComponent(ui, root, pinnedSha);

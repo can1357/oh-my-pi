@@ -2,8 +2,8 @@
  * Minimal TUI implementation with explicit history batches.
  *
  * Two output channels: a product-owned {@link TerminalFrameProvider} returns,
- * per frame, an optional immutable {@link HistoryBatch} (finalized transcript
- * rows appended to native history exactly once, gated by a monotonic id and
+ * per frame, an optional immutable {@link HistoryBatch} (finalized or naturally
+ * emitted stable rows, or one complete replay, gated by a monotonic id and
  * acknowledgement) plus the complete mutable viewport. The writer anchors the
  * viewport directly below whatever history remains visible, diffs
  * viewport-only frames, and never infers finality from a row's position.
@@ -14,11 +14,12 @@
  */
 import * as fs from "node:fs";
 import { performance } from "node:perf_hooks";
-import { $flag, getDebugLogPath, logger } from "@oh-my-pi/pi-utils";
+import { $flag, getDebugLogPath, logger, postmortem } from "@oh-my-pi/pi-utils";
 import { DEFAULT_MAX_INLINE_IMAGES, ImageBudget } from "./components/image";
+import { TuiDebugServer } from "./debug-server";
 import { isKeyRelease, matchesKey } from "./keys";
 import { LoopWatchdog } from "./loop-watchdog";
-import { setAltScreenActive, type Terminal } from "./terminal";
+import { STDOUT_BACKLOG_CLEAR_BYTES, setAltScreenActive, type Terminal } from "./terminal";
 import {
 	encodeKittyDeleteAllImages,
 	encodeKittyDeleteImage,
@@ -109,13 +110,20 @@ export interface ViewportSize {
 	readonly rows: number;
 }
 
-/** Immutable finalized rows offered until the terminal accepts this identifier. */
+/** Immutable append or complete replay offered until the terminal accepts this identifier. */
 export interface HistoryBatch {
 	readonly id: number;
 	readonly rows: readonly string[];
+	/**
+	 * `append` (the default) adds finalized or naturally emitted rows. `replay`
+	 * is the complete logical ledger; the writer bottom-splits it against the
+	 * leading blank viewport and serializes the remainder plus final viewport in
+	 * one synchronous terminal write.
+	 */
+	readonly kind?: "append" | "replay";
 }
 
-/** One history append and the complete mutable viewport for a terminal frame. */
+/** One history append or complete replay plus the mutable viewport for a terminal frame. */
 export interface TerminalFramePlan {
 	readonly history?: HistoryBatch;
 	readonly viewport: readonly string[];
@@ -174,6 +182,15 @@ const DEFAULT_RENDER_SCHEDULER: RenderScheduler = {
  * which leading rows survived.
  */
 export interface Component {
+	/** Stable identifier surfaced in the debug tree as kind#id. */
+	debugId?: string;
+	/** Override for the tree node kind (default: constructor.name). */
+	debugKind?: string;
+	/** Widget state for the debug `values`/`tree` ops. JSON-serializable. */
+	debugState?(): Record<string, unknown>;
+	/** Children for the debug tree when not already exposed as a public `children` array. */
+	debugChildren?: readonly Component[];
+
 	/**
 	 * Render the component to an array of physical rows at the given width.
 	 * The result is component-owned and `readonly` to the caller; an unchanged
@@ -457,6 +474,7 @@ export class Container implements Component {
 		let refs = this.#memoChildLines;
 		let unchanged = this.#memoLines !== undefined && this.#memoWidth === width && refs.length === count;
 		if (refs.length !== count) {
+			// oxlint-disable-next-line unicorn/no-new-array -- render-frame length preallocation
 			refs = new Array(count);
 			this.#memoChildLines = refs;
 		}
@@ -642,15 +660,66 @@ export class TUI extends Container {
 	#parkedViewportOffset = 0;
 	// In-flight post-resize anchor probe: the stale viewport snapshot and park
 	// offset captured when CSI 6n was written, plus the no-reply fallback timer.
-	#resizeProbe: { window: readonly string[]; offset: number; timer: RenderTimer } | undefined;
-	// Unanswered CSI 6n probes; CPR replies are consumed from input while > 0.
-	#pendingCprReplies = 0;
+	#resizeProbe:
+		| {
+				window: readonly string[];
+				offset: number;
+				timer: RenderTimer;
+				epoch: number;
+				retried: boolean;
+		  }
+		| undefined;
+	// Pre-erase viewport snapshot for the settled resize-anchor probe: the erase
+	// in #beginResizeAltPaint empties #providerWindow, so the probe must bound
+	// the anchor with the window that was actually on screen when the resize
+	// began (see #resolveResizeAnchor's `height - staleRows` clamp).
+	#resizeProbeWindow: readonly string[] = [];
+	#resizeProbeOffset = 0;
+	// Direction tracking for the current coalesced resize burst (reset when a
+	// plan frame commits, alongside #previousHeight). A burst containing any
+	// height grow invalidates the multiplexer clip model in
+	// #resolveResizeAnchor: the grow pulls scrollback into the pane and moves
+	// the parked logical row, so the net shrink no longer telescopes from
+	// pre-burst state.
+	#resizeBurstGrew = false;
+	#resizeBurstLastHeight: number | undefined;
+	// Sum of every grow step in the burst: bounds how much scrollback a
+	// multiplexer can have pulled down across the whole burst, including a
+	// shrink-then-regrow that never exceeds the pre-burst height (see the
+	// CPR-timeout fallback in #resolveResizeAnchor).
+	#resizeBurstPull = 0;
+	// Geometry epoch: bumped on every resize transaction entry, so each CSI 6n
+	// request records the geometry it was parked under.
+	#geometryEpoch = 0;
+	// CPR attribution: each request parks a distinct column (CHA) before its
+	// CSI 6n; the terminal processes requests serially, so every reply carries
+	// its own request's column. That makes attribution exact even when replies
+	// are dropped or arbitrarily delayed — anonymous FIFO counting cannot
+	// survive drops (forgetting retired requests eagerly misattributes late
+	// replies, remembering them forever poisons later probes with phantoms,
+	// and age expiry is unsound because replies carry no lifetime guarantee).
+	// A rewrap can only invalidate a reply's row via a width-change SIGWINCH,
+	// which bumps the geometry epoch and discards the reply anyway, so the
+	// scheme is sound on direct terminals too. Tags are never expired; a late
+	// reply to a dead tag is stripped and discarded by column.
+	#cprColumnTags = new Map<number, number>();
+	#cprProbeSeq = 0;
 	// Prepared rows painted by the previous provider frame, for row diffing.
 	#providerWindow: string[] = [];
 	#previousFrameLength = 0;
 	#previousWidth = 0;
 	#previousHeight = 0;
 	#focusedComponent: Component | null = null;
+	#debugServer: TuiDebugServer | undefined;
+	#debugPaint:
+		| {
+				lines: readonly string[];
+				windowTop: number;
+				altScreen: boolean;
+				cursor?: { x: number; y: number; visible?: boolean };
+		  }
+		| undefined;
+	#debugNextWindowTop = 0;
 	#inputListeners = new Set<InputListener>();
 	#startListeners = new Set<StartListener>();
 
@@ -685,8 +754,12 @@ export class TUI extends Container {
 	 * render (keeping its forced/clear-scrollback intent) and retry shortly;
 	 * the eventual frame composes the latest component state, so a slow
 	 * terminal receives only fresh frames instead of every intermediate one.
+	 *
+	 * This is the terminal's healthy-backlog level ({@link STDOUT_BACKLOG_CLEAR_BYTES}):
+	 * gating here and ending a StdoutStallWatchdog episode there keeps the stall
+	 * watchdog armed across exactly the range where frames are deferred (#10434).
 	 */
-	static readonly #MAX_PENDING_OUTPUT_BYTES = 256 * 1024;
+	static readonly #MAX_PENDING_OUTPUT_BYTES = STDOUT_BACKLOG_CLEAR_BYTES;
 	/** Retry cadence while the output backlog gate is holding renders back. */
 	static readonly #OUTPUT_BACKLOG_RETRY_MS = 10;
 	/** Quiet window before restoring the normal buffer after resize. */
@@ -727,6 +800,7 @@ export class TUI extends Container {
 	#forceViewportRepaintOnNextRender = false;
 	#hasEverRendered = false;
 	#stopped = false;
+	#cancelPostmortemRestore?: () => void;
 	/** True between a `deferInput` start() and enableInput(). */
 	#inputDeferred = false;
 	// Always-on event-loop lag probe. The high default threshold keeps it quiet;
@@ -853,6 +927,16 @@ export class TUI extends Container {
 		return this.#synchronizedOutputEnabled;
 	}
 
+	/**
+	 * Cost in milliseconds of the most recently completed frame.
+	 *
+	 * Animation components use this to apply proportional backpressure after
+	 * their render request is asynchronously composed and written.
+	 */
+	get lastFrameCostMs(): number {
+		return this.#lastFrameCostMs;
+	}
+
 	setFocus(component: Component | null): void {
 		const topVisibleOverlay = this.#getTopmostVisibleOverlay();
 		if (topVisibleOverlay && !isOverlayFocusTarget(topVisibleOverlay.component, component)) {
@@ -881,6 +965,27 @@ export class TUI extends Container {
 	/** Component currently receiving keyboard input, if any. */
 	getFocused(): Component | null {
 		return this.#focusedComponent;
+	}
+	/** Last viewport successfully written by the renderer, for debug inspection. */
+	getDebugPaint():
+		| {
+				lines: readonly string[];
+				windowTop: number;
+				altScreen: boolean;
+				cursor?: { x: number; y: number; visible?: boolean };
+		  }
+		| undefined {
+		return this.#debugPaint;
+	}
+
+	/** Render the current root document at the live terminal width for debug inspection. */
+	getDebugDocument(): readonly string[] {
+		return this.render(Math.max(1, this.terminal.columns));
+	}
+
+	/** Feed debug and test input through the same pipeline as terminal stdin. */
+	injectDebugInput(data: string): void {
+		this.#handleInput(data);
 	}
 
 	/**
@@ -984,6 +1089,14 @@ export class TUI extends Container {
 
 	start(options?: TUIStartOptions): void {
 		this.#stopped = false;
+		this.#debugPaint = undefined;
+		this.#debugServer?.stop();
+		this.#debugServer = undefined;
+		const debugPath = process.env.OMP_TUI_DEBUG;
+		if (debugPath !== undefined && debugPath.length > 0) {
+			this.#debugServer = new TuiDebugServer(this, debugPath);
+			this.#debugServer.start();
+		}
 		this.#inputDeferred = options?.deferInput === true;
 		this.#watchdog.start();
 		this.#ghosttyInitialImageDelayDone = false;
@@ -1006,7 +1119,7 @@ export class TUI extends Container {
 				if (this.#resizeProbe) {
 					// The anchor being probed is already stale; restart the transaction.
 					this.#cancelResizeProbe();
-					this.#beginResizeAltPaint();
+					this.#beginResizeAltPaint(true);
 					return;
 				}
 				if (this.#renderScheduler.now() < this.#suppressResizeUntil) {
@@ -1019,6 +1132,8 @@ export class TUI extends Container {
 			{ deferInput: this.#inputDeferred },
 		);
 		if (this.#stopped) return;
+		this.#cancelPostmortemRestore?.();
+		this.#cancelPostmortemRestore = postmortem.register("tui-restore", () => this.stop());
 		for (const listener of this.#startListeners) {
 			try {
 				listener();
@@ -1034,12 +1149,23 @@ export class TUI extends Container {
 		}
 		this.requestRender(true, { clearScrollback: options?.clearScrollback === true });
 	}
-	/** Borrow the alternate buffer for stable, history-free resize repainting. */
-	#beginResizeAltPaint(): void {
+	/**
+	 * Borrow the alternate buffer for stable, history-free resize repainting.
+	 * `restartingProbe` marks a transaction restarted by a SIGWINCH that
+	 * arrived while the settled anchor probe was in flight: the live window
+	 * was already stashed and emptied, so the snapshot below must be skipped
+	 * to keep the good stash.
+	 */
+	#beginResizeAltPaint(restartingProbe = false): void {
 		if (this.#altActive) {
 			this.requestRender(true);
 			return;
 		}
+		const burstLastHeight = this.#resizeBurstLastHeight ?? this.#previousHeight;
+		if (this.terminal.rows > burstLastHeight) this.#resizeBurstGrew = true;
+		this.#resizeBurstLastHeight = this.terminal.rows;
+		this.#resizeBurstPull += Math.max(0, this.terminal.rows - burstLastHeight);
+		this.#geometryEpoch++;
 		if (!this.#resizeAltActive) {
 			this.#resizeAltActive = true;
 			setAltScreenActive(true);
@@ -1058,10 +1184,19 @@ export class TUI extends Container {
 			// cursor-relative movement lands on the viewport's top row. On height
 			// shrink kitty clamps the cursor instead of moving it with pushed rows,
 			// so cursor-relative addressing would start rows late; fall back to the
-			// same bottom-preserving bound as resize-anchor recovery. The blank top
-			// row then anchors the settled CPR probe (empty window means staleRows 0).
+			// same bottom-preserving bound as resize-anchor recovery. The pre-erase
+			// window is stashed for the settled CPR probe: its reflowed row count
+			// bounds the anchor to `height - staleRows`, so a mis-parked cursor (a
+			// single-step tmux zoom re-lays the pane before SIGWINCH delivery,
+			// moving the park target under us) cannot anchor the settled repaint
+			// over pulled-back history rows or scroll-push the frame into
+			// scrollback again.
 			let erase = "";
-			if (this.#hasEverRendered && this.#providerWindow.length > 0) {
+			if (!restartingProbe) {
+				this.#resizeProbeWindow = this.#providerWindow;
+				this.#resizeProbeOffset = this.#parkedViewportOffset;
+			}
+			if (this.#hasEverRendered && this.#providerWindow.length > 0 && !isInsideTerminalMultiplexer()) {
 				if (this.terminal.rows < this.#previousHeight) {
 					const staleRows = this.#reflowedRowCount(
 						this.#providerWindow,
@@ -1070,7 +1205,7 @@ export class TUI extends Container {
 						this.terminal.columns,
 					);
 					const top = Math.max(0, Math.min(this.#providerViewportTop, this.terminal.rows - staleRows));
-					erase = `\x1b[?25l\x1b[${top + 1};1H\x1b[J`;
+					erase = `\x1b[?25l${this.#eraseBelowRow(top, this.terminal.rows)}`;
 				} else {
 					const up = this.#reflowedRowCount(
 						this.#providerWindow,
@@ -1078,8 +1213,25 @@ export class TUI extends Container {
 						this.#parkedViewportOffset,
 						this.terminal.columns,
 					);
-					erase = `\x1b[?25l${up > 0 ? `\x1b[${up}A` : ""}\r\x1b[J`;
+					const eraseBelow = this.#eraseBelowCursorRow(this.terminal.columns, this.terminal.rows);
+					erase = `\x1b[?25l${up > 0 ? `\x1b[${up}A` : ""}${eraseBelow}`;
 				}
+				// Both erase paths leave the cursor on the viewport's top row, so the
+				// parked offset no longer applies; carrying a stale nonzero offset
+				// into the probe would anchor the settled repaint above the real
+				// viewport top and overwrite visible committed rows.
+				this.#resizeProbeOffset = 0;
+				this.#providerWindow = [];
+				this.#parkedViewportOffset = 0;
+			}
+			if (this.#hasEverRendered && this.#providerWindow.length > 0 && isInsideTerminalMultiplexer()) {
+				// Multiplexers apply the pane re-layout on their own schedule relative
+				// to SIGWINCH delivery, so an immediate erase races it: with the pane
+				// already re-laid the stale coordinates blank pulled-back committed
+				// rows (destroying popped scrollback), and with the pane not yet
+				// re-laid the erase lands on rows about to move. Skip it — the
+				// settled repaint overwrites the live region at the clip-model anchor
+				// and erases below it, race-free after the quiet window.
 				this.#providerWindow = [];
 				this.#parkedViewportOffset = 0;
 			}
@@ -1105,14 +1257,60 @@ export class TUI extends Container {
 	 * trip against the parked cursor reports where the viewport's logical line
 	 * landed. The settled repaint waits for the reply (or a short timeout).
 	 */
-	#beginResizeAnchorProbe(): void {
+	#beginResizeAnchorProbe(retry = false): void {
 		this.#cancelResizeProbe();
 		const timer = this.#renderScheduler.scheduleRender(() => {
+			const probe = this.#resizeProbe;
+			if (probe !== undefined && !probe.retried && (isInsideTerminalMultiplexer() || this.#resizeBurstGrew)) {
+				// A CPR-less resolve is heuristic: a grow's pull span is unknown
+				// on any terminal, and SIGWINCH coalescing can hide intermediate
+				// grows entirely, so even an observed-monotonic multiplexer
+				// shrink cannot be modeled with certainty. A dropped DSR reply
+				// is a transient race — multiplexers in particular answer DSR
+				// themselves — so ask once more before falling back.
+				this.#beginResizeAnchorProbe(true);
+				return;
+			}
 			this.#resolveResizeAnchor(undefined);
 		}, TUI.#RESIZE_PROBE_TIMEOUT_MS);
-		this.#resizeProbe = { window: this.#providerWindow, offset: this.#parkedViewportOffset, timer };
-		this.#pendingCprReplies++;
-		this.terminal.write("\x1b[6n");
+		this.#resizeProbe = {
+			window: this.#resizeProbeWindow,
+			offset: this.#resizeProbeOffset,
+			timer,
+			epoch: this.#geometryEpoch,
+			retried: retry,
+		};
+		// Tags are never expired by age: a reply has no lifetime guarantee, and
+		// freeing a column while its reply may still arrive would let that
+		// reply match a newer tag on the reused column. Dead tags only
+		// accumulate from genuinely dropped replies; a terminal that drops
+		// enough of them to exhaust the span earns the timeout-only fallback.
+		// Park a distinct column for this request so its reply is
+		// self-identifying, then return the cursor to column 1 immediately:
+		// the reply snapshots the column when the terminal processes the CSI
+		// 6n, but a cursor RESTING on a nonzero column would reflow onto a
+		// later visual row if a direct terminal's width later shrank below it,
+		// corrupting the next probe's cursor-relative math. Columns 1-16 are
+		// never used as tags: column 1 cannot be told apart from a spurious or
+		// clamped reply, and modified F3 keys encode as CSI 1;<mod>R with
+		// modifier codes 2-16, which is byte-identical to a CPR for row 1 on
+		// those columns. A column may not be reused while its tag is live —
+		// the old request's delayed reply would be attributed to the new
+		// epoch — so scan for a free slot.
+		const span = Math.min(30, this.terminal.columns - 16);
+		if (span >= 4) {
+			for (let index = 0; index < span; index++) {
+				const candidate = 17 + ((this.#cprProbeSeq + index) % span);
+				if (this.#cprColumnTags.has(candidate)) continue;
+				this.#cprProbeSeq += index + 1;
+				this.#cprColumnTags.set(candidate, this.#geometryEpoch);
+				this.terminal.write(`\x1b[${candidate}G\x1b[6n\x1b[1G`);
+				return;
+			}
+		}
+		// Degenerate span or full occupancy: an untagged reply could never be
+		// attributed, so no DSR is sent at all; the timeout anchors
+		// conservatively on its own.
 	}
 
 	#cancelResizeProbe(): void {
@@ -1123,19 +1321,25 @@ export class TUI extends Container {
 
 	/**
 	 * Anchor the settled post-resize repaint. `reportedRow` is the 0-based CPR
-	 * row of the parked cursor (undefined = probe timed out). The viewport top
-	 * is `min(reported - parkOffset, height - staleRows)`: terminals track the
+	 * row of the parked cursor (undefined = probe timed out). Direct terminals
+	 * use `min(reported - parkOffset, height - staleRows)`: they track the
 	 * cursor exactly through width rewrap, and the second bound reconstructs
-	 * height-shrink scrollback pushes that leave the cursor behind (kitty clamps
-	 * the cursor instead of scrolling it) — bottom-preserving resize guarantees
-	 * the stale viewport ends on the last screen row whenever a push happened.
-	 * Validated against kitty's real core in resize-anchor-recovery.test.ts.
+	 * height-shrink scrollback pushes that leave the cursor behind (kitty
+	 * clamps the cursor instead of scrolling it) — bottom-preserving resize
+	 * guarantees the stale viewport ends on the last screen row whenever a
+	 * push happened; validated against kitty's real core in
+	 * resize-anchor-recovery.test.ts. Multiplexers clip on height changes
+	 * (though they reflow on width changes), so that bound never applies:
+	 * monotonic shrinks use the deterministic clip model below, everything
+	 * else trusts the CPR directly.
 	 */
 	#resolveResizeAnchor(reportedRow: number | undefined): void {
 		const probe = this.#resizeProbe;
 		if (!probe) return;
 		probe.timer.cancel();
 		this.#resizeProbe = undefined;
+		// Column tags stay live across resolves: their replies are
+		// self-identifying and discarded by tag whenever they arrive.
 		const width = this.terminal.columns;
 		const height = this.terminal.rows;
 		const staleRows = this.#reflowedRowCount(probe.window, 0, probe.window.length, width);
@@ -1143,7 +1347,58 @@ export class TUI extends Container {
 			reportedRow === undefined
 				? this.#providerViewportTop
 				: reportedRow - this.#reflowedRowCount(probe.window, 0, probe.offset, width);
-		const top = Math.max(0, Math.min(reportedTop, height - staleRows));
+		let top: number;
+		if (isInsideTerminalMultiplexer()) {
+			if (reportedRow !== undefined) {
+				// The parked cursor's reply is exact under multiplexer clipping:
+				// discards leave the cursor in place, pushes only occur after
+				// everything below it is discarded (the bottom row IS the
+				// attached position), and grow pull-down rides it down. It
+				// therefore also reflects intermediate geometries that SIGWINCH
+				// coalescing hid from the burst tracker, and always outranks the
+				// clip model. The `height - staleRows` bound must NOT apply here:
+				// it encodes bottom-preserving rewrap, but a multiplexer shrink
+				// may have discarded stale rows below the cursor instead of
+				// pushing the top ones. Frame-size clamping happens when the
+				// settled plan frame is emitted.
+				top = Math.max(0, reportedTop);
+			} else if (height < this.#previousHeight && !this.#resizeBurstGrew) {
+				// Last resort after the retry: model the clip deterministically
+				// from the saved parked cursor. Rows strictly below the cursor
+				// are discarded first (even non-blank ones — measured against
+				// real tmux), and only the remainder of the shrink pushes top
+				// rows into scrollback; across an observed burst the totals
+				// telescope from pre-burst state. SIGWINCH coalescing can hide a
+				// grow from this model, which is why a reply always wins above.
+				const parkedRow = this.#providerViewportTop + this.#reflowedRowCount(probe.window, 0, probe.offset, width);
+				const shrink = this.#previousHeight - height;
+				const discardedBelow = Math.min(shrink, Math.max(0, this.#previousHeight - 1 - parkedRow));
+				const pushed = Math.max(0, shrink - discardedBelow);
+				top = Math.max(0, this.#providerViewportTop - pushed);
+			} else {
+				// CPR-less grow or reversed burst: the pre-resize top is
+				// stale-low, every grow step already pulled scrollback down.
+				// Anchor at the conservative upper bound — pull never exceeds
+				// the burst's accumulated growth, and pushes/discards only lower
+				// the top. Exact when scrollback covers the pull; when it does
+				// not, the repaint lands below the real viewport and leaves
+				// stale rows above rather than overwriting committed ones.
+				top = Math.max(0, this.#providerViewportTop + this.#resizeBurstPull);
+			}
+		} else {
+			// Direct terminals rewrap bottom-preserving: with `staleRows` stale
+			// rows on screen the viewport top cannot exceed `height - staleRows`
+			// whenever a push happened, so the bound reconstructs height-shrink
+			// pushes that leave the cursor behind (kitty clamps the cursor
+			// instead of scrolling it). A CPR-less grow is stale-low like the
+			// multiplexer case — grow pull-down moved the real viewport — so it
+			// anchors at the accumulated pull bound, still under the clamp.
+			const fallbackTop =
+				reportedRow === undefined && this.#resizeBurstGrew
+					? this.#providerViewportTop + this.#resizeBurstPull
+					: reportedTop;
+			top = Math.max(0, Math.min(fallbackTop, height - staleRows));
+		}
 		if ($flag("PI_DEBUG_REDRAW")) {
 			const msg = `[${new Date().toISOString()}] resize anchor: size=${width}x${height} cpr=${reportedRow ?? "timeout"} park=${probe.offset} stale=${staleRows} old=${this.#providerViewportTop} top=${top}\n`;
 			fs.appendFileSync(getDebugLogPath(), msg);
@@ -1154,14 +1409,17 @@ export class TUI extends Container {
 	}
 
 	/**
-	 * Rows `[start, end)` of a previously painted window re-measured at `width`.
-	 * Direct terminals rewrap on resize (a row spans ceil(cells/width) rows);
-	 * multiplexers clip in place, so every row still spans exactly one row.
+	 * Rows `[start, end)` of a previously painted window re-measured at
+	 * `width`. Every terminal rewraps content on a width change — including
+	 * multiplexers: tmux clips in place on height changes only, and reflows
+	 * the pane (scrollback included) when the width moves, so a row painted
+	 * wider than the current width spans ceil(cells/width) physical rows
+	 * everywhere. For height-only resizes the painted rows already fit the
+	 * width and the count is unchanged.
 	 */
 	#reflowedRowCount(window: readonly string[], start: number, end: number, width: number): number {
 		const stop = Math.min(end, window.length);
 		const from = Math.max(0, start);
-		if (isInsideTerminalMultiplexer()) return Math.max(0, stop - from);
 		let rows = 0;
 		for (let index = from; index < stop; index++) {
 			rows += Math.max(1, Math.ceil(visibleWidth(window[index]!) / Math.max(1, width)));
@@ -1172,11 +1430,13 @@ export class TUI extends Container {
 	/** Paint the full semantic tail on the borrowed resize buffer. */
 	#renderResizeAltFrame(width: number, height: number): void {
 		const provider = this.#frameProvider;
-		this.#imageBudget.beginPass();
-		const rendered =
-			provider?.renderResizeFrame?.({ columns: width, rows: height }) ??
-			(provider ? provider.renderFrame({ columns: width, rows: height }).viewport : this.render(width));
-		this.#imageBudget.endPass();
+		let rendered: readonly string[];
+		do {
+			this.#imageBudget.beginPass();
+			rendered =
+				provider?.renderResizeFrame?.({ columns: width, rows: height }) ??
+				(provider ? provider.renderFrame({ columns: width, rows: height }).viewport : this.render(width));
+		} while (this.#imageBudget.endPass());
 		const viewport = rendered.length > height ? rendered.slice(rendered.length - height) : Array.from(rendered);
 		this.#extractCursorMarkers(viewport);
 		this.#emitAltFrame(this.#prepareLinesArray(viewport, width), width, height);
@@ -1350,9 +1610,11 @@ export class TUI extends Container {
 		if (width <= 0 || height <= 0) return;
 		provider.beginHistoryFlush();
 		while (true) {
-			this.#imageBudget.beginPass();
-			const plan = provider.renderFrame({ columns: width, rows: height });
-			this.#imageBudget.endPass();
+			let plan: TerminalFramePlan;
+			do {
+				this.#imageBudget.beginPass();
+				plan = provider.renderFrame({ columns: width, rows: height });
+			} while (this.#imageBudget.endPass());
 			if (plan.history === undefined) return;
 			let viewport = Array.from(plan.viewport);
 			if (viewport.length > height) viewport = viewport.slice(0, height);
@@ -1365,6 +1627,10 @@ export class TUI extends Container {
 	}
 
 	stop(): void {
+		this.#cancelPostmortemRestore?.();
+		this.#cancelPostmortemRestore = undefined;
+		this.#debugServer?.stop();
+		this.#debugServer = undefined;
 		this.#resizeSettleTimer?.cancel();
 		this.#resizeSettleTimer = undefined;
 		this.#cancelResizeProbe();
@@ -1383,6 +1649,11 @@ export class TUI extends Container {
 			this.#altPreviousLines = [];
 			this.#pendingAltExit = "";
 		}
+		// A latched destructive reset (settled rebuild-mode resize, /clear) pairs
+		// ED3 with a complete-ledger replay. Running that pair during stop would
+		// erase native history and re-stream the whole transcript at quit; drop
+		// the latch so the flush below writes only un-retired rows.
+		this.#clearScrollbackOnNextRender = false;
 		this.#flushHistoryBeforeStop();
 		// Deliberately leave transmitted images in the terminal's graphics store:
 		// placeholder cells committed to native scrollback render only while their
@@ -1593,12 +1864,39 @@ export class TUI extends Container {
 		// Consume CPR replies (CSI row;col R) while an anchor probe is unanswered;
 		// they are terminal reports, never keystrokes, and must not reach the
 		// focused component.
-		while (this.#pendingCprReplies > 0) {
-			const match = data.match(/\x1b\[(\d+);(\d+)R/);
+		let searchFrom = 0;
+		while (this.#cprColumnTags.size > 0) {
+			const match = data.slice(searchFrom).match(/\x1b\[(\d+);(\d+)R/);
 			if (!match || match.index === undefined) break;
-			this.#pendingCprReplies--;
-			this.#resolveResizeAnchor(Number(match[1]) - 1);
-			data = data.slice(0, match.index) + data.slice(match.index + match[0].length);
+			const row = Number(match[1]);
+			const column = Number(match[2]);
+			if (!this.#cprColumnTags.has(column) && row === 1 && column >= 2) {
+				// CSI 1;<mod>R with no live tag is modified F3: the modifier
+				// parameter spans 2-256 once the lock-state bits (caps 64,
+				// num 128) and hyper/meta are included, so no practical tag
+				// range escapes it entirely. Anything row-1 we did not tag is
+				// treated as a keystroke and left for the focused component;
+				// a tagged column hit by a hyper/meta-modified F3 (params
+				// 17-64, practically unused) is still gated by the epoch check
+				// below.
+				searchFrom += match.index + match[0].length;
+				continue;
+			}
+			if (this.#cprColumnTags.has(column)) {
+				// Column-tagged reply: exact attribution. Resolve only when its
+				// request was parked under the active probe's geometry; a reply
+				// from an older epoch is stale and discarded.
+				const tagEpoch = this.#cprColumnTags.get(column);
+				this.#cprColumnTags.delete(column);
+				const probe = this.#resizeProbe;
+				if (probe !== undefined && tagEpoch === probe.epoch) {
+					this.#resolveResizeAnchor(Number(match[1]) - 1);
+				}
+			}
+			// Other unknown-column replies while expecting tagged ones are our
+			// requests answered with a clamped or mangled column: strip and
+			// discard; the probe timeout covers recovery.
+			data = data.slice(0, searchFrom + match.index) + data.slice(searchFrom + match.index + match[0].length);
 		}
 		if (data.length === 0) return;
 		// Ctrl+C/Esc use app-level double-press windows. Give those gestures one
@@ -1977,9 +2275,12 @@ export class TUI extends Container {
 	#renderProviderFrame(width: number, height: number): void {
 		const provider = this.#frameProvider;
 		if (!provider || width <= 0 || height <= 0) return;
-		this.#imageBudget.beginPass();
-		const plan = provider.renderFrame({ columns: width, rows: height });
-		this.#imageBudget.endPass();
+		this.#debugNextWindowTop = 0;
+		let plan: TerminalFramePlan;
+		do {
+			this.#imageBudget.beginPass();
+			plan = provider.renderFrame({ columns: width, rows: height });
+		} while (this.#imageBudget.endPass());
 		let viewport = Array.from(plan.viewport);
 		if (viewport.length > height) {
 			const message = `Frame provider returned ${viewport.length} rows for a ${height}-row viewport`;
@@ -1996,6 +2297,14 @@ export class TUI extends Container {
 	 * Append mode leaves the terminal's prior copy in place and writes a
 	 * current-width copy below it. Rebuild mode routes through the destructive
 	 * reset latch so ED3 removes stale history before the same replay.
+	 *
+	 * The append replay only exists to refresh width-shredded scrollback: a
+	 * width change leaves the terminal's committed history wrapped at the old
+	 * width, so the copy below it is the intended fresh current-width render. A
+	 * height-only change reflows nothing (the terminal merely pulls rows back
+	 * out of scrollback), so replaying would write an identical duplicate — the
+	 * editor/status chrome included — below the retained copy. Skip it, matching
+	 * the `widthChanged`-gated commit-ledger logic in {@link #doRender}.
 	 */
 	#prepareResizeReplay(width: number, height: number): void {
 		const size = `${width}x${height}`;
@@ -2018,15 +2327,56 @@ export class TUI extends Container {
 			this.#prepareForcedRender(true);
 			return;
 		}
+		if (width === this.#previousWidth) return;
 		provider.beginHistoryReplay();
 		this.#forceViewportRepaintOnNextRender = true;
 	}
 
 	/**
-	 * Physical write transaction: append an unacknowledged history batch above
-	 * the anchored mutable viewport, repaint the viewport, and erase stale rows
-	 * below. Appending K rows scrolls at most K rows off the top — the oldest
-	 * visible history — and the viewport anchor follows the retained history.
+	 * Erase `row` and everything below it, absolute-addressed, without ever
+	 * issuing a full-screen clear. tmux and Windows conhost (#9597) archive a
+	 * screen-wide erase into pane history instead of discarding it, so an erase
+	 * anchored on the first row would preserve the unfinished frame it exists to
+	 * remove (#9780). Below existing history a plain ED0 cannot span the screen;
+	 * on the first row, EL2 that row and ED0 from the second down touch the same
+	 * cells with no full-screen clear. `row` is clamped because a caller's
+	 * viewport top can predate a height shrink.
+	 * Every form leaves the cursor on the clamped row at column zero.
+	 */
+	#eraseBelowRow(row: number, height: number): string {
+		const top = Math.max(0, Math.min(row, Math.max(0, height - 1)));
+		if (top > 0) return `\x1b[${top + 1};1H\x1b[J`;
+		if (height <= 1) return `\x1b[1;1H${ERASE_LINE}`;
+		return `\x1b[1;1H${ERASE_LINE}\x1b[2;1H\x1b[J\x1b[1;1H`;
+	}
+
+	/**
+	 * Erase the cursor's row and everything below it, cursor-relative, without
+	 * ever issuing a full-screen clear. Used where the resize path must stay
+	 * cursor-relative: the terminal reflowed the normal buffer, so absolute rows
+	 * are stale and only the parked cursor still tracks the viewport's logical
+	 * line. Every form leaves the cursor on column zero of that row, exactly
+	 * where a plain `\r\x1b[J` left it.
+	 *
+	 * The erase must never run from the first cell, which is what makes tmux and
+	 * Windows conhost (#9597) archive the screen instead of discarding it
+	 * (#9780), and a clamped CUU can put the cursor on the first row without
+	 * naming it. Stepping one column right is enough and needs no row movement,
+	 * but at one column CUF cannot leave the first cell, so step one row down
+	 * instead: from the first row that can only reach row 1, and DECSC/DECRC
+	 * restores the anchor even when CUD clamps at the last row. A one-row screen
+	 * has nothing below the cursor, so EL2 alone clears everything.
+	 */
+	#eraseBelowCursorRow(width: number, height: number): string {
+		if (height <= 1) return `\r${ERASE_LINE}`;
+		if (width > 1) return `\r${ERASE_LINE}\x1b[C\x1b[J\r`;
+		return `\r${ERASE_LINE}\x1b7\x1b[B\x1b[J\x1b8`;
+	}
+
+	/**
+	 * Physical write transaction: append an ordinary batch, or bottom-split one
+	 * complete replay into a history remainder and final viewport, then serialize
+	 * the whole result in one terminal write before acknowledgement.
 	 */
 	#emitPlanFrame(
 		width: number,
@@ -2040,11 +2390,28 @@ export class TUI extends Container {
 			while (viewport.length < height) viewport.push("");
 			viewport = this.#compositeOverlaysIntoWindow(viewport, width, height);
 		}
-		const markers = this.#extractCursorMarkers(viewport);
-		const prepared = this.#prepareLinesArray(viewport, width);
 		const history = offered !== undefined && offered.id > this.#acceptedHistoryBatchId ? offered : undefined;
 		if (offered !== undefined && offered.id <= this.#acceptedHistoryBatchId) provider?.acknowledgeHistory(offered.id);
-		const historyRows = history?.rows ?? [];
+
+		let historyRows = history?.rows ?? [];
+		let replayViewportRows = 0;
+		if (history?.kind === "replay") {
+			// Providers may omit unused leading rows from a short viewport. Make
+			// that logical space explicit before the bottom-first replay split.
+			while (viewport.length < height) viewport.unshift("");
+			let leadingBlankRows = 0;
+			while (leadingBlankRows < viewport.length && !/\S/.test(viewport[leadingBlankRows]!)) {
+				leadingBlankRows++;
+			}
+			const moved = Math.min(historyRows.length, leadingBlankRows);
+			if (moved > 0) {
+				viewport = [...historyRows.slice(historyRows.length - moved), ...viewport.slice(moved)];
+				historyRows = historyRows.slice(0, historyRows.length - moved);
+				replayViewportRows = moved;
+			}
+		}
+		const markers = this.#extractCursorMarkers(viewport);
+		const prepared = this.#prepareLinesArray(viewport, width);
 		const preparedHistory = this.#prepareLinesArray(historyRows, width);
 		const rows = prepared.length;
 		// Destructive reset (session replace, /tree, explicit clear, or a settled
@@ -2062,7 +2429,8 @@ export class TUI extends Container {
 		const geometryStable = this.#hasEverRendered && this.#previousWidth === width && this.#previousHeight === height;
 		const startTop = destructiveReset ? 0 : Math.min(this.#providerViewportTop, Math.max(0, height - 1));
 		const newTop = Math.max(0, Math.min(startTop + historyRows.length, height - rows));
-		let buffer = this.#paintBeginSequence;
+		const pendingAltExit = this.#pendingAltExit;
+		let buffer = this.#paintBeginSequence + pendingAltExit;
 		if (destructiveReset && TERMINAL.imageProtocol === ImageProtocol.Kitty) {
 			// ED2/ED3 erase text cells but leave Kitty graphics visible. A reset is
 			// explicitly destructive, so remove every placement—not only the ones
@@ -2076,7 +2444,14 @@ export class TUI extends Container {
 		} else {
 			this.#imageBudget.takePurgeIds();
 		}
-		if (destructiveReset) buffer += "\x1b[H\x1b[3J\x1b[2J";
+		// ED2 MUST precede ED3: tmux implements ED2 by scrolling the live screen
+		// into pane history (so cleared content stays reachable), so erasing
+		// history first would let ED2 refill it with a copy of the old screen —
+		// which the replay then repaints, duplicating one full frame per reset.
+		// ED2-then-ED3 clears the screen, then wipes history including that
+		// push. On xterm-family terminals the two erases are independent and
+		// the order is irrelevant.
+		if (destructiveReset) buffer += "\x1b[H\x1b[2J\x1b[3J";
 		const diffable =
 			geometryStable &&
 			historyRows.length === 0 &&
@@ -2107,7 +2482,7 @@ export class TUI extends Container {
 			// committed rows and blanks, never an unfinished frame.
 			const pushed = Math.max(0, startTop + preparedHistory.length + rows - height);
 			if (pushed > this.#providerViewportTop && this.#providerWindow.length > 0) {
-				buffer += `\x1b[${this.#providerViewportTop + 1};1H\x1b[J`;
+				buffer += this.#eraseBelowRow(this.#providerViewportTop, height);
 			}
 			buffer += `\x1b[${startTop + 1};1H`;
 			let screenRow = startTop;
@@ -2137,6 +2512,8 @@ export class TUI extends Container {
 			}
 			if (newTop + rows < height) buffer += `\x1b[${newTop + rows + 1};1H\x1b[J`;
 		}
+		const mutableTop = newTop + replayViewportRows;
+		const mutablePrepared = replayViewportRows > 0 ? prepared.slice(replayViewportRows) : prepared;
 		const marker = markers[0];
 		const target =
 			marker !== undefined && rows > 0
@@ -2144,23 +2521,36 @@ export class TUI extends Container {
 				: null;
 		if (target) {
 			buffer += `\x1b[${target.row + 1};${target.col + 1}H${target.visible ? "\x1b[?25h" : "\x1b[?25l"}`;
-			this.#parkedViewportOffset = Math.max(0, target.row - newTop);
+			this.#parkedViewportOffset = Math.max(0, target.row - mutableTop);
 		} else {
 			// Park the hidden cursor on the viewport's top row: terminals keep the
 			// cursor attached to its logical line through resize reflow, so the
 			// post-resize anchor probe can recover where the viewport landed.
-			buffer += `\x1b[?25l\x1b[${newTop + 1};1H`;
+			buffer += `\x1b[?25l\x1b[${mutableTop + 1};1H`;
 			this.#parkedViewportOffset = 0;
 		}
 		buffer += this.#paintEndSequence;
 		this.terminal.write(buffer);
+		this.#debugPaint = {
+			lines: prepared,
+			windowTop: this.#debugNextWindowTop,
+			altScreen: false,
+			...(target === null ? {} : { cursor: { x: target.col, y: target.row, visible: target.visible } }),
+		};
+		if (pendingAltExit) {
+			this.#pendingAltExit = "";
+			setAltScreenActive(false);
+		}
 		if (target) this.#recordHardwareCursorState(target);
 		else this.#recordHardwareCursorHidden();
-		this.#providerWindow = prepared;
-		this.#providerViewportTop = newTop;
+		this.#providerWindow = mutablePrepared;
+		this.#providerViewportTop = mutableTop;
 		this.#previousWidth = width;
 		this.#previousHeight = height;
-		this.#previousFrameLength = rows;
+		this.#resizeBurstGrew = false;
+		this.#resizeBurstLastHeight = undefined;
+		this.#resizeBurstPull = 0;
+		this.#previousFrameLength = mutablePrepared.length;
 		this.#clearScrollbackOnNextRender = false;
 		this.#forceViewportRepaintOnNextRender = false;
 		this.#hasEverRendered = true;
@@ -2168,10 +2558,9 @@ export class TUI extends Container {
 		if (history !== undefined) {
 			this.#acceptedHistoryBatchId = history.id;
 			provider?.acknowledgeHistory(history.id);
-			// Draining is one batch per frame; the provider may hold further
-			// finalized prefixes (large resumed transcripts). Pump the next frame
-			// instead of waiting for an unrelated render request.
-			this.requestRender();
+			// Normal retirement may hold another ordered batch. Replay is always
+			// complete, so pumping it would create a second visible redraw/write.
+			if (history.kind !== "replay") this.requestRender();
 		}
 	}
 
@@ -2216,16 +2605,29 @@ export class TUI extends Container {
 			const mouseExit = this.#altMouseTrackingActive ? MOUSE_TRACKING_OFF : "";
 			const enhancementExit = this.#keyboardEnhancementExit();
 			const exitSequence = `${mouseExit}${enhancementExit}\x1b[?1049l`;
-			this.terminal.write(exitSequence);
-			setAltScreenActive(false);
+			// Session replacement finishes while its fullscreen selector still
+			// covers the old normal buffer. Fuse the restore into the destructive
+			// repaint so no stale frame can become visible between writes.
+			if (this.#clearScrollbackOnNextRender) {
+				this.#pendingAltExit = exitSequence;
+			} else {
+				this.terminal.write(exitSequence);
+				setAltScreenActive(false);
+			}
 			this.#forgetHardwareCursorState();
 			this.#altActive = false;
 			this.#altMouseTrackingActive = false;
 			this.#altPreviousLines = [];
-			// The alt buffer restore put the pre-overlay normal screen back; a
-			// geometry change while covered invalidates the diff baseline and the
-			// writer's dimension check forces the full anchored rewrite.
+			// The alt-buffer restore put the pre-overlay normal screen back. If
+			// that buffer resized while covered, its cursor moved with width
+			// rewrap or a height-grow scrollback pull, while our viewport anchor
+			// stayed frozen. Recover the restored cursor position before any
+			// provider repaint can overwrite history at the stale row.
 			if (width !== this.#altEnterWidth || height !== this.#altEnterHeight) {
+				if (this.#frameProvider !== undefined) {
+					this.#beginResizeAnchorProbe();
+					return;
+				}
 				this.#forceViewportRepaintOnNextRender = true;
 			}
 		} else if (wantMouseTracking !== this.#altMouseTrackingActive) {
@@ -2250,16 +2652,20 @@ export class TUI extends Container {
 	 * mutable viewport. Nothing is ever appended to terminal history.
 	 */
 	#renderChildrenFrame(width: number, height: number): void {
-		this.#imageBudget.beginPass();
-		const composed = this.render(width);
-		this.#imageBudget.endPass();
+		let composed: readonly string[];
+		do {
+			this.#imageBudget.beginPass();
+			composed = this.render(width);
+		} while (this.#imageBudget.endPass());
 		if (this.#maybeDeferGhosttyInitialImagePaint()) return;
+		this.#debugNextWindowTop = Math.max(0, composed.length - height);
 		const viewport = composed.length > height ? composed.slice(composed.length - height) : Array.from(composed);
 		this.#emitPlanFrame(width, height, viewport, undefined, undefined);
 	}
 
 	/** Stateless variant for overlay-composited windows and alt-screen frames. */
 	#prepareLinesArray(lines: readonly string[], width: number): string[] {
+		// oxlint-disable-next-line unicorn/no-new-array -- render-frame length preallocation
 		const prepared: string[] = new Array(lines.length);
 		for (let i = 0; i < lines.length; i++) {
 			prepared[i] = this.#prepareLine(lines[i]!, width).line;
@@ -2291,7 +2697,7 @@ export class TUI extends Container {
 
 		let output = "";
 		let cells = 0;
-		for (let i = 0; i < raw.length && cells < safeWidth; ) {
+		for (let i = 0; i < raw.length && cells < safeWidth;) {
 			if (raw.charCodeAt(i) === 0x1b) {
 				const end = this.#ansiSequenceEnd(raw, i);
 				if (end < 0) break;
@@ -2387,7 +2793,7 @@ export class TUI extends Container {
 
 	#ansiAsciiLineWidth(line: string, maxWidth: number): number | undefined {
 		let col = 0;
-		for (let i = 0; i < line.length; ) {
+		for (let i = 0; i < line.length;) {
 			const code = line.charCodeAt(i);
 			if (code === 0x1b) {
 				const next = line.charCodeAt(i + 1);
@@ -2548,6 +2954,7 @@ export class TUI extends Container {
 	 * blank base — the transcript is never touched while the alt buffer is up.
 	 */
 	#renderAltFrame(width: number, height: number): void {
+		// oxlint-disable-next-line unicorn/no-new-array -- alt-frame length preallocation
 		const base: string[] = new Array(Math.max(0, height)).fill("");
 		let lines = this.#compositeOverlaysIntoWindow(base, width, height);
 		this.#extractCursorMarkers(lines);
@@ -2561,6 +2968,7 @@ export class TUI extends Container {
 	 * native-scrollback byte. The hardware cursor stays hidden here.
 	 */
 	#emitAltFrame(lines: string[], width: number, height: number): void {
+		// oxlint-disable-next-line unicorn/no-new-array -- alt-frame length preallocation
 		const fitted: string[] = new Array(height);
 		for (let r = 0; r < height; r++) fitted[r] = lines[r] ?? "";
 		// Flush queued image-data transmits (`a=t`, no visible output) before the
@@ -2599,6 +3007,7 @@ export class TUI extends Container {
 		buffer += this.#paintEndSequence;
 		this.terminal.write(buffer);
 		this.#altPreviousLines = fitted;
+		this.#debugPaint = { lines: fitted, windowTop: 0, altScreen: true };
 		this.#fullRedrawCount += 1;
 	}
 }

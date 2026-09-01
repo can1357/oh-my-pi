@@ -11,8 +11,9 @@ with a lazy JIT runtime (`packages/omptype`). Author types with
 - The first two calls run an interpreter; the third call JIT-compiles a specialized
   validator via `new Function`. Hot-path validation is tens of nanoseconds; failures
   allocate one small error object with lazy message building.
-- There is no `jitless` switch and no `scope()` — lazy JIT removed the startup tax
-  those existed to dodge. Import `type` directly.
+- There is no functional `jitless` mode — lazy JIT removed the startup tax it
+  existed to dodge. Import `type` directly. (`ScopeOptions` accepts a `jitless`
+  flag for ArkType compatibility, but the runtime never reads it.)
 
 ## The detection contract (don't break it)
 
@@ -75,6 +76,43 @@ if (out instanceof type.errors) {
 
 Note on `.or()` typing: schema and string operands infer precisely;
 object-literal operands degrade — wrap them with `type({...})` first.
+
+## Scopes, modules, and generics
+
+Recursive or mutually-referencing schemas go through named scopes
+(`packages/omptype/src/type.ts`, `scope()` / `type.scope()`):
+
+```ts
+import { type } from "@oh-my-pi/omptype";
+
+const types = type.module({
+	tree: { value: "number", "children?": "tree[]" },
+});
+```
+
+- `type.scope(aliases)` (also exported top-level as `scope()`) returns a
+  `TypeScope` with `.type`, `.define`, `.resolve`, `.import`, and `.export`;
+  aliases may reference each other recursively, and `#private` names stay
+  internal.
+- `type.module({...})` compiles a named module — `scope(...).export()` — into
+  a map of ready schemas.
+- `type.generic("<T>", def)` builds runtime generics that other definitions
+  can instantiate inside a scope.
+
+## JSON Schema interop
+
+- `.toJsonSchema()` emits draft-2020-12 by default (`target: "draft-07"`
+  supported); recursive aliases emit `$defs`/`$ref`.
+- `fromJsonSchema(schema)` rebuilds a callable schema from a JSON Schema
+  document (structural keywords of draft-07 / draft-2020-12, string formats,
+  `$defs` recursion, enums, `anyOf`/`oneOf`/`allOf`) — the inverse of
+  `.toJsonSchema()`.
+- `type.withJsonSchema(schema, json)` wraps a validation-only schema so
+  `.toJsonSchema()` emits `json` verbatim even when nested in objects, arrays,
+  or unions; schemas with defaults or output-changing morphs are rejected.
+- Every schema exposes Standard Schema V1 via `~standard` (synchronous
+  `validate`), enabling direct use with `@t3-oss/env`, tRPC, and other
+  Standard Schema consumers.
 
 ## Adapters
 

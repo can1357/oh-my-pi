@@ -9,6 +9,7 @@
  * endpoint.
  */
 import { type AuthStorage, type FetchImpl, type OAuthAccess, withOAuthAccess } from "@oh-my-pi/pi-ai";
+import { parseCloudflareAiGatewayCredential } from "@oh-my-pi/pi-catalog/wire/cloudflare-ai-gateway";
 import { getAntigravityUserAgent, getGeminiCliHeaders } from "@oh-my-pi/pi-catalog/wire/gemini-headers";
 import { fetchWithRetry, USER_AGENT } from "@oh-my-pi/pi-utils";
 
@@ -656,9 +657,12 @@ export async function searchGemini(params: GeminiSearchParams): Promise<SearchRe
 		);
 	} else {
 		const endpoint = resolveGeminiDeveloperEndpoint();
-		const apiKey = await params.authStorage.getApiKey(endpoint.authProvider, params.sessionId, {
+		const storedApiKey = await params.authStorage.getApiKey(endpoint.authProvider, params.sessionId, {
 			signal: params.signal,
 		});
+		const apiKey = endpoint.isCloudflareGateway
+			? parseCloudflareAiGatewayCredential(storedApiKey ?? "")?.token
+			: storedApiKey;
 		if (!apiKey) {
 			throw new Error(
 				endpoint.isCloudflareGateway

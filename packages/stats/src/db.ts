@@ -18,6 +18,7 @@ import type {
 	BehaviorOverallStats,
 	BehaviorTimeSeriesPoint,
 	CostTimeSeriesPoint,
+	DailyActivityPoint,
 	FolderStats,
 	MessageStats,
 	ModelPerformancePoint,
@@ -1150,6 +1151,47 @@ export function getMessageById(id: number): MessageStats | null {
 	const row = stmt.get(id);
 	return row ? rowToMessageStats(row) : null;
 }
+/** Per-transcript-file rollup for the Traces session list. */
+export interface SessionRollupRow {
+	sessionFile: string;
+	requests: number;
+	startedAt: number;
+	endedAt: number;
+	totalTokens: number;
+	costTotal: number;
+	/** Comma-joined DISTINCT models. */
+	models: string;
+}
+
+/** Aggregate every synced transcript file into one row (subagents unfolded). */
+export function getSessionRollups(): SessionRollupRow[] {
+	if (!db) return [];
+	const stmt = db.prepare(`
+		SELECT session_file AS sessionFile,
+		       COUNT(*) AS requests,
+		       MIN(timestamp) AS startedAt,
+		       MAX(timestamp + COALESCE(duration, 0)) AS endedAt,
+		       SUM(total_tokens) AS totalTokens,
+		       SUM(cost_total) AS costTotal,
+		       GROUP_CONCAT(DISTINCT model) AS models
+		FROM messages
+		GROUP BY session_file
+	`);
+	return stmt.all() as SessionRollupRow[];
+}
+
+/** Tool-call counts keyed by transcript file, for the Traces session list. */
+export function getToolCallCountsBySession(): Map<string, number> {
+	const counts = new Map<string, number>();
+	if (!db) return counts;
+	const stmt = db.prepare(
+		"SELECT session_file AS sessionFile, COUNT(*) AS calls FROM tool_calls GROUP BY session_file",
+	);
+	for (const row of stmt.all() as Array<{ sessionFile: string; calls: number }>) {
+		counts.set(row.sessionFile, row.calls);
+	}
+	return counts;
+}
 
 /**
  * Get daily cost time series data for the last N days, broken down by model.
@@ -1190,6 +1232,41 @@ export function getCostTimeSeries(days = 90, cutoff?: number | null): CostTimeSe
 		costCacheRead: row.cost_cache_read ?? 0,
 		costCacheWrite: row.cost_cache_write ?? 0,
 		requests: row.requests,
+	}));
+}
+
+/**
+ * Per-local-day activity aggregates for the last `days` days, oldest first.
+ * Self-initializing (opens the stats DB on first use) so the coding-agent TUI
+ * can query without the dashboard server's init flow. Days use the machine's
+ * timezone — this is a localhost tool, same rationale as
+ * {@link getProviderHourlyBurn}.
+ */
+export async function getDailyActivity(days = 371): Promise<DailyActivityPoint[]> {
+	const database = await initDb();
+	const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
+	const stmt = database.prepare(`
+		SELECT
+			date(timestamp / 1000, 'unixepoch', 'localtime') as day,
+			SUM(cost_total) as cost,
+			COUNT(*) as requests,
+			SUM(total_tokens) as total_tokens
+		FROM messages
+		WHERE timestamp >= ?
+		GROUP BY day
+		ORDER BY day ASC
+	`);
+	const rows = stmt.all(cutoff) as Array<{
+		day: string;
+		cost: number | null;
+		requests: number;
+		total_tokens: number | null;
+	}>;
+	return rows.map(row => ({
+		day: row.day,
+		cost: row.cost ?? 0,
+		requests: row.requests,
+		totalTokens: row.total_tokens ?? 0,
 	}));
 }
 

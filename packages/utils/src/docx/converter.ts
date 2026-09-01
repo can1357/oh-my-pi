@@ -530,7 +530,7 @@ function renderList(
 
 function renderBlocks(blocks: readonly Block[]): string {
 	let html = "";
-	for (let index = 0; index < blocks.length; ) {
+	for (let index = 0; index < blocks.length;) {
 		const block = blocks[index];
 		if (block.kind === "html") {
 			html += block.html;
@@ -549,7 +549,7 @@ function renderBlocks(blocks: readonly Block[]): string {
 			listItems.push(candidate);
 			index++;
 		}
-		for (let itemIndex = 0; itemIndex < listItems.length; ) {
+		for (let itemIndex = 0; itemIndex < listItems.length;) {
 			const rendered = renderList(listItems, itemIndex, listItems[itemIndex].list?.level ?? 0);
 			html += rendered.html;
 			itemIndex = rendered.next;

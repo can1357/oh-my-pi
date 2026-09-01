@@ -1,12 +1,12 @@
 import { stripVTControlCharacters } from "node:util";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { type Component, padding, truncateToWidth, visibleWidth } from "@oh-my-pi/pi-tui";
 import { formatNumber, getProjectDir } from "@oh-my-pi/pi-utils";
 import { settings } from "../../config/settings";
 import { theme } from "../../modes/theme/theme";
 import type { AgentSession } from "../../session/agent-session";
 import { shortenPath } from "../../tools/render-utils";
-import * as git from "../../utils/git";
 import { sanitizeStatusText } from "../shared";
 import { formatContextUsage, getContextUsageLevel, getContextUsageThemeColor } from "./status-line/context-thresholds";
 
@@ -14,9 +14,12 @@ import { formatContextUsage, getContextUsageLevel, getContextUsageThemeColor } f
  * Footer component that shows pwd, token stats, and context usage
  */
 export class FooterComponent implements Component {
-	#cachedBranch: string | null | undefined = undefined; // undefined = not checked yet, null = not in git repo, string = branch name
+	#cachedBranch: string | null | undefined = undefined;
+	#branchResolve: AbortController | undefined;
+	#branchGeneration = 0;
 	#gitUnwatch: (() => void) | null = null;
 	#onBranchChange: (() => void) | null = null;
+	#disposed = false;
 	#autoCompactEnabled: boolean = true;
 	#extensionStatuses: Map<string, string> = new Map();
 
@@ -28,8 +31,8 @@ export class FooterComponent implements Component {
 
 	/**
 	 * Set extension status text to display in the footer.
-	 * Text is sanitized (newlines/tabs replaced with spaces) and truncated to terminal width.
-	 * ANSI escape codes for styling are preserved.
+	 * ANSI/VT escape sequences and most control characters are stripped; tabs and newlines become spaces.
+	 * The combined status line is trimmed and truncated to terminal width.
 	 * @param key - Unique key to identify this status
 	 * @param text - Status text, or undefined to clear
 	 */
@@ -42,9 +45,7 @@ export class FooterComponent implements Component {
 	}
 
 	/**
-	 * Watch the repository HEAD for branch changes; invokes the callback so the
-	 * footer repaints with the new branch. Uses `git.head.watch` (stat-poll) —
-	 * see that helper for why `fs.watch` cannot track git's atomic HEAD swaps.
+	 * Watch the repository head for label changes and repaint the footer.
 	 */
 	watchBranch(onBranchChange: () => void): void {
 		this.#onBranchChange = onBranchChange;
@@ -56,12 +57,12 @@ export class FooterComponent implements Component {
 		this.#gitUnwatch = null;
 
 		if (!settings.get("git.enabled")) return;
-		const repository = git.repo.resolveSync(getProjectDir());
+		const repository = vcs.repo(getProjectDir());
 		if (!repository) return;
 
 		try {
-			this.#gitUnwatch = git.head.watch(repository, () => {
-				this.#cachedBranch = undefined; // Invalidate cache
+			this.#gitUnwatch = vcs.watch(repository, () => {
+				this.#invalidateBranch();
 				this.#onBranchChange?.();
 			});
 		} catch {
@@ -73,18 +74,26 @@ export class FooterComponent implements Component {
 	 * Clean up the file watcher
 	 */
 	dispose(): void {
+		this.#disposed = true;
+		this.#branchResolve?.abort();
+		this.#branchResolve = undefined;
 		this.#gitUnwatch?.();
 		this.#gitUnwatch = null;
 	}
 
 	invalidate(): void {
-		// Invalidate cached branch so it gets re-read on next render
+		this.#invalidateBranch();
+	}
+
+	#invalidateBranch(): void {
+		this.#branchGeneration++;
+		this.#branchResolve?.abort();
+		this.#branchResolve = undefined;
 		this.#cachedBranch = undefined;
 	}
 
 	/**
-	 * Get current git branch by reading .git/HEAD directly.
-	 * Returns null if not in a git repo, branch name otherwise.
+	 * Get the current branch, bookmark, or change-id label.
 	 */
 	#getCurrentBranch(): string | null {
 		if (!settings.get("git.enabled")) return null;
@@ -92,9 +101,56 @@ export class FooterComponent implements Component {
 			return this.#cachedBranch;
 		}
 
-		const headState = git.head.resolveSync(getProjectDir());
+		const repository = (() => {
+			try {
+				return vcs.repo(getProjectDir());
+			} catch {
+				return null;
+			}
+		})();
+		if (!repository) {
+			this.#cachedBranch = null;
+			return null;
+		}
+
+		const gitRepository = repository.asGit();
+		if (!gitRepository) {
+			if (!this.#branchResolve) {
+				const request = new AbortController();
+				const generation = this.#branchGeneration;
+				this.#branchResolve = request;
+				void repository
+					.label(request.signal)
+					.then(label => {
+						if (this.#disposed || this.#branchGeneration !== generation) return;
+						const changed = this.#cachedBranch !== label;
+						this.#cachedBranch = label;
+						if (changed) this.#onBranchChange?.();
+					})
+					.catch(() => {
+						if (this.#disposed || this.#branchGeneration !== generation) return;
+						this.#cachedBranch = null;
+					})
+					.finally(() => {
+						if (this.#branchResolve === request) this.#branchResolve = undefined;
+					});
+			}
+			return this.#cachedBranch ?? null;
+		}
+
+		const headState = (() => {
+			try {
+				return gitRepository.headSync();
+			} catch {
+				return null;
+			}
+		})();
 		this.#cachedBranch =
-			headState === null ? null : headState.kind === "ref" ? (headState.branchName ?? headState.ref) : "detached";
+			headState === null
+				? null
+				: headState.kind === "ref"
+					? (headState.branch ?? headState.refName ?? "HEAD")
+					: "detached";
 		return this.#cachedBranch;
 	}
 

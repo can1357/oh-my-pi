@@ -4,8 +4,27 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { generateThemeVars } from "@oh-my-pi/pi-coding-agent/export/html";
 import { defaultThemes } from "@oh-my-pi/pi-coding-agent/modes/theme/defaults";
-import { getResolvedThemeColors, getThemeByName, isLightTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { createTheme, getBuiltinThemes } from "@oh-my-pi/pi-coding-agent/modes/theme/loader";
+import {
+	getEditorTheme,
+	getResolvedThemeColors,
+	getThemeByName,
+	isLightTheme,
+	setThemeInstance,
+} from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { Editor } from "@oh-my-pi/pi-tui";
 import { getAgentDir, getCustomThemesDir, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
+
+function createBaseThemes() {
+	const builtins = getBuiltinThemes();
+	const lightJson = builtins.light;
+	const darkJson = builtins.dark;
+	if (!lightJson || !darkJson) throw new Error("Base light/dark themes are unavailable");
+	return {
+		light: createTheme(lightJson, { mode: "truecolor" }),
+		dark: createTheme(darkJson, { mode: "truecolor" }),
+	};
+}
 
 describe("Theme.isLight", () => {
 	it("classifies built-in themes by their status-line surface", async () => {
@@ -24,6 +43,106 @@ describe("Theme.isLight", () => {
 		expect(light?.accentSurfaceLuminance).toBeGreaterThan(0.5);
 		// ...dark themes pass undefined so accents stay vivid.
 		expect(dark?.accentSurfaceLuminance).toBeUndefined();
+	});
+});
+
+describe("empty foreground contrast", () => {
+	it("preserves terminal-default foregrounds for unpainted empty tokens", () => {
+		const { light, dark } = createBaseThemes();
+
+		expect(light.getFgAnsi("text")).toBe("\x1b[39m");
+		expect(light.getFgAnsi("userMessageText")).toBe("\x1b[39m");
+		expect(dark.getFgAnsi("text")).toBe("\x1b[39m");
+	});
+
+	it("chooses empty-token contrast from the controlled background", () => {
+		const { light } = createBaseThemes();
+		const porcelain = createTheme(defaultThemes.porcelain, { mode: "truecolor" });
+
+		expect(light.getFgOnBgAnsi("userMessageText", "userMessageBg")).toBe("\x1b[38;2;0;0;0m");
+		expect(porcelain.getFgOnBgAnsi("userMessageText", "userMessageBg")).toBe("\x1b[38;2;229;229;231m");
+	});
+
+	it("preserves terminal defaults when the message background is also default", () => {
+		const { dark } = createBaseThemes();
+		const darkJson = getBuiltinThemes().dark;
+		if (!darkJson) throw new Error("Base dark theme is unavailable");
+		const terminalDefault = createTheme(
+			{
+				...darkJson,
+				colors: { ...darkJson.colors, userMessageBg: "", userMessageText: "" },
+			},
+			{ mode: "truecolor" },
+		);
+		try {
+			setThemeInstance(terminalDefault);
+			const surfaceColor = getEditorTheme().surfaceColor;
+			if (!surfaceColor) throw new Error("Editor surface color is unavailable");
+
+			expect(surfaceColor("typed")).toBe("\x1b[49m\x1b[39mtyped\x1b[39m\x1b[49m");
+		} finally {
+			setThemeInstance(dark);
+		}
+	});
+
+	it("pairs the editor surface with its user-message foreground", () => {
+		const { light, dark } = createBaseThemes();
+		try {
+			setThemeInstance(light);
+			const surfaceColor = getEditorTheme().surfaceColor;
+			if (!surfaceColor) throw new Error("Editor surface color is unavailable");
+
+			expect(surfaceColor("typed")).toContain("\x1b[48;2;232;232;232m\x1b[38;2;0;0;0mtyped");
+		} finally {
+			setThemeInstance(dark);
+		}
+	});
+
+	it("uses the normal text token for transparent composer text", () => {
+		const { dark } = createBaseThemes();
+		const poimandresJson = getBuiltinThemes()["light-poimandres"];
+		if (!poimandresJson) throw new Error("Light Poimandres theme is unavailable");
+		try {
+			// poimandres `text` is #506477 → rgb(80,100,119); a transparent composer
+			// must paint typed text with it, never the `userMessageText` (#ffffff)
+			// reserved for the painted message background.
+			setThemeInstance(createTheme(poimandresJson, { mode: "truecolor" }));
+			const editor = new Editor(getEditorTheme());
+			editor.setText("typed");
+
+			expect(editor.render(40).join("\n")).toContain("\x1b[38;2;80;100;119mtyped");
+		} finally {
+			setThemeInstance(dark);
+		}
+	});
+
+	it("keeps filled composer text contrasted against its painted surface", () => {
+		const { dark } = createBaseThemes();
+		try {
+			setThemeInstance(createTheme(defaultThemes.porcelain, { mode: "truecolor" }));
+			const editor = new Editor(getEditorTheme());
+			editor.setBorderStyle("field");
+			editor.setText("typed");
+
+			expect(editor.render(40).join("\n")).toContain("\x1b[48;2;80;112;160m\x1b[38;2;229;229;231m typed");
+		} finally {
+			setThemeInstance(dark);
+		}
+	});
+
+	it("reapplies the editor surface foreground after nested decorator resets", () => {
+		const { light, dark } = createBaseThemes();
+		try {
+			setThemeInstance(light);
+			const surfaceColor = getEditorTheme().surfaceColor;
+			if (!surfaceColor) throw new Error("Editor surface color is unavailable");
+
+			const styled = surfaceColor("before\x1b[39mafter-default\x1b[0mafter-full");
+			expect(styled).toContain("\x1b[39m\x1b[38;2;0;0;0mafter-default");
+			expect(styled).toContain("\x1b[0m\x1b[48;2;232;232;232m\x1b[38;2;0;0;0mafter-full");
+		} finally {
+			setThemeInstance(dark);
+		}
 	});
 });
 

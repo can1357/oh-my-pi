@@ -7,7 +7,7 @@ import type {
 	ToolApprovalDecision,
 } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
-import { isClaudeModelId } from "@oh-my-pi/pi-catalog/identity";
+import { classifyModel } from "@oh-my-pi/pi-catalog/identity";
 import type { DesktopCapabilities } from "@oh-my-pi/pi-natives";
 import { once, prompt } from "@oh-my-pi/pi-utils";
 import { callSessionTool } from "../eval/js/tool-bridge";
@@ -33,9 +33,9 @@ function usesCoordinateSafeImageSizing(model: Model | undefined): boolean {
 	const compat = model.compat;
 	return (
 		(!!compat && "supportsImageDetailOriginal" in compat && compat.supportsImageDetailOriginal === false) ||
-		isClaudeModelId(model.id) ||
-		(model.requestModelId !== undefined && isClaudeModelId(model.requestModelId)) ||
-		(typeof model.name === "string" && /^claude(?:\s|$)/i.test(model.name))
+		model.identity.class === "anthropic" ||
+		(model.requestModelId !== undefined &&
+			classifyModel(model.provider, model.requestModelId, { lenient: true }).class === "anthropic")
 	);
 }
 

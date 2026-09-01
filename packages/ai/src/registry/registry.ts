@@ -9,6 +9,7 @@ import { azureProvider } from "./azure";
 import { basetenProvider } from "./baseten";
 import { bedrockMantleProvider } from "./bedrock-mantle";
 import { cerebrasProvider } from "./cerebras";
+import { clinePassProvider } from "./cline-pass";
 import { cloudflareAiGatewayProvider } from "./cloudflare-ai-gateway";
 import { coreWeaveProvider } from "./coreweave";
 import { cursorProvider } from "./cursor";
@@ -73,6 +74,7 @@ import { xiaomiProvider } from "./xiaomi";
 import { xiaomiTokenPlanAmsProvider } from "./xiaomi-token-plan-ams";
 import { xiaomiTokenPlanCnProvider } from "./xiaomi-token-plan-cn";
 import { xiaomiTokenPlanSgpProvider } from "./xiaomi-token-plan-sgp";
+import { yoloAutoProvider } from "./yolo-auto";
 import { zaiCodingPlanProvider, zaiProvider } from "./zai";
 import { zenmuxProvider } from "./zenmux";
 import { zhipuCodingPlanProvider } from "./zhipu-coding-plan";
@@ -117,6 +119,7 @@ const ALL = [
 	xiaomiTokenPlanAmsProvider,
 	xiaomiTokenPlanCnProvider,
 	firepassProvider,
+	clinePassProvider,
 	deepseekProvider,
 	metaProvider,
 	moonshotProvider,
@@ -144,6 +147,7 @@ const ALL = [
 	zenmuxProvider,
 	opencodeZenProvider,
 	opencodeGoProvider,
+	yoloAutoProvider,
 	tavilyProvider,
 	kagiProvider,
 	exaProvider,

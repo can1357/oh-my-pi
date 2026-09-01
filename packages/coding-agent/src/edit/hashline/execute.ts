@@ -12,7 +12,6 @@
  */
 import {
 	type BlockResolution,
-	buildCompactDiffPreview,
 	type Clipboard,
 	commitClipboard,
 	forkClipboard,
@@ -26,17 +25,23 @@ import {
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import type { FileDiagnosticsResult, WritethroughCallback, WritethroughDeferredHandle } from "../../lsp";
 import type { ToolSession } from "../../tools";
-import { outputMeta } from "../../tools/output-meta";
 import { ToolError } from "../../tools/tool-errors";
 import type { AppliedEditObserver } from "../blackbox";
 import { generateDiffString } from "../diff";
 import { getEditClipboard } from "../edit-clipboard";
 import { getFileSnapshotStore } from "../file-snapshot-store";
 import type { EditToolDetails, EditToolPerFileResult, LspBatchRequest } from "../renderer";
-import { pruneOversizedEditSnapshots } from "../snapshot-details";
+import {
+	createAggregateEditDetails,
+	createAggregateEditToolResult,
+	createEditResult,
+	getEditResultText,
+	joinEditResultText,
+	toEditToolResult,
+} from "../result";
 import { nativeBlockResolver } from "./block-resolver";
 import { HashlineFilesystem } from "./filesystem";
-import { hashPatchInput, NOOP_HARD_LIMIT, recordNoopEdit, resetNoopEdit } from "./noop-loop-guard";
+import { hashPatchInput, recordNoopEdit, resetNoopEdit } from "./noop-loop-guard";
 import { type HashlineParams, hashlineEditParamsSchema } from "./params";
 
 export interface ExecuteHashlineSingleOptions {
@@ -146,84 +151,52 @@ function renderSection(
 	sourcePath: string,
 ): RenderedSection {
 	if (result.op === "delete") {
-		const toolResult: AgentToolResult<EditToolDetails, typeof hashlineEditParamsSchema> = {
-			content: [{ type: "text", text: `Deleted ${result.path}` }],
-			details: pruneOversizedEditSnapshots({
-				diff: "",
-				op: "delete",
-				path: result.path,
-				oldText: result.before,
-				meta: outputMeta().get(),
-			}),
-		};
+		const editResult = createEditResult({
+			displayPath: result.path,
+			resultPath: result.path,
+			diff: "",
+			op: "delete",
+			oldText: result.before,
+		});
 		return {
-			toolResult,
-			perFileResult: pruneOversizedEditSnapshots({
-				path: result.path,
-				diff: "",
-				op: "delete",
-				oldText: result.before,
-			}),
+			toolResult: toEditToolResult(editResult),
+			perFileResult: editResult.perFileResult,
 		};
 	}
 
 	if (result.op === "noop") {
-		const toolResult: AgentToolResult<EditToolDetails, typeof hashlineEditParamsSchema> = {
-			content: [{ type: "text", text: noChangeDiagnostic(result.path) }],
-			details: { diff: "", op: "update", meta: outputMeta().get() },
-		};
+		const editResult = createEditResult({
+			displayPath: result.path,
+			diff: "",
+			op: "update",
+			text: noChangeDiagnostic(result.path),
+		});
 		return {
-			toolResult,
-			perFileResult: { path: result.path, diff: "", op: "update" },
+			toolResult: toEditToolResult(editResult),
+			perFileResult: editResult.perFileResult,
 		};
 	}
 
 	const diff = generateDiffString(result.before, result.after, undefined, { path: result.path });
-	const preview = buildCompactDiffPreview(diff.diff);
-	const meta = outputMeta()
-		.diagnostics(diagnostics?.summary ?? "", diagnostics?.messages ?? [])
-		.get();
-
-	const warningsBlock = result.warnings.length > 0 ? `\n\nWarnings:\n${result.warnings.join("\n")}` : "";
-	const previewBlock = preview.preview ? `\n${preview.preview}` : "";
-	const blockBlock =
-		result.blockResolutions && result.blockResolutions.length > 0
-			? `\n${result.blockResolutions.map(formatBlockResolution).join("\n")}`
-			: "";
-	const moveBlock = result.moveDest ? `\nMoved to ${result.moveDest}` : "";
 	const firstChangedLine = result.firstChangedLine ?? diff.firstChangedLine;
+	const editResult = createEditResult({
+		displayPath: result.moveDest ?? result.path,
+		resultPath: result.moveDest ?? result.path,
+		header: result.header,
+		diff: diff.diff,
+		firstChangedLine,
+		diagnostics,
+		op: result.op,
+		move: result.moveDest,
+		sourcePath: result.moveDest ? sourcePath : undefined,
+		oldText: result.before,
+		newText: result.after,
+		beforePreview: result.blockResolutions?.map(formatBlockResolution),
+		warnings: result.warnings,
+	});
 	return {
-		toolResult: {
-			content: [
-				{
-					type: "text",
-					text: `${result.header}${blockBlock}${moveBlock}${previewBlock}${warningsBlock}`,
-				},
-			],
-			details: pruneOversizedEditSnapshots({
-				diff: diff.diff,
-				firstChangedLine,
-				diagnostics,
-				op: result.op,
-				move: result.moveDest,
-				path: result.moveDest ?? result.path,
-				sourcePath: result.moveDest ? sourcePath : undefined,
-				oldText: result.before,
-				newText: result.after,
-				meta,
-			}),
-		},
-		perFileResult: pruneOversizedEditSnapshots({
-			path: result.moveDest ?? result.path,
-			diff: diff.diff,
-			firstChangedLine,
-			diagnostics,
-			op: result.op,
-			move: result.moveDest,
-			sourcePath: result.moveDest ? sourcePath : undefined,
-			oldText: result.before,
-			newText: result.after,
-		}),
+		toolResult: toEditToolResult(editResult),
+		perFileResult: editResult.perFileResult,
 	};
 }
 
@@ -312,20 +285,10 @@ export async function executeHashlineSingle(
 		resetNoopEdit(options.session, sectionResult.canonicalPath);
 		rendered.push(renderSection(sectionResult, fs.consumeDiagnostics(sectionResult.path), prepared[i].section.path));
 	}
-	return {
-		content: [
-			{
-				type: "text",
-				text: rendered
-					.map(r => r.toolResult.content.map(part => (part.type === "text" ? part.text : "")).join("\n"))
-					.join("\n\n"),
-			},
-		],
-		details: pruneOversizedEditSnapshots({
-			diff: rendered.map(r => r.toolResult.details?.diff ?? "").join("\n"),
-			perFileResults: rendered.map(r => r.perFileResult),
-		}),
-	};
+	return createAggregateEditToolResult(
+		joinEditResultText(rendered.map(entry => getEditResultText(entry.toolResult))),
+		createAggregateEditDetails({ perFileResults: rendered.map(entry => entry.perFileResult) }),
+	);
 }
 
 export { HashlineMismatchError, type HashlineParams, hashlineEditParamsSchema };

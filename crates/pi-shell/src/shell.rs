@@ -2087,9 +2087,34 @@ mod tests {
 		let dir = tempfile::tempdir().expect("process test directory");
 		let name = format!("{prefix}{}", std::process::id());
 		let command = dir.path().join(&name);
-		let sleep = test_executable("sleep");
-		std::os::unix::fs::symlink(sleep, &command).expect("sleep symlink");
+		let test_binary = std::env::current_exe().expect("current test executable");
+		std::os::unix::fs::symlink(test_binary, &command).expect("test executable symlink");
 		(dir, command, name)
+	}
+
+	#[cfg(unix)]
+	fn process_test_child(command: &std::path::Path, duration: Duration) -> Command {
+		let duration_ms = u64::try_from(duration.as_millis()).expect("test duration fits u64");
+		let mut child = Command::new(command);
+		child
+			.args(["--ignored", "--exact", "shell::tests::process_test_sleeper"])
+			.env("PI_SHELL_PROCESS_TEST_SLEEP_MS", duration_ms.to_string())
+			.stdout(std::process::Stdio::null())
+			.stderr(std::process::Stdio::null());
+		child
+	}
+
+	#[cfg(unix)]
+	#[test]
+	#[ignore = "spawned by process-control tests"]
+	fn process_test_sleeper() {
+		let Ok(duration_ms) = std::env::var("PI_SHELL_PROCESS_TEST_SLEEP_MS") else {
+			return;
+		};
+		let duration_ms = duration_ms
+			.parse()
+			.expect("valid process test sleep duration");
+		std::thread::sleep(Duration::from_millis(duration_ms));
 	}
 
 	#[cfg(unix)]
@@ -2114,8 +2139,7 @@ mod tests {
 	#[tokio::test(flavor = "multi_thread")]
 	async fn pgrep_matches_name_and_pkills_signal_probe() {
 		let (_dir, command, name) = process_test_command("opg");
-		let mut child = Command::new(command)
-			.arg("30")
+		let mut child = process_test_child(&command, Duration::from_secs(30))
 			.spawn()
 			.expect("matching process");
 		let pid = i32::try_from(child.id().expect("child pid")).expect("pid fits i32");
@@ -2131,7 +2155,7 @@ mod tests {
 		assert_eq!(pgrep_result.exit_code, Some(0));
 		assert_eq!(output, format!("{pid}\n"));
 		assert_eq!(pkill_result.exit_code, Some(0));
-		assert!(pkill_output.is_empty());
+		assert_eq!(pkill_output, "");
 		assert!(still_running, "signal 0 must not terminate a matching process");
 	}
 
@@ -2171,8 +2195,8 @@ mod tests {
 	#[tokio::test(flavor = "multi_thread")]
 	async fn pkill_queue_option_consumes_its_value() {
 		let (_dir, command, name) = process_test_command("opq");
-		let mut command = Command::new(command);
-		command.arg("30").kill_on_drop(true);
+		let mut command = process_test_child(&command, Duration::from_secs(30));
+		command.kill_on_drop(true);
 		let mut child = command.spawn().expect("queue test process");
 		let pid = i32::try_from(child.id().expect("child pid")).expect("pid fits i32");
 		wait_for_process_name(pid, &name).await;
@@ -2190,8 +2214,8 @@ mod tests {
 	#[tokio::test(flavor = "multi_thread")]
 	async fn pkill_interactive_prompt_honors_cancellation() {
 		let (_dir, command, name) = process_test_command("opi");
-		let mut command = Command::new(command);
-		command.arg("30").kill_on_drop(true);
+		let mut command = process_test_child(&command, Duration::from_secs(30));
+		command.kill_on_drop(true);
 		let mut child = command.spawn().expect("interactive target");
 		let pid = i32::try_from(child.id().expect("child pid")).expect("pid fits i32");
 		wait_for_process_name(pid, &name).await;
@@ -2227,8 +2251,7 @@ mod tests {
 	#[tokio::test(flavor = "multi_thread")]
 	async fn pgrep_reads_pidfile_from_standard_input() {
 		let (_dir, command, name) = process_test_command("opf");
-		let mut child = Command::new(command)
-			.arg("30")
+		let mut child = process_test_child(&command, Duration::from_secs(30))
 			.spawn()
 			.expect("pidfile process");
 		let pid = i32::try_from(child.id().expect("child pid")).expect("pid fits i32");
@@ -2252,8 +2275,7 @@ mod tests {
 		}
 
 		let (_dir, command, name) = process_test_command("opl");
-		let mut child = Command::new(command)
-			.arg("30")
+		let mut child = process_test_child(&command, Duration::from_secs(30))
 			.spawn()
 			.expect("locked pidfile process");
 		let pid = i32::try_from(child.id().expect("child pid")).expect("pid fits i32");
@@ -2308,12 +2330,10 @@ mod tests {
 	#[tokio::test(flavor = "multi_thread")]
 	async fn pkill_signals_every_matching_process() {
 		let (_dir, command, name) = process_test_command("opk");
-		let mut first = Command::new(&command)
-			.arg("30")
+		let mut first = process_test_child(&command, Duration::from_secs(30))
 			.spawn()
 			.expect("first matching process");
-		let mut second = Command::new(command)
-			.arg("30")
+		let mut second = process_test_child(&command, Duration::from_secs(30))
 			.spawn()
 			.expect("second matching process");
 		let first_pid = i32::try_from(first.id().expect("first pid")).expect("pid fits i32");
@@ -2332,7 +2352,7 @@ mod tests {
 			let _ = second.wait().await;
 		}
 		assert_eq!(result.exit_code, Some(0));
-		assert!(output.is_empty());
+		assert_eq!(output, "");
 		assert!(statuses.is_ok(), "pkill did not signal every matching process");
 	}
 
@@ -2340,8 +2360,7 @@ mod tests {
 	#[tokio::test(flavor = "multi_thread")]
 	async fn pidwait_returns_after_the_matching_process_exits() {
 		let (_dir, command, name) = process_test_command("opw");
-		let mut child = Command::new(command)
-			.arg("0.25")
+		let mut child = process_test_child(&command, Duration::from_millis(250))
 			.spawn()
 			.expect("waited process");
 		let pid = i32::try_from(child.id().expect("child pid")).expect("pid fits i32");
@@ -2354,7 +2373,7 @@ mod tests {
 			let _ = child.wait().await;
 		}
 		assert_eq!(result.exit_code, Some(0));
-		assert!(output.is_empty());
+		assert_eq!(output, "");
 		assert!(status.is_some(), "pidwait returned while its matching process was still running");
 	}
 
@@ -3605,11 +3624,7 @@ mod tests {
 			.await
 			.expect("run_string head bad flag");
 		assert_ne!(exit_code(&bad), 0, "invalid flag should be a usage error");
-		assert!(
-			!std::fs::read_to_string(tmp.join("err.txt"))
-				.expect("err.txt")
-				.is_empty()
-		);
+		assert_ne!(std::fs::read_to_string(tmp.join("err.txt")).expect("err.txt"), "");
 
 		let _ = std::fs::remove_dir_all(&tmp);
 	}

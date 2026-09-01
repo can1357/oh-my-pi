@@ -1,6 +1,7 @@
 import { fetchWithRetry } from "@oh-my-pi/pi-utils";
+import { compareRevision, parseRevision } from "../compat/revision";
+import { classifyModel } from "../compat/taxonomy";
 import { Effort } from "../effort";
-import { isGlm52ReasoningEffortModelId } from "../identity/family";
 import type { ModelManagerOptions } from "../model-manager";
 import type { FetchImpl, ModelSpec, ThinkingConfig } from "../types";
 import { discoveryFetch } from "../utils";
@@ -96,7 +97,19 @@ function getThinkingConfig(modelId: string, capabilities: string[] | undefined):
 	if (!capabilities?.includes("thinking")) {
 		return undefined;
 	}
-	if (isGlm52ReasoningEffortModelId(modelId)) {
+	const identity = classifyModel("ollama-cloud", modelId, { lenient: true });
+	const revision = identity.revision === undefined ? undefined : parseRevision(identity.revision);
+	const floor = parseRevision(identity.family === "flash" ? "5.3" : "5.2");
+	const isGlmEffortModel =
+		identity.class === "glm" &&
+		(identity.family === undefined ||
+			identity.family === "air" ||
+			identity.family === "turbo" ||
+			identity.family === "flash") &&
+		revision !== undefined &&
+		floor !== undefined &&
+		compareRevision(revision, floor) >= 0;
+	if (isGlmEffortModel) {
 		return OLLAMA_CLOUD_GLM_52_THINKING;
 	}
 	return { mode: "effort", efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High] };

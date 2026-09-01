@@ -8,7 +8,7 @@
  * the final shipped behavior belongs in release notes.
  *
  * For every non-empty `[Unreleased]` section this script hands the whole section
- * to a small model (default `google-antigravity/gemini-3.7-flash` via `@oh-my-pi/pi-ai`)
+ * to a small model (default `openai-codex/gpt-5.6-luna` via `@oh-my-pi/pi-ai`),
  * and asks for a complete replacement grouped by changelog category. The model
  * returns structured sections/items; markdown is rendered locally so only the
  * Unreleased section changes and formatting stays deterministic.
@@ -46,7 +46,9 @@ import {
 	resolveRepoRoot,
 } from "./fix-changelogs";
 
-const DEFAULT_MODEL = "google-antigravity/gemini-3.7-flash";
+const DEFAULT_MODEL = "openai-codex/gpt-5.6-luna";
+/** Tried in order after the primary model fails (quota exhaustion, auth, hard API errors). */
+const FALLBACK_MODELS = [];
 
 // --------------------------------------------------------------------------
 // Prompts
@@ -306,8 +308,37 @@ async function run(options: RunOptions): Promise<RunResult> {
 	const paths = (await changelogPaths(repoRoot)).filter(
 		changelogPath => !options.packageFilter || changelogPath.includes(options.packageFilter),
 	);
-	const model = await openModel(options.model);
+	const specs = [options.model, ...FALLBACK_MODELS.filter(spec => spec !== options.model)];
+	const opened = new Map<string, Promise<RewriteModel>>();
+	// Once a model spec fails (all requestRewrite retries or open error), later
+	// files skip straight to the next spec instead of re-burning its retries.
+	let activeSpec = 0;
+	async function rewriteWithFallback(packageName: string, unreleasedBody: string): Promise<RewrittenSection[]> {
+		let lastError: unknown;
+		for (let i = activeSpec; i < specs.length; i++) {
+			const spec = specs[i];
+			if (!spec) continue;
+			try {
+				let model = opened.get(spec);
+				if (!model) {
+					model = openModel(spec);
+					opened.set(spec, model);
+				}
+				return await requestRewrite(await model, packageName, unreleasedBody);
+			} catch (error) {
+				lastError = error;
+				activeSpec = Math.max(activeSpec, i + 1);
+				const next = specs[i + 1];
+				if (next) {
+					const message = error instanceof Error ? error.message : String(error);
+					console.warn(`${packageName}: ${spec} failed (${message}); falling back to ${next}`);
+				}
+			}
+		}
+		throw lastError;
+	}
 	const concurrency = options.concurrency ?? 4;
+	// oxlint-disable-next-line unicorn/no-new-array -- length preallocation
 	const results: Array<RewrittenFile | undefined> = new Array(paths.length);
 
 	let pathIndex = 0;
@@ -329,7 +360,7 @@ async function run(options: RunOptions): Promise<RunResult> {
 				.replace(/^## \[Unreleased\]\n?/, "")
 				.trim();
 
-			const rewritten = await requestRewrite(model, changelogPath, unreleasedBody);
+			const rewritten = await rewriteWithFallback(changelogPath, unreleasedBody);
 			applyRewrite(section, rewritten);
 			const next = renderChangelog(document);
 			if (next === content) continue;
@@ -356,7 +387,7 @@ async function run(options: RunOptions): Promise<RunResult> {
 		if (res !== undefined) changed.push(res);
 	}
 
-	return { model: model.spec, changed };
+	return { model: specs.slice(0, activeSpec + 1).join(" -> "), changed };
 }
 
 // --------------------------------------------------------------------------
@@ -402,7 +433,7 @@ function usage(): string {
 		"while preserving public contract, exports, API, config, auth, and billing behavior.",
 		"",
 		"Options:",
-		`  -m, --model <prov/id>  Classifier model (default ${DEFAULT_MODEL}).`,
+		`  -m, --model <prov/id>  Classifier model (default ${DEFAULT_MODEL}${FALLBACK_MODELS.length > 0 ? `; falls back to ${FALLBACK_MODELS.join(", ")} on failure` : ""}).`,
 		"  --package <substr> Only changelogs whose path contains this substring.",
 		"  --concurrency <n>  Max concurrent changelogs to process in parallel (default 4).",
 		"  --dry-run          Report what would be dropped without writing files.",

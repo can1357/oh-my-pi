@@ -20,6 +20,7 @@ import type {
 } from "@oh-my-pi/pi-ai";
 import { calculateRateLimitBackoffMs, parseRateLimitReason } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
+import { resolveModelPolicy } from "@oh-my-pi/pi-catalog/compat/resolve";
 import { isFireworksFastModelId, toFireworksBaseModelId } from "@oh-my-pi/pi-catalog/fireworks-model-id";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { extractRetryHint, logger, prompt } from "@oh-my-pi/pi-utils";
@@ -103,6 +104,57 @@ function retryableAssistantTurnEnd(messages: readonly AgentMessage[]): number | 
 	if (message.stopReason !== "error" && message.stopReason !== "aborted") return undefined;
 	return turnEnd;
 }
+/** Whether `messages` ends in a failed/aborted turn whose most recent activity was a tool call. */
+function abortedToolCallTail(messages: readonly AgentMessage[]): boolean {
+	const turnEnd = retryableAssistantTurnEnd(messages);
+	if (turnEnd === undefined) return false;
+	// Synthetic tool results only ever trail a turn that emitted tool calls.
+	if (turnEnd < messages.length) return true;
+	const beforeTurn = messages[turnEnd - 2];
+	return beforeTurn?.role === "toolResult" && beforeTurn.isError === true;
+}
+/**
+ * Index of the first trailing failed tool result to strip for a tool replay,
+ * or undefined when the tail does not qualify.
+ *
+ * Qualifies when the transcript ends in a fully failed/aborted tool batch
+ * whose anchor assistant turn completed with runnable arguments
+ * (`toolUse`/`stop`) — optionally followed by an aborted boundary with no tool
+ * calls of its own (a live Esc; a restored session has already dropped it).
+ * Stripping from the returned index leaves that assistant as the transcript
+ * tail, which `Agent.continue()` resumes by re-executing the calls. A
+ * partially successful batch never qualifies: re-running a completed call
+ * would repeat its side effects. Synthetic placeholder tails never qualify
+ * either — their anchor is the aborted turn itself and its arguments may be
+ * truncated, so those are re-generated via a fresh model call instead.
+ */
+function toolReplayStart(messages: readonly AgentMessage[]): number | undefined {
+	let end = messages.length;
+	const tail = messages[end - 1];
+	if (tail?.role === "assistant") {
+		if (tail.stopReason !== "aborted" && tail.stopReason !== "error") return undefined;
+		if (tail.content.some(block => block.type === "toolCall")) return undefined;
+		end -= 1;
+	}
+	let start = end;
+	while (start > 0 && messages[start - 1].role === "toolResult") start--;
+	if (start === end) return undefined;
+	const anchor = messages[start - 1];
+	if (anchor?.role !== "assistant") return undefined;
+	if (anchor.stopReason !== "toolUse" && anchor.stopReason !== "stop") return undefined;
+	const callIds = new Set<string>();
+	for (const block of anchor.content) {
+		if (block.type === "toolCall") callIds.add(block.id);
+	}
+	if (end - start !== callIds.size) return undefined;
+	for (let i = start; i < end; i++) {
+		const result = messages[i];
+		if (result.role !== "toolResult" || result.isError !== true || !callIds.has(result.toolCallId)) {
+			return undefined;
+		}
+	}
+	return start;
+}
 
 /** Result shape shared with automatic maintenance recovery. */
 export interface RecoveryCompactionResult {
@@ -142,7 +194,12 @@ export interface TurnRecoveryHost {
 	promptGeneration(): number;
 	sessionId(): string;
 	emitSessionEvent(event: AgentSessionEvent): Promise<void>;
-	scheduleAgentContinue(options: { delayMs?: number; generation?: number; onError?: (error: unknown) => void }): void;
+	scheduleAgentContinue(options: {
+		source: string;
+		delayMs?: number;
+		generation?: number;
+		onError?: (error: unknown) => void;
+	}): void;
 	waitForSessionMessagePersistence(message: AssistantMessage): Promise<void>;
 	appendSessionMessage(message: AssistantMessage): void;
 	persistedAssistantEntryId(message: AssistantMessage): string | undefined;
@@ -233,6 +290,14 @@ export class TurnRecovery {
 	#bootstrapCache:
 		| { model: Model; level: ThinkingLevel | undefined; routed: boolean; value: ServingModel }
 		| undefined;
+	/**
+	 * Fallback-chain warnings pushed to `configWarnings` by startup validation,
+	 * tracked so a post-discovery re-check can retract the ones discovery
+	 * resolved (#10048).
+	 */
+	#fallbackChainWarnings = new Set<string>();
+	/** Whether startup validation deferred any warning pending in-flight discovery (#10048). */
+	#pendingDiscoveryDeferredValidation = false;
 
 	constructor(host: TurnRecoveryHost, options: TurnRecoveryOptions = {}) {
 		this.#host = host;
@@ -382,6 +447,7 @@ export class TurnRecovery {
 		});
 		this.#clearPendingRetryErrors();
 		this.#retryAttempt = 0;
+		this.resolveRetry();
 	}
 
 	/** Closes a failed retry saga when no compaction continuation took ownership. */
@@ -738,7 +804,10 @@ export class TurnRecovery {
 			attribution: "agent",
 			timestamp: Date.now(),
 		});
-		this.#host.scheduleAgentContinue({ generation: this.#host.promptGeneration() });
+		this.#host.scheduleAgentContinue({
+			source: "empty-stop-retry",
+			generation: this.#host.promptGeneration(),
+		});
 		return "continue";
 	}
 
@@ -818,7 +887,10 @@ export class TurnRecovery {
 			attribution: "agent",
 			timestamp: Date.now(),
 		});
-		this.#host.scheduleAgentContinue({ generation: this.#host.promptGeneration() });
+		this.#host.scheduleAgentContinue({
+			source: "unexpected-stop-retry",
+			generation: this.#host.promptGeneration(),
+		});
 		return true;
 	}
 
@@ -1095,11 +1167,16 @@ export class TurnRecovery {
 
 		// Credential rotation and classifier fallbacks are safe only before
 		// committed text, images, tool calls, or server tools. Thinking-only
-		// output remains replay-safe. A classifier refusal or malformed-function
-		// response may also be replayed when every emitted tool call is paired
-		// with positive proof that it never executed.
+		// output remains replay-safe. A classifier refusal, malformed-function
+		// response, or retriable transport error (the provider stream died
+		// mid-turn after a complete tool call — e.g. a socket close — and every
+		// emitted call was paired with a synthetic `executed: false` result) may
+		// also be replayed when every emitted tool call is paired with positive
+		// proof that it never executed.
 		const replaySafeUnexecutedTools =
-			(this.isClassifierRefusal(message) || AIError.is(id, AIError.Flag.MalformedFunctionCall)) &&
+			(this.isClassifierRefusal(message) ||
+				AIError.is(id, AIError.Flag.MalformedFunctionCall) ||
+				AIError.retriable(id)) &&
 			this.#unexecutedToolCallsReplaySafe(message);
 		if (this.#hasReplayUnsafeOutput(message) && !replaySafeUnexecutedTools) return false;
 		if (AIError.is(id, AIError.Flag.AccountPolicy) || this.isClassifierRefusal(message)) return true;
@@ -1109,7 +1186,8 @@ export class TurnRecovery {
 	/**
 	 * True when every emitted tool call provably never executed and no other
 	 * replay-unsafe output exists. The caller restricts this exception to
-	 * classifier refusals and malformed-function responses.
+	 * classifier refusals, malformed-function responses, and retriable
+	 * transport errors.
 	 *
 	 * Gemini can report `MALFORMED_FUNCTION_CALL` after streaming an earlier,
 	 * well-formed call. Anthropic classifiers can likewise refuse after a call.
@@ -1291,9 +1369,63 @@ export class TurnRecovery {
 	}
 
 	#validateRetryFallbackChains(): void {
-		validateRetryFallbackChains(this.#host.settings, this.#host.modelRegistry, message =>
-			this.#host.configWarnings.push(message),
+		let deferred = false;
+		validateRetryFallbackChains(
+			this.#host.settings,
+			this.#host.modelRegistry,
+			message => {
+				logger.warn(message);
+				this.#fallbackChainWarnings.add(message);
+				this.#host.configWarnings.push(message);
+			},
+			{
+				isDiscoveryPending: provider => {
+					const pending = this.#host.modelRegistry.isProviderDiscoveryPending(provider);
+					if (pending) deferred = true;
+					return pending;
+				},
+			},
 		);
+		this.#pendingDiscoveryDeferredValidation = deferred;
+	}
+
+	/** Whether startup fallback-chain validation deferred any warning pending in-flight discovery (#10048). */
+	hasPendingDiscoveryDeferredFallbackValidation(): boolean {
+		return this.#pendingDiscoveryDeferredValidation;
+	}
+
+	/**
+	 * Re-run fallback-chain validation once background discovery has settled and
+	 * reconcile `configWarnings`. Startup validation suppresses "unknown model"
+	 * warnings for selectors whose config-declared discovery provider had not yet
+	 * populated the registry (a cold cache after `omp update` bumps the discovery
+	 * namespace, #10048). With discovery done, drop any startup warning discovery
+	 * resolved and surface warnings for selectors that stayed unknown.
+	 *
+	 * @returns true when `configWarnings` changed and the header must rebuild.
+	 */
+	revalidateRetryFallbackChainsAfterDiscovery(): boolean {
+		const definitive = new Set<string>();
+		validateRetryFallbackChains(this.#host.settings, this.#host.modelRegistry, message => definitive.add(message));
+		this.#pendingDiscoveryDeferredValidation = false;
+		let changed = false;
+		for (const message of Array.from(this.#fallbackChainWarnings)) {
+			if (definitive.has(message)) continue;
+			const index = this.#host.configWarnings.indexOf(message);
+			if (index !== -1) {
+				this.#host.configWarnings.splice(index, 1);
+				changed = true;
+			}
+			this.#fallbackChainWarnings.delete(message);
+		}
+		for (const message of definitive) {
+			if (this.#fallbackChainWarnings.has(message)) continue;
+			logger.warn(message);
+			this.#fallbackChainWarnings.add(message);
+			this.#host.configWarnings.push(message);
+			changed = true;
+		}
+		return changed;
 	}
 
 	#getRetryFallbackRevertPolicy(): RetryFallbackRevertPolicy {
@@ -1384,12 +1516,14 @@ export class TurnRecovery {
 		role: string,
 		currentSelector: string,
 		currentModel: Model | null | undefined = this.#host.model(),
+		options?: { wrapAround?: boolean },
 	): RetryFallbackSelector[] {
 		return findRetryFallbackCandidates(
 			this.#getRetryFallbackResolutionContext(),
 			role,
 			currentSelector,
 			currentModel,
+			options,
 		);
 	}
 
@@ -1644,18 +1778,26 @@ export class TurnRecovery {
 	async #tryRetryModelFallback(
 		currentSelector: string,
 		failedMessage: AssistantMessage,
-		options?: { pinFallback?: boolean },
+		options?: {
+			excludeProvider?: string;
+			pinFallback?: boolean;
+			preserveFailedTurn?: boolean;
+			wrapAround?: boolean;
+		},
 	): Promise<boolean> {
 		const ceiling = this.#host.thinkingLevelCeiling();
-		const latestAssistant = this.#host.agent.state.messages.findLast(
-			(message): message is AssistantMessage => message.role === "assistant" && message !== failedMessage,
-		);
+		const latestAssistant = options?.preserveFailedTurn
+			? failedMessage
+			: this.#host.agent.state.messages.findLast(
+					(message): message is AssistantMessage => message.role === "assistant" && message !== failedMessage,
+				);
 		for (const role of this.retryFallbackChainKeys(currentSelector)) {
-			for (const selector of this.findRetryFallbackCandidates(role, currentSelector)) {
+			for (const selector of this.findRetryFallbackCandidates(role, currentSelector, undefined, options)) {
 				if (this.isRetryFallbackSelectorSuppressed(selector)) continue;
 				const resolved = resolveModelOverride([selector.raw], this.#host.modelRegistry, this.#host.settings);
 				const candidate = resolved.model ?? this.#host.modelRegistry.find(selector.provider, selector.id);
 				if (!candidate) continue;
+				if (options?.excludeProvider === candidate.provider) continue;
 				// Anthropic signatures and redacted blocks are model-bound, while the
 				// latest assistant response must remain byte-identical. A same-provider
 				// model switch can satisfy neither constraint, so keep retrying the
@@ -1678,9 +1820,11 @@ export class TurnRecovery {
 				// clamped UP past the cap by its model floor — skip it entirely.
 				if (ceiling !== undefined && !modelSupportsEffortCeiling(candidate, ceiling)) continue;
 				// Skip a candidate whose window cannot hold the retry context. The
-				// failed assistant is removed before continue(), so exclude it here to
-				// judge the request that will actually be sent (issue #8065).
-				if (!this.#host.contextFitsModel(candidate, failedMessage)) continue;
+				// failed assistant is excluded only when retry removes it; preserved
+				// unexecuted-tool turns remain part of the request (issue #8065).
+				if (!this.#host.contextFitsModel(candidate, options?.preserveFailedTurn ? undefined : failedMessage)) {
+					continue;
+				}
 				const apiKey = await this.#host.modelRegistry.getApiKey(candidate, this.#host.sessionId());
 				if (!apiKey) continue;
 				return this.applyRetryFallbackCandidate(role, selector, currentSelector, options);
@@ -1956,7 +2100,7 @@ export class TurnRecovery {
 		const id = this.#classifyRetryMessage(message);
 		const preserveFailedTurn =
 			options?.preserveFailedTurn === true ||
-			((classifierRefusal || AIError.is(id, AIError.Flag.MalformedFunctionCall)) &&
+			((classifierRefusal || AIError.is(id, AIError.Flag.MalformedFunctionCall) || AIError.retriable(id)) &&
 				this.#unexecutedToolCallsReplaySafe(message));
 		const rateLimitReason = parseRateLimitReason(errorMessage);
 		const staleOpenAIResponsesReplayError = AIError.is(id, AIError.Flag.StaleResponsesItem);
@@ -1986,6 +2130,10 @@ export class TurnRecovery {
 		// Set when a usage-limit error pinned the wait to credential
 		// availability — suppresses the generic retry-after bump below.
 		let usageLimitWaitMs: number | undefined;
+		const siblingAvailabilityWaitMs =
+			recordedUsageLimitOutcome?.retryAtMs === undefined
+				? undefined
+				: Math.max(0, recordedUsageLimitOutcome.retryAtMs - Date.now()) + SIBLING_UNBLOCK_BUFFER_MS;
 
 		if (staleOpenAIResponsesReplayError) {
 			this.#host.resetCurrentResponsesProviderSession("stale replay error");
@@ -2012,12 +2160,8 @@ export class TurnRecovery {
 				// recoverable situation into the provider's multi-hour wait and
 				// trips the fail-fast cap below.
 				usageLimitWaitMs = recordedUsageLimitOutcome.retryAfterMs;
-				if (recordedUsageLimitOutcome.retryAtMs !== undefined) {
-					const siblingWaitMs =
-						Math.max(0, recordedUsageLimitOutcome.retryAtMs - Date.now()) + SIBLING_UNBLOCK_BUFFER_MS;
-					if (siblingWaitMs < usageLimitWaitMs) {
-						usageLimitWaitMs = siblingWaitMs;
-					}
+				if (siblingAvailabilityWaitMs !== undefined && siblingAvailabilityWaitMs < usageLimitWaitMs) {
+					usageLimitWaitMs = siblingAvailabilityWaitMs;
 				}
 				if (usageLimitWaitMs > delayMs) {
 					delayMs = usageLimitWaitMs;
@@ -2046,6 +2190,27 @@ export class TurnRecovery {
 		// contents, not model health (issue #8760). Keep it on the same model; the
 		// retry budget still bounds a genuinely stuck stream.
 		const thinkingLoop = AIError.is(id, AIError.Flag.ThinkingLoop);
+		const effectiveUsageLimitWaitMs =
+			usageLimitWaitMs ??
+			(siblingAvailabilityWaitMs === undefined
+				? (recordedUsageLimitOutcome?.retryAfterMs ?? parsedRetryAfterMs)
+				: Math.min(
+						recordedUsageLimitOutcome?.retryAfterMs ?? parsedRetryAfterMs ?? Infinity,
+						siblingAvailabilityWaitMs,
+					));
+		const waitForSiblingCredential =
+			siblingAvailabilityWaitMs !== undefined &&
+			effectiveUsageLimitWaitMs !== undefined &&
+			effectiveUsageLimitWaitMs <= retrySettings.maxDelayMs;
+		const longUsageLimitFallback =
+			currentModel !== undefined &&
+			resolveModelPolicy(currentModel).catalog.longUsageLimitFallback === true &&
+			retrySettings.maxDelayMs > 0 &&
+			effectiveUsageLimitWaitMs !== undefined &&
+			effectiveUsageLimitWaitMs > retrySettings.maxDelayMs &&
+			/\bGoUsageLimitError\b/.test(errorMessage) &&
+			(!this.#hasReplayUnsafeOutput(message) || this.#unexecutedToolCallsReplaySafe(message));
+
 		if (!staleOpenAIResponsesReplayError && !switchedCredential && currentSelector) {
 			// A refusal chain stops at the retry budget: the exhausted-attempt
 			// last resort is for provider failures, not classifier decisions.
@@ -2053,13 +2218,17 @@ export class TurnRecovery {
 				allowModelFallback &&
 				retrySettings.modelFallback &&
 				!thinkingLoop &&
+				!waitForSiblingCredential &&
 				!(retryBudgetExhausted && classifierRefusal)
 			) {
 				if (!classifierRefusal) {
 					this.noteRetryFallbackCooldown(currentSelector, parsedRetryAfterMs, errorMessage);
 				}
 				switchedModel = await this.#tryRetryModelFallback(currentSelector, message, {
+					excludeProvider: longUsageLimitFallback ? currentModel.provider : undefined,
 					pinFallback: classifierRefusal,
+					preserveFailedTurn,
+					wrapAround: longUsageLimitFallback,
 				});
 			}
 			// Auto fallback from a Fireworks Fast variant to its base model. Independent
@@ -2163,7 +2332,7 @@ export class TurnRecovery {
 				type: "auto_retry_end",
 				success: false,
 				attempt,
-				finalError: `Provider requested ${delayMs}ms wait, exceeds retry.maxDelayMs (${maxDelayMs}ms). Original error: ${errorMessage}`,
+				finalError: `Provider requested ${Math.ceil(delayMs)}ms wait, exceeds retry.maxDelayMs (${maxDelayMs}ms). Original error: ${errorMessage}`,
 			});
 			this.#clearPendingRetryErrors();
 			this.resolveRetry();
@@ -2239,6 +2408,7 @@ export class TurnRecovery {
 		// otherwise auto_retry_end never fires, retryPromise stays pending, and
 		// the in-flight prompt() (and the TUI retry indicator) hang forever.
 		this.#host.scheduleAgentContinue({
+			source: "automatic-retry",
 			delayMs: 1,
 			generation,
 			onError: error => void this.#failRetryAfterLocalContinueError(message, error),
@@ -2362,6 +2532,25 @@ export class TurnRecovery {
 		this.#host.settings.set("retry.enabled", enabled);
 	}
 	/**
+	 * Whether the transcript tail is a failed/aborted assistant turn whose most
+	 * recent activity was a tool call: synthetic placeholder results trail the
+	 * failed turn (stream died mid-tool-call), or the message right before the
+	 * aborted boundary is an errored/aborted tool result (Esc landed during
+	 * tool execution). Drives the TUI's idle "F5 to Retry" status row;
+	 * {@link retry} is the matching action.
+	 */
+	get hasAbortedToolCallTail(): boolean {
+		const active = this.#host.agent.state.messages;
+		if (abortedToolCallTail(active)) return true;
+		// A trailing assistant message is authoritative for a live session: a
+		// settled successful turn leaves nothing to retry.
+		if (active.at(-1)?.role === "assistant") return false;
+		// A restored session omits the failed turn (and its synthetic results)
+		// from provider context, so — mirroring retry() — the persisted display
+		// transcript decides whether a retryable tool-call tail exists.
+		return abortedToolCallTail(this.#host.sessionManager.buildSessionContext({ transcript: true }).messages);
+	}
+	/**
 	 * Manually retry the last failed assistant turn.
 	 * Removes the error message from active agent state when present and
 	 * re-attempts with a fresh retry budget.
@@ -2379,6 +2568,13 @@ export class TurnRecovery {
 	 * context. In that case, the persisted display transcript remains the source
 	 * of truth for whether the current branch has a retryable failed tail.
 	 *
+	 * When the failure is a fully failed/aborted tool batch with complete
+	 * arguments (see {@link toolReplayStart}), the retry strips the failed
+	 * results (and the aborted boundary) instead of the whole turn, leaving the
+	 * tool-calling assistant as the tail — the continuation then re-executes
+	 * the same tool calls directly rather than paying a model call to re-issue
+	 * them.
+	 *
 	 * @returns true if retry was initiated, false if no failed turn to retry or agent is busy
 	 */
 	async retry(): Promise<boolean> {
@@ -2387,23 +2583,75 @@ export class TurnRecovery {
 		const messages = this.#host.agent.state.messages;
 		const activeTurnEnd = retryableAssistantTurnEnd(messages);
 		if (activeTurnEnd !== undefined) {
-			// Remove the failed/aborted assistant message plus its synthetic tool
-			// results (same as auto-retry does before re-attempting).
-			this.#host.agent.replaceMessages(messages.slice(0, activeTurnEnd - 1));
+			const replayStart = toolReplayStart(messages);
+			if (replayStart !== undefined) {
+				await this.#stripForToolReplay(messages, replayStart);
+			} else {
+				// Remove the failed/aborted assistant message plus its synthetic tool
+				// results (same as auto-retry does before re-attempting).
+				this.#host.agent.replaceMessages(messages.slice(0, activeTurnEnd - 1));
+			}
 		} else {
 			// A restored session already dropped the failed assistant turn (and its
 			// paired synthetic tool results) from provider context, so the persisted
 			// display transcript is the source of truth for a retryable failed tail.
 			const transcriptMessages = this.#host.sessionManager.buildSessionContext({ transcript: true }).messages;
 			if (retryableAssistantTurnEnd(transcriptMessages) === undefined) return false;
+			// The boundary is already gone from active context; when the intact
+			// failed batch is still the tail, replay the tools directly.
+			const replayStart = toolReplayStart(messages);
+			if (replayStart !== undefined) await this.#stripForToolReplay(messages, replayStart);
 		}
 
 		// Reset retry budget for a fresh attempt
 		this.#retryAttempt = 0;
 
 		// Re-attempt the turn
-		this.#host.scheduleAgentContinue({ delayMs: 1 });
+		this.#host.scheduleAgentContinue({ source: "manual-retry", delayMs: 1 });
 
 		return true;
+	}
+	/**
+	 * Strip the failed tool batch (and any aborted boundary) for a tool replay:
+	 * reparent the persisted leaf onto the anchor assistant entry — so the
+	 * dropped results cannot resurface on reload or pair duplicate toolCallIds
+	 * on replay — then cut the active context to the same point.
+	 */
+	async #stripForToolReplay(messages: readonly AgentMessage[], replayStart: number): Promise<void> {
+		const tail = messages[messages.length - 1];
+		if (tail?.role === "assistant") {
+			try {
+				await this.#host.waitForSessionMessagePersistence(tail);
+			} catch (err) {
+				logger.debug("Tool replay: boundary persistence wait failed", {
+					error: err instanceof Error ? err.message : String(err),
+				});
+			}
+		}
+		const anchor = messages[replayStart - 1] as AssistantMessage;
+		const branch = this.#host.sessionManager.getBranch();
+		const persistedEntryId = this.#host.persistedAssistantEntryId(anchor);
+		const anchorEntry =
+			(persistedEntryId === undefined
+				? undefined
+				: branch.find(
+						entry =>
+							entry.id === persistedEntryId && entry.type === "message" && entry.message.role === "assistant",
+					)) ??
+			branch
+				.slice()
+				.reverse()
+				.find(
+					entry =>
+						entry.type === "message" &&
+						entry.message.role === "assistant" &&
+						this.#isSameAssistantMessage(entry.message as AssistantMessage, anchor),
+				);
+		if (anchorEntry) {
+			this.#host.withBashBranchTransition(() => {
+				this.#host.sessionManager.branch(anchorEntry.id);
+			});
+		}
+		this.#host.agent.replaceMessages(messages.slice(0, replayStart));
 	}
 }

@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import {
 	buildHttp400DumpPayload,
 	type RawHttpRequestDump,
+	rewriteClinePassError,
 	shouldDumpRejectedRequest,
 } from "@oh-my-pi/pi-ai/utils/http-inspector";
 
@@ -65,5 +66,59 @@ describe("shouldDumpRejectedRequest", () => {
 
 	it("skips errors without an HTTP status", () => {
 		expect(shouldDumpRejectedRequest(new Error("network reset"))).toBe(false);
+	});
+});
+
+describe("rewriteClinePassError", () => {
+	it("rewrites not-subscribed into free-tier guidance", () => {
+		const rewritten = rewriteClinePassError("the user is not subscribed to required model plan", "cline-pass");
+		expect(rewritten).toContain("requires a ClinePass subscription");
+		expect(rewritten).toContain("free");
+	});
+
+	it("rewrites the alternate not-subscribed phrasing", () => {
+		const rewritten = rewriteClinePassError(
+			"No access to ClinePass subscription models yet. Subscribe to ClinePass",
+			"cline-pass",
+		);
+		expect(rewritten).toContain("requires a ClinePass subscription");
+	});
+
+	it("rewrites organization-account restriction", () => {
+		const rewritten = rewriteClinePassError(
+			"organization accounts cannot use individual model inference subscriptions",
+			"cline-pass",
+		);
+		expect(rewritten).toContain("organization accounts");
+		expect(rewritten).toContain("personal Cline API key");
+	});
+
+	it("rewrites roster-rotation model-not-found into reselection guidance", () => {
+		const rewritten = rewriteClinePassError("model not found", "cline-pass");
+		expect(rewritten).toContain("removed this model from the roster");
+		expect(rewritten).toContain("/model");
+	});
+
+	it("rewrites the client-surface gate into actionable guidance", () => {
+		const rewritten = rewriteClinePassError(
+			"Error 403: deepseek/deepseek-v4-flash is only available via Cline product surfaces. If you are using an old version of Cline, please update to the latest version",
+			"cline-pass",
+		);
+		expect(rewritten).toContain("official product surfaces");
+		expect(rewritten).toContain("/model");
+	});
+
+	it("does not let the surface-gate rewrite swallow model-not-found", () => {
+		// Marker independence: the surface-gate pattern must not match the
+		// roster-rotation phrasing and vice versa.
+		expect(rewriteClinePassError("model not found", "cline-pass")).toContain("removed this model");
+	});
+
+	it("leaves other providers untouched — the marker is too generic for them", () => {
+		expect(rewriteClinePassError("model not found", "openrouter")).toBe("model not found");
+	});
+
+	it("leaves unrelated cline-pass errors untouched", () => {
+		expect(rewriteClinePassError("500 internal server error", "cline-pass")).toBe("500 internal server error");
 	});
 });

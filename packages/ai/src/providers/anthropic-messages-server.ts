@@ -571,7 +571,6 @@ export function encodeStream(
 		async start(controller) {
 			const messageId = newMessageId();
 			let started = false;
-			let lastPartial: AssistantMessage | undefined;
 			const open = new Map<number, OpenBlock>();
 
 			const ensureStart = (partial: AssistantMessage | undefined) => {
@@ -738,7 +737,7 @@ export function encodeStream(
 							closeBlock(ev.contentIndex);
 							break;
 						case "done": {
-							for (const idx of [...open.keys()]) closeBlock(idx);
+							for (const idx of Array.from(open.keys())) closeBlock(idx);
 							emitServerToolBlocksBefore(ev.message, ev.message.content.length);
 							controller.enqueue(
 								sseFrame("message_delta", {
@@ -766,13 +765,13 @@ export function encodeStream(
 				// Stream ended without an explicit done: emit a complete envelope
 				// (message_start + message_delta carrying a stop_reason) so strict
 				// clients don't reject the response as a protocol error.
-				ensureStart(lastPartial);
-				for (const idx of [...open.keys()]) closeBlock(idx);
+				ensureStart(undefined);
+				for (const idx of Array.from(open.keys())) closeBlock(idx);
 				controller.enqueue(
 					sseFrame("message_delta", {
 						type: "message_delta",
 						delta: { stop_reason: "end_turn", stop_sequence: null },
-						usage: lastPartial ? encodeUsage(lastPartial) : ZERO_WIRE_USAGE,
+						usage: ZERO_WIRE_USAGE,
 					}),
 				);
 				controller.enqueue(sseFrame("message_stop", { type: "message_stop" }));

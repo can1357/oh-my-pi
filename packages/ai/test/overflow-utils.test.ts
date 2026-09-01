@@ -69,6 +69,15 @@ describe("isContextOverflow/isPayloadRejection - HTTP 413 variants", () => {
 		expect(isPayloadRejection(message)).toBe(false);
 	});
 
+	it("classifies provider chat-history count limits as overflow, not payload rejection", () => {
+		const message = createErrorMessage("413 Chat history exceeds the 800-message limit");
+		message.errorStatus = 413;
+		AIError.classifyMessage(message);
+
+		expect(isContextOverflow(message)).toBe(true);
+		expect(isPayloadRejection(message)).toBe(false);
+	});
+
 	it("keeps request_too_large carrying token-count evidence classified as overflow", () => {
 		const message = createErrorMessage("request_too_large: prompt is too long: 300000 tokens > 200000 maximum");
 		expect(isContextOverflow(message)).toBe(true);

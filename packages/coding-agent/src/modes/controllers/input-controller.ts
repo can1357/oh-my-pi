@@ -5,6 +5,7 @@ import { type AutocompleteProvider, matchesKey, type SlashCommand } from "@oh-my
 import { isEnoent, logger, sanitizeText } from "@oh-my-pi/pi-utils";
 import { isSettingsInitialized, settings } from "../../config/settings";
 import { resolveLocalRoot } from "../../internal-urls";
+import { AskDialogComponent } from "../../modes/components/ask-dialog";
 import { AssistantMessageComponent } from "../../modes/components/assistant-message";
 import { extractImagePathFromText } from "../../modes/components/custom-editor";
 import { ReadToolGroupComponent } from "../../modes/components/read-tool-group";
@@ -311,6 +312,13 @@ export class InputController {
 				if (this.ctx.ui.hasOverlay()) return undefined;
 				if (this.ctx.ui.getFocused() instanceof TreeSelectorComponent && matchesKey(data, "ctrl+o"))
 					return undefined;
+				const focused = this.ctx.ui.getFocused();
+				// A truncated ask question lives in the editor slot, not chat
+				// transcript, so expand it in-place instead of (or before)
+				// toggling tool-output previews.
+				if (focused instanceof AskDialogComponent && focused.toggleQuestionExpansion()) {
+					return { consume: true };
+				}
 				this.toggleToolOutputExpansion();
 				return { consume: true };
 			});
@@ -434,16 +442,12 @@ export class InputController {
 				// Esc must not destroy an in-progress draft.
 				this.ctx.lastEscapeTime = 0;
 			} else {
-				// Double-interrupt with empty editor triggers /tree, /branch, or nothing based on setting
-				const action = settings.get("doubleEscapeAction");
-				if (action !== "none") {
+				// Double-interrupt with empty editor opens the transcript rewind
+				// selector unless disabled.
+				if (settings.get("doubleEscapeAction") !== "none") {
 					const now = Date.now();
 					if (now - this.ctx.lastEscapeTime < 500) {
-						if (action === "tree") {
-							this.ctx.showTreeSelector();
-						} else {
-							this.ctx.showUserMessageSelector();
-						}
+						this.ctx.showUserMessageSelector();
 						// Forced viewport repaint only: `resetDisplay()` replays the whole
 						// committed transcript (and clears native scrollback on direct
 						// terminals), which blocks on PTY backpressure for tens of seconds
@@ -2043,6 +2047,7 @@ export class InputController {
 			return;
 		}
 		this.setToolsExpanded(!this.ctx.toolOutputExpanded);
+		this.ctx.showStatus(`Tool output expansion: ${this.ctx.toolOutputExpanded ? "enabled" : "disabled"}`);
 	}
 
 	toggleToolActivityVisibility(): void {
@@ -2110,6 +2115,11 @@ export class InputController {
 
 		// This is an explicit user display gesture: rebuild native history so the
 		// visibility change also applies to rows already retired from the viewport.
+		// Append-only thinking heads emitted their stable rows to scrollback while
+		// streaming (visible); forget that emission ledger so the paired scrollback
+		// clear re-renders them under the new visibility instead of replaying the
+		// captured reasoning (#10177).
+		this.ctx.chatContainer.resetStableEmission();
 		this.ctx.ui.resetDisplay();
 
 		this.ctx.showStatus(`Thinking blocks: ${this.ctx.hideThinkingBlock ? "hidden" : "visible"}`);
@@ -2149,7 +2159,7 @@ export class InputController {
 			this.ctx.editor.setCustomKeyHandler(keyId, () => {
 				const ctx = runner.createCommandContext();
 				try {
-					shortcut.handler(ctx);
+					runner.runScoped(() => shortcut.handler(ctx));
 				} catch (err) {
 					runner.emitError({
 						extensionPath: shortcut.extensionPath,

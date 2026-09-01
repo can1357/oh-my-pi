@@ -9,18 +9,11 @@ import { shareSession } from "../export/share";
 import { theme } from "../modes/theme/theme";
 import type { InteractiveModeContext } from "../modes/types";
 import { extractLastCodeBlock, extractLastCommand } from "../modes/utils/copy-targets";
-import { urlHyperlinkAlways } from "../tui";
 import { copyToClipboard } from "../utils/clipboard";
 import { refreshStatusLine } from "./builtin-modes";
-import { CollabQrCodeComponent } from "./helpers/collab-qrcode";
+import { CollabQrCodeComponent, collabBrowserLink } from "./helpers/collab-qrcode";
 import { commandConsumed, errorMessage, parseSubcommand, usage } from "./helpers/parse";
 import type { SlashCommandSpec } from "./types";
-
-/** Scheme-less display form of a browser deep link: accent + underline, OSC-8 linked to the full URL. */
-function collabWebLinkClickable(webLink: string): string {
-	const display = theme.fg("accent", `\x1b[4m${webLink.replace(/^https?:\/\//, "")}\x1b[24m`);
-	return urlHyperlinkAlways(webLink, display);
-}
 
 /** Join hint printed by /collab: compact terminal link + clickable browser deep link. */
 function collabLinkHint(host: CollabHost, heading: string, view = false): string {
@@ -28,9 +21,11 @@ function collabLinkHint(host: CollabHost, heading: string, view = false): string
 	const link = view ? host.viewLink : host.link;
 	const webLink = view ? host.webViewLink : host.webLink;
 	return [
-		theme.fg("success", heading),
+		// Keep the URL on the first row: under transcript pressure the status
+		// block is clipped to rendered[0], which used to drop the join link.
+		`${collabBrowserLink(webLink, "Join in browser")}  ${theme.fg("success", heading)}`,
 		` ${bullet} ${theme.fg("muted", view ? "Watch from another terminal:" : "Join from another terminal:")} ${APP_NAME} join "${link}"`,
-		` ${bullet} ${theme.fg("muted", "or any web browser:")} ${collabWebLinkClickable(webLink)}`,
+		` ${bullet} ${theme.fg("muted", "or any web browser:")} ${collabBrowserLink(webLink)}`,
 		theme.fg(
 			"dim",
 			view
@@ -196,6 +191,33 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 		},
 	},
 	{
+		name: "trace",
+		icon: "stats",
+		description: "Open this session's trace in the stats dashboard",
+		handle: async (_command, runtime) => {
+			const sessionFile = runtime.session.sessionFile;
+			if (!sessionFile) {
+				await runtime.output("No session file yet — send a message first.");
+				return commandConsumed();
+			}
+			try {
+				// Lazy: the stats dashboard (server + sqlite) loads on demand only,
+				// matching src/cli/stats-cli.ts, to keep CLI startup fast.
+				const { formatStatsDashboardUrl, startServer } = await import("@oh-my-pi/omp-stats");
+				const { hostname, port } = await startServer();
+				const url = `${formatStatsDashboardUrl(hostname, port)}/#/traces?s=${encodeURIComponent(sessionFile)}`;
+				await runtime.output(url);
+				return commandConsumed();
+			} catch (err) {
+				return usage(`Failed to open trace: ${errorMessage(err)}`, runtime);
+			}
+		},
+		handleTui: async (_command, runtime) => {
+			await runtime.ctx.handleTraceCommand();
+			runtime.ctx.editor.setText("");
+		},
+	},
+	{
 		name: "dump",
 		icon: "clipboard",
 		description: "Copy session transcript to clipboard (and write LLM request JSON to tmp)",
@@ -292,7 +314,7 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 					const names = ctx.collabHost.participants.map(p =>
 						p.role === "host" ? `${p.name} (host)` : p.readOnly ? `${p.name} (view-only)` : p.name,
 					);
-					ctx.showStatus(`Collab: ${names.join(", ")} — ${collabWebLinkClickable(ctx.collabHost.webLink)}`);
+					ctx.showStatus(`Collab: ${names.join(", ")} — ${collabBrowserLink(ctx.collabHost.webLink)}`);
 				} else if (ctx.collabGuest) {
 					ctx.showStatus(
 						ctx.collabGuest.readOnly

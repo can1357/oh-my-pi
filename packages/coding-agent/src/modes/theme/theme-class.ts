@@ -2,8 +2,9 @@ import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Effort } from "@oh-my-pi/pi-ai";
 import { colorLuma, logger, relativeLuminance } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
+import type { SessionAccentTheme } from "../../utils/session-color";
 import { bgAnsi, colorToAnsi, fgAnsi, resolveToHex } from "./color";
-import type { ColorMode, ThemeBg, ThemeColor } from "./schema";
+import { type ColorMode, isValidThemeColor, type ThemeBg, type ThemeColor } from "./schema";
 import {
 	type SlashCommandIconName,
 	SPINNER_FRAMES,
@@ -130,6 +131,7 @@ const LANG_BRAND_COLORS: Partial<Record<SymbolKey, string>> = {
 };
 
 const BACKGROUND_RESET_PATTERN = /\x1b\[(?:0|49)m/g;
+const FOREGROUND_RESET_PATTERN = /\x1b\[(?:0|39)m/g;
 
 export class Theme {
 	#fgColors: Record<ThemeColor, string>;
@@ -164,9 +166,12 @@ export class Theme {
 
 		this.#fgColors = {} as Record<ThemeColor, string>;
 		this.#hexFgColors = {} as Record<ThemeColor, string>;
-		for (const [key, value] of Object.entries(fgColors) as [ThemeColor, string | number][]) {
+		for (const key in fgColors) {
+			if (!isValidThemeColor(key)) continue;
+			const value = fgColors[key];
+			const hex = resolveToHex(value, slIsLight);
 			this.#fgColors[key] = fgAnsi(value, mode);
-			this.#hexFgColors[key] = resolveToHex(value, slIsLight);
+			this.#hexFgColors[key] = hex;
 		}
 		this.#bgColors = {} as Record<ThemeBg, string>;
 		this.#hexBgColors = {} as Record<ThemeBg, string>;
@@ -271,11 +276,32 @@ export class Theme {
 	getAccentColorHex(): string {
 		return this.getColorHex("accent");
 	}
+	/**
+	 * Theme-derived inputs for `getSessionAccentHex`: the accent hex whose
+	 * OKLCH weight session accents adopt, the major colors they must not
+	 * hue-collide with, and the light-theme surface luminance to contrast
+	 * against.
+	 */
+	get sessionAccentInputs(): SessionAccentTheme {
+		return {
+			accentHex: this.getAccentColorHex(),
+			colorHexes: this.getMajorThemeColorHexes(),
+			surfaceLuminance: this.accentSurfaceLuminance,
+		};
+	}
 
 	fg(color: ThemeColor, text: string): string {
 		const ansi = this.#fgColors[color];
 		if (!ansi) throw new Error(`Unknown theme color: ${color}`);
 		return `${ansi}${text}\x1b[39m`; // Reset only foreground color
+	}
+
+	/** Apply a foreground, replacing terminal-default tokens with the theme's contrast-safe fallback. */
+	fgResolved(color: ThemeColor, text: string): string {
+		const ansi = this.#fgColors[color];
+		if (!ansi) throw new Error(`Unknown theme color: ${color}`);
+		const resolved = ansi === "\x1b[39m" ? colorToAnsi(this.getColorHex(color), this.mode) : ansi;
+		return `${resolved}${text.replace(FOREGROUND_RESET_PATTERN, `$&${resolved}`)}\x1b[39m`;
 	}
 
 	bg(color: ThemeBg, text: string): string {
@@ -294,6 +320,16 @@ export class Theme {
 		const ansi = this.#bgColors[color];
 		if (!ansi) throw new Error(`Unknown theme background color: ${color}`);
 		return `${ansi}${text.replace(BACKGROUND_RESET_PATTERN, `$&${ansi}`)}\x1b[49m`;
+	}
+
+	/**
+	 * Apply a foreground over a controlled background, choosing a contrast-safe
+	 * fallback only when the theme token requests the terminal default and
+	 * reapplying it after nested full/foreground resets.
+	 */
+	fgOnBg(color: ThemeColor, background: ThemeBg, text: string): string {
+		const ansi = this.getFgOnBgAnsi(color, background);
+		return `${ansi}${text.replace(FOREGROUND_RESET_PATTERN, `$&${ansi}`)}\x1b[39m`;
 	}
 
 	bold(text: string): string {
@@ -326,6 +362,21 @@ export class Theme {
 		const ansi = this.#bgColors[color];
 		if (!ansi) throw new Error(`Unknown theme background color: ${color}`);
 		return ansi;
+	}
+
+	/**
+	 * Foreground ANSI for text rendered over a controlled theme background.
+	 * Explicit theme colors win; terminal-default tokens become black or near-white.
+	 */
+	getFgOnBgAnsi(color: ThemeColor, background: ThemeBg): string {
+		const ansi = this.#fgColors[color];
+		if (!ansi) throw new Error(`Unknown theme color: ${color}`);
+		if (ansi !== "\x1b[39m") return ansi;
+		const backgroundAnsi = this.#bgColors[background];
+		if (!backgroundAnsi) throw new Error(`Unknown theme background color: ${background}`);
+		if (backgroundAnsi === "\x1b[49m") return ansi;
+		const backgroundLuma = colorLuma(this.getBgHex(background));
+		return colorToAnsi(backgroundLuma !== undefined && backgroundLuma > 0.5 ? "#000000" : "#e5e5e7", this.mode);
 	}
 
 	/**
@@ -472,6 +523,17 @@ export class Theme {
 		};
 	}
 
+	/**
+	 * Dotted rules/verticals for transient selection outlines. Corners come from
+	 * {@link boxRound} — Unicode has no rounded dotted corner glyphs.
+	 */
+	get boxDotted() {
+		return {
+			horizontal: this.#symbols["boxDotted.horizontal"],
+			vertical: this.#symbols["boxDotted.vertical"],
+		};
+	}
+
 	get boxSharp() {
 		return {
 			topLeft: this.#symbols["boxSharp.topLeft"],
@@ -496,6 +558,7 @@ export class Theme {
 			powerlineRight: this.#symbols["sep.powerlineRight"],
 			powerlineThinLeft: this.#symbols["sep.powerlineThinLeft"],
 			powerlineThinRight: this.#symbols["sep.powerlineThinRight"],
+			powerlineCapLeft: this.#symbols["sep.powerlineCapLeft"],
 			block: this.#symbols["sep.block"],
 			space: this.#symbols["sep.space"],
 			asciiLeft: this.#symbols["sep.asciiLeft"],
@@ -527,8 +590,10 @@ export class Theme {
 			cost: this.#symbols["icon.cost"],
 			subscription: this.#symbols["icon.subscription"],
 			advisor: this.#symbols["icon.advisor"],
+			advisorClosed: this.#symbols["icon.advisorClosed"],
 			time: this.#symbols["icon.time"],
-			pi: this.#symbols["icon.pi"],
+			omp: this.#symbols["icon.omp"],
+			esc: this.#symbols["icon.esc"],
 			ghost: this.#symbols["icon.ghost"],
 			agents: this.#symbols["icon.agents"],
 			job: this.#symbols["icon.job"],

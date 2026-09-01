@@ -1,5 +1,4 @@
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
-import { settings } from "../config/settings";
 import type { AgentSession } from "../session/agent-session";
 import type { SessionOAuthAccountList } from "../session/agent-session-types";
 import {
@@ -473,15 +472,20 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		},
 	},
 	{
+		name: "hub",
+		icon: "agents",
+		description: "Open the live Agent Hub",
+		handleTui: (_command, runtime) => {
+			runtime.ctx.showAgentHub({ initialSection: "activity" });
+			runtime.ctx.editor.setText("");
+		},
+	},
+	{
 		name: "branch",
 		icon: "branch",
 		description: "Create a new branch from a previous message",
 		handleTui: (_command, runtime) => {
-			if (settings.get("doubleEscapeAction") === "tree") {
-				runtime.ctx.showTreeSelector();
-			} else {
-				runtime.ctx.showUserMessageSelector();
-			}
+			runtime.ctx.showUserMessageSelector();
 			runtime.ctx.editor.setText("");
 		},
 	},

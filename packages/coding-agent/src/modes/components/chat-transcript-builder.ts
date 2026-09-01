@@ -13,7 +13,7 @@
  */
 import type { AgentMessage, AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { Usage } from "@oh-my-pi/pi-ai";
-import type { TUI } from "@oh-my-pi/pi-tui";
+import type { Component, TUI } from "@oh-my-pi/pi-tui";
 import type { AdvisorMessageDetails } from "../../advisor";
 import { COLLAB_PROMPT_MESSAGE_TYPE, type CollabPromptDetails } from "../../collab/protocol";
 import { settings } from "../../config/settings";
@@ -22,6 +22,7 @@ import { LAUNCH_COMPLETION_MESSAGE_TYPE } from "../../session/launch-completion"
 import {
 	BACKGROUND_TAN_DISPATCH_MESSAGE_TYPE,
 	type CustomMessage,
+	isUserTurnInitiator,
 	LSP_LATE_DIAGNOSTIC_MESSAGE_TYPE,
 	SKILL_PROMPT_MESSAGE_TYPE,
 	type SkillPromptDetails,
@@ -57,7 +58,7 @@ import { groupedReadUsageCallIds, ReadToolGroupComponent, readArgsCollapseIntoGr
 import { SkillMessageComponent } from "./skill-message";
 import { ToolExecutionComponent } from "./tool-execution";
 import { TranscriptContainer } from "./transcript-container";
-import { createUsageRowBlock } from "./usage-row";
+import { createUsageRowBlock, turnElapsedMs } from "./usage-row";
 import { CollapsedSyntheticMessageComponent, UserMessageComponent } from "./user-message";
 
 export interface ChatTranscriptBuilderDeps {
@@ -91,11 +92,14 @@ export class ChatTranscriptBuilder {
 	#pendingUsageTtft: number | undefined;
 	#pendingUsageTimestamp: number | undefined;
 	#pendingReadUsageCallIds: string[] | undefined;
+	#pendingUsageElapsedMs: number | undefined;
+	#turnStartedAt: number | undefined;
 	#lastAssistantUsage: Usage | undefined;
 	#waitingPoll: ToolExecutionComponent | null = null;
 	#todoSnapshot: ToolExecutionComponent | null = null;
 	#expandables: Array<{ setExpanded(expanded: boolean): void }> = [];
 	#expanded = false;
+	#entryComponents = new Map<string, Component[]>();
 
 	constructor(private readonly deps: ChatTranscriptBuilderDeps) {
 		this.container.setToolActivityVisible(!settings.get("display.hideToolActivity"));
@@ -109,7 +113,7 @@ export class ChatTranscriptBuilder {
 	/** Discard all components and rebuild the whole transcript from `entries`. */
 	rebuild(entries: SessionMessageEntry[]): void {
 		this.reset();
-		for (const entry of entries) this.#appendChatMessage(entry.message);
+		for (const entry of entries) this.#appendEntry(entry);
 		// Flush the trailing turn's usage row only once its tools are materialized
 		// (a read whose result has not arrived stays pending); otherwise the row
 		// would sit above its tools. The drain happens here at the end of the pass.
@@ -118,7 +122,7 @@ export class ChatTranscriptBuilder {
 
 	/** Append newly persisted entries without rebuilding already rendered rows. */
 	append(entries: SessionMessageEntry[]): void {
-		for (const entry of entries) this.#appendChatMessage(entry.message);
+		for (const entry of entries) this.#appendEntry(entry);
 		if (this.#readArgs.size === 0 && this.#pendingTools.size === 0) this.#flushPendingUsage();
 	}
 
@@ -132,6 +136,15 @@ export class ChatTranscriptBuilder {
 		return this.#expanded;
 	}
 
+	/** Rendered row where a persisted entry begins, after the container has painted once. */
+	rowForEntry(entryId: string): number | undefined {
+		for (const component of this.#entryComponents.get(entryId) ?? []) {
+			const row = this.container.getChildStartRow(component);
+			if (row !== undefined) return row;
+		}
+		return undefined;
+	}
+
 	/** Tear down components (sealing pending spinners) and clear build state. */
 	reset(): void {
 		for (const pending of this.#pendingTools.values()) pending.seal();
@@ -143,16 +156,26 @@ export class ChatTranscriptBuilder {
 		this.#pendingUsageTtft = undefined;
 		this.#pendingUsageTimestamp = undefined;
 		this.#pendingReadUsageCallIds = undefined;
+		this.#pendingUsageElapsedMs = undefined;
+		this.#turnStartedAt = undefined;
 		this.#lastAssistantUsage = undefined;
 		this.#waitingPoll = null;
 		this.#todoSnapshot = null;
 		this.#expandables = [];
+		this.#entryComponents.clear();
 		this.container.dispose();
 		this.container.clear();
 	}
 
 	dispose(): void {
 		this.reset();
+	}
+
+	#appendEntry(entry: SessionMessageEntry): void {
+		const before = this.container.children.length;
+		this.#appendChatMessage(entry.message);
+		const components = this.container.children.slice(before);
+		if (components.length > 0) this.#entryComponents.set(entry.id, components);
 	}
 
 	#trackExpandable(component: { setExpanded(expanded: boolean): void }): void {
@@ -215,6 +238,7 @@ export class ChatTranscriptBuilder {
 				this.#pendingUsageDuration,
 				this.#pendingUsageTtft,
 				this.#pendingUsageTimestamp,
+				this.#pendingUsageElapsedMs,
 			) ??
 				false);
 		if (!usageAttached) {
@@ -226,6 +250,7 @@ export class ChatTranscriptBuilder {
 					this.#pendingUsageDuration,
 					this.#pendingUsageTtft,
 					this.#pendingUsageTimestamp,
+					this.#pendingUsageElapsedMs,
 				),
 			);
 		}
@@ -234,6 +259,7 @@ export class ChatTranscriptBuilder {
 		this.#pendingUsageTtft = undefined;
 		this.#pendingUsageTimestamp = undefined;
 		this.#pendingReadUsageCallIds = undefined;
+		this.#pendingUsageElapsedMs = undefined;
 	}
 
 	#appendChatMessage(message: AgentMessage): void {
@@ -251,6 +277,22 @@ export class ChatTranscriptBuilder {
 				break;
 			case "user":
 			case "developer": {
+				// Only genuinely user-attributed prompts anchor the delta; a mid-run
+				// agent-attributed `user` message (advisor tool-loop redirect) must not.
+				if (message.role === "user" && message.attribution !== "agent") {
+					this.#turnStartedAt = message.timestamp;
+				} else if (message.role === "developer" && message.synthetic) {
+					// A synthetic developer message initiates a fresh run (auto-
+					// continue, /goal, approved plan): replay must not inherit the
+					// preceding user prompt's timestamp, mirroring the live
+					// agent_start clear. Same-turn continuation reminders (todo, plan)
+					// are persisted developer messages WITHOUT the synthetic marker,
+					// so their anchor survives the rebuild.
+					// A deliberate operator action (`.`, `c` continue shortcut) is the turn's
+					// own prompt: anchor the delta to it instead of clearing.
+					if (message.userInitiated) this.#turnStartedAt = message.timestamp;
+					else this.#turnStartedAt = undefined;
+				}
 				// A user prompt closes the poll-displacement window, same as the live path.
 				if (message.role === "user") this.#resolveWaitingPoll();
 				if (message.role === "user") this.#resolveTodoSnapshot();
@@ -288,6 +330,12 @@ export class ChatTranscriptBuilder {
 			}
 			case "hookMessage":
 			case "custom":
+				// A directly-invoked `/skill:` custom prompt is the run's initiator
+				// (user attribution), so it seeds the prompt→yield delta like a user
+				// message does.
+				if (message.role === "custom" && isUserTurnInitiator(message as CustomMessage)) {
+					this.#turnStartedAt = message.timestamp;
+				}
 				this.#appendCustomMessage(message);
 				break;
 			case "compactionSummary": {
@@ -312,6 +360,11 @@ export class ChatTranscriptBuilder {
 			default:
 				message satisfies never;
 		}
+	}
+
+	/** Prompt→yield wall time for the current turn, or undefined when unknown. */
+	#turnElapsedMs(message: Extract<AgentMessage, { role: "assistant" }>): number | undefined {
+		return turnElapsedMs(this.#turnStartedAt, message);
 	}
 
 	#appendAssistantMessage(message: Extract<AgentMessage, { role: "assistant" }>): void {
@@ -430,6 +483,8 @@ export class ChatTranscriptBuilder {
 		this.#pendingUsageTtft = message.ttft;
 		this.#pendingUsageTimestamp = message.timestamp;
 		this.#pendingReadUsageCallIds = this.#pendingUsage ? groupedReadUsageCallIds(message) : undefined;
+		this.#pendingUsageElapsedMs =
+			this.#pendingUsage && settings.get("display.showTurnTime") ? this.#turnElapsedMs(message) : undefined;
 	}
 
 	#appendToolResult(message: Extract<AgentMessage, { role: "toolResult" }>): void {

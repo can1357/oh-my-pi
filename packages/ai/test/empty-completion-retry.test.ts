@@ -1,13 +1,11 @@
 /**
- * Contracts for `withEmptyCompletionRetry` (shared by the OpenAI-completions and
- * Anthropic-messages providers): a benign terminal stop with no content/usage is
- * retried a bounded number of times; once any content streams the attempt is
- * committed (no retry, no duplicate `start`); the cap delivers the empty result;
- * backoff failures surface unless the caller aborted.
+ * Contracts for replay-safe provider retries: empty and transient pre-output
+ * attempts are bounded and discarded, while emitted content commits an attempt
+ * so output is never duplicated.
  */
 import { describe, expect, it } from "bun:test";
 import type { AssistantMessage, AssistantMessageEvent, Context, Usage } from "@oh-my-pi/pi-ai/types";
-import { MAX_EMPTY_COMPLETION_RETRIES, withEmptyCompletionRetry } from "@oh-my-pi/pi-ai/utils/empty-completion-retry";
+import { MAX_EMPTY_COMPLETION_RETRIES, withReplaySafeStreamRetry } from "@oh-my-pi/pi-ai/utils/empty-completion-retry";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 
 const CTX = {} as Context;
@@ -79,14 +77,20 @@ async function drain(stream: AssistantMessageEventStream): Promise<AssistantMess
 	return events;
 }
 
-describe("withEmptyCompletionRetry", () => {
+describe("withReplaySafeStreamRetry", () => {
 	it("retries past empty attempts and delivers the first non-empty one", async () => {
 		let attempts = 0;
 		const waits: number[] = [];
-		const stream = withEmptyCompletionRetry({}, CTX, { providerRetryWait: async ms => void waits.push(ms) }, () => {
-			attempts++;
-			return attempts <= MAX_EMPTY_COMPLETION_RETRIES ? emptyAttempt() : contentAttempt();
-		});
+		const stream = withReplaySafeStreamRetry(
+			{},
+			CTX,
+			{ providerRetryWait: async ms => void waits.push(ms) },
+			() => {
+				attempts++;
+				return attempts <= MAX_EMPTY_COMPLETION_RETRIES ? emptyAttempt() : contentAttempt();
+			},
+			{ retryEmptyCompletion: true },
+		);
 
 		const events = await drain(stream);
 		const result = await stream.result();
@@ -103,10 +107,16 @@ describe("withEmptyCompletionRetry", () => {
 	it("retries an EOS-only empty stop that reports one output token", async () => {
 		let attempts = 0;
 		const waits: number[] = [];
-		const stream = withEmptyCompletionRetry({}, CTX, { providerRetryWait: async ms => void waits.push(ms) }, () => {
-			attempts++;
-			return attempts === 1 ? eosOnlyAttempt() : contentAttempt();
-		});
+		const stream = withReplaySafeStreamRetry(
+			{},
+			CTX,
+			{ providerRetryWait: async ms => void waits.push(ms) },
+			() => {
+				attempts++;
+				return attempts === 1 ? eosOnlyAttempt() : contentAttempt();
+			},
+			{ retryEmptyCompletion: true },
+		);
 
 		const events = await drain(stream);
 		const result = await stream.result();
@@ -120,10 +130,16 @@ describe("withEmptyCompletionRetry", () => {
 	it("delivers the empty result after exhausting the retry cap", async () => {
 		let attempts = 0;
 		const waits: number[] = [];
-		const stream = withEmptyCompletionRetry({}, CTX, { providerRetryWait: async ms => void waits.push(ms) }, () => {
-			attempts++;
-			return emptyAttempt();
-		});
+		const stream = withReplaySafeStreamRetry(
+			{},
+			CTX,
+			{ providerRetryWait: async ms => void waits.push(ms) },
+			() => {
+				attempts++;
+				return emptyAttempt();
+			},
+			{ retryEmptyCompletion: true },
+		);
 
 		const events = await drain(stream);
 		const result = await stream.result();
@@ -138,15 +154,21 @@ describe("withEmptyCompletionRetry", () => {
 	it("does not retry an empty pause_turn completion", async () => {
 		let attempts = 0;
 		const waits: number[] = [];
-		const stream = withEmptyCompletionRetry({}, CTX, { providerRetryWait: async ms => void waits.push(ms) }, () => {
-			attempts++;
-			const message = assistant();
-			message.stopDetails = { type: "pause_turn" };
-			return streamFromEvents([
-				{ type: "start", partial: message },
-				{ type: "done", reason: "stop", message },
-			] as unknown as AssistantMessageEvent[]);
-		});
+		const stream = withReplaySafeStreamRetry(
+			{},
+			CTX,
+			{ providerRetryWait: async ms => void waits.push(ms) },
+			() => {
+				attempts++;
+				const message = assistant();
+				message.stopDetails = { type: "pause_turn" };
+				return streamFromEvents([
+					{ type: "start", partial: message },
+					{ type: "done", reason: "stop", message },
+				] as unknown as AssistantMessageEvent[]);
+			},
+			{ retryEmptyCompletion: true },
+		);
 
 		const events = await drain(stream);
 		const result = await stream.result();
@@ -160,7 +182,7 @@ describe("withEmptyCompletionRetry", () => {
 	it("does not retry when the first attempt streams content", async () => {
 		let attempts = 0;
 		let waited = false;
-		const stream = withEmptyCompletionRetry(
+		const stream = withReplaySafeStreamRetry(
 			{},
 			CTX,
 			{
@@ -172,6 +194,7 @@ describe("withEmptyCompletionRetry", () => {
 				attempts++;
 				return contentAttempt();
 			},
+			{ retryEmptyCompletion: true },
 		);
 
 		await drain(stream);
@@ -182,15 +205,21 @@ describe("withEmptyCompletionRetry", () => {
 
 	it("commits on streamed thinking and does not retry a thinking-only stop", async () => {
 		let attempts = 0;
-		const stream = withEmptyCompletionRetry({}, CTX, {}, () => {
-			attempts++;
-			const message = assistant(); // no visible content; only thinking streams
-			return streamFromEvents([
-				{ type: "start", partial: message },
-				{ type: "thinking_delta", contentIndex: 0, delta: "pondering", partial: message },
-				{ type: "done", reason: "stop", message },
-			] as unknown as AssistantMessageEvent[]);
-		});
+		const stream = withReplaySafeStreamRetry(
+			{},
+			CTX,
+			{},
+			() => {
+				attempts++;
+				const message = assistant(); // no visible content; only thinking streams
+				return streamFromEvents([
+					{ type: "start", partial: message },
+					{ type: "thinking_delta", contentIndex: 0, delta: "pondering", partial: message },
+					{ type: "done", reason: "stop", message },
+				] as unknown as AssistantMessageEvent[]);
+			},
+			{ retryEmptyCompletion: true },
+		);
 
 		const events = await drain(stream);
 
@@ -199,7 +228,7 @@ describe("withEmptyCompletionRetry", () => {
 	});
 
 	it("propagates a non-abort backoff failure instead of masking the empty result", async () => {
-		const stream = withEmptyCompletionRetry(
+		const stream = withReplaySafeStreamRetry(
 			{},
 			CTX,
 			{
@@ -208,6 +237,7 @@ describe("withEmptyCompletionRetry", () => {
 				},
 			},
 			() => emptyAttempt(),
+			{ retryEmptyCompletion: true },
 		);
 
 		let caught: unknown;
@@ -222,7 +252,7 @@ describe("withEmptyCompletionRetry", () => {
 	it("delivers the empty result when aborted during backoff", async () => {
 		const controller = new AbortController();
 		let attempts = 0;
-		const stream = withEmptyCompletionRetry(
+		const stream = withReplaySafeStreamRetry(
 			{},
 			CTX,
 			{
@@ -236,6 +266,7 @@ describe("withEmptyCompletionRetry", () => {
 				attempts++;
 				return emptyAttempt();
 			},
+			{ retryEmptyCompletion: true },
 		);
 
 		const events = await drain(stream);
@@ -248,18 +279,24 @@ describe("withEmptyCompletionRetry", () => {
 
 	it("discards buffered pre-content markers from a retried empty attempt", async () => {
 		let attempts = 0;
-		const stream = withEmptyCompletionRetry({}, CTX, { providerRetryWait: async () => {} }, () => {
-			attempts++;
-			if (attempts === 1) {
-				const message = assistant();
-				return streamFromEvents([
-					{ type: "start", partial: message },
-					{ type: "thinking_start", contentIndex: 0, partial: message },
-					{ type: "done", reason: "stop", message },
-				] as unknown as AssistantMessageEvent[]);
-			}
-			return contentAttempt();
-		});
+		const stream = withReplaySafeStreamRetry(
+			{},
+			CTX,
+			{ providerRetryWait: async () => {} },
+			() => {
+				attempts++;
+				if (attempts === 1) {
+					const message = assistant();
+					return streamFromEvents([
+						{ type: "start", partial: message },
+						{ type: "thinking_start", contentIndex: 0, partial: message },
+						{ type: "done", reason: "stop", message },
+					] as unknown as AssistantMessageEvent[]);
+				}
+				return contentAttempt();
+			},
+			{ retryEmptyCompletion: true },
+		);
 
 		const events = await drain(stream);
 
@@ -275,7 +312,7 @@ describe("withEmptyCompletionRetry", () => {
 		let waited = false;
 		const message = assistant(["streamed"]);
 		const inner = new AssistantMessageEventStream();
-		const stream = withEmptyCompletionRetry(
+		const stream = withReplaySafeStreamRetry(
 			{},
 			CTX,
 			{
@@ -284,6 +321,7 @@ describe("withEmptyCompletionRetry", () => {
 				},
 			},
 			() => inner,
+			{ retryEmptyCompletion: true },
 		);
 
 		const iterator = stream[Symbol.asyncIterator]();
@@ -304,5 +342,78 @@ describe("withEmptyCompletionRetry", () => {
 		inner.push({ type: "done", reason: "stop", message } as unknown as AssistantMessageEvent);
 		expect((await iterator.next()).value?.type).toBe("done");
 		expect(waited).toBe(false);
+	});
+
+	it("retries a transient provider error before output commits", async () => {
+		let attempts = 0;
+		const stream = withReplaySafeStreamRetry(
+			{},
+			CTX,
+			{ providerRetryWait: async () => {} },
+			() => {
+				attempts++;
+				if (attempts > 1) return contentAttempt();
+				const message = assistant();
+				message.stopReason = "error";
+				message.errorMessage = "The socket connection was closed unexpectedly";
+				return streamFromEvents([
+					{ type: "start", partial: message },
+					{ type: "error", reason: "error", error: message },
+				]);
+			},
+			{ retryProviderErrors: true, maxProviderErrorRetries: 1 },
+		);
+
+		const events = await drain(stream);
+		const result = await stream.result();
+
+		expect(attempts).toBe(2);
+		expect(events.filter(event => event.type === "start")).toHaveLength(1);
+		expect(result.content).toEqual([{ type: "text", text: "hello" }]);
+	});
+
+	it("does not retry a transient provider error after output commits", async () => {
+		let attempts = 0;
+		const message = assistant(["partial"]);
+		message.stopReason = "error";
+		message.errorMessage = "The socket connection was closed unexpectedly";
+		const stream = withReplaySafeStreamRetry(
+			{},
+			CTX,
+			{ providerRetryWait: async () => {} },
+			() => {
+				attempts++;
+				return streamFromEvents([
+					{ type: "start", partial: message },
+					{ type: "text_start", contentIndex: 0, partial: message },
+					{ type: "text_delta", contentIndex: 0, delta: "partial", partial: message },
+					{ type: "error", reason: "error", error: message },
+				]);
+			},
+			{ retryProviderErrors: true, maxProviderErrorRetries: 1 },
+		);
+
+		const events = await drain(stream);
+		const result = await stream.result();
+
+		expect(attempts).toBe(1);
+		expect(events.at(-1)?.type).toBe("error");
+		expect(result.stopReason).toBe("error");
+		expect(result.content).toEqual([{ type: "text", text: "partial" }]);
+	});
+
+	it("settles the outer stream when the attempt factory throws synchronously", async () => {
+		const configError = new Error("explicit prompt caching is unsupported");
+		const stream = withReplaySafeStreamRetry(
+			{},
+			CTX,
+			{ providerRetryWait: async () => {} },
+			() => {
+				throw configError;
+			},
+			{ retryProviderErrors: true, maxProviderErrorRetries: 1 },
+		);
+
+		await expect(stream.result()).rejects.toBe(configError);
 	});
 });

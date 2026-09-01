@@ -43,7 +43,7 @@ function readVarint(bytes: Uint8Array, offset: number): [number, number] {
 
 function protobufFields(bytes: Uint8Array): ProtobufField[] {
 	const fields: ProtobufField[] = [];
-	for (let offset = 0; offset < bytes.length; ) {
+	for (let offset = 0; offset < bytes.length;) {
 		const [tag, nextOffset] = readVarint(bytes, offset);
 		offset = nextOffset;
 		const wireType = tag & 7;

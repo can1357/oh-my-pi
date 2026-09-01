@@ -1,0 +1,17 @@
+class "anthropic" {
+	namespace "anthropic" bounded=#true
+	bounded "anthropic"
+	bounded "claude"
+
+	family "opus" glob="*opus*"
+	family "sonnet" glob="*sonnet*"
+	family "haiku" glob="*haiku*"
+	family "fable" glob="*fable*"
+	family "mythos" glob="*mythos*"
+
+	revision prefix="claude-" anywhere=#true
+
+	override id="nanogpt-gemma-claude-opus-distill-family" provider="nanogpt" model="Gemma-4-31B-Claude-4.6-Opus-Reasoning-Distilled" logical="Gemma-4-31B-Claude-4.6-Opus-Reasoning-Distilled" class="anthropic" family="opus" rationale="The reviewed distillation lineage follows its Claude Opus teacher rather than the student architecture" provenance="fixtures/llm-oracle/catalog/models.normalized.json"
+	override id="nanogpt-qwen-claude-opus-distill-family" provider="nanogpt" model="Qwen3.5-27B-Claude-4.6-Opus-Reasoning-Distilled-Derestricted" logical="Qwen3.5-27B-Claude-4.6-Opus-Reasoning-Distilled-Derestricted" class="anthropic" family="opus" rationale="The reviewed distillation lineage follows its Claude Opus teacher rather than the student architecture" provenance="fixtures/llm-oracle/catalog/models.normalized.json"
+	override id="nanogpt-qwen-claude-opus-distill-lite-family" provider="nanogpt" model="Qwen3.5-27B-Claude-4.6-Opus-Reasoning-Distilled-Derestricted-Lite" logical="Qwen3.5-27B-Claude-4.6-Opus-Reasoning-Distilled-Derestricted-Lite" class="anthropic" family="opus" rationale="The reviewed lite distillation lineage follows its Claude Opus teacher rather than the student architecture" provenance="fixtures/llm-oracle/catalog/models.normalized.json"
+}

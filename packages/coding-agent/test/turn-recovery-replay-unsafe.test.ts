@@ -60,7 +60,7 @@ function createHost(
 		}
 	}
 	return {
-		agent: (options.messages ? { state: { messages: options.messages } } : undefined) as never,
+		agent: { state: { messages: options.messages ?? [] } } as never,
 		sessionManager: {
 			getLastModelChangeRole: () => options.lastModelChangeRole,
 		} as never,
@@ -267,6 +267,23 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 	it("treats a failed turn with partial non-whitespace text as NOT retriable", () => {
 		const recovery = new TurnRecovery(createHost(model, modelRegistry));
 		const message = makeMessage([{ type: "text", text: "Here is the first part of my answer" }], model);
+		expect(recovery.isRetryableError(message)).toBe(false);
+	});
+
+	it("does not replay a long OpenCode Go usage limit after committed text", () => {
+		const openCodeModel = getBundledModel("opencode-go", "deepseek-v4-flash");
+		if (!openCodeModel) throw new Error("Expected bundled OpenCode Go model");
+		const recovery = new TurnRecovery(
+			createHost(openCodeModel, modelRegistry, {
+				fallbackChains: {
+					[`${openCodeModel.provider}/${openCodeModel.id}`]: ["openai/gpt-4o-mini"],
+				},
+			}),
+		);
+		const message = {
+			...makeMessage([{ type: "text", text: "Already shown to the user" }], openCodeModel),
+			errorMessage: "429 Weekly usage limit reached. type=GoUsageLimitError retry-after-ms=3242000",
+		} as AssistantMessage;
 		expect(recovery.isRetryableError(message)).toBe(false);
 	});
 
@@ -584,9 +601,84 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 			expect(recoveryFor(message, [syntheticResult("call-1")]).isRetryableError(message)).toBe(false);
 		});
 
-		it("keeps a non-refusal error with an unexecuted tool call non-retriable", () => {
+		it("retries a transport error with a provably unexecuted tool call", () => {
 			const message = makeMessage([toolCall("call-1")], model);
-			expect(recoveryFor(message, [syntheticResult("call-1")]).isRetryableError(message)).toBe(false);
+			expect(recoveryFor(message, [syntheticResult("call-1")]).isRetryableError(message)).toBe(true);
+		});
+	});
+
+	// A provider transport error (e.g. `The socket connection was closed
+	// unexpectedly` after the model emitted a complete tool call) ends the turn
+	// with `stopReason: "error"`; the agent loop pairs every emitted-but-unrun
+	// call with a synthetic `executed: false` result. With positive proof that
+	// none of them ran, the turn is replay-safe the same way a post-call
+	// classifier refusal is, so the configured retry/fallback policy gets its
+	// chance instead of surfacing the socket error as terminal.
+	describe("transport error with emitted tool calls", () => {
+		const socketClose =
+			"The socket connection was closed unexpectedly. For more information, pass `verbose: true` in the second argument to fetch()";
+
+		function transportError(content: AssistantMessage["content"]): AssistantMessage {
+			const message = makeMessage(content, model);
+			message.errorMessage = socketClose;
+			return message;
+		}
+
+		function toolCall(id: string): AssistantMessage["content"][number] {
+			return { type: "toolCall", id, name: "bash", arguments: { command: "ssh host" } };
+		}
+
+		function syntheticResult(toolCallId: string): ToolResultMessage<SyntheticToolResultDetails> {
+			return {
+				role: "toolResult",
+				toolCallId,
+				toolName: "bash",
+				content: [{ type: "text", text: "Tool call was not executed." }],
+				isError: true,
+				details: { __synthetic: true, source: "assistant_stop_error", executed: false },
+				timestamp: Date.now(),
+			};
+		}
+
+		function realResult(toolCallId: string): ToolResultMessage {
+			return {
+				role: "toolResult",
+				toolCallId,
+				toolName: "bash",
+				content: [{ type: "text", text: "ok" }],
+				isError: false,
+				timestamp: Date.now(),
+			};
+		}
+
+		function recoveryForTransport(message: AssistantMessage, tail: readonly AgentMessage[]): TurnRecovery {
+			return new TurnRecovery(createHost(model, modelRegistry, { messages: [message as AgentMessage, ...tail] }));
+		}
+
+		it("retries when the only tool call provably never executed", () => {
+			const message = transportError([toolCall("call-1")]);
+			expect(recoveryForTransport(message, [syntheticResult("call-1")]).isRetryableError(message)).toBe(true);
+		});
+
+		it("does not retry when the tool call produced a real result", () => {
+			const message = transportError([toolCall("call-1")]);
+			expect(recoveryForTransport(message, [realResult("call-1")]).isRetryableError(message)).toBe(false);
+		});
+
+		it("does not retry when only some tool calls went unexecuted", () => {
+			const message = transportError([toolCall("call-1"), toolCall("call-2")]);
+			const recovery = recoveryForTransport(message, [realResult("call-1"), syntheticResult("call-2")]);
+			expect(recovery.isRetryableError(message)).toBe(false);
+		});
+
+		it("does not retry when the turn also committed visible text", () => {
+			const message = transportError([{ type: "text", text: "Connecting..." }, toolCall("call-1")]);
+			expect(recoveryForTransport(message, [syntheticResult("call-1")]).isRetryableError(message)).toBe(false);
+		});
+
+		it("does not retry when the tool call has no result at all", () => {
+			const message = transportError([toolCall("call-1")]);
+			expect(recoveryForTransport(message, []).isRetryableError(message)).toBe(false);
 		});
 	});
 

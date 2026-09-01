@@ -1,15 +1,20 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import { Agent } from "@oh-my-pi/pi-agent-core";
+import { createMockModel, type MockHandler } from "@oh-my-pi/pi-ai/providers/mock";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { SettingPath } from "@oh-my-pi/pi-coding-agent/config/settings-schema";
 import { IrcBus, type IrcMessage } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import type { CustomMessage } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { type CoordinationDetails, HubTool, isIrcEnabled } from "@oh-my-pi/pi-coding-agent/tools/hub";
+import { TempDir } from "@oh-my-pi/pi-utils";
 
 interface FakeSession {
 	session: AgentSession;
@@ -23,16 +28,24 @@ interface FakeSession {
 	setError: (error: Error) => void;
 	/** Side effect run on delivery (e.g. reply via the bus). */
 	onDeliver: (fn: (msg: IrcMessage) => void) => void;
+	/** Emit a terminal `agent_end` to the session's subscribers. */
+	endTurn: (options?: { isTerminal?: boolean }) => void;
 }
 
 function makeFakeSession(): FakeSession {
 	let outcome: "injected" | "woken" = "injected";
 	let nextError: Error | null = null;
 	let deliverHook: ((msg: IrcMessage) => void) | undefined;
+	const listeners = new Set<(event: AgentSessionEvent) => void>();
 	const delivered: IrcMessage[] = [];
 	const relayed: CustomMessage[] = [];
 	const session = {
 		isStreaming: true,
+		subscribe: (listener: (event: AgentSessionEvent) => void) => {
+			listeners.add(listener);
+			return () => listeners.delete(listener);
+		},
+		waitForIrcAutoReplies: async () => {},
 		deliverIrcMessage: async (msg: IrcMessage) => {
 			if (nextError) {
 				const err = nextError;
@@ -59,6 +72,15 @@ function makeFakeSession(): FakeSession {
 		},
 		onDeliver: fn => {
 			deliverHook = fn;
+		},
+		endTurn: options => {
+			const event = {
+				type: "agent_end",
+				messages: [],
+				isTerminal: options?.isTerminal ?? true,
+			} as unknown as AgentSessionEvent;
+			// oxlint-disable-next-line unicorn/no-useless-spread -- listeners may change during dispatch
+			for (const listener of [...listeners]) listener(event);
 		},
 	};
 }
@@ -95,11 +117,51 @@ function createRealSession(overrides: Partial<Record<SettingPath, unknown>> = {}
 	return { session, sessionManager };
 }
 
+/** A real `AgentSession` driven by a mock model, so a prompt runs a genuine
+ *  turn and emits the real terminal `agent_end` after prompt unwind. */
+function createStreamingSession(
+	modelRegistry: ModelRegistry,
+	responses: MockHandler[],
+	options?: { tools?: HubTool[]; settings?: Partial<Record<SettingPath, unknown>> },
+): { session: AgentSession } {
+	const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+	if (!model) throw new Error("Expected bundled anthropic model to exist");
+	const mock = createMockModel({ responses });
+	const session = new AgentSession({
+		agent: new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["system prompt"], tools: options?.tools ?? [], messages: [] },
+			streamFn: mock.stream,
+		}),
+		sessionManager: SessionManager.inMemory("/tmp"),
+		settings: Settings.isolated({
+			"compaction.enabled": false,
+			"retry.enabled": false,
+			...options?.settings,
+		}),
+		modelRegistry,
+	});
+	return { session };
+}
+
 describe("IRC", () => {
 	let registry: AgentRegistry;
 	let bus: IrcBus;
 
 	const sessions: AgentSession[] = [];
+	let authDir: TempDir;
+	let authStorage: AuthStorage;
+	let modelRegistry: ModelRegistry;
+	beforeAll(async () => {
+		authDir = TempDir.createSync("@pi-irc-auth-");
+		authStorage = await AuthStorage.create(authDir.join("auth.db"));
+		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		modelRegistry = new ModelRegistry(authStorage, authDir.join("models.yml"));
+	});
+	afterAll(() => {
+		authStorage.close();
+		authDir.removeSync();
+	});
 	beforeEach(() => {
 		AgentRegistry.resetGlobalForTests();
 		AgentLifecycleManager.resetGlobalForTests();
@@ -621,7 +683,7 @@ describe("IRC", () => {
 			expect(tool.interruptible({ op: "send", await: true })).toBe(false);
 		});
 
-		it("op=list includes parked peers, unread counts, and parent ids", async () => {
+		it("op=list defaults to live peers and reports parked counts without parked names", async () => {
 			const sub = makeFakeSession();
 			registry.register({
 				id: "0-AuthLoader",
@@ -642,10 +704,18 @@ describe("IRC", () => {
 			expect(details?.op).toBe("list");
 			expect(details?.peers).toMatchObject([
 				{ id: "0-AuthLoader", status: "running", parentId: "0-Main", unread: 1 },
-				{ id: "0-Parked", status: "parked", unread: 0 },
 			]);
+			expect(details?.peers?.some(peer => peer.id === "0-Parked")).toBe(false);
+			expect(details?.counts).toEqual({
+				running: 1,
+				idle: 0,
+				parked: 1,
+				shown: 1,
+				truncated: 0,
+			});
 			const text = result.content[0]?.type === "text" ? result.content[0].text : "";
-			expect(text).toContain("Parked agents are revived automatically");
+			expect(text).toContain('status="parked"');
+			expect(text).not.toContain("0-Parked");
 		});
 
 		it("op=list hides advisor-kind refs from the peer roster", async () => {
@@ -806,6 +876,200 @@ describe("IRC", () => {
 			const text = result.content[0]?.type === "text" ? result.content[0].text : "";
 			expect(text).toContain("Send delivered");
 			expect(text).toContain("interrupted");
+		});
+
+		it("op=send await=true settles when the recipient stops without replying", async () => {
+			const main = makeFakeSession();
+			registry.register({ id: "0-Main", displayName: "main", kind: "main", session: main.session });
+			const sub = makeFakeSession();
+			registry.register({ id: "0-Sub", displayName: "task", kind: "sub", session: sub.session, status: "running" });
+			sub.onDeliver(() => {
+				// The recipient consumes the aside and ends its turn WITHOUT replying.
+				// It stays `isStreaming === true` throughout: the terminal `agent_end`
+				// (emitted post-unwind, while the registry still reads the peer as
+				// running) is the only stop signal — a fix that watched `isStreaming`
+				// flipping false would miss it and block the full timeout.
+				sub.endTurn();
+			});
+
+			const tool = new HubTool(makeToolSession(registry, "0-Main"));
+			// A 120s timeout would strand the sender if the stop were not observed;
+			// the exit monitor must settle it long before the default bun timeout.
+			const result = await tool.execute("call-1", {
+				op: "send",
+				to: "0-Sub",
+				message: "ping",
+				await: true,
+				timeoutMs: 120_000,
+			});
+
+			expect(result.isError).toBeFalsy();
+			const details = result.details as CoordinationDetails | undefined;
+			expect(details?.waited ?? null).toBeNull();
+			const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+			expect(text).toContain("0-Sub stopped without replying");
+		});
+
+		it("op=send await=true ignores a non-terminal (continuation) agent_end", async () => {
+			const main = makeFakeSession();
+			registry.register({ id: "0-Main", displayName: "main", kind: "main", session: main.session });
+			const sub = makeFakeSession();
+			registry.register({ id: "0-Sub", displayName: "task", kind: "sub", session: sub.session, status: "running" });
+			sub.onDeliver(() => {
+				// A mid-run continuation (auto-compaction / retry) emits a
+				// non-terminal agent_end; it must NOT settle the await early.
+				sub.endTurn({ isTerminal: false });
+				// The recipient then replies on the resumed turn.
+				void bus.send({ from: "0-Sub", to: "0-Main", body: "resumed reply" });
+			});
+
+			const tool = new HubTool(makeToolSession(registry, "0-Main"));
+			const result = await tool.execute("call-1", {
+				op: "send",
+				to: "0-Sub",
+				message: "ping",
+				await: true,
+				timeoutMs: 120_000,
+			});
+
+			const details = result.details as CoordinationDetails | undefined;
+			expect(details?.waited?.body).toBe("resumed reply");
+		});
+
+		it("await monitor aborts on a real AgentSession's terminal agent_end", async () => {
+			// End-to-end against a real session: it runs a genuine turn and emits its
+			// terminal `agent_end` only after the prompt unwinds. This pins the exact
+			// ordering the monitor relies on — the registry still reports the peer as
+			// running at the (deferred) idle transition, so keying on `isStreaming`
+			// flipping would strand the sender for the full timeout.
+			const { session: subSession } = createStreamingSession(modelRegistry, [{ content: ["done, not replying"] }]);
+			sessions.push(subSession);
+			registry.register({ id: "0-Main", displayName: "main", kind: "main", session: makeFakeSession().session });
+			registry.register({ id: "0-Sub", displayName: "task", kind: "sub", session: subSession, status: "running" });
+			const unsync = registry.syncSessionStatus("0-Sub", subSession);
+			try {
+				const waitP = bus.wait("0-Main", { from: "0-Sub" }, 120_000, undefined, {
+					drainPending: false,
+					awaitTarget: { registry, target: "0-Sub" },
+				});
+				await subSession.prompt("work");
+				await subSession.waitForIdle();
+				expect(subSession.isStreaming).toBe(false);
+				await expect(waitP).rejects.toThrow(/stopped without replying/);
+			} finally {
+				unsync();
+			}
+		});
+
+		it("op=send await=true waits for an in-flight side-channel auto-reply", async () => {
+			const streamStarted = Promise.withResolvers<void>();
+			const autoReplyStarted = Promise.withResolvers<void>();
+			const releaseAutoReply = Promise.withResolvers<void>();
+			const { session: subSession } = createStreamingSession(
+				modelRegistry,
+				[
+					() => {
+						streamStarted.resolve();
+						return { content: ["working"], delayMs: 1_000 };
+					},
+				],
+				{ settings: { "async.enabled": false } },
+			);
+			sessions.push(subSession);
+			registry.register({ id: "0-Main", displayName: "main", kind: "main", session: makeFakeSession().session });
+			registry.register({ id: "0-Sub", displayName: "task", kind: "sub", session: subSession, status: "running" });
+			const unsync = registry.syncSessionStatus("0-Sub", subSession);
+			vi.spyOn(subSession, "runEphemeralTurn").mockImplementation(async () => {
+				autoReplyStarted.resolve();
+				await releaseAutoReply.promise;
+				return { replyText: "delayed auto answer", assistantMessage: {} as never };
+			});
+			try {
+				const running = subSession.prompt("work");
+				await streamStarted.promise;
+				const mainHub = new HubTool(makeToolSession(registry, "0-Main"));
+				const resultP = mainHub.execute("call-1", {
+					op: "send",
+					to: "0-Sub",
+					message: "answer on the side channel",
+					await: true,
+					timeoutMs: 5_000,
+				});
+				let settled = false;
+				void resultP.then(() => {
+					settled = true;
+				});
+				await autoReplyStarted.promise;
+				// Model the main turn consuming the incoming aside before it ends:
+				// no bridge queue or wake turn remains to keep agent_end
+				// non-terminal; only the separate side request is still alive.
+				expect(subSession.drainPendingIrcInboxMessages("0-Sub")).toHaveLength(1);
+				await running;
+				await subSession.waitForIdle();
+				await Promise.resolve();
+				expect(settled).toBe(false);
+
+				releaseAutoReply.resolve();
+				const result = await resultP;
+				const details = result.details as CoordinationDetails | undefined;
+				expect(details?.waited?.body).toBe("delayed auto answer");
+			} finally {
+				releaseAutoReply.resolve();
+				unsync();
+			}
+		});
+
+		it("await target waits through an IRC wake scheduled after terminal settle", async () => {
+			const subHub = new HubTool(makeToolSession(registry, "0-Sub"));
+			const { session: subSession } = createStreamingSession(
+				modelRegistry,
+				[
+					{ content: ["working"] },
+					{
+						content: [
+							{
+								type: "toolCall",
+								id: "tail-reply",
+								name: "hub",
+								arguments: { op: "send", to: "0-Main", message: "reply from the IRC wake" },
+							},
+						],
+					},
+					{ content: ["wake complete"] },
+				],
+				{ tools: [subHub] },
+			);
+			sessions.push(subSession);
+			registry.register({ id: "0-Main", displayName: "main", kind: "main", session: makeFakeSession().session });
+			registry.register({ id: "0-Sub", displayName: "task", kind: "sub", session: subSession, status: "running" });
+			const unsync = registry.syncSessionStatus("0-Sub", subSession);
+			let sentAtTail = false;
+			const unsubscribe = subSession.subscribe(event => {
+				if (sentAtTail || event.type !== "message_end" || event.message.role !== "assistant") return;
+				sentAtTail = true;
+				// Session listeners receive the final assistant message after the
+				// loop's last aside poll but before the deferred terminal
+				// `agent_end`. Delivering here strands the record until the settle
+				// drain schedules its IRC wake turn.
+				void bus.send(
+					{ from: "0-Main", to: "0-Sub", body: "reply after your current turn" },
+					{ expectsReply: true },
+				);
+			});
+			try {
+				const waitP = bus.wait("0-Main", { from: "0-Sub" }, 5_000, undefined, {
+					drainPending: false,
+					awaitTarget: { registry, target: "0-Sub" },
+				});
+				await subSession.prompt("work");
+				const reply = await waitP;
+
+				expect(sentAtTail).toBe(true);
+				expect(reply?.body).toBe("reply from the IRC wake");
+			} finally {
+				unsubscribe();
+				unsync();
+			}
 		});
 
 		it("op=send rejects await with to=all and self-sends", async () => {

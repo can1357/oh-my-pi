@@ -8,6 +8,7 @@
  * - re-exported `SqliteAuthCredentialStore`: concrete SQLite-backed implementation
  */
 import { createHash } from "node:crypto";
+import { planRequirementFor } from "@oh-my-pi/pi-catalog/compat/behavior";
 import { $env, $envExact, extractRetryHint, getAgentDbPath, logger } from "@oh-my-pi/pi-utils";
 import {
 	isSqliteCorruptionError,
@@ -28,9 +29,11 @@ import type {
 	OAuthProvider,
 	OAuthProviderId,
 } from "./registry/oauth/types";
+import { AUTHENTICATED_SENTINEL } from "./registry/types";
 import { getEnvApiKey, getEnvApiKeyName } from "./stream";
 import type { Provider } from "./types";
 import type {
+	ClientUsageIdentity,
 	ClientUsageReport,
 	ClientUsageSummary,
 	CredentialRankingContext,
@@ -49,7 +52,9 @@ import type {
 import { resolveUsedFraction } from "./usage";
 import { alibabaTokenPlanRankingStrategy, alibabaTokenPlanUsageProvider } from "./usage/alibaba-token-plan";
 import { claudeRankingStrategy, claudeUsageProvider } from "./usage/claude";
+import { clinePassUsageProvider } from "./usage/cline-pass";
 import { cursorUsageProvider } from "./usage/cursor";
+import { devinUsageProvider } from "./usage/devin";
 import { googleGeminiCliUsageProvider } from "./usage/gemini";
 import { githubCopilotUsageProvider } from "./usage/github-copilot";
 import { antigravityRankingStrategy, antigravityUsageProvider } from "./usage/google-antigravity";
@@ -70,11 +75,7 @@ import { umansUsageProvider } from "./usage/umans";
 import { xaiOauthUsageProvider } from "./usage/xai-oauth";
 import { zaiRankingStrategy, zaiUsageProvider } from "./usage/zai";
 
-export {
-	isSqliteBusyError,
-	isSqliteCorruptionError,
-	SqliteAuthCredentialStore,
-} from "./auth/sqlite-credential-store";
+export { isSqliteBusyError, isSqliteCorruptionError, SqliteAuthCredentialStore } from "./auth/sqlite-credential-store";
 
 const USAGE_RANKING_METRIC_EPSILON = 1e-9;
 /**
@@ -458,8 +459,10 @@ export interface AuthCredentialStore {
 	 * Client hook: forward locally observed request usage. Remote broker stores
 	 * batch these to the broker so it can attribute token burn per install;
 	 * local stores omit it and observation is skipped.
+	 * `client` overrides the reporting identity (gateway requests attribute to
+	 * the originating client, not the gateway host).
 	 */
-	recordObservedUsage?(entries: ObservedUsageEntry[]): void;
+	recordObservedUsage?(entries: ObservedUsageEntry[], client?: ClientUsageIdentity): void;
 	/** Broker host: persist one client's observed-usage report. */
 	recordClientUsage?(report: ClientUsageReport): void;
 	/** Broker host: aggregate recorded per-client usage since a timestamp. */
@@ -663,6 +666,7 @@ const DEFAULT_USAGE_PROVIDERS: UsageProvider[] = [
 	ollamaUsageProvider,
 	ollamaCloudUsageProvider,
 	claudeUsageProvider,
+	clinePassUsageProvider,
 	zaiUsageProvider,
 	umansUsageProvider,
 	opencodeGoUsageProvider,
@@ -670,6 +674,7 @@ const DEFAULT_USAGE_PROVIDERS: UsageProvider[] = [
 	cursorUsageProvider,
 	syntheticUsageProvider,
 	xaiOauthUsageProvider,
+	devinUsageProvider,
 ];
 
 const DEFAULT_USAGE_PROVIDER_MAP = new Map<Provider, UsageProvider>(
@@ -989,7 +994,6 @@ function isAbortSignalOption(
 type OpenAICodexPlanRequirement = "none" | "paid" | "pro";
 type OpenAICodexPlanClass = "free" | "paid" | "pro" | "unknown";
 
-const GPT_56_PAID_CODEX_MODEL_PATTERN = /^gpt-5\.6-(?:sol|luna)(?:-pro)?$/;
 const OPENAI_CODEX_PRO_PLAN_TOKENS: Record<string, true> = {
 	pro: true,
 };
@@ -1020,11 +1024,7 @@ const OPENAI_CODEX_FREE_PLAN_TOKENS: Record<string, true> = {
  */
 function resolveOpenAICodexPlanRequirement(provider: string, modelId: string | undefined): OpenAICodexPlanRequirement {
 	if (provider !== "openai-codex" || typeof modelId !== "string") return "none";
-	const separator = modelId.lastIndexOf("/");
-	const bareModelId = (separator === -1 ? modelId : modelId.slice(separator + 1)).toLowerCase();
-	if (bareModelId.includes("-spark")) return "pro";
-	if (bareModelId === "gpt-5.6" || GPT_56_PAID_CODEX_MODEL_PATTERN.test(bareModelId)) return "paid";
-	return "none";
+	return (planRequirementFor("openai-codex", modelId) as OpenAICodexPlanRequirement | undefined) ?? "none";
 }
 
 const MODEL_ACCOUNT_POLICY_BLOCK_SCOPE_PREFIX = "model-policy:";
@@ -1269,6 +1269,7 @@ type UsageRankedCandidate<T extends AuthCredential> = UsageCandidate<T> & {
 	blocked: boolean;
 	blockedUntil?: number;
 	hasPriorityBoost: boolean;
+	usageMeasured: boolean;
 	planPriority: number;
 	secondaryUsed: number;
 	secondaryRequiredDrain: number;
@@ -1443,7 +1444,7 @@ export class AuthStorage {
 	#bumpGeneration(reason: string): void {
 		this.#generation += 1;
 		this.#store.acknowledgeLocalChanges?.();
-		for (const listener of [...this.#generationListeners]) {
+		for (const listener of Array.from(this.#generationListeners)) {
 			try {
 				listener(this.#generation);
 			} catch (error) {
@@ -2165,13 +2166,16 @@ export class AuthStorage {
 			const windows = usage ? strategy.findWindowLimits(usage, args.rankingContext) : undefined;
 			const primary = windows?.primary;
 			const secondary = windows?.secondary;
+			const usageMeasured = primary !== undefined || secondary !== undefined;
+			const primaryUncapped = primary === undefined && secondary !== undefined;
 			ranked.push({
 				selection,
 				usage,
 				usageChecked,
 				blocked,
 				blockedUntil,
-				hasPriorityBoost: strategy.hasPriorityBoost?.(primary) ?? false,
+				usageMeasured,
+				hasPriorityBoost: strategy.hasPriorityBoost?.(primary, primaryUncapped, args.rankingContext) ?? false,
 				planPriority: 0,
 				secondaryUsed: this.#normalizeUsageFraction(secondary),
 				secondaryRequiredDrain: this.#computeWindowRequiredDrain(
@@ -2743,6 +2747,34 @@ export class AuthStorage {
 		if (this.#hasDedicatedEnvAuth(provider)) return true;
 		if (this.#fallbackResolver?.(provider)) return true;
 		return false;
+	}
+
+	/**
+	 * Like {@link hasAuth} but excludes providers whose only credential is the
+	 * self-resolving {@link AUTHENTICATED_SENTINEL} — the marker AWS/Vertex
+	 * transports return when a credential *source* merely exists (a stray
+	 * `~/.aws` profile, an EC2 instance role, Application Default Credentials)
+	 * without a usable key resolved yet. Default-model auto-selection uses this
+	 * so an ambiently-available provider (e.g. `amazon-bedrock` via an unrelated
+	 * AWS profile) does not win the startup default over a provider the user
+	 * actually signed into and then 403 on the first turn. Explicit selection
+	 * and picker visibility still go through {@link hasAuth}. See issue #9967.
+	 */
+	hasConcreteAuth(provider: string): boolean {
+		if (this.#runtimeOverrides.has(provider)) return true;
+		if (this.#configOverrides.has(provider)) return true;
+		if (this.#getCredentialsForProvider(provider).length > 0) return true;
+		if ((provider === "amazon-bedrock" || provider === "bedrock-mantle") && $env.AWS_BEARER_TOKEN_BEDROCK?.trim()) {
+			return true;
+		}
+		if (provider === "xai-oauth") {
+			if ($env.XAI_OAUTH_TOKEN?.trim()) return true;
+		} else {
+			const envApiKey = getEnvApiKey(provider);
+			if (envApiKey !== undefined && envApiKey !== AUTHENTICATED_SENTINEL) return true;
+		}
+		const fallback = this.#fallbackResolver?.(provider);
+		return fallback !== undefined && fallback !== AUTHENTICATED_SENTINEL;
 	}
 
 	/**
@@ -3461,23 +3493,29 @@ export class AuthStorage {
 		usage: { input: number; output: number; cacheRead: number; cacheWrite: number };
 		costUsd?: number;
 		at?: number;
+		/** Attribution override; defaults to this process's install identity. */
+		client?: ClientUsageIdentity;
 	}): void {
 		const record = this.#store.recordObservedUsage;
 		if (!record) return;
 		try {
-			record.call(this.#store, [
-				{
-					at: entry.at ?? Date.now(),
-					provider: entry.provider,
-					model: entry.model,
-					requests: 1,
-					inputTokens: entry.usage.input,
-					outputTokens: entry.usage.output,
-					cacheReadTokens: entry.usage.cacheRead,
-					cacheWriteTokens: entry.usage.cacheWrite,
-					costUsd: Number.isFinite(entry.costUsd) ? (entry.costUsd ?? 0) : 0,
-				},
-			]);
+			record.call(
+				this.#store,
+				[
+					{
+						at: entry.at ?? Date.now(),
+						provider: entry.provider,
+						model: entry.model,
+						requests: 1,
+						inputTokens: entry.usage.input,
+						outputTokens: entry.usage.output,
+						cacheReadTokens: entry.usage.cacheRead,
+						cacheWriteTokens: entry.usage.cacheWrite,
+						costUsd: Number.isFinite(entry.costUsd) ? (entry.costUsd ?? 0) : 0,
+					},
+				],
+				entry.client,
+			);
 		} catch (error) {
 			this.#usageLogger?.debug("observed usage record failed", {
 				provider: entry.provider,
@@ -3524,7 +3562,7 @@ export class AuthStorage {
 		const exhausted = parsedReport.limits.some(limit => this.#isUsageLimitExhausted(limit));
 		const last = this.#usageHeaderIngestAt.get(cacheKey);
 		if (!exhausted && last !== undefined && now - last < USAGE_HEADER_INGEST_INTERVAL_MS) return false;
-		const metadata: Record<string, unknown> = { ...(parsedReport.metadata ?? {}) };
+		const metadata: Record<string, unknown> = { ...parsedReport.metadata };
 		if (credential.accountId && metadata.accountId === undefined) metadata.accountId = credential.accountId;
 		if (credential.email && metadata.email === undefined) metadata.email = credential.email;
 		if (credential.projectId && metadata.projectId === undefined) metadata.projectId = credential.projectId;
@@ -3563,8 +3601,8 @@ export class AuthStorage {
 				fetchedAt: now,
 				limits,
 				metadata: {
-					...(report.metadata ?? {}),
-					...(prior.metadata ?? {}),
+					...report.metadata,
+					...prior.metadata,
 					source: prior.metadata?.source,
 					headersUpdatedAt: now,
 				},
@@ -3748,7 +3786,7 @@ export class AuthStorage {
 		const base = sorted[0];
 		const mergedLimits = [...base.limits];
 		const limitIds = new Set(mergedLimits.map(limit => limit.id));
-		const mergedMetadata: Record<string, unknown> = { ...(base.metadata ?? {}) };
+		const mergedMetadata: Record<string, unknown> = { ...base.metadata };
 		let fetchedAt = base.fetchedAt;
 
 		for (const report of sorted.slice(1)) {
@@ -4624,8 +4662,8 @@ export class AuthStorage {
 		// scores are only comparable between measured windows, and the
 		// clockless headroom fallback (0..1) must not let an account whose
 		// usage fetch failed shadow a measured sibling.
-		const leftMeasured = left.usage !== null;
-		const rightMeasured = right.usage !== null;
+		const leftMeasured = left.usageMeasured;
+		const rightMeasured = right.usageMeasured;
 		if (leftMeasured !== rightMeasured) return leftMeasured ? -1 : 1;
 		// Required drain, descending: the account whose remaining quota must
 		// burn fastest to avoid expiring unused at its reset comes first, so
@@ -4760,13 +4798,16 @@ export class AuthStorage {
 			const windows = usage ? strategy.findWindowLimits(usage, args.rankingContext) : undefined;
 			const primary = windows?.primary;
 			const secondary = windows?.secondary;
+			const usageMeasured = primary !== undefined || secondary !== undefined;
+			const primaryUncapped = primary === undefined && secondary !== undefined;
 			ranked.push({
 				selection,
 				usage,
 				usageChecked,
 				blocked,
 				blockedUntil,
-				hasPriorityBoost: strategy.hasPriorityBoost?.(primary) ?? false,
+				usageMeasured,
+				hasPriorityBoost: strategy.hasPriorityBoost?.(primary, primaryUncapped, args.rankingContext) ?? false,
 				planPriority: getOpenAICodexPlanPriority(usage, args.planRequirement),
 				secondaryUsed: this.#normalizeUsageFraction(secondary),
 				secondaryRequiredDrain: this.#computeWindowRequiredDrain(

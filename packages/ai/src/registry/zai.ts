@@ -32,10 +32,10 @@ export const zaiCodingPlanProvider = {
 	// Minted key lives in creds.access; getOAuthApiKey returns it for the `zai`
 	// catalog provider verbatim, so store credentials under `zai`.
 	storeCredentialsAs: "zai",
-	// Loopback callback server on this port, plus the manual paste-code
-	// fallback (PASTE_CODE_LOGIN_PROVIDERS) for when the browser cannot reach
-	// this machine. Mirrors the Anthropic sign-in wiring.
-	callbackPort: 54548,
+	// Loopback callback server on the ZCode-registered CLI port, plus the manual
+	// paste-code fallback (PASTE_CODE_LOGIN_PROVIDERS) for when the browser
+	// cannot reach this machine. Mirrors the Anthropic sign-in wiring.
+	callbackPort: 9999,
 	pasteCodeFlow: true,
 	login: (cb: OAuthLoginCallbacks) => import("./oauth/zai").then(m => m.loginZaiOAuth(cb)),
 } as const satisfies ProviderDefinition;

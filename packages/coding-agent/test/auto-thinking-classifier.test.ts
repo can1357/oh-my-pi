@@ -205,11 +205,29 @@ describe("auto thinking classifier helpers", () => {
 			getApiKey: async () => "test-key",
 			resolver: () => async () => "test-key",
 		} as never;
-		const completeSimpleMock = vi.spyOn(ai, "completeSimple").mockResolvedValue({
-			stopReason: "stop",
-			content: [{ type: "text", text: answer }],
-		} as never);
-		return { deps: { settings, registry, model: targetModel }, completeSimpleMock };
+		const usage = {
+			input: 11,
+			output: 2,
+			cacheRead: 3,
+			cacheWrite: 0,
+			totalTokens: 16,
+			cost: { input: 0.0011, output: 0.0004, cacheRead: 0.00003, cacheWrite: 0, total: 0.00153 },
+		};
+		const completeSimpleMock = vi
+			.spyOn(ai, "completeSimple")
+			.mockImplementation(async (_model, _context, options) => {
+				const response = {
+					api: classifierModel.api,
+					provider: classifierModel.provider,
+					model: classifierModel.id,
+					usage,
+					stopReason: "stop",
+					content: [{ type: "text", text: answer }],
+				} as never;
+				options?.onAttempt?.(response);
+				return response;
+			});
+		return { deps: { settings, registry, model: targetModel }, completeSimpleMock, classifierModel, usage };
 	}
 
 	function buildLadderModel(id: string, efforts: Effort[]): Model {
@@ -230,6 +248,43 @@ describe("auto thinking classifier helpers", () => {
 
 	const MAX_LADDER = [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh, Effort.Max];
 	const XHIGH_LADDER = [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh];
+
+	it("reports usage for each response when a transient classifier failure is retried", async () => {
+		const fixture = createOnlineFixture(buildLadderModel("mock-max", MAX_LADDER), "high");
+		fixture.completeSimpleMock.mockImplementationOnce(async (_model, _context, options) => {
+			const response = {
+				api: fixture.classifierModel.api,
+				provider: fixture.classifierModel.provider,
+				model: fixture.classifierModel.id,
+				usage: fixture.usage,
+				stopReason: "error",
+				errorStatus: 500,
+				errorMessage: "Internal Server Error",
+				content: [],
+			} as never;
+			options?.onAttempt?.(response);
+			return response;
+		});
+		const onUsage = vi.fn();
+
+		await classifyDifficulty("refactor the scheduler", { ...fixture.deps, onUsage });
+
+		expect(fixture.completeSimpleMock).toHaveBeenCalledTimes(2);
+		expect(onUsage).toHaveBeenCalledTimes(2);
+		expect(onUsage).toHaveBeenNthCalledWith(
+			1,
+			expect.objectContaining({ stopReason: "error", errorMessage: "Internal Server Error" }),
+		);
+		expect(onUsage).toHaveBeenNthCalledWith(2, {
+			role: "smol",
+			api: fixture.classifierModel.api,
+			provider: fixture.classifierModel.provider,
+			model: fixture.classifierModel.id,
+			usage: fixture.usage,
+			stopReason: "stop",
+			errorMessage: undefined,
+		});
+	});
 
 	it("offers the max label only when opted in on a model that exposes the tier", async () => {
 		const optedIn = createOnlineFixture(buildLadderModel("mock-max", MAX_LADDER), "high", "max");

@@ -21,11 +21,8 @@ it("strings", () => {
 	const _type1: Eq<
 		typeof T.props,
 		array<
-			// biome-ignore lint/complexity/noBannedTypes: BaseTypeProp generic type parameter
 			| BaseTypeProp<"required", "foo", 1, {}>
-			// biome-ignore lint/complexity/noBannedTypes: BaseTypeProp generic type parameter
 			| BaseTypeProp<"required", "bar", 2, {}>
-			// biome-ignore lint/complexity/noBannedTypes: BaseTypeProp generic type parameter
 			| BaseTypeProp<"optional", "baz", 3, {}>
 		>
 	> = true;

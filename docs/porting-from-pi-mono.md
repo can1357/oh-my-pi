@@ -48,8 +48,6 @@ Upstream uses different package scopes. Replace them consistently.
   - `@mariozechner/pi-tui` → `@oh-my-pi/pi-tui`
   - `@mariozechner/pi-ai` → `@oh-my-pi/pi-ai`
   - `@mariozechner/pi-utils` → `@oh-my-pi/pi-utils`
-  - `@mariozechner/pi-catalog` → `@oh-my-pi/pi-catalog`
-  - `@mariozechner/pi-natives` → `@oh-my-pi/pi-natives`
 - Some upstream packages publish under the `@earendil-works/*` scope instead of `@mariozechner/*`. Map it the same way (`@earendil-works/pi-coding-agent` → `@oh-my-pi/pi-coding-agent`, and so on).
 - The bare `typebox` package is not an `@oh-my-pi/*` scope; do not rewrite it as one. See the Extensions divergence in section 15 for how tool-parameter schemas map.
 
@@ -160,13 +158,14 @@ Unless requested, remove upstream compatibility shims.
 
 ## 10) Validate the port
 
-Run the checks that cover the port:
+Run the checks that cover the port after changes:
 
-- `bun check` for the repository's TypeScript and Rust checks.
-- Targeted Bun tests for the packages and behavior you changed (for example, `bun test packages/<package>/test/<file>.test.ts`).
+- `bun check`
+- Run the focused Bun test or smoke scenario that exercises the changed behavior.
 - If dependencies changed, run `bun install --frozen-lockfile` after updating `bun.lock`.
 
-Tests use Bun's runner, not Vitest. Do not substitute a project-wide `bun test` for targeted coverage; the root `test` script uses the repository's sharded runner. If a check already fails for an unrelated reason, call out the exact command and failure.
+If the repo already has failing checks unrelated to your changes, call that out.
+Tests use Bun's runner (not Vitest), but do not substitute an indiscriminate project-wide `bun test` for targeted behavioral verification.
 
 ## 11) Protect improved features (regression trap list)
 
@@ -348,7 +347,7 @@ Our fork has architectural decisions that differ from upstream. **Do not port th
 | Upstream                            | Our Fork                                                                                                      | Notes                                                     |
 | ----------------------------------- | ------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------- |
 | `createTool(cwd: string, options?)` | `createTools(session: ToolSession)` via `BUILTIN_TOOLS` registry                                              | Tool factories accept `ToolSession` and can return `null` |
-| Per-tool `*Operations` interfaces   | Only current per-tool override interfaces remain (for example `FindOperations`)                               | Used for SSH/remote overrides where present               |
+| Per-tool `*Operations` interfaces   | Only current per-tool override interfaces remain (for example `GlobOperations` in `tools/glob.ts`); `FindOperations` survives only in the legacy shim (`src/extensibility/legacy-pi-coding-agent-shim.ts`) after the find→glob rename | Used for SSH/remote overrides where present               |
 | Node.js `fs/promises` everywhere    | Bun file APIs for simple file writes/reads, `node:fs/promises` for dirs, selected sync `node:fs` where needed | Prefer Bun APIs when they simplify                        |
 
 ### Auth Storage
@@ -367,6 +366,7 @@ Our fork has architectural decisions that differ from upstream. **Do not port th
 | `StringEnum` from `pi-ai`                                              | `Type.Enum` from `pi.typebox`, or `pi.arktype.enumerated(...)`; `pi-ai` no longer exports `StringEnum`                                                                                                                                                                                       |
 | `formatSize` from `pi-coding-agent`                                    | `formatBytes` from `@oh-my-pi/pi-utils`                                                                                                                                                                                                                                                      |
 | Upstream resource/package/settings managers as the native architecture | Capability-based discovery (`loadCapability(...)`), the `Settings` singleton, and `EventBus`; legacy extension imports of `DefaultResourceLoader`, `DefaultPackageManager`, and `SettingsManager` are compatibility shims in `legacy-pi-coding-agent-shim.ts`, not the native implementation |
+| `SettingsManager.create(cwd)` returns a synchronous manager with `getGlobalSettings()`/`getProjectSettings()` | The shim's `SettingsManager.create()` is synchronous and resolves the active extension session's `Settings`, then a live instance matching `cwd`/`agentDir`, or an isolated fallback; `Settings` exposes `getGlobalSettings()`/`getProjectSettings()` that deep-clone the raw global/project layers so extensions can read their own namespaced keys (#10397) |
 
 ### Skip These Upstream Features
 

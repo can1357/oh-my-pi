@@ -20,10 +20,10 @@
  */
 import * as path from "node:path";
 import type * as natives from "@oh-my-pi/pi-natives";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { AgentRegistry } from "../registry/agent-registry";
 import type { ToolSession } from "../tools";
 import { generateCommitMessage } from "../utils/commit-message-generator";
-import * as git from "../utils/git";
 import { trackLateCleanup } from "../utils/late-cleanup";
 import type { ExecutorOptions } from "./executor";
 import { runSubprocess } from "./executor";
@@ -70,18 +70,23 @@ function rememberAgentArtifacts(result: SingleResult): SingleResult {
  * copy of the agent's commits.
  */
 async function rescueTaskBranch(repoRoot: string, branchName: string, baseSha: string): Promise<string | undefined> {
+	const repo = vcs.git(repoRoot);
 	try {
-		const carriedCommits = (await git.revList.range(repoRoot, baseSha, branchName)).length;
+		const carriedCommits = (await vcs.requireGit(repoRoot).revListRange(baseSha, branchName)).length;
 		if (carriedCommits > 0) return branchName;
 	} catch {
 		try {
-			if (await git.ref.exists(repoRoot, `refs/heads/${branchName}`)) return branchName;
+			if (await repo?.refExists(`refs/heads/${branchName}`)) return branchName;
 		} catch {
 			// An inconclusive recovery probe must never risk deleting the only ref.
 			return branchName;
 		}
 	}
-	await git.branch.tryDelete(repoRoot, branchName);
+	try {
+		await repo?.deleteBranch(branchName, true);
+	} catch {
+		// Best-effort cleanup matches the old façade's tryDelete semantics.
+	}
 	return undefined;
 }
 
@@ -130,7 +135,7 @@ export function makeIsolationCommitMessage(session: ToolSession): BuildCommitMes
 export interface IsolatedRunOptions {
 	/**
 	 * Base run options handed to the subagent subprocess. This helper sets
-	 * `worktree`, clears `preloadedExtensionPaths` / `preloadedCustomToolPaths`
+	 * `worktree`, clears prepared/path extension preloads and custom-tool paths
 	 * (isolated runs re-discover inside the worktree), and forwards everything
 	 * else unchanged.
 	 */
@@ -200,6 +205,7 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 			...opts.baseOptions,
 			worktree: isolationDir,
 			preloadedExtensionPaths: undefined,
+			preloadedPreparedExtensions: undefined,
 			preloadedCustomToolPaths: undefined,
 			onCleanupDeferred: completion => {
 				deferredCleanup = completion;
@@ -207,7 +213,12 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 			},
 		});
 		opts.onSubprocessResult?.(result);
-		if (deferredCleanup) return result;
+		// A successful result cannot be captured while deferred owner jobs or
+		// shutdown hooks may still write the worktree. Failed runs skip capture,
+		// so their cleanup remains asynchronous.
+		if (deferredCleanup && result.exitCode === 0) {
+			await deferredCleanup;
+		}
 		if (opts.mergeMode === "branch" && result.exitCode === 0) {
 			try {
 				const commitResult = await commitToBranch(
@@ -328,6 +339,7 @@ export interface IsolationMergeOutcome {
  */
 export async function mergeIsolatedChanges(opts: IsolationMergeOptions): Promise<IsolationMergeOutcome> {
 	const { result, repoRoot, mergeMode } = opts;
+	const repo = vcs.requireGit(repoRoot);
 	try {
 		if (mergeMode === "branch") {
 			if (!result.branchName && result.exitCode === 0 && !result.aborted && result.error) {
@@ -408,8 +420,8 @@ export async function mergeIsolatedChanges(opts: IsolationMergeOptions): Promise
 				// `--3way --check`, which exits 0 even when the real apply would
 				// leave conflict markers and unmerged index entries.
 				const [alreadyApplied, forwardApplies] = await Promise.all([
-					git.patch.canApplyText(repoRoot, normalized, { reverse: true }),
-					git.patch.canApplyText(repoRoot, normalized),
+					repo.canApplyPatch(normalized, { reverse: true }).catch(() => false),
+					repo.canApplyPatch(normalized, {}).catch(() => false),
 				]);
 				hadAnyChanges = false;
 				if (alreadyApplied && !forwardApplies) {
@@ -417,7 +429,7 @@ export async function mergeIsolatedChanges(opts: IsolationMergeOptions): Promise
 				} else if (forwardApplies) {
 					changesApplied = true;
 					try {
-						await git.patch.applyText(repoRoot, normalized);
+						await repo.applyPatch(normalized, {});
 						hadAnyChanges = true;
 					} catch {
 						changesApplied = false;

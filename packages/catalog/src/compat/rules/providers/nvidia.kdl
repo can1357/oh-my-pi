@@ -1,0 +1,27 @@
+// Provider-wire compat for "nvidia"; regenerated from the frozen census using deployment contract selectors.
+
+provider "nvidia" {
+	thinking-mode "effort"
+	class "qwen" {
+		thinking-format "qwen-chat-template"
+	}
+	class "unknown" {
+		thinking-efforts "minimal" "low" "medium" "high" "xhigh"
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning" {
+		thinking-requires-effort #true
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "qwen/qwen3-next-80b-a3b-thinking" {
+		thinking-format "qwen-chat-template"
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "z-ai/glm-5.1" "z-ai/glm4.7" "z-ai/glm5" {
+		thinking-efforts "minimal" "low" "medium" "high" "xhigh"
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "z-ai/glm-5.2" {
+		thinking-efforts "minimal" "low" "medium" "high" "max"
+	}
+}

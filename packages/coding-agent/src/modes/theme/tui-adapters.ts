@@ -286,7 +286,9 @@ export function getEditorTheme(): EditorTheme {
 	return {
 		borderColor: (text: string) => theme.fg("borderMuted", text),
 		accentColor: (text: string) => theme.fg("accent", text),
-		surfaceColor: (text: string) => theme.bgFill("userMessageBg", text),
+		surfaceColor: (text: string) =>
+			theme.bgFill("userMessageBg", theme.fgOnBg("userMessageText", "userMessageBg", text)),
+		textColor: (text: string) => theme.fgResolved("text", text),
 		selectList: getSelectListTheme(),
 		symbols: getSymbolTheme(),
 		hintStyle: (text: string) => theme.fg("dim", text),

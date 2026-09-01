@@ -6,6 +6,7 @@
  * Project-level discovery walks up from cwd to repoRoot.
  */
 import * as path from "node:path";
+import { isWsl, windowsPathToWslMount } from "@oh-my-pi/pi-utils";
 import { registerProvider } from "../capability";
 import { type ContextFile, contextFileCapability } from "../capability/context-file";
 import { readFile } from "../capability/fs";
@@ -33,25 +34,6 @@ interface UserPathCandidateOptions {
 	env?: NodeJS.ProcessEnv;
 	windowsUserProfile?: () => string | undefined;
 	wslPath?: (windowsPath: string) => string | undefined;
-}
-
-const WINDOWS_DRIVE_PROFILE_PATTERN = /^([A-Za-z]):[\\/](.*)$/;
-
-function isWsl(platform: NodeJS.Platform, env: NodeJS.ProcessEnv): boolean {
-	return platform === "linux" && Boolean(env.WSL_DISTRO_NAME || env.WSL_INTEROP);
-}
-
-function convertWindowsPathToDefaultWslMount(windowsPath: string): string | undefined {
-	const trimmed = windowsPath.trim();
-	if (trimmed.length === 0) return undefined;
-	// The result is always a WSL (POSIX) path, so build it with posix
-	// semantics regardless of the host platform.
-	if (path.posix.isAbsolute(trimmed)) return path.posix.normalize(trimmed);
-	const match = WINDOWS_DRIVE_PROFILE_PATTERN.exec(trimmed);
-	if (!match) return undefined;
-	const [, drive, rest] = match;
-	const segments = rest.replace(/\\/g, "/").split("/").filter(Boolean);
-	return path.posix.join("/mnt", drive.toLowerCase(), ...segments);
 }
 
 /**
@@ -105,7 +87,10 @@ export function getWslWindowsHomeCandidate(options: UserPathCandidateOptions = {
 	if (!isWsl(platform, env)) return undefined;
 	const userProfile = env.USERPROFILE ?? (options.windowsUserProfile ?? resolveWindowsUserProfile)();
 	if (!userProfile) return undefined;
-	return (options.wslPath ?? resolveWithWslPath)(userProfile) ?? convertWindowsPathToDefaultWslMount(userProfile);
+	const interopPath = (options.wslPath ?? resolveWithWslPath)(userProfile);
+	if (interopPath !== undefined) return interopPath;
+	const trimmed = userProfile.trim();
+	return path.posix.isAbsolute(trimmed) ? path.posix.normalize(trimmed) : windowsPathToWslMount(trimmed);
 }
 
 /**

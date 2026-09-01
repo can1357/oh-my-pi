@@ -76,7 +76,7 @@ function createTinyWorkerSpawnMock(calls: TinyWorkerSpawnCall[]) {
 		first: string[] | (TinyWorkerSpawnOptions & { cmd: string[] }),
 		second?: TinyWorkerSpawnOptions,
 	): Subprocess<"ignore", "ignore", "ignore"> {
-		const options = Array.isArray(first) ? { ...(second ?? {}), cmd: first } : first;
+		const options = Array.isArray(first) ? { ...second, cmd: first } : first;
 		calls.push({ options });
 		return {
 			pid: 12345,

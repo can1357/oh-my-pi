@@ -1,0 +1,242 @@
+// Model-lineage compat for "anthropic"; regenerated from the frozen census using class taxonomy selectors.
+
+class "anthropic" {
+	on "aimlapi" "gitlab-duo" "kilo" "nanogpt" "venice" {
+		thinking-efforts "minimal" "low" "medium" "high" "xhigh"
+	}
+	on "amazon-bedrock" "anthropic" "cloudflare-ai-gateway" "github-copilot" "gitlab-duo" \
+		"google-antigravity" "google-vertex" "opencode-zen" "vercel-ai-gateway" "zenmux" {
+		family "sonnet" {
+			revision ">=3.7 <4.6" {
+				thinking-mode "budget"
+			}
+		}
+	}
+	on "amazon-bedrock" "anthropic" "cloudflare-ai-gateway" "github-copilot" "gitlab-duo" \
+		"google-vertex" "opencode-zen" "vercel-ai-gateway" {
+		family "haiku" {
+			thinking-mode "budget"
+		}
+	}
+	on "amazon-bedrock" "anthropic" "cloudflare-ai-gateway" "github-copilot" "gitlab-duo" \
+		"google-vertex" "opencode-zen" "vercel-ai-gateway" "zenmux" {
+		family "opus" {
+			revision ">=4.5 <4.6" {
+				thinking-mode "anthropic-budget-effort"
+			}
+		}
+	}
+	on "amazon-bedrock" "anthropic" "cloudflare-ai-gateway" "github-copilot" "google-vertex" \
+		"opencode-zen" "openrouter" "vercel-ai-gateway" "zenmux" {
+		family "opus" {
+			revision ">=4.6 <4.7" {
+				thinking-efforts "low" "medium" "high" "max"
+			}
+		}
+	}
+	on "amazon-bedrock" "anthropic" "cloudflare-ai-gateway" "github-copilot" "google-vertex" \
+		"opencode-zen" "vercel-ai-gateway" "zenmux" {
+		revision ">=4.7 <45.1" {
+			thinking-mode "anthropic-adaptive"
+		}
+	}
+	on "amazon-bedrock" "anthropic" "cloudflare-ai-gateway" "opencode-zen" "vercel-ai-gateway" \
+		"zenmux" {
+		family "opus" {
+			revision ">=4 <4.5" {
+				thinking-mode "budget"
+			}
+		}
+	}
+	on "amazon-bedrock" "cursor" "google-antigravity" "openrouter" {
+		family "sonnet" {
+			revision ">=4.6 <5" {
+				thinking-efforts "minimal" "low" "medium" "high"
+			}
+		}
+		revision ">=3.7 <4.6" {
+			thinking-efforts "minimal" "low" "medium" "high"
+		}
+	}
+	on "amazon-bedrock" "google-antigravity" {
+		family "sonnet" {
+			revision ">=4.6 <5" {
+				thinking-mode "budget"
+			}
+		}
+	}
+	on "anthropic" "cloudflare-ai-gateway" "github-copilot" "google-vertex" "opencode-zen" \
+		"openrouter" "vercel-ai-gateway" "zenmux" {
+		revision ">=4.7 <45.1" {
+			thinking-efforts "low" "medium" "high" "xhigh" "max"
+		}
+	}
+	on "anthropic" "cloudflare-ai-gateway" "github-copilot" "google-vertex" "opencode-zen" \
+		"vercel-ai-gateway" "zenmux" {
+		family "sonnet" {
+			revision ">=4.6 <5" {
+				thinking-efforts "low" "medium" "high"
+			}
+		}
+		revision ">=4.6 <4.7" {
+			thinking-mode "anthropic-adaptive"
+		}
+	}
+	// Reviewed catalog-metadata corrections (stale upstream pricing/limits).
+	on "anthropic" {
+		family "opus" {
+			revision "=4.5" {
+				// stencil.so reports 3x the correct cache pricing.
+				cost-patch {
+					cache-read 0.5
+					cache-write 6.25
+				}
+			}
+		}
+		// Anthropic's /v1/models omits token limits and pricing for the
+		// Fable/Mythos generation; pin the model-card values.
+		family "fable" {
+			cost-patch {
+				input 10.0
+				output 50.0
+				cache-read 1.0
+				cache-write 12.5
+			}
+			limits-patch {
+				context-window 1000000
+				max-tokens 128000
+			}
+		}
+		family "mythos" {
+			cost-patch {
+				input 10.0
+				output 50.0
+				cache-read 1.0
+				cache-write 12.5
+			}
+			limits-patch {
+				context-window 1000000
+				max-tokens 128000
+			}
+		}
+	}
+	// AWS Bedrock Converse prompt-cache checkpoints, from the AWS model cards
+	// (docs.aws.amazon.com/bedrock/latest/userguide/model-cards.html); cache
+	// pricing is deliberately not used to infer these request shapes.
+	on "amazon-bedrock" {
+		family "opus" {
+			revision ">=4 <4.5" {
+				prompt-cache-mode "explicit"
+				prompt-cache-minimum-tokens 1024
+				prompt-cache-maximum-checkpoints 4
+			}
+			revision "=4.5" {
+				prompt-cache-mode "explicit"
+				prompt-cache-minimum-tokens 4096
+				prompt-cache-maximum-checkpoints 4
+				supports-long-prompt-cache-retention #true
+			}
+			revision "=4.6" {
+				prompt-cache-mode "explicit"
+				prompt-cache-minimum-tokens 4096
+				prompt-cache-maximum-checkpoints 4
+				// Upstream metadata is stale for cache pricing and context.
+				cost-patch {
+					cache-read 0.5
+					cache-write 6.25
+				}
+				limits-patch {
+					context-window 1000000
+					max-tokens 128000
+				}
+			}
+			revision ">=4.7 <5" {
+				prompt-cache-mode "explicit"
+				prompt-cache-minimum-tokens 4096
+				prompt-cache-maximum-checkpoints 4
+				supports-long-prompt-cache-retention #true
+			}
+			revision ">=5" {
+				prompt-cache-mode "explicit"
+				prompt-cache-minimum-tokens 512
+				prompt-cache-maximum-checkpoints 4
+				supports-long-prompt-cache-retention #true
+			}
+		}
+		family "sonnet" {
+			revision "=3.5" {
+				models "*3-5-sonnet-20241022-v2*" {
+				prompt-cache-mode "explicit"
+				prompt-cache-minimum-tokens 1024
+				prompt-cache-maximum-checkpoints 4
+			}
+			}
+			revision "=3.7" {
+				prompt-cache-mode "explicit"
+				prompt-cache-minimum-tokens 1024
+				prompt-cache-maximum-checkpoints 4
+			}
+			revision ">=4 <4.5" {
+				prompt-cache-mode "explicit"
+				prompt-cache-minimum-tokens 1024
+				prompt-cache-maximum-checkpoints 4
+			}
+			revision "=4.5" {
+				prompt-cache-mode "explicit"
+				prompt-cache-minimum-tokens 4096
+				prompt-cache-maximum-checkpoints 4
+				supports-long-prompt-cache-retention #true
+			}
+			revision "=4.6" {
+				prompt-cache-mode "explicit"
+				prompt-cache-minimum-tokens 1024
+				prompt-cache-maximum-checkpoints 4
+			}
+			revision ">=5" {
+				prompt-cache-mode "explicit"
+				prompt-cache-minimum-tokens 4096
+				prompt-cache-maximum-checkpoints 4
+				supports-long-prompt-cache-retention #true
+			}
+		}
+		family "haiku" {
+			revision "=3.5" {
+				prompt-cache-mode "explicit"
+				prompt-cache-minimum-tokens 2048
+				prompt-cache-maximum-checkpoints 4
+			}
+			revision ">=4.5" {
+				prompt-cache-mode "explicit"
+				prompt-cache-minimum-tokens 4096
+				prompt-cache-maximum-checkpoints 4
+				supports-long-prompt-cache-retention #true
+			}
+		}
+		family "fable" {
+			revision ">=5" {
+				prompt-cache-mode "explicit"
+				prompt-cache-minimum-tokens 1024
+				prompt-cache-maximum-checkpoints 4
+				supports-long-prompt-cache-retention #true
+			}
+		}
+	}
+	// Claude 3.5 Haiku OAuth requests omit the Claude Code instruction.
+	family "haiku" {
+		revision "=3.5" {
+			inject-claude-code-instruction #false
+		}
+	}
+
+	// Cloud Code Assist exposes Claude through Google's wire envelope.
+	on "google-antigravity" "google-gemini-cli" {
+		supports-function-part-id #true
+		cca-legacy-parameters-schema #true
+	}
+	on "google-antigravity" {
+		drop-unsigned-thinking #true
+		claude-thinking-beta-header #true
+		antigravity-claude-tool-mode #true
+		antigravity-usage-label "true"
+	}
+}

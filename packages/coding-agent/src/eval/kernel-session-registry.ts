@@ -9,6 +9,7 @@ import {
 	isTimedOutCancellation,
 	resolveOwnerScopedSessionKey,
 	type SessionOwners,
+	waitForPromiseWithCancellation,
 } from "./executor-base";
 
 interface KernelSessionRegistryOptions {
@@ -126,7 +127,7 @@ export function formatSessionKernelTimeoutAnnotation(timeoutMs: number | undefin
 export function createKernelSessionRegistry<
 	TKernel extends RegistryKernel,
 	TOptions extends KernelSessionRegistryOptions,
-	TResult,
+	TResult extends { cancelled: boolean },
 	TSession extends KernelSession<TKernel>,
 >(
 	descriptor: KernelSessionRegistryDescriptor<TKernel, TOptions, TResult, TSession>,
@@ -134,6 +135,7 @@ export function createKernelSessionRegistry<
 	const sessions = new Map<string, TSession>();
 	const startingSessions = new Map<string, StartingKernelSession<TSession>>();
 	const resettingSessions = new Map<string, Promise<void>>();
+	const replacingSessionKernels = new Map<TSession, { kernel: TKernel; promise: Promise<TKernel> }>();
 
 	const context: KernelSessionRegistryContext<TKernel, TOptions, TSession> = {
 		sessions,
@@ -143,6 +145,14 @@ export function createKernelSessionRegistry<
 
 	function waitForStartup(promise: Promise<TSession>, options: TOptions): Promise<TSession> {
 		return descriptor.waitForStartup?.(promise, options) ?? promise;
+	}
+
+	function throwIfCallerCancelled(options: TOptions): void {
+		if (!options.signal?.aborted) return;
+		const timedOut =
+			descriptor.isTimedOutCancellation?.(options.signal.reason, options.signal) ??
+			isTimedOutCancellation(options.signal.reason, descriptor.cancelledErrorClass, options.signal);
+		throw new descriptor.cancelledErrorClass(timedOut);
 	}
 
 	function isCurrent(session: TSession, kernel?: TKernel): boolean {
@@ -168,6 +178,7 @@ export function createKernelSessionRegistry<
 			attachSessionOwner(starting, sessionId, options.kernelOwnerId);
 			return await waitForStartup(starting.promise, options);
 		}
+		// oxlint-disable-next-line prefer-const -- captured by the startup closure before assignment
 		let startingSession!: StartingKernelSession<TSession>;
 		const startup = (async () => {
 			const kernel = await descriptor.startKernel(cwd, options);
@@ -225,18 +236,73 @@ export function createKernelSessionRegistry<
 		return next;
 	}
 
+	async function acquireDefaultReplacementKernel(
+		session: TSession,
+		kernel: TKernel,
+		cwd: string,
+		options: TOptions,
+	): Promise<TKernel> {
+		const existing = replacingSessionKernels.get(session);
+		if (existing?.kernel === kernel) {
+			return await waitForPromiseWithCancellation(existing.promise, options, descriptor.cancelledErrorClass);
+		}
+		if (!isCurrent(session)) throw new descriptor.cancelledErrorClass(false);
+		if (session.kernel !== kernel) {
+			const currentKernel = session.kernel;
+			if (currentKernel.isAlive()) return currentKernel;
+			return await acquireDefaultReplacementKernel(session, currentKernel, cwd, options);
+		}
+		const replacement = {
+			kernel,
+			promise: replaceSessionKernel(session, cwd, {
+				...options,
+				signal: undefined,
+				deadlineMs: undefined,
+			}),
+		};
+		replacingSessionKernels.set(session, replacement);
+		const release = (): void => {
+			if (replacingSessionKernels.get(session) === replacement) {
+				replacingSessionKernels.delete(session);
+			}
+		};
+		void replacement.promise.then(release, release);
+		return await waitForPromiseWithCancellation(replacement.promise, options, descriptor.cancelledErrorClass);
+	}
+
 	async function acquireLiveSessionKernel(session: TSession, cwd: string, options: TOptions): Promise<TKernel> {
 		if (descriptor.acquireLiveSessionKernel) {
 			return await descriptor.acquireLiveSessionKernel(session, cwd, options, context);
 		}
 		if (!isCurrent(session)) throw new descriptor.cancelledErrorClass(false);
-		if (!session.kernel.isAlive()) await replaceSessionKernel(session, cwd, options);
+		const kernel = session.kernel;
+		if (!kernel.isAlive()) await acquireDefaultReplacementKernel(session, kernel, cwd, options);
 		if (!isCurrent(session)) throw new descriptor.cancelledErrorClass(false);
 		return session.kernel;
 	}
 
 	async function shutdownSession(session: TSession, resetting: boolean): Promise<RegistryKernelShutdownResult> {
-		return await (descriptor.shutdownSession?.(session, resetting) ?? session.kernel.shutdown());
+		const replacement = replacingSessionKernels.get(session)?.promise;
+		let shutdown: Promise<RegistryKernelShutdownResult>;
+		try {
+			shutdown = descriptor.shutdownSession?.(session, resetting) ?? session.kernel.shutdown();
+		} catch (error) {
+			if (replacement) await replacement.catch(() => undefined);
+			throw error;
+		}
+		if (!replacement) return await shutdown;
+		const [result] = await Promise.allSettled([shutdown, replacement]);
+		if (result.status === "rejected") throw result.reason;
+		return result.value;
+	}
+	async function settleShutdown(
+		session: TSession,
+		resetting: boolean,
+	): Promise<PromiseSettledResult<RegistryKernelShutdownResult>> {
+		return await shutdownSession(session, resetting).then(
+			value => ({ status: "fulfilled", value }),
+			reason => ({ status: "rejected", reason }),
+		);
 	}
 
 	async function resetSession(sessionKey: string): Promise<void> {
@@ -252,19 +318,23 @@ export function createKernelSessionRegistry<
 		const pending = [...startingSessions.values()].map(starting => starting.promise);
 		startingSessions.clear();
 		if (descriptor.clearResetsOnDisposeAll) resettingSessions.clear();
-		const started = await Promise.allSettled(pending);
 		const all = [...sessions.entries()];
-		for (const result of started) {
-			if (result.status !== "fulfilled") continue;
-			if (!all.some(([, session]) => session === result.value)) {
-				all.push([result.value.sessionKey, result.value]);
-			}
-		}
 		for (const [id, session] of all) {
 			descriptor.invalidateSession?.(session);
 			if (sessions.get(id) === session) sessions.delete(id);
 		}
-		const results = await Promise.allSettled(all.map(([, session]) => shutdownSession(session, false)));
+		const shutdowns = all.map(([, session]) => settleShutdown(session, false));
+		const started = await Promise.allSettled(pending);
+		for (const result of started) {
+			if (result.status !== "fulfilled") continue;
+			if (all.some(([, session]) => session === result.value)) continue;
+			const session = result.value;
+			all.push([session.sessionKey, session]);
+			descriptor.invalidateSession?.(session);
+			if (sessions.get(session.sessionKey) === session) sessions.delete(session.sessionKey);
+			shutdowns.push(settleShutdown(session, false));
+		}
+		const results = await Promise.all(shutdowns);
 		for (let i = 0; i < all.length; i += 1) {
 			const [id, session] = all[i];
 			const result = results[i];
@@ -283,7 +353,7 @@ export function createKernelSessionRegistry<
 	async function disposeByOwner(ownerId: string): Promise<void> {
 		const toShutdown: TSession[] = [];
 		const startingToShutdown: StartingKernelSession<TSession>[] = [];
-		for (const session of [...sessions.values()]) {
+		for (const session of Array.from(sessions.values())) {
 			if (!session.ownerIds.has(ownerId)) continue;
 			if (session.ownerIds.size === 1) {
 				toShutdown.push(session);
@@ -291,7 +361,7 @@ export function createKernelSessionRegistry<
 			}
 			session.ownerIds.delete(ownerId);
 		}
-		for (const [sessionKey, starting] of [...startingSessions.entries()]) {
+		for (const [sessionKey, starting] of Array.from(startingSessions.entries())) {
 			if (sessions.has(sessionKey) || !starting.ownerIds.has(ownerId)) continue;
 			if (starting.ownerIds.size === 1) {
 				startingSessions.delete(sessionKey);
@@ -304,6 +374,7 @@ export function createKernelSessionRegistry<
 			descriptor.invalidateSession?.(session);
 			if (sessions.get(session.sessionKey) === session) sessions.delete(session.sessionKey);
 		}
+		const shutdowns = toShutdown.map(session => settleShutdown(session, false));
 		const started = await Promise.allSettled(startingToShutdown.map(starting => starting.promise));
 		for (const result of started) {
 			if (result.status !== "fulfilled") continue;
@@ -311,8 +382,9 @@ export function createKernelSessionRegistry<
 			descriptor.invalidateSession?.(session);
 			if (sessions.get(session.sessionKey) === session) sessions.delete(session.sessionKey);
 			toShutdown.push(session);
+			shutdowns.push(settleShutdown(session, false));
 		}
-		const results = await Promise.allSettled(toShutdown.map(session => shutdownSession(session, false)));
+		const results = await Promise.all(shutdowns);
 		for (let i = 0; i < toShutdown.length; i += 1) {
 			const session = toShutdown[i];
 			const result = results[i];
@@ -329,6 +401,24 @@ export function createKernelSessionRegistry<
 			});
 			if (!sessions.has(session.sessionKey)) sessions.set(session.sessionKey, session);
 		}
+	}
+
+	async function acquireRetryKernel(
+		session: TSession,
+		kernel: TKernel,
+		cwd: string,
+		options: TOptions,
+	): Promise<TKernel> {
+		if (descriptor.acquireLiveSessionKernel) {
+			const retryKernel = await acquireLiveSessionKernel(session, cwd, options);
+			if (!isCurrent(session, retryKernel)) throw new descriptor.cancelledErrorClass(false);
+			return retryKernel;
+		}
+		const retryKernel = await acquireDefaultReplacementKernel(session, kernel, cwd, options);
+		if (!isCurrent(session) || session.kernel !== retryKernel) {
+			throw new descriptor.cancelledErrorClass(false);
+		}
+		return retryKernel;
 	}
 
 	async function executeOnSession(code: string, cwd: string, options: TOptions): Promise<TResult> {
@@ -363,17 +453,14 @@ export function createKernelSessionRegistry<
 			if (inFlight) await inFlight.catch(() => undefined);
 		}
 		const session = await acquireSession(sessionKey, sessionId, cwd, options);
-		if (options.signal?.aborted) {
-			const timedOut =
-				descriptor.isTimedOutCancellation?.(options.signal.reason, options.signal) ??
-				isTimedOutCancellation(options.signal.reason, descriptor.cancelledErrorClass, options.signal);
-			throw new descriptor.cancelledErrorClass(timedOut);
-		}
+		throwIfCallerCancelled(options);
 		const kernel = await acquireLiveSessionKernel(session, cwd, options);
 		if (!isCurrent(session, kernel)) throw new descriptor.cancelledErrorClass(false);
+		throwIfCallerCancelled(options);
 		const runOptions = { ...options, cwd };
+		let result: TResult;
 		try {
-			return await descriptor.executeWithKernel(kernel, code, runOptions);
+			result = await descriptor.executeWithKernel(kernel, code, runOptions);
 		} catch (err) {
 			if (
 				descriptor.isCancellation?.(err) ||
@@ -382,16 +469,33 @@ export function createKernelSessionRegistry<
 			)
 				throw err;
 			if (kernel.isAlive()) throw err;
-			let retryKernel: TKernel;
-			if (descriptor.acquireLiveSessionKernel) {
-				retryKernel = await acquireLiveSessionKernel(session, cwd, options);
-			} else {
-				if (!isCurrent(session, kernel)) throw new descriptor.cancelledErrorClass(false);
-				retryKernel = await replaceSessionKernel(session, cwd, options);
-			}
-			if (!isCurrent(session, retryKernel)) throw new descriptor.cancelledErrorClass(false);
+			const retryKernel = await acquireRetryKernel(session, kernel, cwd, options);
+			throwIfCallerCancelled(options);
 			return await descriptor.executeWithKernel(retryKernel, code, runOptions);
 		}
+		if (
+			!result.cancelled ||
+			options.signal?.aborted ||
+			(options.deadlineMs !== undefined && options.deadlineMs <= Date.now()) ||
+			kernel.isAlive()
+		) {
+			return result;
+		}
+		let retryKernel: TKernel;
+		try {
+			retryKernel = await acquireRetryKernel(session, kernel, cwd, options);
+		} catch (err) {
+			const deadlineExpired = options.deadlineMs !== undefined && options.deadlineMs <= Date.now();
+			const cancelled = descriptor.isCancellation?.(err) || isCancellationError(err, descriptor.cancelledErrorClass);
+			if (deadlineExpired && cancelled) return result;
+			throw err;
+		}
+		throwIfCallerCancelled(options);
+		const retryResult = await descriptor.executeWithKernel(retryKernel, code, runOptions);
+		if (retryResult.cancelled && options.deadlineMs !== undefined && options.deadlineMs <= Date.now()) {
+			return result;
+		}
+		return retryResult;
 	}
 
 	return { disposeAll, disposeByOwner, executeOnSession };

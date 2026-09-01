@@ -99,6 +99,14 @@ describe("countTokens", () => {
 		expect(countTokens("hello world", Encoding.O200kBase)).toBe(2);
 		expect(countTokens(["hello world", "hello world"], Encoding.O200kBase)).toBe(4);
 	});
+
+	it("round-trips every Encoding through the local addon", () => {
+		for (const encoding of Object.values(Encoding)) {
+			const n = countTokens("hello", encoding);
+			expect(typeof n).toBe("number");
+			expect(n).toBeGreaterThan(0);
+		}
+	});
 });
 
 async function cleanupFixtures() {
@@ -774,6 +782,67 @@ describe("pi-natives", () => {
 			session.kill();
 			expect((await run).cancelled).toBeTrue();
 		});
+
+		// Needs this PR's rust; PR CI loads the published natives leaf.
+		it.skipIf(process.env.GITHUB_EVENT_NAME === "pull_request")(
+			"keeps a fast PTY child blocked while onChunk is stalled and still delivers every byte",
+			async () => {
+				if (process.platform === "win32") {
+					return;
+				}
+
+				const blockBytes = 64 * 1024;
+				const blocks = 80;
+				const scriptPath = path.join(testDir, "pty-slow-consumer.ts");
+				await Bun.write(
+					scriptPath,
+					`const block = Buffer.alloc(${blockBytes}, 0x78);\n` +
+						`for (let i = 0; i < ${blocks}; i++) process.stdout.write(block);\n` +
+						`process.stdout.write("END\\n");\n`,
+				);
+
+				const session = new PtySession();
+				let pid = 0;
+				let stalled = false;
+				let aliveDuringStall = false;
+				let output = "";
+				const result = await session.startArgv(
+					{
+						application: process.execPath,
+						args: [scriptPath],
+						cwd: testDir,
+						timeoutMs: 30_000,
+						cols: 400,
+						rows: 24,
+					},
+					(_error, chunk) => {
+						output += chunk;
+						if (stalled || !output.includes("x")) {
+							return;
+						}
+						stalled = true;
+						const until = Date.now() + 400;
+						while (Date.now() < until) {}
+						if (pid > 0) {
+							try {
+								process.kill(pid, 0);
+								aliveDuringStall = true;
+							} catch {}
+						}
+					},
+					(_error, childPid) => {
+						pid = childPid;
+					},
+				);
+
+				expect(result.timedOut).toBe(false);
+				expect(result.cancelled).toBe(false);
+				expect(result.exitCode).toBe(0);
+				expect(aliveDuringStall).toBe(true);
+				expect(output.split("x").length - 1).toBe(blockBytes * blocks);
+				expect(output.includes("END")).toBe(true);
+			},
+		);
 
 		it("should time out detached background workloads without hanging", async () => {
 			if (process.platform === "win32" || !Bun.which("bash")) {

@@ -19,7 +19,7 @@ async function createFixture(order: readonly string[]): Promise<string> {
 
 function tarHeaderMtimes(bytes: Uint8Array): number[] {
 	const mtimes: number[] = [];
-	for (let offset = 0; offset + 512 <= bytes.length; ) {
+	for (let offset = 0; offset + 512 <= bytes.length;) {
 		const header = bytes.subarray(offset, offset + 512);
 		if (header.every(byte => byte === 0)) break;
 		const sizeField = Buffer.from(header.subarray(124, 136)).toString("ascii").replace(/\0.*$/, "").trim();
