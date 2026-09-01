@@ -1,6 +1,19 @@
 // Model-lineage compat for "anthropic"; regenerated from the frozen census using class taxonomy selectors.
 
 class "anthropic" {
+	family "fable" {
+		revision ">=5.1" {
+			// Fable 5.1+ binds signed thinking to the exact preceding conversation.
+			thinking-prefix-binding #true
+		}
+	}
+	on "anthropic" "cloudflare-ai-gateway" "google-vertex" {
+		family "fable" {
+			revision ">=5.1" {
+				supports-thinking-binding-controls #true
+			}
+		}
+	}
 	on "aimlapi" "gitlab-duo" "kilo" "nanogpt" "venice" {
 		thinking-efforts "minimal" "low" "medium" "high" "xhigh"
 	}

@@ -193,6 +193,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"supports-eager-tool-input-streaming": wire("supportsEagerToolInputStreaming", ["anthropic"]),
 	"supports-long-cache-retention": wire("supportsLongCacheRetention", ["anthropic"]),
 	"supports-mid-conversation-system": wire("supportsMidConversationSystem", ["anthropic"]),
+	"supports-thinking-binding-controls": wire("supportsThinkingBindingControls", ["anthropic"]),
 
 	// ── wire: bedrock-converse-stream ──
 	"prompt-cache-maximum-checkpoints": wire("promptCacheMaximumCheckpoints", ["bedrock"]),
@@ -239,6 +240,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 		values: THINKING_MODES,
 	},
 	"thinking-requires-effort": { key: "requiresEffort", set: "thinking", shape: "scalar" },
+	"thinking-prefix-binding": { key: "prefixBinding", set: "thinking", shape: "scalar" },
 	"thinking-suppress-when-off": { key: "suppressWhenOff", set: "thinking", shape: "scalar" },
 	"thinking-supports-display": { key: "supportsDisplay", set: "thinking", shape: "scalar" },
 

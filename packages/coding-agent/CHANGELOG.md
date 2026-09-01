@@ -13,6 +13,22 @@
 - Fixed that same recovery path tearing down a bare `Target.attachToTarget` holder's page session while re-attaching, which made the holder's next command fail `Unknown session id` and, with no session left to sweep, left the debugger attachment orphaned past client disconnect: the relay bridge now preserves those tabId-routed page sessions across the Chrome root swap, so recovered tabs stay drivable and are still detached (infobar cleared) when the last holder disconnects ([#8930](https://github.com/can1357/oh-my-pi/issues/8930)).
 - Fixed browser-relay recovery minting fresh auto-attach sessions for a tab the user detached (dismissed the debugger infobar) while the final subscription-replay RPC was in flight: the replay continuation now revalidates that the tab is still attached, unbanned, and on the same extension socket before emitting replacement sessions, so downstream clients no longer receive sessions whose every command fails ([#8930](https://github.com/can1357/oh-my-pi/issues/8930)).
 - Fixed a second, concurrent subscription replay being launched when another tab's delayed guard detach triggered a same-socket hello while a replay was still in flight, which could double-issue journaled subscriptions and let a stale task retract sessions after commands resumed: same-socket hellos now preserve the active replay instead of discarding its task pointer ([#8930](https://github.com/can1357/oh-my-pi/issues/8930)).
+### Added
+
+- Stray `<SM:EDIT>` payloads the model emits as plain text (outside an edit tool call) are now recovered into a real edit tool call and executed through the normal pipeline; disable with the `edit.recoverInlineEdits` setting.
+- Advisors now receive the active memory backend's context (sharpshooter project decisions, mnemopi/hindsight instructions) in their system prompt, and the default advisor tool set gains `recall` when the backend provides it (hindsight/mnemopi).
+
+### Changed
+
+- Increased default input delay in trace CLI to 3s
+- Reworked the sloppy edit format's payload surface from `§`/`«`/`»`/`⟪│⟫` markers to XML tags: `<SM:EDIT path="…">` (with optional `all`), `<SM:FIND>` current text, `<SM:PUT>` final text; content between tags is raw file bytes with no entity escaping, and edit errors now return copy-ready XML payloads.
+
+### Fixed
+
+- Improved chat history stability during long-running sessions by preventing unnecessary message modification when date or directory context changes
+- Fixed `bun claude:trace` hanging due to a TLS ClientHello race condition in the proxy MITM bridge and added forward HTTP proxy support.
+- Fixed an invalid Lark grammar error in sloppy edit constrained decoding caused by unsupported regex lookahead.
+
 ## [18.1.1] - 2026-09-01
 
 ### Fixed

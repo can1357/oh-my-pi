@@ -1642,6 +1642,7 @@ export class AgentSession {
 			watchdogPrompt: config.advisorWatchdogPrompt,
 			sharedInstructions: config.advisorSharedInstructions,
 			contextPrompt: config.advisorContextPrompt,
+			memoryPrompt: config.advisorMemoryPrompt,
 			configs: config.advisorConfigs,
 			streamFn: config.advisorStreamFn,
 			transformProviderContext: config.transformProviderContext,
@@ -10022,6 +10023,15 @@ export class AgentSession {
 	 */
 	setAdvisorContextPrompt(contextPrompt: string | undefined): void {
 		this.#advisors.setContextPrompt(contextPrompt);
+	}
+
+	/**
+	 * Refresh the memory backend instructions advisor sessions run against.
+	 * Store-only: live advisors pick the new value up at their next runtime
+	 * build (compaction, reset, toggle) — see `SessionAdvisors#setMemoryPrompt`.
+	 */
+	setAdvisorMemoryPrompt(memoryPrompt: string | undefined): void {
+		this.#advisors.setMemoryPrompt(memoryPrompt);
 	}
 
 	/**

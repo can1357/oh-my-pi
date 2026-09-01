@@ -309,6 +309,8 @@ export interface AgentSessionConfig {
 	advisorSharedInstructions?: string;
 	/** Project context rendered for advisor sessions. */
 	advisorContextPrompt?: string;
+	/** Memory backend developer instructions rendered for advisor sessions. */
+	advisorMemoryPrompt?: string;
 	/** Advisors discovered from WATCHDOG.yml. */
 	advisorConfigs?: AdvisorConfig[];
 	/** Strip tool descriptions from provider-bound side-request tool specs. */

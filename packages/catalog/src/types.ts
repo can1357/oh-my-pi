@@ -55,6 +55,11 @@ export interface ThinkingConfig {
 	 */
 	supportsDisplay?: boolean;
 	/**
+	 * Thinking signatures bind each block to its preceding conversation prefix.
+	 * Requests that rewrite the prefix must opt into the provider's drop/error control.
+	 */
+	prefixBinding?: boolean;
+	/**
 	 * Per-effort upstream wire-id routing for collapsed effort-tier variants
 	 * (`compat/collapse.ts`). Keyed by pi effort; `"off"` applies when
 	 * thinking is disabled. Missing keys fall back to `requestModelId ?? id`.
@@ -487,12 +492,14 @@ export interface AnthropicCompat {
 	supportsLongCacheRetention?: boolean;
 	/**
 	 * Whether mid-conversation `role: "system"` messages are accepted in the
-	 * `messages` array (Claude Opus 4.8+ and Claude Fable/Mythos 5 on the
-	 * first-party Claude API and Claude Platform on AWS). When unset,
-	 * auto-detected from the model id and base URL. Not available on Bedrock,
-	 * Vertex AI, or Microsoft Foundry.
+	 * `messages` array. When unset, auto-detected from model and deployment policy.
 	 */
 	supportsMidConversationSystem?: boolean;
+	/**
+	 * Whether the endpoint accepts `thinking.block_binding` and reports
+	 * `input_transformations` under the thinking-binding-controls beta.
+	 */
+	supportsThinkingBindingControls?: boolean;
 	/**
 	 * Whether the model accepts a forced `tool_choice` (`{ type: "any" }` or
 	 * `{ type: "tool", name }`). Claude Fable/Mythos 5 reject forced tool use

@@ -847,6 +847,7 @@ function resolveAnthropicPolicy(
 		supportsEagerToolInputStreaming: official,
 		supportsLongCacheRetention: official,
 		supportsMidConversationSystem: official && facts.anthropicAdaptiveGenAtLeast("4.8"),
+		supportsThinkingBindingControls: false,
 		supportsForcedToolChoice: !requiresThinkingEnabled && !facts.family("fable", "mythos"),
 		supportsSamplingParams: !facts.anthropicAdaptiveGenAtLeast("4.7"),
 		requiresToolResultId: false,
