@@ -864,6 +864,7 @@ export type ZedWireProvider = "anthropic" | "open_ai" | "google" | "x_ai";
 /** Compatibility settings for zed-agent API. */
 export interface ZedCompat {
 	provider?: ZedWireProvider;
+	multimodalFunctionResponse?: boolean;
 }
 
 export type ResolvedZedCompat = ZedCompat;

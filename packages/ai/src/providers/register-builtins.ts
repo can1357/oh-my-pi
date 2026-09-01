@@ -43,7 +43,7 @@ import type { OllamaChatOptions } from "./ollama";
 import type { OpenAICodexResponsesOptions } from "./openai-codex-responses";
 import type { OpenAICompletionsOptions } from "./openai-completions";
 import type { OpenAIResponsesOptions } from "./openai-responses";
-import { streamZed as streamZedProvider } from "./zed";
+import type { ZedOptions } from "./zed";
 
 // ---------------------------------------------------------------------------
 // Lazy provider module shape
@@ -143,6 +143,10 @@ interface BedrockProviderModule {
 		context: Context,
 		options: BedrockOptions,
 	) => AssistantMessageEventStream;
+}
+
+interface ZedProviderModule {
+	streamZed: (model: Model<"zed-agent">, context: Context, options: ZedOptions) => AssistantMessageEventStream;
 }
 
 // ---------------------------------------------------------------------------
@@ -461,7 +465,10 @@ function loadDevinProviderModule(): Promise<LazyProviderModule<"devin-agent">> {
 }
 
 function loadZedProviderModule(): Promise<LazyProviderModule<"zed-agent">> {
-	zedProviderModulePromise ||= Promise.resolve({ stream: streamZedProvider });
+	zedProviderModulePromise ||= import("./zed").then(module => {
+		const provider = module as ZedProviderModule;
+		return { stream: provider.streamZed };
+	});
 	return zedProviderModulePromise;
 }
 

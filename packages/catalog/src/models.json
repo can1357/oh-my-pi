@@ -361181,7 +361181,8 @@
 			"requiresGlyphTokenization": true,
 			"tokenizer": "claude-v3",
 			"compat": {
-				"provider": "anthropic"
+				"provider": "anthropic",
+				"multimodalFunctionResponse": false
 			},
 			"supportsComputerUse": false,
 			"compatConfig": {
@@ -361225,7 +361226,8 @@
 			"requiresGlyphTokenization": true,
 			"tokenizer": "claude-v3",
 			"compat": {
-				"provider": "anthropic"
+				"provider": "anthropic",
+				"multimodalFunctionResponse": false
 			},
 			"supportsComputerUse": false,
 			"compatConfig": {
@@ -361269,7 +361271,8 @@
 			"requiresGlyphTokenization": true,
 			"tokenizer": "claude-v3",
 			"compat": {
-				"provider": "anthropic"
+				"provider": "anthropic",
+				"multimodalFunctionResponse": false
 			},
 			"supportsComputerUse": false,
 			"compatConfig": {
@@ -361313,7 +361316,8 @@
 			"requiresGlyphTokenization": true,
 			"tokenizer": "claude-v5-sonnet",
 			"compat": {
-				"provider": "anthropic"
+				"provider": "anthropic",
+				"multimodalFunctionResponse": false
 			},
 			"supportsComputerUse": false,
 			"compatConfig": {
@@ -361357,7 +361361,8 @@
 			},
 			"requiresGlyphTokenization": false,
 			"compat": {
-				"provider": "google"
+				"provider": "google",
+				"multimodalFunctionResponse": true
 			},
 			"supportsComputerUse": false,
 			"compatConfig": {
@@ -361399,7 +361404,8 @@
 			},
 			"requiresGlyphTokenization": false,
 			"compat": {
-				"provider": "google"
+				"provider": "google",
+				"multimodalFunctionResponse": true
 			},
 			"supportsComputerUse": false,
 			"compatConfig": {
@@ -361443,7 +361449,8 @@
 			},
 			"requiresGlyphTokenization": false,
 			"compat": {
-				"provider": "google"
+				"provider": "google",
+				"multimodalFunctionResponse": true
 			},
 			"supportsComputerUse": false,
 			"compatConfig": {
@@ -361486,7 +361493,8 @@
 			},
 			"requiresGlyphTokenization": false,
 			"compat": {
-				"provider": "open_ai"
+				"provider": "open_ai",
+				"multimodalFunctionResponse": false
 			},
 			"supportsComputerUse": false,
 			"compatConfig": {
@@ -361529,7 +361537,8 @@
 			},
 			"requiresGlyphTokenization": false,
 			"compat": {
-				"provider": "open_ai"
+				"provider": "open_ai",
+				"multimodalFunctionResponse": false
 			},
 			"supportsComputerUse": false,
 			"compatConfig": {
@@ -361572,7 +361581,8 @@
 			},
 			"requiresGlyphTokenization": false,
 			"compat": {
-				"provider": "open_ai"
+				"provider": "open_ai",
+				"multimodalFunctionResponse": false
 			},
 			"supportsComputerUse": false,
 			"compatConfig": {
@@ -361615,7 +361625,8 @@
 			},
 			"requiresGlyphTokenization": false,
 			"compat": {
-				"provider": "open_ai"
+				"provider": "open_ai",
+				"multimodalFunctionResponse": false
 			},
 			"supportsComputerUse": false,
 			"compatConfig": {
@@ -361658,7 +361669,8 @@
 			},
 			"requiresGlyphTokenization": false,
 			"compat": {
-				"provider": "open_ai"
+				"provider": "open_ai",
+				"multimodalFunctionResponse": false
 			},
 			"supportsComputerUse": false,
 			"compatConfig": {
@@ -361702,7 +361714,8 @@
 			"requiresGlyphTokenization": false,
 			"contextPromotionTarget": "zed-agent/gpt-5.4",
 			"compat": {
-				"provider": "open_ai"
+				"provider": "open_ai",
+				"multimodalFunctionResponse": false
 			},
 			"supportsComputerUse": false,
 			"compatConfig": {
@@ -361746,7 +361759,8 @@
 			},
 			"requiresGlyphTokenization": false,
 			"compat": {
-				"provider": "open_ai"
+				"provider": "open_ai",
+				"multimodalFunctionResponse": false
 			},
 			"supportsComputerUse": false,
 			"compatConfig": {
@@ -361790,7 +361804,8 @@
 			},
 			"requiresGlyphTokenization": false,
 			"compat": {
-				"provider": "open_ai"
+				"provider": "open_ai",
+				"multimodalFunctionResponse": false
 			},
 			"supportsComputerUse": false,
 			"compatConfig": {
@@ -361834,7 +361849,8 @@
 			},
 			"requiresGlyphTokenization": false,
 			"compat": {
-				"provider": "open_ai"
+				"provider": "open_ai",
+				"multimodalFunctionResponse": false
 			},
 			"supportsComputerUse": false,
 			"compatConfig": {

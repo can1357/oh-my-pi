@@ -554,9 +554,11 @@ describe("Zed Model Discovery", () => {
 
 		const sonnetPolicy = resolveModelPolicy(sonnetSpec);
 		expect(sonnetPolicy.compat.provider).toBe("anthropic");
+		expect(sonnetPolicy.compat.multimodalFunctionResponse).toBe(false);
 
 		const sonnetModel = buildModel(sonnetSpec);
 		expect(sonnetModel.compat.provider).toBe("anthropic");
+		expect(sonnetModel.compat.multimodalFunctionResponse).toBe(false);
 		expect(sonnetModel.cost).toEqual({
 			input: 2.2,
 			output: 11.0,
@@ -630,14 +632,23 @@ describe("Zed Model Discovery", () => {
 
 		const geminiPolicy = resolveModelPolicy(geminiSpec);
 		expect(geminiPolicy.compat.provider).toBe("google");
+		expect(geminiPolicy.compat.multimodalFunctionResponse).toBe(true);
 
 		const geminiModel = buildModel(geminiSpec);
 		expect(geminiModel.compat.provider).toBe("google");
+		expect(geminiModel.compat.multimodalFunctionResponse).toBe(true);
 		expect(geminiModel.cost).toEqual({
 			input: 0.55,
 			output: 3.3,
 			cacheRead: 0.1375,
 			cacheWrite: 0.6875,
 		});
+
+		// Explicit compat override takes precedence
+		const geminiExplicitFalse: ModelSpec<"zed-agent"> = {
+			...geminiSpec,
+			compat: { multimodalFunctionResponse: false },
+		};
+		expect(resolveModelPolicy(geminiExplicitFalse).compat.multimodalFunctionResponse).toBe(false);
 	});
 });

@@ -32,7 +32,6 @@ import {
 	mapStopReasonString,
 	resolveThoughtSignature,
 	retainThoughtSignature,
-	supportsMultimodalFunctionResponse,
 } from "./google-shared";
 import type { Part } from "./google-types";
 import { encodeResponsesToolResultOutput, parseResponseReasoningReplayItem } from "./openai-shared";
@@ -501,7 +500,7 @@ function mapContextToGoogle(context: Context, model: Model<"zed-agent">, options
 
 			const hasText = textResult.length > 0;
 			const hasImages = imageContent.length > 0;
-			const modelSupportsMultimodalFunctionResponse = supportsMultimodalFunctionResponse(model.id);
+			const modelSupportsMultimodalFunctionResponse = Boolean(model.compat?.multimodalFunctionResponse);
 
 			const responseValue = omittedImages
 				? [hasText ? textResult : "", NON_VISION_IMAGE_PLACEHOLDER].filter(Boolean).join("\n")

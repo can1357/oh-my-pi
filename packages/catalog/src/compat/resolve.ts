@@ -936,7 +936,10 @@ function resolveZedPolicy(spec: ModelSpec<"zed-agent">, facts: IdentityFacts): R
 			provider = "open_ai";
 		}
 	}
-	return { provider };
+	return {
+		provider,
+		multimodalFunctionResponse: spec.compat?.multimodalFunctionResponse ?? (facts.is("gemini") && facts.revGte("3")),
+	};
 }
 
 function resolveGooglePolicy(

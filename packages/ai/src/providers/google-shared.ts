@@ -156,19 +156,6 @@ export function resolveThoughtSignature(
 	return isSameProviderAndModel && isValidThoughtSignature(signature) ? signature : undefined;
 }
 
-function getGeminiMajorVersion(modelId: string): number | undefined {
-	const match = modelId.toLowerCase().match(/^gemini(?:-live)?-(\d+)/);
-	if (!match) return undefined;
-	return Number.parseInt(match[1], 10);
-}
-
-export function supportsMultimodalFunctionResponse(modelId: string): boolean {
-	const geminiMajorVersion = getGeminiMajorVersion(modelId);
-	if (geminiMajorVersion !== undefined) {
-		return geminiMajorVersion >= 3;
-	}
-	return true;
-}
 /**
  * Convert internal messages to Gemini Content[] format.
  */

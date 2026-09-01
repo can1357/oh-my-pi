@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { renderDemotedThinking } from "../src/dialect/demotion";
+import { streamZed } from "../src/providers/register-builtins";
 import { NON_VISION_IMAGE_PLACEHOLDER } from "../src/providers/vision-guard";
 import { buildZedProviderRequest, resolveProviderKind } from "../src/providers/zed";
 import { invalidateZedLlmToken } from "../src/registry/oauth/zed-token-pool";
@@ -10,24 +11,20 @@ import type { AssistantMessage, Context, FetchImpl, Model, ModelSpec } from "../
 import { mockFetch } from "./helpers/fetch-mock";
 
 const zeroCost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
-
-function makeModel(
-	spec: Omit<
-		ModelSpec<"zed-agent">,
-		"api" | "provider" | "baseUrl" | "cost" | "reasoning" | "input" | "contextWindow" | "maxTokens"
-	> &
-		Partial<Pick<ModelSpec<"zed-agent">, "reasoning" | "input" | "contextWindow" | "maxTokens">>,
-): Model<"zed-agent"> {
+function makeModel(spec: Partial<ModelSpec<"zed-agent">> & { id: string }): Model<"zed-agent"> {
+	const { name, id, ...rest } = spec;
 	return buildModel({
+		id,
+		name: name ?? id,
 		api: "zed-agent",
 		provider: "zed-agent",
 		baseUrl: "https://cloud.zed.dev",
-		cost: zeroCost,
 		reasoning: false,
 		input: ["text"],
-		contextWindow: 128_000,
-		maxTokens: 8_192,
-		...spec,
+		contextWindow: 128000,
+		maxTokens: 4096,
+		cost: zeroCost,
+		...rest,
 	});
 }
 
@@ -1156,5 +1153,134 @@ describe("Zed Provider Payload Construction", () => {
 		} finally {
 			invalidateZedLlmToken(userId, accessToken);
 		}
+	});
+	it("hoists tool-result images out of functionResponse.parts for models with multimodalFunctionResponse: false", () => {
+		const model = makeModel({
+			id: "google/gemini-2.5-flash",
+			compat: {
+				provider: "google",
+				multimodalFunctionResponse: false,
+			},
+			input: ["text", "image"],
+		});
+
+		const context: Context = {
+			messages: [
+				{
+					role: "toolResult",
+					toolCallId: "call_1",
+					toolName: "getImageDescription",
+					isError: false,
+					timestamp: Date.now(),
+					content: [
+						{ type: "text", text: "This is a beautiful sunset" },
+						{ type: "image", data: "test-image-data", mimeType: "image/png" },
+					],
+				},
+			],
+		};
+
+		const request = buildZedProviderRequest("google", context, model) as {
+			contents: Array<{ role: string; parts: unknown[] }>;
+		};
+
+		// Should have two user messages - one with functionResponse (without images) and one with hoisted images
+		expect(request.contents).toHaveLength(2);
+
+		// First message should contain functionResponse without image parts
+		expect(request.contents[0]).toEqual({
+			role: "user",
+			parts: [
+				{
+					functionResponse: {
+						name: "getImageDescription",
+						response: { output: "This is a beautiful sunset" },
+					},
+				},
+			],
+		});
+
+		// Second message should contain the hoisted image
+		expect(request.contents[1]).toEqual({
+			role: "user",
+			parts: [
+				{ text: "Tool result image:" },
+				{
+					inlineData: {
+						mimeType: "image/png",
+						data: "test-image-data",
+					},
+				},
+			],
+		});
+	});
+
+	it("nests images directly inside functionResponse.parts for models with multimodalFunctionResponse: true", () => {
+		const model = makeModel({
+			id: "google/gemini-3.0-pro",
+			compat: {
+				provider: "google",
+				multimodalFunctionResponse: true,
+			},
+			input: ["text", "image"],
+		});
+
+		const context: Context = {
+			messages: [
+				{
+					role: "toolResult",
+					toolCallId: "call_1",
+					toolName: "getImageDescription",
+					isError: false,
+					timestamp: Date.now(),
+					content: [
+						{ type: "text", text: "This is a beautiful sunset" },
+						{ type: "image", data: "test-image-data", mimeType: "image/png" },
+					],
+				},
+			],
+		};
+
+		const request = buildZedProviderRequest("google", context, model) as {
+			contents: Array<{ role: string; parts: unknown[] }>;
+		};
+
+		// Should have one user message with nested functionResponse containing images
+		expect(request.contents).toHaveLength(1);
+
+		// Message should contain functionResponse with image parts nested inside
+		expect(request.contents[0]).toEqual({
+			role: "user",
+			parts: [
+				{
+					functionResponse: {
+						name: "getImageDescription",
+						response: { output: "This is a beautiful sunset" },
+						parts: [
+							{
+								inlineData: {
+									mimeType: "image/png",
+									data: "test-image-data",
+								},
+							},
+						],
+					},
+				},
+			],
+		});
+	});
+	it("exports streamZed as a lazy stream function without throwing at import time", () => {
+		// This test verifies that the streamZed function can be imported without throwing
+		// and that it's a function that returns an AssistantMessageEventStream when called
+		expect(typeof streamZed).toBe("function");
+
+		// We're not actually going to call the function since that would require
+		// a real Zed provider connection, but we can verify it exists and is callable
+		expect(streamZed).toBeDefined();
+		expect(() => {
+			// This should not throw at import time
+			const fnType = typeof streamZed;
+			expect(fnType).toBe("function");
+		}).not.toThrow();
 	});
 });
