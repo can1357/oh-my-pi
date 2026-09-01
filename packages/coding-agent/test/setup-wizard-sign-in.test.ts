@@ -1,4 +1,4 @@
-import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import type { AuthStorage } from "@oh-my-pi/pi-ai";
 import type { OAuthLoginCallbacks, OAuthProviderId } from "@oh-my-pi/pi-ai/oauth/types";
 import { SignInTab } from "@oh-my-pi/pi-coding-agent/modes/setup-wizard/scenes/sign-in";
@@ -7,12 +7,22 @@ import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import * as clipboard from "@oh-my-pi/pi-coding-agent/utils/clipboard";
 import type { Component } from "@oh-my-pi/pi-tui";
 
+const ambientBrowser = process.env.BROWSER;
+
 beforeAll(async () => {
 	await initTheme();
 });
 
+// A shell that exports BROWSER=none would suppress the openInBrowser calls the
+// tests below assert on. Each test that wants BROWSER sets it itself.
+beforeEach(() => {
+	delete process.env.BROWSER;
+});
+
 afterEach(() => {
 	vi.restoreAllMocks();
+	if (ambientBrowser === undefined) delete process.env.BROWSER;
+	else process.env.BROWSER = ambientBrowser;
 });
 
 describe("SignInTab", () => {
