@@ -840,10 +840,10 @@ export class AgentSession {
 		// the still-old context (the transition hasn't reached agent.reset() yet), start a
 		// stale provider turn that races the reset, and — once reconnected — append its
 		// output to the fresh session (issue #5800). A disconnected session never owns the
-		// queue: the transition does. newSession/switchSession drop the queue (reset /
-		// clearAllQueues), so nothing survives; compaction preserves it and re-drains itself
-		// after #reconnectToAgent (see compact()'s finally); an explicit prompt flushes it
-		// in every case.
+		// queue: successful newSession/switchSession transitions drop it (reset /
+		// clearAllQueues), while cancelled transitions reconnect and explicitly re-drain it.
+		// Compaction preserves it and re-drains itself after #reconnectToAgent (see
+		// compact()'s finally); an explicit prompt flushes it in every case.
 		if (this.#unsubscribeAgent === undefined) return;
 		// A concern steered into a resumed streaming run after a user interrupt can
 		// strand at the turn tail (steered past the loop's final boundary poll). While
@@ -1872,15 +1872,33 @@ export class AgentSession {
 		this.#planProposalHandler = handler ?? undefined;
 	}
 
-	#sessionBeforeSwitchReconciler: (() => Promise<void>) | undefined;
+	#sessionBeforeSwitchReconciler: ((reason: "new" | "resume") => Promise<boolean>) | undefined;
 
-	setSessionBeforeSwitchReconciler(reconciler: (() => Promise<void>) | null): void {
+	setSessionBeforeSwitchReconciler(reconciler: ((reason: "new" | "resume") => Promise<boolean>) | null): void {
 		this.#sessionBeforeSwitchReconciler = reconciler ?? undefined;
 	}
 
-	#sessionSwitchReconciler: (() => Promise<void>) | undefined;
+	#resumeAfterCancelledSessionTransition(): void {
+		this.#reconnectToAgent();
+		this.#drainStrandedQueuedMessages();
+	}
 
-	setSessionSwitchReconciler(reconciler: (() => Promise<void>) | null): void {
+	async #reconcileBeforeSessionTransition(reason: "new" | "resume"): Promise<boolean> {
+		try {
+			if ((await this.#sessionBeforeSwitchReconciler?.(reason)) === false) {
+				this.#resumeAfterCancelledSessionTransition();
+				return false;
+			}
+			return true;
+		} catch (error) {
+			this.#resumeAfterCancelledSessionTransition();
+			throw error;
+		}
+	}
+
+	#sessionSwitchReconciler: ((outcome: "committed" | "rolled-back") => Promise<void>) | undefined;
+
+	setSessionSwitchReconciler(reconciler: ((outcome: "committed" | "rolled-back") => Promise<void>) | null): void {
 		this.#sessionSwitchReconciler = reconciler ?? undefined;
 	}
 
@@ -7284,6 +7302,7 @@ export class AgentSession {
 		this.#disconnectFromAgent();
 		let advisorRecordersDetached = false;
 		await this.abort();
+		if (!(await this.#reconcileBeforeSessionTransition("new"))) return false;
 		this.#cancelOwnAsyncJobs();
 		this.#closeAllProviderSessions("new session");
 		await this.#bash.flushPending();
@@ -8382,7 +8401,7 @@ export class AgentSession {
 
 		this.#disconnectFromAgent();
 		await this.abort({ goalReason: "internal" });
-		await this.#sessionBeforeSwitchReconciler?.();
+		if (!(await this.#reconcileBeforeSessionTransition("resume"))) return false;
 
 		await this.#bash.flushPending();
 		// Flush pending writes before switching so restore snapshots reflect committed state.
@@ -8580,7 +8599,7 @@ export class AgentSession {
 			}
 			this.#reconnectToAgent();
 			try {
-				await this.#sessionSwitchReconciler?.();
+				await this.#sessionSwitchReconciler?.("committed");
 			} catch (error) {
 				logger.warn("Failed to reconcile session mode after switch", {
 					targetSessionFile: sessionPath,
@@ -8662,7 +8681,7 @@ export class AgentSession {
 			this.#advisors.reattachRecorderFeeds();
 			this.#reconnectToAgent();
 			try {
-				await this.#sessionSwitchReconciler?.();
+				await this.#sessionSwitchReconciler?.("rolled-back");
 			} catch (reconcileError) {
 				logger.warn("Failed to reconcile session mode after switch rollback", {
 					targetSessionFile: sessionPath,

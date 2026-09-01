@@ -244,6 +244,29 @@ import { UiHelpers } from "./utils/ui-helpers";
 
 const STILL_CLOSING_DELAY_MS = 3_000;
 const DEFAULT_WORKING_MESSAGE = "Working…";
+const TOOL_PRESENTATION_RETRY_INITIAL_DELAY_MS = 250;
+const TOOL_PRESENTATION_RETRY_MAX_DELAY_MS = 2_000;
+
+interface ToolPresentationSnapshot {
+	enabled: string[];
+	mounted: string[];
+}
+
+type GuidedGoalInterview =
+	| { phase: "dispatching"; previousPresentation: ToolPresentationSnapshot; settled: Promise<void> }
+	| { phase: "pending" | "cleanup-failed"; previousPresentation: ToolPresentationSnapshot }
+	| { phase: "restoring"; previousPresentation: ToolPresentationSnapshot; restore: Promise<boolean> };
+
+interface GuidedGoalInterviewSwitchRollback {
+	activePresentation: ToolPresentationSnapshot;
+	previousPresentation: ToolPresentationSnapshot;
+}
+
+interface GoalModeExitOptions {
+	silent?: boolean;
+	paused?: boolean;
+	reason?: "completed" | "paused" | "dropped";
+}
 
 interface WorkingMessageAccent {
 	main: string;
@@ -728,7 +751,11 @@ export class InteractiveMode implements InteractiveModeContext {
 	/** Header components below the config warnings + welcome, retained so a live config-warning change can rebuild the header (#10048). */
 	#headerAfter: readonly Component[] = [];
 	#planModePreviousTools: string[] | undefined;
-	#goalModePreviousTools: string[] | undefined;
+	#goalModePreviousToolPresentation: ToolPresentationSnapshot | undefined;
+	#goalModeExit: Promise<boolean> | undefined;
+	#goalModeExitPending: GoalModeExitOptions | undefined;
+	#guidedGoalInterview: GuidedGoalInterview | undefined;
+	#guidedGoalInterviewSwitchRollback: GuidedGoalInterviewSwitchRollback | undefined;
 	#vibeModePreviousTools: string[] | undefined;
 	#vibeModeOwnerScope: VibeOwnerScope | undefined;
 	#vibeScopeSuspendedForSwitch = false;
@@ -1122,8 +1149,13 @@ export class InteractiveMode implements InteractiveModeContext {
 			getDraftText: () => this.#inputController.getDraftText(),
 			beginDispose: () => this.session.beginDispose(),
 			saveDraft: text => this.sessionManager.saveDraft(text),
-			disposeSession: reason =>
-				this.session.dispose({ mnemopiConsolidateTimeoutMs: SHUTDOWN_CONSOLIDATE_BUDGET_MS, reason }),
+			disposeSession: async reason => {
+				await this.#retryPendingGoalModeExit(true);
+				await this.session.dispose({
+					mnemopiConsolidateTimeoutMs: SHUTDOWN_CONSOLIDATE_BUDGET_MS,
+					reason,
+				});
+			},
 		});
 		// Forward the postmortem reason (SIGTERM/SIGHUP/uncaughtException/…) so the
 		// persisted `session_exit` diagnostic carries the real trigger. Postmortem
@@ -1299,11 +1331,38 @@ export class InteractiveMode implements InteractiveModeContext {
 		await logger.time("InteractiveMode.init:hooks", () => this.initHooksAndCustomTools());
 
 		// Restore mode from session (e.g. plan mode on resume)
-		this.session.setSessionBeforeSwitchReconciler?.(async () => {
-			await this.#liveCommandController.stop();
-			await this.#quiesceVibeForSessionSwitch();
+		this.session.setSessionBeforeSwitchReconciler?.(async reason => {
+			if (reason === "resume") {
+				if (!(await this.#retryGuidedGoalInterviewSwitchRollback())) return false;
+			} else {
+				this.#guidedGoalInterviewSwitchRollback = undefined;
+			}
+			const interview = this.#guidedGoalInterview;
+			const rollbackCandidate =
+				reason === "resume" && interview && (interview.phase === "pending" || interview.phase === "dispatching")
+					? {
+							activePresentation: this.#captureToolPresentation(),
+							previousPresentation: interview.previousPresentation,
+						}
+					: undefined;
+			if (!(await this.#restoreGuidedGoalInterviewTools())) return false;
+			const rollback =
+				rollbackCandidate && !this.session.getGoalModeState()?.enabled ? rollbackCandidate : undefined;
+			try {
+				if (!(await this.#retryPendingGoalModeExit())) {
+					if (rollback) await this.#reinstateGuidedGoalInterview(rollback);
+					return false;
+				}
+				await this.#liveCommandController.stop();
+				await this.#quiesceVibeForSessionSwitch();
+			} catch (error) {
+				if (rollback) await this.#reinstateGuidedGoalInterview(rollback);
+				throw error;
+			}
+			this.#guidedGoalInterviewSwitchRollback = rollback;
+			return true;
 		});
-		this.session.setSessionSwitchReconciler?.(() => this.#reconcileModeFromSession({ preserveActiveGoal: true }));
+		this.session.setSessionSwitchReconciler?.(outcome => this.#reconcileModeAfterSessionSwitch(outcome));
 		await logger.time("InteractiveMode.init:reconcileMode", () => this.#reconcileModeFromSession());
 
 		// Brand-new sessions optionally start in plan mode when the user has made it
@@ -1648,9 +1707,39 @@ export class InteractiveMode implements InteractiveModeContext {
 		return true;
 	}
 
+	async #restoreToolPresentationBeforeInput(): Promise<boolean> {
+		if (!(await this.#retryGuidedGoalInterviewSwitchRollback())) return false;
+		if (
+			(this.#guidedGoalInterview?.phase === "cleanup-failed" || this.#guidedGoalInterview?.phase === "restoring") &&
+			!(await this.#restoreGuidedGoalInterviewTools())
+		) {
+			return false;
+		}
+		return await this.#retryPendingGoalModeExit();
+	}
+
+	async #waitForToolPresentationBeforeInput(): Promise<void> {
+		let retryDelay = TOOL_PRESENTATION_RETRY_INITIAL_DELAY_MS;
+		let warned = false;
+		while (!(await this.#restoreToolPresentationBeforeInput())) {
+			if (!warned) {
+				this.showWarning("Could not restore the previous tool set. Input is paused while retrying.");
+				warned = true;
+			}
+			await Bun.sleep(retryDelay);
+			retryDelay = Math.min(retryDelay * 2, TOOL_PRESENTATION_RETRY_MAX_DELAY_MS);
+		}
+	}
+
 	async getUserInput(): Promise<SubmittedUserInput> {
-		if (this.session.getGoalModeState()?.mode === "exiting") {
-			await this.#exitGoalMode({ reason: "completed", silent: true });
+		const submitWasDisabled = this.editor.disableSubmit;
+		this.editor.disableSubmit = true;
+		this.ui.requestRender();
+		try {
+			await this.#waitForToolPresentationBeforeInput();
+		} finally {
+			this.editor.disableSubmit = submitWasDisabled;
+			this.ui.requestRender();
 		}
 		const { promise, resolve } = Promise.withResolvers<SubmittedUserInput>();
 		this.onInputCallback = input => {
@@ -2858,6 +2947,119 @@ export class InteractiveMode implements InteractiveModeContext {
 		};
 	}
 
+	#captureToolPresentation(): ToolPresentationSnapshot {
+		return {
+			enabled: this.session.getEnabledToolNames(),
+			mounted: this.session.getMountedXdevToolNames(),
+		};
+	}
+
+	#capturePreGoalToolPresentation(): ToolPresentationSnapshot {
+		const current = this.#captureToolPresentation();
+		return {
+			enabled: current.enabled.filter(name => name !== "goal"),
+			mounted: current.mounted.filter(name => name !== "goal"),
+		};
+	}
+
+	async #restoreGuidedGoalInterviewTools(): Promise<boolean> {
+		const interview = this.#guidedGoalInterview;
+		if (!interview) return true;
+		if (interview.phase === "restoring") {
+			return await interview.restore;
+		}
+		if (interview.phase === "dispatching") {
+			await interview.settled;
+			if (this.#guidedGoalInterview === interview) {
+				this.#guidedGoalInterview = {
+					phase: "pending",
+					previousPresentation: interview.previousPresentation,
+				};
+			}
+			return await this.#restoreGuidedGoalInterviewTools();
+		}
+		const restore = (async () => {
+			try {
+				await this.session.setActiveToolPresentation(
+					interview.previousPresentation.enabled,
+					interview.previousPresentation.mounted,
+				);
+				return true;
+			} catch (error) {
+				logger.warn("Failed to restore tools after guided goal interview", { error: String(error) });
+				return false;
+			}
+		})();
+		const restoring: GuidedGoalInterview = {
+			phase: "restoring",
+			previousPresentation: interview.previousPresentation,
+			restore,
+		};
+		this.#guidedGoalInterview = restoring;
+		const restored = await restore;
+		if (this.#guidedGoalInterview === restoring) {
+			this.#guidedGoalInterview = restored
+				? undefined
+				: { phase: "cleanup-failed", previousPresentation: interview.previousPresentation };
+		}
+		return restored;
+	}
+	async #reinstateGuidedGoalInterview(rollback: GuidedGoalInterviewSwitchRollback): Promise<boolean> {
+		try {
+			await this.session.setActiveToolPresentation(
+				rollback.activePresentation.enabled,
+				rollback.activePresentation.mounted,
+			);
+			this.#guidedGoalInterview = {
+				phase: "pending",
+				previousPresentation: rollback.previousPresentation,
+			};
+			return true;
+		} catch (error) {
+			logger.warn("Failed to reactivate guided goal interview after session switch rollback", {
+				error: String(error),
+			});
+			return false;
+		}
+	}
+
+	async #retryGuidedGoalInterviewSwitchRollback(): Promise<boolean> {
+		const rollback = this.#guidedGoalInterviewSwitchRollback;
+		if (!rollback) return true;
+		if (!(await this.#reinstateGuidedGoalInterview(rollback))) return false;
+		if (this.#guidedGoalInterviewSwitchRollback === rollback) {
+			this.#guidedGoalInterviewSwitchRollback = undefined;
+		}
+		return true;
+	}
+
+	async #reconcileModeAfterSessionSwitch(outcome: "committed" | "rolled-back"): Promise<void> {
+		const rollback = this.#guidedGoalInterviewSwitchRollback;
+		this.#guidedGoalInterviewSwitchRollback = undefined;
+		let reconcileError: unknown;
+		let reconcileFailed = false;
+		try {
+			await this.#reconcileModeFromSession({ preserveActiveGoal: true });
+		} catch (error) {
+			reconcileError = error;
+			reconcileFailed = true;
+		}
+		if (outcome === "rolled-back" && rollback) {
+			this.#guidedGoalInterviewSwitchRollback = rollback;
+			if (!(await this.#retryGuidedGoalInterviewSwitchRollback())) {
+				throw new Error("Failed to reactivate guided goal interview after session switch rollback.");
+			}
+		}
+		if (reconcileFailed) throw reconcileError;
+	}
+
+	#transferGuidedGoalInterviewToGoal(): void {
+		const interview = this.#guidedGoalInterview;
+		if (!interview) return;
+		this.#goalModePreviousToolPresentation = interview.previousPresentation;
+		this.#guidedGoalInterview = undefined;
+	}
+
 	async #handleGoalSessionEvent(event: AgentSessionEvent): Promise<void> {
 		if (event.type === "agent_start") {
 			this.#goalTurnHadToolCalls = false;
@@ -2876,6 +3078,10 @@ export class InteractiveMode implements InteractiveModeContext {
 			return;
 		}
 		if (event.type === "goal_updated") {
+			if (event.state?.enabled) {
+				// Goal exit now owns restoration of the pre-interview tool set.
+				this.#transferGuidedGoalInterviewToGoal();
+			}
 			// Handle drop before clearing goalModeEnabled so #exitGoalMode can
 			// still restore the previous tool set while the flag is true.
 			if (event.state?.goal?.status === "dropped") {
@@ -2892,6 +3098,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 		if (event.type !== "agent_end") {
 			return;
+		}
+		const interviewPhase = this.#guidedGoalInterview?.phase;
+		if (event.isTerminal !== false && (interviewPhase === "pending" || interviewPhase === "cleanup-failed")) {
+			await this.#restoreGuidedGoalInterviewTools();
 		}
 		if (this.#goalContinuationTurnInFlight) {
 			this.#goalSuppressNextContinuation = !this.#goalTurnHadToolCalls;
@@ -3018,13 +3228,16 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 
 		if (this.goalModeEnabled || this.goalModePaused) {
-			if (this.#goalModePreviousTools !== undefined) {
-				await this.session.setActiveToolsByName(this.#goalModePreviousTools);
+			if (this.#goalModePreviousToolPresentation) {
+				await this.session.setActiveToolPresentation(
+					this.#goalModePreviousToolPresentation.enabled,
+					this.#goalModePreviousToolPresentation.mounted,
+				);
 			}
 			this.session.setGoalModeState(undefined);
 			this.goalModeEnabled = false;
 			this.goalModePaused = false;
-			this.#goalModePreviousTools = undefined;
+			this.#goalModePreviousToolPresentation = undefined;
 			this.#goalTurnHadToolCalls = false;
 			this.#goalContinuationTurnInFlight = false;
 			this.#goalSuppressNextContinuation = false;
@@ -3099,9 +3312,9 @@ export class InteractiveMode implements InteractiveModeContext {
 			// sdk.ts excludes "goal" from the initial active tool set unconditionally.
 			// Re-add it now so the agent can call resume, complete, or drop on this goal.
 			if (restored?.goal) {
-				const previousTools = this.session.getEnabledToolNames().filter(name => name !== "goal");
-				this.#goalModePreviousTools = previousTools;
-				await this.session.setActiveToolsByName([...new Set([...previousTools, "goal"])]);
+				const previousPresentation = this.#capturePreGoalToolPresentation();
+				this.#goalModePreviousToolPresentation = previousPresentation;
+				await this.session.setActiveToolsByName([...new Set([...previousPresentation.enabled, "goal"])]);
 			}
 			this.#updateGoalModeStatus();
 			return;
@@ -3355,9 +3568,9 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.showWarning("Exit vibe mode first.");
 			return;
 		}
-		const previousTools = this.session.getEnabledToolNames().filter(name => name !== "goal");
-		const goalTools = [...new Set([...previousTools, "goal"])];
-		this.#goalModePreviousTools = previousTools;
+		const previousPresentation = this.#capturePreGoalToolPresentation();
+		const goalTools = [...new Set([...previousPresentation.enabled, "goal"])];
+		this.#goalModePreviousToolPresentation = previousPresentation;
 		this.goalModePaused = false;
 		const state = options.resume
 			? await this.session.goalRuntime.resumeGoal()
@@ -3375,43 +3588,70 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 	}
 
-	async #exitGoalMode(options?: {
-		silent?: boolean;
-		paused?: boolean;
-		reason?: "completed" | "paused" | "dropped";
-	}): Promise<void> {
-		const previousTools = this.#goalModePreviousTools;
-		if (this.goalModeEnabled && previousTools) {
-			await this.session.setActiveToolsByName(previousTools);
-		}
-		const currentState = this.session.getGoalModeState();
-		if (options?.reason === "completed") {
-			this.session.setGoalModeState(undefined);
-			this.sessionManager.appendModeChange("none");
-			this.sessionManager.appendCustomEntry("goal-completed", {
-				objective: currentState?.goal?.objective,
-				tokensUsed: currentState?.goal?.tokensUsed,
-				tokenBudget: currentState?.goal?.tokenBudget,
-				timeUsedSeconds: currentState?.goal?.timeUsedSeconds,
-			});
-		}
-		this.goalModeEnabled = false;
-		this.goalModePaused = options?.paused ?? false;
-		this.#goalModePreviousTools = undefined;
-		this.#goalContinuationTurnInFlight = false;
-		this.#cancelGoalContinuation();
-		this.#updateGoalModeStatus();
-		if (!options?.silent) {
-			if (options?.reason === "completed") {
-				this.showStatus("Goal mode completed.");
-			} else if (options?.reason === "dropped") {
-				this.showStatus("Goal dropped.");
-			} else if (options?.paused) {
-				this.showStatus("Goal mode paused.");
-			} else {
-				this.showStatus("Goal mode disabled.");
+	async #exitGoalMode(options: GoalModeExitOptions = {}, finalizeOnRestoreFailure = false): Promise<boolean> {
+		this.#goalModeExitPending ??= options;
+		if (this.#goalModeExit) return await this.#goalModeExit;
+		const exitOptions = this.#goalModeExitPending;
+		const exit = (async () => {
+			const previousPresentation = this.#goalModePreviousToolPresentation;
+			if (previousPresentation) {
+				try {
+					await this.session.setActiveToolPresentation(previousPresentation.enabled, previousPresentation.mounted);
+				} catch (error) {
+					logger.warn("Failed to restore tools while exiting goal mode", { error: String(error) });
+					if (!finalizeOnRestoreFailure) return false;
+				}
+			}
+			const currentState = this.session.getGoalModeState();
+			if (exitOptions.reason === "completed") {
+				this.session.setGoalModeState(undefined);
+				this.sessionManager.appendModeChange("none");
+				this.sessionManager.appendCustomEntry("goal-completed", {
+					objective: currentState?.goal?.objective,
+					tokensUsed: currentState?.goal?.tokensUsed,
+					tokenBudget: currentState?.goal?.tokenBudget,
+					timeUsedSeconds: currentState?.goal?.timeUsedSeconds,
+				});
+			}
+			this.goalModeEnabled = false;
+			this.goalModePaused = exitOptions.paused ?? false;
+			this.#goalModePreviousToolPresentation = undefined;
+			this.#goalModeExitPending = undefined;
+			this.#goalContinuationTurnInFlight = false;
+			this.#cancelGoalContinuation();
+			this.#updateGoalModeStatus();
+			if (!exitOptions.silent) {
+				if (exitOptions.reason === "completed") {
+					this.showStatus("Goal mode completed.");
+				} else if (exitOptions.reason === "dropped") {
+					this.showStatus("Goal dropped.");
+				} else if (exitOptions.paused) {
+					this.showStatus("Goal mode paused.");
+				} else {
+					this.showStatus("Goal mode disabled.");
+				}
+			}
+			return true;
+		})();
+		this.#goalModeExit = exit;
+		try {
+			return await exit;
+		} finally {
+			if (this.#goalModeExit === exit) {
+				this.#goalModeExit = undefined;
 			}
 		}
+	}
+
+	async #retryPendingGoalModeExit(finalizeOnRestoreFailure = false): Promise<boolean> {
+		const options =
+			this.#goalModeExitPending ??
+			(this.session.getGoalModeState()?.mode === "exiting"
+				? { reason: "completed" as const, silent: true }
+				: undefined);
+		if (!options) return true;
+		const restored = await this.#exitGoalMode(options);
+		return !restored && finalizeOnRestoreFailure ? await this.#exitGoalMode(options, true) : restored;
 	}
 
 	async #readPlanFile(planFilePath: string): Promise<string | null> {
@@ -4147,6 +4387,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		rest?: string,
 		input?: Pick<SubmittedUserInput, "images" | "imageLinks">,
 	): Promise<boolean> {
+		let dispatchFinished: PromiseWithResolvers<void> | undefined;
 		try {
 			if (this.planModeEnabled || this.planModePaused) {
 				this.showWarning("Exit plan mode first.");
@@ -4156,6 +4397,17 @@ export class InteractiveMode implements InteractiveModeContext {
 				this.showWarning("Exit vibe mode first.");
 				return false;
 			}
+			if (!(await this.#retryGuidedGoalInterviewSwitchRollback())) {
+				this.showStatus("A guided goal interview is already in progress.");
+				return false;
+			}
+			if (this.#guidedGoalInterview) {
+				const cleanupFailed = this.#guidedGoalInterview.phase === "cleanup-failed";
+				if (!cleanupFailed || !(await this.#restoreGuidedGoalInterviewTools())) {
+					this.showStatus("A guided goal interview is already in progress.");
+					return false;
+				}
+			}
 			if (!this.session.settings.get("goal.enabled")) {
 				this.showWarning("Goal mode is disabled. Enable it in settings (goal.enabled).");
 				return false;
@@ -4164,39 +4416,97 @@ export class InteractiveMode implements InteractiveModeContext {
 				this.showStatus("Goal mode is already active. Use /goal to manage it, or /goal drop to start over.");
 				return false;
 			}
+			if (!(await this.#retryPendingGoalModeExit())) {
+				this.showWarning("The previous goal's tool set could not be restored.");
+				return false;
+			}
 			if (this.#getPausedGoalState()) {
 				this.showWarning("Resume the current goal first, or drop it before setting a new objective.");
 				return false;
 			}
 
-			// Expose the goal tool for the interview so the agent can finish by
-			// calling `goal create`. Record the pre-interview toolset first: the
-			// tool-driven create flips goalModeEnabled via `goal_updated`, and the
-			// eventual goal exit restores this set (dropping the goal tool again).
-			const enabledTools = this.session.getEnabledToolNames();
-			this.#goalModePreviousTools = enabledTools.filter(name => name !== "goal");
-			if (!enabledTools.includes("goal")) {
-				await this.session.setActiveToolsByName([...enabledTools, "goal"]);
+			// The interview cannot obey its ask-only contract when the built-in
+			// tool was disabled, excluded, or replaced by an extension.
+			if (!this.session.settings.get("ask.enabled") || !this.session.hasBuiltInTool("ask")) {
+				this.showWarning(
+					"The guided goal interview requires the built-in ask tool, but it is unavailable in this session.",
+				);
+				return false;
 			}
 
-			// The interview is a normal conversation: the kickoff rides in as a
-			// hidden developer message, the agent asks its questions as regular
-			// assistant turns, and the user answers in the ordinary editor. Queue
-			// behind an in-flight run instead of aborting it.
+			// Expose ask and goal for the interview. Record the pre-interview
+			// toolset first: goal exit must restore whether ask was previously active.
+			const previousPresentation = this.#captureToolPresentation();
+			const enabledTools = previousPresentation.enabled;
+			dispatchFinished = Promise.withResolvers<void>();
+			const interview: GuidedGoalInterview = {
+				phase: "dispatching",
+				previousPresentation,
+				settled: dispatchFinished.promise,
+			};
+			this.#guidedGoalInterview = interview;
+			if (!enabledTools.includes("ask") || !enabledTools.includes("goal")) {
+				await this.session.setActiveToolsByName([...new Set([...enabledTools, "ask", "goal"])]);
+			}
+			const activatedTools = this.session.getEnabledToolNames();
+			if (
+				!this.session.settings.get("ask.enabled") ||
+				!this.session.settings.get("goal.enabled") ||
+				!this.session.hasBuiltInTool("ask") ||
+				!this.session.hasBuiltInTool("goal") ||
+				!this.session.getToolForEvalBridge("ask") ||
+				!this.session.getToolForEvalBridge("goal") ||
+				!activatedTools.includes("ask") ||
+				!activatedTools.includes("goal")
+			) {
+				dispatchFinished.resolve();
+				await this.#restoreGuidedGoalInterviewTools();
+				this.showWarning(
+					"The guided goal interview requires ask and goal, but this session cannot activate both tools.",
+				);
+				return false;
+			}
+
+			// The interview kickoff is a hidden developer message. The agent asks
+			// through the built-in ask tool, receives answers as tool results, and
+			// creates the settled goal through `goal create`. Queue behind an
+			// in-flight run instead of aborting it.
 			const kickoff = prompt.render(guidedGoalInterviewPrompt, { initial: rest?.trim() || undefined });
 			const images = input?.images?.length ? input.images : undefined;
-			if (this.session.isStreaming) {
+			let queued = this.session.isStreaming;
+			if (queued) {
 				await this.session.followUp(kickoff, images, { synthetic: true });
 			} else {
 				try {
 					await this.session.prompt(kickoff, images ? { synthetic: true, images } : { synthetic: true });
 				} catch (error) {
 					if (!(error instanceof AgentBusyError)) throw error;
+					queued = true;
 					await this.session.followUp(kickoff, images, { synthetic: true });
 				}
 			}
+			dispatchFinished.resolve();
+			if (this.#guidedGoalInterview !== interview && !this.session.getGoalModeState()?.enabled) {
+				return false;
+			}
+			if (queued) {
+				if (this.#guidedGoalInterview === interview) {
+					this.#guidedGoalInterview = {
+						phase: "pending",
+						previousPresentation: interview.previousPresentation,
+					};
+				}
+			} else if (this.session.getGoalModeState()?.enabled) {
+				this.#transferGuidedGoalInterviewToGoal();
+			} else {
+				// prompt() has fully settled. No goal means the interview was
+				// aborted, rejected during preflight, or ended without creating one.
+				await this.#restoreGuidedGoalInterviewTools();
+			}
 			return true;
 		} catch (error) {
+			dispatchFinished?.resolve();
+			await this.#restoreGuidedGoalInterviewTools();
 			this.showError(error instanceof Error ? error.message : String(error));
 			return false;
 		}
@@ -4797,6 +5107,11 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	/** Shared `shutdown()`/`restart()` teardown: dispose the session and hand the terminal back. */
 	async #teardown(): Promise<void> {
+		if (this.#guidedGoalInterview?.phase === "dispatching") {
+			await this.session.abort();
+		}
+		await this.#restoreGuidedGoalInterviewTools();
+		await this.#retryPendingGoalModeExit(true);
 		await this.#liveCommandController.stop();
 
 		this.#btwController.dispose();
