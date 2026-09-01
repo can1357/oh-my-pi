@@ -532,7 +532,13 @@ describe("Agent hub Enter activation", () => {
 				focusResolved.resolve();
 			},
 			session: { getToolByName: () => undefined, extensionRunner: undefined },
-			sessionManager: { getCwd: () => TEST_CWD, getSessionFile: () => null },
+			sessionManager: {
+				getCwd: () => TEST_CWD,
+				getSessionFile: () => null,
+				getSessionId: () => "selector-session",
+				getEntries: () => [],
+				appendCustomEntry: () => "irc-history-entry",
+			},
 			hideThinkingBlock: false,
 		};
 		const controller = new SelectorController(ctx as unknown as InteractiveModeContext);
@@ -589,7 +595,13 @@ describe("Agent hub double-← gating", () => {
 			collabGuest: { agentRegistry: agents, hubRemote: undefined },
 			focusAgentSession: async () => {},
 			session: { getToolByName: () => undefined, extensionRunner: undefined },
-			sessionManager: { getCwd: () => TEST_CWD, getSessionFile: () => sessionFile },
+			sessionManager: {
+				getCwd: () => TEST_CWD,
+				getSessionFile: () => sessionFile,
+				getSessionId: () => "gating-session",
+				getEntries: () => [],
+				appendCustomEntry: () => "irc-history-entry",
+			},
 			hideThinkingBlock: false,
 		};
 		const controller = new SelectorController(ctx as unknown as InteractiveModeContext);
