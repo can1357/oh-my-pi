@@ -40,6 +40,8 @@
 
 ### Fixed
 
+- Fixed OAuth provider `modifyModels` projections being silently dropped after a discovery refresh introduced live-config headers.
+- Fixed ordinary CLI startup eagerly loading the computer worker graph (native desktop addon and early environment), restoring lazy startup and profile `.env` ordering.
 - Fixed online auto-thinking classifier usage being omitted from session token and cost totals.
 - Fixed image generation with custom provider endpoints when using `openai-codex` credentials and a non-OpenAI chat model.
 - Fixed custom hook UI factories not receiving the documented `keybindings` argument.
