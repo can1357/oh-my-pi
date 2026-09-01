@@ -258,6 +258,23 @@ describe("ACP builtin slash commands", () => {
 			"Extended context is off.",
 		]);
 	});
+	it("toggles the per-turn time stamp with explicit controls and reports state", async () => {
+		const { output, runtime } = createRuntime();
+
+		expect(await executeAcpBuiltinSlashCommand("/time off", runtime)).toEqual({ consumed: true });
+		expect(runtime.settings.get("prompt.nowStamp")).toBe(false);
+		expect(await executeAcpBuiltinSlashCommand("/time on", runtime)).toEqual({ consumed: true });
+		expect(runtime.settings.get("prompt.nowStamp")).toBe(true);
+		expect(await executeAcpBuiltinSlashCommand("/time", runtime)).toEqual({ consumed: true });
+		expect(runtime.settings.get("prompt.nowStamp")).toBe(false);
+		expect(await executeAcpBuiltinSlashCommand("/time status", runtime)).toEqual({ consumed: true });
+		expect(output).toEqual([
+			"Per-turn time stamp disabled.",
+			"Per-turn time stamp enabled.",
+			"Per-turn time stamp disabled.",
+			"Per-turn time stamp is off.",
+		]);
+	});
 
 	it("forces a tool and returns remaining prompt text", async () => {
 		const { output, runtime } = createRuntime();

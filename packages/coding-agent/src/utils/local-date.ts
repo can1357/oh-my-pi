@@ -18,3 +18,11 @@ export function formatLocalDateTimeWithOffset(date: Date): string {
 		offsetHours,
 	)}:${pad2(offsetRemainderMinutes)}`;
 }
+
+/** Format a Date's short timezone name (e.g. `CST`) in the host locale. */
+export function formatLocalTimeZoneShortName(date: Date): string {
+	const part = new Intl.DateTimeFormat(undefined, { timeZoneName: "short" })
+		.formatToParts(date)
+		.find(part => part.type === "timeZoneName");
+	return part?.value ?? "";
+}

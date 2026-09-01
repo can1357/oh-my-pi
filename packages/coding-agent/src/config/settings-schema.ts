@@ -2516,6 +2516,20 @@ export const SETTINGS_SCHEMA = {
 				"Use premium long-context windows on models that bill extra past a threshold (e.g. GPT-5.6 1M charges 2x input above 272K); off caps them at the standard-pricing window",
 		},
 	},
+	// Per-turn time stamp: fresh Now: instant appended to the last user
+	// message of each provider request (context tail — prompt-cache prefix
+	// stays byte-stable; toggle with /time).
+	"prompt.nowStamp": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "context",
+			group: "General",
+			label: "Per-turn Time Stamp",
+			description:
+				"Append a fresh Now: timestamp to the last user message of each provider request so the model always knows the current time (toggle with /time)",
+		},
+	},
 
 	// Compaction
 	"compaction.enabled": {

@@ -339,12 +339,17 @@ describe("AgentSession message pipeline", () => {
 
 			expect(contexts).toHaveLength(1);
 			const userMessage = contexts[0]!.messages.find(message => message.role === "user");
-			// The date/cwd reminder rides on the first user turn (#7404); the contract
-			// here is that the undecodable WebP is replaced by the placeholder text.
+			// The date/cwd reminder rides on the first user turn (#7404); the per-turn
+			// Now stamp rides on the last user turn (here the same message); the
+			// contract is that the undecodable WebP is replaced by the placeholder text.
 			expect(userMessage?.content).toEqual([
 				{ type: "text", text: expect.stringContaining("<system-reminder>") },
 				{ type: "text", text: "inspect this" },
 				{ type: "text", text: "[image omitted: WebP could not be decoded for this model]" },
+				{
+					type: "text",
+					text: expect.stringMatching(/^<system-reminder>\nNow: \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z \(/),
+				},
 			]);
 		} finally {
 			await session.dispose();
