@@ -36,6 +36,7 @@
 - Added compatibility options for Anthropic-compatible proxies that reject `context_management` and OpenAI Responses proxies that provide incomplete reasoning-summary streams.
 - Added ClinePass API-key authentication via the official `CLINE_API_KEY` environment variable, with account validation, actionable subscription and quota errors, support for eligible ClinePass model rosters, and rolling quota-window reporting in `omp usage`.
 - Added Devin router-model support, including assignment of the concrete model before each request, routed-model metadata, credit usage reporting, and plan, quota-window, and account details through `omp usage`.
+- Added `/login` support for AKI.IO, Cortecs, EUrouter, Melious, Nebius Token Factory, Opper, OVHcloud AI Endpoints, and Scaleway Generative APIs. ([#3319](https://github.com/can1357/oh-my-pi/issues/3319))
 
 ### Changed
 
@@ -49,6 +50,7 @@
 - Fixed Z.AI (GLM Coding Plan) browser sign-in by using the registered CLI callback address.
 - Fixed OpenAI Codex/Responses tool results being lost when composite call identifiers could not be paired with the corresponding assistant call.
 - Fixed native OpenAI Responses history replay becoming stuck on malformed or truncated function-call arguments; invalid history items are now discarded so the session can recover.
+- Fixed hosted gateway API key validation to use each provider's authenticated OpenAI-compatible endpoint. ([#3319](https://github.com/can1357/oh-my-pi/issues/3319))
 
 ## [18.0.11] - 2026-08-29
 
@@ -79,11 +81,6 @@
 
 - Fixed Amazon Bedrock requests to OpenAI-schema models (the `gpt-5.x` SKUs) failing with HTTP 400 `unknown_parameter: 'thinking'` when reasoning was enabled, by sending `reasoning.effort` instead of Anthropic's `thinking` budget block for models the catalog marks as effort-controlled.
 - Fixed Cursor replay rejecting sessions with orphaned tool results while preserving their output as assistant context.
-- Added `/login` support for AKI.IO, Cortecs, EUrouter, Melious, Nebius Token Factory, Opper, OVHcloud AI Endpoints, and Scaleway Generative APIs. ([#3319](https://github.com/can1357/oh-my-pi/issues/3319))
-
-### Fixed
-
-- Fixed hosted gateway API key validation to use each provider's authenticated OpenAI-compatible endpoint. ([#3319](https://github.com/can1357/oh-my-pi/issues/3319))
 
 ## [18.0.7] - 2026-08-26
 

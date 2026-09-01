@@ -41,6 +41,7 @@
 - Added the native ClinePass provider with live model discovery, subscription and free-tier model listings, current limits and pricing, model modalities, and per-model reasoning controls. Subscription models display API-equivalent pricing while free-tier models display as free.
 - Added native Devin provider discovery with current Cascade model capabilities, pricing, limits, reasoning controls, selector aliases, and model descriptions and recommendation/beta metadata. Added static SWE-1.6 defaults so the provider can resolve a default model before account-scoped discovery completes.
 - Added per-tier model pricing and long-context pricing support, along with expanded catalog metadata for model limits, API routes, input modalities, and provider-specific model aliases.
+- Added catalog and discovery entries for AKI.IO, Cortecs, EUrouter, Melious, Nebius Token Factory, Opper, OVHcloud AI Endpoints, and Scaleway Generative APIs. ([#3319](https://github.com/can1357/oh-my-pi/issues/3319))
 
 ### Changed
 
@@ -94,9 +95,6 @@
 
 - Fixed the thinking control mode for OpenAI models served over Bedrock Converse (`global.openai.gpt-5.6-luna`, `-sol`, `-terra`), which are now classified as `effort` rather than `budget` so requests use OpenAI's reasoning schema.
 - Fixed LiteLLM discovery leaking a colliding bundled model's provider-specific transport onto custom endpoints: a discovered alias (e.g. `kimi-k3`) matching a bundled Fireworks model no longer inherits that model's wire-id transform, which had caused requests to POST a model id the endpoint never advertised and return HTTP 400 ([#9938](https://github.com/can1357/oh-my-pi/issues/9938)).
-### Added
-
-- Added catalog and discovery entries for AKI.IO, Cortecs, EUrouter, Melious, Nebius Token Factory, Opper, OVHcloud AI Endpoints, and Scaleway Generative APIs. ([#3319](https://github.com/can1357/oh-my-pi/issues/3319))
 
 ## [18.0.7] - 2026-08-26
 
