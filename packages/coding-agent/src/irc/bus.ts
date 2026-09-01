@@ -1,9 +1,9 @@
 /**
- * IrcBus - Process-global mailbox bus for agent-to-agent messaging.
+ * IrcBus - Registry-scoped mailbox bus for agent-to-agent messaging.
  *
  * Replaces the old auto-reply model: a `send` never blocks on the recipient
- * generating anything. Delivery resolves the recipient via the global
- * AgentRegistry — parked agents are revived through the
+ * generating anything. Delivery resolves the recipient via the bus's
+ * AgentRegistry — parked agents are revived through the matching
  * AgentLifecycleManager, idle agents are woken with a real turn, and busy
  * agents receive the message as a non-interrupting aside at the next step
  * boundary (see AgentSession.deliverIrcMessage). Replies are real turns by
@@ -21,6 +21,14 @@ import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import type { AgentSession } from "../session/agent-session";
 import type { AgentSessionEvent } from "../session/agent-session-events";
 import type { CustomMessage } from "../session/messages";
+
+const ircBusKey = Symbol("AgentRegistry.ircBus");
+
+declare module "../registry/agent-registry" {
+	interface AgentRegistry {
+		[ircBusKey]?: IrcBus;
+	}
+}
 
 export interface IrcMessage {
 	id: string;
@@ -63,19 +71,26 @@ export class IrcAwaitTargetStopped extends Error {
 /** Mailbox cap per agent; oldest messages are dropped beyond it. */
 const MAILBOX_CAP = 100;
 
+/** Routes peer messages and owns mailboxes within one agent registry. */
 export class IrcBus {
-	static #global: IrcBus | undefined;
-
-	static global(): IrcBus {
-		if (!IrcBus.#global) {
-			IrcBus.#global = new IrcBus();
+	/** Returns the bus whose routing and mailboxes belong to `registry`. */
+	static forRegistry(registry: AgentRegistry): IrcBus {
+		let bus = registry[ircBusKey];
+		if (!bus) {
+			bus = new IrcBus(registry);
+			registry[ircBusKey] = bus;
 		}
-		return IrcBus.#global;
+		return bus;
 	}
 
-	/** Reset the global bus. Test-only. */
+	/** Returns the bus for the process-global registry. */
+	static global(): IrcBus {
+		return IrcBus.forRegistry(AgentRegistry.global());
+	}
+
+	/** Reset the global registry's bus. Test-only. */
 	static resetGlobalForTests(): void {
-		IrcBus.#global = undefined;
+		delete AgentRegistry.global()[ircBusKey];
 	}
 
 	readonly #registry: AgentRegistry;
@@ -85,9 +100,9 @@ export class IrcBus {
 
 	constructor(registry: AgentRegistry = AgentRegistry.global(), lifecycle?: AgentLifecycleManager) {
 		this.#registry = registry;
-		// Lazy: the lifecycle global self-constructs against the global registry,
-		// so only touch it when a parked recipient actually needs reviving.
-		this.#lifecycle = () => lifecycle ?? AgentLifecycleManager.global();
+		// Lazy: constructing a bus must not start lifecycle timers or registry
+		// subscriptions until a parked recipient actually needs reviving.
+		this.#lifecycle = () => lifecycle ?? AgentLifecycleManager.forRegistry(registry);
 	}
 
 	/**

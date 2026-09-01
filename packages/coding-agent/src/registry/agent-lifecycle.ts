@@ -33,6 +33,14 @@ import {
 	type RegistryEvent,
 } from "./agent-registry";
 
+const agentLifecycleKey = Symbol("AgentRegistry.agentLifecycle");
+
+declare module "./agent-registry" {
+	interface AgentRegistry {
+		[agentLifecycleKey]?: AgentLifecycleManager;
+	}
+}
+
 export type AgentReviver = (expected: AgentRef) => Promise<AgentSession>;
 
 const AGENT_RELEASE_GRACE_MS = 5000;
@@ -89,14 +97,27 @@ interface RevivingAgent {
 export class AgentLifecycleManager {
 	static #global: AgentLifecycleManager | undefined;
 
+	/** Returns the lifecycle manager that owns `registry`. */
+	static forRegistry(registry: AgentRegistry): AgentLifecycleManager {
+		if (registry === AgentRegistry.global()) return AgentLifecycleManager.global();
+		let manager = registry[agentLifecycleKey];
+		if (!manager) {
+			manager = new AgentLifecycleManager(registry);
+			registry[agentLifecycleKey] = manager;
+		}
+		return manager;
+	}
+
 	static global(): AgentLifecycleManager {
-		if (!AgentLifecycleManager.#global) {
-			AgentLifecycleManager.#global = new AgentLifecycleManager();
+		const registry = AgentRegistry.global();
+		if (!AgentLifecycleManager.#global?.manages(registry)) {
+			AgentLifecycleManager.#global = registry[agentLifecycleKey] ?? new AgentLifecycleManager(registry);
+			registry[agentLifecycleKey] = AgentLifecycleManager.#global;
 		}
 		return AgentLifecycleManager.#global;
 	}
 
-	/** Reset the global manager. Test-only. */
+	/** Reset the global lifecycle manager. Test-only. */
 	static resetGlobalForTests(): void {
 		const current = AgentLifecycleManager.#global;
 		if (current) {
@@ -109,6 +130,7 @@ export class AgentLifecycleManager {
 			current.#revivals.clear();
 			current.#parks.clear();
 			current.#persistedReviverFactory = undefined;
+			delete current.#registry[agentLifecycleKey];
 		}
 		AgentLifecycleManager.#global = undefined;
 	}
@@ -455,7 +477,7 @@ export class AgentLifecycleManager {
 		return true;
 	}
 
-	/** Teardown everything; disposing the global manager makes its next owner a fresh instance. */
+	/** Tears down this registry's lifecycle and releases its memoized manager. */
 	async dispose(deadlineAt: number = Date.now() + AGENT_RELEASE_GRACE_MS): Promise<void> {
 		this.#unsubscribe?.();
 		this.#disposed = true;
@@ -480,6 +502,7 @@ export class AgentLifecycleManager {
 		this.#revivals.clear();
 		this.#parks.clear();
 		this.#persistedReviverFactory = undefined;
+		if (this.#registry[agentLifecycleKey] === this) delete this.#registry[agentLifecycleKey];
 		if (AgentLifecycleManager.#global === this) AgentLifecycleManager.#global = undefined;
 	}
 

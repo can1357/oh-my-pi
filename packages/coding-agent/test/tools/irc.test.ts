@@ -97,7 +97,10 @@ function makeToolSession(registry: AgentRegistry, agentId: string): ToolSession 
 	};
 }
 
-function createRealSession(overrides: Partial<Record<SettingPath, unknown>> = {}): {
+function createRealSession(
+	overrides: Partial<Record<SettingPath, unknown>> = {},
+	agentRegistry?: AgentRegistry,
+): {
 	session: AgentSession;
 	sessionManager: SessionManager;
 } {
@@ -112,6 +115,7 @@ function createRealSession(overrides: Partial<Record<SettingPath, unknown>> = {}
 		}),
 		sessionManager,
 		settings: Settings.isolated({ "compaction.enabled": false, ...overrides }),
+		...(agentRegistry ? { agentRegistry } : {}),
 		modelRegistry: {} as never,
 	});
 	return { session, sessionManager };
@@ -211,6 +215,42 @@ describe("IRC", () => {
 			expect(main.relayed[0]?.details).toEqual({ from: "0-A", to: "0-B", body: "sibling note" });
 		});
 
+		it("scopes delivery, relays, and mailboxes to each registry", async () => {
+			const firstRegistry = new AgentRegistry();
+			const secondRegistry = new AgentRegistry();
+			const firstMain = makeFakeSession();
+			const firstA = makeFakeSession();
+			const firstB = makeFakeSession();
+			const secondMain = makeFakeSession();
+			const secondA = makeFakeSession();
+			const secondB = makeFakeSession();
+			firstRegistry.register({ id: "Main", displayName: "main", kind: "main", session: firstMain.session });
+			firstRegistry.register({ id: "0-A", displayName: "task", kind: "sub", session: firstA.session });
+			firstRegistry.register({ id: "0-B", displayName: "task", kind: "sub", session: firstB.session });
+			secondRegistry.register({ id: "Main", displayName: "main", kind: "main", session: secondMain.session });
+			secondRegistry.register({ id: "0-A", displayName: "task", kind: "sub", session: secondA.session });
+			secondRegistry.register({ id: "0-B", displayName: "task", kind: "sub", session: secondB.session });
+
+			const firstBus = IrcBus.forRegistry(firstRegistry);
+			await firstBus.send({ from: "0-A", to: "0-B", body: "first-session chatter" });
+
+			expect(firstB.delivered.map(message => message.body)).toEqual(["first-session chatter"]);
+			expect(secondB.delivered).toEqual([]);
+			expect(firstMain.relayed.map(record => record.details)).toEqual([
+				{ from: "0-A", to: "0-B", body: "first-session chatter" },
+			]);
+			expect(secondMain.relayed).toEqual([]);
+
+			firstB.setError(new Error("temporarily unavailable"));
+			await firstBus.send({ from: "0-A", to: "0-B", body: "first-session mailbox" });
+			expect(
+				IrcBus.forRegistry(firstRegistry)
+					.inbox("0-B")
+					.map(message => message.body),
+			).toEqual(["first-session mailbox"]);
+			expect(IrcBus.forRegistry(secondRegistry).inbox("0-B")).toEqual([]);
+		});
+
 		it("send to an unknown or aborted agent fails", async () => {
 			const unknown = await bus.send({ from: "0-Main", to: "0-Ghost", body: "hello?" });
 			expect(unknown.outcome).toBe("failed");
@@ -285,6 +325,30 @@ describe("IRC", () => {
 			expect(receipt).toEqual({ to: "0-Sub", outcome: "injected" });
 			expect(live.delivered.map(msg => msg.body)).toEqual(["hi"]);
 			expect(globalStub.delivered).toEqual([]);
+		});
+
+		it("revives a parked recipient through its registry lifecycle", async () => {
+			const scopedRegistry = new AgentRegistry();
+			const scopedBus = IrcBus.forRegistry(scopedRegistry);
+			const lifecycle = AgentLifecycleManager.forRegistry(scopedRegistry);
+			const sub = makeFakeSession();
+			scopedRegistry.register({
+				id: "0-Parked",
+				displayName: "task",
+				kind: "sub",
+				session: null,
+				status: "parked",
+			});
+			lifecycle.adopt("0-Parked", {
+				idleTtlMs: 0,
+				revive: async () => sub.session,
+			});
+
+			const receipt = await scopedBus.send({ from: "Main", to: "0-Parked", body: "wake up" });
+
+			expect(receipt.outcome).toBe("revived");
+			expect(sub.delivered.map(message => message.body)).toEqual(["wake up"]);
+			expect(scopedRegistry.get("0-Parked")?.status).toBe("idle");
 		});
 
 		it("send during pre-detach park keeps the live session and does not revive", async () => {
@@ -681,6 +745,47 @@ describe("IRC", () => {
 			expect(tool.interruptible({ op: "logs" })).toBe(false);
 			expect(tool.interruptible({ op: "start" })).toBe(false);
 			expect(tool.interruptible({ op: "send", await: true })).toBe(false);
+		});
+
+		it("uses the session registry for send, wait, and inbox", async () => {
+			const scopedRegistry = new AgentRegistry();
+			const scopedBus = IrcBus.forRegistry(scopedRegistry);
+			const main = makeFakeSession();
+			const sub = makeFakeSession();
+			scopedRegistry.register({ id: "Main", displayName: "main", kind: "main", session: main.session });
+			scopedRegistry.register({
+				id: "0-Sub",
+				displayName: "task",
+				kind: "sub",
+				parentId: "Main",
+				session: sub.session,
+			});
+			sub.onDeliver(message => {
+				void scopedBus.send({ from: "0-Sub", to: message.from, body: "scoped reply", replyTo: message.id });
+			});
+			const tool = new HubTool(makeToolSession(scopedRegistry, "Main"));
+
+			const sent = await tool.execute("call-send", {
+				op: "send",
+				to: "0-Sub",
+				message: "scoped question",
+				await: true,
+			});
+			const sentDetails = sent.details as CoordinationDetails | undefined;
+			expect(sent.isError).toBeFalsy();
+			expect(sentDetails?.waited?.body).toBe("scoped reply");
+
+			main.setError(new Error("temporarily unavailable"));
+			await scopedBus.send({ from: "0-Sub", to: "Main", body: "buffered scoped note" });
+			const inbox = await tool.execute("call-inbox", { op: "inbox" });
+			const inboxDetails = inbox.details as CoordinationDetails | undefined;
+			expect(inboxDetails?.inbox?.map(message => message.body)).toEqual(["buffered scoped note"]);
+
+			const waiting = tool.execute("call-wait", { op: "wait", from: "0-Sub", timeoutMs: 1000 });
+			await scopedBus.send({ from: "0-Sub", to: "Main", body: "live scoped note" });
+			const waited = await waiting;
+			const waitedDetails = waited.details as CoordinationDetails | undefined;
+			expect(waitedDetails?.waited?.body).toBe("live scoped note");
 		});
 
 		it("op=list defaults to live peers and reports parked counts without parked names", async () => {
@@ -1274,12 +1379,14 @@ describe("IRC", () => {
 			expect(await session.agent.hasIrcInterrupts?.()).toBe(true);
 		});
 
-		it("queues parent IRC as steering while a subagent turn is streaming", async () => {
-			const { session } = createRealSession();
+		it("queues parent IRC as steering from the session registry while a subagent turn is streaming", async () => {
+			const scopedRegistry = new AgentRegistry();
+			const { session } = createRealSession({}, scopedRegistry);
 			sessions.push(session);
 			const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined);
 			Object.defineProperty(session, "isStreaming", { value: true, configurable: true });
-			registry.register({ id: "0-Child", displayName: "task", kind: "sub", parentId: "Main", session });
+			scopedRegistry.register({ id: "0-Child", displayName: "task", kind: "sub", parentId: "Main", session });
+			registry.register({ id: "0-Child", displayName: "task", kind: "sub", parentId: "Other", session: null });
 
 			const outcome = await session.deliverIrcMessage({
 				id: "msg-parent",
@@ -1299,42 +1406,40 @@ describe("IRC", () => {
 			expect(parentSteer.content).toContain("change approach");
 		});
 
-		it("auto-replies via an ephemeral side turn when the sender awaits and async execution is disabled", async () => {
-			const { session } = createRealSession({ "async.enabled": false });
+		it("auto-replies on the session registry when the sender awaits and async execution is disabled", async () => {
+			const scopedRegistry = new AgentRegistry();
+			const scopedBus = IrcBus.forRegistry(scopedRegistry);
+			const { session } = createRealSession({ "async.enabled": false }, scopedRegistry);
 			sessions.push(session);
-			registry.register({ id: "Main", displayName: "main", kind: "main", session });
+			scopedRegistry.register({ id: "Main", displayName: "main", kind: "main", session });
 			const sub = makeFakeSession();
-			registry.register({ id: "0-Sub", displayName: "task", kind: "sub", session: sub.session });
+			scopedRegistry.register({ id: "0-Sub", displayName: "task", kind: "sub", session: sub.session });
 			Object.defineProperty(session, "isStreaming", { value: true, configurable: true });
 			const ephemeralSpy = vi
 				.spyOn(session, "runEphemeralTurn")
 				.mockResolvedValue({ replyText: "auto answer", assistantMessage: {} as never });
-			const autoReplyEvent = new Promise<CustomMessage>(resolve => {
-				session.subscribe(event => {
-					if (event.type === "irc_message" && event.message.customType === "irc:autoreply") {
-						resolve(event.message);
-					}
-				});
+			const { promise: autoReplyEvent, resolve: resolveAutoReplyEvent } = Promise.withResolvers<CustomMessage>();
+			session.subscribe(event => {
+				if (event.type === "irc_message" && event.message.customType === "irc:autoreply") {
+					resolveAutoReplyEvent(event.message);
+				}
 			});
 
 			// The sender parks a waiter (the `await: true` path), then sends with
-			// the expectsReply hint — exactly what the irc tool does.
-			const waiting = bus.wait("0-Sub", { from: "Main" }, 1000);
-			const receipt = await bus.send(
+			// the expectsReply hint — exactly what the hub tool does.
+			const waiting = scopedBus.wait("0-Sub", { from: "Main" }, 1000);
+			const receipt = await scopedBus.send(
 				{ from: "0-Sub", to: "Main", body: "which PR did you mean?" },
 				{ expectsReply: true },
 			);
 			expect(receipt).toEqual({ to: "Main", outcome: "injected" });
 
-			// The side-channel reply resolves the sender's waiter as a real bus
-			// message threaded to the original send.
 			const reply = await waiting;
 			expect(reply?.from).toBe("Main");
 			expect(reply?.body).toBe("auto answer");
 			expect(reply?.replyTo).toBeTruthy();
 			expect(ephemeralSpy.mock.calls[0]?.[0]?.promptText).toContain("which PR did you mean?");
 
-			// The recipient records what was said on its behalf.
 			const record = await autoReplyEvent;
 			expect(record.details).toMatchObject({ to: "0-Sub", body: "auto answer" });
 		});

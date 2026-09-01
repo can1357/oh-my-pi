@@ -33,6 +33,7 @@ import type { ExtensionRunner, PreparedExtension } from "../extensibility/extens
 import type { ContextUsage } from "../extensibility/extensions/types";
 import type { Skill, SkillWarning } from "../extensibility/skills";
 import type { FileSlashCommand } from "../extensibility/slash-commands";
+import type { AgentRegistry } from "../registry/agent-registry";
 import type { SecretObfuscator } from "../secrets/obfuscator";
 import type { ConfiguredThinkingLevel } from "../thinking";
 import type { XdevState } from "../tools/xdev";
@@ -126,6 +127,8 @@ export interface AgentSessionConfig {
 	codeModeState?: { namespacesInfo?: unknown };
 	sessionManager: SessionManager;
 	settings: Settings;
+	/** Registry that scopes this session's peer messaging. */
+	agentRegistry?: AgentRegistry;
 	/**
 	 * Live extension-root policy inherited from the owning session. Subagents use
 	 * this provider so explicit roots, discovery mode, configured roots, and

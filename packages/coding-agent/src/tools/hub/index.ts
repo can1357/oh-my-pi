@@ -407,7 +407,7 @@ export class HubTool implements AgentTool<typeof hubSchema, HubDetails> {
 			// there, so without this take the liveness gate would answer "nothing
 			// to wait for" while `hub inbox` hands back the very message being
 			// waited on. Single atomic take: the rest of the backlog stays queued.
-			const queued = IrcBus.global().take(messaging.senderId, from);
+			const queued = IrcBus.forRegistry(messaging.registry).take(messaging.senderId, from);
 			if (queued) return messageResult(messaging.senderId, queued);
 			if (!from) {
 				// A bare wait can only be satisfied by a running peer eventually
@@ -438,7 +438,7 @@ export class HubTool implements AgentTool<typeof hubSchema, HubDetails> {
 		let removeBusAbortListener: (() => void) | undefined;
 		const busLeg =
 			messaging && busAbort
-				? IrcBus.global()
+				? IrcBus.forRegistry(messaging.registry)
 						.wait(messaging.senderId, { from }, 0, busAbort.signal)
 						.then(
 							message => ({ message, error: null as Error | null }),

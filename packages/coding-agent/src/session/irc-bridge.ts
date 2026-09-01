@@ -15,6 +15,8 @@ export interface IrcBridgeHost {
 	agent: Agent;
 	sessionManager: SessionManager;
 	settings: Settings;
+	/** Registry that scopes peer lookup and replies; `undefined` uses the process registry. */
+	agentRegistry: AgentRegistry | undefined;
 	isDisposed(): boolean;
 	isStreaming(): boolean;
 	planModeEnabled(): boolean;
@@ -26,12 +28,14 @@ export interface IrcBridgeHost {
 /** Owns incoming IRC queues, injection, and side-channel auto-replies. */
 export class IrcBridge {
 	readonly #host: IrcBridgeHost;
+	readonly #registry: AgentRegistry;
 	#interrupts: CustomMessage[] = [];
 	#asides: CustomMessage[] = [];
 	readonly #autoReplies = new Set<Promise<void>>();
 
 	constructor(host: IrcBridgeHost) {
 		this.#host = host;
+		this.#registry = host.agentRegistry ?? AgentRegistry.global();
 	}
 
 	/** Whether an incoming peer message can interrupt a wait. */
@@ -139,7 +143,7 @@ export class IrcBridge {
 		};
 		void this.#host.emitSessionEvent({ type: "irc_message", message: record });
 		if (streaming) {
-			const recipientParentId = AgentRegistry.global().get(msg.to)?.parentId;
+			const recipientParentId = this.#registry.get(msg.to)?.parentId;
 			if (recipientParentId === msg.from) {
 				this.#host.agent.steer({
 					role: "user",
@@ -211,7 +215,12 @@ export class IrcBridge {
 			};
 			void this.#host.emitSessionEvent({ type: "irc_message", message: record });
 			this.#asides.push(record);
-			const receipt = await IrcBus.global().send({ from: msg.to, to: msg.from, body, replyTo: msg.id });
+			const receipt = await IrcBus.forRegistry(this.#registry).send({
+				from: msg.to,
+				to: msg.from,
+				body,
+				replyTo: msg.id,
+			});
 			if (receipt.outcome === "failed") {
 				logger.warn("IRC auto-reply delivery failed", { to: msg.from, error: receipt.error });
 			}
