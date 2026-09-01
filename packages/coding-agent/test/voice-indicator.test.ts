@@ -13,10 +13,11 @@ describe("VoiceIndicatorComponent", () => {
 		const lines = indicator.render(30);
 		const plain = lines.map(line => Bun.stripANSI(line));
 
-		expect(lines).toHaveLength(7);
+		expect(lines).toHaveLength(9);
 		expect(plain.join("\n")).toContain("Listening");
 		expect(plain.join("\n")).toContain("speak naturally");
 		expect(lines.every(line => visibleWidth(line) === 30)).toBe(true);
+		expect(plain.slice(0, 7).join("")).toMatch(/[\u2800-\u28ff]/u);
 	});
 
 	it("animates in place and changes personality while transcribing", () => {

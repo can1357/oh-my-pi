@@ -16,10 +16,16 @@ describe("LiveVisualizer", () => {
 
 		for (const targetWidth of [80, 140, 200]) {
 			const lines = visualizer.render(targetWidth);
-			expect(lines.length).toBeGreaterThan(0);
+			expect(lines).toHaveLength(10);
 			for (const line of lines) {
 				expect(visibleWidth(line)).toBe(targetWidth);
 			}
+			const plain = lines.map(line => Bun.stripANSI(line));
+			expect(plain[0]?.startsWith("┌")).toBe(true);
+			expect(plain[9]?.startsWith("└")).toBe(true);
+			const orbRows = plain.slice(1, 8);
+			expect(orbRows.join("")).toMatch(/[\u2800-\u28ff]/u);
+			expect(orbRows.some(row => /[\u2800-\u28ff]/u.test(row.slice(21, -1)))).toBe(false);
 		}
 	});
 });

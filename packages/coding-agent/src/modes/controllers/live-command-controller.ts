@@ -10,7 +10,7 @@ import { theme } from "../theme/theme";
 import type { InteractiveModeContext } from "../types";
 import { createAssistantMessageComponent } from "../utils/interactive-context-helpers";
 
-const ANIMATION_INTERVAL_MS = 120;
+const ANIMATION_INTERVAL_MS = 80;
 type LiveSessionFactory = (options: LiveSessionControllerOptions) => LiveSessionController;
 
 const LIVE_MESSAGE_USAGE: AssistantMessage["usage"] = {

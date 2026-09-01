@@ -8,7 +8,7 @@ import {
 	visibleWidth,
 } from "@oh-my-pi/pi-tui";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
-import { centerVoiceLine, renderVoiceOrb } from "../modes/components/voice-indicator";
+import { renderVoiceOrb } from "../modes/components/voice-indicator";
 import { type ThemeColor, theme } from "../modes/theme/theme";
 
 /** Distinct states of a realtime call connection. */
@@ -121,7 +121,7 @@ export class LiveVisualizer implements Component {
 		this.#cache = undefined;
 	}
 
-	/** Renders a centered, audio-reactive orb with transcript and controls. */
+	/** Renders the thinking orb in the original compact live-mode panel. */
 	render(width: number): readonly string[] {
 		if (
 			this.#cache &&
@@ -147,35 +147,54 @@ export class LiveVisualizer implements Component {
 	}
 
 	#renderLines(maxWidth: number): readonly string[] {
-		const width = Math.max(24, maxWidth);
+		const width = Math.max(2, maxWidth);
+		const innerWidth = width - 2;
+		const border = (content: string): string =>
+			theme.fg("border", "│") + content + (width > 1 ? theme.fg("border", "│") : "");
+		const top = theme.fg("border", `┌${"─".repeat(innerWidth)}${width > 1 ? "┐" : ""}`);
+		const orbState =
+			this.#phase === "connecting"
+				? "connecting"
+				: this.#phase === "listening"
+					? "listening"
+					: this.#phase === "working"
+						? "solving"
+						: this.#phase === "speaking"
+							? "composing"
+							: this.#phase === "muted"
+								? "breathing"
+								: "shaping";
 		const energy =
 			this.#phase === "muted" || this.#phase === "error"
 				? 0
 				: this.#phase === "speaking"
 					? Math.max(0.68, this.#displayLevel)
-					: this.#phase === "working"
-						? 0.32
-						: this.#phase === "connecting"
-							? 0.18
-							: this.#displayLevel;
-		const orb = renderVoiceOrb(this.#frame, energy).map(line => centerVoiceLine(line, width));
-		return [...orb, this.#renderTranscript(this.#userTranscript, width), this.#renderFooter(width)];
+					: this.#displayLevel;
+		const orbRows = renderVoiceOrb(orbState, this.#frame, energy).map(line => {
+			const content = ` ${line}`;
+			return border(content + " ".repeat(Math.max(0, innerWidth - visibleWidth(content))));
+		});
+		const transcript = this.#renderTranscript(this.#userTranscript, innerWidth, border);
+		return [top, ...orbRows, transcript, this.#renderFooter(width, innerWidth)];
 	}
 
-	#renderTranscript(transcript: string, width: number): string {
-		const content = truncateFromStart(transcript, width);
-		return centerVoiceLine(theme.fg("accent", content), width);
+	#renderTranscript(transcript: string, innerWidth: number, border: (content: string) => string): string {
+		const content = truncateFromStart(transcript, innerWidth);
+		const padding = " ".repeat(Math.max(0, innerWidth - visibleWidth(content)));
+		return border(theme.fg("accent", content) + padding);
 	}
 
-	#renderFooter(width: number): string {
-		const phases: Record<LivePhase, { icon: string; label: string }> = {
-			connecting: { icon: "○", label: "Connecting" },
-			listening: { icon: "●", label: "Listening" },
-			working: { icon: "◌", label: "Thinking" },
-			speaking: { icon: "»", label: "Speaking" },
-			muted: { icon: "×", label: "Muted" },
-			error: { icon: "!", label: "Connection error" },
+	#renderFooter(width: number, innerWidth: number): string {
+		const spinners = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+		const staticIcons: Record<LivePhase, string> = {
+			connecting: "○",
+			listening: "●",
+			working: "○",
+			speaking: "»",
+			muted: "×",
+			error: "!",
 		};
+		const icon = this.#phase === "working" ? spinners[this.#frame % spinners.length] : staticIcons[this.#phase];
 		const phaseColors: Record<LivePhase, ThemeColor> = {
 			connecting: "dim",
 			listening: "success",
@@ -184,9 +203,23 @@ export class LiveVisualizer implements Component {
 			muted: "dim",
 			error: "error",
 		};
-		const status = `${phases[this.#phase].icon} ${phases[this.#phase].label}`;
-		const fullLabel = `${status} · space mute · esc end`;
-		const label = width >= visibleWidth(fullLabel) ? fullLabel : status;
-		return centerVoiceLine(theme.fg(phaseColors[this.#phase], truncateToWidth(label, width)), width);
+		const status = `${icon} ${this.#phase}`;
+		const fullLabel = ` ${status} · space mute · esc end `;
+		const shortLabel = ` ${status} `;
+		const label =
+			innerWidth >= visibleWidth(fullLabel) + 1
+				? fullLabel
+				: innerWidth >= visibleWidth(shortLabel) + 1
+					? shortLabel
+					: "";
+		if (!label) {
+			return theme.fg("border", `└${"─".repeat(innerWidth)}${width > 1 ? "┘" : ""}`);
+		}
+		const remaining = Math.max(0, innerWidth - visibleWidth(label) - 1);
+		return (
+			theme.fg("border", "└─") +
+			theme.fg(phaseColors[this.#phase], truncateToWidth(label, innerWidth - 1)) +
+			theme.fg("border", `${"─".repeat(remaining)}${width > 1 ? "┘" : ""}`)
+		);
 	}
 }
