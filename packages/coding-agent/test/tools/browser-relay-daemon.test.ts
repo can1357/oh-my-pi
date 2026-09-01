@@ -6,6 +6,14 @@ import { createDaemonBrokerClient } from "../../src/launch/client";
 import { findFreeCdpPort } from "../../src/tools/browser/attach";
 import { probeRelayServer } from "../../src/tools/browser/relay/daemon";
 
+/**
+ * Per-consumer ready budget. Each consumer is a cold `bun` process that imports the whole
+ * daemon module graph, which on a saturated CI runner has been observed to take longer than
+ * the previous 15s. `awaitConsumerReady` aborts immediately if the consumer dies, so this
+ * ceiling is only ever reached by a slow-but-healthy start.
+ */
+const MARKER_TIMEOUT_MS = 30_000;
+
 async function waitUntil(condition: () => boolean | Promise<boolean>, timeoutMs: number): Promise<boolean> {
 	const deadline = Date.now() + timeoutMs;
 	while (Date.now() < deadline) {
@@ -13,6 +21,66 @@ async function waitUntil(condition: () => boolean | Promise<boolean>, timeoutMs:
 		await Bun.sleep(50);
 	}
 	return condition();
+}
+
+/** The subset of a spawned consumer this file needs, kept structural so it survives Bun typing changes. */
+type RelayConsumer = {
+	readonly stderr: ReadableStream<Uint8Array>;
+	readonly exitCode: number | null;
+	readonly signalCode: NodeJS.Signals | null;
+	readonly exited: Promise<number>;
+	kill(): void;
+};
+
+/**
+ * Waits for a consumer to publish its ready marker, and explains itself when it does not.
+ *
+ * A bare `waitUntil(...marker exists...)` collapses three distinct outcomes into one
+ * `expected false to be true`: the consumer threw, the consumer exited non-zero, or the
+ * consumer is merely slow. The consumers are spawned with `stderr: "pipe"`, but that pipe
+ * was only ever drained on the success path, and the enclosing `finally` removes the temp
+ * home, so the evidence was destroyed before anyone could read it.
+ *
+ * Racing the marker against `exited` separates "dead" from "slow" and always surfaces the
+ * child's stderr. It also means a crashed consumer fails in milliseconds instead of burning
+ * the whole marker budget.
+ */
+async function awaitConsumerReady(
+	consumer: RelayConsumer,
+	marker: string,
+	label: string,
+	timeoutMs: number,
+): Promise<void> {
+	const deadline = Date.now() + timeoutMs;
+	while (Date.now() < deadline) {
+		if (await Bun.file(marker).exists()) return;
+		if (consumer.exitCode !== null || consumer.signalCode !== null) {
+			// Lost the race against a dying child: re-check the marker so a consumer that
+			// wrote it and exited in the same tick is not misreported as a failure.
+			if (await Bun.file(marker).exists()) return;
+			throw new Error(
+				`${label} consumer exited before publishing its ready marker ` +
+					`(code=${consumer.exitCode}, signal=${consumer.signalCode})\n${await readStderr(consumer)}`,
+			);
+		}
+		await Bun.sleep(50);
+	}
+	if (await Bun.file(marker).exists()) return;
+	consumer.kill();
+	await consumer.exited;
+	throw new Error(
+		`${label} consumer did not publish its ready marker within ${timeoutMs}ms ` +
+			`(code=${consumer.exitCode}, signal=${consumer.signalCode})\n${await readStderr(consumer)}`,
+	);
+}
+
+async function readStderr(consumer: RelayConsumer): Promise<string> {
+	try {
+		const text = (await new Response(consumer.stderr).text()).trim();
+		return text || "<no stderr>";
+	} catch (err) {
+		return `<stderr unavailable: ${err}>`;
+	}
 }
 
 describe("browser relay daemon", () => {
@@ -126,12 +194,12 @@ try {
 
 		const first = spawnConsumer(firstProject, "profile-a", firstMarker);
 		try {
-			expect(await waitUntil(() => Bun.file(firstMarker).exists(), 15_000)).toBeTrue();
+			await awaitConsumerReady(first, firstMarker, "first", MARKER_TIMEOUT_MS);
 			expect(await probeRelayServer(cdpUrl)).toBeTrue();
 
 			const second = spawnConsumer(secondProject, "profile-b", secondMarker);
 			try {
-				expect(await waitUntil(() => Bun.file(secondMarker).exists(), 15_000)).toBeTrue();
+				await awaitConsumerReady(second, secondMarker, "second", MARKER_TIMEOUT_MS);
 				first.stdin.end();
 				const firstExit = await first.exited;
 				if (firstExit !== 0) throw new Error(await new Response(first.stderr).text());
@@ -163,11 +231,12 @@ try {
 			rescue.close();
 			await fs.rm(home, { recursive: true, force: true });
 		}
-		// Budget must exceed the sum of the bounds inside the test: two 15s marker waits
-		// plus the 5s shutdown probe are 35s of legitimate waiting, so a 30s cap let a
-		// loaded runner kill the test mid-`waitUntil` and report only "timed out after
-		// 30000ms" instead of the marker assertion that actually failed. Each consumer is
-		// a cold `bun` process importing the daemon module graph, so the spawns are slow
-		// exactly when the machine is busy.
-	}, 60_000);
+		// Budget must exceed the sum of the bounds inside the test: two MARKER_TIMEOUT_MS marker
+		// waits plus the 5s shutdown probe are 65s of legitimate waiting, so a 60s cap let a
+		// loaded runner kill the test mid-wait and report only "timed out after 60000ms" instead
+		// of the marker diagnosis that actually failed. Each consumer is a cold `bun` process
+		// importing the daemon module graph, so the spawns are slow exactly when the machine is
+		// busy. Raising the ceiling is safe now that `awaitConsumerReady` fails fast on a dead
+		// consumer: only a genuinely slow-but-alive start can reach the full budget.
+	}, 120_000);
 });
