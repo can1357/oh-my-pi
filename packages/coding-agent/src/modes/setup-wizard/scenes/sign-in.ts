@@ -11,7 +11,7 @@ import {
 } from "@oh-my-pi/pi-tui";
 import { getAgentDbPath } from "@oh-my-pi/pi-utils";
 import { copyToClipboard } from "../../../utils/clipboard";
-import { persistLoginUrl } from "../../../utils/login-url";
+import { loginUrlCopyCommand, persistLoginUrl } from "../../../utils/login-url";
 import { openCommandFor } from "../../../utils/open";
 import { OAuthSelectorComponent } from "../../components/oauth-selector";
 import { theme } from "../../theme/theme";
@@ -176,7 +176,7 @@ export class SignInTab implements SetupTab {
 			// selection carries row breaks and padding, and OSC 52/OSC 8 are
 			// optional. A one-row file path survives any selection.
 			if (this.#authUrlFile) {
-				lines.push(theme.fg("dim", `Clean copy: cat ${this.#authUrlFile}`));
+				lines.push(theme.fg("dim", `Clean copy: ${loginUrlCopyCommand(this.#authUrlFile)}`));
 			}
 			if (this.#authLaunchUrl) {
 				lines.push(theme.fg("dim", `Local shortcut (this machine only): ${this.#authLaunchUrl}`));

@@ -60,7 +60,7 @@ import { shortenPath } from "../../tools/render-utils";
 import { urlHyperlinkAlways } from "../../tui";
 import { copyToClipboard } from "../../utils/clipboard";
 import { isTimeoutError } from "../../utils/fetch-timeout";
-import { persistLoginUrl } from "../../utils/login-url";
+import { loginUrlCopyCommand, persistLoginUrl } from "../../utils/login-url";
 import { openPath } from "../../utils/open";
 import { ChatBlock } from "../components/chat-block";
 import { DynamicBorder } from "../components/dynamic-border";
@@ -962,7 +962,7 @@ export class MCPCommandController {
 							// and padding, and OSC 52/OSC 8 are optional terminal features.
 							const urlFile = persistLoginUrl(info.url);
 							if (urlFile) {
-								block.addChild(new Text(theme.fg("muted", `Clean copy: cat ${urlFile}`), 1, 0));
+								block.addChild(new Text(theme.fg("muted", `Clean copy: ${loginUrlCopyCommand(urlFile)}`), 1, 0));
 							}
 						}
 						this.ctx.ui.requestRender();
@@ -2461,7 +2461,7 @@ export class MCPCommandController {
 					: theme.fg("muted", "Browser launch disabled by BROWSER=none. Log in at the URL below."),
 				theme.fg("dim", "Authorize URL:"),
 				theme.fg("accent", session.authUrl),
-				...(smitheryUrlFile ? [theme.fg("dim", `Clean copy: cat ${smitheryUrlFile}`)] : []),
+				...(smitheryUrlFile ? [theme.fg("dim", `Clean copy: ${loginUrlCopyCommand(smitheryUrlFile)}`)] : []),
 				theme.fg("dim", `Fallback: ${fallbackLoginUrl}`),
 				"",
 			].join("\n"),

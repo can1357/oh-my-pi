@@ -2,7 +2,7 @@ import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import { Container, getKeybindings, Input, Spacer, Text, type TUI, wrapTextWithAnsi } from "@oh-my-pi/pi-tui";
 import { theme } from "../../modes/theme/theme";
 import { urlHyperlinkAlways, WidthAwareText } from "../../tui";
-import { persistLoginUrl } from "../../utils/login-url";
+import { loginUrlCopyCommand, persistLoginUrl } from "../../utils/login-url";
 import { openPath } from "../../utils/open";
 import { OverlayPanel } from "./overlay-box";
 
@@ -103,7 +103,7 @@ export class LoginDialogComponent extends OverlayPanel {
 		// selection carries row breaks and padding, and OSC 52/OSC 8 are optional.
 		const urlFile = persistLoginUrl(url);
 		if (urlFile) {
-			this.#contentContainer.addChild(new Text(theme.fg("dim", `Clean copy: cat ${urlFile}`), 0, 0));
+			this.#contentContainer.addChild(new Text(theme.fg("dim", `Clean copy: ${loginUrlCopyCommand(urlFile)}`), 0, 0));
 		}
 
 		// Open browser (best-effort). `false` means BROWSER=none suppressed the
