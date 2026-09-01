@@ -140,7 +140,14 @@ class FakeAgentSession {
 	customMessages: Array<{ customType: string; content: string; details?: unknown }> = [];
 	customMessageOptions: Array<{ streamingBehavior?: "steer" | "followUp"; queueChipText?: string } | undefined> = [];
 	skillsSettings = { enableSkillCommands: true };
-	skills: Array<{ name: string; description: string; filePath: string; baseDir: string; source: string }> = [];
+	skills: Array<{
+		name: string;
+		description: string;
+		filePath: string;
+		baseDir: string;
+		source: string;
+		userInvocable?: boolean;
+	}> = [];
 	refreshSkillsCalls = 0;
 	async refreshSkills(): Promise<void> {
 		this.refreshSkillsCalls++;
@@ -1896,6 +1903,40 @@ describe("ACP agent", () => {
 
 		harness.abortController.abort();
 		await Bun.sleep(0);
+	});
+
+	it("falls through to ordinary prompting when the skill is not user-invocable", async () => {
+		const harness = await createHarness();
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId);
+		if (!session) throw new Error("expected ACP session to exist after newSession");
+		const skillDir = path.join(harness.cwdA, ".skills", "sample");
+		const skillPath = path.join(skillDir, "SKILL.md");
+		await fs.promises.mkdir(skillDir, { recursive: true });
+		await fs.promises.writeFile(skillPath, "---\ndescription: Sample skill\n---\n# Sample\nDo work.\n");
+		session.skills = [
+			{
+				name: "sample",
+				description: "Sample skill",
+				filePath: skillPath,
+				baseDir: skillDir,
+				source: "test",
+				userInvocable: false,
+			},
+		];
+
+		await harness.agent.prompt({
+			sessionId: created.sessionId,
+			messageId: "00000000-0000-4000-8000-000000000002",
+			prompt: [{ type: "text", text: "/skill:sample extra context" }],
+		} as PromptRequest);
+
+		// The token is not addressable, so it reaches the model as ordinary text.
+		expect(session.customMessages).toEqual([]);
+		expect(session.promptCalls).toEqual(["/skill:sample extra context"]);
+
+		harness.abortController.abort();
+		await Promise.resolve();
 	});
 
 	it("auto-cancels an in-progress turn and queues a new prompt when called mid-flight", async () => {
