@@ -92,7 +92,7 @@
 		"test:scripts": "bun test scripts/ci-test-ts.test.ts scripts/ci-release-build-binaries.test.ts scripts/musl-release.test.ts scripts/ci-release-publish.test.ts scripts/release.test.ts",
 		"test:rs": "bun scripts/run-rs-task.ts test:rs",
 		"check": "bun run --parallel check:ts check:rs",
-		"check:ts": "bun run check:tools && bun run --workspaces --if-present check",
+		"check:ts": "bun run check:tools && bun run --workspaces --sequential --if-present check",
 		"check:tools": "oxlint . && oxfmt --check 'packages/*/src/**/*.{ts,tsx}' 'packages/*/{test,bench,examples,scripts}/**/*.ts' 'packages/*/*.ts' 'scripts/**/*.ts'",
 		"check:rs": "bun scripts/run-rs-task.ts check:rs",
 		"lint": "bun run --parallel lint:ts lint:rs",
