@@ -427,6 +427,8 @@ export class EditTool implements AgentTool<TInput> {
 	readonly #writethrough: WritethroughCallback;
 	readonly #editMode?: EditMode;
 	readonly #deferredDiagnostics: DeferredDiagnostics;
+	/** Last file path this tool resolved — sloppy auto-recovery target. */
+	#lastTargetPath: string | undefined;
 
 	/**
 	 * `mode` pins the edit variant for this instance, for callers whose protocol
@@ -698,6 +700,7 @@ export class EditTool implements AgentTool<TInput> {
 							path,
 							run: async (br: LspBatchRequest | undefined) => {
 								const targetPath = await resolveOnce(path, patchParams.op !== "create");
+								tool.#lastTargetPath = targetPath;
 								return executePatchSingle({
 									session: tool.session,
 									path: targetPath,
@@ -752,9 +755,17 @@ export class EditTool implements AgentTool<TInput> {
 				) => {
 					const { input } = params as SloppyParams;
 					// `[path]` headers open per-file sections; the first line MUST be one.
-					const sections = splitSloppySections(input);
+					let sections = splitSloppySections(input);
 					if (sections.length === 0) {
-						throw new Error("Missing file header: start the payload with `§relative/path.ts`.");
+						// Auto-recovery: the model forgot the §path header — default to
+						// the last file this tool resolved this session instead of
+						// dead-ending the edit (harness-error reduction, 2026-09).
+						const implied = tool.#lastTargetPath;
+						if (implied) {
+							sections = [{ path: implied, body: input }];
+						} else {
+							throw new Error("Missing file header: start the payload with `§relative/path.ts`.");
+						}
 					}
 					const resolved: SloppySection[] = [];
 					for (const section of sections) {
@@ -763,6 +774,7 @@ export class EditTool implements AgentTool<TInput> {
 							body: section.body,
 						});
 					}
+					if (resolved.length > 0) tool.#lastTargetPath = resolved[resolved.length - 1].path;
 					return executeSloppy({
 						session: tool.session,
 						sections: resolved,
@@ -800,6 +812,7 @@ export class EditTool implements AgentTool<TInput> {
 									},
 								];
 					const targetPath = await resolveEditPath(tool.session, replaceParams.path, { mustExist: true, signal });
+					tool.#lastTargetPath = targetPath;
 					const runs = entries.map(
 						entry => (br: LspBatchRequest | undefined) =>
 							executeReplace({
