@@ -14,6 +14,7 @@ import {
 } from "../src/blob-broker/exposure";
 
 const PORT = 43127;
+const FILE_CONTENT_WAIT_TIMEOUT_MS = 5_000;
 const originalPath = process.env.PATH;
 let fakeBinDir = "";
 let invocationSequence = 0;
@@ -61,17 +62,12 @@ async function waitForFileContent(filePath: string, matches: (text: string) => b
 			return false;
 		}
 	};
-	if (matchesCurrentContent()) return;
-	const { promise, resolve } = Promise.withResolvers<void>();
-	const listener = (): void => {
-		if (matchesCurrentContent()) resolve();
-	};
-	fs.watchFile(filePath, { interval: 25, persistent: false }, listener);
-	listener();
-	try {
-		await promise;
-	} finally {
-		fs.unwatchFile(filePath, listener);
+	const deadline = Date.now() + FILE_CONTENT_WAIT_TIMEOUT_MS;
+	while (!matchesCurrentContent()) {
+		if (Date.now() >= deadline) {
+			throw new Error(`Timed out waiting for ${path.basename(filePath)} content`);
+		}
+		await Bun.sleep(25);
 	}
 }
 
