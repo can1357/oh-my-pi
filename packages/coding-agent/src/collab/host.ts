@@ -721,33 +721,23 @@ export class CollabHost {
 			return;
 		}
 		this.#ircHistoryFetchAt.set(fromPeer, now);
-		bus.configureHistory(this.#ctx.sessionManager.getSessionFile());
-		void bus.history.ready().then(
-			() => {
-				const records = bus.historyRecords().slice(-IRC_HISTORY_RECORD_CAP);
-				const bounded: typeof records = [];
-				let bytes = Buffer.byteLength(JSON.stringify({ t: "irc-history", reqId, records: [] }), "utf8");
-				for (let index = records.length - 1; index >= 0; index--) {
-					const record = records[index]!;
-					const body =
-						Buffer.byteLength(record.message.body, "utf8") > IRC_BODY_BYTES_CAP
-							? `${record.message.body.slice(0, IRC_BODY_CODE_UNIT_CAP)}…`
-							: record.message.body;
-					const projected =
-						body === record.message.body ? record : { ...record, message: { ...record.message, body } };
-					const size = Buffer.byteLength(JSON.stringify(projected), "utf8") + Number(bounded.length > 0);
-					if (bytes + size > IRC_HISTORY_BYTES_CAP) break;
-					bytes += size;
-					bounded.push(projected);
-				}
-				this.#socket?.send({ t: "irc-history", reqId, records: bounded.reverse() }, fromPeer);
-			},
-			error =>
-				this.#socket?.send(
-					{ t: "irc-history", reqId, records: [], error: error instanceof Error ? error.message : String(error) },
-					fromPeer,
-				),
-		);
+		bus.configureHistory(this.#ctx.sessionManager);
+		const records = bus.historyRecords().slice(-IRC_HISTORY_RECORD_CAP);
+		const bounded: typeof records = [];
+		let bytes = Buffer.byteLength(JSON.stringify({ t: "irc-history", reqId, records: [] }), "utf8");
+		for (let index = records.length - 1; index >= 0; index--) {
+			const record = records[index]!;
+			const body =
+				Buffer.byteLength(record.message.body, "utf8") > IRC_BODY_BYTES_CAP
+					? `${record.message.body.slice(0, IRC_BODY_CODE_UNIT_CAP)}…`
+					: record.message.body;
+			const projected = body === record.message.body ? record : { ...record, message: { ...record.message, body } };
+			const size = Buffer.byteLength(JSON.stringify(projected), "utf8") + Number(bounded.length > 0);
+			if (bytes + size > IRC_HISTORY_BYTES_CAP) break;
+			bytes += size;
+			bounded.push(projected);
+		}
+		this.#socket?.send({ t: "irc-history", reqId, records: bounded.reverse() }, fromPeer);
 	}
 
 	async #handleIrcSend(
@@ -791,7 +781,7 @@ export class CollabHost {
 		}
 		const registry = this.#registry;
 		const bus = this.#irc;
-		bus.configureHistory(this.#ctx.sessionManager.getSessionFile());
+		bus.configureHistory(this.#ctx.sessionManager);
 		if (target === "all") {
 			const targets = registry
 				.listVisibleTo(MAIN_AGENT_ID)

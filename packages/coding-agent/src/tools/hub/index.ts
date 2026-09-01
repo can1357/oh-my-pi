@@ -132,6 +132,8 @@ interface MessagingDeps {
 	registry: AgentRegistry;
 	senderId: string;
 	settings: ToolSession["settings"];
+	/** Root session manager that owns persisted Agent Hub history. */
+	historySession: ToolSession["sessionManager"];
 	/** Caller session file: direct sends refresh this root's persisted roster before resolving the target. */
 	sessionFileHint?: string | null;
 }
@@ -261,6 +263,7 @@ export class HubTool implements AgentTool<typeof hubSchema, HubDetails> {
 			registry,
 			senderId,
 			settings: this.session.settings,
+			historySession: registry.get(MAIN_AGENT_ID)?.session?.sessionManager ?? this.session.sessionManager,
 			sessionFileHint:
 				registry.get(MAIN_AGENT_ID)?.sessionFile ??
 				(typeof this.session.getSessionFile === "function" ? this.session.getSessionFile() : null),

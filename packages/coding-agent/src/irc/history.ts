@@ -1,11 +1,11 @@
-import type { Stats } from "node:fs";
-import * as fs from "node:fs/promises";
-import * as path from "node:path";
-import { logger } from "@oh-my-pi/pi-utils";
-import type { IrcDeliveryReceipt, IrcHistoryEvent, IrcHistoryRecord, IrcMessage, IrcReadCursor } from "./types";
+import type { SessionManager } from "../session/session-manager";
+import type { IrcDeliveryReceipt, IrcHistoryRecord, IrcMessage, IrcReadCursor } from "./types";
+
+export const IRC_HISTORY_CUSTOM_TYPE = "irc-history";
 
 const MAX_HISTORY_RECORDS = 5_000;
-const MAX_HISTORY_LOAD_BYTES = 8 * 1024 * 1024;
+
+export type IrcHistorySession = Pick<SessionManager, "appendCustomEntry" | "getEntries" | "getSessionId">;
 
 function recordOf(value: unknown): Record<string, unknown> | undefined {
 	return value !== null && typeof value === "object" && !Array.isArray(value)
@@ -36,43 +36,63 @@ function parseMessage(value: unknown): IrcMessage | undefined {
 	};
 }
 
-function journalPath(sessionFile: string): string {
-	return `${sessionFile}.irc`;
+function parseTerminalOutcome(value: unknown): IrcDeliveryReceipt["outcome"] | undefined {
+	switch (value) {
+		case "injected":
+		case "woken":
+		case "revived":
+		case "failed":
+			return value;
+		default:
+			return undefined;
+	}
+}
+
+function parseHistoryRecord(value: unknown): IrcHistoryRecord | undefined {
+	const candidate = recordOf(value);
+	const message = parseMessage(candidate?.message);
+	const outcome = parseTerminalOutcome(candidate?.outcome);
+	if (!candidate || !message || !outcome || typeof candidate.updatedAt !== "number") return undefined;
+	return {
+		message,
+		outcome,
+		error: typeof candidate.error === "string" ? candidate.error : undefined,
+		updatedAt: candidate.updatedAt,
+	};
 }
 
 /**
- * Append-only delivery journal plus a bounded in-memory projection.
- * Message intent is fsynced through appendFile before IrcBus starts delivery;
- * a second event records its terminal hand-off outcome.
+ * Bounded in-memory projection backed by the owning session's custom entries.
+ * Pending delivery remains process-local; each terminal outcome adds one
+ * `irc-history` entry to the same JSONL lifecycle as the rest of the session.
  */
 export class IrcHistoryStore {
-	#file: string | undefined;
+	#session: IrcHistorySession | undefined;
+	#sessionId: string | undefined;
 	#records = new Map<string, IrcHistoryRecord>();
 	#listeners = new Set<() => void>();
 	#readAt = new Map<string, IrcReadCursor>();
 	#pendingMessages = new Map<string, number>();
-	#ready: Promise<void> = Promise.resolve();
-	#writeQueue: Promise<void> = Promise.resolve();
 	#generation = 0;
 
-	get file(): string | undefined {
-		return this.#file;
-	}
+	configureSession(session?: IrcHistorySession | null): void {
+		const nextSession = session ?? undefined;
+		const nextSessionId = nextSession?.getSessionId();
+		if (nextSession === this.#session && nextSessionId === this.#sessionId) return;
 
-	configureSessionFile(sessionFile?: string | null): void {
-		const file = sessionFile ? journalPath(sessionFile) : undefined;
-		if (file === this.#file) return;
-		this.#file = file;
+		this.#session = nextSession;
+		this.#sessionId = nextSessionId;
 		this.#records.clear();
 		this.#readAt.clear();
 		this.#pendingMessages.clear();
-		const generation = ++this.#generation;
-		this.#ready = file ? this.#load(file, generation) : Promise.resolve();
-		this.#notify();
-	}
+		this.#generation++;
 
-	async ready(): Promise<void> {
-		await this.#ready;
+		for (const entry of nextSession?.getEntries() ?? []) {
+			if (entry.type !== "custom" || entry.customType !== IRC_HISTORY_CUSTOM_TYPE) continue;
+			const record = parseHistoryRecord(entry.data);
+			if (record) this.#store(record);
+		}
+		this.#notify();
 	}
 
 	onChange(listener: () => void): () => void {
@@ -80,42 +100,27 @@ export class IrcHistoryStore {
 		return () => this.#listeners.delete(listener);
 	}
 
-	recordMessage(message: IrcMessage): Promise<void> | undefined {
-		const event: IrcHistoryEvent = { type: "irc", v: 1, event: "message", message };
-		const generation = this.#generation;
-		if (!this.#file) {
-			this.#apply(event);
-			this.#pendingMessages.set(message.id, generation);
-			this.#notify();
-			return;
-		}
-		const file = this.#file;
-		const ready = this.#ready;
-		return this.#recordDurable(event, file, generation, ready).then(() => {
-			if (generation === this.#generation && file === this.#file) {
-				this.#pendingMessages.set(message.id, generation);
-			}
-		});
+	recordMessage(message: IrcMessage): void {
+		this.#store({ message, outcome: "pending", updatedAt: message.ts });
+		this.#pendingMessages.set(message.id, this.#generation);
+		this.#notify();
 	}
 
-	recordDelivery(messageId: string, receipt: IrcDeliveryReceipt): Promise<void> | undefined {
+	recordDelivery(messageId: string, receipt: IrcDeliveryReceipt): void {
 		if (this.#pendingMessages.get(messageId) !== this.#generation) return;
 		this.#pendingMessages.delete(messageId);
-		const event: IrcHistoryEvent = {
-			type: "irc",
-			v: 1,
-			event: "delivery",
-			messageId,
+		const pending = this.#records.get(messageId);
+		if (!pending) return;
+
+		const record: IrcHistoryRecord = {
+			message: pending.message,
 			outcome: receipt.outcome,
 			error: receipt.error,
-			ts: Date.now(),
+			updatedAt: Date.now(),
 		};
-		if (!this.#file) {
-			this.#apply(event);
-			this.#notify();
-			return;
-		}
-		return this.#recordDurable(event, this.#file, this.#generation, this.#ready);
+		this.#store(record);
+		this.#notify();
+		this.#session?.appendCustomEntry(IRC_HISTORY_CUSTOM_TYPE, record);
 	}
 
 	list(): IrcHistoryRecord[] {
@@ -138,6 +143,7 @@ export class IrcHistoryStore {
 	readAt(conversationId: string): IrcReadCursor {
 		return this.#readAt.get(conversationId) ?? { timestamp: 0, messageId: "" };
 	}
+
 	clear(): void {
 		this.#records.clear();
 		this.#readAt.clear();
@@ -145,96 +151,13 @@ export class IrcHistoryStore {
 		this.#notify();
 	}
 
-	async #recordDurable(event: IrcHistoryEvent, file: string, generation: number, ready: Promise<void>): Promise<void> {
-		await ready;
-		this.#assertActiveSession(file, generation);
-		await this.#append(file, event);
-		this.#assertActiveSession(file, generation);
-		this.#apply(event);
-		this.#notify();
-	}
-
-	#assertActiveSession(file: string, generation: number): void {
-		if (generation !== this.#generation || file !== this.#file) {
-			throw new Error("active IRC history session changed");
+	#store(record: IrcHistoryRecord): void {
+		this.#records.set(record.message.id, record);
+		while (this.#records.size > MAX_HISTORY_RECORDS) {
+			const oldest = this.#records.keys().next().value;
+			if (typeof oldest !== "string") break;
+			this.#records.delete(oldest);
 		}
-	}
-
-	async #append(file: string, event: IrcHistoryEvent): Promise<void> {
-		const line = `${JSON.stringify(event)}\n`;
-		const write = this.#writeQueue.then(async () => {
-			await fs.mkdir(path.dirname(file), { recursive: true });
-			const handle = await fs.open(file, "a", 0o600);
-			try {
-				await handle.writeFile(line, "utf8");
-				await handle.sync();
-			} finally {
-				await handle.close();
-			}
-		});
-		this.#writeQueue = write.catch(error => {
-			logger.error("IRC history append failed", { file, error: String(error) });
-		});
-		await write;
-	}
-
-	async #load(file: string, generation: number): Promise<void> {
-		let stat: Stats;
-		try {
-			stat = await fs.stat(file);
-		} catch {
-			return;
-		}
-		const start = Math.max(0, stat.size - MAX_HISTORY_LOAD_BYTES);
-		let text: string;
-		try {
-			text = await Bun.file(file).slice(start, stat.size).text();
-		} catch (error) {
-			logger.warn("IRC history load failed", { file, error: String(error) });
-			return;
-		}
-		if (generation !== this.#generation || file !== this.#file) return;
-		if (start > 0) {
-			const firstNewline = text.indexOf("\n");
-			text = firstNewline >= 0 ? text.slice(firstNewline + 1) : "";
-		}
-		for (const line of text.split("\n")) {
-			if (!line.trim()) continue;
-			try {
-				this.#apply(JSON.parse(line));
-			} catch {
-				// A torn or foreign line cannot invalidate the rest of the journal.
-			}
-		}
-		this.#notify();
-	}
-
-	#apply(value: unknown): void {
-		const event = recordOf(value);
-		if (event?.type !== "irc" || event.v !== 1) return;
-		if (event.event === "message") {
-			const message = parseMessage(event.message);
-			if (!message) return;
-			this.#records.set(message.id, { message, outcome: "pending", updatedAt: message.ts });
-			while (this.#records.size > MAX_HISTORY_RECORDS) {
-				const oldest = this.#records.keys().next().value;
-				if (typeof oldest !== "string") break;
-				this.#records.delete(oldest);
-			}
-			return;
-		}
-		if (
-			event.event !== "delivery" ||
-			typeof event.messageId !== "string" ||
-			!(["injected", "woken", "revived", "failed"] as const).includes(event.outcome as never)
-		) {
-			return;
-		}
-		const record = this.#records.get(event.messageId);
-		if (!record) return;
-		record.outcome = event.outcome as IrcDeliveryReceipt["outcome"];
-		record.error = typeof event.error === "string" ? event.error : undefined;
-		record.updatedAt = typeof event.ts === "number" ? event.ts : record.updatedAt;
 	}
 
 	#notify(): void {

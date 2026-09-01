@@ -15,6 +15,7 @@ import { formatAge, formatDuration, Snowflake } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../../config/settings";
 import type { RenderResultOptions } from "../../extensibility/custom-tools/types";
 import { IrcAwaitTargetStopped, IrcBus, type IrcDeliveryReceipt, type IrcMessage } from "../../irc/bus";
+import type { IrcHistorySession } from "../../irc/history";
 import type { Theme } from "../../modes/theme/theme";
 import { type AgentRegistry, MAIN_AGENT_ID } from "../../registry/agent-registry";
 import { ensurePersistedRoster, isCurrentSessionRosterRef } from "../../registry/persisted-agents";
@@ -226,7 +227,13 @@ export interface HubSendParams {
 }
 
 export async function executeSend(
-	deps: { registry: AgentRegistry; senderId: string; settings: Settings; sessionFileHint?: string | null },
+	deps: {
+		registry: AgentRegistry;
+		senderId: string;
+		settings: Settings;
+		historySession?: IrcHistorySession;
+		sessionFileHint?: string | null;
+	},
 	params: HubSendParams,
 	signal?: AbortSignal,
 ): Promise<AgentToolResult<CoordinationDetails>> {
@@ -263,7 +270,7 @@ export async function executeSend(
 	}
 
 	const bus = IrcBus.global();
-	bus.configureHistory(deps.sessionFileHint ?? null);
+	bus.configureHistory(deps.historySession);
 	let waited: IrcMessage | null | undefined;
 	const timeoutMs = params.await ? resolveMessageTimeoutMs(settings, params.timeoutMs) : undefined;
 	const awaitAbort = params.await ? new AbortController() : undefined;

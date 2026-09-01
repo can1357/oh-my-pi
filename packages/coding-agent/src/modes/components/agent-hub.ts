@@ -39,6 +39,7 @@ import type { Settings } from "../../config/settings";
 import type { MessageRenderer } from "../../extensibility/extensions/types";
 import { backfillIrcHistoryFromTranscript, dedupeBackfillRecords } from "../../irc/backfill";
 import { IrcBus, type IrcHistoryRecord, type IrcReadCursor } from "../../irc/bus";
+import type { IrcHistorySession } from "../../irc/history";
 import { deriveIrcConversations, type IrcConversation } from "../../irc/conversations";
 import { AgentLifecycleManager } from "../../registry/agent-lifecycle";
 import { type AgentRef, AgentRegistry, type AgentStatus, MAIN_AGENT_ID } from "../../registry/agent-registry";
@@ -178,6 +179,8 @@ export interface AgentHubDeps {
 	focusAgent?: (id: string) => Promise<void>;
 	/** Current main session file; used to seed parked historical subagents after restart. */
 	sessionFile?: string | null;
+	/** Current main session manager; owns persisted Agent Hub message history. */
+	sessionManager?: IrcHistorySession;
 	/** Initial top-level projection; slash commands deep-link into this surface. */
 	initialSection?: AgentHubSection;
 	/** Injectable unified activity source; production creates one from local or remote transcripts. */
@@ -320,7 +323,7 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 		this.#requestRender = deps.requestRender;
 		this.#hubKeys = deps.hubKeys;
 		this.#remote = deps.remote;
-		if (!this.#remote) this.#irc.configureHistory(deps.sessionFile);
+		if (!this.#remote) this.#irc.configureHistory(deps.sessionManager);
 		this.#loadingPersistedSubagents = !this.#remote && Boolean(deps.sessionFile?.endsWith(".jsonl"));
 		this.#ui =
 			deps.ui ??
@@ -771,8 +774,8 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 
 	/**
 	 * One-time lazy scan of the session transcript for legacy hub sends (sessions
-	 * that predate durable IRC journals). Streams the root transcript in the
-	 * background; a cap bounds memory on very chatty sessions.
+	 * that predate persisted IRC history entries). Streams the root transcript in
+	 * the background; a cap bounds memory on very chatty sessions.
 	 */
 	async #ensureBackfill(): Promise<void> {
 		if (this.#backfillStarted || this.#remote) return;

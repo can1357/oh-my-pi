@@ -6,6 +6,7 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { SettingPath } from "@oh-my-pi/pi-coding-agent/config/settings-schema";
 import { IrcBus, type IrcMessage } from "@oh-my-pi/pi-coding-agent/irc/bus";
+import { IRC_HISTORY_CUSTOM_TYPE } from "@oh-my-pi/pi-coding-agent/irc/history";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
@@ -85,7 +86,7 @@ function makeFakeSession(): FakeSession {
 	};
 }
 
-function makeToolSession(registry: AgentRegistry, agentId: string): ToolSession {
+function makeToolSession(registry: AgentRegistry, agentId: string, sessionManager?: SessionManager): ToolSession {
 	return {
 		cwd: "/tmp",
 		hasUI: false,
@@ -94,6 +95,7 @@ function makeToolSession(registry: AgentRegistry, agentId: string): ToolSession 
 		settings: Settings.isolated(),
 		agentRegistry: registry,
 		getAgentId: () => agentId,
+		sessionManager,
 	};
 }
 
@@ -748,6 +750,30 @@ describe("IRC", () => {
 			expect(details?.receipts).toEqual([{ to: "0-Sub", outcome: "injected" }]);
 			expect(details?.waited).toBeUndefined();
 			expect(sub.delivered.map(msg => msg.body)).toEqual(["ping"]);
+		});
+
+		it("op=send persists terminal history in the root session", async () => {
+			const sub = makeFakeSession();
+			registry.register({ id: "0-Sub", displayName: "task", kind: "sub", session: sub.session });
+			const sessionManager = SessionManager.inMemory("/tmp");
+			try {
+				const tool = new HubTool(makeToolSession(registry, "0-Main", sessionManager));
+				await tool.execute("call-1", { op: "send", to: "0-Sub", message: "persist me" });
+
+				const entries = sessionManager
+					.getEntries()
+					.filter(entry => entry.type === "custom" && entry.customType === IRC_HISTORY_CUSTOM_TYPE);
+				expect(entries).toEqual([
+					expect.objectContaining({
+						data: expect.objectContaining({
+							message: expect.objectContaining({ from: "0-Main", to: "0-Sub", body: "persist me" }),
+							outcome: "injected",
+						}),
+					}),
+				]);
+			} finally {
+				await sessionManager.close();
+			}
 		});
 
 		it("op=send to=all fans out to live peers and reports per-recipient receipts", async () => {

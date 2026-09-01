@@ -31,15 +31,3 @@ export interface IrcReadCursor {
 	timestamp: number;
 	messageId: string;
 }
-
-export type IrcHistoryEvent =
-	| { type: "irc"; v: 1; event: "message"; message: IrcMessage }
-	| {
-			type: "irc";
-			v: 1;
-			event: "delivery";
-			messageId: string;
-			outcome: Exclude<IrcDeliveryOutcome, "pending">;
-			error?: string;
-			ts: number;
-	  };

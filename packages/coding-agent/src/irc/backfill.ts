@@ -39,12 +39,12 @@ function hubSends(entry: FileEntry): Array<{ callId: string; to: string; body: s
 /**
  * Reconstruct Agent Hub sends from a legacy session transcript.
  *
- * Durable IRC history journals (`.irc` sidecars) only exist for sessions
- * driven by builds with message persistence. Older transcripts record every
- * hub send as a `hub` tool call in the root session file. This streams that
- * file once and projects those calls into history records so the Messages
- * view shows pre-journal conversations. Delivery outcomes are unknowable
- * from tool calls alone, so records are marked `injected`.
+ * IRC history custom entries only exist for sessions driven by builds with
+ * message persistence. Older transcripts record every hub send as a `hub`
+ * tool call in the root session file. This streams that file once and
+ * projects those calls into history records so the Messages view shows
+ * pre-history conversations. Delivery outcomes are unknowable from tool
+ * calls alone, so records are marked `injected`.
  *
  * Only Main's outbound traffic is reconstructed: sibling traffic lives in
  * nested per-agent transcripts, which would multiply the scan cost.
@@ -78,15 +78,15 @@ export async function backfillIrcHistoryFromTranscript(
 }
 
 /**
- * Drop backfilled records that duplicate a durable journal record for the
+ * Drop backfilled records that duplicate a persisted history record for the
  * same send (sessions used across the old/new builds record sends both ways).
- * Match on endpoint pair + body; the journal's snowflake ids never collide
- * with `bf:` ids, so ids cannot be used for dedupe.
+ * Match on endpoint pair + body; persisted snowflake ids never collide with
+ * `bf:` ids, so ids cannot be used for dedupe.
  */
 export function dedupeBackfillRecords(
 	backfilled: readonly IrcHistoryRecord[],
-	journaled: readonly IrcHistoryRecord[],
+	persisted: readonly IrcHistoryRecord[],
 ): IrcHistoryRecord[] {
-	const seen = new Set(journaled.map(record => `${record.message.to}\u0000${record.message.body}`));
+	const seen = new Set(persisted.map(record => `${record.message.to}\u0000${record.message.body}`));
 	return backfilled.filter(record => !seen.has(`${record.message.to}\u0000${record.message.body}`));
 }

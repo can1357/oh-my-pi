@@ -16,7 +16,7 @@
  */
 
 import { logger, Snowflake } from "@oh-my-pi/pi-utils";
-import { IrcHistoryStore } from "./history";
+import { IrcHistoryStore, type IrcHistorySession } from "./history";
 import type { IrcDeliveryReceipt, IrcHistoryRecord, IrcMessage } from "./types";
 
 export type { IrcDeliveryReceipt, IrcHistoryRecord, IrcMessage, IrcReadCursor } from "./types";
@@ -85,8 +85,8 @@ export class IrcBus {
 		this.history = history;
 	}
 
-	configureHistory(sessionFile?: string | null): void {
-		this.history.configureSessionFile(sessionFile);
+	configureHistory(session?: IrcHistorySession | null): void {
+		this.history.configureSession(session);
 	}
 
 	historyRecords(): IrcHistoryRecord[] {
@@ -123,8 +123,7 @@ export class IrcBus {
 	): Promise<IrcDeliveryReceipt> {
 		const message: IrcMessage = { ...msg, id: Snowflake.next(), ts: Date.now() };
 		try {
-			const pendingRecord = this.history.recordMessage(message);
-			if (pendingRecord) await pendingRecord;
+			this.history.recordMessage(message);
 		} catch (error) {
 			return {
 				to: message.to,
@@ -132,10 +131,9 @@ export class IrcBus {
 				error: `IRC history unavailable: ${error instanceof Error ? error.message : String(error)}`,
 			};
 		}
-		const finish = async (receipt: TerminalReceipt): Promise<TerminalReceipt> => {
+		const finish = (receipt: TerminalReceipt): TerminalReceipt => {
 			try {
-				const pendingDelivery = this.history.recordDelivery(message.id, receipt);
-				if (pendingDelivery) await pendingDelivery;
+				this.history.recordDelivery(message.id, receipt);
 			} catch (error) {
 				logger.error("IRC delivery outcome persistence failed", {
 					messageId: message.id,
