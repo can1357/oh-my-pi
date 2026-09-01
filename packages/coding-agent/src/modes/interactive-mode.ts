@@ -5566,6 +5566,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#observerRegistry.setMainSession(this.sessionManager.getSessionFile() ?? undefined);
 	}
 
+	setObservedAgentTaskOutcome(id: string, state: "active" | "completed" | "failed" | "aborted"): void {
+		this.#observerRegistry.setTaskOutcomeState(id, state);
+	}
+
 	handleBashCommand(command: string, excludeFromContext?: boolean): Promise<void> {
 		return this.#commandController.handleBashCommand(command, excludeFromContext);
 	}

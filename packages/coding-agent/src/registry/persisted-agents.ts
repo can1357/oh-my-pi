@@ -11,9 +11,11 @@ import { loadBundledAgents } from "../task/agents";
 import { isReadOnlyAgent } from "../task/read-only-policy";
 import { persistedVibeChildIds } from "../vibe/lifecycle";
 import {
+	AGENT_TASK_OUTCOME_ENTRY_TYPE,
 	type AgentHistorySummary,
 	type AgentMetricsSummary,
 	type AgentRegistry,
+	type AgentTerminalOutcome,
 	getAgentTombstonePath,
 	MAIN_AGENT_ID,
 } from "./agent-registry";
@@ -102,12 +104,15 @@ interface AssistantMetrics {
 	cost: number;
 	contextTokens?: number;
 	resolvedModel?: string;
+	outcome?: AgentTerminalOutcome;
 	/**
 	 * True when this turn produced output, making its model the run's. Uses the
 	 * same predicate as the live session, so replaying a transcript reaches the
 	 * same verdict the session reached while running it.
 	 */
 	served: boolean;
+	/** True when this assistant turn successfully ended its request. */
+	terminalSuccess: boolean;
 }
 
 function assistantMetrics(message: Record<string, unknown>): AssistantMetrics {
@@ -116,16 +121,20 @@ function assistantMetrics(message: Record<string, unknown>): AssistantMetrics {
 	const content = Array.isArray(message.content) ? message.content : [];
 	const provider = typeof message.provider === "string" ? message.provider : undefined;
 	const model = typeof message.model === "string" ? message.model : undefined;
+	const outcome = message.stopReason === "error" ? "failed" : message.stopReason === "aborted" ? "aborted" : undefined;
+	const served = assistantTurnProducedOutput({
+		stopReason: message.stopReason,
+		content,
+	} as Pick<AssistantMessage, "stopReason" | "content">);
 	return {
 		tokens: usageTokens(usage),
 		tools: content.filter(part => recordOf(part)?.type === "toolCall").length,
 		cost: finiteNumber(cost?.total),
 		contextTokens: finiteNumber(usage.totalTokens) || undefined,
 		resolvedModel: provider && model ? `${provider}/${model}` : undefined,
-		served: assistantTurnProducedOutput({
-			stopReason: message.stopReason,
-			content,
-		} as Pick<AssistantMessage, "stopReason" | "content">),
+		outcome,
+		served,
+		terminalSuccess: message.stopReason === "stop" && served,
 	};
 }
 
@@ -151,6 +160,8 @@ async function readPersistedAgentHistory(
 	const parents = new Map<string, string | undefined>();
 	const assistantById = new Map<string, AssistantMetrics>();
 	const modelChangeById = new Map<string, { model: string; role?: string; resolvedModelIsFallback: boolean }>();
+	const outcomeById = new Map<string, AgentTerminalOutcome>();
+	const taskOutcomeById = new Map<string, AgentTerminalOutcome | null>();
 	let leafId: string | undefined;
 	let leafTimestamp: number | undefined;
 	try {
@@ -174,9 +185,23 @@ async function readPersistedAgentHistory(
 					});
 					return;
 				}
+				if (record.type === "custom" && record.customType === AGENT_TASK_OUTCOME_ENTRY_TYPE) {
+					const outcome = recordOf(record.data)?.outcome;
+					if (outcome === null || outcome === "completed" || outcome === "failed" || outcome === "aborted") {
+						taskOutcomeById.set(id, outcome);
+					}
+					return;
+				}
 				if (record.type !== "message") return;
 				const message = recordOf(record.message);
-				if (message?.role === "assistant") assistantById.set(id, assistantMetrics(message));
+				if (message?.role === "assistant") {
+					assistantById.set(id, assistantMetrics(message));
+					return;
+				}
+				if (message?.role !== "toolResult" || message.toolName !== "yield" || message.isError === true) return;
+				const details = recordOf(message.details);
+				if (details?.status === "success") outcomeById.set(id, "completed");
+				else if (details?.status === "aborted") outcomeById.set(id, "aborted");
 			},
 			// Advisor transcripts are the one file that can grow pathologically large
 			// (issue #9553); cap their scan so one bad transcript can't stall the Hub
@@ -221,9 +246,20 @@ async function readPersistedAgentHistory(
 	let contextTokens: number | undefined;
 	let servedModel: string | undefined;
 	let latestModelChange: { model: string; resolvedModelIsFallback: boolean } | undefined;
+	let lastOutcome: AgentTerminalOutcome | undefined;
+	let taskOutcomeResolved = false;
+	let legacyOutcomeResolved = false;
 	const visited = new Set<string>();
 	for (let id = leafId; id && !visited.has(id); id = parents.get(id)) {
 		visited.add(id);
+		if (!taskOutcomeResolved && taskOutcomeById.has(id)) {
+			taskOutcomeResolved = true;
+			lastOutcome = taskOutcomeById.get(id) ?? undefined;
+		}
+		if (!taskOutcomeResolved && !legacyOutcomeResolved && outcomeById.has(id)) {
+			legacyOutcomeResolved = true;
+			lastOutcome = outcomeById.get(id);
+		}
 		const modelChange = modelChangeById.get(id);
 		if (modelChange) {
 			latestModelChange ??= modelChange;
@@ -245,6 +281,16 @@ async function readPersistedAgentHistory(
 		}
 		const assistant = assistantById.get(id);
 		if (!assistant) continue;
+		if (!taskOutcomeResolved && !legacyOutcomeResolved) {
+			if (assistant.outcome) {
+				legacyOutcomeResolved = true;
+				lastOutcome = assistant.outcome;
+			} else if (assistant.terminalSuccess) {
+				// Legacy/advisor transcripts have no explicit task marker. A newer
+				// successful terminal turn supersedes any older provider error.
+				legacyOutcomeResolved = true;
+			}
+		}
 		if (servedModel === undefined && assistant.served && assistant.resolvedModel) {
 			servedModel = assistant.resolvedModel;
 		}
@@ -267,6 +313,7 @@ async function readPersistedAgentHistory(
 		...(metrics.requests > 0 ? { metrics } : {}),
 		...(resolvedModel ? { resolvedModel, resolvedModelIsFallback } : {}),
 		...(modelRole ? { modelRole } : {}),
+		...(lastOutcome ? { lastOutcome } : {}),
 	};
 }
 

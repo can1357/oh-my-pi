@@ -10,10 +10,13 @@ import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import { type AgentHubDeps, AgentHubOverlayComponent } from "@oh-my-pi/pi-coding-agent/modes/components/agent-hub";
+import { agentDisplayState } from "@oh-my-pi/pi-coding-agent/modes/components/agent-hub-projection";
 import { SessionObserverRegistry } from "@oh-my-pi/pi-coding-agent/modes/session-observer-registry";
 import { initTheme, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
-import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
-import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { AgentRegistry, runTrackedAgentTaskTurn } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
+import type { AgentSession, AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { TASK_SUBAGENT_LIFECYCLE_CHANNEL } from "@oh-my-pi/pi-coding-agent/task";
+import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { visibleWidth } from "@oh-my-pi/pi-tui/utils";
 
 interface GeometryStub {
@@ -1020,5 +1023,325 @@ describe("Agent hub row ordering", () => {
 		} finally {
 			hub.dispose();
 		}
+	});
+
+	it("keeps task outcomes visible after sessions become idle and explains retry failures", () => {
+		geometry = stubStdoutGeometry(160);
+		geometry.setRows(32);
+		const agents = new AgentRegistry();
+		agents.register({
+			id: "CompletedAgent",
+			displayName: "Completed Agent",
+			kind: "sub",
+			session: null,
+			status: "idle",
+			history: { lastOutcome: "completed" },
+			lastActivity: 1_000,
+		});
+		agents.register({
+			id: "FailedAgent",
+			displayName: "Failed Agent",
+			kind: "sub",
+			session: null,
+			status: "idle",
+			lastActivity: 2_000,
+		});
+		agents.register({
+			id: "RetryAgent",
+			displayName: "Retry Agent",
+			kind: "sub",
+			session: {} as AgentSession,
+			status: "running",
+			lastActivity: 3_000,
+		});
+		const observers = new SessionObserverRegistry();
+		vi.spyOn(observers, "getSessions").mockReturnValue([
+			{
+				id: "RetryAgent",
+				kind: "subagent",
+				label: "Retry Agent",
+				status: "active",
+				lastUpdate: Date.now(),
+				progress: {
+					index: 0,
+					id: "RetryAgent",
+					agent: "worker",
+					agentSource: "bundled",
+					status: "running",
+					task: "Wait for provider capacity",
+					recentTools: [],
+					recentOutput: [],
+					toolCount: 0,
+					requests: 2,
+					tokens: 400,
+					cost: 0,
+					durationMs: 1_500,
+					retryState: {
+						attempt: 2,
+						maxAttempts: 4,
+						delayMs: 5_000,
+						errorMessage: "429 capacity exhausted",
+						startedAtMs: Date.now(),
+					},
+				} as never,
+			},
+			{
+				id: "FailedAgent",
+				kind: "subagent",
+				label: "Failed Agent",
+				status: "failed",
+				lastUpdate: Date.now(),
+				progress: {
+					index: 1,
+					id: "FailedAgent",
+					agent: "worker",
+					agentSource: "bundled",
+					status: "failed",
+					task: "Call the provider",
+					recentTools: [],
+					recentOutput: [],
+					toolCount: 0,
+					requests: 4,
+					tokens: 800,
+					cost: 0,
+					durationMs: 4_000,
+					retryFailure: {
+						attempt: 4,
+						errorMessage: "retry-after exceeded the configured cap",
+					},
+				} as never,
+			},
+		]);
+		const hub = makeHub(agents, { observers });
+
+		try {
+			const retrying = Bun.stripANSI(hub.render(160).join("\n"));
+			expect(retrying).toContain("1 retrying");
+			expect(retrying).toContain("1 failed");
+			expect(retrying).toContain("1 completed");
+			expect(retrying).not.toContain("2 idle");
+			expect(retrying).toContain("Retry");
+			expect(retrying).toContain("Attempt 2/4");
+			expect(retrying).toContain("429 capacity exhausted");
+
+			hub.handleInput("j");
+			const failed = Bun.stripANSI(hub.render(160).join("\n"));
+			expect(selectedAgentId(hub)).toBe("FailedAgent");
+			expect(failed).toContain("failed · idle session");
+			expect(failed).toContain("Failure");
+			expect(failed).toContain("Auto-retry stopped after 4 attempts");
+			expect(failed).toContain("retry-after exceeded the configured cap");
+		} finally {
+			hub.dispose();
+		}
+	});
+
+	it("clears a settled outcome when the reusable session starts another turn", () => {
+		const agents = new AgentRegistry();
+		const session = { isStreaming: false } as AgentSession;
+		const ref = agents.register({
+			id: "FollowUpAgent",
+			displayName: "Follow-up Agent",
+			kind: "sub",
+			session,
+			status: "idle",
+			history: { lastOutcome: "failed" },
+		});
+
+		expect(agentDisplayState(ref)).toBe("failed");
+		expect(agentDisplayState({ ...ref, session: { isStreaming: true } as AgentSession })).toBe("running");
+		expect(
+			agentDisplayState(ref, {
+				id: ref.id,
+				kind: "subagent",
+				label: ref.displayName,
+				status: "failed",
+				lastUpdate: 0,
+				progress: { retryState: {} },
+			} as never),
+		).toBe("retrying");
+		expect(agents.clearLastOutcome(ref.id, session)).toBe(true);
+		expect(agentDisplayState(ref)).toBe("idle");
+	});
+
+	it("rejects delayed finalization after a newer agent turn starts", () => {
+		const agents = new AgentRegistry();
+		const session = { isStreaming: false } as AgentSession;
+		const ref = agents.register({
+			id: "ConcurrentAgent",
+			displayName: "Concurrent Agent",
+			kind: "sub",
+			session,
+			status: "idle",
+			history: { lastOutcome: "failed" },
+		});
+		const settledGeneration = agents.taskOutcomeGeneration(ref.id)!;
+		const followUpGeneration = agents.beginTaskOutcome(ref.id, session)!;
+
+		expect(agents.setTaskOutcome(ref.id, settledGeneration, "completed")).toBe(false);
+		expect(ref.history?.lastOutcome).toBeUndefined();
+		expect(agents.setTaskOutcome(ref.id, followUpGeneration, "failed")).toBe(true);
+		expect(ref.history?.lastOutcome).toBe("failed");
+	});
+
+	it("correlates concurrent tracked dispatches with only the turn each starts", async () => {
+		const agents = new AgentRegistry();
+		const listeners = new Set<(event: AgentSessionEvent) => void>();
+		const firstDispatchEntered = Promise.withResolvers<void>();
+		const releaseStart = Promise.withResolvers<void>();
+		const releaseTurn = Promise.withResolvers<void>();
+		let isStreaming = false;
+		const session = {
+			get isStreaming() {
+				return isStreaming;
+			},
+			sessionManager: { appendCustomEntry: () => {} },
+			subscribe: (listener: (event: AgentSessionEvent) => void) => {
+				listeners.add(listener);
+				return () => listeners.delete(listener);
+			},
+			getLastAssistantMessage: () => ({ stopReason: "stop" }),
+		} as unknown as AgentSession;
+		agents.register({
+			id: "ConcurrentAgent",
+			displayName: "Concurrent Agent",
+			kind: "sub",
+			session,
+			status: "idle",
+			history: { lastOutcome: "failed" },
+		});
+
+		const firstStates: string[] = [];
+		const first = runTrackedAgentTaskTurn(
+			agents,
+			"ConcurrentAgent",
+			session,
+			async () => {
+				firstDispatchEntered.resolve();
+				await releaseStart.promise;
+				isStreaming = true;
+				for (const listener of listeners) listener({ type: "agent_start" } as AgentSessionEvent);
+				await releaseTurn.promise;
+				isStreaming = false;
+				return true;
+			},
+			state => firstStates.push(state),
+		);
+		await firstDispatchEntered.promise;
+
+		const secondStates: string[] = [];
+		const second = runTrackedAgentTaskTurn(
+			agents,
+			"ConcurrentAgent",
+			session,
+			async () => {
+				await releaseStart.promise;
+				return true;
+			},
+			state => secondStates.push(state),
+		);
+		const listenersBeforeStart = listeners.size;
+
+		releaseStart.resolve();
+		expect(await second).toBe(true);
+		releaseTurn.resolve();
+		expect(await first).toBe(true);
+
+		expect(listenersBeforeStart).toBe(1);
+		expect(firstStates).toEqual(["active", "completed"]);
+		expect(secondStates).toEqual([]);
+		expect(agents.get("ConcurrentAgent")?.history?.lastOutcome).toBe("completed");
+	});
+
+	it("invalidates observer outcomes only after a follow-up turn starts", async () => {
+		const agents = new AgentRegistry();
+		const observerStates: string[] = [];
+		const observers = new SessionObserverRegistry();
+		const eventBus = new EventBus();
+		observers.subscribeToEventBus(eventBus, eventBus);
+		eventBus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
+			id: "FollowUpAgent",
+			index: 0,
+			agent: "task",
+			status: "failed",
+		});
+		await Promise.resolve();
+		const appended: Array<{ customType: string; data: unknown }> = [];
+		let listener: ((event: AgentSessionEvent) => void) | undefined;
+		const session = {
+			isStreaming: false,
+			sessionManager: {
+				appendCustomEntry: (customType: string, data: unknown) => {
+					appended.push({ customType, data });
+				},
+			},
+			subscribe: (next: (event: AgentSessionEvent) => void) => {
+				listener = next;
+				return () => {
+					listener = undefined;
+				};
+			},
+			getLastAssistantMessage: () => ({ stopReason: "stop" }),
+		} as unknown as AgentSession;
+		agents.register({
+			id: "FollowUpAgent",
+			displayName: "Follow-up Agent",
+			kind: "sub",
+			session,
+			status: "idle",
+			history: { lastOutcome: "failed" },
+		});
+
+		await runTrackedAgentTaskTurn(
+			agents,
+			"FollowUpAgent",
+			session,
+			async () => {
+				expect(agents.get("FollowUpAgent")?.history?.lastOutcome).toBe("failed");
+				listener?.({ type: "agent_start" } as AgentSessionEvent);
+				expect(agents.get("FollowUpAgent")?.history?.lastOutcome).toBeUndefined();
+				expect(observers.getSession("FollowUpAgent")?.status).toBe("active");
+				return true;
+			},
+			state => {
+				observerStates.push(state);
+				observers.setTaskOutcomeState("FollowUpAgent", state);
+			},
+		);
+		expect(observers.getSession("FollowUpAgent")?.status).toBe("completed");
+
+		expect(observerStates).toEqual(["active", "completed"]);
+		expect(agents.get("FollowUpAgent")?.history?.lastOutcome).toBe("completed");
+		expect(appended.map(entry => entry.data)).toEqual([{ outcome: null }, { outcome: "completed" }]);
+	});
+
+	it("retains the prior outcome when a follow-up prompt never starts", async () => {
+		const agents = new AgentRegistry();
+		const appended: unknown[] = [];
+		const session = {
+			isStreaming: false,
+			sessionManager: { appendCustomEntry: (_customType: string, data: unknown) => appended.push(data) },
+			subscribe: () => () => {},
+			getLastAssistantMessage: () => ({ stopReason: "stop" }),
+		} as unknown as AgentSession;
+		agents.register({
+			id: "RejectedAgent",
+			displayName: "Rejected Agent",
+			kind: "sub",
+			session,
+			status: "idle",
+			history: { lastOutcome: "failed" },
+		});
+
+		await expect(
+			runTrackedAgentTaskTurn(agents, "RejectedAgent", session, async () => {
+				throw new Error("prompt rejected");
+			}),
+		).rejects.toThrow("prompt rejected");
+		expect(agents.get("RejectedAgent")?.history?.lastOutcome).toBe("failed");
+		expect(appended).toEqual([]);
+		expect(await runTrackedAgentTaskTurn(agents, "RejectedAgent", session, async () => true)).toBe(true);
+		expect(agents.get("RejectedAgent")?.history?.lastOutcome).toBe("failed");
+		expect(appended).toEqual([]);
 	});
 });

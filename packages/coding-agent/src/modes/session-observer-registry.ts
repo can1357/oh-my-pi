@@ -96,6 +96,16 @@ export class SessionObserverRegistry {
 		return this.#sessions.get(id);
 	}
 
+	/** Replace a stale terminal observer verdict while a reusable agent runs another task. */
+	setTaskOutcomeState(id: string, status: "active" | "completed" | "failed" | "aborted"): void {
+		const session = this.#sessions.get(id);
+		if (session?.kind !== "subagent") return;
+		session.status = status;
+		session.lastUpdate = Date.now();
+		if (status === "active") session.progress = undefined;
+		this.#notifyListeners("lifecycle");
+	}
+
 	getSessions(): ObservableSession[] {
 		const sessions = [...this.#sessions.values()];
 		sessions.sort((a, b) => {

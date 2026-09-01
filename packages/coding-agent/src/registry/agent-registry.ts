@@ -52,6 +52,24 @@ export interface AgentMetricsSummary {
 	contextWindow?: number;
 }
 
+export type AgentTerminalOutcome = "completed" | "failed" | "aborted";
+
+/** Custom session entry whose latest value supersedes heuristic task-outcome reconstruction. */
+export const AGENT_TASK_OUTCOME_ENTRY_TYPE = "agent_task_outcome";
+
+/** Persist or invalidate the latest finalized task outcome on the agent's active transcript branch. */
+export function recordAgentTaskOutcome(
+	session: Pick<AgentSession, "sessionManager">,
+	outcome: AgentTerminalOutcome | null,
+): void {
+	const sessionManager = session.sessionManager;
+	const appendCustomEntry = sessionManager?.appendCustomEntry;
+	// Lightweight embedders and unit doubles may omit SessionManager or expose
+	// only its session-init subset. They still receive the in-memory update.
+	if (typeof appendCustomEntry !== "function") return;
+	appendCustomEntry.call(sessionManager, AGENT_TASK_OUTCOME_ENTRY_TYPE, { outcome });
+}
+
 /** Historical identity and telemetry that remain available after the live session is disposed. */
 export interface AgentHistorySummary {
 	agent?: string;
@@ -59,6 +77,8 @@ export interface AgentHistorySummary {
 	resolvedModel?: string;
 	/** Whether the last resolved model was selected by retry fallback routing. */
 	resolvedModelIsFallback?: boolean;
+	/** Latest task outcome, retained while the reusable session becomes idle or parked. */
+	lastOutcome?: AgentTerminalOutcome;
 	metrics?: AgentMetricsSummary;
 	readOnly?: boolean;
 	/** Durable task output artifact, when the executor wrote one. */
@@ -131,6 +151,8 @@ export class AgentRegistry {
 
 	readonly #refs = new Map<string, AgentRef>();
 	readonly #listeners = new Set<RegistryListener>();
+	#nextTaskOutcomeGeneration = 0;
+	readonly #taskOutcomeGenerations = new Map<string, number>();
 
 	#matchesExpected(ref: AgentRef, expected?: AgentRefExpectation): boolean {
 		return expected === undefined || ref === expected || ref.session === expected;
@@ -157,6 +179,7 @@ export class AgentRegistry {
 			history: input.history,
 		};
 		this.#refs.set(ref.id, ref);
+		this.#taskOutcomeGenerations.set(ref.id, ++this.#nextTaskOutcomeGeneration);
 		this.#emit({ type: "registered", ref });
 		return ref;
 	}
@@ -183,6 +206,41 @@ export class AgentRegistry {
 		ref.history = { ...ref.history, ...definedHistory };
 		this.#emit({ type: "metadata_changed", ref });
 		return true;
+	}
+
+	/** Clear a settled task verdict when the same reusable session starts another turn. */
+	clearLastOutcome(id: string, expected?: AgentRefExpectation): boolean {
+		const ref = this.#refs.get(id);
+		if (!ref || ref.status === "aborted" || !this.#matchesExpected(ref, expected)) return false;
+		if (!ref.history?.lastOutcome) return true;
+		delete ref.history.lastOutcome;
+		ref.lastActivity = Date.now();
+		this.#emit({ type: "metadata_changed", ref });
+		return true;
+	}
+
+	/**
+	 * Start one task verdict generation after the owned session confirms a turn.
+	 * A later generation prevents delayed finalization from overwriting that turn.
+	 */
+	beginTaskOutcome(id: string, expected?: AgentRefExpectation): number | undefined {
+		if (!this.clearLastOutcome(id, expected)) return undefined;
+		const generation = ++this.#nextTaskOutcomeGeneration;
+		this.#taskOutcomeGenerations.set(id, generation);
+		return generation;
+	}
+
+	taskOutcomeGeneration(id: string): number | undefined {
+		return this.#refs.has(id) ? this.#taskOutcomeGenerations.get(id) : undefined;
+	}
+
+	isCurrentTaskOutcome(id: string, generation: number): boolean {
+		return this.#refs.has(id) && this.#taskOutcomeGenerations.get(id) === generation;
+	}
+
+	setTaskOutcome(id: string, generation: number, outcome: AgentTerminalOutcome): boolean {
+		if (!this.isCurrentTaskOutcome(id, generation)) return false;
+		return this.setHistory(id, { lastOutcome: outcome });
 	}
 
 	setStatus(id: string, status: AgentStatus, expected?: AgentRefExpectation): boolean {
@@ -258,6 +316,7 @@ export class AgentRegistry {
 		const ref = this.#refs.get(id);
 		if (!ref || !this.#matchesExpected(ref, expected)) return false;
 		this.#refs.delete(id);
+		this.#taskOutcomeGenerations.delete(id);
 		this.#emit({ type: "removed", ref });
 		return true;
 	}
@@ -308,5 +367,63 @@ export class AgentRegistry {
 				// listeners must not break the dispatch loop
 			}
 		}
+	}
+}
+
+export type AgentTaskOutcomeState = "active" | AgentTerminalOutcome;
+
+const trackedTaskTurnStartGates = new WeakMap<AgentSession, Promise<void>>();
+
+/**
+ * Track a user-driven turn on a reusable agent session without erasing the
+ * previous task verdict until the session confirms that a new turn started.
+ */
+export async function runTrackedAgentTaskTurn(
+	registry: AgentRegistry,
+	id: string,
+	session: AgentSession,
+	dispatch: () => Promise<boolean>,
+	onState?: (state: AgentTaskOutcomeState) => void,
+): Promise<boolean> {
+	const previousStartGate = trackedTaskTurnStartGates.get(session) ?? Promise.resolve();
+	const startGate = Promise.withResolvers<void>();
+	trackedTaskTurnStartGates.set(session, startGate.promise);
+	await previousStartGate;
+
+	let started = false;
+	let outcomeGeneration: number | undefined;
+	let unsubscribe: (() => void) | undefined;
+	const finalize = (outcome: AgentTerminalOutcome): void => {
+		if (outcomeGeneration === undefined || !registry.isCurrentTaskOutcome(id, outcomeGeneration)) return;
+		recordAgentTaskOutcome(session, outcome);
+		registry.setTaskOutcome(id, outcomeGeneration, outcome);
+		onState?.(outcome);
+	};
+	try {
+		unsubscribe = session.subscribe(event => {
+			if (event.type !== "agent_start" || started) return;
+			started = true;
+			startGate.resolve();
+			outcomeGeneration = registry.beginTaskOutcome(id, session);
+			if (outcomeGeneration === undefined) return;
+			recordAgentTaskOutcome(session, null);
+			onState?.("active");
+		});
+		const accepted = await dispatch();
+		if (!accepted) return false;
+		if (!started) return true;
+		const stopReason = session.getLastAssistantMessage()?.stopReason;
+		finalize(stopReason === "aborted" ? "aborted" : stopReason === "error" ? "failed" : "completed");
+		return true;
+	} catch (error) {
+		if (started) {
+			const stopReason = session.getLastAssistantMessage()?.stopReason;
+			finalize(stopReason === "aborted" ? "aborted" : "failed");
+		}
+		throw error;
+	} finally {
+		unsubscribe?.();
+		startGate.resolve();
+		if (trackedTaskTurnStartGates.get(session) === startGate.promise) trackedTaskTurnStartGates.delete(session);
 	}
 }

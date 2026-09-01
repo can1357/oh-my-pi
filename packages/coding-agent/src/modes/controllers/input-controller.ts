@@ -21,6 +21,7 @@ import { parseQueueShorthand, splitQueuedMessages } from "../../modes/queue-inpu
 import { buildSkillCommandPrompt, isKnownSkillCommand } from "../../modes/skill-command";
 import type { InteractiveModeContext } from "../../modes/types";
 import manualContinuePrompt from "../../prompts/system/manual-continue.md" with { type: "text" };
+import { AgentRegistry, runTrackedAgentTaskTurn } from "../../registry/agent-registry";
 import { USER_INTERRUPT_LABEL } from "../../session/messages";
 import { executeBuiltinSlashCommand, lookupBuiltinSlashCommand } from "../../slash-commands/builtin-registry";
 import { parseSlashCommand } from "../../slash-commands/helpers/parse";
@@ -1078,11 +1079,25 @@ export class InputController {
 			return; // editor text not cleared: Editor does not auto-clear on submit
 		}
 		this.ctx.editor.clearDraft(text);
+		const focusedAgentId = this.ctx.focusedAgentId;
 		try {
 			// prompt() handles idle (new turn) and streaming (queues per streamingBehavior).
-			await this.ctx.withLocalSubmission(text, () => target.prompt(text, { streamingBehavior, images }), {
-				imageCount: images?.length ?? 0,
-			});
+			await this.ctx.withLocalSubmission(
+				text,
+				() =>
+					focusedAgentId && !target.isStreaming
+						? runTrackedAgentTaskTurn(
+								AgentRegistry.global(),
+								focusedAgentId,
+								target,
+								() => target.prompt(text, { streamingBehavior, images }),
+								state => this.ctx.setObservedAgentTaskOutcome(focusedAgentId, state),
+							)
+						: target.prompt(text, { streamingBehavior, images }),
+				{
+					imageCount: images?.length ?? 0,
+				},
+			);
 		} catch (error) {
 			// Hand the message back, mirroring the main submit error path: restore
 			// pasted images so the user can retry an image-only or text+image draft.

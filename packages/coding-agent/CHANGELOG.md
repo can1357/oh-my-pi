@@ -13,6 +13,7 @@
 
 ### Changed
 
+- Agent Hub now distinguishes live session lifecycle from task outcomes, retaining completed and failed states after agents become idle or parked and showing retry delays and terminal retry errors in the inspector.
 - Disabled `hashline` edit mode for Kimi, Mimo, DeepSeek Flash, and Stepfun models for stability
 - Double-Escape now opens a fullscreen transcript rewind selector that outlines the target item with a dotted border — ↑/↓ step through rendered items, ←/→ jump between user turns, Enter rewinds (branching on user prompts, in-place leaf moves elsewhere); it replaces both the previous user-message list and the tree route (`doubleEscapeAction` is now `rewind` or `none`)
 - The rewind selector shows alternate session-tree branches at a fork as side-by-side half-width transcript columns; ←/→ slide between them with an animated camera, a dot rail with edge ellipses tracks position when branches overflow the window, and Enter rewinds into the chosen branch

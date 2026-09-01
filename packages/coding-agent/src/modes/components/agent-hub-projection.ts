@@ -17,6 +17,43 @@ interface AgentTreeProjection {
 	lastSiblingById: Map<string, boolean>;
 }
 
+/**
+ * Operator-facing state derived from the registry lifecycle plus task observer
+ * outcomes. Registry `idle`/`parked` means the session is available for another
+ * turn, not that its most recent task succeeded.
+ */
+export type AgentDisplayState = "running" | "retrying" | "completed" | "failed" | "aborted" | "idle" | "parked";
+
+export const AGENT_DISPLAY_STATES = [
+	"running",
+	"retrying",
+	"failed",
+	"completed",
+	"idle",
+	"parked",
+	"aborted",
+] as const satisfies readonly AgentDisplayState[];
+
+/**
+ * Project lifecycle and outcome sources without mutating either source model.
+ *
+ * A live registry session wins over an older observer outcome so Hub-driven
+ * follow-up turns immediately read as running. Once the session settles,
+ * observer state wins, followed by a transcript-derived durable outcome.
+ */
+export function agentDisplayState(ref: AgentRef, observed?: ObservableSession): AgentDisplayState {
+	if (ref.status === "aborted") return "aborted";
+	if (ref.session?.isStreaming || ref.status === "running") {
+		return observed?.progress?.retryState ? "retrying" : "running";
+	}
+	if (observed?.progress?.retryState) return "retrying";
+	if (observed?.status === "active") return "running";
+	if (observed?.status === "completed") return "completed";
+	if (observed?.status === "failed") return "failed";
+	if (observed?.status === "aborted") return "aborted";
+	return ref.history?.lastOutcome ?? ref.status;
+}
+
 export const STATUS_ORDER: Record<AgentStatus, number> = { running: 0, idle: 1, parked: 2, aborted: 3 };
 
 function finiteMetric(value: number | undefined): number {

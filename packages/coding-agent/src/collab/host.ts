@@ -23,7 +23,7 @@ import type {
 } from "@oh-my-pi/pi-wire";
 import type { InteractiveModeContext } from "../modes/types";
 import { AgentLifecycleManager } from "../registry/agent-lifecycle";
-import { type AgentRef, AgentRegistry } from "../registry/agent-registry";
+import { type AgentRef, AgentRegistry, runTrackedAgentTaskTurn } from "../registry/agent-registry";
 import type { AgentSessionEvent } from "../session/agent-session";
 import { stripImagesFromMessage, USER_INTERRUPT_LABEL } from "../session/messages";
 import type { SessionEntry as StoredSessionEntry } from "../session/session-entries";
@@ -575,6 +575,7 @@ export class CollabHost {
 					kind: ref.kind,
 					parentId: ref.parentId,
 					status: ref.status,
+					lastOutcome: ref.history?.lastOutcome,
 					hasSessionFile: !!ref.sessionFile,
 					createdAt: ref.createdAt,
 					lastActivity: ref.lastActivity,
@@ -612,10 +613,21 @@ export class CollabHost {
 					this.#socket?.send({ t: "error", message: `agent ${agentId}: empty chat message` }, fromPeer);
 					return;
 				}
-				// Mirrors the hub's #submitChatMessage: revive if parked, steer if mid-turn.
+				// Mirrors the hub's submit path: revive if parked, steer if mid-turn,
+				// and track a fresh task outcome only when an idle session starts a turn.
 				AgentLifecycleManager.global()
 					.ensureLive(agentId)
-					.then(session => session.prompt(trimmed, { streamingBehavior: "steer" }))
+					.then(session =>
+						session.isStreaming
+							? session.prompt(trimmed, { streamingBehavior: "steer" })
+							: runTrackedAgentTaskTurn(
+									AgentRegistry.global(),
+									agentId,
+									session,
+									() => session.prompt(trimmed, { streamingBehavior: "steer" }),
+									state => this.#ctx.setObservedAgentTaskOutcome(agentId, state),
+								),
+					)
 					.catch(fail);
 				break;
 			}
