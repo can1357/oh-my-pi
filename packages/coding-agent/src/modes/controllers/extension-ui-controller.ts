@@ -1,5 +1,12 @@
-import type { Component, OverlayHandle, TUI } from "@oh-my-pi/pi-tui";
-import { Container, Spacer, Text } from "@oh-my-pi/pi-tui";
+import type {
+	Component,
+	OverlayHandle,
+	PanelLayoutResult,
+	RenderRequestOptions,
+	RightPanelBlock,
+	TUI,
+} from "@oh-my-pi/pi-tui";
+import { Container, RIGHT_PANEL_MIN_COL, Spacer, Text, trimRightPadding } from "@oh-my-pi/pi-tui";
 import type { CollabUiRequestDraft, CollabUiSelectItem } from "@oh-my-pi/pi-wire";
 import { KeybindingsManager } from "../../config/keybindings";
 import type {
@@ -16,12 +23,17 @@ import type {
 	ExtensionUIDialogOptions,
 	ExtensionUISelectItem,
 	ExtensionUiComponent,
+	ExtensionUiComponentFactory,
+	ExtensionWidgetBlock,
 	ExtensionWidgetContent,
 	ExtensionWidgetOptions,
 	SendUserMessageHandler,
 	TerminalInputHandler,
+	WidgetAlignment,
+	WidgetLayoutEvent,
 } from "../../extensibility/extensions";
 import { getSessionSlashCommands } from "../../extensibility/extensions/get-commands-handler";
+import { emitSessionShutdownEvent } from "../../extensibility/extensions/runner";
 import { AskDialogComponent, boundPromptTitle } from "../../modes/components/ask-dialog";
 import { installExtensionComposerShape } from "../../modes/components/composer-shape-registry";
 import { EditorTopGap } from "../../modes/components/editor-top-gap";
@@ -37,6 +49,21 @@ const MAX_WIDGET_LINES = 10;
 const ASK_OTHER_OPTION = "Other (type your own)";
 const ASK_CHAT_OPTION = "Chat about this";
 const ASK_NEXT_OPTION = "Next →";
+
+interface RightWidgetPanelBlock {
+	lines: string[];
+	priority?: number;
+	alignment?: WidgetAlignment;
+	id?: string;
+}
+
+type RightWidgetEntry =
+	| { kind: "blocks"; blocks: RightWidgetPanelBlock[]; priority?: number; alignment?: WidgetAlignment }
+	| { kind: "component"; component: ExtensionUiComponent; priority?: number; alignment?: WidgetAlignment };
+
+function isWidgetBlock(value: unknown): value is ExtensionWidgetBlock {
+	return typeof value === "object" && value !== null && Array.isArray((value as { lines?: unknown }).lines);
+}
 
 interface CollabDialogWinner {
 	source: "local" | "remote";
@@ -69,6 +96,23 @@ export class ExtensionUiController {
 	#composerShapeDisposers: Array<() => void> = [];
 	#hookWidgetsAbove = new Map<string, ExtensionUiComponent>();
 	#hookWidgetsBelow = new Map<string, ExtensionUiComponent>();
+	#rightInfoProvider = (width: number): RightPanelBlock[] => this.#rightWidgetLines(width);
+	#rightWidgets = new Map<string, RightWidgetEntry>();
+	#errorSubscribedRunners = new WeakSet<object>();
+	// Block index → widget key / block id / block row count, refreshed each
+	// render by #rightWidgetLines so #handlePanelLayout can map compositor
+	// block indices back to per-widget visibility.
+	#lastBlockWidgetKeys: string[] = [];
+	#lastBlockIds: (string | undefined)[] = [];
+	#lastBlockSizes: number[] = [];
+	// Per-widget cached layout state — only emit widget_layout on change.
+	#widgetLayoutCache = new Map<
+		string,
+		{ visible: boolean; availableWidth: number; visibleRows: number; hiddenBlocks: string[] }
+	>();
+	// Emitter set by the mode (which owns the extension runner). Fire-and-forget;
+	// the mode catches handler errors.
+	#emitWidgetLayout: ((event: WidgetLayoutEvent) => void) | null = null;
 	// Single-file dialog surface (`editorContainer` + focus) is shared by the
 	// selector / input / editor modals, so only one may be presented at a time;
 	// the rest queue. See `#presentDialog`.
@@ -99,6 +143,9 @@ export class ExtensionUiController {
 	 * Initialize the hook system with TUI-based UI context.
 	 */
 	async initHooksAndCustomTools(): Promise<void> {
+		this.clearExtensionTerminalInputListeners();
+		this.clearHookWidgets();
+
 		// Create and set hook & tool UI context
 		const uiContext: ExtensionUIContext = {
 			timeoutStartsOnPresentation: true,
@@ -302,10 +349,12 @@ export class ExtensionUiController {
 
 		extensionRunner.initialize(actions, contextActions, commandActions, uiContext, "tui");
 
-		// Subscribe to extension errors
-		extensionRunner.onError((error: ExtensionError) => {
-			this.showExtensionError(error.extensionPath, error.error);
-		});
+		if (!this.#errorSubscribedRunners.has(extensionRunner)) {
+			this.#errorSubscribedRunners.add(extensionRunner);
+			extensionRunner.onError((error: ExtensionError) => {
+				this.showExtensionError(error.extensionPath, error.error);
+			});
+		}
 
 		// Emit session_start event
 		await extensionRunner.emit({
@@ -324,18 +373,62 @@ export class ExtensionUiController {
 		return this.#toolUIContext;
 	}
 
+	async reloadHooksAndCustomTools(): Promise<void> {
+		await emitSessionShutdownEvent(this.ctx.session.extensionRunner);
+		await this.initHooksAndCustomTools();
+	}
+
 	setHookWidget(key: string, content: ExtensionWidgetContent, options?: ExtensionWidgetOptions): void {
 		const placement = options?.placement ?? "aboveEditor";
-		this.#removeHookWidget(this.#hookWidgetsAbove, key);
-		this.#removeHookWidget(this.#hookWidgetsBelow, key);
+		const wasRight = this.#rightWidgets.has(key);
 
 		if (content === undefined) {
+			this.#removeHookWidget(this.#hookWidgetsAbove, key);
+			this.#removeHookWidget(this.#hookWidgetsBelow, key);
+			if (wasRight) {
+				this.#disposeRightWidgetEntry(this.#rightWidgets.get(key));
+				this.#rightWidgets.delete(key);
+				this.#widgetLayoutCache.delete(key);
+				this.#flushRightWidgets();
+			}
 			this.#rebuildHookWidgets();
 			return;
 		}
 
+		// Build the replacement FIRST for every placement transition: component
+		// factories (and contentToRightEntry) may throw, and a failed refresh must
+		// never drop the existing widget. Only after a successful build do we dispose
+		// the old entries and install the new one.
+		if (placement === "rightEditor") {
+			const nextEntry = this.#contentToRightEntry(content, options?.priority, options?.alignment);
+			// Drop a stale inline entry for this key (if it was above/below before) only
+			// now that the right replacement is built.
+			this.#removeHookWidget(this.#hookWidgetsAbove, key);
+			this.#removeHookWidget(this.#hookWidgetsBelow, key);
+			// Update (not delete+set) the existing right key so Map insertion order is
+			// preserved — deleting first would make right-side widgets jump below siblings.
+			this.#disposeRightWidgetEntry(this.#rightWidgets.get(key));
+			this.#rightWidgets.set(key, nextEntry);
+			if (nextEntry.kind === "blocks" && nextEntry.blocks.length === 0) {
+				this.#widgetLayoutCache.delete(key);
+			}
+			this.#flushRightWidgets();
+			this.#rebuildHookWidgets();
+			return;
+		}
+
+		const nextWidget = this.#createHookWidget(content);
+		this.#removeHookWidget(this.#hookWidgetsAbove, key);
+		this.#removeHookWidget(this.#hookWidgetsBelow, key);
+		// Moving a previously right-side key back inline must clear its stale lines.
+		if (wasRight) {
+			this.#disposeRightWidgetEntry(this.#rightWidgets.get(key));
+			this.#rightWidgets.delete(key);
+			this.#widgetLayoutCache.delete(key);
+			this.#flushRightWidgets();
+		}
 		const target = placement === "belowEditor" ? this.#hookWidgetsBelow : this.#hookWidgetsAbove;
-		target.set(key, this.#createHookWidget(content));
+		target.set(key, nextWidget);
 		this.#rebuildHookWidgets();
 	}
 
@@ -344,14 +437,183 @@ export class ExtensionUiController {
 		existing?.dispose?.();
 		widgets.delete(key);
 	}
+	#contentToRightEntry(
+		content: ExtensionWidgetContent,
+		priority: number | undefined,
+		alignment: WidgetAlignment | undefined,
+	): RightWidgetEntry {
+		if (Array.isArray(content)) {
+			if (content.length > 0 && content.every(isWidgetBlock)) {
+				return {
+					kind: "blocks",
+					blocks: content
+						.map(block => ({
+							lines: block.lines.map(line => String(line)),
+							priority: block.priority,
+							id: block.id,
+							alignment: block.alignment,
+						}))
+						.filter(block => block.lines.length > 0),
+					priority,
+					alignment,
+				};
+			}
+			return { kind: "blocks", blocks: [{ lines: content.map(line => String(line)) }], priority, alignment };
+		}
+		if (content === undefined) return { kind: "blocks", blocks: [], priority, alignment };
+		return { kind: "component", component: this.#createRightWidgetComponent(content), priority, alignment };
+	}
+
+	#rightWidgetBlocks(entry: RightWidgetEntry, width: number): RightWidgetPanelBlock[] {
+		if (entry.kind === "blocks") return entry.blocks;
+		const panelWidth = Math.max(1, width - RIGHT_PANEL_MIN_COL - 1);
+		return [
+			{
+				lines: entry.component.render(panelWidth).map(trimRightPadding),
+			},
+		];
+	}
+
+	#disposeRightWidgetEntry(entry: RightWidgetEntry | undefined): void {
+		if (entry?.kind === "component") {
+			entry.component.dispose?.();
+		}
+	}
+
+	#createRightWidgetComponent(content: ExtensionUiComponentFactory): ExtensionUiComponent {
+		const requestRightWidgetRender = (force = false, options?: RenderRequestOptions): void => {
+			this.ctx.ui.requestRender(force, options);
+		};
+		const ui = new Proxy(this.ctx.ui, {
+			get: (target, property) => {
+				if (property === "requestRender") return requestRightWidgetRender;
+				if (property === "requestComponentRender") return () => requestRightWidgetRender();
+				// Resolve against the real TUI (not the proxy) and bind methods back to it:
+				// `TUI`/`Container` methods touch `#private` fields, so a method invoked with
+				// `this` bound to the proxy (e.g. `ui.addChild`, `ui.setFocus`,
+				// `ui.addInputListener` from a component-backed rightEditor widget) would throw
+				// at runtime. Getters likewise run with the real receiver.
+				const value = Reflect.get(target, property, target);
+				return typeof value === "function" ? value.bind(target) : value;
+			},
+		}) as TUI;
+		return content(ui, theme);
+	}
+
+	#flushRightWidgets(): void {
+		if (this.#rightWidgets.size === 0) {
+			this.ctx.setRightInfo(undefined);
+			return;
+		}
+		this.ctx.setRightInfo(this.#rightInfoProvider, result => this.#handlePanelLayout(result));
+	}
+
+	#rightWidgetLines(width: number): RightPanelBlock[] {
+		// Each rightEditor block is composited independently so multi-section
+		// widgets can degrade contextually when the negative space is short.
+		// Placement order: explicit block priority, then widget priority, then
+		// ascending height (shortest first), then stable widget/block order.
+		const blocks = [...this.#rightWidgets.entries()].flatMap(([key, entry], widgetIndex) =>
+			this.#rightWidgetBlocks(entry, width).map((block, blockIndex) => ({
+				lines: block.lines,
+				priority: block.priority ?? entry.priority,
+				alignment: block.alignment ?? entry.alignment,
+				widgetIndex,
+				blockIndex,
+				widgetKey: key,
+				blockId: block.id,
+			})),
+		);
+		blocks.sort((a, b) => {
+			const pa = a.priority ?? Number.POSITIVE_INFINITY;
+			const pb = b.priority ?? Number.POSITIVE_INFINITY;
+			if (pa !== pb) return pa - pb;
+			if (a.lines.length !== b.lines.length) return a.lines.length - b.lines.length;
+			if (a.widgetIndex !== b.widgetIndex) return a.widgetIndex - b.widgetIndex;
+			return a.blockIndex - b.blockIndex;
+		});
+		// Track mapping for #handlePanelLayout to map compositor block indices
+		// back to per-widget visibility.
+		this.#lastBlockWidgetKeys = blocks.map(b => b.widgetKey);
+		this.#lastBlockIds = blocks.map(b => b.blockId);
+		this.#lastBlockSizes = blocks.map(b => b.lines.length);
+		return blocks.map(block => ({ lines: block.lines, alignment: block.alignment }));
+	}
+
+	/**
+	 * Process compositor layout result: map block indices → widget keys, compute
+	 * per-widget visibility, and emit `widget_layout` events (deferred, cached —
+	 * only on state change, not every paint).
+	 */
+	#handlePanelLayout(result: PanelLayoutResult): void {
+		if (!this.#emitWidgetLayout || this.#lastBlockWidgetKeys.length === 0) return;
+
+		const placedSet = new Set(result.placedBlockIndices);
+		const widgetState = new Map<string, { visible: boolean; visibleRows: number; hiddenBlocks: string[] }>();
+
+		for (let i = 0; i < this.#lastBlockWidgetKeys.length; i++) {
+			const key = this.#lastBlockWidgetKeys[i];
+			const isPlaced = placedSet.has(i);
+			const state = widgetState.get(key) ?? { visible: false, visibleRows: 0, hiddenBlocks: [] };
+			if (isPlaced) {
+				state.visible = true;
+				state.visibleRows += this.#lastBlockSizes[i] ?? 0;
+			} else {
+				const blockId = this.#lastBlockIds[i];
+				if (blockId !== undefined) state.hiddenBlocks.push(blockId);
+			}
+			widgetState.set(key, state);
+		}
+
+		for (const [key, state] of widgetState) {
+			const hiddenBlocks = state.hiddenBlocks;
+			const cached = this.#widgetLayoutCache.get(key);
+			if (
+				cached &&
+				cached.visible === state.visible &&
+				cached.availableWidth === result.availableWidth &&
+				cached.visibleRows === state.visibleRows &&
+				cached.hiddenBlocks.length === hiddenBlocks.length &&
+				cached.hiddenBlocks.every((b, i) => b === hiddenBlocks[i])
+			)
+				continue;
+
+			this.#widgetLayoutCache.set(key, {
+				visible: state.visible,
+				availableWidth: result.availableWidth,
+				visibleRows: state.visibleRows,
+				hiddenBlocks: [...hiddenBlocks],
+			});
+
+			const event: WidgetLayoutEvent = {
+				type: "widget_layout",
+				key,
+				visible: state.visible,
+				availableWidth: result.availableWidth,
+				visibleRows: state.visibleRows,
+				hiddenBlocks: hiddenBlocks.length > 0 ? hiddenBlocks : undefined,
+			};
+			// Deferred emit: the paint stack is synchronous; queueMicrotask runs
+			// after it completes so handler calls (setWidget → requestRender)
+			// schedule the next frame instead of re-entering the current paint.
+			queueMicrotask(() => this.#emitWidgetLayout?.(event));
+		}
+	}
+
+	/** Set the callback used to emit widget_layout events. The mode owns the runner. */
+	setWidgetLayoutEmitter(emit: ((event: WidgetLayoutEvent) => void) | null): void {
+		this.#emitWidgetLayout = emit;
+	}
 
 	#createHookWidget(content: ExtensionWidgetContent): ExtensionUiComponent {
 		if (Array.isArray(content)) {
+			const lines =
+				content.length > 0 && content.every(isWidgetBlock) ? content.flatMap(block => block.lines) : content;
 			const container = new Container();
-			for (const line of content.slice(0, MAX_WIDGET_LINES)) {
-				container.addChild(new Text(line, 1, 0));
+			for (const line of lines.slice(0, MAX_WIDGET_LINES)) {
+				container.addChild(new Text(String(line), 1, 0));
 			}
-			if (content.length > MAX_WIDGET_LINES) {
+			if (lines.length > MAX_WIDGET_LINES) {
 				container.addChild(new Text(theme.fg("muted", "... (widget truncated)"), 1, 0));
 			}
 			return container;
@@ -1154,6 +1416,7 @@ export class ExtensionUiController {
 	}
 
 	clearHookWidgets(): void {
+		const hadHookWidgets = this.#hookWidgetsAbove.size > 0 || this.#hookWidgetsBelow.size > 0;
 		for (const widget of this.#hookWidgetsAbove.values()) {
 			widget.dispose?.();
 		}
@@ -1162,7 +1425,14 @@ export class ExtensionUiController {
 		}
 		this.#hookWidgetsAbove.clear();
 		this.#hookWidgetsBelow.clear();
-		this.#rebuildHookWidgets();
+		const hadRightWidgets = this.#rightWidgets.size > 0;
+		for (const widget of this.#rightWidgets.values()) {
+			this.#disposeRightWidgetEntry(widget);
+		}
+		this.#rightWidgets.clear();
+		this.#widgetLayoutCache.clear();
+		if (hadRightWidgets) this.#flushRightWidgets();
+		if (hadHookWidgets) this.#rebuildHookWidgets();
 	}
 
 	clearExtensionTerminalInputListeners(): void {

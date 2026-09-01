@@ -15,10 +15,17 @@
 import * as fs from "node:fs";
 import { performance } from "node:perf_hooks";
 import { $flag, getDebugLogPath, logger } from "@oh-my-pi/pi-utils";
-import { DEFAULT_MAX_INLINE_IMAGES, ImageBudget } from "./components/image";
+import { DEFAULT_MAX_INLINE_IMAGES, ImageBudget, RESERVED_IMAGE_ROW } from "./components/image";
 import { TuiDebugServer } from "./debug-server";
 import { isKeyRelease, matchesKey } from "./keys";
+import { parseKittyVirtualPlacementImageId } from "./kitty-graphics";
 import { LoopWatchdog } from "./loop-watchdog";
+import {
+	compositeRightPanelsInRange,
+	type PanelLayoutResult,
+	RIGHT_PANEL_MIN_COL,
+	type RightPanelBlockInput,
+} from "./right-panel";
 import { setAltScreenActive, type Terminal } from "./terminal";
 import {
 	encodeKittyDeleteAllImages,
@@ -123,10 +130,17 @@ export interface HistoryBatch {
 	readonly kind?: "append" | "replay";
 }
 
+export interface TerminalFrameSegment {
+	readonly component: Component;
+	readonly start: number;
+	readonly rowCount: number;
+}
+
 /** One history append or complete replay plus the mutable viewport for a terminal frame. */
 export interface TerminalFramePlan {
 	readonly history?: HistoryBatch;
 	readonly viewport: readonly string[];
+	readonly segments?: readonly TerminalFrameSegment[];
 }
 
 /** Produces bounded terminal frames and retires acknowledged history batches. */
@@ -410,6 +424,7 @@ export class Container implements Component {
 	#memoLines: string[] | undefined;
 	#memoChildLines: (readonly string[])[] = [];
 	#memoWidth = -1;
+	#frameSegments: TerminalFrameSegment[] = [];
 
 	#ignoreTight = false;
 
@@ -485,6 +500,12 @@ export class Container implements Component {
 			}
 		}
 		this.#memoWidth = width;
+		let start = 0;
+		this.#frameSegments = refs.map((lines, index) => {
+			const segment = { component: children[index]!, start, rowCount: lines.length };
+			start += lines.length;
+			return segment;
+		});
 		if (unchanged) return this.#memoLines!;
 		const lines: string[] = [];
 		for (let i = 0; i < count; i++) {
@@ -493,6 +514,10 @@ export class Container implements Component {
 		}
 		this.#memoLines = lines;
 		return lines;
+	}
+
+	getFrameSegments(): readonly TerminalFrameSegment[] {
+		return this.#frameSegments;
 	}
 }
 
@@ -795,6 +820,7 @@ export class TUI extends Container {
 	#forceViewportRepaintOnNextRender = false;
 	#hasEverRendered = false;
 	#stopped = false;
+	#hasStarted = false;
 	/** True between a `deferInput` start() and enableInput(). */
 	#inputDeferred = false;
 	// Always-on event-loop lag probe. The high default threshold keeps it quiet;
@@ -828,6 +854,12 @@ export class TUI extends Container {
 		preFocus: Component | null;
 		hidden: boolean;
 	}[] = [];
+	#rightPanelSourceFrame: readonly string[] = [];
+	#rightPanelWindowOffset = 0;
+	#rightPanelProvider: ((width: number) => readonly RightPanelBlockInput[]) | null = null;
+	#rightPanelTargets: Set<Component> | null = null;
+	#rightPanelLayoutCallback: ((result: PanelLayoutResult) => void) | null = null;
+	#providerSegments: readonly TerminalFrameSegment[] = [];
 
 	constructor(terminal: Terminal, showHardwareCursor?: boolean, options?: TUIOptions) {
 		super();
@@ -847,6 +879,116 @@ export class TUI extends Container {
 		this.#providerWindow = [];
 		this.#resizeReplaySize = undefined;
 		this.requestRender(true);
+	}
+	/**
+	 * Float blocks in right-side whitespace owned by the selected frame roots.
+	 * Passing `null` removes the panel.
+	 */
+	setRightPanel(
+		provider: ((width: number) => readonly RightPanelBlockInput[]) | null,
+		targets?: readonly Component[],
+		onLayout?: (result: PanelLayoutResult) => void,
+	): void {
+		this.#rightPanelProvider = provider;
+		this.#rightPanelTargets =
+			provider !== null && targets !== undefined && targets.length > 0 ? new Set(targets) : null;
+		this.#rightPanelLayoutCallback = onLayout ?? null;
+		if (this.#hasStarted) this.requestRender();
+	}
+
+	#compositeRightPanel(
+		viewport: string[],
+		width: number,
+		preparedBlocks?: readonly RightPanelBlockInput[],
+		onLayout: ((result: PanelLayoutResult) => void) | undefined = this.#rightPanelLayoutCallback ?? undefined,
+	): string[] {
+		const provider = this.#rightPanelProvider;
+		if (provider === null) return viewport;
+		const blocks = preparedBlocks ?? provider(width);
+		if (blocks.length === 0) return viewport;
+		if (this.#getTopmostVisibleOverlay() !== undefined) {
+			onLayout?.({
+				placedBlockIndices: [],
+				hiddenBlockIndices: blocks.map((_, index) => index),
+				availableWidth: Math.max(0, width - RIGHT_PANEL_MIN_COL - 1),
+				searchRows: 0,
+			});
+			return viewport;
+		}
+
+		const occupied = new Array<boolean>(viewport.length).fill(false);
+		const targets = this.#rightPanelTargets;
+		if (targets !== null) {
+			occupied.fill(true);
+			for (const segment of this.#providerSegments) {
+				if (!targets.has(segment.component)) continue;
+				const end = Math.min(viewport.length, segment.start + segment.rowCount);
+				for (let row = Math.max(0, segment.start); row < end; row++) occupied[row] = false;
+			}
+		}
+		for (let row = 0; row < viewport.length; row++) {
+			const line = viewport[row] ?? "";
+			if (!isOsc66Line(line)) continue;
+			occupied[row] = true;
+			const reservedRows = Math.max(0, osc66MaxScale(line) - 1);
+			for (let offset = 1; offset <= reservedRows && row + offset < viewport.length; offset++) {
+				occupied[row + offset] = true;
+			}
+		}
+		if (this.#rightPanelWindowOffset > 0) {
+			for (let sourceRow = this.#rightPanelWindowOffset - 1; sourceRow >= 0; sourceRow--) {
+				const line = this.#rightPanelSourceFrame[sourceRow];
+				if (line === undefined) break;
+				const reservedRows = Math.max(0, osc66MaxScale(line) - 1);
+				if (reservedRows === 0) {
+					if (visibleWidth(line) > 0) break;
+					continue;
+				}
+				for (let offset = 1; offset <= reservedRows; offset++) {
+					const viewportRow = sourceRow + offset - this.#rightPanelWindowOffset;
+					if (viewportRow >= 0 && viewportRow < viewport.length) occupied[viewportRow] = true;
+				}
+				break;
+			}
+		}
+		return compositeRightPanelsInRange(
+			viewport,
+			blocks,
+			width,
+			0,
+			viewport.length,
+			(line, index) => occupied[index] === true || TERMINAL.isImageLine(line),
+			line => TERMINAL.isImageEscapeLine(line) && parseKittyVirtualPlacementImageId(line) === undefined,
+			onLayout,
+		);
+	}
+
+	#retainPlacedRightPanelImages(
+		viewport: string[],
+		width: number,
+		blocks: readonly RightPanelBlockInput[] | undefined,
+		passMark: number,
+	): void {
+		if (!blocks || blocks.length === 0) {
+			this.#imageBudget.retainPassSince(passMark, new Set());
+			return;
+		}
+		let layout: PanelLayoutResult | undefined;
+		this.#compositeRightPanel(viewport, width, blocks, result => {
+			layout = result;
+		});
+		const placed = new Set(layout?.placedBlockIndices ?? []);
+		const imageIds = new Set<number>();
+		for (let index = 0; index < blocks.length; index++) {
+			if (!placed.has(index)) continue;
+			const input = blocks[index]!;
+			const lines = "lines" in input ? input.lines : input;
+			for (const line of lines) {
+				const imageId = parseKittyDirectPlacementLine(line)?.imageId ?? parseKittyVirtualPlacementImageId(line);
+				if (imageId !== undefined) imageIds.add(imageId);
+			}
+		}
+		this.#imageBudget.retainPassSince(passMark, imageIds);
 	}
 
 	#syncTerminalCursorMode(component: Component | null): void {
@@ -1082,6 +1224,7 @@ export class TUI extends Container {
 	}
 
 	start(options?: TUIStartOptions): void {
+		this.#hasStarted = true;
 		this.#stopped = false;
 		this.#debugPaint = undefined;
 		this.#debugServer?.stop();
@@ -1602,12 +1745,13 @@ export class TUI extends Container {
 		while (true) {
 			this.#imageBudget.beginPass();
 			const plan = provider.renderFrame({ columns: width, rows: height });
+			const rightPanelBlocks = this.#rightPanelProvider?.(width) ?? undefined;
 			this.#imageBudget.endPass();
 			if (plan.history === undefined) return;
 			let viewport = Array.from(plan.viewport);
 			if (viewport.length > height) viewport = viewport.slice(0, height);
 			const acceptedBefore = this.#acceptedHistoryBatchId;
-			this.#emitPlanFrame(width, height, viewport, plan.history, provider);
+			this.#emitPlanFrame(width, height, viewport, plan.history, provider, rightPanelBlocks);
 			if (plan.history.id > acceptedBefore && this.#acceptedHistoryBatchId === acceptedBefore) {
 				throw new Error("History flush did not accept the offered batch");
 			}
@@ -1615,6 +1759,7 @@ export class TUI extends Container {
 	}
 
 	stop(): void {
+		this.#hasStarted = false;
 		this.#debugServer?.stop();
 		this.#debugServer = undefined;
 		this.#resizeSettleTimer?.cancel();
@@ -2264,7 +2409,8 @@ export class TUI extends Container {
 		this.#debugNextWindowTop = 0;
 		this.#imageBudget.beginPass();
 		const plan = provider.renderFrame({ columns: width, rows: height });
-		this.#imageBudget.endPass();
+		const panelPassMark = this.#imageBudget.markPass();
+		const rightPanelBlocks = this.#rightPanelProvider?.(width) ?? undefined;
 		let viewport = Array.from(plan.viewport);
 		if (viewport.length > height) {
 			const message = `Frame provider returned ${viewport.length} rows for a ${height}-row viewport`;
@@ -2272,8 +2418,13 @@ export class TUI extends Container {
 			logger.error("TUI layout contract violated", { rows: viewport.length, height });
 			viewport = viewport.slice(0, height);
 		}
+		this.#providerSegments = plan.segments ?? [];
+		this.#rightPanelSourceFrame = viewport;
+		this.#rightPanelWindowOffset = 0;
+		this.#retainPlacedRightPanelImages(viewport, width, rightPanelBlocks, panelPassMark);
+		this.#imageBudget.endPass();
 		if (this.#maybeDeferGhosttyInitialImagePaint()) return;
-		this.#emitPlanFrame(width, height, viewport, plan.history, provider);
+		this.#emitPlanFrame(width, height, viewport, plan.history, provider, rightPanelBlocks);
 	}
 	/**
 	 * Re-offer finalized history once after a settled resize.
@@ -2368,8 +2519,9 @@ export class TUI extends Container {
 		viewportRows: string[],
 		offered: HistoryBatch | undefined,
 		provider: TerminalFrameProvider | undefined,
+		rightPanelBlocks?: readonly RightPanelBlockInput[],
 	): void {
-		let viewport = viewportRows;
+		let viewport = this.#compositeRightPanel(viewportRows, width, rightPanelBlocks);
 		if (this.#getTopmostVisibleOverlay() !== undefined) {
 			while (viewport.length < height) viewport.push("");
 			viewport = this.#compositeOverlaysIntoWindow(viewport, width, height);
@@ -2626,11 +2778,18 @@ export class TUI extends Container {
 	#renderChildrenFrame(width: number, height: number): void {
 		this.#imageBudget.beginPass();
 		const composed = this.render(width);
+		const rightPanelBlocks = this.#rightPanelProvider?.(width) ?? undefined;
 		this.#imageBudget.endPass();
 		if (this.#maybeDeferGhosttyInitialImagePaint()) return;
 		this.#debugNextWindowTop = Math.max(0, composed.length - height);
 		const viewport = composed.length > height ? composed.slice(composed.length - height) : Array.from(composed);
-		this.#emitPlanFrame(width, height, viewport, undefined, undefined);
+		const offset = Math.max(0, composed.length - viewport.length);
+		this.#rightPanelSourceFrame = composed;
+		this.#rightPanelWindowOffset = offset;
+		this.#providerSegments = this.getFrameSegments()
+			.map(segment => ({ ...segment, start: segment.start - offset }))
+			.filter(segment => segment.start + segment.rowCount > 0);
+		this.#emitPlanFrame(width, height, viewport, undefined, undefined, rightPanelBlocks);
 	}
 
 	/** Stateless variant for overlay-composited windows and alt-screen frames. */
@@ -2823,9 +2982,11 @@ export class TUI extends Container {
 	 * reserved row of a scale ≥ 3 heading is covered, not just the first.
 	 */
 	#osc66SpacerGlyphWidth(lines: readonly string[], index: number): number {
-		if (index <= 0 || lines[index] !== "") return -1;
+		const isReservedSpacer = (line: string | undefined): boolean =>
+			line === "" || (line !== undefined && visibleWidth(line) === 0 && line.includes(RESERVED_IMAGE_ROW));
+		if (index <= 0 || !isReservedSpacer(lines[index])) return -1;
 		let gap = 1;
-		while (gap < TUI.#OSC66_MAX_SPACER_ROWS && index - gap > 0 && lines[index - gap] === "") {
+		while (gap < TUI.#OSC66_MAX_SPACER_ROWS && index - gap > 0 && isReservedSpacer(lines[index - gap])) {
 			gap++;
 		}
 		const above = lines[index - gap];
@@ -2923,6 +3084,15 @@ export class TUI extends Container {
 	 * blank base — the transcript is never touched while the alt buffer is up.
 	 */
 	#renderAltFrame(width: number, height: number): void {
+		const blockCount = this.#imageBudget.preview(() => this.#rightPanelProvider?.(width).length ?? 0);
+		if (blockCount > 0) {
+			this.#rightPanelLayoutCallback?.({
+				placedBlockIndices: [],
+				hiddenBlockIndices: Array.from({ length: blockCount }, (_, index) => index),
+				availableWidth: Math.max(0, width - RIGHT_PANEL_MIN_COL - 1),
+				searchRows: 0,
+			});
+		}
 		const base: string[] = new Array(Math.max(0, height)).fill("");
 		let lines = this.#compositeOverlaysIntoWindow(base, width, height);
 		this.#extractCursorMarkers(lines);

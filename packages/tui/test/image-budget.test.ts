@@ -70,6 +70,34 @@ describe("ImageBudget", () => {
 		expect(second.purge).toEqual([]);
 	});
 
+	it("discards observations and transmits from hidden optional subtrees", () => {
+		const budget = new ImageBudget(1, () => {});
+		budget.beginPass();
+		budget.observe(1);
+		const mark = budget.markPass();
+		budget.observe(2);
+		budget.enqueueTransmit(2, "hidden-transmit");
+		budget.retainPassSince(mark, new Set());
+		budget.endPass();
+
+		expect(budget.takeTransmits()).toEqual([]);
+		expect(pass(budget, 1).suppressed).toEqual([false]);
+	});
+
+	it("preserves observations and transmits selected by optional-subtree layout", () => {
+		const budget = new ImageBudget(2, () => {});
+		budget.beginPass();
+		const mark = budget.markPass();
+		budget.observe(1);
+		budget.enqueueTransmit(1, "placed-transmit");
+		budget.observe(2);
+		budget.enqueueTransmit(2, "hidden-transmit");
+		budget.retainPassSince(mark, new Set([1]));
+		budget.endPass();
+
+		expect(budget.takeTransmits()).toEqual(["placed-transmit"]);
+	});
+
 	it("demotes the oldest image on the frame after the cap is exceeded, purging its graphics id", () => {
 		let renders = 0;
 		const budget = new ImageBudget(2, () => {

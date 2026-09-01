@@ -20,6 +20,7 @@ import {
 	type ExtensionUIContext,
 	type ExtensionUIDialogOptions,
 	type ExtensionUISelectItem,
+	type ExtensionWidgetBlock,
 	type ExtensionWidgetOptions,
 	getExtensionUISelectOptionLabel,
 } from "../../extensibility/extensions";
@@ -57,6 +58,30 @@ import type {
 	RpcSessionState,
 	RpcSubagentSubscriptionLevel,
 } from "./rpc-types";
+
+function isExtensionWidgetBlock(value: unknown): value is ExtensionWidgetBlock {
+	return typeof value === "object" && value !== null && Array.isArray((value as { lines?: unknown }).lines);
+}
+
+function widgetBlocksForRpc(
+	content: unknown,
+): { widgetLines?: string[]; widgetBlocks?: ExtensionWidgetBlock[] } | undefined {
+	if (content === undefined) return {};
+	if (!Array.isArray(content)) return undefined;
+	if (content.length > 0 && content.every(isExtensionWidgetBlock)) {
+		return {
+			widgetBlocks: content
+				.map(block => ({
+					lines: block.lines.map(line => String(line)),
+					priority: block.priority,
+					alignment: block.alignment,
+					id: block.id,
+				}))
+				.filter(block => block.lines.length > 0),
+		};
+	}
+	return { widgetLines: content.map(line => String(line)) };
+}
 
 // Re-export types for consumers
 export type * from "./rpc-types";
@@ -847,18 +872,19 @@ export async function runRpcMode(
 		}
 
 		setWidget(key: string, content: unknown, options?: ExtensionWidgetOptions): void {
-			// Only support string arrays in RPC mode - factory functions are ignored
-			if (content === undefined || Array.isArray(content)) {
-				this.output({
-					type: "extension_ui_request",
-					id: Snowflake.next() as string,
-					method: "setWidget",
-					widgetKey: key,
-					widgetLines: content as string[] | undefined,
-					widgetPlacement: options?.placement,
-				} as RpcExtensionUIRequest);
-			}
-			// Component factories are not supported in RPC mode - would need TUI access
+			const widgetContent = widgetBlocksForRpc(content);
+			// Component factories are not supported in RPC mode - would need TUI access.
+			if (!widgetContent) return;
+			this.output({
+				type: "extension_ui_request",
+				id: Snowflake.next() as string,
+				method: "setWidget",
+				widgetKey: key,
+				...widgetContent,
+				widgetPlacement: options?.placement,
+				widgetPriority: options?.priority,
+				widgetAlignment: options?.alignment,
+			} as RpcExtensionUIRequest);
 		}
 
 		setFooter(_factory: unknown): void {
@@ -1475,6 +1501,22 @@ export async function runRpcMode(
 				} catch (err: unknown) {
 					return error(id, "login", err instanceof Error ? err.message : String(err));
 				}
+			}
+
+			case "widget_layout": {
+				if (session.extensionRunner?.hasHandlers("widget_layout")) {
+					session.extensionRunner
+						.emit({
+							type: "widget_layout",
+							key: command.widgetKey,
+							visible: command.visible,
+							availableWidth: command.availableWidth,
+							visibleRows: command.visibleRows,
+							hiddenBlocks: command.hiddenBlocks,
+						})
+						.catch(() => {});
+				}
+				return success(id, "widget_layout");
 			}
 
 			default: {

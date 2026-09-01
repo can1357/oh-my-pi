@@ -34,7 +34,9 @@ const SAVE_CURSOR = "\x1b7";
 const RESTORE_CURSOR = "\x1b8";
 // Direct placements reserve height with leading zero-width rows. Keep them
 // non-plain so transcript blank-edge trimming does not collapse image-only blocks.
-const RESERVED_IMAGE_ROW = "\x1b[0m";
+// Exported so the right-panel compositor can distinguish a renderer-reserved row
+// (which an image's cells occupy) from an ordinary blank Markdown spacer.
+export const RESERVED_IMAGE_ROW = "\x1b[0m";
 
 /** Default count of inline images kept as live graphics before older ones fall back to text. */
 export const DEFAULT_MAX_INLINE_IMAGES = 8;
@@ -103,13 +105,14 @@ export class ImageBudget {
 	#purgeIds: number[] = [];
 	/** Image ids whose data is believed to be loaded in the terminal's store. */
 	#transmitted = new Set<number>();
-	/** Transmit sequences (full base64) to write once, before this frame's placements. */
-	#pendingTransmits: string[] = [];
+	/** Transmit sequences (full base64) queued by image id before this frame's placements. */
+	#pendingTransmits: Array<{ imageId: number; sequence: string }> = [];
 	// True while the in-flight pass is a partial/throwaway pass (the
 	// non-multiplexer resize viewport fast path) that walks only the visible
 	// tail, bottom-up. Such a pass cannot derive display order from observe()
 	// call order, so its suppression decisions replay the committed split below.
 	#stablePass = false;
+	#previewDepth = 0;
 	// Image ids shown as text in the frame currently on the terminal: the
 	// display-order prefix [0, #onTerminal) of the last full pass, snapshotted by
 	// id so a partial pass reproduces the on-screen live/text split without a
@@ -190,6 +193,19 @@ export class ImageBudget {
 	}
 
 	/**
+	 * Evaluate optional layout content without recording observations or
+	 * transmissions. Used only to refresh hidden-layout metadata.
+	 */
+	preview<T>(render: () => T): T {
+		this.#previewDepth++;
+		try {
+			return render();
+		} finally {
+			this.#previewDepth--;
+		}
+	}
+
+	/**
 	 * Record an image in display order and report whether it must render its text
 	 * fallback this frame. Called by every {@link Image} during render — including
 	 * on a cache hit, so the image keeps its display-order slot.
@@ -199,6 +215,9 @@ export class ImageBudget {
 	 * (`#suppressedIds`) keyed by id — order- and partiality-independent.
 	 */
 	observe(imageId: number): boolean {
+		if (this.#previewDepth > 0) {
+			return this.#cap > 0 && this.#suppressedIds.has(imageId);
+		}
 		if (this.#stablePass) {
 			const suppressed = this.#cap > 0 && this.#suppressedIds.has(imageId);
 			if (suppressed) this.#forgetKeyForId(imageId);
@@ -209,6 +228,35 @@ export class ImageBudget {
 		const suppressed = this.#cap > 0 && index < this.#planned;
 		if (suppressed) this.#forgetKeyForId(imageId);
 		return suppressed;
+	}
+	/** Start offset for observations made by an optional subtree in the current pass. */
+	markPass(): number {
+		return this.#passIds.length;
+	}
+
+	/**
+	 * Keep only selected image observations made after `mark`.
+	 *
+	 * Optional UI subtrees can render before layout determines whether they are
+	 * visible. Removing rejected observations here keeps hidden images out of the
+	 * global cap and drops their unsent data.
+	 */
+	retainPassSince(mark: number, imageIds: ReadonlySet<number>): void {
+		const start = Math.max(0, Math.min(mark, this.#passIds.length));
+		const removed = new Set<number>();
+		const retained = this.#passIds.slice(0, start);
+		for (let index = start; index < this.#passIds.length; index++) {
+			const imageId = this.#passIds[index]!;
+			if (imageIds.has(imageId)) retained.push(imageId);
+			else removed.add(imageId);
+		}
+		this.#passIds = retained;
+		if (removed.size === 0) return;
+		this.#pendingTransmits = this.#pendingTransmits.filter(({ imageId }) => {
+			if (!removed.has(imageId)) return true;
+			this.#transmitted.delete(imageId);
+			return false;
+		});
 	}
 
 	/**
@@ -391,9 +439,10 @@ export class ImageBudget {
 	 * repeated call (e.g. a width-change re-render) never re-sends the data.
 	 */
 	enqueueTransmit(imageId: number, sequence: string): void {
+		if (this.#previewDepth > 0) return;
 		if (this.#transmitted.has(imageId)) return;
 		this.#transmitted.add(imageId);
-		this.#pendingTransmits.push(sequence);
+		this.#pendingTransmits.push({ imageId, sequence });
 	}
 
 	/** Whether a frame has image data queued but not yet written to the terminal. */
@@ -419,7 +468,7 @@ export class ImageBudget {
 	/** Transmit sequences to write before this frame's placements; clears the queue. */
 	takeTransmits(): readonly string[] {
 		if (this.#pendingTransmits.length === 0) return EMPTY_TRANSMITS;
-		const sequences = this.#pendingTransmits;
+		const sequences = this.#pendingTransmits.map(({ sequence }) => sequence);
 		this.#pendingTransmits = [];
 		return sequences;
 	}

@@ -21,6 +21,7 @@ import type {
 	EditorTheme,
 	LoaderMessageColorFn,
 	OverlayHandle,
+	PanelLayoutResult,
 	SlashCommand,
 } from "@oh-my-pi/pi-tui";
 import {
@@ -237,6 +238,7 @@ import type {
 	InteractiveModeInitOptions,
 	InteractiveSelectorDialogOptions,
 	RenderSessionContextOptions,
+	RightInfoProvider,
 	SubmittedUserInput,
 	TodoItem,
 	TodoPhase,
@@ -703,6 +705,10 @@ export class InteractiveMode implements InteractiveModeContext {
 	get isShuttingDown(): boolean {
 		return this.#isShuttingDown;
 	}
+	#rightInfoBlocks: string[][] = [];
+	#staticRightInfoProvider = (_width: number): readonly (readonly string[])[] => this.#rightInfoBlocks;
+	#rightInfoProvider: RightInfoProvider = this.#staticRightInfoProvider;
+	#rightInfoLayoutCallback: ((result: PanelLayoutResult) => void) | null = null;
 	hookSelector: HookSelectorComponent | undefined = undefined;
 	hookInput: HookInputComponent | undefined = undefined;
 	hookEditor: HookEditorComponent | undefined = undefined;
@@ -1037,6 +1043,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#omfgController = new OmfgController(this);
 		this.#cleanseController = new CleanseCommandController(this);
 		this.#extensionUiController = new ExtensionUiController(this);
+		this.#extensionUiController.setWidgetLayoutEmitter(event => {
+			const runner = this.session.extensionRunner;
+			if (runner?.hasHandlers("widget_layout")) runner.emit(event).catch(() => {});
+		});
 		this.#eventController = new EventController(this);
 		this.#commandController = new CommandController(this);
 		this.#todoCommandController = new TodoCommandController(this);
@@ -1104,6 +1114,30 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	playWelcomeIntro(): void {
 		this.composer.playWelcomeIntro();
+	}
+
+	setRightInfo(
+		blocks: string[][] | RightInfoProvider | undefined,
+		onLayout?: (result: PanelLayoutResult) => void,
+	): void {
+		if (onLayout !== undefined) this.#rightInfoLayoutCallback = onLayout;
+		if (typeof blocks === "function") {
+			this.#rightInfoProvider = blocks;
+			this.ui.requestRender();
+			return;
+		}
+		const next = blocks ?? [];
+		const changed =
+			this.#rightInfoProvider !== this.#staticRightInfoProvider ||
+			next.length !== this.#rightInfoBlocks.length ||
+			next.some((block, i) => {
+				const prev = this.#rightInfoBlocks[i];
+				return !prev || block.length !== prev.length || block.some((l, j) => l !== prev[j]);
+			});
+		if (!changed) return;
+		this.#rightInfoBlocks = next;
+		this.#rightInfoProvider = this.#staticRightInfoProvider;
+		this.ui.requestRender();
 	}
 
 	async init(options: InteractiveModeInitOptions = {}): Promise<void> {
@@ -1254,6 +1288,11 @@ export class InteractiveMode implements InteractiveModeContext {
 			});
 			this.#ownsStartedUi = true;
 		}
+		this.ui.setRightPanel(
+			width => this.#rightInfoProvider(width),
+			[this.composer.rightPanelHeaderTarget, this.chatContainer, this.todoContainer],
+			result => this.#rightInfoLayoutCallback?.(result),
+		);
 		pushTerminalTitle();
 		setTerminalTitleStateEnabled(this.settings.get("tui.titleState"));
 		setSessionTerminalTitle(this.sessionManager.getSessionName(), this.sessionManager.getCwd());
@@ -5897,6 +5936,10 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	getToolUIContext(): ExtensionUIContext | undefined {
 		return this.#extensionUiController.getToolUIContext();
+	}
+
+	reloadHooksAndCustomTools(): Promise<void> {
+		return this.#extensionUiController.reloadHooksAndCustomTools();
 	}
 
 	emitCustomToolSessionEvent(

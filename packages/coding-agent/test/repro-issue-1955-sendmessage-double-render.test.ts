@@ -113,6 +113,8 @@ function createHarness(): Harness {
 	const ctx = {
 		chatContainer: new Container(),
 		pendingMessagesContainer: new Container(),
+		hookWidgetContainerAbove: new Container(),
+		hookWidgetContainerBelow: new Container(),
 		pendingBashComponents: [],
 		pendingPythonComponents: [],
 		transcriptMessageComponents: new WeakMap(),
@@ -138,6 +140,7 @@ function createHarness(): Harness {
 		setEditorComponent: vi.fn(),
 		setWorkingMessage: vi.fn(),
 		setToolsExpanded: vi.fn(),
+		setRightInfo: vi.fn(),
 		toolOutputExpanded: false,
 		syncComposerShape: vi.fn(),
 		hideThinkingBlock: false,

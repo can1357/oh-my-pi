@@ -219,15 +219,36 @@ export interface ExtensionUIDialogOptions {
 /** Raw terminal input listener for extensions. */
 export type TerminalInputHandler = (data: string) => { consume?: boolean; data?: string } | undefined;
 
-export type WidgetPlacement = "aboveEditor" | "belowEditor";
-
+export type WidgetPlacement = "aboveEditor" | "belowEditor" | "rightEditor";
+export type WidgetAlignment = "top" | "bottom";
 export interface ExtensionWidgetOptions {
 	placement?: WidgetPlacement;
+	/** Vertical edge used by `rightEditor`; defaults to `top`. */
+	alignment?: WidgetAlignment;
+	/**
+	 * Placement priority for `rightEditor` widgets when the negative space cannot
+	 * fit every panel. Lower numbers are placed first (claim space first). Widgets
+	 * without a priority fall back to ascending height (shortest first), so the
+	 * smallest, always-present panels stay visible and the tallest hide first.
+	 */
+	priority?: number;
+}
+
+/**
+ * Optional independently placeable sub-block for `rightEditor` widgets.
+ * Each block is hidden or shown as a unit when the negative space is tight.
+ */
+export interface ExtensionWidgetBlock {
+	id?: string;
+	lines: string[];
+	priority?: number;
+	/** Overrides the parent widget alignment for this independently placed block. */
+	alignment?: WidgetAlignment;
 }
 
 export type ExtensionUiComponent = Component & { dispose?(): void };
 export type ExtensionUiComponentFactory = (tui: TUI, theme: Theme) => ExtensionUiComponent;
-export type ExtensionWidgetContent = string[] | ExtensionUiComponentFactory | undefined;
+export type ExtensionWidgetContent = string[] | ExtensionWidgetBlock[] | ExtensionUiComponentFactory | undefined;
 
 /** Options for `ExtensionUIContext.custom()` (overlay rendering of a custom component). */
 export interface ExtensionCustomOptions {
@@ -287,7 +308,7 @@ export interface ExtensionUIContext {
 	/** Set the working/loading message shown during streaming. Call with no argument to restore default. */
 	setWorkingMessage(message?: string): void;
 
-	/** Set a widget to display above or below the editor. Accepts string array or component factory. */
+	/** Set a widget. `rightEditor` also accepts sub-block arrays that can hide independently. */
 	setWidget(key: string, content: ExtensionWidgetContent, options?: ExtensionWidgetOptions): void;
 
 	/** Set a custom footer component, or undefined to restore the built-in footer. */
@@ -894,6 +915,40 @@ export interface UserPythonEvent {
 }
 
 // ============================================================================
+// Widget Layout Events
+// ============================================================================
+
+/**
+ * Emitted after the TUI composites right-panel widgets, reporting whether each
+ * widget is visible and the dimensions available to it. Fires only when layout
+ * state changes (visibility, width, rows, hidden blocks) — not on every paint.
+ *
+ * `availableWidth` is always measured (the panel content column width) even when
+ * the widget is hidden from lack of rows — use it to pre-render content for when
+ * the widget becomes visible. `visibleRows` is the number of rows actually
+ * allocated (0 when the widget received no rows).
+ *
+ * Use this to stop polling/expensive computation when `visible` is false, to
+ * reformat content for the available width, or to adapt when blocks are hidden.
+ */
+export interface WidgetLayoutEvent {
+	type: "widget_layout";
+	/** Widget key (matches the key passed to `setWidget`). */
+	key: string;
+	/** Whether any part of this widget is currently visible on screen. */
+	visible: boolean;
+	/** Panel content column width, always measured regardless of visibility. */
+	availableWidth: number;
+	/** Rows allocated to this widget (0 when the widget received no rows). */
+	visibleRows: number;
+	/**
+	 * Block IDs that were hidden due to space constraints (`rightEditor` placement only).
+	 * Undefined for placements that don't support independent block hiding.
+	 */
+	hiddenBlocks?: string[];
+}
+
+// ============================================================================
 // Input Events
 // ============================================================================
 
@@ -1100,7 +1155,8 @@ export type ExtensionEvent =
 	| ToolCallEvent
 	| ToolResultEvent
 	| ToolApprovalRequestedEvent
-	| ToolApprovalResolvedEvent;
+	| ToolApprovalResolvedEvent
+	| WidgetLayoutEvent;
 
 // ============================================================================
 // Event Results
@@ -1290,6 +1346,7 @@ export interface ExtensionAPI {
 	on(event: "user_bash", handler: ExtensionHandler<UserBashEvent, UserBashEventResult>): void;
 	on(event: "user_python", handler: ExtensionHandler<UserPythonEvent, UserPythonEventResult>): void;
 	on(event: "mcp_notification", handler: ExtensionHandler<McpNotificationEvent>): void;
+	on(event: "widget_layout", handler: ExtensionHandler<WidgetLayoutEvent>): void;
 
 	// =========================================================================
 	// Tool Registration

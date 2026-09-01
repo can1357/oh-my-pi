@@ -90,7 +90,18 @@ export type RpcCommand =
 
 	// Login
 	| { id?: string; type: "get_login_providers" }
-	| { id?: string; type: "login"; providerId: string };
+	| { id?: string; type: "login"; providerId: string }
+
+	// Widget layout feedback (host → server)
+	| {
+			id?: string;
+			type: "widget_layout";
+			widgetKey: string;
+			visible: boolean;
+			availableWidth: number;
+			visibleRows: number;
+			hiddenBlocks?: string[];
+	  };
 
 // ============================================================================
 // RPC State
@@ -337,6 +348,7 @@ export type RpcResponse =
 			data: { providers: Array<{ id: string; name: string; available: boolean; authenticated: boolean }> };
 	  }
 	| { id?: string; type: "response"; command: "login"; success: true; data: { providerId: string } }
+	| { id?: string; type: "response"; command: "widget_layout"; success: true }
 
 	// Error response (any command can fail); `code` is an optional machine-readable reason.
 	| { id?: string; type: "response"; command: string; success: false; error: string; code?: string };
@@ -370,6 +382,13 @@ export type RpcSessionEventFrame = AgentSessionEvent | RpcSubagentFrame;
 /** Positional presentation metadata for an RPC select option. */
 export interface RpcExtensionUISelectOptionDetail {
 	description?: string;
+}
+
+export interface RpcExtensionWidgetBlock {
+	lines: string[];
+	priority?: number;
+	alignment?: "top" | "bottom";
+	id?: string;
 }
 
 /** Emitted when an extension needs user input */
@@ -420,8 +439,11 @@ export type RpcExtensionUIRequest =
 			id: string;
 			method: "setWidget";
 			widgetKey: string;
-			widgetLines: string[] | undefined;
-			widgetPlacement?: "aboveEditor" | "belowEditor";
+			widgetLines?: string[] | undefined;
+			widgetBlocks?: RpcExtensionWidgetBlock[] | undefined;
+			widgetPlacement?: "aboveEditor" | "belowEditor" | "rightEditor";
+			widgetPriority?: number;
+			widgetAlignment?: "top" | "bottom";
 	  }
 	| { type: "extension_ui_request"; id: string; method: "setTitle"; title: string }
 	| { type: "extension_ui_request"; id: string; method: "set_editor_text"; text: string }

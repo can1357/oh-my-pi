@@ -306,7 +306,6 @@ class ProtocolParsingTests(unittest.TestCase):
         self.assertEqual(notification.url, "https://example.com/oauth")
         self.assertEqual(notification.launch_url, "http://127.0.0.1:8123/redirect")
         self.assertTrue(notification.is_passive())
-
     def test_parse_todo_reminder_notification(self) -> None:
         notification = parse_notification(
             {

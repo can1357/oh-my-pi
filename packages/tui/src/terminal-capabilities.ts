@@ -139,6 +139,23 @@ export class TerminalInfo {
 		return hasNeedleBefore(line, this.imageProtocol, 512) || hasNeedleBefore(line, KITTY_PLACEHOLDER, 512);
 	}
 
+	/**
+	 * A raw image *protocol escape* line — the Sixel DCS or iTerm2/Kitty data
+	 * escape that physically reserves cells, including the blank rows printed
+	 * above it. Unlike {@link isImageLine} this excludes Kitty Unicode placeholder
+	 * rows, which are themselves the visible image grid and reserve nothing above.
+	 * Only escape lines should backfill contiguous zero-width rows as occupied;
+	 * placeholder/Markdown-spacing blanks above a placeholder image stay free for
+	 * right-side panels.
+	 */
+	isImageEscapeLine(line: string): boolean {
+		if (!this.imageProtocol) return false;
+		if (this.imageProtocol === ImageProtocol.Sixel) {
+			return hasSixelDcsStart(line);
+		}
+		return hasNeedleBefore(line, this.imageProtocol, 64);
+	}
+
 	formatNotification(message: string | TerminalNotification): string {
 		if (this.notifyProtocol === NotifyProtocol.Bell) {
 			return NotifyProtocol.Bell;

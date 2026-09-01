@@ -20,7 +20,8 @@ SteeringMode: TypeAlias = Literal["all", "one-at-a-time"]
 InterruptMode: TypeAlias = Literal["immediate", "wait"]
 StopReason: TypeAlias = Literal["stop", "length", "toolUse", "error", "aborted"]
 NotifyType: TypeAlias = Literal["info", "warning", "error"]
-WidgetPlacement: TypeAlias = Literal["aboveEditor", "belowEditor"]
+WidgetPlacement: TypeAlias = Literal["aboveEditor", "belowEditor", "rightEditor"]
+WidgetAlignment: TypeAlias = Literal["top", "bottom"]
 TodoStatus: TypeAlias = Literal[
     "pending", "in_progress", "completed", "abandoned", "blocked"
 ]
@@ -77,8 +78,9 @@ _STOP_REASON_VALUES: Final[frozenset[str]] = frozenset(
 )
 _NOTIFY_TYPE_VALUES: Final[frozenset[str]] = frozenset({"info", "warning", "error"})
 _WIDGET_PLACEMENT_VALUES: Final[frozenset[str]] = frozenset(
-    {"aboveEditor", "belowEditor"}
+    {"aboveEditor", "belowEditor", "rightEditor"}
 )
+_WIDGET_ALIGNMENT_VALUES: Final[frozenset[str]] = frozenset({"top", "bottom"})
 _TODO_STATUS_VALUES: Final[frozenset[str]] = frozenset(
     {"pending", "in_progress", "completed", "abandoned", "blocked"}
 )
@@ -264,7 +266,7 @@ def _optional_int(payload: JsonObject, field: str) -> int | None:
     return value
 
 
-def _optional_float(payload: JsonObject, field: str) -> float | None:
+def _optional_number(payload: JsonObject, field: str) -> float | None:
     value = payload.get(field)
     if value is None:
         return None
@@ -285,6 +287,38 @@ def _tuple_of_strings(values: object, *, field: str) -> tuple[str, ...] | None:
             raise ValueError(f"{field} must contain only strings")
         result.append(item)
     return tuple(result) or None
+
+def _tuple_of_widget_blocks(values: object, *, field: str) -> tuple[ExtensionWidgetBlock, ...] | None:
+    if values is None:
+        return None
+    if not isinstance(values, list):
+        raise ValueError(f"{field} must be a list")
+
+    result: list[ExtensionWidgetBlock] = []
+    for index, item in enumerate(values):
+        item_field = f"{field}[{index}]"
+        if not isinstance(item, dict):
+            raise ValueError(f"{item_field} must be an object")
+        lines = _tuple_of_strings(item.get("lines"), field=f"{item_field}.lines")
+        if lines is None:
+            raise ValueError(f"{item_field}.lines must contain at least one string")
+        priority = _optional_number(item, "priority")
+        alignment = cast(
+            WidgetAlignment | None,
+            _optional_literal(
+                item.get("alignment"),
+                _WIDGET_ALIGNMENT_VALUES,
+                field=f"{item_field}.alignment",
+            ),
+        )
+        block_id = _optional_str(item, "id")
+        result.append(
+            ExtensionWidgetBlock(
+                lines=lines, priority=priority, alignment=alignment, id=block_id
+            )
+        )
+    return tuple(result) or None
+
 
 
 def _parse_agent_message(payload: JsonObject, *, field: str) -> AgentMessage:
@@ -950,6 +984,14 @@ class MessagesPage:
 
 
 @dataclass(slots=True, frozen=True)
+class ExtensionWidgetBlock:
+    lines: tuple[str, ...]
+    priority: float | None = None
+    alignment: WidgetAlignment | None = None
+    id: str | None = None
+
+
+@dataclass(slots=True, frozen=True)
 class ExtensionUiRequest:
     id: str
     method: ExtensionUiMethod
@@ -967,7 +1009,10 @@ class ExtensionUiRequest:
     status_text: str | None = None
     widget_key: str | None = None
     widget_lines: tuple[str, ...] | None = None
+    widget_blocks: tuple[ExtensionWidgetBlock, ...] | None = None
     widget_placement: WidgetPlacement | None = None
+    widget_priority: float | None = None
+    widget_alignment: WidgetAlignment | None = None
     text: str | None = None
     url: str | None = None
     launch_url: str | None = None
@@ -1432,7 +1477,7 @@ def parse_session_state(payload: JsonObject) -> SessionState:
         dump_tools=dump_tools,
         fast_mode_enabled=bool(payload.get("fastModeEnabled", False)),
         fast_mode_active=bool(payload.get("fastModeActive", False)),
-        tokens_per_second=_optional_float(payload, "tokensPerSecond"),
+        tokens_per_second=_optional_number(payload, "tokensPerSecond"),
         context_usage=parse_context_usage(
             _optional_json_object(
                 payload.get("contextUsage"), field="sessionState.contextUsage"
@@ -1597,12 +1642,24 @@ def parse_extension_ui_request(payload: JsonObject) -> ExtensionUiRequest:
         widget_lines=_tuple_of_strings(
             payload.get("widgetLines"), field="extension_ui_request.widgetLines"
         ),
+        widget_blocks=_tuple_of_widget_blocks(
+            payload.get("widgetBlocks"), field="extension_ui_request.widgetBlocks"
+        ),
         widget_placement=cast(
             WidgetPlacement | None,
             _optional_literal(
                 payload.get("widgetPlacement"),
                 _WIDGET_PLACEMENT_VALUES,
                 field="extension_ui_request.widgetPlacement",
+            ),
+        ),
+        widget_priority=_optional_number(payload, "widgetPriority"),
+        widget_alignment=cast(
+            WidgetAlignment | None,
+            _optional_literal(
+                payload.get("widgetAlignment"),
+                _WIDGET_ALIGNMENT_VALUES,
+                field="extension_ui_request.widgetAlignment",
             ),
         ),
         text=_optional_str(payload, "text"),

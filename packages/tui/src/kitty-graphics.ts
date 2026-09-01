@@ -123,6 +123,16 @@ export function encodeKittyVirtualPlacement(opts: {
 	return wrapTmuxPassthroughIfNeeded(`\x1b_G${params.join(",")}\x1b\\`);
 }
 
+const KITTY_VIRTUAL_PLACEMENT_PREFIX = /^\x1b_Ga=p,U=1,q=2,i=(\d+)(?:,[^\x1b]*)?\x1b\\/;
+
+/** Image id from a Unicode-placeholder virtual-placement prefix, if present. */
+export function parseKittyVirtualPlacementImageId(line: string): number | undefined {
+	const match = KITTY_VIRTUAL_PLACEMENT_PREFIX.exec(line);
+	if (!match) return undefined;
+	const imageId = Number(match[1]);
+	return Number.isSafeInteger(imageId) ? imageId : undefined;
+}
+
 /**
  * Build the placeholder cell grid as one string per row. The image id is carried
  * in each row's foreground color and the placement id (if any) in its underline
