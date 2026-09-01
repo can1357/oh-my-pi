@@ -887,6 +887,20 @@ describe("European gateway provider catalog support", () => {
 		expect(model?.supportsTools).toBeUndefined();
 	});
 
+	test("treats recognized gateway tool tags as positive tool hints", async () => {
+		const fetchMock: FetchImpl = vi.fn(async () => {
+			return Response.json({
+				data: [{ id: "gateway-tools-model", name: "Gateway Tools Model", tags: ["tools"] }],
+			});
+		});
+
+		const models = await eurouterModelManagerOptions({ fetch: fetchMock }).fetchDynamicModels?.();
+		const model = models?.find(candidate => candidate.id === "gateway-tools-model");
+
+		expect(model).toBeDefined();
+		expect(model?.supportsTools).toBe(true);
+	});
+
 	test("preserves native tool support when gateway capability metadata is absent", async () => {
 		const fetchMock: FetchImpl = vi.fn(async () => {
 			return new Response(
