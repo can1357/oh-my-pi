@@ -3344,9 +3344,18 @@ export async function processResponsesStream<TApi extends Api>(
 			// X-OpenRouter-Metadata request header): the selected endpoint names
 			// the inference provider that actually generated this response.
 			if (model.provider === "openrouter") {
-				const metadata = (response as { openrouter_metadata?: { endpoints?: { available?: Array<{ provider?: string; selected?: boolean }> } } } | undefined)
-					?.openrouter_metadata;
-				const selected = metadata?.endpoints?.available?.find(endpoint => endpoint.selected) ?? metadata?.endpoints?.available?.[0];
+				const metadata = (
+					response as
+						| {
+								openrouter_metadata?: {
+									endpoints?: { available?: Array<{ provider?: string; selected?: boolean }> };
+								};
+						  }
+						| undefined
+				)?.openrouter_metadata;
+				const selected =
+					metadata?.endpoints?.available?.find(endpoint => endpoint.selected) ??
+					metadata?.endpoints?.available?.[0];
 				if (typeof selected?.provider === "string" && selected.provider.length > 0) {
 					output.upstreamProvider = selected.provider;
 				}

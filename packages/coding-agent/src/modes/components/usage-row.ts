@@ -108,7 +108,13 @@ export function createUsageRowBlock(
 ): Container {
 	const block = new Container();
 	block.addChild(new Spacer(1));
-	block.addChild(new Text(theme.fg("dim", formatUsageRow(usage, durationMs, ttftMs, timestamp, turnElapsedMs, upstreamProvider)), 1, 0));
+	block.addChild(
+		new Text(
+			theme.fg("dim", formatUsageRow(usage, durationMs, ttftMs, timestamp, turnElapsedMs, upstreamProvider)),
+			1,
+			0,
+		),
+	);
 	usageRowBlocks.add(block);
 	return block;
 }
