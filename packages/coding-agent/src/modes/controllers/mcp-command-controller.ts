@@ -2438,22 +2438,23 @@ export class MCPCommandController {
 	async #handleSmitheryBrowserLogin(): Promise<boolean> {
 		const session = await createSmitheryCliAuthSession();
 		const fallbackLoginUrl = getSmitheryLoginUrl();
+		// Message reflects what actually happened: under BROWSER=none nothing
+		// launches, and "complete auth in your browser" precedes a five-minute
+		// wait for a browser that never opened.
+		const launched = openPath(session.authUrl);
 		this.#showMessage(
 			[
 				"",
 				theme.bold("Smithery Login"),
-				theme.fg("muted", "Browser authorization started. Complete auth in your browser."),
+				launched
+					? theme.fg("muted", "Browser authorization started. Complete auth in your browser.")
+					: theme.fg("muted", "Browser launch disabled by BROWSER=none. Log in at the URL below."),
 				theme.fg("dim", "Authorize URL:"),
 				theme.fg("accent", session.authUrl),
 				theme.fg("dim", `Fallback: ${fallbackLoginUrl}`),
 				"",
 			].join("\n"),
 		);
-		try {
-			openPath(session.authUrl);
-		} catch {
-			// URL is already shown above.
-		}
 
 		const apiKey = await this.#waitForSmitheryCliApiKey(session.sessionId, new AbortController().signal);
 		await this.#validateSmitheryApiKey(apiKey);

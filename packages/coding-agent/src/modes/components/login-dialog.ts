@@ -98,8 +98,14 @@ export class LoginDialogComponent extends OverlayPanel {
 			this.#contentContainer.addChild(new Text(theme.fg("warning", instructions), 0, 0));
 		}
 
-		// Open browser (best-effort)
-		openPath(url);
+		// Open browser (best-effort). `false` means BROWSER=none suppressed the
+		// launch: say so, or the provider's "a browser window should open"
+		// instructions above leave the user waiting for one that never comes.
+		if (!openPath(url)) {
+			this.#contentContainer.addChild(
+				new Text(theme.fg("dim", "Browser launch disabled by BROWSER=none. Use the URL above."), 0, 0),
+			);
+		}
 
 		this.#tui.requestRender();
 	}
