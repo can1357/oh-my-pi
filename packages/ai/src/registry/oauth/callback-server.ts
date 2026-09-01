@@ -497,9 +497,18 @@ export abstract class OAuthCallbackFlow {
 
 /**
  * Parse a redirect URL or code string to extract code and state.
+ *
+ * Whitespace is removed rather than trimmed. A URL copied out of a full-screen
+ * TUI arrives carrying the row breaks the frame painted: every wrapped fragment
+ * is its own terminal row, so a click-drag selection includes newlines, and a
+ * terminal that pads the row includes spaces. The URL parser drops interior
+ * newlines by itself but keeps a space, which turns a valid `code` into a
+ * slightly wrong one and costs the user an opaque provider rejection instead of
+ * a login. Neither a redirect URL nor an authorization code contains
+ * whitespace, so none of it can be meaningful here.
  */
 export function parseCallbackInput(input: string): { code?: string; state?: string } {
-	const value = input.trim();
+	const value = input.replace(/\s+/g, "");
 	if (!value) return {};
 
 	try {

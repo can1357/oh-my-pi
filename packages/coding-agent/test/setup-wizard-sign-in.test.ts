@@ -148,7 +148,13 @@ describe("SignInTab", () => {
 	// weird". The panel printed the first two wrapped rows of the URL under the
 	// header and then the whole URL again lower down, so the copy a user
 	// actually reaches for ends mid-query-string.
-	it("renders the authorization URL once, unbroken, so a selection copies all of it", async () => {
+	//
+	// This asserts the rows, not the bytes a terminal selection produces: a
+	// full-screen frame paints every wrapped fragment as its own row, so a
+	// drag-copy carries the breaks no matter how the panel is laid out. The
+	// byte-exact paths are Alt+C (covered above) and the OSC 8 link, and
+	// `parseCallbackInput` strips the whitespace a selection adds.
+	it("renders the authorization URL once, in consecutive rows, never twice", async () => {
 		const url = `https://auth.example.com/oauth/authorize?response_type=code&client_id=omp&redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback&scope=openid+profile+email+offline_access&code_challenge=${"B".repeat(43)}&state=${"s".repeat(32)}`;
 		const loginGate = Promise.withResolvers<void>();
 		vi.spyOn(clipboard, "copyToClipboard").mockResolvedValue(undefined);
@@ -187,8 +193,8 @@ describe("SignInTab", () => {
 			const plain = tab.render(width).map(line => Bun.stripANSI(line));
 			expect(plain.join("").split(url).length - 1).toBe(1);
 
-			// Contiguous: every row of the URL sits directly under the one before
-			// it, so a click-drag over the block yields the whole string.
+			// Consecutive: no prompt row, status line, or second copy interrupts
+			// the block.
 			const first = plain.findIndex(line => line.startsWith("https://auth.example.com"));
 			expect(first).toBeGreaterThanOrEqual(0);
 			const rowCount = Math.ceil(url.length / width);

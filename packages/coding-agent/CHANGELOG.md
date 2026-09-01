@@ -4,7 +4,8 @@
 
 ### Fixed
 
-- Fixed the setup wizard's sign-in panel printing the OAuth authorization URL twice: the first copy was clipped to two wrapped rows and the complete one sat below the code prompt, so selecting the URL a user reaches for first yielded a string truncated mid-query-string. The URL is now rendered once, unbroken, below the input rows a short terminal must never clip.
+- Fixed the setup wizard's sign-in panel printing the OAuth authorization URL twice: the first copy was clipped to two wrapped rows and the complete one sat below the code prompt, so selecting the URL a user reaches for first yielded a string truncated mid-query-string. The URL is now rendered once, in consecutive rows, below the input rows a short terminal must never clip.
+- Fixed `parseCallbackInput` rejecting an authorization code pasted from a terminal selection. A full-screen frame paints each wrapped fragment as its own row, so a drag-copy carries newlines and, on terminals that pad, spaces; the URL parser drops the newlines but keeps a space, turning a valid code into a silently wrong one. Whitespace is now removed rather than trimmed.
 - Fixed the `Set up your providers` tab strip advertising `(tab to cycle)` during an in-flight OAuth login, when the modal panel owns every key and Tab is deliberately inert.
 
 ### Added
