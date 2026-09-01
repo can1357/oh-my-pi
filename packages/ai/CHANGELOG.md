@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Bump credential incarnation when a stored API-key row is replaced (or an OAuth row becomes an API key) so prior turn reservations cannot suppress the new key.
+- Settle gateway quota probes only on committed output or successful terminals, release pi-native reservations when abort wins lookup, lease probes against the active block scope, and skip cooldown-blocked API keys when healthy rows are reserved.
+
+- Require a quota probe lease on the allow-blocked OAuth fallback pass.
+- Add parent fallback edges from every nested child target to the later sibling entry.
+- Preserve JSON-schema descriptions when flattening Chat Completions response_format for Responses, and store in-memory Codex reconciliation deadlines.
+
+- Renew turn reservations while streams are active; release API-key holds when secret resolution fails.
+- Fixed API-key turn reservations releasing when credential-helper resolution fails, and renewing the hold as SSE chunks arrive so long streams outlive the idle TTL.
+
+- Fixed rejecting ambiguous cross-branch model reuse under a single fallback node.
+- Fixed pi-native virtual routes dispatching compiled.targets[0], suffix fallback edges per sibling, and a parse→wire Responses options contract test.
+- Fixed nested fallback edges scoped per source target, turn reservations for selected API-key rows, and rejection of unsupported Codex `previous_response_id` over the gateway.
+
 ### Added
 
 - Add support for automatic recovery from "preserved-thinking" signature errors during conversation history rewrites
@@ -55,6 +71,13 @@
 - Improved OAuth sign-in flows, including a fallback message when the browser cannot automatically close the OAuth success tab.
 - Fixed Cloudflare AI Gateway onboarding and routing so gateway account and endpoint configuration is preserved correctly while gateway credentials are not sent as upstream OpenAI authorization headers.
 - Fixed Codex OAuth quota handling so chat and Spark usage remain independent, legacy shared quota limits continue to work, and incomplete usage reports are not incorrectly treated as unlimited.
+- Gateway error classifications now carry a failure owner and retry/failover disposition (`credential_permanent`, `provider_transient`, `policy_terminal`, …); provider status codes stay authoritative over message wording, and context-overflow detection reuses the central classifier.
+- Gateway requests now forward `previous_response_id`, `parallel_tool_calls`, `logit_bias`, `user`, and `response_format` to providers instead of dropping them; Responses requests map `response_format` JSON-schema to the flat `text.format` shape and never send Chat-Completions-only `seed`.
+
+### Fixed
+
+- Fixed OpenAI Responses continuation pairing a caller-supplied `previous_response_id` with an internally computed delta from a different stored response, and restricted stale-baseline recovery to internally owned chain ids so a stale caller id can no longer silently drop prior context.
+- Auth gateway observes Responses SSE through a StreamCommitGate: metadata-only preludes stay failover-eligible, the first output event or 4 MiB cap commits, and post-commit terminals (`response.completed`/`response.failed`/`response.incomplete`/`response.error`) end failover eligibility instead of being misread as output.
 
 ## [18.0.8] - 2026-08-27
 
