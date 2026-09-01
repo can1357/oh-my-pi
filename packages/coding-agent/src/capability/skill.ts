@@ -29,9 +29,9 @@ export interface SkillFrontmatter {
 	 */
 	disableModelInvocation?: boolean;
 	/**
-	 * User axis. When `false`, the skill is not registered, completed, or
-	 * dispatched as `/skill:<name>`; it stays loadable via `skill://<name>`
-	 * and, unless the model axis also opts out, advertised to the model.
+	 * User axis, parsed and stored but not yet enforced: no registration or
+	 * dispatch path reads it at this commit, so a skill setting it is still
+	 * addressable as `/skill:<name>`. The consumers land with the axis feature.
 	 * Normalized from kebab-case `user-invocable`. Defaults to `true`.
 	 */
 	userInvocable?: boolean;
