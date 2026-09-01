@@ -93,8 +93,8 @@ describe("Zed provider protocol regressions", () => {
 			{
 				role: "user",
 				parts: [
-					{ functionResponse: { name: "read_file", response: { output: "contents" } } },
-					{ functionResponse: { name: "write_file", response: { error: "permission denied" } } },
+					{ functionResponse: { name: "read_file", response: { output: "contents" }, id: "call_read" } },
+					{ functionResponse: { name: "write_file", response: { error: "permission denied" }, id: "call_write" } },
 				],
 			},
 		]);
@@ -1062,5 +1062,127 @@ describe("Zed provider protocol regressions", () => {
 		expect(result.stopReason).toBe("aborted");
 		expect(result.errorStatus).toBeUndefined();
 		expect(result.errorMessage).toMatch(/aborted/i);
+	});
+	it("maps Anthropic error stop reasons (refusal, sensitive, model_context_window_exceeded)", async () => {
+		const model = makeModel("claude-sonnet-5", true);
+
+		const refusalRun = await runZedStream(model, [
+			{
+				event: {
+					type: "message_delta",
+					delta: { stop_reason: "refusal" },
+				},
+			},
+			{ status: "stream_ended" },
+		]);
+
+		expect(refusalRun.result.stopReason).toBe("error");
+		expect(refusalRun.result.errorMessage).toContain("refusal");
+
+		const sensitiveRun = await runZedStream(model, [
+			{
+				event: {
+					type: "message_delta",
+					delta: { stop_reason: "sensitive" },
+				},
+			},
+			{ status: "stream_ended" },
+		]);
+
+		expect(sensitiveRun.result.stopReason).toBe("error");
+		expect(sensitiveRun.result.errorMessage).toContain("sensitive");
+
+		const contextExceededRun = await runZedStream(model, [
+			{
+				event: {
+					type: "message_delta",
+					delta: { stop_reason: "model_context_window_exceeded" },
+				},
+			},
+			{ status: "stream_ended" },
+		]);
+
+		expect(contextExceededRun.result.stopReason).toBe("length");
+	});
+
+	it("preserves upstream functionCall.id from Gemini candidate parts", async () => {
+		const model = makeModel("gemini-3-flash", true);
+		const run = await runZedStream(model, [
+			{
+				event: {
+					candidates: [
+						{
+							content: {
+								role: "model",
+								parts: [
+									{
+										functionCall: {
+											name: "test_tool",
+											args: {},
+											id: "server_call_id_456",
+										},
+									},
+								],
+							},
+							finishReason: "STOP",
+						},
+					],
+				},
+			},
+			{ status: "stream_ended" },
+		]);
+
+		expect(run.result.content).toHaveLength(1);
+		expect(run.result.content[0]).toEqual({
+			type: "toolCall",
+			id: "server_call_id_456",
+			name: "test_tool",
+			arguments: {},
+		});
+	});
+
+	it("records reasoning_tokens from OpenAI Responses usage into outputMessage.usage.reasoningTokens", async () => {
+		const model = makeModel("gpt-5.6-luna", true);
+		const run = await runZedStream(model, [
+			{
+				event: {
+					type: "response.completed",
+					response: {
+						usage: {
+							input_tokens: 10,
+							output_tokens: 20,
+							output_tokens_details: {
+								reasoning_tokens: 15,
+							},
+						},
+					},
+				},
+			},
+			{ status: "stream_ended" },
+		]);
+
+		expect(run.result.usage?.reasoningTokens).toBe(15);
+	});
+
+	it("forwards stopSequences from streamSimple to Zed Anthropic request", async () => {
+		let capturedPayload: Record<string, unknown> | undefined;
+		const fetchMock: FetchImpl = mockFetch(async (_input, init) => {
+			if (init?.body && typeof init.body === "string") {
+				const parsed = JSON.parse(init.body) as Record<string, unknown>;
+				if (parsed.provider_request) {
+					capturedPayload = parsed.provider_request as Record<string, unknown>;
+				}
+			}
+			return ndjsonResponse([{ status: "stream_ended" }]);
+		});
+
+		const stream = streamSimple(makeModel("claude-sonnet-5", true), userContext(), {
+			apiKey: "direct-zed-token",
+			fetch: fetchMock,
+			stopSequences: ["\n\nHuman:"],
+		});
+		await stream.result();
+
+		expect(capturedPayload?.stop_sequences).toEqual(["\n\nHuman:"]);
 	});
 });

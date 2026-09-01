@@ -106207,13 +106207,13 @@
 				"text"
 			],
 			"cost": {
-				"input": 0.05,
-				"output": 0.16,
-				"cacheRead": 0.013,
+				"input": 0.04998,
+				"output": 0.09996,
+				"cacheRead": 0.009996,
 				"cacheWrite": 0
 			},
 			"contextWindow": 1048576,
-			"maxTokens": 393216,
+			"maxTokens": 131072,
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
@@ -109969,7 +109969,6 @@
 			},
 			"requiresGlyphTokenization": true,
 			"tokenizer": "claude-v47",
-			"supportsComputerUse": false,
 			"compat": {
 				"supportsStore": false,
 				"supportsDeveloperRole": false,
@@ -110023,7 +110022,8 @@
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
 				"supportsPromptCacheKey": false
-			}
+			},
+			"supportsComputerUse": false
 		},
 		"anthropic/claude-opus-4.8": {
 			"id": "anthropic/claude-opus-4.8",
@@ -110153,7 +110153,6 @@
 			},
 			"requiresGlyphTokenization": true,
 			"tokenizer": "claude-v47",
-			"supportsComputerUse": false,
 			"compat": {
 				"supportsStore": false,
 				"supportsDeveloperRole": false,
@@ -110207,7 +110206,8 @@
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
 				"supportsPromptCacheKey": false
-			}
+			},
+			"supportsComputerUse": false
 		},
 		"anthropic/claude-opus-5": {
 			"id": "anthropic/claude-opus-5",
@@ -110337,7 +110337,6 @@
 			},
 			"requiresGlyphTokenization": true,
 			"tokenizer": "claude-v5",
-			"supportsComputerUse": false,
 			"compat": {
 				"supportsStore": false,
 				"supportsDeveloperRole": false,
@@ -110391,7 +110390,8 @@
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
 				"supportsPromptCacheKey": false
-			}
+			},
+			"supportsComputerUse": false
 		},
 		"anthropic/claude-sonnet-4": {
 			"id": "anthropic/claude-sonnet-4",
@@ -118891,6 +118891,84 @@
 				"retryWithoutStrictOnGrammarError": false,
 				"supportsPromptCacheKey": false
 			}
+		},
+		"inception/mercury-2.5-preview": {
+			"id": "inception/mercury-2.5-preview",
+			"name": "Mercury 2.5 Preview",
+			"api": "openai-completions",
+			"provider": "kilo",
+			"baseUrl": "https://api.kilo.ai/api/gateway",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 260000,
+			"maxTokens": 65536,
+			"identity": {
+				"class": "unknown"
+			},
+			"requiresGlyphTokenization": false,
+			"compat": {
+				"supportsStore": false,
+				"supportsDeveloperRole": false,
+				"supportsMultipleSystemMessages": false,
+				"supportsReasoningEffort": true,
+				"supportsReasoningParams": true,
+				"supportsSamplingParams": true,
+				"supportsPenaltyAndStopParams": true,
+				"reasoningEffortMap": {},
+				"supportsUsageInStreaming": true,
+				"alwaysSendMaxTokens": false,
+				"disableReasoningOnForcedToolChoice": false,
+				"disableReasoningOnToolChoice": false,
+				"supportsToolChoice": true,
+				"supportsForcedToolChoice": true,
+				"supportsNamedToolChoice": true,
+				"maxTokensField": "max_completion_tokens",
+				"requiresToolResultName": false,
+				"requiresAssistantAfterToolResult": false,
+				"requiresThinkingAsText": false,
+				"requiresMistralToolIds": false,
+				"thinkingFormat": "openai",
+				"reasoningDisableMode": "lowest-effort",
+				"omitReasoningEffort": false,
+				"includeEncryptedReasoning": true,
+				"filterReasoningHistory": false,
+				"reasoningContentField": "reasoning_content",
+				"requiresReasoningContentForToolCalls": false,
+				"requiresReasoningContentForAllAssistantTurns": false,
+				"allowsSyntheticReasoningContentForToolCalls": true,
+				"replayReasoningContent": false,
+				"qwenPreserveThinking": false,
+				"qwenTemplateReasoningEffort": false,
+				"requiresAssistantContentForToolCalls": false,
+				"supportsPromptCacheBreakpoints": false,
+				"isOpenRouterHost": false,
+				"wireModelIdMode": "raw",
+				"isVercelGatewayHost": false,
+				"supportsStrictMode": false,
+				"toolStrictMode": "mixed",
+				"stripDeepseekSpecialTokens": false,
+				"streamMarkupHealingPattern": "thinking",
+				"reasoningDeltasMayBeCumulative": false,
+				"emptyLengthFinishIsContextError": false,
+				"usesOpenAIToolCallIdLimit": false,
+				"dropThinkingWhenReasoningEffort": false,
+				"nativeKimiK3Reasoning": false,
+				"zaiReasoningEffortDialect": false,
+				"clampOutputToModelMax": false,
+				"stripImageInput": false,
+				"rejectRootObjectUnion": false,
+				"retryWithoutStrictOnGrammarError": false,
+				"supportsPromptCacheKey": false
+			},
+			"supportsComputerUse": false
 		},
 		"inception/mercury-coder": {
 			"id": "inception/mercury-coder",
@@ -285463,13 +285541,13 @@
 				"text"
 			],
 			"cost": {
-				"input": 0.049999999999999996,
-				"output": 0.16,
-				"cacheRead": 0.013000000000000001,
+				"input": 0.049980000000000004,
+				"output": 0.09996000000000001,
+				"cacheRead": 0.009996000000000001,
 				"cacheWrite": 0
 			},
 			"contextWindow": 1310720,
-			"maxTokens": 393216,
+			"maxTokens": 131072,
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
@@ -293413,9 +293491,9 @@
 				"text"
 			],
 			"cost": {
-				"input": 0.08092,
-				"output": 0.16184,
-				"cacheRead": 0.016184,
+				"input": 0.07784,
+				"output": 0.15568,
+				"cacheRead": 0.015568,
 				"cacheWrite": 0
 			},
 			"contextWindow": 1048576,
@@ -298530,6 +298608,102 @@
 				"supportsReasoningSummary": true
 			},
 			"supportsComputerUseConfig": false
+		},
+		"inception/mercury-2.5-preview": {
+			"id": "inception/mercury-2.5-preview",
+			"name": "Mercury 2.5 Preview",
+			"api": "openrouter",
+			"provider": "openrouter",
+			"baseUrl": "https://openrouter.ai/api/v1",
+			"reasoning": true,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0.04,
+				"output": 0.15,
+				"cacheRead": 0.004,
+				"cacheWrite": 0
+			},
+			"contextWindow": 260000,
+			"maxTokens": 65536,
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"minimal",
+					"low",
+					"medium",
+					"high"
+				]
+			},
+			"identity": {
+				"class": "unknown"
+			},
+			"requiresGlyphTokenization": false,
+			"compat": {
+				"supportsStore": true,
+				"supportsDeveloperRole": false,
+				"supportsMultipleSystemMessages": true,
+				"supportsReasoningEffort": true,
+				"supportsReasoningParams": true,
+				"supportsSamplingParams": true,
+				"supportsPenaltyAndStopParams": true,
+				"reasoningEffortMap": {},
+				"supportsUsageInStreaming": true,
+				"alwaysSendMaxTokens": false,
+				"disableReasoningOnForcedToolChoice": false,
+				"disableReasoningOnToolChoice": false,
+				"supportsToolChoice": true,
+				"supportsForcedToolChoice": true,
+				"supportsNamedToolChoice": true,
+				"maxTokensField": "max_completion_tokens",
+				"requiresToolResultName": false,
+				"requiresAssistantAfterToolResult": false,
+				"requiresThinkingAsText": false,
+				"requiresMistralToolIds": false,
+				"thinkingFormat": "openrouter",
+				"reasoningDisableMode": "openrouter-enabled-false",
+				"omitReasoningEffort": false,
+				"includeEncryptedReasoning": true,
+				"filterReasoningHistory": false,
+				"reasoningContentField": "reasoning_content",
+				"requiresReasoningContentForToolCalls": true,
+				"requiresReasoningContentForAllAssistantTurns": false,
+				"allowsSyntheticReasoningContentForToolCalls": true,
+				"replayReasoningContent": false,
+				"qwenPreserveThinking": false,
+				"qwenTemplateReasoningEffort": false,
+				"requiresAssistantContentForToolCalls": false,
+				"supportsPromptCacheBreakpoints": false,
+				"isOpenRouterHost": true,
+				"wireModelIdMode": "openrouter",
+				"isVercelGatewayHost": false,
+				"supportsStrictMode": true,
+				"toolStrictMode": "mixed",
+				"stripDeepseekSpecialTokens": false,
+				"streamMarkupHealingPattern": "thinking",
+				"reasoningDeltasMayBeCumulative": false,
+				"emptyLengthFinishIsContextError": false,
+				"usesOpenAIToolCallIdLimit": false,
+				"dropThinkingWhenReasoningEffort": false,
+				"nativeKimiK3Reasoning": false,
+				"zaiReasoningEffortDialect": false,
+				"clampOutputToModelMax": false,
+				"stripImageInput": false,
+				"rejectRootObjectUnion": false,
+				"retryWithoutStrictOnGrammarError": false,
+				"supportsPromptCacheKey": false,
+				"supportsLongPromptCacheRetention": false,
+				"strictResponsesPairing": false,
+				"supportsImageDetailOriginal": true,
+				"supportsObfuscationOptOut": false,
+				"supportsAllTurnsReasoningContext": false,
+				"officialEndpoint": false,
+				"harmonyLeakMitigation": false,
+				"requiresReasoningOffJuiceInstruction": false,
+				"supportsReasoningSummary": true
+			},
+			"supportsComputerUse": false
 		},
 		"inception/mercury-coder": {
 			"id": "inception/mercury-coder",
@@ -353605,7 +353779,7 @@
 		"anthropic/claude-opus-4.8-fast": {
 			"id": "anthropic/claude-opus-4.8-fast",
 			"requiresGlyphTokenization": true,
-			"name": "Claude Opus 4.8",
+			"name": "Claude Opus 4.8 (Fast)",
 			"api": "anthropic-messages",
 			"provider": "vercel-ai-gateway",
 			"baseUrl": "https://ai-gateway.vercel.sh",
@@ -353723,7 +353897,7 @@
 		"anthropic/claude-opus-5-fast": {
 			"id": "anthropic/claude-opus-5-fast",
 			"requiresGlyphTokenization": true,
-			"name": "Claude Opus 5",
+			"name": "Claude Opus 5 (Fast)",
 			"api": "anthropic-messages",
 			"provider": "vercel-ai-gateway",
 			"baseUrl": "https://ai-gateway.vercel.sh",
@@ -375012,7 +375186,7 @@
 			"baseUrl": "https://cloud.zed.dev",
 			"reasoning": true,
 			"thinking": {
-				"mode": "effort",
+				"mode": "budget",
 				"efforts": [
 					"minimal",
 					"low",
@@ -375057,7 +375231,7 @@
 			"baseUrl": "https://cloud.zed.dev",
 			"reasoning": true,
 			"thinking": {
-				"mode": "effort",
+				"mode": "budget",
 				"efforts": [
 					"minimal",
 					"low",
@@ -375102,7 +375276,7 @@
 			"baseUrl": "https://cloud.zed.dev",
 			"reasoning": true,
 			"thinking": {
-				"mode": "effort",
+				"mode": "budget",
 				"efforts": [
 					"minimal",
 					"low",
@@ -375147,7 +375321,7 @@
 			"baseUrl": "https://cloud.zed.dev",
 			"reasoning": true,
 			"thinking": {
-				"mode": "effort",
+				"mode": "anthropic-adaptive",
 				"efforts": [
 					"minimal",
 					"low",
@@ -375192,7 +375366,7 @@
 			"baseUrl": "https://cloud.zed.dev",
 			"reasoning": true,
 			"thinking": {
-				"mode": "effort",
+				"mode": "google-level",
 				"efforts": [
 					"minimal",
 					"low",
@@ -375237,7 +375411,7 @@
 			"baseUrl": "https://cloud.zed.dev",
 			"reasoning": true,
 			"thinking": {
-				"mode": "effort",
+				"mode": "google-level",
 				"efforts": [
 					"low",
 					"high"
@@ -375280,7 +375454,7 @@
 			"baseUrl": "https://cloud.zed.dev",
 			"reasoning": true,
 			"thinking": {
-				"mode": "effort",
+				"mode": "google-level",
 				"efforts": [
 					"minimal",
 					"low",
@@ -375572,11 +375746,11 @@
 				"revision": "5.5.0"
 			},
 			"requiresGlyphTokenization": false,
+			"contextPromotionTarget": "zed-agent/gpt-5.4",
 			"compat": {
 				"provider": "open_ai",
 				"multimodalFunctionResponse": false
 			},
-			"contextPromotionTarget": "zed-agent/gpt-5.4",
 			"supportsComputerUse": false,
 			"compatConfig": {
 				"provider": "open_ai"

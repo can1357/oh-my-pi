@@ -275,7 +275,7 @@ function mapContextToAnthropic(context: Context, model: Model<"zed-agent">, opti
 		}
 	}
 
-	const isClaudeBudgetThinking = model.id.includes("4-5");
+	const isClaudeBudgetThinking = model.thinking?.mode !== "anthropic-adaptive";
 	const isReasoning = model.reasoning && !options?.disableReasoning && !isForcedToolChoice;
 
 	const body: Record<string, unknown> = {
@@ -516,6 +516,7 @@ function mapContextToGoogle(context: Context, model: Model<"zed-agent">, options
 				functionResponse: {
 					name: msg.toolName,
 					response: msg.isError ? { error: responseValue } : { output: responseValue },
+					...(msg.toolCallId && { id: msg.toolCallId }),
 					...(hasImages && modelSupportsMultimodalFunctionResponse && { parts: imageParts }),
 				},
 			});
@@ -579,6 +580,7 @@ function mapContextToGoogle(context: Context, model: Model<"zed-agent">, options
 						functionCall: {
 							name: block.name,
 							args: block.arguments,
+							...(block.id && { id: block.id }),
 						},
 						...(thoughtSignature ? { thoughtSignature } : {}),
 					});
@@ -1548,9 +1550,16 @@ export function streamZed(
 						const delta = event.delta as Record<string, unknown> | undefined;
 						if (delta?.stop_reason) {
 							const sr = String(delta.stop_reason);
-							if (sr === "max_tokens") outputMessage.stopReason = "length";
-							else if (sr === "tool_use") outputMessage.stopReason = "toolUse";
-							else outputMessage.stopReason = "stop";
+							if (sr === "max_tokens" || sr === "model_context_window_exceeded") {
+								outputMessage.stopReason = "length";
+							} else if (sr === "tool_use") {
+								outputMessage.stopReason = "toolUse";
+							} else if (sr === "refusal" || sr === "sensitive") {
+								outputMessage.stopReason = "error";
+								outputMessage.errorMessage = `Anthropic stop reason: ${sr}`;
+							} else {
+								outputMessage.stopReason = "stop";
+							}
 						}
 						const usage = event.usage as { output_tokens?: number } | undefined;
 						if (usage?.output_tokens && outputMessage.usage) {
@@ -1879,7 +1888,7 @@ export function streamZed(
 									text?: string;
 									thought?: boolean;
 									thoughtSignature?: string;
-									functionCall?: { name?: string; args?: Record<string, unknown> };
+									functionCall?: { name?: string; args?: Record<string, unknown>; id?: string };
 								}>;
 							};
 						};
@@ -1915,9 +1924,10 @@ export function streamZed(
 							if (part.functionCall?.name && !candidateHasError) {
 								closeActiveText();
 								closeActiveThinking();
+								const callId = part.functionCall.id || `call_${crypto.randomUUID()}`;
 								const toolCall: ToolCall = {
 									type: "toolCall",
-									id: crypto.randomUUID(),
+									id: callId,
 									name: part.functionCall.name,
 									arguments: part.functionCall.args ?? {},
 									...(part.thoughtSignature ? { thoughtSignature: part.thoughtSignature } : {}),
@@ -1991,6 +2001,9 @@ export function streamZed(
 							| undefined;
 						if (usage && outputMessage.usage) {
 							outputMessage.usage.output = usage.output_tokens ?? usage.output ?? outputMessage.usage.output;
+							if (usage.output_tokens_details?.reasoning_tokens !== undefined) {
+								outputMessage.usage.reasoningTokens = usage.output_tokens_details.reasoning_tokens;
+							}
 							const cachedTokens =
 								usage.cache_read_input_tokens ??
 								usage.input_tokens_details?.cached_tokens ??

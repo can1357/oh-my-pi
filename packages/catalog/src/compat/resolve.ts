@@ -985,6 +985,13 @@ function defaultThinkingMode<TApi extends Api>(spec: ModelSpec<TApi>, facts: Ide
 			}
 			if (facts.is("openai")) return "effort";
 			return "budget";
+		case "zed-agent":
+			if (facts.is("anthropic")) {
+				if (facts.revGte("4.6") && !facts.family("haiku")) return "anthropic-adaptive";
+				return "budget";
+			}
+			if (facts.is("gemini")) return facts.revMajor() === 3 ? "google-level" : "budget";
+			return "effort";
 		default:
 			return "effort";
 	}

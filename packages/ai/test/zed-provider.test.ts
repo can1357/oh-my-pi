@@ -938,6 +938,7 @@ describe("Zed Provider Payload Construction", () => {
 						functionResponse: {
 							name: "capture",
 							response: { output: "Screenshot captured." },
+							id: "call_screenshot",
 							parts: [{ inlineData: { mimeType: "image/png", data: "AQID" } }],
 						},
 					},
@@ -1028,6 +1029,7 @@ describe("Zed Provider Payload Construction", () => {
 						functionCall: {
 							name: "search_tool",
 							args: { query: "weather in Paris" },
+							id: "call_search",
 						},
 						thoughtSignature: testCase.toolSignature,
 					},
@@ -1043,6 +1045,7 @@ describe("Zed Provider Payload Construction", () => {
 				functionCall: {
 					name: "search_tool",
 					args: { query: "weather in Paris" },
+					id: "call_search",
 				},
 			});
 		}
@@ -1195,6 +1198,7 @@ describe("Zed Provider Payload Construction", () => {
 					functionResponse: {
 						name: "getImageDescription",
 						response: { output: "This is a beautiful sunset" },
+						id: "call_1",
 					},
 				},
 			],
@@ -1256,6 +1260,7 @@ describe("Zed Provider Payload Construction", () => {
 					functionResponse: {
 						name: "getImageDescription",
 						response: { output: "This is a beautiful sunset" },
+						id: "call_1",
 						parts: [
 							{
 								inlineData: {
@@ -1282,5 +1287,113 @@ describe("Zed Provider Payload Construction", () => {
 			const fnType = typeof streamZed;
 			expect(fnType).toBe("function");
 		}).not.toThrow();
+	});
+	it("preserves functionCall.id and functionResponse.id during Google request mapping", () => {
+		const model = makeModel({
+			id: "gemini-3-flash",
+			name: "Gemini 3 Flash",
+			reasoning: true,
+			contextWindow: 1_000_000,
+			maxTokens: 66_000,
+			input: ["text", "image"],
+		});
+		const assistantMsg: AssistantMessage = {
+			role: "assistant",
+			content: [
+				{
+					type: "toolCall",
+					id: "call_abc123",
+					name: "read_file",
+					arguments: { path: "README.md" },
+				},
+			],
+			api: "zed-agent",
+			provider: "zed-agent",
+			model: "gemini-3-flash",
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "toolUse",
+			timestamp: 1,
+		};
+		const context: Context = {
+			messages: [
+				assistantMsg,
+				{
+					role: "toolResult",
+					toolCallId: "call_abc123",
+					toolName: "read_file",
+					content: [{ type: "text", text: "contents" }],
+					isError: false,
+					timestamp: 1,
+				},
+			],
+		};
+
+		const request = buildZedProviderRequest("google", context, model) as {
+			contents: Array<{ role: string; parts: Array<Record<string, unknown>> }>;
+		};
+
+		expect(request.contents).toHaveLength(2);
+		expect(request.contents[0].parts[0]).toEqual({
+			functionCall: {
+				name: "read_file",
+				args: { path: "README.md" },
+				id: "call_abc123",
+			},
+		});
+		expect(request.contents[1].parts[0]).toEqual({
+			functionResponse: {
+				name: "read_file",
+				response: { output: "contents" },
+				id: "call_abc123",
+			},
+		});
+	});
+
+	it("selects budget thinking when model thinking mode is budget and adaptive thinking when mode is anthropic-adaptive", () => {
+		const budgetModel = makeModel({
+			id: "claude-haiku-4-5",
+			name: "Claude Haiku 4.5",
+			reasoning: true,
+			maxTokens: 64_000,
+			thinking: {
+				mode: "budget",
+				efforts: [Effort.Low, Effort.Medium, Effort.High],
+				defaultLevel: Effort.Medium,
+			},
+		});
+		const adaptiveModel = makeModel({
+			id: "claude-sonnet-5",
+			name: "Claude Sonnet 5",
+			reasoning: true,
+			thinking: {
+				mode: "anthropic-adaptive",
+				efforts: [Effort.Low, Effort.Medium, Effort.High],
+				defaultLevel: Effort.Medium,
+			},
+		});
+
+		const budgetRequest = buildZedProviderRequest("anthropic", { messages: [] }, budgetModel, {
+			reasoning: Effort.Medium,
+		}) as {
+			thinking: { type: string; budget_tokens?: number };
+		};
+		const adaptiveRequest = buildZedProviderRequest("anthropic", { messages: [] }, adaptiveModel, {
+			reasoning: Effort.High,
+		}) as {
+			thinking: { type: string };
+			output_config?: { effort?: string; include?: string[] };
+		};
+
+		expect(budgetRequest.thinking.type).toBe("enabled");
+		expect(budgetRequest.thinking.budget_tokens).toBe(8192);
+		expect(adaptiveRequest.thinking.type).toBe("adaptive");
+		expect(adaptiveRequest.output_config).toEqual({ effort: "high", include: ["summary"] });
 	});
 });

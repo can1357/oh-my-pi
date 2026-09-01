@@ -1968,6 +1968,7 @@ function mapOptionsForApi<TApi extends Api>(
 		minP: options?.minP,
 		presencePenalty: options?.presencePenalty,
 		repetitionPenalty: options?.repetitionPenalty,
+		stopSequences: options?.stopSequences,
 		maxTokens: options?.maxTokens ?? model.maxTokens ?? undefined,
 		toolChoice: options?.toolChoice,
 		signal: options?.signal,
