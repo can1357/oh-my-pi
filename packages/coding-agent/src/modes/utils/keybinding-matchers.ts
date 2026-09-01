@@ -26,6 +26,21 @@ export function matchesAppToolsExpand(data: string): boolean {
 	return matchesKey(data, "ctrl+o");
 }
 
+/** Match `app.dialog.toggleFocus`, falling back to Alt+E when the action is unbound. */
+export function matchesAppDialogFocusToggle(data: string): boolean {
+	const keybindings = getKeybindings();
+	const keys = keybindings.getKeys("app.dialog.toggleFocus");
+	if (keys.length > 0) {
+		return keybindings.matches(data, "app.dialog.toggleFocus");
+	}
+	return matchesKey(data, "alt+e");
+}
+
+/** Match the queued-message dequeue keybinding (`app.message.dequeue`). */
+export function matchesAppMessageDequeue(data: string): boolean {
+	return getKeybindings().matches(data, "app.message.dequeue");
+}
+
 /** Match the generic selector cancel keybinding. */
 export function matchesSelectCancel(data: string): boolean {
 	return getKeybindings().matches(data, "tui.select.cancel");
