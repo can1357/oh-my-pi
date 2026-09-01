@@ -1721,6 +1721,22 @@ export class AuthStorage {
 		return this.#getStoredCredentials(provider).map(entry => entry.credential);
 	}
 
+	/** Resolve and filter the stored rows exposed through a login-provider alias. */
+	#getProviderScopedStoredCredentials(provider: string): StoredCredential[] {
+		const definition = getProviderDefinition(provider);
+		const credentialProvider = definition?.storeCredentialsAs ?? provider;
+		const stored = this.#getStoredCredentials(credentialProvider);
+		if (credentialProvider === provider) return stored;
+		return stored.filter(entry => {
+			const credential = entry.credential;
+			return credential.type === "oauth" && (definition?.matchesStoredCredential?.(credential) ?? true);
+		});
+	}
+
+	#getProviderScopedCredentials(provider: string): AuthCredential[] {
+		return this.#getProviderScopedStoredCredentials(provider).map(entry => entry.credential);
+	}
+
 	/** Prefer whichever interactive login source was persisted most recently. */
 	#preferredInteractiveCredentialType(provider: string): AuthCredential["type"] | undefined {
 		let latest: { type: AuthCredential["type"]; authorizedAt: number; index: number } | undefined;
@@ -2440,7 +2456,7 @@ export class AuthStorage {
 	 */
 	listStoredCredentials(provider?: string): StoredAuthCredential[] {
 		if (provider !== undefined) {
-			return this.#getStoredCredentials(provider).map(entry => ({
+			return this.#getProviderScopedStoredCredentials(provider).map(entry => ({
 				id: entry.id,
 				provider,
 				credential: entry.credential,
@@ -2713,6 +2729,12 @@ export class AuthStorage {
 	 */
 	async remove(provider: string): Promise<void> {
 		const credentialProvider = resolveProviderCredentialId(provider);
+		if (credentialProvider !== provider) {
+			for (const entry of this.#getProviderScopedStoredCredentials(provider)) {
+				await this.removeCredential(provider, entry.id);
+			}
+			return;
+		}
 		if (this.#store.deleteAuthCredentialsRemote) {
 			await this.#store.deleteAuthCredentialsRemote(credentialProvider, "deleted by user");
 		} else {
@@ -2726,8 +2748,10 @@ export class AuthStorage {
 	 * Remove one stored credential for a provider.
 	 */
 	async removeCredential(provider: string, credentialId: number): Promise<boolean> {
-		const entries = this.#getStoredCredentials(provider);
-		const index = entries.findIndex(entry => entry.id === credentialId);
+		const credentialProvider = resolveProviderCredentialId(provider);
+		const entries = this.#getStoredCredentials(credentialProvider);
+		const scopedIds = new Set(this.#getProviderScopedStoredCredentials(provider).map(entry => entry.id));
+		const index = entries.findIndex(entry => entry.id === credentialId && scopedIds.has(entry.id));
 		if (index === -1) return false;
 
 		if (this.#store.deleteAuthCredentialRemote) {
@@ -2737,10 +2761,10 @@ export class AuthStorage {
 			this.#store.deleteAuthCredential(credentialId, "deleted by user");
 		}
 		this.#setStoredCredentials(
-			provider,
+			credentialProvider,
 			entries.filter((_entry, entryIndex) => entryIndex !== index),
 		);
-		this.#resetProviderAssignments(provider);
+		this.#resetProviderAssignments(credentialProvider);
 		return true;
 	}
 
@@ -2755,7 +2779,7 @@ export class AuthStorage {
 	 * Check if credentials exist for a provider in storage.
 	 */
 	has(provider: string): boolean {
-		return this.#getCredentialsForProvider(resolveProviderCredentialId(provider)).length > 0;
+		return this.#getProviderScopedCredentials(provider).length > 0;
 	}
 
 	/**
@@ -2765,9 +2789,12 @@ export class AuthStorage {
 	 * `XAI_API_KEY` does not auto-select SuperGrok (`xai-oauth`).
 	 */
 	hasAuth(provider: string): boolean {
+		if (resolveProviderCredentialId(provider) !== provider) {
+			return this.#getProviderScopedCredentials(provider).length > 0;
+		}
 		if (this.#runtimeOverrides.has(provider)) return true;
 		if (this.#configOverrides.has(provider)) return true;
-		if (this.#getCredentialsForProvider(resolveProviderCredentialId(provider)).length > 0) return true;
+		if (this.#getCredentialsForProvider(provider).length > 0) return true;
 		if (this.#hasDedicatedEnvAuth(provider)) return true;
 		if (this.#fallbackResolver?.(provider)) return true;
 		return false;
@@ -2785,9 +2812,12 @@ export class AuthStorage {
 	 * and picker visibility still go through {@link hasAuth}. See issue #9967.
 	 */
 	hasConcreteAuth(provider: string): boolean {
+		if (resolveProviderCredentialId(provider) !== provider) {
+			return this.#getProviderScopedCredentials(provider).length > 0;
+		}
 		if (this.#runtimeOverrides.has(provider)) return true;
 		if (this.#configOverrides.has(provider)) return true;
-		if (this.#getCredentialsForProvider(resolveProviderCredentialId(provider)).length > 0) return true;
+		if (this.#getCredentialsForProvider(provider).length > 0) return true;
 		if ((provider === "amazon-bedrock" || provider === "bedrock-mantle") && $env.AWS_BEARER_TOKEN_BEDROCK?.trim()) {
 			return true;
 		}
@@ -2825,9 +2855,12 @@ export class AuthStorage {
 	 * silently satisfies xai-oauth and routes around `providers.xai.baseUrl`.
 	 */
 	hasNonEnvCredential(provider: string): boolean {
+		if (resolveProviderCredentialId(provider) !== provider) {
+			return this.#getProviderScopedCredentials(provider).length > 0;
+		}
 		if (this.#runtimeOverrides.has(provider)) return true;
 		if (this.#configOverrides.has(provider)) return true;
-		if (this.#getCredentialsForProvider(resolveProviderCredentialId(provider)).length > 0) return true;
+		if (this.#getCredentialsForProvider(provider).length > 0) return true;
 		if (this.#fallbackResolver?.(provider)) return true;
 		return false;
 	}
@@ -2857,16 +2890,27 @@ export class AuthStorage {
 	 * Compact, structured counterpart to {@link describeCredentialSource}.
 	 */
 	getCredentialOrigin(provider: string): CredentialOrigin | undefined {
-		if (this.#runtimeOverrides.has(provider)) return { kind: "runtime" };
-		if (this.#configOverrides.has(provider)) return { kind: "config" };
-		const stored = this.#getCredentialsForProvider(provider);
+		const credentialProvider = resolveProviderCredentialId(provider);
+		const isAlias = credentialProvider !== provider;
+		if (!isAlias && this.#runtimeOverrides.has(provider)) return { kind: "runtime" };
+		if (!isAlias && this.#configOverrides.has(provider)) return { kind: "config" };
+		const stored = this.#getProviderScopedCredentials(provider);
+		const preferredType = isAlias ? undefined : this.#preferredInteractiveCredentialType(credentialProvider);
+		if (
+			preferredType === "api_key" &&
+			stored.some(credential => credential.type === "api_key" && credential.source === "login")
+		) {
+			return { kind: "api_key" };
+		}
 		if (stored.some(credential => credential.type === "oauth")) return { kind: "oauth" };
 		if (stored.some(credential => credential.type === "api_key" && credential.source === "login")) {
 			return { kind: "api_key" };
 		}
-		if (this.#hasDedicatedEnvAuth(provider)) return { kind: "env", envVar: getEnvApiKeyName(provider) };
+		if (!isAlias && this.#hasDedicatedEnvAuth(provider)) {
+			return { kind: "env", envVar: getEnvApiKeyName(provider) };
+		}
 		if (stored.some(credential => credential.type === "api_key")) return { kind: "api_key" };
-		if (this.#fallbackResolver?.(provider)) return { kind: "fallback" };
+		if (!isAlias && this.#fallbackResolver?.(provider)) return { kind: "fallback" };
 		return undefined;
 	}
 
@@ -2874,46 +2918,54 @@ export class AuthStorage {
 	 * Check if OAuth credentials are configured for a provider.
 	 */
 	hasOAuth(provider: string): boolean {
-		return this.#getCredentialsForProvider(provider).some(credential => credential.type === "oauth");
+		return this.#getProviderScopedCredentials(provider).some(credential => credential.type === "oauth");
 	}
 
 	/**
 	 * Get OAuth credentials for a provider.
 	 */
 	getOAuthCredential(provider: string): OAuthCredential | undefined {
-		return this.#getCredentialsForProvider(provider).find(
+		return this.#getProviderScopedCredentials(provider).find(
 			(credential): credential is OAuthCredential => credential.type === "oauth",
 		);
 	}
 
 	#resolveActiveOAuthCredential(provider: string, sessionId?: string): OAuthCredential | undefined {
-		const allCredentials = this.#getCredentialsForProvider(provider);
-		const oauthCredentials = allCredentials.filter((c): c is OAuthCredential => c.type === "oauth");
-		if (oauthCredentials.length === 0) return undefined;
+		const credentialProvider = resolveProviderCredentialId(provider);
+		const isAlias = credentialProvider !== provider;
+		const allStored = this.#getStoredCredentials(credentialProvider);
+		const scopedIds = new Set(this.#getProviderScopedStoredCredentials(provider).map(entry => entry.id));
+		const oauthEntries = allStored.filter(
+			(entry): entry is StoredCredential & { credential: OAuthCredential } =>
+				scopedIds.has(entry.id) && entry.credential.type === "oauth",
+		);
+		if (oauthEntries.length === 0) return undefined;
 
 		// Runtime / config overrides bypass OAuth account_uuid attribution — the
 		// caller is authenticating with an explicit key, not the broker's OAuth.
-		if (this.#runtimeOverrides.has(provider) || this.#configOverrides.has(provider)) return undefined;
+		if (!isAlias && (this.#runtimeOverrides.has(provider) || this.#configOverrides.has(provider))) return undefined;
 
 		// Prefer the session-sticky credential when available.
-		const sessionPref = this.#getSessionCredential(provider, sessionId);
+		const sessionPref = this.#getSessionCredential(credentialProvider, sessionId);
 		// If the session has been routed to a stored API key, do not inject OAuth account_uuid.
 		if (sessionPref !== undefined && sessionPref.type !== "oauth") return undefined;
 
 		// When no session-sticky credential is recorded yet (first call before any getApiKey,
 		// or all stored credentials are unavailable), the request falls through to the env-key
 		// or fallback-resolver path in getApiKey() — neither is OAuth-authenticated, so
-		// account_uuid injection would misattribute traffic. Only apply this guard when
-		// sessionPref is absent; a recorded OAuth sticky (sessionPref.type === "oauth") must
-		// NOT be blocked even if an env key also happens to exist.
-		if (!sessionPref && (getEnvApiKey(provider) || this.#fallbackResolver?.(provider))) return undefined;
-		// Resolve the sticky index against the full credential list — the index is
-		// recorded against the unfiltered provider array (by #recordSessionCredential /
-		// #tryOAuthCredential), not the OAuth-only subset, so dereferencing it into the
-		// filtered array would be off-by-N when any non-OAuth credential precedes the
-		// OAuth ones (e.g. [api_key, oauth_A, oauth_B] stored order).
-		const stickyCredential = sessionPref?.type === "oauth" ? allCredentials[sessionPref.index] : undefined;
-		return stickyCredential?.type === "oauth" ? stickyCredential : oauthCredentials[0];
+		// account_uuid injection would misattribute traffic.
+		if (
+			!isAlias &&
+			!sessionPref &&
+			(getEnvApiKey(credentialProvider) || this.#fallbackResolver?.(credentialProvider))
+		) {
+			return undefined;
+		}
+		const stickyEntry = sessionPref?.type === "oauth" ? allStored[sessionPref.index] : undefined;
+		if (stickyEntry?.credential.type === "oauth" && scopedIds.has(stickyEntry.id)) {
+			return stickyEntry.credential;
+		}
+		return oauthEntries[0]?.credential;
 	}
 
 	/**
@@ -6942,35 +6994,39 @@ export class AuthStorage {
 	 * Mirrors {@link AuthStorage.getApiKey} precedence, highest first:
 	 *   1. Runtime override (`--api-key`).
 	 *   2. Config override (`models.yml` `providers.<name>.apiKey`).
-	 *   3. Stored OAuth credential.
-	 *   4. API key persisted by a successful `/login`.
-	 *   5. Env var — overrides a stored static api_key (e.g. a stale broker copy).
-	 *   6. Stored api_key credential.
-	 *   7. Fallback resolver.
+	 *   3. Most recently persisted interactive OAuth or API-key login.
+	 *   4. Env var — overrides a stored static api_key (e.g. a stale broker copy).
+	 *   5. Stored api_key credential.
+	 *   6. Fallback resolver.
 	 *
 	 * The string is purely informational; consumers must not parse it.
 	 */
 	describeCredentialSource(provider: string, sessionId?: string): string | undefined {
-		if (this.#runtimeOverrides.has(provider)) {
+		const credentialProvider = resolveProviderCredentialId(provider);
+		const isAlias = credentialProvider !== provider;
+		if (!isAlias && this.#runtimeOverrides.has(provider)) {
 			return "runtime override (--api-key)";
 		}
-		if (this.#configOverrides.has(provider)) {
+		if (!isAlias && this.#configOverrides.has(provider)) {
 			return "config override (models.yml)";
 		}
 
 		const baseLabel = this.#sourceLabel ?? "local store";
-		const stored = this.#getStoredCredentials(provider);
-		const session = sessionId ? this.#sessionLastCredential.get(provider)?.get(sessionId) : undefined;
+		const scopedIds = new Set(this.#getProviderScopedStoredCredentials(provider).map(entry => entry.id));
+		const stored = this.#getStoredCredentials(credentialProvider)
+			.map((entry, index) => ({ entry, index }))
+			.filter(({ entry }) => scopedIds.has(entry.id));
+		const session = sessionId ? this.#sessionLastCredential.get(credentialProvider)?.get(sessionId) : undefined;
 		const describeStored = (
 			type: AuthCredential["type"],
 			filter?: (credential: AuthCredential) => boolean,
 		): string | undefined => {
-			const typed = stored
-				.map((entry, index) => ({ entry, index }))
-				.filter(({ entry }) => entry.credential.type === type && (filter?.(entry.credential) ?? true));
+			const typed = stored.filter(
+				({ entry }) => entry.credential.type === type && (filter?.(entry.credential) ?? true),
+			);
 			if (typed.length === 0) return undefined;
 			const sticky = session?.type === type ? typed.find(entry => entry.index === session.index) : undefined;
-			const chosen = sticky?.entry ?? typed[0].entry;
+			const chosen = sticky?.entry ?? typed[0]!.entry;
 			const credential = chosen.credential;
 			const identity =
 				credential.type === "oauth"
@@ -6979,21 +7035,26 @@ export class AuthStorage {
 			return `${baseLabel} · ${type} #${chosen.id} (${identity})`;
 		};
 
-		// Deliberate login credentials win; then an explicit env var; then a stored static api_key.
+		const preferredType = isAlias ? undefined : this.#preferredInteractiveCredentialType(credentialProvider);
+		const loginApiKeySource = (): string | undefined =>
+			describeStored("api_key", credential => credential.type === "api_key" && credential.source === "login");
+		if (preferredType === "api_key") {
+			const preferredApiKeySource = loginApiKeySource();
+			if (preferredApiKeySource) return preferredApiKeySource;
+		}
 		const oauthSource = describeStored("oauth");
 		if (oauthSource) return oauthSource;
-		const loginApiKeySource = describeStored(
-			"api_key",
-			credential => credential.type === "api_key" && credential.source === "login",
-		);
-		if (loginApiKeySource) return loginApiKeySource;
-		if (getEnvApiKey(provider)) return `env (over ${baseLabel})`;
+		if (preferredType !== "api_key") {
+			const fallbackLoginApiKeySource = loginApiKeySource();
+			if (fallbackLoginApiKeySource) return fallbackLoginApiKeySource;
+		}
+		if (!isAlias && getEnvApiKey(provider)) return `env (over ${baseLabel})`;
 		const apiKeySource = describeStored(
 			"api_key",
 			credential => credential.type !== "api_key" || credential.source !== "login",
 		);
 		if (apiKeySource) return apiKeySource;
-		if (this.#fallbackResolver?.(provider) !== undefined) return "fallback resolver";
+		if (!isAlias && this.#fallbackResolver?.(provider) !== undefined) return "fallback resolver";
 		return undefined;
 	}
 }

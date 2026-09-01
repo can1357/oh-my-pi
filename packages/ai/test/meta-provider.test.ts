@@ -149,6 +149,9 @@ describe("Meta Model API login", () => {
 			await storage.reload();
 			now = Date.parse("2030-01-01T00:00:00.000Z");
 			await login("meta", "LLM|payg-key");
+			expect(storage.hasAuth("muse-code")).toBe(false);
+			expect(storage.getCredentialOrigin("muse-code")).toBeUndefined();
+			expect(storage.describeCredentialSource("muse-code")).toBeUndefined();
 			now = Date.parse("2030-01-01T00:00:01.000Z");
 			await login("muse-code", "");
 			expect(
@@ -168,8 +171,12 @@ describe("Meta Model API login", () => {
 			await storage.reload();
 			expect(await storage.getApiKey("meta", "after-restart")).toBe("LLM|subscription-key");
 			await storage.logout("muse-code");
-			expect(storage.has("meta")).toBe(false);
+			expect(storage.has("meta")).toBe(true);
 			expect(storage.has("muse-code")).toBe(false);
+			expect(await storage.getApiKey("meta", "payg-after-muse-logout")).toBe("LLM|payg-key");
+			expect(storage.listStoredCredentials("meta").map(row => row.credential.type)).toEqual(["api_key"]);
+			await storage.logout("meta");
+			expect(storage.has("meta")).toBe(false);
 
 			now = Date.parse("2030-01-01T00:00:02.000Z");
 			await login("muse-code", "");
@@ -182,6 +189,19 @@ describe("Meta Model API login", () => {
 					.sort(),
 			).toEqual(["api_key", "oauth"]);
 			expect(await storage.getApiKey("meta", "payg-latest")).toBe("LLM|new-payg-key");
+			expect(storage.getCredentialOrigin("meta")).toEqual({ kind: "api_key" });
+			expect(storage.describeCredentialSource("meta")).toContain("api_key");
+			expect(storage.getCredentialOrigin("muse-code")).toEqual({ kind: "oauth" });
+			expect(storage.describeCredentialSource("muse-code")).toContain("oauth");
+			expect(storage.getOAuthAccountIdentity("muse-code")?.accountId).toBe("meta-account");
+			const museRows = storage.listStoredCredentials("muse-code");
+			expect(museRows.map(row => row.credential.type)).toEqual(["oauth"]);
+			const paygRow = storage.listStoredCredentials("meta").find(row => row.credential.type === "api_key");
+			expect(await storage.removeCredential("muse-code", paygRow!.id)).toBe(false);
+			expect(await storage.removeCredential("muse-code", museRows[0]!.id)).toBe(true);
+			expect(storage.hasAuth("muse-code")).toBe(false);
+			expect(storage.hasAuth("meta")).toBe(true);
+			expect(await storage.getApiKey("meta", "payg-after-row-logout")).toBe("LLM|new-payg-key");
 		} finally {
 			nowSpy.mockRestore();
 			storage.close();

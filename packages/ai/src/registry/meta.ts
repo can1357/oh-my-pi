@@ -32,4 +32,5 @@ export const museCodeProvider = {
 	name: "Muse Code subscription (Meta account)",
 	login: (cb: OAuthLoginCallbacks) => loginMetaMuse(cb),
 	storeCredentialsAs: "meta",
+	matchesStoredCredential: credentials => Boolean(credentials.apiKey),
 } as const satisfies ProviderDefinition;
