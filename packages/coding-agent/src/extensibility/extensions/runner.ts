@@ -1226,51 +1226,47 @@ export class ExtensionRunner {
 	 * `ctx.agentIdentity` read. `AgentRegistry` refs are mutable mid-session
 	 * (SDK callers may unregister/re-register), so the chain must not be
 	 * re-resolved from the registry on every access; freezing at first read
-	 * yields one stable, frozen identity object per session. Observational
-	 * only: this resolves registry links that predate this feature; it does
-	 * not create, re-key, or validate them (registry registration ownership
-	 * remains the caller's pre-existing contract).
+	 * yields one stable, frozen identity object per session. Absent input
+	 * stays absent: a runner constructed without identity input (provider-only
+	 * hosts, legacy embedders) reports `undefined` rather than fabricating a
+	 * top-level identity. Observational only: this resolves registry links
+	 * that predate this feature; it does not create, re-key, or validate them
+	 * (registry registration ownership remains the caller's pre-existing
+	 * contract).
 	 */
 	#identitySnapshot: AgentIdentity | undefined;
+	#identityResolved = false;
 
-	#getAgentIdentity(): AgentIdentity {
-		if (!this.#identitySnapshot) {
-			this.#identitySnapshot = this.#buildAgentIdentity(this.#agentIdentityInput);
+	#getAgentIdentity(): AgentIdentity | undefined {
+		if (!this.#identityResolved) {
+			this.#identitySnapshot = this.#agentIdentityInput
+				? this.#buildAgentIdentity(this.#agentIdentityInput)
+				: undefined;
+			this.#identityResolved = true;
 		}
 		return this.#identitySnapshot;
 	}
 
-	#buildAgentIdentity(input?: ExtensionRunnerIdentityInput): AgentIdentity {
-		let identity: AgentIdentity;
-		if (!input) {
-			identity = {
-				kind: "main",
-				depth: 0,
-				agentId: MAIN_AGENT_ID,
-				displayName: "main",
-				parentChain: [],
-			};
-		} else {
-			// Seed the seen-set with this agent's own id so a registry cycle
-			// looping back through the current agent (A → B → A) ends the walk
-			// before the self id enters the reported ancestor chain.
-			const seen = new Set<string>([input.agentId]);
-			const parentChain: string[] = [];
-			let cursor = input.parentId;
-			while (cursor !== undefined && cursor !== MAIN_AGENT_ID && !seen.has(cursor)) {
-				parentChain.push(cursor);
-				seen.add(cursor);
-				cursor = input.registry.get(cursor)?.parentId;
-			}
-			identity = {
-				kind: input.kind,
-				depth: input.depth,
-				agentId: input.agentId,
-				displayName: input.displayName,
-				...(input.parentId !== undefined ? { parentId: input.parentId } : {}),
-				parentChain,
-			};
+	#buildAgentIdentity(input: ExtensionRunnerIdentityInput): AgentIdentity {
+		// Seed the seen-set with this agent's own id so a registry cycle
+		// looping back through the current agent (A → B → A) ends the walk
+		// before the self id enters the reported ancestor chain.
+		const seen = new Set<string>([input.agentId]);
+		const parentChain: string[] = [];
+		let cursor = input.parentId;
+		while (cursor !== undefined && cursor !== MAIN_AGENT_ID && !seen.has(cursor)) {
+			parentChain.push(cursor);
+			seen.add(cursor);
+			cursor = input.registry.get(cursor)?.parentId;
 		}
+		const identity: AgentIdentity = {
+			kind: input.kind,
+			depth: input.depth,
+			agentId: input.agentId,
+			displayName: input.displayName,
+			...(input.parentId !== undefined ? { parentId: input.parentId } : {}),
+			parentChain,
+		};
 		// Frozen deeply: the memoized object is handed to every handler for the
 		// session, so a mutating extension cannot corrupt the documented identity
 		// (e.g. reversing `parentChain`) for unrelated extensions.

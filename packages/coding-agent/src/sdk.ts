@@ -3733,6 +3733,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			obfuscator,
 			agentId: resolvedAgentId,
 			agentKind,
+			agentDisplayName: resolvedAgentDisplayName,
 			taskDepth,
 			providerSessionId: options.providerSessionId,
 			providerPromptCacheKeySource,

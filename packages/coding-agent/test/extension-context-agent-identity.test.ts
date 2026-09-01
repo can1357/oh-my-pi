@@ -29,16 +29,10 @@ function makeRunner(identity?: ExtensionRunnerIdentityInput): ExtensionRunner {
 }
 
 describe("ExtensionContext agentIdentity", () => {
-	it("falls back to the top-level main identity when constructed without one", () => {
+	it("reports undefined identity when constructed without one (no fabricated Main)", () => {
 		const runner = makeRunner();
 
-		expect(runner.createContext().agentIdentity).toEqual({
-			kind: "main",
-			depth: 0,
-			agentId: MAIN_AGENT_ID,
-			displayName: "main",
-			parentChain: [],
-		});
+		expect(runner.createContext().agentIdentity).toBeUndefined();
 	});
 
 	it("resolves deeper ancestors from the registry at first access and never re-queries after", () => {
@@ -47,14 +41,14 @@ describe("ExtensionContext agentIdentity", () => {
 		// own ancestor would come from a registry lookup (none registered yet).
 		const runner = makeRunner({ kind: "sub", depth: 2, agentId: "C2", displayName: "c2", parentId: "P1", registry });
 
-		expect(runner.createContext().agentIdentity.parentChain).toEqual(["P1"]);
+		expect(runner.createContext().agentIdentity?.parentChain).toEqual(["P1"]);
 
 		// Registering P1's own parent afterwards does not retro-link the
 		// memoized identity — the chain is resolved once (structural for a live
 		// agent), not re-queried on every access.
 		registry.register({ id: "P1", displayName: "planner", kind: "sub", parentId: "GP", session: null });
 		registry.register({ id: "GP", displayName: "grand", kind: "sub", parentId: MAIN_AGENT_ID, session: null });
-		expect(runner.createContext().agentIdentity.parentChain).toEqual(["P1"]);
+		expect(runner.createContext().agentIdentity?.parentChain).toEqual(["P1"]);
 	});
 
 	it("reports a subagent's direct parentId but excludes Main from the parent chain", () => {
@@ -93,7 +87,7 @@ describe("ExtensionContext agentIdentity", () => {
 		});
 
 		const before = runner.createContext().agentIdentity;
-		expect(before.parentChain).toEqual(["P1", "GP"]);
+		expect(before?.parentChain).toEqual(["P1", "GP"]);
 
 		// Unregistering an ancestor truncates nothing in the already-snapshotted
 		// chain; re-registering the same id with different ancestry splices in
@@ -104,8 +98,8 @@ describe("ExtensionContext agentIdentity", () => {
 		registry.register({ id: "P1", displayName: "imposter", kind: "sub", parentId: "EVIL", session: null });
 		registry.register({ id: "EVIL", displayName: "evil", kind: "sub", parentId: "P1", session: null });
 		const after = runner.createContext().agentIdentity;
-		expect(after.parentChain).toEqual(["P1", "GP"]);
-		expect(before.parentChain).toEqual(["P1", "GP"]);
+		expect(after?.parentChain).toEqual(["P1", "GP"]);
+		expect(before?.parentChain).toEqual(["P1", "GP"]);
 	});
 
 	it("resolves the ancestor chain nearest-first through registry parent links, excluding Main", () => {
@@ -121,9 +115,9 @@ describe("ExtensionContext agentIdentity", () => {
 			registry,
 		}).createContext().agentIdentity;
 
-		expect(identity.parentId).toBe("P1");
-		expect(identity.depth).toBe(2);
-		expect(identity.parentChain).toEqual(["P1"]);
+		expect(identity?.parentId).toBe("P1");
+		expect(identity?.depth).toBe(2);
+		expect(identity?.parentChain).toEqual(["P1"]);
 	});
 
 	it("terminates on cyclic parent links and never includes the agent's own id", () => {
@@ -142,7 +136,7 @@ describe("ExtensionContext agentIdentity", () => {
 		// The cycle A -> B -> A is cut by seeding the walk with A's own id: the
 		// chain is the true ancestors reached before the loop closes ("B"), not
 		// `["B", "A"]` with A reappearing in its own ancestry.
-		expect(identity.parentChain).toEqual(["B"]);
+		expect(identity?.parentChain).toEqual(["B"]);
 	});
 	it("hands handlers an immutable identity so one extension cannot corrupt it for others", () => {
 		const registry = new AgentRegistry();
@@ -157,18 +151,19 @@ describe("ExtensionContext agentIdentity", () => {
 			registry,
 		});
 		const identity = runner.createContext().agentIdentity;
-		expect(identity.parentChain).toEqual(["P2", "P1"]);
-
-		expect(Object.isFrozen(identity)).toBe(true);
-		expect(Object.isFrozen(identity.parentChain)).toBe(true);
+		expect(identity?.parentChain).toEqual(["P2", "P1"]);
 		// A mutation attempt must not corrupt the identity other handlers read
 		// (frozen surfaces may not throw in every runtime, but must never change).
-		try {
-			(identity.parentChain as unknown as string[]).reverse();
-		} catch {
-			// Frozen-array mutation may throw depending on runtime — both outcomes fine.
+		if (identity) {
+			expect(Object.isFrozen(identity)).toBe(true);
+			expect(Object.isFrozen(identity.parentChain)).toBe(true);
+			try {
+				(identity.parentChain as unknown as string[]).reverse();
+			} catch {
+				// Frozen-array mutation may throw depending on runtime — both outcomes fine.
+			}
 		}
-		expect(runner.createContext().agentIdentity.parentChain).toEqual(["P2", "P1"]);
+		expect(runner.createContext().agentIdentity?.parentChain).toEqual(["P2", "P1"]);
 	});
 
 	it("classifies a parentAgentId-only SDK caller by the pre-existing gate inputs (additive)", async () => {
@@ -259,6 +254,54 @@ describe("ExtensionContext agentIdentity", () => {
 					parentChain: [],
 				});
 				expect(registry.get("Tan-1")?.kind).toBe("sub");
+			} finally {
+				await session.dispose();
+			}
+		} finally {
+			authStorage.close();
+			await fsp.rm(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("reports a task-subagent identity for an ordinary taskDepth spawn through the public SDK path", async () => {
+		const tempDir = await fsp.mkdtemp(path.join(os.tmpdir(), "pi-identity-sdk-depth-"));
+		const registry = new AgentRegistry();
+		registry.register({ id: MAIN_AGENT_ID, displayName: "Main", kind: "main", session: null });
+		const authStorage = await AuthStorage.create(":memory:");
+		try {
+			// The ordinary executor subagent shape: taskDepth > 0 supplied
+			// without parentTaskPrefix, so only the taskDepth gate marks it.
+			const { session } = await createAgentSession({
+				cwd: path.join(tempDir, "project"),
+				agentDir: path.join(tempDir, "agent"),
+				authStorage,
+				modelRegistry: new ModelRegistry(authStorage),
+				settings: Settings.isolated(),
+				disableExtensionDiscovery: true,
+				skills: [],
+				contextFiles: [],
+				promptTemplates: [],
+				slashCommands: [],
+				toolNames: [],
+				enableMCP: false,
+				enableLsp: false,
+				agentRegistry: registry,
+				agentId: "S1",
+				agentDisplayName: "researcher",
+				parentAgentId: MAIN_AGENT_ID,
+				taskDepth: 1,
+			});
+			try {
+				const identity = session.extensionRunner?.createContext().agentIdentity;
+				expect(identity).toEqual({
+					kind: "sub",
+					depth: 1,
+					agentId: "S1",
+					displayName: "researcher",
+					parentId: MAIN_AGENT_ID,
+					parentChain: [],
+				});
+				expect(registry.get("S1")?.kind).toBe("sub");
 			} finally {
 				await session.dispose();
 			}

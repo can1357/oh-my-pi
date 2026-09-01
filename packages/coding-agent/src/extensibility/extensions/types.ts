@@ -541,9 +541,11 @@ export interface ExtensionContext {
 	models: ExtensionModelQuery;
 	/**
 	 * Identity of the agent this context serves: top-level or subagent,
-	 * depth, registry id, display name, and parent chain. Read lazily.
+	 * depth, registry id, display name, and parent chain. Read lazily;
+	 * `undefined` when the host does not report identity (e.g. provider-only
+	 * runner hosts) — handlers must fail open rather than assume `"main"`.
 	 */
-	readonly agentIdentity: AgentIdentity;
+	readonly agentIdentity?: AgentIdentity;
 	/** Whether the agent is idle (not streaming) */
 	isIdle(): boolean;
 	/** Abort the current agent operation */

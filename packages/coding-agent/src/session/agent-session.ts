@@ -624,6 +624,8 @@ export class AgentSession {
 	// Agent identity (registry id) used for IRC routing and job ownership.
 	#agentId: string | undefined;
 	#agentKind: "main" | "sub" = "main";
+	// Registry display name; backs the extension identity fallback.
+	#agentDisplayName: string | undefined;
 	// Task recursion depth (0 = top-level); mirrors the runner identity input.
 	#taskDepth = 0;
 	#scoutAllowedBySpawnPolicy = true;
@@ -1477,6 +1479,7 @@ export class AgentSession {
 		this.#taskDepth = config.taskDepth ?? 0;
 		this.#agentId = config.agentId;
 		this.#agentKind = config.agentKind ?? "main";
+		this.#agentDisplayName = config.agentDisplayName;
 		this.#scoutAllowedBySpawnPolicy = config.scoutAllowedBySpawnPolicy ?? true;
 		this.#providerSessionId = config.providerSessionId;
 		this.#inheritedProviderPromptCacheKey =
@@ -6311,7 +6314,7 @@ export class AgentSession {
 			kind,
 			depth: this.#taskDepth,
 			agentId: this.#agentId ?? MAIN_AGENT_ID,
-			displayName: kind === "sub" ? "sub" : "main",
+			displayName: this.#agentDisplayName ?? (kind === "sub" ? "sub" : "main"),
 			parentChain: Object.freeze([]),
 		});
 		return identity;
