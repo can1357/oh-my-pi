@@ -1409,7 +1409,7 @@ export class TurnRecovery {
 		validateRetryFallbackChains(this.#host.settings, this.#host.modelRegistry, message => definitive.add(message));
 		this.#pendingDiscoveryDeferredValidation = false;
 		let changed = false;
-		for (const message of [...this.#fallbackChainWarnings]) {
+		for (const message of Array.from(this.#fallbackChainWarnings)) {
 			if (definitive.has(message)) continue;
 			const index = this.#host.configWarnings.indexOf(message);
 			if (index !== -1) {

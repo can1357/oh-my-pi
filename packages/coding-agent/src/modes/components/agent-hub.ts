@@ -436,8 +436,7 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 		if (typeof this.#ui.showOverlay !== "function") return;
 		this.#closeTranscriptOverlay();
 		this.#notice = undefined;
-		let viewer: AgentTranscriptViewer;
-		viewer = new AgentTranscriptViewer({
+		const viewer = new AgentTranscriptViewer({
 			agentId: id,
 			initialEntryId: entryId,
 			registry: this.#registry,
@@ -885,7 +884,7 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 
 		// Grow a window around the selection. Only visible entries are rendered,
 		// so the 5,000-agent Hub retains bounded paint cost.
-		for (let grew = true; grew; ) {
+		for (let grew = true; grew;) {
 			grew = false;
 			if (end < this.#rows.length) {
 				const next = entryAt(end);

@@ -5286,7 +5286,6 @@ describe("openai-codex streaming", () => {
 
 		const sentTypesByConnection: string[][] = [];
 		let constructorCount = 0;
-		let abortSecondRequest: (() => void) | undefined;
 
 		class AbortResetWebSocket extends MockWebSocket {
 			#connectionIndex: number;
@@ -5374,7 +5373,7 @@ describe("openai-codex streaming", () => {
 		expect(firstResult.role).toBe("assistant");
 
 		const secondAbortController = new AbortController();
-		abortSecondRequest = () => {
+		const abortSecondRequest = () => {
 			secondAbortController.abort();
 		};
 		const secondResult = await streamOpenAICodexResponses(model, secondContext, {

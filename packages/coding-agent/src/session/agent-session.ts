@@ -173,9 +173,7 @@ import checkpointActiveNoticeTemplate from "../prompts/system/checkpoint-active-
 import interruptedThinkingTemplate from "../prompts/system/interrupted-thinking.md" with { type: "text" };
 import planModeActivePrompt from "../prompts/system/plan-mode-active.md" with { type: "text" };
 import planModeReferencePrompt from "../prompts/system/plan-mode-reference.md" with { type: "text" };
-import planModeToolDecisionReminderPrompt from "../prompts/system/plan-mode-tool-decision-reminder.md" with {
-	type: "text",
-};
+import planModeToolDecisionReminderPrompt from "../prompts/system/plan-mode-tool-decision-reminder.md" with { type: "text" };
 import rewindReportTemplate from "../prompts/system/rewind-report.md" with { type: "text" };
 import sideChannelNoToolsReminder from "../prompts/system/side-channel-no-tools.md" with { type: "text" };
 import vibeModeActivePrompt from "../prompts/system/vibe-mode-active.md" with { type: "text" };
@@ -2322,7 +2320,7 @@ export class AgentSession {
 	 * provider-backed compaction and must not block switching sessions.
 	 */
 	async settleInFlightMessagePersistence(): Promise<void> {
-		await Promise.allSettled([...this.#pendingMessageEndPersistence.values()]);
+		await Promise.allSettled(this.#pendingMessageEndPersistence.values());
 	}
 
 	/**
@@ -2333,7 +2331,7 @@ export class AgentSession {
 	 */
 	async #drainInFlightEventHandlers(): Promise<void> {
 		while (this.#inFlightEventHandlers.size > 0) {
-			await Promise.allSettled([...this.#inFlightEventHandlers]);
+			await Promise.allSettled(this.#inFlightEventHandlers);
 		}
 	}
 
@@ -4152,7 +4150,7 @@ export class AgentSession {
 	}
 
 	#notifySessionChangeCallbacks(): void {
-		for (const callback of [...this.#sessionChangeCallbacks]) {
+		for (const callback of Array.from(this.#sessionChangeCallbacks)) {
 			try {
 				callback();
 			} catch (error) {
@@ -4966,17 +4964,9 @@ export class AgentSession {
 		return this.#tools.resolveActiveEditMode();
 	}
 
-	#syncAfterModelChange(previousEditMode: EditMode): Promise<void> {
-		return this.#tools.syncAfterModelChange(previousEditMode);
-	}
-
 	/** Enabled MCP tools in their current presentation partition. */
 	getSelectedMCPToolNames(): string[] {
 		return this.#tools.getSelectedMCPToolNames();
-	}
-
-	#applyActiveToolsByName(toolNames: string[]): Promise<void> {
-		return this.#tools.applyActiveToolsByName(toolNames);
 	}
 
 	/** Rediscovers reloadable skills and refreshes prompt metadata. */

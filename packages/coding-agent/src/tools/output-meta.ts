@@ -803,8 +803,8 @@ async function spillLargeResultToArtifact(
 		};
 	}
 
-	const newMeta: OutputMeta = { ...(existingMeta ?? {}), truncation: truncationMeta };
-	const newDetails = { ...(result.details ?? {}), meta: newMeta };
+	const newMeta: OutputMeta = { ...existingMeta, truncation: truncationMeta };
+	const newDetails = { ...result.details, meta: newMeta };
 
 	// Prune the raw payload only MCP results duplicate into `details.rawContent`.
 	// Identify them by the required `serverName` + `mcpToolName` markers (the same

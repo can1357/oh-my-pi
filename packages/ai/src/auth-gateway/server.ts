@@ -146,7 +146,7 @@ function buildStreamOptions(parsed: ParsedFormatRequest, api: Api, signal: Abort
 	if (options.frequencyPenalty !== undefined && !isCodex) opts.frequencyPenalty = options.frequencyPenalty;
 	if (options.repetitionPenalty !== undefined && !isCodex) opts.repetitionPenalty = options.repetitionPenalty;
 	if (options.metadata !== undefined) opts.metadata = options.metadata;
-	if (options.headers !== undefined) opts.headers = { ...(opts.headers ?? {}), ...options.headers };
+	if (options.headers !== undefined) opts.headers = { ...opts.headers, ...options.headers };
 	if (options.toolChoice !== undefined) {
 		opts.toolChoice =
 			typeof options.toolChoice !== "object"
@@ -169,7 +169,7 @@ function buildStreamOptions(parsed: ParsedFormatRequest, api: Api, signal: Abort
 	opts.promptCacheKey = promptCacheKey;
 	opts.sessionId = promptCacheKey;
 	if (options.thinkingBudgets) {
-		opts.thinkingBudgets = { ...(opts.thinkingBudgets ?? {}), ...options.thinkingBudgets };
+		opts.thinkingBudgets = { ...opts.thinkingBudgets, ...options.thinkingBudgets };
 	}
 	if (options.explicitThinkingBudgetTokens !== undefined) {
 		// Mirror Rust's `resolve_thinking_budget`: explicit budget pins onto
@@ -178,7 +178,7 @@ function buildStreamOptions(parsed: ParsedFormatRequest, api: Api, signal: Abort
 		// surface the budget.
 		const effort = options.reasoning ?? Effort.High;
 		opts.thinkingBudgets = {
-			...(opts.thinkingBudgets ?? {}),
+			...opts.thinkingBudgets,
 			[effort]: options.explicitThinkingBudgetTokens,
 		};
 		opts.reasoning ??= effort;
@@ -427,7 +427,7 @@ async function handleFormatEndpoint(
 	// anything they didn't touch.
 	{
 		const captured = captureRequestHeaders(req.headers);
-		parsed.options.headers = { ...captured, ...(parsed.options.headers ?? {}) };
+		parsed.options.headers = { ...captured, ...parsed.options.headers };
 	}
 	if (controller.signal.aborted) return clientClosedResponse(route);
 
@@ -682,7 +682,7 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 	// Merge gateway-captured passthrough headers under the client's own
 	// headers — the client's values win when they collide.
 	const captured = captureRequestHeaders(req.headers);
-	streamOpts.headers = { ...captured, ...(streamOpts.headers ?? {}) };
+	streamOpts.headers = { ...captured, ...streamOpts.headers };
 	streamOpts.sessionId ??= sessionId;
 
 	logger.info("auth-gateway request", {

@@ -189,7 +189,7 @@ export async function disposeAllVmContexts(): Promise<void> {
 	const pending = [...startingSessions.values()].map(starting => starting.promise);
 	startingSessions.clear();
 	const started = await Promise.allSettled(pending);
-	const all = [...sessions.values()];
+	const all = Array.from(sessions.values());
 	for (const result of started) {
 		if (result.status !== "fulfilled") continue;
 		if (!all.includes(result.value)) all.push(result.value);
@@ -204,7 +204,7 @@ export async function disposeAllVmContexts(): Promise<void> {
  */
 export async function disposeVmContextsByOwner(ownerId: string): Promise<void> {
 	const toKill: JsSession[] = [];
-	for (const session of [...sessions.values()]) {
+	for (const session of Array.from(sessions.values())) {
 		if (!session.ownerIds.has(ownerId)) continue;
 		if (session.ownerIds.size === 1) {
 			toKill.push(session);
@@ -213,7 +213,7 @@ export async function disposeVmContextsByOwner(ownerId: string): Promise<void> {
 		session.ownerIds.delete(ownerId);
 	}
 	const startingToKill: StartingJsSession[] = [];
-	for (const [sessionKey, starting] of [...startingSessions.entries()]) {
+	for (const [sessionKey, starting] of Array.from(startingSessions.entries())) {
 		if (sessions.has(sessionKey) || !starting.ownerIds.has(ownerId)) continue;
 		if (starting.ownerIds.size === 1) {
 			startingSessions.delete(sessionKey);
@@ -354,6 +354,7 @@ async function acquireSession(
 		attachSessionOwner(starting, snapshot.sessionId, ownerId);
 		return await starting.promise;
 	}
+	// oxlint-disable-next-line prefer-const -- captured by the startup closure before assignment
 	let startingSession!: StartingJsSession;
 
 	const startup = (async (): Promise<JsSession> => {
@@ -718,7 +719,6 @@ function spawnJsProcess(): WorkerHandle {
 		async close() {
 			const { promise, resolve } = Promise.withResolvers<boolean>();
 			let settled = false;
-			let timeout: NodeJS.Timeout | undefined;
 			let unsubscribe = (): void => {};
 			const finish = (value: boolean): void => {
 				if (settled) return;
@@ -731,7 +731,7 @@ function spawnJsProcess(): WorkerHandle {
 				if (message.type !== "closed") return;
 				void base.terminate().finally(() => finish(true));
 			});
-			timeout = setTimeout(() => finish(false), workerCloseTimeoutMs);
+			const timeout = setTimeout(() => finish(false), workerCloseTimeoutMs);
 			base.send({ type: "close" });
 			return await promise;
 		},
@@ -769,7 +769,6 @@ function wrapBunWorker(worker: Worker): WorkerHandle {
 			let settled = false;
 			let sawClosedAck = false;
 			let sawWorkerExit = false;
-			let timeout: NodeJS.Timeout | undefined;
 			let unsubscribe = (): void => {};
 			const finish = (value: boolean): void => {
 				if (settled) return;
@@ -792,7 +791,7 @@ function wrapBunWorker(worker: Worker): WorkerHandle {
 				finishIfClosed();
 			});
 			worker.addEventListener("close", onClose);
-			timeout = setTimeout(() => finish(false), workerCloseTimeoutMs);
+			const timeout = setTimeout(() => finish(false), workerCloseTimeoutMs);
 			worker.postMessage({ type: "close" } satisfies WorkerInbound);
 			return await closed;
 		},
@@ -845,7 +844,6 @@ function spawnInlineWorker(): WorkerHandle {
 		async close() {
 			const { promise: closed, resolve } = Promise.withResolvers<boolean>();
 			let settled = false;
-			let timeout: NodeJS.Timeout | undefined;
 			let unsubscribe = (): void => {};
 			const finish = (value: boolean): void => {
 				if (settled) return;
@@ -860,7 +858,7 @@ function spawnInlineWorker(): WorkerHandle {
 				if (msg.type === "closed") finish(true);
 			});
 			this.send({ type: "close" });
-			timeout = setTimeout(() => finish(false), workerCloseTimeoutMs);
+			const timeout = setTimeout(() => finish(false), workerCloseTimeoutMs);
 			return await closed;
 		},
 		async terminate() {

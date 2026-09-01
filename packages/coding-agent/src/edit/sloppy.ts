@@ -557,7 +557,7 @@ function recoverBracketPairs(lines: string[], content: string): string[] | undef
 
 function hasInlineSelection(pattern: string): boolean {
 	let selected = false;
-	for (let index = 0; index < pattern.length; ) {
+	for (let index = 0; index < pattern.length;) {
 		if (pattern.startsWith(SELECT_OPEN, index)) {
 			selected = true;
 			index += SELECT_OPEN.length;
@@ -640,7 +640,7 @@ function parseInlinePattern(
 	let sawBare = false;
 	let sawInline = false;
 
-	for (let index = 0; index < pattern.length; ) {
+	for (let index = 0; index < pattern.length;) {
 		const codePoint = pattern.codePointAt(index);
 		if (codePoint === undefined) break;
 		const character = String.fromCodePoint(codePoint);
@@ -732,7 +732,7 @@ function recoverMixedRewriteForms(
 	let currentText = "";
 	let desiredText = "";
 	let replacementIndex = 0;
-	for (let index = 0; index < inline.patternText.length; ) {
+	for (let index = 0; index < inline.patternText.length;) {
 		const open = inline.patternText.indexOf(SELECT_OPEN, index);
 		if (open === -1) {
 			const tail = inline.patternText.slice(index);
@@ -1438,7 +1438,7 @@ function normalizeText(source: string): NormalizedText {
 	let text = "";
 	const starts: number[] = [];
 	const ends: number[] = [];
-	for (let index = 0; index < source.length; ) {
+	for (let index = 0; index < source.length;) {
 		const codePoint = source.codePointAt(index);
 		if (codePoint === undefined) break;
 		if (codePoint <= 0x7f) {
@@ -1509,7 +1509,7 @@ function parsePattern(pattern: string, operationNumber: number): ParsedPattern {
 		literal = "";
 	};
 
-	for (let index = 0; index < pattern.length; ) {
+	for (let index = 0; index < pattern.length;) {
 		const gapMarker = patternGapAt(pattern, index);
 		if (gapMarker) {
 			flushLiteral();
@@ -1885,6 +1885,7 @@ function collectCandidates(
 			const first = chosen.get(literalIndices[0]);
 			const last = chosen.get(literalIndices.at(-1) ?? -1);
 			if (start > end || !first || !last) return;
+			// oxlint-disable-next-line unicorn/no-new-array -- length preallocation
 			const captures = new Array<string>(pattern.tokens.filter(token => token.kind === "gap").length).fill("");
 			for (let tokenIndex = 0; tokenIndex < pattern.tokens.length; tokenIndex++) {
 				const token = pattern.tokens[tokenIndex];
@@ -1997,7 +1998,7 @@ function lineNumberAt(content: string, offset: number): number {
 function renderInlinePattern(patternText: string, replacements: string[]): string {
 	let rendered = "";
 	let replacementIndex = 0;
-	for (let index = 0; index < patternText.length; ) {
+	for (let index = 0; index < patternText.length;) {
 		const codePoint = patternText.codePointAt(index);
 		if (codePoint === undefined) break;
 		const character = String.fromCodePoint(codePoint);
@@ -2395,7 +2396,7 @@ function recoverNonConsecutiveOperation(content: string, operation: Operation): 
 
 function rewriteGapCount(rewrite: string): number {
 	let count = 0;
-	for (let index = 0; index < rewrite.length; ) {
+	for (let index = 0; index < rewrite.length;) {
 		if (rewrite.startsWith(GAP, index)) {
 			count++;
 			index += GAP.length;
@@ -2666,7 +2667,7 @@ function renderRewrite(
 	const sentinels = selectedCaptureIndices.map((_, index) => `\u0000V8GAP${index}\u0000`);
 	let markerIndex = 0;
 	let marked = "";
-	for (let index = 0; index < rewrite.length; ) {
+	for (let index = 0; index < rewrite.length;) {
 		const gapMarker = rewrite.startsWith(GAP, index) ? GAP : undefined;
 		if (gapMarker) {
 			const lineStart = rewrite.lastIndexOf("\n", index - 1) + 1;
@@ -3153,7 +3154,7 @@ function dropSelectionEchoes(patternText: string): string | undefined {
  */
 function overlapTrimCandidates(patternText: string): string[] {
 	const results: string[] = [];
-	for (let index = 0; index < patternText.length; ) {
+	for (let index = 0; index < patternText.length;) {
 		if (patternText.startsWith(GAP, index)) {
 			index += GAP.length;
 			continue;
@@ -3750,6 +3751,7 @@ function applyOperations(content: string, input: string, context: SloppyApplyCon
 			if (!candidates.every(candidate => rewriteProvesWholeSpan(content, candidate, baseResolvedRewrite))) {
 				const candidate = candidates[0];
 				const oneLineRewrite = baseResolvedRewrite.replace(/\s*\n\s*/gu, " ");
+				// oxlint-disable-next-line unicorn/no-new-array -- length preallocation
 				const repeated = new Array<string>(pattern.selectionRanges.length).fill(oneLineRewrite);
 				const header = operation.all ? `${OPENER}*` : OPENER;
 				throw new Error(

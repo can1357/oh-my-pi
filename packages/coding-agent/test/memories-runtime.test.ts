@@ -72,7 +72,7 @@ async function createFixture(overrides?: Partial<Record<string, unknown>>): Prom
 		"memories.maxRolloutsPerStartup": 16,
 		"memories.threadScanLimit": 64,
 		"memories.phase2HeartbeatSeconds": 1,
-		...(overrides ?? {}),
+		...overrides,
 	});
 	const model = createModel();
 	const modelRegistry = createModelRegistry(model);

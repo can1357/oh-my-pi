@@ -100,10 +100,10 @@ describe("sloppy v8", () => {
 
 	test("keeps a mid-line ellipsis in REWRITE literal when the capture is multi-line", () => {
 		const content = "function f() {\n  a();\n  b();\n}\n";
-		// biome-ignore lint/suspicious/noTemplateCurlyInString: test fixture contains template literal
+		// oxlint-disable-next-line no-template-curly-in-string -- test fixture contains template literal
 		const input = operation("function f() {\n…\n}", "function f() {\n  return `${x}[… ]${y}`;\n}");
 
-		// biome-ignore lint/suspicious/noTemplateCurlyInString: test fixture contains template literal
+		// oxlint-disable-next-line no-template-curly-in-string -- test fixture contains template literal
 		expect(variant.apply(content, input, context)).toBe("function f() {\n  return `${x}[… ]${y}`;\n}\n");
 	});
 
@@ -1715,7 +1715,7 @@ describe("sloppy v8", () => {
 			"      ui,",
 			"      (spinner) => theme.fg('accent', spinner),",
 			"      (text) => theme.fg('muted', text),",
-			// biome-ignore lint/suspicious/noTemplateCurlyInString: test fixture contains template literal
+			// oxlint-disable-next-line no-template-curly-in-string -- test fixture contains template literal
 			"      `Summarizing branch... (${keyText('app.interrupt')} to cancel)`,",
 			"    );",
 			"",
@@ -1723,7 +1723,7 @@ describe("sloppy v8", () => {
 		const pattern = [
 			"super(\u2026",
 			"⟪'branchSummary'⟫,\u2026",
-			// biome-ignore lint/suspicious/noTemplateCurlyInString: test fixture contains template literal
+			// oxlint-disable-next-line no-template-curly-in-string -- test fixture contains template literal
 			"`Summarizing branch... (${keyText('app.interrupt')} to cancel)`,",
 			");",
 		].join("\n");

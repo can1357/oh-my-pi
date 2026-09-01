@@ -32,11 +32,11 @@
     "gen:stats:reset": "bun scripts/generate-client-bundle.ts --reset",
     "build": "bun run build.ts",
     "dev": "bun run src/index.ts",
-    "check": "biome check . && bun run check:types",
+    "check": "oxlint . && oxfmt --check --no-error-on-unmatched-pattern 'src/**/*.{ts,tsx}' '{test,bench,examples,scripts}/**/*.ts' '*.ts' && bun run check:types",
     "check:types": "tsgo -p tsconfig.json --noEmit && tsgo -p tsconfig.client.json --noEmit",
-    "lint": "biome lint .",
-    "fix": "biome check --write --unsafe .",
-    "fmt": "biome format --write ."
+    "lint": "oxlint .",
+    "fix": "oxlint --fix --fix-suggestions . && bun run fmt",
+    "fmt": "oxfmt --no-error-on-unmatched-pattern 'src/**/*.{ts,tsx}' '{test,bench,examples,scripts}/**/*.ts' '*.ts'"
   },
   "dependencies": {
     "@oh-my-pi/pi-ai": "catalog:",

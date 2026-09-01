@@ -104,6 +104,7 @@ async function mapPhase(
 	const totalTokens = files.reduce((sum, file) => sum + (file.isBinary ? 0 : file.tokenEstimate()), 0);
 	const budget = effectiveMapBudget(totalTokens, config.mapBatchTokenBudget);
 	const batches = buildLlmFileBatches(files, budget);
+	// oxlint-disable-next-line unicorn/no-new-array -- length preallocation
 	const observations: Array<ConventionalFileObservation | undefined> = new Array(files.length);
 	for (let index = 0; index < files.length; index += 1) {
 		const file = files[index];
@@ -165,6 +166,7 @@ function mapResponseToObservations(
 	stopReason: string,
 ): ConventionalFileObservation[] {
 	if (entries.length === 0) return files.map(fallbackFileObservation);
+	// oxlint-disable-next-line unicorn/no-new-array -- length preallocation
 	const used = new Array<boolean>(entries.length).fill(false);
 	const stoppedAtMaxTokens = stopReason === "max_tokens" || stopReason === "length";
 	return files.map(file => {
@@ -350,6 +352,7 @@ async function mapWithConcurrency<T, R>(
 	limit: number,
 	worker: (item: T, index: number) => Promise<R>,
 ): Promise<R[]> {
+	// oxlint-disable-next-line unicorn/no-new-array -- length preallocation
 	const results = new Array<R>(items.length);
 	let nextIndex = 0;
 	const runners = Array.from({ length: Math.min(limit, items.length) }, async () => {

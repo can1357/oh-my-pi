@@ -1362,7 +1362,7 @@ function buildCoworkTlsFetchOptions(
 			rejectUnauthorized: true,
 			serverName,
 			...(COWORK_TLS_CIPHERS ? { ciphers: COWORK_TLS_CIPHERS } : {}),
-			...(foundryTlsOptions ?? {}),
+			...foundryTlsOptions,
 		},
 	};
 }
@@ -1842,7 +1842,7 @@ const streamAnthropicOnce = (
 							messages: context.messages,
 							hasImages: hasCopilotVisionInput(context.messages),
 							premiumMultiplier: model.premiumMultiplier,
-							headers: { ...(model.headers ?? {}), ...(options?.headers ?? {}) },
+							headers: { ...model.headers, ...options?.headers },
 							initiatorOverride: options?.initiatorOverride,
 						})
 					: undefined;
@@ -2991,7 +2991,7 @@ export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): A
 	// `AnthropicMessagesClient` already arms its own DEFAULT_TIMEOUT_MS timer
 	// per request, so the native ceiling can only short-circuit slow-prefill
 	// streams before the configured watchdog gets to govern them.
-	const fetchOptions: AnthropicFetchOptions = { ...(tlsFetchOptions ?? {}), timeout: false };
+	const fetchOptions: AnthropicFetchOptions = { ...tlsFetchOptions, timeout: false };
 	const baseFetch = args.fetch ?? fetch;
 	// Only OAuth requests inject the CC billing header; no API-key request can ever
 	// contain it, so there is no need to install the rewriter for those.
@@ -4306,12 +4306,10 @@ function buildAnthropicBaseToolInputSchema(tool: Tool): Record<string, unknown> 
 }
 
 function buildAnthropicToolSchemaPlans(tools: Tool[], disableStrictTools = false): AnthropicToolSchemaPlan[] {
-	const plans = tools.map(
-		(tool): AnthropicToolSchemaPlan => ({
-			inputSchema: buildAnthropicBaseToolInputSchema(tool) as AnthropicToolInputSchema,
-			strict: false,
-		}),
-	);
+	const plans = tools.map((tool): AnthropicToolSchemaPlan => ({
+		inputSchema: buildAnthropicBaseToolInputSchema(tool) as AnthropicToolInputSchema,
+		strict: false,
+	}));
 	if (NO_STRICT || disableStrictTools) return plans;
 
 	const candidateIndexes = tools.flatMap((tool, index) => {

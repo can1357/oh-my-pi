@@ -597,7 +597,7 @@ export class SessionAdvisors {
 
 	/** Waits for all advisor-card persistence handlers currently in flight. */
 	async waitForPendingCardEvents(): Promise<void> {
-		await Promise.allSettled([...this.#pendingAdvisorCardEvents]);
+		await Promise.allSettled(this.#pendingAdvisorCardEvents);
 	}
 
 	// Advisor runtime lifecycle
@@ -1760,7 +1760,7 @@ export class SessionAdvisors {
 		while (this.#pendingAdvisorCardEvents.size > 0) {
 			const remainingMs = deadline - Date.now();
 			if (remainingMs <= 0) return false;
-			const settled = Promise.allSettled([...this.#pendingAdvisorCardEvents]).then(() => true as const);
+			const settled = Promise.allSettled(this.#pendingAdvisorCardEvents).then(() => true as const);
 			const { promise: timedOut, resolve } = Promise.withResolvers<false>();
 			const timer = setTimeout(() => resolve(false), remainingMs);
 			try {
