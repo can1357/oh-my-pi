@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 
 import httpx
 import pytest
 
-from robomp.github_client import GitHubClient, GitHubError
+from robomp.github_client import _MAX_LABEL_PAGES, GitHubClient, GitHubError
 
 
 def _run_async(coro):
@@ -715,3 +716,239 @@ def test_list_issues_treats_pull_request_null_as_plain_issue() -> None:
     assert len(issues) == 1
     assert issues[0].number == 9
     assert issues[0].is_pull_request is False
+
+
+def test_release_action_reads_parse_runs_jobs_and_failed_steps() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/repos/octo/widget/actions/runs":
+            assert request.url.params["head_sha"] == "abc"
+            assert request.url.params["per_page"] == "100"
+            return httpx.Response(
+                200,
+                json={
+                    "workflow_runs": [
+                        {
+                            "id": 10,
+                            "name": "CI",
+                            "event": "push",
+                            "status": "completed",
+                            "conclusion": "failure",
+                            "head_branch": "main",
+                            "head_sha": "abc",
+                            "html_url": "https://example/runs/10",
+                            "run_attempt": 2,
+                        }
+                    ]
+                },
+            )
+        assert request.url.path == "/repos/octo/widget/actions/runs/10/jobs"
+        assert request.url.params["filter"] == "latest"
+        return httpx.Response(
+            200,
+            json={
+                "jobs": [
+                    {
+                        "id": 20,
+                        "run_id": 10,
+                        "name": "test",
+                        "status": "completed",
+                        "conclusion": "failure",
+                        "html_url": "https://example/jobs/20",
+                        "steps": [
+                            {"name": "checkout", "conclusion": "success"},
+                            {"name": "tests", "conclusion": "failure"},
+                            {"name": "cleanup", "conclusion": "skipped"},
+                        ],
+                    }
+                ]
+            },
+        )
+
+    client = GitHubClient("tok", transport=httpx.MockTransport(handler))
+    runs = _run_async(client.list_workflow_runs("octo/widget", head_sha="abc"))
+    jobs = _run_async(client.list_workflow_jobs("octo/widget", runs[0].id))
+    assert runs[0].run_attempt == 2
+    assert runs[0].head_sha == "abc"
+    assert jobs[0].failed_steps == ("tests",)
+
+
+def test_job_log_tail_follows_redirect_and_caps_retained_bytes() -> None:
+    payload = b"discard\n" + (b"x" * (4 * 1024 * 1024)) + b"\nlast\n"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/logs"):
+            return httpx.Response(302, headers={"location": "https://logs.example/job.txt"})
+        assert request.url.host == "logs.example"
+        return httpx.Response(200, content=payload)
+
+    client = GitHubClient("tok", transport=httpx.MockTransport(handler))
+    tail = _run_async(client.get_job_log_tail("octo/widget", 20, tail_lines=2))
+    assert len(tail.encode()) <= 4 * 1024 * 1024
+    assert tail.endswith("\nlast")
+    assert "discard" not in tail
+
+
+def test_tag_dereference_and_release_metadata() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/git/ref/tags/v1.2.3"):
+            return httpx.Response(200, json={"object": {"type": "tag", "sha": "tag-object"}})
+        if request.url.path.endswith("/git/tags/tag-object"):
+            return httpx.Response(200, json={"object": {"type": "commit", "sha": "commit-sha"}})
+        assert request.url.path.endswith("/releases/tags/v1.2.3")
+        return httpx.Response(
+            200,
+            json={
+                "tag_name": "v1.2.3",
+                "name": "1.2.3",
+                "draft": False,
+                "prerelease": False,
+                "html_url": "https://example/releases/v1.2.3",
+                "assets": [{"name": "omp-darwin-arm64.tar.gz"}],
+            },
+        )
+
+    client = GitHubClient("tok", transport=httpx.MockTransport(handler))
+    assert _run_async(client.get_tag_sha("octo/widget", "v1.2.3")) == "commit-sha"
+    release = _run_async(client.get_release_by_tag("octo/widget", "v1.2.3"))
+    assert release is not None
+    assert release.asset_names == ("omp-darwin-arm64.tar.gz",)
+
+
+def test_missing_tag_and_release_return_none() -> None:
+    client = GitHubClient(
+        "tok",
+        transport=httpx.MockTransport(lambda request: httpx.Response(404, json={"message": "Not Found"})),
+    )
+    assert _run_async(client.get_tag_sha("octo/widget", "v1.2.3")) is None
+    assert _run_async(client.get_release_by_tag("octo/widget", "v1.2.3")) is None
+
+
+def test_add_issue_labels_forgejo_creates_missing_labels_first() -> None:
+    """Forgejo drops missing names on add, so the client must create absent
+    labels (and only absent ones) before the additive issue-label POST."""
+    list_calls = 0
+    created: list[dict[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal list_calls
+        if request.method == "GET" and request.url.path == "/repos/octo/widget/labels":
+            list_calls += 1
+            return httpx.Response(200, json=[{"name": "bug"}])
+        if request.method == "POST" and request.url.path == "/repos/octo/widget/labels":
+            created.append(json.loads(request.content))
+            return httpx.Response(201, json={"name": "needs-triage"})
+        if request.method == "POST" and request.url.path == "/repos/octo/widget/issues/7/labels":
+            assert json.loads(request.content) == {"labels": ["bug", "needs-triage"]}
+            return httpx.Response(200, json=[{"name": "bug"}, {"name": "needs-triage"}])
+        raise AssertionError(f"unexpected request {request.method} {request.url.path}")
+
+    client = GitHubClient("tok", transport=httpx.MockTransport(handler), platform="forgejo")
+    result = _run_async(client.add_issue_labels("octo/widget", 7, ["bug", "needs-triage"]))
+    assert result == ("bug", "needs-triage")
+    assert list_calls == 1
+    assert created == [{"name": "needs-triage", "color": "#cccccc"}]
+
+
+def test_add_issue_labels_forgejo_existing_labels_not_recreated() -> None:
+    created: list[dict[str, str]] = []
+    added: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == "/repos/octo/widget/labels":
+            return httpx.Response(200, json=[{"name": "bug"}])
+        if request.method == "POST" and request.url.path == "/repos/octo/widget/labels":
+            created.append(json.loads(request.content))
+            return httpx.Response(201, json={"name": "bug"})
+        if request.method == "POST" and request.url.path == "/repos/octo/widget/issues/7/labels":
+            added.append(json.loads(request.content))
+            return httpx.Response(200, json=[{"name": "bug"}])
+        raise AssertionError(f"unexpected request {request.method} {request.url.path}")
+
+    client = GitHubClient("tok", transport=httpx.MockTransport(handler), platform="forgejo")
+    assert _run_async(client.add_issue_labels("octo/widget", 7, ["bug"])) == ("bug",)
+    assert created == []
+    assert added == [{"labels": ["bug"]}]
+
+
+def test_add_issue_labels_github_does_not_list_or_create() -> None:
+    """GitHub auto-creates on add; the client must not add extra requests."""
+    paths: list[tuple[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        paths.append((request.method, request.url.path))
+        if request.method == "POST" and request.url.path == "/repos/octo/widget/issues/7/labels":
+            return httpx.Response(200, json=[{"name": "bug"}])
+        raise AssertionError(f"unexpected request {request.method} {request.url.path}")
+
+    client = GitHubClient("tok", transport=httpx.MockTransport(handler))
+    assert _run_async(client.add_issue_labels("octo/widget", 7, ["bug"])) == ("bug",)
+    assert paths == [("POST", "/repos/octo/widget/issues/7/labels")]
+
+
+def test_add_issue_labels_forgejo_409_create_already_exists_is_ignored() -> None:
+    """A concurrent creator wins the label-create race: the 409 'already
+    exists' is swallowed and the attach still happens."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == "/repos/octo/widget/labels":
+            return httpx.Response(200, json=[])
+        if request.method == "POST" and request.url.path == "/repos/octo/widget/labels":
+            return httpx.Response(409, json={"message": "Label already exists"})
+        if request.method == "POST" and request.url.path == "/repos/octo/widget/issues/7/labels":
+            return httpx.Response(200, json=[{"name": "needs-triage"}])
+        raise AssertionError(f"unexpected request {request.method} {request.url.path}")
+
+    client = GitHubClient("tok", transport=httpx.MockTransport(handler), platform="forgejo")
+    assert _run_async(client.add_issue_labels("octo/widget", 7, ["needs-triage"])) == ("needs-triage",)
+
+
+def test_list_repo_labels_paginates_forgejo() -> None:
+    seen_params: list[dict[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_params.append(dict(request.url.params))
+        if request.url.params["page"] == "1":
+            return httpx.Response(200, json=[{"name": f"lbl-{i}"} for i in range(50)])
+        return httpx.Response(200, json=[])
+
+    client = GitHubClient("tok", transport=httpx.MockTransport(handler), platform="forgejo")
+    names = _run_async(client.list_repo_labels("octo/widget"))
+    assert names == tuple(f"lbl-{i}" for i in range(50))
+    assert seen_params[0] == {"limit": "50", "page": "1"}
+    assert seen_params[1] == {"limit": "50", "page": "2"}
+
+
+def test_list_repo_labels_paginates_github() -> None:
+    """The GitHub branch uses `per_page` (100) instead of Forgejo's `limit`."""
+    seen_params: list[dict[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_params.append(dict(request.url.params))
+        if request.url.params["page"] == "1":
+            return httpx.Response(200, json=[{"name": f"lbl-{i}"} for i in range(100)])
+        return httpx.Response(200, json=[])
+
+    client = GitHubClient("tok", transport=httpx.MockTransport(handler))
+    names = _run_async(client.list_repo_labels("octo/widget"))
+    assert names == tuple(f"lbl-{i}" for i in range(100))
+    assert seen_params[0] == {"per_page": "100", "page": "1"}
+    assert seen_params[1] == {"per_page": "100", "page": "2"}
+
+
+def test_list_repo_labels_truncates_at_page_bound(caplog: pytest.LogCaptureFixture) -> None:
+    """A server returning full pages forever must stop at the page bound and
+    log a warning rather than paginate unbounded."""
+    requests_seen: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests_seen.append(int(request.url.params["page"]))
+        return httpx.Response(200, json=[{"name": f"lbl-{int(request.url.params['page'])}-{i}"} for i in range(50)])
+
+    client = GitHubClient("tok", transport=httpx.MockTransport(handler), platform="forgejo")
+    with caplog.at_level(logging.WARNING, logger="robomp.github_client"):
+        names = _run_async(client.list_repo_labels("octo/widget"))
+    assert len(names) == _MAX_LABEL_PAGES * 50
+    assert len(requests_seen) == _MAX_LABEL_PAGES
+    assert requests_seen == list(range(1, _MAX_LABEL_PAGES + 1))
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert any("truncated" in r.getMessage() for r in warnings)
