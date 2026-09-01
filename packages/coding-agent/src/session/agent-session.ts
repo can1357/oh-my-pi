@@ -369,6 +369,13 @@ import { TtsrCoordinator, type TtsrCoordinatorHost } from "./ttsr-coordinator";
 
 const PLAN_MODE_REMINDER_MAX = 3;
 const POST_PROMPT_DRAIN_TIMEOUT_MS = 5_000;
+const NEXT_TURN_QUEUE_ENTRY_TYPE = "agent-session-next-turn-queued";
+const NEXT_TURN_CONSUMED_ENTRY_TYPE = "agent-session-next-turn-consumed";
+const kDurableNextTurnEntryId = Symbol("agentSession.durableNextTurnEntryId");
+
+type DurableNextTurnMessage = CustomMessage & {
+	[kDurableNextTurnEntryId]?: string;
+};
 
 /** Internal marker for hook messages queued through the agent loop */
 // ============================================================================
@@ -544,7 +551,7 @@ export class AgentSession {
 	#observedSessionId: string | undefined;
 
 	/** Messages queued to be included with the next user prompt as context ("asides"). */
-	#pendingNextTurnMessages: CustomMessage[] = [];
+	#pendingNextTurnMessages: DurableNextTurnMessage[] = [];
 	#scheduledHiddenNextTurnGeneration: number | undefined = undefined;
 	#queuedMessageDrainScheduled = false;
 	#planModeState: PlanModeState | undefined;
@@ -1051,6 +1058,7 @@ export class AgentSession {
 		this.agent = config.agent;
 		this.#codeModeState = config.codeModeState ?? {};
 		this.sessionManager = config.sessionManager;
+		this.#restoreDurableNextTurnMessages();
 		this.settings = config.settings;
 		this.#modelRegistry = config.modelRegistry;
 		this.#extensionRoots =
@@ -2531,22 +2539,26 @@ export class AgentSession {
 		};
 	}
 
+	#appendCustomMessageEntry(message: CustomMessage | HookMessage): void {
+		this.sessionManager.appendCustomMessageEntry(
+			message.customType,
+			message.content,
+			message.display,
+			message.details,
+			message.attribution ?? "agent",
+			message.timestamp,
+		);
+	}
+
 	#persistMessageEnd(message: AgentMessage): void {
 		if (message.role === "hookMessage" || message.role === "custom") {
 			// Prewalk's plan nudge is a one-run steering instruction. Persisting it would
 			// resurrect the consumed prompt on resume, fork, or any context rebuild.
 			if (!isPrewalkPlanNudge(message)) {
-				this.sessionManager.appendCustomMessageEntry(
-					message.customType,
-					message.content,
-					message.display,
-					message.details,
-					message.attribution ?? "agent",
-					// Preserve the initiating message's own timestamp: the entry
-					// otherwise records emission time, which on rebuild excludes
-					// provider preparation / hook time from the prompt→yield anchor.
-					message.timestamp,
-				);
+				this.#appendCustomMessageEntry(message);
+			}
+			if (message.role === "custom") {
+				this.#consumeDurableNextTurnMessage(message);
 			}
 			if (message.role === "custom" && message.customType === "ttsr-injection") {
 				this.#ttsr.markInjectedFromDetails(message.details);
@@ -4405,6 +4417,7 @@ export class AgentSession {
 		} catch (error) {
 			logger.warn("Active agent run still settling at dispose deadline", { error: String(error) });
 		}
+		this.#materializeDurableNextTurnMessages();
 
 		// Event handlers can reopen the append writer while they persist their
 		// terminal message; that pipeline has drained (or hit the deadline).
@@ -4525,6 +4538,8 @@ export class AgentSession {
 		this.#promptGeneration++;
 		await this.#cancelPostPromptTasks();
 		this.#cancelOwnAsyncJobs();
+		await this.settleInFlightMessagePersistence();
+		this.#materializeDurableNextTurnMessages();
 
 		// Drop the conversation: messages, queued steers/follow-ups, pending tool
 		// calls, and error state. agent.reset() keeps the model and system prompt.
@@ -6547,7 +6562,72 @@ export class AgentSession {
 		return delivered;
 	}
 
-	#queueHiddenNextTurnMessage(message: CustomMessage, triggerTurn: boolean): void {
+	#restoreDurableNextTurnMessages(): void {
+		const queued = new Map<string, DurableNextTurnMessage>();
+		const consumed = new Set<string>();
+		for (const entry of this.sessionManager.getBranch()) {
+			if (entry.type !== "custom") continue;
+			if (entry.customType === NEXT_TURN_QUEUE_ENTRY_TYPE) {
+				const message = this.#parseDurableNextTurnMessage(entry.data);
+				if (message) queued.set(entry.id, message);
+				continue;
+			}
+			if (
+				entry.customType === NEXT_TURN_CONSUMED_ENTRY_TYPE &&
+				isRecord(entry.data) &&
+				typeof entry.data.queuedEntryId === "string"
+			) {
+				consumed.add(entry.data.queuedEntryId);
+			}
+		}
+		for (const entryId of consumed) queued.delete(entryId);
+		for (const [entryId, message] of queued) {
+			this.#pendingNextTurnMessages.push(message);
+			message[kDurableNextTurnEntryId] = entryId;
+		}
+	}
+
+	#parseDurableNextTurnMessage(data: unknown): DurableNextTurnMessage | undefined {
+		if (!isRecord(data) || !isRecord(data.message)) return undefined;
+		const message = data.message;
+		if (message.role !== "custom" || typeof message.timestamp !== "number" || !Number.isFinite(message.timestamp)) {
+			return undefined;
+		}
+		return {
+			role: "custom",
+			...normalizeCustomMessagePayload(message),
+			timestamp: message.timestamp,
+		};
+	}
+
+	#consumeDurableNextTurnMessage(message: DurableNextTurnMessage): boolean {
+		const queuedEntryId = message[kDurableNextTurnEntryId];
+		if (!queuedEntryId) return false;
+		this.sessionManager.appendCustomEntry(NEXT_TURN_CONSUMED_ENTRY_TYPE, { queuedEntryId });
+		delete message[kDurableNextTurnEntryId];
+		return true;
+	}
+
+	#materializeDurableNextTurnMessages(): void {
+		const remaining: DurableNextTurnMessage[] = [];
+		for (const message of this.#pendingNextTurnMessages) {
+			if (!message[kDurableNextTurnEntryId]) {
+				remaining.push(message);
+				continue;
+			}
+			this.#appendCustomMessageEntry(message);
+			this.#consumeDurableNextTurnMessage(message);
+		}
+		this.#pendingNextTurnMessages = remaining;
+	}
+
+	#queueDurableNextTurnMessage(message: DurableNextTurnMessage, triggerTurn: boolean): void {
+		const entryId = this.sessionManager.appendCustomEntry(NEXT_TURN_QUEUE_ENTRY_TYPE, { message });
+		message[kDurableNextTurnEntryId] = entryId;
+		this.#queueHiddenNextTurnMessage(message, triggerTurn);
+	}
+
+	#queueHiddenNextTurnMessage(message: DurableNextTurnMessage, triggerTurn: boolean): void {
 		this.#pendingNextTurnMessages.push(message);
 		if (!triggerTurn) return;
 		const generation = this.#promptGeneration;
@@ -6733,7 +6813,7 @@ export class AgentSession {
 		const normalizedAppMessage = await this.#normalizeAgentMessageImages(appMessage);
 		if (this.isStreaming) {
 			if (options?.deliverAs === "nextTurn") {
-				this.#queueHiddenNextTurnMessage(normalizedAppMessage, options?.triggerTurn ?? false);
+				this.#queueDurableNextTurnMessage(normalizedAppMessage, options?.triggerTurn ?? false);
 				return false;
 			}
 			this.#allowQueuedMessageDrainRetry();
@@ -6750,7 +6830,7 @@ export class AgentSession {
 		if (options?.deliverAs === "nextTurn") {
 			if (options?.triggerTurn) {
 				if (this.#clientBridge?.deferAgentInitiatedTurns && !this.#allowAcpAgentInitiatedTurns) {
-					this.#queueHiddenNextTurnMessage(normalizedAppMessage, false);
+					this.#queueDurableNextTurnMessage(normalizedAppMessage, false);
 					return false;
 				}
 				await this.#promptAgentInitiatedMessage(normalizedAppMessage, {
@@ -6759,19 +6839,13 @@ export class AgentSession {
 				return true;
 			}
 			this.agent.appendMessage(normalizedAppMessage);
-			this.sessionManager.appendCustomMessageEntry(
-				normalizedAppMessage.customType,
-				normalizedAppMessage.content,
-				normalizedAppMessage.display,
-				normalizedAppMessage.details,
-				normalizedAppMessage.attribution,
-			);
+			this.#appendCustomMessageEntry(normalizedAppMessage);
 			return false;
 		}
 
 		if (options?.triggerTurn) {
 			if (this.#clientBridge?.deferAgentInitiatedTurns && !this.#allowAcpAgentInitiatedTurns) {
-				this.#queueHiddenNextTurnMessage(normalizedAppMessage, false);
+				this.#queueDurableNextTurnMessage(normalizedAppMessage, false);
 				return false;
 			}
 			await this.#promptAgentInitiatedMessage(normalizedAppMessage);
@@ -6779,13 +6853,7 @@ export class AgentSession {
 		}
 
 		this.agent.appendMessage(normalizedAppMessage);
-		this.sessionManager.appendCustomMessageEntry(
-			normalizedAppMessage.customType,
-			normalizedAppMessage.content,
-			normalizedAppMessage.display,
-			normalizedAppMessage.details,
-			normalizedAppMessage.attribution,
-		);
+		this.#appendCustomMessageEntry(normalizedAppMessage);
 		return false;
 	}
 
@@ -7215,6 +7283,8 @@ export class AgentSession {
 		try {
 			advisorRecordersDetached = true;
 			await this.#advisors.drainAndDetachRecorders();
+			await this.settleInFlightMessagePersistence();
+			this.#materializeDurableNextTurnMessages();
 			try {
 				this.agent.reset();
 				if (options?.drop && previousSessionFile) {
@@ -8411,6 +8481,12 @@ export class AgentSession {
 
 			this.agent.replaceMessages(sessionContext.messages);
 			this.#advisors.resetSessionState({ preserveCost: true });
+			// Re-arm durable next-turn messages from the freshly loaded branch: the
+			// wholesale clear above dropped the previous session's queue, and the
+			// constructor's restore never runs on switch/reload (issue #10311). The
+			// rollback snapshot at #pendingNextTurnMessages taken earlier restores
+			// the prior queue if this switch fails.
+			this.#restoreDurableNextTurnMessages();
 			this.#todo.syncFromBranch();
 			if (switchingToDifferentSession) {
 				this.#closeAllProviderSessions("session switch");
