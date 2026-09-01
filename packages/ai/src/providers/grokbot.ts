@@ -678,6 +678,7 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 				sandParameterIds: model.sandParameterIds,
 				sandMaxMode: model.sandMaxMode,
 				canonicalModelId: model.requestModelId,
+				sandVariantStringRepresentation: model.sandVariantStringRepresentation,
 			});
 			let body: Record<string, unknown> = {
 				messages,

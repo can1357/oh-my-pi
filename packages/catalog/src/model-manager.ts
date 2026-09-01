@@ -1,5 +1,6 @@
 import { buildModel } from "./build";
 import { collapseBuiltVariants } from "./compat/collapse";
+import { resolveModelPolicy } from "./compat/resolve";
 import { readModelCache, writeModelCache } from "./model-cache";
 import { type GeneratedProvider, getBundledModels } from "./models";
 import type { Api, Model, ModelCost, ModelSpec, Provider, TokenCost } from "./types";
@@ -546,7 +547,7 @@ function mergeDynamicModel<TApi extends Api>(existingModel: Model<TApi>, dynamic
 		(existingModel.provider === "deepinfra" && dynamicModel.provider === "deepinfra") ||
 		(existingModel.provider === "grokbot" && dynamicModel.provider === "grokbot");
 	const dynamicLimitsAuthoritative =
-		existingModel.provider === "grokbot" && dynamicModel.provider === "grokbot";
+		resolveModelPolicy(dynamicModel).catalog.credentialScopedCatalog === true;
 	const supportsImage = dynamicInputAuthoritative
 		? dynamicModel.input.includes("image")
 		: existingModel.input.includes("image") || dynamicModel.input.includes("image");

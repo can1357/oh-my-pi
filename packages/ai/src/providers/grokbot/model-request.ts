@@ -8,6 +8,7 @@ export type GrokbotRequestedModel = {
 	modelId: string;
 	maxMode?: boolean;
 	parameters?: GrokbotRequestedParameter[];
+	isVariantStringRepresentation?: boolean;
 };
 
 export type GrokbotRequestedModelOptions = {
@@ -50,6 +51,8 @@ export type GrokbotRequestedModelOptions = {
 	sandMaxMode?: boolean;
 	/** Canonical wire model id when `modelId` was an alias. */
 	canonicalModelId?: string;
+	/** When true, set `isVariantStringRepresentation` on the sand requestedModel wire. */
+	sandVariantStringRepresentation?: boolean;
 };
 
 /**
@@ -63,6 +66,24 @@ export function toSandEffortValue(
 	if (typeof effort !== "string" || !effort) return undefined;
 	const mapped = effortMap?.[effort];
 	return typeof mapped === "string" && mapped.length > 0 ? mapped : effort;
+}
+
+function resolveSandEffortWireValue(
+	options: GrokbotRequestedModelOptions | undefined,
+	allowed: Set<string>,
+): string | undefined {
+	const explicit = toSandEffortValue(options?.effort, options?.effortMap);
+	if (explicit) return explicit;
+	const defaults = options?.sandParameterDefaults;
+	if (allowed.has("effort")) {
+		const value = defaults?.effort?.trim();
+		if (value) return value;
+	}
+	if (allowed.has("reasoning")) {
+		const value = defaults?.reasoning?.trim();
+		if (value) return value;
+	}
+	return undefined;
 }
 
 export function resolveGrokbotRequestedModel(
@@ -79,7 +100,7 @@ export function resolveGrokbotRequestedModel(
 	const parameters: GrokbotRequestedParameter[] = [];
 
 	if (allowed.size > 0) {
-		const effortValue = toSandEffortValue(options?.effort, options?.effortMap);
+		const effortValue = resolveSandEffortWireValue(options, allowed);
 		// Cursor AvailableModels variants always send the full advertised set
 		// (thinking/context/effort/fast). Partial sets work for some vendors but
 		// Anthropic variants are defined as complete combinations.
@@ -115,6 +136,9 @@ export function resolveGrokbotRequestedModel(
 	}
 
 	const requested: GrokbotRequestedModel = { modelId: wireId };
+	if (options?.sandVariantStringRepresentation === true) {
+		requested.isVariantStringRepresentation = true;
+	}
 	if (options?.sandMaxMode === true) {
 		requested.maxMode = true;
 	}

@@ -136,6 +136,20 @@ const FIXTURE = {
 				{ parameterValues: [{ id: "effort", value: "max" }] },
 			],
 		},
+		{
+			name: "variant-string-model",
+			clientDisplayName: "Variant String",
+			supportsThinking: true,
+			supportsImages: true,
+			parameterDefinitions: [{ id: "effort" }],
+			variants: [
+				{
+					variantStringRepresentation: "variant-string-model::high",
+					displayName: "High effort variant",
+					parameterValues: [{ id: "effort", value: "high" }],
+				},
+			],
+		},
 	],
 };
 
@@ -219,6 +233,11 @@ describe("grokbot AvailableModels normalize", () => {
 			"xhigh",
 			"max",
 		]);
+
+		const variantString = models.find(m => m.id === "variant-string-model::high");
+		expect(variantString?.requestModelId).toBe("variant-string-model");
+		expect(variantString?.sandVariantStringRepresentation).toBe(true);
+		expect(variantString?.sandParameterDefaults).toEqual({ effort: "high" });
 	});
 
 	test("trims whitespace from AvailableModels model ids", () => {

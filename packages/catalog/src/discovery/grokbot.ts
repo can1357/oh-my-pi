@@ -179,7 +179,9 @@ function toGrokbotModelSpecs(row: GrokbotAvailableModel, baseUrl: string, id: st
 	const out: ModelSpec<"grokbot-sand">[] = [base];
 	for (const variant of row.variants ?? []) {
 		const legacySlug = variant.legacySlug?.trim();
-		if (!legacySlug || legacySlug === id) continue;
+		const variantString = variant.variantStringRepresentation?.trim();
+		const selector = legacySlug && legacySlug !== id ? legacySlug : variantString && variantString !== id ? variantString : undefined;
+		if (!selector) continue;
 		const variantParams = collectVariantParameterIds(variant);
 		const parameterIds = variantParams.length > 0 ? variantParams : base.sandParameterIds;
 		const sandMaxMode =
@@ -190,12 +192,13 @@ function toGrokbotModelSpecs(row: GrokbotAvailableModel, baseUrl: string, id: st
 					: base.sandMaxMode;
 		out.push({
 			...base,
-			id: legacySlug,
-			name: variant.displayName?.trim() || legacySlug,
+			id: selector,
+			name: variant.displayName?.trim() || selector,
 			requestModelId: id,
 			sandParameterIds: parameterIds,
 			sandParameterDefaults: collectVariantSandParameterDefaults(variant) ?? base.sandParameterDefaults,
 			sandMaxMode,
+			sandVariantStringRepresentation: !legacySlug && Boolean(variantString),
 			contextWindow: resolveGrokbotContextWindow(row, sandMaxMode),
 			aliases: undefined,
 		});

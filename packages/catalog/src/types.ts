@@ -1116,6 +1116,8 @@ export interface Model<TApi extends Api = Api> {
 	sandParameterDefaults?: Readonly<Record<string, string>>;
 	/** When true, Grok Bot stream sets `requestedModel.maxMode`. Default false. */
 	sandMaxMode?: boolean;
+	/** When true, sand requests set `requestedModel.isVariantStringRepresentation`. */
+	sandVariantStringRepresentation?: boolean;
 	cost: ModelCost;
 	/** Premium Copilot requests charged per user-initiated request (defaults to 1). */
 	premiumMultiplier?: number;

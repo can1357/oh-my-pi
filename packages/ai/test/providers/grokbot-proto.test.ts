@@ -273,6 +273,47 @@ describe("grokbot requested model mapping", () => {
 		).toBeUndefined();
 	});
 
+	test("falls back to discovered effort default when caller omits effort", () => {
+		expect(
+			resolveGrokbotRequestedModel("grok-4.6-high", {
+				sandParameterIds: ["effort", "fast"],
+				sandParameterDefaults: { effort: "high", fast: "false" },
+				canonicalModelId: "grok-4.6",
+			}),
+		).toEqual({
+			modelId: "grok-4.6",
+			parameters: [
+				{ id: "effort", value: "high" },
+				{ id: "fast", value: "true" },
+			],
+		});
+		expect(
+			resolveGrokbotRequestedModel("gpt-5.6-sol", {
+				sandParameterIds: ["reasoning", "context", "fast"],
+				sandParameterDefaults: { reasoning: "medium", context: "272k", fast: "false" },
+			}).parameters,
+		).toEqual([
+			{ id: "context", value: "272k" },
+			{ id: "reasoning", value: "medium" },
+			{ id: "fast", value: "true" },
+		]);
+	});
+
+	test("sets isVariantStringRepresentation for variant-string catalog rows", () => {
+		expect(
+			resolveGrokbotRequestedModel("variant-string-model::high", {
+				sandParameterIds: ["effort"],
+				sandParameterDefaults: { effort: "high" },
+				canonicalModelId: "variant-string-model",
+				sandVariantStringRepresentation: true,
+			}),
+		).toEqual({
+			modelId: "variant-string-model",
+			isVariantStringRepresentation: true,
+			parameters: [{ id: "effort", value: "high" }],
+		});
+	});
+
 	test("preserves discovered minimal and max effort on the wire", () => {
 		expect(
 			resolveGrokbotRequestedModel("grok-4.6", {

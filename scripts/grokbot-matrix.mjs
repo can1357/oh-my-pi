@@ -8,7 +8,6 @@
  * Success markers (EXPECT tokens):
  *   MATRIX_TEXT_PASS | MATRIX_TOOLS_PASS | MATRIX_OPUS_TOOLS_PASS | OMPA_SMOKE_PASS | OMPA_INTEGRATION_PASS
  */
-import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import {
@@ -88,7 +87,7 @@ function parseFrames(buf) {
 	}
 	const dbg = end?.error?.details?.[0]?.debug;
 	return {
-		ok: !end?.error,
+		ok: end !== undefined && !end?.parseError && !end?.error && o === buf.length,
 		texts,
 		responseModel,
 		toolNames,
@@ -162,14 +161,16 @@ function resolveOmpaBin() {
 
 function runOmpa(args, { timeout = 120_000, cwd = ROOT } = {}) {
 	const ompa = resolveOmpaBin();
-	const r = spawnSync(ompa, args, {
+	const r = Bun.spawnSync([ompa, ...args], {
 		cwd,
 		encoding: "utf8",
 		timeout,
 		env: { ...process.env, PI_NO_MCP: "1" },
+		stdout: "pipe",
+		stderr: "pipe",
 	});
-	const out = `${r.stdout || ""}\n${r.stderr || ""}`;
-	return { status: r.status, out, signal: r.signal };
+	const out = `${r.stdout?.toString() ?? ""}\n${r.stderr?.toString() ?? ""}`;
+	return { status: r.exitCode, out, signal: r.signalCode };
 }
 
 function ompaPrint(model, { tools = false, thinking = "low", prompt = `Reply with exactly: ${TOKEN}` } = {}) {
