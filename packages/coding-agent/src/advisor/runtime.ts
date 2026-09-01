@@ -86,6 +86,10 @@ export interface AdvisorRuntimeHost {
 	notifyQuotaExhausted?(): void;
 	/** Stable identity for the live advisor model. Used to restore full transcript rendering after a model switch. */
 	getModelIdentity?(): string;
+	/** Called once the runtime finishes draining its review backlog (or
+	 *  hard-stops), so the host can repaint UI that reflects whether the
+	 *  advisor is still going to comment on the current yield. */
+	notifyIdle?(): void;
 }
 
 /**
@@ -315,6 +319,13 @@ export class AdvisorRuntime {
 	 * explicit {@link reset} (config rebuild, /new, session restart).
 	 */
 	#halted = false;
+	/**
+	 * Whether the runtime has completed at least one review (a drain batch that
+	 * ended in a successful advisor turn). Gates {@link yielded} so the
+	 * status-line eye stays open until a review actually completes — a fresh
+	 * runtime with an empty backlog has not "finished" anything yet.
+	 */
+	#hasReviewed = false;
 	/** True from the moment an advisor turn fails until one succeeds (or an
 	 *  explicit reset/seed). While set, {@link waitForCatchup} resolves
 	 *  immediately: the primary agent NEVER parks on a failing advisor. */
@@ -353,6 +364,22 @@ export class AdvisorRuntime {
 	/** True after the runtime hard-stopped on repeated or permanent failures. */
 	get halted(): boolean {
 		return this.#halted;
+	}
+	/**
+	 * True once the runtime has completed at least one review and has no queued
+	 * or in-flight review work left, or has hard-stopped (halted/quota-paused/
+	 * disposed): the advisor is not going to add any more comments until a new
+	 * primary turn (or an explicit reset). A fresh runtime that has never
+	 * reviewed anything is NOT yielded — the eye stays open until the first
+	 * review completes. Drives the status-line closed-eye state.
+	 */
+	get yielded(): boolean {
+		return (
+			this.disposed ||
+			this.#quotaExhausted ||
+			this.#halted ||
+			(this.#hasReviewed && !this.#busy && this.#backlog === 0 && this.#pending.length === 0)
+		);
 	}
 
 	/**
@@ -557,6 +584,10 @@ export class AdvisorRuntime {
 		this.#sessionTransitionPaused = false;
 		this.#quotaExhausted = false;
 		this.#halted = false;
+		// A re-primed advisor has not reviewed the (new) conversation yet — drop
+		// the latch so the eye stays open until the first post-reset review, and
+		// so an aborted prior drain cannot emit a stale advisor_yielded.
+		this.#hasReviewed = false;
 		this.#failing = false;
 		this.#droppedBacklogs = 0;
 		this.#consecutiveQuarantines = 0;
@@ -1171,6 +1202,7 @@ export class AdvisorRuntime {
 					if (turnError) throw turnError;
 					success = true;
 					this.#seenContextInFlight = undefined;
+					this.#hasReviewed = true;
 					this.#failing = false;
 					this.#consecutiveFailures = 0;
 					this.#failureNotified = false;
@@ -1449,6 +1481,18 @@ export class AdvisorRuntime {
 		} finally {
 			this.#iterationAbort = undefined;
 			this.#busy = false;
+			// Notify on EVERY path that lands the runtime in the yielded state —
+			// not just an empty backlog. The quota branch requeues the failed
+			// batch (backlog/pending stay non-empty) yet `yielded` is true via
+			// the quota latch, and the eye must close without waiting for an
+			// unrelated repaint. Same for halt.
+			if (!this.disposed && this.yielded) {
+				try {
+					this.host.notifyIdle?.();
+				} catch (err) {
+					logger.debug("advisor idle notification failed", { err: String(err) });
+				}
+			}
 		}
 	}
 }

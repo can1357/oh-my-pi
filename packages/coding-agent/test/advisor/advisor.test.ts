@@ -1379,6 +1379,50 @@ describe("advisor", () => {
 			expect(promptText(promptInputs[1])).toContain("second");
 		});
 
+		it("clears the review latch on reset so a re-primed advisor is not yielded", async () => {
+			// Review feedback on #10463: after a successful review the runtime is
+			// yielded, but reset() (/new, branch, session switch, rewrites) must
+			// drop the latch — the advisor has not reviewed the new conversation,
+			// so the eye stays open until its first post-reset review, and an
+			// aborted prior drain cannot emit a stale advisor_yielded.
+			const promptInputs: Array<string | AgentMessage[]> = [];
+			const idleNotifications: number[] = [];
+			const agent: AdvisorAgent = {
+				prompt: async input => {
+					promptInputs.push(input);
+					// Complete the review: an assistant message makes the runtime's
+					// turn-error check see a finished turn.
+					agent.state.messages.push({
+						role: "assistant",
+						content: [{ type: "text", text: "no issues" }],
+						stopReason: "stop",
+					} as AssistantMessage);
+				},
+				abort: () => {},
+				reset: () => {},
+				state: { messages: [] },
+			};
+			const messages: AgentMessage[] = [{ role: "user", content: "work", timestamp: 1 } as AgentMessage];
+			const host: AdvisorRuntimeHost = {
+				snapshotMessages: () => messages,
+				enqueueAdvice: () => {},
+				notifyIdle: () => idleNotifications.push(1),
+			};
+			const runtime = new AdvisorRuntime(agent, host);
+
+			expect(runtime.yielded).toBe(false); // nothing reviewed yet
+
+			runtime.onTurnEnd(messages);
+			await runtime.waitForCatchup(1000, 1);
+			expect(runtime.yielded).toBe(true); // review completed
+			expect(idleNotifications).toHaveLength(1);
+
+			runtime.reset("conversation-boundary");
+			expect(runtime.yielded).toBe(false); // re-primed: nothing reviewed in the new conversation
+			await Promise.resolve();
+			expect(idleNotifications).toHaveLength(1); // no stale idle notification after reset
+		});
+
 		it("waits for an in-flight review within the catch-up deadline", async () => {
 			const promptStarted = Promise.withResolvers<void>();
 			const releasePrompt = Promise.withResolvers<void>();
