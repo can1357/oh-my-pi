@@ -29222,6 +29222,7 @@
 				"retryWithoutStrictOnGrammarError": false,
 				"supportsPromptCacheKey": false
 			},
+			"tokenizer": "kimi-k2",
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
@@ -319406,6 +319407,7 @@
 				"retryWithoutStrictOnGrammarError": false,
 				"supportsPromptCacheKey": false
 			},
+			"tokenizer": "glm5",
 			"thinking": {
 				"mode": "effort",
 				"efforts": [

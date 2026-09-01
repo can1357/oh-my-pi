@@ -353,6 +353,11 @@ describe("European gateway provider catalog support", () => {
 		expect(model?.contextWindow).toBe(262_144);
 	});
 
+	test("bundles tokenizer metadata for European gateway defaults", () => {
+		expect(getBundledModels("aki-io").find(model => model.id === "kimi-k2.7-code-1100b")?.tokenizer).toBe("kimi-k2");
+		expect(getBundledModels("scaleway").find(model => model.id === "glm-5.2")?.tokenizer).toBe("glm5");
+	});
+
 	test("rejects malformed provider rebake invocations", async () => {
 		const child = Bun.spawn(
 			[process.execPath, path.join(import.meta.dir, "../scripts/generate-models.ts"), "--rebake-provider"],

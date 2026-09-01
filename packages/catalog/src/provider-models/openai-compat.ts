@@ -6012,6 +6012,7 @@ function mapLiteLLMRichEntry<TApi extends Api>(
 				: supportsVision === false
 					? ["text"]
 					: (reference?.input ?? ["text"]),
+		...(typeof supportsVision === "boolean" ? { catalogFallback: { liveInputModalities: true } } : {}),
 		reasoning: typeof supportsReasoning === "boolean" ? supportsReasoning : (reference?.reasoning ?? false),
 		thinking: reference?.thinking,
 		cost: getLiteLLMCost(entry) ?? reference?.cost ?? UNKNOWN_PROXY_COST,

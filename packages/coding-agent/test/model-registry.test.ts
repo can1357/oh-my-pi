@@ -935,6 +935,23 @@ describe("ModelRegistry", () => {
 			expect(custom!.baseUrl).toBe("https://my-proxy.example.com/v1");
 		});
 
+		test("standalone custom models preserve explicit reasoning denials", () => {
+			writeRawModelsJson({
+				eurouter: {
+					baseUrl: "https://gateway.example.com/v1",
+					apiKey: "TEST_KEY",
+					api: "openai-completions",
+					models: [{ id: "grok-4.5", reasoning: false }],
+				},
+			});
+
+			const registry = new ModelRegistry(authStorage, modelsJsonPath);
+			const model = registry.find("eurouter", "grok-4.5");
+
+			expect(model?.reasoning).toBe(false);
+			expect(model?.thinking).toBeUndefined();
+		});
+
 		test("custom model with same id replaces built-in model by id", () => {
 			const models = getModelsForProvider(openrouterReplace, "openrouter");
 			const sonnetModels = models.filter(m => m.id === "anthropic/claude-sonnet-4");

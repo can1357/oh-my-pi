@@ -572,6 +572,25 @@ describe("LiteLLM provider discovery", () => {
 		});
 	});
 
+	test("preserves explicit LiteLLM text-only metadata for MiniCPM models", async () => {
+		const fetchMock = vi.fn(async (input: string | URL | Request) => {
+			if (inputUrl(input) === "http://primary:4000/model_group/info") {
+				return Response.json({ data: [{ model_group: "minicpm-v-4.5", supports_vision: false }] });
+			}
+			return new Response("{}", { status: 404 });
+		}) as FetchImpl;
+
+		const specs = await fetchLiteLLMRichModels<"openai-completions">({
+			api: "openai-completions",
+			provider: "litellm",
+			baseUrl: "http://primary:4000/v1",
+			fetch: fetchMock,
+		});
+
+		expect(specs).toHaveLength(1);
+		expect(buildModel(specs![0]!).input).toEqual(["text"]);
+	});
+
 	test("uses LiteLLM tool support metadata when rich endpoints succeed", async () => {
 		const fetchMock = vi.fn(async (input: string | URL | Request) => {
 			const url = inputUrl(input);
