@@ -1457,9 +1457,10 @@ describe("runEvalAgent isolation", () => {
 			hadAnyChanges: true,
 			mergedBranchForNestedPatches: false,
 		});
-		vi.spyOn(isolationRunner, "applyEligibleNestedPatches").mockResolvedValue(
-			"\n\n<system-notification>Some nested repository patches failed to apply.</system-notification>",
-		);
+		vi.spyOn(isolationRunner, "applyEligibleNestedPatches").mockResolvedValue({
+			summary: "\n\n<system-notification>Some nested repository patches failed to apply.</system-notification>",
+			applied: true,
+		});
 
 		await expect(
 			runEvalAgent(

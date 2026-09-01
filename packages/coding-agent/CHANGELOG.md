@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Unverified-merge latch treats read-only shell probes (`git status`, `cat`, `rg`, …) as non-acceptance, and LSP diagnostics regressions match the `waitForDiagnostics` result shape.
+- Parent-verify gating rejects status-negated (`! cmd`) and newline-masked commands, ignores redirection ampersands (`2>&1` / `&>`), and realpath-compares verifier cwd so symlink escapes cannot clear the merge latch.
+
 ### Added
 
 - Added `injectV1: false` option to `openai-models-list` discovery to fetch the model list from `{baseUrl}/models` without injecting `/v1`, for gateways that root their OpenAI-compatible surface at a versioned URL (e.g. `https://api.opper.ai/v3/compat`) where the `/v1`-injected endpoint returns only a small subset.
@@ -56,6 +61,46 @@
 - Fixed `lsp diagnostics` incorrectly reporting success for project-aware pull-diagnostic servers when diagnostics time out or fail.
 - Corrected labels under `Settings > Context > Compaction Token Limit`.
 - Fixed orphaned pages, iframes, and workers accumulating in the shared headless browser after abnormal OMP session termination.
+### Fixed
+
+- Model `todo({ op: "rm" })` abandons open work in place (like drop) so it cannot empty the settle ledger; user `/todo rm` still deletes.
+- RPC `set_todos` stamps abandoned rows as user-authored (`droppedBy: "user"`) so host cancels do not arm model-abandoned reminders.
+- Parent bash verify prefers a leading `cd` over a structured in-tree `cwd`, so `{ cwd: "/repo", command: "cd /tmp && bun test" }` no longer clears the latch.
+- Background bash re-key preserves the start-resolved cwd (does not overwrite with the running-ack structured cwd).
+- Leading `cd` prefixes that cannot be safely extracted (redirects, expansion) never clear the latch via session/structured cwd fallback.
+- Env/`sudo`/whitespace before `cd`, chained `cd … && cd …`, and `~` paths are resolved the same way as the bash tool for parent-verify cwd snaps.
+- Parent `eval` verify uses the session cwd when no explicit cwd is set (where the cell actually runs) and still rejects trivial expressions including `(1+1)` / `void 0`.
+- Duplicate background bash/eval terminals are not stashed after the verify snap clears, so a reused job id cannot clear a later latch from a stale early completion.
+- Early async terminals are stashed only while a bash/eval tool call still awaits its running-ack re-key; finished job ids are ignored so a hub redelivery cannot poison a later `bg_N` reuse.
+- `lsp` diagnostics waits that time out without a publish or pull report the server as failed (`failedServerCount`) instead of a clean `success: true` with zero errors.
+- Chained relative `cd` targets (`cd /tmp && cd project`) resolve cumulatively for parent-verify cwd snaps.
+- Relative leading `cd` targets resolve against the structured bash `cwd` (then session cwd), matching shell semantics for `{ cwd: "/tmp", command: "cd project && …" }`.
+- Shell-backgrounded verify commands (`bun test & true`) no longer clear the unverified-merge latch.
+- Status-masking verify chains (`bun test || true`, `bun test; true`, `bun test | cat`) no longer clear the unverified-merge latch.
+- Partial cherry-pick success before a later conflict still arms the parent verify latch (`hadAnyChanges`).
+- `/todo edit` and `/todo import` stamp Markdown `[-]`/`[~]` rows as user drops so settle does not treat them as model-abandoned work.
+- Parent `eval` no longer clears the unverified-merge latch on bare success: require an explicit cwd inside the merged tree and reject trivial expressions such as `1+1`.
+- Leading `cd <path>; …` (semicolon) is recognized for parent-verify cwd resolution, so `cd /tmp; bun test` no longer clears the latch as if it ran in-tree.
+- Isolated task merges now latch parent verification: child yield is not evidence. Each successful isolated apply adds one pending latch; one parent check cannot clear two overlapping merges. A successful parent `bash`/`eval` or clean `lsp` diagnostics result decrements the latch; `ls`/`pwd`/`echo` and error-bearing diagnostics do not. Stopping with an unverified merge continues the session like incomplete todos. Background bash/eval verification clears only when the async job completes successfully (including when hub consumes delivery). Session switches clear the latch and pending verify snapshots so a different cwd/transcript does not inherit them. Nested patch apply failures no longer report `applied: true` unless an earlier nested repo actually changed.
+- Armed the unverified-merge latch before temporary artifact cleanup so a cleanup failure cannot drop the settle gate after an isolated apply.
+- Merge-only todo reminders show an unverified-merge header instead of "0 incomplete todos", and ACP skips empty plan updates for those reminders.
+- `lsp` diagnostics now report `failedServerCount`; parent verify requires zero failed servers as well as zero error diagnostics. Workspace (`*`) diagnostics derive both counts from checker output. Targets with no configured language server count as failed attempts so they cannot falsely clear the latch.
+- Background bash/eval terminals that arrive before the running-ack re-key still clear the merge latch.
+- Env-prefixed tautologies (`FOO=1 pwd`) no longer clear the merge latch; bare assignment-only segments are also rejected.
+- The merge settle gate is skipped when no parent verify tools (`bash`/`eval`/`lsp`) are active.
+- Nested-only branch merges report `hadAnyChanges: false` until nested patches are actually applied.
+- Parent bash verify outside the session/repo tree (e.g. `cwd: /tmp`) no longer clears the unverified-merge latch. Model-abandoned todos stay incomplete for settle (user `droppedBy` cancels), so this gate does not revert the abandoned≠done contract.
+- Clean `lsp` diagnostics on a file outside the session/repo tree (e.g. `/tmp/clean.ts`) no longer clear the unverified-merge latch; workspace-wide `*` and in-tree targets still can.
+- Assistant questions or response cues no longer bypass an armed merge latch — settle still requires successful parent verify.
+- Parent bash verify also rejects relative escapes (`cwd: ../other-repo`) and leading `cd … &&` targets outside the merged tree when result details omit cwd.
+- `/todo drop` (TUI and ACP) stamps `droppedBy: "user"` so settle honors explicit user cancels; model `todo` drop ops remain unstamped. Restarting or model-dropping a previously user-canceled task clears the stale stamp.
+- Truncated LSP diagnostics globs (`success: false` when more than the target cap matched) no longer clear the unverified-merge latch.
+- Leading `cd <path> &&` / `;` wrappers are stripped before classifying bash verify tautologies (`cd packages/foo && pwd` is non-evidence).
+- Early async job terminals are stashed for merge-latch verify only when the job type is `bash` or `eval` (task/etc. are ignored).
+- `AgentStorage.close()` clears its in-flight guard when shutdown throws so a later retry can re-enter.
+- Dropped todos (`todo drop` / `abandoned`) no longer count as done for the stop-time reminder or the todo summary. Settle stays incomplete until those items are completed, blocked, or the user forces stop. User-issued `/todo drop` is stamped as user-authored and does not schedule a continue reminder. Newly abandoned checklist items from `/todo edit` or a fresh markdown import are stamped as user drops; a no-op edit of model-abandoned items stays incomplete for settle. Imports stamp every `[-]`/`[~]` as a user cancel even when replacing a list that already held a model drop with the same content. Later model broad drops no longer clear an existing user `droppedBy` stamp, and no longer reopen completed or blocked tasks; an explicit targeted `todo({ op: "drop", task })` can still abandon blocked or completed work. Model `todo rm` abandons open tasks in place (not completed/blocked/user-dropped), so it cannot silence the same gate; user `/todo rm` still deletes. User-authored drops also count as settled for HUD auto-clear. RPC `set_todos` stamps abandoned provenance against the prior list without stripping phase/task ids, notes, or details.
+- `AgentStorage.close()` is idempotent: a second process-wide close no longer throws `Database has closed` when tests (or overlapping sessions) race the singleton map.
+- Dropped todos (`todo drop` / `abandoned`) no longer count as done for the stop-time reminder or the todo summary. Settle stays incomplete until those items are completed, blocked, or the user forces stop. User-issued `/todo drop` is stamped as user-authored and does not schedule a continue reminder. Checklist `[-]`/`[~]` items from `/todo edit` or markdown import are also treated as user drops. Later model broad drops no longer clear an existing user `droppedBy` stamp. Model `todo rm` abandons in place instead of deleting, so it cannot silence the same gate; user `/todo rm` still deletes.
 
 ## [18.0.10] - 2026-08-28
 

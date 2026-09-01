@@ -179,6 +179,8 @@ export async function runEvalAgent(args: unknown, options: EvalAgentBridgeOption
 				`agent() isolated apply failed for ${result.id}${summary ? `: ${summary}` : ""}${recoveryHint}`,
 			);
 		}
+		// Latch is armed inside `runStructuredSubagent` before artifact cleanup —
+		// do not mark again here (would double-count overlapping merges).
 
 		const structuredOutput = result.structuredOutput;
 		const structured = structuredOutput?.source !== undefined && structuredOutput.source !== "none";

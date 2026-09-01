@@ -1803,6 +1803,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			getHindsightSessionState: () => session?.getHindsightSessionState(),
 			getMnemopiSessionState: () => session?.getMnemopiSessionState(),
 			getAgentId: () => resolvedAgentId,
+			noteUnverifiedMerge: () => session?.markUnverifiedMerge(),
+			observeAsyncJobTerminal: (jobId, jobType, status) => session?.observeAsyncJobTerminal(jobId, jobType, status),
 			getToolByName: name => session?.getToolByName(name),
 			getToolForEvalBridge: name => session?.getToolForEvalBridge(name),
 			getEvalBridgeToolNames: () => session?.getEvalBridgeToolNames() ?? [],

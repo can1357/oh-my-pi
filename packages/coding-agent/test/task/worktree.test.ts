@@ -980,9 +980,10 @@ describe("applyNestedPatches", () => {
 			"+v2\n";
 		const warnings = await applyNestedPatches(parentRepo, [{ relativePath: nestedRel, patch }]);
 
-		expect(warnings).toHaveLength(1);
-		expect(warnings[0]).toContain("could not be auto-restored");
-		expect(warnings[0]).toContain(nestedRel);
+		expect(warnings.warnings).toHaveLength(1);
+		expect(warnings.warnings[0]).toContain("could not be auto-restored");
+		expect(warnings.warnings[0]).toContain(nestedRel);
+		expect(warnings.applied).toBe(true);
 
 		// Commit landed and the stash entry is preserved for manual recovery.
 		const [committedFiles, stashList] = await Promise.all([

@@ -11,6 +11,8 @@
  * and arithmetic expansion are out of scope; callers fall through when they
  * cannot find the structure they need.
  */
+import * as path from "node:path";
+
 export function tokenizeShellSegments(command: string): string[][] {
 	const segments: string[][] = [];
 	let current: string[] = [];
@@ -232,16 +234,17 @@ const CD_TARGET_TERMINATORS: Record<string, true> = {
 };
 
 /**
- * Parses a leading `cd <path> && ...` prefix so the bash tool can route the
- * target through its structured `cwd` parameter when the model omits it.
+ * Parses a leading `cd <path> && ...` or `cd <path>; ...` prefix so the bash
+ * tool can route the target through its structured `cwd` parameter when the
+ * model omits it.
  *
  * Returns the single path token (quotes and backslash escapes resolved to their
- * literal value) and the command remainder after the top-level `&&`, or `null`
- * when the command does not begin with exactly `cd`, one path token, and a
- * top-level `&&`. The scanner deliberately bails on anything else in the prefix
- * — redirects (`cd /tmp 2>/dev/null && ...`), extra arguments, or paths needing
- * shell expansion (`$`, backticks, `(`) — leaving the whole command for the
- * shell instead of absorbing shell syntax into `cwd`.
+ * literal value) and the command remainder after the top-level `&&` or `;`, or
+ * `null` when the command does not begin with exactly `cd`, one path token, and
+ * a top-level `&&` / `;`. The scanner deliberately bails on anything else in
+ * the prefix — redirects (`cd /tmp 2>/dev/null && ...`), extra arguments, or
+ * paths needing shell expansion (`$`, backticks, `(`) — leaving the whole
+ * command for the shell instead of absorbing shell syntax into `cwd`.
  */
 export function extractLeadingCdTarget(command: string): { path: string; rest: string } | null {
 	const prefix = /^cd[ \t]+/.exec(command);
@@ -301,11 +304,272 @@ export function extractLeadingCdTarget(command: string): { path: string; rest: s
 	if (inSingle || inDouble || path.length === 0) return null;
 	// A path needing shell expansion can't be resolved literally through cwd.
 	if (/[$`(]/.test(path)) return null;
-	// Skip inter-token whitespace, then require a top-level `&&` (a single `&`,
-	// `||`, `;`, `|`, or a redirect all mean this is not a bare `cd <path>`).
+	// Skip inter-token whitespace, then require a top-level `&&` or `;`
+	// (a single `&`, `||`, `|`, or a redirect means this is not a bare `cd <path>`).
 	while (command[i] === " " || command[i] === "\t") i++;
-	if (command[i] !== "&" || command[i + 1] !== "&") return null;
-	i += 2;
+	if (command[i] === ";") {
+		i += 1;
+	} else if (command[i] === "&" && command[i + 1] === "&") {
+		i += 2;
+	} else {
+		return null;
+	}
 	while (command[i] === " " || command[i] === "\t") i++;
 	return { path, rest: command.slice(i) };
+}
+
+/** Strip leading `NAME=value` tokens and a single `sudo` for cwd/`cd` analysis. */
+export function stripLeadingEnvAndSudo(command: string): string {
+	let rest = command.trim();
+	while (/^[A-Za-z_][A-Za-z0-9_]*=/.test(rest)) {
+		const space = rest.search(/[ \t]/);
+		if (space < 0) return rest;
+		rest = rest.slice(space).trimStart();
+	}
+	return rest.replace(/^sudo[ \t]+/, "");
+}
+
+/**
+ * Walk a leading `cd … &&|; cd …` chain after env/sudo stripping.
+ * Returns the last extractable path (relative targets resolved against the
+ * preceding effective cwd), or `{ unresolvable: true }` when any leading `cd`
+ * cannot be safely extracted (redirects, expansion, extra args).
+ */
+/**
+ * True when a subshell / group / command substitution may change cwd without a
+ * leading top-level `cd` (e.g. `(cd /tmp && bun test)`). Callers that need a
+ * trusted verify cwd must treat these as unresolvable rather than falling back
+ * to the session/structured cwd.
+ */
+export function hasHiddenCwdChangeInShellGroup(command: string): boolean {
+	let inSingle = false;
+	let inDouble = false;
+	for (let i = 0; i < command.length; i++) {
+		const ch = command[i]!;
+		if (inSingle) {
+			if (ch === "'") inSingle = false;
+			continue;
+		}
+		if (inDouble) {
+			if (ch === "\\" && i + 1 < command.length) {
+				i++;
+				continue;
+			}
+			if (ch === '"') inDouble = false;
+			continue;
+		}
+		if (ch === "'") {
+			inSingle = true;
+			continue;
+		}
+		if (ch === '"') {
+			inDouble = true;
+			continue;
+		}
+		if (ch === "\\" && i + 1 < command.length) {
+			i++;
+			continue;
+		}
+		if (ch === "$" && command[i + 1] === "(") {
+			const end = findMatchingClose(command, i + 2, ")");
+			if (end >= 0 && commandWordCdIn(command.slice(i + 2, end))) return true;
+			if (end >= 0) i = end;
+			continue;
+		}
+		if (ch === "`") {
+			const end = command.indexOf("`", i + 1);
+			if (end > i && commandWordCdIn(command.slice(i + 1, end))) return true;
+			if (end > i) i = end;
+			continue;
+		}
+		if (ch === "(" || ch === "{") {
+			const close = ch === "(" ? ")" : "}";
+			const end = findMatchingClose(command, i + 1, close);
+			if (end >= 0 && commandWordCdIn(command.slice(i + 1, end))) return true;
+			if (end >= 0) i = end;
+		}
+	}
+	return false;
+}
+
+function findMatchingClose(command: string, start: number, close: string): number {
+	const open = close === ")" ? "(" : "{";
+	let depth = 1;
+	let inSingle = false;
+	let inDouble = false;
+	for (let i = start; i < command.length; i++) {
+		const ch = command[i]!;
+		if (inSingle) {
+			if (ch === "'") inSingle = false;
+			continue;
+		}
+		if (inDouble) {
+			if (ch === "\\" && i + 1 < command.length) {
+				i++;
+				continue;
+			}
+			if (ch === '"') inDouble = false;
+			continue;
+		}
+		if (ch === "'") {
+			inSingle = true;
+			continue;
+		}
+		if (ch === '"') {
+			inDouble = true;
+			continue;
+		}
+		if (ch === "\\" && i + 1 < command.length) {
+			i++;
+			continue;
+		}
+		if (ch === open) depth++;
+		else if (ch === close) {
+			depth--;
+			if (depth === 0) return i;
+		}
+	}
+	return -1;
+}
+
+/** True when `cd` appears as a shell command word (not inside a path/arg alone). */
+function commandWordCdIn(body: string): boolean {
+	return /(?:^|[\s;&|])cd(?:[\s;|&)]|$)/.test(body);
+}
+
+export function resolveLeadingCdChain(command: string): { path?: string; unresolvable?: boolean } {
+	if (hasHiddenCwdChangeInShellGroup(command)) return { unresolvable: true };
+	let rest = stripLeadingEnvAndSudo(command);
+	let lastPath: string | undefined;
+	let sawCd = false;
+	while (/^cd([ \t]|$)/.test(rest)) {
+		sawCd = true;
+		const cd = extractLeadingCdTarget(rest);
+		if (!cd) return { unresolvable: true };
+		lastPath = joinCdChainPath(lastPath, cd.path);
+		rest = cd.rest.trim();
+	}
+	if (sawCd && lastPath === undefined) return { unresolvable: true };
+	// A later `cd` after non-cd setup (`echo x && cd /tmp && bun test`) is not
+	# captured by the leading-only loop — treat as unresolvable so the latch
+	# cannot trust the structured/session cwd.
+	if (commandWordCdIn(rest)) return { unresolvable: true };
+	if (lastPath !== undefined) return { path: lastPath };
+	return {};
+}
+
+/**
+ * Resolve a subsequent `cd` target against the previous chain cwd.
+ * Absolute/`~` targets replace the chain; relative targets append.
+ */
+export function joinCdChainPath(base: string | undefined, next: string): string {
+	const trimmed = next.trim();
+	if (trimmed.startsWith("~") || path.isAbsolute(trimmed)) return trimmed;
+	if (base === undefined || base.trim() === "") return trimmed;
+	return path.join(base, trimmed);
+}
+
+/**
+ * True when the command contains a top-level shell background operator (`&`
+ * that is not part of `&&` and not part of redirection `>&` / `<&` / `&>`).
+ * Sync bash success then races the backgrounded work.
+ */
+export function hasTopLevelShellBackground(command: string): boolean {
+	let inSingle = false;
+	let inDouble = false;
+	for (let i = 0; i < command.length; i++) {
+		const ch = command[i]!;
+		if (inSingle) {
+			if (ch === "'") inSingle = false;
+			continue;
+		}
+		if (inDouble) {
+			if (ch === "\\" && i + 1 < command.length) {
+				i++;
+				continue;
+			}
+			if (ch === '"') inDouble = false;
+			continue;
+		}
+		if (ch === "'") {
+			inSingle = true;
+			continue;
+		}
+		if (ch === '"') {
+			inDouble = true;
+			continue;
+		}
+		if (ch === "\\" && i + 1 < command.length) {
+			i++;
+			continue;
+		}
+		if (ch === "&") {
+			if (command[i + 1] === "&") {
+				i++;
+				continue;
+			}
+			// Redirection: `2>&1`, `>&2`, `<&0`, `&>file`, `&>>file`.
+			const prev = i > 0 ? command[i - 1] : "";
+			if (prev === ">" || prev === "<") continue;
+			if (command[i + 1] === ">") {
+				i++;
+				continue;
+			}
+			return true;
+		}
+	}
+	return false;
+}
+
+/**
+ * True when the command contains a top-level status-masking operator (`||`,
+ * `;`, or `|`) so a trailing `true` / pipe consumer can report exit 0 even when
+ * the real check failed. `&&` is not masking — failure short-circuits.
+ */
+export function hasTopLevelStatusMaskingOperator(command: string): boolean {
+	let inSingle = false;
+	let inDouble = false;
+	for (let i = 0; i < command.length; i++) {
+		const ch = command[i]!;
+		if (inSingle) {
+			if (ch === "'") inSingle = false;
+			continue;
+		}
+		if (inDouble) {
+			if (ch === "\\" && i + 1 < command.length) {
+				i++;
+				continue;
+			}
+			if (ch === '"') inDouble = false;
+			continue;
+		}
+		if (ch === "'") {
+			inSingle = true;
+			continue;
+		}
+		if (ch === '"') {
+			inDouble = true;
+			continue;
+		}
+		if (ch === "\\" && i + 1 < command.length) {
+			i++;
+			continue;
+		}
+		if (ch === ";") return true;
+		if (ch === "|") {
+			if (command[i + 1] === "|") return true;
+			return true;
+		}
+	}
+	return false;
+}
+
+/**
+ * True when the command begins with `cd` but {@link extractLeadingCdTarget}
+ * cannot safely resolve the path (redirects, extra args, expansion). The shell
+ * still changes directory — callers that need a trusted cwd must treat this as
+ * unverifiable rather than falling back to the session/structured cwd.
+ */
+export function hasUnresolvableLeadingCdPrefix(command: string): boolean {
+	return resolveLeadingCdChain(command).unresolvable === true;
 }

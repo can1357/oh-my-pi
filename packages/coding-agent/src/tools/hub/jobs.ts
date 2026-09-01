@@ -213,6 +213,12 @@ export function buildJobResult(
 	const alreadyConsumed = new Set(jobResults.filter(job => manager.isJobResultConsumed(job.id)).map(job => job.id));
 
 	manager.consumeJobResults(jobResults.filter(j => j.status !== "running").map(j => j.id));
+	// Hub recovery suppresses auto-delivery; still observe terminal bash/eval so the
+	// unverified-merge latch clears when verification succeeded via this snapshot.
+	for (const job of jobResults) {
+		if (job.status === "running") continue;
+		session.observeAsyncJobTerminal?.(job.id, job.type, job.status);
+	}
 
 	const completed = jobResults.filter(j => j.status !== "running");
 	const running = jobResults.filter(j => j.status === "running");

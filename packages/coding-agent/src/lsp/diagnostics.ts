@@ -239,11 +239,21 @@ function requestDocumentDiagnostics(
 		});
 }
 
+/** Outcome of waiting for an authoritative diagnostics publish or pull. */
+export type WaitForDiagnosticsResult = {
+	diagnostics: Diagnostic[];
+	/**
+	 * True when the wait budget expired with neither a publish nor a successful
+	 * pull — callers must not treat this as a clean empty diagnostic set.
+	 */
+	timedOut: boolean;
+};
+
 export async function waitForDiagnostics(
 	client: LspClient,
 	uri: string,
 	options: WaitForDiagnosticsOptions = {},
-): Promise<Diagnostic[]> {
+): Promise<WaitForDiagnosticsResult> {
 	const { timeoutMs = 3000, signal, minVersion, expectedDocumentVersion, settleMs = DIAGNOSTICS_SETTLE_MS } = options;
 	const deadline = Date.now() + timeoutMs;
 	let pullAttempted = false;
@@ -264,7 +274,7 @@ export async function waitForDiagnostics(
 		if (published && versionOk) {
 			// Server honored our exact document version → authoritative, accept now.
 			if (expectedDocumentVersion !== undefined && published.version === expectedDocumentVersion) {
-				return published.diagnostics;
+				return { diagnostics: published.diagnostics, timedOut: false };
 			}
 			// Unversioned/mismatched publish: wait for the stream to go quiet so an
 			// in-flight publish for the pre-edit content is superseded by the fresh one.
@@ -272,7 +282,7 @@ export async function waitForDiagnostics(
 				settledRef = published;
 				settledAt = Date.now();
 			} else if (Date.now() - settledAt >= settleMs) {
-				return published.diagnostics;
+				return { diagnostics: published.diagnostics, timedOut: false };
 			}
 		}
 
@@ -300,10 +310,10 @@ export async function waitForDiagnostics(
 	const published = client.diagnostics.get(uri);
 	if (published && versionOk) {
 		if (expectedDocumentVersion !== undefined && published.version === expectedDocumentVersion) {
-			return published.diagnostics;
+			return { diagnostics: published.diagnostics, timedOut: false };
 		}
 		if (published === settledRef && Date.now() - settledAt >= settleMs) {
-			return published.diagnostics;
+			return { diagnostics: published.diagnostics, timedOut: false };
 		}
 	}
 	if (pullResultPromise) {
@@ -318,14 +328,14 @@ export async function waitForDiagnostics(
 		if (pullFailure !== undefined) {
 			throw pullFailure instanceof Error ? pullFailure : new Error(String(pullFailure));
 		}
-		return [];
+		return { diagnostics: [], timedOut: true };
 	}
 	client.diagnostics.set(uri, {
 		diagnostics: pulled,
 		version: expectedDocumentVersion ?? client.openFiles.get(uri)?.version ?? null,
 	});
 	client.diagnosticsVersion += 1;
-	return pulled;
+	return { diagnostics: pulled, timedOut: false };
 }
 
 /** Result from getDiagnosticsForFile */
@@ -457,13 +467,16 @@ export async function getDiagnosticsForFile(
 				// Content already synced + didSave sent, wait for fresh diagnostics
 				const minVersion = minVersions?.get(serverName);
 				const expectedDocumentVersion = expectedDocumentVersions?.get(serverName);
-				const diagnostics = await waitForDiagnostics(client, uri, {
+				const waited = await waitForDiagnostics(client, uri, {
 					timeoutMs: waitBudgetMs,
 					signal: boundSignal,
 					minVersion,
 					expectedDocumentVersion,
 				});
-				return { serverName, serverConfig, diagnostics };
+				if (waited.timedOut) {
+					throw new Error(`Diagnostics wait timed out for ${serverName}`);
+				}
+				return { serverName, serverConfig, diagnostics: waited.diagnostics };
 			});
 		}),
 	);

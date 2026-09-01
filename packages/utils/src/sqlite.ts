@@ -9,9 +9,38 @@
  */
 import type { Database } from "bun:sqlite";
 
+/** True when bun:sqlite rejected a call because the Database was already closed. */
+export function isSqliteClosedError(err: unknown): boolean {
+	return err instanceof Error && err.message.includes("Database has closed");
+}
+
+/**
+ * Benign WAL-checkpoint I/O failures from temp-directory teardown races.
+ * Real durability failures (`SQLITE_IOERR_WRITE` / `_FSYNC` / `_TRUNCATE`, …)
+ * must still propagate.
+ */
+function isBenignCheckpointIoError(err: unknown): boolean {
+	if (err === null || typeof err !== "object" || !("code" in err) || typeof err.code !== "string") {
+		return false;
+	}
+	const code = err.code;
+	return (
+		code === "SQLITE_IOERR_VNODE" ||
+		code === "SQLITE_IOERR_DELETE" ||
+		code === "SQLITE_IOERR_DELETE_NOENT"
+	);
+}
+
 /** Checkpoints committed WAL frames without waiting for concurrent readers. */
 export function checkpointWal(db: Database): void {
-	db.run("PRAGMA wal_checkpoint(PASSIVE)");
+	try {
+		db.run("PRAGMA wal_checkpoint(PASSIVE)");
+	} catch (err) {
+		// Close races: the handle is already gone, or the temp file was unlinked
+		// (SQLITE_IOERR_VNODE / DELETE*) while another test tore down the directory.
+		if (isSqliteClosedError(err) || isBenignCheckpointIoError(err)) return;
+		throw err;
+	}
 }
 
 /**
