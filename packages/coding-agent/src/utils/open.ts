@@ -103,10 +103,18 @@ export function openCommandFor(target: string): string[] | undefined {
 	}
 }
 
-/** Open a URL or file path in the default browser/application. Best-effort, never throws. */
-export function openPath(urlOrPath: string): void {
+/**
+ * Open a URL or file path in the default browser/application. Best-effort,
+ * never throws.
+ *
+ * Returns whether a launch was attempted: `false` means `BROWSER=none`
+ * suppressed it, and the caller should present the URL itself rather than
+ * telling the user a browser is opening. A `true` still carries no guarantee
+ * the opener succeeded, only that it was invoked.
+ */
+export function openPath(urlOrPath: string): boolean {
 	const cmd = openCommandFor(urlOrPath);
-	if (!cmd) return;
+	if (!cmd) return false;
 	let child: Bun.Subprocess | undefined;
 	try {
 		child = Bun.spawn(cmd, {
@@ -124,7 +132,7 @@ export function openPath(urlOrPath: string): void {
 			target: urlOrPath,
 			error: error instanceof Error ? error.message : String(error),
 		});
-		return;
+		return true;
 	}
 	// Detect delayed failures (exec succeeded but the opener exited non-zero)
 	// without blocking the caller. Recording them makes silent misconfigurations
@@ -144,4 +152,5 @@ export function openPath(urlOrPath: string): void {
 			// Ignore — awaiting the subprocess is best-effort telemetry.
 		},
 	);
+	return true;
 }

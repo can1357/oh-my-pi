@@ -933,8 +933,10 @@ export class MCPCommandController {
 						// `openPath` is best-effort — it logs spawn failures but never
 						// throws, so we always render the copy-URL fallback beneath the
 						// "attempting to open browser" line and no earlier try/catch is
-						// worth keeping.
-						openPath(info.url);
+						// worth keeping. `false` means BROWSER=none suppressed the
+						// launch, and saying a browser is opening would leave the user
+						// waiting for one that never comes.
+						const launched = openPath(info.url);
 						// Stage the FULL authorization URL on the clipboard via OSC 52.
 						// The full URL works from any machine (unlike `launchUrl`, which
 						// only resolves against the OMP host), and OSC 52 is a
@@ -944,9 +946,15 @@ export class MCPCommandController {
 						// whether or not the terminal honors OSC 52.
 						void copyToClipboard(info.url).catch(() => {});
 						block.addChild(new Spacer(1));
-						block.addChild(new Text(theme.fg("success", "→ Attempting to open browser..."), 1, 0));
+						block.addChild(
+							launched
+								? new Text(theme.fg("success", "→ Attempting to open browser..."), 1, 0)
+								: new Text(theme.fg("muted", "→ Browser launch disabled by BROWSER=none. Open the URL below."), 1, 0),
+						);
 						block.addChild(new Spacer(1));
-						block.addChild(new Text(theme.fg("muted", "Alternative if browser did not open:"), 1, 0));
+						block.addChild(
+							new Text(theme.fg("muted", launched ? "Alternative if browser did not open:" : "Log in at:"), 1, 0),
+						);
 						block.addChild(new MCPAuthorizationLinkPrompt(info.url, info.launchUrl));
 						this.ctx.ui.requestRender();
 					},
