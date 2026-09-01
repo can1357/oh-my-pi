@@ -9,6 +9,7 @@ const CREDENTIAL_SCOPED_MODEL_CACHE_PROVIDERS: Readonly<Record<string, true>> = 
 	"opencode-go": true,
 	"opencode-zen": true,
 	"github-copilot": true,
+	openllm: true,
 };
 
 /** Whether a provider's model-cache namespace requires its resolved credential. */
@@ -22,6 +23,8 @@ export function getDefaultModelDiscoveryBaseUrl(providerId: string): string | un
 			return "http://127.0.0.1:11434";
 		case "litellm":
 			return Bun.env.LITELLM_BASE_URL ?? "http://localhost:4000/v1";
+		case "openllm":
+			return Bun.env.OPENLLM_BASE_URL ?? "https://openllm.sh/v1";
 		case "opencode-go":
 			return "https://opencode.ai/zen/go/v1";
 		case "opencode-zen":
@@ -86,6 +89,13 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 			const baseUrl = options.baseUrl ?? PERSONAL_GITHUB_COPILOT_BASE_URL;
 			const scope = `${options.apiKey ?? ""}\u0000${baseUrl}`;
 			return `github-copilot:models-v1:${Bun.hash(scope).toString(36)}`;
+		}
+		case "openllm": {
+			// OpenLLM catalogs are per-account and per-endpoint (hosted gateway vs
+			// local daemon), so scope the cache to the credential and base URL.
+			const baseUrl = options.baseUrl ?? getDefaultModelDiscoveryBaseUrl(providerId)!;
+			const scope = `${options.apiKey ?? ""}\u0000${baseUrl}`;
+			return `openllm:models-v1:${Bun.hash(scope).toString(36)}`;
 		}
 		case "openrouter":
 			return "openrouter:pseudo-api";

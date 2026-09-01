@@ -140,6 +140,7 @@ Each provider has one or more environment variables that supply a key when no st
 | `aimlapi`                        | `AIMLAPI_API_KEY`                                                             |
 | `gitlab-duo`, `gitlab-duo-agent` | `GITLAB_TOKEN`                                                                |
 | `opencode-zen`, `opencode-go`    | `OPENCODE_API_KEY`                                                            |
+| `openllm`                        | `OPENLLM_API_KEY`; optional `OPENLLM_BASE_URL` for the gateway endpoint       |
 | `cline-pass`                     | `CLINE_API_KEY`                                                               |
 | `firepass`                       | `FIREPASS_API_KEY`                                                            |
 | `wafer-serverless`               | `WAFER_SERVERLESS_API_KEY`                                                    |
