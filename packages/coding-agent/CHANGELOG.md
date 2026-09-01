@@ -23,6 +23,7 @@
 - Fixed an issue where custom model overrides were lost during configuration updates
 - Fixed "Please use nerdfont" notification incorrectly persisting after theme configuration
 - Fixed sampling parameter errors for newer Anthropic models (Opus 4.7+, Sonnet 5+)
+- Fixed custom task agents configured with `model: inherit` failing before their first prompt and preserved explicit thinking suffixes when inheriting the active session model ([#10322](https://github.com/can1357/oh-my-pi/pull/10322) by [@SiaoZeng](https://github.com/SiaoZeng)).
 
 ## [18.0.11] - 2026-08-29
 

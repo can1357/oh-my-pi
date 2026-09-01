@@ -1076,15 +1076,30 @@ export function resolveExplicitModelRole(
 	return undefined;
 }
 
-function isSessionInheritedAgentPattern(value: string): boolean {
-	return (
-		value === DEFAULT_MODEL_ROLE ||
-		value === formatModelRoleAlias(DEFAULT_MODEL_ROLE) ||
-		value === DEFAULT_MODEL_ROLE_ALIAS ||
-		value === `${LEGACY_MODEL_ROLE_ALIAS_PREFIX}${DEFAULT_MODEL_ROLE}` ||
-		value === formatModelRoleAlias("task") ||
-		value === `${LEGACY_MODEL_ROLE_ALIAS_PREFIX}task`
+interface SessionInheritedAgentPattern {
+	base: string;
+	inherits: boolean;
+	thinkingLevel: ConfiguredThinkingLevel | undefined;
+}
+
+function parseSessionInheritedAgentPattern(value: string): SessionInheritedAgentPattern {
+	const { base, level } = splitThinkingSuffix(
+		value,
+		modelRoleAliasPrefixLength(value) ?? LEGACY_MODEL_ROLE_ALIAS_PREFIX.length,
+		MAX_THINKING_SUFFIX_OPTIONS,
 	);
+	return {
+		base,
+		inherits:
+			base === "inherit" ||
+			base === DEFAULT_MODEL_ROLE ||
+			base === formatModelRoleAlias(DEFAULT_MODEL_ROLE) ||
+			base === DEFAULT_MODEL_ROLE_ALIAS ||
+			base === `${LEGACY_MODEL_ROLE_ALIAS_PREFIX}${DEFAULT_MODEL_ROLE}` ||
+			base === formatModelRoleAlias("task") ||
+			base === `${LEGACY_MODEL_ROLE_ALIAS_PREFIX}task`,
+		thinkingLevel: level,
+	};
 }
 
 function shouldInheritDefaultBeforePriority(role: ModelRole): boolean {
@@ -1244,20 +1259,24 @@ function resolveEffectiveAgentModelSelection(
 	const normalizedAgentPatterns = normalizeModelPatternList(agentModel);
 	const configuredAgentPatterns = resolveConfiguredModelPatterns(agentModel, settings);
 	const singleAgentPattern = normalizedAgentPatterns.length === 1 ? normalizedAgentPatterns[0] : undefined;
-	const agentInheritsSessionModel = singleAgentPattern ? isSessionInheritedAgentPattern(singleAgentPattern) : false;
+	const inheritedAgentPattern = singleAgentPattern ? parseSessionInheritedAgentPattern(singleAgentPattern) : undefined;
 	if (configuredAgentPatterns.length > 0) {
 		if (
-			singleAgentPattern === formatModelRoleAlias("task") ||
-			singleAgentPattern === `${LEGACY_MODEL_ROLE_ALIAS_PREFIX}task`
+			inheritedAgentPattern?.base === formatModelRoleAlias("task") ||
+			inheritedAgentPattern?.base === `${LEGACY_MODEL_ROLE_ALIAS_PREFIX}task`
 		) {
 			return { source: agentModel, patterns: configuredAgentPatterns };
 		}
-		if (!agentInheritsSessionModel) return { source: agentModel, patterns: configuredAgentPatterns };
+		if (!inheritedAgentPattern?.inherits) return { source: agentModel, patterns: configuredAgentPatterns };
 	}
 
 	const fallback =
 		activeModelPattern?.trim() || fallbackModelPattern?.trim() || settings?.getModelRole("default")?.trim() || "";
-	return { patterns: resolveConfiguredModelPatterns(fallback, settings) };
+	const fallbackPatterns = resolveConfiguredModelPatterns(fallback, settings);
+	if (!inheritedAgentPattern?.thinkingLevel) return { patterns: fallbackPatterns };
+	return {
+		patterns: fallbackPatterns.map(pattern => formatModelSelectorValue(pattern, inheritedAgentPattern.thinkingLevel)),
+	};
 }
 
 /** Effective agent model patterns paired with the pre-expansion role alias behind them. */

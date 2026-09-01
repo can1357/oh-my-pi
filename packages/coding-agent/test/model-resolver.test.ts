@@ -1055,6 +1055,93 @@ describe("resolveAgentModelPatterns", () => {
 		expect(result).toEqual(["openai/gpt-4o"]);
 	});
 
+	test("treats literal inherit as the active session model sentinel", () => {
+		const settings = Settings.isolated({
+			modelRoles: { default: "anthropic/claude-sonnet-4-5" },
+		});
+
+		expect(
+			resolveAgentModelSelection({
+				agentModel: "inherit",
+				settings,
+				activeModelPattern: "openai-codex/gpt-5.6-sol",
+			}),
+		).toEqual({
+			patterns: ["openai-codex/gpt-5.6-sol"],
+			role: undefined,
+		});
+	});
+
+	test("applies an inherited role suffix to the active session model", () => {
+		const settings = Settings.isolated({
+			modelRoles: { default: "anthropic/claude-sonnet-4-5" },
+		});
+
+		expect(
+			resolveAgentModelPatterns({
+				agentModel: "@default:high",
+				settings,
+				activeModelPattern: "openai-codex/gpt-5.6-sol",
+			}),
+		).toEqual(["openai-codex/gpt-5.6-sol:high"]);
+	});
+
+	test("preserves a literal :max model id when applying an inherited thinking suffix", () => {
+		const settings = Settings.isolated({
+			modelRoles: { default: "anthropic/claude-sonnet-4-5" },
+		});
+
+		const [pattern] = resolveAgentModelPatterns({
+			agentModel: "@default:high",
+			settings,
+			activeModelPattern: "nanogpt/coding-router:max",
+		});
+		expect(pattern).toBe("nanogpt/coding-router:max:high");
+
+		const resolved = parseModelPattern(pattern, mockMaxSuffixModels);
+		expect(resolved.model?.id).toBe("coding-router:max");
+		expect(resolved.thinkingLevel).toBe(Effort.High);
+	});
+
+	test("overrides a configured fallback thinking suffix without losing the model", () => {
+		const settings = Settings.isolated({
+			modelRoles: { default: "openai/gpt-4o:low" },
+		});
+
+		const [pattern] = resolveAgentModelPatterns({ agentModel: "@default:high", settings });
+		expect(pattern).toBe("openai/gpt-4o:low:high");
+
+		const resolved = parseModelPattern(pattern, mockModels);
+		expect(resolved.model?.id).toBe("gpt-4o");
+		expect(resolved.thinkingLevel).toBe(Effort.High);
+	});
+
+	test("preserves a configured fallback model id ending in :max", () => {
+		const settings = Settings.isolated({
+			modelRoles: { default: "nanogpt/coding-router:max" },
+		});
+
+		const [pattern] = resolveAgentModelPatterns({ agentModel: "@default:high", settings });
+		expect(pattern).toBe("nanogpt/coding-router:max:high");
+
+		const resolved = parseModelPattern(pattern, mockMaxSuffixModels);
+		expect(resolved.model?.id).toBe("coding-router:max");
+		expect(resolved.thinkingLevel).toBe(Effort.High);
+	});
+
+	test("preserves a configured fallback model id ending in :low", () => {
+		const settings = Settings.isolated({
+			modelRoles: { default: "nanogpt/coding-router:low" },
+		});
+
+		const [pattern] = resolveAgentModelPatterns({ agentModel: "@default:high", settings });
+		expect(pattern).toBe("nanogpt/coding-router:low:high");
+
+		const resolved = parseModelPattern(pattern, mockMaxSuffixModels);
+		expect(resolved.model?.id).toBe("coding-router:low");
+		expect(resolved.thinkingLevel).toBe(Effort.High);
+	});
+
 	test("uses the configured task role before falling back to the session model", () => {
 		const settings = Settings.isolated({
 			modelRoles: {
