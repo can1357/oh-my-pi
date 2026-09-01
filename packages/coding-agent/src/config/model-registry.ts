@@ -799,7 +799,17 @@ export class ModelRegistry {
 			const credential = this.authStorage.getOAuthCredential(providerName);
 			if (!credential) continue;
 			try {
-				projected = modifyModels(structuredClone(projected), credential);
+				// Live command-backed headers are a Proxy, which structuredClone
+				// rejects. Materialize only header-bearing models before cloning so
+				// modifier hooks still get an isolated, mutable catalog snapshot.
+				let cloneableModels = projected;
+				for (let index = 0; index < projected.length; index += 1) {
+					const model = projected[index]!;
+					if (!model.headers) continue;
+					if (cloneableModels === projected) cloneableModels = [...projected];
+					cloneableModels[index] = { ...model, headers: { ...model.headers } };
+				}
+				projected = modifyModels(structuredClone(cloneableModels), credential);
 			} catch (error) {
 				this.#warnModelModifierFailure(providerName, error instanceof Error ? error.message : String(error));
 			}

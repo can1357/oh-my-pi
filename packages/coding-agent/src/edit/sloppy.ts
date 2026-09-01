@@ -183,7 +183,9 @@ export async function computeSloppySectionDiff(section: SloppySection, cwd: stri
 		const rawContent = await readEditFileText(absolutePath, section.path);
 		const normalizedContent = normalizeToLF(stripBom(rawContent).text);
 		const newContent = sloppyVariant.apply(normalizedContent, normalizeToLF(section.body), { path: section.path });
-		return generateDiffString(normalizedContent, newContent, undefined, { path: section.path });
+		return generateDiffString(normalizedContent, newContent, undefined, {
+			path: section.path,
+		});
 	} catch (error) {
 		return { error: error instanceof Error ? error.message : String(error) };
 	}
@@ -279,6 +281,8 @@ interface Operation {
 	desiredState?: boolean;
 	/** Post-apply advisory for a formally invalid payload recovered at parse time. */
 	recoveryNote?: string;
+	/** Marker-line op whose MATCH found the file only after whitespace normalization. */
+	whitespaceMatched?: boolean;
 }
 
 interface LiteralToken {
@@ -848,6 +852,27 @@ function hasMarkerLines(patternText: string): boolean {
 			line => markerLineContent(line, ADD_LINE) !== undefined || markerLineContent(line, REMOVE_LINE) !== undefined,
 		);
 }
+/**
+ * Non-marker MATCH lines of a marker-line op whose visible text appears
+ * nowhere in the file even whitespace-ignored: almost always new text missing
+ * its `＋` marker rather than a misquoted anchor.
+ */
+function missingUnmarkedLines(content: string, sourcePatternText: string): string[] {
+	const haystack = normalizeText(content).text;
+	const missing: string[] = [];
+	for (const line of sourcePatternText.split("\n")) {
+		if (markerLineContent(line, ADD_LINE) !== undefined || markerLineContent(line, REMOVE_LINE) !== undefined)
+			continue;
+		if (line.includes(SELECT_OPEN) || line.includes(SELECT_CLOSE)) continue;
+		const fragments = line
+			.split(GAP)
+			.map(fragment => normalizeText(fragment).text)
+			.filter(fragment => fragment !== "");
+		if (fragments.length === 0) continue;
+		if (fragments.some(fragment => !haystack.includes(fragment))) missing.push(line.trim());
+	}
+	return missing;
+}
 
 /**
  * True when `added` is a near-variant of `anchor`: same line mutated rather
@@ -1017,7 +1042,10 @@ function recoverDirectiveRewrite(
 			let from = 0;
 			for (let at = segment.text.indexOf(old, from); at !== -1; at = segment.text.indexOf(old, from)) {
 				if (at > from) rewritten.push({ text: segment.text.slice(from, at), locked: false });
-				rewritten.push({ text: `${SELECT_OPEN}${old}${SELECT_DIVIDER}${next}${SELECT_CLOSE}`, locked: true });
+				rewritten.push({
+					text: `${SELECT_OPEN}${old}${SELECT_DIVIDER}${next}${SELECT_CLOSE}`,
+					locked: true,
+				});
 				matchedAny = true;
 				from = at + old.length;
 			}
@@ -1177,6 +1205,33 @@ function parseOperations(input: string, content: string): Operation[] {
 			operations.push(createOperation(sourcePatternText, "", allMatches, operations.length + 1, false));
 			return;
 		}
+		// A REWRITE whose every non-blank line is a `＋` add line is the
+		// add-only diff hunk habit: it means "keep MATCH, insert these lines
+		// after it". Stripping the markers and replacing the MATCH would
+		// silently delete the matched text.
+		if (!hasInlineSelection(sourcePatternText) && !hasMarkerLines(sourcePatternText)) {
+			const body = [...rewriteLines];
+			while (body[0]?.trim() === "") body.shift();
+			while (body.at(-1)?.trim() === "") body.pop();
+			const addOnly =
+				normalizeText(sourcePatternText).text !== "" &&
+				body.some(line => markerLineContent(line, ADD_LINE) !== undefined) &&
+				body.every(line => line.trim() === "" || markerLineContent(line, ADD_LINE) !== undefined);
+			if (addOnly) {
+				const insertion = body.map(line => (line.trim() === "" ? ADD_LINE : line));
+				const operation = createOperation(
+					`${sourcePatternText}\n${insertion.join("\n")}`,
+					"",
+					allMatches,
+					operations.length + 1,
+					false,
+				);
+				const note = `Note: operation ${operations.length + 1}'s REWRITE contained only ${ADD_LINE} add lines; they were inserted after the kept MATCH. A REWRITE replaces the MATCH with its stated final text — to insert, drop ${REWRITE_HEADER} and put the ${ADD_LINE} lines directly in the operation.`;
+				operation.recoveryNote = operation.recoveryNote ? `${note}\n${operation.recoveryNote}` : note;
+				operations.push(operation);
+				return;
+			}
+		}
 		operations.push(createOperation(sourcePatternText, rewriteText, allMatches, operations.length + 1, true));
 	};
 	const pendingSeparatorErrors = new Map<number, string>();
@@ -1291,10 +1346,14 @@ function parseOperations(input: string, content: string): Operation[] {
 				return;
 			}
 		}
-		const needsSeparator = `Operation ${operations.length + 1} needs ${REWRITE_HEADER}.\nCopy-ready corrected payload (fill in the new text):\n${[...lines.slice(0, endIndex), REWRITE_HEADER, "<new text>", ...lines.slice(endIndex)].join("\n")}`;
+		const normalizedPattern = normalizeText(sourcePatternText).text;
+		const contextEcho =
+			normalizedPattern !== "" && normalizeText(content).text.includes(normalizedPattern)
+				? "\nIts lines already exist in the file unchanged — if this operation only restated context, delete it; anchors belong inside the operation that edits them."
+				: "";
+		const needsSeparator = `Operation ${operations.length + 1} needs ${REWRITE_HEADER}.${contextEcho}\nCopy-ready corrected payload (fill in the new text):\n${[...lines.slice(0, endIndex), REWRITE_HEADER, "<new text>", ...lines.slice(endIndex)].join("\n")}`;
 		// A multiline pattern-only block may be the delete half of a move; assume
 		// deletion now, justified post-parse only when another op re-emits it.
-		const normalizedPattern = normalizeText(sourcePatternText).text;
 		if (!sourcePatternText.includes("\n") || normalizedPattern.length < 24) {
 			throw new Error(needsSeparator);
 		}
@@ -1640,7 +1699,12 @@ function exactOccurrences(content: string, pattern: string): Occurrence[] {
 	while (from <= content.length - pattern.length) {
 		const start = content.indexOf(pattern, from);
 		if (start === -1) break;
-		occurrences.push({ start, end: start + pattern.length, distance: 0, punctuationEdits: 0 });
+		occurrences.push({
+			start,
+			end: start + pattern.length,
+			distance: 0,
+			punctuationEdits: 0,
+		});
 		from = start + 1;
 	}
 	return occurrences;
@@ -2099,7 +2163,12 @@ function closestFragment(
 	token: LiteralToken,
 	centerOffset?: number,
 ): { text: string; offset: number; score: number } {
-	const ranked: Array<{ line: string; offset: number; normalized: NormalizedText; score: number }> = [];
+	const ranked: Array<{
+		line: string;
+		offset: number;
+		normalized: NormalizedText;
+		score: number;
+	}> = [];
 	const centerLine = centerOffset === undefined ? undefined : lineNumberAt(content, centerOffset) - 1;
 	let offset = 0;
 	let lineIndex = 0;
@@ -2234,7 +2303,15 @@ function noMatchGuidance(
 	additionRetry?: string;
 } {
 	const literals = pattern.tokens.flatMap((token, index) =>
-		token.kind === "literal" ? [{ index, token, occurrences: occurrencesForLiteral(normalized, token) }] : [],
+		token.kind === "literal"
+			? [
+					{
+						index,
+						token,
+						occurrences: occurrencesForLiteral(normalized, token),
+					},
+				]
+			: [],
 	);
 	const missing = literals.find(literal => literal.occurrences.length === 0);
 	if (missing) {
@@ -2445,11 +2522,11 @@ function locate(
 	if (raw.overflow) {
 		throw new Error(`Operation ${operationNumber} pattern is too broad; add another distinctive ${GAP} fragment.`);
 	}
-	if (raw.candidates.length === 0 && hasMarkerLines(operation.sourcePatternText)) {
-		throw new Error(
-			`Operation ${operationNumber} adds or removes whole lines but MATCH did not match byte-for-byte. Re-read the region and copy its exact indentation.`,
-		);
-	}
+	// Marker-line ops (`＋`/`－`) ride the same raw → normalized ladder as
+	// every other op: whitespace drift in anchors must not block a whole-line
+	// insertion. Character-level fuzzy stays off for them — a drifted anchor
+	// would splice new lines at a similar-but-wrong site.
+	const markerOp = hasMarkerLines(operation.sourcePatternText);
 	if (raw.candidates.length === 0 && pattern.literalFallback) {
 		const exact = exactOccurrences(normalized.text, pattern.literalFallback.normalized);
 		if (exact.length > 0 && (operation.all || exact.length === 1)) {
@@ -2478,11 +2555,12 @@ function locate(
 					tuple: [occurrence.start],
 				};
 			});
+			if (markerOp) operation.whitespaceMatched = true;
 			return operation.all ? fallbackCandidates : [fallbackCandidates[0]];
 		}
 	}
 	let result = raw.candidates.length > 0 ? raw : collectCandidates(content, normalized, pattern, "normalized");
-	if (result.candidates.length === 0 && !result.overflow) {
+	if (result.candidates.length === 0 && !result.overflow && !markerOp) {
 		result = collectCandidates(content, normalized, pattern, "fuzzy");
 		if (result.candidates.length === 0 && !result.overflow && !operation.all) {
 			const punctuationTolerant = collectCandidates(content, normalized, pattern, "fuzzy", true);
@@ -2491,6 +2569,7 @@ function locate(
 			}
 		}
 	}
+	if (markerOp && raw.candidates.length === 0 && result.candidates.length > 0) operation.whitespaceMatched = true;
 	if (result.overflow) {
 		throw new Error(`Operation ${operationNumber} pattern is too broad; add another distinctive ${GAP} fragment.`);
 	}
@@ -2538,11 +2617,22 @@ function locate(
 			);
 		}
 		const guidance = noMatchGuidance(content, normalized, pattern, operation);
+		const missingLines = markerOp ? missingUnmarkedLines(content, operation.sourcePatternText) : [];
 		throw new Error(
 			[
 				operation.all
 					? `Operation ${operationNumber} ${OPENER}* found 0 matches in ${path}. ${guidance.reason}`
 					: `Operation ${operationNumber} did not match ${path}. ${guidance.reason}`,
+				...(missingLines.length > 0
+					? [
+							`Unmarked MATCH lines must already exist in the file; ${missingLines
+								.slice(0, 3)
+								.map(line => displayFragment(line))
+								.join(
+									", ",
+								)}${missingLines.length > 3 ? ", …" : ""} ${missingLines.length === 1 ? "does" : "do"} not. Copy real lines from the file, and mark new lines to insert with ${ADD_LINE}.`,
+						]
+					: []),
 				"Current file content near the closest match (no re-read needed):",
 				numberedPreview(content, guidance.previewOffset),
 				...(guidance.copyReady && standaloneOperation
@@ -2571,7 +2661,10 @@ function locate(
 				}
 				let result = content;
 				const substitutions = candidate.selectionSpans
-					.map((span, selectionIndex) => ({ span, text: rewriteOf.replacements[selectionIndex] ?? "" }))
+					.map((span, selectionIndex) => ({
+						span,
+						text: rewriteOf.replacements[selectionIndex] ?? "",
+					}))
 					.sort((left, right) => right.span.start - left.span.start);
 				for (const { span, text } of substitutions) {
 					result = result.slice(0, span.start) + text + result.slice(span.end);
@@ -2830,7 +2923,11 @@ function prepareCandidateEdit(
 	pattern: ParsedPattern,
 	rewrite: string,
 	operationNumber: number,
-): { candidate: Candidate; replacement: string; deletedText: string | undefined } {
+): {
+	candidate: Candidate;
+	replacement: string;
+	deletedText: string | undefined;
+} {
 	let replacement = renderRewrite(
 		rewrite,
 		candidate.captures.length === 0 ? [] : pattern.selectedCaptureIndices,
@@ -2844,6 +2941,29 @@ function prepareCandidateEdit(
 		candidate = expandFullLineDeletion(content, candidate);
 	}
 	return { candidate, replacement, deletedText };
+}
+
+/**
+ * Re-anchor a leniently matched whole-line insertion offset: snap back to the
+ * line start when only whitespace precedes it on the line (a normalized match
+ * maps boundaries to the first visible character, and splicing there would
+ * migrate the next anchor line's indentation onto the inserted text), then hop
+ * backward over whole blank lines so the insert lands directly under the last
+ * non-blank anchor — where the whitespace-drifted MATCH placed it. An insert
+ * whose text opens with its own blank line was authored to sit below a blank
+ * seam, so the hop is skipped for it.
+ */
+function snapLineInsertionOffset(content: string, offset: number, hopBlankLines: boolean): number {
+	let lineStart = content.lastIndexOf("\n", offset - 1) + 1;
+	for (let index = lineStart; index < offset; index++) {
+		if (content[index] !== " " && content[index] !== "\t") return offset;
+	}
+	while (hopBlankLines && lineStart > 0) {
+		const previousStart = content.lastIndexOf("\n", lineStart - 2) + 1;
+		if (!/^[ \t]*$/u.test(content.slice(previousStart, lineStart - 1))) break;
+		lineStart = previousStart;
+	}
+	return lineStart;
 }
 
 /**
@@ -2871,7 +2991,12 @@ function prepareInlineSelectionEdit(
 	selection: SelectionPair,
 	rewrite: string,
 	operationNumber: number,
-): { candidate: Candidate; replacement: string; deletedText: string | undefined } {
+	lenient = false,
+): {
+	candidate: Candidate;
+	replacement: string;
+	deletedText: string | undefined;
+} {
 	let start = span.start;
 	let end = span.end;
 	// A gap-captured old side spans the raw text between anchors, padding
@@ -2884,6 +3009,10 @@ function prepareInlineSelectionEdit(
 		if (newline !== -1 && newline < end) end = newline;
 		while (start < end && /[ \t]/u.test(content[start])) start++;
 		while (end > start && /[ \t]/u.test(content[end - 1])) end--;
+	}
+	if (selection.lineInsertion && start === end) {
+		if (lenient) start = snapLineInsertionOffset(content, start, !rewrite.startsWith("\n"));
+		end = start;
 	}
 	let candidate: Candidate = {
 		...located,
@@ -3063,7 +3192,12 @@ function reconcileOverlap(content: string, left: PlannedEdit, right: PlannedEdit
 		content.slice(start, edit.start) + edit.replacement + content.slice(edit.end, end);
 	const projected = project(left);
 	if (projected !== project(right)) return undefined;
-	return { start, end, replacement: projected, operationNumber: left.operationNumber };
+	return {
+		start,
+		end,
+		replacement: projected,
+		operationNumber: left.operationNumber,
+	};
 }
 
 /**
@@ -3608,7 +3742,11 @@ function applyOperations(content: string, input: string, context: SloppyApplyCon
 		const operationNumber = index + 1;
 		const parsedNote = operations[index].recoveryNote;
 		if (parsedNote !== undefined) recoveryNotes.push(parsedNote);
-		let located: { operation: Operation; pattern: ParsedPattern; candidates: Candidate[] };
+		let located: {
+			operation: Operation;
+			pattern: ParsedPattern;
+			candidates: Candidate[];
+		};
 		try {
 			located = locateWithEchoRecovery(
 				content,
@@ -3627,6 +3765,11 @@ function applyOperations(content: string, input: string, context: SloppyApplyCon
 			throw error;
 		}
 		const operation = located.operation;
+		if (operation.whitespaceMatched) {
+			recoveryNotes.push(
+				`Note: operation ${operationNumber}'s MATCH differed from the file in whitespace only and was matched leniently. Inserted lines are written exactly as authored — verify their indentation.`,
+			);
+		}
 		const pattern = located.pattern;
 		const candidates = located.candidates;
 		const orderedCandidates = operation.all
@@ -3661,6 +3804,7 @@ function applyOperations(content: string, input: string, context: SloppyApplyCon
 						selection.selection,
 						selection.rewrite,
 						operationNumber,
+						operation.whitespaceMatched === true,
 					);
 					if (content.slice(prepared.candidate.start, prepared.candidate.end) === prepared.replacement) continue;
 					if (
@@ -3728,7 +3872,10 @@ function applyOperations(content: string, input: string, context: SloppyApplyCon
 				let positionalChanges = 0;
 				for (const candidate of orderedCandidates) {
 					const selections = candidate.selectionSpans
-						.map((span, selectionIndex) => ({ span, replacement: segments[selectionIndex] }))
+						.map((span, selectionIndex) => ({
+							span,
+							replacement: segments[selectionIndex],
+						}))
 						.sort((left, right) => right.span.start - left.span.start);
 					for (const { span, replacement } of selections) {
 						if (content.slice(span.start, span.end) === replacement) continue;
@@ -3791,6 +3938,14 @@ function applyOperations(content: string, input: string, context: SloppyApplyCon
 					resolvedCandidateRewrite = `${referenced.replace(/\n+$/u, "")}\n\n${anchorLine}`;
 				}
 			}
+			if (operation.whitespaceMatched === true && pattern.lineInsertion && candidate.start === candidate.end) {
+				const snapped = snapLineInsertionOffset(
+					content,
+					candidate.start,
+					!resolvedCandidateRewrite.startsWith("\n"),
+				);
+				if (snapped !== candidate.start) candidate = { ...candidate, start: snapped, end: snapped };
+			}
 			const rewrite = pattern.lineInsertion
 				? frameLineInsertion(content, candidate.start, resolvedCandidateRewrite)
 				: resolvedCandidateRewrite;
@@ -3836,7 +3991,12 @@ function applyOperations(content: string, input: string, context: SloppyApplyCon
 						: undefined;
 				throwNoOp(operationNumber, { content, offset: candidate.matchStart }, undefined, hint);
 			}
-			planned.push({ start: candidate.start, end: candidate.end, replacement, operationNumber });
+			planned.push({
+				start: candidate.start,
+				end: candidate.end,
+				replacement,
+				operationNumber,
+			});
 			changes++;
 		}
 		if (operation.all && changes === 0) {
@@ -3908,22 +4068,17 @@ function apply(content: string, input: string, context: SloppyApplyContext): str
 	} catch (error) {
 		if (!(error instanceof Error)) throw error;
 		let message = error.message;
-		if (
-			!message.includes("Current file content near the closest match (no re-read needed):") &&
-			!/\bNear line \d+:/u.test(message) &&
-			!message.includes("Copy-ready corrected operation:") &&
-			!message.includes("Copy-ready corrected payload:") &&
-			!message.includes("Copy-ready per-selection interpretation:")
-		) {
-			message += `\nCurrent file content near the closest match (no re-read needed):\n${numberedPreview(content, 0)}`;
-		}
 		if (!message.includes(ATOMICITY_NOTICE)) message += `\n${ATOMICITY_NOTICE}`;
 		throw new Error(message);
 	}
 }
 
 /** The official sloppy implementation; docs re-skinned to the active marker alphabet. */
-export const sloppyVariant: SloppyVariant = { id: "sloppy", description, apply };
+export const sloppyVariant: SloppyVariant = {
+	id: "sloppy",
+	description,
+	apply,
+};
 
 /** Lark grammar for constrained decoding, in the active marker alphabet. */
 export const sloppyGrammar: string = sloppyGrammarSource;
@@ -3999,7 +4154,10 @@ export async function executeSloppy(
 		const notes: string[] = [];
 		let newContent: string;
 		try {
-			newContent = applySloppy(normalizedContent, normalizeToLF(section.body), { path, notes });
+			newContent = applySloppy(normalizedContent, normalizeToLF(section.body), {
+				path,
+				notes,
+			});
 		} catch (error) {
 			if (!(error instanceof Error) || !multiFile) throw error;
 			throw new Error(`[${path}]: ${error.message}\nNo files were modified — sections apply atomically.`);
@@ -4007,7 +4165,16 @@ export async function executeSloppy(
 		if (newContent === normalizedContent) {
 			throw new Error(`Edits to ${path} resulted in no changes being made.`);
 		}
-		prepared.push({ path, absolutePath, rawContent, bom, originalEnding, normalizedContent, newContent, notes });
+		prepared.push({
+			path,
+			absolutePath,
+			rawContent,
+			bom,
+			originalEnding,
+			normalizedContent,
+			newContent,
+			notes,
+		});
 	}
 
 	// Phase 2 — write every prepared section; only the last write flushes the LSP batch.
@@ -4044,7 +4211,11 @@ export async function executeSloppy(
 		}
 
 		const diffResult = generateDiffString(entry.normalizedContent, entry.newContent, undefined, { path: entry.path });
-		await onApplied?.({ path: entry.absolutePath, prev: entry.rawContent, next: finalContent });
+		await onApplied?.({
+			path: entry.absolutePath,
+			prev: entry.rawContent,
+			next: finalContent,
+		});
 		const editResult = createEditResult({
 			displayPath: entry.path,
 			resultPath: entry.absolutePath,
