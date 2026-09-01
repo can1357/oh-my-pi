@@ -15,9 +15,13 @@ import {
 	initializeTabWorkerForTest,
 	releaseTab,
 } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
-import { chromiumAvailable } from "./chromium-probe";
+import { chromiumAvailable, headfulChromiumAvailable } from "./chromium-probe";
 
 const CHROMIUM_AVAILABLE = await chromiumAvailable();
+// Headful launches additionally need a display; `CHROMIUM_AVAILABLE` alone lets
+// them through on a display-less runner and Puppeteer then throws "Missing X
+// server to start the headful browser".
+const HEADFUL_AVAILABLE = await headfulChromiumAvailable();
 
 class FakeStartupWorker {
 	#errorHandlers = new Set<(error: Error) => void>();
@@ -217,7 +221,7 @@ describe("browser init deadline carry-over", () => {
 	);
 });
 describe("visible OMP-owned browser tabs", () => {
-	it.skipIf(!CHROMIUM_AVAILABLE)(
+	it.skipIf(!HEADFUL_AVAILABLE)(
 		"creates independent pages without pinning the resizable window viewport",
 		async () => {
 			let browser: BrowserHandle | undefined;
