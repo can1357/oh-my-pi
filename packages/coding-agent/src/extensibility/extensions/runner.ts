@@ -437,8 +437,10 @@ interface ToolRegistrationScope {
 
 /**
  * Identity of the agent a runner serves, passed at construction so extension
- * contexts can expose {@link AgentIdentity}. `registry` resolves the parent
- * chain lazily; `parentId` is omitted for the top-level session.
+ * contexts can expose {@link AgentIdentity}. Unlike `AgentRef`, `kind` is the
+ * narrowed `"main" | "sub"` — a runner always fronts a live session, so the
+ * registry-only `advisor` kind is unreachable here. `registry` resolves the
+ * parent chain lazily; `parentId` is omitted for the top-level session.
  */
 export interface ExtensionRunnerIdentityInput {
 	kind: "main" | "sub";

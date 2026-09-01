@@ -214,7 +214,7 @@ Handlers and tool `execute` receive `ctx` with:
 - `shutdown()`
 - `getSystemPrompt()`
 - `memory` (optional structured memory runtime — status/search/save across the configured backend)
-- `agentIdentity` — identity of the agent this handler runs in: `kind` (`"main" | "sub"`, mirroring the session's pre-existing classification), `depth` (`0` = top-level; test `kind === "sub"`, not `depth > 0`), `agentId` (registry id, `"Main"` top-level), `displayName`, optional `parentId` (spawning agent's registry id; `/tan` forks report the job-owning main), `parentChain` (nearest-first ancestors, excluding `"Main"`; empty for top-level and runner-less SDK sessions). Lazy, frozen — copy rather than mutate.
+- `agentIdentity` — identity of the agent this handler runs in: `kind` (`"main" | "sub"`, mirroring the session's pre-existing classification verbatim), `depth` (`0` = top-level; derives from `taskDepth`, not the parent chain — a `/tan` fork is a special tangential fork agent, `kind: "sub"` with `depth: 0`; ask "am I a spawned worker?" via `kind === "sub"`, not `depth > 0`), `agentId` (registry id, `"Main"` top-level), `displayName`, optional `parentId` (spawning agent's registry id; `/tan` forks report the job-owning main), `parentChain` (nearest-first ancestors, excluding `"Main"`; empty for top-level and runner-less SDK sessions). Read once per session (frozen snapshot at first access); frozen — copy rather than mutate.
 - `setInterval(fn, ms, ...args)` / `setTimeout(fn, ms, ...args)` / `clearTimer(timer)` — managed timers (see below)
 
 ### Background work (`ctx.setInterval` / `ctx.setTimeout`)

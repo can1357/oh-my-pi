@@ -468,19 +468,22 @@ export interface AgentIdentity {
 	/**
 	 * Whether this session runs as the top-level session or as a spawned
 	 * worker. Mirrors the session's pre-existing `agentKind` classification
-	 * (`taskDepth > 0 || parentTaskPrefix !== undefined`) verbatim — a caller
-	 * linking via `parentAgentId` while omitting `taskDepth`/`parentTaskPrefix`
-	 * (e.g. a `/tan` fork) observes `"main"`, same as every capability gate.
+	 * (`taskDepth > 0 || parentTaskPrefix !== undefined`) verbatim — identity
+	 * never widens or narrows it. A caller linking via `parentAgentId` while
+	 * omitting `taskDepth`/`parentTaskPrefix` observes `"main"`; a `/tan`
+	 * fork observed via a context is a special tangential fork agent
+	 * classified `"sub"` by the same pre-existing inputs (`depth` stays `0`).
 	 */
 	readonly kind: "main" | "sub";
 	/**
 	 * Recursion depth of this agent: `0` = top-level. Mirrors the session's own
 	 * `taskDepth` (the pre-existing gate input for IRC/memory/spawn capability
-	 * gates) exactly — it is NOT re-derived here from the parent chain, so a
-	 * caller that supplies parent linkage while omitting `taskDepth` (e.g. the
-	 * `/tan` clone path) observes `0` here, matching every other capability
-	 * gate for that session. Extensions asking "am I a child?" should test
-	 * `kind === "sub"` or `parentId !== undefined`, not `depth > 0`.
+	 * gates) exactly — it is NOT re-derived here from the parent chain. Kind
+	 * and depth come from different pre-existing gate inputs, so they can
+	 * legitimately disagree: a `/tan` fork supplies `parentTaskPrefix` but no
+	 * `taskDepth` and observes `kind: "sub"` with `depth: 0`. Extensions
+	 * asking "am I a spawned worker?" should test `kind === "sub"`; asking
+	 * "was I spawned by the task tool?" — test `depth > 0`.
 	 */
 	readonly depth: number;
 	/**
@@ -496,8 +499,10 @@ export interface AgentIdentity {
 	readonly displayName: string;
 	/**
 	 * Registry id of the direct parent agent as supplied to
-	 * `createAgentSession`; undefined for the top-level session. `/tan` forks
-	 * report the job-owning main session here even though `kind` is `"main"`.
+	 * `createAgentSession`; undefined for the top-level session. A `/tan`
+	 * fork reports the job-owning main session here (its `parentId` is
+	 * registry-resolvable linkage, but its `parentChain` is empty because the
+	 * walk stops at `"Main"`).
 	 */
 	readonly parentId?: string;
 	/**

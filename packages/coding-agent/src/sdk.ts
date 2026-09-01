@@ -1712,8 +1712,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	// Pre-existing classification: task-depth or a parent-linked artifact
 	// prefix marks a spawned worker. Every genuine spawn path (executor,
 	// revive) supplies taskDepth > 0, so the extension identity observes
-	// `agentKind` verbatim — identity never widens it; /tan forks stay
-	// "main" like every other capability gate.
+	// `agentKind` verbatim — identity never widens or narrows it; /tan
+	// forks classify exactly as before (sub via parentTaskPrefix), and a
+	// linkage-only caller (parentAgentId without taskDepth/parentTaskPrefix)
+	// observes main, same as every capability gate.
 	const resolvedAgentDisplayName =
 		options.agentDisplayName ?? ((options.taskDepth ?? 0) > 0 || options.parentTaskPrefix ? "sub" : "main");
 	const agentKind = (options.taskDepth ?? 0) > 0 || options.parentTaskPrefix ? ("sub" as const) : ("main" as const);

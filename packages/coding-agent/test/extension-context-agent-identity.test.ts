@@ -215,4 +215,56 @@ describe("ExtensionContext agentIdentity", () => {
 			await fsp.rm(tempDir, { recursive: true, force: true });
 		}
 	});
+
+	it("reports the documented /tan fork identity through the public SDK path", async () => {
+		const tempDir = await fsp.mkdtemp(path.join(os.tmpdir(), "pi-identity-sdk-tan-"));
+		const registry = new AgentRegistry();
+		registry.register({ id: MAIN_AGENT_ID, displayName: "Main", kind: "main", session: null });
+		const authStorage = await AuthStorage.create(":memory:");
+		try {
+			// Options mirror TanCommandController.start(): parentTaskPrefix is
+			// always truthy, taskDepth is never set, the owning main session is
+			// the parentAgentId.
+			const { session } = await createAgentSession({
+				cwd: path.join(tempDir, "project"),
+				agentDir: path.join(tempDir, "agent"),
+				authStorage,
+				modelRegistry: new ModelRegistry(authStorage),
+				settings: Settings.isolated(),
+				disableExtensionDiscovery: true,
+				skills: [],
+				contextFiles: [],
+				promptTemplates: [],
+				slashCommands: [],
+				toolNames: [],
+				enableMCP: false,
+				enableLsp: false,
+				agentRegistry: registry,
+				agentId: "Tan-1",
+				agentDisplayName: "tan",
+				parentTaskPrefix: "Tan-1",
+				parentAgentId: MAIN_AGENT_ID,
+			});
+			try {
+				const identity = session.extensionRunner?.createContext().agentIdentity;
+				// Documented special tan-fork identity: classified "sub" by the
+				// pre-existing parentTaskPrefix input, depth 0 (no taskDepth),
+				// parentChain empty (walk stops at "Main").
+				expect(identity).toEqual({
+					kind: "sub",
+					depth: 0,
+					agentId: "Tan-1",
+					displayName: "tan",
+					parentId: MAIN_AGENT_ID,
+					parentChain: [],
+				});
+				expect(registry.get("Tan-1")?.kind).toBe("sub");
+			} finally {
+				await session.dispose();
+			}
+		} finally {
+			authStorage.close();
+			await fsp.rm(tempDir, { recursive: true, force: true });
+		}
+	});
 });
