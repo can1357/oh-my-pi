@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Linux `ptree` timeout cleanup occasionally leaving session-escaped descendants running during subreaper adoption.
+
 ## [18.0.11] - 2026-08-29
 
 ### Fixed

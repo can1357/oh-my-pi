@@ -17,6 +17,8 @@ type PipedSubprocess<In extends InMask = InMask> = Subprocess<In, "pipe", "pipe"
 
 const LINUX_SUBREAPER_COMMAND_ENV = "OMP_PTREE_SUBREAPER_COMMAND";
 const LINUX_SUBREAPER_BUN_BE_BUN_ENV = "OMP_PTREE_SUBREAPER_BUN_BE_BUN";
+const SUBREAPER_KILL_WINDOW_MS = 100;
+const SUBREAPER_KILL_POLL_MS = 5;
 
 /**
  * Build the Linux child-subreaper entrypoint.
@@ -189,6 +191,8 @@ export class ChildProcess<In extends InMask = InMask> {
 	#stderrStream?: ReadableStream<Uint8Array>;
 	// Termination in flight after kill(); aborted exits await it before reporting.
 	#terminating?: Promise<boolean | void>;
+	// A hard subreaper sweep must remain authoritative across overlapping kill requests.
+	#hardKillSweep?: Promise<void>;
 	#terminateGroup: boolean;
 	#hardKillTree: boolean;
 	// Windows has no process groups. Retaining the root's native handle pins
@@ -340,14 +344,22 @@ export class ChildProcess<In extends InMask = InMask> {
 			// group leader; wait() still needs to report the later deadline.
 			if (this.proc.exitCode !== null) this.#exitReason = reason;
 		}
+		// An AbortSignal can race a timeout after its hard subreaper sweep has
+		// started. Do not replace that sweep with a normal root termination: the
+		// root must stay alive until adopted descendants have been collected.
+		if (this.#hardKillSweep) return;
 		if (gracefulMs !== undefined && gracefulMs < 0 && this.#hardKillTree && this.proc.exitCode === null) {
-			// terminate() sends its polite wave to the root before rebuilding the
-			// hard-kill tree. A subreaper root can die in that gap and release its
-			// adopted descendants, so snapshot and hard-kill the live tree first.
+			// Keep the subreaper alive while descendants are killed. A single
+			// killTree() snapshot can miss a worker whose parent exits during the
+			// walk and reparents it to the subreaper after that root was enumerated.
 			const root = Process.fromPid(this.proc.pid);
 			if (root) {
-				root.killTree(9);
-				this.#terminating = Promise.resolve();
+				const sweep = this.#hardKillSubreaperTree(root).catch(e => void e);
+				this.#hardKillSweep = sweep;
+				this.#terminating = sweep;
+				void sweep.finally(() => {
+					if (this.#hardKillSweep === sweep) this.#hardKillSweep = undefined;
+				});
 				return;
 			}
 		}
@@ -383,6 +395,25 @@ export class ChildProcess<In extends InMask = InMask> {
 			this.#terminating = (this.#windowsRootProcess ?? Process.fromPid(this.proc.pid))
 				?.terminate(options)
 				?.catch(e => void e);
+		}
+	}
+
+	async #hardKillSubreaperTree(root: Process): Promise<void> {
+		try {
+			const deadline = Date.now() + SUBREAPER_KILL_WINDOW_MS;
+			let emptySweeps = 0;
+			while (emptySweeps < 2 && Date.now() < deadline) {
+				const children = root.children();
+				if (children.length === 0) {
+					emptySweeps++;
+				} else {
+					emptySweeps = 0;
+					for (const child of children) child.killTree(9);
+				}
+				if (emptySweeps < 2) await Bun.sleep(SUBREAPER_KILL_POLL_MS);
+			}
+		} finally {
+			root.killTree(9);
 		}
 	}
 
