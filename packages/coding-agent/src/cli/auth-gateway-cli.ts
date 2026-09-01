@@ -534,7 +534,7 @@ async function probeOneModel(
  * Stops as soon as one model returns a successful response (the credential
  * authenticated against at least one model in the catalog).
  */
-function createStrictCompletionProbe(): CompletionProbe {
+export function createStrictCompletionProbe(): CompletionProbe {
 	return async (input: CompletionProbeInput): Promise<CredentialCompletionResult> => {
 		const candidates = pickProbeCandidates(input.provider).slice(0, STRICT_PROBE_MAX_CANDIDATES);
 		if (candidates.length === 0) {

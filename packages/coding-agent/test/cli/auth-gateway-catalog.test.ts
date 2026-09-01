@@ -1,9 +1,9 @@
 import { Database } from "bun:sqlite";
-import { describe, expect, test } from "bun:test";
+import { describe, expect, test, vi } from "bun:test";
 import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai";
 import { getBundledModels } from "@oh-my-pi/pi-catalog/models";
 import { TempDir } from "@oh-my-pi/pi-utils";
-import { indexModelsByRequestId } from "../../src/cli/auth-gateway-cli";
+import { createStrictCompletionProbe, indexModelsByRequestId } from "../../src/cli/auth-gateway-cli";
 import { ModelRegistry } from "../../src/config/model-registry";
 
 function stubAuthStorage(configKeys?: string[]): AuthStorage {
@@ -17,6 +17,63 @@ function stubAuthStorage(configKeys?: string[]): AuthStorage {
 	};
 	return stub as unknown as AuthStorage;
 }
+
+describe("strict credential probes", () => {
+	test("sends the Muse subscription key instead of the Meta account token", async () => {
+		let authorization = "";
+		const preconnect = fetch.preconnect;
+		const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(
+			Object.assign(
+				(_input: string | URL | Request, init?: RequestInit) => {
+					authorization = new Headers(init?.headers).get("Authorization") ?? "";
+					const sse = [
+						`data: ${JSON.stringify({
+							type: "response.output_item.done",
+							item: {
+								type: "message",
+								id: "msg_probe",
+								role: "assistant",
+								status: "completed",
+								content: [{ type: "output_text", text: "pong", annotations: [] }],
+							},
+						})}`,
+						`data: ${JSON.stringify({
+							type: "response.completed",
+							response: {
+								status: "completed",
+								usage: {
+									input_tokens: 1,
+									output_tokens: 1,
+									total_tokens: 2,
+									input_tokens_details: { cached_tokens: 0 },
+								},
+							},
+						})}`,
+					].join("\n\n");
+					return Promise.resolve(new Response(`${sse}\n\n`, { headers: { "content-type": "text/event-stream" } }));
+				},
+				{ preconnect },
+			),
+		);
+		try {
+			const result = await createStrictCompletionProbe()({
+				provider: "meta",
+				credentialId: 1,
+				credential: {
+					type: "oauth",
+					accessToken: "meta-account-access",
+					apiKey: "LLM|subscription-key",
+				},
+				signal: new AbortController().signal,
+			});
+
+			expect(result.ok).toBe(true);
+			expect(authorization).toBe("Bearer LLM|subscription-key");
+		} finally {
+			fetchSpy.mockRestore();
+		}
+	});
+});
 
 describe("provider login aliases", () => {
 	test("refreshes Meta discovery after Muse login", async () => {
