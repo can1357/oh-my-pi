@@ -495,6 +495,12 @@ export interface AnthropicCompat {
 	 * `messages` array. When unset, auto-detected from model and deployment policy.
 	 */
 	supportsMidConversationSystem?: boolean;
+	/** Whether turn-scoped system messages accept `clear_at`. */
+	supportsTurnScopedSystem?: boolean;
+	/** Whether tool availability can change through system-message tool references. */
+	supportsMidConversationToolChanges?: boolean;
+	/** Whether effort can change through a per-message `output_config`. */
+	supportsPerMessageEffort?: boolean;
 	/**
 	 * Whether the endpoint accepts `thinking.block_binding` and reports
 	 * `input_transformations` under the thinking-binding-controls beta.

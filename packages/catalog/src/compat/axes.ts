@@ -193,7 +193,10 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"supports-eager-tool-input-streaming": wire("supportsEagerToolInputStreaming", ["anthropic"]),
 	"supports-long-cache-retention": wire("supportsLongCacheRetention", ["anthropic"]),
 	"supports-mid-conversation-system": wire("supportsMidConversationSystem", ["anthropic"]),
+	"supports-mid-conversation-tool-changes": wire("supportsMidConversationToolChanges", ["anthropic"]),
+	"supports-per-message-effort": wire("supportsPerMessageEffort", ["anthropic"]),
 	"supports-thinking-binding-controls": wire("supportsThinkingBindingControls", ["anthropic"]),
+	"supports-turn-scoped-system": wire("supportsTurnScopedSystem", ["anthropic"]),
 
 	// ── wire: bedrock-converse-stream ──
 	"prompt-cache-maximum-checkpoints": wire("promptCacheMaximumCheckpoints", ["bedrock"]),

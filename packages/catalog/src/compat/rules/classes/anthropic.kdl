@@ -9,8 +9,38 @@ class "anthropic" {
 	}
 	on "anthropic" "cloudflare-ai-gateway" "google-vertex" {
 		family "fable" {
+			revision ">=5" {
+				supports-mid-conversation-system #true
+				supports-mid-conversation-tool-changes #true
+				supports-turn-scoped-system #true
+			}
+			revision ">=5.1" {
+				supports-per-message-effort #true
+			}
+		}
+		family "mythos" {
+			revision ">=5" {
+				supports-mid-conversation-system #true
+				supports-mid-conversation-tool-changes #true
+				supports-turn-scoped-system #true
+			}
+			revision ">=5.1" {
+				supports-per-message-effort #true
+			}
+		}
+		family "fable" {
 			revision ">=5.1" {
 				supports-thinking-binding-controls #true
+			}
+		}
+		family "opus" {
+			revision ">=4.8" {
+				supports-mid-conversation-system #true
+				supports-mid-conversation-tool-changes #true
+				supports-turn-scoped-system #true
+			}
+			revision ">=5" {
+				supports-per-message-effort #true
 			}
 		}
 	}

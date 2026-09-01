@@ -655,7 +655,7 @@ export class AgentSession {
 	#autolearnCaptureAbortController: AbortController | undefined;
 	#autolearnCaptureTask: Promise<void> | undefined;
 	#isDisposed = false;
-	#fallbackDiscoveryRevalidationAbortController = new AbortController();
+	#modelDiscoveryAbortController = new AbortController();
 	/** Process-wide by default (double-spend safety across sessions); injectable for tests. */
 	#codexResetCoordinator: CodexAutoRedeemCoordinator;
 	// Extension system
@@ -1758,10 +1758,12 @@ export class AgentSession {
 		// fire-and-forget (before the session in the SDK path, right after it in
 		// the CLI path), so discovery-backed providers (e.g. GitHub Copilot, or a
 		// models.yml LiteLLM provider with a cold cache) may not be populated yet.
-		// Reactivate a `no_model` advisor (#9010) and retract stale
-		// retry.fallbackChains warnings (#10048) once discovery settles.
+		// Reactivate a `no_model` advisor (#9010), retract stale
+		// retry.fallbackChains warnings (#10048), and rebind the active model to
+		// its refreshed same-selector entry (#10488) once discovery settles.
 		void this.#retryInactiveAdvisorAfterModelDiscovery();
 		void this.#revalidateFallbackChainsAfterModelDiscovery();
+		if (config.rebindModelAfterDiscovery) void this.#rebindActiveModelAfterModelDiscovery();
 	}
 	/** Model registry for API key resolution and model discovery */
 	get modelRegistry(): ModelRegistry {
@@ -4219,7 +4221,7 @@ export class AgentSession {
 	 */
 	beginDispose(): void {
 		this.#isDisposed = true;
-		this.#fallbackDiscoveryRevalidationAbortController.abort();
+		this.#modelDiscoveryAbortController.abort();
 		this.#queuedMessageDrainBlocked = false;
 		this.#usagePreflightReadyForNextModelCall = false;
 		this.#detachUsageBeforeQueueDequeue?.();
@@ -7842,7 +7844,6 @@ export class AgentSession {
 	async #setModelWithProviderSessionReset(model: Model): Promise<void> {
 		const currentModel = this.model;
 		const isChanging = !currentModel || !modelsAreEqual(currentModel, model);
-		const codeModeChanged = this.#tools.codeModeChangesBetween(currentModel, model);
 		if (currentModel) {
 			this.#closeProviderSessionsForModelSwitch(currentModel, model);
 			if (isChanging) {
@@ -7867,10 +7868,14 @@ export class AgentSession {
 			this.#emit({ type: "model_changed" });
 		}
 
+		await this.#reconcileModelDependentState(currentModel, model);
+	}
+
+	async #reconcileModelDependentState(previousModel: Model | undefined, model: Model): Promise<void> {
 		// Re-evaluate append-only context mode — provider or setting may have changed
 		this.#syncAppendOnlyContext(model);
 
-		if (codeModeChanged || this.#tools.codeModeDirectWireMetadataChanged()) {
+		if (this.#tools.codeModeChangesBetween(previousModel, model) || this.#tools.codeModeDirectWireMetadataChanged()) {
 			try {
 				await this.#tools.reconcileCodeMode();
 			} catch (error) {
@@ -7879,9 +7884,8 @@ export class AgentSession {
 		}
 
 		// inspect_image auto mode keys off model image capability. Reconcile
-		// centrally here so retry-fallback model changes (turn-recovery.ts),
-		// which bypass syncAfterModelChange, cannot leave the tool set stale —
-		// callers await, so a scheduled retry never races the reconciled slate.
+		// centrally here so retry-fallback and metadata-only model changes cannot
+		// leave the tool set stale.
 		try {
 			await this.#tools.reconcileInspectImageAfterModelChange();
 		} catch (error) {
@@ -9986,13 +9990,48 @@ export class AgentSession {
 	 */
 	async #revalidateFallbackChainsAfterModelDiscovery(): Promise<void> {
 		if (this.#isDisposed || !this.#recovery.hasPendingDiscoveryDeferredFallbackValidation()) return;
-		await this.#modelRegistry.awaitInitialBackgroundRefresh(
-			this.#fallbackDiscoveryRevalidationAbortController.signal,
-		);
+		await this.#modelRegistry.awaitInitialBackgroundRefresh(this.#modelDiscoveryAbortController.signal);
 		if (this.#isDisposed) return;
 		if (this.#recovery.revalidateRetryFallbackChainsAfterDiscovery()) {
 			this.#emit({ type: "config_warnings_changed" });
 		}
+	}
+
+	/**
+	 * Rebind the active model to its refreshed registry entry once the initial
+	 * background discovery settles.
+	 *
+	 * Startup resolves the active model from the pre-discovery catalog snapshot
+	 * (`main.ts` fires `refreshInBackground` only after the session is built), so
+	 * a discovery-backed provider that re-clamps or splits a selector after the
+	 * fact leaves the live model holding stale metadata. GitHub Copilot caps a
+	 * tiered base selector (e.g. `github-copilot/gpt-5.6-sol`) to its default-tier
+	 * context window and synthesizes a separate `-1m` sibling only during live
+	 * discovery; the bundled base entry still carries the full long-context
+	 * window, so a fresh session runs with the 1.05M window that contradicts the
+	 * 400K catalog value until the user re-selects the same model. Re-look-up the
+	 * active selector post-discovery and, when its context window changed, fold
+	 * the refreshed spec into the live model. Same selector, so this is a metadata
+	 * refresh with no provider-session reset; reconcile model-dependent tools and
+	 * append-only state before `model_changed` notifies the status line and RPC
+	 * subscribers. Issue #10488.
+	 */
+	async #rebindActiveModelAfterModelDiscovery(): Promise<void> {
+		const boundAtStartup = this.model;
+		if (this.#isDisposed || !boundAtStartup) return;
+		if (typeof this.#modelRegistry.awaitInitialBackgroundRefresh !== "function") return;
+		await this.#modelRegistry.awaitInitialBackgroundRefresh(this.#modelDiscoveryAbortController.signal);
+		if (this.#isDisposed) return;
+		// Only silently re-metadata the startup-bound selector: bail if the user
+		// switched models while discovery was in flight.
+		const current = this.model;
+		if (!current || !modelsAreEqual(current, boundAtStartup)) return;
+		const refreshed = this.#modelRegistry.find(current.provider, current.id);
+		if (!refreshed || refreshed.contextWindow === current.contextWindow) return;
+		this.agent.setModel(refreshed);
+		await this.#reconcileModelDependentState(current, refreshed);
+		if (this.#isDisposed) return;
+		this.#emit({ type: "model_changed" });
 	}
 
 	/**

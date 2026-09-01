@@ -442,13 +442,32 @@ export async function scanSkillsFromDir(
 }
 
 /**
+ * Resolve a placeholder name against `extraEnv`, then the ambient environment.
+ *
+ * Inherited members of either map (`__proto__`, `constructor`, `toString`, …)
+ * are never substitutable: `extraEnv` is consulted by own property only, and
+ * `Bun.env`'s getter falls through to `Object.prototype`, so `${constructor}`
+ * would otherwise stringify into the value as `function Object() { [native
+ * code] }`. Every real variable is a string, so a non-string ambient hit means
+ * the name resolved to a prototype member and counts as unset.
+ */
+function lookupEnvValue(varName: string, extraEnv?: Record<string, string>): string | undefined {
+	if (extraEnv !== undefined && Object.hasOwn(extraEnv, varName)) return extraEnv[varName];
+	const ambient = Bun.env[varName];
+	return typeof ambient === "string" ? ambient : undefined;
+}
+
+/**
  * Expand environment variables in a string.
  * Supports ${VAR} and ${VAR:-default} syntax.
  */
 function expandEnvVars(value: string, extraEnv?: Record<string, string>): string {
 	return value.replace(/\$\{([^}:]+)(?::-([^}]*))?\}/g, (_, varName: string, defaultValue?: string) => {
-		const envValue = extraEnv?.[varName] ?? Bun.env[varName];
-		if (envValue !== undefined) return envValue;
+		const envValue = lookupEnvValue(varName, extraEnv);
+		// `${VAR:-default}` follows POSIX `:-`: the default applies when the
+		// variable is unset OR empty. Plain `${VAR}` keeps the value verbatim
+		// (even an empty one) and stays literal when unset.
+		if (envValue !== undefined && (defaultValue === undefined || envValue !== "")) return envValue;
 		if (defaultValue !== undefined) return defaultValue;
 		return `\${${varName}}`;
 	});

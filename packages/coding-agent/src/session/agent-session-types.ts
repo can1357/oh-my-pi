@@ -197,6 +197,8 @@ export interface AgentSessionConfig {
 	createInspectImageTool?: () => Promise<AgentTool | null>;
 	/** Model registry for API key resolution and model discovery. */
 	modelRegistry: ModelRegistry;
+	/** Whether the startup model may be replaced by refreshed same-selector registry metadata. */
+	rebindModelAfterDiscovery?: boolean;
 	/** Tool registry for LSP and settings. */
 	toolRegistry?: Map<string, AgentTool>;
 	/** Creates tools registered only while vibe mode is active. */

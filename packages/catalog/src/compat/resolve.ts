@@ -847,6 +847,9 @@ function resolveAnthropicPolicy(
 		supportsEagerToolInputStreaming: official,
 		supportsLongCacheRetention: official,
 		supportsMidConversationSystem: official && facts.anthropicAdaptiveGenAtLeast("4.8"),
+		supportsTurnScopedSystem: false,
+		supportsMidConversationToolChanges: false,
+		supportsPerMessageEffort: false,
 		supportsThinkingBindingControls: false,
 		supportsForcedToolChoice: !requiresThinkingEnabled && !facts.family("fable", "mythos"),
 		supportsSamplingParams: !facts.anthropicAdaptiveGenAtLeast("4.7"),
@@ -1013,6 +1016,7 @@ interface RuleThinking {
 	requiresEffort?: boolean;
 	suppressWhenOff?: boolean;
 	supportsDisplay?: boolean;
+	prefixBinding?: boolean;
 }
 
 function readRuleThinking(axes: ResolvedAxes): RuleThinking {
@@ -1031,6 +1035,7 @@ function readRuleThinking(axes: ResolvedAxes): RuleThinking {
 	if (typeof raw.requiresEffort === "boolean") out.requiresEffort = raw.requiresEffort;
 	if (typeof raw.suppressWhenOff === "boolean") out.suppressWhenOff = raw.suppressWhenOff;
 	if (typeof raw.supportsDisplay === "boolean") out.supportsDisplay = raw.supportsDisplay;
+	if (typeof raw.prefixBinding === "boolean") out.prefixBinding = raw.prefixBinding;
 	return out;
 }
 
@@ -1086,6 +1091,7 @@ function resolveThinkingPolicy<TApi extends Api>(
 	if (rule.effortBudgets !== undefined) config.effortBudgets = rule.effortBudgets;
 	const supportsDisplay = rule.supportsDisplay ?? defaultSupportsDisplay(spec, facts);
 	if (supportsDisplay) config.supportsDisplay = true;
+	if (rule.prefixBinding) config.prefixBinding = true;
 	const requiresEffort =
 		rule.requiresEffort ?? (impliesMandatoryReasoning(facts, spec.id) || isQwenTemplateReasoningEffortCompat(compat));
 	if (requiresEffort) config.requiresEffort = true;
@@ -1143,7 +1149,8 @@ function fillExplicitThinking<TApi extends Api>(
 		(rule.requiresEffort ??
 			(impliesMandatoryReasoning(facts, spec.id) || isQwenTemplateReasoningEffortCompat(compat)));
 	const needsDefaultLevel = thinking.defaultLevel === undefined && rule.defaultLevel !== undefined;
-	if (effortMap === undefined && !needsDisplay && !needsRequiresEffort && !needsDefaultLevel) {
+	const needsPrefixBinding = thinking.prefixBinding === undefined && rule.prefixBinding === true;
+	if (effortMap === undefined && !needsDisplay && !needsRequiresEffort && !needsDefaultLevel && !needsPrefixBinding) {
 		return thinking;
 	}
 	const filled: ThinkingConfig = { ...thinking };
@@ -1151,6 +1158,7 @@ function fillExplicitThinking<TApi extends Api>(
 	if (needsDisplay) filled.supportsDisplay = true;
 	if (needsDefaultLevel && rule.defaultLevel !== undefined) filled.defaultLevel = rule.defaultLevel;
 	if (needsRequiresEffort) filled.requiresEffort = true;
+	if (needsPrefixBinding) filled.prefixBinding = true;
 	return filled;
 }
 

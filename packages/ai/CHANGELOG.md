@@ -2,18 +2,21 @@
 
 ## [Unreleased]
 
+## [18.1.2] - 2026-09-01
+
 ### Added
 
-- Add support for automatic recovery from "preserved-thinking" signature errors during conversation history rewrites
-- Add `anthropicPrefixMismatchBehavior` option to control handling of invalid thinking blocks
-- Enable prompt caching for system instructions to improve performance
+- Added thinking controls for Amazon Bedrock models.
+- Added dynamic mid-conversation updates for Anthropic system prompts, tools, and reasoning effort.
+- Added deferred tool loading and prompt caching for Anthropic models.
+- Added configurable handling for invalid Anthropic thinking blocks through `anthropicPrefixMismatchBehavior`.
 
 ### Fixed
 
-- Resolve 400 "Invalid signature" errors by automatically dropping mismatched thinking blocks after history rewrites
-- Fix incorrect OS reporting in request headers for non-Linux systems
-- Fixed Google Antigravity model-quota errors switching models instead of rotating to another account with available usage.
-- Fixed the Claude Code fingerprint being rejected by Anthropic for newer models by aligning with the `2.1.257` CLI request signature.
+- Fixed compatibility issues with Anthropic thinking and prompt-cache breakpoints across deployments, preserving valid reasoning context while preventing invalid-signature errors.
+- Fixed incorrect operating-system information reported in request headers on non-Linux systems.
+- Fixed Google Antigravity quota handling so requests rotate to another account with available usage instead of unnecessarily switching models.
+- Fixed Anthropic authentication for newer models by updating the Claude Code request fingerprint.
 
 ## [18.1.0] - 2026-09-01
 

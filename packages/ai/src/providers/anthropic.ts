@@ -22,6 +22,7 @@ import * as AIError from "../error";
 import { getEnvApiKey, OUTPUT_FALLBACK_BUFFER } from "../stream";
 import type {
 	AnthropicFallbackContent,
+	AnthropicMessagePayload,
 	AnthropicServerToolContent,
 	Api,
 	AssistantMessage,
@@ -160,6 +161,9 @@ function mergeAnthropicBetaHeader(callerHeaders: Record<string, string>, beta: s
 }
 const oauthAuthBeta = "oauth-2025-04-20";
 const midConversationSystemBeta = "mid-conversation-system-2026-04-07";
+const midConversationSystemClearAtBeta = "mid-conversation-system-clear-at-2026-08-21";
+const midConversationToolChangesBeta = "mid-conversation-tool-changes-2026-07-01";
+const midConversationOutputConfigBeta = "mid-conversation-output-config-2026-07-01";
 const contextManagementBeta = "context-management-2025-06-27";
 const structuredOutputsBeta = "structured-outputs-2025-12-15";
 const thinkingTokenCountBeta = "thinking-token-count-2026-05-13";
@@ -188,6 +192,19 @@ const fastModeBeta = "fast-mode-2026-02-01";
 const taskBudgetBeta = "task-budgets-2026-03-13";
 const effortBeta = "effort-2025-11-24";
 const serverSideFallbackBeta = "server-side-fallback-2026-06-01";
+
+function resolveAnthropicControlBetas(
+	model: Model<"anthropic-messages">,
+	prefixMismatchBehavior: "drop_block" | "error" | undefined,
+): string[] {
+	const betas: string[] = [];
+	if (prefixMismatchBehavior) betas.push(THINKING_BINDING_CONTROLS_BETA);
+	if (model.compat.supportsMidConversationSystem) betas.push(midConversationSystemBeta);
+	if (model.compat.supportsTurnScopedSystem) betas.push(midConversationSystemClearAtBeta);
+	if (model.compat.supportsMidConversationToolChanges) betas.push(midConversationToolChangesBeta);
+	if (model.compat.supportsPerMessageEffort) betas.push(midConversationOutputConfigBeta);
+	return betas;
+}
 
 function buildClaudeCodeBetas({
 	agentRequest,
@@ -388,6 +405,21 @@ let warnedStopSequencesTrim = false;
 
 const ANTHROPIC_PROVIDER_SESSION_STATE_KEY = "anthropic-messages";
 
+/**
+ * A mid-conversation `role: "system"` message omp inserts at a fixed slot in
+ * the wire history so top-level `tools` and `output_config.effort` can stay
+ * byte-stable for preserved thinking and the prompt cache. `messageCount` is
+ * the number of wire messages preceding the control; `anchor` fingerprints the
+ * message right before it so a rewritten history (compaction, branch switch)
+ * discards the transition instead of splicing it into the wrong turn.
+ */
+type AnthropicControlTransition = {
+	messageCount: number;
+	anchor: string;
+	content: ContentBlockParam[];
+	effort?: AnthropicOutputEffort;
+};
+
 type AnthropicProviderSessionState = ProviderSessionState & {
 	strictToolsDisabled: boolean;
 	fastModeDisabled: boolean;
@@ -402,6 +434,17 @@ type AnthropicProviderSessionState = ProviderSessionState & {
 	replayUnsignedThinkingDisabled: boolean;
 	/** Thinking blocks the API permanently dropped after a prefix mismatch. */
 	prefixDroppedThinkingBlocks: Set<string>;
+	/** Model the control baseline below was captured for; a switch re-baselines. */
+	controlModelId: string | undefined;
+	/** `tools` declared at baseline plus later `defer_loading` additions, in wire order. */
+	declaredTools: AnthropicWireTool[] | undefined;
+	activeToolNames: Set<string>;
+	stableSystemBlocks: AnthropicSystemBlock[] | undefined;
+	systemFingerprint: string | undefined;
+	controlTransitions: AnthropicControlTransition[];
+	baseEffort: AnthropicOutputEffort | undefined;
+	baseEffortWire: AnthropicOutputEffort | undefined;
+	currentEffort: AnthropicOutputEffort | undefined;
 };
 
 function createAnthropicProviderSessionState(): AnthropicProviderSessionState {
@@ -410,11 +453,22 @@ function createAnthropicProviderSessionState(): AnthropicProviderSessionState {
 		fastModeDisabled: false,
 		replayUnsignedThinkingDisabled: false,
 		prefixDroppedThinkingBlocks: new Set(),
+		controlModelId: undefined,
+		declaredTools: undefined,
+		activeToolNames: new Set(),
+		stableSystemBlocks: undefined,
+		systemFingerprint: undefined,
+		controlTransitions: [],
+		baseEffort: undefined,
+		baseEffortWire: undefined,
+		currentEffort: undefined,
 		close: () => {
 			state.strictToolsDisabled = false;
 			state.fastModeDisabled = false;
 			state.replayUnsignedThinkingDisabled = false;
 			state.prefixDroppedThinkingBlocks.clear();
+			state.controlModelId = undefined;
+			resetAnthropicControlState(state);
 		},
 	};
 	return state;
@@ -440,7 +494,12 @@ function getAnthropicProviderSessionState(
 	if (!providerSessionState) return undefined;
 	const key = anthropicProviderSessionStateKey(baseUrl, modelId);
 	const existing = providerSessionState.get(key) as AnthropicProviderSessionState | undefined;
-	if (existing) return existing;
+	if (existing) {
+		existing.prefixDroppedThinkingBlocks ??= new Set();
+		existing.activeToolNames ??= new Set();
+		existing.controlTransitions ??= [];
+		return existing;
+	}
 	const created = createAnthropicProviderSessionState();
 	providerSessionState.set(key, created);
 	return created;
@@ -1835,16 +1894,32 @@ function rememberPrefixDroppedThinking(
 	state: AnthropicProviderSessionState | undefined,
 ): void {
 	if (!state) return;
+	let firstMessageIndex: number | undefined;
+	let firstBlockIndex: number | undefined;
 	for (const transformation of transformations) {
 		if (transformation.reason !== "prefix_binding_mismatch" || typeof transformation.path !== "string") continue;
 		const match = INPUT_TRANSFORMATION_PATH_PATTERN.exec(transformation.path);
 		if (!match) continue;
-		const message = params.messages[Number(match[1])];
+		const messageIndex = Number(match[1]);
+		const blockIndex = Number(match[2]);
+		if (
+			firstMessageIndex === undefined ||
+			messageIndex < firstMessageIndex ||
+			(messageIndex === firstMessageIndex && blockIndex < (firstBlockIndex ?? Number.POSITIVE_INFINITY))
+		) {
+			firstMessageIndex = messageIndex;
+			firstBlockIndex = blockIndex;
+		}
+	}
+	if (firstMessageIndex === undefined || firstBlockIndex === undefined) return;
+	for (let messageIndex = firstMessageIndex; messageIndex < params.messages.length; messageIndex++) {
+		const message = params.messages[messageIndex];
 		if (!message || !Array.isArray(message.content)) continue;
-		const block = message.content[Number(match[2])];
-		if (!block) continue;
-		const key = thinkingReplayKey(block);
-		if (key) state.prefixDroppedThinkingBlocks.add(key);
+		const blockStart = messageIndex === firstMessageIndex ? firstBlockIndex : 0;
+		for (let blockIndex = blockStart; blockIndex < message.content.length; blockIndex++) {
+			const key = thinkingReplayKey(message.content[blockIndex]!);
+			if (key) state.prefixDroppedThinkingBlocks.add(key);
+		}
 	}
 }
 
@@ -1854,7 +1929,13 @@ function applyReportedInputTransformations(
 	state: AnthropicProviderSessionState | undefined,
 	value: unknown,
 	seen: Set<string>,
+	replace = false,
 ): void {
+	if (value === undefined || value === null) return;
+	if (replace) {
+		seen.clear();
+		output.inputTransformations = [];
+	}
 	const fresh: ProviderInputTransformation[] = [];
 	for (const transformation of parseAnthropicInputTransformations(value)) {
 		const key = JSON.stringify(transformation);
@@ -1951,6 +2032,7 @@ const streamAnthropicOnce = (
 				model.thinking?.prefixBinding && model.compat.supportsThinkingBindingControls
 					? (options?.anthropicPrefixMismatchBehavior ?? "drop_block")
 					: undefined;
+			const controlBetas = resolveAnthropicControlBetas(model, prefixMismatchBehavior);
 			const mergedCallerHeaders = mergeHeaders(model.headers, options?.headers);
 			const umansGatewayWebSearchHeader = getUmansWebSearchHeader(model, mergedCallerHeaders);
 			// Keep fallback payloads aligned with the top-level Vertex effort gate:
@@ -2011,12 +2093,10 @@ const streamAnthropicOnce = (
 				) {
 					extraBetas.push(effortBeta);
 				}
-				if (
-					prefixMismatchBehavior &&
-					!isVertexRawPredictUrl(baseUrl) &&
-					!extraBetas.includes(THINKING_BINDING_CONTROLS_BETA)
-				) {
-					extraBetas.push(THINKING_BINDING_CONTROLS_BETA);
+				if (!isVertexRawPredictUrl(baseUrl)) {
+					for (const beta of controlBetas) {
+						if (!extraBetas.includes(beta)) extraBetas.push(beta);
+					}
 				}
 				// `context_management.clear_thinking_20251015` requires this beta. OAuth
 				// requests carry it in `claudeCodeAgentBetaDefaults`; API-key requests
@@ -2094,6 +2174,7 @@ const streamAnthropicOnce = (
 					prefixMismatchBehavior,
 					dropAllThinking,
 					droppedThinkingBlocks: providerSessionState?.prefixDroppedThinkingBlocks,
+					providerSessionState,
 					fallbacks,
 				});
 				if (disableStrictTools) {
@@ -2275,10 +2356,10 @@ const streamAnthropicOnce = (
 				// rawPredict is excluded because its betas live in `anthropic_beta`.
 				let injectedClientBetaHeaders: Record<string, string> | undefined;
 				if (options?.client !== undefined && !isVertexRawPredictUrl(baseUrl)) {
-					if (prefixMismatchBehavior) {
+					for (const beta of controlBetas) {
 						injectedClientBetaHeaders = mergeAnthropicBetaHeader(
-							mergedCallerHeaders,
-							THINKING_BINDING_CONTROLS_BETA,
+							injectedClientBetaHeaders ?? mergedCallerHeaders,
+							beta,
 						);
 					}
 					if ((params.output_config as AnthropicOutputConfig | undefined)?.effort !== undefined) {
@@ -2710,8 +2791,9 @@ const streamAnthropicOnce = (
 								output,
 								params,
 								providerSessionState,
-								delta?.input_transformations,
+								event.input_transformations,
 								seenInputTransformations,
+								true,
 							);
 							const rawStopReason = delta?.stop_reason;
 							if (rawStopReason) {
@@ -3344,10 +3426,17 @@ function ensureMaxTokensForThinking(params: MessageCreateParamsStreaming, maxAll
 function applyCacheControlToLastBlock(blocks: ContentBlockParam[], cacheControl: AnthropicCacheControl): boolean {
 	for (let index = blocks.length - 1; index >= 0; index--) {
 		const block = blocks[index];
-		// Anthropic rejects cache_control on generated reasoning and fallback
-		// boundary blocks. Preserve the requested trailing boundary on every
-		// ordinary content block, including tool use and tool results.
-		if (block.type === "thinking" || block.type === "redacted_thinking" || block.type === "fallback") {
+		// Anthropic rejects cache_control on generated reasoning, fallback
+		// boundaries, and mid-conversation tool-control blocks. Preserve the
+		// requested trailing boundary on ordinary content, including tool use
+		// and tool results.
+		if (
+			block.type === "thinking" ||
+			block.type === "redacted_thinking" ||
+			block.type === "fallback" ||
+			block.type === "tool_addition" ||
+			block.type === "tool_removal"
+		) {
 			continue;
 		}
 		if ("cache_control" in block && block.cache_control != null) return false;
@@ -3436,6 +3525,225 @@ function extractClaudeCodeFirstUserMessageText(messages: readonly Message[]): st
 	return "";
 }
 
+function resetAnthropicControlState(state: AnthropicProviderSessionState): void {
+	state.declaredTools = undefined;
+	state.activeToolNames.clear();
+	state.stableSystemBlocks = undefined;
+	state.systemFingerprint = undefined;
+	state.controlTransitions = [];
+	state.baseEffort = undefined;
+	state.baseEffortWire = undefined;
+	state.currentEffort = undefined;
+}
+
+/** Fingerprint of the wire message a control transition is attached after. */
+function anthropicControlAnchor(messages: readonly MessageParam[], messageCount: number): string {
+	if (messageCount === 0) return "";
+	return String(Bun.hash(JSON.stringify(messages[messageCount - 1])));
+}
+
+/**
+ * Discard the control baseline when the request no longer continues the
+ * conversation it was captured for: a different model, or a wire history that
+ * shrank or was rewritten under a recorded transition (compaction, branch
+ * switch, `/clear`). The next request re-baselines from its own payload.
+ */
+function syncAnthropicControlState(
+	state: AnthropicProviderSessionState,
+	model: Model<"anthropic-messages">,
+	messages: readonly MessageParam[],
+): void {
+	if (state.controlModelId !== model.id) {
+		state.controlModelId = model.id;
+		resetAnthropicControlState(state);
+		return;
+	}
+	for (const transition of state.controlTransitions) {
+		if (
+			transition.messageCount > messages.length ||
+			transition.anchor !== anthropicControlAnchor(messages, transition.messageCount)
+		) {
+			resetAnthropicControlState(state);
+			return;
+		}
+	}
+}
+
+/**
+ * Keep the top-level `system` array byte-stable across a session. The blocks
+ * captured on the first request are replayed verbatim (with the current
+ * request's cache breakpoints) while their text is unchanged. A text change
+ * re-baselines instead of duplicating the prompt as a mid-conversation
+ * system message: omp's system prompt is one rendered segment that embeds
+ * the tool roster, so replaying a second copy on every later request would
+ * cost the full prompt again per change. The prefix rewrite is absorbed by
+ * `prefix_mismatch_behavior: "drop_block"` and one cache miss.
+ */
+function planStableAnthropicSystem(
+	current: AnthropicSystemBlock[] | undefined,
+	state: AnthropicProviderSessionState | undefined,
+	enabled: boolean,
+): AnthropicSystemBlock[] | undefined {
+	if (!state || !enabled) return current;
+	const fingerprint = JSON.stringify(current?.map(block => block.text) ?? null);
+	if (state.systemFingerprint !== fingerprint) {
+		resetAnthropicControlState(state);
+		state.systemFingerprint = fingerprint;
+		state.stableSystemBlocks = current?.map(block => ({ type: block.type, text: block.text }));
+	}
+	return state.stableSystemBlocks?.map((block, index) => {
+		const cacheControl = current?.[index]?.cache_control;
+		return cacheControl ? { ...block, cache_control: cloneAnthropicCacheControl(cacheControl) } : { ...block };
+	});
+}
+
+function anthropicToolDefinitionKey(tool: AnthropicWireTool): string {
+	const stable = { ...tool };
+	delete stable.defer_loading;
+	return JSON.stringify(stable);
+}
+
+function recordAnthropicControlTransition(
+	state: AnthropicProviderSessionState,
+	messages: readonly MessageParam[],
+	messageCount: number,
+	content: ContentBlockParam[],
+	effort?: AnthropicOutputEffort,
+): void {
+	const existing = state.controlTransitions.findLast(transition => transition.messageCount === messageCount);
+	if (existing) {
+		existing.content.push(...content);
+		if (effort !== undefined) existing.effort = effort;
+		return;
+	}
+	state.controlTransitions.push({
+		messageCount,
+		anchor: anthropicControlAnchor(messages, messageCount),
+		content,
+		effort,
+	});
+}
+
+/**
+ * Keep the top-level `tools` array byte-stable across a session. Tools that
+ * leave the active set are withdrawn with `tool_removal`; tools that join are
+ * appended with `defer_loading: true` (not part of the checked prefix until
+ * referenced) and offered with `tool_addition`. A changed definition for an
+ * already-declared name cannot be expressed as a control and re-baselines.
+ */
+function planStableAnthropicTools(
+	current: AnthropicWireTool[] | undefined,
+	messages: readonly MessageParam[],
+	state: AnthropicProviderSessionState | undefined,
+	enabled: boolean,
+): AnthropicWireTool[] | undefined {
+	if (!state || !enabled || !current) return current;
+	if (!state.declaredTools) {
+		state.declaredTools = current.map(tool => ({ ...tool }));
+		state.activeToolNames = new Set(current.map(tool => tool.name));
+		return state.declaredTools;
+	}
+
+	const declaredByName = new Map(state.declaredTools.map(tool => [tool.name, tool]));
+	for (const tool of current) {
+		const declared = declaredByName.get(tool.name);
+		if (declared && anthropicToolDefinitionKey(declared) !== anthropicToolDefinitionKey(tool)) {
+			resetAnthropicControlState(state);
+			state.declaredTools = current.map(candidate => ({ ...candidate }));
+			state.activeToolNames = new Set(current.map(candidate => candidate.name));
+			return state.declaredTools;
+		}
+	}
+
+	const nextActive = new Set(current.map(tool => tool.name));
+	const changes: ContentBlockParam[] = [];
+	for (const activeName of state.activeToolNames) {
+		if (nextActive.has(activeName)) continue;
+		changes.push({
+			type: "tool_removal",
+			tool: { type: "tool_reference", name: activeName },
+		});
+	}
+	for (const tool of current) {
+		if (state.activeToolNames.has(tool.name)) continue;
+		if (!declaredByName.has(tool.name)) {
+			const deferred = { ...tool, defer_loading: true };
+			state.declaredTools.push(deferred);
+			declaredByName.set(tool.name, deferred);
+		}
+		changes.push({
+			type: "tool_addition",
+			tool: { type: "tool_reference", name: tool.name },
+		});
+	}
+	if (changes.length > 0) recordAnthropicControlTransition(state, messages, messages.length, changes);
+	state.activeToolNames = nextActive;
+	return state.declaredTools;
+}
+
+/**
+ * Keep top-level `output_config.effort` byte-stable across a session and carry
+ * later changes as per-message effort. Anthropic applies a system message's
+ * `output_config.effort` from the next `user` turn on, so the control is
+ * anchored before the latest user message to take effect on this response.
+ */
+function planStableAnthropicEffort(
+	current: AnthropicOutputEffort | undefined,
+	messages: readonly MessageParam[],
+	state: AnthropicProviderSessionState | undefined,
+	enabled: boolean,
+): AnthropicOutputEffort | undefined {
+	if (!state || !enabled) return current;
+	const effective = current ?? "high";
+	if (state.baseEffort === undefined) {
+		state.baseEffort = effective;
+		state.baseEffortWire = current;
+		state.currentEffort = effective;
+		return current;
+	}
+	if (state.currentEffort !== effective) {
+		const lastUserIndex = messages.findLastIndex(message => message.role === "user");
+		const messageCount = lastUserIndex >= 0 ? lastUserIndex : messages.length;
+		recordAnthropicControlTransition(state, messages, messageCount, [], effective);
+		state.currentEffort = effective;
+	}
+	return state.baseEffortWire;
+}
+
+function materializeAnthropicControlTransitions(
+	messages: MessageParam[],
+	state: AnthropicProviderSessionState | undefined,
+): MessageParam[] {
+	if (!state || state.controlTransitions.length === 0) return messages;
+	const result = messages.slice();
+	// Insert in slot order so each splice offsets only the transitions after it.
+	const ordered = state.controlTransitions.toSorted((a, b) => a.messageCount - b.messageCount);
+	let offset = 0;
+	for (const transition of ordered) {
+		const index = Math.min(transition.messageCount + offset, result.length);
+		const previous = result[index - 1];
+		if (previous?.role === "system" && previous.clear_at === undefined) {
+			const content: ContentBlockParam[] =
+				typeof previous.content === "string"
+					? [{ type: "text", text: previous.content }, ...transition.content]
+					: [...previous.content, ...transition.content];
+			result[index - 1] = {
+				...previous,
+				content,
+				...(transition.effort === undefined ? {} : { output_config: { effort: transition.effort } }),
+			};
+			continue;
+		}
+		result.splice(index, 0, {
+			role: "system",
+			content: transition.content,
+			...(transition.effort === undefined ? {} : { output_config: { effort: transition.effort } }),
+		});
+		offset++;
+	}
+	return result;
+}
+
 type AnthropicParamBuildOptions = {
 	disableStrictTools: boolean;
 	useUmansGatewayWebSearch: boolean;
@@ -3444,6 +3752,7 @@ type AnthropicParamBuildOptions = {
 	prefixMismatchBehavior?: "drop_block" | "error";
 	dropAllThinking: boolean;
 	droppedThinkingBlocks?: ReadonlySet<string>;
+	providerSessionState?: AnthropicProviderSessionState;
 	/** Sanitized server-side fallback entries; defaults to `options?.fallbacks` when omitted. */
 	fallbacks?: AnthropicOptions["fallbacks"];
 };
@@ -3463,6 +3772,7 @@ function buildParams(
 		prefixMismatchBehavior,
 		dropAllThinking,
 		droppedThinkingBlocks,
+		providerSessionState,
 		fallbacks = options?.fallbacks,
 	} = buildOptions;
 	// A session-scoped auto-demote (learned from a live signing 400) clones the
@@ -3480,7 +3790,7 @@ function buildParams(
 	const firstUserMessageText = shouldInjectClaudeCodeInstruction
 		? extractClaudeCodeFirstUserMessageText(context.messages)
 		: "";
-	const systemBlocks = buildAnthropicSystemBlocks(context.systemPrompt, {
+	let systemBlocks = buildAnthropicSystemBlocks(context.systemPrompt, {
 		includeClaudeCodeInstruction: shouldInjectClaudeCodeInstruction,
 		firstUserMessageText,
 		cacheControl,
@@ -3591,8 +3901,33 @@ function buildParams(
 	// the `effort-2025-11-24` beta, which that adapter can only accept in the body
 	// (`anthropic_beta`), never as the `anthropic-beta` HTTP header this path sets
 	// — so the field is dropped alongside the beta to avoid a 400 (#5614).
+	let wireMessages = convertAnthropicMessages(context.messages, effectiveModel, isOAuthToken, {
+		serverSideFallbackEnabled: !!fallbacks?.length,
+		dropAllThinking,
+		droppedThinkingBlocks,
+	});
+	if (providerSessionState) syncAnthropicControlState(providerSessionState, model, wireMessages);
+	systemBlocks = planStableAnthropicSystem(
+		systemBlocks,
+		providerSessionState,
+		model.compat.supportsMidConversationSystem,
+	);
+	tools = planStableAnthropicTools(
+		tools,
+		wireMessages,
+		providerSessionState,
+		model.compat.supportsMidConversationToolChanges,
+	);
+	const topLevelEffort = planStableAnthropicEffort(
+		outputConfigEffort,
+		wireMessages,
+		providerSessionState,
+		model.compat.supportsPerMessageEffort,
+	);
+	wireMessages = materializeAnthropicControlTransitions(wireMessages, providerSessionState);
+
 	const outputConfigEntries: AnthropicOutputConfig = {};
-	if (outputConfigEffort && model.compat.supportsOutputEffort) outputConfigEntries.effort = outputConfigEffort;
+	if (topLevelEffort && model.compat.supportsOutputEffort) outputConfigEntries.effort = topLevelEffort;
 	if (options?.taskBudget) outputConfigEntries.task_budget = options.taskBudget;
 	const outputConfig = Object.keys(outputConfigEntries).length ? outputConfigEntries : undefined;
 
@@ -3602,15 +3937,15 @@ function buildParams(
 	const modelMaxTokens = model.maxTokens ?? CLAUDE_CODE_MAX_OUTPUT_TOKENS;
 	const maxOutputTokens = isOAuthToken ? Math.min(CLAUDE_CODE_MAX_OUTPUT_TOKENS, modelMaxTokens) : modelMaxTokens;
 
+	const vertexControlBetas = isVertexRawPredictUrl(model.baseUrl)
+		? resolveAnthropicControlBetas(model, prefixMismatchBehavior)
+		: [];
+
 	// Build params in the canonical field order: model → messages → system → tools →
 	// metadata → max_tokens → thinking → context_management → output_config → stream.
 	const params: MessageCreateParamsStreaming = {
 		model: options?.requestModelId ?? model.requestModelId ?? model.id,
-		messages: convertAnthropicMessages(context.messages, effectiveModel, isOAuthToken, {
-			serverSideFallbackEnabled: !!fallbacks?.length,
-			dropAllThinking,
-			droppedThinkingBlocks,
-		}),
+		messages: wireMessages,
 		...(systemBlocks && { system: systemBlocks }),
 		...(tools !== undefined && { tools }),
 		...(metadata && { metadata }),
@@ -3619,9 +3954,7 @@ function buildParams(
 		...(contextManagement && { context_management: contextManagement }),
 		...(outputConfig && { output_config: outputConfig }),
 		...(fallbacks?.length ? { fallbacks } : {}),
-		...(isVertexRawPredictUrl(model.baseUrl) && prefixMismatchBehavior
-			? { anthropic_beta: [THINKING_BINDING_CONTROLS_BETA] }
-			: {}),
+		...(vertexControlBetas.length > 0 ? { anthropic_beta: vertexControlBetas } : {}),
 		stream: true,
 	};
 
@@ -3801,7 +4134,7 @@ export function convertAnthropicMessages(
 	// Indices of params emitted from `developer` messages. After the main pass,
 	// the ones whose placement satisfies Anthropic's mid-conversation rules are
 	// upgraded from the `user` role to the authoritative `system` role.
-	const developerParamIndices: number[] = [];
+	const developerParams: Array<{ index: number; payload?: AnthropicMessagePayload }> = [];
 	const params: AnthropicMessageParam[] = [];
 
 	const transformedMessages = transformMessages(messages, model, normalizeToolCallId);
@@ -3810,23 +4143,52 @@ export function convertAnthropicMessages(
 		const msg = transformedMessages[i];
 
 		if (msg.role === "user" || msg.role === "developer") {
-			if (!msg.content) continue;
+			const payload =
+				msg.role === "developer" && msg.providerPayload?.type === "anthropicMessage"
+					? msg.providerPayload
+					: undefined;
+			const hasProviderControls =
+				payload?.clearAt !== undefined ||
+				payload?.effort !== undefined ||
+				(payload?.toolChanges !== undefined && payload.toolChanges.length > 0);
 
 			let content: string | ContentBlockParam[];
 			if (typeof msg.content === "string") {
-				if (msg.content.trim().length === 0) continue;
-				content = msg.content.toWellFormed();
+				if (msg.content.trim().length === 0) {
+					if (!hasProviderControls) continue;
+					content = [];
+				} else {
+					content = msg.content.toWellFormed();
+				}
 			} else {
 				const contentBlocks = convertContentBlocks(msg.content, model.input.includes("image"));
 				if (typeof contentBlocks === "string") {
-					if (contentBlocks.trim().length === 0) continue;
-					content = contentBlocks;
+					if (contentBlocks.trim().length === 0) {
+						if (!hasProviderControls) continue;
+						content = [];
+					} else {
+						content = contentBlocks;
+					}
 				} else {
-					if (contentBlocks.length === 0) continue;
+					if (contentBlocks.length === 0 && !hasProviderControls) continue;
 					content = contentBlocks;
 				}
 			}
-			if (msg.role === "developer") developerParamIndices.push(params.length);
+			if (payload?.toolChanges && model.compat.supportsMidConversationToolChanges) {
+				const blocks: ContentBlockParam[] =
+					typeof content === "string" ? [{ type: "text", text: content }] : content;
+				for (const change of payload.toolChanges) {
+					blocks.push({
+						type: change.type,
+						tool: {
+							type: "tool_reference",
+							name: encodeAnthropicToolName(change.name, isOAuthToken, model.compat.escapeBuiltinToolNames),
+						},
+					});
+				}
+				content = blocks;
+			}
+			if (msg.role === "developer") developerParams.push({ index: params.length, payload });
 			params.push({ role: "user", content });
 		} else if (msg.role === "assistant") {
 			const blocks: ContentBlockParam[] = [];
@@ -3845,8 +4207,7 @@ export function convertAnthropicMessages(
 				} else if (block.type === "thinking") {
 					if (
 						opts?.dropAllThinking ||
-						(block.thinkingSignature &&
-							opts?.droppedThinkingBlocks?.has(`thinking:${block.thinkingSignature}`))
+						(block.thinkingSignature && opts?.droppedThinkingBlocks?.has(`thinking:${block.thinkingSignature}`))
 					) {
 						continue;
 					}
@@ -4004,17 +4365,30 @@ export function convertAnthropicMessages(
 	// never consecutive. Requiring the next param to be `assistant` (or absent)
 	// covers both the "followed by assistant / last" and "no consecutive system"
 	// constraints. Anything that does not qualify stays a `user` message.
-	if (developerParamIndices.length > 0 && model.compat.supportsMidConversationSystem) {
-		for (const idx of developerParamIndices) {
+	if (developerParams.length > 0 && model.compat.supportsMidConversationSystem) {
+		for (const developer of developerParams) {
+			const idx = developer.index;
 			const followsUser = idx > 0 && params[idx - 1]?.role === "user";
 			const next = params[idx + 1];
 			const lastOrBeforeAssistant = idx === params.length - 1 || next?.role === "assistant";
-			// System content is text-only on the wire; a developer turn carrying
-			// image blocks must stay a `user` message or the API rejects it.
 			const content = params[idx].content;
-			const textOnly = typeof content === "string" || content.every(block => block.type === "text");
-			if (followsUser && lastOrBeforeAssistant && textOnly) {
-				params[idx] = { role: "system", content };
+			const systemCompatible =
+				typeof content === "string" ||
+				content.every(
+					block => block.type === "text" || block.type === "tool_addition" || block.type === "tool_removal",
+				);
+			const effortOnly = developer.payload?.effort !== undefined && Array.isArray(content) && content.length === 0;
+			if ((followsUser && lastOrBeforeAssistant && systemCompatible) || effortOnly) {
+				params[idx] = {
+					role: "system",
+					content,
+					...(developer.payload?.clearAt !== undefined && model.compat.supportsTurnScopedSystem
+						? { clear_at: developer.payload.clearAt }
+						: {}),
+					...(developer.payload?.effort !== undefined && model.compat.supportsPerMessageEffort
+						? { output_config: { effort: developer.payload.effort } }
+						: {}),
+				};
 			}
 		}
 	}
@@ -4553,6 +4927,7 @@ function convertTools(
 			...baseTool,
 			...(supportsEagerToolInputStreaming ? { eager_input_streaming: true } : {}),
 			...(plan.strict ? { strict: true } : {}),
+			...(tool.deferLoading ? { defer_loading: true } : {}),
 		};
 	});
 }
