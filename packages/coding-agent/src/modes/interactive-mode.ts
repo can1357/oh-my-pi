@@ -232,6 +232,7 @@ import {
 } from "./theme/theme";
 import { getSlashCommandTypeIcon } from "./theme/tui-adapters";
 import type {
+	AgentHubOpenOptions,
 	CompactionQueuedMessage,
 	InteractiveModeContext,
 	InteractiveModeInitOptions,
@@ -5557,7 +5558,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		await this.#selectorController.showDebugSelector();
 	}
 
-	showAgentHub(options?: { requireContent?: boolean; armCloseTap?: boolean }): void {
+	showAgentHub(options?: AgentHubOpenOptions): void {
 		this.#selectorController.showAgentHub(this.#observerRegistry, options);
 	}
 

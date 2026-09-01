@@ -5,6 +5,7 @@
  */
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ChatTranscriptBuilder } from "@oh-my-pi/pi-coding-agent/modes/components/chat-transcript-builder";
 import { ReadToolGroupComponent } from "@oh-my-pi/pi-coding-agent/modes/components/read-tool-group";
@@ -12,7 +13,7 @@ import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
 import type { SessionContext } from "@oh-my-pi/pi-coding-agent/session/session-context";
-import { Container, type TUI } from "@oh-my-pi/pi-tui";
+import { Container, TUI, VirtualTerminal } from "@oh-my-pi/pi-tui";
 import { formatNumber } from "@oh-my-pi/pi-utils";
 
 // 4242 → "4.2K": distinctive enough not to collide with a read group's render.
@@ -175,6 +176,38 @@ describe("ChatTranscriptBuilder token-usage row timestamp", () => {
 		const rendered = last.render(120).join("\n");
 		expect(rendered).toContain(USAGE_TS_LABEL);
 		expect(rendered).toContain(USAGE_LABEL);
+	});
+
+	it("deep-links tool-only assistant entries to their first rendered row", () => {
+		const builder = new ChatTranscriptBuilder({
+			ui: new TUI(new VirtualTerminal(120, 20)),
+			cwd: process.cwd(),
+			requestRender: () => {},
+		});
+		const message: AssistantMessage = {
+			role: "assistant",
+			content: [{ type: "toolCall", id: "call-1", name: "bash", arguments: { command: "echo ok" } }],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-sonnet-4-5",
+			stopReason: "toolUse",
+			usage: {
+				input: 1,
+				output: 1,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 2,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: 1_000,
+		};
+		builder.rebuild([
+			{ type: "message", id: "tool-entry", parentId: null, timestamp: new Date(0).toISOString(), message },
+		]);
+
+		const rendered = builder.container.render(120);
+		expect(Bun.stripANSI(rendered.join("\n"))).toContain("echo ok");
+		expect(builder.rowForEntry("tool-entry")).toBe(0);
 	});
 
 	it("keeps grouped read metrics nested on the reusable transcript-builder path", () => {

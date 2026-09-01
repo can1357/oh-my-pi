@@ -68,7 +68,7 @@ function makeHub(focusAgent: (id: string) => Promise<void>) {
 	return { hub, doneCalls: () => doneCalls, done: done.promise, renderRequested: renderRequested.promise };
 }
 
-const ROSTER_ENTRY_PATTERN = /^(❯| ) (\S+) (?:(?:(?:│ {3}| {4})*)(?:├── |└── ))?(\S+)/u;
+const ROSTER_ENTRY_PATTERN = /^(❯| ) (?:(?:(?:│ {3}| {4})*)(?:├── |└── ))?(\S+) (\S+)/u;
 
 function renderedRosterEntry(hub: AgentHubOverlayComponent, id: string, width: number): string {
 	const cells = hub.render(width).map(raw => {
@@ -255,7 +255,7 @@ describe("Agent hub Enter activation", () => {
 		expect(agents.get("Parent")?.parentId).toBe("Main");
 		expect(agents.get("Child")?.parentId).toBe("Parent");
 		hub.handleInput("t");
-		expect(Bun.stripANSI(renderedRosterEntry(hub, "Child", 120))).toContain("└── Child");
+		expect(Bun.stripANSI(renderedRosterEntry(hub, "Child", 120))).toContain("└── ○ Child");
 		hub.dispose();
 	});
 
@@ -303,7 +303,7 @@ describe("Agent hub Enter activation", () => {
 		});
 		const workerEntry = renderedRosterEntry(hub, "Worker", 120);
 		expect(workerEntry).toContain("Inspect dependency boundaries and report unsafe coupling.");
-		expect(workerEntry.replace(/\s+/g, " ")).toContain("usage —");
+		expect(workerEntry.replace(/\s+/g, " ")).toContain("usage ·");
 		expect(workerEntry).not.toContain("$0.000");
 		hub.dispose();
 	});

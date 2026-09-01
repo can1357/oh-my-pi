@@ -141,6 +141,8 @@ export class TranscriptContainer extends Container {
 	#replayRequested = false;
 	#toolActivityVisible = true;
 	#lastFrame: AnimationFrame = { tick: 0, now: 0 };
+	// Start rows from the last full render(), keyed by child component (transcript deep-links).
+	#childStartRows = new Map<Component, number>();
 
 	override addChild(component: Component): void {
 		if (isToolActivityComponent(component)) component.setToolActivityVisible(this.#toolActivityVisible);
@@ -161,6 +163,7 @@ export class TranscriptContainer extends Container {
 		super.removeChild(component);
 		this.#entries = this.#entries.filter(candidate => candidate.component !== component);
 		this.#frontier = Math.min(this.#frontier, this.#entries.length);
+		this.#childStartRows.delete(component);
 	}
 
 	override clear(): void {
@@ -168,6 +171,7 @@ export class TranscriptContainer extends Container {
 		this.#entries = [];
 		this.#frontier = 0;
 		this.#offered = undefined;
+		this.#childStartRows.clear();
 		this.#replayPending = false;
 		this.#replayRequested = false;
 	}
@@ -489,15 +493,22 @@ export class TranscriptContainer extends Container {
 	/** Full semantic render used by exports and non-terminal commands. */
 	override render(width: number): readonly string[] {
 		this.#syncEntries();
+		this.#childStartRows.clear();
 		const rows: string[] = [];
 		for (const entry of this.#entries) {
 			this.#setAllocation(entry.component, Number.MAX_SAFE_INTEGER, this.#lastFrame);
 			const block = this.#renderEntry(entry, width);
 			if (block.length === 0) continue;
 			if (rows.length > 0) rows.push("");
+			this.#childStartRows.set(entry.component, rows.length);
 			rows.push(...block);
 		}
 		return rows;
+	}
+
+	/** Rendered row where a child's block begins in the last full render() (transcript deep-links). */
+	getChildStartRow(child: Component): number | undefined {
+		return this.#childStartRows.get(child);
 	}
 
 	#renderEntry(entry: TranscriptEntry, width: number): readonly string[] {
