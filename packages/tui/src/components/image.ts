@@ -103,6 +103,20 @@ export class ImageBudget {
 	#purgeIds: number[] = [];
 	/** Image ids whose data is believed to be loaded in the terminal's store. */
 	#transmitted = new Set<number>();
+	/**
+	 * Image protocol in effect when the ids in {@link #transmitted} were sent.
+	 *
+	 * The transmit-once design assumes the terminal still holds the data every
+	 * later placement refers to. A mid-session capability change breaks that
+	 * assumption — a Sixel probe landing, a forced-protocol override, or a
+	 * terminal/multiplexer that stops (or starts) reporting Kitty — because the
+	 * store the ids were written to is no longer the store the placements read
+	 * from. Left stale, those ids replay as placement-only forever: blank
+	 * reserved rows with no text fallback, scoped to the affected ids while
+	 * brand-new images still render. Tracked so {@link #syncTransmitProtocol}
+	 * can drop the tracking on the transition. See issue #10359.
+	 */
+	#transmittedProtocol: typeof TERMINAL.imageProtocol = null;
 	/** Transmit sequences (full base64) to write once, before this frame's placements. */
 	#pendingTransmits: string[] = [];
 	// True while the in-flight pass is a partial/throwaway pass (the
@@ -264,8 +278,15 @@ export class ImageBudget {
 		return ids;
 	}
 
-	/** Whether `imageId`'s data still needs to be transmitted to the terminal. */
+	/**
+	 * Whether `imageId`'s data still needs to be transmitted to the terminal.
+	 *
+	 * Reconciles the tracked protocol first, so an image whose data was sent
+	 * under a protocol that is no longer in effect re-transmits instead of
+	 * emitting a placement the terminal cannot resolve.
+	 */
 	shouldTransmit(imageId: number): boolean {
+		this.#syncTransmitProtocol();
 		return !this.#transmitted.has(imageId);
 	}
 
@@ -392,6 +413,9 @@ export class ImageBudget {
 	 */
 	enqueueTransmit(imageId: number, sequence: string): void {
 		if (this.#transmitted.has(imageId)) return;
+		// Bind the tracking to the protocol the data is being sent under, so a
+		// later capability change is detectable (see #syncTransmitProtocol).
+		this.#transmittedProtocol = TERMINAL.imageProtocol;
 		this.#transmitted.add(imageId);
 		this.#pendingTransmits.push(sequence);
 	}
@@ -436,6 +460,26 @@ export class ImageBudget {
 		if (this.#transmitted.size === 0 && this.#pendingTransmits.length === 0) return;
 		this.#transmitted.clear();
 		this.#pendingTransmits = [];
+	}
+
+	/**
+	 * Drop transmit tracking when the image protocol changed since those ids were
+	 * sent. The transmit-once optimisation is only sound while the terminal still
+	 * holds the data a placement refers to; a capability change mid-session means
+	 * it does not, and a placement-only replay then paints blank reserved rows
+	 * with no text fallback for the rest of the session (issue #10359).
+	 *
+	 * Edge-triggered: the recorded protocol is updated on every check, so a
+	 * flapping capability re-transmits once per transition rather than on every
+	 * frame. {@link Image} calls {@link shouldTransmit} on every render pass —
+	 * including cache hits and passes with no protocol at all — so the transition
+	 * is observed even while images are rendering their text fallback.
+	 */
+	#syncTransmitProtocol(): void {
+		const protocol = TERMINAL.imageProtocol;
+		if (protocol === this.#transmittedProtocol) return;
+		this.#transmittedProtocol = protocol;
+		this.forgetTransmitted();
 	}
 
 	#forgetKeyForId(id: number): void {
