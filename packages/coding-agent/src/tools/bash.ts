@@ -668,6 +668,17 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 		}
 	}
 
+	/**
+	 * Predicate tools (grep, rg, ag, ack, git grep, git log -S) return exit 1
+	 * for "no match" — a valid answer, not a failure. Exit 2 is a real error.
+	 * Treating exit-1 predicates as success keeps the harness error metric
+	 * honest (harness-error reduction, 2026-09).
+	 */
+	private static isPredicateNoMatch(exitCode: number, command: string | undefined): boolean {
+		if (exitCode !== 1 || !command) return false;
+		return /(^|[;&|()]\s*)(grep|rg|ag|ack)(\s|$)|git\s+(grep|log)/.test(command);
+	}
+
 	async #buildCompletedResult(
 		result: BashResult | BashInteractiveResult,
 		timeoutSec: number | undefined,
@@ -677,9 +688,11 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 			terminalId?: string;
 			wallTimeMs?: number;
 		} = {},
+		command?: string,
 	): Promise<AgentToolResult<BashToolDetails>> {
 		const exitCode = result.exitCode;
-		const failedExit = exitCode !== undefined && exitCode !== 0;
+		const failedExit =
+			exitCode !== undefined && exitCode !== 0 && !BashTool.isPredicateNoMatch(exitCode, command);
 
 		const outputLines = [this.#formatResultOutput(result)];
 		const notices: string[] = [];
@@ -849,7 +862,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 						requestedTimeoutSec: options.requestedTimeoutSec,
 						notices: options.notices ?? [],
 						wallTimeMs,
-					});
+					}, options.command);
 					const finalText = this.#extractTextResult(finalResult);
 					latestText = finalText;
 					// Hand the detailed result to the foreground auto-background
@@ -1443,7 +1456,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 			requestedTimeoutSec,
 			notices: pendingNotices,
 			wallTimeMs,
-		});
+		}, command);
 	}
 }
 

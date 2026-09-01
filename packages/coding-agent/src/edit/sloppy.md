@@ -2,6 +2,7 @@ Sparse edit format: name distinctive current fragments, elide the rest with `…
 
 <ops>
 `§relative/path.ts` opens an operation in that file; a bare `§` opens another operation in the same file. Each MUST match once; `§*path.ts` / `§*` applies its operation to every match. All operations apply atomically.
+If you omit the `§path` header entirely, the payload applies to the last file you edited in this session (auto-recovery).
 
 One rewrite form per operation:
 - Inline: `⟪current│desired⟫` — changes inside lines (renames, operator flips, argument tweaks), several per operation, across lines; a selection MAY span lines for a contained replace. `⟪old│⟫` deletes.
