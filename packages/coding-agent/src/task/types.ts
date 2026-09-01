@@ -7,6 +7,21 @@ import type { NestedRepoPatch } from "./worktree";
 
 /** Source of an agent definition */
 export type AgentSource = "bundled" | "user" | "project";
+
+/** Host-classified origin of an agent definition. Kept separate from legacy precedence source. */
+export type AgentDefinitionOriginKind = AgentSource | "extension" | "claude-marketplace";
+
+/** Opaque immutable identity for one host-owned definition origin. */
+export interface AgentDefinitionOriginIdentity {
+	readonly schemaVersion: 1;
+	readonly originKind: AgentDefinitionOriginKind;
+	readonly originId: string;
+}
+
+/** Opaque immutable identity for the exact selected agent definition and source content supplied to its parser. */
+export interface AgentDefinitionIdentity extends AgentDefinitionOriginIdentity {
+	readonly definitionId: string;
+}
 /**
  * Enforcement policy for a structured subagent output schema.
  *
@@ -89,6 +104,8 @@ export interface SubagentLifecyclePayload {
 	id: string;
 	agent: string;
 	agentSource: AgentSource;
+	/** Exact host-owned identity of the selected definition, when available. */
+	agentIdentity?: AgentDefinitionIdentity;
 	description?: string;
 	status: "started" | "completed" | "failed" | "aborted";
 	sessionFile?: string;
@@ -375,6 +392,8 @@ export interface AgentDefinition {
 	advisor?: boolean | string;
 	source: AgentSource;
 	filePath?: string;
+	/** Exact host-owned identity assigned during authoritative discovery. */
+	identity?: AgentDefinitionIdentity;
 }
 
 /** Details extracted from a subagent `yield` tool call for final-result assembly and task rendering. */
@@ -476,6 +495,8 @@ export interface SingleResult {
 	id: string;
 	agent: string;
 	agentSource: AgentSource;
+	/** Exact host-owned identity of the selected definition, when available. */
+	agentIdentity?: AgentDefinitionIdentity;
 	task: string;
 	assignment?: string;
 	description?: string;

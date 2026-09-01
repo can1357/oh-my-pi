@@ -346,6 +346,60 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 		expect(Object.hasOwn(result, "structuredOutput")).toBe(false);
 	});
 
+	it("carries the exact selected definition identity through start, terminal, and SingleResult", async () => {
+		const session = yieldEmittingSession();
+		vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));
+		const eventBus = new EventBus();
+		const lifecycleEvents: unknown[] = [];
+		eventBus.on("task:subagent:lifecycle", event => lifecycleEvents.push(event));
+		const agentIdentity = Object.freeze({
+			schemaVersion: 1 as const,
+			originKind: "extension" as const,
+			originId: "sha256:fixture-extension-origin",
+			definitionId: "sha256:fixture-agent-definition",
+		});
+		const agent = { ...baseAgent, identity: agentIdentity } as AgentDefinition;
+
+		const result = await runSubprocess({
+			...baseOptions,
+			agent,
+			id: "identity-child",
+			parentToolCallId: "identity-parent",
+			eventBus,
+		});
+
+		expect(lifecycleEvents).toHaveLength(2);
+		expect((lifecycleEvents[0] as { agentIdentity?: unknown }).agentIdentity).toBe(agentIdentity);
+		expect((lifecycleEvents[1] as { agentIdentity?: unknown }).agentIdentity).toBe(agentIdentity);
+		expect(result.agentIdentity).toBe(agentIdentity);
+	});
+
+	it("carries the selected definition identity through pre-abort without emitting lifecycle frames", async () => {
+		const eventBus = new EventBus();
+		const lifecycleEvents: unknown[] = [];
+		eventBus.on("task:subagent:lifecycle", event => lifecycleEvents.push(event));
+		const agentIdentity = Object.freeze({
+			schemaVersion: 1 as const,
+			originKind: "project" as const,
+			originId: "sha256:project-origin",
+			definitionId: "sha256:project-worker",
+		});
+		const controller = new AbortController();
+		controller.abort();
+
+		const result = await runSubprocess({
+			...baseOptions,
+			agent: { ...baseAgent, source: "project", identity: agentIdentity },
+			id: "pre-aborted-identity-child",
+			parentToolCallId: "pre-aborted-identity-parent",
+			eventBus,
+			signal: controller.signal,
+		});
+
+		expect(result).toMatchObject({ aborted: true, exitCode: 1, agentIdentity });
+		expect(lifecycleEvents).toEqual([]);
+	});
+
 	it("caps caller-requested effort at task.maxEffort", async () => {
 		const model = getBundledModel("openai-codex", "gpt-5.6-sol");
 		if (!model) throw new Error("Expected gpt-5.6-sol model to exist");

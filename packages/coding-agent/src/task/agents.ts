@@ -16,7 +16,9 @@ import securityReviewerMd from "../prompts/agents/security-reviewer.md" with { t
 import taskMd from "../prompts/agents/task.md" with { type: "text" };
 import { AUTO_THINKING } from "../thinking";
 
-import type { AgentDefinition, AgentSource } from "./types";
+import { createEmbeddedAgentDefinitionIdentity } from "./agent-definition-identity";
+
+import type { AgentDefinition, AgentDefinitionIdentity, AgentSource } from "./types";
 
 interface AgentFrontmatter {
 	name: string;
@@ -108,6 +110,7 @@ export function parseAgent(
 	content: string,
 	source: AgentSource,
 	level: "fatal" | "warn" | "off" = "fatal",
+	identity?: AgentDefinitionIdentity,
 ): AgentDefinition {
 	const { frontmatter, body } = parseFrontmatter(content, {
 		location: filePath,
@@ -122,6 +125,7 @@ export function parseAgent(
 		systemPrompt: body,
 		source,
 		filePath,
+		...(identity ? { identity } : {}),
 	};
 }
 
@@ -136,9 +140,16 @@ export function loadBundledAgents(): AgentDefinition[] {
 	if (bundledAgentsCache !== null) {
 		return bundledAgentsCache;
 	}
-	bundledAgentsCache = EMBEDDED_AGENT_DEFS.map(def =>
-		parseAgent(`embedded:${def.fileName}`, buildAgentContent(def), "bundled"),
-	);
+	bundledAgentsCache = EMBEDDED_AGENT_DEFS.map(def => {
+		const content = buildAgentContent(def);
+		return parseAgent(
+			`embedded:${def.fileName}`,
+			content,
+			"bundled",
+			"fatal",
+			createEmbeddedAgentDefinitionIdentity(`embedded:${def.fileName}`, content),
+		);
+	});
 	return bundledAgentsCache;
 }
 
