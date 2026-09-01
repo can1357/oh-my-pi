@@ -183,3 +183,80 @@ describe("OpenAI Chat Completions explicit prompt cache policy", () => {
 		}
 	});
 });
+
+describe("session id metadata forwarding", () => {
+	it("forwards sessionId as metadata.session_id", async () => {
+		const { body } = await captureRequest({ sessionId: "sess-01a03f57" });
+
+		expect(body.metadata).toEqual({ session_id: "sess-01a03f57" });
+	});
+
+	it("preserves caller metadata alongside session_id", async () => {
+		const { body } = await captureRequest({
+			sessionId: "sess-01a03f57",
+			metadata: { source: "test" },
+		});
+
+		expect(body.metadata).toEqual({ source: "test", session_id: "sess-01a03f57" });
+	});
+
+	it("omits metadata entirely when sessionId is absent", async () => {
+		const { body } = await captureRequest({ metadata: { source: "test" } });
+
+		expect(body.metadata).toBeUndefined();
+	});
+
+	it("drops non-string caller metadata values", async () => {
+		const { body } = await captureRequest({
+			sessionId: "sess-01a03f57",
+			metadata: { source: "test", count: 3, flag: null, nested: { a: 1 } },
+		});
+
+		expect(body.metadata).toEqual({ source: "test", session_id: "sess-01a03f57" });
+	});
+
+	it("omits metadata for endpoints whose compat rejects it", async () => {
+		const strictModel: Model<"openai-completions"> = {
+			...openAI56CompletionsModel,
+			compat: { ...openAI56CompletionsModel.compat, supportsMetadata: false },
+		};
+		const { body } = await captureRequest({ sessionId: "sess-01a03f57" }, strictModel);
+
+		expect(body.metadata).toBeUndefined();
+	});
+
+	it("omits metadata for endpoints that have not opted in", async () => {
+		const unknownModel: Model<"openai-completions"> = {
+			...openAI56CompletionsModel,
+			compat: { ...openAI56CompletionsModel.compat, supportsMetadata: undefined },
+		};
+		const { body } = await captureRequest({ sessionId: "sess-01a03f57" }, unknownModel);
+
+		expect(body.metadata).toBeUndefined();
+	});
+
+	it("reserves a metadata slot for session_id within the wire limit", async () => {
+		const callerEntries = Object.fromEntries(Array.from({ length: 16 }, (_, i) => [`key${i}`, `value${i}`]));
+		const { body } = await captureRequest({ sessionId: "sess-01a03f57", metadata: callerEntries });
+
+		const metadata = body.metadata as Record<string, string>;
+		expect(Object.keys(metadata)).toHaveLength(16);
+		expect(metadata.session_id).toBe("sess-01a03f57");
+		expect(metadata.key15).toBeUndefined();
+	});
+
+	it("drops caller metadata entries exceeding wire key and value limits", async () => {
+		const { body } = await captureRequest({
+			sessionId: "sess-01a03f57",
+			metadata: { ok: "fine", ["k".repeat(65)]: "v", longValue: "v".repeat(513) },
+		});
+
+		expect(body.metadata).toEqual({ ok: "fine", session_id: "sess-01a03f57" });
+	});
+
+	it("omits metadata entirely when the session id exceeds the wire value limit", async () => {
+		const { body } = await captureRequest({ sessionId: "s".repeat(513), metadata: { ok: "fine" } });
+
+		expect(body.metadata).toBeUndefined();
+	});
+});
