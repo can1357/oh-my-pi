@@ -1091,10 +1091,12 @@ export class RelayBridge {
 			case "Emulation.setEmulatedMedia":
 			case "Emulation.setLocaleOverride":
 			case "Emulation.setFocusEmulationEnabled":
+			case "Emulation.setScrollbarsHidden":
 			case "Emulation.setEmulatedVisionDeficiency": {
 				if (
 					!hasObjectKeys(msg.params) ||
 					(msg.method === "Emulation.setFocusEmulationEnabled" && msg.params?.enabled === false) ||
+					(msg.method === "Emulation.setScrollbarsHidden" && msg.params?.hidden === false) ||
 					(msg.method === "Emulation.setLocaleOverride" && msg.params?.locale === "") ||
 					(msg.method === "Emulation.setEmulatedVisionDeficiency" && msg.params?.type === "none")
 				) {
@@ -1501,6 +1503,7 @@ export class RelayBridge {
 			case "Emulation.setLocaleOverride":
 			case "Emulation.setTimezoneOverride":
 			case "Emulation.setFocusEmulationEnabled":
+			case "Emulation.setScrollbarsHidden":
 			case "Emulation.setDefaultBackgroundColorOverride":
 			case "Emulation.setPageScaleFactor":
 			case "Emulation.resetPageScaleFactor":
@@ -1662,6 +1665,8 @@ export class RelayBridge {
 			case "Input.setInterceptDrags":
 			case "Emulation.setFocusEmulationEnabled":
 				return { method: subscription.method, params: { enabled: false } };
+			case "Emulation.setScrollbarsHidden":
+				return { method: subscription.method, params: { hidden: false } };
 			case "Emulation.setEmulatedMedia":
 				return {
 					method: subscription.method,
