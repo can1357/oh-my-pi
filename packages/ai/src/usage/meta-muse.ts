@@ -1,3 +1,4 @@
+import * as AIError from "../error";
 import type { MuseCodeKeyResponse } from "../registry/oauth/meta-muse";
 import { requestMuseCodeKey } from "../registry/oauth/meta-muse";
 import type { UsageAmount, UsageFetchParams, UsageLimit, UsageProvider, UsageReport, UsageWindow } from "../usage";
@@ -103,7 +104,10 @@ export const metaMuseUsageProvider: UsageProvider = {
 		let payload: MuseCodeKeyResponse;
 		try {
 			payload = await requestMuseCodeKey(accessToken, ctx.fetch, params.signal);
-		} catch {
+		} catch (error) {
+			if (error instanceof AIError.OAuthError && (error.status === 401 || error.status === 403)) {
+				throw new AIError.ProviderHttpError(error.message, error.status, { cause: error });
+			}
 			return null;
 		}
 		if (payload.is_subs_active === false) return null;

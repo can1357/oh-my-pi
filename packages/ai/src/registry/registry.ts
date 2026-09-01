@@ -178,6 +178,11 @@ export function getProviderDefinition(id: string): ProviderDefinition | undefine
 	return BY_ID.get(id);
 }
 
+/** Resolve a login-only alias to the provider id that owns its persisted credentials and models. */
+export function resolveProviderCredentialId(id: string): string {
+	return getProviderDefinition(id)?.storeCredentialsAs ?? id;
+}
+
 /** Compile-time completeness: every catalog chat-model provider must have a registry definition. */
 type _MissingCatalogProviders = Exclude<KnownProvider, RegistryDef["id"]>;
 type _CheckRegistryComplete = _MissingCatalogProviders extends never

@@ -116,7 +116,11 @@ function normalizeStoredIdentityKey(identityKey: string | null | undefined): str
 
 export function serializeCredential(provider: string, credential: AuthCredential): SerializedCredentialRecord | null {
 	if (credential.type === "api_key") {
-		const data = credential.source === "login" ? { key: credential.key, source: "login" } : { key: credential.key };
+		const data = {
+			key: credential.key,
+			...(credential.source === "login" ? { source: "login" as const } : {}),
+			...(credential.authorizedAt !== undefined ? { authorizedAt: credential.authorizedAt } : {}),
+		};
 		return {
 			credentialType: "api_key",
 			data: JSON.stringify(data),
@@ -148,7 +152,13 @@ function deserializeCredential(row: AuthRow): AuthCredential | null {
 		const data = parsed as Record<string, unknown>;
 		if (typeof data.key === "string") {
 			const source = data.source === "login" ? "login" : undefined;
-			return source ? { type: "api_key", key: data.key, source } : { type: "api_key", key: data.key };
+			const authorizedAt = typeof data.authorizedAt === "number" ? data.authorizedAt : undefined;
+			return {
+				type: "api_key",
+				key: data.key,
+				...(source ? { source } : {}),
+				...(authorizedAt !== undefined ? { authorizedAt } : {}),
+			};
 		}
 	}
 	if (row.credential_type === "oauth") {
@@ -1300,7 +1310,9 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 				identityKey: resolveRowCredentialIdentityKey(providerName, row),
 			}));
 
-			if (item.type === "oauth") {
+			// Meta OAuth mints a Muse transport key, so its subscription grant is
+			// distinct from direct PAYG keys and both login sources must coexist.
+			if (item.type === "oauth" && !(providerName === "meta" && item.apiKey)) {
 				for (const row of existing) {
 					if (row.credential && row.credential.type === "api_key") {
 						this.#deleteStmt.run("replaced by oauth login", row.id);

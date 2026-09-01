@@ -1,12 +1,14 @@
 import { Database } from "bun:sqlite";
 import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-storage";
-import { describe, expect, test } from "bun:test";
+import { describe, expect, test, vi } from "bun:test";
 import { streamOpenAIResponses } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import { loginMeta, metaProvider, museCodeProvider } from "@oh-my-pi/pi-ai/registry/meta";
-import type { Context, Model } from "@oh-my-pi/pi-ai/types";
+import { resolveProviderCredentialId } from "@oh-my-pi/pi-ai/registry";
+import type { Context, FetchImpl, Model } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { META_MUSE_STATIC_MODELS } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
+import { TempDir } from "@oh-my-pi/pi-utils";
 
 const context: Context = {
 	messages: [{ role: "user", content: "hello", timestamp: Date.now() }],
@@ -64,6 +66,7 @@ describe("Meta Model API login", () => {
 
 	test("keeps PAYG API-key login separate from Muse subscription login", () => {
 		expect(museCodeProvider.storeCredentialsAs).toBe("meta");
+		expect(resolveProviderCredentialId("muse-code")).toBe("meta");
 		expect(metaProvider.getApiKey?.({ access: "oauth", refresh: "refresh", expires: 1, apiKey: "minted-key" })).toBe(
 			"minted-key",
 		);
@@ -100,6 +103,87 @@ describe("Meta Model API login", () => {
 			).toBe(true);
 			expect(await storage.getApiKey("meta", sessionId)).toBe("LLM|subscription-key-b");
 		} finally {
+			storage.close();
+		}
+	});
+
+	test("persists both Meta login sources and prefers the latest login", async () => {
+		using tempDir = TempDir.createSync("@omp-meta-login-");
+		const dbPath = tempDir.join("auth.db");
+		let storage = new AuthStorage(new SqliteAuthCredentialStore(new Database(dbPath)), {
+			usageProviderResolver: () => undefined,
+		});
+		const museFetch: FetchImpl = input => {
+			const url = String(input);
+			if (url.endsWith("/oidc/device/authorization/")) {
+				return Promise.resolve(
+					Response.json({
+						device_code: "device-token",
+						user_code: "ABCD-EFGH",
+						verification_uri: "https://auth.meta.com/oauth/device/",
+						expires_in: 600,
+					}),
+				);
+			}
+			if (url.endsWith("/oidc/device/token/")) {
+				return Promise.resolve(
+					Response.json({ access_token: "meta-account-access", refresh_token: "meta-refresh", expires_in: 3600 }),
+				);
+			}
+			if (url.endsWith("/muse-code/key")) {
+				return Promise.resolve(Response.json({ api_key: "LLM|subscription-key", user_id: "meta-account" }));
+			}
+			return Promise.resolve(Response.json({ data: [{ id: "muse-spark-1.2" }] }));
+		};
+		const login = async (provider: "meta" | "muse-code", key: string): Promise<void> => {
+			await storage.login(provider, {
+				onAuth: () => {},
+				onPrompt: async () => key,
+				fetch: museFetch,
+			});
+		};
+
+		let now = Date.parse("2030-01-01T00:00:00.000Z");
+		const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now);
+		try {
+			await storage.reload();
+			now = Date.parse("2030-01-01T00:00:00.000Z");
+			await login("meta", "LLM|payg-key");
+			now = Date.parse("2030-01-01T00:00:01.000Z");
+			await login("muse-code", "");
+			expect(
+				storage
+					.listStoredCredentials("meta")
+					.map(row => row.credential.type)
+					.sort(),
+			).toEqual(["api_key", "oauth"]);
+			expect(await storage.getApiKey("meta", "muse-latest")).toBe("LLM|subscription-key");
+			expect(storage.hasAuth("muse-code")).toBe(true);
+			expect(storage.has("muse-code")).toBe(true);
+			storage.close();
+
+			storage = new AuthStorage(new SqliteAuthCredentialStore(new Database(dbPath)), {
+				usageProviderResolver: () => undefined,
+			});
+			await storage.reload();
+			expect(await storage.getApiKey("meta", "after-restart")).toBe("LLM|subscription-key");
+			await storage.logout("muse-code");
+			expect(storage.has("meta")).toBe(false);
+			expect(storage.has("muse-code")).toBe(false);
+
+			now = Date.parse("2030-01-01T00:00:02.000Z");
+			await login("muse-code", "");
+			now = Date.parse("2030-01-01T00:00:03.000Z");
+			await login("meta", "LLM|new-payg-key");
+			expect(
+				storage
+					.listStoredCredentials("meta")
+					.map(row => row.credential.type)
+					.sort(),
+			).toEqual(["api_key", "oauth"]);
+			expect(await storage.getApiKey("meta", "payg-latest")).toBe("LLM|new-payg-key");
+		} finally {
+			nowSpy.mockRestore();
 			storage.close();
 		}
 	});

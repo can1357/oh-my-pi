@@ -20,7 +20,7 @@ import {
 import type { ApiKeyResolver } from "./auth-retry";
 import * as AIError from "./error";
 import { isUsageLimitOutcome } from "./error/rate-limit";
-import { getProviderDefinition, PASTE_CODE_LOGIN_PROVIDERS } from "./registry";
+import { getProviderDefinition, PASTE_CODE_LOGIN_PROVIDERS, resolveProviderCredentialId } from "./registry";
 import { getOAuthApiKey, getOAuthProvider, refreshOAuthToken } from "./registry/oauth";
 import type {
 	OAuthAuthInfo,
@@ -110,6 +110,7 @@ export type ApiKeyCredential = {
 	type: "api_key";
 	key: string;
 	source?: "login";
+	authorizedAt?: number;
 };
 
 export type OAuthCredential = {
@@ -1720,6 +1721,24 @@ export class AuthStorage {
 		return this.#getStoredCredentials(provider).map(entry => entry.credential);
 	}
 
+	/** Prefer whichever interactive login source was persisted most recently. */
+	#preferredInteractiveCredentialType(provider: string): AuthCredential["type"] | undefined {
+		let latest: { type: AuthCredential["type"]; authorizedAt: number; index: number } | undefined;
+		for (const [index, credential] of this.#getCredentialsForProvider(provider).entries()) {
+			if (credential.type === "api_key" && credential.source !== "login") continue;
+			const authorizedAt = credential.authorizedAt;
+			if (typeof authorizedAt !== "number" || !Number.isFinite(authorizedAt)) continue;
+			if (
+				!latest ||
+				authorizedAt > latest.authorizedAt ||
+				(authorizedAt === latest.authorizedAt && index > latest.index)
+			) {
+				latest = { type: credential.type, authorizedAt, index };
+			}
+		}
+		return latest?.type;
+	}
+
 	/** Composite key for round-robin tracking: "anthropic:oauth" or "openai:api_key" */
 	#getProviderTypeKey(provider: string, type: AuthCredential["type"]): string {
 		return `${provider}:${type}`;
@@ -2693,13 +2712,14 @@ export class AuthStorage {
 	 * Remove credential for a provider.
 	 */
 	async remove(provider: string): Promise<void> {
+		const credentialProvider = resolveProviderCredentialId(provider);
 		if (this.#store.deleteAuthCredentialsRemote) {
-			await this.#store.deleteAuthCredentialsRemote(provider, "deleted by user");
+			await this.#store.deleteAuthCredentialsRemote(credentialProvider, "deleted by user");
 		} else {
-			this.#store.deleteAuthCredentialsForProvider(provider, "deleted by user");
+			this.#store.deleteAuthCredentialsForProvider(credentialProvider, "deleted by user");
 		}
-		this.#setStoredCredentials(provider, []);
-		this.#resetProviderAssignments(provider);
+		this.#setStoredCredentials(credentialProvider, []);
+		this.#resetProviderAssignments(credentialProvider);
 	}
 
 	/**
@@ -2735,7 +2755,7 @@ export class AuthStorage {
 	 * Check if credentials exist for a provider in storage.
 	 */
 	has(provider: string): boolean {
-		return this.#getCredentialsForProvider(provider).length > 0;
+		return this.#getCredentialsForProvider(resolveProviderCredentialId(provider)).length > 0;
 	}
 
 	/**
@@ -2747,7 +2767,7 @@ export class AuthStorage {
 	hasAuth(provider: string): boolean {
 		if (this.#runtimeOverrides.has(provider)) return true;
 		if (this.#configOverrides.has(provider)) return true;
-		if (this.#getCredentialsForProvider(provider).length > 0) return true;
+		if (this.#getCredentialsForProvider(resolveProviderCredentialId(provider)).length > 0) return true;
 		if (this.#hasDedicatedEnvAuth(provider)) return true;
 		if (this.#fallbackResolver?.(provider)) return true;
 		return false;
@@ -2767,7 +2787,7 @@ export class AuthStorage {
 	hasConcreteAuth(provider: string): boolean {
 		if (this.#runtimeOverrides.has(provider)) return true;
 		if (this.#configOverrides.has(provider)) return true;
-		if (this.#getCredentialsForProvider(provider).length > 0) return true;
+		if (this.#getCredentialsForProvider(resolveProviderCredentialId(provider)).length > 0) return true;
 		if ((provider === "amazon-bedrock" || provider === "bedrock-mantle") && $env.AWS_BEARER_TOKEN_BEDROCK?.trim()) {
 			return true;
 		}
@@ -2807,7 +2827,7 @@ export class AuthStorage {
 	hasNonEnvCredential(provider: string): boolean {
 		if (this.#runtimeOverrides.has(provider)) return true;
 		if (this.#configOverrides.has(provider)) return true;
-		if (this.#getCredentialsForProvider(provider).length > 0) return true;
+		if (this.#getCredentialsForProvider(resolveProviderCredentialId(provider)).length > 0) return true;
 		if (this.#fallbackResolver?.(provider)) return true;
 		return false;
 	}
@@ -2997,7 +3017,14 @@ export class AuthStorage {
 			if (!result) {
 				return undefined;
 			}
-			const newCredential: ApiKeyCredential = { type: "api_key", key: result, source: "login" };
+			const newCredential: ApiKeyCredential = {
+				type: "api_key",
+				key: result,
+				source: "login",
+				// Meta supports both direct PAYG keys and Muse OAuth under one
+				// transport provider; persist which interactive source won last.
+				...(provider === "meta" ? { authorizedAt: Date.now() } : {}),
+			};
 			const stored = this.#store.upsertAuthCredentialRemote
 				? await this.#store.upsertAuthCredentialRemote(provider, newCredential)
 				: this.#store.upsertAuthCredentialForProvider(provider, newCredential);
@@ -5580,6 +5607,32 @@ export class AuthStorage {
 		return undefined;
 	}
 
+	async #peekLoginApiKey(provider: string): Promise<string | undefined> {
+		const selection = this.#selectCredentialByType(
+			provider,
+			"api_key",
+			undefined,
+			credential => credential.type === "api_key" && credential.source === "login",
+		);
+		return selection ? this.#configValueResolver(selection.credential.key) : undefined;
+	}
+
+	async #resolveLoginApiKey(
+		provider: string,
+		sessionId: string | undefined,
+		options: AuthApiKeyOptions | undefined,
+	): Promise<string | undefined> {
+		const selection = await this.#selectApiKeyCredential(
+			provider,
+			sessionId,
+			options,
+			credential => credential.source === "login",
+		);
+		if (!selection) return undefined;
+		this.#recordSessionCredential(provider, sessionId, "api_key", selection.index);
+		return this.#configValueResolver(selection.credential.key);
+	}
+
 	/**
 	 * Peek at API key for a provider without refreshing OAuth tokens.
 	 * Used for model discovery where we only need to know if credentials exist
@@ -5597,8 +5650,13 @@ export class AuthStorage {
 			return configKey;
 		}
 
-		// Precedence: a deliberate OAuth/login credential wins, then an explicit env var,
-		// then a stored static api_key (which may be a stale broker-migrated copy) as a last resort.
+		// The newest interactive login wins when OAuth and direct API-key
+		// sources coexist; environment and migrated static rows remain fallbacks.
+		const preferLoginApiKey = this.#preferredInteractiveCredentialType(provider) === "api_key";
+		if (preferLoginApiKey) {
+			const loginApiKey = await this.#peekLoginApiKey(provider);
+			if (loginApiKey) return loginApiKey;
+		}
 		const oauthSelection = this.#selectCredentialByType(provider, "oauth");
 		if (oauthSelection) {
 			const expiresAt = oauthSelection.credential.expires;
@@ -5617,14 +5675,9 @@ export class AuthStorage {
 			}
 		}
 
-		const loginApiKeySelection = this.#selectCredentialByType(
-			provider,
-			"api_key",
-			undefined,
-			credential => credential.type === "api_key" && credential.source === "login",
-		);
-		if (loginApiKeySelection) {
-			return this.#configValueResolver(loginApiKeySelection.credential.key);
+		if (!preferLoginApiKey) {
+			const loginApiKey = await this.#peekLoginApiKey(provider);
+			if (loginApiKey) return loginApiKey;
 		}
 
 		const envKey = getEnvApiKey(provider);
@@ -5640,14 +5693,12 @@ export class AuthStorage {
 
 	/**
 	 * Get API key for a provider.
-	 * Priority (first match wins):
 	 * 1. Runtime override (CLI --api-key)
 	 * 2. Config override (models.yml `providers.<name>.apiKey`)
-	 * 3. OAuth token from storage (auto-refreshed)
-	 * 4. API key persisted by a successful `/login`
-	 * 5. Environment variable
-	 * 6. Stored API key (e.g. a broker-migrated copy) — last resort, so an explicit env var wins
-	 * 7. Fallback resolver (models.yml custom providers, last-resort)
+	 * 3. Most recently persisted interactive OAuth or API-key login
+	 * 4. Environment variable
+	 * 5. Stored API key (e.g. a broker-migrated copy) — last resort, so an explicit env var wins
+	 * 6. Fallback resolver (models.yml custom providers, last-resort)
 	 */
 	async getApiKey(provider: string, sessionId?: string, options?: AuthApiKeyOptions): Promise<string | undefined> {
 		// Runtime override takes highest priority
@@ -5666,21 +5717,20 @@ export class AuthStorage {
 			return configKey;
 		}
 
-		// Precedence: a deliberate OAuth/login credential wins, then an explicit env var,
-		// then a stored static api_key (which may be a stale broker-migrated copy) as a last resort.
+		// The newest interactive login wins when OAuth and direct API-key
+		// sources coexist; environment and migrated static rows remain fallbacks.
+		const preferLoginApiKey = this.#preferredInteractiveCredentialType(provider) === "api_key";
+		if (preferLoginApiKey) {
+			const loginApiKey = await this.#resolveLoginApiKey(provider, sessionId, options);
+			if (loginApiKey) return loginApiKey;
+		}
 		const oauthResolved = await this.#resolveOAuthSelection(provider, sessionId, options);
 		if (oauthResolved) {
 			return oauthResolved.apiKey;
 		}
-		const loginApiKeySelection = await this.#selectApiKeyCredential(
-			provider,
-			sessionId,
-			options,
-			credential => credential.source === "login",
-		);
-		if (loginApiKeySelection) {
-			this.#recordSessionCredential(provider, sessionId, "api_key", loginApiKeySelection.index);
-			return this.#configValueResolver(loginApiKeySelection.credential.key);
+		if (!preferLoginApiKey) {
+			const loginApiKey = await this.#resolveLoginApiKey(provider, sessionId, options);
+			if (loginApiKey) return loginApiKey;
 		}
 
 		// Past OAuth: the session sticky (if any) is stale — the request authenticates via

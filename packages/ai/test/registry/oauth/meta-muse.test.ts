@@ -29,7 +29,6 @@ describe("Muse Code OAuth", () => {
 						verification_uri: "https://auth.meta.com/oauth/device/",
 						verification_uri_complete: "https://auth.meta.com/oauth/device/?code=ABCD-EFGH",
 						expires_in: 600,
-						interval: 5,
 					}),
 				);
 			}
@@ -92,5 +91,25 @@ describe("Muse Code OAuth", () => {
 		expect(refreshForm.get("grant_type")).toBe("refresh_token");
 		expect(refreshForm.get("refresh_token")).toBe("durable-refresh");
 		expect(new Headers(requests[1]!.init?.headers).get("Authorization")).toBe("Bearer new-oauth-access");
+	});
+
+	test("surfaces revoked refresh grants as definitive OAuth failures", async () => {
+		const fetchImpl: FetchImpl = () =>
+			Promise.resolve(
+				response(
+					{
+						error: "invalid_grant",
+						error_description: "The refresh token was revoked",
+					},
+					400,
+				),
+			);
+
+		await expect(
+			refreshMetaMuseToken(
+				{ access: "expired-access", refresh: "revoked-refresh", expires: 0, apiKey: "LLM|old-key" },
+				fetchImpl,
+			),
+		).rejects.toThrow("invalid_grant: The refresh token was revoked");
 	});
 });

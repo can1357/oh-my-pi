@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Muse Code subscription sign-in through Meta's browser device flow, including subscription-backed Muse Spark access and rolling and weekly quota reporting in `/usage` and `omp usage`.
+
 ## [18.1.2] - 2026-09-01
 
 ### Added
@@ -17,9 +21,6 @@
 - Fixed incorrect operating-system information reported in request headers on non-Linux systems.
 - Fixed Google Antigravity quota handling so requests rotate to another account with available usage instead of unnecessarily switching models.
 - Fixed Anthropic authentication for newer models by updating the Claude Code request fingerprint.
-### Added
-
-- Added Muse Code subscription sign-in through Meta's browser device flow, including subscription-backed Muse Spark access and rolling and weekly quota reporting in `/usage` and `omp usage`.
 
 ## [18.1.0] - 2026-09-01
 

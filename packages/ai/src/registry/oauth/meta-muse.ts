@@ -19,7 +19,7 @@ interface DeviceAuthorization {
 	userCode: string;
 	verificationUri: string;
 	expiresInSeconds: number;
-	intervalSeconds: number;
+	intervalSeconds?: number;
 }
 
 interface TokenGrant {
@@ -34,7 +34,7 @@ const deviceAuthorizationSchema = type({
 	verification_uri: "string",
 	"verification_uri_complete?": "string",
 	expires_in: "number",
-	interval: "number",
+	"interval?": "number",
 });
 type DeviceAuthorizationResponse = typeof deviceAuthorizationSchema.infer;
 
@@ -43,6 +43,7 @@ const tokenResponseSchema = type({
 	"refresh_token?": "string",
 	"expires_in?": "number",
 	"error?": "string",
+	"error_description?": "string",
 });
 type TokenResponse = typeof tokenResponseSchema.infer;
 
@@ -112,8 +113,7 @@ function parseDeviceAuthorization(payload: unknown): DeviceAuthorization {
 		!verificationUri ||
 		!Number.isFinite(response.expires_in) ||
 		response.expires_in <= 0 ||
-		!Number.isFinite(response.interval) ||
-		response.interval <= 0
+		(response.interval !== undefined && (!Number.isFinite(response.interval) || response.interval <= 0))
 	) {
 		throw new AIError.OAuthError("Meta device authorization response is missing required fields", {
 			kind: "validation",
@@ -319,7 +319,11 @@ export async function refreshMetaMuseToken(
 		signal,
 	);
 	if (!response.ok) {
-		throw new AIError.OAuthError(`Meta token refresh failed: ${response.status}`, {
+		const errorResponse = parseTokenResponse(payload);
+		const code = errorResponse.error?.trim();
+		const description = errorResponse.error_description?.trim();
+		const detail = [code, description].filter(Boolean).join(": ");
+		throw new AIError.OAuthError(`Meta token refresh failed: ${response.status}${detail ? ` ${detail}` : ""}`, {
 			kind: "token-refresh",
 			provider: PROVIDER,
 			status: response.status,

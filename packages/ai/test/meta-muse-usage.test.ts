@@ -1,3 +1,5 @@
+import { Database } from "bun:sqlite";
+import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-storage";
 import { describe, expect, test } from "bun:test";
 import { metaMuseUsageProvider } from "@oh-my-pi/pi-ai/usage/meta-muse";
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
@@ -57,5 +59,30 @@ describe("Muse Code subscription usage", () => {
 				credential: { type: "api_key", apiKey: "LLM|payg-key" },
 			}),
 		).toBe(false);
+	});
+
+	test("reports revoked Meta account tokens as invalid credentials", async () => {
+		const storage = new AuthStorage(new SqliteAuthCredentialStore(new Database(":memory:")), {
+			usageProviderResolver: provider => (provider === "meta" ? metaMuseUsageProvider : undefined),
+			usageFetch: Object.assign(() => Promise.resolve(Response.json({ error: "revoked" }, { status: 401 })), {
+				preconnect: fetch.preconnect,
+			}),
+		});
+		try {
+			await storage.reload();
+			await storage.set("meta", {
+				type: "oauth",
+				access: "revoked-meta-access",
+				refresh: "meta-refresh",
+				expires: Date.now() + 3_600_000,
+				apiKey: "LLM|subscription-key",
+			});
+
+			const [result] = await storage.checkCredentials();
+			expect(result.ok).toBe(false);
+			expect(result.reason).toContain("401");
+		} finally {
+			storage.close();
+		}
 	});
 });
