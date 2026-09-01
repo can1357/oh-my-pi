@@ -26,6 +26,19 @@ export interface ProcessFileOptions {
 	autoResizeImages?: boolean;
 }
 
+/** Validate explicit CLI attachments before starting a durable workspace or session. */
+export function resolveFileArguments(fileArgs: string[], cwd = getProjectDir()): string[] {
+	return fileArgs.map(fileArg => path.resolve(resolveReadPath(fileArg, cwd)));
+}
+
+export function validateFileArguments(fileArgs: string[], cwd = getProjectDir()): void {
+	for (const absolutePath of resolveFileArguments(fileArgs, cwd)) {
+		if (!fs.statSync(absolutePath, { throwIfNoEntry: false })) {
+			throw new Error(`File not found: ${absolutePath}`);
+		}
+	}
+}
+
 /** Process @file arguments into text, document content, and image attachments */
 export async function processFileArguments(fileArgs: string[], options?: ProcessFileOptions): Promise<ProcessedFiles> {
 	const autoResizeImages = options?.autoResizeImages ?? true;

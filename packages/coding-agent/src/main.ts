@@ -26,11 +26,12 @@ import chalk from "@oh-my-pi/pi-utils/chalk";
 import { reset as resetCapabilities } from "./capability";
 import { type Args, reportUnrecognizedFlags, validateToolNames } from "./cli/args";
 import { applyExtensionFlags, type ExtensionFlagSink } from "./cli/extension-flags";
-import { processFileArguments } from "./cli/file-processor";
+import { processFileArguments, resolveFileArguments, validateFileArguments } from "./cli/file-processor";
 import { buildInitialMessage } from "./cli/initial-message";
 import { selectSession } from "./cli/session-picker";
 import { applyStartupCwd } from "./cli/startup-cwd";
 import { getLatestRelease } from "./cli/update-cli";
+import { type CreatedWorktree, cleanupCreatedWorktree, createWorktree } from "./cli/worktree-create";
 import { findConfigFile } from "./config";
 import { ModelRegistry } from "./config/model-registry";
 import {
@@ -1414,6 +1415,9 @@ export async function runRootCommand(
 		}
 
 		const notifs: (InteractiveModeNotify | null)[] = [];
+		let startupSettingsPromise: Promise<Settings> | undefined;
+		let createdWorktree: CreatedWorktree | undefined;
+		let worktreeSourceCwd: string | undefined;
 
 		if (parsedArgs.version) {
 			writeStartupNotice(parsedArgs, `${VERSION}\n`);
@@ -1438,6 +1442,33 @@ export async function runRootCommand(
 		if ((parsedArgs.mode === "rpc" || parsedArgs.mode === "rpc-ui") && parsedArgs.fileArgs.length > 0) {
 			process.stderr.write(`${chalk.red("Error: @file arguments are not supported in RPC mode")}\n`);
 			process.exit(1);
+		}
+
+		if (parsedArgs.worktree !== undefined) {
+			if (parsedArgs.fork !== undefined || parsedArgs.fromClaude || parsedArgs.fromCodex) {
+				process.stderr.write(
+					`${chalk.red("Error: --worktree cannot be combined with fork or session import flags")}\n`,
+				);
+				process.exit(1);
+			}
+
+			const launchCwd = getProjectDir();
+			worktreeSourceCwd = launchCwd;
+			startupSettingsPromise = deps.settings
+				? Promise.resolve(deps.settings)
+				: logger.time("settings:init:worktree", Settings.init, { cwd: launchCwd, configFiles: parsedArgs.config });
+			startupSettingsPromise.catch(() => {});
+			try {
+				const startupSettings = await startupSettingsPromise;
+				const worktree = await logger.time("createWorktree", createWorktree, launchCwd, parsedArgs.worktree);
+				createdWorktree = worktree;
+				setProjectDir(worktree.workspacePath);
+				await startupSettings.reloadForCwd(getProjectDir());
+			} catch (error) {
+				const message = error instanceof Error ? error.message : "Failed to create worktree";
+				process.stderr.write(`${chalk.red(`Error: ${message}`)}\n`);
+				process.exit(1);
+			}
 		}
 		const mode = parsedArgs.mode || "text";
 		// RPC owns stdin. Claim its singleton stream before plugin/extension discovery can load an in-process consumer.
@@ -1490,9 +1521,11 @@ export async function runRootCommand(
 		// startup error below, while its cache/config I/O overlaps settings I/O.
 		const authStoragePromise = logger.time("discoverAuthStorage", deps.discoverAuthStorage ?? discoverAuthStorage);
 		authStoragePromise.catch(() => {});
-		const settingsPromise = deps.settings
-			? Promise.resolve(deps.settings)
-			: logger.time("settings:init", Settings.init, { cwd, configFiles: parsedArgs.config });
+		const settingsPromise =
+			startupSettingsPromise ??
+			(deps.settings
+				? Promise.resolve(deps.settings)
+				: logger.time("settings:init", Settings.init, { cwd, configFiles: parsedArgs.config }));
 		settingsPromise.catch(() => {});
 		let authStorage: AuthStorage;
 		try {
@@ -1899,6 +1932,11 @@ export async function runRootCommand(
 				},
 			};
 			const initialArgs = applyExtensionFlags(extensionFlagSink, rawArgs) ?? parsedArgs;
+			// The user supplied relative @files from the primary checkout. Keep those
+			// attachments stable after switching the process into the linked workspace.
+			if (worktreeSourceCwd) {
+				initialArgs.fileArgs = resolveFileArguments(initialArgs.fileArgs, worktreeSourceCwd);
+			}
 			normalizeContinueSessionArgs(initialArgs, rawArgs);
 			if ((parsedArgs.trustedExtensions?.length ?? 0) > 0 && extensionsResult.errors.length > 0) {
 				throw new Error(
@@ -1919,7 +1957,20 @@ export async function runRootCommand(
 			// tool calls (issue #2459). Exit code 2 matches the conventional
 			// "command line usage error" convention.
 			if (reportUnrecognizedFlags(initialArgs)) {
+				if (createdWorktree && worktreeSourceCwd) {
+					await cleanupCreatedWorktree(worktreeSourceCwd, createdWorktree);
+				}
 				process.exit(2);
+			}
+			try {
+				validateFileArguments(initialArgs.fileArgs);
+			} catch (error) {
+				if (createdWorktree && worktreeSourceCwd) {
+					await cleanupCreatedWorktree(worktreeSourceCwd, createdWorktree);
+				}
+				const message = error instanceof Error ? error.message : String(error);
+				process.stderr.write(`${chalk.red(`Error: ${message}`)}\n`);
+				process.exit(1);
 			}
 			const processedFiles =
 				initialArgs.fileArgs.length > 0

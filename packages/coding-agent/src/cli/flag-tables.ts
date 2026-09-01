@@ -86,6 +86,10 @@ const setResume: OptionalSetter = (result, value) => {
 	result.resume = value !== undefined ? value : true;
 };
 
+const setWorktree: OptionalSetter = (result, value) => {
+	result.worktree = value !== undefined ? value : true;
+};
+
 const MAX_TIME_DURATION_RE = /^(\d+(?:\.\d+)?)([smh])$/;
 
 function maxTimeMultiplier(unit: string | undefined): number {
@@ -246,6 +250,8 @@ export const OPTIONAL_FLAGS: Record<string, OptionalFlagConfig> = {
 	"--resume": { set: setResume, rejectEmpty: true },
 	"-r": { set: setResume, rejectEmpty: true },
 	"--session": { set: setResume, rejectEmpty: true },
+	"--worktree": { set: setWorktree, rejectEmpty: true },
+	"-w": { set: setWorktree, rejectEmpty: true },
 };
 
 /**

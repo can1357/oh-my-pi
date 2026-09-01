@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `--worktree`/`-w` to start a main session in a persistent managed Git workspace ([#452](https://github.com/can1357/oh-my-pi/issues/452)).
+
 ### Fixed
 
 - TypeScript code intelligence now works on TypeScript 7 projects: the built-in `typescript-native` server runs `tsc --lsp --stdio` when the resolved TypeScript install no longer ships `tsserver.js`, replacing `typescript-language-server` for that project.

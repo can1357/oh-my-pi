@@ -82,6 +82,8 @@ export interface Args {
 	noTitle?: boolean;
 	autoApprove?: boolean;
 	approvalMode?: "always-ask" | "write" | "yolo";
+	/** `--worktree`/`-w`: explicit name or `true` to generate one. */
+	worktree?: string | true;
 	messages: string[];
 	fileArgs: string[];
 	/** Extension-registered flags this parse recognized — name to value. */
