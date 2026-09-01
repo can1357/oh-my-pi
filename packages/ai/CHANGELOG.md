@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added Muse Code subscription sign-in through Meta's browser device flow, including subscription-backed Muse Spark access and rolling and weekly quota reporting in `/usage` and `omp usage`.
+- Added Muse Code subscriptions as a Meta login option, with subscription-backed Muse Spark access and rolling and weekly quota reporting in `/usage` and `omp usage`.
 
 ## [18.1.2] - 2026-09-01
 

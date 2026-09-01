@@ -1,9 +1,10 @@
+import * as AIError from "../error";
 import { loginMetaMuse, refreshMetaMuseToken } from "./oauth/meta-muse";
 import { createApiKeyLogin } from "./api-key-login";
-import type { OAuthLoginCallbacks } from "./oauth/types";
+import type { OAuthCredentials, OAuthLoginCallbacks } from "./oauth/types";
 import type { ProviderDefinition } from "./types";
 
-export const loginMeta = createApiKeyLogin({
+const loginMetaApiKey = createApiKeyLogin({
 	providerLabel: "Meta Model API",
 	authUrl: "https://developer.meta.com/ai/",
 	instructions: "Create or copy your key from the Meta Model API dashboard",
@@ -16,21 +17,27 @@ export const loginMeta = createApiKeyLogin({
 	},
 });
 
+export async function loginMeta(callbacks: OAuthLoginCallbacks): Promise<OAuthCredentials | string> {
+	const choice = (
+		await callbacks.onPrompt({
+			message:
+				"Choose Meta authentication: 1=Muse Code subscription (Meta account), 2=Model API key (pay as you go)",
+			placeholder: "1 or 2",
+		})
+	).trim();
+	if (callbacks.signal?.aborted || choice.length === 0) throw new AIError.LoginCancelledError();
+	if (choice === "1") return loginMetaMuse(callbacks);
+	if (choice === "2") return loginMetaApiKey(callbacks);
+	throw new AIError.ConfigurationError("Choose 1 for Muse Code or 2 for a Model API key");
+}
+
 export const metaProvider = {
 	id: "meta",
-	name: "Meta Model API",
+	name: "Meta",
 	login: (cb: OAuthLoginCallbacks) => loginMeta(cb),
 	refreshToken: (credentials, signal) => refreshMetaMuseToken(credentials, undefined, signal),
 	getApiKey: credentials => {
 		if (!credentials.apiKey) throw new Error("Muse Code OAuth credential is missing its Model API key");
 		return credentials.apiKey;
 	},
-} as const satisfies ProviderDefinition;
-
-export const museCodeProvider = {
-	id: "muse-code",
-	name: "Muse Code subscription (Meta account)",
-	login: (cb: OAuthLoginCallbacks) => loginMetaMuse(cb),
-	storeCredentialsAs: "meta",
-	matchesStoredCredential: credentials => Boolean(credentials.apiKey),
 } as const satisfies ProviderDefinition;

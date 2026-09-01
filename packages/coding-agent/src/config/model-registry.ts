@@ -4,7 +4,7 @@ import { registerCustomApi, unregisterCustomApis } from "@oh-my-pi/pi-ai/api-reg
 import { registerOAuthProvider, unregisterOAuthProvider, unregisterOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import type { OAuthCredentials, OAuthLoginCallbacks } from "@oh-my-pi/pi-ai/oauth/types";
 import { setCodexAttestationProvider } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
-import { getProviderDefinition, resolveProviderCredentialId } from "@oh-my-pi/pi-ai/registry";
+import { getProviderDefinition } from "@oh-my-pi/pi-ai/registry";
 import type {
 	Api,
 	Context,
@@ -506,14 +506,13 @@ export class ModelRegistry {
 	}
 
 	async refreshProvider(providerId: string, strategy: ModelRefreshStrategy = "online"): Promise<void> {
-		const effectiveProviderId = resolveProviderCredentialId(providerId);
 		this.#reloadStaticModels();
 		for (const selector of this.#suppressedSelectors.keys()) {
-			if (selector.startsWith(`${effectiveProviderId}/`)) {
+			if (selector.startsWith(`${providerId}/`)) {
 				this.#suppressedSelectors.delete(selector);
 			}
 		}
-		await this.#refreshRuntimeDiscoveries(strategy, new Set([effectiveProviderId]));
+		await this.#refreshRuntimeDiscoveries(strategy, new Set([providerId]));
 		// #reloadStaticModels above may have rebuilt #models from static sources,
 		// dropping models previously discovered by OTHER runtime providers (their
 		// fetchDynamicModels results live only in #models + the SQLite cache, not
@@ -521,7 +520,7 @@ export class ModelRegistry {
 		// online-if-uncached strategy: no network while their cached row is
 		// fresh, so the scoped refresh above stays the only forced fetch.
 		const otherRuntimeProviderIds = new Set(
-			[...this.#runtimeModelManagers.keys()].filter(runtimeId => runtimeId !== effectiveProviderId),
+			[...this.#runtimeModelManagers.keys()].filter(runtimeId => runtimeId !== providerId),
 		);
 		if (otherRuntimeProviderIds.size > 0) {
 			await this.#refreshRuntimeDiscoveries("online-if-uncached", otherRuntimeProviderIds);

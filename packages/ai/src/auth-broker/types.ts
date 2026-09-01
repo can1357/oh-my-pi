@@ -171,6 +171,9 @@ export const AUTH_BROKER_CAPABILITIES_HEADER = "OMP-Auth-Broker-Capabilities";
 /** Client understands independent Codex `chat` and `spark` credential-block scopes. */
 export const AUTH_BROKER_CAPABILITY_CODEX_METER_BLOCK_SCOPES = "codex-meter-block-scopes";
 
+/** Client understands interactive Meta API-key login recency. */
+export const AUTH_BROKER_CAPABILITY_META_API_KEY_AUTHORIZED_AT = "meta-api-key-authorized-at";
+
 /** Default port when none is configured. Loopback-only, no external exposure. */
 export const DEFAULT_AUTH_BROKER_BIND = "127.0.0.1:8765";
 

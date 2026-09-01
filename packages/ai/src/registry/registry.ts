@@ -35,7 +35,7 @@ import { kimiCodeProvider } from "./kimi-code";
 import { litellmProvider } from "./litellm";
 import { llamaCppProvider } from "./llama-cpp";
 import { lmStudioProvider } from "./lm-studio";
-import { metaProvider, museCodeProvider } from "./meta";
+import { metaProvider } from "./meta";
 import { minimaxProvider } from "./minimax";
 import { minimaxCodeProvider } from "./minimax-code";
 import { minimaxCodeCnProvider } from "./minimax-code-cn";
@@ -122,7 +122,6 @@ const ALL = [
 	clinePassProvider,
 	deepseekProvider,
 	metaProvider,
-	museCodeProvider,
 	moonshotProvider,
 	cerebrasProvider,
 	basetenProvider,
@@ -176,11 +175,6 @@ const BY_ID = new Map<string, ProviderDefinition>(ALL.map(p => [p.id, p] as [str
 
 export function getProviderDefinition(id: string): ProviderDefinition | undefined {
 	return BY_ID.get(id);
-}
-
-/** Resolve a login-only alias to the provider id that owns its persisted credentials and models. */
-export function resolveProviderCredentialId(id: string): string {
-	return getProviderDefinition(id)?.storeCredentialsAs ?? id;
 }
 
 /** Compile-time completeness: every catalog chat-model provider must have a registry definition. */

@@ -1,6 +1,5 @@
-import { Database } from "bun:sqlite";
 import { describe, expect, test, vi } from "bun:test";
-import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai";
+import type { AuthStorage } from "@oh-my-pi/pi-ai";
 import { getBundledModels } from "@oh-my-pi/pi-catalog/models";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createStrictCompletionProbe, indexModelsByRequestId } from "../../src/cli/auth-gateway-cli";
@@ -71,29 +70,6 @@ describe("strict credential probes", () => {
 			expect(authorization).toBe("Bearer LLM|subscription-key");
 		} finally {
 			fetchSpy.mockRestore();
-		}
-	});
-});
-
-describe("provider login aliases", () => {
-	test("refreshes Meta discovery after Muse login", async () => {
-		using tempDir = TempDir.createSync("@omp-muse-refresh-");
-		const authStorage = new AuthStorage(new SqliteAuthCredentialStore(new Database(":memory:")));
-		const requestedUrls: string[] = [];
-		try {
-			await authStorage.reload();
-			await authStorage.set("meta", { type: "api_key", key: "LLM|meta-key" });
-			const registry = new ModelRegistry(authStorage, tempDir.join("models.yml"), {
-				fetch: input => {
-					requestedUrls.push(String(input));
-					return Promise.resolve(Response.json({ data: [] }));
-				},
-			});
-
-			await registry.refreshProvider("muse-code", "online");
-			expect(requestedUrls).toContain("https://api.meta.ai/v1/models");
-		} finally {
-			authStorage.close();
 		}
 	});
 });

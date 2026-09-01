@@ -7,6 +7,7 @@ import { AuthStorage, REMOTE_REFRESH_SENTINEL, SqliteAuthCredentialStore } from 
 import {
 	AUTH_BROKER_CAPABILITIES_HEADER,
 	AUTH_BROKER_CAPABILITY_CODEX_METER_BLOCK_SCOPES,
+	AUTH_BROKER_CAPABILITY_META_API_KEY_AUTHORIZED_AT,
 	AuthBrokerClient,
 	AuthBrokerError,
 	type AuthBrokerServerHandle,
@@ -214,7 +215,9 @@ describe("auth-broker wire surface", () => {
 		const unchanged = await client.fetchSnapshot({ ifGenerationGt: body.generation, waitMs: 10 });
 		expect(unchanged.status).toBe(304);
 		expect(unchanged.generation).toBe(body.generation);
-		expect(observedCapabilities).toEqual([AUTH_BROKER_CAPABILITY_CODEX_METER_BLOCK_SCOPES]);
+		expect(observedCapabilities).toEqual([
+			`${AUTH_BROKER_CAPABILITY_CODEX_METER_BLOCK_SCOPES},${AUTH_BROKER_CAPABILITY_META_API_KEY_AUTHORIZED_AT}`,
+		]);
 
 		const rawUnchanged = await fetch(`${handle!.url}/v1/snapshot?wait=10`, {
 			headers: {
@@ -224,6 +227,48 @@ describe("auth-broker wire surface", () => {
 		});
 		expect(rawUnchanged.status).toBe(304);
 		expect(rawUnchanged.headers.get("vary")).toBe(AUTH_BROKER_CAPABILITIES_HEADER);
+	});
+
+	test("negotiates Meta API-key login recency across broker versions", async () => {
+		let uploadedCredential: Record<string, unknown> | undefined;
+		const fetchImpl: typeof fetch = Object.assign(
+			async (input: string | URL | Request, init?: RequestInit) => {
+				if (String(input).endsWith("/v1/credential") && typeof init?.body === "string") {
+					const body = JSON.parse(init.body) as { credential: Record<string, unknown> };
+					uploadedCredential = body.credential;
+				}
+				return fetch(input, init);
+			},
+			{ preconnect: fetch.preconnect },
+		);
+		const client = new AuthBrokerClient({ url: handle!.url, token, fetchImpl });
+		const before = Date.now();
+		const uploaded = await client.uploadCredential("meta", {
+			type: "api_key",
+			key: "meta-payg-key",
+			source: "login",
+			authorizedAt: 1,
+		});
+		const after = Date.now();
+
+		expect(uploadedCredential).toEqual({ type: "api_key", key: "meta-payg-key", source: "login" });
+		const currentCredential = uploaded.entries.find(entry => entry.provider === "meta")?.credential;
+		expect(currentCredential?.type).toBe("api_key");
+		if (currentCredential?.type !== "api_key") throw new Error("expected Meta API-key credential");
+		expect(currentCredential.authorizedAt).toBeGreaterThanOrEqual(before);
+		expect(currentCredential.authorizedAt).toBeLessThanOrEqual(after);
+
+		const legacyClient = new AuthBrokerClient({
+			url: handle!.url,
+			token,
+			fetchImpl: fetchWithoutAuthBrokerCapabilities(),
+		});
+		const legacyResult = await legacyClient.fetchSnapshot();
+		if (legacyResult.status !== 200) throw new Error("expected legacy-client snapshot");
+		const legacyCredential = legacyResult.snapshot.credentials.find(entry => entry.provider === "meta")?.credential;
+		expect(legacyCredential?.type).toBe("api_key");
+		if (legacyCredential?.type !== "api_key") throw new Error("expected legacy Meta API-key credential");
+		expect(legacyCredential.authorizedAt).toBeUndefined();
 	});
 
 	test("ignores external SQLite commits outside auth tables", async () => {

@@ -12,7 +12,12 @@
 
 import { type Type, type } from "@oh-my-pi/omptype";
 import { logger } from "@oh-my-pi/pi-utils";
-import type { AuthStorage, StoredCredentialBlock } from "../auth-storage";
+import type {
+	AuthCredentialSnapshotEntry,
+	AuthStorage,
+	SnapshotCredential,
+	StoredCredentialBlock,
+} from "../auth-storage";
 import { parseBind } from "../utils/parse-bind";
 import { AuthBrokerRefresher, type AuthBrokerRefresherSchedule } from "./refresher";
 import type {
@@ -35,6 +40,7 @@ import type {
 import {
 	AUTH_BROKER_CAPABILITIES_HEADER,
 	AUTH_BROKER_CAPABILITY_CODEX_METER_BLOCK_SCOPES,
+	AUTH_BROKER_CAPABILITY_META_API_KEY_AUTHORIZED_AT,
 	DEFAULT_AUTH_BROKER_BIND,
 	DEFAULT_REFRESH_INTERVAL_MS,
 	DEFAULT_REFRESH_SKEW_MS,
@@ -106,13 +112,22 @@ function isAuthorized(req: Request, tokens: ReadonlySet<string>): boolean {
 	return tokens.has(match[1].trim());
 }
 
-function supportsCodexMeterBlockScopes(req: Request): boolean {
-	const capabilities = req.headers.get(AUTH_BROKER_CAPABILITIES_HEADER);
-	return (
-		capabilities
+interface ClientCapabilities {
+	codexMeterBlockScopes: boolean;
+	metaApiKeyAuthorizedAt: boolean;
+}
+
+function getClientCapabilities(req: Request): ClientCapabilities {
+	const advertised = new Set(
+		req.headers
+			.get(AUTH_BROKER_CAPABILITIES_HEADER)
 			?.split(",")
-			.some(capability => capability.trim() === AUTH_BROKER_CAPABILITY_CODEX_METER_BLOCK_SCOPES) ?? false
+			.map(capability => capability.trim()),
 	);
+	return {
+		codexMeterBlockScopes: advertised.has(AUTH_BROKER_CAPABILITY_CODEX_METER_BLOCK_SCOPES),
+		metaApiKeyAuthorizedAt: advertised.has(AUTH_BROKER_CAPABILITY_META_API_KEY_AUTHORIZED_AT),
+	};
 }
 
 /**
@@ -389,10 +404,32 @@ function buildCredentialBlockGroups(
 	return byCredentialId;
 }
 
+function projectCredentialForClient(
+	credential: SnapshotCredential,
+	clientSupportsMetaApiKeyAuthorizedAt: boolean,
+): SnapshotCredential {
+	if (clientSupportsMetaApiKeyAuthorizedAt || credential.type !== "api_key" || credential.authorizedAt === undefined) {
+		return credential;
+	}
+	return {
+		type: "api_key",
+		key: credential.key,
+		...(credential.source !== undefined ? { source: credential.source } : {}),
+	};
+}
+
+function projectCredentialEntryForClient(
+	entry: AuthCredentialSnapshotEntry,
+	clientSupportsMetaApiKeyAuthorizedAt: boolean,
+): AuthCredentialSnapshotEntry {
+	const credential = projectCredentialForClient(entry.credential, clientSupportsMetaApiKeyAuthorizedAt);
+	return credential === entry.credential ? entry : { ...entry, credential };
+}
+
 function buildSnapshot(
 	storage: AuthStorage,
 	refresher: AuthBrokerRefresher | undefined,
-	clientSupportsCodexMeterBlockScopes: boolean,
+	capabilities: ClientCapabilities,
 ): SnapshotResponse {
 	const serverNowMs = Date.now();
 	const base = storage.exportSnapshot();
@@ -401,9 +438,10 @@ function buildSnapshot(
 	const blocksByCredentialId = buildCredentialBlockGroups(
 		storage.listCredentialBlocks(credentialIds),
 		serverNowMs,
-		clientSupportsCodexMeterBlockScopes,
+		capabilities.codexMeterBlockScopes,
 	);
-	const credentials: SnapshotEntry[] = base.credentials.map(entry => {
+	const credentials: SnapshotEntry[] = base.credentials.map(rawEntry => {
+		const entry = projectCredentialEntryForClient(rawEntry, capabilities.metaApiKeyAuthorizedAt);
 		const blocks = blocksByCredentialId.get(entry.id);
 		const rotatesInMs = computeRotatesInMs(entry, wire, nextSweepAt, serverNowMs);
 		return blocks && blocks.length > 0 ? { ...entry, rotatesInMs, blocks } : { ...entry, rotatesInMs };
@@ -426,13 +464,13 @@ async function serveSnapshot(
 	peer: string,
 ): Promise<Response> {
 	await storage.reload();
-	const clientSupportsCodexMeterBlockScopes = supportsCodexMeterBlockScopes(req);
+	const capabilities = getClientCapabilities(req);
 	let currentGeneration = storage.getGeneration();
 	const clientGeneration = parseGenerationTag(req.headers.get("if-none-match"));
 	const waitMs = parseWaitMs(url);
 
 	if (clientGeneration === undefined || currentGeneration !== clientGeneration || waitMs <= 0) {
-		const body = buildSnapshot(storage, refresher, clientSupportsCodexMeterBlockScopes);
+		const body = buildSnapshot(storage, refresher, capabilities);
 		logger.info("auth-broker snapshot served", {
 			peer,
 			credentials: body.credentials.length,
@@ -452,7 +490,7 @@ async function serveSnapshot(
 	await storage.reload();
 	currentGeneration = storage.getGeneration();
 	if (currentGeneration !== clientGeneration) {
-		const body = buildSnapshot(storage, refresher, clientSupportsCodexMeterBlockScopes);
+		const body = buildSnapshot(storage, refresher, capabilities);
 		logger.info("auth-broker snapshot long-poll changed", {
 			peer,
 			credentials: body.credentials.length,
@@ -498,7 +536,7 @@ function serveSnapshotStream(
 ): Response {
 	const encoder = new TextEncoder();
 	const openedAt = Date.now();
-	const clientSupportsCodexMeterBlockScopes = supportsCodexMeterBlockScopes(req);
+	const capabilities = getClientCapabilities(req);
 	const lastByCredId = new Map<number, string>();
 	let controller: ReadableStreamDefaultController<Uint8Array> | null = null;
 	let unsubscribe: (() => void) | null = null;
@@ -556,7 +594,7 @@ function serveSnapshotStream(
 				pendingBumps = 0;
 				await storage.reload();
 				if (closed) return;
-				const snapshot = buildSnapshot(storage, refresher, clientSupportsCodexMeterBlockScopes);
+				const snapshot = buildSnapshot(storage, refresher, capabilities);
 				// Generation must move forward; a duplicate listener firing without a
 				// real bump is a no-op below (fingerprints unchanged).
 				if (snapshot.generation < lastGeneration) {
@@ -611,7 +649,7 @@ function serveSnapshotStream(
 		async start(c) {
 			controller = c;
 			await storage.reload();
-			const initial = buildSnapshot(storage, refresher, clientSupportsCodexMeterBlockScopes);
+			const initial = buildSnapshot(storage, refresher, capabilities);
 			lastGeneration = initial.generation;
 			for (const entry of initial.credentials) lastByCredId.set(entry.id, fingerprintEntry(entry));
 			const initialEvent: SnapshotStreamSnapshotEvent = { kind: "snapshot", ...initial };
@@ -856,14 +894,25 @@ export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServer
 					if (!parsed.ok) return parsed.response;
 					const { provider, credential } = parsed.data;
 					try {
-						const entries = opts.storage.upsertCredential(provider, credential);
+						const storedCredential =
+							provider === "meta" && credential.type === "api_key" && credential.source === "login"
+								? { ...credential, authorizedAt: Date.now() }
+								: credential;
+						const entries = opts.storage
+							.upsertCredential(provider, storedCredential)
+							.map(entry =>
+								projectCredentialEntryForClient(entry, getClientCapabilities(req).metaApiKeyAuthorizedAt),
+							);
 						const identity =
-							credential.type === "oauth"
-								? (credential.email ?? credential.accountId ?? credential.projectId ?? "(no identity)")
+							storedCredential.type === "oauth"
+								? (storedCredential.email ??
+									storedCredential.accountId ??
+									storedCredential.projectId ??
+									"(no identity)")
 								: "(api key)";
 						logger.info("auth-broker credential upserted", {
 							provider,
-							type: credential.type,
+							type: storedCredential.type,
 							identity,
 							peer,
 							providerTotal: entries.length,

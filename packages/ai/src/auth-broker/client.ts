@@ -29,7 +29,11 @@ import type {
 	UsageResponse,
 	UsageStaleResponse,
 } from "./types";
-import { AUTH_BROKER_CAPABILITIES_HEADER, AUTH_BROKER_CAPABILITY_CODEX_METER_BLOCK_SCOPES } from "./types";
+import {
+	AUTH_BROKER_CAPABILITIES_HEADER,
+	AUTH_BROKER_CAPABILITY_CODEX_METER_BLOCK_SCOPES,
+	AUTH_BROKER_CAPABILITY_META_API_KEY_AUTHORIZED_AT,
+} from "./types";
 import {
 	clientUsageReportResponseSchema,
 	clientUsageSummaryResponseSchema,
@@ -46,6 +50,19 @@ import {
 	usageResponseSchema,
 	usageStaleResponseSchema,
 } from "./wire-schemas";
+
+const CLIENT_CAPABILITIES = `${AUTH_BROKER_CAPABILITY_CODEX_METER_BLOCK_SCOPES},${AUTH_BROKER_CAPABILITY_META_API_KEY_AUTHORIZED_AT}`;
+
+function credentialForUpload(provider: string, credential: AuthCredential): AuthCredential {
+	if (provider !== "meta" || credential.type !== "api_key" || credential.authorizedAt === undefined) {
+		return credential;
+	}
+	return {
+		type: "api_key",
+		key: credential.key,
+		...(credential.source !== undefined ? { source: credential.source } : {}),
+	};
+}
 
 /** Response schema per endpoint, keyed by the name `#request` callers pass. */
 const RESPONSE_SCHEMAS = {
@@ -157,7 +174,7 @@ export class AuthBrokerClient {
 		if (opts.waitMs !== undefined) query.set("wait", String(opts.waitMs));
 		const path = `/v1/snapshot${query.size > 0 ? `?${query.toString()}` : ""}`;
 		const headers: Record<string, string> = {
-			[AUTH_BROKER_CAPABILITIES_HEADER]: AUTH_BROKER_CAPABILITY_CODEX_METER_BLOCK_SCOPES,
+			[AUTH_BROKER_CAPABILITIES_HEADER]: CLIENT_CAPABILITIES,
 		};
 		if (opts.ifGenerationGt !== undefined) headers["If-None-Match"] = `"${opts.ifGenerationGt}"`;
 		const timeoutMs =
@@ -199,7 +216,7 @@ export class AuthBrokerClient {
 		const headers: Record<string, string> = {
 			Accept: "text/event-stream",
 			Authorization: `Bearer ${this.#token}`,
-			[AUTH_BROKER_CAPABILITIES_HEADER]: AUTH_BROKER_CAPABILITY_CODEX_METER_BLOCK_SCOPES,
+			[AUTH_BROKER_CAPABILITIES_HEADER]: CLIENT_CAPABILITIES,
 		};
 		if (opts.signal?.aborted) {
 			throw new AuthBrokerError("Auth broker request aborted", { cause: opts.signal.reason });
@@ -368,7 +385,7 @@ export class AuthBrokerClient {
 		credential: AuthCredential,
 		signal?: AbortSignal,
 	): Promise<CredentialUploadResponse> {
-		const body: CredentialUploadRequest = { provider, credential };
+		const body: CredentialUploadRequest = { provider, credential: credentialForUpload(provider, credential) };
 		return this.#request<CredentialUploadResponse>("POST", "/v1/credential", {
 			body,
 			schema: "credentialUploadResponseSchema",
@@ -445,7 +462,11 @@ export class AuthBrokerClient {
 	): Promise<Response> {
 		const auth = opts.auth ?? true;
 		const url = `${this.#baseUrl}${path}`;
-		const headers: Record<string, string> = { Accept: "application/json", ...opts.headers };
+		const headers: Record<string, string> = {
+			Accept: "application/json",
+			[AUTH_BROKER_CAPABILITIES_HEADER]: CLIENT_CAPABILITIES,
+			...opts.headers,
+		};
 		if (auth) headers.Authorization = `Bearer ${this.#token}`;
 		let payload: string | undefined;
 		if (opts.body !== undefined) {
