@@ -209,6 +209,33 @@ describe("structured subagent primitive", () => {
 		).toBe(true);
 	});
 
+	it("stops nested fallback traversal at unauthenticated intermediate models", async () => {
+		const models: Record<string, FallbackTestModel> = {
+			"anthropic/a": fallbackTestModel("anthropic", "a"),
+			"openrouter/b": fallbackTestModel("openrouter", "b"),
+			"merge-gateway/c": fallbackTestModel("merge-gateway", "c", true),
+		};
+		const modelRegistry = {
+			find: (provider: string, id: string) => models[`${provider}/${id}`],
+			hasProvider: (provider: string) => Object.values(models).some(model => model.provider === provider),
+			getApiKey: async (model: FallbackTestModel) => (model.provider === "openrouter" ? undefined : "key"),
+		} as unknown as ModelRegistry;
+		const settings = Settings.isolated({
+			"retry.fallbackChains": {
+				"anthropic/a": ["openrouter/b"],
+				"openrouter/b": ["merge-gateway/c"],
+			},
+		});
+		expect(
+			await executorModule.retryFallbackMayRequireStructuredOutputHardening({
+				settings,
+				modelRegistry,
+				initialSelector: "anthropic/a",
+				roleHint: undefined,
+			}),
+		).toBe(false);
+	});
+
 	it("ignores configured fallback chains when runtime model fallback is disabled", async () => {
 		const models: Record<string, FallbackTestModel> = {
 			"openai/a": fallbackTestModel("openai", "a"),

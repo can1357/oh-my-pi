@@ -380,13 +380,14 @@ export async function retryFallbackMayRequireStructuredOutputHardening(args: {
 		) {
 			continue;
 		}
-		if (
-			currentModel &&
-			modelRequiresStructuredOutputHardening(currentModel) &&
-			(await modelRegistry.getApiKey(currentModel))
-		) {
-			return true;
-		}
+		if (current.isFallback && !currentModel) continue;
+		const requiresHardening = modelRequiresStructuredOutputHardening(currentModel);
+		const hasUsableCredential =
+			currentModel && (current.isFallback || requiresHardening)
+				? Boolean(await modelRegistry.getApiKey(currentModel))
+				: false;
+		if (current.isFallback && !hasUsableCredential) continue;
+		if (requiresHardening && hasUsableCredential) return true;
 		const chainKey = resolveRetryFallbackChainKey(context, current.selector, currentModel, current.roleHint);
 		const candidates = chainKey
 			? findRetryFallbackCandidates(context, chainKey, current.selector, currentModel, {
