@@ -2097,7 +2097,7 @@ function closestFragment(
 	content: string,
 	token: LiteralToken,
 	centerOffset?: number,
-): { text: string; offset: number } {
+): { text: string; offset: number; score: number } {
 	const ranked: Array<{ line: string; offset: number; normalized: NormalizedText; score: number }> = [];
 	const centerLine = centerOffset === undefined ? undefined : lineNumberAt(content, centerOffset) - 1;
 	let offset = 0;
@@ -2117,7 +2117,7 @@ function closestFragment(
 	}
 	const first = ranked[0];
 	if (!first && centerOffset !== undefined) return closestFragment(content, token);
-	if (!first) return { text: token.text, offset: 0 };
+	if (!first) return { text: token.text, offset: 0, score: 1 };
 
 	let best = { text: first.line, offset: first.offset, score: first.score };
 	if (token.normalized.length <= 160) {
@@ -2141,7 +2141,7 @@ function closestFragment(
 			}
 		}
 	}
-	return { text: best.text, offset: best.offset };
+	return { text: best.text, offset: best.offset, score: best.score };
 }
 
 /**
@@ -2210,12 +2210,28 @@ function numberedPreview(content: string, offset: number): string {
 		.join("\n");
 }
 
+/**
+ * Normalized edit-distance ceiling below which `closestFragment`'s nearest
+ * text is trusted as a real correction of an unmatched fragment. Above it the
+ * closest match is a fuzzy sliver (e.g. `ngle:` cut from `single:`), so the
+ * guidance is presented as non-copyable rather than a fabricated retry. Mirrors
+ * the acceptance bound used by `closestDesiredBlock`.
+ */
+const CONFIDENT_CORRECTION_SCORE = 0.35;
+
 function noMatchGuidance(
 	content: string,
 	normalized: NormalizedText,
 	pattern: ParsedPattern,
 	operation: Operation,
-): { reason: string; previewOffset: number; correctedPattern: string; additionRetry?: string } {
+): {
+	reason: string;
+	previewOffset: number;
+	correctedPattern: string;
+	copyReady: boolean;
+	nonCopyReadyReason?: string;
+	additionRetry?: string;
+} {
 	const literals = pattern.tokens.flatMap((token, index) =>
 		token.kind === "literal" ? [{ index, token, occurrences: occurrencesForLiteral(normalized, token) }] : [],
 	);
@@ -2231,12 +2247,16 @@ function noMatchGuidance(
 		const anchorOffset = anchor?.occurrences[0] ? sourceStart(normalized, anchor.occurrences[0].start, 0) : undefined;
 		const closest = closestFragment(content, missing.token, anchorOffset);
 		const at = operation.patternText.indexOf(missing.token.text);
-		const correctedPattern =
-			at >= 0 && closest.text !== ""
-				? operation.patternText.slice(0, at) +
-					closest.text +
-					operation.patternText.slice(at + missing.token.text.length)
-				: operation.patternText;
+		// Rewrite the unmatched fragment to the closest current text only when
+		// that text is a confident match. A low-confidence sliver would make the
+		// "corrected" operation target unintended text, so keep the original
+		// pattern and mark the guidance non-copyable instead.
+		const confidentCorrection = at >= 0 && closest.text !== "" && closest.score < CONFIDENT_CORRECTION_SCORE;
+		const correctedPattern = confidentCorrection
+			? operation.patternText.slice(0, at) +
+				closest.text +
+				operation.patternText.slice(at + missing.token.text.length)
+			: operation.patternText;
 		const lineStart = content.lastIndexOf("\n", Math.max(0, closest.offset - 1)) + 1;
 		const newline = content.indexOf("\n", closest.offset);
 		const neighborLine = content.slice(lineStart, newline === -1 ? content.length : newline);
@@ -2252,6 +2272,8 @@ function noMatchGuidance(
 				(anchor ? ` It broke relative to matched anchor ${displayFragment(anchor.token.text)}.` : ""),
 			previewOffset: anchorOffset ?? closest.offset,
 			correctedPattern,
+			copyReady: confidentCorrection,
+			nonCopyReadyReason: confidentCorrection ? undefined : "the closest current text is only a fuzzy match",
 			additionRetry:
 				looksLikeAddition && additionText !== undefined && neighborLine.trim() !== ""
 					? `If you are ADDING this text: match the existing neighbor line it belongs next to, and put the new text in the REWRITE —\n${OPENER}\n${SELECT_OPEN}${SELECT_CLOSE}${neighborLine}\n${REWRITE_HEADER}\n${additionText}`
@@ -2285,6 +2307,8 @@ function noMatchGuidance(
 			reason: `Failed fragment: ${displayFragment(only?.token.text ?? operation.patternText)} could not align.`,
 			previewOffset: only?.occurrences[0] ? sourceStart(normalized, only.occurrences[0].start, 0) : 0,
 			correctedPattern: operation.patternText,
+			copyReady: false,
+			nonCopyReadyReason: "the current text could not be aligned safely",
 		};
 	}
 
@@ -2302,6 +2326,11 @@ function noMatchGuidance(
 
 		previewOffset: sourceStart(normalized, broken.left.occurrences[0]?.start ?? 0, 0),
 		correctedPattern,
+		copyReady: correctedPattern !== operation.patternText,
+		nonCopyReadyReason:
+			correctedPattern === operation.patternText
+				? "the matched anchors are in a different order and no safe correction is available"
+				: undefined,
 	};
 }
 function nonConsecutiveGuidance(
@@ -2408,6 +2437,7 @@ function locate(
 	operationNumber: number,
 	path: string,
 	exclusions?: ReadonlyArray<{ start: number; end: number }>,
+	standaloneOperation = true,
 ): Candidate[] {
 	const normalized = normalizeText(content);
 	const raw = collectCandidates(content, normalized, pattern, "raw");
@@ -2514,8 +2544,16 @@ function locate(
 					: `Operation ${operationNumber} did not match ${path}. ${guidance.reason}`,
 				"Current file content near the closest match (no re-read needed):",
 				numberedPreview(content, guidance.previewOffset),
-				"Copy-ready corrected operation:",
-				operationPayload(operation, operation.all ? "*" : "", guidance.correctedPattern),
+				...(guidance.copyReady && standaloneOperation
+					? [
+							"Copy-ready corrected operation:",
+							operationPayload(operation, operation.all ? "*" : "", guidance.correctedPattern),
+						]
+					: [
+							guidance.copyReady
+								? "No copy-ready correction — retrying this operation alone would drop sibling operations. Rebuild it inside the full payload."
+								: `No copy-ready correction — ${guidance.nonCopyReadyReason ?? "no safe correction is available"}. Re-read the region above and rebuild MATCH from the exact current text.`,
+						]),
 				...(guidance.additionRetry ? [guidance.additionRetry] : []),
 			].join("\n"),
 		);
@@ -3452,10 +3490,15 @@ function locateWithEchoRecovery(
 	operationNumber: number,
 	path: string,
 	exclusions?: ReadonlyArray<{ start: number; end: number }>,
+	standaloneOperation = true,
 ): { operation: Operation; pattern: ParsedPattern; candidates: Candidate[] } {
 	const pattern = parsePattern(operation.patternText, operationNumber);
 	try {
-		return { operation, pattern, candidates: locate(content, pattern, operation, operationNumber, path, exclusions) };
+		return {
+			operation,
+			pattern,
+			candidates: locate(content, pattern, operation, operationNumber, path, exclusions, standaloneOperation),
+		};
 	} catch (error) {
 		const nonConsecutive = recoverNonConsecutiveOperation(content, operation);
 		if (nonConsecutive) {
@@ -3572,6 +3615,7 @@ function applyOperations(content: string, input: string, context: SloppyApplyCon
 				operationNumber,
 				context.path,
 				deferredAmbiguous.has(index) ? planned.map(edit => ({ start: edit.start, end: edit.end })) : undefined,
+				operations.length === 1,
 			);
 		} catch (error) {
 			if (!deferredAmbiguous.has(index) && error instanceof Error && error.message.includes(" is ambiguous: ")) {

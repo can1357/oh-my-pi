@@ -1150,6 +1150,47 @@ export function getMessageById(id: number): MessageStats | null {
 	const row = stmt.get(id);
 	return row ? rowToMessageStats(row) : null;
 }
+/** Per-transcript-file rollup for the Traces session list. */
+export interface SessionRollupRow {
+	sessionFile: string;
+	requests: number;
+	startedAt: number;
+	endedAt: number;
+	totalTokens: number;
+	costTotal: number;
+	/** Comma-joined DISTINCT models. */
+	models: string;
+}
+
+/** Aggregate every synced transcript file into one row (subagents unfolded). */
+export function getSessionRollups(): SessionRollupRow[] {
+	if (!db) return [];
+	const stmt = db.prepare(`
+		SELECT session_file AS sessionFile,
+		       COUNT(*) AS requests,
+		       MIN(timestamp) AS startedAt,
+		       MAX(timestamp + COALESCE(duration, 0)) AS endedAt,
+		       SUM(total_tokens) AS totalTokens,
+		       SUM(cost_total) AS costTotal,
+		       GROUP_CONCAT(DISTINCT model) AS models
+		FROM messages
+		GROUP BY session_file
+	`);
+	return stmt.all() as SessionRollupRow[];
+}
+
+/** Tool-call counts keyed by transcript file, for the Traces session list. */
+export function getToolCallCountsBySession(): Map<string, number> {
+	const counts = new Map<string, number>();
+	if (!db) return counts;
+	const stmt = db.prepare(
+		"SELECT session_file AS sessionFile, COUNT(*) AS calls FROM tool_calls GROUP BY session_file",
+	);
+	for (const row of stmt.all() as Array<{ sessionFile: string; calls: number }>) {
+		counts.set(row.sessionFile, row.calls);
+	}
+	return counts;
+}
 
 /**
  * Get daily cost time series data for the last N days, broken down by model.

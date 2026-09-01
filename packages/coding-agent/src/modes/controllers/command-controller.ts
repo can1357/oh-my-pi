@@ -145,6 +145,24 @@ export class CommandController {
 			this.ctx.showError(`Failed to export session: ${error instanceof Error ? error.message : "Unknown error"}`);
 		}
 	}
+	async handleTraceCommand(): Promise<void> {
+		const sessionFile = this.ctx.session.sessionFile;
+		if (!sessionFile) {
+			this.ctx.showWarning("No session file yet — send a message first.");
+			return;
+		}
+		try {
+			// Lazy: the stats dashboard (server + sqlite) loads on demand only,
+			// matching src/cli/stats-cli.ts, to keep CLI startup fast.
+			const { formatStatsDashboardUrl, startServer } = await import("@oh-my-pi/omp-stats");
+			const { hostname, port } = await startServer();
+			const url = `${formatStatsDashboardUrl(hostname, port)}/#/traces?s=${encodeURIComponent(sessionFile)}`;
+			this.openInBrowser(url);
+			this.ctx.showStatus(`Trace: ${url}`);
+		} catch (error: unknown) {
+			this.ctx.showError(`Failed to open trace: ${error instanceof Error ? error.message : "Unknown error"}`);
+		}
+	}
 
 	async handleDumpCommand(): Promise<void> {
 		try {

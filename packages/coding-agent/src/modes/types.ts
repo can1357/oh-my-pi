@@ -383,6 +383,7 @@ export interface InteractiveModeContext {
 
 	// Command handling
 	handleExportCommand(text: string): Promise<void>;
+	handleTraceCommand(): Promise<void>;
 	handleShareCommand(): Promise<void>;
 	handleTodoCommand(args: string): Promise<void>;
 	handleSessionCommand(): Promise<void>;

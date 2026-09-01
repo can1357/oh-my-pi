@@ -128,6 +128,7 @@ import type {
 	MessageEndEvent,
 	MessageStartEvent,
 	MessageUpdateEvent,
+	PreparedExtension,
 	SessionBeforeBranchResult,
 	SessionBeforeSwitchResult,
 	SessionBeforeTreeResult,
@@ -514,6 +515,26 @@ export class AgentSession {
 		return this.#extensionRoots();
 	}
 
+	/** Parent-imported extension factories, forwarded to session forks (`/tan`) to rebind runtime providers. */
+	readonly #preparedExtensions: readonly PreparedExtension[] | undefined;
+
+	/**
+	 * Session-independent imported extension factories safe to rebind in child
+	 * sessions. A `/tan` fork forwards these as `preloadedPreparedExtensions`
+	 * so the child re-registers the parent's runtime providers.
+	 */
+	get preparedExtensions(): readonly PreparedExtension[] | undefined {
+		return this.#preparedExtensions;
+	}
+
+	/** Source paths of the parent's loaded extensions; forwarded to `/tan` forks as the prepared-extension fallback. */
+	readonly #extensionPaths: readonly string[] | undefined;
+
+	/** Source paths of loaded extensions, forwarded to child sessions when prepared factories are unavailable. */
+	get extensionPaths(): readonly string[] | undefined {
+		return this.#extensionPaths;
+	}
+
 	#powerAssertion: MacOSPowerAssertion | undefined;
 
 	readonly configWarnings: string[] = [];
@@ -538,6 +559,7 @@ export class AgentSession {
 	/** Last (enable, providerId) tuple resolved by `#syncAppendOnlyContext` — used to skip no-op invalidations. */
 	#lastAppendOnlyResolution?: { enable: boolean; providerId: string | undefined };
 	#eventListeners: AgentSessionEventListener[] = [];
+	#activeToolExecutionUpdates = new Map<string, Extract<AgentSessionEvent, { type: "tool_execution_update" }>>();
 	#runStateListeners = new Set<(state: "running" | "idle") => void>();
 	#commandMetadataChangedListeners: CommandMetadataChangedListener[] = [];
 	#sessionChangeCallbacks = new Set<() => void>();
@@ -1061,6 +1083,8 @@ export class AgentSession {
 				configured: this.settings.get("extensions") ?? [],
 				configuredLevel: this.settings.extensionsSourceLevel(),
 			}));
+		this.#preparedExtensions = config.preparedExtensions;
+		this.#extensionPaths = config.extensionPaths;
 		this.#codexResetCoordinator = config.codexResetCoordinator ?? defaultCodexAutoRedeemCoordinator;
 		const bashHost: BashRunnerHost = {
 			agent: this.agent,
@@ -2201,6 +2225,14 @@ export class AgentSession {
 	#subscriberEmitGate: Promise<void> = Promise.resolve();
 
 	async #emitSessionEvent(event: AgentSessionEvent, options: { detachExtensions?: boolean } = {}): Promise<void> {
+		if (event.type === "tool_execution_update") {
+			// Returned background calls have no later tool result to persist their
+			// terminal frame. Keep the latest update for future focus rebuilds;
+			// logical session transitions clear the cache.
+			this.#activeToolExecutionUpdates.set(event.toolCallId, event);
+		} else if (event.type === "tool_execution_end") {
+			this.#activeToolExecutionUpdates.delete(event.toolCallId);
+		}
 		if (event.type === "message_update") {
 			this.#emit(event);
 			void this.#queueExtensionEvent(event);
@@ -3988,6 +4020,15 @@ export class AgentSession {
 	}
 
 	/**
+	 * Snapshot the latest unpersisted display result for each active tool or
+	 * returned background call. Focus rebuilds replay these after reconstructing
+	 * persisted transcript state.
+	 */
+	activeToolExecutionUpdates(): readonly Extract<AgentSessionEvent, { type: "tool_execution_update" }>[] {
+		return [...this.#activeToolExecutionUpdates.values()];
+	}
+
+	/**
 	 * Observe authoritative run-state transitions before public `agent_end`
 	 * deferral, for lifecycle owners that must not remain stale while prompts unwind.
 	 */
@@ -5310,6 +5351,10 @@ export class AgentSession {
 		this.#toolChoiceQueue.clear();
 		this.#tools.clearAcpPermissionDecisions();
 		this.#tools.resetAnnouncedMounts();
+		// A `/new`, session switch, or tree navigation reuses tool-call ids, so a
+		// still-cached background-task snapshot from the old conversation must not
+		// survive to be replayed by a focus rebuild in the reset session (#10447).
+		this.#activeToolExecutionUpdates.clear();
 	}
 
 	/**
@@ -5813,6 +5858,27 @@ export class AgentSession {
 			? await this.#buildImageDescriptionNotice(normalizedImages)
 			: undefined;
 
+		// A concurrent prompt() can start a turn during the awaits above: image
+		// normalization and the vision-description call suspend after the
+		// isStreaming check at the top, so two callers — the CLI initial message
+		// and a freshly typed submission — can both observe an idle session.
+		// Re-check before dispatch so the loser queues exactly like the early
+		// branch instead of racing #promptWithMessage into AgentBusyError. No
+		// await sits between this check and #beginInFlight, so the winner's
+		// in-flight increment is visible to every later re-check.
+		if (this.isStreaming) {
+			const streamingBehavior = options?.streamingBehavior;
+			if (!streamingBehavior) throw new AgentBusyError();
+			for (const notice of keywordNotices) {
+				await this.#queueCustomMessage(notice, streamingBehavior);
+			}
+			await this.#queueUserMessage(expandedText, options?.images, streamingBehavior, submittedAt, {
+				images: normalizedImages,
+				descriptionNotice: imageDescriptionNotice,
+			});
+			return true;
+		}
+
 		const promptAttribution = options?.attribution ?? (options?.synthetic ? "agent" : "user");
 		if (externalThinkingToolChoice) {
 			this.#toolChoiceQueue.pushOnce(externalThinkingToolChoice, {
@@ -6202,7 +6268,7 @@ export class AgentSession {
 		const ctx = this.#extensionRunner.createCommandContext();
 
 		try {
-			await command.handler(args, ctx);
+			await this.#extensionRunner.runScoped(() => command.handler(args, ctx));
 			return true;
 		} catch (err) {
 			// Emit error via extension runner
@@ -6434,21 +6500,27 @@ export class AgentSession {
 		images: ImageContent[] | undefined,
 		mode: "steer" | "followUp",
 		timestamp?: number,
+		preprocessed?: { images: ImageContent[] | undefined; descriptionNotice: CustomMessage | undefined },
 	): Promise<void> {
 		// A queued user message (RPC/SDK/collab steer or follow-up, or a typed message
 		// while streaming) is a deliberate resume; re-enable advisor auto-resume that
 		// a user interrupt suppressed.
 		this.#advisors.autoResumeSuppressed = false;
-		const normalizedImages = await this.#normalizeImagesForModel(images);
+		// The pre-dispatch re-check in prompt() arrives with normalization and the
+		// vision description already done — reuse them instead of paying a second
+		// vision-model request for the same attachment.
+		const normalizedImages = preprocessed ? preprocessed.images : await this.#normalizeImagesForModel(images);
 		const content: (TextContent | ImageContent)[] = [{ type: "text", text }];
 		if (normalizedImages?.length) {
 			content.push(...normalizedImages);
 		}
 		// Text-only model + image attachment: describe via a vision model and enqueue the
 		// description as a hidden companion immediately before the user message.
-		const imageDescriptionNotice = normalizedImages?.length
-			? await this.#buildImageDescriptionNotice(normalizedImages)
-			: undefined;
+		const imageDescriptionNotice = preprocessed
+			? preprocessed.descriptionNotice
+			: normalizedImages?.length
+				? await this.#buildImageDescriptionNotice(normalizedImages)
+				: undefined;
 		this.#allowQueuedMessageDrainRetry();
 		if (mode === "followUp") {
 			if (imageDescriptionNotice) this.agent.followUp(imageDescriptionNotice);

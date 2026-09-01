@@ -606,7 +606,11 @@ async function runInteractiveMode(
 		session.maybeStartTitleGeneration(initialMessage);
 		try {
 			using _keepalive = new EventLoopKeepalive();
-			await session.prompt(initialMessage, { images: initialImages });
+			// `steer` covers the race where the user submits a prompt of their own
+			// before this dispatch runs (the composer accepts input as soon as the
+			// first turn starts): the CLI message queues into that turn instead of
+			// dying with AgentBusyError.
+			await session.prompt(initialMessage, { images: initialImages, streamingBehavior: "steer" });
 		} catch (error: unknown) {
 			const errorMessage = error instanceof Error ? error.message : "Unknown error occurred";
 			mode.showError(errorMessage);
@@ -617,7 +621,7 @@ async function runInteractiveMode(
 		session.maybeStartTitleGeneration(message);
 		try {
 			using _keepalive = new EventLoopKeepalive();
-			await session.prompt(message);
+			await session.prompt(message, { streamingBehavior: "steer" });
 		} catch (error: unknown) {
 			const errorMessage = error instanceof Error ? error.message : "Unknown error occurred";
 			mode.showError(errorMessage);

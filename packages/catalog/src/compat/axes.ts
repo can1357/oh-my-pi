@@ -266,6 +266,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	 * not enrich limits from canonical-family or stencil.so same-id references.
 	 */
 	"credential-scoped-catalog": { key: "credentialScopedCatalog", set: "catalog", shape: "scalar" },
+	"long-usage-limit-fallback": { key: "longUsageLimitFallback", set: "catalog", shape: "scalar" },
 	priority: { key: "priority", set: "catalog", shape: "scalar" },
 	/**
 	 * Offline Sand wire-parameter allowlist (e.g. `effort`/`fast`). Applied only

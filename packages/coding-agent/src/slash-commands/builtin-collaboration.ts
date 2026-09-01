@@ -191,6 +191,33 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 		},
 	},
 	{
+		name: "trace",
+		icon: "stats",
+		description: "Open this session's trace in the stats dashboard",
+		handle: async (_command, runtime) => {
+			const sessionFile = runtime.session.sessionFile;
+			if (!sessionFile) {
+				await runtime.output("No session file yet — send a message first.");
+				return commandConsumed();
+			}
+			try {
+				// Lazy: the stats dashboard (server + sqlite) loads on demand only,
+				// matching src/cli/stats-cli.ts, to keep CLI startup fast.
+				const { formatStatsDashboardUrl, startServer } = await import("@oh-my-pi/omp-stats");
+				const { hostname, port } = await startServer();
+				const url = `${formatStatsDashboardUrl(hostname, port)}/#/traces?s=${encodeURIComponent(sessionFile)}`;
+				await runtime.output(url);
+				return commandConsumed();
+			} catch (err) {
+				return usage(`Failed to open trace: ${errorMessage(err)}`, runtime);
+			}
+		},
+		handleTui: async (_command, runtime) => {
+			await runtime.ctx.handleTraceCommand();
+			runtime.ctx.editor.setText("");
+		},
+	},
+	{
 		name: "dump",
 		icon: "clipboard",
 		description: "Copy session transcript to clipboard (and write LLM request JSON to tmp)",

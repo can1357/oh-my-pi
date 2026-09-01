@@ -14,7 +14,14 @@
  * Throws on any failure (no model, no key, unparseable output, abort/timeout);
  * the caller falls back to a concrete level and continues the turn.
  */
-import { type AssistantMessage, completeSimple, Effort, type Model, retryTransientCompletion } from "@oh-my-pi/pi-ai";
+import {
+	type AssistantMessage,
+	completeSimple,
+	Effort,
+	type Model,
+	retryTransientCompletion,
+	type Usage,
+} from "@oh-my-pi/pi-ai";
 import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import { prompt } from "@oh-my-pi/pi-utils";
 
@@ -86,6 +93,17 @@ export interface ClassifyDifficultyDeps {
 	sessionId?: string;
 	signal?: AbortSignal;
 	metadataResolver?: (provider: string) => Record<string, unknown> | undefined;
+	onUsage?: (usage: ClassifierUsage) => void;
+}
+
+export interface ClassifierUsage {
+	role: string;
+	api: string;
+	provider: string;
+	model: string;
+	usage: Usage;
+	stopReason: AssistantMessage["stopReason"];
+	errorMessage?: string;
 }
 
 /**
@@ -139,6 +157,16 @@ async function classifyOnline(input: string, deps: ClassifyDifficultyDeps, ceili
 					disableReasoning: true,
 					metadata,
 					signal: deps.signal,
+					onAttempt: attempt =>
+						deps.onUsage?.({
+							role: resolved.role,
+							api: attempt.api,
+							provider: attempt.provider,
+							model: attempt.model,
+							usage: attempt.usage,
+							stopReason: attempt.stopReason,
+							errorMessage: attempt.errorMessage,
+						}),
 				},
 			),
 		{ signal: deps.signal },

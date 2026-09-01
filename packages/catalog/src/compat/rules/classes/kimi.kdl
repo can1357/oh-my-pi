@@ -53,7 +53,7 @@ class "kimi" {
 		}
 	}
 	on "cloudflare-ai-gateway" "coreweave" "fireworks" "huggingface" "kilo" "nanogpt" \
-		"novita" "nvidia" "opencode" "opencode-go" "opencode-zen" "together" "vercel-ai-gateway" \
+		"novita" "nvidia" "opencode-go" "opencode-zen" "together" "vercel-ai-gateway" \
 		"zenmux" {
 		family "k2.5" {
 			thinking-efforts "minimal" "low" "medium" "high" "xhigh"

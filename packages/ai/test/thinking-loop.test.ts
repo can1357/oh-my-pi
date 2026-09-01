@@ -863,10 +863,12 @@ describe("thinking-loop retry budget (result path)", () => {
 		try {
 			const mock = createMockModel({ provider: "openrouter", id: "google/gemini-3.5-flash" });
 			for (let i = 0; i < 4; i++) mock.push(loopResponse());
+			const attempts: AssistantMessage[] = [];
 
-			const result = await completeSimple(mock.model, context());
+			const result = await completeSimple(mock.model, context(), { onAttempt: message => attempts.push(message) });
 
 			expect(mock.calls).toHaveLength(3);
+			expect(attempts).toHaveLength(3);
 			expect(result.stopReason).toBe("error");
 			expect(result.content).toEqual([]);
 			expect(result.errorMessage).toContain(THINKING_LOOP_ERROR_MARKER);

@@ -822,7 +822,10 @@ export class SessionAdvisors {
 			} = descriptor;
 
 			const emissionGuard = new AdvisorEmissionGuard();
-			const adviseTool = new AdviseTool((note, severity) => this.#routeAdvice(advisorRef, note, severity));
+			const adviseTool = new AdviseTool(
+				(note, severity) => this.#routeAdvice(advisorRef, note, severity),
+				note => this.#acceptAdvice(advisorRef, note),
+			);
 
 			// `#advisorWatchdogPrompt` already carries WATCHDOG.md + YAML shared
 			// instructions; `config.instructions` adds this advisor's specialization.
@@ -1059,6 +1062,9 @@ export class SessionAdvisors {
 				getModelIdentity: () => formatModelString(advisorRef.agent.state.model),
 				beginAdvisorUpdate: inProgress => {
 					advisorRef.recorder.beginTurn();
+					// Flush the deferred backlog (notes already cleared the emission guard
+					// when reserved), then reset the guard's per-update budget for this
+					// prompt's live notes.
 					advisorRef.adviseTool.beginUpdate(inProgress);
 					advisorRef.emissionGuard.beginUpdate();
 				},
@@ -1164,11 +1170,21 @@ export class SessionAdvisors {
 		return isTerminalTextAssistantAnswer(messages[tail]);
 	}
 
+	/** Emission-guard gate: the noise/empty/dedupe filter plus the
+	 *  one-advise-per-update budget, consumed the moment a note is emitted —
+	 *  whether it is delivered live or held for a deferred flush. A suppressed
+	 *  note never consumes the budget, so it cannot burn an update's slot ahead
+	 *  of a substantive concern. Returns whether the note may reach the primary. */
+	#acceptAdvice(advisor: ActiveAdvisor, note: string, severity?: AdvisorSeverity): boolean {
+		if (advisor.emissionGuard.accept(note)) return true;
+		logger.debug("advisor advice suppressed by emission guard", { severity, advisor: advisor.name });
+		return false;
+	}
+
+	/** Route an already-accepted advice note to the primary. Never re-runs the
+	 *  emission guard — the note passed {@link #acceptAdvice} when it was emitted,
+	 *  so a deferred flush replays the backlog without re-filtering. */
 	#routeAdvice(advisor: ActiveAdvisor, note: string, severity?: AdvisorSeverity): void {
-		if (!advisor.emissionGuard.accept(note)) {
-			logger.debug("advisor advice suppressed by emission guard", { severity, advisor: advisor.name });
-			return;
-		}
 		// The implicit single ("default") advisor stamps no source name, so its
 		// agent-facing `<advisory>` bytes stay identical to the pre-multi-advisor path.
 		const source = advisor.slug ? advisor.name : undefined;
