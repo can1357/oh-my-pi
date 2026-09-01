@@ -38,14 +38,24 @@ function makeParams(overrides: Partial<UsageFetchParams> = {}): UsageFetchParams
 	};
 }
 
-function makeCtx(payload: unknown, status = 200): UsageFetchContext {
-	const fetch: FetchImpl = async () => {
+interface RecordedRequest {
+	url: string;
+	init: RequestInit;
+}
+
+function makeCtx(payload: unknown, status = 200): UsageFetchContext & { requests: RecordedRequest[] } {
+	const requests: RecordedRequest[] = [];
+	const fetch: FetchImpl = async (input, init) => {
+		requests.push({
+			url: typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url,
+			init: init ?? {},
+		});
 		return new Response(JSON.stringify(payload), {
 			status,
 			headers: { "content-type": "application/json" },
 		});
 	};
-	return { fetch };
+	return { fetch, requests };
 }
 
 function makeCtxThrow(): UsageFetchContext {
@@ -63,6 +73,56 @@ describe("ollama-cloud usage provider", () => {
 		expect(report?.limits.map(limit => limit.id).sort()).toEqual(["ollama-cloud:activity", "ollama-cloud:monthly"]);
 	});
 
+	it("wire contract: GET https://ollama.com/api/usage with Authorization: Bearer <key> and Accept: application/json", async () => {
+		const ctx = makeCtx(FULL_FIXTURE);
+		await ollamaCloudUsageProvider.fetchUsage(makeParams(), ctx);
+		expect(ctx.requests).toHaveLength(1);
+		expect(ctx.requests[0]?.url).toBe("https://ollama.com/api/usage");
+		const headers = new Headers(ctx.requests[0]?.init.headers);
+		expect(headers.get("authorization")).toBe("Bearer ollama-test-key");
+		expect(headers.get("accept")).toBe("application/json");
+	});
+
+	it("legacy unmigrated plan: session/weekly fractions map to 5h/7d percent limits", async () => {
+		// Shape recorded in PR #10101 for accounts not migrated to monthly billing.
+		const legacyFixture = {
+			activity: { cost: "0.42", period: { type: "last_4_weeks" } },
+			limits: {
+				session: { usage: 0.03, models: [{ name: "glm-5.3-flash", request_count: 54 }] },
+				weekly: { usage: 0.005, models: [{ name: "glm-5.3-flash", request_count: 458 }] },
+			},
+		};
+		const report = await ollamaCloudUsageProvider.fetchUsage(makeParams(), makeCtx(legacyFixture));
+		expect(report).not.toBeNull();
+		expect(report?.limits.map(limit => limit.id).sort()).toEqual([
+			"ollama-cloud:5h",
+			"ollama-cloud:7d",
+			"ollama-cloud:activity",
+		]);
+		const session = report?.limits.find(limit => limit.id === "ollama-cloud:5h");
+		expect(session?.label).toBe("Ollama 5 Hour");
+		expect(session?.amount.usedFraction).toBeCloseTo(0.03);
+		expect(session?.amount.unit).toBe("percent");
+		expect(session?.window?.durationMs).toBe(5 * 60 * 60 * 1000);
+		expect(session?.notes).toEqual(["54 requests this period"]);
+		const weekly = report?.limits.find(limit => limit.id === "ollama-cloud:7d");
+		expect(weekly?.label).toBe("Ollama 7 Day");
+		expect(weekly?.amount.usedFraction).toBeCloseTo(0.005);
+		expect(weekly?.window?.durationMs).toBe(7 * 24 * 60 * 60 * 1000);
+	});
+
+	it("legacy plan: session at >= 0.9 → warning, at 1 → exhausted", async () => {
+		const warning = await ollamaCloudUsageProvider.fetchUsage(
+			makeParams(),
+			makeCtx({ limits: { session: { usage: 0.91 } } }),
+		);
+		expect(warning?.limits.find(limit => limit.id === "ollama-cloud:5h")?.status).toBe("warning");
+		const exhausted = await ollamaCloudUsageProvider.fetchUsage(
+			makeParams(),
+			makeCtx({ limits: { session: { usage: 1 } } }),
+		);
+		expect(exhausted?.limits.find(limit => limit.id === "ollama-cloud:5h")?.status).toBe("exhausted");
+	});
 	it("monthly limit: usedFraction mirrors the API fraction, status ok at low usage", async () => {
 		const report = await ollamaCloudUsageProvider.fetchUsage(makeParams(), makeCtx(FULL_FIXTURE));
 		const monthly = report?.limits.find(limit => limit.id === "ollama-cloud:monthly");

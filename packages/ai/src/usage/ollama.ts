@@ -21,14 +21,53 @@ function parseRequestCount(value: unknown): number {
 }
 
 /**
- * `limits.monthly`: `usage` is the consumed fraction (0..1) of the monthly
- * allowance. Ollama does not expose the absolute cap, a reset timestamp, or a
- * remaining balance — only the fraction and per-model request counts.
+ * Legacy unmigrated plans report `limits.session` (5h rolling) and
+ * `limits.weekly` (7-day rolling) — the pre-monthly-credit shape recorded in
+ * PR #10101. Accounts that switched to monthly billing stop returning these
+ * keys, so a missing key simply yields no limit. `usage` is again a 0..1
+ * fraction with per-model request counts and no reset timestamp.
+ */
+const LEGACY_PLAN_WINDOWS = [
+	{ key: "session", id: "5h", label: "5 Hour", durationMs: 5 * 60 * 60 * 1000 },
+	{ key: "weekly", id: "7d", label: "7 Day", durationMs: 7 * 24 * 60 * 60 * 1000 },
+] as const;
+
+function parseLegacyPlanLimit(
+	raw: unknown,
+	plan: (typeof LEGACY_PLAN_WINDOWS)[number],
+	provider: UsageFetchParams["provider"],
+): UsageLimit | null {
+	if (!isRecord(raw)) return null;
+	const usage = toNumber(raw.usage);
+	if (usage === undefined) return null;
+	const fraction = Math.max(usage, 0);
+	const models = Array.isArray(raw.models) ? raw.models : [];
+	const requests = models.reduce(
+		(sum, model) => sum + (isRecord(model) ? parseRequestCount(model.request_count) : 0),
+		0,
+	);
+	return {
+		id: `${provider}:${plan.id}`,
+		label: `Ollama ${plan.label}`,
+		scope: { provider, windowId: plan.id, shared: true },
+		window: { id: plan.id, label: plan.label, durationMs: plan.durationMs },
+		amount: { used: fraction * 100, usedFraction: fraction, unit: "percent" },
+		status: usageStatus(fraction),
+		notes: requests > 0 ? [`${requests} requests this period`] : undefined,
+	};
+}
+
+/**
+ * Migrated plans report `limits.monthly`: `usage` is the consumed fraction
+ * (0..1) of the monthly allowance. Ollama does not expose the absolute cap, a
+ * reset timestamp, or a remaining balance — only the fraction and per-model
+ * request counts.
  */
 function parseMonthlyLimit(raw: unknown, provider: UsageFetchParams["provider"]): UsageLimit | null {
 	if (!isRecord(raw)) return null;
 	const usage = toNumber(raw.usage);
 	if (usage === undefined) return null;
+	const fraction = Math.max(usage, 0);
 	const models = Array.isArray(raw.models) ? raw.models : [];
 	const requests = models.reduce(
 		(sum, model) => sum + (isRecord(model) ? parseRequestCount(model.request_count) : 0),
@@ -37,14 +76,14 @@ function parseMonthlyLimit(raw: unknown, provider: UsageFetchParams["provider"])
 	// Fraction-only quota: no absolute credit quantity exists, so the unit is
 	// "percent" — renderers turn usedFraction into "X% used", while a named
 	// unit like "credits" would print a false "0.40 credits used".
-	const amount: UsageAmount = { used: Math.max(usage, 0) * 100, usedFraction: Math.max(usage, 0), unit: "percent" };
+	const amount: UsageAmount = { used: fraction * 100, usedFraction: fraction, unit: "percent" };
 	return {
 		id: `${provider}:monthly`,
 		label: "Monthly allowance",
 		scope: { provider, windowId: "monthly", shared: true },
 		window: { id: "monthly", label: "Monthly" },
 		amount,
-		status: usageStatus(usage),
+		status: usageStatus(fraction),
 		notes: requests > 0 ? [`${requests} requests this period`] : undefined,
 	};
 }
@@ -121,7 +160,12 @@ async function fetchOllamaCloudUsage(params: UsageFetchParams, ctx: UsageFetchCo
 	if (!isRecord(payload)) return null;
 
 	const limits: UsageLimit[] = [];
-	const monthly = parseMonthlyLimit(isRecord(payload.limits) ? payload.limits.monthly : undefined, params.provider);
+	const payloadLimits = isRecord(payload.limits) ? payload.limits : {};
+	for (const plan of LEGACY_PLAN_WINDOWS) {
+		const legacy = parseLegacyPlanLimit(payloadLimits[plan.key], plan, params.provider);
+		if (legacy) limits.push(legacy);
+	}
+	const monthly = parseMonthlyLimit(payloadLimits.monthly, params.provider);
 	if (monthly) limits.push(monthly);
 	const activity = parseActivityLimit(payload.activity, params.provider);
 	if (activity) limits.push(activity);
@@ -141,10 +185,9 @@ export const ollamaUsageProvider: UsageProvider = {
 	id: OLLAMA_PROVIDER,
 	fetchUsage: fetchOllamaUsage,
 	supports: params => params.provider === OLLAMA_PROVIDER,
-	validatesCredentials: false,
 };
 
-/** Fetches the Ollama Cloud monthly allowance from the ollama.com usage API. */
+/** Fetches Ollama Cloud quota (legacy session/weekly or migrated monthly) from the ollama.com usage API. */
 export const ollamaCloudUsageProvider: UsageProvider = {
 	id: OLLAMA_CLOUD_PROVIDER,
 	fetchUsage: fetchOllamaCloudUsage,
