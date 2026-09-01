@@ -1991,13 +1991,13 @@ export const SETTINGS_SCHEMA = {
 	// Input and startup
 	doubleEscapeAction: {
 		type: "enum",
-		values: ["branch", "tree", "none"] as const,
-		default: "tree",
+		values: ["rewind", "none"] as const,
+		default: "rewind",
 		ui: {
 			tab: "interaction",
 			group: "Input",
 			label: "Double-Escape Action",
-			description: "Action when pressing Escape twice with empty editor",
+			description: "Pressing Escape twice with an empty editor opens the transcript rewind selector",
 		},
 	},
 

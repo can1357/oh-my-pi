@@ -81,6 +81,15 @@ behavior {
 		route "openai-completions" prefix="openai/" strip-prefix=#true
 		route "openai-completions" prefix="workers-ai/" strip-prefix=#false
 	}
+	// GitLab Duo aliases route through GitLab's provider-specific proxy
+	// transports. Upstream model-id translation remains catalog identity data.
+	// Replaces gitlab-duo.ts MODEL_MAPPINGS API-flavor fields.
+	api-routes provider="gitlab-duo" default="openai-completions" {
+		route "anthropic-messages" prefix="duo-chat-opus-" prefix="duo-chat-sonnet-" prefix="duo-chat-haiku-" \
+			prefix="claude-opus-" prefix="claude-sonnet-" prefix="claude-haiku-"
+		route "openai-responses" exact="duo-chat-gpt-5-codex" exact="duo-chat-gpt-5-2-codex" \
+			exact="gpt-5-codex" exact="gpt-5.2-codex"
+	}
 
 	// Provider-default wire model for model-less hosted search operations.
 	hosted-default provider="kimi-search" model="kimi-for-coding"

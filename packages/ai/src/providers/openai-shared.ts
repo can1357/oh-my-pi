@@ -545,10 +545,6 @@ export function disableStrictToolsForScope(
 	state?.strictTools.disabledModelScopes.add(`${scope.provider}:${scope.baseUrl ?? ""}:${scope.modelId}`);
 }
 
-export function isOpenRouterAnthropicModel(model: OpenAIModelIdentity): boolean {
-	return model.provider === "openrouter" && model.identity?.class === "anthropic";
-}
-
 /**
  * Append an OpenRouter routing-variant suffix (e.g. `:nitro`, `:floor`, `:online`, `:exacto`)
  * to a model id when no explicit variant is already present. A variant is considered

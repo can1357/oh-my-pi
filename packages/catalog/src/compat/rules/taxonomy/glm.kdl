@@ -1,5 +1,8 @@
 class "glm" {
     bounded "glm"
+    // Vendor-prefixed bare ids (mistral `zai-glm-5-2`, cerebras `zai-glm-4.7`):
+    // bounded matchers are prefix-anchored, so `bounded "glm"` never sees them.
+    bounded "zai-glm"
 
     family "flash" glob="*flash*"
     family "air" glob="*air*"

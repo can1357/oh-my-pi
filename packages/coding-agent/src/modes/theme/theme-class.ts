@@ -523,6 +523,17 @@ export class Theme {
 		};
 	}
 
+	/**
+	 * Dotted rules/verticals for transient selection outlines. Corners come from
+	 * {@link boxRound} — Unicode has no rounded dotted corner glyphs.
+	 */
+	get boxDotted() {
+		return {
+			horizontal: this.#symbols["boxDotted.horizontal"],
+			vertical: this.#symbols["boxDotted.vertical"],
+		};
+	}
+
 	get boxSharp() {
 		return {
 			topLeft: this.#symbols["boxSharp.topLeft"],

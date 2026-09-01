@@ -1,6 +1,17 @@
 // Provider-wire compat for "opencode-zen"; regenerated from the frozen census using deployment contract selectors.
 
 provider "opencode-zen" {
+	// Replaces the OpenCode reasoning-model whenThinking fallback object.
+	// Applies to every completions-routed reasoning model, discovered ids
+	// included; the engine drops whenThinking for non-reasoning specs.
+	when-thinking {
+		requires-reasoning-content-for-tool-calls #true
+		allows-synthetic-reasoning-content-for-tool-calls #false
+		reasoning-content-field "reasoning_content"
+	}
+	// Replaces the Anthropic request-builder exclusion: Zen rejects the
+	// context_management field on several Claude families (#6510).
+	supports-context-management #false
 	class "anthropic" {
 		revision ">=4 <4.6" {
 			thinking-efforts "minimal" "low" "medium" "high" "xhigh"
@@ -76,6 +87,12 @@ provider "opencode-zen" {
 	}
 	// residue: taxonomy ranks and exact globs do not isolate these models.
 	models "minimax-m2.5-free" {
+		// Replaces the Anthropic-route MiniMax effort remap table.
+		thinking-effort-map {
+			low "adaptive"
+			medium "adaptive"
+			high "adaptive"
+		}
 		thinking-mode "anthropic-adaptive"
 	}
 	// residue: taxonomy ranks and exact globs do not isolate these models.

@@ -1,6 +1,12 @@
 // Model-lineage compat for "glm"; regenerated from the frozen census using class taxonomy selectors.
 
 class "glm" {
+	// Replaces provider-keyed GLM 5+ coding-plan stream-idle dispatch.
+	on "zhipu-coding-plan" "opencode-go" "opencode-zen" {
+		revision ">=5" {
+			stream-idle-timeout-ms 600000
+		}
+	}
 	// GLM-5.2 exposes the default lower tiers plus a genuine max on generic
 	// OpenAI-compatible hosts; the zai-dialect and Anthropic-route hosts
 	// (Z.ai, Zhipu, Umans, Ollama Cloud, Baseten) serve only high/max.

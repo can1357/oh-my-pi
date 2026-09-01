@@ -1,6 +1,10 @@
 // Provider-wire compat for "openai"; regenerated from the frozen census using deployment contract selectors.
 
 provider "openai" {
+	// Replaces the strict-mode provider whitelist entry.
+	supports-strict-mode #true
+	// Replaces both OpenAI tool-call id-limit baselines.
+	uses-openai-tool-call-id-limit #true
 	thinking-mode "effort"
 	class "unknown" {
 		revision ">=5.6 <5.7" {
@@ -43,29 +47,29 @@ provider "openai" {
 	// First-party GPT-5.6 whole-request long-context tiers (>272K input).
 	models "daybreak-blue-latest" "gpt-5.6" "gpt-5.6-sol*" {
 		long-context-cost {
-			inputThreshold 272000
+			input-threshold 272000
 			input 10.0
 			output 45.0
-			cacheRead 1.0
-			cacheWrite 12.5
+			cache-read 1.0
+			cache-write 12.5
 		}
 	}
 	models "gpt-5.6-luna*" {
 		long-context-cost {
-			inputThreshold 272000
+			input-threshold 272000
 			input 0.4
 			output 1.8
-			cacheRead 0.04
-			cacheWrite 0.5
+			cache-read 0.04
+			cache-write 0.5
 		}
 	}
 	models "gpt-5.6-terra*" {
 		long-context-cost {
-			inputThreshold 272000
+			input-threshold 272000
 			input 4.0
 			output 18.0
-			cacheRead 0.4
-			cacheWrite 5.0
+			cache-read 0.4
+			cache-write 5.0
 		}
 	}
 	// residue: the bare Daybreak rolling aliases pin the documented 5.6-gen
