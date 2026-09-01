@@ -34,6 +34,22 @@ describe("catalog provider descriptors", () => {
 		expect(typeof options?.fetchDynamicModels).toBe("function");
 	});
 
+	test("zed-agent descriptor declares live server default model and catalog discovery", () => {
+		const zed = PROVIDER_DESCRIPTORS.find(descriptor => descriptor.providerId === "zed-agent");
+		expect(zed).toBeDefined();
+		expect(zed?.defaultModel).toBe("claude-sonnet-4-6");
+		expect(zed?.catalogDiscovery).toEqual({
+			label: "Zed Agent",
+			envVars: ["ZED_ACCESS_TOKEN"],
+			oauthProvider: "zed-agent",
+		});
+
+		const options = zed?.createModelManagerOptions({ apiKey: "test-key" });
+		expect(options?.providerId).toBe("zed-agent");
+		expect(options?.dynamicModelsAuthoritative).toBe(true);
+		expect(typeof options?.fetchDynamicModels).toBe("function");
+	});
+
 	test("every descriptor has a default model and a factory that preserves provider identity", () => {
 		for (const descriptor of PROVIDER_DESCRIPTORS) {
 			expect(descriptor.defaultModel).toBeTruthy();

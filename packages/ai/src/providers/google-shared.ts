@@ -53,7 +53,7 @@ export { normalizeSchemaForGoogle };
 
 type GoogleApiType = "google-generative-ai" | "google-gemini-cli" | "google-vertex";
 
-function convertGoogleImagePart(image: ImageContent): Part {
+export function convertGoogleImagePart(image: ImageContent): Part {
 	if (image.providerFile?.provider === "google" && image.providerFile.uri) {
 		return { fileData: { fileUri: image.providerFile.uri, mimeType: image.mimeType } };
 	}
@@ -149,7 +149,10 @@ function isValidThoughtSignature(signature: string | undefined): boolean {
 /**
  * Only keep signatures from the same provider/model and with valid base64.
  */
-function resolveThoughtSignature(isSameProviderAndModel: boolean, signature: string | undefined): string | undefined {
+export function resolveThoughtSignature(
+	isSameProviderAndModel: boolean,
+	signature: string | undefined,
+): string | undefined {
 	return isSameProviderAndModel && isValidThoughtSignature(signature) ? signature : undefined;
 }
 

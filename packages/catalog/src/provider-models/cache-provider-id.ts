@@ -9,6 +9,7 @@ const CREDENTIAL_SCOPED_MODEL_CACHE_PROVIDERS: Readonly<Record<string, true>> = 
 	"opencode-go": true,
 	"opencode-zen": true,
 	"github-copilot": true,
+	"zed-agent": true,
 };
 
 /** Whether a provider's model-cache namespace requires its resolved credential. */
@@ -78,8 +79,7 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 		case "github-copilot": {
 			// Copilot model specs bake in the plan-specific endpoint (personal vs
 			// Business/Enterprise) resolved from the credential. Discovery writes an
-			// authoritative cache, so `online-if-uncached` serves it for the full
-			// TTL without re-probing. Keying the namespace on the credential means
+			// authoritative cache, so keying the namespace on the credential means
 			// switching `COPILOT_GITHUB_TOKEN` to a different account misses the
 			// prior endpoint's cache and re-runs discovery instead of hitting the
 			// stale host and 403ing (PR #8510 review).
@@ -87,6 +87,12 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 			const scope = `${options.apiKey ?? ""}\u0000${baseUrl}`;
 			return `github-copilot:models-v1:${Bun.hash(scope).toString(36)}`;
 		}
+		case "zed-agent":
+			// Zed's authoritative `/models` response is account-specific. Keep
+			// unauthenticated discovery on the historical provider namespace, but
+			// isolate authenticated catalogs by a non-reversible credential
+			// fingerprint so accounts cannot reuse one another's model set.
+			return options.apiKey ? `${providerId}:models-v1:${Bun.hash(options.apiKey).toString(36)}` : providerId;
 		case "openrouter":
 			return "openrouter:pseudo-api";
 		case "vllm": {

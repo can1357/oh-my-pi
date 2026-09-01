@@ -76,6 +76,9 @@
 ### Fixed
 
 - Fixed LiteLLM model discovery so model pricing is correctly populated when pricing information is provided by a later metadata endpoint.
+### Added
+
+- Added Zed Agent model discovery and catalog descriptors for Zed-hosted models (`zed-agent`), including context limits, reasoning effort ladders, and official rate card pricing.
 
 ## [18.0.5] - 2026-08-25
 

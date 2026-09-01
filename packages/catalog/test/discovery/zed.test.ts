@@ -1,0 +1,684 @@
+import { describe, expect, it, vi } from "bun:test";
+import { buildModel } from "../../src/build";
+import { resolveModelPolicy } from "../../src/compat/resolve";
+import { fetchZedModels } from "../../src/discovery/zed";
+import type { FetchImpl, ModelSpec } from "../../src/types";
+import { ZED_APP_VERSION, ZED_CLOUD_URL, ZED_HEADERS } from "../../src/wire/zed";
+
+type PromiseOutcome<T> = { kind: "fulfilled"; value: T } | { kind: "rejected"; error: unknown };
+
+async function resolveAfterMicrotasks<T>(promise: Promise<T>, errorMessage: string): Promise<T> {
+	let outcome: PromiseOutcome<T> | undefined;
+	promise.then(
+		value => {
+			outcome = { kind: "fulfilled", value };
+		},
+		error => {
+			outcome = { kind: "rejected", error };
+		},
+	);
+	for (let i = 0; i < 1000 && !outcome; i++) {
+		await Promise.resolve();
+	}
+	if (!outcome) throw new Error(errorMessage);
+	if (outcome.kind === "rejected") throw outcome.error;
+	return outcome.value;
+}
+
+describe("Zed Model Discovery", () => {
+	it("executes the full two-tier auth chain with master credentials (userId + accessToken)", async () => {
+		interface RecordedCall {
+			url: string;
+			method: string;
+			headers: Record<string, string>;
+			body?: unknown;
+		}
+
+		const recordedCalls: RecordedCall[] = [];
+
+		const mockFetcher: FetchImpl = async (input, init) => {
+			const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+			const method = init?.method ?? "GET";
+			const headersObj: Record<string, string> = {};
+			if (init?.headers) {
+				const h = new Headers(init.headers);
+				h.forEach((value, key) => {
+					headersObj[key.toLowerCase()] = value;
+				});
+			}
+
+			let bodyParsed: unknown;
+			if (init?.body && typeof init.body === "string") {
+				try {
+					bodyParsed = JSON.parse(init.body);
+				} catch {
+					bodyParsed = init.body;
+				}
+			}
+
+			recordedCalls.push({
+				url,
+				method,
+				headers: headersObj,
+				body: bodyParsed,
+			});
+
+			if (url === `${ZED_CLOUD_URL}/client/llm_tokens`) {
+				return new Response(JSON.stringify({ token: "minted_short_lived_llm_token_999" }), {
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				});
+			}
+
+			if (url === `${ZED_CLOUD_URL}/models`) {
+				const mockResponse = {
+					models: [
+						{
+							provider: "anthropic",
+							id: "claude-sonnet-5",
+							display_name: "Claude Sonnet 5",
+							max_token_count: 1_000_000,
+							max_output_tokens: 64_000,
+							supports_tools: true,
+							supports_images: true,
+							supports_thinking: true,
+							supported_effort_levels: [
+								{ name: "Low", value: "low" },
+								{ name: "Medium", value: "medium", is_default: true },
+								{ name: "High", value: "high" },
+							],
+						},
+						{
+							provider: "open_ai",
+							id: "gpt-5.6-sol",
+							display_name: "GPT-5.6 Sol",
+							max_token_count: 1_000_000,
+							max_output_tokens: 16_384,
+							supports_tools: true,
+							supports_images: true,
+							supports_thinking: true,
+							supported_effort_levels: [{ name: "High", value: "high", is_default: true }],
+						},
+						{
+							provider: "x_ai",
+							id: "grok-4.20",
+							display_name: "Grok 4.20",
+							max_token_count: 256_000,
+							max_output_tokens: 8_192,
+							supports_tools: true,
+							supports_images: false,
+							supports_thinking: false,
+						},
+					],
+					default_model: "claude-sonnet-5",
+					default_fast_model: "grok-4.20",
+					recommended_models: ["claude-sonnet-5", "gpt-5.6-sol"],
+				};
+
+				return new Response(JSON.stringify(mockResponse), {
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				});
+			}
+
+			return new Response("Not Found", { status: 404 });
+		};
+
+		const masterCredentials = "48201 secret_access_token_abc123";
+		const models = await fetchZedModels({ token: masterCredentials, fetcher: mockFetcher });
+
+		// 1. Assert exactly 2 sequential requests were made
+		expect(recordedCalls.length).toBe(2);
+
+		// 2. Request 1: POST /client/llm_tokens with master Authorization and organization_id: null
+		const call1 = recordedCalls[0];
+		expect(call1.url).toBe(`${ZED_CLOUD_URL}/client/llm_tokens`);
+		expect(call1.method).toBe("POST");
+		expect(call1.headers.authorization).toBe("48201 secret_access_token_abc123");
+		expect(call1.headers[ZED_HEADERS.VERSION]).toBe(ZED_APP_VERSION);
+		expect(call1.headers["content-type"]).toBe("application/json");
+		expect(call1.body).toEqual({ organization_id: null });
+
+		// 3. Request 2: GET /models with Bearer minted token, x-zed-version, and x-zed-client-supports-x-ai
+		const call2 = recordedCalls[1];
+		expect(call2.url).toBe(`${ZED_CLOUD_URL}/models`);
+		expect(call2.method).toBe("GET");
+		expect(call2.headers.authorization).toBe("Bearer minted_short_lived_llm_token_999");
+		expect(call2.headers[ZED_HEADERS.VERSION]).toBe(ZED_APP_VERSION);
+		expect(call2.headers[ZED_HEADERS.CLIENT_X_AI]).toBe("true");
+		expect(call2.headers["content-type"]).toBe("application/json");
+
+		// 4. Assert returned live models
+		expect(models).not.toBeNull();
+		expect(models?.length).toBe(3);
+
+		const sonnet = models?.find(m => m.id === "claude-sonnet-5");
+		expect(sonnet).toBeDefined();
+		expect(sonnet?.name).toBe("Claude Sonnet 5");
+		expect(sonnet?.provider).toBe("zed-agent");
+		expect(sonnet?.baseUrl).toBe(ZED_CLOUD_URL);
+		expect(sonnet?.reasoning).toBeTrue();
+		expect(sonnet?.thinking).toBeUndefined();
+		expect(buildModel(sonnet!).thinking?.mode).toBe("anthropic-adaptive");
+		expect(sonnet?.contextWindow).toBe(1_000_000);
+		expect(sonnet?.maxTokens).toBe(64_000);
+		expect(sonnet?.input).toEqual(["text", "image"]);
+		expect(sonnet?.supportsTools).toBe(true);
+
+		const gpt = models?.find(m => m.id === "gpt-5.6-sol");
+		expect(gpt).toBeDefined();
+		expect(gpt?.name).toBe("GPT-5.6 Sol");
+		expect(gpt?.reasoning).toBeTrue();
+		expect(gpt?.thinking).toBeUndefined();
+		expect(buildModel(gpt!).thinking?.mode).toBe("effort");
+		expect(gpt?.contextWindow).toBe(1_000_000);
+		expect(gpt?.maxTokens).toBe(16_384);
+
+		const grok = models?.find(m => m.id === "grok-4.20");
+		expect(grok).toBeDefined();
+		expect(grok?.name).toBe("Grok 4.20");
+		expect(grok?.reasoning).toBeFalse();
+		expect(grok?.thinking).toBeUndefined();
+		expect(grok?.contextWindow).toBe(256_000);
+		expect(grok?.maxTokens).toBe(8_192);
+		expect(grok?.input).toEqual(["text"]);
+
+		// 5. Assert compat.provider is preserved from discovered model.provider
+		expect(sonnet?.compat?.provider).toBe("anthropic");
+		expect(gpt?.compat?.provider).toBe("open_ai");
+		expect(grok?.compat?.provider).toBe("x_ai");
+
+		// 6. Assert discovered cost is seeded as neutral { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
+		expect(sonnet?.cost).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+		expect(gpt?.cost).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+		expect(grok?.cost).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+		if (!sonnet) throw new Error("Claude Sonnet discovery fixture was not returned");
+		expect(buildModel(sonnet).cost).toEqual({
+			input: 2.2,
+			output: 11.0,
+			cacheRead: 0.22,
+			cacheWrite: 2.75,
+		});
+	});
+	it("supports direct bearer token when no userId is present in credentials", async () => {
+		const recordedCalls: Array<{ url: string; headers: Record<string, string> }> = [];
+
+		const mockFetcher: FetchImpl = async (input, init) => {
+			const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+			const headersObj: Record<string, string> = {};
+			if (init?.headers) {
+				const h = new Headers(init.headers);
+				h.forEach((value, key) => {
+					headersObj[key.toLowerCase()] = value;
+				});
+			}
+
+			recordedCalls.push({ url, headers: headersObj });
+
+			return new Response(
+				JSON.stringify({
+					models: [
+						{
+							provider: "anthropic",
+							id: "claude-3-7-sonnet",
+							display_name: "Claude 3.7 Sonnet",
+						},
+					],
+				}),
+				{ status: 200, headers: { "Content-Type": "application/json" } },
+			);
+		};
+
+		const directToken = "direct_pre_minted_llm_token";
+		const models = await fetchZedModels({ token: directToken, fetcher: mockFetcher });
+
+		expect(recordedCalls.length).toBe(1);
+		expect(recordedCalls[0].url).toBe(`${ZED_CLOUD_URL}/models`);
+		expect(recordedCalls[0].headers.authorization).toBe("Bearer direct_pre_minted_llm_token");
+		expect(recordedCalls[0].headers[ZED_HEADERS.CLIENT_X_AI]).toBe("true");
+
+		expect(models).not.toBeNull();
+		expect(models?.length).toBe(1);
+		expect(models?.[0].id).toBe("claude-3-7-sonnet");
+	});
+
+	it("returns null on token mint HTTP error without returning stale fallback", async () => {
+		const mockFetcher: FetchImpl = async input => {
+			const url = String(input);
+			if (url.includes("/client/llm_tokens")) {
+				return new Response(JSON.stringify({ error: "Unauthorized master token" }), { status: 401 });
+			}
+			return new Response("Not Found", { status: 404 });
+		};
+
+		const models = await fetchZedModels({
+			token: "12345 invalid_master_token",
+			fetcher: mockFetcher,
+		});
+
+		expect(models).toBeNull();
+	});
+
+	it("returns null on token mint network error without returning stale fallback", async () => {
+		const mockFetcher: FetchImpl = async input => {
+			const url = String(input);
+			if (url.includes("/client/llm_tokens")) {
+				throw new Error("Network connection refused");
+			}
+			return new Response("Not Found", { status: 404 });
+		};
+
+		const models = await fetchZedModels({
+			token: "12345 master_token",
+			fetcher: mockFetcher,
+		});
+
+		expect(models).toBeNull();
+	});
+
+	it("returns null on invalid token mint JSON response without returning stale fallback", async () => {
+		const mockFetcher: FetchImpl = async input => {
+			const url = String(input);
+			if (url.includes("/client/llm_tokens")) {
+				return new Response(JSON.stringify({ unexpected_shape: true }), { status: 200 });
+			}
+			return new Response("Not Found", { status: 404 });
+		};
+
+		const models = await fetchZedModels({
+			token: "12345 master_token",
+			fetcher: mockFetcher,
+		});
+
+		expect(models).toBeNull();
+	});
+
+	it("returns null on models endpoint HTTP error without returning stale fallback", async () => {
+		const mockFetcher: FetchImpl = async input => {
+			const url = String(input);
+			if (url.includes("/client/llm_tokens")) {
+				return new Response(JSON.stringify({ token: "test_token" }), { status: 200 });
+			}
+			if (url.includes("/models")) {
+				return new Response("Payment Required", { status: 402 });
+			}
+			return new Response("Not Found", { status: 404 });
+		};
+
+		const models = await fetchZedModels({
+			token: "12345 master_token",
+			fetcher: mockFetcher,
+		});
+
+		expect(models).toBeNull();
+	});
+
+	it("returns null on models endpoint network error without returning stale fallback", async () => {
+		const mockFetcher: FetchImpl = async input => {
+			const url = String(input);
+			if (url.includes("/client/llm_tokens")) {
+				return new Response(JSON.stringify({ token: "test_token" }), { status: 200 });
+			}
+			if (url.includes("/models")) {
+				throw new Error("Socket hung up");
+			}
+			return new Response("Not Found", { status: 404 });
+		};
+
+		const models = await fetchZedModels({
+			token: "12345 master_token",
+			fetcher: mockFetcher,
+		});
+
+		expect(models).toBeNull();
+	});
+
+	it("returns null on models endpoint schema mismatch without returning stale fallback", async () => {
+		const mockFetcher: FetchImpl = async input => {
+			const url = String(input);
+			if (url.includes("/client/llm_tokens")) {
+				return new Response(JSON.stringify({ token: "test_token" }), { status: 200 });
+			}
+			if (url.includes("/models")) {
+				return new Response(JSON.stringify({ unexpected_data: "no models key" }), { status: 200 });
+			}
+			return new Response("Not Found", { status: 404 });
+		};
+
+		const models = await fetchZedModels({
+			token: "12345 master_token",
+			fetcher: mockFetcher,
+		});
+
+		expect(models).toBeNull();
+	});
+
+	it("returns empty array for valid empty live model catalog", async () => {
+		const mockFetcher: FetchImpl = async input => {
+			const url = String(input);
+			if (url.includes("/client/llm_tokens")) {
+				return new Response(JSON.stringify({ token: "test_token" }), { status: 200 });
+			}
+			if (url.includes("/models")) {
+				return new Response(JSON.stringify({ models: [] }), {
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				});
+			}
+			return new Response("Not Found", { status: 404 });
+		};
+
+		const models = await fetchZedModels({
+			token: "12345 master_token",
+			fetcher: mockFetcher,
+		});
+
+		expect(models).not.toBeNull();
+		expect(models).toEqual([]);
+	});
+
+	it("filters out disabled models", async () => {
+		const mockFetcher: FetchImpl = async input => {
+			const url = String(input);
+			if (url.includes("/client/llm_tokens")) {
+				return new Response(JSON.stringify({ token: "test_token" }), { status: 200 });
+			}
+			if (url.includes("/models")) {
+				return new Response(
+					JSON.stringify({
+						models: [
+							{
+								provider: "anthropic",
+								id: "claude-active",
+								display_name: "Active Claude",
+								is_disabled: false,
+							},
+							{
+								provider: "openai",
+								id: "gpt-disabled",
+								display_name: "Disabled GPT",
+								is_disabled: true,
+								disabled_reason: "Quota exceeded",
+							},
+						],
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}
+			return new Response("Not Found", { status: 404 });
+		};
+
+		const models = await fetchZedModels({
+			token: "12345 master_token",
+			fetcher: mockFetcher,
+		});
+
+		expect(models).not.toBeNull();
+		expect(models?.length).toBe(1);
+		expect(models?.[0].id).toBe("claude-active");
+	});
+
+	it("times out a stalled token mint and retries on the next discovery attempt", async () => {
+		vi.useFakeTimers();
+		const pendingMint = Promise.withResolvers<Response>();
+		let mintAttempts = 0;
+		let modelRequests = 0;
+		const fetcher: FetchImpl = async (input, init) => {
+			const url = String(input);
+			if (url.endsWith("/client/llm_tokens")) {
+				mintAttempts++;
+				if (mintAttempts === 1) {
+					const signal = init?.signal;
+					signal?.addEventListener(
+						"abort",
+						() => pendingMint.reject(signal.reason ?? new Error("token mint aborted")),
+						{ once: true },
+					);
+					return pendingMint.promise;
+				}
+				return new Response(JSON.stringify({ token: "retry-llm-token" }), {
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				});
+			}
+			if (url.endsWith("/models")) {
+				modelRequests++;
+				expect(new Headers(init?.headers).get("authorization")).toBe("Bearer retry-llm-token");
+				return new Response(JSON.stringify({ models: [{ provider: "anthropic", id: "claude-after-timeout" }] }), {
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				});
+			}
+			return new Response("Not Found", { status: 404 });
+		};
+
+		try {
+			const firstAttempt = fetchZedModels({
+				token: "12345 master_token",
+				fetcher,
+			});
+			await Promise.resolve();
+			expect(mintAttempts).toBe(1);
+
+			vi.advanceTimersByTime(10_000);
+			const firstResult = await resolveAfterMicrotasks(
+				firstAttempt,
+				"Zed discovery token mint did not settle after its timeout",
+			);
+			expect(firstResult).toBeNull();
+			expect(modelRequests).toBe(0);
+
+			const retryResult = await fetchZedModels({
+				token: "12345 master_token",
+				fetcher,
+			});
+			expect(retryResult?.map(model => model.id)).toEqual(["claude-after-timeout"]);
+			expect(mintAttempts).toBe(2);
+			expect(modelRequests).toBe(1);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("times out a stalled models request and retries on the next discovery attempt", async () => {
+		vi.useFakeTimers();
+		const pendingModels = Promise.withResolvers<Response>();
+		let modelsAttempts = 0;
+		const fetcher: FetchImpl = async (input, init) => {
+			const url = String(input);
+			if (url.endsWith("/models")) {
+				modelsAttempts++;
+				if (modelsAttempts === 1) {
+					const signal = init?.signal;
+					signal?.addEventListener(
+						"abort",
+						() => pendingModels.reject(signal.reason ?? new Error("models request aborted")),
+						{ once: true },
+					);
+					return pendingModels.promise;
+				}
+				return new Response(
+					JSON.stringify({ models: [{ provider: "anthropic", id: "claude-after-model-timeout" }] }),
+					{
+						status: 200,
+						headers: { "Content-Type": "application/json" },
+					},
+				);
+			}
+			return new Response("Not Found", { status: 404 });
+		};
+
+		try {
+			const firstAttempt = fetchZedModels({
+				token: "direct_pre_minted_llm_token",
+				fetcher,
+			});
+			await Promise.resolve();
+			expect(modelsAttempts).toBe(1);
+
+			vi.advanceTimersByTime(10_000);
+			const firstResult = await resolveAfterMicrotasks(
+				firstAttempt,
+				"Zed discovery models request did not settle after its timeout",
+			);
+			expect(firstResult).toBeNull();
+
+			const retryResult = await fetchZedModels({
+				token: "direct_pre_minted_llm_token",
+				fetcher,
+			});
+			expect(retryResult?.map(model => model.id)).toEqual(["claude-after-model-timeout"]);
+			expect(modelsAttempts).toBe(2);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("resolves ZedCompat provider and applies KDL cost-patch rules via buildModel", () => {
+		const sonnetSpec: ModelSpec<"zed-agent"> = {
+			id: "claude-sonnet-5",
+			name: "Claude Sonnet 5",
+			api: "zed-agent",
+			provider: "zed-agent",
+			baseUrl: ZED_CLOUD_URL,
+			reasoning: true,
+			input: ["text", "image"],
+			contextWindow: 1_000_000,
+			maxTokens: 64_000,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			compat: { provider: "anthropic" },
+		};
+
+		const sonnetPolicy = resolveModelPolicy(sonnetSpec);
+		expect(sonnetPolicy.compat.provider).toBe("anthropic");
+		expect(sonnetPolicy.compat.multimodalFunctionResponse).toBe(false);
+
+		const sonnetModel = buildModel(sonnetSpec);
+		expect(sonnetModel.compat.provider).toBe("anthropic");
+		expect(sonnetModel.compat.multimodalFunctionResponse).toBe(false);
+		expect(sonnetModel.thinking?.mode).toBe("anthropic-adaptive");
+		expect(sonnetModel.cost).toEqual({
+			input: 2.2,
+			output: 11.0,
+			cacheRead: 0.22,
+			cacheWrite: 2.75,
+		});
+
+		const sonnet45Spec: ModelSpec<"zed-agent"> = {
+			id: "claude-sonnet-4-5",
+			name: "Claude Sonnet 4.5",
+			api: "zed-agent",
+			provider: "zed-agent",
+			baseUrl: ZED_CLOUD_URL,
+			reasoning: true,
+			input: ["text", "image"],
+			contextWindow: 200_000,
+			maxTokens: 8_192,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		};
+		const sonnet45Model = buildModel(sonnet45Spec);
+		expect(sonnet45Model.thinking?.mode).toBe("budget");
+		// Fallback without explicit compat.provider resolves from taxonomy identity.class
+		const gptSpec: ModelSpec<"zed-agent"> = {
+			id: "gpt-5.6-sol",
+			name: "GPT-5.6 Sol",
+			api: "zed-agent",
+			provider: "zed-agent",
+			baseUrl: ZED_CLOUD_URL,
+			reasoning: true,
+			input: ["text", "image"],
+			contextWindow: 1_000_000,
+			maxTokens: 16_384,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		};
+
+		const gptPolicy = resolveModelPolicy(gptSpec);
+		expect(gptPolicy.compat.provider).toBe("open_ai");
+
+		const gptModel = buildModel(gptSpec);
+		expect(gptModel.compat.provider).toBe("open_ai");
+		expect(gptModel.cost).toEqual({
+			input: 5.5,
+			output: 33.0,
+			cacheRead: 0.55,
+			cacheWrite: 6.875,
+		});
+
+		const grokSpec: ModelSpec<"zed-agent"> = {
+			id: "grok-4.20",
+			name: "Grok 4.20",
+			api: "zed-agent",
+			provider: "zed-agent",
+			baseUrl: ZED_CLOUD_URL,
+			reasoning: false,
+			input: ["text"],
+			contextWindow: 256_000,
+			maxTokens: 8_192,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		};
+
+		const grokPolicy = resolveModelPolicy(grokSpec);
+		expect(grokPolicy.compat.provider).toBe("x_ai");
+
+		const grokModel = buildModel(grokSpec);
+		expect(grokModel.compat.provider).toBe("x_ai");
+		expect(grokModel.cost).toEqual({
+			input: 2.2,
+			output: 11.0,
+			cacheRead: 0.55,
+			cacheWrite: 2.75,
+		});
+
+		const geminiSpec: ModelSpec<"zed-agent"> = {
+			id: "gemini-3-flash",
+			name: "Gemini 3 Flash",
+			api: "zed-agent",
+			provider: "zed-agent",
+			baseUrl: ZED_CLOUD_URL,
+			reasoning: true,
+			input: ["text", "image"],
+			contextWindow: 1_000_000,
+			maxTokens: 8_192,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		};
+
+		const geminiPolicy = resolveModelPolicy(geminiSpec);
+		expect(geminiPolicy.compat.provider).toBe("google");
+		expect(geminiPolicy.compat.multimodalFunctionResponse).toBe(true);
+
+		const geminiModel = buildModel(geminiSpec);
+		expect(geminiModel.compat.provider).toBe("google");
+		expect(geminiModel.compat.multimodalFunctionResponse).toBe(true);
+		expect(geminiModel.cost).toEqual({
+			input: 0.55,
+			output: 3.3,
+			cacheRead: 0.1375,
+			cacheWrite: 0.6875,
+		});
+
+		// Explicit compat override takes precedence
+		const geminiExplicitFalse: ModelSpec<"zed-agent"> = {
+			...geminiSpec,
+			compat: { multimodalFunctionResponse: false },
+		};
+		expect(resolveModelPolicy(geminiExplicitFalse).compat.multimodalFunctionResponse).toBe(false);
+
+		// Thinking mode resolution derived from catalog policy
+
+		const sonnet46Spec: ModelSpec<"zed-agent"> = {
+			...sonnet45Spec,
+			id: "claude-sonnet-4-6",
+			name: "Claude Sonnet 4.6",
+		};
+		expect(buildModel(sonnet46Spec).thinking?.mode).toBe("anthropic-adaptive");
+
+		const sonnet5Spec: ModelSpec<"zed-agent"> = {
+			...sonnet45Spec,
+			id: "claude-sonnet-5",
+			name: "Claude Sonnet 5",
+		};
+		const sonnet5Model = buildModel(sonnet5Spec);
+		expect(sonnet5Model.thinking?.mode).toBe("anthropic-adaptive");
+		expect(sonnet5Model.thinking?.supportsDisplay).toBe(true);
+	});
+});

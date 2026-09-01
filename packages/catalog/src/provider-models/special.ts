@@ -4,6 +4,7 @@ import { apiRouteFor } from "../compat/behavior";
 import { type CodexModelDiscoveryResult, fetchCodexModels } from "../discovery/codex";
 import type { DevinModelDiscoveryOptions } from "../discovery/devin";
 import { buildGitLabDuoWorkflowFallbackModel, fetchGitLabDuoWorkflowModels } from "../discovery/gitlab-duo-workflow";
+import { fetchZedModels } from "../discovery/zed";
 import type { ModelManagerOptions } from "../model-manager";
 import { getBundledModel } from "../models";
 import type { Api, FetchImpl, Model, ModelSpec } from "../types";
@@ -391,4 +392,25 @@ export interface ZaiModelManagerConfig {}
 
 export function zaiModelManagerOptions(_config: ZaiModelManagerConfig = {}): ModelManagerOptions<"anthropic-messages"> {
 	return { providerId: "zai" };
+}
+
+// ---------------------------------------------------------------------------
+// Zed Agent
+// ---------------------------------------------------------------------------
+
+export interface ZedModelManagerConfig {
+	apiKey?: string;
+	fetch?: FetchImpl;
+}
+
+export function zedModelManagerOptions(config: ZedModelManagerConfig = {}): ModelManagerOptions<"zed-agent"> {
+	const { apiKey, fetch } = config;
+	return {
+		providerId: "zed-agent",
+		cacheProviderId: resolveModelCacheProviderId("zed-agent", { apiKey }),
+		dynamicModelsAuthoritative: true,
+		fetchDynamicModels: async () => {
+			return fetchZedModels({ token: apiKey, fetcher: fetch });
+		},
+	};
 }

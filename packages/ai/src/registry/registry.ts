@@ -76,6 +76,7 @@ import { xiaomiTokenPlanCnProvider } from "./xiaomi-token-plan-cn";
 import { xiaomiTokenPlanSgpProvider } from "./xiaomi-token-plan-sgp";
 import { yoloAutoProvider } from "./yolo-auto";
 import { zaiCodingPlanProvider, zaiProvider } from "./zai";
+import { zedProvider } from "./zed";
 import { zenmuxProvider } from "./zenmux";
 import { zhipuCodingPlanProvider } from "./zhipu-coding-plan";
 
@@ -97,6 +98,7 @@ const ALL = [
 	githubCopilotProvider,
 	cursorProvider,
 	devinProvider,
+	zedProvider,
 	googleAntigravityProvider,
 	googleGeminiCliProvider,
 	openaiCodexDeviceProvider,

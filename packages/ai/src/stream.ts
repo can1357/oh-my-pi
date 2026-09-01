@@ -58,8 +58,10 @@ import {
 	streamOpenAICodexResponses,
 	streamOpenAICompletions,
 	streamOpenAIResponses,
+	streamZed,
 } from "./providers/register-builtins";
 import { isSyntheticModel, streamSynthetic } from "./providers/synthetic";
+import type { ZedOptions } from "./providers/zed";
 import { getProviderDefinition, PROVIDER_REGISTRY } from "./registry";
 import type {
 	Api,
@@ -1038,6 +1040,8 @@ function streamDispatch<TApi extends Api>(
 
 		case "devin-agent":
 			return streamDevin(providerModel as Model<"devin-agent">, context, providerOptions as DevinOptions);
+		case "zed-agent":
+			return streamZed(providerModel as Model<"zed-agent">, context, providerOptions as ZedOptions);
 
 		default:
 			throw new AIError.ConfigurationError(`Unhandled API: ${api}`);
@@ -1887,9 +1891,7 @@ function resolveGoogleThinkingOff<TApi extends Api>(model: Model<TApi>): NonNull
 	}
 	return thinking;
 }
-
 const castApi = <TApi extends Api>(api: OptionsForApi<TApi>): OptionsForApi<Api> => api as OptionsForApi<Api>;
-
 /**
  * Mandatory-reasoning endpoints (`thinking.requiresEffort`) reject disabled
  * or omitted thinking ("Reasoning is mandatory for this endpoint and cannot
@@ -1966,7 +1968,9 @@ function mapOptionsForApi<TApi extends Api>(
 		minP: options?.minP,
 		presencePenalty: options?.presencePenalty,
 		repetitionPenalty: options?.repetitionPenalty,
+		stopSequences: options?.stopSequences,
 		maxTokens: options?.maxTokens ?? model.maxTokens ?? undefined,
+		toolChoice: options?.toolChoice,
 		signal: options?.signal,
 		apiKey: apiKey ?? (typeof options?.apiKey === "string" ? options.apiKey : undefined),
 		cacheRetention: options?.cacheRetention,
@@ -2399,6 +2403,18 @@ function mapOptionsForApi<TApi extends Api>(
 			return castApi<"devin-agent">({
 				...base,
 				chatModelUid: resolveWireModelId(devinModel, effort),
+			});
+		}
+		case "zed-agent": {
+			const zedModel = model as Model<"zed-agent">;
+			const effort =
+				options?.reasoning && !options.disableReasoning && !options.forceReasoningOff && zedModel.reasoning
+					? requireSupportedEffort(zedModel, options.reasoning)
+					: undefined;
+			return castApi<"zed-agent">({
+				...base,
+				reasoning: effort,
+				disableReasoning: options?.disableReasoning || options?.forceReasoningOff,
 			});
 		}
 		default:

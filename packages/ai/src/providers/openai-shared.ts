@@ -2103,7 +2103,7 @@ export function buildResponsesInput<TApi extends Api>(options: BuildResponsesInp
 
 type ResponsesReplayAssistantMessage = Omit<ResponseOutputMessage, "id"> & { id?: string };
 
-function parseResponseReasoningReplayItem(signature: string | undefined): ResponseReasoningItem | undefined {
+export function parseResponseReasoningReplayItem(signature: string | undefined): ResponseReasoningItem | undefined {
 	if (!signature) return undefined;
 	try {
 		const parsed = JSON.parse(signature) as unknown;

@@ -219,12 +219,12 @@ export abstract class OAuthCallbackFlow {
 					: "Waiting for browser authentication...",
 			);
 
-			const { code } = await this.#waitForCallback(state);
+			const { code, state: callbackState } = await this.#waitForCallback(state);
 			this.#throwIfCancelled();
 
 			this.ctrl.onProgress?.("Exchanging authorization code for tokens...");
 
-			return await this.exchangeToken(code, state, redirectUri);
+			return await this.exchangeToken(code, callbackState, redirectUri);
 		} finally {
 			this.#pendingAuthUrl = undefined;
 			server?.stop();
@@ -407,6 +407,49 @@ export abstract class OAuthCallbackFlow {
 			fetch: req => this.#handleCallback(req, expectedState),
 		});
 	}
+	/**
+	 * Parse provider-specific callback query parameters into a {@link CallbackResult}.
+	 *
+	 * Subclasses can override this to support non-standard callback parameters
+	 * (such as Zed's encrypted `user_id` and `access_token` query params).
+	 *
+	 * Returning `null` signals that the request payload is malformed or
+	 * invalid and should return an HTTP 500 error page without settling or
+	 * aborting the active login flow.
+	 */
+	protected parseCallbackParams(
+		url: URL,
+		expectedState: string,
+	): { ok: true; result: CallbackResult } | { ok: false; error: string } | null {
+		const error = url.searchParams.get("error") || "";
+		const errorDescription = url.searchParams.get("error_description") || error;
+		if (error) {
+			return { ok: false, error: `Authorization failed: ${errorDescription}` };
+		}
+		const code = url.searchParams.get("code");
+		if (!code) {
+			return { ok: false, error: "Missing authorization code" };
+		}
+		const state = url.searchParams.get("state") || "";
+		if (expectedState && state !== expectedState) {
+			return { ok: false, error: "State mismatch - possible CSRF attack" };
+		}
+		return { ok: true, result: { code, state } };
+	}
+
+	/**
+	 * Parse a manually pasted authorization code or redirect input.
+	 *
+	 * Subclasses can override this for provider-specific manual formats while
+	 * retaining the generic raw-code, redirect, and state-validation behavior.
+	 * A `null` result keeps the prompt loop active without settling the login.
+	 */
+	protected parseManualCallbackInput(input: string, expectedState: string): CallbackResult | null {
+		const parsed = parseCallbackInput(input);
+		if (!parsed.code) return null;
+		if (expectedState && parsed.state && parsed.state !== expectedState) return null;
+		return { code: parsed.code, state: parsed.state ?? expectedState };
+	}
 
 	/**
 	 * Handle OAuth callback HTTP request. Two routes on the same loopback server:
@@ -434,23 +477,21 @@ export abstract class OAuthCallbackFlow {
 			return new Response("Not Found", { status: 404 });
 		}
 
-		const code = url.searchParams.get("code");
-		const state = url.searchParams.get("state") || "";
+		const parsed = this.parseCallbackParams(url, expectedState);
 		const error = url.searchParams.get("error") || "";
 		const errorDescription = url.searchParams.get("error_description") || error;
+		const state = url.searchParams.get("state") || "";
 
 		type OkState = { ok: true; code: string; state: string };
 		type ErrorState = { ok?: false; error?: string };
 		let resultState: OkState | ErrorState;
 
-		if (error) {
-			resultState = { ok: false, error: `Authorization failed: ${errorDescription}` };
-		} else if (!code) {
-			resultState = { ok: false, error: "Missing authorization code" };
-		} else if (expectedState && state !== expectedState) {
-			resultState = { ok: false, error: "State mismatch - possible CSRF attack" };
+		if (!parsed) {
+			resultState = { ok: false, error: "Invalid callback request" };
+		} else if (parsed.ok) {
+			resultState = { ok: true, code: parsed.result.code, state: parsed.result.state };
 		} else {
-			resultState = { ok: true, code, state };
+			resultState = { ok: false, error: parsed.error };
 		}
 
 		if (resultState.ok) {
@@ -458,7 +499,7 @@ export abstract class OAuthCallbackFlow {
 			queueMicrotask(() => {
 				resolve?.({ code: resultState.code, state: resultState.state });
 			});
-		} else if (error && (!expectedState || state === expectedState)) {
+		} else if (parsed && !parsed.ok && error && (!expectedState || state === expectedState)) {
 			// The redirect carries our state nonce, so it came from the genuine
 			// authorization flow (e.g. the user denied the consent screen).
 			// Surface the denial now instead of leaving the login waiting for
@@ -507,12 +548,7 @@ export abstract class OAuthCallbackFlow {
 					const result = await Promise.race([
 						callbackPromise,
 						requestManualInput()
-							.then((input): CallbackResult | null => {
-								const parsed = parseCallbackInput(input);
-								if (!parsed.code) return null;
-								if (expectedState && parsed.state && parsed.state !== expectedState) return null;
-								return { code: parsed.code, state: parsed.state ?? "" };
-							})
+							.then((input): CallbackResult | null => this.parseManualCallbackInput(input, expectedState))
 							.catch((): CallbackResult | null => null),
 					]);
 					if (result) return result;

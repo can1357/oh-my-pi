@@ -43,6 +43,7 @@ import type { OllamaChatOptions } from "./ollama";
 import type { OpenAICodexResponsesOptions } from "./openai-codex-responses";
 import type { OpenAICompletionsOptions } from "./openai-completions";
 import type { OpenAIResponsesOptions } from "./openai-responses";
+import { streamZed as streamZedProvider } from "./zed";
 
 // ---------------------------------------------------------------------------
 // Lazy provider module shape
@@ -458,6 +459,10 @@ function loadDevinProviderModule(): Promise<LazyProviderModule<"devin-agent">> {
 	return devinProviderModulePromise;
 }
 
+function loadZedProviderModule(): Promise<LazyProviderModule<"zed-agent">> {
+	return Promise.resolve({ stream: streamZedProvider });
+}
+
 function loadBedrockProviderModule(): Promise<LazyProviderModule<"bedrock-converse-stream">> {
 	if (bedrockProviderModuleOverride) {
 		return Promise.resolve(bedrockProviderModuleOverride);
@@ -503,5 +508,6 @@ export const streamOpenAIResponses = createLazyStream(
 export const streamCursor = createLazyStream(loadCursorProviderModule);
 export const streamDevin = createLazyStream(loadDevinProviderModule);
 export const streamOllama = createLazyStream(loadOllamaProviderModule, OPENAI_IDLE_FLOORED_LAZY_STREAM_LIMITS);
+export const streamZed = createLazyStream(loadZedProviderModule);
 
 export const streamBedrock = createLazyStream(loadBedrockProviderModule);

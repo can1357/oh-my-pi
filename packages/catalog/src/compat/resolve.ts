@@ -29,6 +29,7 @@ import type {
 	ResolvedOpenAICompat,
 	ResolvedOpenAIResponsesCompat,
 	ResolvedOpenAISharedCompat,
+	ResolvedZedCompat,
 	ThinkingConfig,
 } from "../types";
 import { isAnthropicSigningProxyUrl, isAzureAnthropicRoute, isOfficialAnthropicApiUrl } from "./anthropic";
@@ -90,6 +91,11 @@ class IdentityFacts {
 		if (this.family("sonnet", "fable", "mythos")) return this.revGte("5");
 		return false;
 	}
+}
+
+/** Whether the Anthropic adapter accepts sampling parameters for this identity. */
+export function supportsAnthropicSampling(identity: ModelIdentity): boolean {
+	return !new IdentityFacts(identity).anthropicAdaptiveGenAtLeast("4.7");
 }
 
 function resolveIdentity<TApi extends Api>(spec: ModelSpec<TApi>): ModelIdentity {
@@ -848,7 +854,7 @@ function resolveAnthropicPolicy(
 		supportsLongCacheRetention: official,
 		supportsMidConversationSystem: official && facts.anthropicAdaptiveGenAtLeast("4.8"),
 		supportsForcedToolChoice: !requiresThinkingEnabled && !facts.family("fable", "mythos"),
-		supportsSamplingParams: !facts.anthropicAdaptiveGenAtLeast("4.7"),
+		supportsSamplingParams: supportsAnthropicSampling(facts.identity),
 		requiresToolResultId: false,
 		requiresThinkingEnabled,
 		replayUnsignedThinking: !signingEndpoint && (Boolean(spec.reasoning) || modelMatchesHost(spec, "deepseekFamily")),
@@ -890,6 +896,25 @@ function resolveDevinPolicy(spec: ModelSpec<"devin-agent">, axes: ResolvedAxes):
 	applyWireAxes(compat, axes.wire, "devin-agent");
 	applyCompatOverrides(compat, spec.compat);
 	return compat;
+}
+
+function resolveZedPolicy(spec: ModelSpec<"zed-agent">, facts: IdentityFacts): ResolvedZedCompat {
+	let provider = spec.compat?.provider;
+	if (!provider) {
+		if (facts.is("anthropic")) {
+			provider = "anthropic";
+		} else if (facts.is("gemini") || facts.is("google")) {
+			provider = "google";
+		} else if (facts.is("xai") || facts.is("x_ai")) {
+			provider = "x_ai";
+		} else {
+			provider = "open_ai";
+		}
+	}
+	return {
+		provider,
+		multimodalFunctionResponse: spec.compat?.multimodalFunctionResponse ?? (facts.is("gemini") && facts.revGte("3")),
+	};
 }
 
 function resolveGooglePolicy(
@@ -960,6 +985,13 @@ function defaultThinkingMode<TApi extends Api>(spec: ModelSpec<TApi>, facts: Ide
 			}
 			if (facts.is("openai")) return "effort";
 			return "budget";
+		case "zed-agent":
+			if (facts.is("anthropic")) {
+				if (facts.revGte("4.6") && !facts.family("haiku")) return "anthropic-adaptive";
+				return "budget";
+			}
+			if (facts.is("gemini")) return facts.revMajor() === 3 ? "google-level" : "budget";
+			return "effort";
 		default:
 			return "effort";
 	}
@@ -1099,7 +1131,7 @@ function resolveThinkingPolicy<TApi extends Api>(
  */
 function defaultSupportsDisplay<TApi extends Api>(spec: ModelSpec<TApi>, facts: IdentityFacts): boolean {
 	return (
-		(spec.api === "anthropic-messages" || spec.api === "bedrock-converse-stream") &&
+		(spec.api === "anthropic-messages" || spec.api === "bedrock-converse-stream" || spec.api === "zed-agent") &&
 		facts.anthropicAdaptiveGenAtLeast("4.7")
 	);
 }
@@ -1201,6 +1233,8 @@ export function resolveModelPolicy(spec: ModelSpec<Api>): ResolvedModelPolicy<Ap
 		compat = resolveBedrockPolicy(spec, axes);
 	} else if (specUsesApi(spec, "devin-agent")) {
 		compat = resolveDevinPolicy(spec, axes);
+	} else if (specUsesApi(spec, "zed-agent")) {
+		compat = resolveZedPolicy(spec, facts);
 	} else if (
 		specUsesApi(spec, "google-generative-ai") ||
 		specUsesApi(spec, "google-vertex") ||
