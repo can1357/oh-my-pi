@@ -36,6 +36,13 @@ describe("classifyModel", () => {
 	test("gpt-oss outranks the gpt- prefix", () => {
 		expect(classifyModel("openai", "gpt-oss-120b").class).toBe("gpt-oss");
 	});
+	test("zai- vendor-prefixed bare ids classify as glm", () => {
+		// Bounded matchers are prefix-anchored, so `bounded "glm"` never sees
+		// `zai-glm-*`; losing the class drops the glm tokenizer and <think>
+		// replay dialect on hosts like mistral (regression: pre-KDL parity sweep).
+		expect(classifyModel("mistral", "zai-glm-5-2")).toEqual({ class: "glm", revision: "5.2.0" });
+		expect(classifyModel("cerebras", "zai-glm-4.7")).toEqual({ class: "glm", revision: "4.7.0" });
+	});
 
 	test("-thinking suffix collapses to the logical id", () => {
 		expect(classifyModel("vercel-ai-gateway", "glm-4.6-thinking")).toMatchObject({

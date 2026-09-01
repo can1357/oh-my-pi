@@ -161,7 +161,7 @@ export async function validateApiKeyAgainstModelsEndpoint(options: ModelListVali
 	const response = await fetchImpl(options.modelsUrl, {
 		method: "GET",
 		headers: {
-			...(resolveValidationHeaders(options.headers) ?? {}),
+			...resolveValidationHeaders(options.headers),
 			Authorization: `Bearer ${options.apiKey}`,
 		},
 		signal,

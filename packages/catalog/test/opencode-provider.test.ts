@@ -3,6 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { resolveModelPolicy } from "@oh-my-pi/pi-catalog/compat/resolve";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { readModelCache, writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { resolveProviderModels } from "@oh-my-pi/pi-catalog/model-manager";
@@ -18,6 +19,7 @@ import {
 } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import type { ModelSpec } from "@oh-my-pi/pi-catalog/types";
 import type { FetchImpl } from "@oh-my-pi/pi-utils";
+import { mergePreviousSnapshotModels } from "../scripts/generate-models";
 
 const LIVE_FREE_MODEL_IDS = [
 	"deepseek-v4-flash-free",
@@ -788,5 +790,70 @@ describe("OpenCode provider discovery", () => {
 		} finally {
 			await fs.rm(tempDir, { recursive: true, force: true });
 		}
+	});
+	test("resolves the OpenCode Go long-usage fallback policy from KDL", () => {
+		const policy = resolveModelPolicy({
+			id: "deepseek-v4-flash",
+			name: "DeepSeek V4 Flash",
+			api: "openai-completions",
+			provider: "opencode-go",
+			baseUrl: "https://opencode.ai/zen/v1",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 128_000,
+			maxTokens: 16_384,
+		});
+
+		expect(policy.catalog).toMatchObject({ longUsageLimitFallback: true });
+	});
+});
+
+describe("issue #10416 — retired bare opencode provider", () => {
+	// #309 split `opencode` into `opencode-go` / `opencode-zen`, and models.dev's
+	// `opencode` key is remapped to `opencode-zen`. The legacy `opencode` rows
+	// survived as previous-snapshot zombies and surfaced in the picker as a dead
+	// provider with no descriptor/auth path.
+	test("prunes bare `opencode` rows while restoring live previous-snapshot providers", () => {
+		const staleModel = buildModel({
+			id: "legacy-opencode-model",
+			name: "Legacy OpenCode Model",
+			api: "openai-completions",
+			provider: "opencode",
+			baseUrl: "https://legacy.invalid/v1",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 128_000,
+			maxTokens: 16_384,
+		});
+		const liveModel = buildModel({
+			id: "live-fallback-model",
+			name: "Live Fallback Model",
+			api: "openai-completions",
+			provider: "fixture-provider",
+			baseUrl: "https://fixture.invalid/v1",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 128_000,
+			maxTokens: 16_384,
+		});
+
+		const merged = mergePreviousSnapshotModels(
+			[],
+			{
+				opencode: { [staleModel.id]: staleModel },
+				"fixture-provider": { [liveModel.id]: liveModel },
+			},
+			new Set(),
+		);
+
+		expect(merged.map(model => `${model.provider}/${model.id}`)).toEqual(["fixture-provider/live-fallback-model"]);
+	});
+
+	test("the split OpenCode providers remain populated", () => {
+		expect(getBundledModels("opencode-go").length).toBeGreaterThan(0);
+		expect(getBundledModels("opencode-zen").length).toBeGreaterThan(0);
 	});
 });

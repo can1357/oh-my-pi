@@ -33,6 +33,41 @@ describe("compat compiler grammar", () => {
 			compileCascade([{ file: "classes/test.kdl", text: 'class "openai" {\n\tthinking-format "sideways"\n}' }]),
 		).toThrow(/rejects value `sideways`/);
 	});
+	test("camelCase object-payload keys are rejected; kebab-case compiles to resolved keys", () => {
+		expect(() =>
+			compileCascade([
+				{
+					file: "providers/test.kdl",
+					text: 'provider "opencode-go" {\n\twhen-thinking {\n\t\treasoningContentField "reasoning_content"\n\t}\n}',
+				},
+			]),
+		).toThrow(/providers\/test\.kdl:3.*`reasoningContentField` must be kebab-case/);
+
+		const compiled = compileCascade([
+			{
+				file: "providers/test.kdl",
+				text: [
+					'provider "opencode-go" {',
+					"\twhen-thinking {",
+					// Axis spelling maps through AXES (directive != mechanical camel)...
+					"\t\ttemplate-reasoning-effort #true",
+					// ...non-axis names convert mechanically...
+					'\t\treasoning-content-field "reasoning_content"',
+					// ...and extra-body subtrees keep literal wire keys.
+					"\t\textra-body {",
+					"\t\t\tenable_thinking #true",
+					"\t\t}",
+					"\t}",
+					"}",
+				].join("\n"),
+			},
+		]);
+		expect(compiled.rules[0]?.wire?.whenThinking).toEqual({
+			qwenTemplateReasoningEffort: true,
+			reasoningContentField: "reasoning_content",
+			extraBody: { enable_thinking: true },
+		});
+	});
 
 	test("exclude-models rejects a duplicate provider property", () => {
 		expect(() =>

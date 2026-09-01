@@ -64,6 +64,7 @@ function makeSession(cwd: string, screenshotDir?: string): ToolSession {
 }
 
 async function drainAllTabs(): Promise<void> {
+	// oxlint-disable-next-line unicorn/no-useless-spread -- releasing tabs mutates the map
 	for (const name of [...getTabsMapForTest().keys()]) {
 		await releaseTab(name, { kill: false }).catch(() => undefined);
 	}

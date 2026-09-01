@@ -11,6 +11,15 @@ behavior {
 		exclude-substring "embedding"
 	}
 
+	// Retired providers: their entire roster is excluded from the generated
+	// bundle and must never be resurrected from the previous snapshot.
+	// `opencode` was split into `opencode-go` / `opencode-zen`; models.dev's
+	// `opencode` key now maps to `opencode-zen`, so fresh discovery never emits
+	// it, but its legacy rows survived as previous-snapshot zombies (no
+	// descriptor makes it authoritative to prune), surfacing a dead, un-authable
+	// `opencode` provider in the picker.
+	retired-providers "wafer-pass" "wandb" "opencode"
+
 	// Discovered Responses/Codex models receive these additional operations.
 	model-operations provider="openai" {
 		exact "o3"
@@ -80,6 +89,15 @@ behavior {
 		route "anthropic-messages" prefix="anthropic/" strip-prefix=#true
 		route "openai-completions" prefix="openai/" strip-prefix=#true
 		route "openai-completions" prefix="workers-ai/" strip-prefix=#false
+	}
+	// GitLab Duo aliases route through GitLab's provider-specific proxy
+	// transports. Upstream model-id translation remains catalog identity data.
+	// Replaces gitlab-duo.ts MODEL_MAPPINGS API-flavor fields.
+	api-routes provider="gitlab-duo" default="openai-completions" {
+		route "anthropic-messages" prefix="duo-chat-opus-" prefix="duo-chat-sonnet-" prefix="duo-chat-haiku-" \
+			prefix="claude-opus-" prefix="claude-sonnet-" prefix="claude-haiku-"
+		route "openai-responses" exact="duo-chat-gpt-5-codex" exact="duo-chat-gpt-5-2-codex" \
+			exact="gpt-5-codex" exact="gpt-5.2-codex"
 	}
 
 	// Provider-default wire model for model-less hosted search operations.

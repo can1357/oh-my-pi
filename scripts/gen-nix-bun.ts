@@ -31,6 +31,11 @@ export function normalizeLockfileVersion(contents: string): string {
 	return `${contents.slice(0, stamp.index)}${stamp[1]}1${stamp[3]}${contents.slice(stamp.index + stamp[0].length)}`;
 }
 
+/** Canonicalize generated Nix output to exactly one trailing LF. */
+export function normalizeGeneratedNix(contents: string): string {
+	return `${contents.replace(/[\r\n]+$/, "")}\n`;
+}
+
 /** Rewrite `bun.lock` in place when Bun 1.4+ stamped it lockfileVersion 2. */
 async function normalizeBunLock(): Promise<void> {
 	const lockPath = path.join(repoRoot, "bun.lock");
@@ -63,16 +68,18 @@ export async function generateNixBunDeps(generator: NixBunDepsGenerator = resolv
 	await normalizeBunLock();
 	if (generator.kind === "bun2nix") {
 		await $`${generator.executable} -l bun.lock -c ../ -o nix/bun.nix`.cwd(repoRoot);
-		return;
-	}
-	if (generator.kind === "nix") {
+	} else if (generator.kind === "nix") {
 		await $`${generator.executable} --extra-experimental-features ${"nix-command flakes"} --accept-flake-config develop --command bun2nix -l bun.lock -c ../ -o nix/bun.nix`.cwd(
 			repoRoot,
 		);
-		return;
+	} else {
+		await $`bunx ${generator.package} -l bun.lock -c ../ -o nix/bun.nix`.cwd(repoRoot);
 	}
 
-	await $`bunx ${generator.package} -l bun.lock -c ../ -o nix/bun.nix`.cwd(repoRoot);
+	const outputPath = path.join(repoRoot, "nix/bun.nix");
+	const contents = await Bun.file(outputPath).text();
+	const normalized = normalizeGeneratedNix(contents);
+	if (normalized !== contents) await Bun.write(outputPath, normalized);
 }
 
 if (import.meta.main) await generateNixBunDeps();

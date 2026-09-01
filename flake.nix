@@ -164,6 +164,7 @@
             cd source
             mv nix/bun.nix nix/bun.expected.nix
             bun2nix -l bun.lock -c ../ -o nix/bun.nix
+            sed -i -e '$a\' nix/bun.nix
             diff -u nix/bun.expected.nix nix/bun.nix
             touch "$out"
           '';

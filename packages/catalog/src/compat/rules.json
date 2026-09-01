@@ -30,6 +30,7 @@
 		"providers/baseten.kdl",
 		"providers/bedrock-mantle.kdl",
 		"providers/cerebras.kdl",
+		"providers/cline-pass.kdl",
 		"providers/cloudflare-ai-gateway.kdl",
 		"providers/coreweave.kdl",
 		"providers/cursor.kdl",
@@ -46,9 +47,12 @@
 		"providers/huggingface.kdl",
 		"providers/kilo.kdl",
 		"providers/kimi-code.kdl",
+		"providers/llama.cpp.kdl",
+		"providers/lm-studio.kdl",
 		"providers/meta.kdl",
 		"providers/minimax-code-cn.kdl",
 		"providers/minimax-code.kdl",
+		"providers/minimax.kdl",
 		"providers/mistral.kdl",
 		"providers/moonshot.kdl",
 		"providers/nanogpt.kdl",
@@ -60,7 +64,6 @@
 		"providers/openai.kdl",
 		"providers/opencode-go.kdl",
 		"providers/opencode-zen.kdl",
-		"providers/opencode.kdl",
 		"providers/openrouter.kdl",
 		"providers/qianfan.kdl",
 		"providers/sakana.kdl",
@@ -69,6 +72,7 @@
 		"providers/umans.kdl",
 		"providers/venice.kdl",
 		"providers/vercel-ai-gateway.kdl",
+		"providers/vllm.kdl",
 		"providers/wafer-serverless.kdl",
 		"providers/xai-oauth.kdl",
 		"providers/xai.kdl",
@@ -454,6 +458,10 @@
 					{
 						"kind": "bounded",
 						"token": "glm"
+					},
+					{
+						"kind": "bounded",
+						"token": "zai-glm"
 					}
 				],
 				"families": [
@@ -3428,12 +3436,11 @@
 					}
 				],
 				"thinking": {
-					"mode": "anthropic-adaptive",
-					"supportsDisplay": true
+					"mode": "anthropic-adaptive"
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:47",
+				"source": "classes/anthropic.kdl:46",
 				"class": "anthropic",
 				"providers": [
 					"amazon-bedrock",
@@ -3459,7 +3466,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:54",
+				"source": "classes/anthropic.kdl:53",
 				"class": "anthropic",
 				"providers": [
 					"amazon-bedrock",
@@ -3488,7 +3495,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:58",
+				"source": "classes/anthropic.kdl:57",
 				"class": "anthropic",
 				"providers": [
 					"amazon-bedrock",
@@ -3516,7 +3523,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:64",
+				"source": "classes/anthropic.kdl:63",
 				"class": "anthropic",
 				"providers": [
 					"amazon-bedrock",
@@ -3538,7 +3545,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:71",
+				"source": "classes/anthropic.kdl:70",
 				"class": "anthropic",
 				"providers": [
 					"anthropic",
@@ -3571,7 +3578,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:78",
+				"source": "classes/anthropic.kdl:77",
 				"class": "anthropic",
 				"providers": [
 					"anthropic",
@@ -3602,7 +3609,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:82",
+				"source": "classes/anthropic.kdl:81",
 				"class": "anthropic",
 				"providers": [
 					"anthropic",
@@ -3628,7 +3635,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:89",
+				"source": "classes/anthropic.kdl:88",
 				"class": "anthropic",
 				"providers": [
 					"anthropic"
@@ -3642,13 +3649,13 @@
 				],
 				"catalog": {
 					"costPatch": {
-						"cache-read": 0.5,
-						"cache-write": 6.25
+						"cacheRead": 0.5,
+						"cacheWrite": 6.25
 					}
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:99",
+				"source": "classes/anthropic.kdl:98",
 				"class": "anthropic",
 				"providers": [
 					"anthropic"
@@ -3658,17 +3665,17 @@
 					"costPatch": {
 						"input": 10,
 						"output": 50,
-						"cache-read": 1,
-						"cache-write": 12.5
+						"cacheRead": 1,
+						"cacheWrite": 12.5
 					},
 					"limitsPatch": {
-						"context-window": 1000000,
-						"max-tokens": 128000
+						"contextWindow": 1000000,
+						"maxTokens": 128000
 					}
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:111",
+				"source": "classes/anthropic.kdl:110",
 				"class": "anthropic",
 				"providers": [
 					"anthropic"
@@ -3678,17 +3685,17 @@
 					"costPatch": {
 						"input": 10,
 						"output": 50,
-						"cache-read": 1,
-						"cache-write": 12.5
+						"cacheRead": 1,
+						"cacheWrite": 12.5
 					},
 					"limitsPatch": {
-						"context-window": 1000000,
-						"max-tokens": 128000
+						"contextWindow": 1000000,
+						"maxTokens": 128000
 					}
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:129",
+				"source": "classes/anthropic.kdl:128",
 				"class": "anthropic",
 				"providers": [
 					"amazon-bedrock"
@@ -3711,7 +3718,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:134",
+				"source": "classes/anthropic.kdl:133",
 				"class": "anthropic",
 				"providers": [
 					"amazon-bedrock"
@@ -3731,7 +3738,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:140",
+				"source": "classes/anthropic.kdl:139",
 				"class": "anthropic",
 				"providers": [
 					"amazon-bedrock"
@@ -3750,17 +3757,17 @@
 				},
 				"catalog": {
 					"costPatch": {
-						"cache-read": 0.5,
-						"cache-write": 6.25
+						"cacheRead": 0.5,
+						"cacheWrite": 6.25
 					},
 					"limitsPatch": {
-						"context-window": 1000000,
-						"max-tokens": 128000
+						"contextWindow": 1000000,
+						"maxTokens": 128000
 					}
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:154",
+				"source": "classes/anthropic.kdl:153",
 				"class": "anthropic",
 				"providers": [
 					"amazon-bedrock"
@@ -3784,7 +3791,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:160",
+				"source": "classes/anthropic.kdl:159",
 				"class": "anthropic",
 				"providers": [
 					"amazon-bedrock"
@@ -3804,7 +3811,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:169",
+				"source": "classes/anthropic.kdl:168",
 				"class": "anthropic",
 				"providers": [
 					"amazon-bedrock"
@@ -3829,7 +3836,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:175",
+				"source": "classes/anthropic.kdl:174",
 				"class": "anthropic",
 				"providers": [
 					"amazon-bedrock"
@@ -3848,7 +3855,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:180",
+				"source": "classes/anthropic.kdl:179",
 				"class": "anthropic",
 				"providers": [
 					"amazon-bedrock"
@@ -3871,7 +3878,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:185",
+				"source": "classes/anthropic.kdl:184",
 				"class": "anthropic",
 				"providers": [
 					"amazon-bedrock"
@@ -3891,7 +3898,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:191",
+				"source": "classes/anthropic.kdl:190",
 				"class": "anthropic",
 				"providers": [
 					"amazon-bedrock"
@@ -3910,7 +3917,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:196",
+				"source": "classes/anthropic.kdl:195",
 				"class": "anthropic",
 				"providers": [
 					"amazon-bedrock"
@@ -3930,7 +3937,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:204",
+				"source": "classes/anthropic.kdl:203",
 				"class": "anthropic",
 				"providers": [
 					"amazon-bedrock"
@@ -3949,7 +3956,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:209",
+				"source": "classes/anthropic.kdl:208",
 				"class": "anthropic",
 				"providers": [
 					"amazon-bedrock"
@@ -3969,7 +3976,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:217",
+				"source": "classes/anthropic.kdl:216",
 				"class": "anthropic",
 				"providers": [
 					"amazon-bedrock"
@@ -3989,7 +3996,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:227",
+				"source": "classes/anthropic.kdl:226",
 				"class": "anthropic",
 				"family": "haiku",
 				"revision": [
@@ -4003,7 +4010,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:233",
+				"source": "classes/anthropic.kdl:232",
 				"class": "anthropic",
 				"providers": [
 					"google-antigravity",
@@ -4015,7 +4022,7 @@
 				}
 			},
 			{
-				"source": "classes/anthropic.kdl:237",
+				"source": "classes/anthropic.kdl:236",
 				"class": "anthropic",
 				"providers": [
 					"google-antigravity"
@@ -4378,7 +4385,25 @@
 				}
 			},
 			{
-				"source": "classes/gemini.kdl:8",
+				"source": "classes/gemini.kdl:9",
+				"class": "gemini",
+				"family": "pro",
+				"revision": [
+					{
+						"op": ">=",
+						"revision": "2.5.0"
+					},
+					{
+						"op": "<",
+						"revision": "3.0.0"
+					}
+				],
+				"thinking": {
+					"requiresEffort": true
+				}
+			},
+			{
+				"source": "classes/gemini.kdl:12",
 				"class": "gemini",
 				"family": "pro",
 				"revision": [
@@ -4397,7 +4422,7 @@
 				}
 			},
 			{
-				"source": "classes/gemini.kdl:11",
+				"source": "classes/gemini.kdl:15",
 				"class": "gemini",
 				"family": "pro",
 				"revision": [
@@ -4414,7 +4439,7 @@
 				}
 			},
 			{
-				"source": "classes/gemini.kdl:16",
+				"source": "classes/gemini.kdl:20",
 				"class": "gemini",
 				"family": "flash",
 				"revision": [
@@ -4433,7 +4458,7 @@
 				}
 			},
 			{
-				"source": "classes/gemini.kdl:21",
+				"source": "classes/gemini.kdl:25",
 				"class": "gemini",
 				"family": "lite",
 				"revision": [
@@ -4452,7 +4477,7 @@
 				}
 			},
 			{
-				"source": "classes/gemini.kdl:29",
+				"source": "classes/gemini.kdl:33",
 				"class": "gemini",
 				"providers": [
 					"google",
@@ -4482,7 +4507,7 @@
 				}
 			},
 			{
-				"source": "classes/gemini.kdl:41",
+				"source": "classes/gemini.kdl:45",
 				"class": "gemini",
 				"providers": [
 					"google",
@@ -4512,7 +4537,7 @@
 				}
 			},
 			{
-				"source": "classes/gemini.kdl:53",
+				"source": "classes/gemini.kdl:57",
 				"class": "gemini",
 				"providers": [
 					"google",
@@ -4542,7 +4567,7 @@
 				}
 			},
 			{
-				"source": "classes/gemini.kdl:67",
+				"source": "classes/gemini.kdl:71",
 				"class": "gemini",
 				"revision": [
 					{
@@ -4551,11 +4576,15 @@
 					}
 				],
 				"wire": {
+					"multimodalFunctionResponse": true,
 					"requiresSkipThoughtSignature": true
+				},
+				"thinking": {
+					"requiresEffort": true
 				}
 			},
 			{
-				"source": "classes/gemini.kdl:71",
+				"source": "classes/gemini.kdl:79",
 				"class": "gemini",
 				"providers": [
 					"google",
@@ -4572,7 +4601,7 @@
 				}
 			},
 			{
-				"source": "classes/gemini.kdl:76",
+				"source": "classes/gemini.kdl:84",
 				"class": "gemini",
 				"providers": [
 					"google-antigravity",
@@ -4647,7 +4676,25 @@
 				}
 			},
 			{
-				"source": "classes/glm.kdl:7",
+				"source": "classes/glm.kdl:6",
+				"class": "glm",
+				"providers": [
+					"zhipu-coding-plan",
+					"opencode-go",
+					"opencode-zen"
+				],
+				"revision": [
+					{
+						"op": ">=",
+						"revision": "5.0.0"
+					}
+				],
+				"wire": {
+					"streamIdleTimeoutMs": 600000
+				}
+			},
+			{
+				"source": "classes/glm.kdl:13",
 				"class": "glm",
 				"revision": [
 					{
@@ -4670,7 +4717,7 @@
 				}
 			},
 			{
-				"source": "classes/glm.kdl:11",
+				"source": "classes/glm.kdl:17",
 				"class": "glm",
 				"providers": [
 					"zai",
@@ -4692,7 +4739,7 @@
 				}
 			},
 			{
-				"source": "classes/glm.kdl:17",
+				"source": "classes/glm.kdl:23",
 				"class": "glm",
 				"providers": [
 					"zai",
@@ -4719,7 +4766,7 @@
 				}
 			},
 			{
-				"source": "classes/glm.kdl:23",
+				"source": "classes/glm.kdl:29",
 				"class": "glm",
 				"providers": [
 					"vercel-ai-gateway"
@@ -4745,7 +4792,7 @@
 				}
 			},
 			{
-				"source": "classes/glm.kdl:30",
+				"source": "classes/glm.kdl:36",
 				"class": "glm",
 				"providers": [
 					"zai",
@@ -4767,13 +4814,13 @@
 				],
 				"catalog": {
 					"limitsPatch": {
-						"context-window": 1000000,
-						"max-tokens": 131072
+						"contextWindow": 1000000,
+						"maxTokens": 131072
 					}
 				}
 			},
 			{
-				"source": "classes/glm.kdl:40",
+				"source": "classes/glm.kdl:46",
 				"class": "glm",
 				"providers": [
 					"zai"
@@ -4788,13 +4835,13 @@
 					"costPatch": {
 						"input": 0.15,
 						"output": 0.5,
-						"cache-read": 0.03,
-						"cache-write": 0
+						"cacheRead": 0.03,
+						"cacheWrite": 0
 					}
 				}
 			},
 			{
-				"source": "classes/glm.kdl:52",
+				"source": "classes/glm.kdl:58",
 				"class": "glm",
 				"providers": [
 					"zai",
@@ -4814,7 +4861,7 @@
 				}
 			},
 			{
-				"source": "classes/glm.kdl:56",
+				"source": "classes/glm.kdl:62",
 				"class": "glm",
 				"providers": [
 					"alibaba-coding-plan",
@@ -4826,7 +4873,7 @@
 				}
 			},
 			{
-				"source": "classes/glm.kdl:60",
+				"source": "classes/glm.kdl:66",
 				"class": "glm",
 				"providers": [
 					"openrouter",
@@ -4843,7 +4890,7 @@
 				}
 			},
 			{
-				"source": "classes/glm.kdl:71",
+				"source": "classes/glm.kdl:77",
 				"class": "glm",
 				"models": [
 					{
@@ -4953,7 +5000,58 @@
 				}
 			},
 			{
-				"source": "classes/kimi.kdl:6",
+				"source": "classes/kimi.kdl:8",
+				"class": "kimi",
+				"providers": [
+					"baseten",
+					"cline-pass",
+					"cloudflare-ai-gateway",
+					"coreweave",
+					"deepinfra",
+					"firepass",
+					"fireworks",
+					"huggingface",
+					"moonshot",
+					"novita",
+					"nvidia",
+					"opencode-go",
+					"opencode-zen",
+					"openrouter",
+					"together",
+					"wafer-serverless",
+					"zenmux"
+				],
+				"family": "k2.6",
+				"wire": {
+					"streamIdleTimeoutMs": 300000
+				}
+			},
+			{
+				"source": "classes/kimi.kdl:14",
+				"class": "kimi",
+				"providers": [
+					"kimi-code",
+					"moonshot"
+				],
+				"family": "k3",
+				"wire": {
+					"streamIdleTimeoutMs": 300000
+				}
+			},
+			{
+				"source": "classes/kimi.kdl:17",
+				"class": "kimi",
+				"providers": [
+					"kimi-code",
+					"moonshot"
+				],
+				"family": "k2.7-code",
+				"wire": {
+					"streamIdleTimeoutMs": 300000
+				}
+			},
+			{
+				"source": "classes/kimi.kdl:23",
 				"class": "kimi",
 				"providers": [
 					"aiand",
@@ -4982,7 +5080,7 @@
 				}
 			},
 			{
-				"source": "classes/kimi.kdl:10",
+				"source": "classes/kimi.kdl:27",
 				"class": "kimi",
 				"family": "k3",
 				"wire": {
@@ -5004,7 +5102,7 @@
 				}
 			},
 			{
-				"source": "classes/kimi.kdl:25",
+				"source": "classes/kimi.kdl:42",
 				"class": "kimi",
 				"providers": [
 					"alibaba-coding-plan",
@@ -5025,7 +5123,7 @@
 				}
 			},
 			{
-				"source": "classes/kimi.kdl:29",
+				"source": "classes/kimi.kdl:46",
 				"class": "kimi",
 				"providers": [
 					"alibaba-coding-plan",
@@ -5037,7 +5135,7 @@
 				}
 			},
 			{
-				"source": "classes/kimi.kdl:34",
+				"source": "classes/kimi.kdl:51",
 				"class": "kimi",
 				"providers": [
 					"baseten",
@@ -5067,7 +5165,7 @@
 				}
 			},
 			{
-				"source": "classes/kimi.kdl:41",
+				"source": "classes/kimi.kdl:58",
 				"class": "kimi",
 				"providers": [
 					"cloudflare-ai-gateway",
@@ -5078,7 +5176,6 @@
 					"nanogpt",
 					"novita",
 					"nvidia",
-					"opencode",
 					"opencode-go",
 					"opencode-zen",
 					"together",
@@ -5097,7 +5194,7 @@
 				}
 			},
 			{
-				"source": "classes/kimi.kdl:46",
+				"source": "classes/kimi.kdl:63",
 				"class": "kimi",
 				"providers": [
 					"cursor",
@@ -5118,7 +5215,7 @@
 				}
 			},
 			{
-				"source": "classes/kimi.kdl:51",
+				"source": "classes/kimi.kdl:68",
 				"class": "kimi",
 				"providers": [
 					"huggingface",
@@ -5135,7 +5232,7 @@
 				}
 			},
 			{
-				"source": "classes/kimi.kdl:56",
+				"source": "classes/kimi.kdl:73",
 				"class": "kimi",
 				"providers": [
 					"huggingface",
@@ -5159,7 +5256,7 @@
 				}
 			},
 			{
-				"source": "classes/kimi.kdl:61",
+				"source": "classes/kimi.kdl:78",
 				"class": "kimi",
 				"providers": [
 					"kilo",
@@ -5174,7 +5271,7 @@
 				}
 			},
 			{
-				"source": "classes/kimi.kdl:66",
+				"source": "classes/kimi.kdl:83",
 				"class": "kimi",
 				"providers": [
 					"kilo",
@@ -5193,7 +5290,7 @@
 				}
 			},
 			{
-				"source": "classes/kimi.kdl:71",
+				"source": "classes/kimi.kdl:88",
 				"class": "kimi",
 				"providers": [
 					"moonshot",
@@ -5210,7 +5307,7 @@
 				}
 			},
 			{
-				"source": "classes/kimi.kdl:76",
+				"source": "classes/kimi.kdl:93",
 				"class": "kimi",
 				"providers": [
 					"moonshot",
@@ -5229,7 +5326,7 @@
 				}
 			},
 			{
-				"source": "classes/kimi.kdl:81",
+				"source": "classes/kimi.kdl:98",
 				"class": "kimi",
 				"providers": [
 					"moonshot",
@@ -5246,7 +5343,7 @@
 				}
 			},
 			{
-				"source": "classes/kimi.kdl:87",
+				"source": "classes/kimi.kdl:104",
 				"class": "kimi",
 				"models": [
 					{
@@ -5259,7 +5356,7 @@
 				}
 			},
 			{
-				"source": "classes/kimi.kdl:91",
+				"source": "classes/kimi.kdl:108",
 				"class": "kimi",
 				"providers": [
 					"kimi-code",
@@ -5314,7 +5411,32 @@
 				}
 			},
 			{
-				"source": "classes/mimo.kdl:6",
+				"source": "classes/mimo.kdl:5",
+				"class": "mimo",
+				"providers": [
+					"xiaomi-token-plan-ams",
+					"xiaomi-token-plan-cn",
+					"xiaomi-token-plan-sgp"
+				],
+				"wire": {
+					"thinkingFormat": "zai"
+				}
+			},
+			{
+				"source": "classes/mimo.kdl:9",
+				"class": "mimo",
+				"providers": [
+					"xiaomi",
+					"xiaomi-token-plan-ams",
+					"xiaomi-token-plan-cn",
+					"xiaomi-token-plan-sgp"
+				],
+				"wire": {
+					"streamIdleTimeoutMs": 300000
+				}
+			},
+			{
+				"source": "classes/mimo.kdl:14",
 				"class": "mimo",
 				"providers": [
 					"aimlapi",
@@ -5338,7 +5460,7 @@
 				}
 			},
 			{
-				"source": "classes/mimo.kdl:15",
+				"source": "classes/mimo.kdl:23",
 				"class": "mimo",
 				"providers": [
 					"aimlapi",
@@ -5364,7 +5486,7 @@
 				}
 			},
 			{
-				"source": "classes/mimo.kdl:20",
+				"source": "classes/mimo.kdl:28",
 				"class": "mimo",
 				"providers": [
 					"xiaomi",
@@ -5383,7 +5505,15 @@
 				}
 			},
 			{
-				"source": "classes/minimax.kdl:6",
+				"source": "classes/minimax.kdl:5",
+				"class": "minimax",
+				"family": "m2",
+				"thinking": {
+					"requiresEffort": true
+				}
+			},
+			{
+				"source": "classes/minimax.kdl:12",
 				"class": "minimax",
 				"providers": [
 					"aimlapi",
@@ -5413,7 +5543,7 @@
 				}
 			},
 			{
-				"source": "classes/minimax.kdl:14",
+				"source": "classes/minimax.kdl:20",
 				"class": "minimax",
 				"providers": [
 					"alibaba-coding-plan",
@@ -5444,7 +5574,7 @@
 				}
 			},
 			{
-				"source": "classes/minimax.kdl:20",
+				"source": "classes/minimax.kdl:26",
 				"class": "minimax",
 				"family": "m2",
 				"thinking": {
@@ -5456,7 +5586,7 @@
 				}
 			},
 			{
-				"source": "classes/minimax.kdl:26",
+				"source": "classes/minimax.kdl:32",
 				"class": "minimax",
 				"providers": [
 					"minimax",
@@ -5472,13 +5602,13 @@
 				],
 				"catalog": {
 					"limitsPatch": {
-						"context-window": 1000000,
-						"max-tokens": 128000
+						"contextWindow": 1000000,
+						"maxTokens": 128000
 					}
 				}
 			},
 			{
-				"source": "classes/minimax.kdl:33",
+				"source": "classes/minimax.kdl:39",
 				"class": "minimax",
 				"providers": [
 					"alibaba-coding-plan",
@@ -5491,7 +5621,7 @@
 				}
 			},
 			{
-				"source": "classes/minimax.kdl:38",
+				"source": "classes/minimax.kdl:44",
 				"class": "minimax",
 				"providers": [
 					"amazon-bedrock",
@@ -5508,7 +5638,7 @@
 				}
 			},
 			{
-				"source": "classes/minimax.kdl:42",
+				"source": "classes/minimax.kdl:48",
 				"class": "minimax",
 				"providers": [
 					"kilo",
@@ -5526,7 +5656,24 @@
 				}
 			},
 			{
-				"source": "classes/minimax.kdl:48",
+				"source": "classes/minimax.kdl:54",
+				"class": "minimax",
+				"providers": [
+					"minimax",
+					"minimax-cn",
+					"vercel-ai-gateway"
+				],
+				"family": "m2",
+				"thinking": {
+					"effortMap": {
+						"low": "adaptive",
+						"medium": "adaptive",
+						"high": "adaptive"
+					}
+				}
+			},
+			{
+				"source": "classes/minimax.kdl:62",
 				"class": "minimax",
 				"providers": [
 					"minimax",
@@ -5535,6 +5682,11 @@
 				],
 				"family": "m3",
 				"thinking": {
+					"effortMap": {
+						"low": "adaptive",
+						"medium": "adaptive",
+						"high": "adaptive"
+					},
 					"efforts": [
 						"low",
 						"medium",
@@ -5543,7 +5695,7 @@
 				}
 			},
 			{
-				"source": "classes/minimax.kdl:46",
+				"source": "classes/minimax.kdl:52",
 				"class": "minimax",
 				"providers": [
 					"minimax",
@@ -5555,7 +5707,7 @@
 				}
 			},
 			{
-				"source": "classes/minimax.kdl:52",
+				"source": "classes/minimax.kdl:72",
 				"class": "minimax",
 				"providers": [
 					"minimax-code",
@@ -5567,7 +5719,7 @@
 				}
 			},
 			{
-				"source": "classes/minimax.kdl:56",
+				"source": "classes/minimax.kdl:76",
 				"class": "minimax",
 				"providers": [
 					"minimax-code",
@@ -5576,6 +5728,13 @@
 				],
 				"wire": {
 					"reasoningContentField": "reasoning_content"
+				}
+			},
+			{
+				"source": "classes/minimax.kdl:3",
+				"class": "minimax",
+				"wire": {
+					"reasoningDeltasMayBeCumulative": true
 				}
 			},
 			{
@@ -5630,7 +5789,15 @@
 				}
 			},
 			{
-				"source": "classes/openai.kdl:8",
+				"source": "classes/openai.kdl:5",
+				"class": "openai",
+				"family": "o-series",
+				"thinking": {
+					"requiresEffort": true
+				}
+			},
+			{
+				"source": "classes/openai.kdl:12",
 				"class": "openai",
 				"family": "gpt",
 				"revision": [
@@ -5649,7 +5816,7 @@
 				}
 			},
 			{
-				"source": "classes/openai.kdl:13",
+				"source": "classes/openai.kdl:17",
 				"class": "openai",
 				"family": "codex",
 				"revision": [
@@ -5668,7 +5835,7 @@
 				}
 			},
 			{
-				"source": "classes/openai.kdl:17",
+				"source": "classes/openai.kdl:21",
 				"class": "openai",
 				"family": "codex",
 				"revision": [
@@ -5691,7 +5858,7 @@
 				}
 			},
 			{
-				"source": "classes/openai.kdl:22",
+				"source": "classes/openai.kdl:26",
 				"class": "openai",
 				"revision": [
 					{
@@ -5713,7 +5880,7 @@
 				}
 			},
 			{
-				"source": "classes/openai.kdl:25",
+				"source": "classes/openai.kdl:29",
 				"class": "openai",
 				"revision": [
 					{
@@ -5735,7 +5902,7 @@
 				}
 			},
 			{
-				"source": "classes/openai.kdl:32",
+				"source": "classes/openai.kdl:36",
 				"class": "openai",
 				"family": "codex",
 				"revision": [
@@ -5746,42 +5913,12 @@
 				],
 				"catalog": {
 					"limitsPatch": {
-						"context-window": 272000
+						"contextWindow": 272000
 					}
 				}
 			},
 			{
 				"source": "classes/qwen.kdl:4",
-				"class": "qwen",
-				"providers": [
-					"aiand",
-					"aimlapi",
-					"alibaba-coding-plan",
-					"alibaba-token-plan",
-					"amazon-bedrock",
-					"cerebras",
-					"coreweave",
-					"groq",
-					"huggingface",
-					"kilo",
-					"nanogpt",
-					"novita",
-					"ollama-cloud",
-					"opencode-go",
-					"opencode-zen",
-					"synthetic",
-					"together",
-					"umans",
-					"vercel-ai-gateway",
-					"wafer-serverless",
-					"zenmux"
-				],
-				"wire": {
-					"thinkingFormat": "qwen"
-				}
-			},
-			{
-				"source": "classes/qwen.kdl:9",
 				"class": "qwen",
 				"providers": [
 					"aiand",
@@ -5813,7 +5950,7 @@
 				}
 			},
 			{
-				"source": "classes/qwen.kdl:18",
+				"source": "classes/qwen.kdl:13",
 				"class": "qwen",
 				"providers": [
 					"aimlapi",
@@ -5832,7 +5969,7 @@
 				}
 			},
 			{
-				"source": "classes/qwen.kdl:22",
+				"source": "classes/qwen.kdl:17",
 				"class": "qwen",
 				"providers": [
 					"alibaba-coding-plan",
@@ -5844,7 +5981,7 @@
 				}
 			},
 			{
-				"source": "classes/qwen.kdl:25",
+				"source": "classes/qwen.kdl:20",
 				"class": "qwen",
 				"providers": [
 					"amazon-bedrock",
@@ -5856,7 +5993,7 @@
 				}
 			},
 			{
-				"source": "classes/qwen.kdl:28",
+				"source": "classes/qwen.kdl:23",
 				"class": "qwen",
 				"providers": [
 					"fireworks",
@@ -5874,7 +6011,7 @@
 				}
 			},
 			{
-				"source": "classes/qwen.kdl:35",
+				"source": "classes/qwen.kdl:30",
 				"class": "qwen",
 				"providers": [
 					"kilo",
@@ -5894,7 +6031,7 @@
 				}
 			},
 			{
-				"source": "classes/qwen.kdl:46",
+				"source": "classes/qwen.kdl:41",
 				"class": "qwen",
 				"providers": [
 					"llama.cpp",
@@ -5921,7 +6058,7 @@
 				}
 			},
 			{
-				"source": "classes/qwen.kdl:55",
+				"source": "classes/qwen.kdl:50",
 				"class": "qwen",
 				"providers": [
 					"vllm"
@@ -5947,7 +6084,7 @@
 				}
 			},
 			{
-				"source": "classes/qwen.kdl:65",
+				"source": "classes/qwen.kdl:60",
 				"class": "qwen",
 				"providers": [
 					"alibaba-token-plan"
@@ -5958,7 +6095,7 @@
 				}
 			},
 			{
-				"source": "classes/qwen.kdl:69",
+				"source": "classes/qwen.kdl:64",
 				"class": "qwen",
 				"providers": [
 					"alibaba-token-plan"
@@ -5980,7 +6117,7 @@
 				}
 			},
 			{
-				"source": "classes/qwen.kdl:73",
+				"source": "classes/qwen.kdl:68",
 				"class": "qwen",
 				"providers": [
 					"alibaba-token-plan"
@@ -6374,7 +6511,7 @@
 				}
 			},
 			{
-				"source": "providers/alibaba-coding-plan.kdl:5",
+				"source": "providers/alibaba-coding-plan.kdl:9",
 				"class": "glm",
 				"providers": [
 					"alibaba-coding-plan"
@@ -6389,7 +6526,7 @@
 				}
 			},
 			{
-				"source": "providers/alibaba-coding-plan.kdl:9",
+				"source": "providers/alibaba-coding-plan.kdl:13",
 				"providers": [
 					"alibaba-coding-plan"
 				],
@@ -6404,7 +6541,7 @@
 				}
 			},
 			{
-				"source": "providers/alibaba-coding-plan.kdl:13",
+				"source": "providers/alibaba-coding-plan.kdl:17",
 				"providers": [
 					"alibaba-coding-plan"
 				],
@@ -6423,12 +6560,16 @@
 				"providers": [
 					"alibaba-coding-plan"
 				],
+				"wire": {
+					"thinkingFormat": "qwen",
+					"streamIdleTimeoutMs": 600000
+				},
 				"thinking": {
 					"mode": "effort"
 				}
 			},
 			{
-				"source": "providers/alibaba-token-plan.kdl:6",
+				"source": "providers/alibaba-token-plan.kdl:8",
 				"class": "qwen",
 				"providers": [
 					"alibaba-token-plan"
@@ -6453,7 +6594,7 @@
 				}
 			},
 			{
-				"source": "providers/alibaba-token-plan.kdl:9",
+				"source": "providers/alibaba-token-plan.kdl:11",
 				"class": "qwen",
 				"providers": [
 					"alibaba-token-plan"
@@ -6473,7 +6614,7 @@
 				}
 			},
 			{
-				"source": "providers/alibaba-token-plan.kdl:14",
+				"source": "providers/alibaba-token-plan.kdl:16",
 				"providers": [
 					"alibaba-token-plan"
 				],
@@ -6488,7 +6629,7 @@
 				}
 			},
 			{
-				"source": "providers/alibaba-token-plan.kdl:18",
+				"source": "providers/alibaba-token-plan.kdl:20",
 				"providers": [
 					"alibaba-token-plan"
 				],
@@ -6516,7 +6657,7 @@
 				}
 			},
 			{
-				"source": "providers/alibaba-token-plan.kdl:29",
+				"source": "providers/alibaba-token-plan.kdl:31",
 				"providers": [
 					"alibaba-token-plan"
 				],
@@ -6540,6 +6681,9 @@
 				"providers": [
 					"alibaba-token-plan"
 				],
+				"wire": {
+					"thinkingFormat": "qwen"
+				},
 				"thinking": {
 					"mode": "effort"
 				}
@@ -6581,6 +6725,9 @@
 						"revision": "5.1.0"
 					}
 				],
+				"wire": {
+					"streamIdleTimeoutMs": 900000
+				},
 				"thinking": {
 					"efforts": [
 						"low",
@@ -6591,7 +6738,7 @@
 				}
 			},
 			{
-				"source": "providers/amazon-bedrock.kdl:14",
+				"source": "providers/amazon-bedrock.kdl:16",
 				"class": "openai",
 				"providers": [
 					"amazon-bedrock"
@@ -6601,7 +6748,7 @@
 				}
 			},
 			{
-				"source": "providers/amazon-bedrock.kdl:17",
+				"source": "providers/amazon-bedrock.kdl:19",
 				"class": "deepseek",
 				"providers": [
 					"amazon-bedrock"
@@ -6619,7 +6766,7 @@
 				}
 			},
 			{
-				"source": "providers/amazon-bedrock.kdl:22",
+				"source": "providers/amazon-bedrock.kdl:24",
 				"class": "minimax",
 				"providers": [
 					"amazon-bedrock"
@@ -6630,7 +6777,7 @@
 				}
 			},
 			{
-				"source": "providers/amazon-bedrock.kdl:26",
+				"source": "providers/amazon-bedrock.kdl:28",
 				"class": "unknown",
 				"providers": [
 					"amazon-bedrock"
@@ -6646,7 +6793,7 @@
 				}
 			},
 			{
-				"source": "providers/amazon-bedrock.kdl:31",
+				"source": "providers/amazon-bedrock.kdl:33",
 				"providers": [
 					"amazon-bedrock"
 				],
@@ -6925,7 +7072,7 @@
 				}
 			},
 			{
-				"source": "providers/cerebras.kdl:6",
+				"source": "providers/cerebras.kdl:11",
 				"providers": [
 					"cerebras"
 				],
@@ -6943,7 +7090,7 @@
 				}
 			},
 			{
-				"source": "providers/cerebras.kdl:11",
+				"source": "providers/cerebras.kdl:16",
 				"providers": [
 					"cerebras"
 				],
@@ -6968,8 +7115,23 @@
 				"providers": [
 					"cerebras"
 				],
+				"wire": {
+					"supportsStrictMode": true,
+					"supportsUsageInStreaming": false,
+					"toolStrictMode": "all_strict"
+				},
 				"thinking": {
 					"mode": "effort"
+				}
+			},
+			{
+				"source": "providers/cline-pass.kdl:3",
+				"providers": [
+					"cline-pass"
+				],
+				"wire": {
+					"wireModelIdMode": "cline-pass",
+					"thinkingFormat": "openai"
 				}
 			},
 			{
@@ -7430,7 +7592,7 @@
 				}
 			},
 			{
-				"source": "providers/firepass.kdl:5",
+				"source": "providers/firepass.kdl:11",
 				"providers": [
 					"firepass"
 				],
@@ -7452,7 +7614,36 @@
 				}
 			},
 			{
-				"source": "providers/fireworks.kdl:5",
+				"source": "providers/firepass.kdl:3",
+				"providers": [
+					"firepass"
+				],
+				"wire": {
+					"wireModelIdMode": "firepass"
+				},
+				"thinking": {
+					"effortMap": {
+						"minimal": "none"
+					}
+				}
+			},
+			{
+				"source": "providers/fireworks.kdl:10",
+				"providers": [
+					"fireworks"
+				],
+				"models": [
+					{
+						"kind": "glob",
+						"value": "*-fast"
+					}
+				],
+				"wire": {
+					"wireModelIdMode": "firepass"
+				}
+			},
+			{
+				"source": "providers/fireworks.kdl:17",
 				"class": "qwen",
 				"providers": [
 					"fireworks"
@@ -7462,7 +7653,7 @@
 				}
 			},
 			{
-				"source": "providers/fireworks.kdl:8",
+				"source": "providers/fireworks.kdl:20",
 				"class": "unknown",
 				"providers": [
 					"fireworks"
@@ -7478,7 +7669,7 @@
 				}
 			},
 			{
-				"source": "providers/fireworks.kdl:12",
+				"source": "providers/fireworks.kdl:24",
 				"providers": [
 					"fireworks"
 				],
@@ -7493,7 +7684,7 @@
 				}
 			},
 			{
-				"source": "providers/fireworks.kdl:16",
+				"source": "providers/fireworks.kdl:28",
 				"providers": [
 					"fireworks"
 				],
@@ -7518,7 +7709,7 @@
 				}
 			},
 			{
-				"source": "providers/fireworks.kdl:20",
+				"source": "providers/fireworks.kdl:32",
 				"providers": [
 					"fireworks"
 				],
@@ -7539,7 +7730,7 @@
 				}
 			},
 			{
-				"source": "providers/fireworks.kdl:24",
+				"source": "providers/fireworks.kdl:36",
 				"providers": [
 					"fireworks"
 				],
@@ -7554,7 +7745,7 @@
 				}
 			},
 			{
-				"source": "providers/fireworks.kdl:28",
+				"source": "providers/fireworks.kdl:40",
 				"providers": [
 					"fireworks"
 				],
@@ -7573,12 +7764,20 @@
 				"providers": [
 					"fireworks"
 				],
+				"priority": -1,
+				"wire": {
+					"wireModelIdMode": "fireworks",
+					"dropThinkingWhenReasoningEffort": true
+				},
 				"thinking": {
+					"effortMap": {
+						"minimal": "none"
+					},
 					"mode": "effort"
 				}
 			},
 			{
-				"source": "providers/github-copilot.kdl:5",
+				"source": "providers/github-copilot.kdl:11",
 				"class": "anthropic",
 				"providers": [
 					"github-copilot"
@@ -7604,7 +7803,7 @@
 				}
 			},
 			{
-				"source": "providers/github-copilot.kdl:10",
+				"source": "providers/github-copilot.kdl:16",
 				"class": "gemini",
 				"providers": [
 					"github-copilot"
@@ -7615,7 +7814,7 @@
 				}
 			},
 			{
-				"source": "providers/github-copilot.kdl:13",
+				"source": "providers/github-copilot.kdl:19",
 				"class": "gemini",
 				"providers": [
 					"github-copilot"
@@ -7635,7 +7834,7 @@
 				}
 			},
 			{
-				"source": "providers/github-copilot.kdl:17",
+				"source": "providers/github-copilot.kdl:23",
 				"class": "kimi",
 				"providers": [
 					"github-copilot"
@@ -7645,7 +7844,7 @@
 				}
 			},
 			{
-				"source": "providers/github-copilot.kdl:21",
+				"source": "providers/github-copilot.kdl:27",
 				"class": "openai",
 				"providers": [
 					"github-copilot"
@@ -7665,7 +7864,7 @@
 				}
 			},
 			{
-				"source": "providers/github-copilot.kdl:25",
+				"source": "providers/github-copilot.kdl:31",
 				"class": "unknown",
 				"providers": [
 					"github-copilot"
@@ -7675,7 +7874,7 @@
 				}
 			},
 			{
-				"source": "providers/github-copilot.kdl:29",
+				"source": "providers/github-copilot.kdl:35",
 				"class": "xai",
 				"providers": [
 					"github-copilot"
@@ -7686,7 +7885,7 @@
 				}
 			},
 			{
-				"source": "providers/github-copilot.kdl:34",
+				"source": "providers/github-copilot.kdl:40",
 				"providers": [
 					"github-copilot"
 				],
@@ -7709,7 +7908,7 @@
 				}
 			},
 			{
-				"source": "providers/github-copilot.kdl:38",
+				"source": "providers/github-copilot.kdl:44",
 				"providers": [
 					"github-copilot"
 				],
@@ -7733,7 +7932,7 @@
 				}
 			},
 			{
-				"source": "providers/github-copilot.kdl:42",
+				"source": "providers/github-copilot.kdl:48",
 				"providers": [
 					"github-copilot"
 				],
@@ -7751,7 +7950,7 @@
 				}
 			},
 			{
-				"source": "providers/github-copilot.kdl:46",
+				"source": "providers/github-copilot.kdl:52",
 				"providers": [
 					"github-copilot"
 				],
@@ -7776,7 +7975,7 @@
 				}
 			},
 			{
-				"source": "providers/github-copilot.kdl:53",
+				"source": "providers/github-copilot.kdl:59",
 				"providers": [
 					"github-copilot"
 				],
@@ -7798,6 +7997,17 @@
 						"high",
 						"xhigh"
 					]
+				}
+			},
+			{
+				"source": "providers/github-copilot.kdl:3",
+				"providers": [
+					"github-copilot"
+				],
+				"wire": {
+					"supportsStrictMode": true,
+					"disableStrictTools": true,
+					"supportsContextManagement": false
 				}
 			},
 			{
@@ -8050,7 +8260,7 @@
 				}
 			},
 			{
-				"source": "providers/google-vertex.kdl:5",
+				"source": "providers/google-vertex.kdl:12",
 				"class": "anthropic",
 				"providers": [
 					"google-vertex"
@@ -8076,7 +8286,7 @@
 				}
 			},
 			{
-				"source": "providers/google-vertex.kdl:10",
+				"source": "providers/google-vertex.kdl:17",
 				"providers": [
 					"google-vertex"
 				],
@@ -8097,7 +8307,7 @@
 				}
 			},
 			{
-				"source": "providers/google-vertex.kdl:15",
+				"source": "providers/google-vertex.kdl:22",
 				"providers": [
 					"google-vertex"
 				],
@@ -8109,6 +8319,17 @@
 				],
 				"thinking": {
 					"mode": "effort"
+				}
+			},
+			{
+				"source": "providers/google-vertex.kdl:3",
+				"providers": [
+					"google-vertex"
+				],
+				"wire": {
+					"supportsFunctionPartId": false,
+					"supportsContextManagement": false,
+					"supportsOutputEffort": false
 				}
 			},
 			{
@@ -8303,7 +8524,22 @@
 				}
 			},
 			{
-				"source": "providers/kilo.kdl:6",
+				"source": "providers/kilo.kdl:5",
+				"providers": [
+					"kilo"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "moonshotai/kimi-k2.6"
+					}
+				],
+				"wire": {
+					"streamIdleTimeoutMs": 300000
+				}
+			},
+			{
+				"source": "providers/kilo.kdl:10",
 				"class": "glm",
 				"providers": [
 					"kilo"
@@ -8320,7 +8556,7 @@
 				}
 			},
 			{
-				"source": "providers/kilo.kdl:10",
+				"source": "providers/kilo.kdl:14",
 				"class": "unknown",
 				"providers": [
 					"kilo"
@@ -8336,7 +8572,7 @@
 				}
 			},
 			{
-				"source": "providers/kilo.kdl:14",
+				"source": "providers/kilo.kdl:18",
 				"providers": [
 					"kilo"
 				],
@@ -8359,7 +8595,7 @@
 				}
 			},
 			{
-				"source": "providers/kilo.kdl:19",
+				"source": "providers/kilo.kdl:23",
 				"providers": [
 					"kilo"
 				],
@@ -8380,7 +8616,7 @@
 				}
 			},
 			{
-				"source": "providers/kilo.kdl:24",
+				"source": "providers/kilo.kdl:28",
 				"providers": [
 					"kilo"
 				],
@@ -8427,7 +8663,7 @@
 				}
 			},
 			{
-				"source": "providers/kilo.kdl:31",
+				"source": "providers/kilo.kdl:35",
 				"providers": [
 					"kilo"
 				],
@@ -8451,7 +8687,7 @@
 				}
 			},
 			{
-				"source": "providers/kilo.kdl:35",
+				"source": "providers/kilo.kdl:39",
 				"providers": [
 					"kilo"
 				],
@@ -8469,7 +8705,7 @@
 				}
 			},
 			{
-				"source": "providers/kilo.kdl:39",
+				"source": "providers/kilo.kdl:43",
 				"providers": [
 					"kilo"
 				],
@@ -8522,7 +8758,7 @@
 				}
 			},
 			{
-				"source": "providers/kilo.kdl:44",
+				"source": "providers/kilo.kdl:48",
 				"providers": [
 					"kilo"
 				],
@@ -8552,7 +8788,28 @@
 				}
 			},
 			{
-				"source": "providers/kimi-code.kdl:8",
+				"source": "providers/kimi-code.kdl:7",
+				"class": "kimi",
+				"providers": [
+					"kimi-code"
+				],
+				"family": "k3",
+				"wire": {
+					"thinkingFormat": "openai"
+				}
+			},
+			{
+				"source": "providers/kimi-code.kdl:4",
+				"class": "kimi",
+				"providers": [
+					"kimi-code"
+				],
+				"wire": {
+					"thinkingFormat": "zai"
+				}
+			},
+			{
+				"source": "providers/kimi-code.kdl:20",
 				"class": "kimi",
 				"providers": [
 					"kimi-code"
@@ -8566,7 +8823,7 @@
 				}
 			},
 			{
-				"source": "providers/kimi-code.kdl:12",
+				"source": "providers/kimi-code.kdl:24",
 				"class": "unknown",
 				"providers": [
 					"kimi-code"
@@ -8586,7 +8843,7 @@
 				}
 			},
 			{
-				"source": "providers/kimi-code.kdl:19",
+				"source": "providers/kimi-code.kdl:31",
 				"providers": [
 					"kimi-code"
 				],
@@ -8615,8 +8872,30 @@
 				"providers": [
 					"kimi-code"
 				],
+				"wire": {
+					"kimiApiFormat": "anthropic",
+					"supportsPromptCacheKey": true
+				},
 				"thinking": {
 					"mode": "effort"
+				}
+			},
+			{
+				"source": "providers/llama.cpp.kdl:3",
+				"providers": [
+					"llama.cpp"
+				],
+				"wire": {
+					"supportsNamedToolChoice": false
+				}
+			},
+			{
+				"source": "providers/lm-studio.kdl:3",
+				"providers": [
+					"lm-studio"
+				],
+				"wire": {
+					"supportsNamedToolChoice": false
 				}
 			},
 			{
@@ -8647,7 +8926,7 @@
 				}
 			},
 			{
-				"source": "providers/minimax-code-cn.kdl:4",
+				"source": "providers/minimax-code-cn.kdl:6",
 				"class": "minimax",
 				"providers": [
 					"minimax-code-cn"
@@ -8657,7 +8936,7 @@
 				}
 			},
 			{
-				"source": "providers/minimax-code-cn.kdl:8",
+				"source": "providers/minimax-code-cn.kdl:10",
 				"providers": [
 					"minimax-code-cn"
 				],
@@ -8677,7 +8956,17 @@
 				}
 			},
 			{
-				"source": "providers/minimax-code.kdl:4",
+				"source": "providers/minimax-code-cn.kdl:3",
+				"providers": [
+					"minimax-code-cn"
+				],
+				"priority": 1,
+				"wire": {
+					"reasoningDeltasMayBeCumulative": true
+				}
+			},
+			{
+				"source": "providers/minimax-code.kdl:6",
 				"class": "minimax",
 				"providers": [
 					"minimax-code"
@@ -8687,7 +8976,7 @@
 				}
 			},
 			{
-				"source": "providers/minimax-code.kdl:8",
+				"source": "providers/minimax-code.kdl:10",
 				"providers": [
 					"minimax-code"
 				],
@@ -8704,6 +8993,26 @@
 						"medium",
 						"high"
 					]
+				}
+			},
+			{
+				"source": "providers/minimax-code.kdl:3",
+				"providers": [
+					"minimax-code"
+				],
+				"priority": 1,
+				"wire": {
+					"reasoningDeltasMayBeCumulative": true
+				}
+			},
+			{
+				"source": "providers/minimax.kdl:3",
+				"providers": [
+					"minimax"
+				],
+				"priority": 1,
+				"wire": {
+					"reasoningDeltasMayBeCumulative": true
 				}
 			},
 			{
@@ -8732,17 +9041,31 @@
 				}
 			},
 			{
+				"source": "providers/moonshot.kdl:7",
+				"class": "kimi",
+				"providers": [
+					"moonshot"
+				],
+				"family": "k3",
+				"wire": {
+					"thinkingFormat": "openai"
+				}
+			},
+			{
 				"source": "providers/moonshot.kdl:4",
 				"class": "kimi",
 				"providers": [
 					"moonshot"
 				],
+				"wire": {
+					"thinkingFormat": "zai"
+				},
 				"thinking": {
 					"mode": "effort"
 				}
 			},
 			{
-				"source": "providers/moonshot.kdl:10",
+				"source": "providers/moonshot.kdl:15",
 				"class": "kimi",
 				"providers": [
 					"moonshot"
@@ -8756,7 +9079,7 @@
 				}
 			},
 			{
-				"source": "providers/moonshot.kdl:13",
+				"source": "providers/moonshot.kdl:18",
 				"class": "kimi",
 				"providers": [
 					"moonshot"
@@ -8770,7 +9093,7 @@
 				}
 			},
 			{
-				"source": "providers/moonshot.kdl:16",
+				"source": "providers/moonshot.kdl:21",
 				"class": "kimi",
 				"providers": [
 					"moonshot"
@@ -8784,7 +9107,7 @@
 				}
 			},
 			{
-				"source": "providers/moonshot.kdl:19",
+				"source": "providers/moonshot.kdl:24",
 				"class": "kimi",
 				"providers": [
 					"moonshot"
@@ -8798,7 +9121,7 @@
 				}
 			},
 			{
-				"source": "providers/moonshot.kdl:25",
+				"source": "providers/moonshot.kdl:30",
 				"providers": [
 					"moonshot"
 				],
@@ -8816,7 +9139,7 @@
 				}
 			},
 			{
-				"source": "providers/moonshot.kdl:28",
+				"source": "providers/moonshot.kdl:33",
 				"providers": [
 					"moonshot"
 				],
@@ -8834,7 +9157,22 @@
 				}
 			},
 			{
-				"source": "providers/nanogpt.kdl:6",
+				"source": "providers/nanogpt.kdl:5",
+				"providers": [
+					"nanogpt"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "moonshotai/kimi-k2.6:thinking"
+					}
+				],
+				"wire": {
+					"streamIdleTimeoutMs": 300000
+				}
+			},
+			{
+				"source": "providers/nanogpt.kdl:10",
 				"class": "anthropic",
 				"providers": [
 					"nanogpt"
@@ -8854,7 +9192,7 @@
 				}
 			},
 			{
-				"source": "providers/nanogpt.kdl:11",
+				"source": "providers/nanogpt.kdl:15",
 				"class": "glm",
 				"providers": [
 					"nanogpt"
@@ -8871,7 +9209,7 @@
 				}
 			},
 			{
-				"source": "providers/nanogpt.kdl:14",
+				"source": "providers/nanogpt.kdl:18",
 				"class": "glm",
 				"providers": [
 					"nanogpt"
@@ -8888,7 +9226,7 @@
 				}
 			},
 			{
-				"source": "providers/nanogpt.kdl:20",
+				"source": "providers/nanogpt.kdl:24",
 				"class": "openai",
 				"providers": [
 					"nanogpt"
@@ -8915,7 +9253,7 @@
 				}
 			},
 			{
-				"source": "providers/nanogpt.kdl:26",
+				"source": "providers/nanogpt.kdl:30",
 				"providers": [
 					"nanogpt"
 				],
@@ -8940,7 +9278,7 @@
 				}
 			},
 			{
-				"source": "providers/nanogpt.kdl:30",
+				"source": "providers/nanogpt.kdl:34",
 				"providers": [
 					"nanogpt"
 				],
@@ -9145,7 +9483,7 @@
 				}
 			},
 			{
-				"source": "providers/nanogpt.kdl:44",
+				"source": "providers/nanogpt.kdl:48",
 				"providers": [
 					"nanogpt"
 				],
@@ -9160,7 +9498,7 @@
 				}
 			},
 			{
-				"source": "providers/nanogpt.kdl:48",
+				"source": "providers/nanogpt.kdl:52",
 				"providers": [
 					"nanogpt"
 				],
@@ -9183,7 +9521,7 @@
 				}
 			},
 			{
-				"source": "providers/nanogpt.kdl:52",
+				"source": "providers/nanogpt.kdl:56",
 				"providers": [
 					"nanogpt"
 				],
@@ -9204,7 +9542,7 @@
 				}
 			},
 			{
-				"source": "providers/nanogpt.kdl:57",
+				"source": "providers/nanogpt.kdl:61",
 				"providers": [
 					"nanogpt"
 				],
@@ -9227,7 +9565,7 @@
 				}
 			},
 			{
-				"source": "providers/nanogpt.kdl:62",
+				"source": "providers/nanogpt.kdl:66",
 				"providers": [
 					"nanogpt"
 				],
@@ -9249,7 +9587,7 @@
 				}
 			},
 			{
-				"source": "providers/nanogpt.kdl:68",
+				"source": "providers/nanogpt.kdl:72",
 				"providers": [
 					"nanogpt"
 				],
@@ -9271,7 +9609,7 @@
 				}
 			},
 			{
-				"source": "providers/nanogpt.kdl:73",
+				"source": "providers/nanogpt.kdl:77",
 				"providers": [
 					"nanogpt"
 				],
@@ -9295,7 +9633,7 @@
 				}
 			},
 			{
-				"source": "providers/nanogpt.kdl:77",
+				"source": "providers/nanogpt.kdl:81",
 				"providers": [
 					"nanogpt"
 				],
@@ -9313,7 +9651,7 @@
 				}
 			},
 			{
-				"source": "providers/nanogpt.kdl:82",
+				"source": "providers/nanogpt.kdl:86",
 				"providers": [
 					"nanogpt"
 				],
@@ -9334,7 +9672,7 @@
 				}
 			},
 			{
-				"source": "providers/nanogpt.kdl:88",
+				"source": "providers/nanogpt.kdl:92",
 				"providers": [
 					"nanogpt"
 				],
@@ -9352,7 +9690,7 @@
 				}
 			},
 			{
-				"source": "providers/nanogpt.kdl:93",
+				"source": "providers/nanogpt.kdl:97",
 				"providers": [
 					"nanogpt"
 				],
@@ -9728,6 +10066,9 @@
 					"ollama"
 				],
 				"priority": -1,
+				"wire": {
+					"emptyLengthFinishIsContextError": true
+				},
 				"thinking": {
 					"efforts": [
 						"low",
@@ -9738,7 +10079,7 @@
 				}
 			},
 			{
-				"source": "providers/openai-codex.kdl:8",
+				"source": "providers/openai-codex.kdl:16",
 				"providers": [
 					"openai-codex"
 				],
@@ -9756,13 +10097,13 @@
 					"costPatch": {
 						"input": 5,
 						"output": 30,
-						"cache-read": 0.5,
-						"cache-write": 6.25
+						"cacheRead": 0.5,
+						"cacheWrite": 6.25
 					}
 				}
 			},
 			{
-				"source": "providers/openai-codex.kdl:16",
+				"source": "providers/openai-codex.kdl:24",
 				"providers": [
 					"openai-codex"
 				],
@@ -9780,13 +10121,13 @@
 					"costPatch": {
 						"input": 12.5,
 						"output": 75,
-						"cache-read": 1.25,
-						"cache-write": 15.625
+						"cacheRead": 1.25,
+						"cacheWrite": 15.625
 					}
 				}
 			},
 			{
-				"source": "providers/openai-codex.kdl:25",
+				"source": "providers/openai-codex.kdl:33",
 				"class": "openai",
 				"providers": [
 					"openai-codex"
@@ -9806,7 +10147,7 @@
 				}
 			},
 			{
-				"source": "providers/openai-codex.kdl:30",
+				"source": "providers/openai-codex.kdl:38",
 				"class": "openai",
 				"providers": [
 					"openai-codex"
@@ -9822,7 +10163,7 @@
 				}
 			},
 			{
-				"source": "providers/openai-codex.kdl:33",
+				"source": "providers/openai-codex.kdl:41",
 				"class": "openai",
 				"providers": [
 					"openai-codex"
@@ -9838,7 +10179,7 @@
 				}
 			},
 			{
-				"source": "providers/openai-codex.kdl:38",
+				"source": "providers/openai-codex.kdl:46",
 				"class": "openai",
 				"providers": [
 					"openai-codex"
@@ -9851,12 +10192,13 @@
 				],
 				"catalog": {
 					"serviceTierCost": {
+						"flex": 0.5,
 						"priority": 2.5
 					}
 				}
 			},
 			{
-				"source": "providers/openai-codex.kdl:49",
+				"source": "providers/openai-codex.kdl:58",
 				"class": "openai",
 				"providers": [
 					"openai-codex"
@@ -9877,12 +10219,12 @@
 				"catalog": {
 					"priority": 1,
 					"limitsPatch": {
-						"context-window": 272000
+						"contextWindow": 272000
 					}
 				}
 			},
 			{
-				"source": "providers/openai-codex.kdl:55",
+				"source": "providers/openai-codex.kdl:64",
 				"class": "openai",
 				"providers": [
 					"openai-codex"
@@ -9903,12 +10245,12 @@
 				"catalog": {
 					"priority": 2,
 					"limitsPatch": {
-						"context-window": 272000
+						"contextWindow": 272000
 					}
 				}
 			},
 			{
-				"source": "providers/openai-codex.kdl:47",
+				"source": "providers/openai-codex.kdl:56",
 				"class": "openai",
 				"providers": [
 					"openai-codex"
@@ -9925,7 +10267,7 @@
 				}
 			},
 			{
-				"source": "providers/openai-codex.kdl:65",
+				"source": "providers/openai-codex.kdl:74",
 				"class": "openai",
 				"providers": [
 					"openai-codex"
@@ -9945,7 +10287,7 @@
 				}
 			},
 			{
-				"source": "providers/openai-codex.kdl:71",
+				"source": "providers/openai-codex.kdl:80",
 				"class": "unknown",
 				"providers": [
 					"openai-codex"
@@ -9961,7 +10303,7 @@
 				}
 			},
 			{
-				"source": "providers/openai-codex.kdl:74",
+				"source": "providers/openai-codex.kdl:83",
 				"class": "unknown",
 				"providers": [
 					"openai-codex"
@@ -9977,7 +10319,7 @@
 				}
 			},
 			{
-				"source": "providers/openai-codex.kdl:80",
+				"source": "providers/openai-codex.kdl:89",
 				"providers": [
 					"openai-codex"
 				],
@@ -9998,7 +10340,7 @@
 				}
 			},
 			{
-				"source": "providers/openai-codex.kdl:89",
+				"source": "providers/openai-codex.kdl:98",
 				"providers": [
 					"openai-codex"
 				],
@@ -10023,7 +10365,7 @@
 				}
 			},
 			{
-				"source": "providers/openai-codex.kdl:98",
+				"source": "providers/openai-codex.kdl:107",
 				"providers": [
 					"openai-codex"
 				],
@@ -10044,7 +10386,7 @@
 				}
 			},
 			{
-				"source": "providers/openai-codex.kdl:109",
+				"source": "providers/openai-codex.kdl:118",
 				"providers": [
 					"openai-codex"
 				],
@@ -10067,7 +10409,22 @@
 				}
 			},
 			{
-				"source": "providers/openai.kdl:6",
+				"source": "providers/openai-codex.kdl:3",
+				"providers": [
+					"openai-codex"
+				],
+				"wire": {
+					"harmonyLeakMitigation": true
+				},
+				"catalog": {
+					"serviceTierCost": {
+						"flex": 0.5,
+						"priority": 2
+					}
+				}
+			},
+			{
+				"source": "providers/openai.kdl:10",
 				"class": "unknown",
 				"providers": [
 					"openai"
@@ -10096,7 +10453,7 @@
 				}
 			},
 			{
-				"source": "providers/openai.kdl:10",
+				"source": "providers/openai.kdl:14",
 				"class": "unknown",
 				"providers": [
 					"openai"
@@ -10116,7 +10473,7 @@
 				}
 			},
 			{
-				"source": "providers/openai.kdl:15",
+				"source": "providers/openai.kdl:19",
 				"providers": [
 					"openai"
 				],
@@ -10141,7 +10498,7 @@
 				}
 			},
 			{
-				"source": "providers/openai.kdl:19",
+				"source": "providers/openai.kdl:23",
 				"providers": [
 					"openai"
 				],
@@ -10165,7 +10522,7 @@
 				}
 			},
 			{
-				"source": "providers/openai.kdl:23",
+				"source": "providers/openai.kdl:27",
 				"providers": [
 					"openai"
 				],
@@ -10183,7 +10540,7 @@
 				}
 			},
 			{
-				"source": "providers/openai.kdl:27",
+				"source": "providers/openai.kdl:31",
 				"providers": [
 					"openai"
 				],
@@ -10198,7 +10555,7 @@
 				}
 			},
 			{
-				"source": "providers/openai.kdl:35",
+				"source": "providers/openai.kdl:39",
 				"class": "openai",
 				"providers": [
 					"openai"
@@ -10215,7 +10572,7 @@
 				}
 			},
 			{
-				"source": "providers/openai.kdl:39",
+				"source": "providers/openai.kdl:43",
 				"class": "openai",
 				"providers": [
 					"openai"
@@ -10235,7 +10592,7 @@
 				}
 			},
 			{
-				"source": "providers/openai.kdl:44",
+				"source": "providers/openai.kdl:48",
 				"providers": [
 					"openai"
 				],
@@ -10264,7 +10621,7 @@
 				}
 			},
 			{
-				"source": "providers/openai.kdl:53",
+				"source": "providers/openai.kdl:57",
 				"providers": [
 					"openai"
 				],
@@ -10285,7 +10642,7 @@
 				}
 			},
 			{
-				"source": "providers/openai.kdl:62",
+				"source": "providers/openai.kdl:66",
 				"providers": [
 					"openai"
 				],
@@ -10306,7 +10663,7 @@
 				}
 			},
 			{
-				"source": "providers/openai.kdl:73",
+				"source": "providers/openai.kdl:77",
 				"providers": [
 					"openai"
 				],
@@ -10331,12 +10688,16 @@
 				"providers": [
 					"openai"
 				],
+				"wire": {
+					"supportsStrictMode": true,
+					"usesOpenAIToolCallIdLimit": true
+				},
 				"thinking": {
 					"mode": "effort"
 				}
 			},
 			{
-				"source": "providers/opencode-go.kdl:6",
+				"source": "providers/opencode-go.kdl:15",
 				"class": "deepseek",
 				"providers": [
 					"opencode-go"
@@ -10347,7 +10708,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-go.kdl:4",
+				"source": "providers/opencode-go.kdl:13",
 				"class": "deepseek",
 				"providers": [
 					"opencode-go"
@@ -10357,7 +10718,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-go.kdl:11",
+				"source": "providers/opencode-go.kdl:20",
 				"providers": [
 					"opencode-go"
 				],
@@ -10372,7 +10733,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-go.kdl:17",
+				"source": "providers/opencode-go.kdl:26",
 				"providers": [
 					"opencode-go"
 				],
@@ -10394,7 +10755,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-go.kdl:23",
+				"source": "providers/opencode-go.kdl:32",
 				"class": "glm",
 				"providers": [
 					"opencode-go"
@@ -10404,7 +10765,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-go.kdl:26",
+				"source": "providers/opencode-go.kdl:35",
 				"class": "kimi",
 				"providers": [
 					"opencode-go"
@@ -10414,7 +10775,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-go.kdl:30",
+				"source": "providers/opencode-go.kdl:39",
 				"class": "mimo",
 				"providers": [
 					"opencode-go"
@@ -10425,7 +10786,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-go.kdl:29",
+				"source": "providers/opencode-go.kdl:38",
 				"class": "mimo",
 				"providers": [
 					"opencode-go"
@@ -10435,7 +10796,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-go.kdl:37",
+				"source": "providers/opencode-go.kdl:46",
 				"class": "qwen",
 				"providers": [
 					"opencode-go"
@@ -10461,7 +10822,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-go.kdl:41",
+				"source": "providers/opencode-go.kdl:50",
 				"class": "qwen",
 				"providers": [
 					"opencode-go"
@@ -10487,7 +10848,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-go.kdl:47",
+				"source": "providers/opencode-go.kdl:56",
 				"providers": [
 					"opencode-go"
 				],
@@ -10512,7 +10873,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-go.kdl:52",
+				"source": "providers/opencode-go.kdl:61",
 				"providers": [
 					"opencode-go"
 				],
@@ -10532,7 +10893,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-go.kdl:57",
+				"source": "providers/opencode-go.kdl:66",
 				"providers": [
 					"opencode-go"
 				],
@@ -10554,7 +10915,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-go.kdl:62",
+				"source": "providers/opencode-go.kdl:71",
 				"providers": [
 					"opencode-go"
 				],
@@ -10575,7 +10936,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-go.kdl:66",
+				"source": "providers/opencode-go.kdl:75",
 				"providers": [
 					"opencode-go"
 				],
@@ -10602,7 +10963,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-go.kdl:70",
+				"source": "providers/opencode-go.kdl:79",
 				"providers": [
 					"opencode-go"
 				],
@@ -10624,7 +10985,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-go.kdl:75",
+				"source": "providers/opencode-go.kdl:84",
 				"providers": [
 					"opencode-go"
 				],
@@ -10639,7 +11000,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-go.kdl:79",
+				"source": "providers/opencode-go.kdl:88",
 				"providers": [
 					"opencode-go"
 				],
@@ -10650,11 +11011,32 @@
 					}
 				],
 				"thinking": {
+					"effortMap": {
+						"low": "adaptive",
+						"medium": "adaptive",
+						"high": "adaptive"
+					},
 					"mode": "anthropic-adaptive"
 				}
 			},
 			{
-				"source": "providers/opencode-zen.kdl:5",
+				"source": "providers/opencode-go.kdl:3",
+				"providers": [
+					"opencode-go"
+				],
+				"wire": {
+					"whenThinking": {
+						"requiresReasoningContentForToolCalls": true,
+						"allowsSyntheticReasoningContentForToolCalls": false,
+						"reasoningContentField": "reasoning_content"
+					}
+				},
+				"catalog": {
+					"longUsageLimitFallback": true
+				}
+			},
+			{
+				"source": "providers/opencode-zen.kdl:16",
 				"class": "anthropic",
 				"providers": [
 					"opencode-zen"
@@ -10680,7 +11062,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-zen.kdl:9",
+				"source": "providers/opencode-zen.kdl:20",
 				"class": "deepseek",
 				"providers": [
 					"opencode-zen"
@@ -10690,7 +11072,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-zen.kdl:12",
+				"source": "providers/opencode-zen.kdl:23",
 				"class": "glm",
 				"providers": [
 					"opencode-zen"
@@ -10700,7 +11082,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-zen.kdl:15",
+				"source": "providers/opencode-zen.kdl:26",
 				"class": "kimi",
 				"providers": [
 					"opencode-zen"
@@ -10710,7 +11092,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-zen.kdl:19",
+				"source": "providers/opencode-zen.kdl:30",
 				"class": "mimo",
 				"providers": [
 					"opencode-zen"
@@ -10721,7 +11103,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-zen.kdl:24",
+				"source": "providers/opencode-zen.kdl:35",
 				"class": "minimax",
 				"providers": [
 					"opencode-zen"
@@ -10732,7 +11114,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-zen.kdl:29",
+				"source": "providers/opencode-zen.kdl:40",
 				"class": "openai",
 				"providers": [
 					"opencode-zen"
@@ -10752,7 +11134,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-zen.kdl:33",
+				"source": "providers/opencode-zen.kdl:44",
 				"class": "unknown",
 				"providers": [
 					"opencode-zen"
@@ -10762,7 +11144,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-zen.kdl:37",
+				"source": "providers/opencode-zen.kdl:48",
 				"class": "xai",
 				"providers": [
 					"opencode-zen"
@@ -10773,7 +11155,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-zen.kdl:42",
+				"source": "providers/opencode-zen.kdl:53",
 				"providers": [
 					"opencode-zen"
 				],
@@ -10795,7 +11177,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-zen.kdl:47",
+				"source": "providers/opencode-zen.kdl:58",
 				"providers": [
 					"opencode-zen"
 				],
@@ -10813,7 +11195,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-zen.kdl:51",
+				"source": "providers/opencode-zen.kdl:62",
 				"providers": [
 					"opencode-zen"
 				],
@@ -10870,7 +11252,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-zen.kdl:56",
+				"source": "providers/opencode-zen.kdl:67",
 				"providers": [
 					"opencode-zen"
 				],
@@ -10891,7 +11273,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-zen.kdl:60",
+				"source": "providers/opencode-zen.kdl:71",
 				"providers": [
 					"opencode-zen"
 				],
@@ -10915,7 +11297,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-zen.kdl:64",
+				"source": "providers/opencode-zen.kdl:75",
 				"providers": [
 					"opencode-zen"
 				],
@@ -10933,7 +11315,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-zen.kdl:68",
+				"source": "providers/opencode-zen.kdl:79",
 				"providers": [
 					"opencode-zen"
 				],
@@ -10956,7 +11338,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-zen.kdl:73",
+				"source": "providers/opencode-zen.kdl:84",
 				"providers": [
 					"opencode-zen"
 				],
@@ -10980,7 +11362,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-zen.kdl:78",
+				"source": "providers/opencode-zen.kdl:89",
 				"providers": [
 					"opencode-zen"
 				],
@@ -10991,11 +11373,16 @@
 					}
 				],
 				"thinking": {
+					"effortMap": {
+						"low": "adaptive",
+						"medium": "adaptive",
+						"high": "adaptive"
+					},
 					"mode": "anthropic-adaptive"
 				}
 			},
 			{
-				"source": "providers/opencode-zen.kdl:82",
+				"source": "providers/opencode-zen.kdl:99",
 				"providers": [
 					"opencode-zen"
 				],
@@ -11016,16 +11403,31 @@
 				}
 			},
 			{
-				"source": "providers/opencode.kdl:3",
+				"source": "providers/opencode-zen.kdl:3",
 				"providers": [
-					"opencode"
+					"opencode-zen"
 				],
-				"thinking": {
-					"mode": "effort"
+				"wire": {
+					"whenThinking": {
+						"requiresReasoningContentForToolCalls": true,
+						"allowsSyntheticReasoningContentForToolCalls": false,
+						"reasoningContentField": "reasoning_content"
+					},
+					"supportsContextManagement": false
 				}
 			},
 			{
-				"source": "providers/openrouter.kdl:7",
+				"source": "providers/openrouter.kdl:10",
+				"class": "anthropic",
+				"providers": [
+					"openrouter"
+				],
+				"wire": {
+					"retryWithoutStrictOnGrammarError": true
+				}
+			},
+			{
+				"source": "providers/openrouter.kdl:17",
 				"class": "minimax",
 				"providers": [
 					"openrouter"
@@ -11041,7 +11443,7 @@
 				}
 			},
 			{
-				"source": "providers/openrouter.kdl:12",
+				"source": "providers/openrouter.kdl:22",
 				"class": "openai",
 				"providers": [
 					"openrouter"
@@ -11057,7 +11459,7 @@
 				}
 			},
 			{
-				"source": "providers/openrouter.kdl:17",
+				"source": "providers/openrouter.kdl:27",
 				"class": "stepfun",
 				"providers": [
 					"openrouter"
@@ -11073,7 +11475,7 @@
 				}
 			},
 			{
-				"source": "providers/openrouter.kdl:21",
+				"source": "providers/openrouter.kdl:31",
 				"class": "unknown",
 				"providers": [
 					"openrouter"
@@ -11088,7 +11490,7 @@
 				}
 			},
 			{
-				"source": "providers/openrouter.kdl:25",
+				"source": "providers/openrouter.kdl:35",
 				"providers": [
 					"openrouter"
 				],
@@ -11115,7 +11517,7 @@
 				}
 			},
 			{
-				"source": "providers/openrouter.kdl:30",
+				"source": "providers/openrouter.kdl:40",
 				"providers": [
 					"openrouter"
 				],
@@ -11136,7 +11538,7 @@
 				}
 			},
 			{
-				"source": "providers/openrouter.kdl:34",
+				"source": "providers/openrouter.kdl:44",
 				"providers": [
 					"openrouter"
 				],
@@ -11154,7 +11556,7 @@
 				}
 			},
 			{
-				"source": "providers/openrouter.kdl:38",
+				"source": "providers/openrouter.kdl:48",
 				"providers": [
 					"openrouter"
 				],
@@ -11179,7 +11581,7 @@
 				}
 			},
 			{
-				"source": "providers/openrouter.kdl:43",
+				"source": "providers/openrouter.kdl:53",
 				"providers": [
 					"openrouter"
 				],
@@ -11194,7 +11596,7 @@
 				}
 			},
 			{
-				"source": "providers/openrouter.kdl:47",
+				"source": "providers/openrouter.kdl:57",
 				"providers": [
 					"openrouter"
 				],
@@ -11262,7 +11664,7 @@
 				}
 			},
 			{
-				"source": "providers/openrouter.kdl:53",
+				"source": "providers/openrouter.kdl:63",
 				"providers": [
 					"openrouter"
 				],
@@ -11288,6 +11690,8 @@
 					"openrouter"
 				],
 				"wire": {
+					"wireModelIdMode": "openrouter",
+					"supportsStrictMode": true,
 					"thinkingFormat": "openrouter"
 				},
 				"thinking": {
@@ -11401,7 +11805,7 @@
 				}
 			},
 			{
-				"source": "providers/together.kdl:5",
+				"source": "providers/together.kdl:7",
 				"class": "unknown",
 				"providers": [
 					"together"
@@ -11417,7 +11821,7 @@
 				}
 			},
 			{
-				"source": "providers/together.kdl:9",
+				"source": "providers/together.kdl:11",
 				"providers": [
 					"together"
 				],
@@ -11432,7 +11836,7 @@
 				}
 			},
 			{
-				"source": "providers/together.kdl:13",
+				"source": "providers/together.kdl:15",
 				"providers": [
 					"together"
 				],
@@ -11461,7 +11865,7 @@
 				}
 			},
 			{
-				"source": "providers/together.kdl:17",
+				"source": "providers/together.kdl:19",
 				"providers": [
 					"together"
 				],
@@ -11486,12 +11890,15 @@
 				"providers": [
 					"together"
 				],
+				"wire": {
+					"supportsStrictMode": true
+				},
 				"thinking": {
 					"mode": "effort"
 				}
 			},
 			{
-				"source": "providers/umans.kdl:6",
+				"source": "providers/umans.kdl:7",
 				"providers": [
 					"umans"
 				],
@@ -11518,7 +11925,7 @@
 				}
 			},
 			{
-				"source": "providers/umans.kdl:12",
+				"source": "providers/umans.kdl:13",
 				"providers": [
 					"umans"
 				],
@@ -11543,7 +11950,7 @@
 				}
 			},
 			{
-				"source": "providers/umans.kdl:18",
+				"source": "providers/umans.kdl:19",
 				"providers": [
 					"umans"
 				],
@@ -11569,7 +11976,7 @@
 				}
 			},
 			{
-				"source": "providers/umans.kdl:23",
+				"source": "providers/umans.kdl:24",
 				"providers": [
 					"umans"
 				],
@@ -11597,7 +12004,17 @@
 				}
 			},
 			{
-				"source": "providers/venice.kdl:7",
+				"source": "providers/venice.kdl:4",
+				"class": "qwen",
+				"providers": [
+					"venice"
+				],
+				"wire": {
+					"thinkingFormat": "openai"
+				}
+			},
+			{
+				"source": "providers/venice.kdl:11",
 				"class": "gemini",
 				"providers": [
 					"venice"
@@ -11617,7 +12034,7 @@
 				}
 			},
 			{
-				"source": "providers/venice.kdl:10",
+				"source": "providers/venice.kdl:14",
 				"class": "gemini",
 				"providers": [
 					"venice"
@@ -11645,7 +12062,7 @@
 				}
 			},
 			{
-				"source": "providers/venice.kdl:15",
+				"source": "providers/venice.kdl:19",
 				"class": "unknown",
 				"providers": [
 					"venice"
@@ -11661,7 +12078,7 @@
 				}
 			},
 			{
-				"source": "providers/venice.kdl:19",
+				"source": "providers/venice.kdl:23",
 				"providers": [
 					"venice"
 				],
@@ -11676,7 +12093,7 @@
 				}
 			},
 			{
-				"source": "providers/venice.kdl:23",
+				"source": "providers/venice.kdl:27",
 				"providers": [
 					"venice"
 				],
@@ -11691,7 +12108,7 @@
 				}
 			},
 			{
-				"source": "providers/venice.kdl:27",
+				"source": "providers/venice.kdl:31",
 				"providers": [
 					"venice"
 				],
@@ -11711,7 +12128,7 @@
 				}
 			},
 			{
-				"source": "providers/venice.kdl:31",
+				"source": "providers/venice.kdl:35",
 				"providers": [
 					"venice"
 				],
@@ -11729,7 +12146,7 @@
 				}
 			},
 			{
-				"source": "providers/venice.kdl:35",
+				"source": "providers/venice.kdl:39",
 				"providers": [
 					"venice"
 				],
@@ -11744,7 +12161,7 @@
 				}
 			},
 			{
-				"source": "providers/venice.kdl:39",
+				"source": "providers/venice.kdl:43",
 				"providers": [
 					"venice"
 				],
@@ -12060,6 +12477,16 @@
 				}
 			},
 			{
+				"source": "providers/vllm.kdl:4",
+				"class": "qwen",
+				"providers": [
+					"vllm"
+				],
+				"wire": {
+					"thinkingFormat": "qwen-chat-template"
+				}
+			},
+			{
 				"source": "providers/wafer-serverless.kdl:5",
 				"class": "glm",
 				"providers": [
@@ -12192,7 +12619,7 @@
 				}
 			},
 			{
-				"source": "providers/xai-oauth.kdl:18",
+				"source": "providers/xai-oauth.kdl:23",
 				"class": "xai",
 				"providers": [
 					"xai-oauth"
@@ -12213,7 +12640,7 @@
 				}
 			},
 			{
-				"source": "providers/xai-oauth.kdl:21",
+				"source": "providers/xai-oauth.kdl:26",
 				"class": "xai",
 				"providers": [
 					"xai-oauth"
@@ -12235,7 +12662,7 @@
 				}
 			},
 			{
-				"source": "providers/xai-oauth.kdl:5",
+				"source": "providers/xai-oauth.kdl:10",
 				"class": "xai",
 				"providers": [
 					"xai-oauth"
@@ -12257,7 +12684,7 @@
 				}
 			},
 			{
-				"source": "providers/xai-oauth.kdl:28",
+				"source": "providers/xai-oauth.kdl:33",
 				"providers": [
 					"xai-oauth"
 				],
@@ -12277,7 +12704,7 @@
 				}
 			},
 			{
-				"source": "providers/xai-oauth.kdl:33",
+				"source": "providers/xai-oauth.kdl:38",
 				"providers": [
 					"xai-oauth"
 				],
@@ -12299,7 +12726,7 @@
 				}
 			},
 			{
-				"source": "providers/xai-oauth.kdl:39",
+				"source": "providers/xai-oauth.kdl:44",
 				"providers": [
 					"xai-oauth"
 				],
@@ -12315,7 +12742,17 @@
 				}
 			},
 			{
-				"source": "providers/xai.kdl:5",
+				"source": "providers/xai-oauth.kdl:3",
+				"providers": [
+					"xai-oauth"
+				],
+				"wire": {
+					"promptCacheSessionHeader": "x-grok-conv-id",
+					"rejectRootObjectUnion": true
+				}
+			},
+			{
+				"source": "providers/xai.kdl:10",
 				"class": "xai",
 				"providers": [
 					"xai"
@@ -12336,7 +12773,7 @@
 				}
 			},
 			{
-				"source": "providers/xai.kdl:25",
+				"source": "providers/xai.kdl:30",
 				"providers": [
 					"xai"
 				],
@@ -12368,7 +12805,7 @@
 				}
 			},
 			{
-				"source": "providers/xai.kdl:29",
+				"source": "providers/xai.kdl:34",
 				"providers": [
 					"xai"
 				],
@@ -12390,7 +12827,7 @@
 				}
 			},
 			{
-				"source": "providers/xai.kdl:36",
+				"source": "providers/xai.kdl:41",
 				"providers": [
 					"xai"
 				],
@@ -12418,7 +12855,7 @@
 				}
 			},
 			{
-				"source": "providers/xai.kdl:42",
+				"source": "providers/xai.kdl:47",
 				"providers": [
 					"xai"
 				],
@@ -12434,6 +12871,16 @@
 				],
 				"thinking": {
 					"requiresEffort": true
+				}
+			},
+			{
+				"source": "providers/xai.kdl:3",
+				"providers": [
+					"xai"
+				],
+				"wire": {
+					"promptCacheSessionHeader": "x-grok-conv-id",
+					"rejectRootObjectUnion": true
 				}
 			},
 			{
@@ -12548,7 +12995,7 @@
 				}
 			},
 			{
-				"source": "providers/zai.kdl:5",
+				"source": "providers/zai.kdl:7",
 				"class": "glm",
 				"providers": [
 					"zai"
@@ -12566,7 +13013,7 @@
 				}
 			},
 			{
-				"source": "providers/zai.kdl:9",
+				"source": "providers/zai.kdl:11",
 				"class": "glm",
 				"providers": [
 					"zai"
@@ -12584,7 +13031,7 @@
 				}
 			},
 			{
-				"source": "providers/zai.kdl:15",
+				"source": "providers/zai.kdl:17",
 				"providers": [
 					"zai"
 				],
@@ -12626,7 +13073,7 @@
 				}
 			},
 			{
-				"source": "providers/zai.kdl:20",
+				"source": "providers/zai.kdl:22",
 				"providers": [
 					"zai"
 				],
@@ -12645,7 +13092,7 @@
 				}
 			},
 			{
-				"source": "providers/zai.kdl:27",
+				"source": "providers/zai.kdl:29",
 				"providers": [
 					"zai"
 				],
@@ -12660,7 +13107,16 @@
 				}
 			},
 			{
-				"source": "providers/zenmux.kdl:5",
+				"source": "providers/zai.kdl:3",
+				"providers": [
+					"zai"
+				],
+				"wire": {
+					"requiresToolResultId": true
+				}
+			},
+			{
+				"source": "providers/zenmux.kdl:7",
 				"class": "anthropic",
 				"providers": [
 					"zenmux"
@@ -12686,7 +13142,7 @@
 				}
 			},
 			{
-				"source": "providers/zenmux.kdl:10",
+				"source": "providers/zenmux.kdl:12",
 				"class": "baidu",
 				"providers": [
 					"zenmux"
@@ -12697,7 +13153,7 @@
 				}
 			},
 			{
-				"source": "providers/zenmux.kdl:15",
+				"source": "providers/zenmux.kdl:17",
 				"class": "bytedance",
 				"providers": [
 					"zenmux"
@@ -12708,7 +13164,7 @@
 				}
 			},
 			{
-				"source": "providers/zenmux.kdl:19",
+				"source": "providers/zenmux.kdl:21",
 				"class": "deepseek",
 				"providers": [
 					"zenmux"
@@ -12718,7 +13174,7 @@
 				}
 			},
 			{
-				"source": "providers/zenmux.kdl:23",
+				"source": "providers/zenmux.kdl:25",
 				"class": "gemini",
 				"providers": [
 					"zenmux"
@@ -12738,7 +13194,7 @@
 				}
 			},
 			{
-				"source": "providers/zenmux.kdl:29",
+				"source": "providers/zenmux.kdl:31",
 				"class": "glm",
 				"providers": [
 					"zenmux"
@@ -12755,7 +13211,7 @@
 				}
 			},
 			{
-				"source": "providers/zenmux.kdl:32",
+				"source": "providers/zenmux.kdl:34",
 				"class": "glm",
 				"providers": [
 					"zenmux"
@@ -12772,7 +13228,7 @@
 				}
 			},
 			{
-				"source": "providers/zenmux.kdl:27",
+				"source": "providers/zenmux.kdl:29",
 				"class": "glm",
 				"providers": [
 					"zenmux"
@@ -12782,7 +13238,7 @@
 				}
 			},
 			{
-				"source": "providers/zenmux.kdl:36",
+				"source": "providers/zenmux.kdl:38",
 				"class": "kimi",
 				"providers": [
 					"zenmux"
@@ -12792,7 +13248,7 @@
 				}
 			},
 			{
-				"source": "providers/zenmux.kdl:40",
+				"source": "providers/zenmux.kdl:42",
 				"class": "mimo",
 				"providers": [
 					"zenmux"
@@ -12803,7 +13259,7 @@
 				}
 			},
 			{
-				"source": "providers/zenmux.kdl:44",
+				"source": "providers/zenmux.kdl:46",
 				"class": "minimax",
 				"providers": [
 					"zenmux"
@@ -12813,7 +13269,7 @@
 				}
 			},
 			{
-				"source": "providers/zenmux.kdl:48",
+				"source": "providers/zenmux.kdl:50",
 				"class": "openai",
 				"providers": [
 					"zenmux"
@@ -12833,7 +13289,7 @@
 				}
 			},
 			{
-				"source": "providers/zenmux.kdl:53",
+				"source": "providers/zenmux.kdl:55",
 				"class": "qwen",
 				"providers": [
 					"zenmux"
@@ -12853,7 +13309,7 @@
 				}
 			},
 			{
-				"source": "providers/zenmux.kdl:58",
+				"source": "providers/zenmux.kdl:60",
 				"class": "stepfun",
 				"providers": [
 					"zenmux"
@@ -12864,7 +13320,7 @@
 				}
 			},
 			{
-				"source": "providers/zenmux.kdl:62",
+				"source": "providers/zenmux.kdl:64",
 				"class": "unknown",
 				"providers": [
 					"zenmux"
@@ -12881,7 +13337,7 @@
 				}
 			},
 			{
-				"source": "providers/zenmux.kdl:67",
+				"source": "providers/zenmux.kdl:69",
 				"class": "xai",
 				"providers": [
 					"zenmux"
@@ -12892,7 +13348,7 @@
 				}
 			},
 			{
-				"source": "providers/zenmux.kdl:72",
+				"source": "providers/zenmux.kdl:74",
 				"providers": [
 					"zenmux"
 				],
@@ -12911,7 +13367,7 @@
 				}
 			},
 			{
-				"source": "providers/zenmux.kdl:76",
+				"source": "providers/zenmux.kdl:78",
 				"providers": [
 					"zenmux"
 				],
@@ -12932,7 +13388,7 @@
 				}
 			},
 			{
-				"source": "providers/zenmux.kdl:81",
+				"source": "providers/zenmux.kdl:83",
 				"providers": [
 					"zenmux"
 				],
@@ -12954,7 +13410,7 @@
 				}
 			},
 			{
-				"source": "providers/zenmux.kdl:87",
+				"source": "providers/zenmux.kdl:89",
 				"providers": [
 					"zenmux"
 				],
@@ -12969,7 +13425,7 @@
 				}
 			},
 			{
-				"source": "providers/zenmux.kdl:91",
+				"source": "providers/zenmux.kdl:93",
 				"providers": [
 					"zenmux"
 				],
@@ -12989,7 +13445,7 @@
 				}
 			},
 			{
-				"source": "providers/zenmux.kdl:95",
+				"source": "providers/zenmux.kdl:97",
 				"providers": [
 					"zenmux"
 				],
@@ -13007,7 +13463,7 @@
 				}
 			},
 			{
-				"source": "providers/zenmux.kdl:99",
+				"source": "providers/zenmux.kdl:101",
 				"providers": [
 					"zenmux"
 				],
@@ -13048,7 +13504,7 @@
 				}
 			},
 			{
-				"source": "providers/zenmux.kdl:103",
+				"source": "providers/zenmux.kdl:105",
 				"providers": [
 					"zenmux"
 				],
@@ -13069,7 +13525,16 @@
 				}
 			},
 			{
-				"source": "providers/zhipu-coding-plan.kdl:8",
+				"source": "providers/zenmux.kdl:3",
+				"providers": [
+					"zenmux"
+				],
+				"wire": {
+					"supportsStrictMode": true
+				}
+			},
+			{
+				"source": "providers/zhipu-coding-plan.kdl:10",
 				"class": "glm",
 				"providers": [
 					"zhipu-coding-plan"
@@ -13083,7 +13548,7 @@
 				}
 			},
 			{
-				"source": "providers/zhipu-coding-plan.kdl:12",
+				"source": "providers/zhipu-coding-plan.kdl:14",
 				"class": "glm",
 				"providers": [
 					"zhipu-coding-plan"
@@ -13103,7 +13568,7 @@
 				}
 			},
 			{
-				"source": "providers/zhipu-coding-plan.kdl:16",
+				"source": "providers/zhipu-coding-plan.kdl:18",
 				"class": "glm",
 				"providers": [
 					"zhipu-coding-plan"
@@ -13124,7 +13589,7 @@
 				}
 			},
 			{
-				"source": "providers/zhipu-coding-plan.kdl:4",
+				"source": "providers/zhipu-coding-plan.kdl:6",
 				"class": "glm",
 				"providers": [
 					"zhipu-coding-plan"
@@ -13134,7 +13599,7 @@
 				}
 			},
 			{
-				"source": "providers/zhipu-coding-plan.kdl:24",
+				"source": "providers/zhipu-coding-plan.kdl:26",
 				"providers": [
 					"zhipu-coding-plan"
 				],
@@ -13158,7 +13623,7 @@
 				}
 			},
 			{
-				"source": "providers/zhipu-coding-plan.kdl:28",
+				"source": "providers/zhipu-coding-plan.kdl:30",
 				"providers": [
 					"zhipu-coding-plan"
 				],
@@ -13175,7 +13640,7 @@
 				}
 			},
 			{
-				"source": "providers/zhipu-coding-plan.kdl:34",
+				"source": "providers/zhipu-coding-plan.kdl:36",
 				"providers": [
 					"zhipu-coding-plan"
 				],
@@ -13208,7 +13673,7 @@
 				}
 			},
 			{
-				"source": "providers/zhipu-coding-plan.kdl:41",
+				"source": "providers/zhipu-coding-plan.kdl:43",
 				"providers": [
 					"zhipu-coding-plan"
 				],
@@ -13228,6 +13693,15 @@
 						"high",
 						"max"
 					]
+				}
+			},
+			{
+				"source": "providers/zhipu-coding-plan.kdl:3",
+				"providers": [
+					"zhipu-coding-plan"
+				],
+				"wire": {
+					"thinkingFormat": "zai"
 				}
 			}
 		]
@@ -13444,6 +13918,36 @@
 						"stripPrefix": false
 					}
 				]
+			},
+			{
+				"provider": "gitlab-duo",
+				"routes": [
+					{
+						"api": "anthropic-messages",
+						"match": {
+							"prefix": [
+								"duo-chat-opus-",
+								"duo-chat-sonnet-",
+								"duo-chat-haiku-",
+								"claude-opus-",
+								"claude-sonnet-",
+								"claude-haiku-"
+							]
+						}
+					},
+					{
+						"api": "openai-responses",
+						"match": {
+							"exact": [
+								"duo-chat-gpt-5-codex",
+								"duo-chat-gpt-5-2-codex",
+								"gpt-5-codex",
+								"gpt-5.2-codex"
+							]
+						}
+					}
+				],
+				"default": "openai-completions"
 			},
 			{
 				"provider": "github-copilot",
@@ -13853,6 +14357,11 @@
 					]
 				}
 			}
+		],
+		"retiredProviders": [
+			"wafer-pass",
+			"wandb",
+			"opencode"
 		],
 		"planRequirements": [
 			{

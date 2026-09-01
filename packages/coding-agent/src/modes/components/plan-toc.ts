@@ -51,6 +51,7 @@ export function stripInlineMarkdown(text: string): string {
 export function parsePlanSections(text: string): PlanSection[] {
 	const lines = text.split("\n");
 	// Character offset of each line start so section `raw` can slice the source.
+	// oxlint-disable-next-line unicorn/no-new-array -- length preallocation
 	const offsets: number[] = new Array(lines.length);
 	let cursor = 0;
 	for (let i = 0; i < lines.length; i++) {

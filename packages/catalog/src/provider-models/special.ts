@@ -1,10 +1,14 @@
 import { once } from "@oh-my-pi/pi-utils";
+import { buildModel } from "../build";
+import { apiRouteFor } from "../compat/behavior";
 import { type CodexModelDiscoveryResult, fetchCodexModels } from "../discovery/codex";
 import type { DevinModelDiscoveryOptions } from "../discovery/devin";
 import { buildGitLabDuoWorkflowFallbackModel, fetchGitLabDuoWorkflowModels } from "../discovery/gitlab-duo-workflow";
 import type { ModelManagerOptions } from "../model-manager";
-import type { FetchImpl, ModelSpec } from "../types";
+import { getBundledModel } from "../models";
+import type { Api, FetchImpl, Model, ModelSpec } from "../types";
 import { DEVIN_DEFAULT_BASE_URL } from "../wire/devin";
+import { toModelSpec } from "./bundled-references";
 import { resolveModelCacheProviderId } from "./cache-provider-id";
 
 // ---------------------------------------------------------------------------
@@ -113,6 +117,131 @@ export function cursorModelManagerOptions(config: CursorModelManagerConfig = {})
 }
 
 const cursorDiscovery = once(() => import("../discovery/cursor"));
+
+// ---------------------------------------------------------------------------
+// GitLab Duo Chat
+// ---------------------------------------------------------------------------
+
+const GITLAB_DUO_ANTHROPIC_BASE_URL = "https://cloud.gitlab.com/ai/v1/proxy/anthropic/";
+const GITLAB_DUO_OPENAI_BASE_URL = "https://cloud.gitlab.com/ai/v1/proxy/openai/v1";
+
+export type GitLabDuoModelIdentity = {
+	upstreamModelId: string;
+	referenceProvider: "anthropic" | "openai";
+	referenceModelId: string;
+};
+
+/**
+ * Duo's public aliases are deployment identity, not model metadata. The
+ * reference ids select bundled first-party rows; capabilities, prices, and
+ * limits are copied from those rows rather than repeated here.
+ */
+const GITLAB_DUO_MODEL_IDENTITIES: Readonly<Record<string, GitLabDuoModelIdentity>> = {
+	"duo-chat-opus-4-6": {
+		upstreamModelId: "claude-opus-4-6",
+		referenceProvider: "anthropic",
+		referenceModelId: "claude-opus-4-6",
+	},
+	"duo-chat-sonnet-4-6": {
+		upstreamModelId: "claude-sonnet-4-6",
+		referenceProvider: "anthropic",
+		referenceModelId: "claude-sonnet-4-6",
+	},
+	"duo-chat-opus-4-5": {
+		upstreamModelId: "claude-opus-4-5-20251101",
+		referenceProvider: "anthropic",
+		referenceModelId: "claude-opus-4-5-20251101",
+	},
+	"duo-chat-sonnet-4-5": {
+		upstreamModelId: "claude-sonnet-4-5-20250929",
+		referenceProvider: "anthropic",
+		referenceModelId: "claude-sonnet-4-5-20250929",
+	},
+	"duo-chat-haiku-4-5": {
+		upstreamModelId: "claude-haiku-4-5-20251001",
+		referenceProvider: "anthropic",
+		referenceModelId: "claude-haiku-4-5-20251001",
+	},
+	"duo-chat-gpt-5-1": {
+		upstreamModelId: "gpt-5.1-2025-11-13",
+		referenceProvider: "openai",
+		referenceModelId: "gpt-5.1",
+	},
+	"duo-chat-gpt-5-2": {
+		upstreamModelId: "gpt-5.2-2025-12-11",
+		referenceProvider: "openai",
+		referenceModelId: "gpt-5.2",
+	},
+	"duo-chat-gpt-5-mini": {
+		upstreamModelId: "gpt-5-mini-2025-08-07",
+		referenceProvider: "openai",
+		referenceModelId: "gpt-5-mini",
+	},
+	"duo-chat-gpt-5-codex": {
+		upstreamModelId: "gpt-5-codex",
+		referenceProvider: "openai",
+		referenceModelId: "gpt-5-codex",
+	},
+	"duo-chat-gpt-5-2-codex": {
+		upstreamModelId: "gpt-5.2-codex",
+		referenceProvider: "openai",
+		referenceModelId: "gpt-5.2-codex",
+	},
+};
+
+export function resolveGitLabDuoModelIdentity(modelId: string): GitLabDuoModelIdentity | undefined {
+	const direct = GITLAB_DUO_MODEL_IDENTITIES[modelId];
+	if (direct) return direct;
+	for (const alias in GITLAB_DUO_MODEL_IDENTITIES) {
+		const identity = GITLAB_DUO_MODEL_IDENTITIES[alias];
+		if (identity?.upstreamModelId === modelId) return identity;
+	}
+	return undefined;
+}
+
+function gitLabDuoDisplayName(alias: string): string {
+	const parts = alias.slice("duo-chat-".length).split("-");
+	const family = parts.shift();
+	if (!family) return alias;
+	const numeric: string[] = [];
+	while (parts[0] !== undefined && /^\d+$/.test(parts[0])) {
+		const part = parts.shift();
+		if (part !== undefined) numeric.push(part);
+	}
+	const familyName = family === "gpt" ? "GPT" : `${family[0]?.toUpperCase() ?? ""}${family.slice(1)}`;
+	const version = numeric.length > 0 ? `${family === "gpt" ? "-" : " "}${numeric.join(".")}` : "";
+	const suffix = parts.map(part => `${part[0]?.toUpperCase() ?? ""}${part.slice(1)}`).join(" ");
+	return `Duo Chat ${familyName}${version}${suffix ? ` ${suffix}` : ""}`;
+}
+
+export function getGitLabDuoModels(): Model<Api>[] {
+	const models: Model<Api>[] = [];
+	for (const alias in GITLAB_DUO_MODEL_IDENTITIES) {
+		const identity = GITLAB_DUO_MODEL_IDENTITIES[alias];
+		if (!identity) continue;
+		const reference = getBundledModel(identity.referenceProvider, identity.referenceModelId);
+		if (!reference) {
+			throw new Error(
+				`Missing bundled ${identity.referenceProvider}/${identity.referenceModelId} reference for ${alias}`,
+			);
+		}
+		const route = apiRouteFor("gitlab-duo", alias)?.api;
+		if (route !== "anthropic-messages" && route !== "openai-completions" && route !== "openai-responses") {
+			throw new Error(`Missing GitLab Duo API route for ${alias}`);
+		}
+		models.push(
+			buildModel({
+				...toModelSpec(reference),
+				id: alias,
+				name: gitLabDuoDisplayName(alias),
+				api: route,
+				provider: "gitlab-duo",
+				baseUrl: route === "anthropic-messages" ? GITLAB_DUO_ANTHROPIC_BASE_URL : GITLAB_DUO_OPENAI_BASE_URL,
+			}),
+		);
+	}
+	return models;
+}
 
 // ---------------------------------------------------------------------------
 // GitLab Duo Workflow

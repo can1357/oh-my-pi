@@ -31,6 +31,12 @@ export interface AxisDef {
 	records?: readonly CompatRecordName[];
 	/** Closed value vocabulary for string scalars / string arrays. */
 	values?: readonly string[];
+	/**
+	 * Object axes only: payload child names are literal wire JSON keys copied
+	 * verbatim (`extra-body`). Default object payloads author kebab-case names
+	 * that compile to camelCase resolved keys.
+	 */
+	verbatimKeys?: true;
 }
 
 const OAI = ["openai", "openai-responses"] as const;
@@ -74,13 +80,13 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	// ── wire: OpenAI-compatible surfaces (chat completions + Responses) ──
 	"allows-synthetic-reasoning-content-for-tool-calls": wire("allowsSyntheticReasoningContentForToolCalls", OAI),
 	"always-send-max-tokens": wire("alwaysSendMaxTokens", OAI),
-	"cache-control-format": wire("cacheControlFormat", ["openai"], "scalar", ["anthropic"]),
+	"cache-control-format": wire("cacheControlFormat", OAI, "scalar", ["anthropic"]),
 	"clamp-output-to-model-max": wire("clampOutputToModelMax", ["openai"]),
 	"disable-reasoning-on-forced-tool-choice": wire("disableReasoningOnForcedToolChoice", OAI),
 	"disable-reasoning-on-tool-choice": wire("disableReasoningOnToolChoice", OAI),
 	"drop-thinking-when-reasoning-effort": wire("dropThinkingWhenReasoningEffort", ["openai"]),
 	"empty-length-finish-is-context-error": wire("emptyLengthFinishIsContextError", OAI),
-	"extra-body": wire("extraBody", ["openai"], "object"),
+	"extra-body": { ...wire("extraBody", ["openai"], "object"), verbatimKeys: true },
 	"filter-reasoning-history": wire("filterReasoningHistory", OAI),
 	"include-encrypted-reasoning": wire("includeEncryptedReasoning", OAI),
 	"kimi-api-format": wire("kimiApiFormat", ["openai"], "scalar", ["openai", "anthropic"]),
@@ -90,6 +96,8 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"prompt-cache-breakpoint-ttl": wire("promptCacheBreakpointTtl", OAI, "scalar", ["30m"]),
 	"prompt-cache-session-header": wire("promptCacheSessionHeader", OAI, "scalar", ["x-grok-conv-id"]),
 	"qwen-preserve-thinking": wire("qwenPreserveThinking", ["openai"]),
+	"reject-root-object-union": wire("rejectRootObjectUnion", OAI),
+	"retry-without-strict-on-grammar-error": wire("retryWithoutStrictOnGrammarError", OAI),
 	"reasoning-content-field": wire("reasoningContentField", OAI, "scalar", [
 		"reasoning_content",
 		"reasoning",
@@ -134,8 +142,10 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"supports-multiple-system-messages": wire("supportsMultipleSystemMessages", ["openai"]),
 	"supports-named-tool-choice": wire("supportsNamedToolChoice", OAI),
 	"supports-obfuscation-opt-out": wire("supportsObfuscationOptOut", ["openai-responses"]),
+	"harmony-leak-mitigation": wire("harmonyLeakMitigation", ["openai-responses"]),
 	"supports-penalty-and-stop-params": wire("supportsPenaltyAndStopParams", OAI),
 	"supports-prompt-cache-breakpoints": wire("supportsPromptCacheBreakpoints", OAI),
+	"supports-prompt-cache-key": wire("supportsPromptCacheKey", ["openai"]),
 	"supports-reasoning-effort": wire("supportsReasoningEffort", OAI),
 	"supports-reasoning-params": wire("supportsReasoningParams", OAI),
 	"supports-reasoning-summary": wire("supportsReasoningSummary", ["openai-responses"]),
@@ -173,12 +183,13 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"disable-strict-tools": wire("disableStrictTools", ["anthropic"]),
 	"escape-builtin-tool-names": wire("escapeBuiltinToolNames", ["anthropic"]),
 	"inject-claude-code-instruction": wire("injectClaudeCodeInstruction", ["anthropic"]),
-	"official-endpoint": wire("officialEndpoint", ["anthropic"]),
+	"official-endpoint": wire("officialEndpoint", ["anthropic", "openai-responses"]),
 	"replay-unsigned-thinking": wire("replayUnsignedThinking", ["anthropic"]),
 	"requires-thinking-enabled": wire("requiresThinkingEnabled", ["anthropic"]),
 	"requires-tool-result-id": wire("requiresToolResultId", ["anthropic"]),
 	"signing-endpoint": wire("signingEndpoint", ["anthropic"]),
 	"supports-context-management": wire("supportsContextManagement", ["anthropic"]),
+	"supports-output-effort": wire("supportsOutputEffort", ["anthropic"]),
 	"supports-eager-tool-input-streaming": wire("supportsEagerToolInputStreaming", ["anthropic"]),
 	"supports-long-cache-retention": wire("supportsLongCacheRetention", ["anthropic"]),
 	"supports-mid-conversation-system": wire("supportsMidConversationSystem", ["anthropic"]),
@@ -245,6 +256,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"input-modalities": { key: "inputModalities", set: "catalog", shape: "array", values: ["text", "image"] },
 	"limits-patch": { key: "limitsPatch", set: "catalog", shape: "object" },
 	"long-context-cost": { key: "longContext", set: "catalog", shape: "object" },
+	"long-usage-limit-fallback": { key: "longUsageLimitFallback", set: "catalog", shape: "scalar" },
 	priority: { key: "priority", set: "catalog", shape: "scalar" },
 	"service-tier-cost": { key: "serviceTierCost", set: "catalog", shape: "object" },
 };

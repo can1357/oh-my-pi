@@ -86,7 +86,15 @@ describe("AgentSession retry delay cap", () => {
 		for (const provider of ["anthropic", "openai-codex"]) {
 			await authStorage.remove(provider);
 		}
-		for (const provider of ["anthropic", "openai", "openai-codex", "openrouter", "github-copilot", "cursor"]) {
+		for (const provider of [
+			"anthropic",
+			"openai",
+			"openai-codex",
+			"opencode-go",
+			"openrouter",
+			"github-copilot",
+			"cursor",
+		]) {
 			authStorage.removeRuntimeApiKey(provider);
 		}
 		authStorage.setRuntimeApiKey("anthropic", "anthropic-test-key");
@@ -115,7 +123,7 @@ describe("AgentSession retry delay cap", () => {
 
 		// 11.18M ms == ~3.1 hours, matching the report on the original incident.
 		const rateLimitError =
-			'429 {"type":"error","error":{"type":"rate_limit_error","message":"This request would exceed your account\'s rate limit. Please try again later."}} retry-after-ms=11180000';
+			'429 {"type":"error","error":{"type":"rate_limit_error","message":"This request would exceed your account\'s rate limit. Please try again later."}} retry-after=11180.0005';
 
 		const mock = createMockModel({ handler: () => ({ throw: rateLimitError }) });
 		const requestedModels: string[] = [];
@@ -166,7 +174,7 @@ describe("AgentSession retry delay cap", () => {
 		expect(retryEndEvents).toHaveLength(1);
 		expect(retryEndEvents[0]).toMatchObject({ success: false });
 		expect(retryEndEvents[0].finalError).toContain("exceeds retry.maxDelayMs");
-		expect(retryEndEvents[0].finalError).toContain("11180000");
+		expect(retryEndEvents[0].finalError).toContain("Provider requested 11180001ms wait");
 		// No multi-hour (or any) sleep — the cap path skips scheduler.wait entirely.
 		for (const call of waitSpy.mock.calls) {
 			expect(call[0]).toBeLessThanOrEqual(100);
@@ -178,6 +186,185 @@ describe("AgentSession retry delay cap", () => {
 		expect(last.stopReason).toBe("error");
 		expect(last.errorMessage).toContain("rate_limit_error");
 		expect(session.isRetrying).toBe(false);
+	});
+
+	it("switches a long OpenCode Go usage limit to an earlier cross-provider fallback", async () => {
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const alternateOpenCodeModel = getBundledModel("opencode-go", "deepseek-v4-pro");
+		const exhaustedModel = getBundledModel("opencode-go", "deepseek-v4-flash");
+		const fallbackModel = getBundledModel("openai", "gpt-5.5");
+		if (!primaryModel || !alternateOpenCodeModel || !exhaustedModel || !fallbackModel) {
+			throw new Error("Expected bundled primary, OpenCode Go, and cross-provider fallback test models to exist");
+		}
+
+		authStorage.setRuntimeApiKey("opencode-go", "opencode-go-test-key");
+		authStorage.setRuntimeApiKey("openai", "openai-test-key");
+
+		const mock = createMockModel({
+			responses: [
+				{ throw: "503 service unavailable: overloaded_error retry-after-ms=60000" },
+				{
+					content: [{ type: "thinking", thinking: "Classifier refusal." }],
+					errorMessage: "Refusal (cyber): Declined.",
+					stopDetails: { type: "refusal", category: "cyber", explanation: "Declined." },
+					stopReason: "error",
+				},
+				{
+					content: [{ type: "thinking", thinking: "Classifier refusal." }],
+					errorMessage: "Refusal (cyber): Declined.",
+					stopDetails: { type: "refusal", category: "cyber", explanation: "Declined." },
+					stopReason: "error",
+				},
+				{
+					throw: "429 Weekly usage limit reached. Resets in 55min. type=GoUsageLimitError retry-after-ms=3242000",
+				},
+				{ content: ["recovered on cross-provider fallback"], stopReason: "stop" },
+			],
+		});
+		const requestedModels: string[] = [];
+		const agent = new Agent({
+			getApiKey: requestedModel => `${requestedModel.provider}-test-key`,
+			initialState: {
+				model: primaryModel,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
+			streamFn: (requestedModel, context, options) => {
+				requestedModels.push(`${requestedModel.provider}/${requestedModel.id}`);
+				return mock.stream(requestedModel, context, options);
+			},
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.maxDelayMs": 300_000,
+			"retry.maxRetries": 3,
+			"retry.modelFallback": true,
+			"retry.fallbackChains": {
+				default: [
+					`${alternateOpenCodeModel.provider}/${alternateOpenCodeModel.id}`,
+					`${fallbackModel.provider}/${fallbackModel.id}`,
+					`${exhaustedModel.provider}/${exhaustedModel.id}`,
+				],
+			},
+		});
+		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
+
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
+		const waitSpy = vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		const fallbackEvents: Array<Extract<AgentSessionEvent, { type: "retry_fallback_applied" }>> = [];
+		session.subscribe(event => {
+			if (event.type === "retry_fallback_applied") fallbackEvents.push(event);
+		});
+
+		await session.prompt("Trigger the long OpenCode Go weekly usage limit");
+		await session.waitForIdle();
+
+		expect(requestedModels).toEqual([
+			`${primaryModel.provider}/${primaryModel.id}`,
+			`${alternateOpenCodeModel.provider}/${alternateOpenCodeModel.id}`,
+			`${fallbackModel.provider}/${fallbackModel.id}`,
+			`${exhaustedModel.provider}/${exhaustedModel.id}`,
+			`${fallbackModel.provider}/${fallbackModel.id}`,
+		]);
+		expect(fallbackEvents).toContainEqual({
+			type: "retry_fallback_applied",
+			from: `${exhaustedModel.provider}/${exhaustedModel.id}`,
+			to: `${fallbackModel.provider}/${fallbackModel.id}`,
+			role: "default",
+		});
+		for (const call of waitSpy.mock.calls) {
+			expect(call[0]).toBeLessThan(300_000);
+		}
+		expect(lastAssistant(session).content).toContainEqual({
+			type: "text",
+			text: "recovered on cross-provider fallback",
+		});
+	});
+	it("waits for a short OpenCode Go sibling credential before model fallback", async () => {
+		const exhaustedModel = getBundledModel("opencode-go", "deepseek-v4-flash");
+		const fallbackModel = getBundledModel("openai", "gpt-5.5");
+		if (!exhaustedModel || !fallbackModel) {
+			throw new Error("Expected bundled OpenCode Go and fallback test models to exist");
+		}
+
+		await authStorage.set("opencode-go", [
+			{ type: "api_key", key: "opencode-go-key-1" },
+			{ type: "api_key", key: "opencode-go-key-2" },
+		]);
+		authStorage.setRuntimeApiKey("openai", "openai-test-key");
+		await modelRegistry.getApiKeyForProvider("opencode-go", "other-session");
+		const blocked = await authStorage.markUsageLimitReached("opencode-go", "other-session", {
+			retryAfterMs: 2_000,
+		});
+		expect(blocked.switched).toBe(true);
+		const usageLimitSpy = vi.spyOn(authStorage, "markUsageLimitReached");
+
+		const mock = createMockModel();
+		const requestedModels: string[] = [];
+		const agent = new Agent({
+			getApiKey: model => modelRegistry.resolver(model, agent.sessionId),
+			initialState: {
+				model: exhaustedModel,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
+			streamFn: (requestedModel, context, options) => {
+				requestedModels.push(`${requestedModel.provider}/${requestedModel.id}`);
+				mock.push(
+					requestedModels.length === 1
+						? {
+								throw: "429 Weekly usage limit reached. type=GoUsageLimitError retry-after-ms=3242000",
+							}
+						: { content: ["recovered after sibling unblock"], stopReason: "stop" },
+				);
+				return mock.stream(requestedModel, context, options);
+			},
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.maxDelayMs": 300_000,
+			"retry.maxRetries": 2,
+			"retry.modelFallback": true,
+			"retry.fallbackChains": { default: [`${fallbackModel.provider}/${fallbackModel.id}`] },
+		});
+		settings.setModelRole("default", `${exhaustedModel.provider}/${exhaustedModel.id}`);
+
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
+		const waitSpy = vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		const fallbackEvents: Array<Extract<AgentSessionEvent, { type: "retry_fallback_applied" }>> = [];
+		session.subscribe(event => {
+			if (event.type === "retry_fallback_applied") fallbackEvents.push(event);
+		});
+
+		await session.prompt("Trigger the long OpenCode Go limit while a sibling is briefly blocked");
+		await session.waitForIdle();
+		expect(usageLimitSpy).toHaveBeenCalledTimes(1);
+		const usageLimitResult = usageLimitSpy.mock.results[0]?.value;
+		expect(usageLimitResult).toBeDefined();
+		expect(await usageLimitResult).toMatchObject({ retryAtMs: expect.any(Number), switched: false });
+
+		expect(requestedModels).toEqual([
+			`${exhaustedModel.provider}/${exhaustedModel.id}`,
+			`${exhaustedModel.provider}/${exhaustedModel.id}`,
+		]);
+		expect(fallbackEvents).toEqual([]);
+		expect(waitSpy.mock.calls.some(call => call[0] >= 1_000 && call[0] <= 3_000)).toBe(true);
+		expect(lastAssistant(session).content).toContainEqual({
+			type: "text",
+			text: "recovered after sibling unblock",
+		});
 	});
 
 	it("honors the reason backoff for a transient rate-limit 429 without a provider hint", async () => {
@@ -604,8 +791,7 @@ describe("AgentSession retry delay cap", () => {
 		const mock = createMockModel();
 		const requestedModels: string[] = [];
 		const requestedKeys: string[] = [];
-		let agent!: Agent;
-		agent = new Agent({
+		const agent = new Agent({
 			getApiKey: model => modelRegistry.resolver(model, agent.sessionId),
 			initialState: {
 				model: primaryModel,
@@ -869,8 +1055,7 @@ describe("AgentSession retry delay cap", () => {
 			'429 {"type":"error","error":{"type":"rate_limit_error","message":"This request would exceed your account\'s rate limit. Please try again later."}} retry-after-ms=11180000';
 		const mock = createMockModel();
 		let attempts = 0;
-		let agent!: Agent;
-		agent = new Agent({
+		const agent = new Agent({
 			getApiKey: model => modelRegistry.resolver(model, agent.sessionId),
 			initialState: {
 				model,
@@ -2346,6 +2531,7 @@ describe("AgentSession retry delay cap", () => {
 
 		expect(attempts).toBe(11);
 		expect(retryStartEvents).toHaveLength(10);
+		// oxlint-disable-next-line unicorn/no-new-array -- length preallocation
 		expect(retryStartEvents.map(event => event.maxAttempts)).toEqual(new Array(10).fill(10));
 		expect(retryStartEvents.map(event => event.delayMs)).toEqual([
 			500, 1000, 2000, 4000, 8000, 8000, 8000, 8000, 8000, 8000,

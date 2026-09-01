@@ -1,6 +1,10 @@
 // Model-lineage compat for "openai"; regenerated from the frozen census using class taxonomy selectors.
 
 class "openai" {
+	// Replaces the o-series mandatory-reasoning fallback.
+	family "o-series" {
+		thinking-requires-effort #true
+	}
 	// GPT wire ladders are model generations, not host contracts: <5.2 keeps
 	// the classic four-tier scale, 5.2+ drops minimal for xhigh, and 5.6+
 	// exposes the wire-exact five-tier low..max scale.

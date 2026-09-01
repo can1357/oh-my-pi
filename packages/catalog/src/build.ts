@@ -110,16 +110,16 @@ export function applyCatalogCorrections(
 		if (input !== undefined) model.cost.input = input;
 		const output = numberField(patch, "output");
 		if (output !== undefined) model.cost.output = output;
-		const cacheRead = numberField(patch, "cache-read");
+		const cacheRead = numberField(patch, "cacheRead");
 		if (cacheRead !== undefined) model.cost.cacheRead = cacheRead;
-		const cacheWrite = numberField(patch, "cache-write");
+		const cacheWrite = numberField(patch, "cacheWrite");
 		if (cacheWrite !== undefined) model.cost.cacheWrite = cacheWrite;
 	}
 	const limitsPatch = objectPayload(catalog.limitsPatch);
 	if (limitsPatch !== undefined) {
-		const contextWindow = numberField(limitsPatch, "context-window");
+		const contextWindow = numberField(limitsPatch, "contextWindow");
 		if (contextWindow !== undefined) model.contextWindow = contextWindow;
-		const maxTokens = numberField(limitsPatch, "max-tokens");
+		const maxTokens = numberField(limitsPatch, "maxTokens");
 		if (maxTokens !== undefined) model.maxTokens = maxTokens;
 	}
 	const contextWindowFloor = catalog.contextWindowFloor;

@@ -151,6 +151,14 @@ export type ServiceTierFamily = "openai" | "anthropic" | "google";
 export type ServiceTierByFamily = Partial<Record<ServiceTierFamily, ServiceTier>>;
 
 type ServiceTierModel = Pick<Model, "provider" | "api" | "identity">;
+// The service-tier matrix below intentionally stays in TypeScript rather than
+// the KDL compat tree: `shouldSendServiceTier` accepts bare provider strings
+// (agent telemetry, google-shared header placement) and the stats parser
+// rebuilds slim `{ provider, api, identity }` models from historical session
+// JSONL — neither path holds a resolved compat record, so a KDL axis would
+// merely duplicate this table as its own fallback. The functions branch on
+// structured `classifyModel` facts, api, and a short provider list, which is
+// the sanctioned mechanism layer.
 
 function isOpenAIServiceTierApi(api: Api | undefined): boolean {
 	return api === "openai-completions" || api === "openai-responses" || api === "openai-codex-responses";

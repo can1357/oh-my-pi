@@ -247,7 +247,7 @@ function trackVibeTeardown(promise: Promise<unknown>, onError: (error: unknown) 
 
 /** Wait for cleanup only until the caller's shared absolute deadline. */
 async function waitForVibeTeardown(tasks: readonly TrackedVibeTeardown[], deadline: number): Promise<boolean> {
-	if (tasks.length === 0 || tasks.every(task => task.status() !== "pending")) return true;
+	if (tasks.every(task => task.status() !== "pending")) return true;
 	const remainingMs = deadline - Date.now();
 	if (remainingMs <= 0) return false;
 	const timeout = Promise.withResolvers<void>();
