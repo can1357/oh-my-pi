@@ -8,6 +8,7 @@
 - Consolidated model identity, capability, and policy resolution into a unified rule-based engine
 - Implemented declarative rule system for provider-specific model behaviors and compatibility constraints
 - Added support for hierarchical cascade resolution of model properties based on class, family, and revision
+- Added a wire-API fallback layer and configuration hooks to per-request image budgets: `providerImageBudget(provider, api?)` now resolves user configuration (`configureProviderImageBudgets`), then `PROVIDER_IMAGE_BUDGETS`, then the new `API_IMAGE_BUDGETS` family table (a gateway speaking `anthropic-messages` gets 90, `google-generative-ai` 200), then the safe floor of 5. `openai-completions` deliberately has no family default, so generic routers keep the floor. `providerFrameBudget(provider, api?)` takes the same wire API so an archive is sized by the budget the send path will honour. Added `providerImageByteBudget` and `configureProviderImageByteBudgets` for per-provider base64 image-byte caps, which have no built-in defaults
 
 ### Changed
 

@@ -265,7 +265,9 @@ describe("AgentSession snapcompact frame-budget sizing", () => {
 	it("caps maxFrames at the provider image budget so unknown gateways do not archive frames the send path will drop", async () => {
 		const model = session.model;
 		if (!model) throw new Error("Expected model");
-		session.agent.setModel({ ...model, provider: "ramp", contextWindow: 500_000 });
+		// openai-completions is the one wire API with no family budget, so this
+		// gateway keeps the floor the send-path clamp will enforce.
+		session.agent.setModel({ ...model, provider: "ramp", api: "openai-completions", contextWindow: 500_000 });
 
 		const branchEntries = sessionManager.getBranch();
 		const lastEntry = branchEntries[branchEntries.length - 1];
@@ -285,6 +287,34 @@ describe("AgentSession snapcompact frame-budget sizing", () => {
 
 		expect(compactSpy).toHaveBeenCalledTimes(1);
 		expect(compactSpy.mock.calls[0]?.[1]?.maxFrames).toBe(snapcompact.DEFAULT_PROVIDER_IMAGE_BUDGET);
+	});
+
+	it("archives up to the wire API budget for an unknown gateway proxying a vendor API", async () => {
+		const model = session.model;
+		if (!model) throw new Error("Expected model");
+		// Same unknown gateway id, but speaking anthropic-messages: the send path
+		// allows 90 images, so the archive must not stop at the floor of 5.
+		session.agent.setModel({ ...model, provider: "ramp", api: "anthropic-messages", contextWindow: 500_000 });
+
+		const branchEntries = sessionManager.getBranch();
+		const lastEntry = branchEntries[branchEntries.length - 1];
+		if (!lastEntry?.id) throw new Error("Expected branch entry with id");
+		const compactSpy = vi.spyOn(snapcompact, "compact").mockResolvedValue({
+			summary: "stubbed snapcompact",
+			shortSummary: "stub",
+			firstKeptEntryId: lastEntry.id,
+			tokensBefore: 100_000,
+			details: { readFiles: [], modifiedFiles: [] },
+			preserveData: {
+				snapcompact: { frames: [], totalChars: 0, truncatedChars: 0 },
+			},
+		});
+
+		await session.compact(undefined, { mode: "snapcompact" });
+
+		expect(compactSpy).toHaveBeenCalledTimes(1);
+		// The frame-byte cap is the binding constraint once the provider floor lifts.
+		expect(compactSpy.mock.calls[0]?.[1]?.maxFrames).toBe(snapcompact.maxFramesForDataBudget());
 	});
 
 	it("keeps the frame archive out of the RPC result after persisting it", async () => {

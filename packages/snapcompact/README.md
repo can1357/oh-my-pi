@@ -62,7 +62,7 @@ const result = await compact(preparation, { model });
 - **Rendering**: `render`, `renderMany`, `frames`, `geometry`
 - **Shapes**: `SHAPES`, `SHAPE_VARIANTS`, `resolveShape`, `resolveShapeForText`, `idealShapeVariant`, `isShape`, `isShapeVariantName`
 - **Text**: `serializeConversation`, `normalize`, `scanRenderability`, `renderabilityProbeText`, `dimStopwords`, `wrap`
-- **Budgets**: `providerImageBudget`, `MAX_FRAMES_DEFAULT`, `FRAME_TOKEN_ESTIMATE`, `HQ_EDGE_FRAMES`
+- **Budgets**: `providerImageBudget`, `providerImageByteBudget`, `configureProviderImageBudgets`, `configureProviderImageByteBudgets`, `API_IMAGE_BUDGETS`, `MAX_FRAMES_DEFAULT`, `FRAME_TOKEN_ESTIMATE`, `HQ_EDGE_FRAMES`
 - **File ops**: `createFileOps`, `computeFileLists`, `upsertFileOperations`
 
 ## References

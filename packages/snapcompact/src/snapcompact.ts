@@ -519,14 +519,55 @@ export const PROVIDER_IMAGE_BUDGETS: Record<string, number> = {
 /** Safe floor for unknown providers (strictest mainstream measured: Groq ~5). */
 export const DEFAULT_PROVIDER_IMAGE_BUDGET = 5;
 
-/** Per-request image budget for `provider`; unknown providers get the floor. */
-export function providerImageBudget(provider: string | undefined): number {
-	return (provider !== undefined ? PROVIDER_IMAGE_BUDGETS[provider] : undefined) ?? DEFAULT_PROVIDER_IMAGE_BUDGET;
+/**
+ * Image-count budgets by wire API for provider ids missing from {@link PROVIDER_IMAGE_BUDGETS}, so a
+ * private gateway proxying a vendor API inherits that vendor's budget. `openai-completions` is
+ * deliberately absent: arbitrary routers speak it, so it keeps the floor.
+ */
+export const API_IMAGE_BUDGETS: Record<string, number> = {
+	"anthropic-messages": 90,
+	"bedrock-converse-stream": 90,
+	"openai-responses": 200,
+	"openai-codex-responses": 200,
+	"azure-openai-responses": 200,
+	"google-generative-ai": 200,
+	"google-gemini-cli": 200,
+	"google-vertex": 200,
+	openrouter: 90,
+};
+
+let configuredImageBudgets: Record<string, number> = {};
+let configuredImageByteBudgets: Record<string, number> = {};
+
+/** Install user-configured per-provider image-count caps; they win over {@link PROVIDER_IMAGE_BUDGETS}. */
+export function configureProviderImageBudgets(budgets: Record<string, number> | undefined): void {
+	configuredImageBudgets = budgets ?? {};
+}
+
+/** Install user-configured per-provider base64 image-byte caps. There are no built-in defaults. */
+export function configureProviderImageByteBudgets(budgets: Record<string, number> | undefined): void {
+	configuredImageByteBudgets = budgets ?? {};
+}
+
+/** User-configured base64 image-byte cap for `provider`; `undefined` means unbounded. */
+export function providerImageByteBudget(provider: string | undefined): number | undefined {
+	return provider === undefined ? undefined : configuredImageByteBudgets[provider];
+}
+
+/** Per-request image budget: configured override, then `provider`, then `api` family, then the floor. */
+export function providerImageBudget(provider: string | undefined, api?: Api): number {
+	if (provider !== undefined) {
+		const configured = configuredImageBudgets[provider];
+		if (configured !== undefined) return configured;
+		const known = PROVIDER_IMAGE_BUDGETS[provider];
+		if (known !== undefined) return known;
+	}
+	return (api !== undefined ? API_IMAGE_BUDGETS[api] : undefined) ?? DEFAULT_PROVIDER_IMAGE_BUDGET;
 }
 
 /** Archive frame cap for `provider`: image budget, never above {@link MAX_FRAMES_DEFAULT}. */
-export function providerFrameBudget(provider: string | undefined): number {
-	return Math.min(providerImageBudget(provider), MAX_FRAMES_DEFAULT);
+export function providerFrameBudget(provider: string | undefined, api?: Api): number {
+	return Math.min(providerImageBudget(provider, api), MAX_FRAMES_DEFAULT);
 }
 
 /** Key under `CompactionEntry.preserveData` holding the frame archive. */

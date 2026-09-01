@@ -639,6 +639,30 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"providers.maxImagesPerRequest": {
+		type: "record",
+		default: EMPTY_NUMBER_RECORD,
+		ui: {
+			tab: "providers",
+			group: "Services",
+			label: "Max Images Per Request",
+			description:
+				'Maximum images one request may carry per provider id (for example "openai" or a custom gateway id), overriding the built-in per-provider budget. Omitted providers use the built-in budget for their id, then their wire API family, then a safe floor of 5.',
+		},
+	},
+
+	"providers.maxImageBytesPerRequest": {
+		type: "record",
+		default: EMPTY_NUMBER_RECORD,
+		ui: {
+			tab: "providers",
+			group: "Services",
+			label: "Max Image Bytes Per Request",
+			description:
+				"Maximum total base64 image bytes one request may carry per provider id, for gateways that reject large request bodies. The oldest droppable images are removed until the request fits; images retained in assistant turns count against the budget but are never removed. Omitted providers are unbounded.",
+		},
+	},
+
 	disabledExtensions: { type: "array", default: EMPTY_STRING_ARRAY },
 
 	modelRoleStorage: {

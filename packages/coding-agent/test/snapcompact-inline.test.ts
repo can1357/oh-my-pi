@@ -1,6 +1,7 @@
-import { describe, expect, it, spyOn } from "bun:test";
+import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import type { Context, ImageContent, Message, TextContent, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { clampProviderContextImages } from "@oh-my-pi/pi-coding-agent/session/provider-image-budget";
 import {
 	estimateInlineSavings,
 	planInlineSwaps,
@@ -53,7 +54,7 @@ function makeModel(
 	overrides: {
 		provider?: string;
 		input?: ("text" | "image")[];
-		api?: "anthropic-messages" | "google-generative-ai";
+		api?: "anthropic-messages" | "google-generative-ai" | "openai-completions";
 		baseUrl?: string;
 	} = {},
 ) {
@@ -93,6 +94,10 @@ function imageCount(context: Context): number {
 }
 
 describe("SnapcompactInlineTransformer", () => {
+	afterEach(() => {
+		snapcompact.configureProviderImageByteBudgets(undefined);
+	});
+
 	it("is a no-op for text-only models", async () => {
 		const transformer = new SnapcompactInlineTransformer(
 			withTestShape({ renderSystemPrompt: "all", renderToolResults: true }),
@@ -428,9 +433,9 @@ describe("SnapcompactInlineTransformer", () => {
 				toolResult("call_4", LARGE),
 			],
 		};
-		// Unknown provider → default budget 5. Each LARGE needs 2 frames:
+		// openai-completions carries no family budget → default 5. Each LARGE needs 2 frames:
 		// call_1 (2) + call_2 (2) fit, call_3 needs 2 > 1 remaining → text.
-		const result = await transformer.transform(context, makeModel({ provider: "groq" }));
+		const result = await transformer.transform(context, makeModel({ provider: "groq", api: "openai-completions" }));
 		expect(imageCount(result)).toBeLessThanOrEqual(5);
 		expect(result.messages[3]).toBe(context.messages[3]);
 		expect(result.messages[4]).toBe(context.messages[4]);
@@ -459,7 +464,9 @@ describe("SnapcompactInlineTransformer", () => {
 				toolResult("call_newest", LARGE),
 			],
 		};
-		const model = makeModel({ provider: "groq" });
+		// Groq speaks openai-completions, the one API family with no budget of its
+		// own, so this provider keeps the floor of 5 and the source images spend it.
+		const model = makeModel({ provider: "groq", api: "openai-completions" });
 		const estimate = estimateInlineSavings({
 			options,
 			model,
@@ -482,6 +489,81 @@ describe("SnapcompactInlineTransformer", () => {
 		} finally {
 			frameCountSpy.mockRestore();
 		}
+	});
+
+	it("inherits the wire API family budget for an unknown provider", async () => {
+		const transformer = new SnapcompactInlineTransformer(
+			withTestShape({ renderSystemPrompt: "none", renderToolResults: true }),
+		);
+		const context: Context = {
+			messages: [
+				userMessage("go"),
+				toolResult("call_1", LARGE),
+				toolResult("call_2", LARGE),
+				toolResult("call_3", LARGE),
+				toolResult("call_4", LARGE),
+			],
+		};
+		// Same fixture, but an anthropic-messages gateway inherits that family's 90, so call_3
+		// flips to frames. call_4 stays text: the newest tool result is never a candidate.
+		const result = await transformer.transform(context, makeModel({ provider: "unknown-gateway" }));
+		expect(imageCount(result)).toBeGreaterThan(5);
+		expect(result.messages[3]).not.toBe(context.messages[3]);
+		expect(result.messages[4]).toBe(context.messages[4]);
+	});
+
+	it("leaves tool results as text when the byte budget cannot hold their frames", async () => {
+		const transformer = new SnapcompactInlineTransformer(
+			withTestShape({ renderSystemPrompt: "none", renderToolResults: true }),
+		);
+		const context: Context = {
+			messages: [userMessage("go"), toolResult("call_1", LARGE), toolResult("call_2", SMALL)],
+		};
+		snapcompact.configureProviderImageByteBudgets({ anthropic: 1000 });
+		const model = makeModel();
+		const result = await transformer.transform(context, model);
+		expect(result).toBe(context);
+		// The clamp runs after the transform: a swap it would reclaim leaves the
+		// note pointing at frames that never reach the provider.
+		expect(clampProviderContextImages(result, model)).toBe(result);
+	});
+
+	it("swaps only the frames the byte budget holds, leaving the clamp nothing to reclaim", async () => {
+		const transformer = new SnapcompactInlineTransformer(
+			withTestShape({ renderSystemPrompt: "none", renderToolResults: true }),
+		);
+		const context: Context = {
+			messages: [
+				userMessage("go"),
+				toolResult("call_1", LARGE),
+				toolResult("call_2", LARGE),
+				toolResult("call_3", LARGE),
+			],
+		};
+		// Two frames' worth of FRAME_DATA_BYTES_ESTIMATE: enough for call_1's pair,
+		// not for call_2's. call_3 is the newest and is never a candidate.
+		snapcompact.configureProviderImageByteBudgets({ anthropic: 2 * snapcompact.FRAME_DATA_BYTES_ESTIMATE });
+		const model = makeModel();
+		const result = await transformer.transform(context, model);
+		expect(result.messages[1]).not.toBe(context.messages[1]);
+		expect(result.messages[2]).toBe(context.messages[2]);
+		expect(result.messages[3]).toBe(context.messages[3]);
+		expect(clampProviderContextImages(result, model)).toBe(result);
+	});
+
+	it("keeps the system prompt as text when its frames would exceed the byte budget", async () => {
+		const transformer = new SnapcompactInlineTransformer(
+			withTestShape({ renderSystemPrompt: "all", renderToolResults: false }),
+		);
+		const context: Context = {
+			systemPrompt: ["You are a coding agent.", LARGE],
+			messages: [userMessage("go")],
+		};
+		snapcompact.configureProviderImageByteBudgets({ anthropic: 1000 });
+		const model = makeModel();
+		const result = await transformer.transform(context, model);
+		expect(result).toBe(context);
+		expect(clampProviderContextImages(result, model)).toBe(result);
 	});
 
 	it("caches renders across turns: identical input does not re-rasterize", async () => {
@@ -615,6 +697,10 @@ describe("planInlineSwaps", () => {
 });
 
 describe("estimateInlineSavings", () => {
+	afterEach(() => {
+		snapcompact.configureProviderImageByteBudgets(undefined);
+	});
+
 	it("reports vision-incapable models as inactive with zero savings", () => {
 		const estimate = estimateInlineSavings({
 			options: { renderSystemPrompt: "all", renderToolResults: true, shape: TEST_SHAPE },
@@ -691,5 +777,28 @@ describe("estimateInlineSavings", () => {
 		// The tiny two-part system prompt stays text in both paths.
 		expect(estimate.systemPrompt?.applied).toBe(false);
 		expect(result.systemPrompt).toBe(context.systemPrompt);
+	});
+
+	it("mirrors the transform's byte budget: nothing is reported as swapped when no frame fits", async () => {
+		const options: SnapcompactInlineOptions = {
+			renderSystemPrompt: "all",
+			renderToolResults: true,
+			shape: TEST_SHAPE,
+		};
+		const context = makeContext();
+		const model = makeModel();
+		snapcompact.configureProviderImageByteBudgets({ anthropic: 1000 });
+
+		const estimate = estimateInlineSavings({
+			options,
+			model,
+			systemPrompt: context.systemPrompt!,
+			messages: context.messages,
+		});
+		const result = await new SnapcompactInlineTransformer(withTestShape(options)).transform(context, model);
+
+		expect(estimate.toolResults?.swapped).toBe(0);
+		expect(estimate.savedTokens).toBe(0);
+		expect(result).toBe(context);
 	});
 });

@@ -7,6 +7,7 @@ import { clearCustomApis } from "@oh-my-pi/pi-ai/api-registry";
 import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
 import { __providerInFlightForTesting, streamSimple } from "@oh-my-pi/pi-ai/stream";
 import type { Context } from "@oh-my-pi/pi-ai/types";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import {
 	onAppendOnlyModeChanged,
 	onCodeModeChanged,
@@ -18,6 +19,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/config/settings";
 import * as discovery from "@oh-my-pi/pi-coding-agent/discovery";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
+import { clampProviderContextImages } from "@oh-my-pi/pi-coding-agent/session/provider-image-budget";
 import { AUTO_IMAGE_PROVIDER_ORDER } from "@oh-my-pi/pi-coding-agent/tools/image-providers";
 import { SEARCH_PROVIDER_ORDER } from "@oh-my-pi/pi-coding-agent/web/search/types";
 import { getProjectAgentDir, TempDir } from "@oh-my-pi/pi-utils";
@@ -1687,6 +1689,65 @@ describe("Settings", () => {
 				await expect(
 					Settings.init({ cwd: projectDir, agentDir, inMemory: true, configFiles: [overlayPath] }),
 				).rejects.toThrow("Provider request limits must be positive numbers: umans");
+			});
+		});
+
+		describe("provider image budgets", () => {
+			const PROXY_MODEL = buildModel({
+				id: "proxy-vision",
+				name: "proxy-vision",
+				api: "openai-completions",
+				provider: "custom-proxy",
+				baseUrl: "https://proxy.example.com/v1",
+				reasoning: false,
+				input: ["text", "image"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 128000,
+				maxTokens: 4096,
+			});
+
+			const imageContext = (): Context => ({
+				systemPrompt: [],
+				tools: [],
+				messages: Array.from({ length: 8 }, (_, index) => ({
+					role: "user" as const,
+					content: [{ type: "image" as const, data: `image-${index}`, mimeType: "image/png" }],
+					timestamp: index,
+				})),
+			});
+
+			const clampedImageCount = (context: Context): number =>
+				clampProviderContextImages(context, PROXY_MODEL).messages.filter(
+					message => Array.isArray(message.content) && message.content.some(part => part.type === "image"),
+				).length;
+
+			it("raises a custom gateway's image cap from config.yml", async () => {
+				await writeSettings({ providers: { maxImagesPerRequest: { "custom-proxy": 90 } } });
+				await Settings.init({ cwd: projectDir, agentDir });
+
+				expect(clampedImageCount(imageContext())).toBe(8);
+			});
+
+			it("falls back to the unknown-provider floor without configuration", async () => {
+				await Settings.init({ cwd: projectDir, agentDir });
+
+				expect(clampedImageCount(imageContext())).toBe(5);
+			});
+
+			it("rejects invalid image counts from config.yml", async () => {
+				await writeSettings({ providers: { maxImagesPerRequest: { "custom-proxy": 0 } } });
+
+				await expect(Settings.init({ cwd: projectDir, agentDir })).rejects.toThrow(
+					"Provider image limits must be positive numbers: custom-proxy",
+				);
+			});
+
+			it("rejects invalid image byte budgets from config.yml", async () => {
+				await writeSettings({ providers: { maxImageBytesPerRequest: { "custom-proxy": "7000000" } } });
+
+				await expect(Settings.init({ cwd: projectDir, agentDir })).rejects.toThrow(
+					"Provider image byte limits must be positive numbers: custom-proxy",
+				);
 			});
 		});
 	});
