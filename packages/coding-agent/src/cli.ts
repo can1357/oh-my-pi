@@ -24,7 +24,7 @@ import {
 	setProfile,
 	VERSION,
 } from "@oh-my-pi/pi-utils/dirs";
-import { interceptUnhandledRejections } from "@oh-my-pi/pi-utils/postmortem";
+import { fatal, interceptUnhandledRejections } from "@oh-my-pi/pi-utils/postmortem";
 import { setProcessName } from "@oh-my-pi/pi-utils/process-name";
 import { declareWorkerHostEntry, installWorkerInbox, isWorkerHostSelector } from "@oh-my-pi/pi-utils/worker-host";
 import { BLOB_BROKER_WORKER_ARG } from "./blob-broker/protocol";
@@ -468,8 +468,5 @@ export async function runCli(argv: string[]): Promise<void> {
 // their entry with `import.meta.main === false`, so the worker-host dispatch
 // is admitted via `!Bun.isMainThread`.
 if (isProcessEntry || !Bun.isMainThread) {
-	runCli(process.argv.slice(2)).catch((err: unknown) => {
-		process.stderr.write(`${Bun.inspect(err, { colors: process.stderr.isTTY === true })}\n`);
-		process.exit(1);
-	});
+	runCli(process.argv.slice(2)).catch(fatal);
 }

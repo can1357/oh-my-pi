@@ -121,6 +121,10 @@
     url = "https://registry.npmjs.org/@babel/types/-/types-7.29.8.tgz";
     hash = "sha512-Vj1jF3cPfxg7OAfoI7QnVKLoILlm2JF9pnVHrX8qx7AHMiYWT+NDAA7jChlNgRS4WTLc/fD1lXLmPixluj+3Gg==";
   };
+  "@bgotink/kdl@0.4.0" = fetchurl {
+    url = "https://registry.npmjs.org/@bgotink/kdl/-/kdl-0.4.0.tgz";
+    hash = "sha512-F0uJCjo5FQvFdcGF5QbYVNfcGiRWlocuzyIdQxottZF2+gu6L2xjMGEu9PIpse2hifAca/19vIospgaETCKxIg==";
+  };
   "@biomejs/biome@2.5.10" = fetchurl {
     url = "https://registry.npmjs.org/@biomejs/biome/-/biome-2.5.10.tgz";
     hash = "sha512-WRKXARA3kTuiV5sxqTpobJ/I0MVd4vk3pOL6wnp5az4LntFIhWTj1RWZq3DI9PCEN3lXcqy7p5aqUHzvq8AXyQ==";

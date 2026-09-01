@@ -9,7 +9,6 @@ import type { SecretObfuscator } from "../secrets/obfuscator";
 import {
 	formatExecutionSourcePreview,
 	formatSessionHistoryMarkdown,
-	formatToolResultErrorPreview,
 	PRIMARY_CONTEXT_CUSTOM_TYPES,
 } from "../session/session-history-format";
 import { ADVISOR_RENDER_OPTIONS, renderAdvisorDeltaChunks } from "./delta-split";
@@ -623,6 +622,15 @@ export class AdvisorRuntime {
 				discoveredNewRegexSecretValue = true;
 			}
 		};
+		const addTextualContent = (content: TextualContent): void => {
+			if (typeof content === "string") {
+				addRegexValues(content);
+				return;
+			}
+			for (const block of content) {
+				if (block.type === "text") addRegexValues(block.text);
+			}
+		};
 		for (const message of delta) {
 			if (
 				message.role === "custom" &&
@@ -631,6 +639,7 @@ export class AdvisorRuntime {
 			) {
 				addRegexValues(message.content);
 			}
+			if (message.role === "toolResult") addTextualContent(message.content as TextualContent);
 		}
 		addRegexValues(renderedMd);
 		scrubAdvisorHistory(obfuscator, this.agent.state.messages, this.#advisorRegexSecretValues);
@@ -746,6 +755,7 @@ export class AdvisorRuntime {
 			md = formatSessionHistoryMarkdown(this.#obfuscatePrimaryContextMessages(obfuscator, delta), {
 				...ADVISOR_RENDER_OPTIONS,
 				includeThinking: this.#includeThinking,
+				transformExpandedToolIO: text => obfuscator.obfuscate(text, this.#advisorRegexSecretValues),
 			});
 			md = obfuscator.obfuscate(md, this.#advisorRegexSecretValues);
 		}
@@ -1483,29 +1493,6 @@ function obfuscateTextualContent(
 	return changed ? result : content;
 }
 
-function firstAdvisorToolResultErrorLine(content: TextualContent): string | undefined {
-	if (typeof content === "string") return content.split("\n", 1)[0];
-	const first = content[0];
-	if (first?.type !== "text") return undefined;
-	return first.text.split("\n", 1)[0];
-}
-
-function obfuscateAdvisorToolResultErrorContent(
-	obfuscator: SecretObfuscator,
-	content: TextualContent,
-	sharedRegexSecretValues: ReadonlySet<string>,
-): TextualContent {
-	const firstLine = firstAdvisorToolResultErrorLine(content);
-	if (firstLine === undefined) return content;
-	const preview = formatToolResultErrorPreview(content);
-	const obfuscatedPreview = obfuscator.obfuscate(preview, sharedRegexSecretValues);
-	if (obfuscatedPreview === firstLine) return content;
-	if (typeof content === "string") return obfuscatedPreview + content.slice(firstLine.length);
-	const first = content[0]!;
-	if (first.type !== "text") return content;
-	return [{ ...first, text: obfuscatedPreview + first.text.slice(firstLine.length) }, ...content.slice(1)];
-}
-
 function obfuscateAssistantMessage(
 	obfuscator: SecretObfuscator,
 	message: AssistantMessage,
@@ -1569,9 +1556,7 @@ function obfuscateAdvisorMessage(
 				details?: Record<string, unknown>;
 				isError?: boolean;
 			};
-			const content = msg.isError
-				? obfuscateAdvisorToolResultErrorContent(obfuscator, msg.content, sharedRegexSecretValues)
-				: msg.content;
+			const content = obfuscateTextualContent(obfuscator, msg.content, sharedRegexSecretValues);
 			let details = msg.details;
 			if (typeof details?.diff === "string") {
 				const diff = obfuscator.obfuscate(details.diff, sharedRegexSecretValues);

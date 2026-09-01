@@ -381,6 +381,7 @@ function buildParams(
 		includeThinkingSignatures: true,
 		developerStringContent: true,
 		preserveAssistantMessageIds: true,
+		repairOrphanOutputs: true,
 	});
 
 	const params: AzureOpenAIResponsesSamplingParams = {

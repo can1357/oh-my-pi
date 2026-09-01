@@ -62,7 +62,7 @@ describe("compat compiler grammar", () => {
 				].join("\n"),
 			},
 		]);
-		expect(compiled.rules[0]?.wire.whenThinking).toEqual({
+		expect(compiled.rules[0]?.wire?.whenThinking).toEqual({
 			qwenTemplateReasoningEffort: true,
 			reasoningContentField: "reasoning_content",
 			extraBody: { enable_thinking: true },

@@ -1602,7 +1602,7 @@ export function resolveRoleSelection(
 	roles: readonly string[],
 	settings: Settings,
 	availableModels: Model<Api>[],
-): { model: Model<Api>; thinkingLevel?: ConfiguredThinkingLevel } | undefined {
+): { role: string; model: Model<Api>; thinkingLevel?: ConfiguredThinkingLevel } | undefined {
 	const matchPreferences = getModelMatchPreferences(settings);
 	for (const role of roles) {
 		const resolved = resolveModelRoleValue(settings.getModelRole(role), availableModels, {
@@ -1610,7 +1610,7 @@ export function resolveRoleSelection(
 			matchPreferences,
 		});
 		if (resolved.model) {
-			return { model: resolved.model, thinkingLevel: resolved.thinkingLevel };
+			return { role, model: resolved.model, thinkingLevel: resolved.thinkingLevel };
 		}
 	}
 	return undefined;

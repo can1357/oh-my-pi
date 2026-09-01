@@ -3155,17 +3155,21 @@ export class Markdown implements Component {
 					markHtmlItemWhenContent(token.text);
 					const linkText = this.#renderInlineTokens(token.tokens || [], resolvedStyleContext);
 					const styledLinkText = this.#theme.link(this.#theme.underline(linkText));
-					const clickableLinkText = formatHyperlink(styledLinkText, token.href);
-					// If link text matches href, only show the link once
+					const href = typeof token.href === "string" ? token.href : "";
+					const clickableLinkText = formatHyperlink(styledLinkText, href);
+					// If link text matches href, only show the link once. A missing
+					// href (malformed/partial link token) renders as plain link text
+					// instead of crashing the renderer or emitting an empty "()"
+					// (issue #10283).
 					// Compare raw text (token.text) not styled text (linkText) since linkText has ANSI codes
 					// For mailto: links, strip the prefix before comparing (autolinked emails have
 					// text="foo@bar.com" but href="mailto:foo@bar.com")
-					const hrefForComparison = token.href.startsWith("mailto:") ? token.href.slice(7) : token.href;
-					if (token.text === token.href || token.text === hrefForComparison)
+					const hrefForComparison = href.startsWith("mailto:") ? href.slice(7) : href;
+					if (!href || token.text === href || token.text === hrefForComparison)
 						result += clickableLinkText + stylePrefix;
 					else {
-						const styledLinkUrl = this.#theme.linkUrl(`(${token.href})`);
-						result += `${clickableLinkText} ${formatHyperlink(styledLinkUrl, token.href)}${stylePrefix}`;
+						const styledLinkUrl = this.#theme.linkUrl(`(${href})`);
+						result += `${clickableLinkText} ${formatHyperlink(styledLinkUrl, href)}${stylePrefix}`;
 					}
 					break;
 				}

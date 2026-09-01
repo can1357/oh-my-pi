@@ -39,6 +39,13 @@ export enum BrowserPlatform {
 	WIN32 = "win32",
 	WIN64 = "win64",
 }
+type ChromeForTestingPlatform = Exclude<BrowserPlatform, BrowserPlatform.LINUX_ARM>;
+
+function requireChromeForTestingPlatform(platform: BrowserPlatform): ChromeForTestingPlatform {
+	if (platform === BrowserPlatform.LINUX_ARM)
+		throw new Error("Chrome for Testing does not provide linux/arm64 builds");
+	return platform;
+}
 
 const BROWSERS = [
 	Browser.CHROME,
@@ -163,13 +170,13 @@ export function getDownloadUrl(
 
 /** Compute the executable path in Puppeteer's cache layout. */
 export function computeExecutablePath(options: ComputeExecutablePathOptions): string {
-	const platform = options.platform ?? detectBrowserPlatform();
-	if (!platform) throw new Error("Cannot determine a browser platform for this host");
+	const detectedPlatform = options.platform ?? detectBrowserPlatform();
+	if (!detectedPlatform) throw new Error("Cannot determine a browser platform for this host");
 	if (options.browser !== Browser.CHROME) throw new Error(`Unsupported browser executable: ${options.browser}`);
+	const platform = requireChromeForTestingPlatform(detectedPlatform);
 	const installDir = installationDir(options.cacheDir, options.browser, platform, options.buildId);
 	switch (platform) {
 		case BrowserPlatform.LINUX:
-		case BrowserPlatform.LINUX_ARM:
 			return path.join(installDir, "chrome-linux64", "chrome");
 		case BrowserPlatform.MAC:
 			return path.join(
@@ -292,9 +299,8 @@ async function fetchMetadata<T>(filename: string): Promise<T> {
 }
 
 function chromeArchivePlatform(platform: BrowserPlatform): string {
-	switch (platform) {
+	switch (requireChromeForTestingPlatform(platform)) {
 		case BrowserPlatform.LINUX:
-		case BrowserPlatform.LINUX_ARM:
 			return "linux64";
 		case BrowserPlatform.MAC:
 			return "mac-x64";

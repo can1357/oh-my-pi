@@ -64,7 +64,6 @@
 		"providers/openai.kdl",
 		"providers/opencode-go.kdl",
 		"providers/opencode-zen.kdl",
-		"providers/opencode.kdl",
 		"providers/openrouter.kdl",
 		"providers/qianfan.kdl",
 		"providers/sakana.kdl",
@@ -5177,7 +5176,6 @@
 					"nanogpt",
 					"novita",
 					"nvidia",
-					"opencode",
 					"opencode-go",
 					"opencode-zen",
 					"together",
@@ -10699,7 +10697,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-go.kdl:12",
+				"source": "providers/opencode-go.kdl:15",
 				"class": "deepseek",
 				"providers": [
 					"opencode-go"
@@ -10710,7 +10708,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-go.kdl:10",
+				"source": "providers/opencode-go.kdl:13",
 				"class": "deepseek",
 				"providers": [
 					"opencode-go"
@@ -10720,7 +10718,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-go.kdl:17",
+				"source": "providers/opencode-go.kdl:20",
 				"providers": [
 					"opencode-go"
 				],
@@ -10735,7 +10733,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-go.kdl:23",
+				"source": "providers/opencode-go.kdl:26",
 				"providers": [
 					"opencode-go"
 				],
@@ -10757,7 +10755,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-go.kdl:29",
+				"source": "providers/opencode-go.kdl:32",
 				"class": "glm",
 				"providers": [
 					"opencode-go"
@@ -10767,7 +10765,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-go.kdl:32",
+				"source": "providers/opencode-go.kdl:35",
 				"class": "kimi",
 				"providers": [
 					"opencode-go"
@@ -10777,7 +10775,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-go.kdl:36",
+				"source": "providers/opencode-go.kdl:39",
 				"class": "mimo",
 				"providers": [
 					"opencode-go"
@@ -10788,7 +10786,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-go.kdl:35",
+				"source": "providers/opencode-go.kdl:38",
 				"class": "mimo",
 				"providers": [
 					"opencode-go"
@@ -10798,7 +10796,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-go.kdl:43",
+				"source": "providers/opencode-go.kdl:46",
 				"class": "qwen",
 				"providers": [
 					"opencode-go"
@@ -10824,7 +10822,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-go.kdl:47",
+				"source": "providers/opencode-go.kdl:50",
 				"class": "qwen",
 				"providers": [
 					"opencode-go"
@@ -10850,7 +10848,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-go.kdl:53",
+				"source": "providers/opencode-go.kdl:56",
 				"providers": [
 					"opencode-go"
 				],
@@ -10875,7 +10873,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-go.kdl:58",
+				"source": "providers/opencode-go.kdl:61",
 				"providers": [
 					"opencode-go"
 				],
@@ -10895,7 +10893,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-go.kdl:63",
+				"source": "providers/opencode-go.kdl:66",
 				"providers": [
 					"opencode-go"
 				],
@@ -10917,7 +10915,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-go.kdl:68",
+				"source": "providers/opencode-go.kdl:71",
 				"providers": [
 					"opencode-go"
 				],
@@ -10938,7 +10936,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-go.kdl:72",
+				"source": "providers/opencode-go.kdl:75",
 				"providers": [
 					"opencode-go"
 				],
@@ -10965,7 +10963,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-go.kdl:76",
+				"source": "providers/opencode-go.kdl:79",
 				"providers": [
 					"opencode-go"
 				],
@@ -10987,7 +10985,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-go.kdl:81",
+				"source": "providers/opencode-go.kdl:84",
 				"providers": [
 					"opencode-go"
 				],
@@ -11002,7 +11000,7 @@
 				}
 			},
 			{
-				"source": "providers/opencode-go.kdl:85",
+				"source": "providers/opencode-go.kdl:88",
 				"providers": [
 					"opencode-go"
 				],
@@ -11032,6 +11030,9 @@
 						"allowsSyntheticReasoningContentForToolCalls": false,
 						"reasoningContentField": "reasoning_content"
 					}
+				},
+				"catalog": {
+					"longUsageLimitFallback": true
 				}
 			},
 			{
@@ -11413,15 +11414,6 @@
 						"reasoningContentField": "reasoning_content"
 					},
 					"supportsContextManagement": false
-				}
-			},
-			{
-				"source": "providers/opencode.kdl:3",
-				"providers": [
-					"opencode"
-				],
-				"thinking": {
-					"mode": "effort"
 				}
 			},
 			{
@@ -14365,6 +14357,11 @@
 					]
 				}
 			}
+		],
+		"retiredProviders": [
+			"wafer-pass",
+			"wandb",
+			"opencode"
 		],
 		"planRequirements": [
 			{

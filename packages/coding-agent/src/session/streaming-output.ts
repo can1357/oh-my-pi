@@ -103,6 +103,11 @@ export interface TruncationResult {
 	elidedBytes?: number;
 	/** Lines elided from the middle (truncateMiddle only). */
 	elidedLines?: number;
+	/** Exact source-line counts retained before/after the middle marker. */
+	headLines?: number;
+	tailLines?: number;
+	/** True when either retained side is a partial byte range of a source line. */
+	partialByteWindows?: boolean;
 	lastLinePartial?: boolean;
 	firstLineExceedsLimit?: boolean;
 }
@@ -547,12 +552,50 @@ export function truncateMiddle(content: string, options: TruncationOptions = {})
 	const headBytesKept = head.outputBytes ?? Buffer.byteLength(head.content, "utf-8");
 	const tailBytesKept = tail.outputBytes ?? Buffer.byteLength(tail.content, "utf-8");
 
-	// Head unusable (first line exceeds budget) → tail-only.
-	if (headLinesKept === 0 || head.firstLineExceedsLimit) return tail;
-	// Tail unusable → head-only.
-	if (tailLinesKept === 0) return head;
-	// Windows overlap → no meaningful elision; return content untruncated.
-	if (headLinesKept + tailLinesKept >= totalLines) {
+	// A giant first/last line cannot use one of the line-preserving windows. Use
+	// a byte window only for that side and retain the normal line cap on the other.
+	if (headLinesKept === 0 || head.firstLineExceedsLimit || tailLinesKept === 0) {
+		const useByteHead = headLinesKept === 0 || head.firstLineExceedsLimit;
+		const byteHead = useByteHead
+			? truncateHeadBytes(content, Math.min(headBytes, totalBytes))
+			: { text: head.content, bytes: headBytesKept };
+		const actualHeadLines = useByteHead ? 1 : headLinesKept;
+		const remainingBytes = Math.max(0, totalBytes - byteHead.bytes);
+		const useByteTail = tailLinesKept === 0;
+		const byteTail = useByteTail
+			? truncateTailBytes(content, Math.min(tailBytes, remainingBytes))
+			: (() => {
+					const limited = truncateTail(content, {
+						maxBytes: Math.min(tailBytes, remainingBytes),
+						maxLines: tailLines,
+					});
+					return { text: limited.content, bytes: limited.outputBytes ?? Buffer.byteLength(limited.content) };
+				})();
+		const actualTailLines = useByteTail ? 1 : Math.min(tailLinesKept, tailLines);
+		const elidedBytes = Math.max(0, totalBytes - byteHead.bytes - byteTail.bytes);
+		if (elidedBytes === 0) return noTruncResult(content, totalLines, totalBytes);
+		const marker = formatMiddleElisionMarker(0, elidedBytes);
+		const composed = `${byteHead.text}\n${marker}\n${byteTail.text}`;
+		return {
+			content: composed,
+			truncated: true,
+			truncatedBy: "middle",
+			totalLines,
+			totalBytes,
+			outputLines: actualHeadLines + actualTailLines + 1,
+			outputBytes: Buffer.byteLength(composed, "utf-8"),
+			elidedLines: Math.max(0, totalLines - actualHeadLines - actualTailLines),
+			headLines: actualHeadLines,
+			tailLines: actualTailLines,
+			partialByteWindows: useByteHead || useByteTail || tail.lastLinePartial === true,
+			elidedBytes,
+			lastLinePartial: true,
+			firstLineExceedsLimit: false,
+		};
+	}
+	// Fully retained line windows need no marker. A partial tail still omitted
+	// bytes from its source line even when the windows account for every line.
+	if (headLinesKept + tailLinesKept >= totalLines && !tail.lastLinePartial) {
 		return noTruncResult(content, totalLines, totalBytes);
 	}
 
@@ -574,6 +617,8 @@ export function truncateMiddle(content: string, options: TruncationOptions = {})
 		outputBytes: headBytesKept + tailBytesKept + markerBytes + 2,
 		elidedLines,
 		elidedBytes,
+		headLines: headLinesKept,
+		tailLines: tailLinesKept,
 		lastLinePartial: tail.lastLinePartial,
 		firstLineExceedsLimit: false,
 	};

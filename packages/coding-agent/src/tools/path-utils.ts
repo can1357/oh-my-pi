@@ -3,7 +3,14 @@ import * as os from "node:os";
 import * as path from "node:path";
 import * as url from "node:url";
 import { glob } from "@oh-my-pi/pi-natives";
-import { hasFsCode, isEnoent, isEnotdir, stripWindowsExtendedLengthPathPrefix } from "@oh-my-pi/pi-utils";
+import {
+	hasFsCode,
+	isEnoent,
+	isEnotdir,
+	isWsl,
+	stripWindowsExtendedLengthPathPrefix,
+	windowsPathToWslMount,
+} from "@oh-my-pi/pi-utils";
 import type { Skill } from "../extensibility/skills";
 import { InternalUrlRouter, type LocalProtocolOptions } from "../internal-urls";
 import { ToolAbortError, ToolError } from "./tool-errors";
@@ -197,9 +204,24 @@ function windowsDriveAliasPath(filePath: string): string | undefined {
 	return tail ? `${drive}:\\${tail}` : `${drive}:\\`;
 }
 
-export function normalizeWindowsDriveAliasPath(filePath: string, platform: NodeJS.Platform = process.platform): string {
-	if (platform !== "win32") return filePath;
-	return windowsDriveAliasPath(filePath) ?? filePath;
+/**
+ * Reconcile a drive-alias path with the current host so filesystem reads land
+ * on the same bytes the user meant, in either translation direction:
+ *
+ * - On native Windows (`win32`), MSYS/WSL mount roots (`/c/...`, `/mnt/c/...`)
+ *   map to native drive paths (`C:\...`).
+ * - Under WSL, pasted Windows drive paths (`C:\...`, `C:/...`) map to their
+ *   `/mnt/<drive>/...` mount so the file resolves on the Linux side instead of
+ *   being `path.resolve`d into a nonexistent path under cwd (issue #10426).
+ */
+export function normalizeWindowsDriveAliasPath(
+	filePath: string,
+	platform: NodeJS.Platform = process.platform,
+	env: NodeJS.ProcessEnv = process.env,
+): string {
+	if (platform === "win32") return windowsDriveAliasPath(filePath) ?? filePath;
+	if (isWsl(platform, env)) return windowsPathToWslMount(filePath) ?? filePath;
+	return filePath;
 }
 
 /**

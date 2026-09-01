@@ -4,26 +4,23 @@
 
 ### Added
 
-- Added compatibility opt-outs for Anthropic proxies that reject optional `context_management` and OpenAI Responses proxies with incomplete reasoning-summary streams ([#10358](https://github.com/can1357/oh-my-pi/pull/10358) by [@jubueche](https://github.com/jubueche)).
-- Added API-key authentication for ClinePass through the official `CLINE_API_KEY` variable, including account-route validation and rolling quota-window reporting in `omp usage` ([#7863](https://github.com/can1357/oh-my-pi/pull/7863) by [@will-bogusz](https://github.com/will-bogusz)).
-- ClinePass login now validates the API key against the `/users/me` account identity route instead of a probe chat completion, so roster churn cannot break sign-in and validation no longer consumes subscription quota ([#7863](https://github.com/can1357/oh-my-pi/pull/7863) by [@will-bogusz](https://github.com/will-bogusz)).
-- ClinePass failures now surface actionable messages: subscription-window and free-tier limit markers classify as usage limits (fail fast, rotate sibling credentials), while not-subscribed, organization-account, and roster-rotation `model not found` responses are rewritten with recovery guidance ([#7863](https://github.com/can1357/oh-my-pi/pull/7863) by [@will-bogusz](https://github.com/will-bogusz)).
-- ClinePass requests now mirror the official Cline CLI's client-identity headers (with Cline's blessing), unlocking roster entries the gateway restricts to Cline product surfaces — including free-tier `deepseek/deepseek-v4-flash`. A surface-gate 403 is classified as per-model client policy rather than a credential failure, so it no longer rotates sibling keys ([#7863](https://github.com/can1357/oh-my-pi/pull/7863) by [@will-bogusz](https://github.com/will-bogusz)).
-- Updated ClinePass requests to use the current Cline client identity and stable task ids, per-model reasoning and Qwen cache controls, and gateway-reported billed costs ([#7863](https://github.com/can1357/oh-my-pi/pull/7863) by [@will-bogusz](https://github.com/will-bogusz)).
-- Devin router models (`compat.modelRouter`, e.g. `adaptive`) now resolve through `AssignModel` before chatting: the provider sends the current user prompt with the turn's cascade id, then issues `GetChatMessage` with the assigned model uid and its assignment JWT. The router uid is never sent as `chatModelUid`, and a missing assignment fails the turn instead of silently degrading ([#8590](https://github.com/can1357/oh-my-pi/pull/8590) by [@will-bogusz](https://github.com/will-bogusz)).
-- Devin responses surface credit metering on `usage.credits` (`cost`, `committedCost`, `acuCost`) and the concrete routed model on `upstreamModel` (assigned uid, replaced by the response's `actualModelUid` when reported) ([#8590](https://github.com/can1357/oh-my-pi/pull/8590) by [@will-bogusz](https://github.com/will-bogusz)).
-- Devin accounts report plan and credit usage in `/usage` through a new `devin` usage provider backed by `SeatManagementService/GetUserStatus`: prompt/flow/flex credit balances against the plan period, daily and weekly quota percent windows with their reset timestamps, plan tier, overage balance, and account/org identity. Credit-billed plans (no dated quota window) surface credits only ([#8590](https://github.com/can1357/oh-my-pi/pull/8590) by [@will-bogusz](https://github.com/will-bogusz)).
+- Added an optional `completeSimple` callback that observes every result, including results from internal thinking-loop retries.
+- Added compatibility options for Anthropic-compatible proxies that reject `context_management` and OpenAI Responses proxies that provide incomplete reasoning-summary streams.
+- Added ClinePass API-key authentication via the official `CLINE_API_KEY` environment variable, with account validation, actionable subscription and quota errors, support for eligible ClinePass model rosters, and rolling quota-window reporting in `omp usage`.
+- Added Devin router-model support, including assignment of the concrete model before each request, routed-model metadata, credit usage reporting, and plan, quota-window, and account details through `omp usage`.
 
 ### Changed
 
-- Provider request builders now read resolved model policy (`model.compat`, `model.identity`, `model.thinking`, behavior rules) for every model-conditional decision — Harmony escaping, vision stripping, thinking transports and ladders, Claude Code instruction injection, Google beta headers and thought-signature handling, Cloudflare gateway routing, Codex service-tier pricing, and quota metering — instead of matching model names.
-- Updated Devin auth, assignment, chat, and usage requests to the current released CLI identity, version `3000.6.2` ([#8590](https://github.com/can1357/oh-my-pi/pull/8590) by [@will-bogusz](https://github.com/will-bogusz)).
-- Devin auth, model assignment, and chat requests now send the native Devin CLI identity (`ideName: devin-cli`, `ideType: chisel`, `extensionName: chisel`, mapped `os`) instead of the Windsurf IDE identity; `ideType: chisel` is what the backend requires for router assignment ([#8590](https://github.com/can1357/oh-my-pi/pull/8590) by [@will-bogusz](https://github.com/will-bogusz)).
-- Devin parallel tool calls follow `compat.supportsParallelToolCalls` instead of being disabled unconditionally, so natively discovered configs that support parallelism can use it ([#8590](https://github.com/can1357/oh-my-pi/pull/8590) by [@will-bogusz](https://github.com/will-bogusz)).
+- Provider behavior is now driven by each model's resolved compatibility, identity, thinking, and behavior policies rather than model-name matching, improving support for model-specific request formatting, vision, reasoning, routing, pricing, and quota handling.
+- Devin integrations now use the current released CLI identity and support parallel tool calls when the model declares that capability.
 
 ### Fixed
 
-- Fixed Z.AI (GLM Coding Plan) browser sign-in being rejected with "Redirect URI not registered for this client": the flow now advertises the ZCode-registered CLI callback `http://127.0.0.1:9999/callback` instead of the unregistered `localhost:54548` ([#10245](https://github.com/can1357/oh-my-pi/issues/10245)).
+- Fixed OpenAI remote-compaction replay for persisted sessions, allowing sessions with previously stored compaction items to resume successfully.
+- Fixed Cursor Fable requests failing when advertised tools used JSON Schema composition keywords.
+- Fixed Z.AI (GLM Coding Plan) browser sign-in by using the registered CLI callback address.
+- Fixed OpenAI Codex/Responses tool results being lost when composite call identifiers could not be paired with the corresponding assistant call.
+- Fixed native OpenAI Responses history replay becoming stuck on malformed or truncated function-call arguments; invalid history items are now discarded so the session can recover.
 
 ## [18.0.11] - 2026-08-29
 
