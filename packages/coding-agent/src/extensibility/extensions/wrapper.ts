@@ -408,15 +408,15 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 			// receive the execution-owned params, or a formatter that mutates or
 			// retains its argument could change what runs after the user approves
 			// the rendered text (formatter displays A, execution receives B). Hand
-			// it a detached clone of the resolved args instead — the same content
-			// the review snapshot was built from, never the execution object.
+			// it a detached clone of the approval view derived from the execution
+			// input instead. On the review path this is the owned execution clone,
+			// so the prompt cannot drift from the input that executes.
 			// Unfrozen: a frozen graph would turn formatter mutation attempts into
 			// TypeErrors, changing formatter error behavior. Inputs that cannot be
-			// cloned keep the previous aliasing — no lossless copy exists, and
-			// cloning never touches the execution object either way.
-			let promptArgs = resolvedArgs;
+			// cloned keep the prior aliasing semantics.
+			let promptArgs = approvalArgs(executionParams, context);
 			try {
-				promptArgs = structuredClone(resolvedArgs);
+				promptArgs = structuredClone(promptArgs);
 			} catch {
 				// Non-cloneable fallback input: keep the prior aliasing semantics.
 			}

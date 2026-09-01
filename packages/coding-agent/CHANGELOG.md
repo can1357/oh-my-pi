@@ -22,6 +22,9 @@
 - Improved chat history stability in long-running sessions by avoiding unnecessary updates when date or directory context changes.
 - Fixed the trace CLI hanging during proxy connections and added support for forward HTTP proxies.
 - Fixed newly started sessions using stale model context-window limits after background model discovery completes; the active model now refreshes automatically so context usage and compaction thresholds match the model catalog.
+### Added
+
+- Added the `tool_approval_review` extension event, a full approval-resolution seam: `approve` resolves an eligible mode-derived prompt positively, `deny` vetoes the call at the extension layer, and `escalate` defers to the native approval path. Handlers review a deeply immutable snapshot of the final tool input, and optional frozen `pi.supportedEvents` enables capability detection ([#10410](https://github.com/can1357/oh-my-pi/pull/10410) by [@th3akii](https://github.com/th3akii)).
 
 ## [18.1.1] - 2026-09-01
 ### Added
@@ -32,7 +35,6 @@
 - Devin model selectors now accept the native CLI's short aliases (`devin/opus`, `devin/swe`), dotted upstream spellings (`devin/gemini-3.7-flash`), and raw effort-route wire uids for dynamically collapsed families ([#8590](https://github.com/can1357/oh-my-pi/pull/8590) by [@will-bogusz](https://github.com/will-bogusz)).
 - Added provider-supplied model metadata to the `/models` detail line: `new`, `beta`, and `recommended` badges beside the model name, and the upstream description after the context, cost, and perf facts ([#8590](https://github.com/can1357/oh-my-pi/pull/8590) by [@will-bogusz](https://github.com/will-bogusz)).
 - Standalone `CLAUDE.md` files in the project root (and ancestor directories) are now loaded as context, mirroring `AGENTS.md` discovery; config-directory context files still take precedence per scope.
-- Added the `tool_approval_review` extension event, a full approval-resolution seam: `approve` resolves an eligible mode-derived prompt positively, `deny` vetoes the call at the extension layer, and `escalate` defers to the native approval path. Handlers review a deeply immutable snapshot of the final tool input, and optional frozen `pi.supportedEvents` enables capability detection ([#10410](https://github.com/can1357/oh-my-pi/pull/10410) by [@th3akii](https://github.com/th3akii)).
 
 ### Changed
 

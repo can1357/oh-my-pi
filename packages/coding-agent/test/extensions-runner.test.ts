@@ -3713,6 +3713,54 @@ describe("ExtensionRunner", () => {
 				expect(executed[0]).toEqual({ command: "echo safe" });
 			});
 
+			it("uses the owned execution snapshot for an escalated native prompt", async () => {
+				const reviewStarted = Promise.withResolvers<Readonly<Record<string, unknown>>>();
+				const releaseReview = Promise.withResolvers<void>();
+				let retainedApprovalArg: { command?: string } | undefined;
+				let selectedPrompt = "";
+				const runner = dispatchRunner([
+					async event => {
+						reviewStarted.resolve(event.input);
+						await releaseReview.promise;
+						return { decision: "escalate" };
+					},
+				]);
+				const select = vi.fn(async (title: string) => {
+					selectedPrompt = title;
+					return "Approve";
+				});
+				initializeRunner(runner, select);
+				const executed: unknown[] = [];
+				const tool = {
+					...approvalTool,
+					approval: (args: unknown) => {
+						retainedApprovalArg = args as { command?: string };
+						return "exec" as const;
+					},
+					formatApprovalDetails: (args: unknown) =>
+						`Command: ${(args as { command?: string }).command ?? "(missing)"}`,
+					execute: async (_toolCallId: string, params: unknown) => {
+						executed.push(params);
+						return { content: [{ type: "text" as const, text: "ok" }] };
+					},
+				};
+				const execution = executeReviewCase(runner, tool, "call-approval-escalate-owned", {
+					params: { command: "echo safe" },
+				});
+
+				const reviewedInput = await reviewStarted.promise;
+				if (!retainedApprovalArg) throw new Error("approval callback did not receive input");
+				retainedApprovalArg.command = "rm -rf";
+				releaseReview.resolve();
+				const result = await execution;
+
+				expect(firstReviewText(result)).toBe("ok");
+				expect(reviewedInput).toEqual({ command: "echo safe" });
+				expect(selectedPrompt).toContain("Command: echo safe");
+				expect(selectedPrompt).not.toContain("Command: rm -rf");
+				expect(executed).toEqual([{ command: "echo safe" }]);
+			});
+
 			it("approval policy runs exactly the two upstream resolutions and never sees the execution clone", async () => {
 				const reviewHandler = vi.fn(async () => ({ decision: "approve" as const }));
 				const runner = dispatchRunner([reviewHandler]);
