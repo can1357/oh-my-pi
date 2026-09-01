@@ -224,23 +224,43 @@ impl GitRepo {
 	}
 
 	/// Render git status in porcelain-v1 form.
+	///
+	/// Prefers the git CLI: whole-worktree status is the one read whose peak
+	/// memory scales with worktree pathology. Tens of thousands of untracked
+	/// files drove gitoxide's parallel walk into the Windows commit limit
+	/// (os error 1455, `ERROR_COMMITMENT_LIMIT`), which panics in gix's
+	/// worker-thread spawn (`.expect("valid name")`) and pins gigabytes of
+	/// committed memory until process exit. A subprocess bounds that blast
+	/// radius: its memory returns to the OS when it exits and failure is an
+	/// exit code, not a panic. Hosts without a git binary fall back to the
+	/// in-process gitoxide walk (never for reftable repos, which are
+	/// unreadable in-process).
 	pub fn status_porcelain(&self, options: &StatusOptions) -> Result<String> {
-		if self.is_reftable() {
-			let mut owned = vec!["status".to_owned(), "--porcelain".to_owned()];
-			owned.push(match options.untracked {
-				UntrackedMode::No => "--untracked-files=no".to_owned(),
-				UntrackedMode::Normal => "--untracked-files=normal".to_owned(),
-				UntrackedMode::All => "--untracked-files=all".to_owned(),
-			});
-			if options.nul_terminated {
-				owned.push("-z".to_owned());
-			}
-			if !options.pathspecs.is_empty() {
-				owned.push("--".to_owned());
-				owned.extend(options.pathspecs.iter().cloned());
-			}
-			return cli_text_owned(self.root(), &owned);
+		let mut args = vec!["status".to_owned(), "--porcelain".to_owned()];
+		args.push(match options.untracked {
+			UntrackedMode::No => "--untracked-files=no".to_owned(),
+			UntrackedMode::Normal => "--untracked-files=normal".to_owned(),
+			UntrackedMode::All => "--untracked-files=all".to_owned(),
+		});
+		if options.nul_terminated {
+			args.push("-z".to_owned());
 		}
+		if !options.pathspecs.is_empty() {
+			args.push("--".to_owned());
+			args.extend(options.pathspecs.iter().cloned());
+		}
+		match cli_text_owned(self.root(), &args, super::cli::COMMAND_TIMEOUT) {
+			Err(err) if !self.is_reftable() && super::cli::is_spawn_failure(&err) => {
+				self.status_porcelain_gix(options)
+			},
+			result => result,
+		}
+	}
+
+	/// In-process porcelain rendering via gitoxide; fallback for hosts
+	/// without a git binary. Must stay byte-identical to `git status
+	/// --porcelain` — the oracle test compares both against the real CLI.
+	fn status_porcelain_gix(&self, options: &StatusOptions) -> Result<String> {
 		let repo = self.gix()?;
 		let untracked = match options.untracked {
 			UntrackedMode::No => gix::status::UntrackedFiles::None,
@@ -566,7 +586,7 @@ impl GitRepo {
 			// `git merge-base` exits 1 for unrelated histories but 128 for fatal
 			// failures (missing ref, corrupt object); only the former is `None`.
 			let args = ["merge-base".to_owned(), a.to_owned(), b.to_owned()];
-			let out = super::cli::run_sync(self.root(), &args)?;
+			let out = super::cli::run_sync(self.root(), &args, super::cli::SYNC_TIMEOUT)?;
 			return match out.exit_code {
 				0 => Ok(nonempty(out.stdout.trim())),
 				1 => Ok(None),
@@ -752,7 +772,7 @@ impl GitRepo {
 				owned.push("--".to_owned());
 				owned.extend(paths.iter().cloned());
 			}
-			return Ok(cli_text_owned(self.root(), &owned)?
+			return Ok(cli_text_owned(self.root(), &owned, super::cli::SYNC_TIMEOUT)?
 				.split('\0')
 				.filter(|s| !s.is_empty())
 				.map(str::to_owned)
@@ -985,7 +1005,7 @@ fn set_worktree(
 
 fn cli_try(cwd: &Path, args: &[&str]) -> Result<Option<String>> {
 	let owned: Vec<_> = args.iter().map(|v| (*v).to_owned()).collect();
-	let out = super::cli::run_sync(cwd, &owned)?;
+	let out = super::cli::run_sync(cwd, &owned, super::cli::SYNC_TIMEOUT)?;
 	if out.exit_code != 0 {
 		return Ok(None);
 	}
@@ -993,10 +1013,12 @@ fn cli_try(cwd: &Path, args: &[&str]) -> Result<Option<String>> {
 }
 fn cli_text(cwd: &Path, args: &[&str]) -> Result<String> {
 	let owned: Vec<_> = args.iter().map(|v| (*v).to_owned()).collect();
-	cli_text_owned(cwd, &owned)
+	cli_text_owned(cwd, &owned, super::cli::SYNC_TIMEOUT)
 }
-fn cli_text_owned(cwd: &Path, args: &[String]) -> Result<String> {
-	Ok(super::cli::run_sync(cwd, args)?.into_checked(args)?.stdout)
+fn cli_text_owned(cwd: &Path, args: &[String], timeout: std::time::Duration) -> Result<String> {
+	Ok(super::cli::run_sync(cwd, args, timeout)?
+		.into_checked(args)?
+		.stdout)
 }
 fn cli_lines(cwd: &Path, args: &[&str]) -> Result<Vec<String>> {
 	Ok(cli_text(cwd, args)?
@@ -1253,6 +1275,27 @@ mod tests {
 		assert!(repo.merge_base("main", "does-not-exist").is_err());
 		Ok(())
 	}
+	#[test]
+	fn read_status_porcelain_survives_output_larger_than_pipe_buffer() -> TestResult {
+		let (dir, repo) = repo()?;
+		commit(dir.path(), "seed", "seed\n", "initial")?;
+		// >64 KiB of porcelain output: the sync CLI runner used to poll
+		// `try_wait` without draining the pipes, so a chatty child blocked on
+		// a full pipe and died as a spurious `CliTimeout`.
+		for i in 0..3000 {
+			fs::write(
+				dir.path()
+					.join(format!("untracked-scratch-file-{i:04}.txt")),
+				"x\n",
+			)?;
+		}
+		let text = repo.status_porcelain(&StatusOptions {
+			untracked: UntrackedMode::All,
+			..Default::default()
+		})?;
+		assert_eq!(text.lines().count(), 3000);
+		Ok(())
+	}
 
 	#[test]
 	fn read_status_matches_porcelain_oracle() -> TestResult {
@@ -1280,6 +1323,10 @@ mod tests {
 		let expected = git(dir.path(), &["status", "--porcelain", "--untracked-files=normal"])?;
 		let actual = repo.status_porcelain(&StatusOptions::default())?;
 		assert_eq!(actual.as_bytes(), expected.as_bytes());
+		// The in-process gitoxide fallback (hosts without a git binary) must
+		// render the same bytes as the CLI-first public path.
+		let fallback = repo.status_porcelain_gix(&StatusOptions::default())?;
+		assert_eq!(fallback.as_bytes(), expected.as_bytes());
 		assert_eq!(repo.status_summary()?, StatusSummary {
 			staged:    2,
 			unstaged:  2,
