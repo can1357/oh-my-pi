@@ -1002,23 +1002,40 @@ describe("sloppy v8", () => {
 		expect(variant.apply(content, input, context)).toBe(`async function ensureMigrationsTable() {\n${block}\n}\n`);
 	});
 
-	test("applies a pattern-only block as the delete half of a move", () => {
+	test("rejects a pattern-only multi-line block even when a sibling op re-emits its text", () => {
 		const block = [
 			"  const parseAnsiRgb = (ansi: string): [number, number, number] | null => {",
 			"    return null;",
 			"  };",
 		].join("\n");
 		const content = `  const first = 0;\n\n${block}\n\n  const other = 1;\n\n  const getContrast = () => 2;\n`;
+		// The old move shape: op1 is a pattern-only block (no »), op2 re-emits its
+		// text. Deletion must be explicit now, so this fails closed.
 		const input = [
 			`${M.open}\n${block}`,
 			`${M.open}\n  const getContrast = () => 2;\n${M.put}\n${block}\n\n  const getContrast = () => 2;`,
 		].join("\n");
-		const notes: string[] = [];
 
-		expect(variant.apply(content, input, { path: context.path, notes })).toBe(
+		expect(() => variant.apply(content, input, context)).toThrow(/needs »/);
+	});
+
+	test("moves a block with an explicit deletion and a »N re-emit", () => {
+		const block = [
+			"  const parseAnsiRgb = (ansi: string): [number, number, number] | null => {",
+			"    return null;",
+			"  };",
+		].join("\n");
+		const content = `  const first = 0;\n\n${block}\n\n  const other = 1;\n\n  const getContrast = () => 2;\n`;
+		// Documented move idiom: delete explicitly with ⟪block│⟫, re-emit at the
+		// destination with »1 as the sole REWRITE line.
+		const input = [
+			`${M.open}\n${M.selectOpen}${block}${M.selectDivider}${M.selectClose}`,
+			`${M.open}\n  const getContrast = () => 2;\n${M.put}\n${M.put}1`,
+		].join("\n");
+
+		expect(variant.apply(content, input, context)).toBe(
 			`  const first = 0;\n\n  const other = 1;\n\n${block}\n\n  const getContrast = () => 2;\n`,
 		);
-		expect(notes.join("\n")).toContain("move deletion");
 	});
 
 	test("never adopts a gap-only remainder as rewrite text", () => {

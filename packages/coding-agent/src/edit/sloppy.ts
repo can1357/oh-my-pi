@@ -273,8 +273,6 @@ interface Operation {
 	sourcePatternText: string;
 	rewrite: OperationRewrite;
 	all: boolean;
-	/** Pattern-only op applied as a deletion; justified only when another op re-emits the block. */
-	assumedDeletion?: boolean;
 	/** Marker-less op read as desired text; a no-op means the assertion already holds. */
 	desiredState?: boolean;
 	/** Post-apply advisory for a formally invalid payload recovered at parse time. */
@@ -1179,7 +1177,6 @@ function parseOperations(input: string, content: string): Operation[] {
 		}
 		operations.push(createOperation(sourcePatternText, rewriteText, allMatches, operations.length + 1, true));
 	};
-	const pendingSeparatorErrors = new Map<number, string>();
 	const finishPattern = (endIndex: number) => {
 		const sourcePatternText = normalizeBlock(patternLines, false);
 		if (
@@ -1291,17 +1288,15 @@ function parseOperations(input: string, content: string): Operation[] {
 				return;
 			}
 		}
-		const needsSeparator = `Operation ${operations.length + 1} needs ${REWRITE_HEADER}.\nCopy-ready corrected payload (fill in the new text):\n${[...lines.slice(0, endIndex), REWRITE_HEADER, "<new text>", ...lines.slice(endIndex)].join("\n")}`;
-		// A multiline pattern-only block may be the delete half of a move; assume
-		// deletion now, justified post-parse only when another op re-emits it.
-		const normalizedPattern = normalizeText(sourcePatternText).text;
-		if (!sourcePatternText.includes("\n") || normalizedPattern.length < 24) {
-			throw new Error(needsSeparator);
-		}
-		const operation = createOperation(sourcePatternText, "", allMatches, operations.length + 1, true);
-		operation.assumedDeletion = true;
-		pendingSeparatorErrors.set(operations.length, needsSeparator);
-		operations.push(operation);
+		// An empty REWRITE is a whole-MATCH deletion; a pattern-only block with no
+		// separator never states a rewrite, so always fail closed with the fill-in
+		// skeleton. Multiline blocks used to be queued as assumed deletions
+		// (justified only when a sibling op re-emits them); that implicit-deletion
+		// ambiguity is the footgun behind accidental block deletions — deletion must
+		// be explicit (⟪old│⟫ / －).
+		throw new Error(
+			`Operation ${operations.length + 1} needs ${REWRITE_HEADER}.\nAn empty REWRITE deletes the whole MATCH; to delete, mark it explicitly with ${SELECT_OPEN}old${SELECT_DIVIDER}${SELECT_CLOSE} or ${REMOVE_LINE} lines.\nCopy-ready corrected payload (fill in the new text):\n${[...lines.slice(0, endIndex), REWRITE_HEADER, "<new text>", ...lines.slice(endIndex)].join("\n")}`,
+		);
 	};
 
 	for (let index = 0; index < lines.length; index++) {
@@ -1417,19 +1412,6 @@ function parseOperations(input: string, content: string): Operation[] {
 				}
 			}
 		}
-	}
-	for (const [index, message] of pendingSeparatorErrors) {
-		const patternNormalized = normalizeText(operations[index].patternText).text;
-		const justified = operations.some((other, otherIndex) => {
-			if (otherIndex === index) return false;
-			const rewrites = other.rewrite.kind === "explicit" ? [other.rewrite.text] : other.rewrite.replacements;
-			return rewrites.some(
-				rewrite =>
-					normalizeText(rewrite).text.includes(patternNormalized) ||
-					rewrite.split("\n").some(line => line.trim() === `${REWRITE_HEADER}${index + 1}`),
-			);
-		});
-		if (!justified) throw new Error(message);
 	}
 	return operations;
 }
@@ -3804,9 +3786,7 @@ function applyOperations(content: string, input: string, context: SloppyApplyCon
 				const deletedLines = prepared.deletedText.split("\n").filter(entry => entry.trim() !== "").length;
 				deletionNotes.set(
 					operationNumber,
-					operation.assumedDeletion
-						? `Note: operation ${operationNumber} had no ${REWRITE_HEADER} REWRITE and was applied as a move deletion (a later operation re-emits its block).`
-						: `Note: operation ${operationNumber} deleted ${deletedLines} line(s); an empty REWRITE means deletion — resend with the final text if you meant to replace.`,
+					`Note: operation ${operationNumber} deleted ${deletedLines} line(s); an empty REWRITE means deletion — resend with the final text if you meant to replace, or mark deletion explicitly with ${SELECT_OPEN}old${SELECT_DIVIDER}${SELECT_CLOSE} / ${REMOVE_LINE} lines.`,
 				);
 			}
 			lastMatchOffset = candidate.matchStart;
