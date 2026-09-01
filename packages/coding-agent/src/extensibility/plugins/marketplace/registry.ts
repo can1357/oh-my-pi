@@ -132,6 +132,20 @@ export async function writeInstalledPluginsRegistry(filePath: string, reg: Insta
 // reading, mutating, and writing back.
 
 /**
+ * Add the entry, refusing a name that already exists. The strict variant of
+ * {@link upsertMarketplaceEntry}. It stays because this module is a published
+ * package surface (star-exported from the marketplace index), so removing it
+ * breaks external callers. Internal code repointing a marketplace wants the
+ * upsert; code registering something genuinely new keeps the duplicate check.
+ */
+export function addMarketplaceEntry(reg: MarketplacesRegistry, entry: MarketplaceRegistryEntry): MarketplacesRegistry {
+	if (reg.marketplaces.some(m => m.name === entry.name)) {
+		throw new Error(`Marketplace "${entry.name}" already exists`);
+	}
+	return { ...reg, marketplaces: [...reg.marketplaces, entry] };
+}
+
+/**
  * Add the entry, or repoint the existing marketplace of the same name at a new
  * source. `addedAt` survives: the marketplace is the same one, reachable
  * somewhere else now.

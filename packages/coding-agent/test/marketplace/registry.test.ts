@@ -10,6 +10,7 @@ import type {
 } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/marketplace";
 import {
 	addInstalledPlugin,
+	addMarketplaceEntry,
 	buildPluginId,
 	getInstalledPlugin,
 	getMarketplaceEntry,
@@ -126,6 +127,12 @@ describe("marketplace registry CRUD", () => {
 	it("upsertMarketplaceEntry + getMarketplaceEntry round-trip", () => {
 		const reg = upsertMarketplaceEntry(empty, entry);
 		expect(getMarketplaceEntry(reg, "test-market")).toEqual(entry);
+	});
+
+	it("addMarketplaceEntry (the strict public variant) throws on a duplicate name", () => {
+		const reg = addMarketplaceEntry(empty, entry);
+		expect(getMarketplaceEntry(reg, "test-market")).toEqual(entry);
+		expect(() => addMarketplaceEntry(reg, entry)).toThrow(/already exists/);
 	});
 
 	it("upsertMarketplaceEntry repoints an existing name without duplicating it", () => {

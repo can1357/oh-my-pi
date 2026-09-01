@@ -237,9 +237,13 @@ export const BUILTIN_MARKETPLACE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec>
 		},
 		handleTui: async (command, runtime) => {
 			runtime.ctx.editor.setText("");
-			const args = command.args.trim().split(/\s+/);
+			const trimmedArgs = command.args.trim();
+			const args = trimmedArgs.split(/\s+/);
 			const sub = args[0] || "install";
-			const rest = args.slice(1).join(" ").trim();
+			// Slice, do not re-join: tokenising collapses repeated whitespace, and a
+			// local marketplace path may contain it. The parsers tokenise for
+			// themselves where that is safe.
+			const rest = trimmedArgs.slice(sub.length).trim();
 
 			// /marketplace (no args) or /marketplace install (no args) → interactive browser
 			if ((sub === "install" && !rest) || (!args[0] && !command.args.trim())) {
