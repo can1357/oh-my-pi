@@ -54,6 +54,7 @@
 - Fixed Perplexity email sign-in for accounts protected by authenticator-based two-factor authentication.
 - Fixed Qianfan API-key login validation for keys that cannot access the validation model.
 - Fixed Z.AI browser sign-in to report an occupied callback port before opening the browser.
+- Chat Completions requests now forward the agent session id as `metadata.session_id`, letting OpenAI-compatible gateways associate provider requests with the agent conversation that produced them. Forwarded by default on hosts known to accept the field (first-party OpenAI, Azure OpenAI, and the `litellm` gateway provider); every other endpoint opts in via `compat.supportsMetadata`.
 
 ## [18.0.9] - 2026-08-28
 
