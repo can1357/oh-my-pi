@@ -60,6 +60,7 @@ import { shortenPath } from "../../tools/render-utils";
 import { urlHyperlinkAlways } from "../../tui";
 import { copyToClipboard } from "../../utils/clipboard";
 import { isTimeoutError } from "../../utils/fetch-timeout";
+import { persistLoginUrl } from "../../utils/login-url";
 import { openPath } from "../../utils/open";
 import { ChatBlock } from "../components/chat-block";
 import { DynamicBorder } from "../components/dynamic-border";
@@ -956,6 +957,14 @@ export class MCPCommandController {
 							new Text(theme.fg("muted", launched ? "Alternative if browser did not open:" : "Log in at:"), 1, 0),
 						);
 						block.addChild(new MCPAuthorizationLinkPrompt(info.url, info.launchUrl));
+						{
+							// Byte-exact copy path: a wrapped selection carries row breaks
+							// and padding, and OSC 52/OSC 8 are optional terminal features.
+							const urlFile = persistLoginUrl(info.url);
+							if (urlFile) {
+								block.addChild(new Text(theme.fg("muted", `Clean copy: cat ${urlFile}`), 1, 0));
+							}
+						}
 						this.ctx.ui.requestRender();
 					},
 					onProgress: (message: string) => {
@@ -2442,6 +2451,7 @@ export class MCPCommandController {
 		// launches, and "complete auth in your browser" precedes a five-minute
 		// wait for a browser that never opened.
 		const launched = openPath(session.authUrl);
+		const smitheryUrlFile = persistLoginUrl(session.authUrl);
 		this.#showMessage(
 			[
 				"",
@@ -2451,6 +2461,7 @@ export class MCPCommandController {
 					: theme.fg("muted", "Browser launch disabled by BROWSER=none. Log in at the URL below."),
 				theme.fg("dim", "Authorize URL:"),
 				theme.fg("accent", session.authUrl),
+				...(smitheryUrlFile ? [theme.fg("dim", `Clean copy: cat ${smitheryUrlFile}`)] : []),
 				theme.fg("dim", `Fallback: ${fallbackLoginUrl}`),
 				"",
 			].join("\n"),

@@ -11,6 +11,7 @@ import {
 } from "@oh-my-pi/pi-tui";
 import { getAgentDbPath } from "@oh-my-pi/pi-utils";
 import { copyToClipboard } from "../../../utils/clipboard";
+import { persistLoginUrl } from "../../../utils/login-url";
 import { openCommandFor } from "../../../utils/open";
 import { OAuthSelectorComponent } from "../../components/oauth-selector";
 import { theme } from "../../theme/theme";
@@ -84,6 +85,8 @@ export class SignInTab implements SetupTab {
 	#authLaunchUrl: string | undefined;
 	/** Why no browser opened, when that is the case. Cleared with the URL. */
 	#launchNotice: string | undefined;
+	/** File carrying the URL byte-exact; the copy path that needs no terminal feature. */
+	#authUrlFile: string | undefined;
 	#prompt: PromptState | undefined;
 	#promptResolve: ((value: string) => void) | undefined;
 	#loginAbort: AbortController | undefined;
@@ -169,6 +172,12 @@ export class SignInTab implements SetupTab {
 			if (this.#launchNotice) {
 				lines.push(theme.fg("dim", this.#launchNotice));
 			}
+			// The byte-exact copy path that needs no terminal feature: a wrapped
+			// selection carries row breaks and padding, and OSC 52/OSC 8 are
+			// optional. A one-row file path survives any selection.
+			if (this.#authUrlFile) {
+				lines.push(theme.fg("dim", `Clean copy: cat ${this.#authUrlFile}`));
+			}
 			if (this.#authLaunchUrl) {
 				lines.push(theme.fg("dim", `Local shortcut (this machine only): ${this.#authLaunchUrl}`));
 			}
@@ -212,6 +221,7 @@ export class SignInTab implements SetupTab {
 		this.#authUrl = undefined;
 		this.#authLaunchUrl = undefined;
 		this.#launchNotice = undefined;
+		this.#authUrlFile = undefined;
 		this.#loginAbort = new AbortController();
 		this.host.restoreFocus();
 		this.host.requestRender();
@@ -229,6 +239,7 @@ export class SignInTab implements SetupTab {
 					// surface. `launchUrl` is still surfaced as an optional local
 					// shortcut for wide-terminal local users.
 					this.#authUrl = info.url;
+					this.#authUrlFile = persistLoginUrl(info.url);
 					this.#authLaunchUrl = info.launchUrl && info.launchUrl !== info.url ? info.launchUrl : undefined;
 					this.#statusLines = [];
 					if (info.instructions) {
@@ -267,6 +278,7 @@ export class SignInTab implements SetupTab {
 			this.#authUrl = undefined;
 			this.#authLaunchUrl = undefined;
 			this.#launchNotice = undefined;
+			this.#authUrlFile = undefined;
 			this.#loggingInProvider = undefined;
 			this.#loginAbort = undefined;
 			this.#selector.stopValidation();
@@ -289,6 +301,7 @@ export class SignInTab implements SetupTab {
 			this.#authUrl = undefined;
 			this.#authLaunchUrl = undefined;
 			this.#launchNotice = undefined;
+			this.#authUrlFile = undefined;
 			this.#loggingInProvider = undefined;
 			this.#loginAbort = undefined;
 			this.host.restoreFocus();
