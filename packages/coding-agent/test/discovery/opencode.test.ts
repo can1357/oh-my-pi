@@ -367,4 +367,39 @@ describe("OpenCode MCP discovery", () => {
 			delete Bun.env.OMP_TEST_MCP_PATH;
 		}
 	});
+
+	test("imports OpenCode oauth.scope as the canonical oauth.scopes override", async () => {
+		await fs.writeFile(
+			path.join(tempDir, "opencode.json"),
+			JSON.stringify({
+				mcp: {
+					gateway: {
+						type: "remote",
+						url: "https://gateway.example.com/mcp",
+						oauth: { clientId: "gateway-client", scope: "https://gateway.example.com/mcp/mcp.invoke openid" },
+					},
+					// An explicitly empty `scope` suppresses the `scope` parameter, which
+					// is a different authorization request than sending discovered
+					// scopes — so it must survive the import instead of being dropped.
+					suppressed: { type: "remote", url: "https://suppressed.example.com/mcp", oauth: { scope: "" } },
+					// `oauth: false` disables OpenCode's auto-detection and carries no
+					// scope, so there is nothing to import.
+					noauth: { type: "remote", url: "https://plain.example.com/mcp", oauth: false },
+					plain: { type: "remote", url: "https://bare.example.com/mcp" },
+				},
+			}),
+		);
+
+		const servers = await loadOpenCodeMcpConfig(tempDir);
+
+		// The importer also carries OpenCode's other OAuth fields through, so match
+		// on the canonical scope override rather than the whole block.
+		expect(servers.find(item => item.name === "gateway")?.oauth).toMatchObject({
+			clientId: "gateway-client",
+			scopes: "https://gateway.example.com/mcp/mcp.invoke openid",
+		});
+		expect(servers.find(item => item.name === "suppressed")?.oauth).toMatchObject({ scopes: "" });
+		expect(servers.find(item => item.name === "noauth")?.oauth).toBeUndefined();
+		expect(servers.find(item => item.name === "plain")?.oauth).toBeUndefined();
+	});
 });

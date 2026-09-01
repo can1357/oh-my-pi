@@ -307,8 +307,19 @@ export interface MCPOAuthConfig {
 	clientId?: string;
 	/** Client secret (optional for PKCE flows) */
 	clientSecret?: string;
-	/** OAuth scopes (space-separated) */
+	/**
+	 * OAuth scopes (space-separated) discovered from metadata or the challenge.
+	 * Applied only when {@link authorizationUrl} carries no `scope` of its own.
+	 */
 	scopes?: string;
+	/**
+	 * Explicit per-server scope override (`oauth.scopes` in MCP config). Unlike
+	 * {@link scopes} it replaces a `scope` already embedded in
+	 * {@link authorizationUrl}, because a general-purpose IdP fronting one MCP
+	 * server advertises tenant-wide scopes the resource rejects. Set to `""` to
+	 * send no `scope` parameter at all.
+	 */
+	scopeOverride?: string;
 	/**
 	 * `prompt` parameter for the authorization request. By default the parameter
 	 * is omitted, matching the reference MCP SDK, except for `offline_access`
@@ -432,7 +443,13 @@ export class MCPOAuthFlow extends OAuthCallbackFlow {
 		} else {
 			params.delete("client_id");
 		}
-		if (this.config.scopes && !params.get("scope")) {
+		if (this.config.scopeOverride !== undefined) {
+			// An explicit override outranks a scope the provider embedded in its
+			// authorization URL: that embedded value is what the IdP advertises,
+			// not what the resource accepts.
+			if (this.config.scopeOverride) params.set("scope", this.config.scopeOverride);
+			else params.delete("scope");
+		} else if (this.config.scopes && !params.get("scope")) {
 			params.set("scope", this.config.scopes);
 		}
 		const prompt = this.config.prompt ?? (hasOAuthScope(params.get("scope"), "offline_access") ? "consent" : "");
@@ -603,9 +620,11 @@ export class MCPOAuthFlow extends OAuthCallbackFlow {
 	 * probe surfaces a message that names the endpoint and status instead of
 	 * the historical opaque "OAuth provider requires client_id".
 	 *
-	 * Includes {@link MCPOAuthConfig.scopes} as RFC 7591 `scope` when set so
-	 * providers that bind DCR clients to registered scopes only (e.g. Clerk)
-	 * accept the later authorize request for the same scope set.
+	 * Includes the scopes the authorize request will carry
+	 * ({@link MCPOAuthConfig.scopeOverride}, else {@link MCPOAuthConfig.scopes})
+	 * as RFC 7591 `scope` when set, so providers that bind DCR clients to
+	 * registered scopes only (e.g. Clerk) accept the later authorize request for
+	 * the same scope set.
 	 */
 	async #tryRegisterClient(redirectUri: string): Promise<void> {
 		const registrationEndpoint = this.config.registrationUrl ?? (await this.#resolveRegistrationEndpoint());
@@ -620,7 +639,7 @@ export class MCPOAuthFlow extends OAuthCallbackFlow {
 				token_endpoint_auth_method: "none",
 				application_type: "native",
 			};
-			const scope = this.config.scopes?.trim();
+			const scope = (this.config.scopeOverride ?? this.config.scopes)?.trim();
 			if (scope) {
 				registrationBody.scope = scope;
 			}

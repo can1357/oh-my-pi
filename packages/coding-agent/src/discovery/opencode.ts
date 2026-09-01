@@ -196,13 +196,16 @@ interface OpenCodeMCPConfig {
 	headers?: Record<string, string>;
 	enabled?: boolean;
 	timeout?: number;
-	oauth?: {
-		clientId?: string;
-		clientSecret?: string;
-		scope?: string;
-		callbackPort?: number;
-		redirectUri?: string;
-	};
+	/** `false` disables OpenCode's OAuth auto-detection; OMP has no equivalent. */
+	oauth?:
+		| {
+				clientId?: string;
+				clientSecret?: string;
+				scope?: string;
+				callbackPort?: number;
+				redirectUri?: string;
+		  }
+		| false;
 }
 
 function stringArray(value: unknown): string[] | undefined {
@@ -324,6 +327,17 @@ function buildMCPServer(name: string, serverConfig: OpenCodeMCPConfig, source: O
 	const command = normalizeCommand(serverConfig.command, serverConfig.args);
 	const env = stringRecord(serverConfig.environment) ?? stringRecord(serverConfig.env);
 
+	// OpenCode's singular `oauth.scope` is the same space-separated authorization
+	// scope string as the canonical `oauth.scopes`. `oauth: false` carries no
+	// scope, so it maps to no OAuth config at all. An empty `scope` is preserved
+	// rather than dropped: like `oauth.scopes: ""` it suppresses the `scope`
+	// parameter, which is a different request than sending discovered scopes.
+	const oauth = normalizeOAuth(serverConfig.oauth);
+	const scopes =
+		typeof serverConfig.oauth === "object" && typeof serverConfig.oauth?.scope === "string"
+			? serverConfig.oauth.scope.trim()
+			: undefined;
+
 	return {
 		name,
 		command: command.command,
@@ -331,9 +345,9 @@ function buildMCPServer(name: string, serverConfig: OpenCodeMCPConfig, source: O
 		env,
 		url: typeof serverConfig.url === "string" ? serverConfig.url : undefined,
 		headers: serverConfig.headers && typeof serverConfig.headers === "object" ? serverConfig.headers : undefined,
+		oauth: scopes === undefined ? oauth : { ...oauth, scopes },
 		enabled: serverConfig.enabled,
 		timeout: typeof serverConfig.timeout === "number" ? serverConfig.timeout : undefined,
-		oauth: normalizeOAuth(serverConfig.oauth),
 		transport,
 		_source: createSourceMeta(PROVIDER_ID, source.path, source.level),
 	};

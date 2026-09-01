@@ -164,6 +164,82 @@ describe("mcp oauth flow", () => {
 		expect(authUrl.searchParams.get("client_id")).toBe("registered-client-id");
 	});
 
+	it("keeps a scope already embedded in the authorization URL over discovered scopes", async () => {
+		const flow = new MCPOAuthFlow(
+			{
+				authorizationUrl: "https://provider.example/authorize?scope=server-default",
+				tokenUrl: "https://provider.example/token",
+				clientId: "client-id",
+				scopes: "openid email phone profile",
+			},
+			{},
+		);
+
+		const { url } = await flow.generateAuthUrl("s", "http://127.0.0.1:53185/callback");
+
+		expect(new URL(url).searchParams.get("scope")).toBe("server-default");
+	});
+
+	it("replaces a scope embedded in the authorization URL with the configured override", async () => {
+		const flow = new MCPOAuthFlow(
+			{
+				authorizationUrl: "https://provider.example/authorize?scope=server-default",
+				tokenUrl: "https://provider.example/token",
+				clientId: "client-id",
+				scopes: "openid email phone profile",
+				scopeOverride: "https://gateway.example.com/mcp/mcp.invoke openid",
+			},
+			{},
+		);
+
+		const { url } = await flow.generateAuthUrl("s", "http://127.0.0.1:53186/callback");
+
+		expect(new URL(url).searchParams.get("scope")).toBe("https://gateway.example.com/mcp/mcp.invoke openid");
+	});
+
+	it("removes an embedded scope when the override is the empty string", async () => {
+		const flow = new MCPOAuthFlow(
+			{
+				authorizationUrl: "https://provider.example/authorize?scope=server-default",
+				tokenUrl: "https://provider.example/token",
+				clientId: "client-id",
+				scopes: "openid email phone profile",
+				scopeOverride: "",
+			},
+			{},
+		);
+
+		const { url } = await flow.generateAuthUrl("s", "http://127.0.0.1:53187/callback");
+
+		expect(new URL(url).searchParams.has("scope")).toBe(false);
+	});
+
+	it("registers the override rather than the discovered scopes with dynamic client registration", async () => {
+		let registrationPayload: Record<string, unknown> | null = null;
+		const scopeOverride = "https://gateway.example.com/mcp/mcp.invoke openid";
+
+		const flow = new MCPOAuthFlow(
+			{
+				authorizationUrl: "https://www.figma.com/oauth/mcp",
+				tokenUrl: "https://api.figma.com/v1/oauth/token",
+				registrationUrl: "https://www.figma.com/oauth/register",
+				scopes: "openid email phone profile",
+				scopeOverride,
+				fetch: mockFigmaRegistration(payload => {
+					registrationPayload = payload;
+				}),
+			},
+			{},
+		);
+
+		const { url } = await flow.generateAuthUrl("test-state", "http://127.0.0.1:53188/callback");
+
+		// Providers that bind DCR clients to their registered scopes reject the
+		// later authorize request when the two sets disagree.
+		expect((registrationPayload as { scope?: string } | null)?.scope).toBe(scopeOverride);
+		expect(new URL(url).searchParams.get("scope")).toBe(scopeOverride);
+	});
+
 	it("omits prompt by default so provider-specific reauth pages can use returning grants", async () => {
 		const flow = new MCPOAuthFlow(
 			{

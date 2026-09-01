@@ -190,6 +190,7 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 							redirectUri?: string;
 							callbackPort?: number;
 							callbackPath?: string;
+							scopes?: string;
 							prompt?: string;
 					  }
 					| undefined,

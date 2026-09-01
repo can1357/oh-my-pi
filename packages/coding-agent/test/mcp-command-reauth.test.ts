@@ -315,6 +315,101 @@ describe("/mcp auth commands", () => {
 		expect(new URL(authorizationUrl).searchParams.get("resource")).toBe("https://gateway.example.com/mcp");
 	});
 
+	/**
+	 * Answer an auth challenge for a server whose authorization server advertises
+	 * tenant-wide `scopes_supported` (`openid email phone profile`) while the
+	 * resource advertises its own resource-bound scope, and report the `scope`
+	 * the resulting authorize request carries. Without a configured override the
+	 * tenant-wide list wins and the provider rejects the request with
+	 * `invalid_scope` before sign-in.
+	 */
+	async function scopeSentForOAuthConfig(
+		oauth: Record<string, unknown>,
+		authorizationEndpoint = "https://auth.example.com/authorize",
+	): Promise<string | null> {
+		await Bun.write(
+			configPath,
+			`${JSON.stringify({ mcpServers: { envserver: { type: "http", url: RAW_SERVER_URL, oauth } } }, null, 2)}\n`,
+		);
+		const authStorage = freshAuthStorage();
+		await authStorage.reload();
+		vi.spyOn(mcpClient, "connectToServer").mockRejectedValue(new Error("HTTP 401: Unauthorized"));
+
+		const resourceMetadataUrl = "https://gateway.example.com/.well-known/oauth-protected-resource";
+		const fetchMock = Object.assign(
+			async (input: string | URL | Request): Promise<Response> => {
+				const url = String(input);
+				if (url === resourceMetadataUrl) {
+					return new Response(
+						JSON.stringify({
+							resource: "https://gateway.example.com/mcp",
+							authorization_servers: ["https://auth.example.com"],
+							scopes_supported: ["https://gateway.example.com/mcp/mcp.invoke"],
+						}),
+						{ status: 200, headers: { "Content-Type": "application/json" } },
+					);
+				}
+				if (url === "https://auth.example.com/.well-known/oauth-authorization-server") {
+					return new Response(
+						JSON.stringify({
+							authorization_endpoint: authorizationEndpoint,
+							token_endpoint: "https://auth.example.com/token",
+							client_id: "challenge-client",
+							scopes_supported: ["openid", "email", "phone", "profile"],
+						}),
+						{ status: 200, headers: { "Content-Type": "application/json" } },
+					);
+				}
+				return new Response("not found", { status: 404 });
+			},
+			{ preconnect: globalThis.fetch.preconnect },
+		);
+		vi.spyOn(globalThis, "fetch").mockImplementation(fetchMock);
+
+		let authorizationUrl = "";
+		vi.spyOn(oauthFlow.MCPOAuthFlow.prototype, "login").mockImplementation(async function (
+			this: oauthFlow.MCPOAuthFlow,
+		) {
+			authorizationUrl = (await this.generateAuthUrl("state", "http://127.0.0.1:53192/callback")).url;
+			return {
+				access: "fresh-access",
+				refresh: "fresh-refresh",
+				expires: Date.now() + 3_600_000,
+			};
+		});
+
+		const { controller, showError } = createController(authStorage);
+		await controller.handleMCPAuthChallenge("envserver", {
+			wwwAuthenticate: [`Bearer resource_metadata="${resourceMetadataUrl}"`],
+		});
+		expect(showError).not.toHaveBeenCalled();
+		return new URL(authorizationUrl).searchParams.get("scope");
+	}
+
+	test("configured oauth.scopes take precedence over discovered authorization-server scopes", async () => {
+		const scope = await scopeSentForOAuthConfig({ scopes: "https://gateway.example.com/mcp/mcp.invoke openid" });
+
+		expect(scope).toBe("https://gateway.example.com/mcp/mcp.invoke openid");
+	});
+
+	test("configured oauth.scopes replace a scope embedded in the discovered authorization endpoint", async () => {
+		const scope = await scopeSentForOAuthConfig(
+			{ scopes: "https://gateway.example.com/mcp/mcp.invoke openid" },
+			"https://auth.example.com/authorize?scope=server-default",
+		);
+
+		expect(scope).toBe("https://gateway.example.com/mcp/mcp.invoke openid");
+	});
+
+	test("empty oauth.scopes send no scope parameter even when the authorization endpoint embeds one", async () => {
+		const scope = await scopeSentForOAuthConfig(
+			{ scopes: "" },
+			"https://auth.example.com/authorize?scope=server-default",
+		);
+
+		expect(scope).toBeNull();
+	});
+
 	test("reauthorizes on a tool challenge even when the anonymous handshake succeeds", async () => {
 		const authStorage = freshAuthStorage();
 		await authStorage.reload();

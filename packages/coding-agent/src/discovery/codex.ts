@@ -143,6 +143,7 @@ interface CodexMCPConfig {
 	tool_timeout_sec?: number;
 	enabled_tools?: string[];
 	disabled_tools?: string[];
+	scopes?: string[]; // OAuth scopes for the authorization request
 }
 
 function extractMCPServersFromToml(
@@ -222,6 +223,17 @@ function extractMCPServersFromToml(
 		// Map Codex tool_timeout_sec (seconds) to MCPServer timeout (milliseconds)
 		if (typeof config.tool_timeout_sec === "number" && config.tool_timeout_sec > 0) {
 			server.timeout = config.tool_timeout_sec * 1000;
+		}
+
+		// Codex lists OAuth scopes as an array; the canonical field holds the
+		// space-separated form the authorization request sends. An empty array is
+		// preserved as `""` rather than dropped: like `oauth.scopes: ""` it
+		// suppresses the `scope` parameter, which is a different request than
+		// sending discovered scopes.
+		if (Array.isArray(config.scopes)) {
+			server.oauth = {
+				scopes: config.scopes.filter(scope => typeof scope === "string" && scope.trim() !== "").join(" "),
+			};
 		}
 		result[name] = server;
 	}
