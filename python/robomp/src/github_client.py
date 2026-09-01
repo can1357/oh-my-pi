@@ -17,6 +17,8 @@ log = logging.getLogger(__name__)
 GITHUB_API = "https://api.github.com"
 ACCEPT = "application/vnd.github+json"
 API_VERSION = "2022-11-28"
+_DEFAULT_AUTO_LABEL_COLOR = "#cccccc"
+_MAX_LABEL_PAGES = 100
 
 
 class GitHubError(RuntimeError):
@@ -680,6 +682,41 @@ class GitHubClient:
             )
         return out
 
+    async def list_repo_labels(self, repo: str) -> tuple[str, ...]:
+        """Return the names of all labels defined on the repo.
+
+        Paginates (Forgejo uses `limit`, GitHub `per_page`). Bounded to
+        `_MAX_LABEL_PAGES` pages as a guard against a runaway server; a repo's
+        label set is small in practice. Hitting the bound truncates the result
+        and logs a warning so the guard is observable rather than silent.
+        """
+        # Forgejo clamps limit to MaxResponseItems (default 50), so use
+        # the effective per-page size for the termination check.
+        per_page = 100 if self._platform != "forgejo" else 50
+        names: list[str] = []
+        page = 1
+        while page <= _MAX_LABEL_PAGES:
+            params = (
+                {"limit": per_page, "page": page}
+                if self._platform == "forgejo"
+                else {"per_page": per_page, "page": page}
+            )
+            data = await self.request("GET", f"/repos/{repo}/labels", params=params)
+            batch = data or []
+            if not batch:
+                break
+            names.extend(str(lbl["name"]) for lbl in batch if isinstance(lbl, dict) and lbl.get("name") is not None)
+            if len(batch) < per_page:
+                break
+            page += 1
+        if page > _MAX_LABEL_PAGES:
+            log.warning(
+                "list_repo_labels truncated at %d pages",
+                _MAX_LABEL_PAGES,
+                extra={"repo": repo},
+            )
+        return tuple(names)
+
     async def post_comment(self, repo: str, number: int, body: str) -> CommentInfo:
         data = await self.request(
             "POST",
@@ -738,16 +775,43 @@ class GitHubClient:
         """Append labels to an issue (or PR). Returns the full label set after the add.
 
         Uses `POST /repos/{owner}/{repo}/issues/{n}/labels` which is *additive* —
-        we never remove or overwrite existing labels.
+        we never remove or overwrite existing labels. GitHub auto-creates a label
+        on add; Forgejo silently drops names that do not exist in the repo, so on
+        the Forgejo path we create any missing labels first (best-effort).
+        Concurrent creation is safe: any 409 from the label-create call is
+        swallowed, so a race with another creator (or this client re-adding the
+        same label) degrades to the label already existing.
         """
         if not labels:
             return ()
+        if self._platform == "forgejo":
+            existing = set(await self.list_repo_labels(repo))
+            for name in labels:
+                if name not in existing:
+                    await self._create_label(repo, name)
         data = await self.request(
             "POST",
             f"/repos/{repo}/issues/{number}/labels",
             json={"labels": labels},
         )
         return tuple(str(lbl["name"]) if isinstance(lbl, dict) else str(lbl) for lbl in (data or []))
+
+    async def _create_label(self, repo: str, name: str) -> None:
+        """Create a repo label with a neutral color. Best-effort: ANY 409 from
+        ``POST /repos/{repo}/labels`` is swallowed regardless of the message
+        wording — on that endpoint a 409 means the label already exists (the
+        success case), which makes concurrent creation safe. Any other error is
+        propagated so the failed attach surfaces to the caller."""
+        try:
+            await self.request(
+                "POST",
+                f"/repos/{repo}/labels",
+                json={"name": name, "color": _DEFAULT_AUTO_LABEL_COLOR},
+            )
+        except GitHubError as exc:
+            if exc.status == 409:
+                return
+            raise
 
     async def remove_issue_label(self, repo: str, number: int, label: str) -> None:
         """Remove one label from an issue (or PR)."""
