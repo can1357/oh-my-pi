@@ -1,6 +1,8 @@
 import { type AgentMessage, type AgentToolResult, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { CompactionOutcome } from "@oh-my-pi/pi-agent-core/compaction";
-import { PASTE_CODE_LOGIN_PROVIDERS } from "@oh-my-pi/pi-ai";
+import { syncAllSessions } from "@oh-my-pi/omp-stats/aggregator";
+import { getDailyActivity } from "@oh-my-pi/omp-stats/db";
+import { PASTE_CODE_LOGIN_PROVIDERS, type UsageReport } from "@oh-my-pi/pi-ai";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import type { OAuthProvider } from "@oh-my-pi/pi-ai/oauth/types";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
@@ -107,6 +109,8 @@ import { SettingsSelectorComponent } from "../components/settings-selector";
 import { ToolExecutionComponent } from "../components/tool-execution";
 import { TranscriptBlock } from "../components/transcript-container";
 import { TreeSelectorComponent } from "../components/tree-selector";
+import { UsageDashboardComponent } from "../components/usage-dashboard";
+import { renderUsageReports } from "./command-controller";
 import type { SessionObserverRegistry } from "../session-observer-registry";
 
 const MANUAL_LOGIN_PROMPT = "Paste the authorization code (or full redirect URL), then press Enter:";
@@ -267,6 +271,49 @@ export class SelectorController {
 			);
 			const overlayHandle = this.#showFullscreenMenu(selector);
 		});
+	}
+
+	/**
+	 * Fullscreen `/usage` dashboard on the alternate screen (the /settings
+	 * idiom): compact subscriptions grid + daily activity heatmap, with the
+	 * classic full report one keypress away. Takes no transcript space.
+	 */
+	showUsageDashboard(reports: UsageReport[]): void {
+		const currentProvider = this.ctx.session.model?.provider;
+		const activeAccount = currentProvider
+			? this.ctx.session.modelRegistry.authStorage.getOAuthAccountIdentity(
+					currentProvider,
+					this.ctx.session.sessionId,
+				)
+			: undefined;
+		const usageModelSelectors = this.ctx.session.getUsageReportingModelSelectors(reports);
+		const done = () => {
+			overlayHandle?.hide();
+			this.focusActiveEditorArea();
+			this.ctx.ui.requestRender();
+		};
+		const dashboard = new UsageDashboardComponent({
+			reports,
+			renderDetail: width =>
+				renderUsageReports(
+					reports,
+					theme,
+					Date.now(),
+					width,
+					provider => (provider === currentProvider ? activeAccount : undefined),
+					usageModelSelectors,
+				),
+			loadActivity: async push => {
+				// Show whatever the stats DB already has, then re-query after an
+				// incremental session sync so the heatmap converges on fresh data.
+				push(await getDailyActivity());
+				await syncAllSessions();
+				push(await getDailyActivity());
+			},
+			requestRender: () => this.ctx.ui.requestRender(),
+			onClose: done,
+		});
+		const overlayHandle = this.#showFullscreenMenu(dashboard);
 	}
 
 	showAdvisorConfigure(): void {

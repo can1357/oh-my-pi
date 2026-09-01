@@ -180,13 +180,17 @@ describe("sloppy v8", () => {
 		);
 	});
 
-	test("strips a diff-habit add marker from REWRITE lines", () => {
-		// Regression: ＋-prefixed REWRITE lines were written verbatim, leaving
-		// literal ＋ markers in the file.
+	test("inserts an all-＋ REWRITE without writing literal markers", () => {
+		// ＋-prefixed REWRITE lines are never written verbatim; an add-only
+		// REWRITE reads as the diff add-hunk habit and inserts after the MATCH.
 		const content = "start();\nmiddle();\nend();\n";
+		const notes: string[] = [];
 		const input = operation("middle();", "＋replacement();\n＋more();");
 
-		expect(variant.apply(content, input, context)).toBe("start();\nreplacement();\nmore();\nend();\n");
+		expect(variant.apply(content, input, { path: context.path, notes })).toBe(
+			"start();\nmiddle();\nreplacement();\nmore();\nend();\n",
+		);
+		expect(notes.join("\n")).toMatch(/inserted after the kept MATCH/);
 	});
 	test("deletes a run of －-marked lines silently", () => {
 		const content = "first();\nold();\nolder();\nlast();\n";
@@ -216,6 +220,80 @@ describe("sloppy v8", () => {
 		const input = operation("beta();", "－beta();\n＋gamma();");
 
 		expect(variant.apply(content, input, context)).toBe("alpha();\ngamma();\n");
+	});
+	test("matches ＋ insertion anchors leniently when only whitespace drifted", () => {
+		// Regression: blank-line miscounts in MATCH anchors hard-failed marker
+		// ops with a byte-for-byte error instead of using normalized matching.
+		const content = "over\ntime.\n\n\n### Builtins\n#### Bash\n";
+		const notes: string[] = [];
+		const input = inlineOperation("time.\n\n\n＋#### Intent injection\n\n\n### Builtins");
+
+		expect(variant.apply(content, input, { path: context.path, notes })).toBe(
+			"over\ntime.\n#### Intent injection\n\n\n### Builtins\n#### Bash\n",
+		);
+		expect(notes.join("\n")).toMatch(/whitespace only/);
+	});
+
+	test("keeps the next anchor's indentation when a lenient ＋ insert lands above it", () => {
+		// The insert splices at line start; the tab stays on the anchor line
+		// instead of migrating onto the inserted text.
+		const content = "fn main() {\n\tsetup();\n\trun();\n}\n";
+		const notes: string[] = [];
+		const input = inlineOperation("setup();\n＋probe();\nrun();");
+
+		expect(variant.apply(content, input, { path: context.path, notes })).toBe(
+			"fn main() {\n\tsetup();\nprobe();\n\trun();\n}\n",
+		);
+		expect(notes.join("\n")).toMatch(/whitespace only/);
+	});
+
+	test("names unmarked MATCH lines that exist nowhere and suggests ＋", () => {
+		// Regression: a new heading typed without ＋ among real anchors produced
+		// only "copy its exact indentation", steering retries at the wrong cause.
+		const content = "alpha();\nbeta();\n";
+		const input = inlineOperation("alpha();\n#### Intent injection\n＋one();\nbeta();");
+
+		expect(() => variant.apply(content, input, context)).toThrow(
+			/Unmarked MATCH lines must already exist in the file; "#### Intent injection" does not\. Copy real lines from the file, and mark new lines to insert with ＋\./,
+		);
+	});
+
+	test("treats an all-＋ REWRITE as insertion after the kept MATCH", () => {
+		// Regression: stripping the markers as diff noise replaced the MATCH,
+		// silently deleting the matched text.
+		const content = "over\ntime.\n\n### Builtins\n";
+		const notes: string[] = [];
+		const input = operation("over\ntime.", "＋#### Intent injection\n\n＋body text");
+
+		expect(variant.apply(content, input, { path: context.path, notes })).toBe(
+			"over\ntime.\n#### Intent injection\n\nbody text\n\n### Builtins\n",
+		);
+		expect(notes.join("\n")).toMatch(/inserted after the kept MATCH/);
+	});
+
+	test("tells a context-only operation missing » to delete itself", () => {
+		const content = "const a = 1;\nkeep();\n";
+		const input = "§\nconst a = ⟪1│2⟫;\n§\nkeep();";
+
+		expect(() => applySloppy(content, input, { path: "i.ts", notes: [] })).toThrow(
+			/Operation 2 needs »\.\nIts lines already exist in the file unchanged/,
+		);
+	});
+
+	test("keeps unlocated errors free of a misleading file-head preview", () => {
+		// Regression: errors with no located region were suffixed with the first
+		// lines of the file under a "closest match (no re-read needed)" banner.
+		const content = "x();\n".repeat(300);
+		let message = "";
+
+		try {
+			variant.apply(content, operation("x();", "y();"), context);
+		} catch (error) {
+			message = error instanceof Error ? error.message : String(error);
+		}
+
+		expect(message).toContain("pattern is too broad");
+		expect(message).not.toContain("no re-read needed");
 	});
 
 	test("drops apply-patch end-of-edit sentinels from the payload", () => {
