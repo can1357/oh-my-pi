@@ -48,3 +48,17 @@ export function chromiumAvailable(): Promise<boolean> {
 	probe ??= chromiumCanLaunch();
 	return probe;
 }
+
+/**
+ * Gate for tests that launch a *visible* (headful) Chromium. A headful launch
+ * on Linux needs an X or Wayland display; `chromiumAvailable()` only proves the
+ * binary executes (`chrome --version` succeeds with no display), so a visible
+ * suite gated on it alone runs and then dies with "Missing X server or
+ * $DISPLAY" on displayless CI (GH-hosted ubuntu-22.04 PR runners). macOS and
+ * Windows headful launches do not need X, so only Linux is display-gated.
+ */
+export async function visibleBrowserAvailable(): Promise<boolean> {
+	if (!(await chromiumAvailable())) return false;
+	if (process.platform !== "linux") return true;
+	return Boolean(process.env.DISPLAY || process.env.WAYLAND_DISPLAY);
+}
