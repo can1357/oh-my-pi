@@ -44,7 +44,6 @@ import {
 	adjustHsv,
 	formatNumber,
 	getProjectDir,
-	hsvToRgb,
 	isEnoent,
 	logger,
 	postmortem,
@@ -178,6 +177,7 @@ import { SessionInfoOverlay } from "./components/session-info-overlay";
 import { StatusLineComponent } from "./components/status-line";
 import { stopSharedSpinnerTicker, type ToolExecutionHandle } from "./components/tool-execution";
 import { TranscriptContainer } from "./components/transcript-container";
+import { VoiceIndicatorComponent, type VoiceIndicatorState } from "./components/voice-indicator";
 import type { LspServerInfo as WelcomeLspServerInfo } from "./components/welcome";
 import { Composer } from "./composer";
 import { writeComposerWelcomeCache } from "./composer-cache";
@@ -821,9 +821,9 @@ export class InteractiveMode implements InteractiveModeContext {
 	readonly #uiHelpers: UiHelpers;
 	#sttController: STTController | undefined;
 	#voiceAnimationInterval: NodeJS.Timeout | undefined;
-	#voiceHue = 0;
-	#voicePreviousShowHardwareCursor: boolean | null = null;
-	#voicePreviousUseTerminalCursor: boolean | null = null;
+	#voiceIndicator: VoiceIndicatorComponent | undefined;
+	#voicePreviousShowHardwareCursor: boolean | undefined;
+	#voicePreviousUseTerminalCursor: boolean | undefined;
 	#resizeHandler?: () => void;
 	#observerRegistry: SessionObserverRegistry;
 	#eventBus?: EventBus;
@@ -4689,7 +4689,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (this.loadingAnimation) {
 			this.#stopLoadingAnimation(false);
 		}
-		this.#cleanupMicAnimation();
+		this.#cleanupVoiceIndicator();
 		// Stop the shared tool-spinner ticker: a live block missed by per-component
 		// stopAnimation would otherwise keep an 80ms interval pinning the process.
 		stopSharedSpinnerTicker();
@@ -5485,17 +5485,10 @@ export class InteractiveMode implements InteractiveModeContext {
 				// Duck assistant speech while the user is talking (push-to-talk); restore after.
 				if (state === "recording") vocalizer.duck();
 				else vocalizer.unduck();
-				if (state === "recording") {
-					this.#voicePreviousShowHardwareCursor = this.ui.getShowHardwareCursor();
-					this.#voicePreviousUseTerminalCursor = this.editor.getUseTerminalCursor();
-					this.ui.setShowHardwareCursor(false);
-					this.editor.setUseTerminalCursor(false);
-					this.#startMicAnimation();
-				} else if (state === "transcribing") {
-					this.#stopMicAnimation();
-					this.#setMicCursor({ r: 200, g: 200, b: 200 });
+				if (state === "recording" || state === "transcribing") {
+					this.#showVoiceIndicator(state);
 				} else {
-					this.#cleanupMicAnimation();
+					this.#cleanupVoiceIndicator();
 				}
 				this.ui.requestRender();
 			},
@@ -5511,51 +5504,47 @@ export class InteractiveMode implements InteractiveModeContext {
 		await this.#liveCommandController.handleCommand();
 	}
 
-	#setMicCursor(color: { r: number; g: number; b: number }): void {
-		this.editor.cursorOverride = `\x1b[38;2;${color.r};${color.g};${color.b}m${theme.icon.mic}\x1b[0m`;
-		// Theme symbols can be wide (for example, 🎤), so measure the rendered override.
-		this.editor.cursorOverrideWidth = visibleWidth(this.editor.cursorOverride);
+	#showVoiceIndicator(state: VoiceIndicatorState): void {
+		if (!this.#voiceIndicator) {
+			this.#voiceIndicator = new VoiceIndicatorComponent(state);
+			this.#voicePreviousShowHardwareCursor = this.ui.getShowHardwareCursor();
+			this.#voicePreviousUseTerminalCursor = this.editor.getUseTerminalCursor();
+			this.ui.setShowHardwareCursor(false);
+			this.editor.setUseTerminalCursor(false);
+			this.editorContainer.clear();
+			this.editorContainer.addChild(this.#voiceIndicator);
+		} else {
+			this.#voiceIndicator.setState(state);
+		}
+		if (!this.#voiceAnimationInterval) {
+			this.#voiceAnimationInterval = setInterval(() => {
+				const indicator = this.#voiceIndicator;
+				if (!indicator) return;
+				indicator.advance();
+				// Component-scoped: voice motion never repaints the transcript.
+				this.ui.requestComponentRender(indicator);
+			}, 120);
+		}
+		this.ui.requestComponentRender(this.#voiceIndicator);
 	}
 
-	#updateMicIcon(): void {
-		const { r, g, b } = hsvToRgb({ h: this.#voiceHue, s: 0.9, v: 1.0 });
-		this.#setMicCursor({ r, g, b });
-	}
-
-	#startMicAnimation(): void {
-		if (this.#voiceAnimationInterval) return;
-		this.#voiceHue = 0;
-		this.#updateMicIcon();
-		this.#voiceAnimationInterval = setInterval(() => {
-			this.#voiceHue = (this.#voiceHue + 8) % 360;
-			this.#updateMicIcon();
-			// Component-scoped: the hue sweep only recolors the editor's cursor
-			// glyph, so the transcript subtree is reused per animation frame.
-			this.ui.requestComponentRender(this.editor);
-		}, 60);
-	}
-
-	#stopMicAnimation(): void {
+	#cleanupVoiceIndicator(): void {
 		if (this.#voiceAnimationInterval) {
 			clearInterval(this.#voiceAnimationInterval);
 			this.#voiceAnimationInterval = undefined;
 		}
-	}
-
-	#cleanupMicAnimation(): void {
-		if (this.#voiceAnimationInterval) {
-			clearInterval(this.#voiceAnimationInterval);
-			this.#voiceAnimationInterval = undefined;
+		if (this.#voiceIndicator) {
+			this.editorContainer.clear();
+			this.editorContainer.addChild(this.editor);
 		}
-		this.editor.cursorOverride = undefined;
-		this.editor.cursorOverrideWidth = undefined;
-		if (this.#voicePreviousShowHardwareCursor !== null) {
+		this.#voiceIndicator = undefined;
+		if (this.#voicePreviousShowHardwareCursor !== undefined) {
 			this.ui.setShowHardwareCursor(this.#voicePreviousShowHardwareCursor);
-			this.#voicePreviousShowHardwareCursor = null;
+			this.#voicePreviousShowHardwareCursor = undefined;
 		}
-		if (this.#voicePreviousUseTerminalCursor !== null) {
+		if (this.#voicePreviousUseTerminalCursor !== undefined) {
 			this.editor.setUseTerminalCursor(this.#voicePreviousUseTerminalCursor);
-			this.#voicePreviousUseTerminalCursor = null;
+			this.#voicePreviousUseTerminalCursor = undefined;
 		}
 	}
 

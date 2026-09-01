@@ -10,7 +10,7 @@ import { theme } from "../theme/theme";
 import type { InteractiveModeContext } from "../types";
 import { createAssistantMessageComponent } from "../utils/interactive-context-helpers";
 
-const ANIMATION_INTERVAL_MS = 80;
+const ANIMATION_INTERVAL_MS = 120;
 type LiveSessionFactory = (options: LiveSessionControllerOptions) => LiveSessionController;
 
 const LIVE_MESSAGE_USAGE: AssistantMessage["usage"] = {
@@ -199,11 +199,11 @@ export class LiveCommandController {
 
 	#mountVisualizer(visualizer: LiveVisualizer): void {
 		this.#visualizer = visualizer;
-		this.#detachedEditor = this.#ctx.editor;
 		this.#previousShowHardwareCursor = this.#ctx.ui.getShowHardwareCursor();
 		this.#previousUseTerminalCursor = this.#ctx.editor.getUseTerminalCursor();
 		this.#ctx.ui.setShowHardwareCursor(false);
 		this.#ctx.editor.setUseTerminalCursor(false);
+		this.#detachedEditor = this.#ctx.editor;
 		this.#ctx.editorContainer.clear();
 		this.#ctx.editorContainer.addChild(visualizer);
 		this.#ctx.ui.setFocus(visualizer);
@@ -243,18 +243,19 @@ export class LiveCommandController {
 		const editor = this.#detachedEditor;
 		this.#detachedEditor = undefined;
 		this.#visualizer = undefined;
-		if (!editor) return;
-		this.#ctx.editorContainer.clear();
-		this.#ctx.editorContainer.addChild(editor);
+		if (editor) {
+			this.#ctx.editorContainer.clear();
+			this.#ctx.editorContainer.addChild(editor);
+		}
 		if (this.#previousShowHardwareCursor !== undefined) {
 			this.#ctx.ui.setShowHardwareCursor(this.#previousShowHardwareCursor);
 		}
 		if (this.#previousUseTerminalCursor !== undefined) {
-			editor.setUseTerminalCursor(this.#previousUseTerminalCursor);
+			this.#ctx.editor.setUseTerminalCursor(this.#previousUseTerminalCursor);
 		}
 		this.#previousShowHardwareCursor = undefined;
 		this.#previousUseTerminalCursor = undefined;
-		this.#ctx.ui.setFocus(editor);
+		this.#ctx.ui.setFocus(this.#ctx.editor);
 		this.#ctx.ui.requestRender();
 	}
 }

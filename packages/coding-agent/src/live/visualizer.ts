@@ -8,6 +8,7 @@ import {
 	visibleWidth,
 } from "@oh-my-pi/pi-tui";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
+import { centerVoiceLine, renderVoiceOrb } from "../modes/components/voice-indicator";
 import { type ThemeColor, theme } from "../modes/theme/theme";
 
 /** Distinct states of a realtime call connection. */
@@ -72,13 +73,14 @@ export class LiveVisualizer implements Component {
 		const next = Number.isFinite(level) ? Math.min(1, Math.max(0, level)) : 0;
 		if (this.#inputLevel === next) return;
 		this.#inputLevel = next;
-		if (next > this.#displayLevel) this.#displayLevel = next;
 		this.invalidate();
 	}
 
-	/** Advances the spectrum animation and its peak decay. */
+	/** Advances the organic animation and eases audio energy toward silence. */
 	setFrame(frame: number): void {
-		const nextLevel = Math.max(this.#inputLevel, this.#displayLevel * 0.84);
+		const target = this.#inputLevel;
+		const rate = target > this.#displayLevel ? 0.22 : 0.08;
+		const nextLevel = this.#displayLevel + (target - this.#displayLevel) * rate;
 		if (this.#frame !== frame || this.#displayLevel !== nextLevel) {
 			this.#frame = frame;
 			this.#displayLevel = nextLevel;
@@ -119,7 +121,7 @@ export class LiveVisualizer implements Component {
 		this.#cache = undefined;
 	}
 
-	/** Renders the microphone spectrum into a compact fixed-height panel. */
+	/** Renders a centered, audio-reactive orb with transcript and controls. */
 	render(width: number): readonly string[] {
 		if (
 			this.#cache &&
@@ -145,35 +147,35 @@ export class LiveVisualizer implements Component {
 	}
 
 	#renderLines(maxWidth: number): readonly string[] {
-		const width = Math.max(2, maxWidth);
-		const innerWidth = width - 2;
-		const border = (content: string): string =>
-			theme.fg("border", "│") + content + (width > 1 ? theme.fg("border", "│") : "");
-		const top = theme.fg("border", `┌${"─".repeat(innerWidth)}${width > 1 ? "┐" : ""}`);
-		const spectrumColor: ThemeColor = this.#phase === "muted" ? "dim" : this.#phase === "error" ? "error" : "success";
-		const spectrum = this.#generateSpectrum(innerWidth, 2);
-		const spectrumRows = spectrum.map(row => border(theme.fg(spectrumColor, row)));
-		const transcript = this.#renderTranscript(this.#userTranscript, innerWidth, border);
-		return [top, ...spectrumRows, transcript, this.#renderFooter(width, innerWidth)];
+		const width = Math.max(24, maxWidth);
+		const energy =
+			this.#phase === "muted" || this.#phase === "error"
+				? 0
+				: this.#phase === "speaking"
+					? Math.max(0.68, this.#displayLevel)
+					: this.#phase === "working"
+						? 0.32
+						: this.#phase === "connecting"
+							? 0.18
+							: this.#displayLevel;
+		const orb = renderVoiceOrb(this.#frame, energy).map(line => centerVoiceLine(line, width));
+		return [...orb, this.#renderTranscript(this.#userTranscript, width), this.#renderFooter(width)];
 	}
 
-	#renderTranscript(transcript: string, innerWidth: number, border: (content: string) => string): string {
-		const content = truncateFromStart(transcript, innerWidth);
-		const padding = " ".repeat(Math.max(0, innerWidth - visibleWidth(content)));
-		return border(theme.fg("accent", content) + padding);
+	#renderTranscript(transcript: string, width: number): string {
+		const content = truncateFromStart(transcript, width);
+		return centerVoiceLine(theme.fg("accent", content), width);
 	}
 
-	#renderFooter(width: number, innerWidth: number): string {
-		const spinners = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-		const staticIcons: Record<LivePhase, string> = {
-			connecting: "○",
-			listening: "●",
-			working: "○",
-			speaking: "»",
-			muted: "×",
-			error: "!",
+	#renderFooter(width: number): string {
+		const phases: Record<LivePhase, { icon: string; label: string }> = {
+			connecting: { icon: "○", label: "Connecting" },
+			listening: { icon: "●", label: "Listening" },
+			working: { icon: "◌", label: "Thinking" },
+			speaking: { icon: "»", label: "Speaking" },
+			muted: { icon: "×", label: "Muted" },
+			error: { icon: "!", label: "Connection error" },
 		};
-		const icon = this.#phase === "working" ? spinners[this.#frame % spinners.length] : staticIcons[this.#phase];
 		const phaseColors: Record<LivePhase, ThemeColor> = {
 			connecting: "dim",
 			listening: "success",
@@ -182,40 +184,9 @@ export class LiveVisualizer implements Component {
 			muted: "dim",
 			error: "error",
 		};
-		const status = `${icon} ${this.#phase}`;
-		const fullLabel = ` ${status} · space mute · esc end `;
-		const shortLabel = ` ${status} `;
-		const label =
-			innerWidth >= visibleWidth(fullLabel) + 1
-				? fullLabel
-				: innerWidth >= visibleWidth(shortLabel) + 1
-					? shortLabel
-					: "";
-		if (!label) {
-			return theme.fg("border", `└${"─".repeat(innerWidth)}${width > 1 ? "┘" : ""}`);
-		}
-		const remaining = Math.max(0, innerWidth - visibleWidth(label) - 1);
-		return (
-			theme.fg("border", "└─") +
-			theme.fg(phaseColors[this.#phase], truncateToWidth(label, innerWidth - 1)) +
-			theme.fg("border", `${"─".repeat(remaining)}${width > 1 ? "┘" : ""}`)
-		);
-	}
-
-	#generateSpectrum(width: number, rows: number): string[] {
-		const blocks = [" ", "▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"];
-		const output = Array.from({ length: rows }, () => "");
-		const energy = this.#phase === "muted" ? 0 : Math.min(1, Math.sqrt(this.#displayLevel * 5));
-		const maxHeight = rows * (blocks.length - 1);
-		for (let column = 0; column < width; column += 1) {
-			const carrier = 0.5 + 0.5 * Math.sin(this.#frame * 0.43 + column * 0.71);
-			const shimmer = 0.5 + 0.5 * Math.sin(this.#frame * 0.19 - column * 1.17);
-			const height = Math.round(energy * (0.3 + carrier * 0.5 + shimmer * 0.2) * maxHeight);
-			for (let row = 0; row < rows; row += 1) {
-				const units = Math.max(0, Math.min(blocks.length - 1, height - (rows - row - 1) * 8));
-				output[row] += blocks[units];
-			}
-		}
-		return output;
+		const status = `${phases[this.#phase].icon} ${phases[this.#phase].label}`;
+		const fullLabel = `${status} · space mute · esc end`;
+		const label = width >= visibleWidth(fullLabel) ? fullLabel : status;
+		return centerVoiceLine(theme.fg(phaseColors[this.#phase], truncateToWidth(label, width)), width);
 	}
 }
