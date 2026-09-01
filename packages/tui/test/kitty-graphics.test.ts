@@ -108,12 +108,23 @@ describe("detectKittyUnicodePlaceholdersSupport", () => {
 		expect(detectKittyUnicodePlaceholdersSupport("alacritty", env())).toBe(false);
 	});
 
-	it("uses scroll-aware placeholders when Kitty is explicitly forced through tmux", () => {
-		const forced = env({ TMUX: "/tmp/tmux-1000/default,1,0", PI_FORCE_IMAGE_PROTOCOL: "kitty" });
-		expect(detectKittyUnicodePlaceholdersSupport("base", forced)).toBe(true);
-		expect(detectKittyUnicodePlaceholdersSupport("wezterm", forced)).toBe(true);
-		// Automatic tmux fallback remains conservative when the outer terminal is unknown.
+	it("uses scroll-aware placeholders when Kitty is explicitly forced through a multiplexer", () => {
+		const forcedTmux = env({ TMUX: "/tmp/tmux-1000/default,1,0", PI_FORCE_IMAGE_PROTOCOL: "kitty" });
+		expect(detectKittyUnicodePlaceholdersSupport("base", forcedTmux)).toBe(true);
+		expect(detectKittyUnicodePlaceholdersSupport("wezterm", forcedTmux)).toBe(true);
+		expect(
+			detectKittyUnicodePlaceholdersSupport("ghostty", env({ HERDR_ENV: "1", PI_FORCE_IMAGE_PROTOCOL: "kitty" })),
+		).toBe(true);
+		// Automatic multiplexer fallback remains conservative when the outer terminal is unknown.
 		expect(detectKittyUnicodePlaceholdersSupport("base", env({ TMUX: "/tmp/tmux-1000/default,1,0" }))).toBe(false);
+		// A detected capable terminal still needs placeholders because direct placement cannot follow pane reflow.
+		expect(detectKittyUnicodePlaceholdersSupport("ghostty", env({ TMUX: "/tmp/tmux-1000/default,1,0" }))).toBe(true);
+	});
+
+	it("ignores leaked Kitty-capable terminal identities inside Herdr unless placeholders are explicitly forced", () => {
+		const leaked = env({ HERDR_ENV: "1", GHOSTTY_RESOURCES_DIR: "/usr/share/ghostty" });
+		expect(detectKittyUnicodePlaceholdersSupport("ghostty", leaked)).toBe(false);
+		expect(detectKittyUnicodePlaceholdersSupport("ghostty", { ...leaked, PI_KITTY_PLACEHOLDERS: "1" })).toBe(true);
 	});
 
 	it("honors PI_NO_KITTY_PLACEHOLDERS=1 as a hard off override on supporting terminals", () => {

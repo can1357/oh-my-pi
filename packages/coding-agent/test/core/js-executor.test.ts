@@ -432,12 +432,10 @@ describe("executeJs", () => {
 	});
 
 	it("auto-displays the final awaited expression result", async () => {
-		const execute = vi.fn(
-			async (): Promise<AgentToolResult> => ({
-				content: [{ type: "text", text: "tool output" }],
-				details: { kind: "tool-result" },
-			}),
-		);
+		const execute = vi.fn(async (): Promise<AgentToolResult> => ({
+			content: [{ type: "text", text: "tool output" }],
+			details: { kind: "tool-result" },
+		}));
 		const toolSession: ToolSession = {
 			...session,
 			getToolByName: name => (name === "read" ? createTool("read", execute) : undefined),

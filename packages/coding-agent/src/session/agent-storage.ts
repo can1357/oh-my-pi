@@ -8,7 +8,16 @@ import {
 	SqliteAuthCredentialStore,
 	type StoredAuthCredential,
 } from "@oh-my-pi/pi-ai";
-import { AsyncDrain, getAgentDbPath, getDbBusyTimeoutMs, getStatsDbPath, isRecord, logger } from "@oh-my-pi/pi-utils";
+import {
+	AsyncDrain,
+	checkpointWal,
+	getAgentDbPath,
+	getDbBusyTimeoutMs,
+	getStatsDbPath,
+	isRecord,
+	logger,
+	postmortem,
+} from "@oh-my-pi/pi-utils";
 import type { RawSettings as Settings } from "../config/settings";
 
 /** Row shape for settings table queries */
@@ -121,6 +130,7 @@ const SQLITE_NOW_EPOCH = "CAST(strftime('%s','now') AS INTEGER)";
 
 /** Singleton instances per database path */
 const instances = new Map<string, AgentStorage>();
+let cancelExitCleanup: (() => void) | undefined;
 
 /**
  * Unified SQLite storage for agent settings, model usage, and auth credentials.
@@ -136,6 +146,8 @@ export class AgentStorage {
 	#listModelUsageStmt: Statement;
 	#upsertModelPerfStmt: Statement;
 	#listModelPerfStmt: Statement;
+	#upsertCommandUsageStmt: Statement;
+	#listCommandUsageStmt: Statement;
 	#modelUsageCache: string[] | null = null;
 	/** Only the real user db auto-imports stats.db history; custom paths (tests, embedding) opt in explicitly. */
 	#autoPerfBackfill: boolean;
@@ -143,6 +155,7 @@ export class AgentStorage {
 	#perfBackfillChecked = false;
 	/** Coalesces per-turn perf samples into one deferred transaction off the turn's hot path. */
 	#perfDrain = new AsyncDrain<ModelPerfInsert>(MODEL_PERF_FLUSH_DELAY_MS);
+	#closing = false;
 
 	private constructor(dbPath: string) {
 		this.#autoPerfBackfill = dbPath === getAgentDbPath();
@@ -189,6 +202,11 @@ ON CONFLICT(model_key) DO UPDATE SET
 		this.#listModelPerfStmt = this.#db.prepare(
 			"SELECT model_key, samples, output_tokens, gen_ms, ttft_samples, ttft_ms FROM model_perf",
 		);
+		this.#upsertCommandUsageStmt = this.#db.prepare(
+			`INSERT INTO command_usage (name, count, last_used_at) VALUES (?, 1, ${SQLITE_NOW_EPOCH})
+ON CONFLICT(name) DO UPDATE SET count = command_usage.count + 1, last_used_at = ${SQLITE_NOW_EPOCH}`,
+		);
+		this.#listCommandUsageStmt = this.#db.prepare("SELECT name, count FROM command_usage");
 	}
 
 	/**
@@ -220,6 +238,12 @@ CREATE TABLE IF NOT EXISTS model_perf (
 	ttft_samples REAL NOT NULL DEFAULT 0,
 	ttft_ms REAL NOT NULL DEFAULT 0,
 	updated_at INTEGER NOT NULL DEFAULT (${SQLITE_NOW_EPOCH})
+);
+
+CREATE TABLE IF NOT EXISTS command_usage (
+	name TEXT PRIMARY KEY,
+	count INTEGER NOT NULL DEFAULT 0,
+	last_used_at INTEGER NOT NULL DEFAULT (${SQLITE_NOW_EPOCH})
 );
 
 CREATE TABLE IF NOT EXISTS meta (
@@ -371,6 +395,11 @@ FROM model_usage_legacy
 		for (let attempt = 0; attempt < maxRetries; attempt++) {
 			try {
 				const storage = new AgentStorage(dbPath);
+				// Exit-only: a keep-alive cleanup leaves the open handle valid for the
+				// continuing process (Settings, MCP cache, callers hold it); the real
+				// exit closes. Register before publishing so a real-exit-in-progress
+				// late registration sees an empty map.
+				cancelExitCleanup ??= postmortem.register("agent-storage", () => AgentStorage.close(), { exitOnly: true });
 				instances.set(dbPath, storage);
 				return storage;
 			} catch (err) {
@@ -389,18 +418,28 @@ FROM model_usage_legacy
 			{ cause: lastError },
 		);
 	}
-	/** @internal Reset all singletons and close their databases — test-only. */
-	static resetInstance(): void {
+
+	/** Flushes deferred writes, closes every process-wide database, and permits reopening them. */
+	static close(): void {
 		for (const storage of instances.values()) storage.#close();
 		instances.clear();
+		cancelExitCleanup?.();
+		cancelExitCleanup = undefined;
 	}
 
 	#close(): void {
+		this.#closing = true;
+		// Model-performance batches are synchronous once invoked, so this
+		// persists them before finalizing their statements during process exit.
+		void this.#perfDrain.flush();
+		checkpointWal(this.#db);
 		this.#listSettingsStmt.finalize();
 		this.#upsertModelUsageStmt.finalize();
 		this.#listModelUsageStmt.finalize();
 		this.#upsertModelPerfStmt.finalize();
 		this.#listModelPerfStmt.finalize();
+		this.#upsertCommandUsageStmt.finalize();
+		this.#listCommandUsageStmt.finalize();
 		// SqliteAuthCredentialStore.close() finalizes its own statements and
 		// closes the shared #db handle — must run after our statements finalize.
 		this.#authStore.close();
@@ -460,6 +499,34 @@ FROM model_usage_legacy
 			return [];
 		}
 	}
+	/**
+	 * Records one slash-command invocation, bumping its usage count and
+	 * last-used timestamp. Frequency-ranked autocomplete reads these counts.
+	 * @param name - Canonical command name (e.g. "model", "skill:review")
+	 */
+	recordCommandUsage(name: string): void {
+		try {
+			this.#upsertCommandUsageStmt.run(name);
+		} catch (error) {
+			logger.warn("AgentStorage failed to record command usage", { name, error: String(error) });
+		}
+	}
+
+	/**
+	 * Gets slash-command usage counts keyed by canonical command name.
+	 * @returns Command name → invocation count
+	 */
+	listCommandUsage(): Record<string, number> {
+		try {
+			const rows = this.#listCommandUsageStmt.all() as Array<{ name: string; count: number }>;
+			const counts: Record<string, number> = {};
+			for (const row of rows) counts[row.name] = row.count;
+			return counts;
+		} catch (error) {
+			logger.warn("AgentStorage failed to list command usage", { error: String(error) });
+			return {};
+		}
+	}
 
 	/**
 	 * Folds one completed request's timing into the model's perf aggregates.
@@ -481,10 +548,9 @@ FROM model_usage_legacy
 	}
 
 	#flushModelPerf(rows: ModelPerfInsert[]): void {
-		// Kick the one-time history import too, so aggregates populate even if
-		// the user never opens /models. Additive merge makes ordering with live
-		// samples irrelevant.
-		this.#kickModelPerfBackfill();
+		// A close-triggered flush must persist only the queued live batch. Starting
+		// the async stats import here could commit aggregates without its marker.
+		if (!this.#closing) this.#kickModelPerfBackfill();
 		try {
 			this.#db.transaction((batch: ModelPerfInsert[]) => {
 				for (const row of batch) this.#foldModelPerf(row);

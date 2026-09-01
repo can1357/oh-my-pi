@@ -20,6 +20,8 @@ import { ASIDE_MESSAGE_COMMIT, ASIDE_MESSAGE_DISCARD } from "@oh-my-pi/pi-agent-
 import type { AssistantMessage, AssistantMessageEvent, Context, Message, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import { createMockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import { createAssistantMessage, createUserMessage } from "./helpers";
 
@@ -40,6 +42,8 @@ declare module "@oh-my-pi/pi-agent-core/types" {
 function identityConverter(messages: AgentMessage[]): Message[] {
 	return messages.filter(m => m.role === "user" || m.role === "assistant" || m.role === "toolResult") as Message[];
 }
+
+const harmonyMitigationModel = buildModel({ ...getBundledModel("openai-codex", "gpt-5.4") });
 
 describe("agentLoop with AgentMessage", () => {
 	it("should emit events with AgentMessage types", async () => {
@@ -185,7 +189,7 @@ describe("agentLoop with AgentMessage", () => {
 			provider: "openai-codex",
 			responses: [{ content: [leak] }, { content: ["clean retry response"] }],
 		});
-		const config: AgentLoopConfig = { model: mock.model, convertToLlm: identityConverter };
+		const config: AgentLoopConfig = { model: harmonyMitigationModel, convertToLlm: identityConverter };
 
 		const events: AgentEvent[] = [];
 		const stream = agentLoop([createUserMessage("Hello")], context, config, undefined, mock.stream);
@@ -3731,13 +3735,13 @@ describe("agentLoop pre-model-call gate", () => {
 			provider: "openai-codex",
 			responses: [{ content: ["Some prose. analysis to=functions.edit code"] }],
 		});
-		const retryModel = { ...mock.model, id: "retry-model" };
+		const retryModel = { ...harmonyMitigationModel, id: "retry-model" };
 		let gateCalls = 0;
 		let turnEndCalls = 0;
 		let rejectedToolChoices = 0;
 		const config: AgentLoopConfig = {
-			model: mock.model,
-			getModel: () => (gateCalls === 0 ? mock.model : retryModel),
+			model: harmonyMitigationModel,
+			getModel: () => (gateCalls === 0 ? harmonyMitigationModel : retryModel),
 			convertToLlm: identityConverter,
 			beforeModelCall: () => (++gateCalls > 1 ? { stop: true, reason: "over budget" } : undefined),
 			onTurnEnd: () => {
@@ -3778,7 +3782,7 @@ describe("agentLoop pre-model-call gate", () => {
 		const controller = new AbortController();
 		let gateCalls = 0;
 		const config: AgentLoopConfig = {
-			model: mock.model,
+			model: harmonyMitigationModel,
 			convertToLlm: identityConverter,
 			beforeModelCall: async (_context, signal) => {
 				if (++gateCalls === 1) return undefined;
@@ -4412,6 +4416,48 @@ describe("agentLoopContinue with AgentMessage", () => {
 					event.message.stopReason === "aborted",
 			),
 		).toBe(false);
+	});
+
+	it("runs onTurnEnd for a terminal-yield turn without a spent abort signal", async () => {
+		const toolSchema = type({ value: "string" });
+		const controller = new AbortController();
+		const tool: AgentTool<typeof toolSchema, { value: string }> = {
+			name: "yield",
+			label: "Yield",
+			description: "Yield tool",
+			parameters: toolSchema,
+			async execute(_toolCallId, params) {
+				return { content: [{ type: "text", text: params.value }], details: { value: params.value } };
+			},
+		};
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [tool] };
+		const mock = createMockModel({
+			responses: [
+				{ content: [{ type: "toolCall", id: "yield-1", name: "yield", arguments: { value: "final answer" } }] },
+				{ content: ["must not be reached"] },
+			],
+		});
+		const turnEndCalls: Array<{ willContinue: boolean | undefined; signalAborted: boolean }> = [];
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: identityConverter,
+			afterToolCall: async () => {
+				controller.abort(TERMINAL_TOOL_RESULT_ABORT_REASON);
+			},
+			onTurnEnd: (_messages, signal, ctx) => {
+				turnEndCalls.push({ willContinue: ctx?.willContinue, signalAborted: signal?.aborted === true });
+			},
+		};
+
+		const events: AgentEvent[] = [];
+		const stream = agentLoop([createUserMessage("go")], context, config, controller.signal, mock.stream);
+		for await (const event of stream) events.push(event);
+
+		// The terminal-yield abort must not suppress per-turn bookkeeping: the
+		// hook runs once for the yield turn, marked complete (willContinue:false)
+		// and with no aborted signal so downstream waits behave like a plain turn.
+		expect(mock.calls).toHaveLength(1);
+		expect(turnEndCalls).toEqual([{ willContinue: false, signalAborted: false }]);
 	});
 
 	it("preserves an external abort boundary when a completed tool ignores cancellation", async () => {

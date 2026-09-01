@@ -357,14 +357,13 @@ export class DebugSelectorComponent extends OverlayPanel {
 
 	async #handleViewRawSse(): Promise<void> {
 		let overlay: OverlayHandle | undefined;
-		let viewer: RawSseViewerComponent | undefined;
 		const close = (): void => {
 			viewer?.dispose();
 			overlay?.hide();
 			overlay = undefined;
 			void this.ctx.showDebugSelector();
 		};
-		viewer = new RawSseViewerComponent({
+		const viewer = new RawSseViewerComponent({
 			buffer: resolveRawSseDebugBuffer(this.ctx.session),
 			terminalRows: this.ctx.ui.terminal.rows,
 			onExit: close,

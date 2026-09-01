@@ -224,17 +224,17 @@ describe("/mcp auth commands", () => {
 			{ preconnect: globalThis.fetch.preconnect },
 		);
 		vi.spyOn(globalThis, "fetch").mockImplementation(fetchMock);
-		vi.spyOn(oauthFlow.MCPOAuthFlow.prototype, "login").mockImplementation(async function (
-			this: oauthFlow.MCPOAuthFlow,
-		) {
-			const { url } = await this.generateAuthUrl("state", "http://127.0.0.1:53192/callback");
-			expect(new URL(url).searchParams.get("client_id")).toBe("pathful-dcr-client");
-			return {
-				access: "fresh-access",
-				refresh: "fresh-refresh",
-				expires: Date.now() + 3_600_000,
-			};
-		});
+		vi.spyOn(oauthFlow.MCPOAuthFlow.prototype, "login").mockImplementation(
+			async function (this: oauthFlow.MCPOAuthFlow) {
+				const { url } = await this.generateAuthUrl("state", "http://127.0.0.1:53192/callback");
+				expect(new URL(url).searchParams.get("client_id")).toBe("pathful-dcr-client");
+				return {
+					access: "fresh-access",
+					refresh: "fresh-refresh",
+					expires: Date.now() + 3_600_000,
+				};
+			},
+		);
 		const { controller, showError } = createController(authStorage);
 
 		await controller.handle("/mcp reauth envserver");
@@ -250,6 +250,18 @@ describe("/mcp auth commands", () => {
 	test("uses tool challenge resource metadata and scopes during reauth", async () => {
 		const authStorage = freshAuthStorage();
 		await authStorage.reload();
+		await Bun.write(
+			configPath,
+			JSON.stringify({
+				mcpServers: {
+					envserver: {
+						type: "http",
+						url: RAW_SERVER_URL,
+						oauth: { scope: "configured.read" },
+					},
+				},
+			}),
+		);
 		vi.spyOn(mcpClient, "connectToServer").mockRejectedValue(new Error("HTTP 401: Unauthorized"));
 
 		const resourceMetadataUrl = "https://gateway.example.com/.well-known/oauth-protected-resource";
@@ -282,16 +294,16 @@ describe("/mcp auth commands", () => {
 		vi.spyOn(globalThis, "fetch").mockImplementation(fetchMock);
 
 		let authorizationUrl = "";
-		vi.spyOn(oauthFlow.MCPOAuthFlow.prototype, "login").mockImplementation(async function (
-			this: oauthFlow.MCPOAuthFlow,
-		) {
-			authorizationUrl = (await this.generateAuthUrl("state", "http://127.0.0.1:53192/callback")).url;
-			return {
-				access: "fresh-access",
-				refresh: "fresh-refresh",
-				expires: Date.now() + 3_600_000,
-			};
-		});
+		vi.spyOn(oauthFlow.MCPOAuthFlow.prototype, "login").mockImplementation(
+			async function (this: oauthFlow.MCPOAuthFlow) {
+				authorizationUrl = (await this.generateAuthUrl("state", "http://127.0.0.1:53192/callback")).url;
+				return {
+					access: "fresh-access",
+					refresh: "fresh-refresh",
+					expires: Date.now() + 3_600_000,
+				};
+			},
+		);
 
 		const { controller, showError } = createController(authStorage);
 		const updated = await controller.handleMCPAuthChallenge("envserver", {
@@ -400,6 +412,334 @@ describe("/mcp auth commands", () => {
 		});
 	});
 
+	test("prefers dynamic registration over a metadata-advertised client", async () => {
+		const authStorage = freshAuthStorage();
+		await authStorage.reload();
+		vi.spyOn(mcpClient, "connectToServer").mockResolvedValue({} as never);
+		vi.spyOn(mcpClient, "disconnectServer").mockResolvedValue(undefined as never);
+
+		const registrationRequests: string[] = [];
+		let tokenRequest: URLSearchParams | undefined;
+		const fetchMock = Object.assign(
+			async (input: string | URL | Request, init?: RequestInit | BunFetchRequestInit): Promise<Response> => {
+				const url = String(input);
+				if (url === "https://mcp.example.com/.well-known/oauth-authorization-server") {
+					return new Response(
+						JSON.stringify({
+							authorization_endpoint: "https://auth.example.com/authorize",
+							token_endpoint: "https://auth.example.com/token",
+							registration_endpoint: "https://auth.example.com/register",
+							client_id: "advertised-client",
+						}),
+						{ status: 200, headers: { "Content-Type": "application/json" } },
+					);
+				}
+				if (url === "https://auth.example.com/register" && init?.method === "POST") {
+					registrationRequests.push(String(init.body ?? ""));
+					return new Response(JSON.stringify({ client_id: "dcr-client" }), {
+						status: 201,
+						headers: { "Content-Type": "application/json" },
+					});
+				}
+				if (url === "https://auth.example.com/token" && init?.method === "POST") {
+					tokenRequest = new URLSearchParams(String(init.body ?? ""));
+					return new Response(
+						JSON.stringify({ access_token: "fresh-access", refresh_token: "fresh-refresh", expires_in: 3600 }),
+						{ status: 200, headers: { "Content-Type": "application/json" } },
+					);
+				}
+				return new Response("not found", { status: 404 });
+			},
+			{ preconnect: globalThis.fetch.preconnect },
+		);
+		vi.spyOn(globalThis, "fetch").mockImplementation(fetchMock);
+
+		let authorizationUrl = "";
+		vi.spyOn(oauthFlow.MCPOAuthFlow.prototype, "login").mockImplementation(
+			async function (this: oauthFlow.MCPOAuthFlow) {
+				authorizationUrl = (await this.generateAuthUrl("state", "http://127.0.0.1/callback")).url;
+				return await this.exchangeToken("authorization-code", "state", "http://127.0.0.1/callback");
+			},
+		);
+
+		const { controller, showError } = createController(authStorage);
+		await controller.handle("/mcp reauth envserver");
+
+		expect(showError).not.toHaveBeenCalled();
+		expect(registrationRequests).toHaveLength(1);
+		expect(new URL(authorizationUrl).searchParams.get("client_id")).toBe("dcr-client");
+		expect(tokenRequest?.get("client_id")).toBe("dcr-client");
+		expect(authStorage.get(oauthFlow.mcpOAuthCredentialId(EXPANDED_SERVER_URL))).toMatchObject({
+			clientId: "dcr-client",
+		});
+	});
+
+	test("does not persist a whitespace-only embedded client id", async () => {
+		const authStorage = freshAuthStorage();
+		await authStorage.reload();
+		vi.spyOn(mcpClient, "connectToServer").mockRejectedValue(
+			new Error(
+				'HTTP 401: {"authorization_url":"https://auth.example.com/authorize?client_id=%20%09","token_url":"https://auth.example.com/token"}',
+			),
+		);
+
+		let tokenRequest: URLSearchParams | undefined;
+		const fetchMock = Object.assign(
+			async (input: string | URL | Request, init?: RequestInit | BunFetchRequestInit): Promise<Response> => {
+				if (String(input) === "https://auth.example.com/token" && init?.method === "POST") {
+					tokenRequest = new URLSearchParams(String(init.body ?? ""));
+					return new Response(
+						JSON.stringify({ access_token: "fresh-access", refresh_token: "fresh-refresh", expires_in: 3600 }),
+						{ status: 200, headers: { "Content-Type": "application/json" } },
+					);
+				}
+				return new Response("not found", { status: 404 });
+			},
+			{ preconnect: globalThis.fetch.preconnect },
+		);
+		vi.spyOn(globalThis, "fetch").mockImplementation(fetchMock);
+
+		let authorizationUrl = "";
+		vi.spyOn(oauthFlow.MCPOAuthFlow.prototype, "login").mockImplementation(
+			async function (this: oauthFlow.MCPOAuthFlow) {
+				authorizationUrl = (await this.generateAuthUrl("state", "http://127.0.0.1/callback")).url;
+				return await this.exchangeToken("authorization-code", "state", "http://127.0.0.1/callback");
+			},
+		);
+
+		const { controller, showError } = createController(authStorage);
+		await controller.handle("/mcp reauth envserver");
+
+		expect(showError).not.toHaveBeenCalled();
+		expect(new URL(authorizationUrl).searchParams.get("client_id")).toBeNull();
+		expect(tokenRequest?.has("client_id")).toBe(false);
+		const savedCredential = authStorage.get(oauthFlow.mcpOAuthCredentialId(EXPANDED_SERVER_URL)) as
+			| oauthFlow.MCPStoredOAuthCredential
+			| undefined;
+		expect(savedCredential).toMatchObject({ type: "oauth", access: "fresh-access" });
+		expect(savedCredential?.clientId).toBeUndefined();
+		const saved = JSON.parse(await Bun.file(configPath).text()) as TestConfigFile;
+		expect(saved.mcpServers?.envserver?.auth?.clientId).toBeUndefined();
+	});
+
+	test("uses configured OAuth scope when endpoint metadata omits scopes", async () => {
+		const authStorage = freshAuthStorage();
+		await authStorage.reload();
+		await Bun.write(
+			configPath,
+			JSON.stringify({
+				mcpServers: {
+					envserver: {
+						type: "http",
+						url: RAW_SERVER_URL,
+						oauth: { scope: "configured.read configured.write" },
+					},
+				},
+			}),
+		);
+		vi.spyOn(mcpClient, "connectToServer").mockResolvedValue({} as never);
+		vi.spyOn(mcpClient, "disconnectServer").mockResolvedValue(undefined as never);
+
+		const fetchMock = Object.assign(
+			async (input: string | URL | Request): Promise<Response> => {
+				if (String(input) === "https://mcp.example.com/.well-known/oauth-authorization-server") {
+					return new Response(
+						JSON.stringify({
+							authorization_endpoint: "https://auth.example.com/authorize",
+							token_endpoint: "https://auth.example.com/token",
+						}),
+						{ status: 200, headers: { "Content-Type": "application/json" } },
+					);
+				}
+				return new Response("not found", { status: 404 });
+			},
+			{ preconnect: globalThis.fetch.preconnect },
+		);
+		vi.spyOn(globalThis, "fetch").mockImplementation(fetchMock);
+
+		let authorizationUrl = "";
+		vi.spyOn(oauthFlow.MCPOAuthFlow.prototype, "login").mockImplementation(
+			async function (this: oauthFlow.MCPOAuthFlow) {
+				authorizationUrl = (await this.generateAuthUrl("state", "http://127.0.0.1:53192/callback")).url;
+				return {
+					access: "fresh-access",
+					refresh: "fresh-refresh",
+					expires: Date.now() + 3_600_000,
+				};
+			},
+		);
+
+		const { controller, showError } = createController(authStorage);
+		await controller.handle("/mcp reauth envserver");
+
+		expect(showError).not.toHaveBeenCalled();
+		expect(new URL(authorizationUrl).searchParams.get("scope")).toBe("configured.read configured.write");
+	});
+
+	test("uses configured OAuth client credentials as a pair when discovery advertises another client", async () => {
+		const authStorage = freshAuthStorage();
+		await authStorage.reload();
+		await Bun.write(
+			configPath,
+			JSON.stringify({
+				mcpServers: {
+					envserver: {
+						type: "http",
+						url: RAW_SERVER_URL,
+						auth: { type: "oauth" },
+						oauth: { clientId: "configured-client", clientSecret: "configured-secret" },
+					},
+				},
+			}),
+		);
+		vi.spyOn(mcpClient, "connectToServer").mockResolvedValue({} as never);
+		vi.spyOn(mcpClient, "disconnectServer").mockResolvedValue(undefined as never);
+
+		let tokenRequest: URLSearchParams | undefined;
+		const fetchMock = Object.assign(
+			async (input: string | URL | Request, init?: RequestInit | BunFetchRequestInit): Promise<Response> => {
+				const url = String(input);
+				if (url === "https://mcp.example.com/.well-known/oauth-authorization-server") {
+					return new Response(
+						JSON.stringify({
+							authorization_endpoint: "https://auth.example.com/authorize?client_id=embedded-client",
+							token_endpoint: "https://auth.example.com/token",
+							client_id: "discovered-client",
+						}),
+						{ status: 200, headers: { "Content-Type": "application/json" } },
+					);
+				}
+				if (url === "https://auth.example.com/token" && init?.method === "POST") {
+					tokenRequest = new URLSearchParams(String(init.body ?? ""));
+					return new Response(
+						JSON.stringify({
+							access_token: "fresh-access",
+							refresh_token: "fresh-refresh",
+							expires_in: 3600,
+						}),
+						{ status: 200, headers: { "Content-Type": "application/json" } },
+					);
+				}
+				return new Response("not found", { status: 404 });
+			},
+			{ preconnect: globalThis.fetch.preconnect },
+		);
+		vi.spyOn(globalThis, "fetch").mockImplementation(fetchMock);
+
+		let authorizationUrl = "";
+		vi.spyOn(oauthFlow.MCPOAuthFlow.prototype, "login").mockImplementation(
+			async function (this: oauthFlow.MCPOAuthFlow) {
+				authorizationUrl = (await this.generateAuthUrl("state", "http://127.0.0.1/callback")).url;
+				return await this.exchangeToken("authorization-code", "state", "http://127.0.0.1/callback");
+			},
+		);
+
+		const { controller, showError } = createController(authStorage);
+		await controller.handle("/mcp reauth envserver");
+
+		expect(showError).not.toHaveBeenCalled();
+		expect(new URL(authorizationUrl).searchParams.get("client_id")).toBe("configured-client");
+		expect(tokenRequest?.get("client_id")).toBe("configured-client");
+		expect(tokenRequest?.get("client_secret")).toBe("configured-secret");
+		const saved = JSON.parse(await Bun.file(configPath).text()) as TestConfigFile;
+		expect(saved.mcpServers?.envserver?.auth).toEqual(
+			expect.objectContaining({ clientId: "configured-client", clientSecret: "configured-secret" }),
+		);
+		expect(saved.mcpServers?.envserver?.oauth).toEqual(
+			expect.objectContaining({ clientId: "configured-client", clientSecret: "configured-secret" }),
+		);
+	});
+
+	test("does not persist or reuse a configured-only OAuth secret", async () => {
+		const authStorage = freshAuthStorage();
+		await authStorage.reload();
+		await Bun.write(
+			configPath,
+			JSON.stringify({
+				mcpServers: {
+					envserver: {
+						type: "http",
+						url: RAW_SERVER_URL,
+						auth: { type: "oauth" },
+						oauth: { clientId: " \t ", clientSecret: "configured-secret" },
+					},
+				},
+			}),
+		);
+		vi.spyOn(mcpClient, "connectToServer").mockResolvedValue({} as never);
+		vi.spyOn(mcpClient, "disconnectServer").mockResolvedValue(undefined as never);
+
+		const tokenRequests: URLSearchParams[] = [];
+		const fetchMock = Object.assign(
+			async (input: string | URL | Request, init?: RequestInit | BunFetchRequestInit): Promise<Response> => {
+				const url = String(input);
+				if (url === "https://mcp.example.com/.well-known/oauth-authorization-server") {
+					return new Response(
+						JSON.stringify({
+							authorization_endpoint: "https://auth.example.com/authorize",
+							token_endpoint: "https://auth.example.com/token",
+							client_id: "discovered-client",
+						}),
+						{ status: 200, headers: { "Content-Type": "application/json" } },
+					);
+				}
+				if (url === "https://auth.example.com/token" && init?.method === "POST") {
+					tokenRequests.push(new URLSearchParams(String(init.body ?? "")));
+					return new Response(
+						JSON.stringify({
+							access_token: "fresh-access",
+							refresh_token: "fresh-refresh",
+							expires_in: 3600,
+						}),
+						{ status: 200, headers: { "Content-Type": "application/json" } },
+					);
+				}
+				return new Response("not found", { status: 404 });
+			},
+			{ preconnect: globalThis.fetch.preconnect },
+		);
+		vi.spyOn(globalThis, "fetch").mockImplementation(fetchMock);
+
+		const authorizationUrls: URL[] = [];
+		vi.spyOn(oauthFlow.MCPOAuthFlow.prototype, "login").mockImplementation(
+			async function (this: oauthFlow.MCPOAuthFlow) {
+				authorizationUrls.push(new URL((await this.generateAuthUrl("state", "http://127.0.0.1/callback")).url));
+				return await this.exchangeToken("authorization-code", "state", "http://127.0.0.1/callback");
+			},
+		);
+
+		const { controller, showError } = createController(authStorage);
+		await controller.handle("/mcp reauth envserver");
+
+		expect(showError).not.toHaveBeenCalled();
+		expect(authorizationUrls[0]?.searchParams.get("client_id")).toBe("discovered-client");
+		expect(tokenRequests[0]?.get("client_id")).toBe("discovered-client");
+		expect(tokenRequests[0]?.has("client_secret")).toBe(false);
+		const savedAfterFirstReauth = JSON.parse(await Bun.file(configPath).text()) as TestConfigFile;
+		const savedAuth = savedAfterFirstReauth.mcpServers?.envserver?.auth;
+		expect(savedAuth).toEqual(expect.objectContaining({ clientId: "discovered-client" }));
+		expect(savedAuth?.clientSecret).toBeUndefined();
+		expect(savedAfterFirstReauth.mcpServers?.envserver?.oauth?.clientId).toBeUndefined();
+
+		await controller.handle("/mcp reauth envserver");
+
+		expect(showError).not.toHaveBeenCalled();
+		expect(authorizationUrls[1]?.searchParams.get("client_id")).toBe("discovered-client");
+		expect(tokenRequests[1]?.get("client_id")).toBe("discovered-client");
+		expect(tokenRequests[1]?.has("client_secret")).toBe(false);
+		const savedAfterSecondReauth = JSON.parse(await Bun.file(configPath).text()) as TestConfigFile;
+		const savedAuthAfterSecondReauth = savedAfterSecondReauth.mcpServers?.envserver?.auth;
+		expect(savedAuthAfterSecondReauth).toEqual(expect.objectContaining({ clientId: "discovered-client" }));
+		expect(savedAuthAfterSecondReauth?.clientSecret).toBeUndefined();
+		expect(savedAfterSecondReauth.mcpServers?.envserver?.oauth?.clientId).toBeUndefined();
+		expect(savedAfterSecondReauth.mcpServers?.envserver?.oauth?.clientSecret).toBe("configured-secret");
+		const savedCredentialAfterSecond = authStorage.get(oauthFlow.mcpOAuthCredentialId(EXPANDED_SERVER_URL)) as
+			| oauthFlow.MCPStoredOAuthCredential
+			| undefined;
+		expect(savedCredentialAfterSecond).toMatchObject({ clientId: "discovered-client" });
+		expect(savedCredentialAfterSecond?.clientSecret).toBeUndefined();
+	});
+
 	test("reuses embedded DCR client secret during reauth token exchange", async () => {
 		const authStorage = freshAuthStorage();
 		await authStorage.reload();
@@ -413,27 +753,55 @@ describe("/mcp auth commands", () => {
 			clientSecret: "dcr-secret",
 			resource: EXPANDED_SERVER_URL,
 		} as oauthFlow.MCPStoredOAuthCredential);
-		const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
-			new Response(
-				JSON.stringify({
-					access_token: "fresh-access",
-					refresh_token: "fresh-refresh",
-					expires_in: 3600,
-					token_type: "Bearer",
-				}),
-				{ status: 200, headers: { "Content-Type": "application/json" } },
+		const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(
+			Object.assign(
+				async (input: string | URL | Request, init?: RequestInit | BunFetchRequestInit): Promise<Response> => {
+					const url = String(input);
+					if (url === "https://mcp.example.com/.well-known/oauth-authorization-server") {
+						return new Response(
+							JSON.stringify({
+								authorization_endpoint: "https://auth.example.com/authorize?client_id=discovered-client",
+								token_endpoint: "https://auth.example.com/token",
+								client_id: "discovered-client",
+							}),
+							{ status: 200, headers: { "Content-Type": "application/json" } },
+						);
+					}
+					if (url === "https://auth.example.com/token" && init?.method === "POST") {
+						return new Response(
+							JSON.stringify({
+								access_token: "fresh-access",
+								refresh_token: "fresh-refresh",
+								expires_in: 3600,
+								token_type: "Bearer",
+							}),
+							{ status: 200, headers: { "Content-Type": "application/json" } },
+						);
+					}
+					return new Response("not found", { status: 404 });
+				},
+				{ preconnect: globalThis.fetch.preconnect },
 			),
 		);
-		vi.spyOn(mcpClient, "connectToServer").mockRejectedValue(AUTH_ERROR);
-		vi.spyOn(oauthFlow.MCPOAuthFlow.prototype, "login").mockImplementation(function (this: oauthFlow.MCPOAuthFlow) {
-			return this.exchangeToken("authorization-code", "state", "http://127.0.0.1/callback");
-		});
+		vi.spyOn(mcpClient, "connectToServer").mockResolvedValue({} as never);
+		vi.spyOn(mcpClient, "disconnectServer").mockResolvedValue(undefined as never);
+		let authorizationUrl = "";
+		vi.spyOn(oauthFlow.MCPOAuthFlow.prototype, "login").mockImplementation(
+			async function (this: oauthFlow.MCPOAuthFlow) {
+				authorizationUrl = (await this.generateAuthUrl("state", "http://127.0.0.1/callback")).url;
+				return await this.exchangeToken("authorization-code", "state", "http://127.0.0.1/callback");
+			},
+		);
 		const { controller, showError } = createController(authStorage);
 
 		await controller.handle("/mcp reauth envserver");
 
 		expect(showError).not.toHaveBeenCalled();
-		const tokenRequestBody = String(fetchSpy.mock.calls[0]?.[1]?.body ?? "");
+		expect(new URL(authorizationUrl).searchParams.get("client_id")).toBe("dcr-client");
+		const tokenRequestCall = fetchSpy.mock.calls.find(
+			call => String(call[0]) === "https://auth.example.com/token" && call[1]?.method === "POST",
+		);
+		const tokenRequestBody = String(tokenRequestCall?.[1]?.body ?? "");
 		const tokenRequest = new URLSearchParams(tokenRequestBody);
 		expect(tokenRequest.get("client_id")).toBe("dcr-client");
 		expect(tokenRequest.get("client_secret")).toBe("dcr-secret");
@@ -679,9 +1047,9 @@ describe("/mcp auth commands", () => {
 							type: "http",
 							url: RAW_SERVER_URL,
 							oauth: {
-								// biome-ignore lint/suspicious/noTemplateCurlyInString: test placeholder string for env expansion
+								// oxlint-disable-next-line no-template-curly-in-string -- test placeholder string for env expansion
 								clientId: "${MCP_OAUTH_CLIENT_ID}",
-								// biome-ignore lint/suspicious/noTemplateCurlyInString: test placeholder string for env expansion
+								// oxlint-disable-next-line no-template-curly-in-string -- test placeholder string for env expansion
 								clientSecret: "${MCP_OAUTH_CLIENT_SECRET}",
 							},
 						},
@@ -695,21 +1063,21 @@ describe("/mcp auth commands", () => {
 			vi.spyOn(mcpClient, "connectToServer").mockRejectedValue(AUTH_ERROR);
 			let flowClientId: string | undefined;
 			let flowClientSecret: string | undefined;
-			vi.spyOn(oauthFlow.MCPOAuthFlow.prototype, "login").mockImplementation(async function (
-				this: oauthFlow.MCPOAuthFlow,
-			) {
-				// MCPOAuthFlow keeps its config private; read it back to assert the
-				// resolved credentials the flow will use. Structurally known shape,
-				// no runtime validation is meaningful here.
-				const flow = this as unknown as { config: { clientId?: string; clientSecret?: string } };
-				flowClientId = flow.config.clientId;
-				flowClientSecret = flow.config.clientSecret;
-				return {
-					access: "fresh-access",
-					refresh: "fresh-refresh",
-					expires: Date.now() + 3_600_000,
-				};
-			});
+			vi.spyOn(oauthFlow.MCPOAuthFlow.prototype, "login").mockImplementation(
+				async function (this: oauthFlow.MCPOAuthFlow) {
+					// MCPOAuthFlow keeps its config private; read it back to assert the
+					// resolved credentials the flow will use. Structurally known shape,
+					// no runtime validation is meaningful here.
+					const flow = this as unknown as { config: { clientId?: string; clientSecret?: string } };
+					flowClientId = flow.config.clientId;
+					flowClientSecret = flow.config.clientSecret;
+					return {
+						access: "fresh-access",
+						refresh: "fresh-refresh",
+						expires: Date.now() + 3_600_000,
+					};
+				},
+			);
 			const { controller, showError } = createController(authStorage);
 
 			await controller.handle("/mcp reauth envserver");
@@ -723,9 +1091,9 @@ describe("/mcp auth commands", () => {
 			// The config file keeps the placeholder; only the flow sees the value.
 			const saved = JSON.parse(await Bun.file(configPath).text()) as TestConfigFile;
 			const savedServer = saved.mcpServers?.envserver;
-			// biome-ignore lint/suspicious/noTemplateCurlyInString: test placeholder string for env expansion
+			// oxlint-disable-next-line no-template-curly-in-string -- test placeholder string for env expansion
 			expect(savedServer?.oauth?.clientSecret).toBe("${MCP_OAUTH_CLIENT_SECRET}");
-			// biome-ignore lint/suspicious/noTemplateCurlyInString: test placeholder string for env expansion
+			// oxlint-disable-next-line no-template-curly-in-string -- test placeholder string for env expansion
 			expect(savedServer?.oauth?.clientId).toBe("${MCP_OAUTH_CLIENT_ID}");
 		} finally {
 			restoreEnvValue("MCP_OAUTH_CLIENT_ID", originalClientId);

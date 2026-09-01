@@ -30,10 +30,8 @@ export interface CleanseStatusBoard {
 	phase(text: string | undefined): void;
 	checkerStarted(checker: CleanseCheckerDescriptor): void;
 	checkerFinished(check: CleanseCheckResult, durationMs: number): void;
-	/** Begin a repair wave of `total` subagents; resets the completion bar. */
-	waveStarted(total: number): void;
-	/** End the repair wave and drop its live rows. */
-	waveFinished(): void;
+	/** End the repair phase and drop its live rows before verification. */
+	repairFinished(): void;
 	agentStarted(name: string, assignment: CleanseAssignment): void;
 	agentProgress(name: string, progress: AgentProgress): void;
 	agentFinished(outcome: CleanseAgentOutcome, assignment: CleanseAssignment): void;
@@ -65,9 +63,9 @@ export class CleanseBoardModel {
 	readonly #agents = new Map<string, RunningAgent>();
 	/** Lifetime token/cost totals per agent; survives row removal for the header sums. */
 	readonly #totals = new Map<string, { tokens: number; cost: number }>();
-	#waveTotal = 0;
-	#waveDone = 0;
-	#waveStartedAt = 0;
+	#repairTotal = 0;
+	#repairDone = 0;
+	#repairStartedAt = 0;
 
 	phase(text: string | undefined): void {
 		this.#phaseText = text;
@@ -86,20 +84,15 @@ export class CleanseBoardModel {
 		return `${glyph} ${check.label} ${verdict} ${chalk.dim(`· ${formatDuration(durationMs)}`)}`;
 	}
 
-	waveStarted(total: number): void {
-		this.#waveTotal = Math.max(total, 0);
-		this.#waveDone = 0;
-		this.#waveStartedAt = Date.now();
-		this.#agents.clear();
-		this.#totals.clear();
-	}
-
-	waveFinished(): void {
-		this.#waveTotal = 0;
+	repairFinished(): void {
+		this.#repairTotal = 0;
+		this.#repairDone = 0;
 		this.#agents.clear();
 	}
 
 	agentStarted(name: string, assignment: CleanseAssignment): void {
+		if (this.#repairStartedAt === 0) this.#repairStartedAt = Date.now();
+		this.#repairTotal += 1;
 		this.#agents.set(name, { assignment, startedAt: Date.now() });
 	}
 
@@ -109,11 +102,11 @@ export class CleanseBoardModel {
 		if (agent) agent.progress = progress;
 	}
 
-	/** Drop the agent's live row, advance the wave bar, and build its permanent outcome line. */
+	/** Drop the agent's live row, advance the repair bar, and build its permanent outcome line. */
 	agentFinished(outcome: CleanseAgentOutcome, assignment: CleanseAssignment): string {
 		const agent = this.#agents.get(outcome.name);
 		this.#agents.delete(outcome.name);
-		this.#waveDone = Math.min(this.#waveDone + 1, this.#waveTotal);
+		this.#repairDone = Math.min(this.#repairDone + 1, this.#repairTotal);
 		return renderOutcomeLine(outcome, assignment, agent, this.#totals.get(outcome.name));
 	}
 
@@ -125,15 +118,15 @@ export class CleanseBoardModel {
 			const elapsed = formatDuration(Date.now() - checker.startedAt);
 			lines.push(`${chalk.yellow(spinner)} ${checker.label} ${chalk.dim(`· ${elapsed}`)}`);
 		}
-		if (this.#waveTotal > 0) {
+		if (this.#repairTotal > 0) {
 			lines.push(
 				renderWaveHeader(
 					spinner,
-					this.#waveTotal,
-					this.#waveDone,
+					this.#repairTotal,
+					this.#repairDone,
 					this.#agents.size,
 					this.#totals,
-					this.#waveStartedAt,
+					this.#repairStartedAt,
 				),
 			);
 			const rows = [...this.#agents.entries()].sort(
@@ -170,15 +163,10 @@ export function createCleanseStatusBoard(
 			board.repaint();
 		},
 		checkerFinished(check, durationMs) {
-			if (!board.interactive) return;
 			board.log(model.checkerFinished(check, durationMs));
 		},
-		waveStarted(total) {
-			model.waveStarted(total);
-			board.repaint();
-		},
-		waveFinished() {
-			model.waveFinished();
+		repairFinished() {
+			model.repairFinished();
 			board.repaint();
 		},
 		agentStarted(name, assignment) {

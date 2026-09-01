@@ -4,9 +4,9 @@
  * (displaceable) and the next `hub` call replaces it — one persistent wait.
  *
  * Contracts under test:
- *  - ToolExecutionComponent: a waiting-poll result keeps the block
- *    un-finalized and displaceable; a settled/cancelled/error result
- *    finalizes normally; seal() always freezes.
+ *  - ToolExecutionComponent: a waiting-poll result stays displaceable but
+ *    finalizes like any other settled result (so it can retire as history
+ *    instead of pinning the live viewport); seal() always freezes.
  *  - EventController: a follow-up `hub` call removes the tracked waiting
  *    poll from the transcript; any other tool seals it in place.
  */
@@ -91,12 +91,12 @@ describe("hub waiting-poll block lifecycle", () => {
 		);
 	}
 
-	it("keeps an all-running poll live and displaceable until sealed", () => {
+	it("keeps an all-running poll displaceable yet finalized until sealed", () => {
 		const component = makeJobComponent();
 		component.updateResult(pollResult(["running", "running"]), false);
 
 		expect(component.isDisplaceableBlock()).toBe(true);
-		expect(component.isTranscriptBlockFinalized()).toBe(false);
+		expect(component.isTranscriptBlockFinalized()).toBe(true);
 
 		component.seal();
 		expect(component.isDisplaceableBlock()).toBe(false);
@@ -122,7 +122,7 @@ describe("hub waiting-poll block lifecycle", () => {
 		expect(errored.isTranscriptBlockFinalized()).toBe(true);
 	});
 
-	it("keeps successful todo snapshots live for replacement", () => {
+	it("keeps successful todo snapshots displaceable yet finalized", () => {
 		const component = trackComponent(
 			created,
 			new ToolExecutionComponent("todo", { op: "view" }, {}, undefined, uiStub),
@@ -130,7 +130,7 @@ describe("hub waiting-poll block lifecycle", () => {
 		component.updateResult(todoResult(), false);
 
 		expect(component.isDisplaceableBlock()).toBe(true);
-		expect(component.isTranscriptBlockFinalized()).toBe(false);
+		expect(component.isTranscriptBlockFinalized()).toBe(true);
 
 		component.seal();
 		expect(component.isDisplaceableBlock()).toBe(false);
@@ -241,7 +241,7 @@ describe("EventController displaces consecutive waiting polls", () => {
 		const { controller, children } = createFixture();
 
 		const poll = await runPoll(controller, children, "t1");
-		expect(poll.isTranscriptBlockFinalized()).toBe(false);
+		expect(poll.isDisplaceableBlock()).toBe(true);
 
 		await controller.handleEvent({
 			type: "tool_execution_start",
@@ -262,7 +262,7 @@ describe("EventController displaces consecutive waiting polls", () => {
 
 		const first = await runTodo(controller, children, "todo-1", ["plan", "read"]);
 		expect(children).toContain(first);
-		expect(first.isTranscriptBlockFinalized()).toBe(false);
+		expect(first.isDisplaceableBlock()).toBe(true);
 
 		await controller.handleEvent({
 			type: "tool_execution_start",
@@ -304,7 +304,7 @@ describe("EventController displaces consecutive waiting polls", () => {
 			result: todoResult(["plan", "read"]),
 			isError: false,
 		});
-		expect(first.isTranscriptBlockFinalized()).toBe(false);
+		expect(first.isDisplaceableBlock()).toBe(true);
 
 		await controller.handleEvent({
 			type: "tool_execution_start",
@@ -327,7 +327,7 @@ describe("EventController displaces consecutive waiting polls", () => {
 		// Start alone is no longer enough — the prior snapshot stays so a failed
 		// follow-up cannot strand the user without a current todo panel.
 		expect(children).toContain(first);
-		expect(first.isTranscriptBlockFinalized()).toBe(false);
+		expect(first.isDisplaceableBlock()).toBe(true);
 
 		await controller.handleEvent({
 			type: "tool_execution_end",
@@ -348,7 +348,7 @@ describe("EventController displaces consecutive waiting polls", () => {
 
 		const first = await runTodo(controller, children, "todo-1", ["plan", "read"]);
 		expect(children).toContain(first);
-		expect(first.isTranscriptBlockFinalized()).toBe(false);
+		expect(first.isDisplaceableBlock()).toBe(true);
 
 		await controller.handleEvent({
 			type: "tool_execution_start",
@@ -368,7 +368,7 @@ describe("EventController displaces consecutive waiting polls", () => {
 
 		expect(children).toContain(first);
 		expect(children).toContain(errored);
-		expect(first.isTranscriptBlockFinalized()).toBe(false);
+		expect(first.isDisplaceableBlock()).toBe(true);
 	});
 
 	it("does not displace a poll that observed completions", async () => {
@@ -410,7 +410,6 @@ describe("UiHelpers.renderSessionContext collapses repeated todo snapshots", () 
 
 	it("removes the earlier todo snapshot when an assistant message replays two todo calls", () => {
 		const chatContainer = new TranscriptContainer();
-		let helpers!: UiHelpers;
 		const ctx = {
 			chatContainer,
 			transcriptMessageComponents: new WeakMap(),
@@ -434,7 +433,7 @@ describe("UiHelpers.renderSessionContext collapses repeated todo snapshots", () 
 			lastAssistantUsage: undefined,
 			clearTransientSessionUi: () => {},
 		} as unknown as InteractiveModeContext;
-		helpers = new UiHelpers(ctx);
+		const helpers = new UiHelpers(ctx);
 
 		const usage = {
 			input: 1,
@@ -488,7 +487,6 @@ describe("UiHelpers.renderSessionContext collapses repeated todo snapshots", () 
 	it("hands the trailing todo snapshot to the controller during mid-turn rebuild", () => {
 		const chatContainer = new TranscriptContainer();
 		const inheritDisplaceableTodo = vi.fn();
-		let helpers!: UiHelpers;
 		const ctx = {
 			chatContainer,
 			transcriptMessageComponents: new WeakMap(),
@@ -508,13 +506,13 @@ describe("UiHelpers.renderSessionContext collapses repeated todo snapshots", () 
 			get viewSession() {
 				return (this as { session: unknown }).session;
 			},
-			eventController: { inheritDisplaceableTodo },
+			eventController: { inheritDisplaceableTodo, inheritTurnStart: vi.fn() },
 			toolOutputExpanded: false,
 			hideThinkingBlock: false,
 			lastAssistantUsage: undefined,
 			clearTransientSessionUi: () => {},
 		} as unknown as InteractiveModeContext;
-		helpers = new UiHelpers(ctx);
+		const helpers = new UiHelpers(ctx);
 
 		const usage = {
 			input: 1,
@@ -555,6 +553,6 @@ describe("UiHelpers.renderSessionContext collapses repeated todo snapshots", () 
 		expect(inheritDisplaceableTodo).toHaveBeenCalledTimes(1);
 		expect(inheritDisplaceableTodo).toHaveBeenCalledWith(todos[0]);
 		expect(todos[0].canBeDisplacedBy("todo")).toBe(true);
-		expect(todos[0].isTranscriptBlockFinalized()).toBe(false);
+		expect(todos[0].isTranscriptBlockFinalized()).toBe(true);
 	});
 });

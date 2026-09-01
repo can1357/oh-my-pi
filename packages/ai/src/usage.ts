@@ -6,7 +6,7 @@
  */
 import { type } from "@oh-my-pi/omptype";
 import type { FetchImpl, Provider } from "./types";
-export type UsageUnit = "percent" | "tokens" | "requests" | "usd" | "minutes" | "bytes" | "unknown";
+export type UsageUnit = "percent" | "tokens" | "requests" | "credits" | "usd" | "minutes" | "bytes" | "unknown";
 
 export type UsageStatus = "ok" | "warning" | "exhausted" | "unknown";
 
@@ -194,11 +194,27 @@ export interface ClientUsageReport {
 	installId: string;
 	/** Human-readable machine name for display surfaces. */
 	hostname?: string;
+	/** Application label for the process that burned the tokens (e.g. `omp`, `robomp`). */
+	app?: string;
 	entries: ObservedUsageEntry[];
+}
+
+/**
+ * Identity a client presents for usage attribution. Defaults to this
+ * process's install id / hostname / app label; the auth-gateway overrides it
+ * with the identity its caller sent so token burn lands on the originating
+ * machine and application instead of the gateway host.
+ */
+export interface ClientUsageIdentity {
+	installId: string;
+	hostname?: string;
+	app?: string;
 }
 
 /** Per-provider aggregate of one client's recorded usage. */
 export interface ClientProviderUsage {
+	/** Application label the usage was reported under; absent for legacy rows. */
+	app?: string;
 	provider: string;
 	requests: number;
 	inputTokens: number;
@@ -224,7 +240,9 @@ export interface ClientUsageSummary {
 
 // ─── Zod schemas (wire-shape validation for the broker `/v1/usage` endpoint) ─
 
-export const usageUnitSchema = type("'percent' | 'tokens' | 'requests' | 'usd' | 'minutes' | 'bytes' | 'unknown'");
+export const usageUnitSchema = type(
+	"'percent' | 'tokens' | 'requests' | 'credits' | 'usd' | 'minutes' | 'bytes' | 'unknown'",
+);
 export const usageStatusSchema = type("'ok' | 'warning' | 'exhausted' | 'unknown'");
 
 export const usageWindowSchema = type({
@@ -396,6 +414,14 @@ export interface CredentialRankingStrategy {
 		primaryMs: number;
 		secondaryMs: number;
 	};
-	/** Optional: priority boost for specific credential states (e.g., fresh 5h ticker start). */
-	hasPriorityBoost?(primary: UsageLimit | undefined): boolean;
+	/**
+	 * Optional: priority boost for specific credential states (e.g., fresh 5h
+	 * ticker start). `primaryUncapped` is true only when the fetched report has
+	 * an applicable secondary window but no applicable primary window.
+	 */
+	hasPriorityBoost?(
+		primary: UsageLimit | undefined,
+		primaryUncapped?: boolean,
+		context?: CredentialRankingContext,
+	): boolean;
 }

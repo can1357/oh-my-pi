@@ -117,6 +117,26 @@ function createRawSseRequest(frames: string[]): { asResponse(): Promise<Response
 	};
 }
 
+function createNeverClosingRawSseRequest(frames: string[]): { asResponse(): Promise<Response> } {
+	return {
+		async asResponse() {
+			const encoder = new TextEncoder();
+			const body = new ReadableStream<Uint8Array>({
+				start(controller) {
+					for (const frame of frames) controller.enqueue(encoder.encode(frame));
+				},
+			});
+			return new Response(body, {
+				status: 200,
+				headers: {
+					"content-type": "text/event-stream",
+					"request-id": "req_raw_never_closes",
+				},
+			});
+		},
+	};
+}
+
 function sseFrame(event: string, data: unknown): string {
 	return `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
 }
@@ -1546,6 +1566,27 @@ describe("anthropic stream envelope handling", () => {
 		expect(countEvents(events, "done")).toBe(1);
 		expect(result.stopReason).toBe("stop");
 		expect(JSON.parse(JSON.stringify(result.content))).toEqual([{ type: "text", text: "hello" }]);
+	});
+
+	it("finishes on message_stop when the raw SSE connection stays open", async () => {
+		vi.spyOn(AnthropicMessages.prototype, "create").mockImplementation(
+			() => createNeverClosingRawSseRequest(createTextSuccessSseFrames("complete")) as never,
+		);
+
+		const stream = streamAnthropic(model, context, {
+			apiKey: "sk-ant-test",
+			signal: AbortSignal.timeout(500),
+		});
+		const events: AssistantMessageEvent[] = [];
+		for await (const event of stream) {
+			events.push(event);
+		}
+		const result = await stream.result();
+
+		expect(countEvents(events, "error")).toBe(0);
+		expect(countEvents(events, "done")).toBe(1);
+		expect(result.stopReason).toBe("stop");
+		expect(JSON.parse(JSON.stringify(result.content))).toEqual([{ type: "text", text: "complete" }]);
 	});
 
 	it("degrades to best-effort content when a raw SSE stream closes before message_stop", async () => {

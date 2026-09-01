@@ -59,6 +59,9 @@ function passthroughRunner(seen: string[] = []): ExtensionRunner {
 	return {
 		hasHandlers: () => true,
 		consumeToolCallEmitted: () => false,
+		runScoped<T>(fn: () => T): T {
+			return fn();
+		},
 		emitToolCall: async (event: { toolName: string }) => {
 			seen.push(event.toolName);
 			return undefined;
@@ -1539,6 +1542,26 @@ describe("CursorExecHandlers native delete gating (issue #5680)", () => {
 		const result = await handlers.delete(create(DeleteArgsSchema, { toolCallId: "call-del", path: target }));
 
 		expect(result.isError).toBe(false);
+		expect(await Bun.file(target).exists()).toBe(false);
+	});
+
+	it("rechecks a live mutation grant after runtime tool activation", async () => {
+		const target = path.join(cwd, "victim.txt");
+		await Bun.write(target, "remove after upgrade");
+		let mutationGranted = false;
+		const handlers = new CursorExecHandlers({
+			cwd,
+			tools: new Map(),
+			allowDirectFileMutation: () => mutationGranted,
+		});
+
+		const denied = await handlers.delete(create(DeleteArgsSchema, { toolCallId: "call-del-denied", path: target }));
+		expect(denied.isError).toBe(true);
+		expect(await Bun.file(target).exists()).toBe(true);
+
+		mutationGranted = true;
+		const allowed = await handlers.delete(create(DeleteArgsSchema, { toolCallId: "call-del-allowed", path: target }));
+		expect(allowed.isError).toBe(false);
 		expect(await Bun.file(target).exists()).toBe(false);
 	});
 

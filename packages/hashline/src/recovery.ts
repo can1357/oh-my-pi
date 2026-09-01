@@ -115,7 +115,7 @@ interface AnchorNeighbors {
 function computeAnchorNeighbors(anchorLines: ReadonlySet<number>, lineCount: number): Map<number, AnchorNeighbors> {
 	const sorted = [...anchorLines].sort((a, b) => a - b);
 	const neighbors = new Map<number, AnchorNeighbors>();
-	for (let i = 0; i < sorted.length; ) {
+	for (let i = 0; i < sorted.length;) {
 		let j = i;
 		while (j + 1 < sorted.length && sorted[j + 1] === sorted[j] + 1) j++;
 		const start = sorted[i];

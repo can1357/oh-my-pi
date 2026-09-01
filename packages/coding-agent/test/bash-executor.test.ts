@@ -517,6 +517,59 @@ exit 64
 		}
 	});
 
+	it("runs zsh shortcut commands on a headless PTY with a color-capable TTY", async () => {
+		if (process.platform === "win32" || Bun.env.PI_NO_PTY === "1") {
+			return;
+		}
+		const zshPath = ["/bin/zsh", "/usr/bin/zsh", "/usr/local/bin/zsh", "/opt/homebrew/bin/zsh"].find(candidate =>
+			fs.existsSync(candidate),
+		);
+		if (!zshPath) {
+			return;
+		}
+
+		const shellDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-zsh-pty-"));
+		fs.writeFileSync(path.join(shellDir, ".zshrc"), "alias pi_pty_alias='printf pty-alias-ok'\n");
+		Settings.instance.set("shellPath", zshPath);
+
+		vi.spyOn(Settings.prototype, "getShellConfig").mockReturnValue({
+			shell: zshPath,
+			args: ["-l", "-c"],
+			env: {
+				PATH: Bun.env.PATH ?? "",
+				HOME: shellDir,
+				SHELL_SESSIONS_DISABLE: "1",
+			},
+			prefix: undefined,
+		});
+
+		const rawChunks: string[] = [];
+		try {
+			const result = await executeBash(
+				"pi_pty_alias; [ -t 1 ] && printf ' is-tty'; printf ' \\033[31mred\\033[0m'",
+				{
+					cwd: tempDir,
+					timeout: 15000,
+					sessionKey: "zsh-pty",
+					useUserShell: true,
+					pty: { cols: 80, rows: 24, onChunk: chunk => rawChunks.push(chunk) },
+				},
+			);
+
+			expect(result.cancelled).toBe(false);
+			expect(result.exitCode).toBe(0);
+			// Interactive rc loaded (alias expanded) AND stdout was a real TTY.
+			expect(result.output).toContain("pty-alias-ok");
+			expect(result.output).toContain("is-tty");
+			// The captured output stays sanitized while raw ANSI reaches the
+			// renderer callback for vterm replay.
+			expect(result.output).not.toContain("\u001b[31m");
+			expect(rawChunks.join("")).toContain("\u001b[31mred\u001b[0m");
+		} finally {
+			removeSyncWithRetries(shellDir);
+		}
+	});
+
 	it("invokes onChunk with command output", async () => {
 		let seenChunk: string | null = null;
 		const result = await executeBash("echo hello", {
@@ -734,6 +787,9 @@ exit 64
 		expect(result.cancelled).toBe(true);
 		expect(result.output).toContain("streamed-before-timeout");
 		expect(result.output).toContain("Command timed out after 1 seconds");
+		// Watchdog-win path: native never returned, so the result must be
+		// distinguishable from a confirmed empty run (#10308).
+		expect(result.output).toContain("the shell backend did not respond");
 		expect(nativeSignal?.aborted).toBe(false);
 		expect(abortSpy).toHaveBeenCalledTimes(1);
 	});
@@ -834,7 +890,7 @@ exit 64
 		const aborted = await abortPromise;
 		expect(aborted.cancelled).toBe(true);
 
-		// biome-ignore lint/suspicious/noTemplateCurlyInString: this is a bash variable expansion
+		// oxlint-disable-next-line no-template-curly-in-string -- this is a bash variable expansion
 		const afterAbort = await executeBash("echo ${PI_RESET_VAR:-unset}", {
 			cwd: tempDir,
 			timeout: 5000,
@@ -1246,6 +1302,8 @@ exit 64
 		expect(result.cancelled).toBe(true);
 		expect(result.output).toContain("flushed-during-timeout");
 		expect(result.output).toContain("Command timed out after 1 seconds");
+		// Native-confirmed timeout: no "backend did not respond" caveat.
+		expect(result.output).not.toContain("the shell backend did not respond");
 		expect(nativeSignal?.aborted).toBe(false);
 		expect(abortSpy).not.toHaveBeenCalled();
 	});
@@ -1327,9 +1385,16 @@ describe("executeBash :async: background retention", () => {
 				});
 				expect(res.cancelled).toBe(false);
 
-				await pollUntil(() => fs.existsSync(pidFile), Date.now() + 4000);
-				pid = Number.parseInt(fs.readFileSync(pidFile, "utf8").trim(), 10);
-				expect(Number.isInteger(pid)).toBe(true);
+				let observedPid = Number.NaN;
+				await pollUntil(() => {
+					if (!fs.existsSync(pidFile)) return false;
+					observedPid = Number.parseInt(fs.readFileSync(pidFile, "utf8").trim(), 10);
+					return Number.isInteger(observedPid);
+				}, Date.now() + 4000);
+				if (!Number.isInteger(observedPid)) {
+					throw new Error(`Timed out waiting for a valid PID in ${pidFile}`);
+				}
+				pid = observedPid;
 
 				// A later turn on a different per-job shell must not have killed it.
 				await executeBash("true", { sessionKey: "reparent-probe:async:job2", cwd: tmp });

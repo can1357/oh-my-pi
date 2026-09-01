@@ -174,10 +174,13 @@ describe("Anthropic request fingerprint alignment", () => {
 		});
 
 		expect(headers.Accept).toBe("application/json");
-		expect(headers["User-Agent"]).toBe(`claude-cli/${claudeCodeVersion} (external, claude-desktop)`);
+		// Pinned literally (not via the imported constant) so a wrong version bump is caught
+		// on an observable wire header: this is the exact User-Agent the upstream expects.
+		expect(headers["User-Agent"]).toBe("claude-cli/2.1.246 (external, claude-desktop)");
 		expect(headers["X-Claude-Code-Session-Id"]).toBe(sessionId);
 		expect(headers["X-Stainless-Arch"]).toBe(mapStainlessArch(process.arch));
 		expect(headers["X-Stainless-OS"]).toBe("Linux");
+		expect(headers["X-Stainless-Package-Version"]).toBe("0.112.1");
 		expect(headers["X-Stainless-Runtime-Version"]).toBe("v26.3.0");
 		expect(headers["X-Stainless-Timeout"]).toBe("600");
 		expect(headers["anthropic-client-platform"]).toBeUndefined();
@@ -205,7 +208,7 @@ describe("Anthropic request fingerprint alignment", () => {
 			"Accept-Encoding",
 		]);
 		expect(headers["anthropic-beta"]).toBe(
-			"claude-code-20250219,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,advanced-tool-use-2025-11-20,effort-2025-11-24,fallback-credit-2026-06-01",
+			"claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,advanced-tool-use-2025-11-20,effort-2025-11-24,fallback-credit-2026-06-01",
 		);
 		expect(headers["x-client-request-id"]).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
 	});
@@ -233,6 +236,11 @@ describe("Anthropic request fingerprint alignment", () => {
 			thinkingDisplay: "omitted",
 		});
 		expect(hiddenUtility.defaultHeaders["anthropic-beta"]).not.toContain("redact-thinking-2026-02-12");
+		// Drift guard: the no-tools/no-thinking utility branch is a distinct code path
+		// (buildCoworkBetas utility defaults) from the agent branch asserted above. Its
+		// OAuth beta must be present verbatim — dropping `oauth-2025-04-20` there silently
+		// reintroduces the upstream 403 with no other test failing.
+		expect(hiddenUtility.defaultHeaders["anthropic-beta"]).toContain("oauth-2025-04-20");
 	});
 
 	it("never advertises context-1m on OAuth requests for million-token models (#7238)", () => {
@@ -255,7 +263,7 @@ describe("Anthropic request fingerprint alignment", () => {
 		});
 
 		expect(options.defaultHeaders["anthropic-beta"]).toBe(
-			"claude-code-20250219,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,advanced-tool-use-2025-11-20,effort-2025-11-24,fallback-credit-2026-06-01",
+			"claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,advanced-tool-use-2025-11-20,effort-2025-11-24,fallback-credit-2026-06-01",
 		);
 		expect(options.defaultHeaders["anthropic-beta"]).not.toContain("context-1m-2025-08-07");
 	});

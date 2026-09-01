@@ -1,6 +1,5 @@
 import { describe, expect, it } from "bun:test";
 import {
-	type Agent,
 	AgentSideConnection,
 	type AnyMessage,
 	type Client,
@@ -33,22 +32,23 @@ describe("ACP JSON-RPC transport", () => {
 			},
 		};
 		const clientConnection = new ClientSideConnection(() => client, pair.left);
-		let agentConnection: AgentSideConnection;
-		const agent: Agent = {
-			initialize: params => ({ protocolVersion: params.protocolVersion }),
-			newSession: async () => ({ sessionId: "session-1" }),
-			prompt: async params => {
-				if (params.prompt.length === 0) throw RequestError.invalidParams({ field: "prompt" });
-				await agentConnection.requestPermission({
-					sessionId: params.sessionId,
-					toolCall: { toolCallId: "tool-1" },
-					options: [],
-				});
-				return { stopReason: "end_turn" };
-			},
-			cancel: async () => {},
-		};
-		agentConnection = new AgentSideConnection(() => agent, pair.right);
+		const agentConnection = new AgentSideConnection(
+			connection => ({
+				initialize: params => ({ protocolVersion: params.protocolVersion }),
+				newSession: async () => ({ sessionId: "session-1" }),
+				prompt: async params => {
+					if (params.prompt.length === 0) throw RequestError.invalidParams({ field: "prompt" });
+					await connection.requestPermission({
+						sessionId: params.sessionId,
+						toolCall: { toolCallId: "tool-1" },
+						options: [],
+					});
+					return { stopReason: "end_turn" };
+				},
+				cancel: async () => {},
+			}),
+			pair.right,
+		);
 
 		await expect(clientConnection.initialize({ protocolVersion: 1, clientCapabilities: {} })).resolves.toEqual({
 			protocolVersion: 1,
@@ -113,6 +113,7 @@ describe("ACP JSON-RPC transport", () => {
 			RequestError.requestCancelled().toErrorResponse(),
 			RequestError.authRequired().toErrorResponse(),
 			RequestError.resourceNotFound("file:///missing").toErrorResponse(),
+			RequestError.sessionBusy("Agent is already processing.", { reason: "session_busy" }).toErrorResponse(),
 		]).toEqual([
 			{ code: -32700, message: "Parse error" },
 			{ code: -32600, message: "Invalid request" },
@@ -122,6 +123,7 @@ describe("ACP JSON-RPC transport", () => {
 			{ code: -32800, message: "Request cancelled" },
 			{ code: -32000, message: "Authentication required" },
 			{ code: -32002, message: "Resource not found: file:///missing", data: { uri: "file:///missing" } },
+			{ code: -32003, message: "Agent is already processing.", data: { reason: "session_busy" } },
 		]);
 	});
 });

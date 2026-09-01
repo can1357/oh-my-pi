@@ -2,7 +2,7 @@
  * Anchored overlay panel for `/cleanse`, mounted above the editor like the
  * `/omfg` panel. Implements {@link CleanseStatusBoard}, so the shared cleanse
  * core renders the exact live view `omp cleanse` shows on stdout: transient
- * checker/wave/agent rows from {@link CleanseBoardModel} animate in place while
+ * checker/repair/agent rows from {@link CleanseBoardModel} animate in place while
  * permanent log lines accumulate above them.
  */
 import { Spacer, Text, type TUI } from "@oh-my-pi/pi-tui";
@@ -75,13 +75,8 @@ export class CleansePanelComponent extends OverlayPanel implements CleanseStatus
 		this.log(this.#model.checkerFinished(check, durationMs));
 	}
 
-	waveStarted(total: number): void {
-		this.#model.waveStarted(total);
-		this.#rebuild();
-	}
-
-	waveFinished(): void {
-		this.#model.waveFinished();
+	repairFinished(): void {
+		this.#model.repairFinished();
 		this.#rebuild();
 	}
 

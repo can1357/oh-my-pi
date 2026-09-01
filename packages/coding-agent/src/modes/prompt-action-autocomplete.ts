@@ -32,6 +32,8 @@ interface PromptActionAutocompleteItem extends AutocompleteItem {
 interface PromptActionAutocompleteOptions {
 	commands: SlashCommand[];
 	basePath: string;
+	/** Usage count per command name for frequency-ranked slash completions. */
+	commandUsage?: (name: string) => number;
 	keybindings: KeybindingsManager;
 	copyCurrentLine: () => void;
 	copyPrompt: () => void;
@@ -131,9 +133,14 @@ export class PromptActionAutocompleteProvider implements AutocompleteProvider {
 	#actions: PromptActionDefinition[];
 	#basePath: string;
 
-	constructor(commands: SlashCommand[], basePath: string, actions: PromptActionDefinition[]) {
+	constructor(
+		commands: SlashCommand[],
+		basePath: string,
+		actions: PromptActionDefinition[],
+		commandUsage?: (name: string) => number,
+	) {
 		this.#commands = commands;
-		this.#baseProvider = new CombinedAutocompleteProvider(commands, basePath);
+		this.#baseProvider = new CombinedAutocompleteProvider(commands, basePath, { commandUsage });
 		this.#basePath = basePath;
 		this.#actions = actions;
 	}
@@ -142,7 +149,9 @@ export class PromptActionAutocompleteProvider implements AutocompleteProvider {
 		lines: string[],
 		cursorLine: number,
 		cursorCol: number,
+		signal?: AbortSignal,
 	): Promise<{ items: AutocompleteItem[]; prefix: string } | null> {
+		if (signal?.aborted) return null;
 		const currentLine = lines[cursorLine] || "";
 		const textBeforeCursor = currentLine.slice(0, cursorCol);
 		const leadingSlashStart = findLeadingSlashCommandStart(textBeforeCursor);
@@ -156,14 +165,14 @@ export class PromptActionAutocompleteProvider implements AutocompleteProvider {
 			const commandName = commandText.slice(1, spaceIndex);
 			const command = this.#commands.find(cmd => cmd.name === commandName || cmd.aliases?.includes(commandName));
 			if (command && (!("allowArgs" in command) || command.allowArgs !== false)) {
-				const argumentSuggestions = await this.#baseProvider.getSuggestions(lines, cursorLine, cursorCol);
+				const argumentSuggestions = await this.#baseProvider.getSuggestions(lines, cursorLine, cursorCol, signal);
 				if (argumentSuggestions) return argumentSuggestions;
 				// No slash-argument completion for this input: preserve numeric
 				// GitHub references and internal URLs while keeping prompt-action
 				// tokens such as `#copy` literal.
 				const githubRefSuggestions = getGithubRefSuggestions(textBeforeCursor);
 				if (githubRefSuggestions) return githubRefSuggestions;
-				return getInternalUrlSuggestions(textBeforeCursor, this.#basePath);
+				return getInternalUrlSuggestions(textBeforeCursor, this.#basePath, signal);
 			}
 		}
 
@@ -193,7 +202,7 @@ export class PromptActionAutocompleteProvider implements AutocompleteProvider {
 			}
 		}
 
-		const urlSuggestions = await getInternalUrlSuggestions(textBeforeCursor, this.#basePath);
+		const urlSuggestions = await getInternalUrlSuggestions(textBeforeCursor, this.#basePath, signal);
 		if (urlSuggestions) return urlSuggestions;
 
 		if (!isSettingsInitialized() || settings.get("emojiAutocomplete")) {
@@ -201,7 +210,7 @@ export class PromptActionAutocompleteProvider implements AutocompleteProvider {
 			if (emojiSuggestions) return emojiSuggestions;
 		}
 
-		return this.#baseProvider.getSuggestions(lines, cursorLine, cursorCol);
+		return this.#baseProvider.getSuggestions(lines, cursorLine, cursorCol, signal);
 	}
 
 	applyCompletion(
@@ -290,33 +299,33 @@ export function createPromptActionAutocompleteProvider(
 		},
 		{
 			id: "cursor-message-end",
-			label: "Move cursor to end of message",
+			label: "Move cursor to message end",
 			description: "Current message",
 			keywords: ["move", "cursor", "message", "end", "prompt", "last", "bottom"],
 			execute: options.moveCursorToMessageEnd,
 		},
 		{
 			id: "cursor-message-start",
-			label: "Move cursor to beginning of message",
+			label: "Move cursor to message start",
 			description: "Current message",
 			keywords: ["move", "cursor", "message", "start", "beginning", "prompt", "first", "top"],
 			execute: options.moveCursorToMessageStart,
 		},
 		{
 			id: "cursor-line-start",
-			label: "Move cursor to beginning of line",
+			label: "Move cursor to line start",
 			description: formatKeyHints(editorKeybindings.getKeys("tui.editor.cursorLineStart")),
 			keywords: ["move", "cursor", "line", "start", "beginning", "home"],
 			execute: options.moveCursorToLineStart,
 		},
 		{
 			id: "cursor-line-end",
-			label: "Move cursor to end of line",
+			label: "Move cursor to line end",
 			description: formatKeyHints(editorKeybindings.getKeys("tui.editor.cursorLineEnd")),
 			keywords: ["move", "cursor", "line", "end"],
 			execute: options.moveCursorToLineEnd,
 		},
 	];
 
-	return new PromptActionAutocompleteProvider(options.commands, options.basePath, actions);
+	return new PromptActionAutocompleteProvider(options.commands, options.basePath, actions, options.commandUsage);
 }

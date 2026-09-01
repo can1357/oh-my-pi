@@ -4,10 +4,22 @@ import type * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { extractArchive } from "./ar";
+import { type ArchiveLimits, extractArchive } from "./ar";
 
 const CHROME_FOR_TESTING_BASE_URL = "https://storage.googleapis.com/chrome-for-testing-public";
 const CHROME_METADATA_BASE_URL = "https://googlechromelabs.github.io/chrome-for-testing";
+
+/**
+ * Archive ceilings for the managed browser download. The default archive
+ * limits (64 MiB per member / 256 MiB in memory) guard against attacker-
+ * controlled archives, but the Chrome-for-Testing binary is a trusted
+ * first-party download whose `chrome` executable already exceeds both
+ * (~269 MB and growing), so extraction gets a ceiling sized for it.
+ */
+const BROWSER_ARCHIVE_LIMITS: Partial<ArchiveLimits> = {
+	maxMemberSize: 1024 * 1024 * 1024,
+	maxInMemorySize: 1024 * 1024 * 1024,
+};
 
 /** Supported browser products. */
 export enum Browser {
@@ -26,6 +38,13 @@ export enum BrowserPlatform {
 	MAC_ARM = "mac_arm",
 	WIN32 = "win32",
 	WIN64 = "win64",
+}
+type ChromeForTestingPlatform = Exclude<BrowserPlatform, BrowserPlatform.LINUX_ARM>;
+
+function requireChromeForTestingPlatform(platform: BrowserPlatform): ChromeForTestingPlatform {
+	if (platform === BrowserPlatform.LINUX_ARM)
+		throw new Error("Chrome for Testing does not provide linux/arm64 builds");
+	return platform;
 }
 
 const BROWSERS = [
@@ -151,13 +170,13 @@ export function getDownloadUrl(
 
 /** Compute the executable path in Puppeteer's cache layout. */
 export function computeExecutablePath(options: ComputeExecutablePathOptions): string {
-	const platform = options.platform ?? detectBrowserPlatform();
-	if (!platform) throw new Error("Cannot determine a browser platform for this host");
+	const detectedPlatform = options.platform ?? detectBrowserPlatform();
+	if (!detectedPlatform) throw new Error("Cannot determine a browser platform for this host");
 	if (options.browser !== Browser.CHROME) throw new Error(`Unsupported browser executable: ${options.browser}`);
+	const platform = requireChromeForTestingPlatform(detectedPlatform);
 	const installDir = installationDir(options.cacheDir, options.browser, platform, options.buildId);
 	switch (platform) {
 		case BrowserPlatform.LINUX:
-		case BrowserPlatform.LINUX_ARM:
 			return path.join(installDir, "chrome-linux64", "chrome");
 		case BrowserPlatform.MAC:
 			return path.join(
@@ -242,7 +261,7 @@ export async function install(options: InstallOptions): Promise<InstalledBrowser
 			archivePath,
 			options.downloadProgressCallback,
 		);
-		await extractArchive(archivePath, stagingPath);
+		await extractArchive(archivePath, stagingPath, { limits: BROWSER_ARCHIVE_LIMITS });
 		await fsp.mkdir(path.dirname(installPath), { recursive: true });
 		await fsp.rm(installPath, { recursive: true, force: true });
 		await fsp.rename(stagingPath, installPath);
@@ -280,9 +299,8 @@ async function fetchMetadata<T>(filename: string): Promise<T> {
 }
 
 function chromeArchivePlatform(platform: BrowserPlatform): string {
-	switch (platform) {
+	switch (requireChromeForTestingPlatform(platform)) {
 		case BrowserPlatform.LINUX:
-		case BrowserPlatform.LINUX_ARM:
 			return "linux64";
 		case BrowserPlatform.MAC:
 			return "mac-x64";

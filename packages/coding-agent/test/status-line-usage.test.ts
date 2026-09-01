@@ -18,11 +18,15 @@ afterAll(() => {
 
 function makeComponent(
 	reports: unknown,
-	options: { provider?: string; activeIdentity?: { accountId?: string; email?: string; projectId?: string } } = {},
+	options: {
+		provider?: string;
+		modelId?: string;
+		activeIdentity?: { accountId?: string; email?: string; projectId?: string };
+	} = {},
 ): StatusLineComponent {
 	const component = new StatusLineComponent({
-		state: { messages: [], model: { contextWindow: 1000, provider: options.provider } },
-		model: { contextWindow: 1000, provider: options.provider },
+		state: { messages: [], model: { id: options.modelId, contextWindow: 1000, provider: options.provider } },
+		model: { id: options.modelId, contextWindow: 1000, provider: options.provider },
 		sessionManager: {
 			getUsageStatistics: () => ({
 				input: 0,
@@ -110,7 +114,84 @@ describe("usage status-line segment", () => {
 		expect(content).toContain("8%");
 	});
 
-	it("prefers untiered windows and labels the displayed tiered window", async () => {
+	it("selects one coherent scope for the active model", async () => {
+		const reports = [
+			{
+				provider: "openai-codex",
+				limits: [
+					{
+						scope: { windowId: "5h", tier: "spark", modelId: "GPT-5.3-Codex-Spark" },
+						amount: { usedFraction: 0 },
+					},
+					{ scope: { windowId: "7d" }, amount: { usedFraction: 0.08 } },
+					{
+						scope: { windowId: "7d", tier: "spark", modelId: "GPT-5.3-Codex-Spark" },
+						amount: { usedFraction: 0 },
+					},
+				],
+			},
+		];
+		const component = makeComponent(reports, { provider: "openai-codex", modelId: "gpt-5.6-sol" });
+
+		component.refreshUsageInBackground();
+		await flushUsageRefresh();
+		const content = stripVTControlCharacters(component.getTopBorder(200).content);
+
+		expect(content).not.toContain("spark");
+		expect(content).not.toContain("5h");
+		expect(content).toContain("7d");
+		expect(content).toContain("8%");
+
+		const sparkComponent = makeComponent(reports, {
+			provider: "openai-codex",
+			modelId: "gpt-5.3-codex-spark",
+		});
+		sparkComponent.refreshUsageInBackground();
+		await flushUsageRefresh();
+		const sparkContent = stripVTControlCharacters(sparkComponent.getTopBorder(200).content);
+
+		expect(sparkContent).toContain("spark");
+		expect(sparkContent).toContain("5h");
+		expect(sparkContent).toContain("7d");
+		expect(sparkContent).not.toContain("8%");
+	});
+
+	it("labels untiered windows with the report's plan tier (Z.AI planType)", async () => {
+		const now = Date.now();
+		const component = makeComponent(
+			[
+				{
+					provider: "zai",
+					metadata: { planType: "pro" },
+					limits: [
+						{
+							scope: { provider: "zai", windowId: "5h" },
+							window: { resetsAt: now + 30 * 60_000 },
+							amount: { usedFraction: 0.21 },
+						},
+						{
+							scope: { provider: "zai", windowId: "7d" },
+							window: { resetsAt: now + 141 * 3_600_000 },
+							amount: { usedFraction: 0.05 },
+						},
+					],
+				},
+			],
+			{ provider: "zai" },
+		);
+
+		component.refreshUsageInBackground();
+		await flushUsageRefresh();
+		const content = stripVTControlCharacters(component.getTopBorder(200).content);
+
+		expect(content).toContain("pro");
+		expect(content).toContain("5h");
+		expect(content).toContain("21%");
+		expect(content).toContain("7d");
+		expect(content).toContain("5%");
+	});
+
+	it("keeps windows within the preferred untiered scope", async () => {
 		const component = makeComponent([
 			{
 				limits: [
@@ -125,12 +206,12 @@ describe("usage status-line segment", () => {
 		await flushUsageRefresh();
 		const content = stripVTControlCharacters(component.getTopBorder(200).content);
 
-		expect(content).toContain("prolite");
+		expect(content).not.toContain("prolite");
 		expect(content).not.toContain("stale");
 		expect(content).toContain("5h");
 		expect(content).toContain("24%");
-		expect(content).toContain("7d");
-		expect(content).toContain("8%");
+		expect(content).not.toContain("7d");
+		expect(content).not.toContain("8%");
 	});
 
 	it("scopes fetched usage reports to the active provider and account", async () => {
@@ -236,6 +317,77 @@ describe("usage status-line segment", () => {
 		await flushUsageRefresh();
 		const refreshed = stripVTControlCharacters(component.getTopBorder(200).content);
 		expect(refreshed).toContain("24%");
+	});
+
+	it("invalidates cached usage when the active model changes within a provider", async () => {
+		const model = { id: "gpt-5.6-sol", contextWindow: 1000, provider: "openai-codex" };
+		const reports = [
+			{
+				provider: "openai-codex",
+				metadata: { accountId: "active-account" },
+				limits: [
+					{ scope: { windowId: "7d" }, amount: { usedFraction: 0.08 } },
+					{
+						scope: { windowId: "5h", tier: "spark", modelId: "GPT-5.3-Codex-Spark" },
+						amount: { usedFraction: 0.42 },
+					},
+					{
+						scope: { windowId: "7d", tier: "spark", modelId: "GPT-5.3-Codex-Spark" },
+						amount: { usedFraction: 0.11 },
+					},
+				],
+			},
+		];
+		const session = {
+			state: { messages: [], model },
+			model,
+			sessionManager: {
+				getUsageStatistics: () => ({
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 0,
+					orchestrationInput: 0,
+					orchestrationOutput: 0,
+					orchestrationCacheRead: 0,
+					premiumRequests: 0,
+					cost: 0,
+				}),
+			},
+			fetchUsageReports: async () => reports,
+			modelRegistry: {
+				authStorage: {
+					getOAuthAccountIdentity: (requestedProvider: string) =>
+						requestedProvider === "openai-codex" ? { accountId: "active-account" } : undefined,
+				},
+			},
+			getAsyncJobSnapshot: () => ({ running: [] }),
+			getContextUsage: () => undefined,
+		} as unknown as ConstructorParameters<typeof StatusLineComponent>[0];
+		const component = new StatusLineComponent(session);
+		component.updateSettings({
+			preset: "custom",
+			leftSegments: [],
+			rightSegments: ["usage"],
+			sessionAccent: false,
+		});
+
+		component.refreshUsageInBackground();
+		await flushUsageRefresh();
+		const solContent = stripVTControlCharacters(component.getTopBorder(200).content);
+		expect(solContent).not.toContain("spark");
+		expect(solContent).not.toContain("5h");
+		expect(solContent).toContain("8%");
+
+		model.id = "gpt-5.3-codex-spark";
+		const immediate = stripVTControlCharacters(component.getTopBorder(200).content);
+		expect(immediate).not.toContain("8%");
+		await flushUsageRefresh();
+		const sparkContent = stripVTControlCharacters(component.getTopBorder(200).content);
+		expect(sparkContent).toContain("spark");
+		expect(sparkContent).toContain("5h");
+		expect(sparkContent).toContain("42%");
 	});
 
 	it("keeps active-provider rate-limit header reports with account metadata", async () => {
@@ -504,6 +656,136 @@ describe("usage status-line segment", () => {
 		expect(content).toContain("24%");
 		expect(content).toContain("7d");
 		expect(content).toContain("8%");
+	});
+
+	it("renders Google Antigravity daily usage", async () => {
+		const now = Date.now();
+		const component = makeComponent(
+			[
+				{
+					provider: "google-antigravity",
+					limits: [
+						{
+							label: "Usage (Google)",
+							scope: { provider: "google-antigravity", windowId: "daily" },
+							window: { id: "daily", label: "Daily", durationMs: 86_400_000, resetsAt: now + 11 * 60_000 },
+							amount: { usedFraction: 0.054 },
+						},
+					],
+				},
+			],
+			{ provider: "google-antigravity" },
+		);
+
+		component.refreshUsageInBackground();
+		await flushUsageRefresh();
+		const content = stripVTControlCharacters(component.getTopBorder(200).content);
+
+		expect(content).toContain("1d");
+		expect(content).toContain("5%");
+		expect(content).toContain("11m");
+	});
+
+	it("scopes Antigravity usage to the active model's backend counter", async () => {
+		const now = Date.now();
+		const reports = [
+			{
+				provider: "google-antigravity",
+				limits: [
+					{
+						id: "google-antigravity:default:default:daily",
+						label: "Usage",
+						scope: { provider: "google-antigravity", windowId: "daily" },
+						window: { id: "daily", label: "Daily", durationMs: 86_400_000, resetsAt: now + 5 * 60_000 },
+						amount: { usedFraction: 0.99 },
+					},
+					{
+						id: "google-antigravity:google:default:daily",
+						label: "Usage (Google)",
+						scope: { provider: "google-antigravity", windowId: "daily" },
+						window: { id: "daily", label: "Daily", durationMs: 86_400_000, resetsAt: now + 11 * 60_000 },
+						amount: { usedFraction: 0.91 },
+					},
+					{
+						id: "google-antigravity:anthropic:default:daily",
+						label: "Usage (Anthropic)",
+						scope: { provider: "google-antigravity", windowId: "daily" },
+						window: { id: "daily", label: "Daily", durationMs: 86_400_000, resetsAt: now + 40 * 60_000 },
+						amount: { usedFraction: 0.24 },
+					},
+					{
+						id: "google-antigravity:openai:default:daily",
+						label: "Usage (OpenAI)",
+						scope: { provider: "google-antigravity", windowId: "daily" },
+						window: { id: "daily", label: "Daily", durationMs: 86_400_000, resetsAt: now + 25 * 60_000 },
+						amount: { usedFraction: 0.63 },
+					},
+				],
+			},
+		];
+
+		const claude = makeComponent(reports, { provider: "google-antigravity", modelId: "claude-opus-4-6" });
+		claude.refreshUsageInBackground();
+		await flushUsageRefresh();
+		const claudeContent = stripVTControlCharacters(claude.getTopBorder(200).content);
+		expect(claudeContent).toContain("1d");
+		expect(claudeContent).toContain("24%");
+		expect(claudeContent).not.toContain("91%");
+		expect(claudeContent).not.toContain("99%");
+
+		const gemini = makeComponent(reports, { provider: "google-antigravity", modelId: "gemini-3-pro" });
+		gemini.refreshUsageInBackground();
+		await flushUsageRefresh();
+		const geminiContent = stripVTControlCharacters(gemini.getTopBorder(200).content);
+		expect(geminiContent).toContain("1d");
+		expect(geminiContent).toContain("91%");
+		expect(geminiContent).not.toContain("24%");
+		expect(geminiContent).not.toContain("99%");
+
+		const gptOss = makeComponent(reports, { provider: "google-antigravity", modelId: "gpt-oss-120b" });
+		gptOss.refreshUsageInBackground();
+		await flushUsageRefresh();
+		const gptOssContent = stripVTControlCharacters(gptOss.getTopBorder(200).content);
+		expect(gptOssContent).toContain("1d");
+		expect(gptOssContent).toContain("63%");
+		expect(gptOssContent).not.toContain("91%");
+		expect(gptOssContent).not.toContain("99%");
+		for (const modelId of ["tab_flash_lite_preview", "tab_jump_flash_lite_preview"]) {
+			const tabModel = makeComponent(reports, { provider: "google-antigravity", modelId });
+			tabModel.refreshUsageInBackground();
+			await flushUsageRefresh();
+			const tabContent = stripVTControlCharacters(tabModel.getTopBorder(200).content);
+			expect(tabContent).toContain("1d");
+			expect(tabContent).toContain("91%");
+			expect(tabContent).not.toContain("24%");
+			expect(tabContent).not.toContain("99%");
+		}
+	});
+
+	it("falls back to legacy default Antigravity usage when the model counter is absent", async () => {
+		const component = makeComponent(
+			[
+				{
+					provider: "google-antigravity",
+					limits: [
+						{
+							id: "google-antigravity:default:default:daily",
+							label: "Usage",
+							scope: { provider: "google-antigravity", windowId: "daily" },
+							window: { id: "daily", label: "Daily", durationMs: 86_400_000 },
+							amount: { usedFraction: 0.42 },
+						},
+					],
+				},
+			],
+			{ provider: "google-antigravity", modelId: "claude-opus-4-6" },
+		);
+
+		component.refreshUsageInBackground();
+		await flushUsageRefresh();
+		const content = stripVTControlCharacters(component.getTopBorder(200).content);
+		expect(content).toContain("1d");
+		expect(content).toContain("42%");
 	});
 
 	it("ignores non-canonical windows without a reported span", async () => {

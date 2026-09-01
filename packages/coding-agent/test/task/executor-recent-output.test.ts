@@ -161,6 +161,7 @@ function createScriptedSession(
 ): MockSessionControls {
 	const listeners: Array<(event: AgentSessionEvent) => void> = [];
 	const emit = (event: AgentSessionEvent) => {
+		// oxlint-disable-next-line unicorn/no-useless-spread -- listeners may change during dispatch
 		for (const listener of [...listeners]) listener(event);
 	};
 	const emittedGate = Promise.withResolvers<void>();
@@ -186,6 +187,8 @@ function createScriptedSession(
 			emittedGate.resolve();
 		},
 		waitForIdle: async () => {},
+		prepareForHeadlessAdvisorDrain: () => {},
+		waitForAdvisorCatchup: async () => true,
 		getLastAssistantMessage: () => undefined,
 		abort: async () => {
 			aborted = true;

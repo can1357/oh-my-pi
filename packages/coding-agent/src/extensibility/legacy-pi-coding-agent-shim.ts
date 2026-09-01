@@ -35,7 +35,7 @@ import {
 import { getPackageDir as getOmpPackageDir } from "../config";
 import { formatKeyHints } from "../config/keybindings";
 import type { PromptTemplate } from "../config/prompt-templates";
-import { type SettingPath, Settings } from "../config/settings";
+import { findScopedSettings, type SettingPath, Settings } from "../config/settings";
 import { EditTool } from "../edit";
 import type { CreateAgentSessionOptions, CreateAgentSessionResult, LoadExtensionsResult } from "../sdk";
 import {
@@ -71,6 +71,7 @@ import type {
 	ReadToolResultEvent,
 	ToolDefinition,
 	ToolResultEvent,
+	ToolShellEnvironmentContext,
 	WriteToolResultEvent,
 } from "./extensions/types";
 import { Type } from "./legacy-typebox";
@@ -94,11 +95,7 @@ interface LegacyThemeLike {
 	bold(text: string): string;
 }
 
-export interface BashSpawnContext {
-	command: string;
-	cwd: string;
-	env: NodeJS.ProcessEnv;
-}
+export type BashSpawnContext = ToolShellEnvironmentContext;
 
 export type BashSpawnHook = (context: BashSpawnContext) => BashSpawnContext;
 
@@ -488,12 +485,30 @@ export function createReadTool(cwd: string, options?: ReadToolOptions): ToolDefi
 /** Create the legacy bash tool definition. */
 export function createBashToolDefinition(cwd: string, options?: BashToolOptions): ToolDefinition {
 	const tool = createRegistryTool(cwd, "bash");
+	const spawnHook = options?.spawnHook;
+	const shellEnv = spawnHook
+		? (spawn: ToolShellEnvironmentContext): Record<string, string> => {
+				const baseline = { ...spawn.env };
+				const result = spawnHook(spawn);
+				// Legacy hooks conventionally return `{ ...context.env, EXTRA }`.
+				// The consumer applies this as per-command overrides on an already
+				// filtered base env, so forwarding the whole object would reintroduce
+				// everything filterChildShellEnv removed. Forward only entries the
+				// hook added or changed relative to the env it was handed.
+				return Object.fromEntries(
+					Object.entries(result.env).filter(
+						(entry): entry is [string, string] => typeof entry[1] === "string" && baseline[entry[0]] !== entry[1],
+					),
+				);
+			}
+		: undefined;
 	return markToolDefinition({
 		name: "bash",
 		label: "Bash",
 		description: tool.description,
 		parameters: legacyBashSchema,
 		approval: "exec",
+		...(shellEnv ? { shellEnv } : {}),
 		renderCall: (params, optionsArg, themeArg) => {
 			const theme = renderTheme(optionsArg, themeArg);
 			const command = stringField(params, "command") ?? "";
@@ -742,9 +757,22 @@ export function createReadOnlyTools(cwd: string): ToolDefinition[] {
 	});
 }
 
+/**
+ * Legacy pi `SettingsManager` shim.
+ *
+ * Upstream Pi's `SettingsManager.create(cwd)` is **synchronous** and returns a
+ * manager exposing `getGlobalSettings()`/`getProjectSettings()` (plus the typed
+ * `get(path)`). OMP's `Settings` is that manager, so the shim resolves the
+ * active extension session's instance first, then falls back to a live instance
+ * matching the requested `cwd`/`agentDir`, or an isolated instance when nothing
+ * matches. Returning the promise from `Settings.init()` here broke every pi
+ * extension that read settings synchronously — e.g. pi-vim's `session_start`
+ * handler (#10397); selecting a process-global instance would leak one session's
+ * settings into another.
+ */
 export const SettingsManager = {
-	create(cwd: string, agentDir?: string): Promise<Settings> {
-		return Settings.init({ cwd, agentDir });
+	create(cwd?: string, agentDir?: string): Settings {
+		return findScopedSettings(cwd, agentDir) ?? Settings.isolated();
 	},
 
 	inMemory(): Settings {
@@ -863,7 +891,7 @@ export class DefaultPackageManager {
  * callbacks, `additional*Paths`, `extensionFactories`, `settingsManager`,
  * `eventBus`) plus the discovery results, and the sibling `createAgentSession`
  * override below translates them into OMP's native session options
- * (`disableExtensionDiscovery`, `preloadedExtensionPaths`, `extensions`,
+ * (`disableExtensionDiscovery`, prepared/path extension preloads, `extensions`,
  * `skills`, `promptTemplates`, `contextFiles`, `settings`, `eventBus`,
  * `systemPrompt`) before delegating to `../sdk`.
  *
@@ -1365,7 +1393,11 @@ export async function createAgentSession(
 	// `preloadedExtensions` seam. Skipping this branch would let
 	// `createAgentSession` re-run its own discovery and undo the caller's
 	// `noExtensions: true`.
-	if (rest.preloadedExtensions === undefined && rest.preloadedExtensionPaths === undefined) {
+	if (
+		rest.preloadedExtensions === undefined &&
+		rest.preloadedPreparedExtensions === undefined &&
+		rest.preloadedExtensionPaths === undefined
+	) {
 		forwarded.preloadedExtensions = state.extensionsResult;
 	}
 
@@ -1454,12 +1486,12 @@ export function getPackageDir(): string {
 }
 
 // Legacy pi's `@earendil-works/pi-coding-agent` re-exported `estimateTokens`,
-// `compact`, and `serializeConversation` from its package root (via
-// `./core/compaction/index.ts`). In omp `compact` and `serializeConversation`
-// live in `@oh-my-pi/pi-agent-core/compaction`, and the coding-agent barrel
-// below does not forward them, so legacy extensions importing them fail Bun's
-// static export check during validation (issues #6583, #7174, #7403).
-export { compact, serializeConversation } from "@oh-my-pi/pi-agent-core/compaction";
+// `compact`, `serializeConversation`, and `calculateContextTokens` from its
+// package root (via `./core/compaction/index.ts`). In omp these live in
+// `@oh-my-pi/pi-agent-core/compaction`, and the coding-agent barrel below does
+// not forward them, so legacy extensions importing them fail Bun's static
+// export check during validation (issues #6583, #7174, #7403, #10278).
+export { calculateContextTokens, compact, serializeConversation } from "@oh-my-pi/pi-agent-core/compaction";
 
 const legacyTokenizer = new Tokenizer();
 
