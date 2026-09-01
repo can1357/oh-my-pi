@@ -7,6 +7,7 @@
 - Added support for GitLab Duo models
 - Added provider support for Llama.cpp, LM Studio, and Minimax
 - Added support for new models: Qwen 3.8 27B, Granite 4.2 8B, Abliterated variants, GLM 5.3, and Qwen 3.8 Flash Next
+- Added runtime-authoritative Nous Portal model discovery through Hermes' OpenAI-compatible subscription proxy.
 - Added `supportsContextManagement` and `supportsReasoningSummary` compatibility metadata for provider-compatible model endpoints ([#10358](https://github.com/can1357/oh-my-pi/pull/10358) by [@jubueche](https://github.com/jubueche)).
 - Model identity and compatibility policy now live in a checked-in KDL rule tree (`src/compat/rules/`: taxonomy, class, provider, and runtime files) compiled by `bun run gen:compat` into a committed `rules.json`; the runtime engine (`resolveModelPolicy`/`classifyModel`) resolves every model's wire compat, thinking surface, and catalog metadata from these rules instead of scattered model-name matching in TypeScript.
 - Built models carry a structured `identity` (`class`, `family`, `revision`, effort/thinking-variant facts) baked into `models.json`, and Google APIs (`google-generative-ai`, `google-vertex`, `google-gemini-cli`) gain a resolved compat record instead of `undefined`.

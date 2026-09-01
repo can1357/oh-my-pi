@@ -113,6 +113,7 @@ Each provider has one or more environment variables that supply a key when no st
 | `together`                       | `TOGETHER_API_KEY`                                                            |
 | `coreweave`                      | `COREWEAVE_API_KEY`, then `WANDB_API_KEY`                                     |
 | `nvidia`                         | `NVIDIA_API_KEY`                                                              |
+| `nous`                           | `NOUS_PROXY_API_KEY` (any non-empty value for the local Hermes proxy)         |
 | `devin`                          | `DEVIN_API_KEY`                                                               |
 | `gmi-cloud`                      | `GMI_API_KEY`                                                                 |
 | `huggingface`                    | `HUGGINGFACE_HUB_TOKEN`, then `HF_TOKEN`                                      |
@@ -157,6 +158,17 @@ Each provider has one or more environment variables that supply a key when no st
 `/login cloudflare-ai-gateway` prompts for the gateway token, Cloudflare account ID, and gateway ID, then stores all three together. To use environment variables, set all three values listed above. OMP selects the Anthropic, OpenAI, or Workers AI gateway route for each model; you do not need a `models.yml` base URL override.
 
 OAuth-backed providers such as `anthropic`, `github-copilot`, `cursor`, `ollama-cloud`, `qwen-portal`, `kimi-code`, `xai-oauth`, `wafer-serverless`, `google-gemini-cli`, `google-antigravity`, `devin`, and the GitLab providers (`gitlab-duo`, `gitlab-duo-agent`) are normally reached through `/login` rather than an environment variable. Interactive API-key logins exist too: `/login baseten`, `/login coreweave`, and `/login sakana` prompt for a dashboard/API key (`coreweave` additionally requires `COREWEAVE_PROJECT` for the `OpenAI-Project` header). See [Environment variables](./environment-variables.md) for search-tool and configuration variables not listed here.
+
+### Nous Portal through the Hermes subscription proxy
+
+The built-in `nous` provider connects to Hermes' credential-refreshing OpenAI-compatible proxy. OMP never reads or stores your Nous Portal access or refresh token.
+
+1. Authenticate once with `hermes portal`.
+2. Keep `hermes proxy start` running. Its default endpoint is `http://127.0.0.1:8645/v1`.
+3. Run `/login nous` in OMP. The login checks the proxy's `/models` endpoint and stores only the inert `sk-unused` client value.
+4. Select a live model as `nous/<model-id>`.
+
+The provider discovers the models available to the signed-in Portal account at runtime. If the proxy is exposed beyond localhost, protect it with a firewall, VPN, or authenticated reverse proxy: Hermes' proxy accepts any bearer token and otherwise grants access to the Portal subscription behind it.
 
 ### `.env` discovery and precedence
 
