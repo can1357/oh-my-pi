@@ -1,7 +1,9 @@
 import { Spacer } from "@oh-my-pi/pi-tui";
 import { APP_NAME } from "@oh-my-pi/pi-utils";
 import { CollabGuestLink } from "../collab/guest";
+import { permissionNames } from "../collab/guest-manager";
 import { CollabHost } from "../collab/host";
+import { GUEST_PERMISSIONS, type GuestRole } from "../collab/protocol";
 import type { SettingPath, SettingValue } from "../config/settings";
 import { settings } from "../config/settings";
 import { parseExportArgs } from "../export/html/args";
@@ -46,6 +48,142 @@ function showCollabQrCode(ctx: InteractiveModeContext, webLink: string): void {
 function showCollabLink(ctx: InteractiveModeContext, host: CollabHost, heading: string, view = false): void {
 	ctx.showStatus(collabLinkHint(host, heading, view), { dim: false });
 	showCollabQrCode(ctx, view ? host.webViewLink : host.webLink);
+}
+
+const COLLAB_ROLES: readonly GuestRole[] = ["owner", "admin", "member", "viewer"];
+
+/** Parse comma-separated GUEST_PERMISSIONS keys ("PROMPT,ABORT") into a bitmask. */
+function parsePermissionBits(spec: string): number | { error: string } {
+	let bits = 0;
+	for (const piece of spec.split(/[,|]/)) {
+		const key = piece.trim().toUpperCase() as keyof typeof GUEST_PERMISSIONS;
+		if (!key) continue;
+		const flag = GUEST_PERMISSIONS[key];
+		if (flag === undefined) {
+			return {
+				error: `Unknown permission "${piece.trim()}" (valid: ${Object.keys(GUEST_PERMISSIONS).join(", ")})`,
+			};
+		}
+		bits |= flag;
+	}
+	return bits;
+}
+
+/** Shared management-argument validation for invite/role. */
+function parseRoleArg(parts: string[], verb: string): { name: string; role: GuestRole } | { usage: string } {
+	const role = (parts[1] as GuestRole | undefined) ?? "member";
+	if (!parts[0] || !COLLAB_ROLES.includes(role)) {
+		return { usage: `Usage: /collab ${verb} <name${verb === "invite" ? "" : "|id"}> [${COLLAB_ROLES.join("|")}]` };
+	}
+	return { name: parts[0], role };
+}
+
+/** Host-side dispatch for /collab invite|kick|role|grant|revoke. */
+function collabHostManage(host: CollabHost, verb: string, rest: string, ctx: InteractiveModeContext): void {
+	const parts = rest.split(/\s+/).filter(Boolean);
+	if (verb === "invite") {
+		const parsed = parseRoleArg(parts, verb);
+		if ("usage" in parsed) {
+			ctx.showStatus(parsed.usage);
+			return;
+		}
+		host.inviteGuest(parsed.name, parsed.role);
+		ctx.showStatus(`Invited ${parsed.name} as ${parsed.role} — they join with that display name`);
+		return;
+	}
+	const target = parts[0];
+	if (!target) {
+		ctx.showStatus(
+			`Usage: /collab ${verb} <name|id>${verb === "kick" ? " [reason]" : verb === "role" ? " <role>" : " <FLAGS>"}`,
+		);
+		return;
+	}
+	if (verb === "kick") {
+		const reason = rest.slice(target.length).trim();
+		ctx.showStatus(host.kickGuest(target, reason || undefined) ? `Kicked ${target}` : `No such guest: ${target}`);
+		return;
+	}
+	if (verb === "role") {
+		const parsed = parseRoleArg(parts, verb);
+		if ("usage" in parsed) {
+			ctx.showStatus(parsed.usage);
+			return;
+		}
+		ctx.showStatus(
+			host.setGuestRole(parsed.name, parsed.role)
+				? `${parsed.name} is now ${parsed.role}`
+				: `No such guest: ${parsed.name}`,
+		);
+		return;
+	}
+	const bits = parsePermissionBits(parts[1] ?? "");
+	if (typeof bits !== "number") {
+		ctx.showStatus(bits.error);
+		return;
+	}
+	if (bits === 0) {
+		ctx.showStatus(`Usage: /collab ${verb} <name|id> <FLAGS> (e.g. PROMPT,ABORT)`);
+		return;
+	}
+	const guest =
+		verb === "grant" ? host.grantGuestPermissions(target, bits) : host.revokeGuestPermissions(target, bits);
+	ctx.showStatus(
+		guest
+			? `${verb === "grant" ? "Granted" : "Revoked"} ${permissionNames(bits)} for ${guest.name}`
+			: `No such guest: ${target}`,
+	);
+}
+
+/** Guest-side dispatch for the same verbs; the host re-checks every permission. */
+function collabGuestManage(guest: CollabGuestLink, verb: string, rest: string, ctx: InteractiveModeContext): void {
+	const parts = rest.split(/\s+/).filter(Boolean);
+	const roster = guest.guests;
+	const resolveTarget = (target: string | undefined): string | null => {
+		if (!target) return null;
+		const byId = roster.find(identity => identity.id === target);
+		if (byId) return byId.id;
+		const key = target.toLowerCase();
+		const matches = roster.filter(identity => identity.name.toLowerCase() === key);
+		return matches.length === 1 ? matches[0].id : null;
+	};
+	if (verb === "invite") {
+		const parsed = parseRoleArg(parts, verb);
+		if ("usage" in parsed) {
+			ctx.showStatus(parsed.usage);
+			return;
+		}
+		guest.inviteGuest(parsed.name, parsed.role);
+		return;
+	}
+	const id = resolveTarget(parts[0]);
+	if (!id) {
+		ctx.showStatus(parts[0] ? `No such guest: ${parts[0]}` : `Usage: /collab ${verb} <name|id>`);
+		return;
+	}
+	if (verb === "kick") {
+		guest.kickGuest(id, rest.slice(parts[0].length).trim() || undefined);
+		return;
+	}
+	if (verb === "role") {
+		const parsed = parseRoleArg(parts, verb);
+		if ("usage" in parsed) {
+			ctx.showStatus(parsed.usage);
+			return;
+		}
+		guest.setGuestRole(id, parsed.role);
+		return;
+	}
+	const bits = parsePermissionBits(parts[1] ?? "");
+	if (typeof bits !== "number") {
+		ctx.showStatus(bits.error);
+		return;
+	}
+	if (bits === 0) {
+		ctx.showStatus(`Usage: /collab ${verb} <name|id> <FLAGS>`);
+		return;
+	}
+	if (verb === "grant") guest.grantGuestPermissions(id, bits);
+	else guest.revokeGuestPermissions(id, bits);
 }
 
 export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
@@ -253,11 +391,18 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 		name: "collab",
 		icon: "broadcast",
 		description: "Share this session live via a relay",
-		inlineHint: "[start|view|stop|status] [relayUrl]",
+		inlineHint: "[start|view|stop|status|guests|chat|invite|kick|role|grant|revoke]",
 		subcommands: [
 			{ name: "view", description: "Share a read-only link (guests can watch, not prompt)" },
 			{ name: "status", description: "Show link + participants" },
 			{ name: "stop", description: "Stop sharing" },
+			{ name: "guests", description: "List the guests in the room with roles" },
+			{ name: "chat", description: "Guest chat: /collab chat [@name] <message>" },
+			{ name: "invite", description: "Invite: /collab invite <name> [role] (host or GUEST_INVITE)" },
+			{ name: "kick", description: "Remove: /collab kick <name|id> [reason]" },
+			{ name: "role", description: "Change role: /collab role <name|id> <admin|member|viewer>" },
+			{ name: "grant", description: "Grant bits: /collab grant <name|id> PROMPT,ABORT" },
+			{ name: "revoke", description: "Revoke bits: /collab revoke <name|id> PROMPT,ABORT" },
 		],
 		allowArgs: true,
 		getTuiAutocompleteDescription: runtime => {
@@ -284,19 +429,88 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 			}
 			if (verb === "status") {
 				if (ctx.collabHost) {
-					const names = ctx.collabHost.participants.map(p =>
-						p.role === "host" ? `${p.name} (host)` : p.readOnly ? `${p.name} (view-only)` : p.name,
+					const names = ctx.collabHost.guests.map(
+						g => `${g.name} [${g.role}]${g.status === "offline" ? " (offline)" : ""}`,
 					);
-					ctx.showStatus(`Collab: ${names.join(", ")} — ${collabBrowserLink(ctx.collabHost.webLink)}`);
-				} else if (ctx.collabGuest) {
 					ctx.showStatus(
-						ctx.collabGuest.readOnly
-							? "In a collab session as a read-only guest (/leave to exit)"
-							: "In a collab session as a guest (/leave to exit)",
+						`Collab: you (host)${names.length ? `, ${names.join(", ")}` : ""} — ${collabBrowserLink(ctx.collabHost.webLink)}`,
+					);
+				} else if (ctx.collabGuest) {
+					const guest = ctx.collabGuest;
+					ctx.showStatus(
+						`In a collab session as ${
+							guest.self ? `guest [${guest.self.role}]` : guest.readOnly ? "read-only guest" : "guest"
+						} (/leave to exit)`,
 					);
 				} else {
 					ctx.showStatus("Not in a collab session");
 				}
+				return;
+			}
+			if (verb === "guests") {
+				if (ctx.collabHost) {
+					const roster = ctx.collabHost.guests;
+					ctx.showStatus(
+						roster.length
+							? roster
+									.map(g => `${g.name} [${g.role}]${g.status === "offline" ? " (offline)" : ""} — ${g.id}`)
+									.join("\n")
+							: "No guests have joined yet",
+					);
+				} else if (ctx.collabGuest) {
+					const roster = ctx.collabGuest.guests;
+					ctx.showStatus(
+						roster.length
+							? roster.map(g => `${g.name} [${g.role}]${g.status === "offline" ? " (offline)" : ""}`).join("\n")
+							: "You are the only guest so far",
+					);
+				} else {
+					ctx.showStatus("Not in a collab session");
+				}
+				return;
+			}
+			if (verb === "chat") {
+				const guest = ctx.collabGuest;
+				if (!guest) {
+					ctx.showStatus(
+						ctx.collabHost
+							? "Guest chat runs between guests; the host sees every prompt"
+							: "Not in a collab session",
+					);
+					return;
+				}
+				const message = rest.trim();
+				if (!message) {
+					ctx.showStatus("Usage: /collab chat [@name] <message>");
+					return;
+				}
+				if (message.startsWith("@")) {
+					const space = message.indexOf(" ");
+					const target = space < 0 ? message.slice(1) : message.slice(1, space);
+					const text = space < 0 ? "" : message.slice(space + 1).trim();
+					const match = guest.guests.find(identity => identity.name.toLowerCase() === target.toLowerCase());
+					if (!text || !match) {
+						ctx.showStatus(match ? "Message is empty" : `No such guest: ${target}`);
+						return;
+					}
+					guest.sendGuestMessage(text, match.id);
+					ctx.showStatus(`→ ${match.name}: ${text}`);
+					return;
+				}
+				guest.sendGuestMessage(message);
+				ctx.showStatus(`→ room: ${message}`);
+				return;
+			}
+			if (verb === "invite" || verb === "kick" || verb === "role" || verb === "grant" || verb === "revoke") {
+				if (ctx.collabHost) {
+					collabHostManage(ctx.collabHost, verb, rest, ctx);
+					return;
+				}
+				if (ctx.collabGuest) {
+					collabGuestManage(ctx.collabGuest, verb, rest, ctx);
+					return;
+				}
+				ctx.showStatus("Not in a collab session");
 				return;
 			}
 			if (ctx.collabGuest) {

@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Bumped `COLLAB_PROTO` to `4` for guest management and inter-guest communication. Hosts still accept proto-3 guests (served the legacy subset: no `self`/`guests`/`permissionsSet` in `welcome`, never sent guest frames), and guests ignore unknown frame types, so mixed versions interoperate.
+
+### Added
+
+- Added persistent guest identity and capability contracts: `GuestIdentity`, `GuestRole`, `GuestStatus`, `GuestCapabilities`, `guestId`/`capabilities` hello fields, and `self`/`guests`/`permissionsSet` in the `welcome` host frame.
+- Added granular guest permission flags (`GUEST_PERMISSIONS`), role defaults (`ROLE_DEFAULT_PERMISSIONS`), the legacy proto-3 surface (`LEGACY_FULL_PERMISSIONS`), and the append-only `PermissionAuditEntry` record.
+- Added guest-management frames (`guest-invite`, `guest-kick`, `guest-role`, `guest-permission`) and host notifications (`guest-joined`, `guest-left`, `guest-role-changed`, `guest-permission-changed`).
+- Added guest-to-guest communication frames: `guest-message` (direct or broadcast chat), `guest-presence`, `guest-cursor`, and the `permission-audit` request/reply pair.
+
 ## [16.3.0] - 2026-07-02
 
 ### Breaking Changes

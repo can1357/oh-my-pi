@@ -182,7 +182,7 @@ describe("collab read-only links", () => {
 		guest.socket.send({ t: "prompt", text: "do something" });
 		const promptReply = await guest.nextFrame();
 		if (promptReply.t !== "error") throw new Error(`expected error, got ${promptReply.t}`);
-		expect(promptReply.message).toContain("read-only");
+		expect(promptReply.message).toContain("PROMPT");
 		expect(prompts).toHaveLength(0);
 
 		guest.socket.send({ t: "abort" });
