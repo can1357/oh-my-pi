@@ -34,7 +34,7 @@ export * from "./main";
 // Run modes for programmatic SDK usage
 export * from "./modes";
 export * from "./modes/components";
-// Theme utilities for custom tools
+// Theme utilities for extensions
 export * from "./modes/theme/theme";
 // SDK for programmatic usage
 export * from "./sdk";
@@ -55,6 +55,8 @@ export * from "./session/session-storage";
 export * from "./session/sql-session-storage";
 export * from "./task/executor";
 export type * from "./task/types";
+// Specialist orchestration policy/telemetry
+export { getSpecialistOrchestration } from "./task/specialist-orchestration-runtime";
 // Tools (detail types and utilities)
 export * from "./tools";
 export * from "./utils/github";
@@ -64,3 +66,6 @@ export {
 	HookInputComponent as ExtensionInputComponent,
 	HookSelectorComponent as ExtensionSelectorComponent,
 };
+
+// Activate specialist delegation on top of the existing task/subagent architecture.
+import "./task/specialist-orchestration-runtime";
