@@ -792,8 +792,10 @@ export class RelayBridge {
 		const touched = new Set<number>();
 		for (const [sessionId, ref] of conn.sessions) {
 			touched.add(ref.tabId);
-			if (ref.kind === "page")
+			if (ref.kind === "page") {
 				this.#forgetSessionSubscriptions(ref.tabId, [sessionId]);
+				this.#forgetSessionPreloadScripts(ref.tabId, [sessionId]);
+			}
 		}
 		conn.sessions.clear();
 		// Tabs this client claimed leave the omp group unless another claimant

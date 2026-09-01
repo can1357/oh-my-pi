@@ -3477,6 +3477,60 @@ describe("RelayBridge tab grouping", () => {
 		).toHaveLength(1);
 	});
 
+	it("removes preload scripts when their connection closes", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const owner = new FakeCdpSocket();
+		const ownerConn = bridge.cdpConnected(owner);
+		const ownerSession = await attachPage(bridge, ext, owner, ownerConn, 1);
+		const holder = new FakeCdpSocket();
+		const holderConn = bridge.cdpConnected(holder);
+		await attachPage(bridge, ext, holder, holderConn, 1);
+
+		const addId = ++msgSeq;
+		bridge.cdpMessage(
+			ownerConn,
+			JSON.stringify({
+				id: addId,
+				sessionId: ownerSession,
+				method: "Page.addScriptToEvaluateOnNewDocument",
+				params: { source: "window.__ownerScript = true;" },
+			}),
+		);
+		await waitFor(
+			() =>
+				ext.rpcs("send").some(
+					(rpc) => rpc.id === ext.rpcs("send")[0]?.id && rpc.method === "Page.addScriptToEvaluateOnNewDocument",
+				),
+			"preload-script install",
+		);
+		ack(bridge, ext, "send", { identifier: "root-script-before-close" });
+		await flush();
+		expect(
+			owner.messages.filter(
+				(message) => message.id === addId && "result" in message,
+			),
+		).toHaveLength(1);
+
+		bridge.cdpClosed(ownerConn);
+		await waitFor(
+			() =>
+				ext
+					.rpcs("send")
+					.some(
+						(rpc) =>
+							rpc.method === "Page.removeScriptToEvaluateOnNewDocument" &&
+							(rpc.params as { identifier?: string } | undefined)?.identifier ===
+								"root-script-before-close",
+					),
+			"preload-script cleanup after connection close",
+		);
+		ack(bridge, ext, "send");
+		await flush();
+		expect(ext.rpcs("detach")).toHaveLength(0);
+	});
+
 	it("clears replayed timezone overrides when their owner disconnects during recovery", async () => {
 		const bridge = new RelayBridge({});
 		const ext = new FakeExtSocket();
