@@ -43,6 +43,15 @@ describe("AuthStorage.getCredentialOrigin", () => {
 		});
 	});
 
+	test("reports fallback origin when a resolver is the only auth source", async () => {
+		await withEnv(SUPPRESS_ENV, () => {
+			if (!auth) throw new Error("test setup failed");
+			auth.setFallbackResolver(provider => (provider === "custom" ? "command-key" : undefined));
+			expect(auth.getCredentialOrigin("custom")).toEqual({ kind: "fallback" });
+			expect(auth.describeCredentialSource("custom")).toBe("fallback resolver");
+		});
+	});
+
 	test("env origin carries the backing variable name for single-var providers", async () => {
 		await withEnv({ ...SUPPRESS_ENV, COPILOT_GITHUB_TOKEN: "ghp_fake" }, () => {
 			expect(auth?.getCredentialOrigin("github-copilot")).toEqual({
@@ -86,6 +95,7 @@ describe("AuthStorage.getCredentialOrigin", () => {
 			await auth?.set("openai", [{ type: "api_key", key: "sk-stored" }]);
 			expect(auth?.getCredentialOrigin("openai")).toEqual({ kind: "env", envVar: "OPENAI_API_KEY" });
 			expect(await auth?.getApiKey("openai")).toBe("sk-env");
+			expect(auth?.describeCredentialSource("openai")).toBe("env (over local store)");
 		});
 	});
 

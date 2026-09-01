@@ -2872,6 +2872,7 @@ export class AuthStorage {
 		}
 		if (this.#hasDedicatedEnvAuth(provider)) return { kind: "env", envVar: getEnvApiKeyName(provider) };
 		if (stored.some(credential => credential.type === "api_key")) return { kind: "api_key" };
+		if (this.#fallbackResolver?.(provider) !== undefined) return { kind: "fallback" };
 		return undefined;
 	}
 
@@ -5679,6 +5680,9 @@ export class AuthStorage {
 				const getApiKey = builtInProvider?.getApiKey ?? customProvider?.getApiKey;
 				return getApiKey ? getApiKey(oauthSelection.credential) : oauthSelection.credential.access;
 			}
+			// A preferred expired OAuth login must force callers onto getApiKey(),
+			// which refreshes it before considering older API-key/env fallbacks.
+			if (!preferLoginApiKey) return undefined;
 		}
 
 		if (!preferLoginApiKey) {
@@ -6999,6 +7003,8 @@ export class AuthStorage {
 			const fallbackLoginApiKeySource = loginApiKeySource();
 			if (fallbackLoginApiKeySource) return fallbackLoginApiKeySource;
 		}
+		const envKey = getEnvApiKey(provider);
+		if (envKey) return `env (over ${baseLabel})`;
 		const apiKeySource = describeStored(
 			"api_key",
 			credential => credential.type !== "api_key" || credential.source !== "login",

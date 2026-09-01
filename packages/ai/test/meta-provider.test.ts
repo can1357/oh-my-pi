@@ -112,6 +112,48 @@ describe("Meta login", () => {
 		}
 	});
 
+	test("refreshes a preferred expired Muse login before exposing an older PAYG key", async () => {
+		let refreshCalls = 0;
+		const storage = new AuthStorage(new SqliteAuthCredentialStore(new Database(":memory:")), {
+			usageProviderResolver: () => undefined,
+			refreshOAuthCredential: (_provider, _credentialId, credential) => {
+				refreshCalls++;
+				return Promise.resolve({
+					...credential,
+					access: "fresh-meta-account-access",
+					expires: Date.now() + 3_600_000,
+					apiKey: "LLM|fresh-subscription-key",
+				});
+			},
+		});
+		try {
+			await storage.reload();
+			const now = Date.now();
+			await storage.set("meta", [
+				{
+					type: "api_key",
+					key: "LLM|older-payg-key",
+					source: "login",
+					authorizedAt: now - 2_000,
+				},
+				{
+					type: "oauth",
+					access: "expired-meta-account-access",
+					refresh: "meta-account-refresh",
+					expires: now - 1,
+					apiKey: "LLM|expired-subscription-key",
+					authorizedAt: now - 1_000,
+				},
+			]);
+
+			expect(await storage.peekApiKey("meta")).toBeUndefined();
+			expect(await storage.getApiKey("meta", "discovery")).toBe("LLM|fresh-subscription-key");
+			expect(refreshCalls).toBe(1);
+		} finally {
+			storage.close();
+		}
+	});
+
 	test("persists both Meta login sources and prefers the latest login", async () => {
 		using tempDir = TempDir.createSync("@omp-meta-login-");
 		const dbPath = tempDir.join("auth.db");
