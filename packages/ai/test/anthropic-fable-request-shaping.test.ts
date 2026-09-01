@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { streamAnthropic } from "@oh-my-pi/pi-ai/providers/anthropic";
-import type { Context, Model, ModelSpec, ProviderSessionState } from "@oh-my-pi/pi-ai/types";
+import type { AssistantMessage, Context, Model, ModelSpec, ProviderSessionState } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 
@@ -52,6 +52,26 @@ const CONTEXT: Context = {
 	messages: [{ role: "user", content: "weather in paris?", timestamp: Date.now() }],
 };
 
+function assistant(text: string, timestamp: number): AssistantMessage {
+	return {
+		role: "assistant",
+		content: [{ type: "text", text }],
+		api: "anthropic-messages",
+		provider: "anthropic",
+		model: "claude-fable-5-1",
+		usage: {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		},
+		stopReason: "stop",
+		timestamp,
+	};
+}
+
 function abortedSignal(): AbortSignal {
 	const controller = new AbortController();
 	controller.abort();
@@ -68,6 +88,7 @@ type CapturedPayload = {
 	system?: Array<{ cache_control?: { type: "ephemeral"; ttl?: "1h" | "5m" } }>;
 	messages?: Array<{
 		role: string;
+		clear_at?: "next_user_message";
 		content:
 			| string
 			| Array<{
@@ -77,7 +98,7 @@ type CapturedPayload = {
 			  }>;
 		output_config?: { effort?: string };
 	}>;
-	tools?: Array<{ name: string; defer_loading?: boolean }>;
+	tools?: Array<{ name: string; description?: string; defer_loading?: boolean }>;
 	anthropic_beta?: string[];
 };
 
@@ -202,6 +223,116 @@ describe("Anthropic preserved-thinking request shaping", () => {
 
 		expect(payload.tools ?? []).toHaveLength(0);
 		expect(payload.messages?.some(message => message.role === "system")).toBe(false);
+	});
+
+	it("isolates side-request controls from the main conversation", async () => {
+		const model = makeAnthropicModel("claude-fable-5-1");
+		const providerSessionState = new Map<string, ProviderSessionState>();
+		const readTool = { name: "read", description: "Read a file.", parameters: { type: "object", properties: {} } };
+		const grepTool = { name: "grep", description: "Search files.", parameters: { type: "object", properties: {} } };
+		const firstTurn: Context["messages"] = [
+			{ role: "user", content: "start", timestamp: 1 },
+			assistant("ready", 2),
+			{ role: "user", content: "continue", timestamp: 3 },
+		];
+		await capturePayload(
+			model,
+			{ thinkingEnabled: true, providerSessionState, sessionId: "main" },
+			{ systemPrompt: ["Main prompt."], messages: firstTurn, tools: [readTool] },
+		);
+		await capturePayload(
+			model,
+			{ thinkingEnabled: true, providerSessionState, sessionId: "main" },
+			{ systemPrompt: ["Main prompt."], messages: firstTurn, tools: [readTool, grepTool] },
+		);
+		await capturePayload(
+			model,
+			{ thinkingEnabled: true, providerSessionState, sessionId: "main:side:1" },
+			{
+				systemPrompt: ["Summarize this."],
+				messages: [{ role: "user", content: "summary", timestamp: 4 }],
+				tools: [],
+			},
+		);
+		const payload = await capturePayload(
+			model,
+			{ thinkingEnabled: true, providerSessionState, sessionId: "main" },
+			{
+				systemPrompt: ["Main prompt."],
+				messages: [...firstTurn, assistant("done", 4), { role: "user", content: "again", timestamp: 5 }],
+				tools: [readTool, grepTool],
+			},
+		);
+
+		expect(payload.tools?.[1]?.defer_loading).toBe(true);
+		const grepWireName = payload.tools?.[1]?.name;
+		expect(grepWireName).toBeDefined();
+		expect(
+			payload.messages?.some(
+				message =>
+					Array.isArray(message.content) &&
+					message.content.some(block => block.type === "tool_addition" && block.tool?.name === grepWireName),
+			),
+		).toBe(true);
+	});
+
+	it("keeps the first declared description when a live tool description changes", async () => {
+		const model = makeAnthropicModel("claude-fable-5-1");
+		const providerSessionState = new Map<string, ProviderSessionState>();
+		const messages: Context["messages"] = [
+			{ role: "user", content: "start", timestamp: 1 },
+			assistant("ready", 2),
+			{ role: "user", content: "continue", timestamp: 3 },
+		];
+		await capturePayload(
+			model,
+			{ thinkingEnabled: true, providerSessionState },
+			{
+				systemPrompt: ["Stable prompt."],
+				messages,
+				tools: [
+					{ name: "bash", description: "Original guidance.", parameters: { type: "object", properties: {} } },
+				],
+			},
+		);
+		const payload = await capturePayload(
+			model,
+			{ thinkingEnabled: true, providerSessionState },
+			{
+				systemPrompt: ["Stable prompt."],
+				messages: [...messages, assistant("done", 4), { role: "user", content: "again", timestamp: 5 }],
+				tools: [{ name: "bash", description: "Updated guidance.", parameters: { type: "object", properties: {} } }],
+			},
+		);
+
+		expect(payload.tools?.[0]?.description).toBe("Original guidance.");
+	});
+
+	it("never caches a turn-scoped system message", async () => {
+		const payload = await capturePayload(
+			makeAnthropicModel("claude-fable-5-1"),
+			{ thinkingEnabled: true, cacheRetention: "short" },
+			{
+				systemPrompt: ["Stable prompt."],
+				messages: [
+					{ role: "user", content: "hello", timestamp: 1 },
+					{
+						role: "developer",
+						content: "Keep this turn brief.",
+						providerPayload: { type: "anthropicMessage", clearAt: "next_user_message" },
+						timestamp: 2,
+					},
+				],
+			},
+		);
+
+		const scoped = payload.messages?.find(message => message.clear_at === "next_user_message");
+		if (!scoped) throw new Error("expected a turn-scoped system message");
+		if (Array.isArray(scoped.content)) {
+			expect(scoped.content.some(block => block.cache_control !== undefined)).toBe(false);
+		} else {
+			expect(scoped.content).toBe("Keep this turn brief.");
+		}
 	});
 
 	it("changes effort through a system message placed before the latest user turn", async () => {

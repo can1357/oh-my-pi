@@ -38485,7 +38485,7 @@
 				"allowAnthropicHeaderOverrides": false,
 				"supportsEagerToolInputStreaming": true,
 				"supportsLongCacheRetention": true,
-				"supportsMidConversationSystem": true,
+				"supportsMidConversationSystem": false,
 				"supportsTurnScopedSystem": false,
 				"supportsMidConversationToolChanges": false,
 				"supportsPerMessageEffort": false,
@@ -90970,7 +90970,7 @@
 			"cost": {
 				"input": 10,
 				"output": 50,
-				"cacheRead": 1,
+				"cacheRead": 0.25,
 				"cacheWrite": 12.5
 			},
 			"contextWindow": 1000000,
@@ -100083,8 +100083,8 @@
 				"cacheRead": 0.135,
 				"cacheWrite": 0
 			},
-			"contextWindow": 1048576,
-			"maxTokens": 393216,
+			"contextWindow": 1024000,
+			"maxTokens": 384000,
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
@@ -146652,6 +146652,99 @@
 				"class": "anthropic",
 				"family": "fable",
 				"revision": "5.0.0"
+			},
+			"requiresGlyphTokenization": true,
+			"tokenizer": "claude-v5-sonnet",
+			"supportsComputerUse": false,
+			"compat": {
+				"supportsStore": true,
+				"supportsDeveloperRole": false,
+				"supportsMultipleSystemMessages": false,
+				"supportsReasoningEffort": true,
+				"supportsReasoningParams": true,
+				"supportsSamplingParams": true,
+				"supportsPenaltyAndStopParams": true,
+				"reasoningEffortMap": {},
+				"supportsUsageInStreaming": true,
+				"alwaysSendMaxTokens": false,
+				"disableReasoningOnForcedToolChoice": true,
+				"disableReasoningOnToolChoice": false,
+				"supportsToolChoice": true,
+				"supportsForcedToolChoice": true,
+				"supportsNamedToolChoice": true,
+				"maxTokensField": "max_completion_tokens",
+				"requiresToolResultName": false,
+				"requiresAssistantAfterToolResult": false,
+				"requiresThinkingAsText": false,
+				"requiresMistralToolIds": false,
+				"thinkingFormat": "openai",
+				"reasoningDisableMode": "lowest-effort",
+				"omitReasoningEffort": false,
+				"includeEncryptedReasoning": true,
+				"filterReasoningHistory": false,
+				"reasoningContentField": "reasoning_content",
+				"requiresReasoningContentForToolCalls": false,
+				"requiresReasoningContentForAllAssistantTurns": false,
+				"allowsSyntheticReasoningContentForToolCalls": true,
+				"replayReasoningContent": false,
+				"qwenPreserveThinking": false,
+				"qwenTemplateReasoningEffort": false,
+				"requiresAssistantContentForToolCalls": false,
+				"supportsPromptCacheBreakpoints": false,
+				"isOpenRouterHost": false,
+				"wireModelIdMode": "raw",
+				"isVercelGatewayHost": false,
+				"supportsStrictMode": false,
+				"toolStrictMode": "mixed",
+				"stripDeepseekSpecialTokens": false,
+				"streamMarkupHealingPattern": "thinking",
+				"reasoningDeltasMayBeCumulative": false,
+				"emptyLengthFinishIsContextError": false,
+				"usesOpenAIToolCallIdLimit": false,
+				"dropThinkingWhenReasoningEffort": false,
+				"nativeKimiK3Reasoning": false,
+				"zaiReasoningEffortDialect": false,
+				"clampOutputToModelMax": false,
+				"stripImageInput": false,
+				"rejectRootObjectUnion": false,
+				"retryWithoutStrictOnGrammarError": false,
+				"supportsPromptCacheKey": false
+			}
+		},
+		"anthropic/claude-fable-5.1": {
+			"id": "anthropic/claude-fable-5.1",
+			"name": "Claude Fable 5.1",
+			"api": "openai-completions",
+			"provider": "nanogpt",
+			"baseUrl": "https://nano-gpt.com/api/v1",
+			"reasoning": true,
+			"input": [
+				"text",
+				"image"
+			],
+			"cost": {
+				"input": 10,
+				"output": 50,
+				"cacheRead": 0.25,
+				"cacheWrite": 12.5
+			},
+			"contextWindow": 1000000,
+			"maxTokens": 128000,
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"minimal",
+					"low",
+					"medium",
+					"high",
+					"xhigh"
+				],
+				"prefixBinding": true
+			},
+			"identity": {
+				"class": "anthropic",
+				"family": "fable",
+				"revision": "5.1.0"
 			},
 			"requiresGlyphTokenization": true,
 			"tokenizer": "claude-v5-sonnet",
@@ -261700,7 +261793,6 @@
 			},
 			"requiresGlyphTokenization": true,
 			"tokenizer": "claude-v5-sonnet",
-			"supportsComputerUse": false,
 			"compat": {
 				"officialEndpoint": false,
 				"signingEndpoint": false,
@@ -261724,7 +261816,8 @@
 				"escapeBuiltinToolNames": false,
 				"injectClaudeCodeInstruction": true,
 				"stripImageInput": false
-			}
+			},
+			"supportsComputerUse": false
 		},
 		"claude-haiku-4-5": {
 			"id": "claude-haiku-4-5",
@@ -279010,9 +279103,9 @@
 				"text"
 			],
 			"cost": {
-				"input": 0.07322000000000001,
-				"output": 0.14644000000000001,
-				"cacheRead": 0.014644,
+				"input": 0.07168000000000001,
+				"output": 0.14336000000000002,
+				"cacheRead": 0.014336,
 				"cacheWrite": 0
 			},
 			"contextWindow": 1048576,
@@ -279504,13 +279597,13 @@
 				"text"
 			],
 			"cost": {
-				"input": 1.5999999999999999,
-				"output": 3.1999999999999997,
-				"cacheRead": 0.135,
+				"input": 1.0274699999999999,
+				"output": 2.0549399999999998,
+				"cacheRead": 0.0856225,
 				"cacheWrite": 0
 			},
 			"contextWindow": 1048576,
-			"maxTokens": 393216,
+			"maxTokens": 384000,
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
@@ -324729,20 +324822,13 @@
 				"image"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
-				"cacheRead": 0,
-				"cacheWrite": 0
+				"input": 12,
+				"output": 60,
+				"cacheRead": 0.3,
+				"cacheWrite": 15
 			},
 			"contextWindow": 1000000,
 			"maxTokens": 128000,
-			"identity": {
-				"class": "anthropic",
-				"family": "fable",
-				"revision": "5.1.0"
-			},
-			"requiresGlyphTokenization": true,
-			"tokenizer": "claude-v5-sonnet",
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
@@ -324754,6 +324840,14 @@
 				],
 				"prefixBinding": true
 			},
+			"identity": {
+				"class": "anthropic",
+				"family": "fable",
+				"revision": "5.1.0"
+			},
+			"requiresGlyphTokenization": true,
+			"tokenizer": "claude-v5-sonnet",
+			"supportsComputerUse": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -324763,7 +324857,7 @@
 				"supportsSamplingParams": true,
 				"supportsPenaltyAndStopParams": true,
 				"reasoningEffortMap": {},
-				"supportsUsageInStreaming": false,
+				"supportsUsageInStreaming": true,
 				"alwaysSendMaxTokens": false,
 				"disableReasoningOnForcedToolChoice": true,
 				"disableReasoningOnToolChoice": false,
@@ -324807,10 +324901,6 @@
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
 				"supportsPromptCacheKey": false
-			},
-			"supportsComputerUse": false,
-			"compatConfig": {
-				"supportsUsageInStreaming": false
 			}
 		},
 		"claude-opus-4-5": {
