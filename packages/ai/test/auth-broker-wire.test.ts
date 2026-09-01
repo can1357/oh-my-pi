@@ -328,6 +328,37 @@ describe("auth-broker wire surface", () => {
 		expect(uploadedCredential?.authorizedAt).toBe(123);
 	});
 
+	test("fails closed before uploading Meta OAuth to a legacy broker", async () => {
+		const requests: Array<{ method: string; url: string }> = [];
+		const legacyFetch: typeof fetch = Object.assign(
+			(input: string | URL | Request, init?: RequestInit) => {
+				requests.push({ method: init?.method ?? "GET", url: String(input) });
+				return Promise.resolve(Response.json({ error: "not found" }, { status: 404 }));
+			},
+			{ preconnect: fetch.preconnect },
+		);
+		const client = new AuthBrokerClient({
+			url: "http://legacy-broker.invalid",
+			token,
+			fetchImpl: legacyFetch,
+			maxRetries: 0,
+		});
+
+		await expect(
+			client.uploadCredential("meta", {
+				type: "oauth",
+				access: "meta-access",
+				refresh: "meta-refresh",
+				expires: Date.now() + 3_600_000,
+				apiKey: "LLM|subscription-key",
+				accountId: "meta-account",
+			}),
+		).rejects.toThrow("upgrade the broker");
+		expect(requests).toEqual([
+			{ method: "GET", url: "http://legacy-broker.invalid/v1/capabilities/meta-oauth-transport-key" },
+		]);
+	});
+
 	test("rejects missing or empty Meta OAuth transport keys before mutating broker state", async () => {
 		await storage!.set("meta", {
 			type: "api_key",

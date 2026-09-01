@@ -843,6 +843,8 @@ type OAuthResolutionResult = { apiKey: string; credential: OAuthCredential; cred
  */
 export interface OAuthAccess {
 	accessToken: string;
+	/** Provider-specific model API key minted alongside the OAuth account token. */
+	apiKey?: string;
 	credentialId?: number;
 	accountId?: string;
 	email?: string;
@@ -5802,6 +5804,7 @@ export class AuthStorage {
 		const { credential, credentialId } = resolved;
 		return {
 			accessToken: credential.access,
+			...(credential.apiKey !== undefined ? { apiKey: credential.apiKey } : {}),
 			credentialId,
 			accountId: credential.accountId,
 			email: credential.email,
@@ -5854,6 +5857,7 @@ export class AuthStorage {
 				ok: true,
 				credentialId: selection.credentialId,
 				accessToken: credential.access,
+				...(credential.apiKey !== undefined ? { apiKey: credential.apiKey } : {}),
 				accountId: credential.accountId,
 				email: credential.email,
 				projectId: credential.projectId,

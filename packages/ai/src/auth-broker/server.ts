@@ -729,6 +729,10 @@ export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServer
 					logger.info("auth-broker request unauthorized", { method: req.method, path: pathname, peer });
 					return json(401, { error: "unauthorized" });
 				}
+				if (req.method === "GET" && pathname === "/v1/capabilities/meta-oauth-transport-key") {
+					const body: HealthzResponse = { ok: true, version };
+					return json(200, body);
+				}
 				if (req.method === "GET" && pathname === "/v1/snapshot/stream") {
 					return serveSnapshotStream(req, opts.storage, refresher, peer, streamKeepaliveMs);
 				}

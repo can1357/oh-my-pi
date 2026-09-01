@@ -186,7 +186,7 @@ type DryBalanceBenchTarget =
 	| {
 			ok: true;
 			account: string;
-			accessToken: string;
+			apiKey: string;
 			credentialId?: number;
 	  }
 	| {
@@ -401,17 +401,19 @@ async function runBenchRequest(
 	streamFn: DryBalanceStreamSimple,
 	now: () => number,
 ): Promise<DryBalanceBenchResult> {
-	const { account, accessToken, credentialId } = target;
+	const { account, apiKey: initialApiKey, credentialId } = target;
 	const startedAt = now();
 	let firstTokenAt: number | undefined;
 	// Re-mint the cached token on a 401: a peer/broker may have rotated it out
 	// from under our snapshot (Anthropic rotates refresh tokens on every use).
 	// The bench measures one account, so the switch step intentionally declines.
 	const apiKey: ApiKeyResolver = async ({ lastChance, error }) => {
-		if (error === undefined) return accessToken;
+		if (error === undefined) return initialApiKey;
 		if (lastChance || credentialId === undefined || !authStorage.forceRefreshCredentialById) return undefined;
 		const refreshed = await authStorage.forceRefreshCredentialById(credentialId);
-		return refreshed.credential.type === "oauth" ? refreshed.credential.access : undefined;
+		return refreshed.credential.type === "oauth"
+			? (refreshed.credential.apiKey ?? refreshed.credential.access)
+			: undefined;
 	};
 	try {
 		const context: Context = {
@@ -490,7 +492,12 @@ async function resolveBenchTargets(
 		seen.add(key);
 		const account = extractAccount(entry);
 		if (entry.ok) {
-			targets.push({ ok: true, account, accessToken: entry.accessToken, credentialId: entry.credentialId });
+			targets.push({
+				ok: true,
+				account,
+				apiKey: entry.apiKey ?? entry.accessToken,
+				credentialId: entry.credentialId,
+			});
 		} else {
 			targets.push({ ok: false, account, error: entry.error });
 		}
