@@ -5,6 +5,9 @@
 ### Added
 
 - Added Ollama Cloud quota and trailing spend reporting to `omp usage` through the new ollama.com usage API (requires an API-key credential; accounts without one keep the previous no-quota stub report). Migrated plans surface the monthly allowance; unmigrated accounts keep their legacy 5-hour and 7-day session quotas.
+### Fixed
+
+- Preserved Anthropic thinking now survives side requests, tool-description drift, turn-scoped reminders, and recoverable prefix mismatches without corrupting the conversation prefix.
 
 ## [18.1.2] - 2026-09-01
 

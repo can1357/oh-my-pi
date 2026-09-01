@@ -1166,6 +1166,7 @@ export class AgentSession {
 			getEnabledToolNames: () => this.getEnabledToolNames(),
 			toolRegistry: () => this.#tools.registry,
 			planModeEnabled: () => this.#planModeState?.enabled === true,
+			prewalkWillHandoff: () => this.#prewalk.willHandoff,
 			consumeLastServedToolChoiceLabel: () => this.#toolChoiceQueue.consumeLastServedLabel(),
 		};
 		this.#todo = new TodoTracker(todoHost);
@@ -6094,10 +6095,10 @@ export class AgentSession {
 				return false;
 			}
 
-			// A pending xd:// delta accompanies the next user-authored prompt,
-			// never an agent-initiated continuation. Reserve its pre-user position,
-			// but consume it only after before_agent_start determines whether the
-			// final provider prompt still carries the base xd:// catalog.
+			// Pending tool-roster and xd:// deltas accompany the next user-authored
+			// prompt, never an agent-initiated continuation. Reserve their pre-user
+			// position, but consume xd:// only after before_agent_start determines
+			// whether the final provider prompt still carries the base catalog.
 			const xdevMountNoticeIndex = messages.length;
 			messages.push(message);
 			// Inject any pending "nextTurn" messages as context alongside the user message
@@ -6197,8 +6198,14 @@ export class AgentSession {
 			const xdevMountNotice = isUserQueuedMessage(message)
 				? this.#tools.takePendingXdevMountNotice(baseXdevCatalogDelivered)
 				: undefined;
-			if (xdevMountNotice) {
-				messages.splice(xdevMountNoticeIndex, 0, xdevMountNotice);
+			const toolRosterNotice = isUserQueuedMessage(message) ? this.#tools.takePendingToolRosterNotice() : undefined;
+			if (xdevMountNotice || toolRosterNotice) {
+				messages.splice(
+					xdevMountNoticeIndex,
+					0,
+					...(xdevMountNotice ? [xdevMountNotice] : []),
+					...(toolRosterNotice ? [toolRosterNotice] : []),
+				);
 			}
 
 			await this.#maintenance.runPrePromptCompactionIfNeeded(messages);
