@@ -229,7 +229,7 @@ describe("auth-broker wire surface", () => {
 		expect(rawUnchanged.headers.get("vary")).toBe(AUTH_BROKER_CAPABILITIES_HEADER);
 	});
 
-	test("negotiates Meta API-key login recency across broker versions", async () => {
+	test("stamps Meta login recency and projects it for legacy clients", async () => {
 		let uploadedCredential: Record<string, unknown> | undefined;
 		const fetchImpl: typeof fetch = Object.assign(
 			async (input: string | URL | Request, init?: RequestInit) => {
@@ -251,12 +251,34 @@ describe("auth-broker wire surface", () => {
 		});
 		const after = Date.now();
 
-		expect(uploadedCredential).toEqual({ type: "api_key", key: "meta-payg-key", source: "login" });
+		expect(uploadedCredential).toEqual({
+			type: "api_key",
+			key: "meta-payg-key",
+			source: "login",
+			authorizedAt: 1,
+		});
 		const currentCredential = uploaded.entries.find(entry => entry.provider === "meta")?.credential;
 		expect(currentCredential?.type).toBe("api_key");
 		if (currentCredential?.type !== "api_key") throw new Error("expected Meta API-key credential");
 		expect(currentCredential.authorizedAt).toBeGreaterThanOrEqual(before);
 		expect(currentCredential.authorizedAt).toBeLessThanOrEqual(after);
+
+		const beforeOAuth = Date.now();
+		const oauthUpload = await client.uploadCredential("meta", {
+			type: "oauth",
+			access: "meta-access",
+			refresh: "meta-refresh",
+			expires: Date.now() + 60_000,
+			accountId: "meta-account",
+			apiKey: "LLM|subscription-key",
+			authorizedAt: Number.MAX_SAFE_INTEGER,
+		});
+		const afterOAuth = Date.now();
+		const currentOAuth = oauthUpload.entries.find(entry => entry.credential.type === "oauth")?.credential;
+		expect(currentOAuth?.type).toBe("oauth");
+		if (currentOAuth?.type !== "oauth") throw new Error("expected Meta OAuth credential");
+		expect(currentOAuth.authorizedAt).toBeGreaterThanOrEqual(beforeOAuth);
+		expect(currentOAuth.authorizedAt).toBeLessThanOrEqual(afterOAuth);
 
 		const legacyClient = new AuthBrokerClient({
 			url: handle!.url,
@@ -265,10 +287,40 @@ describe("auth-broker wire surface", () => {
 		});
 		const legacyResult = await legacyClient.fetchSnapshot();
 		if (legacyResult.status !== 200) throw new Error("expected legacy-client snapshot");
-		const legacyCredential = legacyResult.snapshot.credentials.find(entry => entry.provider === "meta")?.credential;
+		const legacyCredential = legacyResult.snapshot.credentials.find(
+			entry => entry.provider === "meta" && entry.credential.type === "api_key",
+		)?.credential;
 		expect(legacyCredential?.type).toBe("api_key");
 		if (legacyCredential?.type !== "api_key") throw new Error("expected legacy Meta API-key credential");
 		expect(legacyCredential.authorizedAt).toBeUndefined();
+	});
+
+	test("fails closed when a legacy broker cannot store Meta PAYG recency", async () => {
+		let uploadedCredential: Record<string, unknown> | undefined;
+		const legacyFetch: typeof fetch = Object.assign(
+			(_input: string | URL | Request, init?: RequestInit) => {
+				const body = JSON.parse(String(init?.body)) as { credential: Record<string, unknown> };
+				uploadedCredential = body.credential;
+				return Promise.resolve(Response.json({ error: "unexpected authorizedAt" }, { status: 400 }));
+			},
+			{ preconnect: fetch.preconnect },
+		);
+		const client = new AuthBrokerClient({
+			url: "http://legacy-broker.invalid",
+			token,
+			fetchImpl: legacyFetch,
+			maxRetries: 0,
+		});
+
+		await expect(
+			client.uploadCredential("meta", {
+				type: "api_key",
+				key: "meta-payg-key",
+				source: "login",
+				authorizedAt: 123,
+			}),
+		).rejects.toThrow("upgrade the broker before using Meta PAYG login");
+		expect(uploadedCredential?.authorizedAt).toBe(123);
 	});
 
 	test("ignores external SQLite commits outside auth tables", async () => {

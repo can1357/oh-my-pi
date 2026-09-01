@@ -93,6 +93,40 @@ describe("Muse Code OAuth", () => {
 		expect(new Headers(requests[1]!.init?.headers).get("Authorization")).toBe("Bearer new-oauth-access");
 	});
 
+	test("preserves a rotated refresh grant when Muse key minting fails transiently", async () => {
+		let calls = 0;
+		const fetchImpl: FetchImpl = () => {
+			calls++;
+			if (calls === 1) {
+				return Promise.resolve(
+					response({
+						access_token: "rotated-oauth-access",
+						refresh_token: "rotated-refresh",
+						expires_in: 7200,
+					}),
+				);
+			}
+			return Promise.resolve(response({ error: "temporarily_unavailable" }, 503));
+		};
+
+		const refreshed = await refreshMetaMuseToken(
+			{
+				access: "expired-access",
+				refresh: "old-refresh",
+				expires: 0,
+				apiKey: "LLM|still-valid-key",
+				accountId: "meta-account",
+			},
+			fetchImpl,
+		);
+
+		expect(refreshed.access).toBe("rotated-oauth-access");
+		expect(refreshed.refresh).toBe("rotated-refresh");
+		expect(refreshed.apiKey).toBe("LLM|still-valid-key");
+		expect(refreshed.accountId).toBe("meta-account");
+		expect(calls).toBe(2);
+	});
+
 	test("surfaces revoked refresh grants as definitive OAuth failures", async () => {
 		const fetchImpl: FetchImpl = () =>
 			Promise.resolve(

@@ -53,17 +53,6 @@ import {
 
 const CLIENT_CAPABILITIES = `${AUTH_BROKER_CAPABILITY_CODEX_METER_BLOCK_SCOPES},${AUTH_BROKER_CAPABILITY_META_API_KEY_AUTHORIZED_AT}`;
 
-function credentialForUpload(provider: string, credential: AuthCredential): AuthCredential {
-	if (provider !== "meta" || credential.type !== "api_key" || credential.authorizedAt === undefined) {
-		return credential;
-	}
-	return {
-		type: "api_key",
-		key: credential.key,
-		...(credential.source !== undefined ? { source: credential.source } : {}),
-	};
-}
-
 /** Response schema per endpoint, keyed by the name `#request` callers pass. */
 const RESPONSE_SCHEMAS = {
 	clientUsageReportResponseSchema,
@@ -385,12 +374,29 @@ export class AuthBrokerClient {
 		credential: AuthCredential,
 		signal?: AbortSignal,
 	): Promise<CredentialUploadResponse> {
-		const body: CredentialUploadRequest = { provider, credential: credentialForUpload(provider, credential) };
-		return this.#request<CredentialUploadResponse>("POST", "/v1/credential", {
-			body,
-			schema: "credentialUploadResponseSchema",
-			signal,
-		});
+		const body: CredentialUploadRequest = { provider, credential };
+		try {
+			return await this.#request<CredentialUploadResponse>("POST", "/v1/credential", {
+				body,
+				schema: "credentialUploadResponseSchema",
+				signal,
+			});
+		} catch (error) {
+			if (
+				error instanceof AuthBrokerError &&
+				error.status === 400 &&
+				provider === "meta" &&
+				credential.type === "api_key" &&
+				credential.source === "login" &&
+				credential.authorizedAt !== undefined
+			) {
+				throw new AuthBrokerError(
+					"Auth broker does not support Meta API-key login recency; upgrade the broker before using Meta PAYG login",
+					{ status: error.status, body: error.body, cause: error },
+				);
+			}
+			throw error;
+		}
 	}
 
 	async upsertCredentialBlock(

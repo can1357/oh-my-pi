@@ -894,10 +894,12 @@ export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServer
 					if (!parsed.ok) return parsed.response;
 					const { provider, credential } = parsed.data;
 					try {
-						const storedCredential =
-							provider === "meta" && credential.type === "api_key" && credential.source === "login"
-								? { ...credential, authorizedAt: Date.now() }
-								: credential;
+						const isMetaInteractiveLogin =
+							provider === "meta" &&
+							(credential.type === "oauth" || (credential.type === "api_key" && credential.source === "login"));
+						const storedCredential = isMetaInteractiveLogin
+							? { ...credential, authorizedAt: Date.now() }
+							: credential;
 						const entries = opts.storage
 							.upsertCredential(provider, storedCredential)
 							.map(entry =>

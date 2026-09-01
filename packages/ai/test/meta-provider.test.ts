@@ -215,12 +215,16 @@ describe("Meta login", () => {
 			});
 			await storage.reload();
 			expect(await storage.getApiKey("meta", "after-restart")).toBe("LLM|subscription-key");
+			now = Date.parse("2030-01-01T00:00:02.000Z");
+			await login("api-key", "LLM|payg-key");
+			expect(storage.getCredentialOrigin("meta")).toEqual({ kind: "api_key" });
+			expect(await storage.getApiKey("meta", "same-payg-relogin")).toBe("LLM|payg-key");
 			await storage.logout("meta");
 			expect(storage.has("meta")).toBe(false);
 
-			now = Date.parse("2030-01-01T00:00:02.000Z");
-			await login("muse");
 			now = Date.parse("2030-01-01T00:00:03.000Z");
+			await login("muse");
+			now = Date.parse("2030-01-01T00:00:04.000Z");
 			await login("api-key", "LLM|new-payg-key");
 			expect(
 				storage

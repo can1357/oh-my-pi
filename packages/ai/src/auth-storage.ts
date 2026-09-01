@@ -1178,7 +1178,12 @@ function raceCredentialRefreshWithSignal<T>(
 function authCredentialEquals(left: AuthCredential, right: AuthCredential): boolean {
 	if (left.type !== right.type) return false;
 	if (left.type === "api_key") {
-		return right.type === "api_key" && left.key === right.key;
+		return (
+			right.type === "api_key" &&
+			left.key === right.key &&
+			left.source === right.source &&
+			left.authorizedAt === right.authorizedAt
+		);
 	}
 	if (right.type !== "oauth") return false;
 	return (

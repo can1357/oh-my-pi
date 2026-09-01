@@ -330,10 +330,26 @@ export async function refreshMetaMuseToken(
 		});
 	}
 	const grant = parseTokenGrant(payload, refreshToken);
-	const minted = await mintMuseCodeApiKey(grant.accessToken, fetchImpl, signal);
-	return {
-		...credentialsFromGrant(grant, minted),
-		accountId: minted.accountId ?? credentials.accountId,
-		email: minted.email ?? credentials.email,
-	};
+	try {
+		const minted = await mintMuseCodeApiKey(grant.accessToken, fetchImpl, signal);
+		return {
+			...credentialsFromGrant(grant, minted),
+			accountId: minted.accountId ?? credentials.accountId,
+			email: minted.email ?? credentials.email,
+		};
+	} catch (error) {
+		const existingApiKey = credentials.apiKey;
+		const transientNetworkFailure =
+			error instanceof TypeError ||
+			(error instanceof DOMException && (error.name === "TimeoutError" || error.name === "AbortError"));
+		const transient =
+			!signal?.aborted &&
+			(error instanceof AIError.OAuthError ? AIError.isTransientStatus(error.status) : transientNetworkFailure);
+		if (!existingApiKey || !transient) throw error;
+		return credentialsFromGrant(grant, {
+			apiKey: existingApiKey,
+			accountId: credentials.accountId,
+			email: credentials.email,
+		});
+	}
 }
