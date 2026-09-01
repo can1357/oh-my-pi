@@ -1,0 +1,16 @@
+// Provider-wire compat for "yolo-auto"; wire constraints apply to every discovered model.
+
+provider "yolo-auto" {
+	supports-developer-role #false
+	supports-store #false
+	models "deepseek-flash-v4" {
+		disable-reasoning-on-tool-choice #true
+		max-tokens-field "max_completion_tokens"
+		requires-reasoning-content-for-all-assistant-turns #true
+		requires-reasoning-content-for-tool-calls #true
+		supports-reasoning-effort #true
+		thinking-efforts "minimal" "low" "medium" "high" "xhigh" "max"
+		thinking-format "chat-template"
+		thinking-mode "effort"
+	}
+}

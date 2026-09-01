@@ -3,20 +3,22 @@
  *
  * Loads configuration from OpenCode's config directories:
  * - User: ~/.config/opencode/
- * - Project: .opencode/ (cwd) and opencode.json (project root)
+ * - Project: .opencode/ (cwd) and opencode.json/opencode.jsonc (project root)
  *
  * Capabilities:
  * - context-files: AGENTS.md (user-level only at ~/.config/opencode/AGENTS.md)
- * - mcps: From opencode.json "mcp" key
- * - settings: From opencode.json
+ * - mcps: From opencode.json and opencode.jsonc "mcp" keys
+ * - settings: From opencode.json and opencode.jsonc
  * - skills: From skills/ subdirectories
  * - slash-commands: From commands/ subdirectories
  * - extension-modules: From plugins/ subdirectories
  *
  * Priority: 55 (tool-specific provider)
  */
+import * as os from "node:os";
 import * as path from "node:path";
-import { logger, parseFrontmatter, tryParseJson } from "@oh-my-pi/pi-utils";
+import { isRecord, logger, parseFrontmatter } from "@oh-my-pi/pi-utils";
+import { JSONC } from "bun";
 import { registerProvider } from "../capability";
 import { type ContextFile, contextFileCapability } from "../capability/context-file";
 import { type ExtensionModule, extensionModuleCapability } from "../capability/extension-module";
@@ -24,7 +26,7 @@ import { readFile } from "../capability/fs";
 import { type MCPServer, mcpCapability } from "../capability/mcp";
 import { type Settings, settingsCapability } from "../capability/settings";
 import { type Skill, skillCapability } from "../capability/skill";
-import { type SlashCommand, slashCommandCapability } from "../capability/slash-command";
+import { type SlashCommand, slashCommandCapability, slashCommandFrontmatterDisplay } from "../capability/slash-command";
 import type { LoadContext, LoadResult, SourceMeta } from "../capability/types";
 import { settings } from "../config/settings";
 
@@ -32,7 +34,6 @@ import {
 	buildExtensionModuleItems,
 	createSourceMeta,
 	discoverExtensionModulePaths,
-	expandEnvVarsDeep,
 	getProjectPath,
 	getUserPath,
 	loadFilesFromDir,
@@ -42,21 +43,117 @@ import {
 const PROVIDER_ID = "opencode";
 const DISPLAY_NAME = "OpenCode";
 const PRIORITY = 55;
+const CONFIG_FILENAMES = ["opencode.json", "opencode.jsonc"] as const;
+
+interface OpenCodeConfigSource {
+	path: string;
+	level: "user" | "project";
+}
 
 // =============================================================================
 // JSON Config Loading
 // =============================================================================
 
-async function loadJsonConfig(configPath: string): Promise<Record<string, unknown> | null> {
+async function loadJsonConfig(
+	configPath: string,
+	onInvalid: (configPath: string) => void,
+): Promise<Record<string, unknown> | null> {
 	const content = await readFile(configPath);
 	if (!content) return null;
 
-	const parsed = tryParseJson<Record<string, unknown>>(content);
-	if (!parsed) {
-		logger.warn("Failed to parse OpenCode JSON config", { path: configPath });
+	let parsed: unknown;
+	try {
+		parsed = JSONC.parse(await substituteConfigVars(content, configPath));
+	} catch {
+		onInvalid(configPath);
+		return null;
+	}
+	if (!isRecord(parsed)) {
+		onInvalid(configPath);
 		return null;
 	}
 	return parsed;
+}
+
+/**
+ * Apply OpenCode's config variable substitution to raw config text.
+ *
+ * OpenCode expands `{env:VAR}` (the env value, or an empty string when unset)
+ * and `{file:path}` (file contents, trimmed and JSON-escaped) at load time,
+ * before the JSON is parsed — see opencode `packages/opencode/src/config/variable.ts`.
+ * OMP loads the same config files, so it MUST honor the same syntax; the generic
+ * `${VAR}` expansion used elsewhere never matches, leaving a header like
+ * `Bearer {env:MCP_KEY}` to reach the MCP server verbatim and 401 (#8778).
+ *
+ * `{file:path}` resolves relative to the config file's directory, or from a `~`/
+ * absolute path. A token on a `//` comment line is left untouched, matching
+ * OpenCode. A missing file expands to an empty string (OpenCode's `missing:
+ * "empty"` mode) rather than aborting discovery.
+ */
+async function substituteConfigVars(text: string, configPath: string): Promise<string> {
+	const envExpanded = text.replace(/\{env:([^}]+)\}/g, (_, name: string) => Bun.env[name] ?? "");
+
+	const fileMatches = [...envExpanded.matchAll(/\{file:[^}]+\}/g)];
+	if (fileMatches.length === 0) return envExpanded;
+
+	const configDir = path.dirname(configPath);
+	let out = "";
+	let cursor = 0;
+	for (const match of fileMatches) {
+		const token = match[0];
+		const index = match.index ?? 0;
+		out += envExpanded.slice(cursor, index);
+		cursor = index + token.length;
+
+		// A `{file:...}` sitting on a JSONC comment line is not a real reference.
+		const lineStart = envExpanded.lastIndexOf("\n", index - 1) + 1;
+		if (envExpanded.slice(lineStart, index).trimStart().startsWith("//")) {
+			out += token;
+			continue;
+		}
+
+		let filePath = token.slice("{file:".length, -1);
+		if (filePath.startsWith("~/")) filePath = path.join(os.homedir(), filePath.slice(2));
+		const resolved = path.isAbsolute(filePath) ? filePath : path.resolve(configDir, filePath);
+
+		const fileContent = await readFile(resolved);
+		if (fileContent === null) {
+			logger.warn("OpenCode config references a missing file", { configPath, path: resolved });
+			continue;
+		}
+		// JSON-escape so multi-line/quoted contents stay valid inside the string literal.
+		out += JSON.stringify(fileContent.trim()).slice(1, -1);
+	}
+	out += envExpanded.slice(cursor);
+	return out;
+}
+
+/**
+ * OpenCode config sources in ascending effective precedence (lowest first):
+ * user `opencode.json` → user `opencode.jsonc` → project-root
+ * `opencode.json` → project-root `opencode.jsonc` → project `.opencode/opencode.json`
+ * → project `.opencode/opencode.jsonc`. This matches how OpenCode merges configs:
+ * project overrides user, `.opencode` overrides project-root config, and within
+ * a directory `opencode.jsonc` overrides `opencode.json`.
+ *
+ * Both consumers apply this order low-to-high: settings deep-merge in item
+ * order (last wins) and `loadMCPServers` deep-merges each server across layers
+ * (later overrides earlier), so higher-precedence sources win in both.
+ */
+function getConfigSources(ctx: LoadContext): OpenCodeConfigSource[] {
+	const sources: OpenCodeConfigSource[] = [];
+	for (const filename of CONFIG_FILENAMES) {
+		const configPath = getUserPath(ctx, "opencode", filename);
+		if (configPath) sources.push({ path: configPath, level: "user" });
+	}
+	for (const filename of CONFIG_FILENAMES) {
+		sources.push({ path: path.join(ctx.cwd, filename), level: "project" });
+	}
+	for (const filename of CONFIG_FILENAMES) {
+		const configPath = getProjectPath(ctx, "opencode", filename);
+		if (configPath) sources.push({ path: configPath, level: "project" });
+	}
+	return sources;
 }
 
 // =============================================================================
@@ -85,10 +182,10 @@ async function loadContextFiles(ctx: LoadContext): Promise<LoadResult<ContextFil
 }
 
 // =============================================================================
-// MCP Servers (opencode.json → mcp)
+// MCP Servers (opencode.json/opencode.jsonc → mcp)
 // =============================================================================
 
-/** OpenCode MCP server config (from opencode.json "mcp" key) */
+/** OpenCode MCP server config (from the "mcp" key) */
 interface OpenCodeMCPConfig {
 	type?: "local" | "remote";
 	command?: string | string[];
@@ -99,6 +196,13 @@ interface OpenCodeMCPConfig {
 	headers?: Record<string, string>;
 	enabled?: boolean;
 	timeout?: number;
+	oauth?: {
+		clientId?: string;
+		clientSecret?: string;
+		scope?: string;
+		callbackPort?: number;
+		redirectUri?: string;
+	};
 }
 
 function stringArray(value: unknown): string[] | undefined {
@@ -118,6 +222,19 @@ function stringRecord(value: unknown): Record<string, string> | undefined {
 		record[key] = item;
 	}
 	return record;
+}
+
+function normalizeOAuth(value: unknown): MCPServer["oauth"] | undefined {
+	if (!isRecord(value)) return undefined;
+
+	const oauth = {
+		clientId: typeof value.clientId === "string" ? value.clientId : undefined,
+		clientSecret: typeof value.clientSecret === "string" ? value.clientSecret : undefined,
+		scope: typeof value.scope === "string" ? value.scope : undefined,
+		callbackPort: typeof value.callbackPort === "number" ? value.callbackPort : undefined,
+		redirectUri: typeof value.redirectUri === "string" ? value.redirectUri : undefined,
+	};
+	return Object.values(oauth).some(item => item !== undefined) ? oauth : undefined;
 }
 
 function normalizeCommand(
@@ -141,84 +258,85 @@ function normalizeCommand(
 }
 
 async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> {
-	const items: MCPServer[] = [];
 	const warnings: string[] = [];
 
-	// User-level: ~/.config/opencode/opencode.json
-	const userConfigPath = getUserPath(ctx, "opencode", "opencode.json");
-	if (userConfigPath) {
-		const config = await loadJsonConfig(userConfigPath);
-		if (config) {
-			const result = extractMCPServers(config, userConfigPath, "user");
-			items.push(...result.items);
-			if (result.warnings) warnings.push(...result.warnings);
+	// Deep-merge each server across config layers in ascending precedence, the
+	// way OpenCode itself merges configs, so a partial higher-precedence override
+	// (e.g. project opencode.jsonc setting only mcp.<name>.timeout) inherits the
+	// command/url from lower-precedence layers instead of shadowing the complete
+	// definition and being rejected by mcpCapability.validate.
+	const mergedByName = new Map<string, Record<string, unknown>>();
+	const sourceByName = new Map<string, OpenCodeConfigSource>();
+
+	for (const source of getConfigSources(ctx)) {
+		const config = await loadJsonConfig(source.path, configPath => {
+			logger.warn("Failed to parse OpenCode config", { path: configPath });
+		});
+		if (!config || !isRecord(config.mcp)) continue;
+
+		for (const name in config.mcp) {
+			const raw = config.mcp[name];
+			if (!isRecord(raw)) {
+				warnings.push(`Invalid MCP config for "${name}" in ${source.path}`);
+				continue;
+			}
+			const previous = mergedByName.get(name);
+			mergedByName.set(name, previous ? mergeConfigRecords(previous, raw) : raw);
+			sourceByName.set(name, source);
 		}
 	}
 
-	// Project-level: opencode.json in project root
-	const projectConfigPath = path.join(ctx.cwd, "opencode.json");
-	const projectConfig = await loadJsonConfig(projectConfigPath);
-	if (projectConfig) {
-		const result = extractMCPServers(projectConfig, projectConfigPath, "project");
-		items.push(...result.items);
-		if (result.warnings) warnings.push(...result.warnings);
+	const items: MCPServer[] = [];
+	for (const [name, config] of mergedByName) {
+		const serverConfig = config as OpenCodeMCPConfig;
+		const source = sourceByName.get(name)!;
+		items.push(buildMCPServer(name, serverConfig, source));
 	}
 
 	return { items, warnings };
 }
 
-function extractMCPServers(
-	config: Record<string, unknown>,
-	configPath: string,
-	level: "user" | "project",
-): LoadResult<MCPServer> {
-	const items: MCPServer[] = [];
-	const warnings: string[] = [];
+/** Deep-merge two OpenCode config records; `override` wins, nested records recurse. */
+function mergeConfigRecords(base: Record<string, unknown>, override: Record<string, unknown>): Record<string, unknown> {
+	const result: Record<string, unknown> = { ...base };
+	for (const key in override) {
+		const value = override[key];
+		const existing = result[key];
+		result[key] = isRecord(existing) && isRecord(value) ? mergeConfigRecords(existing, value) : value;
+	}
+	return result;
+}
 
-	if (!config.mcp || typeof config.mcp !== "object") {
-		return { items, warnings };
+/** Translate one merged OpenCode MCP entry into the canonical MCPServer shape. */
+function buildMCPServer(name: string, serverConfig: OpenCodeMCPConfig, source: OpenCodeConfigSource): MCPServer {
+	// Determine transport from OpenCode's "type" field
+	let transport: "stdio" | "sse" | "http" | undefined;
+	if (serverConfig.type === "local") {
+		transport = "stdio";
+	} else if (serverConfig.type === "remote") {
+		transport = "http";
+	} else if (serverConfig.url) {
+		transport = "http";
+	} else if (serverConfig.command) {
+		transport = "stdio";
 	}
 
-	const servers = expandEnvVarsDeep(config.mcp as Record<string, unknown>);
+	const command = normalizeCommand(serverConfig.command, serverConfig.args);
+	const env = stringRecord(serverConfig.environment) ?? stringRecord(serverConfig.env);
 
-	for (const [name, raw] of Object.entries(servers)) {
-		if (!raw || typeof raw !== "object") {
-			warnings.push(`Invalid MCP config for "${name}" in ${configPath}`);
-			continue;
-		}
-
-		const serverConfig = raw as OpenCodeMCPConfig;
-
-		// Determine transport from OpenCode's "type" field
-		let transport: "stdio" | "sse" | "http" | undefined;
-		if (serverConfig.type === "local") {
-			transport = "stdio";
-		} else if (serverConfig.type === "remote") {
-			transport = "http";
-		} else if (serverConfig.url) {
-			transport = "http";
-		} else if (serverConfig.command) {
-			transport = "stdio";
-		}
-
-		const command = normalizeCommand(serverConfig.command, serverConfig.args);
-		const env = stringRecord(serverConfig.environment) ?? stringRecord(serverConfig.env);
-
-		items.push({
-			name,
-			command: command.command,
-			args: command.args,
-			env,
-			url: typeof serverConfig.url === "string" ? serverConfig.url : undefined,
-			headers: serverConfig.headers && typeof serverConfig.headers === "object" ? serverConfig.headers : undefined,
-			enabled: serverConfig.enabled,
-			timeout: typeof serverConfig.timeout === "number" ? serverConfig.timeout : undefined,
-			transport,
-			_source: createSourceMeta(PROVIDER_ID, configPath, level),
-		});
-	}
-
-	return { items, warnings };
+	return {
+		name,
+		command: command.command,
+		args: command.args,
+		env,
+		url: typeof serverConfig.url === "string" ? serverConfig.url : undefined,
+		headers: serverConfig.headers && typeof serverConfig.headers === "object" ? serverConfig.headers : undefined,
+		enabled: serverConfig.enabled,
+		timeout: typeof serverConfig.timeout === "number" ? serverConfig.timeout : undefined,
+		oauth: normalizeOAuth(serverConfig.oauth),
+		transport,
+		_source: createSourceMeta(PROVIDER_ID, source.path, source.level),
+	};
 }
 
 // =============================================================================
@@ -309,6 +427,7 @@ async function loadSlashCommands(ctx: LoadContext): Promise<LoadResult<SlashComm
 				name: String(commandName),
 				path: filePath,
 				content: body,
+				...slashCommandFrontmatterDisplay(frontmatter),
 				level,
 				_source: source,
 			};
@@ -342,47 +461,25 @@ async function loadSlashCommands(ctx: LoadContext): Promise<LoadResult<SlashComm
 }
 
 // =============================================================================
-// Settings (opencode.json)
+// Settings (opencode.json/opencode.jsonc)
 // =============================================================================
 
 async function loadSettings(ctx: LoadContext): Promise<LoadResult<Settings>> {
 	const items: Settings[] = [];
 	const warnings: string[] = [];
 
-	// User-level: ~/.config/opencode/opencode.json
-	const userConfigPath = getUserPath(ctx, "opencode", "opencode.json");
-	if (userConfigPath) {
-		const content = await readFile(userConfigPath);
-		if (content) {
-			const parsed = tryParseJson<Record<string, unknown>>(content);
-			if (parsed) {
-				items.push({
-					path: userConfigPath,
-					data: parsed,
-					level: "user",
-					_source: createSourceMeta(PROVIDER_ID, userConfigPath, "user"),
-				});
-			} else {
-				warnings.push(`Invalid JSON in ${userConfigPath}`);
-			}
-		}
-	}
+	for (const source of getConfigSources(ctx)) {
+		const parsed = await loadJsonConfig(source.path, configPath => {
+			warnings.push(`Invalid JSON in ${configPath}`);
+		});
+		if (!parsed) continue;
 
-	// Project-level: opencode.json in project root
-	const projectConfigPath = path.join(ctx.cwd, "opencode.json");
-	const content = await readFile(projectConfigPath);
-	if (content) {
-		const parsed = tryParseJson<Record<string, unknown>>(content);
-		if (parsed) {
-			items.push({
-				path: projectConfigPath,
-				data: parsed,
-				level: "project",
-				_source: createSourceMeta(PROVIDER_ID, projectConfigPath, "project"),
-			});
-		} else {
-			warnings.push(`Invalid JSON in ${projectConfigPath}`);
-		}
+		items.push({
+			path: source.path,
+			data: parsed,
+			level: source.level,
+			_source: createSourceMeta(PROVIDER_ID, source.path, source.level),
+		});
 	}
 
 	return { items, warnings };
@@ -403,7 +500,7 @@ registerProvider(contextFileCapability.id, {
 registerProvider(mcpCapability.id, {
 	id: PROVIDER_ID,
 	displayName: DISPLAY_NAME,
-	description: "Load MCP servers from opencode.json mcp key",
+	description: "Load MCP servers from OpenCode config files",
 	priority: PRIORITY,
 	load: loadMCPServers,
 });
@@ -435,7 +532,7 @@ registerProvider(slashCommandCapability.id, {
 registerProvider(settingsCapability.id, {
 	id: PROVIDER_ID,
 	displayName: DISPLAY_NAME,
-	description: "Load settings from opencode.json",
+	description: "Load settings from OpenCode config files",
 	priority: PRIORITY,
 	load: loadSettings,
 });

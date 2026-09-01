@@ -3,8 +3,8 @@
  */
 
 import type { ToolResultMessage } from "@oh-my-pi/pi-ai";
+import type { Tokenizer } from "../tokenizer";
 import type { AgentMessage, AgentToolCall } from "../types";
-import { estimateTokens } from "./compaction";
 import type { SessionEntry, SessionMessageEntry } from "./entries";
 import { invalidateMessageCache } from "./message-cache";
 import {
@@ -140,13 +140,13 @@ function estimatePrunedSavings(tokens: number, notice: string): number {
  * (cacheWrite premium) if that entry is mutated in place. Used to keep prune
  * mutations inside the cheap-to-recache tail.
  */
-function computeMessageSuffixTokens(entries: readonly SessionEntry[]): number[] {
+function computeMessageSuffixTokens(entries: readonly SessionEntry[], tokenizer: Tokenizer): number[] {
 	const suffix = new Array<number>(entries.length);
 	let accumulated = 0;
 	for (let i = entries.length - 1; i >= 0; i--) {
 		suffix[i] = accumulated;
 		const entry = entries[i];
-		if (entry.type === "message") accumulated += estimateTokens(entry.message as AgentMessage);
+		if (entry.type === "message") accumulated += tokenizer.countMessage(entry.message as AgentMessage);
 	}
 	return suffix;
 }
@@ -181,6 +181,7 @@ interface SupersedeCandidate {
  */
 function collectSupersededResults(
 	entries: readonly SessionEntry[],
+	tokenizer: Tokenizer,
 	toolCallsById: ReadonlyMap<string, AgentToolCall>,
 	supersedeKey: SupersedeKeyFn,
 	protectedTools: readonly ProtectedToolMatcher[],
@@ -204,7 +205,7 @@ function collectSupersededResults(
 			entry: entry as SessionMessageEntry,
 			message,
 			index: i,
-			tokens: estimateTokens(message as AgentMessage),
+			tokens: tokenizer.countMessage(message as AgentMessage),
 			notice: SUPERSEDED_NOTICE,
 		});
 	}
@@ -219,6 +220,7 @@ function collectSupersededResults(
  */
 function collectUselessResults(
 	entries: readonly SessionEntry[],
+	tokenizer: Tokenizer,
 	toolCallsById: ReadonlyMap<string, AgentToolCall>,
 	protectedTools: readonly ProtectedToolMatcher[],
 	exclude: ReadonlySet<ToolResultMessage>,
@@ -230,7 +232,7 @@ function collectUselessResults(
 		if (message?.useless !== true || message.prunedAt !== undefined || message.isError === true) continue;
 		if (exclude.has(message)) continue;
 		if (isProtectedToolResult(message, toolCallsById.get(message.toolCallId), protectedTools)) continue;
-		const tokens = estimateTokens(message as AgentMessage);
+		const tokens = tokenizer.countMessage(message as AgentMessage);
 		if (estimatePrunedSavings(tokens, USELESS_NOTICE) <= 0) continue;
 		candidates.push({ entry: entry as SessionMessageEntry, message, index: i, tokens, notice: USELESS_NOTICE });
 	}
@@ -246,14 +248,18 @@ function collectUselessResults(
  * the provider cache is cold anyway (then all still-sent candidates flush).
  * Never mutates entries before `keepBoundaryId` (summarized away — not sent).
  */
-export function pruneSupersededToolResults(entries: SessionEntry[], config: SupersedePruneConfig): PruneResult {
+export function pruneSupersededToolResults(
+	entries: SessionEntry[],
+	tokenizer: Tokenizer,
+	config: SupersedePruneConfig,
+): PruneResult {
 	const toolCallsById = collectToolCallsById(entries);
 	const candidates = config.supersedeKey
-		? collectSupersededResults(entries, toolCallsById, config.supersedeKey, config.protectedTools)
+		? collectSupersededResults(entries, tokenizer, toolCallsById, config.supersedeKey, config.protectedTools)
 		: [];
 	if (config.pruneUseless) {
 		const exclude = new Set(candidates.map(candidate => candidate.message));
-		candidates.push(...collectUselessResults(entries, toolCallsById, config.protectedTools, exclude));
+		candidates.push(...collectUselessResults(entries, tokenizer, toolCallsById, config.protectedTools, exclude));
 		candidates.sort((a, b) => a.index - b.index);
 	}
 	if (candidates.length === 0) return { prunedCount: 0, tokensSaved: 0 };
@@ -284,7 +290,7 @@ export function pruneSupersededToolResults(entries: SessionEntry[], config: Supe
 		// Mutating a candidate re-writes its suffix in the warm cache, so prune only
 		// when that suffix is small (cheap-to-recache tail) and the candidate sits
 		// at/after the compaction boundary.
-		const suffixTokens = computeMessageSuffixTokens(entries);
+		const suffixTokens = computeMessageSuffixTokens(entries, tokenizer);
 		toPrune = candidates.filter(
 			candidate => candidate.index >= boundaryIndex && suffixTokens[candidate.index] <= suffixTokenLimit,
 		);
@@ -302,7 +308,11 @@ export function pruneSupersededToolResults(entries: SessionEntry[], config: Supe
 	return { prunedCount: toPrune.length, tokensSaved };
 }
 
-export function pruneToolOutputs(entries: SessionEntry[], config: PruneConfig = DEFAULT_PRUNE_CONFIG): PruneResult {
+export function pruneToolOutputs(
+	entries: SessionEntry[],
+	tokenizer: Tokenizer,
+	config: PruneConfig = DEFAULT_PRUNE_CONFIG,
+): PruneResult {
 	let accumulatedTokens = 0;
 	let tokensSaved = 0;
 	let prunedCount = 0;
@@ -311,7 +321,7 @@ export function pruneToolOutputs(entries: SessionEntry[], config: PruneConfig = 
 	const toolCallsById = collectToolCallsById(entries);
 	const supersededMessages = config.supersedeKey
 		? new Set(
-				collectSupersededResults(entries, toolCallsById, config.supersedeKey, config.protectedTools).map(
+				collectSupersededResults(entries, tokenizer, toolCallsById, config.supersedeKey, config.protectedTools).map(
 					candidate => candidate.message,
 				),
 			)
@@ -321,6 +331,7 @@ export function pruneToolOutputs(entries: SessionEntry[], config: PruneConfig = 
 			? new Set(
 					collectUselessResults(
 						entries,
+						tokenizer,
 						toolCallsById,
 						config.protectedTools,
 						supersededMessages ?? new Set(),
@@ -331,14 +342,15 @@ export function pruneToolOutputs(entries: SessionEntry[], config: PruneConfig = 
 	const boundaryIndex = resolveBoundaryIndex(entries, config.keepBoundaryId);
 	const cacheWarmSuffixTokens = config.cacheWarmSuffixTokens;
 	// All-message suffix per index, only when the cache guard is armed.
-	const messageSuffix = cacheWarmSuffixTokens === undefined ? undefined : computeMessageSuffixTokens(entries);
+	const messageSuffix =
+		cacheWarmSuffixTokens === undefined ? undefined : computeMessageSuffixTokens(entries, tokenizer);
 
 	for (let i = entries.length - 1; i >= 0; i--) {
 		const entry = entries[i];
 		const message = getToolResultMessage(entry);
 		if (!message) continue;
 
-		const tokens = estimateTokens(message as AgentMessage);
+		const tokens = tokenizer.countMessage(message as AgentMessage);
 		const isProtected = isProtectedToolResult(message, toolCallsById.get(message.toolCallId), config.protectedTools);
 
 		if (message.prunedAt !== undefined) {

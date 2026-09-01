@@ -3,12 +3,10 @@
  *
  * Provides a hierarchical settings interface:
  * - Plugin list (npm plugins + marketplace plugins)
- *   - npm plugin detail (enable/disable, features, config)
- *   - Marketplace plugin detail (enable/disable + read-only metadata)
- *     - Feature toggles
- *     - Config value editor
+ *   - Plugin details (enablement, manifest settings, and marketplace metadata)
  */
 import {
+	type Component,
 	Container,
 	Input,
 	matchesKey,
@@ -22,18 +20,19 @@ import {
 import { logger } from "@oh-my-pi/pi-utils";
 import { clearPluginRootsAndCaches, resolveOrDefaultProjectRegistryPath } from "../../discovery/helpers";
 import { PluginManager } from "../../extensibility/plugins/manager";
-import type { InstalledPluginSummary } from "../../extensibility/plugins/marketplace";
 import {
 	getInstalledPluginsRegistryPath,
 	getMarketplacesCacheDir,
 	getMarketplacesRegistryPath,
 	getPluginsCacheDir,
+	type InstalledPluginSummary,
 	MarketplaceManager,
+	parsePluginId,
 } from "../../extensibility/plugins/marketplace";
 import type { InstalledPlugin, PluginSettingSchema } from "../../extensibility/plugins/types";
 import { getSelectListTheme, getSettingsListTheme, theme } from "../../modes/theme/theme";
 import { shortenPath } from "../../tools/render-utils";
-import { DynamicBorder } from "./dynamic-border";
+import { OverlayPanel } from "./overlay-box";
 
 /**
  * Forwards a keystroke to `input`, but cancels via `onCancel` when the user presses Escape.
@@ -82,6 +81,72 @@ function marketplaceEnabled(summary: InstalledPluginSummary): boolean {
 	return summary.entries[0]?.enabled !== false;
 }
 
+async function buildPluginConfigItems(
+	plugin: InstalledPlugin,
+	manager: PluginManager,
+	onConfigChange: (key: string, value: unknown) => void,
+): Promise<SettingItem[]> {
+	const schemaSettings = plugin.manifest.settings;
+	if (!schemaSettings) return [];
+
+	const settings = await manager.getPluginSettings(plugin.name);
+	const items: SettingItem[] = [];
+	for (const key in schemaSettings) {
+		const schema = schemaSettings[key];
+		const currentValue = settings[key] ?? schema.default;
+		const displayValue = schema.secret && currentValue ? "••••••••" : String(currentValue ?? "(not set)");
+
+		if (schema.type === "boolean") {
+			items.push({
+				id: `config:${key}`,
+				label: `  ${key}`,
+				description: schema.description || `Configure ${key}`,
+				currentValue: currentValue ? "true" : "false",
+				values: ["true", "false"],
+			});
+		} else if (schema.type === "enum") {
+			items.push({
+				id: `config:${key}`,
+				label: `  ${key}`,
+				description: schema.description || `Configure ${key}`,
+				currentValue: String(currentValue ?? schema.default ?? ""),
+				submenu: (cv, done) =>
+					new ConfigEnumSubmenu(
+						key,
+						schema.description || `Select value for ${key}`,
+						schema.values,
+						cv,
+						value => {
+							onConfigChange(key, value);
+							done(value);
+						},
+						() => done(),
+					),
+			});
+		} else {
+			items.push({
+				id: `config:${key}`,
+				label: `  ${key}`,
+				description: schema.description || `Configure ${key}`,
+				currentValue: displayValue,
+				submenu: (cv, done) =>
+					new ConfigInputSubmenu(
+						key,
+						schema,
+						cv === "(not set)" ? "" : cv,
+						value => {
+							const parsed = schema.type === "number" ? Number(value) : value;
+							onConfigChange(key, parsed);
+							done(String(value));
+						},
+						() => done(),
+					),
+			});
+		}
+	}
+	return items;
+}
+
 /**
  * Stable SelectList value for a list entry. Combined with `findEntryByValue`
  * this keeps lookup correct even when the same plugin id exists in both user
@@ -101,29 +166,24 @@ function findEntryByValue(entries: ReadonlyArray<PluginListEntry>, value: string
  * enable/disable status, scope tag, and shadow indicator. Selecting an entry
  * fans out to the kind-specific detail callback.
  */
-export class PluginListComponent extends Container {
+export class PluginListComponent extends OverlayPanel {
 	readonly #selectList: SelectList;
 
 	constructor(
 		private readonly entries: ReadonlyArray<PluginListEntry>,
 		callbacks: PluginListCallbacks,
 	) {
-		super();
-
-		// Title
-		this.addChild(new DynamicBorder());
-		this.addChild(new Text(theme.bold(theme.fg("accent", "  Plugins")), 0, 0));
+		super("Plugins");
 		this.addChild(new Spacer(1));
 
 		if (entries.length === 0) {
-			this.addChild(new Text(theme.fg("muted", "  No plugins installed"), 0, 0));
+			this.addChild(new Text(theme.fg("muted", "No plugins installed"), 0, 0));
 			this.addChild(new Spacer(1));
-			this.addChild(new Text(theme.fg("dim", "  Install npm plugins:        omp plugin install <package>"), 0, 0));
+			this.addChild(new Text(theme.fg("dim", "Install npm plugins:        omp plugin install <package>"), 0, 0));
 			this.addChild(
-				new Text(theme.fg("dim", "  Install marketplace plugins: omp plugin install <name>@<marketplace>"), 0, 0),
+				new Text(theme.fg("dim", "Install marketplace plugins: omp plugin install <name>@<marketplace>"), 0, 0),
 			);
 			this.addChild(new Spacer(1));
-			this.addChild(new DynamicBorder());
 
 			// Empty list still handles Escape so the user can leave the panel.
 			this.#selectList = new SelectList([], 1, getSelectListTheme());
@@ -152,8 +212,7 @@ export class PluginListComponent extends Container {
 
 		this.addChild(this.#selectList);
 		this.addChild(new Spacer(1));
-		this.addChild(new Text(theme.fg("dim", "  Enter to configure · Esc to go back"), 0, 0));
-		this.addChild(new DynamicBorder());
+		this.addChild(new Text(theme.fg("dim", "Enter to configure · Esc to go back"), 0, 0));
 	}
 
 	#renderItem(entry: PluginListEntry): SelectItem {
@@ -220,7 +279,7 @@ export interface PluginDetailCallbacks {
  * - Feature toggles
  * - Config settings
  */
-export class PluginDetailComponent extends Container {
+export class PluginDetailComponent extends OverlayPanel {
 	#settingsList!: SettingsList;
 
 	constructor(
@@ -228,7 +287,7 @@ export class PluginDetailComponent extends Container {
 		private readonly manager: PluginManager,
 		private readonly callbacks: PluginDetailCallbacks,
 	) {
-		super();
+		super(plugin.name);
 
 		void this.#rebuild();
 	}
@@ -239,11 +298,9 @@ export class PluginDetailComponent extends Container {
 		const plugin = this.plugin;
 		const manifest = plugin.manifest;
 
-		// Header
-		this.addChild(new DynamicBorder());
-		this.addChild(new Text(theme.bold(theme.fg("accent", `  ${plugin.name}`)), 0, 0));
+		this.title = plugin.name;
 		if (manifest.description) {
-			this.addChild(new Text(theme.fg("muted", `  ${manifest.description}`), 0, 0));
+			this.addChild(new Text(theme.fg("muted", manifest.description), 0, 0));
 		}
 		this.addChild(new Spacer(1));
 
@@ -280,64 +337,7 @@ export class PluginDetailComponent extends Container {
 			}
 		}
 
-		// Config settings
-		if (manifest.settings && Object.keys(manifest.settings).length > 0) {
-			const settings = await this.manager.getPluginSettings(plugin.name);
-
-			for (const [key, schema] of Object.entries(manifest.settings)) {
-				const currentValue = settings[key] ?? schema.default;
-				const displayValue = schema.secret && currentValue ? "••••••••" : String(currentValue ?? "(not set)");
-
-				if (schema.type === "boolean") {
-					items.push({
-						id: `config:${key}`,
-						label: `  ${key}`,
-						description: schema.description || `Configure ${key}`,
-						currentValue: currentValue ? "true" : "false",
-						values: ["true", "false"],
-					});
-				} else if (schema.type === "enum") {
-					items.push({
-						id: `config:${key}`,
-						label: `  ${key}`,
-						description: schema.description || `Configure ${key}`,
-						currentValue: String(currentValue ?? schema.default ?? ""),
-						submenu: (cv, done) =>
-							new ConfigEnumSubmenu(
-								key,
-								schema.description || `Select value for ${key}`,
-								schema.values,
-								cv,
-								value => {
-									this.callbacks.onConfigChange(key, value);
-									done(value);
-								},
-								() => done(),
-							),
-					});
-				} else {
-					// string or number - show as submenu with input
-					items.push({
-						id: `config:${key}`,
-						label: `  ${key}`,
-						description: schema.description || `Configure ${key}`,
-						currentValue: displayValue,
-						submenu: (cv, done) =>
-							new ConfigInputSubmenu(
-								key,
-								schema,
-								cv === "(not set)" ? "" : cv,
-								value => {
-									const parsed = schema.type === "number" ? Number(value) : value;
-									this.callbacks.onConfigChange(key, parsed);
-									done(String(value));
-								},
-								() => done(),
-							),
-					});
-				}
-			}
-		}
+		items.push(...(await buildPluginConfigItems(plugin, this.manager, this.callbacks.onConfigChange)));
 
 		this.#settingsList = new SettingsList(
 			items,
@@ -371,8 +371,7 @@ export class PluginDetailComponent extends Container {
 
 		this.addChild(this.#settingsList);
 		this.addChild(new Spacer(1));
-		this.addChild(new Text(theme.fg("dim", "  Enter to edit · Esc to go back"), 0, 0));
-		this.addChild(new DynamicBorder());
+		this.addChild(new Text(theme.fg("dim", "Enter to edit · Esc to go back"), 0, 0));
 	}
 
 	handleInput(data: string): void {
@@ -387,33 +386,60 @@ export class PluginDetailComponent extends Container {
 
 export interface MarketplacePluginDetailCallbacks {
 	onEnabledChange: (enabled: boolean) => void;
+	onConfigChange: (pluginName: string, key: string, value: unknown) => void;
+	/** Schedules a TUI frame after asynchronous manifest settings load. */
+	requestRender?: () => void;
 	onBack: () => void;
 }
 
 /**
- * Detail view for a marketplace plugin. Marketplace plugins do not declare
- * features or settings, so the panel exposes a single enable/disable toggle
- * plus the read-only metadata from the installed-plugins registry.
+ * Detail view for a marketplace plugin, including settings declared by its
+ * runtime package and metadata from the installed-plugins registry.
  */
-export class MarketplacePluginDetailComponent extends Container {
-	#settingsList: SettingsList;
+export class MarketplacePluginDetailComponent extends OverlayPanel {
+	#settingsList!: SettingsList;
 
 	constructor(
 		private plugin: InstalledPluginSummary,
+		private readonly manager: PluginManager,
 		private readonly callbacks: MarketplacePluginDetailCallbacks,
 	) {
-		super();
+		super(plugin.id);
+		this.#render(undefined, []);
+		void this.#loadConfig();
+	}
 
+	async #loadConfig(): Promise<void> {
+		const entry = this.plugin.entries[0];
+		if (!entry) return;
+
+		const fallbackName = parsePluginId(this.plugin.id)?.name ?? this.plugin.id;
+		try {
+			const runtimePlugin = await this.manager.getPlugin(fallbackName, { path: entry.installPath });
+			if (!runtimePlugin) return;
+			const configItems = await buildPluginConfigItems(runtimePlugin, this.manager, (key, value) =>
+				this.callbacks.onConfigChange(runtimePlugin.name, key, value),
+			);
+			this.#render(runtimePlugin, configItems);
+			this.callbacks.requestRender?.();
+		} catch (err) {
+			logger.error("Settings → Plugins: failed to load marketplace plugin settings", {
+				pluginId: this.plugin.id,
+				path: entry.installPath,
+				error: err instanceof Error ? err.message : String(err),
+			});
+		}
+	}
+
+	#render(runtimePlugin: InstalledPlugin | undefined, configItems: SettingItem[]): void {
+		this.clear();
+
+		const plugin = this.plugin;
 		const entry = plugin.entries[0];
-		const enabled = marketplaceEnabled(plugin);
-
-		// Header
-		this.addChild(new DynamicBorder());
-		this.addChild(new Text(theme.bold(theme.fg("accent", `  ${plugin.id}`)), 0, 0));
-
+		this.title = plugin.id;
 		const subtitleParts = [`[${plugin.scope}]`];
 		if (plugin.shadowedBy) subtitleParts.push(`${theme.status.shadowed} shadowed by ${plugin.shadowedBy}`);
-		this.addChild(new Text(theme.fg("muted", `  ${subtitleParts.join(" ")}`), 0, 0));
+		this.addChild(new Text(theme.fg("muted", subtitleParts.join(" ")), 0, 0));
 		this.addChild(new Spacer(1));
 
 		const items: SettingItem[] = [
@@ -421,14 +447,14 @@ export class MarketplacePluginDetailComponent extends Container {
 				id: "__enabled__",
 				label: "Enabled",
 				description: "Enable or disable this marketplace plugin",
-				currentValue: enabled ? "true" : "false",
+				currentValue: marketplaceEnabled(plugin) ? "true" : "false",
 				values: ["true", "false"],
 			},
+			...configItems,
 		];
-
 		this.#settingsList = new SettingsList(
 			items,
-			items.length,
+			Math.min(items.length, 10),
 			getSettingsListTheme(),
 			(id, newValue) => {
 				if (id === "__enabled__") {
@@ -438,6 +464,11 @@ export class MarketplacePluginDetailComponent extends Container {
 						...this.plugin,
 						entries: this.plugin.entries.map(e => ({ ...e, enabled: next })),
 					};
+				} else if (id.startsWith("config:")) {
+					const key = id.slice(7);
+					if (runtimePlugin?.manifest.settings?.[key]?.type === "boolean") {
+						this.callbacks.onConfigChange(runtimePlugin.name, key, newValue === "true");
+					}
 				}
 			},
 			this.callbacks.onBack,
@@ -445,27 +476,23 @@ export class MarketplacePluginDetailComponent extends Container {
 
 		this.addChild(this.#settingsList);
 		this.addChild(new Spacer(1));
-
-		// Read-only metadata. SettingsList rejects items without `values`/`submenu`,
-		// so we render the metadata as plain text rows beneath the toggle.
-		this.addChild(new Text(theme.fg("dim", `  version       ${entry?.version ?? "(unknown)"}`), 0, 0));
-		this.addChild(new Text(theme.fg("dim", `  scope         ${plugin.scope}`), 0, 0));
+		this.addChild(new Text(theme.fg("dim", `version       ${entry?.version ?? "(unknown)"}`), 0, 0));
+		this.addChild(new Text(theme.fg("dim", `scope         ${plugin.scope}`), 0, 0));
 		this.addChild(
 			new Text(
-				theme.fg("dim", `  install path  ${entry?.installPath ? shortenPath(entry.installPath) : "(unknown)"}`),
+				theme.fg("dim", `install path  ${entry?.installPath ? shortenPath(entry.installPath) : "(unknown)"}`),
 				0,
 				0,
 			),
 		);
-		this.addChild(new Text(theme.fg("dim", `  installed at  ${entry?.installedAt ?? "(unknown)"}`), 0, 0));
-		this.addChild(new Text(theme.fg("dim", `  last updated  ${entry?.lastUpdated ?? "(unknown)"}`), 0, 0));
+		this.addChild(new Text(theme.fg("dim", `installed at  ${entry?.installedAt ?? "(unknown)"}`), 0, 0));
+		this.addChild(new Text(theme.fg("dim", `last updated  ${entry?.lastUpdated ?? "(unknown)"}`), 0, 0));
 		if (entry?.gitCommitSha) {
-			this.addChild(new Text(theme.fg("dim", `  git sha       ${entry.gitCommitSha}`), 0, 0));
+			this.addChild(new Text(theme.fg("dim", `git sha       ${entry.gitCommitSha}`), 0, 0));
 		}
 
 		this.addChild(new Spacer(1));
-		this.addChild(new Text(theme.fg("dim", "  Enter to toggle · Esc to go back"), 0, 0));
-		this.addChild(new DynamicBorder());
+		this.addChild(new Text(theme.fg("dim", "Enter to edit · Esc to go back"), 0, 0));
 	}
 
 	handleInput(data: string): void {
@@ -480,7 +507,7 @@ export class MarketplacePluginDetailComponent extends Container {
 /**
  * Submenu for enum config values.
  */
-class ConfigEnumSubmenu extends Container {
+class ConfigEnumSubmenu extends OverlayPanel {
 	#selectList: SelectList;
 
 	constructor(
@@ -491,9 +518,7 @@ class ConfigEnumSubmenu extends Container {
 		onSelect: (value: string) => void,
 		onCancel: () => void,
 	) {
-		super();
-
-		this.addChild(new Text(theme.bold(theme.fg("accent", key)), 0, 0));
+		super(key);
 		if (description) {
 			this.addChild(new Spacer(1));
 			this.addChild(new Text(theme.fg("muted", description), 0, 0));
@@ -513,7 +538,7 @@ class ConfigEnumSubmenu extends Container {
 
 		this.addChild(this.#selectList);
 		this.addChild(new Spacer(1));
-		this.addChild(new Text(theme.fg("dim", "  Enter to select · Esc to cancel"), 0, 0));
+		this.addChild(new Text(theme.fg("dim", "Enter to select · Esc to cancel"), 0, 0));
 	}
 
 	handleInput(data: string): void {
@@ -524,7 +549,7 @@ class ConfigEnumSubmenu extends Container {
 /**
  * Submenu for string/number config values with text input.
  */
-class ConfigInputSubmenu extends Container {
+class ConfigInputSubmenu extends OverlayPanel {
 	#input: Input;
 
 	constructor(
@@ -534,9 +559,7 @@ class ConfigInputSubmenu extends Container {
 		private readonly onSubmit: (value: string) => void,
 		private readonly onCancel: () => void,
 	) {
-		super();
-
-		this.addChild(new Text(theme.bold(theme.fg("accent", key)), 0, 0));
+		super(key);
 		if (schema.description) {
 			this.addChild(new Spacer(1));
 			this.addChild(new Text(theme.fg("muted", schema.description), 0, 0));
@@ -571,7 +594,7 @@ class ConfigInputSubmenu extends Container {
 
 		this.addChild(this.#input);
 		this.addChild(new Spacer(1));
-		this.addChild(new Text(theme.fg("dim", "  Enter to save · Esc to cancel"), 0, 0));
+		this.addChild(new Text(theme.fg("dim", "Enter to save · Esc to cancel"), 0, 0));
 	}
 
 	handleInput(data: string): void {
@@ -586,6 +609,8 @@ class ConfigInputSubmenu extends Container {
 export interface PluginSettingsCallbacks {
 	onClose: () => void;
 	onPluginChanged: () => void | Promise<void>;
+	/** Schedules a TUI frame after asynchronous plugin data loads. */
+	requestRender?: () => void;
 }
 
 /** Component with handleInput method */
@@ -600,7 +625,7 @@ interface InputHandler {
 export class PluginSettingsComponent extends Container {
 	#cwd: string;
 	#manager: PluginManager;
-	#viewComponent: (Container & InputHandler) | null = null;
+	#viewComponent: (Component & InputHandler) | null = null;
 	// biome-ignore lint/correctness/noUnusedPrivateClassMembers: state tracking for view management
 	#currentView: "list" | "npm-detail" | "marketplace-detail" = "list";
 	// biome-ignore lint/correctness/noUnusedPrivateClassMembers: state tracking for view management
@@ -669,6 +694,12 @@ export class PluginSettingsComponent extends Container {
 		});
 
 		this.addChild(this.#viewComponent);
+
+		// The list mounts after the first frame (npm + marketplace listing is
+		// async and this method runs fire-and-forget), so ask for a repaint —
+		// otherwise the tab stays blank until an unrelated event forces a
+		// render, e.g. reopening /settings (issue #9526).
+		this.callbacks.requestRender?.();
 	}
 
 	#showPluginDetail(plugin: InstalledPlugin): void {
@@ -708,7 +739,7 @@ export class PluginSettingsComponent extends Container {
 		this.#currentMarketplacePlugin = plugin;
 		this.clear();
 
-		this.#viewComponent = new MarketplacePluginDetailComponent(plugin, {
+		this.#viewComponent = new MarketplacePluginDetailComponent(plugin, this.#manager, {
 			onEnabledChange: async enabled => {
 				try {
 					const mgr = await this.#buildMarketplaceManager();
@@ -723,7 +754,12 @@ export class PluginSettingsComponent extends Container {
 					});
 				}
 			},
+			onConfigChange: async (pluginName, key, value) => {
+				await this.#manager.setPluginSetting(pluginName, key, value);
+				await this.callbacks.onPluginChanged();
+			},
 			onBack: () => this.#showPluginList(),
+			requestRender: this.callbacks.requestRender,
 		});
 
 		this.addChild(this.#viewComponent);

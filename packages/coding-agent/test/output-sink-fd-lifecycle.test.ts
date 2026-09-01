@@ -34,10 +34,9 @@ describe("OutputSink fd lifecycle", () => {
 		const skill = path.join(dir, "SKILL.md");
 		await Bun.write(skill, "# skill\n");
 
-		// Far more iterations than the 64-descriptor limit the repro runs under.
-		// A leaked spill fd would exhaust the table and make the skill read below
-		// throw EMFILE — exactly the reported failure.
-		for (let i = 0; i < 256; i++) {
+		// Cross the 64-descriptor limit used by the leak repro. More iterations do
+		// not strengthen that boundary and only multiply serial file I/O.
+		for (let i = 0; i < 72; i++) {
 			const artifactPath = path.join(dir, `spill-${i}.txt`);
 			const sink = new OutputSink({ artifactPath, artifactId: `art-${i}`, spillThreshold: 16 });
 			spill(sink);

@@ -18,8 +18,31 @@ export interface SlashCommand {
 	content: string;
 	/** Source level */
 	level: "user" | "project" | "native";
+	/** Already-parsed display description, when discovery stripped frontmatter from `content`. */
+	description?: string;
+	/** Already-parsed argument hint (`argumentHint` or `argument-hint`). */
+	argumentHint?: string;
 	/** Source metadata */
 	_source: SourceMeta;
+}
+
+function optionalTrimmedString(value: unknown): string | undefined {
+	if (typeof value !== "string") return undefined;
+	const trimmed = value.trim();
+	return trimmed.length > 0 ? trimmed : undefined;
+}
+
+/** Display fields already parsed from command frontmatter. */
+export function slashCommandFrontmatterDisplay(frontmatter: Record<string, unknown>): {
+	description?: string;
+	argumentHint?: string;
+} {
+	return {
+		description: optionalTrimmedString(frontmatter.description),
+		argumentHint: optionalTrimmedString(
+			frontmatter.argumentHint ?? ("argument-hint" in frontmatter ? frontmatter["argument-hint"] : undefined),
+		),
+	};
 }
 
 export const slashCommandCapability = defineCapability<SlashCommand>({

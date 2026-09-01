@@ -1,5 +1,4 @@
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
-import { settings } from "../config/settings";
 import type { AgentSession } from "../session/agent-session";
 import type { SessionOAuthAccountList } from "../session/agent-session-types";
 import {
@@ -140,12 +139,15 @@ async function handleSessionPinCommand(
 export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	{
 		name: "todo",
+		icon: "todo",
 		description: "View or modify the agent's todo list",
 		acpDescription: "Manage todos",
 		acpInputHint: "<subcommand>",
 		subcommands: [
 			{ name: "edit", description: "Open todos in $EDITOR (Markdown round-trip)" },
 			{ name: "copy", description: "Copy todos as Markdown to clipboard" },
+			{ name: "expand", description: "Show every phase and task in the HUD" },
+			{ name: "collapse", description: "Restore the bounded HUD preview" },
 			{ name: "export", description: "Write todos as Markdown to a file (default: TODO.md)", usage: "[<path>]" },
 			{ name: "import", description: "Replace todos from a Markdown file (default: TODO.md)", usage: "[<path>]" },
 			{
@@ -175,6 +177,7 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	},
 	{
 		name: "session",
+		icon: "session",
 		description: "Session management commands",
 		acpDescription: "Show or configure the current session",
 		acpInputHint: "[info|delete|pin [account]]",
@@ -252,6 +255,7 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	},
 	{
 		name: "jobs",
+		icon: "jobs",
 		description: "Show async background jobs status",
 		acpDescription: "Show background jobs",
 		getTuiAutocompleteDescription: runtime => {
@@ -293,6 +297,7 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	},
 	{
 		name: "usage",
+		icon: "gauge",
 		description: "Show provider usage and limits",
 		acpDescription: "Show token usage",
 		acpInputHint: "[show|reset [account|active]]",
@@ -335,8 +340,9 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	},
 	{
 		name: "stats",
+		icon: "stats",
 		description: "Launch the local stats dashboard",
-		inlineHint: "[--port <port>]",
+		inlineHint: "[--port <port>] [--host <host>]",
 		allowArgs: true,
 		handle: async (command, runtime) => {
 			const parsed = parseStatsDashboardArgs(command.args);
@@ -354,6 +360,7 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	},
 	{
 		name: "changelog",
+		icon: "news",
 		description: "Show changelog entries",
 		acpDescription: "Show changelog",
 		acpInputHint: "[full]",
@@ -379,6 +386,7 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	},
 	{
 		name: "hotkeys",
+		icon: "keyboard",
 		description: "Show all keyboard shortcuts",
 		handleTui: (_command, runtime) => {
 			runtime.ctx.handleHotkeysCommand();
@@ -387,6 +395,7 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	},
 	{
 		name: "tools",
+		icon: "tools",
 		description: "Show tools currently visible to the agent",
 		acpDescription: "Show available tools",
 		getTuiAutocompleteDescription: runtime => {
@@ -415,6 +424,7 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	},
 	{
 		name: "context",
+		icon: "context",
 		description: "Show estimated context usage breakdown",
 		acpDescription: "Show context usage",
 		getTuiAutocompleteDescription: runtime => {
@@ -434,6 +444,7 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	{
 		name: "extensions",
 		aliases: ["status"],
+		icon: "extension",
 		description: "Open Extension Control Center dashboard",
 		handleTui: (_command, runtime) => {
 			runtime.ctx.showExtensionsDashboard();
@@ -442,26 +453,36 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	},
 	{
 		name: "agents",
-		description: "Open Agent Control Center dashboard",
+		icon: "agents",
+		description: "Open the agents hub (per-agent model, prewalk, and advisor)",
 		handleTui: (_command, runtime) => {
 			runtime.ctx.showAgentsDashboard();
 			runtime.ctx.editor.setText("");
 		},
 	},
 	{
+		name: "git",
+		icon: "branch",
+		description: "Open the git UI (split diff viewer, staging, commit composer)",
+		inlineHint: "[revision]",
+		allowArgs: true,
+		handleTui: (command, runtime) => {
+			runtime.ctx.showGitUi(command.args.trim() || undefined);
+			runtime.ctx.editor.setText("");
+		},
+	},
+	{
 		name: "branch",
+		icon: "branch",
 		description: "Create a new branch from a previous message",
 		handleTui: (_command, runtime) => {
-			if (settings.get("doubleEscapeAction") === "tree") {
-				runtime.ctx.showTreeSelector();
-			} else {
-				runtime.ctx.showUserMessageSelector();
-			}
+			runtime.ctx.showUserMessageSelector();
 			runtime.ctx.editor.setText("");
 		},
 	},
 	{
 		name: "fork",
+		icon: "branch",
 		description: "Create a new fork from a previous message",
 		handleTui: async (_command, runtime) => {
 			runtime.ctx.editor.setText("");
@@ -470,6 +491,7 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	},
 	{
 		name: "tree",
+		icon: "tree",
 		description: "Navigate session tree (switch branches)",
 		handleTui: (_command, runtime) => {
 			runtime.ctx.showTreeSelector();
@@ -478,6 +500,7 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	},
 	{
 		name: "login",
+		icon: "signIn",
 		description: "Login with OAuth provider",
 		inlineHint: "[provider|redirect URL]",
 		allowArgs: true,
@@ -530,6 +553,7 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	},
 	{
 		name: "logout",
+		icon: "signOut",
 		description: "Logout from OAuth provider",
 		inlineHint: "[provider]",
 		allowArgs: true,
@@ -552,6 +576,7 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	},
 	{
 		name: "mcp",
+		icon: "mcp",
 		description: "Manage MCP servers (add, list, remove, test)",
 		acpDescription: "Manage MCP servers",
 		inlineHint: "<subcommand>",

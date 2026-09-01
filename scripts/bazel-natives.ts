@@ -18,12 +18,18 @@
  * Extra args after `--` are passed to bazel verbatim (cache configs, endpoints,
  * headers — see .bazelrc for the cache-rw/cache-ro policy configs).
  *
+ * The `host` pseudo-target builds through the local Cargo/N-API path
+ * (packages/natives/scripts/build-bindings.ts) by default — no bazel needed
+ * for plain host iteration. Bazel is opt-in for host via
+ * `OMP_NATIVE_BUILD_BACKEND=bazel` or by passing extra bazel args after `--`;
+ * explicit //:natives-* targets and aggregates always build through bazel
+ * (the CI path, which runs bazelisk).
+ *
  * Windows hosts: the msvc cc toolchain in bazel/toolchains/msvc only supports
  * linux/mac exec hosts (its clang-cl+xwin wrappers replace the MSVC a Windows
- * box already has), so a win32 host cannot run any bazel addon build. The
- * `host` pseudo-target instead delegates to the local napi build
- * (packages/natives/scripts/build-bindings.ts) against the installed VS Build
- * Tools; every other target on a win32 host fails fast with guidance.
+ * box already has), so a win32 host cannot run any bazel addon build. `host`
+ * always uses the local napi build there (against installed VS Build Tools);
+ * every other target on a win32 host fails fast with guidance.
  *
  * Note: musl addons intentionally reuse the plain linux-<arch> filenames, so a
  * `linux-all` copy overwrites the gnu addon with the musl one (and vice versa);
@@ -31,7 +37,7 @@
  */
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { detectHostAvx2Support } from "./host-detect";
+import { detectHostAvx2Support, resolveLocalHostAddon } from "./host-detect";
 
 const repoRoot = path.join(import.meta.dir, "..");
 
@@ -171,14 +177,8 @@ export function parseCliArgs(argv: string[]): CliOptions {
 	return { targets, dest, source, bazelArgs };
 }
 
-function resolveBazelBinary(): string {
-	const bin = Bun.which("bazelisk") ?? Bun.which("bazel");
-	if (!bin) {
-		throw new Error(
-			"Neither `bazelisk` nor `bazel` found on PATH. Install bazelisk: https://github.com/bazelbuild/bazelisk",
-		);
-	}
-	return bin;
+function resolveBazelBinary(): string | null {
+	return Bun.which("bazelisk") ?? Bun.which("bazel");
 }
 
 const STDERR_TAIL_LINES = 40;
@@ -221,14 +221,10 @@ async function installAddon(sourcePath: string, destPath: string): Promise<void>
 	}
 }
 
-/**
- * win32-host path for the `host` pseudo-target: the bazel msvc cross toolchain
- * cannot run here, but real MSVC can — build the addon via the napi local
- * build and install it into destDir like the bazel path would.
- */
-async function buildWindowsHostAddon(host: HostInfo, destDir: string): Promise<void> {
+/** Build and install the host addon through the local Cargo/N-API path. */
+async function buildLocalHostAddon(host: HostInfo, destDir: string): Promise<void> {
 	const script = path.join(repoRoot, "packages/natives/scripts/build-bindings.ts");
-	console.log(`win32 host: bazel msvc toolchain is linux/mac-only; building via ${path.relative(repoRoot, script)}`);
+	console.log(`local host build: using ${path.relative(repoRoot, script)}`);
 	const proc = Bun.spawn([process.execPath, script], {
 		cwd: repoRoot,
 		stdout: "inherit",
@@ -237,7 +233,7 @@ async function buildWindowsHostAddon(host: HostInfo, destDir: string): Promise<v
 	const exitCode = await proc.exited;
 	if (exitCode !== 0) process.exit(exitCode || 1);
 
-	const filename = `pi_natives.win32-x64-${host.avx2 ? "modern" : "baseline"}.node`;
+	const filename = resolveLocalHostAddon(host).filename;
 	const builtPath = path.join(repoRoot, "packages/natives/native", filename);
 	if (path.dirname(builtPath) !== destDir) {
 		await fs.mkdir(destDir, { recursive: true });
@@ -251,15 +247,32 @@ async function main(): Promise<void> {
 	const host: HostInfo = { platform: process.platform, arch: process.arch, avx2: detectHostAvx2Support() };
 	const destDir = options.dest ? path.resolve(options.dest) : path.join(repoRoot, "packages/natives/native");
 
-	if (host.platform === "win32" && !options.source) {
-		if (options.targets.length !== 1 || options.targets[0] !== "host") {
-			throw new Error(
-				`Cannot bazel-build [${options.targets.join(", ")}] on a Windows host: the msvc cross ` +
-					"toolchain (bazel/toolchains/msvc) only runs on linux/mac exec hosts. Use `host` here " +
-					"(local napi build via VS Build Tools), or run this script from WSL/linux for cross targets.",
-			);
+	const backend = Bun.env.OMP_NATIVE_BUILD_BACKEND?.trim();
+	if (backend && backend !== "cargo" && backend !== "bazel") {
+		throw new Error(`Unknown OMP_NATIVE_BUILD_BACKEND "${backend}" (expected "cargo" or "bazel")`);
+	}
+	const hostOnly = options.targets.length === 1 && options.targets[0] === "host";
+	// Backend selection: the host build defaults to the local Cargo/N-API
+	// path; bazel is opt-in for host via OMP_NATIVE_BUILD_BACKEND=bazel or
+	// extra bazel args after `--`. Explicit //:natives-* targets always go
+	// through bazel. win32 hosts can only build `host`, locally (see the msvc
+	// toolchain note in the header).
+	const cargoBackend =
+		backend === "cargo" ||
+		host.platform === "win32" ||
+		(backend !== "bazel" && hostOnly && options.bazelArgs.length === 0);
+	if (cargoBackend && !options.source) {
+		if (!hostOnly) {
+			if (host.platform === "win32") {
+				throw new Error(
+					`Cannot bazel-build [${options.targets.join(", ")}] on a Windows host: the msvc cross ` +
+						"toolchain (bazel/toolchains/msvc) only runs on linux/mac exec hosts. Use `host` here " +
+						"(local napi build via VS Build Tools), or run this script from WSL/linux for cross targets.",
+				);
+			}
+			throw new Error("OMP_NATIVE_BUILD_BACKEND=cargo supports only the host target");
 		}
-		await buildWindowsHostAddon(host, destDir);
+		await buildLocalHostAddon(host, destDir);
 		return;
 	}
 	let outputs: string[];
@@ -272,6 +285,17 @@ async function main(): Promise<void> {
 	} else {
 		const labels = resolveTargetLabels(options.targets, host);
 		const bazel = resolveBazelBinary();
+		if (!bazel) {
+			if (options.targets.length !== 1 || options.targets[0] !== "host") {
+				throw new Error(
+					`Neither \`bazelisk\` nor \`bazel\` found on PATH; Cargo fallback supports only the host target, not [${options.targets.join(", ")}]. ` +
+						"Install bazelisk or request `host` for a local Cargo/N-API build.",
+				);
+			}
+			console.log("bazelisk/bazel not found; falling back to the local Cargo/N-API host build");
+			await buildLocalHostAddon(host, destDir);
+			return;
+		}
 		// CI hands cache wiring (remote or disk) through a bazelrc fragment so
 		// endpoint composition stays in .github/actions/bazel-cache.
 		const rcPath = Bun.env.OMP_BAZEL_RC?.trim();

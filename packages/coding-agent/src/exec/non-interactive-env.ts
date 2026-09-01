@@ -1,3 +1,8 @@
+import { $which } from "@oh-my-pi/pi-utils";
+
+/** Portable command that rejects credential prompts without assuming an FHS layout. */
+export const REJECT_PROMPT_COMMAND = $which("false") ?? "false";
+
 export const NON_INTERACTIVE_ENV: Readonly<Record<string, string>> = {
 	// Disable pagers so commands don't block on interactive views.
 	PAGER: "cat",
@@ -22,7 +27,7 @@ export const NON_INTERACTIVE_ENV: Readonly<Record<string, string>> = {
 	VISUAL: "true",
 	EDITOR: "true",
 	GIT_TERMINAL_PROMPT: "0",
-	SSH_ASKPASS: "/usr/bin/false",
+	SSH_ASKPASS: REJECT_PROMPT_COMMAND,
 	CI: "true",
 	AGENT: "1",
 	// Package manager defaults for unattended execution.

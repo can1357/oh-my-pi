@@ -1,0 +1,113 @@
+// Model-lineage compat for "kimi"; regenerated from the frozen census using class taxonomy selectors.
+
+class "kimi" {
+	// Replaces the K2.6 reasoning stream-idle baseline on OpenAI-compatible routes.
+	on "baseten" "cline-pass" "cloudflare-ai-gateway" "coreweave" "deepinfra" "firepass" "fireworks" \
+		"huggingface" "moonshot" "novita" "nvidia" "opencode-go" "opencode-zen" "openrouter" \
+		"together" "wafer-serverless" "zenmux" {
+		family "k2.6" {
+			stream-idle-timeout-ms 300000
+		}
+	}
+	// Replaces Moonshot-native K3 and K2.7 Code stream-idle branches.
+	on "kimi-code" "moonshot" {
+		family "k3" {
+			stream-idle-timeout-ms 300000
+		}
+		family "k2.7-code" {
+			stream-idle-timeout-ms 300000
+		}
+	}
+	on "aiand" "baseten" "coreweave" "fireworks" "huggingface" "kilo" "nanogpt" "novita" \
+		"opencode-go" "opencode-zen" "together" "vercel-ai-gateway" "zenmux" {
+		family "k2.7-code" {
+			thinking-efforts "minimal" "low" "medium" "high" "xhigh"
+		}
+	}
+	family "k3" {
+		thinking-default-level "max"
+		thinking-efforts "low" "high" "max"
+		thinking-requires-effort #true
+		// K3 drives reasoning through OpenAI-style reasoning_effort with a
+		// wire low/high/max scale on every chat-completions host; the remap
+		// is a lineage truth, not a deployment contract.
+		reasoning-effort-map {
+			minimal "low"
+			medium "high"
+			xhigh "max"
+			max "max"
+		}
+	}
+	on "alibaba-coding-plan" "cursor" "kimi-code" "moonshot" "ollama-cloud" "openrouter" {
+		family "k2.5" {
+			thinking-efforts "minimal" "low" "medium" "high"
+		}
+	}
+	on "alibaba-coding-plan" "github-copilot" "wafer-serverless" {
+		supports-developer-role #false
+	}
+	on "baseten" "cloudflare-ai-gateway" "coreweave" "fireworks" "huggingface" "kilo" \
+		"nanogpt" "novita" "nvidia" "opencode-go" "opencode-zen" "together" "vercel-ai-gateway" "zenmux" {
+		family "k2.6" {
+			thinking-efforts "minimal" "low" "medium" "high" "xhigh"
+		}
+	}
+	on "cloudflare-ai-gateway" "coreweave" "fireworks" "huggingface" "kilo" "nanogpt" \
+		"novita" "nvidia" "opencode" "opencode-go" "opencode-zen" "together" "vercel-ai-gateway" \
+		"zenmux" {
+		family "k2.5" {
+			thinking-efforts "minimal" "low" "medium" "high" "xhigh"
+		}
+	}
+	on "cursor" "github-copilot" "moonshot" "ollama-cloud" "openrouter" "wafer-serverless" {
+		family "k2.7-code" {
+			thinking-efforts "minimal" "low" "medium" "high"
+		}
+	}
+	on "huggingface" "moonshot" "nanogpt" "novita" "nvidia" "ollama-cloud" "zenmux" {
+		family "k2" {
+			thinking-requires-effort #true
+		}
+	}
+	on "huggingface" "nanogpt" "novita" "nvidia" "opencode-zen" "venice" "vercel-ai-gateway" "zenmux" {
+		family "k2" {
+			thinking-efforts "minimal" "low" "medium" "high" "xhigh"
+		}
+	}
+	on "kilo" "moonshot" "openrouter" "vercel-ai-gateway" "zenmux" {
+		family "k2-thinking" {
+			thinking-requires-effort #true
+		}
+	}
+	on "kilo" "vercel-ai-gateway" "zenmux" {
+		family "k2-thinking" {
+			thinking-efforts "minimal" "low" "medium" "high" "xhigh"
+		}
+	}
+	on "moonshot" "ollama-cloud" {
+		family "k2" {
+			thinking-efforts "minimal" "low" "medium" "high"
+		}
+	}
+	on "moonshot" "ollama-cloud" "openrouter" "wafer-serverless" {
+		family "k2.6" {
+			thinking-efforts "minimal" "low" "medium" "high"
+		}
+	}
+	on "moonshot" "openrouter" {
+		family "k2-thinking" {
+			thinking-efforts "minimal" "low" "medium" "high"
+		}
+	}
+	// K2 chat templates can leak native section/tool-call tokens on hosted and
+	// local OpenAI-compatible transports.
+	models "*kimi*k2*" {
+		stream-markup-healing-pattern "kimi"
+	}
+	on "kimi-code" "moonshot" {
+		family "k3" {
+			native-kimi-k3-reasoning #true
+			clamp-output-to-model-max #true
+		}
+	}
+}

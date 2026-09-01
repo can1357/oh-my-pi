@@ -37,6 +37,24 @@ describe("renderMermaidAscii", () => {
 		expect(rows[markerRow + 1]).toMatch(/╰─+╯/);
 	});
 
+	it("masks routed lines behind spaces in edge labels", () => {
+		const horizontal = renderMermaidAscii(
+			["graph LR", "  A[Agent] -->|on Mac| B[Server]", "  A -->|on Linux| C[Cluster]"].join("\n"),
+			{ colorMode: "none", useAscii: false },
+		);
+		const vertical = renderMermaidAscii("graph TD\n  A[Agent] -->|to c| C[Cluster]", {
+			colorMode: "none",
+			useAscii: false,
+		});
+
+		expect(horizontal).toContain("on Mac");
+		expect(horizontal).toContain("on Linux");
+		expect(horizontal).not.toContain("on─Mac");
+		expect(horizontal).not.toContain("on─Linux");
+		expect(vertical).toContain("to c");
+		expect(vertical).not.toContain("to│c");
+	});
+
 	it("returns a bounded fallback for declaration orders that make a clean route unreachable", () => {
 		const rendered = renderMermaidAsciiSafe(
 			[
@@ -60,6 +78,39 @@ describe("renderMermaidAscii", () => {
 		expect(rendered).toContain("Archive");
 		expect(rendered).toContain("Gateway");
 		expect(rendered).toContain("Audit");
+	});
+
+	it("renders left-to-right diagrams whose subgraph shifts drawing past the grid extents", () => {
+		// The subgraph border extends past the origin, so layout shifts every
+		// drawing coordinate right/down after the canvas was already sized from
+		// the raw grid. Edges routed to the far column then land outside the
+		// allocation, which used to throw and drop the whole diagram.
+		const rendered = renderMermaidAscii(
+			[
+				"graph LR",
+				"  subgraph S[Done]",
+				"    A",
+				"  end",
+				"  A --> C",
+				"  A --> D",
+				"  D --> E",
+				"  C --> F",
+				"  F --> G",
+				"  D --> G",
+			].join("\n"),
+			{ colorMode: "none" },
+		);
+
+		expect(rendered).toContain("Done");
+		for (const label of ["A", "C", "D", "E", "F", "G"]) {
+			expect(rendered).toContain(label);
+		}
+		// Every row must be padded to the shifted width, not truncated at the
+		// pre-shift canvas edge.
+		const rows = rendered.split("\n");
+		for (const row of rows) {
+			expect(row.length).toBe(rows[0]!.length);
+		}
 	});
 
 	it("returns null when the destination attachment point is enclosed", () => {

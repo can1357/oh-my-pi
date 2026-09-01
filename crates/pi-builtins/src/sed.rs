@@ -1558,7 +1558,14 @@ pub fn compile_subst_flags(
 				}
 				let location = ScriptLocation::at_position(lines, line);
 				let mut path = read_file_path(lines, line)?;
-				if let Some(cwd) = cwd && path.is_relative() { path = cwd.join(path); }
+				if let Some(cwd) = cwd {
+					let normalized = brush_core::sys::fs::normalize_shell_path(&path);
+					path = if normalized.is_absolute() {
+						normalized.into_owned()
+					} else {
+						cwd.join(normalized)
+					};
+				}
 				subst.write_file = Some(NamedWriter::new(path, location)?);
 				return Ok(()); // 'w' is the last flag allowed
 			},
@@ -1633,7 +1640,12 @@ fn compile_read_file_command(
 		return compilation_error(lines, line, ERR_SANDBOX);
 	}
 	let mut path = read_file_path(lines, line)?;
-	if path.is_relative() { path = context.cwd.join(path); }
+	let normalized = brush_core::sys::fs::normalize_shell_path(&path);
+	path = if normalized.is_absolute() {
+		normalized.into_owned()
+	} else {
+		context.cwd.join(normalized)
+	};
 	cmd.data = CommandData::Path(path);
 	Ok(CommandHandling::Continue)
 }
@@ -1651,7 +1663,12 @@ fn compile_write_file_command(
 	}
 	let location = ScriptLocation::at_position(lines, line);
 	let mut path = read_file_path(lines, line)?;
-	if path.is_relative() { path = context.cwd.join(path); }
+	let normalized = brush_core::sys::fs::normalize_shell_path(&path);
+	path = if normalized.is_absolute() {
+		normalized.into_owned()
+	} else {
+		context.cwd.join(normalized)
+	};
 	cmd.data = CommandData::NamedWriter(NamedWriter::new(path, location)?);
 	Ok(CommandHandling::Continue)
 }
@@ -5611,6 +5628,7 @@ struct MmapOutput {
 /// All other output is buffered and writen via BufWriter.
 pub struct OutputBuffer {
 	out:               BufWriter<Box<dyn OutputWrite + 'static>>, // Where to write
+	line_buffered:     bool, // Flush completed lines for non-file stdout
 	#[cfg(unix)]
 	max_pending_write: usize,                        /* Max bytes to keep before
 	                                                               * flushing */
@@ -5637,9 +5655,10 @@ const MAX_PENDING_WRITE_NON_FILE: usize = 64 * 1024;
 
 impl OutputBuffer {
 	#[cfg(not(unix))]
-	pub fn new(w: Box<dyn OutputWrite + 'static>) -> Self {
+	pub fn new(w: Box<dyn OutputWrite + 'static>, line_buffered: bool) -> Self {
 		Self {
 			out: BufWriter::new(w),
+			line_buffered,
 			pending_newline: false,
 			#[cfg(test)]
 			low_level_flushes: 0,
@@ -5647,12 +5666,15 @@ impl OutputBuffer {
 	}
 
 	#[cfg(unix)]
-	pub fn new(w: Box<dyn OutputWrite + 'static>) -> Self {
-		// The writer is not fd-backed, so regular-file output detection is gone;
-		// always bound pending data by the pipe-sized limit.
+	pub fn new(w: Box<dyn OutputWrite + 'static>, line_buffered: bool) -> Self {
 		Self {
 			out: BufWriter::new(w),
-			max_pending_write: MAX_PENDING_WRITE_NON_FILE,
+			line_buffered,
+			max_pending_write: if line_buffered {
+				MAX_PENDING_WRITE_NON_FILE
+			} else {
+				usize::MAX
+			},
 			mmap_chunk: None,
 			pending_newline: false,
 			#[cfg(test)]
@@ -5684,7 +5706,33 @@ impl OutputBuffer {
 		};
 
 		let mut reader = BufReader::new(file);
-		io::copy(&mut reader, &mut self.out)?;
+		if self.line_buffered {
+			let mut buf = [0; 8 * 1024];
+			loop {
+				let len = reader.read(&mut buf)?;
+				if len == 0 {
+					break;
+				}
+				self.out.write_all(&buf[..len])?;
+				if buf[..len].contains(&b'\n') {
+					self.flush_completed_line()?;
+				}
+			}
+		} else {
+			io::copy(&mut reader, &mut self.out)?;
+		}
+		Ok(())
+	}
+
+	/// Flush output through a completed line when writing to a non-file stdout.
+	fn flush_completed_line(&mut self) -> io::Result<()> {
+		if self.line_buffered {
+			#[cfg(test)]
+			{
+				self.low_level_flushes += 1;
+			}
+			self.out.flush()?;
+		}
 		Ok(())
 	}
 }
@@ -5723,6 +5771,7 @@ impl OutputBuffer {
 			self.flush_mmap(WriteRange::Complete)?;
 			self.out.write_all(b"\n")?;
 			self.pending_newline = false;
+			self.flush_completed_line()?;
 		}
 
 		match &new_chunk.content {
@@ -5772,6 +5821,13 @@ impl OutputBuffer {
 				self.pending_newline = !has_newline;
 			},
 		}
+
+		if self.line_buffered && new_chunk.is_newline_terminated() {
+			// Mmap output reaches the BufWriter only here; file-backed mmap
+			// output is block-buffered, so this cannot affect its fast path.
+			self.flush_mmap(WriteRange::Complete)?;
+			self.flush_completed_line()?;
+		}
 		Ok(())
 	}
 
@@ -5802,6 +5858,7 @@ impl OutputBuffer {
 			self.flush_mmap(WriteRange::Complete)?;
 			self.out.write_all(b"\n")?;
 			self.pending_newline = false;
+			self.flush_completed_line()?;
 		}
 		Ok(())
 	}
@@ -5824,6 +5881,7 @@ impl OutputBuffer {
 		if self.pending_newline {
 			self.out.write_all(b"\n")?;
 			self.pending_newline = false;
+			self.flush_completed_line()?;
 		}
 
 		match &chunk.content {
@@ -5833,6 +5891,9 @@ impl OutputBuffer {
 					self.out.write_all(b"\n")?;
 				}
 				self.pending_newline = !has_newline;
+				if *has_newline {
+					self.flush_completed_line()?;
+				}
 				Ok(())
 			},
 		}
@@ -5843,6 +5904,7 @@ impl OutputBuffer {
 		if self.pending_newline {
 			self.out.write_all(b"\n")?;
 			self.pending_newline = false;
+			self.flush_completed_line()?;
 		}
 		Ok(())
 	}
@@ -5887,7 +5949,7 @@ mod tests {
 		let tmp = NamedTempFile::new()?;
 		{
 			let file = tmp.reopen()?;
-			let mut out = OutputBuffer::new(Box::new(file));
+			let mut out = OutputBuffer::new(Box::new(file), false);
 			out.write_str("foo\n")?;
 			out.write_str("bar\n")?;
 			out.flush()?;
@@ -5922,7 +5984,7 @@ mod tests {
 		let output = NamedTempFile::new()?;
 		let output_path = output.path().to_path_buf();
 		let out_file = std::fs::File::create(&output_path)?;
-		let mut out = OutputBuffer::new(Box::new(Box::new(out_file)));
+		let mut out = OutputBuffer::new(Box::new(Box::new(out_file)), false);
 
 		// Drain reader → writer
 		while let Some(chunk) = reader.get_line()? {
@@ -5957,7 +6019,7 @@ mod tests {
 		let output = NamedTempFile::new()?;
 		let output_path = output.path().to_path_buf();
 		let out_file = File::create(&output_path)?;
-		let mut out = OutputBuffer::new(Box::new(out_file));
+		let mut out = OutputBuffer::new(Box::new(out_file), false);
 
 		// Read the first mmap line ("zero\n") and write it
 		if let Some(chunk) = reader.get_line()? {
@@ -6011,7 +6073,7 @@ mod tests {
 		let out_file = File::create(&output_path)?;
 
 		// Wrap it in your OutputBuffer and run the loop:
-		let mut out = OutputBuffer::new(Box::new(out_file));
+		let mut out = OutputBuffer::new(Box::new(out_file), false);
 		let mut nline = 0;
 		while let Some(chunk) = reader.get_line()? {
 			out.write_chunk(&chunk)?;
@@ -6050,7 +6112,7 @@ mod tests {
 		let out_file = File::create(&output_path)?;
 
 		// Wrap it in your OutputBuffer and run the loop:
-		let mut out = OutputBuffer::new(Box::new(out_file));
+		let mut out = OutputBuffer::new(Box::new(out_file), false);
 		let mut nline = 0;
 		while let Some(chunk) = reader.get_line()? {
 			out.write_chunk(&chunk)?;
@@ -6085,7 +6147,7 @@ mod tests {
 		let out_file = File::create(&output_path)?;
 
 		// Wrap it in your OutputBuffer and run the loop:
-		let mut out = OutputBuffer::new(Box::new(out_file));
+		let mut out = OutputBuffer::new(Box::new(out_file), false);
 		let mut nline = 0;
 		while let Some(chunk) = reader.get_line()? {
 			out.write_chunk(&chunk)?;
@@ -6120,7 +6182,7 @@ mod tests {
 		let out_file = File::create(&output_path)?;
 
 		// Wrap it in your OutputBuffer and run the loop:
-		let mut out = OutputBuffer::new(Box::new(out_file));
+		let mut out = OutputBuffer::new(Box::new(out_file), false);
 		let mut nline = 0;
 		while let Some(chunk) = reader.get_line()? {
 			out.write_chunk(&chunk)?;
@@ -6424,6 +6486,7 @@ mod tests {
 		let file = tempfile().unwrap();
 		let buf = OutputBuffer {
 			out: BufWriter::new(Box::new(file.try_clone().unwrap())),
+			line_buffered: false,
 			#[cfg(unix)]
 			max_pending_write: 8,
 			#[cfg(unix)]
@@ -7316,9 +7379,14 @@ use tempfile::NamedTempFile;
 use uucore::display::Quotable;
 
 use brush_core::openfiles::OpenFile;
-use crate::sed::error_handling::{IoContext, SedError, SedResult};
-
-use crate::sed::{command::ProcessingContext, fast_io::OutputBuffer};
+use crate::{
+	host::is_regular_file,
+	sed::{
+		command::ProcessingContext,
+		error_handling::{IoContext, SedError, SedResult},
+		fast_io::OutputBuffer,
+	},
+};
 
 /// Context for in-place editing
 pub struct InPlace {
@@ -7336,9 +7404,10 @@ impl InPlace {
 	/// Depending on its settings it may or may not perform in-place
 	/// editing, backup the original file, or follow symlinks.
 	pub fn new_with_stdout(context: ProcessingContext, stdout: OpenFile) -> Self {
+		let line_buffered = !is_regular_file(&stdout);
 		Self {
 			stdout: stdout.clone(),
-			output:          OutputBuffer::new(Box::new(stdout.clone())),
+			output:          OutputBuffer::new(Box::new(stdout.clone()), line_buffered),
 			in_place:        context.in_place,
 			in_place_suffix: context.in_place_suffix,
 			follow_symlinks: context.follow_symlinks,
@@ -7372,7 +7441,8 @@ impl InPlace {
 	/// to the context settings.
 	fn begin_resolved(&mut self, file_name: &Path) -> SedResult<&mut OutputBuffer> {
 		if !self.in_place {
-			self.output = OutputBuffer::new(Box::new(self.stdout.clone()));
+			self.output =
+				OutputBuffer::new(Box::new(self.stdout.clone()), !is_regular_file(&self.stdout));
 			return Ok(&mut self.output);
 		}
 
@@ -7401,8 +7471,10 @@ impl InPlace {
 			fs::set_permissions(temp_file.path(), perms)?;
 		}
 
-		let output =
-			OutputBuffer::new(Box::new(temp_file.reopen().expect("reopening NamedTempFile")));
+		let output = OutputBuffer::new(
+			Box::new(temp_file.reopen().expect("reopening NamedTempFile")),
+			false,
+		);
 		self.output = output;
 		self.temp_file = Some(temp_file);
 		self.original_path = Some(file_name.to_path_buf());
@@ -7913,7 +7985,7 @@ fn re_or_saved_re<'a>(
 
 #[cfg(unix)]
 fn shell_command(cmd: &str, host: &Host) -> std::process::Command {
-	let mut c = std::process::Command::new("/bin/sh");
+	let mut c = std::process::Command::new("sh");
 	c.arg("-c").arg(cmd);
 	// run relative to the shell's cwd,
 	// not the host process cwd. `output()` already keeps the child's stdio
@@ -8822,9 +8894,15 @@ impl ScriptLineProvider {
 						line_number: 0,
 					};
 				} else {
-					// resolve `-f`
-					// script files against the shell working directory.
-					let resolved = if p.is_absolute() { p.clone() } else { self.cwd.join(p) };
+					// resolve `-f` script files against the shell working
+					// directory, normalizing MSYS/WSL drive aliases (`/c/...`)
+					// to native drive paths first — mirrors `Host::resolve`.
+					let normalized = brush_core::sys::fs::normalize_shell_path(p);
+					let resolved = if normalized.is_absolute() {
+						normalized.into_owned()
+					} else {
+						self.cwd.join(normalized)
+					};
 					let file = File::open(resolved)
 						.map_err_context(|| format!("error opening script file {}", p.quote()))?;
 					self.state = State::Active {
@@ -8913,6 +8991,30 @@ mod tests {
 		}
 
 		assert_eq!(lines, vec!["file line 1", "file line 2"]);
+	}
+
+	#[cfg(windows)]
+	#[test]
+	fn test_file_source_resolves_msys_drive_alias() {
+		let mut temp_file = NamedTempFile::new().unwrap();
+		writeln!(temp_file, "aliased line 1").unwrap();
+		writeln!(temp_file, "aliased line 2").unwrap();
+
+		let native = temp_file.path().to_string_lossy().replace('\\', "/");
+		let (drive, tail) = native
+			.split_once(":/")
+			.unwrap_or_else(|| panic!("expected drive-qualified temp path, got {native:?}"));
+		let alias = format!("/{}/{}", drive.to_ascii_lowercase(), tail);
+
+		let input = vec![ScriptValue::PathVal(PathBuf::from(alias))];
+		let mut provider = ScriptLineProvider::new(input);
+
+		let mut lines = Vec::new();
+		while let Some(line) = provider.next_line().unwrap() {
+			lines.push(line.trim_end().to_string());
+		}
+
+		assert_eq!(lines, vec!["aliased line 1", "aliased line 2"]);
 	}
 
 	#[test]

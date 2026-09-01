@@ -4,6 +4,7 @@ import { connect, type Subprocess } from "bun";
 import {
 	STATS_DASHBOARD_HEADER,
 	STATS_DASHBOARD_HOSTNAME,
+	STATS_DASHBOARD_HOSTNAME_HEADER,
 	STATS_DASHBOARD_SECURITY_VERSION,
 } from "../src/port-conflict";
 import { startServer } from "../src/server";
@@ -24,6 +25,15 @@ async function tcpConnects(hostname: string, port: number): Promise<boolean> {
 	} catch {
 		return false;
 	}
+}
+function getNonLoopbackHostname(): string | undefined {
+	const interfaces = networkInterfaces();
+	for (const name in interfaces) {
+		for (const address of interfaces[name] ?? []) {
+			if (address.family === "IPv4" && !address.internal) return address.address;
+		}
+	}
+	return undefined;
 }
 
 const holderProcesses: Array<Subprocess<"ignore", "pipe", "pipe">> = [];
@@ -77,26 +87,34 @@ describe("startServer access", () => {
 			const response = await fetch(`http://${server.hostname}:${server.port}/api/stats/models`);
 			expect(response.status).toBe(200);
 			expect(response.headers.get(STATS_DASHBOARD_HEADER)).toBe(STATS_DASHBOARD_SECURITY_VERSION);
+			expect(response.headers.get(STATS_DASHBOARD_HOSTNAME_HEADER)).toBe(STATS_DASHBOARD_HOSTNAME);
 			expect(response.headers.get("Access-Control-Allow-Origin")).toBeNull();
 			await response.body?.cancel();
 
-			let nonLoopbackHostname: string | undefined;
-			const interfaces = networkInterfaces();
-			for (const name in interfaces) {
-				const addresses = interfaces[name] ?? [];
-				for (const address of addresses) {
-					if (address.family === "IPv4" && !address.internal) {
-						nonLoopbackHostname = address.address;
-						break;
-					}
-				}
-				if (nonLoopbackHostname) break;
-			}
-			expect(nonLoopbackHostname).toBeDefined();
+			const nonLoopbackHostname = getNonLoopbackHostname();
 			expect(await tcpConnects(server.hostname, server.port)).toBe(true);
-			if (nonLoopbackHostname) {
-				expect(await tcpConnects(nonLoopbackHostname, server.port)).toBe(false);
-			}
+			if (nonLoopbackHostname) expect(await tcpConnects(nonLoopbackHostname, server.port)).toBe(false);
+		} finally {
+			server.stop();
+		}
+	});
+
+	it("serves non-loopback requests only when explicitly requested", async () => {
+		const nonLoopbackHostname = getNonLoopbackHostname();
+		if (!nonLoopbackHostname) return;
+
+		const server = await startServer(0, "0.0.0.0");
+
+		try {
+			expect(server.hostname).toBe("0.0.0.0");
+			expect(await tcpConnects(nonLoopbackHostname, server.port)).toBe(true);
+
+			const response = await fetch(`http://${STATS_DASHBOARD_HOSTNAME}:${server.port}/api/stats/models`);
+			expect(response.status).toBe(200);
+			expect(response.headers.get(STATS_DASHBOARD_HEADER)).toBe(STATS_DASHBOARD_SECURITY_VERSION);
+			expect(response.headers.get(STATS_DASHBOARD_HOSTNAME_HEADER)).toBe("0.0.0.0");
+			expect(response.headers.get("Access-Control-Allow-Origin")).toBeNull();
+			await response.body?.cancel();
 		} finally {
 			server.stop();
 		}
@@ -110,7 +128,12 @@ describe("startServer port conflicts", () => {
 			hostname: STATS_DASHBOARD_HOSTNAME,
 			fetch: request =>
 				new URL(request.url).pathname === "/api/stats/models"
-					? Response.json([], { headers: { [STATS_DASHBOARD_HEADER]: STATS_DASHBOARD_SECURITY_VERSION } })
+					? Response.json([], {
+							headers: {
+								[STATS_DASHBOARD_HEADER]: STATS_DASHBOARD_SECURITY_VERSION,
+								[STATS_DASHBOARD_HOSTNAME_HEADER]: STATS_DASHBOARD_HOSTNAME,
+							},
+						})
 					: new Response("dashboard"),
 		});
 

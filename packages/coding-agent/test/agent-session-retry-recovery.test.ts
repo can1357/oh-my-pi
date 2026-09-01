@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { scheduler } from "node:timers/promises";
 import { Agent } from "@oh-my-pi/pi-agent-core";
@@ -119,16 +119,24 @@ function successfulAssistantEntry(sessionManager: SessionManager, text: string):
 
 describe("AgentSession retry recovery", () => {
 	let tempDir: TempDir;
+	let fixtureDir: TempDir;
 	let authStorage: AuthStorage;
 	let modelRegistry: ModelRegistry;
 	let sessions: AgentSession[];
 	let managers: SessionManager[];
 
+	beforeAll(async () => {
+		fixtureDir = TempDir.createSync("@pi-retry-recovery-fixture-");
+		authStorage = await AuthStorage.create(path.join(fixtureDir.path(), "testauth.db"));
+		modelRegistry = new ModelRegistry(authStorage, path.join(fixtureDir.path(), "models.yml"));
+	});
+
 	beforeEach(async () => {
 		tempDir = TempDir.createSync("@pi-retry-recovery-");
-		authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
 		vi.spyOn(aiStream, "getEnvApiKey").mockReturnValue(undefined);
-		modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));
+		await authStorage.remove("anthropic");
+		authStorage.removeRuntimeApiKey("anthropic");
+		modelRegistry.clearSuppressedSelectors();
 		sessions = [];
 		managers = [];
 	});
@@ -140,9 +148,13 @@ describe("AgentSession retry recovery", () => {
 		for (const manager of managers.splice(0).reverse()) {
 			await manager.close();
 		}
-		authStorage.close();
 		tempDir.removeSync();
 		vi.restoreAllMocks();
+	});
+
+	afterAll(() => {
+		authStorage.close();
+		fixtureDir.removeSync();
 	});
 
 	async function runCredentialRecovery(): Promise<RecoveryRun> {

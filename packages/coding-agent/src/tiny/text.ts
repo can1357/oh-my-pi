@@ -165,7 +165,11 @@ export function normalizeGeneratedTitle(value: string | null | undefined, source
 		.replace(/[.!?]$/, "")
 		.trim();
 	if (!title || title.toLowerCase() === NO_TITLE_SENTINEL) return null;
-	if (title.length > MAX_TITLE_CHARS || (title.match(TITLE_WORD)?.length ?? 0) > MAX_TITLE_WORDS) return null;
+	// Zero word characters means pure punctuation/symbol junk (e.g. ".."), which
+	// a sampling model occasionally emits instead of a title; reject so the
+	// caller defers titling rather than naming the session "..".
+	const words = title.match(TITLE_WORD)?.length ?? 0;
+	if (words === 0 || title.length > MAX_TITLE_CHARS || words > MAX_TITLE_WORDS) return null;
 	return sourceText === undefined ? title : reconcileTitleCasing(title, sourceText);
 }
 

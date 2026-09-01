@@ -1,4 +1,4 @@
-import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeAll, describe, expect, it, type Mock, vi } from "bun:test";
 import { Container, type OverlayOptions, setKeybindings } from "@oh-my-pi/pi-tui";
 import { KeybindingsManager } from "../../../src/config/keybindings";
 import type { ExtensionAskDialogQuestion, ExtensionUIContext } from "../../../src/extensibility/extensions";
@@ -50,6 +50,7 @@ function makeHarness() {
 			uiContext = context;
 		},
 		addAutocompleteProvider,
+		syncComposerShape: vi.fn(),
 	} as unknown as InteractiveModeContext;
 
 	const controller = new ExtensionUiController(ctx);
@@ -315,5 +316,38 @@ describe("ExtensionUiController custom overlay", () => {
 			maxHeight: "100%",
 			margin: 0,
 		});
+	});
+
+	it("rejects and restores the editor when a custom factory fails", async () => {
+		const harness = makeHarness();
+		const ui = await harness.init();
+		const failure = new Error("custom factory failed");
+
+		await expect(ui.custom(() => Promise.reject(failure))).rejects.toBe(failure);
+
+		expect(harness.editorContainer.children).toEqual([harness.editor]);
+		expect(harness.setFocus).toHaveBeenLastCalledWith(harness.editor);
+	});
+
+	it("aborts a pending custom factory and disposes its late component", async () => {
+		const harness = makeHarness();
+		const ui = await harness.init();
+		harness.editor.setText("draft before factory");
+		const controller = new AbortController();
+		const factory = Promise.withResolvers<Container>();
+		const component = new Container() as Container & { dispose: Mock<() => void> };
+		component.dispose = vi.fn();
+
+		const pending = ui.custom(() => factory.promise, { signal: controller.signal });
+		harness.editor.setText("draft typed while factory is pending");
+		controller.abort();
+
+		await expect(pending).rejects.toBe(controller.signal.reason);
+		factory.resolve(component);
+		await flushMicrotasks();
+
+		expect(component.dispose).toHaveBeenCalledTimes(1);
+		expect(harness.editorContainer.children).toEqual([harness.editor]);
+		expect(harness.editor.getText()).toBe("draft typed while factory is pending");
 	});
 });

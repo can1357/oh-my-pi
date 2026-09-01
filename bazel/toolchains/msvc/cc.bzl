@@ -124,15 +124,20 @@ set(CMAKE_CXX_COMPILER "${CMAKE_CURRENT_LIST_DIR}/bin/clang-cl")
 set(CMAKE_LINKER "${CMAKE_CURRENT_LIST_DIR}/bin/lld-link")
 set(CMAKE_RC_COMPILER "${CMAKE_CURRENT_LIST_DIR}/bin/llvm-rc")
 set(CMAKE_MT "${CMAKE_CURRENT_LIST_DIR}/bin/llvm-mt")
-# The xwin splat carries release CRT import libs only (msvcrt.lib, no
-# msvcrtd.lib — same as cargo-xwin). try_compile defaults to the Debug
-# configuration, whose /MDd would demand the debug CRT; pin try_compile to
-# Release and the runtime library to dynamic release /MD for every config
-# (CMP0091 NEW makes CMAKE_MSVC_RUNTIME_LIBRARY authoritative even for
-# projects with ancient cmake_minimum_required, e.g. bundled opus).
+# The xwin splat carries release CRT import + static libs only (msvcrt.lib /
+# libcmt.lib, no debug msvcrtd.lib / libcmtd.lib — same as cargo-xwin).
+# try_compile defaults to the Debug configuration, whose debug CRT the splat
+# lacks; pin try_compile to Release. The shipped win32 addon statically links
+# the CRT (rustc +crt-static + the static_link_msvcrt cc feature; see
+# bazel/defs.bzl and crates/pi-natives/BUILD.bazel), so pin the runtime library
+# to the static release CRT /MT for every config as well — otherwise CMake's
+# authoritative CMAKE_MSVC_RUNTIME_LIBRARY (CMP0091 NEW) would emit /MD for the
+# bundled opus objects, which then import VCRUNTIME140.dll and conflict with the
+# static CRT the rest of the addon links (issue #8439). Keep this in lock-step
+# with the static_link_msvcrt feature: both must select the static CRT together.
 set(CMAKE_TRY_COMPILE_CONFIGURATION Release)
 set(CMAKE_POLICY_DEFAULT_CMP0091 NEW)
-set(CMAKE_MSVC_RUNTIME_LIBRARY MultiThreadedDLL)
+set(CMAKE_MSVC_RUNTIME_LIBRARY MultiThreaded)
 """
 
 _BUILD = """\

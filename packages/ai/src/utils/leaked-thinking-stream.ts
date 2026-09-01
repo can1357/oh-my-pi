@@ -25,7 +25,7 @@
  * events are forwarded verbatim.
  */
 
-import { isAnthropicWebSearchHistoryBlock } from "../providers/anthropic-wire";
+import { isAnthropicServerToolHistoryBlock } from "../providers/anthropic-wire";
 import type {
 	AnthropicServerToolContent,
 	AssistantMessage,
@@ -430,7 +430,7 @@ class LeakedThinkingProjector {
 		const pairedIndexes = new Set<number>();
 		for (let srcIndex = 0; srcIndex < message.content.length; srcIndex++) {
 			const content = message.content[srcIndex];
-			if (content?.type !== "anthropicServerTool" || !isAnthropicWebSearchHistoryBlock(content.block)) continue;
+			if (content?.type !== "anthropicServerTool" || !isAnthropicServerToolHistoryBlock(content.block)) continue;
 			if (content.block.type === "server_tool_use") {
 				pendingCalls.set(content.block.id, srcIndex);
 				continue;

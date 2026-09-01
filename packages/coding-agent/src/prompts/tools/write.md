@@ -3,7 +3,7 @@ Creates or overwrites file at specified path.
 <conditions>
 - Creating new files explicitly required by task
 - Replacing entire file contents when editing would be more complex
-- Supports `.tar`, `.tar.gz`, `.tgz`, `.zip`, and ZIP-based `.jar`/`.war`/`.ear`/`.apk` archive entries via `archive.ext:path/inside/archive`
+- Supports `.zip` (and ZIP-based `.jar`/`.war`/`.ear`/`.apk`), `.tar`, `.tar.gz`/`.tgz`, `.tar.zst`, and `.asar` archive entries via `archive.ext:path/inside/archive`; other archive formats (`.rar`, `.7z`, `.iso`, …) are read-only
 - Supports SQLite row operations via `db.sqlite:table` (insert), `db.sqlite:table:key` (update with JSON content, delete with empty content)
 </conditions>
 

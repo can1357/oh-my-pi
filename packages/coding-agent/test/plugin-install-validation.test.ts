@@ -126,6 +126,48 @@ describe("PluginManager.install load validation", () => {
 		expect(result.path).toBe(path.join(pluginsNodeModules, "pi-figma-remote-auth"));
 	});
 
+	test("rejects and rolls back an install when the extension factory throws", async () => {
+		vi.spyOn(Bun, "spawn").mockImplementation(((cmd: string[]) => {
+			expect(cmd).toEqual(["bun", "install", "factory-failure-plugin"]);
+
+			const prepare = (async () => {
+				await Bun.write(
+					pluginsPkgJson,
+					JSON.stringify(
+						{
+							name: "omp-plugins",
+							private: true,
+							dependencies: { "factory-failure-plugin": "1.0.0" },
+						},
+						null,
+						2,
+					),
+				);
+				await writePluginPackage(pluginsNodeModules, "factory-failure-plugin", {
+					version: "1.0.0",
+					source: 'export default function() { throw new Error("factory-time failure"); }\n',
+				});
+			})();
+
+			return {
+				pid: 1,
+				stdout: emptyStream(),
+				stderr: emptyStream(),
+				exited: prepare.then(() => 0),
+			} as Subprocess;
+		}) as typeof Bun.spawn);
+
+		await expect(new PluginManager(tmpRoot).install("factory-failure-plugin")).rejects.toThrow(
+			/factory-time failure/,
+		);
+
+		const pluginsPackage = await Bun.file(pluginsPkgJson).json();
+		expect(pluginsPackage.dependencies ?? {}).toEqual({});
+		expect(await Bun.file(path.join(pluginsNodeModules, "factory-failure-plugin", "package.json")).exists()).toBe(
+			false,
+		);
+	});
+
 	test("rejects an install whose extension entry cannot resolve its dependencies", async () => {
 		vi.spyOn(Bun, "spawn").mockImplementation(((cmd: string[]) => {
 			expect(cmd).toEqual(["bun", "install", "broken-plugin"]);

@@ -8,7 +8,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { logger, postmortem } from "@oh-my-pi/pi-utils";
+import { getSafeProjectCwd, logger, postmortem } from "@oh-my-pi/pi-utils";
 import fnEnvHelper from "./shell-snapshot-fn-env.sh" with { type: "text" };
 
 const cachedSnapshotPaths = new Map<string, string>();
@@ -208,10 +208,14 @@ fi
 /**
  * Create a shell snapshot, caching the result.
  * Returns the path to the snapshot file, or null if creation failed.
+ *
+ * `timeoutMs` is configurable so callers exercising failure handling do not
+ * have to wait out the production startup budget.
  */
 export async function getOrCreateSnapshot(
 	shell: string,
 	env: Record<string, string | undefined>,
+	timeoutMs = SNAPSHOT_TIMEOUT_MS,
 ): Promise<string | null> {
 	const cacheKey = shell;
 	// Return cached snapshot if valid
@@ -280,11 +284,12 @@ export async function getOrCreateSnapshot(
 			}
 		}
 		const child = Bun.spawn([shell, "-c", script], {
+			cwd: getSafeProjectCwd(),
 			env: spawnEnv,
 			stdin: "ignore",
 			stdout: "ignore",
 			stderr: "ignore",
-			timeout: SNAPSHOT_TIMEOUT_MS,
+			timeout: timeoutMs,
 			killSignal: "SIGKILL",
 		});
 

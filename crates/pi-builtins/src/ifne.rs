@@ -255,35 +255,35 @@ mod tests {
 	#[cfg(unix)]
 	#[test]
 	fn nonempty_stdin_runs_command_with_stdin() {
-		let result = run_in("hello world\n", &["/bin/cat"]);
+		let result = run_in("hello world\n", &["cat"]);
 		assert_eq!(result, (0, "hello world\n".to_string(), String::new()));
 	}
 
 	#[cfg(unix)]
 	#[test]
 	fn empty_stdin_skips_command() {
-		let result = run_in("", &["/bin/sh", "-c", "echo ran"]);
+		let result = run_in("", &["sh", "-c", "echo ran"]);
 		assert_eq!(result, (0, String::new(), String::new()));
 	}
 
 	#[cfg(unix)]
 	#[test]
 	fn invert_runs_command_on_empty_stdin() {
-		let result = run_in("", &["-n", "/bin/sh", "-c", "echo ran"]);
+		let result = run_in("", &["-n", "sh", "-c", "echo ran"]);
 		assert_eq!(result, (0, "ran\n".to_string(), String::new()));
 	}
 
 	#[cfg(unix)]
 	#[test]
 	fn invert_passes_nonempty_stdin_through() {
-		let result = run_in("data\n", &["-n", "/bin/sh", "-c", "echo ran"]);
+		let result = run_in("data\n", &["-n", "sh", "-c", "echo ran"]);
 		assert_eq!(result, (0, "data\n".to_string(), String::new()));
 	}
 
 	#[cfg(unix)]
 	#[test]
 	fn child_exit_code_propagates() {
-		let result = run_in("x", &["/bin/sh", "-c", "exit 3"]);
+		let result = run_in("x", &["sh", "-c", "exit 3"]);
 		assert_eq!(result, (3, String::new(), String::new()));
 	}
 
@@ -299,7 +299,7 @@ mod tests {
 	#[test]
 	fn early_exiting_child_is_not_an_error() {
 		let big = "a".repeat(1 << 20);
-		let result = run_in(&big, &["/usr/bin/head", "-c", "1"]);
+		let result = run_in(&big, &["head", "-c", "1"]);
 		assert_eq!(result, (0, "a".to_string(), String::new()));
 	}
 

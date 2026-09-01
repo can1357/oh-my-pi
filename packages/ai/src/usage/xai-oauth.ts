@@ -50,6 +50,7 @@ interface XaiWeeklyBillingConfig {
 	productUsage: XaiProductUsage[];
 	onDemandCap?: number;
 	onDemandUsed?: number;
+	inferredPercent?: boolean;
 }
 
 /**
@@ -137,7 +138,16 @@ function parseWeeklyBillingConfig(raw: Record<string, unknown>): XaiWeeklyBillin
 		return null;
 	}
 
-	const creditUsagePercent = parsePercent(raw.creditUsagePercent);
+	// Fresh weekly periods (or accounts with 0 usage) omit creditUsagePercent;
+	// default to 0 only when the weekly period is active (end > now).
+	// Expired periods without explicit usage data are rejected to retain last good cache.
+	const inferredPercent = raw.creditUsagePercent === undefined || raw.creditUsagePercent === null;
+	let creditUsagePercent: number | undefined;
+	if (inferredPercent) {
+		creditUsagePercent = end > Date.now() ? 0 : undefined;
+	} else {
+		creditUsagePercent = parsePercent(raw.creditUsagePercent);
+	}
 	if (creditUsagePercent === undefined) return null;
 
 	const productUsage: XaiProductUsage[] = [];
@@ -146,7 +156,8 @@ function parseWeeklyBillingConfig(raw: Record<string, unknown>): XaiWeeklyBillin
 		for (const item of raw.productUsage) {
 			if (!isRecord(item)) continue;
 			const product = typeof item.product === "string" ? item.product.trim() : "";
-			const usagePercent = parsePercent(item.usagePercent);
+			const usagePercent =
+				item.usagePercent === undefined || item.usagePercent === null ? 0 : parsePercent(item.usagePercent);
 			if (!product || usagePercent === undefined) continue;
 			productUsage.push({ product, usagePercent });
 		}
@@ -163,6 +174,7 @@ function parseWeeklyBillingConfig(raw: Record<string, unknown>): XaiWeeklyBillin
 		productUsage,
 		onDemandCap: parseOnDemandAmount(raw.onDemandCap),
 		onDemandUsed: parseOnDemandAmount(raw.onDemandUsed),
+		inferredPercent,
 	};
 }
 
@@ -189,6 +201,13 @@ function parseMonthlyBillingConfig(raw: Record<string, unknown>): XaiMonthlyBill
 		onDemandCap: parseOnDemandAmount(raw.onDemandCap),
 		onDemandUsed: parseOnDemandAmount(raw.onDemandUsed),
 	};
+}
+
+function confirmsNoMonthlyQuota(raw: Record<string, unknown>): boolean {
+	const limit = parseOnDemandAmount(raw.monthlyLimit);
+	if (limit !== undefined) return limit === 0;
+	// Some weekly accounts return the credits shape from the default endpoint too.
+	return parseWeeklyBillingConfig(raw)?.inferredPercent === true;
 }
 
 function buildOnDemandLimit(
@@ -361,10 +380,31 @@ export const xaiOauthUsageProvider: UsageProvider = {
 					: null;
 		}
 
-		if (!weekly && !monthly) return null;
+		// When an account is marked unified billing and weekly credits were only inferred
+		// from an omitted percentage field:
+		// - If a positive monthly quota is returned, use the monthly quota alone.
+		// - If the monthly endpoint returned a valid config without positive monthly quota,
+		//   confirm that this account relies on the weekly reset cycle and use weekly.
+		// - If the monthly fetch failed (transient network error), reject inferred weekly
+		//   so AuthStorage's retain-last-good cache preserves the previous valid snapshot.
+		let effectiveWeekly = weekly;
+		if (weekly?.inferredPercent && creditsLooksUnified) {
+			if (monthly) {
+				effectiveWeekly = null;
+			} else {
+				const monthlyConfig =
+					monthlyPayload && isRecord(monthlyPayload) && isRecord(monthlyPayload.config)
+						? monthlyPayload.config
+						: null;
+				if (!monthlyConfig || !confirmsNoMonthlyQuota(monthlyConfig)) {
+					effectiveWeekly = null;
+				}
+			}
+		}
+		if (!effectiveWeekly && !monthly) return null;
 
 		const limits: UsageLimit[] = [];
-		if (weekly) limits.push(...buildLimits(weekly, accountId));
+		if (effectiveWeekly) limits.push(...buildLimits(effectiveWeekly, accountId));
 		if (monthly) limits.push(...buildLimits(monthly, accountId));
 		// Deduplicate on-demand if both shapes carried the same cap (keep first).
 		const seen = new Set<string>();
@@ -375,12 +415,13 @@ export const xaiOauthUsageProvider: UsageProvider = {
 		});
 		if (deduped.length === 0) return null;
 
-		const billingKind = weekly && monthly ? "unified" : weekly ? "weekly" : "monthly";
-		const endpoint = weekly && monthly ? `${creditsUrl} + ${monthlyUrl}` : weekly ? creditsUrl : monthlyUrl;
+		const billingKind = effectiveWeekly && monthly ? "unified" : effectiveWeekly ? "weekly" : "monthly";
+		const endpoint =
+			effectiveWeekly && monthly ? `${creditsUrl} + ${monthlyUrl}` : effectiveWeekly ? creditsUrl : monthlyUrl;
 		const raw =
-			weekly && monthly
+			effectiveWeekly && monthly
 				? { credits: creditsPayload, monthly: monthlyPayload }
-				: weekly
+				: effectiveWeekly
 					? creditsPayload
 					: monthlyPayload;
 

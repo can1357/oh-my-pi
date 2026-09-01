@@ -81,77 +81,52 @@ void withHostGuard(async () => {
 `);
 	};
 
-	it("converts a top-level process.exit in an extension into a load error", async () => {
-		const ext = writeModule("rogue-extension.ts", "process.exit(0)\n");
-		const cwd = project!.path();
-		const originalExit = process.exit;
-
-		const result = await loadExtensions([ext], cwd);
-
-		expect(process.exit).toBe(originalExit);
-		expect(result.extensions).toEqual([]);
-		expect(result.errors).toHaveLength(1);
-		expect(result.errors[0].path).toBe(ext);
-		expect(result.errors[0].error).toContain("process.exit(0)");
-	});
-
-	it("converts a top-level process.exit in a hook into a load error", async () => {
-		const hook = writeModule("rogue-hook.ts", "process.exit(42)\n");
-		const cwd = project!.path();
-		const originalExit = process.exit;
-
-		const result = await loadHooks([hook], cwd);
-
-		expect(process.exit).toBe(originalExit);
-		expect(result.hooks).toEqual([]);
-		expect(result.errors).toHaveLength(1);
-		expect(result.errors[0].path).toBe(hook);
-		expect(result.errors[0].error).toContain("process.exit(42)");
-	});
-
-	it("converts hard exits from extension and hook factories into load errors", async () => {
-		const extension = writeModule("factory-exit-extension.ts", "export default function(pi) { process.exit(31); }\n");
-		const hook = writeModule("factory-exit-hook.ts", "export default function(pi) { process.exit(32); }\n");
+	it("converts extension and hook exits into load errors without blocking siblings", async () => {
+		const topLevelExtension = writeModule("top-level-exit-extension.ts", "process.exit(0)\n");
+		const factoryExtension = writeModule(
+			"factory-exit-extension.ts",
+			"export default function(pi) { process.exit(31); }\n",
+		);
 		const reallyExitExtension = writeModule(
 			"factory-really-exit-extension.ts",
 			"export default function(pi) { process.reallyExit(33); }\n",
 		);
+		const goodExtension = writeModule(
+			"good-extension.ts",
+			"export default function(pi) { pi.registerCommand('ok', { handler: async () => {} }); }\n",
+		);
+		const topLevelHook = writeModule("top-level-exit-hook.ts", "process.exit(42)\n");
+		const factoryHook = writeModule("factory-exit-hook.ts", "export default function(pi) { process.exit(32); }\n");
 		const cwd = project!.path();
 		const originalExit = process.exit;
 		const originalReallyExit = process.reallyExit;
 
-		const extensionResult = await loadExtensions([extension], cwd);
-		const hookResult = await loadHooks([hook], cwd);
-		const reallyExitResult = await loadExtensions([reallyExitExtension], cwd);
+		const extensionResult = await loadExtensions(
+			[topLevelExtension, factoryExtension, reallyExitExtension, goodExtension],
+			cwd,
+		);
+		const hookResult = await loadHooks([topLevelHook, factoryHook], cwd);
 
 		expect(process.exit).toBe(originalExit);
 		expect(process.reallyExit).toBe(originalReallyExit);
-		expect(extensionResult.extensions).toEqual([]);
-		expect(extensionResult.errors).toHaveLength(1);
-		expect(extensionResult.errors[0].path).toBe(extension);
-		expect(extensionResult.errors[0].error).toContain("process.exit(31)");
+		expect(extensionResult.extensions.map(extension => path.basename(extension.path))).toEqual(["good-extension.ts"]);
+		expect(
+			extensionResult.errors.map(({ path: modulePath, error }) => [
+				modulePath,
+				error.match(/process\.(?:exit|reallyExit)\(\d+\)/)?.[0],
+			]),
+		).toEqual([
+			[topLevelExtension, "process.exit(0)"],
+			[factoryExtension, "process.exit(31)"],
+			[reallyExitExtension, "process.reallyExit(33)"],
+		]);
 		expect(hookResult.hooks).toEqual([]);
-		expect(hookResult.errors).toHaveLength(1);
-		expect(hookResult.errors[0].path).toBe(hook);
-		expect(hookResult.errors[0].error).toContain("process.exit(32)");
-		expect(reallyExitResult.extensions).toEqual([]);
-		expect(reallyExitResult.errors).toHaveLength(1);
-		expect(reallyExitResult.errors[0].path).toBe(reallyExitExtension);
-		expect(reallyExitResult.errors[0].error).toContain("process.reallyExit(33)");
-	});
-
-	it("loads sibling modules even when one of them tries to exit", async () => {
-		const bad = writeModule("rogue-extension.ts", "process.exit(0)\n");
-		const good = writeModule(
-			"good-extension.ts",
-			"export default function(pi) { pi.registerCommand('ok', { handler: async () => {} }); }\n",
-		);
-		const cwd = project!.path();
-
-		const result = await loadExtensions([bad, good], cwd);
-
-		expect(result.errors.map(e => e.path)).toEqual([bad]);
-		expect(result.extensions.map(e => path.basename(e.path))).toEqual(["good-extension.ts"]);
+		expect(
+			hookResult.errors.map(({ path: modulePath, error }) => [modulePath, error.match(/process\.exit\(\d+\)/)?.[0]]),
+		).toEqual([
+			[topLevelHook, "process.exit(42)"],
+			[factoryHook, "process.exit(32)"],
+		]);
 	});
 
 	it("restores process.exit after a synchronous throw inside the guarded callback", async () => {

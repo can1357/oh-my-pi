@@ -13,11 +13,14 @@ import tomllib
 from collections.abc import Mapping
 from functools import cache
 from importlib import resources
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from robomp.git_ops import DirtyState
 from robomp.github_client import CommentInfo, IssueInfo, PullRequestInfo, RepoInfo
 from robomp.sandbox import Workspace
+
+if TYPE_CHECKING:
+    from robomp.worker import ReleaseTaskContext
 
 _PLACEHOLDER = re.compile(r"\{\{\s*([a-zA-Z0-9_.]+)\s*\}\}")
 
@@ -139,6 +142,41 @@ def system_append_pr_review(*, repo: RepoInfo, issue: IssueInfo, workspace: Work
     return render(
         _load("system_append_pr_review.md"),
         {"repo": repo, "issue": issue, "workspace": workspace, "bot_login": bot_login},
+    )
+
+
+def system_append_release(
+    *,
+    repo: RepoInfo,
+    release: ReleaseTaskContext,
+    workspace: Workspace,
+    release_commit_prefix: str,
+) -> str:
+    """Render the invariant release-repair instructions for every round."""
+    return render(
+        _load("system_append_release.md"),
+        {
+            "repo": repo,
+            "release": release,
+            "workspace": workspace,
+            "release_commit_prefix": release_commit_prefix,
+        },
+    )
+
+
+def kickoff_release(*, repo: RepoInfo, release: ReleaseTaskContext, workspace: Workspace) -> str:
+    """Render the first failed-CI round for a release."""
+    return render(
+        _load("kickoff_release.md"),
+        {"repo": repo, "release": release, "workspace": workspace},
+    )
+
+
+def followup_release(*, repo: RepoInfo, release: ReleaseTaskContext, workspace: Workspace) -> str:
+    """Render a later or crash-resumed failed-CI release round."""
+    return render(
+        _load("followup_release.md"),
+        {"repo": repo, "release": release, "workspace": workspace},
     )
 
 
@@ -390,15 +428,18 @@ __all__ = [
     "finalized_issue_comment",
     "finalized_pr_comment",
     "followup_comment",
+    "followup_release",
     "followup_review",
     "host_tool_description",
     "host_tool_parameter_description",
     "kickoff",
     "kickoff_directive",
+    "kickoff_release",
     "kickoff_pr_review",
     "render",
     "completion_reminder",
     "review_completion_reminder",
+    "system_append_release",
     "system_append_pr_review",
     "dirty_state_reminder",
     "resume_triage",

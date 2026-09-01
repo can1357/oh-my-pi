@@ -1,13 +1,17 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { isEexist, isEnoent, logger } from "@oh-my-pi/pi-utils";
 import { formatPathRelativeToCwd } from "../tools/path-utils";
 import { ToolError } from "../tools/tool-errors";
 import type {
 	CreateFile,
+	CreateFileOptions,
 	DeleteFile,
+	DeleteFileOptions,
 	Position,
 	Range,
 	RenameFile,
+	RenameFileOptions,
 	TextDocumentEdit,
 	TextEdit,
 	WorkspaceEdit,
@@ -77,7 +81,16 @@ export function rangesOverlap(a: Range, b: Range): boolean {
  * Byte-identical non-empty range edits are idempotent, so duplicate server
  * output is collapsed before overlap validation.
  */
+function rejectSnippetTextEdits(edits: TextEdit[]): void {
+	for (const edit of edits) {
+		if ("insertTextFormat" in edit && edit.insertTextFormat === 2) {
+			throw new ToolError("snippet-formatted LSP edits are unsupported");
+		}
+	}
+}
+
 export function sortAndValidateTextEdits(edits: TextEdit[]): TextEdit[] {
+	rejectSnippetTextEdits(edits);
 	const sorted = edits
 		.map((edit, index) => ({ edit, index }))
 		.sort((a, b) => {
@@ -153,15 +166,52 @@ export async function applyTextEdits(filePath: string, edits: TextEdit[]): Promi
 	await Bun.write(filePath, result);
 }
 
+/** A reference file and the text edits a rename computed for it. */
+export interface RenameReferenceEdit {
+	filePath: string;
+	edits: TextEdit[];
+}
+
+/**
+ * Apply a rename's reference edits and then move `source` → `dest` as one unit.
+ *
+ * The reference edits (import/usage rewrites in other files) must be written
+ * before the move so their positions match the pre-move file contents, but a
+ * failed move must not leave those files half-rewritten: each edited file is
+ * snapshotted first, and if `mkdir`/`rename` throws, every snapshot is restored
+ * before the error propagates. A failed move therefore leaves the source,
+ * destination, and every reference file exactly as they were.
+ *
+ * @throws the original `mkdir`/`rename` error, after rolling back the edits.
+ */
+export async function applyEditsThenRename(
+	references: RenameReferenceEdit[],
+	source: string,
+	dest: string,
+): Promise<void> {
+	const backups: Array<{ filePath: string; original: string }> = [];
+	for (const { filePath, edits } of references) {
+		backups.push({ filePath, original: await Bun.file(filePath).text() });
+		await applyTextEdits(filePath, edits);
+	}
+	try {
+		await fs.mkdir(path.dirname(dest), { recursive: true });
+		await fs.rename(source, dest);
+	} catch (err) {
+		await Promise.all(backups.map(({ filePath, original }) => Bun.write(filePath, original)));
+		throw err;
+	}
+}
+
 // =============================================================================
 // Workspace Edit Application
 // =============================================================================
 
 type WorkspaceEditOp =
 	| { kind: "text"; uri: string; edits: TextEdit[] }
-	| { kind: "create"; uri: string }
-	| { kind: "rename"; oldUri: string; newUri: string }
-	| { kind: "delete"; uri: string };
+	| { kind: "create"; uri: string; options?: CreateFileOptions }
+	| { kind: "rename"; oldUri: string; newUri: string; options?: RenameFileOptions }
+	| { kind: "delete"; uri: string; options?: DeleteFileOptions };
 
 /**
  * Flatten documentChanges into an ordered op list. Text edits are accumulated
@@ -207,7 +257,7 @@ function planDocumentChanges(documentChanges: NonNullable<WorkspaceEdit["documen
 			if (change.kind === "create") {
 				const createOp = change as CreateFile;
 				flushUri(createOp.uri);
-				ops.push({ kind: "create", uri: createOp.uri });
+				ops.push({ kind: "create", uri: createOp.uri, options: createOp.options });
 			} else if (change.kind === "rename") {
 				const renameOp = change as RenameFile;
 				// Per LSP §3.16.2 documentChanges are applied in declared order.
@@ -217,11 +267,16 @@ function planDocumentChanges(documentChanges: NonNullable<WorkspaceEdit["documen
 				// `options.overwrite` and `options.ignoreIfExists`).
 				flushSubtree(renameOp.oldUri);
 				flushSubtree(renameOp.newUri);
-				ops.push({ kind: "rename", oldUri: renameOp.oldUri, newUri: renameOp.newUri });
+				ops.push({
+					kind: "rename",
+					oldUri: renameOp.oldUri,
+					newUri: renameOp.newUri,
+					options: renameOp.options,
+				});
 			} else if (change.kind === "delete") {
 				const deleteOp = change as DeleteFile;
 				flushSubtree(deleteOp.uri);
-				ops.push({ kind: "delete", uri: deleteOp.uri });
+				ops.push({ kind: "delete", uri: deleteOp.uri, options: deleteOp.options });
 			}
 		}
 	}
@@ -234,14 +289,41 @@ function planDocumentChanges(documentChanges: NonNullable<WorkspaceEdit["documen
 	return ops;
 }
 
+/** One filesystem mutation actually performed by {@link applyWorkspaceEdit}. */
+export type ExecutedWorkspaceChange =
+	| { kind: "edit"; uri: string }
+	| { kind: "create"; uri: string }
+	| { kind: "rename"; oldUri: string; newUri: string }
+	| { kind: "delete"; uri: string };
+
+/** What {@link applyWorkspaceEdit} did: human-readable summaries plus the ops that really ran. */
+export interface WorkspaceEditResult {
+	applied: string[];
+	/** Ops that mutated the filesystem — skipped `ignoreIfExists`/`ignoreIfNotExists` ops are excluded. */
+	executed: ExecutedWorkspaceChange[];
+}
+
 /**
  * Apply a workspace edit (collection of file changes).
  * All text-edit batches are overlap-validated before anything is written so a
  * conflict throws without leaving the workspace half-applied.
- * Returns array of applied change descriptions.
+ *
+ * `onExecuted` fires after each filesystem mutation. When a later op throws,
+ * the callback has already reported the executed prefix — callers that must
+ * reconcile external state (e.g. LSP overlays) rely on this because the
+ * returned {@link WorkspaceEditResult} is lost on failure.
  */
-export async function applyWorkspaceEdit(edit: WorkspaceEdit, cwd: string): Promise<string[]> {
+export async function applyWorkspaceEdit(
+	edit: WorkspaceEdit,
+	cwd: string,
+	onExecuted?: (change: ExecutedWorkspaceChange) => void,
+): Promise<WorkspaceEditResult> {
 	const applied: string[] = [];
+	const executed: ExecutedWorkspaceChange[] = [];
+	const record = (change: ExecutedWorkspaceChange) => {
+		executed.push(change);
+		onExecuted?.(change);
+	};
 
 	if (edit.documentChanges) {
 		const ops = planDocumentChanges(edit.documentChanges);
@@ -253,20 +335,101 @@ export async function applyWorkspaceEdit(edit: WorkspaceEdit, cwd: string): Prom
 				const filePath = uriToFile(op.uri);
 				await applyTextEdits(filePath, op.edits);
 				applied.push(`Applied ${op.edits.length} edit(s) to ${formatPathRelativeToCwd(filePath, cwd)}`);
+				record({ kind: "edit", uri: op.uri });
 			} else if (op.kind === "create") {
 				const filePath = uriToFile(op.uri);
-				await Bun.write(filePath, "");
+				await fs.mkdir(path.dirname(filePath), { recursive: true });
+				try {
+					if (op.options?.overwrite) {
+						await Bun.write(filePath, "");
+					} else {
+						const handle = await fs.open(filePath, "wx");
+						await handle.close();
+					}
+				} catch (error) {
+					if (!(op.options?.ignoreIfExists && !op.options.overwrite && isEexist(error))) {
+						throw error;
+					}
+					continue;
+				}
 				applied.push(`Created ${formatPathRelativeToCwd(filePath, cwd)}`);
+				record({ kind: "create", uri: op.uri });
 			} else if (op.kind === "rename") {
 				const oldPath = uriToFile(op.oldUri);
 				const newPath = uriToFile(op.newUri);
 				await fs.mkdir(path.dirname(newPath), { recursive: true });
-				await fs.rename(oldPath, newPath);
+				if (oldPath !== newPath) {
+					// Displace an overwritten destination into a kernel-reserved sibling
+					// temp dir (same filesystem, so the moves stay atomic) instead of
+					// deleting it, so a failed rename (EXDEV, permissions) can restore
+					// it and leave the workspace exactly as it was.
+					let displaced: { dir: string; file: string } | undefined;
+					try {
+						const targetStat = await fs.lstat(newPath);
+						if (!op.options?.overwrite) {
+							if (op.options?.ignoreIfExists) continue;
+							throw new ToolError(`rename target already exists: ${formatPathRelativeToCwd(newPath, cwd)}`);
+						}
+						// Only displace the destination when it is a distinct file. On a
+						// case-insensitive filesystem a case-only rename resolves both
+						// paths to the same inode; moving newPath aside would move the
+						// source, so let fs.rename change the case in place instead.
+						const sourceStat = await fs.lstat(oldPath);
+						if (sourceStat.dev !== targetStat.dev || sourceStat.ino !== targetStat.ino) {
+							const holdDir = await fs.mkdtemp(path.join(path.dirname(newPath), ".omp-displaced-"));
+							const holdFile = path.join(holdDir, path.basename(newPath));
+							try {
+								await fs.rename(newPath, holdFile);
+							} catch (error) {
+								await fs.rm(holdDir, { recursive: true, force: true }).catch(() => {});
+								throw error;
+							}
+							displaced = { dir: holdDir, file: holdFile };
+						}
+					} catch (error) {
+						if (!isEnoent(error)) throw error;
+					}
+					try {
+						await fs.rename(oldPath, newPath);
+					} catch (error) {
+						if (displaced) {
+							try {
+								await fs.rename(displaced.file, newPath);
+							} catch {
+								// Restoration failed: the destination really is gone, so
+								// report it to reconciliation as an executed delete.
+								record({ kind: "delete", uri: op.newUri });
+							}
+							await fs.rm(displaced.dir, { recursive: true, force: true }).catch(() => {});
+						}
+						throw error;
+					}
+					if (displaced) {
+						await fs.rm(displaced.dir, { recursive: true, force: true }).catch((error: unknown) => {
+							logger.debug("LSP rename: failed to remove displaced overwrite target", {
+								displaced: displaced?.dir,
+								error: error instanceof Error ? error.message : String(error),
+							});
+						});
+					}
+				}
 				applied.push(`Renamed ${formatPathRelativeToCwd(oldPath, cwd)} → ${formatPathRelativeToCwd(newPath, cwd)}`);
+				record({ kind: "rename", oldUri: op.oldUri, newUri: op.newUri });
 			} else {
 				const filePath = uriToFile(op.uri);
-				await fs.rm(filePath, { recursive: true });
+				try {
+					const stat = await fs.lstat(filePath);
+					if (stat.isDirectory() && !stat.isSymbolicLink() && !op.options?.recursive) {
+						await fs.rmdir(filePath);
+					} else {
+						await fs.rm(filePath, { recursive: op.options?.recursive ?? false });
+					}
+				} catch (error) {
+					if (!(op.options?.ignoreIfNotExists && isEnoent(error))) throw error;
+					continue;
+				}
 				applied.push(`Deleted ${formatPathRelativeToCwd(filePath, cwd)}`);
+				record({ kind: "delete", uri: op.uri });
 			}
 		}
 	} else if (edit.changes) {
@@ -281,8 +444,9 @@ export async function applyWorkspaceEdit(edit: WorkspaceEdit, cwd: string): Prom
 			const filePath = uriToFile(uri);
 			await applyTextEdits(filePath, textEdits);
 			applied.push(`Applied ${textEdits.length} edit(s) to ${formatPathRelativeToCwd(filePath, cwd)}`);
+			record({ kind: "edit", uri });
 		}
 	}
 
-	return applied;
+	return { applied, executed };
 }

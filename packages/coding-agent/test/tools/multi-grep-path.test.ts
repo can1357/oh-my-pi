@@ -3,10 +3,12 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { createTools, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { resolveExplicitSearchPaths } from "@oh-my-pi/pi-coding-agent/tools/path-utils";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { GrepTool } from "../../src/tools/grep";
 
+const testSettings = Settings.isolated();
 const isWindows = process.platform === "win32";
 
 function createTestSession(cwd: string, overrides: Partial<ToolSession> = {}): ToolSession {
@@ -15,7 +17,7 @@ function createTestSession(cwd: string, overrides: Partial<ToolSession> = {}): T
 		hasUI: false,
 		getSessionFile: () => null,
 		getSessionSpawns: () => "*",
-		settings: Settings.isolated(),
+		settings: testSettings,
 		...overrides,
 	};
 }
@@ -58,9 +60,7 @@ describe.skipIf(isWindows)("search with omitted paths", () => {
 	});
 
 	it("defaults to the workspace root when paths is omitted", async () => {
-		const tools = await createTools(createTestSession(cwd));
-		const tool = tools.find(entry => entry.name === "grep");
-		if (!tool) throw new Error("Missing grep tool");
+		const tool = new GrepTool(createTestSession(cwd));
 
 		// Callers that omit `path` would otherwise be rejected at schema
 		// validation with `path: Invalid input` and never run. Omission must
@@ -74,9 +74,7 @@ describe.skipIf(isWindows)("search with omitted paths", () => {
 	});
 
 	it("defaults to the workspace root when path is an empty JSON array", async () => {
-		const tools = await createTools(createTestSession(cwd));
-		const tool = tools.find(entry => entry.name === "grep");
-		if (!tool) throw new Error("Missing grep tool");
+		const tool = new GrepTool(createTestSession(cwd));
 
 		const result = await tool.execute("search-empty-paths", {
 			pattern: "default-needle",
@@ -108,9 +106,7 @@ describe.skipIf(isWindows)("search across unrelated filesystem trees", () => {
 	});
 
 	it("returns matches from both trees without rooting the scan at /", async () => {
-		const tools = await createTools(createTestSession(cwd));
-		const tool = tools.find(entry => entry.name === "grep");
-		if (!tool) throw new Error("Missing grep tool");
+		const tool = new GrepTool(createTestSession(cwd));
 
 		const start = performance.now();
 		const result = await tool.execute("search-cross-tree", {
@@ -202,9 +198,7 @@ describe.skipIf(isWindows)("search with explicit walker-pruned file targets", ()
 		// The directory walker prunes `.git` unconditionally, so folding the
 		// explicit file into the walk's glob union silently returned 0 matches.
 		// The file must be read directly as its own target.
-		const tools = await createTools(createTestSession(repo));
-		const tool = tools.find(entry => entry.name === "grep");
-		if (!tool) throw new Error("Missing grep tool");
+		const tool = new GrepTool(createTestSession(repo));
 
 		const result = await tool.execute("search-git-config", {
 			pattern: "followTags",
@@ -219,9 +213,7 @@ describe.skipIf(isWindows)("search with explicit walker-pruned file targets", ()
 	it("dedupes matches when a file target overlaps a directory target", async () => {
 		await fs.mkdir(path.join(repo, "src"), { recursive: true });
 		await Bun.write(path.join(repo, "src", "a.ts"), "needle-dup\n");
-		const tools = await createTools(createTestSession(repo));
-		const tool = tools.find(entry => entry.name === "grep");
-		if (!tool) throw new Error("Missing grep tool");
+		const tool = new GrepTool(createTestSession(repo));
 
 		const result = await tool.execute("search-overlap", {
 			pattern: "needle-dup",

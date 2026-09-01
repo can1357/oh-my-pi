@@ -4,10 +4,10 @@ Host desktop control via JS: windows, screenshots, native input, OS accessibilit
 
 `code`: top-level await; persistent session; window handles, screenshot frames, AX refs survive calls. In scope: `desktop`, `wait(msOrFn, {timeout?, interval?})`, `assert(cond, msg?)`, `display`/`print`/`read`/`write`/`tool.*`.
 
-- `desktop.windows({app?, title?})` → `[{id, app, title, pid, x, y, width, height, focused}]`; `desktop.window(idOrFilter)` → Win; ambiguous → throws listing candidates. Also `desktop.focusedWindow()`, `desktop.displays()`, `desktop.capabilities()`.
+- `desktop.windows({app?, title?})` → `[{id, app, title, pid, x, y, width, height, focused}]`; `desktop.window(idOrFilter)` → `Promise<Win>` — MUST await it; ids are opaque strings; ambiguous → throws listing candidates. Also `desktop.focusedWindow()`, `desktop.displays()`, `desktop.capabilities()`.
 - Win: `.screenshot({silent?})`, `.click(x, y, {button?, count?, modifiers?, delivery?})`, `.doubleClick(x, y)`, `.move(x, y)`, `.drag([[x,y],…], {modifiers?, delivery?})`, `.scroll(x, y, {dx?, dy?, delivery?})`, `.type(text, {delivery?})`, `.press("cmd+shift+p", {delivery?})`, `.raise()`, `.ax({all?, maxDepth?})`, `.find({role?, title?, value?, limit?})` → all matches, `await .ref("e5")` → live element; expired → `StaleRef`.
 - `desktop.screenshot()/click()/…`: same input surface, all-displays composite.
-- AX elements: `.ax()` text `[ref=eN]`, `.find()`, `.ref()`, `desktop.elementAt(x,y)` (global desktop coords, `.bounds()` space; no screenshot), `desktop.focusedElement()`. Members: `.role/.title/.ref`, `.value()`, `.setValue(v)`, `.bounds()`, `.attributes()`, `.actions()`, `.perform(name)`, `.press()`, `.click()`, `.focus()`, `.parent()`, `.children()`.
+- AX elements: `win.ax({maxDepth?})` returns a formatted TEXT tree — a single STRING, one node per line with `[ref=eN]` tags; NOT an array of node objects (never iterate or `.map` it). `.find({role?, title?, value?, limit?})` → live element objects; `await .ref("e5")` → live element; expired → `StaleRef`. `desktop.elementAt(x,y)` (global desktop coords, `.bounds()` space; no screenshot), `desktop.focusedElement()`. Members: `.role/.title/.ref`, `.value()`, `.setValue(v)`, `.bounds()`, `.attributes()`, `.actions()`, `.perform(name)`, `.press()`, `.click()`, `.focus()`, `.parent()`, `.children()`.
 - Clipboard: `desktop.clipboard.read()` / `.write(text)`.
 
 ## Rules

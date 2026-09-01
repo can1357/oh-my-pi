@@ -78,6 +78,36 @@ describe("fetchWithRetry", () => {
 		expect(await response.text()).toBe("slow down");
 		expect(attempt).toBe(1);
 	});
+
+	it("normalizes aborts during response backoff", async () => {
+		const request = fetchWithRetry("https://example.invalid/response-backoff", {
+			fetch: async () => new Response("retry", { status: 503 }),
+			signal: AbortSignal.timeout(10),
+			defaultDelayMs: 1_000,
+			maxAttempts: 2,
+		});
+
+		await expect(request).rejects.toMatchObject({
+			name: "Error",
+			message: "Request was aborted",
+		});
+	});
+
+	it("normalizes aborts during network-error backoff", async () => {
+		const request = fetchWithRetry("https://example.invalid/network-backoff", {
+			fetch: async () => {
+				throw new TypeError("connection reset");
+			},
+			signal: AbortSignal.timeout(10),
+			defaultDelayMs: 1_000,
+			maxAttempts: 2,
+		});
+
+		await expect(request).rejects.toMatchObject({
+			name: "Error",
+			message: "Request was aborted",
+		});
+	});
 });
 
 describe("extractRetryHint", () => {

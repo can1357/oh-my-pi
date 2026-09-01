@@ -7,8 +7,8 @@ import { isEexist, isEnoent, logger, postmortem, procmgr, sanitizeText, setProce
 import { hostHasInheritableConsole } from "../eval/py/spawn-options";
 import { truncateHead, truncateHeadBytes, truncateTail, truncateTailBytes } from "../session/streaming-output";
 import { workerEnvFromParent } from "../subprocess/worker-client";
-import { daemonBrokerEndpoint } from "./paths";
-import { hasLiveDaemonProjectPresence } from "./presence";
+import { daemonBrokerEndpoint, writeDaemonScopeMeta } from "./paths";
+import { hasLiveDaemonProjectPresence, pruneDeadDaemonRuntimeDirs } from "./presence";
 import {
 	DAEMON_IDLE_GRACE_ENV,
 	DAEMON_PROJECT_DIR_ENV,
@@ -37,6 +37,7 @@ const MAX_LOG_BYTES = 25 * 1024 * 1024;
 const LOG_READ_BYTES = 2 * 1024 * 1024;
 const READINESS_BUFFER_CHARS = 64 * 1024;
 const RESTART_MAX_DELAY_MS = 30_000;
+const RESTART_BACKOFF_BASE_MS = 1_000;
 /**
  * Cap on terminal (exited/failed) daemons surfaced by `list`. Active daemons
  * are always shown in full; older history is truncated so the response stays
@@ -351,6 +352,7 @@ class DaemonBroker {
 	readonly #endpoint: string;
 	readonly #token: string;
 	readonly #idleGraceMs: number;
+	readonly #restartBackoffBaseMs: number;
 	readonly #records = new Map<string, ManagedDaemon>();
 	/**
 	 * Names reserved by an in-flight `start` before its record lands in
@@ -371,12 +373,19 @@ class DaemonBroker {
 	#idleTimer: NodeJS.Timeout | undefined;
 	#shuttingDown = false;
 
-	constructor(projectDir: string, runtimeDir: string, token: string, idleGraceMs: number) {
+	constructor(
+		projectDir: string,
+		runtimeDir: string,
+		token: string,
+		idleGraceMs: number,
+		restartBackoffBaseMs: number,
+	) {
 		this.#projectDir = projectDir;
 		this.#runtimeDir = runtimeDir;
 		this.#endpoint = daemonBrokerEndpoint(projectDir, runtimeDir);
 		this.#token = token;
 		this.#idleGraceMs = idleGraceMs;
+		this.#restartBackoffBaseMs = restartBackoffBaseMs;
 	}
 
 	async run(): Promise<void> {
@@ -955,7 +964,10 @@ class DaemonBroker {
 			record.snapshot.readyAt = undefined;
 			record.snapshot.readyMatch = undefined;
 			record.snapshot.state = "restarting";
-			const delay = Math.min(1_000 * 2 ** Math.min(record.consecutiveFailures, 5), RESTART_MAX_DELAY_MS);
+			const delay = Math.min(
+				this.#restartBackoffBaseMs * 2 ** Math.min(record.consecutiveFailures, 5),
+				RESTART_MAX_DELAY_MS,
+			);
 			record.log?.append(
 				`\n[daemon exited${exitCode === undefined ? "" : ` with code ${exitCode}`}; restarting in ${delay}ms]\n`,
 			);
@@ -990,6 +1002,13 @@ class DaemonBroker {
 		) {
 			this.#notifyCompletion(completion);
 		}
+		// Terminal settlement can free the last live persistent daemon. The idle
+		// timer that fired while that daemon was alive returned without rearming
+		// (see #scheduleIdleShutdown), so rearm here or the broker, its endpoint,
+		// timers, and record maps stay alive forever after the daemon exits. The
+		// timer re-checks clients, remaining live persistent records, and detached
+		// project presence before it shuts anything down.
+		this.#scheduleIdleShutdown();
 	}
 
 	async #logs(operation: Extract<DaemonOperation, { op: "logs" }>): Promise<DaemonRpcResult> {
@@ -1038,6 +1057,10 @@ class DaemonBroker {
 
 	async #wait(operation: Extract<DaemonOperation, { op: "wait" }>): Promise<DaemonRpcResult> {
 		const record = this.#record(operation.name);
+		// A wait observes exactly one launch generation. Automatic or explicit
+		// relaunches reuse the managed record, so polling the record without this
+		// binding can hang past an exit or consume the replacement's output.
+		const boundGeneration = record.generation;
 		await this.#refreshDetached(record);
 		let matched: string | undefined;
 		let pattern: RegExp | undefined;
@@ -1054,7 +1077,10 @@ class DaemonBroker {
 			record.snapshot.readyAt !== undefined ||
 			record.snapshot.state === "ready" ||
 			(record.snapshot.state === "running" && !record.spec.ready);
+		const generationEnded = (): boolean =>
+			record.generation !== boundGeneration || record.snapshot.state === "restarting";
 		const condition = (): boolean => {
+			if (generationEnded()) return true;
 			if (pattern) {
 				const match = pattern.exec(record.readinessBuffer);
 				if (!match) return false;
@@ -1067,6 +1093,13 @@ class DaemonBroker {
 			return readyObserved() || terminalState(record.snapshot.state);
 		};
 		const woke = condition() || (await this.#waitUntil(record, condition, operation.timeoutMs));
+		if (generationEnded()) {
+			const exit = record.snapshot.exitCode === undefined ? "" : ` with exit code ${record.snapshot.exitCode}`;
+			throw new Error(
+				`Daemon ${operation.name} generation ${boundGeneration} exited${exit}; ` +
+					"the wait was rejected instead of continuing against a replacement generation",
+			);
+		}
 		// A for:"ready" wait that woke on a terminal exit without ever observing
 		// readiness is still "not ready" — surface it as timed out so callers and the
 		// renderer don't chain work against a dead process.
@@ -1340,8 +1373,13 @@ class DaemonBroker {
 	}
 }
 
+export interface DaemonBrokerStartOptions {
+	/** Base of the exponential child-restart backoff. */
+	restartBackoffBaseMs?: number;
+}
+
 /** Start the detached project or global daemon broker selected by the CLI worker host. */
-export async function startDaemonBrokerFromEnvironment(): Promise<void> {
+export async function startDaemonBrokerFromEnvironment(options: DaemonBrokerStartOptions = {}): Promise<void> {
 	const projectDir = process.env[DAEMON_PROJECT_DIR_ENV];
 	const runtimeDir = process.env[DAEMON_RUNTIME_DIR_ENV];
 	if (!projectDir || !runtimeDir) throw new Error("Daemon broker environment is incomplete");
@@ -1351,13 +1389,32 @@ export async function startDaemonBrokerFromEnvironment(): Promise<void> {
 	delete process.env[DAEMON_IDLE_GRACE_ENV];
 	const parsedGrace = rawGrace === undefined ? DEFAULT_IDLE_GRACE_MS : Number.parseInt(rawGrace, 10);
 	const idleGraceMs = Number.isFinite(parsedGrace) && parsedGrace >= 0 ? parsedGrace : DEFAULT_IDLE_GRACE_MS;
+	const requestedRestartBackoffBaseMs = options.restartBackoffBaseMs ?? RESTART_BACKOFF_BASE_MS;
+	const restartBackoffBaseMs =
+		Number.isFinite(requestedRestartBackoffBaseMs) && requestedRestartBackoffBaseMs >= 0
+			? requestedRestartBackoffBaseMs
+			: RESTART_BACKOFF_BASE_MS;
 	await fs.mkdir(runtimeDir, { recursive: true, mode: 0o700 });
 	const lease = await acquireBrokerLease(runtimeDir);
 	if (!lease) return;
 	setProcessName("omp daemon broker");
+	// Record the scope's project dir so `omp ps` can map this hash-keyed runtime
+	// dir back to its project (and derive the Windows pipe name) offline.
+	void writeDaemonScopeMeta(runtimeDir, projectDir).catch(error => {
+		logger.warn("Failed to record daemon scope metadata", {
+			error: error instanceof Error ? error.message : String(error),
+		});
+	});
+	// Reclaim sibling daemon scopes left behind by dead brokers (issue #8674).
+	// Detached and non-throwing so it never delays clients connecting to us.
+	void pruneDeadDaemonRuntimeDirs(runtimeDir).catch(error => {
+		logger.warn("Daemon runtime prune failed", {
+			error: error instanceof Error ? error.message : String(error),
+		});
+	});
 	const token = (await Bun.file(path.join(runtimeDir, TOKEN_FILE)).text()).trim();
 	if (!token) throw new Error("Daemon broker token is empty");
-	const broker = new DaemonBroker(projectDir, runtimeDir, token, idleGraceMs);
+	const broker = new DaemonBroker(projectDir, runtimeDir, token, idleGraceMs, restartBackoffBaseMs);
 	const cancelCleanup = postmortem.register("daemon-broker", () => broker.shutdown());
 	try {
 		await broker.run();

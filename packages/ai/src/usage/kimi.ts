@@ -2,6 +2,7 @@ import { toNumber } from "@oh-my-pi/pi-catalog/utils";
 import { $env } from "@oh-my-pi/pi-utils";
 import { getKimiCommonHeaders } from "../registry/oauth/kimi";
 import type {
+	CredentialRankingStrategy,
 	UsageAmount,
 	UsageFetchContext,
 	UsageFetchParams,
@@ -285,11 +286,25 @@ export const kimiUsageProvider: UsageProvider = {
 			fetchedAt: nowMs,
 			limits,
 			metadata: {
+				accountId: credential.accountId,
 				endpoint: url,
 			},
 			raw: parsed.raw,
 		};
 
 		return report;
+	},
+};
+
+/** Ranks Kimi OAuth accounts by the canonical 5-hour and 7-day quota windows. */
+export const kimiRankingStrategy: CredentialRankingStrategy = {
+	findWindowLimits: report => ({
+		primary: report.limits.find(limit => limit.window?.id === "5h"),
+		secondary: report.limits.find(limit => limit.window?.id === "7d"),
+	}),
+	scopeLimits: report => report.limits.filter(limit => limit.window?.id === "5h" || limit.window?.id === "7d"),
+	windowDefaults: {
+		primaryMs: 5 * HOUR_MS,
+		secondaryMs: 7 * DAY_MS,
 	},
 };

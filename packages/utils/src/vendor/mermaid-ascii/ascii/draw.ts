@@ -21,7 +21,7 @@ import { gridToDrawingCoord, lineToDrawing } from './grid'
 import { splitLines } from './multiline-utils'
 import { getCorners } from './shapes/corners'
 import { getShapeAttachmentPoint } from './shapes/index'
-import { displayWidth, toCells, WIDE_PAD } from '../text-metrics'
+import { displayWidth, LABEL_SPACE, toCells, WIDE_PAD } from '../text-metrics'
 
 // ============================================================================
 // Node drawing — renders a node using shape-aware rendering
@@ -679,7 +679,7 @@ function drawTextOnLine(canvas: Canvas, line: DrawingCoord[], label: string, isU
   for (let i = 0; i < lines.length; i++) {
     const lineText = lines[i]!
     const startX = middleX - Math.floor(displayWidth(lineText) / 2)
-    drawText(canvas, { x: startX, y: startY + i }, lineText)
+    drawText(canvas, { x: startX, y: startY + i }, lineText.replaceAll(' ', LABEL_SPACE))
   }
 }
 

@@ -1,0 +1,94 @@
+// Provider-wire compat for "opencode-go"; regenerated from the frozen census using deployment contract selectors.
+
+provider "opencode-go" {
+	// Replaces the OpenCode reasoning-model whenThinking fallback object.
+	when-thinking {
+		requires-reasoning-content-for-tool-calls #true
+		allows-synthetic-reasoning-content-for-tool-calls #false
+		reasoning-content-field "reasoning_content"
+	}
+	class "deepseek" {
+		thinking-mode "effort"
+		family "flash" {
+			supports-tool-choice #false
+		}
+	}
+	// residue: the vision-exp lane keeps tool choice available.
+	models "deepseek-v4-flash-vision-exp" {
+		supports-tool-choice #true
+	}
+	// residue: the gateway's DeepSeek V4 flash/pro lanes reject tool_choice,
+	// speak max_tokens + reasoning_content, and require reasoning replay on
+	// tool calls (both the completions and responses routes).
+	models "deepseek-v4-flash" "deepseek-v4-pro" {
+		supports-tool-choice #false
+		max-tokens-field "max_tokens"
+		reasoning-content-field "reasoning_content"
+		requires-reasoning-content-for-tool-calls #true
+	}
+	class "glm" {
+		thinking-mode "effort"
+	}
+	class "kimi" {
+		thinking-mode "effort"
+	}
+	class "mimo" {
+		family "v2" {
+			thinking-mode "effort"
+		}
+		// The gateway rejects tool_choice for every MiMo lane.
+		supports-tool-choice #false
+	}
+	class "qwen" {
+		revision ">=3.5 <3.7" {
+			thinking-efforts "minimal" "low" "medium" "high"
+			thinking-mode "effort"
+		}
+		revision ">=3.7 <3.9" {
+			thinking-efforts "minimal" "low" "medium" "high" 
+			thinking-mode "effort"
+		}
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "glm-5" "glm-5.1" {
+		thinking-efforts "minimal" "low" "medium" "high" "xhigh"
+	}
+	// residue: the Ox Alpha stealth SKU reasons through the wire-exact
+	// low/high/max ladder with mandatory thinking (issue #9349).
+	models "ox-alpha*" {
+		thinking-efforts "low" "high" "max"
+		thinking-requires-effort #true
+	}
+	// residue: the 3.8 Flash lane keeps the budget dialect with the xhigh tier.
+	models "qwen3.8-flash" {
+		thinking-efforts "minimal" "low" "medium" "high" "xhigh"
+		thinking-mode "budget"
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "glm-5.2" {
+		thinking-efforts "minimal" "low" "medium" "high" "max"
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "gpt-5.6-luna" "grok-4.5" "minimax-m2.7" "minimax-m3" {
+		thinking-mode "effort"
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "hy3" {
+		thinking-efforts "minimal" "low" "medium" "high" "xhigh"
+		thinking-mode "effort"
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "kimi-k2.7-code" {
+		supports-forced-tool-choice #false
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "minimax-m2.5" {
+		// Replaces the Anthropic-route MiniMax effort remap table.
+		thinking-effort-map {
+			low "adaptive"
+			medium "adaptive"
+			high "adaptive"
+		}
+		thinking-mode "anthropic-adaptive"
+	}
+}

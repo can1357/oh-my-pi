@@ -47,7 +47,6 @@ import { CliUsageError } from "./usage-error";
 export interface ParseDeps {
 	logger: { warn: (message: string, meta?: Record<string, unknown>) => void };
 	parseThinking: (value: string | null | undefined) => ConfiguredThinkingLevel | undefined;
-	builtinToolNames: readonly string[];
 	normalizeToolNames: (values: Iterable<string>) => string[];
 	thinkingEfforts: readonly string[];
 }
@@ -189,15 +188,8 @@ export const STRING_SETTERS: Record<string, StringSetter> = {
 				.map(s => s.trim())
 				.filter(Boolean),
 		);
-		// An unknown name silently narrowing the toolset is worse than a failed
-		// launch: scripts keep running believing the tool is available (e.g. a
-		// stale `--tools bash,ssh` after the ssh tool's removal).
-		const unknown = names.filter(name => !deps.builtinToolNames.includes(name));
-		if (unknown.length > 0) {
-			throw new CliUsageError(
-				`Unknown tool${unknown.length === 1 ? "" : "s"} in --tools: ${unknown.join(", ")}. Valid tools: ${deps.builtinToolNames.join(", ")}.`,
-			);
-		}
+		// Validation runs after session tool discovery. At this point extension,
+		// custom, plugin-manifest, and MCP tools are not all known yet.
 		result.tools = names;
 	},
 	"--thinking": (result, value, deps) => {
@@ -365,4 +357,54 @@ export function flagConsumesValue(flag: string, next: string | undefined): boole
 	}
 	if (isUnknownLongValueCandidate(flag)) return valueLike;
 	return false;
+}
+
+/**
+ * Session-source launch flags dropped when relaunching into an existing
+ * session: the restart supplies its own `--resume`, and replaying a stale
+ * continue/fork/import selector would re-run its one-shot session choice.
+ */
+const SESSION_SOURCE_FLAGS: ReadonlySet<string> = new Set([
+	"--resume",
+	"-r",
+	"--session",
+	"--continue",
+	"-c",
+	"--fork",
+	"--from-claude",
+	"--from-codex",
+]);
+
+/**
+ * Rewrite the launch argv for an in-place self-restart (`/restart`).
+ *
+ * Keeps every configuration flag as launched, but drops:
+ * - session-source flags ({@link SESSION_SOURCE_FLAGS}, including inline
+ *   `--resume=<id>` forms) — the relaunch resumes `resumeSessionId` instead;
+ * - positionals (prompt messages, `@file` args, subcommand tokens) — their
+ *   effect is already in the resumed transcript, so replaying them would
+ *   duplicate the initial prompt.
+ *
+ * Value consumption mirrors {@link flagConsumesValue}, so a dropped flag takes
+ * its value token with it and an unknown extension flag keeps its value.
+ * `resumeSessionId` is omitted for a session that never materialized on disk;
+ * the relaunch then starts fresh with the same configuration.
+ */
+export function restartArgv(argv: string[], resumeSessionId: string | undefined): string[] {
+	const kept: string[] = [];
+	for (let i = 0; i < argv.length; i++) {
+		const arg = argv[i];
+		if (arg === "--") break; // end-of-options: the rest is literal prompt text
+		if (!arg.startsWith("-")) continue; // positional: prompt message, @file, or subcommand
+		const consumesNext = flagConsumesValue(arg, argv[i + 1]);
+		const flag = arg.startsWith("--") ? arg.split("=", 1)[0] : arg;
+		if (SESSION_SOURCE_FLAGS.has(flag)) {
+			if (consumesNext) i++;
+			continue;
+		}
+		kept.push(arg);
+		if (consumesNext) kept.push(argv[++i]);
+	}
+	if (resumeSessionId !== undefined) kept.push("--resume", resumeSessionId);
+	return kept;
 }

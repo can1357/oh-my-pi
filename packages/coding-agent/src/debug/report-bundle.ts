@@ -3,11 +3,13 @@
  *
  * Creates a .tar.gz archive with session data, logs, system info, and optional profiling data.
  */
+
+import type { Dirent } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { WorkProfile } from "@oh-my-pi/pi-natives";
 import { APP_NAME, getLogPath, getLogsDir, getReportsDir, isEnoent } from "@oh-my-pi/pi-utils";
-import { writeArchive } from "../utils/zip";
+import { writeArchive } from "@oh-my-pi/pi-utils/ar";
 import type { CpuProfile, HeapSnapshot } from "./profiler";
 import { collectSystemInfo, sanitizeEnv } from "./system-info";
 
@@ -66,8 +68,8 @@ export interface DebugLogSource {
  *
  * Bundle contents:
  * - session.jsonl: Current session transcript
- * - artifacts/: Session artifacts directory
- * - subagents/: Subagent sessions + artifacts
+ * - artifacts/: Current session's artifacts subtree (recursive), including any
+ *   subagent session transcripts nested under it
  * - logs.txt: Recent log entries
  * - system.json: OS, arch, CPU, memory, versions
  * - env.json: Sanitized environment variables
@@ -130,14 +132,12 @@ export async function createReportBundle(options: ReportBundleOptions): Promise<
 			// Session file might not exist yet
 		}
 
-		// Artifacts directory (same path without .jsonl)
+		// Artifacts subtree (same path without .jsonl). Recursing captures the
+		// current session's nested subagent transcripts and their artifacts while
+		// staying inside this session's own directory — unrelated co-located
+		// sessions in the sessions root are never touched (#8648).
 		const artifactsDir = options.sessionFile.slice(0, -6);
 		await addDirectoryToArchive(data, files, artifactsDir, "artifacts");
-
-		// Look for subagent sessions in the same directory
-		const sessionDir = path.dirname(options.sessionFile);
-		const sessionBasename = path.basename(options.sessionFile, ".jsonl");
-		await addSubagentSessions(data, files, sessionDir, sessionBasename);
 	}
 
 	// CPU profile
@@ -172,68 +172,34 @@ export async function createReportBundle(options: ReportBundleOptions): Promise<
 	return { path: outputPath, files };
 }
 
-/** Add all files from a directory to the archive */
+/** Recursively add every file under a directory to the archive. */
 async function addDirectoryToArchive(
 	data: Record<string, string>,
 	files: string[],
 	dirPath: string,
 	archivePrefix: string,
 ): Promise<void> {
+	let entries: Dirent[];
 	try {
-		const entries = await fs.readdir(dirPath, { withFileTypes: true });
-		for (const entry of entries) {
-			if (!entry.isFile()) continue;
-			const filePath = path.join(dirPath, entry.name);
-			const archivePath = `${archivePrefix}/${entry.name}`;
-			try {
-				const content = await Bun.file(filePath).text();
-				data[archivePath] = content;
-				files.push(archivePath);
-			} catch {
-				// Skip files we can't read
-			}
-		}
+		entries = await fs.readdir(dirPath, { withFileTypes: true });
 	} catch {
 		// Directory doesn't exist
+		return;
 	}
-}
-
-/** Find and add subagent session files */
-async function addSubagentSessions(
-	data: Record<string, string>,
-	files: string[],
-	sessionDir: string,
-	parentBasename: string,
-): Promise<void> {
-	// Subagent sessions are named with task IDs in the same directory
-	// They follow the pattern: {timestamp}_{sessionId}.jsonl
-	// We look for any sessions created after the parent session
-	try {
-		const entries = await fs.readdir(sessionDir, { withFileTypes: true });
-		const sessionFiles = entries
-			.filter(e => e.isFile() && e.name.endsWith(".jsonl") && e.name !== `${parentBasename}.jsonl`)
-			.map(e => e.name);
-
-		// Limit to most recent 10 subagent sessions
-		const sortedFiles = sessionFiles.sort().slice(-10);
-
-		for (const filename of sortedFiles) {
-			const filePath = path.join(sessionDir, filename);
-			const archivePath = `subagents/${filename}`;
-			try {
-				const content = await Bun.file(filePath).text();
-				data[archivePath] = content;
-				files.push(archivePath);
-
-				// Also add artifacts for this subagent session
-				const artifactsDir = filePath.slice(0, -6);
-				await addDirectoryToArchive(data, files, artifactsDir, `subagents/${filename.slice(0, -6)}`);
-			} catch {
-				// Skip files we can't read
-			}
+	for (const entry of entries) {
+		const entryPath = path.join(dirPath, entry.name);
+		const archivePath = `${archivePrefix}/${entry.name}`;
+		if (entry.isDirectory()) {
+			await addDirectoryToArchive(data, files, entryPath, archivePath);
+			continue;
 		}
-	} catch {
-		// Directory doesn't exist
+		if (!entry.isFile()) continue;
+		try {
+			data[archivePath] = await Bun.file(entryPath).text();
+			files.push(archivePath);
+		} catch {
+			// Skip files we can't read
+		}
 	}
 }
 

@@ -1,5 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
-import * as path from "node:path";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import { scheduler } from "node:timers/promises";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import type {
@@ -14,14 +13,13 @@ import type {
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
-import { withGeminiThinkingLoopGuard } from "@oh-my-pi/pi-ai/utils/thinking-loop";
+import { withThinkingLoopGuard } from "@oh-my-pi/pi-ai/utils/thinking-loop";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { type CustomMessage, convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { TempDir } from "@oh-my-pi/pi-utils";
 
 const LOOP_PARAGRAPHS = [
 	"I am now verifying the test module to guarantee there are no compile errors and the code is completely safe.",
@@ -65,7 +63,7 @@ function chunkedThinkingLoopStream(model: Model<Api>, options?: SimpleStreamOpti
 		inner.push({ type: "thinking_end", contentIndex: 0, content: thinking.thinking, partial });
 		inner.push({ type: "done", reason: "stop", message: partial });
 	});
-	return withGeminiThinkingLoopGuard(model, options, () => inner);
+	return withThinkingLoopGuard(model, options, () => inner);
 }
 
 function successStream(model: Model<Api>): AssistantMessageEventStream {
@@ -112,14 +110,14 @@ function errorIdOnlyThinkingLoopStream(model: Model<Api>): AssistantMessageEvent
 }
 
 describe("AgentSession thinking-loop retry", () => {
-	let tempDir: TempDir;
 	let authStorage: AuthStorage;
+	let modelRegistry: ModelRegistry;
 	let session: AgentSession | undefined;
 
-	beforeEach(async () => {
-		tempDir = TempDir.createSync("@pi-thinking-loop-retry-");
-		authStorage = await AuthStorage.create(path.join(tempDir.path(), "auth.db"));
+	beforeAll(async () => {
+		authStorage = await AuthStorage.create(":memory:");
 		authStorage.setRuntimeApiKey("openrouter", "openrouter-test-key");
+		modelRegistry = new ModelRegistry(authStorage);
 	});
 
 	afterEach(async () => {
@@ -127,14 +125,15 @@ describe("AgentSession thinking-loop retry", () => {
 			await session.dispose();
 			session = undefined;
 		}
-		authStorage.close();
-		tempDir.removeSync();
 		vi.restoreAllMocks();
+	});
+
+	afterAll(() => {
+		authStorage.close();
 	});
 
 	it("drops a chunked thinking-loop error and retries the turn", async () => {
 		const model = createMockModel({ provider: "openrouter", id: "google/gemini-3.5-flash" }).model;
-		const modelRegistry = new ModelRegistry(authStorage);
 		const calls: string[] = [];
 		const agent = new Agent({
 			getApiKey: requestedModel => `${requestedModel.provider}-test-key`,
@@ -195,7 +194,6 @@ describe("AgentSession thinking-loop retry", () => {
 
 	it("starts retry for thinking-loop errorId even without transient wording", async () => {
 		const model = createMockModel({ provider: "openrouter", id: "google/gemini-3.5-flash" }).model;
-		const modelRegistry = new ModelRegistry(authStorage);
 		const calls: string[] = [];
 		const agent = new Agent({
 			getApiKey: requestedModel => `${requestedModel.provider}-test-key`,
@@ -247,7 +245,6 @@ describe("AgentSession thinking-loop retry", () => {
 
 	it("injects a redirect notice into the retried turn after a thinking loop", async () => {
 		const model = createMockModel({ provider: "openrouter", id: "google/gemini-3.5-flash" }).model;
-		const modelRegistry = new ModelRegistry(authStorage);
 		const calls: string[] = [];
 		const contexts: Context[] = [];
 		const agent = new Agent({
@@ -315,7 +312,6 @@ describe("AgentSession thinking-loop retry", () => {
 
 	it("injects a redirect notice on each consecutive thinking-loop retry", async () => {
 		const model = createMockModel({ provider: "openrouter", id: "google/gemini-3.5-flash" }).model;
-		const modelRegistry = new ModelRegistry(authStorage);
 		const calls: string[] = [];
 		const contexts: Context[] = [];
 		const agent = new Agent({

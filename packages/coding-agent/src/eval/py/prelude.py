@@ -569,6 +569,14 @@ if "__omp_prelude_loaded__" not in globals():
             return 0
         return n if n > 0 else 0
 
+    class _AwaitableList(list):
+        """Completed list result accepted by both sync and ``await`` syntax."""
+
+        def __await__(self):
+            yield from ()
+            return self
+
+
     def _pool_map(items, fn):
         """Run ``fn`` over ``items`` through a bounded thread pool.
 
@@ -582,10 +590,10 @@ if "__omp_prelude_loaded__" not in globals():
 
         items = list(items)
         if not items:
-            return []
+            return _AwaitableList()
         limit = _concurrency_limit()
         workers = min(limit, len(items)) if limit > 0 else len(items)
-        results = [None] * len(items)
+        results = _AwaitableList(None for _ in items)
         errors = {}
         with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
             futures = {}
@@ -621,7 +629,7 @@ if "__omp_prelude_loaded__" not in globals():
         stage). Stage 1 receives the original item; later stages receive the
         previous stage's result. Pool width tracks ``task.maxConcurrency``.
         """
-        current = list(items)
+        current = _AwaitableList(items)
         for stage in stages:
             if not callable(stage):
                 raise TypeError("pipeline() stages must be callables")

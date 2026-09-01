@@ -56,6 +56,17 @@ const PARTIAL_HOLD_MAX_MS = 150;
 // so the string-terminator cap is generous.
 const MAX_CSI_BYTES = 4096;
 const MAX_STRING_SEQ_BYTES = 16 * 1024 * 1024;
+// Torn-string discard bounds. When a capped or timeout-expired OSC/DCS/APC
+// partial is dropped, the bytes that follow are mid-string payload (base64
+// clipboard data, Sixel, …) up to the next ST/BEL. Replaying them as
+// keystrokes types kilobytes of garbage into the focused component (kitty
+// OSC 5522 image paste spam), so discard mode swallows the tail until a
+// terminator — bounded by a byte budget for a terminator-less stream and an
+// inactivity watchdog for a stream that simply stops.
+const STRING_DISCARD_MAX_BYTES = 2 * MAX_STRING_SEQ_BYTES;
+const STRING_DISCARD_INACTIVITY_MS = 1000;
+// Partial that can only be the head of an OSC/DCS/APC string sequence.
+const STRING_SEQ_PARTIAL = /^\x1b[\]P_]/;
 
 // SGR mouse report bodies live between `<` and the terminating `M`/`m`.
 // Matched only when the trailing byte is a valid terminator, so the regex
@@ -110,7 +121,8 @@ function isRawMultilineBurst(text: string): boolean {
  *   `end > pos`  — complete sequence, exclusive end index.
  *   `-1`         — incomplete, still under the per-type cap; buffer for more.
  *   `-2`         — incomplete and the prefix already spans the per-type cap;
- *                  the caller flushes it as raw bytes to guarantee progress.
+ *                  the caller cap-flushes CSI as raw bytes; string types
+ *                  (OSC/DCS/APC) are dropped and their tail discarded.
  */
 function resolveEscapeEnd(buffer: string, pos: number, length: number, resumeSearchFrom: number): number {
 	if (pos + 1 >= length) return -1;
@@ -212,17 +224,6 @@ function resolveEscapeEnd(buffer: string, pos: number, length: number, resumeSea
 }
 
 /**
- * Per-type cap used to flush the incomplete prefix when `resolveEscapeEnd`
- * returns -2. The cap keeps issue-4073's malformed streamed CSI/OSC/…
- * bounded in both work and memory.
- */
-function escapeCapFor(next: number): number {
-	// OSC/DCS/APC carry the large payloads (image paste, Sixel); CSI stays
-	// tight because real CSI keys/mouse/responses fit comfortably below 4 KiB.
-	return next === 0x5d || next === 0x50 || next === 0x5f ? MAX_STRING_SEQ_BYTES : MAX_CSI_BYTES;
-}
-
-/**
  * Split accumulated buffer into complete sequences
  */
 function parseUnmodifiedKittyPrintableCodepoint(sequence: string): number | undefined {
@@ -236,7 +237,7 @@ function parseUnmodifiedKittyPrintableCodepoint(sequence: string): number | unde
 function extractCompleteSequences(
 	buffer: string,
 	resumeSearchFrom: number,
-): { sequences: string[]; remainder: string; resumeSearchFrom: number } {
+): { sequences: string[]; remainder: string; resumeSearchFrom: number; discardFrom?: number } {
 	const sequences: string[] = [];
 	const length = buffer.length;
 	let pos = 0;
@@ -295,8 +296,8 @@ function extractCompleteSequences(
 				return { sequences, remainder: buffer.slice(pos), resumeSearchFrom: 0 };
 			}
 			if (innerEnd === -2) {
-				const cap = escapeCapFor(third);
-				const flushEnd = Math.min(length, pos + cap);
+				// `third` is CSI/SS3 here, never a string type.
+				const flushEnd = Math.min(length, pos + MAX_CSI_BYTES);
 				sequences.push(buffer.slice(pos, flushEnd));
 				pos = flushEnd;
 				hint = 0;
@@ -331,8 +332,14 @@ function extractCompleteSequences(
 		}
 		if (end === -2) {
 			const next = buffer.charCodeAt(pos + 1);
-			const cap = escapeCapFor(next);
-			const flushEnd = Math.min(length, pos + cap);
+			if (next === 0x5d || next === 0x50 || next === 0x5f) {
+				// Unterminated string sequence at the cap (issue #4073 case A):
+				// the head is junk and everything after it is mid-string
+				// payload. Hand both to the caller's discard mode instead of
+				// flushing the payload as per-character typed text.
+				return { sequences, remainder: "", resumeSearchFrom: 0, discardFrom: pos };
+			}
+			const flushEnd = Math.min(length, pos + MAX_CSI_BYTES);
 			sequences.push(buffer.slice(pos, flushEnd));
 			pos = flushEnd;
 			hint = 0;
@@ -399,6 +406,10 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 	#escapeSearchOffset = 0;
 	#rawPasteCandidate = "";
 	#rawPasteTimer?: NodeJS.Timeout;
+	#stringDiscardActive = false;
+	#stringDiscardBytes = 0;
+	#stringDiscardEscHeld = false;
+	#stringDiscardWatchdog?: NodeJS.Timeout;
 
 	constructor(options: StdinBufferOptions = {}) {
 		super();
@@ -421,6 +432,12 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 			}
 		} else {
 			str = data;
+		}
+		if (this.#stringDiscardActive) {
+			// Mid torn-string: swallow payload up to the terminator; only what
+			// follows the terminator re-enters normal parsing.
+			str = this.#consumeStringDiscard(str);
+			if (str.length === 0) return;
 		}
 
 		if (this.#flushDeferral && this.#isFreshEscapeAfterDeferredFlush(str)) {
@@ -500,6 +517,18 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 		}
 
 		const result = extractCompleteSequences(this.#buffer, this.#escapeSearchOffset);
+		if (result.discardFrom !== undefined) {
+			const junk = this.#buffer.slice(result.discardFrom);
+			this.#buffer = "";
+			this.#escapeSearchOffset = 0;
+			for (const sequence of result.sequences) {
+				this.#emitDataSequence(sequence);
+			}
+			this.#enterStringDiscard();
+			const after = this.#consumeStringDiscard(junk);
+			if (after.length > 0) this.process(after);
+			return;
+		}
 		this.#buffer = result.remainder;
 		this.#escapeSearchOffset = result.resumeSearchFrom;
 
@@ -662,7 +691,7 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 			this.#timeout = undefined;
 			this.#flushDeferral = setTimeout(() => {
 				this.#flushDeferral = undefined;
-				this.#flushExpired();
+				this.#flushExpired(true);
 			});
 		}, this.#timeoutMs);
 	}
@@ -710,7 +739,7 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 	}
 
 	/** Timeout-driven flush: hold unambiguous partials (bounded), else deliver. */
-	#flushExpired(): void {
+	#flushExpired(fromTimer = false): void {
 		if (this.#buffer.length === 0) {
 			this.#partialHoldStartMs = 0;
 			return;
@@ -723,12 +752,16 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 			}
 		}
 		this.#partialHoldStartMs = 0;
-		for (const sequence of this.flush()) {
+		for (const sequence of this.#drainBuffered(fromTimer)) {
 			this.#emitDataSequence(sequence);
 		}
 	}
 
 	flush(): string[] {
+		return this.#drainBuffered(false);
+	}
+
+	#drainBuffered(discardTornString: boolean): string[] {
 		this.#clearFlushTimer();
 
 		const rawCandidate = this.#takeRawPasteCandidate();
@@ -750,16 +783,93 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 		// split in `extractCompleteSequences` and deliver two ESC events.
 		if (buffered === `${ESC}${ESC}`) {
 			sequences.push(ESC, ESC);
+		} else if (isKittyProtocolActive() && STRING_SEQ_PARTIAL.test(buffered)) {
+			// Torn OSC/DCS/APC head. Under the kitty keyboard protocol no key
+			// ever arrives as a bare `\x1b]`/`\x1bP`/`\x1b_`, so this is always
+			// terminal protocol data (kitty OSC 5522 clipboard read, graphics
+			// reply) whose tail is still in flight. Never deliver the head as a
+			// key; on a timeout flush also swallow the tail up to its
+			// terminator so kilobytes of base64 are not typed into the focused
+			// component (image paste spam).
+			if (discardTornString) this.#enterStringDiscard();
 		} else {
 			sequences.push(buffered);
 		}
 		return sequences;
 	}
 
+	/** Enter torn-string discard: swallow mid-string bytes until ST/BEL. */
+	#enterStringDiscard(): void {
+		this.#stringDiscardActive = true;
+		this.#stringDiscardBytes = 0;
+		this.#stringDiscardEscHeld = false;
+		this.#armStringDiscardWatchdog();
+	}
+
+	#exitStringDiscard(): void {
+		this.#stringDiscardActive = false;
+		this.#stringDiscardBytes = 0;
+		this.#stringDiscardEscHeld = false;
+		if (this.#stringDiscardWatchdog) {
+			clearTimeout(this.#stringDiscardWatchdog);
+			this.#stringDiscardWatchdog = undefined;
+		}
+	}
+
+	/**
+	 * Swallow mid-string bytes; returns the input remaining after the string
+	 * terminator (empty while still inside the torn string). A trailing ESC is
+	 * held across calls so an `ESC \` split between reads is still detected.
+	 * The byte budget bounds a terminator-less stream; the inactivity watchdog
+	 * recovers a stream that stops without ever terminating.
+	 */
+	#consumeStringDiscard(str: string): string {
+		if (this.#stringDiscardEscHeld) {
+			this.#stringDiscardEscHeld = false;
+			if (str.charCodeAt(0) === 0x5c /* \ */) {
+				this.#exitStringDiscard();
+				return str.slice(1);
+			}
+		}
+		for (let i = 0; i < str.length; i++) {
+			const code = str.charCodeAt(i);
+			if (code === 0x07 /* BEL */) {
+				this.#exitStringDiscard();
+				return str.slice(i + 1);
+			}
+			if (code === 0x1b /* ESC */) {
+				if (i + 1 === str.length) {
+					this.#stringDiscardEscHeld = true;
+					break;
+				}
+				if (str.charCodeAt(i + 1) === 0x5c /* \ */) {
+					this.#exitStringDiscard();
+					return str.slice(i + 2);
+				}
+			}
+		}
+		this.#stringDiscardBytes += str.length;
+		if (this.#stringDiscardBytes > STRING_DISCARD_MAX_BYTES) {
+			this.#exitStringDiscard();
+			return "";
+		}
+		this.#armStringDiscardWatchdog();
+		return "";
+	}
+
+	#armStringDiscardWatchdog(): void {
+		if (this.#stringDiscardWatchdog) clearTimeout(this.#stringDiscardWatchdog);
+		this.#stringDiscardWatchdog = setTimeout(() => {
+			this.#stringDiscardWatchdog = undefined;
+			this.#exitStringDiscard();
+		}, STRING_DISCARD_INACTIVITY_MS);
+	}
+
 	clear(): void {
 		this.#clearFlushTimer();
 		this.#clearPasteWatchdog();
 		this.#clearRawPasteTimer();
+		this.#exitStringDiscard();
 		this.#buffer = "";
 		this.#rawPasteCandidate = "";
 		this.#pasteMode = false;

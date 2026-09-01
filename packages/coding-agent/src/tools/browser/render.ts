@@ -162,7 +162,7 @@ function renderOpenOrCloseLine(
 	let title: string;
 	if (action === "close") {
 		const all = args.all === true || (args.name === undefined && details?.name === undefined);
-		title = all ? "Close all tabs" : `Close ${tabLabel(args, details)}`;
+		title = all ? "Release all tabs" : `Release ${tabLabel(args, details)}`;
 		if (args.kill) title += " (kill)";
 	} else {
 		title = `Open ${tabLabel(args, details)}`;

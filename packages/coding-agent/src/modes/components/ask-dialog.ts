@@ -4,6 +4,7 @@ import {
 	Markdown,
 	type MarkdownTheme,
 	matchesKey,
+	padding,
 	renderInlineMarkdown,
 	replaceTabs,
 	ScrollView,
@@ -12,6 +13,7 @@ import {
 	Text,
 	type TUI,
 	truncateToWidth,
+	visibleWidth,
 	wrapTextWithAnsi,
 } from "@oh-my-pi/pi-tui";
 import type {
@@ -20,9 +22,11 @@ import type {
 	ExtensionAskDialogResultItem,
 	ExtensionAskDialogSubmitResult,
 } from "../../extensibility/extensions";
+import { expandKeyHint } from "../../tools/render-utils";
 import { getTabBarTheme } from "../shared";
 import { getMarkdownTheme, highlightCode, theme } from "../theme/theme";
 import {
+	matchesAppToolsExpand,
 	matchesSelectCancel,
 	matchesSelectDown,
 	matchesSelectPageDown,
@@ -135,24 +139,23 @@ function clamp(value: number, min: number, max: number): number {
 	return Math.max(min, Math.min(value, max));
 }
 
-function stripRecommendedSuffix(label: string): string {
-	const suffix = " (Recommended)";
-	return label.endsWith(suffix) ? label.slice(0, -suffix.length) : label;
-}
-
 function questionTabLabel(question: ExtensionAskDialogQuestion, index: number): string {
 	const base = question.header?.trim() || question.id || `Q${index + 1}`;
 	return truncateToWidth(replaceTabs(base), MAX_HEADER_CHIP_WIDTH, Ellipsis.Unicode);
 }
 
-function renderQuestionTitle(question: ExtensionAskDialogQuestion, width: number): string[] {
+function wrapQuestionTitle(question: ExtensionAskDialogQuestion, width: number): string[] {
 	const mdTheme = getMarkdownTheme();
 	const questionText = renderInlineMarkdown(replaceTabs(question.question), mdTheme, t => theme.fg("text", t));
-	const wrapped = wrapTextWithAnsi(questionText, Math.max(1, width));
-	if (wrapped.length <= MAX_HEADER_ROWS) return wrapped;
+	return wrapTextWithAnsi(questionText, Math.max(1, width));
+}
+
+function renderQuestionTitle(question: ExtensionAskDialogQuestion, width: number, maxRows = MAX_HEADER_ROWS): string[] {
+	const wrapped = wrapQuestionTitle(question, width);
+	if (wrapped.length <= maxRows) return wrapped;
 	return [
-		...wrapped.slice(0, MAX_HEADER_ROWS - 1),
-		truncateToWidth(wrapped.slice(MAX_HEADER_ROWS - 1).join(" "), Math.max(1, width), Ellipsis.Unicode),
+		...wrapped.slice(0, maxRows - 1),
+		truncateToWidth(wrapped.slice(maxRows - 1).join(" "), Math.max(1, width), Ellipsis.Unicode),
 	];
 }
 
@@ -307,16 +310,26 @@ function renderRowLabel(
 ): string[] {
 	const isOption = rowItem.kind === "option";
 	const isOther = rowItem.kind === "other";
-	const checked = isOption
-		? state.selectedOptions.has(stripRecommendedSuffix(rowItem.label))
-		: isOther && state.customInput !== undefined;
+	const option = isOption ? question.options[rowItem.optionIndex ?? -1] : undefined;
+	const checked =
+		option !== undefined ? state.selectedOptions.has(option.label) : isOther && state.customInput !== undefined;
 	const color = selected ? "accent" : checked ? "toolOutput" : "text";
 	const marker = `${theme.fg(checked ? "success" : "dim", optionMarker(question, checked))} `;
 	const cursor = selected ? theme.fg("accent", `${theme.nav.cursor} `) : "  ";
 	const label = renderInlineMarkdown(rowItem.label, mdTheme, t => theme.fg(color, t));
 	const noteMarker = state.note && state.noteRowKey === rowItem.key ? theme.fg("success", "  ✎ note") : "";
-	const firstLine = `${cursor}${marker}${label}${noteMarker}`;
-	const lines = [truncateToWidth(firstLine, width, Ellipsis.Unicode)];
+	// `width` is already the inner content width consumed by row(); when a
+	// scrollbar is needed, renderRows() calls this again with one less column.
+	// Keep the cursor, option marker, first wrapped label line, and optional
+	// note marker within that budget so the outer fit() never truncates them.
+	const noteWidth = noteMarker ? visibleWidth(noteMarker) : 0;
+	const labelWidth = Math.max(1, width - visibleWidth(cursor) - visibleWidth(marker) - noteWidth);
+	const wrappedLabel = wrapTextWithAnsi(label, labelWidth);
+	const indent = padding(visibleWidth(cursor) + visibleWidth(marker));
+	const lines = [`${cursor}${marker}${wrappedLabel[0] ?? ""}${noteMarker}`];
+	for (let i = 1; i < wrappedLabel.length; i++) {
+		lines.push(`${indent}${wrappedLabel[i] ?? ""}`);
+	}
 	if (rowItem.kind === "option") {
 		const option = question.options[rowItem.optionIndex ?? -1];
 		if (option?.description?.trim()) {
@@ -392,6 +405,9 @@ export class AskDialogComponent implements Component {
 	#stableHeight: { key: string; total: number } | undefined;
 	#previewCache: PreviewRenderCache = new Map();
 	#overflowLayouts = new WeakMap<ExtensionAskDialogQuestion, Set<string>>();
+	#expanded = false;
+	#contentWidth = 76;
+	#headerExpandable = false;
 	readonly #questions: ExtensionAskDialogQuestion[];
 
 	constructor(
@@ -438,6 +454,22 @@ export class AskDialogComponent implements Component {
 		this.#countdown?.dispose();
 	}
 
+	/**
+	 * Toggle a truncated question header. Returns false when there is nothing
+	 * to expand so the global Ctrl+O listener can still expand transcript tools.
+	 */
+	toggleQuestionExpansion(): boolean {
+		if (this.#closed || this.#isSubmitTab()) return false;
+		const question = this.#questions[this.#currentQuestionIndex()];
+		if (!question) return false;
+		const overflows = wrapQuestionTitle(question, this.#contentWidth).length > MAX_HEADER_ROWS;
+		if (!overflows) return false;
+		this.#expanded = !this.#expanded;
+		this.invalidate();
+		this.#requestRender();
+		return true;
+	}
+
 	handleInput(keyData: string): void {
 		if (this.#closed || this.#promptActive) return;
 		// Reset the inactivity countdown on any key that reaches past the
@@ -445,6 +477,12 @@ export class AskDialogComponent implements Component {
 		this.#countdown?.reset();
 		if (matchesSelectCancel(keyData)) {
 			this.#finishCancel();
+			return;
+		}
+		// Expand before the draft-input guard so Ctrl+O can reveal a truncated
+		// question even while a pending prompt still owns typing.
+		if (matchesAppToolsExpand(keyData)) {
+			this.toggleQuestionExpansion();
 			return;
 		}
 		const inputGuard = this.options.inputGuard;
@@ -470,12 +508,16 @@ export class AskDialogComponent implements Component {
 		// same frame).
 		this.options.inputGuard?.syncPresentation?.();
 		const innerWidth = Math.max(1, width - 4);
+		this.#contentWidth = innerWidth;
 		// Fixed panel height: measured from the tallest tab at spawn and
 		// re-measured only when the viewport changes. Tab switches, cursor
 		// moves, and later answers never resize the box; content that
-		// outgrows it scrolls.
+		// outgrows it scrolls. Expanding a truncated question uses the space
+		// available within the existing height cap.
 		const totalRows = this.#dialogHeight(innerWidth, process.stdout.rows || 40);
-		const headerLines = this.#renderHeader(innerWidth);
+		const tabBarRows = this.#hasSubmitTab() ? 1 : 0;
+		const maxTitleRows = Math.max(1, totalRows - 5 - MIN_BODY_ROWS - tabBarRows);
+		const headerLines = this.#renderHeader(innerWidth, maxTitleRows);
 		// topBorder(1) + header(N) + divider(1) + divider(1) + footer(1) +
 		// bottomBorder(1) = N + 5 fixed rows outside the body. Without the
 		// bottomBorder term the dialog overflowed the viewport by one row
@@ -499,7 +541,7 @@ export class AskDialogComponent implements Component {
 	}
 
 	#dialogHeight(width: number, termRows: number): number {
-		const key = `${width}:${termRows}`;
+		const key = `${width}:${termRows}:${this.#expanded ? 1 : 0}`;
 		if (this.#stableHeight?.key === key) return this.#stableHeight.total;
 		const total = this.#measureHeight(width, termRows);
 		this.#stableHeight = { key, total };
@@ -520,7 +562,8 @@ export class AskDialogComponent implements Component {
 			const question = this.#questions[index];
 			const state = this.#states[index];
 			if (!question || !state) continue;
-			const headerRows = tabBarRows + renderQuestionTitle(question, width).length;
+			const titleRows = this.#expanded ? Number.POSITIVE_INFINITY : MAX_HEADER_ROWS;
+			const headerRows = tabBarRows + renderQuestionTitle(question, width, titleRows).length;
 			const rowItems = this.#questionRows(question);
 			const listRows = (listWidth: number): number => {
 				let total = 0;
@@ -568,7 +611,7 @@ export class AskDialogComponent implements Component {
 		this.options.tui?.requestRender();
 	}
 
-	#renderHeader(width: number): string[] {
+	#renderHeader(width: number, maxTitleRows: number): string[] {
 		const lines: string[] = [];
 		if (this.#hasSubmitTab()) {
 			const tabs: Tab[] = [
@@ -583,32 +626,47 @@ export class AskDialogComponent implements Component {
 			lines.push(...this.#tabBar.render(width));
 		}
 		if (this.#isSubmitTab()) {
+			this.#headerExpandable = false;
 			lines.push(theme.bold(theme.fg("accent", "Review answers")));
 			return lines;
 		}
 		const questionIndex = this.#currentQuestionIndex();
 		const question = this.#questions[questionIndex];
-		if (!question) return lines;
-		lines.push(...renderQuestionTitle(question, width));
+		if (!question) {
+			this.#headerExpandable = false;
+			return lines;
+		}
+		const wrapped = wrapQuestionTitle(question, width);
+		this.#headerExpandable = wrapped.length > MAX_HEADER_ROWS;
+		const maxRows = this.#expanded ? maxTitleRows : MAX_HEADER_ROWS;
+		lines.push(...renderQuestionTitle(question, width, maxRows));
 		return lines;
+	}
+
+	#expandHint(): string {
+		if (!this.#headerExpandable) return "";
+		return ` · ${expandKeyHint()} ${this.#expanded ? "collapse" : "expand"}`;
 	}
 
 	#footerHintText(indicator: string): string {
 		const cancel = `${cancelKeyLabel()} cancel`;
 		const inputGuard = this.options.inputGuard;
-		if (inputGuard?.isBlocked()) return `${inputGuard.hint} · ${cancel}`;
+		if (inputGuard?.isBlocked()) return `${inputGuard.hint}${this.#expandHint()} · ${cancel}`;
 		if (this.#isSubmitTab()) {
 			const scroll = indicator ? ` ${indicator} scroll ·` : "";
 			return `Enter submit · ↑/↓ scroll ·${scroll} ${cancel}`;
 		}
 		const question = this.#questions[this.#currentQuestionIndex()];
-		const action = question?.multi ? "Space/Enter toggle · n note" : "Enter select · n note";
+		// Enter advances in multi-question dialogs and submits single-question ones.
+		const enterAction = this.#questions.length > 1 ? "next" : "submit";
+		const action = question?.multi ? `Space toggle · Enter ${enterAction}` : "Enter select · n note";
 		const tabs = this.#hasSubmitTab() ? " · Tab/←/→" : "";
+		const expand = this.#expandHint();
 		if (this.#questionCanPage && indicator) {
-			return `${action} · ↑/↓${tabs} · ${cancel} · ${pageKeysLabel()} ${indicator}`;
+			return `${action} · ↑/↓${tabs} · ${cancel}${expand} · ${pageKeysLabel()} ${indicator}`;
 		}
 		const scroll = indicator ? ` ${indicator} scroll ·` : "";
-		return `${action} · ↑/↓ move${tabs} ·${scroll} ${cancel}`;
+		return `${action} · ↑/↓ move${tabs} ·${scroll} ${cancel}${expand}`;
 	}
 
 	#questionRows(question: ExtensionAskDialogQuestion): QuestionRow[] {
@@ -623,7 +681,9 @@ export class AskDialogComponent implements Component {
 	}
 
 	#optionLabel(question: ExtensionAskDialogQuestion, label: string, index: number): string {
-		return question.recommended === index ? `${label} (Recommended)` : label;
+		const suffix = " (Recommended)";
+		if (question.recommended !== index || label.endsWith(suffix)) return label;
+		return `${label}${suffix}`;
 	}
 
 	#activeQuestionState(): { question: ExtensionAskDialogQuestion; state: QuestionState } | undefined {
@@ -680,8 +740,14 @@ export class AskDialogComponent implements Component {
 		const option = question.options[rowItem.optionIndex ?? -1];
 		if (!option) return;
 		if (question.multi) {
-			// Multi is toggle-only: Enter and Space both toggle, and the
-			// answer is confirmed from the Submit tab.
+			if (isEnter) {
+				// Enter confirms the current selection without toggling the
+				// focused option; Space toggles. Advances to the next question
+				// (submitting only for a single-question dialog), matching
+				// single-select Enter (#8252).
+				this.#advanceAfterQuestion();
+				return;
+			}
 			if (state.selectedOptions.has(option.label)) {
 				state.selectedOptions.delete(option.label);
 				clearNoteIfRow(state, rowItem.key);

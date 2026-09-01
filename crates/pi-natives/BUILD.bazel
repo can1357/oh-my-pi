@@ -18,6 +18,9 @@ rust_shared_library(
     compile_data = glob([
         "src/syntaxes/*.sublime-syntax",
         "src/fonts/*",
+        "data/*.bin.zst",
+        "src/utok/claude/testdata/*.json",
+        "fixtures/*.json",
     ]),
     crate_features = [],
     edition = "2024",
@@ -40,6 +43,13 @@ rust_shared_library(
         # cdylib at all; napi musl addons have always linked the dynamic CRT.
         "//bazel/triples:x86_64-unknown-linux-musl": ["-Ctarget-feature=-crt-static"],
         "//bazel/triples:aarch64-unknown-linux-musl": ["-Ctarget-feature=-crt-static"],
+        # Statically link the MSVC CRT so the shipped .node does not import
+        # VCRUNTIME140.dll from the Visual C++ Redistributable, which is absent
+        # on a clean Windows install and makes the loader's dlopen fail with
+        # "The specified module could not be found" (error 126). The C deps are
+        # switched to /MT in lock-step via the static_link_msvcrt cc feature in
+        # the native_addon transition (bazel/defs.bzl).
+        "//bazel/triples:x86_64-pc-windows-msvc": ["-Ctarget-feature=+crt-static"],
         "//conditions:default": [],
     }),
     version = "17.1.5",
@@ -47,6 +57,7 @@ rust_shared_library(
         "//crates/pi-ast",
         "//crates/pi-iso",
         "//crates/pi-shell",
+        "//crates/pi-vcs",
         "//crates/pi-voice",
         "//crates/pi-walker",
     ],

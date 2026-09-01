@@ -61,6 +61,48 @@ describe("mcp/startup-events — connection-status cross-module contract", () =>
 		expect(message).toContain("broken: failed at   ~/.omp/mcp.log");
 	});
 
+	it("keeps the config source and transport error visible under independent truncation", () => {
+		const message = formatMCPConnectionStatusMessage({
+			pendingServers: [],
+			connectedServers: [],
+			failedServers: [
+				{
+					serverName: "broken",
+					error: `ENOENT ${"missing executable ".repeat(10)}`,
+					sourcePath: `${os.homedir()}/.codex/config.toml`,
+				},
+			],
+		});
+
+		expect(message).not.toContain(os.homedir());
+		expect(message).toContain("broken [config: ~/.codex/config.toml]: ENOENT");
+		expect(message).toContain("…");
+	});
+
+	it("shortens config sources when the home directory contains spaces", () => {
+		const homeDir = "/tmp/OMP User";
+		const moduleUrl = new URL("../src/mcp/startup-events.ts", import.meta.url).href;
+		const script = `
+			import os from "node:os";
+			import { formatMCPConnectionStatusMessage } from ${JSON.stringify(moduleUrl)};
+			const sourcePath = os.homedir() + "/.codex/config.toml";
+			process.stdout.write(formatMCPConnectionStatusMessage({
+				pendingServers: [],
+				connectedServers: [],
+				failedServers: [{ serverName: "broken", error: "ENOENT", sourcePath }],
+			}));
+		`;
+		const result = Bun.spawnSync({
+			cmd: [process.execPath, "-e", script],
+			env: { ...process.env, HOME: homeDir, USERPROFILE: homeDir },
+		});
+		const message = result.stdout.toString();
+
+		expect(result.exitCode).toBe(0);
+		expect(message).not.toContain(homeDir);
+		expect(message).toContain("broken [config: ~/.codex/config.toml]: ENOENT");
+	});
+
 	it("sanitizes server names before rendering them in status text", () => {
 		const homePath = `${os.homedir()}/.omp`;
 		const message = formatMCPConnectionStatusMessage({
@@ -99,6 +141,14 @@ describe("mcp/startup-events — connection-status cross-module contract", () =>
 		expect(isMcpConnectionStatusEvent({ type: "connecting", serverNames: [] })).toBe(true);
 		expect(isMcpConnectionStatusEvent({ type: "connected", serverName: "a" })).toBe(true);
 		expect(isMcpConnectionStatusEvent({ type: "failed", serverName: "a", error: "boom" })).toBe(true);
+		expect(
+			isMcpConnectionStatusEvent({
+				type: "failed",
+				serverName: "a",
+				error: "boom",
+				sourcePath: "/tmp/config.toml",
+			}),
+		).toBe(true);
 
 		expect(isMcpConnectionStatusEvent(null)).toBe(false);
 		expect(isMcpConnectionStatusEvent(undefined)).toBe(false);
@@ -108,5 +158,13 @@ describe("mcp/startup-events — connection-status cross-module contract", () =>
 		expect(isMcpConnectionStatusEvent({ type: "connecting", serverNames: ["ok", 3] })).toBe(false);
 		expect(isMcpConnectionStatusEvent({ type: "connected", serverName: 1 })).toBe(false);
 		expect(isMcpConnectionStatusEvent({ type: "failed", serverName: "a" })).toBe(false);
+		expect(
+			isMcpConnectionStatusEvent({
+				type: "failed",
+				serverName: "a",
+				error: "boom",
+				sourcePath: 42,
+			}),
+		).toBe(false);
 	});
 });

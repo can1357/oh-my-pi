@@ -4,6 +4,8 @@ import { umansUsageProvider } from "../src/usage/umans";
 
 const DEFAULT_BASE_URL = "https://api.code.umans.ai";
 
+const RESETS_AT = "2026-08-06T21:52:21.202174+00:00";
+
 function umansPayload(overrides: Record<string, unknown> = {}): Record<string, unknown> {
 	return {
 		plan: { display_name: "Code Max" },
@@ -11,9 +13,16 @@ function umansPayload(overrides: Record<string, unknown> = {}): Record<string, u
 			requests: { limit: 200, hard_cap: 400, burst_pct: 1.0, window_seconds: 18000 },
 			concurrency: { limit: 4, hard_cap: 8, burst_pct: 1.0 },
 		},
+		window: {
+			started_at: "2026-08-06T16:52:21.202174+00:00",
+			resets_at: RESETS_AT,
+			remaining_minutes: 9,
+		},
 		usage: {
 			requests_in_window: 48,
 			remaining_requests: 152,
+			weighted_in_window: 96,
+			weighted_remaining_requests: 104,
 			concurrent_sessions: 1,
 			tokens_in: 1_200_000,
 			tokens_out: 340_000,
@@ -49,9 +58,8 @@ function fetchRecorder(
 	};
 	return fn as unknown as typeof fetch;
 }
-
 describe("umans usage provider", () => {
-	it("parses the rolling 5h request window into a UsageLimit with used/remaining/fraction", async () => {
+	it("splits requests into soft-cap (weighted) and burst-ceiling (raw) limits", async () => {
 		const report = await umansUsageProvider.fetchUsage(
 			{
 				provider: "umans",
@@ -60,18 +68,227 @@ describe("umans usage provider", () => {
 			{ fetch: fakeFetch(umansPayload()) },
 		);
 		expect(report).not.toBeNull();
+		const soft = report?.limits.find(l => l.id === "umans:requests:soft");
+		expect(soft).toBeDefined();
+		// Weighted "effective requests" are authoritative against the soft cap:
+		// 96 effective used of 200.
+		expect(soft?.amount.used).toBe(96);
+		expect(soft?.amount.limit).toBe(200);
+		expect(soft?.amount.remaining).toBe(104);
+		expect(soft?.amount.usedFraction).toBeCloseTo(0.48, 5);
+		expect(soft?.amount.remainingFraction).toBeCloseTo(0.52, 5);
+		expect(soft?.amount.unit).toBe("requests");
+		expect(soft?.status).toBe("ok");
+		// The rolling 5h window still exposes its absolute `resets_at` as an
+		// incremental countdown for the status line.
+		expect(soft?.window?.resetsAt).toBe(Date.parse(RESETS_AT));
+		expect(soft?.window?.resetLabel).toBe("tick");
+		expect(soft?.window?.durationMs).toBe(18000_000);
+		expect(soft?.window?.label).toBe("rolling 5h");
+		// Raw counts against the burst ceiling are a separate row.
+		const hard = report?.limits.find(l => l.id === "umans:requests:hard");
+		expect(hard).toBeDefined();
+		expect(hard?.amount.used).toBe(48);
+		expect(hard?.amount.limit).toBe(400);
+		expect(hard?.amount.usedFraction).toBeCloseTo(0.12, 5);
+		expect(hard?.status).toBe("ok");
+	});
+
+	it("falls back to the legacy raw row when weighted fields are absent", async () => {
+		const report = await umansUsageProvider.fetchUsage(
+			{
+				provider: "umans",
+				credential: { type: "api_key", apiKey: "sk-test" },
+			},
+			{
+				fetch: fakeFetch(
+					umansPayload({
+						window: undefined,
+						usage: {
+							requests_in_window: 48,
+							remaining_requests: 152,
+							concurrent_sessions: 1,
+							tokens_in: 0,
+							tokens_out: 0,
+							priority: { low: false },
+						},
+					}),
+				),
+			},
+		);
 		const requests = report?.limits.find(l => l.id === "umans:requests");
 		expect(requests).toBeDefined();
+		expect(report?.limits.some(l => l.id.startsWith("umans:requests:"))).toBe(false);
 		expect(requests?.amount.used).toBe(48);
-		expect(requests?.amount.limit).toBe(200);
 		expect(requests?.amount.remaining).toBe(152);
 		expect(requests?.amount.usedFraction).toBeCloseTo(0.24, 5);
-		expect(requests?.amount.remainingFraction).toBeCloseTo(0.76, 5);
-		expect(requests?.amount.unit).toBe("requests");
-		// Rolling window: no fabricated reset timestamp.
 		expect(requests?.window?.resetsAt).toBeUndefined();
-		expect(requests?.window?.durationMs).toBe(18000_000);
 		expect(requests?.window?.label).toBe("rolling 5h");
+	});
+
+	it("does not report exhausted when raw requests exceed the soft cap but weighted headroom remains (#7858)", async () => {
+		// Real payload from https://github.com/can1357/oh-my-pi/issues/7858:
+		// raw 838 exceeds the 500 soft cap (previously clamped to 1.0 → false
+		// exhausted), while weighted "effective requests" are 207/500 with 293
+		// remaining — the account continues normally. Raw traffic only reaches
+		// the burst ceiling (1000) before throttling applies.
+		const report = await umansUsageProvider.fetchUsage(
+			{
+				provider: "umans",
+				credential: { type: "api_key", apiKey: "sk-test" },
+			},
+			{
+				fetch: fakeFetch(
+					umansPayload({
+						limits: {
+							requests: { limit: 500, hard_cap: 1000, burst_pct: 1.0, window_seconds: 18000 },
+							concurrency: { limit: 4, hard_cap: 8, burst_pct: 1.0 },
+						},
+						usage: {
+							requests_in_window: 838,
+							remaining_requests: 0,
+							weighted_in_window: 207,
+							weighted_remaining_requests: 293,
+							concurrent_sessions: 0,
+							tokens_in: 3_557_477,
+							tokens_out: 723_550,
+							priority: { low: false, boxed_until: null, reason: null },
+						},
+					}),
+				),
+			},
+		);
+		const soft = report?.limits.find(l => l.id === "umans:requests:soft");
+		expect(soft).toBeDefined();
+		expect(soft?.amount.used).toBe(207);
+		expect(soft?.amount.remaining).toBe(293);
+		expect(soft?.amount.usedFraction).toBeCloseTo(0.414, 3);
+		expect(soft?.status).toBe("ok");
+		expect(soft?.window?.resetsAt).toBe(Date.parse(RESETS_AT));
+		const hard = report?.limits.find(l => l.id === "umans:requests:hard");
+		expect(hard).toBeDefined();
+		expect(hard?.amount.used).toBe(838);
+		expect(hard?.amount.limit).toBe(1000);
+		expect(hard?.amount.usedFraction).toBeCloseTo(0.838, 3);
+		expect(hard?.status).toBe("ok");
+		expect(report?.limits.some(l => l.status === "exhausted")).toBe(false);
+	});
+
+	it("collapses to a single weighted requests row that can exhaust when no burst ceiling is reported", async () => {
+		// Weighted counters present but `hard_cap` absent: without a burst
+		// ceiling there is no hard row to defer exhaustion to, so the weighted
+		// effective-request budget is the operative ceiling — the single row
+		// must be able to report `exhausted` or a spent account could never
+		// trigger the usage-aware fallback.
+		const report = await umansUsageProvider.fetchUsage(
+			{
+				provider: "umans",
+				credential: { type: "api_key", apiKey: "sk-test" },
+			},
+			{
+				fetch: fakeFetch(
+					umansPayload({
+						limits: {
+							requests: { limit: 200, window_seconds: 18000 },
+							concurrency: { limit: 4, hard_cap: 8, burst_pct: 1.0 },
+						},
+						usage: {
+							requests_in_window: 400,
+							remaining_requests: 0,
+							weighted_in_window: 200,
+							weighted_remaining_requests: 0,
+							concurrent_sessions: 0,
+							tokens_in: 0,
+							tokens_out: 0,
+							priority: { low: false },
+						},
+					}),
+				),
+			},
+		);
+		const requests = report?.limits.find(l => l.id === "umans:requests");
+		expect(requests).toBeDefined();
+		// No soft/hard split without a reported burst ceiling.
+		expect(report?.limits.some(l => l.id.startsWith("umans:requests:"))).toBe(false);
+		// Weighted effective requests are authoritative: raw 400 overshoots the
+		// 200 limit, but it is the weighted 200/200 that reports exhausted.
+		expect(requests?.amount.used).toBe(200);
+		expect(requests?.amount.limit).toBe(200);
+		expect(requests?.amount.usedFraction).toBe(1);
+		expect(requests?.status).toBe("exhausted");
+	});
+
+	it("keeps weighted headroom decisive when no burst ceiling is reported", async () => {
+		// Same #7858 shape (raw usage over the soft limit, weighted headroom
+		// remaining) but with no `hard_cap` in the payload: the weighted counter
+		// must still decide, so raw burst traffic cannot fabricate an exhausted
+		// state even when there is no hard row to buffer it.
+		const report = await umansUsageProvider.fetchUsage(
+			{
+				provider: "umans",
+				credential: { type: "api_key", apiKey: "sk-test" },
+			},
+			{
+				fetch: fakeFetch(
+					umansPayload({
+						limits: {
+							requests: { limit: 200, window_seconds: 18000 },
+							concurrency: { limit: 4, hard_cap: 8, burst_pct: 1.0 },
+						},
+						usage: {
+							requests_in_window: 300,
+							remaining_requests: 0,
+							weighted_in_window: 100,
+							weighted_remaining_requests: 100,
+							concurrent_sessions: 0,
+							tokens_in: 0,
+							tokens_out: 0,
+							priority: { low: false },
+						},
+					}),
+				),
+			},
+		);
+		const requests = report?.limits.find(l => l.id === "umans:requests");
+		expect(requests).toBeDefined();
+		expect(requests?.amount.used).toBe(100);
+		expect(requests?.amount.remaining).toBe(100);
+		expect(requests?.amount.usedFraction).toBeCloseTo(0.5, 5);
+		expect(requests?.status).toBe("ok");
+		expect(report?.limits.some(l => l.status === "exhausted")).toBe(false);
+	});
+
+	it("reserves exhausted for the burst ceiling and warns at the soft cap", async () => {
+		const report = await umansUsageProvider.fetchUsage(
+			{
+				provider: "umans",
+				credential: { type: "api_key", apiKey: "sk-test" },
+			},
+			{
+				fetch: fakeFetch(
+					umansPayload({
+						usage: {
+							requests_in_window: 1000,
+							remaining_requests: 0,
+							weighted_in_window: 500,
+							weighted_remaining_requests: 0,
+							concurrent_sessions: 0,
+							tokens_in: 0,
+							tokens_out: 0,
+							priority: { low: false },
+						},
+					}),
+				),
+			},
+		);
+		const soft = report?.limits.find(l => l.id === "umans:requests:soft");
+		expect(soft?.amount.usedFraction).toBe(1);
+		// Soft cap hit = burst headroom in use; warn, never exhaust.
+		expect(soft?.status).toBe("warning");
+		const hard = report?.limits.find(l => l.id === "umans:requests:hard");
+		expect(hard?.amount.usedFraction).toBe(1);
+		// Only the raw burst ceiling can exhaust (that's where 429s start).
+		expect(hard?.status).toBe("exhausted");
 	});
 
 	it("emits a concurrency limit from limits.concurrency", async () => {

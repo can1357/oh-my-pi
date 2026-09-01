@@ -37,62 +37,48 @@ async function writePackage(files: Record<string, string>): Promise<string> {
 }
 
 describe("legacy-pi in-place module loading (issue #1674)", () => {
-	it("reads __dirname-relative HTML assets from the real extension directory", async () => {
+	it("loads in place with ESM-to-CommonJS default, named, and require interop", async () => {
 		const dir = await writePackage({
 			"package.json": JSON.stringify({ name: "asset-ext", version: "1.0.0" }),
 			"ui.html": "<html>PLAN-UI</html>",
+			"config.js": 'module.exports = { value: "required-cjs-ok" };\n',
+			"consumer.js": [
+				'import { createRequire } from "node:module";',
+				"const require = createRequire(import.meta.url);",
+				'export const requiredValue = require("./config.js").value;',
+			].join("\n"),
+			"helper.js": "module.exports = { value: 42 };\n",
+			"named-helper.cjs": 'module.exports = { namedValue: "named-cjs-ok" };\n',
 			"index.ts": [
 				'import { readFileSync } from "node:fs";',
 				'import { fileURLToPath } from "node:url";',
 				'import * as path from "node:path";',
+				'import { requiredValue } from "./consumer.js";',
+				'import helper from "./helper.js";',
+				'import { namedValue } from "./named-helper.cjs";',
 				"const here = path.dirname(fileURLToPath(import.meta.url));",
 				"export const dirName = here;",
 				'export const html = readFileSync(path.join(here, "ui.html"), "utf8");',
+				"export const defaultValue = helper.value;",
+				"export { namedValue, requiredValue };",
 				"export default function (pi) { void pi; }",
 			].join("\n"),
 		});
 
-		const mod = (await loadLegacyPiModule(path.join(dir, "index.ts"))) as { dirName: string; html: string };
+		const mod = (await loadLegacyPiModule(path.join(dir, "index.ts"))) as {
+			defaultValue: number;
+			dirName: string;
+			html: string;
+			namedValue: string;
+			requiredValue: string;
+		};
 
-		// The asset resolves because the module runs in place — its computed
-		// __dirname is the extension's real directory, not a mirror temp root.
-		// (Bun realpaths loaded modules, so compare against the realpath.)
+		// Bun realpaths loaded modules, so the in-place path is compared to the fixture's real path.
 		expect(mod.dirName).toBe(await fs.realpath(dir));
 		expect(mod.html).toBe("<html>PLAN-UI</html>");
-	});
-
-	it("loads CommonJS helpers required by an ES module extension", async () => {
-		const dir = await writePackage({
-			"package.json": JSON.stringify({ name: "cjs-helper-ext", version: "1.0.0" }),
-			"config.js": 'module.exports = { value: "config-ok" };\n',
-			"index.js": [
-				'import { createRequire } from "node:module";',
-				"const require = createRequire(import.meta.url);",
-				'const { value } = require("./config.js");',
-				"export { value };",
-				"export default function (pi) { void pi; }",
-			].join("\n"),
-		});
-
-		const mod = (await loadLegacyPiModule(path.join(dir, "index.js"))) as { value: string };
-
-		expect(mod.value).toBe("config-ok");
-	});
-
-	it("loads a relative CommonJS helper imported by a TypeScript extension", async () => {
-		const dir = await writePackage({
-			"package.json": JSON.stringify({ name: "relative-cjs-import-ext", version: "1.0.0" }),
-			"helper.js": "module.exports = { value: 42 };\n",
-			"index.ts": [
-				'import helper from "./helper.js";',
-				"export const value = helper.value;",
-				"export default function (pi) { void pi; }",
-			].join("\n"),
-		});
-
-		const mod = (await loadLegacyPiModule(path.join(dir, "index.ts"))) as { value: number };
-
-		expect(mod.value).toBe(42);
+		expect(mod.requiredValue).toBe("required-cjs-ok");
+		expect(mod.defaultValue).toBe(42);
+		expect(mod.namedValue).toBe("named-cjs-ok");
 	});
 
 	it("remaps legacy Pi requires in graph-owned CommonJS packages to the host shim", async () => {
@@ -145,22 +131,6 @@ describe("legacy-pi in-place module loading (issue #1674)", () => {
 		const mod = await loadLegacyPiModule(path.join(dir, "index.js"));
 
 		expect(Reflect.get(Object(mod), "canvasValue")).toBe("canvas-shim");
-	});
-
-	it("preserves named ESM imports from CommonJS helpers", async () => {
-		const dir = await writePackage({
-			"package.json": JSON.stringify({ name: "named-cjs-ext", version: "1.0.0", type: "module" }),
-			"index.js": [
-				'import { value } from "./helper.cjs";',
-				"export { value };",
-				"export default function (pi) { void pi; }",
-			].join("\n"),
-			"helper.cjs": 'module.exports = { value: "named-cjs-ok" };\n',
-		});
-
-		const mod = (await loadLegacyPiModule(path.join(dir, "index.js"))) as { value: string };
-
-		expect(mod.value).toBe("named-cjs-ok");
 	});
 
 	it("reads a lazy CommonJS helper at import time", async () => {

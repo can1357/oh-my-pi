@@ -10,9 +10,10 @@ import {
 	createAgentSession,
 	type ExtensionFactory,
 } from "@oh-my-pi/pi-coding-agent/sdk";
-import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
+import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
 const providerName = "restricted-session-provider";
 const modelId = "restricted-session-model";
@@ -25,10 +26,10 @@ describe("restricted sessions sharing extension providers", () => {
 	let modelRegistry: ModelRegistry;
 	let settings: Settings;
 
-	beforeEach(async () => {
+	beforeEach(() => {
 		tempDir = path.join(os.tmpdir(), `pi-sdk-restricted-provider-${Snowflake.next()}`);
 		fs.mkdirSync(tempDir, { recursive: true });
-		authStorage = await AuthStorage.create(path.join(tempDir, "auth.db"));
+		authStorage = createInMemoryAuthStorage();
 		modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
 		settings = Settings.isolated();
 		settings.setModelRole("default", `${providerName}/${modelId}`);
@@ -76,6 +77,9 @@ describe("restricted sessions sharing extension providers", () => {
 			enableMCP: false,
 			enableLsp: false,
 			skipPythonPreflight: true,
+			rules: [],
+			preloadedCustomToolPaths: [],
+			toolNames: ["read"],
 		};
 	}
 

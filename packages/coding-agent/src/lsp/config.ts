@@ -229,6 +229,7 @@ export function hasRootMarkerAncestor(filePath: string, markers: string[]): bool
  */
 const PYTHON_ROOT_MARKERS = [
 	"pyproject.toml",
+	"ty.toml",
 	"requirements.txt",
 	"setup.py",
 	"setup.cfg",

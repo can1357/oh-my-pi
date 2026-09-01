@@ -11,7 +11,7 @@
  *     post-prompt recovery, but the loop is already done) must be drained when
  *     the session settles.
  */
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -36,8 +36,18 @@ interface SteerHarness {
 
 describe("AgentSession queued steer delivery", () => {
 	let tempDir: string;
+	let fixtureDir: string;
+	let authStorage: AuthStorage;
+	let modelRegistry: ModelRegistry;
 	let session: AgentSession;
-	const authStorages: AuthStorage[] = [];
+
+	beforeAll(async () => {
+		fixtureDir = path.join(os.tmpdir(), `pi-steer-strand-fixture-${Snowflake.next()}`);
+		fs.mkdirSync(fixtureDir, { recursive: true });
+		authStorage = await AuthStorage.create(path.join(fixtureDir, "auth.db"));
+		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		modelRegistry = new ModelRegistry(authStorage, path.join(fixtureDir, "models.yml"));
+	});
 
 	beforeEach(() => {
 		tempDir = path.join(os.tmpdir(), `pi-steer-strand-${Snowflake.next()}`);
@@ -46,10 +56,12 @@ describe("AgentSession queued steer delivery", () => {
 
 	afterEach(async () => {
 		await session?.dispose();
-		for (const authStorage of authStorages.splice(0)) {
-			authStorage.close();
-		}
 		removeSyncWithRetries(tempDir);
+	});
+
+	afterAll(() => {
+		authStorage.close();
+		removeSyncWithRetries(fixtureDir);
 	});
 
 	async function createSession(responses: MockResponse[]): Promise<SteerHarness> {
@@ -62,10 +74,7 @@ describe("AgentSession queued steer delivery", () => {
 		});
 		const sessionManager = SessionManager.inMemory();
 		const settings = Settings.isolated({ "compaction.enabled": false });
-		const authStorage = await AuthStorage.create(path.join(tempDir, `auth-${Snowflake.next()}.db`));
-		authStorages.push(authStorage);
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
-		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
+
 		session = new AgentSession({ agent, sessionManager, settings, modelRegistry });
 		return { session, sessionManager, mock };
 	}

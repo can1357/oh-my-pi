@@ -24,3 +24,4 @@ No native tool_calling? Inference provider botches parsing them? `PI_DIALECT=glm
 Turn on `/advisor` to attach a second model that reviews every turn and quietly injects advice
 Try starting your prompt with a ->, and writing a list (1. Do X, 2. Do Y)
 Press shift+tab to cycle through reasoning effort levels
+Lint/type errors piling up? `omp cleanse` (or /cleanse right here) hunts project diagnostics and fixes them with parallel subagents — esc cancels

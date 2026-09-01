@@ -1054,9 +1054,9 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 	#activateAgent(ref: AgentRef): void {
 		this.#notice = undefined;
 		const focusAgent = this.#focusAgent;
-		// Advisor refs are read-only transcripts with no live/ revivable session;
-		// open the in-hub chat view (file-backed) instead of trying to focus one.
-		if (ref.kind === "advisor" || this.#remote || !focusAgent) {
+		// Aborted agents and advisor refs are read-only transcripts with no
+		// revivable session; open the in-hub viewer instead of failing ensureLive.
+		if (ref.kind === "advisor" || ref.status === "aborted" || this.#remote || !focusAgent) {
 			this.openChat(ref.id);
 			return;
 		}

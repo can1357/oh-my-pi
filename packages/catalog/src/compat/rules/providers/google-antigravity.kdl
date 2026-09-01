@@ -1,0 +1,53 @@
+// Provider-wire compat for "google-antigravity"; regenerated from the frozen census using deployment contract selectors.
+
+provider "google-antigravity" {
+	class "anthropic" {
+		family "opus" {
+			thinking-mode "budget"
+		}
+	}
+	class "gemini" {
+		family "flash" {
+			revision ">=3 <3.6" {
+				thinking-effort-budgets {
+					high 10000
+					low 1000
+					medium 4000
+					minimal 1000
+				}
+				thinking-mode "budget"
+				thinking-suppress-when-off #true
+			}
+			revision ">=3.6 <3.8" {
+				thinking-mode "google-level"
+				thinking-requires-effort #true
+			}
+		}
+		family "pro" {
+			revision ">=3 <3.2" {
+				thinking-suppress-when-off #true
+			}
+		}
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "claude-opus-4-6" {
+		thinking-efforts "minimal" "low" "medium" "high"
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "gemini-3-pro" {
+		thinking-mode "google-level"
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "gemini-3.1-flash-lite" {
+		thinking-mode "google-level"
+		thinking-requires-effort #true
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "gemini-3.1-pro" {
+		thinking-effort-budgets {
+			high 10001
+			low 1001
+		}
+		thinking-mode "budget"
+	}
+}

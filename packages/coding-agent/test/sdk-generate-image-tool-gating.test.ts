@@ -29,7 +29,7 @@ describe("generate_image tool gating", () => {
 		registryDir = path.join(os.tmpdir(), `pi-generate-image-gating-${Snowflake.next()}`);
 		fs.mkdirSync(registryDir, { recursive: true });
 		authStorage = await AuthStorage.create(path.join(registryDir, "auth.db"));
-		modelRegistry = new ModelRegistry(authStorage);
+		modelRegistry = new ModelRegistry(authStorage, path.join(registryDir, "models.yml"));
 	});
 
 	afterEach(async () => {
@@ -41,8 +41,30 @@ describe("generate_image tool gating", () => {
 		if (fs.existsSync(registryDir)) removeSyncWithRetries(registryDir);
 	});
 
+	function startupShortcuts() {
+		// These tests vary only tool registration and activation. Bypass unrelated
+		// filesystem discovery and workspace walking on every SDK session startup.
+		return {
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			rules: [],
+			workspaceTree: {
+				rootPath: registryDir,
+				rendered: "",
+				truncated: false,
+				totalLines: 0,
+				agentsMdFiles: [],
+			},
+			enableMCP: false,
+			enableLsp: false,
+		};
+	}
+
 	async function activeToolNames(settings: Settings, toolNames?: string[]): Promise<string[]> {
 		const { session } = await createAgentSession({
+			...startupShortcuts(),
 			cwd: registryDir,
 			agentDir: registryDir,
 			modelRegistry,
@@ -67,8 +89,17 @@ describe("generate_image tool gating", () => {
 		} as CustomTool;
 	}
 
+	function specializedToolsPolicy(session: AgentSession): string {
+		const rendered = session.systemPrompt.join("\n");
+		const start = rendered.indexOf("# Specialized Tools");
+		const end = rendered.indexOf("\n# Exploration", start);
+		if (start < 0 || end < 0) throw new Error("Expected the specialized-tools policy section");
+		return rendered.slice(start, end);
+	}
+
 	async function sessionWithCustomTools(toolNames: string[], customTools: CustomTool[]): Promise<AgentSession> {
 		const { session } = await createAgentSession({
+			...startupShortcuts(),
 			cwd: registryDir,
 			agentDir: registryDir,
 			enableMCP: false,
@@ -116,6 +147,7 @@ describe("generate_image tool gating", () => {
 		// discoverable custom tool, so it mounts as an xd:// device instead of
 		// shipping its schema top-level.
 		const { session } = await createAgentSession({
+			...startupShortcuts(),
 			cwd: registryDir,
 			agentDir: registryDir,
 			modelRegistry,
@@ -129,20 +161,47 @@ describe("generate_image tool gating", () => {
 		expect(session.getXdevToolEntries().map(entry => entry.name)).toContain("generate_image");
 	});
 
-	it("keeps ambient tools top-level across runtime selection without write", async () => {
+	it("mounts ambient tools across runtime selection with a device-only write", async () => {
 		const ambientTool = customTool("ambient_search");
 		const session = await sessionWithCustomTools(["read"], [ambientTool]);
-		expect(session.getActiveToolNames()).toContain(ambientTool.name);
-		expect(session.getXdevToolEntries()).toEqual([]);
+		expect(session.getActiveToolNames()).toEqual(expect.arrayContaining(["read", "write"]));
+		expect(session.getActiveToolNames()).not.toContain(ambientTool.name);
+		expect(session.getXdevToolEntries().map(entry => entry.name)).toContain(ambientTool.name);
+		expect(specializedToolsPolicy(session)).not.toContain("`write`");
 
 		await session.setActiveToolsByName(session.getEnabledToolNames());
 
-		expect(session.getActiveToolNames()).toContain(ambientTool.name);
-		expect(session.getActiveToolNames()).not.toContain("write");
-		expect(session.getXdevToolEntries()).toEqual([]);
+		const write = session.getToolByName("write");
+		expect(write).toBeDefined();
+		await expect(
+			write!.execute("device-only-after-reapply", {
+				path: path.join(registryDir, "internal-reapply.txt"),
+				content: "x",
+			}),
+		).rejects.toThrow("Filesystem writes are not available");
+
+		expect(session.getActiveToolNames()).toEqual(expect.arrayContaining(["read", "write"]));
+		expect(session.getActiveToolNames()).not.toContain(ambientTool.name);
+		expect(session.getXdevToolEntries().map(entry => entry.name)).toContain(ambientTool.name);
 	});
 
-	it("exposes ambient MCP-shaped tools directly when write was not granted", async () => {
+	it("upgrades explicit write selection while devices are already mounted", async () => {
+		const ambientTool = customTool("mounted_runtime_search");
+		const session = await sessionWithCustomTools(["read"], [ambientTool]);
+		expect(session.getXdevToolEntries().map(entry => entry.name)).toContain(ambientTool.name);
+
+		await session.setActiveToolsByName(["read", "write"]);
+
+		expect(session.getXdevToolEntries().map(entry => entry.name)).not.toContain(ambientTool.name);
+		expect(specializedToolsPolicy(session)).toContain("`write`");
+		const write = session.getToolByName("write");
+		expect(write).toBeDefined();
+		const target = path.join(registryDir, "mounted-runtime-upgrade.txt");
+		await write!.execute("mounted-runtime-full-write", { path: target, content: "upgraded\n" });
+		expect(await Bun.file(target).text()).toBe("upgraded\n");
+	});
+
+	it("mounts ambient MCP-shaped tools when write was omitted", async () => {
 		let mcpCalls = 0;
 		const mcpTool = {
 			name: "mcp__test__search",
@@ -157,6 +216,7 @@ describe("generate_image tool gating", () => {
 			},
 		} as CustomTool;
 		const { session } = await createAgentSession({
+			...startupShortcuts(),
 			cwd: registryDir,
 			agentDir: registryDir,
 			modelRegistry,
@@ -170,9 +230,9 @@ describe("generate_image tool gating", () => {
 		sessions.push(session);
 
 		expect(session.getActiveToolNames()).toContain("generate_image");
-		expect(session.getActiveToolNames()).toContain(mcpTool.name);
-		expect(session.getActiveToolNames()).not.toContain("write");
-		expect(session.getXdevToolEntries()).toEqual([]);
+		expect(session.getActiveToolNames()).toContain("write");
+		expect(session.getActiveToolNames()).not.toContain(mcpTool.name);
+		expect(session.getXdevToolEntries().map(entry => entry.name)).toContain(mcpTool.name);
 		expect(session.getAllToolNames()).toContain(mcpTool.name);
 		const directTool = session.getToolByName(mcpTool.name);
 		expect(directTool).toBeDefined();
@@ -181,27 +241,30 @@ describe("generate_image tool gating", () => {
 		expect(mcpCalls).toBe(1);
 	});
 
-	it("does not add write for an MCP device when write was omitted", async () => {
+	it("keeps the device-only write across an empty MCP refresh", async () => {
 		const session = await sessionWithCustomTools(["read"], [customTool("mcp__test__search", true)]);
-		expect(session.getActiveToolNames()).toContain("mcp__test__search");
-		expect(session.getActiveToolNames()).not.toContain("write");
-		expect(session.getXdevToolEntries()).toEqual([]);
+		expect(session.getActiveToolNames()).toContain("write");
+		expect(session.getActiveToolNames()).not.toContain("mcp__test__search");
+		expect(session.getXdevToolEntries().map(entry => entry.name)).toContain("mcp__test__search");
 
 		await session.refreshMCPTools([]);
 
-		expect(session.getActiveToolNames()).not.toContain("write");
+		expect(session.getActiveToolNames()).toContain("write");
+		expect(session.getXdevToolEntries().map(entry => entry.name)).toContain("mcp__test__search");
 	});
 
-	it("does not add write during enabled-set round trips", async () => {
+	it("keeps the device-only write during enabled-set round trips", async () => {
 		const session = await sessionWithCustomTools(["read"], [customTool("mcp__test__search", true)]);
-		expect(session.getActiveToolNames()).not.toContain("write");
+		expect(session.getActiveToolNames()).toContain("write");
 
 		await session.setActiveToolsByName(session.getEnabledToolNames());
-		expect(session.getActiveToolNames()).toContain("mcp__test__search");
-		expect(session.getActiveToolNames()).not.toContain("write");
+		expect(session.getActiveToolNames()).not.toContain("mcp__test__search");
+		expect(session.getActiveToolNames()).toContain("write");
+		expect(session.getXdevToolEntries().map(entry => entry.name)).toContain("mcp__test__search");
 
 		await session.refreshMCPTools([]);
-		expect(session.getActiveToolNames()).not.toContain("write");
+		expect(session.getActiveToolNames()).toContain("write");
+		expect(session.getXdevToolEntries().map(entry => entry.name)).toContain("mcp__test__search");
 	});
 
 	it("preserves explicitly requested write after MCP devices disconnect", async () => {
@@ -224,15 +287,15 @@ describe("generate_image tool gating", () => {
 		expect(session.getXdevToolEntries()).toEqual([]);
 	});
 
-	it("keeps all remaining tools top-level after MCP disconnect without write", async () => {
+	it("keeps ambient tools mounted after MCP disconnect with a device-only write", async () => {
 		const ambientTool = customTool("ambient_search");
 		const session = await sessionWithCustomTools(["read"], [ambientTool, customTool("mcp__test__search", true)]);
 
 		await session.refreshMCPTools([]);
 
-		expect(session.getActiveToolNames()).toContain(ambientTool.name);
-		expect(session.getActiveToolNames()).not.toContain("write");
-		expect(session.getXdevToolEntries()).toEqual([]);
+		expect(session.getActiveToolNames()).toContain("write");
+		expect(session.getActiveToolNames()).not.toContain(ambientTool.name);
+		expect(session.getXdevToolEntries().map(entry => entry.name)).toContain(ambientTool.name);
 	});
 
 	it("keeps ambient custom tools top-level when an explicit session omitted read", async () => {
@@ -313,8 +376,9 @@ describe("generate_image tool gating", () => {
 		expect(session.getActiveToolNames()).toContain(rpcTool.name);
 		expect(session.getXdevToolEntries().map(entry => entry.name)).not.toContain(rpcTool.name);
 	});
-	it("exposes newly discovered RPC tools directly when write was omitted", async () => {
+	it("mounts newly discovered RPC tools under xd:// when write was omitted", async () => {
 		const { session } = await createAgentSession({
+			...startupShortcuts(),
 			cwd: registryDir,
 			agentDir: registryDir,
 			modelRegistry,
@@ -326,7 +390,10 @@ describe("generate_image tool gating", () => {
 			toolNames: ["read"],
 		});
 		sessions.push(session);
+		// The device-only transport stays dormant until a mountable tool appears.
 		expect(session.getXdevToolEntries()).toEqual([]);
+		expect(session.getActiveToolNames()).not.toContain("write");
+		await session.setActiveToolsByName(["read"]);
 		expect(session.getActiveToolNames()).not.toContain("write");
 
 		const rpcTool: AgentTool = {
@@ -341,8 +408,16 @@ describe("generate_image tool gating", () => {
 		};
 		await session.refreshRpcHostTools([rpcTool]);
 
-		expect(session.getActiveToolNames()).toContain("rpc_search");
-		expect(session.getActiveToolNames()).not.toContain("write");
-		expect(session.getXdevToolEntries()).toEqual([]);
+		expect(session.getActiveToolNames()).toContain("write");
+
+		expect(session.getActiveToolNames()).not.toContain("rpc_search");
+		expect(session.getXdevToolEntries().map(entry => entry.name)).toContain("rpc_search");
+
+		// The transport write rejects filesystem targets: the grant is xd:// only.
+		const write = session.getToolByName("write");
+		expect(write).toBeDefined();
+		await expect(
+			write!.execute("device-only-fs", { path: path.join(registryDir, "nope.txt"), content: "x" }),
+		).rejects.toThrow("Filesystem writes are not available");
 	});
 });

@@ -12,22 +12,26 @@
  * `enableMCP: false`, regardless of what `baseOptions` carries.
  */
 
-import { describe, expect, it } from "bun:test";
+import { afterAll, describe, expect, it } from "bun:test";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createAcpSessionFactory } from "@oh-my-pi/pi-coding-agent/main";
 import type { CreateAgentSessionOptions, CreateAgentSessionResult } from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
-import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
+
+const authStorage = createInMemoryAuthStorage();
+const modelRegistry = new ModelRegistry(authStorage);
+
+afterAll(() => {
+	authStorage.close();
+});
 
 describe("createAcpSessionFactory MCP isolation (issue #1234)", () => {
 	it("forces enableMCP=false even when baseOptions opts in", async () => {
 		const tempDir = TempDir.createSync("@pi-acp-mcp-isolation-");
-		let authStorage: AuthStorage | undefined;
 		try {
-			authStorage = await AuthStorage.create(tempDir.join("auth.db"));
-			const modelRegistry = new ModelRegistry(authStorage);
 			const settings = Settings.isolated({});
 			const fakeSession = {} as AgentSession;
 			const captured: CreateAgentSessionOptions[] = [];
@@ -62,25 +66,47 @@ describe("createAcpSessionFactory MCP isolation (issue #1234)", () => {
 			});
 
 			const result = await factory(tempDir.path());
-			expect(result).toBe(fakeSession);
+			expect(result.session).toBe(fakeSession);
 			expect(captured).toHaveLength(1);
 			expect(captured[0].enableMCP).toBe(false);
 		} finally {
-			try {
-				authStorage?.close();
-			} finally {
-				await Bun.sleep(0);
-				await tempDir.remove();
-			}
+			await tempDir.remove();
+		}
+	});
+
+	it("rejects allowlisted tools absent from the completed ACP session registry", async () => {
+		const tempDir = TempDir.createSync("@pi-acp-tool-allowlist-");
+		try {
+			const settings = Settings.isolated({});
+			let disposed = false;
+			const fakeSession = {
+				extensionRunner: undefined,
+				getAllToolNames: () => ["read"],
+				dispose: async () => {
+					disposed = true;
+				},
+			} as unknown as AgentSession;
+			const factory = createAcpSessionFactory({
+				baseOptions: {} as CreateAgentSessionOptions,
+				settings,
+				sessionDir: tempDir.join("sessions"),
+				authStorage,
+				modelRegistry,
+				parsedArgs: { tools: ["read", "missing"] },
+				rawArgs: ["--tools", "read,missing"],
+				createSession: async () => ({ session: fakeSession }) as CreateAgentSessionResult,
+			});
+
+			await expect(factory(tempDir.path())).rejects.toThrow(/Unknown tool in --tools: missing/);
+			expect(disposed).toBe(true);
+		} finally {
+			await tempDir.remove();
 		}
 	});
 
 	it("shares the trusted extension EventBus with the ACP session", async () => {
 		const tempDir = TempDir.createSync("@pi-acp-trusted-extension-");
-		let authStorage: AuthStorage | undefined;
 		try {
-			authStorage = await AuthStorage.create(tempDir.join("auth.db"));
-			const modelRegistry = new ModelRegistry(authStorage);
 			const settings = Settings.isolated({});
 			const trustedPath = tempDir.join("trusted.ts");
 			const firedPath = tempDir.join("trusted-event-fired");
@@ -125,20 +151,13 @@ describe("createAcpSessionFactory MCP isolation (issue #1234)", () => {
 			expect(await Bun.file(firedPath).text()).toBe("fired");
 			expect(await Bun.file(ambientFiredPath).exists()).toBe(false);
 		} finally {
-			try {
-				authStorage?.close();
-			} finally {
-				await tempDir.remove();
-			}
+			await tempDir.remove();
 		}
 	});
 
 	it("fails before ACP session creation when a trusted extension cannot load", async () => {
 		const tempDir = TempDir.createSync("@pi-acp-trusted-extension-failure-");
-		let authStorage: AuthStorage | undefined;
 		try {
-			authStorage = await AuthStorage.create(tempDir.join("auth.db"));
-			const modelRegistry = new ModelRegistry(authStorage);
 			const settings = Settings.isolated({});
 			const trustedPath = tempDir.join("throwing.ts");
 			await Bun.write(trustedPath, 'throw new Error("trusted extension fixture");');
@@ -163,11 +182,7 @@ describe("createAcpSessionFactory MCP isolation (issue #1234)", () => {
 			await expect(factory(tempDir.path())).rejects.toThrow(/Trusted extension failed to load.*fixture/);
 			expect(createCalls).toBe(0);
 		} finally {
-			try {
-				authStorage?.close();
-			} finally {
-				await tempDir.remove();
-			}
+			await tempDir.remove();
 		}
 	});
 });
@@ -175,10 +190,7 @@ describe("createAcpSessionFactory MCP isolation (issue #1234)", () => {
 describe("createAcpSessionFactory TITLE_SYSTEM.md per-cwd resolution (PR #3736)", () => {
 	it("re-resolves the title prompt for the per-session cwd instead of inheriting the launch cwd's override", async () => {
 		const tempDir = TempDir.createSync("@pi-acp-title-prompt-");
-		let authStorage: AuthStorage | undefined;
 		try {
-			authStorage = await AuthStorage.create(tempDir.join("auth.db"));
-			const modelRegistry = new ModelRegistry(authStorage);
 			const settings = Settings.isolated({});
 
 			const projectDir = tempDir.join("project");
@@ -224,12 +236,7 @@ describe("createAcpSessionFactory TITLE_SYSTEM.md per-cwd resolution (PR #3736)"
 			expect(captured).toHaveLength(1);
 			expect(captured[0].titleSystemPrompt).toBe("Project-specific title policy.");
 		} finally {
-			try {
-				authStorage?.close();
-			} finally {
-				await Bun.sleep(0);
-				await tempDir.remove();
-			}
+			await tempDir.remove();
 		}
 	});
 });

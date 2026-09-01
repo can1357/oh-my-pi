@@ -69,8 +69,6 @@ function windowsOpenerCommand(target: string): string[] {
 		powershell,
 		"-NoProfile",
 		"-NonInteractive",
-		"-WindowStyle",
-		"Hidden",
 		"-EncodedCommand",
 		Buffer.from(script, "utf16le").toString("base64"),
 	];
@@ -93,7 +91,12 @@ export function openPath(urlOrPath: string): void {
 	}
 	let child: Bun.Subprocess | undefined;
 	try {
-		child = Bun.spawn(cmd, { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+		child = Bun.spawn(cmd, {
+			stdin: "ignore",
+			stdout: "ignore",
+			stderr: "ignore",
+			windowsHide: process.platform === "win32",
+		});
 	} catch (error) {
 		// Spawn threw synchronously (missing binary, denied exec, sandbox
 		// restriction, …). Best-effort: log so the failure isn't invisible while

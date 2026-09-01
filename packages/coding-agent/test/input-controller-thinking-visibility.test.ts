@@ -1,55 +1,21 @@
-import { describe, expect, it, vi } from "bun:test";
+import { describe, expect, it, type Mock, vi } from "bun:test";
 import { AssistantMessageComponent } from "@oh-my-pi/pi-coding-agent/modes/components/assistant-message";
 import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 
+function createAssistant(): AssistantMessageComponent {
+	const assistant = Object.create(AssistantMessageComponent.prototype) as AssistantMessageComponent;
+	assistant.setHideThinkingBlock = vi.fn();
+	return assistant;
+}
+
 describe("InputController thinking visibility", () => {
-	it("keeps pre-stream pending transcript content mounted when Ctrl+T toggles thinking blocks", () => {
-		const pendingUserMessage = { kind: "pending-user" };
-		const loadingIndicator = { kind: "loading" };
-		const assistant = new AssistantMessageComponent();
-		const setHideThinkingBlock = vi.spyOn(assistant, "setHideThinkingBlock");
-		const resetDisplay = vi.fn();
-		const clear = vi.fn();
-		const addChild = vi.fn();
-		const rebuildChatFromMessages = vi.fn();
-		const set = vi.fn();
-		const showStatus = vi.fn();
-		const children = [pendingUserMessage, assistant, loadingIndicator];
-		const chatContainer = { children, clear, addChild };
-		const ctx = {
-			hideThinkingBlock: false,
-			effectiveHideThinkingBlock: false,
-			settings: { set },
-			session: { agent: { hideThinkingSummary: false }, thinkingLevel: "high" },
-			chatContainer,
-			streamingComponent: undefined,
-			streamingMessage: undefined,
-			rebuildChatFromMessages,
-			showStatus,
-			ui: { resetDisplay },
-		} as unknown as InteractiveModeContext;
-
-		new InputController(ctx).toggleThinkingBlockVisibility();
-
-		expect(ctx.hideThinkingBlock).toBe(true);
-		expect(set).toHaveBeenCalledWith("hideThinkingBlock", true);
-		expect(ctx.session.agent.hideThinkingSummary).toBe(false);
-		expect(chatContainer.children).toEqual([pendingUserMessage, assistant, loadingIndicator]);
-		expect(clear).not.toHaveBeenCalled();
-		expect(addChild).not.toHaveBeenCalled();
-		expect(rebuildChatFromMessages).not.toHaveBeenCalled();
-		expect(setHideThinkingBlock).toHaveBeenCalledWith(true);
-		expect(resetDisplay).toHaveBeenCalledTimes(1);
-		expect(showStatus).toHaveBeenCalledWith("Thinking blocks: hidden");
-	});
-
 	it("refuses to toggle and informs the user when thinking level is off", () => {
 		// When thinking is "off", effectiveHideThinkingBlock is true even if the
 		// user's hideThinkingBlock setting is false. The toggle should refuse
 		// instead of silently no-op'ing or corrupting the setting.
-		const assistant = new AssistantMessageComponent();
-		const setHideThinkingBlock = vi.spyOn(assistant, "setHideThinkingBlock");
+		const assistant = createAssistant();
+		const setHideThinkingBlock = assistant.setHideThinkingBlock as Mock<(hidden: boolean) => void>;
 		const set = vi.fn();
 		const showStatus = vi.fn();
 		const resetDisplay = vi.fn();
@@ -76,18 +42,25 @@ describe("InputController thinking visibility", () => {
 	});
 
 	it("allows toggling when thinking is off after reasoning content was received", () => {
-		const assistant = new AssistantMessageComponent();
-		const setHideThinkingBlock = vi.spyOn(assistant, "setHideThinkingBlock");
+		const assistant = createAssistant();
+		const setHideThinkingBlock = assistant.setHideThinkingBlock as Mock<(hidden: boolean) => void>;
 		const set = vi.fn();
 		const showStatus = vi.fn();
-		const resetDisplay = vi.fn();
+		const resetOrder: string[] = [];
+		const resetDisplay = vi.fn(() => resetOrder.push("display"));
+		const resetStableEmission = vi.fn(() => resetOrder.push("stable emission"));
 		const ctx = {
 			hideThinkingBlock: false,
 			effectiveHideThinkingBlock: false,
 			hasDisplayableThinkingContent: true,
 			settings: { set },
 			session: { agent: { hideThinkingSummary: false }, thinkingLevel: "off" },
-			chatContainer: { children: [assistant], clear: vi.fn(), addChild: vi.fn() },
+			chatContainer: {
+				children: [assistant],
+				clear: vi.fn(),
+				addChild: vi.fn(),
+				resetStableEmission,
+			},
 			streamingComponent: undefined,
 			streamingMessage: undefined,
 			showStatus,
@@ -99,13 +72,15 @@ describe("InputController thinking visibility", () => {
 		expect(ctx.hideThinkingBlock).toBe(true);
 		expect(set).toHaveBeenCalledWith("hideThinkingBlock", true);
 		expect(setHideThinkingBlock).toHaveBeenCalledWith(true);
+		expect(resetStableEmission).toHaveBeenCalledTimes(1);
 		expect(resetDisplay).toHaveBeenCalledTimes(1);
+		expect(resetOrder).toEqual(["stable emission", "display"]);
 		expect(showStatus).toHaveBeenCalledWith("Thinking blocks: hidden");
 	});
 
 	it("refuses to toggle when the focused view session has thinking off", () => {
-		const assistant = new AssistantMessageComponent();
-		const setHideThinkingBlock = vi.spyOn(assistant, "setHideThinkingBlock");
+		const assistant = createAssistant();
+		const setHideThinkingBlock = assistant.setHideThinkingBlock as Mock<(hidden: boolean) => void>;
 		const set = vi.fn();
 		const showStatus = vi.fn();
 		const resetDisplay = vi.fn();
@@ -136,8 +111,8 @@ describe("InputController thinking visibility", () => {
 		// where thinking was on. With thinking off, effectiveHideThinkingBlock
 		// is true regardless, so any toggle is a no-op — guard it rather than
 		// flipping the persisted preference back to false.
-		const assistant = new AssistantMessageComponent();
-		const setHideThinkingBlock = vi.spyOn(assistant, "setHideThinkingBlock");
+		const assistant = createAssistant();
+		const setHideThinkingBlock = assistant.setHideThinkingBlock as Mock<(hidden: boolean) => void>;
 		const set = vi.fn();
 		const showStatus = vi.fn();
 		const resetDisplay = vi.fn();

@@ -16,6 +16,64 @@ async function waitUntil(condition: () => boolean | Promise<boolean>, timeoutMs:
 }
 
 describe("browser relay daemon", () => {
+	it("bypasses HTTP_PROXY when probing the loopback relay", async () => {
+		let relayHits = 0;
+		let proxyHits = 0;
+		const relay = Bun.serve({
+			port: 0,
+			fetch: () => {
+				relayHits++;
+				return new Response("waiting", { status: 503 });
+			},
+		});
+		const proxy = Bun.serve({
+			port: 0,
+			fetch: () => {
+				proxyHits++;
+				return new Response("Bad Gateway", { status: 502 });
+			},
+		});
+		const child = Bun.spawn(
+			[
+				process.execPath,
+				"-e",
+				`import { probeRelayServer } from ${JSON.stringify(path.resolve(import.meta.dir, "../../src/tools/browser/relay/daemon.ts"))};
+const url = Bun.env.OMP_TEST_RELAY_URL;
+if (!url) throw new Error("missing relay URL");
+process.stdout.write(String(await probeRelayServer(url)));`,
+			],
+			{
+				env: {
+					...process.env,
+					HTTP_PROXY: `http://127.0.0.1:${proxy.port}`,
+					http_proxy: `http://127.0.0.1:${proxy.port}`,
+					NO_PROXY: "",
+					no_proxy: "",
+					OMP_TEST_RELAY_URL: `http://127.0.0.1:${relay.port}`,
+				},
+				stdout: "pipe",
+				stderr: "pipe",
+			},
+		);
+		try {
+			const [exitCode, stdout, stderr] = await Promise.all([
+				child.exited,
+				new Response(child.stdout).text(),
+				new Response(child.stderr).text(),
+			]);
+			expect(stderr).toBe("");
+			expect(exitCode).toBe(0);
+			expect(stdout).toBe("true");
+			expect(relayHits).toBe(1);
+			expect(proxyHits).toBe(0);
+		} finally {
+			if (child.exitCode === null) child.kill();
+			await child.exited;
+			await relay.stop(true);
+			await proxy.stop(true);
+		}
+	});
+
 	it("stays alive while a consumer in another project holds the global broker lease", async () => {
 		const home = await fs.mkdtemp(path.join(os.tmpdir(), "omp-relay-global-"));
 		const firstProject = path.join(home, "project-a");
@@ -105,5 +163,11 @@ try {
 			rescue.close();
 			await fs.rm(home, { recursive: true, force: true });
 		}
-	}, 30_000);
+		// Budget must exceed the sum of the bounds inside the test: two 15s marker waits
+		// plus the 5s shutdown probe are 35s of legitimate waiting, so a 30s cap let a
+		// loaded runner kill the test mid-`waitUntil` and report only "timed out after
+		// 30000ms" instead of the marker assertion that actually failed. Each consumer is
+		// a cold `bun` process importing the daemon module graph, so the spawns are slow
+		// exactly when the machine is busy.
+	}, 60_000);
 });

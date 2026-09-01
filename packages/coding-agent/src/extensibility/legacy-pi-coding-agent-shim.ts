@@ -15,7 +15,13 @@
 import { Database } from "bun:sqlite";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type { AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
+import {
+	type AgentMessage,
+	type AgentToolResult,
+	type AgentToolUpdateCallback,
+	type MessageCountOptions,
+	Tokenizer,
+} from "@oh-my-pi/pi-agent-core";
 import { type AuthCredential, SqliteAuthCredentialStore, type TSchema } from "@oh-my-pi/pi-ai";
 import { piEscapeRegexLiteral, piJoinPath } from "@oh-my-pi/pi-ai/providers/cursor-pi-args";
 import { getKeybindings, type Keybinding, Text } from "@oh-my-pi/pi-tui";
@@ -57,7 +63,17 @@ import { EventBus } from "../utils/event-bus";
 import { convertImageToPng } from "../utils/image-loading";
 import { discoverExtensionPaths, loadExtensionFromFactory, loadExtensions } from "./extensions";
 import { ExtensionRuntime } from "./extensions/loader";
-import type { ExtensionFactory, ToolDefinition } from "./extensions/types";
+import type {
+	BashToolResultEvent,
+	EditToolResultEvent,
+	ExtensionFactory,
+	GrepToolResultEvent,
+	ReadToolResultEvent,
+	ToolDefinition,
+	ToolResultEvent,
+	ToolShellEnvironmentContext,
+	WriteToolResultEvent,
+} from "./extensions/types";
 import { Type } from "./legacy-typebox";
 import { getEnabledPlugins, resolvePluginExtensionPaths, type ScopedInstalledPlugin } from "./plugins/loader";
 import type { Skill } from "./skills";
@@ -79,11 +95,7 @@ interface LegacyThemeLike {
 	bold(text: string): string;
 }
 
-export interface BashSpawnContext {
-	command: string;
-	cwd: string;
-	env: NodeJS.ProcessEnv;
-}
+export type BashSpawnContext = ToolShellEnvironmentContext;
 
 export type BashSpawnHook = (context: BashSpawnContext) => BashSpawnContext;
 
@@ -473,12 +485,30 @@ export function createReadTool(cwd: string, options?: ReadToolOptions): ToolDefi
 /** Create the legacy bash tool definition. */
 export function createBashToolDefinition(cwd: string, options?: BashToolOptions): ToolDefinition {
 	const tool = createRegistryTool(cwd, "bash");
+	const spawnHook = options?.spawnHook;
+	const shellEnv = spawnHook
+		? (spawn: ToolShellEnvironmentContext): Record<string, string> => {
+				const baseline = { ...spawn.env };
+				const result = spawnHook(spawn);
+				// Legacy hooks conventionally return `{ ...context.env, EXTRA }`.
+				// The consumer applies this as per-command overrides on an already
+				// filtered base env, so forwarding the whole object would reintroduce
+				// everything filterChildShellEnv removed. Forward only entries the
+				// hook added or changed relative to the env it was handed.
+				return Object.fromEntries(
+					Object.entries(result.env).filter(
+						(entry): entry is [string, string] => typeof entry[1] === "string" && baseline[entry[0]] !== entry[1],
+					),
+				);
+			}
+		: undefined;
 	return markToolDefinition({
 		name: "bash",
 		label: "Bash",
 		description: tool.description,
 		parameters: legacyBashSchema,
 		approval: "exec",
+		...(shellEnv ? { shellEnv } : {}),
 		renderCall: (params, optionsArg, themeArg) => {
 			const theme = renderTheme(optionsArg, themeArg);
 			const command = stringField(params, "command") ?? "";
@@ -848,7 +878,7 @@ export class DefaultPackageManager {
  * callbacks, `additional*Paths`, `extensionFactories`, `settingsManager`,
  * `eventBus`) plus the discovery results, and the sibling `createAgentSession`
  * override below translates them into OMP's native session options
- * (`disableExtensionDiscovery`, `preloadedExtensionPaths`, `extensions`,
+ * (`disableExtensionDiscovery`, prepared/path extension preloads, `extensions`,
  * `skills`, `promptTemplates`, `contextFiles`, `settings`, `eventBus`,
  * `systemPrompt`) before delegating to `../sdk`.
  *
@@ -1350,7 +1380,11 @@ export async function createAgentSession(
 	// `preloadedExtensions` seam. Skipping this branch would let
 	// `createAgentSession` re-run its own discovery and undo the caller's
 	// `noExtensions: true`.
-	if (rest.preloadedExtensions === undefined && rest.preloadedExtensionPaths === undefined) {
+	if (
+		rest.preloadedExtensions === undefined &&
+		rest.preloadedPreparedExtensions === undefined &&
+		rest.preloadedExtensionPaths === undefined
+	) {
 		forwarded.preloadedExtensions = state.extensionsResult;
 	}
 
@@ -1440,11 +1474,24 @@ export function getPackageDir(): string {
 
 // Legacy pi's `@earendil-works/pi-coding-agent` re-exported `estimateTokens`,
 // `compact`, and `serializeConversation` from its package root (via
-// `./core/compaction/index.ts`). In omp they live in
-// `@oh-my-pi/pi-agent-core/compaction`, and the coding-agent barrel below does
-// not forward them, so legacy extensions importing them fail Bun's static
-// export check during validation (issues #6583, #7174, #7403).
-export { compact, estimateTokens, serializeConversation } from "@oh-my-pi/pi-agent-core/compaction";
+// `./core/compaction/index.ts`). In omp `compact` and `serializeConversation`
+// live in `@oh-my-pi/pi-agent-core/compaction`, and the coding-agent barrel
+// below does not forward them, so legacy extensions importing them fail Bun's
+// static export check during validation (issues #6583, #7174, #7403).
+export { compact, serializeConversation } from "@oh-my-pi/pi-agent-core/compaction";
+
+const legacyTokenizer = new Tokenizer();
+
+/**
+ * Legacy `estimateTokens(message, tokenizer?, options?)` export. The core API
+ * became `Tokenizer.countMessage`, but legacy pi extensions still import this
+ * free function by name (issues #6583, #7174, #7403), so the export surface
+ * must survive; a shared model-agnostic Tokenizer backs the tokenizer-less
+ * legacy call shape.
+ */
+export function estimateTokens(message: AgentMessage, tokenizer?: Tokenizer, options?: MessageCountOptions): number {
+	return (tokenizer ?? legacyTokenizer).countMessage(message, options);
+}
 
 // Same barrel gap for two more legacy package-root exports: pi re-exported the
 // `CONFIG_DIR_NAME` constant and the CLI parser `parseArgs`. In omp
@@ -1458,3 +1505,54 @@ export * from "../index";
 export { formatBytes as formatSize } from "../tools/render-utils";
 export { copyToClipboard } from "../utils/clipboard";
 export { Type } from "./legacy-typebox";
+
+// Legacy pi's `@earendil-works/pi-coding-agent` root exported an `is<Tool>ToolResult`
+// family of type guards that narrow a `tool_result` event (`ToolResultEvent`) by
+// tool name. omp removed them from the public API in 10.2.3, and the barrel above
+// does not forward them, so legacy extensions importing them (e.g.
+// `pi-lean-ctx@3.9.18`, which uses `isEditToolResult`/`isWriteToolResult` to
+// invalidate its read cache after a native edit/write) fail Bun's static export
+// check during validation (issue #8161). Restore the full guard family; legacy
+// `find`/`ls` tool results arrive through omp's custom-event branch, so those
+// guards narrow the tool name while leaving their details unknown.
+
+/** Narrow a `tool_result` event to the `bash` tool. */
+export function isBashToolResult(e: ToolResultEvent): e is BashToolResultEvent {
+	return e.toolName === "bash";
+}
+
+/** Narrow a `tool_result` event to the `read` tool. */
+export function isReadToolResult(e: ToolResultEvent): e is ReadToolResultEvent {
+	return e.toolName === "read";
+}
+
+/** Narrow a `tool_result` event to the `edit` tool. */
+export function isEditToolResult(e: ToolResultEvent): e is EditToolResultEvent {
+	return e.toolName === "edit";
+}
+
+/** Narrow a `tool_result` event to the `write` tool. */
+export function isWriteToolResult(e: ToolResultEvent): e is WriteToolResultEvent {
+	return e.toolName === "write";
+}
+
+/** Narrow a `tool_result` event to the `grep` tool. */
+export function isGrepToolResult(e: ToolResultEvent): e is GrepToolResultEvent {
+	return e.toolName === "grep";
+}
+
+/** Legacy `find` result event represented by omp's custom-event branch. */
+export type FindToolResultEvent = ToolResultEvent & { toolName: "find" };
+
+/** Narrow a `tool_result` event to the legacy `find` tool. */
+export function isFindToolResult(e: ToolResultEvent): e is FindToolResultEvent {
+	return e.toolName === "find";
+}
+
+/** Legacy `ls` result event represented by omp's custom-event branch. */
+export type LsToolResultEvent = ToolResultEvent & { toolName: "ls" };
+
+/** Narrow a `tool_result` event to the legacy `ls` tool. */
+export function isLsToolResult(e: ToolResultEvent): e is LsToolResultEvent {
+	return e.toolName === "ls";
+}

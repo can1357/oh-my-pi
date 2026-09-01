@@ -14,24 +14,24 @@ import { type } from "@oh-my-pi/omptype";
 import { usageReportSchema } from "@oh-my-pi/pi-ai";
 import { usageResponseSchema } from "@oh-my-pi/pi-ai/auth-broker/wire-schemas";
 
-const DISCLAIMER = "OMP-observed spend only; OpenCode usage outside OMP is not included.";
+const PROVIDER_NOTE = "Usage data can be delayed by up to five minutes.";
 
 function reportWithNotes() {
 	return {
-		provider: "opencode-go",
+		provider: "anthropic",
 		fetchedAt: Date.now(),
 		limits: [
 			{
-				id: "rolling-5h",
-				label: "5 Hour limit",
-				scope: { provider: "opencode-go", windowId: "rolling-5h" },
-				window: { id: "rolling-5h", label: "5 Hour", durationMs: 5 * 3_600_000 },
-				amount: { used: 3, limit: 12, remaining: 9, usedFraction: 0.25, remainingFraction: 0.75, unit: "usd" },
+				id: "anthropic:5h",
+				label: "5 Hour",
+				scope: { provider: "anthropic", windowId: "5h" },
+				window: { id: "5h", label: "5 Hour", durationMs: 5 * 3_600_000 },
+				amount: { usedFraction: 0.25, remainingFraction: 0.75, unit: "percent" },
 				status: "ok",
 			},
 		],
-		notes: [DISCLAIMER],
-		metadata: { planType: "OpenCode Go" },
+		notes: [PROVIDER_NOTE],
+		metadata: { planType: "Pro" },
 	};
 }
 
@@ -39,7 +39,7 @@ describe("usage report notes wire schema", () => {
 	it("usageReportSchema accepts report-level notes and preserves them", () => {
 		const validated = usageReportSchema(reportWithNotes());
 		expect(validated).not.toBeInstanceOf(type.errors);
-		expect(validated).toHaveProperty("notes", [DISCLAIMER]);
+		expect(validated).toHaveProperty("notes", [PROVIDER_NOTE]);
 	});
 
 	it("usageResponseSchema preserves report-level notes through the broker reject gate", () => {
@@ -52,6 +52,33 @@ describe("usage report notes wire schema", () => {
 		expect(validated).toHaveProperty("reports");
 		if (validated instanceof type.errors) throw new Error("expected valid response");
 		const reports = validated.reports;
-		expect(reports[0]).toHaveProperty("notes", [DISCLAIMER]);
+		expect(reports[0]).toHaveProperty("notes", [PROVIDER_NOTE]);
+	});
+
+	it("both schema copies accept the credits unit (Z.AI GLM Coding Plan reports)", () => {
+		// `usage.ts` and `wire-schemas.ts` keep separate copies of the unit enum;
+		// a new unit added to only one copy makes broker `/v1/usage` responses
+		// containing it fail the `"+": "reject"` gate client-side.
+		const report = {
+			provider: "zai",
+			fetchedAt: Date.now(),
+			limits: [
+				{
+					id: "zai:credits:5h",
+					label: "ZAI 5 Hours Credit Quota",
+					scope: { provider: "zai", windowId: "5h", shared: true },
+					window: { id: "5h", label: "5 Hours", durationMs: 5 * 3_600_000 },
+					amount: { used: 1438, limit: 12000, usedFraction: 0.11, unit: "credits" },
+					status: "ok",
+				},
+			],
+			metadata: { planType: "pro" },
+		};
+
+		const local = usageReportSchema(report);
+		expect(local).not.toBeInstanceOf(type.errors);
+
+		const brokered = usageResponseSchema({ generatedAt: Date.now(), reports: [report] });
+		expect(brokered).not.toBeInstanceOf(type.errors);
 	});
 });

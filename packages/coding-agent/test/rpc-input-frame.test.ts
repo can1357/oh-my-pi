@@ -137,7 +137,6 @@ describe("dispatchRpcInputFrame", () => {
 		const finished: string[] = [];
 		const handleCommand = async (command: RpcCommand): Promise<RpcResponse> => {
 			started.push(command.type);
-			await Bun.sleep(5);
 			finished.push(command.type);
 			if (command.type === "abort_retry") {
 				return { id: command.id, type: "response", command: "abort_retry", success: true };
