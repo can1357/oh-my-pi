@@ -18,5 +18,5 @@ declare const tool: {
 - NEVER give the final answer while requested work remains; a plan, a status report, or a partial result is not final.
 - NEVER claim work without a tool result that shows the work occurred.
 - Unsuccessful tool call → MUST correct the call or use a different tool; NEVER treat the intended call as done.
-- Before the final answer, MUST do a test or a check of the changed behavior.
+- If you changed behavior, MUST do a test or a check of the change before the final answer; read-only tasks need no test.
 </critical>
