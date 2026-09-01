@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added a `nous` login that validates Hermes' local subscription proxy without importing or persisting Nous Portal OAuth credentials.
 - Added compatibility opt-outs for Anthropic proxies that reject optional `context_management` and OpenAI Responses proxies with incomplete reasoning-summary streams ([#10358](https://github.com/can1357/oh-my-pi/pull/10358) by [@jubueche](https://github.com/jubueche)).
 - Added API-key authentication for ClinePass through the official `CLINE_API_KEY` variable, including account-route validation and rolling quota-window reporting in `omp usage` ([#7863](https://github.com/can1357/oh-my-pi/pull/7863) by [@will-bogusz](https://github.com/will-bogusz)).
 - ClinePass login now validates the API key against the `/users/me` account identity route instead of a probe chat completion, so roster churn cannot break sign-in and validation no longer consumes subscription quota ([#7863](https://github.com/can1357/oh-my-pi/pull/7863) by [@will-bogusz](https://github.com/will-bogusz)).

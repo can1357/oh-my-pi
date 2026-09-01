@@ -4998,6 +4998,37 @@ export function yoloAutoModelManagerOptions(
 }
 
 // ---------------------------------------------------------------------------
+// Nous Portal via the local Hermes subscription proxy
+// ---------------------------------------------------------------------------
+
+export interface NousPortalModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
+export function nousPortalModelManagerOptions(
+	config?: NousPortalModelManagerConfig,
+): ModelManagerOptions<"openai-completions"> {
+	const apiKey = config?.apiKey;
+	const baseUrl = config?.baseUrl ?? "http://127.0.0.1:8645/v1";
+	return {
+		providerId: "nous",
+		dynamicModelsAuthoritative: true,
+		...(apiKey && {
+			fetchDynamicModels: () =>
+				fetchOpenAICompatibleModels({
+					api: "openai-completions",
+					provider: "nous",
+					baseUrl,
+					apiKey,
+					fetch: config?.fetch,
+				}),
+		}),
+	};
+}
+
+// ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
 // 17. Qwen Portal

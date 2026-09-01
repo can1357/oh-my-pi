@@ -36,6 +36,7 @@ import {
 	mistralModelManagerOptions,
 	moonshotModelManagerOptions,
 	nanoGptModelManagerOptions,
+	nousPortalModelManagerOptions,
 	novitaModelManagerOptions,
 	nvidiaModelManagerOptions,
 	ollamaModelManagerOptions,
@@ -335,6 +336,13 @@ export const CATALOG_PROVIDERS = [
 		envVars: ["NVIDIA_API_KEY"],
 		createModelManagerOptions: (config: ModelManagerConfig) => nvidiaModelManagerOptions(config),
 		catalogDiscovery: { label: "NVIDIA" },
+	},
+	{
+		id: "nous",
+		defaultModel: "nousresearch/hermes-4-70b",
+		envVars: ["NOUS_PROXY_API_KEY"],
+		createModelManagerOptions: (config: ModelManagerConfig) => nousPortalModelManagerOptions(config),
+		dynamicModelsAuthoritative: true,
 	},
 	{
 		id: "novita",
