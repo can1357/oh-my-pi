@@ -873,7 +873,7 @@ export function rebakeBundledModel(model: ModelSpec<Api>): ModelSpec<Api> {
 			requiresGlyphTokenization: rebaked.requiresGlyphTokenization,
 		}),
 		...(Object.hasOwn(model, "tokenizer") && { tokenizer: rebaked.tokenizer }),
-		...(Object.hasOwn(model, "thinking") && { thinking: rebaked.thinking }),
+		...(rebaked.thinking !== undefined && { thinking: rebaked.thinking }),
 		...(Object.hasOwn(model, "supportsComputerUse") && { supportsComputerUse: rebaked.supportsComputerUse }),
 		...(Object.hasOwn(model, "supportsComputerUseConfig") && {
 			supportsComputerUseConfig: rebaked.supportsComputerUseConfig,
