@@ -185,6 +185,10 @@ export const ollamaUsageProvider: UsageProvider = {
 	id: OLLAMA_PROVIDER,
 	fetchUsage: fetchOllamaUsage,
 	supports: params => params.provider === OLLAMA_PROVIDER,
+	// The local stub never contacts the configured server, so it cannot
+	// authenticate anything — flagging it as validating would make
+	// `omp auth check` report unreachable local engines as healthy.
+	validatesCredentials: false,
 };
 
 /** Fetches Ollama Cloud quota (legacy session/weekly or migrated monthly) from the ollama.com usage API. */
