@@ -143,6 +143,26 @@ describe("MarketplaceManager", () => {
 		await expect(ctx.manager.addMarketplace(FIXTURE_DIR)).rejects.toThrow(/already exists/);
 	});
 
+	it("addMarketplace with force → repoints the existing marketplace instead of duplicating it", async () => {
+		const first = await ctx.manager.addMarketplace(FIXTURE_DIR);
+
+		// Same catalog name, different location: a marketplace that moved.
+		const movedDir = buildMinimalFixture();
+		try {
+			const second = await ctx.manager.addMarketplace(movedDir, { force: true });
+
+			expect(second.name).toBe(first.name);
+			expect(second.sourceUri).toBe(movedDir);
+			expect(second.addedAt).toBe(first.addedAt);
+
+			const list = await ctx.manager.listMarketplaces();
+			expect(list).toHaveLength(1);
+			expect(list[0].sourceUri).toBe(movedDir);
+		} finally {
+			removeSyncWithRetries(movedDir);
+		}
+	});
+
 	it("removeMarketplace → gone from list and catalog cache removed", async () => {
 		const entry = await ctx.manager.addMarketplace(FIXTURE_DIR);
 

@@ -131,11 +131,20 @@ export async function writeInstalledPluginsRegistry(filePath: string, reg: Insta
 // Pure functions that transform registry state. Caller is responsible for
 // reading, mutating, and writing back.
 
-export function addMarketplaceEntry(reg: MarketplacesRegistry, entry: MarketplaceRegistryEntry): MarketplacesRegistry {
-	if (reg.marketplaces.some(m => m.name === entry.name)) {
-		throw new Error(`Marketplace "${entry.name}" already exists`);
-	}
-	return { ...reg, marketplaces: [...reg.marketplaces, entry] };
+/**
+ * Add the entry, or repoint the existing marketplace of the same name at a new
+ * source. `addedAt` survives: the marketplace is the same one, reachable
+ * somewhere else now.
+ */
+export function upsertMarketplaceEntry(
+	reg: MarketplacesRegistry,
+	entry: MarketplaceRegistryEntry,
+): MarketplacesRegistry {
+	const index = reg.marketplaces.findIndex(m => m.name === entry.name);
+	if (index < 0) return { ...reg, marketplaces: [...reg.marketplaces, entry] };
+	const marketplaces = [...reg.marketplaces];
+	marketplaces[index] = { ...entry, addedAt: marketplaces[index].addedAt };
+	return { ...reg, marketplaces };
 }
 
 export function removeMarketplaceEntry(reg: MarketplacesRegistry, name: string): MarketplacesRegistry {

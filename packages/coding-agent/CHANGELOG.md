@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `--force` to `omp plugin marketplace add` and `/marketplace add`, which repoints an already-registered marketplace at a new source instead of failing with `Marketplace "<name>" already exists`. A marketplace that moves (a renamed repo, a mirror stood up for machines that cannot reach the original) previously had to be removed and re-added, which is two commands where one will do and leaves the user with no marketplace at all if the new source turns out to be unreachable. The failure without the flag now names it. `addedAt` survives a repoint, since the marketplace is the same one reachable somewhere else.
+
 ## [17.2.15] - 2026-08-12
 
 ### Added

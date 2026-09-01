@@ -17,7 +17,7 @@ import type { InteractiveModeContext } from "../modes/types";
 import { refreshAgentDiscovery } from "../task";
 import { createMarketplaceManager } from "./helpers/marketplace-manager";
 import { commandConsumed, errorMessage, parseSubcommand, usage } from "./helpers/parse";
-import { parseMarketplaceInstallArgs, parsePluginScopeArgs } from "./marketplace-install-parser";
+import { parseAddArgs, parseMarketplaceInstallArgs, parsePluginScopeArgs } from "./marketplace-install-parser";
 import type { SlashCommandSpec } from "./types";
 
 /**
@@ -114,9 +114,10 @@ export const BUILTIN_MARKETPLACE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec>
 				const manager = await createMarketplaceManager(runtime);
 				switch (verb) {
 					case "add": {
-						if (!rest) return usage("Usage: /marketplace add <source>", runtime);
-						const entry = await manager.addMarketplace(rest);
-						await runtime.output(`Added marketplace: ${entry.name}`);
+						if (!rest) return usage("Usage: /marketplace add <source> [--force]", runtime);
+						const { source, force } = parseAddArgs(rest);
+						const entry = await manager.addMarketplace(source, { force });
+						await runtime.output(`${force ? "Repointed" : "Added"} marketplace: ${entry.name}`);
 						return commandConsumed();
 					}
 					case "remove":
@@ -262,11 +263,12 @@ export const BUILTIN_MARKETPLACE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec>
 				switch (sub) {
 					case "add": {
 						if (!rest) {
-							runtime.ctx.showStatus("Usage: /marketplace add <source>");
+							runtime.ctx.showStatus("Usage: /marketplace add <source> [--force]");
 							return;
 						}
-						const entry = await mgr.addMarketplace(rest);
-						runtime.ctx.showStatus(`Added marketplace: ${entry.name}`);
+						const { source, force } = parseAddArgs(rest);
+						const entry = await mgr.addMarketplace(source, { force });
+						runtime.ctx.showStatus(`${force ? "Repointed" : "Added"} marketplace: ${entry.name}`);
 						break;
 					}
 					case "remove":

@@ -54,6 +54,23 @@ export function parseMarketplaceInstallArgs(rest: string): MarketplaceInstallArg
 	return { force, scope, installSpec };
 }
 
+// ── `/marketplace add` ─────────────────────────────────────────────────────
+
+/**
+ * Parse `<source> [--force]`. `--force` repoints a marketplace that is already
+ * registered under the same catalog name at the given source.
+ *
+ * Unlike the parsers above there is nothing to validate: any string can be a
+ * source, and the manager reports what it cannot fetch.
+ */
+export function parseAddArgs(rest: string): { source: string; force: boolean } {
+	const tokens = rest.split(/\s+/).filter(Boolean);
+	return {
+		source: tokens.filter(token => token !== "--force").join(" "),
+		force: tokens.includes("--force"),
+	};
+}
+
 // ── Shared scope+id parser for uninstall / upgrade / enable / disable ───────
 
 export interface PluginScopeArgs {

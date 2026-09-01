@@ -18,7 +18,6 @@ import { cachePlugin } from "./cache";
 import { classifySource, fetchMarketplace, parseMarketplaceCatalog, promoteCloneToCache } from "./fetcher";
 import {
 	addInstalledPlugin,
-	addMarketplaceEntry,
 	collectReferencedPaths,
 	getInstalledPlugin,
 	getMarketplaceEntry,
@@ -26,6 +25,7 @@ import {
 	readMarketplacesRegistry,
 	removeInstalledPlugin,
 	removeMarketplaceEntry,
+	upsertMarketplaceEntry,
 	writeInstalledPluginsRegistry,
 	writeMarketplacesRegistry,
 } from "./registry";
@@ -88,20 +88,32 @@ export class MarketplaceManager {
 
 	// ── Marketplace lifecycle ─────────────────────────────────────────────────
 
-	async addMarketplace(source: string): Promise<MarketplaceRegistryEntry> {
+	/**
+	 * Register a marketplace, or repoint an existing one at a new source with
+	 * `force`.
+	 *
+	 * A marketplace that has moved (a repo renamed, a mirror stood up for
+	 * machines that cannot reach the original) otherwise has to be removed and
+	 * re-added, since the registry keys on the catalog name and there is no
+	 * other way to change `sourceUri`. Remove first is a worse default than it
+	 * looks: it is two commands where one will do, and if the new source turns
+	 * out to be unreachable the user is left with no marketplace at all.
+	 */
+	async addMarketplace(source: string, options: { force?: boolean } = {}): Promise<MarketplaceRegistryEntry> {
 		const reg = await readMarketplacesRegistry(this.#opts.marketplacesRegistryPath);
-		const existingNames = new Set(reg.marketplaces.map(m => m.name));
-
 		const { catalog, clonePath } = await fetchMarketplace(source, this.#opts.marketplacesCacheDir);
+		const replacing = reg.marketplaces.some(m => m.name === catalog.name);
 
-		if (existingNames.has(catalog.name)) {
+		if (replacing && !options.force) {
 			if (clonePath) {
 				await fs.rm(clonePath, { recursive: true, force: true }).catch(() => {});
 			}
 			throw new Error(`Marketplace "${catalog.name}" already exists`);
 		}
 
-		// Promote the temp clone to its final cache location now that we know it's not a duplicate.
+		// Promote the temp clone now that the duplicate check has passed. The
+		// promotion removes whatever is at the target, so a repoint replaces the
+		// old catalog rather than merging into it.
 		if (clonePath) {
 			await promoteCloneToCache(clonePath, this.#opts.marketplacesCacheDir, catalog.name);
 		}
@@ -127,11 +139,14 @@ export class MarketplaceManager {
 			updatedAt: now,
 		};
 
-		const updated = addMarketplaceEntry(reg, entry);
+		const updated = upsertMarketplaceEntry(reg, entry);
 		await writeMarketplacesRegistry(this.#opts.marketplacesRegistryPath, updated);
 
-		logger.debug("Marketplace added", { name: catalog.name, sourceType });
-		return entry;
+		logger.debug(replacing ? "Marketplace repointed" : "Marketplace added", { name: catalog.name, sourceType });
+		// Read back rather than returning `entry`: a repoint keeps the original
+		// `addedAt`, so the two disagree and the caller would report a creation
+		// date that is not the one on disk.
+		return getMarketplaceEntry(updated, catalog.name) ?? entry;
 	}
 
 	async removeMarketplace(name: string): Promise<void> {
