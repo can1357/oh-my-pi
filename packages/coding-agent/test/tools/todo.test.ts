@@ -6,6 +6,15 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { initTheme, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import {
+	applyOpsToPhases,
+	applyRpcTodoProvenance,
+	applyUserMarkdownPhases,
+	escapeTodoMarkdownContent,
+	formatTodoHudRatio,
+	isCompletedTodo,
+	isHudSettledTodo,
+	isSettledTodo,
+	isTodoPhase,
 	markdownToPhases,
 	nextActionableTask,
 	phasesToMarkdown,
@@ -16,8 +25,10 @@ import {
 	type TodoItem,
 	type TodoPhase,
 	TodoTool,
+	todoHudCounts,
 	todoMatchesAnyDescription,
 	todoToolRenderer,
+	unescapeTodoMarkdownContent,
 } from "@oh-my-pi/pi-coding-agent/tools";
 import type { Component } from "@oh-my-pi/pi-tui";
 
@@ -311,6 +322,381 @@ describe("TodoTool operations", () => {
 		expect(parsedA?.blocker).toBe("x");
 	});
 
+	it("preserves user droppedBy provenance across the markdown round-trip", () => {
+		const phases: TodoPhase[] = [
+			{
+				name: "Work",
+				tasks: [
+					{ content: "ship it", status: "abandoned", droppedBy: "user" },
+					{ content: "model drop", status: "abandoned" },
+				],
+			},
+		];
+		const md = phasesToMarkdown(phases);
+		expect(md).toContain("<!-- dropped-by: user -->");
+		expect(md).not.toMatch(/model drop.*dropped-by/);
+
+		const { phases: parsed, errors } = markdownToPhases(md);
+		expect(errors).toEqual([]);
+		const userDrop = parsed[0]?.tasks.find(task => task.content === "ship it");
+		const modelDrop = parsed[0]?.tasks.find(task => task.content === "model drop");
+		expect(userDrop).toEqual({ content: "ship it", status: "abandoned", droppedBy: "user" });
+		// Bare model drops stay unstamped at parse time — applyUserMarkdownPhases
+		// decides provenance against the prior list.
+		expect(modelDrop).toEqual({ content: "model drop", status: "abandoned" });
+
+		const merged = applyUserMarkdownPhases(phases, parsed);
+		expect(merged[0]?.tasks.find(task => task.content === "ship it")).toEqual({
+			content: "ship it",
+			status: "abandoned",
+			droppedBy: "user",
+		});
+		expect(merged[0]?.tasks.find(task => task.content === "model drop")).toEqual({
+			content: "model drop",
+			status: "abandoned",
+		});
+	});
+
+	it("escapes literal provenance comments in task content so they are not parsed as stamps", () => {
+		const phases: TodoPhase[] = [
+			{
+				name: "Work",
+				tasks: [{ content: "note <!-- dropped-by: user --> in body", status: "abandoned" }],
+			},
+		];
+		const md = phasesToMarkdown(phases);
+		expect(md).toContain("&lt;!-- dropped-by: user --&gt;");
+		expect(md).not.toMatch(/\] note <!-- dropped-by: user -->/);
+
+		const { phases: parsed, errors } = markdownToPhases(md);
+		expect(errors).toEqual([]);
+		expect(parsed[0]?.tasks[0]).toEqual({
+			content: "note <!-- dropped-by: user --> in body",
+			status: "abandoned",
+		});
+		const merged = applyUserMarkdownPhases(phases, parsed);
+		expect(merged[0]?.tasks[0]).toEqual({
+			content: "note <!-- dropped-by: user --> in body",
+			status: "abandoned",
+		});
+	});
+
+	it("round-trips pre-escaped comment delimiter entities without inventing real delimiters", () => {
+		const samples = [
+			"already &lt;!-- stamped --&gt; text",
+			"bare & and &amp; together",
+			"<!-- real --> plus &lt;!-- fake --&gt;",
+			"--&gt; before &lt;!--",
+		];
+		for (const content of samples) {
+			expect(unescapeTodoMarkdownContent(escapeTodoMarkdownContent(content))).toBe(content);
+		}
+		// Escaped form must not leave raw comment openers that parse as provenance.
+		const md = phasesToMarkdown([
+			{ name: "Work", tasks: [{ content: "already &lt;!-- dropped-by: user --&gt;", status: "pending" }] },
+		]);
+		expect(md).not.toMatch(/\] already <!--/);
+		expect(md).toContain("&amp;lt;!--");
+		const { phases: parsed, errors } = markdownToPhases(md);
+		expect(errors).toEqual([]);
+		expect(parsed[0]?.tasks[0]?.content).toBe("already &lt;!-- dropped-by: user --&gt;");
+	});
+
+	it("keeps model drops unstamped on a no-op edit when duplicate content shares a phase", () => {
+		const prior: TodoPhase[] = [
+			{
+				name: "Work",
+				tasks: [
+					{ content: "Ship", status: "abandoned" },
+					{ content: "Ship", status: "pending" },
+				],
+			},
+		];
+		const md = phasesToMarkdown(prior);
+		const { phases: parsed, errors } = markdownToPhases(md);
+		expect(errors).toEqual([]);
+		const merged = applyUserMarkdownPhases(prior, parsed);
+		// Last-content-wins would see the pending row and stamp the model drop as user.
+		expect(merged[0]?.tasks[0]).toEqual({ content: "Ship", status: "abandoned" });
+		expect(merged[0]?.tasks[1]?.status).toBe("in_progress");
+	});
+
+	it("consumes a leading non-abandoned duplicate before matching a model-abandoned sibling", () => {
+		const prior: TodoPhase[] = [
+			{
+				name: "Work",
+				tasks: [
+					{ content: "Ship", status: "pending" },
+					{ content: "Ship", status: "abandoned" },
+				],
+			},
+		];
+		const md = phasesToMarkdown(prior);
+		const { phases: parsed, errors } = markdownToPhases(md);
+		expect(errors).toEqual([]);
+		const merged = applyUserMarkdownPhases(prior, parsed);
+		// Skipping non-abandoned FIFO consume would match the abandoned row against
+		// the pending prior and incorrectly stamp it as a user drop.
+		expect(merged[0]?.tasks[0]?.status).toBe("in_progress");
+		expect(merged[0]?.tasks[1]).toEqual({ content: "Ship", status: "abandoned" });
+
+		const rpc = applyRpcTodoProvenance(prior, [
+			{
+				name: "Work",
+				tasks: [
+					{ content: "Ship", status: "pending" },
+					{ content: "Ship", status: "abandoned" },
+				],
+			},
+		]);
+		expect(rpc[0]?.tasks[1]).toEqual({ content: "Ship", status: "abandoned" });
+	});
+
+	it("preserves per-occurrence droppedBy when duplicate abandoned texts share a phase", () => {
+		const prior: TodoPhase[] = [
+			{
+				name: "Work",
+				tasks: [
+					{ content: "Ship", status: "abandoned" },
+					{ content: "Ship", status: "abandoned", droppedBy: "user" },
+				],
+			},
+		];
+		const md = phasesToMarkdown(prior);
+		const { phases: parsed, errors } = markdownToPhases(md);
+		expect(errors).toEqual([]);
+		const merged = applyUserMarkdownPhases(prior, parsed);
+		expect(merged[0]?.tasks).toEqual([
+			{ content: "Ship", status: "abandoned" },
+			{ content: "Ship", status: "abandoned", droppedBy: "user" },
+		]);
+	});
+
+	it("stamps newly abandoned checklist items from /todo edit as user drops", () => {
+		const prior: TodoPhase[] = [
+			{
+				name: "Work",
+				tasks: [
+					{ content: "cancelled in the editor", status: "pending" },
+					{ content: "also cancelled", status: "in_progress" },
+					{ content: "model drop", status: "abandoned" },
+				],
+			},
+		];
+		const md = ["# Work", "- [-] cancelled in the editor", "- [~] also cancelled", "- [-] model drop"].join("\n");
+		const { phases: parsed, errors } = markdownToPhases(md);
+		expect(errors).toEqual([]);
+		const merged = applyUserMarkdownPhases(prior, parsed);
+		expect(merged[0]?.tasks).toEqual([
+			{ content: "cancelled in the editor", status: "abandoned", droppedBy: "user" },
+			{ content: "also cancelled", status: "abandoned", droppedBy: "user" },
+			{ content: "model drop", status: "abandoned" },
+		]);
+	});
+
+	it("stamps all abandoned items on a fresh markdown import with empty prior", () => {
+		const md = ["# Work", "- [-] cancelled in the editor", "- [~] also cancelled"].join("\n");
+		const { phases: parsed, errors } = markdownToPhases(md);
+		expect(errors).toEqual([]);
+		const merged = applyUserMarkdownPhases([], parsed);
+		expect(merged[0]?.tasks).toEqual([
+			{ content: "cancelled in the editor", status: "abandoned", droppedBy: "user" },
+			{ content: "also cancelled", status: "abandoned", droppedBy: "user" },
+		]);
+	});
+
+	it("reserves exact-phase matches before content-only rename fallback", () => {
+		const prior = [
+			{ name: "A", tasks: [{ content: "Ship", status: "pending" as const }] },
+			{ name: "B", tasks: [{ content: "Ship", status: "abandoned" as const }] },
+		];
+		// Renamed B sorts first; must not consume A's pending Ship via any-phase FIFO.
+		const parsed = [
+			{ name: "B-renamed", tasks: [{ content: "Ship", status: "abandoned" as const }] },
+			{ name: "A", tasks: [{ content: "Ship", status: "pending" as const }] },
+		];
+		const merged = applyUserMarkdownPhases(prior, parsed);
+		expect(merged[0]?.tasks[0]?.droppedBy).toBeUndefined();
+		expect(merged[1]?.tasks[0]?.status).toBe("pending");
+	});
+
+	it("preserves model-drop provenance when a phase is renamed in /todo edit", () => {
+		const prior: TodoPhase[] = [
+			{ name: "Old phase", tasks: [{ content: "model dropped", status: "abandoned" }] },
+		];
+		const { phases: parsed, errors } = markdownToPhases("# New phase\n- [-] model dropped\n");
+		expect(errors).toEqual([]);
+		const merged = applyUserMarkdownPhases(prior, parsed);
+		expect(merged[0]).toEqual({
+			name: "New phase",
+			tasks: [{ content: "model dropped", status: "abandoned" }],
+		});
+	});
+
+	it("keeps user droppedBy when the edit HTML comment is stripped", () => {
+		const prior: TodoPhase[] = [
+			{ name: "Work", tasks: [{ content: "ship it", status: "abandoned", droppedBy: "user" }] },
+		];
+		const { phases: parsed, errors } = markdownToPhases("# Work\n- [-] ship it\n");
+		expect(errors).toEqual([]);
+		expect(parsed[0]?.tasks[0]).toEqual({ content: "ship it", status: "abandoned" });
+		const merged = applyUserMarkdownPhases(prior, parsed);
+		expect(merged[0]?.tasks[0]).toEqual({ content: "ship it", status: "abandoned", droppedBy: "user" });
+	});
+
+	it("preserves user droppedBy when a later model broad drop re-targets the task", () => {
+		const phases: TodoPhase[] = [
+			{
+				name: "Work",
+				tasks: [
+					{ content: "keep cancelled", status: "abandoned", droppedBy: "user" },
+					{ content: "still open", status: "pending" },
+				],
+			},
+		];
+		const { phases: next } = applyOpsToPhases(phases, [{ op: "drop", phase: "Work" }]);
+		const kept = next[0]?.tasks.find(task => task.content === "keep cancelled");
+		const newlyDropped = next[0]?.tasks.find(task => task.content === "still open");
+		expect(kept).toEqual({ content: "keep cancelled", status: "abandoned", droppedBy: "user" });
+		expect(newlyDropped).toEqual({ content: "still open", status: "abandoned" });
+	});
+
+	it("leaves completed and blocked tasks alone when the model broad-drops a phase", () => {
+		const { phases } = applyOpsToPhases(
+			[
+				{
+					name: "Work",
+					tasks: [
+						{ content: "done", status: "completed" },
+						{ content: "waiting", status: "blocked", blocker: "owner" },
+						{ content: "user cancel", status: "abandoned", droppedBy: "user" },
+						{ content: "open", status: "pending" },
+					],
+				},
+			],
+			[{ op: "drop", phase: "Work" }],
+		);
+		expect(phases[0]?.tasks).toEqual([
+			{ content: "done", status: "completed" },
+			{ content: "waiting", status: "blocked", blocker: "owner" },
+			{ content: "user cancel", status: "abandoned", droppedBy: "user" },
+			{ content: "open", status: "abandoned" },
+		]);
+	});
+
+	it("abandons a blocked or completed task when the model targets it with drop", () => {
+		const { phases } = applyOpsToPhases(
+			[
+				{
+					name: "Work",
+					tasks: [
+						{ content: "done", status: "completed" },
+						{ content: "waiting", status: "blocked", blocker: "owner" },
+						{ content: "open", status: "pending" },
+					],
+				},
+			],
+			[
+				{ op: "drop", task: "waiting" },
+				{ op: "drop", task: "done" },
+			],
+		);
+		expect(phases[0]?.tasks).toEqual([
+			{ content: "done", status: "abandoned" },
+			{ content: "waiting", status: "abandoned" },
+			{ content: "open", status: "in_progress" },
+		]);
+	});
+
+	it("stamps imported [-] as user cancel even over a prior model drop", () => {
+		const prior: TodoPhase[] = [{ name: "Work", tasks: [{ content: "model drop", status: "abandoned" }] }];
+		const { phases: parsed, errors } = markdownToPhases("# Work\n- [-] model drop\n");
+		expect(errors).toEqual([]);
+		// Import uses empty prior so the file's abandoned markers win.
+		const imported = applyUserMarkdownPhases([], parsed);
+		expect(imported[0]?.tasks[0]).toEqual({
+			content: "model drop",
+			status: "abandoned",
+			droppedBy: "user",
+		});
+		// Edit-style merge against the live prior would keep the model stamp.
+		expect(applyUserMarkdownPhases(prior, parsed)[0]?.tasks[0]).toEqual({
+			content: "model drop",
+			status: "abandoned",
+		});
+	});
+
+	it("stamps RPC abandoned provenance without stripping host wire fields", () => {
+		const prior: TodoPhase[] = [{ name: "Ship", tasks: [{ content: "model drop", status: "abandoned" }] }];
+		const incoming = [
+			{
+				name: "Ship",
+				id: "phase-1",
+				tasks: [
+					{
+						content: "host cancel",
+						status: "abandoned" as const,
+						id: "task-1",
+						notes: "host note",
+						details: "host details",
+					},
+					{
+						content: "model drop",
+						status: "abandoned" as const,
+						id: "task-2",
+						notes: "still model",
+					},
+					{
+						content: "open work",
+						status: "pending" as const,
+						id: "task-3",
+						details: "keep going",
+					},
+				],
+			},
+		] as TodoPhase[];
+		const next = applyRpcTodoProvenance(prior, incoming);
+		expect(next).toEqual([
+			{
+				name: "Ship",
+				id: "phase-1",
+				tasks: [
+					{
+						content: "host cancel",
+						status: "abandoned",
+						id: "task-1",
+						notes: "host note",
+						details: "host details",
+						droppedBy: "user",
+					},
+					{
+						content: "model drop",
+						status: "abandoned",
+						id: "task-2",
+						notes: "still model",
+					},
+					{
+						content: "open work",
+						status: "pending",
+						id: "task-3",
+						details: "keep going",
+					},
+				],
+			},
+		]);
+	});
+
+	it("stamps droppedBy for slash userAuthored drops but not for model tool drops", () => {
+		const phases: TodoPhase[] = [{ name: "Work", tasks: [{ content: "ship it", status: "pending" }] }];
+		const userDrop = applyOpsToPhases(phases, [{ op: "drop", task: "ship it" }], { userAuthored: true });
+		expect(userDrop.phases[0]?.tasks[0]).toEqual({
+			content: "ship it",
+			status: "abandoned",
+			droppedBy: "user",
+		});
+		const modelDrop = applyOpsToPhases(phases, [{ op: "drop", task: "ship it" }]);
+		expect(modelDrop.phases[0]?.tasks[0]).toEqual({ content: "ship it", status: "abandoned" });
+	});
 	it("parses checklist items with backslash-escaped brackets from /todo edit", () => {
 		// Editors/serializers (e.g. content pasted from a markdown renderer) escape
 		// `[` and `]`; the line still renders as a checkbox, so it must parse rather
@@ -382,7 +768,7 @@ describe("TodoTool operations", () => {
 		expect(allTasks.map(task => task.status)).toEqual(["completed", "completed", "in_progress"]);
 	});
 
-	it("removes all tasks when rm omits task and phase", async () => {
+	it("abandons all tasks when the model rm omits task and phase", async () => {
 		const tool = new TodoTool(createSession());
 		await tool.execute("call-1", {
 			op: "init",
@@ -390,10 +776,57 @@ describe("TodoTool operations", () => {
 		});
 
 		const result = await tool.execute("call-2", { op: "rm" });
-		expect(result.details?.phases[0]?.tasks).toEqual([]);
+		const tasks = result.details?.phases[0]?.tasks ?? [];
+		expect(tasks.map(task => task.status)).toEqual(["abandoned", "abandoned"]);
+		expect(tasks.every(task => task.droppedBy === undefined)).toBe(true);
 		const summary = result.content.find(part => part.type === "text");
 		if (summary?.type !== "text") throw new Error("Expected text summary");
-		expect(summary.text).toContain("Todo list cleared.");
+		expect(summary.text).toContain("0/2 done, 2 dropped, 0 open");
+		expect(summary.text).not.toContain("Todo list cleared.");
+	});
+
+	it("leaves completed, blocked, and user-dropped tasks alone when the model rm runs", () => {
+		const { phases } = applyOpsToPhases(
+			[
+				{
+					name: "Work",
+					tasks: [
+						{ content: "done", status: "completed" },
+						{ content: "waiting", status: "blocked", blocker: "CI" },
+						{ content: "user cancel", status: "abandoned", droppedBy: "user" },
+						{ content: "model drop", status: "abandoned" },
+						{ content: "open", status: "pending" },
+						{ content: "active", status: "in_progress" },
+					],
+				},
+			],
+			[{ op: "rm" }],
+		);
+		expect(phases[0]?.tasks).toEqual([
+			{ content: "done", status: "completed" },
+			{ content: "waiting", status: "blocked", blocker: "CI" },
+			{ content: "user cancel", status: "abandoned", droppedBy: "user" },
+			{ content: "model drop", status: "abandoned" },
+			{ content: "open", status: "abandoned" },
+			{ content: "active", status: "abandoned" },
+		]);
+	});
+
+	it("deletes tasks when user-authored rm runs", () => {
+		const { phases } = applyOpsToPhases(
+			[
+				{
+					name: "Work",
+					tasks: [
+						{ content: "First", status: "pending" },
+						{ content: "Second", status: "pending" },
+					],
+				},
+			],
+			[{ op: "rm" }],
+			{ userAuthored: true },
+		);
+		expect(phases[0]?.tasks).toEqual([]);
 	});
 
 	it("drops all tasks in a phase", async () => {
@@ -406,6 +839,11 @@ describe("TodoTool operations", () => {
 		const result = await tool.execute("call-2", { op: "drop", phase: "Work" });
 		const tasks = result.details?.phases[0]?.tasks ?? [];
 		expect(tasks.map(task => task.status)).toEqual(["abandoned", "abandoned"]);
+		const summary = result.content.find(part => part.type === "text");
+		if (summary?.type !== "text") throw new Error("Expected text summary");
+		expect(summary.text).toContain("0/2 done, 2 dropped, 0 open");
+		expect(summary.text).not.toContain("Remaining items: none.");
+		expect(summary.text).toContain("[abandoned]");
 	});
 
 	it("view echoes state without mutating it", async () => {
@@ -719,6 +1157,75 @@ describe("todoToolRenderer.renderResult phase collapsing", () => {
 		});
 		// No empty body line survives between phases.
 		expect(innerLines(component).every(line => line.length > 0)).toBe(true);
+	});
+});
+
+describe("abandoned todos in tool summary and compact HUD contracts", () => {
+	it("keeps dropped items in Remaining while Active phase follows actionable work", async () => {
+		const tool = new TodoTool(
+			createSession([
+				{
+					name: "Dropped phase",
+					tasks: [{ content: "old drop", status: "abandoned" }],
+				},
+				{
+					name: "Live phase",
+					tasks: [{ content: "still open", status: "pending" }],
+				},
+			]),
+		);
+		const result = await tool.execute("t1", { op: "view" });
+		const text = result.content.find(part => part.type === "text")?.text ?? "";
+		expect(text).toContain("Remaining items (1 open + 1 dropped):");
+		expect(text).toContain("old drop [abandoned]");
+		expect(text).toContain('Active phase 2/2 "Live phase"');
+		expect(text).not.toContain('Active phase 1/2 "Dropped phase"');
+	});
+
+	it("reports compact progress with dropped-only plans as incomplete, not done", async () => {
+		await initTheme();
+		const phases: TodoPhase[] = [
+			{
+				name: "Only drops",
+				tasks: [
+					{ content: "a", status: "abandoned" },
+					{ content: "b", status: "abandoned" },
+				],
+			},
+		];
+		expect(nextActionableTask(phases)).toBeUndefined();
+		expect(phases.flatMap(p => p.tasks).filter(isCompletedTodo)).toHaveLength(0);
+		expect(phases.flatMap(p => p.tasks).filter(isSettledTodo)).toHaveLength(2);
+		expect(phases.flatMap(p => p.tasks).filter(isHudSettledTodo)).toHaveLength(0);
+		const tool = new TodoTool(createSession(phases));
+		const result = await tool.execute("t1", { op: "view" });
+		const text = result.content.find(part => part.type === "text")?.text ?? "";
+		expect(text).toContain("0/2 done, 2 dropped, 0 open");
+		expect(text).toContain("Remaining items (0 open + 2 dropped):");
+	});
+
+	it("treats user-dropped todos as HUD-settled for auto-clear, not progress", () => {
+		expect(isHudSettledTodo({ status: "completed" })).toBe(true);
+		expect(isHudSettledTodo({ status: "abandoned", droppedBy: "user" })).toBe(true);
+		expect(isHudSettledTodo({ status: "abandoned" })).toBe(false);
+		expect(isHudSettledTodo({ status: "blocked" })).toBe(false);
+		expect(isCompletedTodo({ status: "abandoned", droppedBy: "user" })).toBe(false);
+	});
+
+	it("accepts unknown droppedBy without dropping the persisted task", () => {
+		expect(
+			isTodoPhase({
+				name: "Work",
+				tasks: [{ content: "ship", status: "abandoned", droppedBy: "agent" }],
+			}),
+		).toBe(true);
+	});
+
+	it("formats HUD ratios with a dropped suffix", () => {
+		expect(
+			formatTodoHudRatio(todoHudCounts([{ status: "completed" }, { status: "abandoned" }, { status: "pending" }])),
+		).toBe("1/3 · 1 dropped");
+		expect(formatTodoHudRatio(todoHudCounts([{ status: "completed" }, { status: "completed" }]))).toBe("2/2");
 	});
 });
 

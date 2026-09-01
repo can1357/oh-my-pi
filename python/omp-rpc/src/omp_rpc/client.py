@@ -115,7 +115,9 @@ THistoryItem = TypeVar("THistoryItem")
 
 _ASYNC_COMMANDS = frozenset({"prompt", "abort_and_prompt"})
 _DEFAULT_ERROR_HISTORY_LIMIT = 128
-_TODO_STATUS_VALUES = frozenset({"pending", "in_progress", "completed", "abandoned"})
+_TODO_STATUS_VALUES = frozenset(
+    {"pending", "in_progress", "completed", "abandoned", "blocked"}
+)
 _MAX_RPC_FRAME_BYTES = 1024 * 1024
 _MAX_RPC_REASSEMBLED_BYTES = 64 * 1024 * 1024
 _RPC_CHUNK_PAYLOAD_BYTES = 256 * 1024
@@ -1711,6 +1713,7 @@ class RpcClient:
                     "notes": seed.notes,
                     "details": seed.details,
                     "blocker": seed.blocker,
+                    "droppedBy": seed.dropped_by,
                 }
 
             content = seed.get("content")
@@ -1722,6 +1725,7 @@ class RpcClient:
             raw_notes = seed.get("notes")
             raw_details = seed.get("details")
             raw_blocker = seed.get("blocker")
+            raw_dropped_by = seed.get("droppedBy", seed.get("dropped_by"))
             if isinstance(raw_status, str):
                 if raw_status not in _TODO_STATUS_VALUES:
                     raise RpcError(f"Unsupported todo status: {raw_status}")
@@ -1737,6 +1741,7 @@ class RpcClient:
                 "notes": raw_notes if isinstance(raw_notes, str) else None,
                 "details": raw_details if isinstance(raw_details, str) else None,
                 "blocker": raw_blocker if isinstance(raw_blocker, str) else None,
+                "droppedBy": raw_dropped_by if isinstance(raw_dropped_by, str) else None,
             }
 
         def is_phase_seed(seed: TodoSeed | TodoPhaseSeed) -> bool:

@@ -33,7 +33,7 @@ import type { MCPResourceReadResult } from "./mcp/types";
 import type { ApprovalMode } from "./tools/approval";
 import { resolveApproval } from "./tools/approval";
 import { confineToWorkspace, resolveToCwd } from "./tools/path-utils";
-import type { TodoPhase, TodoStatus } from "./tools/todo";
+import type { TodoItem, TodoPhase, TodoStatus } from "./tools/todo";
 
 /** Phase used for Cursor-owned tasks with no local phase grouping. */
 const CURSOR_TODO_PHASE = "Tasks";
@@ -876,20 +876,48 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 		// or a host with no local todo state must still resolve it.
 		let phases: TodoPhase[] | undefined;
 		if (snapshot && setPhases) {
-			const phaseByContent = new Map<string, string>();
+			// FIFO queues so duplicate content keeps per-occurrence phase + provenance
+			// instead of collapsing to last-content-wins.
+			const phaseQueueByContent = new Map<string, string[]>();
+			const existingQueueByContent = new Map<string, TodoItem[]>();
 			for (const phase of existing) {
-				for (const task of phase.tasks) phaseByContent.set(task.content, phase.name);
+				for (const task of phase.tasks) {
+					let phases = phaseQueueByContent.get(task.content);
+					if (!phases) {
+						phases = [];
+						phaseQueueByContent.set(task.content, phases);
+					}
+					phases.push(phase.name);
+					let items = existingQueueByContent.get(task.content);
+					if (!items) {
+						items = [];
+						existingQueueByContent.set(task.content, items);
+					}
+					items.push(task);
+				}
 			}
 
 			const grouped = new Map<string, TodoPhase["tasks"]>();
 			for (const todo of snapshot.todos) {
-				const name = phaseByContent.get(todo.content) ?? CURSOR_TODO_PHASE;
+				const name = phaseQueueByContent.get(todo.content)?.shift() ?? CURSOR_TODO_PHASE;
 				let tasks = grouped.get(name);
 				if (!tasks) {
 					tasks = [];
 					grouped.set(name, tasks);
 				}
-				tasks.push({ content: todo.content, status: todo.status as TodoStatus });
+				const status = todo.status as TodoStatus;
+				const item: TodoItem = { content: todo.content, status };
+				const prev = existingQueueByContent.get(todo.content)?.shift();
+				// Cursor snapshots only carry content+status; keep local provenance
+				// when the mirrored status still matches so /todo drop and blockers
+				// survive the next sync.
+				if (prev?.status === "abandoned" && status === "abandoned" && prev.droppedBy === "user") {
+					item.droppedBy = "user";
+				}
+				if (prev?.status === "blocked" && status === "blocked" && prev.blocker !== undefined) {
+					item.blocker = prev.blocker;
+				}
+				tasks.push(item);
 			}
 
 			// Preserve the local phase order; phases new to this snapshot append.

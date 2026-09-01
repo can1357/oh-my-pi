@@ -10,10 +10,10 @@ After each successful state-changing op: if nothing is `in_progress`, the earlie
 |`init`|`items: string[]`|Flattened single-phase init|
 |`start`|`task`|Mark in progress|
 |`done`|`task` or `phase`|Mark completed|
-|`drop`|`task` or `phase`|Mark abandoned|
+|`drop`|`task` or `phase`|Mark abandoned; still incomplete for the stop reminder. Use `block` when waiting on the user; only the user can continue past drops|
 |`block`|`task` or `phase`; optional `reason`|Mark blocked: awaiting external input; never auto-promotes; excluded from stop-time incomplete-todo reminder|
 |`unblock`|`task` or `phase`|Blocked task → `pending`|
-|`rm`|optional `task` or `phase`|Remove task/phase; omit both → clear|
+|`rm`|optional `task` or `phase`|Abandon open tasks in place (same settle gate as `drop`); completed/blocked/user-dropped unchanged. User `/todo rm` deletes|
 |`append`|`phase`; `items: string[]`|Append tasks to phase; lazily creates phase|
 |`view`|—|Read-only; echo list|
 
