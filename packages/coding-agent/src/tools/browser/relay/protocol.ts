@@ -41,6 +41,8 @@ export type ExtToRelayMessage =
 			t: "hello";
 			userAgent: string;
 			browserVersion: string;
+			/** Browser-default navigator.hardwareConcurrency for resetting overrides. */
+			hardwareConcurrency?: number;
 			tabs: TabSnapshot[];
 			/** Tabs that already have a `chrome.debugger` attachment (relay reconciles after a service-worker restart). */
 			attachedTabIds: number[];

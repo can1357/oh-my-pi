@@ -137,6 +137,18 @@ function isEmptyUserAgentOverride(params: Record<string, unknown> | undefined): 
 	return typeof params?.userAgent === "string" && params.userAgent === "";
 }
 
+function isDefaultHardwareConcurrency(
+	params: Record<string, unknown> | undefined,
+	defaultHardwareConcurrency: number | undefined,
+): boolean {
+	return (
+		typeof defaultHardwareConcurrency === "number" &&
+		Number.isInteger(defaultHardwareConcurrency) &&
+		defaultHardwareConcurrency > 0 &&
+		params?.hardwareConcurrency === defaultHardwareConcurrency
+	);
+}
+
 function subscriptionClearedFields(
 	key: string,
 	params: Record<string, unknown> | undefined,
@@ -421,7 +433,7 @@ export class RelayBridge {
 	#subscriptionSeq = 0;
 	#rpcSeq = 0;
 	#ext: RelaySocket | null = null;
-	#extInfo: { userAgent: string; browserVersion: string } | null = null;
+	#extInfo: { userAgent: string; browserVersion: string; hardwareConcurrency?: number } | null = null;
 	#pendingRpc = new Map<
 		number,
 		{ resolve: (value: unknown) => void; reject: (err: Error) => void; timer: NodeJS.Timeout }
@@ -584,7 +596,11 @@ export class RelayBridge {
 	}
 
 	#onHello(msg: Extract<ExtToRelayMessage, { t: "hello" }>): void {
-		this.#extInfo = { userAgent: msg.userAgent, browserVersion: msg.browserVersion };
+		this.#extInfo = {
+			userAgent: msg.userAgent,
+			browserVersion: msg.browserVersion,
+			hardwareConcurrency: msg.hardwareConcurrency,
+		};
 		const seen = new Set<number>();
 		const attachedNow = new Set(msg.attachedTabIds);
 		// An older extension predates the orphan guard and omits `recoverableTabIds`
@@ -1203,6 +1219,7 @@ export class RelayBridge {
 			case "Emulation.setGeolocationOverride":
 			case "Page.setGeolocationOverride":
 			case "Emulation.setIdleOverride":
+			case "Emulation.setHardwareConcurrencyOverride":
 			case "Network.setUserAgentOverride":
 			case "Emulation.setUserAgentOverride":
 			case "Emulation.setDefaultBackgroundColorOverride":
@@ -1215,6 +1232,13 @@ export class RelayBridge {
 				if (
 					(msg.method === "Network.setUserAgentOverride" || msg.method === "Emulation.setUserAgentOverride") &&
 					isEmptyUserAgentOverride(msg.params)
+				) {
+					this.#forgetTabSubscription(tab, subscriptionKey(msg.method));
+					return;
+				}
+				if (
+					msg.method === "Emulation.setHardwareConcurrencyOverride" &&
+					isDefaultHardwareConcurrency(msg.params, this.#extInfo?.hardwareConcurrency)
 				) {
 					this.#forgetTabSubscription(tab, subscriptionKey(msg.method));
 					return;
@@ -1512,6 +1536,7 @@ export class RelayBridge {
 			case "Emulation.setDefaultBackgroundColorOverride":
 			case "Emulation.setPageScaleFactor":
 			case "Emulation.resetPageScaleFactor":
+			case "Emulation.setHardwareConcurrencyOverride":
 			case "Emulation.setEmulatedVisionDeficiency":
 			case "Emulation.setCPUThrottlingRate":
 			case "Emulation.setScriptExecutionDisabled":
@@ -1690,6 +1715,18 @@ export class RelayBridge {
 				return { method: subscription.method };
 			case "Emulation.setPageScaleFactor":
 				return { method: "Emulation.resetPageScaleFactor" };
+			case "Emulation.setHardwareConcurrencyOverride":
+				if (
+					typeof this.#extInfo?.hardwareConcurrency === "number" &&
+					Number.isInteger(this.#extInfo.hardwareConcurrency) &&
+					this.#extInfo.hardwareConcurrency > 0
+				) {
+					return {
+						method: subscription.method,
+						params: { hardwareConcurrency: this.#extInfo.hardwareConcurrency },
+					};
+				}
+				return null;
 			case "Emulation.setEmulatedVisionDeficiency":
 				return { method: subscription.method, params: { type: "none" } };
 			case "Emulation.setIdleOverride":

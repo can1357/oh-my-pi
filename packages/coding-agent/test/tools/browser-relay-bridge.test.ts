@@ -70,7 +70,7 @@ function connect(
 	bridge: RelayBridge,
 	socket: FakeExtSocket,
 	tabs: TabSnapshot[],
-	options: { attachedTabIds?: number[]; recoverableTabIds?: number[] } = {},
+	options: { attachedTabIds?: number[]; recoverableTabIds?: number[]; hardwareConcurrency?: number } = {},
 ): void {
 	bridge.extConnected(socket);
 	bridge.extMessage(
@@ -79,6 +79,7 @@ function connect(
 			t: "hello",
 			userAgent: "test",
 			browserVersion: "Chrome/151.0.0.0",
+			hardwareConcurrency: options.hardwareConcurrency ?? 8,
 			tabs,
 			attachedTabIds: options.attachedTabIds ?? [],
 			recoverableTabIds: options.recoverableTabIds ?? [],
@@ -4190,6 +4191,117 @@ describe("RelayBridge tab grouping", () => {
 		ack(bridge, ext2, "send", { cookies: [] });
 		await flush();
 		expect(holder.messages.filter(message => message.id === commandId && "result" in message)).toHaveLength(1);
+	});
+
+	it("replays hardware-concurrency overrides after guard recovery and resets them to the browser default when the owner disconnects", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })], { hardwareConcurrency: 8 });
+		const owner = new FakeCdpSocket();
+		const ownerConn = bridge.cdpConnected(owner);
+		const ownerSession = await attachPage(bridge, ext, owner, ownerConn, 1);
+		const holder = new FakeCdpSocket();
+		const holderConn = bridge.cdpConnected(holder);
+		const holderSession = await attachPage(bridge, ext, holder, holderConn, 1);
+
+		const sendRootCommand = async (
+			connId: number,
+			sessionId: string,
+			method: string,
+			params?: Record<string, unknown>,
+		): Promise<void> => {
+			const id = ++msgSeq;
+			bridge.cdpMessage(connId, JSON.stringify({ id, sessionId, method, params }));
+			await flush();
+			ack(bridge, ext, "send");
+			await flush();
+		};
+
+		await sendRootCommand(ownerConn, ownerSession, "Emulation.setHardwareConcurrencyOverride", {
+			hardwareConcurrency: 16,
+		});
+
+		bridge.extClosed(ext);
+		const ext2 = new FakeExtSocket();
+		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], { recoverableTabIds: [1], hardwareConcurrency: 8 });
+		await waitFor(() => ext2.rpcs("attach").length === 1, "hardware-concurrency recovery attach RPC");
+		ack(bridge, ext2, "attach");
+		await waitFor(() => ext2.rpcs("send").length === 1, "hardware-concurrency replay");
+		expect(ext2.rpcs("send")[0]).toMatchObject({
+			method: "Emulation.setHardwareConcurrencyOverride",
+			params: { hardwareConcurrency: 16 },
+		});
+		ack(bridge, ext2, "send");
+		await flush();
+
+		bridge.cdpClosed(ownerConn);
+		await waitFor(() => ext2.rpcs("send").length === 2, "hardware-concurrency cleanup after owner loss");
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual([
+			"Emulation.setHardwareConcurrencyOverride",
+			"Emulation.setHardwareConcurrencyOverride",
+		]);
+		expect(ext2.rpcs("send")[1]).toMatchObject({
+			method: "Emulation.setHardwareConcurrencyOverride",
+			params: { hardwareConcurrency: 8 },
+		});
+		ack(bridge, ext2, "send");
+		await flush();
+
+		const commandId = ++msgSeq;
+		bridge.cdpMessage(
+			holderConn,
+			JSON.stringify({ id: commandId, sessionId: holderSession, method: "Network.getCookies" }),
+		);
+		await flush();
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual([
+			"Emulation.setHardwareConcurrencyOverride",
+			"Emulation.setHardwareConcurrencyOverride",
+			"Network.getCookies",
+		]);
+		ack(bridge, ext2, "send", { cookies: [] });
+		await flush();
+		expect(holder.messages.filter(message => message.id === commandId && "result" in message)).toHaveLength(1);
+	});
+
+	it("treats resetting hardware-concurrency to the browser default as a tab-wide clear before recovery", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })], { hardwareConcurrency: 8 });
+		const owner = new FakeCdpSocket();
+		const ownerConn = bridge.cdpConnected(owner);
+		const ownerSession = await attachPage(bridge, ext, owner, ownerConn, 1);
+		const clearer = new FakeCdpSocket();
+		const clearerConn = bridge.cdpConnected(clearer);
+		const clearerSession = await attachPage(bridge, ext, clearer, clearerConn, 1);
+
+		const sendRootCommand = async (
+			connId: number,
+			sessionId: string,
+			method: string,
+			params?: Record<string, unknown>,
+		): Promise<void> => {
+			const id = ++msgSeq;
+			bridge.cdpMessage(connId, JSON.stringify({ id, sessionId, method, params }));
+			await flush();
+			ack(bridge, ext, "send");
+			await flush();
+		};
+
+		await sendRootCommand(ownerConn, ownerSession, "Emulation.setHardwareConcurrencyOverride", {
+			hardwareConcurrency: 16,
+		});
+		await sendRootCommand(clearerConn, clearerSession, "Emulation.setHardwareConcurrencyOverride", {
+			hardwareConcurrency: 8,
+		});
+
+		bridge.extClosed(ext);
+		const ext2 = new FakeExtSocket();
+		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], { recoverableTabIds: [1], hardwareConcurrency: 8 });
+		await waitFor(() => ext2.rpcs("attach").length === 1, "hardware-concurrency clear recovery attach RPC");
+		ack(bridge, ext2, "attach");
+		await flush();
+
+		expect(ext2.rpcs("send")).toHaveLength(0);
 	});
 
 	it("drops tab-wide ignore-certificate-errors clears before recovery", async () => {
