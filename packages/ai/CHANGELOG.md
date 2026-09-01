@@ -5,6 +5,9 @@
 ### Added
 
 - Added Muse Code subscriptions as a Meta login option, with subscription-backed Muse Spark access and rolling and weekly quota reporting in `/usage` and `omp usage`.
+### Fixed
+
+- Preserved Anthropic thinking now survives side requests, tool-description drift, turn-scoped reminders, and recoverable prefix mismatches without corrupting the conversation prefix.
 
 ## [18.1.2] - 2026-09-01
 

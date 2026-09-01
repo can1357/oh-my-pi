@@ -114,9 +114,12 @@ describe("Anthropic mid-conversation system messages", () => {
 		expect(params[1]).toEqual({
 			role: "system",
 			clear_at: "next_user_message",
+			content: [{ type: "text", text: "Use fewer tokens this turn." }],
+		});
+		expect(params[2]).toEqual({
+			role: "system",
 			output_config: { effort: "low" },
 			content: [
-				{ type: "text", text: "Use fewer tokens this turn." },
 				{
 					type: "tool_removal",
 					tool: { type: "tool_reference", name: "write" },

@@ -309,6 +309,61 @@ export function resolveCommand(command: string, cwd: string, options?: ResolveCo
 	return $which(command, { cache: options.cache, PATH: options.PATH });
 }
 
+// =============================================================================
+// TypeScript Server Selection
+// =============================================================================
+
+/**
+ * Directory of the package that owns a resolved `tsc`/`tsgo` launcher, or null
+ * when the layout is not a recognizable npm install.
+ */
+function typescriptPackageDir(tscPath: string): string | null {
+	let realPath = tscPath;
+	try {
+		realPath = fs.realpathSync(tscPath);
+	} catch {}
+	const binDir = path.dirname(tscPath);
+	const candidates = [
+		// <pkg>/bin/tsc: symlinked node_modules/.bin and global installs
+		...(path.basename(path.dirname(realPath)) === "bin" ? [path.dirname(path.dirname(realPath))] : []),
+		// node_modules/.bin/tsc.cmd on Windows
+		path.join(binDir, "..", "typescript"),
+		// npm global prefix on Windows
+		path.join(binDir, "node_modules", "typescript"),
+	];
+	for (const dir of candidates) {
+		if (fs.existsSync(path.join(dir, "package.json"))) return dir;
+	}
+	return null;
+}
+
+/**
+ * Whether the `tsc` at `tscPath` speaks LSP itself. TypeScript 7 dropped the JS
+ * `lib/tsserver.js` that typescript-language-server wraps and exposes
+ * `tsc --lsp --stdio` from its native binary instead; older releases reject the
+ * flag with TS5023.
+ */
+function typescriptSpeaksLsp(tscPath: string): boolean {
+	const packageDir = typescriptPackageDir(tscPath);
+	return packageDir !== null && !fs.existsSync(path.join(packageDir, "lib", "tsserver.js"));
+}
+
+/**
+ * Keep exactly one TypeScript server. `typescript-language-server` needs
+ * `lib/tsserver.js`, which a TypeScript 7 workspace no longer ships, so it fails
+ * at initialize there; `tsc --lsp` exits on older TypeScript. Pick by inspecting
+ * the resolved `tsc` install rather than spawning both.
+ */
+function selectTypescriptServer(servers: Record<string, ServerConfig>): void {
+	const native = servers["typescript-native"];
+	if (!native?.resolvedCommand) return;
+	if (typescriptSpeaksLsp(native.resolvedCommand)) {
+		delete servers["typescript-language-server"];
+	} else {
+		delete servers["typescript-native"];
+	}
+}
+
 interface ConfigSource {
 	read(): NormalizedConfig | null;
 }
@@ -438,54 +493,31 @@ export function loadConfig(cwd: string): LspConfig {
 	let mergedServers = coerceServerConfigs(DEFAULTS);
 
 	const configSources = getConfigSources(cwd).reverse();
-	let hasOverrides = false;
 
 	let idleTimeoutMs: number | undefined;
 	for (const source of configSources) {
 		const parsed = source.read();
 		if (!parsed) continue;
-		const hasServerOverrides = Object.keys(parsed.servers).length > 0;
-		if (hasServerOverrides) {
-			hasOverrides = true;
-			mergedServers = mergeServers(mergedServers, parsed.servers);
-		}
+		mergedServers = mergeServers(mergedServers, parsed.servers);
 		if (parsed.idleTimeoutMs !== undefined) {
 			idleTimeoutMs = parsed.idleTimeoutMs;
 		}
 	}
 
-	if (!hasOverrides) {
-		// Auto-detect: find servers based on project markers AND available binaries
-		const detected: Record<string, ServerConfig> = {};
-		const defaultsWithRuntime = applyRuntimeDefaults(mergedServers);
-
-		for (const [name, config] of Object.entries(defaultsWithRuntime)) {
-			// Check if project has root markers for this language
-			if (!hasRootMarkers(cwd, config.rootMarkers)) continue;
-
-			// Check if the language server binary is available (local or $PATH)
-			const resolved = resolveCommand(config.command, cwd);
-			if (!resolved) continue;
-
-			detected[name] = { ...config, resolvedCommand: resolved };
-		}
-
-		return { servers: detected, idleTimeoutMs };
-	}
-
-	// Merge overrides with defaults and filter to available servers
-	const mergedWithRuntime = applyRuntimeDefaults(mergedServers);
-	const available: Record<string, ServerConfig> = {};
-
-	for (const [name, config] of Object.entries(mergedWithRuntime)) {
+	// Filter to servers whose project markers exist and whose binary resolves (local or $PATH)
+	const servers: Record<string, ServerConfig> = {};
+	const candidates = applyRuntimeDefaults(mergedServers);
+	for (const name in candidates) {
+		const config = candidates[name];
 		if (config.disabled) continue;
 		if (!hasRootMarkers(cwd, config.rootMarkers)) continue;
 		const resolved = resolveCommand(config.command, cwd);
 		if (!resolved) continue;
-		available[name] = { ...config, resolvedCommand: resolved };
+		servers[name] = { ...config, resolvedCommand: resolved };
 	}
+	selectTypescriptServer(servers);
 
-	return { servers: available, idleTimeoutMs };
+	return { servers, idleTimeoutMs };
 }
 
 // =============================================================================
