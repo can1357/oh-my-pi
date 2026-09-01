@@ -1366,6 +1366,7 @@ export class RelayBridge {
 			case "Emulation.setTouchEmulationEnabled":
 			case "Page.setTouchEmulationEnabled":
 			case "Input.setInterceptDrags":
+			case "Page.setInterceptFileChooserDialog":
 				enabled = msg.params?.enabled === true;
 				break;
 			case "Network.setExtraHTTPHeaders": {
@@ -1629,6 +1630,7 @@ export class RelayBridge {
 				case "Emulation.setTouchEmulationEnabled":
 				case "Page.setTouchEmulationEnabled":
 				case "Input.setInterceptDrags":
+				case "Page.setInterceptFileChooserDialog":
 					this.#forgetTabSubscription(tab, subscriptionKey(msg.method));
 					break;
 				default:
@@ -2300,6 +2302,7 @@ export class RelayBridge {
 			case "Emulation.setTouchEmulationEnabled":
 			case "Page.setTouchEmulationEnabled":
 			case "Input.setInterceptDrags":
+			case "Page.setInterceptFileChooserDialog":
 			case "Emulation.setFocusEmulationEnabled":
 				return { method: subscription.method, params: { enabled: false } };
 			case "Emulation.setScrollbarsHidden":
