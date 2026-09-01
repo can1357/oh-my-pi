@@ -67,7 +67,8 @@ describe("ollama-cloud usage provider", () => {
 		const report = await ollamaCloudUsageProvider.fetchUsage(makeParams(), makeCtx(FULL_FIXTURE));
 		const monthly = report?.limits.find(limit => limit.id === "ollama-cloud:monthly");
 		expect(monthly?.amount.usedFraction).toBeCloseTo(0.004);
-		expect(monthly?.amount.unit).toBe("credits");
+		expect(monthly?.amount.unit).toBe("percent");
+		expect(monthly?.amount.used).toBeCloseTo(0.4);
 		expect(monthly?.status).toBe("ok");
 		expect(monthly?.window?.id).toBe("monthly");
 		expect(monthly?.scope.shared).toBe(true);

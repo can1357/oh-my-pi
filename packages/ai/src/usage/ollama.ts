@@ -34,7 +34,10 @@ function parseMonthlyLimit(raw: unknown, provider: UsageFetchParams["provider"])
 		(sum, model) => sum + (isRecord(model) ? parseRequestCount(model.request_count) : 0),
 		0,
 	);
-	const amount: UsageAmount = { usedFraction: Math.max(usage, 0), unit: "credits" };
+	// Fraction-only quota: no absolute credit quantity exists, so the unit is
+	// "percent" — renderers turn usedFraction into "X% used", while a named
+	// unit like "credits" would print a false "0.40 credits used".
+	const amount: UsageAmount = { used: Math.max(usage, 0) * 100, usedFraction: Math.max(usage, 0), unit: "percent" };
 	return {
 		id: `${provider}:monthly`,
 		label: "Monthly allowance",
