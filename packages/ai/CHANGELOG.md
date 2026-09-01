@@ -2,6 +2,25 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Honour balance rr/weighted strategies on first dispatch, and resolve replaceAll route-refs against the complete incoming definition set.
+- Renew in-flight turn reservations for the lifetime of the SSE stream, defer OpenAI file_id compat until a catalog target binds, and route temporary credential unavailability through the conductor before 401.
+- Reject shared 100.64/10 discovery hosts, gate previous_response_id fallbacks by Responses-compatible APIs, and detect OpenAI file refs in user/assistant messages.
+- Reject RFC1918 172.16/12 discovery hosts, preserve stateful ownership when the primary is missing, recheck OpenAI file_id compat per target, require requestId for probe leases, and reset sibling exhaustion per fallback target.
+- Reject private IPv6 discovery hosts, keep incompatible previous_response_id fallbacks disposition-scoped, and flush metadata-only SSE preludes at EOF.
+- Honor Retry-After blocks on the allow-blocked credential pass by still requiring a probe lease.
+- Let DRR deficit outrank weight in both directions so fair-share debt can repay.
+- Reject ambiguous cross-branch reuse of the same model id so fallback edges stay distinct.
+- Continue past unresolved catalog targets, gate previous_response_id cross-provider fallbacks, and reject non-OK discovery responses.
+
+- Fallback children chain to later siblings; successful terminal SSE settles probes; prelude cap keeps the crossing chunk.
+- Fixed auth-gateway resetting StreamCommitGate between pre-commit attempts, releasing reservations when SSE reads reject, and only settling quota probes on committed streams.
+
+- Fixed auth-gateway nested fallback compilation leaking rules from unreached sibling branches onto earlier targets.
+- Fixed gateway classification treating OpenAI-style `model does not exist` 404s as `request_terminal` instead of `model_unavailable`.
+- Fixed auth-gateway inference error responses omitting `x-request-id` / `request-id` so callers could not look up the matching decision trace.
+
 ### Added
 
 - Added compatibility opt-outs for Anthropic proxies that reject optional `context_management` and OpenAI Responses proxies with incomplete reasoning-summary streams ([#10358](https://github.com/can1357/oh-my-pi/pull/10358) by [@jubueche](https://github.com/jubueche)).
@@ -43,6 +62,23 @@
 - Improved OAuth sign-in flows, including a fallback message when the browser cannot automatically close the OAuth success tab.
 - Fixed Cloudflare AI Gateway onboarding and routing so gateway account and endpoint configuration is preserved correctly while gateway credentials are not sent as upstream OpenAI authorization headers.
 - Fixed Codex OAuth quota handling so chat and Spark usage remain independent, legacy shared quota limits continue to work, and incomplete usage reports are not incorrectly treated as unlimited.
+- Gateway error classifications now carry a failure owner and retry/failover disposition (`credential_permanent`, `provider_transient`, `policy_terminal`, …); provider status codes stay authoritative over message wording, and context-overflow detection reuses the central classifier.
+- Gateway requests now forward `previous_response_id`, `parallel_tool_calls`, `logit_bias`, `user`, and `response_format` to providers instead of dropping them; Responses requests map `response_format` JSON-schema to the flat `text.format` shape and never send Chat-Completions-only `seed`.
+
+### Fixed
+
+- Fixed OpenAI Responses continuation pairing a caller-supplied `previous_response_id` with an internally computed delta from a different stored response, and restricted stale-baseline recovery to internally owned chain ids so a stale caller id can no longer silently drop prior context.
+- Auth gateway observes Responses SSE through a StreamCommitGate: metadata-only preludes stay failover-eligible, the first output event or 4 MiB cap commits, and post-commit terminals (`response.completed`/`response.failed`/`response.incomplete`/`response.error`) end failover eligibility instead of being misread as output.
+- Auth gateway virtual routes now fail over to a backup model when the primary is unavailable, as long as the response stream has not been committed.
+- Auth gateway can load virtual routes from a JSON/JSON5 file.
+- Auth gateway `GET /v1/routes` lists registered virtual routes.
+- Auth gateway `GET /v1/routes/:id` returns a registered virtual route.
+- Auth gateway `PUT /v1/routes/:id` registers or replaces a virtual route.
+- Auth gateway `DELETE /v1/routes/:id` unregisters a virtual route.
+- Auth gateway retries a sibling credential on quota errors before falling over to another model.
+- Auth gateway `GET /v1/executions/:id` returns redacted decision traces for an execution.
+- Auth gateway `GET /v1/health/routes` lists virtual route ids, generations, and targets without credentials.
+- Auth gateway `GET /v1/credentials` lists credential ids without tokens; `POST /v1/credentials/:id/disable` and `POST /v1/credentials/:id/pin` manage stored accounts.
 
 ## [18.0.8] - 2026-08-27
 

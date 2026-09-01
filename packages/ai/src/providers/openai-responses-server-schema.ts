@@ -383,6 +383,9 @@ export const openaiResponsesRequestSchema = type({
 	"service_tier?": "string",
 	"presence_penalty?": "number",
 	"frequency_penalty?": "number",
+	"seed?": "number",
+	"logit_bias?": type({ "[string]": "number" }),
+	"response_format?": "unknown",
 	// `reasoning.encrypted_content` and computer screenshot refs must survive
 	// the gateway bridge so the resolved Responses transport can request them.
 	"background?": "unknown",
