@@ -139,12 +139,6 @@ describe("structured subagent primitive", () => {
 			mode: "permissive",
 			failureToolNames: undefined,
 		});
-		expect(executorModule.modelPatternTargetsProvider("merge-gateway/deepseek/deepseek-v3.2", "merge-gateway")).toBe(
-			true,
-		);
-		expect(executorModule.modelPatternTargetsProvider("openrouter/deepseek/deepseek-v3.2", "merge-gateway")).toBe(
-			false,
-		);
 		expect(
 			executorModule.isOutputSchemaCorrectionLock({
 				type: "session_init",
@@ -155,7 +149,6 @@ describe("structured subagent primitive", () => {
 		expect(
 			executorModule.mergeMayServeSubagent({
 				actualProvider: "anthropic",
-				requestedPatterns: ["merge-gateway/deepseek/deepseek-v3.2"],
 				fallbackMayReachMerge: true,
 				prewalkMayServeMerge: false,
 				authFallbackUsed: true,
@@ -164,7 +157,6 @@ describe("structured subagent primitive", () => {
 		expect(
 			executorModule.mergeMayServeSubagent({
 				actualProvider: "merge-gateway",
-				requestedPatterns: [],
 				fallbackMayReachMerge: false,
 				prewalkMayServeMerge: false,
 				authFallbackUsed: true,
@@ -173,7 +165,6 @@ describe("structured subagent primitive", () => {
 		expect(
 			executorModule.mergeMayServeSubagent({
 				actualProvider: "anthropic",
-				requestedPatterns: [],
 				fallbackMayReachMerge: false,
 				prewalkMayServeMerge: true,
 				authFallbackUsed: true,
@@ -209,28 +200,35 @@ describe("structured subagent primitive", () => {
 		).toBe(true);
 	});
 
-	it("ignores Merge fallback targets without a usable credential", async () => {
+	it("does not harden an authenticated non-Merge primary when its Merge fallback lacks credentials", async () => {
 		const models: Record<string, { provider: string; id: string }> = {
-			"anthropic/a": { provider: "anthropic", id: "a" },
+			"openai/a": { provider: "openai", id: "a" },
 			"merge-gateway/c": { provider: "merge-gateway", id: "c" },
 		};
 		const modelRegistry = {
 			find: (provider: string, id: string) => models[`${provider}/${id}`],
 			hasProvider: (provider: string) => Object.values(models).some(model => model.provider === provider),
-			getApiKey: async () => undefined,
+			getApiKey: async (model: { provider: string }) => (model.provider === "openai" ? "openai-key" : undefined),
 		} as unknown as ModelRegistry;
 		const settings = Settings.isolated({
 			"retry.fallbackChains": {
-				"anthropic/a": ["merge-gateway/c"],
+				"openai/a": ["merge-gateway/c"],
 			},
 		});
+		const fallbackMayReachMerge = await executorModule.retryFallbackMayReachProvider({
+			settings,
+			modelRegistry,
+			initialSelector: "openai/a",
+			roleHint: undefined,
+			targetProvider: "merge-gateway",
+		});
+		expect(fallbackMayReachMerge).toBe(false);
 		expect(
-			await executorModule.retryFallbackMayReachProvider({
-				settings,
-				modelRegistry,
-				initialSelector: "anthropic/a",
-				roleHint: undefined,
-				targetProvider: "merge-gateway",
+			executorModule.mergeMayServeSubagent({
+				actualProvider: "openai",
+				fallbackMayReachMerge,
+				prewalkMayServeMerge: false,
+				authFallbackUsed: false,
 			}),
 		).toBe(false);
 	});
@@ -261,7 +259,6 @@ describe("structured subagent primitive", () => {
 		expect(
 			executorModule.mergeMayServeSubagent({
 				actualProvider: "anthropic",
-				requestedPatterns: [],
 				fallbackMayReachMerge: false,
 				prewalkMayServeMerge,
 				authFallbackUsed: true,

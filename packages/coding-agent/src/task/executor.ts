@@ -189,23 +189,15 @@ function normalizeModelPatterns(value: string | string[] | undefined): string[] 
 		.map(entry => entry.trim())
 		.filter(Boolean);
 }
-export function modelPatternTargetsProvider(pattern: string, provider: string): boolean {
-	const normalized = pattern.trim();
-	return normalized === provider || normalized.startsWith(`${provider}/`);
-}
 export function mergeMayServeSubagent(args: {
 	actualProvider: string | undefined;
-	requestedPatterns: readonly string[];
 	fallbackMayReachMerge: boolean;
 	prewalkMayServeMerge: boolean;
 	authFallbackUsed: boolean;
 }): boolean {
 	if (args.actualProvider === "merge-gateway" || args.prewalkMayServeMerge) return true;
 	if (args.authFallbackUsed) return false;
-	return (
-		args.requestedPatterns.some(pattern => modelPatternTargetsProvider(pattern, "merge-gateway")) ||
-		args.fallbackMayReachMerge
-	);
+	return args.fallbackMayReachMerge;
 }
 
 const SUBAGENT_RETRY_FALLBACK_ROLE_PREFIX = "subagent:";
@@ -3162,7 +3154,6 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					})));
 			const mergeMayServe = mergeMayServeSubagent({
 				actualProvider: model?.provider,
-				requestedPatterns: modelPatterns,
 				fallbackMayReachMerge: await retryFallbackMayReachProvider({
 					settings: subagentSettings,
 					modelRegistry,
