@@ -340,6 +340,8 @@ class TabState {
 		previous: SessionRootSubscription | undefined;
 		next: SessionRootSubscription | undefined;
 	}> = [];
+	/** Replacement recovery needs one post-replay retry for a queued live cleanup. */
+	resumeSubscriptionReconcileAfterRestore = false;
 	/** Recovery replay must complete, including after an extension socket replacement. */
 	restorePending = false;
 	/** Effective root-domain state by subscription key and owning page pseudo-session. */
@@ -616,6 +618,9 @@ export class RelayBridge {
 			const holders = this.#sessionHolders(tab.tabId);
 			const preserve = holders.filter(conn => !conn.autoAttach && conn.sessionsForTab(tab.tabId).length > 0);
 			if (tab.attached) {
+				const needsRecoveryReplay = tab.restorePending && !sameSocketReplay;
+				tab.resumeSubscriptionReconcileAfterRestore =
+					needsRecoveryReplay && tab.pendingSubscriptionReconcile.length > 0;
 				if (tab.pendingSubscriptionReconcile.length > 0) {
 					this.#scheduleLiveSubscriptionReconcile(tab, tab.pendingSubscriptionReconcile);
 				}
@@ -623,7 +628,7 @@ export class RelayBridge {
 					this.#detachIfUnheld(tab.tabId);
 					continue;
 				}
-				if (tab.restorePending && !sameSocketReplay) {
+				if (needsRecoveryReplay) {
 					// A socket replacement can interrupt replay after Chrome accepted only
 					// part of it. The replacement hello still reports the debugger attached,
 					// so resume the pending journal instead of treating the root as ready.
@@ -2153,8 +2158,13 @@ export class RelayBridge {
 		})();
 		const task = restoring.finally(() => {
 			if (tab.restoring === task) {
+				const resumeQueuedCleanup = tab.resumeSubscriptionReconcileAfterRestore;
 				tab.restoring = null;
 				tab.restoringExt = null;
+				tab.resumeSubscriptionReconcileAfterRestore = false;
+				if (resumeQueuedCleanup && tab.pendingSubscriptionReconcile.length > 0) {
+					this.#scheduleLiveSubscriptionReconcile(tab, tab.pendingSubscriptionReconcile);
+				}
 			}
 		});
 		tab.restoring = task;

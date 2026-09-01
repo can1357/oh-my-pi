@@ -1557,6 +1557,65 @@ describe("RelayBridge tab grouping", () => {
 		expect(holder.messages.filter(message => message.id === commandId && "result" in message)).toHaveLength(1);
 	});
 
+	it("resumes queued live cleanup after replacement recovery finishes", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const owner = new FakeCdpSocket();
+		const ownerConn = bridge.cdpConnected(owner);
+		const ownerSession = await attachPage(bridge, ext, owner, ownerConn, 1);
+		const holder = new FakeCdpSocket();
+		const holderConn = bridge.cdpConnected(holder);
+		const holderSession = await attachPage(bridge, ext, holder, holderConn, 1);
+
+		bridge.cdpMessage(
+			ownerConn,
+			JSON.stringify({
+				id: ++msgSeq,
+				sessionId: ownerSession,
+				method: "Fetch.enable",
+				params: { patterns: [{ urlPattern: "https://owner.example/*" }] },
+			}),
+		);
+		await flush();
+		ack(bridge, ext, "send");
+		await flush();
+
+		bridge.extClosed(ext);
+		const ext2 = new FakeExtSocket();
+		connect(bridge, ext2, [tab({ tabId: 1 })], { recoverableTabIds: [1] });
+		await waitFor(() => ext2.rpcs("attach").length === 1, "first recovery attach");
+		ack(bridge, ext2, "attach");
+		await waitFor(() => ext2.rpcs("send").length === 1, "first replayed owner subscription");
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual(["Fetch.enable"]);
+
+		// The owner disappears after recovery replay sent its Fetch.enable but before
+		// replay finishes observing the ack. Cleanup is queued for the next socket.
+		bridge.cdpClosed(ownerConn);
+
+		const replacement = new FakeExtSocket();
+		connect(bridge, replacement, [tab({ tabId: 1 })], { attachedTabIds: [1], recoverableTabIds: [1] });
+
+		// The replacement replay no longer includes the departed owner's Fetch.enable,
+		// so recovery itself may finish without any send RPCs. The already-applied
+		// Fetch state on Chrome still must be cleared after that recovery completes.
+		await waitFor(() => replacement.rpcs("send").length === 1, "queued cleanup after replacement recovery");
+		expect(replacement.rpcs("send").map(rpc => rpc.method)).toEqual(["Fetch.disable"]);
+		ack(bridge, replacement, "send");
+		await flush();
+
+		const commandId = ++msgSeq;
+		bridge.cdpMessage(
+			holderConn,
+			JSON.stringify({ id: commandId, sessionId: holderSession, method: "Network.getCookies" }),
+		);
+		await flush();
+		expect(replacement.rpcs("send").map(rpc => rpc.method)).toEqual(["Fetch.disable", "Network.getCookies"]);
+		ack(bridge, replacement, "send", { cookies: [] });
+		await flush();
+		expect(holder.messages.filter(message => message.id === commandId && "result" in message)).toHaveLength(1);
+	});
+
 	it("retries live owner cleanup after an ordinary extension disconnect", async () => {
 		const bridge = new RelayBridge({});
 		const ext = new FakeExtSocket();
