@@ -47,6 +47,11 @@ export const SEARCH_PROVIDER_OPTIONS = [
 		label: "Firecrawl",
 		description: "Uses Firecrawl API when FIRECRAWL_API_KEY is set; falls back to keyless mode",
 	},
+	{
+		value: "anysearch",
+		label: "AnySearch",
+		description: "Anonymous web search via AnySearch; optional ANYSEARCH_API_KEY",
+	},
 	{ value: "brave", label: "Brave", description: "Requires BRAVE_API_KEY" },
 	{
 		value: "kimi",
