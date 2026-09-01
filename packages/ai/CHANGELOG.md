@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Prefer healthy API-key siblings before leasing a cooldown probe, and acquire API-key probes under the ranking block scope that caused the cooldown.
+- Preserve Retry-After provenance across broker snapshots, retain in-memory reconciliation deadlines for new backoff maps, and commit when prelude buffering hits the cap.
+- Require probe leases for blocked API-key selections, avoid double-forwarding the commit chunk, and skip settlement waits on failed stream release.
+- Persist Retry-After provenance in SQLite credential blocks, compare OAuth orgId on equality, and observe remaining SSE frames in the commit chunk.
+- Fixed OpenAI Responses continuation pairing a caller-supplied `previous_response_id` with an internally computed delta from a different stored response, and restricted stale-baseline recovery to internally owned chain ids so a stale caller id can no longer silently drop prior context.
+- Auth gateway observes Responses SSE through a StreamCommitGate: metadata-only preludes stay failover-eligible, the first output event or 4 MiB cap commits, and post-commit terminals (`response.completed`/`response.failed`/`response.incomplete`/`response.error`) end failover eligibility instead of being misread as output.
+- Settle probes from canonical stream results, reuse request-owned probe leases on auth retry, and observe post-commit SSE terminals.
+- Require probe leases on allow-blocked paths, forward successful terminal-only SSE preludes, return 429 while credentials cool down, and carry Retry-After provenance on durable blocks when the store round-trips it.
+- Fixed quota probes honoring global Retry-After when selection uses a chat/spark scope, and workspace deactivation attributing rotated bearers via fingerprint history.
+- Fixed quota-probe leases releasing on abort/5xx/fallback via `clearQuotaProbe`, and settling only on successful stream completion.
+
+- Fixed deactivated_workspace fan-out tests for org-scoped identities, and treated empty previousResponseId as present rather than falling through to internal chaining.
+- Fixed quota-probe leases still applying on the allowBlocked OAuth pass for Retry-After blocks, workspace deactivation fan-out matching only organization-qualified identity keys, and Chat→Responses `json_schema.description` preservation.
+
 ### Added
 
 - Add support for automatic recovery from "preserved-thinking" signature errors during conversation history rewrites
@@ -55,6 +71,8 @@
 - Improved OAuth sign-in flows, including a fallback message when the browser cannot automatically close the OAuth success tab.
 - Fixed Cloudflare AI Gateway onboarding and routing so gateway account and endpoint configuration is preserved correctly while gateway credentials are not sent as upstream OpenAI authorization headers.
 - Fixed Codex OAuth quota handling so chat and Spark usage remain independent, legacy shared quota limits continue to work, and incomplete usage reports are not incorrectly treated as unlimited.
+- Gateway error classifications now carry a failure owner and retry/failover disposition (`credential_permanent`, `provider_transient`, `policy_terminal`, …); provider status codes stay authoritative over message wording, and context-overflow detection reuses the central classifier.
+- Gateway requests now forward `previous_response_id`, `parallel_tool_calls`, `logit_bias`, `user`, and `response_format` to providers instead of dropping them; Responses requests map `response_format` JSON-schema to the flat `text.format` shape and never send Chat-Completions-only `seed`.
 
 ## [18.0.8] - 2026-08-27
 
