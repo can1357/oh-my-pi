@@ -11,12 +11,14 @@ import { registerProvider } from "../capability";
 import { readFile } from "../capability/fs";
 import { type Hook, hookCapability } from "../capability/hook";
 import { type MCPServer, mcpCapability } from "../capability/mcp";
+import { type Rule, ruleCapability } from "../capability/rule";
 import { type Skill, skillCapability } from "../capability/skill";
 import { type SlashCommand, slashCommandCapability } from "../capability/slash-command";
 import { type CustomTool, toolCapability } from "../capability/tool";
 import type { LoadContext, LoadResult } from "../capability/types";
 import { legacyProviderAllowed } from "./agent-plugin-format";
 import {
+	buildRuleFromMarkdown,
 	type ClaudePluginRoot,
 	createSourceMeta,
 	expandEnvVarsDeep,
@@ -244,6 +246,30 @@ async function loadSkills(ctx: LoadContext): Promise<LoadResult<Skill>> {
 }
 
 // =============================================================================
+// Rules
+// =============================================================================
+
+async function loadRules(ctx: LoadContext): Promise<LoadResult<Rule>> {
+	const { roots, warnings: rootWarnings } = await allowedRoots(ctx, "other");
+	const warnings = [...rootWarnings];
+	const results = await Promise.all(
+		roots.map(root =>
+			loadFilesFromDir<Rule>(ctx, path.join(root.path, "rules"), PROVIDER_ID, root.scope, {
+				extensions: ["md", "mdc"],
+				transform: (name, content, filePath, source) =>
+					buildRuleFromMarkdown(name, content, filePath, source, { stripNamePattern: /\.(md|mdc)$/ }),
+			}),
+		),
+	);
+	const items: Rule[] = [];
+	for (const result of results) {
+		items.push(...result.items);
+		if (result.warnings) warnings.push(...result.warnings);
+	}
+	return { items, warnings };
+}
+
+// =============================================================================
 // Slash Commands
 // =============================================================================
 
@@ -379,8 +405,9 @@ async function loadTools(ctx: LoadContext): Promise<LoadResult<CustomTool>> {
 		roots.map(async root => {
 			const toolsDir = path.join(root.path, "tools");
 			return loadFilesFromDir<CustomTool>(ctx, toolsDir, PROVIDER_ID, root.scope, {
+				extensions: ["ts", "js"],
 				transform: (name, _content, filePath, source) => {
-					const toolName = name.replace(/\.(ts|js|sh|bash|py)$/, "");
+					const toolName = name.replace(/\.(ts|js)$/, "");
 					return {
 						name: toolName,
 						path: filePath,
@@ -605,6 +632,14 @@ registerProvider<Skill>(skillCapability.id, {
 	description: "Load skills from Claude Code marketplace plugins (~/.claude/plugins/cache/)",
 	priority: PRIORITY,
 	load: loadSkills,
+});
+
+registerProvider<Rule>(ruleCapability.id, {
+	id: PROVIDER_ID,
+	displayName: DISPLAY_NAME,
+	description: "Load rules from marketplace plugin rules directories",
+	priority: PRIORITY,
+	load: loadRules,
 });
 
 registerProvider<SlashCommand>(slashCommandCapability.id, {

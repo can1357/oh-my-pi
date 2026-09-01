@@ -1,0 +1,28 @@
+// Provider-wire compat for "umans"; regenerated from the frozen census using deployment contract selectors.
+
+provider "umans" {
+	// Replaces resolve.ts's Umans provider baseline for Anthropic built-in tool names.
+	escape-builtin-tool-names #true
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "umans-coder" "umans-kimi-k2.7" {
+		thinking-efforts "minimal" "low" "medium" "high" "xhigh"
+		thinking-mode "budget"
+		thinking-requires-effort #true
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "umans-deepseek-v4-flash-0731" {
+		escape-builtin-tool-names #true
+		requires-reasoning-content-for-all-assistant-turns #true
+		thinking-efforts "minimal" "low" "medium" "high" "xhigh"
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "umans-flash" "umans-kimi-k3" {
+		thinking-efforts "minimal" "low" "medium" "high" "xhigh"
+		thinking-mode "budget"
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "umans-glm-5.2" {
+		thinking-efforts "high" "max"
+		thinking-mode "anthropic-budget-effort"
+	}
+}

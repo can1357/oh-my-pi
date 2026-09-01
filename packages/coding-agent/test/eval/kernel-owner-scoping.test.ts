@@ -87,7 +87,7 @@ describe("JS eval owner-scoped reset forking", () => {
 		await disposeAllVmContexts();
 	});
 
-	it("forks a subagent reset instead of clobbering the shared context", async () => {
+	it("forks shared resets while resetting an exclusive owner in place", async () => {
 		using tempDir = TempDir.createSync("@omp-js-owner-fork-");
 		const session = makeSession(tempDir.path());
 		const evalSessionId = `js-owner-fork:${crypto.randomUUID()}`;
@@ -114,23 +114,10 @@ describe("JS eval owner-scoped reset forking", () => {
 		await disposeVmContextsByOwner("agent-b");
 		const survivor = await run("return shared + 1;", "agent-a");
 		expect(survivor.output.trim()).toBe("42");
-	});
 
-	it("resets in place for the exclusive owner of a context", async () => {
-		using tempDir = TempDir.createSync("@omp-js-owner-exclusive-");
-		const session = makeSession(tempDir.path());
-		const evalSessionId = `js-owner-exclusive:${crypto.randomUUID()}`;
-		const run = (code: string, reset?: boolean) =>
-			executeJs(code, {
-				cwd: tempDir.path(),
-				sessionId: evalSessionId,
-				session,
-				kernelOwnerId: "agent-solo",
-				reset,
-			});
-
-		await run("var solo = 1;");
-		const reset = await run("return typeof solo;", true);
+		// Once agent-a is the exclusive owner, reset reuses its process but clears
+		// the context rather than needlessly forking another worker.
+		const reset = await run("return typeof shared;", "agent-a", true);
 		expect(reset.output.trim()).toBe("undefined");
 	});
 });

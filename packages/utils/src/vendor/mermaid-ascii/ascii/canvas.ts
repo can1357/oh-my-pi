@@ -8,7 +8,7 @@
 
 import type { Canvas, DrawingCoord, RoleCanvas, CharRole, AsciiTheme, ColorMode } from './types'
 import { colorizeLine, DEFAULT_ASCII_THEME } from './ansi'
-import { displayWidth, toCells, WIDE_PAD } from '../text-metrics'
+import { displayWidth, LABEL_SPACE, toCells, WIDE_PAD } from '../text-metrics'
 
 /**
  * Create a blank canvas filled with spaces.
@@ -189,7 +189,7 @@ export function isJunctionChar(c: string): boolean {
  * letter/digit test misses.
  */
 function isLabelChar(c: string): boolean {
-  return c === WIDE_PAD || displayWidth(c) === 2 || /[\p{L}\p{N}]/u.test(c)
+  return c === LABEL_SPACE || c === WIDE_PAD || displayWidth(c) === 2 || /[\p{L}\p{N}]/u.test(c)
 }
 
 /**
@@ -268,7 +268,7 @@ export function mergeCanvases(
     for (let x = 0; x < overlay.length; x++) {
       for (let y = 0; y < overlay[0]!.length; y++) {
         const c = overlay[x]![y]!
-        // WIDE_PAD cells are written atomically with their lead below
+        // Spaces are transparent; WIDE_PAD cells are written atomically with their lead below
         if (c === ' ' || c === WIDE_PAD) continue
         const mx = x + offset.x
         const my = y + offset.y
@@ -327,8 +327,8 @@ export function canvasToString(canvas: Canvas, options?: CanvasToStringOptions):
       let line = ''
       for (let x = 0; x <= maxX; x++) {
         const c = canvas[x]![y]!
-        // Skip wide-glyph continuation cells: the glyph itself spans 2 columns
-        if (c !== WIDE_PAD) line += c
+        // Skip wide-glyph continuation cells and restore opaque label spaces.
+        if (c !== WIDE_PAD) line += c === LABEL_SPACE ? ' ' : c
       }
       lines.push(line)
     } else {
@@ -338,7 +338,7 @@ export function canvasToString(canvas: Canvas, options?: CanvasToStringOptions):
       for (let x = 0; x <= maxX; x++) {
         const c = canvas[x]![y]!
         if (c === WIDE_PAD) continue
-        chars.push(c)
+        chars.push(c === LABEL_SPACE ? ' ' : c)
         roles.push(roleCanvas[x]?.[y] ?? null)
       }
       lines.push(colorizeLine(chars, roles, theme, colorMode))

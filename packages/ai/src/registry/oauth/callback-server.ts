@@ -10,6 +10,7 @@
  * - generateAuthUrl(): Build provider-specific authorization URL
  * - exchangeToken(): Exchange authorization code for tokens
  */
+import * as os from "node:os";
 import * as AIError from "../../error";
 import templateHtml from "./oauth.html" with { type: "text" };
 import type { OAuthController, OAuthCredentials } from "./types";
@@ -56,6 +57,27 @@ function isAddressInUse(error: unknown): boolean {
 	const code = (error as { code?: unknown } | null | undefined)?.code;
 	if (typeof code === "string") return code === "EADDRINUSE";
 	return error instanceof Error && /EADDRINUSE|in use/i.test(error.message);
+}
+
+/**
+ * Whether this host exposes an IPv6 loopback (`::1`) the companion listener can
+ * bind. A kernel with IPv6 disabled (`ipv6.disable=1`) lists no internal IPv6
+ * address, and the `::1` companion bind there fails with a generic Bun error
+ * {@link isAddressInUse} cannot distinguish from a real collision — Bun reuses
+ * its "Is port X in use?" message for every listen failure (oven-sh/bun#7187) —
+ * so the dual-bind path must be skipped up front rather than misread as a
+ * conflict (issue #8814).
+ */
+function ipv6LoopbackAvailable(): boolean {
+	const interfaces = os.networkInterfaces();
+	for (const name in interfaces) {
+		const addresses = interfaces[name];
+		if (!addresses) continue;
+		for (const address of addresses) {
+			if (address.internal && address.family === "IPv6") return true;
+		}
+	}
+	return false;
 }
 
 export interface OAuthCallbackFlowOptions {
@@ -335,12 +357,21 @@ export abstract class OAuthCallbackFlow {
 		if (this.callbackHostname !== DEFAULT_HOSTNAME) {
 			return this.#serve(this.callbackHostname, port, expectedState);
 		}
+		// A host with IPv6 disabled at the kernel exposes no `::1`, so the
+		// companion bind cannot succeed there. Bun reports that failure with the
+		// same generic "Is port X in use?" message it uses for a real collision
+		// (oven-sh/bun#7187), which the catch below would misread — tearing down
+		// the healthy IPv4 listener and, for a pinned port, throwing a bogus
+		// "port in use" ConfigurationError. Detecting the missing stack up front
+		// lets the IPv4 listener serve alone (issue #8814).
+		const dualStack = ipv6LoopbackAvailable();
 		for (let attempt = 0; ; attempt++) {
 			const primary = this.#serve(IPV4_LOOPBACK, port, expectedState);
 			const boundPort = primary.port;
 			// A non-TCP endpoint has no port for the companion to target;
 			// #resolveServerPort reports that case precisely.
 			if (typeof boundPort !== "number") return primary;
+			if (!dualStack) return primary;
 			let companion: Bun.Server<unknown>;
 			try {
 				companion = this.#serve(IPV6_LOOPBACK, boundPort, expectedState);

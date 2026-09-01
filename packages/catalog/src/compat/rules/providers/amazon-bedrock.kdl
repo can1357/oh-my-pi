@@ -1,0 +1,36 @@
+// Provider-wire compat for "amazon-bedrock"; regenerated from the frozen census using deployment contract selectors.
+
+provider "amazon-bedrock" {
+	class "anthropic" {
+		family "opus" {
+			revision ">=4.6 <4.7" {
+				thinking-mode "anthropic-adaptive"
+			}
+		}
+		revision ">=4.7 <5.1" {
+			// Replaces the adaptive Anthropic Bedrock timeout branch.
+			stream-idle-timeout-ms 900000
+			thinking-efforts "low" "medium" "high" "max"
+		}
+	}
+	class "openai" {
+		thinking-mode "effort"
+	}
+	class "deepseek" {
+		requires-reasoning-content-for-all-assistant-turns #true
+		thinking-efforts "minimal" "low" "medium" "high"
+	}
+	class "minimax" {
+		family "m2" {
+			thinking-mode "budget"
+		}
+	}
+	class "unknown" {
+		thinking-efforts "minimal" "low" "medium" "high"
+		thinking-mode "budget"
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "moonshot.kimi-k2-thinking" {
+		thinking-requires-effort #true
+	}
+}

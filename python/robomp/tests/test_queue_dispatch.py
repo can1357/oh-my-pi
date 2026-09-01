@@ -18,6 +18,13 @@ class _StubGitHub:
 class _StubSandbox:
     natives_cache = None
 
+    def reclaim_workspace_caches(self, *, repo: str, number: int | str) -> bool:
+        del repo, number
+        return False
+
+    def reclaim_all_caches(self) -> int:
+        return 0
+
 
 class _StubGitTransport:
     pass
@@ -114,3 +121,32 @@ async def test_dispatch_pr_synchronize_is_noop(
     await _make_pool(settings, db)._dispatch(_pr_row("synchronize"))  # noqa: SLF001
 
     assert called is False
+
+
+@pytest.mark.asyncio
+async def test_dispatch_routes_completed_workflow_to_release_handler(
+    settings: Settings,
+    db: Database,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[tuple[str, int]] = []
+
+    async def fake_handle_release_ci(*, payload, attempts, **_kwargs) -> None:
+        seen.append((str(payload.get("action")), attempts))
+
+    monkeypatch.setattr(tasks, "handle_release_ci", fake_handle_release_ci, raising=False)
+    row = EventRow(
+        delivery_id="release-1",
+        event_type="workflow_run",
+        repo="octo/widget",
+        issue_key="octo/widget#release",
+        payload={"action": "completed", "workflow_run": {"id": 10}},
+        received_at="2026-01-01T00:00:00Z",
+        state="running",
+        attempts=2,
+        last_error=None,
+    )
+
+    await _make_pool(settings, db)._dispatch(row)  # noqa: SLF001
+
+    assert seen == [("completed", 2)]

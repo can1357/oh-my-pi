@@ -53,7 +53,7 @@ describe("read tool multi-range selector", () => {
 		await removeWithRetries(tmpDir);
 	});
 
-	it("uses only the filename in hashline headers for nested files", async () => {
+	it("keeps the workspace-relative path in hashline headers for nested files", async () => {
 		const filePath = path.join(tmpDir, "src", "nested", "numbered.txt");
 		await fs.mkdir(path.dirname(filePath), { recursive: true });
 		await fs.writeFile(filePath, "alpha\nbeta\n");
@@ -62,8 +62,9 @@ describe("read tool multi-range selector", () => {
 		const text = textOutput(await tool.execute("call-filename-header", { path: filePath }));
 		const firstLine = text.split("\n")[0];
 
-		expect(firstLine).toMatch(/^\[numbered\.txt#[0-9A-F]{4}\]$/);
-		expect(firstLine).not.toContain("src");
+		// A same-basename file elsewhere in the tree must not capture a
+		// follow-up edit, so the header retains the workspace-relative path.
+		expect(firstLine).toBe(`[${path.join("src", "nested", "numbered.txt")}#${firstLine.slice(-5, -1)}]`);
 	});
 
 	it("returns both ranges separated by an elision marker", async () => {
@@ -75,7 +76,7 @@ describe("read tool multi-range selector", () => {
 		const result = await tool.execute("call-multi", { path: `${filePath}:3-5,20-22` });
 		const text = textOutput(result);
 		const firstLine = text.split("\n")[0];
-		expect(firstLine).toMatch(/^\[numbered\.txt#[0-9A-F]{4}\]$/);
+		expect(firstLine).toMatch(/^\[src\/numbered\.txt#[0-9A-F]{4}\]$/);
 
 		expect(text).toContain("line 3");
 		expect(text).toContain("line 4");

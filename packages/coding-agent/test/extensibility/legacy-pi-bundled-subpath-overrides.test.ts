@@ -6,7 +6,8 @@ import { __buildLegacyPiPackageRootOverrides } from "@oh-my-pi/pi-coding-agent/e
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { __renderLegacyPiVirtualModule, collectBundledPiEntries } from "../../scripts/legacy-pi-virtual-module";
 
-const bundledModuleKeys = new Set((await collectBundledPiEntries()).map(entry => entry.key));
+const bundledEntries = await collectBundledPiEntries();
+const bundledModuleKeys = new Set(bundledEntries.map(entry => entry.key));
 
 // Regression for issue #3442: extension validation in compiled-binary mode
 // failed to resolve `@earendil-works/pi-ai/oauth` because the override map
@@ -32,34 +33,33 @@ describe("legacy pi compat compiled-mode subpath overrides (issue #3442)", () =>
 		await Bun.write(
 			registryPath,
 			`${registry}
-const beforeAlpha = Reflect.get(globalThis, "__alphaLoads") ?? 0;
-const beforeBeta = Reflect.get(globalThis, "__betaLoads") ?? 0;
+export const beforeAlpha = Reflect.get(globalThis, "__alphaLoads") ?? 0;
+export const beforeBeta = Reflect.get(globalThis, "__betaLoads") ?? 0;
 await BUNDLED_PI_MODULE_LOADERS.alpha();
-const afterAlpha = Reflect.get(globalThis, "__alphaLoads") ?? 0;
-const betaAfterAlpha = Reflect.get(globalThis, "__betaLoads") ?? 0;
+export const afterAlpha = Reflect.get(globalThis, "__alphaLoads") ?? 0;
+export const betaAfterAlpha = Reflect.get(globalThis, "__betaLoads") ?? 0;
 await BUNDLED_PI_MODULE_LOADERS.beta();
-process.stdout.write(JSON.stringify([
-	beforeAlpha,
-	beforeBeta,
-	afterAlpha,
-	betaAfterAlpha,
-	Reflect.get(globalThis, "__alphaLoads") ?? 0,
-	Reflect.get(globalThis, "__betaLoads") ?? 0,
-]));
+export const finalAlpha = Reflect.get(globalThis, "__alphaLoads") ?? 0;
+export const finalBeta = Reflect.get(globalThis, "__betaLoads") ?? 0;
 `,
 		);
-		const proc = Bun.spawn([process.execPath, registryPath], {
-			stdout: "pipe",
-			stderr: "pipe",
-		});
-		const [exitCode, stdout, stderr] = await Promise.all([
-			proc.exited,
-			new Response(proc.stdout).text(),
-			new Response(proc.stderr).text(),
-		]);
-		expect(exitCode).toBe(0);
-		expect(stderr).toBe("");
-		expect(JSON.parse(stdout)).toEqual([0, 0, 1, 0, 1, 1]);
+		Reflect.deleteProperty(globalThis, "__alphaLoads");
+		Reflect.deleteProperty(globalThis, "__betaLoads");
+		try {
+			// The generated registry has a runtime-selected temp path; importing it is the loading boundary under test.
+			const observed = await import(url.pathToFileURL(registryPath).href);
+			expect([
+				observed.beforeAlpha,
+				observed.beforeBeta,
+				observed.afterAlpha,
+				observed.betaAfterAlpha,
+				observed.finalAlpha,
+				observed.finalBeta,
+			]).toEqual([0, 0, 1, 0, 1, 1]);
+		} finally {
+			Reflect.deleteProperty(globalThis, "__alphaLoads");
+			Reflect.deleteProperty(globalThis, "__betaLoads");
+		}
 	});
 
 	it("serves @oh-my-pi/pi-ai/oauth through the bundled virtual namespace in compiled mode", () => {
@@ -93,7 +93,7 @@ process.stdout.write(JSON.stringify([
 		// Executing the generated registry is the contract — a key present in the
 		// override map still proves nothing if the module cannot be imported.
 		const key = "@oh-my-pi/pi-ai/providers/cursor-pi-args";
-		const entry = (await collectBundledPiEntries()).find(candidate => candidate.key === key);
+		const entry = bundledEntries.find(candidate => candidate.key === key);
 		expect(entry).toBeDefined();
 
 		// The rendered registry imports by bare specifier, exactly as the real
@@ -106,32 +106,19 @@ process.stdout.write(JSON.stringify([
 			registryPath,
 			`${__renderLegacyPiVirtualModule([entry!])}
 const mod = await BUNDLED_PI_MODULE_LOADERS[${JSON.stringify(key)}]();
-process.stdout.write(JSON.stringify([
+export const observed = [
 	mod.piEscapeRegexLiteral("a.b*c"),
 	mod.piJoinPath("src", "*.ts"),
-]));
+];
 `,
 		);
-		let exitCode: number;
-		let stdout: string;
-		let stderr: string;
 		try {
-			const proc = Bun.spawn([process.execPath, registryPath], {
-				cwd: packageRoot,
-				stdout: "pipe",
-				stderr: "pipe",
-			});
-			[exitCode, stdout, stderr] = await Promise.all([
-				proc.exited,
-				new Response(proc.stdout).text(),
-				new Response(proc.stderr).text(),
-			]);
+			// The generated registry has a runtime-selected package-root path; importing it exercises bare resolution.
+			const registryModule = await import(url.pathToFileURL(registryPath).href);
+			expect(registryModule.observed).toEqual(["a\\.b\\*c", path.join("src", "*.ts")]);
 		} finally {
 			await fs.rm(registryPath, { force: true });
 		}
-		expect(stderr).toBe("");
-		expect(exitCode).toBe(0);
-		expect(JSON.parse(stdout)).toEqual(["a\\.b\\*c", path.join("src", "*.ts")]);
 
 		const overrides = __buildLegacyPiPackageRootOverrides(true, bundledModuleKeys);
 		expect(overrides[key]).toBe(`omp-legacy-pi-bundled:${key}`);
@@ -150,6 +137,13 @@ process.stdout.write(JSON.stringify([
 			expect(bundledModuleKeys.has(key)).toBe(true);
 			expect(overrides[key]).toBe(`omp-legacy-pi-bundled:${key}`);
 		}
+	});
+
+	it("serves coding-agent registry wildcard exports in compiled mode", () => {
+		const key = "@oh-my-pi/pi-coding-agent/registry/agent-registry";
+		const overrides = __buildLegacyPiPackageRootOverrides(true, bundledModuleKeys);
+		expect(bundledModuleKeys.has(key)).toBe(true);
+		expect(overrides[key]).toBe(`omp-legacy-pi-bundled:${key}`);
 	});
 
 	it("does not enumerate root catch-all wildcards (./* / ./*.js)", () => {
@@ -222,18 +216,16 @@ process.stdout.write(JSON.stringify([
 		expect(overrides).not.toHaveProperty("typebox");
 	});
 
-	it("bundles nested wildcard subpaths so a compiled extension can import them", async () => {
+	it("bundles nested wildcard subpaths so a compiled extension can import them", () => {
 		// Node matches `*` in an `exports` pattern across `/`, so
 		// `./slash-commands/*` genuinely serves
 		// `slash-commands/helpers/active-oauth-account`. Enumerating only the
 		// top level left every nested key out of the compiled registry, so the
 		// import resolved from source and failed inside a binary — which is how
 		// a real extension (`quota-hud.ts`) broke on this exact specifier.
-		const entries = await collectBundledPiEntries();
-		const keys = new Set(entries.map(entry => entry.key));
-		expect(keys.has("@oh-my-pi/pi-coding-agent/slash-commands/helpers/active-oauth-account")).toBe(true);
+		expect(bundledModuleKeys.has("@oh-my-pi/pi-coding-agent/slash-commands/helpers/active-oauth-account")).toBe(true);
 		// Directory index modules stay excluded: `./x/*` must not serve `x/y`
 		// from `y/index.ts`, which Node would not resolve either.
-		expect(keys.has("@oh-my-pi/pi-coding-agent/modes/theme/defaults/index")).toBe(false);
+		expect(bundledModuleKeys.has("@oh-my-pi/pi-coding-agent/modes/theme/defaults/index")).toBe(false);
 	});
 });

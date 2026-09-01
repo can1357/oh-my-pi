@@ -4,6 +4,7 @@ import {
 	getActiveClients,
 	getActiveOrPendingClient,
 	getOrCreateClient,
+	isRustAnalyzerClient,
 	type LspServerStatus,
 	notifySaved,
 	sendNotification,
@@ -254,25 +255,46 @@ export function isMethodNotFoundError(err: unknown): boolean {
 	);
 }
 
+/**
+ * Build the params for the generic `workspace/didChangeConfiguration` reload.
+ *
+ * The handshake in `client.ts` pushes `{ settings: config.settings ?? {} }` right
+ * after `initialized`, so a reload has to echo those same settings back. A bare
+ * `{}` is well-formed LSP, but it means "the configuration is now empty" — the
+ * opposite of a refresh. Servers that key behaviour off their configuration
+ * (formatter options, analysis toggles, per-workspace overrides) silently drop it
+ * and serve the rest of the session on defaults, so `lsp reload` ends up erasing
+ * the configured settings instead of re-applying them (issue #8383).
+ */
+export function reloadConfigurationParams(config: ServerConfig): { settings: Record<string, unknown> } {
+	return { settings: config.settings ?? {} };
+}
+
 export async function reloadServer(client: LspClient, serverName: string, signal?: AbortSignal): Promise<string> {
 	throwIfAborted(signal);
-	// rust-analyzer exposes a real reload request. Every other server rejects it
-	// with method-not-found — that alone justifies the generic fallback. A caller
-	// cancel or tool timeout must propagate, never be mistaken for an unsupported
-	// method and swallowed into a bogus "Restarted" (issue #6369).
-	try {
-		await sendRequest(client, "rust-analyzer/reloadWorkspace", null, signal);
-		return `Reloaded ${serverName}`;
-	} catch (err) {
-		throwIfAborted(signal);
-		if (!isMethodNotFoundError(err)) throw err;
-		// Method not supported — fall through to the generic reload.
+	// rust-analyzer exposes a real reload request. Only rust-analyzer implements
+	// it, so gate the request on the binary (or registered name) rather than
+	// probing every server: some servers (Roslyn) crash the whole process on an
+	// unknown method instead of replying with method-not-found — killing the
+	// server `lsp reload` was meant to refresh (issue #8571, dotnet/roslyn#84890).
+	// A caller cancel or tool timeout must propagate, never be mistaken for an
+	// unsupported method and swallowed into a bogus "Restarted" (issue #6369).
+	if (isRustAnalyzerClient(client) || serverName === "rust-analyzer") {
+		try {
+			await sendRequest(client, "rust-analyzer/reloadWorkspace", undefined, signal);
+			return `Reloaded ${serverName}`;
+		} catch (err) {
+			throwIfAborted(signal);
+			if (!isMethodNotFoundError(err)) throw err;
+			// Method not supported — fall through to the generic reload.
+		}
 	}
 	// workspace/didChangeConfiguration is a notification per spec; sending it
 	// as a request hangs until the tool deadline on servers that route it to
 	// the notification handler and never respond.
 	try {
-		await sendNotification(client, "workspace/didChangeConfiguration", { settings: {} }, signal);
+		const params = reloadConfigurationParams(client.config);
+		await sendNotification(client, "workspace/didChangeConfiguration", params, signal);
 		return `Reloaded ${serverName}`;
 	} catch {
 		throwIfAborted(signal);

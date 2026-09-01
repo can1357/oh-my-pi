@@ -1,11 +1,12 @@
-import { describe, expect, it, spyOn } from "bun:test";
+import { beforeAll, describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { type Skill as CapabilitySkill, skillCapability } from "@oh-my-pi/pi-coding-agent/capability/skill";
 import { getCapability } from "@oh-my-pi/pi-coding-agent/discovery";
-import { getWslWindowsHomeCandidate } from "@oh-my-pi/pi-coding-agent/discovery/agents";
+import { getWslWindowsHomeCandidate, runHostProbe } from "@oh-my-pi/pi-coding-agent/discovery/agents";
 import {
+	type LoadSkillsResult,
 	loadSkills,
 	loadSkillsFromDir,
 	parseSkillInvocation,
@@ -46,8 +47,13 @@ const DISABLE_ALL_BUILTIN_SKILLS = {
 
 describe("skills", () => {
 	describe("loadSkillsFromDir", () => {
-		const loadFixtureRoot = () => loadSkillsFromDir({ dir: fixturesDir, source: "test" });
+		let fixtureRoot: LoadSkillsResult;
 
+		beforeAll(async () => {
+			fixtureRoot = await loadSkillsFromDir({ dir: fixturesDir, source: "test" });
+		});
+
+		const loadFixtureRoot = async () => fixtureRoot;
 		it("should load a valid skill from a skills root", async () => {
 			const { skills, warnings } = await loadFixtureRoot();
 			const validSkill = skills.find(skill => skill.name === "valid-skill");
@@ -157,15 +163,23 @@ describe("skills", () => {
 	});
 
 	describe("loadSkills with options", () => {
+		let customDirectorySkills: LoadSkillsResult;
+
+		beforeAll(async () => {
+			customDirectorySkills = await loadSkills({
+				...DISABLE_ALL_BUILTIN_SKILLS,
+				customDirectories: [fixturesDir],
+			});
+		});
 		it("should load from customDirectories only when built-ins disabled", async () => {
-			const { skills } = await loadSkills({ ...DISABLE_ALL_BUILTIN_SKILLS, customDirectories: [fixturesDir] });
+			const { skills } = customDirectorySkills;
 			expect(skills.length).toBeGreaterThan(0);
 			// Custom directory skills have source "custom:user"
 			expect(skills.every(s => s.source.startsWith("custom"))).toBe(true);
 		});
 
 		it("should return customDirectory skills sorted by name (case-insensitive)", async () => {
-			const { skills } = await loadSkills({ ...DISABLE_ALL_BUILTIN_SKILLS, customDirectories: [fixturesDir] });
+			const { skills } = customDirectorySkills;
 
 			expect(skills.map(s => s.name)).toEqual(expectedFixtureSkillOrder);
 		});
@@ -296,6 +310,24 @@ describe("skills", () => {
 			});
 
 			expect(resolved).toBe("/mnt/c/Users/alice");
+		});
+
+		it("kills a host probe that never exits instead of blocking startup (#8402)", () => {
+			// Integration test against real OS timer behavior: the contract is that
+			// runHostProbe's spawnSync `timeout` actually kills a genuinely blocked
+			// child. Injecting a short deadline preserves that native lifecycle
+			// coverage without paying the production discovery budget.
+			const start = performance.now();
+			const result = runHostProbe([process.execPath, "-e", "await Bun.sleep(60_000)"], 25);
+			const elapsed = performance.now() - start;
+			expect(result).toBeUndefined();
+			// Loose bound proves the probe returned via its timeout, not the child.
+			expect(elapsed).toBeLessThan(1_000);
+		});
+
+		it("returns trimmed stdout for a host probe that succeeds (#8402)", () => {
+			const result = runHostProbe([process.execPath, "-e", "process.stdout.write('  host-home  ')"]);
+			expect(result).toBe("host-home");
 		});
 
 		it("respects an explicit enableAgentsUser: false (#2401)", async () => {

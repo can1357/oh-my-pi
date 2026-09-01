@@ -1,0 +1,48 @@
+// Provider-wire compat for "xai-oauth"; regenerated from the frozen census using deployment contract selectors.
+
+provider "xai-oauth" {
+	// Replaces the provider-keyed prompt-cache session-header baseline.
+	prompt-cache-session-header "x-grok-conv-id"
+	// SuperGrok shares the paid validator: leftover root anyOf/oneOf tool
+	// schemas 400; replaces the provider check in the OpenAI request builders.
+	reject-root-object-union #true
+	class "xai" {
+		family "grok" {
+			// SuperGrok shares the paid /v1/responses dialect: encrypted reasoning
+			// is requested and replayed, and history keeps native reasoning items.
+			filter-reasoning-history #false
+			include-encrypted-reasoning #true
+			reasoning-effort-map {
+				minimal "low"
+				xhigh "high"
+				max "high"
+			}
+			supports-image-detail-original #false
+			supports-reasoning-summary #false
+			thinking-mode "effort"
+			revision ">=0.1 <4.3" {
+				omit-reasoning-effort #true
+			}
+			revision ">=4.3 <4.20" {
+				omit-reasoning-effort #false
+				supports-reasoning-effort #true
+			}
+		}
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "*reasoning" "grok-build" {
+		omit-reasoning-effort #true
+		supports-reasoning-effort #false
+	}
+	// xhigh-capable SKUs keep xhigh unmapped.
+	models "grok-4.6*" "grok-4.20-multi-agent*" priority=1 {
+		reasoning-effort-map {
+			minimal "low"
+		}
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "grok-4.20-multi-agent-0309" {
+		omit-reasoning-effort #false
+		supports-reasoning-effort #true
+	}
+}

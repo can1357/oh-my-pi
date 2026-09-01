@@ -4,7 +4,8 @@
  * Uses brush-core via native bindings for shell execution.
  */
 import { ExponentialYield } from "@oh-my-pi/pi-agent-core/utils/yield";
-import { type MinimizerOptions, Shell, type ShellRunResult } from "@oh-my-pi/pi-natives";
+import { type MinimizerOptions, PtySession, Shell, type ShellRunResult } from "@oh-my-pi/pi-natives";
+import { $env } from "@oh-my-pi/pi-utils/env";
 import { isCmdShell, isExecutable, type ShellConfig } from "@oh-my-pi/pi-utils/procmgr";
 import { Settings, type ShellMinimizerSettings } from "../config/settings";
 import { OutputSink } from "../session/streaming-output";
@@ -26,6 +27,8 @@ export interface BashExecutorOptions {
 	env?: Record<string, string>;
 	/** Run through the configured user shell instead of brush parsing directly. */
 	useUserShell?: boolean;
+	/** Run supported user shells (zsh/fish) on a headless PTY; requires `useUserShell`. */
+	pty?: BashPtyOptions;
 	/** Artifact path/id for full output storage */
 	artifactPath?: string;
 	artifactId?: string;
@@ -40,6 +43,14 @@ export interface BashExecutorOptions {
 		originalText: string,
 		info: { filter: string; inputBytes: number; outputBytes: number },
 	) => Promise<string | undefined>;
+}
+
+/** Viewport + raw-output callback enabling the user-shell PTY path (`!` hotkey). */
+export interface BashPtyOptions {
+	cols: number;
+	rows: number;
+	/** Receives raw PTY bytes (ANSI intact) for virtual-terminal rendering. */
+	onChunk: (chunk: string) => void;
 }
 
 export interface BashResult {
@@ -340,6 +351,84 @@ function resolveUserShellConfig(settings: Settings, baseConfig: ShellConfig): Sh
 	};
 }
 
+/**
+ * Env for the user-shell PTY path: keep the non-interactive guards (pagers,
+ * editors, credential prompts) but restore color — the PTY makes stdout a
+ * TTY, so TERM/NO_COLOR/CI are all that keep tools monochrome.
+ */
+function buildUserShellPtyEnv(
+	shellEnv: Record<string, string>,
+	commandEnv: Record<string, string>,
+): Record<string, string> {
+	const env: Record<string, string> = { ...shellEnv, ...commandEnv, TERM: "xterm-256color" };
+	delete env.NO_COLOR;
+	delete env.CI;
+	return env;
+}
+
+/**
+ * Run a user-shell command on a headless PTY. Interactive zsh/fish startup
+ * (zle, job control, gitstatus) requires a real TTY — piping through the
+ * embedded shell produces `can't change option: zle` noise and colorless
+ * output. Raw bytes stream to `pty.onChunk` for virtual-terminal rendering;
+ * the sink keeps the sanitized capture for the transcript and the model.
+ */
+async function executeUserShellPty(run: {
+	shell: string;
+	args: string[];
+	command: string;
+	cwd: string | undefined;
+	env: Record<string, string>;
+	pty: BashPtyOptions;
+	timeoutMs: number | undefined;
+	signal: AbortSignal | undefined;
+	sink: OutputSink;
+}): Promise<BashResult> {
+	const session = new PtySession();
+	const result = await session.startArgv(
+		{
+			application: run.shell,
+			args: [...ensureInteractiveShellArgs(run.shell, run.args), run.command],
+			cwd: run.cwd,
+			env: run.env,
+			timeoutMs: run.timeoutMs,
+			signal: run.signal,
+			cols: run.pty.cols,
+			rows: run.pty.rows,
+		},
+		(err, chunk) => {
+			if (err || !chunk) return;
+			run.pty.onChunk(chunk);
+			// CRLF → LF for the capture; the sink strips ANSI itself.
+			run.sink.push(chunk.replace(/\r\n?/gu, "\n"));
+		},
+	);
+	if (result.timedOut) {
+		return {
+			exitCode: undefined,
+			cancelled: true,
+			timedOut: true,
+			...(await run.sink.dump(
+				run.timeoutMs !== undefined
+					? `Command timed out after ${Math.round(run.timeoutMs / 1000)} seconds`
+					: "Command timed out",
+			)),
+		};
+	}
+	if (result.cancelled) {
+		return {
+			exitCode: undefined,
+			cancelled: true,
+			...(await run.sink.dump("Command cancelled")),
+		};
+	}
+	return {
+		exitCode: result.exitCode,
+		cancelled: false,
+		...(await run.sink.dump()),
+	};
+}
+
 export async function executeBash(command: string, options?: BashExecutorOptions): Promise<BashResult> {
 	const settings = await Settings.init();
 	const baseShellConfig = settings.getShellConfig();
@@ -347,6 +436,18 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 		options?.useUserShell === true ? resolveUserShellConfig(settings, baseShellConfig) : baseShellConfig;
 	const { shell, args, env: shellEnv, prefix } = shellConfig;
 	const bashShell = isBashShell(shell);
+	// `!` hotkey commands on zsh/fish run in a real PTY: interactive shell
+	// startup (zle, job control, gitstatus) needs a TTY, and tools only emit
+	// color when stdout is one. bash keeps the snapshot + embedded-shell path;
+	// `cd` keeps the persistent shell so the session cwd can follow it.
+	const ptyRequest = options?.pty;
+	const usePty =
+		ptyRequest !== undefined &&
+		options?.useUserShell === true &&
+		!bashShell &&
+		supportsAutoUserShell(shell) &&
+		$env.PI_NO_PTY !== "1" &&
+		!isPersistentShellCdCommand(command);
 	const snapshotPath = bashShell ? await getOrCreateSnapshot(shell, shellEnv) : null;
 
 	const minimizer = buildMinimizerOptions(settings.getGroup("shellMinimizer"));
@@ -376,12 +477,12 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 
 	// Create output sink for truncation and artifact handling
 	const sink = new OutputSink({
-		onChunk: options?.onChunk,
+		onChunk: usePty ? undefined : options?.onChunk,
 		artifactPath: options?.artifactPath,
 		artifactId: options?.artifactId,
 		headBytes: resolveOutputSinkHeadBytes(settings),
 		maxColumns: resolveOutputMaxColumns(settings),
-		chunkThrottleMs: options?.onChunk ? (options.chunkThrottleMs ?? 50) : 0,
+		chunkThrottleMs: !usePty && options?.onChunk ? (options.chunkThrottleMs ?? 50) : 0,
 	});
 
 	// sink.push() is synchronous — buffer management, counters, and onChunk
@@ -398,6 +499,25 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 			cancelled: true,
 			...(await sink.dump("Command cancelled")),
 		};
+	}
+
+	if (usePty && ptyRequest) {
+		const requestedMs = options?.timeout;
+		try {
+			return await executeUserShellPty({
+				shell,
+				args,
+				command: preflight.command,
+				cwd: commandCwd,
+				env: buildUserShellPtyEnv(shellEnv, commandEnv),
+				pty: ptyRequest,
+				timeoutMs: requestedMs === 0 ? undefined : Math.max(1_000, requestedMs ?? 300_000),
+				signal: options?.signal,
+				sink,
+			});
+		} finally {
+			await sink.dispose();
+		}
 	}
 
 	const shellOptions = {

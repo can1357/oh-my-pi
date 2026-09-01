@@ -198,6 +198,23 @@ describe("print mode working indicator", () => {
 		expect(stdoutOutput.join("")).toBe("final answer\n");
 	});
 
+	it("suppresses the startup-default note when the headless plan flow is already active", async () => {
+		const delayed = createDelayedSession(makeAssistantMessage("final answer"), { defaultPlanMode: true });
+		const run = runPrintMode(delayed.session, {
+			mode: "text",
+			initialMessage: "Reply with exactly: OK",
+			planYolo: true,
+		});
+
+		await delayed.promptStarted;
+		try {
+			expect(stderrOutput.join("")).not.toContain("plan.defaultOnStartup");
+		} finally {
+			delayed.resolvePrompt();
+			await run;
+		}
+	});
+
 	it("writes a text-mode working indicator before the prompt resolves and prints the final answer afterward", async () => {
 		const delayed = createDelayedSession(makeAssistantMessage("final answer"));
 		const run = runPrintMode(delayed.session, { mode: "text", initialMessage: "hello" });

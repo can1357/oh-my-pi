@@ -74,7 +74,7 @@ describe("read summary", () => {
 		const result = await tool.execute("read-summary-ts", { path: fixture });
 		const text = textOutput(result);
 		const firstLine = text.split("\n")[0];
-		expect(firstLine).toMatch(/^\[fixture\.ts#[0-9A-F]{4}\]$/);
+		expect(firstLine).toMatch(/^\[src\/fixture\.ts#[0-9A-F]{4}\]$/);
 
 		expect(text).toContain("export function alpha(value: string): string { … }");
 		expect(text).toContain("export function beta(): number { … }");

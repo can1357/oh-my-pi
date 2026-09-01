@@ -21,6 +21,7 @@
  * boot without forcing a startup reorder.
  */
 
+import { AuthBrokerError } from "@oh-my-pi/pi-ai/auth-broker";
 import {
 	type AuthBrokerClientConfig,
 	type DiscoverAuthStorageOptions,
@@ -28,6 +29,7 @@ import {
 	getAuthBrokerTokenFilePath,
 	resolveAuthBrokerConfig as resolveAuthBrokerConfigShared,
 } from "@oh-my-pi/pi-ai/auth-broker/discover";
+import { MissingApiKeyError } from "@oh-my-pi/pi-ai/error";
 import { getAgentDir } from "@oh-my-pi/pi-utils";
 import { resolveConfigValue } from "../config/resolve-config-value";
 import type { AuthStorage } from "./auth-storage";
@@ -89,4 +91,40 @@ export function discoverAuthStorage(
 		agentDir,
 		configValueResolver: resolveConfigValue,
 	});
+}
+
+/**
+ * Turn an auth-storage discovery failure raised at CLI startup into a clean,
+ * actionable message, or return `null` when the error is unrelated to the
+ * broker (so the caller rethrows it unchanged).
+ *
+ * A configured broker deliberately *replaces* the local credential store —
+ * {@link discoverAuthStorage} never silently falls back to local SQLite once
+ * `auth.broker.url` is set — so an unreachable broker is fatal. Without this,
+ * the underlying `AuthBrokerError` (or missing-token `MissingApiKeyError`)
+ * propagates as a raw uncaught exception and the CLI dies with a stack dump
+ * instead of recovery guidance (issue #8096).
+ */
+export async function describeAuthBrokerStartupError(error: unknown): Promise<string | null> {
+	if (error instanceof MissingApiKeyError) {
+		// resolveAuthBrokerConfig already built an actionable message naming the
+		// env var / config key / token-file path to set.
+		return error.message;
+	}
+	if (!(error instanceof AuthBrokerError)) return null;
+	let url: string | undefined;
+	try {
+		url = (await resolveAuthBrokerConfig())?.url;
+	} catch {
+		// Config resolution itself failed (e.g. token vanished); fall back to a
+		// URL-less message rather than masking the original broker failure.
+	}
+	const target = url ? ` at ${url}` : "";
+	return (
+		`Auth broker${target} is unreachable (${error.message}). ` +
+		"omp is configured to use this broker for credentials and will not fall back to local credentials automatically.\n" +
+		"Start the broker with `omp auth-broker serve`, or disable it with " +
+		"`omp config reset auth.broker.url` and `omp config reset auth.broker.token` " +
+		"(or unset OMP_AUTH_BROKER_URL / OMP_AUTH_BROKER_TOKEN)."
+	);
 }

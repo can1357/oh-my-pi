@@ -15,7 +15,7 @@ import {
 	type ModelHubOptions,
 	resetProviderAutoRefreshGuard,
 } from "@oh-my-pi/pi-coding-agent/modes/components/model-hub";
-import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { getThemeByName, setThemeInstance, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { AUTO_THINKING } from "@oh-my-pi/pi-coding-agent/thinking";
 import type { TUI } from "@oh-my-pi/pi-tui";
 
@@ -92,12 +92,13 @@ function createHub(options: {
 	registry?: RegistryOverrides;
 	hub?: ModelHubOptions;
 	callbacks?: Partial<ModelHubCallbacks>;
+	terminalRows?: number;
 }): HubHarness {
 	installTestTheme();
 	const modelsFn = typeof options.models === "function" ? options.models : () => options.models as Model[];
 	const settings = options.settings ?? Settings.isolated({});
 	const registry = makeRegistry(modelsFn, options.registry);
-	const ui = { requestRender: vi.fn(), terminal: { rows: 40 } } as unknown as TUI;
+	const ui = { requestRender: vi.fn(), terminal: { rows: options.terminalRows ?? 40 } } as unknown as TUI;
 	const onAssign = vi.fn();
 	const onUnassign = vi.fn();
 	const onLoginRequest = vi.fn();
@@ -280,9 +281,68 @@ describe("ModelHub", () => {
 			installTestTheme();
 
 			for (const ch of "target") hub.handleInput(ch);
+			hub.handleInput(LEFT); // switch focus to sidebar
 			hub.handleInput(UP); // skips Roles → wraps to prov-a
 			expect(normalize(hub.render(220))).toContain("prov-a ·");
 			expect(footerLine(hub.render(220))).not.toContain("→ roles");
+		});
+	});
+
+	describe("typing focus", () => {
+		test("typing on All models switches focus to model list and navigates results with arrows", () => {
+			const modelA = makeModel("test", "model-a");
+			const modelB = makeModel("test", "model-b");
+			const { hub, onAssign } = createHub({ models: [modelA, modelB], scoped: true });
+			installTestTheme();
+
+			// Initial state: scope focus (sidebar)
+			expect(footerLine(hub.render(220))).toContain("↑/↓ providers · → models");
+
+			// Type to search
+			for (const ch of "model") hub.handleInput(ch);
+
+			// Focus is now on the model list
+			expect(footerLine(hub.render(220))).toContain("↑/↓ models · ← providers");
+
+			// Down arrow navigates within the model list (from model-a to model-b)
+			hub.handleInput(DOWN);
+			hub.handleInput("\n"); // open role strip for model-b
+			expect(footerLine(hub.render(220))).toContain("model-b →");
+
+			hub.handleInput("\n"); // assign to default
+			expect(onAssign.mock.calls[0]?.[0]).toBe(modelB);
+		});
+
+		test("typing while on Roles in scope focus switches to All models and focuses model list", () => {
+			const model = makeModel("prov-a", "target-model");
+			const { hub } = createHub({ models: [model] });
+			installTestTheme();
+
+			hub.handleInput(UP); // All models → Roles (scope focus)
+			expect(footerLine(hub.render(220))).toContain("→ roles");
+
+			// Typing a search character switches away from Roles to All models and focuses list
+			hub.handleInput("t");
+			expect(normalize(hub.render(220))).toContain("All available models");
+			expect(footerLine(hub.render(220))).toContain("↑/↓ models · ← providers");
+		});
+
+		test("typing while on a locked provider in scope focus switches to All models and focuses model list", () => {
+			const model = makeModel("anthropic", "claude-locked-test");
+			const { hub } = createHub({
+				models: [model],
+				registry: { getAvailable: () => [] },
+			});
+			installTestTheme();
+
+			hub.handleInput(DOWN); // All models → locked anthropic
+			expect(normalize(hub.render(220))).toContain("anthropic has no credentials configured");
+			expect(footerLine(hub.render(220))).toContain("Enter log in");
+
+			// Typing a search character switches to All models and focuses list
+			hub.handleInput("t");
+			expect(normalize(hub.render(220))).toContain("All available models");
+			expect(footerLine(hub.render(220))).toContain("↑/↓ models · ← providers");
 		});
 	});
 
@@ -327,6 +387,23 @@ describe("ModelHub", () => {
 			expect(previewText.indexOf("smol")).toBeGreaterThan(-1);
 			expect(previewText.indexOf("smol")).toBeLessThan(previewText.indexOf("default"));
 			expect(previewText.indexOf("default")).toBeLessThan(previewText.indexOf("slow"));
+		});
+
+		test("separates the quick-cycle icon from its ordinal", () => {
+			const model = makeModel("test", "cycle-model");
+			const settings = Settings.isolated({
+				cycleOrder: ["default"],
+				modelRoles: { default: `${model.provider}/${model.id}` },
+			});
+			const { hub } = createHub({ models: [model], scoped: true, settings });
+
+			hub.handleInput(UP); // All models → Roles.
+			const defaultRow = hub
+				.render(220)
+				.map(line => stripVTControlCharacters(line))
+				.find(line => line.includes("DEFAULT"));
+
+			expect(defaultRow).toContain(`${theme.icon.loop} 1`);
 		});
 
 		test("the + New role row names a custom role and jumps into assigning it", () => {
@@ -709,6 +786,35 @@ describe("ModelHub", () => {
 			expect(onFallbackChainChange).toHaveBeenLastCalledWith("default", ["test/model-b"]);
 		});
 
+		test("windows the roles list so model-keyed chains past the panel height stay reachable", () => {
+			const settings = Settings.isolated({
+				// Model-keyed chains sort alphabetically; the unique tail key lands last.
+				"retry.fallbackChains": {
+					"aa-provider/head-chain": ["x/y"],
+					"mm-provider/mid-chain": ["x/y"],
+					"zz-provider/tail-chain-marker": ["x/y"],
+				},
+			});
+			// A short terminal makes the built-in roles alone fill the panel, so the
+			// model-keyed chains that follow the separator land below the fold. The
+			// chain keys are not available models, so no role auto-assignment leaks
+			// their names into the visible role rows.
+			const { hub } = createHub({ models: [makeModel("test", "solo")], settings, terminalRows: 16 });
+
+			enterRolesView(hub);
+			const top = normalize(hub.render(120));
+			// The alphabetically last model-keyed chain is clipped, but the panel
+			// now advertises the hidden rows instead of dropping them silently.
+			expect(top).not.toContain("tail-chain-marker");
+			expect(top).toContain("more");
+
+			// Wrapping up from the top row lands on the trailing "+ New fallback…"
+			// row; the window scrolls to the bottom and reveals the clipped chain.
+			hub.handleInput(UP);
+			const bottom = normalize(hub.render(120));
+			expect(bottom).toContain("tail-chain-marker");
+		});
+
 		test("clicking a roles row hits the row under the pointer", () => {
 			const a = makeModel("test", "model-a");
 			const { hub } = createHub({ models: [a], scoped: true });
@@ -951,10 +1057,10 @@ describe("ModelHub", () => {
 			installTestTheme();
 
 			for (const ch of "z-ai") hub.handleInput(ch);
+			hub.handleInput(LEFT); // switch focus to sidebar
 			hub.handleInput(DOWN); // skips custom-provider (0 matches), lands on openrouter
 			expect(normalize(hub.render(220))).toContain("openrouter ·");
 		});
-
 		test("providers with matches float to the top of the sidebar while searching", () => {
 			const noMatch = makeModel("aaa-provider", "different-model");
 			const withMatch = makeModel("zzz-provider", "target-model");

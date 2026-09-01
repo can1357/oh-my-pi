@@ -2,7 +2,7 @@
 name = "pi-natives"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license = "MIT"
 authors.workspace = true
 repository.workspace = true
 
@@ -28,6 +28,7 @@ ast-grep-core.workspace = true
 base64.workspace = true
 clap.workspace = true
 globset.workspace = true
+heapless.workspace = true
 fontdue.workspace = true
 grep-matcher.workspace = true
 futures.workspace = true
@@ -38,12 +39,15 @@ html-to-markdown-rs.workspace = true
 icy_sixel.workspace = true
 ignore.workspace = true
 image = { workspace = true, features = ["bmp"] }
+resvg.workspace = true
 # Feature activation only (see workspace manifest): zune-jpeg needs `log` to compile.
 zune-jpeg.workspace = true
 inferno.workspace = true
 napi.workspace = true
 napi-derive.workspace = true
+pi-vcs.workspace = true
 parking_lot.workspace = true
+pdf-inspector.workspace = true
 phf.workspace = true
 flume.workspace = true
 pi-ast.workspace = true
@@ -59,12 +63,11 @@ serde.workspace = true
 serde_json.workspace = true
 smallvec.workspace = true
 syntect.workspace = true
-tiktoken-rs.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 toml.workspace = true
-unicode-segmentation.workspace = true
-unicode-width.workspace = true
+xutf.workspace = true
+zstd.workspace = true
 xxhash-rust.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
@@ -84,6 +87,7 @@ tempfile = "=3.27.0"
 core-graphics = "0.25"
 foreign-types = "=0.5.0"
 objc2-app-kit = "=0.3.2"
+objc2 = "=0.6.4"
 objc2-core-graphics = "=0.3.2"
 objc2-foundation = "=0.3.2"
 objc2-application-services = { version = "=0.3.2", default-features = true }
@@ -99,6 +103,8 @@ uiautomation = "=0.25.0"
 winreg.workspace = true
 
 [dev-dependencies]
+fancy-regex.workspace = true # utok scanner differential oracle
+tiktoken-rs.workspace = true # utok openai differential oracle
 xkeysym = "=0.2.1"
 
 [build-dependencies]

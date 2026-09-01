@@ -5,7 +5,7 @@ import {
 	ASIDE_MESSAGE_DISCARD,
 	type CommittableAsideMessage,
 } from "@oh-my-pi/pi-agent-core";
-import { type AsyncJob, AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async";
+import { type AsyncJob, AsyncJobManager, type AsyncJobType } from "@oh-my-pi/pi-coding-agent/async";
 import type { CustomMessage } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { YieldQueue } from "@oh-my-pi/pi-coding-agent/session/yield-queue";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
@@ -21,7 +21,7 @@ type AsyncEntry = {
 type AsyncDetails = {
 	jobs: Array<{
 		jobId: string;
-		type?: "bash" | "task";
+		type?: AsyncJobType;
 		label?: string;
 		durationMs?: number;
 	}>;
@@ -112,14 +112,6 @@ function createHarness(initialStreaming: boolean) {
 	};
 }
 
-async function waitUntil(predicate: () => boolean, message: string): Promise<void> {
-	const deadline = Date.now() + 2_000;
-	while (!predicate()) {
-		if (Date.now() >= deadline) throw new Error(message);
-		await Bun.sleep(5);
-	}
-}
-
 afterEach(async () => {
 	const manager = AsyncJobManager.instance();
 	if (manager) {
@@ -134,7 +126,7 @@ describe("async result yield queue delivery", () => {
 		const jobId = harness.manager.register("bash", "race job", async () => "inline result");
 
 		await harness.manager.waitForAll();
-		await waitUntil(() => harness.queue.has("async-result"), "Timed out waiting for staged async result");
+		expect(await harness.manager.drainDeliveries({ timeoutMs: 2_000 })).toBe(true);
 
 		const tool = new HubTool(createToolSession(harness.manager));
 		const result = await tool.execute("tool-call", { op: "wait", ids: [jobId] });

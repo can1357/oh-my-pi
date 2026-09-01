@@ -27,6 +27,8 @@ export interface PrintModeOptions {
 	initialImages?: ImageContent[];
 	/** If true, include thinking blocks in text output */
 	printThoughts?: boolean;
+	/** Whether the caller explicitly started the headless plan flow. */
+	planYolo?: boolean;
 }
 
 /** Matches the longest built-in provider request deadline while bounding tool-loop stalls. */
@@ -87,7 +89,7 @@ export function printableEvent(event: AgentSessionEvent): unknown {
  * Sends prompts to the agent and outputs the result.
  */
 export async function runPrintMode(session: AgentSession, options: PrintModeOptions): Promise<void> {
-	const { mode, messages = [], initialMessage, initialImages, printThoughts } = options;
+	const { mode, messages = [], initialMessage, initialImages, printThoughts, planYolo = false } = options;
 
 	// process.stdout.write is fire-and-forget: a large final record (e.g. a
 	// multi-MB agent_end) can be dropped when the process exits before the pipe
@@ -116,6 +118,7 @@ export async function runPrintMode(session: AgentSession, options: PrintModeOpti
 	}
 	// Set up extensions for print mode (no UI, no command context)
 	await initializeExtensions(session, {
+		mode: mode === "json" ? "json" : "print",
 		reportSendError: (action, err) => {
 			process.stderr.write(
 				`Extension ${action === "extension_send" ? "sendMessage" : "sendUserMessage"} failed: ${err.message}\n`,
@@ -138,7 +141,8 @@ export async function runPrintMode(session: AgentSession, options: PrintModeOpti
 		session.settings.get("plan.defaultOnStartup") &&
 		session.settings.get("plan.enabled") &&
 		session.sessionManager.buildSessionContext().messages.length === 0 &&
-		!session.sessionManager.getEntries().some(entry => entry.type === "mode_change");
+		!session.sessionManager.getEntries().some(entry => entry.type === "mode_change") &&
+		!planYolo;
 	if (planStartupIgnored) {
 		process.stderr.write(
 			"Note: plan.defaultOnStartup is ignored in print mode (no interactive surface to review the plan). Use --plan-yolo for a headless plan flow.\n",

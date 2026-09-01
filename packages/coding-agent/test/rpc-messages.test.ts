@@ -10,7 +10,7 @@ function message(index: number, bytes = 32 * 1024): AgentMessage {
 const snapshot: RpcMessageSnapshot = {
 	sessionId: "session-1",
 	leafId: "leaf-1",
-	messageCount: 60,
+	messageCount: 40,
 };
 
 describe("RPC message pagination", () => {

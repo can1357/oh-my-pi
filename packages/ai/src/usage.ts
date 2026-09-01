@@ -6,7 +6,7 @@
  */
 import { type } from "@oh-my-pi/omptype";
 import type { FetchImpl, Provider } from "./types";
-export type UsageUnit = "percent" | "tokens" | "requests" | "usd" | "minutes" | "bytes" | "unknown";
+export type UsageUnit = "percent" | "tokens" | "requests" | "credits" | "usd" | "minutes" | "bytes" | "unknown";
 
 export type UsageStatus = "ok" | "warning" | "exhausted" | "unknown";
 
@@ -166,24 +166,6 @@ export interface UsageHistoryQuery {
 	/** Inclusive lower bound on {@link UsageHistoryEntry.recordedAt} (epoch ms). */
 	sinceMs?: number;
 }
-/** One observed provider request cost, attributed to the credential that made it. */
-export interface UsageCostHistoryEntry {
-	/** Epoch ms the request completed. */
-	recordedAt: number;
-	provider: Provider;
-	/** Stable credential identity key (account/email/project/secret derived). */
-	accountKey: string;
-	/** Estimated request cost in USD. */
-	costUsd: number;
-}
-
-/** Filter for reading observed request costs. */
-export interface UsageCostHistoryQuery {
-	provider?: string;
-	accountKey?: string;
-	/** Inclusive lower bound on {@link UsageCostHistoryEntry.recordedAt} (epoch ms). */
-	sinceMs?: number;
-}
 
 /**
  * Aggregated request usage a client observed for one (provider, model) pair.
@@ -212,11 +194,27 @@ export interface ClientUsageReport {
 	installId: string;
 	/** Human-readable machine name for display surfaces. */
 	hostname?: string;
+	/** Application label for the process that burned the tokens (e.g. `omp`, `robomp`). */
+	app?: string;
 	entries: ObservedUsageEntry[];
+}
+
+/**
+ * Identity a client presents for usage attribution. Defaults to this
+ * process's install id / hostname / app label; the auth-gateway overrides it
+ * with the identity its caller sent so token burn lands on the originating
+ * machine and application instead of the gateway host.
+ */
+export interface ClientUsageIdentity {
+	installId: string;
+	hostname?: string;
+	app?: string;
 }
 
 /** Per-provider aggregate of one client's recorded usage. */
 export interface ClientProviderUsage {
+	/** Application label the usage was reported under; absent for legacy rows. */
+	app?: string;
 	provider: string;
 	requests: number;
 	inputTokens: number;
@@ -242,7 +240,9 @@ export interface ClientUsageSummary {
 
 // ─── Zod schemas (wire-shape validation for the broker `/v1/usage` endpoint) ─
 
-export const usageUnitSchema = type("'percent' | 'tokens' | 'requests' | 'usd' | 'minutes' | 'bytes' | 'unknown'");
+export const usageUnitSchema = type(
+	"'percent' | 'tokens' | 'requests' | 'credits' | 'usd' | 'minutes' | 'bytes' | 'unknown'",
+);
 export const usageStatusSchema = type("'ok' | 'warning' | 'exhausted' | 'unknown'");
 
 export const usageWindowSchema = type({
@@ -346,8 +346,6 @@ export interface UsageFetchContext {
 	fetch: FetchImpl;
 	logger?: UsageLogger;
 	retryWait?: (delayMs: number, signal?: AbortSignal) => Promise<void>;
-	/** Observed request-cost history for providers without upstream usage APIs. */
-	listUsageCosts?: (query?: UsageCostHistoryQuery) => UsageCostHistoryEntry[];
 }
 
 /** Provider implementation for fetching usage information. */
@@ -386,6 +384,16 @@ export interface CredentialRankingStrategy {
 	 */
 	scopeLimits?(report: UsageReport, context?: CredentialRankingContext): UsageLimit[];
 	/**
+	 * Restrict limits for the opt-in, non-destructive usage-reserve health
+	 * check ({@link AuthStorage.getModelUsageHealth}). Distinct from
+	 * {@link scopeLimits}, which gates credential-wide hard blocks: a provider
+	 * whose model/tier counters are trusted only at confirmed exhaustion for
+	 * hard-blocking can still expose them here so the reserve margin protects
+	 * the mapped quota before it hits the cap. Falls back to {@link scopeLimits}
+	 * when omitted.
+	 */
+	scopeLimitsForReserve?(report: UsageReport, context?: CredentialRankingContext): UsageLimit[];
+	/**
 	 * Return a provider-local backoff scope for the requested model. Providers
 	 * with backend-specific quotas use this so one exhausted model family does
 	 * not block unrelated families on the same OAuth credential.
@@ -406,6 +414,14 @@ export interface CredentialRankingStrategy {
 		primaryMs: number;
 		secondaryMs: number;
 	};
-	/** Optional: priority boost for specific credential states (e.g., fresh 5h ticker start). */
-	hasPriorityBoost?(primary: UsageLimit | undefined): boolean;
+	/**
+	 * Optional: priority boost for specific credential states (e.g., fresh 5h
+	 * ticker start). `primaryUncapped` is true only when the fetched report has
+	 * an applicable secondary window but no applicable primary window.
+	 */
+	hasPriorityBoost?(
+		primary: UsageLimit | undefined,
+		primaryUncapped?: boolean,
+		context?: CredentialRankingContext,
+	): boolean;
 }

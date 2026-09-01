@@ -1330,7 +1330,7 @@ mod follow {
 		use std::{
 			collections::{HashMap, hash_map::Keys},
 			fs::{File, Metadata},
-			io::{BufRead, BufReader, BufWriter, Write},
+			io::{BufRead, BufReader, Write},
 			path::{Path, PathBuf},
 		};
 		
@@ -1480,8 +1480,7 @@ mod follow {
 						self.header_printer.print(display_name.as_str(), writer);
 					}
 		
-					let mut writer = BufWriter::new(writer);
-					chunks.print(&mut writer).map_err(crate::tail::map_output_error)?;
+					chunks.print(writer).map_err(crate::tail::map_output_error)?;
 					writer.flush().map_err(crate::tail::map_output_error)?;
 		
 					self.last.replace(path.to_owned());
@@ -1565,7 +1564,7 @@ mod follow {
 		use brush_core::openfiles::OpenFile;
 		
 		use crate::{
-			host::Host,
+			host::{Host, StreamWriter},
 			tail::{
 				TailError,
 				TailResult,
@@ -1656,7 +1655,7 @@ mod follow {
 			pub files:      FileHandling,
 		
 			pub pid: platform::Pid,
-			pub stdout: OpenFile,
+			pub stdout: StreamWriter,
 			pub stderr: OpenFile,
 			pub cancel: Arc<AtomicBool>,
 		}
@@ -1668,7 +1667,7 @@ mod follow {
 				use_polling: bool,
 				files: FileHandling,
 				pid: platform::Pid,
-				stdout: OpenFile,
+				stdout: StreamWriter,
 				stderr: OpenFile,
 				cancel: Arc<AtomicBool>,
 			) -> Self {
@@ -1694,7 +1693,7 @@ mod follow {
 		
 			pub fn from(
 				settings: &Settings,
-				stdout: OpenFile,
+				stdout: StreamWriter,
 				stderr: OpenFile,
 				cancel: Arc<AtomicBool>,
 			) -> Self {
@@ -2807,7 +2806,7 @@ use std::{
 	cmp::Ordering,
 	ffi::OsString,
 	fs::File,
-	io::{self, BufReader, BufWriter, ErrorKind, Read, Seek, SeekFrom, Write},
+	io::{self, BufReader, ErrorKind, Read, Seek, SeekFrom, Write},
 	path::{Path, PathBuf},
 };
 
@@ -2875,101 +2874,109 @@ pub(crate) fn map_output_error(error: io::Error) -> TailError {
 	error.into()
 }
 
-fn rewrite_tail_argv(mut argv: Vec<OsString>) -> Result<Vec<OsString>, String> {
-	let mut has_reverse = false;
-	let mut incompatible = false;
-	let mut unsupported = None;
+/// True when `token` is an option that takes its value from the *next* argv
+/// token, so that value must never be mistaken for an obsolete `-N`/`+N` form
+/// (e.g. the `+5` in `tail -n +5 file`).
+fn consumes_separate_value(token: &str) -> bool {
+	if let Some(long) = token.strip_prefix("--") {
+		if long.is_empty() || long.contains('=') {
+			return false;
+		}
+		// clap infers unambiguous long-option prefixes; `--follow` requires
+		// `=` for its value and never consumes the next token.
+		return ["lines", "bytes", "pid", "sleep-interval", "max-unchanged-stats"]
+			.iter()
+			.any(|name| name.starts_with(long));
+	}
+	let Some(cluster) = token.strip_prefix('-') else {
+		return false;
+	};
+	let mut chars = cluster.chars();
+	while let Some(c) = chars.next() {
+		match c {
+			// Value-taking shorts: a trailing `-n`/`-c`/`-s` consumes the next
+			// token; anything after them in the cluster is an attached value.
+			'n' | 'c' | 's' => return chars.next().is_none(),
+			'q' | 'v' | 'z' | 'f' | 'F' | 'r' | 'b' => {},
+			_ => return false,
+		}
+	}
+	false
+}
 
-	for arg in argv.iter().skip(1) {
+/// Rewrites every obsolete `-N[bcl][f]` / `+N[bcl][f]` token (before `--`)
+/// into modern options, wherever it appears among flags and operands: GNU/BSD
+/// accept `tail -20 f1 f2`, `tail -f -5 file`, and `tail -5 -q file`.
+fn rewrite_tail_argv(argv: Vec<OsString>) -> Result<Vec<OsString>, String> {
+	let mut rewritten = Vec::with_capacity(argv.len() + 2);
+	let mut iter = argv.into_iter();
+	rewritten.extend(iter.next());
+	let mut follow = false;
+	let mut has_operand = false;
+	let mut skip_value = false;
+	let mut seen_ddash = false;
+	for arg in iter {
+		if skip_value {
+			skip_value = false;
+			rewritten.push(arg);
+			continue;
+		}
+		if seen_ddash {
+			has_operand = true;
+			rewritten.push(arg);
+			continue;
+		}
 		let token = arg.to_string_lossy();
 		if token == "--" {
-			break;
-		}
-		let Some(cluster) = token.strip_prefix('-') else {
-			continue;
-		};
-		if cluster.is_empty() {
+			seen_ddash = true;
+			rewritten.push(arg);
 			continue;
 		}
-		if cluster.starts_with('-') {
-			if token == "--reverse" {
-				has_reverse = true;
-			} else {
-				unsupported = Some(token.into_owned());
+		let bytes = token.as_bytes();
+		// `+…` is always a candidate (`+10`, `+f`); `-…` only with a leading
+		// digit (`-5`, `-20f`) so options like `-n` stay untouched.
+		let candidate =
+			bytes.first() == Some(&b'+') || matches!(bytes, [b'-', b'0'..=b'9', ..]);
+		if candidate {
+			match parse::parse_obsolete(&arg) {
+				Some(Ok(obsolete)) => {
+					follow |= obsolete.follow;
+					rewritten.push(OsString::from(if obsolete.lines { "-n" } else { "-c" }));
+					rewritten.push(OsString::from(format!(
+						"{}{}",
+						if obsolete.plus { "+" } else { "" },
+						obsolete.num
+					)));
+					continue;
+				},
+				Some(Err(parse::ParseError::Context)) => {
+					return Err(format!(
+						"option used in invalid context -- {}",
+						token.chars().nth(1).unwrap_or_default()
+					));
+				},
+				Some(Err(parse::ParseError::InvalidEncoding)) => {
+					return Err(format!("bad argument encoding: {}", arg.quote()));
+				},
+				None => {},
 			}
-			continue;
 		}
-		for flag in cluster.chars() {
-			match flag {
-				'r' => has_reverse = true,
-				'n' | 'c' | 'b' | 'f' => incompatible = true,
-				_ => unsupported = Some(format!("-{flag}")),
-			}
+		if bytes.len() > 1 && bytes[0] == b'-' {
+			skip_value = consumes_separate_value(&token);
+		} else {
+			has_operand = true;
 		}
+		rewritten.push(arg);
 	}
-
-	if has_reverse && incompatible {
-		return Err(
-			"-r with -n, -c, -b, or -f is not supported by this builtin; pipe through tac"
-				.to_owned(),
+	if follow {
+		// Obsolete `f` follows by name when a file operand is present,
+		// matching GNU; insert up front so an explicit later -f/-F wins.
+		rewritten.insert(
+			1,
+			OsString::from(if has_operand { "--follow=name" } else { "--follow=descriptor" }),
 		);
 	}
-	if has_reverse {
-		if let Some(option) = unsupported {
-			return Err(format!(
-				"-r with {option} is not supported by this builtin; pipe through tac"
-			));
-		}
-		return Ok(argv);
-	}
-
-	if argv.len() != 2 && argv.len() != 3 {
-		return Ok(argv);
-	}
-	let clap_ok = args::uu_app()
-		.try_get_matches_from(argv.clone())
-		.is_ok_and(|matches| Settings::from(&matches).is_ok());
-	let obsolete_token = argv[1].clone();
-	let force_obsolete_blocks = obsolete_token
-		.to_string_lossy()
-		.strip_prefix('-')
-		.is_some_and(|cluster| cluster.contains('b'));
-	if clap_ok
-		&& !force_obsolete_blocks
-		&& !obsolete_token.to_string_lossy().starts_with('+')
-	{
-		return Ok(argv);
-	}
-	match parse::parse_obsolete(&obsolete_token) {
-		Some(Ok(obsolete)) => {
-			let mut rewritten = vec![argv.remove(0)];
-			if obsolete.follow {
-				rewritten.push(OsString::from(if argv.len() > 1 {
-					"--follow=name"
-				} else {
-					"--follow=descriptor"
-				}));
-			}
-			rewritten.push(OsString::from(if obsolete.lines { "-n" } else { "-c" }));
-			rewritten.push(OsString::from(format!(
-				"{}{}",
-				if obsolete.plus { "+" } else { "" },
-				obsolete.num
-			)));
-			if argv.len() > 1 {
-				rewritten.push(argv.remove(1));
-			}
-			Ok(rewritten)
-		},
-		Some(Err(parse::ParseError::Context)) => Err(format!(
-			"option used in invalid context -- {}",
-			obsolete_token.to_string_lossy().chars().nth(1).unwrap_or_default()
-		)),
-		Some(Err(parse::ParseError::InvalidEncoding)) => {
-			Err(format!("bad argument encoding: {}", obsolete_token.quote()))
-		},
-		None => Ok(argv),
-	}
+	Ok(rewritten)
 }
 /// Parsed `tail` invocation.
 pub(crate) struct Tail {
@@ -2986,24 +2993,7 @@ impl Utility for Tail {
 
 	fn run(self, host: &mut Host) -> i32 {
 		if self.matches.get_flag(args::options::REVERSE) {
-			if self.matches.contains_id(args::options::LINES)
-				|| self.matches.contains_id(args::options::BYTES)
-				|| self.matches.get_flag(args::options::BLOCKS)
-				|| self.matches.contains_id(args::options::FOLLOW)
-				|| self.matches.get_flag(args::options::FOLLOW_RETRY)
-			{
-				let _ = writeln!(
-					host.stderr,
-					"tail: -r with -n, -c, -b, or -f is not supported by this builtin; pipe through tac"
-				);
-				return 1;
-			}
-
-			let mut argv = vec![OsString::from("tac"), OsString::from("--")];
-			if let Some(files) = self.matches.get_many::<OsString>(args::options::ARG_FILES) {
-				argv.extend(files.cloned());
-			}
-			return crate::tac::run_argv(argv, host);
+			return run_reverse(&self.matches, host);
 		}
 		let mut settings = match Settings::from(&self.matches) {
 			Ok(settings) => settings,
@@ -3032,6 +3022,155 @@ pub(crate) fn tail_builtin<SE: ShellExtensions>() -> Registration<SE> {
 	util::<Tail, SE>()
 }
 
+/// BSD `tail -r`: print lines in reverse order. With `-n N` the count selects
+/// how many lines to show (last N, or from line N for `+N`) before reversing.
+fn run_reverse(matches: &ArgMatches, host: &mut Host) -> i32 {
+	if matches.contains_id(args::options::BYTES)
+		|| matches.get_flag(args::options::BLOCKS)
+		|| matches.contains_id(args::options::FOLLOW)
+		|| matches.get_flag(args::options::FOLLOW_RETRY)
+	{
+		let _ = writeln!(
+			host.stderr,
+			"tail: -r with -c, -b, or -f is not supported by this builtin; pipe through tac"
+		);
+		return 1;
+	}
+
+	let mut settings = match Settings::from(matches) {
+		Ok(settings) => settings,
+		Err(error) => {
+			let _ = writeln!(host.stderr, "tail: {error}");
+			return error.code();
+		},
+	};
+
+	// Without `-n`, `-r` reverses whole inputs; when no headers are wanted
+	// that is exactly `tac`, so keep delegating.
+	let all_lines = !matches.contains_id(args::options::LINES);
+	if all_lines && !settings.verbose {
+		let mut argv = vec![OsString::from("tac"), OsString::from("--")];
+		if let Some(files) = matches.get_many::<OsString>(args::options::ARG_FILES) {
+			argv.extend(files.cloned());
+		}
+		return crate::tac::run_argv(argv, host);
+	}
+	settings.resolve_paths(host);
+
+	match reverse_main(&settings, all_lines, host) {
+		Ok(()) => host.exit_code(),
+		Err(error) => {
+			let code = error.code();
+			if code != SIGPIPE_EXIT_CODE {
+				let _ = writeln!(host.stderr, "tail: {error}");
+			}
+			code
+		},
+	}
+}
+
+fn reverse_main(settings: &Settings, all_lines: bool, host: &mut Host) -> TailResult<()> {
+	let FilterMode::Lines(signum, sep) = &settings.mode else {
+		unreachable!("-r with -c is rejected before dispatch");
+	};
+	let (signum, sep) = (*signum, *sep);
+	let mut stdout = host.stdout_writer();
+	let mut printer = HeaderPrinter::new(settings.verbose, true);
+	for input in &settings.inputs {
+		let path = match input.kind() {
+			InputKind::File(path) if !(cfg!(unix) && path == &PathBuf::from(text::DEV_STDIN)) => {
+				Some(path)
+			},
+			InputKind::File(_) | InputKind::Stdin => None,
+		};
+		let mut data = Vec::new();
+		if let Some(path) = path {
+			if path.is_dir() {
+				host.fail(1);
+				printer.print_input(input, &mut stdout);
+				let _ = writeln!(
+					host.stderr,
+					"tail: error reading '{}': Is a directory",
+					input.display_name
+				);
+				continue;
+			}
+			match File::open(path) {
+				Ok(mut file) => {
+					printer.print_input(input, &mut stdout);
+					file.read_to_end(&mut data)?;
+				},
+				Err(error) if error.kind() == ErrorKind::NotFound => {
+					host.fail(1);
+					let _ = writeln!(
+						host.stderr,
+						"tail: cannot open '{}' for reading: No such file or directory",
+						input.display_name
+					);
+					continue;
+				},
+				Err(error) => {
+					host.fail(1);
+					let _ = writeln!(
+						host.stderr,
+						"tail: cannot open '{}' for reading: {error}",
+						input.display_name
+					);
+					continue;
+				},
+			}
+		} else {
+			printer.print_input(input, &mut stdout);
+			host.stdin.read_to_end(&mut data)?;
+		}
+		write_reversed_lines(&data, signum, sep, all_lines, &mut stdout)?;
+	}
+	stdout.flush()?;
+	Ok(())
+}
+
+/// Writes the selected lines of `data` in reverse order, BSD `tail -r` style:
+/// each line keeps its trailing delimiter, so an unterminated final line leads
+/// the output without one (matching `tac`).
+fn write_reversed_lines(
+	data: &[u8],
+	signum: Signum,
+	sep: u8,
+	all_lines: bool,
+	writer: &mut impl Write,
+) -> io::Result<()> {
+	let mut segments: Vec<&[u8]> = Vec::new();
+	let mut start = 0;
+	for end in memchr_iter(sep, data) {
+		segments.push(&data[start..=end]);
+		start = end + 1;
+	}
+	if start < data.len() {
+		segments.push(&data[start..]);
+	}
+	let keep: &[&[u8]] = if all_lines {
+		&segments[..]
+	} else {
+		match signum {
+			Signum::Negative(count) => {
+				let count = usize::try_from(count).unwrap_or(usize::MAX);
+				&segments[segments.len().saturating_sub(count)..]
+			},
+			Signum::MinusZero => &[],
+			Signum::PlusZero => &segments[..],
+			Signum::Positive(count) => {
+				// GNU-style 1-based origin: `+1` (like `+0`) selects everything.
+				let skip = usize::try_from(count.saturating_sub(1)).unwrap_or(usize::MAX);
+				&segments[skip.min(segments.len())..]
+			},
+		}
+	};
+	for segment in keep.iter().rev() {
+		writer.write_all(segment)?;
+	}
+	writer.flush()
+}
+
 fn tail_main(settings: &Settings, host: &mut Host) -> TailResult<()> {
 	settings.check_warnings(&mut host.stderr);
 
@@ -3053,7 +3192,7 @@ fn uu_tail(settings: &Settings, host: &mut Host) -> TailResult<()> {
 	let mut printer = HeaderPrinter::new(settings.verbose, true);
 	let mut observer = Observer::from(
 		settings,
-		host.stdout_clone(),
+		host.stdout_writer(),
 		host.stderr_clone(),
 		host.cancel_flag(),
 	);
@@ -3080,6 +3219,7 @@ fn uu_tail(settings: &Settings, host: &mut Host) -> TailResult<()> {
 			},
 		}
 	}
+	observer.stdout.flush()?;
 
 	if settings.follow.is_some() {
 		/*
@@ -3435,16 +3575,15 @@ fn unbounded_tail<T: Read>(
 	settings: &Settings,
 	writer: &mut impl Write,
 ) -> io::Result<()> {
-	let mut writer = BufWriter::new(writer);
 	match &settings.mode {
 		FilterMode::Lines(Signum::Negative(count), sep) => {
 			let mut chunks = chunks::LinesChunkBuffer::new(*sep, *count);
 			chunks.fill(reader)?;
-			chunks.write(&mut writer)?;
+			chunks.write(&mut *writer)?;
 		},
 
 		FilterMode::Lines(Signum::PlusZero | Signum::Positive(1), _) => {
-			io::copy(reader, &mut writer)?;
+			io::copy(reader, &mut *writer)?;
 		},
 		FilterMode::Lines(Signum::Positive(count), sep) => {
 			let mut num_skip = *count - 1;
@@ -3458,22 +3597,22 @@ fn unbounded_tail<T: Read>(
 				}
 			}
 			if chunk.has_data() {
-				chunk.write_lines(&mut writer, num_skip as usize)?;
-				io::copy(reader, &mut writer)?;
+				chunk.write_lines(&mut *writer, num_skip as usize)?;
+				io::copy(reader, &mut *writer)?;
 			}
 		},
 		FilterMode::Bytes(Signum::Negative(count)) => {
 			let mut chunks = chunks::BytesChunkBuffer::new(*count);
 			chunks.fill(reader)?;
-			chunks.print(&mut writer)?;
+			chunks.print(&mut *writer)?;
 		},
 		FilterMode::Lines(Signum::MinusZero, sep) => {
 			let mut chunks = chunks::LinesChunkBuffer::new(*sep, 0);
 			chunks.fill(reader)?;
-			chunks.write(&mut writer)?;
+			chunks.write(&mut *writer)?;
 		},
 		FilterMode::Bytes(Signum::PlusZero | Signum::Positive(1)) => {
-			io::copy(reader, &mut writer)?;
+			io::copy(reader, &mut *writer)?;
 		},
 		FilterMode::Bytes(Signum::Positive(count)) => {
 			let mut num_skip = *count - 1;
@@ -3496,7 +3635,7 @@ fn unbounded_tail<T: Read>(
 				}
 			}
 
-			io::copy(reader, &mut writer)?;
+			io::copy(reader, &mut *writer)?;
 		},
 		_ => {},
 	}
@@ -3525,12 +3664,20 @@ where
 
 #[cfg(test)]
 mod tests {
-	use std::{fs, io::Cursor};
+	use std::{ffi::OsString, fs, io::Cursor};
 
 	use clap::Parser;
 
 	use super::{Tail, Utility, forwards_thru_file};
 	use crate::host::{Host, run_util};
+
+	fn rewritten(argv: &[&str]) -> Vec<String> {
+		Tail::rewrite_argv(argv.iter().map(OsString::from).collect())
+			.unwrap()
+			.into_iter()
+			.map(|arg| arg.to_str().unwrap().to_owned())
+			.collect()
+	}
 
 	#[test]
 	fn prints_last_line_from_stdin() {
@@ -3579,14 +3726,102 @@ mod tests {
 		assert_eq!(parsed.run(&mut host), 0);
 	}
 
+	// Failure mode: obsolete `-N`/`+N` was only rewritten for `argv.len()`
+	// of 2 or 3 with the token at argv[1], so multi-file and flag-interleaved
+	// invocations were clap parse errors.
 	#[test]
-	fn reverse_with_line_count_keeps_bsd_error() {
-		let (code, capture) = run_util::<Tail>(&["-r", "-n", "2"], "", "/");
+	fn obsolete_count_rewritten_at_any_position() {
+		assert_eq!(rewritten(&["tail", "-20", "f1", "f2"]), ["tail", "-n", "20", "f1", "f2"]);
+		assert_eq!(rewritten(&["tail", "-f", "-5", "f"]), ["tail", "-f", "-n", "5", "f"]);
+		assert_eq!(rewritten(&["tail", "-5", "-q", "f"]), ["tail", "-n", "5", "-q", "f"]);
+		assert_eq!(rewritten(&["tail", "+10", "f"]), ["tail", "-n", "+10", "f"]);
+		assert_eq!(rewritten(&["tail", "-5c", "f"]), ["tail", "-c", "5", "f"]);
+		// Obsolete `f` still maps to --follow=name with a file operand.
+		assert_eq!(
+			rewritten(&["tail", "-20f", "f"]),
+			["tail", "--follow=name", "-n", "20", "f"]
+		);
+		assert_eq!(rewritten(&["tail", "-20f"]), ["tail", "--follow=descriptor", "-n", "20"]);
+	}
+
+	// Failure mode: a `-N`/`+N` token that is really an option value or a
+	// post-`--` operand must never be rewritten.
+	#[test]
+	fn option_values_and_post_ddash_operands_are_not_rewritten() {
+		assert_eq!(rewritten(&["tail", "-n", "+5", "f"]), ["tail", "-n", "+5", "f"]);
+		assert_eq!(rewritten(&["tail", "-c", "-5", "f"]), ["tail", "-c", "-5", "f"]);
+		assert_eq!(rewritten(&["tail", "--lines", "-5", "f"]), ["tail", "--lines", "-5", "f"]);
+		assert_eq!(rewritten(&["tail", "--", "-5"]), ["tail", "--", "-5"]);
+	}
+
+	// Failure mode: `tail -20 f1 f2` was rejected outright; it must print the
+	// last lines of every operand with GNU headers.
+	#[test]
+	fn obsolete_count_with_multiple_files_prints_headers() {
+		let dir = tempfile::tempdir().unwrap();
+		fs::write(dir.path().join("f1"), "a\nb\n").unwrap();
+		fs::write(dir.path().join("f2"), "c\nd\n").unwrap();
+		let (code, capture) = run_util::<Tail>(&["-1", "f1", "f2"], "", dir.path());
+		assert_eq!(code, 0);
+		assert_eq!(capture.out(), "==> f1 <==\nb\n\n==> f2 <==\nd\n");
+		assert_eq!(capture.err(), "");
+	}
+
+	// Failure mode: `-r` with `-n N` was rejected; BSD tail shows the last N
+	// lines in reverse order.
+	#[test]
+	fn reverse_with_line_count_takes_last_lines_reversed() {
+		let (code, capture) = run_util::<Tail>(&["-r", "-n", "2"], "a\nb\nc\n", "/");
+		assert_eq!(code, 0);
+		assert_eq!(capture.out(), "c\nb\n");
+		assert_eq!(capture.err(), "");
+	}
+
+	// Failure mode: `-rq` was rejected; with `-q` headers stay suppressed
+	// while each file's selection is reversed independently.
+	#[test]
+	fn reverse_quiet_suppresses_headers_across_files() {
+		let dir = tempfile::tempdir().unwrap();
+		fs::write(dir.path().join("f1"), "a\nb\n").unwrap();
+		fs::write(dir.path().join("f2"), "c\nd\n").unwrap();
+		let (code, capture) = run_util::<Tail>(&["-rq", "-n", "2", "f1", "f2"], "", dir.path());
+		assert_eq!(code, 0);
+		assert_eq!(capture.out(), "b\na\nd\nc\n");
+		assert_eq!(capture.err(), "");
+	}
+
+	// Multi-file reverse keeps GNU-style headers.
+	#[test]
+	fn reverse_with_multiple_files_prints_headers() {
+		let dir = tempfile::tempdir().unwrap();
+		fs::write(dir.path().join("f1"), "a\nb\n").unwrap();
+		fs::write(dir.path().join("f2"), "c\nd\n").unwrap();
+		let (code, capture) = run_util::<Tail>(&["-r", "-n", "1", "f1", "f2"], "", dir.path());
+		assert_eq!(code, 0);
+		assert_eq!(capture.out(), "==> f1 <==\nb\n\n==> f2 <==\nd\n");
+		assert_eq!(capture.err(), "");
+	}
+
+	// Failure mode: obsolete `-N` combined with `-r` (`tail -r -5`) must feed
+	// the rewritten count into the reverse path.
+	#[test]
+	fn reverse_with_obsolete_count() {
+		let (code, capture) = run_util::<Tail>(&["-r", "-2"], "a\nb\nc\n", "/");
+		assert_eq!(code, 0);
+		assert_eq!(capture.out(), "c\nb\n");
+		assert_eq!(capture.err(), "");
+	}
+
+	// `-r` with byte/block counts stays an explicit error rather than
+	// silently diverging from BSD semantics.
+	#[test]
+	fn reverse_with_byte_count_keeps_clear_error() {
+		let (code, capture) = run_util::<Tail>(&["-r", "-c", "5"], "", "/");
 		assert_eq!(code, 1);
 		assert_eq!(capture.out(), "");
 		assert_eq!(
 			capture.err(),
-			"tail: -r with -n, -c, -b, or -f is not supported by this builtin; pipe through tac\n"
+			"tail: -r with -c, -b, or -f is not supported by this builtin; pipe through tac\n"
 		);
 	}
 

@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, test, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -17,32 +17,29 @@ import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 // out of the app.
 describe("prewalk startup degradation", () => {
 	let tempDir: string;
-	const authStoragesToClose: AuthStorage[] = [];
+	let authStorage: AuthStorage;
+	let modelRegistry: ModelRegistry;
 
-	beforeEach(() => {
+	beforeAll(async () => {
 		tempDir = path.join(os.tmpdir(), `pi-prewalk-repro-${Snowflake.next()}`);
 		fs.mkdirSync(tempDir, { recursive: true });
+		authStorage = await AuthStorage.create(path.join(tempDir, "auth.db"));
+		modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
+	});
+
+	afterAll(() => {
+		authStorage.close();
+		if (tempDir && fs.existsSync(tempDir)) removeSyncWithRetries(tempDir);
 	});
 
 	afterEach(() => {
 		vi.restoreAllMocks();
-		for (const authStorage of authStoragesToClose) authStorage.close();
-		authStoragesToClose.length = 0;
-		if (tempDir && fs.existsSync(tempDir)) removeSyncWithRetries(tempDir);
 	});
-
-	async function newRegistry(name: string): Promise<{ authStorage: AuthStorage; modelRegistry: ModelRegistry }> {
-		const authStorage = await AuthStorage.create(path.join(tempDir, `${name}.db`));
-		authStoragesToClose.push(authStorage);
-		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, `${name}.yml`));
-		return { authStorage, modelRegistry };
-	}
 
 	test("leaves prewalk unarmed instead of crashing when the target has no configured auth", async () => {
 		const settings = Settings.isolated();
 		settings.set("prewalk.enabled", true);
 		settings.setModelRole("smol", "cerebras/zai-glm-4.7");
-		const { modelRegistry } = await newRegistry("no-auth");
 		// Force the no-auth condition: hasAuth() also consults $HOME/.env via
 		// getEnvApiKey (packages/utils/src/env.ts), so a CEREBRAS_API_KEY in the
 		// runner's home .env would otherwise legitimately arm prewalk and make
@@ -60,7 +57,6 @@ describe("prewalk startup degradation", () => {
 		const settings = Settings.isolated();
 		settings.set("prewalk.enabled", true);
 		settings.setModelRole("smol", `${model.provider}/${model.id}`);
-		const { authStorage, modelRegistry } = await newRegistry("with-auth");
 		authStorage.setRuntimeApiKey(model.provider, "test-key");
 
 		const options = await buildSessionOptions(parseArgs([]), [], SessionManager.inMemory(), modelRegistry, settings);
@@ -75,7 +71,6 @@ describe("prewalk startup degradation", () => {
 		const settings = Settings.isolated();
 		settings.set("prewalk.enabled", true);
 		settings.setModelRole("smol", `${model.provider}/${model.id}`);
-		const { authStorage, modelRegistry } = await newRegistry("restoring");
 		authStorage.setRuntimeApiKey(model.provider, "test-key");
 
 		for (const args of [parseArgs(["--continue"]), parseArgs(["--resume=session.jsonl"])]) {
@@ -89,7 +84,6 @@ describe("prewalk startup degradation", () => {
 		if (!model) throw new Error("expected claude-sonnet-4-5 to be bundled");
 		const settings = Settings.isolated();
 		settings.setModelRole("smol", `${model.provider}/${model.id}`);
-		const { authStorage, modelRegistry } = await newRegistry("explicit-restore");
 		authStorage.setRuntimeApiKey(model.provider, "test-key");
 
 		const options = await buildSessionOptions(

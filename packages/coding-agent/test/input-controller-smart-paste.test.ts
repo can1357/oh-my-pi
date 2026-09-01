@@ -13,14 +13,15 @@ import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/typ
 function createContext(options?: { focused?: { pasteText(text: string): void } }) {
 	const pasteText = vi.fn();
 	const insertText = vi.fn();
+	const insertAtom = vi.fn();
 	const requestRender = vi.fn();
 	const showStatus = vi.fn();
 	const ctx = {
-		editor: { pasteText, insertText } as unknown as InteractiveModeContext["editor"],
+		editor: { pasteText, insertText, insertAtom } as unknown as InteractiveModeContext["editor"],
 		ui: { requestRender, getFocused: () => options?.focused ?? null } as unknown as InteractiveModeContext["ui"],
 		showStatus,
 	} as unknown as InteractiveModeContext;
-	return { ctx, spies: { pasteText, insertText, requestRender, showStatus } };
+	return { ctx, spies: { pasteText, insertText, insertAtom, requestRender, showStatus } };
 }
 
 describe("InputController.handleImagePaste smart-paste fallback", () => {

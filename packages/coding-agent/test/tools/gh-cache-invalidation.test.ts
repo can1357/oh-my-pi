@@ -3,17 +3,14 @@
  * detector drops cache rows for state-mutating `gh issue|pr` ops while
  * leaving unrelated commands and read-only `gh` calls alone.
  */
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import * as fs from "node:fs/promises";
-import * as os from "node:os";
-import * as path from "node:path";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import { invalidateGithubCacheForBashCommand } from "@oh-my-pi/pi-coding-agent/tools/gh-cache-invalidation";
 import {
+	clearAll,
 	getCached,
 	putCached,
 	resetForTests as resetCacheForTests,
 } from "@oh-my-pi/pi-coding-agent/tools/github-cache";
-import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 const REPO = "owner/example";
 
@@ -76,24 +73,25 @@ function seedPr(number: number, repo = REPO): void {
 	});
 }
 
-let tempDir: string;
 let originalEnv: string | undefined;
 
-beforeEach(async () => {
+beforeAll(() => {
 	originalEnv = process.env.OMP_GITHUB_CACHE_DB;
-	tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "gh-cache-inv-"));
-	process.env.OMP_GITHUB_CACHE_DB = path.join(tempDir, "github-cache.db");
+	process.env.OMP_GITHUB_CACHE_DB = ":memory:";
 	resetCacheForTests();
 });
 
-afterEach(async () => {
+beforeEach(() => {
+	clearAll();
+});
+
+afterAll(() => {
 	resetCacheForTests();
 	if (originalEnv === undefined) {
 		delete process.env.OMP_GITHUB_CACHE_DB;
 	} else {
 		process.env.OMP_GITHUB_CACHE_DB = originalEnv;
 	}
-	await removeWithRetries(tempDir);
 });
 
 describe("invalidateGithubCacheForBashCommand", () => {
@@ -113,6 +111,21 @@ describe("invalidateGithubCacheForBashCommand", () => {
 		seedPr(123, "other/repo");
 		invalidateGithubCacheForBashCommand("gh pr close https://github.com/other/repo/pull/123");
 		expect(getCached("other/repo", "pr", 123, true)).toBeNull();
+	});
+
+	it("drops the bare row for a mixed-case github.com URL", () => {
+		seedPr(6, "other/repo");
+		invalidateGithubCacheForBashCommand("gh pr close https://GitHub.com/other/repo/pull/6");
+		expect(getCached("other/repo", "pr", 6, true)).toBeNull();
+	});
+
+	it("drops the host-qualified row for an enterprise PR URL", () => {
+		seedPr(5, "ghe.example.com/other/repo");
+		seedPr(5, "other/repo");
+		invalidateGithubCacheForBashCommand("gh pr close https://ghe.example.com/other/repo/pull/5");
+		expect(getCached("ghe.example.com/other/repo", "pr", 5, true)).toBeNull();
+		// Same slug on github.com is a different repository and keeps its row.
+		expect(getCached("other/repo", "pr", 5, true)?.rendered).toBe("pr-other/repo-5");
 	});
 
 	it("drops cache when --repo is supplied separately", () => {

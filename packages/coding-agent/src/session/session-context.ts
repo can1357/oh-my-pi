@@ -7,6 +7,7 @@ import {
 	createCustomMessage,
 	INTERRUPTED_THINKING_MESSAGE_TYPE,
 	isCustomMessageContent,
+	isEmptyErrorTurn,
 	normalizeCustomMessagePayload,
 	PREWALK_PLAN_MESSAGE_TYPE,
 } from "./messages";
@@ -333,7 +334,11 @@ export function buildSessionContext(
 	const appendMessage = (entry: SessionEntry) => {
 		handleEntryResetTracking(entry);
 		if (entry.type === "message") {
-			if (!options?.transcript && entry.message.role === "assistant" && entry.message.retryRecovery) {
+			if (
+				!options?.transcript &&
+				entry.message.role === "assistant" &&
+				(entry.message.retryRecovery || isEmptyErrorTurn(entry.message))
+			) {
 				return;
 			}
 			pushMessage(entry.message);
@@ -372,11 +377,13 @@ export function buildSessionContext(
 						active ? entry.summary : SUPERSEDED_COMPACTION_SUMMARY,
 						entry.tokensBefore,
 						entry.timestamp,
-						active ? entry.shortSummary : SUPERSEDED_COMPACTION_SHORT_SUMMARY,
-						undefined,
-						undefined,
-						snapcompactHistoryBlocksForContext(snapcompactArchive, options),
-						entry.warning,
+						{
+							shortSummary: active ? entry.shortSummary : SUPERSEDED_COMPACTION_SHORT_SUMMARY,
+							blocks: snapcompactHistoryBlocksForContext(snapcompactArchive, options),
+							warning: entry.warning,
+							method: entry.method,
+							tokensAfter: entry.tokensAfter,
+						},
 					),
 				);
 			} else {
@@ -414,11 +421,14 @@ export function buildSessionContext(
 			compaction.summary,
 			compaction.tokensBefore,
 			compaction.timestamp,
-			compaction.shortSummary,
-			providerPayload,
-			undefined,
-			snapcompactHistoryBlocksForContext(snapcompactArchive, options),
-			compaction.warning,
+			{
+				shortSummary: compaction.shortSummary,
+				providerPayload,
+				blocks: snapcompactHistoryBlocksForContext(snapcompactArchive, options),
+				warning: compaction.warning,
+				method: compaction.method,
+				tokensAfter: compaction.tokensAfter,
+			},
 		);
 		// Agent context (non-transcript): summary first so the LLM sees the
 		// compacted context before recent messages.
@@ -444,6 +454,13 @@ export function buildSessionContext(
 				}
 				if (foundFirstKept) {
 					appendMessage(entry);
+				}
+			}
+		} else if (compaction.providerReplayThroughEntryId) {
+			const replayThroughIdx = path.findIndex(entry => entry.id === compaction.providerReplayThroughEntryId);
+			if (replayThroughIdx >= 0 && replayThroughIdx < compactionIdx) {
+				for (let i = replayThroughIdx + 1; i < compactionIdx; i++) {
+					appendMessage(path[i]);
 				}
 			}
 		}

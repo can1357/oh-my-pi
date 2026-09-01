@@ -10,7 +10,7 @@ import type {
 } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import { ExtensionUiController } from "@oh-my-pi/pi-coding-agent/modes/controllers/extension-ui-controller";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
-import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
+import type { InteractiveModeContext, RenderSessionContextOptions } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
 import { buildSessionContext, type SessionContext } from "@oh-my-pi/pi-coding-agent/session/session-context";
 import type { CustomMessageEntry, SessionEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
@@ -85,6 +85,7 @@ function createHarness(): Harness {
 		emit: async () => undefined,
 		getMessageRenderer: () => undefined,
 		getAssistantThinkingRenderers: () => undefined,
+		getComposerShapes: () => [],
 	};
 
 	const sessionMock = {
@@ -117,6 +118,7 @@ function createHarness(): Harness {
 		transcriptMessageComponents: new WeakMap(),
 		pendingTools: new Map(),
 		ui: { requestRender: vi.fn() },
+		resetTranscript: () => ctx.chatContainer.clear(),
 		isBackgrounded: false,
 		initialChatRendered: false,
 		statusLine: { invalidate: vi.fn() },
@@ -137,6 +139,7 @@ function createHarness(): Harness {
 		setWorkingMessage: vi.fn(),
 		setToolsExpanded: vi.fn(),
 		toolOutputExpanded: false,
+		syncComposerShape: vi.fn(),
 		hideThinkingBlock: false,
 		showError: vi.fn(),
 		editor: {
@@ -144,8 +147,13 @@ function createHarness(): Harness {
 			handleInput: vi.fn(),
 			getText: () => "",
 		},
-		renderSessionContext: (c: SessionContext, o?: { updateFooter?: boolean; populateHistory?: boolean }) =>
-			helpers.renderSessionContext(c, o),
+		renderSessionContext: (context: SessionContext, options?: RenderSessionContextOptions) =>
+			helpers.renderSessionContext(context, options),
+		renderSessionContextIncrementally: (
+			context: SessionContext,
+			options: RenderSessionContextOptions,
+			renderChunk?: () => void,
+		) => helpers.renderSessionContextIncrementally(context, options, renderChunk),
 		addMessageToChat: (m: AgentMessage) => helpers.addMessageToChat(m),
 		rebuildChatFromMessages: () => {
 			ctx.chatContainer.clear();
@@ -212,7 +220,7 @@ describe("issue #1955 — sendMessage(display:true) during session_start", () =>
 
 		// Mirror main.ts: after `mode.init()` returns, the host renders the
 		// initial transcript while preserving anything previously added to chat.
-		harness.helpers.renderInitialMessages({ preserveExistingChat: true });
+		await harness.helpers.renderInitialMessages({ preserveExistingChat: true });
 
 		const rendered = Bun.stripANSI(harness.ctx.chatContainer.render(120).join("\n"));
 		const occurrences = countOccurrences(rendered, marker);
@@ -226,7 +234,7 @@ describe("issue #1955 — sendMessage(display:true) during session_start", () =>
 
 		// Establish the initial render — the host's `renderInitialMessages`
 		// flips `initialChatRendered` so subsequent extension sends can rebuild.
-		harness.helpers.renderInitialMessages({ preserveExistingChat: true });
+		await harness.helpers.renderInitialMessages({ preserveExistingChat: true });
 
 		const actions = harness.getActions();
 		actions!.sendMessage(
@@ -242,5 +250,73 @@ describe("issue #1955 — sendMessage(display:true) during session_start", () =>
 
 		const rendered = Bun.stripANSI(harness.ctx.chatContainer.render(120).join("\n"));
 		expect(countOccurrences(rendered, marker)).toBe(1);
+	});
+
+	test("defers display rebuilds that arrive during the incremental initial replay", async () => {
+		const initialMarker = "INITIAL_ENTRY_127_END";
+		const lateMarker = "LATE_EXTENSION_MESSAGE_END";
+		const harness = createHarness();
+		for (let index = 0; index < 128; index++) {
+			harness.entries.push(
+				makeCustomEntry(index + 1, `INITIAL_ENTRY_${index}_END`, index === 0 ? null : `entry-${index}`),
+			);
+		}
+		await harness.controller.initHooksAndCustomTools();
+		const actions = harness.getActions();
+		expect(actions).toBeDefined();
+
+		const initialReplay = harness.helpers.renderInitialMessages({
+			preserveExistingChat: true,
+			clearTerminalHistory: true,
+		});
+		expect(harness.ctx.initialChatRendered).toBe(false);
+		actions!.sendMessage(
+			{
+				customType: "issue-1955-probe",
+				content: [{ type: "text", text: lateMarker }],
+				display: true,
+				attribution: "agent",
+			},
+			{ deliverAs: "nextTurn" },
+		);
+		await initialReplay;
+
+		const rendered = Bun.stripANSI(harness.ctx.chatContainer.render(120).join("\n"));
+		expect(countOccurrences(rendered, initialMarker)).toBe(1);
+		expect(countOccurrences(rendered, lateMarker)).toBe(1);
+		expect(rendered.indexOf(initialMarker)).toBeLessThan(rendered.indexOf(lateMarker));
+	});
+
+	test("defers display rebuilds that arrive during a later incremental replay", async () => {
+		const existingMarker = "EXISTING_ENTRY_127_END";
+		const lateMarker = "LATE_DURING_REPLAY_END";
+		const harness = createHarness();
+		for (let index = 0; index < 128; index++) {
+			harness.entries.push(
+				makeCustomEntry(index + 1, `EXISTING_ENTRY_${index}_END`, index === 0 ? null : `entry-${index}`),
+			);
+		}
+		await harness.controller.initHooksAndCustomTools();
+		await harness.helpers.renderInitialMessages({ clearTerminalHistory: true });
+		const actions = harness.getActions();
+		expect(actions).toBeDefined();
+
+		const replay = harness.helpers.renderInitialMessages({ clearTerminalHistory: true });
+		expect(harness.ctx.initialChatRendered).toBe(false);
+		actions!.sendMessage(
+			{
+				customType: "issue-1955-probe",
+				content: [{ type: "text", text: lateMarker }],
+				display: true,
+				attribution: "agent",
+			},
+			{ deliverAs: "nextTurn" },
+		);
+		await replay;
+
+		const rendered = Bun.stripANSI(harness.ctx.chatContainer.render(120).join("\n"));
+		expect(countOccurrences(rendered, existingMarker)).toBe(1);
+		expect(countOccurrences(rendered, lateMarker)).toBe(1);
+		expect(rendered.indexOf(existingMarker)).toBeLessThan(rendered.indexOf(lateMarker));
 	});
 });

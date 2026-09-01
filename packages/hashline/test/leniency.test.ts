@@ -82,6 +82,16 @@ describe("hashline core — verb header forms", () => {
 		expect(applyPatch(FILE, "CUT 2")).toBe("a\nc\nd\ne");
 	});
 
+	it("recovers a dangling range separator as a single-line range", () => {
+		expect(applyPatch(FILE, "PUT 2.=:\n+X")).toBe("a\nX\nc\nd\ne");
+		expect(applyPatch(FILE, "PUT 2-:\n+X")).toBe("a\nX\nc\nd\ne");
+		expect(applyPatch(FILE, "CUT 2.=")).toBe("a\nc\nd\ne");
+	});
+
+	it("still rejects a dangling separator followed by junk", () => {
+		expect(() => parsePatch("PUT 2.= junk:\n+X")).toThrow();
+	});
+
 	it("recovers top-level numbered snapshot rows as single-line replacements", () => {
 		for (const separator of [":", "|"]) {
 			const result = parsePatch(`2${separator}B\n4${separator}D`);

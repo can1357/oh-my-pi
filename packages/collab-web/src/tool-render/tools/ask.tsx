@@ -22,6 +22,8 @@ interface AskAnswer {
 	id?: string;
 	selectedOptions: string[];
 	customInput?: string;
+	/** Free-form note the user attached to the answer via the rich ask dialog. */
+	note?: string;
 	timedOut?: boolean;
 }
 
@@ -106,6 +108,7 @@ function answerOf(rec: Record<string, unknown>): AskAnswer {
 		id: str(rec.id) ?? undefined,
 		selectedOptions,
 		customInput: str(rec.customInput) ?? undefined,
+		note: str(rec.note) ?? undefined,
 		timedOut: rec.timedOut === true,
 	};
 }
@@ -185,6 +188,11 @@ function QuestionBlock({ q, answer }: { q: AskQuestion; answer: AskAnswer | unde
 			{answer?.customInput !== undefined && (
 				<Row k="✎">
 					<span className="tv-ok-text">{answer.customInput}</span>
+				</Row>
+			)}
+			{answer?.note !== undefined && (
+				<Row k="note:">
+					<span className="tv-muted">{answer.note}</span>
 				</Row>
 			)}
 			{answer && answer.selectedOptions.length === 0 && answer.customInput === undefined && (

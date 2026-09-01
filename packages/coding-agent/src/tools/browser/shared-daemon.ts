@@ -16,6 +16,7 @@ import { describeQuietly, stopQuietly, waitReady } from "../../launch/ensure";
 import { daemonRuntimeDir } from "../../launch/paths";
 import type { DaemonSnapshot } from "../../launch/protocol";
 import { throwIfAborted } from "../tool-errors";
+import { probeCdpStatus } from "./attach";
 import { resolveSharedBrowserLaunchSpec } from "./launch";
 
 /** Chrome prints this on stderr once the CDP listener is up; the broker's ready probe captures the line. */
@@ -50,13 +51,8 @@ async function probeEndpoint(wsEndpoint: string): Promise<boolean> {
 	} catch {
 		return false;
 	}
-	try {
-		const res = await fetch(`http://${host}/json/version`, { signal: AbortSignal.timeout(PROBE_TIMEOUT_MS) });
-		await res.body?.cancel();
-		return res.ok;
-	} catch {
-		return false;
-	}
+	const status = await probeCdpStatus(`http://${host}/json/version`, { timeoutMs: PROBE_TIMEOUT_MS });
+	return status !== null && status >= 200 && status < 300;
 }
 
 /**

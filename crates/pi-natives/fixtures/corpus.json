@@ -1,0 +1,20 @@
+[
+  "",
+  " ",
+  "  \t\t\n\n\r\n   ",
+  "hello world",
+  "Hello, World! It's a test. We'll see; don't worry, y'all've been warned.",
+  "The quick brown fox jumps over the lazy dog. 1234567890 12 345 6789",
+  "fn main() {\n    let x: Vec<u32> = (0..10).map(|i| i * 2).collect();\n    println!(\"{x:?}\");\n}",
+  "{\"key\": [1, 2.5, -3e8], \"nested\": {\"a\": null, \"b\": true}}",
+  "东京は日本の首都であり、世界で最も人口の多い都市圏の一つです。深度求索发布了新一代基座模型。",
+  "한국어 텍스트도 테스트합니다. 안녕하세요!",
+  "Многоязычный текст: русский, ελληνικά, עברית, العربية.",
+  "naïve café résumé — em-dash…ellipsis",
+  "naïve café",
+  "👍🏽 emoji test 👨‍👩‍👧‍👦 family, flags 🇹🇷🇯🇵, math 𝕏≈∑∫",
+  "https://example.com/path?query=value&other=%20escaped#fragment",
+  "supercalifragilisticexpialidocious supercalifragilisticexpialidocious supercalifragilisticexpialidocious supercalifragilisticexpialidocious supercalifragilisticexpialidocious supercalifragilisticexpialidocious supercalifragilisticexpialidocious supercalifragilisticexpialidocious supercalifragilisticexpialidocious supercalifragilisticexpialidocious supercalifragilisticexpialidocious supercalifragilisticexpialidocious supercalifragilisticexpialidocious supercalifragilisticexpialidocious supercalifragilisticexpialidocious supercalifragilisticexpialidocious supercalifragilisticexpialidocious supercalifragilisticexpialidocious supercalifragilisticexpialidocious supercalifragilisticexpialidocious",
+  "    indented\n\tmixed   whitespace     runs\n\n\n",
+  "CamelCaseIdentifier snake_case_name SCREAMING_SNAKE kebab-case-name"
+]

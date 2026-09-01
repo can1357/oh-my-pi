@@ -15,6 +15,9 @@ import {
 	setAgentDir,
 } from "@oh-my-pi/pi-utils";
 
+const OLDER_MTIME = new Date("2000-01-01T00:00:00.000Z");
+const NEWER_MTIME = new Date("2000-01-01T00:00:01.000Z");
+
 describe("loadEntriesFromFile", () => {
 	let tempDir: string;
 
@@ -76,9 +79,9 @@ describe("findMostRecentSession", () => {
 		const file2 = path.join(tempDir, "newer.jsonl");
 
 		fs.writeFileSync(file1, '{"type":"session","id":"old","timestamp":"2025-01-01T00:00:00Z","cwd":"/tmp"}\n');
-		// Small delay to ensure different mtime
-		await new Promise(r => setTimeout(r, 10));
+		fs.utimesSync(file1, OLDER_MTIME, OLDER_MTIME);
 		fs.writeFileSync(file2, '{"type":"session","id":"new","timestamp":"2025-01-01T00:00:00Z","cwd":"/tmp"}\n');
+		fs.utimesSync(file2, NEWER_MTIME, NEWER_MTIME);
 
 		expect(await findMostRecentSession(tempDir)).toBe(file2);
 	});
@@ -88,7 +91,6 @@ describe("findMostRecentSession", () => {
 		const valid = path.join(tempDir, "valid.jsonl");
 
 		fs.writeFileSync(invalid, '{"type":"not-session"}\n');
-		await new Promise(r => setTimeout(r, 10));
 		fs.writeFileSync(valid, '{"type":"session","id":"abc","timestamp":"2025-01-01T00:00:00Z","cwd":"/tmp"}\n');
 
 		expect(await findMostRecentSession(tempDir)).toBe(valid);
@@ -255,6 +257,10 @@ describe("SessionManager temp cwd session dirs", () => {
 
 describe("SessionManager legacy session migration persistence", () => {
 	let tempDir: string;
+	let testAgentDir: string;
+	const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
+	const originalTmuxPane = process.env.TMUX_PANE;
+	const fallbackAgentDir = path.join(getConfigRootDir(), "agent");
 
 	function makeAssistantMessage() {
 		return {
@@ -281,11 +287,28 @@ describe("SessionManager legacy session migration persistence", () => {
 	}
 
 	beforeEach(() => {
+		// Deterministic, non-TTY terminal id so the per-terminal breadcrumb
+		// (written by newSession/continueRecent) is scoped to this test and
+		// cannot leak across files in the same suite run. Without it, a real
+		// terminal id (WT_SESSION/TMUX_PANE) points continueRecent at stale
+		// breadcrumb state from earlier tests in this file.
+		process.env.TMUX_PANE = "%legacy-migration-test";
+		testAgentDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-session-manager-legacy-agent-"));
+		setAgentDir(testAgentDir);
 		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-session-manager-legacy-"));
 	});
 
 	afterEach(() => {
+		if (originalTmuxPane === undefined) delete process.env.TMUX_PANE;
+		else process.env.TMUX_PANE = originalTmuxPane;
+		if (originalAgentDir) {
+			setAgentDir(originalAgentDir);
+		} else {
+			setAgentDir(fallbackAgentDir);
+			delete process.env.PI_CODING_AGENT_DIR;
+		}
 		removeSyncWithRetries(tempDir);
+		removeSyncWithRetries(testAgentDir);
 	});
 
 	it("keeps legacy migration in memory until later persisted activity rewrites the file", async () => {
@@ -306,6 +329,7 @@ describe("SessionManager legacy session migration persistence", () => {
 				}),
 			].join("\n")}\n`,
 		);
+		fs.utimesSync(sessionFile, OLDER_MTIME, OLDER_MTIME);
 		const initialMtimeMs = fs.statSync(sessionFile).mtimeMs;
 
 		const session = await SessionManager.open(sessionFile, tempDir);
@@ -318,11 +342,9 @@ describe("SessionManager legacy session migration persistence", () => {
 		expect(migratedEntries[0]?.parentId).toBeNull();
 		expect(migratedEntries[1]?.parentId).toBe(migratedEntries[0]?.id);
 
-		await new Promise(resolve => setTimeout(resolve, 20));
 		await session.flush();
 		expect(fs.statSync(sessionFile).mtimeMs).toBe(initialMtimeMs);
 
-		await new Promise(resolve => setTimeout(resolve, 20));
 		session.appendMessage({ role: "user", content: "follow up", timestamp: Date.now() });
 		await session.flush();
 
@@ -351,10 +373,10 @@ describe("SessionManager legacy session migration persistence", () => {
 				}),
 			].join("\n")}\n`,
 		);
+		fs.utimesSync(sessionFile, OLDER_MTIME, OLDER_MTIME);
 		const initialMtimeMs = fs.statSync(sessionFile).mtimeMs;
 
 		const session = await SessionManager.open(sessionFile, tempDir);
-		await new Promise(resolve => setTimeout(resolve, 20));
 		await session.rewriteEntries();
 
 		const persistedEntries = await loadEntriesFromFile(sessionFile);
@@ -383,10 +405,10 @@ describe("SessionManager legacy session migration persistence", () => {
 				}),
 			].join("\n")}\n`,
 		);
+		fs.utimesSync(sessionFile, OLDER_MTIME, OLDER_MTIME);
 		const initialMtimeMs = fs.statSync(sessionFile).mtimeMs;
 
 		const session = await SessionManager.open(sessionFile, tempDir);
-		await new Promise(resolve => setTimeout(resolve, 20));
 		await session.ensureOnDisk();
 
 		const persistedEntries = await loadEntriesFromFile(sessionFile);
@@ -413,10 +435,18 @@ describe("SessionManager legacy session migration persistence", () => {
 		const freshSessionFile = await session.newSession();
 		expect(freshSessionFile).toBeDefined();
 		expect(fs.existsSync(freshSessionFile!)).toBe(false);
+		// Lazy new-session persistence: nothing on disk yet, so materialize the
+		// fresh session the way assistant output would (issue #5730).
+		session.appendMessage({ role: "user", content: "first message of fresh session", timestamp: Date.now() });
+		session.appendMessage(makeAssistantMessage());
+		await session.flush();
+		expect(fs.existsSync(freshSessionFile!)).toBe(true);
 
 		const resumed = await SessionManager.continueRecent(tempDir, tempDir);
 		try {
-			expect(resumed.getSessionFile()).toBe(previousSessionFile);
+			// The `/new` boundary is durable: once materialized, relaunch resumes
+			// the fresh session, not the pre-`/new` transcript.
+			expect(resumed.getSessionFile()).toBe(freshSessionFile);
 		} finally {
 			await resumed.close();
 			await session.close();

@@ -38,6 +38,7 @@ export {
 
 import type { OutputMeta } from "../tools/output-meta";
 import { formatOutputNotice } from "../tools/output-meta";
+import { titleTextFromSkillPrompt } from "./skill-title-input";
 
 export const SKILL_PROMPT_MESSAGE_TYPE = "skill-prompt";
 export const LSP_LATE_DIAGNOSTIC_MESSAGE_TYPE = "lsp-late-diagnostic";
@@ -163,6 +164,11 @@ function thinkingFromContent(content: unknown): string {
 }
 
 function titleConversationTurnFromMessage(message: AgentMessage): TitleConversationTurn | undefined {
+	if (message.role === "custom") {
+		const text = titleTextFromSkillPrompt(message);
+		if (!text) return undefined;
+		return { role: "user", text };
+	}
 	if (message.role !== "user" && message.role !== "assistant") return undefined;
 	const text = textFromContent(message.content);
 	const thinking = message.role === "assistant" ? thinkingFromContent(message.content) : undefined;
@@ -328,6 +334,9 @@ export type NormalizedCustomMessagePayload<T = unknown> = Pick<
 /** Custom message type for hidden interrupted-thinking continuity context. */
 export const INTERRUPTED_THINKING_MESSAGE_TYPE = "interrupted-thinking";
 
+/** Custom message type for the transient checkpoint-active reminder. */
+export const CHECKPOINT_ACTIVE_REMINDER_TYPE = "checkpoint-active-reminder";
+
 /** Metadata persisted with a hidden interrupted-thinking continuity message. */
 export interface InterruptedThinkingDetails {
 	interruptedAt: number;
@@ -406,11 +415,7 @@ function followedByInterruptedThinking(messages: AgentMessage[], index: number):
 	return next !== undefined && next.role === "custom" && next.customType === INTERRUPTED_THINKING_MESSAGE_TYPE;
 }
 
-/**
- * Drop the demoted trailing thinking run from an assistant message for the LLM
- * view only. The run is incomplete and unsigned, so providers reject it; the
- * continuity message that follows carries the reasoning instead.
- */
+/** Drop an incomplete trailing thinking run from an interrupted assistant in the LLM view. */
 function stripDemotedThinkingForLlm(message: AssistantMessage): AssistantMessage {
 	const demoted = demoteInterruptedThinking(message);
 	return demoted ? { ...message, content: demoted.strippedContent } : message;
@@ -1089,8 +1094,21 @@ function customMessageContentToLlmContent(content: CustomMessage["content"]): (T
 	return typeof content === "string" ? [{ type: "text", text: content }] : content;
 }
 
-function isUserInvokedSkillPrompt(message: CustomMessage): boolean {
+/** True for a `/skill:<name>` prompt the user invoked directly (attribution `user`), as opposed to an agent/autoload injection. */
+export function isUserInvokedSkillPrompt(message: CustomMessage): boolean {
 	return message.customType === SKILL_PROMPT_MESSAGE_TYPE && message.attribution === "user";
+}
+
+/**
+ * True for a custom message that initiates a user-attributed turn: a directly
+ * invoked `/skill:` prompt or a writable-collab peer's prompt. Agent redirects,
+ * reminders, and auto-continues are not turn starts.
+ */
+export function isUserTurnInitiator(message: CustomMessage): boolean {
+	return (
+		isUserInvokedSkillPrompt(message) ||
+		(message.customType === COLLAB_PROMPT_MESSAGE_TYPE && message.attribution === "user")
+	);
 }
 
 function convertImageBearingCustomMessage(message: CustomMessage | HookMessage): Message[] | undefined {
@@ -1263,12 +1281,12 @@ function convertOne(m: AgentMessage, interruptedNext: boolean): Message[] {
 			return converted ? [converted] : [];
 		}
 		case "assistant": {
-			// A user-interrupted turn keeps its trailing thinking run on the
-			// persisted/displayed message so reload and display-reset rebuilds still
-			// show it. That run is incomplete/unsigned and gets rejected on
-			// resend, so strip it here — LLM path only — when the hidden
-			// interrupted-thinking continuity message follows.
-			const source = interruptedNext ? stripDemotedThinkingForLlm(m) : m;
+			// Persisted/displayed messages retain interrupted thinking. Signed or
+			// encrypted blocks replay natively; incomplete unsigned runs are
+			// stripped whether or not they were long enough for a continuity note.
+			const userInterrupted = m.stopReason === "aborted" && isUserInterruptAbort(m);
+			const source = interruptedNext || userInterrupted ? stripDemotedThinkingForLlm(m) : m;
+			if (userInterrupted && !interruptedNext && source.content.length === 0) return [];
 			const converted = convertMessageToLlm(source);
 			return converted ? [converted] : [];
 		}

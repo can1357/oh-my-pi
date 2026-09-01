@@ -57,6 +57,14 @@ def _seed_db(settings: Settings) -> None:
         pr_number=42,
     )
     db.set_issue_classification(issue_key("octo/widget", 3), "bug")
+    release = db.upsert_release(
+        repo="octo/widget",
+        tag="v1.2.3",
+        version="1.2.3",
+        current_sha="a" * 40,
+        session_dir="/tmp/release-session",
+    )
+    db.bump_release_round(release.key, failed_sha=release.current_sha)
 
 
 def test_index_serves_dashboard_html(settings: Settings) -> None:
@@ -133,8 +141,51 @@ def test_api_status_reports_runtime_counts_and_inflight(settings: Settings) -> N
     assert issues[fix_key]["pr_number"] == 42
     assert issues[fix_key]["branch"] == "farm/abc12345/fix"
 
+    releases = {release["key"]: release for release in body["releases"]}
+    assert releases["octo/widget#v1.2.3"]["state"] == "fixing"
+    assert releases["octo/widget#v1.2.3"]["rounds"] == 1
+    assert releases["octo/widget#v1.2.3"]["current_sha"] == "a" * 40
+
     delivery_ids = {e["delivery_id"] for e in body["recent_events"]}
     assert {"d-queued", "d-skipped", "d-running"}.issubset(delivery_ids)
+
+
+def test_releases_endpoint_returns_recent_release_state(settings: Settings) -> None:
+    app = create_app(settings)
+    with TestClient(app) as client:
+        db = get_database(settings.sqlite_path)
+        row = db.upsert_release(
+            repo="octo/widget",
+            tag="v2.0.0",
+            version="2.0.0",
+            current_sha="b" * 40,
+            session_dir="/tmp/release-v2",
+        )
+        db.set_release_state(row.key, "failed", error="CI green but GitHub Release missing/draft")
+        updated_row = db.get_release(row.key)
+        assert updated_row is not None
+        resp = client.get("/releases?limit=1")
+    close_database()
+
+    assert resp.status_code == 200
+    assert resp.json() == {
+        "releases": [
+            {
+                "key": "octo/widget#v2.0.0",
+                "repo": "octo/widget",
+                "tag": "v2.0.0",
+                "version": "2.0.0",
+                "state": "failed",
+                "current_sha": "b" * 40,
+                "last_failed_sha": None,
+                "rounds": 0,
+                "last_error": "CI green but GitHub Release missing/draft",
+                "session_dir": "/tmp/release-v2",
+                "created_at": updated_row.created_at,
+                "updated_at": updated_row.updated_at,
+            }
+        ]
+    }
 
 
 def test_api_status_reports_current_issue_event_state(settings: Settings) -> None:

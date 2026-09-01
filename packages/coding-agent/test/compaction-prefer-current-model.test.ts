@@ -46,7 +46,7 @@ describe("compaction prefers the current session model over modelRoles.default",
 			throw new Error("Expected bundled test models to exist");
 		}
 
-		const settings = Settings.isolated({ "compaction.keepRecentTokens": 1, "compaction.strategy": "context-full" });
+		const settings = Settings.isolated({ "compaction.keepRecentTokens": 1, "compaction.methodOrder": ["soft"] });
 		settings.setModelRole("default", `${defaultRoleModel.provider}/${defaultRoleModel.id}`);
 
 		const promptCacheKey = "inherited-parent-cache";
@@ -110,7 +110,7 @@ describe("compaction prefers the current session model over modelRoles.default",
 			throw new Error("Expected bundled test models to exist");
 		}
 
-		const settings = Settings.isolated({ "compaction.keepRecentTokens": 1, "compaction.strategy": "context-full" });
+		const settings = Settings.isolated({ "compaction.keepRecentTokens": 1, "compaction.methodOrder": ["soft"] });
 		settings.setModelRole("smol", `${fallbackModel.provider}/${fallbackModel.id}`);
 
 		const agent = new Agent({
@@ -202,7 +202,7 @@ describe("compaction prefers the current session model over modelRoles.default",
 		session = new AgentSession({
 			agent,
 			sessionManager: SessionManager.inMemory(),
-			settings: Settings.isolated({ "compaction.keepRecentTokens": 1, "compaction.strategy": "context-full" }),
+			settings: Settings.isolated({ "compaction.keepRecentTokens": 1, "compaction.methodOrder": ["soft"] }),
 			modelRegistry,
 		});
 		session.subscribe(() => {});

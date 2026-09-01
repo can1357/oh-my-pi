@@ -94,44 +94,34 @@ describe("initTelemetryExport gating", () => {
 });
 
 describe("initTelemetryExport signals export path", () => {
-	it("registers a provider and exports spans to an OTLP/proto receiver", async () => {
-		// Run in a subprocess: initTelemetryExport() registers a process-global
-		// provider, so exercising the positive path in-process would leak that
-		// singleton into every later test. The probe stands up its own loopback
-		// receiver and exits 0 only when a protobuf trace export actually lands.
-		const probe = fileURLToPath(new URL("./otel-export-probe.ts", import.meta.url));
-		const proc = Bun.spawn([process.execPath, probe], {
-			stdin: "ignore",
-			stdout: "ignore",
-			stderr: "ignore",
-		});
-		expect(await proc.exited).toBe(0);
-	}, 20_000);
+	it("exports every OTLP/proto signal and merged resource attributes", async () => {
+		// Positive initialization registers process-global providers, so each
+		// scenario still runs in its own process. Starting the independent probes
+		// together avoids serially paying three Bun startup and exporter-flush waits.
+		const probes = [
+			["traces", "./otel-export-probe.ts"],
+			["logs and metrics", "./otel-signals-probe.ts"],
+			["resource attributes", "./otel-resource-probe.ts"],
+		] as const;
+		const results = await Promise.all(
+			probes.map(async ([name, relativePath]) => {
+				const probe = fileURLToPath(new URL(relativePath, import.meta.url));
+				const proc = Bun.spawn([process.execPath, probe], {
+					// Bun otherwise inherits the process's original native environment,
+					// including external OTEL kill-switches removed in beforeEach.
+					env: { ...process.env },
+					stdin: "ignore",
+					stdout: "ignore",
+					stderr: "ignore",
+				});
+				return [name, await proc.exited] as const;
+			}),
+		);
 
-	it("exports log records and metrics to OTLP/proto receivers", async () => {
-		// Same subprocess isolation as the trace probe: the logs/metrics probe
-		// drives the bridged logger and the agent telemetry metric hooks, then
-		// asserts protobuf POSTs landed at both /v1/logs and /v1/metrics.
-		const probe = fileURLToPath(new URL("./otel-signals-probe.ts", import.meta.url));
-		const proc = Bun.spawn([process.execPath, probe], {
-			stdin: "ignore",
-			stdout: "ignore",
-			stderr: "ignore",
+		expect(Object.fromEntries(results)).toEqual({
+			traces: 0,
+			"logs and metrics": 0,
+			"resource attributes": 0,
 		});
-		expect(await proc.exited).toBe(0);
-	}, 20_000);
-
-	it("merges OTEL_RESOURCE_ATTRIBUTES into the exported resource", async () => {
-		// Regression for #7134: the resource only carried service.name, so
-		// OTEL_RESOURCE_ATTRIBUTES entries never reached the collector. The probe
-		// asserts the merged attributes land and that OTEL_SERVICE_NAME wins
-		// service.name over an OTEL_RESOURCE_ATTRIBUTES entry.
-		const probe = fileURLToPath(new URL("./otel-resource-probe.ts", import.meta.url));
-		const proc = Bun.spawn([process.execPath, probe], {
-			stdin: "ignore",
-			stdout: "ignore",
-			stderr: "ignore",
-		});
-		expect(await proc.exited).toBe(0);
 	}, 20_000);
 });

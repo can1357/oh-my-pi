@@ -15,6 +15,10 @@ class FakeExtensionFlagSink implements ExtensionFlagSink {
 		]);
 	}
 
+	getToolNames(): readonly string[] {
+		return [];
+	}
+
 	setFlagValue(name: string, value: boolean | string): void {
 		this.#values.set(name, value);
 	}

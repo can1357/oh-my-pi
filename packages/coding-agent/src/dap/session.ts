@@ -219,6 +219,30 @@ function truncateOutput(session: DapSession, output: string): void {
 	}
 }
 
+/**
+ * Drain a `runInTerminal` debuggee's stdout into the session output buffer.
+ *
+ * `ptree.spawn` always pipes stdout and only eagerly drains stderr; the exposed
+ * stdout stream must be consumed or Bun buffers it unboundedly in this process
+ * (a chatty debuggee grows omp toward OOM). The reverse-request path has no
+ * terminal surface here, so route the child's stdout through {@link
+ * truncateOutput}: this bounds memory at `MAX_OUTPUT_BYTES` and surfaces the
+ * program's output to the agent, mirroring the adapter's own `output` events.
+ * Runs in the background for the child's lifetime; a killed child or closed pipe
+ * ends the loop quietly.
+ */
+async function drainTerminalStdout(stream: ReadableStream<Uint8Array>, session: DapSession): Promise<void> {
+	const decoder = new TextDecoder();
+	try {
+		for await (const chunk of stream) {
+			truncateOutput(session, decoder.decode(chunk, { stream: true }));
+		}
+		truncateOutput(session, decoder.decode());
+	} catch {
+		// Child killed or pipe closed mid-stream; nothing more to surface.
+	}
+}
+
 function summarizeBreakpointCount(breakpoints: Map<string, DapBreakpointRecord[]>): number {
 	let total = 0;
 	for (const entries of breakpoints.values()) {
@@ -369,6 +393,10 @@ export class DapSessionManager {
 				timeoutMs,
 			);
 			session.needsConfigurationDone = session.capabilities.supportsConfigurationDoneRequest === true;
+			if (options.adapter.attachDefaults.skipAttachRequest === true) {
+				await this.#completeConfigurationHandshake(session, signal, timeoutMs);
+				return buildSummary(session);
+			}
 			const attachArguments: DapAttachArguments = {
 				...options.adapter.attachDefaults,
 				cwd: options.cwd,
@@ -1356,6 +1384,9 @@ export class DapSessionManager {
 				},
 				detached: true,
 			});
+			// Consume the child's stdout — ptree pipes it but drains only stderr,
+			// so an unconsumed stream buffers unboundedly in this process.
+			void drainTerminalStdout(proc.stdout, session);
 			return { processId: proc.pid } satisfies DapRunInTerminalResponse;
 		});
 		client.onReverseRequest("startDebugging", async rawArgs => {
@@ -1377,7 +1408,9 @@ export class DapSessionManager {
 		});
 		client.onEvent("initialized", () => {
 			session.initializedSeen = true;
-			session.status = session.configurationDoneSent ? session.status : "configuring";
+			if (!session.configurationDoneSent && session.status === "launching") {
+				session.status = "configuring";
+			}
 		});
 		client.onEvent("stopped", body => {
 			this.#handleStoppedEvent(session, body as DapStoppedEventBody);
@@ -1458,6 +1491,9 @@ export class DapSessionManager {
 		if (!session.needsConfigurationDone) {
 			if (session.parentSessionId) {
 				await this.#applyRootBreakpointsToSession(session, signal, timeoutMs);
+			}
+			if (session.status === "launching" || session.status === "configuring") {
+				session.status = "running";
 			}
 			return;
 		}

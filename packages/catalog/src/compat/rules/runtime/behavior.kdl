@@ -1,0 +1,231 @@
+// Provider and model behavior needed before or outside exact bundled-model lookup.
+
+behavior {
+	// LiteLLM may discover ids absent from the bundled catalog. This conservative
+	// heuristic routes likely OpenAI text/reasoning ids to Responses while
+	// excluding other OpenAI product surfaces.
+	openai-responses-heuristic {
+		include-prefix "gpt-" "o1" "o3" "o4" "chatgpt"
+		exclude-prefix "text-embedding" "whisper-" "tts-" "omni-moderation" "omni-transcribe" \
+			"omni-speech" "gpt-image-" "gpt-realtime"
+		exclude-substring "embedding"
+	}
+
+	// Discovered Responses/Codex models receive these additional operations.
+	model-operations provider="openai" {
+		exact "o3"
+		prefix "gpt-" "o3-"
+		operation "generate_image"
+	}
+	model-operations provider="openai-codex" {
+		exact "o3"
+		prefix "gpt-" "o3-"
+		operation "generate_image"
+	}
+
+	// Cursor advertises OpenAI reasoning effort as sibling model ids. The
+	// family marker uses a `gpt-` prefix followed immediately by an ASCII
+	// version digit.
+	cursor-effort family-marker="gpt-" {
+		tier "minimal" "low" "medium" "high" "xhigh" "max"
+	}
+	// A bare composer-2.5 request defaults to the Fast lane server-side.
+	cursor-model-parameter model="composer-2.5" id="fast" value="false"
+
+	// Exact quota bucket memberships reported by Google Gemini CLI.
+	quota-tiers provider="google-gemini-cli" {
+		tier "3-Flash" "gemini-3-flash-preview" "gemini-3-flash" "gemini-3.5-flash"
+		tier "Flash" "gemini-2.5-flash" "gemini-2.5-flash-lite" "gemini-2.0-flash" \
+			"gemini-1.5-flash"
+		tier "Pro" "gemini-2.5-pro" "gemini-3-pro-preview" "gemini-3.1-pro-preview" \
+			"gemini-3-pro" "gemini-3.1-pro" "gemini-pro-agent" "gemini-1.5-pro"
+		// Unknown discovered quota ids retain the upstream display heuristic.
+		fallback "Flash" substring="flash"
+		fallback "Pro" substring="pro"
+	}
+	// Antigravity reports independent backend-family counters. Exact memberships
+	// cover bundled/current ids; fallbacks preserve the same counter for newly
+	// discovered family ids.
+	quota-tiers provider="google-antigravity" {
+		tier "anthropic" "claude-opus-4-6"
+		tier "google" "gemini-3-pro" "gemma-3" "tab_flash_lite_preview" \
+			"tab_jump_flash_lite_preview"
+		tier "openai" "gpt-oss-120b" "openai/gpt-oss-120b"
+		fallback "anthropic" substring="claude-"
+		fallback "google" substring="gemini-"
+		fallback "google" substring="gemma-"
+		fallback "google" substring="tab_"
+		fallback "openai" substring="gpt-"
+		fallback "openai" substring="openai/"
+	}
+	// Codex Spark consumes an independent meter. The broad chat fallback follows
+	// Spark so the specific suffix wins for discovered ids.
+	quota-tiers provider="openai-codex" {
+		tier "spark" "gpt-5.3-codex-spark"
+		tier "chat" "gpt-5.3-codex"
+		fallback "spark" substring="-spark"
+		fallback "chat" substring="gpt-"
+	}
+	// Subscription eligibility for model-aware Codex credential routing.
+	plan-requirement provider="openai-codex" {
+		tier "pro" substring="-spark"
+		tier "paid" exact="gpt-5.6" exact="gpt-5.6-sol" exact="gpt-5.6-sol-pro" \
+			exact="gpt-5.6-luna" exact="gpt-5.6-luna-pro" glob="*/gpt-5.6" glob="*/gpt-5.6-sol" \
+			glob="*/gpt-5.6-sol-pro" glob="*/gpt-5.6-luna" glob="*/gpt-5.6-luna-pro"
+	}
+
+	// Cloudflare AI Gateway namespace routing. The Workers AI prefix remains
+	// on the request id; the upstream namespaces are stripped.
+	api-routes provider="cloudflare-ai-gateway" {
+		route "anthropic-messages" prefix="anthropic/" strip-prefix=#true
+		route "openai-completions" prefix="openai/" strip-prefix=#true
+		route "openai-completions" prefix="workers-ai/" strip-prefix=#false
+	}
+	// GitLab Duo aliases route through GitLab's provider-specific proxy
+	// transports. Upstream model-id translation remains catalog identity data.
+	// Replaces gitlab-duo.ts MODEL_MAPPINGS API-flavor fields.
+	api-routes provider="gitlab-duo" default="openai-completions" {
+		route "anthropic-messages" prefix="duo-chat-opus-" prefix="duo-chat-sonnet-" prefix="duo-chat-haiku-" \
+			prefix="claude-opus-" prefix="claude-sonnet-" prefix="claude-haiku-"
+		route "openai-responses" exact="duo-chat-gpt-5-codex" exact="duo-chat-gpt-5-2-codex" \
+			exact="gpt-5-codex" exact="gpt-5.2-codex"
+	}
+
+	// Provider-default wire model for model-less hosted search operations.
+	hosted-default provider="kimi-search" model="kimi-for-coding"
+	// models.dev rows OMP cannot route successfully: AWS does not document
+	// the jp. Opus 5 profile, and the openai.gpt-5.x rows are Mantle-only
+	// ids that Bedrock rejects or misroutes.
+	exclude-models provider="amazon-bedrock" exact="jp.anthropic.claude-opus-5" exact="openai.gpt-5.4" \
+		exact="openai.gpt-5.5" exact="openai.gpt-5.6-luna" exact="openai.gpt-5.6-sol" exact="openai.gpt-5.6-terra"
+	// [1m] is a Claude Code selector convention, not an inference id.
+	exclude-models provider="zai" glob="*[1m]"
+	// Anthropic /v1/models rows OMP does not route: pre-tool-era snapshots and
+	// the 3.5/3.7 lanes Claude Code retired from the public roster.
+	exclude-models provider="anthropic" prefix="claude-3-5-haiku" prefix="claude-3-7-sonnet" \
+		exact="claude-3-opus-20240229" exact="claude-3-sonnet-20240229"
+	// Control-plane resource ids are not accepted by the inference API.
+	exclude-models provider="fireworks" prefix="accounts/fireworks/"
+	exclude-models provider="firepass" prefix="accounts/fireworks/"
+	// Text-chat transports cannot serve Xiaomi's audio-only models.
+	exclude-models provider="xiaomi" substring="-tts" substring="-asr"
+	exclude-models provider="xiaomi-token-plan-ams" substring="-tts" substring="-asr"
+	exclude-models provider="xiaomi-token-plan-cn" substring="-tts" substring="-asr"
+	exclude-models provider="xiaomi-token-plan-sgp" substring="-tts" substring="-asr"
+	// SuperGrok's roster interleaves media models the chat picker cannot
+	// serve; the dedicated tool surfaces route them instead.
+	exclude-models provider="xai-oauth" prefix="grok-imagine-" prefix="grok-stt-" prefix="grok-voice-"
+	// NanoGPT's roster interleaves non-text SKUs by name token.
+	exclude-models provider="nanogpt" substring="embedding" substring="image" substring="vision" \
+		substring="audio" substring="speech" substring="transcribe" substring="moderation" \
+		substring="realtime" substring="whisper" substring="tts"
+	// AIML API's roster interleaves media/embedding SKUs; bounded tokens keep
+	// chat ids from false-matching on plain substrings.
+	exclude-models provider="aimlapi" token="audio" token="embed" token="embedding" token="embeddings" \
+		token="i2i" token="i2v" token="image" token="speech" token="t2i" token="t2v" token="tts" token="video" \
+		substring="dall-e" substring="dalle" substring="flux" substring="imagen" substring="sora" \
+		substring="veo" substring="whisper"
+	// SiliconFlow's /v1/models lists embeddings, rerankers, and image/audio/
+	// video generators with no per-model type field.
+	exclude-models provider="siliconflow" substring="embedding" substring="reranker" substring="bge-" \
+		substring="bce-" substring="stable-diffusion" substring="image" substring="flux" substring="kolors" \
+		substring="sensevoice" substring="cosyvoice" substring="fish-speech" substring="indextts" \
+		substring="sovits" substring="whisper" substring="hunyuanvideo" substring="wan2" \
+		substring="ltx-video" substring="speech" substring="moderator" substring="tts"
+	// Alibaba Token Plan serves ASR/image/embedding SKUs the chat picker
+	// cannot route.
+	exclude-models provider="alibaba-token-plan" prefix="fun-asr" prefix="happyhorse-" \
+		prefix="qwen-audio-" prefix="qwen-image-" prefix="text-embedding-" prefix="wan2.7-"
+	// Copilot's /models listing carries no transport field; route Claude ids
+	// to Anthropic Messages, the reviewed Responses roster to Responses, and
+	// everything else to chat completions.
+	api-routes provider="github-copilot" default="openai-completions" {
+		route "anthropic-messages" glob="claude-haiku-*" glob="claude-sonnet-*" glob="claude-opus-*" \
+			glob="claude-fable-*" glob="claude-mythos-*"
+		route "openai-responses" exact="grok-4.5" exact="grok-4.6" prefix="gpt-5" prefix="oswe" prefix="mai-"
+	}
+	// ZenMux fronts Anthropic ids on a dedicated Messages endpoint; every
+	// other namespace stays on chat completions.
+	api-routes provider="zenmux" default="openai-completions" {
+		route "anthropic-messages" prefix="anthropic/"
+	}
+	// OpenCode Zen: models.dev declares these with `@ai-sdk/anthropic`, but the
+	// gateway serves them only at /v1/chat/completions (#1617).
+	api-routes provider="opencode-zen" {
+		route "openai-completions" exact="minimax-m3" exact="minimax-m3-free"
+	}
+	// OpenCode Go: models.dev's npm hints misroute these (#887, #1617); the
+	// responses pins are gateway-verified (deepseek-v4-flash 2026-08-08;
+	// muse-spark per opencode.ai/docs/go/#endpoints, #8957).
+	api-routes provider="opencode-go" {
+		route "openai-responses" exact="deepseek-v4-flash" exact="muse-spark-1.2" exact="muse-spark-1.2-contributor"
+		route "openai-completions" exact="minimax-m2.7" exact="minimax-m3" exact="minimax-m3-free" \
+			exact="qwen3.5-plus" exact="qwen3.6-plus"
+	}
+
+	// Copilot serves these models with tighter effective limits than its
+	// /models metadata reports.
+	model-limits provider="github-copilot" {
+		limits "claude-opus-4.6" context=168000 max-tokens=32000
+		limits "gpt-5.2" context=272000 max-tokens=128000
+		limits "gpt-5.4" context=272000 max-tokens=128000
+		limits "gpt-5.4-mini" context=272000 max-tokens=128000
+		limits "grok-code-fast-1" context=192000 max-tokens=64000
+	}
+	// Alibaba Token Plan discovery carries no limit fields; values come from
+	// official model documentation. Unknown future models keep null limits
+	// rather than unsafe guesses.
+	// Moonshot serves K3 at its documented 1M/131K window when /models omits
+	// limit fields (#5756).
+	model-limits provider="moonshot" {
+		limits "kimi-k3" context=1048576 max-tokens=131072
+	}
+	// Kimi Code's /coding/v1/models envelope carries no output-limit field;
+	// these are the documented per-family caps (models.dev `kimi-for-coding`
+	// and `moonshotai` kimi-k3 entries, #6711). Legacy K2 rows keep their
+	// discovery-reported values.
+	model-limits provider="kimi-code" {
+		limits "k3" max-tokens=131072
+		limits "k3-256k" max-tokens=131072
+		limits "kimi-for-coding" max-tokens=32768
+		limits "kimi-for-coding-highspeed" max-tokens=32768
+	}
+	// Bedrock lists conversational SKUs OMP cannot drive over Converse
+	// tool-calling: Jamba, Titan Text Express, and Mistral 7B v0.
+	exclude-models provider="amazon-bedrock" prefix="ai21.jamba" prefix="amazon.titan-text-express" \
+		prefix="mistral.mistral-7b-instruct-v0"
+	model-limits provider="alibaba-token-plan" {
+		limits "qwen3.6-plus" context=1000000 max-tokens=65536
+		limits "qwen3.8-max" context=1000000 max-tokens=131072
+		limits "deepseek-v4-flash" context=1000000 max-tokens=384000
+		limits "deepseek-v4-flash-0731" context=1000000 max-tokens=384000
+		limits "deepseek-v4-pro-0813" context=1000000 max-tokens=384000
+		limits "deepseek-v3.2" context=131072 max-tokens=65536
+		limits "glm-5.1" context=202752 max-tokens=128000
+		limits "glm-5" context=202752 max-tokens=16384
+		limits "kimi-k2.7-code" context=262144 max-tokens=262144
+		limits "kimi-k2.6" context=262144 max-tokens=262144
+		limits "kimi-k2.5" context=262144 max-tokens=98304
+		limits "minimax-m2.5" context=196608 max-tokens=32768
+	}
+
+	// Antigravity discovery reports no pricing (the subscription bills through
+	// Google); price rows at their first-party equivalents, Vertex before
+	// Anthropic for Claude ids. Aliases map ids whose peer ships differently.
+	pricing-peer provider="google-antigravity" peers="google" "google-vertex" "anthropic" {
+		alias "gemini-3-flash" peer-id="gemini-3-flash-preview"
+		alias "gemini-3-pro" peer-id="gemini-3-pro-preview"
+		alias "gemini-3.1-pro" peer-id="gemini-3.1-pro-preview"
+		alias "claude-opus-4-5" peer-id="claude-opus-4-5@20251101"
+		alias "claude-opus-4-6" peer-id="claude-opus-4-6@default"
+		alias "claude-sonnet-4-5" peer-id="claude-sonnet-4-5@20250929"
+		alias "claude-sonnet-4-6" peer-id="claude-sonnet-4-6@default"
+	}
+	// SuperGrok surfaces a few models under IDs that differ from their public
+	// xai equivalent, so the exact-id price mirror misses them.
+	pricing-peer provider="xai-oauth" peers="xai" {
+		alias "grok-4.20-multi-agent-0309" peer-id="grok-4.20-multi-agent-beta-latest"
+	}
+	hosted-default provider="zai-search" model="glm-4.7"
+	hosted-default provider="synthetic-search" model="auto"
+}

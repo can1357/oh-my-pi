@@ -1,0 +1,32 @@
+// Provider-wire compat for "zai"; regenerated from the frozen census using deployment contract selectors.
+
+provider "zai" {
+	// Replaces resolve.ts's ZAI provider baseline for Anthropic tool-result IDs.
+	requires-tool-result-id #true
+	class "glm" {
+		family "flash" {
+			thinking-efforts "minimal" "low" "medium" "high" "xhigh"
+			thinking-mode "budget"
+		}
+		family "turbo" {
+			thinking-efforts "minimal" "low" "medium" "high" "xhigh"
+			thinking-mode "budget"
+		}
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "*5" "*v" "glm-4.5-air" "glm-4.6" "glm-4.7" "glm-5.1" {
+		thinking-efforts "minimal" "low" "medium" "high" "xhigh"
+		thinking-mode "budget"
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "glm-5.2" {
+		thinking-efforts "high" "max"
+		thinking-mode "anthropic-budget-effort"
+	}
+	// GLM-5.3-Flash is the first mandatory-thinking flash SKU. Its exact
+	// deployment keeps the Anthropic budget+effort wire mode instead of the
+	// older optional-thinking flash family's budget-only mode.
+	models "glm-5.3-flash" {
+		thinking-mode "anthropic-budget-effort"
+	}
+}

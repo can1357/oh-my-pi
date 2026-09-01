@@ -1,27 +1,34 @@
-import { afterEach, describe, expect, it, vi } from "bun:test";
-import * as path from "node:path";
+import { afterAll, afterEach, describe, expect, it, vi } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentMessage, type AgentTool } from "@oh-my-pi/pi-agent-core";
 import { createMockModel, type MockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { type SettingPath, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
-import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import * as unexpectedStopClassifier from "@oh-my-pi/pi-coding-agent/session/unexpected-stop-classifier";
 import { logger, TempDir } from "@oh-my-pi/pi-utils";
+import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
 const recordToolSchema = type({ value: type("string") });
 
 type Harness = {
 	session: AgentSession;
-	authStorage: AuthStorage;
 	tempDir: TempDir;
 };
 type SettingsOverrides = Partial<Record<SettingPath, unknown>>;
 
 const activeHarnesses: Harness[] = [];
+const sharedAuthStorage = createInMemoryAuthStorage();
+sharedAuthStorage.setRuntimeApiKey("mock", "test-key");
+sharedAuthStorage.setRuntimeApiKey("anthropic", "test-key");
+const sharedModelRegistry = new ModelRegistry(sharedAuthStorage);
+
+afterAll(() => {
+	sharedAuthStorage.close();
+});
 
 const recordTool: AgentTool<typeof recordToolSchema, { value: string }> = {
 	name: "record",
@@ -62,11 +69,9 @@ async function createHarness(
 	settingsOverrides: SettingsOverrides = {},
 ): Promise<Harness & { mock: MockModel }> {
 	const tempDir = TempDir.createSync("@pi-unexpected-stop-guard-");
-	const authStorage = await AuthStorage.create(path.join(tempDir.path(), "auth.db"));
-	authStorage.setRuntimeApiKey("mock", "test-key");
 
 	const mock = createMockModel({ responses });
-	const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));
+	const modelRegistry = sharedModelRegistry;
 	const settings = Settings.isolated({
 		"compaction.enabled": false,
 		"retry.enabled": false,
@@ -77,28 +82,32 @@ async function createHarness(
 	});
 	settings.setModelRole("default", `${mock.provider}/${mock.id}`);
 
+	const model = getBundledModel("anthropic", "claude-sonnet-4-5") ?? mock;
 	const sessionManager = SessionManager.inMemory(tempDir.path());
 	const tools = [recordTool as AgentTool];
+	let session: AgentSession | undefined;
 	const agent = new Agent({
 		getApiKey: () => "test-key",
 		initialState: {
-			model: mock,
+			model,
 			systemPrompt: ["Test"],
 			tools,
 			messages: [],
 		},
 		convertToLlm,
+		getToolChoice: () => session?.nextToolChoiceDirective(),
 		streamFn: mock.stream,
 	});
 
-	const session = new AgentSession({
+	const agentSession = new AgentSession({
 		agent,
 		sessionManager,
 		settings,
 		modelRegistry,
 		toolRegistry: new Map(tools.map(tool => [tool.name, tool])),
 	});
-	const harness = { session, authStorage, tempDir };
+	session = agentSession;
+	const harness = { session: agentSession, tempDir };
 	activeHarnesses.push(harness);
 	return { ...harness, mock };
 }
@@ -130,14 +139,46 @@ afterEach(async () => {
 	vi.restoreAllMocks();
 	for (const harness of activeHarnesses) {
 		await harness.session.dispose();
-		harness.authStorage.close();
-		harness.tempDir.remove();
+		harness.tempDir.removeSync();
 	}
 	activeHarnesses.length = 0;
 });
 
 describe("AgentSession unexpected stop guard", () => {
-	it("does not classify when the feature is disabled", async () => {
+	it("does not retry or classify when the mode is none", async () => {
+		const spy = vi.spyOn(unexpectedStopClassifier, "classifyUnexpectedStop").mockResolvedValue(true);
+		const { session, mock } = await createHarness(
+			[unexpectedStop("I should apply the same fix to the JS eval worker. Doing that now.")],
+			{
+				"features.unexpectedStopDetection": "none",
+			},
+		);
+
+		await session.prompt("do the thing");
+		await session.waitForIdle();
+
+		expect(spy).not.toHaveBeenCalled();
+		expect(mock.calls).toHaveLength(1);
+		expect(reminderMessages(session.agent.state.messages)).toHaveLength(0);
+	});
+
+	it("defaults to mechanical mode and retries on thinking-only stops without classification", async () => {
+		const spy = vi.spyOn(unexpectedStopClassifier, "classifyUnexpectedStop").mockResolvedValue(false);
+		const { session, mock } = await createHarness([
+			thinkingOnlyStop("思考中..."),
+			{ content: ["done now"], stopReason: "stop" },
+		]);
+
+		await session.prompt("do the thing");
+		await session.waitForIdle();
+
+		expect(spy).not.toHaveBeenCalled();
+		expect(mock.calls).toHaveLength(2);
+		expect(assistantText(session.agent.state.messages)).toContain("done now");
+		expect(reminderMessages(session.agent.state.messages)).toHaveLength(1);
+	});
+
+	it("does not retry in mechanical mode when text message was delivered", async () => {
 		const spy = vi.spyOn(unexpectedStopClassifier, "classifyUnexpectedStop").mockResolvedValue(true);
 		const { session, mock } = await createHarness([
 			unexpectedStop("I should apply the same fix to the JS eval worker. Doing that now."),
@@ -148,6 +189,22 @@ describe("AgentSession unexpected stop guard", () => {
 
 		expect(spy).not.toHaveBeenCalled();
 		expect(mock.calls).toHaveLength(1);
+		expect(reminderMessages(session.agent.state.messages)).toHaveLength(0);
+	});
+
+	it("does not retry after a forced tool call", async () => {
+		const spy = vi.spyOn(unexpectedStopClassifier, "classifyUnexpectedStop").mockResolvedValue(true);
+		const { session, mock } = await createHarness([
+			recordCall("alpha", "call-record-forced"),
+			{ content: ["recorded"], stopReason: "stop" },
+		]);
+		session.setForcedToolChoice("record");
+
+		await session.prompt("record alpha");
+		await session.waitForIdle();
+
+		expect(mock.calls.map(call => call.options?.toolChoice)).toEqual([{ type: "tool", name: "record" }, "none"]);
+		expect(spy).not.toHaveBeenCalled();
 		expect(reminderMessages(session.agent.state.messages)).toHaveLength(0);
 	});
 
@@ -163,7 +220,7 @@ describe("AgentSession unexpected stop guard", () => {
 				{ content: ["done now"], stopReason: "stop" },
 			],
 			{
-				"features.unexpectedStopDetection": true,
+				"features.unexpectedStopDetection": "smart",
 				"providers.unexpectedStopModel": "online",
 			},
 		);
@@ -177,25 +234,19 @@ describe("AgentSession unexpected stop guard", () => {
 		expect(reminderMessages(session.agent.state.messages)).toHaveLength(1);
 	});
 
-	it("classifies a thinking-only stop on its thinking text and continues", async () => {
-		let calls = 0;
-		const spy = vi.spyOn(unexpectedStopClassifier, "classifyUnexpectedStop").mockImplementation(async () => {
-			calls++;
-			return calls === 1;
-		});
+	it("retries a thinking-only stop directly in smart mode", async () => {
+		const spy = vi.spyOn(unexpectedStopClassifier, "classifyUnexpectedStop").mockResolvedValue(false);
 		const { session, mock } = await createHarness(
-			[thinkingOnlyStop(" 响应"), { content: ["done now"], stopReason: "stop" }],
+			[thinkingOnlyStop(" 响应"), { content: ["done now"], stopReason: "aborted" }],
 			{
-				"features.unexpectedStopDetection": true,
-				"providers.unexpectedStopModel": "online",
+				"features.unexpectedStopDetection": "smart",
 			},
 		);
 
 		await session.prompt("do the thing");
 		await session.waitForIdle();
 
-		expect(spy).toHaveBeenCalledTimes(2);
-		expect(spy.mock.calls[0]?.[0]).toContain("响应");
+		expect(spy).not.toHaveBeenCalled();
 		expect(mock.calls).toHaveLength(2);
 		expect(assistantText(session.agent.state.messages)).toContain("done now");
 		expect(reminderMessages(session.agent.state.messages)).toHaveLength(1);
@@ -206,7 +257,7 @@ describe("AgentSession unexpected stop guard", () => {
 		const { session, mock } = await createHarness(
 			[unexpectedStop("I should apply the same fix to the JS eval worker. Doing that now.")],
 			{
-				"features.unexpectedStopDetection": true,
+				"features.unexpectedStopDetection": "smart",
 				"providers.unexpectedStopModel": "online",
 			},
 		);
@@ -230,7 +281,7 @@ describe("AgentSession unexpected stop guard", () => {
 				unexpectedStop("I should fix this next."),
 			],
 			{
-				"features.unexpectedStopDetection": true,
+				"features.unexpectedStopDetection": "smart",
 				"providers.unexpectedStopModel": "online",
 			},
 		);
@@ -249,7 +300,7 @@ describe("AgentSession unexpected stop guard", () => {
 		const { session, mock } = await createHarness(
 			[recordCall("alpha", "call-record-alpha"), { content: ["tool path complete"], stopReason: "aborted" }],
 			{
-				"features.unexpectedStopDetection": true,
+				"features.unexpectedStopDetection": "smart",
 				"providers.unexpectedStopModel": "online",
 			},
 		);
@@ -267,7 +318,7 @@ describe("AgentSession unexpected stop guard", () => {
 		const { session, mock } = await createHarness(
 			[{ content: ["I should continue but hit the length limit"], stopReason: "length" }],
 			{
-				"features.unexpectedStopDetection": true,
+				"features.unexpectedStopDetection": "smart",
 				"providers.unexpectedStopModel": "online",
 			},
 		);

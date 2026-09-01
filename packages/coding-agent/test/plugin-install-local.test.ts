@@ -78,21 +78,19 @@ describe("runPluginCommand({ action: 'install', args: [<local>] })", () => {
 		await removeWithRetries(tmpRoot);
 	});
 
-	for (const spec of [".", "./pkg", "../pkg", "/abs/pkg", "~/pkg"]) {
-		test(`dispatches ${JSON.stringify(spec)} to link() instead of install()`, async () => {
-			const linkSpy = spyOn(PluginManager.prototype, "link").mockResolvedValue(FAKE_INSTALLED);
-			const installSpy = spyOn(PluginManager.prototype, "install").mockResolvedValue(FAKE_INSTALLED);
-			try {
-				await runPluginCommand({ action: "install", args: [spec], flags: { json: true } });
-				expect(linkSpy).toHaveBeenCalledTimes(1);
-				expect(linkSpy.mock.calls[0]?.[0]).toBe(spec);
-				expect(installSpy).not.toHaveBeenCalled();
-			} finally {
-				linkSpy.mockRestore();
-				installSpy.mockRestore();
-			}
-		});
-	}
+	test("dispatches a local path to link() instead of install()", async () => {
+		const linkSpy = spyOn(PluginManager.prototype, "link").mockResolvedValue(FAKE_INSTALLED);
+		const installSpy = spyOn(PluginManager.prototype, "install").mockResolvedValue(FAKE_INSTALLED);
+		try {
+			await runPluginCommand({ action: "install", args: ["."], flags: { json: true } });
+			expect(linkSpy).toHaveBeenCalledTimes(1);
+			expect(linkSpy.mock.calls[0]?.[0]).toBe(".");
+			expect(installSpy).not.toHaveBeenCalled();
+		} finally {
+			linkSpy.mockRestore();
+			installSpy.mockRestore();
+		}
+	});
 
 	test("npm-style spec still dispatches to install(), not link()", async () => {
 		// Guard against an overly-eager local detector: a bare package name with

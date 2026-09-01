@@ -1,0 +1,59 @@
+name: OMP Nix
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/nix.yml"
+      - ".cargo/**"
+      - "flake.nix"
+      - "flake.lock"
+      - "nix/**"
+      - "bun.lock"
+      - "package.json"
+      - "patches/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - "packages/**"
+      - "crates/**"
+      - "scripts/**"
+      - "docs/**"
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/nix.yml"
+      - ".cargo/**"
+      - "flake.nix"
+      - "flake.lock"
+      - "nix/**"
+      - "bun.lock"
+      - "package.json"
+      - "patches/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - "packages/**"
+      - "crates/**"
+      - "scripts/**"
+      - "docs/**"
+
+concurrency:
+  group: "${{ github.workflow }}-${{ github.ref }}"
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  evaluate:
+    name: Evaluate flake
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            accept-flake-config = true
+      - name: Evaluate every supported system
+        run: nix flake check --all-systems --no-build --show-trace

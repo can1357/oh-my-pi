@@ -12,6 +12,7 @@ import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import * as secrets from "@oh-my-pi/pi-coding-agent/secrets";
+import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { VibeSessionRegistry } from "@oh-my-pi/pi-coding-agent/vibe/runtime";
@@ -231,6 +232,59 @@ describe("createAgentSession session storage isolation", () => {
 		).rejects.toThrow("already owned by another session generation");
 		expect(registry.get("shared-worker")).toBe(replacement);
 		expect(replacement).toMatchObject({ status: "idle", session: null });
+	});
+
+	it("reclaims an unrevivable parked generation before a fresh same-id spawn", async () => {
+		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `pi-sdk-generation-corpse-${Snowflake.next()}-`));
+		tempDirs.push(tempDir);
+		const cwd = path.join(tempDir, "project");
+		fs.mkdirSync(cwd, { recursive: true });
+		AgentLifecycleManager.resetGlobalForTests();
+		AgentRegistry.resetGlobalForTests();
+		const lifecycle = AgentLifecycleManager.global();
+		const registry = AgentRegistry.global();
+		const corpse = registry.register({
+			id: "reused-worker",
+			displayName: "dead generation",
+			kind: "sub",
+			parentId: "Main",
+			session: null,
+			sessionFile: path.join(tempDir, "old-worker.jsonl"),
+			status: "parked",
+		});
+
+		let session: AgentSession | undefined;
+		try {
+			({ session } = await createAgentSession({
+				cwd,
+				agentDir: path.join(tempDir, "agent"),
+				modelRegistry: sharedModelRegistry,
+				settings: Settings.isolated(),
+				disableExtensionDiscovery: true,
+				skills: [],
+				contextFiles: [],
+				promptTemplates: [],
+				slashCommands: [],
+				enableMCP: false,
+				enableLsp: false,
+				agentRegistry: registry,
+				agentId: "reused-worker",
+				agentDisplayName: "fresh generation",
+				parentTaskPrefix: "reused-worker",
+				parentAgentId: "Main",
+				taskDepth: 1,
+				expectedAgentRef: null,
+			}));
+			const replacement = registry.get("reused-worker");
+			expect(replacement).toBeDefined();
+			expect(replacement).not.toBe(corpse);
+			expect(replacement?.session).toBe(session);
+		} finally {
+			await session?.dispose();
+			await lifecycle.dispose();
+			AgentLifecycleManager.resetGlobalForTests();
+			AgentRegistry.resetGlobalForTests();
+		}
 	});
 
 	it("reuses the exact parked ref authorized for revival", async () => {

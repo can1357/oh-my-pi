@@ -96,16 +96,24 @@ describe("read → edit round-trip for out-of-cwd files", () => {
 		expect(await Bun.file(outFile).text()).toBe("ALPHA\nbeta\n");
 	});
 
-	it("still collapses an in-cwd read header to the bare filename", async () => {
-		const inFile = path.join(cwdDir, "src", "settings.json");
-		await fs.mkdir(path.dirname(inFile), { recursive: true });
-		await fs.writeFile(inFile, "alpha\nbeta\n");
+	it("keeps an in-cwd relative path so an existing basename cannot capture a follow-up edit", async () => {
+		const rootFile = path.join(cwdDir, "settings.json");
+		const nestedFile = path.join(cwdDir, "src", "settings.json");
+		await fs.mkdir(path.dirname(nestedFile), { recursive: true });
+		await Promise.all([fs.writeFile(rootFile, "root\n"), fs.writeFile(nestedFile, "alpha\nbeta\n")]);
 
 		const session = createSession(cwdDir);
-		const header = textOutput(await new ReadTool(session).execute("read-in", { path: inFile })).split("\n")[0];
+		const header = textOutput(await new ReadTool(session).execute("read-in", { path: nestedFile })).split("\n")[0];
 
-		expect(header).toMatch(/^\[settings\.json#[0-9A-F]{4}\]$/);
-		expect(header).not.toContain("src");
+		// The header must retain the workspace-relative directory, not collapse
+		// to the bare `settings.json`, or the edit below resolves against the
+		// existing cwd file and the snapshot-tag guard rejects the valid edit.
+		expect(header).toBe(`[${path.join("src", "settings.json")}#${header.slice(-5, -1)}]`);
+
+		await executeHashlineSingle(editOptions(session, `${header}\nPUT 1.=1:\n+ALPHA\n`));
+
+		expect(await Bun.file(nestedFile).text()).toBe("ALPHA\nbeta\n");
+		expect(await Bun.file(rootFile).text()).toBe("root\n");
 	});
 
 	it("recovers a missing cwd path from the active approved local plan", async () => {

@@ -88,7 +88,7 @@ describe("AgentSession.branchFromBtw", () => {
 		const sessionManager =
 			options?.persisted === false ? SessionManager.inMemory() : SessionManager.create(tempDir, tempDir);
 		const settings = Settings.isolated({ "compaction.enabled": false });
-		authStorage = await AuthStorage.create(path.join(tempDir, "testauth.db"));
+		authStorage = await AuthStorage.create(":memory:");
 		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
 		authStorage.setRuntimeApiKey("anthropic", "test-key");
 		session = new AgentSession({
@@ -319,7 +319,7 @@ describe("AgentSession.branchFromBtw", () => {
 		const bashPromise = activeSession.executeBash('bun -e "await Bun.sleep(60_000)"', () => undefined, {
 			useUserShell: false,
 		});
-		while (!activeSession.isBashRunning) await Bun.sleep(1);
+		expect(activeSession.isBashRunning).toBe(true);
 
 		await expect(
 			activeSession.branchFromBtw(

@@ -1,0 +1,13 @@
+// Provider-wire compat for "minimax-code"; regenerated from the frozen census using deployment contract selectors.
+
+provider "minimax-code" priority=1 {
+	// Replaces the provider-id regex in both OpenAI baselines.
+	reasoning-deltas-may-be-cumulative #true
+	class "minimax" {
+		thinking-mode "effort"
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "MiniMax-M3" {
+		thinking-efforts "minimal" "low" "medium" "high"
+	}
+}

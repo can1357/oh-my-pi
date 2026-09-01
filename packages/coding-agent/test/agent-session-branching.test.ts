@@ -68,7 +68,7 @@ describe.skipIf(!e2eApiKey("ANTHROPIC_API_KEY"))("AgentSession branching", () =>
 
 		sessionManager = noSession ? SessionManager.inMemory() : SessionManager.create(tempDir, tempDir);
 		const settings = Settings.isolated();
-		authStorage = await AuthStorage.create(path.join(tempDir, "testauth.db"));
+		authStorage = await AuthStorage.create(":memory:");
 		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
 
 		session = new AgentSession({

@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -12,12 +12,21 @@ import { SessionManager } from "../src/session/session-manager";
 import { FileSessionStorage } from "../src/session/session-storage";
 
 let tempRoot: string;
+let originalClaudeConfigDir: string | undefined;
 
 beforeEach(async () => {
 	tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-foreign-sessions-"));
+	originalClaudeConfigDir = process.env.CLAUDE_CONFIG_DIR;
+	delete process.env.CLAUDE_CONFIG_DIR;
 });
 
 afterEach(async () => {
+	vi.restoreAllMocks();
+	if (originalClaudeConfigDir === undefined) {
+		delete process.env.CLAUDE_CONFIG_DIR;
+	} else {
+		process.env.CLAUDE_CONFIG_DIR = originalClaudeConfigDir;
+	}
 	await fs.rm(tempRoot, { recursive: true, force: true });
 });
 
@@ -129,6 +138,30 @@ describe("ClaudeSessionStore", () => {
 		expect(sessions).toHaveLength(1);
 		expect(sessions[0]?.firstMessage).toBe("Legacy prompt");
 		expect(sessions[0]?.created.toISOString()).toBe("2025-01-01T00:00:00.000Z");
+	});
+
+	it("defaults to CLAUDE_CONFIG_DIR and reads its colocated project registry", async () => {
+		const root = path.join(tempRoot, "relocated-claude");
+		const cwd = path.join(tempRoot, "project-with-hyphen");
+		const id = "22222222-2222-4222-8222-333333333333";
+		const encoded = cwd.replaceAll(path.sep, "-");
+		process.env.CLAUDE_CONFIG_DIR = root;
+		await Bun.write(path.join(root, ".claude.json"), JSON.stringify({ projects: { [cwd]: {} } }));
+		await writeJsonl(path.join(root, "projects", encoded, `${id}.jsonl`), [
+			{
+				type: "user",
+				uuid: "relocated-user",
+				parentUuid: null,
+				timestamp: "2025-01-01T00:00:00.000Z",
+				message: { content: "Relocated prompt" },
+			},
+		]);
+
+		const sessions = await new ClaudeSessionStore().list();
+
+		expect(sessions).toHaveLength(1);
+		expect(sessions[0]?.cwd).toBe(cwd);
+		expect(sessions[0]?.path).toBe(path.join(root, "projects", encoded, `${id}.jsonl`));
 	});
 });
 

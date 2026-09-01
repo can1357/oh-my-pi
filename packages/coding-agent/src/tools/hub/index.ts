@@ -32,6 +32,7 @@ import type { Theme } from "../../modes/theme/theme";
 import hubDescription from "../../prompts/tools/hub.md" with { type: "text" };
 import type { AgentRegistry } from "../../registry/agent-registry";
 import type { ToolSession } from "..";
+import type { ToolActivitySummary } from "../renderers";
 import {
 	buildJobResult,
 	executeCancel,
@@ -63,7 +64,13 @@ import {
 	messagingRenderResult,
 	normalizeIrcTimeoutMs,
 } from "./messaging";
-import { type HubDetails, type HubRenderArgs, hubErrorResult } from "./types";
+import {
+	DEFAULT_HUB_LIST_LIMIT,
+	type HubDetails,
+	type HubRenderArgs,
+	hubErrorResult,
+	MAX_HUB_LIST_LIMIT,
+} from "./types";
 
 export { isWaitingPollDetails } from "./jobs";
 export type { LaunchParams, LaunchToolDetails } from "./launch";
@@ -82,6 +89,10 @@ const hubSchema = type({
 	"ids?": type("string[]").describe("wait: job ids to watch (omit = all running jobs); cancel: job ids to kill"),
 	"timeoutMs?": type("number").describe("wait (messages/jobs): timeout in milliseconds (0 waits indefinitely)"),
 	"peek?": type("boolean").describe("inbox: list messages without consuming them"),
+	"status?": type("'running' | 'idle' | 'parked'").describe("list: filter by status; omit for running+idle"),
+	"limit?": type("number > 0").describe(
+		`list: max peer rows; default ${DEFAULT_HUB_LIST_LIMIT}, max ${MAX_HUB_LIST_LIMIT}`,
+	),
 	"name?": type("string <= 48").describe("process ops: stable project-scoped launch name"),
 	"application?": type("string > 0").describe("start: executable or application path"),
 	"args?": type("string[]").describe("start: argv passed directly to the application"),
@@ -121,6 +132,8 @@ interface MessagingDeps {
 	registry: AgentRegistry;
 	senderId: string;
 	settings: ToolSession["settings"];
+	/** Caller session file: direct sends refresh this root's persisted roster before resolving the target. */
+	sessionFileHint?: string | null;
 }
 
 const PROGRESS_INTERVAL_MS = 500;
@@ -169,6 +182,10 @@ export class HubTool implements AgentTool<typeof hubSchema, HubDetails> {
 		{
 			caption: "List peers",
 			call: { op: "list" },
+		},
+		{
+			caption: "Inspect parked peer history",
+			call: { op: "list", status: "parked" },
 		},
 		{
 			caption: "Fire-and-forget DM — same send wakes idle/parked peers",
@@ -240,7 +257,12 @@ export class HubTool implements AgentTool<typeof hubSchema, HubDetails> {
 		const registry = this.session.agentRegistry;
 		const senderId = this.session.getAgentId?.() ?? null;
 		if (!registry || !senderId) return null;
-		return { registry, senderId, settings: this.session.settings };
+		return {
+			registry,
+			senderId,
+			settings: this.session.settings,
+			sessionFileHint: this.session.getSessionFile?.() ?? null,
+		};
 	}
 
 	async execute(
@@ -254,7 +276,15 @@ export class HubTool implements AgentTool<typeof hubSchema, HubDetails> {
 			case "list": {
 				const messaging = this.#messaging();
 				if (!messaging) return hubErrorResult("Peer messaging is unavailable in this session.", { op: "list" });
-				return executeList(messaging.registry, messaging.senderId);
+				return executeList(
+					messaging.registry,
+					messaging.senderId,
+					{
+						status: params.status,
+						limit: params.limit,
+					},
+					this.session.getSessionFile(),
+				);
 			}
 			case "send": {
 				const toPeer = params.to?.trim();
@@ -371,13 +401,21 @@ export class HubTool implements AgentTool<typeof hubSchema, HubDetails> {
 		if (!manager || runningJobs.length === 0) {
 			// No job legs: pure message wait — or nothing to block on at all.
 			if (!messaging) return nothingToWaitForResult(this.session);
+			// The bus mailbox is a separate store from the session-pending buffer
+			// drained above, and only `executeMessageWait` below ever reads it. A
+			// peer that sends and then stops running leaves its message queued
+			// there, so without this take the liveness gate would answer "nothing
+			// to wait for" while `hub inbox` hands back the very message being
+			// waited on. Single atomic take: the rest of the backlog stays queued.
+			const queued = IrcBus.global().take(messaging.senderId, from);
+			if (queued) return messageResult(messaging.senderId, queued);
 			if (!from) {
 				// A bare wait can only be satisfied by a running peer eventually
 				// sending something; with none, return the snapshot immediately
 				// instead of blocking a full message-timeout window.
 				const hasRunningPeer = messaging.registry
 					.listVisibleTo(messaging.senderId)
-					.some(ref => ref.status === "running");
+					.some(ref => messaging.registry.isRunning(ref));
 				if (!hasRunningPeer) return nothingToWaitForResult(this.session);
 			}
 			return executeMessageWait(messaging, { from, timeoutMs: params.timeoutMs }, signal);
@@ -537,6 +575,19 @@ function toLaunchArgs(args: HubRenderArgs | undefined): LaunchRenderArgs {
 export const hubToolRenderer = {
 	inline: true,
 	mergeCallAndResult: true,
+	/** Compact one-line activity: op plus its peer, process, or job target. */
+	activitySummary(args: unknown): ToolActivitySummary {
+		const hubArgs = (args ?? {}) as HubRenderArgs;
+		const op = hubArgs.op;
+		if (!op) return { label: "Hub" };
+		let detail = op;
+		if (op === "send" && (hubArgs.to || hubArgs.name)) detail = `send → ${hubArgs.to ?? hubArgs.name}`;
+		else if (op === "wait" && (hubArgs.from || hubArgs.name)) detail = `wait ${hubArgs.from ?? hubArgs.name}`;
+		else if ((op === "wait" || op === "cancel") && hubArgs.ids?.length) {
+			detail = `${op} ${hubArgs.ids.length} job${hubArgs.ids.length === 1 ? "" : "s"}`;
+		} else if (hubArgs.name) detail = `${op} ${hubArgs.name}`;
+		return { label: "Hub", detail };
+	},
 	// Only launch pending frames consume the spinner (broker RPC in flight);
 	// messaging/job pending frames are static, exactly as before the merge.
 	animatedPendingPreview: (args: unknown): boolean => isLaunchStyleArgs(args as HubRenderArgs | undefined),

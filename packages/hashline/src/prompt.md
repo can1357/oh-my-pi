@@ -7,9 +7,11 @@ Section: `[PATH#TAG]`; `TAG`: 4-hex snapshot from latest `read`/`search`, REQUIR
 <ops>
 `PUT N.=M:`: replace original inclusive lines N–M with body.
 `PUT N*:`: replace syntactic block beginning N; closing line resolved.
-`PUT <N:` / `PUT >N:`: insert before/after N; `<1` head, `>$` tail.
+`PUT <N:` insert body rows before line N (`PUT <1:` = file head).
+`PUT >N:` insert body rows after line N (`PUT >$:` = file tail).
 `PUT >N*:`: insert after block N's end, at sibling depth. Append inside block: `PUT >M:`.
-`PUT <N` / `PUT >N` / `PUT N.=M @name` / `PUT N* @name`: paste captured register at gap/range/resolved block; no `:` or body. Unlabeled gap paste: anonymous register; range/block paste: `@name` required.
+`PUT <N @name` / `PUT >N @name` paste register `@name` at the gap before/after line N; omit `@name` for the anonymous register.
+`PUT N.=M @name` / `PUT N* @name` paste `@name` over the range / resolved block; `@name` required here.
 `CUT N.=M` / `CUT N*`: delete and capture inclusive lines N–M / block N; anonymous or given `@name`.
 `REM`: delete section file. `MV DEST`: move/rename (quote paths with spaces); prior edits apply to source, final content to `DEST`.
 Single line: `PUT N.=N:` / `CUT N.=N`. Ranges name original inclusive touched lines; body length irrelevant.

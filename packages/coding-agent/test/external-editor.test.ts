@@ -1,8 +1,8 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { TempDir } from "@oh-my-pi/pi-utils";
-import { getEditorCommand, openInEditor } from "../src/utils/external-editor";
+import { getEditorCommand, openInEditor, resolveEditorSpawnCommand } from "../src/utils/external-editor";
 
 interface MutableProcess {
 	platform: NodeJS.Platform;
@@ -66,6 +66,42 @@ describe("getEditorCommand", () => {
 });
 
 describe("openInEditor", () => {
+	it("always inherits the pane stdio", async () => {
+		const spawn = spyOn(Bun, "spawn").mockReturnValue({
+			exited: Promise.resolve(1),
+		} as never);
+		try {
+			await openInEditor("editor", "original", {
+				extension: ".md",
+				stdio: [0, 1, 2],
+			} as never);
+
+			expect(spawn).toHaveBeenCalledTimes(1);
+			expect(spawn.mock.calls[0]?.[1]).toMatchObject({
+				stdin: "inherit",
+				stdout: "inherit",
+				stderr: "inherit",
+			});
+		} finally {
+			spawn.mockRestore();
+		}
+	});
+
+	it("passes the cmd.exe command line verbatim on Windows", () => {
+		const tmpFile = String.raw`C:\Users\Example User\AppData\Local\Temp\omp-editor-123.omp.md`;
+
+		expect(resolveEditorSpawnCommand('"C:\\Program Files\\Code.exe" --wait', tmpFile, "win32")).toEqual({
+			cmd: [
+				"cmd.exe",
+				"/d",
+				"/s",
+				"/c",
+				String.raw`""C:\Program Files\Code.exe" --wait "C:\Users\Example User\AppData\Local\Temp\omp-editor-123.omp.md""`,
+			],
+			windowsVerbatimArguments: true,
+		});
+	});
+
 	it.skipIf(process.platform === "win32")("supports quoted editor paths containing spaces", async () => {
 		const tempDir = TempDir.createSync("@external-editor-");
 		try {

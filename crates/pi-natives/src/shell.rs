@@ -491,7 +491,7 @@ mod tests {
 			shell
 				.run(
 					CoreShellRunOptions {
-						command:    "/bin/sh -c 'printf \"%d\\n\" \"$$\"; sleep 0.5'".to_string(),
+						command:    "sh -c 'printf \"%d\\n\" \"$$\"; sleep 0.5'".to_string(),
 						cwd:        None,
 						env:        None,
 						timeout_ms: None,

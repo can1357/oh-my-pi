@@ -81,6 +81,51 @@ describe("marked compatibility", () => {
 		});
 	}
 
+	// Lazy-continuation boundary shapes (behavior cross-checked against marked
+	// v18): an indented code block cannot interrupt a paragraph, so an indented
+	// line directly attached to paragraph text stays in the paragraph even when
+	// a setext/hr lookahead matches downstream — while a whitespace-padded
+	// blank line detaches it, so the next indented run still opens indented
+	// code. Documented divergences from marked kept as-is: marked dedents the
+	// attached line inside `text` via its code-merge path, and it splits a
+	// padded blank into a `space` token where this lexer keeps the padded
+	// blank inside the paragraph raw.
+	const lazyBoundaryShapes: Array<[string, Array<[string, string]>]> = [
+		[
+			"lead\n   \n    code\n",
+			[
+				["paragraph", "lead\n   \n"],
+				["code", "    code\n"],
+			],
+		],
+		[
+			"lead\n    attached\n---\n",
+			[
+				["paragraph", "lead\n    attached\n"],
+				["hr", "---\n"],
+			],
+		],
+		[
+			"lead\n     deeper attached\n---\n",
+			[
+				["paragraph", "lead\n     deeper attached\n"],
+				["hr", "---\n"],
+			],
+		],
+		[
+			"lead\n   \n     deeper code\n",
+			[
+				["paragraph", "lead\n   \n"],
+				["code", "     deeper code\n"],
+			],
+		],
+	];
+	for (const [source, shape] of lazyBoundaryShapes) {
+		test(`keeps the lazy-continuation boundary shape for ${JSON.stringify(source)}`, () => {
+			expect([...Lexer.lex(source)].map(token => [token.type, token.raw])).toEqual(shape);
+		});
+	}
+
 	test("runs block and inline tokenizer/renderer extensions", () => {
 		const latexBlock: TokenizerAndRendererExtension = {
 			name: "latexBlock",

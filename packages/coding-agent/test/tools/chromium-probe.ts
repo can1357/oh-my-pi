@@ -1,3 +1,4 @@
+import * as fs from "node:fs/promises";
 import { ensureChromiumExecutable } from "@oh-my-pi/pi-coding-agent/tools/browser/launch";
 
 /**
@@ -10,6 +11,16 @@ async function chromiumCanLaunch(): Promise<boolean> {
 	try {
 		const executable = await ensureChromiumExecutable();
 		if (!executable) return false;
+		// Only Linux runs the exec probe. Elsewhere the resolved candidate is a
+		// GUI application path, and running it is the hazard
+		// `isChromiumExecutable()` already refuses for the same reason (#8445): a
+		// GUI `chrome.exe --version` prints nothing to a detached stdout and does
+		// not exit, so this spawnSync never returns and every importing suite
+		// hangs during module evaluation. Check the file instead, so a stale
+		// PUPPETEER_EXECUTABLE_PATH — which `ensureChromiumExecutable()` hands
+		// back unvalidated — still skips the suites rather than failing them at
+		// launch.
+		if (process.platform !== "linux") return (await fs.stat(executable)).isFile();
 		const probe = Bun.spawnSync([executable, "--version"], { stdout: "ignore", stderr: "ignore" });
 		return probe.exitCode === 0;
 	} catch {

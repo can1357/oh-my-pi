@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "bun:test";
+import { afterAll, afterEach, describe, expect, it, vi } from "bun:test";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
@@ -13,9 +13,16 @@ type Harness = {
 	setStreaming: (value: boolean) => void;
 };
 
-let harnesses: Harness[] = [];
+let harness: Harness | undefined;
 
 async function createHarness(): Promise<Harness> {
+	if (harness) {
+		harness.setStreaming(false);
+		harness.mode.clearTransientSessionUi();
+		harness.mode.chatContainer.disposeChildren();
+		return harness;
+	}
+
 	const tempDir = TempDir.createSync("@pi-deferred-notice-");
 	await Settings.init({ inMemory: true, cwd: tempDir.path() });
 	await initTheme(false);
@@ -39,14 +46,13 @@ async function createHarness(): Promise<Harness> {
 		},
 	} as unknown as AgentSession;
 	const mode = new InteractiveMode(session, "test");
-	const harness = {
+	harness = {
 		mode,
 		tempDir,
 		setStreaming: (value: boolean) => {
 			streaming = value;
 		},
 	};
-	harnesses.push(harness);
 	return harness;
 }
 
@@ -63,12 +69,13 @@ function transcriptText(mode: InteractiveMode): string {
 }
 
 afterEach(() => {
-	for (const harness of harnesses) {
-		harness.mode.stop();
-		harness.tempDir.removeSync();
-	}
-	harnesses = [];
 	vi.restoreAllMocks();
+});
+
+afterAll(() => {
+	harness?.mode.stop();
+	harness?.tempDir.removeSync();
+	harness = undefined;
 	resetSettingsForTest();
 });
 

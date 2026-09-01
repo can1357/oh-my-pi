@@ -396,6 +396,7 @@ export class Mnemopi {
 	constructor(options: MnemopiOptions = {}) {
 		this.sessionId = options.sessionId ?? options.session_id ?? "default";
 		this.bank = options.bank ?? "default";
+
 		this.authorId = options.authorId ?? options.author_id ?? null;
 		this.authorType = options.authorType ?? options.author_type ?? null;
 		this.channelId = options.channelId ?? options.channel_id ?? this.sessionId;

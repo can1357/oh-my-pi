@@ -198,8 +198,13 @@ function splitLines(value: string): string[] {
 
 function getEditPathFromArgs(args: unknown): string | null {
 	if (!args || typeof args !== "object") return null;
-	const pathValue = (args as { path?: unknown }).path;
-	return typeof pathValue === "string" && pathValue.length > 0 ? pathValue : null;
+	if ("path" in args && typeof args.path === "string" && args.path.length > 0) return args.path;
+	// Sloppy payloads name the file in a leading `[path]` header instead of an argument.
+	if ("input" in args && typeof args.input === "string") {
+		const header = /^\[([^\]\n]+)\]/.exec(args.input);
+		if (header?.[1]) return header[1];
+	}
+	return null;
 }
 
 function getEditPayloadFromArgs(args: unknown): string {

@@ -48,10 +48,10 @@ use std::{
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use fontdue::{Font as TtfFace, FontSettings, Metrics};
-use napi::bindgen_prelude::*;
+use napi::{JsString, bindgen_prelude::*};
 use napi_derive::napi;
 
-use crate::task;
+use crate::{js, task};
 
 /// Upper bound on the frame edge: a hard stop against absurd allocations
 /// (`size * size` pixel buffer), far above the 2576px production frame.
@@ -1162,14 +1162,17 @@ pub struct SnapcompactRenderOptions {
 /// the selected native font has a glyph for it; renderer control codes are
 /// considered renderable because they are interpreted outside font lookup.
 #[napi]
-pub fn snapcompact_supported_chars(font: String, chars: String) -> Result<String> {
-	let font = resolve_font(&font).ok_or_else(|| {
+pub fn snapcompact_supported_chars(font: JsString, chars: JsString) -> Result<String> {
+	let font_name = js::utf8(font)?;
+	let font = resolve_font(&font_name).ok_or_else(|| {
 		Error::from_reason(format!(
-			"Unknown snapcompact font {font:?}: expected \"5x8\", \"8x8\", \"6x12\", \"8x13\", or \
-			 \"silver\""
+			"Unknown snapcompact font {:?}: expected \"5x8\", \"8x8\", \"6x12\", \"8x13\", or \
+			 \"silver\"",
+			&*font_name
 		))
 	})?;
-	let mut supported = String::new();
+	let chars = js::utf8(chars)?;
+	let mut supported = String::with_capacity(chars.len());
 	for ch in chars.chars() {
 		if matches!(ch as u32, DIM_ON | DIM_OFF | FULL_BLOCK | 0x0a) || font.supports(ch as u32) {
 			supported.push(ch);
@@ -1351,6 +1354,35 @@ mod tests {
 		assert!(FONT_SILVER.supported.contains(&'こ'), "Silver must cover Japanese kana");
 		assert!(FONT_SILVER.supported.contains(&'你'), "Silver must cover Han text");
 		assert!(FONT_SILVER.supported.contains(&'안'), "Silver must cover Hangul syllables");
+	}
+
+	#[test]
+	fn digit_zero_is_disambiguated_from_letter_o() {
+		// Regression for #8713: the default snapcompact bitmap fonts drew digit
+		// `0` and letter `O` as bare ovals that OCR back ambiguously, corrupting
+		// compacted identifiers. Each `0` now carries an interior slash/bar the
+		// `O` lacks, so it inks strictly more of the glyph's vertical middle even
+		// though it is the narrower oval (its wider top/bottom arcs sit outside
+		// the sampled band). unscii-8 already shipped a slashed zero.
+		for font in [&*FONT_5X8, &*FONT_6X12, &*FONT_8X13] {
+			let (cw, ch) = (font.cell_w, font.cell_h);
+			let width = cw * 2;
+			let grid = Grid { cols: 2, rows: 1, repeat: 1, cell_w: cw, cell_h: ch };
+			let px = render_bitmap("0O", width, ch, font, &grid, true);
+			let band = ch / 4..ch - ch / 4;
+			let mid_ink = |col0: usize| -> usize {
+				band
+					.clone()
+					.flat_map(|y| (col0..col0 + cw).map(move |x| (x, y)))
+					.filter(|&(x, y)| px[y * width + x] != 0)
+					.count()
+			};
+			let (zero, oh) = (mid_ink(0), mid_ink(cw));
+			assert!(
+				zero > oh,
+				"cell {cw}x{ch}: zero must ink its middle more than O (zero={zero}, O={oh})"
+			);
+		}
 	}
 
 	#[test]

@@ -1,5 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
-import * as path from "node:path";
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
@@ -8,9 +7,9 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
-import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { TempDir, withTimeout } from "@oh-my-pi/pi-utils";
+import { TempDir } from "@oh-my-pi/pi-utils";
+import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
 /**
  * Regression coverage for the `#hasPendingAsyncWake()` gate shared by the
@@ -47,19 +46,23 @@ import { TempDir, withTimeout } from "@oh-my-pi/pi-utils";
  * the same way — so once `waitForIdle()` resolves, the settle has definitively
  * decided whether to fire the stop-time passes. No wall-clock sleeps needed.
  */
+const sharedAuthStorage = createInMemoryAuthStorage();
+sharedAuthStorage.setRuntimeApiKey("anthropic", "test-key");
+const sharedModelRegistry = new ModelRegistry(sharedAuthStorage);
+
+afterAll(() => {
+	sharedAuthStorage.close();
+});
+
 describe("AgentSession todo reminder async-job deferral", () => {
 	let tempDir: TempDir;
 	let session: AgentSession;
 	let sessionManager: SessionManager;
-	let authStorage: AuthStorage;
-	let modelRegistry: ModelRegistry;
 	let manager: AsyncJobManager;
 	let extensionRunner: ExtensionRunner;
 	let gates: Array<PromiseWithResolvers<string>>;
 	let reminderAttempts: number[];
-	let firstReminderPromise: Promise<void>;
 	let agentEndTerminalStates: Array<boolean | undefined>;
-	let resolveFirstReminder: () => void;
 
 	function textOnlyAssistantMessage(): AssistantMessage {
 		return {
@@ -108,12 +111,9 @@ describe("AgentSession todo reminder async-job deferral", () => {
 		]);
 	}
 
-	beforeEach(async () => {
+	beforeEach(() => {
 		tempDir = TempDir.createSync("@pi-todo-reminder-async-jobs-");
-		authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
-		modelRegistry = new ModelRegistry(authStorage);
-		sessionManager = SessionManager.create(tempDir.path(), tempDir.path());
+		sessionManager = SessionManager.inMemory(tempDir.path());
 		manager = new AsyncJobManager({});
 		gates = [];
 		extensionRunner = {
@@ -144,7 +144,7 @@ describe("AgentSession todo reminder async-job deferral", () => {
 				"todo.reminders": true,
 				"todo.remindersMax": 3,
 			}),
-			modelRegistry,
+			modelRegistry: sharedModelRegistry,
 			agentId: "Main",
 			asyncJobManager: manager,
 			extensionRunner,
@@ -155,12 +155,8 @@ describe("AgentSession todo reminder async-job deferral", () => {
 
 		reminderAttempts = [];
 		agentEndTerminalStates = [];
-		({ promise: firstReminderPromise, resolve: resolveFirstReminder } = Promise.withResolvers<void>());
 		session.subscribe((event: AgentSessionEvent) => {
-			if (event.type === "todo_reminder") {
-				reminderAttempts.push(event.attempt);
-				if (reminderAttempts.length === 1) resolveFirstReminder();
-			}
+			if (event.type === "todo_reminder") reminderAttempts.push(event.attempt);
 			if (event.type === "agent_end") {
 				agentEndTerminalStates.push(
 					(event as Extract<AgentSessionEvent, { type: "agent_end" }> & { isTerminal?: boolean }).isTerminal,
@@ -175,7 +171,6 @@ describe("AgentSession todo reminder async-job deferral", () => {
 		await session.dispose();
 		manager.cancelAll();
 		await manager.dispose();
-		authStorage.close();
 		try {
 			await tempDir.remove();
 		} catch {}
@@ -201,7 +196,7 @@ describe("AgentSession todo reminder async-job deferral", () => {
 		registerGatedJob("OtherAgent");
 
 		emitTextOnlyStop();
-		await withTimeout(firstReminderPromise, 1000, "todo_reminder never fired");
+		await session.waitForIdle();
 
 		expect(reminderAttempts).toEqual([1]);
 	});
@@ -223,7 +218,7 @@ describe("AgentSession todo reminder async-job deferral", () => {
 		await manager.drainDeliveries();
 
 		emitTextOnlyStop();
-		await withTimeout(firstReminderPromise, 1000, "todo_reminder never fired after job drained");
+		await session.waitForIdle();
 
 		expect(reminderAttempts).toEqual([1]);
 	});

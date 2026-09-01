@@ -51,6 +51,7 @@ fn drop_passed_lines(input: &str) -> String {
 fn failures_only(input: &str) -> String {
 	let mut out = String::new();
 	let mut keeping_block = false;
+	let mut kept_failure = false;
 	let mut trailing_context = 0usize;
 
 	for line in input.lines() {
@@ -72,6 +73,7 @@ fn failures_only(input: &str) -> String {
 
 		if starts_failure_block(trimmed) {
 			keeping_block = true;
+			kept_failure = true;
 			trailing_context = 10;
 			push_line(&mut out, line);
 			continue;
@@ -97,7 +99,10 @@ fn failures_only(input: &str) -> String {
 		}
 	}
 
-	if has_content(&out) {
+	// A failing run where no failure block was recognized means the format is
+	// unknown; summary counts alone lose the actual error (issue: bun's non-TTY
+	// `(fail)` output). Fall back to head/tail rather than drop the failure.
+	if kept_failure && has_content(&out) {
 		out
 	} else {
 		primitives::head_tail_lines(input, 80, 80)
@@ -147,7 +152,8 @@ fn is_noise_line(trimmed: &str) -> bool {
 }
 
 fn is_pass_noise(trimmed: &str) -> bool {
-	trimmed.starts_with("PASS ")
+	trimmed.starts_with("(pass)")
+		|| trimmed.starts_with("PASS ")
 		|| trimmed.starts_with("✓")
 		|| trimmed.starts_with("✔")
 		|| trimmed.starts_with("√")
@@ -164,7 +170,8 @@ fn is_pass_noise(trimmed: &str) -> bool {
 }
 
 fn starts_failure_block(trimmed: &str) -> bool {
-	trimmed.starts_with("FAIL ")
+	trimmed.starts_with("(fail)")
+		|| trimmed.starts_with("FAIL ")
 		|| trimmed.starts_with("FAILURES")
 		|| trimmed.starts_with("Failed Tests")
 		|| trimmed.starts_with("● ")
@@ -173,6 +180,8 @@ fn starts_failure_block(trimmed: &str) -> bool {
 		|| trimmed.starts_with("✗")
 		|| trimmed.starts_with("❯")
 		|| trimmed.starts_with("Error:")
+		|| trimmed.starts_with("error:")
+		|| is_code_frame_line(trimmed)
 		|| trimmed.starts_with("AssertionError")
 		|| trimmed.starts_with("TimeoutError")
 		|| is_playwright_numbered_failure(trimmed)
@@ -193,6 +202,15 @@ fn is_error_context_line(trimmed: &str) -> bool {
 		|| trimmed.contains(" › ")
 		|| trimmed.contains(".spec.")
 		|| trimmed.contains(".test.")
+}
+
+/// Source excerpt rows in bun/jest failure output: `12 | expect(x).toBe(y)`
+/// (optionally behind jest's `> ` pointer). Bun prints the code frame *before*
+/// its `error:` line, so these must open the failure block.
+fn is_code_frame_line(trimmed: &str) -> bool {
+	let rest = trimmed.strip_prefix("> ").unwrap_or(trimmed);
+	let after_digits = rest.trim_start_matches(|ch: char| ch.is_ascii_digit());
+	after_digits.len() < rest.len() && after_digits.starts_with(" |")
 }
 
 fn is_playwright_numbered_failure(trimmed: &str) -> bool {
@@ -313,6 +331,84 @@ Ran 3 tests across 2 files. [150.00ms]
 		assert!(filtered.contains("at a.test.ts:5:7"));
 		assert!(filtered.contains("2 pass"));
 		assert!(filtered.contains("1 fail"));
+	}
+
+	// Regression: bun's non-TTY reporter marks results as `(pass)`/`(fail)` and
+	// prints the code frame + `error:` block *before* the `(fail)` line. The
+	// old filter recognized none of these markers and reduced a failing run to
+	// bare counts, dropping the failed test name and assertion entirely.
+	#[test]
+	fn bun_non_tty_failure_keeps_error_block_fail_line_and_counts() {
+		let input = "\
+bun test v1.2.19 (aad3abea)
+
+test/ok.test.ts:
+(pass) suite > works [0.12ms]
+
+test/bundled-reference-laziness.test.ts:
+14 | \tconst result = runFixture();
+15 | \texpect(result.exitCode).toBe(0);
+              ^
+error: expect(received).toBe(expected)
+
+Expected: 0
+Received: 1
+
+      at runFixture (/work/pi/packages/catalog/test/bundled-reference-laziness.test.ts:14:52)
+      at <anonymous> (/work/pi/packages/catalog/test/bundled-reference-laziness.test.ts:20:43)
+(fail) bundled model laziness > provider options and the bundled registry stay lazy [124.31ms]
+
+ 625 pass
+ 1 fail
+ 3042 expect() calls
+Ran 626 tests across 84 files. [8.37s]
+";
+		let filtered = failures_only(input);
+
+		assert!(!filtered.contains("(pass) suite > works"));
+		assert!(filtered.contains("error: expect(received).toBe(expected)"));
+		assert!(filtered.contains("15 | \texpect(result.exitCode).toBe(0);"));
+		assert!(filtered.contains("Expected: 0"));
+		assert!(filtered.contains("Received: 1"));
+		assert!(filtered.contains("at runFixture"));
+		assert!(filtered.contains(
+			"(fail) bundled model laziness > provider options and the bundled registry stay lazy"
+		));
+		assert!(filtered.contains("625 pass"));
+		assert!(filtered.contains("1 fail"));
+		assert!(filtered.contains("Ran 626 tests across 84 files."));
+	}
+
+	#[test]
+	fn bun_non_tty_pass_lines_collapse_on_success() {
+		let input = "\
+bun test v1.2.19 (aad3abea)
+
+test/ok.test.ts:
+(pass) suite > works [0.12ms]
+(pass) suite > also works [0.10ms]
+
+ 2 pass
+ 0 fail
+Ran 2 tests across 1 file. [50.00ms]
+";
+		let filtered = drop_passed_lines(input);
+
+		assert!(!filtered.contains("(pass)"));
+		assert!(filtered.contains("2 pass"));
+		assert!(filtered.contains("0 fail"));
+		assert!(filtered.contains("Ran 2 tests across 1 file."));
+	}
+
+	// A failing run in an unrecognized format must never collapse to bare
+	// summary counts: the actual failure text is the whole point of the output.
+	#[test]
+	fn unrecognized_failure_format_falls_back_to_head_tail() {
+		let input = "something exploded in a novel way\nTests: 1 failed, 1 total\n";
+		let filtered = failures_only(input);
+
+		assert!(filtered.contains("something exploded in a novel way"));
+		assert!(filtered.contains("Tests: 1 failed, 1 total"));
 	}
 
 	#[test]

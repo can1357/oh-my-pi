@@ -10,7 +10,7 @@ Four similarly named things behave differently. Keep them straight:
 
 - **Context files** are read as plain Markdown and shown to the agent in generated project instructions (inside `<repo-rules>` with the default prompt template). They are session-opening instructions and background for repository work.
 - **Sticky rules** come from a top-level native `RULES.md`. They are converted into an always-apply rule that is re-attached near the current turn, so they keep their hold even after the visible conversation grows. See "Sticky rules vs normal context" below.
-- **Discovery providers** are the config-source adapters (`native`, `claude`, `codex`, `gemini`, `opencode`, `github`, `agents`, `agents-md`) that know where each tool keeps its files. The same provider that contributes context files may also contribute MCP servers, slash commands, skills, hooks, tools, prompts, and settings.
+- **Discovery providers** are the config-source adapters that know where each tool keeps its files. The full registry is `native`, `omp-plugins`, `claude`, `agent-plugins`, `codex`, `agents`, `claude-plugins`, `gemini`, `opencode`, `cursor`, `windsurf`, `cline`, `github`, `vscode`, `agents-md`, `mcp-json`, `ssh-json`, and `builtin-defaults`. Only some contribute context files (`native`, `claude`, `codex`, `gemini`, `opencode`, `github`, `agents`, `agents-md`); the rest contribute other capabilities such as rules, MCP servers, skills, commands, hooks, tools, or SSH hosts. The same provider that contributes context files may also contribute MCP servers, slash commands, skills, hooks, tools, prompts, and settings.
 - **Model providers** are inference backends such as `anthropic`, `openai`, `google`, `groq`, `ollama`, and `openrouter`. They have nothing to do with context files except that both kinds of id share the one `disabledProviders` list — see "Disabling discovery providers" below and [Providers](./providers.md).
 
 Authoring **skills** and **rule** files (as opposed to the sticky `RULES.md`) is covered in [Skills](./skills.md). Customizing the system prompt with `SYSTEM.md` is covered in [System prompt customization](./system-prompt-customization.md).
@@ -66,23 +66,34 @@ Put broad, durable project background in `AGENTS.md`. Reserve `RULES.md` for sho
 | `github`    | `.github/copilot-instructions.md`           | User + project | Project file `<cwd>/.github/copilot-instructions.md` only (no ancestor walk-up), plus a user-global `~/.copilot/copilot-instructions.md` (relocate with `COPILOT_HOME`). `AGENTS.md` candidates from `COPILOT_CUSTOM_INSTRUCTIONS_DIRS` are also considered at user scope, where normal one-user-file deduplication applies.                                 |
 | `agents`    | `.agent/AGENTS.md`, `.agents/AGENTS.md`     | User + project | User files from `~/.agent/` and `~/.agents/`; project files discovered while walking up from the current directory to the repository root.                                                                                                                                                                                                                   |
 | `agents-md` | `AGENTS.md`                                 | Project        | Standalone (non-config-directory) `AGENTS.md` files, discovered by walking up from the current directory to the repository root and, when that repository is nested under the user's home directory, through enclosing workspace directories up to but not including the home directory. With no repository root, discovery uses the home directory as the boundary for sessions under home and includes that boundary file. Files whose parent directory name starts with `.` are ignored — those belong to a config-directory provider instead.                                                                   |
+| `claude-md` | `CLAUDE.md`                                 | Project        | Standalone (non-config-directory) `CLAUDE.md` files, discovered by walking up from the current directory to the repository root and, when that repository is nested under the user's home directory, through enclosing workspace directories up to but not including the home directory. With no repository root, discovery uses the home directory as the boundary for sessions under home and includes that boundary file. Files whose parent directory name starts with `.` are ignored — those belong to a config-directory provider instead. |
 | `github`    | `.github/instructions/**/*.instructions.md` | Project rules  | GitHub Copilot / VS Code instruction files become rules. `applyTo: '*'`, `applyTo: '**'`, or `applyTo: '**/*'` is injected as always-apply content; other `applyTo` globs are listed in the rulebook with a generated description when needed and are readable as `rule://<name>`. Missing `applyTo` also produces a rulebook entry and a discovery warning. |
 
-Providers marked "(no ancestor walk-up)" only look in the current working directory's config directory. If you need ancestor walk-up behavior, prefer the native `.omp/AGENTS.md` format or a standalone `AGENTS.md` (the `agents-md` provider), or launch `omp` from the directory that holds the config directory.
+Providers marked "(no ancestor walk-up)" only look in the current working directory's config directory. If you need ancestor walk-up behavior, prefer the native `.omp/AGENTS.md` format or a standalone `AGENTS.md` or `CLAUDE.md` (the `agents-md` / `claude-md` providers), or launch `omp` from the directory that holds the config directory.
+
+The discovery registry also holds providers that contribute no context files at all: `cursor` (`.cursor/rules/*.mdc` and legacy `.cursorrules` rules, plus MCP servers and settings), `windsurf` (`.windsurf/rules/*.md`, legacy `.windsurfrules`, and global Windsurf rules, plus MCP servers), `cline` (`.clinerules` rules), `vscode` and `mcp-json` (MCP servers), `claude-plugins` (Claude marketplace plugins: skills, commands, rules, hooks, tools, MCP servers), `omp-plugins` (OMP plugins: skills, commands, rules, prompts, hooks, tools, MCP servers), `agent-plugins` (Agent Plugins standard packages: skills and MCP servers), `ssh-json` (SSH hosts), and `builtin-defaults` (built-in default rules). These become relevant for rules and other capabilities, and for the shared `disabledProviders` switch below.
 
 ## Load order and shadowing
 
-When two providers describe the _same_ scope, the higher-priority provider wins. Provider priorities:
+When two providers describe the _same_ scope, the higher-priority provider wins. Full registry priorities:
 
-| Priority | Provider id       |
-| -------: | ----------------- |
-|      100 | `native`          |
-|       80 | `claude`          |
-|       70 | `agents`, `codex` |
-|       60 | `gemini`          |
-|       55 | `opencode`        |
-|       30 | `github`          |
-|       10 | `agents-md`       |
+| Priority | Provider id                                        |
+| -------: | -------------------------------------------------- |
+|      100 | `native`                                           |
+|       90 | `omp-plugins`                                      |
+|       80 | `claude`                                           |
+|       75 | `agent-plugins`                                    |
+|       70 | `agents`, `claude-plugins`, `codex`                |
+|       60 | `gemini`                                           |
+|       55 | `opencode`                                         |
+|       50 | `cursor`, `windsurf`                               |
+|       40 | `cline`                                            |
+|       30 | `github`                                           |
+|       20 | `vscode`                                           |
+|       10 | `agents-md`                                        |
+|       10 | `claude-md`                                        |
+|        5 | `mcp-json`, `ssh-json`                             |
+|        1 | `builtin-defaults`                                 |
 
 Discovered files are then deduplicated by scope:
 
@@ -192,10 +203,10 @@ disabledProviders:
 
 | Id kind                | Examples                                                                           | Effect when listed                                                                                                                                                                 |
 | ---------------------- | ---------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Discovery provider ids | `native`, `claude`, `codex`, `gemini`, `opencode`, `github`, `agents`, `agents-md` | The entire config source is removed — not just its context files, but also any MCP servers, slash commands, skills, hooks, tools, prompts, and settings it would have contributed. |
+| Discovery provider ids | `native`, `claude`, `codex`, `gemini`, `opencode`, `github`, `agents`, `agents-md`, `claude-md` | The entire config source is removed — not just its context files, but also any MCP servers, slash commands, skills, hooks, tools, prompts, and settings it would have contributed. |
 | Model provider ids     | `anthropic`, `openai`, `google`, `groq`, `ollama`, `openrouter`                    | The model backend is removed from selection even when its credentials are present. See [Providers](./providers.md).                                                                |
 
-Ids are exact and the two namespaces do not collide by accident: `google` disables the Google model backend, while `gemini` disables the Gemini CLI discovery files. Disabling a discovery provider is heavier than it looks — disabling `claude`, for instance, also drops Claude-discovered MCP servers, commands, skills, hooks, tools, and settings, not only `CLAUDE.md`.
+Ids are exact and the two namespaces do not collide by accident: `google` disables the Google model backend, while `gemini` disables the Gemini CLI discovery files. Disabling a discovery provider is heavier than it looks — disabling `claude`, for instance, also drops Claude-discovered MCP servers, commands, skills, hooks, tools, and settings, not only `CLAUDE.md`. To drop the context file alone and keep everything else the provider contributes, use [`disabledExtensions`](#disabling-a-single-context-file) instead.
 
 Only `enabledModels` and `disabledProviders` support **path-scoped** entries, so you can vary provider availability per subtree:
 
@@ -211,20 +222,52 @@ A scoped entry applies when the cwd equals the configured path or sits beneath i
 
 Remember that higher-precedence settings layers **replace** array settings rather than appending to them. If your global config disables `claude` but a project config sets `disabledProviders: [github]`, then inside that project Claude discovery is re-enabled and only GitHub is disabled. See [Settings](./settings.md) for the full layer precedence, merge rules, and path-scoped array details.
 
+## Disabling a single context file
+
+`disabledProviders` removes a whole config source. To drop one context file and keep the rest of what its provider contributes, list its extension id in `disabledExtensions`:
+
+```yaml
+# ~/.omp/agent/config.yml, .omp/config.yml, or a --config overlay
+disabledExtensions:
+  - context-file:user:CLAUDE.md
+```
+
+Context-file ids have the form `context-file:<level>:<basename>`, where `<level>` is `user` or `project` and `<basename>` is the file name with no directory part:
+
+| Id                                  | Disables                                                                       |
+| ----------------------------------- | ------------------------------------------------------------------------------ |
+| `context-file:user:CLAUDE.md`       | The user-level `CLAUDE.md`, while Claude's MCP servers, commands, skills, hooks, tools, and settings keep loading. |
+| `context-file:project:AGENTS.md`    | **Every** project-level `AGENTS.md`, at each directory depth the walk reaches — the id carries no depth. |
+| `context-file:user:AGENTS.md`       | Every user-level file named `AGENTS.md`, whichever provider supplied it.       |
+
+The match is on level and file name only, so one entry covers every provider that contributes a file of that name at that level, and a project entry cannot be narrowed to a single depth. When you need per-directory control, use a project `.omp/config.yml` in the subtree that should differ, or the path-scoped `disabledProviders` form above.
+
+Disabling is not the same as shadowing, and the difference is visible: a disabled file is dropped before deduplication, so it does not claim its scope. **The file it used to shadow is loaded in its place.** In a project holding both `.claude/CLAUDE.md` and `AGENTS.md`, `CLAUDE.md` normally wins the depth-0 scope; disable `context-file:project:CLAUDE.md` and `AGENTS.md` becomes the project context rather than the scope falling empty. To leave the scope with no file at all, disable each candidate name.
+
+Two everyday uses:
+
+- **Non-interactive runs.** A user-level context file written for your own interactive sessions is usually wrong for `-p` runs driven by another program, which arrive with their own instructions. Disabling it in a `--config` overlay keeps your interactive setup untouched.
+- **Delegated work.** When one agent drives another, the caller's own operating instructions travel into the callee's prompt as user-level context and can contradict the task it was actually given.
+
+`disabledExtensions` is not path-scoped: only `enabledModels` and `disabledProviders` accept the `path:` form. Like every array setting it is replaced, not merged, by a higher-precedence layer.
+
+Browse the ids interactively with `/extensions`, which lists every discovered context file with its level, source, and current state, and toggles the same setting.
+
 ## Troubleshooting
 
 ### A file is not loaded
 
 - Native project context is read only from the nearest non-empty `.omp/` directory. That directory must contain a non-empty `AGENTS.md`; if it does not, discovery does not continue to a farther native directory.
-- A standalone `AGENTS.md` is handled by `agents-md`, not `native`.
+- A standalone `CLAUDE.md` is handled by `claude-md`, not `native`.
 - `.claude/CLAUDE.md`, `.gemini/GEMINI.md`, and `.github/copilot-instructions.md` are read only from the current working directory's config directory — not from every ancestor.
 - `~/.codex/AGENTS.md` and `~/.config/opencode/AGENTS.md` are user-level only and have no project equivalent.
 - Empty files contribute nothing for the native and standalone providers.
 - A disabled discovery provider contributes nothing — check `disabledProviders` across your global, project, and `--config` layers.
+- A single file can also be turned off on its own — check `disabledExtensions` for a matching `context-file:<level>:<basename>` entry, and remember that a project entry applies at every depth. `/extensions` shows the file as `disabled` when this is the cause.
 
 ### The wrong file wins
 
-At one user scope or project depth, the higher-priority provider shadows the others (native > claude > agents/codex > gemini > opencode > github > agents-md). To force deterministic behavior, move your guidance into `.omp/AGENTS.md` (native always wins) or disable the competing discovery provider.
+At one user scope or project depth, the higher-priority provider shadows the others (native > claude > agents/codex > gemini > opencode > github > agents-md > claude-md). To force deterministic behavior, move your guidance into `.omp/AGENTS.md` (native always wins) or disable the competing discovery provider.
 
 ### User context disappeared
 

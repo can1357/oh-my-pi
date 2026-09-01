@@ -16,19 +16,32 @@ _ADDON_RUSTC_FLAGS = [
 ]
 
 def _addon_transition_impl(settings, attr):
+    # Statically link the MSVC CRT for the shipped win32 addon: rustc gets
+    # +crt-static via the crate's rustc_flags select, and the C dependencies
+    # (opus/cmake, tree-sitter, blake3, ring) must move to /MT in lock-step so
+    # the final .node imports no VCRUNTIME140.dll from the Visual C++
+    # Redistributable (absent on a clean Windows install -> dlopen error 126).
+    # The static_link_msvcrt cc feature flips the toolchain compile flags that
+    # rules_rust forwards to cc-rs/cmake as CFLAGS/CXXFLAGS; it is inert for the
+    # zig/darwin toolchains, so scoping it to win32 is belt-and-suspenders.
+    features = list(settings["//command_line_option:features"])
+    if "win32" in str(attr.platform):
+        features = features + ["static_link_msvcrt"]
     return {
         "//command_line_option:platforms": str(attr.platform),
         "//command_line_option:compilation_mode": "opt",
+        "//command_line_option:features": features,
         "@rules_rust//rust/settings:lto": "thin",
         "@rules_rust//rust/settings:extra_rustc_flags": _ADDON_RUSTC_FLAGS,
     }
 
 _addon_transition = transition(
     implementation = _addon_transition_impl,
-    inputs = [],
+    inputs = ["//command_line_option:features"],
     outputs = [
         "//command_line_option:platforms",
         "//command_line_option:compilation_mode",
+        "//command_line_option:features",
         "@rules_rust//rust/settings:lto",
         "@rules_rust//rust/settings:extra_rustc_flags",
     ],

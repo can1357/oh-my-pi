@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -10,7 +10,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { getThemeByName } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import type { ImageAttachmentEntry, ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { InspectImageTool } from "@oh-my-pi/pi-coding-agent/tools/inspect-image";
 import { inspectImageToolRenderer } from "@oh-my-pi/pi-coding-agent/tools/inspect-image-renderer";
 import { toolRenderers } from "@oh-my-pi/pi-coding-agent/tools/renderers";
@@ -18,6 +18,8 @@ import { removeSyncWithRetries, sanitizeText } from "@oh-my-pi/pi-utils";
 
 const TINY_PNG_BASE64 =
 	"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==";
+const TINY_SVG =
+	'<svg xmlns="http://www.w3.org/2000/svg" width="12" height="7"><rect width="12" height="7" fill="red"/></svg>';
 
 const visionModel: Model<"openai-responses"> = buildModel({
 	id: "gpt-4o",
@@ -49,7 +51,7 @@ interface CreateSessionOptions {
 	availableModels?: Model<"openai-responses">[];
 	activeModel?: Model<"openai-responses">;
 	configureVisionRole?: boolean;
-	imageAttachments?: { label: string; uri: string; image: ImageContent }[];
+	imageAttachments?: ImageAttachmentEntry[];
 }
 
 interface CompleteSimpleStub {
@@ -64,6 +66,7 @@ function createSession(
 	settings = Settings.isolated(),
 	options: CreateSessionOptions = {},
 ): ToolSession {
+	settings.set("images.autoResize", false);
 	const availableModels = options.availableModels ?? [model];
 	const activeModel = options.activeModel ?? model;
 	if (options.configureVisionRole !== false) {
@@ -163,19 +166,19 @@ function createCompleteSimpleHangingStub(): CompleteSimpleStub {
 
 describe("InspectImageTool", () => {
 	let testDir: string;
+	let imagePath: string;
 
-	beforeEach(() => {
+	beforeAll(() => {
 		testDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-inspect-image-"));
+		imagePath = path.join(testDir, "screen.png");
+		fs.writeFileSync(imagePath, Buffer.from(TINY_PNG_BASE64, "base64"));
 	});
 
-	afterEach(() => {
+	afterAll(() => {
 		removeSyncWithRetries(testDir);
 	});
 
 	it("sends image and question to completeSimple and returns text-only result", async () => {
-		const imagePath = path.join(testDir, "screen.png");
-		fs.writeFileSync(imagePath, Buffer.from(TINY_PNG_BASE64, "base64"));
-
 		const stub = createCompleteSimpleSuccessStub("Detected text: Settings");
 		const tool = new InspectImageTool(createSession(testDir, visionModel), stub.fn);
 		const result = await tool.execute("call-1", {
@@ -184,6 +187,7 @@ describe("InspectImageTool", () => {
 		});
 
 		expect(result.content).toEqual([{ type: "text", text: "Detected text: Settings" }]);
+		expect(result.details?.usage).toMatchObject({ input: 1, output: 1, totalTokens: 2 });
 		expect((result.content as Array<{ type: string }>).some(c => c.type === "image")).toBe(false);
 		expect(stub.calls).toHaveLength(1);
 
@@ -195,11 +199,23 @@ describe("InspectImageTool", () => {
 		expect(contentParts[0]?.type).toBe("image");
 		expect(contentParts[1]).toEqual({ type: "text", text: "Extract visible UI labels." });
 	});
+	it("rasterizes a selected SVG before sending it to the vision model", async () => {
+		const svgPath = path.join(testDir, "diagram.svg");
+		fs.writeFileSync(svgPath, TINY_SVG);
+		const stub = createCompleteSimpleSuccessStub("Red rectangle");
+		const tool = new InspectImageTool(createSession(testDir, visionModel), stub.fn);
+
+		const result = await tool.execute("call-svg", {
+			path: `${svgPath}:img`,
+			question: "Describe the diagram.",
+		});
+
+		expect(stub.calls).toHaveLength(1);
+		expect(result.details?.imagePath).toBe(svgPath);
+		expect(result.details?.mimeType).toBe("image/png");
+	});
 
 	it("passes the vision role's configured thinking effort into the oneshot", async () => {
-		const imagePath = path.join(testDir, "screen.png");
-		fs.writeFileSync(imagePath, Buffer.from(TINY_PNG_BASE64, "base64"));
-
 		const settings = Settings.isolated();
 		settings.setModelRole("vision", `${reasoningVisionModel.provider}/${reasoningVisionModel.id}:high`);
 
@@ -228,7 +244,9 @@ describe("InspectImageTool", () => {
 		const missingCwd = path.join(testDir, "missing-cwd");
 		const tool = new InspectImageTool(
 			createSession(missingCwd, visionModel, "test-key", Settings.isolated({ "images.autoResize": false }), {
-				imageAttachments: [{ label: "Image #1", uri: "attachment://1", image }],
+				imageAttachments: [
+					{ label: "Image #1", uri: "attachment://1", image, sourcePath: path.join(testDir, "pasted-image.png") },
+				],
 			}),
 			stub.fn,
 		);
@@ -252,9 +270,9 @@ describe("InspectImageTool", () => {
 	it("resolves bracketed labels and attachment URIs deterministically", async () => {
 		const first: ImageContent = { type: "image", data: TINY_PNG_BASE64, mimeType: "image/png" };
 		const second: ImageContent = { type: "image", data: TINY_PNG_BASE64, mimeType: "image/png" };
-		const attachments = [
-			{ label: "Image #1", uri: "attachment://1", image: first },
-			{ label: "Image #2", uri: "attachment://2", image: second },
+		const attachments: ImageAttachmentEntry[] = [
+			{ label: "Image #1", uri: "attachment://1", image: first, sourcePath: path.join(testDir, "first.png") },
+			{ label: "Image #2", uri: "attachment://2", image: second, sourcePath: path.join(testDir, "second.png") },
 		];
 
 		const bracketStub = createCompleteSimpleSuccessStub("First");
@@ -286,7 +304,14 @@ describe("InspectImageTool", () => {
 		const stub = createCompleteSimpleForbiddenStub();
 		const tool = new InspectImageTool(
 			createSession(testDir, visionModel, "test-key", Settings.isolated(), {
-				imageAttachments: [{ label: "Image #1", uri: "attachment://1", image }],
+				imageAttachments: [
+					{
+						label: "Image #1",
+						uri: "attachment://1",
+						image,
+						sourcePath: path.join(testDir, "missing-label-source.png"),
+					},
+				],
 			}),
 			stub.fn,
 		);
@@ -331,9 +356,12 @@ describe("InspectImageTool", () => {
 				const tool = session.getToolByName("inspect_image");
 				expect(tool).toBeDefined();
 				const wiredToolSession = (tool as unknown as { session?: ToolSession }).session;
-				expect(wiredToolSession?.getImageAttachments?.()).toEqual([
-					{ label: "Image #1", uri: "attachment://1", image },
-				]);
+				const attachments = wiredToolSession?.getImageAttachments?.();
+				const sourcePath = attachments?.[0]?.sourcePath;
+				if (!sourcePath) {
+					throw new Error("Expected attachment sourcePath to be populated");
+				}
+				expect(attachments).toEqual([{ label: "Image #1", uri: "attachment://1", image, sourcePath }]);
 			} finally {
 				await session.dispose();
 			}
@@ -343,9 +371,6 @@ describe("InspectImageTool", () => {
 	});
 
 	it("sends question text unchanged", async () => {
-		const imagePath = path.join(testDir, "screen.png");
-		fs.writeFileSync(imagePath, Buffer.from(TINY_PNG_BASE64, "base64"));
-
 		const stub = createCompleteSimpleSuccessStub("Looks clear");
 		const tool = new InspectImageTool(createSession(testDir, visionModel), stub.fn);
 		await tool.execute("call-1b", { path: imagePath, question: "What warning is shown?" });
@@ -405,9 +430,6 @@ describe("InspectImageTool", () => {
 	});
 
 	it("fails when images.blockImages is enabled", async () => {
-		const imagePath = path.join(testDir, "screen.png");
-		fs.writeFileSync(imagePath, Buffer.from(TINY_PNG_BASE64, "base64"));
-
 		const stub = createCompleteSimpleForbiddenStub();
 		const settings = Settings.isolated({ "images.blockImages": true });
 		const tool = new InspectImageTool(createSession(testDir, visionModel, "test-key", settings), stub.fn);
@@ -419,9 +441,6 @@ describe("InspectImageTool", () => {
 	});
 
 	it("falls back to @default when vision role is unset", async () => {
-		const imagePath = path.join(testDir, "screen.png");
-		fs.writeFileSync(imagePath, Buffer.from(TINY_PNG_BASE64, "base64"));
-
 		const settings = Settings.isolated();
 		settings.setModelRole("default", `${visionModel.provider}/${visionModel.id}`);
 
@@ -442,10 +461,24 @@ describe("InspectImageTool", () => {
 		expect(selectedModel?.id).toBe("gpt-4o");
 	});
 
-	it("fails with actionable error when resolved model does not support image input", async () => {
-		const imagePath = path.join(testDir, "screen.png");
-		fs.writeFileSync(imagePath, Buffer.from(TINY_PNG_BASE64, "base64"));
+	it("skips text-only role fallbacks for an available vision model on the active provider", async () => {
+		const stub = createCompleteSimpleSuccessStub("Vision-capable fallback used");
+		const tool = new InspectImageTool(
+			createSession(testDir, textOnlyModel, "test-key", Settings.isolated(), {
+				configureVisionRole: false,
+				availableModels: [textOnlyModel, visionModel],
+				activeModel: textOnlyModel,
+			}),
+			stub.fn,
+		);
 
+		const result = await tool.execute("call-1d", { path: imagePath, question: "What text is visible?" });
+		expect(result.details?.model).toBe("openai/gpt-4o");
+		const selectedModel = stub.calls[0]?.[0] as { id?: string } | undefined;
+		expect(selectedModel?.id).toBe("gpt-4o");
+	});
+
+	it("fails with actionable error when resolved model does not support image input", async () => {
 		const stub = createCompleteSimpleForbiddenStub();
 		const tool = new InspectImageTool(createSession(testDir, textOnlyModel), stub.fn);
 
@@ -456,9 +489,6 @@ describe("InspectImageTool", () => {
 	});
 
 	it("fails with actionable error when API key is missing", async () => {
-		const imagePath = path.join(testDir, "screen.png");
-		fs.writeFileSync(imagePath, Buffer.from(TINY_PNG_BASE64, "base64"));
-
 		const stub = createCompleteSimpleForbiddenStub();
 		const tool = new InspectImageTool(createSession(testDir, visionModel, ""), stub.fn);
 
@@ -469,42 +499,40 @@ describe("InspectImageTool", () => {
 	});
 
 	it("times out with a configured error when the vision-model call stalls", async () => {
-		const imagePath = path.join(testDir, "screen.png");
-		fs.writeFileSync(imagePath, Buffer.from(TINY_PNG_BASE64, "base64"));
-
 		const stub = createCompleteSimpleHangingStub();
 		const settings = Settings.isolated({ "inspect_image.timeoutMs": 50 });
 		const tool = new InspectImageTool(createSession(testDir, visionModel, "test-key", settings), stub.fn);
+		const timeoutController = new AbortController();
+		const timeoutSpy = vi.spyOn(AbortSignal, "timeout").mockImplementation(timeoutMs => {
+			expect(timeoutMs).toBe(50);
+			queueMicrotask(() => timeoutController.abort());
+			return timeoutController.signal;
+		});
 
-		const start = Date.now();
-		await expect(tool.execute("call-timeout", { path: imagePath, question: "Anything?" })).rejects.toThrow(
-			/inspect_image request timed out.*inspect_image\.timeoutMs.*50ms/,
-		);
-		const elapsed = Date.now() - start;
-		expect(elapsed).toBeLessThan(5000);
+		try {
+			await expect(tool.execute("call-timeout", { path: imagePath, question: "Anything?" })).rejects.toThrow(
+				/inspect_image request timed out.*inspect_image\.timeoutMs.*50ms/,
+			);
+		} finally {
+			timeoutSpy.mockRestore();
+		}
 		expect(stub.calls).toHaveLength(1);
 	});
 
 	it("surfaces manual abort as aborted, not as timed out", async () => {
-		const imagePath = path.join(testDir, "screen.png");
-		fs.writeFileSync(imagePath, Buffer.from(TINY_PNG_BASE64, "base64"));
-
 		const stub = createCompleteSimpleHangingStub();
 		const settings = Settings.isolated({ "inspect_image.timeoutMs": 60_000 });
 		const tool = new InspectImageTool(createSession(testDir, visionModel, "test-key", settings), stub.fn);
 		const controller = new AbortController();
 
 		const pending = tool.execute("call-manual-abort", { path: imagePath, question: "Anything?" }, controller.signal);
-		setTimeout(() => controller.abort(), 25);
+		queueMicrotask(() => controller.abort());
 		await expect(pending).rejects.toThrow(/inspect_image request aborted/);
 		await expect(pending).rejects.not.toThrow(/timed out/);
 		expect(stub.calls).toHaveLength(1);
 	});
 
 	it("skips the timeout guard when inspect_image.timeoutMs is zero", async () => {
-		const imagePath = path.join(testDir, "screen.png");
-		fs.writeFileSync(imagePath, Buffer.from(TINY_PNG_BASE64, "base64"));
-
 		const stub = createCompleteSimpleSuccessStub("Timeout disabled path");
 		const settings = Settings.isolated({ "inspect_image.timeoutMs": 0 });
 		const tool = new InspectImageTool(createSession(testDir, visionModel, "test-key", settings), stub.fn);

@@ -1,14 +1,14 @@
 // Integration test — real timers are required (ts-no-test-timers exception): this spawns the
 // actual cross-process daemon broker driving real child processes, and the bug is a leaked real
 // `setTimeout` in #settle that resurrects a stopped daemon. Fake timers cannot control the OS
-// process-exit promise or the unix-socket RPC the broker relies on, and proving the *absence* of a
-// resurrection means waiting past the real backoff window (no signal exists to await).
+// process-exit promise or the unix-socket RPC the broker relies on. The embedded broker uses a
+// shorter real backoff here; proving the absence of resurrection still requires crossing it.
 import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { Process } from "@oh-my-pi/pi-natives";
 import { TempDir } from "@oh-my-pi/pi-utils";
-import { startDaemonBrokerFromEnvironment } from "../../src/launch/broker";
+import { type DaemonBrokerStartOptions, startDaemonBrokerFromEnvironment } from "../../src/launch/broker";
 import { createDaemonBrokerClient, type DaemonBrokerClient } from "../../src/launch/client";
 import {
 	DAEMON_IDLE_GRACE_ENV,
@@ -17,19 +17,23 @@ import {
 	type DaemonSnapshot,
 } from "../../src/launch/protocol";
 
+const RESTART_BACKOFF_BASE_MS = 250;
+const INITIAL_RESTART_DELAY_MS = RESTART_BACKOFF_BASE_MS * 2;
+const RESTART_SETTLE_MARGIN_MS = 150;
+
 function restoreEnv(name: string, value: string | undefined): void {
 	if (value === undefined) delete process.env[name];
 	else process.env[name] = value;
 }
 
-function startBroker(projectDir: string, runtimeDir: string): Promise<void> {
+function startBroker(projectDir: string, runtimeDir: string, options: DaemonBrokerStartOptions = {}): Promise<void> {
 	const previousProjectDir = process.env[DAEMON_PROJECT_DIR_ENV];
 	const previousRuntimeDir = process.env[DAEMON_RUNTIME_DIR_ENV];
 	const previousGrace = process.env[DAEMON_IDLE_GRACE_ENV];
 	process.env[DAEMON_PROJECT_DIR_ENV] = projectDir;
 	process.env[DAEMON_RUNTIME_DIR_ENV] = runtimeDir;
 	process.env[DAEMON_IDLE_GRACE_ENV] = "5000";
-	const broker = startDaemonBrokerFromEnvironment();
+	const broker = startDaemonBrokerFromEnvironment(options);
 	restoreEnv(DAEMON_PROJECT_DIR_ENV, previousProjectDir);
 	restoreEnv(DAEMON_RUNTIME_DIR_ENV, previousRuntimeDir);
 	restoreEnv(DAEMON_IDLE_GRACE_ENV, previousGrace);
@@ -69,7 +73,9 @@ describe("daemon broker restart settling", () => {
 		const previousTitle = process.title;
 		// Create the client (writes broker.token) before starting the broker, which reads that token.
 		const client = await createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
-		const broker = startBroker(projectDir, runtimeDir);
+		const broker = startBroker(projectDir, runtimeDir, {
+			restartBackoffBaseMs: RESTART_BACKOFF_BASE_MS,
+		});
 		const name = "crash-loop";
 		try {
 			const started = await client.request({
@@ -106,8 +112,8 @@ describe("daemon broker restart settling", () => {
 			if (stopped.op !== "stop") throw new Error(`unexpected result: ${stopped.op}`);
 			expect(stopped.daemon.state).toBe("exited");
 
-			// Wait past the initial backoff (2s) where a leaked timer would have fired #launch.
-			await Bun.sleep(2_600);
+			// Cross the configured initial backoff where a leaked timer would fire #launch.
+			await Bun.sleep(INITIAL_RESTART_DELAY_MS + RESTART_SETTLE_MARGIN_MS);
 			const afterStop = await snapshotOf(client, name);
 			expect(afterStop.state).toBe("exited");
 			expect(afterStop.pid).toBeUndefined();

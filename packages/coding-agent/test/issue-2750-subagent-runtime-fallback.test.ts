@@ -49,6 +49,7 @@ function createYieldingSession(fallback: "served" | "unproven" = "served"): Agen
 		getEnabledToolNames: () => ["yield"],
 		setActiveToolsByName: async () => {},
 		setIrcWakeTurnObserver: () => {},
+		subscribeRunState: () => () => {},
 		subscribe: (listener: (event: { type: string; [key: string]: unknown }) => void) => {
 			listeners.push(listener);
 			return () => {};
@@ -79,6 +80,8 @@ function createYieldingSession(fallback: "served" | "unproven" = "served"): Agen
 			});
 		},
 		waitForIdle: async () => {},
+		prepareForHeadlessAdvisorDrain: () => {},
+		waitForAdvisorCatchup: async () => true,
 		getLastAssistantMessage: () => undefined,
 		abort: async () => {},
 		dispose: async () => {},

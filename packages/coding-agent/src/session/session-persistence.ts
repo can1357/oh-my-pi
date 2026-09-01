@@ -1,4 +1,4 @@
-import { isAnthropicWebSearchHistoryBlock } from "@oh-my-pi/pi-ai/providers/anthropic-wire";
+import { isAnthropicServerToolHistoryBlock } from "@oh-my-pi/pi-ai/providers/anthropic-wire";
 import {
 	type BlobStore,
 	externalizeImageDataSync,
@@ -13,6 +13,12 @@ const TRUNCATION_NOTICE = "\n\n[Session persistence truncated large content]";
 /** Minimum base64 length to externalize to blob store (skip tiny inline images) */
 const BLOB_EXTERNALIZE_THRESHOLD = 1024;
 const TEXT_CONTENT_KEY = "content";
+/** Parent key under which snapcompact persists its base64 PNG frame archive
+ *  (`preserveData.snapcompact.frames[]`). Frame objects are image payloads, so
+ *  their base64 must externalize to the blob store rather than fall through to
+ *  generic string truncation, which appends {@link TRUNCATION_NOTICE} and
+ *  corrupts the base64 the provider decodes on resume. */
+const SNAPCOMPACT_FRAMES_KEY = "frames";
 
 function truncateString(value: string, maxLength: number): string {
 	if (value.length <= maxLength) return value;
@@ -24,6 +30,11 @@ function truncateString(value: string, maxLength: number): string {
 		}
 	}
 	return truncated;
+}
+
+/** Detect strings damaged by an older persistence pass so loaders can migrate them safely. */
+export function isPersistenceTruncatedString(value: unknown): value is string {
+	return typeof value === "string" && value.endsWith(TRUNCATION_NOTICE);
 }
 
 export function isImageBlock(value: unknown): value is { type: "image"; data: string; mimeType?: string } {
@@ -51,13 +62,29 @@ export function isImageDataPayload(value: unknown): value is { data: string; mim
 	);
 }
 
-function shouldExternalizeImagePayload(
+/**
+ * True when an image payload sits in a persistence position whose base64 is
+ * externalized to the blob store instead of truncated as a generic string: a
+ * `content` image block, an `images[]` entry, or a snapcompact frame under
+ * `frames[]`. Shared by the persist path ({@link shouldExternalizeImagePayload})
+ * and the load path (`resolvePersistedBlobRefs`) so the two never drift and
+ * strand a payload externalized on write but not resolved on read.
+ */
+export function isExternalizableImagePosition(
 	value: unknown,
 	key: string | undefined,
 ): value is { data: string; mimeType?: string } {
 	if (!isImageDataPayload(value)) return false;
+	return (key === TEXT_CONTENT_KEY && isImageBlock(value)) || key === "images" || key === SNAPCOMPACT_FRAMES_KEY;
+}
+
+function shouldExternalizeImagePayload(
+	value: unknown,
+	key: string | undefined,
+): value is { data: string; mimeType?: string } {
+	if (!isExternalizableImagePosition(value, key)) return false;
 	if (isBlobRef(value.data) || value.data.length < BLOB_EXTERNALIZE_THRESHOLD) return false;
-	return (key === TEXT_CONTENT_KEY && isImageBlock(value)) || key === "images";
+	return true;
 }
 
 /** True for a non-empty string — marks signature/encrypted fields whose block must persist verbatim. */
@@ -100,8 +127,8 @@ function truncateForPersistence(obj: unknown, blobStore: BlobStore, key?: string
 	// Persist signed blocks verbatim — never truncate, externalize, or descend.
 	// Unsigned blocks (e.g. an interrupted stream) have no such binding and stay
 	// truncatable for size control.
-	// Anthropic validates native web-search history byte-for-byte on replay.
-	// Keep the complete typed block atomic, including nested encrypted_content.
+	// Anthropic validates native web-search and tool-search history byte-for-byte
+	// on replay. Keep the complete typed block atomic, including opaque content.
 	if (typeof obj === "object" && "type" in obj && obj.type === "anthropicServerTool" && "block" in obj) {
 		const block = obj.block;
 		if (typeof block === "object" && block !== null && "type" in block && typeof block.type === "string") {
@@ -112,7 +139,7 @@ function truncateForPersistence(obj: unknown, blobStore: BlobStore, key?: string
 				...("tool_use_id" in block ? { tool_use_id: block.tool_use_id } : {}),
 				...("content" in block ? { content: block.content } : {}),
 			};
-			if (isAnthropicWebSearchHistoryBlock(validationView)) return obj;
+			if (isAnthropicServerToolHistoryBlock(validationView)) return obj;
 		}
 	}
 	if (typeof obj === "object" && "type" in obj) {

@@ -23,9 +23,14 @@ interface UmansUsagePayload {
 		requests?: { limit?: number; hard_cap?: number | null; window_seconds?: number };
 		concurrency?: { limit?: number; hard_cap?: number | null };
 	};
+	/** Rolling 5h window metadata; `resets_at` anchors the status-line countdown. */
+	window?: { started_at?: string; resets_at?: string; remaining_minutes?: number };
 	usage?: {
 		requests_in_window?: number;
 		remaining_requests?: number;
+		/** Model-weighted "effective requests" (umans-flash counts 0.5). */
+		weighted_in_window?: number;
+		weighted_remaining_requests?: number;
 		concurrent_sessions?: number;
 		tokens_in?: number;
 		tokens_out?: number;
@@ -55,6 +60,18 @@ function resolveStatus(usedFraction: number | undefined): UsageStatus | undefine
 	return "ok";
 }
 
+/**
+ * Soft-cap status never reaches `exhausted`: hitting the effective-request
+ * limit only means burst headroom is being consumed — Umans throttles (429)
+ * only near the burst ceiling, which the hard row tracks. `exhausted` must
+ * stay off this row or the usage-aware fallback demotes a healthy account.
+ */
+function softCapStatus(usedFraction: number | undefined): UsageStatus | undefined {
+	if (usedFraction === undefined) return undefined;
+	if (usedFraction >= 0.9) return "warning";
+	return "ok";
+}
+
 function buildAmount(args: {
 	used: number | undefined;
 	limit: number | undefined;
@@ -75,30 +92,88 @@ function buildAmount(args: {
 	};
 }
 
-function buildRequestsLimit(payload: UmansUsagePayload, provider: string): UsageLimit | null {
+function buildRequestsLimits(payload: UmansUsagePayload, provider: string): UsageLimit[] {
 	const limit = toFiniteNumber(payload.limits?.requests?.limit);
+	const hardCap = toFiniteNumber(payload.limits?.requests?.hard_cap);
 	const windowSeconds = toFiniteNumber(payload.limits?.requests?.window_seconds);
-	const used = toFiniteNumber(payload.usage?.requests_in_window);
-	const remaining = toFiniteNumber(payload.usage?.remaining_requests);
-	if (limit === undefined && used === undefined) return null;
-	const amount = buildAmount({ used, limit, remaining, unit: "requests" });
-	// Rolling window: each request ages out `window_seconds` after it fired, so
-	// there is no single reset timestamp. Surface the window size + label only.
-	// `window.id` is `"5h"` to match the status-line usage segment's window-id
-	// contract (it only recognizes `"5h"`/`"7d"`); `label` stays human-readable.
+	const rawUsed = toFiniteNumber(payload.usage?.requests_in_window);
+	const rawRemaining = toFiniteNumber(payload.usage?.remaining_requests);
+	const weightedUsed = toFiniteNumber(payload.usage?.weighted_in_window);
+	const weightedRemaining = toFiniteNumber(payload.usage?.weighted_remaining_requests);
+	if (limit === undefined && rawUsed === undefined && weightedUsed === undefined) return [];
+
+	// The 5h window is rolling (FIFO: each request ages out five hours after it
+	// fired), but the payload still reports an absolute `resets_at` for the
+	// current window epoch — surface it as an incremental countdown (`tick`)
+	// rather than a hard reset. `window.id` is `"5h"` to match the status-line
+	// usage segment's window-id contract (it only recognizes `"5h"`/`"7d"`).
+	let resetsAt: number | undefined;
+	if (payload.window?.resets_at) {
+		const parsed = Date.parse(payload.window.resets_at);
+		resetsAt = Number.isNaN(parsed) ? undefined : parsed;
+	}
 	const window: UsageWindow = {
 		id: "5h",
 		label: "rolling 5h",
 		durationMs: windowSeconds ? windowSeconds * 1000 : 5 * HOUR_MS,
+		...(resetsAt !== undefined ? { resetsAt, resetLabel: "tick" } : {}),
 	};
-	return {
-		id: "umans:requests",
-		label: "Requests (rolling 5h)",
-		scope: { provider, windowId: window.id, shared: true },
-		window,
-		amount,
-		status: resolveStatus(amount.usedFraction),
-	};
+
+	// Single row: either payloads without weighted counters (legacy) or payloads
+	// that report weighted usage but no burst ceiling (`hard_cap`). Without a
+	// burst ceiling there is no hard row to defer exhaustion to, so the
+	// authoritative counter — weighted when available, else raw — drives the
+	// single row and CAN exhaust at the limit. Raw burst traffic above the
+	// limit still never drives exhaustion on its own: weighted headroom stays
+	// decisive (https://github.com/can1357/oh-my-pi/issues/7858).
+	if (weightedUsed === undefined || hardCap === undefined) {
+		const amount = buildAmount({
+			used: weightedUsed ?? rawUsed,
+			limit,
+			remaining: weightedUsed !== undefined ? weightedRemaining : rawRemaining,
+			unit: "requests",
+		});
+		return [
+			{
+				id: "umans:requests",
+				label: "Requests (rolling 5h)",
+				scope: { provider, windowId: window.id, shared: true },
+				window,
+				amount,
+				status: resolveStatus(amount.usedFraction),
+			},
+		];
+	}
+
+	// Umans weights requests by model ("effective requests": umans-flash counts
+	// 0.5), so the weighted counters are the authoritative utilization against
+	// the soft `limit`; the raw counters include burst/superseded traffic and
+	// read as exhausted mid-window while the account still has weighted
+	// headroom (https://github.com/can1357/oh-my-pi/issues/7858). Soft cap hits
+	// warn; only the burst ceiling (`hard_cap`, raw counts) can exhaust.
+	const softAmount = buildAmount({ used: weightedUsed, limit, remaining: weightedRemaining, unit: "requests" });
+	const limits: UsageLimit[] = [
+		{
+			id: "umans:requests:soft",
+			label: "Requests (soft cap)",
+			scope: { provider, windowId: window.id, shared: true },
+			window,
+			amount: softAmount,
+			status: softCapStatus(softAmount.usedFraction),
+		},
+	];
+	if (hardCap !== undefined && rawUsed !== undefined) {
+		const hardAmount = buildAmount({ used: rawUsed, limit: hardCap, remaining: undefined, unit: "requests" });
+		limits.push({
+			id: "umans:requests:hard",
+			label: "Requests (burst ceiling)",
+			scope: { provider, windowId: window.id, shared: true },
+			window,
+			amount: hardAmount,
+			status: resolveStatus(hardAmount.usedFraction),
+		});
+	}
+	return limits;
 }
 
 function buildConcurrencyLimit(payload: UmansUsagePayload, provider: string): UsageLimit | null {
@@ -157,9 +232,7 @@ async function fetchUmansUsage(params: UsageFetchParams, ctx: UsageFetchContext)
 		return null;
 	}
 
-	const limits: UsageLimit[] = [];
-	const requests = buildRequestsLimit(payload, params.provider);
-	if (requests) limits.push(requests);
+	const limits: UsageLimit[] = [...buildRequestsLimits(payload, params.provider)];
 	const concurrency = buildConcurrencyLimit(payload, params.provider);
 	if (concurrency) limits.push(concurrency);
 	if (limits.length === 0) return null;

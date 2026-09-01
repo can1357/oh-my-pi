@@ -209,7 +209,7 @@ describe("browser run cancellation", () => {
 
 	it("reports user rethrows from native browser-promise combinators", async () => {
 		vi.useRealTimers();
-		for (const name of ["all", "race"] as const) {
+		for (const name of ["all", "race", "allSettled", "any"] as const) {
 			const owner = {};
 			const browserFailure = new Error(`${name} browser failure`);
 			const floatingRejections: unknown[] = [];
@@ -229,7 +229,17 @@ describe("browser run cancellation", () => {
 				owner,
 				reason => floatingRejections.push(reason),
 				async () => {
-					const combined = name === "all" ? Promise.all([facade.fail()]) : Promise.race([facade.fail()]);
+					const combined =
+						name === "all"
+							? Promise.all([facade.fail()])
+							: name === "race"
+								? Promise.race([facade.fail()])
+								: name === "allSettled"
+									? Promise.allSettled([facade.fail()]).then(results => {
+											const [first] = results;
+											if (first?.status === "rejected") throw first.reason;
+										})
+									: Promise.any([facade.fail()]);
 					void combined.catch(reason => {
 						throw reason;
 					});
@@ -237,7 +247,13 @@ describe("browser run cancellation", () => {
 				},
 			);
 
-			expect(floatingRejections).toEqual([browserFailure]);
+			if (name === "any") {
+				expect(floatingRejections).toHaveLength(1);
+				expect(floatingRejections[0]).toBeInstanceOf(AggregateError);
+				expect((floatingRejections[0] as AggregateError).errors).toEqual([browserFailure]);
+			} else {
+				expect(floatingRejections).toEqual([browserFailure]);
+			}
 			expect(Promise[name]).toBe(originalCombinator);
 		}
 	});

@@ -1,6 +1,13 @@
 import { describe, expect, it } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
-import { omitUndefinedArgs, piGrepSkip } from "../src/providers/cursor-pi-args";
+import {
+	cursorEditOwnedReadPath,
+	cursorRawReadPath,
+	omitUndefinedArgs,
+	piGrepSkip,
+	piReadPath,
+} from "../src/providers/cursor-pi-args";
+
 import type { Tool } from "../src/types";
 import { validateToolArguments } from "../src/utils/validation";
 
@@ -82,5 +89,25 @@ describe("omitUndefinedArgs", () => {
 				arguments: omitUndefinedArgs(rawGrep),
 			}),
 		).toEqual({ pattern: "needle", path: "." });
+	});
+});
+
+describe("cursorRawReadPath", () => {
+	it("appends :raw to a whole-file path so hashline markup is not returned", () => {
+		expect(cursorRawReadPath("/tmp/note.txt")).toBe("/tmp/note.txt:raw");
+	});
+
+	it("inserts raw before an existing line range instead of dropping the range", () => {
+		expect(cursorRawReadPath("/tmp/note.txt:10-20")).toBe("/tmp/note.txt:raw:10-20");
+	});
+
+	it("leaves a path that already carries raw alone", () => {
+		expect(cursorRawReadPath("/tmp/note.txt:raw")).toBe("/tmp/note.txt:raw");
+		expect(cursorRawReadPath("/tmp/note.txt:raw:2+3")).toBe("/tmp/note.txt:raw:2+3");
+	});
+
+	it("does not stack a second :raw when a range is composed onto a raw path", () => {
+		expect(piReadPath("/tmp/note.txt:raw", 2, 1)).toBe("/tmp/note.txt:raw:2+1");
+		expect(cursorEditOwnedReadPath("/tmp/note.txt", 2, 1)).toBe("/tmp/note.txt:raw:2+1");
 	});
 });

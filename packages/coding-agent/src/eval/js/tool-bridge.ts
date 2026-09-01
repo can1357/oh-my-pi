@@ -37,7 +37,7 @@ function toolResultHasError(result: AgentToolResult): boolean {
 }
 
 function getTool(session: ToolSession, name: string): AgentTool {
-	const tool = session.getToolByName?.(name);
+	const tool = session.getToolForEvalBridge ? session.getToolForEvalBridge(name) : session.getToolByName?.(name);
 	if (!tool) {
 		throw new ToolError(`Unknown tool from js runtime: ${name}`);
 	}
@@ -120,11 +120,22 @@ export async function callSessionTool(name: string, args: unknown, options: Tool
 	if (name === EVAL_CONCURRENCY_BRIDGE_NAME) {
 		return runEvalConcurrency(args, options);
 	}
+	if (name === "checkpoint" || name === "rewind") {
+		// The session recognizes checkpoint/rewind only as direct toolResult
+		// messages; a bridged call would report success without taking effect.
+		throw new ToolError(`\`${name}\` cannot run through the eval bridge; call the direct \`${name}\` tool.`);
+	}
 	const tool = getTool(options.session, name);
 	const normalizedArgs = normalizeArgs(args);
 	const toolCallId = `js-${name}-${crypto.randomUUID()}`;
 	try {
-		const result = await tool.execute(toolCallId, normalizedArgs, options.signal);
+		const result = await tool.execute(
+			toolCallId,
+			normalizedArgs,
+			options.signal,
+			undefined,
+			options.session.getToolContext?.(),
+		);
 		const textBlocks = result.content.filter(
 			(content): content is { type: "text"; text: string } =>
 				content.type === "text" && typeof content.text === "string",

@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -392,61 +392,67 @@ describe("MemoryProtocolHandler", () => {
 interface MnemopiFixture {
 	state: MnemopiSessionState;
 	dbDir: TempDir;
+	session: AgentSession;
 }
 
-async function withMnemopiSession(
-	fn: (fixture: MnemopiFixture) => Promise<void>,
-	options: { bank?: string } = {},
-): Promise<void> {
-	const dbDir = TempDir.createSync(`memory-protocol-mnemopi-${Date.now()}-`);
-	const bank = options.bank ?? "test-bank";
-	const config = {
-		dbPath: dbDir.join("mnemopi.db"),
-		bank,
-		autoRecall: false,
-		autoRetain: false,
-		polyphonicRecall: false,
-		enhancedRecall: false,
-		proactiveLinking: false,
-		retainEveryNTurns: 3,
-		recallLimit: 10,
-		recallContextTurns: 1,
-		recallMaxQueryChars: 800,
-		injectionTokenLimit: 1024,
-		debug: false,
-		providerOptions: {
-			noEmbeddings: true,
-			llm: false,
-		},
-		llmMode: "none" as const,
-	} as unknown as ConstructorParameters<typeof MnemopiSessionState>[0]["config"];
-	const session = {
-		sessionId: "test-mnemopi",
-		sessionManager: {
-			getEntries: () => [],
-			getCwd: () => dbDir.path(),
-			getArtifactsDir: () => null,
-			getSessionId: () => "test-mnemopi",
-		},
-		emitNotice: () => {},
-		getHindsightSessionState: () => undefined,
-	} as unknown as AgentSession;
-	const state = new MnemopiSessionState({ sessionId: "test-mnemopi", config, session });
-	setMnemopiSessionState(session, state);
+let sharedMnemopiFixture: MnemopiFixture | undefined;
+
+async function withMnemopiSession(fn: (fixture: MnemopiFixture) => Promise<void>): Promise<void> {
+	if (!sharedMnemopiFixture) {
+		const dbDir = TempDir.createSync("memory-protocol-mnemopi-");
+		const config = {
+			dbPath: dbDir.join("mnemopi.db"),
+			bank: "test-bank",
+			autoRecall: false,
+			autoRetain: false,
+			polyphonicRecall: false,
+			enhancedRecall: false,
+			proactiveLinking: false,
+			retainEveryNTurns: 3,
+			recallLimit: 10,
+			recallContextTurns: 1,
+			recallMaxQueryChars: 800,
+			injectionTokenLimit: 1024,
+			debug: false,
+			providerOptions: {
+				noEmbeddings: true,
+				llm: false,
+			},
+			llmMode: "none" as const,
+		} as unknown as ConstructorParameters<typeof MnemopiSessionState>[0]["config"];
+		const session = {
+			sessionId: "test-mnemopi",
+			sessionManager: {
+				getEntries: () => [],
+				getCwd: () => dbDir.path(),
+				getArtifactsDir: () => null,
+				getSessionId: () => "test-mnemopi",
+			},
+			emitNotice: () => {},
+			getHindsightSessionState: () => undefined,
+		} as unknown as AgentSession;
+		const state = new MnemopiSessionState({ sessionId: "test-mnemopi", config, session });
+		setMnemopiSessionState(session, state);
+		sharedMnemopiFixture = { state, dbDir, session };
+	}
+
+	const fixture = sharedMnemopiFixture;
 	AgentRegistry.global().register({
 		id: "test-mnemopi",
 		displayName: "test-mnemopi",
 		kind: "main",
-		session,
+		session: fixture.session,
 		sessionFile: null,
 	});
-	try {
-		await fn({ state, dbDir });
-	} finally {
-		await state.dispose({ consolidate: false });
-		await dbDir.remove();
-	}
+	await fn(fixture);
 }
+
+afterAll(async () => {
+	if (!sharedMnemopiFixture) return;
+	await sharedMnemopiFixture.state.dispose({ consolidate: false });
+	await sharedMnemopiFixture.dbDir.remove();
+	sharedMnemopiFixture = undefined;
+});
 
 describe("MemoryProtocolHandler — mnemopi bridge (issue #4443)", () => {
 	beforeEach(() => {
