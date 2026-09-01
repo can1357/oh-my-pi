@@ -12,6 +12,9 @@ import type {
 	BusChannel,
 	CollabUiRequest,
 	GuestFrame,
+	GuestIdentity,
+	GuestPermissionSet,
+	HostFrame,
 	ParsedCollabLink,
 	Participant,
 	SessionState,
@@ -34,12 +37,24 @@ export type {
 	CollabUiRequestDraft,
 	CollabUiResponseValue,
 	CollabUiSelectItem,
+	GuestCapabilities,
+	GuestIdentity,
+	GuestPermissionSet,
+	GuestRole,
+	GuestStatus,
 	ParsedCollabLink,
+	PermissionAuditEntry,
 	RelayControlMessage,
 	RelayControlToGuest,
 	RelayControlToHost,
 } from "@oh-my-pi/pi-wire";
-export { COLLAB_PROMPT_MESSAGE_TYPE, COLLAB_PROTO } from "@oh-my-pi/pi-wire";
+export {
+	COLLAB_PROMPT_MESSAGE_TYPE,
+	COLLAB_PROTO,
+	GUEST_PERMISSIONS,
+	LEGACY_FULL_PERMISSIONS,
+	ROLE_DEFAULT_PERMISSIONS,
+} from "@oh-my-pi/pi-wire";
 export { DEFAULT_RELAY_URL, ENVELOPE_HEADER_LENGTH, ROOM_ID_BYTES };
 
 export type CollabParticipant = Participant;
@@ -57,15 +72,32 @@ export type CollabSessionState = SessionState & {
 };
 
 /**
+ * Host → guest guest-management/chat frames, verbatim from the wire grammar
+ * (proto-4 only; legacy guests are never sent these).
+ */
+type GuestHostFrame = Extract<
+	HostFrame,
+	| { t: "guest-joined" }
+	| { t: "guest-left" }
+	| { t: "guest-role-changed" }
+	| { t: "guest-permission-changed" }
+	| { t: "guest-message" }
+	| { t: "guest-presence" }
+	| { t: "guest-cursor" }
+	| { t: "permission-audit" }
+>;
+
+/** Frames the host receives (guest → host); wire grammar verbatim except the rich prompt payload. */
+export type CollabGuestFrame =
+	| Exclude<GuestFrame, { t: "prompt" }>
+	| { t: "prompt"; text: string; images?: ImageContent[] };
+
+/**
  * Encrypted payload frames (inside AES-GCM, JSON). The wire package pins the
  * JSON skeleton (`WireFrame`); host-side frames carry the rich session types
  * that serialize into those shapes.
  */
-export type CollabFrame =
-	// guest -> host (hello/abort/agent-cmd/fetch-transcript/ui-response are taken verbatim from the wire grammar)
-	| Exclude<GuestFrame, { t: "prompt" }>
-	| { t: "prompt"; text: string; images?: ImageContent[] }
-	// host -> guest
+export type CollabHostFrame =
 	| {
 			t: "welcome";
 			proto: number;
@@ -81,6 +113,12 @@ export type CollabFrame =
 			entryCount: number;
 			/** True when this peer joined through a read-only (view) link. */
 			readOnly?: boolean;
+			/** Proto-4 guests only: the identity the host assigned to this guest. */
+			self?: GuestIdentity;
+			/** Proto-4 guests only: every current guest in the room (including self). */
+			guests?: GuestIdentity[];
+			/** Proto-4 guests only: the host's effective permission bitmask for this guest. */
+			permissionsSet?: GuestPermissionSet;
 	  }
 	/**
 	 * Targeted snapshot fragment delivered after `welcome`. Splits a large
@@ -103,7 +141,11 @@ export type CollabFrame =
 	/** Targeted reply to fetch-transcript; `error` marks a terminal read failure that guests must surface without hot retrying. */
 	| { t: "transcript"; reqId: number; text: string; newSize: number; error?: string }
 	| { t: "bye"; reason: string }
-	| { t: "error"; message: string };
+	| { t: "error"; message: string }
+	| GuestHostFrame;
+
+/** Either direction can travel the same sealed socket stream; typed transports narrow per side. */
+export type CollabFrame = CollabGuestFrame | CollabHostFrame;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Wire envelope: [4B uint32 BE peerId][sealed payload]

@@ -31,7 +31,7 @@ export function importRoomKey(raw: Uint8Array): Promise<CryptoKey> {
 	return crypto.subtle.importKey("raw", asStrict(raw), AES_ALGORITHM, false, ["encrypt", "decrypt"]);
 }
 
-export async function seal(key: CryptoKey, frame: CollabFrame): Promise<Uint8Array> {
+export async function seal(key: CryptoKey, frame: { t: string }): Promise<Uint8Array> {
 	const iv = new Uint8Array(IV_LENGTH);
 	crypto.getRandomValues(iv);
 	const plaintext = TEXT_ENCODER.encode(JSON.stringify(frame));
@@ -42,15 +42,21 @@ export async function seal(key: CryptoKey, frame: CollabFrame): Promise<Uint8Arr
 	return out;
 }
 
-/** Inverse of {@link seal}. Throws on auth failure or malformed input. */
-export async function open(key: CryptoKey, data: Uint8Array): Promise<CollabFrame> {
+/**
+ * Inverse of {@link seal}. Throws on auth failure or malformed input.
+ * Typed transports narrow the result to their direction's grammar.
+ */
+export async function open<Frame extends { t: string } = CollabFrame>(
+	key: CryptoKey,
+	data: Uint8Array,
+): Promise<Frame> {
 	if (data.byteLength <= IV_LENGTH) {
 		throw new Error("Sealed frame too short");
 	}
 	const iv = asStrict(data.subarray(0, IV_LENGTH));
 	const ciphertext = asStrict(data.subarray(IV_LENGTH));
 	const plaintext = new Uint8Array(await crypto.subtle.decrypt({ name: AES_ALGORITHM, iv }, key, ciphertext));
-	return JSON.parse(TEXT_DECODER.decode(plaintext)) as CollabFrame;
+	return JSON.parse(TEXT_DECODER.decode(plaintext)) as Frame;
 }
 
 function asStrict(bytes: Uint8Array): Uint8Array<ArrayBuffer> {

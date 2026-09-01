@@ -30,17 +30,25 @@ import type { SessionEntry as StoredSessionEntry } from "../session/session-entr
 import { TASK_SUBAGENT_LIFECYCLE_CHANNEL, TASK_SUBAGENT_PROGRESS_CHANNEL } from "../task/types";
 import { generateRoomKey, generateWriteToken, importRoomKey } from "./crypto";
 import { collabDisplayName } from "./display-name";
+import { GuestRegistry, type GuestRegistryEvent, permissionNames } from "./guest-manager";
 import {
 	type AgentSnapshot,
 	COLLAB_PROMPT_MESSAGE_TYPE,
 	COLLAB_PROTO,
-	type CollabFrame,
+	type CollabGuestFrame,
+	type CollabHostFrame,
 	type CollabParticipant,
 	type CollabPromptDetails,
 	type CollabSessionState,
 	formatCollabLink,
 	formatCollabWebLink,
+	GUEST_PERMISSIONS,
+	type GuestIdentity,
+	type GuestPermissionSet,
+	type GuestRole,
+	type GuestStatus,
 	generateRoomId,
+	type PermissionAuditEntry,
 	parseCollabLink,
 } from "./protocol";
 import { CollabSocket } from "./relay-client";
@@ -122,7 +130,7 @@ export type CollabGuestUiResult = { kind: "answered"; value: CollabUiResponseVal
 
 export class CollabHost {
 	#ctx: InteractiveModeContext;
-	#socket: CollabSocket | null = null;
+	#socket: CollabSocket<CollabHostFrame, CollabGuestFrame> | null = null;
 	#link = "";
 	#webLink = "";
 	#viewLink = "";
@@ -130,7 +138,7 @@ export class CollabHost {
 	#writeToken: Uint8Array | null = null;
 	#sessionId = "";
 	#unsubscribe?: () => void;
-	#peers = new Map<number, { name: string; canWrite: boolean }>();
+	#guests = new GuestRegistry();
 	#uiReqSeq = 0;
 	#pendingUi = new Map<number, { request: CollabUiRequest; settle(result: CollabGuestUiResult): void }>();
 	#lastStateJson = "";
@@ -139,6 +147,7 @@ export class CollabHost {
 	#agentsDebounce: Timer | null = null;
 	#busUnsubscribers: (() => void)[] = [];
 	#registryUnsubscribe?: () => void;
+	#guestsUnsubscribe?: () => void;
 	#stopped = false;
 
 	constructor(ctx: InteractiveModeContext) {
@@ -163,17 +172,19 @@ export class CollabHost {
 	get webViewLink(): string {
 		return this.#webViewLink;
 	}
-
 	get participants(): CollabParticipant[] {
 		const list: CollabParticipant[] = [{ name: collabDisplayName(this.#ctx), role: "host" }];
-		for (const peer of this.#peers.values()) {
-			list.push({ name: peer.name, role: "guest", readOnly: peer.canWrite ? undefined : true });
+		for (const identity of this.#guests.list()) {
+			list.push({
+				name: identity.name,
+				role: "guest",
+				readOnly: (this.#guests.effectivePermissions(identity) & GUEST_PERMISSIONS.PROMPT) === 0 || undefined,
+			});
 		}
 		return list;
 	}
-
 	requestGuestUi(request: CollabUiRequestDraft, signal?: AbortSignal): Promise<CollabGuestUiResult> | null {
-		if (!this.#socket || !this.#hasWritablePeers()) return null;
+		if (!this.#socket || !this.#hasUiResponders()) return null;
 		const reqId = ++this.#uiReqSeq;
 		const fullRequest: CollabUiRequest = { ...request, reqId };
 		const { promise, resolve } = Promise.withResolvers<CollabGuestUiResult>();
@@ -181,31 +192,50 @@ export class CollabHost {
 		const settle = (result: CollabGuestUiResult): void => {
 			if (settled) return;
 			settled = true;
-			signal?.removeEventListener("abort", onAbort);
+			// Remove before the end-frame: a settled request must never replay
+			// to guests that join later (only unanswered asks stay queued).
 			this.#pendingUi.delete(reqId);
-			this.#sendWritablePeers({ t: "ui-request-end", reqId });
+			this.#sendUiCapable({ t: "ui-request-end", reqId });
 			resolve(result);
 		};
 		const onAbort = (): void => settle({ kind: "unavailable" });
 		if (signal?.aborted) return Promise.resolve({ kind: "unavailable" });
 		signal?.addEventListener("abort", onAbort, { once: true });
 		this.#pendingUi.set(reqId, { request: fullRequest, settle });
-		this.#sendWritablePeers({ t: "ui-request", request: fullRequest });
+		this.#sendUiCapable({ t: "ui-request", request: fullRequest });
 		return promise;
 	}
-
-	#hasWritablePeers(): boolean {
-		for (const peer of this.#peers.values()) {
-			if (peer.canWrite) return true;
+	/** True when at least one connected guest holds the UI_RESPONSE bit. */
+	#hasUiResponders(): boolean {
+		for (const identity of this.#guests.list()) {
+			if (identity.peerId < 0) continue;
+			if ((this.#guests.effectivePermissions(identity) & GUEST_PERMISSIONS.UI_RESPONSE) !== 0) return true;
 		}
 		return false;
 	}
 
-	#sendWritablePeers(frame: CollabFrame): void {
+	/** Target every connected guest holding the UI_RESPONSE bit (proto-3 guests included). */
+	#sendUiCapable(frame: CollabHostFrame): void {
 		const socket = this.#socket;
 		if (!socket) return;
-		for (const [peerId, peer] of this.#peers) {
-			if (peer.canWrite) socket.send(frame, peerId);
+		for (const identity of this.#guests.list()) {
+			if (identity.peerId < 0) continue;
+			if ((this.#guests.effectivePermissions(identity) & GUEST_PERMISSIONS.UI_RESPONSE) === 0) continue;
+			socket.send(frame, identity.peerId);
+		}
+	}
+
+	/**
+	 * Target a frame at every connected proto-4 guest. Legacy guests are never
+	 * sent guest-management/chat frames; `gate` narrows further by capability.
+	 */
+	#sendToGuests(frame: CollabHostFrame, gate?: (identity: GuestIdentity) => boolean): void {
+		const socket = this.#socket;
+		if (!socket) return;
+		for (const identity of this.#guests.list()) {
+			if (identity.peerId < 0 || identity.capabilities.protocolVersion < 4) continue;
+			if (gate && !gate(identity)) continue;
+			socket.send(frame, identity.peerId);
 		}
 	}
 
@@ -222,7 +252,7 @@ export class CollabHost {
 		if ("error" in parsed) throw new Error(parsed.error);
 		const key = await importRoomKey(rawKey);
 
-		const socket = new CollabSocket({ wsUrl: parsed.wsUrl, role: "host", key });
+		const socket = new CollabSocket<CollabHostFrame, CollabGuestFrame>({ wsUrl: parsed.wsUrl, role: "host", key });
 		this.#socket = socket;
 		this.#sessionId = this.#ctx.sessionManager.getSessionId();
 
@@ -285,6 +315,7 @@ export class CollabHost {
 			}
 		}
 		this.#registryUnsubscribe = AgentRegistry.global().onChange(() => this.#scheduleAgentsBroadcast());
+		this.#guestsUnsubscribe = this.#guests.on(event => this.#onGuestEvent(event));
 		this.#ctx.sessionManager.onEntryAppended = entry => {
 			if (isWireSessionEntry(entry)) this.#broadcast({ t: "entry", entry: shrinkForReplication(entry) });
 			// Model/thinking/title changes land as entries while idle; refresh
@@ -311,6 +342,8 @@ export class CollabHost {
 		this.#busUnsubscribers = [];
 		this.#registryUnsubscribe?.();
 		this.#registryUnsubscribe = undefined;
+		this.#guestsUnsubscribe?.();
+		this.#guestsUnsubscribe = undefined;
 		clearTimeout(this.#stateDebounce ?? undefined);
 		this.#stateDebounce = null;
 		clearTimeout(this.#agentsDebounce ?? undefined);
@@ -319,7 +352,6 @@ export class CollabHost {
 		this.#streamingInterval = null;
 		for (const pending of this.#pendingUi.values()) pending.settle({ kind: "unavailable" });
 		this.#pendingUi.clear();
-		this.#peers.clear();
 		this.#socket?.close();
 		this.#socket = null;
 		this.#ctx.collabHost = undefined;
@@ -327,7 +359,7 @@ export class CollabHost {
 		this.#ctx.ui.requestRender();
 	}
 
-	#broadcast(frame: CollabFrame): void {
+	#broadcast(frame: CollabHostFrame): void {
 		if (this.#stopped || !this.#socket) return;
 		if (this.#ctx.sessionManager.getSessionId() !== this.#sessionId) {
 			void this.stop("session switched");
@@ -337,10 +369,64 @@ export class CollabHost {
 		this.#socket.send(frame);
 	}
 
-	#handleFrame(frame: CollabFrame, fromPeer: number): void {
+	/**
+	 * Map a {@link GuestRegistryEvent} onto the wire for observing guests and
+	 * refresh the host's own surfaces. Guest frames go only to proto-4
+	 * guests; legacy guests are never invited into the newer grammar.
+	 */
+	#onGuestEvent(event: GuestRegistryEvent): void {
+		if (this.#stopped || !this.#socket) return;
+		switch (event.type) {
+			case "guest-joined": {
+				// Re-read on reattach: the event may carry the pre-reconnect peerId.
+				const guest = this.#guests.byId(event.guest.id) ?? event.guest;
+				const viewOnly = (this.#guests.effectivePermissions(guest) & GUEST_PERMISSIONS.PROMPT) === 0;
+				// The joining guest learns its identity from welcome; the event is
+				// for everyone else.
+				this.#sendToGuests({ t: "guest-joined", guest }, identity => identity.id !== guest.id);
+				this.#ctx.session.emitNotice(
+					"info",
+					`${guest.name} joined the collab session${viewOnly ? " (view-only)" : ""}`,
+					"collab",
+				);
+				this.#updateStatusSegment();
+				this.#scheduleStateBroadcast();
+				break;
+			}
+			case "guest-left": {
+				const name = this.#guests.byId(event.guestId)?.name ?? "a guest";
+				this.#sendToGuests({ t: "guest-left", guestId: event.guestId, reason: event.reason });
+				this.#ctx.session.emitNotice("info", `${name} left the collab session`, "collab");
+				this.#updateStatusSegment();
+				this.#scheduleStateBroadcast();
+				break;
+			}
+			case "guest-role-changed":
+				this.#sendToGuests({ t: "guest-role-changed", guestId: event.guestId, role: event.role, by: event.by });
+				this.#scheduleStateBroadcast();
+				break;
+			case "guest-permission-changed":
+				this.#sendToGuests({
+					t: "guest-permission-changed",
+					guestId: event.guestId,
+					permissionsSet: event.permissionsSet,
+				});
+				this.#scheduleStateBroadcast();
+				break;
+			case "guest-presence-changed":
+				this.#sendToGuests(
+					{ t: "guest-presence", guestId: event.guestId, status: event.status },
+					identity => identity.capabilities.supportsPresence,
+				);
+				break;
+		}
+	}
+
+	#handleFrame(frame: CollabGuestFrame, fromPeer: number): void {
+		if (frame.t !== "hello") this.#guests.touch(fromPeer);
 		switch (frame.t) {
 			case "hello":
-				this.#handleHello(frame.name, frame.proto, frame.writeToken, fromPeer);
+				this.#handleHello(frame, fromPeer);
 				break;
 			case "prompt":
 				this.#handlePrompt(frame.text, frame.images, fromPeer);
@@ -357,8 +443,34 @@ export class CollabHost {
 			case "fetch-transcript":
 				void this.#handleFetchTranscript(frame.reqId, frame.agentId, frame.fromByte, fromPeer);
 				break;
+			case "guest-invite":
+				this.#handleGuestInvite(frame.name, frame.role, frame.permissionsOverride, fromPeer);
+				break;
+			case "guest-kick":
+				this.#handleGuestKick(frame.guestId, frame.reason, fromPeer);
+				break;
+			case "guest-role":
+				this.#handleGuestRole(frame.guestId, frame.role, fromPeer);
+				break;
+			case "guest-permission":
+				this.#handleGuestPermission(frame.guestId, frame.grant, frame.revoke, fromPeer);
+				break;
+			case "guest-message":
+				this.#handleGuestMessage(frame.to, frame.text, frame.kind, fromPeer);
+				break;
+			case "guest-presence":
+				this.#handleGuestPresence(frame.status, fromPeer);
+				break;
+			case "guest-cursor":
+				this.#handleGuestCursor(frame.agentId, frame.position, fromPeer);
+				break;
+			case "permission-audit":
+				this.#handlePermissionAudit(frame.reqId, frame.guestId, frame.limit, fromPeer);
+				break;
 			default:
-				logger.debug("collab host ignoring unexpected frame", { type: frame.t, fromPeer });
+				// Default is unreachable for the declared grammar; reachable for
+				// runtime garbage, so log the frame itself instead of a field.
+				logger.debug("collab host ignoring unexpected frame", { frame, fromPeer });
 		}
 	}
 
@@ -370,22 +482,50 @@ export class CollabHost {
 		return bytes.byteLength === expected.byteLength && timingSafeEqual(bytes, expected);
 	}
 
-	/** Reject a mutating frame from a read-only peer with a targeted error. */
-	#rejectReadOnly(action: string, fromPeer: number): void {
-		this.#socket?.send({ t: "error", message: `${action} is disabled on a read-only link` }, fromPeer);
+	/**
+	 * Targeted denial when {@link fromPeer} lacks {@link flag}; true when the
+	 * action may proceed.
+	 */
+	#checkPermission(flag: GuestPermissionSet, action: string, fromPeer: number): boolean {
+		if (this.#guests.hasPermissionForPeer(fromPeer, flag)) return true;
+		this.#socket?.send(
+			{ t: "error", message: `${action} requires the ${permissionNames(flag)} permission` },
+			fromPeer,
+		);
+		return false;
 	}
 
-	#handleHello(name: string, proto: number, writeToken: string | undefined, fromPeer: number): void {
-		if (proto !== COLLAB_PROTO) {
+	#handleHello(frame: Extract<CollabGuestFrame, { t: "hello" }>, fromPeer: number): void {
+		// Proto-3 guests (pre-guest-management builds) speak a subset of the
+		// grammar and are served the legacy surface; only older-than-ui-request
+		// versions are rejected outright (their welcome would hang the ask
+		// flow — see the COLLAB_PROTO history in @oh-my-pi/pi-wire).
+		if (frame.proto < 3 || frame.proto > COLLAB_PROTO) {
 			this.#socket?.send(
-				{ t: "error", message: `protocol mismatch: host speaks v${COLLAB_PROTO}, guest sent v${proto}` },
+				{ t: "error", message: `protocol mismatch: host speaks v${COLLAB_PROTO}, guest sent v${frame.proto}` },
 				fromPeer,
 			);
 			return;
 		}
-		const cleanName = name.trim().slice(0, 64) || `guest-${fromPeer}`;
-		const canWrite = this.#verifyWriteToken(writeToken);
-		this.#peers.set(fromPeer, { name: cleanName, canWrite });
+		const cleanName = frame.name.trim().slice(0, 64) || `guest-${fromPeer}`;
+		const canWrite = this.#verifyWriteToken(frame.writeToken);
+		const attached = this.#guests.attach({
+			peerId: fromPeer,
+			name: cleanName,
+			proto: frame.proto,
+			canWrite,
+			guestId: frame.guestId,
+			capabilities: frame.capabilities,
+		});
+		const socket = this.#socket;
+		if (!socket) return;
+		if ("error" in attached) {
+			// Kicked identity rejoining: refuse with a targeted goodbye.
+			socket.send({ t: "bye", reason: "removed from this session" }, fromPeer);
+			return;
+		}
+		const identity = attached.identity;
+		const modern = identity.capabilities.protocolVersion >= 4;
 
 		// Snapshot and send synchronously: no awaits between snapshot, welcome,
 		// and chunk sends, so subsequent broadcast frames (entry/event/state/bus)
@@ -400,31 +540,33 @@ export class CollabHost {
 			logger.info("collab welcome exceeded size threshold; stripped images", { stripped });
 		}
 		const entries = snapshot.entries.filter(isWireSessionEntry);
-		const socket = this.#socket;
-		if (!socket) return;
 		socket.send(
 			{
 				t: "welcome",
-				proto: COLLAB_PROTO,
+				// Negotiated per-peer version: proto-3 guests are served the
+				// legacy grammar, so the welcome promises v3 to them.
+				proto: Math.min(frame.proto, COLLAB_PROTO),
 				header: snapshot.header,
 				state: this.#buildState(),
 				agents: this.#snapshotAgents(),
 				entryCount: entries.length,
 				readOnly: canWrite ? undefined : true,
+				...(modern
+					? {
+							self: identity,
+							guests: this.#guests.list(),
+							permissionsSet: this.#guests.effectivePermissions(identity),
+						}
+					: {}),
 			},
 			fromPeer,
 		);
 		this.#sendSnapshotChunks(entries, fromPeer);
-		if (canWrite) {
+		if ((this.#guests.effectivePermissions(identity) & GUEST_PERMISSIONS.UI_RESPONSE) !== 0) {
 			for (const pending of this.#pendingUi.values()) {
 				socket.send({ t: "ui-request", request: pending.request }, fromPeer);
 			}
 		}
-		this.#ctx.session.emitNotice(
-			"info",
-			`${cleanName} joined the collab session${canWrite ? "" : " (read-only)"}`,
-			"collab",
-		);
 		this.#updateStatusSegment();
 		this.#scheduleStateBroadcast();
 	}
@@ -465,21 +607,13 @@ export class CollabHost {
 	}
 
 	#handleUiResponse(reqId: number, value: CollabUiResponseValue, fromPeer: number): void {
-		const peer = this.#peers.get(fromPeer);
-		if (!peer?.canWrite) {
-			this.#rejectReadOnly("responding to ask", fromPeer);
-			return;
-		}
+		if (!this.#checkPermission(GUEST_PERMISSIONS.UI_RESPONSE, "responding to ask", fromPeer)) return;
 		this.#pendingUi.get(reqId)?.settle({ kind: "answered", value });
 	}
 
 	#handlePrompt(text: string, images: ImageContent[] | undefined, fromPeer: number): void {
-		const peer = this.#peers.get(fromPeer);
-		if (!peer?.canWrite) {
-			this.#rejectReadOnly("prompting", fromPeer);
-			return;
-		}
-		const name = peer.name;
+		if (!this.#checkPermission(GUEST_PERMISSIONS.PROMPT, "prompting", fromPeer)) return;
+		const name = this.#guests.byPeer(fromPeer)?.name ?? "a guest";
 		const content: string | (TextContent | ImageContent)[] =
 			images && images.length > 0 ? [{ type: "text", text }, ...images] : text;
 		const details: CollabPromptDetails = { from: name };
@@ -506,12 +640,8 @@ export class CollabHost {
 	}
 
 	#handleAbort(fromPeer: number): void {
-		const peer = this.#peers.get(fromPeer);
-		if (!peer?.canWrite) {
-			this.#rejectReadOnly("interrupting", fromPeer);
-			return;
-		}
-		const name = peer.name;
+		if (!this.#checkPermission(GUEST_PERMISSIONS.ABORT, "interrupting", fromPeer)) return;
+		const name = this.#guests.byPeer(fromPeer)?.name ?? "a guest";
 		void this.#ctx.session
 			.abort({ reason: USER_INTERRUPT_LABEL })
 			.then(() => this.#ctx.session.emitNotice("info", `${name} interrupted`, "collab"))
@@ -519,11 +649,9 @@ export class CollabHost {
 	}
 
 	#handlePeerLeft(peer: number): void {
-		const name = this.#peers.get(peer)?.name;
-		this.#peers.delete(peer);
-		if (name) this.#ctx.session.emitNotice("info", `${name} left the collab session`, "collab");
-		this.#updateStatusSegment();
-		this.#scheduleStateBroadcast();
+		// The registry emits guest-left (notice + guest frames) when a mapping
+		// exists; peers that never hello'd were never visible anyway.
+		this.#guests.detachPeer(peer);
 	}
 
 	#buildState(): CollabSessionState {
@@ -591,10 +719,13 @@ export class CollabHost {
 	}
 
 	#handleAgentCmd(cmd: "chat" | "kill" | "revive", agentId: string, text: string | undefined, fromPeer: number): void {
-		if (!this.#peers.get(fromPeer)?.canWrite) {
-			this.#rejectReadOnly("agent control", fromPeer);
-			return;
-		}
+		const flag =
+			cmd === "chat"
+				? GUEST_PERMISSIONS.AGENT_CHAT
+				: cmd === "kill"
+					? GUEST_PERMISSIONS.AGENT_KILL
+					: GUEST_PERMISSIONS.AGENT_REVIVE;
+		if (!this.#checkPermission(flag, "agent control", fromPeer)) return;
 		// Advisor refs are excluded from snapshots, but reject control by id defensively:
 		// a stale/malicious client must never chat/kill/revive a read-only advisor transcript.
 		if (AgentRegistry.global().get(agentId)?.kind === "advisor") {
@@ -639,6 +770,7 @@ export class CollabHost {
 
 	/** Incremental transcript read mirroring the hub's readFileIncremental contract. */
 	async #handleFetchTranscript(reqId: number, agentId: string, fromByte: number, fromPeer: number): Promise<void> {
+		if (!this.#checkPermission(GUEST_PERMISSIONS.FETCH_TRANSCRIPT, "transcript reads", fromPeer)) return;
 		const reply = (text: string, newSize: number, error?: string) =>
 			this.#socket?.send({ t: "transcript", reqId, text, newSize, error }, fromPeer);
 		const file = AgentRegistry.global().get(agentId)?.sessionFile;
@@ -679,6 +811,196 @@ export class CollabHost {
 		}
 	}
 
+	// ── Guest management (proto-4 frames) ───────────────────────────────────
+
+	#handleGuestInvite(
+		name: string,
+		role: GuestRole,
+		permissionsOverride: GuestPermissionSet | undefined,
+		fromPeer: number,
+	): void {
+		if (!this.#checkPermission(GUEST_PERMISSIONS.GUEST_INVITE, "inviting guests", fromPeer)) return;
+		const actor = this.#guests.byPeer(fromPeer);
+		if (!actor) return;
+		this.#guests.invite(name, role, actor.id, permissionsOverride);
+		this.#ctx.session.emitNotice("info", `${actor.name} invited ${name.trim()} as ${role}`, "collab");
+	}
+
+	#handleGuestKick(guestId: string, reason: string | undefined, fromPeer: number): void {
+		if (!this.#checkPermission(GUEST_PERMISSIONS.GUEST_KICK, "kicking guests", fromPeer)) return;
+		const actor = this.#guests.byPeer(fromPeer);
+		if (!actor) return;
+		const target = this.#guests.byId(guestId);
+		if (!target) {
+			this.#socket?.send({ t: "error", message: `no such guest: ${guestId}` }, fromPeer);
+			return;
+		}
+		const kickedPeer = target.peerId;
+		this.#guests.kick(guestId, actor.id, reason);
+		// The registry event broadcast guest-left (the kicked peer is already
+		// detached there); drop the pipe itself with a targeted goodbye.
+		if (kickedPeer >= 0) {
+			this.#socket?.send(
+				{ t: "bye", reason: reason ? `removed by ${actor.name}: ${reason}` : `removed by ${actor.name}` },
+				kickedPeer,
+			);
+		}
+	}
+
+	#handleGuestRole(guestId: string, role: GuestRole, fromPeer: number): void {
+		if (!this.#checkPermission(GUEST_PERMISSIONS.GUEST_ROLE, "changing roles", fromPeer)) return;
+		const actor = this.#guests.byPeer(fromPeer);
+		if (!actor) return;
+		if (!this.#guests.byId(guestId)) {
+			this.#socket?.send({ t: "error", message: `no such guest: ${guestId}` }, fromPeer);
+			return;
+		}
+		this.#guests.setRole(guestId, role, actor.id);
+	}
+
+	#handleGuestPermission(
+		guestId: string,
+		grant: GuestPermissionSet,
+		revoke: GuestPermissionSet,
+		fromPeer: number,
+	): void {
+		if (!this.#checkPermission(GUEST_PERMISSIONS.PERMISSION_MANAGE, "permission changes", fromPeer)) return;
+		const actor = this.#guests.byPeer(fromPeer);
+		if (!actor) return;
+		if (!this.#guests.byId(guestId)) {
+			this.#socket?.send({ t: "error", message: `no such guest: ${guestId}` }, fromPeer);
+			return;
+		}
+		if (grant) this.#guests.grantPermission(guestId, grant, actor.id);
+		if (revoke) this.#guests.revokePermission(guestId, revoke, actor.id);
+	}
+
+	#handleGuestMessage(
+		to: string | "broadcast",
+		text: string,
+		kind: "chat" | "system" | undefined,
+		fromPeer: number,
+	): void {
+		if (!this.#checkPermission(GUEST_PERMISSIONS.GUEST_CHAT, "guest chat", fromPeer)) return;
+		const sender = this.#guests.byPeer(fromPeer);
+		if (!sender) return;
+		const cleanText = text.trim();
+		if (!cleanText) {
+			this.#socket?.send({ t: "error", message: "empty guest message" }, fromPeer);
+			return;
+		}
+		const wireKind = kind ?? "chat";
+		if (to === "broadcast") {
+			this.#sendToGuests(
+				{ t: "guest-message", from: sender, to, text: cleanText, kind: wireKind },
+				identity => identity.capabilities.supportsGuestChat && identity.id !== sender.id,
+			);
+			return;
+		}
+		const target = this.#guests.byId(to);
+		if (!target || target.peerId < 0 || !target.capabilities.supportsGuestChat) {
+			this.#socket?.send({ t: "error", message: `guest ${to} is not available for chat` }, fromPeer);
+			return;
+		}
+		this.#socket?.send({ t: "guest-message", from: sender, to, text: cleanText, kind: wireKind }, target.peerId);
+	}
+
+	#handleGuestPresence(status: GuestStatus, fromPeer: number): void {
+		const sender = this.#guests.byPeer(fromPeer);
+		if (!sender?.capabilities.supportsPresence) return;
+		this.#guests.updateStatus(fromPeer, status);
+	}
+
+	#handleGuestCursor(
+		agentId: string | undefined,
+		position: { line: number; column: number } | undefined,
+		fromPeer: number,
+	): void {
+		const sender = this.#guests.byPeer(fromPeer);
+		if (!sender?.capabilities.supportsCursors) return;
+		this.#sendToGuests(
+			{ t: "guest-cursor", from: sender.id, agentId, position },
+			identity => identity.capabilities.supportsCursors && identity.id !== sender.id,
+		);
+	}
+
+	#handlePermissionAudit(
+		reqId: number,
+		guestId: string | undefined,
+		limit: number | undefined,
+		fromPeer: number,
+	): void {
+		if (!this.#checkPermission(GUEST_PERMISSIONS.PERMISSION_MANAGE, "reading the audit log", fromPeer)) return;
+		this.#socket?.send({ t: "permission-audit", reqId, entries: this.#guests.auditLog(guestId, limit) }, fromPeer);
+	}
+
+	// ── Host-side management API (slash commands, scripts) ──────────────────
+
+	/** Current guest identities, oldest join first. */
+	get guests(): GuestIdentity[] {
+		return this.#guests.list();
+	}
+
+	/** Queue a pending invitation; the next hello with that display name joins as {@link role}. */
+	inviteGuest(name: string, role: GuestRole, permissionsOverride?: GuestPermissionSet): void {
+		this.#guests.invite(name, role, "host", permissionsOverride);
+	}
+
+	/** Kick by guestId or unique display name; returns the kicked guestId or null. */
+	kickGuest(target: string, reason?: string): string | null {
+		const guest = this.#resolveGuest(target);
+		if (!guest) return null;
+		const kickedPeer = guest.peerId;
+		this.#guests.kick(guest.id, "host", reason);
+		if (kickedPeer >= 0) {
+			this.#socket?.send(
+				{ t: "bye", reason: reason ? `removed by the host: ${reason}` : "removed by the host" },
+				kickedPeer,
+			);
+		}
+		return guest.id;
+	}
+
+	/** Change a guest's role by guestId or unique display name. */
+	setGuestRole(target: string, role: GuestRole): GuestIdentity | null {
+		const guest = this.#resolveGuest(target);
+		if (!guest) return null;
+		return this.#guests.setRole(guest.id, role, "host");
+	}
+
+	grantGuestPermissions(target: string, bits: GuestPermissionSet): GuestIdentity | null {
+		const guest = this.#resolveGuest(target);
+		if (!guest) return null;
+		return this.#guests.grantPermission(guest.id, bits, "host");
+	}
+
+	revokeGuestPermissions(target: string, bits: GuestPermissionSet): GuestIdentity | null {
+		const guest = this.#resolveGuest(target);
+		if (!guest) return null;
+		return this.#guests.revokePermission(guest.id, bits, "host");
+	}
+
+	/** Drop per-guest overrides; the guest falls back to its role defaults. */
+	clearGuestPermissions(target: string): GuestIdentity | null {
+		const guest = this.#resolveGuest(target);
+		if (!guest) return null;
+		return this.#guests.clearGuestOverrides(guest.id, "host");
+	}
+
+	/** Guest permission audit trail, oldest first. */
+	auditLog(guestId?: string, limit?: number): PermissionAuditEntry[] {
+		return this.#guests.auditLog(guestId, limit);
+	}
+
+	/** Resolve a slash-command target: guestId first, then unique case-insensitive name. */
+	#resolveGuest(target: string): GuestIdentity | undefined {
+		const byId = this.#guests.byId(target);
+		if (byId) return byId;
+		const key = target.trim().toLowerCase();
+		const matches = this.#guests.list().filter(identity => identity.name.trim().toLowerCase() === key);
+		return matches.length === 1 ? matches[0] : undefined;
+	}
+
 	#scheduleStateBroadcast(): void {
 		if (this.#stopped || this.#stateDebounce) return;
 		this.#stateDebounce = setTimeout(() => {
@@ -692,7 +1014,7 @@ export class CollabHost {
 	}
 
 	#updateStatusSegment(): void {
-		this.#ctx.statusLine.setCollabStatus({ role: "host", participantCount: this.#peers.size + 1 });
+		this.#ctx.statusLine.setCollabStatus({ role: "host", participantCount: this.#guests.onlineCount() + 1 });
 		this.#ctx.statusLine.invalidate();
 		this.#ctx.ui.requestRender();
 	}

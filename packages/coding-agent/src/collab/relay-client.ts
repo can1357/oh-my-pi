@@ -32,10 +32,15 @@ export interface CollabSocketOptions {
 	key: CryptoKey;
 }
 
-export class CollabSocket {
+/**
+ * Sealed frame transport. `Sent`/`Received` pin the grammar per direction:
+ * hosts use `<CollabHostFrame, CollabGuestFrame>`, guests the reverse;
+ * unparameterized callers get the full union (tests, tooling).
+ */
+export class CollabSocket<Sent extends { t: string } = CollabFrame, Received extends { t: string } = CollabFrame> {
 	/** Fires after every successful (re)connect. */
 	onOpen?: () => void;
-	onFrame?: (frame: CollabFrame, fromPeer: number) => void;
+	onFrame?: (frame: Received, fromPeer: number) => void;
 	onControl?: (msg: RelayControlMessage) => void;
 	/** Fires once per terminal close (intentional, fatal code, or bad key). willReconnect=true for transient drops that will retry. */
 	onClose?: (reason: string, willReconnect: boolean) => void;
@@ -69,7 +74,7 @@ export class CollabSocket {
 		this.#openSocket();
 	}
 
-	send(frame: CollabFrame, targetPeer = 0): void {
+	send(frame: Sent, targetPeer = 0): void {
 		this.#sendChain = this.#sendChain
 			.then(async () => {
 				if (this.#closed) {
@@ -106,7 +111,7 @@ export class CollabSocket {
 			});
 	}
 
-	#enqueuePendingSend(envelope: Uint8Array, frameType: CollabFrame["t"]): void {
+	#enqueuePendingSend(envelope: Uint8Array, frameType: string): void {
 		if (this.#pendingSends.length >= MAX_PENDING_SENDS) {
 			logger.debug("collab: dropping frame, reconnect buffer full", { t: frameType });
 			return;
@@ -214,9 +219,9 @@ export class CollabSocket {
 		this.#recvChain = this.#recvChain
 			.then(async () => {
 				if (this.#ws !== ws) return;
-				let frame: CollabFrame;
+				let frame: Received;
 				try {
-					frame = await open(this.#opts.key, envelope.payload);
+					frame = await open<Received>(this.#opts.key, envelope.payload);
 				} catch {
 					this.#failFatal("bad key or corrupted frame");
 					return;

@@ -29,12 +29,21 @@ import { emitSubagentFrame } from "../utils/event-bus";
 import { setSessionTerminalTitle } from "../utils/title-generator";
 import { importRoomKey } from "./crypto";
 import { collabDisplayName } from "./display-name";
+import { permissionNames } from "./guest-manager";
 import {
 	type AgentSnapshot,
 	COLLAB_PROTO,
 	type CollabFrame,
+	type CollabGuestFrame,
+	type CollabHostFrame,
 	type CollabSessionState,
 	type CollabUiRequest,
+	GUEST_PERMISSIONS,
+	type GuestIdentity,
+	type GuestPermissionSet,
+	type GuestRole,
+	type GuestStatus,
+	LEGACY_FULL_PERMISSIONS,
 	parseCollabLink,
 } from "./protocol";
 import { CollabSocket } from "./relay-client";
@@ -78,6 +87,12 @@ interface PendingSnapshot {
 	state: WelcomeFrame["state"];
 	agents: AgentSnapshot[];
 	readOnly: boolean;
+	/** Proto-4 only: the identity the host assigned to this guest. */
+	self?: GuestIdentity;
+	/** Proto-4 only: every current guest in the room (including self). */
+	guests?: GuestIdentity[];
+	/** Proto-4 only: the host's effective permission bitmask for self. */
+	permissionsSet?: GuestPermissionSet;
 	entryCount: number;
 	entries: SessionEntry[];
 	isResync: boolean;
@@ -158,7 +173,7 @@ export function reconcileGuestSnapshotHostState(ctx: GuestSnapshotActivityReconc
 
 export class CollabGuestLink {
 	#ctx: InteractiveModeContext;
-	#socket: CollabSocket | null = null;
+	#socket: CollabSocket<CollabGuestFrame, CollabHostFrame> | null = null;
 	#roomId = "";
 	/** Previous session file to restore on leave; null = previous session was unsaved. */
 	#returnSessionFile: string | null = null;
@@ -184,8 +199,16 @@ export class CollabGuestLink {
 	#snapshotProgressTimer: Timer | null = null;
 	/** base64url write token from a full link; absent when joined via a view link. */
 	#writeToken: string | undefined;
-	/** True when the host marked this peer read-only (view link). */
+	/** True when the guest cannot prompt (view link, or a proto-4 role without PROMPT). */
 	#readOnly = false;
+	/** Client-generated identity; stable across reconnects within this link. */
+	readonly #guestId = `g-${crypto.randomUUID().replaceAll("-", "")}`;
+	/** Identity the host assigned (proto-4); null when talking to a legacy host. */
+	#self: GuestIdentity | null = null;
+	/** Local mirror of the room roster (proto-4). */
+	#guestsById = new Map<string, GuestIdentity>();
+	/** Effective permission bitmask from the latest welcome / permission frame. */
+	#permissions = 0;
 	/** False until the first assistant message_start (real or synthesized) since (re)sync. */
 	#assistantStreamSynced = false;
 	state: CollabSessionState | null = null;
@@ -199,15 +222,15 @@ export class CollabGuestLink {
 	#nextReqId = 1;
 	readonly #hubRemote: AgentHubRemote = {
 		chat: (id, text) => {
-			if (this.#rejectReadOnly()) return;
+			if (this.#requirePermission(GUEST_PERMISSIONS.AGENT_CHAT, "agent chat")) return;
 			this.#socket?.send({ t: "agent-cmd", cmd: "chat", agentId: id, text });
 		},
 		kill: id => {
-			if (this.#rejectReadOnly()) return;
+			if (this.#requirePermission(GUEST_PERMISSIONS.AGENT_KILL, "killing agents")) return;
 			this.#socket?.send({ t: "agent-cmd", cmd: "kill", agentId: id });
 		},
 		revive: id => {
-			if (this.#rejectReadOnly()) return;
+			if (this.#requirePermission(GUEST_PERMISSIONS.AGENT_REVIVE, "reviving agents")) return;
 			this.#socket?.send({ t: "agent-cmd", cmd: "revive", agentId: id });
 		},
 		readTranscript: (id, fromByte) => {
@@ -240,10 +263,13 @@ export class CollabGuestLink {
 		return this.#readOnly;
 	}
 
-	/** Shows the read-only status hint when applicable; true when the action must be dropped. */
-	#rejectReadOnly(): boolean {
-		if (!this.#readOnly) return false;
-		this.#ctx.showStatus("This collab link is read-only");
+	/**
+	 * Pre-flight a permission-gated action; true when it must be dropped. The
+	 * host re-checks every frame, so this only shapes local UX.
+	 */
+	#requirePermission(flag: GuestPermissionSet, action: string): boolean {
+		if ((this.#permissions & flag) !== 0) return false;
+		this.#ctx.showStatus(`${action} requires the ${permissionNames(flag)} permission`);
 		return true;
 	}
 
@@ -260,7 +286,7 @@ export class CollabGuestLink {
 
 		this.#returnSessionFile = this.#ctx.sessionManager.getSessionFile() ?? null;
 
-		const socket = new CollabSocket({ wsUrl: parsed.wsUrl, role: "guest", key });
+		const socket = new CollabSocket<CollabGuestFrame, CollabHostFrame>({ wsUrl: parsed.wsUrl, role: "guest", key });
 		this.#socket = socket;
 
 		const firstWelcome = Promise.withResolvers<void>();
@@ -287,6 +313,13 @@ export class CollabGuestLink {
 				proto: COLLAB_PROTO,
 				name: collabDisplayName(this.#ctx),
 				writeToken: this.#writeToken,
+				guestId: this.#guestId,
+				capabilities: {
+					protocolVersion: COLLAB_PROTO,
+					supportsGuestChat: true,
+					supportsPresence: true,
+					supportsCursors: false,
+				},
 			});
 		};
 		socket.onFrame = frame => {
@@ -377,13 +410,62 @@ export class CollabGuestLink {
 	}
 
 	sendPrompt(text: string, images?: ImageContent[]): void {
-		if (this.#rejectReadOnly()) return;
+		if (this.#requirePermission(GUEST_PERMISSIONS.PROMPT, "prompting the host")) return;
 		this.#socket?.send({ t: "prompt", text, images: images && images.length > 0 ? images : undefined });
 	}
 
 	sendAbort(): void {
-		if (this.#rejectReadOnly()) return;
+		if (this.#requirePermission(GUEST_PERMISSIONS.ABORT, "interrupting the host")) return;
 		this.#socket?.send({ t: "abort" });
+	}
+
+	// ── Guest management / inter-guest (proto-4) ────────────────────────────
+
+	/** Send a guest-to-guest chat message; `to` defaults to broadcast. */
+	sendGuestMessage(text: string, to: string | "broadcast" = "broadcast"): void {
+		if (this.#requirePermission(GUEST_PERMISSIONS.GUEST_CHAT, "guest chat")) return;
+		this.#socket?.send({ t: "guest-message", to, text });
+	}
+
+	/** Publish this guest's presence status. */
+	sendGuestPresence(status: GuestStatus): void {
+		this.#socket?.send({ t: "guest-presence", status });
+	}
+
+	/** Invite a display name; the host applies {@link role} when they join. */
+	inviteGuest(name: string, role: GuestRole): void {
+		if (this.#requirePermission(GUEST_PERMISSIONS.GUEST_INVITE, "inviting guests")) return;
+		this.#socket?.send({ t: "guest-invite", name, role });
+	}
+
+	kickGuest(guestId: string, reason?: string): void {
+		if (this.#requirePermission(GUEST_PERMISSIONS.GUEST_KICK, "kicking guests")) return;
+		this.#socket?.send({ t: "guest-kick", guestId, reason });
+	}
+
+	setGuestRole(guestId: string, role: GuestRole): void {
+		if (this.#requirePermission(GUEST_PERMISSIONS.GUEST_ROLE, "changing roles")) return;
+		this.#socket?.send({ t: "guest-role", guestId, role });
+	}
+
+	grantGuestPermissions(guestId: string, bits: GuestPermissionSet): void {
+		if (this.#requirePermission(GUEST_PERMISSIONS.PERMISSION_MANAGE, "permission changes")) return;
+		this.#socket?.send({ t: "guest-permission", guestId, grant: bits, revoke: 0 });
+	}
+
+	revokeGuestPermissions(guestId: string, bits: GuestPermissionSet): void {
+		if (this.#requirePermission(GUEST_PERMISSIONS.PERMISSION_MANAGE, "permission changes")) return;
+		this.#socket?.send({ t: "guest-permission", guestId, grant: 0, revoke: bits });
+	}
+
+	/** Room roster as of the latest welcome/join/left frames, oldest join first. */
+	get guests(): GuestIdentity[] {
+		return [...this.#guestsById.values()].sort((a, b) => a.joinedAt - b.joinedAt);
+	}
+
+	/** This guest's host-assigned identity (proto-4); null for legacy hosts. */
+	get self(): GuestIdentity | null {
+		return this.#self;
 	}
 
 	/**
@@ -402,6 +484,9 @@ export class CollabGuestLink {
 			entryCount: frame.entryCount,
 			entries: [],
 			isResync,
+			self: frame.self,
+			guests: frame.guests,
+			permissionsSet: frame.permissionsSet,
 		};
 		this.#armSnapshotProgressTimer();
 	}
@@ -457,12 +542,32 @@ export class CollabGuestLink {
 		await this.#ctx.renderInitialMessages({ clearTerminalHistory: true });
 		await this.#ctx.reloadTodos();
 		this.#updateStatusSegment();
-		this.#readOnly = pending.readOnly;
+		if (pending.self) {
+			this.#applyRoomIdentity(pending.self, pending.guests, pending.permissionsSet);
+		} else {
+			// Legacy host: exact pre-4 surface derived from the link variant.
+			this.#self = null;
+			this.#guestsById.clear();
+			this.#permissions = pending.readOnly ? GUEST_PERMISSIONS.FETCH_TRANSCRIPT : LEGACY_FULL_PERMISSIONS;
+			this.#readOnly = pending.readOnly;
+		}
 		this.#welcomed = true;
 		const suffix = this.#readOnly ? " (read-only)" : "";
 		this.#ctx.showStatus(
 			pending.isResync ? `Reconnected to collab session${suffix}` : `Joined collab session${suffix}`,
 		);
+	}
+
+	/** Latch the proto-4 welcome identity block and derive the local action surface. */
+	#applyRoomIdentity(
+		self: GuestIdentity,
+		guests: GuestIdentity[] | undefined,
+		permissionsSet: GuestPermissionSet | undefined,
+	): void {
+		this.#self = self;
+		this.#guestsById = new Map((guests ?? [self]).map(identity => [identity.id, identity]));
+		this.#permissions = permissionsSet ?? LEGACY_FULL_PERMISSIONS;
+		this.#readOnly = (this.#permissions & GUEST_PERMISSIONS.PROMPT) === 0;
 	}
 
 	#armWelcomeTimer(): void {
@@ -497,7 +602,7 @@ export class CollabGuestLink {
 		}
 	}
 
-	#applyFrame(frame: CollabFrame): void {
+	#applyFrame(frame: CollabHostFrame): void {
 		switch (frame.t) {
 			case "entry": {
 				// Entries are never rendered directly — rendering is events-only
@@ -554,6 +659,44 @@ export class CollabGuestLink {
 				}
 				break;
 			}
+			case "guest-joined":
+				this.#guestsById.set(frame.guest.id, frame.guest);
+				if (frame.guest.id !== this.#self?.id) {
+					this.#ctx.showStatus(`${frame.guest.name} joined the collab session`);
+				}
+				break;
+			case "guest-left": {
+				const left = this.#guestsById.get(frame.guestId);
+				if (left) left.status = "offline";
+				this.#ctx.showStatus(`${left?.name ?? frame.guestId} left the collab session`);
+				break;
+			}
+			case "guest-role-changed": {
+				const member = this.#guestsById.get(frame.guestId);
+				if (member) member.role = frame.role;
+				if (frame.guestId === this.#self?.id) {
+					this.#ctx.showStatus(`Your role is now ${frame.role} (changed by ${frame.by})`);
+				}
+				break;
+			}
+			case "guest-permission-changed":
+				if (frame.guestId === this.#self?.id) {
+					this.#permissions = frame.permissionsSet;
+					this.#readOnly = (frame.permissionsSet & GUEST_PERMISSIONS.PROMPT) === 0;
+					this.#ctx.showStatus(`Your permissions changed (${permissionNames(frame.permissionsSet) || "none"})`);
+				}
+				break;
+			case "guest-presence": {
+				const present = this.#guestsById.get(frame.guestId);
+				if (present) present.status = frame.status;
+				break;
+			}
+			case "guest-message":
+				this.#ctx.showStatus(`${frame.from.name}: ${frame.text}`, { dim: frame.kind === "system" });
+				break;
+			case "guest-cursor":
+				// The TUI has no cursor surface; cursors exist for the web client.
+				break;
 			case "bye": {
 				this.#ctx.showStatus(`Collab session ended (${frame.reason})`);
 				this.#socket?.close();
@@ -665,8 +808,9 @@ export class CollabGuestLink {
 	 * the host settled the request elsewhere; that path must NOT respond.
 	 */
 	#presentUiRequest(request: CollabUiRequest): void {
-		// The host only targets writable peers; drop defensively on a read-only link.
-		if (this.#readOnly || this.#pendingUiRequests.has(request.reqId)) return;
+		// The host only targets UI-response-capable peers; drop defensively.
+		if (this.#requirePermission(GUEST_PERMISSIONS.UI_RESPONSE, "answering host asks")) return;
+		if (this.#pendingUiRequests.has(request.reqId)) return;
 		const abort = new AbortController();
 		this.#pendingUiRequests.set(request.reqId, abort);
 		const dialog =

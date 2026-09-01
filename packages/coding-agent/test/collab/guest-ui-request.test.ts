@@ -519,16 +519,19 @@ async function joinRawGuest(
 }
 
 describe("collab proto handshake (#4049)", () => {
-	it("host rejects a stale-proto hello with a protocol-mismatch error and never welcomes or admits the guest", async () => {
+	it("rejects a pre-ui-request proto hello with a protocol-mismatch error and never admits the guest", async () => {
+		// Proto 2 predates ui-request: its guests cannot answer host asks, so
+		// they are refused outright. Proto 3 (legacy) is still admitted — see
+		// the COLLAB_PROTO history in @oh-my-pi/pi-wire.
 		const host = new CollabHost(makeHostContext());
 		await host.start("ws://localhost:8787");
-		const guest = await joinRawGuest(host.link, COLLAB_PROTO - 1);
+		const guest = await joinRawGuest(host.link, 2);
 		try {
 			const reply = await guest.nextFrame();
 			if (reply.t !== "error") throw new Error(`expected error, got ${reply.t}`);
 			expect(reply.message).toContain("protocol mismatch");
 			expect(reply.message).toContain(`host speaks v${COLLAB_PROTO}`);
-			expect(reply.message).toContain(`guest sent v${COLLAB_PROTO - 1}`);
+			expect(reply.message).toContain("guest sent v2");
 			// The rejected guest was never admitted: no participant entry, and a
 			// host ask finds no writable peer to route to.
 			expect(host.participants.filter(p => p.role !== "host")).toEqual([]);
@@ -539,14 +542,18 @@ describe("collab proto handshake (#4049)", () => {
 		}
 	});
 
-	it("welcomes a current-proto guest at v3 and round-trips a ui-request", async () => {
+	it("welcomes a legacy proto-3 guest at v3 without the proto-4 fields and round-trips a ui-request", async () => {
 		const host = new CollabHost(makeHostContext());
 		await host.start("ws://localhost:8787");
-		const guest = await joinRawGuest(host.link, COLLAB_PROTO);
+		const guest = await joinRawGuest(host.link, 3);
 		try {
 			const welcome = await guest.nextFrame();
 			if (welcome.t !== "welcome") throw new Error(`expected welcome, got ${welcome.t}`);
+			// Negotiated down to the guest's grammar; no proto-4 identity block.
 			expect(welcome.proto).toBe(3);
+			expect(welcome.self).toBeUndefined();
+			expect(welcome.guests).toBeUndefined();
+			expect(welcome.permissionsSet).toBeUndefined();
 
 			const pending = host.requestGuestUi({ kind: "select", title: "Continue?", options: ["Yes"] });
 			if (!pending) throw new Error("expected writable guest UI request");

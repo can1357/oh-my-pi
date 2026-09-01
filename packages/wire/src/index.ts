@@ -295,6 +295,140 @@ export interface SubagentLifecyclePayload {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// Guests (persistent identity, roles, granular permissions)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/** Role ladder for collab guests; the human host is the de-facto `owner`. */
+export type GuestRole = "owner" | "admin" | "member" | "viewer";
+
+export type GuestStatus = "online" | "away" | "offline";
+
+/** Feature flags a guest declares in `hello`; the host gates broadcasts on them. */
+export interface GuestCapabilities {
+	/** Guest's wire protocol version. */
+	protocolVersion: number;
+	supportsGuestChat: boolean;
+	supportsPresence: boolean;
+	supportsCursors: boolean;
+}
+
+/**
+ * Stable per-guest identity (proto 4+). `id` survives reconnects within the
+ * same host session; `peerId` changes on every reconnect.
+ */
+export interface GuestIdentity {
+	id: string;
+	/** Current relay peerId; -1 while the guest is disconnected. */
+	peerId: number;
+	name: string;
+	role: GuestRole;
+	status: GuestStatus;
+	/** `data:` or https URL; rendered by guests when present. */
+	avatar?: string;
+	/** True when this guest's current hello proved write-token possession. */
+	canWrite: boolean;
+	capabilities: GuestCapabilities;
+	/** Epoch ms of the original join. */
+	joinedAt: number;
+	/** Epoch ms of the guest's most recent frame (or disconnect). */
+	lastActive: number;
+	/** guestId of the inviter, when the guest arrived through a pending invite. */
+	invitedBy?: string;
+}
+
+/**
+ * Granular guest permissions as bit flags over a `number` — deliberately NOT
+ * bigint: every collab frame is JSON.stringify'd inside the AES-GCM seal, and
+ * bigint throws on serialization. 13 flags stay far inside the 32-bit range.
+ */
+export const GUEST_PERMISSIONS = {
+	/** Send prompts. */
+	PROMPT: 1 << 0,
+	/** `agent-cmd: chat`. */
+	AGENT_CHAT: 1 << 1,
+	/** `agent-cmd: kill`. */
+	AGENT_KILL: 1 << 2,
+	/** `agent-cmd: revive`. */
+	AGENT_REVIVE: 1 << 3,
+	/** Answer host `ui-request` prompts (select/editor). */
+	UI_RESPONSE: 1 << 4,
+	/** `fetch-transcript`. */
+	FETCH_TRANSCRIPT: 1 << 5,
+	/** `abort`. */
+	ABORT: 1 << 6,
+	/** Guest-to-guest chat (send and receive). */
+	GUEST_CHAT: 1 << 7,
+	/** Invite new guests. */
+	GUEST_INVITE: 1 << 8,
+	/** Kick guests. */
+	GUEST_KICK: 1 << 9,
+	/** Change guest roles. */
+	GUEST_ROLE: 1 << 10,
+	/** Grant/revoke permission bits and read the audit log. */
+	PERMISSION_MANAGE: 1 << 11,
+	/** Change session settings (reserved for future frames). */
+	SESSION_CONFIG: 1 << 12,
+} as const satisfies Record<string, number>;
+
+export type GuestPermissionKey = keyof typeof GUEST_PERMISSIONS;
+
+/** Bitmask over {@link GUEST_PERMISSIONS}. */
+export type GuestPermissionSet = number;
+
+/**
+ * Effective surface of a legacy proto-3 guest holding a write token: exactly
+ * the pre-4 mutating grammar. Proto-3 clients have no chat/invite UI, so the
+ * guest-management bits never fire for them even when role defaults include
+ * them.
+ */
+export const LEGACY_FULL_PERMISSIONS: GuestPermissionSet =
+	GUEST_PERMISSIONS.PROMPT |
+	GUEST_PERMISSIONS.AGENT_CHAT |
+	GUEST_PERMISSIONS.AGENT_KILL |
+	GUEST_PERMISSIONS.AGENT_REVIVE |
+	GUEST_PERMISSIONS.UI_RESPONSE |
+	GUEST_PERMISSIONS.FETCH_TRANSCRIPT |
+	GUEST_PERMISSIONS.ABORT;
+
+/** Role → default permission bitmask. Hosts may override per role and per guest. */
+export const ROLE_DEFAULT_PERMISSIONS: Record<GuestRole, GuestPermissionSet> = {
+	owner:
+		LEGACY_FULL_PERMISSIONS |
+		GUEST_PERMISSIONS.GUEST_INVITE |
+		GUEST_PERMISSIONS.GUEST_KICK |
+		GUEST_PERMISSIONS.GUEST_ROLE |
+		GUEST_PERMISSIONS.PERMISSION_MANAGE |
+		GUEST_PERMISSIONS.SESSION_CONFIG,
+	admin:
+		LEGACY_FULL_PERMISSIONS |
+		GUEST_PERMISSIONS.GUEST_INVITE |
+		GUEST_PERMISSIONS.GUEST_KICK |
+		GUEST_PERMISSIONS.GUEST_ROLE,
+	member:
+		GUEST_PERMISSIONS.PROMPT |
+		GUEST_PERMISSIONS.AGENT_CHAT |
+		GUEST_PERMISSIONS.UI_RESPONSE |
+		GUEST_PERMISSIONS.FETCH_TRANSCRIPT |
+		GUEST_PERMISSIONS.ABORT |
+		GUEST_PERMISSIONS.GUEST_CHAT,
+	/** Watch the transcript and join guest chat; nothing else. */
+	viewer: GUEST_PERMISSIONS.FETCH_TRANSCRIPT | GUEST_PERMISSIONS.GUEST_CHAT,
+};
+
+/** Append-only audit record for permission-affecting actions (host caps the log). */
+export interface PermissionAuditEntry {
+	/** Epoch ms. */
+	at: number;
+	/** Actor guestId, or `"host"` for host-side actions. */
+	actorId: string;
+	action: "grant" | "revoke" | "role-change" | "invite" | "kick";
+	/** Affected guestId when the action targets one. */
+	target?: string;
+	/** Human-readable detail, e.g. `"PROMPT|AGENT_CHAT"` or `"member -> admin"`. */
+	detail: string;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Frames (JSON inside the AES-GCM seal)
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -332,12 +466,38 @@ export type GuestFrame =
 			 * read-only and rejects their mutating frames.
 			 */
 			writeToken?: string;
+			/**
+			 * Persistent guest identity (proto 4+); survives reconnects within
+			 * the same host session. Absent on legacy proto-3 clients.
+			 */
+			guestId?: string;
+			/** Feature flags (proto 4+); absent flags default to false. */
+			capabilities?: GuestCapabilities;
 	  }
 	| { t: "prompt"; text: string; images?: ImageContent[] }
 	| { t: "ui-response"; reqId: number; value?: CollabUiResponseValue }
 	| { t: "abort" }
 	| { t: "agent-cmd"; cmd: "chat" | "kill" | "revive"; agentId: string; text?: string }
-	| { t: "fetch-transcript"; reqId: number; agentId: string; fromByte: number };
+	| { t: "fetch-transcript"; reqId: number; agentId: string; fromByte: number }
+	// ── Guest management (proto 4+) ──────────────────────────────────────────
+	/**
+	 * Invite a guest by display name; the host records a pending invitation
+	 * and applies `role` (plus optional permission bits) when a guest joins
+	 * under that name.
+	 */
+	| { t: "guest-invite"; name: string; role: GuestRole; permissionsOverride?: GuestPermissionSet }
+	/** Disconnect a guest and mark its identity kicked for this session. */
+	| { t: "guest-kick"; guestId: string; reason?: string }
+	| { t: "guest-role"; guestId: string; role: GuestRole }
+	/** Grant/revoke permission bits on top of the guest's role defaults. */
+	| { t: "guest-permission"; guestId: string; grant: GuestPermissionSet; revoke: GuestPermissionSet }
+	// ── Guest-to-guest communication (proto 4+) ─────────────────────────────
+	/** `"broadcast"` fans out to every chat-capable guest; a guestId targets one. */
+	| { t: "guest-message"; to: string | "broadcast"; text: string; kind?: "chat" | "system" }
+	| { t: "guest-presence"; status: GuestStatus }
+	| { t: "guest-cursor"; agentId?: string; position?: { line: number; column: number } }
+	/** Request the host's permission audit log (requires PERMISSION_MANAGE). */
+	| { t: "permission-audit"; reqId: number; guestId?: string; limit?: number };
 
 /** EventBus channels mirrored to guests (task subagent traffic only). */
 export type BusChannel = "task:subagent:progress" | "task:subagent:lifecycle";
@@ -358,6 +518,12 @@ export type HostFrame =
 			entryCount: number;
 			/** True when this peer joined through a read-only (view) link. */
 			readOnly?: boolean;
+			/** Proto-4 guests only: the identity the host assigned to this guest. */
+			self?: GuestIdentity;
+			/** Proto-4 guests only: every current guest in the room (including self). */
+			guests?: GuestIdentity[];
+			/** Proto-4 guests only: the host's effective permission bitmask for this guest. */
+			permissionsSet?: GuestPermissionSet;
 	  }
 	/**
 	 * Targeted snapshot fragment delivered after `welcome`. Hosts split the
@@ -377,7 +543,18 @@ export type HostFrame =
 	/** Targeted reply to fetch-transcript; `text` is decoded JSONL from `fromByte`, `newSize` the next offset base. */
 	| { t: "transcript"; reqId: number; text: string; newSize: number; error?: string }
 	| { t: "bye"; reason: string }
-	| { t: "error"; message: string };
+	| { t: "error"; message: string }
+	// ── Guest management (proto-4 guests only; legacy guests never receive these) ──
+	| { t: "guest-joined"; guest: GuestIdentity }
+	| { t: "guest-left"; guestId: string; reason?: string }
+	| { t: "guest-role-changed"; guestId: string; role: GuestRole; by: string }
+	| { t: "guest-permission-changed"; guestId: string; permissionsSet: GuestPermissionSet }
+	// ── Guest-to-guest communication ──
+	| { t: "guest-message"; from: GuestIdentity; to: string | "broadcast"; text: string; kind: "chat" | "system" }
+	| { t: "guest-presence"; guestId: string; status: GuestStatus }
+	| { t: "guest-cursor"; from: string; agentId?: string; position?: { line: number; column: number } }
+	/** Targeted reply to `permission-audit`. */
+	| { t: "permission-audit"; reqId: number; entries: PermissionAuditEntry[]; error?: string };
 
 export type WireFrame = GuestFrame | HostFrame;
 
@@ -393,8 +570,15 @@ export type WireFrame = GuestFrame | HostFrame;
  *   answered by the `ui-response` guest frame. Guests that predate the
  *   grammar would silently drop `ui-request` (asks hang forever on the
  *   host), so they must be rejected at hello.
+ * - `4`: guest management + inter-guest communication. Guests may declare a
+ *   persistent `guestId` and `capabilities` in `hello`; the host answers
+ *   with `self`/`guests`/`permissionsSet` in `welcome` and accepts the
+ *   `guest-*`/`permission-audit` frames. Hosts still accept proto-3 guests
+ *   (legacy subset: no self/guests/permissions in welcome, never sent guest
+ *   frames), and guests ignore unknown frame types, so mixed versions
+ *   interoperate.
  */
-export const COLLAB_PROTO = 3;
+export const COLLAB_PROTO = 4;
 
 /** Parameter key used for intent tracing (e.g. prompt explanation/reasoning) */
 export const INTENT_FIELD = "i";
