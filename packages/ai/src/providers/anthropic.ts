@@ -31,6 +31,7 @@ import type {
 	ImageContent,
 	Message,
 	Model,
+	ProviderInputTransformation,
 	ProviderSessionState,
 	RawSseEvent,
 	RedactedThinkingContent,
@@ -83,7 +84,9 @@ import {
 	type MessageCreateParams,
 	type MessageCreateParamsStreaming,
 	type MessageParam,
+	parseAnthropicInputTransformations,
 	type RawMessageStreamEvent,
+	THINKING_BINDING_CONTROLS_BETA,
 	type TextBlockParam,
 } from "./anthropic-wire";
 import {
@@ -92,7 +95,7 @@ import {
 	claudeCodeSystemInstruction,
 	claudeCodeVersion,
 	claudeToolPrefix,
-	coworkUserAgent,
+	claudeCodeUserAgent,
 } from "./claude-code-fingerprint";
 import {
 	buildCopilotDynamicHeaders,
@@ -112,7 +115,7 @@ export type AnthropicHeaderOptions = {
 	modelHeaders?: Record<string, string>;
 	isCloudflareAiGateway?: boolean;
 	claudeCodeSessionId?: string;
-	coworkBetas?: readonly string[];
+	claudeCodeBetas?: readonly string[];
 	/** Allow explicit fingerprint headers to replace OAuth defaults on non-official endpoints. */
 	allowAnthropicHeaderOverrides?: boolean;
 };
@@ -161,7 +164,7 @@ const contextManagementBeta = "context-management-2025-06-27";
 const structuredOutputsBeta = "structured-outputs-2025-12-15";
 const thinkingTokenCountBeta = "thinking-token-count-2026-05-13";
 const fallbackCreditBeta = "fallback-credit-2026-06-01";
-const coworkUtilityBetaDefaults = [
+const claudeCodeUtilityBetaDefaults = [
 	oauthAuthBeta,
 	"interleaved-thinking-2025-05-14",
 	thinkingTokenCountBeta,
@@ -169,7 +172,7 @@ const coworkUtilityBetaDefaults = [
 	"prompt-caching-scope-2026-01-05",
 	structuredOutputsBeta,
 ] as const;
-const coworkAgentBetaDefaults = [
+const claudeCodeAgentBetaDefaults = [
 	"claude-code-20250219",
 	oauthAuthBeta,
 	"interleaved-thinking-2025-05-14",
@@ -177,7 +180,6 @@ const coworkAgentBetaDefaults = [
 	contextManagementBeta,
 	"prompt-caching-scope-2026-01-05",
 	midConversationSystemBeta,
-	"advanced-tool-use-2025-11-20",
 ] as const;
 const extendedCacheTtlBeta = "extended-cache-ttl-2025-04-11";
 const fineGrainedToolStreamingBeta = "fine-grained-tool-streaming-2025-05-14";
@@ -187,7 +189,7 @@ const taskBudgetBeta = "task-budgets-2026-03-13";
 const effortBeta = "effort-2025-11-24";
 const serverSideFallbackBeta = "server-side-fallback-2026-06-01";
 
-function buildCoworkBetas({
+function buildClaudeCodeBetas({
 	agentRequest,
 	thinkingRequest,
 	disableStrictTools = false,
@@ -203,9 +205,9 @@ function buildCoworkBetas({
 	// hard-429s ("Usage credits are required for long context requests") on any
 	// beta-gated 1M model regardless of prompt size (#7238). Natively-1M models
 	// (e.g. claude-sonnet-5) serve their full window without the beta anyway.
-	if (!agentRequest && !disableStrictTools && supportsContextManagement) return coworkUtilityBetaDefaults;
+	if (!agentRequest && !disableStrictTools && supportsContextManagement) return claudeCodeUtilityBetaDefaults;
 	const betas: string[] = [];
-	for (const beta of agentRequest ? coworkAgentBetaDefaults : coworkUtilityBetaDefaults) {
+	for (const beta of agentRequest ? claudeCodeAgentBetaDefaults : claudeCodeUtilityBetaDefaults) {
 		if (disableStrictTools && beta === structuredOutputsBeta) continue;
 		if (!supportsContextManagement && beta === contextManagementBeta) continue;
 		betas.push(beta);
@@ -255,10 +257,11 @@ export function buildAnthropicHeaders(options: AnthropicHeaderOptions): Record<s
 	const incomingUserAgent = getHeaderCaseInsensitive(options.modelHeaders, "User-Agent");
 	const incomingAuthorization = getHeaderCaseInsensitive(options.modelHeaders, "Authorization");
 	const incomingApiKey = getHeaderCaseInsensitive(options.modelHeaders, "X-Api-Key");
-	// Cowork's beta profile is part of the OAuth fingerprint; API-key requests
-	// default to extras only, matching the streaming path.
+	// Claude Code's beta profile is part of the OAuth fingerprint; API-key
+	// requests default to extras only, matching the streaming path.
 	const betaHeader = buildBetaHeader(
-		options.coworkBetas ?? (oauthToken ? buildCoworkBetas({ agentRequest: true, thinkingRequest: true }) : []),
+		options.claudeCodeBetas ??
+			(oauthToken ? buildClaudeCodeBetas({ agentRequest: true, thinkingRequest: true }) : []),
 		extraBetas,
 	);
 	const acceptHeader = oauthToken ? "application/json" : stream ? "text/event-stream" : "application/json";
@@ -316,20 +319,19 @@ export function buildAnthropicHeaders(options: AnthropicHeaderOptions): Record<s
 	}
 
 	if (oauthToken) {
-		const userAgent = isClaudeCodeClientUserAgent(incomingUserAgent) ? incomingUserAgent : coworkUserAgent;
+		const userAgent = isClaudeCodeClientUserAgent(incomingUserAgent) ? incomingUserAgent : claudeCodeUserAgent;
 		const headers = {
 			...modelHeaders,
 			Accept: acceptHeader,
 			"Content-Type": "application/json",
 			"User-Agent": userAgent,
 			...(options.claudeCodeSessionId ? { "X-Claude-Code-Session-Id": options.claudeCodeSessionId } : {}),
-			...coworkHeaders,
+			...claudeCodeHeaders,
 			...(betaHeader ? { "anthropic-beta": betaHeader } : {}),
 			"anthropic-dangerous-direct-browser-access": "true",
 			"anthropic-version": "2023-06-01",
 			Authorization: `Bearer ${options.apiKey}`,
 			"x-app": "cli",
-			"x-client-request-id": nodeCrypto.randomUUID(),
 			Connection: "keep-alive",
 			"Accept-Encoding": "gzip, deflate, br, zstd",
 			...(incomingApiKey ? { "X-Api-Key": incomingApiKey } : {}),
@@ -398,6 +400,8 @@ type AnthropicProviderSessionState = ProviderSessionState & {
 	 * close.
 	 */
 	replayUnsignedThinkingDisabled: boolean;
+	/** Thinking blocks the API permanently dropped after a prefix mismatch. */
+	prefixDroppedThinkingBlocks: Set<string>;
 };
 
 function createAnthropicProviderSessionState(): AnthropicProviderSessionState {
@@ -405,10 +409,12 @@ function createAnthropicProviderSessionState(): AnthropicProviderSessionState {
 		strictToolsDisabled: false,
 		fastModeDisabled: false,
 		replayUnsignedThinkingDisabled: false,
+		prefixDroppedThinkingBlocks: new Set(),
 		close: () => {
 			state.strictToolsDisabled = false;
 			state.fastModeDisabled = false;
 			state.replayUnsignedThinkingDisabled = false;
+			state.prefixDroppedThinkingBlocks.clear();
 		},
 	};
 	return state;
@@ -508,10 +514,28 @@ function getCacheControl(
 	};
 }
 
-// Cowork mode: mimic the desktop agent's direct inference transport. Constants
-// live in the leaf module so registry/usage consumers avoid an init cycle.
+// Claude Code mode: mimic the CLI's direct inference transport. Constants live
+// in the leaf module so registry/usage consumers avoid an init cycle.
 export * from "./claude-code-fingerprint";
 
+/** Maps Node's platform identifier to the Stainless wire value. */
+export function mapStainlessOs(platform: string): "MacOS" | "Windows" | "Linux" | "FreeBSD" | `Other::${string}` {
+	switch (platform.toLowerCase()) {
+		case "darwin":
+			return "MacOS";
+		case "windows":
+		case "win32":
+			return "Windows";
+		case "linux":
+			return "Linux";
+		case "freebsd":
+			return "FreeBSD";
+		default:
+			return `Other::${platform.toLowerCase()}`;
+	}
+}
+
+/** Maps Node's architecture identifier to the Stainless wire value. */
 export function mapStainlessArch(arch: string): "x64" | "arm64" | "x86" | `other::${string}` {
 	switch (arch.toLowerCase()) {
 		case "amd64":
@@ -529,11 +553,11 @@ export function mapStainlessArch(arch: string): "x64" | "arm64" | "x86" | `other
 	}
 }
 
-/** Static headers emitted by Cowork's Linux Claude runtime. */
-export const coworkHeaders = {
+/** Static headers emitted by Claude Code's CLI runtime. */
+export const claudeCodeHeaders = {
 	"X-Stainless-Arch": mapStainlessArch(process.arch),
 	"X-Stainless-Lang": "js",
-	"X-Stainless-OS": "Linux",
+	"X-Stainless-OS": mapStainlessOs(process.platform),
 	"X-Stainless-Package-Version": claudeCodeSdkVersion,
 	"X-Stainless-Retry-Count": "0",
 	"X-Stainless-Runtime": "node",
@@ -543,7 +567,7 @@ export const coworkHeaders = {
 
 const enforcedHeaderKeys = new Set(
 	[
-		...Object.keys(coworkHeaders),
+		...Object.keys(claudeCodeHeaders),
 		"Accept",
 		"Accept-Encoding",
 		"Connection",
@@ -562,7 +586,7 @@ const enforcedHeaderKeys = new Set(
 );
 
 const overridableAnthropicHeaderKeys = new Set(
-	[...Object.keys(coworkHeaders), "anthropic-beta", "User-Agent", "x-app"].map(key => key.toLowerCase()),
+	[...Object.keys(claudeCodeHeaders), "anthropic-beta", "User-Agent", "x-app"].map(key => key.toLowerCase()),
 );
 
 const CLAUDE_BILLING_HEADER_PREFIX = "x-anthropic-billing-header:";
@@ -579,7 +603,7 @@ function createClaudeBillingHeader(firstUserMessageText: string): string {
 		.slice(0, 3);
 	// cch=00000: placeholder replaced with the real attestation hash by wrapFetchForCch
 	// before the request hits the wire (see below).
-	return `${CLAUDE_BILLING_HEADER_PREFIX} cc_version=${claudeCodeVersion}.${versionSuffix}; cc_entrypoint=claude-desktop; ${CCH_PLACEHOLDER_STR};`;
+	return `${CLAUDE_BILLING_HEADER_PREFIX} cc_version=${claudeCodeVersion}.${versionSuffix}; cc_entrypoint=cli; ${CCH_PLACEHOLDER_STR};`;
 }
 
 // cch attestation: XXHash64(body_with_placeholder, seed) low-20-bits, 5 hex chars.
@@ -1166,7 +1190,7 @@ export type AnthropicClientOptionsResult = {
 	fetchOptions?: AnthropicFetchOptions;
 };
 
-const COWORK_TLS_CIPHERS = tls.DEFAULT_CIPHERS;
+const CLAUDE_CODE_TLS_CIPHERS = tls.DEFAULT_CIPHERS;
 
 type FoundryTlsOptions = {
 	ca?: string | string[];
@@ -1339,7 +1363,7 @@ function resolveFoundryTlsOptions(model: Model<"anthropic-messages">): FoundryTl
 	return resolved;
 }
 
-function buildCoworkTlsFetchOptions(
+function buildClaudeCodeTlsFetchOptions(
 	model: Model<"anthropic-messages">,
 	baseUrl: string | undefined,
 ): AnthropicFetchOptions | undefined {
@@ -1361,7 +1385,7 @@ function buildCoworkTlsFetchOptions(
 		tls: {
 			rejectUnauthorized: true,
 			serverName,
-			...(COWORK_TLS_CIPHERS ? { ciphers: COWORK_TLS_CIPHERS } : {}),
+			...(CLAUDE_CODE_TLS_CIPHERS ? { ciphers: CLAUDE_CODE_TLS_CIPHERS } : {}),
 			...foundryTlsOptions,
 		},
 	};
@@ -1785,8 +1809,69 @@ function calculateFallbackTurnCost(
  * replayed as `signature: ""`. Exported for the compat tests.
  */
 const INVALID_THINKING_SIGNATURE_PATTERN = /invalid\s+`?signature`?\s+in\s+`?thinking`?(?:\s+block)?/i;
+const THINKING_PREFIX_BINDING_PATTERN =
+	/(?:bound to a different conversation|block_binding\.prefix_mismatch_behavior|prefix_mismatch_behavior)/i;
+
+/** Detects the preserved-thinking error caused by rewriting a signed block's conversation prefix. */
+export function isThinkingPrefixBindingError(message: string): boolean {
+	return INVALID_THINKING_SIGNATURE_PATTERN.test(message) && THINKING_PREFIX_BINDING_PATTERN.test(message);
+}
+
 export function isInvalidThinkingSignatureError(message: string): boolean {
 	return INVALID_THINKING_SIGNATURE_PATTERN.test(message);
+}
+
+const INPUT_TRANSFORMATION_PATH_PATTERN = /^messages\.(\d+)\.content\.(\d+)$/;
+
+function thinkingReplayKey(block: ContentBlockParam): string | undefined {
+	if (block.type === "thinking") return block.signature ? `thinking:${block.signature}` : undefined;
+	if (block.type === "redacted_thinking") return block.data ? `redacted:${block.data}` : undefined;
+	return undefined;
+}
+
+function rememberPrefixDroppedThinking(
+	params: MessageCreateParamsStreaming,
+	transformations: readonly ProviderInputTransformation[],
+	state: AnthropicProviderSessionState | undefined,
+): void {
+	if (!state) return;
+	for (const transformation of transformations) {
+		if (transformation.reason !== "prefix_binding_mismatch" || typeof transformation.path !== "string") continue;
+		const match = INPUT_TRANSFORMATION_PATH_PATTERN.exec(transformation.path);
+		if (!match) continue;
+		const message = params.messages[Number(match[1])];
+		if (!message || !Array.isArray(message.content)) continue;
+		const block = message.content[Number(match[2])];
+		if (!block) continue;
+		const key = thinkingReplayKey(block);
+		if (key) state.prefixDroppedThinkingBlocks.add(key);
+	}
+}
+
+function applyReportedInputTransformations(
+	output: AssistantMessage,
+	params: MessageCreateParamsStreaming,
+	state: AnthropicProviderSessionState | undefined,
+	value: unknown,
+	seen: Set<string>,
+): void {
+	const fresh: ProviderInputTransformation[] = [];
+	for (const transformation of parseAnthropicInputTransformations(value)) {
+		const key = JSON.stringify(transformation);
+		if (seen.has(key)) continue;
+		seen.add(key);
+		fresh.push(transformation);
+	}
+	if (fresh.length === 0) return;
+	output.inputTransformations = [...(output.inputTransformations ?? []), ...fresh];
+	rememberPrefixDroppedThinking(params, fresh, state);
+	for (const transformation of fresh) {
+		if (transformation.reason !== "prefix_binding_mismatch") continue;
+		logger.warn("anthropic: dropped thinking block after conversation prefix changed", {
+			model: output.model,
+			path: transformation.path,
+		});
+	}
 }
 
 /**
@@ -1798,7 +1883,7 @@ export function isInvalidThinkingSignatureError(message: string): boolean {
  * case into a one-line fix instead of a silent retry loop (#4297).
  */
 export function maybeAddReplayUnsignedThinkingHint(model: Model<"anthropic-messages">, message: string): string {
-	if (!isInvalidThinkingSignatureError(message)) return message;
+	if (!isInvalidThinkingSignatureError(message) || isThinkingPrefixBindingError(message)) return message;
 	if (model.compat.officialEndpoint) return message;
 	if (model.compatConfig?.replayUnsignedThinking !== undefined) return message;
 	const hint = `Provider "${model.provider}" looks like an Anthropic-compatible signing proxy: it rejected a replayed unsigned thinking block. Set \`compat.replayUnsignedThinking: false\` under \`providers.${model.provider}\` in your models.yml and retry. See https://github.com/can1357/oh-my-pi/issues/4297.`;
@@ -1861,6 +1946,11 @@ const streamAnthropicOnce = (
 				(providerSessionState?.strictToolsDisabled ?? false) || (model.compat?.disableStrictTools ?? false);
 			let dropFastMode = providerSessionState?.fastModeDisabled ?? false;
 			let forceDemoteUnsignedThinking = providerSessionState?.replayUnsignedThinkingDisabled ?? false;
+			let dropAllThinking = false;
+			let prefixMismatchBehavior =
+				model.thinking?.prefixBinding && model.compat.supportsThinkingBindingControls
+					? (options?.anthropicPrefixMismatchBehavior ?? "drop_block")
+					: undefined;
 			const mergedCallerHeaders = mergeHeaders(model.headers, options?.headers);
 			const umansGatewayWebSearchHeader = getUmansWebSearchHeader(model, mergedCallerHeaders);
 			// Keep fallback payloads aligned with the top-level Vertex effort gate:
@@ -1921,12 +2011,12 @@ const streamAnthropicOnce = (
 				) {
 					extraBetas.push(effortBeta);
 				}
-				if (model.compat.supportsMidConversationSystem && !extraBetas.includes(midConversationSystemBeta)) {
-					// convertAnthropicMessages may upgrade developer turns to the
-					// mid-conversation `system` role on these models; API-key requests
-					// need the beta alongside the role (OAuth agent requests already
-					// carry it in the Claude Code list).
-					extraBetas.push(midConversationSystemBeta);
+				if (
+					prefixMismatchBehavior &&
+					!isVertexRawPredictUrl(baseUrl) &&
+					!extraBetas.includes(THINKING_BINDING_CONTROLS_BETA)
+				) {
+					extraBetas.push(THINKING_BINDING_CONTROLS_BETA);
 				}
 				// `context_management.clear_thinking_20251015` requires this beta. OAuth
 				// requests carry it in `claudeCodeAgentBetaDefaults`; API-key requests
@@ -2001,6 +2091,9 @@ const streamAnthropicOnce = (
 					useUmansGatewayWebSearch: umansGatewayWebSearchHeader !== undefined,
 					forceDemoteUnsignedThinking,
 					supportsEagerToolInputStreaming,
+					prefixMismatchBehavior,
+					dropAllThinking,
+					droppedThinkingBlocks: providerSessionState?.prefixDroppedThinkingBlocks,
 					fallbacks,
 				});
 				if (disableStrictTools) {
@@ -2025,6 +2118,7 @@ const streamAnthropicOnce = (
 				return nextParams;
 			};
 			let params = await prepareParams();
+			const seenInputTransformations = new Set<string>();
 			const idleTimeoutMs = options?.streamIdleTimeoutMs ?? getStreamIdleTimeoutMs(model.compat.streamIdleTimeoutMs);
 			const firstEventTimeoutMs = options?.streamFirstEventTimeoutMs ?? getStreamFirstEventTimeoutMs(idleTimeoutMs);
 			const requestTimeoutMs =
@@ -2065,6 +2159,13 @@ const streamAnthropicOnce = (
 					throw new AIError.AnthropicStreamEnvelopeError("Anthropic cache refresh response omitted usage");
 				}
 				if (typeof body.id === "string") output.responseId = body.id;
+				applyReportedInputTransformations(
+					output,
+					params,
+					providerSessionState,
+					body.input_transformations,
+					seenInputTransformations,
+				);
 				output.usage.input = wireUsage.input_tokens ?? 0;
 				output.usage.output = wireUsage.output_tokens ?? 0;
 				output.usage.cacheRead = wireUsage.cache_read_input_tokens ?? 0;
@@ -2169,22 +2270,27 @@ const streamAnthropicOnce = (
 				// to zero even when no watchdog timeout is configured (the helper only
 				// pins it alongside a timeout; a client retry budget of 5 would otherwise
 				// multiply with PROVIDER_MAX_RETRIES into up to 66 wire attempts).
-				// Injected SDK clients (`options.client`) bypass the client-level
-				// `anthropic-beta` construction below, so any `output_config.effort` the
-				// body carries — the adaptive-only thinking-off / forced-tool pins and
-				// enabled-effort turns alike — would reach Anthropic without the required
-				// `effort-2025-11-24` beta and 400. `create()` accepts per-request headers
-				// (already used for the gateway web-search header), so merge the beta with
-				// any caller-provided `anthropic-beta` (deduped) and attach it there. Vertex
-				// never carries the effort field (dropped in buildParams), so it is unaffected.
-				const injectedClientEffortHeaders =
-					options?.client !== undefined &&
-					(params.output_config as AnthropicOutputConfig | undefined)?.effort !== undefined
-						? mergeAnthropicBetaHeader(mergedCallerHeaders, effortBeta)
-						: undefined;
+				// Injected SDK clients bypass client-level beta construction. Attach
+				// every beta required by fields this request actually carries. Vertex
+				// rawPredict is excluded because its betas live in `anthropic_beta`.
+				let injectedClientBetaHeaders: Record<string, string> | undefined;
+				if (options?.client !== undefined && !isVertexRawPredictUrl(baseUrl)) {
+					if (prefixMismatchBehavior) {
+						injectedClientBetaHeaders = mergeAnthropicBetaHeader(
+							mergedCallerHeaders,
+							THINKING_BINDING_CONTROLS_BETA,
+						);
+					}
+					if ((params.output_config as AnthropicOutputConfig | undefined)?.effort !== undefined) {
+						injectedClientBetaHeaders = mergeAnthropicBetaHeader(
+							injectedClientBetaHeaders ?? mergedCallerHeaders,
+							effortBeta,
+						);
+					}
+				}
 				const perRequestHeaders =
-					umansGatewayWebSearchHeader || injectedClientEffortHeaders
-						? { ...umansGatewayWebSearchHeader, ...injectedClientEffortHeaders }
+					umansGatewayWebSearchHeader || injectedClientBetaHeaders
+						? { ...umansGatewayWebSearchHeader, ...injectedClientBetaHeaders }
 						: undefined;
 				const requestOptions = {
 					...createSdkStreamRequestOptions(requestSignal, requestTimeoutMs),
@@ -2302,6 +2408,13 @@ const streamAnthropicOnce = (
 							sawMessageStart = true;
 							const startMessage = event.message;
 							if (startMessage?.id) output.responseId = startMessage.id;
+							applyReportedInputTransformations(
+								output,
+								params,
+								providerSessionState,
+								startMessage?.input_transformations,
+								seenInputTransformations,
+							);
 							const startUsage = startMessage?.usage;
 							if (startUsage) {
 								applyAnthropicUsageExtras(output.usage, startUsage);
@@ -2593,6 +2706,13 @@ const streamAnthropicOnce = (
 								continue;
 							}
 							const delta = event.delta;
+							applyReportedInputTransformations(
+								output,
+								params,
+								providerSessionState,
+								delta?.input_transformations,
+								seenInputTransformations,
+							);
 							const rawStopReason = delta?.stop_reason;
 							if (rawStopReason) {
 								output.stopReason = mapStopReason(rawStopReason);
@@ -2730,13 +2850,40 @@ const streamAnthropicOnce = (
 						firstTokenTime = undefined;
 						continue;
 					}
+					const streamFailureMessage =
+						streamFailure instanceof Error ? streamFailure.message : String(streamFailure);
+					if (
+						!dropAllThinking &&
+						firstTokenTime === undefined &&
+						!streamedReplayUnsafeContent &&
+						isThinkingPrefixBindingError(streamFailureMessage)
+					) {
+						logger.warn("anthropic: thinking prefix changed, stripping bound thinking and retrying", {
+							provider: model.provider,
+							model: model.id,
+							baseUrl,
+						});
+						prefixMismatchBehavior = undefined;
+						dropAllThinking = true;
+						params = await prepareParams();
+						providerRetryAttempt = 0;
+						output.content.length = 0;
+						output.model = model.id;
+						output.responseId = undefined;
+						output.errorMessage = undefined;
+						output.inputTransformations = undefined;
+						output.providerPayload = undefined;
+						output.usage = createEmptyUsage(copilotDynamicHeaders?.premiumRequests);
+						output.stopReason = "stop";
+						firstTokenTime = undefined;
+						continue;
+					}
 					if (
 						!forceDemoteUnsignedThinking &&
 						firstTokenTime === undefined &&
 						!streamedReplayUnsafeContent &&
-						isInvalidThinkingSignatureError(
-							streamFailure instanceof Error ? streamFailure.message : String(streamFailure),
-						)
+						!isThinkingPrefixBindingError(streamFailureMessage) &&
+						isInvalidThinkingSignatureError(streamFailureMessage)
 					) {
 						logger.warn(
 							"anthropic: signing proxy detected (Invalid signature in thinking block), demoting unsigned thinking and retrying",
@@ -2744,7 +2891,7 @@ const streamAnthropicOnce = (
 								provider: model.provider,
 								model: model.id,
 								baseUrl,
-								error: streamFailure instanceof Error ? streamFailure.message : String(streamFailure),
+								error: streamFailureMessage,
 							},
 						);
 						if (providerSessionState) {
@@ -2889,19 +3036,22 @@ export const streamAnthropic: StreamFunction<"anthropic-messages"> = (model, con
 export type AnthropicSystemBlock = {
 	type: "text";
 	text: string;
+	cache_control?: AnthropicCacheControl;
 };
 type SystemBlockOptions = {
 	includeClaudeCodeInstruction?: boolean;
 	extraInstructions?: string[];
 	/** Text of the first user message — used as fingerprint seed for the billing header. */
 	firstUserMessageText?: string;
+	/** Cache lifetime shared by the OAuth system breakpoint and later message breakpoints. */
+	cacheControl?: AnthropicCacheControl;
 };
 
 export function buildAnthropicSystemBlocks(
 	systemPrompt: readonly string[] | undefined,
 	options: SystemBlockOptions = {},
 ): AnthropicSystemBlock[] | undefined {
-	const { includeClaudeCodeInstruction = false, extraInstructions = [], firstUserMessageText } = options;
+	const { includeClaudeCodeInstruction = false, extraInstructions = [], firstUserMessageText, cacheControl } = options;
 	const sanitizedPrompts = normalizeSystemPrompts(systemPrompt);
 	const trimmedInstructions = extraInstructions.map(instruction => instruction.trim()).filter(Boolean);
 	const hasBillingHeader = sanitizedPrompts.some(prompt => prompt.startsWith(CLAUDE_BILLING_HEADER_PREFIX));
@@ -2909,7 +3059,11 @@ export function buildAnthropicSystemBlocks(
 	if (includeClaudeCodeInstruction && !hasBillingHeader) {
 		const blocks: AnthropicSystemBlock[] = [
 			{ type: "text", text: createClaudeBillingHeader(firstUserMessageText ?? "") },
-			{ type: "text", text: claudeCodeSystemInstruction },
+			{
+				type: "text",
+				text: claudeCodeSystemInstruction,
+				cache_control: cacheControl ? cloneAnthropicCacheControl(cacheControl) : { type: "ephemeral" },
+			},
 		];
 
 		for (const instruction of trimmedInstructions) {
@@ -2986,7 +3140,7 @@ export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): A
 	const needsFineGrainedToolStreamingBeta =
 		hasTools && isOfficialAnthropicApiUrl(baseUrl) && !supportsEagerToolInputStreaming;
 	const foundryCustomHeaders = resolveAnthropicCustomHeaders(model, baseUrl);
-	const tlsFetchOptions = buildCoworkTlsFetchOptions(model, baseUrl);
+	const tlsFetchOptions = buildClaudeCodeTlsFetchOptions(model, baseUrl);
 	// Disable Bun's native ~300s pre-response fetch timeout (issue #2422).
 	// `AnthropicMessagesClient` already arms its own DEFAULT_TIMEOUT_MS timer
 	// per request, so the native ceiling can only short-circuit slow-prefill
@@ -3052,8 +3206,8 @@ export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): A
 		isCloudflareAiGateway: model.provider === "cloudflare-ai-gateway",
 		allowAnthropicHeaderOverrides: model.compat.allowAnthropicHeaderOverrides,
 		claudeCodeSessionId,
-		coworkBetas: oauthToken
-			? buildCoworkBetas({
+		claudeCodeBetas: oauthToken
+			? buildClaudeCodeBetas({
 					agentRequest: hasTools || thinkingEnabled,
 					thinkingRequest: thinkingEnabled,
 					disableStrictTools,
@@ -3287,6 +3441,9 @@ type AnthropicParamBuildOptions = {
 	useUmansGatewayWebSearch: boolean;
 	forceDemoteUnsignedThinking: boolean;
 	supportsEagerToolInputStreaming: boolean;
+	prefixMismatchBehavior?: "drop_block" | "error";
+	dropAllThinking: boolean;
+	droppedThinkingBlocks?: ReadonlySet<string>;
 	/** Sanitized server-side fallback entries; defaults to `options?.fallbacks` when omitted. */
 	fallbacks?: AnthropicOptions["fallbacks"];
 };
@@ -3303,6 +3460,9 @@ function buildParams(
 		useUmansGatewayWebSearch,
 		forceDemoteUnsignedThinking,
 		supportsEagerToolInputStreaming,
+		prefixMismatchBehavior,
+		dropAllThinking,
+		droppedThinkingBlocks,
 		fallbacks = options?.fallbacks,
 	} = buildOptions;
 	// A session-scoped auto-demote (learned from a live signing 400) clones the
@@ -3323,6 +3483,7 @@ function buildParams(
 	const systemBlocks = buildAnthropicSystemBlocks(context.systemPrompt, {
 		includeClaudeCodeInstruction: shouldInjectClaudeCodeInstruction,
 		firstUserMessageText,
+		cacheControl,
 	});
 
 	// Pre-compute tools.
@@ -3398,6 +3559,15 @@ function buildParams(
 		}
 	}
 
+	if (prefixMismatchBehavior) {
+		if (!thinking && model.thinking?.mode === "anthropic-adaptive") {
+			thinking = { type: "adaptive" };
+		}
+		if (thinking?.type === "adaptive" || thinking?.type === "enabled") {
+			thinking.block_binding = { prefix_mismatch_behavior: prefixMismatchBehavior };
+		}
+	}
+
 	// Pre-compute context_management. Send keep: "all" for every enabled or
 	// adaptive thinking request (OAuth + API-key) — not just OAuth. Without
 	// this directive Anthropic-compatible backends (Z.AI, Kimi, DeepSeek, …)
@@ -3438,6 +3608,8 @@ function buildParams(
 		model: options?.requestModelId ?? model.requestModelId ?? model.id,
 		messages: convertAnthropicMessages(context.messages, effectiveModel, isOAuthToken, {
 			serverSideFallbackEnabled: !!fallbacks?.length,
+			dropAllThinking,
+			droppedThinkingBlocks,
 		}),
 		...(systemBlocks && { system: systemBlocks }),
 		...(tools !== undefined && { tools }),
@@ -3447,6 +3619,9 @@ function buildParams(
 		...(contextManagement && { context_management: contextManagement }),
 		...(outputConfig && { output_config: outputConfig }),
 		...(fallbacks?.length ? { fallbacks } : {}),
+		...(isVertexRawPredictUrl(model.baseUrl) && prefixMismatchBehavior
+			? { anthropic_beta: [THINKING_BINDING_CONTROLS_BETA] }
+			: {}),
 		stream: true,
 	};
 
@@ -3617,7 +3792,11 @@ export function convertAnthropicMessages(
 	messages: Message[],
 	model: Model<"anthropic-messages">,
 	isOAuthToken: boolean,
-	opts?: { serverSideFallbackEnabled?: boolean },
+	opts?: {
+		serverSideFallbackEnabled?: boolean;
+		dropAllThinking?: boolean;
+		droppedThinkingBlocks?: ReadonlySet<string>;
+	},
 ): AnthropicMessageParam[] {
 	// Indices of params emitted from `developer` messages. After the main pass,
 	// the ones whose placement satisfies Anthropic's mid-conversation rules are
@@ -3664,6 +3843,13 @@ export function convertAnthropicMessages(
 						text: block.text.toWellFormed(),
 					});
 				} else if (block.type === "thinking") {
+					if (
+						opts?.dropAllThinking ||
+						(block.thinkingSignature &&
+							opts?.droppedThinkingBlocks?.has(`thinking:${block.thinkingSignature}`))
+					) {
+						continue;
+					}
 					if (hasSignedThinking) {
 						if (!block.thinkingSignature || block.thinkingSignature.trim().length === 0) {
 							if (block.thinking.trim().length === 0) continue;
@@ -3702,6 +3888,7 @@ export function convertAnthropicMessages(
 						});
 					}
 				} else if (block.type === "redactedThinking") {
+					if (opts?.dropAllThinking || opts?.droppedThinkingBlocks?.has(`redacted:${block.data}`)) continue;
 					if (block.data.trim().length === 0) continue;
 					blocks.push({
 						type: "redacted_thinking",

@@ -32345,6 +32345,51 @@
 				"streamIdleTimeoutMs": 900000
 			}
 		},
+		"eu.anthropic.claude-fable-5-1": {
+			"id": "eu.anthropic.claude-fable-5-1",
+			"name": "Claude Fable 5.1 (EU)",
+			"api": "bedrock-converse-stream",
+			"provider": "amazon-bedrock",
+			"baseUrl": "https://bedrock-runtime.us-east-1.amazonaws.com",
+			"reasoning": true,
+			"input": [
+				"text",
+				"image"
+			],
+			"cost": {
+				"input": 10,
+				"output": 50,
+				"cacheRead": 0.25,
+				"cacheWrite": 12.5
+			},
+			"contextWindow": 1000000,
+			"maxTokens": 128000,
+			"thinking": {
+				"mode": "anthropic-adaptive",
+				"efforts": [
+					"minimal",
+					"low",
+					"medium",
+					"high"
+				],
+				"supportsDisplay": true
+			},
+			"identity": {
+				"class": "anthropic",
+				"family": "fable",
+				"revision": "5.1.0"
+			},
+			"requiresGlyphTokenization": true,
+			"tokenizer": "claude-v5-sonnet",
+			"supportsComputerUse": false,
+			"compat": {
+				"promptCacheMode": "explicit",
+				"supportsLongPromptCacheRetention": true,
+				"promptCacheMinimumTokens": 1024,
+				"promptCacheMaximumCheckpoints": 4,
+				"streamIdleTimeoutMs": 600000
+			}
+		},
 		"eu.anthropic.claude-haiku-4-5-20251001-v1:0": {
 			"id": "eu.anthropic.claude-haiku-4-5-20251001-v1:0",
 			"name": "Claude Haiku 4.5 (EU)",
@@ -32962,6 +33007,51 @@
 				"promptCacheMinimumTokens": 1024,
 				"promptCacheMaximumCheckpoints": 4,
 				"streamIdleTimeoutMs": 900000
+			}
+		},
+		"global.anthropic.claude-fable-5-1": {
+			"id": "global.anthropic.claude-fable-5-1",
+			"name": "Claude Fable 5.1",
+			"api": "bedrock-converse-stream",
+			"provider": "amazon-bedrock",
+			"baseUrl": "https://bedrock-runtime.us-east-1.amazonaws.com",
+			"reasoning": true,
+			"input": [
+				"text",
+				"image"
+			],
+			"cost": {
+				"input": 10,
+				"output": 50,
+				"cacheRead": 0.25,
+				"cacheWrite": 12.5
+			},
+			"contextWindow": 1000000,
+			"maxTokens": 128000,
+			"thinking": {
+				"mode": "anthropic-adaptive",
+				"efforts": [
+					"minimal",
+					"low",
+					"medium",
+					"high"
+				],
+				"supportsDisplay": true
+			},
+			"identity": {
+				"class": "anthropic",
+				"family": "fable",
+				"revision": "5.1.0"
+			},
+			"requiresGlyphTokenization": true,
+			"tokenizer": "claude-v5-sonnet",
+			"supportsComputerUse": false,
+			"compat": {
+				"promptCacheMode": "explicit",
+				"supportsLongPromptCacheRetention": true,
+				"promptCacheMinimumTokens": 1024,
+				"promptCacheMaximumCheckpoints": 4,
+				"streamIdleTimeoutMs": 600000
 			}
 		},
 		"global.anthropic.claude-haiku-4-5-20251001-v1:0": {
@@ -35143,6 +35233,51 @@
 				"streamIdleTimeoutMs": 900000
 			}
 		},
+		"us-gov.anthropic.claude-fable-5-1": {
+			"id": "us-gov.anthropic.claude-fable-5-1",
+			"name": "Claude Fable 5.1 (GovCloud)",
+			"api": "bedrock-converse-stream",
+			"provider": "amazon-bedrock",
+			"baseUrl": "https://bedrock-runtime.us-east-1.amazonaws.com",
+			"reasoning": true,
+			"input": [
+				"text",
+				"image"
+			],
+			"cost": {
+				"input": 10,
+				"output": 50,
+				"cacheRead": 0.25,
+				"cacheWrite": 12.5
+			},
+			"contextWindow": 1000000,
+			"maxTokens": 128000,
+			"thinking": {
+				"mode": "anthropic-adaptive",
+				"efforts": [
+					"minimal",
+					"low",
+					"medium",
+					"high"
+				],
+				"supportsDisplay": true
+			},
+			"identity": {
+				"class": "anthropic",
+				"family": "fable",
+				"revision": "5.1.0"
+			},
+			"requiresGlyphTokenization": true,
+			"tokenizer": "claude-v5-sonnet",
+			"supportsComputerUse": false,
+			"compat": {
+				"promptCacheMode": "explicit",
+				"supportsLongPromptCacheRetention": true,
+				"promptCacheMinimumTokens": 1024,
+				"promptCacheMaximumCheckpoints": 4,
+				"streamIdleTimeoutMs": 600000
+			}
+		},
 		"us-gov.anthropic.claude-haiku-4-5-20251001-v1:0": {
 			"id": "us-gov.anthropic.claude-haiku-4-5-20251001-v1:0",
 			"name": "Claude Haiku 4.5 (GovCloud)",
@@ -35801,6 +35936,51 @@
 				"promptCacheMinimumTokens": 1024,
 				"promptCacheMaximumCheckpoints": 4,
 				"streamIdleTimeoutMs": 900000
+			}
+		},
+		"us.anthropic.claude-fable-5-1": {
+			"id": "us.anthropic.claude-fable-5-1",
+			"name": "Claude Fable 5.1 (US)",
+			"api": "bedrock-converse-stream",
+			"provider": "amazon-bedrock",
+			"baseUrl": "https://bedrock-runtime.us-east-1.amazonaws.com",
+			"reasoning": true,
+			"input": [
+				"text",
+				"image"
+			],
+			"cost": {
+				"input": 11,
+				"output": 55,
+				"cacheRead": 0.275,
+				"cacheWrite": 13.75
+			},
+			"contextWindow": 1000000,
+			"maxTokens": 128000,
+			"thinking": {
+				"mode": "anthropic-adaptive",
+				"efforts": [
+					"minimal",
+					"low",
+					"medium",
+					"high"
+				],
+				"supportsDisplay": true
+			},
+			"identity": {
+				"class": "anthropic",
+				"family": "fable",
+				"revision": "5.1.0"
+			},
+			"requiresGlyphTokenization": true,
+			"tokenizer": "claude-v5-sonnet",
+			"supportsComputerUse": false,
+			"compat": {
+				"promptCacheMode": "explicit",
+				"supportsLongPromptCacheRetention": true,
+				"promptCacheMinimumTokens": 1024,
+				"promptCacheMaximumCheckpoints": 4,
+				"streamIdleTimeoutMs": 600000
 			}
 		},
 		"us.anthropic.claude-haiku-4-5-20251001-v1:0": {
@@ -37055,6 +37235,65 @@
 				"class": "anthropic",
 				"family": "fable",
 				"revision": "5.0.0"
+			},
+			"requiresGlyphTokenization": true,
+			"tokenizer": "claude-v5-sonnet",
+			"supportsComputerUse": false,
+			"compat": {
+				"officialEndpoint": true,
+				"signingEndpoint": true,
+				"supportsContextManagement": true,
+				"supportsOutputEffort": true,
+				"disableStrictTools": false,
+				"disableAdaptiveThinking": false,
+				"allowAnthropicHeaderOverrides": false,
+				"supportsEagerToolInputStreaming": true,
+				"supportsLongCacheRetention": true,
+				"supportsMidConversationSystem": true,
+				"supportsForcedToolChoice": false,
+				"supportsSamplingParams": false,
+				"requiresToolResultId": false,
+				"requiresThinkingEnabled": false,
+				"replayUnsignedThinking": false,
+				"escapeBuiltinToolNames": false,
+				"injectClaudeCodeInstruction": true,
+				"stripImageInput": false
+			}
+		},
+		"claude-fable-5-1": {
+			"id": "claude-fable-5-1",
+			"name": "Claude Fable 5.1",
+			"api": "anthropic-messages",
+			"provider": "anthropic",
+			"baseUrl": "https://api.anthropic.com",
+			"reasoning": true,
+			"input": [
+				"text",
+				"image"
+			],
+			"cost": {
+				"input": 10,
+				"output": 50,
+				"cacheRead": 1,
+				"cacheWrite": 12.5
+			},
+			"contextWindow": 1000000,
+			"maxTokens": 128000,
+			"thinking": {
+				"mode": "anthropic-adaptive",
+				"efforts": [
+					"low",
+					"medium",
+					"high",
+					"xhigh",
+					"max"
+				],
+				"supportsDisplay": true
+			},
+			"identity": {
+				"class": "anthropic",
+				"family": "fable",
+				"revision": "5.1.0"
 			},
 			"requiresGlyphTokenization": true,
 			"tokenizer": "claude-v5-sonnet",
@@ -54838,6 +55077,246 @@
 			"supportsComputerUse": false,
 			"supportsComputerUseConfig": false
 		},
+		"claude-fable-5-1-high": {
+			"id": "claude-fable-5-1-high",
+			"name": "Claude Fable 5.1 1M (NO ZDR)",
+			"api": "cursor-agent",
+			"provider": "cursor",
+			"baseUrl": "https://api2.cursor.sh",
+			"reasoning": true,
+			"input": [
+				"text",
+				"image"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 1000000,
+			"maxTokens": 64000,
+			"cursorMaxMode": false,
+			"tokenizer": "claude-v5-sonnet",
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"minimal",
+					"low",
+					"medium",
+					"high"
+				],
+				"effortRouting": {
+					"off": "claude-fable-5-1-high",
+					"minimal": "claude-fable-5-1-thinking-high",
+					"low": "claude-fable-5-1-thinking-high",
+					"medium": "claude-fable-5-1-thinking-high",
+					"high": "claude-fable-5-1-thinking-high"
+				}
+			},
+			"identity": {
+				"class": "anthropic",
+				"family": "fable",
+				"revision": "5.1.0",
+				"effort": "high",
+				"logicalId": "claude-fable-5-1"
+			},
+			"requiresGlyphTokenization": true,
+			"supportsComputerUse": false,
+			"supportsComputerUseConfig": false
+		},
+		"claude-fable-5-1-low": {
+			"id": "claude-fable-5-1-low",
+			"name": "Claude Fable 5.1 1M Low (NO ZDR)",
+			"api": "cursor-agent",
+			"provider": "cursor",
+			"baseUrl": "https://api2.cursor.sh",
+			"reasoning": true,
+			"input": [
+				"text",
+				"image"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 1000000,
+			"maxTokens": 64000,
+			"cursorMaxMode": false,
+			"tokenizer": "claude-v5-sonnet",
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"minimal",
+					"low",
+					"medium",
+					"high"
+				],
+				"effortRouting": {
+					"off": "claude-fable-5-1-low",
+					"minimal": "claude-fable-5-1-thinking-low",
+					"low": "claude-fable-5-1-thinking-low",
+					"medium": "claude-fable-5-1-thinking-low",
+					"high": "claude-fable-5-1-thinking-low"
+				}
+			},
+			"identity": {
+				"class": "anthropic",
+				"family": "fable",
+				"revision": "5.1.0",
+				"effort": "low",
+				"logicalId": "claude-fable-5-1"
+			},
+			"requiresGlyphTokenization": true,
+			"supportsComputerUse": false,
+			"supportsComputerUseConfig": false
+		},
+		"claude-fable-5-1-max": {
+			"id": "claude-fable-5-1-max",
+			"name": "Claude Fable 5.1 1M Max (NO ZDR)",
+			"api": "cursor-agent",
+			"provider": "cursor",
+			"baseUrl": "https://api2.cursor.sh",
+			"reasoning": true,
+			"input": [
+				"text",
+				"image"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 1000000,
+			"maxTokens": 64000,
+			"cursorMaxMode": false,
+			"tokenizer": "claude-v5-sonnet",
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"minimal",
+					"low",
+					"medium",
+					"high"
+				],
+				"effortRouting": {
+					"off": "claude-fable-5-1-max",
+					"minimal": "claude-fable-5-1-thinking-max",
+					"low": "claude-fable-5-1-thinking-max",
+					"medium": "claude-fable-5-1-thinking-max",
+					"high": "claude-fable-5-1-thinking-max"
+				}
+			},
+			"identity": {
+				"class": "anthropic",
+				"family": "fable",
+				"revision": "5.1.0",
+				"effort": "max",
+				"logicalId": "claude-fable-5-1"
+			},
+			"requiresGlyphTokenization": true,
+			"supportsComputerUse": false,
+			"supportsComputerUseConfig": false
+		},
+		"claude-fable-5-1-medium": {
+			"id": "claude-fable-5-1-medium",
+			"name": "Claude Fable 5.1 1M Medium (NO ZDR)",
+			"api": "cursor-agent",
+			"provider": "cursor",
+			"baseUrl": "https://api2.cursor.sh",
+			"reasoning": true,
+			"input": [
+				"text",
+				"image"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 1000000,
+			"maxTokens": 64000,
+			"cursorMaxMode": false,
+			"tokenizer": "claude-v5-sonnet",
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"minimal",
+					"low",
+					"medium",
+					"high"
+				],
+				"effortRouting": {
+					"off": "claude-fable-5-1-medium",
+					"minimal": "claude-fable-5-1-thinking-medium",
+					"low": "claude-fable-5-1-thinking-medium",
+					"medium": "claude-fable-5-1-thinking-medium",
+					"high": "claude-fable-5-1-thinking-medium"
+				}
+			},
+			"identity": {
+				"class": "anthropic",
+				"family": "fable",
+				"revision": "5.1.0",
+				"effort": "medium",
+				"logicalId": "claude-fable-5-1"
+			},
+			"requiresGlyphTokenization": true,
+			"supportsComputerUse": false,
+			"supportsComputerUseConfig": false
+		},
+		"claude-fable-5-1-xhigh": {
+			"id": "claude-fable-5-1-xhigh",
+			"name": "Claude Fable 5.1 1M Extra High (NO ZDR)",
+			"api": "cursor-agent",
+			"provider": "cursor",
+			"baseUrl": "https://api2.cursor.sh",
+			"reasoning": true,
+			"input": [
+				"text",
+				"image"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 1000000,
+			"maxTokens": 64000,
+			"cursorMaxMode": false,
+			"tokenizer": "claude-v5-sonnet",
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"minimal",
+					"low",
+					"medium",
+					"high"
+				],
+				"effortRouting": {
+					"off": "claude-fable-5-1-xhigh",
+					"minimal": "claude-fable-5-1-thinking-xhigh",
+					"low": "claude-fable-5-1-thinking-xhigh",
+					"medium": "claude-fable-5-1-thinking-xhigh",
+					"high": "claude-fable-5-1-thinking-xhigh"
+				}
+			},
+			"identity": {
+				"class": "anthropic",
+				"family": "fable",
+				"revision": "5.1.0",
+				"effort": "xhigh",
+				"logicalId": "claude-fable-5-1"
+			},
+			"requiresGlyphTokenization": true,
+			"supportsComputerUse": false,
+			"supportsComputerUseConfig": false
+		},
 		"claude-fable-5-high": {
 			"id": "claude-fable-5-high",
 			"name": "Claude Fable 5 1M (NO ZDR)",
@@ -59684,8 +60163,8 @@
 				"image"
 			],
 			"cost": {
-				"input": 2,
-				"output": 10,
+				"input": 2.9999999999999996,
+				"output": 15,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -68991,6 +69470,105 @@
 				"supportsPromptCacheKey": false
 			},
 			"supportsComputerUse": false
+		},
+		"deepseek-v4-flash-vision-exp": {
+			"id": "deepseek-v4-flash-vision-exp",
+			"name": "DeepSeek V4 Flash Vision Exp",
+			"api": "openai-completions",
+			"provider": "fireworks",
+			"baseUrl": "https://api.fireworks.ai/inference/v1",
+			"reasoning": true,
+			"input": [
+				"text",
+				"image"
+			],
+			"cost": {
+				"input": 0.14,
+				"output": 0.28,
+				"cacheRead": 0.0028,
+				"cacheWrite": 0
+			},
+			"contextWindow": 1048576,
+			"maxTokens": 384000,
+			"identity": {
+				"class": "deepseek",
+				"family": "flash"
+			},
+			"requiresGlyphTokenization": false,
+			"tokenizer": "deepseek-v3",
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"low",
+					"high",
+					"max"
+				]
+			},
+			"compat": {
+				"supportsStore": false,
+				"supportsDeveloperRole": false,
+				"supportsMultipleSystemMessages": true,
+				"supportsReasoningEffort": true,
+				"supportsReasoningParams": true,
+				"supportsSamplingParams": true,
+				"supportsPenaltyAndStopParams": true,
+				"reasoningEffortMap": {},
+				"supportsUsageInStreaming": true,
+				"alwaysSendMaxTokens": false,
+				"disableReasoningOnForcedToolChoice": false,
+				"disableReasoningOnToolChoice": true,
+				"supportsToolChoice": false,
+				"supportsForcedToolChoice": true,
+				"supportsNamedToolChoice": true,
+				"maxTokensField": "max_tokens",
+				"requiresToolResultName": false,
+				"requiresAssistantAfterToolResult": false,
+				"requiresThinkingAsText": false,
+				"requiresMistralToolIds": false,
+				"thinkingFormat": "openai",
+				"reasoningDisableMode": "lowest-effort",
+				"omitReasoningEffort": false,
+				"includeEncryptedReasoning": true,
+				"filterReasoningHistory": false,
+				"reasoningContentField": "reasoning_content",
+				"requiresReasoningContentForToolCalls": true,
+				"requiresReasoningContentForAllAssistantTurns": true,
+				"allowsSyntheticReasoningContentForToolCalls": false,
+				"replayReasoningContent": false,
+				"qwenPreserveThinking": false,
+				"qwenTemplateReasoningEffort": false,
+				"requiresAssistantContentForToolCalls": true,
+				"supportsPromptCacheBreakpoints": false,
+				"isOpenRouterHost": false,
+				"wireModelIdMode": "fireworks",
+				"isVercelGatewayHost": false,
+				"supportsStrictMode": false,
+				"toolStrictMode": "mixed",
+				"stripDeepseekSpecialTokens": false,
+				"streamMarkupHealingPattern": "dsml",
+				"reasoningDeltasMayBeCumulative": false,
+				"emptyLengthFinishIsContextError": false,
+				"usesOpenAIToolCallIdLimit": false,
+				"dropThinkingWhenReasoningEffort": true,
+				"nativeKimiK3Reasoning": false,
+				"zaiReasoningEffortDialect": false,
+				"clampOutputToModelMax": false,
+				"stripImageInput": false,
+				"thinkingLoopGuard": "deepseek",
+				"rejectRootObjectUnion": false,
+				"retryWithoutStrictOnGrammarError": false,
+				"supportsPromptCacheKey": false
+			},
+			"supportsComputerUse": false,
+			"compatConfig": {
+				"supportsDeveloperRole": false,
+				"supportsReasoningEffort": true,
+				"maxTokensField": "max_tokens",
+				"supportsToolChoice": false,
+				"reasoningContentField": "reasoning_content",
+				"requiresReasoningContentForToolCalls": true,
+				"requiresAssistantContentForToolCalls": true
+			}
 		},
 		"deepseek-v4-pro": {
 			"id": "deepseek-v4-pro",
@@ -80324,6 +80902,65 @@
 		}
 	},
 	"google-vertex": {
+		"claude-fable-5-1@default": {
+			"id": "claude-fable-5-1@default",
+			"name": "Claude Fable 5.1",
+			"api": "anthropic-messages",
+			"provider": "google-vertex",
+			"baseUrl": "https://{location}-aiplatform.googleapis.com/v1/projects/{project}/locations/{location}/publishers/anthropic/models/claude-fable-5-1@default:streamRawPredict",
+			"reasoning": true,
+			"input": [
+				"text",
+				"image"
+			],
+			"cost": {
+				"input": 10,
+				"output": 50,
+				"cacheRead": 0.25,
+				"cacheWrite": 12.5
+			},
+			"contextWindow": 1000000,
+			"maxTokens": 128000,
+			"thinking": {
+				"mode": "anthropic-adaptive",
+				"efforts": [
+					"low",
+					"medium",
+					"high",
+					"xhigh",
+					"max"
+				],
+				"supportsDisplay": true
+			},
+			"identity": {
+				"class": "anthropic",
+				"family": "fable",
+				"revision": "5.1.0"
+			},
+			"requiresGlyphTokenization": true,
+			"tokenizer": "claude-v5-sonnet",
+			"supportsComputerUse": false,
+			"compat": {
+				"officialEndpoint": false,
+				"signingEndpoint": true,
+				"supportsContextManagement": false,
+				"supportsOutputEffort": false,
+				"disableStrictTools": false,
+				"disableAdaptiveThinking": false,
+				"allowAnthropicHeaderOverrides": false,
+				"supportsEagerToolInputStreaming": false,
+				"supportsLongCacheRetention": false,
+				"supportsMidConversationSystem": false,
+				"supportsForcedToolChoice": false,
+				"supportsSamplingParams": false,
+				"requiresToolResultId": false,
+				"requiresThinkingEnabled": false,
+				"replayUnsignedThinking": false,
+				"escapeBuiltinToolNames": false,
+				"injectClaudeCodeInstruction": true,
+				"stripImageInput": false
+			}
+		},
 		"claude-fable-5@default": {
 			"id": "claude-fable-5@default",
 			"name": "Claude Fable 5",
@@ -90163,13 +90800,13 @@
 				"text"
 			],
 			"cost": {
-				"input": 0.05,
-				"output": 0.16,
-				"cacheRead": 0.013,
+				"input": 0.04998,
+				"output": 0.09996,
+				"cacheRead": 0.009996,
 				"cacheWrite": 0
 			},
 			"contextWindow": 1048576,
-			"maxTokens": 393216,
+			"maxTokens": 131072,
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
@@ -93244,6 +93881,98 @@
 				"supportsPromptCacheKey": false
 			}
 		},
+		"anthropic/claude-fable-5.1": {
+			"id": "anthropic/claude-fable-5.1",
+			"name": "Claude Fable 5.1",
+			"api": "openai-completions",
+			"provider": "kilo",
+			"baseUrl": "https://api.kilo.ai/api/gateway",
+			"reasoning": true,
+			"input": [
+				"text",
+				"image"
+			],
+			"cost": {
+				"input": 10,
+				"output": 50,
+				"cacheRead": 0.25,
+				"cacheWrite": 12.5
+			},
+			"contextWindow": 1000000,
+			"maxTokens": 128000,
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"minimal",
+					"low",
+					"medium",
+					"high",
+					"xhigh"
+				]
+			},
+			"identity": {
+				"class": "anthropic",
+				"family": "fable",
+				"revision": "5.1.0"
+			},
+			"requiresGlyphTokenization": true,
+			"tokenizer": "claude-v5-sonnet",
+			"supportsComputerUse": false,
+			"compat": {
+				"supportsStore": false,
+				"supportsDeveloperRole": false,
+				"supportsMultipleSystemMessages": false,
+				"supportsReasoningEffort": true,
+				"supportsReasoningParams": true,
+				"supportsSamplingParams": true,
+				"supportsPenaltyAndStopParams": true,
+				"reasoningEffortMap": {},
+				"supportsUsageInStreaming": true,
+				"alwaysSendMaxTokens": false,
+				"disableReasoningOnForcedToolChoice": true,
+				"disableReasoningOnToolChoice": false,
+				"supportsToolChoice": true,
+				"supportsForcedToolChoice": true,
+				"supportsNamedToolChoice": true,
+				"maxTokensField": "max_completion_tokens",
+				"requiresToolResultName": false,
+				"requiresAssistantAfterToolResult": false,
+				"requiresThinkingAsText": false,
+				"requiresMistralToolIds": false,
+				"thinkingFormat": "openai",
+				"reasoningDisableMode": "lowest-effort",
+				"omitReasoningEffort": false,
+				"includeEncryptedReasoning": true,
+				"filterReasoningHistory": false,
+				"reasoningContentField": "reasoning_content",
+				"requiresReasoningContentForToolCalls": false,
+				"requiresReasoningContentForAllAssistantTurns": false,
+				"allowsSyntheticReasoningContentForToolCalls": true,
+				"replayReasoningContent": false,
+				"qwenPreserveThinking": false,
+				"qwenTemplateReasoningEffort": false,
+				"requiresAssistantContentForToolCalls": false,
+				"supportsPromptCacheBreakpoints": false,
+				"isOpenRouterHost": false,
+				"wireModelIdMode": "raw",
+				"isVercelGatewayHost": false,
+				"supportsStrictMode": false,
+				"toolStrictMode": "mixed",
+				"stripDeepseekSpecialTokens": false,
+				"streamMarkupHealingPattern": "thinking",
+				"reasoningDeltasMayBeCumulative": false,
+				"emptyLengthFinishIsContextError": false,
+				"usesOpenAIToolCallIdLimit": false,
+				"dropThinkingWhenReasoningEffort": false,
+				"nativeKimiK3Reasoning": false,
+				"zaiReasoningEffortDialect": false,
+				"clampOutputToModelMax": false,
+				"stripImageInput": false,
+				"rejectRootObjectUnion": false,
+				"retryWithoutStrictOnGrammarError": false,
+				"supportsPromptCacheKey": false
+			}
+		},
 		"anthropic/claude-haiku-4.5": {
 			"id": "anthropic/claude-haiku-4.5",
 			"name": "Claude Haiku 4.5",
@@ -93925,7 +94654,6 @@
 			},
 			"requiresGlyphTokenization": true,
 			"tokenizer": "claude-v47",
-			"supportsComputerUse": false,
 			"compat": {
 				"supportsStore": false,
 				"supportsDeveloperRole": false,
@@ -93979,7 +94707,8 @@
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
 				"supportsPromptCacheKey": false
-			}
+			},
+			"supportsComputerUse": false
 		},
 		"anthropic/claude-opus-4.8": {
 			"id": "anthropic/claude-opus-4.8",
@@ -94109,7 +94838,6 @@
 			},
 			"requiresGlyphTokenization": true,
 			"tokenizer": "claude-v47",
-			"supportsComputerUse": false,
 			"compat": {
 				"supportsStore": false,
 				"supportsDeveloperRole": false,
@@ -94163,7 +94891,8 @@
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
 				"supportsPromptCacheKey": false
-			}
+			},
+			"supportsComputerUse": false
 		},
 		"anthropic/claude-opus-5": {
 			"id": "anthropic/claude-opus-5",
@@ -94293,7 +95022,6 @@
 			},
 			"requiresGlyphTokenization": true,
 			"tokenizer": "claude-v5",
-			"supportsComputerUse": false,
 			"compat": {
 				"supportsStore": false,
 				"supportsDeveloperRole": false,
@@ -94347,7 +95075,8 @@
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
 				"supportsPromptCacheKey": false
-			}
+			},
+			"supportsComputerUse": false
 		},
 		"anthropic/claude-sonnet-4": {
 			"id": "anthropic/claude-sonnet-4",
@@ -98911,7 +99640,7 @@
 				"cacheRead": 0.132,
 				"cacheWrite": 0
 			},
-			"contextWindow": 1024000,
+			"contextWindow": 1048576,
 			"maxTokens": 384000,
 			"thinking": {
 				"mode": "effort",
@@ -102848,6 +103577,94 @@
 				"supportsPromptCacheKey": false
 			}
 		},
+		"inception/mercury-2.5-preview": {
+			"id": "inception/mercury-2.5-preview",
+			"name": "Mercury 2.5 Preview",
+			"api": "openai-completions",
+			"provider": "kilo",
+			"baseUrl": "https://api.kilo.ai/api/gateway",
+			"reasoning": true,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0.2,
+				"output": 0.75,
+				"cacheRead": 0.02,
+				"cacheWrite": 0
+			},
+			"contextWindow": 260000,
+			"maxTokens": 65536,
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"minimal",
+					"low",
+					"medium",
+					"high",
+					"xhigh"
+				]
+			},
+			"identity": {
+				"class": "unknown"
+			},
+			"requiresGlyphTokenization": false,
+			"supportsComputerUse": false,
+			"compat": {
+				"supportsStore": false,
+				"supportsDeveloperRole": false,
+				"supportsMultipleSystemMessages": false,
+				"supportsReasoningEffort": true,
+				"supportsReasoningParams": true,
+				"supportsSamplingParams": true,
+				"supportsPenaltyAndStopParams": true,
+				"reasoningEffortMap": {},
+				"supportsUsageInStreaming": true,
+				"alwaysSendMaxTokens": false,
+				"disableReasoningOnForcedToolChoice": false,
+				"disableReasoningOnToolChoice": false,
+				"supportsToolChoice": true,
+				"supportsForcedToolChoice": true,
+				"supportsNamedToolChoice": true,
+				"maxTokensField": "max_completion_tokens",
+				"requiresToolResultName": false,
+				"requiresAssistantAfterToolResult": false,
+				"requiresThinkingAsText": false,
+				"requiresMistralToolIds": false,
+				"thinkingFormat": "openai",
+				"reasoningDisableMode": "lowest-effort",
+				"omitReasoningEffort": false,
+				"includeEncryptedReasoning": true,
+				"filterReasoningHistory": false,
+				"reasoningContentField": "reasoning_content",
+				"requiresReasoningContentForToolCalls": false,
+				"requiresReasoningContentForAllAssistantTurns": false,
+				"allowsSyntheticReasoningContentForToolCalls": true,
+				"replayReasoningContent": false,
+				"qwenPreserveThinking": false,
+				"qwenTemplateReasoningEffort": false,
+				"requiresAssistantContentForToolCalls": false,
+				"supportsPromptCacheBreakpoints": false,
+				"isOpenRouterHost": false,
+				"wireModelIdMode": "raw",
+				"isVercelGatewayHost": false,
+				"supportsStrictMode": false,
+				"toolStrictMode": "mixed",
+				"stripDeepseekSpecialTokens": false,
+				"streamMarkupHealingPattern": "thinking",
+				"reasoningDeltasMayBeCumulative": false,
+				"emptyLengthFinishIsContextError": false,
+				"usesOpenAIToolCallIdLimit": false,
+				"dropThinkingWhenReasoningEffort": false,
+				"nativeKimiK3Reasoning": false,
+				"zaiReasoningEffortDialect": false,
+				"clampOutputToModelMax": false,
+				"stripImageInput": false,
+				"rejectRootObjectUnion": false,
+				"retryWithoutStrictOnGrammarError": false,
+				"supportsPromptCacheKey": false
+			}
+		},
 		"inception/mercury-coder": {
 			"id": "inception/mercury-coder",
 			"name": "Mercury Coder",
@@ -106533,8 +107350,8 @@
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
-			"contextWindow": 131072,
-			"maxTokens": 8192,
+			"contextWindow": 327680,
+			"maxTokens": 16384,
 			"identity": {
 				"class": "meta",
 				"family": "llama"
@@ -108201,7 +109018,7 @@
 				"cacheWrite": 0
 			},
 			"contextWindow": 196608,
-			"maxTokens": 196608,
+			"maxTokens": 176947,
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
@@ -108460,7 +109277,7 @@
 				"cacheWrite": 0
 			},
 			"contextWindow": 1048576,
-			"maxTokens": 1048576,
+			"maxTokens": 943718,
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
@@ -123688,7 +124505,7 @@
 				"cacheWrite": 0
 			},
 			"contextWindow": 262144,
-			"maxTokens": 16384,
+			"maxTokens": 235929,
 			"identity": {
 				"class": "qwen",
 				"revision": "3.0.0"
@@ -130248,9 +131065,9 @@
 				"text"
 			],
 			"cost": {
-				"input": 0.14,
-				"output": 0.58,
-				"cacheRead": 0.035,
+				"input": 0.0825,
+				"output": 0.33,
+				"cacheRead": 0.020625,
 				"cacheWrite": 0
 			},
 			"contextWindow": 262144,
@@ -173238,6 +174055,94 @@
 			},
 			"contextWindow": 131072,
 			"maxTokens": 117964,
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"minimal",
+					"low",
+					"medium",
+					"high",
+					"xhigh"
+				]
+			},
+			"identity": {
+				"class": "unknown"
+			},
+			"requiresGlyphTokenization": false,
+			"supportsComputerUse": false,
+			"compat": {
+				"supportsStore": true,
+				"supportsDeveloperRole": false,
+				"supportsMultipleSystemMessages": false,
+				"supportsReasoningEffort": true,
+				"supportsReasoningParams": true,
+				"supportsSamplingParams": true,
+				"supportsPenaltyAndStopParams": true,
+				"reasoningEffortMap": {},
+				"supportsUsageInStreaming": true,
+				"alwaysSendMaxTokens": false,
+				"disableReasoningOnForcedToolChoice": false,
+				"disableReasoningOnToolChoice": false,
+				"supportsToolChoice": true,
+				"supportsForcedToolChoice": true,
+				"supportsNamedToolChoice": true,
+				"maxTokensField": "max_completion_tokens",
+				"requiresToolResultName": false,
+				"requiresAssistantAfterToolResult": false,
+				"requiresThinkingAsText": false,
+				"requiresMistralToolIds": false,
+				"thinkingFormat": "openai",
+				"reasoningDisableMode": "lowest-effort",
+				"omitReasoningEffort": false,
+				"includeEncryptedReasoning": true,
+				"filterReasoningHistory": false,
+				"reasoningContentField": "reasoning_content",
+				"requiresReasoningContentForToolCalls": false,
+				"requiresReasoningContentForAllAssistantTurns": false,
+				"allowsSyntheticReasoningContentForToolCalls": true,
+				"replayReasoningContent": false,
+				"qwenPreserveThinking": false,
+				"qwenTemplateReasoningEffort": false,
+				"requiresAssistantContentForToolCalls": false,
+				"supportsPromptCacheBreakpoints": false,
+				"isOpenRouterHost": false,
+				"wireModelIdMode": "raw",
+				"isVercelGatewayHost": false,
+				"supportsStrictMode": false,
+				"toolStrictMode": "mixed",
+				"stripDeepseekSpecialTokens": false,
+				"streamMarkupHealingPattern": "thinking",
+				"reasoningDeltasMayBeCumulative": false,
+				"emptyLengthFinishIsContextError": false,
+				"usesOpenAIToolCallIdLimit": false,
+				"dropThinkingWhenReasoningEffort": false,
+				"nativeKimiK3Reasoning": false,
+				"zaiReasoningEffortDialect": false,
+				"clampOutputToModelMax": false,
+				"stripImageInput": false,
+				"rejectRootObjectUnion": false,
+				"retryWithoutStrictOnGrammarError": false,
+				"supportsPromptCacheKey": false
+			}
+		},
+		"inception/mercury-2.5-preview": {
+			"id": "inception/mercury-2.5-preview",
+			"name": "Mercury 2.5 Preview",
+			"api": "openai-completions",
+			"provider": "nanogpt",
+			"baseUrl": "https://nano-gpt.com/api/v1",
+			"reasoning": true,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0.04,
+				"output": 0.15,
+				"cacheRead": 0.004,
+				"cacheWrite": 0
+			},
+			"contextWindow": 260000,
+			"maxTokens": 65536,
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
@@ -260145,6 +261050,65 @@
 				"stripImageInput": false
 			}
 		},
+		"claude-fable-5-1": {
+			"id": "claude-fable-5-1",
+			"name": "Claude Fable 5.1",
+			"api": "anthropic-messages",
+			"provider": "opencode-zen",
+			"baseUrl": "https://opencode.ai/zen",
+			"reasoning": true,
+			"input": [
+				"text",
+				"image"
+			],
+			"cost": {
+				"input": 10,
+				"output": 50,
+				"cacheRead": 0.25,
+				"cacheWrite": 12.5
+			},
+			"contextWindow": 1000000,
+			"maxTokens": 128000,
+			"thinking": {
+				"mode": "anthropic-adaptive",
+				"efforts": [
+					"low",
+					"medium",
+					"high",
+					"xhigh",
+					"max"
+				],
+				"supportsDisplay": true
+			},
+			"identity": {
+				"class": "anthropic",
+				"family": "fable",
+				"revision": "5.1.0"
+			},
+			"requiresGlyphTokenization": true,
+			"tokenizer": "claude-v5-sonnet",
+			"supportsComputerUse": false,
+			"compat": {
+				"officialEndpoint": false,
+				"signingEndpoint": false,
+				"supportsContextManagement": false,
+				"supportsOutputEffort": true,
+				"disableStrictTools": false,
+				"disableAdaptiveThinking": false,
+				"allowAnthropicHeaderOverrides": false,
+				"supportsEagerToolInputStreaming": false,
+				"supportsLongCacheRetention": false,
+				"supportsMidConversationSystem": false,
+				"supportsForcedToolChoice": false,
+				"supportsSamplingParams": false,
+				"requiresToolResultId": false,
+				"requiresThinkingEnabled": false,
+				"replayUnsignedThinking": true,
+				"escapeBuiltinToolNames": false,
+				"injectClaudeCodeInstruction": true,
+				"stripImageInput": false
+			}
+		},
 		"claude-haiku-4-5": {
 			"id": "claude-haiku-4-5",
 			"name": "Claude Haiku 4.5",
@@ -269312,13 +270276,13 @@
 				"text"
 			],
 			"cost": {
-				"input": 0.049999999999999996,
-				"output": 0.16,
-				"cacheRead": 0.013000000000000001,
+				"input": 0.049980000000000004,
+				"output": 0.09996000000000001,
+				"cacheRead": 0.009996000000000001,
 				"cacheWrite": 0
 			},
 			"contextWindow": 1310720,
-			"maxTokens": 393216,
+			"maxTokens": 131072,
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
@@ -271827,6 +272791,113 @@
 				"supportsReasoningSummary": true
 			},
 			"supportsComputerUseConfig": false
+		},
+		"anthropic/claude-fable-5.1": {
+			"id": "anthropic/claude-fable-5.1",
+			"name": "Claude Fable 5.1",
+			"api": "openrouter",
+			"provider": "openrouter",
+			"baseUrl": "https://openrouter.ai/api/v1",
+			"reasoning": true,
+			"input": [
+				"text",
+				"image"
+			],
+			"cost": {
+				"input": 10,
+				"output": 50,
+				"cacheRead": 0.25,
+				"cacheWrite": 12.5
+			},
+			"contextWindow": 1000000,
+			"maxTokens": 128000,
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"low",
+					"medium",
+					"high",
+					"xhigh",
+					"max"
+				],
+				"defaultLevel": "high",
+				"requiresEffort": true
+			},
+			"identity": {
+				"class": "anthropic",
+				"family": "fable",
+				"revision": "5.1.0"
+			},
+			"requiresGlyphTokenization": true,
+			"tokenizer": "claude-v5-sonnet",
+			"compat": {
+				"supportsStore": true,
+				"supportsDeveloperRole": false,
+				"supportsMultipleSystemMessages": true,
+				"supportsReasoningEffort": true,
+				"supportsReasoningParams": true,
+				"supportsSamplingParams": true,
+				"supportsPenaltyAndStopParams": true,
+				"reasoningEffortMap": {},
+				"supportsUsageInStreaming": true,
+				"alwaysSendMaxTokens": false,
+				"disableReasoningOnForcedToolChoice": true,
+				"disableReasoningOnToolChoice": false,
+				"supportsToolChoice": false,
+				"supportsForcedToolChoice": true,
+				"supportsNamedToolChoice": true,
+				"maxTokensField": "max_completion_tokens",
+				"requiresToolResultName": false,
+				"requiresAssistantAfterToolResult": false,
+				"requiresThinkingAsText": false,
+				"requiresMistralToolIds": false,
+				"thinkingFormat": "openrouter",
+				"reasoningDisableMode": "openrouter-enabled-false",
+				"omitReasoningEffort": false,
+				"includeEncryptedReasoning": true,
+				"filterReasoningHistory": true,
+				"reasoningContentField": "reasoning_content",
+				"requiresReasoningContentForToolCalls": true,
+				"requiresReasoningContentForAllAssistantTurns": false,
+				"allowsSyntheticReasoningContentForToolCalls": true,
+				"replayReasoningContent": false,
+				"qwenPreserveThinking": false,
+				"qwenTemplateReasoningEffort": false,
+				"requiresAssistantContentForToolCalls": false,
+				"cacheControlFormat": "anthropic",
+				"supportsPromptCacheBreakpoints": false,
+				"isOpenRouterHost": true,
+				"wireModelIdMode": "openrouter",
+				"isVercelGatewayHost": false,
+				"supportsStrictMode": true,
+				"toolStrictMode": "mixed",
+				"stripDeepseekSpecialTokens": false,
+				"streamMarkupHealingPattern": "thinking",
+				"reasoningDeltasMayBeCumulative": false,
+				"emptyLengthFinishIsContextError": false,
+				"usesOpenAIToolCallIdLimit": false,
+				"dropThinkingWhenReasoningEffort": false,
+				"nativeKimiK3Reasoning": false,
+				"zaiReasoningEffortDialect": false,
+				"clampOutputToModelMax": false,
+				"stripImageInput": false,
+				"rejectRootObjectUnion": false,
+				"retryWithoutStrictOnGrammarError": true,
+				"supportsPromptCacheKey": false,
+				"supportsLongPromptCacheRetention": false,
+				"strictResponsesPairing": false,
+				"supportsImageDetailOriginal": true,
+				"supportsObfuscationOptOut": false,
+				"supportsAllTurnsReasoningContext": false,
+				"officialEndpoint": false,
+				"harmonyLeakMitigation": false,
+				"requiresReasoningOffJuiceInstruction": false,
+				"supportsReasoningSummary": true
+			},
+			"supportsComputerUse": false,
+			"compatConfig": {
+				"supportsToolChoice": false
+			}
 		},
 		"anthropic/claude-haiku-4.5": {
 			"id": "anthropic/claude-haiku-4.5",
@@ -277262,9 +278333,9 @@
 				"text"
 			],
 			"cost": {
-				"input": 0.08092,
-				"output": 0.16184,
-				"cacheRead": 0.016184,
+				"input": 0.07476000000000001,
+				"output": 0.14952000000000001,
+				"cacheRead": 0.014952,
 				"cacheWrite": 0
 			},
 			"contextWindow": 1048576,
@@ -277559,9 +278630,9 @@
 				"image"
 			],
 			"cost": {
-				"input": 0.44,
-				"output": 1.32,
-				"cacheRead": 0.014,
+				"input": 0.22,
+				"output": 0.66,
+				"cacheRead": 0.007,
 				"cacheWrite": 0
 			},
 			"contextWindow": 1048576,
@@ -277853,9 +278924,9 @@
 				"text"
 			],
 			"cost": {
-				"input": 1.1154,
-				"output": 3.3461999999999996,
-				"cacheRead": 0.03718,
+				"input": 0.66,
+				"output": 1.9800000000000002,
+				"cacheRead": 0.022,
 				"cacheWrite": 0
 			},
 			"contextWindow": 1048576,
@@ -282380,6 +283451,102 @@
 			},
 			"supportsComputerUseConfig": false
 		},
+		"inception/mercury-2.5-preview": {
+			"id": "inception/mercury-2.5-preview",
+			"name": "Mercury 2.5 Preview",
+			"api": "openrouter",
+			"provider": "openrouter",
+			"baseUrl": "https://openrouter.ai/api/v1",
+			"reasoning": true,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0.04,
+				"output": 0.15,
+				"cacheRead": 0.004,
+				"cacheWrite": 0
+			},
+			"contextWindow": 260000,
+			"maxTokens": 65536,
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"minimal",
+					"low",
+					"medium",
+					"high"
+				]
+			},
+			"identity": {
+				"class": "unknown"
+			},
+			"requiresGlyphTokenization": false,
+			"compat": {
+				"supportsStore": true,
+				"supportsDeveloperRole": false,
+				"supportsMultipleSystemMessages": true,
+				"supportsReasoningEffort": true,
+				"supportsReasoningParams": true,
+				"supportsSamplingParams": true,
+				"supportsPenaltyAndStopParams": true,
+				"reasoningEffortMap": {},
+				"supportsUsageInStreaming": true,
+				"alwaysSendMaxTokens": false,
+				"disableReasoningOnForcedToolChoice": false,
+				"disableReasoningOnToolChoice": false,
+				"supportsToolChoice": true,
+				"supportsForcedToolChoice": true,
+				"supportsNamedToolChoice": true,
+				"maxTokensField": "max_completion_tokens",
+				"requiresToolResultName": false,
+				"requiresAssistantAfterToolResult": false,
+				"requiresThinkingAsText": false,
+				"requiresMistralToolIds": false,
+				"thinkingFormat": "openrouter",
+				"reasoningDisableMode": "openrouter-enabled-false",
+				"omitReasoningEffort": false,
+				"includeEncryptedReasoning": true,
+				"filterReasoningHistory": false,
+				"reasoningContentField": "reasoning_content",
+				"requiresReasoningContentForToolCalls": true,
+				"requiresReasoningContentForAllAssistantTurns": false,
+				"allowsSyntheticReasoningContentForToolCalls": true,
+				"replayReasoningContent": false,
+				"qwenPreserveThinking": false,
+				"qwenTemplateReasoningEffort": false,
+				"requiresAssistantContentForToolCalls": false,
+				"supportsPromptCacheBreakpoints": false,
+				"isOpenRouterHost": true,
+				"wireModelIdMode": "openrouter",
+				"isVercelGatewayHost": false,
+				"supportsStrictMode": true,
+				"toolStrictMode": "mixed",
+				"stripDeepseekSpecialTokens": false,
+				"streamMarkupHealingPattern": "thinking",
+				"reasoningDeltasMayBeCumulative": false,
+				"emptyLengthFinishIsContextError": false,
+				"usesOpenAIToolCallIdLimit": false,
+				"dropThinkingWhenReasoningEffort": false,
+				"nativeKimiK3Reasoning": false,
+				"zaiReasoningEffortDialect": false,
+				"clampOutputToModelMax": false,
+				"stripImageInput": false,
+				"rejectRootObjectUnion": false,
+				"retryWithoutStrictOnGrammarError": false,
+				"supportsPromptCacheKey": false,
+				"supportsLongPromptCacheRetention": false,
+				"strictResponsesPairing": false,
+				"supportsImageDetailOriginal": true,
+				"supportsObfuscationOptOut": false,
+				"supportsAllTurnsReasoningContext": false,
+				"officialEndpoint": false,
+				"harmonyLeakMitigation": false,
+				"requiresReasoningOffJuiceInstruction": false,
+				"supportsReasoningSummary": true
+			},
+			"supportsComputerUse": false
+		},
 		"inception/mercury-coder": {
 			"id": "inception/mercury-coder",
 			"name": "Mercury Coder",
@@ -284769,13 +285936,13 @@
 				"image"
 			],
 			"cost": {
-				"input": 0.11,
-				"output": 0.33999999999999997,
+				"input": 0.09999999999999999,
+				"output": 0.3,
 				"cacheRead": 0.055,
 				"cacheWrite": 0
 			},
 			"contextWindow": 1310720,
-			"maxTokens": 8192,
+			"maxTokens": 16384,
 			"requiresGlyphTokenization": false,
 			"identity": {
 				"class": "meta",
@@ -304832,13 +305999,13 @@
 				"text"
 			],
 			"cost": {
-				"input": 0.09,
-				"output": 0.55,
+				"input": 0.0875,
+				"output": 0.35,
 				"cacheRead": 0.0175,
 				"cacheWrite": 0
 			},
 			"contextWindow": 262144,
-			"maxTokens": 16384,
+			"maxTokens": 235929,
 			"requiresGlyphTokenization": false,
 			"identity": {
 				"class": "qwen",
@@ -310992,9 +312159,9 @@
 				"text"
 			],
 			"cost": {
-				"input": 0.13199999999999998,
-				"output": 0.5279999999999999,
-				"cacheRead": 0.032999999999999995,
+				"input": 0.0825,
+				"output": 0.33,
+				"cacheRead": 0.020625,
 				"cacheWrite": 0
 			},
 			"contextWindow": 262144,
@@ -322827,6 +323994,101 @@
 				"rejectRootObjectUnion": false,
 				"retryWithoutStrictOnGrammarError": false,
 				"supportsPromptCacheKey": false
+			}
+		},
+		"claude-fable-5-1": {
+			"id": "claude-fable-5-1",
+			"name": "Claude Fable 5.1",
+			"api": "openai-completions",
+			"provider": "venice",
+			"baseUrl": "https://api.venice.ai/api/v1",
+			"reasoning": true,
+			"input": [
+				"text",
+				"image"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 1000000,
+			"maxTokens": 128000,
+			"identity": {
+				"class": "anthropic",
+				"family": "fable",
+				"revision": "5.1.0"
+			},
+			"requiresGlyphTokenization": true,
+			"tokenizer": "claude-v5-sonnet",
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"minimal",
+					"low",
+					"medium",
+					"high",
+					"xhigh"
+				]
+			},
+			"compat": {
+				"supportsStore": true,
+				"supportsDeveloperRole": false,
+				"supportsMultipleSystemMessages": false,
+				"supportsReasoningEffort": true,
+				"supportsReasoningParams": true,
+				"supportsSamplingParams": true,
+				"supportsPenaltyAndStopParams": true,
+				"reasoningEffortMap": {},
+				"supportsUsageInStreaming": false,
+				"alwaysSendMaxTokens": false,
+				"disableReasoningOnForcedToolChoice": true,
+				"disableReasoningOnToolChoice": false,
+				"supportsToolChoice": true,
+				"supportsForcedToolChoice": true,
+				"supportsNamedToolChoice": true,
+				"maxTokensField": "max_completion_tokens",
+				"requiresToolResultName": false,
+				"requiresAssistantAfterToolResult": false,
+				"requiresThinkingAsText": false,
+				"requiresMistralToolIds": false,
+				"thinkingFormat": "openai",
+				"reasoningDisableMode": "venice-disable-thinking",
+				"omitReasoningEffort": false,
+				"includeEncryptedReasoning": true,
+				"filterReasoningHistory": false,
+				"reasoningContentField": "reasoning_content",
+				"requiresReasoningContentForToolCalls": false,
+				"requiresReasoningContentForAllAssistantTurns": false,
+				"allowsSyntheticReasoningContentForToolCalls": true,
+				"replayReasoningContent": false,
+				"qwenPreserveThinking": false,
+				"qwenTemplateReasoningEffort": false,
+				"requiresAssistantContentForToolCalls": false,
+				"supportsPromptCacheBreakpoints": false,
+				"isOpenRouterHost": false,
+				"wireModelIdMode": "raw",
+				"isVercelGatewayHost": false,
+				"supportsStrictMode": false,
+				"toolStrictMode": "mixed",
+				"stripDeepseekSpecialTokens": false,
+				"streamMarkupHealingPattern": "thinking",
+				"reasoningDeltasMayBeCumulative": false,
+				"emptyLengthFinishIsContextError": false,
+				"usesOpenAIToolCallIdLimit": false,
+				"dropThinkingWhenReasoningEffort": false,
+				"nativeKimiK3Reasoning": false,
+				"zaiReasoningEffortDialect": false,
+				"clampOutputToModelMax": false,
+				"stripImageInput": false,
+				"rejectRootObjectUnion": false,
+				"retryWithoutStrictOnGrammarError": false,
+				"supportsPromptCacheKey": false
+			},
+			"supportsComputerUse": false,
+			"compatConfig": {
+				"supportsUsageInStreaming": false
 			}
 		},
 		"claude-opus-4-5": {
@@ -337454,7 +338716,7 @@
 		"anthropic/claude-opus-4.8-fast": {
 			"id": "anthropic/claude-opus-4.8-fast",
 			"requiresGlyphTokenization": true,
-			"name": "Claude Opus 4.8",
+			"name": "Claude Opus 4.8 (Fast)",
 			"api": "anthropic-messages",
 			"provider": "vercel-ai-gateway",
 			"baseUrl": "https://ai-gateway.vercel.sh",
@@ -337572,7 +338834,7 @@
 		"anthropic/claude-opus-5-fast": {
 			"id": "anthropic/claude-opus-5-fast",
 			"requiresGlyphTokenization": true,
-			"name": "Claude Opus 5",
+			"name": "Claude Opus 5 (Fast)",
 			"api": "anthropic-messages",
 			"provider": "vercel-ai-gateway",
 			"baseUrl": "https://ai-gateway.vercel.sh",
@@ -338635,8 +339897,8 @@
 				"cacheRead": 0.007,
 				"cacheWrite": 0
 			},
-			"contextWindow": 1000000,
-			"maxTokens": 384000,
+			"contextWindow": 1048576,
+			"maxTokens": 1048576,
 			"requiresGlyphTokenization": false,
 			"tokenizer": "deepseek-v3",
 			"thinking": {
@@ -349538,6 +350800,61 @@
 			"identity": {
 				"class": "mimo",
 				"family": "v2"
+			},
+			"compat": {
+				"officialEndpoint": false,
+				"signingEndpoint": false,
+				"supportsContextManagement": true,
+				"supportsOutputEffort": true,
+				"disableStrictTools": false,
+				"disableAdaptiveThinking": false,
+				"allowAnthropicHeaderOverrides": false,
+				"supportsEagerToolInputStreaming": false,
+				"supportsLongCacheRetention": false,
+				"supportsMidConversationSystem": false,
+				"supportsForcedToolChoice": true,
+				"supportsSamplingParams": true,
+				"requiresToolResultId": false,
+				"requiresThinkingEnabled": false,
+				"replayUnsignedThinking": true,
+				"escapeBuiltinToolNames": false,
+				"injectClaudeCodeInstruction": true,
+				"stripImageInput": false
+			},
+			"supportsComputerUse": false
+		},
+		"xiaomi/mimo-v2.5-pro-ultraspeed": {
+			"id": "xiaomi/mimo-v2.5-pro-ultraspeed",
+			"name": "MiMo V2.5 Pro UltraSpeed",
+			"api": "anthropic-messages",
+			"provider": "vercel-ai-gateway",
+			"baseUrl": "https://ai-gateway.vercel.sh",
+			"reasoning": true,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 1.305,
+				"output": 2.61,
+				"cacheRead": 0.0108,
+				"cacheWrite": 0
+			},
+			"contextWindow": 1048576,
+			"maxTokens": 131072,
+			"identity": {
+				"class": "mimo",
+				"family": "v2"
+			},
+			"requiresGlyphTokenization": false,
+			"thinking": {
+				"mode": "budget",
+				"efforts": [
+					"minimal",
+					"low",
+					"medium",
+					"high",
+					"xhigh"
+				]
 			},
 			"compat": {
 				"officialEndpoint": false,

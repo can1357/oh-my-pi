@@ -6,7 +6,6 @@ import { InMemorySnapshotStore } from "@oh-my-pi/hashline";
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { editToolRenderer } from "@oh-my-pi/pi-coding-agent/edit/renderer";
-import { SLOPPY_MARKERS } from "@oh-my-pi/pi-coding-agent/edit/sloppy";
 import { renderDiff } from "@oh-my-pi/pi-coding-agent/modes/components/diff";
 import { ToolExecutionComponent } from "@oh-my-pi/pi-coding-agent/modes/components/tool-execution";
 import * as themeModule from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
@@ -175,7 +174,7 @@ describe("editToolRenderer", () => {
 	it("uses sloppy input section headers for the streaming call path", async () => {
 		const uiTheme = await getUiTheme();
 		const component = editToolRenderer.renderCall(
-			{ input: `[src/engine/disk.rs]\n${SLOPPY_MARKERS.open}\nfn parse_disk_ref(` },
+			{ input: `<SM:EDIT path="src/engine/disk.rs">\n<SM:FIND>\nfn parse_disk_ref(` },
 			{ expanded: false, isPartial: true, spinnerFrame: 0, renderContext: { editMode: "sloppy" } },
 			uiTheme,
 		);
@@ -186,7 +185,7 @@ describe("editToolRenderer", () => {
 
 	it("counts extra sloppy sections in the streaming call header", async () => {
 		const uiTheme = await getUiTheme();
-		const input = `[a.ts]\n${SLOPPY_MARKERS.open}\nfoo\n[b.ts]\n${SLOPPY_MARKERS.open}\nbar`;
+		const input = `<SM:EDIT path="a.ts">\n<SM:FIND>\nfoo\n</SM:FIND>\n<SM:EDIT path="b.ts">\n<SM:FIND>\nbar`;
 		const component = editToolRenderer.renderCall(
 			{ input },
 			{ expanded: false, isPartial: true, spinnerFrame: 0, renderContext: { editMode: "sloppy" } },

@@ -215,6 +215,8 @@ export interface SessionAdvisorsOptions {
 	watchdogPrompt?: string;
 	sharedInstructions?: string;
 	contextPrompt?: string;
+	/** Active memory backend's developer instructions, wrapped for advisors. */
+	memoryPrompt?: string;
 	configs?: AdvisorConfig[];
 	streamFn?: StreamFn;
 	transformProviderContext?: (context: Context, model: Model) => Context | Promise<Context>;
@@ -309,6 +311,7 @@ export class SessionAdvisors {
 	#advisorWatchdogPrompt: string | undefined;
 	#advisorSharedInstructions: string | undefined;
 	#advisorContextPrompt: string | undefined;
+	#advisorMemoryPrompt: string | undefined;
 	#advisorStreamFn: StreamFn | undefined;
 	#transformProviderContext: ((context: Context, model: Model) => Context | Promise<Context>) | undefined;
 	#advisors: ActiveAdvisor[] = [];
@@ -345,6 +348,7 @@ export class SessionAdvisors {
 		this.#advisorWatchdogPrompt = options.watchdogPrompt;
 		this.#advisorSharedInstructions = options.sharedInstructions;
 		this.#advisorContextPrompt = options.contextPrompt;
+		this.#advisorMemoryPrompt = options.memoryPrompt;
 		this.#advisorConfigs = options.configs;
 		this.#advisorStreamFn = options.streamFn;
 		this.#transformProviderContext = options.transformProviderContext;
@@ -842,11 +846,18 @@ export class SessionAdvisors {
 			// instructions; `config.instructions` adds this advisor's specialization.
 			const systemPrompt = [advisorSystemPrompt];
 			if (this.#advisorContextPrompt) systemPrompt.push(this.#advisorContextPrompt);
+			if (this.#advisorMemoryPrompt) systemPrompt.push(this.#advisorMemoryPrompt);
 			if (this.#advisorWatchdogPrompt) systemPrompt.push(this.#advisorWatchdogPrompt);
 			if (this.#advisorSharedInstructions) systemPrompt.push(this.#advisorSharedInstructions);
 			if (config.instructions?.trim()) systemPrompt.push(config.instructions.trim());
 
-			const names = config.tools === undefined ? ADVISOR_DEFAULT_TOOL_NAMES : new Set(config.tools);
+			// The default roster additionally gets `recall` when the active memory
+			// backend built it (MemoryRecallTool.createIf — hindsight/mnemopi only;
+			// sharpshooter/local expose no recall tool, so the extra name filters
+			// nothing there). The advisor's instance reads the same bank as the
+			// primary. Explicit `tools` lists stay user-owned and are not widened.
+			const names =
+				config.tools === undefined ? new Set([...ADVISOR_DEFAULT_TOOL_NAMES, "recall"]) : new Set(config.tools);
 			const tools = (this.#advisorTools ?? []).filter(t => names.has(t.name));
 			const advisorLoopTools: AgentTool<any>[] = [adviseTool, ...tools];
 			const advisorToolMap = new Map<string, AgentTool<any>>();
@@ -1848,6 +1859,18 @@ export class SessionAdvisors {
 		if (!this.#advisorEnabled || this.#advisors.length === 0) return;
 		this.#stopAdvisorRuntime();
 		this.#buildAdvisorRuntime(true);
+	}
+
+	/**
+	 * Store the memory backend's developer instructions for advisor system
+	 * prompts. Unlike {@link setContextPrompt} this never rebuilds live
+	 * runtimes: hindsight/mnemopi refresh their instructions on every turn
+	 * (per-turn recall snippets), and tearing the advisor down each time would
+	 * drop its append-only context and prompt cache. Live advisors pick the new
+	 * value up at the next natural runtime build (compaction, reset, toggle).
+	 */
+	setMemoryPrompt(memoryPrompt: string | undefined): void {
+		this.#advisorMemoryPrompt = memoryPrompt;
 	}
 
 	/**

@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added support for Claude Fable 5.1 models, including improved thinking prefix binding and controls
+- Added DeepSeek V4 Flash Vision Exp
+- Added Mercury 2.5 Preview
+- Added Xiaomi MiMo V2.5 Pro UltraSpeed
+
+### Changed
+
+- Updated pricing and context window limits for various models
+
 ## [18.1.0] - 2026-09-01
 
 ### Added

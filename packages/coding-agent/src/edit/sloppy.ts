@@ -51,7 +51,53 @@ export const sloppyEditSchema = type({
 
 export type SloppyParams = typeof sloppyEditSchema.infer;
 
-const PATH_HEADER_RE = /^\[([^\]\n]+)\]$/;
+/** Structural tag line of the XML surface, parsed; `undefined` = content line. */
+type TagLine =
+	| { kind: "open"; path: string | undefined; all: boolean }
+	| { kind: "close-edit" }
+	| { kind: "find"; inline?: string }
+	| { kind: "close-find" }
+	| { kind: "put"; inline?: string }
+	| { kind: "close-put" };
+
+const EDIT_OPEN_RE = /^<SM:EDIT\b([^>\n]*?)\/?>$/iu;
+const BLOCK_TAG_RE = /^<(\/?)(SM:FIND|SM:PUT)\s*(\/?)>$/iu;
+const INLINE_TAG_RE = /^<(SM:FIND|SM:PUT)>(.*)<\/\1>$/iu;
+
+/**
+ * Classify one payload line as XML-surface structure. Only whole lines are
+ * structure: a tag with other text on its line is file content, so code that
+ * merely mentions the tags mid-line survives untouched.
+ */
+function parseTagLine(line: string): TagLine | undefined {
+	const trimmed = line.trim();
+	if (!trimmed.startsWith("<")) return undefined;
+	if (/^<\/SM:EDIT>$/iu.test(trimmed)) return { kind: "close-edit" };
+	const open = EDIT_OPEN_RE.exec(trimmed);
+	if (open) {
+		const attrs = open[1];
+		const pathMatch = /(?:path|file)\s*=\s*(?:"([^"\n]*)"|'([^'\n]*)'|([^\s"'>]+))/iu.exec(attrs);
+		const path = (pathMatch?.[1] ?? pathMatch?.[2] ?? pathMatch?.[3])?.trim();
+		const allMatch = /\ball\b(?:\s*=\s*(?:"([^"\n]*)"|'([^'\n]*)'|([^\s"'>]+)))?/iu.exec(attrs);
+		const allValue = allMatch?.[1] ?? allMatch?.[2] ?? allMatch?.[3];
+		const all = allMatch !== null && allValue?.toLowerCase() !== "false" && allValue !== "0";
+		return { kind: "open", path: path || undefined, all };
+	}
+	const inline = INLINE_TAG_RE.exec(trimmed);
+	if (inline) {
+		return inline[1].toLowerCase() === "sm:find"
+			? { kind: "find", inline: inline[2] }
+			: { kind: "put", inline: inline[2] };
+	}
+	const tag = BLOCK_TAG_RE.exec(trimmed);
+	if (tag) {
+		const find = tag[2].toLowerCase() === "sm:find";
+		if (tag[1] === "/") return find ? { kind: "close-find" } : { kind: "close-put" };
+		if (tag[3] === "/") return find ? { kind: "find", inline: "" } : { kind: "put", inline: "" };
+		return find ? { kind: "find" } : { kind: "put" };
+	}
+	return undefined;
+}
 /** Envelope and foreign-dialect sentinel lines dropped from payloads. */
 const ENVELOPE_LINE_RE =
 	/^\*{3}\s*(?:(?:Begin|End)(?:\s+of)?\s+(?:patch|edits?|file)|Abort|Update File:|Add File:|Delete File:)/iu;
@@ -61,7 +107,7 @@ const ENVELOPE_WORDS_RE = /^\s*(?:Begin|End)(?:\s+of)?\s+(?:patch|edits?|file)\b
 /**
  * Drop envelope sentinels and decoding noise: split sentinels (`***` on its
  * own line, `End Patch` on the next) join first, and everything between an
- * End sentinel and the next Begin sentinel or `[path]` header is discarded
+ * End sentinel and the next Begin sentinel or `<SM:EDIT` opener is discarded
  * (models sometimes append commentary or a self-retry after ending a patch).
  */
 function stripEnvelopeNoise(rawLines: string[]): string[] {
@@ -78,7 +124,7 @@ function stripEnvelopeNoise(rawLines: string[]): string[] {
 			continue;
 		}
 		if (skipping) {
-			if (PATH_HEADER_RE.test(line)) {
+			if (parseTagLine(line)?.kind === "open") {
 				skipping = false;
 				lines.push(line);
 			}
@@ -89,88 +135,219 @@ function stripEnvelopeNoise(rawLines: string[]): string[] {
 	return lines;
 }
 
-/** One `[path]` section of a sloppy payload: a file plus its operations. */
+/** One `<SM:EDIT path="…">` target of a sloppy payload: a file plus its compiled ops. */
 export interface SloppySection {
 	path: string;
+	/** Internal op stream (`«`/`»` lines) compiled from the tag surface. */
 	body: string;
 }
 
+/** IR lines compiled for one `<SM:EDIT>` target; path "" = the current file. */
+interface CompiledSection {
+	path: string;
+	ir: string[];
+}
+
 /**
- * Split a sloppy payload into `[path]` sections, hashline-style. The first
- * line MUST be a header; a later whole-line `[path]` opens a new section only
- * when the next non-blank line starts an operation («), so content lines
- * that merely look like headers stay in their operation. Same-path sections
- * merge in order. Returns an empty list when the payload has no leading header.
+ * Compile the XML tag surface into the internal op stream: each
+ * `<SM:FIND>`/`<SM:PUT>` pair becomes `«` (or `«*` under `all`), the find lines,
+ * `»`, the put lines. Lenient by construction: content with no open block
+ * reads as an implicit `<SM:FIND>`, a `<SM:PUT>` with no `<SM:FIND>` reads as stated
+ * desired text, and every tag closes implicitly at the next opener or EOF.
+ */
+function compileTagSurface(lines: string[]): { sections: CompiledSection[]; sawTags: boolean } {
+	const sections: CompiledSection[] = [];
+	let sawTags = false;
+	let all = false;
+	let state: "idle" | "find" | "between" | "put" = "idle";
+	let findLines: string[] = [];
+	let putLines: string[] | undefined;
+	const ir = (): string[] => {
+		if (sections.length === 0) sections.push({ path: "", ir: [] });
+		return sections[sections.length - 1].ir;
+	};
+	const trimBlank = (buffer: string[]): string[] => {
+		let start = 0;
+		let end = buffer.length;
+		while (start < end && buffer[start].trim() === "") start++;
+		while (end > start && buffer[end - 1].trim() === "") end--;
+		return buffer.slice(start, end);
+	};
+	const flush = () => {
+		const find = trimBlank(findLines);
+		const put = putLines === undefined ? undefined : trimBlank(putLines);
+		findLines = [];
+		putLines = undefined;
+		state = "idle";
+		if (find.length === 0 && (put === undefined || put.length === 0)) return;
+		const opener = `${OPENER}${all ? "*" : ""}`;
+		if (find.length === 0 && put !== undefined) {
+			ir().push(opener, ...put);
+			return;
+		}
+		ir().push(opener, ...find);
+		if (put !== undefined) ir().push(REWRITE_HEADER, ...put);
+	};
+	for (const line of lines) {
+		const tag = parseTagLine(line);
+		if (tag === undefined) {
+			if (state === "put") putLines?.push(line);
+			else if (state === "find") findLines.push(line);
+			else if (state === "between") {
+				if (line.trim() !== "") findLines.push(line);
+			} else if (line.trim() !== "") {
+				state = "find";
+				findLines.push(line);
+			}
+			continue;
+		}
+		sawTags = true;
+		switch (tag.kind) {
+			case "open":
+				flush();
+				if (tag.path !== undefined) sections.push({ path: tag.path, ir: [] });
+				all = tag.all;
+				break;
+			case "close-edit":
+				flush();
+				all = false;
+				break;
+			case "find":
+				flush();
+				state = "find";
+				if (tag.inline !== undefined) {
+					findLines.push(tag.inline);
+					state = "between";
+				}
+				break;
+			case "close-find":
+				if (state === "find") state = "between";
+				break;
+			case "put":
+				putLines = [];
+				state = "put";
+				if (tag.inline !== undefined) {
+					putLines.push(tag.inline);
+					flush();
+				}
+				break;
+			case "close-put":
+				flush();
+				break;
+		}
+	}
+	flush();
+	return { sections, sawTags };
+}
+
+/**
+ * Split a sloppy payload into per-file sections. The first line MUST be an
+ * `<SM:EDIT path="…">` opener; same-path sections merge in order. Returns an
+ * empty list when the payload has no leading pathful opener.
  */
 export function splitSloppySections(input: string): SloppySection[] {
 	const lines = stripEnvelopeNoise(input.split("\n"));
 	while (lines.length > 0 && lines[0].trim() === "") lines.shift();
-	if (lines.length === 0 || !(PATH_HEADER_RE.test(lines[0]) || parseSectionOpener(lines[0])?.path)) return [];
-	const sections: SloppySection[] = [];
+	const first = lines.length > 0 ? parseTagLine(lines[0]) : undefined;
+	if (first?.kind !== "open" || first.path === undefined) return [];
+	const { sections } = compileTagSurface(lines);
 	const bodiesByPath = new Map<string, string[]>();
-	let currentPath = "";
-	let currentBody: string[] = [];
-	const flush = () => {
-		if (!currentPath) return;
-		let body = bodiesByPath.get(currentPath);
+	const ordered: SloppySection[] = [];
+	for (const section of sections) {
+		if (section.path === "" || section.ir.length === 0) continue;
+		let body = bodiesByPath.get(section.path);
 		if (!body) {
 			body = [];
-			bodiesByPath.set(currentPath, body);
-			sections.push({ path: currentPath, body: "" });
+			bodiesByPath.set(section.path, body);
+			ordered.push({ path: section.path, body: "" });
 		}
-		body.push(...currentBody);
-		currentBody = [];
-	};
-	for (let index = 0; index < lines.length; index++) {
-		const line = lines[index];
-		const opener = parseSectionOpener(line);
-		if (opener) {
-			if (opener.path) {
-				flush();
-				currentPath = opener.path;
-			}
-			currentBody.push(`${OPENER}${opener.all ? "*" : ""}`);
-			continue;
-		}
-		const header = PATH_HEADER_RE.exec(line);
-		if (header && (index === 0 || startsOperation(lines, index + 1))) {
-			flush();
-			currentPath = header[1].trim();
-			continue;
-		}
-		currentBody.push(line);
+		body.push(...section.ir);
 	}
-	flush();
-	for (const section of sections) {
+	for (const section of ordered) {
 		section.body = (bodiesByPath.get(section.path) ?? []).join("\n");
 	}
-	return sections;
+	return ordered;
+}
+
+/** One stray sloppy payload region located inside plain prose. */
+export interface InlineSloppyRegion {
+	/** Character offset of the opener line's first byte within the scanned text. */
+	start: number;
+	/** Character offset one past the last payload line (its newline included). */
+	end: number;
+	/** Verbatim payload text, opener line through last structural line. */
+	payload: string;
 }
 
 /**
- * Parse a `§` operation opener: `§relative/path` opens an operation in that
- * file (`§*path` for every match); a bare `§` or `§*` opens another
- * operation in the current file.
+ * Find sloppy payload regions the model emitted as plain prose instead of an
+ * `edit` tool call. A region starts at a pathful `<SM:EDIT path="…">` opener on
+ * its own line and extends only while lines stay structural: tag lines
+ * anywhere, arbitrary content only inside an open `<SM:FIND>`/`<SM:PUT>` block,
+ * blanks between structure. The first prose line outside a block ends the
+ * region — stricter than {@link applySloppy}'s lenient parse, so surrounding
+ * commentary is never swallowed into an edit. Openers inside markdown code
+ * fences (``` / ~~~) are presentational and skipped. Regions that do not
+ * compile to at least one pathful section are dropped.
  */
-function parseSectionOpener(line: string): { all: boolean; path: string } | undefined {
-	if (!line.startsWith(SECTION_OPENER)) return undefined;
-	let rest = line.slice(SECTION_OPENER.length);
-	let all = false;
-	if (rest.startsWith("*")) {
-		all = true;
-		rest = rest.slice(1);
+export function extractInlineSloppyRegions(text: string): InlineSloppyRegion[] {
+	if (!text.includes("<SM:EDIT")) return [];
+	const regions: InlineSloppyRegion[] = [];
+	const lines = text.split("\n");
+	const starts: number[] = [];
+	for (let index = 0, position = 0; index < lines.length; index++) {
+		starts.push(position);
+		position += lines[index].length + 1;
 	}
-	return { all, path: rest.trim() };
-}
-
-/** True when the next non-blank line opens a sloppy operation. */
-function startsOperation(lines: string[], from: number): boolean {
-	for (let index = from; index < lines.length; index++) {
-		const trimmed = lines[index].trim();
-		if (trimmed === "") continue;
-		return trimmed.startsWith(OPENER) || trimmed.startsWith(SECTION_OPENER);
+	const lineEnd = (index: number): number => Math.min(text.length, starts[index] + lines[index].length + 1);
+	let inFence = false;
+	let index = 0;
+	while (index < lines.length) {
+		const line = lines[index];
+		if (/^\s*(?:```|~~~)/.test(line)) {
+			inFence = !inFence;
+			index++;
+			continue;
+		}
+		const opener = inFence ? undefined : parseTagLine(line);
+		if (opener?.kind !== "open" || opener.path === undefined) {
+			index++;
+			continue;
+		}
+		let last = index;
+		let block: "outside" | "find" | "put" = "outside";
+		let scan = index + 1;
+		for (; scan < lines.length; scan++) {
+			const tag = parseTagLine(lines[scan]);
+			if (tag === undefined) {
+				if (block === "outside") {
+					// Blank gap: kept only if more structure follows; prose ends the region.
+					if (lines[scan].trim() === "") continue;
+					break;
+				}
+				last = scan;
+				continue;
+			}
+			switch (tag.kind) {
+				case "find":
+					block = tag.inline === undefined ? "find" : "outside";
+					break;
+				case "put":
+					block = tag.inline === undefined ? "put" : "outside";
+					break;
+				default:
+					block = "outside";
+					break;
+			}
+			last = scan;
+		}
+		const payload = lines.slice(index, last + 1).join("\n");
+		if (splitSloppySections(payload).length > 0) {
+			regions.push({ start: starts[index], end: lineEnd(last), payload });
+		}
+		index = Math.max(scan, last + 1);
 	}
-	return false;
+	return regions;
 }
 
 /**
@@ -191,6 +368,7 @@ export async function computeSloppySectionDiff(section: SloppySection, cwd: stri
 	}
 }
 
+/** Internal op-stream alphabet; the taught surface is the XML tag format. */
 export const SLOPPY_MARKERS = {
 	open: "«",
 	put: "»",
@@ -210,43 +388,21 @@ const SELECT_DIVIDER = SLOPPY_MARKERS.selectDivider;
 const GAP = SLOPPY_MARKERS.gap;
 const ADD_LINE = SLOPPY_MARKERS.add;
 const REMOVE_LINE = SLOPPY_MARKERS.remove;
-/** Operation opener: non-directional, doubles as the file header. */
-const SECTION_OPENER = "§";
-
 /**
- * Re-voice an engine error into the taught `§` vocabulary: opener markers
- * become `§` and `[path]` header lines merge into the opener that follows
- * them, so every copy-ready payload matches the prompt's surface.
+ * Apply a sloppy payload; copy-ready payloads in errors carry the section's
+ * path on their `<SM:EDIT>` opener so a verbatim re-send targets the right file.
  */
-function toSloppyVoice(message: string): string {
-	const lines = message.replaceAll(OPENER, SECTION_OPENER).split("\n");
-	const out: string[] = [];
-	for (let index = 0; index < lines.length; index++) {
-		const header = PATH_HEADER_RE.exec(lines[index]);
-		const next = lines[index + 1];
-		if (header && (next === SECTION_OPENER || next === `${SECTION_OPENER}*`)) {
-			out.push(`${next}${header[1]}`);
-			index++;
-			continue;
-		}
-		out.push(lines[index]);
-	}
-	return out.join("\n");
-}
-
-/** Apply a sloppy payload; errors re-voice into the taught `§` vocabulary. */
 export function applySloppy(content: string, input: string, context: SloppyApplyContext): string {
 	try {
 		return apply(content, input, context);
 	} catch (error) {
 		if (error instanceof Error) {
-			const lines = toSloppyVoice(error.message).split("\n");
+			const lines = error.message.split("\n");
 			for (let index = 0; index + 1 < lines.length; index++) {
-				if (!lines[index].startsWith("Copy-ready corrected payload")) continue;
+				if (!lines[index].startsWith("Copy-ready")) continue;
 				const opener = lines[index + 1];
-				if (opener === SECTION_OPENER || opener === `${SECTION_OPENER}*`) {
-					lines[index + 1] = `${opener}${context.path}`;
-				}
+				if (opener === "<SM:EDIT>") lines[index + 1] = `<SM:EDIT path="${context.path}">`;
+				else if (opener === "<SM:EDIT all>") lines[index + 1] = `<SM:EDIT path="${context.path}" all>`;
 			}
 			throw new Error(lines.join("\n"));
 		}
@@ -374,20 +530,20 @@ function isOrdinalOpener(line: string): boolean {
 }
 
 function normalizeInput(input: string): string {
-	const lines = stripEnvelopeNoise(input.split("\n"))
-		.map(line => {
-			const opener = parseSectionOpener(line);
-			return opener ? `${OPENER}${opener.all ? "*" : ""}` : line;
-		})
-		.flatMap(line => {
-			const glued = line.match(/^[ \t]*(«\*?|»)([ \t]+\S.*)$/u);
-			return glued ? [glued[1], glued[2]] : [line];
-		});
+	let lines = stripEnvelopeNoise(input.split("\n"));
 	while (lines[0]?.trim() === "") lines.shift();
-	if (/^```(?:text|typescript|ts|tsx|javascript|js)?\s*$/iu.test(lines[0]?.trim() ?? "")) {
+	if (/^```(?:text|xml|html|typescript|ts|tsx|javascript|js)?\s*$/iu.test(lines[0]?.trim() ?? "")) {
 		lines.shift();
 		while (lines.at(-1)?.trim() === "") lines.pop();
 		if (lines.at(-1)?.trim() === "```") lines.pop();
+	}
+	if (lines.some(line => parseTagLine(line) !== undefined)) {
+		lines = compileTagSurface(lines).sections.flatMap(section => section.ir);
+	} else {
+		lines = lines.flatMap(line => {
+			const glued = line.match(/^[ \t]*(«\*?|»)([ \t]+\S.*)$/u);
+			return glued ? [glued[1], glued[2]] : [line];
+		});
 	}
 	while (lines[0]?.trim() === "") lines.shift();
 	while (lines.at(-1)?.trim() === "") lines.pop();
@@ -1197,9 +1353,9 @@ function parseOperations(input: string, content: string): Operation[] {
 					(line, index) => index < endIndex && line.trim() === referenceSeparator,
 				);
 				correctedLines[separatorIndex] = REWRITE_HEADER;
-				correctedLines.splice(endIndex, 0, "<final text>");
+				correctedLines.splice(endIndex, 0, "{final text}");
 				throw new Error(
-					`${referenceSeparator} after MATCH reads as the ${REWRITE_HEADER} separator, leaving REWRITE empty.\nCopy-ready corrected payload (fill in the final text):\n${correctedLines.join("\n")}`,
+					`${referenceSeparator} after <SM:FIND> reads as the <SM:PUT> separator, leaving <SM:PUT> empty.\nCopy-ready corrected payload (fill in the final text):\n${irToXml(correctedLines)}`,
 				);
 			}
 			operations.push(createOperation(sourcePatternText, "", allMatches, operations.length + 1, false));
@@ -1226,7 +1382,7 @@ function parseOperations(input: string, content: string): Operation[] {
 					operations.length + 1,
 					false,
 				);
-				const note = `Note: operation ${operations.length + 1}'s REWRITE contained only ${ADD_LINE} add lines; they were inserted after the kept MATCH. A REWRITE replaces the MATCH with its stated final text — to insert, drop ${REWRITE_HEADER} and put the ${ADD_LINE} lines directly in the operation.`;
+				const note = `Note: operation ${operations.length + 1}'s REWRITE contained only ${ADD_LINE} add lines; they were inserted after the kept MATCH. A <SM:PUT> replaces the <SM:FIND> match with its stated final text — to insert, restate the kept lines plus the new lines in <SM:PUT>.`;
 				operation.recoveryNote = operation.recoveryNote ? `${note}\n${operation.recoveryNote}` : note;
 				operations.push(operation);
 				return;
@@ -1261,7 +1417,7 @@ function parseOperations(input: string, content: string): Operation[] {
 			} catch {
 				continue;
 			}
-			operation.recoveryNote = `Note: operation ${operations.length + 1} was written as a unified diff and was applied as inline changes; state changes with ${SELECT_OPEN}old${SELECT_DIVIDER}new${SELECT_CLOSE}, ${ADD_LINE} add lines, and ${GAP} gaps.`;
+			operation.recoveryNote = `Note: operation ${operations.length + 1} was written as a unified diff and was applied as inline changes; state edits as <SM:FIND>/<SM:PUT> pairs instead.`;
 			try {
 				const diffPattern = parsePattern(operation.patternText, operations.length + 1);
 				locate(content, diffPattern, operation, operations.length + 1, "");
@@ -1323,7 +1479,7 @@ function parseOperations(input: string, content: string): Operation[] {
 					}
 				}
 				if (neighborsDuplicate) {
-					desired.recoveryNote = `Note: operation ${operations.length + 1} stated desired text without markers; the closest matching block was replaced with it. Mark changes explicitly with ${SELECT_OPEN}old${SELECT_DIVIDER}new${SELECT_CLOSE}.`;
+					desired.recoveryNote = `Note: operation ${operations.length + 1} stated desired text without markers; the closest matching block was replaced with it. State the current text in <SM:FIND> and the new text in <SM:PUT>.`;
 					operations.push(desired);
 					return;
 				}
@@ -1341,7 +1497,7 @@ function parseOperations(input: string, content: string): Operation[] {
 					sourcePatternText,
 					rewrite: { kind: "explicit", text: sourcePatternText },
 					all: false,
-					recoveryNote: `Note: operation ${operations.length + 1} stated desired text without markers; the closest matching block was replaced with it. Mark changes explicitly with ${SELECT_OPEN}old${SELECT_DIVIDER}new${SELECT_CLOSE}.`,
+					recoveryNote: `Note: operation ${operations.length + 1} stated desired text without markers; the closest matching block was replaced with it. State the current text in <SM:FIND> and the new text in <SM:PUT>.`,
 				});
 				return;
 			}
@@ -1351,7 +1507,7 @@ function parseOperations(input: string, content: string): Operation[] {
 			normalizedPattern !== "" && normalizeText(content).text.includes(normalizedPattern)
 				? "\nIts lines already exist in the file unchanged — if this operation only restated context, delete it; anchors belong inside the operation that edits them."
 				: "";
-		const needsSeparator = `Operation ${operations.length + 1} needs ${REWRITE_HEADER}.${contextEcho}\nCopy-ready corrected payload (fill in the new text):\n${[...lines.slice(0, endIndex), REWRITE_HEADER, "<new text>", ...lines.slice(endIndex)].join("\n")}`;
+		const needsSeparator = `Operation ${operations.length + 1} has <SM:FIND> but no <SM:PUT>.${contextEcho}\nCopy-ready corrected payload (fill in the new text):\n${irToXml([...lines.slice(0, endIndex), REWRITE_HEADER, "{new text}", ...lines.slice(endIndex)])}`;
 		// A multiline pattern-only block may be the delete half of a move; assume
 		// deletion now, justified post-parse only when another op re-emits it.
 		if (!sourcePatternText.includes("\n") || normalizedPattern.length < 24) {
@@ -1370,7 +1526,7 @@ function parseOperations(input: string, content: string): Operation[] {
 		const registerReference = trimmed.match(/^»([1-9]\d*)$/u);
 		if (isOrdinalOpener(line)) {
 			throw new Error(
-				`${trimmed} is not a valid opener. Use ${OPENER} with a pattern that matches once — add context only the intended match has — or ${OPENER}* to change every match.`,
+				`${trimmed} is not a valid opener. Use a <SM:FIND> that matches once — add context only the intended match has — or <SM:EDIT all> to change every match.`,
 			);
 		}
 		if (trimmed === `${OPENER}${REWRITE_HEADER}`) {
@@ -1396,7 +1552,7 @@ function parseOperations(input: string, content: string): Operation[] {
 				referenceSeparator = undefined;
 				state = "pattern";
 			} else if (trimmed !== "") {
-				throw new Error(`Expected ${OPENER} on input line ${index + 1}.`);
+				throw new Error(`Expected an <SM:EDIT> or <SM:FIND> tag on input line ${index + 1}.`);
 			}
 			continue;
 		}
@@ -1462,7 +1618,7 @@ function parseOperations(input: string, content: string): Operation[] {
 
 	if (state === "rewrite") finish(lines.length);
 	else if (state === "pattern") finishPattern(lines.length);
-	if (operations.length === 0) throw new Error(`Empty patch. Start with ${OPENER}.`);
+	if (operations.length === 0) throw new Error("Empty patch. Provide at least one <SM:FIND>/<SM:PUT> pair.");
 	for (let index = 0; index < operations.length; index++) {
 		const operationRewrite = operations[index].rewrite;
 		const rewrites = operationRewrite.kind === "explicit" ? [operationRewrite.text] : operationRewrite.replacements;
@@ -2086,11 +2242,39 @@ function operationPattern(operation: Operation, patternText = operation.patternT
 		: renderInlinePattern(patternText, operation.rewrite.replacements);
 }
 
+/** Render an internal op stream (`«`/`»` lines) as the taught XML surface. */
+function irToXml(lines: string[]): string {
+	const out: string[] = [];
+	let state: "idle" | "find" | "put" = "idle";
+	const close = () => {
+		if (state === "find") out.push("</SM:FIND>", "</SM:EDIT>");
+		else if (state === "put") out.push("</SM:PUT>", "</SM:EDIT>");
+		state = "idle";
+	};
+	for (const line of lines) {
+		if (parseOpener(line) !== false) {
+			close();
+			out.push(line.trim() === `${OPENER}*` ? "<SM:EDIT all>" : "<SM:EDIT>", "<SM:FIND>");
+			state = "find";
+			continue;
+		}
+		if (line.trim() === REWRITE_HEADER && state === "find") {
+			out.push("</SM:FIND>", "<SM:PUT>");
+			state = "put";
+			continue;
+		}
+		out.push(line);
+	}
+	close();
+	return out.join("\n");
+}
+
 function operationPayload(operation: Operation, target: "*" | "" = "", patternText?: string): string {
-	const header = `${OPENER}${target}`;
+	const open = target === "*" ? "<SM:EDIT all>" : "<SM:EDIT>";
 	const pattern = operationPattern(operation, patternText);
-	if (operation.rewrite.kind === "inline") return `${header}\n${pattern}`;
-	return `${header}\n${pattern}\n${REWRITE_HEADER}\n${operation.rewrite.text}`;
+	if (operation.rewrite.kind === "inline") return `${open}\n<SM:FIND>\n${pattern}\n</SM:FIND>\n</SM:EDIT>`;
+	const put = operation.rewrite.text === "" ? "<SM:PUT></SM:PUT>" : `<SM:PUT>\n${operation.rewrite.text}\n</SM:PUT>`;
+	return `${open}\n<SM:FIND>\n${pattern}\n</SM:FIND>\n${put}\n</SM:EDIT>`;
 }
 
 function exactAndFuzzyCandidates(content: string, pattern: ParsedPattern): CandidateResult {
@@ -2264,7 +2448,7 @@ function closestDesiredBlock(content: string, statedText: string): string | unde
 		if (scores[index] - best.score < 0.1) return undefined;
 	}
 	const text = lines.slice(best.index, best.index + statedLineCount).join("\n");
-	const markers = [SELECT_OPEN, SELECT_CLOSE, SELECT_DIVIDER, GAP, ADD_LINE, REWRITE_HEADER, OPENER, SECTION_OPENER];
+	const markers = [SELECT_OPEN, SELECT_CLOSE, SELECT_DIVIDER, GAP, ADD_LINE, REWRITE_HEADER, OPENER];
 	if (markers.some(marker => text.includes(marker))) return undefined;
 	return text;
 }
@@ -2354,7 +2538,7 @@ function noMatchGuidance(
 			nonCopyReadyReason: confidentCorrection ? undefined : "the closest current text is only a fuzzy match",
 			additionRetry:
 				looksLikeAddition && additionText !== undefined && neighborLine.trim() !== ""
-					? `If you are ADDING this text: match the existing neighbor line it belongs next to, and put the new text in the REWRITE —\n${OPENER}\n${SELECT_OPEN}${SELECT_CLOSE}${neighborLine}\n${REWRITE_HEADER}\n${additionText}`
+					? `If you are ADDING this text: <SM:FIND> the existing neighbor line it belongs next to, and restate it with the new text in <SM:PUT> —\n<SM:EDIT>\n<SM:FIND>\n${neighborLine}\n</SM:FIND>\n<SM:PUT>\n${additionText}\n${neighborLine}\n</SM:PUT>\n</SM:EDIT>`
 					: undefined,
 		};
 	}
@@ -2605,7 +2789,7 @@ function locate(
 		if (separated) {
 			const replacementGuidance =
 				operation.rewrite.kind === "explicit"
-					? `The REWRITE then replaces the whole span lines ${separated.locations[0]}-${separated.locations.at(-1)}, including the skipped lines — re-emit kept gaps with ${GAP}.`
+					? `The <SM:PUT> then replaces the whole span lines ${separated.locations[0]}-${separated.locations.at(-1)}, including the skipped lines — re-emit kept gaps with ${GAP}.`
 					: `The inline replacements then target the whole span lines ${separated.locations[0]}-${separated.locations.at(-1)}, including skipped lines — re-emit kept gaps with ${GAP}.`;
 			throw new Error(
 				[
@@ -2621,7 +2805,7 @@ function locate(
 		throw new Error(
 			[
 				operation.all
-					? `Operation ${operationNumber} ${OPENER}* found 0 matches in ${path}. ${guidance.reason}`
+					? `Operation ${operationNumber} <SM:EDIT all> found 0 matches in ${path}. ${guidance.reason}`
 					: `Operation ${operationNumber} did not match ${path}. ${guidance.reason}`,
 				...(missingLines.length > 0
 					? [
@@ -2643,7 +2827,7 @@ function locate(
 					: [
 							guidance.copyReady
 								? "No copy-ready correction — retrying this operation alone would drop sibling operations. Rebuild it inside the full payload."
-								: `No copy-ready correction — ${guidance.nonCopyReadyReason ?? "no safe correction is available"}. Re-read the region above and rebuild MATCH from the exact current text.`,
+								: `No copy-ready correction — ${guidance.nonCopyReadyReason ?? "no safe correction is available"}. Re-read the region above and rebuild <SM:FIND> from the exact current text.`,
 						]),
 				...(guidance.additionRetry ? [guidance.additionRetry] : []),
 			].join("\n"),
@@ -2754,7 +2938,7 @@ function renderRewrite(
 ): string {
 	if (rewrite.includes(SELECT_OPEN) || rewrite.includes(SELECT_CLOSE)) {
 		throw new Error(
-			`Operation ${operationNumber} has selection markers in REWRITE; PATTERN is current text, REWRITE is final text.`,
+			`Operation ${operationNumber} has selection markers in <SM:PUT>; <SM:FIND> is current text, <SM:PUT> is final text.`,
 		);
 	}
 	const sentinels = selectedCaptureIndices.map((_, index) => `\u0000V8GAP${index}\u0000`);
@@ -2772,7 +2956,7 @@ function renderRewrite(
 				// text; writing it verbatim splices a literal `…` into the file.
 				if (line.trim() === GAP) {
 					throw new Error(
-						`Operation ${operationNumber} REWRITE has a whole-line ${GAP} with no MATCH gap to re-emit. REWRITE is final text written verbatim: type the elided lines out, or add a matching ${GAP} gap to MATCH. To write a literal ${GAP} line, use the write tool.`,
+						`Operation ${operationNumber} <SM:PUT> has a whole-line ${GAP} with no <SM:FIND> gap to re-emit. <SM:PUT> is final text written verbatim: type the elided lines out, or add a matching ${GAP} gap to <SM:FIND>. To write a literal ${GAP} line, use the write tool.`,
 					);
 				}
 				marked += gapMarker;
@@ -3706,9 +3890,9 @@ function applyOperations(content: string, input: string, context: SloppyApplyCon
 					? `Edits to ${context.path} made no change.`
 					: matchCount === undefined
 						? `Operation ${operationNumber} makes no change to ${context.path}.`
-						: `Operation ${operationNumber} ${OPENER}* matched ${matchCount} occurrences but all make no change to ${context.path}.`;
+						: `Operation ${operationNumber} <SM:EDIT all> matched ${matchCount} occurrences but all make no change to ${context.path}.`;
 		const grounding = preview
-			? `\nYour rewrite normalized to text identical to these lines. Indentation-only changes are applied verbatim; adjust the authored REWRITE if another whitespace change was intended.\nCurrent file content near the closest match (no re-read needed):\n${numberedPreview(preview.content, preview.offset)}`
+			? `\nYour rewrite normalized to text identical to these lines. Indentation-only changes are applied verbatim; adjust the authored <SM:PUT> if another whitespace change was intended.\nCurrent file content near the closest match (no re-read needed):\n${numberedPreview(preview.content, preview.offset)}`
 			: "";
 		throw new Error(base + grounding + (hint ? `\n${hint}` : ""));
 	};
@@ -3722,11 +3906,9 @@ function applyOperations(content: string, input: string, context: SloppyApplyCon
 		// fill-in skeleton) must not be followed by an echo of the broken input.
 		if (error.message.includes("Copy-ready corrected payload")) throw error;
 		const normalizedPayload = normalizeInput(input);
-		const retry =
-			parseOpener(normalizedPayload.split("\n")[0] ?? "") === false
-				? `${OPENER}\n${normalizedPayload}`
-				: normalizedPayload;
-		throw new Error(`${error.message}\nCopy-ready corrected payload:\n${retry}`);
+		const payloadLines = normalizedPayload.split("\n");
+		if (parseOpener(payloadLines[0] ?? "") === false) payloadLines.unshift(OPENER);
+		throw new Error(`${error.message}\nCopy-ready corrected payload:\n${irToXml(payloadLines)}`);
 	}
 	const removedByOperation: Array<string | undefined> = [];
 	const planned: PlannedEdit[] = [];
@@ -3767,7 +3949,7 @@ function applyOperations(content: string, input: string, context: SloppyApplyCon
 		const operation = located.operation;
 		if (operation.whitespaceMatched) {
 			recoveryNotes.push(
-				`Note: operation ${operationNumber}'s MATCH differed from the file in whitespace only and was matched leniently. Inserted lines are written exactly as authored — verify their indentation.`,
+				`Note: operation ${operationNumber}'s <SM:FIND> differed from the file in whitespace only and was matched leniently. Inserted lines are written exactly as authored — verify their indentation.`,
 			);
 		}
 		const pattern = located.pattern;
@@ -3829,7 +4011,7 @@ function applyOperations(content: string, input: string, context: SloppyApplyCon
 						const insertedLines = prepared.replacement.split("\n").filter(entry => entry.trim() !== "");
 						if (insertedLines.length > 0 && insertedLines.every(entry => nearby.has(entry.trim()))) {
 							recoveryNotes.push(
-								`Note: operation ${operationNumber} inserted ${insertedLines.length} line(s) that duplicate adjacent code. If you meant to replace or reorder the originals, mark them: ⟪old│new⟫ replaces, ⟪old│⟫ deletes.`,
+								`Note: operation ${operationNumber} inserted ${insertedLines.length} line(s) that duplicate adjacent code. If you meant to replace or reorder the originals, quote the originals in <SM:FIND> and state the final text in <SM:PUT>.`,
 							);
 						}
 					}
@@ -3847,7 +4029,7 @@ function applyOperations(content: string, input: string, context: SloppyApplyCon
 			if (changes === 0) {
 				const hint =
 					inlineWouldChangeHint(content, candidates[0], pattern, replacements, operationNumber) ??
-					`The desired side equals the current text — identical ${SELECT_OPEN}current${SELECT_DIVIDER}desired${SELECT_CLOSE} sides never change the file. Restate the selection with the actual change after ${SELECT_DIVIDER}; do not drop the operation.`;
+					"The stated text equals the current text and never changes the file. Restate the edit with the actual change; do not drop the operation.";
 				throwNoOp(
 					operationNumber,
 					{ content, offset: candidates[0].matchStart },
@@ -3900,14 +4082,14 @@ function applyOperations(content: string, input: string, context: SloppyApplyCon
 				const oneLineRewrite = baseResolvedRewrite.replace(/\s*\n\s*/gu, " ");
 				// oxlint-disable-next-line unicorn/no-new-array -- length preallocation
 				const repeated = new Array<string>(pattern.selectionRanges.length).fill(oneLineRewrite);
-				const header = operation.all ? `${OPENER}*` : OPENER;
+				const header = operation.all ? "<SM:EDIT all>" : "<SM:EDIT>";
 				throw new Error(
 					[
-						`Operation ${operationNumber} has ${pattern.selectionRanges.length} selections, but REWRITE proves neither positional substitution nor whole-span replacement.`,
+						`Operation ${operationNumber} has ${pattern.selectionRanges.length} selections, but <SM:PUT> proves neither positional substitution nor whole-span replacement.`,
 						"Copy-ready per-selection interpretation:",
-						`${header}\n${operation.patternText}\n${REWRITE_HEADER}\n${repeated.join("\n")}`,
+						`${header}\n<SM:FIND>\n${operation.patternText}\n</SM:FIND>\n<SM:PUT>\n${repeated.join("\n")}\n</SM:PUT>\n</SM:EDIT>`,
 						"Copy-ready whole-span interpretation:",
-						`${header}\n${operation.patternText}\n${REWRITE_HEADER}\n${rewriteSelectionSpans(content, candidate, repeated)}`,
+						`${header}\n<SM:FIND>\n${operation.patternText}\n</SM:FIND>\n<SM:PUT>\n${rewriteSelectionSpans(content, candidate, repeated)}\n</SM:PUT>\n</SM:EDIT>`,
 					].join("\n"),
 				);
 			}
@@ -3960,8 +4142,8 @@ function applyOperations(content: string, input: string, context: SloppyApplyCon
 				deletionNotes.set(
 					operationNumber,
 					operation.assumedDeletion
-						? `Note: operation ${operationNumber} had no ${REWRITE_HEADER} REWRITE and was applied as a move deletion (a later operation re-emits its block).`
-						: `Note: operation ${operationNumber} deleted ${deletedLines} line(s); an empty REWRITE means deletion — resend with the final text if you meant to replace.`,
+						? `Note: operation ${operationNumber} had no <SM:PUT> and was applied as a move deletion (a later operation re-emits its block).`
+						: `Note: operation ${operationNumber} deleted ${deletedLines} line(s); an empty <SM:PUT> means deletion — resend with the final text if you meant to replace.`,
 				);
 			}
 			lastMatchOffset = candidate.matchStart;
@@ -4073,14 +4255,14 @@ function apply(content: string, input: string, context: SloppyApplyContext): str
 	}
 }
 
-/** The official sloppy implementation; docs re-skinned to the active marker alphabet. */
+/** The official sloppy implementation; docs teach the XML tag surface. */
 export const sloppyVariant: SloppyVariant = {
 	id: "sloppy",
 	description,
 	apply,
 };
 
-/** Lark grammar for constrained decoding, in the active marker alphabet. */
+/** Lark grammar for constrained decoding of the XML tag surface. */
 export const sloppyGrammar: string = sloppyGrammarSource;
 
 export interface ExecuteSloppyOptions {
@@ -4107,7 +4289,7 @@ interface PreparedSloppySection {
 }
 
 /**
- * Execute a sloppy payload against its `[path]` sections. Hashline-style
+ * Execute a sloppy payload against its per-file sections. Hashline-style
  * all-or-nothing: every section is applied in memory first; a failure in any
  * section means no file is written. Mirrors `executeReplace`'s per-file
  * lifecycle (plan-mode guard, BOM/EOL preservation, LSP writethrough, diff

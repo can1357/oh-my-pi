@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+### Added
+
+- Add support for automatic recovery from "preserved-thinking" signature errors during conversation history rewrites
+- Add `anthropicPrefixMismatchBehavior` option to control handling of invalid thinking blocks
+- Enable prompt caching for system instructions to improve performance
+
+### Fixed
+
+- Resolve 400 "Invalid signature" errors by automatically dropping mismatched thinking blocks after history rewrites
+- Fix incorrect OS reporting in request headers for non-Linux systems
+- Fixed Google Antigravity model-quota errors switching models instead of rotating to another account with available usage.
+- Fixed the Claude Code fingerprint being rejected by Anthropic for newer models by aligning with the `2.1.257` CLI request signature.
+
 ## [18.1.0] - 2026-09-01
 
 ### Added
