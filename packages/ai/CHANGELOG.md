@@ -19,7 +19,15 @@
 - Provider request builders now read resolved model policy (`model.compat`, `model.identity`, `model.thinking`, behavior rules) for every model-conditional decision — Harmony escaping, vision stripping, thinking transports and ladders, Claude Code instruction injection, Google beta headers and thought-signature handling, Cloudflare gateway routing, Codex service-tier pricing, and quota metering — instead of matching model names.
 - Updated Devin auth, assignment, chat, and usage requests to the current released CLI identity, version `3000.6.2` ([#8590](https://github.com/can1357/oh-my-pi/pull/8590) by [@will-bogusz](https://github.com/will-bogusz)).
 - Devin auth, model assignment, and chat requests now send the native Devin CLI identity (`ideName: devin-cli`, `ideType: chisel`, `extensionName: chisel`, mapped `os`) instead of the Windsurf IDE identity; `ideType: chisel` is what the backend requires for router assignment ([#8590](https://github.com/can1357/oh-my-pi/pull/8590) by [@will-bogusz](https://github.com/will-bogusz)).
-- Devin parallel tool calls follow `compat.supportsParallelToolCalls` instead of being disabled unconditionally, so natively discovered configs that support parallelism can use it ([#8590](https://github.com/can1357/oh-my-pi/pull/8590) by [@will-bogusz](https://github.com/will-bogusz)).
+- Aligned the Devin Connect-RPC adapter's `GetChatMessage` request with the wire format captured from the Devin CLI and Devin Desktop via mitmproxy. The adapter previously impersonated Windsurf and sent fields the real Devin clients never transmit.
+  - Removed the `GetUserJwt` preflight RPC: the session token is now placed directly in `Metadata.apiKey` (field 3), eliminating an extra HTTP round-trip per chat request.
+  - Added `authorization: Basic <token>-<token>` HTTP header, suppressed the default `User-Agent`, and set `Accept-Encoding: identity` to match the CLI transport.
+  - Switched from gzip-compressed Connect frames (flag `0x01`) to raw uncompressed frames (flag `0x00`), matching the CLI. Removed `connect-content-encoding` and `connect-accept-encoding` headers.
+  - Added attestation field 31 (`f`, derived from `getInstallId()`). Updated `CompletionConfiguration` defaults to `maxTokens=128000`, `maxNewlines=400`, `temperature=1.0`, `topK=40`, `topP=0.95` (all still overridable via `StreamOptions`/`model.maxTokens`). Removed hardcoded stop patterns (only caller-specified ones are sent), `firstTemperature`, and `fimEotProbThreshold`.
+  - Removed extra request fields absent from CLI traffic: `executionId`, `toolChoice`, `systemPromptCacheOptions`, `disableParallelToolCalls`.
+
+- Devin `GetChatMessage` requests now match the CLI Connect transport: uncompressed frames (flag `0x00`), `authorization: Basic <token>-<token>`, empty `User-Agent`, and `Accept-Encoding: identity`, while keeping the post-#8590 CLI metadata identity, `GetUserJwt`, and `AssignModel` handshake ([#8534](https://github.com/can1357/oh-my-pi/pull/8534)).
+
 
 ### Fixed
 
@@ -37,7 +45,6 @@
 - Fixed Z.AI browser sign-in to report an occupied callback port before opening the browser.
 
 ## [18.0.9] - 2026-08-28
-
 ### Fixed
 
 - Improved OAuth sign-in flows, including a fallback message when the browser cannot automatically close the OAuth success tab.

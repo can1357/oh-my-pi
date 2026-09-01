@@ -11,14 +11,14 @@ import {
 	type GetChatMessageRequest,
 	GetChatMessageRequestSchema,
 	GetChatMessageResponseSchema,
-	GetUserJwtResponseSchema,
 	ModelAssignmentSchema,
 	StopReason,
 } from "@oh-my-pi/pi-catalog/discovery/devin-proto";
 import { create, fromBinary, toBinary } from "@oh-my-pi/pi-catalog/discovery/protobuf";
 import type { DevinCompat } from "@oh-my-pi/pi-catalog/types";
 
-const AUTH_PAYLOAD = toBinary(GetUserJwtResponseSchema, create(GetUserJwtResponseSchema, { userJwt: "user-jwt" }));
+/** Connect streaming flag bit 0x01 = gzip-compressed payload. */
+const CONNECT_COMPRESSED_FLAG = 0x01;
 
 function frameConnectMessage(payload: Uint8Array): Uint8Array {
 	const out = new Uint8Array(5 + payload.length);
@@ -66,11 +66,14 @@ function decodeAssignRequest(body: RequestInit["body"]): AssignModelRequest {
 
 function decodeChatRequest(body: RequestInit["body"]): GetChatMessageRequest {
 	const framed = new Uint8Array(body as ArrayBuffer);
+	const flag = framed[0];
 	const length = new DataView(framed.buffer, framed.byteOffset, framed.byteLength).getUint32(1, false);
-	return fromBinary(GetChatMessageRequestSchema, gunzipSync(framed.subarray(5, 5 + length)));
+	const payload = framed.subarray(5, 5 + length);
+	const decoded = flag & CONNECT_COMPRESSED_FLAG ? gunzipSync(payload) : payload;
+	return fromBinary(GetChatMessageRequestSchema, decoded);
 }
 
-/** Fake Devin edge: serves auth, a fixed model assignment, and one chat response frame. */
+/** Fake Devin edge: serves a fixed model assignment and one chat response frame. */
 function fakeDevin(options: { assignment?: { assignmentJwt: string; modelUid: string }; chat?: ChatResponseFields }): {
 	fetch: typeof fetch;
 	recorded: RecordedTurn;
@@ -89,7 +92,6 @@ function fakeDevin(options: { assignment?: { assignmentJwt: string; modelUid: st
 	const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
 		const url = String(input);
 		recorded.paths.push(new URL(url).pathname);
-		if (url.includes("GetUserJwt")) return new Response(AUTH_PAYLOAD);
 		if (url.includes("AssignModel")) {
 			recorded.assignment = decodeAssignRequest(init?.body);
 			const response = create(AssignModelResponseSchema, {
@@ -140,7 +142,6 @@ describe("streamDevin router assignment", () => {
 		}).result();
 
 		expect(recorded.paths).toEqual([
-			"/exa.auth_pb.AuthService/GetUserJwt",
 			"/exa.api_server_pb.ApiServerService/AssignModel",
 			"/exa.api_server_pb.ApiServerService/GetChatMessage",
 		]);
@@ -163,7 +164,7 @@ describe("streamDevin router assignment", () => {
 		expect(recorded.chat?.chatModelUid).toBe("claude-sonnet-4-5");
 		expect(recorded.chat?.modelAssignmentJwt).toBe("assign-jwt");
 		expect(recorded.chat?.cascadeId).toBe("cascade-42");
-		expect(recorded.chat?.metadata).toMatchObject({ ideType: "chisel", userJwt: "user-jwt" });
+		expect(recorded.chat?.metadata).toMatchObject({ ideType: "chisel", userJwt: "" });
 		expect(result.upstreamModel).toBe("claude-sonnet-4-5");
 		expect(result.stopReason).toBe("stop");
 	});
@@ -229,16 +230,20 @@ describe("streamDevin router assignment", () => {
 		expect(result.usage.credits).toBeUndefined();
 	});
 
-	it("enables parallel tool calls only when compat advertises support", async () => {
+	it("omits disableParallelToolCalls from the encoded chat request", async () => {
 		const off = fakeDevin({});
-		await streamDevin(devinModel({}), context, { apiKey: "token", fetch: off.fetch }).result();
-		expect(off.recorded.chat?.disableParallelToolCalls).toBe(true);
-
-		const on = fakeDevin({});
 		await streamDevin(devinModel({ supportsParallelToolCalls: true }), context, {
 			apiKey: "token",
-			fetch: on.fetch,
+			fetch: off.fetch,
 		}).result();
-		expect(on.recorded.chat?.disableParallelToolCalls).toBe(false);
+		const encoded = toBinary(GetChatMessageRequestSchema, off.recorded.chat!);
+		const withParallelEnabled = toBinary(
+			GetChatMessageRequestSchema,
+			create(GetChatMessageRequestSchema, {
+				...off.recorded.chat!,
+				disableParallelToolCalls: true,
+			}),
+		);
+		expect(encoded).not.toEqual(withParallelEnabled);
 	});
 });
