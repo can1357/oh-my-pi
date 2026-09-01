@@ -1,6 +1,8 @@
 import { type } from "@oh-my-pi/omptype";
+import { prompt } from "@oh-my-pi/pi-utils";
 import * as AIError from "../../error";
 import type { FetchImpl } from "../../types";
+import metaDeviceCodePrompt from "./meta-device-code.md" with { type: "text" };
 import { pollOAuthDeviceCodeFlow, type OAuthDeviceCodePollResult } from "./device-code";
 import type { OAuthController, OAuthCredentials } from "./types";
 
@@ -307,7 +309,10 @@ function credentialsFromGrant(grant: TokenGrant, minted: MintedMuseKey): OAuthCr
 export async function loginMetaMuse(ctrl: OAuthController): Promise<OAuthCredentials> {
 	const fetchImpl = ctrl.fetch ?? fetch;
 	const device = await requestDeviceAuthorization(fetchImpl, ctrl.signal);
-	ctrl.onAuth?.({ url: device.verificationUri, instructions: `Confirm code: ${device.userCode}` });
+	ctrl.onAuth?.({
+		url: device.verificationUri,
+		instructions: prompt.render(metaDeviceCodePrompt, { userCode: device.userCode }).trim(),
+	});
 	ctrl.onProgress?.("Waiting for Meta device authorization...");
 	const grant = await pollOAuthDeviceCodeFlow({
 		poll: () => pollDeviceToken(device.deviceCode, fetchImpl, ctrl.signal),
