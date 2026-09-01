@@ -33,6 +33,7 @@ import {
 	AUTO_THINKING,
 	type ConfiguredThinkingLevel,
 	concreteThinkingLevel,
+	parseConfiguredThinkingLevel,
 	parseThinkingLevel,
 	resolveThinkingLevelForModel,
 } from "../thinking";
@@ -1732,6 +1733,52 @@ export async function resolveModelScope(
 	}
 
 	return scopedModels;
+}
+/**
+ * Map resolver scope entries to the session's Ctrl+P cycle shape, filling in the
+ * configured default thinking level for entries without an explicit `:level`
+ * suffix. `auto` is session-level only, so it is coerced to a concrete default here.
+ */
+export function toSessionScopedModels(
+	scopedModels: readonly ScopedModel[],
+	activeSettings: Settings,
+): Array<{ model: Model; thinkingLevel?: ThinkingLevel }> {
+	if (scopedModels.length === 0) return [];
+	const defaultThinkingLevel = concreteThinkingLevel(
+		parseConfiguredThinkingLevel(activeSettings.get("defaultThinkingLevel")),
+	);
+	return scopedModels.map(scopedModel => ({
+		model: scopedModel.model,
+		thinkingLevel: scopedModel.explicitThinkingLevel
+			? (scopedModel.thinkingLevel ?? defaultThinkingLevel)
+			: defaultThinkingLevel,
+	}));
+}
+
+/**
+ * Whether two scope lists are equivalent for the live cycle: identical length,
+ * order, provider/id, thinking level, AND model-record reference. A rebuilt
+ * list is skipped only when it is byte-for-byte identical to what is already
+ * installed. This is the single guard for both scope-rebuild paths — startup's
+ * post-discovery rebuild and `/reload-settings` — so a reorder, a level change
+ * (`foo:low` → `foo:high`), OR a catalog-metadata change (a refresh that swaps
+ * in a new model object for the same provider/id) forces a reinstall: the cycle
+ * must adopt fresh records or later cycling keeps the stale metadata.
+ */
+export function sameScopedModelCycle(
+	a: ReadonlyArray<{ model: Model; thinkingLevel?: ThinkingLevel }>,
+	b: ReadonlyArray<{ model: Model; thinkingLevel?: ThinkingLevel }>,
+): boolean {
+	if (a.length !== b.length) return false;
+	return a.every((entry, index) => {
+		const other = b[index];
+		return (
+			entry.model.provider === other.model.provider &&
+			entry.model.id === other.model.id &&
+			entry.model === other.model &&
+			entry.thinkingLevel === other.thinkingLevel
+		);
+	});
 }
 
 /**

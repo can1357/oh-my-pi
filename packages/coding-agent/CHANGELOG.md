@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- `/reload-settings` now applies async-execution settings live: `async.enabled`, `bash.autoBackground.*`, and `async.maxJobs` reach the running bash tool and job manager instead of waiting for a restart.
 - Claude marketplace MCP servers now resolve environment placeholders in stdio environment values instead of passing strings such as `${NAME:-}` literally ([#10481](https://github.com/can1357/oh-my-pi/pull/10481) by [@mrexodia](https://github.com/mrexodia)).
 ## [18.1.2] - 2026-09-01
 
@@ -653,6 +654,8 @@
 - Added repeat read warning hints when identical file content is read multiple times.
 - Explicit DAP adapters can now attach without a PID or port when `attachDefaults` provide the target arguments.
 - Added `isProjectTrusted()` compatibility shim to `ExtensionContext` for extensions targeting upstream per-directory trust gates.
+- Added `/reload-settings` slash command (`/reload-config`): re-reads the global, project, and overlay config layers from disk and applies them to the live session without a restart, reporting which effective settings changed.
+- `/reload-settings` also reloads `models.yml` (custom providers/models) and refreshes the model catalog live, so models added mid-session appear in `/models` and `/switch` without a restart.
 
 ### Changed
 

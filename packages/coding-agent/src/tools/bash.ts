@@ -605,27 +605,44 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 			isWindows: process.platform === "win32",
 		});
 	}
-	readonly parameters: BashToolSchema;
+	get parameters(): BashToolSchema {
+		return this.#asyncEnabled ? bashSchemaWithAsync : bashSchemaBase;
+	}
 	// Non-pty calls run alongside each other (the executor isolates overlapping
 	// runs on the same shell session); pty takes over the terminal UI and must
 	// run alone.
 	readonly concurrency = (args: Partial<BashToolInput>): "shared" | "exclusive" =>
 		args.pty === true ? "exclusive" : "shared";
 	readonly strict = true;
-	readonly #asyncEnabled: boolean;
-	readonly #autoBackgroundEnabled: boolean;
-	readonly #autoBackgroundThresholdMs: number;
+	#asyncEnabled = false;
+	#autoBackgroundEnabled = false;
+	#autoBackgroundThresholdMs = DEFAULT_AUTO_BACKGROUND_THRESHOLD_MS;
 
 	constructor(private readonly session: ToolSession) {
-		this.#asyncEnabled = this.session.settings.get("async.enabled");
-		this.#autoBackgroundEnabled = this.session.settings.get("bash.autoBackground.enabled");
-		this.#autoBackgroundThresholdMs = Math.max(
+		this.reconfigure();
+	}
+
+	/** Re-reads async-execution settings; returns true when the live schema or description changed. */
+	reconfigure(): boolean {
+		const asyncEnabled = this.session.settings.get("async.enabled");
+		const autoBackgroundEnabled = this.session.settings.get("bash.autoBackground.enabled");
+		const autoBackgroundThresholdMs = Math.max(
 			0,
 			Math.floor(
 				this.session.settings.get("bash.autoBackground.thresholdMs") ?? DEFAULT_AUTO_BACKGROUND_THRESHOLD_MS,
 			),
 		);
-		this.parameters = this.#asyncEnabled ? bashSchemaWithAsync : bashSchemaBase;
+		if (
+			asyncEnabled === this.#asyncEnabled &&
+			autoBackgroundEnabled === this.#autoBackgroundEnabled &&
+			autoBackgroundThresholdMs === this.#autoBackgroundThresholdMs
+		) {
+			return false;
+		}
+		this.#asyncEnabled = asyncEnabled;
+		this.#autoBackgroundEnabled = autoBackgroundEnabled;
+		this.#autoBackgroundThresholdMs = autoBackgroundThresholdMs;
+		return true;
 	}
 
 	#formatResultOutput(result: BashResult | BashInteractiveResult): string {

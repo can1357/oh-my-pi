@@ -1561,6 +1561,27 @@ export class SessionTools {
 	}
 
 	/**
+	 * Re-reads async-execution settings into the live bash tool after a
+	 * settings reload. The tool snapshots its schema and description at
+	 * construction, so without this push a reloaded `async.enabled` /
+	 * `bash.autoBackground.*` value would take effect only on restart.
+	 *
+	 * @returns false when this session has no live bash tool to reconfigure.
+	 */
+	reconcileBashToolSettings(): Promise<boolean> {
+		return this.runToolRegistryMutation(async () => {
+			const bashTool = this.#toolRegistry.get("bash") as { reconfigure?: () => boolean } | undefined;
+			if (!bashTool?.reconfigure) return false;
+			const changed = bashTool.reconfigure();
+			if (!changed) return true;
+			// The changed values render into the bash description, so the applied
+			// tool signature differs and the base prompt rebuilds below.
+			await this.#applyActiveToolsByName(this.getEnabledToolNames());
+			return true;
+		});
+	}
+
+	/**
 	 * Session-scoped `/vision` override. `auto` clears the override so the
 	 * persisted `inspect_image.mode` setting (itself possibly `auto`) decides;
 	 * `on`/`off` force the tool for this session only. Takes effect before the

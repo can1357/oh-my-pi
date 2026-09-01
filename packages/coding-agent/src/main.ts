@@ -42,7 +42,12 @@ import {
 	resolveModelRoleValue,
 	resolveModelScope,
 	type ScopedModel,
+	sameScopedModelCycle,
+	toSessionScopedModels,
 } from "./config/model-resolver";
+
+export { toSessionScopedModels };
+
 import { ModelsConfigFile } from "./config/models-config";
 import { serviceTierSettingToTier } from "./config/service-tier";
 import { getDefault, type SettingPath, Settings, type SettingValue, settings } from "./config/settings";
@@ -104,7 +109,6 @@ import { shouldShowStartupSplash } from "./startup-splash";
 import { discoverTitleSystemPromptFile, resolvePromptInput } from "./system-prompt";
 import { createPersistedSubagentReviverFactory } from "./task/persisted-revive";
 import { createTelemetryExportConfig, initTelemetryExport, isTelemetryExportEnabled } from "./telemetry-export";
-import { concreteThinkingLevel, parseConfiguredThinkingLevel } from "./thinking";
 import type { LspStartupServerInfo } from "./tools";
 import { getChangelogPath, resolveStartupChangelogForDisplay, type StartupChangelogSelection } from "./utils/changelog";
 import { EventBus } from "./utils/event-bus";
@@ -828,34 +832,6 @@ export async function resolveScopedModels(
 	return await resolveModelScope(modelPatterns, modelRegistry, preferences, activeSettings);
 }
 
-/**
- * Map resolver scope entries to the session's Ctrl+P cycle shape, filling in the
- * configured default thinking level for entries without an explicit `:level`
- * suffix. `auto` is session-level only, so it is coerced to a concrete default here.
- */
-export function toSessionScopedModels(
-	scopedModels: readonly ScopedModel[],
-	activeSettings: Settings,
-): Array<{ model: Model; thinkingLevel?: ThinkingLevel }> {
-	if (scopedModels.length === 0) return [];
-	const defaultThinkingLevel = concreteThinkingLevel(
-		parseConfiguredThinkingLevel(activeSettings.get("defaultThinkingLevel")),
-	);
-	return scopedModels.map(scopedModel => ({
-		model: scopedModel.model,
-		thinkingLevel: scopedModel.explicitThinkingLevel
-			? (scopedModel.thinkingLevel ?? defaultThinkingLevel)
-			: defaultThinkingLevel,
-	}));
-}
-
-/** Whether two scope lists reference the same set of models (order-independent). */
-function sameScopedModelSet(a: ReadonlyArray<{ model: Model }>, b: ReadonlyArray<{ model: Model }>): boolean {
-	if (a.length !== b.length) return false;
-	const keys = new Set(a.map(entry => `${entry.model.provider}/${entry.model.id}`));
-	return b.every(entry => keys.has(`${entry.model.provider}/${entry.model.id}`));
-}
-
 /** Minimal session surface the post-discovery scope rebuild mutates. */
 export interface ScopedModelSink {
 	readonly isDisposed: boolean;
@@ -894,7 +870,7 @@ export async function rebuildScopedModelsAfterDiscovery(
 		activeSettings,
 	);
 	const mapped = toSessionScopedModels(rebuilt, activeSettings);
-	if (mapped.length === 0 || sameScopedModelSet(session.scopedModels, mapped)) return;
+	if (mapped.length === 0 || sameScopedModelCycle(session.scopedModels, mapped)) return;
 	session.setScopedModels(mapped);
 }
 
@@ -1310,6 +1286,10 @@ export async function buildSessionOptions(
 	if (scopedModels.length > 0) {
 		options.scopedModels = toSessionScopedModels(scopedModels, activeSettings);
 	}
+	// Frozen CLI `--models` scope for /reload-settings: when present the CLI scope
+	// never re-resolves (highest precedence); when absent the session is
+	// settings-derived and refreshScopedModels reads the live enabledModels value.
+	options.cliModelScope = parsed.models && parsed.models.length > 0 ? parsed.models : undefined;
 
 	// API key from CLI - set in authStorage
 	// (handled by caller before createAgentSession)

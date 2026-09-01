@@ -558,6 +558,70 @@ describe("AsyncJobManager", () => {
 		await expect(reap).resolves.toBe(true);
 		expect(manager.getJob("hung-1")?.status).toBe("cancelled");
 	});
+
+	test("applies a raised running-job cap to the next capacity check", async () => {
+		const release = Promise.withResolvers<void>();
+		const hold = async (): Promise<string> => {
+			await release.promise;
+			return "done";
+		};
+		const manager = new AsyncJobManager({ maxRunningJobs: 1 });
+		manager.register("bash", "hold one", hold);
+
+		expect(() => manager.register("bash", "blocked", async () => "x")).toThrow("Background job limit reached (1)");
+
+		manager.setMaxRunningJobs(2);
+		manager.register("bash", "hold two", hold);
+		expect(manager.atCapacity).toBe(true);
+		expect(() => manager.register("bash", "still blocked", async () => "x")).toThrow(
+			"Background job limit reached (2)",
+		);
+
+		release.resolve();
+		await manager.waitForAll();
+		await manager.drainDeliveries({ timeoutMs: 2_000 });
+	});
+
+	test("clamps the running-job cap to 1-100 on construction and on update", async () => {
+		const release = Promise.withResolvers<void>();
+		const hold = async (): Promise<string> => {
+			await release.promise;
+			return "done";
+		};
+		// A cap below 1 behaves as 1.
+		const floorManager = new AsyncJobManager({ maxRunningJobs: 0 });
+		floorManager.register("bash", "hold", hold);
+		expect(() => floorManager.register("bash", "blocked", async () => "x")).toThrow(
+			"Background job limit reached (1)",
+		);
+
+		// A cap above 100 behaves as 100: 100 held jobs reach the ceiling.
+		const ceilingManager = new AsyncJobManager({ maxRunningJobs: 500 });
+		for (let i = 0; i < 100; i++) {
+			ceilingManager.register("bash", `hold ${i}`, hold);
+		}
+		expect(ceilingManager.atCapacity).toBe(true);
+		expect(() => ceilingManager.register("bash", "blocked", async () => "x")).toThrow(
+			"Background job limit reached (100)",
+		);
+
+		// The setter clamps too, in both directions.
+		ceilingManager.setMaxRunningJobs(500);
+		expect(ceilingManager.atCapacity).toBe(true);
+		expect(() => ceilingManager.register("bash", "still blocked", async () => "x")).toThrow(
+			"Background job limit reached (100)",
+		);
+		ceilingManager.setMaxRunningJobs(0);
+		expect(() => ceilingManager.register("bash", "blocked again", async () => "x")).toThrow(
+			"Background job limit reached (1)",
+		);
+
+		release.resolve();
+		await floorManager.waitForAll();
+		await ceilingManager.waitForAll();
+		await floorManager.drainDeliveries({ timeoutMs: 2_000 });
+		await ceilingManager.drainDeliveries({ timeoutMs: 2_000 });
+	});
 });
 
 describe("AsyncJobManager smart poll-wait escalation", () => {

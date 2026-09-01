@@ -278,3 +278,68 @@ describe("BashTool argument validation", () => {
 		);
 	});
 });
+
+describe("BashTool reconfigure", () => {
+	function createReconfigurableBashTool(settings: Record<string, unknown>): BashTool {
+		const session = {
+			settings: {
+				get(key: string) {
+					return settings[key];
+				},
+			},
+		} as unknown as ToolSession;
+		return new BashTool(session);
+	}
+
+	const baseSettings = (): Record<string, unknown> => ({
+		"async.enabled": false,
+		"bash.autoBackground.enabled": true,
+		"bash.autoBackground.thresholdMs": 60_000,
+	});
+
+	// `properties` is `unknown` on omptype's JSON-schema projection; the cast
+	// keeps every assertion reading the same shape.
+	const propertyNames = (tool: BashTool): string[] =>
+		Object.keys(tool.parameters.toJsonSchema().properties as Record<string, unknown>);
+
+	it("reports no change and keeps the base schema when settings are unchanged", () => {
+		const tool = createReconfigurableBashTool(baseSettings());
+		expect(propertyNames(tool)).not.toContain("async");
+
+		expect(tool.reconfigure()).toBe(false);
+		expect(propertyNames(tool)).not.toContain("async");
+	});
+
+	it("reports no change while the async schema stays enabled", () => {
+		const settings = { ...baseSettings(), "async.enabled": true };
+		const tool = createReconfigurableBashTool(settings);
+		expect(propertyNames(tool)).toContain("async");
+
+		expect(tool.reconfigure()).toBe(false);
+		expect(propertyNames(tool)).toContain("async");
+	});
+
+	it("picks up an async.enabled flip and swaps the live schema", () => {
+		const settings = baseSettings();
+		const tool = createReconfigurableBashTool(settings);
+		expect(propertyNames(tool)).not.toContain("async");
+
+		settings["async.enabled"] = true;
+		expect(tool.reconfigure()).toBe(true);
+		expect(propertyNames(tool)).toContain("async");
+
+		settings["async.enabled"] = false;
+		expect(tool.reconfigure()).toBe(true);
+		expect(propertyNames(tool)).not.toContain("async");
+	});
+
+	it("reports an auto-background threshold change even though the schema is unchanged", () => {
+		const settings = baseSettings();
+		const tool = createReconfigurableBashTool(settings);
+		expect(tool.reconfigure()).toBe(false);
+
+		settings["bash.autoBackground.thresholdMs"] = 120_000;
+		expect(tool.reconfigure()).toBe(true);
+		expect(propertyNames(tool)).not.toContain("async");
+	});
+});

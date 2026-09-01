@@ -80,6 +80,7 @@ import * as AIError from "@oh-my-pi/pi-ai/error";
 import { resetOpenAICodexHistoryAfterCompaction } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { preferredDialect } from "@oh-my-pi/pi-catalog/identity";
+import type { ModelRefreshStrategy } from "@oh-my-pi/pi-catalog/model-manager";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { MacOSPowerAssertion } from "@oh-my-pi/pi-natives";
 import {
@@ -104,7 +105,13 @@ import { reset as resetCapabilities } from "../capability";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import { shouldEnableAppendOnlyContext } from "../config/append-only-context-mode";
 import type { ModelRegistry } from "../config/model-registry";
-import type { ResolvedModelRoleValue } from "../config/model-resolver";
+import {
+	getModelMatchPreferences,
+	type ResolvedModelRoleValue,
+	resolveModelScope,
+	sameScopedModelCycle,
+	toSessionScopedModels,
+} from "../config/model-resolver";
 import { expandPromptTemplate, type PromptTemplate } from "../config/prompt-templates";
 import { buildServiceTierByFamily } from "../config/service-tier";
 import type { Settings, SkillsSettings } from "../config/settings";
@@ -678,6 +685,8 @@ export class AgentSession {
 
 	// Model registry for API key resolution
 	#modelRegistry: ModelRegistry;
+	/** Settings-derived enabledModels scope; undefined keeps a --models scope fixed at its launch resolution. */
+	#cliModelScope: readonly string[] | undefined;
 	#usageFallbackConfirmer: UsageFallbackConfirmer | undefined;
 	#usagePreflightAbortControllers = new Set<AbortController>();
 	#queuedMessageDrainBlocked = false;
@@ -1196,6 +1205,7 @@ export class AgentSession {
 			thinkingLevelCeiling: config.thinkingLevelCeiling,
 			serviceTierByFamily: config.serviceTierByFamily,
 		});
+		this.#cliModelScope = config.cliModelScope;
 
 		this.#promptTemplates = config.promptTemplates ?? [];
 		this.#slashCommands = config.slashCommands ?? [];
@@ -5062,6 +5072,11 @@ export class AgentSession {
 		return this.#tools.reconcileInspectImageTool();
 	}
 
+	/** Re-reads async-execution settings into the live bash tool; see {@link SessionTools.reconcileBashToolSettings}. */
+	reconcileBashToolSettings(): Promise<boolean> {
+		return this.#tools.reconcileBashToolSettings();
+	}
+
 	/** Cancels the local rollout-memory startup owned by this session. */
 	cancelLocalMemoryStartup(): void {
 		this.#memory.cancelLocalMemoryStartup();
@@ -5263,6 +5278,48 @@ export class AgentSession {
 	/** Replace the Ctrl+P/`/models` cycle scope (post-discovery rebuild; see {@link ModelControls.setScopedModels}). */
 	setScopedModels(scopedModels: Array<{ model: Model; thinkingLevel?: ThinkingLevel }>): void {
 		this.#models.setScopedModels(scopedModels);
+	}
+	/**
+	 * Re-resolve the settings-derived scope and push it into the Ctrl+P cycle /
+	 * scoped pickers when the rebuilt list differs. Reads the LIVE `enabledModels`
+	 * value — not the one captured at construction — so a mid-session edit that
+	 * changes the configured scope (A→B) or clears it takes effect on the same
+	 * reload. When the setting becomes empty the scope is cleared (unfrozen) so
+	 * the picker falls back to the full catalog; a non-empty setting that merely
+	 * resolves to zero models keeps the previous scope to avoid a transient
+	 * collapse while discovery settles. No-op for `--models`-scoped sessions
+	 * (`#cliModelScope` set): the CLI scope is frozen and outranks settings.
+	 */
+	async refreshScopedModels(): Promise<boolean> {
+		if (this.#isDisposed || this.#cliModelScope) return false;
+		const patterns = this.settings.get("enabledModels");
+		// Explicitly cleared (or never set and now absent): unfreeze the pickers.
+		if (!patterns || patterns.length === 0) {
+			if (this.#models.scopedModels.length === 0) return false;
+			this.#models.setScopedModels([]);
+			return true;
+		}
+		const resolved = await resolveModelScope(
+			[...patterns],
+			this.#modelRegistry,
+			getModelMatchPreferences(this.settings),
+			this.settings,
+		);
+		// Adopt the fresh model records for the active model too: a reload that
+		// edits the current model's metadata (baseUrl, compat, limits) rebuilds
+		// the registry into new objects with the same provider/id, and the next
+		// request must read them rather than the stale construction-time record.
+		const current = this.agent.state.model;
+		if (current) {
+			const fresh = resolved.find(
+				entry => entry.model.provider === current.provider && entry.model.id === current.id,
+			)?.model;
+			if (fresh && fresh !== current) this.agent.setModel(fresh);
+		}
+		const mapped = toSessionScopedModels(resolved, this.settings);
+		if (mapped.length === 0 || sameScopedModelCycle(this.#models.scopedModels, mapped)) return false;
+		this.#models.setScopedModels(mapped);
+		return true;
 	}
 
 	/** Prompt templates */
@@ -7514,6 +7571,37 @@ export class AgentSession {
 		return this.#models.getAvailableModels();
 	}
 
+	/**
+	 * Rebuild the model catalog from disk after a live config reload: re-parses
+	 * models.yml (custom providers/models) and re-runs provider discovery, then
+	 * re-applies settings-driven policies. Models added mid-session become
+	 * visible to /models and /switch without a restart.
+	 */
+	async refreshModels(strategy: ModelRefreshStrategy = "online-if-uncached"): Promise<void> {
+		// Serialize against startup's refreshInBackground(): a reload issued while
+		// background discovery is still running would start an unsynchronized
+		// refresh, and the older request could finish last and re-add a provider the
+		// reload just disabled (or overwrite the fresh catalog). No-op when no
+		// refresh is in flight.
+		await this.#modelRegistry.awaitBackgroundRefresh();
+		// Force the static rebuild BEFORE the online pass. `refresh()`'s static
+		// reload is mtime-gated, so a reload that only edits settings (e.g.
+		// removing a provider from `disabledProviders`, or toggling `extendedContext`)
+		// would reuse the old `#discoverableProviders` list; `reapplyModelPolicies()`
+		// forces the rebuild for the fresh settings, and the online pass below then
+		// discovers against it. Newly-enabled implicit providers (e.g. ollama) with
+		// no prior cache only surface here.
+		await this.#modelRegistry.reapplyModelPolicies();
+		await this.#modelRegistry.refresh(strategy);
+		// refresh() does not reject on a malformed models.yml: the custom layer
+		// comes back empty with a configError. Surface it so callers never report
+		// success while the live custom providers were dropped.
+		const configError = this.#modelRegistry.getError();
+		if (configError) {
+			throw new Error(`models.yml failed to load: ${configError.message}`);
+		}
+	}
+
 	/** Selects the session thinking level and optionally persists it as the default. */
 	setThinkingLevel(level: ConfiguredThinkingLevel | undefined, persist: boolean = false): void {
 		this.#models.setThinkingLevel(level, persist);
@@ -7560,29 +7648,30 @@ export class AgentSession {
 
 	/**
 	 * Set steering mode.
-	 * Saves to settings.
+	 * Saves to settings unless `persist` is false — reload reconciliation must
+	 * apply an overlay-provided value without promoting it into global config.
 	 */
-	setSteeringMode(mode: "all" | "one-at-a-time"): void {
+	setSteeringMode(mode: "all" | "one-at-a-time", persist: boolean = true): void {
 		this.agent.setSteeringMode(mode);
-		this.settings.set("steeringMode", mode);
+		if (persist) this.settings.set("steeringMode", mode);
 	}
 
 	/**
 	 * Set follow-up mode.
-	 * Saves to settings.
+	 * Saves to settings unless `persist` is false (see {@link setSteeringMode}).
 	 */
-	setFollowUpMode(mode: "all" | "one-at-a-time"): void {
+	setFollowUpMode(mode: "all" | "one-at-a-time", persist: boolean = true): void {
 		this.agent.setFollowUpMode(mode);
-		this.settings.set("followUpMode", mode);
+		if (persist) this.settings.set("followUpMode", mode);
 	}
 
 	/**
 	 * Set interrupt mode.
-	 * Saves to settings.
+	 * Saves to settings unless `persist` is false (see {@link setSteeringMode}).
 	 */
-	setInterruptMode(mode: "immediate" | "wait"): void {
+	setInterruptMode(mode: "immediate" | "wait", persist: boolean = true): void {
 		this.agent.setInterruptMode(mode);
-		this.settings.set("interruptMode", mode);
+		if (persist) this.settings.set("interruptMode", mode);
 	}
 
 	/**
@@ -9964,6 +10053,18 @@ export class AgentSession {
 	 */
 	setAdvisorEnabled(enabled: boolean): boolean {
 		return this.#advisors.setAdvisorEnabled(enabled);
+	}
+
+	/**
+	 * Re-resolves role-driven consumers (advisors) against the current registry.
+	 * A reload that changes role assignments resolves them against whatever
+	 * catalog is loaded at signal time; call this after `refreshModels()` so a
+	 * consumer that recorded `no_model` during the stale window heals without
+	 * waiting for the next role change.
+	 */
+	reapplyModelRoles(): void {
+		if (this.#isDisposed) return;
+		this.#advisors.onModelRolesChanged();
 	}
 
 	/**

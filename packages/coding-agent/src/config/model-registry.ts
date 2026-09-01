@@ -674,6 +674,10 @@ export class ModelRegistry {
 			return;
 		}
 		this.#modelsConfigFile.invalidate();
+		// Snapshot the config-sourced API keys BEFORE the clear so a malformed
+		// models.yml (parse error) can restore them: the last-good provider keys
+		// must survive until the file is repaired, not vanish with the failed parse.
+		const lastGoodConfigApiKeys = new Map(this.#customProviderApiKeys);
 		this.#customProviderApiKeys.clear();
 		this.#keylessProviders.clear();
 		this.#discoverableProviders = [];
@@ -690,7 +694,7 @@ export class ModelRegistry {
 		this.#modelOverrides.clear();
 		this.#configError = undefined;
 		this.#providerDiscoveryStates.clear();
-		this.#loadModels();
+		this.#loadModels(lastGoodConfigApiKeys);
 	}
 
 	/**
@@ -700,7 +704,17 @@ export class ModelRegistry {
 		return this.#configError;
 	}
 
-	#loadModels() {
+	#loadModels(lastGoodConfigApiKeys?: Map<string, string>) {
+		// Snapshot the last-good custom layer BEFORE reset so a malformed
+		// models.yml (status "error") restores the previous valid catalog instead
+		// of installing the empty custom layer + dropped config keys.
+		const lastGood = {
+			customModels: this.#customModelOverlays,
+			providerOverrides: this.#providerOverrides,
+			modelOverrides: this.#modelOverrides,
+			keylessProviders: this.#keylessProviders,
+			discoverableProviders: this.#discoverableProviders,
+		};
 		this.#resetStaticComposition();
 		// Load custom config first (to know which providers to override).
 		const {
@@ -713,11 +727,29 @@ export class ModelRegistry {
 			error: configError,
 		} = logger.time("modelRegistry:loadCustomModels", () => this.#loadCustomModels());
 		this.#configError = configError;
-		this.#keylessProviders = keylessProviders;
-		this.#discoverableProviders = discoverableProviders;
-		this.#customModelOverlays = customModels;
-		this.#providerOverrides = overrides;
-		this.#modelOverrides = modelOverrides;
+		// On a parse failure keep the last-good custom layer: dropping it loses
+		// every valid custom model/provider until the file is repaired. The error
+		// still surfaces via getError() so the reload reports the failure; the
+		// prior catalog stays live. Config-sourced API keys are restored too.
+		if (configError) {
+			this.#customModelOverlays = lastGood.customModels;
+			this.#providerOverrides = lastGood.providerOverrides;
+			this.#modelOverrides = lastGood.modelOverrides;
+			this.#keylessProviders = lastGood.keylessProviders;
+			this.#discoverableProviders = lastGood.discoverableProviders;
+			for (const [provider, keyConfig] of lastGoodConfigApiKeys ?? []) {
+				this.#installProviderApiKey(provider, keyConfig);
+			}
+			// configuredProviders comes from the failed parse (none), but the
+			// last-good discoverable set is restored above; implicit add over an
+			// empty configured set is a no-op.
+		} else {
+			this.#customModelOverlays = customModels;
+			this.#providerOverrides = overrides;
+			this.#modelOverrides = modelOverrides;
+			this.#keylessProviders = keylessProviders;
+			this.#discoverableProviders = discoverableProviders;
+		}
 
 		this.#addImplicitDiscoverableProviders(configuredProviders);
 		const configuredDiscoveryProviders = new Set(this.#discoverableProviders.map(provider => provider.provider));

@@ -995,6 +995,25 @@ describe("ModelRegistry", () => {
 			expect(anthropicModels.some(m => m.id.includes("claude"))).toBe(true);
 		});
 
+		test("refresh() keeps the last-good custom layer when models.json becomes malformed", async () => {
+			writeModelsJson({
+				prov: providerConfig("https://example.com/v1", [{ id: "m1" }]),
+			});
+			const registry = new ModelRegistry(authStorage, modelsJsonPath);
+			const model = registry.find("prov", "m1");
+			expect(model).toBeDefined();
+			expect(registry.hasConfiguredAuth(model!)).toBe(true);
+
+			// A malformed edit must surface the error but preserve the live catalog
+			// and its config-sourced API key instead of dropping them until repair.
+			fs.writeFileSync(modelsJsonPath, "{ definitely not valid json or yaml[");
+			await registry.refresh("offline");
+
+			expect(registry.getError()).toBeDefined();
+			expect(registry.find("prov", "m1")).toBeDefined();
+			expect(registry.hasConfiguredAuth(registry.find("prov", "m1")!)).toBe(true);
+		});
+
 		test("built-in gpt-5.4 applies the hardcoded context window policy", () => {
 			expect(sharedBuiltin.find("openai", "gpt-5.4")?.contextWindow).toBe(1_000_000);
 		});

@@ -432,7 +432,17 @@ FROM model_usage_legacy
 		// Model-performance batches are synchronous once invoked, so this
 		// persists them before finalizing their statements during process exit.
 		void this.#perfDrain.flush();
-		checkpointWal(this.#db);
+		// The checkpoint can race an external unlink of the database file or its
+		// directory (tests removing a temp dir while the singleton handle is
+		// open): SQLite then raises SQLITE_IOERR. Reads/writes through the stale
+		// handle are equally void and the WAL contents are unrecoverable, so
+		// swallowing the error loses nothing; the statements below still need
+		// their finalize.
+		try {
+			checkpointWal(this.#db);
+		} catch {
+			// Unrecoverable WAL; proceed to finalize and close the handle.
+		}
 		this.#listSettingsStmt.finalize();
 		this.#upsertModelUsageStmt.finalize();
 		this.#listModelUsageStmt.finalize();

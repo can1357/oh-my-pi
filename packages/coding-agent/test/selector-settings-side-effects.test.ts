@@ -15,6 +15,7 @@ import { SelectorController } from "@oh-my-pi/pi-coding-agent/modes/controllers/
 import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import type { ResolvedRoleModel } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { AUTO_THINKING } from "@oh-my-pi/pi-coding-agent/thinking";
 import { setTerminalHyperlinks, TERMINAL } from "@oh-my-pi/pi-tui";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
@@ -28,6 +29,11 @@ beforeEach(async () => {
 });
 
 afterEach(() => {
+	// loadIsolated tests below open an AgentStorage singleton in a per-test
+	// temp dir that their cleanup removes while the handle is live. Closing
+	// here retires the handle before the next file's AgentStorage.close()
+	// would checkpoint it from under a deleted directory (SQLITE_IOERR).
+	AgentStorage.close();
 	restoreSettingsTestState(settingsState);
 	settingsState = undefined;
 });
@@ -203,6 +209,25 @@ describe("selector setting side effects", () => {
 			} as unknown as InteractiveModeContext);
 
 			controller.handleSettingChange("display.showTokenUsage", enabled);
+
+			expect(rebuildChatFromMessages).toHaveBeenCalledTimes(1);
+			expect(resetDisplay).toHaveBeenCalledTimes(1);
+			expect(rebuildChatFromMessages.mock.invocationCallOrder[0]).toBeLessThan(
+				resetDisplay.mock.invocationCallOrder[0],
+			);
+		});
+	}
+
+	for (const enabled of [false, true]) {
+		it(`rebuilds the transcript when display.showTurnTime=${enabled} changes in /settings`, () => {
+			const rebuildChatFromMessages = vi.fn();
+			const resetDisplay = vi.fn();
+			const controller = new SelectorController({
+				rebuildChatFromMessages,
+				ui: { resetDisplay },
+			} as unknown as InteractiveModeContext);
+
+			controller.handleSettingChange("display.showTurnTime", enabled);
 
 			expect(rebuildChatFromMessages).toHaveBeenCalledTimes(1);
 			expect(resetDisplay).toHaveBeenCalledTimes(1);

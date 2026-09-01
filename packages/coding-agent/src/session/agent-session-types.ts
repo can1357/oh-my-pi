@@ -156,6 +156,8 @@ export interface AgentSessionConfig {
 	autoApprove?: boolean;
 	/** Models to cycle through with Ctrl+P (from --models flag). */
 	scopedModels?: Array<{ model: Model; thinkingLevel?: ThinkingLevel }>;
+	/** Frozen `--models` scope patterns: when set, the CLI scope never re-resolves on reload; undefined means settings-derived, re-resolved live. */
+	cliModelScope?: readonly string[];
 	/** Initial session thinking selector. */
 	thinkingLevel?: ConfiguredThinkingLevel;
 	/** Hard ceiling on the session's thinking effort (e.g. a task spawn's `task.maxEffort`-capped hint); every later change, including retry-fallback recovery, is re-clamped to it. */

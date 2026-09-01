@@ -153,7 +153,7 @@ export class AsyncJobManager {
 	readonly #pollEscalation = new Map<string | undefined, PollEscalationState>();
 	readonly #deliverySinks = new Map<string, AsyncJobDeliverySink>();
 	readonly #onJobComplete: AsyncJobManagerOptions["onJobComplete"];
-	readonly #maxRunningJobs: number;
+	#maxRunningJobs: number;
 	readonly #retentionMs: number;
 	#deliveryLoop: Promise<void> | undefined;
 	#deliveryQueueChanged = Promise.withResolvers<void>();
@@ -169,10 +169,19 @@ export class AsyncJobManager {
 		return out;
 	}
 
+	#clampMaxRunningJobs(value: number): number {
+		return Math.min(100, Math.max(1, Math.floor(value)));
+	}
+
 	constructor(options: AsyncJobManagerOptions) {
 		this.#onJobComplete = options.onJobComplete;
-		this.#maxRunningJobs = Math.max(1, Math.floor(options.maxRunningJobs ?? DEFAULT_MAX_RUNNING_JOBS));
+		this.#maxRunningJobs = this.#clampMaxRunningJobs(options.maxRunningJobs ?? DEFAULT_MAX_RUNNING_JOBS);
 		this.#retentionMs = Math.max(0, Math.floor(options.retentionMs ?? DEFAULT_RETENTION_MS));
+	}
+
+	/** Updates the live running-job cap; applies at the next capacity check. */
+	setMaxRunningJobs(value: number): void {
+		this.#maxRunningJobs = this.#clampMaxRunningJobs(value);
 	}
 
 	/** True when the running-job count has reached the configured cap. */

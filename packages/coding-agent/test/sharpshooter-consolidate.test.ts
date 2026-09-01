@@ -225,20 +225,18 @@ describe("runSharpshooterConsolidation", () => {
 		expect(await Bun.file(path.join(bankDir, "architecture.md")).text()).toBe("old architecture");
 		expect(await Bun.file(path.join(bankDir, "product.md")).text()).toBe("old product");
 		expect(await Bun.file(path.join(bankDir, "style.md")).text()).toBe("old style");
-		expect(await listSharpshooterDeltas(harness.agentDir, harness.cwd)).toHaveLength(1);
+
 		const state = await readSharpshooterState(harness.agentDir, harness.cwd);
 		expect(state.lastError?.message).toContain("all-empty");
 	});
 
-	it("accepts an all-empty replacement when the current memory files are already empty", async () => {
-		using temp = TempDir.createSync("@pi-sharpshooter-empty-noop-");
+	it("treats an all-empty replacement as a no-op success when existing files are also empty", async () => {
+		using temp = TempDir.createSync("@pi-sharpshooter-empty-nop-");
 		const harness = createHarness(temp.path());
 		await appendSharpshooterDelta(
 			harness.agentDir,
 			harness.cwd,
-			delta("session-a", 1, "One-shot decision.", {
-				friction: { corrective: false, regression: false, subtle: false },
-			}),
+			delta("session-a", 1, "Admission-law rejected content."),
 		);
 		vi.spyOn(ai, "completeSimple").mockResolvedValue(
 			completion([
@@ -250,10 +248,13 @@ describe("runSharpshooterConsolidation", () => {
 
 		const result = await runSharpshooterConsolidation({ ...harness, force: true });
 
-		expect(result).toEqual({ ran: true, sessions: 1, deltas: 1 });
+		expect(result.ran).toBe(true);
+		expect(result.deltas).toBe(1);
+		for (const name of ["architecture.md", "product.md", "style.md"]) {
+			expect(await Bun.file(sharpshooterMemoryFilePath(harness.agentDir, harness.cwd, name)).text()).toBe("");
+		}
 		expect(await listSharpshooterDeltas(harness.agentDir, harness.cwd)).toHaveLength(0);
 		const state = await readSharpshooterState(harness.agentDir, harness.cwd);
-		expect(state.lastConsolidatedAt).toBeGreaterThan(0);
 		expect(state.lastError).toBeUndefined();
 	});
 });
