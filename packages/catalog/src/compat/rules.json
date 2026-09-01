@@ -14,6 +14,7 @@
 		"classes/kimi.kdl",
 		"classes/meta.kdl",
 		"classes/mimo.kdl",
+		"classes/minicpm.kdl",
 		"classes/minimax.kdl",
 		"classes/mistral.kdl",
 		"classes/openai.kdl",
@@ -5701,6 +5702,16 @@
 						"low",
 						"medium",
 						"high"
+					]
+				}
+			},
+			{
+				"source": "classes/minicpm.kdl:3",
+				"class": "minicpm",
+				"catalog": {
+					"inputModalitiesFallback": [
+						"text",
+						"image"
 					]
 				}
 			},

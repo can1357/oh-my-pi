@@ -816,9 +816,6 @@ function getEuropeanGatewayKnownInput(model: ModelSpec<Api>): ("text" | "image")
 	if (reference?.input.includes("image")) {
 		return ["text", "image"];
 	}
-	if (classifyModel("", model.id, { lenient: true }).class === "minicpm") {
-		return ["text", "image"];
-	}
 	return undefined;
 }
 
