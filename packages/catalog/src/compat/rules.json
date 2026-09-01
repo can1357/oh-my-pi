@@ -9053,7 +9053,7 @@
 				}
 			},
 			{
-				"source": "providers/merge-gateway.kdl:5",
+				"source": "providers/merge-gateway.kdl:6",
 				"class": "deepseek",
 				"providers": [
 					"merge-gateway"
@@ -9068,7 +9068,8 @@
 					"merge-gateway"
 				],
 				"wire": {
-					"trustExplicitThinkingOnly": true
+					"trustExplicitThinkingOnly": true,
+					"requiresStructuredOutputHardening": true
 				}
 			},
 			{

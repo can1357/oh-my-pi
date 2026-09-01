@@ -31,6 +31,7 @@ import {
 	isCatalogDescriptor,
 } from "../src/provider-models/descriptor-types";
 import { PROVIDER_DESCRIPTORS } from "../src/provider-models/descriptors";
+import { linkOpenAIPromotionTargets } from "../src/context-promotion";
 import { filterModelsDevCatalogRows } from "../src/provider-models/models-dev-policies";
 import {
 	AIAND_STATIC_MODELS,
@@ -70,7 +71,6 @@ import {
 	applyOllamaCloudOutputCap,
 	CLOUDFLARE_FALLBACK_MODEL,
 	hasBillableCost,
-	linkOpenAIPromotionTargets,
 } from "./generated-policies";
 
 const packageRoot = path.join(import.meta.dir, "..");
@@ -97,16 +97,16 @@ const REQUESTED_PROVIDER = requestedProvider();
 const DISCOVERY_ONLY_PROVIDERS = new Set(["ollama", "vllm", "lm-studio", "litellm"]);
 /**
  * Credential-scoped catalogs (Devin's Cascade roster is gated per account/team
- * via `allowed_model_uids`). Fetching them during generation would bake one
- * private account's entitlements into the shared bundle, and those rows then
- * survive forever as previous-snapshot zombies: a later regen without that
- * credential can never mark the provider authoritative to prune them. These
- * providers are never fetched at generation time and their previous-snapshot
- * rows are dropped — the curated static seed is the only bundled surface, and
- * runtime discovery is authoritative per credential (mirrors the GitLab Duo
- * fallback-only policy below).
+ * via `allowed_model_uids`; Merge exposes an account-specific route roster).
+ * Fetching them during generation would bake one private account's entitlements
+ * into the shared bundle, and those rows then survive forever as
+ * previous-snapshot zombies: a later regen without that credential can never
+ * mark the provider authoritative to prune them. These providers are never
+ * fetched at generation time and their previous-snapshot rows are dropped —
+ * curated static seeds remain bundled, while runtime discovery is authoritative
+ * per credential.
  */
-const CREDENTIAL_SCOPED_PROVIDERS = new Set(["devin"]);
+const CREDENTIAL_SCOPED_PROVIDERS = new Set(["devin", "merge-gateway"]);
 
 /**
  * Restores unfetched rows from a previous generated catalog while pruning

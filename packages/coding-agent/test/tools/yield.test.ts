@@ -1246,6 +1246,35 @@ describe("YieldTool", () => {
 		expect(lockdowns).toBe(1);
 	});
 
+	it("retries correction lockdown when installation fails", async () => {
+		const outputSchema = {
+			type: "object",
+			properties: { token: { type: "string", minLength: 3 } },
+			required: ["token"],
+		};
+		let lockdowns = 0;
+		const tool = new YieldTool(
+			createSession({
+				outputSchema,
+				onOutputSchemaValidationFailure: () => {
+					lockdowns++;
+					if (lockdowns === 1) throw new Error("lock installation failed");
+				},
+			}),
+		);
+
+		await expect(tool.execute("invalid-lock-1", { result: { data: { token: "x" } } } as never)).rejects.toThrow(
+			"lock installation failed",
+		);
+		await expect(tool.execute("invalid-lock-2", { result: { data: { token: "x" } } } as never)).rejects.toThrow(
+			"Output does not match schema",
+		);
+		await expect(tool.execute("invalid-lock-3", { result: { data: { token: "x" } } } as never)).rejects.toThrow(
+			"Output does not match schema",
+		);
+		expect(lockdowns).toBe(2);
+	});
+
 	it("keeps schema degradation counter at zero when submissions are valid", async () => {
 		const outputSchema = {
 			type: "object",

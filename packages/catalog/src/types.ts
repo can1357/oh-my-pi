@@ -219,6 +219,8 @@ export interface OpenAICompat {
 	 * surface from model identity or provider defaults.
 	 */
 	trustExplicitThinkingOnly?: boolean;
+	/** Require fail-closed structured-output correction when this model may serve a schema-bearing agent. */
+	requiresStructuredOutputHardening?: boolean;
 	/** Whether the provider supports `stream_options: { include_usage: true }` for token usage in streaming responses. Default: true. */
 	supportsUsageInStreaming?: boolean;
 	/** Which field to use for max tokens. Default: auto-detected from URL. */
@@ -696,6 +698,8 @@ export interface ResolvedOpenAISharedCompat {
 	requiresAssistantContentForToolCalls: boolean;
 	stripDeepseekSpecialTokens: boolean;
 	streamMarkupHealingPattern?: OpenAIStreamMarkupHealingPattern;
+	/** Require fail-closed structured-output correction when this model may serve a schema-bearing agent. */
+	requiresStructuredOutputHardening?: boolean;
 	/** See {@link OpenAICompat.streamFirstEventTimeoutMs}. */
 	streamFirstEventTimeoutMs?: number;
 	reasoningDeltasMayBeCumulative: boolean;
@@ -743,6 +747,7 @@ export type ResolvedOpenAICompat = ResolvedOpenAISharedCompat &
 			| "supportsReasoningEffort"
 			| "reasoningEffortMap"
 			| "trustExplicitThinkingOnly"
+			| "requiresStructuredOutputHardening"
 			| "supportsReasoningParams"
 			| "supportsReasoningSummary"
 			| "supportsSamplingParams"
@@ -800,6 +805,7 @@ export type ResolvedOpenAICompat = ResolvedOpenAISharedCompat &
 		>
 	> & {
 		trustExplicitThinkingOnly?: boolean;
+		requiresStructuredOutputHardening?: boolean;
 		vercelGatewayRouting?: OpenAICompat["vercelGatewayRouting"];
 		extraBody?: OpenAICompat["extraBody"];
 		cacheControlFormat?: OpenAICompat["cacheControlFormat"];

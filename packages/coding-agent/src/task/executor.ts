@@ -101,15 +101,14 @@ export interface StructuredOutputHarnessPolicy {
 	mode: StructuredSubagentSchemaMode | undefined;
 	failureToolNames: readonly string[] | undefined;
 }
-
-/** Merge schema-bearing agents fail closed and become yield-only after the first invalid result. */
+/** Schema-bearing agents with a resolved hardening policy fail closed after the first invalid result. */
 export function resolveStructuredOutputHarnessPolicy(
-	provider: string | undefined,
+	requiresStructuredOutputHardening: boolean,
 	outputSchema: unknown,
 	requestedMode: StructuredSubagentSchemaMode | undefined,
 ): StructuredOutputHarnessPolicy {
 	const { normalized } = normalizeSchema(outputSchema);
-	if (provider !== "merge-gateway" || normalized === undefined) {
+	if (!requiresStructuredOutputHardening || normalized === undefined) {
 		return { mode: requestedMode, failureToolNames: undefined };
 	}
 	return { mode: "strict", failureToolNames: ["yield"] };
@@ -189,15 +188,25 @@ function normalizeModelPatterns(value: string | string[] | undefined): string[] 
 		.map(entry => entry.trim())
 		.filter(Boolean);
 }
-export function mergeMayServeSubagent(args: {
-	actualProvider: string | undefined;
-	fallbackMayReachMerge: boolean;
-	prewalkMayServeMerge: boolean;
-	authFallbackUsed: boolean;
+export function modelRequiresStructuredOutputHardening(model: Model<Api> | undefined): boolean {
+	const compat = model?.compat;
+	return (
+		compat !== undefined &&
+		"requiresStructuredOutputHardening" in compat &&
+		compat.requiresStructuredOutputHardening === true
+	);
+}
+
+export function structuredOutputHardeningMayApply(args: {
+	actualModel: Model<Api> | undefined;
+	fallbackMayRequireHardening: boolean;
+	prewalkMayRequireHardening: boolean;
 }): boolean {
-	if (args.actualProvider === "merge-gateway" || args.prewalkMayServeMerge) return true;
-	if (args.authFallbackUsed) return false;
-	return args.fallbackMayReachMerge;
+	return (
+		modelRequiresStructuredOutputHardening(args.actualModel) ||
+		args.fallbackMayRequireHardening ||
+		args.prewalkMayRequireHardening
+	);
 }
 
 const SUBAGENT_RETRY_FALLBACK_ROLE_PREFIX = "subagent:";
@@ -318,15 +327,15 @@ function installSubagentRetryFallbackChain(args: {
 	settings.override("retry.fallbackChains", fallbackChains);
 	return role;
 }
-export async function retryFallbackMayReachProvider(args: {
+export async function retryFallbackMayRequireStructuredOutputHardening(args: {
 	settings: Settings;
 	modelRegistry: ModelRegistry;
 	initialSelector: string | undefined;
 	roleHint: string | undefined;
-	targetProvider: string;
 }): Promise<boolean> {
-	const { settings, modelRegistry, initialSelector, roleHint, targetProvider } = args;
-	if (!initialSelector) return false;
+	const { settings, modelRegistry, initialSelector, roleHint } = args;
+	if (!initialSelector || !settings.get("retry.modelFallback")) return false;
+	const disabledProviders = new Set(settings.get("disabledProviders"));
 	const chains = getRetryFallbackChains(settings);
 	if (
 		typeof modelRegistry.find !== "function" ||
@@ -349,7 +358,14 @@ export async function retryFallbackMayReachProvider(args: {
 		seen.add(visitKey);
 		const parsed = parseRetryFallbackSelector(current.selector, modelRegistry);
 		const currentModel = parsed ? modelRegistry.find(parsed.provider, parsed.id) : undefined;
-		if (currentModel?.provider === targetProvider && (await modelRegistry.getApiKey(currentModel))) return true;
+		if (currentModel && disabledProviders.has(currentModel.provider)) continue;
+		if (
+			currentModel &&
+			modelRequiresStructuredOutputHardening(currentModel) &&
+			(await modelRegistry.getApiKey(currentModel))
+		) {
+			return true;
+		}
 		const chainKey = resolveRetryFallbackChainKey(context, current.selector, currentModel, current.roleHint);
 		const candidates = chainKey
 			? findRetryFallbackCandidates(context, chainKey, current.selector, currentModel, {
@@ -3141,36 +3157,6 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				prewalkThinkingLevel = resolvedPrewalk.thinkingLevel;
 				prewalkWarning = resolvedPrewalk.warning;
 			}
-			const prewalkMayServeMerge =
-				prewalkTarget !== undefined &&
-				modelRegistry.hasConfiguredAuth(prewalkTarget) &&
-				(prewalkTarget.provider === "merge-gateway" ||
-					(await retryFallbackMayReachProvider({
-						settings: subagentSettings,
-						modelRegistry,
-						initialSelector: formatModelStringWithRouting(prewalkTarget),
-						roleHint: prewalkPattern ? resolveExplicitModelRole([prewalkPattern], subagentSettings) : undefined,
-						targetProvider: "merge-gateway",
-					})));
-			const mergeMayServe = mergeMayServeSubagent({
-				actualProvider: model?.provider,
-				fallbackMayReachMerge: await retryFallbackMayReachProvider({
-					settings: subagentSettings,
-					modelRegistry,
-					initialSelector: initialFallbackSelector,
-					roleHint: retryFallbackRole ?? modelRole,
-					targetProvider: "merge-gateway",
-				}),
-				prewalkMayServeMerge,
-				authFallbackUsed,
-			});
-			const structuredOutputPolicy = resolveStructuredOutputHarnessPolicy(
-				mergeMayServe ? "merge-gateway" : model?.provider,
-				outputSchema,
-				options.outputSchemaMode,
-			);
-			effectiveOutputSchemaMode = structuredOutputPolicy.mode;
-			outputSchemaFailureToolNames = structuredOutputPolicy.failureToolNames;
 			if (model?.contextWindow && model.contextWindow > 0) {
 				progress.contextWindow = model.contextWindow;
 			}
@@ -3234,6 +3220,35 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					prewalk = { target: prewalkTarget, thinkingLevel: prewalkThinkingLevel };
 				}
 			}
+			const prewalkMayRequireHardening =
+				prewalk !== undefined &&
+				(modelRequiresStructuredOutputHardening(prewalk.target) ||
+					(await retryFallbackMayRequireStructuredOutputHardening({
+						settings: subagentSettings,
+						modelRegistry,
+						initialSelector: formatModelStringWithRouting(prewalk.target),
+						roleHint: prewalkPattern ? resolveExplicitModelRole([prewalkPattern], subagentSettings) : undefined,
+					})));
+			const fallbackInitialSelector =
+				authFallbackUsed && model ? formatModelStringWithRouting(model) : initialFallbackSelector;
+			const fallbackRoleHint = authFallbackUsed ? undefined : (retryFallbackRole ?? modelRole);
+			const requiresStructuredOutputHardening = structuredOutputHardeningMayApply({
+				actualModel: model,
+				fallbackMayRequireHardening: await retryFallbackMayRequireStructuredOutputHardening({
+					settings: subagentSettings,
+					modelRegistry,
+					initialSelector: fallbackInitialSelector,
+					roleHint: fallbackRoleHint,
+				}),
+				prewalkMayRequireHardening,
+			});
+			const structuredOutputPolicy = resolveStructuredOutputHarnessPolicy(
+				requiresStructuredOutputHardening,
+				outputSchema,
+				options.outputSchemaMode,
+			);
+			effectiveOutputSchemaMode = structuredOutputPolicy.mode;
+			outputSchemaFailureToolNames = structuredOutputPolicy.failureToolNames;
 
 			const restrictToolNames = options.restrictToolNames === true;
 			const enableMCP = !restrictToolNames && (options.enableMCP ?? true);

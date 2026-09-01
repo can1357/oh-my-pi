@@ -31,6 +31,20 @@ const AGENT: AgentDefinition = {
 	output: { type: "object", properties: { agent: { type: "boolean" } } },
 };
 
+type FallbackTestModel = {
+	provider: string;
+	id: string;
+	compat: { requiresStructuredOutputHardening?: boolean };
+};
+
+function fallbackTestModel(provider: string, id: string, requiresHardening = false): FallbackTestModel {
+	return {
+		provider,
+		id,
+		compat: requiresHardening ? { requiresStructuredOutputHardening: true } : {},
+	};
+}
+
 function session(
 	options: {
 		planMode?: boolean;
@@ -122,20 +136,20 @@ describe("structured subagent primitive", () => {
 		expect(inherited.schema).toMatchObject({ source: "session", mode: "strict", outputSchemaOverridesAgent: false });
 	});
 
-	it("applies fail-closed yield-only correction only to schema-bearing Merge runs", () => {
-		expect(executorModule.resolveStructuredOutputHarnessPolicy("merge-gateway", true, "permissive")).toEqual({
+	it("applies fail-closed yield-only correction only when resolved policy requires it", () => {
+		expect(executorModule.resolveStructuredOutputHarnessPolicy(true, true, "permissive")).toEqual({
 			mode: "strict",
 			failureToolNames: ["yield"],
 		});
-		expect(executorModule.resolveStructuredOutputHarnessPolicy("openrouter", true, "permissive")).toEqual({
+		expect(executorModule.resolveStructuredOutputHarnessPolicy(false, true, "permissive")).toEqual({
 			mode: "permissive",
 			failureToolNames: undefined,
 		});
-		expect(executorModule.resolveStructuredOutputHarnessPolicy("merge-gateway", undefined, undefined)).toEqual({
+		expect(executorModule.resolveStructuredOutputHarnessPolicy(true, undefined, undefined)).toEqual({
 			mode: undefined,
 			failureToolNames: undefined,
 		});
-		expect(executorModule.resolveStructuredOutputHarnessPolicy("merge-gateway", null, "permissive")).toEqual({
+		expect(executorModule.resolveStructuredOutputHarnessPolicy(true, null, "permissive")).toEqual({
 			mode: "permissive",
 			failureToolNames: undefined,
 		});
@@ -147,36 +161,26 @@ describe("structured subagent primitive", () => {
 		).toBe(true);
 		expect(executorModule.isOutputSchemaCorrectionLock({ type: "session_init" })).toBe(false);
 		expect(
-			executorModule.mergeMayServeSubagent({
-				actualProvider: "anthropic",
-				fallbackMayReachMerge: true,
-				prewalkMayServeMerge: false,
-				authFallbackUsed: true,
-			}),
-		).toBe(false);
-		expect(
-			executorModule.mergeMayServeSubagent({
-				actualProvider: "merge-gateway",
-				fallbackMayReachMerge: false,
-				prewalkMayServeMerge: false,
-				authFallbackUsed: true,
+			executorModule.structuredOutputHardeningMayApply({
+				actualModel: undefined,
+				fallbackMayRequireHardening: true,
+				prewalkMayRequireHardening: false,
 			}),
 		).toBe(true);
 		expect(
-			executorModule.mergeMayServeSubagent({
-				actualProvider: "anthropic",
-				fallbackMayReachMerge: false,
-				prewalkMayServeMerge: true,
-				authFallbackUsed: true,
+			executorModule.structuredOutputHardeningMayApply({
+				actualModel: undefined,
+				fallbackMayRequireHardening: false,
+				prewalkMayRequireHardening: true,
 			}),
 		).toBe(true);
 	});
 
-	it("finds Merge through nested exact-model fallback chains", async () => {
-		const models: Record<string, { provider: string; id: string }> = {
-			"anthropic/a": { provider: "anthropic", id: "a" },
-			"openrouter/b": { provider: "openrouter", id: "b" },
-			"merge-gateway/c": { provider: "merge-gateway", id: "c" },
+	it("finds structured-output hardening through nested exact-model fallback chains", async () => {
+		const models: Record<string, FallbackTestModel> = {
+			"anthropic/a": fallbackTestModel("anthropic", "a"),
+			"openrouter/b": fallbackTestModel("openrouter", "b"),
+			"merge-gateway/c": fallbackTestModel("merge-gateway", "c", true),
 		};
 		const modelRegistry = {
 			find: (provider: string, id: string) => models[`${provider}/${id}`],
@@ -190,53 +194,102 @@ describe("structured subagent primitive", () => {
 			},
 		});
 		expect(
-			await executorModule.retryFallbackMayReachProvider({
+			await executorModule.retryFallbackMayRequireStructuredOutputHardening({
 				settings,
 				modelRegistry,
 				initialSelector: "anthropic/a",
 				roleHint: undefined,
-				targetProvider: "merge-gateway",
 			}),
 		).toBe(true);
 	});
 
-	it("does not harden an authenticated non-Merge primary when its Merge fallback lacks credentials", async () => {
-		const models: Record<string, { provider: string; id: string }> = {
-			"openai/a": { provider: "openai", id: "a" },
-			"merge-gateway/c": { provider: "merge-gateway", id: "c" },
+	it("ignores configured fallback chains when runtime model fallback is disabled", async () => {
+		const models: Record<string, FallbackTestModel> = {
+			"openai/a": fallbackTestModel("openai", "a"),
+			"merge-gateway/c": fallbackTestModel("merge-gateway", "c", true),
 		};
 		const modelRegistry = {
 			find: (provider: string, id: string) => models[`${provider}/${id}`],
 			hasProvider: (provider: string) => Object.values(models).some(model => model.provider === provider),
-			getApiKey: async (model: { provider: string }) => (model.provider === "openai" ? "openai-key" : undefined),
+			getApiKey: async () => "merge-key",
+		} as unknown as ModelRegistry;
+		const settings = Settings.isolated({
+			"retry.modelFallback": false,
+			"retry.fallbackChains": {
+				"openai/a": ["merge-gateway/c"],
+			},
+		});
+		expect(
+			await executorModule.retryFallbackMayRequireStructuredOutputHardening({
+				settings,
+				modelRegistry,
+				initialSelector: "openai/a",
+				roleHint: undefined,
+			}),
+		).toBe(false);
+	});
+
+	it("ignores authenticated hardening fallbacks from disabled providers", async () => {
+		const models: Record<string, FallbackTestModel> = {
+			"openai/a": fallbackTestModel("openai", "a"),
+			"merge-gateway/c": fallbackTestModel("merge-gateway", "c", true),
+		};
+		const modelRegistry = {
+			find: (provider: string, id: string) => models[`${provider}/${id}`],
+			hasProvider: (provider: string) => Object.values(models).some(model => model.provider === provider),
+			getApiKey: async () => "merge-key",
+		} as unknown as ModelRegistry;
+		const settings = Settings.isolated({
+			disabledProviders: ["merge-gateway"],
+			"retry.fallbackChains": {
+				"openai/a": ["merge-gateway/c"],
+			},
+		});
+		expect(
+			await executorModule.retryFallbackMayRequireStructuredOutputHardening({
+				settings,
+				modelRegistry,
+				initialSelector: "openai/a",
+				roleHint: undefined,
+			}),
+		).toBe(false);
+	});
+
+	it("does not harden an authenticated primary when its hardening fallback lacks credentials", async () => {
+		const models: Record<string, FallbackTestModel> = {
+			"openai/a": fallbackTestModel("openai", "a"),
+			"merge-gateway/c": fallbackTestModel("merge-gateway", "c", true),
+		};
+		const modelRegistry = {
+			find: (provider: string, id: string) => models[`${provider}/${id}`],
+			hasProvider: (provider: string) => Object.values(models).some(model => model.provider === provider),
+			getApiKey: async (model: FallbackTestModel) => (model.provider === "openai" ? "openai-key" : undefined),
 		} as unknown as ModelRegistry;
 		const settings = Settings.isolated({
 			"retry.fallbackChains": {
 				"openai/a": ["merge-gateway/c"],
 			},
 		});
-		const fallbackMayReachMerge = await executorModule.retryFallbackMayReachProvider({
+		const fallbackMayRequireHardening = await executorModule.retryFallbackMayRequireStructuredOutputHardening({
 			settings,
 			modelRegistry,
 			initialSelector: "openai/a",
 			roleHint: undefined,
-			targetProvider: "merge-gateway",
 		});
-		expect(fallbackMayReachMerge).toBe(false);
+		expect(fallbackMayRequireHardening).toBe(false);
 		expect(
-			executorModule.mergeMayServeSubagent({
-				actualProvider: "openai",
-				fallbackMayReachMerge,
-				prewalkMayServeMerge: false,
-				authFallbackUsed: false,
+			executorModule.structuredOutputHardeningMayApply({
+				actualModel: undefined,
+				fallbackMayRequireHardening,
+				prewalkMayRequireHardening: false,
 			}),
 		).toBe(false);
 	});
 
-	it("hardens a non-Merge prewalk target whose runtime fallback reaches Merge", async () => {
-		const models: Record<string, { provider: string; id: string }> = {
-			"openrouter/b": { provider: "openrouter", id: "b" },
-			"merge-gateway/c": { provider: "merge-gateway", id: "c" },
+	it("hardens an armed prewalk target whose runtime fallback requires it", async () => {
+		const models: Record<string, FallbackTestModel> = {
+			"openrouter/b": fallbackTestModel("openrouter", "b"),
+			"merge-gateway/c": fallbackTestModel("merge-gateway", "c", true),
 		};
 		const modelRegistry = {
 			find: (provider: string, id: string) => models[`${provider}/${id}`],
@@ -248,29 +301,27 @@ describe("structured subagent primitive", () => {
 				"openrouter/b": ["merge-gateway/c"],
 			},
 		});
-		const prewalkMayServeMerge = await executorModule.retryFallbackMayReachProvider({
+		const prewalkMayRequireHardening = await executorModule.retryFallbackMayRequireStructuredOutputHardening({
 			settings,
 			modelRegistry,
 			initialSelector: "openrouter/b",
 			roleHint: undefined,
-			targetProvider: "merge-gateway",
 		});
-		expect(prewalkMayServeMerge).toBe(true);
+		expect(prewalkMayRequireHardening).toBe(true);
 		expect(
-			executorModule.mergeMayServeSubagent({
-				actualProvider: "anthropic",
-				fallbackMayReachMerge: false,
-				prewalkMayServeMerge,
-				authFallbackUsed: true,
+			executorModule.structuredOutputHardeningMayApply({
+				actualModel: undefined,
+				fallbackMayRequireHardening: false,
+				prewalkMayRequireHardening,
 			}),
 		).toBe(true);
 	});
 
 	it("expands provider wildcards before following nested model-key chains", async () => {
-		const models: Record<string, { provider: string; id: string }> = {
-			"anthropic/a": { provider: "anthropic", id: "a" },
-			"openrouter/a": { provider: "openrouter", id: "a" },
-			"merge-gateway/a": { provider: "merge-gateway", id: "a" },
+		const models: Record<string, FallbackTestModel> = {
+			"anthropic/a": fallbackTestModel("anthropic", "a"),
+			"openrouter/a": fallbackTestModel("openrouter", "a"),
+			"merge-gateway/a": fallbackTestModel("merge-gateway", "a", true),
 		};
 		const modelRegistry = {
 			find: (provider: string, id: string) => models[`${provider}/${id}`],
@@ -284,12 +335,11 @@ describe("structured subagent primitive", () => {
 			},
 		});
 		expect(
-			await executorModule.retryFallbackMayReachProvider({
+			await executorModule.retryFallbackMayRequireStructuredOutputHardening({
 				settings,
 				modelRegistry,
 				initialSelector: "anthropic/a",
 				roleHint: undefined,
-				targetProvider: "merge-gateway",
 			}),
 		).toBe(true);
 	});
@@ -302,12 +352,11 @@ describe("structured subagent primitive", () => {
 			} as never,
 		});
 		expect(
-			await executorModule.retryFallbackMayReachProvider({
+			await executorModule.retryFallbackMayRequireStructuredOutputHardening({
 				settings,
 				modelRegistry: {} as ModelRegistry,
 				initialSelector: "anthropic/a",
 				roleHint: undefined,
-				targetProvider: "merge-gateway",
 			}),
 		).toBe(false);
 	});

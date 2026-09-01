@@ -2,6 +2,7 @@
 
 provider "merge-gateway" {
 	trust-explicit-thinking-only #true
+	requires-structured-output-hardening #true
 	class "deepseek" {
 		stream-markup-healing-pattern "dsml"
 	}

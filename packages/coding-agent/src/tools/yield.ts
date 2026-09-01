@@ -277,6 +277,7 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 	#isKnownSection?: (label: string) => boolean;
 	#schemaValidationFailures = 0;
 	#schemaCorrectionLocked = false;
+	#schemaCorrectionPromise: Promise<void> | undefined;
 	#emptyResultFailures = 0;
 	#hasIncrementalSections = false;
 
@@ -514,8 +515,20 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 
 	async #notifySchemaValidationFailure(): Promise<void> {
 		if (this.#schemaCorrectionLocked) return;
-		this.#schemaCorrectionLocked = true;
-		await this.#session.onOutputSchemaValidationFailure?.();
+		if (this.#schemaCorrectionPromise) {
+			await this.#schemaCorrectionPromise;
+			return;
+		}
+		const correction = Promise.resolve().then(async () => {
+			await this.#session.onOutputSchemaValidationFailure?.();
+			this.#schemaCorrectionLocked = true;
+		});
+		this.#schemaCorrectionPromise = correction;
+		try {
+			await correction;
+		} finally {
+			if (this.#schemaCorrectionPromise === correction) this.#schemaCorrectionPromise = undefined;
+		}
 	}
 
 	/**

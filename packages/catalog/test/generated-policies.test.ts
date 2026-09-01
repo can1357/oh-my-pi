@@ -5,8 +5,8 @@ import {
 	applyAntigravityPricingFallback,
 	applyGeneratedModelPolicies,
 	applyOllamaCloudOutputCap,
-	linkOpenAIPromotionTargets,
 } from "../scripts/generated-policies";
+import { linkOpenAIPromotionTargets } from "../src/context-promotion";
 import { buildModel } from "../src/build";
 
 function createSpec<TApi extends Api>(overrides: {

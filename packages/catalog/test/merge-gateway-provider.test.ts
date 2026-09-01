@@ -5,7 +5,6 @@ import * as path from "node:path";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { resolveProviderModels } from "@oh-my-pi/pi-catalog/model-manager";
-import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import {
 	fetchMergeGatewayModels,
 	isCredentialScopedModelCacheProvider,
@@ -58,7 +57,7 @@ function model(id: string, vendors: Record<string, unknown>): Record<string, unk
 }
 
 describe("Merge Gateway provider", () => {
-	test("registers an authoritative first-class provider", async () => {
+	test("registers an authoritative first-class provider", () => {
 		const descriptor = PROVIDER_DESCRIPTORS.find(item => item.providerId === "merge-gateway");
 		expect(descriptor).toMatchObject({
 			defaultModel: "openai/gpt-5.6-sol",
@@ -79,33 +78,15 @@ describe("Merge Gateway provider", () => {
 		expect(mergeGatewayModelManagerOptions({ apiKey: "account-a" }).cacheProviderId).not.toBe(
 			mergeGatewayModelManagerOptions({ apiKey: "account-b" }).cacheProviderId,
 		);
-		const bundled = getBundledModel("merge-gateway", "zai/glm-5.3-flash");
-		expect(bundled).toMatchObject({
-			name: "GLM-5.3 Flash",
-			input: ["text", "image"],
-			supportsTools: true,
-			declaredCapabilities: {
-				nativeToolCalling: true,
-				nativeToolChoice: false,
-				nativeStructuredOutputs: false,
-				streaming: true,
-				zeroDataRetention: false,
-			},
-			contextWindow: 1_000_000,
-			maxTokens: 131_000,
-			thinking: {
-				mode: "effort",
-				efforts: [Effort.Low, Effort.High, Effort.Max],
-				requiresEffort: true,
-				supportsDisplay: true,
-			},
-		});
+	});
+
+	test("links live OpenAI routes to their context-promotion sibling", async () => {
 		const dynamic = await mergeGatewayModelManagerOptions({
 			apiKey: "account-a",
 			fetch: async () =>
 				Response.json({
 					object: "list",
-					data: [model("openai/gpt-5.5", { openai: route() })],
+					data: [model("openai/gpt-5.5", { openai: route() }), model("openai/gpt-5.4", { openai: route() })],
 					has_more: false,
 					next_cursor: null,
 				}),
@@ -418,6 +399,7 @@ describe("Merge Gateway provider", () => {
 		const built = buildModel(mapped!);
 		expect(built.compat.streamMarkupHealingPattern).toBe("dsml");
 		expect(built.compat.trustExplicitThinkingOnly).toBe(true);
+		expect(built.compat.requiresStructuredOutputHardening).toBe(true);
 	});
 
 	test("paginates the native model envelope and preserves provider-prefixed IDs", async () => {
