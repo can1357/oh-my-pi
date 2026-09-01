@@ -1041,9 +1041,9 @@ describe("Agent hub row ordering", () => {
 
 		try {
 			hub.handleInput("t");
-			expect(Bun.stripANSI(renderedRosterHeaderLineRaw(hub, "First", 120))).toContain("├─ ⟳ First");
-			expect(Bun.stripANSI(renderedRosterHeaderLineRaw(hub, "Grandchild", 120))).toContain("│  └─ ⟳ Grandchild");
-			expect(Bun.stripANSI(renderedRosterHeaderLineRaw(hub, "Last", 120))).toContain("└─ ⟳ Last");
+			expect(Bun.stripANSI(renderedRosterHeaderLineRaw(hub, "First", 120))).toContain("├── ⟳ First");
+			expect(Bun.stripANSI(renderedRosterHeaderLineRaw(hub, "Grandchild", 120))).toContain("│   └── ⟳ Grandchild");
+			expect(Bun.stripANSI(renderedRosterHeaderLineRaw(hub, "Last", 120))).toContain("└── ⟳ Last");
 		} finally {
 			hub.dispose();
 		}
