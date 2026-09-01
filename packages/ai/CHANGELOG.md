@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Ollama Cloud monthly allowance and trailing spend reporting to `omp usage` through the new ollama.com usage API (requires an API-key credential; accounts without one keep the previous no-quota stub report).
+
 ## [18.1.2] - 2026-09-01
 
 ### Added
