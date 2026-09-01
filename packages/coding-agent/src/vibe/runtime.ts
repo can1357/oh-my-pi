@@ -1586,7 +1586,10 @@ export class VibeSessionRegistry {
  * — the same leaf calculator the main status line uses — so worker rates are
  * computed identically to the main session's rate.
  */
-export function aggregateVibeWorkerTokensPerSecond(ownerId: string): number | null {
+export function aggregateVibeWorkerTokensPerSecond(
+	ownerId: string,
+	options?: { excludeTtft?: boolean },
+): number | null {
 	const ids = VibeSessionRegistry.global().listIdsByOwner(ownerId);
 	if (ids.length === 0) return null;
 	let total = 0;
@@ -1595,7 +1598,14 @@ export function aggregateVibeWorkerTokensPerSecond(ownerId: string): number | nu
 	for (const id of ids) {
 		const workerSession = registry.get(id)?.session;
 		if (!workerSession?.isStreaming) continue;
-		const rate = calculateTokensPerSecond(workerSession.state.messages, true);
+		// Same gap as the main badge: the in-flight partial lives on
+		// `state.streamMessage` until `message_end` appends it to `messages`.
+		const partial = workerSession.state.streamMessage;
+		const messages =
+			partial && partial.role === "assistant"
+				? [...workerSession.state.messages, partial]
+				: workerSession.state.messages;
+		const rate = calculateTokensPerSecond(messages, true, undefined, options);
 		if (rate !== null) {
 			total += rate;
 			any = true;

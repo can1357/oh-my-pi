@@ -134,7 +134,10 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 		let latestStopReason = StopReason.UNSPECIFIED;
 
 		const markFirstToken = () => {
-			if (firstTokenTime === undefined) firstTokenTime = performance.now();
+			if (firstTokenTime === undefined) {
+				firstTokenTime = performance.now();
+				output.ttft = firstTokenTime - startTime;
+			}
 		};
 
 		const endTextBlock = () => {

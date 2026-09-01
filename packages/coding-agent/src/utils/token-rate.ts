@@ -14,6 +14,7 @@ type AssistantLikeMessage = {
 	role: "assistant";
 	timestamp: number;
 	duration?: number;
+	ttft?: number;
 	usage: AssistantUsage;
 };
 
@@ -21,9 +22,21 @@ type MaybeAssistantMessage = {
 	role?: string;
 	timestamp?: number;
 	duration?: number;
+	ttft?: number;
 	usage?: {
 		output?: number;
 	};
+};
+
+export type CalculateTokensPerSecondOptions = {
+	/**
+	 * Exclude time-to-first-token from the denominator so the rate reflects
+	 * generation-only throughput (the initial latency before the first token
+	 * is not counted). Falls back to the full duration when the message has
+	 * no usable TTFT or the subtraction would leave less than
+	 * {@link MIN_DURATION_MS}.
+	 */
+	excludeTtft?: boolean;
 };
 
 function isAssistantMessage(message: MaybeAssistantMessage | undefined): message is AssistantLikeMessage {
@@ -49,6 +62,7 @@ export function calculateTokensPerSecond(
 	messages: ReadonlyArray<MaybeAssistantMessage>,
 	isStreaming: boolean,
 	nowMs: number = Date.now(),
+	options?: CalculateTokensPerSecondOptions,
 ): number | null {
 	const assistant = getLastAssistantMessage(messages);
 	if (!assistant) return null;
@@ -65,7 +79,20 @@ export function calculateTokensPerSecond(
 
 	if (resolvedDurationMs === null || resolvedDurationMs < MIN_DURATION_MS) return null;
 
-	const tokensPerSecond = (outputTokens * 1000) / resolvedDurationMs;
+	let denominatorMs = resolvedDurationMs;
+	if (options?.excludeTtft) {
+		const ttftMs = assistant.ttft;
+		if (typeof ttftMs === "number" && Number.isFinite(ttftMs) && ttftMs > 0) {
+			const generationMs = resolvedDurationMs - ttftMs;
+			// Only honor TTFT when it leaves a measurable generation window;
+			// otherwise keep the full duration so the rate stays sane.
+			if (generationMs >= MIN_DURATION_MS) {
+				denominatorMs = generationMs;
+			}
+		}
+	}
+
+	const tokensPerSecond = (outputTokens * 1000) / denominatorMs;
 	if (!Number.isFinite(tokensPerSecond) || tokensPerSecond <= 0) return null;
 
 	return tokensPerSecond;

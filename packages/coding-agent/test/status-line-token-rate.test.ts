@@ -1,6 +1,8 @@
-import { beforeAll, describe, expect, it } from "bun:test";
+import { afterEach, beforeAll, describe, expect, it } from "bun:test";
 import { stripVTControlCharacters } from "node:util";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
+import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { StatusLineComponent } from "@oh-my-pi/pi-coding-agent/modes/components/status-line/component";
 import { renderSegment } from "@oh-my-pi/pi-coding-agent/modes/components/status-line/segments";
 import type { SegmentContext } from "@oh-my-pi/pi-coding-agent/modes/components/status-line/types";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
@@ -99,5 +101,120 @@ describe("token rate calculation", () => {
 			false,
 		);
 		expect(rate).toBeNull();
+	});
+
+	it("excludes ttft from the denominator when excludeTtft is set", () => {
+		const base = assistantMessage();
+		const rate = calculateTokensPerSecond(
+			[assistantMessage({ usage: { ...base.usage, output: 120 }, duration: 2_000, ttft: 1_500 })],
+			false,
+			undefined,
+			{ excludeTtft: true },
+		);
+		expect(rate).toBe(240);
+	});
+
+	it("keeps the full duration as the denominator by default", () => {
+		const base = assistantMessage();
+		const rate = calculateTokensPerSecond(
+			[assistantMessage({ usage: { ...base.usage, output: 120 }, duration: 2_000, ttft: 1_500 })],
+			false,
+		);
+		expect(rate).toBe(60);
+	});
+
+	it("falls back to the full duration when ttft leaves no measurable generation window", () => {
+		const base = assistantMessage();
+		const rate = calculateTokensPerSecond(
+			[assistantMessage({ usage: { ...base.usage, output: 120 }, duration: 2_000, ttft: 1_995 })],
+			false,
+			undefined,
+			{ excludeTtft: true },
+		);
+		expect(rate).toBe(60);
+	});
+
+	it("ignores negative and non-finite ttft values", () => {
+		const base = assistantMessage();
+		for (const ttft of [-5, Number.NaN, Number.POSITIVE_INFINITY]) {
+			const rate = calculateTokensPerSecond(
+				[assistantMessage({ usage: { ...base.usage, output: 120 }, duration: 2_000, ttft })],
+				false,
+				undefined,
+				{ excludeTtft: true },
+			);
+			expect(rate).toBe(60);
+		}
+	});
+
+	it("excludes ttft from the streaming window (no duration, nowMs - timestamp)", () => {
+		const base = assistantMessage();
+		// timestamp=1000, ttft=1500, nowMs=4500: streaming duration is 3500ms,
+		// generation window 3500 - 1500 = 2000ms → 120 tokens / 2s = 60 tok/s.
+		// Without exclusion the streaming rate would be ~34.3 tok/s.
+		const rate = calculateTokensPerSecond(
+			[assistantMessage({ usage: { ...base.usage, output: 120 }, timestamp: 1_000, ttft: 1_500 })],
+			true,
+			4_500,
+			{ excludeTtft: true },
+		);
+		expect(rate).toBe(60);
+	});
+
+	it("falls back to the streaming duration when ttft leaves no measurable window mid-stream", () => {
+		const base = assistantMessage();
+		// timestamp=1000, ttft=3410, nowMs=4500: generation window would be
+		// 90ms < MIN_DURATION_MS (100) → full 3500ms streaming duration applies.
+		const rate = calculateTokensPerSecond(
+			[assistantMessage({ usage: { ...base.usage, output: 350 }, timestamp: 1_000, ttft: 3_410 })],
+			true,
+			4_500,
+			{ excludeTtft: true },
+		);
+		expect(rate).toBe(100);
+	});
+});
+
+describe("token rate runtime toggle", () => {
+	afterEach(() => {
+		resetSettingsForTest();
+	});
+
+	it("updateSettings on a live component flips the rate policy without reconstruction", async () => {
+		await Settings.init({ inMemory: true });
+		const assistant = assistantMessage({
+			usage: { ...assistantMessage().usage, output: 120 },
+			timestamp: 1_000,
+			duration: 2_000,
+			ttft: 1_500,
+		} as Partial<AssistantMessage>);
+		const session = {
+			state: { messages: [], streamMessage: assistant },
+			isStreaming: true,
+			settings: { get: () => false },
+			sessionManager: { getSessionName: () => undefined },
+			modelRegistry: { isUsingOAuth: () => false },
+			getContextUsage: () => undefined,
+		} as unknown as ConstructorParameters<typeof StatusLineComponent>[0];
+		const component = new StatusLineComponent(session);
+
+		// Default: full-duration denominator → 120 tokens / 2000ms = 60 tok/s.
+		component.updateSettings({ preset: "custom", leftSegments: [], rightSegments: [], separator: "none" });
+		expect(component.getEffectiveSettingsForTest().tokenRateExcludesTtft ?? false).toBe(false);
+
+		// Runtime toggle on the already-running component.
+		component.updateSettings({
+			preset: "custom",
+			leftSegments: [],
+			rightSegments: [],
+			separator: "none",
+			tokenRateExcludesTtft: true,
+		});
+		expect(component.getEffectiveSettingsForTest().tokenRateExcludesTtft).toBe(true);
+
+		// A later sync that omits the field (as #syncStatusLineSettings sends a
+		// full payload read from the store) resolves through the store default.
+		component.updateSettings({ preset: "custom", leftSegments: [], rightSegments: [], separator: "none" });
+		expect(component.getEffectiveSettingsForTest().tokenRateExcludesTtft ?? false).toBe(false);
 	});
 });

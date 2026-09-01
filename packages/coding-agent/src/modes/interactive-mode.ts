@@ -999,7 +999,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		// workers stream, so without this the tok/s badge would show a stale
 		// value while parallel work is actively generating tokens.
 		this.statusLine.setVibeWorkerTokenRateProvider(() =>
-			aggregateVibeWorkerTokensPerSecond(this.session.getAgentId() ?? MAIN_AGENT_ID),
+			aggregateVibeWorkerTokensPerSecond(this.session.getAgentId() ?? MAIN_AGENT_ID, {
+				excludeTtft: settings.get("statusLine.tokenRateExcludesTtft") ?? false,
+			}),
 		);
 
 		this.hideToolActivity = settings.get("display.hideToolActivity");
@@ -2131,6 +2133,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			transparent: settings.get("statusLine.transparent"),
 			segmentOptions: settings.get("statusLine.segmentOptions"),
 			compactThinkingLevel: settings.get("statusLine.compactThinkingLevel"),
+			tokenRateExcludesTtft: settings.get("statusLine.tokenRateExcludesTtft"),
 			contextLine: settings.get("statusLine.contextLine"),
 		});
 	}

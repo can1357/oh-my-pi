@@ -93,4 +93,26 @@ describe("aggregateVibeWorkerTokensPerSecond", () => {
 	it("returns null for the main-agent owner id when no workers are registered", () => {
 		expect(aggregateVibeWorkerTokensPerSecond(MAIN_AGENT_ID)).toBeNull();
 	});
+
+	it("excludeTtft divides by generation time only when workers carry ttft", () => {
+		// 100 output tokens, 2000ms full duration, 1500ms TTFT → generation
+		// window 500ms → 200 tok/s per worker.
+		const withTtft = {
+			role: "assistant",
+			timestamp: 1000,
+			duration: 2000,
+			ttft: 1500,
+			usage: { output: 100 },
+		};
+		registerWorker("w1", fakeSession([withTtft], true));
+		registerWorker("w2", fakeSession([withTtft], true));
+		expect(aggregateVibeWorkerTokensPerSecond(OWNER, { excludeTtft: true })).toBe(400);
+		// Without the option, the same workers aggregate at full-duration rates.
+		expect(aggregateVibeWorkerTokensPerSecond(OWNER)).toBe(100);
+	});
+
+	it("excludeTtft falls back to full duration for workers without ttft", () => {
+		registerWorker("w1", fakeSession([assistantMessage(100, 1000)], true));
+		expect(aggregateVibeWorkerTokensPerSecond(OWNER, { excludeTtft: true })).toBe(100);
+	});
 });

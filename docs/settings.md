@@ -679,6 +679,7 @@ tui:
 | `statusLine.sessionAccent`  | boolean | `true`           | Tint the editor border with the session color.                            |
 | `statusLine.transparent`    | boolean | `false`          | Use the terminal background for the status line.                          |
 | `statusLine.showHookStatus` | boolean | `true`           | Show hook status messages.                                                |
+| `statusLine.tokenRateExcludesTtft` | boolean | `false`    | Compute the `token_rate` segment from generation time only (request duration minus time-to-first-token), so long-prefill requests no longer depress the displayed tok/s. |
 | `terminal.showImages`       | boolean | `true`           | Render images inline (when the terminal supports it).                     |
 | `images.autoResize`         | boolean | `true`           | Resize large images for model compatibility.                              |
 | `images.blockImages`        | boolean | `false`          | Never send images to providers.                                           |

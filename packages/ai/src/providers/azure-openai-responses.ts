@@ -209,7 +209,10 @@ const streamAzureOpenAIResponsesOnce = (
 			let sawTerminalResponseEvent = false;
 			await processResponsesStream(timedOpenaiStream, output, stream, model, {
 				onFirstToken: () => {
-					if (!firstTokenTime) firstTokenTime = performance.now();
+					if (!firstTokenTime) {
+						firstTokenTime = performance.now();
+						output.ttft = firstTokenTime - startTime;
+					}
 				},
 				onCompleted: () => {
 					sawTerminalResponseEvent = true;

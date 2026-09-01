@@ -621,7 +621,10 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 			let lastResponseId: string | undefined;
 			const ensureStarted = () => {
 				if (!started) {
-					if (!firstTokenTime) firstTokenTime = performance.now();
+					if (!firstTokenTime) {
+						firstTokenTime = performance.now();
+						output.ttft = firstTokenTime - startTime;
+					}
 					stream.push({ type: "start", partial: output });
 					started = true;
 				}

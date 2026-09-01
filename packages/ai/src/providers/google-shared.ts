@@ -684,6 +684,10 @@ export async function consumeGoogleStream<T extends GoogleApiType>(args: {
 				}
 
 				if (part.functionCall) {
+					if (!firstTokenSeen) {
+						firstTokenSeen = true;
+						onFirstToken?.();
+					}
 					if (currentBlock) {
 						flushCurrent();
 						currentBlock = null;
@@ -1021,6 +1025,7 @@ export function streamGoogleGenAI<T extends "google-generative-ai" | "google-ver
 					retainTextSignature,
 					onFirstToken: () => {
 						firstTokenTime = performance.now();
+						output.ttft = firstTokenTime - startTime;
 					},
 				});
 

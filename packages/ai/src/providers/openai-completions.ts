@@ -1004,7 +1004,10 @@ const streamOpenAICompletionsOnce = (
 
 			const appendTextDelta = (text: string): void => {
 				if (!text) return;
-				if (!firstTokenTime) firstTokenTime = performance.now();
+				if (!firstTokenTime) {
+					firstTokenTime = performance.now();
+					output.ttft = firstTokenTime - startTime;
+				}
 				appendText(output, stream, text);
 			};
 			// Tracks the last full cumulative reasoning snapshot per signature (the
@@ -1031,7 +1034,10 @@ const streamOpenAICompletionsOnce = (
 					lastCumulativeReasoningBySignature.set(key, thinking);
 					if (!emittedThinking) return;
 				}
-				if (!firstTokenTime) firstTokenTime = performance.now();
+				if (!firstTokenTime) {
+					firstTokenTime = performance.now();
+					output.ttft = firstTokenTime - startTime;
+				}
 				appendThinking(output, stream, emittedThinking, signature);
 			};
 
@@ -1214,7 +1220,10 @@ const streamOpenAICompletionsOnce = (
 
 					const normalizedDeltaText = normalizeStreamingContentText(choice.delta.content);
 					if (normalizedDeltaText.length > 0) {
-						if (!firstTokenTime) firstTokenTime = performance.now();
+						if (!firstTokenTime) {
+							firstTokenTime = performance.now();
+							output.ttft = firstTokenTime - startTime;
+						}
 						const hasStructuredToolCalls =
 							Array.isArray(choice.delta.tool_calls) && choice.delta.tool_calls.length > 0;
 
@@ -1231,6 +1240,10 @@ const streamOpenAICompletionsOnce = (
 					}
 
 					if (choice?.delta?.tool_calls && choice.delta.tool_calls.length > 0) {
+						if (!firstTokenTime) {
+							firstTokenTime = performance.now();
+							output.ttft = firstTokenTime - startTime;
+						}
 						const toolCalls = choice.delta.tool_calls;
 						for (let toolCallOffset = 0; toolCallOffset < toolCalls.length; toolCallOffset++) {
 							const toolCall = toolCalls[toolCallOffset]!;
