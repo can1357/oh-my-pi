@@ -49,6 +49,7 @@ export * from "./session/session-dump-format";
 export * from "./session/session-entries";
 export * from "./session/session-listing";
 export * from "./session/session-loader";
+export * from "./session/portable-session";
 export * from "./session/session-manager";
 export * from "./session/session-migrations";
 export * from "./session/session-storage";

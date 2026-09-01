@@ -70,6 +70,11 @@ import {
 } from "./session-loader";
 import { generateId, migrateToCurrentVersion } from "./session-migrations";
 import {
+	createPortableSessionSnapshot,
+	parsePortableSessionSnapshot,
+	type PortableSessionSnapshot,
+} from "./portable-session";
+import {
 	computeDefaultSessionDir,
 	readTerminalBreadcrumbEntry,
 	resolveManagedSessionRoot,
@@ -393,11 +398,23 @@ export type ReadonlySessionManager = Pick<
 	| "getBranch"
 	| "getHeader"
 	| "getEntries"
+	| "exportPortableSession"
 	| "getTree"
 	| "getUsageStatistics"
 	| "putBlob"
 	| "putBlobSync"
 >;
+
+export interface ImportPortableSessionOptions {
+	/** Destination workspace; the source cwd is never adopted. */
+	cwd: string;
+	/** Destination session directory; defaults to the canonical cwd bucket. */
+	sessionDir?: string;
+	/** Storage backend, primarily for embedders and tests. */
+	storage?: SessionStorage;
+	/** Avoid changing the terminal breadcrumb before the caller switches sessions. */
+	suppressBreadcrumb?: boolean;
+}
 
 interface SessionManagerStateSnapshot {
 	cwd: string;
@@ -2267,6 +2284,15 @@ export class SessionManager {
 	}
 
 	/**
+	 * Export a detached logical snapshot that is independent of the physical
+	 * title slot and blob-backed on-disk representation.
+	 */
+	async exportPortableSession(): Promise<PortableSessionSnapshot> {
+		await this.flush();
+		return createPortableSessionSnapshot(this.#header, this.#entries, this.#index.leafId());
+	}
+
+	/**
 	 * Append a message as a child of the current leaf, then advance the leaf.
 	 * CompactionSummaryMessage / BranchSummaryMessage are rejected here — they are
 	 * top-level entries via appendCompaction()/branchWithSummary().
@@ -2822,6 +2848,52 @@ export class SessionManager {
 		const file = path.join(sessionDir, `${fileSafeTimestamp(timestamp)}_${id}.jsonl`);
 		storage.writeTextSync(file, `${serializeTitleSlot({ updatedAt: timestamp })}${JSON.stringify(header)}\n`);
 		return file;
+	}
+
+	/**
+	 * Import an untrusted logical snapshot into a freshly identified local
+	 * session. The source workspace and prompt-cache identity are not adopted.
+	 */
+	static async importPortableSession(value: unknown, options: ImportPortableSessionOptions): Promise<SessionManager> {
+		const snapshot = parsePortableSessionSnapshot(value);
+		const storage = options.storage ?? new FileSessionStorage();
+		const cwd = path.resolve(options.cwd);
+		const dir = options.sessionDir ?? SessionManager.getDefaultSessionDir(cwd, undefined, storage);
+		const manager = new SessionManager(cwd, dir, true, storage);
+		manager.#suppressBreadcrumb = options.suppressBreadcrumb === true;
+
+		const sourceEntries = [snapshot.header, ...snapshot.entries] as FileEntry[];
+		migrateToCurrentVersion(sourceEntries);
+		const sourceHeader = sourceEntries[0] as SessionHeader;
+		const history = sourceEntries.slice(1) as SessionEntry[];
+
+		manager.#resetToNewSession({ parentSession: sourceHeader.id });
+		manager.#header.title = sourceHeader.title;
+		manager.#header.titleSource = sourceHeader.titleSource;
+		manager.#sessionName = sourceHeader.title;
+		manager.#titleSource = sourceHeader.titleSource;
+		manager.#titleUpdatedAt = nowIso();
+		manager.#hasTitleSlot = true;
+		manager.#entries = history;
+		manager.#index.rebuild(history);
+		manager.#index.setLeaf(snapshot.leafId);
+
+		const importMarker: CustomEntry = {
+			type: "custom",
+			customType: "portable_session_import",
+			data: {
+				sourceSessionId: sourceHeader.id,
+				sourceLeafId: snapshot.leafId,
+				formatVersion: snapshot.formatVersion,
+			},
+			...manager.#freshEntryFields(),
+		};
+		manager.#entries.push(importMarker);
+		manager.#index.insert(importMarker);
+		manager.sanitizeLoadedOpenAIResponsesReplayMetadata();
+		manager.#forceFileCreation = true;
+		await manager.#rewriteAtomically();
+		return manager;
 	}
 
 	/**

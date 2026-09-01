@@ -66,6 +66,26 @@ Session files are JSONL: one JSON object per line. Current files physically begi
 - Remaining logical entries are `SessionEntry` values.
 - Entries are append-only at runtime; branch navigation moves a pointer (`leafId`) rather than mutating existing entries.
 
+### Portable snapshots
+
+`SessionManager.exportPortableSession()` returns a detached logical snapshot for integrations that need to move a session without depending on OMP's physical JSONL layout:
+
+```ts
+{
+  format: "omp-session",
+  formatVersion: 1,
+  header,
+  entries,
+  leafId
+}
+```
+
+The snapshot contains the hydrated logical header and entries, preserves the selected branch through `leafId`, and omits local file-history metadata. It does not include the fixed-width title slot or blob-store references used by physical session files.
+
+Use `SessionManager.importPortableSession(snapshot, { cwd, sessionDir? })` to validate untrusted input and create a fresh local session. Import assigns a new session id and destination cwd, records the source session id as `parentSession`, drops source workspace and provider prompt-cache configuration, persists hydrated blobs through the destination storage backend, and appends a `portable_session_import` custom entry so the selected branch survives reopening.
+
+Portable snapshots are an interchange boundary, not native session files. Do not write the envelope directly into the sessions directory.
+
 ### Header (`SessionHeader`)
 
 ```json
@@ -264,6 +284,7 @@ Current core-owned values include:
 | ------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `tool_execution_start`   | `{ toolCallId: string, toolName: string, startedAt: string, args?: { command?: string, path?: string }, intent?: string }`                                                                                                                               | `AgentSession` writes a marker immediately before a tool implementation starts. Exit diagnostics combine it with assistant tool calls and tool results to reconstruct calls left pending. Argument summaries are truncated projections; older full argument objects are accepted on read.                  |
 | `session_exit`           | `{ reason: string, kind: "normal" \| "signal" \| "fatal" \| "process_exit", recordedAt: string, pendingToolCalls?: Array<{ toolCallId?: string, toolName: string, args?: unknown, intent?: string, assistantTimestamp?: number, startedAt?: string }> }` | Normal disposal and postmortem teardown record the exit when the session has assistant history or pending tool calls. The writer immediately calls `flushSync()` so a subsequent process can inspect the last durable turn; a flush failure is logged. Resume diagnostics consume the latest valid record. |
+| `portable_session_import` | `{ sourceSessionId: string, sourceLeafId: string \| null, formatVersion: number }`                                                                                                                                    | `SessionManager.importPortableSession()` appends the marker to preserve the imported source branch as the durable leaf and record source lineage.                                                                                                                               |
 | `user_todo_edit`         | `{ phases: TodoPhase[] }`                                                                                                                                                                                                                                | SDK/UI todo editing persists the complete phase snapshot. Todo restoration scans backward for the latest snapshot (or a successful `todo` tool result) and restores its phases.                                                                                                                            |
 | `vibe-session-lifecycle` | Version-1 event with `{ version: 1, id, ownerId, parentSessionId, action, ... }`; `spawn` adds `cli`, `agent`, `childSessionFile`, and `createdAt`; turn events add `turn`; tombstone events add `reason`.                                               | Vibe runtime persists and replays child spawn, turn-started/settled, tombstone, and tombstone-revoked transitions to recover owned child sessions and in-flight state. Invalid or out-of-scope events are ignored.                                                                                         |
 | `autoresearch-control`   | `{ mode: "on" \| "off" \| "clear", goal?: string }`                                                                                                                                                                                                      | The built-in autoresearch command writes mode/goal changes, and experiment-limit shutdown writes `mode: "off"`. `reconstructControlState()` replays valid records on resume to restore whether autoresearch is active and its goal; `clear` removes the goal.                                              |

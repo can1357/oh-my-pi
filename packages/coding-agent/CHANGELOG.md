@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added storage-independent session snapshot export and import APIs for extensions and external integrations.
+
 ### Fixed
 
 - TypeScript code intelligence now works on TypeScript 7 projects: the built-in `typescript-native` server runs `tsc --lsp --stdio` when the resolved TypeScript install no longer ships `tsserver.js`, replacing `typescript-language-server` for that project.

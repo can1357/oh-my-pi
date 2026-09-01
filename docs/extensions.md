@@ -204,6 +204,7 @@ Handlers and tool `execute` receive `ctx` with:
 - `hasUI`
 - `cwd`
 - `sessionManager` (read-only)
+  - `exportPortableSession()` returns a detached, storage-independent logical snapshot. Import it with `SessionManager.importPortableSession(snapshot, { cwd })` from `@oh-my-pi/pi-coding-agent`; see [Portable snapshots](./session.md#portable-snapshots).
 - `modelRegistry`, `model`
 - `models` (read-only model query — see below)
 - `localProtocolOptions` (optional calling-session `local://` root mapping for external tool bridges)
