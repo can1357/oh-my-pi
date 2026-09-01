@@ -3542,20 +3542,22 @@ describe("ExtensionRunner", () => {
 				expect(executed[0]).toEqual({ command: "echo reviewed" });
 			});
 
-			it("owned policy re-resolution failure skips review and uses native approval", async () => {
-				const reviewHandler = vi.fn(async () => ({ decision: "approve" as const }));
-				const transformedInput = { command: "echo hi" };
-				const runner = dispatchRunner([reviewHandler], [async () => ({ input: transformedInput })]);
-				const select = vi.fn(async () => "Approve");
-				initializeRunner(runner, select);
+			it("a retained approval argument cannot mutate the reviewed input into execution", async () => {
+				const reviewStarted = Promise.withResolvers<Readonly<Record<string, unknown>>>();
+				const releaseReview = Promise.withResolvers<void>();
+				let retainedApprovalArg: { command?: string } | undefined;
+				const runner = dispatchRunner([
+					async event => {
+						reviewStarted.resolve(event.input);
+						await releaseReview.promise;
+						return { decision: "approve" };
+					},
+				]);
 				const executed: unknown[] = [];
 				const tool = {
 					...approvalTool,
 					approval: (args: unknown) => {
-						const command = args && typeof args === "object" && "command" in args ? args.command : undefined;
-						if (command !== "echo original" && args !== transformedInput) {
-							throw new Error("Approval input lost its source identity");
-						}
+						retainedApprovalArg = args as { command?: string };
 						return "exec" as const;
 					},
 					execute: async (_toolCallId: string, params: unknown) => {
@@ -3564,44 +3566,130 @@ describe("ExtensionRunner", () => {
 					},
 				};
 
-				const result = await executeReviewCase(runner, tool, "call-owned-resolution-failure", {
-					params: { command: "echo original" },
+				const execution = executeReviewCase(runner, tool, "call-approval-alias", {
+					params: { command: "echo safe" },
 				});
+
+				// Review is pending while the retained approval alias flips safe → dangerous.
+				await reviewStarted.promise;
+				if (retainedApprovalArg) retainedApprovalArg.command = "rm -rf";
+				releaseReview.resolve();
+				const result = await execution;
+
+				expect(firstReviewText(result)).toBe("ok");
+				expect(executed[0]).toEqual({ command: "echo safe" });
+			});
+
+			it("approval policy runs exactly the two upstream resolutions and never sees the execution clone", async () => {
+				const reviewHandler = vi.fn(async () => ({ decision: "approve" as const }));
+				const runner = dispatchRunner([reviewHandler]);
+				const observed: unknown[] = [];
+				const executed: unknown[] = [];
+				const tool = {
+					...approvalTool,
+					approval: (args: unknown) => {
+						observed.push(args);
+						return "exec" as const;
+					},
+					execute: async (_toolCallId: string, params: unknown) => {
+						executed.push(params);
+						return { content: [{ type: "text" as const, text: "ok" }] };
+					},
+				};
+
+				const result = await executeReviewCase(runner, tool, "call-approval-invocations", {
+					params: { command: "echo safe" },
+				});
+
+				expect(firstReviewText(result)).toBe("ok");
+				expect(reviewHandler).toHaveBeenCalledTimes(1);
+				// Pre-dispatch short-circuit + full gate; the review path adds no invocation.
+				expect(observed).toHaveLength(2);
+				expect(observed[0]).toBe(observed[1]);
+				// The executed graph is an independent mutable clone no policy invocation observed.
+				expect(observed).not.toContain(executed[0]);
+				expect(Object.isFrozen(executed[0])).toBe(false);
+			});
+
+			it("null-prototype input bypasses extension review and keeps native semantics", async () => {
+				const reviewHandler = vi.fn(async () => ({ decision: "approve" as const }));
+				const runner = dispatchRunner([reviewHandler]);
+				const select = vi.fn(async () => "Approve");
+				initializeRunner(runner, select);
+				const executed: unknown[] = [];
+				const tool = {
+					...approvalTool,
+					execute: async (_toolCallId: string, params: unknown) => {
+						executed.push(params);
+						return { content: [{ type: "text" as const, text: "ok" }] };
+					},
+				};
+				const params = Object.create(null) as { command: string };
+				params.command = "echo hi";
+
+				const result = await executeReviewCase(runner, tool, "call-null-proto", { params });
 
 				expect(firstReviewText(result)).toBe("ok");
 				expect(reviewHandler).not.toHaveBeenCalled();
 				expect(select).toHaveBeenCalledTimes(1);
-				expect(executed).toEqual([transformedInput]);
-				expect(executed[0]).toBe(transformedInput);
+				expect(executed[0]).toBe(params);
 			});
 
-			it("owned policy re-resolution deny is authoritative before review", async () => {
+			it("frozen and sealed inputs bypass extension review and keep native semantics", async () => {
+				for (const toolCallId of ["call-frozen", "call-sealed"]) {
+					const reviewHandler = vi.fn(async () => ({ decision: "approve" as const }));
+					const runner = dispatchRunner([reviewHandler]);
+					const select = vi.fn(async () => "Approve");
+					initializeRunner(runner, select);
+					const executed: unknown[] = [];
+					const tool = {
+						...approvalTool,
+						execute: async (_id: string, params: unknown) => {
+							executed.push(params);
+							return { content: [{ type: "text" as const, text: "ok" }] };
+						},
+					};
+					const params =
+						toolCallId === "call-frozen"
+							? Object.freeze({ command: "echo hi" })
+							: Object.seal({ command: "echo hi" });
+
+					const result = await executeReviewCase(runner, tool, toolCallId, { params });
+
+					expect(firstReviewText(result)).toBe("ok");
+					expect(reviewHandler).not.toHaveBeenCalled();
+					expect(select).toHaveBeenCalledTimes(1);
+					expect(executed[0]).toBe(params);
+				}
+			});
+
+			it("non-enumerable property input bypasses extension review and keeps native semantics", async () => {
 				const reviewHandler = vi.fn(async () => ({ decision: "approve" as const }));
-				const transformedInput = { command: "echo hi" };
-				const runner = dispatchRunner([reviewHandler], [async () => ({ input: transformedInput })]);
+				const runner = dispatchRunner([reviewHandler]);
 				const select = vi.fn(async () => "Approve");
 				initializeRunner(runner, select);
-				const execute = vi.fn(async () => ({ content: [{ type: "text" as const, text: "ran" }] }));
+				const executed: unknown[] = [];
 				const tool = {
 					...approvalTool,
-					approval: (args: unknown) => {
-						const command = args && typeof args === "object" && "command" in args ? args.command : undefined;
-						if (command === "echo original" || args === transformedInput) {
-							return "exec" as const;
-						}
-						return { policy: "deny", tier: "exec", reason: "owned clone denied" } as const;
+					execute: async (_toolCallId: string, params: unknown) => {
+						executed.push(params);
+						return { content: [{ type: "text" as const, text: "ok" }] };
 					},
-					execute,
 				};
+				const params: Record<string, unknown> = {};
+				Object.defineProperty(params, "command", {
+					value: "echo hi",
+					writable: true,
+					enumerable: false,
+					configurable: true,
+				});
 
-				await expect(
-					executeReviewCase(runner, tool, "call-owned-resolution-deny", {
-						params: { command: "echo original" },
-					}),
-				).rejects.toThrow('Tool "dangerous_tool" is blocked by tool policy.\nReason: owned clone denied');
+				const result = await executeReviewCase(runner, tool, "call-non-enumerable", { params });
+
+				expect(firstReviewText(result)).toBe("ok");
 				expect(reviewHandler).not.toHaveBeenCalled();
-				expect(select).not.toHaveBeenCalled();
-				expect(execute).not.toHaveBeenCalled();
+				expect(select).toHaveBeenCalledTimes(1);
+				expect(executed[0]).toBe(params);
 			});
 
 			it("native deny stays authoritative on non-cloneable input and never dispatches review", async () => {

@@ -1875,8 +1875,13 @@ export class ExtensionRunner {
 	}
 }
 
-/** Rejects values that cannot be exposed as a deeply immutable approval-review snapshot. */
-export function assertReviewInputSafe(value: unknown, seen = new WeakSet<object>()): void {
+/**
+ * Rejects values that cannot be exposed as a deeply immutable snapshot: only
+ * plain objects/arrays without accessors freeze transitively. Tolerates
+ * non-default descriptors — an already frozen/sealed graph is exactly what
+ * freezing would produce, so re-freezing host snapshots stays a no-op.
+ */
+function assertDeepFreezable(value: unknown, seen = new WeakSet<object>()): void {
 	if (typeof value !== "object" || value === null || seen.has(value)) return;
 
 	const prototype = Object.getPrototypeOf(value);
@@ -1889,13 +1894,55 @@ export function assertReviewInputSafe(value: unknown, seen = new WeakSet<object>
 		if (!descriptor || !("value" in descriptor)) {
 			throw new TypeError("Review input contains an accessor");
 		}
+		assertDeepFreezable(descriptor.value, seen);
+	}
+}
+
+/**
+ * Rejects values that structuredClone would not reproduce verbatim, so a
+ * cloned approval-review snapshot is guaranteed to match the semantics of the
+ * input being approved. Admits only plain objects/arrays with default data
+ * descriptors and cloneable leaf values; anything else (null-prototype
+ * objects, class instances, Dates, frozen/sealed or non-enumerable graphs,
+ * accessors, symbol keys, functions) must fall back to native approval with
+ * its original semantics intact.
+ */
+export function assertReviewInputSafe(value: unknown, seen = new WeakSet<object>()): void {
+	if (typeof value === "function" || typeof value === "symbol") {
+		throw new TypeError("Review input contains a non-cloneable value");
+	}
+	if (typeof value !== "object" || value === null || seen.has(value)) return;
+
+	const prototype = Object.getPrototypeOf(value);
+	if (prototype !== Object.prototype && prototype !== Array.prototype) {
+		// Includes null-prototype objects: structuredClone re-homes them on
+		// Object.prototype, so their semantics would not survive the snapshot.
+		throw new TypeError("Review input contains an unsupported mutable value");
+	}
+	const isArray = Array.isArray(value);
+	seen.add(value);
+	for (const key of Reflect.ownKeys(value)) {
+		if (typeof key === "symbol") {
+			throw new TypeError("Review input contains a symbol-keyed property");
+		}
+		const descriptor = Object.getOwnPropertyDescriptor(value, key);
+		if (!descriptor || !("value" in descriptor)) {
+			throw new TypeError("Review input contains an accessor");
+		}
+		if (isArray && key === "length") continue;
+		if (!descriptor.writable || !descriptor.enumerable || !descriptor.configurable) {
+			// structuredClone normalizes non-default descriptors: non-enumerable
+			// properties are dropped and frozen/sealed graphs become mutable, so
+			// the snapshot would diverge from the input being approved.
+			throw new TypeError("Review input contains a non-default property descriptor");
+		}
 		assertReviewInputSafe(descriptor.value, seen);
 	}
 }
 
 /** Recursively freezes a review-safe plain object/array value. */
 export function deepFreeze<T>(value: T): T {
-	assertReviewInputSafe(value);
+	assertDeepFreezable(value);
 	return freezeReviewInput(value);
 }
 
