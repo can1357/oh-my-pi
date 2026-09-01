@@ -72,6 +72,7 @@ import {
 } from "../../thinking";
 import {
 	isSearchProviderId,
+	setDefaultImageModel,
 	setExcludedSearchProviders,
 	setImageProviderOrder,
 	setSearchProviderOrder,
@@ -747,6 +748,9 @@ export class SelectorController {
 				if (Array.isArray(value)) {
 					setImageProviderOrder(value.filter((entry): entry is string => typeof entry === "string"));
 				}
+				break;
+			case "providers.imageModel":
+				setDefaultImageModel(typeof value === "string" ? value.trim() || undefined : undefined);
 				break;
 
 			// MCP update injection - live subscribe/unsubscribe

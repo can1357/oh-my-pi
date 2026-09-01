@@ -38,6 +38,7 @@ export {
 
 import type { OutputMeta } from "../tools/output-meta";
 import { formatOutputNotice } from "../tools/output-meta";
+import { isToolDetailImage, type ToolDetailImage, toolDetailImagesOwner } from "../tools/tool-detail-images";
 import { titleTextFromSkillPrompt } from "./skill-title-input";
 
 export const SKILL_PROMPT_MESSAGE_TYPE = "skill-prompt";
@@ -851,13 +852,14 @@ function stripImagesFromMessageContent(message: AgentMessage): number {
 				message.content = content;
 				removed += contentRemoved;
 			}
-			const details = message.details as { images?: unknown } | null | undefined;
-			if (details && Array.isArray(details.images)) {
-				const original = details.images as unknown[];
-				const kept: unknown[] = [];
+			const owner = toolDetailImagesOwner(message.details);
+			if (owner) {
+				const original = owner.images;
+				const kept: ToolDetailImage[] = [];
 				for (const candidate of original) {
 					const looksLikeImageBlock =
-						!!candidate && typeof candidate === "object" && (candidate as { type?: unknown }).type === "image";
+						isToolDetailImage(candidate) ||
+						(!!candidate && typeof candidate === "object" && (candidate as { type?: unknown }).type === "image");
 					if (looksLikeImageBlock) {
 						removed++;
 					} else {
@@ -865,7 +867,7 @@ function stripImagesFromMessageContent(message: AgentMessage): number {
 					}
 				}
 				if (kept.length !== original.length) {
-					details.images = kept;
+					owner.images = kept;
 				}
 			}
 			return removed;

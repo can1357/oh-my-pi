@@ -254,6 +254,12 @@ export interface CustomTool<TParams extends TSchema = TSchema, TDetails = any> {
 	onSession?: (event: CustomToolSessionEvent, ctx: CustomToolContext) => void | Promise<void>;
 	/** Custom rendering for tool call display - return a Component */
 	renderCall?: (args: Static<TParams>, options: RenderResultOptions, theme: Theme) => Component;
+	/**
+	 * Suppress the call component once a result exists, so a renderer that draws
+	 * one merged block is not preceded by a redundant tool-name line.
+	 * `ToolExecutionComponent` reads this off the live tool instance.
+	 */
+	mergeCallAndResult?: boolean;
 
 	/** Custom rendering for tool result display - return a Component */
 	renderResult?: (

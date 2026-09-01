@@ -23,6 +23,7 @@ import { githubToolRenderer } from "./gh-renderer";
 import { globToolRenderer } from "./glob";
 import { grepToolRenderer } from "./grep";
 import { hubToolRenderer } from "./hub";
+import { imageGenToolRenderer } from "./image-gen-renderer";
 import { inspectImageToolRenderer } from "./inspect-image-renderer";
 import { recallToolRenderer, reflectToolRenderer, retainToolRenderer } from "./memory-render";
 import { readToolRenderer } from "./read";
@@ -108,6 +109,7 @@ export const toolRenderers: Record<string, ToolRenderer> = {
 	apply_patch: editToolRenderer as ToolRenderer,
 	glob: globToolRenderer as ToolRenderer,
 	grep: grepToolRenderer as ToolRenderer,
+	generate_image: imageGenToolRenderer as ToolRenderer,
 	lsp: lspToolRenderer as ToolRenderer,
 	inspect_image: inspectImageToolRenderer as ToolRenderer,
 	// Lazy getter: `hubToolRenderer` lives in a module whose deps (messaging →

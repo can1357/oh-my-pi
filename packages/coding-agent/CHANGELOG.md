@@ -4,6 +4,25 @@
 
 ### Added
 
+- Added model-first image generation: a curated capability catalog of 13 flagship models (Nano Banana Pro/2, GPT Image 2, FLUX.2 Pro/Max, Seedream 4.5/5 Pro, Qwen Image 3, Recraft V4/Vector, Krea 2 Large, Grok Imagine, FLUX.1 Schnell) with per-binding capability validation, canonical knobs (`model`, `resolution`, `n`, `quality`, `output_format`, `background`, `seed`), and fail-closed errors instead of silent model substitution.
+- Added a FAL backend (`FAL_KEY`) with queue-API generation, CDN input upload, polling, and job cancellation, plus a `fal:<endpoint-id>` escape hatch that reaches any FAL endpoint without a release.
+- Reworked OpenRouter image generation onto its dedicated Images API (`POST /api/v1/images`) with `input_references` edits and surfaced `costUsd`.
+- Added `providers.imageModel` setting for a default image model (catalog alias or raw `fal:`/`openrouter:` reference).
+
+### Changed
+
+- Multi-image tool results now render through a responsive `ImageGrid`, while unsupported direct-placement protocols retain safe vertical rendering.
+
+### Fixed
+
+- Fixed `generate_image` inline previews and lifecycle blocks for both direct and `xd://` dispatches, including actionable diagnostics when inline rendering is unavailable.
+- Fixed hosted OpenAI image generation silently defaulting to GPT Image 1 and active Codex sessions preferring a metered OpenAI credential when both credentials were available.
+- Fixed mouse-wheel scrolling in the normal transcript after inline images by keeping normal-screen image clicks opt-in, preserving native terminal scrollback by default.
+- Fixed discovered FAL edit endpoints with singular `image_url` inputs and preserved provider error messages returned by completed or failed queue jobs.
+
+
+### Added
+
 - Added `injectV1: false` option to `openai-models-list` discovery to fetch the model list from `{baseUrl}/models` without injecting `/v1`, for gateways that root their OpenAI-compatible surface at a versioned URL (e.g. `https://api.opper.ai/v3/compat`) where the `/v1`-injected endpoint returns only a small subset.
 - Added provider-reported credits and concrete routed-model counts to `/session` statistics ([#8590](https://github.com/can1357/oh-my-pi/pull/8590) by [@will-bogusz](https://github.com/will-bogusz)).
 - Added `CLINE_API_KEY` to the CLI environment help for native ClinePass subscription inference ([#7863](https://github.com/can1357/oh-my-pi/pull/7863) by [@will-bogusz](https://github.com/will-bogusz)).

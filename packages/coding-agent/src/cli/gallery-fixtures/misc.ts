@@ -107,6 +107,61 @@ export const miscFixtures: Record<string, GalleryFixture> = {
 		},
 	},
 
+	generate_image: {
+		customRendered: true,
+		label: "GenerateImage",
+		streamingArgs: { subject: "a massive stylized dire wolf", model: "nano-banana-pro" },
+		args: {
+			subject: "a massive stylized dire wolf",
+			model: "nano-banana-pro",
+			aspect_ratio: "9:16",
+			resolution: "2K",
+		},
+		result: {
+			content: [
+				{
+					type: "text",
+					text: [
+						"Provider: fal",
+						"Model: fal-ai/nano-banana-pro",
+						"Generated 1 image(s):",
+						"  /tmp/omp-image-1.png (1536x2752, 5.1MB)",
+					].join("\n"),
+				},
+			],
+			details: {
+				provider: "fal",
+				model: "fal-ai/nano-banana-pro",
+				entryId: "nano-banana-pro",
+				costUsd: 0.0123,
+				imageStats: [
+					{
+						path: "/tmp/omp-image-1.png",
+						width: 1536,
+						height: 2752,
+						sizeBytes: 5_400_000,
+						mimeType: "image/png",
+					},
+				],
+				images: [],
+			},
+		},
+		errorResult: {
+			content: [
+				{
+					type: "text",
+					text: "Quality is not supported by gpt-image-2 via fal (openai/gpt-image-2). Background handling is not supported by gpt-image-2 via fal (openai/gpt-image-2).",
+				},
+			],
+			isError: true,
+			details: {
+				provider: "fal",
+				model: "gpt-image-2",
+				entryId: "gpt-image-2",
+			},
+		},
+	},
+
 	inspect_image: {
 		label: "Inspect Image",
 		streamingArgs: {

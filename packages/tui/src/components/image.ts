@@ -1,8 +1,11 @@
-import { getKittyGraphics } from "../kitty-graphics";
+import { getKittyGraphics, kittyPlaceholdersFit } from "../kitty-graphics";
+import type { MouseRoutable, SgrMouseEvent } from "../mouse";
 import {
+	calculateImageFit,
 	getCellDimensions,
 	getImageDimensions,
 	type ImageDimensions,
+	ImageProtocol,
 	imageFallback,
 	renderImage,
 	TERMINAL,
@@ -17,6 +20,10 @@ export interface ImageOptions {
 	maxWidthCells?: number;
 	maxHeightCells?: number;
 	filename?: string;
+	/** Optional callback invoked with this image's logical index on a left click. */
+	onClick?: (index: number) => void;
+	/** Logical index supplied to {@link onClick}; standalone images default to 0. */
+	imageIndex?: number;
 	/** Shared budget that caps how many inline images render as live graphics. */
 	budget?: ImageBudget;
 	/**
@@ -105,6 +112,8 @@ export class ImageBudget {
 	#transmitted = new Set<number>();
 	/** Transmit sequences (full base64) to write once, before this frame's placements. */
 	#pendingTransmits: string[] = [];
+	/** Image ids corresponding to {@link #pendingTransmits}, for keyed release. */
+	#pendingTransmitIds: number[] = [];
 	// True while the in-flight pass is a partial/throwaway pass (the
 	// non-multiplexer resize viewport fast path) that walks only the visible
 	// tail, bottom-up. Such a pass cannot derive display order from observe()
@@ -173,6 +182,19 @@ export class ImageBudget {
 		}
 		const id = this.#nextId;
 		this.#nextId = (this.#nextId + 1) & 0xffffff || 1;
+		return id;
+	}
+	/**
+	 * Release the graphics id currently owned by a stable key.
+	 *
+	 * A replacement must not reuse the old terminal-store payload: queue a purge
+	 * for ids that were transmitted, then discard all bookkeeping that could
+	 * make a later acquire/placement look like the old image.
+	 */
+	releaseId(key: string): number | undefined {
+		const id = this.#keyToId.get(key);
+		if (id === undefined) return undefined;
+		this.#releaseId(id);
 		return id;
 	}
 
@@ -252,11 +274,15 @@ export class ImageBudget {
 
 	/** All image ids believed to be loaded in the terminal store; clears tracking. */
 	takeAllTransmittedIds(): readonly number[] {
-		if (this.#transmitted.size === 0) return EMPTY_IDS;
+		if (this.#transmitted.size === 0 && this.#purgeIds.length === 0) return EMPTY_IDS;
 		const ids = [...this.#transmitted];
+		for (const id of this.#purgeIds) {
+			if (!ids.includes(id)) ids.push(id);
+		}
 		this.#transmitted.clear();
 		this.#purgeIds = [];
 		this.#pendingTransmits = [];
+		this.#pendingTransmitIds = [];
 		this.#keyToId.clear();
 		this.#idToKey.clear();
 		this.#placementState.clear();
@@ -394,6 +420,7 @@ export class ImageBudget {
 		if (this.#transmitted.has(imageId)) return;
 		this.#transmitted.add(imageId);
 		this.#pendingTransmits.push(sequence);
+		this.#pendingTransmitIds.push(imageId);
 	}
 
 	/** Whether a frame has image data queued but not yet written to the terminal. */
@@ -421,6 +448,7 @@ export class ImageBudget {
 		if (this.#pendingTransmits.length === 0) return EMPTY_TRANSMITS;
 		const sequences = this.#pendingTransmits;
 		this.#pendingTransmits = [];
+		this.#pendingTransmitIds = [];
 		return sequences;
 	}
 
@@ -436,8 +464,25 @@ export class ImageBudget {
 		if (this.#transmitted.size === 0 && this.#pendingTransmits.length === 0) return;
 		this.#transmitted.clear();
 		this.#pendingTransmits = [];
+		this.#pendingTransmitIds = [];
 	}
 
+	#releaseId(id: number): void {
+		const transmitted = this.#transmitted.delete(id);
+		const pendingIndex = this.#pendingTransmitIds.indexOf(id);
+		if (pendingIndex >= 0) {
+			this.#pendingTransmitIds.splice(pendingIndex, 1);
+			this.#pendingTransmits.splice(pendingIndex, 1);
+		}
+		if (transmitted || this.#placementState.has(id)) this.#queuePurge(id);
+		this.#deletePlacementState(id);
+		this.#suppressedIds.delete(id);
+		this.#forgetKeyForId(id);
+	}
+
+	#queuePurge(id: number): void {
+		if (!this.#purgeIds.includes(id)) this.#purgeIds.push(id);
+	}
 	#forgetKeyForId(id: number): void {
 		const key = this.#idToKey.get(id);
 		if (key === undefined) return;
@@ -469,7 +514,7 @@ function normalizeCap(cap: number): number {
 	return Math.max(0, Math.trunc(cap));
 }
 
-export class Image implements Component {
+export class Image implements Component, MouseRoutable {
 	#base64Data: string;
 	#mimeType: string;
 	#dimensions: ImageDimensions;
@@ -489,7 +534,11 @@ export class Image implements Component {
 	// pads itself to this height so a budget demotion never shrinks the block
 	// (its rows may already be committed to native scrollback).
 	#renderedGraphicRows = 0;
-
+	// Last rendered hit region. The row/column geometry is intentionally kept
+	// separate from the image cache: returning cached rows must not lose the
+	// pointer target that was established by the previous render.
+	#lastRenderedRows = 0;
+	#lastRenderedColumns = 0;
 	constructor(
 		base64Data: string,
 		mimeType: string,
@@ -504,6 +553,47 @@ export class Image implements Component {
 		this.#dimensions = dimensions || getImageDimensions(base64Data, mimeType) || { widthPx: 800, heightPx: 600 };
 		this.#budget = options.budget;
 		this.#imageId = options.budget ? options.budget.acquireId(options.imageKey) : undefined;
+	}
+	/**
+	 * Image targets are opt-in and disabled when this terminal has no graphics
+	 * protocol, preserving ordinary text selection on fallback-only terminals.
+	 */
+	hasMouseTargets(): boolean {
+		return TERMINAL.imageProtocol !== null && this.#options.onClick !== undefined;
+	}
+
+	routeMouse(event: SgrMouseEvent, line: number, col: number): boolean {
+		if (!event.leftClick || !this.hasMouseTargets()) return false;
+		if (line < 0 || line >= this.#lastRenderedRows || col < 0 || col >= this.#lastRenderedColumns) {
+			return false;
+		}
+		this.#options.onClick?.(this.#options.imageIndex ?? 0);
+		return true;
+	}
+
+	/**
+	 * Whether this image can be rendered as ordinary Kitty placeholder cells
+	 * at the supplied width. ImageGrid uses this before composing children;
+	 * direct Kitty placement cannot be safely spliced into a shared row.
+	 */
+	canRenderAsKittyPlaceholders(width: number): boolean {
+		if (
+			TERMINAL.imageProtocol !== ImageProtocol.Kitty ||
+			this.#imageId === undefined ||
+			!getKittyGraphics().unicodePlaceholders
+		) {
+			return false;
+		}
+		const maxWidthCells =
+			this.#options.maxWidthCells !== undefined && this.#options.maxWidthCells > 0
+				? Math.min(width - 2, this.#options.maxWidthCells)
+				: width - 2;
+		const fit = calculateImageFit(
+			this.#dimensions,
+			{ maxWidthCells, maxHeightCells: this.#options.maxHeightCells },
+			getCellDimensions(),
+		);
+		return kittyPlaceholdersFit(fit.columns, fit.rows);
 	}
 	/** Return source metadata without exposing the encoded image buffer. */
 	debugState(): Record<string, unknown> {
@@ -527,6 +617,14 @@ export class Image implements Component {
 		const hasProtocol = imageProtocol != null;
 		const cellDimensions = getCellDimensions();
 		const kittyUnicodePlaceholders = getKittyGraphics().unicodePlaceholders;
+		const cap = this.#options.maxWidthCells;
+		const maxWidth = cap != null && cap > 0 ? Math.min(width - 2, cap) : width - 2;
+		const fit = calculateImageFit(
+			this.#dimensions,
+			{ maxWidthCells: maxWidth, maxHeightCells: this.#options.maxHeightCells },
+			cellDimensions,
+		);
+		this.#lastRenderedColumns = fit.columns;
 		// observe() must run on every pass — even a cache hit — so the image keeps
 		// its display-order slot in the budget. Only graphics-capable frames count
 		// toward (and are demoted by) the budget; without a protocol every image is
@@ -543,11 +641,9 @@ export class Image implements Component {
 			this.#cachedKittyUnicodePlaceholders === kittyUnicodePlaceholders &&
 			(this.#imageId == null || this.#budget?.shouldTransmit(this.#imageId) !== true)
 		) {
+			this.#lastRenderedRows = this.#cachedLines.length;
 			return this.#cachedLines;
 		}
-
-		const cap = this.#options.maxWidthCells;
-		const maxWidth = cap != null && cap > 0 ? Math.min(width - 2, cap) : width - 2;
 
 		let lines: string[];
 
@@ -601,6 +697,7 @@ export class Image implements Component {
 			lines = this.#fallbackLines();
 		}
 
+		this.#lastRenderedRows = lines.length;
 		this.#cachedLines = lines;
 		this.#cachedWidth = width;
 		this.#cachedSuppressed = suppressed;

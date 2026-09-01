@@ -3,15 +3,16 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
-import type { AgentTool } from "@oh-my-pi/pi-agent-core";
+import type { AgentTool, AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import * as themeModule from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { ToolChoiceQueue } from "@oh-my-pi/pi-coding-agent/session/tool-choice-queue";
 import { createTools, type Tool, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { requiresApproval, resolveApproval } from "@oh-my-pi/pi-coding-agent/tools/approval";
 import { githubToolRenderer } from "@oh-my-pi/pi-coding-agent/tools/gh-renderer";
+import { imageGenToolRenderer } from "@oh-my-pi/pi-coding-agent/tools/image-gen-renderer";
 import { ToolError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
-import { WriteTool, writeToolRenderer } from "@oh-my-pi/pi-coding-agent/tools/write";
+import { WriteTool, type WriteToolDetails, writeToolRenderer } from "@oh-my-pi/pi-coding-agent/tools/write";
 import {
 	listXdevTools,
 	resolveMountedXdevTool,
@@ -361,6 +362,63 @@ describe("read and write route xd:// device URLs", () => {
 		expect(queuedText).toContain("queued");
 		expect(queuedText).toContain("ecoport/search");
 		expect(queuedText).toContain("Broken");
+	});
+	it("preserves mounted image args through a streamed xd:// result", async () => {
+		await themeModule.initTheme();
+		const uiTheme = (await themeModule.getThemeByName("dark")) ?? (await themeModule.getThemeByName("light"));
+		if (!uiTheme) throw new Error("expected an initialized theme");
+
+		const imageDevice = {
+			name: "generate_image",
+			label: "GenerateImage",
+			description: "Generate an image",
+			parameters: type({ model: "string" }),
+			...imageGenToolRenderer,
+			async execute(
+				_toolCallId: string,
+				_args: { model: string },
+				_signal?: AbortSignal,
+				onUpdate?: (result: { content: Array<{ type: "text"; text: string }> }) => void,
+			) {
+				onUpdate?.({
+					content: [{ type: "text", text: "Generating image via fal (fal-ai/flux/schnell)…" }],
+				});
+				return {
+					content: [{ type: "text", text: "Image generated." }],
+					details: { provider: "fal", model: "fal-ai/flux/schnell", entryId: "flux-schnell" },
+				};
+			},
+		} as unknown as AgentTool;
+		const xdev = createTestXdevState([imageDevice]);
+		const write = new WriteTool(xdevSession(process.cwd(), { xdev }));
+		let partial: AgentToolResult<WriteToolDetails> | undefined;
+		const content = JSON.stringify({ model: "flux-schnell" });
+		const finalResult = await write.execute(
+			"write-xdev-image-progress",
+			{ path: "xd://generate_image", content },
+			undefined,
+			update => {
+				partial = update;
+			},
+		);
+
+		expect(partial).toBeDefined();
+		if (!partial) throw new Error("expected a streamed device result");
+		expect(partial.details).toMatchObject({ xdev: { args: { model: "flux-schnell" } } });
+		const component = writeToolRenderer.renderResult(
+			partial,
+			{
+				expanded: false,
+				isPartial: true,
+				renderContext: { resolveXdevMounted: name => resolveMountedXdevTool(xdev, name) },
+			},
+			uiTheme,
+			{ path: "xd://generate_image", content },
+		);
+		const rendered = Bun.stripANSI(component.render(100).join("\n"));
+		expect(rendered).toContain("Image: flux-schnell");
+		expect(rendered).not.toContain("Image: image");
+		expect(finalResult.details?.xdev).toMatchObject({ args: { model: "flux-schnell" } });
 	});
 
 	it("renders device execution errors as the mounted tool instead of write", async () => {

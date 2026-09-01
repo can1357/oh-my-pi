@@ -1,3 +1,4 @@
+import type { MouseRoutable, SgrMouseEvent } from "../mouse";
 import type { Component } from "../tui";
 import {
 	getPaddingX,
@@ -18,6 +19,18 @@ type Cache = {
 	childSnapshots: (readonly string[] | undefined)[];
 	result: string[];
 };
+interface MouseTargetAware {
+	hasMouseTargets?: () => boolean;
+	routeMouse?: (event: SgrMouseEvent, line: number, col: number) => boolean | void;
+}
+
+interface ChildLayout {
+	child: Component;
+	top: number;
+	left: number;
+	width: number;
+	height: number;
+}
 
 /** Box-drawing glyphs plus an optional colorizer for an outline drawn around a {@link Box}. */
 export interface BoxBorder {
@@ -35,12 +48,13 @@ export interface BoxBorder {
 /**
  * Box component - a container that applies padding and background to all children
  */
-export class Box implements Component {
+export class Box implements Component, MouseRoutable {
 	children: Component[] = [];
 	#paddingX: number;
 	#paddingY: number;
 	#bgFn?: (text: string) => string;
 	#border?: BoxBorder;
+	#mouseLayouts: ChildLayout[] = [];
 
 	#ignoreTight = false;
 
@@ -48,6 +62,25 @@ export class Box implements Component {
 		this.#ignoreTight = ignore;
 		this.#invalidateCache();
 		return this;
+	}
+	hasMouseTargets(): boolean {
+		return this.children.some(child => this.#hasMouseTargets(child));
+	}
+
+	routeMouse(event: SgrMouseEvent, line: number, col: number): boolean {
+		const target = this.#mouseLayouts.find(
+			layout =>
+				line >= layout.top &&
+				line < layout.top + layout.height &&
+				col >= layout.left &&
+				col < layout.left + layout.width &&
+				this.#hasMouseTargets(layout.child),
+		);
+		if (!target) return false;
+		const child = target.child as Component & MouseTargetAware;
+		if (child.routeMouse === undefined) return false;
+		const routed = child.routeMouse(event, line - target.top, col - target.left);
+		return routed !== false;
 	}
 
 	// Cache for rendered output
@@ -150,6 +183,19 @@ export class Box implements Component {
 			contentRows += lines.length;
 			return lines;
 		});
+		this.#mouseLayouts = [];
+		let childTop = (border ? 1 : 0) + Math.max(0, this.#paddingY);
+		const childLeft = (border ? 1 : 0) + Math.max(0, paddingX);
+		for (const [index, lines] of childLines.entries()) {
+			this.#mouseLayouts.push({
+				child: children[index]!,
+				top: childTop,
+				left: childLeft,
+				width: contentWidth,
+				height: lines.length,
+			});
+			childTop += lines.length;
+		}
 		const childWidths = childLines.map(lines => getPublishedLineWidths(lines));
 		const cached = this.#cached;
 		if (
@@ -242,5 +288,9 @@ export class Box implements Component {
 			result,
 		};
 		return result;
+	}
+	#hasMouseTargets(child: Component): boolean {
+		const target = child as Component & MouseTargetAware;
+		return target.hasMouseTargets?.() === true;
 	}
 }

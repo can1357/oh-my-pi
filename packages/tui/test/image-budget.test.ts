@@ -32,19 +32,33 @@ const terminal = TERMINAL as unknown as MutableTerminalInfo;
 const BASE64_ONE_PIXEL_PNG =
 	"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAAAAAA6fptVAAAACklEQVR4nGNgAAAAAgABSK+kcQAAAABJRU5ErkJggg==";
 
-const ORIGINAL_TMUX = Bun.env.TMUX;
-const ORIGINAL_HERDR_ENV = Bun.env.HERDR_ENV;
+const MULTIPLEXER_ENV_KEYS = [
+	"TMUX",
+	"STY",
+	"ZELLIJ",
+	"HERDR_ENV",
+	"CMUX_WORKSPACE_ID",
+	"CMUX_SURFACE_ID",
+	"CMUX_REMOTE_TRANSPORT",
+] as const;
+const ORIGINAL_MULTIPLEXER_ENV = Object.fromEntries(MULTIPLEXER_ENV_KEYS.map(key => [key, Bun.env[key]])) as Partial<
+	Record<(typeof MULTIPLEXER_ENV_KEYS)[number], string>
+>;
+const ORIGINAL_TERM = Bun.env.TERM;
 
 beforeEach(() => {
-	delete Bun.env.TMUX;
-	delete Bun.env.HERDR_ENV;
+	for (const key of MULTIPLEXER_ENV_KEYS) delete Bun.env[key];
+	Bun.env.TERM = "xterm-256color";
 });
 
 afterEach(() => {
-	if (ORIGINAL_TMUX === undefined) delete Bun.env.TMUX;
-	else Bun.env.TMUX = ORIGINAL_TMUX;
-	if (ORIGINAL_HERDR_ENV === undefined) delete Bun.env.HERDR_ENV;
-	else Bun.env.HERDR_ENV = ORIGINAL_HERDR_ENV;
+	for (const key of MULTIPLEXER_ENV_KEYS) {
+		const value = ORIGINAL_MULTIPLEXER_ENV[key];
+		if (value === undefined) delete Bun.env[key];
+		else Bun.env[key] = value;
+	}
+	if (ORIGINAL_TERM === undefined) delete Bun.env.TERM;
+	else Bun.env.TERM = ORIGINAL_TERM;
 });
 
 /** Drive one render pass against the budget with `count` images (ids 1..count, stable across passes). */
@@ -145,6 +159,21 @@ describe("ImageBudget", () => {
 		expect(a1).toBe(a2);
 		expect(b).not.toBe(a1);
 		expect(budget.acquireId()).not.toBe(budget.acquireId());
+	});
+	it("releases a keyed image before replacement and purges its pending transmission", () => {
+		const budget = new ImageBudget(3, () => {});
+		const oldId = budget.acquireId("slot");
+		budget.enqueueTransmit(oldId, "OLD");
+
+		expect(budget.releaseId("slot")).toBe(oldId);
+		expect([...budget.takeTransmits()]).toEqual([]);
+		expect([...budget.takePurgeIds()]).toEqual([oldId]);
+
+		const newId = budget.acquireId("slot");
+		expect(newId).not.toBe(oldId);
+		expect(budget.shouldTransmit(newId)).toBe(true);
+		budget.enqueueTransmit(newId, "NEW");
+		expect([...budget.takeTransmits()]).toEqual(["NEW"]);
 	});
 
 	it("initializes separate budgets with different starting IDs", () => {
@@ -982,6 +1011,15 @@ describe("ImageBudget transmit tracking", () => {
 		expect([...budget.takeTransmits()]).toEqual([]);
 		expect(budget.shouldTransmit(1)).toBe(true);
 		expect([...budget.takeAllTransmittedIds()]).toEqual([]);
+	});
+	it("includes pending replacement purges in terminal-session cleanup", () => {
+		const budget = new ImageBudget(3, () => {});
+		const id = budget.acquireId("slot");
+		budget.enqueueTransmit(id, "TX");
+		expect(budget.releaseId("slot")).toBe(id);
+
+		expect([...budget.takeAllTransmittedIds()]).toEqual([id]);
+		expect([...budget.takePurgeIds()]).toEqual([]);
 	});
 
 	it("re-transmits an image after a purge frees its data", () => {

@@ -4,6 +4,7 @@ import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
 import { stripImagesFromMessage } from "@oh-my-pi/pi-coding-agent/session/messages";
 
 const png = (data: string = "iVBORw0KGgo"): ImageContent => ({ type: "image", data, mimeType: "image/png" });
+const detailImage = (data: string): { data: string; mimeType: string } => ({ data, mimeType: "image/png" });
 const text = (value: string): TextContent => ({ type: "text", text: value });
 
 describe("stripImagesFromMessage", () => {
@@ -55,14 +56,13 @@ describe("stripImagesFromMessage", () => {
 		expect(stripImagesFromMessage(message)).toBe(2);
 		expect(message.content).toEqual([text("[image removed]")]);
 	});
-
 	it("strips images from tool result content AND details.images, summing the count", () => {
 		const message: AgentMessage = {
 			role: "toolResult",
 			toolCallId: "tc1",
 			toolName: "generate_image",
 			content: [text("generated"), png("inline")],
-			details: { images: [png("hidden-1"), png("hidden-2")], imageCount: 2 },
+			details: { images: [detailImage("hidden-1"), detailImage("hidden-2")], imageCount: 2 },
 			isError: false,
 			timestamp: Date.now(),
 		};
@@ -71,9 +71,91 @@ describe("stripImagesFromMessage", () => {
 
 		expect(removed).toBe(3);
 		expect(message.content).toEqual([text("generated")]);
-		const details = message.details as { images: ImageContent[]; imageCount: number };
+		const details = message.details as { images: Array<{ data: string; mimeType: string }>; imageCount: number };
 		expect(details.images).toEqual([]);
 		expect(details.imageCount).toBe(2); // unrelated detail fields stay intact
+	});
+	it("strips detail image payloads without MIME or with non-image MIME metadata", () => {
+		const message: AgentMessage = {
+			role: "toolResult",
+			toolCallId: "tc-mime-less",
+			toolName: "generate_image",
+			content: [text("generated")],
+			details: {
+				images: [{ data: "hidden-without-mime" }, { data: "hidden-with-json-mime", mimeType: "application/json" }],
+			},
+			isError: false,
+			timestamp: Date.now(),
+		};
+
+		expect(stripImagesFromMessage(message)).toBe(2);
+		expect(message.details).toEqual({ images: [] });
+	});
+
+	it("strips images from nested xd:// tool result details and keeps unrelated fields", () => {
+		const message: AgentMessage = {
+			role: "toolResult",
+			toolCallId: "tc-nested",
+			toolName: "write",
+			content: [text("generated"), png("inline")],
+			details: {
+				xdev: {
+					tool: "generate_image",
+					mode: "execute",
+					inner: {
+						images: [detailImage("hidden-1"), detailImage("hidden-2")],
+						imageCount: 2,
+						provider: "fal",
+					},
+				},
+				retained: "outer detail",
+			},
+			isError: false,
+			timestamp: Date.now(),
+		};
+
+		const removed = stripImagesFromMessage(message);
+
+		expect(removed).toBe(3);
+		expect(message.content).toEqual([text("generated")]);
+		const details = message.details as {
+			xdev: {
+				tool: string;
+				mode: string;
+				inner: { images: Array<{ data: string; mimeType: string }>; imageCount: number; provider: string };
+			};
+			retained: string;
+		};
+		expect(details.xdev.inner.images).toEqual([]);
+		expect(details.xdev.inner.imageCount).toBe(2);
+		expect(details.xdev.inner.provider).toBe("fal");
+		expect(details.xdev.tool).toBe("generate_image");
+		expect(details.xdev.mode).toBe("execute");
+		expect(details.retained).toBe("outer detail");
+	});
+
+	it("preserves non-image nested detail entries while stripping image payloads", () => {
+		const message: AgentMessage = {
+			role: "toolResult",
+			toolCallId: "tc-mixed",
+			toolName: "write",
+			content: [text("generated")],
+			details: {
+				xdev: {
+					tool: "generate_image",
+					mode: "execute",
+					inner: {
+						images: [detailImage("hidden"), { provider: "fal", marker: "keep" }],
+					},
+				},
+			},
+			isError: false,
+			timestamp: Date.now(),
+		};
+
+		expect(stripImagesFromMessage(message)).toBe(1);
+		const details = message.details as { xdev: { inner: { images: unknown[] } } };
+		expect(details.xdev.inner.images).toEqual([{ provider: "fal", marker: "keep" }]);
 	});
 
 	it("clears fileMention image attachments without dropping other file fields", () => {

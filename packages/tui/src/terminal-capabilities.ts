@@ -950,7 +950,7 @@ export function calculateImageRows(
 	return Math.max(1, rows);
 }
 
-function calculateImageFit(
+export function calculateImageFit(
 	imageDimensions: ImageDimensions,
 	options: ImageRenderOptions,
 	cellDims: CellDimensions,

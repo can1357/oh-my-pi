@@ -5362,6 +5362,13 @@ export const SETTINGS_SCHEMA = {
 			ordered: true,
 		},
 	},
+	"providers.imageModel": {
+		type: "string",
+		default: "",
+		ui: { tab: "providers", group: "Services", label: "Default Image Model" },
+		description:
+			"Default image model for `generate_image`: a catalog alias (e.g. `nano-banana-pro`, `flux-2-pro`) or a raw `fal:<endpoint-id>` / `openrouter:<model-id>` reference. Empty uses the credentialed provider order.",
+	},
 	"providers.fireworksTier": {
 		type: "enum",
 		values: ["standard", "priority"] as const,

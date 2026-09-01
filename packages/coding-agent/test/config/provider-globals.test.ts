@@ -12,13 +12,21 @@ describe("applyProviderGlobalsFromSettings", () => {
 		const excludeSpy = vi.spyOn(webSearch, "setExcludedSearchProviders").mockImplementation(() => {});
 		const orderSpy = vi.spyOn(webSearch, "setSearchProviderOrder").mockImplementation(() => {});
 		const imageOrderSpy = vi.spyOn(imageGen, "setImageProviderOrder").mockImplementation(() => {});
+		const imageModelSpy = vi.spyOn(imageGen, "setDefaultImageModel").mockImplementation(() => {});
 
 		applyProviderGlobalsFromSettings({
-			get(path: "providers.webSearchOrder" | "providers.webSearchExclude" | "providers.imageOrder"): unknown {
+			get(
+				path:
+					| "providers.webSearchOrder"
+					| "providers.webSearchExclude"
+					| "providers.imageOrder"
+					| "providers.imageModel",
+			): unknown {
 				const values: Record<string, unknown> = {
 					"providers.webSearchOrder": ["perplexity", "not-a-provider", "exa"],
 					"providers.webSearchExclude": ["exa", "not-a-provider", "gemini"],
 					"providers.imageOrder": ["xai", 42, "gemini"],
+					"providers.imageModel": "  flux-2-pro  ",
 				};
 				return values[path];
 			},
@@ -27,5 +35,6 @@ describe("applyProviderGlobalsFromSettings", () => {
 		expect(orderSpy).toHaveBeenCalledWith(["perplexity", "exa"]);
 		expect(excludeSpy).toHaveBeenCalledWith(["exa", "gemini"]);
 		expect(imageOrderSpy).toHaveBeenCalledWith(["xai", "gemini"]);
+		expect(imageModelSpy).toHaveBeenCalledWith("flux-2-pro");
 	});
 });
