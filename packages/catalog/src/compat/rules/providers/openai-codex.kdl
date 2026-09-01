@@ -1,6 +1,14 @@
 // Provider-wire compat for "openai-codex"; regenerated from the frozen census using deployment contract selectors.
 
 provider "openai-codex" {
+	// Replaces the Codex provider's handwritten flex/priority pricing fallback.
+	service-tier-cost {
+		flex 0.5
+		priority 2
+	}
+	// Harmony-protocol leak detection/mitigation applies to every Codex model,
+	// current and future; replaces the provider check in harmony-leak.ts.
+	harmony-leak-mitigation #true
 	// Subscription (Codex) discovery reports no pricing; the curated Daybreak
 	// aliases carry the standard GPT-5.6 Sol/Cyber API list price so cost
 	// display reads as API-equivalent spend. The `-wm` worker sibling bills
@@ -37,6 +45,7 @@ provider "openai-codex" {
 		// GPT-5.5 generation (2x elsewhere).
 		revision "=5.5" {
 			service-tier-cost {
+				flex 0.5
 				priority 2.5
 			}
 		}
@@ -79,29 +88,29 @@ provider "openai-codex" {
 	// first-party API once prompt input exceeds 272K tokens.
 	models "gpt-5.6-luna*" {
 		long-context-cost {
-			inputThreshold 272000
+			input-threshold 272000
 			input 0.4
 			output 1.8
-			cacheRead 0.04
-			cacheWrite 0.5
+			cache-read 0.04
+			cache-write 0.5
 		}
 	}
 	models "gpt-5.6-sol*" "gpt-5.6" {
 		long-context-cost {
-			inputThreshold 272000
+			input-threshold 272000
 			input 10.0
 			output 45.0
-			cacheRead 1.0
-			cacheWrite 12.5
+			cache-read 1.0
+			cache-write 12.5
 		}
 	}
 	models "gpt-5.6-terra*" {
 		long-context-cost {
-			inputThreshold 272000
+			input-threshold 272000
 			input 4.0
 			output 18.0
-			cacheRead 0.4
-			cacheWrite 5.0
+			cache-read 0.4
+			cache-write 5.0
 		}
 	}
 	// OpenAI enabled a 1M window for subscription Codex GPT-5.6 (2026-08-16);

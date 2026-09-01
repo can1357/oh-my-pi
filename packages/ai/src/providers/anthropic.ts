@@ -187,20 +187,27 @@ const taskBudgetBeta = "task-budgets-2026-03-13";
 const effortBeta = "effort-2025-11-24";
 const serverSideFallbackBeta = "server-side-fallback-2026-06-01";
 
-function buildCoworkBetas(
-	agentRequest: boolean,
-	thinkingRequest: boolean,
+function buildCoworkBetas({
+	agentRequest,
+	thinkingRequest,
 	disableStrictTools = false,
-): readonly string[] {
+	supportsContextManagement = true,
+}: {
+	agentRequest: boolean;
+	thinkingRequest: boolean;
+	disableStrictTools?: boolean;
+	supportsContextManagement?: boolean;
+}): readonly string[] {
 	// `context-1m-2025-08-07` is intentionally never advertised. OAuth
 	// subscription credentials have no long-context credit balance, so Anthropic
 	// hard-429s ("Usage credits are required for long context requests") on any
 	// beta-gated 1M model regardless of prompt size (#7238). Natively-1M models
 	// (e.g. claude-sonnet-5) serve their full window without the beta anyway.
-	if (!agentRequest && !disableStrictTools) return coworkUtilityBetaDefaults;
+	if (!agentRequest && !disableStrictTools && supportsContextManagement) return coworkUtilityBetaDefaults;
 	const betas: string[] = [];
 	for (const beta of agentRequest ? coworkAgentBetaDefaults : coworkUtilityBetaDefaults) {
 		if (disableStrictTools && beta === structuredOutputsBeta) continue;
+		if (!supportsContextManagement && beta === contextManagementBeta) continue;
 		betas.push(beta);
 	}
 	if (!agentRequest) return betas;
@@ -251,7 +258,7 @@ export function buildAnthropicHeaders(options: AnthropicHeaderOptions): Record<s
 	// Cowork's beta profile is part of the OAuth fingerprint; API-key requests
 	// default to extras only, matching the streaming path.
 	const betaHeader = buildBetaHeader(
-		options.coworkBetas ?? (oauthToken ? buildCoworkBetas(true, true) : []),
+		options.coworkBetas ?? (oauthToken ? buildCoworkBetas({ agentRequest: true, thinkingRequest: true }) : []),
 		extraBetas,
 	);
 	const acceptHeader = oauthToken ? "application/json" : stream ? "text/event-stream" : "application/json";
@@ -1860,7 +1867,7 @@ const streamAnthropicOnce = (
 			// no nested effort field means the fallback scan cannot re-add its beta.
 			let fallbacks = options?.fallbacks;
 			if (
-				model.provider === "google-vertex" &&
+				!model.compat.supportsOutputEffort &&
 				fallbacks?.some(entry => entry.output_config?.effort !== undefined)
 			) {
 				fallbacks = fallbacks.map(entry => {
@@ -1908,7 +1915,7 @@ const streamAnthropicOnce = (
 						(model.compat.supportsForcedToolChoice && isForcedToolChoice(options?.toolChoice)));
 				if (
 					model.reasoning &&
-					model.provider !== "google-vertex" &&
+					model.compat.supportsOutputEffort &&
 					((options?.thinkingEnabled && options.effort !== "adaptive") || sendsAdaptiveEffortPin) &&
 					!extraBetas.includes(effortBeta)
 				) {
@@ -1924,17 +1931,12 @@ const streamAnthropicOnce = (
 				// `context_management.clear_thinking_20251015` requires this beta. OAuth
 				// requests carry it in `claudeCodeAgentBetaDefaults`; API-key requests
 				// need it added explicitly so the field is honored instead of rejected
-				// (#3288). Skip transports where this package cannot deliver or the
-				// provider cannot accept the beta: Copilot strips Anthropic betas;
-				// Vertex rawPredict needs betas in the body (`anthropic_beta`), not as
-				// an `anthropic-beta` HTTP header; and OpenCode Zen rejects the related
-				// `context_management` field (#6510).
+				// (#3288). Provider deployment contracts that cannot deliver or accept
+				// context management disable it through model compatibility policy.
 				if (
 					model.reasoning &&
 					options?.thinkingEnabled &&
-					model.provider !== "github-copilot" &&
-					model.provider !== "google-vertex" &&
-					model.provider !== "opencode-zen" &&
+					model.compat.supportsContextManagement !== false &&
 					!extraBetas.includes(contextManagementBeta)
 				) {
 					extraBetas.push(contextManagementBeta);
@@ -3050,7 +3052,14 @@ export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): A
 		isCloudflareAiGateway: model.provider === "cloudflare-ai-gateway",
 		allowAnthropicHeaderOverrides: model.compat.allowAnthropicHeaderOverrides,
 		claudeCodeSessionId,
-		coworkBetas: oauthToken ? buildCoworkBetas(hasTools || thinkingEnabled, thinkingEnabled, disableStrictTools) : [],
+		coworkBetas: oauthToken
+			? buildCoworkBetas({
+					agentRequest: hasTools || thinkingEnabled,
+					thinkingRequest: thinkingEnabled,
+					disableStrictTools,
+					supportsContextManagement: model.compat.supportsContextManagement,
+				})
+			: [],
 	});
 
 	if (model.provider === "cloudflare-ai-gateway") {
@@ -3137,7 +3146,7 @@ function disableThinkingIfToolChoiceForced(
 	// body (dropped there too, see buildParams), so it keeps the delete behavior.
 	// The effort beta itself is attached at the request site — including per-request
 	// for injected SDK clients that bypass client-level beta construction.
-	if (isAdaptiveOnlyThinking(model) && model.provider !== "google-vertex") {
+	if (isAdaptiveOnlyThinking(model) && model.compat.supportsOutputEffort) {
 		const outputConfig = (params.output_config as AnthropicOutputConfig | undefined) ?? {};
 		outputConfig.effort = "low";
 		params.output_config = outputConfig;
@@ -3322,7 +3331,7 @@ function buildParams(
 		tools = convertTools(
 			context.tools,
 			isOAuthToken,
-			disableStrictTools || model.provider === "github-copilot",
+			disableStrictTools,
 			supportsEagerToolInputStreaming,
 			model.compat.escapeBuiltinToolNames,
 			useUmansGatewayWebSearch,
@@ -3397,20 +3406,12 @@ function buildParams(
 	// and the KV cache misses every turn (#3288). Narrowing this guard back
 	// to `isOAuthToken` regresses every API-key thinking provider. Skip
 	// injected clients because this code cannot add the required
-	// `context-management-2025-06-27` beta to caller-owned SDK clients. Skip
-	// Copilot because its proxy strips Anthropic betas and demotes thinking
-	// blocks to text upstream, so `keep: "all"` is a no-op that risks proxy
-	// rejection of an unrecognized field. Skip Vertex rawPredict because that
-	// adapter requires betas in the JSON body (`anthropic_beta`) instead of the
-	// Anthropic HTTP beta header this code can add. Skip OpenCode Zen because
-	// its Anthropic proxy rejects the unrecognized `context_management` field
-	// with `400 Extra inputs are not permitted` on several Claude families
-	// (#6510) — same rationale as Copilot.
+	// `context-management-2025-06-27` beta to caller-owned SDK clients.
+	// Providers that cannot deliver or accept context management disable it
+	// through model compatibility policy.
 	const shouldKeepThinkingContext =
 		!options?.client &&
-		model.provider !== "github-copilot" &&
-		model.provider !== "google-vertex" &&
-		model.provider !== "opencode-zen" &&
+		model.compat.supportsContextManagement !== false &&
 		(thinking?.type === "adaptive" || thinking?.type === "enabled");
 	const contextManagement = shouldKeepThinkingContext
 		? { edits: [{ type: "clear_thinking_20251015" as const, keep: "all" as const }] }
@@ -3421,7 +3422,7 @@ function buildParams(
 	// (`anthropic_beta`), never as the `anthropic-beta` HTTP header this path sets
 	// — so the field is dropped alongside the beta to avoid a 400 (#5614).
 	const outputConfigEntries: AnthropicOutputConfig = {};
-	if (outputConfigEffort && model.provider !== "google-vertex") outputConfigEntries.effort = outputConfigEffort;
+	if (outputConfigEffort && model.compat.supportsOutputEffort) outputConfigEntries.effort = outputConfigEffort;
 	if (options?.taskBudget) outputConfigEntries.task_budget = options.taskBudget;
 	const outputConfig = Object.keys(outputConfigEntries).length ? outputConfigEntries : undefined;
 

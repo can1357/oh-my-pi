@@ -109,20 +109,19 @@ const CONCRETE_ANCHOR =
 	/`[^`]+`|\b\w{2,}\.[a-zA-Z]\w{0,4}\b|[\w-]+(?:\/[\w-]+){2,}|\b\w+_\w+\b|\b[a-z]+[A-Z]\w*\b|\b[A-Z][a-z]+[A-Z]\w*\b/g;
 
 /**
- * True when `model.id` belongs to a family guarded by the semantic loop
- * heuristics: Gemini, DeepSeek, or Grok. Exact suffix-cycle detection applies to
- * every enabled model independently of this predicate.
- *
- * Model identity is derived only from its id; provider and compatibility metadata
- * do not opt opaque aliases into semantic detection.
+ * True when resolved compatibility policy enables semantic loop heuristics for
+ * this model. Exact suffix-cycle detection applies to every enabled model
+ * independently of this predicate.
  */
 export function isLoopGuardedModel(model: Model<Api>, options?: StreamOptions): boolean {
 	if (options?.loopGuard?.enabled === false) return false;
 	const compat = model.compat;
-	if (compat !== undefined && "thinkingLoopGuard" in compat) {
-		if (compat.thinkingLoopGuard !== undefined) return true;
-	}
-	return model.identity?.class === "gemini" || model.identity?.class === "deepseek" || model.identity?.class === "xai";
+	if (compat !== undefined) return "thinkingLoopGuard" in compat && compat.thinkingLoopGuard !== undefined;
+	// Custom API surfaces resolve no compat record, so the KDL `thinking-loop-guard`
+	// axis cannot land on them; fall back to the class facts the axis encodes
+	// (classes/{gemini,deepseek,xai}.kdl).
+	const cls = model.identity?.class;
+	return cls === "gemini" || cls === "deepseek" || cls === "xai";
 }
 
 /**

@@ -1,6 +1,11 @@
 // Provider-wire compat for "xai"; regenerated from the frozen census using deployment contract selectors.
 
 provider "xai" {
+	// Replaces the provider-keyed prompt-cache session-header baseline.
+	prompt-cache-session-header "x-grok-conv-id"
+	// xAI's function-calling validator 400s on leftover root anyOf/oneOf tool
+	// schemas; replaces the provider check in the OpenAI request builders.
+	reject-root-object-union #true
 	class "xai" {
 		family "grok" {
 			// Paid xAI routes through /v1/responses like SuperGrok. Encrypted

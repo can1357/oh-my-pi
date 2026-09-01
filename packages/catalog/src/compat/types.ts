@@ -304,6 +304,7 @@ export interface CompiledBehavior {
 	excludeModels: CompiledExcludeModels[];
 	planRequirements: CompiledPlanRequirement[];
 	pricingPeers: CompiledPricingPeer[];
+	retiredProviders: string[];
 }
 
 /** The complete compiled rule tree persisted as `rules.json`. */

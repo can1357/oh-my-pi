@@ -5,6 +5,10 @@ class "gemini" {
 	// the four-tier scale, Gemini 3+ Pro exposes only low/high, and the 3+
 	// Flash/Lite lines keep the four-tier scale.
 	family "pro" {
+		// Replaces the Gemini 2.5+ Pro mandatory-reasoning fallback.
+		revision ">=2.5 <3" {
+			thinking-requires-effort #true
+		}
 		revision "<3" {
 			thinking-efforts "minimal" "low" "medium" "high"
 		}
@@ -65,7 +69,11 @@ class "gemini" {
 
 	// Gemini 3 tool calls require the sentinel signature on unsigned replay.
 	revision ">=3" {
+		// Replaces the Google multimodal function-response baseline.
+		multimodal-function-response #true
 		requires-skip-thought-signature #true
+		// Replaces the Gemini 3+ mandatory-reasoning fallback.
+		thinking-requires-effort #true
 	}
 	on "google" "opencode-zen" {
 		revision ">=3" {

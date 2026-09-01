@@ -225,6 +225,9 @@ describe("openai-completions compatibility", () => {
 			zaiReasoningEffortDialect: false,
 			clampOutputToModelMax: false,
 			stripImageInput: false,
+			rejectRootObjectUnion: false,
+			retryWithoutStrictOnGrammarError: false,
+			supportsPromptCacheKey: false,
 		} satisfies ResolvedOpenAICompat;
 		const assistantMessage: AssistantMessage = {
 			role: "assistant",

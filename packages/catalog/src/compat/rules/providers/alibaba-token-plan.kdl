@@ -1,6 +1,8 @@
 // Provider-wire compat for "alibaba-token-plan"; regenerated from the frozen census using deployment contract selectors.
 
 provider "alibaba-token-plan" {
+	// Replaces the Alibaba-compatible thinking-format branch.
+	thinking-format "qwen"
 	thinking-mode "effort"
 	class "qwen" {
 		revision ">=3.6 <3.8" {
@@ -19,10 +21,10 @@ provider "alibaba-token-plan" {
 		thinking-default-level "xhigh"
 		thinking-efforts "low" "medium" "xhigh"
 		when-thinking {
-			extraBody {
+			extra-body {
 				enable_thinking #true
 			}
-			thinkingFormat "openai"
+			thinking-format "openai"
 		}
 	}
 	// residue: taxonomy ranks and exact globs do not isolate these models.

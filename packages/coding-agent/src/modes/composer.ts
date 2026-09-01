@@ -329,6 +329,7 @@ export class Composer implements TerminalFrameProvider {
 		chromeRows: number,
 	): { id: number; rows: readonly string[]; kind: "append" | "replay" } | undefined {
 		if (this.#offeredHistory !== undefined) {
+			this.#rerenderOfferedHistory(width);
 			return {
 				id: this.#offeredHistory.id,
 				rows: this.#offeredHistory.rows,
@@ -399,6 +400,25 @@ export class Composer implements TerminalFrameProvider {
 			rows: this.#offeredHistory.rows,
 			kind: this.#offeredHistory.kind,
 		};
+	}
+
+	#rerenderOfferedHistory(width: number): void {
+		const offered = this.#offeredHistory;
+		if (offered === undefined) return;
+		if (offered.source === "header") {
+			const rows = this.#header.render(width);
+			offered.rows = rows.length > 0 ? [...rows, ""] : [];
+			return;
+		}
+		const transcript = offered.source.transcript.rerenderOfferedBatch(width);
+		if (offered.source.header === "none") {
+			if (transcript !== undefined) offered.rows = transcript.rows;
+			return;
+		}
+		const recomposed = this.#header.render(width);
+		const headerRows = recomposed.length > 0 ? [...recomposed, ""] : this.#reflowRetiredHeader(width, 0);
+		offered.source.headerRows = headerRows;
+		offered.rows = [...headerRows, ...(transcript?.rows ?? [])];
 	}
 
 	#renderRoots(roots: readonly Component[], width: number): string[] {

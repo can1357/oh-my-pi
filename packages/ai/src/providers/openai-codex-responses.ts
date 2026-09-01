@@ -1333,17 +1333,8 @@ function getCodexServiceTierCostMultiplier(
 	model: Pick<Model<"openai-codex-responses">, "serviceTierCost">,
 	serviceTier: ServiceTier | "default" | undefined,
 ): number {
-	const resolvedMultiplier =
-		serviceTier === "flex" || serviceTier === "priority" ? model.serviceTierCost?.[serviceTier] : undefined;
-	if (resolvedMultiplier !== undefined) return resolvedMultiplier;
-	switch (serviceTier) {
-		case "flex":
-			return 0.5;
-		case "priority":
-			return 2;
-		default:
-			return 1;
-	}
+	if (serviceTier !== "flex" && serviceTier !== "priority") return 1;
+	return model.serviceTierCost?.[serviceTier] ?? 1;
 }
 
 function resolveCodexCostServiceTier(res: unknown, req?: unknown): ServiceTier | "default" | undefined {

@@ -1991,13 +1991,13 @@ export const SETTINGS_SCHEMA = {
 	// Input and startup
 	doubleEscapeAction: {
 		type: "enum",
-		values: ["branch", "tree", "none"] as const,
-		default: "tree",
+		values: ["rewind", "none"] as const,
+		default: "rewind",
 		ui: {
 			tab: "interaction",
 			group: "Input",
 			label: "Double-Escape Action",
-			description: "Action when pressing Escape twice with empty editor",
+			description: "Pressing Escape twice with an empty editor opens the transcript rewind selector",
 		},
 	},
 
@@ -4946,7 +4946,11 @@ export const SETTINGS_SCHEMA = {
 			label: "Prefer Task Delegation",
 			description: "How strongly to push delegating work to subagents",
 			options: [
-				{ value: "default", label: "Default", description: "Model decides when to delegate" },
+				{
+					value: "default",
+					label: "Default",
+					description: "Uses the selected model's policy; some models require an explicit delegation request",
+				},
 				{ value: "preferred", label: "Preferred", description: "Adds delegation guidance to the system prompt" },
 				{ value: "always", label: "Always", description: "Prompt guidance plus a first-turn delegation reminder" },
 			],

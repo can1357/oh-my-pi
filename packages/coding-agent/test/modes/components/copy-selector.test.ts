@@ -1,155 +1,184 @@
+/**
+ * Contract tests for the transcript-based `/copy` picker: Enter copies the
+ * outlined turn's text, Right descends into its inner blocks (fenced code,
+ * commands, tool output) and Enter copies the outlined block verbatim,
+ * Left/Esc ascend before Esc cancels, and turns without prose fall back to
+ * their blocks.
+ */
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
-import { stripVTControlCharacters } from "node:util";
+import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { KeybindingsManager } from "@oh-my-pi/pi-coding-agent/config/keybindings";
+import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { CopySelectorComponent } from "@oh-my-pi/pi-coding-agent/modes/components/copy-selector";
-import { getThemeByName, setThemeInstance, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
-import type { CopyTarget } from "@oh-my-pi/pi-coding-agent/modes/utils/copy-targets";
-import { setKeybindings } from "@oh-my-pi/pi-tui";
+import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import type { SessionMessageEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
+import { setKeybindings, type TUI } from "@oh-my-pi/pi-tui";
 
 const UP = "\x1b[A";
-const DOWN = "\x1b[B";
-const ENTER = "\n";
-const CANCEL = "\x07"; // ctrl+g, remapped to tui.select.cancel below
+const LEFT = "\x1b[D";
+const RIGHT = "\x1b[C";
+const ENTER = "\r";
+const ESC = "\x1b";
 
-let darkTheme = await getThemeByName("dark");
+const CODE = "const answer = 42;\nconsole.log(answer);";
+const ASSISTANT_TEXT = `Here is the fix:\n\`\`\`ts\n${CODE}\n\`\`\`\nDone.`;
 
-// Flatten order (always expanded): msg:1, Block 1, Block 2, msg:2.
-function makeRoots(): CopyTarget[] {
+function entry(id: string, parentId: string | null, message: AgentMessage): SessionMessageEntry {
+	return { type: "message", id, parentId, timestamp: "2024-01-01T00:00:00Z", message };
+}
+
+/** user → assistant(text + code fence + bash call) → bash result. */
+function makeEntries(): SessionMessageEntry[] {
 	return [
-		{
-			id: "msg:1",
-			label: "Newest message",
-			hint: "5 lines · 2 code",
-			preview: "newest-preview-text",
-			content: "FULL_MESSAGE",
-			copyMessage: "Copied last message to clipboard",
-			children: [
-				{
-					id: "msg:1:code:0",
-					label: "Block 1",
-					hint: "ts",
-					language: "ts",
-					preview: "alpha()",
-					content: "BLOCK0",
-					copyMessage: "Copied block 1",
-				},
-				{
-					id: "msg:1:code:1",
-					label: "Block 2",
-					hint: "py",
-					language: "python",
-					preview: "beta()",
-					content: "BLOCK1",
-					copyMessage: "Copied block 2",
-				},
+		entry("u1", null, { role: "user", content: "fix the logging", timestamp: 1 } as AgentMessage),
+		entry("a1", "u1", {
+			role: "assistant",
+			content: [
+				{ type: "text", text: ASSISTANT_TEXT },
+				{ type: "toolCall", id: "call-1", name: "bash", arguments: { command: "bun test" } },
 			],
-		},
-		{
-			id: "msg:2",
-			label: "Older message",
-			hint: "3 lines",
-			preview: "older-text",
-			content: "OLDER",
-			copyMessage: "Copied message",
-		},
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-sonnet-4-5",
+			stopReason: "stop",
+			usage: {
+				input: 10,
+				output: 5,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 15,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: 2,
+		} as unknown as AgentMessage),
+		entry("t1", "a1", {
+			role: "toolResult",
+			toolCallId: "call-1",
+			toolName: "bash",
+			content: [{ type: "text", text: "12 pass" }],
+			isError: false,
+			timestamp: 3,
+		} as unknown as AgentMessage),
 	];
 }
 
-function render(component: CopySelectorComponent): string {
-	return stripVTControlCharacters(component.render(80).join("\n"));
+function makeSelector(picks: Array<{ content: string; label: string }>, onCancel = () => {}): CopySelectorComponent {
+	return new CopySelectorComponent(makeEntries(), {
+		ui: { requestRender: () => {}, requestComponentRender: () => {} } as unknown as TUI,
+		cwd: "/tmp",
+		requestRender: () => {},
+		onPick: (content, label) => picks.push({ content, label }),
+		onCancel,
+	});
 }
 
 describe("CopySelectorComponent", () => {
 	beforeAll(async () => {
-		darkTheme = await getThemeByName("dark");
-		if (!darkTheme) throw new Error("Failed to load dark theme");
+		await initTheme();
 	});
-
-	beforeEach(() => {
-		setThemeInstance(darkTheme!);
-		setKeybindings(KeybindingsManager.inMemory({ "tui.select.cancel": "ctrl+g" }));
+	beforeEach(async () => {
+		await Settings.init({ inMemory: true, cwd: process.cwd() });
+		setKeybindings(KeybindingsManager.inMemory());
 	});
-
 	afterEach(() => {
 		setKeybindings(KeybindingsManager.inMemory());
-		vi.restoreAllMocks();
+		resetSettingsForTest();
 	});
 
-	it("renders an outlined tree with code blocks nested under their message", () => {
-		const out = render(new CopySelectorComponent(makeRoots(), { onPick: vi.fn(), onCancel: vi.fn() }));
-		expect(out).toContain(theme.boxRound.topLeft);
-		expect(out).toContain("│");
-		expect(out).toContain("Copy to clipboard");
-		// Messages and their nested blocks are all visible (always expanded),
-		// connected with /tree-style branch glyphs.
-		expect(out).toContain("Newest message");
-		expect(out).toContain("Block 1");
-		expect(out).toContain("Block 2");
-		expect(out).toContain("Older message");
-		expect(out).toMatch(/[├└]/);
+	it("copies the outlined turn's prose on Enter", () => {
+		const picks: Array<{ content: string; label: string }> = [];
+		const selector = makeSelector(picks);
+		selector.render(100);
+
+		selector.handleInput(ENTER);
+		selector.dispose();
+
+		// The newest item is the assistant turn (bash result folded into it);
+		// its item-level copy is the assistant prose, not tool noise.
+		expect(picks).toEqual([{ content: ASSISTANT_TEXT, label: "assistant message" }]);
 	});
 
-	it("renders human-readable keybinding hints in the footer", () => {
-		const out = render(new CopySelectorComponent(makeRoots(), { onPick: vi.fn(), onCancel: vi.fn() }));
+	it("descends into inner blocks with Right and copies the block verbatim", () => {
+		const picks: Array<{ content: string; label: string }> = [];
+		const selector = makeSelector(picks);
+		selector.render(100);
 
-		expect(out).toContain("Enter copy");
-		expect(out).toContain("Ctrl+G quit");
+		selector.handleInput(RIGHT);
+		selector.handleInput(ENTER);
+		selector.dispose();
+
+		// First block of the turn is the fenced code — copied without fences.
+		expect(picks).toEqual([{ content: CODE, label: "ts code" }]);
 	});
 
-	it("copies the message node itself on Enter", () => {
-		const onPick = vi.fn();
-		const component = new CopySelectorComponent(makeRoots(), { onPick, onCancel: vi.fn() });
+	it("steps through command and tool-output blocks of the same turn", () => {
+		const picks: Array<{ content: string; label: string }> = [];
+		const selector = makeSelector(picks);
+		selector.render(100);
 
-		component.handleInput(ENTER); // cursor starts on the message node
+		selector.handleInput(RIGHT);
+		selector.handleInput("\x1b[B");
+		selector.handleInput(ENTER);
+		selector.handleInput(RIGHT);
+		selector.handleInput("\x1b[B");
+		selector.handleInput("\x1b[B");
+		selector.handleInput(ENTER);
+		selector.dispose();
 
-		expect(onPick).toHaveBeenCalledTimes(1);
-		expect(onPick.mock.calls[0]![0].content).toBe("FULL_MESSAGE");
+		// Block order within the turn: code fence, bash command, bash result.
+		expect(picks).toEqual([
+			{ content: "bun test", label: "bash command" },
+			{ content: "12 pass", label: "bash result" },
+		]);
 	});
 
-	it("navigates into a nested code block and copies it", () => {
-		const onPick = vi.fn();
-		const component = new CopySelectorComponent(makeRoots(), { onPick, onCancel: vi.fn() });
-
-		component.handleInput(DOWN); // onto "Block 1"
-		component.handleInput(ENTER);
-
-		expect(onPick).toHaveBeenCalledTimes(1);
-		expect(onPick.mock.calls[0]![0].content).toBe("BLOCK0");
-	});
-
-	it("traverses past nested blocks to the older message, with the preview tracking the cursor", () => {
-		const component = new CopySelectorComponent(makeRoots(), { onPick: vi.fn(), onCancel: vi.fn() });
-
-		component.handleInput(DOWN); // Block 1
-		expect(render(component)).toContain("alpha()");
-
-		component.handleInput(DOWN); // Block 2
-		component.handleInput(DOWN); // Older message
-		expect(render(component)).toContain("older-text");
-
-		component.handleInput(UP); // back onto Block 2
-		expect(render(component)).toContain("beta()");
-	});
-
-	it("drops cached preview content when invalidated", () => {
-		const roots = makeRoots();
-		const component = new CopySelectorComponent(roots, { onPick: vi.fn(), onCancel: vi.fn() });
-
-		expect(render(component)).toContain("newest-preview-text");
-
-		roots[0]!.preview = "updated-preview-text";
-		component.invalidate();
-
-		expect(render(component)).toContain("updated-preview-text");
-		expect(render(component)).not.toContain("newest-preview-text");
-	});
-
-	it("quits on the cancel key", () => {
+	it("Esc ascends from the block view before it cancels the picker", () => {
+		const picks: Array<{ content: string; label: string }> = [];
 		const onCancel = vi.fn();
-		const component = new CopySelectorComponent(makeRoots(), { onPick: vi.fn(), onCancel });
+		const selector = makeSelector(picks, onCancel);
+		selector.render(100);
 
-		component.handleInput(CANCEL);
+		selector.handleInput(RIGHT);
+		selector.handleInput(ESC);
+		expect(onCancel).not.toHaveBeenCalled();
+		selector.handleInput(ENTER);
+		selector.handleInput(ESC);
+		selector.dispose();
 
+		// Post-ascend Enter copies the whole turn again; the second Esc cancels.
+		expect(picks).toEqual([{ content: ASSISTANT_TEXT, label: "assistant message" }]);
 		expect(onCancel).toHaveBeenCalledTimes(1);
+	});
+
+	it("Left/Up navigate: user prompt copies its raw text", () => {
+		const picks: Array<{ content: string; label: string }> = [];
+		const selector = makeSelector(picks);
+		selector.render(100);
+
+		selector.handleInput(UP);
+		selector.handleInput(ENTER);
+		selector.dispose();
+
+		expect(picks).toEqual([{ content: "fix the logging", label: "user message" }]);
+	});
+
+	it("renders the descended block stack with captions and dotted outline", () => {
+		const selector = makeSelector([]);
+		const itemView = selector.render(100).map(line => Bun.stripANSI(line));
+		// The outline advertises the descent affordance before Right is pressed.
+		expect(itemView.join("\n")).toContain("3 blocks →");
+		selector.handleInput(RIGHT);
+		const lines = selector.render(100).map(line => Bun.stripANSI(line));
+		selector.handleInput(LEFT);
+		selector.dispose();
+
+		const joined = lines.join("\n");
+		expect(joined).toContain("1/3 · ts code");
+		expect(joined).toContain("2/3 · bash command");
+		expect(joined).toContain("3/3 · bash result");
+		// The selected block sits inside the dotted outline; the rest are plain.
+		const boxed = lines.filter(line => line.startsWith("┆")).join("\n");
+		expect(boxed).toContain("const answer = 42;");
+		expect(boxed).not.toContain("bun test");
 	});
 });

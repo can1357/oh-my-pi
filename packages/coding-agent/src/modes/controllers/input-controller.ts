@@ -442,16 +442,12 @@ export class InputController {
 				// Esc must not destroy an in-progress draft.
 				this.ctx.lastEscapeTime = 0;
 			} else {
-				// Double-interrupt with empty editor triggers /tree, /branch, or nothing based on setting
-				const action = settings.get("doubleEscapeAction");
-				if (action !== "none") {
+				// Double-interrupt with empty editor opens the transcript rewind
+				// selector unless disabled.
+				if (settings.get("doubleEscapeAction") !== "none") {
 					const now = Date.now();
 					if (now - this.ctx.lastEscapeTime < 500) {
-						if (action === "tree") {
-							this.ctx.showTreeSelector();
-						} else {
-							this.ctx.showUserMessageSelector();
-						}
+						this.ctx.showUserMessageSelector();
 						// Forced viewport repaint only: `resetDisplay()` replays the whole
 						// committed transcript (and clears native scrollback on direct
 						// terminals), which blocks on PTY backpressure for tens of seconds
@@ -2163,7 +2159,7 @@ export class InputController {
 			this.ctx.editor.setCustomKeyHandler(keyId, () => {
 				const ctx = runner.createCommandContext();
 				try {
-					shortcut.handler(ctx);
+					runner.runScoped(() => shortcut.handler(ctx));
 				} catch (err) {
 					runner.emitError({
 						extensionPath: shortcut.extensionPath,

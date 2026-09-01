@@ -1574,6 +1574,26 @@ bar`,
 			const output = markdown.render(80).join("\n");
 			expect(output.includes("\x1b]8;;http://www.example.com\x07")).toBe(true);
 		});
+
+		it("renders a reference link with a prototype-key label as plain text without crashing (issue #10283)", () => {
+			// A reference-style link whose label collides with an Object.prototype
+			// member used to resolve to an inherited non-definition, producing a
+			// link token with `href: undefined` that crashed the renderer at
+			// `token.href.startsWith` — fatal during transcript replay.
+			// `constructor`/`toString` render as literal label text; every case
+			// must avoid emitting an OSC 8 hyperlink and must not throw.
+			for (const label of ["constructor", "toString", "valueOf", "isPrototypeOf"]) {
+				const markdown = new Markdown(`See [${label}] for details`, 0, 0, defaultMarkdownTheme);
+				const output = markdown.render(80).join("\n");
+				expect(stripTerminalSequences(output).trim()).toBe(`See [${label}] for details`);
+				expect(output.includes("\x1b]8;;")).toBe(false);
+			}
+			// `__proto__`'s double underscores are legitimately parsed as emphasis;
+			// the contract here is only that it never becomes a link or crashes.
+			const protoOut = new Markdown("See [__proto__] for details", 0, 0, defaultMarkdownTheme).render(80).join("\n");
+			expect(protoOut.includes("\x1b]8;;")).toBe(false);
+			expect(stripTerminalSequences(protoOut)).toContain("proto");
+		});
 	});
 
 	describe("HTML-like tags in text", () => {
