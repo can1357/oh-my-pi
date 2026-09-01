@@ -50,6 +50,25 @@ describe("Portkey gateway model references", () => {
 		const index = buildModelReferenceIndex([direct, reseller]);
 		expect(index.exact.get("shared-model")?.provider).toBe("openai");
 	});
+
+	test("does not use ClinePass entries as cross-provider references", () => {
+		const clinePassModel = buildModel({
+			id: "mistral-large-3",
+			name: "Mistral Large 3 (free)",
+			api: "openai-completions",
+			provider: "cline-pass",
+			baseUrl: "https://api.cline.bot/api/v1",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 256_000,
+			maxTokens: 32_000,
+		} satisfies ModelSpec<"openai-completions">);
+
+		const index = buildModelReferenceIndex([clinePassModel]);
+
+		expect(resolveModelReference("mistral-large-3", index)).toBeUndefined();
+	});
 });
 
 describe("Vercel AI Gateway cache compat", () => {

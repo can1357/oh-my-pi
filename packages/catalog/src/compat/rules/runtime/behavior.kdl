@@ -102,9 +102,9 @@ behavior {
 
 	// Provider-default wire model for model-less hosted search operations.
 	hosted-default provider="kimi-search" model="kimi-for-coding"
-	// Regional gateways sell provider-specific model surfaces. Their pricing and
-	// limits remain valid provider-locally but must not seed global references.
-	cross-provider-reference-exclusions "aki-io" "cortecs" "eurouter" "melious" "nebius" "opper" "ovhcloud" "scaleway"
+	// Provider-specific model surfaces may carry pricing, limits, or routing
+	// metadata that must remain provider-local instead of seeding global references.
+	cross-provider-reference-exclusions "aki-io" "cline-pass" "cortecs" "eurouter" "melious" "nebius" "opper" "ovhcloud" "scaleway"
 	// European gateway rosters interleave model families that their chat
 	// completions endpoints cannot serve. Match the id and display name because
 	// individual providers are inconsistent about which field carries the SKU.
