@@ -3529,6 +3529,132 @@ describe("RelayBridge tab grouping", () => {
 		});
 	});
 
+	it("replays preserved preload scripts on a fresh root after a replacement loses the replay result", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		const pageSession = await attachPage(bridge, ext, cdp, connId, 1);
+
+		const addId = ++msgSeq;
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({
+				id: addId,
+				sessionId: pageSession,
+				method: "Page.addScriptToEvaluateOnNewDocument",
+				params: { source: "window.__relayInjected = true;" },
+			}),
+		);
+		await flush();
+		ack(bridge, ext, "send", { identifier: "root-script-before-recovery" });
+		await flush();
+		const addReply = cdp.messages.find((message) => message.id === addId);
+		const clientIdentifier =
+			addReply &&
+			"result" in addReply &&
+			addReply.result &&
+			typeof addReply.result === "object" &&
+			"identifier" in addReply.result &&
+			typeof addReply.result.identifier === "string"
+				? addReply.result.identifier
+				: undefined;
+		expect(clientIdentifier).toBeDefined();
+
+		bridge.extClosed(ext);
+		const ext2 = new FakeExtSocket();
+		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], {
+			recoverableTabIds: [1],
+		});
+		await waitFor(
+			() => ext2.rpcs("attach").length === 1,
+			"preload-script lost-result recovery attach RPC",
+		);
+		ack(bridge, ext2, "attach");
+		await waitFor(
+			() =>
+				ext2
+					.rpcs("send")
+					.some(
+						(rpc) => rpc.method === "Page.addScriptToEvaluateOnNewDocument",
+					),
+			"preload-script lost-result first replay",
+		);
+
+		const replacement = new FakeExtSocket();
+		bridge.extConnected(replacement);
+		await flush();
+		connect(bridge, replacement, [tab({ tabId: 1, groupId: -1 })], {
+			attachedTabIds: [1],
+			recoverableTabIds: [1],
+		});
+		await waitFor(
+			() => replacement.rpcs("detach").length === 1,
+			"fresh-root detach before retrying preload replay",
+		);
+		ack(bridge, replacement, "detach");
+		await waitFor(
+			() => replacement.rpcs("attach").length === 1,
+			"fresh-root attach before retrying preload replay",
+		);
+		ack(bridge, replacement, "attach");
+		await waitFor(
+			() =>
+				replacement
+					.rpcs("send")
+					.some(
+						(rpc) => rpc.method === "Page.addScriptToEvaluateOnNewDocument",
+					),
+			"preload-script replay after fresh root",
+		);
+		const replay = replacement
+			.rpcs("send")
+			.find((rpc) => rpc.method === "Page.addScriptToEvaluateOnNewDocument");
+		expect(replay?.params).toEqual({
+			source: "window.__relayInjected = true;",
+		});
+		expect(
+			replacement
+				.rpcs("send")
+				.filter(
+					(rpc) => rpc.method === "Page.addScriptToEvaluateOnNewDocument",
+				),
+		).toHaveLength(1);
+		ack(bridge, replacement, "send", {
+			identifier: "root-script-after-fresh-root",
+		});
+		await flush();
+
+		const removeId = ++msgSeq;
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({
+				id: removeId,
+				sessionId: pageSession,
+				method: "Page.removeScriptToEvaluateOnNewDocument",
+				params: { identifier: clientIdentifier },
+			}),
+		);
+		await waitFor(
+			() =>
+				replacement
+					.rpcs("send")
+					.some(
+						(rpc) => rpc.method === "Page.removeScriptToEvaluateOnNewDocument",
+					),
+			"preload-script remove after fresh-root replay",
+		);
+		const removeRpc = replacement
+			.rpcs("send")
+			.find((rpc) => rpc.method === "Page.removeScriptToEvaluateOnNewDocument");
+		expect(removeRpc?.params).toEqual({
+			identifier: "root-script-after-fresh-root",
+		});
+		ack(bridge, replacement, "send");
+		await flush();
+	});
+
 	it("removes preload scripts when their connection closes", async () => {
 		const bridge = new RelayBridge({});
 		const ext = new FakeExtSocket();
@@ -3552,9 +3678,13 @@ describe("RelayBridge tab grouping", () => {
 		);
 		await waitFor(
 			() =>
-				ext.rpcs("send").some(
-					(rpc) => rpc.id === ext.rpcs("send")[0]?.id && rpc.method === "Page.addScriptToEvaluateOnNewDocument",
-				),
+				ext
+					.rpcs("send")
+					.some(
+						(rpc) =>
+							rpc.id === ext.rpcs("send")[0]?.id &&
+							rpc.method === "Page.addScriptToEvaluateOnNewDocument",
+					),
 			"preload-script install",
 		);
 		ack(bridge, ext, "send", { identifier: "root-script-before-close" });
@@ -3573,8 +3703,8 @@ describe("RelayBridge tab grouping", () => {
 					.some(
 						(rpc) =>
 							rpc.method === "Page.removeScriptToEvaluateOnNewDocument" &&
-							(rpc.params as { identifier?: string } | undefined)?.identifier ===
-								"root-script-before-close",
+							(rpc.params as { identifier?: string } | undefined)
+								?.identifier === "root-script-before-close",
 					),
 			"preload-script cleanup after connection close",
 		);
@@ -4096,10 +4226,7 @@ describe("RelayBridge tab grouping", () => {
 			"file chooser recovery attach RPC",
 		);
 		ack(bridge, ext2, "attach");
-		await waitFor(
-			() => ext2.rpcs("send").length === 1,
-			"file chooser replay",
-		);
+		await waitFor(() => ext2.rpcs("send").length === 1, "file chooser replay");
 		expect(ext2.rpcs("send").map((rpc) => rpc.method)).toEqual([
 			"Page.setInterceptFileChooserDialog",
 		]);
@@ -4107,10 +4234,7 @@ describe("RelayBridge tab grouping", () => {
 
 		bridge.cdpClosed(ownerConn);
 		ack(bridge, ext2, "send");
-		await waitFor(
-			() => ext2.rpcs("send").length === 2,
-			"file chooser cleanup",
-		);
+		await waitFor(() => ext2.rpcs("send").length === 2, "file chooser cleanup");
 		expect(ext2.rpcs("send").map((rpc) => rpc.method)).toEqual([
 			"Page.setInterceptFileChooserDialog",
 			"Page.setInterceptFileChooserDialog",

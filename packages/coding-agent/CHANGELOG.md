@@ -4,6 +4,9 @@
 
 ### Fixed
 
+- Fixed an issue where custom model overrides were lost during configuration updates
+- Fixed "Please use nerdfont" notification incorrectly persisting after theme configuration
+- Fixed sampling parameter errors for newer Anthropic models (Opus 4.7+, Sonnet 5+)
 - Fixed browser-relay reconnects failing to re-attach tabs that still had live session holders after the extension's orphan sweep detached them, so an extension/service-worker restart no longer strands active relay-controlled tabs in a permanently detached state until the next manual claim ([#8930](https://github.com/can1357/oh-my-pi/issues/8930)).
 - Fixed a recoverable tab that fails to re-attach after an outage (for example, DevTools claimed it) leaving a discovering Puppeteer client holding an undrivable recreated target: the relay bridge now retracts the re-announced target when the guard-authorized reattach fails, matching the `Target.setAutoAttach` path ([#8930](https://github.com/can1357/oh-my-pi/issues/8930)).
 - Fixed browser-relay recovery skipping the debugger re-attach for a still-claimed tab whose session holder attached through `Target.attachToTarget` without enabling `Target.setAutoAttach`: the reconnect path now forces the attachment for recoverable tabs regardless of auto-attach clients, so the tab is not left announced-but-detached with the holder's next command failing ([#8930](https://github.com/can1357/oh-my-pi/issues/8930)).
@@ -39,9 +42,6 @@
 
 ### Fixed
 
-- Fixed an issue where custom model overrides were lost during configuration updates
-- Fixed "Please use nerdfont" notification incorrectly persisting after theme configuration
-- Fixed sampling parameter errors for newer Anthropic models (Opus 4.7+, Sonnet 5+)
 - Improved edit-tool error guidance for operations missing the `»` separator, identifying redundant context-only operations
 - Fixed OAuth provider `modifyModels` projections being silently dropped after a discovery refresh introduced live-config headers.
 - Edit-tool `＋`/`－` line operations now match their anchors leniently across whitespace drift (indentation, blank-line miscounts) instead of failing with a byte-for-byte error; a note reports the lenient match.

@@ -387,6 +387,8 @@ class TabState {
 	resumeSubscriptionReconcileAfterRestore = false;
 	/** Recovery replay must complete, including after an extension socket replacement. */
 	restorePending = false;
+	/** Retry preload replay on a fresh Chrome root after an ambiguous transport swap. */
+	forceFreshRootBeforeReplay = false;
 	/** Effective root-domain state by subscription key and owning page pseudo-session. */
 	readonly subscriptions = new Map<
 		string,
@@ -436,7 +438,7 @@ const RPC_TIMEOUT_MS = 20_000;
 const CDP_ERROR_METHOD_NOT_FOUND = -32601;
 const CDP_ERROR_SERVER = -32000;
 
-function platformFromUserAgent(userAgent: string): string | undefined {
+function _platformFromUserAgent(userAgent: string): string | undefined {
 	if (!userAgent) return undefined;
 	if (userAgent.includes("Android")) return "Android";
 	if (userAgent.includes("Mac OS X")) return "MacIntel";
@@ -2757,6 +2759,7 @@ export class RelayBridge {
 		this.#log("tab detached", { tabId, reason });
 		tab.attached = false;
 		tab.attaching = null;
+		tab.forceFreshRootBeforeReplay = false;
 		this.#resetRuntime(tab);
 		tab.restoreRootRuntime = false;
 		tab.banned = true;
@@ -2866,7 +2869,9 @@ export class RelayBridge {
 		// terminal attach failure — and must not retract preserved sessions.
 		const ext = this.#ext;
 		const restoring = (async () => {
-			const ok = !attach || (await this.#ensureAttached(tab));
+			const ok = tab.forceFreshRootBeforeReplay
+				? await this.#refreshRootForRecovery(tab, ext)
+				: !attach || (await this.#ensureAttached(tab));
 			if (!ok) {
 				if (this.#ext !== ext) {
 					// The extension socket was replaced (or closed) mid-attach: the
@@ -2882,6 +2887,7 @@ export class RelayBridge {
 				// during the outage). Mirror the Target.setAutoAttach path and retract
 				// the just-announced target so a discovering client never retains a
 				// recreated target it can neither initialize nor drive.
+				tab.forceFreshRootBeforeReplay = false;
 				tab.restorePending = false;
 				this.#retractTab(tab);
 				return;
@@ -2903,11 +2909,13 @@ export class RelayBridge {
 					// contract. Surface a real session teardown instead of leaving the
 					// client silently subscribed to domains that are disabled on Chrome's
 					// fresh root.
+					tab.forceFreshRootBeforeReplay = false;
 					tab.restorePending = false;
 					this.#retractTab(tab);
 					this.#detachIfUnheld(tab.tabId);
 					return;
 				}
+				tab.forceFreshRootBeforeReplay = false;
 				tab.restorePending = false;
 			}
 			// The user can cancel the debugger attachment while the final replay RPC
@@ -2957,6 +2965,54 @@ export class RelayBridge {
 		});
 		tab.restoring = task;
 		tab.restoringExt = ext;
+	}
+
+	/**
+	 * A preload replay whose RPC result is lost across a socket swap may already
+	 * have mutated Chrome, but without the returned identifier we cannot dedupe a
+	 * retry on the same root. Force a fresh debugger root before replaying again.
+	 */
+	async #refreshRootForRecovery(
+		tab: TabState,
+		expectedExt: RelaySocket | null,
+	): Promise<boolean> {
+		if (!tab.attached) return await this.#ensureAttached(tab);
+		while (tab.detaching) await tab.detaching;
+		const staleRealSessions = [...tab.realSessions];
+		for (const realSession of staleRealSessions)
+			this.#realSessionTabs.delete(realSession);
+		tab.realSessions.clear();
+		for (const conn of this.#conns.values()) {
+			for (const pageSession of conn.sessionsForTab(tab.tabId, "page")) {
+				const ref = conn.sessions.get(pageSession);
+				if (!ref) continue;
+				for (const realSession of staleRealSessions) {
+					this.#emit(
+						conn,
+						"Target.detachedFromTarget",
+						{ sessionId: realSession },
+						pageSession,
+					);
+				}
+				ref.runtimeContexts.clear();
+				ref.runtimeEnabling = null;
+				ref.runtimeEpoch++;
+			}
+		}
+		if (tab.rootRuntimeEnabled) tab.restoreRootRuntime = true;
+		tab.reattachedAfterDetach = false;
+		const done = (async () => {
+			this.#assertExtensionCurrent(expectedExt);
+			await this.#rpc({ op: "detach", tabId: tab.tabId });
+			this.#assertExtensionCurrent(expectedExt);
+			tab.attached = false;
+			this.#resetRuntime(tab);
+		})().finally(() => {
+			if (tab.detaching === done) tab.detaching = null;
+		});
+		tab.detaching = done;
+		await done;
+		return await this.#ensureAttached(tab);
 	}
 
 	/** Restore root-domain state promised by page sessions preserved across recovery. */
@@ -3053,12 +3109,19 @@ export class RelayBridge {
 							runImmediately: false,
 						}
 					: script.params;
-			const result = (await this.#rpc({
-				op: "send",
-				tabId: tab.tabId,
-				method: "Page.addScriptToEvaluateOnNewDocument",
-				params: replayParams,
-			})) as Record<string, unknown> | undefined;
+			let result: Record<string, unknown> | undefined;
+			try {
+				result = (await this.#rpc({
+					op: "send",
+					tabId: tab.tabId,
+					method: "Page.addScriptToEvaluateOnNewDocument",
+					params: replayParams,
+				})) as Record<string, unknown> | undefined;
+			} catch (err) {
+				if (err instanceof ExtensionReplacedError)
+					tab.forceFreshRootBeforeReplay = true;
+				throw err;
+			}
 			this.#assertExtensionCurrent(expectedExt);
 			const identifier = result?.identifier;
 			if (typeof identifier !== "string") {
@@ -3321,6 +3384,7 @@ export class RelayBridge {
 		const done = this.#rpc({ op: "detach", tabId })
 			.then(() => {
 				tab.attached = false;
+				tab.forceFreshRootBeforeReplay = false;
 				tab.restorePending = false;
 				tab.subscriptionReconciling = null;
 				tab.subscriptions.clear();
