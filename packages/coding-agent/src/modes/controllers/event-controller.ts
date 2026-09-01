@@ -34,6 +34,7 @@ import {
 import { type ApprovalMode, resolveApproval } from "../../tools/approval";
 import { previewLine, TRUNCATE_LENGTHS } from "../../tools/render-utils";
 import { PROPOSE_DEVICE_NAME, writeDeviceDispatch } from "../../tools/resolve";
+import { isSessionGrantExcluded, isToolApprovedForSession } from "../../tools/session-approvals";
 import { nextActionableTask } from "../../tools/todo";
 import { SpeechEnhancer } from "../../tts/speech-enhancer";
 import { vocalizer } from "../../tts/vocalizer";
@@ -1551,13 +1552,38 @@ export class EventController {
 	 * the wrapper's `resolveApproval` inputs (approvalMode + tools.approval); uses
 	 * `resolveApproval` rather than `requiresApproval` so a `deny` policy does not
 	 * throw in the render path.
+	 *
+	 * A session approval ("… Commands for Session") downgrades the `prompt`
+	 * resolution to allow in the wrapper, so it must not flip the title here
+	 * either. Three classes of prompt are never downgraded and so always mean
+	 * `attention`: a tool-demanded `override` (bash critical patterns,
+	 * `bash.patterns: prompt`), pending provider safety checks, which the
+	 * computer tool's synthetic `{actions, pendingSafetyChecks}` event args
+	 * mark, and a tool no session grant may cover (`task`).
+	 *
+	 * The grants that need a subject — a recorded similar subject, a session
+	 * file grant — are deliberately NOT consulted: they may still end in a
+	 * prompt, which makes `attention` the conservative correct answer, and
+	 * reading them here would mean re-deriving write targets from partially
+	 * streamed args in a render path.
 	 */
 	#toolWillPromptForApproval(toolName: string, args: unknown): boolean {
 		const tool = this.ctx.viewSession.getToolByName(toolName);
 		if (!tool) return false;
 		const mode = (settings.get("tools.approvalMode") ?? "yolo") as ApprovalMode;
 		const userPolicies = (settings.get("tools.approval") ?? {}) as Record<string, unknown>;
-		return resolveApproval(tool, args, mode, userPolicies).policy === "prompt";
+		const resolved = resolveApproval(tool, args, mode, userPolicies);
+		if (resolved.policy !== "prompt") return false;
+		if (resolved.override || isSessionGrantExcluded(toolName)) return true;
+		const synthetic = args as { actions?: unknown; pendingSafetyChecks?: unknown } | null;
+		if (
+			Array.isArray(synthetic?.actions) &&
+			Array.isArray(synthetic?.pendingSafetyChecks) &&
+			synthetic.pendingSafetyChecks.length > 0
+		) {
+			return true;
+		}
+		return !isToolApprovedForSession(this.ctx.sessionManager.getSessionId(), toolName);
 	}
 
 	async #handleToolExecutionUpdate(

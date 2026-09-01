@@ -2982,6 +2982,38 @@ describe("ACP agent", () => {
 			});
 		});
 
+		it("degrades rich select options to label-only enum entries and returns the label", async () => {
+			// The approval gate's session options are `{label, labelHighlight}`
+			// items matched by exact label on return; the elicitation enum must
+			// carry exactly those labels — the TUI-only highlight stays in the
+			// host process — so the client's answer round-trips.
+			const { connection, calls } = createElicitConnection(async () => ({
+				action: "accept",
+				content: { value: "Approve bash Commands for Session" },
+			}));
+			const ctx = createAcpExtensionUiContext(connection, () => "session-select-rich", FORM_CAPABILITIES);
+
+			const result = await ctx.select("Approve?", [
+				"Approve",
+				{
+					label: "Approve bash Commands for Session",
+					labelHighlight: "bash",
+				},
+				"Deny",
+			]);
+
+			expect(result).toBe("Approve bash Commands for Session");
+			const request = calls[0]!;
+			if (!isFormElicitation(request)) throw new Error("expected form elicitation");
+			expect(request.requestedSchema).toEqual({
+				type: "object",
+				properties: {
+					value: { type: "string", enum: ["Approve", "Approve bash Commands for Session", "Deny"] },
+				},
+				required: ["value"],
+			});
+		});
+
 		it("translates confirm to a boolean elicitation and returns the accepted value", async () => {
 			const { connection, calls } = createElicitConnection(async () => ({
 				action: "accept",

@@ -255,10 +255,24 @@ export function requiresApproval(
 	return { required: false };
 }
 
+/** Halves of the elision marker below; {@link isTruncatedForPrompt} reads them back. */
+const ELISION_OPEN = "[…";
+const ELISION_CLOSE = "ch elided…]";
+
 export function truncateForPrompt(value: string, maxChars = DEFAULT_PROMPT_TRUNCATE_CHARS): string {
 	if (value.length <= maxChars) return value;
 	const omitted = value.length - maxChars;
-	return `${value.slice(0, maxChars)}[…${omitted}ch elided…]`;
+	return `${value.slice(0, maxChars)}${ELISION_OPEN}${omitted}${ELISION_CLOSE}`;
+}
+
+/**
+ * True when `value` carries the elision marker, i.e. material was cut before it
+ * reached the prompt. Consumers that must not judge partial content — the
+ * approval similarity classifier — gate on this instead of re-typing the marker.
+ */
+export function isTruncatedForPrompt(value: string): boolean {
+	const open = value.indexOf(ELISION_OPEN);
+	return open >= 0 && value.includes(ELISION_CLOSE, open + ELISION_OPEN.length);
 }
 
 /**

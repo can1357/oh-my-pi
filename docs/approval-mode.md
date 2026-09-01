@@ -87,6 +87,14 @@ Tools can add approval-prompt body lines with `formatApprovalDetails(args)`. The
 - `Reason: <reason>` when the tool decision supplies one
 - tool-specific details such as command, path, code, browser action, or subagent assignment
 
+## Session-scoped approvals
+
+Approval prompts offer two extra options: `Approve <tool> Commands for Session` skips prompts for that tool for the rest of the session, and `Approve Similar <tool> Commands for Session` auto-approves later calls that a small classifier judges similar to the approved one; any classifier error or timeout falls back to a normal prompt. Grants live in memory only, belong to one session id (`/new`, `/reset`, fork, rewind, session switch, and process exit release them), and never bypass a `deny` policy, provider safety checks, or tool-demanded prompts such as `bash` critical patterns. The classifier is the `TINY` role model from `/models`, else `smol`, and is not configurable: the on-device tiny models the other small-model classifiers offer were measured granting commands whose effect class does not match the approved one, and a `YES` here runs a tool with no prompt. Point the `TINY` role at your own endpoint to keep the check local.
+
+`Approve Similar` also records the files that call writes, and those file grants are session-wide rather than per tool: approving a `write` to `src/a.ts` covers a later `edit` of `src/a.ts`, and a command whose write targets the classifier names covers both. For `write` and `edit` the targets come from the call's own arguments — path, patch sections, and move destinations — and match with no model call at all. For every other tool the classifier names them, and only paths quoted verbatim in the approved subject are kept. A granted file is not a licence to do anything to it: a grant means "this session may write this file", so a call that deletes a file or moves it away always prompts, and approving such a call grants nothing for the path it removes.
+
+The `task` tool is excluded from all of this. Its subject is a free-form prompt with no bounded operation to compare, and it runs its own tool calls behind its own approval gate, so `task` prompts offer only `Approve` and `Deny`.
+
 ## Defining approval on tools
 
 Built-in and custom tools share the same shape:

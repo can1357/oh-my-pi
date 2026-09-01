@@ -144,7 +144,9 @@ execute(toolCallId, params, onUpdate, ctx, signal);
 - `params` is statically typed from its omptype or TypeBox schema via `Static<TParams>`.
 - Runtime argument validation happens before execution in the agent loop.
 - `onUpdate` emits partial results for UI streaming.
-- `ctx` includes `sessionManager`, `modelRegistry`, current `model`, `isIdle()`, `hasQueuedMessages()`, `abort()`, and optional `settings`, `fetch`, `localProtocolOptions`, and `autoApprove`.
+- `ctx` includes `sessionManager`, `modelRegistry`, current `model`, `isIdle()`, `hasQueuedMessages()`, `abort()`, and optional `settings`, `fetch`, `localProtocolOptions`, `autoApprove`, and `metadataForProvider(provider)`.
+- Which optional fields arrive depends on how the tool was registered. SDK-provided and discovered tools get a context rebuilt by the extension bridge, which carries `metadataForProvider` and `localProtocolOptions` but drops `settings` and `autoApprove`. MCP-adapted tools get the agent loop's own context, which carries those two as well. Nothing in the CLI sets `fetch`; it is there for library consumers that build a context themselves.
+- `metadataForProvider(provider)` returns the session's per-provider request metadata (`metadata.user_id`); pass it to any side model request the tool makes so the call is attributed to the same provider session and OAuth account as the conversation. Call it per request — after the credential is selected. Every session path supplies it; it is absent only when the host built an extension runner with no session agent behind it, such as the `omp models` CLI.
 - `signal` carries cancellation and may be `undefined`.
 
 The session bootstrap bridge converts custom tools to extension `ToolDefinition`s and forwards calls in the correct argument order. `CustomToolAdapter` remains available to library consumers that directly adapt a custom tool to the agent tool interface.

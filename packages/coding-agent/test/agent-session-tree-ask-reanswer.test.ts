@@ -667,6 +667,10 @@ describe("AgentSession.buildAskReanswerContext", () => {
 			expect(toolContext.isIdle?.()).toBe(true);
 			expect(toolContext.hasQueuedMessages?.()).toBe(false);
 			expect(() => toolContext.abort?.()).not.toThrow();
+			// Live delegate to the agent's installed metadata resolver, so a tool's
+			// side model request is attributed to this session's provider identity.
+			const metadata = toolContext.metadataForProvider?.("anthropic");
+			expect(JSON.parse(String(metadata?.user_id)).session_id).toBe(session.agent.sessionId);
 		} finally {
 			await ctx.cleanup();
 		}

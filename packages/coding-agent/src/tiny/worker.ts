@@ -277,9 +277,11 @@ async function generateTitle(
 }
 
 /**
- * Completion path for Mnemopi memory tasks. Extraction can carry a dedicated
- * system prompt and user payload; consolidation retains the generic user-only
- * prompt. Output is capped to keep local inference latency bounded.
+ * Generic completion used by Mnemopi memory tasks (fact extraction and
+ * consolidation) and the small classifiers. The caller supplies the task
+ * prompt as the user turn and, optionally, its rules as a system turn; we
+ * decode greedily and return the raw text for the caller's own parser. Output
+ * is capped to keep local inference latency bounded.
  */
 async function generateCompletion(
 	transport: TinyTitleTransport,

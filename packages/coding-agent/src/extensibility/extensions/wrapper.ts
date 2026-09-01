@@ -19,12 +19,28 @@ import {
 	resolveApproval,
 	truncateForPrompt,
 } from "../../tools/approval";
+import {
+	type ApprovalSimilarityVerdict,
+	classifyApprovalSimilarity,
+	classifyWriteTargets,
+} from "../../tools/approval-similarity";
+import { toolCallCwd, toolFileEffects } from "../../tools/approval-write-targets";
 import { defaultLoadModeForToolName } from "../../tools/essential-tools";
 import { withFileMutationSession } from "../../tools/file-write-fallback";
+import {
+	addFileApprovals,
+	addSimilarApproval,
+	approvalIdentity,
+	approvalSubject,
+	approveToolForSession,
+	hasSessionApprovalGrants,
+	isSessionGrantExcluded,
+	isToolApprovedForSession,
+} from "../../tools/session-approvals";
 import { normalizeToolEventInput, resolveToolEventInput } from "../tool-event-input";
 import { applyToolProxy } from "../tool-proxy";
 import type { ExtensionRunner } from "./runner";
-import type { RegisteredTool, ToolCallEventResult } from "./types";
+import type { ExtensionUISelectItem, RegisteredTool, ToolCallEventResult } from "./types";
 
 /**
  * Adapts a RegisteredTool into an AgentTool.
@@ -262,8 +278,68 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 		// them on the user's behalf.
 		const explicitPrompt = resolved.override || Object.hasOwn(userPolicies, resolved.policyKey ?? this.tool.name);
 		const xdevBypass = context?.xdevApproved === true && effectiveParams === params;
+		const policyPrompts = resolved.policy === "prompt" && (explicitPrompt || !xdevBypass);
+
+		// Session approvals ("… Commands for Session" prompt options) can only
+		// downgrade a `prompt` resolution the user is free to answer once: they
+		// never satisfy provider safety checks (each of those must be
+		// acknowledged per call), never override the `deny` short-circuit above,
+		// and never answer a tool-demanded prompt (`resolved.override` — bash
+		// critical patterns, `bash.patterns: prompt`), which is a safety gate the
+		// user never opted out of. The similarity classifier runs before the
+		// prompt so a "similar" verdict skips it entirely; it is fail-safe
+		// (`false` ⇒ prompt) and time-bounded by contract.
+		const safetyOverride = resolved.override === true;
+		const sessionId = context?.sessionManager?.getSessionId() ?? "";
+		// One condition for honoring a grant and for offering one below: an option
+		// the gate would refuse to honor must never appear, or the grant it records
+		// silently does nothing.
+		const sessionGrants =
+			sessionId.length > 0 &&
+			pendingSafetyChecks.length === 0 &&
+			!safetyOverride &&
+			!isSessionGrantExcluded(this.tool.name);
+		// Computed once for the coverage check and the record path both, and only
+		// where a grant is in play: an approval subject formats the tool's detail
+		// lines, and an identity digests the whole argument object.
+		const subject = sessionGrants ? approvalSubject(this.tool, resolvedArgs) : "";
+		const identity = sessionGrants ? approvalIdentity(resolvedArgs) : "";
+		// Paths in a grant are absolute, so they survive a later call that names
+		// the same file differently — hence the cwd this call itself resolves
+		// against, which `bash` may redirect with its own `cwd` argument.
+		const cwd = sessionGrants
+			? toolCallCwd(this.tool.name, resolvedArgs, context?.sessionManager?.getCwd() ?? "")
+			: "";
+		const fileEffects = sessionGrants ? toolFileEffects(this.tool.name, resolvedArgs, cwd) : undefined;
+		const classifyDeps = {
+			sessionId,
+			toolName: this.tool.name,
+			subject,
+			identity,
+			fileEffects,
+			cwd,
+			registry: context?.modelRegistry,
+			// Attribute the classification to this session's provider identity,
+			// like every other side request (title, auto-thinking, recovery).
+			metadataResolver: context?.metadataForProvider,
+			signal,
+		};
+		let sessionAllowed = false;
+		// Retained for the record path: an `Approve Similar` choice records the
+		// files this call writes, and when the gate already classified them there
+		// is nothing left to ask.
+		let verdict: ApprovalSimilarityVerdict | undefined;
+		if (policyPrompts && sessionGrants) {
+			if (isToolApprovedForSession(sessionId, this.tool.name)) {
+				sessionAllowed = true;
+			} else if (settings && hasSessionApprovalGrants(sessionId, this.tool.name)) {
+				verdict = await classifyApprovalSimilarity({ ...classifyDeps, settings });
+				sessionAllowed = verdict.covered;
+			}
+		}
+
 		const approvalCheck = {
-			required: pendingSafetyChecks.length > 0 || (resolved.policy === "prompt" && (explicitPrompt || !xdevBypass)),
+			required: (pendingSafetyChecks.length > 0 || policyPrompts) && !sessionAllowed,
 			reason: resolved.reason,
 		};
 
@@ -278,7 +354,6 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 
 			const hasApprovalHandlers =
 				this.runner.hasHandlers("tool_approval_requested") || this.runner.hasHandlers("tool_approval_resolved");
-			const sessionId = context?.sessionManager?.getSessionId() ?? "";
 			if (hasApprovalHandlers) {
 				await this.runner.emit({
 					type: "tool_approval_requested",
@@ -327,14 +402,46 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 				pendingSafetyChecks.length > 0
 					? `${basePrompt}\nProvider safety checks:\n${safetyCheckLines(pendingSafetyChecks).join("\n")}`
 					: basePrompt;
+			// Session-scoped options appear on exactly the condition the gate above
+			// honors them on (`sessionGrants`): a safety acknowledgement is per-call
+			// and must not be broadened into a session-wide grant that later calls
+			// answer for the user, and offering an option that gate refuses to honor
+			// would silently drop the grant.
+			const approveSessionToolLabel = `Approve ${this.tool.name} Commands for Session`;
+			const approveSimilarLabel = `Approve Similar ${this.tool.name} Commands for Session`;
+			const options: ExtensionUISelectItem[] = sessionGrants
+				? [
+						"Approve",
+						{ label: approveSessionToolLabel, labelHighlight: this.tool.name },
+						{ label: approveSimilarLabel, labelHighlight: this.tool.name },
+						"Deny",
+					]
+				: ["Approve", "Deny"];
 			let choice: string | undefined;
 			try {
-				choice = await uiContext.select(safetyPrompt, ["Approve", "Deny"]);
+				choice = await uiContext.select(safetyPrompt, options);
 			} catch (err) {
 				await emitApprovalResolved(false, err instanceof Error ? err.message : "approval aborted");
 				throw err;
 			}
-			const approved = choice === "Approve";
+			if (choice === approveSessionToolLabel) {
+				approveToolForSession(sessionId, this.tool.name);
+			} else if (choice === approveSimilarLabel) {
+				addSimilarApproval(sessionId, this.tool.name, subject, identity);
+				// Files this call writes become session-wide grants, so approving a
+				// write here covers the same file through any other tool. Their source,
+				// in order: the call's own arguments when the tool states its file
+				// effects (`write`/`edit`, where a delete or a move away states that
+				// the path is not written), else the paths the classifier read out of
+				// the subject — reusing the verdict above when the gate already
+				// classified this call, so one gate costs at most one classification.
+				const writeTargets =
+					fileEffects?.writes ??
+					verdict?.writeTargets ??
+					(settings ? await classifyWriteTargets({ ...classifyDeps, settings }) : []);
+				addFileApprovals(sessionId, writeTargets);
+			}
+			const approved = choice === "Approve" || choice === approveSessionToolLabel || choice === approveSimilarLabel;
 			await emitApprovalResolved(approved, approved ? undefined : "denied by user");
 			if (!approved) {
 				throw new Error(`Tool call denied by user: ${this.tool.name}`);
