@@ -23,6 +23,7 @@
 - Fixed an issue where custom model overrides were lost during configuration updates
 - Fixed "Please use nerdfont" notification incorrectly persisting after theme configuration
 - Fixed sampling parameter errors for newer Anthropic models (Opus 4.7+, Sonnet 5+)
+- Fixed Enter being silently dropped for the entire first turn when omp is launched with an initial prompt; typed messages now steer into the running turn ([#10302](https://github.com/can1357/oh-my-pi/pull/10302) by [@nick-maderight](https://github.com/nick-maderight)).
 
 ## [18.0.11] - 2026-08-29
 
