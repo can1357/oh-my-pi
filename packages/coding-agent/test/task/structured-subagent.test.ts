@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import path from "node:path";
+import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
@@ -35,6 +36,8 @@ type FallbackTestModel = {
 	provider: string;
 	id: string;
 	compat: { requiresStructuredOutputHardening?: boolean };
+	reasoning?: boolean;
+	thinking?: { mode: "effort"; efforts: string[] };
 };
 
 function fallbackTestModel(provider: string, id: string, requiresHardening = false): FallbackTestModel {
@@ -153,6 +156,9 @@ describe("structured subagent primitive", () => {
 			mode: "permissive",
 			failureToolNames: undefined,
 		});
+		expect(() => executorModule.resolveStructuredOutputHarnessPolicy(true, false, "permissive")).toThrow(
+			"Invalid strict effective output schema",
+		);
 		expect(
 			executorModule.isOutputSchemaCorrectionLock({
 				type: "session_init",
@@ -225,6 +231,36 @@ describe("structured subagent primitive", () => {
 				modelRegistry,
 				initialSelector: "openai/a",
 				roleHint: undefined,
+			}),
+		).toBe(false);
+	});
+
+	it("ignores hardening fallbacks above the spawn effort ceiling", async () => {
+		const models: Record<string, FallbackTestModel> = {
+			"openai/a": fallbackTestModel("openai", "a"),
+			"merge-gateway/c": {
+				...fallbackTestModel("merge-gateway", "c", true),
+				thinking: { mode: "effort", efforts: ["high"] },
+				reasoning: true,
+			},
+		};
+		const modelRegistry = {
+			find: (provider: string, id: string) => models[`${provider}/${id}`],
+			hasProvider: (provider: string) => Object.values(models).some(model => model.provider === provider),
+			getApiKey: async () => "merge-key",
+		} as unknown as ModelRegistry;
+		const settings = Settings.isolated({
+			"retry.fallbackChains": {
+				"openai/a": ["merge-gateway/c"],
+			},
+		});
+		expect(
+			await executorModule.retryFallbackMayRequireStructuredOutputHardening({
+				settings,
+				modelRegistry,
+				initialSelector: "openai/a",
+				roleHint: undefined,
+				effortCeiling: Effort.Low,
 			}),
 		).toBe(false);
 	});

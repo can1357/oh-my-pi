@@ -7,7 +7,7 @@
 import path from "node:path";
 import type { AgentEvent, AgentIdentity, AgentMessage, AgentTelemetryConfig } from "@oh-my-pi/pi-agent-core";
 import { EventLoopKeepalive, recordHandoff, resolveTelemetry } from "@oh-my-pi/pi-agent-core";
-import type { Api, Model, ServiceTierByFamily, Usage } from "@oh-my-pi/pi-ai";
+import type { Api, Effort, Model, ServiceTierByFamily, Usage } from "@oh-my-pi/pi-ai";
 import { logger, popLoopPhase, prompt, pushLoopPhase, untilAborted } from "@oh-my-pi/pi-utils";
 import { ASYNC_JOB_MANAGER_SHUTDOWN_REASON, AsyncJobManager } from "../async";
 import type { Rule } from "../capability/rule";
@@ -58,7 +58,13 @@ import {
 } from "../session/retry-fallback-chains";
 import { SessionManager } from "../session/session-manager";
 import { truncateTail } from "../session/streaming-output";
-import { type ConfiguredThinkingLevel, prewalkWouldBeNoop, resolveTaskEffortLevel, type TaskEffort } from "../thinking";
+import {
+	type ConfiguredThinkingLevel,
+	modelSupportsEffortCeiling,
+	prewalkWouldBeNoop,
+	resolveTaskEffortLevel,
+	type TaskEffort,
+} from "../thinking";
 import type { ContextFileEntry, ToolSession } from "../tools";
 import { resolveEvalBackends } from "../tools/eval-backends";
 import { isIrcEnabled } from "../tools/hub";
@@ -110,6 +116,10 @@ export function resolveStructuredOutputHarnessPolicy(
 	const { normalized } = normalizeSchema(outputSchema);
 	if (!requiresStructuredOutputHardening || normalized === undefined) {
 		return { mode: requestedMode, failureToolNames: undefined };
+	}
+	if (requestedMode !== "strict") {
+		const { error } = buildOutputValidator(outputSchema);
+		if (error) throw new Error(`Invalid strict effective output schema: ${error}`);
 	}
 	return { mode: "strict", failureToolNames: ["yield"] };
 }
@@ -332,8 +342,9 @@ export async function retryFallbackMayRequireStructuredOutputHardening(args: {
 	modelRegistry: ModelRegistry;
 	initialSelector: string | undefined;
 	roleHint: string | undefined;
+	effortCeiling?: Effort;
 }): Promise<boolean> {
-	const { settings, modelRegistry, initialSelector, roleHint } = args;
+	const { settings, modelRegistry, initialSelector, roleHint, effortCeiling } = args;
 	if (!initialSelector || !settings.get("retry.modelFallback")) return false;
 	const disabledProviders = new Set(settings.get("disabledProviders"));
 	const chains = getRetryFallbackChains(settings);
@@ -349,7 +360,9 @@ export async function retryFallbackMayRequireStructuredOutputHardening(args: {
 		getModelRole: (role: string) => settings.getModelRole(role),
 		modelLookup: modelRegistry,
 	};
-	const queue: Array<{ selector: string; roleHint?: string }> = [{ selector: initialSelector, roleHint }];
+	const queue: Array<{ selector: string; roleHint?: string; isFallback: boolean }> = [
+		{ selector: initialSelector, roleHint, isFallback: false },
+	];
 	const seen = new Set<string>();
 	while (queue.length > 0) {
 		const current = queue.shift()!;
@@ -359,6 +372,14 @@ export async function retryFallbackMayRequireStructuredOutputHardening(args: {
 		const parsed = parseRetryFallbackSelector(current.selector, modelRegistry);
 		const currentModel = parsed ? modelRegistry.find(parsed.provider, parsed.id) : undefined;
 		if (currentModel && disabledProviders.has(currentModel.provider)) continue;
+		if (
+			current.isFallback &&
+			currentModel &&
+			effortCeiling !== undefined &&
+			!modelSupportsEffortCeiling(currentModel, effortCeiling)
+		) {
+			continue;
+		}
 		if (
 			currentModel &&
 			modelRequiresStructuredOutputHardening(currentModel) &&
@@ -372,7 +393,7 @@ export async function retryFallbackMayRequireStructuredOutputHardening(args: {
 					allowMissingPrimary: true,
 				})
 			: [];
-		for (const candidate of candidates) queue.push({ selector: candidate.raw });
+		for (const candidate of candidates) queue.push({ selector: candidate.raw, isFallback: true });
 	}
 	return false;
 }
@@ -3228,6 +3249,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 						modelRegistry,
 						initialSelector: formatModelStringWithRouting(prewalk.target),
 						roleHint: prewalkPattern ? resolveExplicitModelRole([prewalkPattern], subagentSettings) : undefined,
+						effortCeiling: spawnEffortCeiling,
 					})));
 			const fallbackInitialSelector =
 				authFallbackUsed && model ? formatModelStringWithRouting(model) : initialFallbackSelector;
@@ -3239,6 +3261,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					modelRegistry,
 					initialSelector: fallbackInitialSelector,
 					roleHint: fallbackRoleHint,
+					effortCeiling: spawnEffortCeiling,
 				}),
 				prewalkMayRequireHardening,
 			});
