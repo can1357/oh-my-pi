@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
-import { rebakeBundledModel } from "../scripts/generate-models";
+import { applyGlobalModelsDevFallback, rebakeBundledModel } from "../scripts/generate-models";
+import type { ModelSpec } from "../src/types";
 
 describe("provider-local model rebakes", () => {
 	test("rederives stale serialized thinking metadata", () => {
@@ -42,5 +43,38 @@ describe("provider-local model rebakes", () => {
 			mode: "anthropic-budget-effort",
 			efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.XHigh],
 		});
+	});
+});
+
+describe("global catalog fallbacks", () => {
+	test("preserves live gateway reasoning and input metadata", () => {
+		const liveGatewayModel: ModelSpec<"openai-completions"> = {
+			id: "mistral-large-3",
+			name: "Mistral Large 3",
+			api: "openai-completions",
+			provider: "eurouter",
+			baseUrl: "https://api.eurouter.ai/api/v1",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: null,
+			maxTokens: null,
+			catalogFallback: {
+				liveInputModalities: true,
+				liveReasoning: true,
+			},
+		};
+		const globalReference: ModelSpec<"openai-completions"> = {
+			...liveGatewayModel,
+			provider: "stencil.so",
+			reasoning: true,
+			input: ["text", "image"],
+			catalogFallback: undefined,
+		};
+
+		const [resolved] = applyGlobalModelsDevFallback([liveGatewayModel], [globalReference]);
+
+		expect(resolved?.reasoning).toBe(false);
+		expect(resolved?.input).toEqual(["text"]);
 	});
 });

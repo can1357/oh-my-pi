@@ -254,7 +254,7 @@ function createGlobalModelsDevReferenceMap(modelsDevModels: readonly ModelSpec[]
 	return references;
 }
 
-function applyGlobalModelsDevFallback(
+export function applyGlobalModelsDevFallback(
 	models: readonly ModelSpec[],
 	modelsDevModels: readonly ModelSpec[],
 ): ModelSpec[] {
@@ -289,8 +289,8 @@ function applyGlobalModelsDevFallback(
 		return {
 			...model,
 			name: reference.name,
-			reasoning: reference.reasoning,
-			input: reference.input,
+			reasoning: model.catalogFallback?.liveReasoning === true ? model.reasoning : reference.reasoning,
+			input: model.catalogFallback?.liveInputModalities === true ? model.input : reference.input,
 			// Fill unknown endpoint limits from same-id stencil.so references, but keep
 			// provider-specific values when discovery returned them explicitly.
 			contextWindow: model.contextWindow ?? reference.contextWindow,
