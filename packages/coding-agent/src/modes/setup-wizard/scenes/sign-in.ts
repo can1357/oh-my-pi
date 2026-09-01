@@ -11,6 +11,7 @@ import {
 } from "@oh-my-pi/pi-tui";
 import { getAgentDbPath } from "@oh-my-pi/pi-utils";
 import { copyToClipboard } from "../../../utils/clipboard";
+import { openCommandFor } from "../../../utils/open";
 import { OAuthSelectorComponent } from "../../components/oauth-selector";
 import { theme } from "../../theme/theme";
 import type { SetupSceneHost, SetupTab } from "./types";
@@ -147,12 +148,17 @@ export class SignInTab implements SetupTab {
 			lines.push(...this.#selector.render(width));
 		}
 
-		const urlLines = this.#authUrl ? wrapTextWithAnsi(theme.fg("dim", this.#authUrl), width) : [];
+		// Layout rule: the rows a user has to act on come first, the long
+		// reference string comes last and whole.
+		//
+		// The previous revision printed the first two wrapped rows of the URL
+		// under the header and then the entire URL again below the prompt. The
+		// copy a user reaches for first ended mid-query-string, and the working
+		// one sat several rows further down. Selecting the URL is the fallback
+		// for every machine where the browser handoff does not work, so it has
+		// to be the obvious one, unbroken and printed once.
 		if (this.#authUrl) {
-			lines.push(
-				theme.fg("accent", `Browser login: ${loginUrlLink(this.#authUrl)} ${loginCopyHint()}`),
-				...urlLines.slice(0, 2),
-			);
+			lines.push(theme.fg("accent", `Browser login: ${loginUrlLink(this.#authUrl)} ${loginCopyHint()}`));
 			if (this.#authLaunchUrl) {
 				lines.push(theme.fg("dim", `Local shortcut (this machine only): ${this.#authLaunchUrl}`));
 			}
@@ -164,8 +170,10 @@ export class SignInTab implements SetupTab {
 			}
 			lines.push(this.#prompt.input.render(width)[0] ?? "");
 		}
-		if (urlLines.length > 2) {
-			lines.push(...urlLines);
+		// Last, so a short terminal clips the tail of a string the user can also
+		// reach with Alt+C or the OSC 8 link, never the input they must type in.
+		if (this.#authUrl) {
+			lines.push(...wrapTextWithAnsi(theme.fg("dim", this.#authUrl), width));
 		}
 		if (this.#statusLines.length > 0) {
 			lines.push(...this.#statusLines.flatMap(line => wrapTextWithAnsi(line, width)));
@@ -219,7 +227,14 @@ export class SignInTab implements SetupTab {
 						this.#statusLines.push(theme.fg("dim", "Paste the returned code or redirect URL when prompted."));
 					}
 					void this.#copyAuthUrl();
-					this.host.ctx.openInBrowser(info.url);
+					// A suppressed launch has to be visible. The provider's own
+					// instructions say a browser window should open, and waiting
+					// for one that never comes is the worst version of this screen.
+					if (openCommandFor(info.url)) {
+						this.host.ctx.openInBrowser(info.url);
+					} else {
+						this.#statusLines.push(theme.fg("dim", "Browser launch disabled by BROWSER=none. Use the URL below."));
+					}
 					this.host.requestRender();
 				},
 				onPrompt: prompt => this.#showPrompt(prompt),

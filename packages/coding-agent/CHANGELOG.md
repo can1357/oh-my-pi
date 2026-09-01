@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed the setup wizard's sign-in panel printing the OAuth authorization URL twice: the first copy was clipped to two wrapped rows and the complete one sat below the code prompt, so selecting the URL a user reaches for first yielded a string truncated mid-query-string. The URL is now rendered once, unbroken, below the input rows a short terminal must never clip.
+- Fixed the `Set up your providers` tab strip advertising `(tab to cycle)` during an in-flight OAuth login, when the modal panel owns every key and Tab is deliberately inert.
+
+### Added
+
+- Added support for the `BROWSER` environment variable when opening URLs: `BROWSER=none` suppresses the automatic launch, and any other value names the opener to use instead of the platform default. The sign-in panel now says when a launch was suppressed instead of leaving the provider's "a browser window should open" instruction standing alone. File paths still go to the OS type handler.
+
 ## [17.2.15] - 2026-08-12
 
 ### Added

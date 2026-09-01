@@ -75,22 +75,42 @@ function windowsOpenerCommand(target: string): string[] {
 		Buffer.from(script, "utf16le").toString("base64"),
 	];
 }
-/** Open a URL or file path in the default browser/application. Best-effort, never throws. */
-export function openPath(urlOrPath: string): void {
-	let cmd: string[];
+
+/**
+ * The argv that opens `target`, or `undefined` when nothing should be launched.
+ *
+ * Honors the `BROWSER` convention shared by xdg-open, python's webbrowser, and
+ * gh: `none` suppresses the launch, and any other value names the opener to use
+ * for web URLs instead of the platform default. The value is taken as a single
+ * executable with the URL as its only argument, so no shell or word splitting
+ * sits between it and a path containing spaces. File paths ignore `BROWSER`
+ * entirely and keep going to the OS handler that knows the type.
+ *
+ * Reported 2026-08-31: "it opens default browser which never works because I
+ * keep my default browser different from other stuff". Launching the wrong
+ * browser during an OAuth login is worse than launching none, because the user
+ * ends up authenticating the wrong profile with no way back to the URL.
+ */
+export function openCommandFor(target: string): string[] | undefined {
+	const browser = /^https?:/i.test(target) ? process.env.BROWSER?.trim() : undefined;
+	if (browser?.toLowerCase() === "none") return undefined;
+	if (browser) return [browser, target];
 	switch (process.platform) {
 		case "darwin":
-			cmd = ["open", urlOrPath];
-			break;
+			return ["open", target];
 		case "win32":
-			cmd = windowsOpenerCommand(urlOrPath);
-			break;
+			return windowsOpenerCommand(target);
 		default: {
-			const wslPath = getExistingWslLocalPath(urlOrPath);
-			cmd = wslPath ? ["wslview", wslPath] : ["xdg-open", urlOrPath];
-			break;
+			const wslPath = getExistingWslLocalPath(target);
+			return wslPath ? ["wslview", wslPath] : ["xdg-open", target];
 		}
 	}
+}
+
+/** Open a URL or file path in the default browser/application. Best-effort, never throws. */
+export function openPath(urlOrPath: string): void {
+	const cmd = openCommandFor(urlOrPath);
+	if (!cmd) return;
 	let child: Bun.Subprocess | undefined;
 	try {
 		child = Bun.spawn(cmd, { stdin: "ignore", stdout: "ignore", stderr: "ignore" });

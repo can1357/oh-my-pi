@@ -73,8 +73,11 @@ describe("SignInTab", () => {
 			expect(copySpy).toHaveBeenCalledTimes(2);
 			expect(copySpy).toHaveBeenLastCalledWith(url);
 
-			// On a ~24-row terminal the wizard body ends up ~8 rows; the OSC8
-			// link, a plain URL row, and the focused input must survive that clip.
+			// On a ~24-row terminal the wizard body ends up ~8 rows. The OSC8
+			// link, the focused input, and the start of the plain URL must all
+			// survive that clip. The input now sits above the URL: a clipped
+			// input is unusable, while a clipped URL tail is still reachable
+			// through Alt+C or the OSC8 link.
 			const clippedBody = rendered.slice(0, 8).map(line => Bun.stripANSI(line).trim());
 			const plainUrlIndex = clippedBody.findIndex(line => line.startsWith("https://example.com/oauth/authorize?"));
 			const inputIndex = clippedBody.findIndex(line => line.startsWith(">"));
@@ -82,7 +85,7 @@ describe("SignInTab", () => {
 			expect(plainUrlIndex).toBeGreaterThanOrEqual(0);
 			expect(clippedBody).toContain("Paste the authorization code (or full redirect URL):");
 			expect(inputIndex).toBeGreaterThanOrEqual(0);
-			expect(plainUrlIndex).toBeLessThan(inputIndex);
+			expect(inputIndex).toBeLessThan(plainUrlIndex);
 		} finally {
 			tab.dispose();
 			loginGate.resolve();
@@ -134,6 +137,62 @@ describe("SignInTab", () => {
 			await Promise.resolve();
 			expect(copySpy).toHaveBeenCalledTimes(2);
 			expect(copySpy).toHaveBeenLastCalledWith(url);
+		} finally {
+			tab.dispose();
+			loginGate.resolve();
+			await loginGate.promise;
+		}
+	});
+
+	// Reported 2026-08-31: "when logging in I can't copy these links which is
+	// weird". The panel printed the first two wrapped rows of the URL under the
+	// header and then the whole URL again lower down, so the copy a user
+	// actually reaches for ends mid-query-string.
+	it("renders the authorization URL once, unbroken, so a selection copies all of it", async () => {
+		const url = `https://auth.example.com/oauth/authorize?response_type=code&client_id=omp&redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback&scope=openid+profile+email+offline_access&code_challenge=${"B".repeat(43)}&state=${"s".repeat(32)}`;
+		const loginGate = Promise.withResolvers<void>();
+		vi.spyOn(clipboard, "copyToClipboard").mockResolvedValue(undefined);
+
+		const authStorage = {
+			has: (_providerId: string) => false,
+			hasAuth: (_providerId: string) => false,
+			getCredentialOrigin: (_providerId: string) => undefined,
+			async login(_provider: OAuthProviderId, ctrl: OAuthLoginCallbacks): Promise<void> {
+				ctrl.onAuth({ url });
+				const prompt = ctrl.onManualCodeInput?.();
+				await loginGate.promise;
+				await prompt;
+			},
+		} as unknown as AuthStorage;
+
+		const host = {
+			ctx: {
+				openInBrowser(): void {},
+				session: { modelRegistry: { authStorage, async refresh(): Promise<void> {} } },
+			},
+			requestRender(): void {},
+			finish(): void {},
+			setFocus(): void {},
+			restoreFocus(): void {},
+		} as unknown as SetupSceneHost;
+
+		const tab = new SignInTab(host);
+		try {
+			for (const char of "anthropic") {
+				tab.handleInput(char);
+			}
+			tab.handleInput("\n");
+
+			const width = 60;
+			const plain = tab.render(width).map(line => Bun.stripANSI(line));
+			expect(plain.join("").split(url).length - 1).toBe(1);
+
+			// Contiguous: every row of the URL sits directly under the one before
+			// it, so a click-drag over the block yields the whole string.
+			const first = plain.findIndex(line => line.startsWith("https://auth.example.com"));
+			expect(first).toBeGreaterThanOrEqual(0);
+			const rowCount = Math.ceil(url.length / width);
+			expect(plain.slice(first, first + rowCount).join("")).toBe(url);
 		} finally {
 			tab.dispose();
 			loginGate.resolve();
