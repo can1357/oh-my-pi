@@ -16,6 +16,7 @@ import {
 	resolveAgentPrewalkPattern,
 	resolveAllowedModels,
 	resolveCliModel,
+	resolveConfiguredModelPatterns,
 	resolveExplicitModelRole,
 	resolveModelFromString,
 	resolveModelOverride,
@@ -1103,6 +1104,74 @@ describe("resolveAgentModelPatterns", () => {
 		});
 
 		expect(resolveAgentModelPatterns({ agentModel: "@smol", settings })).toEqual(["anthropic/claude-sonnet-4-5"]);
+	});
+
+	test("expands chained configured role aliases to concrete model patterns", () => {
+		const settings = Settings.isolated({
+			modelRoles: {
+				default: "@slow",
+				slow: "@designer",
+				designer: "openai-codex/gpt-5.6-sol",
+			},
+		});
+
+		expect(resolveAgentModelPatterns({ agentModel: "@smol", settings })).toEqual(["openai-codex/gpt-5.6-sol"]);
+	});
+
+	test("stops chained configured role aliases at cycles", () => {
+		const settings = Settings.isolated({
+			modelRoles: {
+				alpha: "@beta",
+				beta: "@alpha",
+			},
+		});
+
+		expect(resolveConfiguredModelPatterns("@alpha", settings)).toEqual([]);
+	});
+
+	test("expands sibling alias chains with independent visited state and suffixes", () => {
+		const settings = Settings.isolated({
+			modelRoles: {
+				root: ["@left:high", "@right:low"],
+				left: "@shared",
+				right: "@shared",
+				shared: "anthropic/claude-sonnet-4-5",
+			},
+		});
+
+		expect(resolveConfiguredModelPatterns("@root", settings)).toEqual([
+			"anthropic/claude-sonnet-4-5:high",
+			"anthropic/claude-sonnet-4-5:low",
+		]);
+	});
+
+	test("keeps the outermost thinking suffix across a chained alias", () => {
+		const settings = Settings.isolated({
+			modelRoles: {
+				root: "@middle:low",
+				middle: "@leaf:medium",
+				leaf: "anthropic/claude-sonnet-4-5:minimal",
+			},
+		});
+
+		const [pattern] = resolveConfiguredModelPatterns("@root:high", settings);
+		const resolved = parseModelPattern(pattern, mockModels);
+		expect(resolved.model?.id).toBe("claude-sonnet-4-5");
+		expect(resolved.thinkingLevel).toBe(Effort.High);
+	});
+
+	test("uses built-in role defaults when an inherited custom alias chain cycles", () => {
+		const settings = Settings.isolated({
+			modelRoles: {
+				default: "@alpha",
+				alpha: "@beta",
+				beta: "@alpha",
+			},
+		});
+
+		const patterns = resolveAgentModelPatterns({ agentModel: "@smol", settings });
+		expect(patterns[0]).toBe("cerebras/zai-glm-4.7");
+		expect(patterns.every(pattern => !pattern.startsWith("@"))).toBe(true);
 	});
 
 	test("prefers configured designer role override over priority defaults", () => {

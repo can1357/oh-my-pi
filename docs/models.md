@@ -427,7 +427,7 @@ The `tiny` role overrides the online model used for lightweight background tasks
 
 Role aliases like `@smol` expand through `settings.modelRoles`; `*` selects `@default`. Quote `@` aliases in YAML values (`fable: "@slow"`). Each role value can also append a thinking selector such as `:minimal`, `:low`, `:medium`, or `:high`.
 
-If a role points at another role, the target model still inherits normally and any explicit suffix on the referring role wins for that role-specific use.
+Chained role aliases are expanded recursively until they reach concrete model patterns. Cyclic candidates are discarded so later configured candidates remain eligible; when no configured candidate resolves, an unset built-in role uses its priority defaults. Any explicit suffix on the referring role wins for that role-specific use.
 
 Related settings:
 

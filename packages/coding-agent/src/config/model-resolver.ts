@@ -1138,14 +1138,16 @@ function resolveDefaultInheritedPatterns(
 			);
 			continue;
 		}
-		if (aliasRole && !visited.has(aliasRole)) {
-			// Cross-role alias (e.g. modelRoles.default = "@slow"): resolve the
-			// concrete model patterns instead of another role alias.
-			const recursed = resolveConfiguredRolePattern(pattern, settings, new Set(visited));
-			if (recursed && recursed.length > 0) {
-				resolved.push(...recursed);
-				continue;
+		if (aliasRole) {
+			if (!visited.has(aliasRole)) {
+				// Cross-role alias (e.g. modelRoles.default = "@slow"): resolve the
+				// concrete model patterns instead of another role alias.
+				const recursed = resolveConfiguredRolePattern(pattern, settings, new Set(visited));
+				if (recursed && recursed.length > 0) {
+					resolved.push(...recursed);
+				}
 			}
+			continue;
 		}
 		resolved.push(pattern);
 	}
@@ -1174,7 +1176,9 @@ function resolveConfiguredRolePattern(
 	const configuredDefault = settings?.getModelRole(DEFAULT_MODEL_ROLE)?.trim();
 	const roleDefaults = isModelRole(role) ? rolePriorityDefaults(role) : [];
 	const resolved = configured
-		? normalizeModelPatternList(configured)
+		? normalizeModelPatternList(configured).flatMap(
+				pattern => resolveConfiguredRolePattern(pattern, settings, new Set(visited)) ?? [],
+			)
 		: isModelRole(role)
 			? resolveDefaultInheritedPatterns(role, configuredDefault, roleDefaults, settings, visited)
 			: roleDefaults;

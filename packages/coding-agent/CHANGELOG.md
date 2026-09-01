@@ -23,6 +23,7 @@
 - Fixed an issue where custom model overrides were lost during configuration updates
 - Fixed "Please use nerdfont" notification incorrectly persisting after theme configuration
 - Fixed sampling parameter errors for newer Anthropic models (Opus 4.7+, Sonnet 5+)
+- Fixed chained `modelRoles` aliases stopping at an intermediate role instead of resolving to concrete model patterns ([#10324](https://github.com/can1357/oh-my-pi/pull/10324) by [@SiaoZeng](https://github.com/SiaoZeng)).
 
 ## [18.0.11] - 2026-08-29
 
