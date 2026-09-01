@@ -1,4 +1,5 @@
 import type { AvailableCommand } from "@oh-my-pi/pi-utils/acp";
+import { isUserInvocable } from "../capability/skill-invocation";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import type { SkillsSettings } from "../config/settings";
 import type { LoadedCustomCommand } from "../extensibility/custom-commands";
@@ -58,6 +59,7 @@ export async function buildAvailableSlashCommands(
 
 	if (session.skillsSettings?.enableSkillCommands) {
 		for (const skill of session.skills) {
+			if (!isUserInvocable(skill)) continue;
 			appendCommand({
 				name: getSkillSlashCommandName(skill),
 				description: skill.description || `Run ${skill.name} skill`,

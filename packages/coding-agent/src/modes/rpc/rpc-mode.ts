@@ -23,7 +23,7 @@ import {
 	type ExtensionWidgetOptions,
 	getExtensionUISelectOptionLabel,
 } from "../../extensibility/extensions";
-import { buildSkillPromptMessage, parseSkillInvocation } from "../../extensibility/skills";
+import { buildSkillPromptMessage, findUserInvocableSkill, parseSkillInvocation } from "../../extensibility/skills";
 import { loadSlashCommands } from "../../extensibility/slash-commands";
 import { type Theme, theme } from "../../modes/theme/theme";
 import type { AgentSession } from "../../session/agent-session";
@@ -123,7 +123,7 @@ export async function tryRunRpcSkillCommand(
 	if (!session.skillsSettings?.enableSkillCommands) return false;
 	const parsed = parseSkillInvocation(text);
 	if (!parsed) return false;
-	const skill = session.skills.find(candidate => candidate.name === parsed.name);
+	const skill = findUserInvocableSkill(session.skills, parsed.name);
 	if (!skill) return false;
 	const built = await buildSkillPromptMessage(skill, parsed.args, "user");
 	await session.promptCustomMessage(

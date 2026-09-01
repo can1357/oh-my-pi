@@ -18,6 +18,7 @@ import {
 	prompt,
 } from "@oh-my-pi/pi-utils";
 import { contextFileCapability } from "./capability/context-file";
+import { isModelInvocable } from "./capability/skill-invocation";
 import { systemPromptCapability } from "./capability/system-prompt";
 import { findConfigFile } from "./config";
 import type { Personality, SkillsSettings } from "./config/settings";
@@ -955,9 +956,9 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 
 	// Filter skills for the rendered system prompt:
 	// - require the `read` tool so the model can actually fetch skill content;
-	// - drop skills with frontmatter `hide: true` (still loadable via skill:// and /skill:<name>).
+	// - drop skills that opted out of model invocation (hide / disable-model-invocation); they stay loadable via skill:// and /skill:<name>.
 	const hasRead = toolNames.includes("read");
-	const filteredSkills = hasRead ? skills.filter(skill => skill.hide !== true) : [];
+	const filteredSkills = hasRead ? skills.filter(isModelInvocable) : [];
 
 	const effectiveSystemPromptCustomization = dedupePromptSource(systemPromptCustomization, [
 		resolvedCustomPrompt,

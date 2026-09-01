@@ -9,6 +9,8 @@ import * as path from "node:path";
 import { arkToWireSchema, isArkSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { normalizePathForComparison, parseFrontmatter } from "@oh-my-pi/pi-utils";
 import { parseRuleConditionAndScope } from "../../../capability/rule";
+import type { SkillFrontmatter } from "../../../capability/skill";
+import { skillInvocationAxes } from "../../../capability/skill-invocation";
 import { slashCommandFrontmatterDisplay } from "../../../capability/slash-command";
 import { isFilesystemSourcePath } from "../../../tools/path-utils";
 import {
@@ -377,7 +379,7 @@ export function skillInspectorData(ext: Extension): {
 } {
 	const raw = asRecord(ext.raw) ?? {};
 	const frontmatter = asRecord(raw.frontmatter) ?? {};
-	const hidden = frontmatter.hide === true || frontmatter.disableModelInvocation === true;
+	const hidden = skillInvocationAxes(frontmatter as SkillFrontmatter).hide;
 	const alwaysApply = frontmatter.alwaysApply === true;
 	const globs = stringArray(frontmatter.globs) ?? stringArray(raw.globs);
 	let runtimeDetail: string | undefined;

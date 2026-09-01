@@ -132,4 +132,38 @@ describe("tryRunRpcSkillCommand", () => {
 			await removeWithRetries(dir);
 		}
 	});
+
+	test("refuses dispatch for user-invocable: false skills", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), `omp-rpc-skill-${Snowflake.next()}-`));
+		const skillPath = path.join(dir, "SKILL.md");
+		await Bun.write(skillPath, "---\nname: internal\ndescription: Internal skill\n---\n\nInternal content.\n");
+
+		let message: Pick<CustomMessage, "customType"> | undefined;
+		try {
+			const handled = await tryRunRpcSkillCommand(
+				{
+					skillsSettings: { enableSkillCommands: true },
+					skills: [
+						{
+							name: "internal",
+							description: "Internal skill",
+							filePath: skillPath,
+							baseDir: dir,
+							source: "project",
+							userInvocable: false,
+						},
+					],
+					async promptCustomMessage(nextMessage) {
+						message = nextMessage;
+					},
+				},
+				"/skill:internal do it",
+			);
+
+			expect(handled).toBe(false);
+			expect(message).toBeUndefined();
+		} finally {
+			await removeWithRetries(dir);
+		}
+	});
 });

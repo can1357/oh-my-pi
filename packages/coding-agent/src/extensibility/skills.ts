@@ -7,6 +7,7 @@ import {
 	sanitizeManagedDescription,
 } from "../autolearn/managed-skills";
 import { skillCapability } from "../capability/skill";
+import { isUserInvocable, skillInvocationAxes } from "../capability/skill-invocation";
 import type { EffectiveExtensionRoots, SourceMeta } from "../capability/types";
 import type { SkillsSettings } from "../config/settings";
 import { type Skill as CapabilitySkill, loadCapability } from "../discovery";
@@ -27,6 +28,11 @@ export interface Skill {
 	 * prompt's `<skills>` listing.
 	 */
 	hide?: boolean;
+	/**
+	 * When `false`, `/skill:<name>` does not resolve to this skill; it stays
+	 * reachable via `skill://<name>` and listed in `/extensions`.
+	 */
+	userInvocable?: boolean;
 	/**
 	 * Filesystem-resolved plugin root for Agent Plugin skills (spec §4.1):
 	 * every `skill://` resource access must realpath-resolve within it.
@@ -110,7 +116,7 @@ export async function loadSkillsFromDir(options: LoadSkillsFromDirOptions): Prom
 			baseDir: capSkill.path.replace(/[\\/]SKILL\.md$/, ""),
 			source: options.source,
 			...(capSkill.containRoot !== undefined && { containRoot: capSkill.containRoot }),
-			hide: capSkill.frontmatter?.hide === true || capSkill.frontmatter?.disableModelInvocation === true,
+			...skillInvocationAxes(capSkill.frontmatter),
 			_source: capSkill._source,
 		})),
 		warnings: (result.warnings ?? []).map(message => ({ skillPath: options.dir, message })),
@@ -257,7 +263,7 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 				baseDir: capSkill.path.replace(/[\\/]SKILL\.md$/, ""),
 				source: `${capSkill._source.provider}:${capSkill.level}`,
 				...(capSkill.containRoot !== undefined && { containRoot: capSkill.containRoot }),
-				hide: capSkill.frontmatter?.hide === true || capSkill.frontmatter?.disableModelInvocation === true,
+				...skillInvocationAxes(capSkill.frontmatter),
 				_source: capSkill._source,
 			});
 			realPathSet.add(resolvedPath);
@@ -295,7 +301,7 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 					baseDir: capSkill.path.replace(/[\\/]SKILL\.md$/, ""),
 					source: "custom:user",
 					...(capSkill.containRoot !== undefined && { containRoot: capSkill.containRoot }),
-					hide: capSkill.frontmatter?.hide === true || capSkill.frontmatter?.disableModelInvocation === true,
+					...skillInvocationAxes(capSkill.frontmatter),
 					_source: { ...capSkill._source, providerName: "Custom" },
 				},
 				path: capSkill.path,
@@ -396,7 +402,7 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 			baseDir: capSkill.path.replace(/[\\/]SKILL\.md$/, ""),
 			source: `${capSkill._source.provider}:${capSkill.level}`,
 			...(capSkill.containRoot !== undefined && { containRoot: capSkill.containRoot }),
-			hide: capSkill.frontmatter?.hide === true || capSkill.frontmatter?.disableModelInvocation === true,
+			...skillInvocationAxes(capSkill.frontmatter),
 			_source: capSkill._source,
 		});
 		realPathSet.add(resolvedPath);
@@ -418,6 +424,18 @@ export interface BuiltSkillPromptMessage {
 
 export function getSkillSlashCommandName(skill: Pick<Skill, "name">): string {
 	return `skill:${skill.name}`;
+}
+
+/**
+ * Resolve a parsed `/skill:<name>` token against the session skill list. A
+ * skill with `user-invocable: false` is not addressable, so the token falls
+ * through to ordinary prompt handling instead of dispatching.
+ */
+export function findUserInvocableSkill<T extends { name: string; userInvocable?: boolean }>(
+	skills: readonly T[],
+	name: string,
+): T | undefined {
+	return skills.find(skill => skill.name === name && isUserInvocable(skill));
 }
 
 /**

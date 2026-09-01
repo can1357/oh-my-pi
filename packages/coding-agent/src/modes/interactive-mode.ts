@@ -79,7 +79,8 @@ import type {
 	ExtensionWidgetOptions,
 } from "../extensibility/extensions";
 import type { CompactOptions } from "../extensibility/extensions/types";
-import type { Skill } from "../extensibility/skills";
+import { isUserInvocable } from "../capability/skill-invocation";
+import { getSkillSlashCommandName, type Skill } from "../extensibility/skills";
 import type { FileSlashCommand } from "../extensibility/slash-commands";
 import { loadSlashCommands } from "../extensibility/slash-commands";
 import type { Goal, GoalModeState } from "../goals/state";
@@ -1462,7 +1463,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (this.session.skillsSettings?.enableSkillCommands !== false) {
 			const icon = getSlashCommandTypeIcon("skill");
 			for (const skill of this.session.skills) {
-				const commandName = `skill:${skill.name}`;
+				if (!isUserInvocable(skill)) continue;
+				const commandName = getSkillSlashCommandName(skill);
 				this.skillCommands.set(commandName, skill);
 				commands.push({ name: commandName, description: skill.description, icon });
 			}

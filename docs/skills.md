@@ -57,8 +57,16 @@ Supported frontmatter fields on the skill type:
 - `alwaysApply?: boolean`
 - `hide?: boolean`
 - `disableModelInvocation?: boolean` — model axis; a Claude Code / Pi convention (not part of the agentskills.io schema), normalized from kebab-case `disable-model-invocation`; alias of `hide`. Agent Plugins skills carry this and the user axis through `metadata` string values, e.g. `metadata: { disable-model-invocation: "true" }` and `metadata: { user-invocable: "false" }`.
-- `userInvocable?: boolean` — user axis; normalized from kebab-case `user-invocable`; defaults to `true`. Parsed and stored, not yet enforced: no registration or dispatch path reads it at this commit, so a skill setting it is still addressable as `/skill:<name>`.
+- `userInvocable?: boolean` — user axis; normalized from kebab-case `user-invocable`; defaults to `true`; when `false` the skill is not registered, completed, or dispatched as `/skill:<name>`; stays model-advertised and `skill://`-loadable
 - additional keys are preserved as unknown metadata
+
+Skills carry two independent invocation axes:
+
+- Model axis (`hide: true` or `disable-model-invocation: true`): omitted from the rendered `<skills>` listing and its token accounting; still reachable via `skill://<name>` and `/skill:<name>`.
+- User axis (`user-invocable: false`): never registered, completed, or dispatched as `/skill:<name>` on any frontend; still advertised to the model and reachable via `skill://<name>`.
+- Both: the skill stays installed and listed in `/extensions`, invocable by neither.
+
+Generic loaders accept both keys as top-level frontmatter (kebab-case, normalized to camelCase on load). The Agent Plugins loader keeps its closed spec schema, so a plugin skill must carry them as string entries under `metadata`, e.g. `metadata: { user-invocable: "false" }`; a `metadata` value other than the exact strings `"true"`/`"false"` is reported and ignored rather than honored.
 
 Current runtime behavior:
 

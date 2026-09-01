@@ -449,6 +449,26 @@ enabled: false
 			}
 		});
 
+		it("should load user-invocable: false skills with axes independent", async () => {
+			const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-ui-skill-"));
+			const skillDir = path.join(tempDir, "user-hidden");
+			await fs.mkdir(skillDir, { recursive: true });
+			await fs.writeFile(
+				path.join(skillDir, "SKILL.md"),
+				`---\nname: user-hidden\ndescription: User axis opted out, model axis stays on.\nuser-invocable: false\n---\n\n# User-Hidden Skill\n`,
+			);
+
+			try {
+				const { skills } = await loadSkills({ ...DISABLE_ALL_BUILTIN_SKILLS, customDirectories: [tempDir] });
+				const skill = skills.find(s => s.name === "user-hidden");
+				expect(skill).toBeDefined();
+				expect(skill?.userInvocable).toBe(false);
+				expect(skill?.hide).toBe(false);
+			} finally {
+				await removeWithRetries(tempDir);
+			}
+		});
+
 		it("should let ignoredSkills override includeSkills", async () => {
 			const { skills } = await loadSkills({
 				...DISABLE_ALL_BUILTIN_SKILLS,

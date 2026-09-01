@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Skills now carry two independent invocation axes: `disable-model-invocation` (or `hide`) keeps a skill out of the model's advertised catalog, while `user-invocable: false` withholds its `/skill:<name>` command on every frontend ([#10062](https://github.com/can1357/oh-my-pi/issues/10062)).
+
 ### Fixed
 
 - Anthropic sessions now keep tool-roster changes and warm-prefix pruning from invalidating preserved thinking or the prompt cache.

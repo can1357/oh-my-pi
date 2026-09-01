@@ -124,4 +124,36 @@ describe("buildAvailableSlashCommands", () => {
 
 		expect(commands.find(command => command.name === "legacy")?.source).toBe("custom");
 	});
+
+	test("omits user-invocable: false skills but keeps model-hidden ones", async () => {
+		const commands = await buildAvailableSlashCommands(
+			{
+				customCommands: [],
+				skills: [
+					{ name: "plain", description: "Plain skill", filePath: "/tmp/plain/SKILL.md" },
+					{
+						name: "user-hidden",
+						description: "User axis off",
+						filePath: "/tmp/user-hidden/SKILL.md",
+						userInvocable: false,
+					},
+					{
+						name: "model-hidden",
+						description: "Model axis off",
+						filePath: "/tmp/model-hidden/SKILL.md",
+						hide: true,
+					},
+				],
+				skillsSettings: { enableSkillCommands: true },
+				sessionManager: { getCwd: () => process.cwd() },
+				setSlashCommands() {},
+			} as never,
+			async () => [],
+		);
+
+		const names = commands.map(command => command.name);
+		expect(names).toContain("skill:plain");
+		expect(names).toContain("skill:model-hidden");
+		expect(names).not.toContain("skill:user-hidden");
+	});
 });

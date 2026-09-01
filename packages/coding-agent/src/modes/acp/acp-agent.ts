@@ -54,7 +54,7 @@ import {
 } from "../../extensibility/extensions";
 import { runExtensionCompact } from "../../extensibility/extensions/compact-handler";
 import { getSessionSlashCommands } from "../../extensibility/extensions/get-commands-handler";
-import { buildSkillPromptMessage, parseSkillInvocation } from "../../extensibility/skills";
+import { buildSkillPromptMessage, findUserInvocableSkill, parseSkillInvocation } from "../../extensibility/skills";
 import { loadSlashCommands } from "../../extensibility/slash-commands";
 import { resolveLocalUrlToPath } from "../../internal-urls";
 import { MCPManager } from "../../mcp/manager";
@@ -1046,7 +1046,7 @@ export class AcpAgent implements Agent {
 		if (!parsed) {
 			return false;
 		}
-		const skill = record.session.skills.find(candidate => candidate.name === parsed.name);
+		const skill = findUserInvocableSkill(record.session.skills, parsed.name);
 		if (!skill) {
 			return false;
 		}

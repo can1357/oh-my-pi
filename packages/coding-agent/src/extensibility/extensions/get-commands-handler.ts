@@ -14,6 +14,7 @@
  * surface extensions use to discover dynamic commands they did not register
  * themselves. Each frontend (interactive-mode, ACP) prepends its own builtins.
  */
+import { isUserInvocable } from "../../capability/skill-invocation";
 import type { SkillsSettings } from "../../config/settings";
 import { BUILTIN_SLASH_COMMAND_RESERVED_NAMES } from "../../slash-commands/builtin-registry";
 import type { CustomCommandSource, LoadedCustomCommand } from "../custom-commands";
@@ -54,6 +55,7 @@ export function getSessionSlashCommands(session: CommandsCapableSession): SlashC
 
 	if (session.skillsSettings?.enableSkillCommands) {
 		for (const skill of session.skills) {
+			if (!isUserInvocable(skill)) continue;
 			out.push({
 				name: getSkillSlashCommandName(skill),
 				description: skill.description || undefined,

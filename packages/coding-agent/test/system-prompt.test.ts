@@ -281,3 +281,51 @@ describe("non-Linux system prompt CPU model", () => {
 		}
 	});
 });
+
+describe("skill invocation axes in rendered system prompt", () => {
+	it("keeps user-invocable: false skills in the listing but drops hide: true skills", async () => {
+		const systemPrompt = await buildSystemPrompt({
+			contextFiles: [],
+			skills: [
+				{
+					name: "user-hidden",
+					description: "User axis off",
+					filePath: "/tmp/a/SKILL.md",
+					baseDir: "/tmp/a",
+					source: "project",
+					userInvocable: false,
+				},
+				{
+					name: "model-hidden",
+					description: "Model axis off",
+					filePath: "/tmp/b/SKILL.md",
+					baseDir: "/tmp/b",
+					source: "project",
+					hide: true,
+				},
+				{
+					name: "plain",
+					description: "Plain skill",
+					filePath: "/tmp/c/SKILL.md",
+					baseDir: "/tmp/c",
+					source: "project",
+				},
+			],
+			toolNames: ["read"],
+			rules: [],
+			workspaceTree: {
+				rootPath: import.meta.dir,
+				rendered: "",
+				truncated: false,
+				totalLines: 0,
+				agentsMdFiles: [],
+			},
+			activeRepoContext: null,
+		});
+
+		const rendered = systemPrompt.systemPrompt.join("\n");
+		expect(rendered).toContain("user-hidden: User axis off");
+		expect(rendered).toContain("plain: Plain skill");
+		expect(rendered).not.toContain("model-hidden");
+	});
+});
