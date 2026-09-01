@@ -22,6 +22,12 @@ import {
 	type MessageCountOptions,
 	Tokenizer,
 } from "@oh-my-pi/pi-agent-core";
+import {
+	type BranchPreparation,
+	type CutPointResult,
+	findCutPoint as findCoreCutPoint,
+	prepareBranchEntries as prepareCoreBranchEntries,
+} from "@oh-my-pi/pi-agent-core/compaction";
 import { type AuthCredential, SqliteAuthCredentialStore, type TSchema } from "@oh-my-pi/pi-ai";
 import { piEscapeRegexLiteral, piJoinPath } from "@oh-my-pi/pi-ai/providers/cursor-pi-args";
 import { getKeybindings, type Keybinding, Text } from "@oh-my-pi/pi-tui";
@@ -32,6 +38,7 @@ import {
 	isCompiledBinary,
 	parseFrontmatter as parseOmpFrontmatter,
 } from "@oh-my-pi/pi-utils";
+import { getShellConfig as getOmpShellConfig, type ShellConfig } from "@oh-my-pi/pi-utils/procmgr";
 import { getPackageDir as getOmpPackageDir } from "../config";
 import { formatKeyHints } from "../config/keybindings";
 import type { PromptTemplate } from "../config/prompt-templates";
@@ -45,6 +52,7 @@ import {
 	discoverSkills,
 	createAgentSession as ompCreateAgentSession,
 } from "../sdk";
+import type { SessionEntry } from "../session/session-entries";
 import {
 	DEFAULT_MAX_BYTES,
 	DEFAULT_MAX_LINES,
@@ -61,6 +69,12 @@ import { formatBytes } from "../tools/render-utils";
 import { WriteTool } from "../tools/write";
 import { EventBus } from "../utils/event-bus";
 import { convertImageToPng } from "../utils/image-loading";
+import {
+	formatDimensionNote as formatOmpDimensionNote,
+	type ImageResizeOptions,
+	type ResizedImage,
+	resizeImage as resizeOmpImage,
+} from "../utils/image-resize";
 import { discoverExtensionPaths, loadExtensionFromFactory, loadExtensions } from "./extensions";
 import { ExtensionRuntime } from "./extensions/loader";
 import type {
@@ -1472,13 +1486,106 @@ export function getPackageDir(): string {
 	return getOmpPackageDir() ?? (isCompiledBinary() ? path.dirname(process.execPath) : process.cwd());
 }
 
-// Legacy pi's `@earendil-works/pi-coding-agent` re-exported `estimateTokens`,
-// `compact`, and `serializeConversation` from its package root (via
-// `./core/compaction/index.ts`). In omp `compact` and `serializeConversation`
-// live in `@oh-my-pi/pi-agent-core/compaction`, and the coding-agent barrel
-// below does not forward them, so legacy extensions importing them fail Bun's
-// static export check during validation (issues #6583, #7174, #7403).
-export { compact, serializeConversation } from "@oh-my-pi/pi-agent-core/compaction";
+/** Parsed legacy `<skill>` invocation embedded in a user message. */
+export interface ParsedSkillBlock {
+	name: string;
+	location: string;
+	content: string;
+	userMessage: string | undefined;
+}
+
+/** Parse the historical XML skill-invocation envelope. */
+export function parseSkillBlock(text: string): ParsedSkillBlock | null {
+	const match = text.match(/^<skill name="([^"]+)" location="([^"]+)">\n([\s\S]*?)\n<\/skill>(?:\n\n([\s\S]+))?$/);
+	if (!match) return null;
+	return {
+		name: match[1],
+		location: match[2],
+		content: match[3],
+		userMessage: match[4]?.trim() || undefined,
+	};
+}
+
+/** Create the event bus shape exposed by the legacy coding-agent root. */
+export function createEventBus(): EventBus {
+	return new EventBus();
+}
+
+/** Source discovery origin used by legacy resource metadata. */
+export type SourceOrigin = "package" | "top-level";
+
+/** Resource metadata exposed by the legacy coding-agent root. */
+export interface SourceInfo {
+	path: string;
+	source: string;
+	scope: SourceScope;
+	origin: SourceOrigin;
+	baseDir?: string;
+}
+
+/** Create metadata for an extension-supplied synthetic resource. */
+export function createSyntheticSourceInfo(
+	resourcePath: string,
+	options: { source: string; scope?: SourceScope; origin?: SourceOrigin; baseDir?: string },
+): SourceInfo {
+	return {
+		path: resourcePath,
+		source: options.source,
+		scope: options.scope ?? "temporary",
+		origin: options.origin ?? "top-level",
+		baseDir: options.baseDir,
+	};
+}
+
+/** Resolve the shell binary and argv using omp's hardened process utility. */
+export function getShellConfig(customShellPath?: string): ShellConfig {
+	return getOmpShellConfig(customShellPath);
+}
+
+/** Resize legacy byte-oriented image input through omp's centralized image pipeline. */
+export async function resizeImage(
+	inputBytes: Uint8Array,
+	mimeType: string,
+	options?: ImageResizeOptions,
+): Promise<ResizedImage | null> {
+	const resized = await resizeOmpImage({ type: "image", data: Buffer.from(inputBytes).toBase64(), mimeType }, options);
+	return resized.decodeFailed ? null : resized;
+}
+
+/** Format the coordinate note produced for a resized legacy image. */
+export function formatDimensionNote(result: ResizedImage): string | undefined {
+	return formatOmpDimensionNote(result);
+}
+
+// Legacy pi's coding-agent root re-exported its public compaction helpers. The
+// compatible core functions are forwarded here; wrappers below preserve the
+// historical tokenizer-free call shapes for `findCutPoint` and
+// `prepareBranchEntries` (issues #6583, #7174, #7403, #10278).
+export {
+	calculateContextTokens,
+	collectEntriesForBranchSummary,
+	compact,
+	DEFAULT_COMPACTION_SETTINGS,
+	findTurnStartIndex,
+	getLastAssistantUsage,
+	serializeConversation,
+	shouldCompact,
+} from "@oh-my-pi/pi-agent-core/compaction";
+
+/** Find a legacy compaction boundary using omp's model-agnostic tokenizer. */
+export function findCutPoint(
+	entries: SessionEntry[],
+	startIndex: number,
+	endIndex: number,
+	keepRecentTokens: number,
+): CutPointResult {
+	return findCoreCutPoint(entries, legacyTokenizer, startIndex, endIndex, keepRecentTokens);
+}
+
+/** Prepare legacy branch entries using omp's model-agnostic tokenizer. */
+export function prepareBranchEntries(entries: SessionEntry[], tokenBudget = 0): BranchPreparation {
+	return prepareCoreBranchEntries(entries, legacyTokenizer, tokenBudget);
+}
 
 const legacyTokenizer = new Tokenizer();
 
@@ -1539,6 +1646,14 @@ export function isWriteToolResult(e: ToolResultEvent): e is WriteToolResultEvent
 /** Narrow a `tool_result` event to the `grep` tool. */
 export function isGrepToolResult(e: ToolResultEvent): e is GrepToolResultEvent {
 	return e.toolName === "grep";
+}
+
+/** Legacy PowerShell result event represented by omp's custom-event branch. */
+export type PowerShellToolResultEvent = ToolResultEvent & { toolName: "powershell" };
+
+/** Narrow a `tool_result` event to the legacy `powershell` tool. */
+export function isPowerShellToolResult(e: ToolResultEvent): e is PowerShellToolResultEvent {
+	return e.toolName === "powershell";
 }
 
 /** Legacy `find` result event represented by omp's custom-event branch. */

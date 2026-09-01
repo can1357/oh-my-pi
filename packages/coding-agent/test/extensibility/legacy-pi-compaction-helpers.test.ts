@@ -1,9 +1,15 @@
 import { describe, expect, it } from "bun:test";
 import { Tokenizer } from "@oh-my-pi/pi-agent-core";
+import type { Usage } from "@oh-my-pi/pi-ai";
 import {
+	calculateContextTokens,
 	compact,
+	DEFAULT_COMPACTION_SETTINGS,
 	estimateTokens,
+	getLastAssistantUsage,
+	prepareBranchEntries,
 	serializeConversation,
+	shouldCompact,
 } from "@oh-my-pi/pi-coding-agent/extensibility/legacy-pi-coding-agent-shim";
 
 // Issue #6583: pi extensions import `estimateTokens` from
@@ -40,5 +46,28 @@ describe("legacy shim compaction helpers", () => {
 	it("re-exports serializeConversation with legacy transcript formatting", () => {
 		const serialized = serializeConversation([{ role: "user", content: "summarize this", timestamp: 0 }]);
 		expect(serialized).toBe("[User]: summarize this");
+	});
+
+	// Issue #10278: `calculateContextTokens` is another package-root compaction
+	// helper (same `@oh-my-pi/pi-agent-core/compaction` module) used by
+	// pi-blackhole. Its absence made `omp plugin install pi-blackhole` fail Bun's
+	// static "Export named 'calculateContextTokens' not found" check.
+	it("re-exports calculateContextTokens with its usage-sizing behavior", () => {
+		expect(typeof calculateContextTokens).toBe("function");
+		const usage: Usage = {
+			input: 10,
+			output: 5,
+			cacheRead: 100,
+			cacheWrite: 0,
+			totalTokens: 115,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		};
+		expect(calculateContextTokens(usage)).toBe(115);
+	});
+
+	it("preserves the audited legacy compaction utility behavior", () => {
+		expect(getLastAssistantUsage([])).toBeUndefined();
+		expect(prepareBranchEntries([], 1_000)).toMatchObject({ messages: [], totalTokens: 0 });
+		expect(shouldCompact(90_000, 100_000, DEFAULT_COMPACTION_SETTINGS)).toBe(true);
 	});
 });
