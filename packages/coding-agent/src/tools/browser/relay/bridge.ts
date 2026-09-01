@@ -2033,10 +2033,7 @@ export class RelayBridge {
 				subscription.fieldSequences ?? {},
 			)) {
 				const existingSequence = fieldSequences[field];
-				if (
-					existingSequence !== undefined &&
-					existingSequence >= sequence
-				)
+				if (existingSequence !== undefined && existingSequence >= sequence)
 					continue;
 				if (subscription.params && field in subscription.params) {
 					params[field] = subscription.params[field];
