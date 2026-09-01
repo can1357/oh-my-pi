@@ -82,6 +82,8 @@ export class SignInTab implements SetupTab {
 	#statusLines: string[] = [];
 	#authUrl: string | undefined;
 	#authLaunchUrl: string | undefined;
+	/** Why no browser opened, when that is the case. Cleared with the URL. */
+	#launchNotice: string | undefined;
 	#prompt: PromptState | undefined;
 	#promptResolve: ((value: string) => void) | undefined;
 	#loginAbort: AbortController | undefined;
@@ -159,6 +161,14 @@ export class SignInTab implements SetupTab {
 		// to be the obvious one, unbroken and printed once.
 		if (this.#authUrl) {
 			lines.push(theme.fg("accent", `Browser login: ${loginUrlLink(this.#authUrl)} ${loginCopyHint()}`));
+			// Sits with the header rather than in `#statusLines`, which render
+			// below the URL block: on the short terminal this whole layout is
+			// about, a notice printed after a multi-row URL is the first thing
+			// the wizard clips, and a user who sees no browser and no
+			// explanation is exactly the state it exists to prevent.
+			if (this.#launchNotice) {
+				lines.push(theme.fg("dim", this.#launchNotice));
+			}
 			if (this.#authLaunchUrl) {
 				lines.push(theme.fg("dim", `Local shortcut (this machine only): ${this.#authLaunchUrl}`));
 			}
@@ -201,6 +211,7 @@ export class SignInTab implements SetupTab {
 		this.#statusLines = [theme.fg("dim", "Starting OAuth flow…")];
 		this.#authUrl = undefined;
 		this.#authLaunchUrl = undefined;
+		this.#launchNotice = undefined;
 		this.#loginAbort = new AbortController();
 		this.host.restoreFocus();
 		this.host.requestRender();
@@ -233,7 +244,7 @@ export class SignInTab implements SetupTab {
 					if (openCommandFor(info.url)) {
 						this.host.ctx.openInBrowser(info.url);
 					} else {
-						this.#statusLines.push(theme.fg("dim", "Browser launch disabled by BROWSER=none. Use the URL below."));
+						this.#launchNotice = "Browser launch disabled by BROWSER=none. Use the URL below.";
 					}
 					this.host.requestRender();
 				},
@@ -255,6 +266,7 @@ export class SignInTab implements SetupTab {
 			];
 			this.#authUrl = undefined;
 			this.#authLaunchUrl = undefined;
+			this.#launchNotice = undefined;
 			this.#loggingInProvider = undefined;
 			this.#loginAbort = undefined;
 			this.#selector.stopValidation();
@@ -265,17 +277,18 @@ export class SignInTab implements SetupTab {
 			if (this.#disposed) return;
 			if (this.#loginAbort?.signal.aborted) {
 				this.#statusLines = [theme.fg("dim", "Login cancelled.")];
-				this.#authUrl = undefined;
-				this.#authLaunchUrl = undefined;
 			} else {
 				const message = error instanceof Error ? error.message : String(error);
 				this.#statusLines = [
 					theme.fg("error", `Login failed: ${message}`),
 					theme.fg("dim", "Choose another provider or press Esc to continue."),
 				];
-				this.#authUrl = undefined;
-				this.#authLaunchUrl = undefined;
 			}
+			// Both branches leave the same wreckage behind: no live URL, no
+			// pending launch, no provider.
+			this.#authUrl = undefined;
+			this.#authLaunchUrl = undefined;
+			this.#launchNotice = undefined;
 			this.#loggingInProvider = undefined;
 			this.#loginAbort = undefined;
 			this.host.restoreFocus();

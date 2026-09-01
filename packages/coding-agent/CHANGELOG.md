@@ -9,7 +9,7 @@
 
 ### Added
 
-- Added support for the `BROWSER` environment variable when opening URLs: `BROWSER=none` suppresses the automatic launch, and any other value names the opener to use instead of the platform default. The sign-in panel now says when a launch was suppressed instead of leaving the provider's "a browser window should open" instruction standing alone. File paths still go to the OS type handler.
+- Added support for `BROWSER=none` when opening web URLs, the opt-out shared by xdg-open, python's webbrowser, and gh, so an OAuth login no longer hijacks a browser the user does not want. The sign-in panel says when a launch was suppressed instead of leaving the provider's "a browser window should open" instruction standing alone. Other `BROWSER` values, which may carry arguments and `%s` substitution, are left to the platform opener, and file paths ignore the variable entirely.
 
 ## [17.2.15] - 2026-08-12
 

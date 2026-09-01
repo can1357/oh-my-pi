@@ -24,13 +24,14 @@ describe("openCommandFor", () => {
 		process.env.BROWSER = "  NONE  ";
 		expect(openCommandFor("https://example.com/oauth")).toBeUndefined();
 	});
-
-	it("uses BROWSER as the opener, unsplit, so a path with spaces survives", () => {
-		process.env.BROWSER = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
-		expect(openCommandFor("https://example.com/oauth")).toEqual([
-			"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-			"https://example.com/oauth",
-		]);
+	// The convention allows arguments and %s substitution. omp does not parse
+	// them, so a value it cannot honor must leave the platform default alone
+	// rather than spawn a binary named "firefox %s" and open nothing.
+	it("ignores a BROWSER value that is not the opt-out", () => {
+		process.env.BROWSER = "firefox %s";
+		expect(openCommandFor("https://example.com/oauth")).toEqual(
+			process.platform === "darwin" ? ["open", "https://example.com/oauth"] : expect.any(Array),
+		);
 	});
 
 	it("ignores BROWSER for file paths, which need the OS type handler", () => {

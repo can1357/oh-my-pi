@@ -199,4 +199,61 @@ describe("SignInTab", () => {
 			await loginGate.promise;
 		}
 	});
+
+	// The notice is only useful if it survives the same clip the layout above is
+	// built around: printed after a multi-row URL it is the first row the wizard
+	// drops, leaving BROWSER=none users with no browser and no explanation.
+	it("puts the suppressed-launch notice above the URL block", async () => {
+		const previousBrowser = process.env.BROWSER;
+		process.env.BROWSER = "none";
+		const url = `https://auth.example.com/oauth/authorize?client_id=omp&state=${"n".repeat(120)}`;
+		const loginGate = Promise.withResolvers<void>();
+		vi.spyOn(clipboard, "copyToClipboard").mockResolvedValue(undefined);
+		const openedUrls: string[] = [];
+
+		const authStorage = {
+			has: (_providerId: string) => false,
+			hasAuth: (_providerId: string) => false,
+			getCredentialOrigin: (_providerId: string) => undefined,
+			async login(_provider: OAuthProviderId, ctrl: OAuthLoginCallbacks): Promise<void> {
+				ctrl.onAuth({ url, instructions: "A browser window should open. Complete login to finish." });
+				await loginGate.promise;
+			},
+		} as unknown as AuthStorage;
+
+		const host = {
+			ctx: {
+				openInBrowser(openedUrl: string): void {
+					openedUrls.push(openedUrl);
+				},
+				session: { modelRegistry: { authStorage, async refresh(): Promise<void> {} } },
+			},
+			requestRender(): void {},
+			finish(): void {},
+			setFocus(): void {},
+			restoreFocus(): void {},
+		} as unknown as SetupSceneHost;
+
+		const tab = new SignInTab(host);
+		try {
+			for (const char of "anthropic") {
+				tab.handleInput(char);
+			}
+			tab.handleInput("\n");
+			await Promise.resolve();
+
+			expect(openedUrls).toEqual([]);
+			const plain = tab.render(60).map(line => Bun.stripANSI(line));
+			const noticeIndex = plain.findIndex(line => line.includes("Browser launch disabled by BROWSER=none"));
+			const urlIndex = plain.findIndex(line => line.startsWith("https://auth.example.com"));
+			expect(noticeIndex).toBeGreaterThanOrEqual(0);
+			expect(noticeIndex).toBeLessThan(urlIndex);
+		} finally {
+			tab.dispose();
+			loginGate.resolve();
+			await loginGate.promise;
+			if (previousBrowser === undefined) delete process.env.BROWSER;
+			else process.env.BROWSER = previousBrowser;
+		}
+	});
 });

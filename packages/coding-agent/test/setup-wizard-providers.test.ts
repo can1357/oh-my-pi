@@ -1,4 +1,4 @@
-import { beforeAll, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import type { AuthStorage } from "@oh-my-pi/pi-ai";
 import type { OAuthLoginCallbacks, OAuthProviderId } from "@oh-my-pi/pi-ai/oauth/types";
 import { providersSetupScene } from "@oh-my-pi/pi-coding-agent/modes/setup-wizard/scenes/providers";
@@ -8,6 +8,12 @@ import * as clipboard from "@oh-my-pi/pi-coding-agent/utils/clipboard";
 
 beforeAll(async () => {
 	await initTheme();
+});
+
+// The clipboard spy below lives on the imported module, which is shared with
+// every other test file in the process.
+afterEach(() => {
+	vi.restoreAllMocks();
 });
 
 describe("providers setup scene", () => {
