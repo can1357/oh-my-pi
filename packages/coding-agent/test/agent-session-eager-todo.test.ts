@@ -264,6 +264,14 @@ describe("AgentSession eager todo enforcement", () => {
 		expect(session.formatSessionAsText()).not.toContain("<user-request>");
 	});
 
+	it("retains eager todo enforcement for agent-attributed task assignments", async () => {
+		await session.prompt("inspect the parser implementation", { attribution: "agent" });
+
+		expect(observedCalls).toHaveLength(1);
+		expect(observedCalls[0]?.toolChoice).toBe("todo");
+		expect(observedCalls[0]?.messageRoles).toEqual(["developer", "user"]);
+		expect(observedCalls[0]?.lastMessageText).toBe("inspect the parser implementation");
+	});
 	it("initializes todos once, then continues within the same user turn", async () => {
 		scriptedResponses = [
 			createToolCallAssistantMessage("todo", {
