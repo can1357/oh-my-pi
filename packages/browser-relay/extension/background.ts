@@ -484,10 +484,16 @@ async function buildHello(): Promise<
 	const recoverableSnapshot = new Set(recoverableTabIds);
 	for (const tabId of attachedTabIds) recoverableSnapshot.add(tabId);
 	const versionMatch = /Chrome\/[\d.]+/.exec(navigator.userAgent);
+	const hardwareConcurrency =
+		Number.isInteger(navigator.hardwareConcurrency) &&
+			navigator.hardwareConcurrency > 0
+			? navigator.hardwareConcurrency
+			: undefined;
 	return {
 		t: "hello",
 		userAgent: navigator.userAgent,
 		browserVersion: versionMatch?.[0] ?? "Chrome/unknown",
+		hardwareConcurrency,
 		tabs: snapshots,
 		attachedTabIds,
 		recoverableTabIds: [...recoverableSnapshot],
