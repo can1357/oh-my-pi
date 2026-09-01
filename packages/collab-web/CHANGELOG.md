@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Collab guest transcript shows a centered Scroll to current pill after scrolling up more than one viewport, jumping to the tail and resuming follow.
+
 ## [18.0.8] - 2026-08-27
 
 ### Added

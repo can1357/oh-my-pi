@@ -1,5 +1,5 @@
 import type { AssistantMessage, ImageContent, SessionEntry, TextContent, ToolResultMessage } from "@oh-my-pi/pi-wire";
-import { ChevronRight } from "lucide-react";
+import { ChevronRight, ChevronsDown } from "lucide-react";
 import type { ReactNode } from "react";
 import { memo, useEffect, useMemo, useRef, useState } from "react";
 import type { ActiveTool } from "../../lib/client";
@@ -7,6 +7,7 @@ import { fmtTokens } from "../../lib/format";
 import type { ToolRenderHost } from "../../tool-render";
 import { Markdown } from "./Markdown";
 import { ToolCard } from "./ToolCard";
+import { useTranscriptScroll } from "./use-transcript-scroll";
 import "./transcript.css";
 
 export interface TranscriptProps {
@@ -238,6 +239,49 @@ const EntryRow = memo(function EntryRow({ entry, results, active, host }: EntryR
 	}
 }, entryRowEqual);
 
+function JumpPill({ visible, onJump }: { visible: boolean; onJump: () => void }): ReactNode {
+	const skipExit = useRef(false);
+	const [mounted, setMounted] = useState(visible);
+	const [leaving, setLeaving] = useState(false);
+
+	useEffect(() => {
+		if (visible) {
+			skipExit.current = false;
+			setMounted(true);
+			setLeaving(false);
+			return;
+		}
+		if (skipExit.current || window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+			skipExit.current = false;
+			setMounted(false);
+			setLeaving(false);
+			return;
+		}
+		setLeaving(true);
+	}, [visible]);
+
+	if (!mounted) return null;
+
+	return (
+		<button
+			type="button"
+			className={`tr-jump${leaving ? " tr-jump--out" : ""}`}
+			onClick={() => {
+				skipExit.current = true;
+				onJump();
+			}}
+			onAnimationEnd={() => {
+				if (!leaving) return;
+				setMounted(false);
+				setLeaving(false);
+			}}
+		>
+			<ChevronsDown size={15} aria-hidden />
+			Scroll to current
+		</button>
+	);
+}
+
 export function Transcript(props: TranscriptProps): ReactNode {
 	const { entries, stream, streamDone, activeTools, working, compact, host } = props;
 
@@ -251,16 +295,15 @@ export function Transcript(props: TranscriptProps): ReactNode {
 		return map;
 	}, [entries]);
 
-	const rootRef = useRef<HTMLDivElement | null>(null);
-	const lockRef = useRef(true);
+	const isCompact = compact === true;
+	const { rootRef, contentRef, showJump, onScroll, jumpToBottom } = useTranscriptScroll(
+		!isCompact,
+		entries,
+		stream,
+		activeTools,
+		working,
+	);
 
-	// Follow the tail while bottom-locked; releasing/re-arming happens in onScroll.
-	useEffect(() => {
-		const el = rootRef.current;
-		if (el !== null && lockRef.current) el.scrollTop = el.scrollHeight;
-	}, [entries, stream, activeTools, working]);
-
-	// Active tools not already represented as toolCall blocks in committed rows or the stream ghost.
 	const renderedToolIds = new Set<string>();
 	for (const entry of entries) {
 		if (entry.type !== "message" || entry.message.role !== "assistant") continue;
@@ -278,53 +321,61 @@ export function Transcript(props: TranscriptProps): ReactNode {
 		if (!renderedToolIds.has(tool.toolCallId)) tailTools.push(tool);
 	}
 
-	return (
+	const scroller = (
 		<div
 			ref={rootRef}
-			className={`tr-root${compact === true ? " tr-root--compact" : ""}`}
-			onScroll={() => {
-				const el = rootRef.current;
-				if (el !== null) {
-					lockRef.current = el.scrollHeight - el.scrollTop - el.clientHeight <= 40;
-				}
-			}}
+			className={`tr-root${isCompact ? " tr-root--compact" : ""}`}
+			tabIndex={isCompact ? undefined : -1}
+			aria-label={isCompact ? undefined : "Transcript"}
+			onScroll={onScroll}
 		>
-			{entries.length === 0 && stream === null && !working && <div className="tr-empty">no activity yet</div>}
-			{entries.map(entry => (
-				<EntryRow key={entry.id} entry={entry} results={results} active={activeTools} host={host} />
-			))}
-			{stream !== null && (
-				<Row kind="assistant" gutter="agent">
-					<AssistantBody
-						message={stream}
-						results={results}
-						active={activeTools}
-						pending={!streamDone}
-						host={host}
-					/>
-				</Row>
-			)}
-			{tailTools.length > 0 && (
-				<Row kind="assistant" gutter={stream === null ? "agent" : ""}>
-					{tailTools.map(tool => (
-						<ToolCard
-							key={tool.toolCallId}
-							toolCallId={tool.toolCallId}
-							name={tool.toolName}
-							intent={tool.intent}
-							args={tool.args}
-							running
-							partialResult={tool.partialResult}
+			<div ref={contentRef} className="tr-content">
+				{entries.length === 0 && stream === null && !working && <div className="tr-empty">no activity yet</div>}
+				{entries.map(entry => (
+					<EntryRow key={entry.id} entry={entry} results={results} active={activeTools} host={host} />
+				))}
+				{stream !== null && (
+					<Row kind="assistant" gutter="agent">
+						<AssistantBody
+							message={stream}
+							results={results}
+							active={activeTools}
+							pending={!streamDone}
 							host={host}
 						/>
-					))}
-				</Row>
-			)}
-			{working && stream === null && activeTools.size === 0 && (
-				<Row kind="assistant" gutter="agent">
-					<div className="tr-shimmer">thinking…</div>
-				</Row>
-			)}
+					</Row>
+				)}
+				{tailTools.length > 0 && (
+					<Row kind="assistant" gutter={stream === null ? "agent" : ""}>
+						{tailTools.map(tool => (
+							<ToolCard
+								key={tool.toolCallId}
+								toolCallId={tool.toolCallId}
+								name={tool.toolName}
+								intent={tool.intent}
+								args={tool.args}
+								running
+								partialResult={tool.partialResult}
+								host={host}
+							/>
+						))}
+					</Row>
+				)}
+				{working && stream === null && activeTools.size === 0 && (
+					<Row kind="assistant" gutter="agent">
+						<div className="tr-shimmer">thinking…</div>
+					</Row>
+				)}
+			</div>
+		</div>
+	);
+
+	if (isCompact) return scroller;
+
+	return (
+		<div className="tr-shell">
+			{scroller}
+			<JumpPill visible={showJump} onJump={jumpToBottom} />
 		</div>
 	);
 }

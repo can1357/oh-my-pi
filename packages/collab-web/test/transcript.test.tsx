@@ -55,6 +55,7 @@ function renderTranscript(props: {
 	entries?: readonly SessionEntry[];
 	activeTools?: ReadonlyMap<string, ActiveTool>;
 	working: boolean;
+	compact?: boolean;
 }): string {
 	return renderToStaticMarkup(
 		<Transcript
@@ -63,6 +64,7 @@ function renderTranscript(props: {
 			streamDone={true}
 			activeTools={props.activeTools ?? new Map()}
 			working={props.working}
+			compact={props.compact}
 		/>,
 	);
 }
@@ -143,5 +145,22 @@ describe("Transcript message Markdown", () => {
 
 		expect(countElements(html, ".tr-row--user .tr-md code")).toBe(1);
 		expect(countElements(html, ".tr-row--user .tr-md strong")).toBe(1);
+	});
+});
+
+describe("Transcript jump pill", () => {
+	it("does not render the jump pill in compact/drawer mode", () => {
+		const html = renderTranscript({ working: false, compact: true });
+		expect(html).not.toContain("Scroll to current");
+		expect(html).not.toContain("tr-shell");
+		expect(html).not.toContain('aria-label="Transcript"');
+	});
+
+	it("wraps the main scroller and labels it", () => {
+		const html = renderTranscript({ working: false });
+		expect(html).toContain("tr-shell");
+		expect(html).toContain("tr-content");
+		expect(html).toContain('aria-label="Transcript"');
+		expect(html).not.toContain("Scroll to current");
 	});
 });
