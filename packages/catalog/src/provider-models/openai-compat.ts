@@ -875,7 +875,6 @@ function hasOnlyNonTextOutput(entry: OpenAICompatibleModelRecord): boolean {
 	);
 }
 
-const EUROPEAN_GATEWAY_REASONING_ID_PATTERN = /(?:^|[\s/:._-])(?:reasoner|reasoning|thinking)(?:$|[\s/:._-])/i;
 const EUROPEAN_GATEWAY_GROK_REASONING_REVISIONS = new Set(["3.0.0", "4.3.0", "4.5.0", "4.6.0", "4.20.0"]);
 const EUROPEAN_GATEWAY_TOOL_CAPABILITY_TOKENS = new Set([
 	"function-call",
@@ -911,7 +910,6 @@ function isLikelyEuropeanGatewayChatModel(entry: OpenAICompatibleModelRecord, mo
 }
 
 function hasEuropeanGatewayReasoningIdentity(model: ModelSpec<Api>): boolean {
-	const normalized = `${model.id} ${model.name}`.trim();
 	const identity = classifyModel("", model.id, { lenient: true });
 	return (
 		identity.class === "gpt-oss" ||
@@ -919,8 +917,7 @@ function hasEuropeanGatewayReasoningIdentity(model: ModelSpec<Api>): boolean {
 		(identity.class === "xai" &&
 			identity.family === "grok" &&
 			EUROPEAN_GATEWAY_GROK_REASONING_REVISIONS.has(identity.revision ?? "")) ||
-		(identity.class === "deepseek" && (identity.family === "r1" || identity.family === "reasoner")) ||
-		EUROPEAN_GATEWAY_REASONING_ID_PATTERN.test(normalized)
+		(identity.class === "deepseek" && (identity.family === "r1" || identity.family === "reasoner"))
 	);
 }
 

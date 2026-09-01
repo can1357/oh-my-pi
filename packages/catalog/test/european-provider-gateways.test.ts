@@ -438,6 +438,26 @@ describe("European gateway provider catalog support", () => {
 		);
 	});
 
+	test("does not infer gateway reasoning from model name tokens", async () => {
+		const fetchMock: FetchImpl = vi.fn(async () => {
+			return Response.json({
+				data: [
+					{ id: "llama-non-reasoning", name: "Llama Non-Reasoning" },
+					{ id: "gateway-model-2026", name: "Reasoning Disabled" },
+				],
+			});
+		});
+
+		const models = await cortecsModelManagerOptions({ fetch: fetchMock }).fetchDynamicModels?.();
+
+		expect(models).toContainEqual(
+			expect.objectContaining({ id: "llama-non-reasoning", provider: "cortecs", reasoning: false }),
+		);
+		expect(models).toContainEqual(
+			expect.objectContaining({ id: "gateway-model-2026", provider: "cortecs", reasoning: false }),
+		);
+	});
+
 	test("preserves known reasoning capability for European gateway refreshes", async () => {
 		const fetchMock: FetchImpl = vi.fn(async () => {
 			return new Response(
