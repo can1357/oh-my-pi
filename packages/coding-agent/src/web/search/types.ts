@@ -42,6 +42,7 @@ export const SEARCH_PROVIDER_OPTIONS = [
 	{ value: "jina", label: "Jina", description: "Requires JINA_API_KEY" },
 	{ value: "kagi", label: "Kagi", description: "Requires KAGI_API_KEY and Kagi Search API beta access" },
 	{ value: "tavily", label: "Tavily", description: "Requires TAVILY_API_KEY" },
+	{ value: "querit", label: "Querit", description: "API via /login querit or QUERIT_API_KEY" },
 	{
 		value: "firecrawl",
 		label: "Firecrawl",

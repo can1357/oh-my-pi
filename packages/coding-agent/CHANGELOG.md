@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added Querit as a built-in `web_search` provider and `read` URL reader (`providers.fetch`), with `/login querit` and `QUERIT_API_KEY` support ([#10440](https://github.com/can1357/oh-my-pi/pull/10440) by [@MCapricorns](https://github.com/MCapricorns)).
 - Added `injectV1: false` option to `openai-models-list` discovery to fetch the model list from `{baseUrl}/models` without injecting `/v1`, for gateways that root their OpenAI-compatible surface at a versioned URL (e.g. `https://api.opper.ai/v3/compat`) where the `/v1`-injected endpoint returns only a small subset.
 - Added provider-reported credits and concrete routed-model counts to `/session` statistics ([#8590](https://github.com/can1357/oh-my-pi/pull/8590) by [@will-bogusz](https://github.com/will-bogusz)).
 - Added `CLINE_API_KEY` to the CLI environment help for native ClinePass subscription inference ([#7863](https://github.com/can1357/oh-my-pi/pull/7863) by [@will-bogusz](https://github.com/will-bogusz)).

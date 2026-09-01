@@ -239,6 +239,7 @@ Literal filesystem paths take precedence over selector interpretation, so an exi
   5. handle JSON directly, feeds via feed parser, plain text directly
   6. for HTML and non-raw mode, try markdown alternates, `URL.md`, content negotiation, feed alternates, HTML-to-text renderers, extracted linked documents, then `llms.txt`
   7. fall back to raw body text/html
+- HTML-to-text reader backends are selected by `providers.fetch`: `auto` walks `native` > `trafilatura` > `lynx` > `parallel` > `querit` > `jina`. Pin one with `omp config set providers.fetch querit`. Querit uses POST `https://api.querit.ai/v1/contents` (`/login querit` or `QUERIT_API_KEY`) and is not a standalone fetch tool.
 - URL output is wrapped with a small header:
 
 ```text
@@ -250,7 +251,7 @@ Notes: ...
 ---
 ```
 
-- `method` records the winning path (`json`, `feed`, `text`, `alternate-markdown`, `md-suffix`, `content-negotiation`, `image`, `markit`, `llms.txt`, `raw`, `raw-html`, etc.).
+- `method` records the winning path (`json`, `feed`, `text`, `alternate-markdown`, `md-suffix`, `content-negotiation`, `image`, `markit`, `llms.txt`, `native`, `trafilatura`, `lynx`, `parallel`, `querit`, `jina`, `raw`, `raw-html`, etc.).
 - URL reads may return an inline image block when the fetched resource is a supported image and survives resizing.
 
 ## Side Effects

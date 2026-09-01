@@ -5753,7 +5753,7 @@ export const SETTINGS_SCHEMA = {
 	},
 	"providers.fetch": {
 		type: "enum",
-		values: ["auto", "native", "trafilatura", "lynx", "parallel", "jina"] as const,
+		values: ["auto", "native", "trafilatura", "lynx", "parallel", "querit", "jina"] as const,
 		default: "auto",
 		ui: {
 			tab: "providers",
@@ -5764,12 +5764,13 @@ export const SETTINGS_SCHEMA = {
 				{
 					value: "auto",
 					label: "Auto",
-					description: "Priority: native > trafilatura > lynx > parallel > jina",
+					description: "Priority: native > trafilatura > lynx > parallel > querit > jina",
 				},
 				{ value: "native", label: "Native", description: "In-process HTML→Markdown converter (always available)" },
 				{ value: "trafilatura", label: "Trafilatura", description: "Auto-installs via uv/pip" },
 				{ value: "lynx", label: "Lynx", description: "Requires lynx system package" },
 				{ value: "parallel", label: "Parallel", description: "Requires PARALLEL_API_KEY" },
+				{ value: "querit", label: "Querit", description: "Requires /login querit or QUERIT_API_KEY" },
 				{ value: "jina", label: "Jina", description: "Uses r.jina.ai reader (JINA_API_KEY optional)" },
 			],
 		},

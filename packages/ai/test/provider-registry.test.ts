@@ -17,6 +17,7 @@ const ENV_KEYS = [
 	"COREWEAVE_API_KEY",
 	"ZENMUX_API_KEY",
 	"EXA_API_KEY",
+	"QUERIT_API_KEY",
 	"XAI_OAUTH_TOKEN",
 	"UMANS_AI_CODING_PLAN_API_KEY",
 	"LLAMA_CPP_API_KEY",
@@ -41,14 +42,16 @@ describe("provider registry auth surface", () => {
 	test("env-key map merges catalog names, registry defs, and legacy keys", () => {
 		Bun.env.ZENMUX_API_KEY = "zenmux-env";
 		Bun.env.EXA_API_KEY = "exa-env";
+		Bun.env.QUERIT_API_KEY = "querit-env";
 		// Plain name derived from the catalog table's `envVars`.
 		expect(getEnvApiKey("zenmux")).toBe("zenmux-env");
 		Bun.env.UMANS_AI_CODING_PLAN_API_KEY = "umans-env";
 		expect(getEnvApiKey("umans")).toBe("umans-env");
 		Bun.env.LLAMA_CPP_API_KEY = "llama-env";
 		expect(getEnvApiKey("llama.cpp")).toBe("llama-env");
-		// Exa is derived from the provider registry's `envKeys` definition.
+		// Exa and Querit are derived from provider registry `envKeys` definitions.
 		expect(getEnvApiKey("exa")).toBe("exa-env");
+		expect(getEnvApiKey("querit")).toBe("querit-env");
 	});
 
 	test("multi-var catalog env fallback picks names in order", () => {
@@ -66,6 +69,7 @@ describe("provider registry auth surface", () => {
 		expect(ids).toContain("zenmux");
 		expect(ids).toContain("kagi");
 		expect(ids).toContain("exa");
+		expect(ids).toContain("querit");
 		expect(ids).toContain("umans");
 		expect(ids).toContain("llama.cpp");
 		// openai has no interactive login flow.

@@ -30,6 +30,7 @@
   - `packages/coding-agent/src/web/search/providers/parallel.ts` — Parallel provider wrapper.
   - `packages/coding-agent/src/web/search/providers/perplexity.ts` — Perplexity API / OAuth adapter.
   - `packages/coding-agent/src/web/search/providers/public.ts` — Public Web aggregate over all credential-free engines.
+  - `packages/coding-agent/src/web/search/providers/querit.ts` — Querit search adapter.
   - `packages/coding-agent/src/web/search/providers/searxng.ts` — self-hosted SearXNG adapter.
   - `packages/coding-agent/src/web/search/providers/startpage.ts` — Startpage (Google-proxied) form-flow scraper.
   - `packages/coding-agent/src/web/search/providers/synthetic.ts` — Synthetic search adapter.
@@ -108,7 +109,7 @@ Each provider search transport receives a hard timeout from `providers.webSearch
   - **Forced provider**: internal callers may pass `provider`; a non-`auto` value is the only attempted provider and uses `isExplicitlyAvailable()`, while `auto` (or omitting it) walks the configured chain. This field is not in the model-facing schema.
   - **Configured order**: `setSearchProviderOrder()` prioritizes valid, first-occurrence provider IDs in `providers.webSearchOrder`; omitted providers follow in built-in relative order. Listed providers are explicit selections and resolve through `isExplicitlyAvailable()`, so Perplexity, Exa, and Firecrawl can use their unauthenticated/keyless paths.
   - **Excluded providers**: `setExcludedSearchProviders()` removes providers from the automatic/configured chain and Public Web fan-out. Wired from `providers.webSearchExclude` through `packages/coding-agent/src/config/provider-globals.ts`.
-  - **Default auto chain order** (23 providers): `perplexity`, `gemini`, `anthropic`, `codex`, `xai`, `zai`, `exa`, `tinyfish`, `jina`, `kagi`, `tavily`, `firecrawl`, `brave`, `kimi`, `parallel`, `synthetic`, `searxng`, `startpage`, `duckduckgo`, `ecosia`, `google`, `mojeek`, `public` (`SEARCH_PROVIDER_ORDER` in `packages/coding-agent/src/web/search/types.ts`). `public` is explicit-only: its `isAvailable()` returns `false`, so the auto chain never fans out implicitly.
+  - **Default auto chain order** (24 providers): `perplexity`, `gemini`, `anthropic`, `codex`, `xai`, `zai`, `exa`, `tinyfish`, `jina`, `kagi`, `tavily`, `querit`, `firecrawl`, `brave`, `kimi`, `parallel`, `synthetic`, `searxng`, `startpage`, `duckduckgo`, `ecosia`, `google`, `mojeek`, `public` (`SEARCH_PROVIDER_ORDER` in `packages/coding-agent/src/web/search/types.ts`). `public` is explicit-only: its `isAvailable()` returns `false`, so the auto chain never fans out implicitly.
 - **Provider timeout**: `providers.webSearchTimeoutSeconds` supplies the hard ceiling for each provider's search transport before the automatic chain advances. It defaults to `60`; invalid non-positive values fall back to that default and values above `300` are capped, while provider-specific upstream or aggregate limits may still be shorter.
 - **Provider adapters**
   - **Perplexity** — `packages/coding-agent/src/web/search/providers/perplexity.ts`
@@ -179,6 +180,11 @@ Each provider search transport receives a hard timeout from `providers.webSearch
     - `recency` maps to Tavily `time_range`; code explicitly keeps `topic` at default general scope instead of narrowing to news.
     - `limit` / `num_search_results`: adapter uses `params.numSearchResults ?? params.limit`, clamped to `5..20` with default `5`.
     - Output: `answer`, `sources`, `requestId`, `authMode: "api_key"`.
+  - **Querit** — `packages/coding-agent/src/web/search/providers/querit.ts`
+    - Availability: `QUERIT_API_KEY` or a stored credential for `querit` (including one added through `/login querit`).
+    - Querying: POST `https://api.querit.ai/v1/search` with Bearer auth and JSON body `{ query, count }` only. Recency, site, date, and language filters stay at Querit's broad API defaults; Google-style directives remain in the query string.
+    - `limit` / `num_search_results`: adapter uses `params.numSearchResults ?? params.limit`, clamped to `1..20` with default `10`.
+    - Output: `sources` mapped from `results.result` (`title`, `url`, `snippet`, `page_age` → `publishedDate`, `site_name` → `author`), `requestId` (`search_id`), `authMode: "api_key"`.
   - **Firecrawl** — `packages/coding-agent/src/web/search/providers/firecrawl.ts`
     - Availability: credentials admit it to the automatic chain; explicit/configured selection is always available and uses keyless mode when no credential resolves.
     - Querying: POST `https://api.firecrawl.dev/v2/search` with `sources: [{ type: "web" }]`. Google-style operators are formatted into the query; `recency` and parsed absolute dates map to `tbs`.
@@ -245,7 +251,7 @@ Each provider search transport receives a hard timeout from `providers.webSearch
   - Many provider adapters accept `AbortSignal`; `WebSearchTool.execute()` passes the tool call signal into `executeSearch()`, which forwards it as `params.signal` to providers and rethrows cancellation during fallback.
 
 ## Limits & Caps
-- Provider auto-order length: 23 providers (`SEARCH_PROVIDER_ORDER` in `packages/coding-agent/src/web/search/types.ts`).
+- Provider auto-order length: 24 providers (`SEARCH_PROVIDER_ORDER` in `packages/coding-agent/src/web/search/types.ts`).
 - `formatForLLM()` truncates source snippets and citation text to 240 chars (`packages/coding-agent/src/web/search/index.ts`).
 - `formatForLLM()` emits at most 3 search queries, each truncated to 120 chars (`packages/coding-agent/src/web/search/index.ts`).
 - Brave result count: default `10`, max `20` (`DEFAULT_NUM_RESULTS`, `MAX_NUM_RESULTS` in `packages/coding-agent/src/web/search/providers/brave.ts`).
@@ -254,6 +260,7 @@ Each provider search transport receives a hard timeout from `providers.webSearch
 - Startpage / Google / Ecosia / Mojeek result count: default `10`, max `20` (their `providers/*.ts` modules).
 - Public Web result count: default `15`, max `30`; fan-out soft deadline `5s`, hard cap `30s` (`packages/coding-agent/src/web/search/providers/public.ts`).
 - Tavily result count: default `5`, max `20` (`packages/coding-agent/src/web/search/providers/tavily.ts`).
+- Querit result count: default `10`, max `20` (`packages/coding-agent/src/web/search/providers/querit.ts`).
 - Firecrawl result count: default `10`, max `100` (`packages/coding-agent/src/web/search/providers/firecrawl.ts`).
 - Kimi result count: default `10`, max `20`; request timeout field fixed to `30` seconds (`packages/coding-agent/src/web/search/providers/kimi.ts`).
 - Parallel result count: default `10`, max `40`; per-result excerpt cap `10_000` chars (`packages/coding-agent/src/web/search/providers/parallel.ts`, `packages/coding-agent/src/web/parallel.ts`).
@@ -285,3 +292,4 @@ Each provider search transport receives a hard timeout from `providers.webSearch
 - `packages/coding-agent/src/config/settings-schema.ts` uses the shared `SEARCH_PROVIDER_PREFERENCES` / `SEARCH_PROVIDER_OPTIONS` metadata, so the settings selector and setup wizard expose `auto` plus every provider in the auto chain.
 - The credential-free scrapers close the auto chain: Startpage and DuckDuckGo precede the browser-backed Ecosia, Google, and Mojeek paths; `public` is listed last and never auto-selected.
 - `/login exa` stores the pasted key in AuthStorage; Exa resolves stored or environment credentials before the unauthenticated `https://mcp.exa.ai/mcp` fallback.
+- `/login querit` stores the pasted key in AuthStorage; Querit resolves stored or `QUERIT_API_KEY` credentials. The same key also authenticates the `read` URL reader when `providers.fetch` is `querit` or `auto`.
