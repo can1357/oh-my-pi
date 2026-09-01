@@ -170,10 +170,16 @@ describe("ollama-cloud usage provider", () => {
 		expect(activity?.window?.durationMs).toBe(28 * 24 * 60 * 60 * 1000);
 	});
 
-	it("raw response preserved, endpoint recorded in metadata", async () => {
+	it("fraction and unit survive the round trip the auth-storage probe and broker consumers rely on", async () => {
 		const report = await ollamaCloudUsageProvider.fetchUsage(makeParams(), makeCtx(FULL_FIXTURE));
-		expect(report?.raw).toEqual(FULL_FIXTURE);
-		expect(report?.metadata?.endpoint).toBe("https://ollama.com/api/usage");
+		const monthly = report?.limits.find(limit => limit.id === "ollama-cloud:monthly");
+		// `resolveUsedFraction` (usage.ts) is the shared consumer: the auth-storage
+		// probe, the TUI dashboard card, and the status line all rank on it. A
+		// regression in the fraction → percent mapping would surface there as a
+		// wrong "X% used" or a lost exhausted/warning status.
+		expect(monthly?.amount.usedFraction).toBeCloseTo(0.004);
+		expect(monthly?.amount.used).toBeCloseTo(0.4);
+		expect(monthly?.amount.unit).toBe("percent");
 	});
 
 	it("non-ollama-cloud provider → returns null", async () => {
