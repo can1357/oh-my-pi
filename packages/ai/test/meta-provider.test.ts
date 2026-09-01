@@ -111,6 +111,52 @@ describe("Meta login", () => {
 		}
 	});
 
+	test("reloads OAuth minted-key and login-recency changes with an unchanged token tuple", async () => {
+		const store = new SqliteAuthCredentialStore(new Database(":memory:"));
+		const storage = new AuthStorage(store, { usageProviderResolver: () => undefined });
+		const now = Date.now();
+		try {
+			await storage.reload();
+			await storage.set("meta", [
+				{
+					type: "api_key",
+					key: "LLM|payg-key",
+					source: "login",
+					authorizedAt: now,
+				},
+				{
+					type: "oauth",
+					access: "meta-account-access",
+					refresh: "meta-account-refresh",
+					expires: now + 3_600_000,
+					apiKey: "LLM|subscription-key",
+					accountId: "meta-account",
+					authorizedAt: now - 1,
+				},
+			]);
+			expect(await storage.getApiKey("meta", "before-recency-update")).toBe("LLM|payg-key");
+
+			const oauthRow = store.listAuthCredentials("meta").find(row => row.credential.type === "oauth");
+			if (!oauthRow || oauthRow.credential.type !== "oauth") throw new Error("expected Meta OAuth row");
+			store.updateAuthCredential(oauthRow.id, {
+				...oauthRow.credential,
+				authorizedAt: now + 1,
+			});
+			await storage.reload();
+			expect(await storage.getApiKey("meta", "after-recency-update")).toBe("LLM|subscription-key");
+
+			store.updateAuthCredential(oauthRow.id, {
+				...oauthRow.credential,
+				apiKey: "LLM|rotated-subscription-key",
+				authorizedAt: now + 1,
+			});
+			await storage.reload();
+			expect(await storage.getApiKey("meta", "after-key-update")).toBe("LLM|rotated-subscription-key");
+		} finally {
+			storage.close();
+		}
+	});
+
 	test("refreshes a preferred expired Muse login before exposing an older PAYG key", async () => {
 		let refreshCalls = 0;
 		const storage = new AuthStorage(new SqliteAuthCredentialStore(new Database(":memory:")), {

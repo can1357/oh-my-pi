@@ -167,20 +167,37 @@ function parseTokenGrant(payload: unknown, refreshFallback?: string): TokenGrant
 	return { accessToken, refreshToken, expiresInSeconds };
 }
 
-function parseMintedKey(response: MuseCodeKeyResponse): MintedMuseKey {
+function parseMintedKey(
+	response: MuseCodeKeyResponse,
+	identity?: Pick<OAuthCredentials, "accountId" | "email">,
+): MintedMuseKey {
+	if (response.is_subs_active === false) {
+		throw new AIError.OAuthError("Muse Code subscription is inactive", {
+			kind: "token-exchange",
+			provider: PROVIDER,
+			status: 403,
+		});
+	}
 	const apiKey = response.api_key?.trim() || "";
 	if (!apiKey) {
 		const actionUrl = response.action_url?.trim() || response.require_payment_action_url?.trim() || "";
 		throw new AIError.OAuthError(
 			actionUrl ? `Muse Code account setup is required: ${actionUrl}` : "Muse Code key response is missing api_key",
-			{ kind: "validation", provider: PROVIDER },
+			{
+				kind: "validation",
+				provider: PROVIDER,
+			},
 		);
 	}
-	return {
-		apiKey,
-		email: response.user_email?.trim().toLowerCase() || undefined,
-		accountId: response.user_id?.trim() || undefined,
-	};
+	const email = response.user_email?.trim().toLowerCase() || identity?.email;
+	const accountId = response.user_id?.trim() || identity?.accountId;
+	if (!accountId && !email) {
+		throw new AIError.OAuthError("Muse Code key response is missing a stable account identity", {
+			kind: "validation",
+			provider: PROVIDER,
+		});
+	}
+	return { apiKey, email, accountId };
 }
 
 async function requestDeviceAuthorization(fetchImpl: FetchImpl, signal?: AbortSignal): Promise<DeviceAuthorization> {
@@ -271,8 +288,9 @@ export async function mintMuseCodeApiKey(
 	accessToken: string,
 	fetchImpl: FetchImpl = fetch,
 	signal?: AbortSignal,
+	identity?: Pick<OAuthCredentials, "accountId" | "email">,
 ): Promise<MintedMuseKey> {
-	return parseMintedKey(await requestMuseCodeKey(accessToken, fetchImpl, signal));
+	return parseMintedKey(await requestMuseCodeKey(accessToken, fetchImpl, signal), identity);
 }
 
 function credentialsFromGrant(grant: TokenGrant, minted: MintedMuseKey): OAuthCredentials {
@@ -331,12 +349,8 @@ export async function refreshMetaMuseToken(
 	}
 	const grant = parseTokenGrant(payload, refreshToken);
 	try {
-		const minted = await mintMuseCodeApiKey(grant.accessToken, fetchImpl, signal);
-		return {
-			...credentialsFromGrant(grant, minted),
-			accountId: minted.accountId ?? credentials.accountId,
-			email: minted.email ?? credentials.email,
-		};
+		const minted = await mintMuseCodeApiKey(grant.accessToken, fetchImpl, signal, credentials);
+		return credentialsFromGrant(grant, minted);
 	} catch (error) {
 		const existingApiKey = credentials.apiKey;
 		const transientNetworkFailure =

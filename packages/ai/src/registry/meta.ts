@@ -1,4 +1,5 @@
 import * as AIError from "../error";
+import metaLoginPrompt from "./meta-login.md" with { type: "text" };
 import { loginMetaMuse, refreshMetaMuseToken } from "./oauth/meta-muse";
 import { createApiKeyLogin } from "./api-key-login";
 import type { OAuthCredentials, OAuthLoginCallbacks } from "./oauth/types";
@@ -20,8 +21,7 @@ const loginMetaApiKey = createApiKeyLogin({
 export async function loginMeta(callbacks: OAuthLoginCallbacks): Promise<OAuthCredentials | string> {
 	const choice = (
 		await callbacks.onPrompt({
-			message:
-				"Choose Meta authentication: 1=Muse Code subscription (Meta account), 2=Model API key (pay as you go)",
+			message: metaLoginPrompt,
 			placeholder: "1 or 2",
 		})
 	).trim();

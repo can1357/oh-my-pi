@@ -1,0 +1,1 @@
+Choose Meta authentication: 1=Muse Code subscription (Meta account), 2=Model API key (pay as you go)

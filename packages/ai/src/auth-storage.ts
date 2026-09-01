@@ -1185,11 +1185,13 @@ function authCredentialEquals(left: AuthCredential, right: AuthCredential): bool
 			left.authorizedAt === right.authorizedAt
 		);
 	}
-	if (right.type !== "oauth") return false;
+	if (right.type !== "oauth" || left.type !== "oauth") return false;
 	return (
 		left.access === right.access &&
 		left.refresh === right.refresh &&
 		left.expires === right.expires &&
+		left.apiKey === right.apiKey &&
+		left.authorizedAt === right.authorizedAt &&
 		left.accountId === right.accountId &&
 		left.email === right.email &&
 		left.projectId === right.projectId &&

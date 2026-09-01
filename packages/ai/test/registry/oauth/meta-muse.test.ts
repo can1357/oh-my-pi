@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { loginMetaMuse, refreshMetaMuseToken } from "../../../src/registry/oauth/meta-muse";
+import { loginMetaMuse, mintMuseCodeApiKey, refreshMetaMuseToken } from "../../../src/registry/oauth/meta-muse";
 import type { FetchImpl } from "../../../src/types";
 
 interface RecordedRequest {
@@ -68,6 +68,25 @@ describe("Muse Code OAuth", () => {
 		expect(new Headers(requests[2]!.init?.headers).get("x-api-version")).toBe("1.0.0");
 	});
 
+	test("rejects key exchanges without a stable account identity", async () => {
+		const fetchImpl: FetchImpl = () => Promise.resolve(response({ api_key: "LLM|identityless-key" }));
+
+		await expect(mintMuseCodeApiKey("oauth-access", fetchImpl)).rejects.toThrow("missing a stable account identity");
+	});
+
+	test("rejects inactive subscriptions during key exchange", async () => {
+		const fetchImpl: FetchImpl = () =>
+			Promise.resolve(
+				response({
+					api_key: "LLM|inactive-key",
+					user_id: "meta-account",
+					is_subs_active: false,
+				}),
+			);
+
+		await expect(mintMuseCodeApiKey("oauth-access", fetchImpl)).rejects.toThrow("subscription is inactive");
+	});
+
 	test("refreshes the Meta grant and replaces the subscription API key", async () => {
 		const requests: RecordedRequest[] = [];
 		const fetchImpl: FetchImpl = (input, init) => {
@@ -80,13 +99,20 @@ describe("Muse Code OAuth", () => {
 		};
 
 		const refreshed = await refreshMetaMuseToken(
-			{ access: "old-access", refresh: "durable-refresh", expires: 0, apiKey: "LLM|old-key" },
+			{
+				access: "old-access",
+				refresh: "durable-refresh",
+				expires: 0,
+				apiKey: "LLM|old-key",
+				accountId: "meta-account",
+			},
 			fetchImpl,
 		);
 
 		expect(refreshed.access).toBe("new-oauth-access");
 		expect(refreshed.refresh).toBe("durable-refresh");
 		expect(refreshed.apiKey).toBe("LLM|new-subscription-key");
+		expect(refreshed.accountId).toBe("meta-account");
 		const refreshForm = requestForm(requests[0]!);
 		expect(refreshForm.get("grant_type")).toBe("refresh_token");
 		expect(refreshForm.get("refresh_token")).toBe("durable-refresh");
