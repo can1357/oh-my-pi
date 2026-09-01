@@ -20,6 +20,8 @@
 - Updated Devin auth, assignment, chat, and usage requests to the current released CLI identity, version `3000.6.2` ([#8590](https://github.com/can1357/oh-my-pi/pull/8590) by [@will-bogusz](https://github.com/will-bogusz)).
 - Devin auth, model assignment, and chat requests now send the native Devin CLI identity (`ideName: devin-cli`, `ideType: chisel`, `extensionName: chisel`, mapped `os`) instead of the Windsurf IDE identity; `ideType: chisel` is what the backend requires for router assignment ([#8590](https://github.com/can1357/oh-my-pi/pull/8590) by [@will-bogusz](https://github.com/will-bogusz)).
 - Devin parallel tool calls follow `compat.supportsParallelToolCalls` instead of being disabled unconditionally, so natively discovered configs that support parallelism can use it ([#8590](https://github.com/can1357/oh-my-pi/pull/8590) by [@will-bogusz](https://github.com/will-bogusz)).
+- Gateway error classifications now carry a failure owner and retry/failover disposition (`credential_permanent`, `provider_transient`, `policy_terminal`, …); provider status codes stay authoritative over message wording, structurally flagged content blocks stay non-retryable, and context-overflow detection reuses the central classifier.
+- Gateway disposition mapping now keeps ordinary RPM/`Too many requests` 429s in the provider lane, requires structural evidence for `gateway_terminal`, and only treats opaque or billing-worded 402s as `credential_quota`.
 
 ### Fixed
 
