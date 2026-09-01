@@ -152,7 +152,7 @@ export async function getOAuthApiKey(
 			{ kind: "validation", provider },
 		);
 	}
-	// For providers that need request-time credential metadata, return JSON.
+	const providerDefinition = getProviderDefinition(provider);
 	const needsStructuredApiKey =
 		provider === "github-copilot" ||
 		provider === "google-gemini-cli" ||
@@ -169,7 +169,7 @@ export async function getOAuthApiKey(
 				email: creds.email,
 				accountId: creds.accountId,
 			})
-		: creds.access;
+		: (providerDefinition?.getApiKey?.(creds) ?? creds.access);
 	return { newCredentials: creds, apiKey };
 }
 

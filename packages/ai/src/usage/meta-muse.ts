@@ -1,0 +1,130 @@
+import type { MuseCodeKeyResponse } from "../registry/oauth/meta-muse";
+import { requestMuseCodeKey } from "../registry/oauth/meta-muse";
+import type { UsageAmount, UsageFetchParams, UsageLimit, UsageProvider, UsageReport, UsageWindow } from "../usage";
+import { parseIsoTimestamp, parsePositiveTimestamp, usageStatus, WEEK_MS } from "./shared";
+
+const PROVIDER = "meta";
+const SOURCE = "api.meta.ai/muse-code/key";
+
+function parseResetTimestamp(value: string | number | undefined): number | undefined {
+	return typeof value === "string" ? parseIsoTimestamp(value) : parsePositiveTimestamp(value);
+}
+
+function percentAmount(usedPercent: number): UsageAmount {
+	const usedFraction = usedPercent / 100;
+	return {
+		used: usedPercent,
+		limit: 100,
+		remaining: Math.max(0, 100 - usedPercent),
+		usedFraction,
+		remainingFraction: Math.max(0, 1 - usedFraction),
+		unit: "percent",
+	};
+}
+
+function buildLimit(
+	id: string,
+	label: string,
+	usedPercent: number | undefined,
+	window: UsageWindow,
+	tier: string | undefined,
+	accountId: string | undefined,
+): UsageLimit | undefined {
+	if (typeof usedPercent !== "number" || !Number.isFinite(usedPercent) || usedPercent < 0) return undefined;
+	const amount = percentAmount(usedPercent);
+	return {
+		id,
+		label,
+		scope: { provider: PROVIDER, accountId, tier, windowId: window.id, shared: true },
+		window,
+		amount,
+		status: usageStatus(amount.usedFraction),
+	};
+}
+
+function buildLimits(payload: MuseCodeKeyResponse, accountId: string | undefined): UsageLimit[] {
+	const usage = payload.subs_usage;
+	if (!usage) return [];
+	const tier = payload.subs_tier_name?.trim() || payload.subs_tier_id?.trim() || undefined;
+	const limits: UsageLimit[] = [];
+	if (usage.window) {
+		const minutes = usage.window.window_duration_mins;
+		const durationMs =
+			typeof minutes === "number" && Number.isFinite(minutes) && minutes > 0 ? minutes * 60_000 : undefined;
+		const label = durationMs === undefined ? "Rolling window" : `${Math.round(durationMs / 3_600_000)} Hour`;
+		const limit = buildLimit(
+			durationMs === undefined ? "rolling" : `${Math.round(durationMs / 60_000)}m`,
+			label,
+			usage.window.used_percent,
+			{
+				id: durationMs === undefined ? "rolling" : `${Math.round(durationMs / 60_000)}m`,
+				label,
+				durationMs,
+				resetsAt: parseResetTimestamp(usage.window.resets_at),
+			},
+			tier,
+			accountId,
+		);
+		if (limit) limits.push(limit);
+	}
+	if (usage.weekly) {
+		const limit = buildLimit(
+			"1w",
+			"Weekly",
+			usage.weekly.used_percent,
+			{
+				id: "1w",
+				label: "Weekly",
+				durationMs: WEEK_MS,
+				resetsAt: parseResetTimestamp(usage.weekly.resets_at),
+			},
+			tier,
+			accountId,
+		);
+		if (limit) limits.push(limit);
+	}
+	return limits;
+}
+
+export const metaMuseUsageProvider: UsageProvider = {
+	id: PROVIDER,
+	validatesCredentials: true,
+
+	supports(params: UsageFetchParams): boolean {
+		return params.provider === PROVIDER && params.credential.type === "oauth" && !!params.credential.accessToken;
+	},
+
+	async fetchUsage(params, ctx): Promise<UsageReport | null> {
+		if (params.provider !== PROVIDER || params.credential.type !== "oauth") return null;
+		const accessToken = params.credential.accessToken?.trim();
+		if (!accessToken) return null;
+		if (params.credential.expiresAt !== undefined && params.credential.expiresAt <= Date.now()) return null;
+
+		let payload: MuseCodeKeyResponse;
+		try {
+			payload = await requestMuseCodeKey(accessToken, ctx.fetch, params.signal);
+		} catch {
+			return null;
+		}
+		if (payload.is_subs_active === false) return null;
+		const email = payload.user_email?.trim().toLowerCase() || params.credential.email;
+		const accountId = payload.user_id?.trim() || params.credential.accountId || email;
+		const limits = buildLimits(payload, accountId);
+		if (limits.length === 0) return null;
+		const raw = { ...payload };
+		delete raw.api_key;
+
+		return {
+			provider: PROVIDER,
+			fetchedAt: Date.now(),
+			limits,
+			metadata: {
+				source: SOURCE,
+				...(email ? { email } : {}),
+				...(accountId ? { accountId } : {}),
+				...(payload.subs_tier_name ? { tier: payload.subs_tier_name } : {}),
+			},
+			raw,
+		};
+	},
+};

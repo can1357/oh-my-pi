@@ -265,6 +265,7 @@ describe("AuthStorage.checkCredentials", () => {
 	it("invokes the completionProbe with the post-refresh OAuth bearer", async () => {
 		const refreshed = {
 			access: "oat-refreshed",
+			apiKey: "LLM|subscription-key",
 			refresh: "refresh-refreshed",
 			expires: Date.now() + 3_600_000,
 			accountId: "account-3-refreshed",
@@ -303,6 +304,7 @@ describe("AuthStorage.checkCredentials", () => {
 			expect(input.credential.type).toBe("oauth");
 			if (input.credential.type === "oauth") {
 				expect(input.credential.accessToken).toBe("oat-refreshed");
+				expect(input.credential.apiKey).toBe("LLM|subscription-key");
 				expect(input.credential.email).toBe("dave@example.com");
 			}
 			expect(result.completion).toEqual({ ok: true, modelId: "test-probe-model", latencyMs: 42 });

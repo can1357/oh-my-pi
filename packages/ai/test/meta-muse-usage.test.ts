@@ -1,0 +1,61 @@
+import { describe, expect, test } from "bun:test";
+import { metaMuseUsageProvider } from "@oh-my-pi/pi-ai/usage/meta-muse";
+import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
+
+const credential = {
+	type: "oauth" as const,
+	accessToken: "meta-oauth-access",
+	expiresAt: Date.now() + 60_000,
+	email: "stored@example.com",
+};
+
+describe("Muse Code subscription usage", () => {
+	test("maps rolling and weekly plan quota into slash-usage limits", async () => {
+		let authorization = "";
+		const fetchImpl: FetchImpl = (_input, init) => {
+			authorization = new Headers(init?.headers).get("Authorization") ?? "";
+			return Promise.resolve(
+				Response.json({
+					api_key: "LLM|subscription-key",
+					user_email: "Muse@Example.com",
+					is_subs_active: true,
+					subs_tier_name: "Power Usage",
+					subs_usage: {
+						window: { used_percent: 42, resets_at: 1_800_000_000, window_duration_mins: 300 },
+						weekly: { used_percent: 75, resets_at: "2030-01-08T00:00:00.000Z" },
+					},
+				}),
+			);
+		};
+
+		const report = await metaMuseUsageProvider.fetchUsage({ provider: "meta", credential }, { fetch: fetchImpl });
+
+		expect(authorization).toBe("Bearer meta-oauth-access");
+		expect(report?.provider).toBe("meta");
+		expect(report?.metadata).toMatchObject({ email: "muse@example.com", tier: "Power Usage" });
+		expect(report?.raw).not.toHaveProperty("api_key");
+		expect(report?.limits).toHaveLength(2);
+		expect(report?.limits[0]).toMatchObject({
+			id: "300m",
+			label: "5 Hour",
+			amount: { used: 42, usedFraction: 0.42, unit: "percent" },
+			window: { durationMs: 18_000_000, resetsAt: 1_800_000_000_000 },
+			status: "ok",
+		});
+		expect(report?.limits[1]).toMatchObject({
+			id: "1w",
+			label: "Weekly",
+			amount: { used: 75, usedFraction: 0.75, unit: "percent" },
+			window: { durationMs: 604_800_000, resetsAt: Date.parse("2030-01-08T00:00:00.000Z") },
+		});
+	});
+
+	test("does not report API-key PAYG credentials as subscription quota", () => {
+		expect(
+			metaMuseUsageProvider.supports?.({
+				provider: "meta",
+				credential: { type: "api_key", apiKey: "LLM|payg-key" },
+			}),
+		).toBe(false);
+	});
+});

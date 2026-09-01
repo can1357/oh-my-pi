@@ -35,7 +35,7 @@ import { kimiCodeProvider } from "./kimi-code";
 import { litellmProvider } from "./litellm";
 import { llamaCppProvider } from "./llama-cpp";
 import { lmStudioProvider } from "./lm-studio";
-import { metaProvider } from "./meta";
+import { metaProvider, museCodeProvider } from "./meta";
 import { minimaxProvider } from "./minimax";
 import { minimaxCodeProvider } from "./minimax-code";
 import { minimaxCodeCnProvider } from "./minimax-code-cn";
@@ -122,6 +122,7 @@ const ALL = [
 	clinePassProvider,
 	deepseekProvider,
 	metaProvider,
+	museCodeProvider,
 	moonshotProvider,
 	cerebrasProvider,
 	basetenProvider,

@@ -1,3 +1,4 @@
+import { loginMetaMuse, refreshMetaMuseToken } from "./oauth/meta-muse";
 import { createApiKeyLogin } from "./api-key-login";
 import type { OAuthLoginCallbacks } from "./oauth/types";
 import type { ProviderDefinition } from "./types";
@@ -19,4 +20,16 @@ export const metaProvider = {
 	id: "meta",
 	name: "Meta Model API",
 	login: (cb: OAuthLoginCallbacks) => loginMeta(cb),
+	refreshToken: (credentials, signal) => refreshMetaMuseToken(credentials, undefined, signal),
+	getApiKey: credentials => {
+		if (!credentials.apiKey) throw new Error("Muse Code OAuth credential is missing its Model API key");
+		return credentials.apiKey;
+	},
+} as const satisfies ProviderDefinition;
+
+export const museCodeProvider = {
+	id: "muse-code",
+	name: "Muse Code subscription (Meta account)",
+	login: (cb: OAuthLoginCallbacks) => loginMetaMuse(cb),
+	storeCredentialsAs: "meta",
 } as const satisfies ProviderDefinition;

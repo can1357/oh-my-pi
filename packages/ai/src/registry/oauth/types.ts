@@ -5,6 +5,8 @@ export type OAuthCredentials = {
 	refresh: string;
 	access: string;
 	expires: number;
+	/** Provider API key minted from this OAuth grant for inference transport. */
+	apiKey?: string;
 	enterpriseUrl?: string;
 	projectId?: string;
 	email?: string;

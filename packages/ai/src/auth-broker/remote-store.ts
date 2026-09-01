@@ -1055,6 +1055,7 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 			access: refreshed.access,
 			refresh: REMOTE_REFRESH_SENTINEL,
 			expires: refreshed.expires,
+			apiKey: refreshed.apiKey,
 			accountId: refreshed.accountId,
 			email: refreshed.email,
 			projectId: refreshed.projectId,

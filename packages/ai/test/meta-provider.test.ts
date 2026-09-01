@@ -1,6 +1,8 @@
+import { Database } from "bun:sqlite";
+import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-storage";
 import { describe, expect, test } from "bun:test";
 import { streamOpenAIResponses } from "@oh-my-pi/pi-ai/providers/openai-responses";
-import { loginMeta } from "@oh-my-pi/pi-ai/registry/meta";
+import { loginMeta, metaProvider, museCodeProvider } from "@oh-my-pi/pi-ai/registry/meta";
 import type { Context, Model } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
@@ -58,5 +60,47 @@ describe("Meta Model API login", () => {
 		expect(apiKey).toBe("meta-test-key");
 		expect(requestedUrl).toBe("https://api.meta.ai/v1/models");
 		expect(authorization).toBe("Bearer meta-test-key");
+	});
+
+	test("keeps PAYG API-key login separate from Muse subscription login", () => {
+		expect(museCodeProvider.storeCredentialsAs).toBe("meta");
+		expect(metaProvider.getApiKey?.({ access: "oauth", refresh: "refresh", expires: 1, apiKey: "minted-key" })).toBe(
+			"minted-key",
+		);
+	});
+
+	test("resolves and rotates subscription-minted keys through AuthStorage", async () => {
+		const storage = new AuthStorage(new SqliteAuthCredentialStore(new Database(":memory:")), {
+			usageProviderResolver: () => undefined,
+		});
+		try {
+			await storage.reload();
+			await storage.set("meta", [
+				{
+					type: "oauth",
+					access: "meta-account-access-a",
+					refresh: "meta-account-refresh-a",
+					expires: Date.now() + 3_600_000,
+					apiKey: "LLM|subscription-key-a",
+				},
+				{
+					type: "oauth",
+					access: "meta-account-access-b",
+					refresh: "meta-account-refresh-b",
+					expires: Date.now() + 3_600_000,
+					apiKey: "LLM|subscription-key-b",
+				},
+			]);
+			const sessionId = "muse-session";
+			expect(await storage.getApiKey("meta", sessionId)).toBe("LLM|subscription-key-a");
+			expect(
+				await storage.invalidateCredentialMatching("meta", "LLM|subscription-key-a", {
+					sessionId,
+				}),
+			).toBe(true);
+			expect(await storage.getApiKey("meta", sessionId)).toBe("LLM|subscription-key-b");
+		} finally {
+			storage.close();
+		}
 	});
 });

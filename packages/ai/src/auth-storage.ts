@@ -59,6 +59,7 @@ import { googleGeminiCliUsageProvider } from "./usage/gemini";
 import { githubCopilotUsageProvider } from "./usage/github-copilot";
 import { antigravityRankingStrategy, antigravityUsageProvider } from "./usage/google-antigravity";
 import { kimiRankingStrategy, kimiUsageProvider } from "./usage/kimi";
+import { metaMuseUsageProvider } from "./usage/meta-muse";
 import { minimaxCodeUsageProvider } from "./usage/minimax-code";
 import { ollamaCloudUsageProvider, ollamaUsageProvider } from "./usage/ollama";
 import { codexRankingStrategy, openaiCodexUsageProvider } from "./usage/openai-codex";
@@ -278,6 +279,7 @@ export type CompletionProbeCredential =
 	| {
 			type: "oauth";
 			accessToken: string;
+			apiKey?: string;
 			refreshToken?: string;
 			expiresAt?: number;
 			accountId?: string;
@@ -674,6 +676,7 @@ const DEFAULT_USAGE_PROVIDERS: UsageProvider[] = [
 	cursorUsageProvider,
 	syntheticUsageProvider,
 	xaiOauthUsageProvider,
+	metaMuseUsageProvider,
 	devinUsageProvider,
 ];
 
@@ -2634,6 +2637,7 @@ export class AuthStorage {
 						access: refreshed.access,
 						refresh: refreshed.refresh,
 						expires: refreshed.expires,
+						apiKey: refreshed.apiKey ?? current.apiKey,
 						accountId: refreshed.accountId ?? current.accountId,
 						email: refreshed.email ?? current.email,
 						projectId: refreshed.projectId ?? current.projectId,
@@ -3045,6 +3049,7 @@ export class AuthStorage {
 			accessToken: credential.access,
 			refreshToken: credential.refresh,
 			expiresAt: credential.expires,
+			apiKey: credential.apiKey,
 			accountId: credential.accountId,
 			projectId: credential.projectId,
 			email: credential.email,
@@ -3174,6 +3179,7 @@ export class AuthStorage {
 			access: credential.accessToken,
 			refresh: credential.refreshToken,
 			expires: credential.expiresAt,
+			apiKey: credential.apiKey,
 			accountId: credential.accountId,
 			projectId: credential.projectId,
 			email: credential.email,
@@ -3198,6 +3204,7 @@ export class AuthStorage {
 		return {
 			type: "oauth",
 			accessToken: credential.accessToken,
+			apiKey: credential.apiKey,
 			refreshToken: credential.refreshToken,
 			expiresAt: credential.expiresAt,
 			accountId: credential.accountId,
@@ -3214,6 +3221,7 @@ export class AuthStorage {
 			accessToken: refreshed.access,
 			refreshToken: refreshed.refresh,
 			expiresAt: refreshed.expires,
+			apiKey: refreshed.apiKey ?? credential.apiKey,
 			accountId: refreshed.accountId ?? credential.accountId,
 			projectId: refreshed.projectId ?? credential.projectId,
 			email: refreshed.email ?? credential.email,
@@ -3264,6 +3272,7 @@ export class AuthStorage {
 			access: next.accessToken ?? entry.credential.access,
 			refresh: next.refreshToken ?? entry.credential.refresh,
 			expires: next.expiresAt ?? entry.credential.expires,
+			apiKey: next.apiKey ?? entry.credential.apiKey,
 			accountId: next.accountId,
 			projectId: next.projectId,
 			email: next.email,
@@ -5482,6 +5491,7 @@ export class AuthStorage {
 				access: result.newCredentials.access,
 				refresh: result.newCredentials.refresh,
 				expires: result.newCredentials.expires,
+				apiKey: result.newCredentials.apiKey ?? selection.credential.apiKey,
 				accountId: result.newCredentials.accountId ?? selection.credential.accountId,
 				email: result.newCredentials.email ?? selection.credential.email,
 				projectId: result.newCredentials.projectId ?? selection.credential.projectId,
@@ -5600,7 +5610,10 @@ export class AuthStorage {
 						apiEndpoint: oauthSelection.credential.apiEndpoint,
 					});
 				}
-				return oauthSelection.credential.access;
+				const builtInProvider = getProviderDefinition(provider);
+				const customProvider = getOAuthProvider(provider);
+				const getApiKey = builtInProvider?.getApiKey ?? customProvider?.getApiKey;
+				return getApiKey ? getApiKey(oauthSelection.credential) : oauthSelection.credential.access;
 			}
 		}
 
@@ -6369,6 +6382,7 @@ export class AuthStorage {
 		if (credential.type === "api_key") {
 			return (await this.#configValueResolver(credential.key)) === apiKey;
 		}
+		if (credential.apiKey === apiKey) return true;
 		if (credential.access === apiKey) return true;
 		return this.#extractStructuredApiKeyToken(apiKey) === credential.access;
 	}
@@ -6735,6 +6749,7 @@ export class AuthStorage {
 				access: refreshed.access,
 				refresh: refreshed.refresh,
 				expires: refreshed.expires,
+				apiKey: refreshed.apiKey ?? attempted.apiKey,
 				accountId: refreshed.accountId ?? attempted.accountId,
 				email: refreshed.email ?? attempted.email,
 				projectId: refreshed.projectId ?? attempted.projectId,

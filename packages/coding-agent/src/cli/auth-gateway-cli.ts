@@ -478,7 +478,7 @@ function pickProbeCandidates(provider: string): Model<Api>[] {
  */
 function composeProbeApiKey(provider: string, credential: CompletionProbeInput["credential"]): string {
 	if (credential.type === "api_key") return credential.apiKey;
-	if (!STRUCTURED_API_KEY_PROVIDERS.has(provider)) return credential.accessToken;
+	if (!STRUCTURED_API_KEY_PROVIDERS.has(provider)) return credential.apiKey ?? credential.accessToken;
 	return JSON.stringify({
 		token: credential.accessToken,
 		enterpriseUrl: credential.enterpriseUrl,
