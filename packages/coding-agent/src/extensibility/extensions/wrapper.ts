@@ -393,7 +393,23 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 			}
 
 			const uiContext = this.runner.getUIContext();
-			const basePrompt = formatApprovalPrompt(this.tool, resolvedArgs, approvalCheck.reason);
+			// `formatApprovalDetails` is tool-owned callback code: it must never
+			// receive the execution-owned params, or a formatter that mutates or
+			// retains its argument could change what runs after the user approves
+			// the rendered text (formatter displays A, execution receives B). Hand
+			// it a detached clone of the resolved args instead — the same content
+			// the review snapshot was built from, never the execution object.
+			// Unfrozen: a frozen graph would turn formatter mutation attempts into
+			// TypeErrors, changing formatter error behavior. Inputs that cannot be
+			// cloned keep the previous aliasing — no lossless copy exists, and
+			// cloning never touches the execution object either way.
+			let promptArgs = resolvedArgs;
+			try {
+				promptArgs = structuredClone(resolvedArgs);
+			} catch {
+				// Non-cloneable fallback input: keep the prior aliasing semantics.
+			}
+			const basePrompt = formatApprovalPrompt(this.tool, promptArgs, approvalCheck.reason);
 			const safetyPrompt =
 				pendingSafetyChecks.length > 0
 					? `${basePrompt}\nProvider safety checks:\n${safetyCheckLines(pendingSafetyChecks).join("\n")}`
