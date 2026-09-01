@@ -904,6 +904,13 @@ export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServer
 					const parsed = await parseBody(req, credentialUploadRequestSchema);
 					if (!parsed.ok) return parsed.response;
 					const { provider, credential } = parsed.data;
+					if (
+						usesOAuthMintedApiKeyWithDirectApiKey(provider) &&
+						credential.type === "oauth" &&
+						credential.apiKey === undefined
+					) {
+						return json(400, { error: `${provider} OAuth credentials require a minted API key` });
+					}
 					try {
 						const isDualInteractiveLogin =
 							usesOAuthMintedApiKeyWithDirectApiKey(provider) &&

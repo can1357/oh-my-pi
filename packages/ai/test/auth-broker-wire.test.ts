@@ -328,7 +328,7 @@ describe("auth-broker wire surface", () => {
 		expect(uploadedCredential?.authorizedAt).toBe(123);
 	});
 
-	test("rejects empty Meta OAuth transport keys before mutating broker state", async () => {
+	test("rejects missing or empty Meta OAuth transport keys before mutating broker state", async () => {
 		await storage!.set("meta", {
 			type: "api_key",
 			key: "LLM|working-payg-key",
@@ -336,23 +336,33 @@ describe("auth-broker wire surface", () => {
 			authorizedAt: 1,
 		});
 		const client = new AuthBrokerClient({ url: handle!.url, token });
-		let rejection: unknown;
-		try {
-			await client.uploadCredential("meta", {
-				type: "oauth",
-				access: "meta-access",
-				refresh: "meta-refresh",
+		for (const credential of [
+			{
+				type: "oauth" as const,
+				access: "meta-access-missing",
+				refresh: "meta-refresh-missing",
+				expires: Date.now() + 3_600_000,
+				accountId: "meta-account",
+			},
+			{
+				type: "oauth" as const,
+				access: "meta-access-empty",
+				refresh: "meta-refresh-empty",
 				expires: Date.now() + 3_600_000,
 				apiKey: "",
 				accountId: "meta-account",
-			});
-		} catch (error) {
-			rejection = error;
+			},
+		]) {
+			let rejection: unknown;
+			try {
+				await client.uploadCredential("meta", credential);
+			} catch (error) {
+				rejection = error;
+			}
+			expect(rejection).toBeInstanceOf(AuthBrokerError);
+			expect(rejection).toMatchObject({ status: 400 });
 		}
-
-		expect(rejection).toBeInstanceOf(AuthBrokerError);
-		expect(rejection).toMatchObject({ status: 400 });
-		expect(await storage!.getApiKey("meta", "empty-key-rejection")).toBe("LLM|working-payg-key");
+		expect(await storage!.getApiKey("meta", "invalid-key-rejection")).toBe("LLM|working-payg-key");
 	});
 
 	test("ignores external SQLite commits outside auth tables", async () => {
