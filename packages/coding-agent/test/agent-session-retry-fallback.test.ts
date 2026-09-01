@@ -3056,6 +3056,111 @@ describe("AgentSession retry fallback", () => {
 		]);
 	});
 
+	async function runBedrockContentFilterTurn(fallbackOnContentFilter?: boolean): Promise<{
+		primaryModel: Model;
+		fallbackModel: Model;
+		requestedModels: string[];
+		activeSession: AgentSession;
+	}> {
+		const primaryModel = buildModel({
+			id: "anthropic.claude-sonnet-4-5-v1:0",
+			name: "Claude Sonnet 4.5 on Bedrock",
+			api: "bedrock-converse-stream",
+			provider: "amazon-bedrock",
+			baseUrl: "",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 200_000,
+			maxTokens: 8_192,
+		});
+		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
+		if (!fallbackModel) {
+			throw new Error("Expected bundled fallback model to exist");
+		}
+
+		const requestedModels: string[] = [];
+		const mock = createMockModel();
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: {
+				model: primaryModel,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
+			streamFn: (model, context, options) => {
+				requestedModels.push(`${model.provider}/${model.id}`);
+				if (model.provider === primaryModel.provider && model.id === primaryModel.id) {
+					mock.push({
+						stopReason: "error",
+						stopDetails: { type: "content_filtered" },
+						errorMessage: "Response filtered by Amazon Bedrock content filters (stop reason: content_filtered)",
+					});
+				} else if (model.provider === fallbackModel.provider && model.id === fallbackModel.id) {
+					mock.push({ content: ["Recovered on fallback"] });
+				} else {
+					throw new Error(
+						`Unexpected model requested after Bedrock content filtering: ${model.provider}/${model.id}`,
+					);
+				}
+				return mock.stream(model, context, options);
+			},
+		});
+
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.maxRetries": 1,
+			...(fallbackOnContentFilter === undefined ? {} : { "retry.fallbackOnContentFilter": fallbackOnContentFilter }),
+			"retry.fallbackChains": {
+				default: [`${fallbackModel.provider}/${fallbackModel.id}`],
+			},
+		});
+		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
+
+		const activeSession = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
+		session = activeSession;
+
+		await activeSession.prompt("Recover from Bedrock content filtering");
+		await activeSession.waitForIdle();
+
+		return { primaryModel, fallbackModel, requestedModels, activeSession };
+	}
+
+	it("falls back after a Bedrock content-filter termination when explicitly enabled", async () => {
+		const { primaryModel, fallbackModel, requestedModels, activeSession } = await runBedrockContentFilterTurn(true);
+
+		expect(requestedModels).toEqual([
+			`${primaryModel.provider}/${primaryModel.id}`,
+			`${fallbackModel.provider}/${fallbackModel.id}`,
+		]);
+		expect(activeSession.model?.provider).toBe(fallbackModel.provider);
+		expect(activeSession.model?.id).toBe(fallbackModel.id);
+		expect(getLastAssistantMessage(activeSession).content).toContainEqual({
+			type: "text",
+			text: "Recovered on fallback",
+		});
+	});
+
+	it("keeps Bedrock content-filter terminations terminal by default", async () => {
+		const { primaryModel, requestedModels, activeSession } = await runBedrockContentFilterTurn();
+
+		expect(requestedModels).toEqual([`${primaryModel.provider}/${primaryModel.id}`]);
+		expect(activeSession.model?.provider).toBe(primaryModel.provider);
+		expect(activeSession.model?.id).toBe(primaryModel.id);
+		const terminal = getLastAssistantMessage(activeSession);
+		expect(terminal.stopReason).toBe("error");
+		expect(terminal.errorMessage).toBe(
+			"Response filtered by Amazon Bedrock content filters (stop reason: content_filtered)",
+		);
+	});
+
 	it("falls back on structured classifier refusals and pins the fallback", async () => {
 		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
 		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");

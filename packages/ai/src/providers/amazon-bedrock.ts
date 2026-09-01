@@ -580,6 +580,9 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 						// no real tool exists for the agent to dispatch.
 						output.stopReason =
 							sentinelInjected && ev.stopReason === "tool_use" ? "stop" : mapStopReason(ev.stopReason);
+						if (ev.stopReason === "content_filtered") {
+							output.stopDetails = { type: ev.stopReason };
+						}
 						if (output.stopReason === "error") {
 							// A guardrail block ends the turn with `guardrail_intervened` and often no
 							// content — surface it explicitly so it never reads as an empty completion.

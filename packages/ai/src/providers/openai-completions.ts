@@ -17,6 +17,7 @@ import type {
 	ProviderSessionState,
 	RawSseEvent,
 	ServiceTier,
+	StopDetails,
 	StopReason,
 	StreamFunction,
 	StreamOptions,
@@ -1180,6 +1181,9 @@ const streamOpenAICompletionsOnce = (
 				if (choice.finish_reason) {
 					const finishReasonResult = mapStopReason(choice.finish_reason);
 					output.stopReason = finishReasonResult.stopReason;
+					if (finishReasonResult.stopDetails) {
+						output.stopDetails = finishReasonResult.stopDetails;
+					}
 					if (finishReasonResult.errorMessage) {
 						output.errorMessage = finishReasonResult.errorMessage;
 					}
@@ -2501,6 +2505,7 @@ const EMPTY_OLLAMA_LENGTH_COMPLETION_MESSAGE =
 
 function mapStopReason(reason: ChatCompletionChunk.Choice["finish_reason"] | string): {
 	stopReason: StopReason;
+	stopDetails?: StopDetails;
 	errorMessage?: string;
 } {
 	if (reason === null) return { stopReason: "stop" };
@@ -2520,7 +2525,11 @@ function mapStopReason(reason: ChatCompletionChunk.Choice["finish_reason"] | str
 		case "tool_calls":
 			return { stopReason: "toolUse" };
 		case "content_filter":
-			return { stopReason: "error", errorMessage: "Provider finish_reason: content_filter" };
+			return {
+				stopReason: "error",
+				stopDetails: { type: "content_filter" },
+				errorMessage: "Provider finish_reason: content_filter",
+			};
 		case "network_error":
 			return { stopReason: "error", errorMessage: "Provider finish_reason: network_error" };
 		case "error":
