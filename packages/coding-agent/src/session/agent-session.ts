@@ -6052,10 +6052,9 @@ export class AgentSession {
 			supportsExternalThinking(activeModel)
 				? buildNamedToolChoice("think", activeModel)
 				: undefined;
-		const eagerTodoPrelude =
-			userInitiated && !hasPendingUserDirective ? this.#todo.createEagerTodoPrelude(expandedText) : undefined;
-		const eagerTaskPrelude =
-			userInitiated && !hasPendingUserDirective ? this.#todo.createEagerTaskPrelude(expandedText) : undefined;
+		const eagerPreludeEligible = !options?.synthetic && !hasPendingUserDirective;
+		const eagerTodoPrelude = eagerPreludeEligible ? this.#todo.createEagerTodoPrelude(expandedText) : undefined;
+		const eagerTaskPrelude = eagerPreludeEligible ? this.#todo.createEagerTaskPrelude(expandedText) : undefined;
 		const videoAttachmentNotices = this.#createVideoAttachmentNotices(options?.images, submittedAt);
 		const normalizedImages = await this.#normalizeImagesForModel(options?.images);
 
