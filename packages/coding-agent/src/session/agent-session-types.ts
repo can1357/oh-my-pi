@@ -254,6 +254,8 @@ export interface AgentSessionConfig {
 	agentId?: string;
 	/** Whether this is a top-level or subagent session. */
 	agentKind?: "main" | "sub";
+	/** Task recursion depth (0 = top-level); backs the extension identity fallback. */
+	taskDepth?: number;
 	/** Provider-facing session ID override. */
 	providerSessionId?: string;
 	/** Whether the provider prompt-cache key was explicit or fork-inherited. */

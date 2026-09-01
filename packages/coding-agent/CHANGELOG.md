@@ -4,6 +4,8 @@
 
 ### Added
 
+- Added `ctx.agentIdentity` to extension contexts, exposing whether a handler runs in the main session or a subagent, its recursion depth, registry id, display name, and parent chain ([#10228](https://github.com/can1357/oh-my-pi/issues/10228)). Identity is read-only and observes the session's pre-existing classification unchanged.
+
 - Added `injectV1: false` option to `openai-models-list` discovery to fetch the model list from `{baseUrl}/models` without injecting `/v1`, for gateways that root their OpenAI-compatible surface at a versioned URL (e.g. `https://api.opper.ai/v3/compat`) where the `/v1`-injected endpoint returns only a small subset.
 - Added provider-reported credits and concrete routed-model counts to `/session` statistics ([#8590](https://github.com/can1357/oh-my-pi/pull/8590) by [@will-bogusz](https://github.com/will-bogusz)).
 - Added `CLINE_API_KEY` to the CLI environment help for native ClinePass subscription inference ([#7863](https://github.com/can1357/oh-my-pi/pull/7863) by [@will-bogusz](https://github.com/will-bogusz)).

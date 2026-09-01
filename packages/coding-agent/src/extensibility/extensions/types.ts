@@ -452,6 +452,63 @@ export interface ExtensionModelQuery {
 /** Runtime host mode exposed to Pi-compatible extensions. */
 export type ExtensionMode = "tui" | "rpc" | "json" | "print";
 
+/**
+ * Identity of the agent an extension context serves.
+ *
+ * Purely descriptive: everything here is derived from state that already
+ * exists (registry identity, spawn options) and nothing in this feature
+ * changes how sessions behave. Where a session is linked to a parent through
+ * options that predate this interface (see `parentAgentId` in
+ * `CreateAgentSessionOptions`), the pre-existing semantics of those options —
+ * including resource-ownership checks keyed on `parentTaskPrefix` and the
+ * registry's unconditional `register()` replacement — are unchanged; this
+ * type only observes them.
+ */
+export interface AgentIdentity {
+	/**
+	 * Whether this session runs as the top-level session or as a spawned
+	 * worker. Mirrors the session's pre-existing `agentKind` classification
+	 * (`taskDepth > 0 || parentTaskPrefix !== undefined`) verbatim — a caller
+	 * linking via `parentAgentId` while omitting `taskDepth`/`parentTaskPrefix`
+	 * (e.g. a `/tan` fork) observes `"main"`, same as every capability gate.
+	 */
+	readonly kind: "main" | "sub";
+	/**
+	 * Recursion depth of this agent: `0` = top-level. Mirrors the session's own
+	 * `taskDepth` (the pre-existing gate input for IRC/memory/spawn capability
+	 * gates) exactly — it is NOT re-derived here from the parent chain, so a
+	 * caller that supplies parent linkage while omitting `taskDepth` (e.g. the
+	 * `/tan` clone path) observes `0` here, matching every other capability
+	 * gate for that session. Extensions asking "am I a child?" should test
+	 * `kind === "sub"` or `parentId !== undefined`, not `depth > 0`.
+	 */
+	readonly depth: number;
+	/**
+	 * Registry id of this agent: `"Main"` for the default top-level session.
+	 * Pre-existing registry semantics apply unchanged: this mirrors the
+	 * session's resolved registry id (`options.agentId ??
+	 * options.parentTaskPrefix ?? "Main"` — no linkage-derived default), and
+	 * `AgentRegistry.register()` keeps replacing the entry keyed by that id
+	 * (documented registry behavior this interface observes, not changes).
+	 */
+	readonly agentId: string;
+	/** Human-readable name of this agent. */
+	readonly displayName: string;
+	/**
+	 * Registry id of the direct parent agent as supplied to
+	 * `createAgentSession`; undefined for the top-level session. `/tan` forks
+	 * report the job-owning main session here even though `kind` is `"main"`.
+	 */
+	readonly parentId?: string;
+	/**
+	 * Ancestor registry ids, nearest-first. Excludes `"Main"` and this agent's
+	 * own id. `[]` for the top-level session; runner-less sessions cannot
+	 * resolve the chain and degrade to `[]` even for subagents. Frozen like the
+	 * surrounding identity: copy rather than mutate.
+	 */
+	readonly parentChain: readonly string[];
+}
+
 export interface ExtensionContext {
 	/** UI methods for user interaction */
 	ui: ExtensionUIContext;
@@ -477,6 +534,11 @@ export interface ExtensionContext {
 	model: Model | undefined;
 	/** Read-only model query facade: list / current / resolve / family. */
 	models: ExtensionModelQuery;
+	/**
+	 * Identity of the agent this context serves: top-level or subagent,
+	 * depth, registry id, display name, and parent chain. Read lazily.
+	 */
+	readonly agentIdentity: AgentIdentity;
 	/** Whether the agent is idle (not streaming) */
 	isIdle(): boolean;
 	/** Abort the current agent operation */

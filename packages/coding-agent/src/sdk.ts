@@ -1709,6 +1709,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 
 	const agentRegistry = options.agentRegistry ?? AgentRegistry.global();
 	const resolvedAgentId = options.agentId ?? options.parentTaskPrefix ?? MAIN_AGENT_ID;
+	// Pre-existing classification: task-depth or a parent-linked artifact
+	// prefix marks a spawned worker. Every genuine spawn path (executor,
+	// revive) supplies taskDepth > 0, so the extension identity observes
+	// `agentKind` verbatim — identity never widens it; /tan forks stay
+	// "main" like every other capability gate.
 	const resolvedAgentDisplayName =
 		options.agentDisplayName ?? ((options.taskDepth ?? 0) > 0 || options.parentTaskPrefix ? "sub" : "main");
 	const agentKind = (options.taskDepth ?? 0) > 0 || options.parentTaskPrefix ? ("sub" as const) : ("main" as const);
@@ -2740,6 +2745,14 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			settings,
 			localProtocolOptions,
 			() => (hasSession ? session.getAsyncJobSnapshot() : null),
+			{
+				depth: taskDepth,
+				kind: agentKind,
+				agentId: resolvedAgentId,
+				displayName: resolvedAgentDisplayName,
+				parentId: options.parentAgentId,
+				registry: agentRegistry,
+			},
 		);
 
 		credentialDisabledTarget = extensionRunner;
@@ -3718,6 +3731,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			obfuscator,
 			agentId: resolvedAgentId,
 			agentKind,
+			taskDepth,
 			providerSessionId: options.providerSessionId,
 			providerPromptCacheKeySource,
 			parentEvalSessionId: options.parentEvalSessionId,
