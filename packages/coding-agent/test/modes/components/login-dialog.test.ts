@@ -22,7 +22,7 @@ afterAll(() => {
 describe("LoginDialogComponent", () => {
 	it("links every wrapped authorization URL row to the complete URL", () => {
 		settings.override("tui.hyperlinks", "always");
-		const openSpy = spyOn(openModule, "openPath").mockImplementation(() => {});
+		const openSpy = spyOn(openModule, "openPath").mockImplementation(() => true);
 		try {
 			const tui = { requestRender() {} } as unknown as TUI;
 			const dialog = new LoginDialogComponent(tui, "google-antigravity", () => {});
