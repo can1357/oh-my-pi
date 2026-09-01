@@ -1101,7 +1101,7 @@ function applyBedrockThinkingBinding(
 	behavior: "drop_block" | "error",
 ): Record<string, unknown> {
 	const result = { ...fields };
-	const thinking = isRecord(result.thinking) ? { ...result.thinking } : { type: "adaptive" };
+	const thinking: Record<string, unknown> = isRecord(result.thinking) ? { ...result.thinking } : { type: "adaptive" };
 	thinking.block_binding = { prefix_mismatch_behavior: behavior };
 	result.thinking = thinking;
 	const betas = Array.isArray(result.anthropic_beta)

@@ -605,9 +605,9 @@
     url = "https://registry.npmjs.org/@octokit/core/-/core-7.0.7.tgz";
     hash = "sha512-DcB0M3KFgr9ECI328lhBMVsyFT2DnmNucSBTqEN3exyNKUzkkpUSCHmTRcunF41Eou2TIQKW4seewri8ON9bSA==";
   };
-  "@octokit/endpoint@11.0.4" = fetchurl {
-    url = "https://registry.npmjs.org/@octokit/endpoint/-/endpoint-11.0.4.tgz";
-    hash = "sha512-f1cOWoHPmxryJFknxbtDdjODWfV8A9tc8Aae6ermXPNgHFZ/x91AtHIz4gicEjL8hkJiip+u21QHJORfBv/qiA==";
+  "@octokit/endpoint@11.0.5" = fetchurl {
+    url = "https://registry.npmjs.org/@octokit/endpoint/-/endpoint-11.0.5.tgz";
+    hash = "sha512-iXa654H3yFafF/ieHkukfbgWo2rmXD2ceD0ZOtrPhw1bc3FDch1d9N/TNs0FQ1/cIbwb7kspUX8jzIs8nzb9DQ==";
   };
   "@octokit/graphql@9.0.4" = fetchurl {
     url = "https://registry.npmjs.org/@octokit/graphql/-/graphql-9.0.4.tgz";
@@ -620,6 +620,10 @@
   "@octokit/openapi-types@28.0.0" = fetchurl {
     url = "https://registry.npmjs.org/@octokit/openapi-types/-/openapi-types-28.0.0.tgz";
     hash = "sha512-0rFyLuyHvIj6uuZWuDslxkowFYdPXoNIkeAv4b27dzm2Tf4vGWXnPsMcxs7d65kLdMERgP3wc1AEPlqMz8e1cQ==";
+  };
+  "@octokit/openapi-types@29.0.1" = fetchurl {
+    url = "https://registry.npmjs.org/@octokit/openapi-types/-/openapi-types-29.0.1.tgz";
+    hash = "sha512-9qWOMFNxxLokERcms42rU0PTLqQmVs7g5E41TI4mCOxmpFayD1rfC7XxOL55cG9MBZLFlC31BrR37myMKardwg==";
   };
   "@octokit/plugin-paginate-rest@14.0.0" = fetchurl {
     url = "https://registry.npmjs.org/@octokit/plugin-paginate-rest/-/plugin-paginate-rest-14.0.0.tgz";
@@ -652,6 +656,10 @@
   "@octokit/types@17.0.0" = fetchurl {
     url = "https://registry.npmjs.org/@octokit/types/-/types-17.0.0.tgz";
     hash = "sha512-ByP1v7YL5SMveFPP7+sj0/ZuWCOOg/Chs4NafOMpq6WNIM/hdGY0S7C0TCGDBWu1aGmOxmUIhMx3cO+IdwYZ1Q==";
+  };
+  "@octokit/types@18.0.0" = fetchurl {
+    url = "https://registry.npmjs.org/@octokit/types/-/types-18.0.0.tgz";
+    hash = "sha512-l6bAF43PNxkJp6g+W4PjoUSSkxHomXw2nOum5CTftJz1NlV3vu93NImgOYtLf6CbBUb5j+fiuzW0PPQ5JTSvZA==";
   };
   "@oh-my-pi/browser-relay" = copyPathToStore ../packages/browser-relay;
   "@oh-my-pi/collab-web" = copyPathToStore ../packages/collab-web;

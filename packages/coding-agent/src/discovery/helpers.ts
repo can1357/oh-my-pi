@@ -447,8 +447,17 @@ export async function scanSkillsFromDir(
  */
 function expandEnvVars(value: string, extraEnv?: Record<string, string>): string {
 	return value.replace(/\$\{([^}:]+)(?::-([^}]*))?\}/g, (_, varName: string, defaultValue?: string) => {
-		const envValue = extraEnv?.[varName] ?? Bun.env[varName];
-		if (envValue !== undefined) return envValue;
+		// Only own extraEnv properties may override the ambient environment:
+		// inherited keys (__proto__, constructor) would otherwise be selected
+		// before Bun.env and stringify as "[object Object]".
+		const envValue =
+			extraEnv !== undefined && Object.prototype.hasOwnProperty.call(extraEnv, varName)
+				? extraEnv[varName]
+				: Bun.env[varName];
+		// `${VAR:-default}` follows POSIX `:-`: the default applies when the
+		// variable is unset OR empty. Plain `${VAR}` keeps the value verbatim
+		// (even an empty one) and stays literal when unset.
+		if (envValue !== undefined && (defaultValue === undefined || envValue !== "")) return envValue;
 		if (defaultValue !== undefined) return defaultValue;
 		return `\${${varName}}`;
 	});

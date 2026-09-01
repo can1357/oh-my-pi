@@ -91,6 +91,11 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 	return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
+/** Env maps must hold only string values; anything else is malformed. */
+function isStringRecord(value: unknown): value is Record<string, string> {
+	return isRecord(value) && Object.values(value).every(v => typeof v === "string");
+}
+
 async function skillsManifestReplacesFallback(root: ClaudePluginRoot): Promise<boolean> {
 	const raw = await readFile(path.join(root.path, "marketplace.json"));
 	if (raw === null) return false;
@@ -521,6 +526,41 @@ async function resolvePluginMCPConfig(root: ClaudePluginRoot): Promise<ResolvedM
 	};
 }
 
+/**
+ * Split a marketplace stdio env map into final values and legacy values.
+ *
+ * `${VAR}`/`${VAR:-default}` placeholders (and `${CLAUDE_PLUGIN_ROOT}` /
+ * `${OMP_PLUGIN_ROOT}`) are expanded here and recorded as literal keys: the
+ * result is final package data and must never be reinterpreted later as a
+ * bare env name or `!command` (a second resolution would execute expanded
+ * values or substitute ambient variables). Values that contained no
+ * placeholder keep the legacy indirection (bare env-name lookup and
+ * `!command` execution) unresolved, so it only runs when the surviving
+ * enabled server is actually connected.
+ */
+async function resolveMarketplaceEnv(
+	env: Record<string, string>,
+	rootPath: string,
+): Promise<{ env: Record<string, string>; literalKeys: string[] }> {
+	// Null prototype: a `__proto__` env key must become an own property, not
+	// mutate the prototype chain (it would silently vanish before spawn).
+	const resolved: Record<string, string> = Object.create(null);
+	const literalKeys: string[] = [];
+	for (const [key, rawValue] of Object.entries(env)) {
+		// Feed the reserved plugin-root names through extraEnv: expansion then
+		// cannot consume an ambient CLAUDE_PLUGIN_ROOT/OMP_PLUGIN_ROOT, and
+		// the registered root inserted as the value is never re-scanned
+		// for `${...}`.
+		const final = expandEnvVarsDeep(rawValue, {
+			CLAUDE_PLUGIN_ROOT: rootPath,
+			OMP_PLUGIN_ROOT: rootPath,
+		}) as string;
+		if (final !== rawValue) literalKeys.push(key);
+		resolved[key] = final;
+	}
+	return { env: resolved, literalKeys };
+}
+
 async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> {
 	const items: MCPServer[] = [];
 	const warnings: string[] = [];
@@ -600,13 +640,29 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 			// Root relative command/cwd at the plugin's config directory, not the
 			// session cwd (MCP stdio spawning resolves relative values there).
 			const rooted = resolvePluginStdioPaths({ command: substitutedCommand, cwd: substitutedCwd }, baseDir);
+			// Malformed env (e.g. `"env": null` in a hand-edited marketplace JSON)
+			// must not throw inside resolveMarketplaceEnv: the capability loader
+			// catches at provider scope and would discard every marketplace
+			// server, not just this entry.
+			if (raw.env !== undefined && !isStringRecord(raw.env)) {
+				warnings.push(`[claude-plugins] Skipping MCP server "${serverName}" in ${sourcePath}: malformed env`);
+				continue;
+			}
+			const resolvedEnv = raw.env !== undefined ? await resolveMarketplaceEnv(raw.env, root.path) : undefined;
 			const server: MCPServer = {
 				name: namespacedName,
 				...(raw.enabled !== undefined && { enabled: raw.enabled }),
 				...(raw.timeout !== undefined && { timeout: raw.timeout }),
 				...(rooted.command !== undefined && { command: rooted.command }),
 				...(raw.args !== undefined && { args: substitutePluginRoot(raw.args, root.path) }),
-				...(raw.env !== undefined && { env: substitutePluginRoot(raw.env, root.path) }),
+				...(resolvedEnv !== undefined && { env: resolvedEnv.env }),
+				// Placeholder-expanded keys are final package data (literal);
+				// raw values keep legacy indirection, resolved by
+				// #resolveAuthConfig only when the server connects.
+				...(resolvedEnv !== undefined &&
+					resolvedEnv.literalKeys.length > 0 && {
+						envLiteralKeys: resolvedEnv.literalKeys,
+					}),
 				...(rooted.cwd !== undefined && { cwd: rooted.cwd }),
 				...(raw.url !== undefined && { url: expandEnvVarsDeep(raw.url) }),
 				...(raw.headers !== undefined && { headers: expandEnvVarsDeep(raw.headers) }),

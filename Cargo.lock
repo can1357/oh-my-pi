@@ -4675,9 +4675,9 @@ checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 
 [[package]]
 name = "libredox"
-version = "0.1.21"
+version = "0.1.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d7955dfc218a8afb29dfeffd540e3a6e96baeb94fe7138228dd7cc6937fbbf96"
+checksum = "8d8f1ea3f21fd3405dcaf6c9b5c1630af9afc422d9073ea39c5f6d6c772e08ed"
 dependencies = [
  "libc",
 ]
@@ -6032,7 +6032,7 @@ dependencies = [
 
 [[package]]
 name = "pi-ast"
-version = "18.1.1"
+version = "18.1.2"
 dependencies = [
  "anyhow",
  "ast-grep-core",
@@ -6102,7 +6102,7 @@ dependencies = [
 
 [[package]]
 name = "pi-builtins"
-version = "18.1.1"
+version = "18.1.2"
 dependencies = [
  "ansi-width",
  "anyhow",
@@ -6189,7 +6189,7 @@ dependencies = [
 
 [[package]]
 name = "pi-iso"
-version = "18.1.1"
+version = "18.1.2"
 dependencies = [
  "async-trait",
  "libc",
@@ -6201,7 +6201,7 @@ dependencies = [
 
 [[package]]
 name = "pi-natives"
-version = "18.1.1"
+version = "18.1.2"
 dependencies = [
  "anyhow",
  "arboard",
@@ -6278,7 +6278,7 @@ dependencies = [
 
 [[package]]
 name = "pi-shell"
-version = "18.1.1"
+version = "18.1.2"
 dependencies = [
  "anyhow",
  "brush-core",
@@ -6306,7 +6306,7 @@ dependencies = [
 
 [[package]]
 name = "pi-vcs"
-version = "18.1.1"
+version = "18.1.2"
 dependencies = [
  "gix",
  "jj-lib",
@@ -6319,7 +6319,7 @@ dependencies = [
 
 [[package]]
 name = "pi-voice"
-version = "18.1.1"
+version = "18.1.2"
 dependencies = [
  "audiopus_sys",
  "bytes",
@@ -6334,7 +6334,7 @@ dependencies = [
 
 [[package]]
 name = "pi-walker"
-version = "18.1.1"
+version = "18.1.2"
 dependencies = [
  "dashmap",
  "globset",

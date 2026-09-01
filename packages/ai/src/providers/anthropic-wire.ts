@@ -419,7 +419,6 @@ export type MessageDelta = {
 	stop_reason?: StopReason | null;
 	stop_sequence?: string | null;
 	stop_details?: StopDetails | null;
-	input_transformations?: InputTransformation[];
 };
 
 export type RawMessageStartEvent = { type: "message_start"; message: ResponseMessage };
@@ -430,7 +429,12 @@ export type RawContentBlockStartEvent = {
 };
 export type RawContentBlockDeltaEvent = { type: "content_block_delta"; index: number; delta: ContentBlockDelta };
 export type RawContentBlockStopEvent = { type: "content_block_stop"; index: number };
-export type RawMessageDeltaEvent = { type: "message_delta"; delta: MessageDelta; usage: Usage };
+export type RawMessageDeltaEvent = {
+	type: "message_delta";
+	delta: MessageDelta;
+	usage: Usage;
+	input_transformations?: InputTransformation[];
+};
 export type RawMessageStopEvent = { type: "message_stop" };
 
 export type RawMessageStreamEvent =
