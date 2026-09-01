@@ -306,7 +306,49 @@ pub(crate) fn run_sync_capped(
 	timeout: Duration,
 	limit: usize,
 ) -> Result<CliOutput> {
-	let argv = hardened_args(args, true);
+	run_sync_with(cwd, args, timeout, limit, false)
+}
+
+/// Read runner that lets git persist the index stat cache it refreshed, with
+/// an explicit retention cap for whole-worktree status calls whose output the
+/// caller wants to bound (e.g. a probe like [`GitRepo::is_dirty`] that only
+/// needs the first few entries).
+///
+/// Deviates from the blanket read-only hardening for whole-worktree status
+/// only, and deliberately. `git status` re-stats every entry; without the
+/// write-back that work is discarded and repeated on the next call. An index
+/// with no stat data — which is how every worktree `jj workspace add` creates
+/// starts — therefore re-reads and re-hashes the whole tree on every single
+/// status, measured here at 42s wall on a 94k-entry checkout, with
+/// `--no-optional-locks` turning a one-time cost into a permanent one.
+///
+/// Safe under concurrency by construction: the lock is *optional*, so git
+/// skips the write when another process holds `index.lock` rather than
+/// waiting or failing. The fsmonitor and untracked-cache pins in
+/// [`hardened_args`] still apply, so the transient-subprocess state mutation
+/// that hardening targets remains blocked — only the stat refresh is allowed
+/// through.
+pub(crate) fn run_sync_refreshing_capped(
+	cwd: &Path,
+	args: &[String],
+	timeout: Duration,
+	limit: usize,
+) -> Result<CliOutput> {
+	run_sync_with(cwd, args, timeout, limit, true)
+}
+
+/// Shared implementation behind [`run_sync_capped`] and
+/// [`run_sync_refreshing_capped`]. `allow_index_refresh` permits the one
+/// opportunistic write git performs on a read: persisting the index stat
+/// cache it just refreshed. Every other optional lock stays disabled.
+fn run_sync_with(
+	cwd: &Path,
+	args: &[String],
+	timeout: Duration,
+	limit: usize,
+	allow_index_refresh: bool,
+) -> Result<CliOutput> {
+	let argv = hardened_args(args, !allow_index_refresh);
 	let mut cmd = std::process::Command::new("git");
 	cmd.args(&argv)
 		.current_dir(cwd)
@@ -314,6 +356,11 @@ pub(crate) fn run_sync_capped(
 		.stdout(Stdio::piped())
 		.stderr(Stdio::piped());
 	apply_env(&mut cmd);
+	if allow_index_refresh {
+		// `--no-optional-locks` and `GIT_OPTIONAL_LOCKS=0` are the same switch;
+		// pinning the env var would re-disable what the argv opted into.
+		cmd.env_remove("GIT_OPTIONAL_LOCKS");
+	}
 	let mut child = cmd.spawn().map_err(|err| spawn_error(cwd, err))?;
 	let stdout = spawn_sync_reader("git-cli-stdout", child.stdout.take(), limit);
 	let stderr = spawn_sync_reader("git-cli-stderr", child.stderr.take(), limit);
