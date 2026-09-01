@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
+import { resolveUsedFraction } from "@oh-my-pi/pi-ai/usage";
 import type { UsageFetchContext, UsageFetchParams } from "@oh-my-pi/pi-ai/usage";
 import { ollamaCloudUsageProvider, ollamaUsageProvider } from "@oh-my-pi/pi-ai/usage/ollama";
 
@@ -170,16 +171,14 @@ describe("ollama-cloud usage provider", () => {
 		expect(activity?.window?.durationMs).toBe(28 * 24 * 60 * 60 * 1000);
 	});
 
-	it("fraction and unit survive the round trip the auth-storage probe and broker consumers rely on", async () => {
+	it("monthly limit feeds resolveUsedFraction — the shared ranking/probe consumer", async () => {
 		const report = await ollamaCloudUsageProvider.fetchUsage(makeParams(), makeCtx(FULL_FIXTURE));
 		const monthly = report?.limits.find(limit => limit.id === "ollama-cloud:monthly");
-		// `resolveUsedFraction` (usage.ts) is the shared consumer: the auth-storage
-		// probe, the TUI dashboard card, and the status line all rank on it. A
-		// regression in the fraction → percent mapping would surface there as a
-		// wrong "X% used" or a lost exhausted/warning status.
-		expect(monthly?.amount.usedFraction).toBeCloseTo(0.004);
-		expect(monthly?.amount.used).toBeCloseTo(0.4);
-		expect(monthly?.amount.unit).toBe("percent");
+		expect(monthly).toBeDefined();
+		// The auth-storage probe, dashboard card, and status line all rank on this
+		// helper; a wrong amount mapping would surface there as a lost or inverted
+		// percentage rather than a parse error.
+		expect(resolveUsedFraction(monthly!)).toBeCloseTo(0.004);
 	});
 
 	it("non-ollama-cloud provider → returns null", async () => {
@@ -197,12 +196,26 @@ describe("ollama-cloud usage provider", () => {
 		);
 		expect(report).not.toBeNull();
 		expect(report?.limits).toHaveLength(0);
-		expect(report?.notes?.length).toBeGreaterThan(0);
+		expect(report?.notes?.[0]).toContain("No usage endpoint reachable");
 	});
 
-	it("HTTP error response → returns null", async () => {
-		const report = await ollamaCloudUsageProvider.fetchUsage(makeParams(), makeCtx({}, 401));
+	it("transient HTTP error (500) → returns null, never throws", async () => {
+		const report = await ollamaCloudUsageProvider.fetchUsage(makeParams(), makeCtx({}, 500));
 		expect(report).toBeNull();
+	});
+
+	it("401 → throws ProviderHttpError so auth storage purges the stale last-good report", async () => {
+		await expect(ollamaCloudUsageProvider.fetchUsage(makeParams(), makeCtx({}, 401))).rejects.toMatchObject({
+			name: "ProviderHttpError",
+			status: 401,
+		});
+	});
+
+	it("403 → throws ProviderHttpError so auth storage purges the stale last-good report", async () => {
+		await expect(ollamaCloudUsageProvider.fetchUsage(makeParams(), makeCtx({}, 403))).rejects.toMatchObject({
+			name: "ProviderHttpError",
+			status: 403,
+		});
 	});
 
 	it("network error / thrown fetch → returns null", async () => {

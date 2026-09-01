@@ -8,6 +8,7 @@ import type {
 	UsageProvider,
 	UsageReport,
 } from "../usage";
+import { ProviderHttpError } from "../error";
 import { DAY_MS, parseIsoTimestamp, usageStatus } from "./shared";
 
 const OLLAMA_PROVIDER = "ollama";
@@ -145,6 +146,15 @@ async function fetchOllamaCloudUsage(params: UsageFetchParams, ctx: UsageFetchCo
 			signal: params.signal,
 		});
 		if (!response.ok) {
+			// A revoked/expired key is a definitive auth failure, not a transient
+			// outage: throw so AuthStorage purges the last-good report instead of
+			// serving stale quota for the duration of the failure cooldown.
+			if (response.status === 401 || response.status === 403) {
+				throw new ProviderHttpError(
+					`Ollama Cloud usage endpoint returned ${response.status} ${response.statusText}`.trim(),
+					response.status,
+				);
+			}
 			ctx.logger?.warn("Ollama Cloud usage fetch failed", {
 				status: response.status,
 				statusText: response.statusText,
@@ -153,6 +163,7 @@ async function fetchOllamaCloudUsage(params: UsageFetchParams, ctx: UsageFetchCo
 		}
 		payload = await response.json();
 	} catch (error) {
+		if (error instanceof ProviderHttpError) throw error;
 		ctx.logger?.warn("Ollama Cloud usage fetch error", { error: String(error) });
 		return null;
 	}
