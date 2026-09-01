@@ -29167,16 +29167,6 @@
 			"contextWindow": 262144,
 			"maxTokens": 262144,
 			"supportsTools": true,
-			"thinking": {
-				"mode": "effort",
-				"efforts": [
-					"minimal",
-					"low",
-					"medium",
-					"high",
-					"xhigh"
-				]
-			},
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -29227,7 +29217,20 @@
 				"nativeKimiK3Reasoning": false,
 				"zaiReasoningEffortDialect": false,
 				"clampOutputToModelMax": false,
-				"stripImageInput": false
+				"stripImageInput": false,
+				"rejectRootObjectUnion": false,
+				"retryWithoutStrictOnGrammarError": false,
+				"supportsPromptCacheKey": false
+			},
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"minimal",
+					"low",
+					"medium",
+					"high",
+					"xhigh"
+				]
 			}
 		}
 	},
@@ -55213,14 +55216,6 @@
 			},
 			"contextWindow": 131000,
 			"maxTokens": 8192,
-			"thinking": {
-				"mode": "effort",
-				"efforts": [
-					"low",
-					"medium",
-					"high"
-				]
-			},
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -55270,7 +55265,18 @@
 				"nativeKimiK3Reasoning": false,
 				"zaiReasoningEffortDialect": false,
 				"clampOutputToModelMax": false,
-				"stripImageInput": false
+				"stripImageInput": false,
+				"rejectRootObjectUnion": false,
+				"retryWithoutStrictOnGrammarError": false,
+				"supportsPromptCacheKey": false
+			},
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"low",
+					"medium",
+					"high"
+				]
 			}
 		}
 	},
@@ -69755,7 +69761,10 @@
 				"nativeKimiK3Reasoning": false,
 				"zaiReasoningEffortDialect": false,
 				"clampOutputToModelMax": false,
-				"stripImageInput": false
+				"stripImageInput": false,
+				"rejectRootObjectUnion": false,
+				"retryWithoutStrictOnGrammarError": false,
+				"supportsPromptCacheKey": false
 			}
 		}
 	},
@@ -137375,14 +137384,6 @@
 			},
 			"contextWindow": 131000,
 			"maxTokens": 8192,
-			"thinking": {
-				"mode": "effort",
-				"efforts": [
-					"low",
-					"medium",
-					"high"
-				]
-			},
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -137432,7 +137433,18 @@
 				"nativeKimiK3Reasoning": false,
 				"zaiReasoningEffortDialect": false,
 				"clampOutputToModelMax": false,
-				"stripImageInput": false
+				"stripImageInput": false,
+				"rejectRootObjectUnion": false,
+				"retryWithoutStrictOnGrammarError": false,
+				"supportsPromptCacheKey": false
+			},
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"low",
+					"medium",
+					"high"
+				]
 			}
 		}
 	},
@@ -226198,7 +226210,10 @@
 				"nativeKimiK3Reasoning": false,
 				"zaiReasoningEffortDialect": false,
 				"clampOutputToModelMax": false,
-				"stripImageInput": false
+				"stripImageInput": false,
+				"rejectRootObjectUnion": false,
+				"retryWithoutStrictOnGrammarError": false,
+				"supportsPromptCacheKey": false
 			}
 		}
 	},
@@ -318708,7 +318723,10 @@
 				"nativeKimiK3Reasoning": false,
 				"zaiReasoningEffortDialect": false,
 				"clampOutputToModelMax": false,
-				"stripImageInput": false
+				"stripImageInput": false,
+				"rejectRootObjectUnion": false,
+				"retryWithoutStrictOnGrammarError": false,
+				"supportsPromptCacheKey": false
 			}
 		}
 	},
@@ -318732,14 +318750,6 @@
 			"contextWindow": 131072,
 			"maxTokens": 131072,
 			"supportsTools": true,
-			"thinking": {
-				"mode": "effort",
-				"efforts": [
-					"low",
-					"medium",
-					"high"
-				]
-			},
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -318789,7 +318799,18 @@
 				"nativeKimiK3Reasoning": false,
 				"zaiReasoningEffortDialect": false,
 				"clampOutputToModelMax": false,
-				"stripImageInput": false
+				"stripImageInput": false,
+				"rejectRootObjectUnion": false,
+				"retryWithoutStrictOnGrammarError": false,
+				"supportsPromptCacheKey": false
+			},
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"low",
+					"medium",
+					"high"
+				]
 			}
 		}
 	},
@@ -319331,16 +319352,6 @@
 			"contextWindow": 256000,
 			"maxTokens": 16000,
 			"supportsTools": true,
-			"thinking": {
-				"mode": "effort",
-				"efforts": [
-					"minimal",
-					"low",
-					"medium",
-					"high",
-					"max"
-				]
-			},
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -319390,7 +319401,20 @@
 				"nativeKimiK3Reasoning": false,
 				"zaiReasoningEffortDialect": false,
 				"clampOutputToModelMax": false,
-				"stripImageInput": false
+				"stripImageInput": false,
+				"rejectRootObjectUnion": false,
+				"retryWithoutStrictOnGrammarError": false,
+				"supportsPromptCacheKey": false
+			},
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"minimal",
+					"low",
+					"medium",
+					"high",
+					"max"
+				]
 			}
 		}
 	},

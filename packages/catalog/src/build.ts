@@ -155,7 +155,7 @@ export function applyCatalogCorrections(
 		) {
 			model.cost.output = output;
 		}
-		const cacheRead = numberField(costFallback, "cache-read");
+		const cacheRead = numberField(costFallback, "cacheRead");
 		if (
 			cacheRead !== undefined &&
 			model.cost.cacheRead === 0 &&
@@ -163,7 +163,7 @@ export function applyCatalogCorrections(
 		) {
 			model.cost.cacheRead = cacheRead;
 		}
-		const cacheWrite = numberField(costFallback, "cache-write");
+		const cacheWrite = numberField(costFallback, "cacheWrite");
 		if (
 			cacheWrite !== undefined &&
 			model.cost.cacheWrite === 0 &&
@@ -174,9 +174,9 @@ export function applyCatalogCorrections(
 	}
 	const limitsFallback = objectPayload(catalog.limitsFallback);
 	if (limitsFallback !== undefined) {
-		const contextWindow = numberField(limitsFallback, "context-window");
+		const contextWindow = numberField(limitsFallback, "contextWindow");
 		if (contextWindow !== undefined && model.contextWindow === null) model.contextWindow = contextWindow;
-		const maxTokens = numberField(limitsFallback, "max-tokens");
+		const maxTokens = numberField(limitsFallback, "maxTokens");
 		if (maxTokens !== undefined && model.maxTokens === null) model.maxTokens = maxTokens;
 	}
 	const limitsPatch = objectPayload(catalog.limitsPatch);

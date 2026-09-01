@@ -35,6 +35,7 @@
 		"providers/coreweave.kdl",
 		"providers/cursor.kdl",
 		"providers/deepseek.kdl",
+		"providers/european-gateways.kdl",
 		"providers/firepass.kdl",
 		"providers/fireworks.kdl",
 		"providers/github-copilot.kdl",
@@ -101,6 +102,7 @@
 		"taxonomy/kimi.kdl",
 		"taxonomy/meta.kdl",
 		"taxonomy/mimo.kdl",
+		"taxonomy/minicpm.kdl",
 		"taxonomy/minimax.kdl",
 		"taxonomy/mistral.kdl",
 		"taxonomy/openai.kdl",
@@ -707,6 +709,23 @@
 						"class": "mimo"
 					}
 				]
+			},
+			{
+				"id": "minicpm",
+				"matchers": [
+					{
+						"kind": "prefix",
+						"token": "minicpm-v"
+					},
+					{
+						"kind": "prefix",
+						"token": "mini-cpm-v"
+					}
+				],
+				"families": [],
+				"revisionPrefixes": [],
+				"skipBare": [],
+				"overrides": []
 			},
 			{
 				"id": "minimax",
@@ -7784,6 +7803,211 @@
 				}
 			},
 			{
+				"source": "providers/european-gateways.kdl:8",
+				"providers": [
+					"aki-io"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "kimi-k2.7-code-1100b"
+					}
+				],
+				"catalog": {
+					"costFallback": {
+						"input": 0.86,
+						"output": 3,
+						"cacheRead": 0,
+						"cacheWrite": 0
+					},
+					"limitsFallback": {
+						"contextWindow": 262144,
+						"maxTokens": 262144
+					},
+					"reasoningFallback": true,
+					"supportsToolsFallback": true
+				}
+			},
+			{
+				"source": "providers/european-gateways.kdl:25",
+				"providers": [
+					"melious"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "gpt-oss-120b"
+					}
+				],
+				"catalog": {
+					"costFallback": {
+						"input": 0,
+						"output": 0,
+						"cacheRead": 0,
+						"cacheWrite": 0
+					},
+					"limitsFallback": {
+						"contextWindow": 131000,
+						"maxTokens": 8192
+					},
+					"reasoningFallback": true
+				}
+			},
+			{
+				"source": "providers/european-gateways.kdl:41",
+				"providers": [
+					"nebius"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "Qwen/Qwen3-235B-A22B-Instruct-2507"
+					}
+				],
+				"catalog": {
+					"costFallback": {
+						"input": 0.2,
+						"output": 0.6,
+						"cacheRead": 0,
+						"cacheWrite": 0
+					},
+					"limitsFallback": {
+						"contextWindow": 262144,
+						"maxTokens": 262144
+					},
+					"supportsToolsFallback": true
+				}
+			},
+			{
+				"source": "providers/european-gateways.kdl:57",
+				"providers": [
+					"cortecs"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "gpt-oss-120b"
+					}
+				],
+				"catalog": {
+					"costFallback": {
+						"input": 0,
+						"output": 0,
+						"cacheRead": 0,
+						"cacheWrite": 0
+					},
+					"limitsFallback": {
+						"contextWindow": 131000,
+						"maxTokens": 8192
+					},
+					"reasoningFallback": true
+				}
+			},
+			{
+				"source": "providers/european-gateways.kdl:73",
+				"providers": [
+					"eurouter"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "mistral-large-3"
+					}
+				],
+				"catalog": {
+					"costFallback": {
+						"input": 0,
+						"output": 0,
+						"cacheRead": 0,
+						"cacheWrite": 0
+					},
+					"inputModalitiesFallback": [
+						"text",
+						"image"
+					],
+					"limitsFallback": {
+						"contextWindow": 262144
+					}
+				}
+			},
+			{
+				"source": "providers/european-gateways.kdl:88",
+				"providers": [
+					"scaleway"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "glm-5.2"
+					}
+				],
+				"catalog": {
+					"costFallback": {
+						"input": 0,
+						"output": 0,
+						"cacheRead": 0,
+						"cacheWrite": 0
+					},
+					"limitsFallback": {
+						"contextWindow": 256000,
+						"maxTokens": 16000
+					},
+					"reasoningFallback": true,
+					"supportsToolsFallback": true
+				}
+			},
+			{
+				"source": "providers/european-gateways.kdl:105",
+				"providers": [
+					"opper"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "mistral/devstral-2512"
+					}
+				],
+				"catalog": {
+					"costFallback": {
+						"input": 0,
+						"output": 0,
+						"cacheRead": 0,
+						"cacheWrite": 0
+					},
+					"limitsFallback": {
+						"contextWindow": 262144,
+						"maxTokens": 262144
+					},
+					"supportsToolsFallback": true
+				}
+			},
+			{
+				"source": "providers/european-gateways.kdl:121",
+				"providers": [
+					"ovhcloud"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "gpt-oss-120b"
+					}
+				],
+				"catalog": {
+					"costFallback": {
+						"input": 0.09,
+						"output": 0.47,
+						"cacheRead": 0,
+						"cacheWrite": 0
+					},
+					"limitsFallback": {
+						"contextWindow": 131072,
+						"maxTokens": 131072
+					},
+					"reasoningFallback": true,
+					"supportsToolsFallback": true
+				}
+			},
+			{
 				"source": "providers/firepass.kdl:11",
 				"providers": [
 					"firepass"
@@ -14375,6 +14599,326 @@
 			}
 		],
 		"excludeModels": [
+			{
+				"provider": "aki-io",
+				"match": {
+					"token": [
+						"audio",
+						"bge",
+						"clip",
+						"embed",
+						"embedding",
+						"embeddings",
+						"guard",
+						"i2i",
+						"i2v",
+						"image",
+						"moderation",
+						"rerank",
+						"reranker",
+						"safeguard",
+						"speech",
+						"stt",
+						"t2i",
+						"t2v",
+						"transcribe",
+						"tts",
+						"video",
+						"whisper"
+					],
+					"substring": [
+						"dall-e",
+						"dalle",
+						"flux",
+						"imagen",
+						"midjourney",
+						"qwen3guard",
+						"sora",
+						"stable-diffusion",
+						"veo"
+					]
+				}
+			},
+			{
+				"provider": "cortecs",
+				"match": {
+					"token": [
+						"audio",
+						"bge",
+						"clip",
+						"embed",
+						"embedding",
+						"embeddings",
+						"guard",
+						"i2i",
+						"i2v",
+						"image",
+						"moderation",
+						"rerank",
+						"reranker",
+						"safeguard",
+						"speech",
+						"stt",
+						"t2i",
+						"t2v",
+						"transcribe",
+						"tts",
+						"video",
+						"whisper"
+					],
+					"substring": [
+						"dall-e",
+						"dalle",
+						"flux",
+						"imagen",
+						"midjourney",
+						"qwen3guard",
+						"sora",
+						"stable-diffusion",
+						"veo"
+					]
+				}
+			},
+			{
+				"provider": "eurouter",
+				"match": {
+					"token": [
+						"audio",
+						"bge",
+						"clip",
+						"embed",
+						"embedding",
+						"embeddings",
+						"guard",
+						"i2i",
+						"i2v",
+						"image",
+						"moderation",
+						"rerank",
+						"reranker",
+						"safeguard",
+						"speech",
+						"stt",
+						"t2i",
+						"t2v",
+						"transcribe",
+						"tts",
+						"video",
+						"whisper"
+					],
+					"substring": [
+						"dall-e",
+						"dalle",
+						"flux",
+						"imagen",
+						"midjourney",
+						"qwen3guard",
+						"sora",
+						"stable-diffusion",
+						"veo"
+					]
+				}
+			},
+			{
+				"provider": "melious",
+				"match": {
+					"token": [
+						"audio",
+						"bge",
+						"clip",
+						"embed",
+						"embedding",
+						"embeddings",
+						"guard",
+						"i2i",
+						"i2v",
+						"image",
+						"moderation",
+						"rerank",
+						"reranker",
+						"safeguard",
+						"speech",
+						"stt",
+						"t2i",
+						"t2v",
+						"transcribe",
+						"tts",
+						"video",
+						"whisper"
+					],
+					"substring": [
+						"dall-e",
+						"dalle",
+						"flux",
+						"imagen",
+						"midjourney",
+						"qwen3guard",
+						"sora",
+						"stable-diffusion",
+						"veo"
+					]
+				}
+			},
+			{
+				"provider": "nebius",
+				"match": {
+					"token": [
+						"audio",
+						"bge",
+						"clip",
+						"embed",
+						"embedding",
+						"embeddings",
+						"guard",
+						"i2i",
+						"i2v",
+						"image",
+						"moderation",
+						"rerank",
+						"reranker",
+						"safeguard",
+						"speech",
+						"stt",
+						"t2i",
+						"t2v",
+						"transcribe",
+						"tts",
+						"video",
+						"whisper"
+					],
+					"substring": [
+						"dall-e",
+						"dalle",
+						"flux",
+						"imagen",
+						"midjourney",
+						"qwen3guard",
+						"sora",
+						"stable-diffusion",
+						"veo"
+					]
+				}
+			},
+			{
+				"provider": "opper",
+				"match": {
+					"token": [
+						"audio",
+						"bge",
+						"clip",
+						"embed",
+						"embedding",
+						"embeddings",
+						"guard",
+						"i2i",
+						"i2v",
+						"image",
+						"moderation",
+						"rerank",
+						"reranker",
+						"safeguard",
+						"speech",
+						"stt",
+						"t2i",
+						"t2v",
+						"transcribe",
+						"tts",
+						"video",
+						"whisper"
+					],
+					"substring": [
+						"dall-e",
+						"dalle",
+						"flux",
+						"imagen",
+						"midjourney",
+						"qwen3guard",
+						"sora",
+						"stable-diffusion",
+						"veo"
+					]
+				}
+			},
+			{
+				"provider": "ovhcloud",
+				"match": {
+					"token": [
+						"audio",
+						"bge",
+						"clip",
+						"embed",
+						"embedding",
+						"embeddings",
+						"guard",
+						"i2i",
+						"i2v",
+						"image",
+						"moderation",
+						"rerank",
+						"reranker",
+						"safeguard",
+						"speech",
+						"stt",
+						"t2i",
+						"t2v",
+						"transcribe",
+						"tts",
+						"video",
+						"whisper"
+					],
+					"substring": [
+						"dall-e",
+						"dalle",
+						"flux",
+						"imagen",
+						"midjourney",
+						"qwen3guard",
+						"sora",
+						"stable-diffusion",
+						"veo"
+					]
+				}
+			},
+			{
+				"provider": "scaleway",
+				"match": {
+					"token": [
+						"audio",
+						"bge",
+						"clip",
+						"embed",
+						"embedding",
+						"embeddings",
+						"guard",
+						"i2i",
+						"i2v",
+						"image",
+						"moderation",
+						"rerank",
+						"reranker",
+						"safeguard",
+						"speech",
+						"stt",
+						"t2i",
+						"t2v",
+						"transcribe",
+						"tts",
+						"video",
+						"whisper"
+					],
+					"substring": [
+						"dall-e",
+						"dalle",
+						"flux",
+						"imagen",
+						"midjourney",
+						"qwen3guard",
+						"sora",
+						"stable-diffusion",
+						"veo"
+					]
+				}
+			},
 			{
 				"provider": "amazon-bedrock",
 				"match": {

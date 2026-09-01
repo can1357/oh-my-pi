@@ -62,7 +62,12 @@ describe("compat compiler grammar", () => {
 				].join("\n"),
 			},
 		]);
-		expect(compiled.rules[0]?.wire?.whenThinking).toEqual({
+		const [rule] = compiled.rules;
+		if (!rule) throw new Error("Expected the compiler to emit one rule");
+		const { wire } = rule;
+		if (!wire) throw new Error("Expected the compiled rule to include wire metadata");
+
+		expect(wire.whenThinking).toEqual({
 			qwenTemplateReasoningEffort: true,
 			reasoningContentField: "reasoning_content",
 			extraBody: { enable_thinking: true },

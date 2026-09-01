@@ -73,6 +73,7 @@ import {
 	CLOUDFLARE_FALLBACK_MODEL,
 	hasBillableCost,
 	linkOpenAIPromotionTargets,
+	rebakeModelThinking,
 } from "./generated-policies";
 
 const packageRoot = path.join(import.meta.dir, "..");
@@ -851,8 +852,10 @@ function parseRebakeProviderArg(args: readonly string[]): string | undefined {
 	return args[1];
 }
 
-function rebakeBundledModel(model: ModelSpec<Api>): ModelSpec<Api> {
-	const rebaked = buildModel(toModelSpec(model as unknown as Model<Api>));
+export function rebakeBundledModel(model: ModelSpec<Api>): ModelSpec<Api> {
+	const spec = toModelSpec(model as unknown as Model<Api>);
+	rebakeModelThinking(spec);
+	const rebaked = buildModel(spec);
 	const {
 		identity: _identity,
 		requiresGlyphTokenization: _requiresGlyphTokenization,
