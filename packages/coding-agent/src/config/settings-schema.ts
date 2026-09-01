@@ -1820,6 +1820,16 @@ export const SETTINGS_SCHEMA = {
 			description: "Allow retry recovery to switch to configured fallback models",
 		},
 	},
+	"retry.fallbackOnContentFilter": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "model",
+			group: "Retry & Fallback",
+			label: "Content Filter Fallback",
+			description: "Allow configured fallback models after a provider content filter blocks a turn",
+		},
+	},
 	"retry.usageAwareFallback": {
 		type: "boolean",
 		default: false,
@@ -6169,6 +6179,7 @@ export interface RetrySettings {
 	baseDelayMs: number;
 	maxDelayMs: number;
 	modelFallback: boolean;
+	fallbackOnContentFilter: boolean;
 	usageAwareFallback: boolean;
 	usageReservePct: number;
 	usageReservePolicy: "confirm" | "auto" | "fail-closed";

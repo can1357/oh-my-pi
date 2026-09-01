@@ -183,6 +183,7 @@ describe("issue #6276 — Amazon Bedrock guardrails", () => {
 		}).result();
 
 		expect(result.stopReason).toBe("error");
+		expect(result.stopDetails).toEqual({ type: "content_filtered" });
 		expect(result.errorMessage).toContain("content filters");
 		expect(result.errorMessage).not.toContain("guardrail");
 	});

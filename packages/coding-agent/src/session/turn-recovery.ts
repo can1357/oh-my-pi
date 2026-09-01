@@ -1350,11 +1350,19 @@ export class TurnRecovery {
 		);
 	}
 
-	/** Checks whether a provider error represents a classifier refusal. */
+	/** Checks whether a provider error is a classifier refusal or an opted-in content-filter termination. */
 	isClassifierRefusal(message: AssistantMessage): boolean {
 		if (message.stopReason !== "error") return false;
 		const stopType = message.stopDetails?.type;
-		return stopType === "refusal" || stopType === "sensitive";
+		if (stopType === "refusal" || stopType === "sensitive") return true;
+		return this.#host.settings.get("retry.fallbackOnContentFilter") && this.#isContentFilterTermination(message);
+	}
+
+	/** Whether the provider explicitly identified this error as a content-filter termination. */
+	#isContentFilterTermination(message: AssistantMessage): boolean {
+		if (message.stopReason !== "error") return false;
+		const stopType = message.stopDetails?.type;
+		return stopType === "content_filter" || stopType === "content_filtered";
 	}
 
 	#getRetryFallbackResolutionContext(): RetryFallbackResolutionContext {
@@ -1878,8 +1886,9 @@ export class TurnRecovery {
 	 * the chain is consulted before the error becomes final. Skips failures a
 	 * model switch cannot fix or must not replay: cancellations (abort-flavored
 	 * errors are not model faults), context overflow (compaction's job),
-	 * classifier refusals (chain consult is handled on the retryable path with
-	 * `pinFallback`), and turns that already emitted replay-unsafe output.
+	 * classifier refusals and opted-in content-filter terminations (handled on
+	 * the retryable path with `pinFallback`), disabled content-filter fallbacks,
+	 * and turns that already emitted replay-unsafe output.
 	 */
 	isHardErrorFallbackEligible(message: AssistantMessage): boolean {
 		if (message.stopReason !== "error") return false;
@@ -1896,6 +1905,7 @@ export class TurnRecovery {
 		const retrySettings = this.#host.settings.getGroup("retry");
 		if (!retrySettings.enabled || !retrySettings.modelFallback) return false;
 		if (this.isClassifierRefusal(message)) return false;
+		if (this.#isContentFilterTermination(message)) return false;
 		const id = this.#classifyRetryMessage(message);
 		if (AIError.is(id, AIError.Flag.Abort) || AIError.is(id, AIError.Flag.UserInterrupt)) return false;
 		// Text-ambiguous overflows waive the veto; usage-backed do not — see AIError.isTextAmbiguousContextOverflow (#9235).

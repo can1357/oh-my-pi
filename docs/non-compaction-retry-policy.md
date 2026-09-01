@@ -35,12 +35,13 @@ So: overload/rate/server/network-style failures use this retry policy; context-w
 - message is **not** context overflow
 - one of:
   - the stop is a classifier refusal (`stopDetails.type` is `"refusal"` or `"sensitive"`)
+  - the stop is a provider-declared content filter and `retry.fallbackOnContentFilter` is enabled
   - the error is a stale OpenAI Responses replay failure
   - the normalized `AIError` classification is retryable (including transient transport/provider failures and usage limits)
 
 Retry classification runs through `AIError.classifyMessage(...)`, using the persisted `errorId`/status when present and augmenting it from provider-aware message classification. It is not solely a regex policy, although legacy/string-only provider failures still use text classification.
 
-The stale-replay and retryable-error branches additionally require that the stream did **not** already emit replay-unsafe output. Non-empty visible text, images, tool calls, and Anthropic server-tool blocks prevent replay. Thinking-only and whitespace-only partials are safe to discard and retry. Classifier refusals are subject to the same replay-safety check.
+The stale-replay and retryable-error branches additionally require that the stream did **not** already emit replay-unsafe output. Non-empty visible text, images, tool calls, and Anthropic server-tool blocks prevent replay. Thinking-only and whitespace-only partials are safe to discard and retry. Classifier refusals and opted-in content-filter terminations are subject to the same replay-safety check.
 
 Current retryable categories include:
 
@@ -52,7 +53,7 @@ Current retryable categories include:
 - provider-suggested retry wording, including OpenAI `retry your request` failures
 - network/connection/socket failures, refused/closed connections, upstream connect/reset-before-headers, socket hang up, timeout/timed out, fetch failed, terminated, retry delay wording, and unexpected socket close messages
 
-The normalized classifier recognizes the transient categories above from structured flags/status and provider-aware text patterns. Classifier refusals remain a separate typed `stopDetails` decision.
+The normalized classifier recognizes the transient categories above from structured flags/status and provider-aware text patterns. Classifier refusals and provider-declared content-filter terminations remain separate typed `stopDetails` decisions.
 
 Beyond `isRetryableError(...)`, empty generic aborts may enter the same retry engine when no user, dispose, or streaming-edit-guard abort is in progress. An interrupted turn whose tool calls already have matching results can also be continued safely: the failed assistant/tool-result sequence is preserved so completed side effects are not replayed. Resolved stream stalls and HTTP/2 stream resets (`NGHTTP2_INTERNAL_ERROR`, `NGHTTP2_REFUSED_STREAM`, `HTTP2StreamReset`) use the same preserve-and-continue path. Cursor idle-stall recovery continues after every emitted tool call has a result; the Connect stream is already closed by the idle abort. An HTTP/2 RST is the same: the stream is already dead.
 
@@ -69,7 +70,7 @@ Flow (`#handleRetryableError`):
 3. Calculate whether the current model's retry budget is exhausted.
 4. Classify the error, parse retry timing, and compute capped jittered backoff: `min(retry.baseDelayMs * 2^(attempt-1), 8000ms) * (75–100% jitter)`. Stale OpenAI Responses replay errors reset the provider session and use delay `0`.
 5. For usage limits, apply a successful credential switch or banked Codex reset immediately; otherwise wait for the earlier of the provider hint and the next temporarily blocked sibling credential.
-6. When allowed, consult configured model fallback chains. A switch uses delay `0`; classifier refusals only continue when a fallback is applied.
+6. When allowed, consult configured model fallback chains. A switch uses delay `0`; classifier refusals and opted-in content-filter terminations only continue when a fallback is applied.
 7. If the current model's retry budget is exhausted, stop unless a fallback model was found. A fallback receives a fresh retry budget.
 8. If the final delay exceeds `retry.maxDelayMs` and no credential/model switch happened, emit final failure without sleeping.
 9. Emit `auto_retry_start`, record the recoverable error, and remove the failed assistant from active context unless this is a resolved interrupted tool turn.
@@ -166,6 +167,7 @@ Defined in settings schema under retry group:
 - `retry.baseDelayMs`
 - `retry.maxDelayMs`
 - `retry.modelFallback` (default `true`; gates retry model-fallback switching)
+- `retry.fallbackOnContentFilter` (default `false`; allows provider-declared content-filter terminations to enter the fallback chain)
 - `retry.fallbackChains`
 - `retry.fallbackRevertPolicy` (`"cooldown-expiry"` by default; `"never"` disables automatic restoration)
 - `retry.usageAwareFallback` (default `false`; runs a preflight for supported coding-plan usage reports)

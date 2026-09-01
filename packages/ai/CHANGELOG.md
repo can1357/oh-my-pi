@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Amazon Bedrock `content_filtered` and OpenAI-compatible `content_filter` terminations to preserve their structured stop classification for recovery policy consumers.
+
 ## [18.1.2] - 2026-09-01
 
 ### Added
