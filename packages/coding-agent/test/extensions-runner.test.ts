@@ -2397,10 +2397,11 @@ describe("ExtensionRunner", () => {
 				{ type: "ui_select" },
 				{ type: "tool_approval_resolved", approved: true },
 			]);
-			expect(select).toHaveBeenCalledWith(expect.stringContaining("Allow tool: dangerous_tool"), [
-				"Approve",
-				"Deny",
-			]);
+			expect(select).toHaveBeenCalledWith(
+				expect.stringContaining("Allow tool: dangerous_tool"),
+				["Approve", "Deny"],
+				undefined,
+			);
 			delete globalState.__approvalEvents;
 		});
 
@@ -3043,6 +3044,134 @@ describe("ExtensionRunner", () => {
 				expect(trace.some(entry => entry.kind === "executed")).toBe(false);
 			});
 
+			// --- Cancellation hardening: an aborted invocation must never execute ---
+
+			const gateGlobals = globalThis as typeof globalThis & {
+				__cancelEntered?: PromiseWithResolvers<void>;
+				__cancelGate?: PromiseWithResolvers<void>;
+			};
+			const installGates = () => {
+				gateGlobals.__cancelEntered = Promise.withResolvers<void>();
+				gateGlobals.__cancelGate = Promise.withResolvers<void>();
+				return {
+					entered: gateGlobals.__cancelEntered.promise,
+					release: () => gateGlobals.__cancelGate?.resolve(),
+					cleanup: () => {
+						delete gateGlobals.__cancelEntered;
+						delete gateGlobals.__cancelGate;
+					},
+				};
+			};
+
+			it("does not execute when cancelled while the escalated native selector is pending", async () => {
+				const trace = setTrace();
+				const selectEntered = Promise.withResolvers<void>();
+				const selectGate = Promise.withResolvers<void>();
+				const { runner, select } = await reviewRunnerFromFile(
+					"cancel-select.ts",
+					reviewExtensionCode(`return { decision: "escalate" };`),
+					async () => {
+						globalWithReview.__reviewTrace?.push({ kind: "ui_select" });
+						selectEntered.resolve();
+						await selectGate.promise;
+						return "Approve";
+					},
+				);
+				const controller = new AbortController();
+				const execution = executeReviewCase(runner, recordingApprovalTool(), "call-cancel-select", {
+					signal: controller.signal,
+				});
+
+				await selectEntered.promise;
+				controller.abort();
+				selectGate.resolve();
+				await expect(execution).rejects.toThrow();
+				expect(select).toHaveBeenCalledTimes(1);
+				// A late "Approve" from the selector must not approve a cancelled call…
+				expect(trace).not.toContainEqual({ kind: "resolved", approved: true });
+				// …it resolves as not-approved (requested→resolved pairing preserved)…
+				expect(trace).toContainEqual({ kind: "resolved", approved: false });
+				// …and the signal-ignoring tool is never invoked.
+				expect(trace.some(entry => entry.kind === "executed")).toBe(false);
+			});
+
+			it("does not execute when cancelled while tool_approval_requested handling is pending", async () => {
+				const trace = setTrace();
+				const gates = installGates();
+				const { runner } = await reviewRunnerFromFile(
+					"cancel-requested.ts",
+					`export default function(pi) {
+						pi.on("tool_approval_requested", async () => {
+							globalThis.__reviewTrace.push({ kind: "requested" });
+							globalThis.__cancelEntered.resolve();
+							await globalThis.__cancelGate.promise;
+						});
+						pi.on("tool_approval_resolved", async (event) => {
+							globalThis.__reviewTrace.push({ kind: "resolved", approved: event.approved });
+						});
+					}`,
+				);
+				const controller = new AbortController();
+				const execution = executeReviewCase(runner, recordingApprovalTool(), "call-cancel-requested", {
+					signal: controller.signal,
+				});
+
+				await gates.entered;
+				controller.abort();
+				gates.release();
+				await expect(execution).rejects.toThrow();
+				expect(trace).toEqual([{ kind: "requested" }, { kind: "resolved", approved: false }]);
+				expect(trace.some(entry => entry.kind === "executed")).toBe(false);
+				gates.cleanup();
+			});
+
+			it("does not execute when cancelled while tool_approval_resolved handling is pending", async () => {
+				const trace = setTrace();
+				const gates = installGates();
+				const { runner } = await reviewRunnerFromFile(
+					"cancel-resolved.ts",
+					`export default function(pi) {
+						pi.on("tool_approval_resolved", async (event) => {
+							globalThis.__reviewTrace.push({ kind: "resolved", approved: event.approved });
+							globalThis.__cancelEntered.resolve();
+							await globalThis.__cancelGate.promise;
+						});
+					}`,
+				);
+				const controller = new AbortController();
+				const execution = executeReviewCase(runner, recordingApprovalTool(), "call-cancel-resolved", {
+					signal: controller.signal,
+				});
+
+				await gates.entered;
+				controller.abort();
+				gates.release();
+				await expect(execution).rejects.toThrow();
+				// Native approval genuinely resolved approve (telemetry stays truthful)…
+				expect(trace).toContainEqual({ kind: "resolved", approved: true });
+				// …but the signal-ignoring tool must never run.
+				expect(trace.some(entry => entry.kind === "executed")).toBe(false);
+				gates.cleanup();
+			});
+
+			it("already-aborted signal never reaches review, native approval, or execution", async () => {
+				const trace = setTrace();
+				const { runner, select } = await reviewRunnerFromFile(
+					"cancel-preaborted.ts",
+					reviewExtensionCode(`return { decision: "approve" };`),
+				);
+				const controller = new AbortController();
+				controller.abort();
+
+				await expect(
+					executeReviewCase(runner, recordingApprovalTool(), "call-preaborted", {
+						signal: controller.signal,
+					}),
+				).rejects.toThrow();
+				expect(select).not.toHaveBeenCalled();
+				expect(trace).toEqual([]);
+			});
+
 			it("approve + escalate handlers are not last-result-wins: the native selector decides", async () => {
 				const trace = setTrace();
 				await Bun.write(
@@ -3211,7 +3340,11 @@ describe("ExtensionRunner", () => {
 
 				expect(firstReviewText(result)).toBe("ok");
 				expect(select).toHaveBeenCalledTimes(1);
-				expect(select).toHaveBeenCalledWith(expect.stringContaining("Provider safety checks"), ["Approve", "Deny"]);
+				expect(select).toHaveBeenCalledWith(
+					expect.stringContaining("Provider safety checks"),
+					["Approve", "Deny"],
+					undefined,
+				);
 				expect(trace).toEqual([
 					{ kind: "requested" },
 					{ kind: "ui_select" },

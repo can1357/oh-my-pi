@@ -109,6 +109,7 @@
 - Fixed "Please use nerdfont" notification incorrectly persisting after theme configuration
 - Fixed sampling parameter errors for newer Anthropic models (Opus 4.7+, Sonnet 5+)
 - Native approval prompts now format from a detached snapshot of the tool input, so a custom tool's `formatApprovalDetails` callback can no longer mutate or retain the object that executes after approval.
+- Fixed tool execution after cancellation: an aborted tool invocation can no longer cross the approval boundary — a late "Approve" from the native selector or a lifecycle handler completing after abort never starts execution, and cancelled approvals resolve to extension handlers as not-approved instead of approved.
 
 ## [18.0.11] - 2026-08-29
 

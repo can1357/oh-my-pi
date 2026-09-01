@@ -143,6 +143,7 @@ function safetyCheckLines(checks: readonly ComputerSafetyCheck[]): string[] {
 		return `${index + 1}. ${approvalData(value)}`;
 	});
 }
+const APPROVAL_ABORTED_REASON = "approval aborted";
 function extensionReviewDenyError(toolName: string, reason?: string): Error {
 	return new Error(`Tool "${toolName}" was denied by an extension approval review${reason ? `: ${reason}` : ""}`);
 }
@@ -192,6 +193,9 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 		// the loop never saw — nested xd:// device dispatches and direct
 		// (non-loop) execution such as Cursor exec handlers.
 		const loopEmittedToolCall = this.runner.consumeToolCallEmitted(toolCallId, this.tool.name);
+		// Cancellation boundary at entry: an already-aborted invocation never
+		// proceeds to review, native approval, or execution.
+		signal?.throwIfAborted();
 		// Resolve approval settings up front. A `deny` on the original input short-circuits before the
 		// runner is touched — an already-denied tool never emits `tool_call` — while the full gate below
 		// re-resolves against the (possibly revised) input so a handler cannot rewrite into a denied or
@@ -244,6 +248,7 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 				throw new Error(`Extension failed, blocking execution: ${String(err)}`);
 			}
 		}
+		signal?.throwIfAborted();
 		const inputMatchesDispatch = effectiveParams === params;
 
 		// 2. Full approval gate against the input that will actually run — resolves policy and
@@ -372,6 +377,12 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 					...(reason ? { reason } : {}),
 				});
 			};
+			if (signal?.aborted) {
+				// Cancelled while approval handlers were pending: resolve as
+				// not-approved so requested→resolved pairing holds, then stop.
+				await emitApprovalResolved(false, APPROVAL_ABORTED_REASON);
+				signal?.throwIfAborted();
+			}
 
 			// Provider safety checks fail closed without an interactive prompt. Unlike
 			// ordinary tier approval, no setting or yolo mode may bypass this gate.
@@ -416,16 +427,24 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 					: basePrompt;
 			let choice: string | undefined;
 			try {
-				choice = await uiContext.select(safetyPrompt, ["Approve", "Deny"]);
+				choice = await uiContext.select(safetyPrompt, ["Approve", "Deny"], signal ? { signal } : undefined);
 			} catch (err) {
-				await emitApprovalResolved(false, err instanceof Error ? err.message : "approval aborted");
+				await emitApprovalResolved(false, err instanceof Error ? err.message : APPROVAL_ABORTED_REASON);
 				throw err;
+			}
+			if (signal?.aborted) {
+				// Cancelled while the selector was pending: a late "Approve" is not
+				// an approval for a cancelled invocation. Resolve as not-approved,
+				// never mark provider safety approved, and stop.
+				await emitApprovalResolved(false, APPROVAL_ABORTED_REASON);
+				signal?.throwIfAborted();
 			}
 			const approved = choice === "Approve";
 			await emitApprovalResolved(approved, approved ? undefined : "denied by user");
 			if (!approved) {
 				throw new Error(`Tool call denied by user: ${this.tool.name}`);
 			}
+			signal?.throwIfAborted();
 			if (pendingSafetyChecks.length > 0) {
 				if (!context) throw new Error("Provider safety approval context is unavailable");
 				context.providerSafetyApproved = true;
@@ -436,6 +455,9 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 		let result: AgentToolResult<TDetails, TParameters>;
 		let executionError: Error | undefined;
 
+		// Final cancellation checkpoint: no route through review or approval may
+		// start execution on an aborted signal, even if the tool ignores it.
+		signal?.throwIfAborted();
 		try {
 			// Name the owning session for process-wide file-mutation fallbacks and
 			// expose its settings to registered tools and any fallback handlers they
