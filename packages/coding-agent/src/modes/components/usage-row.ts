@@ -1,5 +1,5 @@
 import type { Usage } from "@oh-my-pi/pi-ai";
-import { Container, Spacer, Text } from "@oh-my-pi/pi-tui";
+import { Container, Ellipsis, Spacer, Text, truncateToWidth } from "@oh-my-pi/pi-tui";
 import { formatDuration, formatNumber } from "@oh-my-pi/pi-utils";
 import { theme } from "../../modes/theme/theme";
 
@@ -74,12 +74,14 @@ export function formatUsageRow(
 	// and cap the length so a misbehaving aggregator can't decorate or flood
 	// the usage row. Absent for direct provider connections.
 	if (upstreamProvider) {
+		// `truncateToWidth` is width-aware (grapheme/emoji safe) — `.slice` on
+		// UTF-16 code units can split surrogate pairs and miscount display width.
 		const providerLabel = Bun.stripANSI(upstreamProvider)
 			.replace(/[\u0000-\u001f\u007f]/g, "")
-			.trim()
-			.slice(0, 40);
-		if (providerLabel) {
-			parts.push(`via ${providerLabel}`);
+			.trim();
+		const truncated = providerLabel ? truncateToWidth(providerLabel, 40, Ellipsis.Omit) : "";
+		if (truncated) {
+			parts.push(`via ${truncated}`);
 		}
 	}
 	return parts.join("  ");
