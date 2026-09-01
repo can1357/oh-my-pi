@@ -8,6 +8,7 @@
 - TypeScript code intelligence now works on TypeScript 7 projects: the built-in `typescript-native` server runs `tsc --lsp --stdio` when the resolved TypeScript install no longer ships `tsserver.js`, replacing `typescript-language-server` for that project.
 - Claude marketplace MCP servers now resolve environment placeholders in stdio environment values instead of passing strings such as `${NAME:-}` literally ([#10481](https://github.com/can1357/oh-my-pi/pull/10481) by [@mrexodia](https://github.com/mrexodia)).
 - Fixed prewalk conflicting with `todo.eager=always`: the forced eager-todo prelude ("call todo first this turn") was injected alongside the prewalk plan nudge ("write a complete plan first, then todo"), giving the model contradictory instructions; the eager-todo prelude is now suppressed only when prewalk will perform a handoff ([#10510](https://github.com/can1357/oh-my-pi/issues/10510)).
+- Agent Plugin skills that set an invocation axis now load instead of being skipped as invalid: carry `disable-model-invocation`, `user-invocable`, or `hide` as `"true"`/`"false"` strings inside the standard `metadata` map ([#10505](https://github.com/can1357/oh-my-pi/issues/10505)).
 ## [18.1.2] - 2026-09-01
 
 ### Added

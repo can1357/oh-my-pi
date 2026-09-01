@@ -17,7 +17,7 @@
 import type { Dirent, Stats } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { getPluginsDir, isEnoent, normalizeFrontmatterKeys, parseFrontmatter } from "@oh-my-pi/pi-utils";
+import { getPluginsDir, isEnoent, isRecord, normalizeFrontmatterKeys, parseFrontmatter } from "@oh-my-pi/pi-utils";
 import { registerProvider } from "../capability";
 import { readFile } from "../capability/fs";
 import { type MCPServer, mcpCapability } from "../capability/mcp";
@@ -166,12 +166,15 @@ async function scanStandardSkills(realRoot: string, level: "user" | "project"): 
 				return;
 			}
 			// §7.1: the Agent Skills specification is the source of truth for skill
-			// validity; the frontmatter schema is closed per skills-ref, so client
-			// conventions like `enabled` reject the skill as an unexpected field.
-			// Non-conforming skills are skipped without affecting other components.
-			const violation = validateAgentSkillFrontmatter(rawFrontmatter, entry.name);
-			if (violation !== null) {
-				warnings.push(`Skipping skill "${entry.name}": ${violation}`);
+			// validity. The spec schema is closed, so unknown top-level keys like
+			// `enabled` still reject the skill; the invocation keys omp documents
+			// arrive through the spec-sanctioned `metadata` map and are honored with
+			// a reported deviation instead. Non-conforming skills are skipped
+			// without affecting other components.
+			const check = validateAgentSkillFrontmatter(rawFrontmatter, entry.name);
+			for (const warning of check.warnings) warnings.push(`Skill "${entry.name}": ${warning}`);
+			if (check.violation !== null) {
+				warnings.push(`Skipping skill "${entry.name}": ${check.violation}`);
 				return;
 			}
 			// Validation guarantees the frontmatter name matches the directory
@@ -179,6 +182,29 @@ async function scanStandardSkills(realRoot: string, level: "user" | "project"): 
 			// Store with the codebase's camelCase key convention (skill:// consumers,
 			// prompt hiding via disableModelInvocation, …).
 			const frontmatter = normalizeFrontmatterKeys(rawFrontmatter) as SkillFrontmatter;
+			// Fold the honored `metadata` invocation strings into camel booleans so
+			// downstream consumers observe the axes. Only exact "true"/"false" map;
+			// anything else is left unset and reported rather than silently honored.
+			const rawMetadata = rawFrontmatter.metadata;
+			if (isRecord(rawMetadata)) {
+				const pairs: Array<[string, "userInvocable" | "disableModelInvocation" | "hide"]> = [
+					["user-invocable", "userInvocable"],
+					["disable-model-invocation", "disableModelInvocation"],
+					["hide", "hide"],
+				];
+				for (const [key, camel] of pairs) {
+					const value = rawMetadata[key];
+					if (value === "true") {
+						frontmatter[camel] = true;
+					} else if (value === "false") {
+						frontmatter[camel] = false;
+					} else if (value !== undefined) {
+						warnings.push(
+							`Skill "${entry.name}": unrecognized value for "metadata.${key}": expected "true" or "false"`,
+						);
+					}
+				}
+			}
 			items.push({
 				name: entry.name,
 				containRoot: realRoot,

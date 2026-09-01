@@ -95,6 +95,12 @@ const SKILL_FIELDS: Record<string, true> = {
 	metadata: true,
 	compatibility: true,
 };
+/** Invocation keys omp honors from the spec-sanctioned `metadata` map. */
+const METADATA_INVOCATION_KEYS: Record<string, true> = {
+	"user-invocable": true,
+	"disable-model-invocation": true,
+	hide: true,
+};
 /** Skill `name` characters: Unicode letters/digits (Python `str.isalnum`) and hyphens. */
 const SKILL_NAME_CHARS_RE = /^[\p{L}\p{N}-]+$/u;
 
@@ -113,19 +119,52 @@ function validateSkillName(raw: unknown, dirName: string): string | null {
 	return null;
 }
 
+/** Outcome of validating `SKILL.md` frontmatter under Agent Plugins §7.1. */
+export interface AgentSkillFrontmatterCheck {
+	/** First fatal violation, or `null` when the skill may load. */
+	violation: string | null;
+	/** Honored omp conventions carried in `metadata`, for reporting. */
+	warnings: string[];
+}
+
 /**
  * Validate `SKILL.md` frontmatter against the Agent Skills specification
  * (https://agentskills.io/specification), the source of truth for skill
- * validity under Agent Plugins §7.1, mirroring the official skills-ref
- * reference validator: the frontmatter schema is CLOSED to its six fields and
- * any unexpected key rejects the skill. Returns the first violation, or `null`
- * when the skill conforms. Frontmatter keys must be raw (unnormalized).
+ * validity under Agent Plugins §7.1. The spec schema is closed to its six
+ * fields; any unexpected top-level key still rejects the skill. The omp
+ * invocation keys `user-invocable`, `disable-model-invocation`, and `hide`
+ * are honored through the spec-sanctioned `metadata` map when they carry the
+ * exact string `"true"` or `"false"`, and are reported as non-standard
+ * conventions rather than treated as fatal. Frontmatter keys must be raw
+ * (unnormalized).
  */
-export function validateAgentSkillFrontmatter(frontmatter: Record<string, unknown>, dirName: string): string | null {
+export function validateAgentSkillFrontmatter(
+	frontmatter: Record<string, unknown>,
+	dirName: string,
+): AgentSkillFrontmatterCheck {
+	const warnings: string[] = [];
 	for (const key in frontmatter) {
-		if (!SKILL_FIELDS[key]) return `unexpected frontmatter field "${key}"`;
+		if (!SKILL_FIELDS[key]) return { violation: `unexpected frontmatter field "${key}"`, warnings };
 	}
+	const violation = validateSpecFields(frontmatter, dirName);
+	if (violation === null) {
+		const metadata = frontmatter.metadata;
+		if (isRecord(metadata)) {
+			for (const key in metadata) {
+				if (!METADATA_INVOCATION_KEYS[key]) continue;
+				const value = metadata[key];
+				if (value !== "true" && value !== "false") continue;
+				warnings.push(
+					`honored invocation setting "metadata.${key}" (omp convention; not part of the Agent Skills schema)`,
+				);
+			}
+		}
+	}
+	return { violation, warnings };
+}
 
+/** Spec-field checks shared by the wrapper; assumes top-level keys are known. */
+function validateSpecFields(frontmatter: Record<string, unknown>, dirName: string): string | null {
 	const nameViolation = validateSkillName(frontmatter.name, dirName);
 	if (nameViolation !== null) return nameViolation;
 

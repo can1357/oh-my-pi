@@ -432,6 +432,54 @@ describe("agent-plugins discovery", () => {
 		expect(warned(`unexpected frontmatter field "enabled"`)).toBe(true);
 	});
 
+	test("honors invocation axes from skill metadata on the standard path", async () => {
+		await writeManifest();
+		await writeSkill(
+			"model-hidden",
+			'name: model-hidden\ndescription: ok\nmetadata:\n  disable-model-invocation: "true"',
+		);
+		await writeSkill("user-hidden", 'name: user-hidden\ndescription: ok\nmetadata:\n  user-invocable: "false"');
+		await writeSkill(
+			"all-hidden",
+			'name: all-hidden\ndescription: ok\nmetadata:\n  hide: "true"\n  user-invocable: "false"',
+		);
+		await writeRegistry(pluginPath);
+
+		const skills = await loadCapability<Skill>("skills", { cwd: tempDir });
+		const fromPlugin = skills.all.filter(skill => skill._source.provider === "agent-plugins");
+		expect(fromPlugin.map(skill => skill.name).sort()).toEqual(["all-hidden", "model-hidden", "user-hidden"]);
+
+		const modelHidden = skills.all.find(skill => skill.name === "model-hidden");
+		expect(modelHidden?.frontmatter?.disableModelInvocation).toBe(true);
+		expect(modelHidden?.frontmatter?.userInvocable).not.toBe(false);
+
+		const userHidden = skills.all.find(skill => skill.name === "user-hidden");
+		expect(userHidden?.frontmatter?.userInvocable).toBe(false);
+		expect(userHidden?.frontmatter?.disableModelInvocation).not.toBe(true);
+
+		const allHidden = skills.all.find(skill => skill.name === "all-hidden");
+		expect(allHidden?.frontmatter?.hide).toBe(true);
+		expect(allHidden?.frontmatter?.userInvocable).toBe(false);
+
+		const warned = (needle: string) => skills.warnings.some(warning => warning.includes(needle));
+		expect(warned(`metadata.disable-model-invocation`)).toBe(true);
+		expect(warned(`metadata.user-invocable`)).toBe(true);
+	});
+
+	test("warns and ignores an unrecognized invocation value in metadata", async () => {
+		await writeManifest();
+		await writeSkill("fuzzy", "name: fuzzy\ndescription: ok\nmetadata:\n  user-invocable: definitely");
+		await writeRegistry(pluginPath);
+
+		const skills = await loadCapability<Skill>("skills", { cwd: tempDir });
+		const fuzzy = skills.all.find(skill => skill.name === "fuzzy");
+		expect(fuzzy).toBeDefined();
+		expect(fuzzy?.frontmatter?.userInvocable).toBeUndefined();
+		expect(skills.warnings.some(warning => warning.includes(`expected "true" or "false"`))).toBe(true);
+		// One owner reports each outcome: an invalid value is never also "honored".
+		expect(skills.warnings.some(warning => warning.includes("honored invocation setting"))).toBe(false);
+	});
+
 	test("rejects an escaping plugin.json symlink without consuming outside content", async () => {
 		// A fully valid Agent Plugins manifest OUTSIDE the package: if the client
 		// read it through the symlink, classification would succeed and the

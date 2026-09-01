@@ -56,7 +56,8 @@ Supported frontmatter fields on the skill type:
 - `globs?: string[]`
 - `alwaysApply?: boolean`
 - `hide?: boolean`
-- `disableModelInvocation?: boolean` (Agent Skills equivalent of `hide`; normalized from kebab-case `disable-model-invocation`)
+- `disableModelInvocation?: boolean` — model axis; a Claude Code / Pi convention (not part of the agentskills.io schema), normalized from kebab-case `disable-model-invocation`; alias of `hide`. Agent Plugins skills carry this and the user axis through `metadata` string values, e.g. `metadata: { disable-model-invocation: "true" }` and `metadata: { user-invocable: "false" }`.
+- `userInvocable?: boolean` — user axis; normalized from kebab-case `user-invocable`; defaults to `true`; when `false` the skill is not registered, completed, or dispatched as `/skill:<name>`
 - additional keys are preserved as unknown metadata
 
 Current runtime behavior:
