@@ -216,7 +216,7 @@ async function handleMarketplace(args: string[], flags: PluginCommandArgs["flags
 			}
 			try {
 				const entry = await manager.addMarketplace(source, { force: flags.force });
-				console.log(chalk.green(`${theme.status.success} Added marketplace: ${entry.name} (${source})`));
+				console.log(chalk.green(`${theme.status.success} Marketplace ${entry.name} now sources from ${source}`));
 			} catch (err) {
 				console.error(chalk.red(`${theme.status.error} Failed to add marketplace: ${err}`));
 				if (String(err).includes("already exists")) {
