@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.1.0] - 2026-09-01
+
 ### Added
 
 - Added GitLab Duo model support.

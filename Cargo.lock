@@ -288,9 +288,9 @@ dependencies = [
 
 [[package]]
 name = "astral-tl"
-version = "0.7.11"
+version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d90933ffb0f97e2fc2e0de21da9d3f20597b804012d199843a6fe7c2810d28f3"
+checksum = "04d4bb5df351abb6758a04240b0193794ddaf34a7c0b9452fab3c25dcce39e88"
 dependencies = [
  "memchr",
 ]
@@ -3117,9 +3117,9 @@ dependencies = [
 
 [[package]]
 name = "gix-path"
-version = "0.12.5"
+version = "0.12.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2b075e730586bba7341304d6fc1b4efc1d10cf64532622521c0e07f30e661046"
+checksum = "38fc6f029ea67de83cbcbd33fd98c05a48360d2932b39d9fdacbc6eae802d475"
 dependencies = [
  "bstr",
  "gix-trace",
@@ -3671,9 +3671,9 @@ checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
 name = "hermit-abi"
-version = "0.5.2"
+version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fc0fef456e4baa96da950455cd02c081ca953b141298e41db3fc7e36b1da849c"
+checksum = "e17592d60ebacc7d5e169f4663c5f84f9161cc90328abcfe8456f41e4dfcb284"
 
 [[package]]
 name = "hex"
@@ -3724,9 +3724,9 @@ checksum = "c9356095b4b41197bba32173600e1582792cda618f65d12f68e2e77d273413c5"
 
 [[package]]
 name = "html-to-markdown-rs"
-version = "3.11.6"
+version = "3.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c5fe2583aad3e87439e40d841fed327a60892bb9946da1e3a5788ee7f0f4fe3c"
+checksum = "9fd381d291246b2df83535a2f2896dc32633a4cb69a14861f29f9dc0c7fbab77"
 dependencies = [
  "ahash",
  "astral-tl",
@@ -6032,7 +6032,7 @@ dependencies = [
 
 [[package]]
 name = "pi-ast"
-version = "18.0.11"
+version = "18.1.0"
 dependencies = [
  "anyhow",
  "ast-grep-core",
@@ -6102,7 +6102,7 @@ dependencies = [
 
 [[package]]
 name = "pi-builtins"
-version = "18.0.11"
+version = "18.1.0"
 dependencies = [
  "ansi-width",
  "anyhow",
@@ -6189,7 +6189,7 @@ dependencies = [
 
 [[package]]
 name = "pi-iso"
-version = "18.0.11"
+version = "18.1.0"
 dependencies = [
  "async-trait",
  "libc",
@@ -6201,7 +6201,7 @@ dependencies = [
 
 [[package]]
 name = "pi-natives"
-version = "18.0.11"
+version = "18.1.0"
 dependencies = [
  "anyhow",
  "arboard",
@@ -6278,7 +6278,7 @@ dependencies = [
 
 [[package]]
 name = "pi-shell"
-version = "18.0.11"
+version = "18.1.0"
 dependencies = [
  "anyhow",
  "brush-core",
@@ -6306,7 +6306,7 @@ dependencies = [
 
 [[package]]
 name = "pi-vcs"
-version = "18.0.11"
+version = "18.1.0"
 dependencies = [
  "gix",
  "jj-lib",
@@ -6319,7 +6319,7 @@ dependencies = [
 
 [[package]]
 name = "pi-voice"
-version = "18.0.11"
+version = "18.1.0"
 dependencies = [
  "audiopus_sys",
  "bytes",
@@ -6334,7 +6334,7 @@ dependencies = [
 
 [[package]]
 name = "pi-walker"
-version = "18.0.11"
+version = "18.1.0"
 dependencies = [
  "dashmap",
  "globset",

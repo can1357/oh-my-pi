@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.1.0] - 2026-09-01
+
 ### Added
 
 - Added an optional `completeSimple` callback that observes every result, including results from internal thinking-loop retries.
