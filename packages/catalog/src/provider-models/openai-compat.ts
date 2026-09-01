@@ -928,9 +928,16 @@ function getEuropeanGatewayToolCapability(entry: OpenAICompatibleModelRecord): b
 	if (entry.supports_tools === false || entry.supports_function_calling === false) {
 		return false;
 	}
+	const tags = toStringArray(entry.tags);
+	if (tags.some(tag => EUROPEAN_GATEWAY_TOOL_CAPABILITY_TOKENS.has(tag.trim().toLowerCase()))) {
+		return true;
+	}
 	const capabilityTokens: string[] = [];
 	let hasCapabilitySignal = false;
 	for (const field of EUROPEAN_GATEWAY_TOOL_CAPABILITY_FIELDS) {
+		if (field === "tags") {
+			continue;
+		}
 		const value = entry[field];
 		if (!Array.isArray(value)) {
 			continue;
