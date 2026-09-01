@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- FriendliAI is now available as a model provider, preconfigured with its serverless flagship `zai-org/GLM-5.3`
+
 ### Added
 
 - Added GitLab Duo model support.

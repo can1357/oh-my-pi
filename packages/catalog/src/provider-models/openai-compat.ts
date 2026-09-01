@@ -1123,6 +1123,48 @@ export function gmiCloudModelManagerOptions(
 }
 
 // ---------------------------------------------------------------------------
+// 1c. FriendliAI
+// ---------------------------------------------------------------------------
+
+/**
+ * Bundled seed for FriendliAI's serverless endpoint. Friendli has no catalog
+ * discovery (no `catalogDiscovery` on the descriptor), so generation never
+ * fetches its credential-scoped `/v1/models`: the seed is the provider's
+ * entire bundled surface and the descriptor's `defaultModel` must resolve
+ * synchronously at boot. Tariff and limits carry Friendli's published
+ * serverless prices for the flagship GLM-5.3 SKU (input $1.4/M, output
+ * $4.4/M, cache-read $0.26/M, 1M-token context window). No `thinking` block:
+ * identity classification (`isGlm53ReasoningEffortModelId`) derives the
+ * wire-exact low/high/max ladder with a `max` default.
+ */
+export const FRIENDLI_STATIC_MODELS: readonly ModelSpec<"openai-completions">[] = [
+	{
+		id: "zai-org/GLM-5.3",
+		name: "GLM-5.3",
+		api: "openai-completions",
+		provider: "friendli",
+		baseUrl: "https://api.friendli.ai/serverless/v1",
+		reasoning: true,
+		input: ["text"],
+		cost: { input: 1.4, output: 4.4, cacheRead: 0.26, cacheWrite: 0 },
+		contextWindow: 1_048_576,
+		maxTokens: 1_048_576,
+	},
+];
+
+/**
+ * FriendliAI model manager. The bundled seed is the provider's whole catalog
+ * (no discovery, no models.dev fallback), so resolution serves it verbatim as
+ * `source: "bundled"`; auth headers are assembled by the stream layer from the
+ * `FRIENDLI_API_KEY` credential.
+ */
+export function friendliModelManagerOptions(_config?: ModelManagerConfig): ModelManagerOptions<"openai-completions"> {
+	return {
+		providerId: "friendli",
+	};
+}
+
+// ---------------------------------------------------------------------------
 // 2. Groq
 // ---------------------------------------------------------------------------
 
@@ -6927,6 +6969,8 @@ const MODELS_DEV_PROVIDER_DESCRIPTORS_SPECIALIZED: readonly ModelsDevProviderDes
 	// --- MiniMax (Anthropic) ---
 	anthropicMessagesDescriptor("minimax", "minimax", "https://api.minimax.io/anthropic"),
 	anthropicMessagesDescriptor("minimax-cn", "minimax-cn", "https://api.minimaxi.com/anthropic"),
+	// --- FriendliAI ---
+	openAiCompletionsDescriptor("friendli", "friendli", "https://api.friendli.ai/serverless/v1"),
 	// --- Hugging Face ---
 	openAiCompletionsDescriptor("huggingface", "huggingface", "https://router.huggingface.co/v1"),
 	// --- Kilo Gateway ---

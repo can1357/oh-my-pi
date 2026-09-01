@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Added FriendliAI API-key login support.
+
 ### Added
 
 - Added an optional `completeSimple` callback that observes every result, including results from internal thinking-loop retries.
