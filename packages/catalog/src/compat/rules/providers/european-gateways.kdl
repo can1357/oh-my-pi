@@ -133,3 +133,28 @@ provider "ovhcloud" {
 		supports-tools-fallback #true
 	}
 }
+
+// Grok reasoning revisions are a reviewed gateway fallback. Keep this
+// deployment-specific capability in the compatibility policy so new gateway
+// mappings do not require a second TypeScript revision table.
+class "xai" {
+	on "aki-io" "melious" "nebius" "cortecs" "eurouter" "scaleway" "opper" "ovhcloud" {
+		family "grok" {
+			revision "=3" {
+				reasoning-fallback #true
+			}
+			revision "=4.3" {
+				reasoning-fallback #true
+			}
+			revision "=4.5" {
+				reasoning-fallback #true
+			}
+			revision "=4.6" {
+				reasoning-fallback #true
+			}
+			revision "=4.20" {
+				reasoning-fallback #true
+			}
+		}
+	}
+}

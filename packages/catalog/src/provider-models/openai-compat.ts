@@ -875,7 +875,6 @@ function hasOnlyNonTextOutput(entry: OpenAICompatibleModelRecord): boolean {
 	);
 }
 
-const EUROPEAN_GATEWAY_GROK_REASONING_REVISIONS = new Set(["3.0.0", "4.3.0", "4.5.0", "4.6.0", "4.20.0"]);
 const EUROPEAN_GATEWAY_TOOL_CAPABILITY_TOKENS = new Set([
 	"function-call",
 	"function-calling",
@@ -914,9 +913,6 @@ function hasEuropeanGatewayReasoningIdentity(model: ModelSpec<Api>): boolean {
 	return (
 		identity.class === "gpt-oss" ||
 		isGlmReasoningIdentity("", model.id, "4.5") ||
-		(identity.class === "xai" &&
-			identity.family === "grok" &&
-			EUROPEAN_GATEWAY_GROK_REASONING_REVISIONS.has(identity.revision ?? "")) ||
 		(identity.class === "deepseek" && (identity.family === "r1" || identity.family === "reasoner"))
 	);
 }

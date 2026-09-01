@@ -8008,6 +8008,126 @@
 				}
 			},
 			{
+				"source": "providers/european-gateways.kdl:143",
+				"class": "xai",
+				"providers": [
+					"aki-io",
+					"melious",
+					"nebius",
+					"cortecs",
+					"eurouter",
+					"scaleway",
+					"opper",
+					"ovhcloud"
+				],
+				"family": "grok",
+				"revision": [
+					{
+						"op": "=",
+						"revision": "3.0.0"
+					}
+				],
+				"catalog": {
+					"reasoningFallback": true
+				}
+			},
+			{
+				"source": "providers/european-gateways.kdl:146",
+				"class": "xai",
+				"providers": [
+					"aki-io",
+					"melious",
+					"nebius",
+					"cortecs",
+					"eurouter",
+					"scaleway",
+					"opper",
+					"ovhcloud"
+				],
+				"family": "grok",
+				"revision": [
+					{
+						"op": "=",
+						"revision": "4.3.0"
+					}
+				],
+				"catalog": {
+					"reasoningFallback": true
+				}
+			},
+			{
+				"source": "providers/european-gateways.kdl:149",
+				"class": "xai",
+				"providers": [
+					"aki-io",
+					"melious",
+					"nebius",
+					"cortecs",
+					"eurouter",
+					"scaleway",
+					"opper",
+					"ovhcloud"
+				],
+				"family": "grok",
+				"revision": [
+					{
+						"op": "=",
+						"revision": "4.5.0"
+					}
+				],
+				"catalog": {
+					"reasoningFallback": true
+				}
+			},
+			{
+				"source": "providers/european-gateways.kdl:152",
+				"class": "xai",
+				"providers": [
+					"aki-io",
+					"melious",
+					"nebius",
+					"cortecs",
+					"eurouter",
+					"scaleway",
+					"opper",
+					"ovhcloud"
+				],
+				"family": "grok",
+				"revision": [
+					{
+						"op": "=",
+						"revision": "4.6.0"
+					}
+				],
+				"catalog": {
+					"reasoningFallback": true
+				}
+			},
+			{
+				"source": "providers/european-gateways.kdl:155",
+				"class": "xai",
+				"providers": [
+					"aki-io",
+					"melious",
+					"nebius",
+					"cortecs",
+					"eurouter",
+					"scaleway",
+					"opper",
+					"ovhcloud"
+				],
+				"family": "grok",
+				"revision": [
+					{
+						"op": "=",
+						"revision": "4.20.0"
+					}
+				],
+				"catalog": {
+					"reasoningFallback": true
+				}
+			},
+			{
 				"source": "providers/firepass.kdl:11",
 				"providers": [
 					"firepass"

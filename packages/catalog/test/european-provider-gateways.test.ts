@@ -4,6 +4,7 @@ import * as path from "node:path";
 import { getEnvApiKey } from "@oh-my-pi/pi-ai/stream";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { isExcludedModel } from "@oh-my-pi/pi-catalog/compat/behavior";
+import { resolveModelPolicy } from "@oh-my-pi/pi-catalog/compat/resolve";
 import { createModelManager } from "@oh-my-pi/pi-catalog/model-manager";
 import { getBundledModels } from "@oh-my-pi/pi-catalog/models";
 import { DEFAULT_MODEL_PER_PROVIDER, PROVIDER_DESCRIPTORS } from "@oh-my-pi/pi-catalog/provider-models/descriptors";
@@ -149,6 +150,30 @@ describe("European gateway provider catalog support", () => {
 		expect(isExcludedModel("eurouter", "Flux 1.1 Pro")).toBe(true);
 		expect(isExcludedModel("cortecs", "qwen3guard-gen-8b")).toBe(true);
 		expect(isExcludedModel("nebius", "Qwen/Qwen3-235B-A22B-Instruct-2507")).toBe(false);
+	});
+
+	test("resolves Grok gateway reasoning revisions from KDL policy", () => {
+		const europeanProviders = providerCases.map(provider => provider.id);
+		const reasoningModelIds = ["grok-3", "grok-4.3", "grok-4.5", "grok-4.6", "grok-4.20"];
+		const spec = (provider: string, id: string): ModelSpec<"openai-completions"> => ({
+			id,
+			name: id,
+			api: "openai-completions",
+			provider,
+			baseUrl: "https://gateway.example/v1",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: null,
+			maxTokens: null,
+		});
+
+		for (const provider of europeanProviders) {
+			for (const id of reasoningModelIds) {
+				expect(resolveModelPolicy(spec(provider, id)).catalog.reasoningFallback).toBe(true);
+			}
+			expect(resolveModelPolicy(spec(provider, "grok-4.2")).catalog.reasoningFallback).not.toBe(true);
+		}
 	});
 
 	for (const provider of providerCases) {
