@@ -82,6 +82,7 @@ export interface AuthGatewayParsedRequestOptions {
 	promptCacheKey?: string;
 	/** OpenAI Responses `previous_response_id` for response chaining. */
 	previousResponseId?: string;
+	store?: boolean;
 	/** OpenAI / abuse-tracking `user` field. */
 	user?: string;
 
