@@ -4423,27 +4423,13 @@ export class AuthStorage {
 	 * how fast the window's remaining quota must be consumed to fully use it
 	 * before it resets and expires. Higher = more headroom at risk of expiring
 	 * unused = ranked first, so selection chases quota that is about to be
-	 * wasted ("use it or lose it").
-	 *
-	 * A window that still has headroom but reports no reset clock has not
-	 * started this period: providers only publish `resetsAt` once the window is
-	 * running. That is the MOST urgent case, not the least. An untouched
-	 * account strands its whole subscription allowance when the period rolls
-	 * over, while a running sibling that gets drained past its cap overflows
-	 * into paid overage. Scoring the clockless case as "a full window remains"
-	 * inverted that: fresh accounts sorted last (headroom/durationHours is the
-	 * smallest score any account can have) and never received traffic until
-	 * every started sibling was hot or blocked.
-	 *
-	 * A limit the report never carried is a different case: `headroom` there is
-	 * the 0.5 unknown-usage placeholder, not observed capacity, so it keeps the
-	 * conservative "a full window remains" score instead of jumping the queue.
+	 * wasted ("use it or lose it"). Without a reset clock, the full window
+	 * duration is assumed to remain so clocked and clockless scores stay comparable.
 	 */
 	#computeWindowRequiredDrain(limit: UsageLimit | undefined, nowMs: number, fallbackDurationMs: number): number {
 		const headroom = 1 - this.#normalizeUsageFraction(limit);
 		if (headroom <= 0) return 0;
 		const resetAt = this.#resolveWindowResetAt(limit?.window);
-		if (resetAt === undefined && limit !== undefined) return Number.POSITIVE_INFINITY;
 		const durationMs = limit?.window?.durationMs ?? fallbackDurationMs;
 		let remainingMs = resetAt === undefined ? durationMs : resetAt - nowMs;
 		if (Number.isFinite(durationMs) && durationMs > 0) {

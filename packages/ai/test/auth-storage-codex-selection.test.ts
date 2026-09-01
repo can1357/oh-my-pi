@@ -2860,14 +2860,7 @@ describe("AuthStorage claude oauth ranking", () => {
 		expectExclusivePreference(counts, "api-acct-near", "api-acct-far");
 	});
 
-	// Anthropic publishes `resetsAt` only once a weekly window is running, so a
-	// seat nobody has touched this period reports 0% used and no clock. It must
-	// be started before a running sibling is drained further: idle weekly quota
-	// strands at the period roll-over, while draining a running seat past its
-	// cap spills into paid extra usage. Ranking clockless windows as "a full
-	// window remains" made fresh seats the lowest-urgency candidate in the pool
-	// and starved them until every sibling was hot or blocked.
-	test("starts an unstarted weekly window before draining a clocked sibling", async () => {
+	test("assumes the full duration remains when ranking clockless windows", async () => {
 		if (!authStorage) throw new Error("test setup failed");
 
 		await authStorage.set("anthropic", [
@@ -2893,55 +2886,7 @@ describe("AuthStorage claude oauth ranking", () => {
 		);
 
 		const apiKey = await authStorage.getApiKey("anthropic", "session-claude-clockless");
-		expect(apiKey).toBe("api-acct-clockless");
-	});
-
-	// Regression guard for the live 4-seat pool: the two mid-week seats
-	// (22%/40% and 14%/26% used) must not outrank the two untouched ones, and
-	// the Fable tier row must follow the same rule as the shared weekly row.
-	test("prefers untouched seats over both mid-week seats for opus and fable", async () => {
-		if (!authStorage) throw new Error("test setup failed");
-
-		await authStorage.set("anthropic", [
-			{ type: "oauth", ...createCredential("acct-hot", "hot@example.com") },
-			{ type: "oauth", ...createCredential("acct-warm", "warm@example.com") },
-			{ type: "oauth", ...createCredential("acct-fresh", "fresh@example.com") },
-		]);
-
-		usageByAccount.set(
-			"acct-hot",
-			createClaudeUsageReport({
-				accountId: "acct-hot",
-				primary: { usedFraction: 0.11, resetInMs: 4 * HOUR_MS },
-				secondary: { usedFraction: 0.22, resetInMs: 58 * HOUR_MS },
-				fableSecondary: { usedFraction: 0.4, resetInMs: 58 * HOUR_MS },
-			}),
-		);
-		usageByAccount.set(
-			"acct-warm",
-			createClaudeUsageReport({
-				accountId: "acct-warm",
-				primary: { usedFraction: 0 },
-				secondary: { usedFraction: 0.14, resetInMs: 80 * HOUR_MS },
-				fableSecondary: { usedFraction: 0.26, resetInMs: 80 * HOUR_MS },
-			}),
-		);
-		usageByAccount.set(
-			"acct-fresh",
-			createClaudeUsageReport({
-				accountId: "acct-fresh",
-				primary: { usedFraction: 0 },
-				secondary: { usedFraction: 0 },
-				fableSecondary: { usedFraction: 0 },
-			}),
-		);
-
-		expect(await authStorage.getApiKey("anthropic", "session-pool-opus", { modelId: "claude-opus-5" })).toBe(
-			"api-acct-fresh",
-		);
-		expect(await authStorage.getApiKey("anthropic", "session-pool-fable", { modelId: "claude-fable-5" })).toBe(
-			"api-acct-fresh",
-		);
+		expect(apiKey).toBe("api-acct-clocked");
 	});
 
 	test("does not rank a missing weekly window as the account's 5h window", async () => {
