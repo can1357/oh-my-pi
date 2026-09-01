@@ -51,6 +51,11 @@ export interface UsageScope {
 	projectId?: string;
 	orgId?: string;
 	modelId?: string;
+	/**
+	 * Model family token (e.g. "claude", "gemini"). Distinct from `modelId`,
+	 * which identifies a specific model rather than the family it belongs to.
+	 */
+	modelFamily?: string;
 	tier?: string;
 	windowId?: string;
 	shared?: boolean;
