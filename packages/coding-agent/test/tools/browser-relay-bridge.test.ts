@@ -4188,6 +4188,93 @@ describe("RelayBridge tab grouping", () => {
 		expect(ext3.rpcs("send").some((rpc) => rpc.tabId === 1)).toBe(true);
 	});
 
+	it("clears refresh authorization after a recovery reattach so a later user detach is honored", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })], { attachedTabIds: [1] });
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		const pageSession = await attachPage(bridge, ext, cdp, connId, 1);
+
+		// Arm forceFreshRootBeforeReplay via an interrupted initial preload add.
+		const addId = ++msgSeq;
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({
+				id: addId,
+				sessionId: pageSession,
+				method: "Page.addScriptToEvaluateOnNewDocument",
+				params: { source: "window.__relayInjected = true;" },
+			}),
+		);
+		await waitFor(
+			() =>
+				ext
+					.rpcs("send")
+					.some((rpc) => rpc.method === "Page.addScriptToEvaluateOnNewDocument"),
+			"initial preload registration RPC",
+		);
+		bridge.extClosed(ext);
+		await flush();
+
+		// First reconnect drives the forced fresh-root detach in flight, then the
+		// socket dies before its result returns (dropping the tab from
+		// recoverableTabIds on the extension while refreshDetachInFlight stays set).
+		const ext2 = new FakeExtSocket();
+		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], {
+			attachedTabIds: [1],
+			recoverableTabIds: [1],
+		});
+		await waitFor(
+			() => ext2.rpcs("detach").length === 1,
+			"forced fresh-root detach in flight",
+		);
+		bridge.extClosed(ext2);
+		await flush();
+
+		// Replacement hello reports the tab unattached + non-recoverable, so recovery
+		// reattaches under the still-live refresh authorization. This settling must
+		// clear refreshDetachInFlight.
+		const ext3 = new FakeExtSocket();
+		connect(bridge, ext3, [tab({ tabId: 1, groupId: -1 })], {
+			attachedTabIds: [],
+			recoverableTabIds: [],
+		});
+		await waitFor(
+			() => ext3.rpcs("attach").length === 1,
+			"recovery reattach after forced-root detach lost its socket",
+		);
+		ack(bridge, ext3, "attach");
+		await flush();
+
+		// Now the socket drops again and the user clicks Cancel (or DevTools takes
+		// over) while it is down, so the next hello omits the tab from
+		// recoverableTabIds. With the stale authorization cleared, this is a genuine
+		// user detach and must be honored — not reattached against the user's intent.
+		bridge.extClosed(ext3);
+		await flush();
+		const ext4 = new FakeExtSocket();
+		connect(bridge, ext4, [tab({ tabId: 1, groupId: -1 })], {
+			attachedTabIds: [],
+			recoverableTabIds: [],
+		});
+		await flush();
+
+		expect(ext4.rpcs("attach")).toHaveLength(0);
+		const cmdId = ++msgSeq;
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({
+				id: cmdId,
+				sessionId: pageSession,
+				method: "Runtime.evaluate",
+			}),
+		);
+		await flush();
+		const reply2 = cdp.messages.find((m) => m.id === cmdId);
+		expect(reply2?.error).toBeDefined();
+	});
+
 	it("honors a user detach that arrives while only a fresh-root replay is pending", async () => {
 		const bridge = new RelayBridge({});
 		const ext = new FakeExtSocket();

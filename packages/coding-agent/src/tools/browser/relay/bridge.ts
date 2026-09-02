@@ -3093,7 +3093,20 @@ export class RelayBridge {
 		tab: TabState,
 		expectedExt: RelaySocket | null,
 	): Promise<boolean> {
-		if (!tab.attached) return await this.#ensureAttached(tab);
+		if (!tab.attached) {
+			// A prior forced-root detach may have committed on the extension but lost
+			// its RPC result to a socket drop, leaving `refreshDetachInFlight` set
+			// while the replacement hello reports the tab unattached. The detach we
+			// were authorizing has already been observed (the tab is gone), so once
+			// this recovery attach settles the authorization is spent: leaving the
+			// flag set would misclassify a later genuine user Cancel / DevTools
+			// takeover as that stale relay-initiated detach and reattach against the
+			// user's intent. Clear it only on a successful reattach so a failed
+			// attempt still retries under the same authorization.
+			const attached = await this.#ensureAttached(tab);
+			if (attached) tab.refreshDetachInFlight = false;
+			return attached;
+		}
 		while (tab.detaching) await tab.detaching;
 		const staleRealSessions = [...tab.realSessions];
 		for (const realSession of staleRealSessions)
