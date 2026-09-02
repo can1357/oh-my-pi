@@ -4,6 +4,7 @@ import {
 	extensionOwnedAttachedTabIds,
 	filterFreshAttachmentState,
 	noteAttachmentStateChange,
+	requireRecoveryStateLoaded,
 	restoreRecoverableState,
 	serializeRecoverableStateUpdate,
 	shouldRetrackAfterDetachFailure,
@@ -111,5 +112,12 @@ describe("attachment-state", () => {
 				new Set([1, 3]),
 			),
 		).toEqual([1]);
+	});
+
+	it("rejects an unknown startup recovery state instead of treating it as empty", () => {
+		expect(() => requireRecoveryStateLoaded(false)).toThrow(
+			"browser relay recovery state failed to load",
+		);
+		expect(() => requireRecoveryStateLoaded(true)).not.toThrow();
 	});
 });

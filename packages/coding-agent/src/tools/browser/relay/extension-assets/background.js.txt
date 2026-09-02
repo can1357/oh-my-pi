@@ -84,6 +84,10 @@ function restoreRecoverableState(target, storedIds, mutatedTabIds) {
 function extensionOwnedAttachedTabIds(targets, recoverableTabIds) {
   return targets.filter((target) => target.attached && target.tabId !== undefined && recoverableTabIds.has(target.tabId)).map((target) => target.tabId);
 }
+function requireRecoveryStateLoaded(loaded) {
+  if (!loaded)
+    throw new Error("browser relay recovery state failed to load");
+}
 function snapshotAttachmentState(epochs, tabIds) {
   const snapshot = new Map;
   for (const tabId of tabIds)
@@ -185,9 +189,10 @@ var recoverableReady = chrome.storage.session.get({
   const deadline = restoreOrphanSweepDeadline(stored[ORPHAN_SWEEP_DEADLINE_KEY], orphanSweepDeadlineGeneration === 0);
   if (deadline !== undefined)
     orphanSweepDeadlineMs = deadline;
-}).catch(() => {});
-var recoverableUpdates = recoverableReady;
-var orphanSweepDeadlineUpdates = recoverableReady;
+  return true;
+}).catch(() => false);
+var recoverableUpdates = recoverableReady.then(() => {});
+var orphanSweepDeadlineUpdates = recoverableReady.then(() => {});
 function trackPendingDetach(promise) {
   pendingOperationGeneration++;
   invalidateHelloRefresh();
@@ -253,6 +258,7 @@ async function setOrphanSweepDeadline(deadlineMs) {
   await orphanSweepDeadlineUpdates;
 }
 async function maybeScheduleOrphanSweep(forceDisconnected = false) {
+  requireRecoveryStateLoaded(await recoverableReady);
   await recoverableUpdates;
   const nextDeadlineMs = computeNextOrphanSweepDeadline(forceDisconnected);
   if (nextDeadlineMs !== orphanSweepDeadlineMs)
@@ -617,7 +623,8 @@ function scheduleReconnect() {
   setTimeout(() => void connect(), delay);
 }
 async function reconcileOrphans() {
-  await recoverableReady;
+  if (!await recoverableReady)
+    return;
   const attachmentState = snapshotAttachmentState(attachmentStateEpochs, [
     ...attachmentStateEpochs.keys()
   ]);

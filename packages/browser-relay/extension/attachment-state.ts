@@ -60,6 +60,10 @@ export function extensionOwnedAttachedTabIds(
 		.map((target) => target.tabId as number);
 }
 
+export function requireRecoveryStateLoaded(loaded: boolean): void {
+	if (!loaded) throw new Error("browser relay recovery state failed to load");
+}
+
 export function snapshotAttachmentState(epochs: Map<number, number>, tabIds: number[]): Map<number, number> {
 	const snapshot = new Map<number, number>();
 	for (const tabId of tabIds) snapshot.set(tabId, epochs.get(tabId) ?? 0);

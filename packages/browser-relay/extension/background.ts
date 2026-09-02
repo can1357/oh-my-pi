@@ -20,6 +20,7 @@ import {
 	extensionOwnedAttachedTabIds,
 	filterFreshAttachmentState,
 	noteAttachmentStateChange,
+	requireRecoveryStateLoaded,
 	restoreRecoverableState,
 	serializeRecoverableStateUpdate,
 	shouldRetrackAfterDetachFailure,
@@ -110,10 +111,11 @@ const recoverableReady = chrome.storage.session
 			orphanSweepDeadlineGeneration === 0,
 		);
 		if (deadline !== undefined) orphanSweepDeadlineMs = deadline;
+		return true;
 	})
-	.catch(() => {});
-let recoverableUpdates: Promise<void> = recoverableReady;
-let orphanSweepDeadlineUpdates: Promise<void> = recoverableReady;
+	.catch(() => false);
+let recoverableUpdates: Promise<void> = recoverableReady.then(() => {});
+let orphanSweepDeadlineUpdates: Promise<void> = recoverableReady.then(() => {});
 
 function trackPendingDetach<T>(promise: Promise<T>): Promise<T> {
 	pendingOperationGeneration++;
@@ -218,6 +220,7 @@ async function setOrphanSweepDeadline(
 async function maybeScheduleOrphanSweep(
 	forceDisconnected = false,
 ): Promise<void> {
+	requireRecoveryStateLoaded(await recoverableReady);
 	await recoverableUpdates;
 	const nextDeadlineMs = computeNextOrphanSweepDeadline(forceDisconnected);
 	if (nextDeadlineMs !== orphanSweepDeadlineMs)
@@ -833,7 +836,7 @@ function scheduleReconnect(): void {
 async function reconcileOrphans(): Promise<void> {
 	// Ownership is persisted across MV3 worker restarts. Load it before filtering
 	// getTargets so startup cannot discard a surviving extension attachment.
-	await recoverableReady;
+	if (!(await recoverableReady)) return;
 	// Snapshot every known epoch before awaiting getTargets so a detach that
 	// lands during the await bumps the epoch past this baseline and is filtered
 	// out of the re-track. The attached tab set is only known after getTargets,
