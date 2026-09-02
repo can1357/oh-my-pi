@@ -102,25 +102,52 @@ describe("family policy", () => {
 		).toThrow(/duplicate resolved model family/);
 	});
 
-	test("an independent role can opt out of distinctness", () => {
-		const role = independent([{ model: "openai/gpt-5.4" }, { model: "openai/gpt-5-mini" }], {
-			distinctFamilies: false,
-		});
-
-		const lineup = resolvePanelLineup({ context: context([gpt, gptMini]), roleId: "r", role, taskMode: "answer" });
-
-		expect(lineup.members).toHaveLength(2);
+	test("an independent role cannot switch distinctness off", () => {
+		expect(() =>
+			parsePanelSettings({
+				roles: {
+					loosened: {
+						strategy: "independent",
+						members: [{ model: "openai/gpt-5.4" }, { model: "openai/gpt-5-mini" }],
+						distinctFamilies: false,
+					},
+				},
+				personas: {},
+			}),
+		).toThrow(/cannot be false for an independent role/);
 	});
 
-	test("a minFamilies floor fails a lineup that collapses onto one family", () => {
-		const role = independent([{ model: "openai/gpt-5.4" }, { model: "openai/gpt-5-mini" }], {
-			distinctFamilies: false,
+	test("a personas role with a floor fails when its lineup collapses onto one family", () => {
+		const role: PanelRole = {
+			strategy: "personas",
+			members: [
+				{ model: "openai/gpt-5.4", persona: "analyst" },
+				{ model: "openai/gpt-5-mini", persona: "reviewer" },
+			],
 			minFamilies: 2,
-		});
+		};
 
 		expect(() =>
 			resolvePanelLineup({ context: context([gpt, gptMini]), roleId: "r", role, taskMode: "answer" }),
 		).toThrow(/resolved 1 distinct model families, need 2/);
+	});
+
+	test("a one-seat lineup resolves an unclassified model, claiming no diversity", () => {
+		const opaque = { ...gpt, identity: { ...gpt.identity, class: "unknown" as const } };
+		const role = independent([{ model: "openai/gpt-5.4" }]);
+
+		const lineup = resolvePanelLineup({ context: context([opaque]), roleId: "r", role, taskMode: "answer" });
+
+		expect(lineup.members[0]?.family).toBe("");
+	});
+
+	test("a multi-seat lineup still fails closed on an unclassified model", () => {
+		const opaque = { ...gptMini, identity: { ...gptMini.identity, class: "unknown" as const } };
+		const role = independent([{ model: "anthropic/claude-sonnet-4-5" }, { model: "openai/gpt-5-mini" }]);
+
+		expect(() =>
+			resolvePanelLineup({ context: context([claude, opaque]), roleId: "r", role, taskMode: "answer" }),
+		).toThrow(/no known model family/);
 	});
 
 	test("a personas role can require distinct families", () => {
