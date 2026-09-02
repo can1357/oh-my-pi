@@ -3578,18 +3578,25 @@ export class RelayBridge {
 					loaderAfterRegistration !== undefined &&
 					loaderAfterRegistration !== currentLoaderId
 				) {
-					await this.#rpc({
-						op: "send",
-						tabId: tab.tabId,
-						method: "Page.removeScriptToEvaluateOnNewDocument",
-						params: { identifier: rootIdentifier },
-					});
-					const retry = (await this.#rpc({
-						op: "send",
-						tabId: tab.tabId,
-						method: "Page.addScriptToEvaluateOnNewDocument",
-						params: { ...script.params, runImmediately: true },
-					})) as Record<string, unknown> | undefined;
+					let retry: Record<string, unknown> | undefined;
+					try {
+						await this.#rpc({
+							op: "send",
+							tabId: tab.tabId,
+							method: "Page.removeScriptToEvaluateOnNewDocument",
+							params: { identifier: rootIdentifier },
+						});
+						retry = (await this.#rpc({
+							op: "send",
+							tabId: tab.tabId,
+							method: "Page.addScriptToEvaluateOnNewDocument",
+							params: { ...script.params, runImmediately: true },
+						})) as Record<string, unknown> | undefined;
+					} catch (err) {
+						if (isExtensionTransportInterrupted(err))
+							tab.forceFreshRootBeforeReplay = true;
+						throw err;
+					}
 					if (typeof retry?.identifier !== "string")
 						throw new Error(
 							"Page.addScriptToEvaluateOnNewDocument replay did not return an identifier",
