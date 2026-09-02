@@ -80,6 +80,7 @@ env:
 
 permissions:
    contents: read
+   pull-requests: read
 
 jobs:
    # scripts/release.ts pushes the version-bump commit and its `v*` tag
@@ -209,23 +210,54 @@ jobs:
          - name: Rustfmt
            run: bazelisk --bazelrc="${{ steps.cache.outputs.rc }}" build --config=rustfmt //crates/...
 
-   # Provides the native addons every downstream TS job installs. PRs never
-   # build: they fetch the latest release's Linux x64 pair from the
+   # The workflow path filter decides whether CI starts at all. This detector
+   # decides whether a PR may reuse a published Linux addon: native build inputs
+   # and the atomic local-write caller chain fail closed to a fresh candidate build.
+   native_changes:
+      name: Detect native and atomic-caller changes
+      runs-on: ubuntu-22.04
+      outputs:
+         native-touched: ${{ steps.detect.outputs.native-touched }}
+      steps:
+         - id: detect
+           name: Classify native/caller diff
+           shell: bash
+           env:
+              GH_TOKEN: ${{ github.token }}
+           run: |
+              set -euo pipefail
+              native_touched=true
+              if [ "${{ github.event_name }}" = "pull_request" ]; then
+                if changed_files="$(gh pr diff ${{ github.event.pull_request.number }} --name-only --repo "$GITHUB_REPOSITORY" 2>/dev/null)"; then
+                  native_touched=false
+                  if printf '%s\n' "$changed_files" | grep -qE '^(crates/|packages/natives/|packages/coding-agent/(package\.json|src/(tools/write|internal-urls/local-protocol)\.ts|test/(write[^/]*|internal-urls/local-protocol[^/]*)\.test\.ts)|scripts/(bazel-natives|host-detect)\.ts$|bazel/|\.cargo/|Cargo\.(toml|lock)$|MODULE\.bazel(\.lock)?$|BUILD\.bazel$|\.bazel(rc|ignore|version)$|rust-toolchain\.toml$|rustfmt\.toml$|\.github/(workflows/ci\.yml|actions/(bazel-cache|bazel-natives|native-artifacts)/))'; then
+                    native_touched=true
+                  fi
+                else
+                  echo "::warning title=Native diff unavailable::Building fresh candidate addons rather than using a published leaf."
+                fi
+              fi
+              echo "native-touched=$native_touched" >> "$GITHUB_OUTPUT"
+              echo "Native candidate build required: $native_touched"
+
+   # Provides the native addons every downstream TS job installs. Native/caller PRs
+   # build fresh candidate Linux x64 artifacts; ordinary PRs fetch the latest release's
    # @oh-my-pi/pi-natives-linux-x64 npm leaf instead. The workspace loader
    # skips its version sentinel for workspace loads, so release addons load
-   # fine under a newer checkout; a PR whose TS tests depend on changed
-   # native behavior fails visibly and the native side lands via main.
+   # fine under a newer checkout; fresh artifacts reach every downstream shard.
+   # Cross-platform hosts execute their own fresh addon before merge.
    # Main (kata, cluster remote cache) builds all Linux-hosted targets with
    # bazel. Job name says "bazel" for continuity with required checks.
    native_addons:
       name: Build native addons (bazel)
       runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-22.04' || 'omp-kata' }}
+      needs: [native_changes]
       steps:
          - uses: actions/checkout@v4
 
          # ---- PR path: latest release addons from npm ----
          - name: Fetch release native addons (npm)
-           if: github.event_name == 'pull_request'
+           if: ${{ github.event_name == 'pull_request' && needs.native_changes.outputs.native-touched != 'true' }}
            shell: bash
            run: |
               set -euo pipefail
@@ -238,7 +270,7 @@ jobs:
          # A corrupt download must fail here, not as a confusing dlopen error
          # in every downstream test shard.
          - name: Smoke release addons
-           if: github.event_name == 'pull_request'
+           if: ${{ github.event_name == 'pull_request' && needs.native_changes.outputs.native-touched != 'true' }}
            shell: bash
            run: |
               set -euo pipefail
@@ -259,28 +291,24 @@ jobs:
               "$loader" "$RUNNER_TEMP/smoke-addons.js" \
                 "$PWD/bazel-bin/natives-linux-x64-baseline/pi_natives.linux-x64-baseline.node" \
                 "$PWD/bazel-bin/natives-linux-x64-modern/pi_natives.linux-x64-modern.node"
-         # Make the policy visible on the rare native-touching PR instead of
-         # leaving a reviewer to wonder which addons the tests exercised.
-         # Best-effort: a diff-API failure must not fail the job over a notice.
-         - name: Note native changes tested against release addons
+         - name: Report native artifact source
            if: github.event_name == 'pull_request'
            shell: bash
-           env:
-              GH_TOKEN: ${{ github.token }}
            run: |
-              if gh pr diff ${{ github.event.pull_request.number }} --name-only 2>/dev/null \
-                 | grep -qE '^(crates/|bazel/|Cargo\.(toml|lock)|MODULE\.bazel(\.lock)?|BUILD\.bazel|\.bazelrc|\.bazelignore|\.bazelversion|rust-toolchain\.toml|rustfmt\.toml)'; then
-                echo "::notice title=Native sources changed::PR CI tests against the latest release addons by design; native changes are validated post-merge on main and at release."
+              if [ "${{ needs.native_changes.outputs.native-touched }}" = "true" ]; then
+                echo "::notice title=Fresh candidate native addons::Downstream TypeScript shards consume fresh Linux host artifacts from this PR."
+              else
+                echo "::notice title=Published native addons::No native/caller change was detected; downstream TypeScript shards retain the published-leaf fast path."
               fi
 
-         # ---- main path: bazel build of all Linux-hosted targets ----
+         # ---- candidate path: full Linux set on main/release; host pair on touched PRs ----
          - id: cache
-           if: github.event_name != 'pull_request'
+           if: github.event_name != 'pull_request' || needs.native_changes.outputs.native-touched == 'true'
            uses: ./.github/actions/bazel-cache
            with:
               scope: linux
-         - name: Build native addons once
-           if: github.event_name != 'pull_request'
+         - name: Build candidate native addons
+           if: github.event_name != 'pull_request' || needs.native_changes.outputs.native-touched == 'true'
            run: |
               set -eo pipefail
               if [ "$(ulimit -Sn)" != unlimited ] && [ "$(ulimit -Sn)" -lt 65536 ]; then ulimit -Sn 65536 || true; fi
@@ -294,21 +322,29 @@ jobs:
               # aggregate as a no-op (also catches targets added to the
               # filegroup but missing from this list).
               : > "$RUNNER_TEMP/bazel-build.log"
-              for target in \
-                natives-linux-arm64 \
-                natives-linux-musl-arm64 \
-                natives-linux-musl-x64-baseline \
-                natives-linux-x64-baseline \
-                natives-linux-x64-modern \
-                natives-win32-x64-baseline; do
+              if [ "${{ github.event_name }}" = "pull_request" ]; then
+                targets=(natives-linux-x64-baseline natives-linux-x64-modern)
+              else
+                targets=(
+                  natives-linux-arm64
+                  natives-linux-musl-arm64
+                  natives-linux-musl-x64-baseline
+                  natives-linux-x64-baseline
+                  natives-linux-x64-modern
+                  natives-win32-x64-baseline
+                )
+              fi
+              for target in "${targets[@]}"; do
                 bazelisk --bazelrc="${{ steps.cache.outputs.rc }}" build "//:$target" 2>&1 | tee -a "$RUNNER_TEMP/bazel-build.log"
               done
-              bazelisk --bazelrc="${{ steps.cache.outputs.rc }}" build //:natives-linux-all 2>&1 | tee -a "$RUNNER_TEMP/bazel-build.log"
+              if [ "${{ github.event_name }}" != "pull_request" ]; then
+                bazelisk --bazelrc="${{ steps.cache.outputs.rc }}" build //:natives-linux-all 2>&1 | tee -a "$RUNNER_TEMP/bazel-build.log"
+              fi
          # Cache-hit visibility: a supposedly warm build that executes
          # thousands of actions is the failure mode that made CI slow — make
          # it visible in the run summary instead of discovering it weeks in.
          - name: Report bazel cache stats
-           if: github.event_name != 'pull_request'
+           if: github.event_name != 'pull_request' || needs.native_changes.outputs.native-touched == 'true'
            shell: bash
            run: |
               # Bazel runs with --color=yes (config=ci); strip ANSI before
@@ -324,6 +360,28 @@ jobs:
               path: bazel-bin/natives-*/*.node
               if-no-files-found: error
               retention-days: 1
+
+   # Cross-built Windows artifacts do not prove the host loader or the native
+   # WriteTool boundary. Native/caller PRs compile and execute on each host.
+   native_host_integration:
+      name: Test atomic local write with fresh host addon (${{ matrix.label }})
+      if: ${{ github.event_name == 'pull_request' && !cancelled() && needs.native_changes.outputs.native-touched == 'true' }}
+      needs: [native_changes]
+      strategy:
+         fail-fast: false
+         matrix:
+            include:
+               - { label: macOS arm64, os: macos-14 }
+               - { label: Windows x64, os: windows-2022 }
+      runs-on: ${{ matrix.os }}
+      timeout-minutes: 40
+      steps:
+         - uses: actions/checkout@v4
+         - uses: ./.github/actions/bun-install
+         - name: Build fresh host native addon
+           run: bun run build:native
+         - name: Test atomic local-write paths
+           run: bun --cwd=packages/coding-agent run test:atomic-local-write
 
    test_workspace:
       name: Test TS workspace fast
@@ -816,16 +874,46 @@ jobs:
               generate_release_notes: true
 
    release_github_verify:
-      name: Verify published release (macOS)
-      if: ${{ needs.release_metadata.outputs.is-release == 'true' && !cancelled() &&
-         needs.release_github.result == 'success' }}
-      needs: [release_metadata, release_github]
+      name: Verify published release and native leaf (macOS)
+      if: ${{ always() && !cancelled() &&
+         needs.release_metadata.outputs.is-release == 'true' &&
+         needs.release_github.result == 'success' &&
+         (inputs.skip_npm || needs.release_native_leaves.result == 'success') }}
+      needs: [release_metadata, release_github, release_native_leaves]
       runs-on: macos-14
       permissions:
          contents: read
       env:
          MACOS_SIGNING: ${{ secrets.APPLE_CERTIFICATE_P12 != '' && secrets.APPLE_CERTIFICATE_PASSWORD != '' && secrets.APPLE_API_KEY_ID != '' && secrets.APPLE_API_ISSUER_ID != '' && secrets.APPLE_API_KEY != '' }}
       steps:
+         - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+           if: ${{ !inputs.skip_npm }}
+           with:
+              node-version: "24"
+              registry-url: "https://registry.npmjs.org"
+         # Native leaves publish before the core package. Load the exact
+         # published macOS artifact so a missing export cannot hide in workspace sources.
+         - name: Canary published native leaf addon
+           if: ${{ !inputs.skip_npm }}
+           env:
+              RELEASE_TAG: ${{ needs.release_metadata.outputs.release-tag }}
+           run: |
+              set -euo pipefail
+              work_dir="$(mktemp -d)"
+              trap 'rm -rf "$work_dir"' EXIT
+              cd "$work_dir"
+              version="${RELEASE_TAG#v}"
+              tarball="$(npm pack "@oh-my-pi/pi-natives-darwin-arm64@$version" --silent)"
+              test -f "$tarball"
+              tar -xzf "$tarball"
+              node - "$PWD/package/pi_natives.darwin-arm64.node" <<'EOF'
+              const addonPath = process.argv[2];
+              if (!addonPath) throw new Error("missing published native leaf path");
+              const addon = require(addonPath);
+              if (typeof addon.atomicLocalWrite !== "function") {
+                throw new Error(`published native leaf lacks atomicLocalWrite: ${addonPath}`);
+              }
+              EOF
          - name: Download published macOS arm64 binary
            run: |
               curl -fsSL -o omp-darwin-arm64 "https://github.com/${{ github.repository }}/releases/download/${{ needs.release_metadata.outputs.release-tag }}/omp-darwin-arm64"

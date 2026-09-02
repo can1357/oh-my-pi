@@ -1,7 +1,8 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { isEnoent } from "@oh-my-pi/pi-utils";
+import * as natives from "@oh-my-pi/pi-natives";
+import { isEnoent, isRecord } from "@oh-my-pi/pi-utils";
 import { AgentRegistry } from "../registry/agent-registry";
 import { isMarkdownPath } from "../utils/lang-from-path";
 import { buildDirectoryResource } from "./filesystem-resource";
@@ -13,9 +14,36 @@ export interface LocalProtocolOptions {
 	getArtifactsDir?: () => string | null;
 	getSessionId?: () => string | null;
 }
-
 function parseLocalUrl(input: string): InternalUrl {
 	return parseInternalUrl(input);
+}
+
+/** Stable native error data retained by the local:// atomic-write boundary. */
+export class AtomicLocalWriteError extends Error {
+	readonly code: string;
+	readonly commitState: string;
+
+	constructor({
+		code,
+		commitState,
+		message,
+	}: {
+		readonly code: string;
+		readonly commitState: string;
+		readonly message: string;
+	}) {
+		super(message);
+		this.name = "AtomicLocalWriteError";
+		this.code = code;
+		this.commitState = commitState;
+	}
+}
+
+export interface AtomicLocalWriteOutcome {
+	readonly absolutePath: string;
+	readonly bytesWritten: number;
+	readonly madeExecutable: boolean;
+	readonly commitState: "COMMITTED";
 }
 
 function ensureWithinRoot(targetPath: string, rootPath: string): void {
@@ -239,18 +267,14 @@ function extractRelativePath(url: InternalUrl): string {
 	return decoded;
 }
 
-/** Resolve the session-scoped local:// root, shortening long Windows artifact paths before writes hit MAX_PATH. */
+/** Resolve the session-scoped local:// root as an absolute path, shortening long Windows artifact paths before writes hit MAX_PATH. */
 export function resolveLocalRoot(options: LocalProtocolOptions, platform: NodeJS.Platform = process.platform): string {
 	const artifactsDir = options.getArtifactsDir?.();
-	if (artifactsDir) {
-		const candidate = path.resolve(artifactsDir, "local");
-		if (platform === "win32" && candidate.length >= WINDOWS_LOCAL_ROOT_MAX_CHARS) {
-			return shortLocalRoot(options);
-		}
-		return candidate;
+	const requestedRoot = artifactsDir ? path.resolve(artifactsDir, "local") : shortLocalRoot(options);
+	if (platform === "win32" && requestedRoot.length >= WINDOWS_LOCAL_ROOT_MAX_CHARS) {
+		return path.resolve(shortLocalRoot(options));
 	}
-
-	return path.join(os.tmpdir(), "omp-local", safeSessionId(options));
+	return path.resolve(requestedRoot);
 }
 
 /**
@@ -301,8 +325,8 @@ export function resolveLocalUrlToPath(
 	options: LocalProtocolOptions,
 	platform: NodeJS.Platform = process.platform,
 ): string {
-	const url = typeof input === "string" ? parseLocalUrl(input) : input;
-	const localRoot = path.resolve(resolveLocalRoot(options, platform));
+	const url = typeof input === "string" ? parseInternalUrl(input) : input;
+	const localRoot = resolveLocalRoot(options, platform);
 	const relativePath = extractRelativePath(url);
 
 	if (!relativePath) {
@@ -312,6 +336,226 @@ export function resolveLocalUrlToPath(
 	const resolved = path.resolve(localRoot, relativePath);
 	ensureWithinRoot(resolved, localRoot);
 	return resolved;
+}
+
+interface ParsedAtomicLocalTarget {
+	readonly absoluteRoot: string;
+	readonly absolutePath: string;
+	readonly targetComponents: string[];
+}
+
+function requireInvokingLocalProtocolOptions(options: LocalProtocolOptions): LocalProtocolOptions {
+	if (typeof options !== "object" || options === null) {
+		throw new AtomicLocalWriteError({
+			code: "INVALID_INPUT",
+			commitState: "NOT_COMMITTED",
+			message: "Atomic local writes require invoking-session local protocol options",
+		});
+	}
+	return options;
+}
+
+/** Parse and decode the model-supplied local target exactly once before passing components to native code. */
+function decodeAtomicLocalRelativePath(url: InternalUrl): string {
+	const rawHref = url.rawHref ?? url.href;
+	const schemeDelimiter = rawHref.indexOf("://");
+	if (schemeDelimiter === -1) {
+		throw new AtomicLocalWriteError({
+			code: "INVALID_INPUT",
+			commitState: "NOT_COMMITTED",
+			message: "Atomic local writes require a local:// URL",
+		});
+	}
+	const rawTargetAndSuffix = rawHref.slice(schemeDelimiter + 3);
+	const suffixStart = rawTargetAndSuffix.search(/[?#]/);
+	const rawHostAndPath = suffixStart === -1 ? rawTargetAndSuffix : rawTargetAndSuffix.slice(0, suffixStart);
+	const pathStart = rawHostAndPath.indexOf("/");
+	const rawHost = pathStart === -1 ? rawHostAndPath : rawHostAndPath.slice(0, pathStart);
+	const rawPathname = pathStart === -1 ? "" : rawHostAndPath.slice(pathStart);
+	const rawTarget = rawHost
+		? rawPathname && rawPathname !== "/"
+			? `${rawHost}${rawPathname}`
+			: rawHost
+		: rawPathname && rawPathname !== "/"
+			? rawPathname.slice(1)
+			: "";
+
+	let decoded: string;
+	try {
+		decoded = decodeURIComponent(rawTarget.replaceAll("\\", "/"));
+	} catch {
+		throw new AtomicLocalWriteError({
+			code: "INVALID_INPUT",
+			commitState: "NOT_COMMITTED",
+			message: `Invalid URL encoding in local:// path: ${url.href}`,
+		});
+	}
+	if (/%[0-9a-f]{2}/i.test(decoded)) {
+		throw new AtomicLocalWriteError({
+			code: "INVALID_INPUT",
+			commitState: "NOT_COMMITTED",
+			message: `Residual URL encoding is not allowed in local:// path: ${url.href}`,
+		});
+	}
+	try {
+		validateRelativePath(decoded);
+	} catch (error) {
+		const validationError = toLocalValidationError(error);
+		throw new AtomicLocalWriteError({
+			code: "INVALID_INPUT",
+			commitState: "NOT_COMMITTED",
+			message: validationError.message,
+		});
+	}
+	return decoded;
+}
+
+function parseAtomicLocalTarget(input: string | InternalUrl, options: LocalProtocolOptions): ParsedAtomicLocalTarget {
+	const url = typeof input === "string" ? parseInternalUrl(input) : input;
+	if (url.protocol.toLowerCase() !== "local:") {
+		throw new AtomicLocalWriteError({
+			code: "INVALID_INPUT",
+			commitState: "NOT_COMMITTED",
+			message: "Atomic local writes require a local:// URL",
+		});
+	}
+
+	const relativePath = decodeAtomicLocalRelativePath(url);
+	if (relativePath.length === 0) {
+		throw new AtomicLocalWriteError({
+			code: "INVALID_INPUT",
+			commitState: "NOT_COMMITTED",
+			message: "Atomic local writes require a file target below the local root",
+		});
+	}
+
+	const targetComponents = relativePath.split("/");
+	for (const component of targetComponents) {
+		if (
+			component.length === 0 ||
+			component === "." ||
+			component === ".." ||
+			component.includes("/") ||
+			component.includes("\\") ||
+			component.includes("\0")
+		) {
+			throw new AtomicLocalWriteError({
+				code: "INVALID_INPUT",
+				commitState: "NOT_COMMITTED",
+				message: "Atomic local write targets must contain non-empty file-name components",
+			});
+		}
+	}
+
+	const absoluteRoot = resolveLocalRoot(options);
+	const absolutePath = path.join(absoluteRoot, ...targetComponents);
+	ensureWithinRoot(absolutePath, absoluteRoot);
+	return { absoluteRoot, absolutePath, targetComponents };
+}
+
+const strictUtf8Encoder = new TextEncoder();
+
+function encodeStrictUtf8(content: string): Uint8Array {
+	if (typeof content !== "string") {
+		throw new AtomicLocalWriteError({
+			code: "INVALID_INPUT",
+			commitState: "NOT_COMMITTED",
+			message: "Atomic local write content must be a string",
+		});
+	}
+	for (let index = 0; index < content.length; index++) {
+		const codeUnit = content.charCodeAt(index);
+		if (codeUnit >= 0xd800 && codeUnit <= 0xdbff) {
+			const nextCodeUnit = content.charCodeAt(index + 1);
+			if (nextCodeUnit >= 0xdc00 && nextCodeUnit <= 0xdfff) {
+				index++;
+				continue;
+			}
+			throw new AtomicLocalWriteError({
+				code: "INVALID_INPUT",
+				commitState: "NOT_COMMITTED",
+				message: "Atomic local write content contains an unpaired UTF-16 surrogate",
+			});
+		}
+		if (codeUnit >= 0xdc00 && codeUnit <= 0xdfff) {
+			throw new AtomicLocalWriteError({
+				code: "INVALID_INPUT",
+				commitState: "NOT_COMMITTED",
+				message: "Atomic local write content contains an unpaired UTF-16 surrogate",
+			});
+		}
+	}
+	return strictUtf8Encoder.encode(content);
+}
+
+function isStructuredAtomicLocalWriteError(
+	error: unknown,
+): error is Record<"code" | "commitState" | "message", string> {
+	return (
+		isRecord(error) &&
+		typeof error.code === "string" &&
+		typeof error.commitState === "string" &&
+		typeof error.message === "string"
+	);
+}
+
+function mapAtomicLocalWriteError(error: unknown): Error {
+	if (isStructuredAtomicLocalWriteError(error)) {
+		return new AtomicLocalWriteError(error);
+	}
+	return error instanceof Error ? error : new Error(String(error));
+}
+
+function requireAtomicLocalWriteCapability(): typeof natives.atomicLocalWrite {
+	const atomicLocalWrite = natives.atomicLocalWrite;
+	if (typeof atomicLocalWrite !== "function") {
+		throw new AtomicLocalWriteError({
+			code: "UNSUPPORTED",
+			commitState: "NOT_COMMITTED",
+			message: "Atomic local writes are unsupported by the installed native bindings",
+		});
+	}
+	return atomicLocalWrite;
+}
+
+/** Atomically replace one plain local:// file through the generated native capability. */
+export async function writeLocalUrlAtomically(
+	input: string | InternalUrl,
+	content: string,
+	options: LocalProtocolOptions,
+	signal?: AbortSignal,
+): Promise<AtomicLocalWriteOutcome> {
+	const invokingOptions = requireInvokingLocalProtocolOptions(options);
+	const atomicLocalWrite = requireAtomicLocalWriteCapability();
+	const target = parseAtomicLocalTarget(input, invokingOptions);
+	const contentUtf8 = encodeStrictUtf8(content);
+
+	try {
+		const result = await atomicLocalWrite(
+			{
+				absoluteRoot: target.absoluteRoot,
+				targetComponents: target.targetComponents,
+				contentUtf8,
+				executable: content.startsWith("#!"),
+			},
+			signal,
+		);
+		if (result.commitState !== "COMMITTED") {
+			throw new AtomicLocalWriteError({
+				code: "IO",
+				commitState: result.commitState,
+				message: "Native atomic local write resolved without a COMMITTED commit state",
+			});
+		}
+		return {
+			absolutePath: target.absolutePath,
+			bytesWritten: result.bytesWritten,
+			madeExecutable: result.madeExecutable,
+			commitState: result.commitState,
+		};
+	} catch (error) {
+		throw mapAtomicLocalWriteError(error);
+	}
 }
 
 /**
@@ -342,7 +586,7 @@ type ResolvedLocalTarget =
  * {@link resolveLocalUrlToFile}.
  */
 async function resolveLocalTarget(url: InternalUrl, opts: LocalProtocolOptions): Promise<ResolvedLocalTarget> {
-	const localRoot = path.resolve(resolveLocalRoot(opts));
+	const localRoot = resolveLocalRoot(opts);
 	await fs.mkdir(localRoot, { recursive: true });
 
 	let resolvedRoot: string;
@@ -501,7 +745,7 @@ export class LocalProtocolHandler implements ProtocolHandler {
 	async complete(_query?: string, context?: ResolveContext): Promise<UrlCompletion[]> {
 		const opts = LocalProtocolHandler.resolveOptions(context);
 		if (!opts) return [];
-		const localRoot = path.resolve(resolveLocalRoot(opts));
+		const localRoot = resolveLocalRoot(opts);
 		try {
 			const files = await listFilesRecursively(localRoot);
 			return files.map(value => ({ value }));

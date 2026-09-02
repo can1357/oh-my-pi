@@ -12,7 +12,7 @@ import type {
 	ToolApprovalDecision,
 } from "@oh-my-pi/pi-agent-core";
 import { type Component, Text } from "@oh-my-pi/pi-tui";
-import { isEnoent, isRecord, prompt, untilAborted } from "@oh-my-pi/pi-utils";
+import { isEnoent, isRecord, logger, prompt, untilAborted } from "@oh-my-pi/pi-utils";
 import {
 	type ArchiveMemberContent,
 	archiveFormatFromPath,
@@ -25,6 +25,7 @@ import { canonicalSnapshotKey, getFileSnapshotStore } from "../edit/file-snapsho
 import { normalizeToLF } from "../edit/normalize";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
 import { InternalUrlRouter } from "../internal-urls";
+import { writeLocalUrlAtomically } from "../internal-urls/local-protocol";
 import { parseInternalUrl } from "../internal-urls/parse";
 import { couldBecomeXdUrl, parseXdUrl } from "../internal-urls/xd-protocol";
 import { createLspWritethrough, type FileDiagnosticsResult, type WritethroughCallback, writethroughNoop } from "../lsp";
@@ -451,6 +452,21 @@ interface ResolvedSqliteWritePath {
 	exists: boolean;
 }
 
+interface AtomicLocalWritePreparation {
+	route: "atomic-local";
+	path: string;
+	content: string;
+	stripped: boolean;
+	expectedAbsolutePath: string;
+	displayPath: string;
+}
+
+function isAtomicLocalWritePreparation(
+	result: AgentToolResult<WriteToolDetails> | AtomicLocalWritePreparation,
+): result is AtomicLocalWritePreparation {
+	return "route" in result && result.route === "atomic-local";
+}
+
 function isArchivePathNotFound(error: unknown): boolean {
 	if (isEnoent(error)) return true;
 	return typeof error === "object" && error !== null && "code" in error && error.code === "ENOTDIR";
@@ -600,6 +616,77 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 						: undefined,
 				})
 			: writethroughNoop;
+	}
+
+	async #writeLocalAtomically(
+		preparation: AtomicLocalWritePreparation,
+		signal: AbortSignal | undefined,
+		onUpdate: AgentToolUpdateCallback<WriteToolDetails> | undefined,
+	): Promise<AgentToolResult<WriteToolDetails>> {
+		// Native owns cancellation through its commit boundary, so this work must
+		// remain outside execute()'s generic untilAborted wrapper.
+		emitWriteProgress(onUpdate, preparation.content, preparation.displayPath, preparation.expectedAbsolutePath);
+		const localProtocolOptions = this.session.localProtocolOptions ?? {
+			getArtifactsDir: () => this.session.getArtifactsDir?.() ?? null,
+			getSessionId: () => this.session.getSessionId?.() ?? null,
+		};
+		const atomicResult = await writeLocalUrlAtomically(
+			preparation.path,
+			preparation.content,
+			localProtocolOptions,
+			signal,
+		);
+
+		const bookkeepingWarnings: string[] = [];
+		const warnPostCommitFailure = (operation: string, error: unknown): void => {
+			bookkeepingWarnings.push(`Warning: write committed but ${operation} failed.`);
+			try {
+				logger.warn("Atomic local write committed but post-commit bookkeeping failed", {
+					operation,
+					path: atomicResult.absolutePath,
+					error: error instanceof Error ? error.message : String(error),
+				});
+			} catch {
+				// Logging is diagnostic only; it must not mask a committed write.
+			}
+		};
+
+		try {
+			invalidateFsScanAfterWrite(atomicResult.absolutePath);
+		} catch (error) {
+			warnPostCommitFailure("filesystem cache invalidation", error);
+		}
+		try {
+			this.session.bumpFileMutationVersion?.(atomicResult.absolutePath);
+		} catch (error) {
+			warnPostCommitFailure("mutation-version update", error);
+		}
+		let header: string | undefined;
+		try {
+			header = maybeWriteSnapshotHeader(this.session, atomicResult.absolutePath, preparation.content);
+		} catch (error) {
+			warnPostCommitFailure("snapshot recording", error);
+		}
+
+		const displayPath = formatPathRelativeToCwd(atomicResult.absolutePath, this.session.cwd);
+		const writeLine = `Successfully wrote ${preparation.content.length} bytes to ${displayPath}`;
+		let resultText = header ? `${header}\n${writeLine}` : writeLine;
+		if (preparation.stripped) {
+			resultText += `\nNote: auto-stripped hashline display prefixes from content before writing.`;
+		}
+		if (atomicResult.madeExecutable) {
+			resultText += `\n${EXECUTABLE_NOTICE}`;
+		}
+		if (bookkeepingWarnings.length > 0) {
+			resultText += `\n${bookkeepingWarnings.join("\n")}`;
+		}
+		return {
+			content: [{ type: "text", text: resultText }],
+			details: {
+				resolvedPath: atomicResult.absolutePath,
+				madeExecutable: atomicResult.madeExecutable || undefined,
+			},
+		};
 	}
 
 	async #resolveArchiveWritePath(writePath: string): Promise<ResolvedArchiveWritePath | null> {
@@ -1133,177 +1220,227 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 				"This `write` tool is limited to the xd:// device transport: call it with path `xd://<tool>` and the device's JSON arguments in `content` (`read xd://` lists mounted devices). Active plan mode additionally permits local:// sandbox drafts. Filesystem writes are not available elsewhere.",
 			);
 		}
-		return untilAborted(signal, async () => {
-			// Strip hashline display prefixes ([PATH#HASH] + LINE:) if the model copied them from read output
-			const { text: cleanContent, stripped } = stripWriteContent(this.session, content);
-			const internalRouter = InternalUrlRouter.instance();
-			assertWriteTargetAddressable(path, internalRouter);
-			if (internalRouter.canHandle(path)) {
-				const parsed = parseInternalUrl(path);
-				const scheme = parsed.protocol.replace(/:$/, "").toLowerCase();
-				const handler = internalRouter.getHandler(scheme);
-				if (handler?.write) {
-					// Handler-owned writes mutate user data outside the local
-					// sandbox. xd:// dispatches retain each wrapped tool's tier.
-					if (scheme !== "xd") {
-						enforcePlanModeWrite(this.session, path, { op: "update" });
-						emitWriteProgress(onUpdate, cleanContent, path);
-					}
-					let xdResult: AgentToolResult<WriteToolDetails> | undefined;
-					await internalRouter.write(path, cleanContent, {
-						cwd: this.session.cwd,
-						signal,
-						xd: {
-							write: async (name, deviceContent) => {
-								if (name === REPORT_ISSUE_DEVICE_NAME) {
-									const { result, xdev } = await dispatchReportIssueDevice(this.session, deviceContent);
+		const executionResult: AgentToolResult<WriteToolDetails> | AtomicLocalWritePreparation = await untilAborted(
+			signal,
+			async () => {
+				// Strip hashline display prefixes ([PATH#HASH] + LINE:) if the model copied them from read output
+				const { text: cleanContent, stripped } = stripWriteContent(this.session, content);
+				const internalRouter = InternalUrlRouter.instance();
+				assertWriteTargetAddressable(path, internalRouter);
+				let isLocalUrl = false;
+				if (internalRouter.canHandle(path)) {
+					const parsed = parseInternalUrl(path);
+					const scheme = parsed.protocol.replace(/:$/, "").toLowerCase();
+					isLocalUrl = scheme === "local";
+					const handler = internalRouter.getHandler(scheme);
+					if (handler?.write) {
+						// Handler-owned writes mutate user data outside the local
+						// sandbox. xd:// dispatches retain each wrapped tool's tier.
+						if (scheme !== "xd") {
+							enforcePlanModeWrite(this.session, path, { op: "update" });
+							emitWriteProgress(onUpdate, cleanContent, path);
+						}
+						let xdResult: AgentToolResult<WriteToolDetails> | undefined;
+						await internalRouter.write(path, cleanContent, {
+							cwd: this.session.cwd,
+							signal,
+							xd: {
+								write: async (name, deviceContent) => {
+									if (name === REPORT_ISSUE_DEVICE_NAME) {
+										const { result, xdev } = await dispatchReportIssueDevice(this.session, deviceContent);
+										xdResult = {
+											content: result.content,
+											details: { xdev },
+											isError: result.isError,
+											useless: result.useless,
+										};
+										return;
+									}
+									if (name && isResolutionDeviceName(name)) {
+										const { result, xdev } = await dispatchResolutionDevice(
+											this.session,
+											name,
+											deviceContent,
+										);
+										xdResult = {
+											content: result.content,
+											details: { xdev },
+											isError: result.isError,
+											useless: result.useless,
+										};
+										return;
+									}
+									const xdev = this.session.xdev;
+									if (!xdev) {
+										throw new ToolError("xd:// is not mounted in this session.");
+									}
+									if (!name) {
+										throw new ToolError(
+											`Cannot write to xd:// itself — pick a device:\n${xdevListing(xdev)}`,
+										);
+									}
+									const { result, xdev: dispatch } = await dispatchXdevTool(
+										xdev,
+										name,
+										deviceContent,
+										_toolCallId,
+										signal,
+										onUpdate as AgentToolUpdateCallback,
+										// The write tool's own gate just resolved approval at this
+										// device's tier (see #approval above) — mark it so a wrapped
+										// inner tool does not prompt a second time.
+										context ? { ...context, xdevApproved: true } : undefined,
+									);
 									xdResult = {
 										content: result.content,
-										details: { xdev },
+										details: { xdev: dispatch },
 										isError: result.isError,
 										useless: result.useless,
 									};
-									return;
-								}
-								if (name && isResolutionDeviceName(name)) {
-									const { result, xdev } = await dispatchResolutionDevice(this.session, name, deviceContent);
-									xdResult = {
-										content: result.content,
-										details: { xdev },
-										isError: result.isError,
-										useless: result.useless,
-									};
-									return;
-								}
-								const xdev = this.session.xdev;
-								if (!xdev) {
-									throw new ToolError("xd:// is not mounted in this session.");
-								}
-								if (!name) {
-									throw new ToolError(`Cannot write to xd:// itself — pick a device:\n${xdevListing(xdev)}`);
-								}
-								const { result, xdev: dispatch } = await dispatchXdevTool(
-									xdev,
-									name,
-									deviceContent,
-									_toolCallId,
-									signal,
-									onUpdate as AgentToolUpdateCallback,
-									// The write tool's own gate just resolved approval at this
-									// device's tier (see #approval above) — mark it so a wrapped
-									// inner tool does not prompt a second time.
-									context ? { ...context, xdevApproved: true } : undefined,
-								);
-								xdResult = {
-									content: result.content,
-									details: { xdev: dispatch },
-									isError: result.isError,
-									useless: result.useless,
-								};
+								},
 							},
-						},
+						});
+						if (xdResult) return xdResult;
+						let resultText = `Successfully wrote ${cleanContent.length} bytes to ${path}`;
+						if (stripped) {
+							resultText += `\nNote: auto-stripped hashline display prefixes from content before writing.`;
+						}
+						return { content: [{ type: "text", text: resultText }], details: {} };
+					}
+					if (scheme !== "local") await internalRouter.write(path, cleanContent);
+					// local:// is backed by the session-local artifact sandbox and is
+					// resolved by resolvePlanPath below so write/read share the same root.
+				}
+
+				const conflictUri = parseConflictUri(path);
+				if (conflictUri) {
+					if (conflictUri.scope) {
+						throw new ToolError(
+							`Conflict URI scope '/${conflictUri.scope}' is read-only — read \`conflict://${conflictUri.id}/${conflictUri.scope}\` to inspect that side. To write, drop the scope (\`conflict://${conflictUri.id}\`) and put the chosen content (or shorthand like \`@${conflictUri.scope}\`) in \`content\`.`,
+						);
+					}
+					emitWriteProgress(onUpdate, cleanContent, path);
+					const result =
+						conflictUri.id === "*"
+							? await this.#resolveAllConflicts(cleanContent, stripped, signal, content)
+							: await this.#resolveSingleConflictById(conflictUri.id, cleanContent, stripped, signal);
+					if (conflictUri.recoveredPrefix !== undefined) {
+						appendNoteToResult(
+							result,
+							`Note: stripped erroneous '${conflictUri.recoveredPrefix}:' prefix from path; conflict URIs are global (use \`conflict://${conflictUri.id}\`, not \`<file>:conflict://${conflictUri.id}\`).`,
+						);
+					}
+					return result;
+				}
+				const resolvedArchivePath = await this.#resolveArchiveWritePath(path);
+				if (resolvedArchivePath) {
+					enforcePlanModeWrite(this.session, resolvedArchivePath.archivePath, {
+						op: resolvedArchivePath.exists ? "update" : "create",
 					});
-					if (xdResult) return xdResult;
-					let resultText = `Successfully wrote ${cleanContent.length} bytes to ${path}`;
+
+					emitWriteProgress(
+						onUpdate,
+						cleanContent,
+						`${formatPathRelativeToCwd(resolvedArchivePath.absolutePath, this.session.cwd)}:${
+							resolvedArchivePath.archiveSubPath
+						}`,
+						resolvedArchivePath.absolutePath,
+					);
+					const archiveResult = await this.#writeArchiveEntry(cleanContent, resolvedArchivePath);
+					if (stripped) {
+						const firstText = archiveResult.content.find(
+							(block): block is { type: "text"; text: string } =>
+								block.type === "text" && typeof block.text === "string",
+						);
+						if (firstText) {
+							firstText.text += `\nNote: auto-stripped hashline display prefixes from content before writing.`;
+						}
+					}
+					return archiveResult;
+				}
+
+				const resolvedSqlitePath = await this.#resolveSqliteWritePath(path);
+				if (resolvedSqlitePath) {
+					enforcePlanModeWrite(this.session, resolvedSqlitePath.sqlitePath, { op: "update" });
+
+					emitWriteProgress(onUpdate, cleanContent, path, resolvedSqlitePath.absolutePath);
+					const sqliteResult = await this.#writeSqliteRow(path, cleanContent, resolvedSqlitePath);
+					if (stripped) {
+						const firstText = sqliteResult.content.find(
+							(block): block is { type: "text"; text: string } =>
+								block.type === "text" && typeof block.text === "string",
+						);
+						if (firstText) {
+							firstText.text += `\nNote: auto-stripped hashline display prefixes from content before writing.`;
+						}
+					}
+					return sqliteResult;
+				}
+
+				await assertNotReadSelectorMisfire(path, cleanContent, this.session.cwd);
+				enforcePlanModeWrite(this.session, path, { op: "create" });
+				const absolutePath = resolvePlanPath(this.session, path);
+				if (isLocalUrl) {
+					const localWrite: AtomicLocalWritePreparation = {
+						route: "atomic-local",
+						path,
+						content: cleanContent,
+						stripped,
+						expectedAbsolutePath: absolutePath,
+						displayPath: formatPathRelativeToCwd(absolutePath, this.session.cwd),
+					};
+					return localWrite;
+				}
+				const batchRequest = getLspBatchRequest(context?.toolCall);
+
+				// Check if file exists and is auto-generated before overwriting
+				if (await fs.exists(absolutePath)) {
+					await assertEditableFile(absolutePath, path, this.session.settings);
+				}
+
+				const displayPath = formatPathRelativeToCwd(absolutePath, this.session.cwd);
+				emitWriteProgress(onUpdate, cleanContent, displayPath, absolutePath);
+
+				// Try ACP bridge first for editor-visible filesystem paths. Internal
+				// artifacts such as local:// plans are owned by OMP, not the editor.
+				const bridgeWrite = await routeWriteThroughBridge(this.session, path, absolutePath, cleanContent, signal);
+				if (bridgeWrite) {
+					// `write` always replaces the whole file, so (unlike hashline's
+					// hunk-scoped diff) there's no size cost to keying the header/
+					// executable-bit check on the verified post-write content —
+					// use it so a drifted write (e.g. client format-on-save) still
+					// hands back a tag that matches what's actually on disk.
+					const madeExecutable = await maybeMarkExecutableForShebang(absolutePath, bridgeWrite.text);
+					const header = maybeWriteSnapshotHeader(this.session, absolutePath, bridgeWrite.text);
+					const writeLine = `Successfully wrote ${cleanContent.length} bytes to ${displayPath}`;
+					let resultText = header ? `${header}\n${writeLine}` : writeLine;
 					if (stripped) {
 						resultText += `\nNote: auto-stripped hashline display prefixes from content before writing.`;
 					}
-					return { content: [{ type: "text", text: resultText }], details: {} };
+					if (madeExecutable) {
+						resultText += `\n${EXECUTABLE_NOTICE}`;
+					}
+					return {
+						content: [{ type: "text", text: resultText }],
+						details: { resolvedPath: absolutePath, madeExecutable: madeExecutable || undefined },
+					};
 				}
-				if (scheme !== "local") await internalRouter.write(path, cleanContent);
-				// local:// is backed by the session-local artifact sandbox and is
-				// resolved by resolvePlanPath below so write/read share the same root.
-			}
 
-			const conflictUri = parseConflictUri(path);
-			if (conflictUri) {
-				if (conflictUri.scope) {
-					throw new ToolError(
-						`Conflict URI scope '/${conflictUri.scope}' is read-only — read \`conflict://${conflictUri.id}/${conflictUri.scope}\` to inspect that side. To write, drop the scope (\`conflict://${conflictUri.id}\`) and put the chosen content (or shorthand like \`@${conflictUri.scope}\`) in \`content\`.`,
-					);
-				}
-				emitWriteProgress(onUpdate, cleanContent, path);
-				const result =
-					conflictUri.id === "*"
-						? await this.#resolveAllConflicts(cleanContent, stripped, signal, content)
-						: await this.#resolveSingleConflictById(conflictUri.id, cleanContent, stripped, signal);
-				if (conflictUri.recoveredPrefix !== undefined) {
-					appendNoteToResult(
-						result,
-						`Note: stripped erroneous '${conflictUri.recoveredPrefix}:' prefix from path; conflict URIs are global (use \`conflict://${conflictUri.id}\`, not \`<file>:conflict://${conflictUri.id}\`).`,
-					);
-				}
-				return result;
-			}
-			const resolvedArchivePath = await this.#resolveArchiveWritePath(path);
-			if (resolvedArchivePath) {
-				enforcePlanModeWrite(this.session, resolvedArchivePath.archivePath, {
-					op: resolvedArchivePath.exists ? "update" : "create",
-				});
-
-				emitWriteProgress(
-					onUpdate,
+				const diagnostics = await this.#writethrough(
+					absolutePath,
 					cleanContent,
-					`${formatPathRelativeToCwd(resolvedArchivePath.absolutePath, this.session.cwd)}:${
-						resolvedArchivePath.archiveSubPath
-					}`,
-					resolvedArchivePath.absolutePath,
+					signal,
+					undefined,
+					batchRequest,
+					dst => this.#deferredDiagnostics?.begin(dst),
 				);
-				const archiveResult = await this.#writeArchiveEntry(cleanContent, resolvedArchivePath);
-				if (stripped) {
-					const firstText = archiveResult.content.find(
-						(block): block is { type: "text"; text: string } =>
-							block.type === "text" && typeof block.text === "string",
-					);
-					if (firstText) {
-						firstText.text += `\nNote: auto-stripped hashline display prefixes from content before writing.`;
-					}
+				invalidateFsScanAfterWrite(absolutePath);
+				if (!this.#deferredDiagnostics || batchRequest?.flush === false) {
+					this.session.bumpFileMutationVersion?.(absolutePath);
 				}
-				return archiveResult;
-			}
+				const madeExecutable = await maybeMarkExecutableForShebang(absolutePath, cleanContent);
 
-			const resolvedSqlitePath = await this.#resolveSqliteWritePath(path);
-			if (resolvedSqlitePath) {
-				enforcePlanModeWrite(this.session, resolvedSqlitePath.sqlitePath, { op: "update" });
-
-				emitWriteProgress(onUpdate, cleanContent, path, resolvedSqlitePath.absolutePath);
-				const sqliteResult = await this.#writeSqliteRow(path, cleanContent, resolvedSqlitePath);
-				if (stripped) {
-					const firstText = sqliteResult.content.find(
-						(block): block is { type: "text"; text: string } =>
-							block.type === "text" && typeof block.text === "string",
-					);
-					if (firstText) {
-						firstText.text += `\nNote: auto-stripped hashline display prefixes from content before writing.`;
-					}
-				}
-				return sqliteResult;
-			}
-
-			await assertNotReadSelectorMisfire(path, cleanContent, this.session.cwd);
-			enforcePlanModeWrite(this.session, path, { op: "create" });
-			const absolutePath = resolvePlanPath(this.session, path);
-			const batchRequest = getLspBatchRequest(context?.toolCall);
-
-			// Check if file exists and is auto-generated before overwriting
-			if (await fs.exists(absolutePath)) {
-				await assertEditableFile(absolutePath, path, this.session.settings);
-			}
-
-			const displayPath = formatPathRelativeToCwd(absolutePath, this.session.cwd);
-			emitWriteProgress(onUpdate, cleanContent, displayPath, absolutePath);
-
-			// Try ACP bridge first for editor-visible filesystem paths. Internal
-			// artifacts such as local:// plans are owned by OMP, not the editor.
-			const bridgeWrite = await routeWriteThroughBridge(this.session, path, absolutePath, cleanContent, signal);
-			if (bridgeWrite) {
-				// `write` always replaces the whole file, so (unlike hashline's
-				// hunk-scoped diff) there's no size cost to keying the header/
-				// executable-bit check on the verified post-write content —
-				// use it so a drifted write (e.g. client format-on-save) still
-				// hands back a tag that matches what's actually on disk.
-				const madeExecutable = await maybeMarkExecutableForShebang(absolutePath, bridgeWrite.text);
-				const header = maybeWriteSnapshotHeader(this.session, absolutePath, bridgeWrite.text);
+				const header = maybeWriteSnapshotHeader(this.session, absolutePath, cleanContent);
 				const writeLine = `Successfully wrote ${cleanContent.length} bytes to ${displayPath}`;
 				let resultText = header ? `${header}\n${writeLine}` : writeLine;
 				if (stripped) {
@@ -1312,54 +1449,30 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 				if (madeExecutable) {
 					resultText += `\n${EXECUTABLE_NOTICE}`;
 				}
+				if (!diagnostics) {
+					return {
+						content: [{ type: "text", text: resultText }],
+						details: { resolvedPath: absolutePath, madeExecutable: madeExecutable || undefined },
+					};
+				}
+
 				return {
 					content: [{ type: "text", text: resultText }],
-					details: { resolvedPath: absolutePath, madeExecutable: madeExecutable || undefined },
+					details: {
+						resolvedPath: absolutePath,
+						diagnostics,
+						madeExecutable: madeExecutable || undefined,
+						meta: outputMeta()
+							.diagnostics(diagnostics.summary, diagnostics.messages ?? [])
+							.get(),
+					},
 				};
-			}
-
-			const diagnostics = await this.#writethrough(
-				absolutePath,
-				cleanContent,
-				signal,
-				undefined,
-				batchRequest,
-				dst => this.#deferredDiagnostics?.begin(dst),
-			);
-			invalidateFsScanAfterWrite(absolutePath);
-			if (!this.#deferredDiagnostics || batchRequest?.flush === false) {
-				this.session.bumpFileMutationVersion?.(absolutePath);
-			}
-			const madeExecutable = await maybeMarkExecutableForShebang(absolutePath, cleanContent);
-
-			const header = maybeWriteSnapshotHeader(this.session, absolutePath, cleanContent);
-			const writeLine = `Successfully wrote ${cleanContent.length} bytes to ${displayPath}`;
-			let resultText = header ? `${header}\n${writeLine}` : writeLine;
-			if (stripped) {
-				resultText += `\nNote: auto-stripped hashline display prefixes from content before writing.`;
-			}
-			if (madeExecutable) {
-				resultText += `\n${EXECUTABLE_NOTICE}`;
-			}
-			if (!diagnostics) {
-				return {
-					content: [{ type: "text", text: resultText }],
-					details: { resolvedPath: absolutePath, madeExecutable: madeExecutable || undefined },
-				};
-			}
-
-			return {
-				content: [{ type: "text", text: resultText }],
-				details: {
-					resolvedPath: absolutePath,
-					diagnostics,
-					madeExecutable: madeExecutable || undefined,
-					meta: outputMeta()
-						.diagnostics(diagnostics.summary, diagnostics.messages ?? [])
-						.get(),
-				},
-			};
-		});
+			},
+		);
+		if (isAtomicLocalWritePreparation(executionResult)) {
+			return this.#writeLocalAtomically(executionResult, signal, onUpdate);
+		}
+		return executionResult;
 	}
 }
 
