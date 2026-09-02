@@ -373,6 +373,37 @@ describe("persisted subagent revival", () => {
 		expect(wakeOptions?.getOutputSchemaMode?.()).toBe("strict");
 	});
 
+	it("fails closed when live-model hardening encounters an invalid persisted schema", async () => {
+		const cwd = makeTempDir("@pi-invalid-live-hardening-revive-");
+		const sessionFile = await createPersistedSession(cwd, false, undefined, undefined, {
+			outputSchema: false,
+			outputSchemaMode: "permissive",
+		});
+		let capturedOptions: CreateAgentSessionOptions | undefined;
+		let wakeOptions: IrcWakeTurnMonitorOptions | undefined;
+		vi.spyOn(executorModule, "attachIrcWakeTurnMonitor").mockImplementation((_session, options) => {
+			wakeOptions = options;
+		});
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+			capturedOptions = options;
+			return { session: createRevivedSession([]).session } as CreateAgentSessionResult;
+		});
+
+		const ref = createRef(sessionFile);
+		const reviver = await createFactory(cwd)(ref);
+		if (!reviver) throw new Error("Expected a persisted reviver");
+		await reviver(ref);
+
+		const hardeningModel = {
+			compat: { requiresStructuredOutputHardening: true },
+		} as Model;
+		expect(capturedOptions?.resolveOutputSchemaFailurePolicy?.(hardeningModel)).toEqual({
+			mode: "strict",
+			toolNames: ["yield"],
+		});
+		expect(wakeOptions?.getOutputSchemaMode?.()).toBe("strict");
+	});
+
 	it("installs an IRC wake monitor that emits cold-revive lifecycle frames on the shared bus", async () => {
 		AgentRegistry.resetGlobalForTests();
 		AgentLifecycleManager.resetGlobalForTests();

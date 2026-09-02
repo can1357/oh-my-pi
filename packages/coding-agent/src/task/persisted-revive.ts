@@ -136,15 +136,19 @@ export function createPersistedSubagentReviverFactory(
 				init.outputSchemaCorrectionLocked !== true
 					? (liveModel: Model) => {
 							if (!modelRequiresStructuredOutputHardening(liveModel)) return undefined;
-							const policy = resolveStructuredOutputHarnessPolicy(
-								true,
-								init.outputSchema,
-								init.outputSchemaMode,
-							);
-							effectiveOutputSchemaMode = policy.mode;
-							return policy.failureToolNames
-								? { mode: policy.mode ?? "strict", toolNames: policy.failureToolNames }
-								: undefined;
+							effectiveOutputSchemaMode = "strict";
+							try {
+								const policy = resolveStructuredOutputHarnessPolicy(
+									true,
+									init.outputSchema,
+									init.outputSchemaMode,
+								);
+								return policy.failureToolNames
+									? { mode: policy.mode ?? "strict", toolNames: policy.failureToolNames }
+									: undefined;
+							} catch {
+								return { mode: "strict" as const, toolNames: ["yield"] };
+							}
 						}
 					: undefined;
 			const { session } = await createAgentSession({

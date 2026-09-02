@@ -3332,11 +3332,15 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			if (normalizedOutputSchema !== undefined && outputSchemaFailureToolNames === undefined) {
 				resolveOutputSchemaFailurePolicy = liveModel => {
 					if (!modelRequiresStructuredOutputHardening(liveModel)) return undefined;
-					const livePolicy = resolveStructuredOutputHarnessPolicy(true, outputSchema, options.outputSchemaMode);
-					effectiveOutputSchemaMode = livePolicy.mode;
-					return livePolicy.failureToolNames
-						? { mode: livePolicy.mode ?? "strict", toolNames: livePolicy.failureToolNames }
-						: undefined;
+					effectiveOutputSchemaMode = "strict";
+					try {
+						const livePolicy = resolveStructuredOutputHarnessPolicy(true, outputSchema, options.outputSchemaMode);
+						return livePolicy.failureToolNames
+							? { mode: livePolicy.mode ?? "strict", toolNames: livePolicy.failureToolNames }
+							: undefined;
+					} catch {
+						return { mode: "strict", toolNames: ["yield"] };
+					}
 				};
 			}
 

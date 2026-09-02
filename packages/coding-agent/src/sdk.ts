@@ -3855,6 +3855,17 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			titleSystemPrompt: options.titleSystemPrompt,
 		});
 		hasSession = true;
+		if (options.resolveOutputSchemaFailurePolicy) {
+			const resolveLiveOutputSchemaPolicy = () => {
+				const liveModel = session?.model;
+				if (liveModel) options.resolveOutputSchemaFailurePolicy?.(liveModel);
+			};
+			resolveLiveOutputSchemaPolicy();
+			const unsubscribeOutputSchemaPolicy = session.subscribe(event => {
+				if (event.type === "model_changed") resolveLiveOutputSchemaPolicy();
+			});
+			disposeCallbacks.add(unsubscribeOutputSchemaPolicy);
+		}
 		// Backfill the resumed advisor spend without blocking startup: the scan
 		// runs after the session is live, so `--resume` no longer scales with the
 		// advisor transcript size (issue #9553).

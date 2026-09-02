@@ -2372,6 +2372,7 @@ describe("createAgentSession defaultInactive tool activation", () => {
 			provider: "merge-gateway",
 			id: "runtime-merge",
 		};
+		const policyModels: string[] = [];
 		await withProviderAuth(["merge-gateway"], async () => {
 			const { session } = await createAgentSession({
 				...baseOptions(tempDir),
@@ -2381,8 +2382,10 @@ describe("createAgentSession defaultInactive tool activation", () => {
 					properties: { token: { type: "string", minLength: 3 } },
 					required: ["token"],
 				},
-				resolveOutputSchemaFailurePolicy: model =>
-					model.provider === "merge-gateway" ? { mode: "strict", toolNames: ["yield"] } : undefined,
+				resolveOutputSchemaFailurePolicy: model => {
+					policyModels.push(model.id);
+					return model.provider === "merge-gateway" ? { mode: "strict", toolNames: ["yield"] } : undefined;
+				},
 				requireYieldTool: true,
 			});
 			session.sessionManager.appendSessionInit({
@@ -2409,6 +2412,7 @@ describe("createAgentSession defaultInactive tool activation", () => {
 			vi.spyOn(session.agent, "streamFn").mockImplementation(mock.stream);
 			try {
 				await session.setModel(runtimeModel);
+				expect(policyModels.at(-1)).toBe(runtimeModel.id);
 				await session.prompt("return structured output");
 				expect(session.getActiveToolNames()).toEqual(["yield"]);
 				const init = session.sessionManager.getBranch().findLast(entry => entry.type === "session_init");
