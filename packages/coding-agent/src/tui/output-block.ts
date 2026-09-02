@@ -3,7 +3,6 @@
  */
 import type { Component } from "@oh-my-pi/pi-tui";
 import { ImageProtocol, padding, TERMINAL, visibleWidth, wrapTextWithAnsi } from "@oh-my-pi/pi-tui";
-import { isOpencodeLayout } from "../modes/layout-mode";
 import type { Theme, ThemeColor } from "../modes/theme/theme";
 import { getSixelLineMask } from "../utils/sixel";
 import type { State } from "./types";
@@ -19,6 +18,9 @@ export interface OutputBlockOptions {
 	applyBg?: boolean;
 	contentPaddingLeft?: number;
 	contentPaddingRight?: number;
+	/** Render flat (opencode layout): no frame, no borders, no state background.
+	 * Tool renderers resolve this from their render context's `flat` flag. */
+	flat?: boolean;
 	/** Override the state-derived border color. Used for muted "legacy" tool
 	 * frames that should not visually compete with framed-output tools. */
 	borderColor?: ThemeColor;
@@ -50,27 +52,31 @@ function normalizeContentPaddingLeft(value: number | undefined): number {
 
 /**
  * Inner content width that {@link renderOutputBlock} wraps its body to, for a
- * given outer `width`: both vertical borders plus symmetric content padding.
- * An explicit left padding of zero keeps legacy flush blocks flush on both
- * sides unless a right padding is provided separately.
+ * given outer `width`. Framed (default): both vertical borders plus symmetric
+ * content padding. Flat (opencode layout): the two-column indent only. An
+ * explicit left padding of zero keeps legacy flush blocks flush on both sides
+ * unless a right padding is provided separately.
  */
 export function outputBlockContentWidth(
 	width: number,
+	flat?: boolean,
 	contentPaddingLeft?: number,
 	contentPaddingRight?: number,
 ): number {
+	if (flat) return Math.max(1, width - 2);
 	const left = normalizeContentPaddingLeft(contentPaddingLeft);
 	const right = normalizeContentPaddingLeft(contentPaddingRight ?? left);
 	return Math.max(1, width - 2 - left - right);
 }
 
 export function renderOutputBlock(options: OutputBlockOptions, theme: Theme): string[] {
-	// Opencode layout: no frame at all. The header renders as a plain status
-	// row (ToolExecutionComponent's collapsed view slices exactly this row) and
-	// section content renders flat, indented two columns, with no background
-	// tint. Every framed tool (bash, eval, read, fetch, task, …) routes through
-	// here, so this single branch is what makes the whole transcript flat.
-	if (isOpencodeLayout()) {
+	// Flat (opencode layout): no frame at all. The header renders as a plain
+	// status row (ToolExecutionComponent's collapsed view slices exactly this
+	// row) and section content renders flat, indented two columns, with no
+	// background tint. Every framed tool (bash, eval, read, fetch, task, …)
+	// routes through here, so this single branch is what makes the whole
+	// transcript flat.
+	if (options.flat) {
 		const flatWidth = Math.max(0, options.width);
 		const lines: string[] = [];
 		const labelText = [options.header, options.headerMeta].filter(Boolean).join(theme.sep.dot);
@@ -258,7 +264,7 @@ export class CachedOutputBlock {
 		const h = new Hasher();
 		h.u32(options.width);
 		// A live layout toggle changes the rendered shape for identical options.
-		h.bool(isOpencodeLayout());
+		h.bool(options.flat ?? false);
 		h.u32(normalizeContentPaddingLeft(options.contentPaddingLeft));
 		h.u32(
 			normalizeContentPaddingLeft(

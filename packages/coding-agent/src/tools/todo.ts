@@ -1167,6 +1167,7 @@ export const todoToolRenderer = {
 				state: "error",
 				borderColor: "error",
 				width,
+				flat: options.renderContext?.flat === true,
 			}));
 		}
 
@@ -1266,6 +1267,7 @@ export const todoToolRenderer = {
 				borderColor: "borderMuted",
 				applyBg: false,
 				width,
+				flat: options.renderContext?.flat === true,
 			};
 		});
 	},

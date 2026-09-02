@@ -35,6 +35,7 @@ import {
 } from "@oh-my-pi/pi-tui";
 import type { MessageRenderer } from "../../extensibility/extensions/types";
 import type { SessionMessageEntry } from "../../session/session-entries";
+import type { LayoutMode } from "../layout-mode";
 import { theme } from "../theme/theme";
 import {
 	matchesAppToolsExpand,
@@ -64,6 +65,8 @@ export interface BranchVariantPath {
 }
 
 export interface RewindSelectorDeps {
+	/** Owning mode's transcript layout accessor (replicated transcript matches the live one). */
+	layout?: () => LayoutMode;
 	ui: TUI;
 	getTool?: (name: string) => AgentTool | undefined;
 	/** Whether the active registry entry came from a built-in factory. */
@@ -149,6 +152,7 @@ export class RewindSelectorComponent implements Component {
 			hideThinkingBlock: this.deps.hideThinkingBlock,
 			proseOnlyThinking: this.deps.proseOnlyThinking,
 			requestRender: this.deps.requestRender,
+			layout: this.deps.layout,
 		});
 	}
 

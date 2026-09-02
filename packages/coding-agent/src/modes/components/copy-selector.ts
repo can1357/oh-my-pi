@@ -21,6 +21,7 @@ import {
 import type { MessageRenderer } from "../../extensibility/extensions/types";
 import type { SessionMessageEntry } from "../../session/session-entries";
 import { replaceTabs } from "../../tools/render-utils";
+import type { LayoutMode } from "../layout-mode";
 import { highlightCode, type ThemeColor, theme } from "../theme/theme";
 import { commandFromToolCall, extractBlocks } from "../utils/copy-targets";
 import {
@@ -42,6 +43,8 @@ import {
 } from "./transcript-outline";
 
 export interface CopySelectorDeps {
+	/** Owning mode's transcript layout accessor (replicated transcript matches the live one). */
+	layout?: () => LayoutMode;
 	ui: TUI;
 	getTool?: (name: string) => AgentTool | undefined;
 	/** Whether the active registry entry came from a built-in factory. */
@@ -100,6 +103,7 @@ export class CopySelectorComponent implements Component {
 			hideThinkingBlock: deps.hideThinkingBlock,
 			proseOnlyThinking: deps.proseOnlyThinking,
 			requestRender: deps.requestRender,
+			layout: deps.layout,
 		});
 		this.#targets = appendOutlineEntries(this.#builder, entries);
 		this.#selected = Math.max(0, this.#targets.length - 1);

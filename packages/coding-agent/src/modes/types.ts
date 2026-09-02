@@ -41,6 +41,7 @@ import type { TranscriptContainer } from "./components/transcript-container";
 import type { RecentSession } from "./components/welcome";
 import type { EventController } from "./controllers/event-controller";
 import type { LoopLimitRuntime } from "./loop-limit";
+import type { LayoutMode } from "./layout-mode";
 import type { OAuthManualInputManager } from "./oauth-manual-input";
 import type { Theme } from "./theme/theme";
 
@@ -191,6 +192,13 @@ export interface InteractiveModeContext {
 	loopLimit?: LoopLimitRuntime;
 	planModePlanFilePath?: string;
 	hideThinkingBlock: boolean;
+	/**
+	 * Per-mode transcript layout (`display.layout`). Owned by the mode instance:
+	 * seeded from settings at construction, mutated by the settings selector and
+	 * the setup wizard. Components capture `() => ctx.layoutMode` at
+	 * construction, so two live modes never share layout state.
+	 */
+	layoutMode: LayoutMode;
 	/**
 	 * Effective thinking-block visibility: true when hidden by user setting OR
 	 * thinking level is "off" before the session has produced displayable

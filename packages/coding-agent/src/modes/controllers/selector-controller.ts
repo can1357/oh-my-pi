@@ -111,7 +111,7 @@ import { TranscriptBlock } from "../components/transcript-container";
 import { TreeSelectorComponent } from "../components/tree-selector";
 import { UsageDashboardComponent } from "../components/usage-dashboard";
 import { renderUsageReports } from "./command-controller";
-import { type LayoutMode, setLayoutMode } from "../layout-mode";
+import type { LayoutMode } from "../layout-mode";
 import type { SessionObserverRegistry } from "../session-observer-registry";
 
 const MANUAL_LOGIN_PROMPT = "Paste the authorization code (or full redirect URL), then press Enter:";
@@ -672,7 +672,7 @@ export class SelectorController {
 				this.ctx.ui.requestRender();
 				break;
 			case "display.layout":
-				setLayoutMode(value as LayoutMode);
+				this.ctx.layoutMode = value as LayoutMode;
 				// Rebuild re-creates every transcript component under the new layout
 				// (tool blocks, read groups, user gutters); full reset retires blocks
 				// already committed to native scrollback (mirrors collapseCompacted).
@@ -1283,6 +1283,7 @@ export class SelectorController {
 			hideThinkingBlock: () => this.ctx.effectiveHideThinkingBlock,
 			proseOnlyThinking: () => this.ctx.proseOnlyThinking,
 			requestRender: () => this.ctx.ui.requestRender(),
+			layout: () => this.ctx.layoutMode,
 			siblingPaths: entryId => this.#siblingBranchPaths(entryId),
 			onSelect: entryId => void this.#rewindFromTranscript(entryId, done),
 			onCancel: done,
@@ -1440,6 +1441,7 @@ export class SelectorController {
 			hideThinkingBlock: () => this.ctx.effectiveHideThinkingBlock,
 			proseOnlyThinking: () => this.ctx.proseOnlyThinking,
 			requestRender: () => this.ctx.ui.requestRender(),
+			layout: () => this.ctx.layoutMode,
 			onPick: (content, label) => {
 				done();
 				if (!content.trim()) {
@@ -2360,6 +2362,7 @@ export class SelectorController {
 			cwd: this.ctx.sessionManager.getCwd(),
 			hideThinkingBlock: () => this.ctx.effectiveHideThinkingBlock,
 			proseOnlyThinking: () => this.ctx.proseOnlyThinking,
+			layout: () => this.ctx.layoutMode,
 			focusAgent: id => this.ctx.focusAgentSession(id),
 			sessionFile: this.ctx.sessionManager.getSessionFile() ?? null,
 		});

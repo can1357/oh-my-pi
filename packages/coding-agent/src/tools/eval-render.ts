@@ -458,6 +458,7 @@ function formatCellOutputLines(
 	previewLines: number,
 	theme: Theme,
 	width: number,
+	flat: boolean,
 ): { lines: readonly string[]; hiddenCount: number } {
 	if (!cell.output) {
 		return { lines: [], hiddenCount: 0 };
@@ -468,7 +469,7 @@ function formatCellOutputLines(
 	// at that width so a long-line tail can't wrap into more rows than budgeted
 	// and scroll its mutating preview above the live-region window — the
 	// duplicate "ctrl+o to expand" scrollback spray.
-	const innerWidth = outputBlockContentWidth(width);
+	const innerWidth = outputBlockContentWidth(width, flat);
 
 	if (cell.hasMarkdown && cell.status !== "error") {
 		const md = new Markdown(cell.output, 0, 0, getMarkdownTheme());
@@ -508,7 +509,8 @@ export const evalToolRenderer = {
 
 		return markFramedBlockComponent({
 			render: (width: number): readonly string[] => {
-				const key = `${options.expanded ? 1 : 0}|${options.spinnerFrame ?? "-"}|${previewWindowRows()}|${cells.map(c => `${c.language}:${c.title ?? ""}:${c.code.length}`).join("|")}`;
+				const flat = options.renderContext?.flat === true;
+				const key = `${options.expanded ? 1 : 0}|${options.spinnerFrame ?? "-"}|${flat ? 1 : 0}|${previewWindowRows()}|${cells.map(c => `${c.language}:${c.title ?? ""}:${c.code.length}`).join("|")}`;
 				if (cached && cached.key === key && cached.width === width) {
 					return cached.result;
 				}
@@ -527,6 +529,7 @@ export const evalToolRenderer = {
 							status: options.spinnerFrame !== undefined ? "running" : "pending",
 							spinnerFrame: options.spinnerFrame,
 							width,
+							flat,
 							// Viewport-sized tail window following the newest streamed code
 							// line; renderResult keeps the same cap so the cell never snaps
 							// open on completion. Only ctrl+o uncaps.
@@ -606,7 +609,8 @@ export const evalToolRenderer = {
 						options.renderContext?.previewLines ?? EVAL_DEFAULT_PREVIEW_LINES,
 						previewWindowRows(),
 					);
-					const key = `${expanded}|${previewLines}|${options.spinnerFrame}|${previewWindowRows()}`;
+					const flat = options.renderContext?.flat === true;
+					const key = `${expanded}|${previewLines}|${options.spinnerFrame}|${flat ? 1 : 0}|${previewWindowRows()}`;
 					if (cached && cached.key === key && cached.width === width) {
 						return cached.result;
 					}
@@ -618,7 +622,7 @@ export const evalToolRenderer = {
 						const agentEvents = allEvents.filter(e => e.op === "agent");
 						const otherEvents = agentEvents.length > 0 ? allEvents.filter(e => e.op !== "agent") : allEvents;
 						const statusLines = renderStatusEvents(otherEvents, uiTheme, expanded);
-						const outputContent = formatCellOutputLines(cell, expanded, previewLines, uiTheme, width);
+						const outputContent = formatCellOutputLines(cell, expanded, previewLines, uiTheme, width, flat);
 						const outputLines = [...outputContent.lines];
 						if (!expanded && outputContent.hiddenCount > 0) {
 							outputLines.push(
@@ -651,6 +655,7 @@ export const evalToolRenderer = {
 								codeMaxLines: previewWindowRows(),
 								expanded,
 								width,
+								flat,
 							},
 							uiTheme,
 						);

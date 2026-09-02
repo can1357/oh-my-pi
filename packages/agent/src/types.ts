@@ -700,6 +700,12 @@ export interface RenderResultOptions {
 	isPartial: boolean;
 	/** Current spinner frame index for animated elements (optional) */
 	spinnerFrame?: number;
+	/**
+	 * Host-supplied render context. The coding agent's transcript always sets
+	 * `flat: boolean` (opencode-layout flag) and tools may receive extra fields
+	 * (bash output, edit previews, …).
+	 */
+	renderContext?: Record<string, unknown>;
 }
 
 /** Capability tier a tool exercises. Determines which approval modes auto-approve it. */

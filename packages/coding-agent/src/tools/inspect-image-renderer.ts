@@ -85,6 +85,7 @@ export const inspectImageToolRenderer = {
 					borderColor: "error",
 					applyBg: false,
 					width,
+					flat: options.renderContext?.flat === true,
 				};
 			});
 		}
@@ -126,6 +127,7 @@ export const inspectImageToolRenderer = {
 				borderColor: "borderMuted",
 				applyBg: false,
 				width,
+				flat: options.renderContext?.flat === true,
 			};
 		});
 	},

@@ -125,6 +125,7 @@ function renderComputerCell(
 			borderColor: isError ? "error" : "borderMuted",
 			applyBg: false,
 			width,
+			flat: options.renderContext?.flat === true,
 		};
 	});
 }

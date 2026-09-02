@@ -1592,6 +1592,8 @@ function renderContentPreview(
 /** Render context for the write tool: resolves an `xd://`-mounted tool so its live renderer drives device dispatch previews. */
 export interface WriteRenderContext {
 	resolveXdevMounted?: (name: string) => AgentTool | undefined;
+	/** Flat opencode layout (owning mode); forwarded to renderOutputBlock. */
+	flat?: boolean;
 }
 
 export const writeToolRenderer = {
@@ -1680,6 +1682,7 @@ export const writeToolRenderer = {
 				state: "pending",
 				borderColor: "borderMuted",
 				width,
+				flat: options?.renderContext?.flat === true,
 			};
 		});
 	},
@@ -1723,6 +1726,7 @@ export const writeToolRenderer = {
 				state: "error",
 				borderColor: "error",
 				width,
+				flat: options.renderContext?.flat === true,
 			}));
 		}
 
@@ -1776,6 +1780,7 @@ export const writeToolRenderer = {
 				state: isPartial ? "pending" : "success",
 				borderColor: "borderMuted",
 				width,
+				flat: options.renderContext?.flat === true,
 			};
 		});
 	},

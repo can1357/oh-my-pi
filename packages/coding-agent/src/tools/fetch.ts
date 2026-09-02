@@ -1815,7 +1815,16 @@ export function renderReadUrlResult(
 		const outputBlock = new CachedOutputBlock();
 		return markFramedBlockComponent({
 			render: (width: number) =>
-				outputBlock.render({ header, state: "error", sections: [{ lines: errorLines }], width }, uiTheme),
+				outputBlock.render(
+					{
+						header,
+						state: "error",
+						sections: [{ lines: errorLines }],
+						width,
+						flat: options.renderContext?.flat === true,
+					},
+					uiTheme,
+				),
 			invalidate: () => outputBlock.invalidate(),
 		});
 	}
@@ -1898,6 +1907,7 @@ export function renderReadUrlResult(
 					],
 					width,
 					applyBg: false,
+					flat: options.renderContext?.flat === true,
 				},
 				uiTheme,
 			);

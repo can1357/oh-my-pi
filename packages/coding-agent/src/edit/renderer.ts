@@ -167,6 +167,8 @@ export interface EditRenderContext {
 	editStreamingFallback?: string;
 	/** Function to render diff text with syntax highlighting */
 	renderDiff?: (diffText: string, options?: { filePath?: string }) => string;
+	/** Flat opencode layout (owning mode); forwarded to renderOutputBlock. */
+	flat?: boolean;
 }
 
 const EDIT_STREAMING_PREVIEW_LINES = 12;
@@ -919,6 +921,7 @@ export const editToolRenderer = {
 				borderColor: applyPatchError ? "error" : "borderMuted",
 				width,
 				contentPaddingLeft: 0,
+				flat: options.renderContext?.flat === true,
 			};
 		});
 	},
@@ -1092,6 +1095,7 @@ function renderSingleFileResult(
 			borderColor: isError ? "error" : "borderMuted",
 			width,
 			contentPaddingLeft: 0,
+			flat: renderContext?.flat === true,
 		};
 	});
 }

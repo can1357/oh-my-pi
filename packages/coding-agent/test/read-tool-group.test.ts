@@ -356,6 +356,77 @@ describe("ReadToolGroupComponent", () => {
 		expect(extractLinkTexts(rendered)).toContain("src/preview.ts");
 		expect(extractLinkTexts(rendered)).not.toContain("src/preview.ts:20-22");
 	});
+	it("keeps failed grouped reads full-detail in the flat opencode layout", () => {
+		const component = new ReadToolGroupComponent({ layout: () => "opencode" });
+		component.updateArgs({ path: "/tmp/ok.ts" }, "read-ok");
+		component.updateResult({ content: [{ type: "text", text: "line 1\nline 2" }] }, false, "read-ok");
+		component.updateArgs({ path: "/tmp/missing.ts" }, "read-fail");
+		component.updateResult(
+			{ content: [{ type: "text", text: "ENOENT: no such file or directory" }], isError: true },
+			false,
+			"read-fail",
+		);
+
+		const rendered = Bun.stripANSI(component.render(120).join("\n"));
+
+		// Successful reads collapse to their one-line flat row…
+		expect(rendered).toContain("→ Read /tmp/ok.ts");
+		expect(rendered).not.toContain("line 1");
+		// …but a failed read keeps its actionable error message visible.
+		expect(rendered).toContain("Read /tmp/missing.ts");
+		expect(rendered).toContain("ENOENT: no such file or directory");
+	});
+
+	it("keeps selector line targets on flat opencode row hyperlinks", () => {
+		settings.override("tui.hyperlinks", "always");
+		const component = new ReadToolGroupComponent({ layout: () => "opencode" });
+		const examplePath = path.resolve("/workspace/src/example.ts");
+		component.updateArgs({ path: "src/example.ts:50-70" }, "read-flat-link");
+		component.updateResult(
+			{
+				content: [{ type: "text", text: "line 50" }],
+				details: { meta: { source: { type: "path", value: examplePath } } },
+			},
+			false,
+			"read-flat-link",
+		);
+
+		const rendered = component.render(120).join("\n");
+
+		const exampleUri = new URL(url.pathToFileURL(examplePath).href);
+		exampleUri.searchParams.set("line", "50");
+		expect(Bun.stripANSI(rendered)).toContain("Read src/example.ts:50-70");
+		expect(extractLinkUris(rendered)).toContain(exampleUri.href);
+	});
+
+	it("truncates over-wide flat opencode rows to a single line", () => {
+		const component = new ReadToolGroupComponent({ layout: () => "opencode" });
+		const longPath = `/tmp/${"deeply-nested-".repeat(12)}dir/file\twith-tabs.ts`;
+		component.updateArgs({ path: longPath }, "read-wide");
+		component.updateResult({ content: [{ type: "text", text: "content" }] }, false, "read-wide");
+
+		const lines = component.render(40);
+
+		// The advertised one-line entry stays one line at the render width, with
+		// tabs sanitized so a pathological path cannot wrap or corrupt the row.
+		expect(lines).toHaveLength(1);
+		expect(Bun.stringWidth(Bun.stripANSI(lines[0]!))).toBeLessThanOrEqual(40);
+		expect(lines[0]!).not.toContain("\t");
+	});
+
+	it("restores the grouped view when the flat group is expanded", () => {
+		const component = new ReadToolGroupComponent({ layout: () => "opencode" });
+		component.updateArgs({ path: "/tmp/a.ts" }, "read-a");
+		component.updateResult({ content: [{ type: "text", text: "alpha" }] }, false, "read-a");
+		component.updateArgs({ path: "/tmp/b.ts" }, "read-b");
+		component.updateResult({ content: [{ type: "text", text: "beta" }] }, false, "read-b");
+
+		expect(Bun.stripANSI(component.render(120).join("\n"))).toContain("→ Read /tmp/a.ts");
+
+		component.setExpanded(true);
+		const grouped = Bun.stripANSI(component.render(120).join("\n"));
+		expect(grouped).toContain("Read (2)");
+	});
 });
 
 describe("readArgsCollapseIntoGroup", () => {

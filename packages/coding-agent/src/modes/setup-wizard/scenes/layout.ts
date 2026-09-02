@@ -1,6 +1,6 @@
 import { routeSelectListMouse, type SelectItem, SelectList, type SgrMouseEvent } from "@oh-my-pi/pi-tui";
 import { formatStatusIcon } from "../../../tools/render-utils";
-import { type LayoutMode, setLayoutMode } from "../../layout-mode";
+import type { LayoutMode } from "../../layout-mode";
 import { getSelectListTheme, theme } from "../../theme/theme";
 import type { SetupScene, SetupSceneController, SetupSceneHost } from "./types";
 
@@ -54,7 +54,7 @@ class LayoutSceneController implements SetupSceneController {
 		this.#selectList.onSelect = item => {
 			const mode = item.value as LayoutMode;
 			this.host.ctx.settings.set("display.layout", mode);
-			setLayoutMode(mode);
+			this.host.ctx.layoutMode = mode;
 			this.host.finish("done");
 		};
 		this.#selectList.onCancel = () => this.host.finish("skipped");

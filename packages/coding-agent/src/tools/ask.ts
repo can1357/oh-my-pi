@@ -1279,12 +1279,13 @@ function renderAnswerOptionLines(
 
 export const askToolRenderer = {
 	mergeCallAndResult: true,
-	renderCall(args: AskRenderArgs, _options: RenderResultOptions, uiTheme: Theme): Component {
+	renderCall(args: AskRenderArgs, options: RenderResultOptions, uiTheme: Theme): Component {
 		const label = formatTitle("Ask", uiTheme);
 		const mdTheme = getMarkdownTheme();
 		const accentStyle = { color: (t: string) => uiTheme.fg("accent", t) };
+		const flat = options.renderContext?.flat === true;
 		const md = (text: string, width: number) =>
-			new Markdown(text, 1, 0, mdTheme, accentStyle).render(Math.max(1, outputBlockContentWidth(width) + 1));
+			new Markdown(text, 1, 0, mdTheme, accentStyle).render(Math.max(1, outputBlockContentWidth(width, flat) + 1));
 
 		// Multi-part questions: one divider-labelled section per question.
 		// Call args are untrusted (partially streamed or model-mangled) and a
@@ -1305,7 +1306,7 @@ export const askToolRenderer = {
 						: mdLines;
 					return { label: `${uiTheme.fg("dim", `[${q.id}]`)}${metaStr}`, lines };
 				});
-				return { header, sections, state: "pending", borderColor: "borderMuted", width };
+				return { header, sections, state: "pending", borderColor: "borderMuted", width, flat };
 			});
 		}
 
@@ -1318,6 +1319,7 @@ export const askToolRenderer = {
 				state: "error",
 				borderColor: "error",
 				width,
+				flat,
 			}));
 		}
 
@@ -1346,14 +1348,15 @@ export const askToolRenderer = {
 
 	renderResult(
 		result: { content: Array<{ type: string; text?: string }>; details?: AskToolDetails },
-		_options: RenderResultOptions,
+		options: RenderResultOptions,
 		uiTheme: Theme,
 	): Component {
 		const { details } = result;
 		const mdTheme = getMarkdownTheme();
 		const accentStyle = { color: (t: string) => uiTheme.fg("accent", t) };
+		const flat = options.renderContext?.flat === true;
 		const md = (text: string, width: number) =>
-			new Markdown(text, 1, 0, mdTheme, accentStyle).render(Math.max(1, outputBlockContentWidth(width) + 1));
+			new Markdown(text, 1, 0, mdTheme, accentStyle).render(Math.max(1, outputBlockContentWidth(width, flat) + 1));
 
 		if (!details) {
 			const txt = result.content[0];
@@ -1373,6 +1376,7 @@ export const askToolRenderer = {
 				state: "warning",
 				borderColor: "borderMuted",
 				width,
+				flat,
 			}));
 		}
 
@@ -1417,6 +1421,7 @@ export const askToolRenderer = {
 					state: hasAnySelection ? "success" : "warning",
 					borderColor: "borderMuted",
 					width,
+					flat,
 				};
 			});
 		}
@@ -1461,6 +1466,7 @@ export const askToolRenderer = {
 				state: hasSelection ? "success" : "warning",
 				borderColor: "borderMuted",
 				width,
+				flat,
 			};
 		});
 	},

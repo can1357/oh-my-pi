@@ -3,7 +3,7 @@ import { formatBytes } from "@oh-my-pi/pi-utils";
 import { getMarkdownTheme, theme } from "../../modes/theme/theme";
 import { attachmentSgr, collapseImageMarkers, renderPlaceholders } from "../composer-attachments";
 import { imageReferenceHyperlink } from "../image-references";
-import { isOpencodeLayout } from "../layout-mode";
+import type { LayoutMode } from "../layout-mode";
 import { highlightMagicKeywords } from "../magic-keywords";
 
 // OSC 133 shell integration: marks prompt zones for terminal multiplexers.
@@ -38,9 +38,17 @@ export class UserMessageComponent extends Container {
 	// never mutates the container's cached array.
 	#zoneSource: readonly string[] | undefined;
 	#zoneLines: string[] | undefined;
+	/** Owning mode's transcript layout; captured at construction (per-instance, never global). */
+	readonly #layout: (() => LayoutMode) | undefined;
 
-	constructor(text: string, synthetic = false, imageLinks?: readonly (string | undefined)[]) {
+	constructor(
+		text: string,
+		synthetic = false,
+		imageLinks?: readonly (string | undefined)[],
+		layout?: () => LayoutMode,
+	) {
 		super();
+		this.#layout = layout;
 		// Display-only collapse: the stored/wire text carries bracketed `[Image #N, WxH]` markers,
 		// but the transcript shows the same compact `<icon> #N` chip the composer used. Runs before
 		// Markdown layout so wrapping and bubble padding are computed on the visible text.
@@ -81,7 +89,7 @@ export class UserMessageComponent extends Container {
 		// Opencode layout: prefix a left accent gutter (opencode's signature user
 		// message chrome). Children render 2 columns narrower to make room, and
 		// the derived array is memoized on the source ref like the OSC zone wrap.
-		const gutter = isOpencodeLayout();
+		const gutter = this.#layout?.() === "opencode";
 		const lines = super.render(gutter ? Math.max(1, width - 2) : width);
 		if (lines.length === 0) {
 			return lines;
@@ -126,6 +134,7 @@ export class CollapsedSyntheticMessageComponent implements Component {
 	constructor(
 		private readonly text: string,
 		private readonly imageLinks?: readonly (string | undefined)[],
+		private readonly layout?: () => LayoutMode,
 	) {
 		this.#summary = summarizeSyntheticInput(text);
 	}
@@ -155,7 +164,7 @@ export class CollapsedSyntheticMessageComponent implements Component {
 	}
 
 	#renderExpanded(width: number): readonly string[] {
-		if (!this.#body) this.#body = new UserMessageComponent(this.text, true, this.imageLinks);
+		if (!this.#body) this.#body = new UserMessageComponent(this.text, true, this.imageLinks, this.layout);
 		return [` ${this.#summaryRow(width)}`, ...this.#body.render(width)];
 	}
 

@@ -878,6 +878,7 @@ export function renderCall(args: TaskParams, options: TaskRenderOptions, theme: 
 			state: "pending",
 			borderColor: "borderMuted",
 			width,
+			flat: options.renderContext?.flat === true,
 		};
 	});
 }
@@ -1515,6 +1516,7 @@ export function renderResult(
 			state: errored ? "error" : "success",
 			borderColor: errored ? "error" : "borderMuted",
 			width,
+			flat: options.renderContext?.flat === true,
 		}));
 	}
 
@@ -1682,6 +1684,7 @@ export function renderResult(
 			state,
 			borderColor,
 			width,
+			flat: options.renderContext?.flat === true,
 		};
 	});
 }

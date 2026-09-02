@@ -196,7 +196,7 @@ import { SSHCommandController } from "./controllers/ssh-command-controller";
 import { TanCommandController } from "./controllers/tan-command-controller";
 import { TodoCommandController } from "./controllers/todo-command-controller";
 import { imageReferenceHyperlink, materializeImageReferenceLinks } from "./image-references";
-import { setLayoutMode } from "./layout-mode";
+import type { LayoutMode } from "./layout-mode";
 import {
 	consumeLoopLimitIteration,
 	createLoopLimitRuntime,
@@ -618,6 +618,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	 */
 	#todoPhasesOwner?: AgentSession;
 	hideThinkingBlock = false;
+	/** Per-mode transcript layout (`display.layout`); see InteractiveModeContext.layoutMode. */
+	layoutMode: LayoutMode = "omp";
 	#sessionsWithDisplayableThinkingContent = new WeakSet<AgentSession>();
 	/** Whether the visible session has produced thinking content the user can reveal. */
 	get hasDisplayableThinkingContent(): boolean {
@@ -924,7 +926,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 
 		setTuiTight(settings.get("tui.tight"));
-		setLayoutMode(settings.get("display.layout"));
+		this.layoutMode = settings.get("display.layout");
 		setMarkdownMermaidRendering(settings.get("tui.renderMermaid"));
 		// A cold-start composer already owns the terminal. Reuse it so input
 		// buffered during startup remains in the same editor instance.

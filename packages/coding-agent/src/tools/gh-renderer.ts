@@ -364,7 +364,8 @@ function renderFallbackComponent(
 	}
 
 	return framedBlock(theme, width => {
-		const lineWidth = outputBlockContentWidth(width || FALLBACK_WIDTH);
+		const flat = options.renderContext?.flat === true;
+		const lineWidth = outputBlockContentWidth(width || FALLBACK_WIDTH, flat);
 		const expanded = options.expanded;
 		const limit = expanded ? allLines.length : Math.min(allLines.length, PREVIEW_LIMITS.OUTPUT_EXPANDED);
 		const visible = allLines.slice(0, limit);
@@ -386,6 +387,7 @@ function renderFallbackComponent(
 			state: isError ? "error" : "success",
 			borderColor: isError ? "error" : "borderMuted",
 			applyBg: false,
+			flat,
 			width,
 		};
 	});
@@ -464,7 +466,8 @@ export const githubToolRenderer = {
 				uiTheme,
 			);
 			return framedBlock(uiTheme, width => {
-				const innerWidth = outputBlockContentWidth(width || FALLBACK_WIDTH);
+				const flat = options.renderContext?.flat === true;
+				const innerWidth = outputBlockContentWidth(width || FALLBACK_WIDTH, flat);
 				const sections = buildWatchSections(watch, uiTheme, options, innerWidth);
 				return {
 					header,
@@ -472,6 +475,7 @@ export const githubToolRenderer = {
 					state: isError ? "error" : "success",
 					borderColor: isError ? "error" : "borderMuted",
 					applyBg: false,
+					flat,
 					width,
 				};
 			});

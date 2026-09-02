@@ -1470,6 +1470,8 @@ export interface BashRenderContext {
 	previewLines?: number;
 	/** Timeout in seconds */
 	timeout?: number;
+	/** Flat opencode layout (owning mode); forwarded to renderOutputBlock. */
+	flat?: boolean;
 }
 
 export interface ShellRendererConfig<TArgs> {
@@ -1550,6 +1552,7 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 							state: options.spinnerFrame !== undefined ? "running" : "pending",
 							sections: [{ lines: capPreviewLines(cmdLines, uiTheme, { expanded: options.expanded }) }],
 							width,
+							flat: options.renderContext?.flat === true,
 						},
 						uiTheme,
 					);
@@ -1610,6 +1613,7 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 			let cachedIsPartial: boolean | undefined;
 			let cachedLines: readonly string[] | undefined;
 			let cachedPreviewWindow: number | undefined;
+			let cachedFlat: boolean | undefined;
 
 			return markFramedBlockComponent({
 				render: (width: number): readonly string[] => {
@@ -1626,6 +1630,7 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 					const isPartial = options.isPartial === true;
 					const previewWindow = previewWindowRows();
 
+					const flat = renderContext?.flat === true;
 					if (
 						cachedLines !== undefined &&
 						cachedWidth === width &&
@@ -1633,7 +1638,8 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 						cachedExpanded === expanded &&
 						cachedRawOutput === rawOutput &&
 						cachedIsPartial === isPartial &&
-						cachedPreviewWindow === previewWindow
+						cachedPreviewWindow === previewWindow &&
+						cachedFlat === flat
 					) {
 						return cachedLines;
 					}
@@ -1713,7 +1719,11 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 							// spraying duplicate "… ctrl+o to expand" banners into native
 							// scrollback (the box never overflows the viewport now).
 							const previewBudget = Math.min(previewLines, previewWindow);
-							const result = truncateToVisualLines(textContent, previewBudget, outputBlockContentWidth(width));
+							const result = truncateToVisualLines(
+								textContent,
+								previewBudget,
+								outputBlockContentWidth(width, flat),
+							);
 							if (result.skippedCount > 0) {
 								outputLines.push(
 									uiTheme.fg(
@@ -1741,11 +1751,13 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 								{ label: uiTheme.fg("toolTitle", "Output"), lines: outputLines },
 							],
 							width,
+							flat,
 						},
 						uiTheme,
 					);
 
 					cachedWidth = width;
+					cachedFlat = flat;
 					cachedPreviewLines = previewLines;
 					cachedExpanded = expanded;
 					cachedRawOutput = rawOutput;

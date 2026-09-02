@@ -290,7 +290,12 @@ export class UiHelpers {
 								message,
 								this.ctx.viewSession.sessionManager.putBlobSync.bind(this.ctx.viewSession.sessionManager),
 							);
-						userComponent = new UserMessageComponent(textContent, isSynthetic, imageLinks);
+						userComponent = new UserMessageComponent(
+							textContent,
+							isSynthetic,
+							imageLinks,
+							() => this.ctx.layoutMode,
+						);
 						this.ctx.transcriptMessageComponents.set(message, userComponent);
 					}
 					this.ctx.chatContainer.addChild(userComponent);
@@ -530,6 +535,7 @@ export class UiHelpers {
 							if (!readGroup) {
 								readGroup = new ReadToolGroupComponent({
 									showContentPreview: this.ctx.settings.get("read.toolResultPreview"),
+									layout: () => this.ctx.layoutMode,
 								});
 								readGroup.setExpanded(this.ctx.toolOutputExpanded);
 								this.ctx.chatContainer.addChild(readGroup);
@@ -544,6 +550,7 @@ export class UiHelpers {
 							if (!readGroup) {
 								readGroup = new ReadToolGroupComponent({
 									showContentPreview: this.ctx.settings.get("read.toolResultPreview"),
+									layout: () => this.ctx.layoutMode,
 								});
 								readGroup.setExpanded(this.ctx.toolOutputExpanded);
 								this.ctx.chatContainer.addChild(readGroup);
@@ -590,6 +597,7 @@ export class UiHelpers {
 							showImages: settings.get("terminal.showImages"),
 							editFuzzyThreshold: settings.get("edit.fuzzyThreshold"),
 							editAllowFuzzy: settings.get("edit.fuzzyMatch"),
+							layout: () => this.ctx.layoutMode,
 						},
 						tool,
 						this.ctx.ui,
@@ -657,6 +665,7 @@ export class UiHelpers {
 						if (!readGroup) {
 							readGroup = new ReadToolGroupComponent({
 								showContentPreview: this.ctx.settings.get("read.toolResultPreview"),
+								layout: () => this.ctx.layoutMode,
 							});
 							readGroup.setExpanded(this.ctx.toolOutputExpanded);
 							this.ctx.chatContainer.addChild(readGroup);

@@ -35,7 +35,7 @@ import type { XdevState } from "../../tools/xdev";
 import { isFramedBlockComponent, markFramedBlockComponent, renderStatusLine, WidthAwareText } from "../../tui";
 import { convertImageToPng } from "../../utils/image-loading";
 import { sanitizeWithOptionalSixelPassthrough } from "../../utils/sixel";
-import { isOpencodeLayout } from "../layout-mode";
+import type { LayoutMode } from "../layout-mode";
 
 import { renderDiff } from "./diff";
 import { type AnimationFrame, trimBlankEdges } from "./transcript-container";
@@ -259,6 +259,8 @@ export interface ToolExecutionOptions {
 	useBuiltInRenderer?: boolean;
 	editFuzzyThreshold?: number;
 	editAllowFuzzy?: boolean;
+	/** Owning mode's transcript layout; captured at construction (per-instance, never global). */
+	layout?: () => LayoutMode;
 }
 
 export interface ToolExecutionHandle extends Component {
@@ -371,6 +373,7 @@ export class ToolExecutionComponent extends Container {
 	#showImages: boolean;
 	#editFuzzyThreshold: number | undefined;
 	#editAllowFuzzy: boolean | undefined;
+	#layout: (() => LayoutMode) | undefined;
 	#snapshots?: SnapshotStore;
 	#clipboard?: Clipboard;
 	#isPartial = true;
@@ -484,6 +487,7 @@ export class ToolExecutionComponent extends Container {
 		this.#showImages = options.showImages ?? true;
 		this.#editFuzzyThreshold = options.editFuzzyThreshold;
 		this.#editAllowFuzzy = options.editAllowFuzzy;
+		this.#layout = options.layout;
 		this.#snapshots = options.snapshots;
 		this.#clipboard = options.clipboard;
 		this.#tool = tool;
@@ -996,7 +1000,7 @@ export class ToolExecutionComponent extends Container {
 		// TUI startup, so a result rendered before it lands must re-shape once it
 		// does (it gates Image children vs text fallback in #rebuildDisplay); keyed
 		// here for the same reason markdown.ts keys its render cache on it.
-		const key = `${this.#resultVersion}|${this.#expanded}|${this.#isPartial}|${this.#argsComplete ? "1" : "0"}|${this.#executionStarted ? "1" : "0"}|${this.#spinnerFrame ?? "-"}|${this.#showImages}|${getThemeEpoch()}|${this.#displayInputVersion}|${TERMINAL.imageProtocol ?? "-"}|${this.#imageSizeKey()}|${isOpencodeLayout() ? "oc" : "omp"}`;
+		const key = `${this.#resultVersion}|${this.#expanded}|${this.#isPartial}|${this.#argsComplete ? "1" : "0"}|${this.#executionStarted ? "1" : "0"}|${this.#spinnerFrame ?? "-"}|${this.#showImages}|${getThemeEpoch()}|${this.#displayInputVersion}|${TERMINAL.imageProtocol ?? "-"}|${this.#imageSizeKey()}|${this.#isFlat() ? "oc" : "omp"}`;
 		if (key === this.#lastDisplayKey && this.#displayBuilt) return;
 		this.#lastDisplayKey = key;
 
@@ -1058,7 +1062,7 @@ export class ToolExecutionComponent extends Container {
 		// the header even for self-framing renderers). Errors stay full-size —
 		// a one-line error hides the message the user needs — and Ctrl+O
 		// (`setExpanded`) restores the complete card.
-		const collapse = isOpencodeLayout() && !this.#expanded && !(this.#result?.isError && !this.#isBenignSkip());
+		const collapse = this.#isFlat() && !this.#expanded && !(this.#result?.isError && !this.#isBenignSkip());
 		if (!collapse) return lines;
 		if (this.#collapsedSource === lines && this.#collapsedLines !== undefined) {
 			return this.#collapsedLines;
@@ -1105,7 +1109,7 @@ export class ToolExecutionComponent extends Container {
 		);
 		// Opencode layout stays flat even under viewport squeeze: the 2-row
 		// `╭─`/`╰` frame is the omp look, so always use the one-line form there.
-		if (this.#allocation === 1 || isOpencodeLayout()) {
+		if (this.#allocation === 1 || this.#isFlat()) {
 			const glyph = this.#spinnerFrame === undefined ? "•" : (theme.spinnerFrames[this.#spinnerFrame] ?? "•");
 			const styledGlyph = theme.fg(this.#spinnerFrame === undefined ? "dim" : "muted", glyph);
 			return [truncateToWidth(`${styledGlyph} ${text}`, width)];
@@ -1169,7 +1173,7 @@ export class ToolExecutionComponent extends Container {
 		const benignSkip = this.#isBenignSkip();
 		const stateBgKey =
 			this.#isPartial || benignSkip ? "toolPendingBg" : this.#result?.isError ? "toolErrorBg" : "toolSuccessBg";
-		const stateBgFn = isOpencodeLayout() ? undefined : (t: string) => theme.bg(stateBgKey, t);
+		const stateBgFn = this.#isFlat() ? undefined : (t: string) => theme.bg(stateBgKey, t);
 
 		// A benign skip is a synthetic placeholder for a call that never executed,
 		// so bypass any bespoke error frame and draw the neutral generic card —
@@ -1473,11 +1477,18 @@ export class ToolExecutionComponent extends Container {
 		return { ...(renderArgs as Record<string, unknown>), previewDiff: first.diff };
 	}
 
+	/** Flat opencode layout, resolved through the owning mode's accessor. */
+	#isFlat(): boolean {
+		return this.#layout?.() === "opencode";
+	}
 	/**
 	 * Build render context for tools that need extra state (bash, python, edit)
 	 */
 	#buildRenderContext(): Record<string, unknown> {
 		const context: Record<string, unknown> = {};
+		// Every framed renderer folds this into its `renderOutputBlock` options —
+		// the flat/framed choice must come from the owning mode, never a global.
+		context.flat = this.#isFlat();
 		const normalizeTimeoutSeconds = (value: unknown, maxSeconds: number): number | undefined => {
 			if (typeof value !== "number" || !Number.isFinite(value)) return undefined;
 			return Math.max(1, Math.min(maxSeconds, value));
