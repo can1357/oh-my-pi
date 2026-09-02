@@ -198,6 +198,39 @@ describe("MarketplaceManager", () => {
 		}
 	});
 
+	it("addMarketplace force repoint with local source → restores the old catalog when the registry write fails", async () => {
+		await ctx.manager.addMarketplace(FIXTURE_DIR);
+		const catalogPath = path.join(ctx.tmpDir, "cache", "marketplaces", "test-marketplace", "marketplace.json");
+		const oldCatalog = fs.readFileSync(catalogPath, "utf8");
+
+		// Same catalog name, new location, distinguishable content.
+		const movedDir = buildMinimalFixture();
+		try {
+			const movedCatalogPath = path.join(movedDir, ".claude-plugin", "marketplace.json");
+			const movedCatalog = JSON.parse(fs.readFileSync(movedCatalogPath, "utf8"));
+			movedCatalog.metadata.description = "moved";
+			fs.writeFileSync(movedCatalogPath, JSON.stringify(movedCatalog));
+
+			// The registry lives directly in tmpDir; a read-only tmpDir blocks its
+			// atomic temp-file write while the existing catalog file below stays
+			// overwritable.
+			fs.chmodSync(ctx.tmpDir, 0o555);
+			try {
+				await expect(ctx.manager.addMarketplace(movedDir, { force: true })).rejects.toThrow();
+			} finally {
+				fs.chmodSync(ctx.tmpDir, 0o755);
+			}
+
+			// Old catalog restored, registry still names the old source.
+			expect(fs.readFileSync(catalogPath, "utf8")).toBe(oldCatalog);
+			const list = await ctx.manager.listMarketplaces();
+			expect(list).toHaveLength(1);
+			expect(list[0].sourceUri).toBe(FIXTURE_DIR);
+		} finally {
+			removeSyncWithRetries(movedDir);
+		}
+	});
+
 	it("removeMarketplace → gone from list and catalog cache removed", async () => {
 		const entry = await ctx.manager.addMarketplace(FIXTURE_DIR);
 

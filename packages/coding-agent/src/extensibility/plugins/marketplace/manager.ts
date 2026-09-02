@@ -137,6 +137,12 @@ export class MarketplaceManager {
 		const catalogPath = path.resolve(
 			expandTilde(path.join(this.#opts.marketplacesCacheDir, catalog.name, "marketplace.json")),
 		);
+		// Non-git repoints have no clone to back up, but the catalog write below
+		// still replaces the old catalog in place. Snapshot it so a failed
+		// registry write can put it back — otherwise the new catalog goes live
+		// while the registry keeps naming the old source.
+		const prevCatalog =
+			replacing && !clonePath ? await fs.readFile(catalogPath, "utf8").catch(() => undefined) : undefined;
 
 		const now = new Date().toISOString();
 		const entry: MarketplaceRegistryEntry = {
@@ -159,6 +165,11 @@ export class MarketplaceManager {
 				// pointing at a repository that exists.
 				await fs.rm(finalDir, { recursive: true, force: true }).catch(() => {});
 				await fs.rename(backupDir, finalDir).catch(() => {});
+			} else if (replacing && !clonePath) {
+				// Same for non-git sources: undo the catalog write so it stays
+				// consistent with the registry, which still names the old source.
+				if (prevCatalog !== undefined) await fs.writeFile(catalogPath, prevCatalog).catch(() => {});
+				else await fs.rm(catalogPath, { force: true }).catch(() => {});
 			}
 			throw err;
 		}

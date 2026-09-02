@@ -1065,7 +1065,7 @@ ${chalk.bold("Config Subcommands:")}
 ${chalk.bold("Options:")}
   --json           Output as JSON
   --fix            Attempt automatic fixes (doctor)
-  --force          Overwrite without prompting (install)
+  --force          Overwrite without prompting (install); repoint an existing marketplace (marketplace add)
   --scope <scope>  Install scope: user (default) or project (install name@marketplace)
   --dry-run        Preview changes without applying (install)
   -l, --local      Use project-local overrides
