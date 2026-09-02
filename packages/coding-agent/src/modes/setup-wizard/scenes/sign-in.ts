@@ -139,8 +139,26 @@ export class SignInTab implements SetupTab {
 
 	render(width: number, maxLines?: number): readonly string[] {
 		const lines: string[] = [];
+		const promptLines = (() => {
+			if (!this.#prompt || maxLines === 0) return [];
+			const input = this.#prompt.input.render(width)[0] ?? "";
+			const details = [
+				theme.fg("warning", this.#prompt.message),
+				...(this.#prompt.placeholder ? [theme.fg("dim", this.#prompt.placeholder)] : []),
+			];
+			return maxLines === undefined ? [...details, input] : [...details.slice(0, Math.max(0, maxLines - 1)), input];
+		})();
+		const fitsBeforePrompt = (rowCount: number): boolean =>
+			maxLines === undefined || lines.length + rowCount + promptLines.length <= maxLines;
+		const pushBeforePrompt = (line: string): boolean => {
+			if (!fitsBeforePrompt(1)) return false;
+			lines.push(line);
+			return true;
+		};
 		if (this.#loggingInProvider) {
-			lines.push(theme.bold(`Signing in to ${this.#loggingInProvider}`));
+			if (maxLines === undefined || (!this.#prompt && !this.#authUrl)) {
+				pushBeforePrompt(theme.bold(`Signing in to ${this.#loggingInProvider}`));
+			}
 		} else {
 			// Hint + blank cost two rows; the wizard subtitle already explains
 			// this panel, so on short screens the rows go to the provider list
@@ -163,37 +181,36 @@ export class SignInTab implements SetupTab {
 		// for every machine where the browser handoff does not work, so it has
 		// to be the obvious one, unbroken and printed once.
 		if (this.#authUrl) {
-			lines.push(theme.fg("accent", `Browser login: ${loginUrlLink(this.#authUrl)} ${loginCopyHint()}`));
+			pushBeforePrompt(theme.fg("accent", `Browser login: ${loginUrlLink(this.#authUrl)} ${loginCopyHint()}`));
 			// Sits with the header rather than in `#statusLines`, which render
 			// below the URL block: on the short terminal this whole layout is
 			// about, a notice printed after a multi-row URL is the first thing
 			// the wizard clips, and a user who sees no browser and no
 			// explanation is exactly the state it exists to prevent.
 			if (this.#launchNotice) {
-				lines.push(theme.fg("dim", this.#launchNotice));
+				pushBeforePrompt(theme.fg("dim", this.#launchNotice));
 			}
 			// The byte-exact copy path that needs no terminal feature: a wrapped
 			// selection carries row breaks and padding, and OSC 52/OSC 8 are
-			// optional. A one-row file path survives any selection. When the agent
-			// dir pushes the command past the terminal width anyway, it wraps
-			// byte-complete by column (the outer #fitToScreen clamp would
-			// otherwise truncate the path into a nonexistent one).
+			// optional. The command can occupy several rows, so it must consume
+			// only rows left after the manual-code input. A clipped command is
+			// unusable, so replace it with an explicit clamp marker.
 			if (this.#authUrlFile) {
-				lines.push(
-					...wrapCommandRow(theme.fg("dim", `Clean copy: ${loginUrlCopyCommand(this.#authUrlFile)}`), width),
+				const commandRows = wrapCommandRow(
+					theme.fg("dim", `Clean copy: ${loginUrlCopyCommand(this.#authUrlFile)}`),
+					width,
 				);
+				if (fitsBeforePrompt(commandRows.length)) {
+					lines.push(...commandRows);
+				} else {
+					pushBeforePrompt(theme.fg("dim", "Clean copy: …"));
+				}
 			}
 			if (this.#authLaunchUrl) {
-				lines.push(theme.fg("dim", `Local shortcut (this machine only): ${this.#authLaunchUrl}`));
+				pushBeforePrompt(theme.fg("dim", `Local shortcut (this machine only): ${this.#authLaunchUrl}`));
 			}
 		}
-		if (this.#prompt) {
-			lines.push(theme.fg("warning", this.#prompt.message));
-			if (this.#prompt.placeholder) {
-				lines.push(theme.fg("dim", this.#prompt.placeholder));
-			}
-			lines.push(this.#prompt.input.render(width)[0] ?? "");
-		}
+		lines.push(...promptLines);
 		// Last, so a short terminal clips the tail of a string the user can also
 		// reach with Alt+C or the OSC 8 link, never the input they must type in.
 		if (this.#authUrl) {
@@ -202,7 +219,7 @@ export class SignInTab implements SetupTab {
 		if (this.#statusLines.length > 0) {
 			lines.push(...this.#statusLines.flatMap(line => wrapTextWithAnsi(line, width)));
 		}
-		return lines;
+		return maxLines === undefined ? lines : lines.slice(0, maxLines);
 	}
 
 	#createSelector(): OAuthSelectorComponent {

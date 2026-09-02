@@ -280,6 +280,16 @@ describe("SignInTab", () => {
 			for (const row of rows) {
 				expect(row.length).toBeLessThanOrEqual(width);
 			}
+
+			const compact = tab.render(width, 4).map(line => Bun.stripANSI(line).trim());
+			expect(compact).toHaveLength(4);
+			expect(compact.some(line => line.startsWith("Browser login: Open login URL"))).toBe(true);
+			expect(compact).toContain("Clean copy: …");
+			expect(compact).toContain("Paste the authorization code (or full redirect URL):");
+			expect(compact.at(-1)).toMatch(/^>/);
+
+			const inputOnly = tab.render(width, 1).map(line => Bun.stripANSI(line).trim());
+			expect(inputOnly).toEqual([">"]);
 		} finally {
 			tab.dispose();
 			loginGate.resolve();
@@ -338,6 +348,7 @@ describe("SignInTab", () => {
 			const urlIndex = plain.findIndex(line => line.startsWith("https://auth.example.com"));
 			expect(noticeIndex).toBeGreaterThanOrEqual(0);
 			expect(noticeIndex).toBeLessThan(urlIndex);
+			expect(Bun.stripANSI(tab.render(60, 1)[0] ?? "").trim()).toStartWith("Browser login:");
 		} finally {
 			tab.dispose();
 			loginGate.resolve();
