@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- GitHub failures now retain structured API diagnostics, identify failed file reads, and clarify Boolean search syntax.
+
 ## [18.1.3] - 2026-09-02
 
 ### Changed
