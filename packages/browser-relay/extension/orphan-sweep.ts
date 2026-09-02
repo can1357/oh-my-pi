@@ -80,10 +80,9 @@ export function orphanSweepAlarmDelayMinutes(
 export function restoreOrphanSweepDeadline(
 	storedDeadline: unknown,
 	isCurrent: boolean,
-): number | null {
-	return isCurrent &&
-		typeof storedDeadline === "number" &&
-		Number.isFinite(storedDeadline)
+): number | null | undefined {
+	if (!isCurrent) return undefined;
+	return typeof storedDeadline === "number" && Number.isFinite(storedDeadline)
 		? storedDeadline
 		: null;
 }

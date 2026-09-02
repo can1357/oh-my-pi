@@ -93,12 +93,11 @@ const recoverableReady = chrome.storage.session
 			recoverableStartupMutations,
 		);
 		recoverableStartupMutations.clear();
-		const deadline = stored[ORPHAN_SWEEP_DEADLINE_KEY];
-		const restoredDeadline = restoreOrphanSweepDeadline(
-			deadline,
+		const deadline = restoreOrphanSweepDeadline(
+			stored[ORPHAN_SWEEP_DEADLINE_KEY],
 			orphanSweepDeadlineGeneration === 0,
 		);
-		if (restoredDeadline !== null) orphanSweepDeadlineMs = restoredDeadline;
+		if (deadline !== undefined) orphanSweepDeadlineMs = deadline;
 	})
 	.catch(() => {});
 let recoverableUpdates: Promise<void> = recoverableReady;

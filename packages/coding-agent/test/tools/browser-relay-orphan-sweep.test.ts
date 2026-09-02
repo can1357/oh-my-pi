@@ -186,8 +186,8 @@ describe("browser relay orphan sweep scheduling", () => {
 	});
 
 	it("does not restore a stale startup deadline after a newer update", () => {
-		expect(restoreOrphanSweepDeadline(31_000, false)).toBeNull();
+		expect(restoreOrphanSweepDeadline(31_000, false)).toBeUndefined();
 		expect(restoreOrphanSweepDeadline(31_000, true)).toBe(31_000);
-		expect(restoreOrphanSweepDeadline("31_000", true)).toBeNull();
+		expect(restoreOrphanSweepDeadline(null, true)).toBeNull();
 	});
 });
