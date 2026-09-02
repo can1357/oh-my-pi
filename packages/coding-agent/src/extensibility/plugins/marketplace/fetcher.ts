@@ -169,6 +169,19 @@ export function parseMarketplaceCatalog(content: string, filePath: string): Mark
 						`plugins[${i}].source.package`,
 						filePath,
 					);
+					// Optional fields are dereferenced by the resolver, so a wrong type has
+					// to be caught here — the entry is skipped with a warning instead of
+					// throwing a bare TypeError from deep inside installation.
+					assertField(
+						src.version === undefined || typeof src.version === "string",
+						`plugins[${i}].source.version (must be a string when present)`,
+						filePath,
+					);
+					assertField(
+						src.registry === undefined || typeof src.registry === "string",
+						`plugins[${i}].source.registry (must be a string when present)`,
+						filePath,
+					);
 				} else {
 					assertField(false, `plugins[${i}].source.source (unknown variant: "${variant}")`, filePath);
 				}

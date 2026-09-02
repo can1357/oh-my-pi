@@ -145,6 +145,19 @@ describe("parseMarketplaceCatalog", () => {
 			"Failed to parse marketplace catalog at /f.json",
 		);
 	});
+	it("skips npm plugin entry with non-string version but loads the rest", () => {
+		const content = JSON.stringify({
+			name: "test-marketplace",
+			owner: { name: "Test" },
+			plugins: [
+				{ name: "bad-npm", source: { source: "npm", package: "bad-pkg", version: null } },
+				{ name: "good-npm", source: { source: "npm", package: "good-pkg", version: "1.0.0" } },
+			],
+		});
+		const catalog = parseMarketplaceCatalog(content, "/f.json");
+		expect(catalog.plugins).toHaveLength(1);
+		expect(catalog.plugins[0].name).toBe("good-npm");
+	});
 });
 
 // ── fetchMarketplace ──────────────────────────────────────────────────

@@ -1232,4 +1232,96 @@ describe("resolvePluginSource — npm", () => {
 		const entry = makeEntry({ source: "npm", package: "test-plugin", version: expr, registry: REGISTRY_ORIGIN });
 		await expect(resolvePluginSource(entry, { tmpDir })).rejects.toThrow(/256 bytes/);
 	});
+
+	// ── Contract: unbundled runtime dependency rejection ────────────────
+
+	it("rejects tarball with unbundled runtime dependencies", async () => {
+		const pkgJson = JSON.stringify({
+			name: "test-plugin",
+			version: "1.0.0",
+			dependencies: { "left-pad": "^1.0.0" },
+		});
+		const entries: readonly [string, string][] = [
+			["package/", ""],
+			["package/package.json", pkgJson],
+			["package/.claude-plugin/plugin.json", pkgJson],
+		];
+		const tarballBytes = await encodeArchive("tar.gz", entries);
+		const integrity = sriSha512(tarballBytes);
+		await setupNpmMock({
+			pkg: "test-plugin",
+			versions: [{ version: "1.0.0", integrity }],
+			tarballBytes,
+		});
+
+		const entry = makeEntry({ source: "npm", package: "test-plugin", version: "1.0.0", registry: REGISTRY_ORIGIN });
+		let thrown: Error | undefined;
+		try {
+			await resolvePluginSource(entry, { tmpDir });
+		} catch (err) {
+			thrown = err as Error;
+		}
+		expect(thrown).toBeDefined();
+		expect(thrown?.message).toMatch(/runtime dependencies its npm tarball does not ship/);
+		// The message has to name the offending package, or the operator cannot act
+		// on it. This caught a real defect: `.map(sanitizeFragment)` passed the
+		// array index as `maxLen`, truncating every name at index 0 to "…".
+		expect(thrown?.message).toContain("left-pad");
+	});
+
+	it("accepts tarball whose runtime dependencies are all bundled", async () => {
+		const pkgJson = JSON.stringify({
+			name: "test-plugin",
+			version: "1.0.0",
+			dependencies: { "left-pad": "^1.0.0" },
+			bundledDependencies: ["left-pad"],
+		});
+		const entries: readonly [string, string][] = [
+			["package/", ""],
+			["package/package.json", pkgJson],
+			["package/.claude-plugin/plugin.json", pkgJson],
+		];
+		const tarballBytes = await encodeArchive("tar.gz", entries);
+		const integrity = sriSha512(tarballBytes);
+		await setupNpmMock({
+			pkg: "test-plugin",
+			versions: [{ version: "1.0.0", integrity }],
+			tarballBytes,
+		});
+
+		const entry = makeEntry({ source: "npm", package: "test-plugin", version: "1.0.0", registry: REGISTRY_ORIGIN });
+		const result = await resolvePluginSource(entry, { tmpDir });
+		expect(result.dir).toMatch(/package$/);
+		expect(result.resolvedVersion).toBe("1.0.0");
+	});
+
+	// ── Contract: control characters stripped from error messages ───────
+
+	it("strips control characters from sibling names in error message", async () => {
+		const pkgJson = JSON.stringify({ name: "test-plugin", version: "1.0.0" });
+		const entries: readonly [string, string][] = [
+			["package/", ""],
+			["package/package.json", pkgJson],
+			["package/.claude-plugin/plugin.json", pkgJson],
+			["pkg\t evil\nname/", ""],
+		];
+		const tarballBytes = await encodeArchive("tar.gz", entries);
+		const integrity = sriSha512(tarballBytes);
+		await setupNpmMock({
+			pkg: "test-plugin",
+			versions: [{ version: "1.0.0", integrity }],
+			tarballBytes,
+		});
+
+		const entry = makeEntry({ source: "npm", package: "test-plugin", version: "1.0.0", registry: REGISTRY_ORIGIN });
+		let thrown: Error | undefined;
+		try {
+			await resolvePluginSource(entry, { tmpDir });
+		} catch (err) {
+			thrown = err as Error;
+		}
+		expect(thrown).toBeDefined();
+		expect(thrown?.message).toMatch(/found siblings/);
+		expect(thrown?.message).not.toMatch(/[\t\n\r]/);
+	});
 });

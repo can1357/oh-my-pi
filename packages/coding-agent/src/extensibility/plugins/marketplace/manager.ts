@@ -29,7 +29,7 @@ import {
 	writeInstalledPluginsRegistry,
 	writeMarketplacesRegistry,
 } from "./registry";
-import { resolvePluginSource } from "./source-resolver";
+import { resolveNpmVersion, resolvePluginSource } from "./source-resolver";
 import type {
 	InstalledPluginEntry,
 	InstalledPluginSummary,
@@ -37,6 +37,7 @@ import type {
 	MarketplaceCatalog,
 	MarketplacePluginEntry,
 	MarketplaceRegistryEntry,
+	PluginSourceNpm,
 } from "./types";
 import { assertRuntimePackageName, buildPluginId, parsePluginId } from "./types";
 
@@ -621,9 +622,10 @@ export class MarketplaceManager {
 		}
 	}
 
-	// Compare installed plugin versions against their catalog entries.
-	// Returns one entry per (pluginId, scope) pair where the catalog declares a newer version.
-	// Catalog entries without a version field are skipped.
+	// Compare installed plugin versions against the version their catalog entry
+	// currently resolves to. Returns one entry per (pluginId, scope) pair that is
+	// behind. Entries with neither a catalog version nor a resolvable npm selector
+	// are skipped.
 	async checkForUpdates(): Promise<Array<{ pluginId: string; scope: "user" | "project"; from: string; to: string }>> {
 		const mktReg = await readMarketplacesRegistry(this.#opts.marketplacesRegistryPath);
 		const updates: Array<{ pluginId: string; scope: "user" | "project"; from: string; to: string }> = [];
@@ -647,47 +649,40 @@ export class MarketplaceManager {
 				if (!mktEntry) continue;
 
 				let catalogVersion: string | undefined;
-				let npmSourceVersion: string | undefined;
+				let npmSource: PluginSourceNpm | undefined;
 				try {
 					const catalog = await this.#readCatalog(mktEntry);
 					const pluginEntry = catalog.plugins.find(p => p.name === parsed.name);
 					catalogVersion = pluginEntry?.version;
-					// For npm-sourced plugins with no top-level entry.version, fall back to
-					// the npm source's version expression so a marketplace bump of
-					// source.version is detected as an update.
 					if (
 						!catalogVersion &&
 						pluginEntry &&
 						typeof pluginEntry.source === "object" &&
 						pluginEntry.source.source === "npm"
 					) {
-						npmSourceVersion = pluginEntry.source.version;
+						npmSource = pluginEntry.source;
 					}
 				} catch {
 					continue;
 				}
 
-				// Use the top-level entry.version when present; otherwise the npm source
-				// version expression (which may be a range such as "^1.0.0").
-				const comparisonVersion = catalogVersion ?? npmSourceVersion;
-				if (!comparisonVersion || comparisonVersion === installed.version) continue;
-
-				// npm range-versus-selected-version rule:
-				// Installation resolves an npm source version expression (which may be a
-				// range like "^1.0.0") to an exact version and persists that exact version
-				// in the installed registry. The catalog keeps the original range. Do not
-				// report an update merely because the range string differs from the
-				// installed exact version when that exact version still satisfies the
-				// unchanged catalog range. Only flag an update when the expression changed
-				// so that the installed version no longer satisfies it.
-				if (npmSourceVersion && !catalogVersion) {
+				// An npm selector is a moving target: the catalog may pin a range like
+				// "^1.2.0" or omit the version entirely (dist-tag `latest`), while
+				// installation persisted the exact version it resolved to. Comparing the
+				// selector string against that exact version can never observe an
+				// ordinary registry release, so resolve the selector and compare
+				// versions. A catalog `version` still wins when present.
+				let comparisonVersion = catalogVersion;
+				if (npmSource) {
 					try {
-						if (Bun.semver.satisfies(installed.version, npmSourceVersion)) continue;
+						comparisonVersion = await resolveNpmVersion(npmSource);
 					} catch {
-						// Non-semver expression (e.g. a dist-tag) — fall through to the
-						// string-inequality check below.
+						// Registry unreachable or selector unresolvable — report nothing
+						// for this plugin rather than guessing from the selector string.
+						continue;
 					}
 				}
+				if (!comparisonVersion || comparisonVersion === installed.version) continue;
 
 				// Treat newer semver as an update; fall back to inequality for non-semver tags.
 				let isNewer: boolean;

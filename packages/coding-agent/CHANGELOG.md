@@ -19,7 +19,7 @@
 - Devin model selectors now accept the native CLI's short aliases (`devin/opus`, `devin/swe`), dotted upstream spellings (`devin/gemini-3.7-flash`), and raw effort-route wire uids for dynamically collapsed families ([#8590](https://github.com/can1357/oh-my-pi/pull/8590) by [@will-bogusz](https://github.com/will-bogusz)).
 - Added provider-supplied model metadata to the `/models` detail line: `new`, `beta`, and `recommended` badges beside the model name, and the upstream description after the context, cost, and perf facts ([#8590](https://github.com/can1357/oh-my-pi/pull/8590) by [@will-bogusz](https://github.com/will-bogusz)).
 - Standalone `CLAUDE.md` files in the project root (and ancestor directories) are now loaded as context, mirroring `AGENTS.md` discovery; config-directory context files still take precedence per scope.
-- Marketplace plugins can now install from npm sources (`{ "source": "npm", "package": "...", "version": "...", "registry": "..." }`), with registry packument fetch, semver version selection, SHA-512 integrity verification, and extraction into the plugin cache.
+- Marketplace plugins can now install from npm sources (`{ "source": "npm", "package": "...", "version": "...", "registry": "..." }`), with registry packument fetch, semver version selection, SHA-512 integrity verification, and extraction into the plugin cache. Update checks resolve the source's selector against the registry, so an ordinary release is detected even when the marketplace catalog is unchanged, and a package whose runtime dependencies its tarball does not ship is rejected at install time rather than failing later at load.
 
 ### Changed
 

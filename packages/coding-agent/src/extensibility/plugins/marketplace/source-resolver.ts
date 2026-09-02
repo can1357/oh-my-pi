@@ -32,8 +32,16 @@ const TARBALL_MAX_BYTES = 256 * 1024 * 1024; // 256 MiB compressed
 const MAX_REDIRECTS = 5;
 const MAX_VERSION_EXPR_BYTES = 256;
 
+/**
+ * Extraction limits for an npm tarball. `maxEntries` has to bound filesystem
+ * work on its own: a tar header is 512 bytes, so the 256 MiB byte cap alone
+ * still admits roughly 524k members, and an integrity-valid archive of empty
+ * files can exhaust inodes or stall extraction long before any byte limit
+ * fires. 16384 sits far above what a published plugin carries (TypeScript
+ * itself ships ~1.5k files) and far below the count that becomes the attack.
+ */
 const NPM_ARCHIVE_LIMITS: ArchiveLimits = {
-	maxEntries: 1_000_000,
+	maxEntries: 16_384,
 	maxInMemorySize: 256 * 1024 * 1024,
 	maxIndexSize: 64 * 1024 * 1024,
 	maxMemberSize: 64 * 1024 * 1024,
@@ -71,12 +79,13 @@ function resolveLimits(limits?: ResolveContext["limits"]): NpmFetchLimits {
 }
 
 /**
- * Truncate and strip control/escape characters from an untrusted fragment
- * before echoing it into a thrown error. Keeps registry- or archive-controlled
- * strings from carrying arbitrary bytes, ANSI escapes, or unbounded length.
+ * Truncate and strip every C0 control character and DEL from an untrusted
+ * fragment before echoing it into a thrown error. Keeps registry- or
+ * archive-controlled strings from carrying arbitrary bytes, ANSI escapes,
+ * tabs, or line breaks into a single-line message and the TUI.
  */
 function sanitizeFragment(s: unknown, maxLen = 64): string {
-	const stripped = String(s).replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, "");
+	const stripped = String(s).replace(/[\x00-\x1f\x7f]/g, "");
 	return stripped.length > maxLen ? `${stripped.slice(0, maxLen)}…` : stripped;
 }
 
@@ -254,26 +263,8 @@ async function resolveNpmSource(source: PluginSourceNpm, context: ResolveContext
 	const stage = (s: string) => `npm source for "${pkg}": ${s}`;
 	const lim = resolveLimits(context.limits);
 
-	// ── Validate version expression ──────────────────────────────────
-	let versionExpr: string | undefined;
-	if (source.version !== undefined) {
-		if (source.version.length === 0) {
-			throw new Error(stage("version expression must be nonempty when present"));
-		}
-		if (source.version.length > MAX_VERSION_EXPR_BYTES) {
-			throw new Error(stage("version expression exceeds 256 bytes"));
-		}
-		versionExpr = source.version;
-	}
-
-	// ── Validate registry URL ────────────────────────────────────────
-	const registryUrl = validateRegistryUrl(source.registry ?? DEFAULT_REGISTRY);
-
-	// ── Fetch packument ──────────────────────────────────────────────
-	const packument = await fetchPackument(pkg, registryUrl, stage, lim);
-
-	// ── Select version ───────────────────────────────────────────────
-	const selectedVersion = selectVersion(packument, versionExpr, stage);
+	// ── Resolve the selector against the registry ────────────────────
+	const { packument, selectedVersion } = await resolveNpmSelector(source, pkg, lim, stage);
 
 	// ── Validate version metadata ────────────────────────────────────
 	const versionMeta = packument.versions?.[selectedVersion];
@@ -342,9 +333,9 @@ async function resolveNpmSource(source: PluginSourceNpm, context: ResolveContext
 
 		// ── Verify extracted package identity ────────────────────────
 		const manifestPath = path.join(pkgPath, "package.json");
-		let manifest: { name?: unknown; version?: unknown };
+		let manifest: NpmPackageManifest;
 		try {
-			manifest = JSON.parse(await Bun.file(manifestPath).text()) as { name?: unknown; version?: unknown };
+			manifest = JSON.parse(await Bun.file(manifestPath).text()) as NpmPackageManifest;
 		} catch {
 			throw new Error(stage("extracted package/package.json is missing or not valid JSON"));
 		}
@@ -361,12 +352,100 @@ async function resolveNpmSource(source: PluginSourceNpm, context: ResolveContext
 			);
 		}
 
+		// An npm tarball ships no node_modules tree, so a runtime dependency that
+		// is not bundled leaves the installed plugin unloadable with a
+		// module-not-found error at first import. Reject here, where the reason is
+		// still visible, rather than letting installation report success.
+		const unbundled = unbundledRuntimeDeps(manifest);
+		if (unbundled.length > 0) {
+			const shown = unbundled
+				.slice(0, 5)
+				.map(name => sanitizeFragment(name))
+				.join(", ");
+			const extra = unbundled.length > 5 ? ` (and ${unbundled.length - 5} more)` : "";
+			throw new Error(
+				stage(
+					`package declares runtime dependencies its npm tarball does not ship: ${shown}${extra} — publish them under "bundledDependencies" or vendor them into the package`,
+				),
+			);
+		}
+
 		return { dir: pkgPath, tempCloneRoot: tempRoot, resolvedVersion: selectedVersion };
 	} catch (err) {
 		// Clean up on any failure — the temp root is private and disposable.
 		await fs.rm(tempRoot, { recursive: true, force: true }).catch(() => {});
 		throw err;
 	}
+}
+
+/** Extracted `package/package.json` fields this resolver reads. */
+interface NpmPackageManifest {
+	name?: unknown;
+	version?: unknown;
+	dependencies?: unknown;
+	bundledDependencies?: unknown;
+	bundleDependencies?: unknown;
+}
+
+/**
+ * Runtime dependencies an npm tarball will not carry. npm packs
+ * `bundledDependencies` (and its `bundleDependencies` alias) into the tarball's
+ * own node_modules, and either spelling may be `true` to bundle everything;
+ * anything left in `dependencies` needs a package manager, which plugin
+ * installation deliberately never runs.
+ */
+function unbundledRuntimeDeps(manifest: NpmPackageManifest): string[] {
+	const deps = manifest.dependencies;
+	if (!deps || typeof deps !== "object" || Array.isArray(deps)) return [];
+	const bundled = manifest.bundledDependencies ?? manifest.bundleDependencies;
+	if (bundled === true) return [];
+	const names = new Set(Array.isArray(bundled) ? bundled.filter(d => typeof d === "string") : []);
+	return Object.keys(deps).filter(name => !names.has(name));
+}
+
+/**
+ * Resolve an npm selector — `source.version` absent, an exact version, a
+ * dist-tag, or a range — against the registry packument. Single owner of the
+ * selector contract: installation and update detection both resolve through it,
+ * so they can never disagree about which version a selector names.
+ */
+async function resolveNpmSelector(
+	source: PluginSourceNpm,
+	pkg: string,
+	lim: NpmFetchLimits,
+	stage: (s: string) => string,
+): Promise<{ packument: Packument; selectedVersion: string }> {
+	let versionExpr: string | undefined;
+	if (source.version !== undefined) {
+		if (source.version.length === 0) {
+			throw new Error(stage("version expression must be nonempty when present"));
+		}
+		if (source.version.length > MAX_VERSION_EXPR_BYTES) {
+			throw new Error(stage("version expression exceeds 256 bytes"));
+		}
+		versionExpr = source.version;
+	}
+	const registryUrl = validateRegistryUrl(source.registry ?? DEFAULT_REGISTRY);
+	const packument = await fetchPackument(pkg, registryUrl, stage, lim);
+	return { packument, selectedVersion: selectVersion(packument, versionExpr, stage) };
+}
+
+/**
+ * Resolve an npm source's selector to the exact version the registry serves
+ * now, without downloading the tarball. Update detection compares that with the
+ * installed exact version: a selector such as `^1.2.0`, a dist-tag, or an
+ * omitted version is a moving target, so comparing selector strings can never
+ * observe an ordinary registry release.
+ */
+export async function resolveNpmVersion(source: PluginSourceNpm, limits?: ResolveContext["limits"]): Promise<string> {
+	const pkg = assertRuntimePackageName(source.package);
+	const { selectedVersion } = await resolveNpmSelector(
+		source,
+		pkg,
+		resolveLimits(limits),
+		s => `npm source for "${pkg}": ${s}`,
+	);
+	return selectedVersion;
 }
 
 // ── npm helpers ─────────────────────────────────────────────────────
@@ -815,6 +894,14 @@ async function downloadTarball(
 				writer.write(value);
 			}
 			await writer.end();
+		} catch (err) {
+			// A read abort, the size cap, or a sink write failure all skip the end()
+			// above, so close the descriptor here. The partial file dies with the
+			// caller's temp root; a close failure must not mask the real error.
+			try {
+				writer.end();
+			} catch {}
+			throw err;
 		} finally {
 			reader.releaseLock();
 		}

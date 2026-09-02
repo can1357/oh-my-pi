@@ -10,7 +10,6 @@ import { getEnabledPlugins } from "@oh-my-pi/pi-coding-agent/extensibility/plugi
 import { PluginManager } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/manager";
 import {
 	assertRuntimePackageName,
-	MAX_RUNTIME_PACKAGE_NAME_LENGTH,
 	MarketplaceManager,
 	readInstalledPluginsRegistry,
 	readMarketplacesRegistry,
@@ -1286,8 +1285,36 @@ describe("MarketplaceManager — npm source", () => {
 		const src = catalog.plugins[0].source as { version?: string };
 		src.version = "2.0.0";
 		await Bun.write(catalogPath, `${JSON.stringify(catalog, null, 2)}\n`);
-
-		// checkForUpdates should fall back to source.version and report the update.
+		// Update the mock registry to also serve 2.0.0 — checkForUpdates now
+		// resolves the selector via resolveNpmVersion, so the packument must
+		// contain the target version for the resolution to succeed.
+		const tarballV2 = await makeNpmTarball(pkg, "2.0.0");
+		const integrityV2 = npmSri(tarballV2);
+		const tarballUrlV1 = `${NPM_REGISTRY}/${pkg}/-/${pkg}-1.0.0.tgz`;
+		const tarballUrlV2 = `${NPM_REGISTRY}/${pkg}/-/${pkg}-2.0.0.tgz`;
+		fetchSpy?.mockRestore();
+		fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async (input: string | URL | Request) => {
+			const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+			if (url === `${NPM_REGISTRY}/${pkg}`) {
+				return new Response(
+					JSON.stringify({
+						name: pkg,
+						"dist-tags": { latest: "2.0.0" },
+						versions: {
+							"1.0.0": { name: pkg, dist: { tarball: tarballUrlV1, integrity: npmSri(tarballBytes) } },
+							"2.0.0": { name: pkg, dist: { tarball: tarballUrlV2, integrity: integrityV2 } },
+						},
+					}),
+					{ status: 200, headers: { "content-type": "application/json" } },
+				);
+			}
+			if (url === tarballUrlV2) {
+				return new Response(tarballV2, { status: 200 });
+			}
+			return new Response("not found", { status: 404 });
+		}) as typeof fetch);
+		// checkForUpdates should resolve source.version "2.0.0" against the
+		// registry and report the update.
 		const updates = await ctx.manager.checkForUpdates();
 		expect(updates).toHaveLength(1);
 		expect(updates[0].to).toBe("2.0.0");
@@ -1334,10 +1361,11 @@ describe("MarketplaceManager — npm source", () => {
 		const entry = await ctx.manager.installPlugin("npm-plugin", "npm-test-marketplace");
 		expect(entry.version).toBe(installedVersion);
 
-		// Remove top-level version so checkForUpdates falls back to source.version
-		// (the range "^1.0.0"), which differs as a string from "1.5.0" but is
-		// satisfied by it. Under the old unequal-string fallback this would
-		// falsely report an update; the fix suppresses it.
+		// Remove the top-level version so checkForUpdates has only the selector
+		// "^1.0.0" to go on. It resolves that against the packument, which serves
+		// nothing newer than 1.5.0, so the resolved version equals the installed
+		// one and no update is reported. The complement is the next test: add a
+		// newer satisfying release and the update must appear.
 		const list = await ctx.manager.listMarketplaces();
 		const catalogPath = list[0].catalogPath;
 		const content = await Bun.file(catalogPath).text();
@@ -1347,6 +1375,81 @@ describe("MarketplaceManager — npm source", () => {
 
 		const updates = await ctx.manager.checkForUpdates();
 		expect(updates).toHaveLength(0);
+	});
+
+	it("checkForUpdates detects npm release when catalog has no version and only the registry changed", async () => {
+		const pkg = "test-npm-plugin";
+		const tarballV1 = await makeNpmTarball(pkg, "1.0.0");
+		const integrityV1 = npmSri(tarballV1);
+		const tarballUrlV1 = `${NPM_REGISTRY}/${pkg}/-/${pkg}-1.0.0.tgz`;
+
+		// Phase 1: registry serves only 1.0.0 as latest.
+		const packumentV1 = {
+			name: pkg,
+			"dist-tags": { latest: "1.0.0" },
+			versions: {
+				"1.0.0": { name: pkg, dist: { tarball: tarballUrlV1, integrity: integrityV1 } },
+			},
+		};
+
+		fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async (input: string | URL | Request) => {
+			const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+			if (url === `${NPM_REGISTRY}/${pkg}`) {
+				return new Response(JSON.stringify(packumentV1), {
+					status: 200,
+					headers: { "content-type": "application/json" },
+				});
+			}
+			if (url === tarballUrlV1) {
+				return new Response(tarballV1, { status: 200 });
+			}
+			return new Response("not found", { status: 404 });
+		}) as typeof fetch);
+
+		// Marketplace fixture: no top-level version on the plugin entry;
+		// source.version is a range "^1.0.0" so update detection must
+		// resolve the selector against the registry, not compare strings.
+		npmFixtureDir = buildNpmMarketplaceFixture(pkg, "^1.0.0", NPM_REGISTRY);
+		await ctx.manager.addMarketplace(npmFixtureDir);
+		const entry = await ctx.manager.installPlugin("npm-plugin", "npm-test-marketplace");
+		expect(entry.version).toBe("1.0.0");
+
+		// Phase 2: registry now serves 1.1.0 as latest, with both versions.
+		// The catalog file is NOT touched.
+		const tarballV2 = await makeNpmTarball(pkg, "1.1.0");
+		const integrityV2 = npmSri(tarballV2);
+		const tarballUrlV2 = `${NPM_REGISTRY}/${pkg}/-/${pkg}-1.1.0.tgz`;
+		const packumentV2 = {
+			name: pkg,
+			"dist-tags": { latest: "1.1.0" },
+			versions: {
+				"1.0.0": { name: pkg, dist: { tarball: tarballUrlV1, integrity: integrityV1 } },
+				"1.1.0": { name: pkg, dist: { tarball: tarballUrlV2, integrity: integrityV2 } },
+			},
+		};
+
+		fetchSpy?.mockRestore();
+		fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async (input: string | URL | Request) => {
+			const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+			if (url === `${NPM_REGISTRY}/${pkg}`) {
+				return new Response(JSON.stringify(packumentV2), {
+					status: 200,
+					headers: { "content-type": "application/json" },
+				});
+			}
+			if (url === tarballUrlV1) {
+				return new Response(tarballV1, { status: 200 });
+			}
+			if (url === tarballUrlV2) {
+				return new Response(tarballV2, { status: 200 });
+			}
+			return new Response("not found", { status: 404 });
+		}) as typeof fetch);
+
+		const updates = await ctx.manager.checkForUpdates();
+		expect(updates).toHaveLength(1);
+		expect(updates[0].from).toBe("1.0.0");
+		expect(updates[0].to).toBe("1.1.0");
 	});
 });
 
@@ -1371,9 +1474,5 @@ describe("assertRuntimePackageName — 214-byte cap", () => {
 
 	it("rejects empty string", () => {
 		expect(() => assertRuntimePackageName("")).toThrow(/Invalid.*package name/);
-	});
-
-	it("MAX_RUNTIME_PACKAGE_NAME_LENGTH is 214", () => {
-		expect(MAX_RUNTIME_PACKAGE_NAME_LENGTH).toBe(214);
 	});
 });
