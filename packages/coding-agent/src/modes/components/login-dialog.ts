@@ -2,7 +2,7 @@ import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import { Container, getKeybindings, Input, Spacer, Text, type TUI, wrapTextWithAnsi } from "@oh-my-pi/pi-tui";
 import { theme } from "../../modes/theme/theme";
 import { urlHyperlinkAlways, WidthAwareText } from "../../tui";
-import { loginUrlCopyCommand, persistLoginUrl } from "../../utils/login-url";
+import { loginUrlCopyCommand, persistLoginUrl, wrapCommandRow } from "../../utils/login-url";
 import { openPath } from "../../utils/open";
 import { OverlayPanel } from "./overlay-box";
 
@@ -101,10 +101,20 @@ export class LoginDialogComponent extends OverlayPanel {
 
 		// Byte-exact copy path that needs no terminal feature: a wrapped
 		// selection carries row breaks and padding, and OSC 52/OSC 8 are optional.
+		// The command row wraps byte-complete by column: plain `Text` word-wraps
+		// and swallows the space at each break, displaying a path that does not
+		// exist when the agent dir carries spaces.
 		const urlFile = persistLoginUrl(url);
 		if (urlFile) {
 			this.#contentContainer.addChild(
-				new Text(theme.fg("dim", `Clean copy: ${loginUrlCopyCommand(urlFile)}`), 0, 0),
+				new WidthAwareText(
+					contentWidth =>
+						wrapCommandRow(theme.fg("dim", `Clean copy: ${loginUrlCopyCommand(urlFile)}`), contentWidth).join(
+							"\n",
+						),
+					0,
+					0,
+				),
 			);
 		}
 

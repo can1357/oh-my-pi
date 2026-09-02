@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { sliceWithWidth, visibleWidth } from "@oh-my-pi/pi-tui";
 import { getAgentDir, logger } from "@oh-my-pi/pi-utils";
 
 const FILE_PREFIX = "login-url-";
@@ -91,4 +92,29 @@ export function loginUrlCopyCommand(filePath: string): string {
 	const quoted = (s: string) => `'${s.replaceAll("'", "'\\''")}'`;
 	if (display.startsWith("~/")) return `cat ~/${quoted(display.slice(2))}`;
 	return `cat ${quoted(filePath)}`;
+}
+
+/**
+ * Split a rendered row into rows of at most `width` columns without losing a
+ * byte. `wrapTextWithAnsi` word-wraps and swallows the space at each break
+ * point; in a copy command every character is load-bearing (a swallowed space
+ * displays a path that does not exist), so the row breaks by column instead —
+ * exactly how a spaceless URL wraps through `wrapTextWithAnsi`. ANSI state is
+ * reopened per row by `sliceWithWidth`.
+ */
+export function wrapCommandRow(row: string, width: number): string[] {
+	const total = visibleWidth(row);
+	if (width <= 0 || total <= width) return [row];
+	const rows: string[] = [];
+	let col = 0;
+	while (col < total) {
+		const strict = sliceWithWidth(row, col, width, true);
+		// Strict refuses a grapheme wider than the whole budget; the non-strict
+		// one-column overshoot beats dropping the grapheme or looping forever.
+		const slice = strict.width > 0 ? strict : sliceWithWidth(row, col, width);
+		if (slice.width <= 0) break;
+		rows.push(slice.text);
+		col += slice.width;
+	}
+	return rows;
 }

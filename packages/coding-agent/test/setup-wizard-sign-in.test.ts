@@ -1,11 +1,16 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import type { AuthStorage } from "@oh-my-pi/pi-ai";
 import type { OAuthLoginCallbacks, OAuthProviderId } from "@oh-my-pi/pi-ai/oauth/types";
 import { SignInTab } from "@oh-my-pi/pi-coding-agent/modes/setup-wizard/scenes/sign-in";
 import type { SetupSceneHost } from "@oh-my-pi/pi-coding-agent/modes/setup-wizard/scenes/types";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import * as clipboard from "@oh-my-pi/pi-coding-agent/utils/clipboard";
+import { loginUrlCopyCommand } from "@oh-my-pi/pi-coding-agent/utils/login-url";
 import type { Component } from "@oh-my-pi/pi-tui";
+import * as piUtils from "@oh-my-pi/pi-utils";
 
 const ambientBrowser = process.env.BROWSER;
 
@@ -213,6 +218,71 @@ describe("SignInTab", () => {
 			tab.dispose();
 			loginGate.resolve();
 			await loginGate.promise;
+		}
+	});
+
+	// Codex r3911391657: the wizard's #fitToScreen clamps every row to the
+	// terminal width, so the clean-copy command pushed as one raw row displayed
+	// a truncated, nonexistent path whenever the agent dir ran long. The row
+	// wraps by column instead — byte-complete, unlike wrapTextWithAnsi, which
+	// swallows the space at each break point.
+	it("keeps the clean-copy command byte-complete across rows at narrow widths", async () => {
+		const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp agent dir with a long spaced name "));
+		vi.spyOn(piUtils, "getAgentDir").mockReturnValue(agentDir);
+		const url = "https://auth.example.com/oauth/authorize?state=narrow";
+		const loginGate = Promise.withResolvers<void>();
+		vi.spyOn(clipboard, "copyToClipboard").mockResolvedValue(undefined);
+
+		const authStorage = {
+			has: (_providerId: string) => false,
+			hasAuth: (_providerId: string) => false,
+			getCredentialOrigin: (_providerId: string) => undefined,
+			async login(_provider: OAuthProviderId, ctrl: OAuthLoginCallbacks): Promise<void> {
+				ctrl.onAuth({ url });
+				const prompt = ctrl.onManualCodeInput?.();
+				await loginGate.promise;
+				await prompt;
+			},
+		} as unknown as AuthStorage;
+
+		const host = {
+			ctx: {
+				openInBrowser(): void {},
+				session: { modelRegistry: { authStorage, async refresh(): Promise<void> {} } },
+			},
+			requestRender(): void {},
+			finish(): void {},
+			setFocus(): void {},
+			restoreFocus(): void {},
+		} as unknown as SetupSceneHost;
+
+		const tab = new SignInTab(host);
+		try {
+			for (const char of "anthropic") {
+				tab.handleInput(char);
+			}
+			tab.handleInput("\n");
+
+			const urlFileName = fs.readdirSync(agentDir).find(name => name.startsWith("login-url-"));
+			expect(urlFileName).toBeDefined();
+			const expected = `Clean copy: ${loginUrlCopyCommand(path.join(agentDir, urlFileName as string))}`;
+
+			const width = 44;
+			// Premise: the spaced agent dir must actually overflow the row.
+			expect(expected.length).toBeGreaterThan(width);
+			const plain = tab.render(width).map(line => Bun.stripANSI(line));
+			const first = plain.findIndex(line => line.startsWith("Clean copy: "));
+			expect(first).toBeGreaterThanOrEqual(0);
+			const rows = plain.slice(first, first + Math.ceil(expected.length / width));
+			expect(rows.join("")).toBe(expected);
+			for (const row of rows) {
+				expect(row.length).toBeLessThanOrEqual(width);
+			}
+		} finally {
+			tab.dispose();
+			loginGate.resolve();
+			await loginGate.promise;
+			fs.rmSync(agentDir, { recursive: true, force: true });
 		}
 	});
 

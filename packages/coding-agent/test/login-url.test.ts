@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { loginUrlCopyCommand, persistLoginUrl } from "@oh-my-pi/pi-coding-agent/utils/login-url";
+import { loginUrlCopyCommand, persistLoginUrl, wrapCommandRow } from "@oh-my-pi/pi-coding-agent/utils/login-url";
 import * as piUtils from "@oh-my-pi/pi-utils";
 
 // Redirected per test: writing to the real agent dir would overwrite or delete
@@ -152,5 +152,29 @@ describe("loginUrlCopyCommand (win32)", () => {
 		expect(loginUrlCopyCommand("C:\\Users\\o'brien\\%TEMP%\\login-url-1.txt")).toBe(
 			"type 'C:\\Users\\o''brien\\%TEMP%\\login-url-1.txt'",
 		);
+	});
+});
+
+describe("wrapCommandRow", () => {
+	it("returns a fitting row untouched", () => {
+		expect(wrapCommandRow("cat ~/.omp/agent/login-url-1.txt", 44)).toEqual(["cat ~/.omp/agent/login-url-1.txt"]);
+	});
+
+	it("keeps every byte when a break lands on a space", () => {
+		// wrapTextWithAnsi would swallow the space at the break point, so the
+		// displayed command would read a path that does not exist.
+		const cmd = "cat '/tmp/agent dir with a very long spaced name/login-url-12345-1.txt'";
+		const rows = wrapCommandRow(cmd, 44);
+		expect(rows.length).toBeGreaterThan(1);
+		expect(rows.join("")).toBe(cmd);
+		for (const row of rows) expect(row.length).toBeLessThanOrEqual(44);
+	});
+
+	it("reopens ANSI styling on every continuation row", () => {
+		const cmd = `\x1b[2mClean copy: cat '/tmp/agent dir with spaces/login-url-1.txt'\x1b[0m`;
+		const rows = wrapCommandRow(cmd, 40);
+		expect(rows.length).toBeGreaterThan(1);
+		expect(rows.map(row => Bun.stripANSI(row)).join("")).toBe(Bun.stripANSI(cmd));
+		for (const row of rows.slice(1)) expect(row.startsWith("\x1b[2m")).toBe(true);
 	});
 });

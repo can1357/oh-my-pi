@@ -11,7 +11,7 @@ import {
 } from "@oh-my-pi/pi-tui";
 import { getAgentDbPath } from "@oh-my-pi/pi-utils";
 import { copyToClipboard } from "../../../utils/clipboard";
-import { loginUrlCopyCommand, persistLoginUrl } from "../../../utils/login-url";
+import { loginUrlCopyCommand, persistLoginUrl, wrapCommandRow } from "../../../utils/login-url";
 import { openCommandFor } from "../../../utils/open";
 import { OAuthSelectorComponent } from "../../components/oauth-selector";
 import { theme } from "../../theme/theme";
@@ -174,9 +174,14 @@ export class SignInTab implements SetupTab {
 			}
 			// The byte-exact copy path that needs no terminal feature: a wrapped
 			// selection carries row breaks and padding, and OSC 52/OSC 8 are
-			// optional. A one-row file path survives any selection.
+			// optional. A one-row file path survives any selection. When the agent
+			// dir pushes the command past the terminal width anyway, it wraps
+			// byte-complete by column (the outer #fitToScreen clamp would
+			// otherwise truncate the path into a nonexistent one).
 			if (this.#authUrlFile) {
-				lines.push(theme.fg("dim", `Clean copy: ${loginUrlCopyCommand(this.#authUrlFile)}`));
+				lines.push(
+					...wrapCommandRow(theme.fg("dim", `Clean copy: ${loginUrlCopyCommand(this.#authUrlFile)}`), width),
+				);
 			}
 			if (this.#authLaunchUrl) {
 				lines.push(theme.fg("dim", `Local shortcut (this machine only): ${this.#authLaunchUrl}`));
