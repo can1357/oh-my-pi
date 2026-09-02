@@ -26,7 +26,7 @@
 - Updated Meta and OpenCode Muse Spark 1.3 model metadata and capabilities, including context windows, reasoning levels, image input, pricing, and model naming; media-only Muse SKUs are no longer presented as chat models.
 ### Added
 
-- Added the `openzoo` provider: live model discovery from the local x402 pay-per-call proxy (`npx openzoo`, `http://localhost:8402/v1`, overridable with `OPENZOO_BASE_URL`), with per-token pricing and the real attention window taken from the proxy catalog, the proxy's router aliases (`openzoo/auto` and friends, no longer published by openzoo >= 0.50.84) dropped from discovery, and no bundled model list.
+- Added the `openzoo` provider: live model discovery from the local x402 pay-per-call proxy (`npx openzoo`, `http://localhost:8402/v1`, overridable with `OPENZOO_BASE_URL`), with per-token pricing and the real attention window taken from the proxy catalog, the proxy's published router aliases (`openzoo/auto` and friends) collapsed to a single `auto` entry, and no bundled model list.
 
 ### Fixed
 
