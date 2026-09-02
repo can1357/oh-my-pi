@@ -276,15 +276,34 @@ describe("omp gc --undo-tails (CLI)", () => {
 
 	it("a second process' writer claim blocks appends to the same session file", async () => {
 		await buildSessionWithTwoUndoTails();
-		// Manager one holds the append writer (and its lock claim).
-		const holder = SessionManager.create(sessionsDir, sessionsDir);
-		await holder.setSessionFile(sessionFile);
-		holder.appendMessage(userMessage("held-cold"));
-		// First append rewrites the whole file (cold path, claim released);
-		// the SECOND opens the persistent append writer and holds the claim.
-		holder.appendMessage(userMessage("held"));
-		await holder.flush();
+		// A REAL second process holds the append writer (and its lock
+		// claim): a same-process sibling now hands the claim off by design
+		// (SDK resume on a file a live in-process manager built), so only a
+		// foreign pid exercises the block path.
+		const fixture = path.resolve(import.meta.dir, "fixtures/gc-undo-tails-child.ts");
+		const holder = Bun.spawn({
+			cmd: [process.execPath, fixture],
+			cwd: path.resolve(import.meta.dir, ".."),
+			env: {
+				...process.env,
+				PI_CODING_AGENT_DIR: agentDir,
+				ZELLIJ_PANE_ID: "gc-hold-writer-test",
+				GC_TEST_AGENT_DIR: agentDir,
+				GC_TEST_APPLY: "0",
+				GC_TEST_MODE: "hold-writer",
+				GC_TEST_SESSION_FILE: sessionFile,
+			},
+			stdout: "ignore",
+			stderr: "pipe",
+		});
 		try {
+			// Wait for the child's writer claim (marker file with its pid) —
+			// a real external process, so bounded polling on the real clock
+			// is the only deterministic-enough signal available.
+			const heldMarker = `${sessionFile}.held`;
+			for (let i = 0; i < 100 && !fs.existsSync(heldMarker); i++) await Bun.sleep(20);
+			expect(fs.existsSync(heldMarker)).toBe(true);
+
 			const rival = SessionManager.create(sessionsDir, sessionsDir);
 			await rival.setSessionFile(sessionFile);
 			expect(() => rival.appendMessage(userMessage("rival"))).toThrow(/locked by another process/);
@@ -292,9 +311,11 @@ describe("omp gc --undo-tails (CLI)", () => {
 			// rewrite under contention raises instead of publishing.
 			await expect(rival.rewriteEntries()).rejects.toThrow(/locked by another process/);
 		} finally {
-			await holder.close();
+			holder.kill();
+			await holder.exited;
+			fs.rmSync(`${sessionFile}.held`, { force: true });
 		}
-		// Claim released on close: a later writer can append again.
+		// Claim released on exit: a later writer can append again.
 		const successor = SessionManager.create(sessionsDir, sessionsDir);
 		await successor.setSessionFile(sessionFile);
 		successor.appendMessage(userMessage("successor"));
