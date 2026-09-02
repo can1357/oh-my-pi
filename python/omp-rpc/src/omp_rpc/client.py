@@ -9,29 +9,31 @@ import signal
 import subprocess
 import threading
 import time
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Generic, Mapping, Sequence, TypeVar, cast
+from typing import Any, Generic, TypeVar, cast
 
 from .host_tools import HostTool, HostToolContext
 from .host_uris import HostUri, HostUriContext, normalize_read_result
 from .protocol import (
-    AgentStartEvent,
     AgentEndEvent,
     AgentMessage,
+    AgentStartEvent,
     AssistantMessage,
     AutoCompactionEndEvent,
     AutoCompactionStartEvent,
     AutoRetryEndEvent,
     AutoRetryStartEvent,
     BashResult,
-    FastModeResult,
     BranchMessage,
     BranchResult,
     CancellationResult,
+    ClearQueueResult,
     CompactionResult,
     ExtensionError,
     ExtensionUiRequest,
+    FastModeResult,
     ImageContent,
     InterruptMode,
     JsonObject,
@@ -47,17 +49,18 @@ from .protocol import (
     RetryFallbackSucceededEvent,
     RpcAgentEvent,
     RpcNotification,
+    ServerFeatures,
     SessionState,
     SessionStats,
     SteeringMode,
     StreamingBehavior,
     ThinkingLevel,
     ThinkingLevelCycleResult,
+    TodoAutoClearEvent,
     TodoItem,
     TodoPhase,
-    TodoStatus,
-    TodoAutoClearEvent,
     TodoReminderEvent,
+    TodoStatus,
     ToolExecutionEndEvent,
     ToolExecutionStartEvent,
     ToolExecutionUpdateEvent,
@@ -68,11 +71,12 @@ from .protocol import (
     assistant_text,
     parse_agent_messages,
     parse_bash_result,
-    parse_fast_mode_result,
     parse_branch_messages,
     parse_branch_result,
     parse_cancellation_result,
+    parse_clear_queue_result,
     parse_compaction_result,
+    parse_fast_mode_result,
     parse_model_cycle_result,
     parse_model_info,
     parse_notification,
@@ -557,6 +561,20 @@ class RpcClient:
     def stderr(self) -> str:
         with self._state_lock:
             return "".join(self._stderr_chunks.snapshot())
+
+    @property
+    def server_features(self) -> ServerFeatures:
+        """Capabilities the running server advertised in its ready frame.
+
+        Empty before `start()` returns and for servers that predate a given
+        capability. Independent of the transport protocol version: the ready
+        frame is always v1, so this is populated whether or not v2 was
+        negotiated.
+        """
+        # Written once by the reader thread before `_ready` is set; `start()`
+        # waits on that event, so every caller observes the published value.
+        ready_event = self._ready_event
+        return ready_event.features if ready_event is not None else ServerFeatures()
 
     @property
     def command(self) -> tuple[str, ...]:
@@ -1150,12 +1168,53 @@ class RpcClient:
         self._mark_agent_run_scheduled()
 
     def steer(
-        self, message: str, *, images: Sequence[ImageContent] | None = None
-    ) -> None:
-        self._request(
+        self,
+        message: str,
+        *,
+        images: Sequence[ImageContent] | None = None,
+        active_turn_only: bool = False,
+    ) -> bool:
+        """Queue a steering message and report whether the server enqueued it.
+
+        `active_turn_only` requires a live turn at the server's enqueue boundary
+        and returns False otherwise, instead of seeding the idle queue (which
+        auto-drains into a fresh turn). Gate it on
+        `server_features.active_turn_steering == 1`; servers without the
+        capability ignore the field and always enqueue.
+
+        Raises `RpcCommandError` when the command failed, so a rejected enqueue
+        (False) is never confused with a server-side error.
+        """
+        payload = self._request(
             "steer",
             message=message,
             images=list(images) if images is not None else None,
+            activeTurnOnly=True if active_turn_only else None,
+        )
+        accepted = payload.get("accepted")
+        # A server that advertised the capability owes a boolean verdict; treating
+        # a missing or malformed one as "enqueued" would hide the very race the
+        # flag exists to report.
+        if self.server_features.active_turn_steering == 1:
+            if not isinstance(accepted, bool):
+                raise RpcError("steer response omitted a boolean data.accepted")
+            return accepted
+        # Pre-capability servers answer with no data and always enqueue.
+        return True
+
+    def clear_queue(self, *, for_interrupt: bool = False) -> ClearQueueResult:
+        """Drop queued messages, reporting how many user-authored ones were dropped.
+
+        `for_interrupt` also drops hidden non-user steers, so a following
+        `abort()` cannot be undone by the server's stranded-queue drain
+        restarting the interrupted run. Requires
+        `server_features.active_turn_steering == 1`.
+        """
+        return parse_clear_queue_result(
+            self._request(
+                "clear_queue",
+                forInterrupt=True if for_interrupt else None,
+            )
         )
 
     def follow_up(
@@ -1966,10 +2025,7 @@ class RpcClient:
 
                 event = cast(RpcAgentEvent, notification)
                 self._append_event(payload)
-                if (
-                    isinstance(event, AgentEndEvent)
-                    and event.is_terminal is not False
-                ):
+                if isinstance(event, AgentEndEvent) and event.is_terminal is not False:
                     self._mark_agent_run_completed()
                 self._dispatch_listeners(
                     "event", event.type, self._event_listeners, event

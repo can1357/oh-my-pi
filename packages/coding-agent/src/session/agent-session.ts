@@ -6604,8 +6604,16 @@ export class AgentSession {
 
 	/**
 	 * Queue a steering message to interrupt the agent mid-run.
+	 *
+	 * Returns whether the message was enqueued. `options.activeTurnOnly` makes the
+	 * enqueue conditional on a live agent run: a caller that only wants to steer a
+	 * run already in flight (an RPC host racing the turn's end) gets `false` instead
+	 * of silently seeding the idle queue, which would auto-drain into a brand new
+	 * turn. "Live" means `agent.state.isStreaming`, which is narrower than
+	 * {@link isStreaming} — the latter stays true while a finished prompt unwinds.
+	 * Without the option the call always enqueues and returns `true`.
 	 */
-	async steer(text: string, images?: ImageContent[]): Promise<void> {
+	async steer(text: string, images?: ImageContent[], options?: { activeTurnOnly?: boolean }): Promise<boolean> {
 		if (text.startsWith("/")) {
 			this.#throwIfExtensionCommand(text);
 		}
@@ -6614,7 +6622,9 @@ export class AgentSession {
 		// Stamp before image preprocessing so a queued image steer measures from
 		// the operator's submission, not after the vision-model description.
 		const submittedAt = Date.now();
-		await this.#queueUserMessage(expandedText, images, "steer", submittedAt);
+		return this.#queueUserMessage(expandedText, images, "steer", submittedAt, undefined, {
+			requireActiveTurn: options?.activeTurnOnly === true,
+		});
 	}
 
 	/**
@@ -6698,7 +6708,16 @@ export class AgentSession {
 		mode: "steer" | "followUp" | "aside",
 		timestamp?: number,
 		preprocessed?: { images: ImageContent[] | undefined; descriptionNotice: CustomMessage | undefined },
-	): Promise<void> {
+		options?: { requireActiveTurn?: boolean },
+	): Promise<boolean> {
+		const requireActiveTurn = options?.requireActiveTurn === true;
+		// `agent.state.isStreaming`, NOT `this.isStreaming`: the session getter also
+		// reports true while a prompt unwinds (`#promptInFlightCount > 0`) after the
+		// agent run already ended. Admitting there would queue behind nothing and
+		// auto-drain into a fresh turn — exactly what activeTurnOnly must refuse.
+		// Cheap pre-check so an obviously idle session skips image normalization
+		// entirely; the decisive check is the one below, after every suspension point.
+		if (requireActiveTurn && !this.agent.state.isStreaming) return false;
 		// Captured before any await below so the aside branch can detect a
 		// newSession()/switchSession() that completed while normalization/vision
 		// description was in flight and drop a record that would otherwise land in a
@@ -6706,12 +6725,10 @@ export class AgentSession {
 		const sessionGeneration = this.#sessionGeneration;
 		// A queued user message (RPC/SDK/collab steer or follow-up, or a typed message
 		// while streaming) is a deliberate resume; re-enable advisor auto-resume that
-		// a user interrupt suppressed. An aside is non-interrupting by design — it must
-		// not re-enable auto-resume a user interrupt deliberately suppressed, so it stays
-		// user-driven (folds into context via #resumeStrandedIrcAsides's post-interrupt
-		// branch) until the next deliberate steer/follow-up/prompt, matching the
-		// sendCustomMessage aside path (queueAside), which never touches this flag.
-		if (mode !== "aside") this.#advisors.autoResumeSuppressed = false;
+		// a user interrupt suppressed. An aside is non-interrupting by design, and an
+		// active-turn-only caller defers this until the enqueue commits, so a rejected
+		// message leaves no advisor state behind.
+		if (mode !== "aside" && !requireActiveTurn) this.#advisors.autoResumeSuppressed = false;
 		// The pre-dispatch re-check in prompt() arrives with normalization and the
 		// vision description already done — reuse them instead of paying a second
 		// vision-model request for the same attachment.
@@ -6729,7 +6746,7 @@ export class AgentSession {
 				? await this.#buildImageDescriptionNotice(normalizedImages)
 				: undefined;
 		if (mode === "aside") {
-			if (await this.#sessionGenerationChanged(sessionGeneration)) return;
+			if (await this.#sessionGenerationChanged(sessionGeneration)) return false;
 			const records: AgentMessage[] = [];
 			if (imageDescriptionNotice) records.push(imageDescriptionNotice);
 			records.push({ role: "user", content, attribution: "user", timestamp: timestamp ?? Date.now() });
@@ -6739,7 +6756,14 @@ export class AgentSession {
 			// queue with no loop left to drain it. Resuming here is a no-op while streaming and
 			// wakes/folds correctly once idle (see #resumeStrandedIrcAsides).
 			this.#resumeStrandedIrcAsides();
-			return;
+			return true;
+		}
+		// Final enqueue boundary. Image normalization and the vision-description call
+		// above suspend, so the turn can end while this call is in flight; re-check
+		// here and bail before touching either queue.
+		if (requireActiveTurn) {
+			if (!this.agent.state.isStreaming) return false;
+			this.#advisors.autoResumeSuppressed = false;
 		}
 		this.#allowQueuedMessageDrainRetry();
 		if (mode === "followUp") {
@@ -6763,6 +6787,7 @@ export class AgentSession {
 			});
 		}
 		this.#scheduleIdleQueueDrain();
+		return true;
 	}
 
 	#scheduleIdleQueueDrain(): void {

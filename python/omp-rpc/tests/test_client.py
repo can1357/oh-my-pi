@@ -14,14 +14,15 @@ import unittest
 
 from omp_rpc import (
     AgentEndEvent,
+    ClearQueueResult,
     RpcClient,
     RpcCommandError,
     RpcConcurrencyError,
     RpcError,
+    ServerFeatures,
     host_tool,
 )
 from omp_rpc.client import _RpcFrameDecoder
-
 
 FAKE_SERVER = textwrap.dedent(
     """
@@ -875,6 +876,148 @@ FORWARD_COMPAT_SERVER = textwrap.dedent(
 )
 
 
+# Answers `steer` and `clear_queue` from the optional fields it received, so a
+# client-side assertion on the result also pins what went over the wire.
+ACTIVE_TURN_SERVER = textwrap.dedent(
+    """
+    import json
+    import sys
+
+    print(
+        json.dumps(
+            {
+                "type": "ready",
+                "protocolVersion": 1,
+                "supportedProtocolVersions": [1],
+                "features": {"activeTurnSteering": 1},
+            }
+        ),
+        flush=True,
+    )
+
+    for raw_line in sys.stdin:
+        raw_line = raw_line.strip()
+        if not raw_line:
+            continue
+        command = json.loads(raw_line)
+        command_type = command["type"]
+        if command_type == "steer":
+            data = {"accepted": command.get("activeTurnOnly") is not True}
+        elif command_type == "clear_queue":
+            data = {"steering": 1 if command.get("forInterrupt") else 0, "followUp": 0}
+        else:
+            data = {}
+        print(
+            json.dumps(
+                {
+                    "id": command.get("id"),
+                    "type": "response",
+                    "command": command_type,
+                    "success": True,
+                    "data": data,
+                }
+            ),
+            flush=True,
+        )
+    """
+)
+
+
+# Predates the capability: no `features`, and `steer` answers with no `data`.
+LEGACY_STEER_SERVER = textwrap.dedent(
+    """
+    import json
+    import sys
+
+    print(json.dumps({"type": "ready", "protocolVersion": 1}), flush=True)
+
+    for raw_line in sys.stdin:
+        raw_line = raw_line.strip()
+        if not raw_line:
+            continue
+        command = json.loads(raw_line)
+        print(
+            json.dumps(
+                {
+                    "id": command.get("id"),
+                    "type": "response",
+                    "command": command["type"],
+                    "success": True,
+                }
+            ),
+            flush=True,
+        )
+    """
+)
+
+
+# Advertises `features` values the client must not accept: a bumped version and
+# assorted malformed types. `PI_BAD_FEATURE` selects which one, so one server
+# script covers every rejection path. None of them may fail startup.
+UNSUPPORTED_CAPABILITY_SERVER = textwrap.dedent(
+    """
+    import json
+    import os
+    import sys
+
+    bad = json.loads(os.environ["PI_BAD_FEATURE"])
+    print(
+        json.dumps(
+            {
+                "type": "ready",
+                "protocolVersion": 1,
+                "features": bad,
+            }
+        ),
+        flush=True,
+    )
+    sys.stdin.read()
+    """
+)
+
+
+# Advertises the capability but breaks the `steer` contract, keyed by message:
+# "boom" fails the command, "malformed" answers a non-boolean verdict, and
+# anything else answers with no `data` at all.
+BROKEN_ACTIVE_TURN_SERVER = textwrap.dedent(
+    """
+    import json
+    import sys
+
+    print(
+        json.dumps(
+            {
+                "type": "ready",
+                "protocolVersion": 1,
+                "features": {"activeTurnSteering": 1},
+            }
+        ),
+        flush=True,
+    )
+
+    for raw_line in sys.stdin:
+        raw_line = raw_line.strip()
+        if not raw_line:
+            continue
+        command = json.loads(raw_line)
+        message = command.get("message")
+        payload = {
+            "id": command.get("id"),
+            "type": "response",
+            "command": command["type"],
+        }
+        if message == "boom":
+            payload["success"] = False
+            payload["error"] = "Cannot steer an extension command"
+        else:
+            payload["success"] = True
+            if message == "malformed":
+                payload["data"] = {"accepted": "yes"}
+        print(json.dumps(payload), flush=True)
+    """
+)
+
+
 class RpcClientTests(unittest.TestCase):
     def make_client(self, server: str = FAKE_SERVER, **kwargs: object) -> RpcClient:
         return RpcClient(
@@ -1353,9 +1496,7 @@ class RpcClientTests(unittest.TestCase):
             client.on_unknown_notification(
                 lambda event: unknown_errors.append(event.parse_error)
             )
-            with self.assertRaisesRegex(
-                RpcError, "Failed to parse terminal agent_end"
-            ):
+            with self.assertRaisesRegex(RpcError, "Failed to parse terminal agent_end"):
                 client.prompt_and_wait("malformed terminal", timeout=1.0)
 
         self.assertEqual(len(unknown_errors), 1)
@@ -1505,6 +1646,76 @@ class RpcClientTests(unittest.TestCase):
                 client.prompt_and_wait("say hello", timeout=2.0)
 
         self.assertIn("max_event_history", str(ctx.exception))
+
+    def test_active_turn_steering_capability_and_commands(self) -> None:
+        with self.make_client(server=ACTIVE_TURN_SERVER) as client:
+            self.assertEqual(client.server_features.active_turn_steering, 1)
+
+            # The server answers `accepted` from the field it received, so the
+            # verdict also proves the field was sent (and omitted) correctly.
+            self.assertTrue(client.steer("plain steer"))
+            self.assertFalse(client.steer("active only", active_turn_only=True))
+
+            self.assertEqual(
+                client.clear_queue(),
+                ClearQueueResult(steering=0, follow_up=0),
+            )
+            self.assertEqual(
+                client.clear_queue(for_interrupt=True),
+                ClearQueueResult(steering=1, follow_up=0),
+            )
+
+    def test_pre_capability_server_reports_no_features_and_accepts_steers(self) -> None:
+        with self.make_client(server=LEGACY_STEER_SERVER) as client:
+            self.assertEqual(client.server_features, ServerFeatures())
+            # A data-less `steer` response is the pre-capability shape: always enqueued.
+            self.assertTrue(client.steer("plain steer"))
+
+    def test_failed_steer_response_raises_instead_of_reporting_an_enqueue(self) -> None:
+        with (
+            self.make_client(server=BROKEN_ACTIVE_TURN_SERVER) as client,
+            self.assertRaises(RpcCommandError) as ctx,
+        ):
+            # A failure is not a verdict: True would report the message as queued,
+            # False would claim the turn had ended.
+            client.steer("boom", active_turn_only=True)
+
+        self.assertIn("Cannot steer an extension command", str(ctx.exception))
+
+    def test_advertised_capability_requires_a_boolean_accepted(self) -> None:
+        with self.make_client(server=BROKEN_ACTIVE_TURN_SERVER) as client:
+            with self.assertRaises(RpcError) as missing:
+                client.steer("missing")
+            with self.assertRaises(RpcError) as malformed:
+                client.steer("malformed")
+
+        self.assertIn("boolean data.accepted", str(missing.exception))
+        self.assertIn("boolean data.accepted", str(malformed.exception))
+
+    def test_unsupported_capability_values_read_as_absent_without_failing_startup(
+        self,
+    ) -> None:
+        # A bumped version means changed semantics, and a malformed value means a
+        # broken server; both must read as absent. Crucially none may raise out of
+        # the notification parser, because that would leave the ready frame
+        # unpublished and time out `start()` against a usable server.
+        for bad in [
+            {"activeTurnSteering": 2},
+            {"activeTurnSteering": True},
+            {"activeTurnSteering": "1"},
+            {"activeTurnSteering": {"version": 1}},
+            {"activeTurnSteering": [1]},
+            {"activeTurnSteering": None},
+            {},
+            "not-an-object",
+        ]:
+            with self.subTest(features=bad):
+                with self.make_client(
+                    server=UNSUPPORTED_CAPABILITY_SERVER,
+                    env={"PI_BAD_FEATURE": json.dumps(bad)},
+                ) as client:
+                    self.assertEqual(client.server_features, ServerFeatures())
+                    self.assertIsNone(client.server_features.active_turn_steering)
 
 
 HANGING_SERVER = textwrap.dedent(

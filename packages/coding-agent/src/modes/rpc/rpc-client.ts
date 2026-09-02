@@ -22,6 +22,7 @@ import {
 import type {
 	RpcAvailableCommandsUpdateFrame,
 	RpcAvailableSlashCommand,
+	RpcClearQueueResult,
 	RpcCommand,
 	RpcExtensionUIRequest,
 	RpcExtensionUIResponse,
@@ -32,6 +33,7 @@ import type {
 	RpcHostToolResult,
 	RpcHostToolUpdate,
 	RpcResponse,
+	RpcServerFeatures,
 	RpcSessionState,
 	RpcSubagentEventFrame,
 	RpcSubagentLifecycleFrame,
@@ -285,6 +287,15 @@ export class RpcClient {
 	#protocolVersion: RpcProtocolVersion = 1;
 	#extensionUiListeners: Set<(req: RpcExtensionUIRequest) => void> = new Set();
 	#abortController = new AbortController();
+	#serverFeatures: RpcServerFeatures = {};
+
+	/** Capabilities the running server advertised in its ready frame. Empty before
+	 *  {@link start} resolves and for servers that predate a given capability.
+	 *  Independent of the transport protocol version: the ready frame is always v1,
+	 *  so this is populated whether or not v2 was negotiated. */
+	get serverFeatures(): RpcServerFeatures {
+		return this.#serverFeatures;
+	}
 
 	constructor(private options: RpcClientOptions = {}) {
 		this.#customTools = [...(options.customTools ?? [])];
@@ -308,6 +319,7 @@ export class RpcClient {
 		// short-circuit the new stdout reader (issue #4079).
 		this.#abortController = new AbortController();
 		this.#protocolVersion = 1;
+		this.#serverFeatures = {};
 
 		const cliPath = this.options.cliPath ?? "dist/cli.js";
 		const args = ["--mode", "rpc"];
@@ -370,6 +382,11 @@ export class RpcClient {
 			for await (const line of lines) {
 				if (!readySettled && isRecord(line) && line.type === "ready") {
 					protocolV2Supported = supportsRpcProtocolV2(line);
+					// Exact-value gating: a server that bumps a capability to 2 has changed
+					// its semantics and must not read as 1 here. Unknown keys are dropped.
+					const features = line.features;
+					this.#serverFeatures =
+						isRecord(features) && features.activeTurnSteering === 1 ? { activeTurnSteering: 1 } : {};
 					readySettled = true;
 					readyResolve();
 					continue;
@@ -596,9 +613,52 @@ export class RpcClient {
 
 	/**
 	 * Queue a steering message to interrupt the agent mid-run.
+	 *
+	 * Returns whether the server enqueued it. `options.activeTurnOnly` requires a
+	 * live turn at the server's enqueue boundary and returns `false` otherwise,
+	 * instead of seeding the idle queue (which auto-drains into a fresh turn).
+	 * Gate it on `serverFeatures.activeTurnSteering === 1`; servers without the
+	 * capability ignore the field and always enqueue.
+	 *
+	 * Throws {@link RpcCommandError} when the command failed, so a rejected
+	 * enqueue (`false`) is never confused with a server-side error.
 	 */
-	async steer(message: string, images?: ImageContent[]): Promise<void> {
-		await this.#send({ type: "steer", message, images });
+	async steer(message: string, images?: ImageContent[], options?: { activeTurnOnly?: boolean }): Promise<boolean> {
+		const response = await this.#send({
+			type: "steer",
+			message,
+			images,
+			...(options?.activeTurnOnly ? { activeTurnOnly: true as const } : {}),
+		});
+		// Throws on success:false before any verdict is derived.
+		const data = this.#getData<{ accepted?: unknown } | undefined>(response);
+		// A server that advertised the capability owes a boolean verdict; treating a
+		// missing or malformed one as "enqueued" would hide the very race the flag
+		// exists to report.
+		if (this.#serverFeatures.activeTurnSteering === 1) {
+			if (typeof data?.accepted !== "boolean") {
+				throw new Error("RPC steer response omitted a boolean data.accepted");
+			}
+			return data.accepted;
+		}
+		// Pre-capability servers answer with no data and always enqueue.
+		return true;
+	}
+
+	/**
+	 * Drop queued messages and report how many user-authored ones were dropped.
+	 *
+	 * `options.forInterrupt` additionally drops hidden non-user steers, so a
+	 * following {@link abort} cannot be undone by the server's stranded-queue
+	 * drain restarting the interrupted run. Requires
+	 * `serverFeatures.activeTurnSteering === 1`.
+	 */
+	async clearQueue(options?: { forInterrupt?: boolean }): Promise<RpcClearQueueResult> {
+		const response = await this.#send({
+			type: "clear_queue",
+			...(options?.forInterrupt ? { forInterrupt: true } : {}),
+		});
+		return this.#getData(response);
 	}
 
 	/**
