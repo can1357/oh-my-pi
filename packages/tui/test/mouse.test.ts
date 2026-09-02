@@ -162,10 +162,19 @@ describe("TUI mouse tracking lifecycle", () => {
 		}
 	}
 
-	it("delays normal-mode mouse reporting until enableInput when input is deferred", () => {
+	it("defaults normal-mode mouse reporting to disabled", () => {
 		const terminal = new RecordingTerminal(80, 24);
 		const tui = new TUI(terminal, false);
 
+		tui.start();
+		expect(terminal.writes.join("")).not.toContain("\x1b[?1000h");
+		expect(terminal.writes.join("")).not.toContain("\x1b[?1006h");
+		tui.stop();
+	});
+
+	it("delays normal-mode mouse reporting until enableInput when input is deferred", () => {
+		const terminal = new RecordingTerminal(80, 24);
+		const tui = new TUI(terminal, false, { mouseTracking: true });
 		tui.start({ deferInput: true });
 		const startWrites = terminal.writes.join("");
 		expect(startWrites).not.toContain("\x1b[?1000h");

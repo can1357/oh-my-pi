@@ -2095,7 +2095,6 @@ export class Editor implements Component, Focusable, MouseRoutable {
 		this.#resetKillSequence();
 		this.#cancelAutocomplete();
 		this.onAutocompleteUpdate?.();
-		if (this.onChange) this.onChange(this.getText());
 		return true;
 	}
 

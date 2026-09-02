@@ -108,7 +108,7 @@ export interface TUIOptions {
 	renderScheduler?: RenderScheduler;
 	/**
 	 * Enable terminal mouse reporting (?1000h/?1006h) in normal mode.
-	 * Defaults to true. When enabled, button press/release events (including
+	 * Defaults to false. When enabled, button press/release events (including
 	 * Option-click) are reported without any-motion flooding.
 	 */
 	mouseTracking?: boolean;
@@ -854,7 +854,7 @@ export class TUI extends Container {
 		this.#renderScheduler = options?.renderScheduler ?? DEFAULT_RENDER_SCHEDULER;
 		this.#showHardwareCursor = showHardwareCursor === undefined ? this.#showHardwareCursor : showHardwareCursor;
 		this.#watchdog = new LoopWatchdog();
-		this.#mouseTracking = options?.mouseTracking ?? true;
+		this.#mouseTracking = options?.mouseTracking ?? false;
 	}
 	static #initialResizeScrollbackMode(): ResizeScrollbackMode {
 		const mode = Bun.env.PI_TUI_RESIZE_SCROLLBACK;

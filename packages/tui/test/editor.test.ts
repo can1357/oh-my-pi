@@ -2984,9 +2984,11 @@ describe("Editor component", () => {
 	});
 
 	describe("option-click cursor positioning", () => {
-		it("moves cursor to clicked column on Option-click", () => {
+		it("moves cursor to clicked column on Option-click without emitting onChange", () => {
 			const editor = new Editor(defaultEditorTheme);
+			const onChange = vi.fn();
 			editor.setText("Hello world");
+			editor.onChange = onChange;
 			editor.render(80);
 			editor.setRenderedScreenRow(10);
 
@@ -2994,6 +2996,7 @@ describe("Editor component", () => {
 			// button 8 = Alt/Option + Left Click (0 + 8)
 			editor.handleInput("\x1b[<8;10;12M"); // 1-based col 10 (col 9), row 12 (row 11)
 			expect(editor.getCursor()).toEqual({ line: 0, col: 6 });
+			expect(onChange).not.toHaveBeenCalled();
 		});
 
 		it("moves cursor to correct line in multi-line text", () => {
