@@ -8,15 +8,19 @@ export function formatLocalCalendarDate(date: Date = new Date()): string {
 
 /** Format a local date and minute with a compact numeric UTC offset. */
 export function formatLocalDateTimeWithOffset(date: Date): string {
-	const offsetMinutes = date.getTimezoneOffset();
-	const offsetSign = offsetMinutes <= 0 ? "+" : "-";
-	const absoluteOffset = Math.abs(offsetMinutes);
-	const offsetHours = Math.floor(absoluteOffset / 60);
-	const offsetRemainderMinutes = absoluteOffset % 60;
+	const { clock, offset } = formatLocalClockAndOffset(date);
+	return `${formatLocalCalendarDate(date)} ${clock} ${offset}`;
+}
+
+/** Local clock (`HH:MM`) and numeric UTC offset (`±HH:MM`) as structured parts. */
+export function formatLocalClockAndOffset(date: Date): { clock: string; offset: string } {
 	const pad2 = (value: number): string => String(value).padStart(2, "0");
-	return `${formatLocalCalendarDate(date)} ${pad2(date.getHours())}:${pad2(date.getMinutes())} ${offsetSign}${pad2(
-		offsetHours,
-	)}:${pad2(offsetRemainderMinutes)}`;
+	const offsetMinutes = date.getTimezoneOffset();
+	const absoluteOffset = Math.abs(offsetMinutes);
+	return {
+		clock: `${pad2(date.getHours())}:${pad2(date.getMinutes())}`,
+		offset: `${offsetMinutes <= 0 ? "+" : "-"}${pad2(Math.floor(absoluteOffset / 60))}:${pad2(absoluteOffset % 60)}`,
+	};
 }
 
 /** Format a Date's short timezone name (e.g. `CST`) in the host locale. */

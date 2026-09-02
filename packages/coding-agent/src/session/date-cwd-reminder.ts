@@ -14,7 +14,7 @@ import type { Context, Message, UserMessage } from "@oh-my-pi/pi-ai";
 import { prompt } from "@oh-my-pi/pi-utils";
 import dateCwdReminderTemplate from "../prompts/system/date-cwd-reminder.md" with { type: "text" };
 import nowReminderTemplate from "../prompts/system/now-reminder.md" with { type: "text" };
-import { formatLocalDateTimeWithOffset, formatLocalTimeZoneShortName } from "../utils/local-date";
+import { formatLocalClockAndOffset, formatLocalTimeZoneShortName } from "../utils/local-date";
 
 /** Renders the reminder text for the given local calendar date and cwd. */
 export function renderDateCwdReminder(date: string, cwd: string): string {
@@ -127,12 +127,10 @@ const nowStampTail = /Now: \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z \([^()]*\)\n<\/s
 
 /** Renders the per-turn stamp payload, e.g. `2026-08-30T02:51:16Z (20:51 CST, UTC-06:00)`. */
 export function renderNowStamp(now: Date = new Date()): string {
-	const parts = formatLocalDateTimeWithOffset(now).split(" ");
-	const clock = parts[1] ?? "";
-	const offset = parts[2] ? `UTC${parts[2]}` : "";
+	const { clock, offset } = formatLocalClockAndOffset(now);
 	const zone = formatLocalTimeZoneShortName(now);
 	const zoneClock = [clock, zone].filter(part => part.length > 0).join(" ");
-	const local = [zoneClock, offset].filter(part => part.length > 0).join(", ");
+	const local = [zoneClock, `UTC${offset}`].filter(part => part.length > 0).join(", ");
 	const iso = now.toISOString().replace(/\.\d{3}Z$/, "Z");
 	return prompt.render(nowReminderTemplate, { now: `${iso} (${local})` }).trim();
 }
@@ -150,16 +148,27 @@ export function renderNowStamp(now: Date = new Date()): string {
  * timestamp would duplicate the stamp and invalidate the prompt cache from
  * message 0.
  *
- * The memo (keyed on the pristine message object, mirroring
- * `injectDateCwdReminder`) guarantees the same pristine user message always
- * yields the same stamped object. The append-only context log stores the
- * pre-transform (pristine) messages and hands them back on every request, so
- * a previously-stamped user message re-enters each later request in pristine
- * form — wherever it sits — and must be swapped back to its stamped copy to
- * keep the already-on-the-wire prefix byte-stable. Entries are
- * garbage-collected alongside the messages they belong to.
+ * Two memo layers keep the on-the-wire bytes stable:
+ * - Identity: the pristine-message WeakMap (mirroring `DateCwdReminderInjector`'s
+ *   injection memo) covers the append-only context path, where the same message
+ *   objects are re-handed on every request and are garbage-collected with them.
+ * - Fingerprint: per-request transforms may recreate the message object with
+ *   identical wire bytes (steer envelopes in `wrapSteeringForModel`, secret
+ *   obfuscation). A recreated object misses the identity memo, so a second
+ *   memo keyed on the stable wire identity (timestamp + content shape + final
+ *   text) re-applies the exact stamp that already went on the wire — including
+ *   for messages that slid out of last-user position. It lives for the process
+ *   lifetime (bounded by the number of distinct user messages).
  */
 const nowStampCache = new WeakMap<Message, Message>();
+const nowStampByFingerprint = new Map<string, string>();
+
+/** Stable wire identity of a user message: timestamp, content shape, final text. */
+function nowStampFingerprint(message: Message, tail: string | undefined): string {
+	const content = message.content;
+	const body = typeof content === "string" ? content : `${content.length}\u0000${tail ?? ""}`;
+	return `${message.timestamp ?? ""}\u0000${body}`;
+}
 
 /** Final text of a message: its string content, or the last text part. */
 function finalMessageText(content: Message["content"]): string | undefined {
@@ -193,14 +202,17 @@ export function injectNowStamp(messages: Message[], now: Date = new Date()): Mes
 			changed = true;
 			continue;
 		}
-		if (i !== last) continue;
-		const stamp = renderNowStamp(now);
+		const fingerprint = nowStampFingerprint(message, tail);
+		const knownStamp = nowStampByFingerprint.get(fingerprint);
+		const stamp = knownStamp ?? (i === last ? renderNowStamp(now) : undefined);
+		if (stamp === undefined) continue;
 		const content =
 			typeof message.content === "string"
 				? `${message.content}\n\n${stamp}`
 				: ([...message.content, { type: "text", text: stamp }] as Message["content"]);
 		const stamped = { ...message, content } as Message;
 		nowStampCache.set(message, stamped);
+		if (knownStamp === undefined) nowStampByFingerprint.set(fingerprint, stamp);
 		out[i] = stamped;
 		changed = true;
 	}
@@ -212,7 +224,7 @@ export function injectNowStamp(messages: Message[], now: Date = new Date()): Mes
  * system prompt byte-stable for prompt caching. Skips NULL_PROMPT-style
  * contexts (empty system prompt) and no-message contexts so such requests
  * stay byte-for-byte unchanged; mirrors the guards of
- * {@link withDateCwdReminder}.
+ * {@link DateCwdReminderInjector.transform}.
  */
 export function applyNowStamp(context: Context, now: Date = new Date()): Context {
 	if (!context.systemPrompt || context.systemPrompt.length === 0) return context;

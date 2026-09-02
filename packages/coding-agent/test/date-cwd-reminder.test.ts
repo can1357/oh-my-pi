@@ -238,6 +238,35 @@ describe("date-cwd-reminder", () => {
 			const empty: Message[] = [];
 			expect(injectNowStamp(empty, new Date("2026-08-30T02:51:16Z"))).toBe(empty);
 		});
+
+		it("re-applies the same stamp to a recreated copy of a previously stamped message", () => {
+			// Per-request transforms (steer envelopes, secret obfuscation) may
+			// hand back a fresh object with identical wire bytes; the stamp must
+			// not change with it.
+			const pristine: Message = { role: "user", content: "steer-alpha", timestamp: 101 };
+			const first = injectNowStamp([pristine], new Date("2026-08-30T02:51:16Z"))[0]!;
+
+			const recreated: Message = { role: "user", content: "steer-alpha", timestamp: 101 };
+			const out = injectNowStamp([recreated], new Date("2026-08-30T03:00:00Z"));
+
+			expect(out[0]).not.toBe(recreated);
+			expect(textOf(out[0]!)).toBe(textOf(first));
+		});
+
+		it("keeps the stamp when a recreated copy slides out of last-user position", () => {
+			const first: Message = { role: "user", content: "steer-beta", timestamp: 102 };
+			const assistant = createAssistantMessage("hi");
+			const second: Message = { role: "user", content: "steer-gamma", timestamp: 103 };
+
+			const firstStamped = injectNowStamp([first], new Date("2026-08-30T02:51:16Z"))[0]!;
+
+			const firstRecreated: Message = { role: "user", content: "steer-beta", timestamp: 102 };
+			const out = injectNowStamp([firstRecreated, assistant, second], new Date("2026-08-30T03:00:00Z"));
+
+			expect(textOf(out[0]!)).toBe(textOf(firstStamped));
+			expect(out[1]).toBe(assistant);
+			expect(textOf(out[2]!)).toContain("Now: 2026-08-30T03:00:00Z");
+		});
 	});
 
 	describe("applyNowStamp", () => {
@@ -256,9 +285,9 @@ describe("date-cwd-reminder", () => {
 			const context: Context = {
 				systemPrompt,
 				messages: [
-					{ role: "user", content: "first", timestamp: 1 },
+					{ role: "user", content: "first-apply", timestamp: 201 },
 					createAssistantMessage("hi"),
-					{ role: "user", content: "last", timestamp: 2 },
+					{ role: "user", content: "last-apply", timestamp: 202 },
 				],
 			};
 
