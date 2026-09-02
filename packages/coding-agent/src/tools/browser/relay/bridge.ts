@@ -3440,7 +3440,7 @@ export class RelayBridge {
 		tab: TabState,
 		conns: CdpConnection[],
 		expectedExt: RelaySocket | null,
-		_runImmediatePreloads: boolean,
+		runImmediatePreloads: boolean,
 		recoveryLoaderId?: string,
 	): Promise<void> {
 		const refs: SessionRef[] = [];
@@ -3529,9 +3529,10 @@ export class RelayBridge {
 			this.#assertExtensionCurrent(expectedExt);
 			const runImmediately =
 				script.params?.runImmediately === true &&
-				recoveryLoaderId !== undefined &&
-				currentLoaderId !== undefined &&
-				recoveryLoaderId !== currentLoaderId;
+				(runImmediatePreloads ||
+					(recoveryLoaderId !== undefined &&
+						currentLoaderId !== undefined &&
+						recoveryLoaderId !== currentLoaderId));
 			const replayParams =
 				script.params &&
 				typeof script.params === "object" &&
