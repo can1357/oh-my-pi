@@ -166,9 +166,11 @@ async function scanStandardSkills(realRoot: string, level: "user" | "project"): 
 				return;
 			}
 			// §7.1: the Agent Skills specification is the source of truth for skill
-			// validity; the frontmatter schema is closed per skills-ref, so client
-			// conventions like `enabled` reject the skill as an unexpected field.
-			// Non-conforming skills are skipped without affecting other components.
+			// validity. Its own fields are accepted as specified and omp's two
+			// invocation keys are accepted with boolean values; every other key,
+			// including client conventions like `enabled`, rejects the skill as an
+			// unexpected field. Non-conforming skills are skipped without
+			// affecting other components.
 			const violation = validateAgentSkillFrontmatter(rawFrontmatter, entry.name);
 			if (violation !== null) {
 				warnings.push(`Skipping skill "${entry.name}": ${violation}`);
