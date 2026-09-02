@@ -1252,6 +1252,26 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"display.layout": {
+		type: "enum",
+		values: ["omp", "opencode"] as const,
+		default: "omp",
+		ui: {
+			tab: "appearance",
+			group: "Display",
+			label: "Layout Style",
+			description: "Transcript style: omp's detailed tool cards, or an opencode-style flat transcript",
+			options: [
+				{ value: "omp", label: "OMP", description: "Tool cards with framed output previews" },
+				{
+					value: "opencode",
+					label: "OpenCode",
+					description: "Flat transcript; collapsed tool calls render as one line (Ctrl+O expands)",
+				},
+			],
+		},
+	},
+
 	"display.shimmer": {
 		type: "enum",
 		values: ["classic", "kitt", "disabled"] as const,

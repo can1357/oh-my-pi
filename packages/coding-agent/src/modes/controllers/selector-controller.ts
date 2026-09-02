@@ -111,6 +111,7 @@ import { TranscriptBlock } from "../components/transcript-container";
 import { TreeSelectorComponent } from "../components/tree-selector";
 import { UsageDashboardComponent } from "../components/usage-dashboard";
 import { renderUsageReports } from "./command-controller";
+import { type LayoutMode, setLayoutMode } from "../layout-mode";
 import type { SessionObserverRegistry } from "../session-observer-registry";
 
 const MANUAL_LOGIN_PROMPT = "Paste the authorization code (or full redirect URL), then press Enter:";
@@ -669,6 +670,14 @@ export class SelectorController {
 				this.ctx.statusLine.invalidate();
 				this.ctx.ui.invalidate();
 				this.ctx.ui.requestRender();
+				break;
+			case "display.layout":
+				setLayoutMode(value as LayoutMode);
+				// Rebuild re-creates every transcript component under the new layout
+				// (tool blocks, read groups, user gutters); full reset retires blocks
+				// already committed to native scrollback (mirrors collapseCompacted).
+				this.ctx.rebuildChatFromMessages();
+				this.ctx.ui.resetDisplay();
 				break;
 			case "tui.resizeScrollback":
 				this.ctx.ui.setResizeScrollback(value as ResizeScrollbackMode);

@@ -34,6 +34,7 @@ import type { XdevState } from "../../tools/xdev";
 import { isFramedBlockComponent, markFramedBlockComponent, renderStatusLine, WidthAwareText } from "../../tui";
 import { convertImageToPng } from "../../utils/image-loading";
 import { sanitizeWithOptionalSixelPassthrough } from "../../utils/sixel";
+import { isOpencodeLayout } from "../layout-mode";
 import { renderDiff } from "./diff";
 import { type AnimationFrame, trimBlankEdges } from "./transcript-container";
 
@@ -429,6 +430,12 @@ export class ToolExecutionComponent extends Container {
 	// the terminal never triggers an unnecessary full-viewport replay.
 	#firstResultViewportRepaintShapePainted = false;
 	#partialResultShapePainted = false;
+	// Memoized opencode-layout collapse: the derived single-line slice keyed on
+	// the underlying container render (same source ref => identical rows =>
+	// reuse), mirroring UserMessageComponent's OSC-zone memo so this component
+	// stays reference-stable for the transcript's incremental assembly.
+	#collapsedSource: readonly string[] | undefined;
+	#collapsedLines: readonly string[] | undefined;
 	#renderState: {
 		spinnerFrame?: number;
 		expanded: boolean;
@@ -971,7 +978,7 @@ export class ToolExecutionComponent extends Container {
 		// TUI startup, so a result rendered before it lands must re-shape once it
 		// does (it gates Image children vs text fallback in #rebuildDisplay); keyed
 		// here for the same reason markdown.ts keys its render cache on it.
-		const key = `${this.#resultVersion}|${this.#expanded}|${this.#isPartial}|${this.#argsComplete ? "1" : "0"}|${this.#executionStarted ? "1" : "0"}|${this.#spinnerFrame ?? "-"}|${this.#showImages}|${getThemeEpoch()}|${this.#displayInputVersion}|${TERMINAL.imageProtocol ?? "-"}|${this.#imageSizeKey()}`;
+		const key = `${this.#resultVersion}|${this.#expanded}|${this.#isPartial}|${this.#argsComplete ? "1" : "0"}|${this.#executionStarted ? "1" : "0"}|${this.#spinnerFrame ?? "-"}|${this.#showImages}|${getThemeEpoch()}|${this.#displayInputVersion}|${TERMINAL.imageProtocol ?? "-"}|${this.#imageSizeKey()}|${isOpencodeLayout() ? "oc" : "omp"}`;
 		if (key === this.#lastDisplayKey && this.#displayBuilt) return;
 		this.#lastDisplayKey = key;
 
@@ -1028,7 +1035,23 @@ export class ToolExecutionComponent extends Container {
 		}
 		this.#firstResultViewportRepaintShapePainted = this.#needsFirstResultViewportRepaintAtRender();
 		this.#partialResultShapePainted = this.#result !== undefined && this.#isPartial;
-		return lines;
+		// Opencode layout: a collapsed tool block renders as its status line only
+		// (renderOutputBlock draws flat in this mode, so the first visible row is
+		// the header even for self-framing renderers). Errors stay full-size —
+		// a one-line error hides the message the user needs — and Ctrl+O
+		// (`setExpanded`) restores the complete card.
+		const collapse = isOpencodeLayout() && !this.#expanded && !(this.#result?.isError && !this.#isBenignSkip());
+		if (!collapse) return lines;
+		if (this.#collapsedSource === lines && this.#collapsedLines !== undefined) {
+			return this.#collapsedLines;
+		}
+		// First row with visible content — the status one-liner every renderer
+		// emits first (rows above it are paddingY blanks, which carry no ANSI in
+		// this mode because the state bg is disabled).
+		const first = lines.find(line => /\S/.test(line));
+		this.#collapsedSource = lines;
+		this.#collapsedLines = first === undefined ? [] : [first];
+		return this.#collapsedLines;
 	}
 
 	#renderCompact(width: number): readonly string[] {
@@ -1111,7 +1134,7 @@ export class ToolExecutionComponent extends Container {
 		const benignSkip = this.#isBenignSkip();
 		const stateBgKey =
 			this.#isPartial || benignSkip ? "toolPendingBg" : this.#result?.isError ? "toolErrorBg" : "toolSuccessBg";
-		const stateBgFn = (t: string) => theme.bg(stateBgKey, t);
+		const stateBgFn = isOpencodeLayout() ? undefined : (t: string) => theme.bg(stateBgKey, t);
 
 		// A benign skip is a synthetic placeholder for a call that never executed,
 		// so bypass any bespoke error frame and draw the neutral generic card —
@@ -1548,7 +1571,7 @@ export class ToolExecutionComponent extends Container {
 	 * only need the neutral tint. Bespoke-renderer tools get their content box
 	 * swapped for the same neutral card.
 	 */
-	#renderBenignSkipCard(stateBgFn: (text: string) => string): void {
+	#renderBenignSkipCard(stateBgFn: ((text: string) => string) | undefined): void {
 		if (!this.#usesContentBox) {
 			this.#contentText.setCustomBgFn(stateBgFn);
 			this.#contentText.invalidate();

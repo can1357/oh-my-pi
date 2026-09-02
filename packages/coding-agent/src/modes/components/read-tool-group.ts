@@ -8,6 +8,7 @@ import { parseLineRanges, selectorLineRanges, splitPathAndSel } from "../../tool
 import { PREVIEW_LIMITS, shortenPath } from "../../tools/render-utils";
 import { fileHyperlink, renderCodeCell, tryResolveInternalUrlSync } from "../../tui";
 import { canonicalizeMessage } from "../../utils/thinking-display";
+import { isOpencodeLayout } from "../layout-mode";
 import type { ToolExecutionHandle } from "./tool-execution";
 import { formatUsageRow } from "./usage-row";
 
@@ -871,6 +872,9 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 	}
 
 	#shouldRenderPreview(entry: ReadEntry): boolean {
+		// Opencode layout: no framed content-preview boxes while collapsed — the
+		// group stays a flat list of one-line reads (Ctrl+O restores previews).
+		if (isOpencodeLayout() && !this.#expanded) return false;
 		return this.#showContentPreview && entry.contentText !== undefined;
 	}
 

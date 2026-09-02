@@ -3,6 +3,7 @@
  */
 import type { Component } from "@oh-my-pi/pi-tui";
 import { ImageProtocol, padding, TERMINAL, visibleWidth, wrapTextWithAnsi } from "@oh-my-pi/pi-tui";
+import { isOpencodeLayout } from "../modes/layout-mode";
 import type { Theme, ThemeColor } from "../modes/theme/theme";
 import { getSixelLineMask } from "../utils/sixel";
 import type { State } from "./types";
@@ -64,6 +65,36 @@ export function outputBlockContentWidth(
 }
 
 export function renderOutputBlock(options: OutputBlockOptions, theme: Theme): string[] {
+	// Opencode layout: no frame at all. The header renders as a plain status
+	// row (ToolExecutionComponent's collapsed view slices exactly this row) and
+	// section content renders flat, indented two columns, with no background
+	// tint. Every framed tool (bash, eval, read, fetch, task, …) routes through
+	// here, so this single branch is what makes the whole transcript flat.
+	if (isOpencodeLayout()) {
+		const flatWidth = Math.max(0, options.width);
+		const lines: string[] = [];
+		const labelText = [options.header, options.headerMeta].filter(Boolean).join(theme.sep.dot);
+		if (labelText) lines.push(truncateToWidth(labelText, flatWidth));
+		const indent = padding(2);
+		const flatContentWidth = Math.max(1, flatWidth - 2);
+		const flatSections = options.sections ?? [];
+		for (const section of flatSections) {
+			if (section.label) lines.push(`${indent}${theme.fg("dim", section.label)}`);
+			const sectionLines = section.lines.flatMap(l => l.split("\n"));
+			const sixelMask = TERMINAL.imageProtocol === ImageProtocol.Sixel ? getSixelLineMask(sectionLines) : undefined;
+			for (let i = 0; i < sectionLines.length; i++) {
+				const line = sectionLines[i]!;
+				if (sixelMask?.[i]) {
+					lines.push(line);
+					continue;
+				}
+				for (const wrapped of wrapTextWithAnsi(line.trimEnd(), flatContentWidth)) {
+					lines.push(`${indent}${wrapped}`);
+				}
+			}
+		}
+		return lines;
+	}
 	const { header, headerMeta, state, sections = [], width, applyBg = true } = options;
 	const h = theme.boxRound.horizontal;
 	const v = theme.boxRound.vertical;
@@ -226,6 +257,8 @@ export class CachedOutputBlock {
 	#buildKey(options: OutputBlockOptions): bigint {
 		const h = new Hasher();
 		h.u32(options.width);
+		// A live layout toggle changes the rendered shape for identical options.
+		h.bool(isOpencodeLayout());
 		h.u32(normalizeContentPaddingLeft(options.contentPaddingLeft));
 		h.u32(
 			normalizeContentPaddingLeft(
