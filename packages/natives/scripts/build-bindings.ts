@@ -244,7 +244,20 @@ try {
 	// The package declares Bun as its build runtime. Invoke napi's JavaScript
 	// entry through this Bun process instead of its `#!/usr/bin/env node` shim so
 	// an old host Node installation cannot make an otherwise supported Bun build fail.
-	const buildResult = await $`${process.execPath} ${napiBin} ${napiArgs}`.nothrow();
+	// Ensure the active rustup toolchain takes precedence over any system rustc shadow,
+	// and fall back to Unix Makefiles if ninja is not installed for C dependencies.
+	const rustupCargoResult = await $`rustup which cargo`.quiet().nothrow();
+	const toolchainBin =
+		rustupCargoResult.exitCode === 0 ? path.dirname(rustupCargoResult.stdout.toString().trim()) : "";
+	const pathSep = process.platform === "win32" ? ";" : ":";
+	const currentPath = process.env.PATH ?? process.env.Path ?? "";
+	const hasNinja = (await $`which ninja`.quiet().nothrow()).exitCode === 0;
+	const buildEnv: Record<string, string> = {
+		...(process.env as Record<string, string>),
+		...(toolchainBin ? { PATH: `${toolchainBin}${pathSep}${currentPath}` } : {}),
+		...(!process.env.CMAKE_GENERATOR && !hasNinja ? { CMAKE_GENERATOR: "Unix Makefiles" } : {}),
+	};
+	const buildResult = await $`${process.execPath} ${napiBin} ${napiArgs}`.env(buildEnv).nothrow();
 	if (buildResult.exitCode !== 0) {
 		const stdout = buildResult.stdout?.toString("utf-8") ?? "";
 		const stderr = buildResult.stderr?.toString("utf-8") ?? "";
