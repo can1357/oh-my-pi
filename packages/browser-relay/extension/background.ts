@@ -864,8 +864,7 @@ async function reconcileOrphans(): Promise<void> {
 	// alarm even though debugger attachments may still exist — an MV3 suspension
 	// could then strand the debugging infobar until a later successful pass.
 	// Leave any existing deadline intact and let the next alarm/startup retry.
-	const targets = await chrome.debugger.getTargets().catch(() => null);
-	if (targets === null) return;
+	const targets = await chrome.debugger.getTargets();
 	// getTargets includes DevTools and other debugger owners. Reconciliation may
 	// only re-seed attachments already known to this extension; otherwise a
 	// takeover becomes relay-authorized again before buildHello can filter it.
