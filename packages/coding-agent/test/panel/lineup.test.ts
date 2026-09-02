@@ -114,7 +114,7 @@ describe("family policy", () => {
 				},
 				personas: {},
 			}),
-		).toThrow(PanelConfigError);
+		).toThrow(/panel\.roles\.loosened\.distinctFamilies: unknown key/);
 	});
 
 	test("a personas role with a floor fails when its lineup collapses onto one family", () => {
