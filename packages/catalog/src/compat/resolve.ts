@@ -846,7 +846,7 @@ function resolveAnthropicPolicy(
 		allowAnthropicHeaderOverrides: false,
 		supportsEagerToolInputStreaming: official,
 		supportsLongCacheRetention: official,
-		supportsMidConversationSystem: official && facts.anthropicAdaptiveGenAtLeast("4.8"),
+		supportsMidConversationSystem: official && !facts.family("sonnet") && facts.anthropicAdaptiveGenAtLeast("4.8"),
 		supportsTurnScopedSystem: false,
 		supportsMidConversationToolChanges: false,
 		supportsPerMessageEffort: false,

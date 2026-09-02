@@ -5,6 +5,16 @@
 ### Added
 
 - Added Merge Gateway as a dynamically discovered provider with separate native capability declarations and OMP compatibility policy for pricing, limits, vision, reasoning, tools, structured output, streaming, zero-data retention, and DeepSeek DSML recovery.
+- Added support for Claude Fable 5.1
+
+### Changed
+
+- Updated pricing and context limits for various Claude models
+
+### Fixed
+
+- Claude Sonnet 5 no longer advertises unsupported mid-conversation system messages.
+
 ## [18.1.2] - 2026-09-01
 
 ### Added

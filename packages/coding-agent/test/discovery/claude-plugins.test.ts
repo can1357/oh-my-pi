@@ -1253,7 +1253,7 @@ describe("listClaudePluginRoots", () => {
 		}
 	});
 
-	test("ignores inherited extraEnv keys when expanding placeholders", async () => {
+	test("never substitutes inherited env names when expanding placeholders", async () => {
 		const pluginsDir = path.join(tempDir, ".claude", "plugins");
 		const pluginPath = path.join(tempDir, "plugins", "proto-env-mcp");
 		const plain = (name: string): string => ["$", "{", name, "}"].join("");
@@ -1290,26 +1290,17 @@ describe("listClaudePluginRoots", () => {
 			}),
 		);
 
-		// An ambient __proto__ variable is a valid own property of the
-		// environment; the expansion extraEnv must not shadow it with the
-		// inherited Object.prototype member.
-		Object.defineProperty(Bun.env, "__proto__", {
-			value: "secret",
-			enumerable: true,
-			writable: true,
-			configurable: true,
+		// `__proto__` and `constructor` resolve through Object.prototype on both
+		// the expansion extraEnv map and Bun.env, so neither is substitutable:
+		// an unset name stays literal and `:-` yields its default. Substituting
+		// the inherited member would leak "[object Object]" /
+		// "function Object() { [native code] }" into the spawned server env.
+		const result = await loadCapability<MCPServer>(mcpCapability.id, {
+			cwd: tempDir,
+			providers: ["claude-plugins"],
 		});
-
-		try {
-			const result = await loadCapability<MCPServer>(mcpCapability.id, {
-				cwd: tempDir,
-				providers: ["claude-plugins"],
-			});
-			const server = result.all.find(item => item.name === "proto-env-mcp:proto");
-			expect(server?.env).toEqual({ PROTO: "secret", CTOR: "none" });
-		} finally {
-			delete Bun.env["__proto__"];
-		}
+		const server = result.all.find(item => item.name === "proto-env-mcp:proto");
+		expect(server?.env).toEqual({ PROTO: plain("__proto__"), CTOR: "none" });
 	});
 
 	describe("isSameMCPConnection stdio equivalence", () => {

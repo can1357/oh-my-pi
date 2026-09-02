@@ -5,6 +5,9 @@
 ### Added
 
 - Added API-key login and validation for Merge Gateway.
+### Fixed
+
+- Preserved Anthropic thinking now survives side requests, tool-description drift, turn-scoped reminders, and recoverable prefix mismatches without corrupting the conversation prefix.
 
 ## [18.1.2] - 2026-09-01
 
