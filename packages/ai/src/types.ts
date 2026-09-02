@@ -484,7 +484,8 @@ export interface StreamOptions {
 	/**
 	 * Optional prompt-cache identity. OpenAI-family providers use this for
 	 * `prompt_cache_key` payloads and cache-affinity headers such as
-	 * `x-grok-conv-id`; when omitted, they fall back to `sessionId`.
+	 * `x-context-id` and `x-grok-conv-id`; when omitted, they fall back to
+	 * `sessionId`.
 	 */
 	promptCacheKey?: string;
 	/**

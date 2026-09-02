@@ -1640,6 +1640,11 @@ function applyOpenAIChatCompletionsPromptCachePolicy(
 		markLatestStableChatCompletionsCacheBreakpoint(params.messages);
 }
 
+/** OpenAI chat-completions `metadata` accepts at most 16 string key/value pairs. */
+const OPENAI_METADATA_MAX_ENTRIES = 16;
+const OPENAI_METADATA_MAX_KEY_LENGTH = 64;
+const OPENAI_METADATA_MAX_VALUE_LENGTH = 512;
+
 function buildParams(
 	model: Model<"openai-completions">,
 	context: Context,
@@ -1660,6 +1665,30 @@ function buildParams(
 		messages: [],
 		stream: true,
 	};
+	const sessionId = options?.sessionId;
+	if (
+		sessionId !== undefined &&
+		sessionId.length <= OPENAI_METADATA_MAX_VALUE_LENGTH &&
+		initialCompat.supportsMetadata === true
+	) {
+		const callerMetadata: Record<string, string> = {};
+		let copied = 0;
+		for (const [key, value] of Object.entries(options?.metadata ?? {})) {
+			if (
+				typeof value !== "string" ||
+				key === "session_id" ||
+				key.length > OPENAI_METADATA_MAX_KEY_LENGTH ||
+				value.length > OPENAI_METADATA_MAX_VALUE_LENGTH
+			) {
+				continue;
+			}
+			if (copied >= OPENAI_METADATA_MAX_ENTRIES - 1) break;
+			callerMetadata[key] = value;
+			copied++;
+		}
+		callerMetadata.session_id = sessionId;
+		params.metadata = callerMetadata;
+	}
 	let toolStrictMode: AppliedToolStrictMode = "none";
 	let strictToolsApplied = false;
 

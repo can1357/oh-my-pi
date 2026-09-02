@@ -195,6 +195,13 @@ export type OpenAIStreamMarkupHealingPattern = "kimi" | "dsml" | "qwen" | "think
 export interface OpenAICompat {
 	/** Whether the provider supports the `store` field. Default: auto-detected from URL. */
 	supportsStore?: boolean;
+	/**
+	 * Whether the provider's chat-completions endpoint accepts the OpenAI
+	 * `metadata` field (string-valued key/value pairs). Hosts with strict
+	 * request schemas reject unknown top-level fields and 400 on it.
+	 * Default: auto-detected from URL.
+	 */
+	supportsMetadata?: boolean;
 	/** Whether the provider supports the `developer` role (vs `system`). Default: auto-detected from URL. */
 	supportsDeveloperRole?: boolean;
 	/**
@@ -342,7 +349,7 @@ export interface OpenAICompat {
 	/** Extra fields to include in request body (e.g. gateway routing hints for OpenClaw-style proxies). */
 	extraBody?: Record<string, unknown>;
 	/** Request-session header that should mirror the normalized prompt-cache key. Default: unset. */
-	promptCacheSessionHeader?: "x-grok-conv-id";
+	promptCacheSessionHeader?: "x-context-id" | "x-grok-conv-id";
 	/** Whether chat-completions payloads should include provider-specific prompt-cache markers. */
 	cacheControlFormat?: "anthropic" | undefined;
 	/**
@@ -707,6 +714,12 @@ export interface ResolvedOpenAISharedCompat {
 	promptCacheBreakpointTtl?: "30m";
 	/** The model sits behind OpenRouter (routing prefs and max-token omission apply). */
 	isOpenRouterHost: boolean;
+	/**
+	 * Whether this endpoint accepts the OpenAI `metadata` field on chat
+	 * completions. Built catalog models always materialize this value;
+	 * optionality preserves hand-authored resolved compat fixtures.
+	 */
+	supportsMetadata?: boolean;
 	/** Whether this endpoint needs a max-token field even when caller did not set one. */
 	alwaysSendMaxTokens: boolean;
 	openRouterRouting?: OpenAICompat["openRouterRouting"];
@@ -774,6 +787,7 @@ export type ResolvedOpenAICompat = ResolvedOpenAISharedCompat &
 			| "promptCacheBreakpointTtl"
 			| "openRouterRouting"
 			| "isOpenRouterHost"
+			| "supportsMetadata"
 			| "supportsStrictMode"
 			| "supportsLongPromptCacheRetention"
 			| "alwaysSendMaxTokens"

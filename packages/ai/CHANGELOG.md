@@ -5,6 +5,7 @@
 ### Fixed
 
 - Preserved Anthropic thinking now survives side requests, tool-description drift, turn-scoped reminders, and recoverable prefix mismatches without corrupting the conversation prefix.
+- OpenAI-compatible Chat Completions requests now forward supported agent sessions as `metadata.session_id` for tracing, while LiteLLM and compatible opt-in gateways receive the stable prompt-cache identity as `x-context-id` for cache affinity. Caller headers and cache-disabled behavior remain unchanged.
 
 ## [18.1.2] - 2026-09-01
 

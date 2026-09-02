@@ -25,6 +25,18 @@ const openAI56CompletionsModel: Model<"openai-completions"> = {
 		api: "openai-completions",
 	}).compat,
 };
+const litellmCompletionsModel: Model<"openai-completions"> = {
+	...openAI56CompletionsSpec,
+	api: "openai-completions",
+	provider: "litellm",
+	baseUrl: "https://litellm.example.com/v1",
+	compat: resolveModelPolicy({
+		...openAI56CompletionsSpec,
+		api: "openai-completions",
+		provider: "litellm",
+		baseUrl: "https://litellm.example.com/v1",
+	}).compat,
+};
 
 const emptyUsage: Usage = {
 	input: 0,
@@ -100,6 +112,51 @@ async function captureSimpleRequest(
 	if (!requestHeaders || !body) throw new Error("Expected a serialized Chat Completions request");
 	return { headers: requestHeaders, body };
 }
+
+describe("OpenAI Chat Completions cache affinity header", () => {
+	const cases: Array<{
+		name: string;
+		options: OpenAICompletionsOptions;
+		expectedHeader: string | null;
+	}> = [
+		{
+			name: "uses sessionId when no prompt cache key is provided",
+			options: { sessionId: "session-fallback" },
+			expectedHeader: "session-fallback",
+		},
+		{
+			name: "keeps the prompt cache key stable across a distinct side-channel session",
+			options: { promptCacheKey: "stable-cache-key", sessionId: "side-channel-session" },
+			expectedHeader: "stable-cache-key",
+		},
+		{
+			name: "omits automatic affinity when caching is disabled",
+			options: {
+				promptCacheKey: "disabled-cache-key",
+				sessionId: "disabled-session",
+				cacheRetention: "none",
+			},
+			expectedHeader: null,
+		},
+		{
+			name: "preserves a caller-provided mixed-case affinity header",
+			options: {
+				promptCacheKey: "automatic-cache-key",
+				sessionId: "automatic-session",
+				headers: { "X-Context-ID": "caller-affinity" },
+			},
+			expectedHeader: "caller-affinity",
+		},
+	];
+
+	for (const { name, options, expectedHeader } of cases) {
+		it(name, async () => {
+			const { headers } = await captureRequest(options, litellmCompletionsModel);
+
+			expect(headers.get("x-context-id")).toBe(expectedHeader);
+		});
+	}
+});
 
 describe("OpenAI Chat Completions explicit prompt cache policy", () => {
 	const historicalContext: Context = {
@@ -181,5 +238,82 @@ describe("OpenAI Chat Completions explicit prompt cache policy", () => {
 				expect(message).not.toMatchObject({ content: [{ prompt_cache_breakpoint: { mode: "explicit" } }] });
 			}
 		}
+	});
+});
+
+describe("session id metadata forwarding", () => {
+	it("forwards sessionId as metadata.session_id", async () => {
+		const { body } = await captureRequest({ sessionId: "sess-01a03f57" });
+
+		expect(body.metadata).toEqual({ session_id: "sess-01a03f57" });
+	});
+
+	it("preserves caller metadata alongside session_id", async () => {
+		const { body } = await captureRequest({
+			sessionId: "sess-01a03f57",
+			metadata: { source: "test" },
+		});
+
+		expect(body.metadata).toEqual({ source: "test", session_id: "sess-01a03f57" });
+	});
+
+	it("omits metadata entirely when sessionId is absent", async () => {
+		const { body } = await captureRequest({ metadata: { source: "test" } });
+
+		expect(body.metadata).toBeUndefined();
+	});
+
+	it("drops non-string caller metadata values", async () => {
+		const { body } = await captureRequest({
+			sessionId: "sess-01a03f57",
+			metadata: { source: "test", count: 3, flag: null, nested: { a: 1 } },
+		});
+
+		expect(body.metadata).toEqual({ source: "test", session_id: "sess-01a03f57" });
+	});
+
+	it("omits metadata for endpoints whose compat rejects it", async () => {
+		const strictModel: Model<"openai-completions"> = {
+			...openAI56CompletionsModel,
+			compat: { ...openAI56CompletionsModel.compat, supportsMetadata: false },
+		};
+		const { body } = await captureRequest({ sessionId: "sess-01a03f57" }, strictModel);
+
+		expect(body.metadata).toBeUndefined();
+	});
+
+	it("omits metadata for endpoints that have not opted in", async () => {
+		const unknownModel: Model<"openai-completions"> = {
+			...openAI56CompletionsModel,
+			compat: { ...openAI56CompletionsModel.compat, supportsMetadata: undefined },
+		};
+		const { body } = await captureRequest({ sessionId: "sess-01a03f57" }, unknownModel);
+
+		expect(body.metadata).toBeUndefined();
+	});
+
+	it("reserves a metadata slot for session_id within the wire limit", async () => {
+		const callerEntries = Object.fromEntries(Array.from({ length: 16 }, (_, i) => [`key${i}`, `value${i}`]));
+		const { body } = await captureRequest({ sessionId: "sess-01a03f57", metadata: callerEntries });
+
+		const metadata = body.metadata as Record<string, string>;
+		expect(Object.keys(metadata)).toHaveLength(16);
+		expect(metadata.session_id).toBe("sess-01a03f57");
+		expect(metadata.key15).toBeUndefined();
+	});
+
+	it("drops caller metadata entries exceeding wire key and value limits", async () => {
+		const { body } = await captureRequest({
+			sessionId: "sess-01a03f57",
+			metadata: { ok: "fine", ["k".repeat(65)]: "v", longValue: "v".repeat(513) },
+		});
+
+		expect(body.metadata).toEqual({ ok: "fine", session_id: "sess-01a03f57" });
+	});
+
+	it("omits metadata entirely when the session id exceeds the wire value limit", async () => {
+		const { body } = await captureRequest({ sessionId: "s".repeat(513), metadata: { ok: "fine" } });
+
+		expect(body.metadata).toBeUndefined();
 	});
 });

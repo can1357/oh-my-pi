@@ -469,6 +469,12 @@ function detectOpenAICompat(
 
 	return {
 		supportsStore: !isNonStandard,
+		// `metadata` is a standard OpenAI chat-completions field, but the wider
+		// OpenAI-compatible ecosystem predates it, and strict request schemas
+		// reject unknown top-level fields (NVIDIA NIM and Venice 400 under
+		// `additionalProperties: false`, see #2299). Default to hosts known to
+		// accept it; everything else opts in via the `supportsMetadata` override.
+		supportsMetadata: isOpenAIHost || isAzureHost || provider === "litellm",
 		supportsDeveloperRole: isOpenAIHost || isAzureHost,
 		supportsMultipleSystemMessages: supportsMultipleSystemMessagesDefault,
 		supportsReasoningEffort: !isGrok && !d.isXiaomiMimo && (!(d.isZai || d.isZhipu) || supportsZaiReasoningEffort),
@@ -555,7 +561,8 @@ function detectOpenAICompat(
 		reasoningDeltasMayBeCumulative: false,
 		emptyLengthFinishIsContextError: false,
 		usesOpenAIToolCallIdLimit: false,
-		promptCacheSessionHeader: hostMatchesUrl(baseUrl, "xai") ? "x-grok-conv-id" : undefined,
+		promptCacheSessionHeader:
+			provider === "litellm" ? "x-context-id" : hostMatchesUrl(baseUrl, "xai") ? "x-grok-conv-id" : undefined,
 		dropThinkingWhenReasoningEffort: false,
 		nativeKimiK3Reasoning: false,
 		zaiReasoningEffortDialect: false,
@@ -763,7 +770,8 @@ function resolveOpenAIResponsesPolicy(
 		reasoningDeltasMayBeCumulative: false,
 		emptyLengthFinishIsContextError: false,
 		usesOpenAIToolCallIdLimit: false,
-		promptCacheSessionHeader: hostMatchesUrl(baseUrl, "xai") ? "x-grok-conv-id" : undefined,
+		promptCacheSessionHeader:
+			provider === "litellm" ? "x-context-id" : hostMatchesUrl(baseUrl, "xai") ? "x-grok-conv-id" : undefined,
 		streamFirstEventTimeoutMs: isLocalServingBackend ? 0 : spec.compat?.streamFirstEventTimeoutMs,
 		streamIdleTimeoutMs: isLocalServingBackend
 			? LOCAL_OPENAI_COMPAT_STREAM_IDLE_TIMEOUT_MS
