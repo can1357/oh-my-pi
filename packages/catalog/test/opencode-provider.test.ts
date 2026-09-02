@@ -584,6 +584,50 @@ describe("OpenCode provider discovery", () => {
 		}
 	});
 
+	test("drops cached Gemini 3.7 Flash effort metadata when refresh fails (#10543)", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-opencode-gemini37-cache-"));
+		const cacheDbPath = path.join(tempDir, "models.db");
+		try {
+			const options = opencodeZenModelManagerOptions({ apiKey: "zen-account-key" });
+			const cacheProviderId = options.cacheProviderId;
+			if (!cacheProviderId) throw new Error("OpenCode Zen cache provider id is missing");
+			const bundledModels = getBundledModels("opencode-zen");
+			const current = bundledModels.find(model => model.id === "gemini-3.7-flash");
+			if (!current?.thinking) throw new Error("OpenCode Zen Gemini 3.7 Flash is missing thinking metadata");
+			const stale = {
+				...current,
+				thinking: {
+					...current.thinking,
+					efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High],
+				},
+			};
+			writeModelCache(cacheProviderId, Date.now(), [stale], true, "merge-v3:pre-10543", cacheDbPath);
+
+			let fetches = 0;
+			const upgraded = await resolveProviderModels(
+				{
+					...options,
+					staticModels: bundledModels,
+					cacheDbPath,
+					modelsDev: undefined,
+					fetchDynamicModels: async () => {
+						fetches++;
+						throw new Error("offline");
+					},
+				},
+				"online-if-uncached",
+			);
+			expect(fetches).toBe(1);
+			expect(upgraded.models.find(model => model.id === current.id)?.thinking?.efforts).toEqual([
+				Effort.Low,
+				Effort.Medium,
+				Effort.High,
+			]);
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
+	});
+
 	test("routes opencode-go deepseek-v4-flash to the responses API", () => {
 		const descriptor = MODELS_DEV_PROVIDER_DESCRIPTORS.find(item => item.providerId === "opencode-go");
 		// stencil.so lists deepseek-v4-flash without provider.npm, so it would

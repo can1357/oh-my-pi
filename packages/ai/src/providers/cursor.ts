@@ -702,7 +702,10 @@ function streamCursorWithWireMode(
 			const { requestBytes, conversationState } = builtRequest;
 			serializedFallbackWireModelId = builtRequest.fallbackWireModelId;
 			conversationStateCache.set(conversationId, conversationState);
-			const requestContextTools = buildMcpToolDefinitions(context.tools);
+			const requestContextTools = buildMcpToolDefinitions(
+				context.tools,
+				model.requiresCursorToolSchemaProjection === true,
+			);
 			const requestContextRules = buildCursorRequestContextRules(context.systemPrompt);
 
 			const baseUrl = model.baseUrl || CURSOR_API_URL;
@@ -4612,7 +4615,10 @@ function isJsonValue(value: unknown): value is JsonValue {
 	return true;
 }
 
-export function buildMcpToolDefinitions(tools: Tool[] | undefined): McpToolDefinition[] {
+export function buildMcpToolDefinitions(
+	tools: Tool[] | undefined,
+	requiresCursorToolSchemaProjection = false,
+): McpToolDefinition[] {
 	if (!tools || tools.length === 0) {
 		return [];
 	}
@@ -4632,7 +4638,8 @@ export function buildMcpToolDefinitions(tools: Tool[] | undefined): McpToolDefin
 	const forwarded = writeTool ? [...advertisedTools, writeTool] : advertisedTools;
 
 	return forwarded.map(tool => {
-		const jsonSchema = sanitizeSchemaForCursor(toolWireSchema(tool));
+		const wireSchema = toolWireSchema(tool);
+		const jsonSchema = requiresCursorToolSchemaProjection ? sanitizeSchemaForCursor(wireSchema) : wireSchema;
 		const schemaValue: JsonValue =
 			jsonSchema !== null && !Array.isArray(jsonSchema) && isJsonValue(jsonSchema)
 				? jsonSchema

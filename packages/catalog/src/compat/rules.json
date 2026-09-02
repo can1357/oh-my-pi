@@ -4720,7 +4720,34 @@
 				}
 			},
 			{
-				"source": "classes/gemini.kdl:71",
+				"source": "classes/gemini.kdl:79",
+				"class": "gemini",
+				"providers": [
+					"google",
+					"google-vertex",
+					"opencode-zen"
+				],
+				"family": "flash",
+				"revision": [
+					{
+						"op": ">=",
+						"revision": "3.7.0"
+					},
+					{
+						"op": "<",
+						"revision": "3.8.0"
+					}
+				],
+				"thinking": {
+					"efforts": [
+						"low",
+						"medium",
+						"high"
+					]
+				}
+			},
+			{
+				"source": "classes/gemini.kdl:85",
 				"class": "gemini",
 				"revision": [
 					{
@@ -4729,15 +4756,14 @@
 					}
 				],
 				"wire": {
-					"multimodalFunctionResponse": true,
-					"requiresSkipThoughtSignature": true
+					"multimodalFunctionResponse": true
 				},
 				"thinking": {
 					"requiresEffort": true
 				}
 			},
 			{
-				"source": "classes/gemini.kdl:79",
+				"source": "classes/gemini.kdl:93",
 				"class": "gemini",
 				"providers": [
 					"google",
@@ -4750,11 +4776,12 @@
 					}
 				],
 				"wire": {
+					"requiresSkipThoughtSignature": true,
 					"supportsFunctionPartId": true
 				}
 			},
 			{
-				"source": "classes/gemini.kdl:84",
+				"source": "classes/gemini.kdl:99",
 				"class": "gemini",
 				"providers": [
 					"google-antigravity",
@@ -4847,7 +4874,7 @@
 				}
 			},
 			{
-				"source": "classes/glm.kdl:13",
+				"source": "classes/glm.kdl:16",
 				"class": "glm",
 				"revision": [
 					{
@@ -4859,6 +4886,7 @@
 						"revision": "5.3.0"
 					}
 				],
+				"priority": 10,
 				"thinking": {
 					"efforts": [
 						"minimal",
@@ -4870,7 +4898,7 @@
 				}
 			},
 			{
-				"source": "classes/glm.kdl:17",
+				"source": "classes/glm.kdl:20",
 				"class": "glm",
 				"providers": [
 					"zai",
@@ -4892,7 +4920,7 @@
 				}
 			},
 			{
-				"source": "classes/glm.kdl:23",
+				"source": "classes/glm.kdl:26",
 				"class": "glm",
 				"providers": [
 					"zai",
@@ -4919,7 +4947,7 @@
 				}
 			},
 			{
-				"source": "classes/glm.kdl:29",
+				"source": "classes/glm.kdl:32",
 				"class": "glm",
 				"providers": [
 					"vercel-ai-gateway"
@@ -4945,7 +4973,7 @@
 				}
 			},
 			{
-				"source": "classes/glm.kdl:36",
+				"source": "classes/glm.kdl:39",
 				"class": "glm",
 				"providers": [
 					"zai",
@@ -4973,7 +5001,7 @@
 				}
 			},
 			{
-				"source": "classes/glm.kdl:46",
+				"source": "classes/glm.kdl:49",
 				"class": "glm",
 				"providers": [
 					"zai"
@@ -4994,7 +5022,7 @@
 				}
 			},
 			{
-				"source": "classes/glm.kdl:58",
+				"source": "classes/glm.kdl:61",
 				"class": "glm",
 				"providers": [
 					"zai",
@@ -5014,7 +5042,7 @@
 				}
 			},
 			{
-				"source": "classes/glm.kdl:62",
+				"source": "classes/glm.kdl:65",
 				"class": "glm",
 				"providers": [
 					"alibaba-coding-plan",
@@ -5026,7 +5054,7 @@
 				}
 			},
 			{
-				"source": "classes/glm.kdl:66",
+				"source": "classes/glm.kdl:69",
 				"class": "glm",
 				"providers": [
 					"openrouter",
@@ -5043,7 +5071,7 @@
 				}
 			},
 			{
-				"source": "classes/glm.kdl:77",
+				"source": "classes/glm.kdl:80",
 				"class": "glm",
 				"models": [
 					{
@@ -7458,7 +7486,18 @@
 				}
 			},
 			{
-				"source": "providers/cursor.kdl:9",
+				"source": "providers/cursor.kdl:6",
+				"class": "anthropic",
+				"providers": [
+					"cursor"
+				],
+				"family": "fable",
+				"catalog": {
+					"requiresCursorToolSchemaProjection": true
+				}
+			},
+			{
+				"source": "providers/cursor.kdl:14",
 				"class": "kimi",
 				"providers": [
 					"cursor"
@@ -7473,7 +7512,7 @@
 				}
 			},
 			{
-				"source": "providers/cursor.kdl:14",
+				"source": "providers/cursor.kdl:19",
 				"providers": [
 					"cursor"
 				],
@@ -7496,7 +7535,7 @@
 				}
 			},
 			{
-				"source": "providers/cursor.kdl:20",
+				"source": "providers/cursor.kdl:25",
 				"providers": [
 					"cursor"
 				],
@@ -7530,7 +7569,7 @@
 				}
 			},
 			{
-				"source": "providers/cursor.kdl:23",
+				"source": "providers/cursor.kdl:28",
 				"providers": [
 					"cursor"
 				],
@@ -7564,7 +7603,7 @@
 				}
 			},
 			{
-				"source": "providers/cursor.kdl:27",
+				"source": "providers/cursor.kdl:32",
 				"providers": [
 					"cursor"
 				],
@@ -7582,7 +7621,7 @@
 				}
 			},
 			{
-				"source": "providers/cursor.kdl:31",
+				"source": "providers/cursor.kdl:36",
 				"providers": [
 					"cursor"
 				],
@@ -7615,7 +7654,7 @@
 				}
 			},
 			{
-				"source": "providers/cursor.kdl:35",
+				"source": "providers/cursor.kdl:40",
 				"providers": [
 					"cursor"
 				],
@@ -7655,7 +7694,7 @@
 				}
 			},
 			{
-				"source": "providers/cursor.kdl:40",
+				"source": "providers/cursor.kdl:45",
 				"providers": [
 					"cursor"
 				],
@@ -7674,7 +7713,7 @@
 				}
 			},
 			{
-				"source": "providers/cursor.kdl:44",
+				"source": "providers/cursor.kdl:49",
 				"providers": [
 					"cursor"
 				],
@@ -13245,7 +13284,7 @@
 				}
 			},
 			{
-				"source": "providers/zai.kdl:29",
+				"source": "providers/zai.kdl:32",
 				"providers": [
 					"zai"
 				],
@@ -13255,6 +13294,9 @@
 						"value": "glm-5.3-flash"
 					}
 				],
+				"wire": {
+					"clampOutputToModelMax": true
+				},
 				"thinking": {
 					"mode": "anthropic-budget-effort"
 				}
@@ -14147,6 +14189,20 @@
 					}
 				],
 				"default": "openai-completions"
+			},
+			{
+				"provider": "zai",
+				"routes": [
+					{
+						"api": "openai-completions",
+						"match": {
+							"exact": [
+								"glm-5.3-flash"
+							]
+						}
+					}
+				],
+				"default": "anthropic-messages"
 			},
 			{
 				"provider": "opencode-zen",

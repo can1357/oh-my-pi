@@ -66,17 +66,32 @@ class "gemini" {
 			}
 		}
 	}
+	// Gemini 3.7 Flash is the one Flash revision whose native thinkingLevel does
+	// not accept `minimal` (400 THINKING_LEVEL_MINIMAL). Only the direct
+	// google-level transports emit `thinkingLevel` on the wire, so the tier is
+	// dropped there; budget (anthropic-messages) and reasoning_effort resellers
+	// never send the rejected value and keep the four-tier ladder. The collapsed
+	// google-antigravity / google-gemini-cli variants remap minimal -> LOW and
+	// carry their own explicit ladder, so they are unaffected.
+	// https://ai.google.dev/gemini-api/docs/generate-content/thinking#thinking-levels
+	on "google" "google-vertex" "opencode-zen" {
+		family "flash" {
+			revision ">=3.7 <3.8" {
+				thinking-efforts "low" "medium" "high"
+			}
+		}
+	}
 
-	// Gemini 3 tool calls require the sentinel signature on unsigned replay.
 	revision ">=3" {
 		// Replaces the Google multimodal function-response baseline.
 		multimodal-function-response #true
-		requires-skip-thought-signature #true
 		// Replaces the Gemini 3+ mandatory-reasoning fallback.
 		thinking-requires-effort #true
 	}
+	// Only public-Gemini-compatible transports accept the bypass sentinel for unsigned calls.
 	on "google" "opencode-zen" {
 		revision ">=3" {
+			requires-skip-thought-signature #true
 			supports-function-part-id #true
 		}
 	}

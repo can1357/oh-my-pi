@@ -114,7 +114,11 @@ export function renderMCPResult(
 	args?: Record<string, unknown>,
 ): Component {
 	const { expanded } = options;
-	const textContent = result.content?.find(c => c.type === "text")?.text ?? "";
+	const textContent = (result.content ?? [])
+		.filter(block => block.type === "text")
+		.map(block => block.text ?? "")
+		.filter(text => text.length > 0)
+		.join("\n\n");
 	const trimmedOutput = stripOutputNotice(textContent, result.details?.meta).trimEnd();
 	const truncationWarning = result.details?.meta?.truncation
 		? formatStyledTruncationWarning(result.details.meta, theme)

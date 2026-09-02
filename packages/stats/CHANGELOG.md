@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [18.1.3] - 2026-09-02
+
+### Changed
+
+- Provider, tool, and project `<select>` dropdowns are now styled to match the dashboard design, with dark and light theme support.
+
 ## [18.1.0] - 2026-09-01
 
 ### Added
