@@ -114,6 +114,6 @@ export function serializeOrphanSweepDeadlineUpdate(
 				repairStaleAlarm();
 				return;
 			}
-			await persist().catch(() => {});
+			await persist();
 		});
 }

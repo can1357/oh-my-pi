@@ -186,6 +186,19 @@ describe("browser relay orphan sweep scheduling", () => {
 		expect(persisted).toEqual([31_000]);
 	});
 
+	it("rejects when the authoritative deadline persistence fails", async () => {
+		const pending = serializeOrphanSweepDeadlineUpdate(
+			Promise.resolve(),
+			Promise.resolve(),
+			() => true,
+			async () => {
+				throw new Error("deadline write failed");
+			},
+			() => {},
+		);
+		await expect(pending).rejects.toThrow("deadline write failed");
+	});
+
 	it("does not restore a stale startup deadline after a newer update", () => {
 		expect(restoreOrphanSweepDeadline(31_000, false)).toBeUndefined();
 		expect(restoreOrphanSweepDeadline(31_000, true)).toBe(31_000);

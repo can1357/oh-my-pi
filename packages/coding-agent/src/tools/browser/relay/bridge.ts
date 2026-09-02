@@ -707,7 +707,6 @@ export class RelayBridge {
 			if (!seen.has(tabId)) this.#onTabRemoved(tabId);
 		}
 		for (const tab of this.#tabs.values()) {
-			tab.recoveryStartLoaderId = msg.recoveryLoaderIds?.[String(tab.tabId)];
 			tab.attached = attachedNow.has(tab.tabId);
 			tab.attaching = null;
 			// A same-socket hello (another tab's delayed guard detach triggering a
@@ -720,6 +719,8 @@ export class RelayBridge {
 			// changed, so the replacement hello restarts the interrupted replay.
 			const sameSocketReplay =
 				tab.restoring !== null && tab.restoringExt === this.#ext;
+			if (!sameSocketReplay)
+				tab.recoveryStartLoaderId = msg.recoveryLoaderIds?.[String(tab.tabId)];
 			if (!sameSocketReplay) tab.restoring = null;
 			const holders = this.#sessionHolders(tab.tabId);
 			const preserve = holders.filter(

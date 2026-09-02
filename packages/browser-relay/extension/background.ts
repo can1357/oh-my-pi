@@ -767,9 +767,14 @@ async function attachTabOperation(
 		await trackAttachments([tabId]);
 	} catch (error) {
 		guardDetachments.add(tabId);
-		await trackPendingDetach(chrome.debugger.detach({ tabId })).catch(() => {
-			guardDetachments.delete(tabId);
-		});
+		await trackPendingDetach(chrome.debugger.detach({ tabId })).catch(
+			async () => {
+				guardDetachments.delete(tabId);
+				const targets = await chrome.debugger.getTargets().catch(() => null);
+				if (shouldRetrackAfterDetachFailure(targets, tabId))
+					attachmentGuard.track(tabId);
+			},
+		);
 		throw error;
 	}
 	if (canceledPendingAttachTabs.delete(tabId)) {

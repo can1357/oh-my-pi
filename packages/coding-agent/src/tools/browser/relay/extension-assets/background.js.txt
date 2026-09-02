@@ -148,7 +148,7 @@ function serializeOrphanSweepDeadlineUpdate(previousUpdate, alarmUpdate, isCurre
       repairStaleAlarm();
       return;
     }
-    await persist().catch(() => {});
+    await persist();
   });
 }
 
@@ -591,8 +591,11 @@ async function attachTabOperation(tabId, socket) {
     await trackAttachments([tabId]);
   } catch (error) {
     guardDetachments.add(tabId);
-    await trackPendingDetach(chrome.debugger.detach({ tabId })).catch(() => {
+    await trackPendingDetach(chrome.debugger.detach({ tabId })).catch(async () => {
       guardDetachments.delete(tabId);
+      const targets = await chrome.debugger.getTargets().catch(() => null);
+      if (shouldRetrackAfterDetachFailure(targets, tabId))
+        attachmentGuard.track(tabId);
     });
     throw error;
   }
