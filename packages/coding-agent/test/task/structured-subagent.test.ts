@@ -3,6 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import path from "node:path";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
+import type { Model } from "@oh-my-pi/pi-ai";
 import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
@@ -38,6 +39,8 @@ type FallbackTestModel = {
 	compat: { requiresStructuredOutputHardening?: boolean };
 	reasoning?: boolean;
 	thinking?: { mode: "effort"; efforts: string[] };
+	contextWindow?: number;
+	contextPromotionTarget?: string;
 };
 
 function fallbackTestModel(provider: string, id: string, requiresHardening = false): FallbackTestModel {
@@ -200,7 +203,7 @@ describe("structured subagent primitive", () => {
 			},
 		});
 		expect(
-			await executorModule.retryFallbackMayRequireStructuredOutputHardening({
+			await executorModule.reachableModelMayRequireStructuredOutputHardening({
 				settings,
 				modelRegistry,
 				initialSelector: "anthropic/a",
@@ -227,7 +230,7 @@ describe("structured subagent primitive", () => {
 			},
 		});
 		expect(
-			await executorModule.retryFallbackMayRequireStructuredOutputHardening({
+			await executorModule.reachableModelMayRequireStructuredOutputHardening({
 				settings,
 				modelRegistry,
 				initialSelector: "anthropic/a",
@@ -253,7 +256,7 @@ describe("structured subagent primitive", () => {
 			},
 		});
 		expect(
-			await executorModule.retryFallbackMayRequireStructuredOutputHardening({
+			await executorModule.reachableModelMayRequireStructuredOutputHardening({
 				settings,
 				modelRegistry,
 				initialSelector: "openai/a",
@@ -282,7 +285,7 @@ describe("structured subagent primitive", () => {
 			},
 		});
 		expect(
-			await executorModule.retryFallbackMayRequireStructuredOutputHardening({
+			await executorModule.reachableModelMayRequireStructuredOutputHardening({
 				settings,
 				modelRegistry,
 				initialSelector: "openai/a",
@@ -309,7 +312,7 @@ describe("structured subagent primitive", () => {
 			},
 		});
 		expect(
-			await executorModule.retryFallbackMayRequireStructuredOutputHardening({
+			await executorModule.reachableModelMayRequireStructuredOutputHardening({
 				settings,
 				modelRegistry,
 				initialSelector: "openai/a",
@@ -333,7 +336,7 @@ describe("structured subagent primitive", () => {
 				"openai/a": ["merge-gateway/c"],
 			},
 		});
-		const fallbackMayRequireHardening = await executorModule.retryFallbackMayRequireStructuredOutputHardening({
+		const fallbackMayRequireHardening = await executorModule.reachableModelMayRequireStructuredOutputHardening({
 			settings,
 			modelRegistry,
 			initialSelector: "openai/a",
@@ -364,7 +367,7 @@ describe("structured subagent primitive", () => {
 				"openrouter/b": ["merge-gateway/c"],
 			},
 		});
-		const prewalkMayRequireHardening = await executorModule.retryFallbackMayRequireStructuredOutputHardening({
+		const prewalkMayRequireHardening = await executorModule.reachableModelMayRequireStructuredOutputHardening({
 			settings,
 			modelRegistry,
 			initialSelector: "openrouter/b",
@@ -376,6 +379,75 @@ describe("structured subagent primitive", () => {
 				actualModel: undefined,
 				fallbackMayRequireHardening: false,
 				prewalkMayRequireHardening,
+			}),
+		).toBe(true);
+	});
+
+	it("hardens an authenticated context-promotion target", async () => {
+		const currentModel = {
+			...fallbackTestModel("openai", "a"),
+			contextWindow: 100,
+			contextPromotionTarget: "merge-gateway/c",
+		};
+		const promotionTarget = {
+			...fallbackTestModel("merge-gateway", "c", true),
+			contextWindow: 200,
+		};
+		const modelRegistry = {
+			find: (provider: string, id: string) =>
+				[currentModel, promotionTarget].find(model => model.provider === provider && model.id === id),
+			getAvailable: () => [currentModel, promotionTarget],
+			getApiKey: async (model: FallbackTestModel) => (model.provider === "merge-gateway" ? "merge-key" : undefined),
+		} as unknown as ModelRegistry;
+		const settings = Settings.isolated({
+			"contextPromotion.enabled": true,
+			"retry.modelFallback": false,
+		});
+		const reachableModelMayRequireHardening = await executorModule.reachableModelMayRequireStructuredOutputHardening({
+			settings,
+			modelRegistry,
+			initialSelector: "openai/a",
+			roleHint: undefined,
+		});
+		expect(reachableModelMayRequireHardening).toBe(true);
+		expect(
+			executorModule.structuredOutputHardeningMayApply({
+				actualModel: currentModel as Model,
+				fallbackMayRequireHardening: reachableModelMayRequireHardening,
+				prewalkMayRequireHardening: false,
+			}),
+		).toBe(true);
+	});
+
+	it("follows context promotion after a runtime fallback switch", async () => {
+		const models: Record<string, FallbackTestModel> = {
+			"openai/a": { ...fallbackTestModel("openai", "a"), contextWindow: 100 },
+			"openrouter/b": {
+				...fallbackTestModel("openrouter", "b"),
+				contextWindow: 120,
+				contextPromotionTarget: "merge-gateway/c",
+			},
+			"merge-gateway/c": { ...fallbackTestModel("merge-gateway", "c", true), contextWindow: 200 },
+		};
+		const modelRegistry = {
+			find: (provider: string, id: string) => models[`${provider}/${id}`],
+			hasProvider: (provider: string) => Object.values(models).some(model => model.provider === provider),
+			getAvailable: () => Object.values(models),
+			getApiKey: async (model: FallbackTestModel) =>
+				model.provider === "openrouter" || model.provider === "merge-gateway" ? "key" : undefined,
+		} as unknown as ModelRegistry;
+		const settings = Settings.isolated({
+			"contextPromotion.enabled": true,
+			"retry.fallbackChains": {
+				"openai/a": ["openrouter/b"],
+			},
+		});
+		expect(
+			await executorModule.reachableModelMayRequireStructuredOutputHardening({
+				settings,
+				modelRegistry,
+				initialSelector: "openai/a",
+				roleHint: undefined,
 			}),
 		).toBe(true);
 	});
@@ -398,7 +470,7 @@ describe("structured subagent primitive", () => {
 			},
 		});
 		expect(
-			await executorModule.retryFallbackMayRequireStructuredOutputHardening({
+			await executorModule.reachableModelMayRequireStructuredOutputHardening({
 				settings,
 				modelRegistry,
 				initialSelector: "anthropic/a",
@@ -415,7 +487,7 @@ describe("structured subagent primitive", () => {
 			} as never,
 		});
 		expect(
-			await executorModule.retryFallbackMayRequireStructuredOutputHardening({
+			await executorModule.reachableModelMayRequireStructuredOutputHardening({
 				settings,
 				modelRegistry: {} as ModelRegistry,
 				initialSelector: "anthropic/a",

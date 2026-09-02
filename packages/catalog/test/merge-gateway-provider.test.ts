@@ -337,6 +337,31 @@ describe("Merge Gateway provider", () => {
 		expect(built.reasoning).toBe(true);
 		expect(built.thinking).toBeUndefined();
 		expect(built.compat.supportsReasoningEffort).toBe(false);
+		expect(built.compat.omitReasoningEffort).toBe(true);
+	});
+
+	test("routes reasoning omission through the compatibility axis", () => {
+		const mapped = mapMergeGatewayModel(
+			model("example/reasoner", { vendor: route() }),
+			"https://api-gateway.merge.dev/v1/openai",
+		);
+		expect(mapped).not.toBeNull();
+		const built = buildModel({
+			...mapped!,
+			compat: {
+				...mapped!.compat,
+				supportsReasoningEffort: false,
+				omitReasoningEffort: false,
+			},
+		});
+		expect(built.compat.supportsReasoningEffort).toBe(false);
+		expect(built.compat.omitReasoningEffort).toBe(false);
+		expect(built.thinking).toEqual({
+			mode: "effort",
+			efforts: [Effort.Low, Effort.High, Effort.Max],
+			requiresEffort: true,
+			supportsDisplay: true,
+		});
 	});
 
 	test("includes tool-capable text models without structured-output support and excludes non-agentic routes", () => {

@@ -56,6 +56,7 @@ import {
 	parseRetryFallbackSelector,
 	resolveRetryFallbackChainKey,
 } from "../session/retry-fallback-chains";
+import { resolveContextPromotionConfiguredTarget } from "../session/role-models";
 import { SessionManager } from "../session/session-manager";
 import { truncateTail } from "../session/streaming-output";
 import {
@@ -337,7 +338,7 @@ function installSubagentRetryFallbackChain(args: {
 	settings.override("retry.fallbackChains", fallbackChains);
 	return role;
 }
-export async function retryFallbackMayRequireStructuredOutputHardening(args: {
+export async function reachableModelMayRequireStructuredOutputHardening(args: {
 	settings: Settings;
 	modelRegistry: ModelRegistry;
 	initialSelector: string | undefined;
@@ -345,28 +346,36 @@ export async function retryFallbackMayRequireStructuredOutputHardening(args: {
 	effortCeiling?: Effort;
 }): Promise<boolean> {
 	const { settings, modelRegistry, initialSelector, roleHint, effortCeiling } = args;
-	if (!initialSelector || !settings.get("retry.modelFallback")) return false;
-	const disabledProviders = new Set(settings.get("disabledProviders"));
-	const chains = getRetryFallbackChains(settings);
+	if (!initialSelector) return false;
+	const fallbackEnabled = settings.get("retry.modelFallback");
+	const promotionEnabled = settings.get("contextPromotion.enabled") === true;
+	if (!fallbackEnabled && !promotionEnabled) return false;
 	if (
 		typeof modelRegistry.find !== "function" ||
-		typeof modelRegistry.hasProvider !== "function" ||
-		typeof modelRegistry.getApiKey !== "function"
+		typeof modelRegistry.getApiKey !== "function" ||
+		(fallbackEnabled && typeof modelRegistry.hasProvider !== "function") ||
+		(promotionEnabled && typeof modelRegistry.getAvailable !== "function")
 	) {
 		return false;
 	}
+	const disabledProviders = new Set(settings.get("disabledProviders"));
+	const chains = fallbackEnabled ? getRetryFallbackChains(settings) : {};
+	const availableModels = promotionEnabled ? modelRegistry.getAvailable() : [];
 	const context = {
 		chains,
 		getModelRole: (role: string) => settings.getModelRole(role),
 		modelLookup: modelRegistry,
 	};
-	const queue: Array<{ selector: string; roleHint?: string; isFallback: boolean }> = [
-		{ selector: initialSelector, roleHint, isFallback: false },
-	];
+	const queue: Array<{
+		selector: string;
+		roleHint?: string;
+		isFallback: boolean;
+		credentialVerified: boolean;
+	}> = [{ selector: initialSelector, roleHint, isFallback: false, credentialVerified: false }];
 	const seen = new Set<string>();
 	while (queue.length > 0) {
 		const current = queue.shift()!;
-		const visitKey = `${current.selector}\u0000${current.roleHint ?? ""}`;
+		const visitKey = `${current.selector}\u0000${current.roleHint ?? ""}\u0000${current.isFallback ? "fallback" : "root"}`;
 		if (seen.has(visitKey)) continue;
 		seen.add(visitKey);
 		const parsed = parseRetryFallbackSelector(current.selector, modelRegistry);
@@ -382,19 +391,47 @@ export async function retryFallbackMayRequireStructuredOutputHardening(args: {
 		}
 		if (current.isFallback && !currentModel) continue;
 		const requiresHardening = modelRequiresStructuredOutputHardening(currentModel);
+		const requiresCredential = current.isFallback || current.credentialVerified || requiresHardening;
 		const hasUsableCredential =
-			currentModel && (current.isFallback || requiresHardening)
-				? Boolean(await modelRegistry.getApiKey(currentModel))
+			currentModel && requiresCredential
+				? current.credentialVerified || Boolean(await modelRegistry.getApiKey(currentModel))
 				: false;
 		if (current.isFallback && !hasUsableCredential) continue;
 		if (requiresHardening && hasUsableCredential) return true;
-		const chainKey = resolveRetryFallbackChainKey(context, current.selector, currentModel, current.roleHint);
+		if (promotionEnabled && currentModel) {
+			const contextWindow = currentModel.contextWindow ?? 0;
+			const target =
+				contextWindow > 0 ? resolveContextPromotionConfiguredTarget(currentModel, availableModels) : undefined;
+			if (
+				target &&
+				(target.provider !== currentModel.provider || target.id !== currentModel.id) &&
+				target.contextWindow != null &&
+				target.contextWindow > contextWindow &&
+				(await modelRegistry.getApiKey(target))
+			) {
+				if (modelRequiresStructuredOutputHardening(target)) return true;
+				queue.push({
+					selector: formatModelStringWithRouting(target),
+					isFallback: false,
+					credentialVerified: true,
+				});
+			}
+		}
+		const chainKey = fallbackEnabled
+			? resolveRetryFallbackChainKey(context, current.selector, currentModel, current.roleHint)
+			: undefined;
 		const candidates = chainKey
 			? findRetryFallbackCandidates(context, chainKey, current.selector, currentModel, {
 					allowMissingPrimary: true,
 				})
 			: [];
-		for (const candidate of candidates) queue.push({ selector: candidate.raw, isFallback: true });
+		for (const candidate of candidates) {
+			queue.push({
+				selector: candidate.raw,
+				isFallback: true,
+				credentialVerified: false,
+			});
+		}
 	}
 	return false;
 }
@@ -3245,7 +3282,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			const prewalkMayRequireHardening =
 				prewalk !== undefined &&
 				(modelRequiresStructuredOutputHardening(prewalk.target) ||
-					(await retryFallbackMayRequireStructuredOutputHardening({
+					(await reachableModelMayRequireStructuredOutputHardening({
 						settings: subagentSettings,
 						modelRegistry,
 						initialSelector: formatModelStringWithRouting(prewalk.target),
@@ -3257,7 +3294,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			const fallbackRoleHint = authFallbackUsed ? undefined : (retryFallbackRole ?? modelRole);
 			const requiresStructuredOutputHardening = structuredOutputHardeningMayApply({
 				actualModel: model,
-				fallbackMayRequireHardening: await retryFallbackMayRequireStructuredOutputHardening({
+				fallbackMayRequireHardening: await reachableModelMayRequireStructuredOutputHardening({
 					settings: subagentSettings,
 					modelRegistry,
 					initialSelector: fallbackInitialSelector,

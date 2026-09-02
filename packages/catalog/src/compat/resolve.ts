@@ -924,17 +924,15 @@ const DEFAULT_REASONING_EFFORTS: readonly Effort[] = [Effort.Minimal, Effort.Low
 const DEFAULT_REASONING_EFFORTS_WITH_XHIGH: readonly Effort[] = [...DEFAULT_REASONING_EFFORTS, Effort.XHigh];
 
 function omitsWireReasoningEffort(spec: ModelSpec<Api>, compat: CompatOf<Api>): boolean {
-	if (spec.provider === "merge-gateway" && spec.api === "openai-completions") {
-		return compat !== undefined && "supportsReasoningEffort" in compat && compat.supportsReasoningEffort === false;
-	}
+	if (compat === undefined || !("omitReasoningEffort" in compat) || compat.omitReasoningEffort !== true) return false;
 	if (
-		spec.api !== "openai-responses" &&
-		spec.api !== "openai-codex-responses" &&
-		spec.api !== "azure-openai-responses"
+		spec.api === "openai-responses" ||
+		spec.api === "openai-codex-responses" ||
+		spec.api === "azure-openai-responses"
 	) {
-		return false;
+		return true;
 	}
-	return compat !== undefined && "supportsReasoningEffort" in compat && compat.supportsReasoningEffort === false;
+	return "trustExplicitThinkingOnly" in compat && compat.trustExplicitThinkingOnly === true;
 }
 
 function readCompatEffortMap(compat: CompatOf<Api>): Partial<Record<Effort, string>> | undefined {
