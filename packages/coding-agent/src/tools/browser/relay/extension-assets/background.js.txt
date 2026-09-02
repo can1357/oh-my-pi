@@ -603,12 +603,7 @@ async function reconcileOrphans() {
   const targets = await chrome.debugger.getTargets().catch(() => null);
   if (targets === null)
     return;
-  const attachedTabIds = [];
-  for (const target of targets) {
-    if (target.attached && target.tabId !== undefined) {
-      attachedTabIds.push(target.tabId);
-    }
-  }
+  const attachedTabIds = extensionOwnedAttachedTabIds(targets, recoverableTabIds);
   await trackAttachments(attachedTabIds, () => true, attachmentState);
   if (attachedTabIds.length > 0 && orphanSweepSeesRelayDisconnected({
     socketReadyState: relayInitializedReadyState(),

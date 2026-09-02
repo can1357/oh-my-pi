@@ -821,12 +821,13 @@ async function reconcileOrphans(): Promise<void> {
 	// Leave any existing deadline intact and let the next alarm/startup retry.
 	const targets = await chrome.debugger.getTargets().catch(() => null);
 	if (targets === null) return;
-	const attachedTabIds: number[] = [];
-	for (const target of targets) {
-		if (target.attached && target.tabId !== undefined) {
-			attachedTabIds.push(target.tabId);
-		}
-	}
+	// getTargets includes DevTools and other debugger owners. Reconciliation may
+	// only re-seed attachments already known to this extension; otherwise a
+	// takeover becomes relay-authorized again before buildHello can filter it.
+	const attachedTabIds = extensionOwnedAttachedTabIds(
+		targets,
+		recoverableTabIds,
+	);
 	await trackAttachments(attachedTabIds, () => true, attachmentState);
 	// Only a socket that has actually delivered a hello owns reconciliation. A
 	// merely OPEN (or CONNECTING) socket may still stall/fail in `buildHello()`

@@ -100,7 +100,7 @@ describe("attachment-state", () => {
 		expect([...current]).toEqual([2]);
 	});
 
-	it("excludes debugger attachments not owned by the extension", () => {
+	it("filters hello and orphan reconciliation to extension-owned attachments", () => {
 		expect(
 			extensionOwnedAttachedTabIds(
 				[
