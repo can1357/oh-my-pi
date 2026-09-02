@@ -271,9 +271,9 @@ export async function fetchMarketplace(source: string, cacheDir: string): Promis
 	const text = await response.text();
 	const catalog = parseMarketplaceCatalog(text, source);
 
-	const catalogDir = path.join(cacheDir, catalog.name);
-	await Bun.write(path.join(catalogDir, "marketplace.json"), text);
-
+	// No cache write here: the manager persists the catalog itself after its
+	// duplicate/force checks, and writing early would clobber the old bytes a
+	// forced repoint snapshots for rollback.
 	return { catalog };
 }
 

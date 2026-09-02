@@ -112,23 +112,20 @@ export class MarketplaceManager {
 			throw new Error(`Marketplace "${catalog.name}" already exists`);
 		}
 
-		// Promote the temp clone now that the duplicate check has passed. When
-		// repointing, the old cache is set aside rather than deleted so a failed
-		// catalog/registry write below can restore it — otherwise the registry
-		// would still name the old source while discovery reads the new clone.
+		// When repointing, the old cache is set aside rather than deleted so any
+		// failure below — promote or catalog/registry write — can restore it.
+		// Otherwise the registry would still name the old source while discovery
+		// reads the new clone.
 		const finalDir = path.join(this.#opts.marketplacesCacheDir, catalog.name);
 		let backupDir: string | undefined;
-		if (clonePath) {
-			if (replacing) {
-				const candidate = `${finalDir}.bak-${Date.now()}`;
-				try {
-					await fs.rename(finalDir, candidate);
-					backupDir = candidate;
-				} catch {
-					// No cached directory to preserve (registry entry without a cache).
-				}
+		if (clonePath && replacing) {
+			const candidate = `${finalDir}.bak-${Date.now()}`;
+			try {
+				await fs.rename(finalDir, candidate);
+				backupDir = candidate;
+			} catch {
+				// No cached directory to preserve (registry entry without a cache).
 			}
-			await promoteCloneToCache(clonePath, this.#opts.marketplacesCacheDir, catalog.name);
 		}
 
 		const sourceType = classifySource(source);
@@ -138,9 +135,10 @@ export class MarketplaceManager {
 			expandTilde(path.join(this.#opts.marketplacesCacheDir, catalog.name, "marketplace.json")),
 		);
 		// Non-git repoints have no clone to back up, but the catalog write below
-		// still replaces the old catalog in place. Snapshot it so a failed
-		// registry write can put it back — otherwise the new catalog goes live
-		// while the registry keeps naming the old source.
+		// still replaces the old catalog in place. Snapshot it before anything
+		// touches the file so a failed write can put the genuinely-old bytes
+		// back — otherwise the new catalog goes live while the registry keeps
+		// naming the old source.
 		const prevCatalog =
 			replacing && !clonePath ? await fs.readFile(catalogPath, "utf8").catch(() => undefined) : undefined;
 
@@ -156,10 +154,19 @@ export class MarketplaceManager {
 		const updated = upsertMarketplaceEntry(reg, entry);
 
 		try {
+			// Promote inside the rollback scope: a promote failure after the
+			// rename above would otherwise strand the old cache in backupDir.
+			if (clonePath) {
+				await promoteCloneToCache(clonePath, this.#opts.marketplacesCacheDir, catalog.name);
+			}
 			// Persist the fetched catalog so subsequent reads don't require re-fetching.
 			await Bun.write(catalogPath, `${JSON.stringify(catalog, null, 2)}\n`);
 			await writeMarketplacesRegistry(this.#opts.marketplacesRegistryPath, updated);
 		} catch (err) {
+			if (clonePath) {
+				// Drop the temp clone; a no-op when the promote already consumed it.
+				await fs.rm(clonePath, { recursive: true, force: true }).catch(() => {});
+			}
 			if (backupDir) {
 				// Put the old cache back so the still-unchanged registry keeps
 				// pointing at a repository that exists.

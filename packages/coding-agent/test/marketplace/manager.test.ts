@@ -12,6 +12,7 @@ import {
 	readMarketplacesRegistry,
 	writeMarketplacesRegistry,
 } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/marketplace";
+import * as marketplaceFetcher from "@oh-my-pi/pi-coding-agent/extensibility/plugins/marketplace/fetcher";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import * as piUtils from "@oh-my-pi/pi-utils";
 import { removeSyncWithRetries } from "@oh-my-pi/pi-utils";
@@ -228,6 +229,89 @@ describe("MarketplaceManager", () => {
 			expect(list[0].sourceUri).toBe(FIXTURE_DIR);
 		} finally {
 			removeSyncWithRetries(movedDir);
+		}
+	});
+
+	it("addMarketplace force repoint with git source → restores the old cache when the promote fails", async () => {
+		const cloneWithMarker = (marker: string) => async (_url: string, targetDir: string) => {
+			fs.mkdirSync(path.join(targetDir, ".claude-plugin"), { recursive: true });
+			fs.writeFileSync(
+				path.join(targetDir, ".claude-plugin", "marketplace.json"),
+				JSON.stringify({ name: "git-marketplace", owner: { name: "x" }, plugins: [] }),
+			);
+			fs.writeFileSync(path.join(targetDir, "MARKER"), marker);
+		};
+		const cloneSpy = spyOn(vcs, "clone").mockImplementation(cloneWithMarker("old"));
+		try {
+			await ctx.manager.addMarketplace("owner/old-repo");
+			const cacheDir = path.join(ctx.tmpDir, "cache", "marketplaces", "git-marketplace");
+			expect(fs.readFileSync(path.join(cacheDir, "MARKER"), "utf8")).toBe("old");
+
+			// Fail after the old cache has been renamed aside: the rollback must
+			// bring it back rather than leave it stranded in the .bak dir.
+			cloneSpy.mockImplementation(cloneWithMarker("new"));
+			const promoteSpy = spyOn(marketplaceFetcher, "promoteCloneToCache").mockImplementation(async () => {
+				throw new Error("promote failed");
+			});
+			try {
+				await expect(ctx.manager.addMarketplace("owner/new-repo", { force: true })).rejects.toThrow(
+					"promote failed",
+				);
+			} finally {
+				promoteSpy.mockRestore();
+			}
+
+			// Old cache restored, registry still names the old source, no stray
+			// backups or temp clones.
+			expect(fs.readFileSync(path.join(cacheDir, "MARKER"), "utf8")).toBe("old");
+			const list = await ctx.manager.listMarketplaces();
+			expect(list).toHaveLength(1);
+			expect(list[0].sourceUri).toBe("owner/old-repo");
+			expect(fs.readdirSync(path.dirname(cacheDir))).toEqual(["git-marketplace"]);
+		} finally {
+			cloneSpy.mockRestore();
+		}
+	});
+
+	it("addMarketplace force repoint with url source → restores the old catalog bytes when the registry write fails", async () => {
+		const catalogJson = (description: string) =>
+			JSON.stringify({
+				name: "url-marketplace",
+				owner: { name: "x" },
+				metadata: { description, version: "1.0.0" },
+				plugins: [],
+			});
+		const fetchSpy = spyOn(globalThis, "fetch").mockImplementation(
+			Object.assign(async () => new Response(catalogJson("old")), { preconnect: fetch.preconnect }),
+		);
+		try {
+			await ctx.manager.addMarketplace("https://example.com/marketplace.json");
+			const catalogPath = path.join(ctx.tmpDir, "cache", "marketplaces", "url-marketplace", "marketplace.json");
+			const oldCatalog = fs.readFileSync(catalogPath, "utf8");
+			expect(oldCatalog).toContain('"old"');
+
+			// The registry lives directly in tmpDir; a read-only tmpDir blocks its
+			// atomic temp-file write while the catalog file below stays overwritable.
+			fetchSpy.mockImplementation(
+				Object.assign(async () => new Response(catalogJson("new")), { preconnect: fetch.preconnect }),
+			);
+			fs.chmodSync(ctx.tmpDir, 0o555);
+			try {
+				await expect(
+					ctx.manager.addMarketplace("https://mirror.example.com/marketplace.json", { force: true }),
+				).rejects.toThrow();
+			} finally {
+				fs.chmodSync(ctx.tmpDir, 0o755);
+			}
+
+			// The genuinely-old bytes are restored — not the just-fetched catalog
+			// written back under the guise of a rollback.
+			expect(fs.readFileSync(catalogPath, "utf8")).toBe(oldCatalog);
+			const list = await ctx.manager.listMarketplaces();
+			expect(list).toHaveLength(1);
+			expect(list[0].sourceUri).toBe("https://example.com/marketplace.json");
+		} finally {
+			fetchSpy.mockRestore();
 		}
 	});
 
