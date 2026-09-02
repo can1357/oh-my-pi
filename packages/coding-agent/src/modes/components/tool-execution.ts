@@ -59,25 +59,32 @@ const OPENCODE_TOOL_GLYPHS: Record<string, string> = {
 
 // OSC 8 hyperlink span: `ESC ] 8 ; params ; uri (BEL|ST) text ESC ] 8 ; ; (BEL|ST)`.
 // The opener requires a non-empty URI so a stray closer can never match.
-const OSC8_LINK_REGEX = /(\x1b\]8;[^;\x07\x1b]*;[^\x07\x1b]+(?:\x07|\x1b\\))([\s\S]*?)(\x1b\]8;;(?:\x07|\x1b\\))/;
+const OSC8_LINK_REGEX = /(\x1b\]8;[^;\x07\x1b]*;[^\x07\x1b]+(?:\x07|\x1b\\))([\s\S]*?)(\x1b\]8;;(?:\x07|\x1b\\))/g;
 
 /**
- * Re-attach the first OSC-8 hyperlink from `source` (the renderer's fully
- * styled status row) onto the matching plain-text segment of `row` (its
- * stripped opencode restyle). The opener/closer bytes are reused verbatim, so
- * the link target is exactly the renderer's own resolution (e.g. write links
+ * Re-attach every OSC-8 hyperlink from `source` (the renderer's fully styled
+ * status row) onto the matching plain-text segments of `row` (its stripped
+ * opencode restyle). The opener/closer bytes are reused verbatim, so each
+ * link target is exactly the renderer's own resolution (e.g. write links
  * `details.resolvedPath`, read keeps its selector line) — no relative-vs-
- * absolute guessing from raw args. Rows without a link pass through unchanged.
+ * absolute guessing from raw args. Segments are bound in order, each search
+ * resuming past the previous restored span, so a rename/move header with
+ * duplicate path substrings links source and destination correctly. Rows
+ * without a link pass through unchanged.
  */
-function restoreFirstHyperlink(row: string, source: string): string {
-	const match = OSC8_LINK_REGEX.exec(source);
-	if (!match) return row;
-	const [, opener, linked, closer] = match;
-	const linkedPlain = replaceTabs(stripVTControlCharacters(linked!));
-	if (!linkedPlain) return row;
-	const at = row.indexOf(linkedPlain);
-	if (at === -1) return row;
-	return `${row.slice(0, at)}${opener}${linkedPlain}${closer}${row.slice(at + linkedPlain.length)}`;
+function restoreHyperlinks(row: string, source: string): string {
+	let out = row;
+	let from = 0;
+	for (const match of source.matchAll(OSC8_LINK_REGEX)) {
+		const [, opener, linked, closer] = match;
+		const linkedPlain = replaceTabs(stripVTControlCharacters(linked!));
+		if (!linkedPlain) continue;
+		const at = out.indexOf(linkedPlain, from);
+		if (at === -1) continue;
+		out = `${out.slice(0, at)}${opener}${linkedPlain}${closer}${out.slice(at + linkedPlain.length)}`;
+		from = at + opener!.length + linkedPlain.length + closer!.length;
+	}
+	return out;
 }
 /** Resolves the canonical renderer key while retaining the provider's wire name in message history. */
 export function toolRenderName(wireName: string, tool: AgentTool | undefined): string {
@@ -1110,7 +1117,7 @@ export class ToolExecutionComponent extends Container {
 				.trim()
 				.replace(/^[^\p{L}\p{N}]{1,2}\s+/u, "");
 			const glyph = OPENCODE_TOOL_GLYPHS[this.#toolName] ?? "∗";
-			const row = restoreFirstHyperlink(` ${glyph} ${plain}`, first);
+			const row = restoreHyperlinks(` ${glyph} ${plain}`, first);
 			this.#collapsedLines = [theme.fg("dim", truncateToWidth(row, Math.max(1, width)))];
 		} else {
 			this.#collapsedLines = [first];

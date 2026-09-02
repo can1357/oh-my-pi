@@ -183,6 +183,38 @@ describe("opencode layout", () => {
 		}
 	});
 
+	it("keeps both OSC-8 links, in order, in a collapsed rename header", () => {
+		// A rename/move edit header carries two links: source and destination.
+		// The collapse restyle must re-wrap every span, not just the first.
+		const srcUri = url.pathToFileURL(path.resolve("/workspace/src/old.ts")).href;
+		const dstUri = url.pathToFileURL(path.resolve("/workspace/lib/new.ts")).href;
+		const link = (uri: string, text: string) => `\x1b]8;;${uri}\x07${text}\x1b]8;;\x07`;
+		const header = `← Move ${link(srcUri, "src/old.ts")} → ${link(dstUri, "lib/new.ts")}`;
+		const tool: MultiLineTool = {
+			name: "custom_render",
+			label: "Custom",
+			mergeCallAndResult: true,
+			renderResult() {
+				return markFramedBlockComponent({
+					render: () => [header, "DETAIL-1"],
+					invalidate() {},
+				}) as unknown as Text;
+			},
+		};
+		const component = makeComponent(tool, opencode);
+		component.updateResult({ content: [{ type: "text", text: "ok" }] }, false);
+
+		const rows = component.render(120).filter(line => /\S/.test(stripVTControlCharacters(line)));
+		expect(rows).toHaveLength(1);
+		const row = rows[0]!;
+		expect(row).toContain(srcUri);
+		expect(row).toContain(dstUri);
+		expect(row.indexOf(srcUri)).toBeLessThan(row.indexOf(dstUri));
+		const plain = stripVTControlCharacters(row);
+		expect(plain).toContain("src/old.ts");
+		expect(plain).toContain("lib/new.ts");
+	});
+
 	it("normalizes tabs so a collapsed row stays one clean line", () => {
 		// Framed (self-drawing) renderers pass their rows through verbatim —
 		// truncateToWidth's short-string fast path preserves a raw `\t` — so the
