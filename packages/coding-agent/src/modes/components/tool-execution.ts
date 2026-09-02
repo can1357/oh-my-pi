@@ -1,3 +1,4 @@
+import { stripVTControlCharacters } from "node:util";
 import type { Clipboard, SnapshotStore } from "@oh-my-pi/hashline";
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import {
@@ -35,9 +36,26 @@ import { isFramedBlockComponent, markFramedBlockComponent, renderStatusLine, Wid
 import { convertImageToPng } from "../../utils/image-loading";
 import { sanitizeWithOptionalSixelPassthrough } from "../../utils/sixel";
 import { isOpencodeLayout } from "../layout-mode";
+
 import { renderDiff } from "./diff";
 import { type AnimationFrame, trimBlankEdges } from "./transcript-container";
 
+// Opencode-layout tool row glyphs, mirroring opencode's iconography: reads →,
+// searches ∗, shell $, writes ←, subagents ◆. Anything unlisted falls back ∗.
+const OPENCODE_TOOL_GLYPHS: Record<string, string> = {
+	read: "→",
+	fetch: "→",
+	grep: "∗",
+	glob: "∗",
+	ast_grep: "∗",
+	bash: "$",
+	eval: "$",
+	write: "←",
+	edit: "←",
+	ast_edit: "←",
+	task: "◆",
+	todo: "▪",
+};
 /** Resolves the canonical renderer key while retaining the provider's wire name in message history. */
 export function toolRenderName(wireName: string, tool: AgentTool | undefined): string {
 	return tool?.name ?? wireName;
@@ -1050,7 +1068,22 @@ export class ToolExecutionComponent extends Container {
 		// this mode because the state bg is disabled).
 		const first = lines.find(line => /\S/.test(line));
 		this.#collapsedSource = lines;
-		this.#collapsedLines = first === undefined ? [] : [first];
+		if (first === undefined) {
+			this.#collapsedLines = [];
+			return this.#collapsedLines;
+		}
+		// Settled success restyles to opencode's dim `<glyph> Tool detail` row;
+		// live calls keep their native styling (spinner/accent) so activity
+		// stays legible, matching opencode's emphasized in-flight rows.
+		if (this.#result !== undefined && !this.#isPartial && !this.#result.isError) {
+			const plain = stripVTControlCharacters(first)
+				.trim()
+				.replace(/^[^\p{L}\p{N}]{1,2}\s+/u, "");
+			const glyph = OPENCODE_TOOL_GLYPHS[this.#toolName] ?? "∗";
+			this.#collapsedLines = [theme.fg("dim", truncateToWidth(` ${glyph} ${plain}`, Math.max(1, width)))];
+		} else {
+			this.#collapsedLines = [first];
+		}
 		return this.#collapsedLines;
 	}
 

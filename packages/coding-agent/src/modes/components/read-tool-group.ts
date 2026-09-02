@@ -1,3 +1,4 @@
+import { stripVTControlCharacters } from "node:util";
 import * as path from "node:path";
 import type { AssistantMessage, Usage } from "@oh-my-pi/pi-ai";
 import type { Component } from "@oh-my-pi/pi-tui";
@@ -543,6 +544,26 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 		// Clear previous children and rebuild the summary and preview blocks.
 		this.clear();
 		this.#text = new Text("", 0, 0);
+
+		// Opencode layout (collapsed): every read renders as its own flat dim
+		// `→ Read path` row — no group header, tree connectors, usage rows, or
+		// previews. Errors keep their status mark so failures stay visible.
+		// Ctrl+O (`setExpanded`) restores the full grouped view.
+		if (isOpencodeLayout() && !this.#expanded && displayRows.length > 0) {
+			const flat: string[] = [];
+			for (const row of displayRows) {
+				const status = this.#statusForTargets(row.targets);
+				const pathText = stripVTControlCharacters(this.#formatRowPath(row));
+				flat.push(
+					status === "error" || status === "warning"
+						? ` ${this.#formatStatus(status)} ${theme.fg("dim", `Read ${pathText}`)}`
+						: theme.fg("dim", ` → Read ${pathText}`),
+				);
+			}
+			this.#text.setText(flat.join("\n"));
+			this.addChild(this.#text);
+			return;
+		}
 
 		if (displayRows.length === 0) {
 			this.#text.setText(` ${theme.format.bullet} ${theme.fg("toolTitle", theme.bold("Read"))}`);
