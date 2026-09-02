@@ -371,20 +371,17 @@ var attachmentGuard = new AttachmentGuard({
   setTimer: (fn, ms) => setTimeout(fn, ms),
   clearTimer: (handle) => clearTimeout(handle),
   detachAll: (tabIds) => {
+    const loaderGeneration = ++recoveryLoaderGeneration;
     for (const tabId of tabIds) {
       guardDetachments.add(tabId);
-      recoveryLoaderGeneration++;
       recoveryLoaderIds.delete(tabId);
       trackPendingDetach((async () => {
         const frameTree = await chrome.debugger.sendCommand({ tabId }, "Page.getFrameTree").catch(() => {
           return;
         });
         const loaderId = frameTree?.frameTree?.frame?.loaderId;
-        if (typeof loaderId === "string")
+        if (loaderGeneration === recoveryLoaderGeneration && typeof loaderId === "string")
           recoveryLoaderIds.set(tabId, loaderId);
-        await chrome.storage.session.set({
-          [RECOVERY_LOADER_IDS_KEY]: Object.fromEntries(recoveryLoaderIds)
-        });
         await chrome.debugger.detach({ tabId });
       })().catch(async () => {
         guardDetachments.delete(tabId);
@@ -394,6 +391,13 @@ var attachmentGuard = new AttachmentGuard({
         }
       }));
     }
+    Promise.all([...pendingDetaches]).then(async () => {
+      if (loaderGeneration !== recoveryLoaderGeneration)
+        return;
+      await chrome.storage.session.set({
+        [RECOVERY_LOADER_IDS_KEY]: Object.fromEntries(recoveryLoaderIds)
+      });
+    });
   }
 });
 async function trackAttachments(tabIds, isFresh = () => true, attachmentState = snapshotAttachmentState(attachmentStateEpochs, tabIds)) {

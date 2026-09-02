@@ -379,9 +379,9 @@ const attachmentGuard = new AttachmentGuard<NodeJS.Timeout>({
 		// trackAttachments persisted every id before handing it to the guard, so
 		// onSuspend can start these detaches without depending on a last-moment
 		// storage write that MV3 may terminate with the worker.
+		const loaderGeneration = ++recoveryLoaderGeneration;
 		for (const tabId of tabIds) {
 			guardDetachments.add(tabId);
-			recoveryLoaderGeneration++;
 			recoveryLoaderIds.delete(tabId);
 			void trackPendingDetach(
 				(async () => {
@@ -391,11 +391,11 @@ const attachmentGuard = new AttachmentGuard<NodeJS.Timeout>({
 						| { frameTree?: { frame?: { loaderId?: unknown } } }
 						| undefined;
 					const loaderId = frameTree?.frameTree?.frame?.loaderId;
-					if (typeof loaderId === "string")
+					if (
+						loaderGeneration === recoveryLoaderGeneration &&
+						typeof loaderId === "string"
+					)
 						recoveryLoaderIds.set(tabId, loaderId);
-					await chrome.storage.session.set({
-						[RECOVERY_LOADER_IDS_KEY]: Object.fromEntries(recoveryLoaderIds),
-					});
 					await chrome.debugger.detach({ tabId });
 				})().catch(async () => {
 					guardDetachments.delete(tabId);
@@ -412,6 +412,12 @@ const attachmentGuard = new AttachmentGuard<NodeJS.Timeout>({
 				}),
 			);
 		}
+		void Promise.all([...pendingDetaches]).then(async () => {
+			if (loaderGeneration !== recoveryLoaderGeneration) return;
+			await chrome.storage.session.set({
+				[RECOVERY_LOADER_IDS_KEY]: Object.fromEntries(recoveryLoaderIds),
+			});
+		});
 	},
 });
 
