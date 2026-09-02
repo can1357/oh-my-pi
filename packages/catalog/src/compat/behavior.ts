@@ -33,6 +33,11 @@ export function usesOAuthMintedApiKeyWithDirectApiKey(provider: string): boolean
 	return credentialPolicyFor(provider)?.mode === "oauth-minted-api-key-with-direct-api-key";
 }
 
+/** Default non-interactive authentication method for RPC login hosts. */
+export function rpcDefaultAuthMethodFor(provider: string): string | undefined {
+	return credentialPolicyFor(provider)?.rpcDefaultAuthMethod;
+}
+
 /**
  * Conservative heuristic for a normalized, lowercase discovered model id with
  * no exact bundled record: whether it likely rides the OpenAI Responses API.

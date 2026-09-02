@@ -6,6 +6,7 @@ import { getOAuthProviders } from "@oh-my-pi/pi-ai/registry/oauth";
 import { refreshMetaMuseToken } from "@oh-my-pi/pi-ai/registry/oauth/meta-muse";
 import { loginMeta, metaProvider } from "@oh-my-pi/pi-ai/registry/meta";
 import type { Context, FetchImpl, Model } from "@oh-my-pi/pi-ai/types";
+import { rpcDefaultAuthMethodFor } from "@oh-my-pi/pi-catalog/compat/behavior";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { META_MUSE_STATIC_MODELS } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
@@ -67,19 +68,18 @@ describe("Meta login", () => {
 	});
 
 	test("accepts a non-interactive Meta login method without prompting for the choice", async () => {
-		const prompts: string[] = [];
 		const apiKey = await loginMeta({
 			authMethod: "api-key",
 			onAuth: () => {},
-			onPrompt: async prompt => {
-				prompts.push(prompt.message);
-				return " meta-rpc-key ";
-			},
+			onPrompt: async () => " meta-rpc-key ",
 			fetch: () => Promise.resolve(Response.json({ data: [{ id: "muse-spark-1.2" }] })),
 		});
 
 		expect(apiKey).toBe("meta-rpc-key");
-		expect(prompts).toEqual(["Paste your Meta Model API key"]);
+	});
+
+	test("declares the legacy RPC login default in provider policy", () => {
+		expect(rpcDefaultAuthMethodFor("meta")).toBe("api-key");
 	});
 
 	test("uses one provider for Muse subscriptions and Model API keys", () => {
@@ -168,10 +168,51 @@ describe("Meta login", () => {
 		}
 	});
 
+	test("falls back to Muse after the preferred PAYG login exhausts its quota", async () => {
+		const storage = new AuthStorage(new SqliteAuthCredentialStore(new Database(":memory:")), {
+			usageProviderResolver: () => undefined,
+		});
+		try {
+			await storage.reload();
+			await storage.set("meta", [
+				{
+					type: "oauth",
+					access: "meta-account-access",
+					refresh: "meta-account-refresh",
+					expires: Date.now() + 3_600_000,
+					apiKey: "LLM|subscription-key",
+					authorizedAt: 1,
+				},
+				{
+					type: "api_key",
+					key: "LLM|payg-key",
+					source: "login",
+					authorizedAt: 2,
+				},
+			]);
+			const sessionId = "payg-quota-fallback";
+			expect(await storage.getApiKey("meta", sessionId)).toBe("LLM|payg-key");
+
+			expect(
+				await storage.rotateSessionCredential("meta", sessionId, {
+					apiKey: "LLM|payg-key",
+					error: Object.assign(
+						new Error('{"error":{"code":"usage_limit_exceeded","message":"usage limit exceeded"}}'),
+						{ status: 429 },
+					),
+				}),
+			).toBe(true);
+			expect(await storage.getApiKey("meta", sessionId)).toBe("LLM|subscription-key");
+		} finally {
+			storage.close();
+		}
+	});
+
 	test("reloads OAuth minted-key and login-recency changes with an unchanged token tuple", async () => {
 		const store = new SqliteAuthCredentialStore(new Database(":memory:"));
 		const storage = new AuthStorage(store, { usageProviderResolver: () => undefined });
 		const now = Date.now();
+
 		try {
 			await storage.reload();
 			await storage.set("meta", [

@@ -13,6 +13,7 @@
 import { once } from "node:events";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
+import { rpcDefaultAuthMethodFor } from "@oh-my-pi/pi-catalog/compat/behavior";
 import { $env, isRecord, Snowflake } from "@oh-my-pi/pi-utils";
 import { reset as resetCapabilities } from "../../capability";
 import { clearPluginRootsAndCaches, resolveActiveProjectRegistryPath } from "../../discovery/helpers";
@@ -1534,9 +1535,9 @@ export async function runRpcMode(
 						onProgress: message => {
 							uiCtx.notify(message, "info");
 						},
-						// Preserve the pre-Muse RPC contract: a Meta login without an
-						// explicit method remains the non-interactive Model API-key flow.
-						authMethod: command.authMethod ?? (command.providerId === "meta" ? "api-key" : undefined),
+						// Provider policy preserves non-interactive defaults for RPC
+						// clients that predate multi-method login.
+						authMethod: command.authMethod ?? rpcDefaultAuthMethodFor(command.providerId),
 						onPrompt: async prompt => {
 							if (!authEmitted) {
 								// onPrompt called before any auth URL — provider requires

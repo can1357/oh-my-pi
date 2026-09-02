@@ -332,9 +332,10 @@ export function compileBehavior(source: { file: string; text: string } | undefin
 				break;
 			}
 			case "credential-policy": {
-				ensureLeaf(node, ["provider", "mode"]);
+				ensureLeaf(node, ["provider", "mode", "rpc-default-auth-method"]);
 				const provider = requiredProp(node, "provider");
 				const mode = requiredProp(node, "mode");
+				const rpcDefaultAuthMethod = propString(node, "rpc-default-auth-method");
 				if (
 					!provider ||
 					mode !== "oauth-minted-api-key-with-direct-api-key" ||
@@ -344,6 +345,7 @@ export function compileBehavior(source: { file: string; text: string } | undefin
 					malformed(node);
 				}
 				const policy: CompiledCredentialPolicy = { provider, mode };
+				if (rpcDefaultAuthMethod) policy.rpcDefaultAuthMethod = rpcDefaultAuthMethod;
 				behavior.credentialPolicies.push(policy);
 				break;
 			}

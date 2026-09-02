@@ -295,6 +295,7 @@ export interface CompiledPricingPeer {
 export interface CompiledCredentialPolicy {
 	provider: string;
 	mode: "oauth-minted-api-key-with-direct-api-key";
+	rpcDefaultAuthMethod?: string;
 }
 /** Compiled runtime behavior vocabulary (`runtime/behavior.kdl`). */
 export interface CompiledBehavior {

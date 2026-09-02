@@ -13905,7 +13905,8 @@
 		"credentialPolicies": [
 			{
 				"provider": "meta",
-				"mode": "oauth-minted-api-key-with-direct-api-key"
+				"mode": "oauth-minted-api-key-with-direct-api-key",
+				"rpcDefaultAuthMethod": "api-key"
 			}
 		],
 		"modelOperations": [
