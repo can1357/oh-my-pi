@@ -1332,7 +1332,25 @@ export class RelayBridge {
 					// caller explicitly cleared. Forget the journal entry so recovery
 					// cannot revive it before forcing the fresh root below.
 					const clearedKey = this.#interruptedClearKey(msg);
-					if (clearedKey) this.#forgetTabSubscription(tab, clearedKey);
+					if (clearedKey) {
+						this.#forgetTabSubscription(tab, clearedKey);
+					} else {
+						// Emulation.setEmulatedMedia can clear one field while leaving
+						// another intact. Preserve those field-level tombstones when the
+						// result is interrupted so fresh-root replay cannot resurrect the
+						// caller's explicitly cleared media or features value.
+						const key = this.#subscriptionTrackingKey(msg);
+						if (key) {
+							const clears = subscriptionClearedFields(key, msg.params);
+							if (clears)
+								this.#rememberTabSubscriptionClear(
+									tab,
+									key,
+									clears,
+									++this.#subscriptionSeq,
+								);
+						}
+					}
 					tab.forceFreshRootBeforeReplay = true;
 				}
 			}

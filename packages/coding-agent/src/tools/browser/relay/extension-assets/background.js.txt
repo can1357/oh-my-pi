@@ -141,6 +141,12 @@ function restoreOrphanSweepDeadline(storedDeadline, isCurrent) {
     return;
   return typeof storedDeadline === "number" && Number.isFinite(storedDeadline) ? storedDeadline : null;
 }
+function seedOrphanSweepDeadline(currentDeadlineMs, scheduledTime, generation) {
+  if (currentDeadlineMs !== null) {
+    return { deadlineMs: currentDeadlineMs, generation };
+  }
+  return { deadlineMs: scheduledTime, generation: generation + 1 };
+}
 function serializeOrphanSweepDeadlineUpdate(previousUpdate, alarmUpdate, isCurrent, persist, repairStaleAlarm) {
   return previousUpdate.catch(() => {}).then(async () => {
     await alarmUpdate.catch(() => {});
@@ -849,8 +855,9 @@ chrome.alarms.onAlarm.addListener((alarm) => {
     return;
   }
   if (alarm.name === ORPHAN_SWEEP_ALARM) {
-    if (orphanSweepDeadlineMs === null)
-      orphanSweepDeadlineMs = alarm.scheduledTime;
+    const seeded = seedOrphanSweepDeadline(orphanSweepDeadlineMs, alarm.scheduledTime, orphanSweepDeadlineGeneration);
+    orphanSweepDeadlineMs = seeded.deadlineMs;
+    orphanSweepDeadlineGeneration = seeded.generation;
     runAfterStartupReconciliation(ensureStartupReconciled, () => maybeRunOrphanSweep(alarm.scheduledTime)).catch(() => {});
   }
 });

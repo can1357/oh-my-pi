@@ -4880,6 +4880,82 @@ describe("RelayBridge tab grouping", () => {
 		).toHaveLength(0);
 	});
 
+	for (const [field, cleared, expectedReplay] of [
+		[
+			"media",
+			"",
+			{ features: [{ name: "prefers-color-scheme", value: "dark" }] },
+		],
+		["features", [], { media: "print" }],
+	] as const) {
+		it(`preserves an interrupted emulated-media ${field} clear`, async () => {
+			const bridge = new RelayBridge({});
+			const ext = new FakeExtSocket();
+			connect(bridge, ext, [tab({ tabId: 1 })]);
+			const cdp = new FakeCdpSocket();
+			const connId = bridge.cdpConnected(cdp);
+			const pageSession = await attachPage(bridge, ext, cdp, connId, 1);
+
+			const setId = ++msgSeq;
+			bridge.cdpMessage(
+				connId,
+				JSON.stringify({
+					id: setId,
+					sessionId: pageSession,
+					method: "Emulation.setEmulatedMedia",
+					params: {
+						media: "print",
+						features: [
+							{ name: "prefers-color-scheme", value: "dark" },
+						],
+					},
+				}),
+			);
+			await flush();
+			ack(bridge, ext, "send");
+			await flush();
+
+			const clearId = ++msgSeq;
+			bridge.cdpMessage(
+				connId,
+				JSON.stringify({
+					id: clearId,
+					sessionId: pageSession,
+					method: "Emulation.setEmulatedMedia",
+					params: { [field]: cleared },
+				}),
+			);
+			await waitFor(
+				() => ext.rpcs("send").length === 2,
+				`interrupted emulated-media ${field} clear`,
+			);
+			bridge.extClosed(ext);
+			await flush();
+
+			const ext2 = new FakeExtSocket();
+			connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], {
+				attachedTabIds: [1],
+				recoverableTabIds: [1],
+			});
+			await waitFor(
+				() => ext2.rpcs("detach").length === 1,
+				`fresh-root detach after interrupted ${field} clear`,
+			);
+			ack(bridge, ext2, "detach");
+			await waitFor(
+				() => ext2.rpcs("attach").length === 1,
+				`fresh-root attach after interrupted ${field} clear`,
+			);
+			ack(bridge, ext2, "attach");
+			await flush();
+			const replays = ext2
+				.rpcs("send")
+				.filter((rpc) => rpc.method === "Emulation.setEmulatedMedia");
+			expect(replays).toHaveLength(1);
+			expect(replays[0]).toMatchObject({ params: expectedReplay });
+		});
+	}
+
 	it("preserves recovery authorization when the forced-root detach outlives its socket", async () => {
 		const bridge = new RelayBridge({});
 		const ext = new FakeExtSocket();

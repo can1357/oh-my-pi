@@ -33,6 +33,7 @@ import {
 	orphanSweepSeesRelayDisconnected,
 	restoreOrphanSweepDeadline,
 	runAfterStartupReconciliation,
+	seedOrphanSweepDeadline,
 	serializeOrphanSweepDeadlineUpdate,
 	shouldProceedWithOrphanSweep,
 	shouldRunOrphanSweep,
@@ -1158,8 +1159,16 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 	if (alarm.name === ORPHAN_SWEEP_ALARM) {
 		// Apply the alarm's own timestamp before startup reconciliation can observe
 		// a missing persisted value and mistakenly arm a fresh grace period.
-		if (orphanSweepDeadlineMs === null)
-			orphanSweepDeadlineMs = alarm.scheduledTime;
+		// This seed is an in-memory deadline mutation just like
+		// setOrphanSweepDeadline(). Invalidate a startup read that was already in
+		// flight so its persisted null cannot erase the fired deadline.
+		const seeded = seedOrphanSweepDeadline(
+			orphanSweepDeadlineMs,
+			alarm.scheduledTime,
+			orphanSweepDeadlineGeneration,
+		);
+		orphanSweepDeadlineMs = seeded.deadlineMs;
+		orphanSweepDeadlineGeneration = seeded.generation;
 		void runAfterStartupReconciliation(ensureStartupReconciled, () =>
 			maybeRunOrphanSweep(alarm.scheduledTime),
 		).catch(() => {});

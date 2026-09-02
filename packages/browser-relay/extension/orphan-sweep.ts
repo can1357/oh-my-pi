@@ -95,6 +95,17 @@ export function restoreOrphanSweepDeadline(
 		: null;
 }
 
+export function seedOrphanSweepDeadline(
+	currentDeadlineMs: number | null,
+	scheduledTime: number,
+	generation: number,
+): { deadlineMs: number; generation: number } {
+	if (currentDeadlineMs !== null) {
+		return { deadlineMs: currentDeadlineMs, generation };
+	}
+	return { deadlineMs: scheduledTime, generation: generation + 1 };
+}
+
 /**
  * Finish an alarm mutation before persisting its matching deadline. Deadline
  * updates are queued so an older clear cannot write `null` after a newer arm.

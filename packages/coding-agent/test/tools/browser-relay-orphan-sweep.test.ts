@@ -5,6 +5,7 @@ import {
 	orphanSweepSeesRelayDisconnected,
 	restoreOrphanSweepDeadline,
 	runAfterStartupReconciliation,
+	seedOrphanSweepDeadline,
 	serializeOrphanSweepDeadlineUpdate,
 	shouldProceedWithOrphanSweep,
 	shouldRunOrphanSweep,
@@ -203,6 +204,19 @@ describe("browser relay orphan sweep scheduling", () => {
 		expect(restoreOrphanSweepDeadline(31_000, false)).toBeUndefined();
 		expect(restoreOrphanSweepDeadline(31_000, true)).toBe(31_000);
 		expect(restoreOrphanSweepDeadline(null, true)).toBeNull();
+	});
+
+	it("makes an alarm seed newer than an in-flight startup restoration", () => {
+		const seeded = seedOrphanSweepDeadline(null, 31_000, 0);
+
+		expect(seeded).toEqual({ deadlineMs: 31_000, generation: 1 });
+		expect(
+			restoreOrphanSweepDeadline(null, seeded.generation === 0),
+		).toBeUndefined();
+		expect(seedOrphanSweepDeadline(31_000, 61_000, 1)).toEqual({
+			deadlineMs: 31_000,
+			generation: 1,
+		});
 	});
 
 	it("waits for startup ownership reconciliation before consuming an alarm", async () => {
