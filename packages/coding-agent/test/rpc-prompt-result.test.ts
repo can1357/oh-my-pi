@@ -119,6 +119,7 @@ describe("reportLocalOnlyPromptResult", () => {
 				onError: () => {},
 				emit: async () => {},
 			},
+			discoverStartupSkillPaths: async () => {},
 			sendCustomMessage: async (_message: unknown, options?: { triggerTurn?: boolean }) => {
 				sentOptions = options;
 				return true;
@@ -272,6 +273,7 @@ describe("reportLocalOnlyPromptResult", () => {
 				onError: () => {},
 				emit: async () => {},
 			},
+			discoverStartupSkillPaths: async () => {},
 			sendUserMessage: async (content: unknown) => {
 				sentContent = content;
 			},
@@ -324,6 +326,7 @@ describe("reportLocalOnlyPromptResult", () => {
 				onError: () => {},
 				emit: async () => {},
 			},
+			discoverStartupSkillPaths: async () => {},
 			sendUserMessage: async () => {
 				throw thrown;
 			},
@@ -412,6 +415,7 @@ describe("initializeExtensions invokingTask rejection safety", () => {
 				onError: () => {},
 				emit: async () => {},
 			},
+			discoverStartupSkillPaths: async () => {},
 			// Mirrors AgentSession.sendCustomMessage's contract: `false` iff no turn started,
 			// e.g. an idle steer superseded by a concurrent turn's preflight generation check.
 			sendCustomMessage: async () => false,
