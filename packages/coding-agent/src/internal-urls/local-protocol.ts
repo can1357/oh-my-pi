@@ -296,7 +296,7 @@ export async function copyLocalArtifacts(sourceRoot: string, destinationRoot: st
 	}
 	if (!sourceRootStat.isDirectory()) return;
 
-	await fs.mkdir(destinationRoot, { recursive: true });
+	await fs.mkdir(destinationRoot, { recursive: true, mode: 0o700 });
 	await copyLocalArtifactEntries(sourceRoot, destinationRoot);
 }
 
@@ -307,13 +307,13 @@ async function copyLocalArtifactEntries(sourceDir: string, destinationDir: strin
 		const destinationPath = path.join(destinationDir, entry.name);
 
 		if (entry.isDirectory()) {
-			await fs.mkdir(destinationPath, { recursive: true });
+			await fs.mkdir(destinationPath, { recursive: true, mode: 0o700 });
 			await copyLocalArtifactEntries(sourcePath, destinationPath);
 			continue;
 		}
 
 		if (entry.isFile()) {
-			await fs.mkdir(path.dirname(destinationPath), { recursive: true });
+			await fs.mkdir(path.dirname(destinationPath), { recursive: true, mode: 0o700 });
 			await fs.copyFile(sourcePath, destinationPath);
 		}
 	}
@@ -453,6 +453,25 @@ function parseAtomicLocalTarget(input: string | InternalUrl, options: LocalProto
 	return { absoluteRoot, absolutePath, targetComponents };
 }
 
+async function canonicalizeAtomicLocalRoot(absoluteRoot: string): Promise<string> {
+	if (process.platform === "win32") return absoluteRoot;
+	const rootName = path.basename(absoluteRoot);
+	const missingParents: string[] = [];
+	let candidate = path.dirname(absoluteRoot);
+	while (true) {
+		try {
+			const canonicalAncestor = await fs.realpath(candidate);
+			return path.join(canonicalAncestor, ...missingParents.reverse(), rootName);
+		} catch (error) {
+			if (!isEnoent(error)) throw error;
+			const parent = path.dirname(candidate);
+			if (parent === candidate) throw error;
+			missingParents.push(path.basename(candidate));
+			candidate = parent;
+		}
+	}
+}
+
 const strictUtf8Encoder = new TextEncoder();
 
 function encodeStrictUtf8(content: string): Uint8Array {
@@ -506,13 +525,18 @@ function mapAtomicLocalWriteError(error: unknown): Error {
 	return error instanceof Error ? error : new Error(String(error));
 }
 
+/**
+ * The built-in write tool deliberately has no JavaScript fallback: falling
+ * back after capability detection would restore the preflight/write race this
+ * boundary exists to remove. Supported hosts must ship the native writer.
+ */
 function requireAtomicLocalWriteCapability(): typeof natives.atomicLocalWrite {
 	const atomicLocalWrite = natives.atomicLocalWrite;
 	if (typeof atomicLocalWrite !== "function") {
 		throw new AtomicLocalWriteError({
 			code: "UNSUPPORTED",
 			commitState: "NOT_COMMITTED",
-			message: "Atomic local writes are unsupported by the installed native bindings",
+			message: "This host cannot safely perform local:// writes because its native bindings lack atomicLocalWrite",
 		});
 	}
 	return atomicLocalWrite;
@@ -529,11 +553,12 @@ export async function writeLocalUrlAtomically(
 	const atomicLocalWrite = requireAtomicLocalWriteCapability();
 	const target = parseAtomicLocalTarget(input, invokingOptions);
 	const contentUtf8 = encodeStrictUtf8(content);
+	const nativeRoot = await canonicalizeAtomicLocalRoot(target.absoluteRoot);
 
 	try {
 		const result = await atomicLocalWrite(
 			{
-				absoluteRoot: target.absoluteRoot,
+				absoluteRoot: nativeRoot,
 				targetComponents: target.targetComponents,
 				contentUtf8,
 				executable: content.startsWith("#!"),
@@ -587,7 +612,7 @@ type ResolvedLocalTarget =
  */
 async function resolveLocalTarget(url: InternalUrl, opts: LocalProtocolOptions): Promise<ResolvedLocalTarget> {
 	const localRoot = resolveLocalRoot(opts);
-	await fs.mkdir(localRoot, { recursive: true });
+	await fs.mkdir(localRoot, { recursive: true, mode: 0o700 });
 
 	let resolvedRoot: string;
 	try {

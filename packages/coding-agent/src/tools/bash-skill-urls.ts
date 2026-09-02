@@ -287,7 +287,7 @@ async function resolveInternalUrlToPath(
 		}
 		const resolvedLocalPath = resolveLocalUrlToPath(url, localOptions);
 		if (ensureLocalParentDirs) {
-			await fs.mkdir(path.dirname(resolvedLocalPath), { recursive: true });
+			await fs.mkdir(path.dirname(resolvedLocalPath), { recursive: true, mode: 0o700 });
 		}
 		return resolvedLocalPath;
 	}

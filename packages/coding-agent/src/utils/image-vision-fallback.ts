@@ -11,6 +11,7 @@
  *
  * Without this the provider layer drops the image entirely (NON_VISION_IMAGE_PLACEHOLDER).
  */
+import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import {
 	type AgentTelemetry,
@@ -86,7 +87,8 @@ function imageFileName(image: ImageContent): string {
 async function saveImage(image: ImageContent, localRoot: string): Promise<string> {
 	const fileName = imageFileName(image);
 	const filePath = path.join(localRoot, fileName);
-	// Content-addressed: identical bytes overwrite themselves harmlessly. Bun.write creates parent dirs.
+	// Content-addressed: identical bytes overwrite themselves harmlessly.
+	await fs.mkdir(localRoot, { recursive: true, mode: 0o700 });
 	await Bun.write(filePath, Buffer.from(image.data, "base64"));
 	return `local://${fileName}`;
 }

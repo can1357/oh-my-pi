@@ -1,3 +1,4 @@
+import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
@@ -1903,6 +1904,7 @@ export class InputController {
 				getArtifactsDir: () => this.ctx.sessionManager.getArtifactsDir(),
 				getSessionId: () => this.ctx.sessionManager.getSessionId(),
 			});
+			await fs.mkdir(localRoot, { recursive: true, mode: 0o700 });
 			let name: string;
 			let filePath: string;
 			do {

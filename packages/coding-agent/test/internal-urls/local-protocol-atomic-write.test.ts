@@ -2,7 +2,11 @@ import { afterEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { LocalProtocolHandler, writeLocalUrlAtomically } from "@oh-my-pi/pi-coding-agent/internal-urls";
+import {
+	copyLocalArtifacts,
+	LocalProtocolHandler,
+	writeLocalUrlAtomically,
+} from "@oh-my-pi/pi-coding-agent/internal-urls";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 async function withTempDir<T>(fn: (dir: string) => Promise<T>): Promise<T> {
@@ -44,6 +48,45 @@ describe("writeLocalUrlAtomically", () => {
 			});
 			expect(await Bun.file(expectedPath).text()).toBe(content);
 			expect(await Bun.file(path.join(staleArtifactsDir, "local", "nested", "trace.md")).exists()).toBe(false);
+		});
+	});
+	it("canonicalizes trusted POSIX symlink ancestors without following a linked local root", async () => {
+		if (process.platform === "win32") return;
+		await withTempDir(async tempDir => {
+			const realParent = path.join(tempDir, "real-parent");
+			const linkedParent = path.join(tempDir, "linked-parent");
+			await fs.mkdir(realParent, { mode: 0o700 });
+			await fs.symlink(realParent, linkedParent, "dir");
+
+			await writeLocalUrlAtomically("local://nested/trace.md", "safe", {
+				getArtifactsDir: () => path.join(linkedParent, "artifacts"),
+				getSessionId: () => "canonical-ancestor",
+			});
+
+			expect(await fs.readFile(path.join(realParent, "artifacts", "local", "nested", "trace.md"), "utf8")).toBe(
+				"safe",
+			);
+		});
+	});
+	it("keeps copied POSIX session roots writable through the native boundary", async () => {
+		if (process.platform === "win32") return;
+		await withTempDir(async tempDir => {
+			const sourceRoot = path.join(tempDir, "source", "local");
+			const destinationArtifacts = path.join(tempDir, "destination");
+			const destinationRoot = path.join(destinationArtifacts, "local");
+			await fs.mkdir(path.join(sourceRoot, "nested"), { recursive: true, mode: 0o755 });
+			await fs.writeFile(path.join(sourceRoot, "nested", "plan.md"), "plan");
+
+			await copyLocalArtifacts(sourceRoot, destinationRoot);
+			await writeLocalUrlAtomically("local://nested/result.md", "result", {
+				getArtifactsDir: () => destinationArtifacts,
+				getSessionId: () => "copied-root",
+			});
+
+			expect(await fs.readFile(path.join(destinationRoot, "nested", "plan.md"), "utf8")).toBe("plan");
+			expect(await fs.readFile(path.join(destinationRoot, "nested", "result.md"), "utf8")).toBe("result");
+			expect((await fs.stat(destinationRoot)).mode & 0o777).toBe(0o700);
+			expect((await fs.stat(path.join(destinationRoot, "nested"))).mode & 0o777).toBe(0o700);
 		});
 	});
 	it("replaces a hard-link directory entry without modifying the linked outside file", async () => {
@@ -105,7 +148,7 @@ describe("writeLocalUrlAtomically", () => {
 			});
 		});
 	});
-	it("refuses permissive POSIX local roots and target parents", async () => {
+	it("migrates owner-owned POSIX directories to 0700 and rejects writable shared parents", async () => {
 		if (process.platform === "win32") return;
 		await withTempDir(async tempDir => {
 			const artifactsDir = path.join(tempDir, "artifacts");
@@ -116,19 +159,30 @@ describe("writeLocalUrlAtomically", () => {
 			const localRoot = path.join(artifactsDir, "local");
 			await fs.mkdir(localRoot, { recursive: true, mode: 0o755 });
 			await fs.chmod(localRoot, 0o755);
-			await expect(writeLocalUrlAtomically("local://unsafe.txt", "content", options)).rejects.toMatchObject({
-				name: "AtomicLocalWriteError",
-				code: "UNSAFE_PATH",
-				commitState: "NOT_COMMITTED",
-			});
+			await writeLocalUrlAtomically("local://migrated.txt", "content", options);
+			expect((await fs.stat(localRoot)).mode & 0o777).toBe(0o700);
 
-			await fs.rm(localRoot, { recursive: true, force: true });
-			await writeLocalUrlAtomically("local://seed.txt", "seed", options);
-			const permissiveParent = path.join(localRoot, "permissive");
-			await fs.mkdir(permissiveParent, { mode: 0o755 });
-			await fs.chmod(permissiveParent, 0o755);
+			const readableParent = path.join(localRoot, "readable");
+			await fs.mkdir(readableParent, { mode: 0o750 });
+			await writeLocalUrlAtomically("local://readable/migrated.txt", "content", options);
+			expect((await fs.stat(readableParent)).mode & 0o777).toBe(0o700);
+
+			const writableParent = path.join(localRoot, "writable");
+			await fs.mkdir(writableParent, { mode: 0o770 });
+			await fs.chmod(writableParent, 0o770);
+			await expect(writeLocalUrlAtomically("local://writable/unsafe.txt", "content", options)).rejects.toMatchObject(
+				{
+					name: "AtomicLocalWriteError",
+					code: "UNSAFE_PATH",
+					commitState: "NOT_COMMITTED",
+				},
+			);
+
+			const otherWritableParent = path.join(localRoot, "other-writable");
+			await fs.mkdir(otherWritableParent, { mode: 0o700 });
+			await fs.chmod(otherWritableParent, 0o702);
 			await expect(
-				writeLocalUrlAtomically("local://permissive/unsafe.txt", "content", options),
+				writeLocalUrlAtomically("local://other-writable/unsafe.txt", "content", options),
 			).rejects.toMatchObject({
 				name: "AtomicLocalWriteError",
 				code: "UNSAFE_PATH",
