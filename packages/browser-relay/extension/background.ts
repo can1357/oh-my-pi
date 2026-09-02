@@ -989,26 +989,26 @@ async function connect(): Promise<void> {
 		if (ws !== socket) return;
 		ws = null;
 		if (helloDeliveredSocket === socket) helloDeliveredSocket = null;
+		const loaderGeneration = ++recoveryLoaderGeneration;
 		recoveryLoaderUpdates = Promise.all(
 			attachmentGuard.attachedTabIds().map(async (tabId) => {
-				recoveryLoaderGeneration++;
-				recoveryLoaderIds.delete(tabId);
 				const frameTree = (await chrome.debugger
 					.sendCommand({ tabId }, "Page.getFrameTree")
 					.catch(() => undefined)) as
 					| { frameTree?: { frame?: { loaderId?: unknown } } }
 					| undefined;
+				if (loaderGeneration !== recoveryLoaderGeneration) return;
+				recoveryLoaderIds.delete(tabId);
 				const loaderId = frameTree?.frameTree?.frame?.loaderId;
 				if (typeof loaderId === "string")
 					recoveryLoaderIds.set(tabId, loaderId);
 			}),
-		).then(() =>
-			chrome.storage.session
-				.set({
-					[RECOVERY_LOADER_IDS_KEY]: Object.fromEntries(recoveryLoaderIds),
-				})
-				.then(() => {}),
-		);
+		).then(async () => {
+			if (loaderGeneration !== recoveryLoaderGeneration) return;
+			await chrome.storage.session.set({
+				[RECOVERY_LOADER_IDS_KEY]: Object.fromEntries(recoveryLoaderIds),
+			});
+		});
 		// A new disconnect cycle: invalidate any orphan sweep that already yielded
 		// to the alarms/storage APIs so its stale resume cannot cancel the fresh
 		// grace deadline armed below.

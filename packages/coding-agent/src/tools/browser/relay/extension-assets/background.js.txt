@@ -739,18 +739,24 @@ async function connect() {
     ws = null;
     if (helloDeliveredSocket === socket)
       helloDeliveredSocket = null;
+    const loaderGeneration = ++recoveryLoaderGeneration;
     recoveryLoaderUpdates = Promise.all(attachmentGuard.attachedTabIds().map(async (tabId) => {
-      recoveryLoaderGeneration++;
-      recoveryLoaderIds.delete(tabId);
       const frameTree = await chrome.debugger.sendCommand({ tabId }, "Page.getFrameTree").catch(() => {
         return;
       });
+      if (loaderGeneration !== recoveryLoaderGeneration)
+        return;
+      recoveryLoaderIds.delete(tabId);
       const loaderId = frameTree?.frameTree?.frame?.loaderId;
       if (typeof loaderId === "string")
         recoveryLoaderIds.set(tabId, loaderId);
-    })).then(() => chrome.storage.session.set({
-      [RECOVERY_LOADER_IDS_KEY]: Object.fromEntries(recoveryLoaderIds)
-    }).then(() => {}));
+    })).then(async () => {
+      if (loaderGeneration !== recoveryLoaderGeneration)
+        return;
+      await chrome.storage.session.set({
+        [RECOVERY_LOADER_IDS_KEY]: Object.fromEntries(recoveryLoaderIds)
+      });
+    });
     connectionGeneration++;
     if (pingTimer !== null) {
       clearInterval(pingTimer);
