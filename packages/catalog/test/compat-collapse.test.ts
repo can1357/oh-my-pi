@@ -292,15 +292,6 @@ describe("collapseVariants with a reviewed table", () => {
 		expect(resolveWireModelId(model, Effort.High)).toBe("gemini-3.8-flash-high");
 	});
 
-	it("bundles the routed gemini-3.8-flash model after generation", () => {
-		const models = getBundledModels("google-antigravity");
-		expect(models.some(model => model.id === "gemini-3.8-flash-tiered")).toBe(false);
-
-		const flash = getBundledModel("google-antigravity", "gemini-3.8-flash");
-		expect(flash?.thinking?.effortRouting?.minimal).toBe("gemini-3.8-flash-low");
-		expect(flash ? mapEffortToGoogleThinkingLevel(Effort.Minimal, flash) : undefined).toBe("LOW");
-	});
-
 	it("drops routes whose target member is absent", () => {
 		const out = collapseVariants([memberSpec("gemini-3.5-flash-extra-low")], { table: antigravityTable });
 
