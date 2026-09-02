@@ -3182,7 +3182,21 @@ export class RelayBridge {
 				// (forceFreshRootBeforeReplay) intact so the replacement hello can
 				// finish the reattach instead of stranding the holder.
 				if (isExtensionTransportInterrupted(err)) return;
-				throw err;
+				this.#log("fresh-root recovery detach failed", {
+					tabId: tab.tabId,
+					error: err instanceof Error ? err.message : String(err),
+				});
+				// The live extension rejected the forced detach, so this recovery cannot
+				// establish a known root. Fail closed: consume the stale authorization,
+				// retract every session that depended on it, and retry best-effort cleanup
+				// only after no downstream holder remains.
+				tab.forceFreshRootBeforeReplay = false;
+				tab.restorePending = false;
+				tab.refreshDetachInFlight = false;
+				tab.banned = true;
+				this.#retractTab(tab);
+				this.#detachIfUnheld(tab.tabId);
+				return;
 			}
 			if (!ok) {
 				if (this.#ext !== ext) {

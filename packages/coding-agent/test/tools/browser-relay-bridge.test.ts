@@ -4674,6 +4674,62 @@ describe("RelayBridge tab grouping", () => {
 		expect(ext3.rpcs("send").some((rpc) => rpc.tabId === 1)).toBe(true);
 	});
 
+	it("retracts preserved sessions when a forced-root detach fails", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })], { attachedTabIds: [1] });
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		const pageSession = await attachPage(bridge, ext, cdp, connId, 1);
+
+		const addId = ++msgSeq;
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({
+				id: addId,
+				sessionId: pageSession,
+				method: "Page.addScriptToEvaluateOnNewDocument",
+				params: { source: "window.__relayInjected = true;" },
+			}),
+		);
+		await waitFor(
+			() =>
+				ext
+					.rpcs("send")
+					.some(
+						(rpc) => rpc.method === "Page.addScriptToEvaluateOnNewDocument",
+					),
+			"initial preload registration RPC",
+		);
+		bridge.extClosed(ext);
+		await flush();
+
+		const ext2 = new FakeExtSocket();
+		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], {
+			attachedTabIds: [1],
+			recoverableTabIds: [1],
+		});
+		await waitFor(
+			() => ext2.pending("detach").length === 1,
+			"forced fresh-root detach issued",
+		);
+		nack(bridge, ext2, "detach", "detach denied");
+		await flush();
+
+		const cmdId = ++msgSeq;
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({
+				id: cmdId,
+				sessionId: pageSession,
+				method: "Runtime.evaluate",
+			}),
+		);
+		await flush();
+		expect(cdp.messages.find((message) => message.id === cmdId)?.error).toBeDefined();
+		expect(ext2.rpcs("detach").length).toBeGreaterThanOrEqual(2);
+	});
+
 	it("clears refresh authorization after a recovery reattach so a later user detach is honored", async () => {
 		const bridge = new RelayBridge({});
 		const ext = new FakeExtSocket();
