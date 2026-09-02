@@ -118,6 +118,7 @@ describe("AgentSession panel lifecycle", () => {
 			preview: {
 				role: { roleId: "prepared", role: { strategy: "independent", members: [] } },
 				members: [],
+				lineupHash: "sha256:test-lineup",
 			},
 			taskMode: "answer",
 			request: "prepared request",
