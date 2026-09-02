@@ -64,6 +64,7 @@ import {
 } from "../src/provider-models/special";
 import type { Api, Model, ModelSpec } from "../src/types";
 import { cleanModelName } from "../src/utils";
+import { mergeCopilotApiHeaders } from "../src/wire/github-copilot";
 import {
 	applyAntigravityPricingFallback,
 	applyCanonicalLimitFallback,
@@ -724,6 +725,11 @@ async function generateModels() {
 	);
 
 	allModels = applyGlobalModelsDevFallback(allModels, modelsDevModels);
+	// Previous-snapshot fallbacks can retain a retired client fingerprint. Force
+	// every bundled Copilot model onto the same identity used by live discovery.
+	allModels = allModels.map(model =>
+		model.provider === "github-copilot" ? { ...model, headers: mergeCopilotApiHeaders(model.headers) } : model,
+	);
 	// Seed QwenCloud's documented Token Plan models when credentialed
 	// discovery is unavailable. A successful `/models` response is authoritative
 	// for the subscribed edition and must not be widened by the fallback.

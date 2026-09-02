@@ -30,6 +30,7 @@ import { formatModelStringWithRouting, resolveModelOverride } from "../config/mo
 import type { Settings } from "../config/settings";
 import type { RetryErrorUpdate } from "../extensibility/shared-events";
 import emptyStopRetryTemplate from "../prompts/system/empty-stop-retry.md" with { type: "text" };
+import malformedFunctionCallRetryTemplate from "../prompts/system/malformed-function-call-retry.md" with { type: "text" };
 import thinkingLoopRedirectTemplate from "../prompts/system/thinking-loop-redirect.md" with { type: "text" };
 import unexpectedStopRetryTemplate from "../prompts/system/unexpected-stop-retry.md" with { type: "text" };
 import {
@@ -71,6 +72,7 @@ const THINKING_LOOP_REDIRECT_TYPE = "thinking-loop-redirect";
 const UNEXPECTED_STOP_MAX_RETRIES = 3;
 const UNEXPECTED_STOP_TIMEOUT_MS = 4000;
 const EMPTY_STOP_MAX_RETRIES = 3;
+const MALFORMED_FUNCTION_CALL_MAX_RETRIES = 3;
 const SIBLING_UNBLOCK_BUFFER_MS = 1_000;
 const NON_WHITESPACE_RE = /\S/;
 const USAGE_PREFLIGHT_BLOCKED_PREFIX = "Usage preflight blocked:";
@@ -262,6 +264,7 @@ export class TurnRecovery {
 	#usageLimitOutcomes = new WeakMap<AssistantMessage, Promise<UsageLimitOutcome>>();
 	#emptyStopRetryCount = 0;
 	#unexpectedStopRetryCount = 0;
+	#malformedFunctionCallRetryCount = 0;
 	#acceptTerminalEmptyStopForPrompt = false;
 	// Three fields sit near the word "serve" and are deliberately distinct:
 	// `#activeRetryFallback.served` gates the one-shot `retry_fallback_succeeded`
@@ -392,6 +395,7 @@ export class TurnRecovery {
 	resetForNewPrompt(): void {
 		this.#emptyStopRetryCount = 0;
 		this.#unexpectedStopRetryCount = 0;
+		this.#malformedFunctionCallRetryCount = 0;
 		this.#acceptTerminalEmptyStopForPrompt = false;
 	}
 
@@ -477,6 +481,63 @@ export class TurnRecovery {
 	/** Classifies suspicious terminal stops and schedules bounded recovery. */
 	handleUnexpectedAssistantStop(message: AssistantMessage): Promise<boolean> {
 		return this.#handleUnexpectedAssistantStop(message);
+	}
+
+	/**
+	 * Continue past a provider-rejected function call that the replay-based
+	 * retry declined. Gemini reports `MALFORMED_FUNCTION_CALL` when the model
+	 * transcribes the call as text (`call:default_api:read{…}`, a tool_code
+	 * fence) instead of emitting a structured call; the text is already
+	 * rendered, so {@link isRetryableError} refuses to replay the turn and the
+	 * session stopped on a pinned error. Nothing ran and nothing needs
+	 * replaying: keep the failed turn in context so the model sees its own
+	 * output, append a corrective developer message, and resume. Bounded per
+	 * prompt; past the cap the error surfaces as before.
+	 */
+	handleMalformedFunctionCallStop(message: AssistantMessage): boolean {
+		if (message.stopReason !== "error") return false;
+		const id = this.#classifyRetryMessage(message);
+		if (!AIError.is(id, AIError.Flag.MalformedFunctionCall)) {
+			this.#malformedFunctionCallRetryCount = 0;
+			return false;
+		}
+		if (this.#host.abortInProgress() || this.#host.isDisposed()) return false;
+
+		this.#malformedFunctionCallRetryCount++;
+		if (this.#malformedFunctionCallRetryCount > MALFORMED_FUNCTION_CALL_MAX_RETRIES) {
+			logger.warn("Assistant kept emitting malformed function calls after retry cap", {
+				attempts: this.#malformedFunctionCallRetryCount - 1,
+				model: message.model,
+				provider: message.provider,
+			});
+			this.#malformedFunctionCallRetryCount = 0;
+			return false;
+		}
+
+		logger.info("Malformed function call; continuing with corrective reminder", {
+			attempt: this.#malformedFunctionCallRetryCount,
+			model: message.model,
+			provider: message.provider,
+		});
+		this.#host.agent.appendMessage({
+			role: "developer",
+			content: [
+				{
+					type: "text",
+					text: prompt.render(malformedFunctionCallRetryTemplate, {
+						retryCount: this.#malformedFunctionCallRetryCount,
+						maxRetries: MALFORMED_FUNCTION_CALL_MAX_RETRIES,
+					}),
+				},
+			],
+			attribution: "agent",
+			timestamp: Date.now(),
+		});
+		this.#host.scheduleAgentContinue({
+			source: "malformed-function-call-retry",
+			generation: this.#host.promptGeneration(),
+		});
+		return true;
 	}
 
 	/** Removes a persisted failed assistant turn after its persistence slot settles; returns the dropped branch entry id. */

@@ -69,7 +69,7 @@ family "flash" glob="*flash*"
 family "lite" glob="*flash-lite*" priority=10
 ```
 
-The glob is anchored, ASCII-case-insensitive, and matched against the lowercased bare name. Matching families rank by `(priority, non-wildcard byte count in the glob)`. Equal ranks belonging to different family IDs are an ambiguity error. No match produces no family. Repeating rules for the same family ID is allowed, as in the checked-in `o-series` taxonomy.
+The glob is anchored, ASCII-case-insensitive, and matched against the lowercased bare name. Matching families rank by `(priority, non-wildcard byte count in the glob)`. When equal-ranked family globs tie, a leading `class.` or `class:` namespace matching one of the selected class's tokens is removed and family matching is retried; a remaining tie is an ambiguity error. No match produces no family. Repeating rules for the same family ID is allowed, as in the checked-in `o-series` taxonomy.
 
 ### Revision extraction
 

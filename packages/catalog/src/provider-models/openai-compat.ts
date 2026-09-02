@@ -33,9 +33,11 @@ import { CLOUDFLARE_AI_GATEWAY_COMPAT_BASE_URL } from "../wire/cloudflare-ai-gat
 import { coreWeaveProjectHeaders } from "../wire/coreweave";
 import {
 	COPILOT_API_HEADERS,
+	COPILOT_DISCOVERY_HEADERS,
 	discoverGitHubCopilotApiEndpoint,
 	getGitHubCopilotBaseUrl,
 	isPersonalGitHubCopilotBaseUrl,
+	mergeCopilotApiHeaders,
 	parseGitHubCopilotApiKey,
 } from "../wire/github-copilot";
 import { createBundledReferenceMap, createReferenceResolver, toModelSpec } from "./bundled-references";
@@ -6061,8 +6063,8 @@ export function githubCopilotModelManagerOptions(config?: GithubCopilotModelMana
 		providerId: "github-copilot",
 		cacheProviderId: resolveModelCacheProviderId("github-copilot", { apiKey: rawApiKey, baseUrl }),
 		dropCachedModelIdsOnStaticMismatch: COPILOT_CACHE_INVALIDATED_MODEL_IDS,
-		// COPILOT_API_HEADERS are compile-time constants (User-Agent + API
-		// version), not credentials. The cache omits all request headers for
+		// COPILOT_API_HEADERS are compile-time wire identity constants, not
+		// credentials. The cache omits all request headers for
 		// safety and can only restore them from a bundled static entry — so a
 		// Copilot model with no bundled reference (e.g. a freshly served
 		// claude-opus-5 and its synthesized -1m sibling) is dropped on offline
@@ -6082,7 +6084,7 @@ export function githubCopilotModelManagerOptions(config?: GithubCopilotModelMana
 					provider: "github-copilot",
 					baseUrl: requestBaseUrl,
 					apiKey,
-					headers: COPILOT_API_HEADERS,
+					headers: COPILOT_DISCOVERY_HEADERS,
 					mapModel: (
 						entry: OpenAICompatibleModelRecord,
 						defaults: ModelSpec<Api>,
@@ -6156,10 +6158,7 @@ export function githubCopilotModelManagerOptions(config?: GithubCopilotModelMana
 									input,
 									contextWindow: defaultTierWindow,
 									maxTokens,
-									headers: {
-										...COPILOT_API_HEADERS,
-										...getProviderReferences().get(defaults.id)?.headers,
-									},
+									headers: mergeCopilotApiHeaders(getProviderReferences().get(defaults.id)?.headers),
 									...(api === "openai-completions"
 										? {
 												compat: {
@@ -6178,7 +6177,7 @@ export function githubCopilotModelManagerOptions(config?: GithubCopilotModelMana
 									input,
 									contextWindow: defaultTierWindow,
 									maxTokens,
-									headers: { ...COPILOT_API_HEADERS },
+									headers: mergeCopilotApiHeaders(),
 									// Copilot's `/models` advertises no reasoning bit, so a
 									// thinking-capable Claude with no bundled reference would
 									// fall back to `reasoning: false` and lose its effort dial.

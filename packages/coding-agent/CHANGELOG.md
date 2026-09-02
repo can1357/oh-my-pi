@@ -5,6 +5,17 @@
 ### Added
 
 - Added three opt-in status-line formatting features for custom presets: a `profile` segment that shows the active named profile as `p:<name>` and hides for the default profile, `segmentOptions.token_total.breakdown` to render labeled traffic totals like `in:25K out:5`, and `segmentOptions.context_pct.compact` to render percentage-only context labels such as `ctx:9.1%` ([#9096](https://github.com/can1357/oh-my-pi/issues/9096))
+### Changed
+
+- Removed incorrect retry instructions from unsupported model error messages
+
+### Fixed
+
+- Provider errors in the transcript and the pinned error banner now wrap to the terminal width instead of being cut at a fixed column with no way to read the rest; long bodies keep a bounded number of rows and end with the `Ctrl+O to expand` hint.
+- Gemini `MALFORMED_FUNCTION_CALL` turns where the model wrote the call as text (`call:default_api:read{…}`) no longer stop on a pinned error: the session keeps the turn, tells the model the call was rejected, and continues (bounded to three attempts per prompt).
+- Auto-compaction recovery no longer loops indefinitely when a model repeatedly returns an empty `response.incomplete` (`length`) turn: the length-stop recovery path is now bounded and surfaces an actionable error after a few failed attempts instead of scheduling `shake-retry` forever and persisting hundreds of empty assistant turns ([#10594](https://github.com/can1357/oh-my-pi/issues/10594)).
+- MCP servers now retry after transient startup handshake timeouts instead of remaining disconnected for the session ([#10478](https://github.com/can1357/oh-my-pi/issues/10478)).
+
 ## [18.1.3] - 2026-09-02
 
 ### Changed

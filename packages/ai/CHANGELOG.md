@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- GitHub Copilot `HTTP 400 model_not_supported` now fails immediately with GitHub's own response instead of being retried eight times per request, re-run by the turn-level retry, and replaced with a hardcoded "only part of its fleet" message ([#7819](https://github.com/can1357/oh-my-pi/issues/7819)).
+- GitHub Copilot requests and new sign-ins now use the official Copilot CLI identity and OAuth app, restoring access to client-gated models while keeping existing credentials valid
+- Improved account recovery when Google rate limits are lifted before the reported reset time
+- Resolved an issue where unmetered autocomplete models surfaced as exhausted when quota is limited
+- Fixed Gemini 3 cross-model sessions on Cloud Code Assist failing with `400 INVALID_ARGUMENT` when the first replayed tool call has no thought signature ([#10602](https://github.com/can1357/oh-my-pi/issues/10602)).
+- Fixed Cursor models behind auth-gateway retrying client-declared tool calls after the gateway incorrectly reported them as missing.
+
 ## [18.1.3] - 2026-09-02
 
 ### Fixed
