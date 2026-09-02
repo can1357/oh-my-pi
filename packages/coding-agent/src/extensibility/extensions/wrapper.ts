@@ -59,7 +59,12 @@ export class RegisteredToolAdapter implements AgentTool<any, any, any> {
 			this.renderResult = (result: any, options: any, theme: any, args?: any) =>
 				registeredTool.definition.renderResult!(
 					result,
-					{ expanded: options.expanded, isPartial: options.isPartial, spinnerFrame: options.spinnerFrame },
+					{
+						expanded: options.expanded,
+						isPartial: options.isPartial,
+						spinnerFrame: options.spinnerFrame,
+						renderContext: options.renderContext,
+					},
 					theme as Theme,
 					args,
 				);

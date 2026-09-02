@@ -588,6 +588,8 @@ export interface ToolRenderResultOptions {
 	isPartial: boolean;
 	/** Current spinner frame index for animated elements (optional) */
 	spinnerFrame?: number;
+	/** Tool-specific render context built by ToolExecutionComponent. */
+	renderContext?: Record<string, unknown>;
 }
 
 /** Session event for tool onSession lifecycle */

@@ -85,7 +85,7 @@ export function renderOutputBlock(options: OutputBlockOptions, theme: Theme): st
 		const flatContentWidth = Math.max(1, flatWidth - 2);
 		const flatSections = options.sections ?? [];
 		for (const section of flatSections) {
-			if (section.label) lines.push(`${indent}${theme.fg("dim", section.label)}`);
+			if (section.label) lines.push(`${indent}${theme.fg("dim", truncateToWidth(section.label, flatContentWidth))}`);
 			const sectionLines = section.lines.flatMap(l => l.split("\n"));
 			const sixelMask = TERMINAL.imageProtocol === ImageProtocol.Sixel ? getSixelLineMask(sectionLines) : undefined;
 			for (let i = 0; i < sectionLines.length; i++) {

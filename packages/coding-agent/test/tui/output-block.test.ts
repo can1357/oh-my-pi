@@ -54,4 +54,18 @@ describe("renderOutputBlock", () => {
 		expect(lines[1]).toBe(`│ ${"x".repeat(26)} │`);
 		expect(lines[2]).toStartWith("│ … 1 more line");
 	});
+
+	it("truncates flat section labels to their indented width", async () => {
+		const theme = (await getThemeByName("dark"))!;
+		const lines = renderOutputBlock(
+			{
+				width: 12,
+				flat: true,
+				sections: [{ label: "ask questions[].id", lines: [] }],
+			},
+			theme,
+		).map(line => stripVTControlCharacters(line));
+
+		expect(lines).toEqual(["  ask quest…"]);
+	});
 });
