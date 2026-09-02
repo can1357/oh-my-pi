@@ -2811,9 +2811,7 @@ class CodexStreamProcessor {
 
 	async #tryRetryProviderError(error: unknown): Promise<boolean> {
 		const retryable =
-			error instanceof CodexProviderStreamError
-				? error.retryable
-				: AIError.isProviderRetryableError(error, { provider: this.model.provider });
+			error instanceof CodexProviderStreamError ? error.retryable : AIError.isProviderRetryableError(error);
 		// A leading `response.output_item.added` opens an empty block and emits only
 		// a `*_start` before any delta; that is replay-safe. But once any text or
 		// thinking delta has streamed — including a whitespace-only

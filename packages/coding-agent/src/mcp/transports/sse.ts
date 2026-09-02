@@ -27,6 +27,14 @@ interface PendingLegacySseRequest {
 	abortHandler?: () => void;
 }
 
+/** Identifies a legacy SSE transport whose endpoint handshake timed out. */
+export class LegacySseConnectionTimeoutError extends Error {
+	constructor(timeoutMs: number) {
+		super(`Legacy SSE endpoint timeout after ${timeoutMs}ms`);
+		this.name = "LegacySseConnectionTimeoutError";
+	}
+}
+
 /** Legacy MCP HTTP+SSE transport from protocol revision 2024-11-05. */
 export class LegacySseTransport implements MCPTransport {
 	#connected = false;
@@ -101,7 +109,7 @@ export class LegacySseTransport implements MCPTransport {
 			if (this.#sseConnection === connection) this.#sseConnection = null;
 			connection.abort();
 			if (operation.isTimeoutAbort(error)) {
-				throw new Error(`Legacy SSE endpoint timeout after ${timeout}ms`);
+				throw new LegacySseConnectionTimeoutError(timeout);
 			}
 			throw error;
 		}
