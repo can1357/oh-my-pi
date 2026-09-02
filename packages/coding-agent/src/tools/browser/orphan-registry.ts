@@ -196,13 +196,16 @@ export async function collectOrphanTargets(
  * when CDP confirms the close or confirms the target no longer exists; a
  * dropped connection or transient protocol failure returns false so durable
  * ownership remains available for a later retry.
+ *
+ * Relay browsers announce no browser-type target, so `browser.target()` cannot
+ * open a session. Fall back to matching `_targetId` on `browser.targets()` and
+ * closing the page directly. Never throws.
  */
 export async function closeCdpTarget(browser: Browser, targetId: string): Promise<boolean> {
-	const session = await browser
-		.target()
-		.createCDPSession()
+	const session = await Promise.resolve()
+		.then(() => browser.target().createCDPSession())
 		.catch(() => null);
-	if (!session) return false;
+	if (!session) return closePageTarget(browser, targetId);
 	try {
 		try {
 			const result = await session.send("Target.closeTarget", { targetId });
@@ -220,6 +223,26 @@ export async function closeCdpTarget(browser: Browser, targetId: string): Promis
 	} finally {
 		await session.detach().catch(() => undefined);
 	}
+}
+
+/**
+ * Close a page by walking puppeteer targets and matching the protocol id on
+ * `_targetId`. Used when the browser-type CDP session is unavailable (relay).
+ */
+async function closePageTarget(browser: Browser, targetId: string): Promise<boolean> {
+	try {
+		for (const target of browser.targets()) {
+			// CdpTarget stores the protocol id on `_targetId`; public Target has no getter.
+			const raw = target as { _targetId?: unknown };
+			if (raw._targetId !== targetId) continue;
+			const page = await target.page();
+			if (page && !page.isClosed()) await page.close();
+			return page != null && page.isClosed();
+		}
+	} catch {
+		return false;
+	}
+	return false;
 }
 
 /** Atomically retain unresolved targets, or remove an ownership file once all are resolved. */

@@ -41,6 +41,11 @@ export type { Observation, ObservationEntry } from "./browser/tab-protocol";
 
 const DEFAULT_TAB_NAME = "main";
 
+function defaultTabName(session: ToolSession): string {
+	const id = session.getSessionId?.();
+	return id ? `${DEFAULT_TAB_NAME}:${id.slice(-6)}` : DEFAULT_TAB_NAME;
+}
+
 const appSchema = type({
 	"path?": type("string").describe("binary path to spawn"),
 	"cdp_url?": type("string").describe("existing cdp endpoint"),
@@ -51,7 +56,9 @@ const appSchema = type({
 
 const browserSchema = type({
 	action: type("'open' | 'close' | 'run'").describe("operation"),
-	"name?": type("string").describe("tab id (default 'main')"),
+	"name?": type("string").describe(
+		"tab id (omit for a tab private to this session; pass a name to share across subagents)",
+	),
 	"url?": type("string").describe("url to open"),
 	"app?": appSchema,
 	"viewport?": {
@@ -228,7 +235,7 @@ export class BrowserTool implements AgentTool<typeof browserSchema, BrowserToolD
 			throwIfAborted(signal);
 			const timeoutSeconds = clampTimeout("browser", params.timeout, this.session.settings.get("tools.maxTimeout"));
 			const timeoutMs = timeoutSeconds * 1000;
-			const name = params.name ?? DEFAULT_TAB_NAME;
+			const name = params.name ?? defaultTabName(this.session);
 			const details: BrowserToolDetails = { action: params.action, name };
 
 			switch (params.action) {
@@ -364,8 +371,17 @@ export class BrowserTool implements AgentTool<typeof browserSchema, BrowserToolD
 	): Promise<AgentToolResult<BrowserToolDetails>> {
 		const kill = !!params.kill;
 		if (params.all) {
-			const count = await untilAborted(signal, () => releaseAllTabs({ kill, timeoutMs }));
-			details.result = `Released ${count} managed tab${count === 1 ? "" : "s"}`;
+			const { released, skipped } = await untilAborted(signal, () =>
+				releaseAllTabs({
+					kill,
+					timeoutMs,
+					ownerSessionId: this.session.getSessionId?.(),
+				}),
+			);
+			details.result = `Released ${released} managed tab${released === 1 ? "" : "s"}`;
+			if (skipped > 0) {
+				details.result += `; left ${skipped} open (owned by other sessions)`;
+			}
 			return toolResult(details).text(details.result).done();
 		}
 		const closed = await untilAborted(signal, () => releaseTab(name, { kill, timeoutMs }));

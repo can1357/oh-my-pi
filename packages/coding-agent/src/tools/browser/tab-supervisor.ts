@@ -7,7 +7,6 @@ import {
 	withTimeout,
 	workerHostEntry,
 } from "@oh-my-pi/pi-utils";
-import type { Page, Target } from "puppeteer-core";
 import { callSessionTool } from "../../eval/js/tool-bridge";
 import { webpExclusionForModel } from "../../utils/image-loading";
 import type { ToolSession } from "../index";
@@ -26,6 +25,13 @@ import {
 	type PuppeteerBrowserHandle,
 	releaseBrowser,
 } from "./registry";
+import {
+	pickAndClaimRelayTarget,
+	relayClaimOwner,
+	releaseRelayClaim,
+	targetIdForPage,
+	targetIdForTarget,
+} from "./relay/pick";
 import type {
 	ReadyInfo,
 	RunErrorPayload,
@@ -85,6 +91,8 @@ interface TabSessionBase<TBrowser extends BrowserHandle = BrowserHandle> {
 	 * Undefined when the acquirer did not identify itself.
 	 */
 	ownerSessionId?: string;
+	/** Relay drive-owner token; a recycled worker re-claims with this so the bridge transfers. */
+	claimOwner?: string;
 }
 
 export interface WorkerTabSession extends TabSessionBase<PuppeteerBrowserHandle> {
@@ -144,6 +152,8 @@ export interface ReleaseTabOptions {
 	kill?: boolean;
 	/** Maximum time for each asynchronous cleanup resource before close fails with diagnostics. */
 	timeoutMs?: number;
+	/** When set, `releaseAllTabs` leaves tabs owned by a different session. */
+	ownerSessionId?: string | null;
 }
 
 const tabs = new Map<string, TabSession>();
@@ -317,16 +327,23 @@ async function acquireTabImpl(
 			throw error;
 		}
 	}
-	let initPayload: WorkerInitPayload;
+	let initPayload: WorkerInitPayload | undefined;
 	let worker: WorkerHandle;
 	try {
-		initPayload = await buildInitPayload(browser, opts);
+		initPayload = await buildInitPayload(browser, opts, name);
 		worker = await spawnTabWorker();
 	} catch (error) {
+		// Spawn failure after a successful adopt-claim must free the claim.
+		// `initPayload` is optional so a `buildInitPayload` throw is not TDZ.
+		if (initPayload) await releaseRelayClaimIfHeld(browser, initPayload);
 		// Failing before the worker took its own hold must release the
 		// temporary one, or the browser's refCount never reaches 0 again.
 		if (tempHold || browser.refCount === 0) await releaseBrowser(browser, { kill: false });
 		throw error;
+	}
+	if (!initPayload) {
+		if (tempHold || browser.refCount === 0) await releaseBrowser(browser, { kill: false });
+		throw new ToolError("Browser tab init payload missing");
 	}
 	// Init budget: the caller's timeout plus the supervisor grace — never a
 	// fixed floor. A floor larger than the caller's budget would keep a wedged
@@ -348,6 +365,7 @@ async function acquireTabImpl(
 		// reported (no-op when it never got that far).
 		closeAbandonedWorkerPage(browser, worker);
 		if (worker.mode === "inline" || isReportedInitFailure(error)) {
+			await releaseRelayClaimIfHeld(browser, initPayload);
 			if (tempHold || browser.refCount === 0) await releaseBrowser(browser, { kill: false });
 			throw error;
 		}
@@ -355,6 +373,7 @@ async function acquireTabImpl(
 		// fired, so a retried result would only be discarded by the post-init abort check —
 		// don't spend the phase floors' excess on a cold start nobody is waiting for.
 		if (initBudgetExhausted(initBudgetMs, startedAt)) {
+			await releaseRelayClaimIfHeld(browser, initPayload);
 			if (tempHold || browser.refCount === 0) await releaseBrowser(browser, { kill: false });
 			throw error;
 		}
@@ -367,6 +386,7 @@ async function acquireTabImpl(
 		} catch (inlineError) {
 			await worker.terminate().catch(() => undefined);
 			closeAbandonedWorkerPage(browser, worker);
+			await releaseRelayClaimIfHeld(browser, initPayload);
 			if (tempHold || browser.refCount === 0) await releaseBrowser(browser, { kill: false });
 			const finalError = new ToolError(
 				`Failed to start browser tab worker (inline fallback also failed): ${inlineError instanceof Error ? inlineError.message : String(inlineError)}`,
@@ -386,6 +406,7 @@ async function acquireTabImpl(
 	if (opts.signal?.aborted) {
 		await worker.terminate().catch(() => undefined);
 		closeAbandonedWorkerPage(browser, worker);
+		await releaseRelayClaimIfHeld(browser, initPayload);
 		if (tempHold || browser.refCount === 0) await releaseBrowser(browser, { kill: false }).catch(() => undefined);
 		throw new ToolAbortError("Browser tab open aborted");
 	}
@@ -405,6 +426,7 @@ async function acquireTabImpl(
 		kindTag: browser.kind.kind,
 		activateForScreenshot: initPayload.mode === "headless" || initPayload.activateForScreenshot !== false,
 		ownerSessionId: opts.ownerSessionId,
+		claimOwner: initPayload.mode === "attach" ? initPayload.claimOwner : undefined,
 	};
 	worker.onMessage(msg => handleTabMessage(tab, msg));
 	tabs.set(name, tab);
@@ -719,13 +741,22 @@ export async function releaseTab(name: string, opts: ReleaseTabOptions = {}): Pr
 	return true;
 }
 
-export async function releaseAllTabs(opts: ReleaseTabOptions = {}): Promise<number> {
+export async function releaseAllTabs(opts: ReleaseTabOptions = {}): Promise<{ released: number; skipped: number }> {
 	const names = [...tabs.keys()];
-	let count = 0;
+	const callerId = opts.ownerSessionId;
+	const hasCaller = typeof callerId === "string" && callerId.length > 0;
+	let released = 0;
+	let skipped = 0;
 	for (const name of names) {
-		if (await releaseTab(name, opts)) count++;
+		const tab = tabs.get(name);
+		if (!tab) continue;
+		if (hasCaller && tab.ownerSessionId !== undefined && tab.ownerSessionId !== callerId) {
+			skipped++;
+			continue;
+		}
+		if (await releaseTab(name, opts)) released++;
 	}
-	return count;
+	return { released, skipped };
 }
 
 export async function dropHeadlessTabs(): Promise<void> {
@@ -766,7 +797,29 @@ function isLastSurfaceCloseError(err: unknown): boolean {
 	return /last/i.test(message);
 }
 
-async function buildInitPayload(browser: PuppeteerBrowserHandle, opts: AcquireTabOptions): Promise<WorkerInitPayload> {
+async function releaseRelayClaimIfHeld(browser: PuppeteerBrowserHandle, initPayload: WorkerInitPayload): Promise<void> {
+	if (initPayload.mode !== "attach" || !initPayload.claimOwner || initPayload.targetId === null) return;
+	const owner = initPayload.claimOwner;
+	const targetId = initPayload.targetId;
+	try {
+		for (const target of browser.browser.targets()) {
+			const id = await targetIdForTarget(target).catch(() => "");
+			if (id !== targetId) continue;
+			const page = await target.page().catch(() => null);
+			if (!page) return;
+			await releaseRelayClaim(page, owner);
+			return;
+		}
+	} catch {
+		// The pre-claim is best-effort; a vanished target needs no release.
+	}
+}
+
+async function buildInitPayload(
+	browser: PuppeteerBrowserHandle,
+	opts: AcquireTabOptions,
+	name: string,
+): Promise<WorkerInitPayload> {
 	const safeDir = getPuppeteerDir();
 	const browserWSEndpoint = browser.browser.wsEndpoint();
 	if (!browserWSEndpoint) throw new ToolError("Browser websocket endpoint is unavailable");
@@ -785,10 +838,44 @@ async function buildInitPayload(browser: PuppeteerBrowserHandle, opts: AcquireTa
 			timeoutMs: opts.timeoutMs,
 		};
 	}
-	// Connected and relay browsers are user-driven. When no target is requested,
-	// adopt the visible tab and avoid raising it before screenshots. An explicit
+	if (browser.kind.kind === "relay") {
+		const owner = relayClaimOwner(name);
+		if (!opts.target && opts.url) {
+			return {
+				mode: "attach",
+				browserWSEndpoint,
+				safeDir,
+				targetId: null,
+				claimOwner: owner,
+				dialogs: opts.dialogs,
+				url: opts.url,
+				waitUntil: opts.waitUntil,
+				timeoutMs: opts.timeoutMs,
+				activateForScreenshot: true,
+			};
+		}
+		const { targetId } = await pickAndClaimRelayTarget(browser.browser, {
+			matcher: opts.target,
+			owner,
+			signal: opts.signal,
+		});
+		return {
+			mode: "attach",
+			browserWSEndpoint,
+			safeDir,
+			targetId,
+			claimOwner: owner,
+			dialogs: opts.dialogs,
+			url: opts.url,
+			waitUntil: opts.waitUntil,
+			timeoutMs: opts.timeoutMs,
+			activateForScreenshot: !shouldPreserveConnectedBrowserFocus(opts.target),
+		};
+	}
+	// Connected browsers are user-driven. When no target is requested, adopt
+	// the visible tab and avoid raising it before screenshots. An explicit
 	// target may be backgrounded, so retain activation for target-correct pixels.
-	const userDriven = browser.kind.kind === "connected" || browser.kind.kind === "relay";
+	const userDriven = browser.kind.kind === "connected";
 	const activateForScreenshot = !userDriven || !shouldPreserveConnectedBrowserFocus(opts.target);
 	const page = await pickElectronTarget(browser.browser, {
 		matcher: opts.target,
@@ -905,6 +992,7 @@ async function recycleTimedOutWorkerTab(tab: WorkerTabSession, timeoutMs: number
 		browserWSEndpoint,
 		safeDir: getPuppeteerDir(),
 		targetId: tab.targetId,
+		claimOwner: tab.claimOwner,
 		dialogs: tab.dialogPolicy,
 		// Unblock a wedged page (open JS dialog, hung navigation) before adopting it —
 		// otherwise init stalls, times out, and the tab gets force-killed.
@@ -1035,23 +1123,6 @@ async function waitForClosed(tab: WorkerTabSession): Promise<void> {
 function expandBrowserScreenshotDir(session: ToolSession): string | undefined {
 	const value = session.settings.get("browser.screenshotDir") as string | undefined;
 	return value ? expandPath(value) : undefined;
-}
-
-async function targetIdForPage(page: Page): Promise<string> {
-	return await targetIdForTarget(page.target());
-}
-
-async function targetIdForTarget(target: Target): Promise<string> {
-	const raw = target as unknown as { _targetId?: unknown };
-	if (typeof raw._targetId === "string") return raw._targetId;
-	const session = await target.createCDPSession();
-	try {
-		const info = (await session.send("Target.getTargetInfo")) as { targetInfo?: { targetId?: string } };
-		if (info.targetInfo?.targetId) return info.targetInfo.targetId;
-		throw new ToolError("Target id unavailable from CDP target info");
-	} finally {
-		await session.detach().catch(() => undefined);
-	}
 }
 
 function errorFromPayload(payload: RunErrorPayload): Error {
