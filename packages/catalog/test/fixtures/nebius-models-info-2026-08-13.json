@@ -1,0 +1,21 @@
+{
+  "capturedAt": "2026-08-13",
+  "source": "https://tokenfactory.nebius.com/api/public/models_info",
+  "models": [
+    {
+      "type": "text2text",
+      "name": "Qwen3-235B-A22B-Instruct-2507",
+      "status": "active",
+      "use_cases": ["text", "code", "function_calling", "context_and_rag", "fine_tune", "responses_api"],
+      "flavors": [
+        {
+          "model_id": "Qwen/Qwen3-235B-A22B-Instruct-2507",
+          "context_window_k": 262,
+          "max_model_len": 262144,
+          "input_price_per_million_tokens": 0.2,
+          "output_price_per_million_tokens": 0.6
+        }
+      ]
+    }
+  ]
+}

@@ -115,6 +115,7 @@ export function finalizeCustomModel(model: CustomModelOverlay, options: CustomMo
 	const reference = options.useDefaults
 		? resolveModelReference(resolvedModel.id, getBundledModelReferenceIndex())
 		: undefined;
+	const liveCostFields = resolvedModel.cost ? (["input", "output", "cacheRead", "cacheWrite"] as const) : undefined;
 	const cost =
 		resolvedModel.cost ??
 		reference?.cost ??
@@ -128,6 +129,15 @@ export function finalizeCustomModel(model: CustomModelOverlay, options: CustomMo
 		provider: resolvedModel.provider,
 		baseUrl: resolvedModel.baseUrl,
 		reasoning: resolvedModel.reasoning ?? reference?.reasoning ?? (options.useDefaults ? false : undefined),
+		...(resolvedModel.reasoning !== undefined || resolvedModel.input !== undefined || liveCostFields !== undefined
+			? {
+					catalogFallback: {
+						...(resolvedModel.reasoning !== undefined ? { liveReasoning: true } : {}),
+						...(resolvedModel.input !== undefined ? { liveInputModalities: true } : {}),
+						...(liveCostFields !== undefined ? { liveCostFields } : {}),
+					},
+				}
+			: {}),
 		thinking: inheritReferenceThinking(resolvedModel.thinking, reference, resolvedModel.provider),
 		input: input as ("text" | "image")[],
 		imageInputDecoder: resolvedModel.imageInputDecoder,

@@ -538,12 +538,15 @@ function mergeDynamicModel<TApi extends Api>(existingModel: Model<TApi>, dynamic
 	// row shares the single DeepInfra endpoint, so `endpointChanged` never fires
 	// there: without this carve-out a model that dropped those tags would keep
 	// the bundled reference's image support and the agent would go on sending
-	// images to a now text-only route.
+	// images to a now text-only route. European gateway discovery records the
+	// same explicit-input provenance so a provider-reported text-only row also
+	// cannot be OR-upgraded by its static fallback.
 	const endpointChanged = existingModel.baseUrl !== dynamicModel.baseUrl;
 	const dynamicInputAuthoritative =
 		endpointChanged ||
 		(existingModel.provider === "github-copilot" && dynamicModel.provider === "github-copilot") ||
-		(existingModel.provider === "deepinfra" && dynamicModel.provider === "deepinfra");
+		(existingModel.provider === "deepinfra" && dynamicModel.provider === "deepinfra") ||
+		dynamicModel.catalogFallback?.liveInputModalities === true;
 	const supportsImage = dynamicInputAuthoritative
 		? dynamicModel.input.includes("image")
 		: existingModel.input.includes("image") || dynamicModel.input.includes("image");
@@ -553,9 +556,12 @@ function mergeDynamicModel<TApi extends Api>(existingModel: Model<TApi>, dynamic
 	// mapper emits `reasoning: false`, and OR-ing the bundled reference's
 	// stale `reasoning: true` back would re-arm an effort dial the route
 	// doesn't expose. Other providers keep the OR so a bundled reasoning flag
-	// survives a discovery row that simply omits the capability.
+	// survives a discovery row that simply omits the capability. European
+	// gateway discovery likewise marks an explicit wire capability so a false
+	// value stays authoritative through the merge.
 	const dynamicReasoningAuthoritative =
-		existingModel.provider === "synthetic" && dynamicModel.provider === "synthetic";
+		(existingModel.provider === "synthetic" && dynamicModel.provider === "synthetic") ||
+		dynamicModel.catalogFallback?.liveReasoning === true;
 	const reasoning = dynamicReasoningAuthoritative
 		? dynamicModel.reasoning
 		: existingModel.reasoning || dynamicModel.reasoning;
@@ -569,22 +575,60 @@ function mergeDynamicModel<TApi extends Api>(existingModel: Model<TApi>, dynamic
 		reasoning,
 		input: supportsImage ? ["text", "image"] : ["text"],
 		cost: {
-			input: preferDiscoveryCost(dynamicModel.cost.input, existingModel.cost.input),
-			output: preferDiscoveryCost(dynamicModel.cost.output, existingModel.cost.output),
-			cacheRead: preferDiscoveryCost(dynamicModel.cost.cacheRead, existingModel.cost.cacheRead),
-			cacheWrite: preferDiscoveryCost(dynamicModel.cost.cacheWrite, existingModel.cost.cacheWrite),
+			input: preferDiscoveryCost(
+				dynamicModel.cost.input,
+				existingModel.cost.input,
+				dynamicModel.catalogFallback,
+				"input",
+			),
+			output: preferDiscoveryCost(
+				dynamicModel.cost.output,
+				existingModel.cost.output,
+				dynamicModel.catalogFallback,
+				"output",
+			),
+			cacheRead: preferDiscoveryCost(
+				dynamicModel.cost.cacheRead,
+				existingModel.cost.cacheRead,
+				dynamicModel.catalogFallback,
+				"cacheRead",
+			),
+			cacheWrite: preferDiscoveryCost(
+				dynamicModel.cost.cacheWrite,
+				existingModel.cost.cacheWrite,
+				dynamicModel.catalogFallback,
+				"cacheWrite",
+			),
 			...(longContextCost ? { longContext: longContextCost } : {}),
 		},
-		contextWindow: preferDiscoveryLimit(dynamicModel.contextWindow, existingModel.contextWindow),
-		maxTokens: preferDiscoveryLimit(dynamicModel.maxTokens, existingModel.maxTokens),
+		contextWindow: preferDiscoveryLimit(
+			dynamicModel.contextWindow,
+			existingModel.contextWindow,
+			dynamicModel.catalogFallback,
+			"contextWindow",
+		),
+		maxTokens: preferDiscoveryLimit(
+			dynamicModel.maxTokens,
+			existingModel.maxTokens,
+			dynamicModel.catalogFallback,
+			"maxTokens",
+		),
 		headers: dynamicModel.headers ? { ...existingModel.headers, ...dynamicModel.headers } : existingModel.headers,
 		compat: dynamicModel.compatConfig ?? existingModel.compatConfig,
 		contextPromotionTarget: dynamicModel.contextPromotionTarget ?? existingModel.contextPromotionTarget,
 	} as ModelSpec<TApi>);
 }
 
-function preferDiscoveryCost(discoveryCost: number, fallbackCost: number): number {
-	if (Number.isFinite(discoveryCost) && discoveryCost > 0) {
+function preferDiscoveryCost(
+	discoveryCost: number,
+	fallbackCost: number,
+	catalogFallback: Model<Api>["catalogFallback"],
+	field: keyof TokenCost,
+): number {
+	if (
+		Number.isFinite(discoveryCost) &&
+		(discoveryCost > 0 || catalogFallback?.liveCostFields?.includes(field) === true)
+	) {
 		return discoveryCost;
 	}
 	return fallbackCost;
@@ -601,11 +645,29 @@ function preferDiscoveryName(discoveryName: string, fallbackName: string, modelI
 	return normalizedDiscoveryName;
 }
 
-function preferDiscoveryLimit(discoveryLimit: number, fallbackLimit: number): number;
-function preferDiscoveryLimit(discoveryLimit: number | null, fallbackLimit: number | null): number | null;
-function preferDiscoveryLimit(discoveryLimit: number | null, fallbackLimit: number | null): number | null {
+function preferDiscoveryLimit(
+	discoveryLimit: number,
+	fallbackLimit: number,
+	catalogFallback: Model<Api>["catalogFallback"],
+	field: "contextWindow" | "maxTokens",
+): number;
+function preferDiscoveryLimit(
+	discoveryLimit: number | null,
+	fallbackLimit: number | null,
+	catalogFallback: Model<Api>["catalogFallback"],
+	field: "contextWindow" | "maxTokens",
+): number | null;
+function preferDiscoveryLimit(
+	discoveryLimit: number | null,
+	fallbackLimit: number | null,
+	catalogFallback: Model<Api>["catalogFallback"],
+	field: "contextWindow" | "maxTokens",
+): number | null {
 	if (discoveryLimit === null || !Number.isFinite(discoveryLimit) || discoveryLimit <= 0) {
 		return fallbackLimit;
+	}
+	if (catalogFallback?.liveLimitFields?.includes(field) === true) {
+		return discoveryLimit;
 	}
 	if (discoveryLimit === 4096 && fallbackLimit !== null && fallbackLimit > discoveryLimit) {
 		return fallbackLimit;

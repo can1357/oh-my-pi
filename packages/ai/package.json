@@ -118,6 +118,10 @@
       "types": "./src/registry/index.ts",
       "import": "./src/registry/index.ts"
     },
+    "./registry/*": {
+      "types": "./src/registry/*.ts",
+      "import": "./src/registry/*.ts"
+    },
     "./registry/oauth": {
       "types": "./src/registry/oauth/index.ts",
       "import": "./src/registry/oauth/index.ts"

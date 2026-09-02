@@ -256,9 +256,17 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	},
 	"context-promotion-target": { key: "contextPromotionTarget", set: "catalog", shape: "scalar" },
 	"context-window-floor": { key: "contextWindowFloor", set: "catalog", shape: "scalar" },
+	"cost-fallback": { key: "costFallback", set: "catalog", shape: "object" },
 	"cost-patch": { key: "costPatch", set: "catalog", shape: "object" },
 	"edit-revision": { key: "editRevision", set: "catalog", shape: "scalar" },
 	"input-modalities": { key: "inputModalities", set: "catalog", shape: "array", values: ["text", "image"] },
+	"input-modalities-fallback": {
+		key: "inputModalitiesFallback",
+		set: "catalog",
+		shape: "array",
+		values: ["text", "image"],
+	},
+	"limits-fallback": { key: "limitsFallback", set: "catalog", shape: "object" },
 	"limits-patch": { key: "limitsPatch", set: "catalog", shape: "object" },
 	"long-context-cost": { key: "longContext", set: "catalog", shape: "object" },
 	"long-usage-limit-fallback": { key: "longUsageLimitFallback", set: "catalog", shape: "scalar" },
@@ -268,7 +276,11 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 		shape: "scalar",
 	},
 	priority: { key: "priority", set: "catalog", shape: "scalar" },
+	reasoning: { key: "reasoning", set: "catalog", shape: "scalar" },
+	"reasoning-fallback": { key: "reasoningFallback", set: "catalog", shape: "scalar" },
 	"service-tier-cost": { key: "serviceTierCost", set: "catalog", shape: "object" },
+	"supports-tools-fallback": { key: "supportsToolsFallback", set: "catalog", shape: "scalar" },
+	"supports-tools": { key: "supportsTools", set: "catalog", shape: "scalar" },
 };
 
 /** Records applicable to each API family; used by `resolve.ts` when applying wire axes. */

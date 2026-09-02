@@ -192,9 +192,9 @@ export function linkOpenAIPromotionTargets(models: ModelSpec<Api>[]): void {
  *
  * Both lookups draw metadata from the proxy-reference index, which prefers the
  * largest limits with complete cache pricing and first-party providers, and
- * excludes zero-cost xai-oauth subscription entries (inflated `maxTokens`) as
- * sources. The canonical head is tried first (more precise); the segment alias
- * backfills any field it leaves null.
+ * excludes zero-cost xai-oauth subscription entries (inflated `maxTokens`) and
+ * European gateway rows as sources. The canonical head is tried first (more
+ * precise); the segment alias backfills any field it leaves null.
  *
  * Only `null` fields are filled; provider-specific limits that discovery
  * returned explicitly are never overwritten.

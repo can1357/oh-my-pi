@@ -8,6 +8,7 @@
  * may strip `search`-style markers and prefers cache-pricing-complete
  * references, both of which would be wrong for canonical coalescing.
  */
+import { isCrossProviderReferenceExcluded } from "../compat/behavior";
 import { collapseVocabulary, discoveryVocabulary } from "../compat/taxonomy";
 import type { Api, Model, ThinkingConfig } from "../types";
 import { getBracketStrippedModelIdCandidates, getLongestModelLikeIdSegment, getModelLikeIdSegments } from "./id";
@@ -40,6 +41,10 @@ export function isZeroCostXaiOAuthReference(candidate: Model<Api>): boolean {
 	);
 }
 
+export function isCrossProviderReferenceEligible(candidate: Model<Api>): boolean {
+	return !isZeroCostXaiOAuthReference(candidate) && !isCrossProviderReferenceExcluded(candidate.provider);
+}
+
 // Prefer the reference with the largest limits and complete cache pricing, then
 // first-party OpenAI entries.
 function shouldReplaceReference(existing: Model<Api> | undefined, candidate: Model<Api>): boolean {
@@ -69,7 +74,7 @@ function normalizeReferenceKey(value: string): string {
 export function buildModelReferenceIndex(models: Iterable<Model<Api>>): ModelReferenceIndex {
 	const exact = new Map<string, Model<Api>>();
 	for (const candidate of models) {
-		if (isZeroCostXaiOAuthReference(candidate)) {
+		if (!isCrossProviderReferenceEligible(candidate)) {
 			continue;
 		}
 		const key = normalizeReferenceKey(candidate.id);

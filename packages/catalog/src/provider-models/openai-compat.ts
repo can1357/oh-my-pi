@@ -1,5 +1,6 @@
 import { USER_AGENT } from "@oh-my-pi/pi-utils";
 import * as logger from "@oh-my-pi/pi-utils/logger";
+import { applyCatalogCorrections, buildModel } from "../build";
 import { toClinePassPublicModelId } from "../cline-pass-model-id";
 import {
 	apiRouteExactModelIds,
@@ -610,6 +611,490 @@ function resolveSimpleProviderHeaders(
 	headers: SimpleProviderDiscoveryHeaders | undefined,
 ): Record<string, string> | undefined {
 	return typeof headers === "function" ? headers() : headers;
+}
+
+type EuropeanGatewayProviderId =
+	| "aki-io"
+	| "cortecs"
+	| "eurouter"
+	| "melious"
+	| "nebius"
+	| "opper"
+	| "ovhcloud"
+	| "scaleway";
+
+type EuropeanGatewayConfig = { apiKey?: string; baseUrl?: string; fetch?: FetchImpl };
+
+const EUROPEAN_GATEWAY_BASE_URLS: Record<EuropeanGatewayProviderId, string> = {
+	"aki-io": "https://aki.io/openai/v1",
+	cortecs: "https://api.cortecs.ai/v1",
+	eurouter: "https://api.eurouter.ai/api/v1",
+	melious: "https://api.melious.ai/v1",
+	nebius: "https://api.tokenfactory.nebius.com/v1",
+	opper: "https://api.opper.ai/v3/compat",
+	ovhcloud: "https://oai.endpoints.kepler.ai.cloud.ovh.net/v1",
+	scaleway: "https://api.scaleway.ai/v1",
+};
+const NEBIUS_MODELS_PATH = "/models?verbose=true";
+
+const EUROPEAN_GATEWAY_NEUTRAL_COST = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } as const;
+
+export const EUROPEAN_GATEWAY_STATIC_MODELS: readonly ModelSpec<"openai-completions">[] = [
+	{
+		id: "kimi-k2.7-code-1100b",
+		name: "Kimi K2.7 Code 1100B",
+		api: "openai-completions",
+		provider: "aki-io",
+		baseUrl: EUROPEAN_GATEWAY_BASE_URLS["aki-io"],
+		reasoning: false,
+		input: ["text"],
+		cost: EUROPEAN_GATEWAY_NEUTRAL_COST,
+		contextWindow: null,
+		maxTokens: null,
+	},
+	{
+		id: "gpt-oss-120b",
+		name: "GPT-OSS 120B",
+		api: "openai-completions",
+		provider: "melious",
+		baseUrl: EUROPEAN_GATEWAY_BASE_URLS.melious,
+		reasoning: false,
+		input: ["text"],
+		cost: EUROPEAN_GATEWAY_NEUTRAL_COST,
+		contextWindow: null,
+		maxTokens: null,
+	},
+	{
+		id: "Qwen/Qwen3-235B-A22B-Instruct-2507",
+		name: "Qwen3 235B A22B Instruct 2507",
+		api: "openai-completions",
+		provider: "nebius",
+		baseUrl: EUROPEAN_GATEWAY_BASE_URLS.nebius,
+		reasoning: false,
+		input: ["text"],
+		cost: EUROPEAN_GATEWAY_NEUTRAL_COST,
+		contextWindow: null,
+		maxTokens: null,
+	},
+	{
+		id: "gpt-oss-120b",
+		name: "GPT-OSS 120B",
+		api: "openai-completions",
+		provider: "cortecs",
+		baseUrl: EUROPEAN_GATEWAY_BASE_URLS.cortecs,
+		reasoning: false,
+		input: ["text"],
+		cost: EUROPEAN_GATEWAY_NEUTRAL_COST,
+		contextWindow: null,
+		maxTokens: null,
+	},
+	{
+		id: "mistral-large-3",
+		name: "Mistral Large 3",
+		api: "openai-completions",
+		provider: "eurouter",
+		baseUrl: EUROPEAN_GATEWAY_BASE_URLS.eurouter,
+		reasoning: false,
+		input: ["text"],
+		cost: EUROPEAN_GATEWAY_NEUTRAL_COST,
+		contextWindow: null,
+		maxTokens: null,
+	},
+	{
+		id: "glm-5.2",
+		name: "GLM 5.2",
+		api: "openai-completions",
+		provider: "scaleway",
+		baseUrl: EUROPEAN_GATEWAY_BASE_URLS.scaleway,
+		reasoning: false,
+		input: ["text"],
+		cost: EUROPEAN_GATEWAY_NEUTRAL_COST,
+		contextWindow: null,
+		maxTokens: null,
+	},
+	{
+		id: "mistral/devstral-2512",
+		name: "Devstral 2",
+		api: "openai-completions",
+		provider: "opper",
+		baseUrl: EUROPEAN_GATEWAY_BASE_URLS.opper,
+		reasoning: false,
+		input: ["text"],
+		cost: EUROPEAN_GATEWAY_NEUTRAL_COST,
+		contextWindow: null,
+		maxTokens: null,
+	},
+	{
+		id: "gpt-oss-120b",
+		name: "GPT-OSS 120B",
+		api: "openai-completions",
+		provider: "ovhcloud",
+		baseUrl: EUROPEAN_GATEWAY_BASE_URLS.ovhcloud,
+		reasoning: false,
+		input: ["text"],
+		cost: EUROPEAN_GATEWAY_NEUTRAL_COST,
+		contextWindow: null,
+		maxTokens: null,
+	},
+];
+
+export function getEuropeanGatewayStaticFallbackModels(
+	authoritativeProviders: ReadonlySet<string>,
+): readonly ModelSpec<"openai-completions">[] {
+	return EUROPEAN_GATEWAY_STATIC_MODELS.filter(model => !authoritativeProviders.has(model.provider)).map(model =>
+		toModelSpec(buildModel(model)),
+	);
+}
+
+function toStringArray(value: unknown): string[] {
+	if (!Array.isArray(value)) {
+		return [];
+	}
+	return value.filter((item): item is string => typeof item === "string");
+}
+
+function toGatewayCostPerMillion(value: unknown): number | undefined {
+	const parsed = toNumber(value);
+	if (parsed === undefined || parsed === null) {
+		return undefined;
+	}
+	return parsed * 1_000_000;
+}
+
+function hasGatewayImageInputModality(value: unknown): boolean {
+	if (typeof value !== "string") {
+		return false;
+	}
+	const inputSide = value.toLowerCase().split(/\s*(?:->|=>)\s*/, 1)[0] ?? "";
+	return /(?:^|[+\s,/_-])image(?:$|[+\s,/_-])/.test(inputSide);
+}
+
+function hasGatewayOnlyNonTextOutputModality(value: unknown): boolean {
+	if (typeof value !== "string") {
+		return false;
+	}
+	const [, outputSide = ""] = value.toLowerCase().split(/\s*(?:->|=>)\s*/, 2);
+	const outputTokens = outputSide.split(/[+\s,/_-]+/).filter(Boolean);
+	return outputTokens.length > 0 && !outputTokens.includes("text");
+}
+
+function hasGatewayTextOutputModality(value: unknown): boolean {
+	if (typeof value !== "string") {
+		return false;
+	}
+	const [, outputSide = ""] = value.toLowerCase().split(/\s*(?:->|=>)\s*/, 2);
+	return outputSide.split(/[+\s,/_-]+/).includes("text");
+}
+
+function toAnthropicCanonicalReferenceId(modelId: string): string | undefined {
+	const identity = classifyModel("", modelId, { lenient: true });
+	if (identity.class !== "anthropic" || !identity.family || !identity.revision) {
+		return undefined;
+	}
+	const [major, minor = "0", patch = "0"] = identity.revision.split(".");
+	if (!major) {
+		return undefined;
+	}
+	const versionParts = [major];
+	if (minor !== "0" || patch !== "0") {
+		versionParts.push(minor);
+	}
+	if (patch !== "0") {
+		versionParts.push(patch);
+	}
+	return `claude-${identity.family}-${versionParts.join("-")}`;
+}
+
+function resolveEuropeanGatewayKnownReference(model: ModelSpec<Api>): Model<Api> | undefined {
+	const referenceIndex = getBundledModelReferenceIndex();
+	return (
+		resolveModelReference(model.id, referenceIndex) ??
+		resolveModelReference(toAnthropicCanonicalReferenceId(model.id) ?? model.id, referenceIndex)
+	);
+}
+
+function getEuropeanGatewayKnownInput(model: ModelSpec<Api>): ("text" | "image")[] | undefined {
+	const reference = resolveEuropeanGatewayKnownReference(model);
+	if (reference?.input.includes("image")) {
+		return ["text", "image"];
+	}
+	return undefined;
+}
+
+function hasEuropeanGatewayKnownReasoning(model: ModelSpec<Api>): boolean {
+	const reference = resolveEuropeanGatewayKnownReference(model);
+	return reference?.reasoning === true;
+}
+
+function toGatewayInputCapabilities(
+	entry: OpenAICompatibleModelRecord,
+	model: ModelSpec<Api>,
+	fallback: ModelSpec<Api>["input"],
+): ("text" | "image")[] {
+	const architecture = isRecord(entry.architecture) ? entry.architecture : undefined;
+	const rawInputModalities = architecture?.input_modalities ?? entry.input_modalities;
+	const inputModalities = toStringArray(rawInputModalities).map(modality => modality.trim().toLowerCase());
+	const rawModality = architecture?.modality ?? entry.modality;
+	if (inputModalities.length > 0) {
+		return inputModalities.includes("image") ? ["text", "image"] : ["text"];
+	}
+	if (typeof rawModality === "string" && rawModality.trim().length > 0) {
+		return hasGatewayImageInputModality(rawModality) ? ["text", "image"] : ["text"];
+	}
+	const tags = toStringArray(entry.tags).map(tag => tag.trim().toLowerCase());
+	if (tags.includes("image") || tags.includes("vision")) {
+		return ["text", "image"];
+	}
+	return getEuropeanGatewayKnownInput(model) ?? fallback;
+}
+
+function hasEuropeanGatewayInputModalityMetadata(entry: OpenAICompatibleModelRecord): boolean {
+	const architecture = isRecord(entry.architecture) ? entry.architecture : undefined;
+	const inputModalities = toStringArray(architecture?.input_modalities ?? entry.input_modalities);
+	if (inputModalities.length > 0) return true;
+	const rawModality = architecture?.modality ?? entry.modality;
+	if (typeof rawModality === "string" && rawModality.trim().length > 0) return true;
+	const tags = toStringArray(entry.tags).map(tag => tag.trim().toLowerCase());
+	return tags.includes("image") || tags.includes("vision");
+}
+
+function getGatewayOutputModalities(entry: OpenAICompatibleModelRecord): string[] {
+	const architecture = isRecord(entry.architecture) ? entry.architecture : undefined;
+	return toStringArray(architecture?.output_modalities ?? entry.output_modalities).map(modality =>
+		modality.trim().toLowerCase(),
+	);
+}
+
+function hasOnlyNonTextOutput(entry: OpenAICompatibleModelRecord): boolean {
+	const architecture = isRecord(entry.architecture) ? entry.architecture : undefined;
+	const outputModalities = getGatewayOutputModalities(entry);
+	return (
+		(outputModalities.length > 0 && !outputModalities.includes("text")) ||
+		hasGatewayOnlyNonTextOutputModality(architecture?.modality ?? entry.modality)
+	);
+}
+
+const EUROPEAN_GATEWAY_TOOL_CAPABILITY_TOKENS = new Set([
+	"function-call",
+	"function-calling",
+	"function_call",
+	"function_calling",
+	"functions",
+	"tool-call",
+	"tool-calling",
+	"tool_choice",
+	"tools",
+]);
+
+const EUROPEAN_GATEWAY_TOOL_CAPABILITY_FIELDS = [
+	"supported_parameters",
+	"supported_features",
+	"features",
+	"capabilities",
+	"tags",
+] as const;
+
+function isLikelyEuropeanGatewayChatModel(entry: OpenAICompatibleModelRecord, model: ModelSpec<Api>): boolean {
+	if (hasOnlyNonTextOutput(entry)) {
+		return false;
+	}
+	const architecture = isRecord(entry.architecture) ? entry.architecture : undefined;
+	const normalized = `${model.id} ${model.name}`.trim().toLowerCase();
+	return (
+		getGatewayOutputModalities(entry).includes("text") ||
+		hasGatewayTextOutputModality(architecture?.modality ?? entry.modality) ||
+		!isExcludedModel(model.provider, normalized)
+	);
+}
+
+function hasEuropeanGatewayReasoningIdentity(model: ModelSpec<Api>): boolean {
+	const identity = classifyModel("", model.id, { lenient: true });
+	return (
+		identity.class === "gpt-oss" ||
+		isGlmReasoningIdentity("", model.id, "4.5") ||
+		(identity.class === "deepseek" && (identity.family === "r1" || identity.family === "reasoner"))
+	);
+}
+
+function getEuropeanGatewayReasoningCapability(entry: OpenAICompatibleModelRecord): boolean | undefined {
+	return typeof entry.supports_reasoning === "boolean" ? entry.supports_reasoning : undefined;
+}
+
+function getEuropeanGatewayToolCapability(entry: OpenAICompatibleModelRecord): boolean | undefined {
+	if (entry.supports_tools === true || entry.supports_function_calling === true) {
+		return true;
+	}
+	if (entry.supports_tools === false || entry.supports_function_calling === false) {
+		return false;
+	}
+	const tags = toStringArray(entry.tags);
+	if (tags.some(tag => EUROPEAN_GATEWAY_TOOL_CAPABILITY_TOKENS.has(tag.trim().toLowerCase()))) {
+		return true;
+	}
+	const capabilityTokens: string[] = [];
+	let hasCapabilitySignal = false;
+	for (const field of EUROPEAN_GATEWAY_TOOL_CAPABILITY_FIELDS) {
+		if (field === "tags") {
+			continue;
+		}
+		const value = entry[field];
+		if (!Array.isArray(value)) {
+			continue;
+		}
+		hasCapabilitySignal = true;
+		capabilityTokens.push(...toStringArray(value));
+	}
+	if (!hasCapabilitySignal) {
+		return undefined;
+	}
+	return capabilityTokens.some(token => EUROPEAN_GATEWAY_TOOL_CAPABILITY_TOKENS.has(token.trim().toLowerCase()));
+}
+
+function mapEuropeanGatewayModel(
+	entry: OpenAICompatibleModelRecord,
+	defaults: ModelSpec<"openai-completions">,
+	reference: ModelSpec<"openai-completions"> | undefined,
+): ModelSpec<"openai-completions"> {
+	const model = mapWithBundledReference(entry, defaults, reference);
+	// Exact gateway seeds use provider-scoped KDL fallbacks; global references
+	// only enrich unseeded discovery rows.
+	const knownReference = reference === undefined ? resolveEuropeanGatewayKnownReference(model) : undefined;
+	const pricing = isRecord(entry.pricing) ? entry.pricing : undefined;
+	const topProvider = isRecord(entry.top_provider) ? entry.top_provider : undefined;
+	const supportsTools = getEuropeanGatewayToolCapability(entry);
+	const supportsReasoning = getEuropeanGatewayReasoningCapability(entry);
+	const liveInputModalities = hasEuropeanGatewayInputModalityMetadata(entry);
+	const liveReasoning = supportsReasoning !== undefined;
+	const inputCost = toGatewayCostPerMillion(pricing?.prompt ?? pricing?.input_token);
+	const outputCost = toGatewayCostPerMillion(pricing?.completion ?? pricing?.output_token);
+	const cacheReadCost = toGatewayCostPerMillion(pricing?.input_cache_read ?? pricing?.cache_read_cost);
+	const cacheWriteCost = toGatewayCostPerMillion(pricing?.input_cache_write ?? pricing?.cache_write_cost);
+	const liveContextWindow = toPositiveNumber(
+		entry.context_length,
+		toPositiveNumber(entry.context_size, toPositiveNumber(topProvider?.context_length, null)),
+	);
+	const liveMaxTokens = toPositiveNumber(
+		entry.max_completion_tokens,
+		toPositiveNumber(topProvider?.max_completion_tokens, null),
+	);
+	const contextWindow = liveContextWindow ?? model.contextWindow ?? knownReference?.contextWindow ?? null;
+	const maxTokens = liveMaxTokens ?? model.maxTokens ?? knownReference?.maxTokens ?? null;
+	const liveCostFields: (keyof TokenCost)[] = [];
+	if (inputCost !== undefined) liveCostFields.push("input");
+	if (outputCost !== undefined) liveCostFields.push("output");
+	if (cacheReadCost !== undefined) liveCostFields.push("cacheRead");
+	if (cacheWriteCost !== undefined) liveCostFields.push("cacheWrite");
+	const liveLimitFields: ("contextWindow" | "maxTokens")[] = [];
+	if (liveContextWindow !== null) liveLimitFields.push("contextWindow");
+	if (liveMaxTokens !== null) liveLimitFields.push("maxTokens");
+	const catalogFallback =
+		liveCostFields.length > 0 || liveLimitFields.length > 0 || liveInputModalities || liveReasoning
+			? {
+					...(liveCostFields.length > 0 && { liveCostFields }),
+					...(liveLimitFields.length > 0 && { liveLimitFields }),
+					...(liveInputModalities && { liveInputModalities: true }),
+					...(liveReasoning && { liveReasoning: true }),
+				}
+			: undefined;
+	const mapped: ModelSpec<"openai-completions"> = {
+		...model,
+		name: toModelName(entry.name, model.name),
+		reasoning:
+			supportsReasoning ??
+			(model.reasoning || hasEuropeanGatewayReasoningIdentity(model) || hasEuropeanGatewayKnownReasoning(model)),
+		input: toGatewayInputCapabilities(entry, model, model.input),
+		cost: {
+			input: inputCost ?? reference?.cost.input ?? knownReference?.cost.input ?? model.cost.input,
+			output: outputCost ?? reference?.cost.output ?? knownReference?.cost.output ?? model.cost.output,
+			cacheRead:
+				cacheReadCost ?? reference?.cost.cacheRead ?? knownReference?.cost.cacheRead ?? model.cost.cacheRead,
+			cacheWrite:
+				cacheWriteCost ?? reference?.cost.cacheWrite ?? knownReference?.cost.cacheWrite ?? model.cost.cacheWrite,
+		},
+		...(catalogFallback && { catalogFallback }),
+		contextWindow,
+		maxTokens,
+		...(supportsTools !== undefined ? { supportsTools } : {}),
+	};
+	applyCatalogCorrections(mapped, resolveModelPolicy(mapped).catalog);
+	return mapped;
+}
+
+function getEuropeanGatewayStaticModels(
+	providerId: EuropeanGatewayProviderId,
+	baseUrl?: string,
+): ModelSpec<"openai-completions">[] {
+	const models = EUROPEAN_GATEWAY_STATIC_MODELS.filter(model => model.provider === providerId);
+	return baseUrl ? models.map(model => ({ ...model, baseUrl })) : models;
+}
+
+interface EuropeanGatewayModelManagerSettings {
+	allowUnauthenticatedDiscovery?: boolean;
+	modelsPath?: string;
+}
+
+function createEuropeanGatewayModelManagerOptions(
+	providerId: EuropeanGatewayProviderId,
+	config?: EuropeanGatewayConfig,
+	settings: EuropeanGatewayModelManagerSettings = {},
+): ModelManagerOptions<"openai-completions"> {
+	const apiKey = config?.apiKey;
+	const baseUrl = config?.baseUrl ?? EUROPEAN_GATEWAY_BASE_URLS[providerId];
+	const hasApiKey = typeof apiKey === "string" && apiKey.length > 0;
+	const canFetchDynamicModels = hasApiKey || settings.allowUnauthenticatedDiscovery === true;
+	const staticModels = getEuropeanGatewayStaticModels(providerId, baseUrl);
+	const references = new Map(staticModels.map(model => [model.id, model]));
+	return {
+		providerId,
+		cacheProviderId: resolveModelCacheProviderId(providerId, { apiKey, baseUrl }),
+		staticModels,
+		dynamicModelsAuthoritative: true,
+		...(canFetchDynamicModels && {
+			fetchDynamicModels: () =>
+				fetchOpenAICompatibleModels({
+					api: "openai-completions",
+					provider: providerId,
+					baseUrl,
+					modelsPath: settings.modelsPath,
+					apiKey,
+					filterModel: (entry, model) => isLikelyEuropeanGatewayChatModel(entry, model),
+					mapModel: (entry, defaults) => mapEuropeanGatewayModel(entry, defaults, references.get(defaults.id)),
+					fetch: config?.fetch,
+				}),
+		}),
+	};
+}
+
+export function cortecsModelManagerOptions(config?: EuropeanGatewayConfig): ModelManagerOptions<"openai-completions"> {
+	return createEuropeanGatewayModelManagerOptions("cortecs", config, { allowUnauthenticatedDiscovery: true });
+}
+
+export function akiIoModelManagerOptions(config?: EuropeanGatewayConfig): ModelManagerOptions<"openai-completions"> {
+	return createEuropeanGatewayModelManagerOptions("aki-io", config);
+}
+
+export function eurouterModelManagerOptions(config?: EuropeanGatewayConfig): ModelManagerOptions<"openai-completions"> {
+	return createEuropeanGatewayModelManagerOptions("eurouter", config, { allowUnauthenticatedDiscovery: true });
+}
+
+export function meliousModelManagerOptions(config?: EuropeanGatewayConfig): ModelManagerOptions<"openai-completions"> {
+	return createEuropeanGatewayModelManagerOptions("melious", config);
+}
+
+export function nebiusModelManagerOptions(config?: EuropeanGatewayConfig): ModelManagerOptions<"openai-completions"> {
+	return createEuropeanGatewayModelManagerOptions("nebius", config, { modelsPath: NEBIUS_MODELS_PATH });
+}
+
+export function opperModelManagerOptions(config?: EuropeanGatewayConfig): ModelManagerOptions<"openai-completions"> {
+	return createEuropeanGatewayModelManagerOptions("opper", config);
+}
+
+export function ovhcloudModelManagerOptions(config?: EuropeanGatewayConfig): ModelManagerOptions<"openai-completions"> {
+	return createEuropeanGatewayModelManagerOptions("ovhcloud", config, { allowUnauthenticatedDiscovery: true });
+}
+
+export function scalewayModelManagerOptions(config?: EuropeanGatewayConfig): ModelManagerOptions<"openai-completions"> {
+	return createEuropeanGatewayModelManagerOptions("scaleway", config);
 }
 
 type OpenAICompatibleModelManagerBuilderOptions<TApi extends Api> = {
@@ -1245,6 +1730,9 @@ function mapNovitaModel(
 		reasoning: novitaArrayIncludes(entry.features, "reasoning"),
 		supportsTools: novitaArrayIncludes(entry.features, "function-calling"),
 		input: toInputCapabilities(entry.input_modalities),
+		...(Array.isArray(entry.input_modalities)
+			? { catalogFallback: { ...model.catalogFallback, liveInputModalities: true } }
+			: {}),
 		cost: {
 			input: toNovitaCostPerMillion(entry.input_token_price_per_m),
 			output: toNovitaCostPerMillion(entry.output_token_price_per_m),
@@ -3863,6 +4351,7 @@ export function kimiCodeModelManagerOptions(
 /** Native LM Studio metadata keyed by model id from `/api/v0/models`. */
 export interface LmStudioNativeModelMetadata {
 	input: ("text" | "image")[];
+	inputAuthoritative: boolean;
 	contextWindow?: number;
 }
 
@@ -3892,6 +4381,10 @@ function getLmStudioNativeInput(entry: Record<string, unknown>): ("text" | "imag
 	const capabilities = getLmStudioCapabilityNames(entry.capabilities);
 	const supportsImage = modelType === "vlm" || capabilities.includes("vision") || capabilities.includes("image");
 	return supportsImage ? ["text", "image"] : ["text"];
+}
+
+function hasLmStudioNativeInputMetadata(entry: Record<string, unknown>): boolean {
+	return typeof entry.type === "string" || Array.isArray(entry.capabilities);
 }
 
 function getLmStudioNativeContextWindow(entry: Record<string, unknown>): number | undefined {
@@ -3941,6 +4434,7 @@ export async function fetchLmStudioNativeModelMetadata(
 				const contextWindow = getLmStudioNativeContextWindow(entry);
 				metadata.set(entry.id, {
 					input: getLmStudioNativeInput(entry),
+					inputAuthoritative: hasLmStudioNativeInputMetadata(entry),
 					...(contextWindow === undefined ? {} : { contextWindow }),
 				});
 			}
@@ -3969,6 +4463,7 @@ export function lmStudioModelManagerOptions(
 	const references = createBundledReferenceMap<"openai-completions">("lm-studio" as any);
 	return {
 		providerId: "lm-studio",
+		cacheProviderId: resolveModelCacheProviderId("lm-studio", { apiKey, baseUrl }),
 		fetchDynamicModels: async () => {
 			const nativeMetadataPromise = fetchLmStudioNativeModelMetadata(baseUrl, config?.fetch, {
 				headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : undefined,
@@ -3999,6 +4494,9 @@ export function lmStudioModelManagerOptions(
 				return {
 					...model,
 					input: metadata.input,
+					...(metadata.inputAuthoritative
+						? { catalogFallback: { ...model.catalogFallback, liveInputModalities: true } }
+						: {}),
 					contextWindow: metadata.contextWindow ?? model.contextWindow,
 				};
 			});
@@ -5480,16 +5978,19 @@ function mapLiteLLMRichEntry<TApi extends Api>(
 	const supportsReasoning = getLiteLLMMetadataValue(entry, "supports_reasoning");
 	const supportedOpenAIParams = getSupportedOpenAIParams(entry);
 	const supportsFunctionCalling = getLiteLLMMetadataValue(entry, "supports_function_calling");
+	const supportsToolsMetadata = getLiteLLMMetadataValue(entry, "supports_tools");
 	const supportsTools =
-		supportsFunctionCalling === true
-			? true
-			: supportsFunctionCalling === false
-				? false
-				: supportedOpenAIParams !== undefined
-					? supportedOpenAIParams.some(param =>
-							["tools", "tool_choice", "functions", "function_call"].includes(param),
-						)
-					: reference?.supportsTools;
+		typeof supportsToolsMetadata === "boolean"
+			? supportsToolsMetadata
+			: supportsFunctionCalling === true
+				? true
+				: supportsFunctionCalling === false
+					? false
+					: supportedOpenAIParams !== undefined
+						? supportedOpenAIParams.some(param =>
+								["tools", "tool_choice", "functions", "function_call"].includes(param),
+							)
+						: reference?.supportsTools;
 	// Enrich from the bundled reference with provider-INDEPENDENT reasoning
 	// hints only. The reference is resolved against the global bundled catalog,
 	// so a custom endpoint exposing an alias that collides with a bundled model
@@ -5515,6 +6016,13 @@ function mapLiteLLMRichEntry<TApi extends Api>(
 			? { omitReasoningEffort: referenceCompat.omitReasoningEffort }
 			: {}),
 	};
+	const catalogFallback =
+		typeof supportsVision === "boolean" || typeof supportsReasoning === "boolean"
+			? {
+					...(typeof supportsVision === "boolean" ? { liveInputModalities: true } : {}),
+					...(typeof supportsReasoning === "boolean" ? { liveReasoning: true } : {}),
+				}
+			: undefined;
 	return {
 		id,
 		name: toLiteLLMDisplayName(modelName, reference?.name, id),
@@ -5529,6 +6037,7 @@ function mapLiteLLMRichEntry<TApi extends Api>(
 				: supportsVision === false
 					? ["text"]
 					: (reference?.input ?? ["text"]),
+		...(catalogFallback !== undefined ? { catalogFallback } : {}),
 		reasoning: typeof supportsReasoning === "boolean" ? supportsReasoning : (reference?.reasoning ?? false),
 		thinking: reference?.thinking,
 		cost: getLiteLLMCost(entry) ?? reference?.cost ?? UNKNOWN_PROXY_COST,
@@ -5555,6 +6064,9 @@ function mergeLiteLLMRichEndpointModels<TApi extends Api>(
 		contextWindow: next.hasContextWindow ? next.model.contextWindow : existing.model.contextWindow,
 		maxTokens: next.hasMaxTokens ? next.model.maxTokens : existing.model.maxTokens,
 		input: next.supportsVision === true || next.supportsVision === false ? next.model.input : existing.model.input,
+		...(existing.model.catalogFallback || next.model.catalogFallback
+			? { catalogFallback: { ...existing.model.catalogFallback, ...next.model.catalogFallback } }
+			: {}),
 		reasoning: typeof next.supportsReasoning === "boolean" ? next.model.reasoning : existing.model.reasoning,
 		cost: { ...existing.model.cost, ...existing.reportedCost, ...next.reportedCost },
 		compat: next.hasSupportedOpenAIParams ? next.model.compat : existing.model.compat,
@@ -5620,6 +6132,7 @@ async function fetchLiteLLMRichEndpoint<TApi extends Api>(
 			const supportsVision = getLiteLLMMetadataValue(entry, "supports_vision");
 			const supportsReasoning = getLiteLLMMetadataValue(entry, "supports_reasoning");
 			const supportsFunctionCalling = getLiteLLMMetadataValue(entry, "supports_function_calling");
+			const supportsTools = getLiteLLMMetadataValue(entry, "supports_tools");
 			const supportedOpenAIParams = getSupportedOpenAIParams(entry);
 			const next: LiteLLMRichEndpointModel<TApi> = {
 				model,
@@ -5629,6 +6142,7 @@ async function fetchLiteLLMRichEndpoint<TApi extends Api>(
 				hasContextWindow: toPositiveNumber(getLiteLLMMetadataValue(entry, "max_input_tokens"), null) !== null,
 				hasMaxTokens: toPositiveNumber(getLiteLLMMetadataValue(entry, "max_output_tokens"), null) !== null,
 				hasToolMetadata:
+					typeof supportsTools === "boolean" ||
 					supportsFunctionCalling === true ||
 					supportsFunctionCalling === false ||
 					supportedOpenAIParams !== undefined,
@@ -5692,10 +6206,19 @@ async function fetchLiteLLMRichModelsInternal<TApi extends Api>(
 				}
 				deduped.set(next.model.id, mergeLiteLLMRichEndpointModels(existing, next));
 			}
+			// `/v1/model/info` is only a path fallback for deployments where the
+			// unversioned endpoint is unavailable, not a second metadata source.
+			if (endpoint === "/model/info") {
+				break;
+			}
 			let needsMoreMetadata = false;
 			for (const entry of deduped.values()) {
 				if (
 					(entry.supportsVision !== true && entry.supportsVision !== false) ||
+					(entry.supportsReasoning !== true && entry.supportsReasoning !== false) ||
+					!entry.hasToolMetadata ||
+					!entry.hasContextWindow ||
+					!entry.hasMaxTokens ||
 					(options.resolveApi !== undefined && entry.apiRoute === "unknown") ||
 					(Object.keys(entry.reportedCost).length > 0 &&
 						(entry.reportedCost.input === undefined ||
@@ -5738,7 +6261,10 @@ export function litellmModelManagerOptions(config?: LiteLLMModelManagerConfig): 
 	const baseUrl = config?.baseUrl ?? getDefaultModelDiscoveryBaseUrl("litellm")!;
 	return {
 		providerId: "litellm",
-		// rich-v8 invalidates rows whose `compatConfig` retained a colliding
+		// rich-v9 invalidates rows that lack explicit modality provenance after
+		// LiteLLM reports `supports_vision`, which would otherwise allow model
+		// class fallbacks to override an authoritative text-only capability.
+		// Earlier rich-v8 invalidated rows whose `compatConfig` retained a colliding
 		// bundled model's provider-specific transport (e.g. Fireworks
 		// `wireModelIdMode`) before that leak was fixed. Earlier versions added
 		// bundled reference fallback, moved OpenAI models to Responses, continued

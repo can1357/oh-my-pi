@@ -100,6 +100,19 @@ describe("buildModel", () => {
 		expect(model.compatConfig).toBe(sparse);
 	});
 
+	it("applies the MiniCPM-V sparse input fallback without overriding live text-only metadata", () => {
+		const sparse = buildModel(completionsSpec({ id: "minicpm-v-4.5" }));
+		const explicitTextOnly = buildModel(
+			completionsSpec({
+				id: "minicpm-v-4.5",
+				catalogFallback: { liveInputModalities: true },
+			}),
+		);
+
+		expect(sparse.input).toEqual(["text", "image"]);
+		expect(explicitTextOnly.input).toEqual(["text"]);
+	});
+
 	it("materializes the opencode whenThinking variant without mutating the base view", () => {
 		const model = buildModel(
 			completionsSpec({

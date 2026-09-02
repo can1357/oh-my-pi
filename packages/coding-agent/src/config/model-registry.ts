@@ -1522,24 +1522,26 @@ export class ModelRegistry {
 		if (providerConfig.discovery.type === "ollama") {
 			return resolveOllamaModelCacheProviderId(providerConfig.provider, providerConfig.baseUrl);
 		}
+		if (providerConfig.discovery.type === "lm-studio") {
+			return `${providerConfig.provider}:lm-studio-native-modalities-v2`;
+		}
 		if (providerConfig.discovery.type === "openai-models-list") {
-			// context-v3 invalidates rows cached before server-advertised input
-			// modalities were parsed from `/v1/models`; warm v2 rows pinned
-			// vision-capable ids at `input: ["text"]` until a forced refresh.
+			// context-v4 invalidates rows that parsed server-advertised modalities
+			// without retaining their provenance; otherwise catalog fallbacks can
+			// still overwrite an explicit text-only declaration after cache load.
 			// `injectV1: false` additionally splits off its own namespace: rows
 			// cached from the `/v1`-injected URL can hold a different (smaller)
 			// model set and must never satisfy a bare provider's cache read.
 			return providerConfig.discovery.injectV1 === false
-				? `${providerConfig.provider}:openai-models-list-bare-context-v3`
-				: `${providerConfig.provider}:openai-models-list-context-v3`;
+				? `${providerConfig.provider}:openai-models-list-bare-context-v4`
+				: `${providerConfig.provider}:openai-models-list-context-v4`;
 		}
 		if (providerConfig.discovery.type === "litellm") {
-			// rich-v4 invalidates rows whose `compatConfig` retained a colliding
-			// bundled model's provider-specific transport (e.g. Fireworks
-			// `wireModelIdMode`) before that leak was fixed (issue #9938); keep in
-			// lockstep with the catalog package's `litellm:rich-vN` namespace
-			// whenever LiteLLM mapping behavior changes.
-			return `${providerConfig.provider}:litellm-rich-v4`;
+			// rich-v9 invalidates rows that lack authoritative capability provenance,
+			// which would otherwise allow catalog fallbacks to override LiteLLM's
+			// explicit metadata. Keep this namespace in lockstep with the catalog
+			// package's `litellm:rich-vN` namespace whenever mapper behavior changes.
+			return `${providerConfig.provider}:litellm-rich-v9`;
 		}
 		return providerConfig.provider;
 	}

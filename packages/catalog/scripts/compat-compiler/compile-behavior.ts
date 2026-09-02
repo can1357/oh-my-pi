@@ -4,8 +4,9 @@
  * Ports the o2 runtime-behavior grammar (openai-responses-heuristic,
  * model-operations, cursor-effort, cursor-model-parameter, quota-tiers,
  * hosted-default) and adds the pi-only nodes: api-routes, model-limits,
- * exclude-models, plan-requirement, pricing-peer. Every node kind is
- * optional; per-node shapes are strict.
+ * exclude-models, plan-requirement, pricing-peer, retired-providers, and
+ * cross-provider-reference-exclusions. Every node kind is optional;
+ * per-node shapes are strict.
  */
 import type {
 	CompiledApiRoutes,
@@ -279,6 +280,7 @@ export function compileBehavior(source: { file: string; text: string } | undefin
 		retiredProviders: [],
 		planRequirements: [],
 		pricingPeers: [],
+		crossProviderReferenceExclusions: [],
 	};
 	if (!source) return behavior;
 	const nodes = parseKdl(source.file, source.text);
@@ -349,6 +351,13 @@ export function compileBehavior(source: { file: string; text: string } | undefin
 				const values = positionalStrings(node);
 				if (values.length === 0 || values.some(value => !value)) malformed(node);
 				behavior.retiredProviders.push(...values);
+				break;
+			}
+			case "cross-provider-reference-exclusions": {
+				ensureLeaf(node, []);
+				const providers = positionalStrings(node);
+				if (providers.length === 0 || providers.some(provider => !provider)) malformed(node);
+				behavior.crossProviderReferenceExclusions.push(...providers);
 				break;
 			}
 			default:

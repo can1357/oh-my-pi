@@ -131,7 +131,7 @@ describe("LiteLLM provider discovery", () => {
 		const models = await options.fetchDynamicModels?.();
 
 		expect(options.cacheProviderId).toBe(
-			`litellm:rich-v8:${Bun.hash("http://litellm.example:4100/v1").toString(36)}`,
+			`litellm:rich-v9:${Bun.hash("http://litellm.example:4100/v1").toString(36)}`,
 		);
 		expect(fetchMock).toHaveBeenCalledTimes(6);
 		expect(models).toHaveLength(1);
@@ -155,7 +155,7 @@ describe("LiteLLM provider discovery", () => {
 		const models = await options.fetchDynamicModels?.();
 
 		expect(options.cacheProviderId).toBe(
-			`litellm:rich-v8:${Bun.hash("http://litellm-config.example:4200/v1/").toString(36)}`,
+			`litellm:rich-v9:${Bun.hash("http://litellm-config.example:4200/v1/").toString(36)}`,
 		);
 		expect(fetchMock).toHaveBeenCalledTimes(6);
 		expect(models).toHaveLength(1);
@@ -572,6 +572,110 @@ describe("LiteLLM provider discovery", () => {
 		});
 	});
 
+	test("preserves explicit LiteLLM text-only metadata for MiniCPM models", async () => {
+		const fetchMock = vi.fn(async (input: string | URL | Request) => {
+			if (inputUrl(input) === "http://primary:4000/model_group/info") {
+				return Response.json({ data: [{ model_group: "minicpm-v-4.5", supports_vision: false }] });
+			}
+			return new Response("{}", { status: 404 });
+		}) as FetchImpl;
+
+		const specs = await fetchLiteLLMRichModels<"openai-completions">({
+			api: "openai-completions",
+			provider: "litellm",
+			baseUrl: "http://primary:4000/v1",
+			fetch: fetchMock,
+		});
+
+		expect(specs).toHaveLength(1);
+		expect(buildModel(specs![0]!).input).toEqual(["text"]);
+	});
+
+	test("preserves explicit MiniCPM text-only metadata merged from a later rich endpoint", async () => {
+		const fetchMock = vi.fn(async (input: string | URL | Request) => {
+			const url = inputUrl(input);
+			if (url === "http://primary:4000/model_group/info") {
+				return Response.json({ data: [{ model_group: "minicpm-v-4.5" }] });
+			}
+			if (url === "http://primary:4000/v2/model/info") {
+				return Response.json({ data: [{ model_name: "minicpm-v-4.5", supports_vision: false }] });
+			}
+			return new Response("{}", { status: 404 });
+		}) as FetchImpl;
+
+		const specs = await fetchLiteLLMRichModels<"openai-completions">({
+			api: "openai-completions",
+			provider: "litellm",
+			baseUrl: "http://primary:4000/v1",
+			fetch: fetchMock,
+		});
+
+		expect(specs).toHaveLength(1);
+		expect(buildModel(specs![0]!).input).toEqual(["text"]);
+	});
+
+	test("continues rich discovery for explicit capabilities omitted by the first endpoint", async () => {
+		const fetchMock = vi.fn(async (input: string | URL | Request) => {
+			const url = inputUrl(input);
+			if (url === "http://primary:4000/model_group/info") {
+				return Response.json({ data: [{ model_group: "runtime-sparse", supports_vision: false }] });
+			}
+			if (url === "http://primary:4000/v2/model/info") {
+				return Response.json({
+					data: [
+						{
+							model_name: "runtime-sparse",
+							supports_reasoning: true,
+							supports_tools: false,
+							max_input_tokens: 32_000,
+							max_output_tokens: 4_096,
+						},
+					],
+				});
+			}
+			return new Response("{}", { status: 404 });
+		}) as FetchImpl;
+		const referenceResolver = (id: string): ModelSpec<"openai-completions"> | undefined =>
+			id === "runtime-sparse"
+				? {
+						id,
+						name: "Runtime Sparse",
+						api: "openai-completions",
+						provider: "reference",
+						baseUrl: "https://reference.example/v1",
+						reasoning: false,
+						input: ["text"],
+						supportsTools: true,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+						contextWindow: 8_192,
+						maxTokens: 2_048,
+					}
+				: undefined;
+
+		const specs = await fetchLiteLLMRichModels<"openai-completions">({
+			api: "openai-completions",
+			provider: "litellm",
+			baseUrl: "http://primary:4000/v1",
+			fetch: fetchMock,
+			referenceResolver,
+		});
+
+		expect(fetchMock).toHaveBeenCalledWith("http://primary:4000/v2/model/info", expect.anything());
+		expect(specs).toContainEqual(
+			expect.objectContaining({
+				id: "runtime-sparse",
+				reasoning: true,
+				supportsTools: false,
+				contextWindow: 32_000,
+				maxTokens: 4_096,
+			}),
+		);
+		expect(specs?.find(model => model.id === "runtime-sparse")?.catalogFallback).toEqual({
+			liveInputModalities: true,
+			liveReasoning: true,
+		});
+	});
+
 	test("uses LiteLLM tool support metadata when rich endpoints succeed", async () => {
 		const fetchMock = vi.fn(async (input: string | URL | Request) => {
 			const url = inputUrl(input);
@@ -684,7 +788,7 @@ describe("LiteLLM provider discovery", () => {
 				});
 			}
 			if (url === "http://primary:4000/v2/model/info") {
-				throw new Error("/v2/model/info should not be called when model_group info has a real model");
+				return new Response("{}", { status: 404 });
 			}
 			if (url === "http://primary:4000/v1/models") {
 				throw new Error("/v1/models should not be called when model_group info has a real model");
@@ -700,7 +804,6 @@ describe("LiteLLM provider discovery", () => {
 		const models = await options.fetchDynamicModels?.();
 
 		expect(calls).toContain("http://primary:4000/model_group/info");
-		expect(calls).not.toContain("http://primary:4000/v2/model/info");
 		expect(calls).not.toContain("http://primary:4000/v1/models");
 		expect(models?.map(model => model.id)).toEqual(["example-real-model"]);
 		expect(models?.[0]).toMatchObject({

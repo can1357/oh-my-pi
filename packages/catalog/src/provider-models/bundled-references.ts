@@ -1,4 +1,4 @@
-import { isZeroCostXaiOAuthReference } from "../identity/reference";
+import { isCrossProviderReferenceEligible } from "../identity/reference";
 import { getBundledModels, getBundledProviders } from "../models";
 import type { Api, Model, ModelSpec } from "../types";
 
@@ -47,7 +47,7 @@ function getGlobalReferences(): Map<string, Model<Api>> {
 			const candidate = model as Model<Api>;
 			// ClinePass limits, pricing, and reasoning controls are gateway-specific;
 			// matching them by bare id would contaminate unrelated proxy models.
-			if (candidate.provider === "cline-pass" || isZeroCostXaiOAuthReference(candidate)) {
+			if (candidate.provider === "cline-pass" || !isCrossProviderReferenceEligible(candidate)) {
 				continue;
 			}
 			const existing = references.get(candidate.id);

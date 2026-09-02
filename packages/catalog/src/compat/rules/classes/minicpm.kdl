@@ -1,0 +1,5 @@
+// Model-lineage compat for MiniCPM-V; sparse discovery rows omit its image input.
+
+class "minicpm" {
+	input-modalities-fallback "text" "image"
+}

@@ -44,6 +44,7 @@ import {
 	clampKimiK27CodeMaxTokens,
 	fetchWellKnownModels,
 	GMI_CLOUD_STATIC_MODELS,
+	getEuropeanGatewayStaticFallbackModels,
 	isFireworksKimiK2ModelId,
 	isKimiK27CodeModelId,
 	kimiCodeMaxTokens,
@@ -72,6 +73,7 @@ import {
 	CLOUDFLARE_FALLBACK_MODEL,
 	hasBillableCost,
 	linkOpenAIPromotionTargets,
+	rebakeModelThinking,
 } from "./generated-policies";
 
 const packageRoot = path.join(import.meta.dir, "..");
@@ -97,6 +99,8 @@ const DISCOVERY_ONLY_PROVIDERS = new Set(["ollama", "vllm", "lm-studio", "litell
  * fallback-only policy below).
  */
 const CREDENTIAL_SCOPED_PROVIDERS = new Set(["devin"]);
+type GeneratedModels = Record<string, Record<string, ModelSpec<Api>>>;
+const previousModels = prevModelsJson as unknown as GeneratedModels;
 
 /**
  * Restores unfetched rows from a previous generated catalog while pruning
@@ -250,7 +254,7 @@ function createGlobalModelsDevReferenceMap(modelsDevModels: readonly ModelSpec[]
 	return references;
 }
 
-function applyGlobalModelsDevFallback(
+export function applyGlobalModelsDevFallback(
 	models: readonly ModelSpec[],
 	modelsDevModels: readonly ModelSpec[],
 ): ModelSpec[] {
@@ -285,8 +289,8 @@ function applyGlobalModelsDevFallback(
 		return {
 			...model,
 			name: reference.name,
-			reasoning: reference.reasoning,
-			input: reference.input,
+			reasoning: model.catalogFallback?.liveReasoning === true ? model.reasoning : reference.reasoning,
+			input: model.catalogFallback?.liveInputModalities === true ? model.input : reference.input,
 			// Fill unknown endpoint limits from same-id stencil.so references, but keep
 			// provider-specific values when discovery returned them explicitly.
 			contextWindow: model.contextWindow ?? reference.contextWindow,
@@ -668,6 +672,11 @@ async function generateModels() {
 	// default must resolve synchronously at boot, before credential-scoped
 	// runtime discovery replaces the seed with the account's live catalog.
 	allModels.push(...DEVIN_STATIC_MODELS);
+	// Seed European gateway defaults so provider entries remain available when
+	// catalog regeneration lacks live credentials or provider discovery is down.
+	// If a gateway returned an authoritative catalog, keep that live list exact
+	// and do not reintroduce seed IDs the endpoint omitted.
+	allModels.unshift(...getEuropeanGatewayStaticFallbackModels(authoritativeCatalogProviders));
 	// Seed Fireworks "Fast" serving-path variants (`<id>-fast`). Fast routers are
 	// not enumerated by the serverless control-plane list, so discovery never
 	// surfaces them; the seed projects each base entry into a fast variant.
@@ -835,6 +844,71 @@ function canonicalizeModelCompat(model: ModelSpec<Api>): void {
 	}
 }
 
+function parseRebakeProviderArg(args: readonly string[]): string | undefined {
+	if (args.length === 0) return undefined;
+	if (args.length !== 2 || args[0] !== "--rebake-provider" || args[1].length === 0) {
+		throw new Error("Usage: generate-models.ts --rebake-provider <provider-id>");
+	}
+	return args[1];
+}
+
+export function rebakeBundledModel(model: ModelSpec<Api>): ModelSpec<Api> {
+	const spec = toModelSpec(model as unknown as Model<Api>);
+	rebakeModelThinking(spec);
+	const rebaked = buildModel(spec);
+	const {
+		identity: _identity,
+		requiresGlyphTokenization: _requiresGlyphTokenization,
+		tokenizer: _tokenizer,
+		thinking: _thinking,
+		supportsComputerUse: _supportsComputerUse,
+		supportsComputerUseConfig: _supportsComputerUseConfig,
+		compatConfig: _compatConfig,
+		...policyRebaked
+	} = rebaked;
+	return {
+		...policyRebaked,
+		...(Object.hasOwn(model, "identity") && { identity: rebaked.identity }),
+		...(Object.hasOwn(model, "requiresGlyphTokenization") && {
+			requiresGlyphTokenization: rebaked.requiresGlyphTokenization,
+		}),
+		...(rebaked.tokenizer !== undefined && { tokenizer: rebaked.tokenizer }),
+		...(rebaked.thinking !== undefined && { thinking: rebaked.thinking }),
+		...(Object.hasOwn(model, "supportsComputerUse") && { supportsComputerUse: rebaked.supportsComputerUse }),
+		...(Object.hasOwn(model, "supportsComputerUseConfig") && {
+			supportsComputerUseConfig: rebaked.supportsComputerUseConfig,
+		}),
+		...(Object.hasOwn(model, "compatConfig") && { compatConfig: rebaked.compatConfig }),
+	} as ModelSpec<Api>;
+}
+
+async function rebakeProviderModels(providerId: string): Promise<void> {
+	const providerModels = previousModels[providerId];
+	if (providerModels === undefined) {
+		throw new Error(`Unknown bundled provider: ${providerId}`);
+	}
+	const rebakedProviderModels = Object.fromEntries(
+		Object.entries(providerModels).map(([id, model]) => [id, rebakeBundledModel(model)]),
+	);
+	await Bun.write(
+		path.join(packageRoot, "src/models.json"),
+		`${JSON.stringify({ ...previousModels, [providerId]: rebakedProviderModels }, null, "\t")}\n`,
+	);
+	console.log(`Rebaked ${providerId} models in src/models.json`);
+}
+
+async function main(): Promise<void> {
+	const providerId = parseRebakeProviderArg(Bun.argv.slice(2));
+	if (providerId !== undefined) {
+		await rebakeProviderModels(providerId);
+		return;
+	}
+	await generateModels();
+}
+
 if (import.meta.main) {
-	generateModels().catch(console.error);
+	main().catch(error => {
+		console.error(error);
+		process.exitCode = 1;
+	});
 }

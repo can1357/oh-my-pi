@@ -102,6 +102,8 @@ export interface FetchOpenAICompatibleModelsOptions<TApi extends Api> {
 	provider: Provider;
 	/** Provider base URL used for both fetch and normalized model records. */
 	baseUrl: string;
+	/** Optional model-list path appended to the normalized base URL. Defaults to `/models`. */
+	modelsPath?: string;
 	/** Optional bearer token for Authorization header. */
 	apiKey?: string;
 	/** Additional request headers. */
@@ -155,10 +157,11 @@ export async function fetchOpenAICompatibleModels<TApi extends Api>(
 	}
 
 	const fetchImpl = discoveryFetch(options.fetch);
+	const modelsPath = normalizeModelsPath(options.modelsPath);
 	const fetchPayload = async (signal?: AbortSignal): Promise<unknown | null> => {
 		let response: Response;
 		try {
-			response = await fetchImpl(`${baseUrl}${MODELS_PATH}`, {
+			response = await fetchImpl(`${baseUrl}${modelsPath}`, {
 				method: "GET",
 				headers: requestHeaders,
 				signal,
@@ -235,6 +238,14 @@ function normalizeBaseUrl(baseUrl: string): string {
 		return "";
 	}
 	return trimmed.endsWith("/") ? trimmed.slice(0, -1) : trimmed;
+}
+
+function normalizeModelsPath(modelsPath: string | undefined): string {
+	const trimmed = modelsPath?.trim();
+	if (!trimmed) {
+		return MODELS_PATH;
+	}
+	return trimmed.startsWith("/") ? trimmed : `/${trimmed}`;
 }
 
 function extractModelEntries(payload: unknown): ParsedOpenAICompatibleModelRecord[] | null {

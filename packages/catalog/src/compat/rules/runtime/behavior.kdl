@@ -102,6 +102,60 @@ behavior {
 
 	// Provider-default wire model for model-less hosted search operations.
 	hosted-default provider="kimi-search" model="kimi-for-coding"
+	// Provider-specific model surfaces may carry pricing, limits, or routing
+	// metadata that must remain provider-local instead of seeding global references.
+	cross-provider-reference-exclusions "aki-io" "cline-pass" "cortecs" "eurouter" "melious" "nebius" "opper" "ovhcloud" "scaleway"
+	// European gateway rosters interleave model families that their chat
+	// completions endpoints cannot serve. Match the id and display name because
+	// individual providers are inconsistent about which field carries the SKU.
+	exclude-models provider="aki-io" token="audio" token="bge" token="clip" token="embed" token="embedding" \
+		token="embeddings" token="guard" token="i2i" token="i2v" token="image" token="moderation" \
+		token="rerank" token="reranker" token="safeguard" token="speech" token="stt" token="t2i" \
+		token="t2v" token="transcribe" token="tts" token="video" token="whisper" substring="dall-e" \
+		substring="dalle" substring="flux" substring="imagen" substring="midjourney" substring="qwen3guard" \
+		substring="sora" substring="stable-diffusion" substring="veo"
+	exclude-models provider="cortecs" token="audio" token="bge" token="clip" token="embed" token="embedding" \
+		token="embeddings" token="guard" token="i2i" token="i2v" token="image" token="moderation" \
+		token="rerank" token="reranker" token="safeguard" token="speech" token="stt" token="t2i" \
+		token="t2v" token="transcribe" token="tts" token="video" token="whisper" substring="dall-e" \
+		substring="dalle" substring="flux" substring="imagen" substring="midjourney" substring="qwen3guard" \
+		substring="sora" substring="stable-diffusion" substring="veo"
+	exclude-models provider="eurouter" token="audio" token="bge" token="clip" token="embed" token="embedding" \
+		token="embeddings" token="guard" token="i2i" token="i2v" token="image" token="moderation" \
+		token="rerank" token="reranker" token="safeguard" token="speech" token="stt" token="t2i" \
+		token="t2v" token="transcribe" token="tts" token="video" token="whisper" substring="dall-e" \
+		substring="dalle" substring="flux" substring="imagen" substring="midjourney" substring="qwen3guard" \
+		substring="sora" substring="stable-diffusion" substring="veo"
+	exclude-models provider="melious" token="audio" token="bge" token="clip" token="embed" token="embedding" \
+		token="embeddings" token="guard" token="i2i" token="i2v" token="image" token="moderation" \
+		token="rerank" token="reranker" token="safeguard" token="speech" token="stt" token="t2i" \
+		token="t2v" token="transcribe" token="tts" token="video" token="whisper" substring="dall-e" \
+		substring="dalle" substring="flux" substring="imagen" substring="midjourney" substring="qwen3guard" \
+		substring="sora" substring="stable-diffusion" substring="veo"
+	exclude-models provider="nebius" token="audio" token="bge" token="clip" token="embed" token="embedding" \
+		token="embeddings" token="guard" token="i2i" token="i2v" token="image" token="moderation" \
+		token="rerank" token="reranker" token="safeguard" token="speech" token="stt" token="t2i" \
+		token="t2v" token="transcribe" token="tts" token="video" token="whisper" substring="dall-e" \
+		substring="dalle" substring="flux" substring="imagen" substring="midjourney" substring="qwen3guard" \
+		substring="sora" substring="stable-diffusion" substring="veo"
+	exclude-models provider="opper" token="audio" token="bge" token="clip" token="embed" token="embedding" \
+		token="embeddings" token="guard" token="i2i" token="i2v" token="image" token="moderation" \
+		token="rerank" token="reranker" token="safeguard" token="speech" token="stt" token="t2i" \
+		token="t2v" token="transcribe" token="tts" token="video" token="whisper" substring="dall-e" \
+		substring="dalle" substring="flux" substring="imagen" substring="midjourney" substring="qwen3guard" \
+		substring="sora" substring="stable-diffusion" substring="veo"
+	exclude-models provider="ovhcloud" token="audio" token="bge" token="clip" token="embed" token="embedding" \
+		token="embeddings" token="guard" token="i2i" token="i2v" token="image" token="moderation" \
+		token="rerank" token="reranker" token="safeguard" token="speech" token="stt" token="t2i" \
+		token="t2v" token="transcribe" token="tts" token="video" token="whisper" substring="dall-e" \
+		substring="dalle" substring="flux" substring="imagen" substring="midjourney" substring="qwen3guard" \
+		substring="sora" substring="stable-diffusion" substring="veo"
+	exclude-models provider="scaleway" token="audio" token="bge" token="clip" token="embed" token="embedding" \
+		token="embeddings" token="guard" token="i2i" token="i2v" token="image" token="moderation" \
+		token="rerank" token="reranker" token="safeguard" token="speech" token="stt" token="t2i" \
+		token="t2v" token="transcribe" token="tts" token="video" token="whisper" substring="dall-e" \
+		substring="dalle" substring="flux" substring="imagen" substring="midjourney" substring="qwen3guard" \
+		substring="sora" substring="stable-diffusion" substring="veo"
 	// models.dev rows OMP cannot route successfully: AWS does not document
 	// the jp. Opus 5 profile, and the openai.gpt-5.x rows are Mantle-only
 	// ids that Bedrock rejects or misroutes.

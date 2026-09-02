@@ -935,6 +935,23 @@ describe("ModelRegistry", () => {
 			expect(custom!.baseUrl).toBe("https://my-proxy.example.com/v1");
 		});
 
+		test("standalone custom models preserve explicit reasoning denials", () => {
+			writeRawModelsJson({
+				eurouter: {
+					baseUrl: "https://gateway.example.com/v1",
+					apiKey: "TEST_KEY",
+					api: "openai-completions",
+					models: [{ id: "grok-4.5", reasoning: false }],
+				},
+			});
+
+			const registry = new ModelRegistry(authStorage, modelsJsonPath);
+			const model = registry.find("eurouter", "grok-4.5");
+
+			expect(model?.reasoning).toBe(false);
+			expect(model?.thinking).toBeUndefined();
+		});
+
 		test("custom model with same id replaces built-in model by id", () => {
 			const models = getModelsForProvider(openrouterReplace, "openrouter");
 			const sonnetModels = models.filter(m => m.id === "anthropic/claude-sonnet-4");
@@ -2300,7 +2317,7 @@ describe("ModelRegistry", () => {
 				{
 					seedCache: dbPath =>
 						writeModelCache(
-							"cached-compact-proxy:openai-models-list-context-v3",
+							"cached-compact-proxy:openai-models-list-context-v4",
 							Date.now(),
 							[
 								buildModel({
@@ -2347,12 +2364,11 @@ describe("ModelRegistry", () => {
 					maxTokens: 16_384,
 				});
 			litellmStaleNamespaceCache = readonlyRegistry(litellmProxyConfig(), {
-				// Rows cached under the retired namespace whose `compatConfig`
-				// retained a colliding bundled model's provider-specific transport
-				// (issue #9938) must be orphaned instead of served.
+				// Rows cached before explicit capability provenance must be orphaned
+				// instead of being rebuilt with catalog fallbacks.
 				seedCache: dbPath =>
 					writeModelCache(
-						"litellm-proxy:litellm-rich-v3",
+						"litellm-proxy:litellm-rich-v4",
 						Date.now(),
 						[litellmCachedModel("MiniMax-M3 (3x usage)")],
 						true,
@@ -2363,7 +2379,7 @@ describe("ModelRegistry", () => {
 			litellmCurrentNamespaceCache = readonlyRegistry(litellmProxyConfig(), {
 				seedCache: dbPath =>
 					writeModelCache(
-						"litellm-proxy:litellm-rich-v4",
+						"litellm-proxy:litellm-rich-v9",
 						Date.now(),
 						[litellmCachedModel("MiniMax-M3")],
 						true,
@@ -2384,11 +2400,11 @@ describe("ModelRegistry", () => {
 					},
 				},
 				{
-					// Row under the retired pre-modality namespace; the context-v3
+					// Row under the retired pre-provenance namespace; the context-v4
 					// bump must orphan it instead of serving the stale text-only row.
 					seedCache: dbPath =>
 						writeModelCache(
-							"stale-openai-proxy:openai-models-list-context-v2",
+							"stale-openai-proxy:openai-models-list-context-v3",
 							Date.now(),
 							[
 								buildModel({
@@ -2449,21 +2465,21 @@ describe("ModelRegistry", () => {
 			});
 		});
 
-		test("ignores litellm discovery rows cached under the retired rich-v3 namespace", () => {
-			// Warm rich-v3 rows carry the leaked provider-specific compat and must not load.
+		test("ignores litellm discovery rows cached under the retired rich-v4 namespace", () => {
+			// Warm rich-v4 rows lack explicit capability provenance and must not load.
 			expect(litellmStaleNamespaceCache.find("litellm-proxy", "minimax/minimax-m3")).toBeUndefined();
 			expect(getModelsForProvider(litellmStaleNamespaceCache, "litellm-proxy")).toHaveLength(0);
 		});
 
-		test("loads litellm discovery rows cached under the rich-v4 namespace", () => {
+		test("loads litellm discovery rows cached under the rich-v9 namespace", () => {
 			const model = litellmCurrentNamespaceCache.find("litellm-proxy", "minimax/minimax-m3");
 			expect(model?.name).toBe("MiniMax-M3");
 			expect(model?.provider).toBe("litellm-proxy");
 		});
 
-		test("ignores openai-models-list rows cached under the retired context-v2 namespace", () => {
-			// PR #7584 added server-advertised input-modality parsing; warm v2 rows
-			// pinned vision-capable ids at text-only and must not load.
+		test("ignores openai-models-list rows cached under the retired context-v3 namespace", () => {
+			// Explicit input-modality provenance was added after context-v3; warm
+			// rows must not allow catalog fallbacks to overwrite server metadata.
 			expect(openaiModelsListStaleNamespaceCache.find("stale-openai-proxy", "stale-vlm")).toBeUndefined();
 			expect(getModelsForProvider(openaiModelsListStaleNamespaceCache, "stale-openai-proxy")).toHaveLength(0);
 		});

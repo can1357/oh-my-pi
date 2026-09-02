@@ -33,8 +33,10 @@ function isInputModalities(value: unknown): value is ("text" | "image")[] {
  * corrections (`cost-patch`, `limits-patch`, `long-context-cost`,
  * `context-window-floor`) overwrite upstream values; selection metadata
  * (`priority`, `apply-patch-tool-type`, `service-tier-cost`,
- * `requires-cursor-tool-schema-projection`) is rule-owned;
- * `context-promotion-target` fills only when the spec left it unset.
+ * `requires-cursor-tool-schema-projection`) is rule-owned; fallback metadata
+ * (`cost-fallback`, `supports-tools-fallback`) applies only
+ * when discovery left that value unknown; `context-promotion-target` fills
+ * only when the spec left it unset.
  */
 function applyCatalogAssignments<TApi extends Api>(model: Model<TApi>, catalog: Record<string, unknown>): void {
 	const serviceTierCost = objectPayload(catalog.serviceTierCost);
@@ -67,15 +69,31 @@ function applyCatalogAssignments<TApi extends Api>(model: Model<TApi>, catalog: 
 /**
  * Applies reviewed catalog-data value corrections (`cost-patch`,
  * `limits-patch`, `long-context-cost`, `context-window-floor`,
- * `input-modalities`) onto an upstream-sourced spec. Applied by
+ * `input-modalities`) and fallbacks (`cost-fallback`, `input-modalities-fallback`,
+ * `limits-fallback`, `reasoning-fallback`, `supports-tools-fallback`) onto an upstream-sourced spec. Applied by
  * `buildModel` to every upstream-sourced spec; user-authored overrides are
  * recomposed after building by the override applicators, so explicit user
- * limits and pricing still win.
+ * limits, pricing, and capability values still win.
  */
 export function applyCatalogCorrections(
-	model: Pick<ModelSpec<Api>, "cost" | "contextWindow" | "maxTokens" | "input">,
+	model: Pick<
+		ModelSpec<Api>,
+		"cost" | "contextWindow" | "maxTokens" | "input" | "reasoning" | "supportsTools" | "catalogFallback"
+	>,
 	catalog: Record<string, unknown>,
 ): void {
+	const reasoning = catalog.reasoning;
+	if (typeof reasoning === "boolean") model.reasoning = reasoning;
+	const reasoningFallback = catalog.reasoningFallback;
+	if (typeof reasoningFallback === "boolean" && !model.catalogFallback?.liveReasoning) {
+		model.reasoning = reasoningFallback;
+	}
+	const supportsTools = catalog.supportsTools;
+	if (typeof supportsTools === "boolean") model.supportsTools = supportsTools;
+	const supportsToolsFallback = catalog.supportsToolsFallback;
+	if (typeof supportsToolsFallback === "boolean" && model.supportsTools === undefined) {
+		model.supportsTools = supportsToolsFallback;
+	}
 	const longContext = objectPayload(catalog.longContext);
 	if (longContext !== undefined) {
 		const inputThreshold = numberField(longContext, "inputThreshold");
@@ -122,6 +140,45 @@ export function applyCatalogCorrections(
 		const cacheWrite = numberField(patch, "cacheWrite");
 		if (cacheWrite !== undefined) model.cost.cacheWrite = cacheWrite;
 	}
+	const costFallback = objectPayload(catalog.costFallback);
+	if (costFallback !== undefined) {
+		model.cost = { ...model.cost };
+		const input = numberField(costFallback, "input");
+		if (input !== undefined && model.cost.input === 0 && !model.catalogFallback?.liveCostFields?.includes("input")) {
+			model.cost.input = input;
+		}
+		const output = numberField(costFallback, "output");
+		if (
+			output !== undefined &&
+			model.cost.output === 0 &&
+			!model.catalogFallback?.liveCostFields?.includes("output")
+		) {
+			model.cost.output = output;
+		}
+		const cacheRead = numberField(costFallback, "cacheRead");
+		if (
+			cacheRead !== undefined &&
+			model.cost.cacheRead === 0 &&
+			!model.catalogFallback?.liveCostFields?.includes("cacheRead")
+		) {
+			model.cost.cacheRead = cacheRead;
+		}
+		const cacheWrite = numberField(costFallback, "cacheWrite");
+		if (
+			cacheWrite !== undefined &&
+			model.cost.cacheWrite === 0 &&
+			!model.catalogFallback?.liveCostFields?.includes("cacheWrite")
+		) {
+			model.cost.cacheWrite = cacheWrite;
+		}
+	}
+	const limitsFallback = objectPayload(catalog.limitsFallback);
+	if (limitsFallback !== undefined) {
+		const contextWindow = numberField(limitsFallback, "contextWindow");
+		if (contextWindow !== undefined && model.contextWindow === null) model.contextWindow = contextWindow;
+		const maxTokens = numberField(limitsFallback, "maxTokens");
+		if (maxTokens !== undefined && model.maxTokens === null) model.maxTokens = maxTokens;
+	}
 	const limitsPatch = objectPayload(catalog.limitsPatch);
 	if (limitsPatch !== undefined) {
 		const contextWindow = numberField(limitsPatch, "contextWindow");
@@ -132,6 +189,10 @@ export function applyCatalogCorrections(
 	const contextWindowFloor = catalog.contextWindowFloor;
 	if (typeof contextWindowFloor === "number") {
 		model.contextWindow = Math.max(model.contextWindow ?? 0, contextWindowFloor);
+	}
+	const inputModalitiesFallback = catalog.inputModalitiesFallback;
+	if (isInputModalities(inputModalitiesFallback) && !model.catalogFallback?.liveInputModalities) {
+		model.input = inputModalitiesFallback;
 	}
 	const inputModalities = catalog.inputModalities;
 	if (isInputModalities(inputModalities)) {

@@ -1190,39 +1190,49 @@ export function resolveModelPolicy<TApi extends Api>(spec: ModelSpec<TApi>): Res
 export function resolveModelPolicy(spec: ModelSpec<Api>): ResolvedModelPolicy<Api> {
 	const identity = resolveIdentity(spec);
 	const facts = new IdentityFacts(identity);
-	const axes = resolveCascade(buildResolveTarget(spec, identity));
+	const initialAxes = resolveCascade(buildResolveTarget(spec, identity));
+	const catalogReasoning = initialAxes.catalog.reasoning;
+	const catalogReasoningFallback = initialAxes.catalog.reasoningFallback;
+	const effectiveReasoning =
+		typeof catalogReasoning === "boolean"
+			? catalogReasoning
+			: typeof catalogReasoningFallback === "boolean" && !spec.catalogFallback?.liveReasoning
+				? catalogReasoningFallback
+				: spec.reasoning;
+	const effectiveSpec = effectiveReasoning !== spec.reasoning ? { ...spec, reasoning: effectiveReasoning } : spec;
+	const axes = effectiveSpec === spec ? initialAxes : resolveCascade(buildResolveTarget(effectiveSpec, identity));
 	let compat: CompatOf<Api>;
-	if (specUsesApi(spec, "openrouter")) {
-		const chat = resolveOpenAICompletionsPolicy(spec, facts, axes);
-		const responses = resolveOpenAIResponsesPolicy(spec, facts, axes, "openrouter");
+	if (specUsesApi(effectiveSpec, "openrouter")) {
+		const chat = resolveOpenAICompletionsPolicy(effectiveSpec, facts, axes);
+		const responses = resolveOpenAIResponsesPolicy(effectiveSpec, facts, axes, "openrouter");
 		compat = { ...chat, ...pickResponsesOnly(responses) };
-	} else if (specUsesApi(spec, "openai-completions")) {
-		compat = resolveOpenAICompletionsPolicy(spec, facts, axes);
+	} else if (specUsesApi(effectiveSpec, "openai-completions")) {
+		compat = resolveOpenAICompletionsPolicy(effectiveSpec, facts, axes);
 	} else if (
-		specUsesApi(spec, "openai-responses") ||
-		specUsesApi(spec, "azure-openai-responses") ||
-		specUsesApi(spec, "openai-codex-responses")
+		specUsesApi(effectiveSpec, "openai-responses") ||
+		specUsesApi(effectiveSpec, "azure-openai-responses") ||
+		specUsesApi(effectiveSpec, "openai-codex-responses")
 	) {
-		compat = resolveOpenAIResponsesPolicy(spec, facts, axes, spec.api);
-	} else if (specUsesApi(spec, "anthropic-messages")) {
-		compat = resolveAnthropicPolicy(spec, facts, axes);
-	} else if (specUsesApi(spec, "bedrock-converse-stream")) {
-		compat = resolveBedrockPolicy(spec, axes);
-	} else if (specUsesApi(spec, "devin-agent")) {
-		compat = resolveDevinPolicy(spec, axes);
+		compat = resolveOpenAIResponsesPolicy(effectiveSpec, facts, axes, effectiveSpec.api);
+	} else if (specUsesApi(effectiveSpec, "anthropic-messages")) {
+		compat = resolveAnthropicPolicy(effectiveSpec, facts, axes);
+	} else if (specUsesApi(effectiveSpec, "bedrock-converse-stream")) {
+		compat = resolveBedrockPolicy(effectiveSpec, axes);
+	} else if (specUsesApi(effectiveSpec, "devin-agent")) {
+		compat = resolveDevinPolicy(effectiveSpec, axes);
 	} else if (
-		specUsesApi(spec, "google-generative-ai") ||
-		specUsesApi(spec, "google-vertex") ||
-		specUsesApi(spec, "google-gemini-cli")
+		specUsesApi(effectiveSpec, "google-generative-ai") ||
+		specUsesApi(effectiveSpec, "google-vertex") ||
+		specUsesApi(effectiveSpec, "google-gemini-cli")
 	) {
-		compat = resolveGooglePolicy(spec, axes);
+		compat = resolveGooglePolicy(effectiveSpec, axes);
 	} else {
 		compat = undefined;
 	}
 	return {
 		identity,
 		compat,
-		thinking: resolveThinkingPolicy(spec, facts, axes, compat),
+		thinking: resolveThinkingPolicy(effectiveSpec, facts, axes, compat),
 		catalog: axes.catalog,
 	};
 }

@@ -62,7 +62,12 @@ describe("compat compiler grammar", () => {
 				].join("\n"),
 			},
 		]);
-		expect(compiled.rules[0]?.wire?.whenThinking).toEqual({
+		const [rule] = compiled.rules;
+		if (!rule) throw new Error("Expected the compiler to emit one rule");
+		const { wire } = rule;
+		if (!wire) throw new Error("Expected the compiled rule to include wire metadata");
+
+		expect(wire.whenThinking).toEqual({
 			qwenTemplateReasoningEffort: true,
 			reasoningContentField: "reasoning_content",
 			extraBody: { enable_thinking: true },
@@ -76,6 +81,15 @@ describe("compat compiler grammar", () => {
 				text: 'behavior {\n\texclude-models provider="a" provider="b" substring="tts"\n}',
 			}),
 		).toThrow(/malformed value/);
+	});
+
+	test("compiles cross-provider reference exclusions", () => {
+		const behavior = compileBehavior({
+			file: "runtime/behavior.kdl",
+			text: 'behavior {\n\tcross-provider-reference-exclusions "gateway-a" "gateway-b"\n}',
+		});
+
+		expect(Reflect.get(behavior, "crossProviderReferenceExclusions")).toEqual(["gateway-a", "gateway-b"]);
 	});
 
 	test("duplicate axis in one block is rejected", () => {

@@ -11,6 +11,7 @@ import { ollamaCloudModelManagerOptions } from "./ollama";
 import {
 	aiandModelManagerOptions,
 	aimlApiModelManagerOptions,
+	akiIoModelManagerOptions,
 	alibabaCodingPlanModelManagerOptions,
 	alibabaTokenPlanModelManagerOptions,
 	anthropicModelManagerOptions,
@@ -20,8 +21,10 @@ import {
 	clinePassModelManagerOptions,
 	cloudflareAiGatewayModelManagerOptions,
 	coreWeaveModelManagerOptions,
+	cortecsModelManagerOptions,
 	deepinfraModelManagerOptions,
 	deepseekModelManagerOptions,
+	eurouterModelManagerOptions,
 	firepassModelManagerOptions,
 	fireworksModelManagerOptions,
 	githubCopilotModelManagerOptions,
@@ -32,6 +35,7 @@ import {
 	kimiCodeModelManagerOptions,
 	litellmModelManagerOptions,
 	lmStudioModelManagerOptions,
+	meliousModelManagerOptions,
 	metaModelManagerOptions,
 	mistralModelManagerOptions,
 	moonshotModelManagerOptions,
@@ -43,9 +47,12 @@ import {
 	opencodeGoModelManagerOptions,
 	opencodeZenModelManagerOptions,
 	openrouterModelManagerOptions,
+	opperModelManagerOptions,
+	ovhcloudModelManagerOptions,
 	qianfanModelManagerOptions,
 	qwenPortalModelManagerOptions,
 	sakanaModelManagerOptions,
+	scalewayModelManagerOptions,
 	siliconflowCnModelManagerOptions,
 	siliconflowModelManagerOptions,
 	syntheticModelManagerOptions,
@@ -62,6 +69,7 @@ import {
 	zenmuxModelManagerOptions,
 	zhipuCodingPlanModelManagerOptions,
 } from "./openai-compat";
+import { nebiusModelManagerOptions } from "./provider-nebius";
 import {
 	cursorModelManagerOptions,
 	devinModelManagerOptions,
@@ -70,6 +78,14 @@ import {
 } from "./special";
 
 export const CATALOG_PROVIDERS = [
+	{
+		id: "aki-io",
+		defaultModel: "kimi-k2.7-code-1100b",
+		envVars: ["AKI_API_KEY"],
+		createModelManagerOptions: (config: ModelManagerConfig) => akiIoModelManagerOptions(config),
+		dynamicModelsAuthoritative: true,
+		catalogDiscovery: { label: "AKI.IO" },
+	},
 	{
 		id: "aiand",
 		defaultModel: "moonshotai/kimi-k2.7-code",
@@ -147,6 +163,14 @@ export const CATALOG_PROVIDERS = [
 		catalogDiscovery: { label: "Cloudflare AI Gateway" },
 	},
 	{
+		id: "cortecs",
+		defaultModel: "gpt-oss-120b",
+		envVars: ["CORTECS_API_KEY"],
+		createModelManagerOptions: (config: ModelManagerConfig) => cortecsModelManagerOptions(config),
+		dynamicModelsAuthoritative: true,
+		catalogDiscovery: { label: "Cortecs", allowUnauthenticated: true },
+	},
+	{
 		id: "cursor",
 		defaultModel: "claude-4.6-opus-high",
 		envVars: ["CURSOR_ACCESS_TOKEN"],
@@ -183,6 +207,14 @@ export const CATALOG_PROVIDERS = [
 		createModelManagerOptions: (config: ModelManagerConfig) => clinePassModelManagerOptions(config),
 		dynamicModelsAuthoritative: true,
 		catalogDiscovery: { label: "ClinePass", allowUnauthenticated: true },
+	},
+	{
+		id: "eurouter",
+		defaultModel: "mistral-large-3",
+		envVars: ["EUROUTER_API_KEY"],
+		createModelManagerOptions: (config: ModelManagerConfig) => eurouterModelManagerOptions(config),
+		dynamicModelsAuthoritative: true,
+		catalogDiscovery: { label: "EUrouter", allowUnauthenticated: true },
 	},
 	{
 		id: "firepass",
@@ -286,6 +318,14 @@ export const CATALOG_PROVIDERS = [
 		allowUnauthenticated: true,
 	},
 	{
+		id: "melious",
+		defaultModel: "gpt-oss-120b",
+		envVars: ["MELIOUS_API_KEY"],
+		createModelManagerOptions: (config: ModelManagerConfig) => meliousModelManagerOptions(config),
+		dynamicModelsAuthoritative: true,
+		catalogDiscovery: { label: "Melious" },
+	},
+	{
 		id: "minimax",
 		defaultModel: "MiniMax-M3",
 		envVars: ["MINIMAX_API_KEY"],
@@ -328,6 +368,30 @@ export const CATALOG_PROVIDERS = [
 		envVars: ["NANO_GPT_API_KEY"],
 		createModelManagerOptions: (config: ModelManagerConfig) => nanoGptModelManagerOptions(config),
 		catalogDiscovery: { label: "NanoGPT" },
+	},
+	{
+		id: "nebius",
+		defaultModel: "Qwen/Qwen3-235B-A22B-Instruct-2507",
+		envVars: ["NEBIUS_API_KEY"],
+		createModelManagerOptions: (config: ModelManagerConfig) => nebiusModelManagerOptions(config),
+		dynamicModelsAuthoritative: true,
+		catalogDiscovery: { label: "Nebius Token Factory" },
+	},
+	{
+		id: "ovhcloud",
+		defaultModel: "gpt-oss-120b",
+		envVars: ["OVH_AI_ENDPOINTS_ACCESS_TOKEN"],
+		createModelManagerOptions: (config: ModelManagerConfig) => ovhcloudModelManagerOptions(config),
+		dynamicModelsAuthoritative: true,
+		catalogDiscovery: { label: "OVHcloud AI Endpoints", allowUnauthenticated: true },
+	},
+	{
+		id: "opper",
+		defaultModel: "mistral/devstral-2512",
+		envVars: ["OPPER_API_KEY"],
+		createModelManagerOptions: (config: ModelManagerConfig) => opperModelManagerOptions(config),
+		dynamicModelsAuthoritative: true,
+		catalogDiscovery: { label: "Opper" },
 	},
 	{
 		id: "nvidia",
@@ -415,6 +479,14 @@ export const CATALOG_PROVIDERS = [
 		createModelManagerOptions: (config: ModelManagerConfig) => sakanaModelManagerOptions(config),
 		dynamicModelsAuthoritative: true,
 		catalogDiscovery: { label: "Sakana AI" },
+	},
+	{
+		id: "scaleway",
+		defaultModel: "glm-5.2",
+		envVars: ["SCW_SECRET_KEY"],
+		createModelManagerOptions: (config: ModelManagerConfig) => scalewayModelManagerOptions(config),
+		dynamicModelsAuthoritative: true,
+		catalogDiscovery: { label: "Scaleway Generative APIs" },
 	},
 	{
 		id: "siliconflow",

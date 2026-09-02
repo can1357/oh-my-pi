@@ -18,7 +18,7 @@ describe("lm studio local provider discovery", () => {
 								capabilities: ["tool_use"],
 								max_context_length: 262144,
 							},
-							{ id: "plain-llm", type: "llm" },
+							{ id: "openbmb/minicpm-v-4_5", type: "llm" },
 						],
 					}),
 					{ status: 200, headers: { "Content-Type": "application/json" } },
@@ -29,7 +29,7 @@ describe("lm studio local provider discovery", () => {
 					JSON.stringify({
 						data: [
 							{ id: "qwen/qwen3.6-27b", object: "model" },
-							{ id: "plain-llm", object: "model" },
+							{ id: "openbmb/minicpm-v-4_5", object: "model" },
 						],
 					}),
 					{ status: 200, headers: { "Content-Type": "application/json" } },
@@ -40,7 +40,7 @@ describe("lm studio local provider discovery", () => {
 
 		const models = await lmStudioModelManagerOptions({ fetch: fetchMock }).fetchDynamicModels?.();
 		const vision = models?.find(model => model.id === "qwen/qwen3.6-27b");
-		const text = models?.find(model => model.id === "plain-llm");
+		const text = models?.find(model => model.id === "openbmb/minicpm-v-4_5");
 
 		expect(requestedUrls).toContain("http://127.0.0.1:1234/api/v0/models");
 		expect(vision?.input).toEqual(["text", "image"]);
