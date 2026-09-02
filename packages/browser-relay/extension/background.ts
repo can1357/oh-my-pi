@@ -665,7 +665,14 @@ function scheduleReconnect(): void {
  * reclaims the surviving `chrome.debugger` infobar.
  */
 async function reconcileOrphans(): Promise<void> {
-	const attachmentState = snapshotAttachmentState(attachmentStateEpochs);
+	// Snapshot every known epoch before awaiting getTargets so a detach that
+	// lands during the await bumps the epoch past this baseline and is filtered
+	// out of the re-track. The attached tab set is only known after getTargets,
+	// so seed the snapshot from the currently tracked tab ids (absent ids read
+	// as epoch 0, matching filterFreshAttachmentState's default).
+	const attachmentState = snapshotAttachmentState(attachmentStateEpochs, [
+		...attachmentStateEpochs.keys(),
+	]);
 	const targets = await chrome.debugger.getTargets().catch(() => []);
 	const attachedTabIds: number[] = [];
 	for (const target of targets) {
