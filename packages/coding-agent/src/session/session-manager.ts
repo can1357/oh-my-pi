@@ -10,8 +10,8 @@ import type {
 } from "@oh-my-pi/pi-ai";
 import {
 	directoryIsEnterable,
-	directoryExists,
 	type FileLockHandle,
+	lockPathFor,
 	getBlobsDir,
 	getProjectDir,
 	getSessionsDir,
@@ -149,11 +149,33 @@ export function ownerClaimIsLive(entry: OwnerClaimsEntry): boolean {
 	return isProcessAlive(entry.pid) && entry.startTokens.some(token => isProcessInstanceAlive(entry.pid, token));
 }
 
+// Same-process holders of a sidecar lock, by resolved lock path (abstract
+// socket locks are per-process: a second acquire from the same process
+// fails even though the first holder is our own queued async op).
+const sidecarLockHolders = new Map<string, number>();
+
+function getSidecarLockPath(sessionFile: string): string {
+	return lockPathFor(ownerSidecarPath(sessionFile));
+}
+
+// Same-process owner of each session file's append-writer lock, keyed by
+// lock path: #appendWriter uses it to hand the claim off to a contending
+// sibling manager (close-and-take) instead of throwing.
+const sessionWriterOwners = new Map<string, SessionManager>();
+
 async function withOwnerSidecarLock<T>(sessionFile: string, fn: () => Promise<T>): Promise<T> {
 	// withFileLock derives `<sidecar>.lock` for the sidecar file itself —
 	// distinct from the session file's own lock, which this process may
 	// already hold for its append writer.
-	return withFileLock(ownerSidecarPath(sessionFile), fn);
+	const lockPath = getSidecarLockPath(sessionFile);
+	sidecarLockHolders.set(lockPath, (sidecarLockHolders.get(lockPath) ?? 0) + 1);
+	try {
+		return await withFileLock(ownerSidecarPath(sessionFile), fn);
+	} finally {
+		const remaining = (sidecarLockHolders.get(lockPath) ?? 1) - 1;
+		if (remaining > 0) sidecarLockHolders.set(lockPath, remaining);
+		else sidecarLockHolders.delete(lockPath);
+	}
 }
 
 async function writeOwnerSidecar(sessionFile: string): Promise<boolean> {
@@ -189,7 +211,24 @@ function writeOwnerSidecarSync(sessionFile: string): boolean {
 	const lock = tryAcquireFileLock(ownerSidecarPath(sessionFile));
 	if (!lock?.acquired) {
 		lock?.release();
-		return false;
+		// A same-process holder is one of OUR queued async sidecar ops:
+		// while we hold the OS lock, no other process can be inside a
+		// remove's read-modify-write, and our own removes serialize behind
+		// the sidecar tail — so a direct append cannot lose the update.
+		// Skipping this re-entrancy path deadlocks instead: the sync retry
+		// loop freezes the event loop with Atomics.wait and starves the very
+		// async holder whose completion would free the lock.
+		if ((sidecarLockHolders.get(getSidecarLockPath(sessionFile)) ?? 0) === 0) return false;
+		try {
+			fs.appendFileSync(ownerSidecarPath(sessionFile), ownerClaimLine(), {
+				encoding: "utf-8",
+				mode: 0o600,
+			});
+			return true;
+		} catch {
+			// Best-effort ownership hint, same contract as below.
+			return false;
+		}
 	}
 	try {
 		fs.appendFileSync(ownerSidecarPath(sessionFile), ownerClaimLine(), {
@@ -1127,6 +1166,10 @@ export class SessionManager {
 	#releaseWriterLock(): void {
 		this.#writerLock?.release();
 		this.#writerLock = undefined;
+		if (this.#sessionFile) {
+			const key = lockPathFor(this.#sessionFile);
+			if (sessionWriterOwners.get(key) === this) sessionWriterOwners.delete(key);
+		}
 	}
 
 	/**
@@ -1387,14 +1430,28 @@ export class SessionManager {
 			// Exclusive claim, held until the writer closes: a gc rewrite (or
 			// any other whole-file replacement) must never interleave with an
 			// open append fd, or appends land on the replaced-away inode and
-			// vanish. Same-process re-acquisition fails by design, so exactly
-			// one handle owns a session file at a time.
-			const lock = tryAcquireFileLock(this.#sessionFile);
+			// vanish. Exactly one OS handle owns a session file at a time;
+			// same-process contention resolves by handoff (below), not failure.
+			let lock = tryAcquireFileLock(this.#sessionFile);
 			if (!lock?.acquired) {
 				lock?.release();
-				throw new SessionFileLockError(this.#sessionFile);
+				// Contended by OUR OWN process: the SDK resume contract (and
+				// upstream tests) open a second manager on a file a live sibling
+				// built and never closed. Hand off rather than fail — close the
+				// sibling's writer (releasing its claim synchronously) and take
+				// over. POSIX O_APPEND keeps concurrent small writes line-atomic,
+				// and the sibling reopens lazily on its next append, stealing back
+				// symmetrically. Cross-process contention still throws.
+				const holder = sessionWriterOwners.get(lockPathFor(this.#sessionFile));
+				if (holder) holder.#closeWriterEventually();
+				lock = tryAcquireFileLock(this.#sessionFile);
+				if (!lock?.acquired) {
+					lock?.release();
+					throw new SessionFileLockError(this.#sessionFile);
+				}
 			}
 			this.#writerLock = lock;
+			sessionWriterOwners.set(lockPathFor(this.#sessionFile), this);
 		}
 		try {
 			this.#writer = this.#storage.openWriter(this.#sessionFile, {
@@ -2238,9 +2295,18 @@ export class SessionManager {
 				}
 				// Live without a durable claim is exactly what gc would
 				// misclassify; the flag stays cleared for the #recordEntry
-				// backstop if the caller retries.
+				// backstop if the caller retries. A directory we cannot
+				// write into cannot host a gc prune either (its publish is a
+				// sidecar write + rename): loading read-only storage without
+				// a claim is safe and matches the switch-under-readonly
+				// contract (issue #505).
 				if (!ownershipEstablished) {
-					throw new SessionFileLockError(resolvedSessionFile);
+					const dirWritable = await fs.promises
+						.access(path.dirname(resolvedSessionFile), fs.constants.W_OK)
+						.then(() => true)
+						.catch(() => false);
+					if (!dirWritable) this.#noOwnerClaim = true;
+					else throw new SessionFileLockError(resolvedSessionFile);
 				}
 				if ((await readUndoTailPruneMarker(resolvedSessionFile)) !== undefined) {
 					await waitClearUndoTailPruneMarker(resolvedSessionFile);

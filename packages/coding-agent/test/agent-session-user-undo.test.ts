@@ -1471,7 +1471,7 @@ describe("AgentSession user undo/redo", () => {
 		// belongs to the turn that follows it and must be rewound together
 		// with that turn, even though its customType is not on the legacy
 		// whitelist.
-		sessionManager.appendCustomMessageEntry("plan-mode-context", "plan context A", false, undefined, "agent", {
+		sessionManager.appendCustomMessageEntry("plan-mode-context", "plan context A", false, undefined, "agent", undefined, {
 			promptPrelude: true,
 		});
 		sessionManager.appendMessage(userMessage("fourth"));
@@ -1555,7 +1555,7 @@ describe("AgentSession user undo/redo", () => {
 			false,
 			{ added: ["demo"], removed: [] },
 			"agent",
-			{ promptPrelude: true },
+			undefined,
 		);
 		sessionManager.appendMessage(userMessage("fourth"));
 		sessionManager.appendMessage(assistantMessage("OK fourth"));
@@ -1585,7 +1585,7 @@ describe("AgentSession user undo/redo", () => {
 			return new SessionTools(
 				{
 					model: () => undefined,
-					agent: { state: { messages } },
+					agent: { state: { messages, tools: [] } },
 					settings: Settings.isolated(),
 				} as unknown as ConstructorParameters<typeof SessionTools>[0],
 				{
@@ -1755,7 +1755,7 @@ describe("AgentSession user undo/redo", () => {
 		// triggerTurn: true }) turn, persisted exactly as #promptWithMessage
 		// now stamps it: the userTurn ownership marker on a user-attributed
 		// custom_message, beside an arbitrary primitive details payload.
-		sessionManager.appendCustomMessageEntry("my-prompt", "extension asks", true, "ext-meta", "user", {
+		sessionManager.appendCustomMessageEntry("my-prompt", "extension asks", true, "ext-meta", "user", undefined, {
 			userTurn: true,
 		});
 		sessionManager.appendMessage(assistantMessage("OK ext"));
