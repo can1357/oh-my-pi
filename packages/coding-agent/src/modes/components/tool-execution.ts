@@ -60,14 +60,14 @@ const OPENCODE_TOOL_GLYPHS: Record<string, SymbolKey> = {
 	todo: "oc.todo",
 };
 
-// Settled collapse restyles `<icon> Tool detail` headers into opencode's
-// `<glyph> Tool detail`, so the native leading icon must be removed. Headers
-// start with a status icon (formatStatusIcon/renderStatusLine) or a per-tool
-// identity glyph, and under symbolPreset "ascii" many of those are
-// alphanumeric ("+f", "lsp", "web", "[ok]") — no character class can tell
-// them apart from real text. Strip by the active theme's known icon strings
-// instead, longest first so "[!!]" wins over "[!]"; glyphs from custom
-// renderers outside the symbol table keep the symbol-ish 1-2 char fallback.
+// Built-in settled collapse restyles `<icon> Tool detail` headers into
+// opencode's `<glyph> Tool detail`, so the native leading icon must be
+// removed. Built-in headers start with a status icon (formatStatusIcon/
+// renderStatusLine) or a per-tool identity glyph, and under symbolPreset
+// "ascii" many are alphanumeric ("+f", "lsp", "web", "[ok]") — no character
+// class can tell them apart from real text. Strip by the active theme's known
+// icon strings instead, longest first so "[!!]" wins over "[!]"; custom
+// renderer output is ordinary tool text and must stay verbatim.
 const HEADER_ICON_KEYS = (Object.keys(SYMBOL_PRESETS.unicode) as SymbolKey[]).filter(
 	key => key.startsWith("status.") || key.startsWith("tool."),
 );
@@ -106,15 +106,22 @@ function restoreHyperlinks(row: string, source: string): string {
 	let from = 0;
 	for (const match of source.matchAll(OSC8_LINK_REGEX)) {
 		const [, opener, linked, closer] = match;
-		const linkedPlain = replaceTabs(stripVTControlCharacters(linked!));
+		const linkedStyled = replaceTabs(linked!);
+		const linkedPlain = stripVTControlCharacters(linkedStyled);
 		if (!linkedPlain) continue;
-		const at = out.indexOf(linkedPlain, from);
+		let at = out.indexOf(linkedStyled, from);
+		let matched = linkedStyled;
+		if (at === -1) {
+			at = out.indexOf(linkedPlain, from);
+			matched = linkedPlain;
+		}
 		if (at === -1) continue;
-		out = `${out.slice(0, at)}${opener}${linkedPlain}${closer}${out.slice(at + linkedPlain.length)}`;
-		from = at + opener!.length + linkedPlain.length + closer!.length;
+		out = `${out.slice(0, at)}${opener}${matched}${closer}${out.slice(at + matched.length)}`;
+		from = at + opener!.length + matched.length + closer!.length;
 	}
 	return out;
 }
+
 /** Resolves the canonical renderer key while retaining the provider's wire name in message history. */
 export function toolRenderName(wireName: string, tool: AgentTool | undefined): string {
 	return tool?.name ?? wireName;
@@ -1142,12 +1149,25 @@ export class ToolExecutionComponent extends Container {
 			// Tabs are legal in filenames and custom status details; normalize
 			// them before measuring so the advertised single row truncates
 			// predictably instead of wrapping or leaving visual holes.
-			const plain = replaceTabs(stripVTControlCharacters(first)).trim().replace(headerIconStrip(), "");
+			let plain = replaceTabs(stripVTControlCharacters(first)).trim();
+			if (this.#renderer !== undefined && !this.#tool?.renderCall && !this.#tool?.renderResult) {
+				plain = plain.replace(headerIconStrip(), "");
+			}
 			const glyph = theme.symbol(OPENCODE_TOOL_GLYPHS[this.#toolName] ?? "oc.search");
-			const row = restoreHyperlinks(` ${glyph} ${plain}`, first);
-			this.#collapsedLines = [theme.fg("dim", truncateToWidth(row, Math.max(1, width)))];
+			const row = ` ${glyph} ${plain}`;
+			this.#collapsedLines = [
+				theme.fg(
+					"dim",
+					restoreHyperlinks(truncateToWidth(row.replace(OSC8_LINK_REGEX, "$2"), Math.max(1, width)), first),
+				),
+			];
 		} else {
-			this.#collapsedLines = [first];
+			this.#collapsedLines = [
+				restoreHyperlinks(
+					truncateToWidth(replaceTabs(first).replace(OSC8_LINK_REGEX, "$2"), Math.max(1, width)),
+					first,
+				),
+			];
 		}
 		return this.#collapsedLines;
 	}

@@ -8,10 +8,9 @@ import { ToolExecutionComponent } from "@oh-my-pi/pi-coding-agent/modes/componen
 import { UserMessageComponent } from "@oh-my-pi/pi-coding-agent/modes/components/user-message";
 import type { LayoutMode } from "@oh-my-pi/pi-coding-agent/modes/layout-mode";
 import { loadTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/loader";
-import { SYMBOL_PRESETS, type SymbolKey } from "@oh-my-pi/pi-coding-agent/modes/theme/symbols";
 import { getThemeByName, initTheme, setThemeInstance, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { CachedOutputBlock, markFramedBlockComponent } from "@oh-my-pi/pi-coding-agent/tui/output-block";
-import { replaceTabs, Text, type TUI } from "@oh-my-pi/pi-tui";
+import { replaceTabs, Text, type TUI, visibleWidth } from "@oh-my-pi/pi-tui";
 
 /**
  * Contract under test (`display.layout: "opencode"`):
@@ -241,6 +240,38 @@ describe("opencode layout", () => {
 		expect(stripVTControlCharacters(rows[0]!)).toContain(replaceTabs("HEAD\tLINE ok"));
 	});
 
+	it("bounds a live custom row without dropping its styling", () => {
+		const uri = "file:///tmp/live.ts";
+		const link = `\x1b]8;;${uri}\x07${theme.fg("accent", "live.ts")}\x1b]8;;\x07`;
+		const longUri = "file:///tmp/long.ts";
+		const longLink = `\x1b]8;;${longUri}\x07${"long".repeat(75)}\x1b]8;;\x07`;
+		const styled = theme.fg("toolTitle", `first\t${link} ${longLink}`);
+		const tool = {
+			name: "custom_render",
+			label: "Custom",
+			parameters: { type: "object", additionalProperties: true },
+			renderCall: () =>
+				markFramedBlockComponent({
+					render: () => [styled, "DETAIL-1"],
+					invalidate() {},
+				}) as unknown as Text,
+			async execute() {
+				return { content: [] };
+			},
+		} as unknown as AgentTool;
+		const component = new ToolExecutionComponent("custom_render", {}, { layout: opencode }, tool, ui, process.cwd());
+
+		const rows = component.render(40).filter(line => /\S/.test(stripVTControlCharacters(line)));
+		expect(rows).toHaveLength(1);
+		expect(rows[0]).not.toContain("\t");
+		expect(visibleWidth(rows[0]!)).toBeLessThanOrEqual(40);
+		expect(rows[0]).toContain(theme.getFgAnsi("toolTitle"));
+		expect(rows[0]).toContain(theme.getFgAnsi("accent"));
+		expect(rows[0]).toContain(uri);
+		expect(rows[0]).not.toContain(longUri);
+		expect(rows[0]!.match(/\x1b\]8;;\x07/g)).toHaveLength(1);
+	});
+
 	it("keys CachedOutputBlock on the explicit flat option", () => {
 		const block = new CachedOutputBlock();
 		const options = {
@@ -290,32 +321,50 @@ describe("opencode layout", () => {
 		}
 	});
 
-	it("strips every ascii status/tool icon from a settled collapsed header", async () => {
+	it("keeps ascii icon words from custom settled headers", async () => {
 		const baseTheme = await getThemeByName("dark");
 		if (!baseTheme) throw new Error("theme unavailable");
 		setThemeInstance(await loadTheme("dark", { symbolPresetOverride: "ascii" }));
 		try {
-			// Sweep the full ascii inventory of icons that can lead a settled
-			// header (formatStatusIcon + per-tool identity glyphs). Many are
-			// alphanumeric ("+f", "lsp", "web", "[ok]"), which the old
-			// `[^\p{L}\p{N}]{1,2}` guess never removed.
-			const iconKeys = (Object.keys(SYMBOL_PRESETS.ascii) as SymbolKey[]).filter(
-				key => key.startsWith("status.") || key.startsWith("tool."),
+			const tool = {
+				...makeMultiLineTool(),
+				name: "write",
+				renderResult: () => new Text("web result detail\nDETAIL-1", 0, 0),
+			};
+			const component = new ToolExecutionComponent(
+				"write",
+				{},
+				{ layout: opencode },
+				tool as unknown as AgentTool,
+				ui,
+				process.cwd(),
 			);
-			expect(iconKeys.length).toBeGreaterThan(0);
-			for (const key of iconKeys) {
-				const icon = theme.symbol(key);
-				const tool = {
-					...makeMultiLineTool(),
-					renderResult: () => new Text(`${icon} Label detail\nDETAIL-1`, 0, 0),
-				};
-				const component = makeComponent(tool, opencode);
-				component.updateResult({ content: [{ type: "text", text: "ok" }] }, false);
-				const rows = visibleRows(component);
-				expect(rows).toHaveLength(1);
-				// The native icon is gone; only the opencode glyph leads the row.
-				expect(rows[0]).toBe(" * Label detail");
-			}
+			component.updateResult({ content: [{ type: "text", text: "ok" }] }, false);
+
+			expect(visibleRows(component)).toEqual([" <- web result detail"]);
+		} finally {
+			setThemeInstance(baseTheme);
+		}
+	});
+
+	it("strips the +f icon from a built-in ascii write header", async () => {
+		const baseTheme = await getThemeByName("dark");
+		if (!baseTheme) throw new Error("theme unavailable");
+		setThemeInstance(await loadTheme("dark", { symbolPresetOverride: "ascii" }));
+		try {
+			const component = new ToolExecutionComponent(
+				"write",
+				{ file_path: "src/example.ts", content: "hello\n" },
+				{ layout: opencode },
+				undefined,
+				ui,
+				process.cwd(),
+			);
+			component.updateResult({ content: [{ type: "text", text: "Wrote 1 lines" }] }, false);
+
+			const [row] = visibleRows(component);
+			expect(row).toMatch(/^ <- /);
+			expect(row).not.toContain("+f");
 		} finally {
 			setThemeInstance(baseTheme);
 		}
