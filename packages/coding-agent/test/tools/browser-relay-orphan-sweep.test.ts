@@ -3,6 +3,7 @@ import {
 	nextOrphanSweepDeadline,
 	orphanSweepAlarmDelayMinutes,
 	orphanSweepSeesRelayDisconnected,
+	restoreOrphanSweepDeadline,
 	serializeOrphanSweepDeadlineUpdate,
 	shouldProceedWithOrphanSweep,
 	shouldRunOrphanSweep,
@@ -182,5 +183,11 @@ describe("browser relay orphan sweep scheduling", () => {
 
 		expect(repaired).toEqual([31_000]);
 		expect(persisted).toEqual([31_000]);
+	});
+
+	it("does not restore a stale startup deadline after a newer update", () => {
+		expect(restoreOrphanSweepDeadline(31_000, false)).toBeNull();
+		expect(restoreOrphanSweepDeadline(31_000, true)).toBe(31_000);
+		expect(restoreOrphanSweepDeadline("31_000", true)).toBeNull();
 	});
 });
