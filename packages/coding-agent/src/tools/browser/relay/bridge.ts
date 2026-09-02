@@ -389,6 +389,15 @@ class TabState {
 	restorePending = false;
 	/** Retry preload replay on a fresh Chrome root after an ambiguous transport swap. */
 	forceFreshRootBeforeReplay = false;
+	/**
+	 * A relay-initiated refresh detach was actually issued and its result was lost
+	 * to a socket drop. Distinct from {@link forceFreshRootBeforeReplay}, which is
+	 * armed the moment an ambiguous RPC is interrupted — before any refresh detach
+	 * runs. Only an in-flight refresh detach explains why the extension dropped the
+	 * tab from `recoverableTabIds`; without it, a non-recoverable signal is a
+	 * genuine user detach that must be honored.
+	 */
+	refreshDetachInFlight = false;
 	/** Effective root-domain state by subscription key and owning page pseudo-session. */
 	readonly subscriptions = new Map<
 		string,
@@ -757,13 +766,16 @@ export class RelayBridge {
 				// removes the tab from the extension's `recoverableTabIds`. If the
 				// socket then drops after that detach but before the reattach, the
 				// replacement hello lands here with an unattached, non-recoverable tab
-				// even though `forceFreshRootBeforeReplay` still records an in-progress
-				// recovery. Treating that as a user detach would retract the preserved
-				// pseudo-sessions and strand the holders. Preserve the explicit
-				// recovery authorization and finish the reattach below instead.
-				if (!tab.forceFreshRootBeforeReplay) {
+				// even though recovery is still in progress. Only an actually-issued
+				// refresh detach (`refreshDetachInFlight`) explains that missing
+				// recovery signal: preserve the sessions and finish the reattach below.
+				// A bare `forceFreshRootBeforeReplay` (armed the instant an ambiguous
+				// RPC was interrupted, before any refresh detach ran) does NOT, so a
+				// user Cancel / DevTools takeover during that window is still honored.
+				if (!tab.refreshDetachInFlight) {
 					// The user detached while the extension socket was down. Invalidate
 					// the relay's stale sessions without fighting the explicit opt-out.
+					tab.forceFreshRootBeforeReplay = false;
 					this.#onTabDetached(tab.tabId, "detached_while_disconnected", false);
 					continue;
 				}
@@ -2843,6 +2855,7 @@ export class RelayBridge {
 		tab.attached = false;
 		tab.attaching = null;
 		tab.forceFreshRootBeforeReplay = false;
+		tab.refreshDetachInFlight = false;
 		this.#resetRuntime(tab);
 		tab.restoreRootRuntime = false;
 		tab.banned = true;
@@ -2972,12 +2985,19 @@ export class RelayBridge {
 			if (!ok) {
 				if (this.#ext !== ext) {
 					// The extension socket was replaced (or closed) mid-attach: the
-					// RPC rejected with ExtensionReplacedError, not a real attach
-					// failure. Retracting now would delete a preserved bare
-					// Target.attachToTarget page session before the replacement hello
-					// can recover it, permanently stranding the holder on
-					// "Unknown session id". Leave the sessions for that hello's
-					// reconciliation to restore.
+					// RPC rejected with ExtensionReplacedError or "relay extension
+					// disconnected", not a real attach failure. Retracting now would
+					// delete a preserved bare Target.attachToTarget page session before
+					// the replacement hello can recover it, permanently stranding the
+					// holder on "Unknown session id". Leave the sessions for that
+					// hello's reconciliation to restore.
+					//
+					// #ensureAttached only exempts ExtensionReplacedError from banning,
+					// so an ordinary "relay extension disconnected" leaves tab.banned
+					// set. Clear that transient ban before returning: otherwise the
+					// replacement hello's re-attach of the same-URL tab is refused and
+					// the preserved sessions are ultimately retracted anyway.
+					tab.banned = false;
 					return;
 				}
 				// Reattachment failed (DevTools or another debugger claimed the tab
@@ -3098,6 +3118,11 @@ export class RelayBridge {
 		}
 		if (tab.rootRuntimeEnabled) tab.restoreRootRuntime = true;
 		tab.reattachedAfterDetach = false;
+		// Record that a relay-initiated detach is now committed: if its result is
+		// lost to a socket drop, the extension will have dropped the tab from
+		// `recoverableTabIds`, and only this flag distinguishes that guard-detach
+		// side effect from a genuine user detach at the next hello.
+		tab.refreshDetachInFlight = true;
 		const done = (async () => {
 			this.#assertExtensionCurrent(expectedExt);
 			await this.#rpc({ op: "detach", tabId: tab.tabId });
@@ -3109,6 +3134,9 @@ export class RelayBridge {
 		});
 		tab.detaching = done;
 		await done;
+		// The detach settled cleanly on this socket, so its `recoverableTabIds`
+		// omission is no longer a lingering concern for the next hello.
+		tab.refreshDetachInFlight = false;
 		return await this.#ensureAttached(tab);
 	}
 

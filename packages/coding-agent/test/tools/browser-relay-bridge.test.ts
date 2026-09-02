@@ -4188,6 +4188,126 @@ describe("RelayBridge tab grouping", () => {
 		expect(ext3.rpcs("send").some((rpc) => rpc.tabId === 1)).toBe(true);
 	});
 
+	it("honors a user detach that arrives while only a fresh-root replay is pending", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })], { attachedTabIds: [1] });
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		const pageSession = await attachPage(bridge, ext, cdp, connId, 1);
+
+		// Interrupt an initial preload registration: this arms
+		// forceFreshRootBeforeReplay, but no relay-initiated refresh detach has run
+		// yet (the socket dropped before recovery started).
+		const addId = ++msgSeq;
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({
+				id: addId,
+				sessionId: pageSession,
+				method: "Page.addScriptToEvaluateOnNewDocument",
+				params: { source: "window.__relayInjected = true;" },
+			}),
+		);
+		await waitFor(
+			() =>
+				ext
+					.rpcs("send")
+					.some(
+						(rpc) => rpc.method === "Page.addScriptToEvaluateOnNewDocument",
+					),
+			"initial preload registration RPC",
+		);
+		bridge.extClosed(ext);
+		await flush();
+		expect(cdp.messages.some((m) => m.id === addId && "error" in m)).toBe(true);
+
+		// The user clicks Cancel (or DevTools takes over) while the socket is down,
+		// so the reconnect hello omits the tab from recoverableTabIds. Because no
+		// refresh detach was ever issued (refreshDetachInFlight is false), this is a
+		// genuine user detach and must be honored — not overridden by the pending
+		// fresh-root flag.
+		const ext2 = new FakeExtSocket();
+		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], {
+			attachedTabIds: [],
+			recoverableTabIds: [],
+		});
+		await flush();
+
+		// The tab was not reattached, and the stale preserved session is invalidated.
+		expect(ext2.rpcs("attach")).toHaveLength(0);
+		const cmdId = ++msgSeq;
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({
+				id: cmdId,
+				sessionId: pageSession,
+				method: "Runtime.evaluate",
+			}),
+		);
+		await flush();
+		const reply = cdp.messages.find((m) => m.id === cmdId);
+		expect(reply?.error).toBeDefined();
+	});
+
+	it("clears the transient ban when an ordinary disconnect interrupts a recovery attach", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		// Bare holder: only Target.attachToTarget, so its page session must survive.
+		const pageSession = await attachPage(bridge, ext, cdp, connId, 1);
+
+		bridge.extClosed(ext);
+
+		// First reconnect arms a forced recovery attach that goes in flight.
+		const ext2 = new FakeExtSocket();
+		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], {
+			recoverableTabIds: [1],
+		});
+		await waitFor(
+			() => ext2.pending("attach").length === 1,
+			"recovery attach in flight",
+		);
+
+		// An ORDINARY disconnect (not a replacement) rejects the in-flight attach
+		// with "relay extension disconnected": #ensureAttached bans the tab because
+		// it only exempts ExtensionReplacedError. The recovery must clear that
+		// transient ban so the replacement hello can re-attach the same-URL tab
+		// instead of having its preserved session retracted.
+		bridge.extClosed(ext2);
+		await flush();
+
+		const ext3 = new FakeExtSocket();
+		connect(bridge, ext3, [tab({ tabId: 1, groupId: -1 })], {
+			recoverableTabIds: [1],
+		});
+		await waitFor(
+			() => ext3.pending("attach").length === 1,
+			"replacement hello re-attaches the un-banned tab",
+		);
+		ack(bridge, ext3, "attach");
+		await flush();
+
+		// The preserved page session survived: its command routes to the reattached
+		// tab instead of failing "Unknown session id".
+		const cmdId = ++msgSeq;
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({
+				id: cmdId,
+				sessionId: pageSession,
+				method: "Runtime.evaluate",
+			}),
+		);
+		ack(bridge, ext3, "send", { ok: true });
+		await flush();
+		const reply = cdp.messages.find((m) => m.id === cmdId);
+		expect(reply?.error).toBeUndefined();
+		expect(ext3.rpcs("send").some((rpc) => rpc.tabId === 1)).toBe(true);
+	});
+
 	it("clears replayed timezone overrides when their owner disconnects during recovery", async () => {
 		const bridge = new RelayBridge({});
 		const ext = new FakeExtSocket();
