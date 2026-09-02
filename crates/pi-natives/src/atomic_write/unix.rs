@@ -345,17 +345,51 @@ fn private_directory_device(
 	}
 	let owner = unsafe { libc::geteuid() };
 	let permissions = stat.st_mode & 0o777;
-	if stat.st_uid != owner || permissions != PRIVATE_DIRECTORY_MODE {
+	if stat.st_uid != owner || permissions & 0o022 != 0 {
 		return Err(AtomicWriteError::new(
 			AtomicWriteErrorCode::UnsafePath,
 			AtomicWriteCommitState::NotCommitted,
 			format!(
-				"{label} must be owned by the invoking user with mode 0700 (owner {}, mode {:04o})",
+				"{label} must be owned by the invoking user and not group/other-writable (owner {}, \
+				 mode {:04o})",
 				stat.st_uid, permissions
 			),
 		));
 	}
+	if permissions != PRIVATE_DIRECTORY_MODE {
+		tighten_private_directory_mode(fd, label)?;
+		let tightened =
+			fd_stat(fd).map_err(|error| precommit_io(&format!("rechecking {label}"), error))?;
+		if tightened.st_uid != owner || tightened.st_mode & 0o777 != PRIVATE_DIRECTORY_MODE {
+			return Err(AtomicWriteError::new(
+				AtomicWriteErrorCode::UnsafePath,
+				AtomicWriteCommitState::NotCommitted,
+				format!("{label} could not be secured to owner-only mode 0700"),
+			));
+		}
+	}
 	Ok(stat.st_dev)
+}
+
+fn tighten_private_directory_mode(
+	fd: RawFd,
+	label: &str,
+) -> std::result::Result<(), AtomicWriteError> {
+	loop {
+		let result = unsafe {
+			// SAFETY: `fd` is the already-open directory descriptor whose owner and
+			// non-writable mode were verified immediately before this call.
+			libc::fchmod(fd, PRIVATE_DIRECTORY_MODE)
+		};
+		if result == 0 {
+			return Ok(());
+		}
+		let error = io::Error::last_os_error();
+		if is_errno(&error, libc::EINTR) {
+			continue;
+		}
+		return Err(precommit_io(&format!("securing {label} to mode 0700"), error));
+	}
 }
 
 fn fd_identity(fd: RawFd) -> io::Result<FileIdentity> {
