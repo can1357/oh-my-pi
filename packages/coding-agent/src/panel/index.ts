@@ -3,6 +3,7 @@ export { PANEL_SLASH_COMMAND } from "./command";
 export {
 	BUILTIN_PANEL_PERSONAS,
 	PanelConfigError,
+	panelLineupHash,
 	parsePanelPersona,
 	parsePanelSettings,
 	resolvePanelPersona,
@@ -23,12 +24,15 @@ export {
 } from "./prompts";
 export {
 	PANEL_MAX_CONCURRENCY,
+	type PanelLineupContext,
 	type PanelRunOptions,
 	type PanelRunPlan,
 	type PanelRunPreview,
 	type PanelRunResult,
 	type PanelUsage,
 	preparePanelRun,
+	type ResolvedPanelLineup,
+	resolvePanelLineup,
 	runPanel,
 } from "./runtime";
 export { formatPanelCompletionStatus, formatPanelProgress } from "./status";
