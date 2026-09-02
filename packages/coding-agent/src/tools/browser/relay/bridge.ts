@@ -754,6 +754,11 @@ export class RelayBridge {
 				continue;
 			}
 			if (holders.length === 0) continue;
+			// A relay-initiated detach can trigger a same-socket hello before the
+			// original recovery task receives its detach RPC result. That task already
+			// owns the reattach and journal replay; starting another here would replay
+			// additive state twice. Let the active same-socket task continue.
+			if (sameSocketReplay) continue;
 			if (!hasRecoveryMetadata) {
 				// Legacy extension without orphan-guard metadata: a service-worker
 				// restart can drop attachments while downstream connections still

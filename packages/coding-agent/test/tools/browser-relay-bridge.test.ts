@@ -9022,6 +9022,86 @@ describe("RelayBridge tab grouping", () => {
 			"Page.enable",
 		]);
 	});
+
+	it("reuses recovery when a same-socket hello reports the forced detach", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		const pageSession = await attachPage(bridge, ext, cdp, connId, 1);
+
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({
+				id: ++msgSeq,
+				sessionId: pageSession,
+				method: "Page.addScriptToEvaluateOnNewDocument",
+				params: { source: "window.__relayInjected = true;" },
+			}),
+		);
+		await flush();
+		ack(bridge, ext, "send", { identifier: "root-before-recovery" });
+		await flush();
+
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({
+				id: ++msgSeq,
+				sessionId: pageSession,
+				method: "Fetch.enable",
+			}),
+		);
+		await waitFor(() => ext.pending("send").some((rpc) => rpc.method === "Fetch.enable"));
+		bridge.extClosed(ext);
+		await flush();
+
+		const ext2 = new FakeExtSocket();
+		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], {
+			attachedTabIds: [1],
+			recoverableTabIds: [1],
+		});
+		await waitFor(() => ext2.pending("detach").length === 1);
+		// Chrome emits the relay detach echo and the extension refreshes hello before
+		// the detach RPC result reaches the bridge. No second recovery may start.
+		bridge.extMessage(
+			ext2,
+			JSON.stringify({ t: "detached", tabId: 1, reason: "target_closed", relayInitiated: true }),
+		);
+		bridge.extMessage(
+			ext2,
+			JSON.stringify({
+				t: "hello",
+				userAgent: "test",
+				browserVersion: "Chrome/151.0.0.0",
+				tabs: [tab({ tabId: 1, groupId: -1 })],
+				attachedTabIds: [],
+				recoverableTabIds: [],
+			}),
+		);
+		await flush();
+		expect(ext2.rpcs("detach")).toHaveLength(1);
+		expect(ext2.rpcs("attach")).toHaveLength(0);
+
+		ack(bridge, ext2, "detach");
+		await waitFor(() => ext2.pending("attach").length === 1);
+		ack(bridge, ext2, "attach");
+		await waitFor(
+			() =>
+				ext2
+					.rpcs("send")
+					.filter((rpc) => rpc.method === "Page.addScriptToEvaluateOnNewDocument")
+					.length === 1,
+			"single preload replay",
+		);
+		ack(bridge, ext2, "send", { identifier: "root-after-recovery" });
+		await flush();
+		expect(
+			ext2
+				.rpcs("send")
+				.filter((rpc) => rpc.method === "Page.addScriptToEvaluateOnNewDocument"),
+		).toHaveLength(1);
+	});
 });
 
 describe("RelayBridge Runtime sessions", () => {
