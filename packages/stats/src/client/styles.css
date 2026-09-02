@@ -35,6 +35,7 @@
   --accent-cyan: var(--link);
   --bg-hover: var(--surface-2);
   --bg-elevated: var(--surface-2);
+  --select-chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23999' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
 
   --radius-sm: 3px;
   --radius-md: 6px;
@@ -60,6 +61,7 @@
     --link: oklch(0.58 0.13 230);
     --success: oklch(0.55 0.13 150);
     --danger: oklch(0.55 0.19 25);
+    --select-chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23555' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
     --warning: oklch(0.6 0.13 85);
   }
 }
@@ -81,6 +83,7 @@
   --link: oklch(0.58 0.13 230);
   --success: oklch(0.55 0.13 150);
   --danger: oklch(0.55 0.19 25);
+  --select-chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23555' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
   --warning: oklch(0.6 0.13 85);
 }
 
@@ -462,6 +465,62 @@
   color: var(--text);
   background: var(--surface);
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.18);
+}
+
+/* Select (native <select>, themed to match RangeControl/Buttons) */
+.stats-select {
+  appearance: none;
+  padding: 6px 28px 6px 12px;
+  font-size: 13px;
+  font-weight: 500;
+  font-family: inherit;
+  color: var(--text);
+  background-color: var(--surface-2);
+  /* Chevron follows theme: light stroke on dark, dark stroke on light. */
+  background-image: var(--select-chevron);
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: border-color 0.15s ease, background-color 0.15s ease;
+  max-width: 100%;
+  text-overflow: ellipsis;
+}
+
+.stats-select:hover:not(:disabled) {
+  border-color: var(--border-strong);
+  background-color: var(--bg-hover);
+}
+
+.stats-select:focus-visible {
+  outline: 2px solid var(--link);
+  outline-offset: 1px;
+}
+
+.stats-select:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Prevent iOS from zooming the viewport when a select receives focus. */
+@media (pointer: coarse) {
+  .stats-select {
+    font-size: 16px;
+  }
+}
+
+/* Dropdown list itself follows the page theme via color-scheme. */
+.stats-select option {
+  background-color: var(--surface);
+  color: var(--text);
+}
+/* Forced-colors (Windows High Contrast) suppresses background images, so the
+   custom chevron vanishes; restore the native indicator instead. */
+@media (forced-colors: active) {
+  .stats-select {
+    appearance: auto;
+  }
 }
 
 /* Sync Button & Container */

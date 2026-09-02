@@ -7,6 +7,7 @@ import "@oh-my-pi/pi-coding-agent/discovery";
 import { loadSkills } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 import { getAgentDir, setAgentDir } from "@oh-my-pi/pi-utils/dirs";
+import { restoreEnvValue } from "./helpers/settings-test-state";
 
 async function writeSkill(dir: string, name: string, description: string): Promise<void> {
 	const file = path.join(dir, name, "SKILL.md");
@@ -19,9 +20,13 @@ describe("managed-skills discovery", () => {
 	let tempCwd: string;
 	let managedDir: string;
 	let authoredDir: string;
+	let originalClaudeConfigDir: string | undefined;
 
 	let originalAgentDir: string;
 	beforeEach(async () => {
+		originalClaudeConfigDir = process.env.CLAUDE_CONFIG_DIR;
+		delete process.env.CLAUDE_CONFIG_DIR;
+		delete Bun.env.CLAUDE_CONFIG_DIR;
 		originalAgentDir = getAgentDir();
 		tempHome = await fs.mkdtemp(path.join(os.tmpdir(), "omp-managed-disco-home-"));
 		// cwd MUST live under the fake home so loadSkills' ancestor walk is bounded
@@ -36,6 +41,7 @@ describe("managed-skills discovery", () => {
 	});
 
 	afterEach(async () => {
+		restoreEnvValue("CLAUDE_CONFIG_DIR", originalClaudeConfigDir);
 		spyOn(os, "homedir").mockRestore();
 		setAgentDir(originalAgentDir);
 		await removeWithRetries(tempHome);

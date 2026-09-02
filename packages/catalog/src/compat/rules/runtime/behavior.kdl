@@ -158,6 +158,11 @@ behavior {
 	api-routes provider="zenmux" default="openai-completions" {
 		route "anthropic-messages" prefix="anthropic/"
 	}
+	// GLM-5.3-Flash is available on Z.AI's native chat-completions API but
+	// not its Anthropic-compatible coding endpoint (#10539).
+	api-routes provider="zai" default="anthropic-messages" {
+		route "openai-completions" exact="glm-5.3-flash"
+	}
 	// OpenCode Zen: models.dev declares these with `@ai-sdk/anthropic`, but the
 	// gateway serves them only at /v1/chat/completions (#1617).
 	api-routes provider="opencode-zen" {

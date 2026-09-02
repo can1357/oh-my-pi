@@ -153,7 +153,36 @@ describe("Agent hub row ordering", () => {
 		}
 	});
 
-	it("re-sorts rows by most-recent activity while the hub is open", () => {
+	it("captures initial ranking when agents load after empty construction", () => {
+		vi.useFakeTimers();
+		geometry = stubStdoutGeometry(120);
+		const agents = new AgentRegistry();
+		const hub = makeHub(agents);
+
+		try {
+			expect(renderedAgentIds(hub)).toEqual([]);
+
+			setSystemTime(3000);
+			agents.register({
+				id: "Parked",
+				displayName: "Parked",
+				kind: "sub",
+				session: null,
+				status: "parked",
+			});
+			setSystemTime(1000);
+			agents.register({ id: "Older", displayName: "Older", kind: "sub", session: {} as AgentSession });
+			setSystemTime(2000);
+			agents.register({ id: "Newer", displayName: "Newer", kind: "sub", session: {} as AgentSession });
+
+			vi.advanceTimersByTime(100);
+			expect(renderedAgentIds(hub)).toEqual(["Newer", "Older", "Parked"]);
+		} finally {
+			hub.dispose();
+		}
+	});
+
+	it("keeps row order stable as agents heartbeat and appends new agents", () => {
 		vi.useFakeTimers();
 		let hub: AgentHubOverlayComponent | undefined;
 		try {
@@ -172,19 +201,30 @@ describe("Agent hub row ordering", () => {
 			agents.register({ id: "C", displayName: "Gamma", kind: "sub", session: sessionC });
 
 			hub = makeHub(agents);
+			// Captured once on open: status then recency (most-recent first).
 			expect(renderedAgentIds(hub)).toEqual(["C", "B", "A"]);
-			// Bump A's lastActivity far ahead of the others; recency wins live.
+
+			// A heartbeats far ahead of the others; a stable roster must NOT bubble
+			// it to the top while the hub is open (issue #10524).
 			setSystemTime(4000);
 			agents.setActivity("A", "still running");
 
-			// A parked agent sorts below live ones by status order.
+			// A new agent appears and forces a refresh: existing rows keep their
+			// captured order, and the newcomer appends at the end.
 			setSystemTime(5000);
 			const sessionD = {} as AgentSession;
 			agents.register({ id: "D", displayName: "Delta", kind: "sub", session: sessionD, status: "parked" });
 			// Renders coalesce: the immediate frame still shows the captured order.
 			expect(renderedAgentIds(hub)).toEqual(["C", "B", "A"]);
 			vi.advanceTimersByTime(100);
-			expect(renderedAgentIds(hub)).toEqual(["A", "C", "B", "D"]);
+			expect(renderedAgentIds(hub)).toEqual(["C", "B", "A", "D"]);
+
+			// Reusing an unregistered id creates a new agent generation. It must
+			// append rather than reclaiming the removed generation's old rank.
+			agents.unregister("B", sessionB);
+			agents.register({ id: "B", displayName: "Beta 2", kind: "sub", session: {} as AgentSession });
+			vi.advanceTimersByTime(100);
+			expect(renderedAgentIds(hub)).toEqual(["C", "A", "D", "B"]);
 		} finally {
 			hub?.dispose();
 			vi.useRealTimers();
