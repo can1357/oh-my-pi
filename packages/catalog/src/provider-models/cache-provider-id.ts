@@ -1,4 +1,8 @@
 import { PERSONAL_GITHUB_COPILOT_BASE_URL } from "../wire/github-copilot";
+// Cycle-safe: openzoo.ts imports resolveModelCacheProviderId from this module,
+// but both edges bind at call time, and sharing the resolver is the point —
+// two normalizers is exactly how the cache id and the fetch URL drifted apart.
+import { resolveOpenzooBaseUrl } from "./openzoo";
 
 export interface ModelCacheProviderIdOptions {
 	apiKey?: string;
@@ -94,8 +98,10 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 		case "openzoo": {
 			// The proxy port is user-configurable (`OPENZOO_PORT` / `OPENZOO_BASE_URL`)
 			// and a public tunnel URL serves a different wallet's catalog, so rows
-			// cached against one endpoint must not answer for another.
-			const baseUrl = options.baseUrl ?? getDefaultModelDiscoveryBaseUrl(providerId)!;
+			// cached against one endpoint must not answer for another. Normalized
+			// through the same resolver the manager uses, so a configured trailing
+			// slash cannot mint a second cache id for the same endpoint.
+			const baseUrl = resolveOpenzooBaseUrl(options.baseUrl);
 			return `openzoo:models-v1:${Bun.hash(baseUrl).toString(36)}`;
 		}
 		case "vllm": {

@@ -39,6 +39,7 @@ import { $which, APP_NAME, getAgentDbPath, getConfigRootDir, isEnoent, logger, V
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { setTransports as setLoggerTransports } from "@oh-my-pi/pi-utils/logger";
 import { $ } from "bun";
+import { isDiscoveryBearerApiKey } from "../config/model-provider-discovery";
 import { refreshManagedMcpOAuthCredential } from "../mcp/oauth-credentials";
 import { isManagedMCPOAuthCredentialId, mcpOAuthServerUrlFromCredentialId } from "../mcp/oauth-flow";
 import { resolveAuthBrokerConfig } from "../session/auth-broker-config";
@@ -835,6 +836,9 @@ async function runMigrate(flags: AuthBrokerCommandArgs["flags"]): Promise<void> 
 			const envValue = getEnvApiKey(provider);
 			if (!envValue) continue;
 			if (envValue === "<authenticated>") continue; // Bedrock/Vertex sentinels — not literal keys.
+			// Local-provider placeholders (llama.cpp/LM Studio/vLLM/openzoo) are
+			// not literal keys either; a broker must never store them.
+			if (!isDiscoveryBearerApiKey(envValue)) continue;
 			const credential: AuthCredential = { type: "api_key", key: envValue };
 			if (brokerAlreadyHas(existing, provider, credential)) {
 				skipped.push({

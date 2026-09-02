@@ -155,6 +155,11 @@ describe("openzoo built-in provider", () => {
 		expect(moved).not.toBe(local);
 		expect(openzooModelManagerOptions().cacheProviderId).toBe(local);
 		expect(openzooModelManagerOptions({ baseUrl: "http://localhost:9402/v1" }).cacheProviderId).toBe(moved);
+		// One endpoint, one id: a configured trailing slash goes through the same
+		// resolver the manager uses, so it cannot mint a second cache namespace.
+		expect(resolveModelCacheProviderId("openzoo", { baseUrl: "https://tunnel.example/v1/" })).toBe(
+			resolveModelCacheProviderId("openzoo", { baseUrl: "https://tunnel.example/v1" }),
+		);
 	});
 
 	test("discovers the live catalog keylessly, pricing from the proxy and limits from the real window", async () => {
