@@ -184,4 +184,40 @@ describe("startup model cache header restoration (#5780)", () => {
 		});
 		expect(upgradedRegistry.find("probe", "probe-model")?.headers?.Authorization).toBe("Bearer runtime-key");
 	});
+
+	test("cached configured-discovery headers stop sending a removed runtime key", async () => {
+		// Restoring a cached row by SNAPSHOTTING the fallback froze whatever the
+		// bearer was at startup, so an SDK host that later removed the runtime
+		// key kept sending it from cache.
+		const modelsPath = path.join(tempDir, "models.json");
+		fs.writeFileSync(
+			modelsPath,
+			JSON.stringify({
+				providers: {
+					probe: {
+						baseUrl: "https://example.invalid/v1/",
+						api: "openai-completions",
+						authHeader: true,
+						discovery: { type: "openai-models-list" },
+					},
+				},
+			}),
+		);
+		authStorage.setRuntimeApiKey("probe", "runtime-key");
+		const primedRegistry = new ModelRegistry(authStorage, modelsPath, {
+			fetch: async () => Response.json({ data: [{ id: "probe-model" }] }),
+		});
+		await primedRegistry.refreshProvider("probe", "online");
+
+		const restartedRegistry = new ModelRegistry(authStorage, modelsPath, {
+			fetch: () => Promise.reject(new Error("offline")),
+		});
+		const cached = restartedRegistry.find("probe", "probe-model");
+		expect(cached?.headers?.Authorization).toBe("Bearer runtime-key");
+
+		authStorage.removeRuntimeApiKey("probe");
+		// No configured apiKey exists, so with the credential withdrawn the model
+		// must carry no authorization at all rather than the withdrawn one.
+		expect(cached?.headers?.Authorization).toBeUndefined();
+	});
 });

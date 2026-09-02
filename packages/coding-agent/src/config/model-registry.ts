@@ -1152,7 +1152,11 @@ export class ModelRegistry {
 					? cache.models
 					: restorableHeaderFallback
 						? cache.models.map(model =>
-								omittedHeaderIds.has(model.id) ? { ...model, headers: { ...restorableHeaderFallback } } : model,
+								// The fallback is a live header proxy: hand it over as-is.
+								// Spreading it froze the bearer that happened to be
+								// installed at startup, so a cached row kept sending a
+								// runtime key an SDK host had since removed.
+								omittedHeaderIds.has(model.id) ? { ...model, headers: restorableHeaderFallback } : model,
 							)
 						: cache.models.filter(model => !omittedHeaderIds.has(model.id));
 			if (restorableHeaderFallback && cache.unrestorableHeaderModelIds.length > 0) {

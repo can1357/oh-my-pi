@@ -10,8 +10,8 @@ const OPEN_FLAGS = fs.constants.O_RDONLY | fs.constants.O_NONBLOCK | (fs.constan
 
 // fs/promises has no fstat/close for a bare descriptor, and the launcher's fd
 // is not ours to adopt as a FileHandle, so promisify the callback forms rather
-// than block the event loop with the sync ones.
-const fstatByFd = promisify(fs.fstat);
+// than block the event loop with the sync ones. `fs.fstat` is promisified at
+// the callsite so a test can substitute it through the module object.
 const closeByFd = promisify(fs.close);
 
 /** Provider name / API key pairs recovered from a validated bundle. */
@@ -69,13 +69,17 @@ export async function readProviderApiKeyBundleFd(value: string | number): Promis
 	if (!Number.isSafeInteger(fd) || fd <= 2) {
 		throw new CliUsageError("--provider-api-keys-fd must be an integer descriptor greater than 2");
 	}
-	let stat: fs.Stats;
+	// The stat lives inside the ownership cleanup: an `fstat` that fails for a
+	// still-open descriptor (EIO, EOVERFLOW) must not leave the launcher's
+	// credential fd inheritable by later child processes. `closeByFd` swallows
+	// EBADF, so an already-invalid descriptor costs nothing here.
 	try {
-		stat = await fstatByFd(fd);
-	} catch {
-		throw new CliUsageError("--provider-api-keys-fd must name a readable open descriptor");
-	}
-	try {
+		let stat: fs.Stats;
+		try {
+			stat = await promisify(fs.fstat)(fd);
+		} catch {
+			throw new CliUsageError("--provider-api-keys-fd must name a readable open descriptor");
+		}
 		validateBundleFile(stat);
 		return await readBundle((buffer, offset, length, position) => readFd(fd, buffer, offset, length, position));
 	} catch (error) {
