@@ -18,7 +18,7 @@ provider "google-antigravity" {
 				thinking-mode "budget"
 				thinking-suppress-when-off #true
 			}
-			revision ">=3.6 <3.8" {
+			revision ">=3.6" {
 				thinking-mode "google-level"
 				thinking-requires-effort #true
 			}

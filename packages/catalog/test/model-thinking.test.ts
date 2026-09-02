@@ -523,6 +523,39 @@ describe("model thinking derivation", () => {
 		expect(mapEffortToGoogleThinkingLevel(Effort.Minimal)).toBe("MINIMAL");
 	});
 
+	it("drops minimal from Gemini 3.7 Flash only on the direct google-level transports (#10543)", () => {
+		// Google's thinkingLevel table marks `minimal` unsupported for 3.7 Flash
+		// (400 THINKING_LEVEL_MINIMAL). Only the direct google-level transports emit
+		// `thinkingLevel` on the wire, so the tier is dropped there; budget and
+		// reasoning-effort resellers never send the rejected value and keep it. These
+		// specs carry no explicit thinking, so efforts derive from the KDL cascade.
+		const vertexFlash37 = createModel({
+			id: "gemini-3.7-flash",
+			api: "google-vertex",
+			provider: "google-vertex",
+		});
+		expect(getSupportedEfforts(vertexFlash37)).toEqual([Effort.Low, Effort.Medium, Effort.High]);
+		expect(() => requireSupportedEffort(vertexFlash37, Effort.Minimal)).toThrow(/not supported/);
+
+		// Every other Flash revision on the same transport keeps the four-tier scale.
+		const vertexFlash36 = createModel({
+			id: "gemini-3.6-flash",
+			api: "google-vertex",
+			provider: "google-vertex",
+		});
+		expect(getSupportedEfforts(vertexFlash36)).toEqual([Effort.Minimal, Effort.Low, Effort.Medium, Effort.High]);
+
+		// Resellers on non-google-level transports emit reasoning_effort / budget,
+		// never `thinkingLevel: MINIMAL`, so 3.7 Flash keeps `minimal` there.
+		const resellerFlash37 = createModel({
+			id: "google/gemini-3.7-flash",
+			api: "openai-completions",
+			provider: "deepinfra",
+			baseUrl: "https://api.deepinfra.com/v1/openai",
+		});
+		expect(getSupportedEfforts(resellerFlash37)).toContain(Effort.Minimal);
+	});
+
 	it("bakes requiresEffort for Gemini 3.x on any provider and backfills explicit metadata", () => {
 		// Derivation: aggregator-hosted Gemini 3.5 gets the flag, 2.5 does not.
 		const openRouterFlash = createModel({
@@ -744,6 +777,22 @@ describe("model thinking derivation", () => {
 		expect(direct.compat.supportsMidConversationToolChanges).toBe(true);
 		expect(direct.compat.supportsPerMessageEffort).toBe(true);
 		expect(direct.compat.supportsTurnScopedSystem).toBe(true);
+	});
+
+	it("does not advertise mid-conversation system messages on Claude Sonnet 5", () => {
+		const sonnet5 = createModel({
+			id: "claude-sonnet-5",
+			api: "anthropic-messages",
+			provider: "anthropic",
+		});
+		const opus48 = createModel({
+			id: "claude-opus-4-8",
+			api: "anthropic-messages",
+			provider: "anthropic",
+		});
+
+		expect(sonnet5.compat.supportsMidConversationSystem).toBe(false);
+		expect(opus48.compat.supportsMidConversationSystem).toBe(true);
 	});
 
 	it("classifies OpenAI-schema Bedrock models as effort, leaving gpt-oss on budget", () => {

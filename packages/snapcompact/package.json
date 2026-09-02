@@ -1,7 +1,7 @@
 {
   "type": "module",
   "name": "@oh-my-pi/snapcompact",
-  "version": "18.1.2",
+  "version": "18.1.4",
   "description": "Bitmap-frame context compression for vision-capable LLMs",
   "homepage": "https://omp.sh",
   "author": "Stencil Labs, Inc.",

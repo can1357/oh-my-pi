@@ -34,6 +34,7 @@ export interface GoogleGeminiCliModelManagerConfig {
 }
 
 const CLOUD_CODE_ASSIST_ENDPOINT = "https://cloudcode-pa.googleapis.com";
+const GEMINI_37_FLASH_CACHE_MIGRATION_MODEL_IDS = ["gemini-3.7-flash"] as const;
 
 function toDiscoveryFetch(fetchImpl: FetchImpl | undefined): typeof fetch | undefined {
 	if (!fetchImpl) {
@@ -51,6 +52,7 @@ export function googleModelManagerOptions(
 	const apiKey = config?.apiKey;
 	return {
 		providerId: "google",
+		dropCachedModelIdsOnStaticMismatch: GEMINI_37_FLASH_CACHE_MIGRATION_MODEL_IDS,
 		...(apiKey
 			? { fetchDynamicModels: () => fetchGeminiModels({ apiKey, fetch: toDiscoveryFetch(config?.fetch) }) }
 			: undefined),
@@ -58,7 +60,10 @@ export function googleModelManagerOptions(
 }
 
 export function googleVertexModelManagerOptions(_config?: GoogleVertexModelManagerConfig): ModelManagerOptions {
-	return { providerId: "google-vertex" };
+	return {
+		providerId: "google-vertex",
+		dropCachedModelIdsOnStaticMismatch: GEMINI_37_FLASH_CACHE_MIGRATION_MODEL_IDS,
+	};
 }
 
 export function googleAntigravityModelManagerOptions(

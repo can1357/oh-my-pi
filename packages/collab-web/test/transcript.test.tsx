@@ -2,7 +2,11 @@ import { describe, expect, it } from "bun:test";
 import type { AssistantMessage, SessionEntry } from "@oh-my-pi/pi-wire";
 import { renderToStaticMarkup } from "react-dom/server";
 import "./transcript-dom-shim";
-import { Transcript } from "../src/components/transcript/Transcript";
+import {
+	followTranscriptTail,
+	Transcript,
+	updateTranscriptTailLock,
+} from "../src/components/transcript/Transcript";
 import type { ActiveTool } from "../src/lib/client";
 
 const TOOL_CALL_ID = "call-running-tool";
@@ -143,5 +147,28 @@ describe("Transcript message Markdown", () => {
 
 		expect(countElements(html, ".tr-row--user .tr-md code")).toBe(1);
 		expect(countElements(html, ".tr-row--user .tr-md strong")).toBe(1);
+	});
+});
+
+describe("Transcript tail-follow scroll operations", () => {
+	it("restores tail-follow when a connection becomes live", () => {
+		const element = { scrollTop: 0, scrollHeight: 1_000, clientHeight: 200 };
+		const lock = { current: false };
+
+		followTranscriptTail(element, lock, true);
+		expect(lock.current).toBe(true);
+		expect(element.scrollTop).toBe(1_000);
+
+		element.scrollTop = 600;
+		updateTranscriptTailLock(element, lock);
+		expect(lock.current).toBe(false);
+
+		element.scrollHeight = 1_200;
+		followTranscriptTail(element, lock);
+		expect(element.scrollTop).toBe(600);
+
+		followTranscriptTail(element, lock, true);
+		expect(lock.current).toBe(true);
+		expect(element.scrollTop).toBe(1_200);
 	});
 });

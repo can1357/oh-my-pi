@@ -1908,9 +1908,10 @@ export class Settings {
 			raw.steeringMode = raw.queueMode;
 			delete raw.queueMode;
 		}
-		// doubleEscapeAction: "branch"/"tree" -> "rewind". Both legacy actions are
-		// superseded by the in-transcript rewind selector; only "none" survives.
-		if (raw.doubleEscapeAction === "branch" || raw.doubleEscapeAction === "tree") {
+		// doubleEscapeAction: legacy "branch" -> "rewind". The old branch backtrack
+		// was superseded by the in-transcript rewind selector; "tree" survives as a
+		// current action (opens the session tree) beside "rewind" and "none".
+		if (raw.doubleEscapeAction === "branch") {
 			raw.doubleEscapeAction = "rewind";
 		}
 

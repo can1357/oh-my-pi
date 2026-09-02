@@ -13,7 +13,7 @@ import {
 	type Skill,
 } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
-
+import { restoreEnvValue } from "./helpers/settings-test-state";
 const fixturesDir = path.resolve(import.meta.dirname, "fixtures/skills");
 const collisionFixturesDir = path.resolve(import.meta.dirname, "fixtures/skills-collision");
 
@@ -185,6 +185,9 @@ describe("skills", () => {
 		});
 
 		it("should keep user Claude skills when project .claude/skills is missing", async () => {
+			const originalClaudeConfigDir = process.env.CLAUDE_CONFIG_DIR;
+			delete process.env.CLAUDE_CONFIG_DIR;
+			delete Bun.env.CLAUDE_CONFIG_DIR;
 			const tempHomeDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-claude-home-"));
 			const tempProjectDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-claude-project-"));
 
@@ -211,6 +214,7 @@ describe("skills", () => {
 				const result = await claudeProvider!.load({ cwd: tempProjectDir, home: tempHomeDir, repoRoot: null });
 				expect(result.items.some(skill => skill.name === "user-only-skill" && skill.level === "user")).toBe(true);
 			} finally {
+				restoreEnvValue("CLAUDE_CONFIG_DIR", originalClaudeConfigDir);
 				await removeWithRetries(tempProjectDir);
 				await removeWithRetries(tempHomeDir);
 			}

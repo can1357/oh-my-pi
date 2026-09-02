@@ -109,6 +109,12 @@ export class PrewalkCoordinator {
 		return this.#prewalk;
 	}
 
+	/** Whether the armed prewalk would perform a model or thinking-level handoff. */
+	get willHandoff(): boolean {
+		const prewalk = this.#prewalk;
+		return prewalk !== undefined && !this.#isNoop(prewalk);
+	}
+
 	#isNoop(prewalk: Prewalk): boolean {
 		return prewalkWouldBeNoop(
 			this.#host.model(),

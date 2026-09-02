@@ -2,7 +2,7 @@ import type { AssistantMessage, ImageContent, SessionEntry, TextContent, ToolRes
 import { ChevronRight } from "lucide-react";
 import type { ReactNode } from "react";
 import { memo, useEffect, useMemo, useRef, useState } from "react";
-import type { ActiveTool } from "../../lib/client";
+import type { ActiveTool, ConnectionPhase } from "../../lib/client";
 import { fmtTokens } from "../../lib/format";
 import type { ToolRenderHost } from "../../tool-render";
 import { Markdown } from "./Markdown";
@@ -18,6 +18,29 @@ export interface TranscriptProps {
 	compact?: boolean; // dense variant for the agent drawer
 	/** Sub-session drill-down capabilities forwarded to tool renderers. */
 	host?: ToolRenderHost;
+	/** Main connection phase; absent for the agent drawer's compact transcript. */
+	phase?: ConnectionPhase;
+}
+
+interface ScrollGeometry {
+	scrollTop: number;
+	readonly scrollHeight: number;
+	readonly clientHeight: number;
+}
+
+interface TailLock {
+	current: boolean;
+}
+
+/** Scroll to the tail while locked; `force` re-arms the lock for a `live` transition. */
+export function followTranscriptTail(element: ScrollGeometry, lock: TailLock, force = false): void {
+	if (force) lock.current = true;
+	if (lock.current) element.scrollTop = element.scrollHeight;
+}
+
+/** Re-derive the lock from current scroll geometry (locked within 40px of the bottom). */
+export function updateTranscriptTailLock(element: ScrollGeometry, lock: TailLock): void {
+	lock.current = element.scrollHeight - element.scrollTop - element.clientHeight <= 40;
 }
 
 function Row({
@@ -239,7 +262,7 @@ const EntryRow = memo(function EntryRow({ entry, results, active, host }: EntryR
 }, entryRowEqual);
 
 export function Transcript(props: TranscriptProps): ReactNode {
-	const { entries, stream, streamDone, activeTools, working, compact, host } = props;
+	const { entries, stream, streamDone, activeTools, working, compact, host, phase } = props;
 
 	const results = useMemo(() => {
 		const map = new Map<string, ToolResultMessage>();
@@ -257,8 +280,15 @@ export function Transcript(props: TranscriptProps): ReactNode {
 	// Follow the tail while bottom-locked; releasing/re-arming happens in onScroll.
 	useEffect(() => {
 		const el = rootRef.current;
-		if (el !== null && lockRef.current) el.scrollTop = el.scrollHeight;
+		if (el !== null) followTranscriptTail(el, lockRef);
 	}, [entries, stream, activeTools, working]);
+
+	// A `live` transition (initial connect or reconnect) jumps to the latest message
+	// regardless of the prior scroll position. Absent for the agent drawer's compact transcript.
+	useEffect(() => {
+		const el = rootRef.current;
+		if (phase === "live" && el !== null) followTranscriptTail(el, lockRef, true);
+	}, [phase]);
 
 	// Active tools not already represented as toolCall blocks in committed rows or the stream ghost.
 	const renderedToolIds = new Set<string>();
@@ -284,9 +314,7 @@ export function Transcript(props: TranscriptProps): ReactNode {
 			className={`tr-root${compact === true ? " tr-root--compact" : ""}`}
 			onScroll={() => {
 				const el = rootRef.current;
-				if (el !== null) {
-					lockRef.current = el.scrollHeight - el.scrollTop - el.clientHeight <= 40;
-				}
+				if (el !== null) updateTranscriptTailLock(el, lockRef);
 			}}
 		>
 			{entries.length === 0 && stream === null && !working && <div className="tr-empty">no activity yet</div>}

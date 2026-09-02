@@ -168,4 +168,31 @@ describe("mergeDiscoveredModel", () => {
 			await fs.rm(tokenFile, { force: true });
 		}
 	});
+
+	test("authHeader+apiKey provider (no explicit headers) re-derives Authorization live on rotation (#10551)", async () => {
+		const tokenFile = path.join(os.tmpdir(), `omp-ah-${Date.now()}-${Math.random().toString(36).slice(2)}.txt`);
+		const readScript = "process.stdout.write(await Bun.file(Bun.argv[1]).text())";
+		const apiKey = `!${JSON.stringify(process.execPath)} -e "${readScript}" ${JSON.stringify(tokenFile)}`;
+		await Bun.write(tokenFile, "token-A");
+		try {
+			// `discoverOpenAIModelsList` bakes a discovery-time resolved bearer
+			// into `model.headers.Authorization`; with `authHeader: true` + a
+			// command-backed `apiKey` and no explicit `headers:` block the merge
+			// must re-derive Authorization from the live `apiKey` instead.
+			const discovered: Model<"openai-completions"> = {
+				...bundled(STANDARD),
+				headers: { Authorization: "Bearer stale-token" },
+			};
+			const merged = mergeDiscoveredModel(discovered, undefined, { authHeader: true, apiKey });
+			// Live apiKey wins over the discovery-time baked bearer...
+			expect(merged.headers?.Authorization).toBe("Bearer token-A");
+			// ...and a 401 force-refresh (command-cache invalidation) reaches it.
+			await Bun.write(tokenFile, "token-B");
+			invalidateCommandConfig(apiKey);
+			expect(merged.headers?.Authorization).toBe("Bearer token-B");
+		} finally {
+			invalidateCommandConfig(apiKey);
+			await fs.rm(tokenFile, { force: true });
+		}
+	});
 });
