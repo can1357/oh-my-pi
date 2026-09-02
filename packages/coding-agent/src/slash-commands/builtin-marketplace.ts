@@ -47,7 +47,11 @@ export const BUILTIN_MARKETPLACE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec>
 		acpDescription: "Manage plugins from marketplaces",
 		acpInputHint: "<subcommand>",
 		subcommands: [
-			{ name: "add", description: "Add a marketplace source, or repoint one with --force", usage: "<source> [--force]" },
+			{
+				name: "add",
+				description: "Add a marketplace source, or repoint one with --force",
+				usage: "<source> [--force]",
+			},
 			{ name: "remove", description: "Remove a marketplace source", usage: "<name>" },
 			{ name: "update", description: "Update marketplace catalog(s)", usage: "[name]" },
 			{ name: "list", description: "List configured marketplaces" },
