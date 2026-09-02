@@ -56,6 +56,7 @@ function independentRole(): PanelRole {
 function resolvedMember(overrides: Partial<ResolvedPanelMember> = {}): ResolvedPanelMember {
 	return {
 		index: 0,
+		requestedSelector: "claude-opus-4-6",
 		model: "claude-opus-4-6",
 		selector: "claude-opus-4-6",
 		modelId: "claude-opus-4-6",

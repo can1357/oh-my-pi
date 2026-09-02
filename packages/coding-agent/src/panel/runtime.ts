@@ -11,10 +11,13 @@ import { runStructuredSubagent } from "../task/structured-subagent";
 import type { AgentDefinition } from "../task/types";
 import { AUTO_THINKING, type ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import type { AgentProgress, SingleResult } from "@oh-my-pi/pi-tui/tools/task";
+import type { ModelRegistry } from "../config/model-registry";
+import type { Settings } from "../config/settings";
 import type { ToolSession } from "../tools";
 import { createPanelPersonaAgent, PANEL_INDEPENDENT_AGENT } from "./agents";
 import {
 	PanelConfigError,
+	panelLineupHash,
 	panelModelFamily,
 	parsePanelSettings,
 	resolvePanelPersona,
@@ -71,12 +74,22 @@ export interface PanelRunResult {
 	readonly cancelled: boolean;
 	readonly usage: PanelUsage;
 	readonly synthesisInput: string;
+	/** Content hash of the lineup that produced these results. */
+	readonly lineupHash: string;
 }
 
 /** A fully resolved, pre-dispatch panel lineup. */
 export interface PanelRunPreview {
 	readonly role: ResolvedPanelRole;
 	readonly members: readonly ResolvedPanelMember[];
+	/** Content hash of the resolved lineup, from {@link panelLineupHash}. */
+	readonly lineupHash: string;
+}
+
+/** One resolved lineup plus the hash that names it, returned by {@link resolvePanelLineup}. */
+export interface ResolvedPanelLineup {
+	readonly members: readonly ResolvedPanelMember[];
+	readonly lineupHash: string;
 }
 
 /**
@@ -138,20 +151,49 @@ function validateThinkingLevel(model: Model, thinking: ConfiguredThinkingLevel |
 	}
 }
 
-function resolveMembers(options: { session: ToolSession; role: ResolvedPanelRole }): ResolvedPanelMember[] {
-	const { session, role } = options;
-	const modelRegistry = session.modelRegistry;
+/** The registry and settings surface a lineup resolution needs, met by both a `ToolSession` and a custom-tool context. */
+export interface PanelLineupContext {
+	readonly modelRegistry?: Pick<ModelRegistry, "getAvailable" | "hasConfiguredAuth">;
+	readonly settings?: Settings;
+}
+
+/** The candidate that resolved for one member, with the route it selected. */
+interface CandidateMatch {
+	readonly requestedSelector: string;
+	readonly model: Model;
+	readonly thinkingLevel?: ConfiguredThinkingLevel;
+}
+
+function resolveMembers(options: { context: PanelLineupContext; role: ResolvedPanelRole }): ResolvedPanelMember[] {
+	const { context, role } = options;
+	const modelRegistry = context.modelRegistry;
 	if (!modelRegistry) {
 		throw new PanelConfigError("panel", "model registry is unavailable");
 	}
 
 	return role.role.members.map((member, index) => {
 		const modelPath = memberPath(role.roleId, index, "model");
-		const resolved = resolveModelOverride([member.model], modelRegistry, session.settings);
-		const model = resolved.model;
-		if (!model) {
-			throw new PanelConfigError(modelPath, `model selector "${member.model}" is unavailable`);
+		const candidates = [member.model, ...(member.fallbacks ?? [])];
+		// Resolved one candidate at a time rather than as one pattern list, so the
+		// candidate that won is known and its own thinking suffix is the one read.
+		let match: CandidateMatch | undefined;
+		for (const candidate of candidates) {
+			const attempt = resolveModelOverride([candidate], modelRegistry, context.settings);
+			if (attempt.model) {
+				match = { requestedSelector: candidate, model: attempt.model, thinkingLevel: attempt.thinkingLevel };
+				break;
+			}
 		}
+		if (!match) {
+			// Both arms name the configured candidates, never the served route.
+			throw new PanelConfigError(
+				modelPath,
+				candidates.length === 1
+					? `model selector "${member.model}" is unavailable`
+					: `no candidate is available: ${candidates.map(candidate => `"${candidate}"`).join(", ")}`,
+			);
+		}
+		const { model, requestedSelector } = match;
 		if (!modelRegistry.hasConfiguredAuth(model)) {
 			throw new PanelConfigError(
 				modelPath,
@@ -161,21 +203,44 @@ function resolveMembers(options: { session: ToolSession; role: ResolvedPanelRole
 
 		const thinking =
 			member.thinking ??
-			extractExplicitThinkingSelector(member.model, session.settings, {
+			extractExplicitThinkingSelector(requestedSelector, context.settings, {
 				isLiteralModelId: (provider, id) => model.provider === provider && model.id === id,
 			}) ??
-			resolved.thinkingLevel;
+			match.thinkingLevel;
 		validateThinkingLevel(model, thinking, memberPath(role.roleId, index, "thinking"));
 
 		return {
 			...member,
 			index,
+			requestedSelector,
 			selector: formatModelStringWithRouting(model),
 			modelId: model.id,
 			family: panelModelFamily(model),
 			...(thinking === undefined || thinking === ThinkingLevel.Inherit ? {} : { thinking }),
 		};
 	});
+}
+
+/**
+ * Resolves and freezes one lineup without preparing a dispatch: candidates in
+ * priority order, the role's family policy, and the content hash that names the
+ * result. Exported for extension packages that own their own execution protocol
+ * but must not reimplement roster resolution. Member-count bounds belong to the
+ * settings schema, so a caller-built role is resolved at whatever size it is.
+ */
+export function resolvePanelLineup(options: {
+	context: PanelLineupContext;
+	roleId: string;
+	role: PanelRole;
+	taskMode: PanelTaskMode;
+}): ResolvedPanelLineup {
+	const { context, roleId, role, taskMode } = options;
+	const members = resolveMembers({ context, role: { roleId, role } });
+	validateResolvedPanelRole(roleId, role, members, taskMode);
+	return {
+		members: Object.freeze(members.map(member => Object.freeze({ ...member }))),
+		lineupHash: panelLineupHash(role, members),
+	};
 }
 
 interface ResolvedPanelRun {
@@ -196,9 +261,8 @@ function resolvePanelRun(
 		ephemeralRole === undefined
 			? resolvePanelRole(settings, requestedRole)
 			: resolveEphemeralPanelRole(ephemeralRole, settings);
-	const members = resolveMembers({ session, role });
-	validateResolvedPanelRole(role.roleId, role.role, members, taskMode);
-	return { settings, preview: { role, members } };
+	const lineup = resolvePanelLineup({ context: session, roleId: role.roleId, role: role.role, taskMode });
+	return { settings, preview: { role, members: lineup.members, lineupHash: lineup.lineupHash } };
 }
 
 /** Clone and freeze the preview boundary before it can be handed to the TUI. */
@@ -207,7 +271,7 @@ function freezePanelPreview(preview: PanelRunPreview): PanelRunPreview {
 	const roleConfig = Object.freeze({ strategy: preview.role.role.strategy, members: roleMembers });
 	const role = Object.freeze({ roleId: preview.role.roleId, role: roleConfig });
 	const members = Object.freeze(preview.members.map(member => Object.freeze({ ...member })));
-	return Object.freeze({ role, members });
+	return Object.freeze({ role, members, lineupHash: preview.lineupHash });
 }
 
 function preparedPanelRunFor(options: PanelRunOptions, plan: PanelRunPlan): PreparedPanelRun {
@@ -340,7 +404,7 @@ export async function runPanel(options: PanelRunOptions): Promise<PanelRunResult
 	const { session, taskMode, request, signal, onProgress } = options;
 	const plan = options.plan ?? preparePanelRun(options);
 	const {
-		preview: { role, members },
+		preview: { role, members, lineupHash },
 	} = plan;
 	const { prepared } = preparedPanelRunFor(options, plan);
 
@@ -394,5 +458,5 @@ export async function runPanel(options: PanelRunOptions): Promise<PanelRunResult
 		results,
 	});
 
-	return { role, members, results, usage, synthesisInput, cancelled };
+	return { role, members, results, usage, synthesisInput, cancelled, lineupHash };
 }

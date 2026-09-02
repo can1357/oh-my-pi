@@ -22,6 +22,11 @@ export type PanelPersonaTools = (typeof PANEL_PERSONA_TOOLS)[number];
 export interface PanelMember {
 	/** A literal model selector or an ordinary `@modelRole` reference. */
 	readonly model: string;
+	/**
+	 * Ordered alternates tried when `model` resolves to nothing available, with
+	 * the same first-match semantics a prioritized agent `model` list uses.
+	 */
+	readonly fallbacks?: readonly string[];
 	/** An explicit panel-member thinking override, when configured. */
 	readonly thinking?: ConfiguredThinkingLevel;
 	/** A built-in or configured persona identifier, required by persona panels. */
@@ -32,6 +37,17 @@ export interface PanelMember {
 export interface PanelRole {
 	readonly strategy: PanelStrategy;
 	readonly members: readonly PanelMember[];
+	/**
+	 * Floor on distinct resolved model families. Resolution fails below it, so a
+	 * lineup that collapses onto fewer lineages than required never dispatches.
+	 */
+	readonly minFamilies?: number;
+	/**
+	 * Whether every member must resolve to its own family. Defaults to `true`
+	 * for `independent` and `false` for `personas`, where repeated families are
+	 * the perspective-coverage contract.
+	 */
+	readonly distinctFamilies?: boolean;
 }
 
 /** A read-only perspective that can be assigned to a personas panel member. */
@@ -59,6 +75,12 @@ export interface ResolvedPanelRole {
 export interface ResolvedPanelMember extends PanelMember {
 	/** The role-local member position, assigned by host code. */
 	readonly index: number;
+	/**
+	 * The configured candidate that actually resolved — `model` or one of its
+	 * `fallbacks`. Kept beside `selector` so a served route that differs from
+	 * the requested one is visible rather than inferred.
+	 */
+	readonly requestedSelector: string;
 	/** The selector resolved for dispatch. */
 	readonly selector: string;
 	/** The selected model's canonical id, without a display suffix. */
