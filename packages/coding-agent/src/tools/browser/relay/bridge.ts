@@ -614,7 +614,7 @@ export class RelayBridge {
 		this.#extInfo = null;
 		this.#rejectPendingExtensionRpcs(new Error("relay extension disconnected"));
 		for (const tab of this.#tabs.values()) {
-			if (tab.recoveryStartUrl === null) tab.recoveryStartUrl = tab.url;
+			tab.recoveryStartUrl = tab.url;
 			if (tab.rootRuntimeEnabled) tab.restoreRootRuntime = true;
 			tab.attached = false;
 			tab.attaching = null;
@@ -3568,18 +3568,45 @@ export class RelayBridge {
 					"Page.addScriptToEvaluateOnNewDocument replay did not return an identifier",
 				);
 			}
+			let rootIdentifier = identifier;
+			if (script.params?.runImmediately === true && !runImmediately) {
+				const loaderAfterRegistration = await this.#mainFrameLoaderId(
+					tab.tabId,
+				).catch(() => undefined);
+				if (
+					currentLoaderId !== undefined &&
+					loaderAfterRegistration !== undefined &&
+					loaderAfterRegistration !== currentLoaderId
+				) {
+					await this.#rpc({
+						op: "send",
+						tabId: tab.tabId,
+						method: "Page.removeScriptToEvaluateOnNewDocument",
+						params: { identifier: rootIdentifier },
+					});
+					const retry = (await this.#rpc({
+						op: "send",
+						tabId: tab.tabId,
+						method: "Page.addScriptToEvaluateOnNewDocument",
+						params: { ...script.params, runImmediately: true },
+					})) as Record<string, unknown> | undefined;
+					if (typeof retry?.identifier !== "string")
+						throw new Error(
+							"Page.addScriptToEvaluateOnNewDocument replay did not return an identifier",
+						);
+					rootIdentifier = retry.identifier;
+				}
+			}
 			const current = this.#preloadScript(
 				tab,
 				script.ownerSessionId,
 				script.clientIdentifier,
 			);
 			if (!current) {
-				this.#enqueuePreloadScriptCleanup(tab, [
-					{ ...script, rootIdentifier: identifier },
-				]);
+				this.#enqueuePreloadScriptCleanup(tab, [{ ...script, rootIdentifier }]);
 				continue;
 			}
-			current.rootIdentifier = identifier;
+			current.rootIdentifier = rootIdentifier;
 			if (currentLoaderId !== undefined) current.loaderId = currentLoaderId;
 		}
 		this.#scheduleLivePreloadScriptCleanup(tab);

@@ -322,8 +322,7 @@ function computeNextOrphanSweepDeadline(forceDisconnected) {
 }
 function scheduleOrphanSweepBeforeSuspend() {
   const nextDeadlineMs = computeNextOrphanSweepDeadline(true);
-  if (nextDeadlineMs !== orphanSweepDeadlineMs)
-    setOrphanSweepDeadline(nextDeadlineMs);
+  setOrphanSweepDeadline(nextDeadlineMs);
 }
 async function maybeRunOrphanSweep() {
   if (!shouldRunOrphanSweep({

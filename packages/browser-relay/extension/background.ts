@@ -302,8 +302,7 @@ function computeNextOrphanSweepDeadline(
  */
 function scheduleOrphanSweepBeforeSuspend(): void {
 	const nextDeadlineMs = computeNextOrphanSweepDeadline(true);
-	if (nextDeadlineMs !== orphanSweepDeadlineMs)
-		void setOrphanSweepDeadline(nextDeadlineMs);
+	void setOrphanSweepDeadline(nextDeadlineMs);
 }
 
 async function maybeRunOrphanSweep(): Promise<void> {
