@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added support for the `gemini-3.8-flash` model
+
 ## [18.1.3] - 2026-09-02
 
 ### Added

@@ -79,7 +79,7 @@ export function requireSupportedEffort<TApi extends Api>(model: ApiModel<TApi>, 
 
 /** Maps a normalized thinking effort to Google's `thinkingLevel` enum values.
  * When a collapsed family routes `minimal` onto the same wire id as `low`
- * (Antigravity Gemini 3.6/3.7 Flash), emit `LOW` — Cloud Code Assist rejects
+ * (Antigravity Gemini 3.6/3.7/3.8 Flash), emit `LOW` — Cloud Code Assist rejects
  * `MINIMAL` on those `-low` SKUs.
  */
 export function mapEffortToGoogleThinkingLevel<TApi extends Api>(

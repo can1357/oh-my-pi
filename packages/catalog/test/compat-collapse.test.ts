@@ -260,6 +260,47 @@ describe("collapseVariants with a reviewed table", () => {
 		expect(flash ? mapEffortToGoogleThinkingLevel(Effort.Minimal, flash) : undefined).toBe("LOW");
 	});
 
+	it("collapses Gemini 3.8 Flash tiers and tiered alias into one routed logical spec", () => {
+		const out = collapseVariants(
+			[
+				memberSpec("gemini-3.8-flash-high"),
+				memberSpec("gemini-3.8-flash-low"),
+				memberSpec("gemini-3.8-flash-medium"),
+				memberSpec("gemini-3.8-flash-tiered"),
+			],
+			{ table: antigravityTable },
+		);
+
+		expect(out).toHaveLength(1);
+		const flash = out[0];
+		expect(flash?.id).toBe("gemini-3.8-flash");
+		expect(flash?.name).toBe("Gemini 3.8 Flash");
+		expect(flash?.requestModelId).toBe("gemini-3.8-flash-low");
+		expect(flash?.thinking?.effortRouting).toEqual({
+			minimal: "gemini-3.8-flash-low",
+			low: "gemini-3.8-flash-low",
+			medium: "gemini-3.8-flash-medium",
+			high: "gemini-3.8-flash-high",
+		});
+
+		const model = buildModel(flash as ModelSpec<"google-gemini-cli">);
+		expect(mapEffortToGoogleThinkingLevel(Effort.Minimal, model)).toBe("LOW");
+		expect(mapEffortToGoogleThinkingLevel(Effort.Low, model)).toBe("LOW");
+		expect(resolveWireModelId(model, Effort.Minimal)).toBe("gemini-3.8-flash-low");
+		expect(resolveWireModelId(model, Effort.Low)).toBe("gemini-3.8-flash-low");
+		expect(resolveWireModelId(model, Effort.Medium)).toBe("gemini-3.8-flash-medium");
+		expect(resolveWireModelId(model, Effort.High)).toBe("gemini-3.8-flash-high");
+	});
+
+	it("bundles the routed gemini-3.8-flash model after generation", () => {
+		const models = getBundledModels("google-antigravity");
+		expect(models.some(model => model.id === "gemini-3.8-flash-tiered")).toBe(false);
+
+		const flash = getBundledModel("google-antigravity", "gemini-3.8-flash");
+		expect(flash?.thinking?.effortRouting?.minimal).toBe("gemini-3.8-flash-low");
+		expect(flash ? mapEffortToGoogleThinkingLevel(Effort.Minimal, flash) : undefined).toBe("LOW");
+	});
+
 	it("drops routes whose target member is absent", () => {
 		const out = collapseVariants([memberSpec("gemini-3.5-flash-extra-low")], { table: antigravityTable });
 

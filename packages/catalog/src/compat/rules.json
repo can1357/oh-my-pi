@@ -1337,6 +1337,13 @@
 					"aliases": [
 						"gemini-3.7-flash-tiered"
 					]
+				},
+				{
+					"provider": "google-antigravity",
+					"logical": "gemini-3.8-flash",
+					"aliases": [
+						"gemini-3.8-flash-tiered"
+					]
 				}
 			],
 			"variantFamilies": [
@@ -1380,6 +1387,31 @@
 						"low": "gemini-3.7-flash-low",
 						"medium": "gemini-3.7-flash-medium",
 						"high": "gemini-3.7-flash-high"
+					},
+					"mode": "google-level",
+					"efforts": [
+						"minimal",
+						"low",
+						"medium",
+						"high"
+					],
+					"requiresEffort": true
+				},
+				{
+					"provider": "google-antigravity",
+					"id": "gemini-3.8-flash",
+					"name": "Gemini 3.8 Flash",
+					"members": [
+						"gemini-3.8-flash-low",
+						"gemini-3.8-flash-medium",
+						"gemini-3.8-flash-high",
+						"gemini-3.8-flash-tiered"
+					],
+					"routing": {
+						"minimal": "gemini-3.8-flash-low",
+						"low": "gemini-3.8-flash-low",
+						"medium": "gemini-3.8-flash-medium",
+						"high": "gemini-3.8-flash-high"
 					},
 					"mode": "google-level",
 					"efforts": [
@@ -1640,6 +1672,31 @@
 						"low": "gemini-3.7-flash-low",
 						"medium": "gemini-3.7-flash-medium",
 						"high": "gemini-3.7-flash-high"
+					},
+					"mode": "google-level",
+					"efforts": [
+						"minimal",
+						"low",
+						"medium",
+						"high"
+					],
+					"requiresEffort": true
+				},
+				{
+					"provider": "google-gemini-cli",
+					"id": "gemini-3.8-flash",
+					"name": "Gemini 3.8 Flash",
+					"members": [
+						"gemini-3.8-flash-low",
+						"gemini-3.8-flash-medium",
+						"gemini-3.8-flash-high",
+						"gemini-3.8-flash-tiered"
+					],
+					"routing": {
+						"minimal": "gemini-3.8-flash-low",
+						"low": "gemini-3.8-flash-low",
+						"medium": "gemini-3.8-flash-medium",
+						"high": "gemini-3.8-flash-high"
 					},
 					"mode": "google-level",
 					"efforts": [
@@ -2708,6 +2765,33 @@
 				},
 				{
 					"provider": "devin",
+					"id": "gemini-3-8-flash",
+					"name": "Gemini 3.8 Flash",
+					"members": [
+						"gemini-3-8-flash-medium",
+						"gemini-3-8-flash-minimal",
+						"gemini-3-8-flash-low",
+						"gemini-3-8-flash-high"
+					],
+					"routing": {
+						"minimal": "gemini-3-8-flash-minimal",
+						"low": "gemini-3-8-flash-low",
+						"medium": "gemini-3-8-flash-medium",
+						"high": "gemini-3-8-flash-high"
+					},
+					"mode": "effort",
+					"efforts": [
+						"minimal",
+						"low",
+						"medium",
+						"high"
+					],
+					"defaultLevel": "medium",
+					"requiresEffort": true,
+					"defaultMember": "gemini-3-8-flash-medium"
+				},
+				{
+					"provider": "devin",
 					"id": "swe-1-7-lightning",
 					"name": "SWE-1.7 Lightning",
 					"members": [
@@ -3119,6 +3203,7 @@
 					"swe": "swe-1-7-lightning",
 					"claude-haiku-4.5": "claude-haiku-4-5",
 					"gemini-3.7-flash": "gemini-3-7-flash",
+					"gemini-3.8-flash": "gemini-3-8-flash",
 					"glm-5.2": "glm-5-2",
 					"gpt-5.6-luna": "gpt-5-6-luna",
 					"gpt-5.6-sol": "gpt-5-6-sol",
@@ -13950,7 +14035,10 @@
 						"models": [
 							"gemini-3-flash-preview",
 							"gemini-3-flash",
-							"gemini-3.5-flash"
+							"gemini-3.5-flash",
+							"gemini-3.6-flash",
+							"gemini-3.7-flash",
+							"gemini-3.8-flash"
 						]
 					},
 					{
