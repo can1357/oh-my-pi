@@ -1534,12 +1534,11 @@ export class ModelRegistry {
 				: `${providerConfig.provider}:openai-models-list-context-v3`;
 		}
 		if (providerConfig.discovery.type === "litellm") {
-			// rich-v4 invalidates rows whose `compatConfig` retained a colliding
-			// bundled model's provider-specific transport (e.g. Fireworks
-			// `wireModelIdMode`) before that leak was fixed (issue #9938); keep in
-			// lockstep with the catalog package's `litellm:rich-vN` namespace
-			// whenever LiteLLM mapping behavior changes.
-			return `${providerConfig.provider}:litellm-rich-v4`;
+			// rich-v9 invalidates rows that lack authoritative capability provenance,
+			// which would otherwise allow catalog fallbacks to override LiteLLM's
+			// explicit metadata. Keep this namespace in lockstep with the catalog
+			// package's `litellm:rich-vN` namespace whenever mapper behavior changes.
+			return `${providerConfig.provider}:litellm-rich-v9`;
 		}
 		return providerConfig.provider;
 	}

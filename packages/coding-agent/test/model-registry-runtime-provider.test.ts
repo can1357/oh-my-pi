@@ -366,6 +366,23 @@ describe("ModelRegistry runtime provider registration", () => {
 		expect(registry.find("eurouter", "minicpm-v-4.5")?.input).toEqual(["text"]);
 	});
 
+	test("preserves explicit zero costs from European gateway runtime discovery", async () => {
+		registry.registerProvider(
+			"nebius",
+			{
+				baseUrl: "https://runtime.example.com/v1",
+				apiKey: "RUNTIME_KEY",
+				api: "openai-completions",
+				fetchDynamicModels: async () => [{ ...baseModel, id: "Qwen/Qwen3-235B-A22B-Instruct-2507" }],
+			},
+			"ext://runtime",
+		);
+
+		await registry.refreshRuntimeProviders("online");
+
+		expect(registry.find("nebius", "Qwen/Qwen3-235B-A22B-Instruct-2507")?.cost).toEqual(baseModel.cost);
+	});
+
 	test("configured discovery suppresses extension fetchDynamicModels for the same provider", async () => {
 		const providerName = "runtime-configured-provider";
 		fs.writeFileSync(

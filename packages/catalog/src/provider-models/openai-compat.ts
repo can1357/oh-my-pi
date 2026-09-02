@@ -5965,16 +5965,19 @@ function mapLiteLLMRichEntry<TApi extends Api>(
 	const supportsReasoning = getLiteLLMMetadataValue(entry, "supports_reasoning");
 	const supportedOpenAIParams = getSupportedOpenAIParams(entry);
 	const supportsFunctionCalling = getLiteLLMMetadataValue(entry, "supports_function_calling");
+	const supportsToolsMetadata = getLiteLLMMetadataValue(entry, "supports_tools");
 	const supportsTools =
-		supportsFunctionCalling === true
-			? true
-			: supportsFunctionCalling === false
-				? false
-				: supportedOpenAIParams !== undefined
-					? supportedOpenAIParams.some(param =>
-							["tools", "tool_choice", "functions", "function_call"].includes(param),
-						)
-					: reference?.supportsTools;
+		typeof supportsToolsMetadata === "boolean"
+			? supportsToolsMetadata
+			: supportsFunctionCalling === true
+				? true
+				: supportsFunctionCalling === false
+					? false
+					: supportedOpenAIParams !== undefined
+						? supportedOpenAIParams.some(param =>
+								["tools", "tool_choice", "functions", "function_call"].includes(param),
+							)
+						: reference?.supportsTools;
 	// Enrich from the bundled reference with provider-INDEPENDENT reasoning
 	// hints only. The reference is resolved against the global bundled catalog,
 	// so a custom endpoint exposing an alias that collides with a bundled model
@@ -6000,6 +6003,13 @@ function mapLiteLLMRichEntry<TApi extends Api>(
 			? { omitReasoningEffort: referenceCompat.omitReasoningEffort }
 			: {}),
 	};
+	const catalogFallback =
+		typeof supportsVision === "boolean" || typeof supportsReasoning === "boolean"
+			? {
+					...(typeof supportsVision === "boolean" ? { liveInputModalities: true } : {}),
+					...(typeof supportsReasoning === "boolean" ? { liveReasoning: true } : {}),
+				}
+			: undefined;
 	return {
 		id,
 		name: toLiteLLMDisplayName(modelName, reference?.name, id),
@@ -6014,7 +6024,7 @@ function mapLiteLLMRichEntry<TApi extends Api>(
 				: supportsVision === false
 					? ["text"]
 					: (reference?.input ?? ["text"]),
-		...(typeof supportsVision === "boolean" ? { catalogFallback: { liveInputModalities: true } } : {}),
+		...(catalogFallback !== undefined ? { catalogFallback } : {}),
 		reasoning: typeof supportsReasoning === "boolean" ? supportsReasoning : (reference?.reasoning ?? false),
 		thinking: reference?.thinking,
 		cost: getLiteLLMCost(entry) ?? reference?.cost ?? UNKNOWN_PROXY_COST,
@@ -6041,7 +6051,9 @@ function mergeLiteLLMRichEndpointModels<TApi extends Api>(
 		contextWindow: next.hasContextWindow ? next.model.contextWindow : existing.model.contextWindow,
 		maxTokens: next.hasMaxTokens ? next.model.maxTokens : existing.model.maxTokens,
 		input: next.supportsVision === true || next.supportsVision === false ? next.model.input : existing.model.input,
-		...(typeof next.supportsVision === "boolean" ? { catalogFallback: next.model.catalogFallback } : {}),
+		...(existing.model.catalogFallback || next.model.catalogFallback
+			? { catalogFallback: { ...existing.model.catalogFallback, ...next.model.catalogFallback } }
+			: {}),
 		reasoning: typeof next.supportsReasoning === "boolean" ? next.model.reasoning : existing.model.reasoning,
 		cost: { ...existing.model.cost, ...existing.reportedCost, ...next.reportedCost },
 		compat: next.hasSupportedOpenAIParams ? next.model.compat : existing.model.compat,
@@ -6107,6 +6119,7 @@ async function fetchLiteLLMRichEndpoint<TApi extends Api>(
 			const supportsVision = getLiteLLMMetadataValue(entry, "supports_vision");
 			const supportsReasoning = getLiteLLMMetadataValue(entry, "supports_reasoning");
 			const supportsFunctionCalling = getLiteLLMMetadataValue(entry, "supports_function_calling");
+			const supportsTools = getLiteLLMMetadataValue(entry, "supports_tools");
 			const supportedOpenAIParams = getSupportedOpenAIParams(entry);
 			const next: LiteLLMRichEndpointModel<TApi> = {
 				model,
@@ -6116,6 +6129,7 @@ async function fetchLiteLLMRichEndpoint<TApi extends Api>(
 				hasContextWindow: toPositiveNumber(getLiteLLMMetadataValue(entry, "max_input_tokens"), null) !== null,
 				hasMaxTokens: toPositiveNumber(getLiteLLMMetadataValue(entry, "max_output_tokens"), null) !== null,
 				hasToolMetadata:
+					typeof supportsTools === "boolean" ||
 					supportsFunctionCalling === true ||
 					supportsFunctionCalling === false ||
 					supportedOpenAIParams !== undefined,
@@ -6179,10 +6193,19 @@ async function fetchLiteLLMRichModelsInternal<TApi extends Api>(
 				}
 				deduped.set(next.model.id, mergeLiteLLMRichEndpointModels(existing, next));
 			}
+			// `/v1/model/info` is only a path fallback for deployments where the
+			// unversioned endpoint is unavailable, not a second metadata source.
+			if (endpoint === "/model/info") {
+				break;
+			}
 			let needsMoreMetadata = false;
 			for (const entry of deduped.values()) {
 				if (
 					(entry.supportsVision !== true && entry.supportsVision !== false) ||
+					(entry.supportsReasoning !== true && entry.supportsReasoning !== false) ||
+					!entry.hasToolMetadata ||
+					!entry.hasContextWindow ||
+					!entry.hasMaxTokens ||
 					(options.resolveApi !== undefined && entry.apiRoute === "unknown") ||
 					(Object.keys(entry.reportedCost).length > 0 &&
 						(entry.reportedCost.input === undefined ||
