@@ -107,10 +107,17 @@ const DISCOVERY_ONLY_PROVIDERS = new Set(["ollama", "vllm", "lm-studio", "litell
  */
 const CREDENTIAL_SCOPED_PROVIDERS = new Set(["devin", "merge-gateway"]);
 
-export function shouldFetchCatalogProvider(providerId: string, requestedProvider?: string): boolean {
+export function shouldFetchProviderSource(providerId: string, requestedProvider?: string): boolean {
 	if (DISCOVERY_ONLY_PROVIDERS.has(providerId)) return false;
 	if (requestedProvider !== undefined) return providerId === requestedProvider;
 	return !CREDENTIAL_SCOPED_PROVIDERS.has(providerId);
+}
+
+export function shouldFetchModelsDevSource(requestedProvider?: string): boolean {
+	return (
+		requestedProvider === undefined ||
+		MODELS_DEV_PROVIDER_DESCRIPTORS.some(descriptor => descriptor.providerId === requestedProvider)
+	);
 }
 
 /**
@@ -535,10 +542,14 @@ async function fetchCodexDiscoveryModels(): Promise<ModelSpec<"openai-codex-resp
 
 async function generateModels() {
 	// Fetch models from dynamic sources.
-	const modelsDevModels = await loadModelsDevData();
+	const modelsDevModels = shouldFetchModelsDevSource(REQUESTED_PROVIDER)
+		? (await loadModelsDevData()).filter(
+				model => REQUESTED_PROVIDER === undefined || model.provider === REQUESTED_PROVIDER,
+			)
+		: [];
 	const catalogProviderDescriptors = PROVIDER_DESCRIPTORS.filter(
 		(descriptor): descriptor is CatalogProviderDescriptor =>
-			isCatalogDescriptor(descriptor) && shouldFetchCatalogProvider(descriptor.providerId, REQUESTED_PROVIDER),
+			isCatalogDescriptor(descriptor) && shouldFetchProviderSource(descriptor.providerId, REQUESTED_PROVIDER),
 	);
 	const catalogProviderModelBatches = await Promise.all(
 		catalogProviderDescriptors.map(async descriptor => ({
@@ -692,12 +703,14 @@ async function generateModels() {
 		{ label: "Codex", providerId: "openai-codex", authoritative: true, fetch: fetchCodexDiscoveryModels },
 	] as const;
 	const specialDiscoveries = await Promise.all(
-		specialDiscoverySources.map(async source => ({
-			label: source.label,
-			providerId: source.providerId,
-			authoritative: source.authoritative,
-			models: await source.fetch(),
-		})),
+		specialDiscoverySources
+			.filter(source => shouldFetchProviderSource(source.providerId, REQUESTED_PROVIDER))
+			.map(async source => ({
+				label: source.label,
+				providerId: source.providerId,
+				authoritative: source.authoritative,
+				models: await source.fetch(),
+			})),
 	);
 	const authoritativeSpecialDiscoveryProviders = new Set<string>();
 	for (const discovery of specialDiscoveries) {

@@ -130,18 +130,20 @@ export function createPersistedSubagentReviverFactory(
 			const mcpManager = restrictToolNames ? undefined : MCPManager.instance();
 			const mcpProxyTools = mcpManager ? createMCPProxyTools(mcpManager) : [];
 			let effectiveOutputSchemaMode = init.outputSchemaMode;
+			const requestedOutputSchemaMode = init.outputSchemaRequestedMode ?? init.outputSchemaMode;
 			const resolveOutputSchemaFailurePolicy =
-				init.outputSchema !== undefined &&
-				init.outputSchemaFailureToolNames === undefined &&
-				init.outputSchemaCorrectionLocked !== true
+				init.outputSchema !== undefined && init.outputSchemaCorrectionLocked !== true
 					? (liveModel: Model) => {
-							if (!modelRequiresStructuredOutputHardening(liveModel)) return undefined;
+							if (!modelRequiresStructuredOutputHardening(liveModel)) {
+								effectiveOutputSchemaMode = requestedOutputSchemaMode;
+								return undefined;
+							}
 							effectiveOutputSchemaMode = "strict";
 							try {
 								const policy = resolveStructuredOutputHarnessPolicy(
 									true,
 									init.outputSchema,
-									init.outputSchemaMode,
+									requestedOutputSchemaMode,
 								);
 								return policy.failureToolNames
 									? { mode: policy.mode ?? "strict", toolNames: policy.failureToolNames }
@@ -171,7 +173,8 @@ export function createPersistedSubagentReviverFactory(
 				toolNames: revivedToolNames,
 				outputSchema: init.outputSchema,
 				outputSchemaMode: init.outputSchemaMode,
-				outputSchemaFailureToolNames: init.outputSchemaFailureToolNames,
+				outputSchemaFailureToolNames:
+					init.outputSchemaCorrectionLocked === true ? init.outputSchemaFailureToolNames : undefined,
 				resolveOutputSchemaFailurePolicy,
 				restrictToolNames: restrictToolNames || undefined,
 				requireYieldTool: true,

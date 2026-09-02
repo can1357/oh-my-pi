@@ -79,6 +79,7 @@ async function createPersistedSession(
 		outputSchemaCorrectionLocked?: boolean;
 		outputSchema?: unknown;
 		outputSchemaMode?: "permissive" | "strict";
+		outputSchemaRequestedMode?: "permissive" | "strict";
 	},
 ): Promise<string> {
 	const manager = SessionManager.create(cwd, path.join(cwd, "sessions"));
@@ -92,6 +93,7 @@ async function createPersistedSession(
 		outputSchemaCorrectionLocked: contract?.outputSchemaCorrectionLocked,
 		outputSchema: contract?.outputSchema,
 		outputSchemaMode: contract?.outputSchemaMode,
+		outputSchemaRequestedMode: contract?.outputSchemaRequestedMode,
 		restrictToolNames,
 		modelRole,
 		resolvedModel: modelRole ? "anthropic/claude-sonnet-4-5" : undefined,
@@ -346,7 +348,8 @@ describe("persisted subagent revival", () => {
 				properties: { token: { type: "string" } },
 				required: ["token"],
 			},
-			outputSchemaMode: "permissive",
+			outputSchemaMode: "strict",
+			outputSchemaRequestedMode: "permissive",
 		});
 		let capturedOptions: CreateAgentSessionOptions | undefined;
 		let wakeOptions: IrcWakeTurnMonitorOptions | undefined;
@@ -371,6 +374,8 @@ describe("persisted subagent revival", () => {
 			toolNames: ["yield"],
 		});
 		expect(wakeOptions?.getOutputSchemaMode?.()).toBe("strict");
+		expect(capturedOptions?.resolveOutputSchemaFailurePolicy?.({} as Model)).toBeUndefined();
+		expect(wakeOptions?.getOutputSchemaMode?.()).toBe("permissive");
 	});
 
 	it("fails closed when live-model hardening encounters an invalid persisted schema", async () => {

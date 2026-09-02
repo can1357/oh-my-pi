@@ -1,12 +1,15 @@
 import { describe, expect, it } from "bun:test";
-import { shouldFetchCatalogProvider } from "../scripts/generate-models";
+import { shouldFetchModelsDevSource, shouldFetchProviderSource } from "../scripts/generate-models";
 
 describe("catalog generation provider selection", () => {
 	it("fetches only the explicit provider during scoped generation", () => {
-		expect(shouldFetchCatalogProvider("openai")).toBe(true);
-		expect(shouldFetchCatalogProvider("merge-gateway")).toBe(false);
-		expect(shouldFetchCatalogProvider("merge-gateway", "merge-gateway")).toBe(true);
-		expect(shouldFetchCatalogProvider("openai", "merge-gateway")).toBe(false);
-		expect(shouldFetchCatalogProvider("ollama", "ollama")).toBe(false);
+		expect(shouldFetchProviderSource("openai")).toBe(true);
+		expect(shouldFetchProviderSource("merge-gateway")).toBe(false);
+		expect(shouldFetchProviderSource("merge-gateway", "merge-gateway")).toBe(true);
+		expect(shouldFetchProviderSource("openai", "merge-gateway")).toBe(false);
+		expect(shouldFetchProviderSource("ollama", "ollama")).toBe(false);
+		expect(shouldFetchModelsDevSource()).toBe(true);
+		expect(shouldFetchModelsDevSource("openai")).toBe(true);
+		expect(shouldFetchModelsDevSource("merge-gateway")).toBe(false);
 	});
 });

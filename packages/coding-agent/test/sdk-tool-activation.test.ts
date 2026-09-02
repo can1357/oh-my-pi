@@ -2365,6 +2365,51 @@ describe("createAgentSession defaultInactive tool activation", () => {
 			}
 		});
 	});
+	it("lets a live resolver clear an initial hardening policy before correction lock", async () => {
+		const tempDir = makeTempDir();
+		const hardeningModel: Model = {
+			...requireBundledModel("openai", "gpt-5"),
+			provider: "merge-gateway",
+			id: "initial-merge",
+		};
+		await withProviderAuth(["merge-gateway", "openai"], async () => {
+			const options = baseOptions(tempDir);
+			const nonHardeningModel = options.model;
+			if (!nonHardeningModel) throw new Error("Expected non-hardening model");
+			const { session } = await createAgentSession({
+				...options,
+				model: hardeningModel,
+				toolNames: ["yield", "write"],
+				outputSchema: {
+					type: "object",
+					properties: { token: { type: "string", minLength: 3 } },
+					required: ["token"],
+				},
+				outputSchemaMode: "strict",
+				outputSchemaFailureToolNames: ["yield"],
+				resolveOutputSchemaFailurePolicy: model =>
+					model.provider === "merge-gateway" ? { mode: "strict", toolNames: ["yield"] } : undefined,
+				requireYieldTool: true,
+			});
+			try {
+				await session.setModel(nonHardeningModel);
+				const yieldTool = session.getToolByName("yield");
+				if (!yieldTool) throw new Error("Expected yield tool");
+				await expect(yieldTool.execute("bad-yield", { result: { data: { token: "x" } } })).rejects.toThrow(
+					"Output does not match schema",
+				);
+				expect(session.getActiveToolNames()).toContain("write");
+				expect(
+					session.sessionManager
+						.getBranch()
+						.findLast(entry => entry.type === "session_init" && entry.outputSchemaCorrectionLocked),
+				).toBeUndefined();
+			} finally {
+				await session.dispose();
+			}
+		});
+	});
+
 	it("applies correction policy against the live model after a runtime switch", async () => {
 		const tempDir = makeTempDir();
 		const runtimeModel: Model = {
@@ -2373,7 +2418,7 @@ describe("createAgentSession defaultInactive tool activation", () => {
 			id: "runtime-merge",
 		};
 		const policyModels: string[] = [];
-		await withProviderAuth(["merge-gateway"], async () => {
+		await withProviderAuth(["merge-gateway", "openai"], async () => {
 			const { session } = await createAgentSession({
 				...baseOptions(tempDir),
 				toolNames: ["yield", "write"],
@@ -2388,6 +2433,8 @@ describe("createAgentSession defaultInactive tool activation", () => {
 				},
 				requireYieldTool: true,
 			});
+			const initialModel = session.model;
+			if (!initialModel) throw new Error("Expected an initial model");
 			session.sessionManager.appendSessionInit({
 				systemPrompt: "structured worker",
 				task: "return structured data",
@@ -2417,6 +2464,14 @@ describe("createAgentSession defaultInactive tool activation", () => {
 				expect(session.getActiveToolNames()).toEqual(["yield"]);
 				const init = session.sessionManager.getBranch().findLast(entry => entry.type === "session_init");
 				expect(init?.type === "session_init" ? init.outputSchemaMode : undefined).toBe("strict");
+				const policyCallCount = policyModels.length;
+				await session.setModel(initialModel);
+				const yieldTool = session.getToolByName("yield");
+				if (!yieldTool) throw new Error("Expected yield tool");
+				await expect(
+					yieldTool.execute("bad-yield-after-lock", { result: { data: { token: "x" } } }),
+				).rejects.toThrow("Output does not match schema");
+				expect(policyModels).toHaveLength(policyCallCount);
 			} finally {
 				await session.dispose();
 			}

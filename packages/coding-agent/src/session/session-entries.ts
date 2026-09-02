@@ -249,6 +249,8 @@ export interface SessionInitEntry extends SessionEntryBase {
 	outputSchema?: unknown;
 	/** Enforcement policy recorded with the output schema for faithful revival. */
 	outputSchemaMode?: StructuredSubagentSchemaMode;
+	/** Caller-requested mode before any live provider hardening upgraded the effective mode. */
+	outputSchemaRequestedMode?: StructuredSubagentSchemaMode;
 	/** Tool ceiling installed after the first schema-invalid yield. */
 	outputSchemaFailureToolNames?: string[];
 	/** True only after schema correction has activated the persisted tool ceiling. */

@@ -2920,7 +2920,6 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		onProgress,
 	} = options;
 	let effectiveOutputSchemaMode = options.outputSchemaMode;
-	let outputSchemaFailureToolNames: readonly string[] | undefined;
 	let resolveOutputSchemaFailurePolicy: CreateAgentSessionOptions["resolveOutputSchemaFailurePolicy"];
 	const cleanupGraceMs = options.cleanupGraceMs ?? TASK_ABORT_CLEANUP_GRACE_MS;
 	const startTime = Date.now();
@@ -3330,10 +3329,12 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				options.outputSchemaMode,
 			);
 			effectiveOutputSchemaMode = structuredOutputPolicy.mode;
-			outputSchemaFailureToolNames = structuredOutputPolicy.failureToolNames;
-			if (normalizedOutputSchema !== undefined && outputSchemaFailureToolNames === undefined) {
+			if (normalizedOutputSchema !== undefined) {
 				resolveOutputSchemaFailurePolicy = liveModel => {
-					if (!modelRequiresStructuredOutputHardening(liveModel)) return undefined;
+					if (!modelRequiresStructuredOutputHardening(liveModel)) {
+						effectiveOutputSchemaMode = options.outputSchemaMode;
+						return undefined;
+					}
 					effectiveOutputSchemaMode = "strict";
 					try {
 						const livePolicy = resolveStructuredOutputHarnessPolicy(true, outputSchema, options.outputSchemaMode);
@@ -3417,7 +3418,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				toolNames: lockedInit?.tools ?? toolNames,
 				outputSchema,
 				outputSchemaMode: effectiveOutputSchemaMode,
-				outputSchemaFailureToolNames: lockedInit?.outputSchemaFailureToolNames ?? outputSchemaFailureToolNames,
+				outputSchemaFailureToolNames: lockedInit?.outputSchemaFailureToolNames,
 				resolveOutputSchemaFailurePolicy: lockedInit ? undefined : resolveOutputSchemaFailurePolicy,
 				restrictToolNames: lockedInit ? true : options.restrictToolNames,
 				requireYieldTool: true,
@@ -3604,7 +3605,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				advisor: advisorSelection ? (advisorSelection.model ?? "on") : undefined,
 				outputSchema,
 				outputSchemaMode: effectiveOutputSchemaMode,
-				outputSchemaFailureToolNames: outputSchemaFailureToolNames ? [...outputSchemaFailureToolNames] : undefined,
+				outputSchemaRequestedMode: options.outputSchemaMode,
 				restrictToolNames: restrictToolNames || undefined,
 			});
 

@@ -1775,17 +1775,24 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			: undefined;
 		const canResolveOutputSchemaFailurePolicy =
 			outputSchemaFailureToolNames !== undefined || options.resolveOutputSchemaFailurePolicy !== undefined;
+		let outputSchemaCorrectionLocked = false;
+		let lockedOutputSchemaFailurePolicy:
+			| { mode: StructuredSubagentSchemaMode | undefined; toolNames: readonly string[] }
+			| undefined;
 		const resolveOutputSchemaFailurePolicy = ():
 			| { mode: StructuredSubagentSchemaMode | undefined; toolNames: readonly string[] }
 			| undefined => {
-			if (outputSchemaFailureToolNames) {
-				return {
-					mode: options.outputSchemaMode,
-					toolNames: outputSchemaFailureToolNames,
-				};
-			}
+			if (outputSchemaCorrectionLocked) return lockedOutputSchemaFailurePolicy;
 			const activeModel = session?.model;
-			return activeModel ? options.resolveOutputSchemaFailurePolicy?.(activeModel) : undefined;
+			if (options.resolveOutputSchemaFailurePolicy && activeModel) {
+				return options.resolveOutputSchemaFailurePolicy(activeModel);
+			}
+			return outputSchemaFailureToolNames
+				? {
+						mode: options.outputSchemaMode,
+						toolNames: outputSchemaFailureToolNames,
+					}
+				: undefined;
 		};
 		let activeToolBatchAbortController: AbortController | undefined;
 		const createToolBatchAbortScope = canResolveOutputSchemaFailurePolicy
@@ -1805,6 +1812,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			? async (): Promise<boolean> => {
 					const policy = resolveOutputSchemaFailurePolicy();
 					if (!policy) return false;
+					outputSchemaCorrectionLocked = true;
+					lockedOutputSchemaFailurePolicy = policy;
 					activeToolBatchAbortController?.abort(
 						new DOMException("Structured-output correction locked this batch to allowed tools", "AbortError"),
 					);
@@ -3857,6 +3866,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		hasSession = true;
 		if (options.resolveOutputSchemaFailurePolicy) {
 			const resolveLiveOutputSchemaPolicy = () => {
+				if (outputSchemaCorrectionLocked) return;
 				const liveModel = session?.model;
 				if (liveModel) options.resolveOutputSchemaFailurePolicy?.(liveModel);
 			};
