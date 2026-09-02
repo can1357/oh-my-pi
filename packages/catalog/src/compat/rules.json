@@ -1323,64 +1323,26 @@
 					"provider": "cursor",
 					"logical": "gpt-5.6-terra",
 					"aliases": []
-				},
-				{
-					"provider": "google-antigravity",
-					"logical": "gemini-3.6-flash",
-					"aliases": [
-						"gemini-3.6-flash-tiered"
-					]
-				},
-				{
-					"provider": "google-antigravity",
-					"logical": "gemini-3.7-flash",
-					"aliases": [
-						"gemini-3.7-flash-tiered"
-					]
 				}
 			],
 			"variantFamilies": [
 				{
 					"provider": "google-antigravity",
-					"id": "gemini-3.6-flash",
-					"name": "Gemini 3.6 Flash",
+					"id": "gemini-{rev}-flash",
+					"name": "Gemini {rev} Flash",
 					"members": [
-						"gemini-3.6-flash-low",
-						"gemini-3.6-flash-medium",
-						"gemini-3.6-flash-high",
-						"gemini-3.6-flash-tiered"
+						"gemini-{rev}-flash-low",
+						"gemini-{rev}-flash-medium",
+						"gemini-{rev}-flash-high",
+						"gemini-{rev}-flash-tiered"
 					],
 					"routing": {
-						"minimal": "gemini-3.6-flash-low",
-						"low": "gemini-3.6-flash-low",
-						"medium": "gemini-3.6-flash-medium",
-						"high": "gemini-3.6-flash-high"
+						"minimal": "gemini-{rev}-flash-low",
+						"low": "gemini-{rev}-flash-low",
+						"medium": "gemini-{rev}-flash-medium",
+						"high": "gemini-{rev}-flash-high"
 					},
-					"mode": "google-level",
-					"efforts": [
-						"minimal",
-						"low",
-						"medium",
-						"high"
-					],
-					"requiresEffort": true
-				},
-				{
-					"provider": "google-antigravity",
-					"id": "gemini-3.7-flash",
-					"name": "Gemini 3.7 Flash",
-					"members": [
-						"gemini-3.7-flash-low",
-						"gemini-3.7-flash-medium",
-						"gemini-3.7-flash-high",
-						"gemini-3.7-flash-tiered"
-					],
-					"routing": {
-						"minimal": "gemini-3.7-flash-low",
-						"low": "gemini-3.7-flash-low",
-						"medium": "gemini-3.7-flash-medium",
-						"high": "gemini-3.7-flash-high"
-					},
+					"revision": ">=3.6",
 					"mode": "google-level",
 					"efforts": [
 						"minimal",
@@ -1602,45 +1564,21 @@
 				},
 				{
 					"provider": "google-gemini-cli",
-					"id": "gemini-3.6-flash",
-					"name": "Gemini 3.6 Flash",
+					"id": "gemini-{rev}-flash",
+					"name": "Gemini {rev} Flash",
 					"members": [
-						"gemini-3.6-flash-low",
-						"gemini-3.6-flash-medium",
-						"gemini-3.6-flash-high",
-						"gemini-3.6-flash-tiered"
+						"gemini-{rev}-flash-low",
+						"gemini-{rev}-flash-medium",
+						"gemini-{rev}-flash-high",
+						"gemini-{rev}-flash-tiered"
 					],
 					"routing": {
-						"minimal": "gemini-3.6-flash-low",
-						"low": "gemini-3.6-flash-low",
-						"medium": "gemini-3.6-flash-medium",
-						"high": "gemini-3.6-flash-high"
+						"minimal": "gemini-{rev}-flash-low",
+						"low": "gemini-{rev}-flash-low",
+						"medium": "gemini-{rev}-flash-medium",
+						"high": "gemini-{rev}-flash-high"
 					},
-					"mode": "google-level",
-					"efforts": [
-						"minimal",
-						"low",
-						"medium",
-						"high"
-					],
-					"requiresEffort": true
-				},
-				{
-					"provider": "google-gemini-cli",
-					"id": "gemini-3.7-flash",
-					"name": "Gemini 3.7 Flash",
-					"members": [
-						"gemini-3.7-flash-low",
-						"gemini-3.7-flash-medium",
-						"gemini-3.7-flash-high",
-						"gemini-3.7-flash-tiered"
-					],
-					"routing": {
-						"minimal": "gemini-3.7-flash-low",
-						"low": "gemini-3.7-flash-low",
-						"medium": "gemini-3.7-flash-medium",
-						"high": "gemini-3.7-flash-high"
-					},
+					"revision": ">=3.6",
 					"mode": "google-level",
 					"efforts": [
 						"minimal",
@@ -8349,10 +8287,6 @@
 					{
 						"op": ">=",
 						"revision": "3.6.0"
-					},
-					{
-						"op": "<",
-						"revision": "3.8.0"
 					}
 				],
 				"thinking": {
