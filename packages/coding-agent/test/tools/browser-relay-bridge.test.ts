@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, vi } from "bun:test";
 import {
 	RelayBridge,
 	type RelaySocket,
@@ -4230,6 +4230,69 @@ describe("RelayBridge tab grouping", () => {
 					(rpc) => rpc.method === "Page.addScriptToEvaluateOnNewDocument",
 				),
 		).toHaveLength(0);
+	});
+
+	it("forces a fresh root after an initial preload registration times out", async () => {
+		vi.useFakeTimers();
+		try {
+			const bridge = new RelayBridge({});
+			const ext = new FakeExtSocket();
+			connect(bridge, ext, [tab({ tabId: 1 })]);
+			const cdp = new FakeCdpSocket();
+			const connId = bridge.cdpConnected(cdp);
+			const pageSession = await attachPage(bridge, ext, cdp, connId, 1);
+
+			const addId = ++msgSeq;
+			bridge.cdpMessage(
+				connId,
+				JSON.stringify({
+					id: addId,
+					sessionId: pageSession,
+					method: "Page.addScriptToEvaluateOnNewDocument",
+					params: { source: "window.__relayTimedOut = true;" },
+				}),
+			);
+			await waitFor(
+				() =>
+					ext
+						.rpcs("send")
+						.some(
+							(rpc) => rpc.method === "Page.addScriptToEvaluateOnNewDocument",
+						),
+				"initial preload registration RPC before timeout",
+			);
+			vi.advanceTimersByTime(20_000);
+			await flush();
+			expect(cdp.messages.some((m) => m.id === addId && "error" in m)).toBe(
+				true,
+			);
+
+			const ext2 = new FakeExtSocket();
+			connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], {
+				attachedTabIds: [1],
+				recoverableTabIds: [1],
+			});
+			await waitFor(
+				() => ext2.rpcs("detach").length === 1,
+				"fresh-root detach after timed-out initial registration",
+			);
+			ack(bridge, ext2, "detach");
+			await waitFor(
+				() => ext2.rpcs("attach").length === 1,
+				"fresh-root attach after timed-out initial registration",
+			);
+			ack(bridge, ext2, "attach");
+			await flush();
+			expect(
+				ext2
+					.rpcs("send")
+					.filter(
+						(rpc) => rpc.method === "Page.addScriptToEvaluateOnNewDocument",
+					),
+			).toHaveLength(0);
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 
 	it("forgets and forces a fresh root after an interrupted preload removal", async () => {

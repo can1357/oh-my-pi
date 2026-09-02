@@ -327,9 +327,13 @@ class CdpConnection {
 /** Transport replacement is retryable and must not permanently ban a tab. */
 class ExtensionReplacedError extends Error {}
 
+/** A timed-out RPC may already have mutated Chrome even though its result was lost. */
+class ExtensionRpcTimeoutError extends Error {}
+
 function isExtensionTransportInterrupted(error: unknown): boolean {
 	return (
 		error instanceof ExtensionReplacedError ||
+		error instanceof ExtensionRpcTimeoutError ||
 		(error instanceof Error && error.message === "relay extension disconnected")
 	);
 }
@@ -3933,7 +3937,9 @@ export class RelayBridge {
 		const timer = setTimeout(() => {
 			this.#pendingRpc.delete(id);
 			reject(
-				new Error(`extension rpc '${req.op}' timed out after ${timeoutMs}ms`),
+				new ExtensionRpcTimeoutError(
+					`extension rpc '${req.op}' timed out after ${timeoutMs}ms`,
+				),
 			);
 		}, timeoutMs);
 		this.#pendingRpc.set(id, { resolve, reject, timer });
