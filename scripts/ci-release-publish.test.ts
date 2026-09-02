@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import {
 	applyPublishBin,
+	bundleExternalFileDependencies,
 	legalPayloadFiles,
 	npmDistTag,
 	packages,
@@ -139,21 +140,56 @@ describe("published manifest topology", () => {
 });
 
 describe("published file: vendor bundling", () => {
-	it("retargets coding-agent thinking-orbs into the packed package", async () => {
+	it("drops thinking-orbs file: spec and nests it for pack", async () => {
 		const pkg = packages.find(entry => entry.dir === "packages/coding-agent");
 		if (!pkg) throw new Error("coding-agent missing from publish set");
 
 		const manifest = await rewriteManifest(pkg, false);
 		const dependencies = manifest.dependencies as Record<string, string>;
-		expect(dependencies["thinking-orbs"]).toBe("file:./vendor/thinking-orbs");
-		expect(manifest.files).toContain("vendor/thinking-orbs");
+		expect(dependencies["thinking-orbs"]).toBeUndefined();
+		expect(manifest.bundledDependencies).toEqual(["thinking-orbs"]);
+		expect(manifest.files).toContain("node_modules/thinking-orbs");
 	});
 
-	it("applyPublishBin also bundles thinking-orbs for tarball smoke", async () => {
+	it("applyPublishBin also nests thinking-orbs for tarball smoke", async () => {
 		const manifest = await applyPublishBin("packages/coding-agent", false);
 		const dependencies = manifest.dependencies as Record<string, string>;
 		expect(manifest.bin).toEqual({ omp: "dist/cli.js" });
-		expect(dependencies["thinking-orbs"]).toBe("file:./vendor/thinking-orbs");
-		expect(manifest.files).toContain("vendor/thinking-orbs");
+		expect(dependencies["thinking-orbs"]).toBeUndefined();
+		expect(manifest.bundledDependencies).toEqual(["thinking-orbs"]);
+		expect(manifest.files).toContain("node_modules/thinking-orbs");
+	});
+
+	it("copies file: deps into nested node_modules and omits the spec", async () => {
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-bundle-file-deps-"));
+		const pkgDir = path.join(root, "package");
+		const vendor = path.join(root, "vendor", "thinking-orbs");
+		try {
+			await fs.mkdir(vendor, { recursive: true });
+			await fs.mkdir(pkgDir);
+			await Bun.write(
+				path.join(vendor, "package.json"),
+				JSON.stringify({ name: "thinking-orbs", version: "0.0.1", type: "module", exports: { ".": "./index.js" } }),
+			);
+			await Bun.write(path.join(vendor, "index.js"), "export const x = 1;\n");
+			const manifest = {
+				name: "host-pkg",
+				version: "1.0.0",
+				files: ["src"],
+				dependencies: { "thinking-orbs": "file:../vendor/thinking-orbs" },
+			};
+			await bundleExternalFileDependencies(manifest, pkgDir, true);
+			expect(manifest.dependencies).toEqual({});
+			expect(manifest.bundledDependencies).toEqual(["thinking-orbs"]);
+			expect(manifest.files).toContain("node_modules/thinking-orbs");
+			expect(await Bun.file(path.join(pkgDir, "node_modules/thinking-orbs/package.json")).json()).toEqual({
+				name: "thinking-orbs",
+				version: "0.0.1",
+				type: "module",
+				exports: { ".": "./index.js" },
+			});
+		} finally {
+			await fs.rm(root, { recursive: true, force: true });
+		}
 	});
 });

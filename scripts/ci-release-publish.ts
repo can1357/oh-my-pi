@@ -271,11 +271,18 @@ function depRecord(value: JsonValue | undefined): JsonObject | null {
 	return value as JsonObject;
 }
 
+function stringList(value: JsonValue | undefined): string[] {
+	if (!Array.isArray(value)) return [];
+	return value.filter((entry): entry is string => typeof entry === "string");
+}
+
 /**
- * Rewrite `file:` dependencies that live outside the package so published
- * tarballs stay installable. Workspace manifests keep pointing at
- * `vendor/` (nix/bun.lock); pack copies the tree under `vendor/<name>`
- * and retargets the spec to `file:./vendor/<name>`.
+ * Rewrite `file:` dependencies so published tarballs stay installable.
+ * Bun resolves `file:` specs against its install cache, not the unpacked
+ * tarball, so a packed `file:./vendor/...` still fails. Copy the tree
+ * into `node_modules/<name>`, drop the spec, and set `bundledDependencies`
+ * so `bun pm pack` includes the nested package. Workspace manifests keep
+ * `file:../../vendor/...` for nix.
  */
 export async function bundleExternalFileDependencies(
 	manifest: PackageManifest,
@@ -283,6 +290,10 @@ export async function bundleExternalFileDependencies(
 	write: boolean,
 ): Promise<void> {
 	const files = Array.isArray(manifest.files) ? [...manifest.files] : [];
+	const bundled = new Set<string>([
+		...stringList(manifest.bundledDependencies),
+		...stringList(manifest.bundleDependencies),
+	]);
 	for (const key of ["dependencies", "optionalDependencies"] as const) {
 		const deps = depRecord(manifest[key]);
 		if (!deps) continue;
@@ -290,19 +301,18 @@ export async function bundleExternalFileDependencies(
 			const spec = deps[name];
 			if (typeof spec !== "string" || !spec.startsWith("file:")) continue;
 			const source = path.resolve(pkgDir, spec.slice("file:".length));
-			const rel = path.relative(pkgDir, source);
-			if (rel !== "" && !rel.startsWith("..") && !path.isAbsolute(rel)) {
-				const packed = rel.split(path.sep).join("/");
-				if (!files.includes(packed) && !files.includes("vendor")) files.push(packed);
-				continue;
-			}
-			const destRel = `vendor/${path.basename(source)}`;
-			deps[name] = `file:./${destRel}`;
-			if (!files.includes(destRel) && !files.includes("vendor")) files.push(destRel);
+			const destRel = `node_modules/${name}`;
+			delete deps[name];
+			bundled.add(name);
+			if (!files.includes(destRel)) files.push(destRel);
 			if (write) await fs.cp(source, path.join(pkgDir, destRel), { recursive: true, force: true });
 		}
 	}
 	manifest.files = files;
+	if (bundled.size > 0) {
+		manifest.bundledDependencies = [...bundled];
+		delete manifest.bundleDependencies;
+	}
 }
 
 /**
