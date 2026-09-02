@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.1.3] - 2026-09-02
+
 ### Added
 
 - Added support for Claude Fable 5.1
@@ -13,6 +15,10 @@
 ### Fixed
 
 - Claude Sonnet 5 no longer advertises unsupported mid-conversation system messages.
+- Custom GLM 5.2 models on `alibaba-coding-plan` (and other blanket-GLM hosts) no longer crash startup with `AmbiguousOverlapError` ([#10553](https://github.com/can1357/oh-my-pi/issues/10553)).
+- Gemini 3.7 Flash no longer offers the `minimal` thinking effort on direct google-level hosts (`google`, `google-vertex`, `opencode-zen`), which reject `thinkingLevel: MINIMAL` with a 400; budget and reasoning-effort resellers keep the tier ([#10543](https://github.com/can1357/oh-my-pi/issues/10543)).
+- Fixed Alibaba Token Plan discovery for `qwen3.8-flash` to include its context limits, reasoning support, and image input.
+- Z.AI GLM-5.3-Flash now uses the native API instead of failing through the unsupported Anthropic-compatible route ([#10539](https://github.com/can1357/oh-my-pi/issues/10539)).
 
 ## [18.1.2] - 2026-09-01
 

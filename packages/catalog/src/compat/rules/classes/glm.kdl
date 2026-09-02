@@ -10,7 +10,10 @@ class "glm" {
 	// GLM-5.2 exposes the default lower tiers plus a genuine max on generic
 	// OpenAI-compatible hosts; the zai-dialect and Anthropic-route hosts
 	// (Z.ai, Zhipu, Umans, Ollama Cloud, Baseten) serve only high/max.
-	revision ">=5.2 <5.3" {
+	// priority breaks the intentional overlap with provider-level blanket GLM
+	// ladders authored for the pre-5.2 census (e.g. alibaba-coding-plan.kdl),
+	// so the 5.2 lineage ladder wins on generic hosts that lack a 5.2 residue.
+	revision ">=5.2 <5.3" priority=10 {
 		thinking-efforts "minimal" "low" "medium" "high" "max"
 	}
 	on "zai" "zhipu-coding-plan" {

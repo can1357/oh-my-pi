@@ -6032,7 +6032,7 @@ dependencies = [
 
 [[package]]
 name = "pi-ast"
-version = "18.1.2"
+version = "18.1.3"
 dependencies = [
  "anyhow",
  "ast-grep-core",
@@ -6102,7 +6102,7 @@ dependencies = [
 
 [[package]]
 name = "pi-builtins"
-version = "18.1.2"
+version = "18.1.3"
 dependencies = [
  "ansi-width",
  "anyhow",
@@ -6189,7 +6189,7 @@ dependencies = [
 
 [[package]]
 name = "pi-iso"
-version = "18.1.2"
+version = "18.1.3"
 dependencies = [
  "async-trait",
  "libc",
@@ -6201,7 +6201,7 @@ dependencies = [
 
 [[package]]
 name = "pi-natives"
-version = "18.1.2"
+version = "18.1.3"
 dependencies = [
  "anyhow",
  "arboard",
@@ -6278,7 +6278,7 @@ dependencies = [
 
 [[package]]
 name = "pi-shell"
-version = "18.1.2"
+version = "18.1.3"
 dependencies = [
  "anyhow",
  "brush-core",
@@ -6306,7 +6306,7 @@ dependencies = [
 
 [[package]]
 name = "pi-vcs"
-version = "18.1.2"
+version = "18.1.3"
 dependencies = [
  "gix",
  "jj-lib",
@@ -6319,7 +6319,7 @@ dependencies = [
 
 [[package]]
 name = "pi-voice"
-version = "18.1.2"
+version = "18.1.3"
 dependencies = [
  "audiopus_sys",
  "bytes",
@@ -6334,7 +6334,7 @@ dependencies = [
 
 [[package]]
 name = "pi-walker"
-version = "18.1.2"
+version = "18.1.3"
 dependencies = [
  "dashmap",
  "globset",

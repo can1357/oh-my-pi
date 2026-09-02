@@ -15,7 +15,7 @@
  * forms. Protocol gating (`imageProtocol === Kitty`) lives in the caller.
  */
 
-import { isInsideTerminalMultiplexer } from "./terminal-multiplexer";
+import { isInsideHerdr, isInsideTerminalMultiplexer } from "./terminal-multiplexer";
 import { wrapTmuxPassthroughIfNeeded } from "./tmux";
 
 /** Kitty Unicode placeholder base character (U+10EEEE, Plane 16 PUA). */
@@ -81,7 +81,7 @@ export function detectKittyUnicodePlaceholdersSupport(terminalId: string, env: N
 	if (force === "0" || force === "false" || force === "off" || force === "no" || force === "n") return false;
 	const insideMultiplexer = isInsideTerminalMultiplexer(env);
 	if (insideMultiplexer && env.PI_FORCE_IMAGE_PROTOCOL?.trim().toLowerCase() === "kitty") return true;
-	if (env.HERDR_ENV === "1") return false;
+	if (isInsideHerdr(env)) return false;
 	return terminalId === "kitty" || terminalId === "ghostty";
 }
 

@@ -6,16 +6,21 @@ import { loadCapability } from "@oh-my-pi/pi-coding-agent/capability";
 import { clearCache as clearFsCache } from "@oh-my-pi/pi-coding-agent/capability/fs";
 import { clearClaudePluginRootsCache } from "@oh-my-pi/pi-coding-agent/discovery/helpers";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { restoreEnvValue } from "./helpers/settings-test-state";
 import "@oh-my-pi/pi-coding-agent/discovery/claude-plugins";
 import type { MCPServer } from "@oh-my-pi/pi-coding-agent/capability/mcp";
 
 describe("issue-851: claude-plugins loads flat .mcp.json shape", () => {
 	let tempDir: string;
 	let originalHome: string | undefined;
+	let originalClaudeConfigDir: string | undefined;
 
 	beforeEach(async () => {
 		clearClaudePluginRootsCache();
 		clearFsCache();
+		originalClaudeConfigDir = process.env.CLAUDE_CONFIG_DIR;
+		delete process.env.CLAUDE_CONFIG_DIR;
+		delete Bun.env.CLAUDE_CONFIG_DIR;
 		originalHome = process.env.HOME;
 		tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "issue-851-"));
 		process.env.HOME = tempDir;
@@ -26,8 +31,8 @@ describe("issue-851: claude-plugins loads flat .mcp.json shape", () => {
 		clearClaudePluginRootsCache();
 		clearFsCache();
 		vi.restoreAllMocks();
-		if (originalHome === undefined) delete process.env.HOME;
-		else process.env.HOME = originalHome;
+		restoreEnvValue("HOME", originalHome);
+		restoreEnvValue("CLAUDE_CONFIG_DIR", originalClaudeConfigDir);
 		await removeWithRetries(tempDir);
 	});
 
