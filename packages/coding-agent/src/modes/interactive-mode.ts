@@ -1649,6 +1649,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			return false;
 		}
 		setSessionTerminalTitle(this.sessionManager.getSessionName(), this.sessionManager.getCwd());
+		this.#syncStatusLineSettings();
 		this.statusLine.applyCwdChange();
 		return true;
 	}
