@@ -343,10 +343,11 @@ export async function reachableModelMayRequireStructuredOutputHardening(args: {
 	modelRegistry: ModelRegistry;
 	initialSelector: string | undefined;
 	roleHint: string | undefined;
+	normalizedOutputSchema: unknown;
 	effortCeiling?: Effort;
 }): Promise<boolean> {
-	const { settings, modelRegistry, initialSelector, roleHint, effortCeiling } = args;
-	if (!initialSelector) return false;
+	const { settings, modelRegistry, initialSelector, roleHint, effortCeiling, normalizedOutputSchema } = args;
+	if (normalizedOutputSchema === undefined || !initialSelector) return false;
 	const fallbackEnabled = settings.get("retry.modelFallback");
 	const promotionEnabled = settings.get("contextPromotion.enabled") === true;
 	if (!fallbackEnabled && !promotionEnabled) return false;
@@ -3279,30 +3280,37 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					prewalk = { target: prewalkTarget, thinkingLevel: prewalkThinkingLevel };
 				}
 			}
-			const prewalkMayRequireHardening =
-				prewalk !== undefined &&
-				(modelRequiresStructuredOutputHardening(prewalk.target) ||
-					(await reachableModelMayRequireStructuredOutputHardening({
+			let requiresStructuredOutputHardening = false;
+			if (normalizedOutputSchema !== undefined) {
+				const prewalkMayRequireHardening =
+					prewalk !== undefined &&
+					(modelRequiresStructuredOutputHardening(prewalk.target) ||
+						(await reachableModelMayRequireStructuredOutputHardening({
+							settings: subagentSettings,
+							modelRegistry,
+							initialSelector: formatModelStringWithRouting(prewalk.target),
+							normalizedOutputSchema,
+							roleHint: prewalkPattern
+								? resolveExplicitModelRole([prewalkPattern], subagentSettings)
+								: undefined,
+							effortCeiling: spawnEffortCeiling,
+						})));
+				const fallbackInitialSelector =
+					authFallbackUsed && model ? formatModelStringWithRouting(model) : initialFallbackSelector;
+				const fallbackRoleHint = authFallbackUsed ? undefined : (retryFallbackRole ?? modelRole);
+				requiresStructuredOutputHardening = structuredOutputHardeningMayApply({
+					actualModel: model,
+					fallbackMayRequireHardening: await reachableModelMayRequireStructuredOutputHardening({
 						settings: subagentSettings,
 						modelRegistry,
-						initialSelector: formatModelStringWithRouting(prewalk.target),
-						roleHint: prewalkPattern ? resolveExplicitModelRole([prewalkPattern], subagentSettings) : undefined,
+						initialSelector: fallbackInitialSelector,
+						roleHint: fallbackRoleHint,
+						normalizedOutputSchema,
 						effortCeiling: spawnEffortCeiling,
-					})));
-			const fallbackInitialSelector =
-				authFallbackUsed && model ? formatModelStringWithRouting(model) : initialFallbackSelector;
-			const fallbackRoleHint = authFallbackUsed ? undefined : (retryFallbackRole ?? modelRole);
-			const requiresStructuredOutputHardening = structuredOutputHardeningMayApply({
-				actualModel: model,
-				fallbackMayRequireHardening: await reachableModelMayRequireStructuredOutputHardening({
-					settings: subagentSettings,
-					modelRegistry,
-					initialSelector: fallbackInitialSelector,
-					roleHint: fallbackRoleHint,
-					effortCeiling: spawnEffortCeiling,
-				}),
-				prewalkMayRequireHardening,
-			});
+					}),
+					prewalkMayRequireHardening,
+				});
+			}
 			const structuredOutputPolicy = resolveStructuredOutputHarnessPolicy(
 				requiresStructuredOutputHardening,
 				outputSchema,

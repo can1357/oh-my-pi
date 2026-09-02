@@ -207,6 +207,7 @@ describe("structured subagent primitive", () => {
 				settings,
 				modelRegistry,
 				initialSelector: "anthropic/a",
+				normalizedOutputSchema: { type: "object" },
 				roleHint: undefined,
 			}),
 		).toBe(true);
@@ -234,6 +235,7 @@ describe("structured subagent primitive", () => {
 				settings,
 				modelRegistry,
 				initialSelector: "anthropic/a",
+				normalizedOutputSchema: { type: "object" },
 				roleHint: undefined,
 			}),
 		).toBe(false);
@@ -260,6 +262,7 @@ describe("structured subagent primitive", () => {
 				settings,
 				modelRegistry,
 				initialSelector: "openai/a",
+				normalizedOutputSchema: { type: "object" },
 				roleHint: undefined,
 			}),
 		).toBe(false);
@@ -289,6 +292,7 @@ describe("structured subagent primitive", () => {
 				settings,
 				modelRegistry,
 				initialSelector: "openai/a",
+				normalizedOutputSchema: { type: "object" },
 				roleHint: undefined,
 				effortCeiling: Effort.Low,
 			}),
@@ -316,6 +320,7 @@ describe("structured subagent primitive", () => {
 				settings,
 				modelRegistry,
 				initialSelector: "openai/a",
+				normalizedOutputSchema: { type: "object" },
 				roleHint: undefined,
 			}),
 		).toBe(false);
@@ -340,6 +345,7 @@ describe("structured subagent primitive", () => {
 			settings,
 			modelRegistry,
 			initialSelector: "openai/a",
+			normalizedOutputSchema: { type: "object" },
 			roleHint: undefined,
 		});
 		expect(fallbackMayRequireHardening).toBe(false);
@@ -371,6 +377,7 @@ describe("structured subagent primitive", () => {
 			settings,
 			modelRegistry,
 			initialSelector: "openrouter/b",
+			normalizedOutputSchema: { type: "object" },
 			roleHint: undefined,
 		});
 		expect(prewalkMayRequireHardening).toBe(true);
@@ -407,6 +414,7 @@ describe("structured subagent primitive", () => {
 			settings,
 			modelRegistry,
 			initialSelector: "openai/a",
+			normalizedOutputSchema: { type: "object" },
 			roleHint: undefined,
 		});
 		expect(reachableModelMayRequireHardening).toBe(true);
@@ -447,6 +455,7 @@ describe("structured subagent primitive", () => {
 				settings,
 				modelRegistry,
 				initialSelector: "openai/a",
+				normalizedOutputSchema: { type: "object" },
 				roleHint: undefined,
 			}),
 		).toBe(true);
@@ -474,9 +483,34 @@ describe("structured subagent primitive", () => {
 				settings,
 				modelRegistry,
 				initialSelector: "anthropic/a",
+				normalizedOutputSchema: { type: "object" },
 				roleHint: undefined,
 			}),
 		).toBe(true);
+	});
+
+	it("skips credential-backed reachability for schema-less tasks", async () => {
+		const getApiKey = vi.fn(async () => "merge-key");
+		const modelRegistry = {
+			find: () => fallbackTestModel("merge-gateway", "c", true),
+			hasProvider: () => true,
+			getApiKey,
+		} as unknown as ModelRegistry;
+		const settings = Settings.isolated({
+			"retry.fallbackChains": {
+				"openai/a": ["merge-gateway/c"],
+			},
+		});
+		expect(
+			await executorModule.reachableModelMayRequireStructuredOutputHardening({
+				settings,
+				modelRegistry,
+				initialSelector: "openai/a",
+				normalizedOutputSchema: undefined,
+				roleHint: undefined,
+			}),
+		).toBe(false);
+		expect(getApiKey).not.toHaveBeenCalled();
 	});
 
 	it("tolerates malformed fallback chains with an incomplete model-registry test double", async () => {
@@ -491,6 +525,7 @@ describe("structured subagent primitive", () => {
 				settings,
 				modelRegistry: {} as ModelRegistry,
 				initialSelector: "anthropic/a",
+				normalizedOutputSchema: { type: "object" },
 				roleHint: undefined,
 			}),
 		).toBe(false);
