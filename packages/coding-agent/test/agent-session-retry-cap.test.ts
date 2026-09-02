@@ -307,8 +307,7 @@ describe("AgentSession retry delay cap", () => {
 
 		const mock = createMockModel();
 		const requestedModels: string[] = [];
-		let agent!: Agent;
-		agent = new Agent({
+		const agent = new Agent({
 			getApiKey: model => modelRegistry.resolver(model, agent.sessionId),
 			initialState: {
 				model: exhaustedModel,
@@ -792,8 +791,7 @@ describe("AgentSession retry delay cap", () => {
 		const mock = createMockModel();
 		const requestedModels: string[] = [];
 		const requestedKeys: string[] = [];
-		let agent!: Agent;
-		agent = new Agent({
+		const agent = new Agent({
 			getApiKey: model => modelRegistry.resolver(model, agent.sessionId),
 			initialState: {
 				model: primaryModel,
@@ -1057,8 +1055,7 @@ describe("AgentSession retry delay cap", () => {
 			'429 {"type":"error","error":{"type":"rate_limit_error","message":"This request would exceed your account\'s rate limit. Please try again later."}} retry-after-ms=11180000';
 		const mock = createMockModel();
 		let attempts = 0;
-		let agent!: Agent;
-		agent = new Agent({
+		const agent = new Agent({
 			getApiKey: model => modelRegistry.resolver(model, agent.sessionId),
 			initialState: {
 				model,
@@ -2534,6 +2531,7 @@ describe("AgentSession retry delay cap", () => {
 
 		expect(attempts).toBe(11);
 		expect(retryStartEvents).toHaveLength(10);
+		// oxlint-disable-next-line unicorn/no-new-array -- length preallocation
 		expect(retryStartEvents.map(event => event.maxAttempts)).toEqual(new Array(10).fill(10));
 		expect(retryStartEvents.map(event => event.delayMs)).toEqual([
 			500, 1000, 2000, 4000, 8000, 8000, 8000, 8000, 8000, 8000,

@@ -614,6 +614,28 @@ export function transformMessages<TApi extends Api>(
 	const responsesCompositeIdMap = new Map<string, string>();
 
 	const latestSurvivingAssistantIndex = getLatestSurvivingAssistantIndex(messages);
+	const invalidBoundThinkingAssistantIndexes = new Set<number>();
+	if (model.thinking?.prefixBinding) {
+		let latestRewriteAt: number | undefined;
+		for (let index = 0; index < messages.length; index++) {
+			const message = messages[index]!;
+			if (message.role === "user" && message.historyRewriteAt !== undefined) {
+				latestRewriteAt =
+					latestRewriteAt === undefined
+						? message.historyRewriteAt
+						: Math.max(latestRewriteAt, message.historyRewriteAt);
+			} else if (message.role === "toolResult" && message.prunedAt !== undefined) {
+				latestRewriteAt =
+					latestRewriteAt === undefined ? message.prunedAt : Math.max(latestRewriteAt, message.prunedAt);
+			} else if (
+				message.role === "assistant" &&
+				latestRewriteAt !== undefined &&
+				message.timestamp <= latestRewriteAt
+			) {
+				invalidBoundThinkingAssistantIndexes.add(index);
+			}
+		}
+	}
 	// First pass: transform messages (thinking blocks, tool call ID normalization)
 	const normalizedMessages = messages.map((msg, index) => {
 		// User and developer messages pass through unchanged
@@ -654,21 +676,22 @@ export function transformMessages<TApi extends Api>(
 			// anthropic-messages providers configured via `models.yaml` and
 			// session-level model swaps (#2257).
 			const isAnthropicReplay = isAnthropicTarget && assistantMsg.api === "anthropic-messages";
+			const sameAnthropicDeployment =
+				isAnthropicReplay &&
+				assistantMsg.provider === model.provider &&
+				(model.compat.officialEndpoint || model.thinking?.prefixBinding === true);
 			const isLatestSurvivingAssistant = index === latestSurvivingAssistantIndex;
 			// Signature policy is a second axis. Anthropic cryptographically
-			// binds reasoning signatures to its key+session+model, so cross-model
-			// signatures must be stripped whenever a signing Anthropic endpoint
-			// is on either end of the replay:
+			// binds reasoning signatures to its deployment and model lineage.
+			// First-party deployments now accept same-deployment cross-model
+			// signatures and drop blocks the target model cannot read. Signatures
+			// still must be stripped when a signing endpoint boundary is crossed:
 			//   * official Anthropic (source): the 3p target can't reverify a
 			//     foreign signature and keeping it leaks continuation metadata
 			//     for no benefit.
-			//   * signing Anthropic (target): official Anthropic, GitHub Copilot,
-			//     ZenMux, Cloudflare AI Gateway `/anthropic`, and Google Vertex
-			//     `publishers/anthropic/…` all forward to signature-enforcing
-			//     Anthropic. Any stale/cross-model signature on the wire triggers
-			//     `400 Invalid signature in thinking block` — same failure class
-			//     whether `officialEndpoint` is true or the endpoint is one of
-			//     the known signing proxies (#4297).
+			//   * signing Anthropic (target): opaque signing proxies cannot prove
+			//     they share the source deployment. Foreign signatures can trigger
+			//     `400 Invalid signature in thinking block` (#4297).
 			// 3p ↔ 3p replays preserve signatures because compatible providers
 			// (Z.AI, DeepSeek, custom `models.yaml` providers) treat them as
 			// opaque continuation hints rather than verified material; stripping
@@ -744,6 +767,12 @@ export function transformMessages<TApi extends Api>(
 				!assistantMsg.content.some(anthropicVisibleThinkingSurvivesReplay);
 
 			const transformedContent = assistantMsg.content.flatMap((block, blockIndex) => {
+				if (
+					invalidBoundThinkingAssistantIndexes.has(index) &&
+					(block.type === "thinking" || block.type === "redactedThinking")
+				) {
+					return [];
+				}
 				if (block.type === "thinking") {
 					// Only an aborted/errored turn's final (mid-stream) block can hold a
 					// partial signature; abandoned tool-use turns strip all. Drop the
@@ -770,17 +799,13 @@ export function transformMessages<TApi extends Api>(
 						// even stripping a signature on the latest message — but only
 						// for turns the target's own provider issued.
 						if (isLatestSurvivingAssistant && abandonedToolUse && !crossProviderSource) return block;
-						// Strip source signatures crossing an official Anthropic
-						// endpoint so the downstream encoder applies its
-						// `replayUnsignedThinking` policy (unsigned thinking is emitted
-						// natively on Anthropic-compatible reasoning endpoints and
-						// demoted to text on official Anthropic). Prior turns strip on
-						// any cross-model transition (#4297); the latest turn strips
-						// only on a cross-provider transition so same-provider
-						// continuations stay byte-for-byte. 3p ↔ 3p replays keep the
-						// signature so the reasoning chain stays signed on continuation
-						// (#2265).
-						const staleSignature = isLatestSurvivingAssistant ? crossProviderSource : !isSameModel;
+						// Preserve same-deployment signatures and let Anthropic perform
+						// its one-way model compatibility check. Across deployments,
+						// strip stale signatures so the encoder applies the target's
+						// unsigned-thinking policy. 3p ↔ 3p replays keep opaque
+						// signatures as continuation metadata (#2265).
+						const staleSignature =
+							!sameAnthropicDeployment && (isLatestSurvivingAssistant ? crossProviderSource : !isSameModel);
 						if (staleSignature && signingAnthropicInvolved && sanitized.thinkingSignature) {
 							sanitized = { ...sanitized, thinkingSignature: undefined };
 						}
@@ -862,6 +887,7 @@ export function transformMessages<TApi extends Api>(
 						if (dropsAllSameModelVisibleThinking) return [];
 						if (
 							isSameModel ||
+							sameAnthropicDeployment ||
 							(isLatestSurvivingAssistant && assistantMsg.provider === model.provider) ||
 							replaysUnsignedAnthropicThinking
 						) {

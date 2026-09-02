@@ -768,7 +768,7 @@ function createDetailedCapture(config: AgentLoopConfig): {
 	const wired: AgentLoopConfig = {
 		...config,
 		telemetry: {
-			...(config.telemetry ?? {}),
+			...config.telemetry,
 			onRunEnd: (summary, coverage) => {
 				captured = { summary, coverage };
 				userHook?.(summary, coverage);

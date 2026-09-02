@@ -588,7 +588,7 @@ export class InspectorPanel implements Component {
 
 	#highlightMarkdown(line: string): string {
 		if (/^#{1,6}\s/.test(line)) return theme.bold(theme.fg("accent", line));
-		if (/^```/.test(line)) return theme.fg("dim", line);
+		if (line.startsWith("```")) return theme.fg("dim", line);
 		if (/^[\s]*[-*+]\s/.test(line)) return line.replace(/^([\s]*[-*+]\s)/, theme.fg("accent", "$1"));
 		if (/^[\s]*\d+\.\s/.test(line)) return line.replace(/^([\s]*\d+\.\s)/, theme.fg("accent", "$1"));
 		return line;

@@ -228,8 +228,8 @@ async function resolveProfileChain(
 	// Static credentials live in ~/.aws/credentials; SSO/role config lives in
 	// ~/.aws/config under `[profile foo]`. Merge into a single view.
 	const merged: Record<string, string> = {
-		...(ctx.configIni?.[profile] ?? {}),
-		...(ctx.credentialsIni?.[profile] ?? {}),
+		...ctx.configIni?.[profile],
+		...ctx.credentialsIni?.[profile],
 	};
 	if (Object.keys(merged).length === 0) return undefined;
 

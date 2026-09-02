@@ -774,6 +774,7 @@ function historyStatus(fraction: number | undefined, status: UsageHistoryEntry["
 /** Peak-per-bucket sparkline over [sinceMs, nowMs]; empty buckets render dim dots. */
 function renderHistorySparkline(entries: UsageHistoryEntry[], sinceMs: number, nowMs: number): string {
 	const span = Math.max(1, nowMs - sinceMs);
+	// oxlint-disable-next-line unicorn/no-new-array -- length preallocation
 	const buckets: Array<number | undefined> = new Array(HISTORY_SPARK_WIDTH).fill(undefined);
 	for (const entry of entries) {
 		if (entry.usedFraction === undefined) continue;

@@ -187,7 +187,7 @@ function sanitizeDeleteAction(action: RemoteDeleteAction, credential: string): R
 	if (containsCredential(url.origin + url.pathname + url.hash, credential)) {
 		throw new Error("Provider delete URL must not embed an account credential");
 	}
-	for (const name of [...url.searchParams.keys()]) {
+	for (const name of Array.from(url.searchParams.keys())) {
 		const values = url.searchParams.getAll(name);
 		if (
 			SENSITIVE_QUERY_PARAMETERS[name.toLowerCase()] ||

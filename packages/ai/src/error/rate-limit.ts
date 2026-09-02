@@ -95,6 +95,7 @@ export function isDashScopeTokenLimitText(errorMessage: string): boolean {
 }
 
 const GOOGLE_RPC_ERROR_INFO_TYPE = "type.googleapis.com/google.rpc.ErrorInfo";
+const ANTIGRAVITY_MODEL_QUOTA_PATTERN = /\bexhausted your capacity on this model\b/i;
 const LONG_RATE_LIMIT_DELAY_MS = 5 * 60 * 1000;
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
@@ -140,6 +141,11 @@ function parseGoogleRpcRateLimitReason(errorMessage: string): RateLimitReason | 
 				// and callers while treating it as credential-rotatable below.
 				return "INSUFFICIENT_G1_CREDITS_BALANCE";
 			case "RATE_LIMIT_EXCEEDED": {
+				// Cloud Code Assist also uses this reason for an account's
+				// per-model quota, even when that quota resets within seconds.
+				if (typeof error.message === "string" && ANTIGRAVITY_MODEL_QUOTA_PATTERN.test(error.message)) {
+					return "QUOTA_EXHAUSTED";
+				}
 				const retryDelayMs = extractRetryHint(undefined, errorMessage);
 				return retryDelayMs !== undefined && retryDelayMs >= LONG_RATE_LIMIT_DELAY_MS
 					? "QUOTA_EXHAUSTED"

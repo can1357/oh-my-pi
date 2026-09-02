@@ -1991,13 +1991,14 @@ export const SETTINGS_SCHEMA = {
 	// Input and startup
 	doubleEscapeAction: {
 		type: "enum",
-		values: ["rewind", "none"] as const,
+		values: ["rewind", "tree", "none"] as const,
 		default: "rewind",
 		ui: {
 			tab: "interaction",
 			group: "Input",
 			label: "Double-Escape Action",
-			description: "Pressing Escape twice with an empty editor opens the transcript rewind selector",
+			description:
+				"What pressing Escape twice with an empty editor does: open the transcript rewind selector, open the session tree, or nothing",
 		},
 	},
 
@@ -3568,6 +3569,17 @@ export const SETTINGS_SCHEMA = {
 			group: "Editing",
 			label: "Abort on Failed Preview",
 			description: "Abort streaming edit tool calls when patch preview fails",
+		},
+	},
+
+	"edit.recoverInlineEdits": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "files",
+			group: "Editing",
+			label: "Recover Inline Edit Payloads",
+			description: "Execute edit payloads the model emits as plain text by converting them into edit tool calls",
 		},
 	},
 

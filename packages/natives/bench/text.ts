@@ -79,6 +79,7 @@ const testCases = {
 const WIDTH_VARIANT_COUNT = 64;
 
 function makeWidthVariants(base: string): string[] {
+	// oxlint-disable-next-line unicorn/no-new-array -- length preallocation
 	const variants: string[] = new Array(WIDTH_VARIANT_COUNT);
 	for (let i = 0; i < WIDTH_VARIANT_COUNT; i++) {
 		variants[i] = `${base} ${String(i).padStart(2, "0")}`;
@@ -106,53 +107,41 @@ function nextWidthInput(kind: keyof typeof widthInputVariants): string {
 summary(() => {
 	bench("visibleWidth: short ascii (pi-tui)", () => do_not_optimize(tuiVisibleWidth(nextWidthInput("shortAscii"))));
 	bench("visibleWidth: short ascii (native N-API)", () =>
-		do_not_optimize(visibleWidth(nextWidthInput("shortAscii"), 3)),
-	);
+		do_not_optimize(visibleWidth(nextWidthInput("shortAscii"), 3)));
 	bench("visibleWidth: short ascii (Bun.stringWidth)", () =>
-		do_not_optimize(Bun.stringWidth(nextWidthInput("shortAscii"))),
-	);
+		do_not_optimize(Bun.stringWidth(nextWidthInput("shortAscii"))));
 	bench("visibleWidth: short ascii (string-width npm)", () =>
-		do_not_optimize(stringWidth(nextWidthInput("shortAscii"))),
-	);
+		do_not_optimize(stringWidth(nextWidthInput("shortAscii"))));
 });
 
 summary(() => {
 	bench("visibleWidth: long ascii (pi-tui)", () => do_not_optimize(tuiVisibleWidth(nextWidthInput("longAscii"))));
 	bench("visibleWidth: long ascii (native N-API)", () =>
-		do_not_optimize(visibleWidth(nextWidthInput("longAscii"), 3)),
-	);
+		do_not_optimize(visibleWidth(nextWidthInput("longAscii"), 3)));
 	bench("visibleWidth: long ascii (Bun.stringWidth)", () =>
-		do_not_optimize(Bun.stringWidth(nextWidthInput("longAscii"))),
-	);
+		do_not_optimize(Bun.stringWidth(nextWidthInput("longAscii"))));
 	bench("visibleWidth: long ascii (string-width npm)", () =>
-		do_not_optimize(stringWidth(nextWidthInput("longAscii"))),
-	);
+		do_not_optimize(stringWidth(nextWidthInput("longAscii"))));
 });
 
 summary(() => {
 	bench("visibleWidth: ansi styled (pi-tui)", () => do_not_optimize(tuiVisibleWidth(nextWidthInput("ansiStyled"))));
 	bench("visibleWidth: ansi styled (native N-API)", () =>
-		do_not_optimize(visibleWidth(nextWidthInput("ansiStyled"), 3)),
-	);
+		do_not_optimize(visibleWidth(nextWidthInput("ansiStyled"), 3)));
 	bench("visibleWidth: ansi styled (Bun.stringWidth)", () =>
-		do_not_optimize(Bun.stringWidth(nextWidthInput("ansiStyled"))),
-	);
+		do_not_optimize(Bun.stringWidth(nextWidthInput("ansiStyled"))));
 	bench("visibleWidth: ansi styled (string-width npm)", () =>
-		do_not_optimize(stringWidth(nextWidthInput("ansiStyled"))),
-	);
+		do_not_optimize(stringWidth(nextWidthInput("ansiStyled"))));
 });
 
 summary(() => {
 	bench("visibleWidth: emoji / CJK (pi-tui)", () => do_not_optimize(tuiVisibleWidth(nextWidthInput("emojiCjk"))));
 	bench("visibleWidth: emoji / CJK (native N-API)", () =>
-		do_not_optimize(visibleWidth(nextWidthInput("emojiCjk"), 3)),
-	);
+		do_not_optimize(visibleWidth(nextWidthInput("emojiCjk"), 3)));
 	bench("visibleWidth: emoji / CJK (Bun.stringWidth)", () =>
-		do_not_optimize(Bun.stringWidth(nextWidthInput("emojiCjk"))),
-	);
+		do_not_optimize(Bun.stringWidth(nextWidthInput("emojiCjk"))));
 	bench("visibleWidth: emoji / CJK (string-width npm)", () =>
-		do_not_optimize(stringWidth(nextWidthInput("emojiCjk"))),
-	);
+		do_not_optimize(stringWidth(nextWidthInput("emojiCjk"))));
 });
 
 // ============================================================================
@@ -161,24 +150,20 @@ summary(() => {
 
 summary(() => {
 	bench("truncateToWidth: long ascii (native)", () =>
-		do_not_optimize(truncateToWidth(testCases.longAscii, 40, 0, false, 3)),
-	);
+		do_not_optimize(truncateToWidth(testCases.longAscii, 40, 0, false, 3)));
 	bench("truncateToWidth: long ascii (cli-truncate)", () => do_not_optimize(cliTruncate(testCases.longAscii, 40)));
 });
 
 summary(() => {
 	bench("truncateToWidth: ansi styled (native)", () =>
-		do_not_optimize(truncateToWidth(testCases.ansiStyled, 40, 0, false, 3)),
-	);
+		do_not_optimize(truncateToWidth(testCases.ansiStyled, 40, 0, false, 3)));
 	bench("truncateToWidth: ansi styled (cli-truncate)", () => do_not_optimize(cliTruncate(testCases.ansiStyled, 40)));
 });
 
 bench("truncateToWidth: fits no-alloc (native)", () =>
-	do_not_optimize(truncateToWidth(testCases.shortAscii, 100, 0, false, 3)),
-);
+	do_not_optimize(truncateToWidth(testCases.shortAscii, 100, 0, false, 3)));
 bench("truncateToWidth: pads with spaces (native)", () =>
-	do_not_optimize(truncateToWidth(testCases.shortAscii, 60, 0, true, 3)),
-);
+	do_not_optimize(truncateToWidth(testCases.shortAscii, 60, 0, true, 3)));
 
 // ============================================================================
 // 3. sliceWithWidth: Native vs slice-ansi
@@ -186,18 +171,15 @@ bench("truncateToWidth: pads with spaces (native)", () =>
 
 summary(() => {
 	bench("sliceWithWidth: ascii slice (native)", () =>
-		do_not_optimize(sliceWithWidth(testCases.shortAscii, 10, 20, false, 3)),
-	);
+		do_not_optimize(sliceWithWidth(testCases.shortAscii, 10, 20, false, 3)));
 	bench("sliceWithWidth: ascii slice (slice-ansi)", () => do_not_optimize(sliceAnsi(testCases.shortAscii, 10, 30)));
 });
 
 summary(() => {
 	bench("sliceWithWidth: ansi styled slice (native)", () =>
-		do_not_optimize(sliceWithWidth(testCases.ansiStyled, 15, 30, false, 3)),
-	);
+		do_not_optimize(sliceWithWidth(testCases.ansiStyled, 15, 30, false, 3)));
 	bench("sliceWithWidth: ansi styled slice (slice-ansi)", () =>
-		do_not_optimize(sliceAnsi(testCases.ansiStyled, 15, 45)),
-	);
+		do_not_optimize(sliceAnsi(testCases.ansiStyled, 15, 45)));
 });
 
 // ============================================================================
@@ -206,20 +188,16 @@ summary(() => {
 
 summary(() => {
 	bench("wrapTextWithAnsi: single line (native)", () =>
-		do_not_optimize(wrapTextWithAnsi(testCases.ansiStyled, 30, 3)),
-	);
+		do_not_optimize(wrapTextWithAnsi(testCases.ansiStyled, 30, 3)));
 	bench("wrapTextWithAnsi: single line (wrap-ansi)", () =>
-		do_not_optimize(wrapAnsi(testCases.ansiStyled, 30, { hard: true })),
-	);
+		do_not_optimize(wrapAnsi(testCases.ansiStyled, 30, { hard: true })));
 });
 
 summary(() => {
 	bench("wrapTextWithAnsi: multiline logs (native)", () =>
-		do_not_optimize(wrapTextWithAnsi(testCases.multilineAnsi, 60, 3)),
-	);
+		do_not_optimize(wrapTextWithAnsi(testCases.multilineAnsi, 60, 3)));
 	bench("wrapTextWithAnsi: multiline logs (wrap-ansi)", () =>
-		do_not_optimize(wrapAnsi(testCases.multilineAnsi, 60, { hard: true })),
-	);
+		do_not_optimize(wrapAnsi(testCases.multilineAnsi, 60, { hard: true })));
 });
 
 // ============================================================================
@@ -229,8 +207,7 @@ summary(() => {
 summary(() => {
 	bench("diffLines: source files (native)", () => do_not_optimize(diffLines(testCases.diffOld, testCases.diffNew)));
 	bench("diffLines: source files (diff npm)", () =>
-		do_not_optimize(diff.diffLines(testCases.diffOld, testCases.diffNew)),
-	);
+		do_not_optimize(diff.diffLines(testCases.diffOld, testCases.diffNew)));
 });
 
 // ============================================================================
@@ -256,11 +233,9 @@ summary(() => {
 // ============================================================================
 
 bench("extractSegments: ansi overlay (native)", () =>
-	do_not_optimize(extractSegments(testCases.ansiStyled, 15, 25, 20, false, 3)),
-);
+	do_not_optimize(extractSegments(testCases.ansiStyled, 15, 25, 20, false, 3)));
 
 bench("highlightCode: rust snippet (native)", () =>
-	do_not_optimize(highlightCode('fn main() { println!("hello"); }', "rust", testCases.colors)),
-);
+	do_not_optimize(highlightCode('fn main() { println!("hello"); }', "rust", testCases.colors)));
 
 await run();

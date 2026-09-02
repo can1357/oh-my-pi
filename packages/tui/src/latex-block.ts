@@ -460,6 +460,7 @@ function gridBox(rows: Box[][], align: (col: number) => CellAlign, gap: (col: nu
 	let ncols = 0;
 	for (const row of rows) ncols = Math.max(ncols, row.length);
 	if (ncols === 0 || rows.length === 0) return textBox("");
+	// oxlint-disable-next-line unicorn/no-new-array -- grid-width allocation
 	const widths = new Array<number>(ncols).fill(0);
 	for (const row of rows) {
 		row.forEach((cell, j) => {

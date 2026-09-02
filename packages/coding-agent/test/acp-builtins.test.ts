@@ -61,35 +61,9 @@ interface FakeAcpBuiltinSession {
 	redeemResetCredit: (target: ResetCreditTarget) => Promise<ResetCreditRedeemOutcome>;
 }
 
-interface FakeAcpBuiltinSessionManager {
-	_sessionFile: string | undefined;
-	_cwd: string;
-	_entries: { type: string }[];
-	_customEntries: Array<{ customType: string; data: unknown }>;
-	_movedTo: string | undefined;
-	_flushed: boolean;
-	_droppedSessions: string[];
-	_sessionName: string | undefined;
-	getSessionId(): string;
-	getSessionFile(): string | undefined;
-	getEntries(): { type: string }[];
-	getBranch(): { type: string }[];
-	appendCustomEntry(customType: string, data?: unknown): string;
-	flush(): Promise<void>;
-	moveTo(newCwd: string): Promise<void>;
-	captureState(): { cwd: string; sessionDir: string };
-	restoreState(snapshot: { cwd: string }): void;
-	rollbackMove(snapshot: { cwd: string; sessionDir: string }): Promise<void>;
-	setSessionFile(sessionFile: string): Promise<void>;
-	dropSession(sessionPath: string): Promise<void>;
-	getCwd(): string;
-	setSessionName(name: string, source: string): Promise<boolean>;
-}
-
 function createRuntime() {
 	const settings = Settings.isolated();
 	const output: string[] = [];
-	let fakeSessionManager: FakeAcpBuiltinSessionManager | undefined;
 	const session: FakeAcpBuiltinSession = {
 		fastMode: false,
 		forcedToolChoice: undefined as string | undefined,
@@ -173,7 +147,7 @@ function createRuntime() {
 		async setModel(_model: unknown) {},
 	};
 	const typedSession = session as unknown as AgentSession & FakeAcpBuiltinSession;
-	fakeSessionManager = {
+	const fakeSessionManager = {
 		_sessionFile: undefined as string | undefined,
 		_cwd: "/tmp/project",
 		_entries: [] as { type: string }[],

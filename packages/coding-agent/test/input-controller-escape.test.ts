@@ -130,12 +130,11 @@ function createContext(): {
 		pendingImageLinks: [],
 	};
 
-	let ctx!: InteractiveModeContext;
 	const ensureLoadingAnimation = vi.fn(() => {
 		ctx.loadingAnimation = {} as InteractiveModeContext["loadingAnimation"];
 	});
 
-	ctx = {
+	const ctx = {
 		editor: editor as unknown as InteractiveModeContext["editor"],
 		ui: {
 			requestRender,
@@ -708,6 +707,24 @@ describe("InputController escape behavior", () => {
 
 		expect(ctx.showUserMessageSelector).not.toHaveBeenCalled();
 		expect(ctx.showTreeSelector).not.toHaveBeenCalled();
+		expect(spies.resetDisplay).not.toHaveBeenCalled();
+	});
+
+	it("opens the session tree on double-Esc when the action is tree", () => {
+		Settings.instance.override("doubleEscapeAction", "tree");
+		const { ctx, editor, spies } = createContext();
+		const controller = new InputController(ctx);
+
+		controller.setupKeyHandlers();
+		editor.onEscape?.();
+		editor.onEscape?.();
+
+		expect(ctx.showTreeSelector).toHaveBeenCalledTimes(1);
+		expect(ctx.showUserMessageSelector).not.toHaveBeenCalled();
+		// Same forced viewport repaint as the rewind path: without it the
+		// overlay paint is deferred past the escape input grace and double-Esc
+		// reads as dead on long sessions.
+		expect(spies.requestRender).toHaveBeenCalledWith(true);
 		expect(spies.resetDisplay).not.toHaveBeenCalled();
 	});
 	it("preserves typed editor text on Esc without opening selectors or aborting", () => {

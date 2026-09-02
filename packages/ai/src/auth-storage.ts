@@ -75,11 +75,7 @@ import { umansUsageProvider } from "./usage/umans";
 import { xaiOauthUsageProvider } from "./usage/xai-oauth";
 import { zaiRankingStrategy, zaiUsageProvider } from "./usage/zai";
 
-export {
-	isSqliteBusyError,
-	isSqliteCorruptionError,
-	SqliteAuthCredentialStore,
-} from "./auth/sqlite-credential-store";
+export { isSqliteBusyError, isSqliteCorruptionError, SqliteAuthCredentialStore } from "./auth/sqlite-credential-store";
 
 const USAGE_RANKING_METRIC_EPSILON = 1e-9;
 /**
@@ -1448,7 +1444,7 @@ export class AuthStorage {
 	#bumpGeneration(reason: string): void {
 		this.#generation += 1;
 		this.#store.acknowledgeLocalChanges?.();
-		for (const listener of [...this.#generationListeners]) {
+		for (const listener of Array.from(this.#generationListeners)) {
 			try {
 				listener(this.#generation);
 			} catch (error) {
@@ -3566,7 +3562,7 @@ export class AuthStorage {
 		const exhausted = parsedReport.limits.some(limit => this.#isUsageLimitExhausted(limit));
 		const last = this.#usageHeaderIngestAt.get(cacheKey);
 		if (!exhausted && last !== undefined && now - last < USAGE_HEADER_INGEST_INTERVAL_MS) return false;
-		const metadata: Record<string, unknown> = { ...(parsedReport.metadata ?? {}) };
+		const metadata: Record<string, unknown> = { ...parsedReport.metadata };
 		if (credential.accountId && metadata.accountId === undefined) metadata.accountId = credential.accountId;
 		if (credential.email && metadata.email === undefined) metadata.email = credential.email;
 		if (credential.projectId && metadata.projectId === undefined) metadata.projectId = credential.projectId;
@@ -3605,8 +3601,8 @@ export class AuthStorage {
 				fetchedAt: now,
 				limits,
 				metadata: {
-					...(report.metadata ?? {}),
-					...(prior.metadata ?? {}),
+					...report.metadata,
+					...prior.metadata,
 					source: prior.metadata?.source,
 					headersUpdatedAt: now,
 				},
@@ -3790,7 +3786,7 @@ export class AuthStorage {
 		const base = sorted[0];
 		const mergedLimits = [...base.limits];
 		const limitIds = new Set(mergedLimits.map(limit => limit.id));
-		const mergedMetadata: Record<string, unknown> = { ...(base.metadata ?? {}) };
+		const mergedMetadata: Record<string, unknown> = { ...base.metadata };
 		let fetchedAt = base.fetchedAt;
 
 		for (const report of sorted.slice(1)) {
@@ -3877,7 +3873,7 @@ export class AuthStorage {
 		return limits.some(limit => this.#isUsageLimitExhausted(limit));
 	}
 
-	/** Extracts the earliest reset timestamp from exhausted windows (in ms). */
+	/** Extracts when every currently exhausted window has reset (in ms). */
 	#getUsageResetAtMs(limits: UsageLimit[], nowMs: number): number | undefined {
 		const candidates: number[] = [];
 		for (const limit of limits) {
@@ -3888,7 +3884,7 @@ export class AuthStorage {
 			}
 		}
 		if (candidates.length === 0) return undefined;
-		return Math.min(...candidates);
+		return Math.max(...candidates);
 	}
 
 	async #getUsageReport(
@@ -4576,7 +4572,7 @@ export class AuthStorage {
 		const now = Date.now();
 		let blockedUntil = now + (options?.retryAfterMs ?? AuthStorage.#defaultBackoffMs);
 
-		if (credentialType === "oauth" && target.credential.type === "oauth" && routing.strategy) {
+		if (target && routing.strategy) {
 			const report = await raceUsageWithSignal(
 				this.#getUsageReport(provider, target.credential, options),
 				options?.signal,

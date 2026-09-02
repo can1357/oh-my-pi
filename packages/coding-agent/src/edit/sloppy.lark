@@ -1,31 +1,26 @@
 // Canonical grammar for the sloppy edit payload (constrained decoding).
 //
 // Shape:
-//   *** Begin Patch   envelope sentinel (stripped by the runtime)
-//   §relative/path    start an operation in that file (§*path: every match)
-//   §                 start another operation in the same file (§*: every match)
-//   <match lines>     current-text pattern with … gaps and selections
-//                      Preferred selection: ⟪old│new⟫; no » follows.
-//                      ＋text lines insert `text` as a new line in place.
-//                      Legacy selection: ⟪old⟫; a » starts whole REWRITE.
-//   »                 optional REWRITE separator
-//   <rewrite lines>   final text
-//   *** End Patch     envelope sentinel (stripped by the runtime)
-start: begin_patch op+ end_patch
-begin_patch: "*** Begin Patch" LF
-end_patch:   "*** End Patch" LF?
-
-op: op_header match_line+ rewrite?
-op_header: "§" ALL? PATH? LF
-ALL: "*"
-PATH: /[^*§«»\n][^\n]*/
-
-rewrite: rewrite_sep rewrite_line*
-rewrite_sep: "»" LF
-rewrite_line: content_line | blank_line
-
-match_line: content_line | blank_line
-content_line: /[^§«»\n][^\n]*/ LF
-blank_line: LF
+//   <SM:EDIT path="relative/path.ts">   open edits in that file (`all` attr: every match)
+//   <SM:EDIT>                           more edits in the same file
+//   <SM:FIND> ... </SM:FIND>           current-text block; … elides gaps
+//   <SM:PUT> ... </SM:PUT>             final text replacing the whole <SM:FIND> match
+//                                        (<SM:PUT></SM:PUT> on one line deletes the match)
+//   </SM:EDIT>                          optional block close
+// Content lines between tags are raw file bytes: no entity escaping, no CDATA.
+start: edit+
+edit: edit_open pair+ edit_close?
+edit_open: "<SM:EDIT" attr* ">" LF
+attr: WS_INLINE (path_attr | all_attr)
+path_attr: /(?:path|file)="[^"\n]*"/
+all_attr: "all"
+edit_close: "</SM:EDIT>" LF?
+pair: find put?
+find: "<SM:FIND>" LF content_line* "</SM:FIND>" LF
+put: "<SM:PUT>" LF content_line* "</SM:PUT>" LF
+   | "<SM:PUT></SM:PUT>" LF
+content_line: TEXT LF | LF
+TEXT: /[^\n]+/
 
 %import common.LF
+%import common.WS_INLINE

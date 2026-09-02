@@ -259,7 +259,7 @@ function findReplacementGroup(edits: readonly AppliedEdit[], start: number): Rep
  */
 function repairReplacementIndentation(edits: AppliedEdit[], fileLines: readonly string[]): string[] {
 	let repaired = false;
-	for (let start = 0; start < edits.length; ) {
+	for (let start = 0; start < edits.length;) {
 		const group = findReplacementGroup(edits, start);
 		if (group === undefined) {
 			start++;

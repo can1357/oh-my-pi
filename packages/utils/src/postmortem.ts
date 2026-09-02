@@ -222,7 +222,7 @@ export function isInternalSocketClosedError(err: unknown): boolean {
 	const internal = frames.every(frame => {
 		const trimmed = frame.trim();
 		if (trimmed === "" || trimmed === "at unknown" || trimmed === "at native") return true;
-		if (!/\(node:[^)]*\)$/.test(trimmed) && !/^at node:/.test(trimmed)) return false;
+		if (!/\(node:[^)]*\)$/.test(trimmed) && !trimmed.startsWith("at node:")) return false;
 		hasNetFrame ||= trimmed.includes("node:net:");
 		return true;
 	});

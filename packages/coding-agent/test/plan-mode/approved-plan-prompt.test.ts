@@ -1,9 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import { prompt } from "@oh-my-pi/pi-utils";
 import planModeApprovedPrompt from "../../src/prompts/system/plan-mode-approved.md" with { type: "text" };
-import planModeCompactInstructionsPrompt from "../../src/prompts/system/plan-mode-compact-instructions.md" with {
-	type: "text",
-};
+import planModeCompactInstructionsPrompt from "../../src/prompts/system/plan-mode-compact-instructions.md" with { type: "text" };
 import planModeReferencePrompt from "../../src/prompts/system/plan-mode-reference.md" with { type: "text" };
 
 const PLAN_FILE_PATH = "local://durable-plan.md";

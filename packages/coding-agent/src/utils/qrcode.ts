@@ -23,7 +23,8 @@ const MAX_VERSION = 40;
 
 // ISO/IEC 18004 Table 9 — error-correction codewords per block, indexed
 // [ecTable][version]. Index 0 of each row pads the 1-based version axis.
-// biome-ignore format: spec table, one row per EC level
+// spec table, one row per EC level
+// oxfmt-ignore
 const ECC_CODEWORDS_PER_BLOCK: readonly (readonly number[])[] = [
 	[-1, 7, 10, 15, 20, 26, 18, 20, 24, 30, 18, 20, 24, 26, 30, 22, 24, 28, 30, 28, 28, 28, 28, 30, 30, 26, 28, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30],
 	[-1, 10, 16, 26, 18, 24, 16, 18, 22, 22, 26, 30, 22, 22, 24, 24, 28, 28, 26, 26, 26, 26, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28],
@@ -33,7 +34,8 @@ const ECC_CODEWORDS_PER_BLOCK: readonly (readonly number[])[] = [
 
 // ISO/IEC 18004 Table 9 — number of error-correction blocks, indexed
 // [ecTable][version].
-// biome-ignore format: spec table, one row per EC level
+// spec table, one row per EC level
+// oxfmt-ignore
 const NUM_EC_BLOCKS: readonly (readonly number[])[] = [
 	[-1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 4, 4, 4, 4, 4, 6, 6, 6, 6, 7, 8, 8, 9, 9, 10, 12, 12, 12, 13, 14, 15, 16, 17, 18, 19, 19, 20, 21, 22, 24, 25],
 	[-1, 1, 1, 1, 2, 2, 4, 4, 4, 5, 5, 5, 8, 9, 9, 10, 10, 11, 13, 14, 16, 17, 17, 18, 20, 21, 23, 25, 26, 28, 29, 31, 33, 35, 37, 38, 40, 43, 45, 47, 49],
@@ -164,7 +166,9 @@ export class QrCode {
 		mask: number,
 	) {
 		this.size = version * 4 + 17;
+		// oxlint-disable-next-line unicorn/no-new-array -- row preallocation
 		this.#modules = Array.from({ length: this.size }, () => new Array<boolean>(this.size).fill(false));
+		// oxlint-disable-next-line unicorn/no-new-array -- row preallocation
 		this.#isFunction = Array.from({ length: this.size }, () => new Array<boolean>(this.size).fill(false));
 
 		this.#drawFunctionPatterns();

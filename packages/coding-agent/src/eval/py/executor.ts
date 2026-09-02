@@ -400,7 +400,7 @@ export async function executePython(code: string, options?: PythonExecutorOption
 	const cwd = normalizeKernelSessionCwd(options?.cwd ?? getProjectDir());
 	const deadlineMs = getExecutionDeadlineMs(options);
 	const executionOptions: PythonExecutorOptions = {
-		...(options ?? {}),
+		...options,
 		cwd,
 		deadlineMs,
 	};

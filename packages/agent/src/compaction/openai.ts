@@ -390,7 +390,7 @@ export function withOpenAiRemoteCompactionPreserveData(
 ): Record<string, unknown> | undefined {
 	if (remoteCompaction) {
 		return {
-			...(preserveData ?? {}),
+			...preserveData,
 			[OPENAI_REMOTE_COMPACTION_PRESERVE_KEY]: remoteCompaction,
 		};
 	}
@@ -803,12 +803,12 @@ export async function requestOpenAiRemoteCompaction(
 		? {
 				"content-type": "application/json",
 				"api-key": apiKey,
-				...(model.headers ?? {}),
+				...model.headers,
 			}
 		: {
 				"content-type": "application/json",
 				Authorization: `Bearer ${apiKey}`,
-				...(model.headers ?? {}),
+				...model.headers,
 			};
 
 	// Codex endpoints require additional auth headers

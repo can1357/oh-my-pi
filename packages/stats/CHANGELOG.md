@@ -2,8 +2,17 @@
 
 ## [Unreleased]
 
+## [18.1.3] - 2026-09-02
+
+### Changed
+
+- Provider, tool, and project `<select>` dropdowns are now styled to match the dashboard design, with dark and light theme support.
+
+## [18.1.0] - 2026-09-01
+
 ### Added
 
+- Added API for daily activity tracking, including cost, requests, and token usage aggregates
 - Added a Traces dashboard for detailed session analysis, including an interactive timeline, searchable and filterable transcripts, token and cost summaries, and aggregate tool-usage and timing insights.
 
 ### Fixed

@@ -136,6 +136,21 @@ export interface CostTimeSeriesPoint {
 }
 
 /**
+ * One local calendar day of aggregate request activity, for the `/usage`
+ * activity heatmap in the coding-agent TUI.
+ */
+export interface DailyActivityPoint {
+	/** Local calendar date, `YYYY-MM-DD`. */
+	day: string;
+	/** Summed API-equivalent cost for the day. */
+	cost: number;
+	/** Request count for the day. */
+	requests: number;
+	/** Total tokens (input + output + cache) for the day. */
+	totalTokens: number;
+}
+
+/**
  * Overall dashboard stats.
  */
 export interface DashboardStats {

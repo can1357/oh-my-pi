@@ -79,6 +79,7 @@ function makeFakeSession(): FakeSession {
 				messages: [],
 				isTerminal: options?.isTerminal ?? true,
 			} as unknown as AgentSessionEvent;
+			// oxlint-disable-next-line unicorn/no-useless-spread -- listeners may change during dispatch
 			for (const listener of [...listeners]) listener(event);
 		},
 	};

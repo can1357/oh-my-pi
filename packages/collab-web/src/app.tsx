@@ -173,6 +173,7 @@ function Session({ client, onLeave, onRejoin }: SessionProps): ReactNode {
 							activeTools={snap.activeTools}
 							working={snap.working}
 							host={toolHost}
+							phase={snap.phase}
 						/>
 					</div>
 				</section>

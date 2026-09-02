@@ -1356,6 +1356,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 				let totalMatchLimitReached = false;
 				if (windowFiles.length > 0) {
 					const lists = windowFiles.map(file => matchesByPath.get(file) ?? []);
+					// oxlint-disable-next-line unicorn/no-new-array -- length preallocation
 					const cursors = new Array<number>(lists.length).fill(0);
 					let anyAdded = true;
 					while (anyAdded) {
@@ -1566,11 +1567,11 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 				const displayText = displayLines.join("\n");
 				const truncated = Boolean(
 					fileLimitReached ||
-						perFileLimitReached ||
-						totalMatchLimitReached ||
-						result.limitReached ||
-						truncation.truncated ||
-						linesTruncated,
+					perFileLimitReached ||
+					totalMatchLimitReached ||
+					result.limitReached ||
+					truncation.truncated ||
+					linesTruncated,
 				);
 				const details: GrepToolDetails = {
 					scopePath,

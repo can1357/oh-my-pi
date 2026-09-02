@@ -485,7 +485,7 @@ const PREVIEW_TOKEN_RE =
 function redactedJunkPreview(text: string): string {
 	const source = text.slice(0, 64);
 	let out = "";
-	for (let i = 0; i < source.length; ) {
+	for (let i = 0; i < source.length;) {
 		const tok = PREVIEW_TOKEN_RE.exec(source.slice(i));
 		if (tok) {
 			out += tok[0];

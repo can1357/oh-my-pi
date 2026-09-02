@@ -30,24 +30,20 @@ export function expandApplyPatchToEntries(params: ApplyPatchParams): ApplyPatchE
 	if (hunks.length === 0) {
 		throw new ApplyPatchError("No files were modified.");
 	}
-	return hunks.map(
-		(h): ApplyPatchEntry => ({
-			path: h.path,
-			op: h.op,
-			rename: h.rename,
-			diff: h.diff,
-		}),
-	);
+	return hunks.map((h): ApplyPatchEntry => ({
+		path: h.path,
+		op: h.op,
+		rename: h.rename,
+		diff: h.diff,
+	}));
 }
 
 export function expandApplyPatchToPreviewEntries(params: ApplyPatchParams): ApplyPatchEntry[] {
 	const hunks = parseApplyPatchStreaming(params.input);
-	return hunks.map(
-		(h): ApplyPatchEntry => ({
-			path: h.path,
-			op: h.op,
-			rename: h.rename,
-			diff: h.diff,
-		}),
-	);
+	return hunks.map((h): ApplyPatchEntry => ({
+		path: h.path,
+		op: h.op,
+		rename: h.rename,
+		diff: h.diff,
+	}));
 }

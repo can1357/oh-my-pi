@@ -57,6 +57,7 @@ function convertToLegacyConfig(server: MCPServer): MCPServerConfig {
 		if (server.args) config.args = server.args;
 		if (server.env) config.env = server.env;
 		if (server.envPolicy) config.envPolicy = server.envPolicy;
+		if (server.envLiteralKeys) config.envLiteralKeys = server.envLiteralKeys;
 		if (server.cwd) config.cwd = server.cwd;
 		return config;
 	}

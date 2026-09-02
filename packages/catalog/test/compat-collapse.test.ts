@@ -738,21 +738,19 @@ describe("Devin tier routing", () => {
 			"swe-1-7-medium",
 			"swe-1-7",
 		];
-		const specs = rawIds.map(
-			(id): ModelSpec<"devin-agent"> => ({
-				id,
-				name: id,
-				api: "devin-agent",
-				provider: "devin",
-				baseUrl: "https://server.codeium.com",
-				reasoning: true,
-				input: ["text"],
-				supportsTools: true,
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-				contextWindow: 200_000,
-				maxTokens: 64_000,
-			}),
-		);
+		const specs = rawIds.map((id): ModelSpec<"devin-agent"> => ({
+			id,
+			name: id,
+			api: "devin-agent",
+			provider: "devin",
+			baseUrl: "https://server.codeium.com",
+			reasoning: true,
+			input: ["text"],
+			supportsTools: true,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 200_000,
+			maxTokens: 64_000,
+		}));
 
 		const collapsed = collapseVariants(specs, { table: devinTable });
 		expect(collapsed.map(model => model.id).sort()).toEqual(["claude-fable-5", "swe-1-7"]);

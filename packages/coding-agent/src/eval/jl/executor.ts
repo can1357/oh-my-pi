@@ -238,7 +238,7 @@ export async function executeJulia(code: string, options?: JuliaExecutorOptions)
 				? getExecutionDeadlineMs(options)
 				: undefined;
 	const executionOptions: JuliaExecutorOptions = {
-		...(options ?? {}),
+		...options,
 		cwd,
 		deadlineMs,
 	};

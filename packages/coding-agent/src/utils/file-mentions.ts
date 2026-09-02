@@ -276,7 +276,9 @@ export async function generateFileMentionMessages(
 			const snapshotStore = options?.useHashLines ? options.snapshotStore : undefined;
 			const normalized = snapshotStore ? normalizeToLF(content) : content;
 			const displayText = snapshotStore ? splitAddressableFileLines(normalized).join("\n") : normalized;
-			let { output, lineCount } = buildTextOutput(displayText);
+			const textOutput = buildTextOutput(displayText);
+			let { output } = textOutput;
+			const { lineCount } = textOutput;
 			if (snapshotStore) {
 				const tag = snapshotStore.record(canonicalSnapshotKey(absolutePath), normalized);
 				output = `${formatHashlineHeader(resolvedPath, tag)}\n${formatNumberedLines(output)}`;

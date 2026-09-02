@@ -320,7 +320,7 @@ function buildStreamingSectionDiff(
 	// number and the edits sit contiguously (a replace lays down its replacement
 	// inserts then its range deletes; block ops expand to the same shape). Group
 	// on that boundary so each op stays intact and ordered.
-	for (let i = 0; i < resolved.length; ) {
+	for (let i = 0; i < resolved.length;) {
 		const opLine = resolved[i].lineNum;
 		const deletes: number[] = [];
 		const inserts: string[] = [];

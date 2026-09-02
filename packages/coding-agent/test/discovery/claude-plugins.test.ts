@@ -14,6 +14,9 @@ import { discoverAgents } from "@oh-my-pi/pi-coding-agent/task/discovery";
 import { __resetDirsFromEnvForTests, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 import "@oh-my-pi/pi-coding-agent/discovery/claude-plugins";
 import { type MCPServer, mcpCapability } from "@oh-my-pi/pi-coding-agent/capability/mcp";
+import { isSameMCPConnection } from "@oh-my-pi/pi-coding-agent/capability/mcp";
+import { loadAllMCPConfigs } from "@oh-my-pi/pi-coding-agent/mcp/config";
+import { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
 import type { Rule } from "@oh-my-pi/pi-coding-agent/capability/rule";
 import type { Skill } from "@oh-my-pi/pi-coding-agent/capability/skill";
 import type { SlashCommand } from "@oh-my-pi/pi-coding-agent/capability/slash-command";
@@ -702,6 +705,643 @@ describe("listClaudePluginRoots", () => {
 			if (originalUrl === undefined) delete process.env.OMP_PLUGIN_MCP_URL;
 			else process.env.OMP_PLUGIN_MCP_URL = originalUrl;
 		}
+	});
+
+	test("expands env placeholders in marketplace plugin MCP stdio environment", async () => {
+		const pluginsDir = path.join(tempDir, ".claude", "plugins");
+		const pluginPath = path.join(tempDir, "plugins", "ida-mcp");
+		const originalNexusId = process.env.OMP_PLUGIN_MCP_NEXUS_ID;
+		const originalStateDir = process.env.OMP_PLUGIN_MCP_STATE_DIR;
+		const originalCacheDir = process.env.OMP_PLUGIN_MCP_CACHE_DIR;
+		const envPlaceholder = (name: string): string => ["$", "{", name, ":-}"].join("");
+		const envPlaceholderWithDefault = (name: string, defaultValue: string): string =>
+			["$", "{", name, ":-", defaultValue, "}"].join("");
+		restoreEnvValue("OMP_PLUGIN_MCP_NEXUS_ID", "test-nexus");
+		restoreEnvValue("OMP_PLUGIN_MCP_STATE_DIR", undefined);
+		restoreEnvValue("OMP_PLUGIN_MCP_CACHE_DIR", "");
+
+		try {
+			await fs.mkdir(pluginsDir, { recursive: true });
+			await fs.mkdir(pluginPath, { recursive: true });
+			await fs.writeFile(
+				path.join(pluginsDir, "installed_plugins.json"),
+				JSON.stringify({
+					version: 2,
+					plugins: {
+						"ida-mcp@hex-rays": [
+							{
+								scope: "user",
+								installPath: pluginPath,
+								version: "1.0.0",
+								installedAt: "2026-09-01T00:00:00Z",
+								lastUpdated: "2026-09-01T00:00:00Z",
+							},
+						],
+					},
+				}),
+			);
+			await fs.writeFile(
+				path.join(pluginPath, ".mcp.json"),
+				JSON.stringify({
+					ida: {
+						command: "uv",
+						env: {
+							IDA_NEXUS_ID: envPlaceholder("OMP_PLUGIN_MCP_NEXUS_ID"),
+							IDA_NEXUS_STATE_DIR: envPlaceholder("OMP_PLUGIN_MCP_STATE_DIR"),
+							IDA_NEXUS_CACHE_DIR: envPlaceholderWithDefault("OMP_PLUGIN_MCP_CACHE_DIR", "/tmp/ida-nexus-cache"),
+							PLUGIN_ROOT: ["$", "{CLAUDE_PLUGIN_ROOT}"].join(""),
+						},
+					},
+				}),
+			);
+
+			const result = await loadCapability<MCPServer>(mcpCapability.id, {
+				cwd: tempDir,
+				providers: ["claude-plugins"],
+			});
+			const server = result.all.find(item => item.name === "ida-mcp:ida");
+
+			expect(server?.env).toEqual({
+				IDA_NEXUS_ID: "test-nexus",
+				IDA_NEXUS_STATE_DIR: "",
+				IDA_NEXUS_CACHE_DIR: "/tmp/ida-nexus-cache",
+				PLUGIN_ROOT: pluginPath,
+			});
+			// The empty expanded value must survive discovery→config conversion
+			// and auth resolution: StdioTransport merges Bun.env underneath the
+			// config env, so a dropped entry would silently inherit a stale host
+			// value instead of delivering the explicit empty override.
+			const { configs } = await loadAllMCPConfigs(tempDir);
+			const delivered = await new MCPManager(tempDir).prepareConfig(configs["ida-mcp:ida"]);
+			expect(delivered).toMatchObject({
+				type: "stdio",
+				env: {
+					IDA_NEXUS_ID: "test-nexus",
+					IDA_NEXUS_STATE_DIR: "",
+					IDA_NEXUS_CACHE_DIR: "/tmp/ida-nexus-cache",
+					PLUGIN_ROOT: pluginPath,
+				},
+			});
+		} finally {
+			restoreEnvValue("OMP_PLUGIN_MCP_NEXUS_ID", originalNexusId);
+			restoreEnvValue("OMP_PLUGIN_MCP_STATE_DIR", originalStateDir);
+			restoreEnvValue("OMP_PLUGIN_MCP_CACHE_DIR", originalCacheDir);
+		}
+	});
+
+	test("defers legacy !command resolution until the enabled server is prepared", async () => {
+		const pluginsDir = path.join(tempDir, ".claude", "plugins");
+		const pluginPath = path.join(tempDir, "plugins", "defer-mcp");
+		const activeSentinel = path.join(tempDir, "active-sentinel");
+		const disabledSentinel = path.join(tempDir, "disabled-sentinel");
+		const command = (sentinel: string): string => "!touch " + sentinel.replaceAll("\\", "/");
+
+		try {
+			await fs.mkdir(pluginsDir, { recursive: true });
+			await fs.mkdir(pluginPath, { recursive: true });
+			await fs.writeFile(
+				path.join(pluginsDir, "installed_plugins.json"),
+				JSON.stringify({
+					version: 2,
+					plugins: {
+						"defer-mcp@market": [
+							{
+								scope: "user",
+								installPath: pluginPath,
+								version: "1.0.0",
+								installedAt: "2026-09-01T00:00:00Z",
+								lastUpdated: "2026-09-01T00:00:00Z",
+							},
+						],
+					},
+				}),
+			);
+			await fs.writeFile(
+				path.join(pluginPath, ".mcp.json"),
+				JSON.stringify({
+					active: {
+						command: "uv",
+						env: {
+							SECRET: command(activeSentinel),
+						},
+					},
+					disabled: {
+						command: "uv",
+						enabled: false,
+						env: {
+							SECRET: command(disabledSentinel),
+						},
+					},
+				}),
+			);
+
+			// Discovery must not execute credential commands: suppression and
+			// deduplication run after provider.load(), so a disabled or shadowed
+			// server must never run its command.
+			const { configs } = await loadAllMCPConfigs(tempDir);
+			expect(configs["defer-mcp:active"]).toBeDefined();
+			expect(configs["defer-mcp:disabled"]).toBeUndefined();
+			expect(await Bun.file(activeSentinel).exists()).toBe(false);
+			expect(await Bun.file(disabledSentinel).exists()).toBe(false);
+
+			// Preparing the surviving enabled server resolves its command; the
+			// disabled server's command still never runs.
+			await new MCPManager(tempDir).prepareConfig(configs["defer-mcp:active"]);
+			expect(await Bun.file(activeSentinel).exists()).toBe(true);
+			expect(await Bun.file(disabledSentinel).exists()).toBe(false);
+		} finally {
+			await fs.rm(activeSentinel, { force: true });
+			await fs.rm(disabledSentinel, { force: true });
+		}
+	});
+
+	test("resolves legacy env indirection once for marketplace plugin env", async () => {
+		const pluginsDir = path.join(tempDir, ".claude", "plugins");
+		const pluginPath = path.join(tempDir, "plugins", "legacy-mcp");
+		const originalTokenEnv = process.env.OMP_PLUGIN_MCP_TOKEN_ENV;
+		const originalTrapEnv = process.env.OMP_PLUGIN_MCP_TRAP_ENV;
+		const originalTrapBang = process.env.OMP_PLUGIN_MCP_TRAP_BANG;
+		const envPlaceholder = (name: string): string => ["$", "{", name, ":-}"].join("");
+		restoreEnvValue("OMP_PLUGIN_MCP_TOKEN_ENV", "test-nexus-token");
+		// The expanded results below LOOK like legacy indirection (an env-var
+		// name and a !command) but must stay literal, never re-resolved.
+		restoreEnvValue("OMP_PLUGIN_MCP_TRAP_ENV", "HOME");
+		restoreEnvValue("OMP_PLUGIN_MCP_TRAP_BANG", "!echo must-not-run");
+
+		try {
+			await fs.mkdir(pluginsDir, { recursive: true });
+			await fs.mkdir(pluginPath, { recursive: true });
+			await fs.writeFile(
+				path.join(pluginsDir, "installed_plugins.json"),
+				JSON.stringify({
+					version: 2,
+					plugins: {
+						"legacy-mcp@market": [
+							{
+								scope: "user",
+								installPath: pluginPath,
+								version: "1.0.0",
+								installedAt: "2026-09-01T00:00:00Z",
+								lastUpdated: "2026-09-01T00:00:00Z",
+							},
+						],
+					},
+				}),
+			);
+			await fs.writeFile(
+				path.join(pluginPath, ".mcp.json"),
+				JSON.stringify({
+					legacy: {
+						command: "uv",
+						env: {
+							TOKEN: "OMP_PLUGIN_MCP_TOKEN_ENV",
+							SECRET: "!echo plugin-secret",
+							TRAP_ENV_NAME: envPlaceholder("OMP_PLUGIN_MCP_TRAP_ENV"),
+							TRAP_BANG: envPlaceholder("OMP_PLUGIN_MCP_TRAP_BANG"),
+						},
+					},
+				}),
+			);
+
+			const result = await loadCapability<MCPServer>(mcpCapability.id, {
+				cwd: tempDir,
+				providers: ["claude-plugins"],
+			});
+			const server = result.all.find(item => item.name === "legacy-mcp:legacy");
+
+			// Discovery expands placeholders (final) but keeps raw legacy values
+			// unresolved: bare env names and !commands resolve only when the
+			// server is actually prepared (connected).
+			expect(server?.env).toEqual({
+				TOKEN: "OMP_PLUGIN_MCP_TOKEN_ENV",
+				SECRET: "!echo plugin-secret",
+				TRAP_ENV_NAME: "HOME",
+				TRAP_BANG: "!echo must-not-run",
+			});
+
+			// prepareConfig resolves the legacy values once and never reinterprets
+			// literal keys: TRAP_BANG is not executed and TRAP_ENV_NAME stays
+			// the literal string rather than the home directory.
+			const { configs } = await loadAllMCPConfigs(tempDir);
+			const delivered = await new MCPManager(tempDir).prepareConfig(configs["legacy-mcp:legacy"]);
+			expect(delivered).toMatchObject({
+				type: "stdio",
+				env: {
+					TOKEN: "test-nexus-token",
+					SECRET: "plugin-secret",
+					TRAP_ENV_NAME: "HOME",
+					TRAP_BANG: "!echo must-not-run",
+				},
+			});
+		} finally {
+			restoreEnvValue("OMP_PLUGIN_MCP_TOKEN_ENV", originalTokenEnv);
+			restoreEnvValue("OMP_PLUGIN_MCP_TRAP_ENV", originalTrapEnv);
+			restoreEnvValue("OMP_PLUGIN_MCP_TRAP_BANG", originalTrapBang);
+		}
+	});
+
+	test("keeps stdio servers distinct when env policy metadata differs", async () => {
+		const pluginsDir = path.join(tempDir, ".claude", "plugins");
+		const pluginPath = path.join(tempDir, "plugins", "alias-mcp");
+		const originalTrap = process.env.OMP_PLUGIN_MCP_TRAP_ENV;
+		const envPlaceholder = (name: string): string => ["$", "{", name, ":-}"].join("");
+		restoreEnvValue("OMP_PLUGIN_MCP_TRAP_ENV", "HOME");
+
+		try {
+			await fs.mkdir(pluginsDir, { recursive: true });
+			await fs.mkdir(pluginPath, { recursive: true });
+			await fs.writeFile(
+				path.join(pluginsDir, "installed_plugins.json"),
+				JSON.stringify({
+					version: 2,
+					plugins: {
+						"alias-mcp@market": [
+							{
+								scope: "user",
+								installPath: pluginPath,
+								version: "1.0.0",
+								installedAt: "2026-09-01T00:00:00Z",
+								lastUpdated: "2026-09-01T00:00:00Z",
+							},
+						],
+					},
+				}),
+			);
+			await fs.writeFile(
+				path.join(pluginPath, ".mcp.json"),
+				JSON.stringify({
+					literal: {
+						command: "uv",
+						env: {
+							TOKEN: envPlaceholder("OMP_PLUGIN_MCP_TRAP_ENV"),
+						},
+					},
+					raw: {
+						command: "uv",
+						env: {
+							TOKEN: "HOME",
+						},
+					},
+				}),
+			);
+
+			// Both servers carry the same env text { TOKEN: "HOME" }, but
+			// `literal` expanded a placeholder (envLiteralKeys) while `raw` keeps
+			// legacy indirection - the delivered subprocess env differs, so they
+			// are distinct connections and neither may shadow the other.
+			const result = await loadCapability<MCPServer>(mcpCapability.id, {
+				cwd: tempDir,
+				providers: ["claude-plugins"],
+			});
+			expect(result.items.map(item => item.name).sort()).toEqual(["alias-mcp:literal", "alias-mcp:raw"]);
+		} finally {
+			restoreEnvValue("OMP_PLUGIN_MCP_TRAP_ENV", originalTrap);
+		}
+	});
+
+	test("skips servers with malformed env instead of discarding the provider", async () => {
+		const pluginsDir = path.join(tempDir, ".claude", "plugins");
+		const pluginPath = path.join(tempDir, "plugins", "bad-env-mcp");
+
+		await fs.mkdir(pluginsDir, { recursive: true });
+		await fs.mkdir(pluginPath, { recursive: true });
+		await fs.writeFile(
+			path.join(pluginsDir, "installed_plugins.json"),
+			JSON.stringify({
+				version: 2,
+				plugins: {
+					"bad-env-mcp@market": [
+						{
+							scope: "user",
+							installPath: pluginPath,
+							version: "1.0.0",
+							installedAt: "2026-09-01T00:00:00Z",
+							lastUpdated: "2026-09-01T00:00:00Z",
+						},
+					],
+				},
+			}),
+		);
+		await fs.writeFile(
+			path.join(pluginPath, ".mcp.json"),
+			JSON.stringify({
+				bad: { command: "uv", env: null },
+				good: { command: "uv" },
+			}),
+		);
+
+		const result = await loadCapability<MCPServer>(mcpCapability.id, {
+			cwd: tempDir,
+			providers: ["claude-plugins"],
+		});
+		// One malformed env must not throw at provider scope and discard the
+		// sibling servers: the bad entry is skipped with a warning.
+		expect(result.items.map(item => item.name)).toEqual(["bad-env-mcp:good"]);
+		expect(result.warnings.join("\n")).toContain("malformed env");
+	});
+
+	test("does not re-expand placeholders inside the substituted plugin root", async () => {
+		const pluginsDir = path.join(tempDir, ".claude", "plugins");
+		const pluginPath = path.join(tempDir, "plugins", ["$", "{HOME}-plugin"].join(""));
+
+		await fs.mkdir(pluginsDir, { recursive: true });
+		await fs.mkdir(pluginPath, { recursive: true });
+		await fs.writeFile(
+			path.join(pluginsDir, "installed_plugins.json"),
+			JSON.stringify({
+				version: 2,
+				plugins: {
+					"root-mcp@market": [
+						{
+							scope: "user",
+							installPath: pluginPath,
+							version: "1.0.0",
+							installedAt: "2026-09-01T00:00:00Z",
+							lastUpdated: "2026-09-01T00:00:00Z",
+						},
+					],
+				},
+			}),
+		);
+		await fs.writeFile(
+			path.join(pluginPath, ".mcp.json"),
+			JSON.stringify({
+				root: {
+					command: "uv",
+					env: {
+						DATA: ["$", "{CLAUDE_PLUGIN_ROOT}", "/data"].join(""),
+					},
+				},
+			}),
+		);
+
+		// The install path itself contains ${HOME}; substituting the root
+		// must not re-scan it as a placeholder and expand it to the ambient
+		// home directory.
+		const result = await loadCapability<MCPServer>(mcpCapability.id, {
+			cwd: tempDir,
+			providers: ["claude-plugins"],
+		});
+		const server = result.all.find(item => item.name === "root-mcp:root");
+		expect(server?.env).toEqual({ DATA: pluginPath + "/data" });
+	});
+
+	test("preserves a __proto__ env key through discovery and delivery", async () => {
+		const pluginsDir = path.join(tempDir, ".claude", "plugins");
+		const pluginPath = path.join(tempDir, "plugins", "proto-mcp");
+		const originalNexusId = process.env.OMP_PLUGIN_MCP_NEXUS_ID;
+		const envPlaceholder = (name: string): string => ["$", "{", name, ":-}"].join("");
+		restoreEnvValue("OMP_PLUGIN_MCP_NEXUS_ID", "test-nexus");
+
+		try {
+			await fs.mkdir(pluginsDir, { recursive: true });
+			await fs.mkdir(pluginPath, { recursive: true });
+			await fs.writeFile(
+				path.join(pluginsDir, "installed_plugins.json"),
+				JSON.stringify({
+					version: 2,
+					plugins: {
+						"proto-mcp@market": [
+							{
+								scope: "user",
+								installPath: pluginPath,
+								version: "1.0.0",
+								installedAt: "2026-09-01T00:00:00Z",
+								lastUpdated: "2026-09-01T00:00:00Z",
+							},
+						],
+					},
+				}),
+			);
+			await fs.writeFile(
+				path.join(pluginPath, ".mcp.json"),
+				JSON.stringify({
+					proto: {
+						command: "uv",
+						env: {
+							["__proto__"]: envPlaceholder("OMP_PLUGIN_MCP_NEXUS_ID"),
+						},
+					},
+				}),
+			);
+
+			const result = await loadCapability<MCPServer>(mcpCapability.id, {
+				cwd: tempDir,
+				providers: ["claude-plugins"],
+			});
+			const server = result.all.find(item => item.name === "proto-mcp:proto");
+			expect(Object.keys(server?.env ?? {})).toContain("__proto__");
+			expect(server?.env?.["__proto__"]).toBe("test-nexus");
+
+			const { configs } = await loadAllMCPConfigs(tempDir);
+			const delivered = await new MCPManager(tempDir).prepareConfig(configs["proto-mcp:proto"]);
+			expect("env" in delivered && Object.keys(delivered.env ?? {})).toContain("__proto__");
+			expect("env" in delivered && delivered.env?.["__proto__"]).toBe("test-nexus");
+		} finally {
+			restoreEnvValue("OMP_PLUGIN_MCP_NEXUS_ID", originalNexusId);
+		}
+	});
+
+	test("treats env policy metadata as a set during connection dedup", async () => {
+		const pluginsDir = path.join(tempDir, ".claude", "plugins");
+		const pluginPath = path.join(tempDir, "plugins", "order-mcp");
+		const originalTrap = process.env.OMP_PLUGIN_MCP_TRAP_ENV;
+		const envPlaceholder = (name: string): string => ["$", "{", name, ":-}"].join("");
+		restoreEnvValue("OMP_PLUGIN_MCP_TRAP_ENV", "HOME");
+
+		try {
+			await fs.mkdir(pluginsDir, { recursive: true });
+			await fs.mkdir(pluginPath, { recursive: true });
+			await fs.writeFile(
+				path.join(pluginsDir, "installed_plugins.json"),
+				JSON.stringify({
+					version: 2,
+					plugins: {
+						"order-mcp@market": [
+							{
+								scope: "user",
+								installPath: pluginPath,
+								version: "1.0.0",
+								installedAt: "2026-09-01T00:00:00Z",
+								lastUpdated: "2026-09-01T00:00:00Z",
+							},
+						],
+					},
+				}),
+			);
+			await fs.writeFile(
+				path.join(pluginPath, ".mcp.json"),
+				JSON.stringify({
+					first: {
+						command: "uv",
+						env: {
+							FIRST: envPlaceholder("OMP_PLUGIN_MCP_TRAP_ENV"),
+							SECOND: envPlaceholder("OMP_PLUGIN_MCP_TRAP_ENV"),
+						},
+					},
+					second: {
+						command: "uv",
+						env: {
+							SECOND: envPlaceholder("OMP_PLUGIN_MCP_TRAP_ENV"),
+							FIRST: envPlaceholder("OMP_PLUGIN_MCP_TRAP_ENV"),
+						},
+					},
+				}),
+			);
+
+			// Identical env values, but literal keys listed in different JSON
+			// insertion order: the delivered environment is the same, so the
+			// aliases must dedupe (one survivor) instead of launching twice.
+			const result = await loadCapability<MCPServer>(mcpCapability.id, {
+				cwd: tempDir,
+				providers: ["claude-plugins"],
+			});
+			expect(result.items.map(item => item.name)).toEqual(["order-mcp:first"]);
+		} finally {
+			restoreEnvValue("OMP_PLUGIN_MCP_TRAP_ENV", originalTrap);
+		}
+	});
+
+	test("prefers the registered plugin root over ambient reserved env vars", async () => {
+		const pluginsDir = path.join(tempDir, ".claude", "plugins");
+		const pluginPath = path.join(tempDir, "plugins", "reserved-mcp");
+		const originalRoot = process.env.CLAUDE_PLUGIN_ROOT;
+		restoreEnvValue("CLAUDE_PLUGIN_ROOT", path.join(tempDir, "ambient-plugin"));
+
+		try {
+			await fs.mkdir(pluginsDir, { recursive: true });
+			await fs.mkdir(pluginPath, { recursive: true });
+			await fs.writeFile(
+				path.join(pluginsDir, "installed_plugins.json"),
+				JSON.stringify({
+					version: 2,
+					plugins: {
+						"reserved-mcp@market": [
+							{
+								scope: "user",
+								installPath: pluginPath,
+								version: "1.0.0",
+								installedAt: "2026-09-01T00:00:00Z",
+								lastUpdated: "2026-09-01T00:00:00Z",
+							},
+						],
+					},
+				}),
+			);
+			await fs.writeFile(
+				path.join(pluginPath, ".mcp.json"),
+				JSON.stringify({
+					reserved: {
+						command: "uv",
+						env: {
+							DATA: ["$", "{CLAUDE_PLUGIN_ROOT}", "/data"].join(""),
+						},
+					},
+				}),
+			);
+
+			// An ambient CLAUDE_PLUGIN_ROOT must never override the registered
+			// install path of the plugin being discovered.
+			const result = await loadCapability<MCPServer>(mcpCapability.id, {
+				cwd: tempDir,
+				providers: ["claude-plugins"],
+			});
+			const server = result.all.find(item => item.name === "reserved-mcp:reserved");
+			expect(server?.env).toEqual({ DATA: pluginPath + "/data" });
+		} finally {
+			restoreEnvValue("CLAUDE_PLUGIN_ROOT", originalRoot);
+		}
+	});
+
+	test("never substitutes inherited env names when expanding placeholders", async () => {
+		const pluginsDir = path.join(tempDir, ".claude", "plugins");
+		const pluginPath = path.join(tempDir, "plugins", "proto-env-mcp");
+		const plain = (name: string): string => ["$", "{", name, "}"].join("");
+
+		await fs.mkdir(pluginsDir, { recursive: true });
+		await fs.mkdir(pluginPath, { recursive: true });
+		await fs.writeFile(
+			path.join(pluginsDir, "installed_plugins.json"),
+			JSON.stringify({
+				version: 2,
+				plugins: {
+					"proto-env-mcp@market": [
+						{
+							scope: "user",
+							installPath: pluginPath,
+							version: "1.0.0",
+							installedAt: "2026-09-01T00:00:00Z",
+							lastUpdated: "2026-09-01T00:00:00Z",
+						},
+					],
+				},
+			}),
+		);
+		await fs.writeFile(
+			path.join(pluginPath, ".mcp.json"),
+			JSON.stringify({
+				proto: {
+					command: "uv",
+					env: {
+						PROTO: plain("__proto__"),
+						CTOR: ["$", "{", "constructor", ":-none}"].join(""),
+					},
+				},
+			}),
+		);
+
+		// `__proto__` and `constructor` resolve through Object.prototype on both
+		// the expansion extraEnv map and Bun.env, so neither is substitutable:
+		// an unset name stays literal and `:-` yields its default. Substituting
+		// the inherited member would leak "[object Object]" /
+		// "function Object() { [native code] }" into the spawned server env.
+		const result = await loadCapability<MCPServer>(mcpCapability.id, {
+			cwd: tempDir,
+			providers: ["claude-plugins"],
+		});
+		const server = result.all.find(item => item.name === "proto-env-mcp:proto");
+		expect(server?.env).toEqual({ PROTO: plain("__proto__"), CTOR: "none" });
+	});
+
+	describe("isSameMCPConnection stdio equivalence", () => {
+		// The reserved PLUGIN_ROOT/PLUGIN_DATA injection means a truly env-less
+		// agent-plugin server cannot be mirrored by another provider, so the
+		// policy normalization is pinned at the comparator contract.
+		const server = (partial: Record<string, unknown>): MCPServer =>
+			({ _source: {} as MCPServer["_source"], ...partial }) as unknown as MCPServer;
+
+		test("treats an inert envPolicy as equivalent to no policy", () => {
+			expect(isSameMCPConnection(server({ command: "uv" }), server({ command: "uv", envPolicy: "literal" }))).toBe(
+				true,
+			);
+		});
+
+		test("normalizes a full literal policy against per-key literal sets", () => {
+			expect(
+				isSameMCPConnection(
+					server({ command: "uv", env: { A: "x" }, envPolicy: "literal" }),
+					server({ command: "uv", env: { A: "x" }, envLiteralKeys: ["A"] }),
+				),
+			).toBe(true);
+		});
+
+		test("keeps differing effective literal sets distinct", () => {
+			expect(
+				isSameMCPConnection(
+					server({ command: "uv", env: { A: "x", B: "y" }, envPolicy: "literal" }),
+					server({ command: "uv", env: { A: "x", B: "y" }, envLiteralKeys: ["A"] }),
+				),
+			).toBe(false);
+		});
+
+		test("compares literal keys order-insensitively", () => {
+			expect(
+				isSameMCPConnection(
+					server({ command: "uv", env: { A: "x", B: "y" }, envLiteralKeys: ["A", "B"] }),
+					server({ command: "uv", env: { A: "x", B: "y" }, envLiteralKeys: ["B", "A"] }),
+				),
+			).toBe(true);
+		});
 	});
 
 	test("uses OMP then Claude manifest mcpServers paths before .mcp.json", async () => {

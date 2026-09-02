@@ -344,7 +344,7 @@ export async function deleteFileWithFallback(dst: string, file?: BunFile): Promi
 		const sessionId = mutationSessionStorage.getStore();
 		// Snapshot: a concurrent session shutdown splices the live array, and
 		// iterating it directly would skip whichever handler shifted into the hole.
-		for (const handler of [...deleteFallbackHandlers]) {
+		for (const handler of Array.from(deleteFallbackHandlers)) {
 			try {
 				if (await handler({ dst: target, cause: error, confirmedFile, sessionId })) return;
 			} catch (handlerError) {
@@ -441,7 +441,7 @@ export async function writeFileWithFallback(dst: string, content: string, file?:
 					// The process-wide registry can hand this to a handler from another
 					// session, so the request names the one that issued it.
 					const sessionId = mutationSessionStorage.getStore();
-					for (const handler of [...fallbackHandlers]) {
+					for (const handler of Array.from(fallbackHandlers)) {
 						try {
 							if (await handler({ dst: target, content, cause: failure.cause, sessionId })) return;
 						} catch (handlerError) {

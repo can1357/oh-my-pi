@@ -178,6 +178,7 @@ export function createKernelSessionRegistry<
 			attachSessionOwner(starting, sessionId, options.kernelOwnerId);
 			return await waitForStartup(starting.promise, options);
 		}
+		// oxlint-disable-next-line prefer-const -- captured by the startup closure before assignment
 		let startingSession!: StartingKernelSession<TSession>;
 		const startup = (async () => {
 			const kernel = await descriptor.startKernel(cwd, options);
@@ -352,7 +353,7 @@ export function createKernelSessionRegistry<
 	async function disposeByOwner(ownerId: string): Promise<void> {
 		const toShutdown: TSession[] = [];
 		const startingToShutdown: StartingKernelSession<TSession>[] = [];
-		for (const session of [...sessions.values()]) {
+		for (const session of Array.from(sessions.values())) {
 			if (!session.ownerIds.has(ownerId)) continue;
 			if (session.ownerIds.size === 1) {
 				toShutdown.push(session);
@@ -360,7 +361,7 @@ export function createKernelSessionRegistry<
 			}
 			session.ownerIds.delete(ownerId);
 		}
-		for (const [sessionKey, starting] of [...startingSessions.entries()]) {
+		for (const [sessionKey, starting] of Array.from(startingSessions.entries())) {
 			if (sessions.has(sessionKey) || !starting.ownerIds.has(ownerId)) continue;
 			if (starting.ownerIds.size === 1) {
 				startingSessions.delete(sessionKey);
