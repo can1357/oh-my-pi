@@ -15,6 +15,7 @@ import {
 } from "@oh-my-pi/pi-mnemopi/core/beam/consolidate";
 import type { BeamMemoryState } from "@oh-my-pi/pi-mnemopi/core/beam/types";
 import { REGEX_EXTRACTION_MAX_INPUT_CHARS } from "@oh-my-pi/pi-mnemopi/core/entities";
+import { Mnemopi } from "@oh-my-pi/pi-mnemopi/core/memory";
 import { closeQuietly, openDatabase } from "@oh-my-pi/pi-mnemopi/db";
 
 function state(sessionId = "s1"): BeamMemoryState {
@@ -352,5 +353,62 @@ describe("beam consolidation free functions", () => {
 		});
 		const facts = beam.db.query("SELECT COUNT(*) AS count FROM memoria_facts").get() as { count: number };
 		expect(facts.count).toBe(0);
+	});
+});
+
+describe("async LLM-backed sleep", () => {
+	it("uses the configured completion for episodic summaries", async () => {
+		const db = openDatabase(":memory:", { create: true, readwrite: true });
+		const memory = new Mnemopi({
+			db,
+			sessionId: "llm-sleep",
+			noEmbeddings: true,
+			llm: { complete: async () => "The user decided to keep the old server online." },
+		});
+		try {
+			const id = memory.remember("Keep the old server online until verification passes", {
+				source: "conversation",
+				extract: false,
+			});
+			db.run("UPDATE working_memory SET timestamp = ?, created_at = ? WHERE id = ?", [oldIso(), oldIso(), id]);
+			const result = await memory.sleepAsync(false);
+			expect(result.llm_used).toBe(1);
+			const row = db.query("SELECT content, metadata_json FROM episodic_memory LIMIT 1").get() as {
+				content: string;
+				metadata_json: string;
+			};
+			expect(row.content).toBe("The user decided to keep the old server online.");
+			expect(JSON.parse(row.metadata_json)).toMatchObject({ llm_used: true, method: "llm" });
+		} finally {
+			memory.close();
+			db.close();
+		}
+	});
+
+	it("falls back safely when the configured completion throws", async () => {
+		const db = openDatabase(":memory:", { create: true, readwrite: true });
+		const memory = new Mnemopi({
+			db,
+			sessionId: "llm-sleep-fallback",
+			noEmbeddings: true,
+			llm: {
+				complete: async () => {
+					throw new Error("provider unavailable");
+				},
+			},
+		});
+		try {
+			const id = memory.remember("Keep the old server online until verification passes", {
+				source: "conversation",
+				extract: false,
+			});
+			db.run("UPDATE working_memory SET timestamp = ?, created_at = ? WHERE id = ?", [oldIso(), oldIso(), id]);
+			const result = await memory.sleepAsync(false);
+			expect(result.llm_used).toBe(0);
+			expect(db.query("SELECT COUNT(*) AS count FROM episodic_memory").get()).toEqual({ count: 1 });
+		} finally {
+			memory.close();
+			db.close();
+		}
 	});
 });
