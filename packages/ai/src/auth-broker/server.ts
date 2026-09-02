@@ -729,10 +729,6 @@ export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServer
 					logger.info("auth-broker request unauthorized", { method: req.method, path: pathname, peer });
 					return json(401, { error: "unauthorized" });
 				}
-				if (req.method === "GET" && pathname === "/v1/capabilities/meta-oauth-transport-key") {
-					const body: HealthzResponse = { ok: true, version };
-					return json(200, body);
-				}
 				if (req.method === "GET" && pathname === "/v1/snapshot/stream") {
 					return serveSnapshotStream(req, opts.storage, refresher, peer, streamKeepaliveMs);
 				}
@@ -904,10 +900,18 @@ export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServer
 						return json(status, { error: message });
 					}
 				}
-				if (req.method === "POST" && pathname === "/v1/credential") {
+				const isMetaOAuthUploadRoute =
+					req.method === "POST" && pathname === "/v1/credential/meta-oauth-transport-key";
+				if ((req.method === "POST" && pathname === "/v1/credential") || isMetaOAuthUploadRoute) {
 					const parsed = await parseBody(req, credentialUploadRequestSchema);
 					if (!parsed.ok) return parsed.response;
 					const { provider, credential } = parsed.data;
+					if (
+						isMetaOAuthUploadRoute &&
+						(!usesOAuthMintedApiKeyWithDirectApiKey(provider) || credential.type !== "oauth")
+					) {
+						return json(400, { error: "Meta OAuth upload route requires a Meta OAuth credential" });
+					}
 					if (
 						usesOAuthMintedApiKeyWithDirectApiKey(provider) &&
 						credential.type === "oauth" &&

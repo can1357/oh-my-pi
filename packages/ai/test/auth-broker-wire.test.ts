@@ -328,7 +328,7 @@ describe("auth-broker wire surface", () => {
 		expect(uploadedCredential?.authorizedAt).toBe(123);
 	});
 
-	test("fails closed before uploading Meta OAuth to a legacy broker", async () => {
+	test("fails closed through an atomic Meta OAuth upload route on a legacy broker", async () => {
 		const requests: Array<{ method: string; url: string }> = [];
 		const legacyFetch: typeof fetch = Object.assign(
 			(input: string | URL | Request, init?: RequestInit) => {
@@ -355,27 +355,20 @@ describe("auth-broker wire surface", () => {
 			}),
 		).rejects.toThrow("upgrade the broker");
 		expect(requests).toEqual([
-			{ method: "GET", url: "http://legacy-broker.invalid/v1/capabilities/meta-oauth-transport-key" },
+			{ method: "POST", url: "http://legacy-broker.invalid/v1/credential/meta-oauth-transport-key" },
 		]);
 	});
 
-	test("rechecks Meta OAuth upload support before every upload", async () => {
+	test("uses the atomic Meta OAuth upload route for every upload", async () => {
 		const requests: Array<{ method: string; url: string }> = [];
-		let capabilityChecks = 0;
+		let uploads = 0;
 		const changingFetch: typeof fetch = Object.assign(
 			(input: string | URL | Request, init?: RequestInit) => {
-				const method = init?.method ?? "GET";
-				const url = String(input);
-				requests.push({ method, url });
-				if (url.endsWith("/v1/capabilities/meta-oauth-transport-key")) {
-					capabilityChecks++;
-					return Promise.resolve(
-						capabilityChecks === 1
-							? Response.json({ ok: true, version: "current" })
-							: Response.json({ error: "not found" }, { status: 404 }),
-					);
-				}
-				return Promise.resolve(Response.json({ entries: [] }));
+				requests.push({ method: init?.method ?? "GET", url: String(input) });
+				uploads++;
+				return Promise.resolve(
+					uploads === 1 ? Response.json({ entries: [] }) : Response.json({ error: "not found" }, { status: 404 }),
+				);
 			},
 			{ preconnect: fetch.preconnect },
 		);
@@ -397,9 +390,8 @@ describe("auth-broker wire surface", () => {
 		await client.uploadCredential("meta", credential);
 		await expect(client.uploadCredential("meta", credential)).rejects.toThrow("upgrade the broker");
 		expect(requests).toEqual([
-			{ method: "GET", url: "http://changing-broker.invalid/v1/capabilities/meta-oauth-transport-key" },
-			{ method: "POST", url: "http://changing-broker.invalid/v1/credential" },
-			{ method: "GET", url: "http://changing-broker.invalid/v1/capabilities/meta-oauth-transport-key" },
+			{ method: "POST", url: "http://changing-broker.invalid/v1/credential/meta-oauth-transport-key" },
+			{ method: "POST", url: "http://changing-broker.invalid/v1/credential/meta-oauth-transport-key" },
 		]);
 	});
 

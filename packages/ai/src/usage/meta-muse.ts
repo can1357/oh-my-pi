@@ -12,13 +12,14 @@ function parseResetTimestamp(value: string | number | undefined): number | undef
 }
 
 function percentAmount(usedPercent: number): UsageAmount {
-	const usedFraction = usedPercent / 100;
+	const used = Math.min(usedPercent, 100);
+	const usedFraction = used / 100;
 	return {
-		used: usedPercent,
+		used,
 		limit: 100,
-		remaining: Math.max(0, 100 - usedPercent),
+		remaining: 100 - used,
 		usedFraction,
-		remainingFraction: Math.max(0, 1 - usedFraction),
+		remainingFraction: 1 - usedFraction,
 		unit: "percent",
 	};
 }

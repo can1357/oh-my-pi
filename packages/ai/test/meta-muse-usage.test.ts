@@ -52,6 +52,31 @@ describe("Muse Code subscription usage", () => {
 		});
 	});
 
+	test("clamps reported quota overages to normalized usage bounds", async () => {
+		const fetchImpl: FetchImpl = () =>
+			Promise.resolve(
+				Response.json({
+					api_key: "LLM|subscription-key",
+					user_email: "muse@example.com",
+					is_subs_active: true,
+					subs_usage: {
+						window: { used_percent: 140, window_duration_mins: 300 },
+					},
+				}),
+			);
+
+		const report = await metaMuseUsageProvider.fetchUsage({ provider: "meta", credential }, { fetch: fetchImpl });
+
+		expect(report?.limits[0]?.amount).toEqual({
+			used: 100,
+			limit: 100,
+			remaining: 0,
+			usedFraction: 1,
+			remainingFraction: 0,
+			unit: "percent",
+		});
+	});
+
 	test("does not report API-key PAYG credentials as subscription quota", () => {
 		expect(
 			metaMuseUsageProvider.supports?.({

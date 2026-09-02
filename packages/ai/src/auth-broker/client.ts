@@ -375,17 +375,22 @@ export class AuthBrokerClient {
 		credential: AuthCredential,
 		signal?: AbortSignal,
 	): Promise<CredentialUploadResponse> {
-		if (usesOAuthMintedApiKeyWithDirectApiKey(provider) && credential.type === "oauth") {
-			await this.#requireMetaOAuthUploadSupport(provider, signal);
-		}
+		const requiresMetaOAuthUpload = usesOAuthMintedApiKeyWithDirectApiKey(provider) && credential.type === "oauth";
+		const path = requiresMetaOAuthUpload ? "/v1/credential/meta-oauth-transport-key" : "/v1/credential";
 		const body: CredentialUploadRequest = { provider, credential };
 		try {
-			return await this.#request<CredentialUploadResponse>("POST", "/v1/credential", {
+			return await this.#request<CredentialUploadResponse>("POST", path, {
 				body,
 				schema: "credentialUploadResponseSchema",
 				signal,
 			});
 		} catch (error) {
+			if (error instanceof AuthBrokerError && error.status === 404 && requiresMetaOAuthUpload) {
+				throw new AuthBrokerError(
+					`Auth broker does not support ${provider} OAuth transport keys; upgrade the broker before using this login`,
+					{ status: 400, body: error.body, cause: error },
+				);
+			}
 			if (
 				error instanceof AuthBrokerError &&
 				error.status === 400 &&
@@ -397,25 +402,6 @@ export class AuthBrokerClient {
 				throw new AuthBrokerError(
 					`Auth broker does not support ${provider} API-key login recency; upgrade the broker before using this login`,
 					{ status: error.status, body: error.body, cause: error },
-				);
-			}
-			throw error;
-		}
-	}
-
-	async #requireMetaOAuthUploadSupport(provider: string, signal?: AbortSignal): Promise<void> {
-		try {
-			await this.#request<HealthzResponse>("GET", "/v1/capabilities/meta-oauth-transport-key", {
-				schema: "healthzResponseSchema",
-				signal,
-			});
-		} catch (error) {
-			if (error instanceof AuthBrokerError && error.status === 404) {
-				throw new AuthBrokerError(
-					`Auth broker does not support ${provider} OAuth transport keys; upgrade the broker before using this login`,
-					{
-						status: 400,
-					},
 				);
 			}
 			throw error;
