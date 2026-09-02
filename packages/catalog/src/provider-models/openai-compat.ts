@@ -1,6 +1,6 @@
 import { USER_AGENT } from "@oh-my-pi/pi-utils";
 import * as logger from "@oh-my-pi/pi-utils/logger";
-import { applyCatalogCorrections } from "../build";
+import { applyCatalogCorrections, buildModel } from "../build";
 import { toClinePassPublicModelId } from "../cline-pass-model-id";
 import {
 	apiRouteExactModelIds,
@@ -741,7 +741,9 @@ export const EUROPEAN_GATEWAY_STATIC_MODELS: readonly ModelSpec<"openai-completi
 export function getEuropeanGatewayStaticFallbackModels(
 	authoritativeProviders: ReadonlySet<string>,
 ): readonly ModelSpec<"openai-completions">[] {
-	return EUROPEAN_GATEWAY_STATIC_MODELS.filter(model => !authoritativeProviders.has(model.provider));
+	return EUROPEAN_GATEWAY_STATIC_MODELS.filter(model => !authoritativeProviders.has(model.provider)).map(model =>
+		toModelSpec(buildModel(model)),
+	);
 }
 
 function toStringArray(value: unknown): string[] {
@@ -6039,6 +6041,7 @@ function mergeLiteLLMRichEndpointModels<TApi extends Api>(
 		contextWindow: next.hasContextWindow ? next.model.contextWindow : existing.model.contextWindow,
 		maxTokens: next.hasMaxTokens ? next.model.maxTokens : existing.model.maxTokens,
 		input: next.supportsVision === true || next.supportsVision === false ? next.model.input : existing.model.input,
+		...(typeof next.supportsVision === "boolean" ? { catalogFallback: next.model.catalogFallback } : {}),
 		reasoning: typeof next.supportsReasoning === "boolean" ? next.model.reasoning : existing.model.reasoning,
 		cost: { ...existing.model.cost, ...existing.reportedCost, ...next.reportedCost },
 		compat: next.hasSupportedOpenAIParams ? next.model.compat : existing.model.compat,
@@ -6222,7 +6225,10 @@ export function litellmModelManagerOptions(config?: LiteLLMModelManagerConfig): 
 	const baseUrl = config?.baseUrl ?? getDefaultModelDiscoveryBaseUrl("litellm")!;
 	return {
 		providerId: "litellm",
-		// rich-v8 invalidates rows whose `compatConfig` retained a colliding
+		// rich-v9 invalidates rows that lack explicit modality provenance after
+		// LiteLLM reports `supports_vision`, which would otherwise allow model
+		// class fallbacks to override an authoritative text-only capability.
+		// Earlier rich-v8 invalidated rows whose `compatConfig` retained a colliding
 		// bundled model's provider-specific transport (e.g. Fireworks
 		// `wireModelIdMode`) before that leak was fixed. Earlier versions added
 		// bundled reference fallback, moved OpenAI models to Responses, continued

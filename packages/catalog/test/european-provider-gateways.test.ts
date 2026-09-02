@@ -20,6 +20,7 @@ import {
 	scalewayModelManagerOptions,
 } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import type { FetchImpl, ModelSpec } from "@oh-my-pi/pi-catalog/types";
+import bundledModels from "../src/models.json" with { type: "json" };
 import nebiusModelsInfoFixture from "./fixtures/nebius-models-info-2026-08-13.json";
 
 const providerCases = [
@@ -331,6 +332,40 @@ describe("European gateway provider catalog support", () => {
 		expect(seededProviders.has("nebius")).toBe(true);
 		expect(seededProviders.has("cortecs")).toBe(false);
 		expect(seededProviders.has("eurouter")).toBe(false);
+	});
+
+	test("materializes European gateway seed policies before generation", () => {
+		const seeds = getEuropeanGatewayStaticFallbackModels(new Set());
+		const aki = seeds.find(model => model.provider === "aki-io");
+		const eurouter = seeds.find(model => model.provider === "eurouter");
+
+		expect(aki).toMatchObject({
+			reasoning: true,
+			supportsTools: true,
+			cost: { input: 0.86, output: 3, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 262_144,
+			maxTokens: 262_144,
+		});
+		expect(eurouter).toMatchObject({ input: ["text", "image"], contextWindow: 262_144 });
+	});
+
+	test("serializes materialized European gateway seed policies", () => {
+		const aki = bundledModels["aki-io"]?.["kimi-k2.7-code-1100b"];
+		const eurouter = bundledModels.eurouter?.["mistral-large-3"];
+
+		expect(aki).toMatchObject({
+			reasoning: true,
+			supportsTools: true,
+			cost: { input: 0.86, output: 3, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 262_144,
+			maxTokens: 262_144,
+			compat: { supportsDeveloperRole: false },
+		});
+		expect(eurouter).toMatchObject({
+			input: ["text", "image"],
+			contextWindow: 262_144,
+			compat: { supportsDeveloperRole: false },
+		});
 	});
 
 	test("bundles European gateway defaults for fresh installs", () => {

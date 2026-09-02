@@ -131,7 +131,7 @@ describe("LiteLLM provider discovery", () => {
 		const models = await options.fetchDynamicModels?.();
 
 		expect(options.cacheProviderId).toBe(
-			`litellm:rich-v8:${Bun.hash("http://litellm.example:4100/v1").toString(36)}`,
+			`litellm:rich-v9:${Bun.hash("http://litellm.example:4100/v1").toString(36)}`,
 		);
 		expect(fetchMock).toHaveBeenCalledTimes(6);
 		expect(models).toHaveLength(1);
@@ -155,7 +155,7 @@ describe("LiteLLM provider discovery", () => {
 		const models = await options.fetchDynamicModels?.();
 
 		expect(options.cacheProviderId).toBe(
-			`litellm:rich-v8:${Bun.hash("http://litellm-config.example:4200/v1/").toString(36)}`,
+			`litellm:rich-v9:${Bun.hash("http://litellm-config.example:4200/v1/").toString(36)}`,
 		);
 		expect(fetchMock).toHaveBeenCalledTimes(6);
 		expect(models).toHaveLength(1);
@@ -576,6 +576,29 @@ describe("LiteLLM provider discovery", () => {
 		const fetchMock = vi.fn(async (input: string | URL | Request) => {
 			if (inputUrl(input) === "http://primary:4000/model_group/info") {
 				return Response.json({ data: [{ model_group: "minicpm-v-4.5", supports_vision: false }] });
+			}
+			return new Response("{}", { status: 404 });
+		}) as FetchImpl;
+
+		const specs = await fetchLiteLLMRichModels<"openai-completions">({
+			api: "openai-completions",
+			provider: "litellm",
+			baseUrl: "http://primary:4000/v1",
+			fetch: fetchMock,
+		});
+
+		expect(specs).toHaveLength(1);
+		expect(buildModel(specs![0]!).input).toEqual(["text"]);
+	});
+
+	test("preserves explicit MiniCPM text-only metadata merged from a later rich endpoint", async () => {
+		const fetchMock = vi.fn(async (input: string | URL | Request) => {
+			const url = inputUrl(input);
+			if (url === "http://primary:4000/model_group/info") {
+				return Response.json({ data: [{ model_group: "minicpm-v-4.5" }] });
+			}
+			if (url === "http://primary:4000/v2/model/info") {
+				return Response.json({ data: [{ model_name: "minicpm-v-4.5", supports_vision: false }] });
 			}
 			return new Response("{}", { status: 404 });
 		}) as FetchImpl;
