@@ -165,7 +165,7 @@ export function renderSearchResult(
 
 			// Answer lines: full markdown when expanded, capped markdown preview when collapsed.
 			const flat = options.renderContext?.flat === true;
-			const answerWidth = outputBlockContentWidth(width, flat);
+			const answerWidth = outputBlockContentWidth(width, undefined, undefined, flat);
 			const renderedAnswer = answerMarkdown ? answerMarkdown.render(answerWidth) : [];
 			let answerLines: readonly string[];
 			if (renderedAnswer.length === 0) {

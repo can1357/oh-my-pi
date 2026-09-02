@@ -17,7 +17,7 @@ import {
 } from "@oh-my-pi/pi-tui";
 import { getProjectDir, isRecord, logger, sanitizeText } from "@oh-my-pi/pi-utils";
 import { EDIT_MODE_STRATEGIES, type EditMode, type PerFileDiffPreview } from "../../edit";
-import type { Theme } from "../../modes/theme/theme";
+import type { SymbolKey, Theme } from "../../modes/theme/theme";
 import { getThemeEpoch, theme } from "../../modes/theme/theme";
 import { BASH_DEFAULT_PREVIEW_LINES } from "../../tools/bash";
 import { formatDefaultToolExecution } from "../../tools/default-renderer";
@@ -41,20 +41,22 @@ import { renderDiff } from "./diff";
 import { type AnimationFrame, trimBlankEdges } from "./transcript-container";
 
 // Opencode-layout tool row glyphs, mirroring opencode's iconography: reads →,
-// searches ∗, shell $, writes ←, subagents ◆. Anything unlisted falls back ∗.
-const OPENCODE_TOOL_GLYPHS: Record<string, string> = {
-	read: "→",
-	fetch: "→",
-	grep: "∗",
-	glob: "∗",
-	ast_grep: "∗",
-	bash: "$",
-	eval: "$",
-	write: "←",
-	edit: "←",
-	ast_edit: "←",
-	task: "◆",
-	todo: "▪",
+// searches ∗, shell $, writes ←, subagents ◆. Anything unlisted falls back to
+// the search glyph. Resolved through the theme symbol table so symbolPreset
+// "ascii" renders ASCII fallbacks (->, *, <-, #, -) instead of Unicode.
+const OPENCODE_TOOL_GLYPHS: Record<string, SymbolKey> = {
+	read: "oc.read",
+	fetch: "oc.read",
+	grep: "oc.search",
+	glob: "oc.search",
+	ast_grep: "oc.search",
+	bash: "oc.shell",
+	eval: "oc.shell",
+	write: "oc.write",
+	edit: "oc.write",
+	ast_edit: "oc.write",
+	task: "oc.subagent",
+	todo: "oc.todo",
 };
 
 // OSC 8 hyperlink span: `ESC ] 8 ; params ; uri (BEL|ST) text ESC ] 8 ; ; (BEL|ST)`.
@@ -1116,7 +1118,7 @@ export class ToolExecutionComponent extends Container {
 			const plain = replaceTabs(stripVTControlCharacters(first))
 				.trim()
 				.replace(/^[^\p{L}\p{N}]{1,2}\s+/u, "");
-			const glyph = OPENCODE_TOOL_GLYPHS[this.#toolName] ?? "∗";
+			const glyph = theme.symbol(OPENCODE_TOOL_GLYPHS[this.#toolName] ?? "oc.search");
 			const row = restoreHyperlinks(` ${glyph} ${plain}`, first);
 			this.#collapsedLines = [theme.fg("dim", truncateToWidth(row, Math.max(1, width)))];
 		} else {

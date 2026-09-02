@@ -7,7 +7,8 @@ import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-ag
 import { ToolExecutionComponent } from "@oh-my-pi/pi-coding-agent/modes/components/tool-execution";
 import { UserMessageComponent } from "@oh-my-pi/pi-coding-agent/modes/components/user-message";
 import type { LayoutMode } from "@oh-my-pi/pi-coding-agent/modes/layout-mode";
-import { initTheme, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { loadTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/loader";
+import { getThemeByName, initTheme, setThemeInstance, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { CachedOutputBlock, markFramedBlockComponent } from "@oh-my-pi/pi-coding-agent/tui/output-block";
 import { replaceTabs, Text, type TUI } from "@oh-my-pi/pi-tui";
 
@@ -257,5 +258,34 @@ describe("opencode layout", () => {
 		expect(stripVTControlCharacters(framed)).toContain(theme.boxRound.topLeft);
 		expect(stripVTControlCharacters(flat)).not.toContain(theme.boxRound.topLeft);
 		expect(framedAgain).toBe(framed);
+	});
+
+	it("renders ascii-preset collapsed rows without Unicode glyphs", async () => {
+		const baseTheme = await getThemeByName("dark");
+		if (!baseTheme) throw new Error("theme unavailable");
+		setThemeInstance(await loadTheme("dark", { symbolPresetOverride: "ascii" }));
+		try {
+			// One mapped name per glyph family plus an unmapped fallback.
+			const rows = ["write", "task", "custom_render"].map(name => {
+				const tool = { ...makeMultiLineTool(), name };
+				const component = new ToolExecutionComponent(
+					name,
+					{},
+					{ layout: opencode },
+					tool as unknown as AgentTool,
+					ui,
+					process.cwd(),
+				);
+				component.updateResult({ content: [{ type: "text", text: "ok" }] }, false);
+				return stripVTControlCharacters(component.render(80).join("\n"));
+			});
+			expect(rows[0]).toContain("<- HEADLINE ok");
+			expect(rows[1]).toContain("# HEADLINE ok");
+			// Unmapped tools fall back to the search glyph.
+			expect(rows[2]).toContain("* HEADLINE ok");
+			for (const row of rows) expect(row).toMatch(/^[\x20-\x7E]*$/);
+		} finally {
+			setThemeInstance(baseTheme);
+		}
 	});
 });

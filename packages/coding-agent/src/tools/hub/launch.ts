@@ -657,7 +657,7 @@ export function launchRenderResult(
 	if (op === "logs") {
 		return framedBlock(theme, width => {
 			const flat = options.renderContext?.flat === true;
-			const innerWidth = outputBlockContentWidth(width, flat);
+			const innerWidth = outputBlockContentWidth(width, undefined, undefined, flat);
 			const rows = body.map(line => truncateToWidth(line, innerWidth));
 			return {
 				header,

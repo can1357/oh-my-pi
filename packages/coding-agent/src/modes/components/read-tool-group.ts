@@ -598,7 +598,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 					: plain;
 				flatRows.push(
 					status === "success"
-						? theme.fg("dim", ` → Read ${pathText}`)
+						? theme.fg("dim", ` ${theme.symbol("oc.read")} Read ${pathText}`)
 						: ` ${this.#formatStatus(status)} ${theme.fg("dim", `Read ${pathText}`)}`,
 				);
 				if (status !== "error") continue;
@@ -612,7 +612,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 				}
 			}
 			if (flatRows.length === 0 && this.children.length === 0) {
-				flatRows.push(theme.fg("dim", " → Read"));
+				flatRows.push(theme.fg("dim", ` ${theme.symbol("oc.read")} Read`));
 			}
 			flushFlatRows();
 			return;

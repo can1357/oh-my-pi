@@ -365,7 +365,7 @@ function renderFallbackComponent(
 
 	return framedBlock(theme, width => {
 		const flat = options.renderContext?.flat === true;
-		const lineWidth = outputBlockContentWidth(width || FALLBACK_WIDTH, flat);
+		const lineWidth = outputBlockContentWidth(width || FALLBACK_WIDTH, undefined, undefined, flat);
 		const expanded = options.expanded;
 		const limit = expanded ? allLines.length : Math.min(allLines.length, PREVIEW_LIMITS.OUTPUT_EXPANDED);
 		const visible = allLines.slice(0, limit);
@@ -467,7 +467,7 @@ export const githubToolRenderer = {
 			);
 			return framedBlock(uiTheme, width => {
 				const flat = options.renderContext?.flat === true;
-				const innerWidth = outputBlockContentWidth(width || FALLBACK_WIDTH, flat);
+				const innerWidth = outputBlockContentWidth(width || FALLBACK_WIDTH, undefined, undefined, flat);
 				const sections = buildWatchSections(watch, uiTheme, options, innerWidth);
 				return {
 					header,

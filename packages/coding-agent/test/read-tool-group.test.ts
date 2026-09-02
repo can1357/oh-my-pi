@@ -7,6 +7,7 @@ import {
 	ReadToolGroupComponent,
 	readArgsCollapseIntoGroup,
 } from "@oh-my-pi/pi-coding-agent/modes/components/read-tool-group";
+import { loadTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/loader";
 import * as themeModule from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 
 function extractLinkUris(text: string): string[] {
@@ -426,6 +427,23 @@ describe("ReadToolGroupComponent", () => {
 		component.setExpanded(true);
 		const grouped = Bun.stripANSI(component.render(120).join("\n"));
 		expect(grouped).toContain("Read (2)");
+	});
+
+	it("renders ascii-preset flat rows with the ascii read glyph", async () => {
+		const baseTheme = await themeModule.getThemeByName("dark");
+		if (!baseTheme) throw new Error("theme unavailable");
+		themeModule.setThemeInstance(await loadTheme("dark", { symbolPresetOverride: "ascii" }));
+		try {
+			const component = new ReadToolGroupComponent({ layout: () => "opencode" });
+			component.updateArgs({ path: "/tmp/a.ts" }, "read-ascii");
+			component.updateResult({ content: [{ type: "text", text: "alpha" }] }, false, "read-ascii");
+
+			const rendered = Bun.stripANSI(component.render(120).join("\n"));
+			expect(rendered).toContain("-> Read /tmp/a.ts");
+			expect(rendered).toMatch(/^[\x20-\x7E\n]*$/);
+		} finally {
+			themeModule.setThemeInstance(baseTheme);
+		}
 	});
 });
 

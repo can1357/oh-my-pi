@@ -2,7 +2,7 @@ import { beforeAll, describe, expect, it } from "bun:test";
 import { stripVTControlCharacters } from "node:util";
 import { getThemeByName, initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { renderMarkdownCell } from "@oh-my-pi/pi-coding-agent/tui/code-cell";
-import { renderOutputBlock } from "@oh-my-pi/pi-coding-agent/tui/output-block";
+import { outputBlockContentWidth, renderOutputBlock } from "@oh-my-pi/pi-coding-agent/tui/output-block";
 
 describe("renderOutputBlock", () => {
 	beforeAll(async () => {
@@ -67,5 +67,15 @@ describe("renderOutputBlock", () => {
 		).map(line => stripVTControlCharacters(line));
 
 		expect(lines).toEqual(["  ask quest…"]);
+	});
+
+	it("keeps the original positional contract of outputBlockContentWidth", () => {
+		// Pre-opencode signature: (width, contentPaddingLeft?, contentPaddingRight?).
+		// Precompiled JS extension callers rely on these positions.
+		expect(outputBlockContentWidth(40)).toBe(36);
+		expect(outputBlockContentWidth(40, 0)).toBe(38);
+		expect(outputBlockContentWidth(40, 2, 3)).toBe(33);
+		// The opencode `flat` flag is appended LAST so the positions above never shift.
+		expect(outputBlockContentWidth(40, undefined, undefined, true)).toBe(38);
 	});
 });

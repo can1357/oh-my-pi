@@ -1722,7 +1722,7 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 							const result = truncateToVisualLines(
 								textContent,
 								previewBudget,
-								outputBlockContentWidth(width, flat),
+								outputBlockContentWidth(width, undefined, undefined, flat),
 							);
 							if (result.skippedCount > 0) {
 								outputLines.push(

@@ -237,7 +237,7 @@ export function renderMarkdownCell(options: MarkdownCellOptions, theme: Theme): 
 
 	// Markdown component manages its own wrapping at the same inner width as
 	// `renderOutputBlock`, so collapsed row caps are applied after final wrapping.
-	const innerWidth = Math.max(20, outputBlockContentWidth(width, options.flat));
+	const innerWidth = Math.max(20, outputBlockContentWidth(width, undefined, undefined, options.flat));
 	const allLines = content.trim() ? new Markdown(content, 0, 0, getMarkdownTheme()).render(innerWidth) : [];
 	const maxContentLines = expanded ? allLines.length : Math.min(allLines.length, contentMaxLines);
 	const contentLines = allLines.slice(0, maxContentLines);

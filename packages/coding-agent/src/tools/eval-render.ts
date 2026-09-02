@@ -469,7 +469,7 @@ function formatCellOutputLines(
 	// at that width so a long-line tail can't wrap into more rows than budgeted
 	// and scroll its mutating preview above the live-region window — the
 	// duplicate "ctrl+o to expand" scrollback spray.
-	const innerWidth = outputBlockContentWidth(width, flat);
+	const innerWidth = outputBlockContentWidth(width, undefined, undefined, flat);
 
 	if (cell.hasMarkdown && cell.status !== "error") {
 		const md = new Markdown(cell.output, 0, 0, getMarkdownTheme());

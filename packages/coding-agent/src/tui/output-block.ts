@@ -56,12 +56,15 @@ function normalizeContentPaddingLeft(value: number | undefined): number {
  * content padding. Flat (opencode layout): the two-column indent only. An
  * explicit left padding of zero keeps legacy flush blocks flush on both sides
  * unless a right padding is provided separately.
+ *
+ * `flat` is deliberately the LAST parameter: the padding parameters keep their
+ * pre-opencode positions so precompiled extension callers stay compatible.
  */
 export function outputBlockContentWidth(
 	width: number,
-	flat?: boolean,
 	contentPaddingLeft?: number,
 	contentPaddingRight?: number,
+	flat?: boolean,
 ): number {
 	if (flat) return Math.max(1, width - 2);
 	const left = normalizeContentPaddingLeft(contentPaddingLeft);
