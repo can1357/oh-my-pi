@@ -86,6 +86,10 @@ class ProvidersSceneController implements SetupSceneController {
 	}
 
 	render(width: number, maxLines?: number): readonly string[] {
+		// `handleInput` hands every key to a modal panel, so Tab does nothing
+		// during an in-flight OAuth login. Advertising the shortcut anyway reads
+		// as a broken key rather than a deliberate lock.
+		this.#tabBar.showHint = !this.#activeTab().modal;
 		const tabLines = this.#tabBar.render(width);
 		this.#tabRowCount = tabLines.length;
 		const tabBudget = maxLines === undefined ? undefined : Math.max(1, maxLines - tabLines.length - 1);

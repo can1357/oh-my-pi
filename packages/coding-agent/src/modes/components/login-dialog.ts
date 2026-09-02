@@ -2,6 +2,7 @@ import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import { Container, getKeybindings, Input, Spacer, Text, type TUI, wrapTextWithAnsi } from "@oh-my-pi/pi-tui";
 import { theme } from "../../modes/theme/theme";
 import { urlHyperlinkAlways, WidthAwareText } from "../../tui";
+import { loginUrlCopyCommand, persistLoginUrl, wrapCommandRow } from "../../utils/login-url";
 import { openPath } from "../../utils/open";
 import { OverlayPanel } from "./overlay-box";
 
@@ -98,8 +99,30 @@ export class LoginDialogComponent extends OverlayPanel {
 			this.#contentContainer.addChild(new Text(theme.fg("warning", instructions), 0, 0));
 		}
 
-		// Open browser (best-effort)
-		openPath(url);
+		// Byte-exact copy path that needs no terminal feature: a wrapped
+		// selection carries row breaks and padding, and OSC 52/OSC 8 are optional.
+		// The command row wraps byte-complete by column: plain `Text` word-wraps
+		// and swallows the space at each break, displaying a path that does not
+		// exist when the agent dir carries spaces. The write is fire-and-forget;
+		// the command derives from the deterministic path, so it renders now.
+		const urlFile = persistLoginUrl(url);
+		this.#contentContainer.addChild(
+			new WidthAwareText(
+				contentWidth =>
+					wrapCommandRow(theme.fg("dim", `Clean copy: ${loginUrlCopyCommand(urlFile)}`), contentWidth).join("\n"),
+				0,
+				0,
+			),
+		);
+
+		// Open browser (best-effort). `false` means BROWSER=none suppressed the
+		// launch: say so, or the provider's "a browser window should open"
+		// instructions above leave the user waiting for one that never comes.
+		if (!openPath(url)) {
+			this.#contentContainer.addChild(
+				new Text(theme.fg("dim", "Browser launch disabled by BROWSER=none. Use the URL above."), 0, 0),
+			);
+		}
 
 		this.#tui.requestRender();
 	}

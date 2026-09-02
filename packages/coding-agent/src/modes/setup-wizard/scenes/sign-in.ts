@@ -11,6 +11,8 @@ import {
 } from "@oh-my-pi/pi-tui";
 import { getAgentDbPath } from "@oh-my-pi/pi-utils";
 import { copyToClipboard } from "../../../utils/clipboard";
+import { loginUrlCopyCommand, persistLoginUrl, wrapCommandRow } from "../../../utils/login-url";
+import { openCommandFor } from "../../../utils/open";
 import { OAuthSelectorComponent } from "../../components/oauth-selector";
 import { theme } from "../../theme/theme";
 import type { SetupSceneHost, SetupTab } from "./types";
@@ -81,6 +83,10 @@ export class SignInTab implements SetupTab {
 	#statusLines: string[] = [];
 	#authUrl: string | undefined;
 	#authLaunchUrl: string | undefined;
+	/** Why no browser opened, when that is the case. Cleared with the URL. */
+	#launchNotice: string | undefined;
+	/** File carrying the URL byte-exact; the copy path that needs no terminal feature. */
+	#authUrlFile: string | undefined;
 	#prompt: PromptState | undefined;
 	#promptResolve: ((value: string) => void) | undefined;
 	#loginAbort: AbortController | undefined;
@@ -133,8 +139,26 @@ export class SignInTab implements SetupTab {
 
 	render(width: number, maxLines?: number): readonly string[] {
 		const lines: string[] = [];
+		const promptLines = (() => {
+			if (!this.#prompt || maxLines === 0) return [];
+			const input = this.#prompt.input.render(width)[0] ?? "";
+			const details = [
+				theme.fg("warning", this.#prompt.message),
+				...(this.#prompt.placeholder ? [theme.fg("dim", this.#prompt.placeholder)] : []),
+			];
+			return maxLines === undefined ? [...details, input] : [...details.slice(0, Math.max(0, maxLines - 1)), input];
+		})();
+		const fitsBeforePrompt = (rowCount: number): boolean =>
+			maxLines === undefined || lines.length + rowCount + promptLines.length <= maxLines;
+		const pushBeforePrompt = (line: string): boolean => {
+			if (!fitsBeforePrompt(1)) return false;
+			lines.push(line);
+			return true;
+		};
 		if (this.#loggingInProvider) {
-			lines.push(theme.bold(`Signing in to ${this.#loggingInProvider}`));
+			if (maxLines === undefined || (!this.#prompt && !this.#authUrl)) {
+				pushBeforePrompt(theme.bold(`Signing in to ${this.#loggingInProvider}`));
+			}
 		} else {
 			// Hint + blank cost two rows; the wizard subtitle already explains
 			// this panel, so on short screens the rows go to the provider list
@@ -147,30 +171,55 @@ export class SignInTab implements SetupTab {
 			lines.push(...this.#selector.render(width));
 		}
 
-		const urlLines = this.#authUrl ? wrapTextWithAnsi(theme.fg("dim", this.#authUrl), width) : [];
+		// Layout rule: the rows a user has to act on come first, the long
+		// reference string comes last and whole.
+		//
+		// The previous revision printed the first two wrapped rows of the URL
+		// under the header and then the entire URL again below the prompt. The
+		// copy a user reaches for first ended mid-query-string, and the working
+		// one sat several rows further down. Selecting the URL is the fallback
+		// for every machine where the browser handoff does not work, so it has
+		// to be the obvious one, unbroken and printed once.
 		if (this.#authUrl) {
-			lines.push(
-				theme.fg("accent", `Browser login: ${loginUrlLink(this.#authUrl)} ${loginCopyHint()}`),
-				...urlLines.slice(0, 2),
-			);
+			pushBeforePrompt(theme.fg("accent", `Browser login: ${loginUrlLink(this.#authUrl)} ${loginCopyHint()}`));
+			// Sits with the header rather than in `#statusLines`, which render
+			// below the URL block: on the short terminal this whole layout is
+			// about, a notice printed after a multi-row URL is the first thing
+			// the wizard clips, and a user who sees no browser and no
+			// explanation is exactly the state it exists to prevent.
+			if (this.#launchNotice) {
+				pushBeforePrompt(theme.fg("dim", this.#launchNotice));
+			}
+			// The byte-exact copy path that needs no terminal feature: a wrapped
+			// selection carries row breaks and padding, and OSC 52/OSC 8 are
+			// optional. The command can occupy several rows, so it must consume
+			// only rows left after the manual-code input. A clipped command is
+			// unusable, so replace it with an explicit clamp marker.
+			if (this.#authUrlFile) {
+				const commandRows = wrapCommandRow(
+					theme.fg("dim", `Clean copy: ${loginUrlCopyCommand(this.#authUrlFile)}`),
+					width,
+				);
+				if (fitsBeforePrompt(commandRows.length)) {
+					lines.push(...commandRows);
+				} else {
+					pushBeforePrompt(theme.fg("dim", "Clean copy: …"));
+				}
+			}
 			if (this.#authLaunchUrl) {
-				lines.push(theme.fg("dim", `Local shortcut (this machine only): ${this.#authLaunchUrl}`));
+				pushBeforePrompt(theme.fg("dim", `Local shortcut (this machine only): ${this.#authLaunchUrl}`));
 			}
 		}
-		if (this.#prompt) {
-			lines.push(theme.fg("warning", this.#prompt.message));
-			if (this.#prompt.placeholder) {
-				lines.push(theme.fg("dim", this.#prompt.placeholder));
-			}
-			lines.push(this.#prompt.input.render(width)[0] ?? "");
-		}
-		if (urlLines.length > 2) {
-			lines.push(...urlLines);
+		lines.push(...promptLines);
+		// Last, so a short terminal clips the tail of a string the user can also
+		// reach with Alt+C or the OSC 8 link, never the input they must type in.
+		if (this.#authUrl) {
+			lines.push(...wrapTextWithAnsi(theme.fg("dim", this.#authUrl), width));
 		}
 		if (this.#statusLines.length > 0) {
 			lines.push(...this.#statusLines.flatMap(line => wrapTextWithAnsi(line, width)));
 		}
-		return lines;
+		return maxLines === undefined ? lines : lines.slice(0, maxLines);
 	}
 
 	#createSelector(): OAuthSelectorComponent {
@@ -193,6 +242,8 @@ export class SignInTab implements SetupTab {
 		this.#statusLines = [theme.fg("dim", "Starting OAuth flow…")];
 		this.#authUrl = undefined;
 		this.#authLaunchUrl = undefined;
+		this.#launchNotice = undefined;
+		this.#authUrlFile = undefined;
 		this.#loginAbort = new AbortController();
 		this.host.restoreFocus();
 		this.host.requestRender();
@@ -210,6 +261,7 @@ export class SignInTab implements SetupTab {
 					// surface. `launchUrl` is still surfaced as an optional local
 					// shortcut for wide-terminal local users.
 					this.#authUrl = info.url;
+					this.#authUrlFile = persistLoginUrl(info.url);
 					this.#authLaunchUrl = info.launchUrl && info.launchUrl !== info.url ? info.launchUrl : undefined;
 					this.#statusLines = [];
 					if (info.instructions) {
@@ -219,7 +271,14 @@ export class SignInTab implements SetupTab {
 						this.#statusLines.push(theme.fg("dim", "Paste the returned code or redirect URL when prompted."));
 					}
 					void this.#copyAuthUrl();
-					this.host.ctx.openInBrowser(info.url);
+					// A suppressed launch has to be visible. The provider's own
+					// instructions say a browser window should open, and waiting
+					// for one that never comes is the worst version of this screen.
+					if (openCommandFor(info.url)) {
+						this.host.ctx.openInBrowser(info.url);
+					} else {
+						this.#launchNotice = "Browser launch disabled by BROWSER=none. Use the URL below.";
+					}
 					this.host.requestRender();
 				},
 				onPrompt: prompt => this.#showPrompt(prompt),
@@ -240,6 +299,8 @@ export class SignInTab implements SetupTab {
 			];
 			this.#authUrl = undefined;
 			this.#authLaunchUrl = undefined;
+			this.#launchNotice = undefined;
+			this.#authUrlFile = undefined;
 			this.#loggingInProvider = undefined;
 			this.#loginAbort = undefined;
 			this.#selector.stopValidation();
@@ -250,17 +311,19 @@ export class SignInTab implements SetupTab {
 			if (this.#disposed) return;
 			if (this.#loginAbort?.signal.aborted) {
 				this.#statusLines = [theme.fg("dim", "Login cancelled.")];
-				this.#authUrl = undefined;
-				this.#authLaunchUrl = undefined;
 			} else {
 				const message = error instanceof Error ? error.message : String(error);
 				this.#statusLines = [
 					theme.fg("error", `Login failed: ${message}`),
 					theme.fg("dim", "Choose another provider or press Esc to continue."),
 				];
-				this.#authUrl = undefined;
-				this.#authLaunchUrl = undefined;
 			}
+			// Both branches leave the same wreckage behind: no live URL, no
+			// pending launch, no provider.
+			this.#authUrl = undefined;
+			this.#authLaunchUrl = undefined;
+			this.#launchNotice = undefined;
+			this.#authUrlFile = undefined;
 			this.#loggingInProvider = undefined;
 			this.#loginAbort = undefined;
 			this.host.restoreFocus();

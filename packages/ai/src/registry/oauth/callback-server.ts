@@ -528,13 +528,25 @@ export abstract class OAuthCallbackFlow {
 
 /**
  * Parse a redirect URL or code string to extract code and state.
+ *
+ * Input arrives carrying terminal artifacts: a URL copied out of a full-screen
+ * TUI includes the row breaks the frame painted, and a terminal that pads rows
+ * includes spaces at the break points. Control whitespace is never valid in any
+ * accepted form (RFC 6749 defines `code` as `1*VSCHAR`, which is %x20-7E), so
+ * each control-whitespace run is removed together with its adjacent spaces:
+ * the padding belongs to the same artifact as the break it surrounds, and
+ * `ABC \n 123` means `ABC123`, not `ABC  123`. Remaining spaces are removed
+ * from the URL and query-string forms, where a raw space cannot be legitimate;
+ * a bare code keeps them, because VSCHAR includes %x20 and stripping a genuine
+ * interior space would corrupt a spec-legal code.
  */
 export function parseCallbackInput(input: string): { code?: string; state?: string } {
-	const value = input.trim();
+	const value = input.replace(/ *[\r\n\t\v\f]+ */g, "").trim();
 	if (!value) return {};
+	const compact = value.replace(/ +/g, "");
 
 	try {
-		const url = new URL(value);
+		const url = new URL(compact);
 		return {
 			code: url.searchParams.get("code") ?? undefined,
 			state: url.searchParams.get("state") ?? undefined,
@@ -543,8 +555,8 @@ export function parseCallbackInput(input: string): { code?: string; state?: stri
 		// Not a URL - check for query string format
 	}
 
-	if (value.includes("code=")) {
-		const params = new URLSearchParams(value.replace(/^[?#]/, ""));
+	if (compact.includes("code=")) {
+		const params = new URLSearchParams(compact.replace(/^[?#]/, ""));
 		return {
 			code: params.get("code") ?? undefined,
 			state: params.get("state") ?? undefined,
