@@ -30,6 +30,7 @@ import {
 	huggingfaceModelManagerOptions,
 	kiloModelManagerOptions,
 	kimiCodeModelManagerOptions,
+	kymaModelManagerOptions,
 	litellmModelManagerOptions,
 	lmStudioModelManagerOptions,
 	metaModelManagerOptions,
@@ -321,6 +322,16 @@ export const CATALOG_PROVIDERS = [
 		envVars: ["MOONSHOT_API_KEY", "KIMI_API_KEY"],
 		createModelManagerOptions: (config: ModelManagerConfig) => moonshotModelManagerOptions(config),
 		catalogDiscovery: { label: "Moonshot" },
+	},
+	{
+		id: "kyma",
+		defaultModel: "claude-sonnet-5",
+		envVars: ["KYMA_API_KEY"],
+		createModelManagerOptions: (config: ModelManagerConfig) => kymaModelManagerOptions(config),
+		// The gateway's /v1/models is the source of truth for what it serves and
+		// what it charges; a bundled snapshot of it would be wrong within weeks.
+		dynamicModelsAuthoritative: true,
+		catalogDiscovery: { label: "Kyma" },
 	},
 	{
 		id: "nanogpt",

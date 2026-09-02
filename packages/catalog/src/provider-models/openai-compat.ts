@@ -1185,6 +1185,19 @@ export interface NvidiaModelManagerConfig {
 	fetch?: FetchImpl;
 }
 
+// ---------------------------------------------------------------------------
+// Kyma
+
+export interface KymaModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
+export function kymaModelManagerOptions(config?: KymaModelManagerConfig): ModelManagerOptions<"openai-completions"> {
+	return createSimpleOpenAICompletionsOptions("kyma", "https://kymaapi.com/v1", config);
+}
+
 export function nvidiaModelManagerOptions(
 	config?: NvidiaModelManagerConfig,
 ): ModelManagerOptions<"openai-completions"> {
