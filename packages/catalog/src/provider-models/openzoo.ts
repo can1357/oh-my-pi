@@ -7,6 +7,7 @@
  * attention window, so the live endpoint is the whole catalog: nothing is
  * bundled, and a successful discovery is authoritative.
  */
+import { classifyModel } from "../compat/taxonomy";
 import { fetchOpenAICompatibleModels, type OpenAICompatibleModelRecord } from "../discovery/openai-compatible";
 import { getBundledModelReferenceIndex } from "../identity/bundled";
 import type { ModelReferenceIndex } from "../identity/reference";
@@ -87,11 +88,61 @@ function toDisplayName(value: unknown, fallback: string): string {
 	return trimmed.length > 0 ? trimmed : fallback;
 }
 
+function listIncludes(value: unknown, token: string): boolean {
+	return Array.isArray(value) && value.includes(token);
+}
+
+/**
+ * Reasoning the live row actually advertises. A matching bundled id from
+ * another provider is not a signal — that host may expose a different
+ * control surface than this OpenAI-completions proxy.
+ */
+function liveOpenzooReasoning(entry: OpenAICompatibleModelRecord): boolean {
+	if (entry.supports_reasoning === true || entry.reasoning === true) {
+		return true;
+	}
+	if (isRecord(entry.reasoning)) {
+		return true;
+	}
+	return (
+		listIncludes(entry.supported_parameters, "reasoning") ||
+		listIncludes(entry.supported_parameters, "reasoning_effort")
+	);
+}
+
+/**
+ * Input modalities the live row actually advertises. `undefined` means the
+ * roster omitted them — leave the discovery default and let KDL
+ * `input-modalities` correct at `buildModel` time.
+ */
+function liveOpenzooInput(entry: OpenAICompatibleModelRecord): ("text" | "image")[] | undefined {
+	if (entry.supports_vision === true || entry.supports_image === true || entry.supports_image_in === true) {
+		return ["text", "image"];
+	}
+	if (isRecord(entry.architecture)) {
+		if (Array.isArray(entry.architecture.input_modalities)) {
+			return listIncludes(entry.architecture.input_modalities, "image") ? ["text", "image"] : ["text"];
+		}
+		const modality = entry.architecture.modality;
+		if (typeof modality === "string" && modality.length > 0) {
+			return modality.includes("image") ? ["text", "image"] : ["text"];
+		}
+	}
+	if (Array.isArray(entry.input_modalities)) {
+		return listIncludes(entry.input_modalities, "image") ? ["text", "image"] : ["text"];
+	}
+	return undefined;
+}
+
 /**
  * Map one proxy row. Limits come from the row where it carries the model's
- * real numbers, and from the bundled upstream reference (matched by the
- * OpenRouter-style id) for reasoning and input modalities the row does not
- * describe. Pricing is always the proxy's: it is what the wallet pays.
+ * real numbers, with the bundled upstream reference (matched by the
+ * OpenRouter-style id) only filling a missing window or display name.
+ * Reasoning and image-input stay on the discovery defaults unless the row
+ * reports them — a matching id from another provider is not a capability
+ * signal. Reviewed corrections are rule-owned (`providers/openzoo.kdl`)
+ * and applied at `buildModel` time. Pricing is always the proxy's: it is
+ * what the wallet pays.
  *
  * `context_length` is deliberately ignored: the proxy reports the ceiling its
  * bind/retrieval layer accepts (128M tokens), not the transformer's window,
@@ -126,11 +177,12 @@ export function mapOpenzooModel(
 		reportedMaxTokens != null && contextWindow != null
 			? Math.min(reportedMaxTokens, contextWindow)
 			: reportedMaxTokens;
+	const identity = classifyModel("openzoo", defaults.id, { lenient: true });
 	return {
 		...defaults,
 		name: canonical?.name ?? toDisplayName(entry.display_name, defaults.name),
-		reasoning: canonical?.reasoning ?? defaults.reasoning,
-		input: canonical?.input ?? defaults.input,
+		reasoning: liveOpenzooReasoning(entry) || identity.thinkingVariant === true,
+		input: liveOpenzooInput(entry) ?? defaults.input,
 		cost: mapOpenzooCost(entry.pricing),
 		contextWindow,
 		maxTokens,

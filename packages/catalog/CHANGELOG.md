@@ -28,6 +28,10 @@
 
 - Added the `openzoo` provider: live model discovery from the local x402 pay-per-call proxy (`npx openzoo`, `http://localhost:8402/v1`, overridable with `OPENZOO_BASE_URL`), with per-token pricing and the real attention window taken from the proxy catalog, the proxy's router aliases (`openzoo/auto` and friends, no longer published by openzoo >= 0.50.84) dropped from discovery, and no bundled model list.
 
+### Fixed
+
+- OpenZoo live `/models` rows no longer inherit another provider's reasoning or image-input flags; those stay neutral unless the row reports them or a compatibility rule corrects them.
+
 ## [18.1.4] - 2026-09-02
 
 ### Changed

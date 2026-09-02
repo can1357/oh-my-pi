@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/registry/oauth";
 import { getEnvApiKey } from "@oh-my-pi/pi-ai/stream";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModelReferenceIndex } from "@oh-my-pi/pi-catalog/identity/bundled";
 import { resolveModelReference } from "@oh-my-pi/pi-catalog/identity/reference";
 import { getBundledProviders } from "@oh-my-pi/pi-catalog/models";
@@ -80,7 +81,13 @@ const OPENZOO_MODELS_PAYLOAD = {
 		// Each later alias row carries only the component the first row omitted,
 		// pinning the field-by-field fold (a whole-object merge would drop these).
 		{ id: "openzoo-auto", object: "model", owned_by: "openzoo", pricing: { completion: 2e-7 } },
-		{ id: "auto", object: "model", owned_by: "openzoo", pricing: { prompt: 1e-7, completion: 2e-7 }, max_output_tokens: 8192 },
+		{
+			id: "auto",
+			object: "model",
+			owned_by: "openzoo",
+			pricing: { prompt: 1e-7, completion: 2e-7 },
+			max_output_tokens: 8192,
+		},
 		{ id: "gpt-5.6-auto", object: "model", owned_by: "openzoo", pricing: { prompt: 1e-7, completion: 2e-7 } },
 		{
 			id: "gpt-4o",
@@ -90,6 +97,17 @@ const OPENZOO_MODELS_PAYLOAD = {
 			pricing: { prompt: 2.5e-6, completion: 1e-5, unit: "USD", markup: 1 },
 			context_length: 128_000_000,
 			display_name: "gpt-4o",
+		},
+		{
+			id: "example-lab/reports-capabilities",
+			object: "model",
+			owned_by: "openrouter",
+			pricing: { prompt: 1e-6, completion: 3e-6, unit: "USD", markup: 1 },
+			max_model_len: 32_768,
+			max_output_tokens: 4_096,
+			display_name: "reports-capabilities (example-lab)",
+			supported_parameters: ["tools", "reasoning"],
+			architecture: { modality: "text+image", input_modalities: ["text", "image"] },
 		},
 	],
 };
@@ -182,6 +200,7 @@ describe("openzoo built-in provider", () => {
 			"anthropic/claude-sonnet-4",
 			"auto",
 			"example-lab/not-in-any-catalog",
+			"example-lab/reports-capabilities",
 		]);
 
 		const sonnet = models?.find(model => model.id === "anthropic/claude-sonnet-4");
@@ -193,12 +212,21 @@ describe("openzoo built-in provider", () => {
 		// `max_model_len` is the attention window; `context_length` is the 128M bind ceiling.
 		expect(sonnet?.contextWindow).toBe(1_000_000);
 		expect(sonnet?.maxTokens).toBe(64_000);
-		// Capabilities the row does not describe hydrate from the bundled upstream reference.
+		// Display name may still come from a bundled reference. Reasoning and
+		// image-input do not: a matching id from another provider is not a
+		// capability signal (github-copilot / opencode-zen Claude Sonnet 4
+		// both reason and accept images).
 		const canonical = resolveModelReference("anthropic/claude-sonnet-4", getBundledModelReferenceIndex());
 		expect(canonical).toBeDefined();
 		expect(sonnet?.name).toBe(canonical?.name ?? "");
-		expect(sonnet?.reasoning).toBe(canonical?.reasoning ?? false);
-		expect(sonnet?.input).toEqual(canonical?.input ?? ["text"]);
+		expect(canonical?.reasoning).toBe(true);
+		expect(canonical?.input).toContain("image");
+		expect(sonnet?.reasoning).toBe(false);
+		expect(sonnet?.input).toEqual(["text"]);
+		// Image input is rule-owned (`providers/openzoo.kdl` input-modalities)
+		// and corrected at build time.
+		expect(sonnet && buildModel(sonnet).input).toEqual(["text", "image"]);
+		expect(sonnet && buildModel(sonnet).reasoning).toBe(false);
 
 		// Unknown ids keep the proxy's numbers (string prices parse too) and conservative capabilities.
 		expect(resolveModelReference("example-lab/not-in-any-catalog", getBundledModelReferenceIndex())).toBeUndefined();
@@ -210,6 +238,17 @@ describe("openzoo built-in provider", () => {
 		expect(unknown?.name).toBe("not-in-any-catalog (example-lab)");
 		expect(unknown?.reasoning).toBe(false);
 		expect(unknown?.input).toEqual(["text"]);
+		expect(unknown && buildModel(unknown).input).toEqual(["text"]);
+
+		// Advertised live fields are authoritative even for an id with no
+		// bundled reference — that is the only path that may light up
+		// reasoning or image input on the discovery spec.
+		const reported = models?.find(model => model.id === "example-lab/reports-capabilities");
+		expect(
+			resolveModelReference("example-lab/reports-capabilities", getBundledModelReferenceIndex()),
+		).toBeUndefined();
+		expect(reported?.reasoning).toBe(true);
+		expect(reported?.input).toEqual(["text", "image"]);
 
 		// The fold is field-by-field: the first alias row priced only the prompt
 		// side and left maxTokens null; later alias rows filled in the rest.

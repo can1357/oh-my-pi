@@ -148,6 +148,7 @@
 		"providers/opencode-go.kdl",
 		"providers/opencode-zen.kdl",
 		"providers/openrouter.kdl",
+		"providers/openzoo.kdl",
 		"providers/qianfan.kdl",
 		"providers/sakana.kdl",
 		"providers/synthetic.kdl",
@@ -12067,6 +12068,82 @@
 				},
 				"thinking": {
 					"mode": "effort"
+				}
+			},
+			{
+				"source": "providers/openzoo.kdl:10",
+				"class": "anthropic",
+				"providers": [
+					"openzoo"
+				],
+				"catalog": {
+					"inputModalities": [
+						"text",
+						"image"
+					]
+				}
+			},
+			{
+				"source": "providers/openzoo.kdl:13",
+				"class": "gemini",
+				"providers": [
+					"openzoo"
+				],
+				"catalog": {
+					"inputModalities": [
+						"text",
+						"image"
+					]
+				}
+			},
+			{
+				"source": "providers/openzoo.kdl:17",
+				"class": "glm",
+				"providers": [
+					"openzoo"
+				],
+				"family": "vision",
+				"catalog": {
+					"inputModalities": [
+						"text",
+						"image"
+					]
+				}
+			},
+			{
+				"source": "providers/openzoo.kdl:22",
+				"providers": [
+					"openzoo"
+				],
+				"models": [
+					{
+						"kind": "token",
+						"value": "vision"
+					}
+				],
+				"catalog": {
+					"inputModalities": [
+						"text",
+						"image"
+					]
+				}
+			},
+			{
+				"source": "providers/openzoo.kdl:25",
+				"providers": [
+					"openzoo"
+				],
+				"models": [
+					{
+						"kind": "token",
+						"value": "vl"
+					}
+				],
+				"catalog": {
+					"inputModalities": [
+						"text",
+						"image"
+					]
 				}
 			},
 			{
