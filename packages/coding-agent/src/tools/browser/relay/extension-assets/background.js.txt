@@ -88,6 +88,16 @@ function shouldProceedWithOrphanSweep(state) {
 function orphanSweepAlarmDelayMinutes(deadlineMs, nowMs) {
   return Math.max((deadlineMs - nowMs) / 60000, 0.01);
 }
+function serializeOrphanSweepDeadlineUpdate(previousUpdate, alarmUpdate, isCurrent, persist, repairStaleAlarm) {
+  return previousUpdate.catch(() => {}).then(async () => {
+    await alarmUpdate.catch(() => {});
+    if (!isCurrent()) {
+      repairStaleAlarm();
+      return;
+    }
+    await persist().catch(() => {});
+  });
+}
 
 // extension/pending-ops.ts
 async function snapshotAfterPendingOperationsSettle(getGeneration, getPendingOperations, takeSnapshot) {
@@ -127,6 +137,7 @@ var RECOVERABLE_TAB_IDS_KEY = "ompRecoverableTabIds";
 var recoverableTabIds = new Set;
 var orphanSweepDeadlineMs = null;
 var connectionGeneration = 0;
+var orphanSweepDeadlineGeneration = 0;
 var recoverableReady = chrome.storage.session.get({ [RECOVERABLE_TAB_IDS_KEY]: [], [ORPHAN_SWEEP_DEADLINE_KEY]: null }).then((stored) => {
   const ids = stored[RECOVERABLE_TAB_IDS_KEY];
   if (Array.isArray(ids)) {
@@ -140,6 +151,7 @@ var recoverableReady = chrome.storage.session.get({ [RECOVERABLE_TAB_IDS_KEY]: [
     orphanSweepDeadlineMs = deadline;
 }).catch(() => {});
 var recoverableUpdates = recoverableReady;
+var orphanSweepDeadlineUpdates = recoverableReady;
 function trackPendingDetach(promise) {
   pendingOperationGeneration++;
   invalidateHelloRefresh();
@@ -168,15 +180,26 @@ function forgetRecoverable(tabId) {
   });
 }
 async function setOrphanSweepDeadline(deadlineMs) {
+  const generation = ++orphanSweepDeadlineGeneration;
   orphanSweepDeadlineMs = deadlineMs;
+  let alarmUpdate = Promise.resolve();
   if (deadlineMs === null) {
-    await chrome.alarms.clear(ORPHAN_SWEEP_ALARM).catch(() => {});
+    alarmUpdate = chrome.alarms.clear(ORPHAN_SWEEP_ALARM);
   } else {
     chrome.alarms.create(ORPHAN_SWEEP_ALARM, {
       delayInMinutes: orphanSweepAlarmDelayMinutes(deadlineMs, Date.now())
     });
   }
-  await chrome.storage.session.set({ [ORPHAN_SWEEP_DEADLINE_KEY]: deadlineMs }).catch(() => {});
+  orphanSweepDeadlineUpdates = serializeOrphanSweepDeadlineUpdate(orphanSweepDeadlineUpdates, alarmUpdate, () => generation === orphanSweepDeadlineGeneration, () => chrome.storage.session.set({
+    [ORPHAN_SWEEP_DEADLINE_KEY]: deadlineMs
+  }), () => {
+    if (orphanSweepDeadlineMs !== null) {
+      chrome.alarms.create(ORPHAN_SWEEP_ALARM, {
+        delayInMinutes: orphanSweepAlarmDelayMinutes(orphanSweepDeadlineMs, Date.now())
+      });
+    }
+  });
+  await orphanSweepDeadlineUpdates;
 }
 async function maybeScheduleOrphanSweep(forceDisconnected = false) {
   await recoverableUpdates;
