@@ -390,13 +390,6 @@ function decodeAtomicLocalRelativePath(url: InternalUrl): string {
 			message: `Invalid URL encoding in local:// path: ${url.href}`,
 		});
 	}
-	if (/%[0-9a-f]{2}/i.test(decoded)) {
-		throw new AtomicLocalWriteError({
-			code: "INVALID_INPUT",
-			commitState: "NOT_COMMITTED",
-			message: `Residual URL encoding is not allowed in local:// path: ${url.href}`,
-		});
-	}
 	try {
 		validateRelativePath(decoded);
 	} catch (error) {
@@ -522,7 +515,10 @@ function mapAtomicLocalWriteError(error: unknown): Error {
 	if (isStructuredAtomicLocalWriteError(error)) {
 		return new AtomicLocalWriteError(error);
 	}
-	return error instanceof Error ? error : new Error(String(error));
+	const message = error instanceof Error ? error.message : String(error);
+	const nativeCode = isRecord(error) && typeof error.code === "string" ? error.code : null;
+	const code = nativeCode && ["EACCES", "EPERM", "ELOOP", "ENOTDIR"].includes(nativeCode) ? "UNSAFE_PATH" : "IO";
+	return new AtomicLocalWriteError({ code, commitState: "NOT_COMMITTED", message });
 }
 
 /**
@@ -553,9 +549,8 @@ export async function writeLocalUrlAtomically(
 	const atomicLocalWrite = requireAtomicLocalWriteCapability();
 	const target = parseAtomicLocalTarget(input, invokingOptions);
 	const contentUtf8 = encodeStrictUtf8(content);
-	const nativeRoot = await canonicalizeAtomicLocalRoot(target.absoluteRoot);
-
 	try {
+		const nativeRoot = await canonicalizeAtomicLocalRoot(target.absoluteRoot);
 		const result = await atomicLocalWrite(
 			{
 				absoluteRoot: nativeRoot,

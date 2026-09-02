@@ -50,6 +50,34 @@ describe("writeLocalUrlAtomically", () => {
 			expect(await Bun.file(path.join(staleArtifactsDir, "local", "nested", "trace.md")).exists()).toBe(false);
 		});
 	});
+	it("allows literal percent sequences that resemble URL escapes", async () => {
+		await withTempDir(async tempDir => {
+			const artifactsDir = path.join(tempDir, "artifacts");
+			await writeLocalUrlAtomically("local://report%252F.txt", "literal", {
+				getArtifactsDir: () => artifactsDir,
+				getSessionId: () => "literal-percent",
+			});
+			expect(await fs.readFile(path.join(artifactsDir, "local", "report%2F.txt"), "utf8")).toBe("literal");
+		});
+	});
+
+	it("maps root-preparation path failures to structured pre-commit errors", async () => {
+		if (process.platform === "win32") return;
+		await withTempDir(async tempDir => {
+			const parentFile = path.join(tempDir, "not-a-directory");
+			await fs.writeFile(parentFile, "file");
+			await expect(
+				writeLocalUrlAtomically("local://trace.md", "content", {
+					getArtifactsDir: () => path.join(parentFile, "artifacts"),
+					getSessionId: () => "canonicalization-error",
+				}),
+			).rejects.toMatchObject({
+				name: "AtomicLocalWriteError",
+				code: "UNSAFE_PATH",
+				commitState: "NOT_COMMITTED",
+			});
+		});
+	});
 	it("canonicalizes trusted POSIX symlink ancestors without following a linked local root", async () => {
 		if (process.platform === "win32") return;
 		await withTempDir(async tempDir => {
@@ -333,7 +361,6 @@ describe("writeLocalUrlAtomically", () => {
 				"local://nested//trace.md",
 				"local://nested/%00trace.md",
 				"local://nested%5Ctrace.md",
-				"local://%2525252e%2525252e/outside.md",
 			];
 			if (process.platform === "win32") {
 				inputs.push(
@@ -364,7 +391,6 @@ describe("writeLocalUrlAtomically", () => {
 					"local://trailing%20",
 					"local://%20leading",
 					"local://trailing%2E",
-					"local://%2543ON",
 				);
 			}
 			for (const input of inputs) {
