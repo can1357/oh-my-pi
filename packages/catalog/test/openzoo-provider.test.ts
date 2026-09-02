@@ -69,15 +69,18 @@ const OPENZOO_MODELS_PAYLOAD = {
 			id: "openzoo/auto",
 			object: "model",
 			owned_by: "openzoo",
-			pricing: { prompt: 1e-7, completion: 2e-7, unit: "USD", markup: 1 },
+			// Prompt only: the completion price arrives on a LATER alias row.
+			pricing: { prompt: 1e-7, unit: "USD", markup: 1 },
 			context_length: 128_000_000,
 			max_model_len: 32_768,
 			max_output_tokens: null,
 			top_provider: { context_length: 128_000_000, max_completion_tokens: null, is_moderated: false },
 			display_name: "auto (openzoo)",
 		},
-		{ id: "openzoo-auto", object: "model", owned_by: "openzoo", pricing: { prompt: 1e-7, completion: 2e-7 } },
-		{ id: "auto", object: "model", owned_by: "openzoo", pricing: { prompt: 1e-7, completion: 2e-7 } },
+		// Each later alias row carries only the component the first row omitted,
+		// pinning the field-by-field fold (a whole-object merge would drop these).
+		{ id: "openzoo-auto", object: "model", owned_by: "openzoo", pricing: { completion: 2e-7 } },
+		{ id: "auto", object: "model", owned_by: "openzoo", pricing: { prompt: 1e-7, completion: 2e-7 }, max_output_tokens: 8192 },
 		{ id: "gpt-5.6-auto", object: "model", owned_by: "openzoo", pricing: { prompt: 1e-7, completion: 2e-7 } },
 		{
 			id: "gpt-4o",
@@ -103,13 +106,13 @@ function stubFetch(seen: { urls: string[]; authorization: (string | null)[] }): 
 }
 
 describe("openzoo built-in provider", () => {
-	test("registers a keyless, dynamic-authoritative runtime descriptor defaulting to a real catalog id", () => {
+	test("registers a keyless, dynamic-authoritative runtime descriptor defaulting to the router", () => {
 		const descriptor = PROVIDER_DESCRIPTORS.find(item => item.providerId === "openzoo");
 		expect(descriptor).toBeDefined();
-		expect(descriptor?.defaultModel).toBe("claude-sonnet-4.5");
+		expect(descriptor?.defaultModel).toBe("auto");
 		expect(descriptor?.allowUnauthenticated).toBe(true);
 		expect(descriptor?.dynamicModelsAuthoritative).toBe(true);
-		expect(DEFAULT_MODEL_PER_PROVIDER.openzoo).toBe("claude-sonnet-4.5");
+		expect(DEFAULT_MODEL_PER_PROVIDER.openzoo).toBe("auto");
 		expect(descriptor?.createModelManagerOptions({}).providerId).toBe("openzoo");
 	});
 
@@ -165,10 +168,10 @@ describe("openzoo built-in provider", () => {
 		expect(seen.urls).toEqual(["http://localhost:8402/v1/models"]);
 		expect(seen.authorization).toEqual([null]);
 
-		// Router-alias rows (a stale gateway may still publish them) and
-		// harness-compat twins are both dropped: only real catalog ids surface.
+		// Router aliases collapse to one `auto` entry; harness-compat twins are dropped.
 		expect((models ?? []).map(model => model.id)).toEqual([
 			"anthropic/claude-sonnet-4",
+			"auto",
 			"example-lab/not-in-any-catalog",
 		]);
 
@@ -199,8 +202,18 @@ describe("openzoo built-in provider", () => {
 		expect(unknown?.reasoning).toBe(false);
 		expect(unknown?.input).toEqual(["text"]);
 
-		// Every router-alias spelling is gone, not renamed.
-		expect(models?.some(model => ["auto", "openzoo/auto", "openzoo-auto"].includes(model.id))).toBe(false);
+		// The fold is field-by-field: the first alias row priced only the prompt
+		// side and left maxTokens null; later alias rows filled in the rest.
+		const auto = models?.find(model => model.id === "auto");
+		expect(auto?.name).toBe("Auto");
+		expect(auto?.cost.input).toBeCloseTo(0.1, 9);
+		expect(auto?.cost.output).toBeCloseTo(0.2, 9);
+		expect(auto?.cost.cacheRead).toBe(0);
+		expect(auto?.cost.cacheWrite).toBe(0);
+		expect(auto?.contextWindow).toBe(32_768);
+		expect(auto?.maxTokens).toBe(8_192);
+		// The alias spellings themselves never surface as separate rows.
+		expect(models?.some(model => ["openzoo/auto", "openzoo-auto"].includes(model.id))).toBe(false);
 	});
 
 	test("sends the bearer and honours a configured base URL", async () => {

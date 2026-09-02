@@ -19,12 +19,13 @@ import { getDefaultModelDiscoveryBaseUrl, resolveModelCacheProviderId } from "./
 export const OPENZOO_DEFAULT_BASE_URL = "http://localhost:8402/v1";
 
 /**
- * Router aliases the proxy USED to publish. As of openzoo 0.50.84 the catalog
- * excludes them (routing lives on the backend; `lib/models.js#augmentModelList`
- * upstream asserts `openzoo/auto` is missing), but a stale or hosted gateway
- * may still list them — so discovery drops any row wearing one of these ids
- * rather than surfacing a model the published contract says does not exist.
+ * The router model. The shim mints no auto row of its own, but the backend
+ * catalog publishes it under all three alias spellings, they pass through
+ * `/v1/models`, and the gateway routes them on the wire (contract pinned
+ * upstream at staccDOTsol/openzoo@211f6cf; measured on 0.50.84). OMP exposes
+ * the bare id so the selector reads `openzoo/auto`, not `openzoo/openzoo/auto`.
  */
+export const OPENZOO_AUTO_MODEL_ID = "auto";
 const OPENZOO_AUTO_ALIASES: ReadonlySet<string> = new Set(["openzoo/auto", "openzoo-auto", "auto"]);
 
 export interface OpenzooModelManagerConfig {
@@ -102,7 +103,14 @@ export function mapOpenzooModel(
 	references: ModelReferenceIndex,
 ): ModelSpec<"openai-completions"> | null {
 	if (isOpenzooAutoAlias(defaults.id)) {
-		return null;
+		return {
+			...defaults,
+			id: OPENZOO_AUTO_MODEL_ID,
+			name: "Auto",
+			cost: mapOpenzooCost(entry.pricing),
+			contextWindow: toPositiveNumber(entry.max_model_len, null),
+			maxTokens: toPositiveNumber(entry.max_output_tokens, null),
+		};
 	}
 	if (isOpenzooHarnessTwin(entry)) {
 		return null;
@@ -130,9 +138,11 @@ export function mapOpenzooModel(
 }
 
 /**
- * Per-fetch mapper. Stateless: router-alias rows are dropped in
- * [`mapOpenzooModel`] (the published catalog no longer carries them), so
- * there is nothing to fold across rows anymore.
+ * Per-fetch mapper. Discovery dedupes by mapped id (last row wins), and the
+ * backend publishes the router under several alias spellings, so router rows
+ * fold into one `auto` entry. The fold is FIELD-BY-FIELD: each cost component
+ * and each limit keeps the first nonzero/non-null value seen, so an alias row
+ * that supplies only the number an earlier row omitted still contributes it.
  */
 export function createOpenzooModelMapper(
 	references: ModelReferenceIndex,
@@ -140,7 +150,27 @@ export function createOpenzooModelMapper(
 	entry: OpenAICompatibleModelRecord,
 	defaults: ModelSpec<"openai-completions">,
 ) => ModelSpec<"openai-completions"> | null {
-	return (entry, defaults) => mapOpenzooModel(entry, defaults, references);
+	let auto: ModelSpec<"openai-completions"> | undefined;
+	return (entry, defaults) => {
+		const row = mapOpenzooModel(entry, defaults, references);
+		if (row === null || !isOpenzooAutoAlias(defaults.id)) {
+			return row;
+		}
+		auto = auto
+			? {
+					...auto,
+					cost: {
+						input: auto.cost.input > 0 ? auto.cost.input : row.cost.input,
+						output: auto.cost.output > 0 ? auto.cost.output : row.cost.output,
+						cacheRead: auto.cost.cacheRead > 0 ? auto.cost.cacheRead : row.cost.cacheRead,
+						cacheWrite: auto.cost.cacheWrite > 0 ? auto.cost.cacheWrite : row.cost.cacheWrite,
+					},
+					contextWindow: auto.contextWindow ?? row.contextWindow,
+					maxTokens: auto.maxTokens ?? row.maxTokens,
+				}
+			: row;
+		return auto;
+	};
 }
 
 export function openzooModelManagerOptions(

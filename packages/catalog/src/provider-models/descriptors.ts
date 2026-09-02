@@ -403,9 +403,11 @@ export const CATALOG_PROVIDERS = [
 	},
 	{
 		id: "openzoo",
-		// A real catalog id: openzoo >= 0.50.84 no longer publishes the
-		// `openzoo/auto` router aliases (routing lives on the backend).
-		defaultModel: "claude-sonnet-4.5",
+		// The router. Contract pinned upstream (staccDOTsol/openzoo@211f6cf):
+		// the shim mints no auto row of its own, but the backend catalog
+		// publishes the aliases, they pass through /v1/models, and the wire
+		// routes them — measured on 0.50.84 (auto listed; paid completion 200).
+		defaultModel: "auto",
 		createModelManagerOptions: (config: ModelManagerConfig) => openzooModelManagerOptions(config),
 		// The local proxy is keyless (it pays per call from its own wallet), and
 		// the live `/v1/models` is the whole catalog: nothing is bundled.
