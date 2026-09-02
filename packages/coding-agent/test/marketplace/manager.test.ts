@@ -1,5 +1,6 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs";
+import * as fsPromises from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 
@@ -164,6 +165,41 @@ describe("MarketplaceManager", () => {
 		}
 	});
 
+	it("addMarketplace force repoint → aborts when snapshotting the old cache fails", async () => {
+		const cloneWithMarker = (marker: string) => async (_url: string, targetDir: string) => {
+			fs.mkdirSync(path.join(targetDir, ".claude-plugin"), { recursive: true });
+			fs.writeFileSync(
+				path.join(targetDir, ".claude-plugin", "marketplace.json"),
+				JSON.stringify({ name: "git-marketplace", owner: { name: "x" }, plugins: [] }),
+			);
+			fs.writeFileSync(path.join(targetDir, "MARKER"), marker);
+		};
+		const cloneSpy = spyOn(vcs, "clone").mockImplementation(cloneWithMarker("old"));
+		try {
+			await ctx.manager.addMarketplace("owner/old-repo");
+			const cacheRoot = path.join(ctx.tmpDir, "cache", "marketplaces");
+			const cacheDir = path.join(cacheRoot, "git-marketplace");
+			const registryPath = path.join(ctx.tmpDir, "marketplaces.json");
+			const oldRegistry = fs.readFileSync(registryPath, "utf8");
+
+			cloneSpy.mockImplementation(cloneWithMarker("new"));
+			const copySpy = spyOn(fsPromises, "cp").mockRejectedValueOnce(new Error("snapshot failed"));
+			try {
+				await expect(ctx.manager.addMarketplace("owner/new-repo", { force: true })).rejects.toThrow(
+					'Could not snapshot marketplace "git-marketplace"; nothing was changed.',
+				);
+			} finally {
+				copySpy.mockRestore();
+			}
+
+			expect(fs.readFileSync(path.join(cacheDir, "MARKER"), "utf8")).toBe("old");
+			expect(fs.readFileSync(registryPath, "utf8")).toBe(oldRegistry);
+			expect(fs.readdirSync(cacheRoot)).toEqual(["git-marketplace"]);
+		} finally {
+			cloneSpy.mockRestore();
+		}
+	});
+
 	it("addMarketplace force repoint with git source → restores the old cache when the registry write fails", async () => {
 		const cloneWithMarker = (marker: string) => async (_url: string, targetDir: string) => {
 			fs.mkdirSync(path.join(targetDir, ".claude-plugin"), { recursive: true });
@@ -295,7 +331,7 @@ describe("MarketplaceManager", () => {
 			cloneSpy.mockImplementation(cloneWithMarker("new"));
 			let midFlightMarker: string | undefined;
 			const writeSpy = spyOn(marketplaceRegistry, "writeMarketplacesRegistry").mockImplementation(async () => {
-				const backup = fs.readdirSync(cacheRoot).find(n => n.startsWith("git-marketplace.bak-"));
+				const backup = fs.readdirSync(cacheRoot).find(n => n.startsWith("git-marketplace.bak~"));
 				if (backup) midFlightMarker = fs.readFileSync(path.join(cacheRoot, backup, "MARKER"), "utf8");
 				throw new Error("simulated kill");
 			});
@@ -320,10 +356,10 @@ describe("MarketplaceManager", () => {
 		}
 	});
 
-	it("backup sweep → restores the newest .bak-* snapshot when the final dir is missing", async () => {
+	it("backup sweep → restores the newest .bak~* snapshot when the final dir is missing", async () => {
 		const cacheRoot = path.join(ctx.tmpDir, "cache", "marketplaces");
 		const mkBackup = (ts: number, marker: string) => {
-			const dir = path.join(cacheRoot, `ghost-marketplace.bak-${ts}`);
+			const dir = path.join(cacheRoot, `ghost-marketplace.bak~${ts}`);
 			fs.mkdirSync(dir, { recursive: true });
 			fs.writeFileSync(path.join(dir, "MARKER"), marker);
 		};
@@ -339,19 +375,31 @@ describe("MarketplaceManager", () => {
 		expect(fs.readdirSync(cacheRoot)).toEqual(["ghost-marketplace"]);
 	});
 
-	it("backup sweep → deletes day-old .bak-* snapshots when the final dir exists, keeps young ones", async () => {
+	it("backup sweep → leaves a valid marketplace name ending in .bak-<timestamp> untouched", async () => {
+		const cacheRoot = path.join(ctx.tmpDir, "cache", "marketplaces");
+		const marketplaceDir = path.join(cacheRoot, "foo.bak-123");
+		fs.mkdirSync(marketplaceDir, { recursive: true });
+		fs.writeFileSync(path.join(marketplaceDir, "MARKER"), "real marketplace");
+
+		await ctx.manager.listAvailablePlugins();
+
+		expect(fs.readFileSync(path.join(marketplaceDir, "MARKER"), "utf8")).toBe("real marketplace");
+		expect(fs.existsSync(path.join(cacheRoot, "foo"))).toBeFalse();
+	});
+
+	it("backup sweep → deletes day-old .bak~* snapshots when the final dir exists, keeps young ones", async () => {
 		const cacheRoot = path.join(ctx.tmpDir, "cache", "marketplaces");
 		fs.mkdirSync(path.join(cacheRoot, "live-marketplace"), { recursive: true });
 		const staleTs = Date.now() - 2 * 24 * 60 * 60 * 1000;
 		const youngTs = Date.now();
-		fs.mkdirSync(path.join(cacheRoot, `live-marketplace.bak-${staleTs}`));
-		fs.mkdirSync(path.join(cacheRoot, `live-marketplace.bak-${youngTs}`));
+		fs.mkdirSync(path.join(cacheRoot, `live-marketplace.bak~${staleTs}`));
+		fs.mkdirSync(path.join(cacheRoot, `live-marketplace.bak~${youngTs}`));
 
 		await ctx.manager.listAvailablePlugins();
 
 		const remaining = fs.readdirSync(cacheRoot).sort();
 		// The young snapshot may belong to a repoint in flight elsewhere.
-		expect(remaining).toEqual([`live-marketplace.bak-${youngTs}`, "live-marketplace"].sort());
+		expect(remaining).toEqual([`live-marketplace.bak~${youngTs}`, "live-marketplace"].sort());
 	});
 
 	it("addMarketplace force repoint with url source → restores the old catalog bytes when the registry write fails", async () => {

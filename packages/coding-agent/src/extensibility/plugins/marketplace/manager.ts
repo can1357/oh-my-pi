@@ -94,7 +94,7 @@ export class MarketplaceManager {
 	 * Belt-and-braces recovery for repoints interrupted by a crash, run once
 	 * per manager instance on the first cache-touching entry point.
 	 *
-	 * addMarketplace snapshots the old cache to `<name>.bak-<ts>` (a copy)
+	 * addMarketplace snapshots the old cache to `<name>.bak~<ts>` (a copy)
 	 * before promoting a new clone, so an interrupt anywhere in that window
 	 * leaves either the old cache intact plus a stale snapshot, or the final
 	 * dir missing with the snapshot still on disk. Restore the newest snapshot
@@ -112,7 +112,7 @@ export class MarketplaceManager {
 		const entries = await fs.readdir(cacheDir, { withFileTypes: true }).catch(() => []);
 		const backups = new Map<string, { path: string; ts: number }[]>();
 		for (const entry of entries) {
-			const match = /^(.+)\.bak-(\d+)$/.exec(entry.name);
+			const match = /^(.+)\.bak~(\d+)$/.exec(entry.name);
 			if (!match || !entry.isDirectory()) continue;
 			const list = backups.get(match[1]) ?? [];
 			list.push({ path: path.join(cacheDir, entry.name), ts: Number(match[2]) });
@@ -168,22 +168,21 @@ export class MarketplaceManager {
 
 		// When repointing, the old cache is snapshotted as a copy rather than
 		// renamed aside: the live cache never disappears, so a crash anywhere
-		// below leaves either the old cache intact (plus a stale .bak-* for the
+		// below leaves either the old cache intact (plus a stale .bak~* for the
 		// sweep) or the new cache fully promoted. Any failure below — promote or
 		// catalog/registry write — restores from the copy; otherwise the registry
 		// would still name the old source while discovery reads the new clone.
 		const finalDir = path.join(this.#opts.marketplacesCacheDir, catalog.name);
 		let backupDir: string | undefined;
 		if (clonePath && replacing) {
-			const candidate = `${finalDir}.bak-${Date.now()}`;
+			const candidate = `${finalDir}.bak~${Date.now()}`;
 			try {
 				await fs.cp(finalDir, candidate, { recursive: true });
 				backupDir = candidate;
-			} catch {
-				// No cached directory to preserve (registry entry without a cache),
-				// or a partial copy — either way drop the candidate and proceed
-				// without a snapshot.
+			} catch (err) {
 				await fs.rm(candidate, { recursive: true, force: true }).catch(() => {});
+				await fs.rm(clonePath, { recursive: true, force: true }).catch(() => {});
+				throw new Error(`Could not snapshot marketplace "${catalog.name}"; nothing was changed.`, { cause: err });
 			}
 		}
 
