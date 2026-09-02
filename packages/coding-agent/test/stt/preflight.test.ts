@@ -120,6 +120,52 @@ describe("STTController preflight", () => {
 		expect(createCapture).toHaveBeenCalledTimes(1);
 	});
 
+	it("accepts the legacy positional capture factory", async () => {
+		vi.spyOn(downloader, "isSttModelCached").mockResolvedValue(true);
+		vi.spyOn(downloader, "downloadSttModel").mockResolvedValue();
+		const createCapture = vi.fn().mockReturnValue({ stop: vi.fn() });
+		controller = new STTController(createCapture);
+
+		await controller.toggle(makeEditor(), makeOptions());
+
+		expect(controller.state).toBe("recording");
+		expect(createCapture).toHaveBeenCalledTimes(1);
+	});
+
+	it("clears a trailing partial preview after a committed segment", async () => {
+		vi.spyOn(downloader, "isSttModelCached").mockResolvedValue(true);
+		vi.spyOn(downloader, "downloadSttModel").mockResolvedValue();
+		let onPartial: ((text: string) => void) | undefined;
+		let onSegment: ((text: string) => void) | undefined;
+		const editor = makeEditor();
+		controller = new STTController({
+			createCapture: () => ({ stop: vi.fn() }),
+			createTranscriber: () => ({
+				id: "test",
+				label: "Test",
+				description: "",
+				createSession: async (_context, callbacks) => {
+					onPartial = callbacks.onPartial;
+					onSegment = callbacks.onSegment;
+					return {
+						pushAudio: vi.fn(),
+						stop: vi.fn().mockResolvedValue("committed"),
+						dispose: vi.fn().mockResolvedValue(undefined),
+					};
+				},
+			}),
+		});
+
+		await controller.toggle(editor, makeOptions());
+		onSegment?.("committed");
+		onPartial?.("trailing");
+		await controller.toggle(editor, makeOptions());
+
+		expect(editor.commitVolatileText).toHaveBeenCalledWith("committed");
+		expect(editor.setVolatileText).toHaveBeenCalledWith(" trailing");
+		expect(editor.clearVolatileText).toHaveBeenCalledTimes(1);
+	});
+
 	it("cached model: starts recording without awaiting the model load, warming it in the background", async () => {
 		const isCached = vi.spyOn(downloader, "isSttModelCached").mockResolvedValue(true);
 		// A warmup that never resolves would hang #ensureDeps if it were awaited;

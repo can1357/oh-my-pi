@@ -58,7 +58,11 @@ export class STTController {
 	#committed = false;
 	#utterance = "";
 
-	constructor(options: STTControllerOptions = {}) {
+	constructor(optionsOrCreateCapture: STTControllerOptions | CaptureFactory = {}) {
+		const options =
+			typeof optionsOrCreateCapture === "function"
+				? { createCapture: optionsOrCreateCapture }
+				: optionsOrCreateCapture;
 		this.#createCapture = options.createCapture ?? (onAudio => new AudioCapture(16_000, onAudio));
 		this.#modelRegistry = options.modelRegistry;
 		this.#getSessionId = options.getSessionId ?? (() => undefined);
@@ -196,7 +200,7 @@ export class STTController {
 			this.#committed = true;
 			this.#utterance = prefixed;
 		}
-		if (!finalText) this.#editor?.clearVolatileText();
+		if (this.#committed || !finalText) this.#editor?.clearVolatileText();
 		options.requestRender?.();
 		if (!failed) options.showStatus(this.#committed ? "" : "No speech detected.");
 		if (this.#committed && !failed && this.#editor) this.#applySubmitTrigger(this.#editor);
