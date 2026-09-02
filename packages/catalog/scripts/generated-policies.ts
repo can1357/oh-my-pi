@@ -213,9 +213,6 @@ export function applyOllamaCloudOutputCap(models: ModelSpec<Api>[]): void {
 }
 
 function applyGeneratedModelPolicy(model: ModelSpec<Api>): void {
-	if (model.provider === "merge-gateway") {
-		delete (model as ModelSpec<Api> & { capabilities?: unknown }).capabilities;
-	}
 	if (model.provider === "cursor") {
 		model.input = resolveCursorInput(model.id, model.input);
 	}

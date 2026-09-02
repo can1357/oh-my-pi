@@ -244,6 +244,7 @@ describe("Merge Gateway provider", () => {
 				supportsNamedToolChoice: false,
 			},
 		});
+		expect(mapped).not.toHaveProperty("capabilities");
 	});
 
 	test("exposes only the reasoning effort ladder shared by every eligible route", () => {
