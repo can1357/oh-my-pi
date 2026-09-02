@@ -1,23 +1,31 @@
 import { MCPManager } from "../mcp/manager";
 import type { MCPResourceReadResult } from "../mcp/types";
+import { parseInternalUrl } from "./parse";
 import type { InternalResource, InternalUrl, ProtocolHandler } from "./types";
 
 function escapeRegex(text: string): string {
 	return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-function getUriTemplateMatchScore(
-	uri: string,
-	uriTemplate: string,
-): { literalChars: number; expressionCount: number } | undefined {
+type UriTemplateMatchScore = {
+	literalChars: number;
+	expressionCount: number;
+	expressionContainsSemicolon: boolean;
+};
+
+function getUriTemplateMatchScore(uri: string, uriTemplate: string): UriTemplateMatchScore | undefined {
 	const expressionPattern = /\{[^}]+\}/g;
 	const literalSegments = uriTemplate.split(expressionPattern);
 	const expressionCount = (uriTemplate.match(expressionPattern) ?? []).length;
 	const pattern = literalSegments.map(escapeRegex).join("(.*?)");
-	const regex = new RegExp(`^${pattern}$`);
-	if (!regex.test(uri)) return undefined;
+	const match = new RegExp(`^${pattern}$`).exec(uri);
+	if (!match) return undefined;
 	const literalChars = literalSegments.reduce((total, segment) => total + segment.length, 0);
-	return { literalChars, expressionCount };
+	return {
+		literalChars,
+		expressionCount,
+		expressionContainsSemicolon: match.slice(1).some(value => value.includes(";")),
+	};
 }
 
 function extractResourceUri(url: InternalUrl): string {
@@ -40,7 +48,11 @@ function extractResourceUri(url: InternalUrl): string {
 	return uri;
 }
 
-function resolveTargetServer(mcpManager: MCPManager, uri: string): string | undefined {
+function resolveTargetServer(
+	mcpManager: MCPManager,
+	uri: string,
+	acceptTemplateMatch: (match: UriTemplateMatchScore) => boolean = () => true,
+): string | undefined {
 	const servers = mcpManager.getConnectedServers();
 	for (const name of servers) {
 		const serverResources = mcpManager.getServerResources(name);
@@ -65,7 +77,7 @@ function resolveTargetServer(mcpManager: MCPManager, uri: string): string | unde
 
 		for (const [templateIndex, template] of serverResources.templates.entries()) {
 			const match = getUriTemplateMatchScore(uri, template.uriTemplate);
-			if (!match) continue;
+			if (!match || !acceptTemplateMatch(match)) continue;
 
 			const isBetterMatch =
 				!bestTemplateMatch ||
@@ -90,6 +102,34 @@ function resolveTargetServer(mcpManager: MCPManager, uri: string): string | unde
 	}
 
 	return bestTemplateMatch?.serverName;
+}
+
+/**
+ * Find the longest unambiguous MCP resource at the start of this input.
+ *
+ * Template expressions that capture semicolons are excluded because the same
+ * input may instead be a valid semicolon-delimited Read batch. Prefix
+ * candidates must themselves contain a semicolon so a broad template such as
+ * `attachment://{id}` cannot claim built-in `attachment://1`.
+ */
+export async function findUnambiguousMcpResourceMatch(input: string): Promise<string | undefined> {
+	const mcpManager = MCPManager.instance();
+	if (!mcpManager) return undefined;
+	try {
+		await Promise.allSettled(mcpManager.getConnectedServers().map(name => mcpManager.ensureServerResources(name)));
+		const candidates = [input];
+		for (let delimiter = input.lastIndexOf(";"); delimiter > 0; delimiter = input.lastIndexOf(";", delimiter - 1)) {
+			const prefix = input.slice(0, delimiter);
+			if (prefix.includes(";")) candidates.push(prefix);
+		}
+		for (const candidate of candidates) {
+			const uri = extractResourceUri(parseInternalUrl(candidate));
+			if (resolveTargetServer(mcpManager, uri, match => !match.expressionContainsSemicolon)) return candidate;
+		}
+		return undefined;
+	} catch {
+		return undefined;
+	}
 }
 
 function formatAvailableResources(mcpManager: MCPManager): string {

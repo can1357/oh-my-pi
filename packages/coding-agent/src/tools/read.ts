@@ -30,6 +30,7 @@ import { normalizeToLF } from "../edit/normalize";
 import { isNotebookPath, readEditableNotebookText } from "../edit/notebook";
 import { InternalUrlRouter, resolveLocalUrlToFile, resolveLocalUrlToPath } from "../internal-urls";
 import { type ResolvedArtifactFile, resolveArtifactFile } from "../internal-urls/artifact-protocol";
+import { findUnambiguousMcpResourceMatch } from "../internal-urls/mcp-protocol";
 import { parseInternalUrl } from "../internal-urls/parse";
 import type { InternalUrl } from "../internal-urls/types";
 import readDescription from "../prompts/tools/read.md" with { type: "text" };
@@ -74,8 +75,10 @@ import {
 	expandPath,
 	formatPathRelativeToCwd,
 	type LineRange,
+	isReadableUrlPath,
 	pathTargetsSsh,
 	probeLiteralPathExists,
+	probeLiteralPathOrSelectorBase,
 	resolveReadPath,
 	splitDelimitedPathEntry,
 	splitInternalUrlSel,
@@ -524,6 +527,15 @@ async function streamLinesFromFile(
 
 const IMAGE_ATTACHMENT_URI_REGEX = /^attachment:\/\/[1-9]\d*$/;
 
+function isBatchableReadPseudoUrl(value: string): boolean {
+	if (IMAGE_ATTACHMENT_URI_REGEX.test(value)) return true;
+	try {
+		return parseConflictUri(value) !== null;
+	} catch {
+		return false;
+	}
+}
+
 // Maximum image file size (20MB) - larger images will be rejected to prevent OOM during serialization
 const MAX_IMAGE_SIZE = MAX_IMAGE_INPUT_BYTES;
 
@@ -725,9 +737,15 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 	async #tryReadDelimitedPaths(
 		readPath: string,
 		signal?: AbortSignal,
-		routedUrlPredicate?: (entry: string) => boolean,
+		options: {
+			splitInternalUrlSemicolons?: boolean;
+		} = {},
 	): Promise<AgentToolResult<ReadToolDetails> | null> {
-		const parts = await splitDelimitedPathEntry(readPath, this.session.cwd, { routedUrlPredicate });
+		const parts = await splitDelimitedPathEntry(readPath, this.session.cwd, {
+			splitInternalUrlSemicolons: options.splitInternalUrlSemicolons,
+			rejectExternalOrOpaqueUrlChildren: true,
+			isBatchablePseudoUrl: isBatchableReadPseudoUrl,
+		});
 		if (!parts) return null;
 
 		const notice = `Note: interpreted as ${parts.length} paths: ${parts.join(", ")}`;
@@ -746,8 +764,13 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 
 		for (const part of parts) {
 			try {
-				const result = await this.execute("read-delimited-part", { path: part }, signal);
-				displayReadTargets.push(result.details?.suffixResolution?.to ?? part);
+				const isUrlShapedLocalPath =
+					!part.includes("://") &&
+					isReadableUrlPath(part) &&
+					(await probeLiteralPathOrSelectorBase(part, this.session.cwd)) === "exists";
+				const executionPath = isUrlShapedLocalPath ? path.resolve(this.session.cwd, part) : part;
+				const result = await this.execute("read-delimited-part", { path: executionPath }, signal);
+				displayReadTargets.push(isUrlShapedLocalPath ? part : (result.details?.suffixResolution?.to ?? part));
 				for (const block of result.content) {
 					if (block.type === "text") {
 						appendText(block.text);
@@ -1085,7 +1108,16 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		_toolContext?: AgentToolContext,
 	): Promise<AgentToolResult<ReadToolDetails>> {
 		let { path: readPath } = params;
-		if (readPath.startsWith("file://")) {
+		const isFileUrl = readPath.toLowerCase().startsWith("file://");
+		if (
+			isFileUrl &&
+			readPath.includes(";") &&
+			(await probeLiteralPathOrSelectorBase(readPath, this.session.cwd)) === "missing"
+		) {
+			const delimitedResult = await this.#tryReadDelimitedPaths(readPath, signal);
+			if (delimitedResult) return delimitedResult;
+		}
+		if (isFileUrl) {
 			readPath = expandPath(readPath);
 		}
 
@@ -1100,6 +1132,34 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			}
 			readPath = attachment.sourcePath;
 		}
+		const hasPseudoScheme = readPath.startsWith("attachment://") || readPath.startsWith("conflict://");
+		const mcpPseudoResource =
+			readPath.includes(";") && hasPseudoScheme ? await findUnambiguousMcpResourceMatch(readPath) : undefined;
+		if (mcpPseudoResource === readPath) {
+			return this.#handleInternalUrl(readPath, parseSel(undefined), signal);
+		}
+		if (mcpPseudoResource) {
+			throw new ToolError(
+				`Cannot batch MCP resource "${mcpPseudoResource}" with other targets. Issue separate sibling Read calls.`,
+			);
+		}
+		if (readPath.startsWith("attachment://") && readPath.includes(";")) {
+			const firstTarget = readPath.slice(0, readPath.indexOf(";"));
+			if (!isBatchableReadPseudoUrl(firstTarget)) {
+				return this.#handleInternalUrl(readPath, parseSel(undefined), signal);
+			}
+			const delimitedResult = await this.#tryReadDelimitedPaths(readPath, signal);
+			if (delimitedResult) return delimitedResult;
+		}
+
+		if (readPath.startsWith("conflict://") && readPath.includes(";")) {
+			const firstTarget = readPath.slice(0, readPath.indexOf(";"));
+			if (!isBatchableReadPseudoUrl(firstTarget)) {
+				return this.#handleInternalUrl(readPath, parseSel(undefined), signal);
+			}
+			const delimitedResult = await this.#tryReadDelimitedPaths(readPath, signal);
+			if (delimitedResult) return delimitedResult;
+		}
 
 		const conflictUri = parseConflictUri(readPath);
 		if (conflictUri) {
@@ -1111,6 +1171,17 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			return this.#readConflictRegion(conflictUri.id, conflictUri.scope);
 		}
 		const displayMode = resolveFileDisplayMode(this.session);
+		if (readPath.includes(";")) {
+			const firstTarget = readPath.slice(0, readPath.indexOf(";"));
+			const startsWithUrlShapedLocalPath =
+				!firstTarget.includes("://") &&
+				isReadableUrlPath(firstTarget) &&
+				(await probeLiteralPathOrSelectorBase(firstTarget, this.session.cwd)) === "exists";
+			if (startsWithUrlShapedLocalPath) {
+				const delimitedResult = await this.#tryReadDelimitedPaths(readPath, signal);
+				if (delimitedResult) return delimitedResult;
+			}
+		}
 
 		const parsedUrlTarget = parseReadUrlTarget(readPath);
 		if (parsedUrlTarget) {
@@ -1148,16 +1219,25 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			return executeReadUrl(this.session, { path: parsedUrlTarget.path, raw: urlRaw }, signal);
 		}
 
-		// Handle native OMP URLs and custom-scheme resources advertised by MCP servers.
+		// MCP resource URIs are opaque and may contain literal semicolons. Route
+		// them exactly before interpreting semicolons as the Read batch delimiter.
 		const internalRouter = InternalUrlRouter.instance();
-		const delimitedInternalResult = internalRouter.canResolve(readPath)
-			? await this.#tryReadDelimitedPaths(readPath, signal, entry => internalRouter.canResolve(entry))
+		const canResolveInternal = internalRouter.canResolve(readPath);
+		const isOpaqueMcpResource =
+			readPath.toLowerCase().startsWith("mcp://") || (canResolveInternal && !internalRouter.canHandle(readPath));
+		if (isOpaqueMcpResource) {
+			return this.#handleInternalUrl(readPath, parseSel(undefined), signal);
+		}
+		const delimitedInternalResult = canResolveInternal
+			? await this.#tryReadDelimitedPaths(readPath, signal, {
+					splitInternalUrlSemicolons: true,
+				})
 			: null;
 		if (delimitedInternalResult) return delimitedInternalResult;
 
 		// Peel malformed selectors through the internal-URL-aware parser before routing.
 		let promotedSelector: string | undefined;
-		if (internalRouter.canResolve(readPath)) {
+		if (canResolveInternal) {
 			const internalTarget = splitInternalUrlSel(readPath);
 			const parsed = parseSel(internalTarget.sel);
 			if (internalTarget.sel !== undefined && parsed.kind === "none") {

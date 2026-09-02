@@ -12,7 +12,7 @@ import {
 	windowsPathToWslMount,
 } from "@oh-my-pi/pi-utils";
 import type { Skill } from "../extensibility/skills";
-import { InternalUrlRouter, type LocalProtocolOptions } from "../internal-urls";
+import { extractUriScheme, InternalUrlRouter, type LocalProtocolOptions } from "../internal-urls";
 import { ToolAbortError, ToolError } from "./tool-errors";
 
 const UNICODE_SPACES = /[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g;
@@ -381,6 +381,17 @@ export async function probeLiteralPathExists(filePath: string, cwd: string): Pro
 		if (isEnoent(err) || isEnotdir(err) || hasFsCode(err, "ENAMETOOLONG")) return "missing";
 		return "unknown";
 	}
+}
+
+/** Probe the literal target, then its selector-free base when it has a valid selector. */
+export async function probeLiteralPathOrSelectorBase(
+	filePath: string,
+	cwd: string,
+): Promise<"exists" | "missing" | "unknown"> {
+	const literal = await probeLiteralPathExists(filePath, cwd);
+	if (literal !== "missing") return literal;
+	const selected = splitPathAndSel(filePath);
+	return selected.sel === undefined ? "missing" : probeLiteralPathExists(selected.path, cwd);
 }
 
 /**
@@ -935,17 +946,55 @@ async function delimitedPathPartResolves(entry: string, cwd: string, splitter: P
  */
 type DelimitedResolveRequirement = "all" | "some" | "none";
 
+async function hasLiteralSemicolonFileUrl(rawParts: readonly string[], cwd: string): Promise<boolean> {
+	for (const [index, rawPart] of rawParts.entries()) {
+		const firstPart = normalizePathLikeInput(rawPart);
+		if (extractUriScheme(firstPart) !== "file") continue;
+		let candidate = firstPart;
+		for (let tailIndex = index + 1; tailIndex < rawParts.length; tailIndex++) {
+			candidate += `;${normalizePathLikeInput(rawParts[tailIndex] ?? "")}`;
+			if ((await probeLiteralPathOrSelectorBase(candidate, cwd)) !== "missing") return true;
+		}
+	}
+	return false;
+}
+
 async function tryDelimitedPathSplit(
 	entry: string,
 	cwd: string,
 	splitter: PathEntrySplitter,
 	mode: DelimitedPathSplitMode,
 	requirement: DelimitedResolveRequirement,
+	rejectExternalOrOpaqueUrlChildren: boolean,
+	isBatchablePseudoUrl: ((value: string) => boolean) | undefined,
 ): Promise<string[] | null> {
 	const rawParts = splitTopLevelDelimitedPath(entry, mode);
 	if (rawParts.length < 2) return null;
 
+	if (rejectExternalOrOpaqueUrlChildren && (await hasLiteralSemicolonFileUrl(rawParts, cwd))) return null;
 	const parts = rawParts.map(normalizePathLikeInput).filter(part => part.length > 0);
+	if (rejectExternalOrOpaqueUrlChildren) {
+		const internalRouter = InternalUrlRouter.instance();
+		// Unregistered schemes may be MCP-advertised opaque resources whose payload
+		// includes later semicolons. Reject the tentative batch rather than corrupting
+		// the URI, while preserving registered handlers and existing POSIX names that
+		// merely resemble scheme-less or opaque URLs.
+		for (const part of parts) {
+			const readableUrl = isReadableUrlPath(part);
+			const scheme = extractUriScheme(part);
+			if (!readableUrl && scheme === undefined) continue;
+			if (!part.includes("://") && (await probeLiteralPathOrSelectorBase(part, cwd)) !== "missing") continue;
+			if (readableUrl || scheme === "mcp") return null;
+			if (scheme === "attachment" || scheme === "conflict") {
+				if (isBatchablePseudoUrl?.(part)) continue;
+				return null;
+			}
+			if (scheme === "file" || (scheme !== undefined && INTERNAL_SCHEMES_WITH_SELECTORS[scheme] === true)) {
+				continue;
+			}
+			if (!internalRouter.canHandle(part)) return null;
+		}
+	}
 	if (parts.length === 0) return null;
 	if (parts.length < 2 && rawParts.length === parts.length) return null;
 
@@ -961,23 +1010,36 @@ async function tryDelimitedPathSplit(
  * Split one path-like entry whose multiple targets were flattened into one
  * string. Existing paths are kept intact, so real filenames containing spaces,
  * commas, or semicolons win over delimiter recovery.
+ *
+ * Internal URLs preserve raw semicolons unless their caller explicitly enables
+ * the documented semicolon-batch grammar. Literal internal-URL semicolons must
+ * remain percent-encoded while splitting occurs.
  */
 export async function splitDelimitedPathEntry(
 	entry: string,
 	cwd: string,
 	options: {
 		splitter?: PathEntrySplitter;
-		routedUrlPredicate?: (entry: string) => boolean;
+		splitInternalUrlSemicolons?: boolean;
+		rejectExternalOrOpaqueUrlChildren?: boolean;
+		isBatchablePseudoUrl?: (value: string) => boolean;
 	} = {},
 ): Promise<string[] | null> {
 	const normalizedEntry = normalizePathLikeInput(entry);
 	if (!hasTopLevelPathDelimiter(normalizedEntry)) return null;
 	const splitter = options.splitter ?? parseSearchPath;
-	if (options.routedUrlPredicate?.(normalizedEntry)) {
-		const parts = await tryDelimitedPathSplit(normalizedEntry, cwd, splitter, "semicolon", "none");
-		return parts?.every(options.routedUrlPredicate) ? parts : null;
+	if (isInternalUrlPath(normalizedEntry)) {
+		if (!options.splitInternalUrlSemicolons) return null;
+		return tryDelimitedPathSplit(
+			normalizedEntry,
+			cwd,
+			splitter,
+			"semicolon",
+			"none",
+			options.rejectExternalOrOpaqueUrlChildren ?? false,
+			options.isBatchablePseudoUrl,
+		);
 	}
-	if (isInternalUrlPath(normalizedEntry)) return null;
 	// A real POSIX file may contain the delimiter and a selector-shaped tail
 	// (`a;b:1-2`, `a b:1-2`). Preserve the raw entry whenever the full literal
 	// resolves — or is only ambiguous — so downstream literal-preferring
@@ -990,10 +1052,42 @@ export async function splitDelimitedPathEntry(
 	}
 
 	return (
-		(await tryDelimitedPathSplit(normalizedEntry, cwd, splitter, "semicolon", "none")) ??
-		(await tryDelimitedPathSplit(normalizedEntry, cwd, splitter, "comma", "some")) ??
-		(await tryDelimitedPathSplit(normalizedEntry, cwd, splitter, "whitespace", "all")) ??
-		(await tryDelimitedPathSplit(normalizedEntry, cwd, splitter, "mixed", "all"))
+		(await tryDelimitedPathSplit(
+			normalizedEntry,
+			cwd,
+			splitter,
+			"semicolon",
+			"none",
+			options.rejectExternalOrOpaqueUrlChildren ?? false,
+			options.isBatchablePseudoUrl,
+		)) ??
+		(await tryDelimitedPathSplit(
+			normalizedEntry,
+			cwd,
+			splitter,
+			"comma",
+			"some",
+			options.rejectExternalOrOpaqueUrlChildren ?? false,
+			options.isBatchablePseudoUrl,
+		)) ??
+		(await tryDelimitedPathSplit(
+			normalizedEntry,
+			cwd,
+			splitter,
+			"whitespace",
+			"all",
+			options.rejectExternalOrOpaqueUrlChildren ?? false,
+			options.isBatchablePseudoUrl,
+		)) ??
+		(await tryDelimitedPathSplit(
+			normalizedEntry,
+			cwd,
+			splitter,
+			"mixed",
+			"all",
+			options.rejectExternalOrOpaqueUrlChildren ?? false,
+			options.isBatchablePseudoUrl,
+		))
 	);
 }
 

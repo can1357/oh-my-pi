@@ -2,6 +2,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import * as url from "node:url";
 import type { RenderResultOptions } from "@oh-my-pi/pi-coding-agent/extensibility/custom-tools/types";
 import { getThemeByName, initTheme, type Theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import {
@@ -40,9 +41,11 @@ describe("delimited path expansion", () => {
 		await fs.mkdir(path.join(tempDir, "packages"), { recursive: true });
 		await fs.mkdir(path.join(tempDir, "src"), { recursive: true });
 		await fs.mkdir(path.join(tempDir, "folder with spaces"), { recursive: true });
+		await fs.mkdir(path.join(tempDir, "www.example"), { recursive: true });
 		await Bun.write(path.join(tempDir, "apps", "a.txt"), "apps\n");
 		await Bun.write(path.join(tempDir, "packages", "b.txt"), "packages\n");
 		await Bun.write(path.join(tempDir, "folder with spaces", "file.txt"), "spaces\n");
+		await Bun.write(path.join(tempDir, "notes:detail"), "colon\n");
 	});
 
 	afterEach(async () => {
@@ -60,6 +63,42 @@ describe("delimited path expansion", () => {
 		]);
 		expect(await splitDelimitedPathEntry("apps/a.txt packages/b.txt", tempDir)).toEqual([
 			"apps/a.txt",
+			"packages/b.txt",
+		]);
+	});
+
+	it("rejects external or opaque URL children from every semicolon batch route", async () => {
+		const options = {
+			rejectExternalOrOpaqueUrlChildren: true,
+			splitInternalUrlSemicolons: true,
+		};
+		expect(await splitDelimitedPathEntry("artifact://abc123;https://example.com/a;b", tempDir, options)).toBeNull();
+		expect(await splitDelimitedPathEntry("conflict://1;https://example.com/a", tempDir, options)).toBeNull();
+		expect(await splitDelimitedPathEntry("artifact://abc123;catalog://items;active", tempDir, options)).toBeNull();
+		expect(await splitDelimitedPathEntry("artifact://abc123;urn:example;view", tempDir, options)).toBeNull();
+		const filePath = path.join(tempDir, "nested;file.txt");
+		await Bun.write(filePath, "nested\n");
+		const fileUrl = url.pathToFileURL(filePath).href;
+		expect(await splitDelimitedPathEntry(`artifact://abc123;${fileUrl}`, tempDir, options)).toBeNull();
+	});
+
+	it("keeps registered device URIs batchable", async () => {
+		expect(
+			await splitDelimitedPathEntry("xd://resolve;packages/b.txt", tempDir, {
+				splitInternalUrlSemicolons: true,
+				rejectExternalOrOpaqueUrlChildren: true,
+			}),
+		).toEqual(["xd://resolve", "packages/b.txt"]);
+	});
+
+	it("keeps URL-shaped existing local children batchable", async () => {
+		const options = { rejectExternalOrOpaqueUrlChildren: true };
+		expect(await splitDelimitedPathEntry("www.example;packages/b.txt", tempDir, options)).toEqual([
+			"www.example",
+			"packages/b.txt",
+		]);
+		expect(await splitDelimitedPathEntry("notes:detail;packages/b.txt", tempDir, options)).toEqual([
+			"notes:detail",
 			"packages/b.txt",
 		]);
 	});

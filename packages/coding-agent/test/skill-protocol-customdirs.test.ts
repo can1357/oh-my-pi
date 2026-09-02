@@ -94,6 +94,56 @@ describe("skill:// resolution honors skills.customDirectories (#7190)", () => {
 		expect(historyText).toContain("Could not read history://missing-second:1-3");
 	});
 
+	it("distinguishes mixed target delimiters from encoded internal URL semicolons", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-mixed-delimited-skills-"));
+		tempDirs.push(tempDir);
+		const skillDir = path.join(tempDir, "mixed-skill");
+		await fs.mkdir(skillDir, { recursive: true });
+		await Bun.write(path.join(skillDir, "SKILL.md"), makeSkillMd("mixed-skill", tempDir));
+		await Bun.write(path.join(skillDir, "reference;guide.md"), "encoded semicolon resource\n");
+
+		const localFile = path.join(tempDir, "local.txt");
+		await Bun.write(localFile, "local file content\n");
+
+		const { skills } = await loadSkills({
+			...ALL_DEFAULT_SOURCES_DISABLED,
+			customDirectories: [tempDir],
+		});
+		setActiveSkills(skills);
+
+		const session: ToolSession = {
+			cwd: tempDir,
+			hasUI: false,
+			getSessionFile: () => null,
+			getSessionSpawns: () => "*",
+			settings: Settings.isolated(),
+		};
+		const readTool = new ReadTool(session);
+		const mixedTargets = [
+			["read-mixed-internal-first", `skill://mixed-skill;${localFile}`],
+			["read-mixed-file-first", `${localFile};skill://mixed-skill`],
+		] as const;
+
+		for (const [toolCallId, readPath] of mixedTargets) {
+			const result = await readTool.execute(toolCallId, { path: readPath });
+			const text = result.content.flatMap(block => (block.type === "text" ? [block.text] : [])).join("\n");
+
+			expect(text).toContain("Note: interpreted as 2 paths:");
+			expect(text).toContain("mixed-skill skill.");
+			expect(text).toContain("local file content");
+		}
+
+		const encodedResult = await readTool.execute("read-encoded-internal-semicolon", {
+			path: "skill://mixed-skill/reference%3Bguide.md",
+		});
+		const encodedText = encodedResult.content
+			.flatMap(block => (block.type === "text" ? [block.text] : []))
+			.join("\n");
+
+		expect(encodedText).toContain("encoded semicolon resource");
+		expect(encodedText).not.toContain("Note: interpreted as");
+	});
+
 	it("keeps first-wins across multiple custom directories", async () => {
 		const dirA = await fs.mkdtemp(path.join(os.tmpdir(), "pi-custom-a-"));
 		tempDirs.push(dirA);

@@ -143,6 +143,21 @@ describe("read surfaces conflicts as a warning footer", () => {
 		expect(session.conflictHistory?.get(2)?.oursLines).toEqual(["b-ours"]);
 	});
 
+	it("reads several registered conflicts from one semicolon-delimited path", async () => {
+		const filePath = path.join(tempDir, "batched-conflicts.ts");
+		await Bun.write(filePath, TWO_BLOCKS);
+		const session = createTestSession(tempDir);
+		const read = await getTool(session, "read");
+
+		await read.execute("register-batched-conflicts", { path: "batched-conflicts.ts:conflicts" });
+		const result = await read.execute("read-batched-conflicts", { path: "conflict://1;conflict://2" });
+		const text = getText(result);
+		expect(text).toContain("Note: interpreted as 2 paths: conflict://1, conflict://2");
+		expect(text).toContain("a-ours");
+		expect(text).toContain("b-ours");
+		expect(result.details?.displayReadTargets).toEqual(["conflict://1", "conflict://2"]);
+	});
+
 	it("emits no warning on clean files and does not touch the history", async () => {
 		const filePath = path.join(tempDir, "clean.ts");
 		await Bun.write(filePath, "const a = 1;\nconst b = 2;\n");
