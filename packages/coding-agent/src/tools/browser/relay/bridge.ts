@@ -3528,10 +3528,9 @@ export class RelayBridge {
 			this.#assertExtensionCurrent(expectedExt);
 			const runImmediately =
 				script.params?.runImmediately === true &&
-				(runImmediatePreloads ||
-					(recoveryLoaderId !== undefined &&
-						currentLoaderId !== undefined &&
-						recoveryLoaderId !== currentLoaderId));
+				(recoveryLoaderId !== undefined && currentLoaderId !== undefined
+					? recoveryLoaderId !== currentLoaderId
+					: runImmediatePreloads);
 			const replayParams =
 				script.params &&
 				typeof script.params === "object" &&

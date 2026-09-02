@@ -70,7 +70,7 @@ function serializeRecoverableStateUpdate(previousUpdate, immediateWrite, isCurre
   return Promise.allSettled([previousUpdate, immediateWrite]).then(async () => {
     if (!isCurrent())
       return;
-    await persistCurrent().catch(() => {});
+    await persistCurrent();
   });
 }
 function restoreRecoverableState(target, storedIds, mutatedTabIds) {
@@ -587,7 +587,15 @@ async function attachTabOperation(tabId, socket) {
     }));
     return;
   }
-  await trackAttachments([tabId]);
+  try {
+    await trackAttachments([tabId]);
+  } catch (error) {
+    guardDetachments.add(tabId);
+    await trackPendingDetach(chrome.debugger.detach({ tabId })).catch(() => {
+      guardDetachments.delete(tabId);
+    });
+    throw error;
+  }
   if (canceledPendingAttachTabs.delete(tabId)) {
     attachmentGuard.untrack(tabId);
     await forgetRecoverable(tabId);

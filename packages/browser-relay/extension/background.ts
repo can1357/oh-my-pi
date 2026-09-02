@@ -763,7 +763,15 @@ async function attachTabOperation(
 		);
 		return;
 	}
-	await trackAttachments([tabId]);
+	try {
+		await trackAttachments([tabId]);
+	} catch (error) {
+		guardDetachments.add(tabId);
+		await trackPendingDetach(chrome.debugger.detach({ tabId })).catch(() => {
+			guardDetachments.delete(tabId);
+		});
+		throw error;
+	}
 	if (canceledPendingAttachTabs.delete(tabId)) {
 		// onDetach ran while the recovery marker was being persisted. Undo the
 		// delayed track and fail the RPC: returning success would make the bridge
