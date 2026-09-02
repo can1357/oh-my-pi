@@ -93,3 +93,6 @@ packages/coding-agent/bench/boot-baseline.json
 /.bazelrc.user
 
 .parity/
+
+# Pack-time copy of file: deps (see bundleExternalFileDependencies)
+packages/coding-agent/vendor/

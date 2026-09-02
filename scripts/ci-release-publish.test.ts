@@ -3,6 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import {
+	applyPublishBin,
 	legalPayloadFiles,
 	npmDistTag,
 	packages,
@@ -134,5 +135,25 @@ describe("published manifest topology", () => {
 				import: "./src/ar/index.ts",
 			},
 		});
+	});
+});
+
+describe("published file: vendor bundling", () => {
+	it("retargets coding-agent thinking-orbs into the packed package", async () => {
+		const pkg = packages.find(entry => entry.dir === "packages/coding-agent");
+		if (!pkg) throw new Error("coding-agent missing from publish set");
+
+		const manifest = await rewriteManifest(pkg, false);
+		const dependencies = manifest.dependencies as Record<string, string>;
+		expect(dependencies["thinking-orbs"]).toBe("file:./vendor/thinking-orbs");
+		expect(manifest.files).toContain("vendor/thinking-orbs");
+	});
+
+	it("applyPublishBin also bundles thinking-orbs for tarball smoke", async () => {
+		const manifest = await applyPublishBin("packages/coding-agent", false);
+		const dependencies = manifest.dependencies as Record<string, string>;
+		expect(manifest.bin).toEqual({ omp: "dist/cli.js" });
+		expect(dependencies["thinking-orbs"]).toBe("file:./vendor/thinking-orbs");
+		expect(manifest.files).toContain("vendor/thinking-orbs");
 	});
 });
