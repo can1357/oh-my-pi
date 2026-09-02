@@ -66,6 +66,13 @@ function consumeRelayInitiatedDetach(markedTabs, tabId, reason) {
 function shouldRetrackAfterDetachFailure(targets, tabId) {
   return targets === null || targets.some((target) => target.tabId === tabId && target.attached);
 }
+function serializeRecoverableStateUpdate(previousUpdate, immediateWrite, isCurrent, persistCurrent) {
+  return Promise.allSettled([previousUpdate, immediateWrite]).then(async () => {
+    if (!isCurrent())
+      return;
+    await persistCurrent().catch(() => {});
+  });
+}
 function snapshotAttachmentState(epochs, tabIds) {
   const snapshot = new Map;
   for (const tabId of tabIds)
@@ -159,6 +166,7 @@ var recoverableReady = chrome.storage.session.get({ [RECOVERABLE_TAB_IDS_KEY]: [
     orphanSweepDeadlineMs = deadline;
 }).catch(() => {});
 var recoverableUpdates = recoverableReady;
+var recoverableUpdateGeneration = 0;
 var orphanSweepDeadlineUpdates = recoverableReady;
 function trackPendingDetach(promise) {
   pendingOperationGeneration++;
@@ -170,10 +178,13 @@ function trackPendingDetach(promise) {
   return tracked;
 }
 function updateRecoverable(update) {
-  recoverableUpdates = recoverableUpdates.then(async () => {
-    update();
-    await chrome.storage.session.set({ [RECOVERABLE_TAB_IDS_KEY]: [...recoverableTabIds] }).catch(() => {});
+  update();
+  const generation = ++recoverableUpdateGeneration;
+  const persistCurrent = () => chrome.storage.session.set({
+    [RECOVERABLE_TAB_IDS_KEY]: [...recoverableTabIds]
   });
+  const immediateWrite = persistCurrent().catch(() => {});
+  recoverableUpdates = serializeRecoverableStateUpdate(recoverableUpdates, immediateWrite, () => generation === recoverableUpdateGeneration, persistCurrent);
   return recoverableUpdates;
 }
 function rememberRecoverable(freshTabIds) {

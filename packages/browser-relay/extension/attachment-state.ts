@@ -23,6 +23,18 @@ export function shouldRetrackAfterDetachFailure(
 	);
 }
 
+export function serializeRecoverableStateUpdate(
+	previousUpdate: Promise<unknown>,
+	immediateWrite: Promise<unknown>,
+	isCurrent: () => boolean,
+	persistCurrent: () => Promise<unknown>,
+): Promise<void> {
+	return Promise.allSettled([previousUpdate, immediateWrite]).then(async () => {
+		if (!isCurrent()) return;
+		await persistCurrent().catch(() => {});
+	});
+}
+
 export function snapshotAttachmentState(epochs: Map<number, number>, tabIds: number[]): Map<number, number> {
 	const snapshot = new Map<number, number>();
 	for (const tabId of tabIds) snapshot.set(tabId, epochs.get(tabId) ?? 0);

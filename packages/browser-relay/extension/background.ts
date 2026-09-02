@@ -19,6 +19,7 @@ import {
 	consumeRelayInitiatedDetach,
 	filterFreshAttachmentState,
 	noteAttachmentStateChange,
+	serializeRecoverableStateUpdate,
 	shouldRetrackAfterDetachFailure,
 	snapshotAttachmentState,
 } from "./attachment-state";
@@ -91,6 +92,7 @@ const recoverableReady = chrome.storage.session
 	})
 	.catch(() => {});
 let recoverableUpdates: Promise<void> = recoverableReady;
+let recoverableUpdateGeneration = 0;
 let orphanSweepDeadlineUpdates: Promise<void> = recoverableReady;
 
 function trackPendingDetach<T>(promise: Promise<T>): Promise<T> {
@@ -104,12 +106,24 @@ function trackPendingDetach<T>(promise: Promise<T>): Promise<T> {
 }
 
 function updateRecoverable(update: () => void): Promise<void> {
-	recoverableUpdates = recoverableUpdates.then(async () => {
-		update();
-		await chrome.storage.session
-			.set({ [RECOVERABLE_TAB_IDS_KEY]: [...recoverableTabIds] })
-			.catch(() => {});
-	});
+	// Apply ownership changes before this event handler returns. In particular, a
+	// user detach must disappear from the next hello even when an older storage
+	// operation is still pending. Start the write immediately so MV3 also sees a
+	// live extension API operation, then serialize a final current-state write to
+	// repair any older write that happened to settle out of order.
+	update();
+	const generation = ++recoverableUpdateGeneration;
+	const persistCurrent = (): Promise<unknown> =>
+		chrome.storage.session.set({
+			[RECOVERABLE_TAB_IDS_KEY]: [...recoverableTabIds],
+		});
+	const immediateWrite = persistCurrent().catch(() => {});
+	recoverableUpdates = serializeRecoverableStateUpdate(
+		recoverableUpdates,
+		immediateWrite,
+		() => generation === recoverableUpdateGeneration,
+		persistCurrent,
+	);
 	return recoverableUpdates;
 }
 

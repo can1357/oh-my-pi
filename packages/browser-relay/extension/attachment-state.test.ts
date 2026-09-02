@@ -3,6 +3,7 @@ import {
 	consumeRelayInitiatedDetach,
 	filterFreshAttachmentState,
 	noteAttachmentStateChange,
+	serializeRecoverableStateUpdate,
 	shouldRetrackAfterDetachFailure,
 	snapshotAttachmentState,
 } from "./attachment-state";
@@ -59,5 +60,35 @@ describe("attachment-state", () => {
 		expect(
 			shouldRetrackAfterDetachFailure([{ tabId: 1, attached: false }], 1),
 		).toBe(false);
+	});
+
+	it("repairs an older recoverable-state write that settles after a user detach", async () => {
+		const firstWrite = Promise.withResolvers<void>();
+		const detachedWrite = Promise.withResolvers<void>();
+		const persisted: number[][] = [];
+		let generation = 1;
+		let pending = serializeRecoverableStateUpdate(
+			Promise.resolve(),
+			firstWrite.promise,
+			() => generation === 1,
+			async () => {
+				persisted.push([1]);
+			},
+		);
+
+		generation = 2;
+		pending = serializeRecoverableStateUpdate(
+			pending,
+			detachedWrite.promise,
+			() => generation === 2,
+			async () => {
+				persisted.push([]);
+			},
+		);
+		detachedWrite.resolve();
+		firstWrite.resolve();
+		await pending;
+
+		expect(persisted).toEqual([[]]);
 	});
 });
