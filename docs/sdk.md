@@ -23,6 +23,7 @@ The package root, `@oh-my-pi/pi-coding-agent`, is the complete embedding surface
 Import these core embedding APIs from the package root:
 
 - `createAgentSession`
+- `initializeExtensions` (required for direct-SDK `session_start`/`resources_discover` — see [Extension lifecycle events](#extension-lifecycle-events-session_start--resources_discover))
 - `SessionManager`
 - `Settings`
 - `AuthStorage`
@@ -322,6 +323,29 @@ const { session } = await createAgentSession({
   session-owning process. Never pass loaded extension instances from a parent
   to another session; use `preloadedExtensionPaths` so each session gets its
   own `ExtensionAPI` binding.
+
+### Extension lifecycle events (`session_start` / `resources_discover`)
+
+`createAgentSession()` loads extensions and wires the per-tool approval gate, but it does **not** emit `session_start` or `resources_discover` — every built-in mode (print, RPC, ACP, interactive, task) emits those itself right after construction, at a point specific to that mode's own initialization order.
+
+A direct SDK embedder that skips every built-in mode (calling `session.prompt()` right after `createAgentSession()`) never triggers those events: extension handlers registered for `session_start`/`resources_discover` simply never run, and extension-contributed skill directories (`skillPaths` returned from `resources_discover`) never reach the session.
+
+Call `initializeExtensions(session, options)` once, after `createAgentSession()` and before the first `session.prompt()`, to opt in:
+
+```ts
+import { createAgentSession, initializeExtensions } from "@oh-my-pi/pi-coding-agent";
+
+const { session } = await createAgentSession();
+
+await initializeExtensions(session, {
+  reportSendError: (action, error) => console.error(action, error),
+  reportRuntimeError: (error) => console.error(error),
+});
+
+await session.prompt("Summarize this repository in 3 bullets.");
+```
+
+This wires the runner's action handlers, emits `session_start`, then emits `resources_discover` (reason `"startup"`) and folds any returned `skillPaths` into the session's skill snapshot. It is a no-op when the session was constructed without an extension runner (for example a `restrictToolNames` session). Calling it more than once per session re-runs `session_start`, which violates the once-per-session contract — call it exactly once.
 
 ### Runtime tool set changes
 
