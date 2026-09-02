@@ -33,33 +33,37 @@ use windows_sys::{
 			ERROR_ACCESS_DENIED, ERROR_DIR_NOT_EMPTY, ERROR_DIRECTORY, ERROR_FILE_NOT_FOUND,
 			ERROR_INSUFFICIENT_BUFFER, ERROR_INVALID_NAME, ERROR_INVALID_PARAMETER, ERROR_LOCK_FAILED,
 			ERROR_LOCK_VIOLATION, ERROR_NOT_SAME_DEVICE, ERROR_NOT_SUPPORTED, ERROR_PATH_NOT_FOUND,
-			ERROR_SHARING_VIOLATION, GetLastError, HANDLE, LocalFree, NTSTATUS, OBJ_CASE_INSENSITIVE,
-			OBJ_DONT_REPARSE, RtlNtStatusToDosError, STATUS_FILE_IS_A_DIRECTORY,
-			STATUS_NOT_A_DIRECTORY, STATUS_OBJECT_NAME_COLLISION, STATUS_OBJECT_NAME_NOT_FOUND,
-			STATUS_OBJECT_PATH_NOT_FOUND, STATUS_REPARSE_POINT_ENCOUNTERED, STATUS_STOPPED_ON_SYMLINK,
-			UNICODE_STRING,
+			ERROR_SHARING_VIOLATION, GENERIC_ALL, GENERIC_WRITE, GetLastError, HANDLE, LocalFree,
+			NTSTATUS, OBJ_CASE_INSENSITIVE, OBJ_DONT_REPARSE, RtlNtStatusToDosError,
+			STATUS_FILE_IS_A_DIRECTORY, STATUS_NOT_A_DIRECTORY, STATUS_OBJECT_NAME_COLLISION,
+			STATUS_OBJECT_NAME_NOT_FOUND, STATUS_OBJECT_PATH_NOT_FOUND,
+			STATUS_REPARSE_POINT_ENCOUNTERED, STATUS_STOPPED_ON_SYMLINK, UNICODE_STRING,
 		},
 		Security::{
-			ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, ACL_REVISION, AddAccessAllowedAceEx,
-			Authorization::GetSecurityInfo, CONTAINER_INHERIT_ACE, CreateWellKnownSid,
-			DACL_SECURITY_INFORMATION, EqualSid, GetAce, GetLengthSid, GetSecurityDescriptorControl,
-			GetTokenInformation, INHERITED_ACE, InitializeAcl, InitializeSecurityDescriptor,
-			OBJECT_INHERIT_ACE, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID,
-			SE_DACL_PROTECTED, SECURITY_DESCRIPTOR, SetSecurityDescriptorControl,
-			SetSecurityDescriptorDacl, SetSecurityDescriptorOwner, TOKEN_QUERY, TOKEN_USER, TokenUser,
-			WinLocalSystemSid,
+			ACCESS_ALLOWED_ACE, ACCESS_DENIED_ACE, ACE_HEADER, ACL, ACL_REVISION,
+			AddAccessAllowedAceEx,
+			Authorization::{GetSecurityInfo, SetSecurityInfo},
+			CONTAINER_INHERIT_ACE, CreateWellKnownSid, DACL_SECURITY_INFORMATION, EqualSid, GetAce,
+			GetLengthSid, GetSecurityDescriptorControl, GetTokenInformation, INHERITED_ACE,
+			InitializeAcl, InitializeSecurityDescriptor, IsValidAcl, IsValidSid, IsWellKnownSid,
+			OBJECT_INHERIT_ACE, OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION,
+			PSECURITY_DESCRIPTOR, PSID, SE_DACL_PROTECTED, SECURITY_DESCRIPTOR,
+			SetSecurityDescriptorControl, SetSecurityDescriptorDacl, SetSecurityDescriptorOwner,
+			TOKEN_QUERY, TOKEN_USER, TokenUser, WinBuiltinAdministratorsSid, WinLocalSystemSid,
 		},
 		Storage::FileSystem::{
 			DELETE, FILE_ADD_FILE, FILE_ADD_SUBDIRECTORY, FILE_ALL_ACCESS, FILE_ATTRIBUTE_NORMAL,
-			FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_TAG_INFO, FILE_DISPOSITION_INFO,
-			FILE_ID_INFO, FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE,
-			FILE_SHARE_NONE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TRAVERSE, FILE_WRITE_ATTRIBUTES,
-			FILE_WRITE_DATA, FileAttributeTagInfo, FileDispositionInfo, FileIdInfo,
-			GetFileInformationByHandleEx, QueryDosDeviceW, READ_CONTROL, SYNCHRONIZE,
-			SetFileInformationByHandle,
+			FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_TAG_INFO, FILE_DELETE_CHILD,
+			FILE_DISPOSITION_INFO, FILE_ID_INFO, FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES,
+			FILE_SHARE_DELETE, FILE_SHARE_NONE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TRAVERSE,
+			FILE_WRITE_ATTRIBUTES, FILE_WRITE_DATA, FILE_WRITE_EA, FileAttributeTagInfo,
+			FileDispositionInfo, FileIdInfo, GetFileInformationByHandleEx, QueryDosDeviceW,
+			READ_CONTROL, SYNCHRONIZE, SetFileInformationByHandle, WRITE_DAC, WRITE_OWNER,
 		},
 		System::{
-			SystemServices::{ACCESS_ALLOWED_ACE_TYPE, SECURITY_DESCRIPTOR_REVISION},
+			SystemServices::{
+				ACCESS_ALLOWED_ACE_TYPE, ACCESS_DENIED_ACE_TYPE, SECURITY_DESCRIPTOR_REVISION,
+			},
 			Threading::{GetCurrentProcess, GetCurrentProcessId, OpenProcessToken},
 		},
 	},
@@ -76,12 +80,23 @@ const DIRECTORY_TRAVERSE_ACCESS: u32 =
 const DIRECTORY_CREATE_CHILD_ACCESS: u32 =
 	FILE_ADD_SUBDIRECTORY | FILE_TRAVERSE | FILE_READ_ATTRIBUTES | SYNCHRONIZE;
 const DIRECTORY_MUTATE_ACCESS: u32 =
-	DIRECTORY_TRAVERSE_ACCESS | FILE_ADD_FILE | FILE_ADD_SUBDIRECTORY;
+	DIRECTORY_TRAVERSE_ACCESS | FILE_ADD_FILE | FILE_ADD_SUBDIRECTORY | WRITE_DAC;
 const DIRECTORY_OPEN_OPTIONS: u32 =
 	FILE_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT;
 const FILE_OPEN_OPTIONS: u32 =
 	FILE_NON_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT;
 const PRIVATE_ACE_FLAGS: u32 = OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE;
+const FOREIGN_ALLOW_MUTATION_ACCESS: u32 = FILE_ADD_FILE
+	| FILE_ADD_SUBDIRECTORY
+	| FILE_DELETE_CHILD
+	| FILE_WRITE_ATTRIBUTES
+	| FILE_WRITE_EA
+	| DELETE
+	| WRITE_DAC
+	| WRITE_OWNER
+	| GENERIC_WRITE
+	| GENERIC_ALL;
+const SID_HEADER_BYTES: usize = 8;
 const STAGE_ATTEMPTS: u32 = 64;
 
 static STAGE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -319,6 +334,39 @@ impl Drop for LocalSecurityDescriptor {
 	}
 }
 
+fn standard_ace_fields(
+	raw_ace: *mut c_void,
+	header: &ACE_HEADER,
+) -> Result<(u32, PSID), AtomicWriteError> {
+	let ace_size = usize::from(header.AceSize);
+	let sid_offset = std::mem::offset_of!(ACCESS_ALLOWED_ACE, SidStart);
+	if ace_size < sid_offset + SID_HEADER_BYTES {
+		return Err(unsafe_path("a local root or parent DACL entry is malformed"));
+	}
+
+	let (mask, sid) = if header.AceType == ACCESS_ALLOWED_ACE_TYPE as u8 {
+		let ace = unsafe { &*raw_ace.cast::<ACCESS_ALLOWED_ACE>() };
+		(ace.Mask, ptr::addr_of!(ace.SidStart).cast::<c_void>() as PSID)
+	} else if header.AceType == ACCESS_DENIED_ACE_TYPE as u8 {
+		let ace = unsafe { &*raw_ace.cast::<ACCESS_DENIED_ACE>() };
+		(ace.Mask, ptr::addr_of!(ace.SidStart).cast::<c_void>() as PSID)
+	} else {
+		return Err(unsafe_path("local root or parent DACL contains an unsupported ACE type"));
+	};
+	let sid_bytes = unsafe { std::slice::from_raw_parts(sid.cast::<u8>(), ace_size - sid_offset) };
+	let sid_length = SID_HEADER_BYTES
+		.checked_add(
+			usize::from(sid_bytes[1])
+				.checked_mul(size_of::<u32>())
+				.ok_or_else(|| unsafe_path("a local root or parent DACL SID is malformed"))?,
+		)
+		.ok_or_else(|| unsafe_path("a local root or parent DACL SID is malformed"))?;
+	if sid_length > sid_bytes.len() || unsafe { IsValidSid(sid) } == 0 {
+		return Err(unsafe_path("a local root or parent DACL SID is malformed"));
+	}
+	Ok((mask, sid))
+}
+
 fn verify_private_object(
 	handle: HANDLE,
 	private: &PrivateSecurityDescriptor,
@@ -347,6 +395,12 @@ fn verify_private_object(
 		return Err(unsafe_path("local root or parent has no complete private security descriptor"));
 	}
 	let descriptor = LocalSecurityDescriptor(descriptor);
+	if unsafe { IsValidSid(owner) } == 0 {
+		return Err(unsafe_path("local root or parent has an invalid owner SID"));
+	}
+	if unsafe { IsValidAcl(dacl) } == 0 {
+		return Err(unsafe_path("local root or parent has an invalid DACL"));
+	}
 
 	let mut control = 0;
 	let mut revision = 0;
@@ -384,11 +438,10 @@ fn verify_private_object(
 				"local root or parent DACL is not the protected owner/SYSTEM policy",
 			));
 		}
-		let ace = unsafe { &*raw_ace.cast::<ACCESS_ALLOWED_ACE>() };
-		if ace.Mask != FILE_ALL_ACCESS {
+		let (mask, sid) = standard_ace_fields(raw_ace, header)?;
+		if mask != FILE_ALL_ACCESS {
 			return Err(unsafe_path("local root or parent DACL grants incomplete private access"));
 		}
-		let sid = ptr::addr_of!(ace.SidStart).cast::<c_void>() as PSID;
 		if unsafe { EqualSid(sid, private.owner.as_psid()) } != 0 {
 			if owner_seen {
 				return Err(unsafe_path("local root or parent DACL repeats the owner ACE"));
@@ -407,6 +460,122 @@ fn verify_private_object(
 		return Err(unsafe_path("local root or parent DACL omits the owner or SYSTEM ACE"));
 	}
 	Ok(())
+}
+
+fn foreign_allow_grants_mutation(mask: u32) -> bool {
+	mask & FOREIGN_ALLOW_MUTATION_ACCESS != 0 || mask & FILE_ALL_ACCESS == FILE_ALL_ACCESS
+}
+
+fn trusted_legacy_principal(sid: PSID, private: &PrivateSecurityDescriptor) -> bool {
+	unsafe {
+		EqualSid(sid, private.owner.as_psid()) != 0
+			|| EqualSid(sid, private.system.as_psid()) != 0
+			|| IsWellKnownSid(sid, WinBuiltinAdministratorsSid) != 0
+	}
+}
+
+fn legacy_dacl_is_safe(
+	dacl: *mut ACL,
+	private: &PrivateSecurityDescriptor,
+) -> Result<(), AtomicWriteError> {
+	if dacl.is_null() || unsafe { IsValidAcl(dacl) } == 0 {
+		return Err(unsafe_path("local root or parent has an invalid legacy DACL"));
+	}
+	let acl = unsafe { &*dacl };
+	for index in 0..u32::from(acl.AceCount) {
+		let mut raw_ace = ptr::null_mut();
+		if unsafe { GetAce(dacl as *const ACL, index, &mut raw_ace) } == 0 || raw_ace.is_null() {
+			return Err(unsafe_path("cannot inspect a local root or parent DACL entry"));
+		}
+		let header = unsafe { &*raw_ace.cast::<ACE_HEADER>() };
+		let (mask, sid) = standard_ace_fields(raw_ace, header)?;
+		if header.AceType == ACCESS_ALLOWED_ACE_TYPE as u8
+			&& !trusted_legacy_principal(sid, private)
+			&& foreign_allow_grants_mutation(mask)
+			&& header.AceFlags & INHERITED_ACE as u8 == 0
+		{
+			return Err(unsafe_path(
+				"local root or parent legacy DACL explicitly grants a foreign principal directory \
+				 mutation access",
+			));
+		}
+	}
+	Ok(())
+}
+
+fn migrate_legacy_directory(
+	handle: HANDLE,
+	private: &PrivateSecurityDescriptor,
+) -> Result<(), AtomicWriteError> {
+	let mut owner = ptr::null_mut();
+	let mut dacl = ptr::null_mut();
+	let mut descriptor = ptr::null_mut();
+	let status = unsafe {
+		GetSecurityInfo(
+			handle,
+			windows_sys::Win32::Security::Authorization::SE_FILE_OBJECT,
+			OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+			&mut owner,
+			ptr::null_mut(),
+			&mut dacl,
+			ptr::null_mut(),
+			&mut descriptor,
+		)
+	};
+	if status != 0 {
+		return Err(unsafe_path(format!(
+			"cannot inspect the local root or parent legacy DACL (Win32 error {status})"
+		)));
+	}
+	if descriptor.is_null() || owner.is_null() || dacl.is_null() {
+		return Err(unsafe_path("local root or parent has no complete legacy security descriptor"));
+	}
+	let _descriptor = LocalSecurityDescriptor(descriptor);
+	if unsafe { IsValidSid(owner) } == 0 {
+		return Err(unsafe_path("local root or parent has an invalid owner SID"));
+	}
+	if unsafe { EqualSid(owner, private.owner.as_psid()) } == 0 {
+		return Err(unsafe_path("local root or parent is not owned by the invoking user"));
+	}
+	legacy_dacl_is_safe(dacl, private)?;
+
+	let status = unsafe {
+		SetSecurityInfo(
+			handle,
+			windows_sys::Win32::Security::Authorization::SE_FILE_OBJECT,
+			DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+			ptr::null_mut(),
+			ptr::null_mut(),
+			private.acl.as_ptr().cast::<ACL>(),
+			ptr::null(),
+		)
+	};
+	if status != 0 {
+		if matches!(status, ERROR_SHARING_VIOLATION | ERROR_LOCK_VIOLATION | ERROR_LOCK_FAILED) {
+			return Err(AtomicWriteError::new(
+				AtomicWriteErrorCode::Busy,
+				AtomicWriteCommitState::NotCommitted,
+				format!("secure local root or parent is busy (Win32 error {status})"),
+			));
+		}
+		if status == ERROR_ACCESS_DENIED {
+			return Err(unsafe_path(format!(
+				"cannot secure the local root or parent DACL (Win32 error {status})"
+			)));
+		}
+		return Err(win32_io_error("secure local root or parent DACL", status));
+	}
+	verify_private_object(handle, private)
+}
+
+fn ensure_private_directory(
+	handle: HANDLE,
+	private: &PrivateSecurityDescriptor,
+) -> Result<(), AtomicWriteError> {
+	if verify_private_object(handle, private).is_ok() {
+		return Ok(());
+	}
+	migrate_legacy_directory(handle, private)
 }
 
 /// A Unicode name whose descriptor always points to its own stable UTF-16
@@ -451,14 +620,72 @@ fn validate_component(component: &[u16]) -> Result<(), AtomicWriteError> {
 		|| component == [u16::from(b'.'), u16::from(b'.')]
 		|| component.iter().any(|character| {
 			let character = *character;
-			character == 0
+			character <= 0x001f
+				|| character == u16::from(b'<')
+				|| character == u16::from(b'>')
+				|| character == u16::from(b':')
+				|| character == u16::from(b'\"')
 				|| character == u16::from(b'/')
 				|| character == u16::from(b'\\')
-				|| character == u16::from(b':')
-		}) {
-		return Err(unsafe_path("target component is not a single Windows file name"));
+				|| character == u16::from(b'|')
+				|| character == u16::from(b'?')
+				|| character == u16::from(b'*')
+		}) || component.first() == Some(&u16::from(b' '))
+		|| component.last() == Some(&u16::from(b' '))
+		|| component.last() == Some(&u16::from(b'.'))
+		|| reserved_device_name(component)
+	{
+		return Err(AtomicWriteError::invalid_input(
+			"target component is not a publicly addressable Windows file name",
+		));
 	}
 	Ok(())
+}
+
+fn reserved_device_name(component: &[u16]) -> bool {
+	let stem_end = component
+		.iter()
+		.position(|character| *character == u16::from(b'.'))
+		.unwrap_or(component.len());
+	let mut stem = &component[..stem_end];
+	while stem.last() == Some(&u16::from(b' ')) {
+		stem = &stem[..stem.len() - 1];
+	}
+	if matches_ascii_case_insensitive(stem, b"CON")
+		|| matches_ascii_case_insensitive(stem, b"PRN")
+		|| matches_ascii_case_insensitive(stem, b"AUX")
+		|| matches_ascii_case_insensitive(stem, b"NUL")
+		|| matches_ascii_case_insensitive(stem, b"CONIN$")
+		|| matches_ascii_case_insensitive(stem, b"CONOUT$")
+	{
+		return true;
+	}
+	if stem.len() != 4 {
+		return false;
+	}
+	let prefix_is_device = (ascii_uppercase(stem[0]) == u16::from(b'C')
+		&& ascii_uppercase(stem[1]) == u16::from(b'O')
+		&& ascii_uppercase(stem[2]) == u16::from(b'M'))
+		|| (ascii_uppercase(stem[0]) == u16::from(b'L')
+			&& ascii_uppercase(stem[1]) == u16::from(b'P')
+			&& ascii_uppercase(stem[2]) == u16::from(b'T'));
+	prefix_is_device && matches!(stem[3], 0x0031..=0x0039 | 0x00b9 | 0x00b2 | 0x00b3)
+}
+
+fn matches_ascii_case_insensitive(component: &[u16], name: &[u8]) -> bool {
+	component.len() == name.len()
+		&& component
+			.iter()
+			.zip(name)
+			.all(|(character, byte)| ascii_uppercase(*character) == u16::from(*byte))
+}
+
+fn ascii_uppercase(character: u16) -> u16 {
+	if character >= u16::from(b'a') && character <= u16::from(b'z') {
+		character - u16::from(b'a') + u16::from(b'A')
+	} else {
+		character
+	}
 }
 
 struct VolumeAnchor {
@@ -749,7 +976,7 @@ fn checked_directory(
 ) -> Result<Directory, AtomicWriteError> {
 	inspect_path_object(directory.raw(), volume)?;
 	if let Some(private) = private {
-		verify_private_object(directory.raw(), private)?;
+		ensure_private_directory(directory.raw(), private)?;
 	}
 	Ok(directory)
 }
@@ -1136,9 +1363,13 @@ pub(super) fn write(
 			"targetComponents must not be empty",
 		));
 	}
+	let mut target_names = Vec::with_capacity(request.target_components.len());
 	for component in &request.target_components {
-		validate_component(&component.encode_wide().collect::<Vec<_>>())?;
+		target_names.push(UnicodeName::component(component)?);
 	}
+	let target = target_names
+		.pop()
+		.ok_or_else(|| AtomicWriteError::invalid_input("targetComponents must not be empty"))?;
 
 	let private = PrivateSecurityDescriptor::new()?;
 	heartbeat(cancel)?;
@@ -1147,18 +1378,10 @@ pub(super) fn write(
 	let volume = inspect_volume_root(&volume_root)?;
 	let mut parent = walk_local_root(&anchor, volume_root, volume, &private, cancel)?;
 
-	for component in &request.target_components[..request.target_components.len() - 1] {
+	for name in &target_names {
 		heartbeat(cancel)?;
-		let name = UnicodeName::component(component)?;
-		parent = open_or_create_target_directory(&parent, &name, volume, &private)?;
+		parent = open_or_create_target_directory(&parent, name, volume, &private)?;
 	}
-
-	let target = UnicodeName::component(
-		request
-			.target_components
-			.last()
-			.expect("targetComponents was checked non-empty"),
-	)?;
 	heartbeat(cancel)?;
 	verify_existing_target(&parent, &target, volume)?;
 	let mut stage = create_stage(&parent, volume, &private, cancel)?;
