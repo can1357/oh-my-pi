@@ -91,16 +91,38 @@ function hasForbiddenThinkingSuffix(model: string): boolean {
 	return level !== undefined && level !== ThinkingLevel.Max;
 }
 
+function parseCandidate(value: unknown, path: string): string {
+	const candidate = requireNonEmptyString(value, path);
+	if (hasForbiddenThinkingSuffix(candidate)) {
+		throw new PanelConfigError(path, "must not include a trailing thinking suffix; use the thinking field instead");
+	}
+	return candidate;
+}
+
 function parsePanelMember(value: unknown, path: string): PanelMember {
 	const record = requireRecord(value, path);
-	requireKnownKeys(record, ["model", "thinking", "persona"], path);
+	requireKnownKeys(record, ["model", "fallbacks", "thinking", "persona"], path);
 
-	const model = requireNonEmptyString(record.model, `${path}.model`);
-	if (hasForbiddenThinkingSuffix(model)) {
-		throw new PanelConfigError(
-			`${path}.model`,
-			"must not include a trailing thinking suffix; use the thinking field instead",
-		);
+	// `model` doubles as the whole ranked list so a seat can be written either as
+	// one selector or as candidates in priority order, matching how agent
+	// frontmatter accepts a prioritized `model` list.
+	let model: string;
+	let fallbacks: string[] = [];
+	if (Array.isArray(record.model)) {
+		if (record.fallbacks !== undefined) {
+			throw new PanelConfigError(`${path}.fallbacks`, "must be omitted when model is already a candidate list");
+		}
+		if (record.model.length === 0) throw new PanelConfigError(`${path}.model`, "must not be an empty list");
+		model = parseCandidate(record.model[0], `${path}.model[0]`);
+		fallbacks = record.model.slice(1).map((entry, index) => parseCandidate(entry, `${path}.model[${index + 1}]`));
+	} else {
+		model = parseCandidate(record.model, `${path}.model`);
+		if (record.fallbacks !== undefined) {
+			if (!Array.isArray(record.fallbacks)) {
+				throw new PanelConfigError(`${path}.fallbacks`, "must be an array");
+			}
+			fallbacks = record.fallbacks.map((entry, index) => parseCandidate(entry, `${path}.fallbacks[${index}]`));
+		}
 	}
 
 	let thinking: PanelMember["thinking"];
@@ -120,6 +142,7 @@ function parsePanelMember(value: unknown, path: string): PanelMember {
 
 	return Object.freeze({
 		model,
+		...(fallbacks.length > 0 ? { fallbacks: Object.freeze(fallbacks) } : {}),
 		...(thinking !== undefined ? { thinking } : {}),
 		...(persona !== undefined ? { persona } : {}),
 	});
@@ -127,7 +150,7 @@ function parsePanelMember(value: unknown, path: string): PanelMember {
 
 function parsePanelRole(value: unknown, path: string): PanelRole {
 	const record = requireRecord(value, path);
-	requireKnownKeys(record, ["strategy", "members"], path);
+	requireKnownKeys(record, ["strategy", "members", "minFamilies", "distinctFamilies"], path);
 
 	const strategyRaw = record.strategy;
 	if (typeof strategyRaw !== "string" || !(PANEL_STRATEGIES as readonly string[]).includes(strategyRaw)) {
@@ -152,7 +175,31 @@ function parsePanelRole(value: unknown, path: string): PanelRole {
 		}
 	}
 
-	return Object.freeze({ strategy, members: Object.freeze(members) });
+	let minFamilies: number | undefined;
+	if (record.minFamilies !== undefined) {
+		if (typeof record.minFamilies !== "number" || !Number.isInteger(record.minFamilies) || record.minFamilies < 1) {
+			throw new PanelConfigError(`${path}.minFamilies`, "must be a positive integer");
+		}
+		if (record.minFamilies > members.length) {
+			throw new PanelConfigError(`${path}.minFamilies`, `cannot exceed the ${members.length} configured members`);
+		}
+		minFamilies = record.minFamilies;
+	}
+
+	let distinctFamilies: boolean | undefined;
+	if (record.distinctFamilies !== undefined) {
+		if (typeof record.distinctFamilies !== "boolean") {
+			throw new PanelConfigError(`${path}.distinctFamilies`, "must be a boolean");
+		}
+		distinctFamilies = record.distinctFamilies;
+	}
+
+	return Object.freeze({
+		strategy,
+		members: Object.freeze(members),
+		...(minFamilies !== undefined ? { minFamilies } : {}),
+		...(distinctFamilies !== undefined ? { distinctFamilies } : {}),
+	});
 }
 
 /**
@@ -252,10 +299,10 @@ export function resolvePanelRole(settings: PanelSettings, roleId: string | undef
 
 /**
  * Validates a resolved role against its saved member shape: resolved-list
- * length, index ordering, and, for `independent` strategy only, that every
- * resolved member carries a known, distinct model family (fail-closed on an
- * empty family by product decision). `personas` roles skip family diversity:
- * repeated families are the product contract for perspective coverage.
+ * length, index ordering, and the role's family policy. Distinctness defaults
+ * to on for `independent` and off for `personas`, where repeated families are
+ * the perspective-coverage contract, and either default can be overridden by
+ * `distinctFamilies`. A `minFamilies` floor applies to both strategies.
  * Persona existence and task-mode availability are validated separately by
  * {@link resolvePanelPersona}, which the runtime calls once per personas
  * member before dispatch.
@@ -285,24 +332,62 @@ export function validateResolvedPanelRole(
 		}
 	});
 
-	if (role.strategy !== "independent") return;
-
-	const seenFamilies = new Set<string>();
+	const requireDistinct = role.distinctFamilies ?? role.strategy === "independent";
+	const families = new Set<string>();
 	for (const member of members) {
 		if (member.family.length === 0) {
-			throw new PanelConfigError(
-				`${rolePath}.members[${member.index}]`,
-				"resolved member has no known model family",
-			);
+			// Fail closed: an unknown lineage cannot be counted toward diversity,
+			// so it must not silently satisfy a distinctness or floor requirement.
+			if (requireDistinct || role.minFamilies !== undefined) {
+				throw new PanelConfigError(
+					`${rolePath}.members[${member.index}]`,
+					"resolved member has no known model family",
+				);
+			}
+			continue;
 		}
-		if (seenFamilies.has(member.family)) {
+		if (requireDistinct && families.has(member.family)) {
 			throw new PanelConfigError(
 				`${rolePath}.members[${member.index}]`,
 				`duplicate resolved model family "${member.family}"`,
 			);
 		}
-		seenFamilies.add(member.family);
+		families.add(member.family);
 	}
+
+	if (role.minFamilies !== undefined && families.size < role.minFamilies) {
+		throw new PanelConfigError(
+			`${rolePath}.minFamilies`,
+			`resolved ${families.size} distinct model families, need ${role.minFamilies}`,
+		);
+	}
+}
+
+/**
+ * Content hash over a resolved lineup: the served route of every seat plus the
+ * policy that admitted it. Two runs that hash alike dispatched the same models
+ * at the same efforts under the same diversity rules, so a stored hash names
+ * the panel a result came from instead of describing it in prose. Requested
+ * candidates are excluded on purpose — an unused fallback does not change what
+ * ran, while a fallback that was actually served changes `selector`.
+ */
+export function panelLineupHash(role: PanelRole, members: readonly ResolvedPanelMember[]): string {
+	const normalized = {
+		strategy: role.strategy,
+		minFamilies: role.minFamilies ?? null,
+		distinctFamilies: role.distinctFamilies ?? null,
+		members: [...members]
+			.sort((left, right) => left.index - right.index)
+			.map(member => ({
+				index: member.index,
+				selector: member.selector,
+				modelId: member.modelId,
+				family: member.family,
+				thinking: member.thinking ?? null,
+				persona: member.persona ?? null,
+			})),
+	};
+	return `sha256:${new Bun.CryptoHasher("sha256").update(JSON.stringify(normalized)).digest("hex")}`;
 }
 
 /**

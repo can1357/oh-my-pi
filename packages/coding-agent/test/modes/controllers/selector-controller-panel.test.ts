@@ -24,6 +24,7 @@ function preview(): PanelRunPreview {
 		members: [
 			{
 				index: 0,
+				requestedSelector: "anthropic/claude-opus-4-5",
 				model: "anthropic/claude-opus-4-5",
 				selector: "anthropic/claude-opus-4-5",
 				modelId: "claude-opus-4-5",
@@ -31,12 +32,14 @@ function preview(): PanelRunPreview {
 			},
 			{
 				index: 1,
+				requestedSelector: "openai/gpt-5.5",
 				model: "openai/gpt-5.5",
 				selector: "openai/gpt-5.5",
 				modelId: "gpt-5.5",
 				family: "gpt",
 			},
 		],
+		lineupHash: "sha256:test-lineup",
 	};
 }
 
@@ -58,6 +61,7 @@ function result(statuses: Array<"completed" | "failed" | "aborted">, cancelled =
 		cancelled,
 		usage: { tokens: statuses.length, requests: statuses.length, cost: 0 },
 		synthesisInput: "synthesis prompt",
+		lineupHash: resolved.lineupHash,
 	};
 }
 
