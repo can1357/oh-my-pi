@@ -122,6 +122,15 @@ describe("loginUrlCopyCommand (win32)", () => {
 		);
 	});
 
+	it("double-quotes a path whose only offending characters are spaces", () => {
+		setPlatform("win32");
+		// Double quotes group in cmd and stay expansion-free in PowerShell when
+		// the path carries none of % ! $ ` ", so both shells read it literally.
+		expect(loginUrlCopyCommand("C:\\Users\\Seth Morton\\agent dir\\login-url-1.txt")).toBe(
+			'type "C:\\Users\\Seth Morton\\agent dir\\login-url-1.txt"',
+		);
+	});
+
 	it("keeps cmd %VAR% and delayed-expansion ! literal via PowerShell single quotes", () => {
 		setPlatform("win32");
 		// Double quotes would let cmd expand %NAME% and !x!; the single-quoted
@@ -139,9 +148,9 @@ describe("loginUrlCopyCommand (win32)", () => {
 			"type 'C:\\agents\\$(calc)\\login-url-1.txt'",
 		);
 		// An embedded single quote cannot terminate the quoting: doubled per
-		// PowerShell's literal-string escape.
-		expect(loginUrlCopyCommand("C:\\Users\\o'brien\\login-url-1.txt")).toBe(
-			"type 'C:\\Users\\o''brien\\login-url-1.txt'",
+		// PowerShell's literal-string escape. %TEMP% forces the single-quote tier.
+		expect(loginUrlCopyCommand("C:\\Users\\o'brien\\%TEMP%\\login-url-1.txt")).toBe(
+			"type 'C:\\Users\\o''brien\\%TEMP%\\login-url-1.txt'",
 		);
 	});
 });

@@ -60,13 +60,17 @@ export function persistLoginUrl(url: string): string | undefined {
  * The command a user runs to print the persisted URL, portable to the shell
  * they are actually in.
  *
- * win32 renders `type` (cmd.exe built-in, also a PowerShell alias). A path of
- * shell-inert characters is left unquoted, which both shells read identically.
- * Anything else is PowerShell single-quoted with embedded quotes doubled:
- * single quotes stop `$()`, backticks, and `%`/`!` expansion there. cmd.exe
- * cannot be made literal at all: `%VAR%` (and `!x!` under delayed expansion)
- * substitutes before quote parsing, so no quoting suppresses it. The quoted
- * form therefore targets PowerShell, the modern Windows default shell.
+ * win32 renders `type` (cmd.exe built-in, also a PowerShell alias) with tiered
+ * quoting. A path of shell-inert characters is left bare, which both shells
+ * read identically. A path whose only offending characters are literal inside
+ * double quotes on both shells (spaces and the like — none of % ! $ ` ") is
+ * double-quoted: cmd and PowerShell both parse that as one argument and
+ * neither expands anything inside it. Anything carrying an expandable is
+ * PowerShell single-quoted with embedded quotes doubled: single quotes stop
+ * `$()`, backticks, and `%`/`!` expansion there. cmd.exe cannot render such a
+ * path literally at all — `%VAR%` (and `!x!` under delayed expansion)
+ * substitutes before quote parsing, so no quoting suppresses it — so that
+ * tier targets PowerShell, the modern Windows default shell.
  *
  * POSIX renders `cat` with the home prefix shortened to `~`, which must stay
  * outside quotes to expand, so the path is unquoted only when every character
@@ -78,6 +82,7 @@ export function persistLoginUrl(url: string): string | undefined {
 export function loginUrlCopyCommand(filePath: string): string {
 	if (process.platform === "win32") {
 		if (/^[\w.:\\/-]+$/.test(filePath)) return `type ${filePath}`;
+		if (!/[%!$`"]/.test(filePath)) return `type "${filePath}"`;
 		return `type '${filePath.replaceAll("'", "''")}'`;
 	}
 	const home = os.homedir();
