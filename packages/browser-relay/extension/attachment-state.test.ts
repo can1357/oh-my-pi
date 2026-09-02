@@ -98,6 +98,18 @@ describe("attachment-state", () => {
 		expect(persisted).toEqual([[]]);
 	});
 
+	it("rejects when the final ownership persistence fails", async () => {
+		const pending = serializeRecoverableStateUpdate(
+			Promise.resolve(),
+			Promise.reject(new Error("immediate write failed")),
+			() => true,
+			async () => {
+				throw new Error("final write failed");
+			},
+		);
+		await expect(pending).rejects.toThrow("final write failed");
+	});
+
 	it("restores only startup ids unaffected by concurrent ownership changes", () => {
 		const current = new Set<number>();
 		restoreRecoverableState(current, [1, 2, "invalid"], new Set([1]));

@@ -34,7 +34,7 @@ export function serializeRecoverableStateUpdate(
 ): Promise<void> {
 	return Promise.allSettled([previousUpdate, immediateWrite]).then(async () => {
 		if (!isCurrent()) return;
-		await persistCurrent().catch(() => {});
+		await persistCurrent();
 	});
 }
 
