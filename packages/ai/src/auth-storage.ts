@@ -2952,6 +2952,18 @@ export class AuthStorage {
 	}
 
 	/**
+	 * Whether the credential selected for a provider/session is OAuth-backed.
+	 * Unlike {@link hasOAuth}, this respects explicit overrides, interactive
+	 * login precedence, and the credential pinned to an active session.
+	 */
+	isUsingOAuth(provider: string, sessionId?: string): boolean {
+		if (this.#runtimeOverrides.has(provider) || this.#configOverrides.has(provider)) return false;
+		const sessionCredential = this.#getSessionCredential(provider, sessionId);
+		if (sessionCredential) return sessionCredential.type === "oauth";
+		return this.getCredentialOrigin(provider)?.kind === "oauth";
+	}
+
+	/**
 	 * Get OAuth credentials for a provider.
 	 */
 	getOAuthCredential(provider: string): OAuthCredential | undefined {

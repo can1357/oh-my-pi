@@ -674,9 +674,18 @@
 						"id": "llama",
 						"glob": "*llama*",
 						"priority": 0
+					},
+					{
+						"id": "spark",
+						"glob": "muse-spark-*",
+						"priority": 0
 					}
 				],
-				"revisionPrefixes": [],
+				"revisionPrefixes": [
+					{
+						"prefix": "muse-spark-"
+					}
+				],
 				"skipBare": [],
 				"overrides": []
 			},
@@ -5491,16 +5500,7 @@
 			{
 				"source": "classes/meta.kdl:4",
 				"class": "meta",
-				"models": [
-					{
-						"kind": "exact",
-						"value": "muse-spark-1.2"
-					},
-					{
-						"kind": "exact",
-						"value": "muse-spark-1.2-contributor"
-					}
-				],
+				"family": "spark",
 				"thinking": {
 					"efforts": [
 						"minimal",
@@ -5510,10 +5510,16 @@
 						"xhigh"
 					],
 					"mode": "effort"
+				},
+				"catalog": {
+					"inputModalities": [
+						"text",
+						"image"
+					]
 				}
 			},
 			{
-				"source": "classes/meta.kdl:9",
+				"source": "classes/meta.kdl:13",
 				"class": "meta",
 				"providers": [
 					"kilo",
@@ -13873,7 +13879,8 @@
 			{
 				"provider": "meta",
 				"mode": "oauth-minted-api-key-with-direct-api-key",
-				"rpcDefaultAuthMethod": "api-key"
+				"rpcDefaultAuthMethod": "api-key",
+				"unionOAuthModelRosters": true
 			}
 		],
 		"modelOperations": [

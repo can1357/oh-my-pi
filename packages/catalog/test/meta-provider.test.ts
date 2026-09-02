@@ -1,118 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
+import { resolveProviderModels } from "@oh-my-pi/pi-catalog/model-manager";
 import { CATALOG_PROVIDERS } from "@oh-my-pi/pi-catalog/provider-models/descriptors";
-import { META_MUSE_STATIC_MODELS, metaModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
+import { metaModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
+import { TempDir } from "@oh-my-pi/pi-utils";
 
 describe("Meta Model API provider", () => {
-	test("ships the documented Muse Spark catalog with Responses capabilities", () => {
-		expect(META_MUSE_STATIC_MODELS).toEqual([
-			{
-				id: "muse-spark-1.3",
-				name: "Muse Spark 1.3",
-				api: "openai-responses",
-				provider: "meta",
-				baseUrl: "https://api.meta.ai/v1",
-				reasoning: true,
-				input: ["text", "image"],
-				cost: { input: 1.25, output: 4.25, cacheRead: 0.15, cacheWrite: 0 },
-				contextWindow: 1_048_576,
-				maxTokens: 131_072,
-				thinking: {
-					mode: "effort",
-					efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.XHigh],
-				},
-				compat: {
-					supportsReasoningEffort: true,
-					includeEncryptedReasoning: true,
-				},
-			},
-			{
-				id: "muse-spark-1.3-contributor",
-				name: "Muse Spark 1.3 Contributor (Data Used for Training)",
-				api: "openai-responses",
-				provider: "meta",
-				baseUrl: "https://api.meta.ai/v1",
-				reasoning: true,
-				input: ["text", "image"],
-				cost: { input: 0.1, output: 0.2, cacheRead: 0.002, cacheWrite: 0 },
-				contextWindow: 1_048_576,
-				maxTokens: 131_072,
-				thinking: {
-					mode: "effort",
-					efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.XHigh],
-				},
-				compat: {
-					supportsReasoningEffort: true,
-					includeEncryptedReasoning: true,
-				},
-			},
-			{
-				id: "muse-spark-1.1",
-				name: "Muse Spark 1.1",
-				api: "openai-responses",
-				provider: "meta",
-				baseUrl: "https://api.meta.ai/v1",
-				reasoning: true,
-				input: ["text", "image"],
-				cost: { input: 1.25, output: 4.25, cacheRead: 0.15, cacheWrite: 0 },
-				contextWindow: 1_048_576,
-				maxTokens: 131_072,
-				thinking: {
-					mode: "effort",
-					efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.XHigh],
-				},
-				compat: {
-					supportsReasoningEffort: true,
-					includeEncryptedReasoning: true,
-				},
-			},
-			{
-				id: "muse-spark-1.2",
-				name: "Muse Spark 1.2",
-				api: "openai-responses",
-				provider: "meta",
-				baseUrl: "https://api.meta.ai/v1",
-				reasoning: true,
-				input: ["text", "image"],
-				cost: { input: 1.25, output: 4.25, cacheRead: 0.15, cacheWrite: 0 },
-				contextWindow: 1_048_576,
-				maxTokens: 131_072,
-				thinking: {
-					mode: "effort",
-					efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.XHigh],
-				},
-				compat: {
-					supportsReasoningEffort: true,
-					includeEncryptedReasoning: true,
-				},
-			},
-			{
-				id: "muse-spark-1.2-contributor",
-				name: "Muse Spark 1.2 Contributor (Data Used for Training)",
-				api: "openai-responses",
-				provider: "meta",
-				baseUrl: "https://api.meta.ai/v1",
-				reasoning: true,
-				input: ["text", "image"],
-				cost: { input: 0.1, output: 0.2, cacheRead: 0.002, cacheWrite: 0 },
-				contextWindow: 1_048_576,
-				maxTokens: 131_072,
-				thinking: {
-					mode: "effort",
-					efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.XHigh],
-				},
-				compat: {
-					supportsReasoningEffort: true,
-					includeEncryptedReasoning: true,
-				},
-			},
-		]);
-		const options = metaModelManagerOptions();
-		expect(options.providerId).toBe("meta");
-		expect(options.staticModels).toEqual(META_MUSE_STATIC_MODELS);
-	});
-
-	test("refreshes every team-enabled Meta model with Muse Spark family defaults", async () => {
+	test("builds every team-enabled Meta model through Muse Spark family policy", async () => {
+		using tempDir = TempDir.createSync("@omp-meta-models-");
 		let requestedUrl = "";
 		let authorization = "";
 		const options = metaModelManagerOptions({
@@ -125,7 +20,7 @@ describe("Meta Model API provider", () => {
 						data: [
 							{ id: "muse-spark-1.3" },
 							{ id: "muse-spark-1.3-contributor" },
-							{ id: "muse-spark-1.4-preview" },
+							{ id: "muse-spark-1.4-preview", context_length: 2_000_000, max_completion_tokens: 200_000 },
 							{ id: "muse-image-1.0" },
 							{ id: "muse-voice-transcribe-1.0" },
 						],
@@ -134,16 +29,16 @@ describe("Meta Model API provider", () => {
 			},
 		});
 
-		expect(options.dynamicModelsAuthoritative).toBe(true);
-		const models = await options.fetchDynamicModels?.();
-		expect(models?.map(model => model.id)).toEqual([
+		const result = await resolveProviderModels({ ...options, cacheDbPath: tempDir.join("models.db") }, "online");
+		const models = result.models;
+		expect(models.map(model => model.id).sort()).toEqual([
 			"muse-image-1.0",
 			"muse-spark-1.3",
 			"muse-spark-1.3-contributor",
 			"muse-spark-1.4-preview",
 			"muse-voice-transcribe-1.0",
 		]);
-		const byId = new Map(models?.map(model => [model.id, model]));
+		const byId = new Map(models.map(model => [model.id, model]));
 		expect(byId.get("muse-spark-1.3")).toMatchObject({
 			name: "Muse Spark 1.3",
 			reasoning: true,
@@ -165,11 +60,47 @@ describe("Meta Model API provider", () => {
 			reasoning: true,
 			input: ["text", "image"],
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-			contextWindow: 1_048_576,
-			maxTokens: 131_072,
+			contextWindow: 2_000_000,
+			maxTokens: 200_000,
+		});
+		expect(byId.get("muse-spark-1.4-preview")?.thinking?.efforts).toEqual([
+			Effort.Minimal,
+			Effort.Low,
+			Effort.Medium,
+			Effort.High,
+			Effort.XHigh,
+		]);
+		expect(byId.get("muse-image-1.0")).toMatchObject({
+			reasoning: false,
+			input: ["text"],
+			contextWindow: null,
+			maxTokens: null,
 		});
 		expect(requestedUrl).toBe("https://api.meta.ai/v1/models");
 		expect(authorization).toBe("Bearer LLM|catalog-key");
+	});
+
+	test("rejects a partial multi-account roster as non-authoritative", async () => {
+		using tempDir = TempDir.createSync("@omp-meta-partial-models-");
+		const options = metaModelManagerOptions({
+			apiKeys: ["LLM|catalog-a", "LLM|catalog-b"],
+			fetch: (_input, init) => {
+				const authorization = new Headers(init?.headers).get("Authorization");
+				if (authorization === "Bearer LLM|catalog-a") {
+					return Promise.resolve(Response.json({ data: [{ id: "muse-image-1.0" }] }));
+				}
+				return Promise.resolve(new Response("unavailable", { status: 503 }));
+			},
+		});
+
+		const result = await resolveProviderModels({ ...options, cacheDbPath: tempDir.join("models.db") }, "online");
+		expect(result.models.map(model => model.id).sort()).toEqual([
+			"muse-spark-1.1",
+			"muse-spark-1.2",
+			"muse-spark-1.2-contributor",
+			"muse-spark-1.3",
+			"muse-spark-1.3-contributor",
+		]);
 	});
 
 	test("prefers Meta's documented key name while accepting the provider-specific alias", () => {

@@ -509,7 +509,9 @@ const costSegment: StatusLineSegment = {
 		const advisorCost = ctx.session.getAdvisorCost?.() ?? 0;
 		const normalizedPremiumRequests = normalizePremiumRequests(premiumRequests);
 		const state = ctx.session.state;
-		const usingSubscription = state.model ? (ctx.session.modelRegistry?.isUsingOAuth(state.model) ?? false) : false;
+		const usingSubscription = state.model
+			? (ctx.session.modelRegistry?.isUsingOAuth(state.model, ctx.session.sessionId) ?? false)
+			: false;
 
 		if (!cost && !advisorCost && !usingSubscription && !normalizedPremiumRequests) {
 			return { content: "", visible: false };

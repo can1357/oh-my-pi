@@ -17,6 +17,7 @@ import type {
 import type { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { collapseBuiltVariants } from "@oh-my-pi/pi-catalog/compat/collapse";
+import { unionsOAuthModelRosters } from "@oh-my-pi/pi-catalog/compat/behavior";
 import { readModelCache, writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import {
 	createModelManager,
@@ -1854,8 +1855,21 @@ export class ModelRegistry {
 				hasExplicitVllmConfig ||
 				canUseSharedCatalogWithoutAuth
 			) {
+				const unionOAuthRosters = strategy !== "offline" && unionsOAuthModelRosters(descriptor.providerId);
+				const oauthAccesses = unionOAuthRosters
+					? await this.authStorage.getOAuthAccesses(descriptor.providerId)
+					: [];
+				const apiKeys = new Set<string>();
+				if (isDiscoveryBearerApiKey(apiKey)) apiKeys.add(apiKey);
+				for (const access of oauthAccesses) {
+					if (access.ok && access.apiKey) apiKeys.add(access.apiKey);
+				}
 				const discoveryConfig = {
 					apiKey: isDiscoveryBearerApiKey(apiKey) ? apiKey : undefined,
+					...(unionOAuthRosters && {
+						apiKeys: [...apiKeys],
+						apiKeysComplete: oauthAccesses.every(access => access.ok),
+					}),
 					baseUrl: this.#descriptorBaseUrl(descriptor.providerId),
 					fetch: this.#fetch,
 				};
@@ -2458,8 +2472,8 @@ export class ModelRegistry {
 	/**
 	 * Check if a model is using OAuth credentials (subscription).
 	 */
-	isUsingOAuth(model: Model<Api>): boolean {
-		return this.authStorage.hasOAuth(model.provider);
+	isUsingOAuth(model: Model<Api>, sessionId?: string): boolean {
+		return this.authStorage.isUsingOAuth(model.provider, sessionId);
 	}
 
 	#clearRuntimeProviderState(providerName: string): void {

@@ -212,7 +212,9 @@ export class FooterComponent implements Component {
 		if (totalCacheWrite) statsParts.push(`W${formatNumber(totalCacheWrite)}`);
 
 		// Show billing summary with subscription and premium-request indicators
-		const usingSubscription = state.model ? this.session.modelRegistry.isUsingOAuth(state.model) : false;
+		const usingSubscription = state.model
+			? this.session.modelRegistry.isUsingOAuth(state.model, this.session.sessionId)
+			: false;
 		const { auto: autoIcon, subscription: subscriptionIcon } = theme.icon;
 		const normalizedPremiumRequests = Math.round((totalPremiumRequests + Number.EPSILON) * 100) / 100;
 		if (totalCost || usingSubscription || normalizedPremiumRequests) {

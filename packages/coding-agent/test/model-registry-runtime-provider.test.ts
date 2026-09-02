@@ -136,42 +136,54 @@ describe("ModelRegistry runtime provider registration", () => {
 		expect(registry.find("cline-pass", "kimi-k3")).toBeDefined();
 	});
 
-	test("refreshes the authoritative Meta catalog with the Muse OAuth-minted API key", async () => {
-		await authStorage.set("meta", {
-			type: "oauth",
-			access: "meta-account-access",
-			refresh: "meta-account-refresh",
-			expires: Date.now() + 3_600_000,
-			apiKey: "LLM|subscription-catalog-key",
-		});
-		let authorization = "";
+	test("unions every Muse account roster before authoritative Meta refresh", async () => {
+		await authStorage.set("meta", [
+			{
+				type: "oauth",
+				access: "meta-account-a-access",
+				refresh: "meta-account-a-refresh",
+				expires: Date.now() + 3_600_000,
+				apiKey: "LLM|subscription-catalog-a",
+				accountId: "meta-account-a",
+			},
+			{
+				type: "oauth",
+				access: "meta-account-b-access",
+				refresh: "meta-account-b-refresh",
+				expires: Date.now() + 3_600_000,
+				apiKey: "LLM|subscription-catalog-b",
+				accountId: "meta-account-b",
+			},
+		]);
+		const authorizations: string[] = [];
 		const oauthRegistry = new ModelRegistry(authStorage, modelsJsonPath, {
 			fetch: (input, init) => {
 				const url = String(input);
 				if (url === "https://api.meta.ai/v1/models") {
-					authorization = new Headers(init?.headers).get("Authorization") ?? "";
-					return Promise.resolve(
-						Response.json({
-							data: [
-								{ id: "muse-spark-1.3-contributor" },
-								{ id: "muse-image-1.0" },
-								{ id: "muse-voice-transcribe-1.0" },
-							],
-						}),
-					);
+					const authorization = new Headers(init?.headers).get("Authorization") ?? "";
+					authorizations.push(authorization);
+					const data =
+						authorization === "Bearer LLM|subscription-catalog-a"
+							? [{ id: "muse-spark-1.3" }, { id: "muse-image-1.0" }]
+							: [{ id: "muse-spark-1.3-contributor" }, { id: "muse-voice-transcribe-1.0" }];
+					return Promise.resolve(Response.json({ data }));
 				}
 				return Promise.reject(new Error(`network disabled for ${url}`));
 			},
 		});
+		const oauthAccessSpy = vi.spyOn(authStorage, "getOAuthAccesses");
+		await oauthRegistry.refreshProvider("meta", "offline");
+		expect(oauthAccessSpy).not.toHaveBeenCalled();
+		oauthAccessSpy.mockRestore();
 
 		await oauthRegistry.refreshProvider("meta", "online");
 
-		expect(authorization).toBe("Bearer LLM|subscription-catalog-key");
+		expect(authorizations.sort()).toEqual(["Bearer LLM|subscription-catalog-a", "Bearer LLM|subscription-catalog-b"]);
 		expect(
 			getProviderModels(oauthRegistry, "meta")
 				.map(model => model.id)
 				.sort(),
-		).toEqual(["muse-image-1.0", "muse-spark-1.3-contributor", "muse-voice-transcribe-1.0"]);
+		).toEqual(["muse-image-1.0", "muse-spark-1.3", "muse-spark-1.3-contributor", "muse-voice-transcribe-1.0"]);
 	});
 
 	test("validates provider config before mutating custom API state", () => {

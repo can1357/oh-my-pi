@@ -20,11 +20,14 @@ function stubAuthStorage(configKeys?: string[]): AuthStorage {
 describe("strict credential probes", () => {
 	test("sends the Muse subscription key instead of the Meta account token", async () => {
 		let authorization = "";
+		let requestedModel = "";
 		const preconnect = fetch.preconnect;
 		const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(
 			Object.assign(
 				(_input: string | URL | Request, init?: RequestInit) => {
 					authorization = new Headers(init?.headers).get("Authorization") ?? "";
+					const body = JSON.parse(String(init?.body)) as { model?: unknown };
+					requestedModel = typeof body.model === "string" ? body.model : "";
 					const sse = [
 						`data: ${JSON.stringify({
 							type: "response.output_item.done",
@@ -68,6 +71,7 @@ describe("strict credential probes", () => {
 
 			expect(result.ok).toBe(true);
 			expect(authorization).toBe("Bearer LLM|subscription-key");
+			expect(requestedModel).toBe("muse-spark-1.3");
 		} finally {
 			fetchSpy.mockRestore();
 		}

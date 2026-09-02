@@ -309,6 +309,7 @@ export interface CompiledCredentialPolicy {
 	provider: string;
 	mode: "oauth-minted-api-key-with-direct-api-key";
 	rpcDefaultAuthMethod?: string;
+	unionOAuthModelRosters?: boolean;
 }
 /** Compiled runtime behavior vocabulary (`runtime/behavior.kdl`). */
 export interface CompiledBehavior {

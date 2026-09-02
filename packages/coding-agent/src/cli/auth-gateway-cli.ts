@@ -32,6 +32,7 @@ import {
 } from "@oh-my-pi/pi-ai/auth-broker";
 import { DEFAULT_AUTH_GATEWAY_BIND, startAuthGateway } from "@oh-my-pi/pi-ai/auth-gateway";
 import { type GeneratedProvider, getBundledModels } from "@oh-my-pi/pi-catalog/models";
+import { DEFAULT_MODEL_PER_PROVIDER } from "@oh-my-pi/pi-catalog/provider-models";
 import { getConfigRootDir, isEnoent, logger, VERSION } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { ModelRegistry } from "../config/model-registry";
@@ -467,6 +468,15 @@ function pickProbeCandidates(provider: string): Model<Api>[] {
 		return true;
 	});
 	candidates.sort((a, b) => a.cost.input + a.cost.output - (b.cost.input + b.cost.output) || a.id.localeCompare(b.id));
+	const defaultModelId =
+		provider in DEFAULT_MODEL_PER_PROVIDER
+			? DEFAULT_MODEL_PER_PROVIDER[provider as keyof typeof DEFAULT_MODEL_PER_PROVIDER]
+			: undefined;
+	const defaultIndex = defaultModelId ? candidates.findIndex(model => model.id === defaultModelId) : -1;
+	if (defaultIndex > 0) {
+		const [defaultModel] = candidates.splice(defaultIndex, 1);
+		if (defaultModel) candidates.unshift(defaultModel);
+	}
 	return candidates;
 }
 

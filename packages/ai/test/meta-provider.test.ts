@@ -476,6 +476,7 @@ describe("Meta login", () => {
 					.sort(),
 			).toEqual(["api_key", "oauth"]);
 			expect(await storage.getApiKey("meta", "muse-latest")).toBe("LLM|subscription-key");
+			expect(storage.isUsingOAuth("meta", "muse-latest")).toBe(true);
 			expect(storage.getCredentialOrigin("meta")).toEqual({ kind: "oauth" });
 			expect(storage.describeCredentialSource("meta")).toContain("oauth");
 			storage.close();
@@ -485,6 +486,7 @@ describe("Meta login", () => {
 			});
 			await storage.reload();
 			expect(await storage.getApiKey("meta", "after-restart")).toBe("LLM|subscription-key");
+			expect(storage.isUsingOAuth("meta", "after-restart")).toBe(true);
 			now = Date.parse("2030-01-01T00:00:02.000Z");
 			await login("api-key", "LLM|payg-key");
 			expect(storage.getCredentialOrigin("meta")).toEqual({ kind: "api_key" });
@@ -494,6 +496,8 @@ describe("Meta login", () => {
 
 			now = Date.parse("2030-01-01T00:00:03.000Z");
 			await login("muse");
+			expect(await storage.getApiKey("meta", "muse-session")).toBe("LLM|subscription-key");
+			expect(storage.isUsingOAuth("meta")).toBe(true);
 			now = Date.parse("2030-01-01T00:00:04.000Z");
 			await login("api-key", "LLM|new-payg-key");
 			expect(
@@ -503,9 +507,12 @@ describe("Meta login", () => {
 					.sort(),
 			).toEqual(["api_key", "oauth"]);
 			expect(storage.getCredentialOrigin("meta")).toEqual({ kind: "api_key" });
+			expect(storage.isUsingOAuth("meta")).toBe(false);
+			expect(storage.isUsingOAuth("meta", "muse-session")).toBe(false);
 			expect(storage.describeCredentialSource("meta")).toContain("api_key");
 			expect(storage.getOAuthAccountIdentity("meta")).toBeUndefined();
 			expect(await storage.getApiKey("meta", "payg-latest")).toBe("LLM|new-payg-key");
+			expect(storage.isUsingOAuth("meta", "payg-latest")).toBe(false);
 		} finally {
 			nowSpy.mockRestore();
 			storage.close();

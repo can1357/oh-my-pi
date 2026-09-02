@@ -38,6 +38,11 @@ export function rpcDefaultAuthMethodFor(provider: string): string | undefined {
 	return credentialPolicyFor(provider)?.rpcDefaultAuthMethod;
 }
 
+/** Whether runtime model discovery must union every stored OAuth account roster. */
+export function unionsOAuthModelRosters(provider: string): boolean {
+	return credentialPolicyFor(provider)?.unionOAuthModelRosters === true;
+}
+
 /**
  * Conservative heuristic for a normalized, lowercase discovered model id with
  * no exact bundled record: whether it likely rides the OpenAI Responses API.

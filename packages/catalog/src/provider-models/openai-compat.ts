@@ -4449,41 +4449,26 @@ export const META_MUSE_STATIC_MODELS: readonly ModelSpec<"openai-responses">[] =
 ];
 
 const META_MUSE_STATIC_MODEL_BY_ID = new Map(META_MUSE_STATIC_MODELS.map(model => [model.id, model]));
-
 const META_MUSE_SPARK_PREFIX = "muse-spark-";
-const META_MUSE_SPARK_CONTRIBUTOR_SUFFIX = "-contributor";
-
-function isMetaMuseSparkModelId(modelId: string): boolean {
-	return modelId.startsWith(META_MUSE_SPARK_PREFIX);
-}
 
 function metaMuseSparkName(modelId: string): string {
-	const contributor = modelId.endsWith(META_MUSE_SPARK_CONTRIBUTOR_SUFFIX);
-	const versionEnd = contributor ? -META_MUSE_SPARK_CONTRIBUTOR_SUFFIX.length : undefined;
-	const version = modelId.slice(META_MUSE_SPARK_PREFIX.length, versionEnd);
-	return `Muse Spark ${version}${contributor ? " Contributor (Data Used for Training)" : ""}`;
+	const suffix = modelId.slice(META_MUSE_SPARK_PREFIX.length);
+	return `Muse Spark ${suffix || modelId}`;
 }
 
 function mapMetaModel(
 	entry: OpenAICompatibleModelRecord,
 	defaults: ModelSpec<"openai-responses">,
-	reference: ModelSpec<"openai-responses"> | undefined,
 ): ModelSpec<"openai-responses"> {
-	const canonicalReference = META_MUSE_STATIC_MODEL_BY_ID.get(defaults.id) ?? reference;
+	const canonicalReference = META_MUSE_STATIC_MODEL_BY_ID.get(defaults.id);
 	const model = mapWithBundledReference(entry, defaults, canonicalReference);
-	if (!isMetaMuseSparkModelId(defaults.id)) return model;
+	if (!defaults.id.startsWith(META_MUSE_SPARK_PREFIX)) return model;
 	return {
 		...model,
-		name: metaMuseSparkName(defaults.id),
+		name: canonicalReference?.name ?? metaMuseSparkName(defaults.id),
 		reasoning: true,
-		input: ["text", "image"],
 		contextWindow: toPositiveNumber(entry.context_length, 1_048_576),
 		maxTokens: toPositiveNumber(entry.max_completion_tokens, 131_072),
-		thinking: META_MUSE_SPARK_THINKING,
-		compat: {
-			supportsReasoningEffort: true,
-			includeEncryptedReasoning: true,
-		},
 	};
 }
 
@@ -4609,20 +4594,46 @@ export function bedrockMantleModelManagerOptions(
 
 export interface MetaModelManagerConfig {
 	apiKey?: string;
+	apiKeys?: readonly string[];
+	apiKeysComplete?: boolean;
 	baseUrl?: string;
 	fetch?: FetchImpl;
 }
 
 export function metaModelManagerOptions(config?: MetaModelManagerConfig): ModelManagerOptions<"openai-responses"> {
-	return {
-		...createOpenAICompatibleModelManagerOptions({
+	const apiKeys = [
+		...new Set(
+			[...(config?.apiKeys ?? []), ...(config?.apiKey ? [config.apiKey] : [])].filter(key => key.length > 0),
+		),
+	];
+	const createOptions = (apiKey?: string): ModelManagerOptions<"openai-responses"> =>
+		createOpenAICompatibleModelManagerOptions({
 			api: "openai-responses",
 			providerId: "meta",
 			defaultBaseUrl: META_MODEL_API_BASE_URL,
-			config,
-			dynamicModelsAuthoritative: true,
+			config: config ? { ...config, apiKey } : undefined,
+			...(config?.apiKeysComplete !== false && { dynamicModelsAuthoritative: true }),
 			requireApiKey: true,
 			mapModel: mapMetaModel,
+		});
+	const optionsByKey = apiKeys.length > 0 ? apiKeys.map(createOptions) : [createOptions()];
+	const primary = optionsByKey[0];
+	if (!primary) throw new Error("Meta model manager options require a primary configuration");
+	return {
+		...primary,
+		...(optionsByKey.length > 1 && {
+			fetchDynamicModels: async () => {
+				const rosters = await Promise.all(optionsByKey.map(options => options.fetchDynamicModels?.()));
+				const available = rosters.filter(
+					(roster): roster is readonly ModelSpec<"openai-responses">[] => roster != null,
+				);
+				if (available.length !== optionsByKey.length) return null;
+				const union = new Map<string, ModelSpec<"openai-responses">>();
+				for (const roster of available) {
+					for (const model of roster) union.set(model.id, model);
+				}
+				return [...union.values()];
+			},
 		}),
 		staticModels: META_MUSE_STATIC_MODELS,
 	};

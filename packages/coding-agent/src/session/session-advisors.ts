@@ -1320,7 +1320,11 @@ export class SessionAdvisors {
 		this.#advisorCosts.set(advisor.slug, (this.#advisorCosts.get(advisor.slug) ?? 0) + cost);
 		// Cheap in-memory OAuth-credential check; captured now so subscription
 		// attribution survives the advisor runtime being torn down (#10131).
-		if (cost > 0 && Number.isFinite(cost) && this.#host.modelRegistry.isUsingOAuth(advisor.model)) {
+		if (
+			cost > 0 &&
+			Number.isFinite(cost) &&
+			this.#host.modelRegistry.isUsingOAuth(advisor.model, advisor.agent.sessionId)
+		) {
 			this.#advisorSubscriptionSlugs.add(advisor.slug);
 		}
 	}
@@ -1962,7 +1966,9 @@ export class SessionAdvisors {
 	 */
 	isUsingSubscription(): boolean {
 		if (this.#advisors.length > 0) {
-			return this.#advisors.some(a => this.#host.modelRegistry.isUsingOAuth(a.model));
+			return this.#advisors.some(advisor =>
+				this.#host.modelRegistry.isUsingOAuth(advisor.model, advisor.agent.sessionId),
+			);
 		}
 		return this.#advisorSubscriptionSlugs.size > 0;
 	}

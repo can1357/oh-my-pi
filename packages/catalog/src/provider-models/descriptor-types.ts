@@ -6,6 +6,10 @@ export type ModelManagerConfig = {
 	apiKey?: string;
 	baseUrl?: string;
 	fetch?: FetchImpl;
+	/** Additional bearer keys whose account-scoped model rosters must be unioned. */
+	apiKeys?: readonly string[];
+	/** False when one or more account keys could not be resolved; disables destructive roster pruning. */
+	apiKeysComplete?: boolean;
 	/** The supplied fetch already applies provider-specific authentication. */
 	authenticated?: boolean;
 };
